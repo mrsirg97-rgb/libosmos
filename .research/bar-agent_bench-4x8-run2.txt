@@ -1,0 +1,2 @@
+4 agents x 8 turns (seed 1)
+  new tokens a turn 150-18693 (median 868), 98757 in all; answers up to 8003 tokens; contexts read first [0, 0, 0, 0]
