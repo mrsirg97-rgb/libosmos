@@ -108,18 +108,12 @@ static PoolPin pin_now(Pool *p, Slot *s, bool held)
 
 static void begin_read(Pool *p, Slot *s)
 {
-  uint64_t bytes[POOL_PARTS];
-  const void *host[POOL_PARTS];
   uint64_t total = 0;
   for (int k = 0; k < s->u.n_parts; k++)
-  {
-    host[k] = s->host[k];
-    bytes[k] = s->u.part[k].bytes;
-    total += bytes[k];
-  }
+    total += s->u.part[k].bytes;
   s->state = POOL_READING;
   emit(p, POOL_EV_READ, (uint32_t)(s - p->s), total);
-  p->fetcher.fetch((uint32_t)(s - p->s), host, bytes, s->u.n_parts, p->fetcher.ctx);
+  p->fetcher.fetch((uint32_t)(s - p->s), s->u.part, s->u.n_parts, p->fetcher.ctx);
 }
 
 static const Map *map_of(Pool *p, int fd, char *err)

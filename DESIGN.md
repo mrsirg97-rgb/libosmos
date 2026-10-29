@@ -193,6 +193,27 @@ at an expert's size (`spikes/inplace_read/regs.hip`, `.research/spike-regs.txt`;
 - **still unmeasured**: a pinned set near the RAM ceiling (the desktop's behaviour); the page cache's eviction of
   unpinned file pages under the GPU's allocations.
 
+## the fetcher (spike, 2026-10-28)
+
+`spikes/fetch/fetch.c`, `.research/spike-fetch.txt`: 600 cold 3 MiB ranges spread over a 36.7 GiB shard, the file
+evicted first, one process a run.
+
+| | throughput | a range p50 / p95 |
+| --- | ---: | --- |
+| pread, 1 worker | 3.05 GB/s | 1.0 / 1.3 ms |
+| **pread, 4 workers** | **6.85 GB/s** | 1.8 / 2.4 ms |
+| pread, 8 / 16 / 32 | 6.98 / 7.02 / 6.95 | 3.5 / 6.9 / 13.7 ms p50 (queueing) |
+| MADV_POPULATE_READ, 1-32 workers | <= 1.85 GB/s | the fault path does not scale on one file |
+| posix_fadvise WILLNEED | 6.33 GB/s | ~280 ms each: no end is reported, only polling finds them |
+
+so the Fetcher is **4 workers that pread** (`src/mem/fetchq.c`): the SSD's ceiling at 4, more only queue. the read
+copies into a 1 MiB scratch a worker, thrown away (~7 GB/s of memory traffic beside the GPU's ~240).
+
+measured through the whole path (`tests/gpu/test_pool_gpu.hip`): ds1017 blk.3's 384 experts (2.97 GB) evicted, all
+asked at once, read by fetchq and pinned by the pool through hip_pinner in **420 ms = 7.08 GB/s**, no read failed,
+the GPU's sums the CPU's. (maya's ~1.4 GB/s on a prompt is paced by its GPU work, not its reads: not the same
+measurement.)
+
 ## splash's bets, and what each is worth here
 
 splash (Apache-2.0, Apple silicon) - read from its README and docs.

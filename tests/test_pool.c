@@ -75,11 +75,11 @@ typedef struct
   int n;
 } Reads;
 
-static void fake_fetch(uint32_t unit, const void *const *host, const uint64_t *bytes, int n, void *ctx)
+static void fake_fetch(uint32_t unit, const PoolRange *parts, int n, void *ctx)
 {
   Reads *r = ctx;
   for (int i = 0; i < n; i++)
-    assert(host[i] && bytes[i] > 0);
+    assert(parts[i].fd >= 0 && parts[i].bytes > 0);
   assert(r->n < MAX_REGS);
   r->unit[r->n++] = unit;
 }

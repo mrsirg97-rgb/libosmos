@@ -38,7 +38,7 @@ typedef struct Pinner
 
 typedef struct Fetcher
 {
-  void (*fetch)(uint32_t unit, const void *const *host, const uint64_t *bytes, int n, void *ctx);
+  void (*fetch)(uint32_t unit, const PoolRange *parts, int n, void *ctx);
   void *ctx;
 } Fetcher;
 
@@ -101,8 +101,9 @@ pool_create
   `budget`: the bytes the pool may hold pinned (whole pages) - RAM, not GTT (registrations do not count against
   ttm's limit) - the caller's plan of the machine. `pinner`: the registration, injected (HIP's hipHostRegister /
   hipHostUnregister in the binary, which refuses unless the device's pointer is the host's; a fake in the tests).
-  `fetcher`: begins reading a unit's parts into the page cache and returns at once; when the read is done, whoever
-  wired it arranges pool_ready(unit) on the consumer (the binary: an engine event; the tests: by hand). `on_event`:
+  `fetcher`: begins reading a unit's parts (their files and offsets) into the page cache and returns at once; when
+  the read is done, whoever wired it arranges pool_ready(unit) on the consumer (the binary: fetchq's workers, then an
+  engine event; the tests: by hand). `on_event`:
   every state change as a PoolEvent, in order (the event log), or NULL. refuses (NULL, the reason in `err`) a unit
   with no parts or more than POOL_PARTS, a range of 0 bytes or past its file, or a unit larger than the budget.
 

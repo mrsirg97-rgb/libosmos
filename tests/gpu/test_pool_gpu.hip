@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <mutex>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <vector>
 
 extern "C" {
+#include "substrate/mem/fetchq.h"
 #include "substrate/mem/hip_pinner.h"
 #include "substrate/mem/pool.h"
 #include "substrate/model/gguf.h"
@@ -41,7 +43,7 @@ static double now_ms() {
 // reads in the test are the kernel's: begun with WILLNEED, and "done" at once - a registration of pages not yet read
 // reads them itself (the pin's own I/O). the binary's fetcher is not this one
 static std::vector<uint32_t> done;
-static void fetch(uint32_t unit, const void* const*, const uint64_t*, int, void*) { done.push_back(unit); }
+static void fetch(uint32_t unit, const PoolRange*, int, void*) { done.push_back(unit); }
 
 int main() {
   std::printf("[test_pool_gpu] start\n");
@@ -117,6 +119,61 @@ int main() {
   std::printf("  %d experts of blk.3 (3 parts, %.2f MB each), budget a quarter (%.0f MB): %d pins, %d waited for a "
               "read, every GPU sum the CPU's; %.2f ms a pin on average, %.0f MB pinned at the end\n",
               E, (double) unit_bytes / 1e6, (double) budget / 1e6, ok, waited, pin_ms / ok, (double) pool_pinned(p) / 1e6);
+  pool_destroy(p);
+
+  // the whole path, cold: the layer's experts evicted, all asked at once, read by fetchq's 4 workers (DESIGN.md "the
+  // fetcher"), each read's end pinned on this thread as the binary's engine event would - then a GPU sum each
+  for (int k = 0; k < 3; k++) posix_fadvise(fds[t[k]->file], (off_t) t[k]->offset, (off_t) t[k]->bytes, POSIX_FADV_DONTNEED);
+  static std::mutex mu;
+  static std::vector<uint32_t> inbox;
+  static int bad = 0;
+  Fetchq* q = fetchq_create(4, [](uint32_t u, bool ok, void*) {
+    std::lock_guard<std::mutex> lk(mu);
+    inbox.push_back(u);
+    bad += !ok;
+  }, nullptr);
+  CHECK(q);
+  p = pool_create(units.data(), units.size(), unit_bytes * (uint64_t) E + (64u << 20), hip_pinner(), fetchq_fetcher(q),
+                  nullptr, nullptr, err);
+  CHECK(p);
+  const double t0 = now_ms();
+  for (int e = 0; e < E; e++) {
+    const void* dev[POOL_PARTS];
+    CHECK(pool_pin(p, (uint32_t) e, dev) == POOL_WAIT);
+  }
+  int pinned = 0;
+  while (pinned < E) {
+    std::vector<uint32_t> got;
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      got.swap(inbox);
+    }
+    for (uint32_t u : got) {
+      pool_ready(p, u);
+      CHECK(pool_state(p, u) == POOL_PINNED);
+      pinned++;
+    }
+    if (got.empty()) usleep(200);
+  }
+  const double cold_ms = now_ms() - t0;
+  for (int e = 0; e < E; e += 37) {
+    const void* dev[POOL_PARTS];
+    CHECK(pool_dev(p, (uint32_t) e, dev));
+    for (int k = 0; k < 3; k++) {
+      const size_t n = (size_t) units[e].part[k].bytes;
+      CHECK(hipMemset(d_sum, 0, sizeof *d_sum) == hipSuccess);
+      sum_kernel<<<64, 256>>>((const uint8_t*) dev[k], n, d_sum);
+      unsigned long long got = 0, want = 0;
+      CHECK(hipMemcpy(&got, d_sum, sizeof got, hipMemcpyDeviceToHost) == hipSuccess);
+      for (size_t b = 0; b < n; b++) want += ((const uint8_t*) dev[k])[b];
+      CHECK(got == want);
+    }
+  }
+  std::printf("  cold, the whole path: %d experts (%.2f GB) read by fetchq and pinned in %.0f ms = %.2f GB/s, %d reads "
+              "failed; the GPU's sums the CPU's\n", E, (double) unit_bytes * E / 1e9, cold_ms,
+              (double) unit_bytes * E / (cold_ms * 1e-3) / 1e9, bad);
+  CHECK(bad == 0);
+  fetchq_destroy(q);
   pool_destroy(p);
   CHECK(hipFree(d_sum) == hipSuccess);
   for (int fd : fds) close(fd);
