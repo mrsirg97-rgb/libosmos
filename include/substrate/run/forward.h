@@ -22,6 +22,7 @@ Seq *seq_create(Forward *f, char err[FORWARD_ERR]);
 void seq_destroy(Seq *s);
 
 bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
+bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
 const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
 
@@ -61,15 +62,24 @@ seq_create / seq_destroy
   a sequence at position 0 / its state freed (NULL nothing to do). a Seq is its Forward's and goes before it.
 
 forward_step
-  the token at the sequence's next position through the layers; the stream out in forward_stream. false with why in
-  err for a token outside the vocabulary, a sequence at max_ctx, a context past what this build selects from (more
-  candidate blocks than the model's candidate_topk_blocks: the candidate masking is not built), or a GPU call that
-  failed, or an expert the budget cannot hold - the sequence is then not to be stepped again.
+  forward_batch of one: the token at the sequence's next position through the layers; the stream out in
+  forward_stream. false with why in err for a token outside the vocabulary, a sequence at max_ctx, a context past
+  what this build selects from (more candidate blocks than the model's candidate_topk_blocks: the candidate masking
+  is not built), a GPU call that failed, or an expert the budget cannot hold - the sequence is then not to be
+  stepped again.
+
+forward_batch
+  n tokens (1 .. MV_MAX_TOKENS) at once, token i at seqs[i]'s next position: a sequence may be given several times,
+  its tokens then at its next positions in the order given (a chunk of its prompt, or drafts to verify), each seeing
+  the ones before it. a token's results are the same bits however it is batched - alone, beside other sequences, or
+  in a chunk of its own: every step a token takes is summed in an order of its own, never the batch's. false, with
+  why, as forward_step, for a batch of 0 or more than MV_MAX_TOKENS tokens, or a sequence of another forward; on a
+  refusal no sequence has moved. probes see the whole batch (n rows; index: the first token's position).
 
 forward_stream
-  the device buffer of the last step's stream out ([hc][n_embd] F32).
+  the device buffer of the last step's stream out ([n][hc][n_embd] F32).
 
 forward_logits
-  the device buffer of the last step's logits ([n_vocab] F32): the head over the stream, when n_layers is all of the
+  the device buffer of the last step's logits ([n][n_vocab] F32): the head over the stream, when n_layers is all of the
   model's (else not computed).
 */

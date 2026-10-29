@@ -11,11 +11,14 @@
 
 #include "substrate/mem/fetchq.h"
 #include "substrate/mem/pool.h"
+#include "substrate/gpu/mv.h"
 #include "substrate/gpu/ops.h"
 #include "substrate/model/engram.h"
 #include "substrate/run/forward.h"
 
 #define FWD_MAX_FILES 16
+#define FWD_MAX_BATCH MV_MAX_TOKENS                 /* a step's tokens: the matrix-vector kernels' */
+#define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a step's (token, routed expert) pairs */
 
 /* the fetcher's finished reads, handed from its workers to the forward (the pool's one consumer) */
 typedef struct Inbox
@@ -27,7 +30,7 @@ typedef struct Inbox
   bool broken; /* a done the inbox could not hold: the forward refuses from then on */
 } Inbox;
 
-/* the step's device buffers, one token's (the decode's) */
+/* the step's device buffers, each [FWD_MAX_BATCH][...] a token (the routed experts' [FWD_MAX_PAIRS][...] a pair) */
 typedef struct Scratch
 {
   float *h, *mix, *a_pre, *a_post, *a_comb, *f_pre, *f_post, *f_comb, *pre0;
@@ -35,20 +38,22 @@ typedef struct Scratch
   float *logits, *rw, *vocab, *ga, *up, *hh, *ye, *moe;
   float *sga, *sup, *shh, *sye; /* the shared expert's, beside the routed ones' [n_used][...] */
   const void **wtab;            /* the routed experts' matrices for mv_group: gates, ups, downs */
-  float *lat, *ikr, *qix, *wix, *score;
+  float *lat, *kvc, *scg, *ikr, *qix, *wix, *score;
   float *erow_f, *ekv;
   uint8_t *erow;
-  int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel;
+  int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *order;
 } Scratch;
 
 /* host memory the GPU copies to and from on the stream (pinned: the copies are asynchronous). each is written only
    after the stream has passed the copy that read it last (the next routing event, or the step's end) */
 typedef struct Pinned
 {
-  int32_t tok[2]; /* the step's token and position */
-  int32_t ids[OPS_MAX_TOPK];
-  const void *tab[3 * OPS_MAX_TOPK];
-  int32_t rpos[WEIGHTS_MAX_LAYERS];
+  int32_t tok[FWD_MAX_BATCH]; /* the step's tokens */
+  int32_t pos[FWD_MAX_BATCH]; /* and their positions */
+  int32_t ids[FWD_MAX_PAIRS]; /* the routed experts, [token][slot] */
+  int32_t order[FWD_MAX_PAIRS];
+  const void *tab[3 * FWD_MAX_PAIRS];
+  int32_t rpos[WEIGHTS_MAX_LAYERS][FWD_MAX_BATCH];
 } Pinned;
 
 struct Forward
@@ -72,10 +77,12 @@ struct Forward
   uint8_t *stage; /* pinned: a position's Engram rows, each Engram layer its own */
   Pinned *pin;
   hipEvent_t routed;                /* the router's picks are on the host */
-  uint32_t held[OPS_MAX_TOPK];      /* the last layer's experts: released once the stream is past them */
+  uint32_t held[FWD_MAX_PAIRS];     /* the last layer's experts: released once the stream is past them */
   uint32_t n_held;
-  int64_t *rows;  /* the position's Engram rows, every Engram layer's */
-  int32_t at; /* the step's position */
+  int64_t *rows;  /* each token's Engram rows, every Engram layer's: [token][layer][col] */
+  uint32_t n;                    /* the step's tokens */
+  Seq *bs[FWD_MAX_BATCH];        /* token i's sequence */
+  int32_t at;                    /* the step's first position (the probes' index) */
   forward_probe_fn probe;
   void *probe_arg;
 };
@@ -103,10 +110,11 @@ bool fwd_put(void *dev, const void *host, uint64_t bytes);
 bool fwd_put_async(void *dev, const void *pinned, uint64_t bytes);
 bool fwd_copy(void *dst, const void *src, uint64_t bytes); /* device to device, on the stream */
 void fwd_release_held(Forward *f);
+void fwd_on_read(uint32_t unit, bool ok, void *arg); /* fetchq's done: the unit to the inbox */
 bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memory */
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
 
-bool fwd_attention(Forward *f, Seq *s, int l, char *err);
+bool fwd_attention(Forward *f, int l, char *err);
 bool fwd_engram(Forward *f, int l, int nth, char *err);
 bool fwd_moe(Forward *f, int l, char *err);
 

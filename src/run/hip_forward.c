@@ -38,60 +38,11 @@ bool fwd_copy(void *dst, const void *src, uint64_t bytes)
   return hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToDevice, NULL) == hipSuccess;
 }
 
-void fwd_release_held(Forward *f)
-{
-  for (uint32_t k = 0; k < f->n_held; k++)
-    pool_release(f->pool, f->held[k]);
-  f->n_held = 0;
-}
 
 void fwd_probe(const Forward *f, const char *step, int layer, int index, void *dev, uint64_t n, bool ints)
 {
   if (f->probe && hipDeviceSynchronize() == hipSuccess)
     f->probe(step, layer, index, dev, n, ints, f->probe_arg);
-}
-
-/* a fetchq worker's read is done: the unit goes to the inbox, for the forward to hand the pool */
-static void on_read(uint32_t unit, bool ok, void *arg)
-{
-  (void)ok; /* a failed read is the pin's own read to do: the pool reads through the registration */
-  Inbox *in = arg;
-  pthread_mutex_lock(&in->mu);
-  if (in->n == in->cap)
-  {
-    const size_t cap = in->cap ? in->cap * 2 : 64;
-    uint32_t *grown = realloc(in->unit, cap * sizeof *grown);
-    if (grown)
-      in->unit = grown, in->cap = cap;
-  }
-  if (in->n < in->cap)
-    in->unit[in->n++] = unit;
-  else
-    in->broken = true;
-  pthread_cond_signal(&in->cv);
-  pthread_mutex_unlock(&in->mu);
-}
-
-/* the unit held and pinned: its reads handed to the pool as they finish, until it is (or is refused) */
-bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err)
-{
-  while (pool_state(f->pool, unit) == POOL_READING)
-  {
-    pthread_mutex_lock(&f->in.mu);
-    while (!f->in.n && !f->in.broken)
-      pthread_cond_wait(&f->in.cv, &f->in.mu);
-    const bool broken = f->in.broken;
-    uint32_t got[64];
-    size_t n = 0;
-    while (f->in.n && n < sizeof got / sizeof *got)
-      got[n++] = f->in.unit[--f->in.n];
-    pthread_mutex_unlock(&f->in.mu);
-    if (broken)
-      return fwd_fail(err, "a finished read the inbox could not hold");
-    for (size_t i = 0; i < n; i++)
-      pool_ready(f->pool, got[i]);
-  }
-  return pool_dev(f->pool, unit, dev) || fwd_fail(err, "a unit the pool could not pin (its budget)");
 }
 
 /* the units: each layer's experts (the pool's to cycle), then every other tensor the layers use (pinned and held
@@ -132,7 +83,7 @@ static bool units(Forward *f, uint64_t budget, char *err)
     u[f->n_expert_units + i] = (PoolUnit){.part = {r}, .n_parts = 1};
   }
   char perr[POOL_ERR] = "";
-  if (ok && !(f->fq = fetchq_create(FWD_FETCH_THREADS, on_read, &f->in)))
+  if (ok && !(f->fq = fetchq_create(FWD_FETCH_THREADS, fwd_on_read, &f->in)))
     ok = fwd_fail(err, "the fetcher's workers could not start");
   else if (ok && !(f->pool = pool_create(u, f->n_expert_units + n_res, budget, hip_pinner(), fetchq_fetcher(f->fq),
                                           NULL, NULL, perr)))
@@ -179,37 +130,42 @@ static bool scratch(Forward *f)
   const uint64_t row = gguf_bytes(f->w->layer[0].eg_embd ? f->w->layer[0].eg_embd->type : 0, g->engram_head_dim);
   const uint64_t cols = g->engram_cols, K = (uint64_t)g->n_used, FF = (uint64_t)g->expert_ff, hd = g->head_dim;
   const uint64_t ih = g->ix_head_dim, nh = g->ix_heads, egv = cols * (uint64_t)g->engram_head_dim;
+  const uint64_t B = FWD_MAX_BATCH, P = FWD_MAX_PAIRS, Fs = OPS_MAX_SELECT;
   const struct
   {
     void *field;
     uint64_t bytes;
   } want[] = {
-      {&b->h, hc * D * F},        {&b->mix, (2 + hc) * hc * F},  {&b->a_pre, hc * F},
-      {&b->a_post, hc * F},       {&b->a_comb, hc * hc * F},     {&b->f_pre, hc * F},
-      {&b->f_post, hc * F},       {&b->f_comb, hc * hc * F},     {&b->pre0, hc * F},
-      {&b->x, D * F},             {&b->qa, (uint64_t)g->q_lora * F}, {&b->q, HQ * F},
-      {&b->kv, hd * F},           {&b->o, HQ * F},               {&b->oa, (uint64_t)g->o_groups * g->o_lora * F},
-      {&b->y, D * F},             {&b->mid, hc * D * F},         {&b->xf, D * F},
-      {&b->logits, (uint64_t)g->n_experts * F}, {&b->vocab, (uint64_t)g->n_vocab * F}, {&b->rw, K * F},
-      {&b->ga, K * FF * F},       {&b->up, K * FF * F},          {&b->hh, K * FF * F},
-      {&b->ye, K * D * F},        {&b->moe, D * F},              {&b->sga, FF * F},
-      {&b->sup, FF * F},          {&b->shh, FF * F},             {&b->sye, D * F},
-      {&b->wtab, 3 * K * sizeof(void *)}, {&b->lat, hd * F},     {&b->ikr, ih * F},
-      {&b->qix, nh * ih * F},     {&b->wix, nh * F},             {&b->score, (uint64_t)f->max_ctx * F},
-      {&b->erow, cols * row},     {&b->erow_f, egv * F},         {&b->ekv, (hc + 1) * D * F},
-      {&b->ids, 4},               {&b->pos, 4},                  {&b->rpos, 4},
-      {&b->ridx, K * 4},          {&b->sel, OPS_MAX_SELECT * 4}, {&b->n_sel, 4},
+      {&b->h, B * hc * D * F},    {&b->mix, B * (2 + hc) * hc * F}, {&b->a_pre, B * hc * F},
+      {&b->a_post, B * hc * F},   {&b->a_comb, B * hc * hc * F},    {&b->f_pre, B * hc * F},
+      {&b->f_post, B * hc * F},   {&b->f_comb, B * hc * hc * F},    {&b->pre0, B * hc * F},
+      {&b->x, B * D * F},         {&b->qa, B * (uint64_t)g->q_lora * F}, {&b->q, B * HQ * F},
+      {&b->kv, B * hd * F},       {&b->o, B * HQ * F},  {&b->oa, B * (uint64_t)g->o_groups * g->o_lora * F},
+      {&b->y, B * D * F},         {&b->mid, B * hc * D * F},        {&b->xf, B * D * F},
+      {&b->logits, B * (uint64_t)g->n_experts * F}, {&b->vocab, B * (uint64_t)g->n_vocab * F},
+      {&b->rw, B * K * F},        {&b->ga, P * FF * F},             {&b->up, P * FF * F},
+      {&b->hh, P * FF * F},       {&b->ye, P * D * F},              {&b->moe, B * D * F},
+      {&b->sga, B * FF * F},      {&b->sup, B * FF * F},            {&b->shh, B * FF * F},
+      {&b->sye, B * D * F},       {&b->wtab, 3 * P * sizeof(void *)}, {&b->lat, B * hd * F},
+      {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, ih * F},
+      {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},            {&b->score, (uint64_t)f->max_ctx * F},
+      {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
+      {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
+      {&b->ridx, B * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
+      {&b->order, P * 4},
   };
   _Static_assert(sizeof want / sizeof *want == sizeof(Scratch) / sizeof(void *), "every buffer of Scratch, once");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
     if (!fwd_alloc(want[i].field, want[i].bytes))
       return false;
-  const float one = 1.0f;
+  float pre0[FWD_MAX_BATCH * OPS_MAX_HC] = {0}; /* the first block's pre, a token: stream 0 */
+  for (uint64_t i = 0; i < B; i++)
+    pre0[i * hc] = 1.0f;
   int n_eg = 0;
   for (int l = 0; l < g->n_layers; l++)
     n_eg += g->engram[l];
-  return fwd_put(b->pre0, &one, F) &&
-         hipHostMalloc((void **)&f->stage, (uint64_t)(n_eg ? n_eg : 1) * cols * row, 0) == hipSuccess &&
+  return fwd_put(b->pre0, pre0, B * hc * F) &&
+         hipHostMalloc((void **)&f->stage, B * (uint64_t)(n_eg ? n_eg : 1) * cols * row, 0) == hipSuccess &&
          hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess &&
          hipEventCreateWithFlags(&f->routed, hipEventDisableTiming) == hipSuccess;
 }
@@ -251,7 +207,7 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
     ok = fwd_fail(err, "the Engram file could not be opened");
   else if (!(f->hash = engram_create(w, f->fds, eerr)))
     ok = fwd_fail(err, eerr);
-  else if (!(f->rows = calloc((size_t)WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)))
+  else if (!(f->rows = calloc((size_t)FWD_MAX_BATCH * WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)))
     ok = fwd_fail(err, "out of memory");
   ok = ok && units(f, budget, err) && oa_tables(f, err);
   if (ok && !(freqs(f) && scratch(f)))

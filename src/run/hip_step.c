@@ -53,84 +53,116 @@ void seq_destroy(Seq *s)
 
 static const float *fv(const Forward *f, const GgufTensor *t) { return (const float *)fwd_dev(f, t); }
 
-static bool layer(Forward *f, Seq *s, int l, const float *pre, int *nth, char *err)
+static bool layer(Forward *f, int l, const float *pre, int *nth, char *err)
 {
   const Geometry *g = f->g;
   const LayerWeights *L = &f->w->layer[l];
   Scratch *b = &f->b;
-  const uint32_t hc = g->hc, D = g->n_embd, nmix = (2 + hc) * hc;
-  const int p = s->pos;
+  const uint32_t hc = g->hc, D = g->n_embd, nmix = (2 + hc) * hc, n = f->n;
+  const int p = f->at;
   if (g->engram[l] && !fwd_engram(f, l, (*nth)++, err))
     return false;
-  fwd_probe(f, "h_in", l, p, b->h, hc * D, false);
-  bool ok = mv_run(L->hc_attn_fn->type, fwd_dev(f, L->hc_attn_fn), nmix, hc * D, b->h, 1, b->mix, NULL) &&
+  fwd_probe(f, "h_in", l, p, b->h, n * hc * D, false);
+  bool ok = mv_run(L->hc_attn_fn->type, fwd_dev(f, L->hc_attn_fn), nmix, hc * D, b->h, n, b->mix, NULL) &&
             ops_hc_mix(b->h, b->mix, fv(f, L->hc_attn_scale), fv(f, L->hc_attn_base), hc, D,
-                       g->rms_eps, g->hc_eps, g->sinkhorn_iters, 1, b->a_pre, b->a_post, b->a_comb, NULL) &&
-            ops_hc_pre_rms(b->h, pre, hc, D, fv(f, L->attn_norm), g->rms_eps, 1, b->x, NULL);
+                       g->rms_eps, g->hc_eps, g->sinkhorn_iters, n, b->a_pre, b->a_post, b->a_comb, NULL) &&
+            ops_hc_pre_rms(b->h, pre, hc, D, fv(f, L->attn_norm), g->rms_eps, n, b->x, NULL);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention's mixes)");
-  fwd_probe(f, "a_pre", l, p, b->a_pre, hc, false);
-  fwd_probe(f, "a_post", l, p, b->a_post, hc, false);
-  fwd_probe(f, "a_comb", l, p, b->a_comb, hc * hc, false);
-  fwd_probe(f, "attn_x", l, p, b->x, D, false);
-  if (!fwd_attention(f, s, l, err))
+  fwd_probe(f, "a_pre", l, p, b->a_pre, n * hc, false);
+  fwd_probe(f, "a_post", l, p, b->a_post, n * hc, false);
+  fwd_probe(f, "a_comb", l, p, b->a_comb, n * hc * hc, false);
+  fwd_probe(f, "attn_x", l, p, b->x, n * D, false);
+  if (!fwd_attention(f, l, err))
     return false;
-  ok = ops_hc_post(b->y, b->h, b->a_post, b->a_comb, hc, D, 1, b->mid, NULL) &&
-       mv_run(L->hc_ffn_fn->type, fwd_dev(f, L->hc_ffn_fn), nmix, hc * D, b->mid, 1, b->mix, NULL) &&
+  ok = ops_hc_post(b->y, b->h, b->a_post, b->a_comb, hc, D, n, b->mid, NULL) &&
+       mv_run(L->hc_ffn_fn->type, fwd_dev(f, L->hc_ffn_fn), nmix, hc * D, b->mid, n, b->mix, NULL) &&
        ops_hc_mix(b->mid, b->mix, fv(f, L->hc_ffn_scale), fv(f, L->hc_ffn_base), hc, D,
-                  g->rms_eps, g->hc_eps, g->sinkhorn_iters, 1, b->f_pre, b->f_post, b->f_comb, NULL) &&
-       ops_hc_pre_rms(b->mid, b->a_pre, hc, D, fv(f, L->ffn_norm), g->rms_eps, 1, b->xf, NULL);
+                  g->rms_eps, g->hc_eps, g->sinkhorn_iters, n, b->f_pre, b->f_post, b->f_comb, NULL) &&
+       ops_hc_pre_rms(b->mid, b->a_pre, hc, D, fv(f, L->ffn_norm), g->rms_eps, n, b->xf, NULL);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the FFN's mixes)");
-  fwd_probe(f, "h_mid", l, p, b->mid, hc * D, false);
-  fwd_probe(f, "f_pre", l, p, b->f_pre, hc, false);
-  fwd_probe(f, "f_post", l, p, b->f_post, hc, false);
-  fwd_probe(f, "f_comb", l, p, b->f_comb, hc * hc, false);
-  fwd_probe(f, "ffn_x", l, p, b->xf, D, false);
+  fwd_probe(f, "h_mid", l, p, b->mid, n * hc * D, false);
+  fwd_probe(f, "f_pre", l, p, b->f_pre, n * hc, false);
+  fwd_probe(f, "f_post", l, p, b->f_post, n * hc, false);
+  fwd_probe(f, "f_comb", l, p, b->f_comb, n * hc * hc, false);
+  fwd_probe(f, "ffn_x", l, p, b->xf, n * D, false);
   if (!fwd_moe(f, l, err))
     return false;
-  if (!ops_hc_post(b->moe, b->mid, b->f_post, b->f_comb, hc, D, 1, b->h, NULL))
+  if (!ops_hc_post(b->moe, b->mid, b->f_post, b->f_comb, hc, D, n, b->h, NULL))
     return fwd_fail(err, "a GPU call failed (the FFN's hc_post)");
-  fwd_probe(f, "h_out", l, p, b->h, hc * D, false);
+  fwd_probe(f, "h_out", l, p, b->h, n * hc * D, false);
   return true;
 }
 
-bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR])
+/* the batch's tokens checked and placed: each at its sequence's next free position (a sequence's tokens in the
+   batch's order), its last tokens for Engram's hash updated, its rows hashed. nothing of a sequence changes before
+   every token has passed */
+static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char *err)
 {
   const Geometry *g = f->g;
-  if (token < 0 || token >= g->n_vocab)
-    return fwd_fail(err, "a token outside the vocabulary");
-  if ((uint32_t)s->pos >= f->max_ctx)
-    return fwd_fail(err, "the sequence is at max_ctx");
   const int ng = engram_ngram(f->hash);
-  memmove(s->last + 1, s->last, (size_t)(ng - 1) * sizeof *s->last);
-  s->last[0] = token;
-  s->n_last = s->n_last < ng ? s->n_last + 1 : ng;
-  if (!engram_rows(f->hash, s->last, s->n_last, f->rows))
-    return fwd_fail(err, "a token the Engram hash refused");
-  f->pin->tok[0] = token, f->pin->tok[1] = s->pos;
-  if (!fwd_put_async(f->b.ids, &f->pin->tok[0], 4) || !fwd_put_async(f->b.pos, &f->pin->tok[1], 4) ||
-      !ops_embed(f->w->embed->type, fwd_dev(f, f->w->embed), g->n_embd, f->b.ids, 1, g->hc, f->b.h, NULL))
+  for (uint32_t i = 0; i < n; i++)
+  {
+    if (!seqs[i] || seqs[i]->f != f)
+      return fwd_fail(err, "a token of no sequence, or another forward's");
+    if (tokens[i] < 0 || tokens[i] >= g->n_vocab)
+      return fwd_fail(err, "a token outside the vocabulary");
+    int32_t at = seqs[i]->pos;
+    for (uint32_t j = 0; j < i; j++)
+      at += seqs[j] == seqs[i];
+    if ((uint32_t)at >= f->max_ctx)
+      return fwd_fail(err, "a sequence past max_ctx");
+    f->bs[i] = seqs[i], f->pin->tok[i] = tokens[i], f->pin->pos[i] = at;
+  }
+  for (uint32_t i = 0; i < n; i++)
+  {
+    Seq *s = seqs[i];
+    memmove(s->last + 1, s->last, (size_t)(ng - 1) * sizeof *s->last);
+    s->last[0] = tokens[i];
+    s->n_last = s->n_last < ng ? s->n_last + 1 : ng;
+    if (!engram_rows(f->hash, s->last, s->n_last, f->rows + (uint64_t)i * WEIGHTS_MAX_LAYERS * g->engram_cols))
+      return fwd_fail(err, "a token the Engram hash refused");
+  }
+  f->n = n;
+  f->at = f->pin->pos[0];
+  return true;
+}
+
+bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
+{
+  const Geometry *g = f->g;
+  if (!n || n > FWD_MAX_BATCH)
+    return fwd_fail(err, "a batch of no tokens, or more than FWD_MAX_BATCH");
+  if (!place(f, seqs, tokens, n, err))
+    return false;
+  if (!fwd_put_async(f->b.ids, f->pin->tok, n * 4) || !fwd_put_async(f->b.pos, f->pin->pos, n * 4) ||
+      !ops_embed(f->w->embed->type, fwd_dev(f, f->w->embed), g->n_embd, f->b.ids, n, g->hc, f->b.h, NULL))
     return fwd_fail(err, "a GPU call failed (the embedding)");
   int nth = 0;
-  f->at = s->pos;
   for (int l = 0; l < f->n_layers; l++)
-    if (!layer(f, s, l, l ? f->b.f_pre : f->b.pre0, &nth, err))
+    if (!layer(f, l, l ? f->b.f_pre : f->b.pre0, &nth, err))
       return false;
   if (f->n_layers == g->n_layers) /* the head: the last block's pre mixes the streams, normed, then the vocabulary */
   {
-    const bool ok = ops_hc_pre_rms(f->b.h, f->b.f_pre, g->hc, g->n_embd, fv(f, f->w->output_norm), g->rms_eps, 1,
+    const bool ok = ops_hc_pre_rms(f->b.h, f->b.f_pre, g->hc, g->n_embd, fv(f, f->w->output_norm), g->rms_eps, n,
                                    f->b.x, NULL) &&
-                    mv_run(f->w->output->type, fwd_dev(f, f->w->output), (uint32_t)g->n_vocab, g->n_embd, f->b.x, 1,
+                    mv_run(f->w->output->type, fwd_dev(f, f->w->output), (uint32_t)g->n_vocab, g->n_embd, f->b.x, n,
                            f->b.vocab, NULL);
     if (!ok)
       return fwd_fail(err, "a GPU call failed (the head)");
-    fwd_probe(f, "logits", -1, s->pos, f->b.vocab, (uint64_t)g->n_vocab, false);
+    fwd_probe(f, "logits", -1, f->at, f->b.vocab, (uint64_t)n * g->n_vocab, false);
   }
   /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
   if (hipDeviceSynchronize() != hipSuccess)
     return fwd_fail(err, "a GPU call failed (the step)");
   fwd_release_held(f);
-  s->pos++;
+  for (uint32_t i = 0; i < n; i++)
+    seqs[i]->pos++;
   return true;
+}
+
+bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR])
+{
+  return forward_batch(f, &s, &token, 1, err);
 }

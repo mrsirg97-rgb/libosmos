@@ -40,6 +40,8 @@ bool ops_router(const float *logits, const float *bias, uint32_t n_exp, uint32_t
                 int32_t *idx, float *w, void *stream);
 bool ops_swiglu(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok, float *h,
                 void *stream);
+bool ops_gather_sum(float *y, const float *src, const int32_t *idx, uint32_t m, uint32_t n, uint32_t dim,
+                    void *stream);
 bool ops_scale(float *x, uint64_t n, float s, void *stream);
 bool ops_add(float *y, const float *a, uint64_t n, void *stream);
 
@@ -118,6 +120,10 @@ ops_router
 ops_swiglu
   h = silu(min(g, lim)) * clamp(u, -lim, lim), times scale[t] if scale is not NULL (a routed expert's weight: applied
   before the down projection, as ref.py does).
+
+ops_gather_sum
+  y[t][:] = sum over j < m of src[idx[t * m + j]][:], for t < n: from 0, in j's order (a batch's tokens' experts,
+  each token's in ascending id - the same sums as a zeroed y and m ops_add calls).
 
 ops_scale
   x *= s.

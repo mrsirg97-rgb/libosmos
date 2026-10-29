@@ -221,6 +221,17 @@ __global__ void swiglu_kernel(const float* g, const float* u, uint32_t n, float 
   h[i] = scale ? v * scale[i / n] : v;
 }
 
+// y[t][d] = sum over j < m of src[idx[t * m + j]][d], in j's order from 0 (the same sums as a zeroed y and m adds)
+__global__ void gather_sum_kernel(float* y, const float* src, const int32_t* idx, uint32_t m, uint32_t n,
+                                  uint32_t dim) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n * dim) return;
+  const uint32_t t = (uint32_t) (i / dim), d = (uint32_t) (i % dim);
+  float s = 0.0f;
+  for (uint32_t j = 0; j < m; j++) s += src[(uint64_t) idx[t * m + j] * dim + d];
+  y[i] = s;
+}
+
 __global__ void scale_kernel(float* x, uint64_t n, float s) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) x[i] = x[i] * s;
@@ -318,6 +329,13 @@ extern "C" bool ops_swiglu(const float* g, const float* u, uint32_t n, float lim
                            float* h, void* stream) {
   if (!n || !n_tok) return false;
   swiglu_kernel<<<grid((uint64_t) n * n_tok), kThreads, 0, st(stream)>>>(g, u, n, lim, scale, n_tok, h);
+  return ok();
+}
+
+extern "C" bool ops_gather_sum(float* y, const float* src, const int32_t* idx, uint32_t m, uint32_t n, uint32_t dim,
+                               void* stream) {
+  if (!m || !n || !dim) return false;
+  gather_sum_kernel<<<grid((uint64_t) n * dim), kThreads, 0, st(stream)>>>(y, src, idx, m, n, dim);
   return ok();
 }
 

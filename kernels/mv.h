@@ -74,14 +74,15 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* _
 }
 
 // n matrices of the same shape and type at once (blockIdx.y the matrix): matrix m's w from the table, its x at
-// x + m * x_mat (0: one x for all), its y at y + m * rows; each row the sums of rows_of, so the bits of kernel's
+// x + (m / x_div) * x_mat (x_mat 0: one x for all), its y at y + m * rows; each row the sums of rows_of, so the bits
+// of kernel's
 template <quant::Type T, int R, int U>
 __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_kernel(const uint8_t* const* __restrict__ w,
                                                                        uint32_t rows, uint32_t cols,
                                                                        const float* __restrict__ x, uint32_t x_mat,
-                                                                       float* __restrict__ y) {
+                                                                       uint32_t x_div, float* __restrict__ y) {
   const uint32_t m = blockIdx.y;
-  rows_of<T, 1, R, U>(w[m], rows, cols, x + (uint64_t) m * x_mat, cols, y + (uint64_t) m * rows, rows);
+  rows_of<T, 1, R, U>(w[m], rows, cols, x + (uint64_t) (m / x_div) * x_mat, cols, y + (uint64_t) m * rows, rows);
 }
 
 template <quant::Type T, int NT, int R, int U>
@@ -95,10 +96,10 @@ bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_
 
 template <quant::Type T, int R, int U>
 bool group_launch(const void* const* w, uint32_t n, uint32_t rows, uint32_t cols, const float* x, uint32_t x_mat,
-                  float* y, hipStream_t s) {
+                  uint32_t x_div, float* y, hipStream_t s) {
   const uint32_t per_block = kWavesPerBlock * R;
   group_kernel<T, R, U><<<dim3((rows + per_block - 1) / per_block, n), kWave * kWavesPerBlock, 0, s>>>(
-      (const uint8_t* const*) w, rows, cols, x, x_mat, y);
+      (const uint8_t* const*) w, rows, cols, x, x_mat, x_div, y);
   return hipGetLastError() == hipSuccess;
 }
 

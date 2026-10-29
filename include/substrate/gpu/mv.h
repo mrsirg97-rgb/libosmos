@@ -10,7 +10,7 @@
 bool mv_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t n_tok, float *y,
             void *stream);
 bool mv_group(uint32_t type, const void *const *w, uint32_t n, uint32_t rows, uint32_t cols, const float *x,
-              uint32_t x_mat, float *y, void *stream);
+              uint32_t x_mat, uint32_t x_div, float *y, void *stream);
 bool mv_strided(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t x_stride,
                 uint32_t n_tok, float *y, uint32_t y_stride, void *stream);
 
@@ -29,10 +29,11 @@ mv_run
   queued, for a type not known, cols not whole blocks, n_tok 0 or past MV_MAX_TOKENS, or a launch refused.
 
 mv_group
-  n matrices of one type and shape at once, one token: y[m * rows + r] = sum over c of W_m[r, c] * x[m * x_mat + c],
-  W_m at w[m] (`w` a device-readable table of n pointers - an expert's gate and up in the pool, say; x_mat 0: one x
-  for all of them). a row summed as mv_run sums it: the same bits as n mv_run calls, in one launch. false, nothing
-  queued, as mv_run, and for n 0 or past MV_MAX_GROUP.
+  n matrices of one type and shape at once, one vector each: y[m * rows + r] = sum over c of W_m[r, c] *
+  x[(m / x_div) * x_mat + c], W_m at w[m] (`w` a device-readable table of n pointers - experts in the pool, say;
+  x_mat 0: one x for all; x_div k: k matrices a vector, a batch's tokens' k experts each). a row summed as mv_run
+  sums it: the same bits as n mv_run calls, in one launch. false, nothing queued, as mv_run, and for n 0 or past
+  MV_MAX_GROUP, or x_div 0.
 
 mv_strided
   mv_run with token t's x at x + t * x_stride and its y at y + t * y_stride (a slice of a wider row: the attention's
