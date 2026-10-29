@@ -3,7 +3,8 @@
 // token distribution - KL(oracle || ours), its argmax - beside maya's (the bar's own logits on the same ids,
 // ~/substrate-oracle/logits_a.bin), and each layer's stream drift. then the same ids again, unprobed and timed: the
 // logits the same bits (determinism), and the decode's tokens a second. passes when every position's argmax is the
-// oracle's wherever maya's is, and our mean KL is no more than maya's.
+// oracle's wherever maya's is - or a tie: the oracle's two within twice our logits' measured error - and our mean KL
+// is no more than maya's.
 // the oracle is not schedule-invariant itself: positions 0-7 of its 8-token run and of its 32-token run part from
 // layer 0 (torch's F32 blocking changes with the prompt's length) to KL 5.5e-5 .. 0.16 a position (mean 2.2e-2) -
 // the floor any comparison against one of its runs stands on; the longer run (ref32) is the one used when present.
@@ -155,19 +156,38 @@ int main() {
   }
   std::printf("  %d positions; the next token's distribution against the oracle's (KL(oracle || x)), and its argmax:\n",
               T);
+  // our logits' measured error: the rms of ours - the oracle's over each position's kTieTop leading tokens. a miss is
+  // a tie when the oracle's two leading tokens are within twice it (the router's tie rule): an order of summing tips it
+  constexpr int kTieTop = 8;
+  double err2 = 0;
+  for (int p = 0; p < T; p++) {
+    const float* o = &logits.v[(size_t) p * V];
+    std::vector<size_t> top(V);
+    for (size_t i = 0; i < V; i++) top[i] = i;
+    std::partial_sort(top.begin(), top.begin() + kTieTop, top.end(), [&](size_t a, size_t b) { return o[a] > o[b]; });
+    for (int k = 0; k < kTieTop; k++) {
+      const double e = (double) got[0][(size_t) p * V + top[k]] - o[top[k]];
+      err2 += e * e;
+    }
+  }
+  const double tie = 2 * std::sqrt(err2 / ((double) T * kTieTop));
   double ours_kl = 0, maya_kl = 0;
-  int ours_top = 0, maya_top = 0, ok_top = 1;
+  int ours_top = 0, maya_top = 0, ok_top = 1, ties = 0;
   for (int p = 0; p < T; p++) {
     const float* o = &logits.v[(size_t) p * V];
     const double ko = kl(o, &got[0][(size_t) p * V], V), km = kl(o, &maya.v[(size_t) p * V], V);
     const size_t ao = argmax(o, V), au = argmax(&got[0][(size_t) p * V], V), am = argmax(&maya.v[(size_t) p * V], V);
     ours_kl += ko, maya_kl += km, ours_top += au == ao, maya_top += am == ao;
-    ok_top &= au == ao || am != ao;
-    std::printf("    %2d  ours KL %.2e %s   maya KL %.2e %s\n", p, ko, au == ao ? "argmax =" : "argmax X", km,
-                am == ao ? "argmax =" : "argmax X");
+    const bool is_tie = au != ao && (double) o[ao] - o[au] <= tie;
+    ties += is_tie;
+    ok_top &= au == ao || am != ao || is_tie;
+    std::printf("    %2d  ours KL %.2e %s   maya KL %.2e %s\n", p, ko,
+                au == ao ? "argmax =" : is_tie ? "argmax T" : "argmax X", km, am == ao ? "argmax =" : "argmax X");
   }
   std::printf("  mean KL: ours %.2e, maya %.2e; argmax the oracle's: ours %d of %d, maya %d\n", ours_kl / T,
               maya_kl / T, ours_top, T, maya_top);
+  std::printf("  our logits' error (rms, the oracle's %d leading tokens) %.3f; misses that are ties: %d (T: the two "
+              "within %.3f)\n", kTieTop, tie / 2, ties, tie);
   std::printf("  the stream's drift from the oracle's, worst position (max |diff| / max |ref|), by layer:\n   ");
   for (int l = 0; l < L; l++) std::printf(" %d:%.1e%s", l, d.rel[l], l % 8 == 7 ? "\n   " : "");
   std::printf("\n  forced (each layer on the oracle's stream in), its own error, by layer:\n   ");

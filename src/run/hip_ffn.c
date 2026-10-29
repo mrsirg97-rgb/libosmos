@@ -107,20 +107,17 @@ bool fwd_moe(Forward *f, int l, char *err)
   fwd_probe(f, "route_w", l, f->at, b->rw, P, false);
   /* the distinct experts in ascending id, each with its pairs (in token order: at most one a token): an expert's
      rows base .. base + cnt, its slots those tokens; one launch of mm_group reads each once for all of its tokens */
-  uint32_t nd = 0, by[FWD_MAX_PAIRS];
+  uint32_t nd = 0, by[FWD_MAX_PAIRS], at[OPS_MAX_EXPERTS + 1] = {0};
   for (uint32_t m = 0; m < P; m++)
   {
     if (ids[m] < 0 || (uint32_t)ids[m] >= E)
       return fwd_fail(err, "the router picked an expert the model does not have");
-    by[m] = m;
+    at[ids[m] + 1]++;
   }
-  for (uint32_t i = 1; i < P; i++) /* by expert, then pair: an insertion sort of at most FWD_MAX_PAIRS */
-    for (uint32_t j = i; j > 0 && (ids[by[j]] < ids[by[j - 1]] || (ids[by[j]] == ids[by[j - 1]] && by[j] < by[j - 1]));
-         j--)
-    {
-      const uint32_t t = by[j];
-      by[j] = by[j - 1], by[j - 1] = t;
-    }
+  for (uint32_t e = 0; e < E; e++) /* by expert, then pair: a counting sort, each expert's pairs in pair order */
+    at[e + 1] += at[e];
+  for (uint32_t m = 0; m < P; m++)
+    by[at[ids[m]]++] = m;
   for (uint32_t r = 0; r < P; r++)
     nd += r == 0 || ids[by[r]] != ids[by[r - 1]];
   /* the layer's tables, carved from one pinned region and sent in one copy */

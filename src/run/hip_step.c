@@ -24,8 +24,8 @@ Seq *seq_create(Forward *f, char err[FORWARD_ERR])
       const uint64_t rows = f->max_ctx / (uint64_t)g->compress[l] + 1;
       ok = fwd_alloc(&s->ckv[l], rows * hd * F) &&
            (!g->ix_source[l] || fwd_alloc(&s->ik[l], rows * (uint64_t)g->ix_head_dim * F)) &&
-           (g->compress[l] < 2 || (fwd_alloc(&s->pend_kvc[l], (uint64_t)g->compress[l] * hd * F) &&
-                                   fwd_alloc(&s->pend_sc[l], (uint64_t)g->compress[l] * hd * F)));
+           (g->compress[l] < 2 || (fwd_alloc(&s->pend_kvc[l], (uint64_t)FWD_PEND_ROWS(g->compress[l]) * hd * F) &&
+                                   fwd_alloc(&s->pend_sc[l], (uint64_t)FWD_PEND_ROWS(g->compress[l]) * hd * F)));
     }
   }
   if (!ok)

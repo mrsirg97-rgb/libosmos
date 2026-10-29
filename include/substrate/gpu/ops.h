@@ -18,7 +18,7 @@ bool ops_embed(uint32_t type, const void *table, uint32_t dim, const int32_t *id
                float *h, void *stream);
 bool ops_rms(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
              uint32_t y_stride, void *stream);
-#define OPS_HC_PARTS 16
+#define OPS_HC_PARTS 64
 bool ops_hc_dot(const float *fn, const float *h, uint32_t hc, uint32_t dim, uint32_t n_tok, float *partial,
                 void *stream);
 bool ops_hc_mix(const float *partial, const float *scale, const float *base, uint32_t hc, uint32_t dim, float eps,
@@ -38,10 +38,15 @@ bool ops_sparse_attn(const float *q, const float *ring, uint32_t slots, const in
                      const float *ckv, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap, uint32_t max_sel,
                      const float *sink, float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *scores,
                      float *o, void *stream);
-bool ops_compress(const float *kvc, const float *sc, uint32_t ratio, uint32_t dim, float *out, void *stream);
-bool ops_index_score(const float *q, const float *keys, const float *w, uint32_t n, uint32_t heads, uint32_t head_dim,
-                     float *score, void *stream);
-bool ops_topk(const float *score, uint32_t n, uint32_t k, int32_t *sel, int32_t *n_sel, void *stream);
+bool ops_compress(const float *kvc, const float *sc, uint32_t slots, const int32_t *pos, uint32_t ratio, uint32_t dim,
+                  uint32_t n_tok, float *out, void *stream);
+bool ops_put_rows(float *dst, uint32_t slots, const float *src, const int32_t *pos, uint32_t every, uint32_t dim,
+                  uint32_t n_tok, void *stream);
+bool ops_index_score(const float *q, const float *keys, const float *w, const int32_t *pos, uint32_t ratio,
+                     uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score, uint32_t stride,
+                     void *stream);
+bool ops_topk(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t k, uint32_t n_tok,
+              int32_t *sel, uint32_t sel_stride, int32_t *n_sel, void *stream);
 bool ops_router(const float *logits, const float *bias, uint32_t n_exp, uint32_t k, float scale, uint32_t n_tok,
                 int32_t *idx, float *w, void *stream);
 bool ops_swiglu(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok, float *h,
@@ -74,7 +79,7 @@ ops_rms
 ops_hc_dot
   the hyper-connection mixes' inputs: each of the (2 + hc) hc rows of fn (F32, [rows][hc * dim]) dotted with each
   token's stream h, and the stream with itself, in OPS_HC_PARTS fixed parts: partial[t][row][part] (row (2 + hc) hc
-  the sum of squares). ops_hc_mix sums the parts in order.
+  the sum of squares), each a sum over its part in order. ops_hc_mix sums the parts in order.
 
 ops_hc_mix
   the mixes from ops_hc_dot's partial: mix = the row's parts summed, times 1 / sqrt(the squares' parts summed /
@@ -118,15 +123,23 @@ ops_sparse_attn
   their order: a token's bits do not depend on the other tokens, the heads' tiling, or the batch.
 
 ops_compress
-  a compressed row from `ratio` positions' kvc and sc ([ratio][dim]): out = sum over them of kvc * softmax(sc), the
-  softmax a value at a time over the positions.
+  for each token t whose position completes a compressed row ((pos[t] + 1) a multiple of ratio): the row from the
+  ratio positions ending at it - position p at row p % slots of kvc and sc ([slots][dim]) - out[t] = sum over them of
+  kvc * softmax(sc), the softmax a value at a time over the positions; any other token's out[t] zeros.
+
+ops_put_rows
+  each token t's row src[t] (dim floats) into dst: every 1, at row pos[t] % slots (a ring); every r, only for a
+  token completing a row of r positions, at row ((pos[t] + 1) / r - 1) % slots. a copy, so the bits.
 
 ops_index_score
-  score[c] = sum over heads h of relu(q_h . keys_c) * w_h for the rows c < n (heads at most 32: a lane a head).
+  for each token t (its q at q + t heads head_dim, its w at w + t heads) and its visible rows c < (pos[t] + 1) / ratio
+  of keys: score[t stride + c] = sum over heads h of relu(q_h . keys_c) * w_h (heads at most 32: a lane a head).
+  max_n bounds the visible rows (at most stride).
 
 ops_topk
-  the k highest of score[0 .. n) - ties to the lower row - their rows ascending into sel and how many into *n_sel
-  (all n when n <= k). deterministic: integer counts, a compaction in row order.
+  for each token t: the k highest of score[t stride + 0 .. n) (n its visible rows, as ops_index_score's) - ties to
+  the lower row - their rows ascending into sel + t sel_stride and how many into n_sel[t] (all n when n <= k; 0 for
+  none visible). deterministic: integer counts, a compaction in row order.
 
 ops_router
   scores = sqrt(softplus(logits)); the k experts of the highest score + bias (ties to the lower expert), in that

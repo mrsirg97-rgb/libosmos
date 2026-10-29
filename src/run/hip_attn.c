@@ -9,67 +9,86 @@
 
 static const float *F(const Forward *f, const GgufTensor *t) { return (const float *)fwd_dev(f, t); }
 
-/* a KV source's new compressed row m of token i's sequence, from its latent (lat, rms'd): the indexer's key from it
-   (index sources), then the row itself, each roped at the row's first position and FP4-rounded */
-static bool finish_row(Forward *f, int l, uint32_t i, int32_t m, const float *lat, char *err)
+/* each run of one sequence's tokens (i, run) in turn: each(f, i, run, arg) */
+static bool runs(Forward *f, bool (*each)(Forward *, uint32_t, uint32_t, void *), void *arg)
 {
-  const Geometry *g = f->g;
-  const LayerWeights *L = &f->w->layer[l];
-  Scratch *b = &f->b;
-  Seq *s = f->bs[i];
-  const uint32_t hd = g->head_dim, RD = g->rope_dim, ih = g->ix_head_dim;
-  f->pin->rpos[l][i] = m * g->compress[l];
-  bool ok = fwd_put_async(b->rpos + i, &f->pin->rpos[l][i], 4);
-  if (ok && g->ix_source[l])
-    ok = fwd_mat(f, L->ix_k, fwd_dev(f, L->ix_k), ih, hd, lat, hd, 1, b->ikr, ih) &&
-         ops_rms(b->ikr, ih, ih, F(f, L->ix_k_norm), g->rms_eps, 1, b->ikr, ih, NULL) &&
-         ops_rope(b->ikr, 1, ih, RD, ih, f->freqs_comp, b->rpos + i, false, 1, NULL) &&
-         ops_fp4_round(b->ikr, ih, FP4_INDEX_BLOCK, false, NULL) &&
-         fwd_copy(s->ik[l] + (uint64_t)m * ih, b->ikr, ih * sizeof(float));
-  float *row = s->ckv[l] + (uint64_t)m * hd;
-  ok = ok && fwd_copy(row, lat, hd * sizeof(float)) &&
-       ops_rope(row, 1, hd, RD, hd, f->freqs_comp, b->rpos + i, false, 1, NULL) &&
-       ops_fp4_round(row, hd, FP4_LATENT_BLOCK, true, NULL);
-  if (!ok)
-    return fwd_fail(err, "a GPU call failed (the compressor)");
-  fwd_probe(f, "ckv", l, m, row, hd, false);
-  return true;
+  bool ok = true;
+  for (uint32_t i = 0, run; ok && i < f->n; i += run)
+  {
+    for (run = 1; i + run < f->n && f->bs[i + run] == f->bs[i]; run++)
+      ;
+    ok = each(f, i, run, arg);
+  }
+  return ok;
 }
 
-/* a KV source's compressor over the batch: the projections batched, then each token in order - its position into
-   its sequence's pending rows, a row finished when the position completes one (a later token of the same sequence
-   then sees it) */
+typedef struct
+{
+  int l;
+  uint32_t r;
+} Layer;
+
+/* a run's positions into its sequence's pending rows, then the rows they complete (b->lat) */
+static bool pend_run(Forward *f, uint32_t i, uint32_t run, void *arg)
+{
+  const Layer *a = arg;
+  Scratch *b = &f->b;
+  Seq *s = f->bs[i];
+  const uint32_t hd = f->g->head_dim, pend = FWD_PEND_ROWS(a->r);
+  return ops_put_rows(s->pend_kvc[a->l], pend, b->kvc + (uint64_t)i * hd, b->pos + i, 1, hd, run, NULL) &&
+         ops_put_rows(s->pend_sc[a->l], pend, b->scg + (uint64_t)i * hd, b->pos + i, 1, hd, run, NULL) &&
+         ops_compress(s->pend_kvc[a->l], s->pend_sc[a->l], pend, b->pos + i, a->r, hd, run, b->lat + (uint64_t)i * hd,
+                      NULL);
+}
+
+/* a run's finished rows into its sequence's: the indexer's keys (index sources), then the rows */
+static bool keep_run(Forward *f, uint32_t i, uint32_t run, void *arg)
+{
+  const Layer *a = arg;
+  const Geometry *g = f->g;
+  Scratch *b = &f->b;
+  Seq *s = f->bs[i];
+  const uint32_t hd = g->head_dim, ih = g->ix_head_dim, rows = f->max_ctx / a->r + 1;
+  return (!g->ix_source[a->l] ||
+          ops_put_rows(s->ik[a->l], rows, b->ikr + (uint64_t)i * ih, b->pos + i, a->r, ih, run, NULL)) &&
+         ops_put_rows(s->ckv[a->l], rows, b->lat + (uint64_t)i * hd, b->pos + i, a->r, hd, run, NULL);
+}
+
+/* a KV source's compressor over the batch, every step batched: the projections; each sequence's positions into its
+   pending rows and the rows they complete (a token whose position completes one: the ratio positions ending at it);
+   the rows' indexer keys (index sources) and the rows, each roped at the row's first position and FP4-rounded, into
+   their sequences' - before any token selects (a later token of the same sequence then sees them) */
 static bool compress_rows(Forward *f, int l, char *err)
 {
   const Geometry *g = f->g;
   const LayerWeights *L = &f->w->layer[l];
   Scratch *b = &f->b;
   const uint32_t r = (uint32_t)g->compress[l], hd = g->head_dim, D = g->n_embd, n = f->n;
+  const uint32_t RD = g->rope_dim, ih = g->ix_head_dim;
+  Layer a = {l, r};
   bool ok = fwd_mat(f, L->comp_kv, fwd_dev(f, L->comp_kv), hd, D, b->x, D, n, r == 1 ? b->lat : b->kvc, hd) &&
-            (r == 1 ? ops_rms(b->lat, hd, hd, F(f, L->comp_norm), g->rms_eps, n, b->lat, hd, NULL)
-                    : fwd_mat(f, L->comp_gate, fwd_dev(f, L->comp_gate), hd, D, b->x, D, n, b->scg, hd));
-  for (uint32_t i = 0; ok && i < n; i++)
-  {
-    const int32_t p = f->pin->pos[i];
-    Seq *s = f->bs[i];
-    if (r == 1)
-    {
-      ok = finish_row(f, l, i, p, b->lat + (uint64_t)i * hd, err);
-      continue;
-    }
-    ok = fwd_copy(s->pend_kvc[l] + (p % r) * hd, b->kvc + (uint64_t)i * hd, hd * sizeof(float)) &&
-         fwd_copy(s->pend_sc[l] + (p % r) * hd, b->scg + (uint64_t)i * hd, hd * sizeof(float));
-    if (ok && (uint32_t)(p + 1) % r == 0)
-    {
-      float *lat = b->lat + (uint64_t)i * hd;
-      ok = ops_compress(s->pend_kvc[l], s->pend_sc[l], r, hd, lat, NULL) &&
-           ops_rms(lat, hd, hd, F(f, L->comp_norm), g->rms_eps, 1, lat, hd, NULL) &&
-           finish_row(f, l, i, p / (int32_t)r, lat, err);
-    }
-  }
-  if (!ok && !err[0])
+            (r == 1 || (fwd_mat(f, L->comp_gate, fwd_dev(f, L->comp_gate), hd, D, b->x, D, n, b->scg, hd) &&
+                        runs(f, pend_run, &a))) &&
+            ops_rms(b->lat, hd, hd, F(f, L->comp_norm), g->rms_eps, n, b->lat, hd, NULL);
+  for (uint32_t i = 0; i < n; i++) /* a row's first position (a token completing none: unused) */
+    f->pin->rpos[l][i] = f->pin->pos[i] + 1 - (int32_t)r;
+  ok = ok && fwd_put_async(b->rpos, f->pin->rpos[l], (uint64_t)n * 4);
+  if (ok && g->ix_source[l])
+    ok = fwd_mat(f, L->ix_k, fwd_dev(f, L->ix_k), ih, hd, b->lat, hd, n, b->ikr, ih) &&
+         ops_rms(b->ikr, ih, ih, F(f, L->ix_k_norm), g->rms_eps, n, b->ikr, ih, NULL) &&
+         ops_rope(b->ikr, 1, ih, RD, ih, f->freqs_comp, b->rpos, false, n, NULL) &&
+         ops_fp4_round(b->ikr, (uint64_t)n * ih, FP4_INDEX_BLOCK, false, NULL);
+  ok = ok && ops_rope(b->lat, 1, hd, RD, hd, f->freqs_comp, b->rpos, false, n, NULL) &&
+       ops_fp4_round(b->lat, (uint64_t)n * hd, FP4_LATENT_BLOCK, true, NULL) && runs(f, keep_run, &a);
+  if (!ok)
     return fwd_fail(err, "a GPU call failed (the compressor)");
-  return ok;
+  for (uint32_t i = 0; f->probe && i < n; i++)
+    if ((uint32_t)(f->pin->pos[i] + 1) % r == 0)
+    {
+      const int32_t m = (f->pin->pos[i] + 1) / (int32_t)r - 1;
+      fwd_probe(f, "ckv", l, m, f->bs[i]->ckv[l] + (uint64_t)m * hd, hd, false);
+    }
+  return true;
 }
 
 /* an index source's rows for each token: its query against its sequence's source's keys, weighted a head, the top k
@@ -87,23 +106,32 @@ static bool select_rows(Forward *f, int l, int src, char *err)
             ops_fp4_round(b->qix, (uint64_t)n * nh * ih, FP4_INDEX_BLOCK, false, NULL) &&
             fwd_mat(f, L->ix_proj, fwd_dev(f, L->ix_proj), nh, D, b->x, D, n, b->wix, nh) &&
             ops_scale(b->wix, (uint64_t)n * nh, w_scale, NULL);
-  for (uint32_t i = 0; ok && i < n; i++)
+  for (uint32_t i = 0; i < n; i++)
   {
-    const uint32_t n_vis = (uint32_t)(f->pin->pos[i] + 1) / ratio;
-    int32_t *sel = b->sel + (uint64_t)i * OPS_MAX_SELECT;
-    if (!n_vis)
-    {
-      ok = hipMemsetAsync(b->n_sel + i, 0, 4, NULL) == hipSuccess;
-      continue;
-    }
-    const uint32_t blocks = (n_vis + g->cand_block - 1) / g->cand_block;
+    const uint32_t blocks = ((uint32_t)(f->pin->pos[i] + 1) / ratio + g->cand_block - 1) / g->cand_block;
     if ((l == g->cand_source || g->cand_source < l) && blocks > (uint32_t)g->cand_blocks)
       return fwd_fail(err, "a context past the candidate blocks (the candidate masking is not built)");
-    ok = ops_index_score(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh, n_vis, nh, ih,
-                         b->score, NULL) &&
-         ops_topk(b->score, n_vis, (uint32_t)g->ix_topk, sel, b->n_sel + i, NULL);
   }
+  for (uint32_t i = 0, run; ok && i < n; i += run) /* a launch a run of one sequence's tokens (their keys its own) */
+  {
+    for (run = 1; i + run < n && f->bs[i + run] == f->bs[i]; run++)
+      ;
+    const uint32_t max_n = (uint32_t)(f->pin->pos[i + run - 1] + 1) / ratio; /* a run's positions ascend */
+    ok = !max_n || (ops_index_score(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh,
+                                    b->pos + i, ratio, max_n, nh, ih, run, b->score + (uint64_t)i * f->score_stride,
+                                    f->score_stride, NULL));
+  }
+  ok = ok && ops_topk(b->score, f->score_stride, b->pos, ratio, (uint32_t)g->ix_topk, n, b->sel, OPS_MAX_SELECT,
+                      b->n_sel, NULL);
   return ok || fwd_fail(err, "a GPU call failed (the indexer)");
+}
+
+/* a run's keys into its sequence's window */
+static bool ring_run(Forward *f, uint32_t i, uint32_t run, void *arg)
+{
+  const int l = *(const int *)arg;
+  const uint32_t HD = f->g->head_dim;
+  return ops_put_rows(f->bs[i]->ring[l], f->slots, f->b.kv + (uint64_t)i * HD, f->b.pos + i, 1, HD, run, NULL);
 }
 
 bool fwd_attention(Forward *f, int l, char *err)
@@ -127,9 +155,7 @@ bool fwd_attention(Forward *f, int l, char *err)
   fwd_probe(f, "q", l, f->at, b->q, n * H * HD, false);
   fwd_probe(f, "kv", l, f->at, b->kv, n * HD, false);
   /* every token's keys into its sequence's window before any attends: a later one of a sequence reads an earlier's */
-  for (uint32_t i = 0; ok && i < n; i++)
-    ok = fwd_copy(f->bs[i]->ring[l] + (uint64_t)(f->pin->pos[i] % f->slots) * HD, b->kv + (uint64_t)i * HD,
-                  HD * sizeof(float));
+  ok = ok && runs(f, ring_run, &l);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the window's keys)");
   const int src = g->kv_from[l];

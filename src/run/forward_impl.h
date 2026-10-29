@@ -19,6 +19,8 @@
 
 #define FWD_MAX_FILES 16
 #define FWD_MAX_BATCH MM_MAX_TOKENS                 /* a step's tokens: the matmul's */
+/* a ratio r source's pending positions a sequence: a step's and the r - 1 before them, each row's r all held */
+#define FWD_PEND_ROWS(r) (FWD_MAX_BATCH + (r) - 1)
 #define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a step's (token, routed expert) pairs */
 #define FWD_MAX_GROUPS 64                           /* a layer's wo_a groups */
 /* a layer's routing tables at most: 3 matrix pointers, 4 offsets, a count an expert; an order and a pair a pair; 2 x 16
@@ -73,6 +75,7 @@ struct Forward
   const Geometry *g;
   int n_layers;
   uint32_t max_ctx;
+  uint32_t score_stride; /* a token's indexer scores: the most rows visible at max_ctx (the smallest ratio) */
   uint32_t slots;
   int fds[FWD_MAX_FILES];
   Pool *pool;

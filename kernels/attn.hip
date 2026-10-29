@@ -15,39 +15,71 @@ constexpr int kThreads = 256;
 constexpr int kWave = 32;
 constexpr int kWaves = kThreads / kWave;
 constexpr int kSelectThreads = 1024;
+constexpr uint32_t kFillBlocks = 160;  // a launch's blocks to fill gfx1151 (40 CUs, 4 blocks each)
 constexpr int kRadixBits = 8;
 constexpr int kBins = 1 << kRadixBits;
 
 hipStream_t st(void* s) { return (hipStream_t) s; }
 bool ok() { return hipGetLastError() == hipSuccess; }
 
-// a compressed row: sum over the ratio's rows of kvc * softmax(sc) (the softmax per value, over the rows)
-__global__ void compress_kernel(const float* kvc, const float* sc, uint32_t ratio, uint32_t dim, float* out) {
-  const uint32_t d = blockIdx.x * kThreads + threadIdx.x;
+// a token that completes a compressed row (its position + 1 a multiple of ratio): the row from the ratio positions
+// ending at it (ring row position % slots of kvc and sc), out[t] = sum over them of kvc * softmax(sc), the softmax a
+// value at a time; any other token's out[t] zeros
+__global__ void compress_kernel(const float* kvc, const float* sc, uint32_t slots, const int32_t* pos, uint32_t ratio,
+                                uint32_t dim, float* out) {
+  const uint32_t d = blockIdx.x * kThreads + threadIdx.x, t = blockIdx.y;
   if (d >= dim) return;
+  const int32_t p = pos[t];
+  float* o = out + (uint64_t) t * dim + d;
+  if ((uint32_t) (p + 1) % ratio) {
+    *o = 0;
+    return;
+  }
+  auto at = [&](const float* x, uint32_t j) { return x[(uint64_t) ((uint32_t) (p + 1 - ratio + j) % slots) * dim + d]; };
   float m = -INFINITY;
-  for (uint32_t j = 0; j < ratio; j++) m = fmaxf(m, sc[(uint64_t) j * dim + d]);
+  for (uint32_t j = 0; j < ratio; j++) m = fmaxf(m, at(sc, j));
   float e[OPS_MAX_RATIO], s = 0;
-  for (uint32_t j = 0; j < ratio; j++) s += (e[j] = expf(sc[(uint64_t) j * dim + d] - m));
+  for (uint32_t j = 0; j < ratio; j++) s += (e[j] = expf(at(sc, j) - m));
   float v = 0;
-  for (uint32_t j = 0; j < ratio; j++) v += kvc[(uint64_t) j * dim + d] * (e[j] / s);
-  out[d] = v;
+  for (uint32_t j = 0; j < ratio; j++) v += at(kvc, j) * (e[j] / s);
+  *o = v;
 }
 
-// score[c] = sum over heads h of relu(q_h . k_c) * w_h, for the rows c < n: a wave a row, a lane a head
-__global__ void index_score_kernel(const float* q, const float* keys, const float* w, uint32_t n, uint32_t heads,
-                                   uint32_t hd, float* score) {
+// token t's row into dst: every 1, at row pos % slots; every r, only a token completing a row of r, at row
+// ((pos + 1) / r - 1) % slots
+__global__ void put_rows_kernel(float* dst, uint32_t slots, const float* src, const int32_t* pos, uint32_t every,
+                                uint32_t dim) {
+  const uint32_t t = blockIdx.y, p1 = (uint32_t) pos[t] + 1;
+  if (p1 % every) return;
+  const uint64_t row = (p1 / every - 1) % slots;
+  for (uint32_t d = blockIdx.x * kThreads + threadIdx.x; d < dim; d += gridDim.x * kThreads)
+    dst[row * dim + d] = src[(uint64_t) t * dim + d];
+}
+
+// a token's visible compressed rows: those whose ratio positions are all at or before its own
+__device__ inline uint32_t visible(const int32_t* pos, uint32_t t, uint32_t ratio) {
+  return (uint32_t) (pos[t] + 1) / ratio;
+}
+
+// token t's score[c] = sum over heads h of relu(q_h . k_c) * w_h, for its visible rows c: a block a slice of a token's
+// rows, a wave a row, a lane a head
+__global__ void index_score_kernel(const float* q, const float* keys, const float* w, const int32_t* pos,
+                                   uint32_t ratio, uint32_t heads, uint32_t hd, float* score, uint32_t stride) {
   extern __shared__ float qs[];
-  for (uint32_t i = threadIdx.x; i < heads * hd; i += kThreads) qs[i] = q[i];
+  const uint32_t t = blockIdx.y, n = visible(pos, t, ratio);
+  if (blockIdx.x * kWaves >= n) return;  // the whole block
+  q += (uint64_t) t * heads * hd, w += (uint64_t) t * heads, score += (uint64_t) t * stride;
+  const uint32_t qst = hd + 1;  // a head's row in LDS one past hd: the lanes' reads in different banks
+  for (uint32_t i = threadIdx.x; i < heads * hd; i += kThreads) qs[i / hd * qst + i % hd] = q[i];
   __syncthreads();
   const int lane = threadIdx.x % kWave;
-  const uint32_t stride = gridDim.x * kWaves;
-  for (uint32_t c = blockIdx.x * kWaves + threadIdx.x / kWave; c < n; c += stride) {
+  const uint32_t step = gridDim.x * kWaves;
+  for (uint32_t c = blockIdx.x * kWaves + threadIdx.x / kWave; c < n; c += step) {
     const float* k = keys + (uint64_t) c * hd;
     float v = 0;
     if ((uint32_t) lane < heads) {
       float s = 0;
-      for (uint32_t d = 0; d < hd; d++) s += qs[lane * hd + d] * k[d];
+      for (uint32_t d = 0; d < hd; d++) s += qs[lane * qst + d] * k[d];
       v = fmaxf(s, 0.0f) * w[lane];
     }
     for (int off = kWave / 2; off > 0; off >>= 1) v += __shfl_xor(v, off, kWave);
@@ -61,13 +93,15 @@ __device__ inline uint32_t order(float f) {
   return (u & 0x80000000u) ? ~u : u | 0x80000000u;
 }
 
-// the k highest of score[0 .. n) (ties to the lower row), their rows ascending into sel, how many into n_sel. one
-// block: radix select of the k-th key (8 bits a pass, integer counts), then a compaction in row order
-__global__ void topk_kernel(const float* score, uint32_t n, uint32_t k, int32_t* sel, int32_t* n_sel) {
+// a token's k highest of score[0 .. n) (ties to the lower row), their rows ascending into sel, how many into n_sel. a
+// block a token: radix select of the k-th key (8 bits a pass, integer counts), then a compaction in row order
+__global__ void topk_kernel(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t k,
+                            int32_t* sel, uint32_t sel_stride, int32_t* n_sel) {
   __shared__ uint32_t hist[kBins];
   __shared__ uint32_t prefix, mask, need;
   __shared__ uint32_t cnt_hi[kSelectThreads], cnt_eq[kSelectThreads];
-  const uint32_t tid = threadIdx.x;
+  const uint32_t tid = threadIdx.x, t = blockIdx.x, n = visible(pos, t, ratio);
+  score += (uint64_t) t * stride, sel += (uint64_t) t * sel_stride, n_sel += t;
   if (n <= k) {  // every row
     for (uint32_t c = tid; c < n; c += kSelectThreads) sel[c] = (int32_t) c;
     if (tid == 0) *n_sel = (int32_t) n;
@@ -125,24 +159,38 @@ __global__ void topk_kernel(const float* score, uint32_t n, uint32_t k, int32_t*
 
 }  // namespace
 
-extern "C" bool ops_compress(const float* kvc, const float* sc, uint32_t ratio, uint32_t dim, float* out,
-                             void* stream) {
-  if (!ratio || ratio > OPS_MAX_RATIO || !dim) return false;
-  compress_kernel<<<(dim + kThreads - 1) / kThreads, kThreads, 0, st(stream)>>>(kvc, sc, ratio, dim, out);
+extern "C" bool ops_compress(const float* kvc, const float* sc, uint32_t slots, const int32_t* pos, uint32_t ratio,
+                             uint32_t dim, uint32_t n_tok, float* out, void* stream) {
+  if (!ratio || ratio > OPS_MAX_RATIO || slots < ratio || !dim || !n_tok) return false;
+  compress_kernel<<<dim3((dim + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(kvc, sc, slots, pos,
+                                                                                              ratio, dim, out);
   return ok();
 }
 
-extern "C" bool ops_index_score(const float* q, const float* keys, const float* w, uint32_t n, uint32_t heads,
-                                uint32_t head_dim, float* score, void* stream) {
-  if (!n || !heads || heads > (uint32_t) kWave || !head_dim) return false;
-  const uint32_t blocks = (n + kWaves - 1) / kWaves < 1024 ? (n + kWaves - 1) / kWaves : 1024;
-  index_score_kernel<<<blocks, kThreads, heads * head_dim * sizeof(float), st(stream)>>>(q, keys, w, n, heads,
-                                                                                          head_dim, score);
+extern "C" bool ops_put_rows(float* dst, uint32_t slots, const float* src, const int32_t* pos, uint32_t every,
+                             uint32_t dim, uint32_t n_tok, void* stream) {
+  if (!slots || !every || !dim || !n_tok) return false;
+  put_rows_kernel<<<dim3((dim + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(dst, slots, src, pos,
+                                                                                              every, dim);
   return ok();
 }
 
-extern "C" bool ops_topk(const float* score, uint32_t n, uint32_t k, int32_t* sel, int32_t* n_sel, void* stream) {
-  if (!n || !k || k > OPS_MAX_SELECT) return false;
-  topk_kernel<<<1, kSelectThreads, 0, st(stream)>>>(score, n, k, sel, n_sel);
+extern "C" bool ops_index_score(const float* q, const float* keys, const float* w, const int32_t* pos, uint32_t ratio,
+                                uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float* score,
+                                uint32_t stride, void* stream) {
+  if (!ratio || !max_n || max_n > stride || !heads || heads > (uint32_t) kWave || !head_dim || !n_tok) return false;
+  // a token's blocks: enough with the others' to fill the GPU, each its q staged once for many rows (a row's score
+  // the same whichever block takes it)
+  const uint32_t rows = (max_n + kWaves - 1) / kWaves, fill = (kFillBlocks + n_tok - 1) / n_tok;
+  const uint32_t blocks = rows < fill ? rows : fill;
+  index_score_kernel<<<dim3(blocks, n_tok), kThreads, heads * (head_dim + 1) * sizeof(float), st(stream)>>>(
+      q, keys, w, pos, ratio, heads, head_dim, score, stride);
+  return ok();
+}
+
+extern "C" bool ops_topk(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t k,
+                         uint32_t n_tok, int32_t* sel, uint32_t sel_stride, int32_t* n_sel, void* stream) {
+  if (!ratio || !k || k > OPS_MAX_SELECT || k > sel_stride || !n_tok) return false;
+  topk_kernel<<<n_tok, kSelectThreads, 0, st(stream)>>>(score, stride, pos, ratio, k, sel, sel_stride, n_sel);
   return ok();
 }

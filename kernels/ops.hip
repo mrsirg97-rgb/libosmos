@@ -17,7 +17,7 @@ constexpr float kRouteEps = 1e-20f;
 constexpr float kEngramDotFloor = 1e-6f; // the gate's |dot| floor before the square root
 
 constexpr int kWide = 1024;  // the hc pre-norm's block: a token's whole stream (4 x 5,120) in one block's reach
-constexpr int kHcParts = 16; // the hc mixes' dots, each split in 16 (20,480 / 16 = 1,280 values a block)
+constexpr int kHcParts = OPS_HC_PARTS;  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
 
 // the sum of each thread's v over the block, by a fixed tree (every thread gets it)
 template <int NT = kThreads>
@@ -60,17 +60,60 @@ __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float*
   for (uint32_t i = threadIdx.x; i < n; i += kThreads) yr[i] = w ? (xr[i] * r) * w[i] : xr[i] * r;
 }
 
-// the hc mixes' dots and the stream's sum of squares, a block a part: block (r, p, t) the part p of row r's dot with
-// token t's stream (r = nm: the stream with itself), into partial[t][r][p]. the parts fixed by the shape
-__global__ void hc_dot_kernel(const float* fn, const float* h, uint32_t nm, uint32_t len, float* partial) {
-  __shared__ float lds[kThreads];
-  const uint32_t r = blockIdx.x, p = blockIdx.y, t = blockIdx.z, seg = len / kHcParts;
-  const float* ht = h + (uint64_t) t * len + (uint64_t) p * seg;
-  const float* wr = r < nm ? fn + (uint64_t) r * len + (uint64_t) p * seg : ht;
-  float s = 0;
-  for (uint32_t i = threadIdx.x; i < seg; i += kThreads) s += wr[i] * ht[i];
-  s = block_sum(s, lds);
-  if (threadIdx.x == 0) partial[((uint64_t) t * (nm + 1) + r) * kHcParts + p] = s;
+// the hc mixes' dots and the stream's sum of squares, a block a part of 64 tokens: block (p, tt) the part p of every
+// row r's dot with each token's stream (r = nm: the stream with itself), into partial[t][r][p] - fn's part read once
+// for the tokens, staged with theirs a step at a time; each a sum over the part in order (fmaf), whatever the tile
+constexpr int kHcTok = 64, kHcStep = 32, kHcLanes = kThreads / kHcTok;  // a thread's token, its rows r = lane + 4 j
+template <uint32_t hc>
+__global__ __launch_bounds__(kThreads) void hc_dot_kernel(const float* fn, const float* h, uint32_t n_tok,
+                                                         uint32_t len, float* partial) {
+  constexpr uint32_t nm = (2 + hc) * hc, rows = nm + 1, per = (rows + kHcLanes - 1) / kHcLanes;
+  __shared__ float hs[kHcTok][kHcStep + 1], fs[rows][kHcStep];
+  const uint32_t p = blockIdx.x, t0 = blockIdx.y * kHcTok, seg = len / kHcParts;
+  const uint32_t tok = threadIdx.x % kHcTok, lane = threadIdx.x / kHcTok;
+  float acc[per] = {};
+  for (uint32_t i0 = 0; i0 < seg; i0 += kHcStep) {
+    __syncthreads();
+    for (uint32_t j = threadIdx.x; j < kHcTok * kHcStep; j += kThreads) {
+      const uint32_t tt = j / kHcStep, ii = j % kHcStep;
+      hs[tt][ii] = t0 + tt < n_tok && i0 + ii < seg ? h[(uint64_t) (t0 + tt) * len + p * seg + i0 + ii] : 0;
+    }
+    for (uint32_t j = threadIdx.x; j < nm * kHcStep; j += kThreads) {
+      const uint32_t r = j / kHcStep, ii = j % kHcStep;
+      fs[r][ii] = i0 + ii < seg ? fn[(uint64_t) r * len + p * seg + i0 + ii] : 0;
+    }
+    __syncthreads();
+    for (int ii = 0; ii < kHcStep; ii++) {
+      const float x = hs[tok][ii];
+#pragma unroll
+      for (uint32_t j = 0; j < per; j++) {
+        const uint32_t r = lane + kHcLanes * j;
+        if (r < nm) acc[j] = fmaf(fs[r][ii], x, acc[j]);
+        else if (r == nm) acc[j] = fmaf(x, x, acc[j]);
+      }
+    }
+  }
+  if (t0 + tok >= n_tok) return;
+  for (uint32_t j = 0; j < per; j++) {
+    const uint32_t r = lane + kHcLanes * j;
+    if (r < rows) partial[((uint64_t) (t0 + tok) * rows + r) * kHcParts + p] = acc[j];
+  }
+}
+
+// the same sums, a thread a (row, part, token): fewer tokens than a tile (decode) - fn read from the cache, every sum
+// the tiled kernel's, in its order, so the same bits
+__global__ void hc_dot_few_kernel(const float* fn, const float* h, uint32_t nm, uint32_t len, float* partial) {
+  const uint32_t j = blockIdx.x * blockDim.x + threadIdx.x, t = blockIdx.y, seg = len / kHcParts;
+  if (j >= (nm + 1) * kHcParts) return;
+  const uint32_t r = j / kHcParts, p = j % kHcParts;
+  const float* x = h + (uint64_t) t * len + p * seg;
+  const float* w = fn + (uint64_t) r * len + p * seg;
+  float acc = 0;
+  if (r < nm)
+    for (uint32_t i = 0; i < seg; i++) acc = fmaf(w[i], x[i], acc);
+  else
+    for (uint32_t i = 0; i < seg; i++) acc = fmaf(x[i], x[i], acc);
+  partial[((uint64_t) t * (nm + 1) + r) * kHcParts + p] = acc;
 }
 
 // hc a template argument: the mixes and the Sinkhorn matrix in registers (indexed by a runtime hc they spill)
@@ -300,9 +343,23 @@ extern "C" bool ops_rms(const float* x, uint32_t n, uint32_t xs, const float* w,
 
 extern "C" bool ops_hc_dot(const float* fn, const float* h, uint32_t hc, uint32_t dim, uint32_t n_tok, float* partial,
                            void* stream) {
-  const uint32_t nm = (2 + hc) * hc, len = hc * dim;
+  const uint32_t len = hc * dim;
   if (!hc || hc > OPS_MAX_HC || !dim || !n_tok || len % kHcParts) return false;
-  hc_dot_kernel<<<dim3(nm + 1, kHcParts, n_tok), kThreads, 0, st(stream)>>>(fn, h, nm, len, partial);
+  const hipStream_t s = st(stream);
+  if (n_tok < (uint32_t) kHcTok) {  // not a tile's worth of tokens: a thread a sum
+    const uint32_t sums = ((2 + hc) * hc + 1) * kHcParts;
+    hc_dot_few_kernel<<<dim3((sums + kWave - 1) / kWave, n_tok), kWave, 0, s>>>(fn, h, (2 + hc) * hc, len, partial);
+    return ok();
+  }
+  const dim3 grid(kHcParts, (n_tok + kHcTok - 1) / kHcTok);
+  switch (hc) {
+#define HC_DOT(n) \
+  case n:         \
+    hc_dot_kernel<n><<<grid, kThreads, 0, s>>>(fn, h, n_tok, len, partial); \
+    break;
+    HC_DOT(1) HC_DOT(2) HC_DOT(3) HC_DOT(4) HC_DOT(5) HC_DOT(6) HC_DOT(7) HC_DOT(8)
+#undef HC_DOT
+  }
   return ok();
 }
 

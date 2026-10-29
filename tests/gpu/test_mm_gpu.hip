@@ -204,6 +204,6 @@ int main() {
   for (const Shape& s : kShapes) shape(g, s);
   gguf_destroy(g);
   std::printf("[test_mm_gpu] ok: every token the same bits alone, among 16, among 16 reversed, and among 33, 64 and "
-              "256 (at its place and at another)\n");
+              "%d (at its place and at another)\n", kBig);
   return 0;
 }
