@@ -48,18 +48,20 @@ template <> __device__ inline void decode<kQ8_0>(const uint8_t* b, int k, float*
   for (int j = 0; j < kChunk; j++) v[j] = mul((float) (int8_t) b[2 + k * kChunk + j], d);
 }
 
-// (d * sc) * q - (dmin * m); 8 groups of 32, q 4 low bits from qs and a fifth from qh
+// (d * sc) * q - (dmin * m); 8 groups of 32, q 4 low bits from qs and a fifth from qh. a block is 176 bytes and
+// every one 16-aligned (a tensor's data 32-aligned, its rows whole blocks): wide loads
 template <> __device__ inline void decode<kQ5_K>(const uint8_t* b, int k, float* v) {
-  const uint8_t* sc = b + 4;
-  const uint8_t* qh = b + 16;
-  const uint8_t* qs = b + 48;
   const int g = k / 4, l0 = (k % 4) * kChunk;
-  const int s = g < 4 ? sc[g] & 0x3F : (sc[g + 4] & 0x0F) | ((sc[g - 4] >> 2) & 0x30);
-  const int m = g < 4 ? sc[g + 4] & 0x3F : (sc[g + 4] >> 4) | ((sc[g] >> 2) & 0x30);
-  const float d = mul(f16(ld16(b)), (float) s), dm = mul(f16(ld16(b + 2)), (float) m);
+  const uint32_t dd = *(const uint32_t*) b;
+  const uint32_t s0 = *(const uint32_t*) (b + 4), s1 = *(const uint32_t*) (b + 8), s2 = *(const uint32_t*) (b + 12);
+  auto byte = [&](int i) { return (int) (((i < 4 ? s0 : i < 8 ? s1 : s2) >> (8 * (i % 4))) & 0xFF); };
+  const int s = g < 4 ? byte(g) & 0x3F : (byte(g + 4) & 0x0F) | ((byte(g - 4) >> 2) & 0x30);
+  const int m = g < 4 ? byte(g + 4) & 0x3F : (byte(g + 4) >> 4) | ((byte(g) >> 2) & 0x30);
+  const float d = mul(f16(dd & 0xFFFF), (float) s), dm = mul(f16(dd >> 16), (float) m);
+  const uint64_t qh = *(const uint64_t*) (b + 16 + l0);
+  const uint64_t qs = *(const uint64_t*) (b + 48 + (g / 2) * 32 + l0);
   for (int j = 0; j < kChunk; j++) {
-    const int l = l0 + j;
-    const int q = ((qs[(g / 2) * 32 + l] >> (4 * (g % 2))) & 0x0F) | (((qh[l] >> g) & 1) << 4);
+    const int q = (int) ((qs >> (8 * j + 4 * (g % 2))) & 0x0F) | (int) (((qh >> (8 * j + g)) & 1) << 4);
     v[j] = __fsub_rn(mul(d, (float) q), dm);
   }
 }
@@ -117,10 +119,11 @@ template <> __device__ inline void decode<kIQ4_NL>(const uint8_t* b, int k, floa
 template <> __device__ inline void decode<kIQ1_M>(const uint8_t* b, int k, float* v) {
   const uint8_t* qs = b;
   const uint8_t* qh = b + 32;
-  const uint8_t* sc = b + 48;
-  const uint32_t s0 = ld16(sc), s1 = ld16(sc + 2), s2 = ld16(sc + 4), s3 = ld16(sc + 6);
+  const uint64_t sc = *(const uint64_t*) (b + 48);  // a block is 56 bytes, every one 8-aligned
+  const uint32_t s0 = (uint32_t) sc & 0xFFFF, s1 = (uint32_t) (sc >> 16) & 0xFFFF;
+  const uint32_t s2 = (uint32_t) (sc >> 32) & 0xFFFF, s3 = (uint32_t) (sc >> 48);
   const float d = f16((s0 >> 12) | ((s1 >> 8) & 0x00F0) | ((s2 >> 4) & 0x0F00) | (s3 & 0xF000));
-  const int s = (ld16(sc + 2 * (k / 8)) >> (3 * ((k / 2) % 4))) & 0x07;
+  const int s = (int) ((sc >> (16 * (k / 8) + 3 * ((k / 2) % 4))) & 0x07);
   const float dl = mul(d, (float) (2 * s + 1));
   const uint32_t h = (qh[k / 2] >> (4 * (k % 2))) & 0x0F;
   const float delta = h & 0x08 ? -kIq1Delta : kIq1Delta;
