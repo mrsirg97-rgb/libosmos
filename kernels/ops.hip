@@ -2,6 +2,7 @@
 #include <cmath>
 
 #include "quant.h"
+#include "round.h"
 
 extern "C" {
 #include "substrate/gpu/ops.h"
@@ -10,16 +11,9 @@ extern "C" {
 namespace {
 
 constexpr int kThreads = 256;
-constexpr int kWave = 32;
-constexpr int kWaves = kThreads / kWave;
-constexpr float kFp8Max = 448.0f;   // E4M3's largest
-constexpr float kFp8Floor = 1e-4f;  // act_quant's amax floor
-constexpr int kFp8Block = 32;
-constexpr int kFp8Mant = 3;
-constexpr int kFp8MinExp = -6;      // E4M3's smallest normal: 2^-6; below it steps of 2^-9
 constexpr float kSoftplusLinear = 20.0f;  // F.softplus's threshold: above it, x
 constexpr float kRouteEps = 1e-20f;
-constexpr float kNegHuge = -1e30f;
+constexpr float kEngramDotFloor = 1e-6f; // the gate's |dot| floor before the square root
 
 // the sum of each thread's v over the block, by a fixed tree (every thread gets it)
 __device__ float block_sum(float v, float* lds) {
@@ -34,30 +28,7 @@ __device__ float block_sum(float v, float* lds) {
   return r;
 }
 
-__device__ inline float bf16_round(float x) {
-  uint32_t u = __float_as_uint(x);
-  if ((u & 0x7fffffffu) > 0x7f800000u) return x;  // NaN as it is
-  u += 0x7fffu + ((u >> 16) & 1u);                 // nearest, ties to even
-  return __uint_as_float(u & 0xffff0000u);
-}
-
 __device__ inline float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
-
-// E4M3 (no infinities), nearest, ties to even; |a| <= 448
-__device__ inline float e4m3(float x) {
-  const float a = fabsf(x);
-  float q;
-  if (a < ldexpf(1.0f, kFp8MinExp)) {
-    const float step = ldexpf(1.0f, kFp8MinExp - kFp8Mant);
-    q = rintf(a / step) * step;
-  } else {
-    int e;
-    frexpf(a, &e);  // a in [2^(e-1), 2^e)
-    const float step = ldexpf(1.0f, e - 1 - kFp8Mant);
-    q = rintf(a / step) * step;
-  }
-  return copysignf(q, x);
-}
 
 template <quant::Type T>
 __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* ids, uint32_t hc, float* h) {
@@ -69,7 +40,8 @@ __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* 
     float v[quant::kChunk];
     quant::decode<T>(row + (c / per) * B::bytes, (int) (c % per), v);
     for (int j = 0; j < quant::kChunk; j++)
-      for (uint32_t k = 0; k < hc; k++) h[((uint64_t) t * hc + k) * dim + c * quant::kChunk + j] = bf16_round(v[j]);
+      for (uint32_t k = 0; k < hc; k++)
+        h[((uint64_t) t * hc + k) * dim + c * quant::kChunk + j] = rnd::bf16_round(v[j]);
   }
 }
 
@@ -170,50 +142,29 @@ __global__ void rope_kernel(float* x, uint32_t heads, uint32_t head_dim, uint32_
   v[1] = a * s + b * c;
 }
 
-__global__ void fp8_kernel(float* x, uint64_t blocks) {
-  const uint64_t b = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (b >= blocks) return;
-  float* v = x + b * kFp8Block;
-  float amax = 0;
-  for (int j = 0; j < kFp8Block; j++) amax = fmaxf(amax, fabsf(v[j]));
-  const float s = exp2f(ceilf(log2f(fmaxf(amax, kFp8Floor) / kFp8Max)));
-  for (int j = 0; j < kFp8Block; j++) v[j] = e4m3(fminf(fmaxf(v[j] / s, -kFp8Max), kFp8Max)) * s;
-}
-
-__global__ void window_attn_kernel(const float* q, const float* ring, uint32_t slots, const int32_t* pos,
-                                   uint32_t window, const float* sink, float scale, uint32_t heads, uint32_t hd,
-                                   float* o) {
-  __shared__ float p[OPS_MAX_WINDOW];
-  __shared__ float den;
-  const uint32_t h = blockIdx.x, t = blockIdx.y;
-  const int32_t at = pos[t];
-  const int32_t j0 = at - (int32_t) window + 1 > 0 ? at - (int32_t) window + 1 : 0;
-  const uint32_t n = (uint32_t) (at - j0 + 1);
-  const float* qh = q + ((uint64_t) t * heads + h) * hd;
-  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave;
-  for (uint32_t k = wave; k < n; k += kWaves) {
-    const float* kv = ring + (uint64_t) ((j0 + k) % slots) * hd;
-    float s = 0;
-    for (uint32_t d = lane; d < hd; d += kWave) s += qh[d] * kv[d];
-    for (int off = kWave / 2; off > 0; off >>= 1) s += __shfl_xor(s, off, kWave);
-    if (lane == 0) p[k] = s * scale;
+// (BF16); dot = sum((h * w) * key) * (rstd(h) * rstd(key)) * scale; h += sigmoid(signed sqrt(dot)) * value
+__global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* qw, const uint16_t* kw, uint32_t hc,
+                                   uint32_t dim, float eps, float scale) {
+  __shared__ float lds[kThreads];
+  __shared__ float gate;
+  const uint32_t k = blockIdx.x, t = blockIdx.y;
+  float* hk = h + ((uint64_t) t * hc + k) * dim;
+  const float* key = kv + ((uint64_t) t * (hc + 1) + k) * dim;
+  const float* value = kv + ((uint64_t) t * (hc + 1) + hc) * dim;
+  float sh = 0, sk = 0, dot = 0;
+  for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
+    const float w = __uint_as_float((uint32_t) qw[(uint64_t) k * dim + d] << 16) *
+                    __uint_as_float((uint32_t) kw[(uint64_t) k * dim + d] << 16);
+    sh += hk[d] * hk[d], sk += key[d] * key[d], dot += (hk[d] * w) * key[d];
   }
-  __syncthreads();
+  sh = block_sum(sh, lds), sk = block_sum(sk, lds), dot = block_sum(dot, lds);
   if (threadIdx.x == 0) {
-    float m = sink[h];
-    for (uint32_t k = 0; k < n; k++) m = fmaxf(m, p[k]);
-    m = fmaxf(m, kNegHuge);
-    float s = 0;
-    for (uint32_t k = 0; k < n; k++) s += (p[k] = expf(p[k] - m));
-    den = s + expf(sink[h] - m);
+    const float rstd = (1.0f / sqrtf(sh / (float) dim + eps)) * (1.0f / sqrtf(sk / (float) dim + eps));
+    const float x = dot * rstd * scale;
+    gate = sigmoid(copysignf(sqrtf(fmaxf(fabsf(x), kEngramDotFloor)), x));
   }
   __syncthreads();
-  float* oh = o + ((uint64_t) t * heads + h) * hd;
-  for (uint32_t d = threadIdx.x; d < hd; d += kThreads) {
-    float s = 0;
-    for (uint32_t k = 0; k < n; k++) s += p[k] * ring[(uint64_t) ((j0 + k) % slots) * hd + d];
-    oh[d] = s / den;
-  }
+  for (uint32_t d = threadIdx.x; d < dim; d += kThreads) hk[d] = hk[d] + gate * value[d];
 }
 
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
@@ -251,6 +202,11 @@ __global__ void swiglu_kernel(const float* g, const float* u, uint32_t n, float 
   const float gv = fminf(g[i], lim), uv = fminf(fmaxf(u[i], -lim), lim);
   const float v = gv / (1.0f + expf(-gv)) * uv;
   h[i] = scale ? v * scale[i / n] : v;
+}
+
+__global__ void scale_kernel(float* x, uint64_t n, float s) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i < n) x[i] = x[i] * s;
 }
 
 __global__ void add_kernel(float* y, const float* a, uint64_t n) {
@@ -316,18 +272,11 @@ extern "C" bool ops_rope(float* x, uint32_t heads, uint32_t head_dim, uint32_t r
   return ok();
 }
 
-extern "C" bool ops_fp8_round(float* x, uint64_t n, void* stream) {
-  if (!n || n % kFp8Block) return false;
-  fp8_kernel<<<grid(n / kFp8Block), kThreads, 0, st(stream)>>>(x, n / kFp8Block);
-  return ok();
-}
-
-extern "C" bool ops_window_attn(const float* q, const float* ring, uint32_t slots, const int32_t* pos,
-                                uint32_t window, const float* sink, float scale, uint32_t heads, uint32_t head_dim,
-                                uint32_t n_tok, float* o, void* stream) {
-  if (!window || window > OPS_MAX_WINDOW || slots < window || !heads || !head_dim || !n_tok) return false;
-  window_attn_kernel<<<dim3(heads, n_tok), kThreads, 0, st(stream)>>>(q, ring, slots, pos, window, sink, scale, heads,
-                                                                       head_dim, o);
+extern "C" bool ops_engram_gate(float* h, const float* kv, const void* q_w, const void* k_w, uint32_t hc, uint32_t dim,
+                                float eps, uint32_t n_tok, void* stream) {
+  if (!hc || hc > OPS_MAX_HC || !dim || !n_tok) return false;
+  engram_gate_kernel<<<dim3(hc, n_tok), kThreads, 0, st(stream)>>>(h, kv, (const uint16_t*) q_w, (const uint16_t*) k_w,
+                                                                    hc, dim, eps, (float) std::pow((double) dim, -0.5));
   return ok();
 }
 
@@ -342,6 +291,12 @@ extern "C" bool ops_swiglu(const float* g, const float* u, uint32_t n, float lim
                            float* h, void* stream) {
   if (!n || !n_tok) return false;
   swiglu_kernel<<<grid((uint64_t) n * n_tok), kThreads, 0, st(stream)>>>(g, u, n, lim, scale, n_tok, h);
+  return ok();
+}
+
+extern "C" bool ops_scale(float* x, uint64_t n, float s, void* stream) {
+  if (!n) return false;
+  scale_kernel<<<grid(n), kThreads, 0, st(stream)>>>(x, n, s);
   return ok();
 }
 

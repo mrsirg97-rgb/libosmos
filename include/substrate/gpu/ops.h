@@ -8,6 +8,8 @@
 #define OPS_MAX_WINDOW 1024
 #define OPS_MAX_EXPERTS 1024
 #define OPS_MAX_TOPK 16
+#define OPS_MAX_SELECT 1024
+#define OPS_MAX_RATIO 16
 
 bool ops_embed(uint32_t type, const void *table, uint32_t dim, const int32_t *ids, uint32_t n_tok, uint32_t hc,
                float *h, void *stream);
@@ -23,13 +25,22 @@ bool ops_hc_post(const float *y, const float *res, const float *post, const floa
 bool ops_rope(float *x, uint32_t heads, uint32_t head_dim, uint32_t rope_dim, uint32_t stride, const float *freqs,
               const int32_t *pos, bool inverse, uint32_t n_tok, void *stream);
 bool ops_fp8_round(float *x, uint64_t n, void *stream);
-bool ops_window_attn(const float *q, const float *ring, uint32_t slots, const int32_t *pos, uint32_t window,
-                     const float *sink, float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *o,
-                     void *stream);
+bool ops_fp4_round(float *x, uint64_t n, uint32_t block, bool e4m3_scale, void *stream);
+bool ops_round_bf16(float *x, uint64_t n, void *stream);
+bool ops_engram_gate(float *h, const float *kv, const void *q_w, const void *k_w, uint32_t hc, uint32_t dim, float eps,
+                     uint32_t n_tok, void *stream);
+bool ops_sparse_attn(const float *q, const float *ring, uint32_t slots, const int32_t *pos, uint32_t window,
+                     const float *ckv, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap, const float *sink,
+                     float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *o, void *stream);
+bool ops_compress(const float *kvc, const float *sc, uint32_t ratio, uint32_t dim, float *out, void *stream);
+bool ops_index_score(const float *q, const float *keys, const float *w, uint32_t n, uint32_t heads, uint32_t head_dim,
+                     float *score, void *stream);
+bool ops_topk(const float *score, uint32_t n, uint32_t k, int32_t *sel, int32_t *n_sel, void *stream);
 bool ops_router(const float *logits, const float *bias, uint32_t n_exp, uint32_t k, float scale, uint32_t n_tok,
                 int32_t *idx, float *w, void *stream);
 bool ops_swiglu(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok, float *h,
                 void *stream);
+bool ops_scale(float *x, uint64_t n, float s, void *stream);
 bool ops_add(float *y, const float *a, uint64_t n, void *stream);
 
 #endif
@@ -70,10 +81,35 @@ ops_fp8_round
   each 32 values rounded as the reference's act_quant: a power-of-two scale (amax / 448, at least 1e-4, up to the next
   power of two), the values E4M3 (nearest, ties to even) under it. n a multiple of 32.
 
-ops_window_attn
-  for each token and head: q against the window's keys - the positions pos - window + 1 .. pos, each at ring row
-  position % slots (the keys are the values: one latent) - scaled, softmax with the head's sink, the values summed.
-  slots at least window + the step's tokens - 1, so no position a token reads is overwritten by the step.
+ops_fp4_round
+  each `block` values rounded as the reference's fp4_act_quant: E2M1 values (nearest, ties to the even mantissa) under
+  a scale - amax / 6 rounded to E4M3 (e4m3_scale; amax at least 6 * 2^-9), else up to the next power of two (amax
+  at least 6 * 2^-126). n a multiple of block.
+
+ops_round_bf16
+  each value rounded to BF16 (nearest, ties to even), kept as F32.
+
+ops_engram_gate
+  Engram's update of the hc streams h ([n_tok][hc][dim], in place) from kv ([n_tok][hc + 1][dim]: a key a stream,
+  then the value) and the BF16 q_w, k_w ([hc][dim]): h_k += sigmoid(signed sqrt(max(|dot|, 1e-6))) * value, dot =
+  sum((h_k * q_w k_w) * key_k) * rstd(h_k) * rstd(key_k) * dim^-0.5 (rounded to F32 from double, as python's).
+
+ops_sparse_attn
+  for each token and head: q against its keys - the window's (positions pos - window + 1 .. pos, at ring row
+  position % slots), then the n_sel[t] compressed rows of ckv that sel[t * sel_cap ..] names (ckv NULL: none) - each
+  a latent that is the key and the value; scaled, softmax with the head's sink, the values summed in that order. slots
+  at least window + the step's tokens - 1, so no position a token reads is overwritten by the step.
+
+ops_compress
+  a compressed row from `ratio` positions' kvc and sc ([ratio][dim]): out = sum over them of kvc * softmax(sc), the
+  softmax a value at a time over the positions.
+
+ops_index_score
+  score[c] = sum over heads h of relu(q_h . keys_c) * w_h for the rows c < n (heads at most 32: a lane a head).
+
+ops_topk
+  the k highest of score[0 .. n) - ties to the lower row - their rows ascending into sel and how many into *n_sel
+  (all n when n <= k). deterministic: integer counts, a compaction in row order.
 
 ops_router
   scores = sqrt(softplus(logits)); the k experts of the highest score + bias (ties to the lower expert), in that
@@ -82,6 +118,9 @@ ops_router
 ops_swiglu
   h = silu(min(g, lim)) * clamp(u, -lim, lim), times scale[t] if scale is not NULL (a routed expert's weight: applied
   before the down projection, as ref.py does).
+
+ops_scale
+  x *= s.
 
 ops_add
   y += a.

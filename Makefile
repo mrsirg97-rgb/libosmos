@@ -1,4 +1,6 @@
 CC := gcc
+# -MMD -MP: each object's headers recorded (build/*.d), so a changed header rebuilds what includes it
+DEPFLAGS = -MMD -MP
 CFLAGS = -Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O2 -g
 LDLIBS := -lpthread -lm
 
@@ -40,21 +42,21 @@ $(LIB): $(OBJS) | $(LIB_DIR)
 $(HIP_LIB): $(HIP_OBJS) $(KERNEL_OBJS) | $(LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $(filter %.o,$^)
 
-$(OBJ_DIR)/%/hip_pinner.o: $(SRC_DIR)/%/hip_pinner.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I$(ROCM)/include -D__HIP_PLATFORM_AMD__ -c $< -o $@
+# the host code that calls the HIP runtime (hip_*.c): its headers
+$(HIP_OBJS): CFLAGS += -I$(ROCM)/include -D__HIP_PLATFORM_AMD__ -Isrc/run
 
 $(OBJ_DIR)/kernels/%.o: $(KERNEL_DIR)/%.hip $(KERNEL_HDRS)
 	@mkdir -p $(dir $@)
-	$(HIPCC) -O2 -ffp-contract=off -Wall -Werror -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) -c $< -o $@
+	$(HIPCC) -O2 -ffp-contract=off -Wall -Werror $(DEPFLAGS) -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) -c $< -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
-	$(HIPCC) -O2 -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -o $@
+	@mkdir -p $(OBJ_DIR)/tests/gpu
+	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -o $@
 
 # the GPU's tests (a gfx1151 and the model): exit 77 is a skip
 gpu-tests: $(GPU_TESTS)
@@ -64,10 +66,17 @@ gpu-tests: $(GPU_TESTS)
 	done
 
 $(BIN_DIR)/%: $(TEST_DIR)/%.c $(LIB) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lsubstrate $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ_DIR)/tests/$*.d $< -L$(LIB_DIR) -lsubstrate $(LDLIBS) -o $@
 
 $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR):
 	mkdir -p $@
+
+$(TESTS): | $(OBJ_DIR)/tests
+
+$(OBJ_DIR)/tests:
+	mkdir -p $@
+
+-include $(shell find $(OBJ_DIR) -name '*.d' 2>/dev/null)
 
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR)

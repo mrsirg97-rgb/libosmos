@@ -47,6 +47,8 @@ typedef struct Geometry
   int engram_head_dim;
   int engram_max_ngram;
   int engram_cols;
+  int engram_pad;
+  int engram_vocab;
   float rms_eps;
   float hc_eps;
   float rope_base;
@@ -93,7 +95,8 @@ Weights
   model's `deepseek41.engram.file`): each a GgufTensor of theirs - borrowed, not owned; both Ggufs must outlive the
   Weights (libtrdr's scope rule). `geo` is the model's metadata, read once and checked; `kv_from[l]` the KV source a
   compressed layer reads (the last at or before it, of its ratio; -1 uncompressed), `engram_cols` the hash columns an
-  Engram position reads ((max_ngram - 1) * heads). a field a layer does not have
+  Engram position reads ((max_ngram - 1) * heads), `engram_pad` the token a hash reads before a sequence's start and
+  `engram_vocab` the compressed tokens the hash's map gives. a field a layer does not have
   is NULL (`comp_gate` off the ratio-2 sources, `ix_k` off the KV sources, `eg_*` off the Engram layers, ...).
 
 weights_create

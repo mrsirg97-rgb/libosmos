@@ -170,7 +170,9 @@ static bool engram(Meta *m, const Gguf *file, Geometry *g)
       !ints(m, ARCH ".engram.num_embeddings", (size_t)n_eg, (size_t)n_eg, rows, &n_rows) ||
       !uint_in(m, ARCH ".engram_head_dim", 1, DIM_MAX, &g->engram_head_dim) ||
       !uint_in(m, ARCH ".engram_n_heads", 1, DIM_MAX, &g->engram_heads) ||
-      !uint_in(m, ARCH ".engram_max_ngram_size", NGRAM_MIN, LIST_MAX, &g->engram_max_ngram))
+      !uint_in(m, ARCH ".engram_max_ngram_size", NGRAM_MIN, LIST_MAX, &g->engram_max_ngram) ||
+      !uint_in(m, ARCH ".engram_pad_token_id", 0, DIM_MAX, &g->engram_pad) ||
+      !uint_in(m, ARCH ".engram_compressed_vocab_size", 1, DIM_MAX, &g->engram_vocab))
     return false;
   for (int l = 0, i = 0; l < g->n_layers; l++)
     if (g->engram[l] && (g->engram_rows[l] = (uint64_t)rows[i++]) == 0)
