@@ -102,6 +102,7 @@ bool fwd_moe(Forward *f, int l, char *err)
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
   fwd_release_held(f); /* the stream is past the last layer's experts: the router came after them */
+  f->visits++;
   const int32_t *ids = f->pin->ids;
   fwd_probe(f, "route_idx", l, f->at, b->ridx, P, true);
   fwd_probe(f, "route_w", l, f->at, b->rw, P, false);

@@ -199,9 +199,9 @@ static void test_cold_to_pinned(int fd)
   assert(pool_dev(p, 0, dev) && dev[0] && dev[1]);
   check(p, u, 2, 64 * PAGE);
   assert(pool_pinned(p) == 5 * PAGE); /* [0, 4) pages and page 9, whole pages */
-  pool_release(p, 0);
-  pool_release(p, 0);
-  pool_release(p, 0); /* no hold left: nothing */
+  pool_release(p, 0, 0);
+  pool_release(p, 0, 0);
+  pool_release(p, 0, 0); /* no hold left: nothing */
   assert(pool_state(p, 0) == POOL_PINNED);
   /* want: a cold unit's read once; read, it is pinned at once without a read */
   const uint32_t both[] = {0, 1};
@@ -231,8 +231,8 @@ static void test_room(int fd)
   for (uint32_t i = 0; i < 4; i++)
     pool_ready(p, i), pool_want(p, &i, 1), pool_ready(p, i);
   assert(pool_pin(p, 0, dev) == POOL_OK && pool_pin(p, 1, dev) == POOL_OK);
-  pool_release(p, 1); /* 1 released first, then 0: 1 is the least recently released */
-  pool_release(p, 0);
+  pool_release(p, 1, 0); /* 1 released first, then 0: 1 is the least recently released */
+  pool_release(p, 0, 0);
   assert(pool_pin(p, 2, dev) == POOL_OK);
   assert(pool_state(p, 1) == POOL_READ && pool_state(p, 0) == POOL_PINNED && count(&events, POOL_EV_UNPIN, 1) == 1);
   check(p, u, 4, budget);
@@ -243,7 +243,7 @@ static void test_room(int fd)
   const int regs_before = regs.n;
   assert(pool_pin(p, 0, dev) == POOL_FULL && count(&events, POOL_EV_REFUSED, 0) == 1);
   assert(regs.n == regs_before && pool_state(p, 2) == POOL_PINNED && pool_state(p, 3) == POOL_PINNED);
-  pool_release(p, 0); /* the refused pin took no hold: nothing */
+  pool_release(p, 0, 0); /* the refused pin took no hold: nothing */
   check(p, u, 4, budget);
   pool_destroy(p);
   assert(regs.n == 0);
@@ -273,18 +273,59 @@ static void test_shared_pages(int fd)
   }
   assert(pool_pinned(p) == span);
   /* the middle one released: its registration also holds a page its held neighbour reads - no room from it */
-  pool_release(p, 1);
+  pool_release(p, 1, 0);
   const int regs_before = regs.n;
   assert(pool_pin(p, 3, dev) == POOL_FULL && regs.n == regs_before && pool_state(p, 1) == POOL_PINNED);
   check(p, u, 4, budget);
   /* the first released too: the middle goes first (frees nothing its neighbour reads), then the first - room */
-  pool_release(p, 0);
+  pool_release(p, 0, 0);
   assert(pool_pin(p, 3, dev) == POOL_OK);
   assert(pool_state(p, 0) == POOL_READ && pool_state(p, 1) == POOL_READ && pool_state(p, 2) == POOL_PINNED);
   check(p, u, 4, budget);
   pool_destroy(p);
   assert(regs.n == 0);
   printf("  shared pages: a page registered once, never unregistered under a unit that reads it; FULL then room\n");
+}
+
+/* units held in turn, a round after round (the forward's layers), each released as the next is held, wanted again a
+   round on: the one released longest ago is the one wanted soonest */
+static int cycle(int fd, bool ahead)
+{
+  enum { N = 6, ROUNDS = 4 };
+  char err[POOL_ERR] = "";
+  PoolUnit u[N];
+  for (int i = 0; i < N; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * PAGE, 4 * PAGE}}, .n_parts = 1};
+  const uint64_t budget = 4 * 4 * PAGE; /* four of the six */
+  Pool *p = make(u, N, budget, err);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  for (uint32_t i = 0; i < N; i++)
+    pool_want(p, &i, 1), pool_ready(p, i);
+  int hits = 0;
+  for (uint64_t visit = 0; visit < (uint64_t)N * ROUNDS; visit++)
+  {
+    const uint32_t i = (uint32_t)(visit % N);
+    hits += visit >= N && pool_state(p, i) == POOL_PINNED;
+    assert(pool_pin(p, i, dev) == POOL_OK);
+    check(p, u, N, budget);
+    if (visit) /* the one before: wanted again a round after its visit (or, not ahead, all alike: the oldest goes) */
+      pool_release(p, (i + N - 1) % N, ahead ? visit - 1 + N : 0);
+  }
+  pool_destroy(p);
+  assert(regs.n == 0);
+  return hits;
+}
+
+static void test_cycle(int fd)
+{
+  const int lru = cycle(fd, false), ahead = cycle(fd, true);
+  /* least recently released: each unit is gone by its turn, every round. furthest ahead: a round keeps all but the
+     two the budget cannot - the held one's room and the one taken for it */
+  assert(lru == 0);
+  assert(ahead >= 3 * (4 - 2));
+  printf("  a cycle of 6 units, room for 4, 3 rounds after the first: %d hits least recently released, %d furthest "
+         "ahead\n", lru, ahead);
 }
 
 /* property: random calls on units of random unaligned ranges in two files; the invariants after every one */
@@ -333,7 +374,7 @@ static void test_random(int fd_a, int fd_b)
     case 3:
       if (holds[i])
       {
-        pool_release(p, i);
+        pool_release(p, i, RND() % 4); /* wanted again at any of a few times: ties and not */
         holds[i]--;
       }
       break;
@@ -363,6 +404,7 @@ int main(void)
   test_cold_to_pinned(a);
   test_room(a);
   test_shared_pages(a);
+  test_cycle(a);
   test_random(a, b);
   close(a);
   close(b);

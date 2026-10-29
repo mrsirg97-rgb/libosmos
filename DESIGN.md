@@ -190,6 +190,20 @@ at an expert's size (`spikes/inplace_read/regs.hip`, `.research/spike-regs.txt`;
   so neighbouring experts share a boundary page. the planner registers merged, page-aligned runs of experts; an expert
   leaving a run unregisters it and registers the rest again (warm: ~0.03 ms a piece).
 - **the count is no constraint** at this model's scale (4,000 held).
+- **under load, an unregister drains the GPU** (2026-10-29, measured: 64 unregisters with a 34 ms kernel in flight
+  took 34.9 ms, the first waiting the kernel out): hipHostUnregister syncs every stream before HSA's unlock, so each
+  of a layer's unpins stalled the forward. hip_pinner calls HSA's `hsa_amd_memory_lock_to_pool` / `hsa_amd_memory_unlock`
+  itself - what hipHostRegister / hipHostUnregister are made of - and the unlock returns at once; the GPU reads a
+  lock's pages at the same 241 GB/s, the device's pointer the host's. the pool is the CPU's coarse-grained one: a
+  plain `hsa_amd_memory_lock` maps fine-grained pages, which stream at the same speed but made a decode step 4%
+  slower (75.0 -> 78.0 ms). the pool's contract carries the safety: a unit
+  is unpinned only with no hold on it, and the forward releases one only once the stream is past it.
+- **the overflow is a cycle, and least recently used is its worst case.** a prompt's step touches ~277 of a layer's
+  384 experts, ~115 GB a step against a 72 GB budget, in layer order every step: least recently released unpinned
+  exactly the experts wanted soonest - **0 hits** on a warm real-text pass. `pool_release` takes the caller's "wanted
+  again at" (the forward's: the layer's next visit) and room goes to the unit wanted furthest ahead - Belady's
+  choice for a cycle: **62% hits**, and a 4096-token prompt's pins 1.6 s -> 0.18 s a pass, 271 -> 290 tok/s warm
+  (2048 a step). the GPU is then the bound: the host waits on it for all but ~0.2 s of a 14.3 s pass.
 - **still unmeasured**: a pinned set near the RAM ceiling (the desktop's behaviour); the page cache's eviction of
   unpinned file pages under the GPU's allocations.
 

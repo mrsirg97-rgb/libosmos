@@ -113,7 +113,7 @@ int main() {
         for (size_t b = 0; b < n; b++) want += ((const uint8_t*) dev[k])[b];
         CHECK(got == want);
       }
-      pool_release(p, e);
+      pool_release(p, e, 0);
       ok++;
     }
   std::printf("  %d experts of blk.3 (3 parts, %.2f MB each), budget a quarter (%.0f MB): %d pins, %d waited for a "

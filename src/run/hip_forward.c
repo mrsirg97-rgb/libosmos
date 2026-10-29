@@ -245,7 +245,8 @@ void forward_destroy(Forward *f)
 {
   if (!f)
     return;
-  fetchq_destroy(f->fq); /* its workers stopped before the pool they feed goes */
+  (void)hipDeviceSynchronize(); /* a failed step's kernels done: the pool's unlocks wait for nothing (hip_pinner.h) */
+  fetchq_destroy(f->fq);        /* its workers stopped before the pool they feed goes */
   pool_destroy(f->pool);
   free(f->tdev);
   hipFree(f->oa_tab);

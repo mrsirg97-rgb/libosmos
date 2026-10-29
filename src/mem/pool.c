@@ -21,7 +21,7 @@ typedef struct Slot
   uint8_t *host[POOL_PARTS];
   PoolState state;
   int holds;
-  uint64_t released;
+  uint64_t released, next; /* when its last hold ended (the pool's clock); when it is wanted again (the caller's) */
 } Slot;
 
 struct Pool
@@ -77,6 +77,20 @@ static void unpin(Pool *p, Slot *s)
   emit(p, POOL_EV_UNPIN, (uint32_t)(s - p->s), freed);
 }
 
+/* the unheld pinned unit wanted furthest ahead; of those, the least recently released. NULL for none */
+static Slot *furthest(Pool *p)
+{
+  Slot *last = NULL;
+  for (size_t i = 0; i < p->n; i++)
+  {
+    Slot *c = &p->s[i];
+    if (c->state == POOL_PINNED && c->holds == 0 &&
+        (!last || c->next > last->next || (c->next == last->next && c->released < last->released)))
+      last = c;
+  }
+  return last;
+}
+
 /* pins a read unit that `holds` will hold: room first (FULL changes nothing), then its pages */
 static PoolPin pin_now(Pool *p, Slot *s, bool held)
 {
@@ -87,13 +101,7 @@ static PoolPin pin_now(Pool *p, Slot *s, bool held)
     return POOL_FULL;
   }
   while (p->pages->total + uncovered(p, s, false) > p->budget)
-  {
-    Slot *oldest = NULL;
-    for (size_t i = 0; i < p->n; i++)
-      if (p->s[i].state == POOL_PINNED && p->s[i].holds == 0 && (!oldest || p->s[i].released < oldest->released))
-        oldest = &p->s[i];
-    unpin(p, oldest); /* one exists: the check above counted only held units' pages as kept */
-  }
+    unpin(p, furthest(p)); /* one exists: the check above counted only held units' pages as kept */
   for (int k = 0; k < s->u.n_parts; k++)
     if (!pages_cover(p->pages, page_lo(s->host[k]), page_hi(s->host[k], s->u.part[k].bytes)))
     {
@@ -268,14 +276,14 @@ bool pool_dev(const Pool *p, uint32_t unit, const void *dev[POOL_PARTS])
   return true;
 }
 
-void pool_release(Pool *p, uint32_t unit)
+void pool_release(Pool *p, uint32_t unit, uint64_t next)
 {
   if (!p || unit >= p->n || p->s[unit].holds == 0)
     return;
   Slot *s = &p->s[unit];
   if (--s->holds == 0)
   {
-    s->released = ++p->clock;
+    s->released = ++p->clock, s->next = next;
     if (s->state == POOL_PINNED)
       ref(p, s, 0, -1);
   }

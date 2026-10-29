@@ -79,7 +79,7 @@ void pool_want(Pool *p, const uint32_t *units, size_t n);
 void pool_ready(Pool *p, uint32_t unit);
 PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
 bool pool_dev(const Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
-void pool_release(Pool *p, uint32_t unit);
+void pool_release(Pool *p, uint32_t unit, uint64_t next);
 
 PoolState pool_state(const Pool *p, uint32_t unit);
 uint64_t pool_pinned(const Pool *p);
@@ -99,8 +99,8 @@ pool_create
   `units`: what can be pinned, a unit up to POOL_PARTS ranges of open, read-only files (an expert's gate, up, down);
   copied. the pool maps each file read-only, whole, and owns the mappings; the descriptors stay the caller's.
   `budget`: the bytes the pool may hold pinned (whole pages) - RAM, not GTT (registrations do not count against
-  ttm's limit) - the caller's plan of the machine. `pinner`: the registration, injected (HIP's hipHostRegister /
-  hipHostUnregister in the binary, which refuses unless the device's pointer is the host's; a fake in the tests).
+  ttm's limit) - the caller's plan of the machine. `pinner`: the registration, injected (HSA's lock / unlock in the
+  binary, hip_pinner.h, which refuses unless the device's pointer is the host's; a fake in the tests).
   `fetcher`: begins reading a unit's parts (their files and offsets) into the page cache and returns at once; when
   the read is done, whoever wired it arranges pool_ready(unit) on the consumer (the binary: fetchq's workers, then an
   engine event; the tests: by hand). `on_event`:
@@ -126,7 +126,8 @@ pool_pin
     the hold is taken; `dev` untouched.
   - POOL_FULL: it does not fit even with every unheld pinned unit unpinned - no hold, nothing changed (a REFUSED
     event).
-  room: unheld pinned units are unpinned, the least recently released first; a held one never is.
+  room: unheld pinned units are unpinned, the one wanted furthest ahead first (pool_release's next), of those the
+  least recently released; a held one never is.
   pages: registrations cannot share a page and a unit's ranges need not be page-aligned, so a unit registers only
   the pages no registration covers yet, and a registration goes only when no pinned unit touches its pages - nothing
   a unit reads is ever unregistered under it.
@@ -135,8 +136,12 @@ pool_dev
   a pinned unit's pointers (after its PIN event); false, `dev` untouched, when it is not pinned.
 
 pool_release
-  one hold ends. at none, a pinned unit stays pinned but is the newest candidate for room. a release with no hold is
-  nothing to do.
+  one hold ends. at none, a pinned unit stays pinned, a candidate for room: `next` is when the caller expects to want
+  it again, on the caller's own clock (any order it keeps - the forward's: the layer's next visit), and the unit
+  wanted furthest ahead goes first. the forward's layers come round in a fixed order, so least recently used would
+  unpin exactly the units wanted soonest; furthest ahead is the best a cycle allows. a release with no hold is nothing
+  to do.
+
 
 pool_state / pool_pinned
   a unit's state; the bytes registered now (whole pages, each counted once).

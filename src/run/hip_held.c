@@ -47,7 +47,7 @@ bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *er
 
 void fwd_release_held(Forward *f)
 {
-  for (uint32_t k = 0; k < f->n_held; k++)
-    pool_release(f->pool, f->held[k]);
+  for (uint32_t k = 0; k < f->n_held; k++) /* the layer they came from next visited a whole round on */
+    pool_release(f->pool, f->held[k], f->visits - 1 + (uint64_t)f->n_layers);
   f->n_held = 0;
 }

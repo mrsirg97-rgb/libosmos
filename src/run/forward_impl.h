@@ -96,6 +96,7 @@ struct Forward
   hipEvent_t routed;                /* the router's picks are on the host */
   uint32_t held[FWD_MAX_PAIRS];     /* the last layer's experts: released once the stream is past them */
   uint32_t n_held;
+  uint64_t visits; /* the layers' expert steps so far: the held ones wanted again n_layers on (pool_release) */
   int64_t *rows;  /* each token's Engram rows, every Engram layer's: [token][layer][col] */
   uint32_t n;                    /* the step's tokens */
   Seq *bs[FWD_MAX_BATCH];        /* token i's sequence */
