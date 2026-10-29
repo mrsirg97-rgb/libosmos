@@ -84,6 +84,13 @@ static Schedule interleaved() {
   return s;
 }
 
+static Schedule prompt() {  // each sequence read 8 tokens a step: a prompt in chunks
+  Schedule s;
+  for (int k = 0; k < kSeqs; k++)
+    for (int p = 0; p < kLen; p += kMaxBatch) s.push_back(std::vector<int>(kMaxBatch, k));
+  return s;
+}
+
 static Schedule chunked(std::mt19937& rng) {
   Schedule s;
   for (int k = 0; k < kSeqs; k++)
@@ -167,6 +174,9 @@ int main() {
   play(&r, interleaved());
   same("interleaved");
   const double inter_ms = r.ms;
+  play(&r, prompt());
+  same("prompt x8");
+  const double prompt_ms = r.ms;
   for (int t = 0; t < kTrials; t++) {
     play(&r, chunked(rng));
     same("chunked");
@@ -176,9 +186,10 @@ int main() {
     same("mixed");
   }
   const int n = kSeqs * kLen;
-  std::printf("  %d schedules, the same bits. %d tokens: alone %.0f ms (%.1f tok/s), interleaved 4 a step %.0f ms "
-              "(%.1f tok/s, %.2fx)\n", schedules, n, alone_ms, n * 1e3 / alone_ms, inter_ms, n * 1e3 / inter_ms,
-              alone_ms / inter_ms);
+  std::printf("  %d schedules, the same bits. %d tokens: alone %.0f ms (%.1f tok/s); interleaved 4 a step %.0f ms "
+              "(%.1f tok/s, %.2fx); a prompt 8 a step %.0f ms (%.1f tok/s, %.2fx)\n", schedules, n, alone_ms,
+              n * 1e3 / alone_ms, inter_ms, n * 1e3 / inter_ms, alone_ms / inter_ms, prompt_ms, n * 1e3 / prompt_ms,
+              alone_ms / prompt_ms);
   forward_destroy(r.f);
   weights_destroy(w);
   gguf_destroy(g);
