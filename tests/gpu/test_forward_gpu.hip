@@ -1,15 +1,19 @@
-// the forward (src/run) over ds1017's first 3 layers - 0 the window alone, 1 with Engram, 2 the first KV source
-// (the compressor at ratio 2, the indexer) - the 32 real ids a token at a time, every step it names (its probe)
+// the forward (src/run) over ds1017's first layers, as many as the oracle's dump holds ($SUBSTRATE_LAYERS, a
+// layer_dump.py -> npz2bin.py directory; ~/substrate-oracle/layers3 by default: 0 the window alone, 1 with Engram,
+// 2 the first KV source - the compressor at ratio 2, the indexer), its ids a token at a time, every step it names
 // against the oracle's (oracle/layer_dump.py -> npz2bin.py, ref.py's prompt path at that position), twice:
 //   free: the forward on its own. the routes and the compressed rows attended exactly; the other steps reported (a
 //     value at an FP8 / FP4 rounding edge flips a whole step - 1/16 of itself, or 4 -> 6 - and the difference then
 //     carries on, so a chained run's differences are not each step's)
 //   forced: each step's output, once compared, overwritten with the oracle's, so each step runs on the oracle's
-//     input: every float step within kMaxRel of its largest value; the rounded rows (kv, ckv) not the oracle's in at
-//     most kMaxFlips of their values (each a step at an edge)
+//     input: every route and compressed row the oracle's - but for a tie: two experts whose scores, in double from
+//     the oracle's own input, are closer than twice our router's error there (measured, the same way), where F32's
+//     summation order decides and the oracle's pick is one roll of it (its weights and the FFN's output at that
+//     position are then a different expert's, not compared); every float step within kMaxRel of its largest value;
+//     the rounded rows (kv, ckv) not the oracle's in at most kMaxFlips of their values (each a step at an edge)
 // the stream out's fingerprint the same with a probe and without (determinism; a probe that only reads changes
 // nothing).
-// needs a gfx1151, ~/models/ds1017 and ~/substrate-oracle/layers3; skipped (77) without them.
+// needs a gfx1151, ~/models/ds1017 and the dump; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <unistd.h>
@@ -20,7 +24,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -38,10 +44,12 @@ extern "C" {
     }                                                                            \
   } while (0)
 
-constexpr int kLayers = 3;
 constexpr double kMaxRel = 1e-3;
 constexpr double kMaxFlips = 5e-3;
-constexpr uint64_t kMaxResident = 24ull << 30;
+// a router key (sqrt(softplus(logit)) + bias) is four F32 roundings - expf, log1pf, sqrtf, the add - each within an
+// ulp: ours and the oracle's within 4 ulps each of the exact key, so two keys closer than 8 are not ordered in F32
+constexpr double kKeyUlps = 8;
+constexpr uint64_t kBudget = 72ull << 30;  // up to 40 layers' weights (~6.5 GB) and a cache of their experts
 
 static std::string g_dir;
 
@@ -80,11 +88,22 @@ struct Diff {
   uint64_t values = 0, flips = 0;
 };
 
+// the router in double from the oracle's input: a layer's weights (BF16) and bias, read from the model once
+struct Router {
+  std::vector<double> w, bias;
+};
+
 struct Probe {
   std::map<std::string, Arr> ref;
   std::map<std::string, Diff> d;
   int T = 0;
   bool force = false;
+  const Gguf* g = nullptr;
+  const Weights* wts = nullptr;
+  std::map<int, Router> router;
+  std::vector<double> ours;      // our scores (+ bias), the position's, from its router_logits
+  std::set<std::pair<int, int>> ties;
+  int n_ties = 0;
   const Arr* get(const std::string& k) {
     auto it = ref.find(k);
     if (it != ref.end()) return &it->second;
@@ -94,9 +113,77 @@ struct Probe {
   }
 };
 
+static std::vector<uint8_t> bytes_of(const Gguf* g, const GgufTensor* t) {
+  std::vector<uint8_t> b(t->bytes);
+  const int fd = open(g->paths[t->file], O_RDONLY);
+  CHECK(fd >= 0 && pread(fd, b.data(), b.size(), (off_t) t->offset) == (ssize_t) b.size());
+  close(fd);
+  return b;
+}
+
+static const Router& router_of(Probe* P, int layer) {
+  auto it = P->router.find(layer);
+  if (it != P->router.end()) return it->second;
+  const LayerWeights& L = P->wts->layer[layer];
+  Router r;
+  const std::vector<uint8_t> w = bytes_of(P->g, L.router), b = bytes_of(P->g, L.router_bias);
+  r.w.resize(w.size() / 2);
+  for (size_t i = 0; i < r.w.size(); i++) {
+    uint32_t u = (uint32_t) (w[2 * i] | w[2 * i + 1] << 8) << 16;
+    float x;
+    std::memcpy(&x, &u, 4);
+    r.w[i] = x;
+  }
+  r.bias.resize(b.size() / 4);
+  for (size_t i = 0; i < r.bias.size(); i++) r.bias[i] = ((const float*) b.data())[i];
+  return P->router[layer] = r;
+}
+
+static double score(double logit) { return std::sqrt(logit > 20 ? logit : std::log1p(std::exp(logit))); }
+
+// a forced route that is not the oracle's: a tie when every swapped expert's key is, in double from the oracle's
+// input, within twice our router's logits' error (ours against double's, this position) and kKeyUlps of the key's
+// F32 rounding of the expert it displaced
+static bool is_tie(Probe* P, int layer, int index, const std::vector<float>& got, const float* want) {
+  const Router& r = router_of(P, layer);
+  const Arr* x = P->get(std::to_string(layer) + ".ffn_x");
+  const size_t E = r.bias.size(), D = r.w.size() / E;
+  std::vector<double> d(E);
+  double err = 0;
+  for (size_t e = 0; e < E; e++) {
+    double s = 0;
+    for (size_t c = 0; c < D; c++) s += r.w[e * D + c] * x->v[(size_t) index * D + c];
+    d[e] = score(s) + r.bias[e];
+    err = std::max(err, std::fabs(P->ours[e] - d[e]));
+  }
+  std::set<int> a(got.begin(), got.end()), b(want, want + got.size());
+  bool all = true;
+  for (int e : a)
+    for (int o : b)
+      if (!a.count(o) && !b.count(e)) {
+        const double big = std::max(std::fabs(d[e]), std::fabs(d[o]));
+        const double ulp = std::ldexp(1.0, std::ilogb(big) - 23), margin = std::fabs(d[e] - d[o]);
+        const bool t = margin <= 2 * err + kKeyUlps * ulp;
+        std::printf("    layer %d position %d: expert %d for the oracle's %d, %.1f F32 ulps apart in double: %s\n",
+                    layer, index, e, o, margin / ulp, t ? "a tie" : "NOT a tie");
+        all &= t;
+      }
+  return all;
+}
+
 static void probe(const char* step, int layer, int index, void* dev, uint64_t n, bool ints, void* arg) {
   Probe* P = (Probe*) arg;
-  const std::string s = step, key = std::to_string(layer) + "." + (s == "ckv" || s == "sel" ? "kv" : s);
+  const std::string s = step;
+  if (s == "router_logits") {  // our scores + bias, for a tie's measure
+    std::vector<float> l(n);
+    CHECK(hipMemcpy(l.data(), dev, n * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    const Router& r = router_of(P, layer);
+    P->ours.resize(n);
+    for (uint64_t e = 0; e < n; e++) P->ours[e] = score(l[e]) + r.bias[e];
+    return;
+  }
+  if ((s == "route_w" || s == "moe_out") && P->ties.count({layer, index})) return;  // another expert's: not compared
+  const std::string key = std::to_string(layer) + "." + (s == "ckv" || s == "sel" ? "kv" : s);
   const Arr* r = P->get(s == "sel" ? std::to_string(layer) + ".idx" : key);
   if (!r) return;  // a step the oracle did not record
   std::vector<float> got(n);
@@ -120,6 +207,11 @@ static void probe(const char* step, int layer, int index, void* dev, uint64_t n,
     } else {
       want.assign(row, row + n);
     }
+    if (want != got && s == "route_idx" && P->force && is_tie(P, layer, index, got, row)) {
+      P->ties.insert({layer, index});
+      P->n_ties++;
+      return;
+    }
     d.exact_bad += want != got;
     return;
   }
@@ -138,11 +230,14 @@ static void probe(const char* step, int layer, int index, void* dev, uint64_t n,
 int main() {
   std::printf("[test_forward_gpu] start\n");
   const char* home = std::getenv("HOME");
-  g_dir = std::string(home ? home : "") + "/substrate-oracle/layers3";
+  const char* dump = std::getenv("SUBSTRATE_LAYERS");
+  g_dir = dump ? dump : std::string(home ? home : "") + "/substrate-oracle/layers3";
   const std::string mdir = std::string(home ? home : "") + "/models/ds1017/";
   int ndev = 0;
-  if (access((g_dir + "/2.h_out.bin").c_str(), R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
-    std::printf("[test_forward_gpu] skipped: no oracle dump (oracle/layer_dump.py --layers 3) or no GPU\n");
+  int kLayers = 0;
+  while (access((g_dir + "/" + std::to_string(kLayers) + ".h_out.bin").c_str(), R_OK) == 0) kLayers++;
+  if (!kLayers || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
+    std::printf("[test_forward_gpu] skipped: no oracle dump (oracle/layer_dump.py) or no GPU\n");
     return 77;
   }
   char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
@@ -151,12 +246,15 @@ int main() {
   CHECK(g && eg);
   Weights* w = weights_create(g, eg, werr);
   CHECK(w);
-  CHECK(!forward_create(w, 0, 64, kMaxResident, ferr) && !forward_create(w, kLayers, 64, 1 << 20, ferr));
-  std::printf("  refusals: 0 layers; more weights than max_resident (%s)\n", ferr);
-  Forward* f = forward_create(w, kLayers, 64, kMaxResident, ferr);
+  CHECK(kLayers <= w->geo.n_layers);
+  CHECK(!forward_create(w, 0, 64, kBudget, ferr) && !forward_create(w, kLayers, 64, 64ull << 20, ferr));
+  std::printf("  refusals: 0 layers; a budget below the layers' weights (%s)\n", ferr);
+  Forward* f = forward_create(w, kLayers, 64, kBudget, ferr);
   if (!f) std::printf("  forward_create: %s\n", ferr);
   CHECK(f);
   Probe P;
+  P.g = g;
+  P.wts = w;
   Arr ids;
   CHECK(load("ids", &ids));
   P.T = (int) ids.dims[0];
@@ -189,8 +287,9 @@ int main() {
     const bool exact = k.find("sel") != std::string::npos || k.find("route_idx") != std::string::npos;
     const bool rounded = k.size() > 3 && (k.substr(k.size() - 3) == ".kv" || k.substr(k.size() - 4) == ".ckv");
     if (exact) {
-      std::printf("    %-12s %3d positions, %d not the oracle's\n", k.c_str(), d.seen, d.exact_bad);
-      ok &= d.exact_bad == 0;
+      std::printf("    %-12s %3d positions, not the oracle's: free %d | forced %d\n", k.c_str(), d.seen, d.exact_bad,
+                  t.exact_bad);
+      ok &= t.exact_bad == 0;
     } else if (rounded) {
       std::printf("    %-12s %3d rows   free %.2e | forced: %llu of %llu values a step apart\n", k.c_str(), d.seen,
                   d.rel, (unsigned long long) t.flips, (unsigned long long) t.values);
@@ -200,6 +299,7 @@ int main() {
       ok &= t.rel <= kMaxRel;
     }
   }
+  std::printf("  forced routes that are ties (keys within F32 rounding, kKeyUlps): %d\n", P.n_ties);
   std::printf("  the stream out, every position: fingerprint %016llx (probed) %016llx (not)\n",
               (unsigned long long) print[0], (unsigned long long) print[2]);
   CHECK(ok && print[0] == print[2]);

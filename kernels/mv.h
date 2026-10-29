@@ -1,4 +1,4 @@
-// the decode's matrix-vector product (mv.hip; include/substrate/gpu/mv.h): a wave R rows, a lane its 8-value chunks
+// the decode's matrix-vector products (mv.hip; include/substrate/gpu/mv.h): a wave R rows, a lane its 8-value chunks
 // lane, lane + 32, lane + 64, ... of each, in that order, U of them loaded before any is summed. a row's sum is the
 // same sequence of fmaf whatever R, U and NT - they only change what is in flight - so its bits are too.
 #pragma once
@@ -40,9 +40,8 @@ __device__ inline void step(const uint8_t* const* base, uint32_t c0, uint32_t xs
 }
 
 template <quant::Type T, int NT, int R, int U>
-__global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* __restrict__ w, uint32_t rows,
-                                                                 uint32_t cols, const float* __restrict__ x,
-                                                                 uint32_t xs, float* __restrict__ y, uint32_t ys) {
+__device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols, const float* __restrict__ x,
+                               uint32_t xs, float* __restrict__ y, uint32_t ys) {
   using B = quant::Block<T>;
   const uint32_t row0 = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * R;
   const int lane = threadIdx.x % kWave;
@@ -68,11 +67,38 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* _
 }
 
 template <quant::Type T, int NT, int R, int U>
+__global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* __restrict__ w, uint32_t rows,
+                                                                 uint32_t cols, const float* __restrict__ x,
+                                                                 uint32_t xs, float* __restrict__ y, uint32_t ys) {
+  rows_of<T, NT, R, U>(w, rows, cols, x, xs, y, ys);
+}
+
+// n matrices of the same shape and type at once (blockIdx.y the matrix): matrix m's w from the table, its x at
+// x + m * x_mat (0: one x for all), its y at y + m * rows; each row the sums of rows_of, so the bits of kernel's
+template <quant::Type T, int R, int U>
+__global__ __launch_bounds__(kWave* kWavesPerBlock) void group_kernel(const uint8_t* const* __restrict__ w,
+                                                                       uint32_t rows, uint32_t cols,
+                                                                       const float* __restrict__ x, uint32_t x_mat,
+                                                                       float* __restrict__ y) {
+  const uint32_t m = blockIdx.y;
+  rows_of<T, 1, R, U>(w[m], rows, cols, x + (uint64_t) m * x_mat, cols, y + (uint64_t) m * rows, rows);
+}
+
+template <quant::Type T, int NT, int R, int U>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
             hipStream_t s) {
   const uint32_t per_block = kWavesPerBlock * R;
   kernel<T, NT, R, U><<<(rows + per_block - 1) / per_block, kWave * kWavesPerBlock, 0, s>>>((const uint8_t*) w, rows,
                                                                                             cols, x, xs, y, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T, int R, int U>
+bool group_launch(const void* const* w, uint32_t n, uint32_t rows, uint32_t cols, const float* x, uint32_t x_mat,
+                  float* y, hipStream_t s) {
+  const uint32_t per_block = kWavesPerBlock * R;
+  group_kernel<T, R, U><<<dim3((rows + per_block - 1) / per_block, n), kWave * kWavesPerBlock, 0, s>>>(
+      (const uint8_t* const*) w, rows, cols, x, x_mat, y);
   return hipGetLastError() == hipSuccess;
 }
 

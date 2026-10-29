@@ -57,6 +57,32 @@ bool by_tokens(const void* w, uint32_t rows, uint32_t cols, const float* x, uint
 
 static_assert(MV_MAX_TOKENS == 8, "by_tokens instantiates 1 .. 8");
 
+template <quant::Type T>
+bool group(const void* const* w, uint32_t n, uint32_t rows, uint32_t cols, const float* x, uint32_t x_mat, float* y,
+           hipStream_t s) {
+  if (cols % quant::Block<T>::values || cols % quant::kChunk || x_mat % quant::kChunk) return false;
+  constexpr Tune k = tune(T, 1);
+  return mv::group_launch<T, k.r, k.u>(w, n, rows, cols, x, x_mat, y, s);
+}
+
+extern "C" bool mv_group(uint32_t type, const void* const* w, uint32_t n, uint32_t rows, uint32_t cols, const float* x,
+                         uint32_t x_mat, float* y, void* stream) {
+  if (!n || n > MV_MAX_GROUP || !rows) return false;
+  const hipStream_t s = (hipStream_t) stream;
+  switch (type) {
+    case quant::kF32: return group<quant::kF32>(w, n, rows, cols, x, x_mat, y, s);
+    case quant::kQ8_0: return group<quant::kQ8_0>(w, n, rows, cols, x, x_mat, y, s);
+    case quant::kQ5_K: return group<quant::kQ5_K>(w, n, rows, cols, x, x_mat, y, s);
+    case quant::kQ6_K: return group<quant::kQ6_K>(w, n, rows, cols, x, x_mat, y, s);
+    case quant::kIQ2_XXS: return group<quant::kIQ2_XXS>(w, n, rows, cols, x, x_mat, y, s);
+    case quant::kIQ2_XS: return group<quant::kIQ2_XS>(w, n, rows, cols, x, x_mat, y, s);
+    case quant::kIQ4_NL: return group<quant::kIQ4_NL>(w, n, rows, cols, x, x_mat, y, s);
+    case quant::kIQ1_M: return group<quant::kIQ1_M>(w, n, rows, cols, x, x_mat, y, s);
+    case quant::kBF16: return group<quant::kBF16>(w, n, rows, cols, x, x_mat, y, s);
+    default: return false;
+  }
+}
+
 extern "C" bool mv_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t n_tok,
                        float* y, void* stream) {
   return mv_strided(type, w, rows, cols, x, cols, n_tok, y, rows, stream);

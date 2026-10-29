@@ -45,45 +45,80 @@ static int cmp_expert(const void *a, const void *b)
   return (x[0] > y[0]) - (x[0] < y[0]);
 }
 
-/* the router's experts, in ascending id (ref.py's index_add order), each its weight before the down projection; then
-   the shared expert */
+/* the shared expert, into its own buffers: queued before the router's result is read, so the GPU has it to do while
+   the host pins the routed ones */
+static bool shared(Forward *f, int l)
+{
+  const Geometry *g = f->g;
+  const LayerWeights *L = &f->w->layer[l];
+  Scratch *b = &f->b;
+  const uint32_t D = g->n_embd, FF = g->expert_ff;
+  return mv_run(L->sh_gate->type, fwd_dev(f, L->sh_gate), FF, D, b->xf, 1, b->sga, NULL) &&
+         mv_run(L->sh_up->type, fwd_dev(f, L->sh_up), FF, D, b->xf, 1, b->sup, NULL) &&
+         ops_swiglu(b->sga, b->sup, FF, g->clamp_shexp[l], NULL, 1, b->shh, NULL) &&
+         mv_run(L->sh_down->type, fwd_dev(f, L->sh_down), D, FF, b->shh, 1, b->sye, NULL);
+}
+
+/* the routed experts: held in the pool (their reads at once), their matrices into the group table, then gate, up,
+   swiglu (each its weight, before the down projection, as ref.py) and down, all of them a launch each; summed in
+   ascending id (ref.py's index_add order), the shared expert last */
 bool fwd_moe(Forward *f, int l, char *err)
 {
   const Geometry *g = f->g;
   const LayerWeights *L = &f->w->layer[l];
   Scratch *b = &f->b;
   const uint32_t D = g->n_embd, FF = g->expert_ff, E = g->n_experts, K = g->n_used;
-  bool ok = mv_run(L->router->type, fwd_dev(f, L->router), E, D, b->xf, 1, b->logits, NULL) &&
-            ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, 1, b->ridx, b->rw,
-                       NULL);
-  int32_t pick[OPS_MAX_TOPK][2];
+  bool ok = mv_run(L->router->type, fwd_dev(f, L->router), E, D, b->xf, 1, b->logits, NULL);
+  if (ok)
+    fwd_probe(f, "router_logits", l, f->at, b->logits, E, false);
+  ok = ok && ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, 1, b->ridx, b->rw,
+                       NULL) &&
+            shared(f, l);
   int32_t ids[OPS_MAX_TOPK];
   ok = ok && hipMemcpy(ids, b->ridx, K * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess;
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the router)");
+    return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
   fwd_probe(f, "route_idx", l, f->at, b->ridx, K, true);
   fwd_probe(f, "route_w", l, f->at, b->rw, K, false);
+  uint32_t unit[OPS_MAX_TOPK];
   for (uint32_t k = 0; k < K; k++)
-    pick[k][0] = ids[k], pick[k][1] = (int32_t)k;
-  qsort(pick, K, sizeof *pick, cmp_expert);
-  const uint64_t gs = L->exp_gate->bytes / E, us = L->exp_up->bytes / E, ds = L->exp_down->bytes / E;
-  ok = hipMemset(b->moe, 0, D * sizeof(float)) == hipSuccess;
+  {
+    if (ids[k] < 0 || (uint32_t)ids[k] >= E)
+      return fwd_fail(err, "the router picked an expert the model does not have");
+    unit[k] = (uint32_t)l * E + (uint32_t)ids[k];
+    if (pool_pin(f->pool, unit[k], (const void *[POOL_PARTS]){0}) == POOL_FULL)
+    {
+      for (uint32_t r = 0; r < k; r++)
+        pool_release(f->pool, unit[r]);
+      return fwd_fail(err, "an expert the budget cannot hold beside the layers' weights");
+    }
+  }
+  const void *tab[3 * OPS_MAX_TOPK];
   for (uint32_t k = 0; ok && k < K; k++)
   {
-    const uint64_t e = (uint64_t)pick[k][0];
-    ok = mv_run(L->exp_gate->type, fwd_dev(f, L->exp_gate) + e * gs, FF, D, b->xf, 1, b->ga, NULL) &&
-         mv_run(L->exp_up->type, fwd_dev(f, L->exp_up) + e * us, FF, D, b->xf, 1, b->up, NULL) &&
-         ops_swiglu(b->ga, b->up, FF, g->clamp_exp[l], b->rw + pick[k][1], 1, b->hh, NULL) &&
-         mv_run(L->exp_down->type, fwd_dev(f, L->exp_down) + e * ds, D, FF, b->hh, 1, b->ye, NULL) &&
-         ops_add(b->moe, b->ye, D, NULL);
+    const void *ex[POOL_PARTS];
+    ok = fwd_pinned(f, unit[k], ex, err);
+    tab[k] = ex[0], tab[K + k] = ex[1], tab[2 * K + k] = ex[2];
   }
-  ok = ok && mv_run(L->sh_gate->type, fwd_dev(f, L->sh_gate), FF, D, b->xf, 1, b->ga, NULL) &&
-       mv_run(L->sh_up->type, fwd_dev(f, L->sh_up), FF, D, b->xf, 1, b->up, NULL) &&
-       ops_swiglu(b->ga, b->up, FF, g->clamp_shexp[l], NULL, 1, b->hh, NULL) &&
-       mv_run(L->sh_down->type, fwd_dev(f, L->sh_down), D, FF, b->hh, 1, b->ye, NULL) &&
-       ops_add(b->moe, b->ye, D, NULL);
+  int32_t order[OPS_MAX_TOPK][2]; /* (expert, slot), ascending expert */
+  for (uint32_t k = 0; k < K; k++)
+    order[k][0] = ids[k], order[k][1] = (int32_t)k;
+  qsort(order, K, sizeof *order, cmp_expert);
+  ok = ok && fwd_put(b->wtab, tab, 3 * K * sizeof *tab) &&
+       mv_group(L->exp_gate->type, b->wtab, K, FF, D, b->xf, 0, b->ga, NULL) &&
+       mv_group(L->exp_up->type, b->wtab + K, K, FF, D, b->xf, 0, b->up, NULL) &&
+       ops_swiglu(b->ga, b->up, FF, g->clamp_exp[l], b->rw, K, b->hh, NULL) &&
+       mv_group(L->exp_down->type, b->wtab + 2 * K, K, D, FF, b->hh, FF, b->ye, NULL) &&
+       hipMemset(b->moe, 0, D * sizeof(float)) == hipSuccess;
+  for (uint32_t k = 0; ok && k < K; k++)
+    ok = ops_add(b->moe, b->ye + (uint64_t)order[k][1] * D, D, NULL);
+  ok = ok && ops_add(b->moe, b->sye, D, NULL);
+  /* the experts' kernels read the pinned pages: done before their holds go */
+  ok = (hipDeviceSynchronize() == hipSuccess) && ok;
+  for (uint32_t k = 0; k < K; k++)
+    pool_release(f->pool, unit[k]);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the experts)");
+    return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");
   fwd_probe(f, "moe_out", l, f->at, b->moe, D, false);
   return true;
 }

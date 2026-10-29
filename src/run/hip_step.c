@@ -116,6 +116,16 @@ bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR])
   for (int l = 0; l < f->n_layers; l++)
     if (!layer(f, s, l, l ? f->b.f_pre : f->b.pre0, &nth, err))
       return false;
+  if (f->n_layers == g->n_layers) /* the head: the last block's pre mixes the streams, normed, then the vocabulary */
+  {
+    const bool ok = ops_hc_pre_rms(f->b.h, f->b.f_pre, g->hc, g->n_embd, fv(f, f->w->output_norm), g->rms_eps, 1,
+                                   f->b.x, NULL) &&
+                    mv_run(f->w->output->type, fwd_dev(f, f->w->output), (uint32_t)g->n_vocab, g->n_embd, f->b.x, 1,
+                           f->b.vocab, NULL);
+    if (!ok)
+      return fwd_fail(err, "a GPU call failed (the head)");
+    fwd_probe(f, "logits", -1, s->pos, f->b.vocab, (uint64_t)g->n_vocab, false);
+  }
   s->pos++;
   return true;
 }

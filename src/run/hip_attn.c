@@ -114,12 +114,9 @@ bool fwd_attention(Forward *f, Seq *s, int l, char *err)
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention)");
   fwd_probe(f, "o", l, p, b->o, H * HD, false);
-  const uint64_t oa_bytes = L->out_a->bytes / OG;
-  ok = ops_rope(b->o, H, HD, RD, H * HD, freqs, b->pos, true, 1, NULL) && ops_fp8_round(b->o, H * HD, NULL);
-  for (uint32_t k = 0; ok && k < OG; k++)
-    ok = mv_strided(L->out_a->type, fwd_dev(f, L->out_a) + k * oa_bytes, OL, oin, b->o + k * oin, H * HD, 1,
-                    b->oa + k * OL, OG * OL, NULL);
-  ok = ok && mv_run(L->out_b->type, fwd_dev(f, L->out_b), D, OG * OL, b->oa, 1, b->y, NULL);
+  ok = ops_rope(b->o, H, HD, RD, H * HD, freqs, b->pos, true, 1, NULL) && ops_fp8_round(b->o, H * HD, NULL) &&
+       mv_group(L->out_a->type, f->oa_tab + (size_t)l * OG, OG, OL, oin, b->o, oin, b->oa, NULL) &&
+       mv_run(L->out_b->type, fwd_dev(f, L->out_b), D, OG * OL, b->oa, 1, b->y, NULL);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention's output)");
   fwd_probe(f, "attn_out", l, p, b->y, D, false);
