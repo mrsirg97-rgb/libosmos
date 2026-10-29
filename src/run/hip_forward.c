@@ -28,6 +28,23 @@ bool fwd_put(void *dev, const void *host, uint64_t bytes)
   return hipMemcpy(dev, host, bytes, hipMemcpyHostToDevice) == hipSuccess;
 }
 
+bool fwd_put_async(void *dev, const void *pinned, uint64_t bytes)
+{
+  return hipMemcpyAsync(dev, pinned, bytes, hipMemcpyHostToDevice, NULL) == hipSuccess;
+}
+
+bool fwd_copy(void *dst, const void *src, uint64_t bytes)
+{
+  return hipMemcpyAsync(dst, src, bytes, hipMemcpyDeviceToDevice, NULL) == hipSuccess;
+}
+
+void fwd_release_held(Forward *f)
+{
+  for (uint32_t k = 0; k < f->n_held; k++)
+    pool_release(f->pool, f->held[k]);
+  f->n_held = 0;
+}
+
 void fwd_probe(const Forward *f, const char *step, int layer, int index, void *dev, uint64_t n, bool ints)
 {
   if (f->probe && hipDeviceSynchronize() == hipSuccess)
@@ -188,7 +205,13 @@ static bool scratch(Forward *f)
     if (!fwd_alloc(want[i].field, want[i].bytes))
       return false;
   const float one = 1.0f;
-  return fwd_put(b->pre0, &one, F) && hipHostMalloc((void **)&f->stage, cols * row, 0) == hipSuccess;
+  int n_eg = 0;
+  for (int l = 0; l < g->n_layers; l++)
+    n_eg += g->engram[l];
+  return fwd_put(b->pre0, &one, F) &&
+         hipHostMalloc((void **)&f->stage, (uint64_t)(n_eg ? n_eg : 1) * cols * row, 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess &&
+         hipEventCreateWithFlags(&f->routed, hipEventDisableTiming) == hipSuccess;
 }
 
 static bool freqs(Forward *f)
@@ -258,6 +281,9 @@ void forward_destroy(Forward *f)
   hipFree(f->freqs_win);
   hipFree(f->freqs_comp);
   hipHostFree(f->stage);
+  hipHostFree(f->pin);
+  if (f->routed)
+    hipEventDestroy(f->routed);
   for (int i = 0; i < FWD_MAX_FILES; i++)
     if (f->fds[i] >= 0)
       close(f->fds[i]);

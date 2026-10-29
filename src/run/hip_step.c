@@ -108,7 +108,8 @@ bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR])
   s->n_last = s->n_last < ng ? s->n_last + 1 : ng;
   if (!engram_rows(f->hash, s->last, s->n_last, f->rows))
     return fwd_fail(err, "a token the Engram hash refused");
-  if (!fwd_put(f->b.ids, &token, 4) || !fwd_put(f->b.pos, &s->pos, 4) ||
+  f->pin->tok[0] = token, f->pin->tok[1] = s->pos;
+  if (!fwd_put_async(f->b.ids, &f->pin->tok[0], 4) || !fwd_put_async(f->b.pos, &f->pin->tok[1], 4) ||
       !ops_embed(f->w->embed->type, fwd_dev(f, f->w->embed), g->n_embd, f->b.ids, 1, g->hc, f->b.h, NULL))
     return fwd_fail(err, "a GPU call failed (the embedding)");
   int nth = 0;
@@ -126,6 +127,10 @@ bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR])
       return fwd_fail(err, "a GPU call failed (the head)");
     fwd_probe(f, "logits", -1, s->pos, f->b.vocab, (uint64_t)g->n_vocab, false);
   }
+  /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
+  if (hipDeviceSynchronize() != hipSuccess)
+    return fwd_fail(err, "a GPU call failed (the step)");
+  fwd_release_held(f);
   s->pos++;
   return true;
 }

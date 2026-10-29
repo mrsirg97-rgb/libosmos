@@ -185,6 +185,10 @@ int main() {
   std::printf("\n  unprobed: logits %s the probed run's; a token %.1f ms cold (the first), then p50 %.1f ms, "
               "max %.1f ms (%.2f tok/s)\n", got[0] == got[1] ? "bit for bit" : "NOT", ms[0], warm[warm.size() / 2],
               warm.back(), 1e3 / warm[warm.size() / 2]);
+  uint64_t print = 1469598103934665603ull;  // FNV-1a over every position's logits: a change that keeps them keeps it
+  const uint8_t* bytes = (const uint8_t*) got[1].data();
+  for (size_t i = 0; i < got[1].size() * 4; i++) print = (print ^ bytes[i]) * 1099511628211ull;
+  std::printf("  the logits, every position: fingerprint %016llx\n", (unsigned long long) print);
   CHECK(got[0] == got[1] && ok_top && ours_kl <= maya_kl);
   forward_destroy(f);
   weights_destroy(w);

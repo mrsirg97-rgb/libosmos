@@ -55,9 +55,10 @@ __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float*
   for (uint32_t i = threadIdx.x; i < n; i += kThreads) yr[i] = w ? (xr[i] * r) * w[i] : xr[i] * r;
 }
 
-__global__ void hc_mix_kernel(const float* h, const float* mix, const float* scale, const float* base, uint32_t hc,
-                              uint32_t dim, float eps, float hc_eps, uint32_t iters, float* pre, float* post,
-                              float* comb) {
+// hc a template argument: the mixes and the Sinkhorn matrix in registers (indexed by a runtime hc they spill)
+template <uint32_t hc>
+__global__ void hc_mix_kernel(const float* h, const float* mix, const float* scale, const float* base, uint32_t dim,
+                              float eps, float hc_eps, uint32_t iters, float* pre, float* post, float* comb) {
   __shared__ float lds[kThreads];
   const uint32_t t = blockIdx.x, n = hc * dim, nm = (2 + hc) * hc;
   const float* ht = h + (uint64_t) t * n;
@@ -65,13 +66,13 @@ __global__ void hc_mix_kernel(const float* h, const float* mix, const float* sca
   for (uint32_t i = threadIdx.x; i < n; i += kThreads) ss += ht[i] * ht[i];
   const float r = 1.0f / sqrtf(block_sum(ss, lds) / (float) n + eps);
   if (threadIdx.x != 0) return;
-  float m[(2 + OPS_MAX_HC) * OPS_MAX_HC];
+  float m[(2 + hc) * hc];
   for (uint32_t i = 0; i < nm; i++) m[i] = mix[(uint64_t) t * nm + i] * r;
   for (uint32_t i = 0; i < hc; i++) {
     pre[t * hc + i] = sigmoid(m[i] * scale[0] + base[i]) + hc_eps;
     post[t * hc + i] = 2.0f * sigmoid(m[hc + i] * scale[1] + base[hc + i]);
   }
-  float c[OPS_MAX_HC][OPS_MAX_HC];
+  float c[hc][hc];
   for (uint32_t i = 0; i < hc; i++) {
     float mx = -INFINITY;
     for (uint32_t j = 0; j < hc; j++) {
@@ -167,28 +168,44 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* qw
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) hk[d] = hk[d] + gate * value[d];
 }
 
+// k passes of a block argmax over score + bias (the larger, ties to the lower expert: the serial scan's picks)
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                               int32_t* idx, float* w) {
-  __shared__ float sc[OPS_MAX_EXPERTS];
-  const uint32_t t = blockIdx.x;
+  __shared__ float sc[OPS_MAX_EXPERTS], key[OPS_MAX_EXPERTS];
+  __shared__ bool taken[OPS_MAX_EXPERTS];
+  __shared__ float bk[kThreads];
+  __shared__ uint32_t bi[kThreads];
+  __shared__ int32_t pick[OPS_MAX_TOPK];
+  const uint32_t t = blockIdx.x, none = n_exp;
   for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads) {
     const float l = logits[(uint64_t) t * n_exp + e];
     sc[e] = sqrtf(l > kSoftplusLinear ? l : log1pf(expf(l)));
+    key[e] = sc[e] + bias[e];
+    taken[e] = false;
   }
   __syncthreads();
-  if (threadIdx.x != 0) return;
-  int32_t pick[OPS_MAX_TOPK];
-  float wt[OPS_MAX_TOPK], sum = 0;
   for (uint32_t s = 0; s < k; s++) {
-    int32_t best = -1;
-    for (uint32_t e = 0; e < n_exp; e++) {
-      bool taken = false;
-      for (uint32_t r = 0; r < s; r++) taken |= pick[r] == (int32_t) e;
-      if (!taken && (best < 0 || sc[e] + bias[e] > sc[best] + bias[best])) best = (int32_t) e;
+    float best = 0;
+    uint32_t at = none;
+    for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads)
+      if (!taken[e] && (at == none || key[e] > best)) best = key[e], at = e;
+    bk[threadIdx.x] = best, bi[threadIdx.x] = at;
+    __syncthreads();
+    for (uint32_t h = kThreads / 2; h > 0; h >>= 1) {
+      if (threadIdx.x < h) {
+        const uint32_t o = threadIdx.x + h;
+        const bool take = bi[o] != none && (bi[threadIdx.x] == none || bk[o] > bk[threadIdx.x] ||
+                                            (bk[o] == bk[threadIdx.x] && bi[o] < bi[threadIdx.x]));
+        if (take) bk[threadIdx.x] = bk[o], bi[threadIdx.x] = bi[o];
+      }
+      __syncthreads();
     }
-    pick[s] = best;
-    sum += (wt[s] = sc[best]);
+    if (threadIdx.x == 0) pick[s] = (int32_t) bi[0], taken[bi[0]] = true;
+    __syncthreads();
   }
+  if (threadIdx.x != 0) return;
+  float wt[OPS_MAX_TOPK], sum = 0;
+  for (uint32_t s = 0; s < k; s++) sum += (wt[s] = sc[pick[s]]);
   for (uint32_t s = 0; s < k; s++) {
     idx[t * k + s] = pick[s];
     w[t * k + s] = wt[s] / (sum + kRouteEps) * scale;
@@ -245,7 +262,17 @@ extern "C" bool ops_hc_mix(const float* h, const float* mix, const float* scale,
                            uint32_t dim, float eps, float hc_eps, uint32_t iters, uint32_t n_tok, float* pre,
                            float* post, float* comb, void* stream) {
   if (!hc || hc > OPS_MAX_HC || !dim || !iters || !n_tok) return false;
-  hc_mix_kernel<<<n_tok, kThreads, 0, st(stream)>>>(h, mix, scale, base, hc, dim, eps, hc_eps, iters, pre, post, comb);
+  static_assert(OPS_MAX_HC == 8, "hc_mix instantiates 1 .. 8");
+  const hipStream_t s = st(stream);
+  switch (hc) {
+#define HC_MIX(n) \
+  case n:                                                                                                    \
+    hc_mix_kernel<n><<<n_tok, kThreads, 0, s>>>(h, mix, scale, base, dim, eps, hc_eps, iters, pre, post, comb); \
+    break;
+    HC_MIX(1) HC_MIX(2) HC_MIX(3) HC_MIX(4) HC_MIX(5) HC_MIX(6) HC_MIX(7) HC_MIX(8)
+#undef HC_MIX
+    default: return false;
+  }
   return ok();
 }
 

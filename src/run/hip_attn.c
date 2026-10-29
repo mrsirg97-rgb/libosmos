@@ -32,15 +32,16 @@ static bool compress_row(Forward *f, Seq *s, int l, char *err)
     ok = ok && ops_compress(s->pend_kvc[l], s->pend_sc[l], r, hd, b->lat, NULL);
   }
   const int32_t m = p / (int32_t)r, at = m * (int32_t)r;
-  ok = ok && ops_rms(b->lat, hd, hd, F(f, L->comp_norm), g->rms_eps, 1, b->lat, hd, NULL) && fwd_put(b->rpos, &at, 4);
+  ok = ok && ops_rms(b->lat, hd, hd, F(f, L->comp_norm), g->rms_eps, 1, b->lat, hd, NULL) &&
+       ((f->pin->rpos[l] = at), fwd_put_async(b->rpos, &f->pin->rpos[l], 4));
   if (ok && g->ix_source[l])
     ok = mv_run(L->ix_k->type, fwd_dev(f, L->ix_k), ih, hd, b->lat, 1, b->ikr, NULL) &&
          ops_rms(b->ikr, ih, ih, F(f, L->ix_k_norm), g->rms_eps, 1, b->ikr, ih, NULL) &&
          ops_rope(b->ikr, 1, ih, RD, ih, f->freqs_comp, b->rpos, false, 1, NULL) &&
          ops_fp4_round(b->ikr, ih, FP4_INDEX_BLOCK, false, NULL) &&
-         hipMemcpy(s->ik[l] + (uint64_t)m * ih, b->ikr, ih * sizeof(float), hipMemcpyDeviceToDevice) == hipSuccess;
+         fwd_copy(s->ik[l] + (uint64_t)m * ih, b->ikr, ih * sizeof(float));
   float *row = s->ckv[l] + (uint64_t)m * hd;
-  ok = ok && hipMemcpy(row, b->lat, hd * sizeof(float), hipMemcpyDeviceToDevice) == hipSuccess &&
+  ok = ok && fwd_copy(row, b->lat, hd * sizeof(float)) &&
        ops_rope(row, 1, hd, RD, hd, f->freqs_comp, b->rpos, false, 1, NULL) &&
        ops_fp4_round(row, hd, FP4_LATENT_BLOCK, true, NULL);
   if (!ok)
@@ -57,7 +58,7 @@ static bool select_rows(Forward *f, Seq *s, int l, int src, uint32_t n_vis, char
   Scratch *b = &f->b;
   const uint32_t nh = g->ix_heads, ih = g->ix_head_dim, D = g->n_embd, RD = g->rope_dim;
   if (!n_vis)
-    return hipMemset(b->n_sel, 0, 4) == hipSuccess || fwd_fail(err, "a GPU call failed (the indexer)");
+    return hipMemsetAsync(b->n_sel, 0, 4, NULL) == hipSuccess || fwd_fail(err, "a GPU call failed (the indexer)");
   const uint32_t blocks = (n_vis + g->cand_block - 1) / g->cand_block;
   if ((l == g->cand_source || g->cand_source < l) && blocks > (uint32_t)g->cand_blocks)
     return fwd_fail(err, "a context past the candidate blocks (the candidate masking is not built)");
@@ -92,8 +93,7 @@ bool fwd_attention(Forward *f, Seq *s, int l, char *err)
     return fwd_fail(err, "a GPU call failed (q, kv)");
   fwd_probe(f, "q", l, p, b->q, H * HD, false);
   fwd_probe(f, "kv", l, p, b->kv, HD, false);
-  if (hipMemcpy(s->ring[l] + (uint64_t)(p % f->slots) * HD, b->kv, HD * sizeof(float), hipMemcpyDeviceToDevice) !=
-      hipSuccess)
+  if (!fwd_copy(s->ring[l] + (uint64_t)(p % f->slots) * HD, b->kv, HD * sizeof(float)))
     return fwd_fail(err, "a GPU call failed (the window's keys)");
   const float *ckv = NULL;
   if (ratio)
