@@ -24,7 +24,8 @@ bool mm_group(uint32_t type, const void *const *w, const int32_t *cnt, uint32_t 
 mm
   the quantized weights' matrix products, the same kernel for 1 to MM_MAX_TOKENS tokens (kernels/mm.h): WMMA over f16
   activations and the weights' exact values rounded to f16, accumulated in F32; a weight slab decoded once for up to
-  4 tiles of 16 tokens. a token's results are the same bits whatever the other tokens - so whatever it is batched
+  8 tiles of 16 tokens. the f16 activations (x16) are tiled as the WMMA reads them: token t's column c (rows of xts
+  values) at (t / 16) 16 xts + (c / 16) 256 + (t % 16) 16 + c % 16 - each 16 x 16 fragment contiguous. a token's results are the same bits whatever the other tokens - so whatever it is batched
   with, and wherever in the batch.
 
 mm_known
@@ -32,7 +33,7 @@ mm_known
 
 mm_x16
   the activations an mm reads: n rows of cols F32 (row t at x + t * xs) into x16 (n rounded up to a multiple of
-  MM_TILE rows of cols f16, nearest; the rows past n zero). a value past f16's range sets *overflow (device memory;
+  MM_TILE rows of cols f16, nearest, tiled (xts cols); the rows past n zero). a value past f16's range sets *overflow (device memory;
   the caller reads it after the step: a refusal, not a guess). n 1 .. MM_MAX_TOKENS, cols a multiple of 16.
 
 mm_run
@@ -41,12 +42,12 @@ mm_run
   outside 1 .. MM_MAX_TOKENS, or a launch refused.
 
 mm_x16_rows
-  slots rows of activations: slot s is row idx[s] of x (row r at x + r * xs; -1: zero) as f16, into x16 ([slots][cols])
-  - each distinct expert's tokens gathered into slots of its own (whole tiles of MM_TILE). *overflow as mm_x16.
+  slots rows of activations: slot s is row idx[s] of x (row r at x + r * xs; -1: zero) as f16, into x16 (slots rows of
+  cols, tiled) - each distinct expert's tokens gathered into slots of its own (whole tiles of MM_TILE). *overflow as mm_x16.
 
 mm_group
-  n_mat matrices of one type and shape at once: matrix m (w[m]) over its token t's f16 x at x16 + xoff[m] + t * xts
-  (its tokens' rows whole tiles of MM_TILE), its first cnt[m] (at most max_cnt <= MM_MAX_TOKENS) tokens' rows into
+  n_mat matrices of one type and shape at once: matrix m (w[m]) over the tiled x16 from x16 + xoff[m] (halves; rows
+  xts long: its first token at a tile, xoff[m] = tile * 16 xts + its first column * 16), its first cnt[m] (at most max_cnt <= MM_MAX_TOKENS) tokens' rows into
   y + yoff[m] + t * ys - a step's distinct experts (each its own gathered tokens),
   or a layer's wo_a groups (each a slice of the same tokens). each tile the same sums as mm_run's: the same bits.
   `w`, `cnt`, `xoff`, `yoff` on the device.

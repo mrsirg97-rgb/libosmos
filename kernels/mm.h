@@ -30,25 +30,34 @@ struct Shape {
   static constexpr int kLdsHalves = kSlabHalves > kPartHalves ? kSlabHalves : kPartHalves;
 };
 
-// a block's 16-row tile (row0 ..) x CT tiles of 16 token columns, tokens c0 .. c0 + 16 CT (token t's x at x16 + t *
-// xts, f16, rows padded to whole tiles) into y (token t's row r at y[t * ys + r], the first n tokens). K split over the
-// block's waves: wave w the slabs w, w + W, ... - each decoded as the matvec decodes (lanes along a row: the loads
-// coalesced) into the wave's LDS as f16 once, then read in WMMA's layout (lane l: row l % 16) a step of 16 at a time,
-// a WMMA a column tile; the waves' tiles summed in w's order, through the same LDS. the split is the shape's and a
-// column's sums are its own: a token's bits are the same whatever the batch, its place in it, or CT
+// the activations' layout (x16): tiled as WMMA reads them - token t's column c at (t / 16) 16 xts + (c / 16) 256 +
+// (t % 16) 16 + c % 16, xts the row's length: a wave's fragment (16 tokens x 16 columns) 512 contiguous bytes, so a
+// load touches 4 lines, not 16 (a token's row each) - measured, the activations' loads were what bound many tokens
+constexpr int kFrag = kTile * kTile;
+__host__ __device__ inline uint64_t x16_at(uint32_t t, uint32_t c, uint32_t xts) {
+  return (uint64_t) (t / kTile) * kTile * xts + (c / kTile) * kFrag + (t % kTile) * kTile + c % kTile;
+}
+
+// a block's 16-row tile (row0 ..) x CT tiles of 16 token columns, tokens c0 .. c0 + 16 CT (the tiled x16 above, xts
+// its row length) into y (token t's row r at y[t * ys + r], the first n tokens). K split over the block's waves: wave
+// w the slabs w, w + W, ... - each decoded as the matvec decodes (lanes along a row: the loads coalesced) into the
+// wave's LDS as f16 once, read in WMMA's layout (lane l: row l % 16) a step of 16 at a time; then a column tile at a
+// time its steps' x loaded together and its WMMAs in step order. the waves' tiles summed in w's order, through the
+// same LDS. the split is the shape's and a column's sums are its own: a token's bits are the same whatever the batch,
+// its place in it, or CT
 template <quant::Type T, class S, int CT>
 __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __restrict__ w, uint32_t row0,
                                                            uint32_t cols, const _Float16* __restrict__ x16,
                                                            uint32_t xts, uint32_t c0, uint32_t n,
                                                            float* __restrict__ y, uint32_t ys, _Float16* lds_all) {
   using B = quant::Block<T>;
-  constexpr int per = B::values / quant::kChunk, SL = S::kSlab;
+  constexpr int per = B::values / quant::kChunk, SL = S::kSlab, G = SL / kTile;
   const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
   _Float16* lds = lds_all + wave * kTile * S::kRowLds;
   const uint64_t row_bytes = (uint64_t) (cols / B::values) * B::bytes;
   const int tiles = (int) ((n - c0 + kTile - 1) / kTile) < CT ? (int) ((n - c0 + kTile - 1) / kTile) : CT;
-  const _Float16* xb[CT];  // each tile's column of this lane: its x, the slab's offset added a step
-  for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + (uint64_t) (c0 + ct * kTile + col) * xts;
+  const _Float16* xb[CT];  // each tile's fragments of this lane: its column, a step kFrag on
+  for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
   f8 acc[CT] = {};
   for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
 #pragma unroll 1
@@ -65,16 +74,16 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
       }
     }
     __builtin_amdgcn_wave_barrier();  // the wave's LDS in order: its writes, then its reads
-    for (int g = 0; g < SL / kTile; g++) {
-      const h16 a = *(const h16*) (lds + col * S::kRowLds + g * kTile);
-#pragma unroll
-      for (int ct = 0; ct < CT; ct++)
-        if (CT == 1 || ct < tiles) {  // the whole wave: past the tokens, nothing
-          const h16 bx = *(const h16*) (xb[ct] + k0 + g * kTile);
-          acc[ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bx, acc[ct]);
-        }
-    }
+    h16 a[G];
+    for (int g = 0; g < G; g++) a[g] = *(const h16*) (lds + col * S::kRowLds + g * kTile);
     __builtin_amdgcn_wave_barrier();
+#pragma unroll
+    for (int ct = 0; ct < CT; ct++)
+      if (CT == 1 || ct < tiles) {  // the whole wave: past the tokens, nothing
+        h16 bx[G];
+        for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
+        for (int g = 0; g < G; g++) acc[ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bx[g], acc[ct]);
+      }
   }
   float* part = (float*) lds_all;
 #pragma unroll
@@ -103,7 +112,8 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel(const uint8_t* __rest
   tile<T, S, CT>(w, blockIdx.x * kTile, cols, x16, cols, blockIdx.z * kTile * CT, n, y, ys, lds);
 }
 
-// n matrices at once (blockIdx.y the matrix m): its w from the table, its token t's x at x16 + xoff[m] + t * xts,
+// n matrices at once (blockIdx.y the matrix m): its w from the table, its x the tiled x16 from x16 + xoff[m] (rows xts
+// long: a token tile's offset t / 16 * 16 xts, a column's c * 16),
 // its first cnt[m] tokens' rows at y + yoff[m] + t * ys - a step's distinct experts, each read once for its tokens,
 // or a layer's wo_a groups, each over its slice of the tokens' attention. a block past its matrix's tokens: nothing
 template <quant::Type T, class S, int CT>

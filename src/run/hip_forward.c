@@ -113,7 +113,7 @@ static bool oa_tables(Forward *f, char *err)
   const void **tab = calloc((size_t)f->n_layers * G, sizeof *tab);
   uint32_t xo[FWD_MAX_GROUPS], yo[FWD_MAX_GROUPS];
   for (uint32_t k = 0; k < G; k++)
-    xo[k] = k * oin, yo[k] = k * (uint32_t)g->o_lora;
+    xo[k] = k * oin * MM_TILE, yo[k] = k * (uint32_t)g->o_lora; /* group k's first column, in the tiled x16 */
   bool ok = tab && fwd_alloc(&f->oa_tab, (uint64_t)f->n_layers * G * sizeof *tab) &&
             fwd_alloc(&f->oa_xoff, G * 4) && fwd_alloc(&f->oa_yoff, G * 4) && fwd_put(f->oa_xoff, xo, G * 4) &&
             fwd_put(f->oa_yoff, yo, G * 4);
