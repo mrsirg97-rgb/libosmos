@@ -155,11 +155,9 @@ bool fwd_attention(Forward *f, int l, char *err)
   fwd_probe(f, "o", l, f->at, b->o, n * H * HD, false);
   ok = ops_rope(b->o, H, HD, RD, H * HD, freqs, b->pos, true, n, NULL) &&
        ops_fp8_round(b->o, (uint64_t)n * H * HD, NULL);
-  /* wo_a: the tokens' attention to f16 once, then every group in one launch, group k over its 4,096 of each */
-  for (uint32_t k = 0; k < OG; k++)
-    f->pin->oa_cnt[k] = (int32_t)n;
-  ok = ok && fwd_put_async(b->oa_cnt, f->pin->oa_cnt, OG * 4) &&
-       mm_x16(b->o, H * HD, n, H * HD, b->x16, b->overflow, NULL) &&
+  /* wo_a: the tokens' attention to f16 once, then every group in one launch, group k over its 4,096 of each (the
+     groups' token counts the step's: forward_batch sends them) */
+  ok = ok && mm_x16(b->o, H * HD, n, H * HD, b->x16, b->overflow, NULL) &&
        mm_group(L->out_a->type, f->oa_tab + (size_t)l * OG, b->oa_cnt, OG, OL, oin, b->x16, f->oa_xoff, H * HD, b->oa,
                 f->oa_yoff, OG * OL, NULL);
   ok = ok && fwd_mat(f, L->out_b, fwd_dev(f, L->out_b), D, OG * OL, b->oa, OG * OL, n, b->y, D);

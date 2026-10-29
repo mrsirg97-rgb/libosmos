@@ -147,26 +147,25 @@ static bool scratch(Forward *f)
     void *field;
     uint64_t bytes;
   } want[] = {
-      {&b->h, B * hc * D * F},    {&b->mix, B * (2 + hc) * hc * F}, {&b->a_pre, B * hc * F},
+      {&b->h, B * hc * D * F},    {&b->hcp, B * ((2 + hc) * hc + 1) * OPS_HC_PARTS * F}, {&b->a_pre, B * hc * F},
       {&b->a_post, B * hc * F},   {&b->a_comb, B * hc * hc * F},    {&b->f_pre, B * hc * F},
       {&b->f_post, B * hc * F},   {&b->f_comb, B * hc * hc * F},    {&b->pre0, B * hc * F},
       {&b->x, B * D * F},         {&b->qa, B * (uint64_t)g->q_lora * F}, {&b->q, B * HQ * F},
       {&b->kv, B * hd * F},       {&b->o, B * HQ * F},  {&b->oa, B * (uint64_t)g->o_groups * g->o_lora * F},
       {&b->y, B * D * F},         {&b->mid, B * hc * D * F},        {&b->xf, B * D * F},
       {&b->logits, B * (uint64_t)g->n_experts * F}, {&b->vocab, B * (uint64_t)g->n_vocab * F},
-      {&b->rw, B * K * F},        {&b->ga, P * FF * F},             {&b->up, P * FF * F},
+      {&b->rw, B * K * F},        {&b->ga, P * FF * F},             {&b->upr, P * FF * F},
       {&b->hh, P * FF * F},       {&b->ye, P * D * F},              {&b->moe, B * D * F},
       {&b->sga, B * FF * F},      {&b->sup, B * FF * F},            {&b->shh, B * FF * F},
-      {&b->sye, B * D * F},       {&b->wtab, 3 * P * sizeof(void *)}, {&b->lat, B * hd * F},
+      {&b->sye, B * D * F},       {&b->up, FWD_UP_BYTES}, {&b->lat, B * hd * F},
       {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, ih * F},
       {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},            {&b->score, (uint64_t)f->max_ctx * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
       {&b->ridx, B * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
-      {&b->order, P * 4},         {&b->rwp, P * F},                 {&b->x16, T * (widest > egv ? widest : egv) * 2},
-      {&b->xe16, P * T * (D > FF ? D : FF) * 2}, {&b->cnt, P * 4},  {&b->base, P * 4},
-      {&b->gidx, P * T * 4},      {&b->hidx, P * T * 4},            {&b->pidx, P * 4},
-      {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4}, {&b->offs, 4 * FWD_MAX_PAIRS * 4},
+      {&b->rwp, P * F},                 {&b->x16, T * (widest > egv ? widest : egv) * 2},
+      {&b->xe16, P * T * (D > FF ? D : FF) * 2},
+      {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4},
   };
   _Static_assert(sizeof want / sizeof *want == sizeof(Scratch) / sizeof(void *), "every buffer of Scratch, once");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)

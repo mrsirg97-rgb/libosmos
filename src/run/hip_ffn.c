@@ -45,6 +45,21 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
   return ok || fwd_fail(err, "a GPU call failed (Engram)");
 }
 
+/* a bump allocator over the pinned staging region and its device copy: a table's host and device addresses */
+typedef struct Carve
+{
+  uint8_t *host, *dev;
+  uint64_t used;
+} Carve;
+
+static void *carve(Carve *c, uint64_t bytes, void **dev)
+{
+  const uint64_t at = (c->used + 15) & ~(uint64_t)15;
+  c->used = at + bytes;
+  *dev = c->dev + at;
+  return c->host + at;
+}
+
 static int cmp_expert(const void *a, const void *b)
 {
   const int32_t *x = a, *y = b;
@@ -106,32 +121,43 @@ bool fwd_moe(Forward *f, int l, char *err)
       const uint32_t t = by[j];
       by[j] = by[j - 1], by[j - 1] = t;
     }
-  Pinned *pin = f->pin;
-  uint32_t row_of[FWD_MAX_PAIRS];
   for (uint32_t r = 0; r < P; r++)
+    nd += r == 0 || ids[by[r]] != ids[by[r - 1]];
+  /* the layer's tables, carved from one pinned region and sent in one copy */
+  Carve c = {f->pin->up, (uint8_t *)b->up, 0};
+  const void **tab, **dtab;
+  int32_t *cnt, *order, *gidx, *hidx, *pidx, *dcnt, *dorder, *dgidx, *dhidx, *dpidx;
+  uint32_t *xg, *yg, *xd, *yd, *dxg, *dyg, *dxd, *dyd;
+  tab = carve(&c, 3 * nd * sizeof *tab, (void **)&dtab), cnt = carve(&c, nd * 4, (void **)&dcnt);
+  order = carve(&c, P * 4, (void **)&dorder), pidx = carve(&c, P * 4, (void **)&dpidx);
+  gidx = carve(&c, nd * MM_TILE * 4, (void **)&dgidx), hidx = carve(&c, nd * MM_TILE * 4, (void **)&dhidx);
+  xg = carve(&c, nd * 4, (void **)&dxg), yg = carve(&c, nd * 4, (void **)&dyg);
+  xd = carve(&c, nd * 4, (void **)&dxd), yd = carve(&c, nd * 4, (void **)&dyd);
+  uint32_t row_of[FWD_MAX_PAIRS], base[FWD_MAX_PAIRS];
+  for (uint32_t r = 0, j = 0; r < P; r++)
   {
     const uint32_t m = by[r];
     if (r == 0 || ids[m] != ids[by[r - 1]])
     {
-      pin->base[nd] = (int32_t)r, pin->cnt[nd] = 0;
-      for (uint32_t j = 0; j < MM_TILE; j++)
-        pin->gidx[nd * MM_TILE + j] = -1, pin->hidx[nd * MM_TILE + j] = -1;
+      j = r == 0 ? 0 : j + 1;
+      base[j] = r, cnt[j] = 0;
+      for (uint32_t s = 0; s < MM_TILE; s++)
+        gidx[j * MM_TILE + s] = -1, hidx[j * MM_TILE + s] = -1;
       const uint32_t unit = (uint32_t)l * E + (uint32_t)ids[m];
       if (pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_FULL)
         return fwd_fail(err, "an expert the budget cannot hold beside the layers' weights");
       f->held[f->n_held++] = unit;
-      nd++;
     }
-    const uint32_t j = nd - 1, slot = (uint32_t)pin->cnt[j]++;
-    pin->gidx[j * MM_TILE + slot] = (int32_t)(m / K), pin->hidx[j * MM_TILE + slot] = (int32_t)r;
-    pin->pidx[r] = (int32_t)m, row_of[m] = r;
+    const uint32_t slot = (uint32_t)cnt[j]++;
+    gidx[j * MM_TILE + slot] = (int32_t)(m / K), hidx[j * MM_TILE + slot] = (int32_t)r;
+    pidx[r] = (int32_t)m, row_of[m] = r;
   }
-  const void **tab = pin->tab;
   for (uint32_t j = 0; ok && j < nd; j++)
   {
     const void *ex[POOL_PARTS];
     ok = fwd_pinned(f, f->held[j], ex, err);
     tab[j] = ex[0], tab[nd + j] = ex[1], tab[2 * nd + j] = ex[2];
+    xg[j] = j * MM_TILE * D, yg[j] = base[j] * FF, xd[j] = j * MM_TILE * FF, yd[j] = base[j] * D;
   }
   for (uint32_t i = 0; i < n; i++) /* each token's rows in ascending expert id */
   {
@@ -140,26 +166,16 @@ bool fwd_moe(Forward *f, int l, char *err)
       ord[k][0] = ids[i * K + k], ord[k][1] = (int32_t)row_of[i * K + k];
     qsort(ord, K, sizeof *ord, cmp_expert);
     for (uint32_t k = 0; k < K; k++)
-      pin->order[i * K + k] = ord[k][1];
+      order[i * K + k] = ord[k][1];
   }
-  uint32_t *xg = pin->offs, *yg = pin->offs + FWD_MAX_PAIRS, *xd = pin->offs + 2 * FWD_MAX_PAIRS;
-  uint32_t *yd = pin->offs + 3 * FWD_MAX_PAIRS;
-  for (uint32_t j = 0; j < nd; j++) /* expert j: its 16 gathered slots, its rows from base */
-    xg[j] = j * MM_TILE * D, yg[j] = (uint32_t)pin->base[j] * FF, xd[j] = j * MM_TILE * FF,
-    yd[j] = (uint32_t)pin->base[j] * D;
-  const uint32_t *dxg = b->offs, *dyg = b->offs + FWD_MAX_PAIRS, *dxd = b->offs + 2 * FWD_MAX_PAIRS;
-  const uint32_t *dyd = b->offs + 3 * FWD_MAX_PAIRS;
-  ok = ok && fwd_put_async(b->wtab, tab, 3 * nd * sizeof *tab) && fwd_put_async(b->order, pin->order, P * 4) &&
-       fwd_put_async(b->cnt, pin->cnt, nd * 4) && fwd_put_async(b->offs, pin->offs, sizeof pin->offs) &&
-       fwd_put_async(b->gidx, pin->gidx, nd * MM_TILE * 4) && fwd_put_async(b->hidx, pin->hidx, nd * MM_TILE * 4) &&
-       fwd_put_async(b->pidx, pin->pidx, P * 4) && ops_gather_rows(b->rwp, b->rw, b->pidx, P, 1, NULL) &&
-       mm_x16_rows(b->xf, D, b->gidx, nd, D, b->xe16, b->overflow, NULL) &&
-       mm_group(L->exp_gate->type, b->wtab, b->cnt, nd, FF, D, b->xe16, dxg, D, b->ga, dyg, FF, NULL) &&
-       mm_group(L->exp_up->type, b->wtab + nd, b->cnt, nd, FF, D, b->xe16, dxg, D, b->up, dyg, FF, NULL) &&
-       ops_swiglu(b->ga, b->up, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
-       mm_x16_rows(b->hh, FF, b->hidx, nd, FF, b->xe16, b->overflow, NULL) &&
-       mm_group(L->exp_down->type, b->wtab + 2 * nd, b->cnt, nd, D, FF, b->xe16, dxd, FF, b->ye, dyd, D, NULL) &&
-       ops_gather_sum(b->moe, b->ye, b->order, K, n, D, NULL) && ops_add(b->moe, b->sye, (uint64_t)n * D, NULL);
+  ok = ok && fwd_put_async(b->up, f->pin->up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
+       mm_x16_rows(b->xf, D, dgidx, nd, D, b->xe16, b->overflow, NULL) &&
+       mm_group(L->exp_gate->type, dtab, dcnt, nd, FF, D, b->xe16, dxg, D, b->ga, dyg, FF, NULL) &&
+       mm_group(L->exp_up->type, dtab + nd, dcnt, nd, FF, D, b->xe16, dxg, D, b->upr, dyg, FF, NULL) &&
+       ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
+       mm_x16_rows(b->hh, FF, dhidx, nd, FF, b->xe16, b->overflow, NULL) &&
+       mm_group(L->exp_down->type, dtab + 2 * nd, dcnt, nd, D, FF, b->xe16, dxd, FF, b->ye, dyd, D, NULL) &&
+       ops_gather_sum(b->moe, b->ye, dorder, K, n, D, NULL) && ops_add(b->moe, b->sye, (uint64_t)n * D, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");
   fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);

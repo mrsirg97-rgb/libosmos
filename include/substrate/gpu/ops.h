@@ -15,9 +15,11 @@ bool ops_embed(uint32_t type, const void *table, uint32_t dim, const int32_t *id
                float *h, void *stream);
 bool ops_rms(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
              uint32_t y_stride, void *stream);
-bool ops_hc_mix(const float *h, const float *mix, const float *scale, const float *base, uint32_t hc, uint32_t dim,
-                float eps, float hc_eps, uint32_t iters, uint32_t n_tok, float *pre, float *post, float *comb,
+#define OPS_HC_PARTS 16
+bool ops_hc_dot(const float *fn, const float *h, uint32_t hc, uint32_t dim, uint32_t n_tok, float *partial,
                 void *stream);
+bool ops_hc_mix(const float *partial, const float *scale, const float *base, uint32_t hc, uint32_t dim, float eps,
+                float hc_eps, uint32_t iters, uint32_t n_tok, float *pre, float *post, float *comb, void *stream);
 bool ops_hc_pre_rms(const float *h, const float *pre, uint32_t hc, uint32_t dim, const float *w, float eps,
                     uint32_t n_tok, float *x, void *stream);
 bool ops_hc_post(const float *y, const float *res, const float *post, const float *comb, uint32_t hc, uint32_t dim,
@@ -65,10 +67,15 @@ ops_embed
 ops_rms
   y = (x * 1 / sqrt(mean(x^2) + eps)) * w, a row at a time (w NULL: no weight).
 
+ops_hc_dot
+  the hyper-connection mixes' inputs: each of the (2 + hc) hc rows of fn (F32, [rows][hc * dim]) dotted with each
+  token's stream h, and the stream with itself, in OPS_HC_PARTS fixed parts: partial[t][row][part] (row (2 + hc) hc
+  the sum of squares). ops_hc_mix sums the parts in order.
+
 ops_hc_mix
-  the hyper-connection mixes from mix = fn h (mv: (2 + hc) hc values a token) and h itself: mix * 1 / sqrt(mean(h^2)
-  + eps) then pre = sigmoid(mix * scale[0] + base) + hc_eps, post = 2 sigmoid(mix * scale[1] + base), comb a softmax
-  a row (+ hc_eps) and Sinkhorn: a column normalisation, then (iters - 1) times a row's and a column's.
+  the mixes from ops_hc_dot's partial: mix = the row's parts summed, times 1 / sqrt(the squares' parts summed /
+  (hc dim) + eps); then pre = sigmoid(mix * scale[0] + base) + hc_eps, post = 2 sigmoid(mix * scale[1] + base), comb a
+  softmax a row (+ hc_eps) and Sinkhorn: a column normalisation, then (iters - 1) times a row's and a column's.
 
 ops_hc_pre_rms
   x = rms(sum over k of pre[k] h[k], w) - the stream mixed into the block's input.

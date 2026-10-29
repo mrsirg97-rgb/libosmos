@@ -21,6 +21,9 @@
 #define FWD_MAX_BATCH MM_TILE                       /* a step's tokens: the matmul's tile */
 #define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a step's (token, routed expert) pairs */
 #define FWD_MAX_GROUPS 64                           /* a layer's wo_a groups */
+/* a layer's routing tables at most: 3 matrix pointers, 4 offsets, a count an expert; an order and a pair a pair; 2 x 16
+   slots an expert - with each table's alignment (16) */
+#define FWD_UP_BYTES (FWD_MAX_PAIRS * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4) + 10 * 16)
 
 /* the fetcher's finished reads, handed from its workers to the forward (the pool's one consumer) */
 typedef struct Inbox
@@ -35,18 +38,17 @@ typedef struct Inbox
 /* the step's device buffers, each [FWD_MAX_BATCH][...] a token (the routed experts' [FWD_MAX_PAIRS][...] a pair) */
 typedef struct Scratch
 {
-  float *h, *mix, *a_pre, *a_post, *a_comb, *f_pre, *f_post, *f_comb, *pre0;
+  float *h, *hcp, *a_pre, *a_post, *a_comb, *f_pre, *f_post, *f_comb, *pre0;
   float *x, *qa, *q, *kv, *o, *oa, *y, *mid, *xf;
-  float *logits, *rw, *vocab, *ga, *up, *hh, *ye, *moe;
+  float *logits, *rw, *vocab, *ga, *upr, *hh, *ye, *moe;
   float *sga, *sup, *shh, *sye; /* the shared expert's, beside the routed ones' [n_used][...] */
-  const void **wtab;            /* the distinct routed experts' matrices for mm_group: gates, ups, downs */
+  void *up;                     /* a layer's routing tables, sent in one copy from Pinned's up */
   float *rwp;                   /* a pair's routing weight, in its row's order */
   void *x16, *xe16;             /* f16 activations: a matmul's [16][cols]; the experts' [expert][16][cols] */
   float *lat, *kvc, *scg, *ikr, *qix, *wix, *score;
   float *erow_f, *ekv;
   uint8_t *erow;
-  int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *order, *cnt, *base, *gidx, *hidx, *pidx, *overflow, *oa_cnt;
-  uint32_t *offs; /* the experts' mm_group offsets: gate / up x, y; down x, y - [4][FWD_MAX_PAIRS] */
+  int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;
 } Scratch;
 
 /* host memory the GPU copies to and from on the stream (pinned: the copies are asynchronous). each is written only
@@ -55,17 +57,10 @@ typedef struct Pinned
 {
   int32_t tok[FWD_MAX_BATCH]; /* the step's tokens */
   int32_t pos[FWD_MAX_BATCH]; /* and their positions */
-  int32_t ids[FWD_MAX_PAIRS]; /* the routed experts, [token][slot] */
-  int32_t order[FWD_MAX_PAIRS];             /* each token's pairs' rows, in ascending expert id */
-  int32_t cnt[FWD_MAX_PAIRS];               /* a distinct expert's tokens */
-  int32_t base[FWD_MAX_PAIRS];              /* and its first row */
-  int32_t gidx[FWD_MAX_PAIRS * MM_TILE];    /* its slots' tokens (-1 none) */
-  int32_t hidx[FWD_MAX_PAIRS * MM_TILE];    /* its slots' rows (-1 none) */
-  int32_t pidx[FWD_MAX_PAIRS];              /* a row's pair */
-  int32_t overflow;                         /* an activation past f16: the step refused */
-  uint32_t offs[4 * FWD_MAX_PAIRS];
-  int32_t oa_cnt[FWD_MAX_GROUPS];           /* each wo_a group's tokens: the step's */
-  const void *tab[3 * FWD_MAX_PAIRS];
+  int32_t ids[FWD_MAX_PAIRS];     /* the routed experts, [token][slot] */
+  int32_t overflow;               /* an activation past f16: the step refused */
+  int32_t oa_cnt[FWD_MAX_GROUPS]; /* each wo_a group's tokens: the step's */
+  uint8_t up[FWD_UP_BYTES];       /* a layer's routing tables (hip_ffn.c's carve), one copy to Scratch's up */
   int32_t rpos[WEIGHTS_MAX_LAYERS][FWD_MAX_BATCH];
 } Pinned;
 
