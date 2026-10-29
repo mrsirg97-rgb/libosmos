@@ -34,6 +34,7 @@ struct Keys {
   uint32_t slots;
   const int32_t* pos;
   uint32_t window;
+  int32_t floor;  // no window key below it (a sequence's first position with the layer's state)
   const float* ckv;
   const int32_t* sel;
   const int32_t* n_sel;
@@ -41,7 +42,7 @@ struct Keys {
 
   __device__ uint32_t j0(uint32_t t) const {
     const int32_t j = pos[t] - (int32_t) window + 1;
-    return j > 0 ? (uint32_t) j : 0;
+    return j > floor ? (uint32_t) j : (uint32_t) floor;
   }
   __device__ uint32_t count(uint32_t t, uint32_t& nw) const {
     nw = (uint32_t) pos[t] - j0(t) + 1;
@@ -140,14 +141,15 @@ __global__ __launch_bounds__(kThreads) void values_kernel(Keys K, const float* _
 }  // namespace
 
 extern "C" bool ops_sparse_attn(const float* q, const float* ring, uint32_t slots, const int32_t* pos,
-                                uint32_t window, const float* ckv, const int32_t* sel, const int32_t* n_sel,
+                                uint32_t window, int32_t floor, const float* ckv, const int32_t* sel, const int32_t* n_sel,
                                 uint32_t sel_cap, uint32_t max_sel, const float* sink, float scale, uint32_t heads,
                                 uint32_t head_dim, uint32_t n_tok, float* scores, float* o, void* stream) {
   if (!window || window > OPS_MAX_WINDOW || slots < window || sel_cap > OPS_MAX_SELECT || max_sel > sel_cap ||
-      !heads || heads % kTile || !head_dim || head_dim % kTile || !n_tok || !scores || (ckv && (!sel || !n_sel)))
+      !heads || heads % kTile || !head_dim || head_dim % kTile || !n_tok || !scores || (ckv && (!sel || !n_sel)) ||
+      floor < 0)
     return false;
   const uint32_t keys = window + (ckv ? max_sel : 0);
-  const Keys K{ring, slots, pos, window, ckv, sel, n_sel, sel_cap, head_dim, OPS_ATTN_ROW(keys)};
+  const Keys K{ring, slots, pos, window, floor, ckv, sel, n_sel, sel_cap, head_dim, OPS_ATTN_ROW(keys)};
   float* den = scores + (uint64_t) n_tok * heads * K.stride;
   const uint32_t ht = heads / kTile;
   scores_kernel<<<dim3((keys + kTile - 1) / kTile, ht, n_tok), kThreads, 0, st(stream)>>>(K, q, scale, heads, scores);

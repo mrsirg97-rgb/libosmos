@@ -54,6 +54,7 @@ typedef struct Scratch
   float *erow_f, *ekv;
   uint8_t *erow;
   int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;
+  int32_t *keep, *back; /* the decoder's tokens (hip_skip.c): kept, compacted; then each back at its row */
 } Scratch;
 
 /* host memory the GPU copies to and from on the stream (pinned: the copies are asynchronous). each is written only
@@ -67,6 +68,7 @@ typedef struct Pinned
   int32_t oa_cnt[FWD_MAX_GROUPS]; /* each wo_a group's tokens: the step's */
   uint8_t up[FWD_UP_BYTES];       /* a layer's routing tables (hip_ffn.c's carve), one copy to Scratch's up */
   int32_t rpos[WEIGHTS_MAX_LAYERS][FWD_MAX_BATCH];
+  int32_t keep[FWD_MAX_BATCH], back[FWD_MAX_BATCH]; /* hip_skip.c's: the kept tokens' rows, and back */
 } Pinned;
 
 struct Forward
@@ -98,6 +100,11 @@ struct Forward
   uint32_t n;                    /* the step's tokens */
   Seq *bs[FWD_MAX_BATCH];        /* token i's sequence */
   int32_t at;                    /* the step's first position (the probes' index) */
+  int dec;                       /* the decoder's first layer: its KV the only one past it (-1: none) */
+  uint32_t reach;                /* how far back the decoder past dec reads: (layers past dec) (window - 1) + 1 */
+  uint32_t n_all, n_keep;        /* the step's tokens before the decoder's compaction, and those it keeps */
+  int32_t row[FWD_MAX_BATCH];    /* a kept token's row in the step (compacted row i: row[i]) */
+  bool want[FWD_MAX_BATCH];      /* a token whose logits the caller may read */
   forward_probe_fn probe;
   void *probe_arg;
 };
@@ -106,6 +113,8 @@ struct Seq
 {
   Forward *f;
   int32_t pos;
+  int32_t prompt_end; /* seq_prompt's end (0: none) */
+  int32_t dec_from;   /* the first position whose decoder state is kept: every one from it to pos */
   int32_t last[ENGRAM_MAX_NGRAM]; /* last[0] the newest */
   int n_last;
   float *ring[WEIGHTS_MAX_LAYERS];
@@ -135,6 +144,11 @@ bool fwd_attention(Forward *f, int l, char *err);
 bool fwd_mat(Forward *f, const GgufTensor *t, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
              uint32_t n, float *y, uint32_t ys);
 bool fwd_engram(Forward *f, int l, int nth, char *err);
+/* hip_skip.c: the decoder skip (seq_prompt) - the step's plan, its compaction past layer dec, the head, the stream */
+void fwd_decoder(Forward *f);
+void fwd_plan(Forward *f);
+bool fwd_compact(Forward *f, char *err);
+bool fwd_head(Forward *f, char *err);
 bool fwd_moe(Forward *f, int l, char *err);
 
 #endif

@@ -136,6 +136,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return fwd_fail(err, "a batch of no tokens, or more than FWD_MAX_BATCH");
   if (!place(f, seqs, tokens, n, err))
     return false;
+  fwd_plan(f);
   for (int k = 0; k < g->o_groups; k++)
     f->pin->oa_cnt[k] = (int32_t)n;
   if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess || !fwd_put_async(f->b.ids, f->pin->tok, n * 4) ||
@@ -144,19 +145,12 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
       !ops_embed(f->w->embed->type, fwd_dev(f, f->w->embed), g->n_embd, f->b.ids, n, g->hc, f->b.h, NULL))
     return fwd_fail(err, "a GPU call failed (the embedding)");
   int nth = 0;
-  for (int l = 0; l < f->n_layers; l++)
-    if (!layer(f, l, l ? f->b.f_pre : f->b.pre0, &nth, err))
+  for (int l = 0; l < f->n_layers && f->n; l++) /* past dec, the kept tokens: maybe none */
+    if (!layer(f, l, l ? f->b.f_pre : f->b.pre0, &nth, err) || (l == f->dec && !fwd_compact(f, err)))
       return false;
-  if (f->n_layers == g->n_layers) /* the head: the last block's pre mixes the streams, normed, then the vocabulary */
-  {
-    const bool ok = ops_hc_pre_rms(f->b.h, f->b.f_pre, g->hc, g->n_embd, fv(f, f->w->output_norm), g->rms_eps, n,
-                                   f->b.x, NULL) &&
-                    fwd_mat(f, f->w->output, fwd_dev(f, f->w->output), (uint32_t)g->n_vocab, g->n_embd, f->b.x,
-                            g->n_embd, n, f->b.vocab, (uint32_t)g->n_vocab);
-    if (!ok)
-      return fwd_fail(err, "a GPU call failed (the head)");
-    fwd_probe(f, "logits", -1, f->at, f->b.vocab, (uint64_t)n * g->n_vocab, false);
-  }
+  /* the head: the last block's pre mixes the streams, normed, then the vocabulary (the wanted tokens') */
+  if (!fwd_head(f, err))
+    return false;
   /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
   if (hipMemcpyAsync(&f->pin->overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       hipDeviceSynchronize() != hipSuccess)
@@ -166,6 +160,14 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   for (uint32_t i = 0; i < n; i++)
     seqs[i]->pos++;
+  return true;
+}
+
+bool seq_prompt(Seq *s, uint32_t end)
+{
+  if (!s || end > s->f->max_ctx || (int64_t)end < s->prompt_end)
+    return false;
+  s->prompt_end = (int32_t)end;
   return true;
 }
 

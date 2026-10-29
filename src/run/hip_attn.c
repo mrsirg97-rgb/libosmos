@@ -174,7 +174,8 @@ bool fwd_attention(Forward *f, int l, char *err)
     for (run = 1; i + run < n && f->bs[i + run] == f->bs[i]; run++)
       ;
     const float *ckv = ratio ? f->bs[i]->ckv[src] : NULL;
-    ok = ops_sparse_attn(b->q + (uint64_t)i * H * HD, f->bs[i]->ring[l], f->slots, b->pos + i, g->window, ckv,
+    const int32_t floor = f->dec >= 0 && l > f->dec ? f->bs[i]->dec_from : 0; /* the decoder's: hip_skip.c */
+    ok = ops_sparse_attn(b->q + (uint64_t)i * H * HD, f->bs[i]->ring[l], f->slots, b->pos + i, g->window, floor, ckv,
                          ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL, ckv ? b->n_sel + i : NULL, OPS_MAX_SELECT,
                          (uint32_t)g->ix_topk, F(f, L->sinks), scale, H, HD, run, b->att, b->o + (uint64_t)i * H * HD,
                          NULL);

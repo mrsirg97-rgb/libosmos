@@ -159,7 +159,7 @@ static bool scratch(Forward *f)
       {&b->sga, B * FF * F},      {&b->sup, B * FF * F},            {&b->shh, B * FF * F},
       {&b->sye, B * D * F},       {&b->up, FWD_UP_BYTES}, {&b->lat, B * hd * F},
       {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, B * ih * F},
-      {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},            {&b->score, B * f->score_stride * F},
+      {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},            {&b->score, B * (f->score_stride > Fs ? f->score_stride : Fs) * F}, /* + hip_skip.c's sel */
       {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
@@ -167,6 +167,7 @@ static bool scratch(Forward *f)
       {&b->rwp, P * F},                 {&b->x16, B * (widest > egv ? widest : egv) * 2},
       {&b->xe16, FWD_MAX_SLOTS(P, g->n_experts) * (D > FF ? D : FF) * 2},
       {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4},
+      {&b->keep, B * 4},          {&b->back, B * 4},
   };
   _Static_assert(sizeof want / sizeof *want == sizeof(Scratch) / sizeof(void *), "every buffer of Scratch, once");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
@@ -206,6 +207,7 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
   f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->slots = w->geo.window + FWD_MAX_BATCH;
+  fwd_decoder(f);
   f->score_stride = 1; /* no compressed layer: never read */
   for (int l = 0; l < n_layers; l++)
     if (w->geo.compress[l] && max_ctx / (uint32_t)w->geo.compress[l] > f->score_stride)

@@ -20,6 +20,7 @@ void forward_probe(Forward *f, forward_probe_fn fn, void *arg);
 
 Seq *seq_create(Forward *f, char err[FORWARD_ERR]);
 void seq_destroy(Seq *s);
+bool seq_prompt(Seq *s, uint32_t end);
 
 bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
@@ -63,6 +64,15 @@ Seq
 seq_create / seq_destroy
   a sequence at position 0 / its state freed (NULL nothing to do). a Seq is its Forward's and goes before it.
 
+seq_prompt
+  the sequence's prompt ends at position end (its last token end - 1): the caller reads no logits before end - 1 and
+  steps nothing from before it. its tokens before that, beyond the decoder's reach of the end - the last token's
+  windows through the layers past the model's last KV source, (those layers) (window - 1) + 1 positions - then skip
+  those layers (DeepSeek-V4.1's decoder, whose state of a prompt token is its windows); the last KV source still runs
+  for every token. the logits of every token from end - 1 on, and every stream and logit after, are the bits of the
+  whole run. raised as the prompt grows (a later turn's); false for no sequence, an end past max_ctx, or one lower
+  than before.
+
 forward_step
   forward_batch of one: the token at the sequence's next position through the layers; the stream out in
   forward_stream. false with why in err for a token outside the vocabulary, a sequence at max_ctx, a context past
@@ -79,9 +89,10 @@ forward_batch
   refusal no sequence has moved. probes see the whole batch (n rows; index: the first token's position).
 
 forward_stream
-  the device buffer of the last step's stream out ([n][hc][n_embd] F32).
+  the device buffer of the last step's stream out ([n][hc][n_embd] F32); a token that skipped the decoder
+  (seq_prompt): its row unspecified.
 
 forward_logits
   the device buffer of the last step's logits ([n][n_vocab] F32): the head over the stream, when n_layers is all of the
-  model's (else not computed).
+  model's (else not computed); a token before its sequence's prompt end - 1 (seq_prompt): its row not computed.
 */

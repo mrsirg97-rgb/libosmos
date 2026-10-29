@@ -35,7 +35,7 @@ bool ops_round_bf16(float *x, uint64_t n, void *stream);
 bool ops_engram_gate(float *h, const float *kv, const void *q_w, const void *k_w, uint32_t hc, uint32_t dim, float eps,
                      uint32_t n_tok, void *stream);
 bool ops_sparse_attn(const float *q, const float *ring, uint32_t slots, const int32_t *pos, uint32_t window,
-                     const float *ckv, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap, uint32_t max_sel,
+                     int32_t floor, const float *ckv, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap, uint32_t max_sel,
                      const float *sink, float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *scores,
                      float *o, void *stream);
 bool ops_compress(const float *kvc, const float *sc, uint32_t slots, const int32_t *pos, uint32_t ratio, uint32_t dim,
@@ -114,8 +114,8 @@ ops_engram_gate
   sum((h_k * q_w k_w) * key_k) * rstd(h_k) * rstd(key_k) * dim^-0.5 (rounded to F32 from double, as python's).
 
 ops_sparse_attn
-  for each token and head: q against its keys - the window's (positions pos - window + 1 .. pos, at ring row
-  position % slots), then the n_sel[t] compressed rows of ckv that sel[t * sel_cap ..] names (ckv NULL: none) - each
+  for each token and head: q against its keys - the window's (positions max(pos - window + 1, floor) .. pos, at ring
+  row position % slots: floor the sequence's first position with the layer's state, 0 for every position), then the n_sel[t] compressed rows of ckv that sel[t * sel_cap ..] names (ckv NULL: none) - each
   a latent that is the key and the value; scaled, softmax with the head's sink, the values summed in that order. slots
   at least window + the step's tokens - 1, so no position a token reads is overwritten by the step. max_sel bounds
   n_sel (the model's top k); scores the device's OPS_ATTN_SCRATCH(n_tok, heads, window + max_sel) floats (window
