@@ -38,6 +38,13 @@ __host__ __device__ inline uint64_t x16_at(uint32_t t, uint32_t c, uint32_t xts)
   return (uint64_t) (t / kTile) * kTile * xts + (c / kTile) * kFrag + (t % kTile) * kTile + c % kTile;
 }
 
+// the tiles' x double-buffered (each tile's fragments loaded under the one before's WMMAs) for a slab of few
+// fragments: a tile's G fragments are 8 G VGPRs, so a second set is cheap at G 2 (Q5_K's slabs of 32: wo_a 7.24 ->
+// 5.69 ms at 2048 tokens, the shared expert's gate 2.01 -> 1.87) and ruinous at 8 (the IQ experts' 128: a real layer
+// 15.2 -> 22.0 ms). the order of the sums is the same either way: the same bits
+template <int G, int CT>
+constexpr bool kPipe = CT > 1 && G <= 2;
+
 // a block's 16-row tile (row0 ..) x CT tiles of 16 token columns, tokens c0 .. c0 + 16 CT (the tiled x16 above, xts
 // its row length) into y (token t's row r at y[t * ys + r], the first n tokens). K split over the block's waves: wave
 // w the slabs w, w + W, ... - each decoded as the matvec decodes (lanes along a row: the loads coalesced) into the
@@ -74,13 +81,25 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
     h16 a[G];
     for (int g = 0; g < G; g++) a[g] = *(const h16*) (lds + col * S::kRowLds + g * kTile);
     __builtin_amdgcn_wave_barrier();
+    if (kPipe<G, CT> && tiles == CT) {  // every tile real: the next tile's x loaded under this one's WMMAs
+      h16 bc[G], bn[G];
+      for (int g = 0; g < G; g++) bc[g] = *(const h16*) (xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
 #pragma unroll
-    for (int ct = 0; ct < CT; ct++)
-      if (CT == 1 || ct < tiles) {  // the whole wave: past the tokens, nothing
-        h16 bx[G];
-        for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
-        for (int g = 0; g < G; g++) acc[ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bx[g], acc[ct]);
+      for (int ct = 0; ct < CT; ct++) {
+        if (ct + 1 < CT)
+          for (int g = 0; g < G; g++) bn[g] = *(const h16*) (xb[ct + 1] + (uint64_t) (k0 / kTile + g) * kFrag);
+        for (int g = 0; g < G; g++) acc[ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bc[g], acc[ct]);
+        if (ct + 1 < CT)
+          for (int g = 0; g < G; g++) bc[g] = bn[g];
       }
+    } else
+#pragma unroll
+      for (int ct = 0; ct < CT; ct++)
+        if (CT == 1 || ct < tiles) {  // the whole wave: past the tokens, nothing
+          h16 bx[G];
+          for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
+          for (int g = 0; g < G; g++) acc[ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bx[g], acc[ct]);
+        }
   }
   float* part = (float*) lds_all;
 #pragma unroll

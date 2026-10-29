@@ -245,6 +245,15 @@ the same SIMD, so the floor is their sum (a real layer's gate: ~8.5 ms of decode
 - not it: prefetching the next slab's raw words (no gain at one tile, slower at more), global instead of flat loads
   (none), the WMMAs' order (only 8 tiles, -12%). the activations' reloads (a 16-row block reads its tokens' x again)
   are ~23% at 8 tiles.
+- **the dense Q5_K matrices** (q_b, wo_a, the shared expert's gate and up; ~18% of a pass): at 2048 tokens 19-24
+  TFLOPS, the waves ~80% waiting - each tile's x loaded, then waited for, then its WMMAs, eight round trips a slab.
+  with every tile real, the next tile's x now loads under this one's WMMAs (the same bits): wo_a 7.24 -> 5.69 ms, a
+  4096-token prompt ~322 -> ~328 tok/s. only for slabs of few fragments (`kPipe`: G <= 2) - the IQ experts' 8 a tile
+  doubled is 64 more VGPRs, a real layer 15.2 -> 22.0 ms. measured and not taken: Q5_K at 4 waves of 64 (q_b 8.75 ->
+  7.55 ms, but a decode token +0.5 ms, and wo_a's gain the pipelining's already); 2 or 4 row tiles a block, each x
+  for 2-4 WMMAs (the same bits, no faster); 16 column tiles (registers: slower).
+- q_b (1280 -> 32768) is its own case: 5 slabs a wave, 268 MB of y a step, its weights read again by each of the 16
+  token blocks; not the epilogue (without the cross-wave sum it was slower). open.
 - found on the way: the compiler fused decode's last product and the f16 rounding into `v_fma_mixlo_f16` (a * b + 0,
   rounded once): +0 for -0, and Q6_K's 25-bit products not round(round(x)) - the matmul's Q6_K weights were never
   quite gguf-py's rounded. an empty asm keeps the two roundings (not volatile: a volatile one cost a decode token 11
