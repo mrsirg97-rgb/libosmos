@@ -22,6 +22,28 @@ __global__ void x16_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t col
   x16[i] = (_Float16) v;
 }
 
+// matrix m's slot j: row idx[m * 16 + j] of x (-1: zero), to f16
+__global__ void x16_rows_kernel(const float* x, uint32_t xs, const int32_t* idx, uint32_t n_mat, uint32_t cols,
+                                _Float16* x16, int32_t* overflow) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n_mat * mm::kTile * cols) return;
+  const int32_t r = idx[i / cols];
+  const float v = r >= 0 ? x[(uint64_t) r * xs + i % cols] : 0.0f;
+  if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);
+  x16[i] = (_Float16) v;
+}
+
+template <quant::Type T>
+bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t rows, uint32_t cols,
+                  const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff, uint32_t ys,
+                  hipStream_t s) {
+  if (rows % mm::kTile || cols % quant::Block<T>::values || cols % mm::kSlab || xts < cols || xts % mm::kTile)
+    return false;
+  mm::group_kernel<T><<<dim3(rows / mm::kTile, n_mat), mm::kWave * mm::kWavesPerBlock, 0, s>>>(
+      (const uint8_t* const*) w, cnt, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
 template <quant::Type T>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
             hipStream_t s) {
@@ -61,6 +83,29 @@ extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t col
     case quant::kIQ1_M: return launch<quant::kIQ1_M>(w, rows, cols, x16, n, y, ys, s);
     case quant::kIQ2_XXS: return launch<quant::kIQ2_XXS>(w, rows, cols, x16, n, y, ys, s);
     case quant::kIQ2_XS: return launch<quant::kIQ2_XS>(w, rows, cols, x16, n, y, ys, s);
+    default: return false;
+  }
+}
+
+extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t n_mat, uint32_t cols, void* x16,
+                            int32_t* overflow, void* stream) {
+  if (!n_mat || !cols || cols % mm::kTile || xs < cols) return false;
+  const uint64_t work = (uint64_t) n_mat * mm::kTile * cols;
+  x16_rows_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+      x, xs, idx, n_mat, cols, (_Float16*) x16, overflow);
+  return hipGetLastError() == hipSuccess;
+}
+
+extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t rows,
+                         uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y,
+                         const uint32_t* yoff, uint32_t ys, void* stream) {
+  if (!n_mat || n_mat > MM_MAX_GROUP) return false;
+  const hipStream_t s = (hipStream_t) stream;
+  switch (type) {
+#define GROUP(t) \
+  case quant::t: return group_launch<quant::t>(w, cnt, n_mat, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS)
+#undef GROUP
     default: return false;
   }
 }

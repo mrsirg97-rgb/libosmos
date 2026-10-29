@@ -153,7 +153,8 @@ static void shape(const Gguf* g, const Shape& s) {
               std::sqrt(f16_rms / ref_rms), bytes / mv_us / 1e3, bytes / us[0] / 1e3, bytes / us[1] / 1e3,
               bytes / us[2] / 1e3, kT * mv_us / us[2]);
   CHECK(hipFree(w) == hipSuccess && hipFree(x) == hipSuccess && hipFree(xrv) == hipSuccess);
-  CHECK(hipFree(y) == hipSuccess && hipFree(y1) == hipSuccess && hipFree(x16) == hipSuccess && hipFree(over) == hipSuccess);
+  CHECK(hipFree(y) == hipSuccess && hipFree(y1) == hipSuccess);
+  CHECK(hipFree(x16) == hipSuccess && hipFree(over) == hipSuccess);
 }
 
 int main() {

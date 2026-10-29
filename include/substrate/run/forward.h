@@ -34,9 +34,11 @@ Forward
   or fewer for a test). the weights are read where they lie, through one pool (substrate/mem/pool.h): every tensor
   the layers use but the routed experts a unit pinned for the forward's life, and each layer's experts units the
   pool pins when the router picks them and unpins, least recently used first, when it needs the room - read by
-  fetchq's workers, nothing copied, none of it counted against the GPU's own memory. `budget` is the RAM the pool may
-  pin: the layers' weights and a cache of experts. the Engram rows are read from the Engram file a position at a
-  time (pread). `max_ctx` bounds a sequence: its compressed rows and indexer keys are held for that many positions.
+  fetchq's workers, nothing copied, none of it counted against the GPU's own memory. the quantized weights' products
+  are mm's (WMMA over f16 activations, one kernel for 1 .. 16 tokens), the F32 and BF16 weights' the matvec's.
+  `budget` is the RAM the pool may pin: the layers' weights and a cache of experts. the Engram rows are read from
+  the Engram file a position at a time (pread). `max_ctx` bounds a sequence: its compressed rows and indexer keys
+  are held for that many positions.
 
 forward_create
   NULL, with why in err, for a model or a size it cannot run: n_layers outside 1 .. the model's, max_ctx 0, the
@@ -69,11 +71,11 @@ forward_step
   stepped again.
 
 forward_batch
-  n tokens (1 .. MV_MAX_TOKENS) at once, token i at seqs[i]'s next position: a sequence may be given several times,
+  n tokens (1 .. MM_TILE, 16) at once, token i at seqs[i]'s next position: a sequence may be given several times,
   its tokens then at its next positions in the order given (a chunk of its prompt, or drafts to verify), each seeing
   the ones before it. a token's results are the same bits however it is batched - alone, beside other sequences, or
   in a chunk of its own: every step a token takes is summed in an order of its own, never the batch's. false, with
-  why, as forward_step, for a batch of 0 or more than MV_MAX_TOKENS tokens, or a sequence of another forward; on a
+  why, as forward_step, for a batch of 0 or more than MM_TILE tokens, or a sequence of another forward; on a
   refusal no sequence has moved. probes see the whole batch (n rows; index: the first token's position).
 
 forward_stream

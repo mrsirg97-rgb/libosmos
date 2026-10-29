@@ -1,9 +1,9 @@
 // schedule invariance, as a property: a token's logits the same bits however the forward was given it. 4 sequences of
 // real ids (16 positions each) decoded a token at a time and alone - the reference - then again: interleaved (the 4 a
-// step, a token each: 4 conversations), chunked (each its own tokens in random chunks of 1-8: a prompt read in pieces,
-// or drafts verified), mixed (random batches of up to 8 tokens over the sequences, random chunks); every logit bit for
-// bit the reference's. then the tokens a second, alone and interleaved. needs a gfx1151, ~/models/ds1017 and
-// ~/substrate-oracle/ids32.txt; skipped (77) without them.
+// step, a token each: 4 conversations), chunked (each its own tokens in random chunks of 1-16: a prompt read in
+// pieces, or drafts verified), mixed (random batches of up to 16 over the sequences, random chunks); every logit
+// bit for bit the reference's. then the tokens a second: alone, interleaved, a prompt 16 a step. needs a gfx1151,
+// ~/models/ds1017 and ~/substrate-oracle/ids32.txt; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <unistd.h>
@@ -33,7 +33,7 @@ extern "C" {
   } while (0)
 
 constexpr uint64_t kBudget = 72ull << 30;
-constexpr int kSeqs = 4, kLen = 16, kMaxBatch = 8, kTrials = 3;
+constexpr int kSeqs = 4, kLen = 16, kMaxBatch = 16, kTrials = 3;
 
 struct Run {
   Forward* f;
@@ -84,7 +84,7 @@ static Schedule interleaved() {
   return s;
 }
 
-static Schedule prompt() {  // each sequence read 8 tokens a step: a prompt in chunks
+static Schedule prompt() {  // each sequence read kMaxBatch tokens a step: a prompt in chunks
   Schedule s;
   for (int k = 0; k < kSeqs; k++)
     for (int p = 0; p < kLen; p += kMaxBatch) s.push_back(std::vector<int>(kMaxBatch, k));
@@ -147,13 +147,14 @@ int main() {
   for (int k = 0; k < kSeqs; k++)  // 4 windows of the real ids: different sequences, real text
     r.ids.push_back(std::vector<int32_t>(all.begin() + 5 * k, all.begin() + 5 * k + kLen));
   Seq* s0 = seq_create(r.f, ferr);
-  int32_t nine[9] = {0};
-  Seq* nine_s[9] = {s0, s0, s0, s0, s0, s0, s0, s0, s0};
-  CHECK(!forward_batch(r.f, nine_s, nine, 9, ferr) && !forward_batch(r.f, nine_s, nine, 0, ferr));
+  std::vector<int32_t> many(kMaxBatch + 1, 0);
+  std::vector<Seq*> many_s(kMaxBatch + 1, s0);
+  CHECK(!forward_batch(r.f, many_s.data(), many.data(), kMaxBatch + 1, ferr));
+  CHECK(!forward_batch(r.f, many_s.data(), many.data(), 0, ferr));
   int32_t bad = (int32_t) r.V;
-  CHECK(!forward_batch(r.f, nine_s, &bad, 1, ferr));
+  CHECK(!forward_batch(r.f, many_s.data(), &bad, 1, ferr));
   seq_destroy(s0);
-  std::printf("  refusals: 9 tokens, 0 tokens, a token past the vocabulary\n");
+  std::printf("  refusals: %d tokens, 0 tokens, a token past the vocabulary\n", kMaxBatch + 1);
 
   play(&r, alone());  // twice: warm the pool, then the reference
   play(&r, alone());
@@ -175,7 +176,7 @@ int main() {
   same("interleaved");
   const double inter_ms = r.ms;
   play(&r, prompt());
-  same("prompt x8");
+  same("prompt x16");
   const double prompt_ms = r.ms;
   for (int t = 0; t < kTrials; t++) {
     play(&r, chunked(rng));
@@ -187,7 +188,7 @@ int main() {
   }
   const int n = kSeqs * kLen;
   std::printf("  %d schedules, the same bits. %d tokens: alone %.0f ms (%.1f tok/s); interleaved 4 a step %.0f ms "
-              "(%.1f tok/s, %.2fx); a prompt 8 a step %.0f ms (%.1f tok/s, %.2fx)\n", schedules, n, alone_ms,
+              "(%.1f tok/s, %.2fx); a prompt 16 a step %.0f ms (%.1f tok/s, %.2fx)\n", schedules, n, alone_ms,
               n * 1e3 / alone_ms, inter_ms, n * 1e3 / inter_ms, alone_ms / inter_ms, prompt_ms, n * 1e3 / prompt_ms,
               alone_ms / prompt_ms);
   forward_destroy(r.f);

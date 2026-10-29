@@ -44,8 +44,14 @@ extern "C" {
     }                                                                            \
   } while (0)
 
-constexpr double kMaxRel = 1e-3;
-constexpr double kMaxFlips = 5e-3;
+// a float step's worst element against its largest value: the matmul's f16 activations and weights cost 2-3e-4 rms
+// (test_mm_gpu) and a step's worst of its thousands of elements ~5 times that; 3e-3 is that with room. a bug is 1e-1
+// and up (positions one apart: 1e0)
+constexpr double kMaxRel = 3e-3;
+// a rounded row's values a step from the oracle's: one sits at an edge when the step before it moved it past one - its
+// error (the matmul's f16 activations and weights: 2-3e-4 relative, test_mm_gpu) against E4M3's step (1/16 of a
+// value at least): 2 x 3e-4 / (1 / 16) ~ 1% of them; 2% is that with room
+constexpr double kMaxFlips = 2e-2;
 // a router key (sqrt(softplus(logit)) + bias) is four F32 roundings - expf, log1pf, sqrtf, the add - each within an
 // ulp: ours and the oracle's within 4 ulps each of the exact key, so two keys closer than 8 are not ordered in F32
 constexpr double kKeyUlps = 8;

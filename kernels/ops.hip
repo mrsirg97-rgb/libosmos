@@ -221,6 +221,12 @@ __global__ void swiglu_kernel(const float* g, const float* u, uint32_t n, float 
   h[i] = scale ? v * scale[i / n] : v;
 }
 
+// dst[i][:] = src[idx[i]][:], rows of len
+__global__ void gather_rows_kernel(float* dst, const float* src, const int32_t* idx, uint32_t n, uint32_t len) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i < (uint64_t) n * len) dst[i] = src[(uint64_t) idx[i / len] * len + i % len];
+}
+
 // y[t][d] = sum over j < m of src[idx[t * m + j]][d], in j's order from 0 (the same sums as a zeroed y and m adds)
 __global__ void gather_sum_kernel(float* y, const float* src, const int32_t* idx, uint32_t m, uint32_t n,
                                   uint32_t dim) {
@@ -329,6 +335,13 @@ extern "C" bool ops_swiglu(const float* g, const float* u, uint32_t n, float lim
                            float* h, void* stream) {
   if (!n || !n_tok) return false;
   swiglu_kernel<<<grid((uint64_t) n * n_tok), kThreads, 0, st(stream)>>>(g, u, n, lim, scale, n_tok, h);
+  return ok();
+}
+
+extern "C" bool ops_gather_rows(float* dst, const float* src, const int32_t* idx, uint32_t n, uint32_t len,
+                                void* stream) {
+  if (!n || !len) return false;
+  gather_rows_kernel<<<grid((uint64_t) n * len), kThreads, 0, st(stream)>>>(dst, src, idx, n, len);
   return ok();
 }
 

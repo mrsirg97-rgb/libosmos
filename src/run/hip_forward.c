@@ -102,12 +102,21 @@ static bool units(Forward *f, uint64_t budget, char *err)
   return ok;
 }
 
-/* each layer's wo_a, a matrix a group (the GGUF's [in, out, groups]: group k's rows k * rows ..), mv_group's table */
+/* each layer's wo_a, a matrix a group (the GGUF's [in, out, groups]: group k's rows k * rows ..), and where each
+   group reads and writes: mm_group's tables, fixed for the forward's life */
 static bool oa_tables(Forward *f, char *err)
 {
-  const uint32_t G = (uint32_t)f->g->o_groups;
+  const Geometry *g = f->g;
+  const uint32_t G = (uint32_t)g->o_groups, oin = (uint32_t)(g->n_heads * g->head_dim / G);
+  if (G > FWD_MAX_GROUPS)
+    return fwd_fail(err, "more wo_a groups than this build runs");
   const void **tab = calloc((size_t)f->n_layers * G, sizeof *tab);
-  bool ok = tab && fwd_alloc(&f->oa_tab, (uint64_t)f->n_layers * G * sizeof *tab);
+  uint32_t xo[FWD_MAX_GROUPS], yo[FWD_MAX_GROUPS];
+  for (uint32_t k = 0; k < G; k++)
+    xo[k] = k * oin, yo[k] = k * (uint32_t)g->o_lora;
+  bool ok = tab && fwd_alloc(&f->oa_tab, (uint64_t)f->n_layers * G * sizeof *tab) &&
+            fwd_alloc(&f->oa_xoff, G * 4) && fwd_alloc(&f->oa_yoff, G * 4) && fwd_put(f->oa_xoff, xo, G * 4) &&
+            fwd_put(f->oa_yoff, yo, G * 4);
   for (int l = 0; ok && l < f->n_layers; l++)
     for (uint32_t k = 0; k < G; k++)
       tab[(size_t)l * G + k] = fwd_dev(f, f->w->layer[l].out_a) + k * (f->w->layer[l].out_a->bytes / G);
@@ -130,7 +139,9 @@ static bool scratch(Forward *f)
   const uint64_t row = gguf_bytes(f->w->layer[0].eg_embd ? f->w->layer[0].eg_embd->type : 0, g->engram_head_dim);
   const uint64_t cols = g->engram_cols, K = (uint64_t)g->n_used, FF = (uint64_t)g->expert_ff, hd = g->head_dim;
   const uint64_t ih = g->ix_head_dim, nh = g->ix_heads, egv = cols * (uint64_t)g->engram_head_dim;
-  const uint64_t B = FWD_MAX_BATCH, P = FWD_MAX_PAIRS, Fs = OPS_MAX_SELECT;
+  const uint64_t B = FWD_MAX_BATCH, P = FWD_MAX_BATCH * K, Fs = OPS_MAX_SELECT, T = MM_TILE;
+  uint64_t widest = (uint64_t)g->o_groups * g->o_lora > D ? (uint64_t)g->o_groups * g->o_lora : D;
+  widest = HQ > widest ? HQ : widest; /* the attention's output: wo_a's groups read it whole */
   const struct
   {
     void *field;
@@ -152,7 +163,10 @@ static bool scratch(Forward *f)
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
       {&b->ridx, B * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
-      {&b->order, P * 4},
+      {&b->order, P * 4},         {&b->rwp, P * F},                 {&b->x16, T * (widest > egv ? widest : egv) * 2},
+      {&b->xe16, P * T * (D > FF ? D : FF) * 2}, {&b->cnt, P * 4},  {&b->base, P * 4},
+      {&b->gidx, P * T * 4},      {&b->hidx, P * T * 4},            {&b->pidx, P * 4},
+      {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4}, {&b->offs, 4 * FWD_MAX_PAIRS * 4},
   };
   _Static_assert(sizeof want / sizeof *want == sizeof(Scratch) / sizeof(void *), "every buffer of Scratch, once");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
@@ -191,7 +205,7 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
   Forward *f = calloc(1, sizeof *f);
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
-  f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->slots = w->geo.window + MV_MAX_TOKENS;
+  f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->slots = w->geo.window + FWD_MAX_BATCH;
   f->eg_fd = -1;
   for (int i = 0; i < FWD_MAX_FILES; i++)
     f->fds[i] = -1;
@@ -228,6 +242,8 @@ void forward_destroy(Forward *f)
   pool_destroy(f->pool);
   free(f->tdev);
   hipFree(f->oa_tab);
+  hipFree(f->oa_xoff);
+  hipFree(f->oa_yoff);
   free(f->in.unit);
   pthread_cond_destroy(&f->in.cv);
   pthread_mutex_destroy(&f->in.mu);

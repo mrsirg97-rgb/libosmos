@@ -63,7 +63,7 @@ static bool layer(Forward *f, int l, const float *pre, int *nth, char *err)
   if (g->engram[l] && !fwd_engram(f, l, (*nth)++, err))
     return false;
   fwd_probe(f, "h_in", l, p, b->h, n * hc * D, false);
-  bool ok = mv_run(L->hc_attn_fn->type, fwd_dev(f, L->hc_attn_fn), nmix, hc * D, b->h, n, b->mix, NULL) &&
+  bool ok = fwd_mat(f, L->hc_attn_fn, fwd_dev(f, L->hc_attn_fn), nmix, hc * D, b->h, hc * D, n, b->mix, nmix) &&
             ops_hc_mix(b->h, b->mix, fv(f, L->hc_attn_scale), fv(f, L->hc_attn_base), hc, D,
                        g->rms_eps, g->hc_eps, g->sinkhorn_iters, n, b->a_pre, b->a_post, b->a_comb, NULL) &&
             ops_hc_pre_rms(b->h, pre, hc, D, fv(f, L->attn_norm), g->rms_eps, n, b->x, NULL);
@@ -76,7 +76,7 @@ static bool layer(Forward *f, int l, const float *pre, int *nth, char *err)
   if (!fwd_attention(f, l, err))
     return false;
   ok = ops_hc_post(b->y, b->h, b->a_post, b->a_comb, hc, D, n, b->mid, NULL) &&
-       mv_run(L->hc_ffn_fn->type, fwd_dev(f, L->hc_ffn_fn), nmix, hc * D, b->mid, n, b->mix, NULL) &&
+       fwd_mat(f, L->hc_ffn_fn, fwd_dev(f, L->hc_ffn_fn), nmix, hc * D, b->mid, hc * D, n, b->mix, nmix) &&
        ops_hc_mix(b->mid, b->mix, fv(f, L->hc_ffn_scale), fv(f, L->hc_ffn_base), hc, D,
                   g->rms_eps, g->hc_eps, g->sinkhorn_iters, n, b->f_pre, b->f_post, b->f_comb, NULL) &&
        ops_hc_pre_rms(b->mid, b->a_pre, hc, D, fv(f, L->ffn_norm), g->rms_eps, n, b->xf, NULL);
@@ -136,7 +136,8 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return fwd_fail(err, "a batch of no tokens, or more than FWD_MAX_BATCH");
   if (!place(f, seqs, tokens, n, err))
     return false;
-  if (!fwd_put_async(f->b.ids, f->pin->tok, n * 4) || !fwd_put_async(f->b.pos, f->pin->pos, n * 4) ||
+  if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess || !fwd_put_async(f->b.ids, f->pin->tok, n * 4) ||
+      !fwd_put_async(f->b.pos, f->pin->pos, n * 4) ||
       !ops_embed(f->w->embed->type, fwd_dev(f, f->w->embed), g->n_embd, f->b.ids, n, g->hc, f->b.h, NULL))
     return fwd_fail(err, "a GPU call failed (the embedding)");
   int nth = 0;
@@ -147,16 +148,19 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
   {
     const bool ok = ops_hc_pre_rms(f->b.h, f->b.f_pre, g->hc, g->n_embd, fv(f, f->w->output_norm), g->rms_eps, n,
                                    f->b.x, NULL) &&
-                    mv_run(f->w->output->type, fwd_dev(f, f->w->output), (uint32_t)g->n_vocab, g->n_embd, f->b.x, n,
-                           f->b.vocab, NULL);
+                    fwd_mat(f, f->w->output, fwd_dev(f, f->w->output), (uint32_t)g->n_vocab, g->n_embd, f->b.x,
+                            g->n_embd, n, f->b.vocab, (uint32_t)g->n_vocab);
     if (!ok)
       return fwd_fail(err, "a GPU call failed (the head)");
     fwd_probe(f, "logits", -1, f->at, f->b.vocab, (uint64_t)n * g->n_vocab, false);
   }
   /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
-  if (hipDeviceSynchronize() != hipSuccess)
+  if (hipMemcpyAsync(&f->pin->overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
+      hipDeviceSynchronize() != hipSuccess)
     return fwd_fail(err, "a GPU call failed (the step)");
   fwd_release_held(f);
+  if (f->pin->overflow)
+    return fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   for (uint32_t i = 0; i < n; i++)
     seqs[i]->pos++;
   return true;

@@ -21,7 +21,7 @@ static bool finish_row(Forward *f, int l, uint32_t i, int32_t m, const float *la
   f->pin->rpos[l][i] = m * g->compress[l];
   bool ok = fwd_put_async(b->rpos + i, &f->pin->rpos[l][i], 4);
   if (ok && g->ix_source[l])
-    ok = mv_run(L->ix_k->type, fwd_dev(f, L->ix_k), ih, hd, lat, 1, b->ikr, NULL) &&
+    ok = fwd_mat(f, L->ix_k, fwd_dev(f, L->ix_k), ih, hd, lat, hd, 1, b->ikr, ih) &&
          ops_rms(b->ikr, ih, ih, F(f, L->ix_k_norm), g->rms_eps, 1, b->ikr, ih, NULL) &&
          ops_rope(b->ikr, 1, ih, RD, ih, f->freqs_comp, b->rpos + i, false, 1, NULL) &&
          ops_fp4_round(b->ikr, ih, FP4_INDEX_BLOCK, false, NULL) &&
@@ -45,9 +45,9 @@ static bool compress_rows(Forward *f, int l, char *err)
   const LayerWeights *L = &f->w->layer[l];
   Scratch *b = &f->b;
   const uint32_t r = (uint32_t)g->compress[l], hd = g->head_dim, D = g->n_embd, n = f->n;
-  bool ok = mv_run(L->comp_kv->type, fwd_dev(f, L->comp_kv), hd, D, b->x, n, r == 1 ? b->lat : b->kvc, NULL) &&
+  bool ok = fwd_mat(f, L->comp_kv, fwd_dev(f, L->comp_kv), hd, D, b->x, D, n, r == 1 ? b->lat : b->kvc, hd) &&
             (r == 1 ? ops_rms(b->lat, hd, hd, F(f, L->comp_norm), g->rms_eps, n, b->lat, hd, NULL)
-                    : mv_run(L->comp_gate->type, fwd_dev(f, L->comp_gate), hd, D, b->x, n, b->scg, NULL));
+                    : fwd_mat(f, L->comp_gate, fwd_dev(f, L->comp_gate), hd, D, b->x, D, n, b->scg, hd));
   for (uint32_t i = 0; ok && i < n; i++)
   {
     const int32_t p = f->pin->pos[i];
@@ -82,10 +82,10 @@ static bool select_rows(Forward *f, int l, int src, char *err)
   const uint32_t nh = g->ix_heads, ih = g->ix_head_dim, D = g->n_embd, RD = g->rope_dim, n = f->n;
   const uint32_t ratio = (uint32_t)g->compress[l];
   const float w_scale = (float)(pow(ih, -0.5) * pow(nh, -0.5));
-  bool ok = mv_run(L->ix_q_b->type, fwd_dev(f, L->ix_q_b), nh * ih, g->q_lora, b->qa, n, b->qix, NULL) &&
+  bool ok = fwd_mat(f, L->ix_q_b, fwd_dev(f, L->ix_q_b), nh * ih, g->q_lora, b->qa, g->q_lora, n, b->qix, nh * ih) &&
             ops_rope(b->qix, nh, ih, RD, nh * ih, f->freqs_comp, b->pos, false, n, NULL) &&
             ops_fp4_round(b->qix, (uint64_t)n * nh * ih, FP4_INDEX_BLOCK, false, NULL) &&
-            mv_run(L->ix_proj->type, fwd_dev(f, L->ix_proj), nh, D, b->x, n, b->wix, NULL) &&
+            fwd_mat(f, L->ix_proj, fwd_dev(f, L->ix_proj), nh, D, b->x, D, n, b->wix, nh) &&
             ops_scale(b->wix, (uint64_t)n * nh, w_scale, NULL);
   for (uint32_t i = 0; ok && i < n; i++)
   {
@@ -114,11 +114,11 @@ bool fwd_attention(Forward *f, int l, char *err)
   const uint32_t H = g->n_heads, HD = g->head_dim, RD = g->rope_dim, QL = g->q_lora, D = g->n_embd, n = f->n;
   const uint32_t OG = g->o_groups, OL = g->o_lora, oin = H * HD / OG, ratio = (uint32_t)g->compress[l];
   const float *freqs = ratio ? f->freqs_comp : f->freqs_win;
-  bool ok = mv_run(L->q_a->type, fwd_dev(f, L->q_a), QL, D, b->x, n, b->qa, NULL) &&
+  bool ok = fwd_mat(f, L->q_a, fwd_dev(f, L->q_a), QL, D, b->x, D, n, b->qa, QL) &&
             ops_rms(b->qa, QL, QL, F(f, L->q_a_norm), g->rms_eps, n, b->qa, QL, NULL) &&
-            mv_run(L->q_b->type, fwd_dev(f, L->q_b), H * HD, QL, b->qa, n, b->q, NULL) &&
+            fwd_mat(f, L->q_b, fwd_dev(f, L->q_b), H * HD, QL, b->qa, QL, n, b->q, H * HD) &&
             ops_rope(b->q, H, HD, RD, H * HD, freqs, b->pos, false, n, NULL) &&
-            mv_run(L->kv->type, fwd_dev(f, L->kv), HD, D, b->x, n, b->kv, NULL) &&
+            fwd_mat(f, L->kv, fwd_dev(f, L->kv), HD, D, b->x, D, n, b->kv, HD) &&
             ops_rms(b->kv, HD, HD, F(f, L->kv_norm), g->rms_eps, n, b->kv, HD, NULL) &&
             ops_rope(b->kv, 1, HD, RD, HD, freqs, b->pos, false, n, NULL) &&
             ops_fp8_round(b->kv, (uint64_t)n * HD, NULL);
@@ -155,13 +155,14 @@ bool fwd_attention(Forward *f, int l, char *err)
   fwd_probe(f, "o", l, f->at, b->o, n * H * HD, false);
   ok = ops_rope(b->o, H, HD, RD, H * HD, freqs, b->pos, true, n, NULL) &&
        ops_fp8_round(b->o, (uint64_t)n * H * HD, NULL);
-  if (n == 1)
-    ok = ok && mv_group(L->out_a->type, f->oa_tab + (size_t)l * OG, OG, OL, oin, b->o, oin, 1, b->oa, NULL);
-  else /* a group a launch over the tokens: the same rows, so the same bits as the grouped launch */
-    for (uint32_t k = 0; ok && k < OG; k++)
-      ok = mv_strided(L->out_a->type, fwd_dev(f, L->out_a) + k * (L->out_a->bytes / OG), OL, oin, b->o + k * oin,
-                      H * HD, n, b->oa + k * OL, OG * OL, NULL);
-  ok = ok && mv_run(L->out_b->type, fwd_dev(f, L->out_b), D, OG * OL, b->oa, n, b->y, NULL);
+  /* wo_a: the tokens' attention to f16 once, then every group in one launch, group k over its 4,096 of each */
+  for (uint32_t k = 0; k < OG; k++)
+    f->pin->oa_cnt[k] = (int32_t)n;
+  ok = ok && fwd_put_async(b->oa_cnt, f->pin->oa_cnt, OG * 4) &&
+       mm_x16(b->o, H * HD, n, H * HD, b->x16, b->overflow, NULL) &&
+       mm_group(L->out_a->type, f->oa_tab + (size_t)l * OG, b->oa_cnt, OG, OL, oin, b->x16, f->oa_xoff, H * HD, b->oa,
+                f->oa_yoff, OG * OL, NULL);
+  ok = ok && fwd_mat(f, L->out_b, fwd_dev(f, L->out_b), D, OG * OL, b->oa, OG * OL, n, b->y, D);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention's output)");
   fwd_probe(f, "attn_out", l, f->at, b->y, n * D, false);
