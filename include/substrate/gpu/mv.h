@@ -37,6 +37,8 @@ mv_group
 
 mv_strided
   mv_run with token t's x at x + t * x_stride and its y at y + t * y_stride (a slice of a wider row: the attention's
-  grouped wo_a reads each group's 4,096 of a token's 32,768); the same sums, so the same bits. also false for a
-  stride that is not a multiple of 8, or, with tokens > 1, that is shorter than its row.
+  grouped wo_a reads each group's 4,096 of a token's 32,768); the same sums, so the same bits. any n_tok: past
+  MV_MAX_TOKENS, consecutive chunks of MV_MAX_TOKENS (the last the rest) in one launch and one more - the sums of
+  one call a chunk. also false for a stride that is not a multiple of 8, or, with tokens > 1, that is shorter than its
+  row.
 */

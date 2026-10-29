@@ -30,9 +30,9 @@ constexpr Tune tune(quant::Type t, int nt) {
 
 template <quant::Type T, int NT>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
-            hipStream_t s) {
+            hipStream_t s, uint32_t chunks = 1) {
   constexpr Tune k = tune(T, NT);
-  return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, xs, y, ys, s);
+  return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, xs, y, ys, s, chunks);
 }
 
 template <quant::Type T>
@@ -40,6 +40,12 @@ bool by_tokens(const void* w, uint32_t rows, uint32_t cols, const float* x, uint
                uint32_t ys, hipStream_t s) {
   if (cols % quant::Block<T>::values || cols % quant::kChunk) return false;
   if ((n_tok > 1 && (xs < cols || ys < rows)) || xs % quant::kChunk) return false;  // tokens apart; x's float4s whole
+  if (n_tok > MV_MAX_TOKENS) {  // whole chunks of MV_MAX_TOKENS in one launch, then the rest: each chunk's own sums
+    const uint32_t whole = n_tok / MV_MAX_TOKENS, done = whole * MV_MAX_TOKENS;
+    return launch<T, MV_MAX_TOKENS>(w, rows, cols, x, xs, y, ys, s, whole) &&
+           (done == n_tok || by_tokens<T>(w, rows, cols, x + (uint64_t) done * xs, xs, n_tok - done,
+                                          y + (uint64_t) done * ys, ys, s));
+  }
   switch (n_tok) {
     case 1: return launch<T, 1>(w, rows, cols, x, xs, y, ys, s);
     case 2: return launch<T, 2>(w, rows, cols, x, xs, y, ys, s);
@@ -85,6 +91,7 @@ extern "C" bool mv_group(uint32_t type, const void* const* w, uint32_t n, uint32
 
 extern "C" bool mv_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t n_tok,
                        float* y, void* stream) {
+  if (n_tok > MV_MAX_TOKENS) return false;  // the decode's: a step and its drafts
   return mv_strided(type, w, rows, cols, x, cols, n_tok, y, rows, stream);
 }
 

@@ -66,11 +66,14 @@ __device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uin
     }
 }
 
+// blockIdx.y a chunk of NT tokens: chunk j's x at x + j NT xs, its y at y + j NT ys - each chunk the sums it takes
+// alone
 template <quant::Type T, int NT, int R, int U>
 __global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* __restrict__ w, uint32_t rows,
                                                                  uint32_t cols, const float* __restrict__ x,
                                                                  uint32_t xs, float* __restrict__ y, uint32_t ys) {
-  rows_of<T, NT, R, U>(w, rows, cols, x, xs, y, ys);
+  const uint64_t j = blockIdx.y * (uint64_t) NT;
+  rows_of<T, NT, R, U>(w, rows, cols, x + j * xs, xs, y + j * ys, ys);
 }
 
 // n matrices of the same shape and type at once (blockIdx.y the matrix): matrix m's w from the table, its x at
@@ -87,10 +90,10 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_kernel(const uint
 
 template <quant::Type T, int NT, int R, int U>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
-            hipStream_t s) {
+            hipStream_t s, uint32_t chunks = 1) {
   const uint32_t per_block = kWavesPerBlock * R;
-  kernel<T, NT, R, U><<<(rows + per_block - 1) / per_block, kWave * kWavesPerBlock, 0, s>>>((const uint8_t*) w, rows,
-                                                                                            cols, x, xs, y, ys);
+  kernel<T, NT, R, U><<<dim3((rows + per_block - 1) / per_block, chunks), kWave * kWavesPerBlock, 0, s>>>(
+      (const uint8_t*) w, rows, cols, x, xs, y, ys);
   return hipGetLastError() == hipSuccess;
 }
 
