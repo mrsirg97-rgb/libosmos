@@ -171,9 +171,27 @@ what it means for the design:
   registrations fills it. the planner budgets RAM; GTT is one of its terms.
 - **the overflow rotates.** ds1017's ~140 GB of weights exceed RAM, so a set of registered regions turns over: pinned
   where the router needs them, unpinned behind - the read ahead of the GPU at the SSD's speed.
-- **unmeasured yet**: registration and unregistration costs at the size of an expert (~10 MB) and their rate; many
-  registrations at once (a limit on their count?); a pinned set near the RAM ceiling (the desktop's behaviour); the
-  page cache's eviction of unpinned file pages under the GPU's allocations.
+
+at an expert's size (`spikes/inplace_read/regs.hip`, `.research/spike-regs.txt`; 3 MiB regions, one expert slice, of a
+36.7 GiB shard):
+
+| | measured |
+| --- | --- |
+| register, cold, one at a time (400 calls) | p50 2.19 ms, p95 3.02 ms, max 159 ms - **1.25 GB/s** (the pages read one by one) |
+| register, warm (in the page cache) | **0.029 ms** |
+| unregister | ~0 ms (p95 0.003) |
+| two registrations sharing a 4 KiB page | **refused** ("part or all of the requested memory range is already mapped") |
+| held at once | 4,000 of 4,000 (11.7 GiB), the GPU's sum ok, all released in ~0 s |
+
+- **the I/O and the pinning are separate steps.** a cold registration is a read at queue depth 1 (1.25 GB/s); a warm
+  one is 29 us. so the planner reads ahead into the page cache with many reads in flight (6.2 GB/s measured above)
+  and pins once the pages are there.
+- **registrations cannot share a page**, and an expert's slice is not page-aligned (an IQ2_XXS gate is 3,041,280 B),
+  so neighbouring experts share a boundary page. the planner registers merged, page-aligned runs of experts; an expert
+  leaving a run unregisters it and registers the rest again (warm: ~0.03 ms a piece).
+- **the count is no constraint** at this model's scale (4,000 held).
+- **still unmeasured**: a pinned set near the RAM ceiling (the desktop's behaviour); the page cache's eviction of
+  unpinned file pages under the GPU's allocations.
 
 ## splash's bets, and what each is worth here
 
