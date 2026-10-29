@@ -217,6 +217,13 @@ splash (Apache-2.0, Apple silicon) - read from its README and docs.
 - **one binary.** it serves the OpenAI API itself (no python server in front).
 - **the bar: maya v1.1.36 + #643 + #587**, on this box.
 - **the harness is maya's own**: `tools/ds4/agent_bench.py` and `tools/ds4/parallel_test.py` (#557 / #587), unchanged.
+- **C for the host code**, libevt's style (Allman braces, 2-space indent, `Type` / `module_verb`, notes on each
+  function in a block after the header's `#endif`), and libtrdr's `scope.md` memory model: every type has
+  `type_create` / `type_destroy`; ownership is a tree - a component frees what its scope allocated and never what it
+  borrowed; a constructor that fails releases what it took and returns NULL; `destroy` takes NULL. HIP C++ only for
+  the kernels, behind a C interface.
+- **no leaks, no faults, checked**: every host test runs plain and under ASan + LeakSanitizer + UBSan (`make asan`) and
+  ThreadSanitizer (`make tsan`); the device code stays behind the C interface so the host's tests need no GPU.
 
 what is ported and what is new (operator, 2026-10-28):
 
