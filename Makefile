@@ -16,7 +16,8 @@ LIB_DIR  := lib
 SRCS := $(shell find $(SRC_DIR) -name '*.c' ! -name 'hip_*.c')
 HIP_SRCS := $(shell find $(SRC_DIR) -name 'hip_*.c')
 HIP_OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(HIP_SRCS))
-# the kernels (HIP C++, gfx1151 only) behind their C interfaces, into the HIP library
+# the kernels (HIP C++, gfx1151 only) behind their C interfaces, into the HIP library; no contraction but the fmaf
+# a kernel writes, so a sum's rounding is the source's and the same in every instantiation
 KERNEL_DIR := kernels
 KERNEL_SRCS := $(wildcard $(KERNEL_DIR)/*.hip)
 KERNEL_OBJS := $(patsubst $(KERNEL_DIR)/%.hip,$(OBJ_DIR)/kernels/%.o,$(KERNEL_SRCS))
@@ -45,7 +46,7 @@ $(OBJ_DIR)/%/hip_pinner.o: $(SRC_DIR)/%/hip_pinner.c
 
 $(OBJ_DIR)/kernels/%.o: $(KERNEL_DIR)/%.hip $(KERNEL_HDRS)
 	@mkdir -p $(dir $@)
-	$(HIPCC) -O2 -Wall -Werror -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) -c $< -o $@
+	$(HIPCC) -O2 -ffp-contract=off -Wall -Werror -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) -c $< -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)

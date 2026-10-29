@@ -31,10 +31,11 @@ template <> struct Block<kIQ2_XXS> { static constexpr int values = kQK, bytes = 
 template <> struct Block<kIQ2_XS> { static constexpr int values = kQK, bytes = 74; };
 template <> struct Block<kIQ4_NL> { static constexpr int values = kQ32, bytes = 18; };
 template <> struct Block<kIQ1_M> { static constexpr int values = kQK, bytes = 56; };
+template <> struct Block<kF32> { static constexpr int values = kChunk, bytes = 4 * kChunk; };  // no block: a chunk
 template <> struct Block<kBF16> { static constexpr int values = kChunk, bytes = 2 * kChunk; };  // no block: a chunk
 
-// blocks sit at any byte (34, 18, 66 ... bytes apart): loads byte by byte
-__device__ inline uint32_t ld16(const uint8_t* p) { return p[0] | (uint32_t) p[1] << 8; }
+// every block's size is even (34, 18, 66, 74, 210 ... bytes) and every row starts even: 16-bit loads, never wider
+__device__ inline uint32_t ld16(const uint8_t* p) { return *(const uint16_t*) p; }
 __device__ inline uint32_t ld32(const uint8_t* p) { return ld16(p) | ld16(p + 2) << 16; }
 __device__ inline float f16(uint32_t bits) { return __half2float(__ushort_as_half((unsigned short) bits)); }
 __device__ inline float mul(float a, float b) { return __fmul_rn(a, b); }
@@ -130,6 +131,10 @@ template <> __device__ inline void decode<kIQ1_M>(const uint8_t* b, int k, float
 // the top half of an F32; 8 values a chunk like the others
 template <> __device__ inline void decode<kBF16>(const uint8_t* b, int k, float* v) {
   for (int j = 0; j < kChunk; j++) v[j] = __uint_as_float(ld16(b + 2 * (k * kChunk + j)) << 16);
+}
+
+template <> __device__ inline void decode<kF32>(const uint8_t* b, int k, float* v) {
+  for (int j = 0; j < kChunk; j++) v[j] = __uint_as_float(ld32(b + 4 * (k * kChunk + j)));
 }
 
 }  // namespace quant
