@@ -10,6 +10,15 @@ extern "C" {
 namespace {
 
 constexpr int kThreads = 256;
+
+// a type's tile (mm.h's Shape): measured on gfx1151 on ds1017's matrices, one token (2026-10-29). Q5_K's decode is the
+// heaviest: small slabs, so more waves hide it (q_b 88 -> 163 GB/s, the head 123 -> 157); the IQ experts' wants
+// bytes in flight (SL 64, 16 waves); Q8_0 and Q6_K were near their matvec's at SL 128
+template <quant::Type T> struct Tuned { using S = mm::Shape<128, 8, 8>; };
+template <> struct Tuned<quant::kQ5_K> { using S = mm::Shape<32, 8, 2>; };
+template <> struct Tuned<quant::kIQ1_M> { using S = mm::Shape<64, 16, 4>; };
+template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<64, 16, 4>; };
+template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<64, 16, 4>; };
 constexpr float kF16Max = 65504.0f;
 
 // a thread a value: to f16 (the rows past n zero)
@@ -37,9 +46,10 @@ template <quant::Type T>
 bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t rows, uint32_t cols,
                   const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff, uint32_t ys,
                   hipStream_t s) {
-  if (rows % mm::kTile || cols % quant::Block<T>::values || cols % mm::kSlab || xts < cols || xts % mm::kTile)
+  using S = typename Tuned<T>::S;
+  if (rows % mm::kTile || cols % quant::Block<T>::values || cols % S::kSlab || xts < cols || xts % mm::kTile)
     return false;
-  mm::group_kernel<T><<<dim3(rows / mm::kTile, n_mat), mm::kWave * mm::kWavesPerBlock, 0, s>>>(
+  mm::group_kernel<T, S><<<dim3(rows / mm::kTile, n_mat), mm::kWave * S::kWaves, 0, s>>>(
       (const uint8_t* const*) w, cnt, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
   return hipGetLastError() == hipSuccess;
 }
@@ -47,9 +57,10 @@ bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint
 template <quant::Type T>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
             hipStream_t s) {
-  if (rows % mm::kTile || cols % quant::Block<T>::values || cols % mm::kSlab) return false;
-  mm::kernel<T><<<rows / mm::kTile, mm::kWave * mm::kWavesPerBlock, 0, s>>>((const uint8_t*) w, cols,
-                                                                           (const _Float16*) x16, n, y, ys);
+  using S = typename Tuned<T>::S;
+  if (rows % mm::kTile || cols % quant::Block<T>::values || cols % S::kSlab) return false;
+  mm::kernel<T, S><<<rows / mm::kTile, mm::kWave * S::kWaves, 0, s>>>((const uint8_t*) w, cols, (const _Float16*) x16,
+                                                                     n, y, ys);
   return hipGetLastError() == hipSuccess;
 }
 
