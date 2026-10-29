@@ -81,7 +81,7 @@ forward_step
   stepped again.
 
 forward_batch
-  n tokens (1 .. MM_MAX_TOKENS, 256) at once, token i at seqs[i]'s next position: a sequence may be given several times,
+  n tokens (1 .. MM_MAX_TOKENS) at once, token i at seqs[i]'s next position: a sequence may be given several times,
   its tokens then at its next positions in the order given (a chunk of its prompt, or drafts to verify), each seeing
   the ones before it. a token's results are the same bits however it is batched - alone, beside other sequences, or
   in a chunk of its own: every step a token takes is summed in an order of its own, never the batch's. false, with

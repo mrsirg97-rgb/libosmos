@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define MM_TILE 16
-#define MM_MAX_TOKENS 1024
+#define MM_MAX_TOKENS 2048
 #define MM_MAX_GROUP 65535
 
 bool mm_known(uint32_t type);
