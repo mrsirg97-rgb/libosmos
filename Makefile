@@ -16,6 +16,11 @@ LIB_DIR  := lib
 SRCS := $(shell find $(SRC_DIR) -name '*.c' ! -name 'hip_*.c')
 HIP_SRCS := $(shell find $(SRC_DIR) -name 'hip_*.c')
 HIP_OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(HIP_SRCS))
+# the kernels (HIP C++, gfx1151 only) behind their C interfaces, into the HIP library
+KERNEL_DIR := kernels
+KERNEL_SRCS := $(wildcard $(KERNEL_DIR)/*.hip)
+KERNEL_OBJS := $(patsubst $(KERNEL_DIR)/%.hip,$(OBJ_DIR)/kernels/%.o,$(KERNEL_SRCS))
+KERNEL_HDRS := $(wildcard $(KERNEL_DIR)/*.h)
 GPU_TESTS := $(patsubst $(TEST_DIR)/gpu/%.hip, $(BIN_DIR)/gpu/%, $(wildcard $(TEST_DIR)/gpu/*.hip))
 ROCM ?= /opt/rocm
 HIPCC := $(ROCM)/bin/hipcc
@@ -31,12 +36,16 @@ all: $(LIB)
 $(LIB): $(OBJS) | $(LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $(filter %.o,$^)
 
-$(HIP_LIB): $(HIP_OBJS) | $(LIB_DIR)
+$(HIP_LIB): $(HIP_OBJS) $(KERNEL_OBJS) | $(LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $(filter %.o,$^)
 
 $(OBJ_DIR)/%/hip_pinner.o: $(SRC_DIR)/%/hip_pinner.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(ROCM)/include -D__HIP_PLATFORM_AMD__ -c $< -o $@
+
+$(OBJ_DIR)/kernels/%.o: $(KERNEL_DIR)/%.hip $(KERNEL_HDRS)
+	@mkdir -p $(dir $@)
+	$(HIPCC) -O2 -Wall -Werror -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) -c $< -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -44,7 +53,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 
 $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
-	$(HIPCC) -O2 -Iinclude --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -o $@
+	$(HIPCC) -O2 -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -o $@
 
 # the GPU's tests (a gfx1151 and the model): exit 77 is a skip
 gpu-tests: $(GPU_TESTS)
