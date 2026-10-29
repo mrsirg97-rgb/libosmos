@@ -214,17 +214,41 @@ asked at once, read by fetchq and pinned by the pool through hip_pinner in **420
 the GPU's sums the CPU's. (maya's ~1.4 GB/s on a prompt is paced by its GPU work, not its reads: not the same
 measurement.)
 
-## the oracle (checked 2026-10-28)
+## determinism (operator, 2026-10-28)
 
-- **primary: maya-ds4's own dumps**, the bar's engine on the same ids: `DS4_DUMP_L` (every layer's residual streams,
-  records `[layer, p0, T]` + T x hc x dim F32), `DS4_DUMP_R` (a layer's routing: picks, gate logits, bias),
-  `DS4_DUMP_Y` (expert sets' h and y rows), `--dump-logits`, `--ppl`. substrate writes the same records, so maya's
-  `tools/ds4/dumpcmp.py` compares the two engines unchanged.
-- **secondary, inside a layer: maya's torch reference** `tools/ds4/ref_gguf.py` (shares no engine code; its
-  `ref.py` functions step through a layer's parts). it needs torch (CPU: a separate venv, a tool, never the runtime;
-  installed when a layer first parts from maya) and one fix: its Engram rows are Q6_K or MXFP8 only, and this
-  model's are **IQ4_NL** (144 B a row) - read as MXFP8 they would be silently wrong. the weights' types it covers
-  through gguf-py's dequantizers (IQ1_M, IQ2_XXS, IQ2_XS, Q5_K, Q6_K, Q8_0, IQ4_NL, BF16: checked).
+maya's prompt path is not run-to-run deterministic on this box: two runs of the bar's maya-ds4 on the same 32 real
+tokens (`~/substrate-oracle`, `dumpcmp.py layers`) part from layer 0 (worst 1.1e-8 at position 8) and grow - layer
+10 median 1.3% (worst 18%), layers 30-38 median 4-7% - to logits KL 2.5e-3 mean, 1.4e-2 max, the argmax the same at
+32 of 33 positions (the 4 greedy tokens the same). substrate diverges from maya here:
+
+1. **run-to-run determinism - a rule.** the same request on the same build gives the same bits, every run: no
+   floating-point atomics, a fixed reduction order in every kernel, hipBLASLt solutions taken only where
+   deterministic (no atomic split-K), no CPU lane (the pool pins what the GPU reads). tested: two runs under different
+   thread timing and load, every dump record and every logit bit for bit.
+2. **schedule invariance - the target.** a request's answer does not depend on how the scheduler served it: its
+   prompt read whole or in pieces of any size, alone or beside other conversations, DSpark drafting or not. so every
+   kernel computes a row the same way whatever the batch or chunk around it (a row's tiling and reduction fixed by
+   its own shape, never by T). then libevt's policies are correct by construction: no policy can change an answer.
+   tested as a property (random piece sizes, random interleavings, against the request alone). its cost is
+   **unmeasured**: measured on the bar, and if it costs more than scheduling gains, it is a mode, said so.
+
+## the oracle (updated 2026-10-28)
+
+- **numerics: maya's torch reference**, deterministic F32, sharing no engine code - `oracle/ref.py` and
+  `oracle/ref_gguf.py`, copied from maya (MIT) with their attribution, run in `.oracle-venv` (CPU torch: a tool,
+  never the runtime). fixed here: maya's `ref_gguf.py` reads Engram rows as Q6_K or MXFP8 only, and this model's are
+  **IQ4_NL** (144 B a row) - read as MXFP8 they would be silently wrong. the weights' types it covers through gguf-py
+  (IQ1_M, IQ2_XXS, IQ2_XS, Q5_K, Q6_K, Q8_0, IQ4_NL, BF16: checked).
+- **measured, the first 8 positions of 32 real tokens** (`~/substrate-oracle`: `ref_gguf.py --dev cpu`, 334 s for 8
+  tokens): KL(reference || maya) 0.0002-0.018 a position, maya against itself 0-0.0057; the argmax the reference's at
+  7 of 8 (position 6: 67 against 75). substrate's numerics target: bit for bit run to run, and at least as close to
+  the reference as maya is (int8 activations and FP16 prompt GEMMs put maya a few times its own spread away).
+- fixed to read this model, besides the Engram rows (each `# substrate:` in `oracle/ref_gguf.py`): the embedding is
+  Q5_K, not Q8_0; the Engram gate is `q_weight` and `k_weight`, not folded. maya's `ref_gguf.py` would have read the
+  Engram rows wrong silently and refused the other two; all three are fixes to offer maya.
+- **the bar and a sanity check: maya-ds4's dumps** - `DS4_DUMP_L` (every layer's residual streams), `DS4_DUMP_R`
+  (routing), `DS4_DUMP_Y` (expert sets), `--dump-logits`. substrate writes the same records (`dumpcmp.py` unchanged);
+  against maya it must stay within maya's own run-to-run spread, measured per layer.
 
 ## splash's bets, and what each is worth here
 
