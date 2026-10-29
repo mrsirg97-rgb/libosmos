@@ -163,7 +163,8 @@ static void shape(const Gguf* g, const Shape& s) {
   double us[4];
   void* x16t = nullptr;
   float* yt = nullptr;
-  CHECK(hipMalloc(&x16t, (size_t) kBig * cols * 2) == hipSuccess && hipMalloc(&yt, (size_t) kBig * rows * 4) == hipSuccess);
+  CHECK(hipMalloc(&x16t, (size_t) kBig * cols * 2) == hipSuccess &&
+        hipMalloc(&yt, (size_t) kBig * rows * 4) == hipSuccess);
   CHECK(hipMemset(x16t, 0, (size_t) kBig * cols * 2) == hipSuccess);
   for (int k = 3; k >= 0; k--)
     us[k] = time_us([&](int i) {

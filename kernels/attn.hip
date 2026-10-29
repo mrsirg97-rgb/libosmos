@@ -35,7 +35,9 @@ __global__ void compress_kernel(const float* kvc, const float* sc, uint32_t slot
     *o = 0;
     return;
   }
-  auto at = [&](const float* x, uint32_t j) { return x[(uint64_t) ((uint32_t) (p + 1 - ratio + j) % slots) * dim + d]; };
+  auto at = [&](const float* x, uint32_t j) {
+    return x[(uint64_t) ((uint32_t) (p + 1 - ratio + j) % slots) * dim + d];
+  };
   float m = -INFINITY;
   for (uint32_t j = 0; j < ratio; j++) m = fmaxf(m, at(sc, j));
   float e[OPS_MAX_RATIO], s = 0;

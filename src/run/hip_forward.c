@@ -159,7 +159,8 @@ static bool scratch(Forward *f)
       {&b->sga, B * FF * F},      {&b->sup, B * FF * F},            {&b->shh, B * FF * F},
       {&b->sye, B * D * F},       {&b->up, FWD_UP_BYTES}, {&b->lat, B * hd * F},
       {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, B * ih * F},
-      {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},            {&b->score, B * (f->score_stride > Fs ? f->score_stride : Fs) * F}, /* + hip_skip.c's sel */
+      {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},
+      {&b->score, B * (f->score_stride > Fs ? f->score_stride : Fs) * F}, /* the indexer's; hip_skip.c's sel */
       {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},

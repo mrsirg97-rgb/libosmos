@@ -141,9 +141,10 @@ __global__ __launch_bounds__(kThreads) void values_kernel(Keys K, const float* _
 }  // namespace
 
 extern "C" bool ops_sparse_attn(const float* q, const float* ring, uint32_t slots, const int32_t* pos,
-                                uint32_t window, int32_t floor, const float* ckv, const int32_t* sel, const int32_t* n_sel,
-                                uint32_t sel_cap, uint32_t max_sel, const float* sink, float scale, uint32_t heads,
-                                uint32_t head_dim, uint32_t n_tok, float* scores, float* o, void* stream) {
+                                uint32_t window, int32_t floor, const float* ckv, const int32_t* sel,
+                                const int32_t* n_sel, uint32_t sel_cap, uint32_t max_sel, const float* sink,
+                                float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float* scores, float* o,
+                                void* stream) {
   if (!window || window > OPS_MAX_WINDOW || slots < window || sel_cap > OPS_MAX_SELECT || max_sel > sel_cap ||
       !heads || heads % kTile || !head_dim || head_dim % kTile || !n_tok || !scores || (ckv && (!sel || !n_sel)) ||
       floor < 0)
