@@ -1,0 +1,13 @@
+file /home/sirg/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf, 2.0 GiB at 8.0 GiB
+A device memory (hipMalloc)              239.7 GB/s  sums ok
+B pinned host memory (hipHostMalloc)     238.2 GB/s  sums ok
+C file pages in place, warm: register   0.00 s (44443.0 GB/s), read   237.5 GB/s  sums ok
+C file pages in place, cold: register   0.00 s (61987.2 GB/s), read   237.7 GB/s  sums ok
+D the mapping as pageable memory: the device reports no pageable memory access
+cold 2.0 GiB: register 0.48 s (4.5 GB/s), first GPU read 0.01 s (226.5 GB/s), then 239.5 GB/s; sums ok
+cold 24.0 GiB: register 4.17 s (6.2 GB/s), first GPU read 0.11 s (235.9 GB/s), then 236.6 GB/s; sums ok
+holding 90.0 GiB of device memory
+cold 16.0 GiB: register 2.81 s (6.1 GB/s), first GPU read 0.32 s (53.5 GB/s), then 236.3 GB/s; sums ok
+holding 4.0 GiB of device memory
+GTT used while registered: 4.17 GiB
+cold 12.0 GiB: register 2.06 s (6.3 GB/s), first GPU read 0.06 s (228.8 GB/s), then 238.2 GB/s; sums ok

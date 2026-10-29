@@ -22,6 +22,48 @@ milestone 1 is done when, on this Halo:
 - token for token the same greedy answers as the reference where the arithmetic is the same, and perplexity within
   the reference's run-to-run spread where it is not (the #356 / #643 protocol).
 
+## the claim this is for
+
+the Halo (one APU, **$4,000**, against **~$15,000** for the operator's 3-GPU workstation - 27% of its price) running a ~140 GB-weight model for local agents,
+with no CUDA - open drivers, ROCm, one binary - and a scheduler derived from first principles (libevt). the 3-GPU
+box is ~3x this one on raw decode and prompt speed, so the claim is not raw speed. what it can honestly be, each
+measured:
+
+- **agent latency**: first token and turn done on `agent_bench`, where scheduling moves the number most.
+- **per dollar**: agent turns an hour per dollar of hardware (prices: the operator's, $4,000 and ~$15,000).
+  a first estimate, **provisional**: the workstation's 190.5 s wall on agent_bench 4x8 (#587, another build and day)
+  against this box's 514.8 s is 2.7x the speed at 3.75x the price, so ~1.4x the agent work per dollar here, before
+  any of this runtime. the claim needs both boxes on the same harness, seed and build, power measured on both.
+- **per watt**: agent turns per Wh, package power (`tools/power.py`) and a wall meter. the workstation: ~700-800 W
+  at the wall under heavy inference (the operator's estimate, not a log), so its 190.5 s agent_bench run is ~40 Wh at
+  ~750 W; this box's: the powered bar run, **unmeasured** so far.
+- **fit**: the model on one 128 GB APU, where a single consumer NVIDIA card cannot hold it.
+
+### against the DGX Spark (the same class: unified memory, ~128 GB)
+
+maya's docs measure the Spark (GB10, 121 GB) on **GLM-5.3** only - no DeepSeek number exists there. GLM to GLM,
+`./maya.sh --bench`, different quants (Spark: Maya-S 96.5 GB; this box: unsloth UD-IQ2_XXS 101 GB):
+
+| | DGX Spark (`docs/DGX_SPARK.md`) | this Halo (2026-10-28) |
+| --- | ---: | ---: |
+| decode, DFlash2 | 21.1 tok/s | **29.8** (+41%) |
+| prompt, 2K / 8K tokens | **597-614 / 730-732** | 294-326 / 306-332 |
+| price (the operator's) | $7,000 | $4,000 (57%) |
+| memory bandwidth (rated) | 273 GB/s | 256 GB/s |
+| dense FP16 / int8 compute | ~125-250 TOPS (**an estimate** from NVIDIA's 1 PFLOP sparse FP4) | ~59 |
+
+decode wins with less bandwidth; the prompt trails about as far as the compute does. the prompt is the gap this
+runtime's kernels go after first (GLM's experts at ~40% of int8 peak; the attention's kernels barely measured).
+
+### it carries its own tuning
+
+this box's numbers came from tuning most owners will never do: `ttm`'s pages_limit, the platform profile, hipBLASLt
+tables retuned for the installed build (the shipped one was rejected for every shape), the grid sizes, the SSD's link,
+a bad core taken offline. so the binary carries what it can: it measures its own GEMM picks on the first start, sizes
+memory from what the machine reports (a 128 GB or a bigger unit, the same binary), and for what it cannot change -
+the `ttm` limit, `RLIMIT_MEMLOCK`, the platform profile - it says so at start, with the measured cost and the exact
+command. one command means the tuned numbers by default.
+
 ## the facts the design rests on
 
 ### the machine
@@ -66,9 +108,10 @@ new tokens a turn 150-18,693 (median 868), 98,757 in all.
 | run | first token mean / p50 / p95 / max (s) | turn done mean / p50 / p95 / max (s) | wall (s) |
 | --- | ---: | ---: | ---: |
 | 1 | 13.02 / 5.80 / 40.25 / 71.57 | 60.37 / 53.32 / 102.60 / 152.57 | 514.8 |
+| 2 | 12.84 / 5.75 / 37.43 / 71.96 | 60.11 / 52.40 / 102.96 / 153.75 | 512.7 |
 
-32 of 32 turns answered, 28 of 28 later turns continued their conversation in place. **one run so far**: the spread
-is not known yet. for scale, #587's 3-GPU split measured 5.23 / 2.37 / 13.5 first token and 190.5 s wall on the same
+32 of 32 turns answered, 28 of 28 later turns continued their conversation in place, both runs. **the spread**:
+wall 0.4%, first token mean 1.4%, p95 7%, turn done mean 0.4% - a p95 claim must clear ~7%. for scale, #587's 3-GPU split measured 5.23 / 2.37 / 13.5 first token and 190.5 s wall on the same
 workload.
 
 ## the model
@@ -99,6 +142,38 @@ the full inventory, with maya's file:line for every part: `.research/ds4-forward
 - **the oracle exists**: maya's `--ppl`, `--dump-logits`, per-layer dumps (`DS4_DUMP_H/R/Y`), `tools/ds4/ref_gguf.py`
   (a GGUF reference sharing no engine code; whether it decodes IQ1_M / IQ2_XS / Q5_K / Q6_K / IQ4_NL is unverified)
   and `compare.py` (cosine, KL, top-1 by layer).
+
+## the memory: one pool, read in place (spike, 2026-10-28)
+
+`spikes/inplace_read/inplace_read.hip`, raw output in `.research/spike-inplace_read.txt`. a streaming kernel sums 2-24
+GiB of a ds1017 GGUF shard; every GPU sum is checked against the CPU's.
+
+| where the bytes are | GPU read |
+| --- | ---: |
+| A device memory (hipMalloc) | 239.7 GB/s |
+| B pinned host memory (hipHostMalloc) | 238.2 GB/s |
+| C the GGUF's own pages, mmap + `hipHostRegister` (read-only, mapped), in the page cache | 237.5 GB/s |
+| C cold (evicted before mapping), 2 GiB: register 0.48 s (4.5 GB/s from the SSD), then | 226.5 -> 239.5 GB/s |
+| C cold, 24 GiB: register 4.17 s (**6.2 GB/s**, the SSD's 6.7 GB/s direct-read ceiling), then | 235.9 -> 236.6 GB/s |
+| D the mapping as plain pageable memory | not supported (the device reports no pageable access) |
+
+and, held 4 GiB of device memory and 12 GiB registered: the driver's `mem_info_gtt_used` reads **4.17 GiB** - a
+registration does not count against `ttm`'s pages_limit. `RLIMIT_MEMLOCK` (8 MB) did not refuse it either.
+
+what it means for the design:
+
+- **the GPU reads the model's files where they lie, at its own memory's speed.** no staging copy, no ring: maya's
+  flow copies the non-resident experts through a ring at ~1.4 GB/s (GPU-paced); here they can be registered and read
+  in place.
+- **a cold registration is a read at the SSD's speed** (6.2 of 6.7 GB/s, one call): the planner's only I/O.
+- **the limit is RAM, not GTT.** registered pages are pinned RAM outside `ttm`'s 107.6 GiB, so the budget is physical
+  RAM (~116 GiB) less the operator's reserve (~16-20 GB for the desktop and docker), whatever mix of allocations and
+  registrations fills it. the planner budgets RAM; GTT is one of its terms.
+- **the overflow rotates.** ds1017's ~140 GB of weights exceed RAM, so a set of registered regions turns over: pinned
+  where the router needs them, unpinned behind - the read ahead of the GPU at the SSD's speed.
+- **unmeasured yet**: registration and unregistration costs at the size of an expert (~10 MB) and their rate; many
+  registrations at once (a limit on their count?); a pinned set near the RAM ceiling (the desktop's behaviour); the
+  page cache's eviction of unpinned file pages under the GPU's allocations.
 
 ## splash's bets, and what each is worth here
 
@@ -150,6 +225,20 @@ gap is the hardware. so:
   copied through a staging ring at 1.4 GB/s - **a hypothesis, unmeasured**), prompt kernels for this GPU, and
   scheduling tuned to one APU. those show in first token and turn done - what agent_bench measures.
 
+## the scheduler
+
+libevt (`~/Projects/libevt`, C, MIT, the operator's): one consumer, a total `(priority, id)` order, `own` (a resource
+alone once the shared work out on it is back) and `cap` (n slots). its line: libtrdr (C) -> rig's `evt` (Go) ->
+libevt (C); maya's DeepSeek serve loop runs a C++ port of it (#557 / #587).
+
+| | ops/s | source |
+| --- | ---: | --- |
+| libtrdr, C, one core, empty closures | 10M | the operator |
+| rig's `evt`, Go | > 300K | the operator |
+| libevt | **unmeasured** | to measure at the scheduler step: empty contexts one core; 8 producers; idle wake-up |
+
+the budget it has to fit: a token is ~35 ms here, so 10 us an event would be ~0.03% of one.
+
 ## the harness interface
 
 `agent_bench` and `parallel_test` drive an engine over its stdin / stdout, token ids only - no tokenizer, no HTTP -
@@ -168,12 +257,18 @@ HTTP API, and the reference is measured through the same harness:
 
 ## the protocol (carried from #356 / #557 / #587)
 
-- every claim is a measured number on this box, with the command that reproduces it.
+- every claim is a measured number on this box, with the command that reproduces it, and the box's state with it:
+  today **core 1 (cpus 1, 17) offline** (idle MCE errors), 15 of 16 cores. its cost is expected small (decode and
+  prompt are GPU- and memory-bound; maya's CPU lane takes 0.2-1.7% of the experts) and **unmeasured**: a fixed unit is
+  re-measured on the same commands.
 - same binary, one switch off and on, alternating runs, at least two each; the run-to-run spread is measured and
   reported, not assumed.
 - latency: first token and turn done at mean / p50 / p95, and wall. throughput: prompt tok/s at 2K / 8K / 32K, decode
   tok/s.
 - correctness: greedy token-for-token against the reference where the arithmetic matches; perplexity (`--ppl`)
   within the measured spread where it does not; the engine's own run-to-run determinism measured first.
+- power: every bar run under `tools/power.py` (amdgpu PPT, the APU package: CPU + GPU + NPU, 2 samples a second),
+  reported as mean / peak watts and the energy of the run. PPT is not wall power (DRAM, the SSD, fans and the supply
+  are outside it); a headline claim per watt uses a wall meter, with PPT beside it.
 - what was tried and did not work is written down, with its numbers.
 - what was not tested is said.
