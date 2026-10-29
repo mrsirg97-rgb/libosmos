@@ -9,6 +9,7 @@
 #define MM_MAX_GROUP 65535
 
 bool mm_known(uint32_t type);
+uint32_t mm_col_tiles(uint32_t type, uint32_t n);
 bool mm_x16(const float *x, uint32_t xs, uint32_t n, uint32_t cols, void *x16, int32_t *overflow, void *stream);
 bool mm_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const void *x16, uint32_t n, float *y,
             uint32_t ys, void *stream);
@@ -42,6 +43,11 @@ mm_run
   of 16, cols of 128 (a slab). false, nothing queued, for a type without a kernel, a shape it cannot tile, n
   outside 1 .. MM_MAX_TOKENS, or a launch refused.
 
+mm_col_tiles
+  the column tiles a block of `type` takes for n tokens (mm_run's, and mm_group's for its max_cnt): a slab decoded
+  once for that many tiles' WMMAs - more tiles, more registers and fewer waves to hide the decode. so a group's
+  matrices of very different counts are best launched apart, each run of the same tiles its own mm_group (measured:
+  a one-tile expert under an 8-tile launch 37% slower). 0 for a type without a kernel.
 mm_x16_rows
   slots rows of activations: slot s is row idx[s] of x (row r at x + r * xs; -1: zero) as f16, into x16 (slots rows of
   cols, tiled) - each distinct expert's tokens gathered into slots of its own (whole tiles of MM_TILE). *overflow as

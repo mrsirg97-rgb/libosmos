@@ -70,8 +70,27 @@ static void check(const char* name, const Ref& r) {
       std::exit(1);
     }
   }
-  CHECK(hipFree(src) == hipSuccess && hipFree(dst) == hipSuccess);
-  std::printf("  %-8s %9llu values, bit for bit gguf-py's, twice\n", name, (unsigned long long) n);
+  /* as f16 (the matmul's decode): gguf-py's value rounded to f16, every one bit for bit */
+  _Float16* dh = nullptr;
+  CHECK(hipMalloc(&dh, n * 2) == hipSuccess && hipMemset(dh, 0xA5, n * 2) == hipSuccess);
+  CHECK(quant_dequant_f16(r.type, src, n, dh, nullptr));
+  CHECK(hipDeviceSynchronize() == hipSuccess);
+  std::vector<_Float16> goth(n);
+  CHECK(hipMemcpy(goth.data(), dh, n * 2, hipMemcpyDeviceToHost) == hipSuccess);
+  uint64_t bad_h = 0, first_h = n;
+  for (uint64_t i = 0; i < n; i++) {
+    const _Float16 want = (_Float16) r.values[i];
+    if (std::memcmp(&goth[i], &want, 2) != 0 && bad_h++ == 0) first_h = i;
+  }
+
+  if (bad_h) {
+    std::printf("  %s as f16: %llu of %llu values differ; first at %llu: %g, gguf-py's rounded %g\n", name,
+                (unsigned long long) bad_h, (unsigned long long) n, (unsigned long long) first_h,
+                (double) goth[first_h], (double) (_Float16) r.values[first_h]);
+    std::exit(1);
+  }
+  CHECK(hipFree(src) == hipSuccess && hipFree(dst) == hipSuccess && hipFree(dh) == hipSuccess);
+  std::printf("  %-8s %9llu values, bit for bit gguf-py's, twice; as f16 its rounding\n", name, (unsigned long long) n);
 }
 
 int main() {
@@ -86,6 +105,7 @@ int main() {
   CHECK(!quant_known(0) && !quant_known(12) && quant_known(29));
   CHECK(!quant_dequant(0, nullptr, 8, nullptr, nullptr) && !quant_dequant(99, nullptr, 8, nullptr, nullptr));
   CHECK(!quant_dequant(13, nullptr, 100, nullptr, nullptr) && !quant_dequant(30, nullptr, 9, nullptr, nullptr));
+  CHECK(!quant_dequant_f16(0, nullptr, 8, nullptr, nullptr) && !quant_dequant_f16(16, nullptr, 100, nullptr, nullptr));
   std::printf("  refusals: F32 and unknown types, values not whole blocks\n");
   uint64_t total = 0;
   for (const char* t : kTypes) {

@@ -140,4 +140,66 @@ template <> __device__ inline void decode<kF32>(const uint8_t* b, int k, float* 
   for (int j = 0; j < kChunk; j++) v[j] = __uint_as_float(ld32(b + 4 * (k * kChunk + j)));
 }
 
+// a chunk as the f16s the matmul's WMMA reads: each value decode<T>'s, rounded to f16 (nearest, ties to even) - the
+// same bits by either path below
+typedef _Float16 h8 __attribute__((ext_vector_type(8)));
+typedef uint32_t u4 __attribute__((ext_vector_type(4)));
+
+// the F32 value first, then f16: the compiler would fuse decode's last product and the rounding into one
+// v_fma_mixlo_f16 (a * b + 0, rounded once to f16), which is a value of its own - +0 for a -0, and for Q6_K's 25-bit
+// products not round(round(x)) (measured: 40690 of test_quant_gpu's 3670016 Q6_K values). the empty asm keeps them
+// two; not volatile, so the schedule around it stays free (a volatile one: a decode token 74 -> 85 ms)
+template <Type T>
+__device__ inline h8 decode_h(const uint8_t* b, int k) {
+  float v[kChunk];
+  decode<T>(b, k, v);
+  h8 h;
+  for (int j = 0; j < kChunk; j++) {
+    asm("" : "+v"(v[j]));
+    h[j] = (_Float16) v[j];
+  }
+  return h;
+}
+
+// kKsigns' 128 patterns as f16 sign bits: pattern i's value j negative - bit 15 of half j. kKsigns[i] is i with an
+// eighth bit that makes its ones even (built here from that rule; test_quant_gpu checks every value against gguf-py)
+struct SignMasks {
+  uint32_t m[128][kChunk / 2];
+};
+constexpr SignMasks make_sign_masks() {
+  SignMasks t{};
+  for (int i = 0; i < 128; i++) {
+    int ones = 0;
+    for (int b = 0; b < 7; b++) ones += (i >> b) & 1;
+    const int s = i | (ones & 1) << 7;
+    for (int p = 0; p < kChunk / 2; p++)
+      t.m[i][p] = (uint32_t) ((s >> (2 * p)) & 1) << 15 | (uint32_t) ((s >> (2 * p + 1)) & 1) << 31;
+  }
+  return t;
+}
+static __constant__ SignMasks kSignMasks = make_sign_masks();
+
+// IQ2's values as f16: each |value| rounded (db * grid, exact in F32, then to f16), its sign then one xor a pair -
+// rounding to nearest is symmetric, so round(-x) = -round(x): decode<T>'s bits, and per value a compare and a select
+// fewer (the decode's VALU 268 -> 172 a slab, measured)
+__device__ inline h8 iq2_h(uint64_t grid, float db, uint32_t pattern) {
+  h8 h;
+  for (int j = 0; j < kChunk; j++) h[j] = (_Float16) mul(db, (float) (uint8_t) (grid >> (8 * j)));
+  return __builtin_bit_cast(h8, __builtin_bit_cast(u4, h) ^ *(const u4*) kSignMasks.m[pattern]);
+}
+
+template <> __device__ inline h8 decode_h<kIQ2_XXS>(const uint8_t* b, int k) {
+  const uint8_t* q = b + 2 + (k / 4) * 8;
+  const uint32_t aux = ld32(q + 4);
+  const float db = mul(mul(f16(ld16(b)), 0.5f + (float) (aux >> 28)), 0.25f);
+  return iq2_h(kIq2xxsGrid[q[k % 4]], db, (aux >> (7 * (k % 4))) & 0x7F);
+}
+
+template <> __device__ inline h8 decode_h<kIQ2_XS>(const uint8_t* b, int k) {
+  const uint32_t q = ld16(b + 2 + 2 * k);
+  const int s = (b[66 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F;
+  const float db = mul(mul(f16(ld16(b)), 0.5f + (float) s), 0.25f);
+  return iq2_h(kIq2xsGrid[q & 511], db, q >> 9);
+}
+
 }  // namespace quant

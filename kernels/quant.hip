@@ -22,6 +22,23 @@ __global__ void dequant_kernel(const uint8_t* __restrict__ src, uint64_t chunks,
 }
 
 template <quant::Type T>
+__global__ void dequant_h_kernel(const uint8_t* __restrict__ src, uint64_t chunks, quant::h8* __restrict__ dst) {
+  constexpr int per = quant::Block<T>::values / quant::kChunk;
+  const uint64_t stride = (uint64_t) gridDim.x * blockDim.x;
+  for (uint64_t c = (uint64_t) blockIdx.x * blockDim.x + threadIdx.x; c < chunks; c += stride)
+    dst[c] = quant::decode_h<T>(src + (c / per) * quant::Block<T>::bytes, (int) (c % per));
+}
+
+template <quant::Type T>
+bool launch_h(const void* src, uint64_t values, void* dst, hipStream_t stream) {
+  if (values % quant::Block<T>::values) return false;
+  const uint64_t chunks = values / quant::kChunk;
+  const uint64_t blocks = chunks / kThreads + 1 < kMaxBlocks ? chunks / kThreads + 1 : kMaxBlocks;
+  dequant_h_kernel<T><<<(unsigned) blocks, kThreads, 0, stream>>>((const uint8_t*) src, chunks, (quant::h8*) dst);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T>
 bool launch(const void* src, uint64_t values, float* dst, hipStream_t stream) {
   if (values % quant::Block<T>::values) return false;
   const uint64_t chunks = values / quant::kChunk;
@@ -51,6 +68,17 @@ extern "C" bool quant_dequant(uint32_t type, const void* src, uint64_t values, f
     case quant::kIQ4_NL: return launch<quant::kIQ4_NL>(src, values, dst, s);
     case quant::kIQ1_M: return launch<quant::kIQ1_M>(src, values, dst, s);
     case quant::kBF16: return launch<quant::kBF16>(src, values, dst, s);
+    default: return false;
+  }
+}
+
+extern "C" bool quant_dequant_f16(uint32_t type, const void* src, uint64_t values, void* dst, void* stream) {
+  const hipStream_t s = (hipStream_t) stream;
+  switch (type) {
+#define H(t) \
+  case quant::t: return launch_h<quant::t>(src, values, dst, s);
+    H(kQ8_0) H(kQ5_K) H(kQ6_K) H(kIQ2_XXS) H(kIQ2_XS) H(kIQ4_NL) H(kIQ1_M) H(kBF16)
+#undef H
     default: return false;
   }
 }

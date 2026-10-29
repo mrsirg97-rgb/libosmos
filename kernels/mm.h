@@ -1,5 +1,5 @@
 // the matmul for the quantized weights, every step's however many tokens (1 .. 16): a wave a tile of 16 rows x 16
-// tokens, K in steps of 16 - the rows' 16 weights at that step decoded (quant.h: exact) and rounded to f16, one WMMA
+// tokens, K in steps of 16 - the rows' 16 weights at that step decoded to f16 (quant.h's decode_h), one WMMA
 // (f32 <- f16, 16 x 16 x 16) accumulating against the tokens' f16 activations. a column's results are the same bits
 // whatever the other columns hold (measured: test_mm_gpu), so a token's are whatever it is batched with.
 #pragma once
@@ -11,7 +11,7 @@ constexpr int kTile = 16;
 constexpr int kWave = 32;
 
 typedef _Float16 h16 __attribute__((ext_vector_type(16)));
-typedef _Float16 h8 __attribute__((ext_vector_type(8)));
+using quant::h8;
 typedef float f8 __attribute__((ext_vector_type(8)));
 
 constexpr int kPad = 8;  // f16s past a row in LDS: rows 2 banks apart, so the reads do not collide
@@ -65,11 +65,8 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
 #pragma unroll
       for (int i = i0; i < i0 + S::kUnroll; i++) {
         const int d = lane + kWave * i, r = d / (SL / quant::kChunk), c = d % (SL / quant::kChunk);
-        float v[quant::kChunk];
         const uint32_t k = k0 / quant::kChunk + c;  // the chunk of the row
-        quant::decode<T>(w + (uint64_t) (row0 + r) * row_bytes + (k / per) * B::bytes, (int) (k % per), v);
-        h8 hv;
-        for (int j = 0; j < quant::kChunk; j++) hv[j] = (_Float16) v[j];
+        const h8 hv = quant::decode_h<T>(w + (uint64_t) (row0 + r) * row_bytes + (k / per) * B::bytes, (int) (k % per));
         *(h8*) (lds + r * S::kRowLds + c * quant::kChunk) = hv;  // 16 bytes, aligned: kRowLds * 2 a multiple of 16
       }
     }

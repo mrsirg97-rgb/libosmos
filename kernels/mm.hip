@@ -11,16 +11,21 @@ namespace {
 
 constexpr int kThreads = 256;
 
-// a type's tile (mm.h's Shape) and its most column tiles: measured on gfx1151 (2026-10-29). the shape at one token:
-// Q5_K's decode is the heaviest: small slabs, so more waves hide it (q_b 88 -> 163 GB/s, the head 123 -> 157); the IQ
-// experts' wants bytes in flight (SL 64, 16 waves); Q8_0 and Q6_K were near their matvec's at SL 128. the column tiles
-// at 1024 tokens (4096 x 4096, the tiled x16): 8 for all but Q8_0, whose 4 is 1.30 ms to 8's 1.62
+// a type's tile (mm.h's Shape) and its most column tiles: measured on gfx1151 (2026-10-29). a shape is a type's for
+// every token count - its K split is the sums' order, so a token's bits would otherwise depend on its batch. Q5_K's
+// decode is the heaviest: small slabs, so more waves hide it (q_b 88 -> 163 GB/s, the head 123 -> 157); Q8_0 and Q6_K
+// were near their matvec's at SL 128. the IQ experts: 4 waves of 128-value slabs, each wave a long run of slabs and a
+// 4-way sum at the end (16 waves of 64 ran 5 slabs a wave to 5120 columns, then a 16-way sum through LDS a tile; the
+// counters: the waves 52-76% waiting, 14% at the barrier). a real step's experts (each run of the same column tiles a
+// launch) 17.6 -> 13.9 ms (blk.24's gate), 22.6 -> 15.7 (blk.10's down); a decode token 74.0 -> 71.6 ms; a 4096-token
+// prompt ~294 -> ~314 tok/s. the column tiles at 1024 tokens (4096 x 4096, the tiled x16): 8 for all but Q8_0, whose
+// 4 is 1.30 ms to 8's 1.62
 template <quant::Type T> struct Tuned { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ8_0> { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 4; };
 template <> struct Tuned<quant::kQ5_K> { using S = mm::Shape<32, 8, 2>; static constexpr int kMaxCt = 8; };
-template <> struct Tuned<quant::kIQ1_M> { using S = mm::Shape<64, 16, 4>; static constexpr int kMaxCt = 8; };
-template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<64, 16, 4>; static constexpr int kMaxCt = 8; };
-template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<64, 16, 4>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kIQ1_M> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 constexpr float kF16Max = 65504.0f;
 
 // a thread a value: to f16 (the rows past n zero)
@@ -109,6 +114,16 @@ extern "C" bool mm_known(uint32_t type) {
     case quant::kQ8_0: case quant::kQ5_K: case quant::kQ6_K: case quant::kIQ1_M: case quant::kIQ2_XXS:
     case quant::kIQ2_XS: return true;
     default: return false;
+  }
+}
+
+extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
+  switch (type) {
+#define TILES(t) \
+  case quant::t: return col_tiles<quant::t>(n);
+    TILES(kQ8_0) TILES(kQ5_K) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS)
+#undef TILES
+    default: return 0;
   }
 }
 

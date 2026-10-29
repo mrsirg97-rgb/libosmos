@@ -6,6 +6,7 @@
 
 bool quant_known(uint32_t type);
 bool quant_dequant(uint32_t type, const void *src, uint64_t values, float *dst, void *stream);
+bool quant_dequant_f16(uint32_t type, const void *src, uint64_t values, void *dst, void *stream);
 
 #endif
 
@@ -21,4 +22,9 @@ quant_dequant
   `values` of `type` at `src` (device-readable: device memory or a pinned registration) as F32 into `dst`, queued on
   `stream` (a hipStream_t; NULL the default stream) and not waited for. false - nothing queued - for a type not known,
   `values` not whole blocks, or a launch the runtime refused.
+
+quant_dequant_f16
+  as quant_dequant, each value as the f16 the matmul's WMMA reads (kernels/quant.h's decode_h: quant_dequant's value
+  rounded to nearest, ties to even - IQ2_XXS and IQ2_XS by a path of their own, the same bits), into `dst` (2 bytes a
+  value).
 */

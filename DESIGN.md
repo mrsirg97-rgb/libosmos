@@ -228,6 +228,28 @@ asked at once, read by fetchq and pinned by the pool through hip_pinner in **420
 the GPU's sums the CPU's. (maya's ~1.4 GB/s on a prompt is paced by its GPU work, not its reads: not the same
 measurement.)
 
+## the experts' matmul (measured, 2026-10-29)
+
+a real-text 2048-token step: a layer's ~306 experts, 54% of them one tile of 16 tokens, 15% two, 15% up to four, 17%
+more (the hottest ~1100 tokens). each block decodes a 16-row slab once for its column tiles; decode and WMMA issue on
+the same SIMD, so the floor is their sum (a real layer's gate: ~8.5 ms of decode, ~6.5 of WMMA). what moved it:
+
+- **a launch a run of the same column tiles** (`mm_col_tiles`): one launch took its tiles from the hottest expert,
+  so every one-tile expert ran the 8-tile kernel (164 VGPRs, fewer waves): 37% slower for it. 290 -> 294 tok/s.
+- **IQ2's f16 decode**: each |value| rounded, the sign one xor a pair of halves (rounding to nearest is symmetric) -
+  the decode's VALU 268 -> 172 a slab, the same bits (`test_quant_gpu`: every value gguf-py's, rounded).
+- **the shape**: 16 waves of 64-value slabs ran 5 slabs a wave over 5120 columns, then a 16-way sum through LDS a
+  tile (the counters: waves 52-76% waiting, 14% at the barrier). 4 waves of 128: a real layer's experts 17-31%
+  faster, a decode token 74.0 -> 71.6 ms, a 4096-token prompt ~294 -> ~314 tok/s (interleaved runs, medians). a
+  shape is a type's for every token count: its K split is the sums' order.
+- not it: prefetching the next slab's raw words (no gain at one tile, slower at more), global instead of flat loads
+  (none), the WMMAs' order (only 8 tiles, -12%). the activations' reloads (a 16-row block reads its tokens' x again)
+  are ~23% at 8 tiles.
+- found on the way: the compiler fused decode's last product and the f16 rounding into `v_fma_mixlo_f16` (a * b + 0,
+  rounded once): +0 for -0, and Q6_K's 25-bit products not round(round(x)) - the matmul's Q6_K weights were never
+  quite gguf-py's rounded. an empty asm keeps the two roundings (not volatile: a volatile one cost a decode token 11
+  ms).
+
 ## determinism (operator, 2026-10-28)
 
 maya's prompt path is not run-to-run deterministic on this box: two runs of the bar's maya-ds4 on the same 32 real
