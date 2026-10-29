@@ -1,6 +1,6 @@
 CC := gcc
 CFLAGS = -Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O2 -g
-LDLIBS := -lpthread
+LDLIBS := -lpthread -lm
 
 AR := ar
 ARFLAGS := rcs
@@ -83,10 +83,10 @@ tests: $(TESTS)
 # ThreadSanitizer
 asan:
 	$(MAKE) clean
-	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" LDLIBS="-lpthread -fsanitize=address,undefined" tests
+	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" LDLIBS="-lpthread -lm -fsanitize=address,undefined" tests
 
 tsan:
 	$(MAKE) clean
-	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=thread" LDLIBS="-lpthread -fsanitize=thread" tests
+	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=thread" LDLIBS="-lpthread -lm -fsanitize=thread" tests
 
 .PHONY: all clean tests asan tsan gpu-tests

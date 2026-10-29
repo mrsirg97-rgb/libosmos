@@ -11,14 +11,14 @@ constexpr int kWavesPerBlock = 8;
 
 // U chunks c0, c0 + 32, ... of R rows into acc, for NT tokens: x loaded, then the weights decoded, then summed
 template <quant::Type T, int NT, int R, int U>
-__device__ inline void step(const uint8_t* const* base, uint32_t c0, uint32_t cols, const float* __restrict__ x,
+__device__ inline void step(const uint8_t* const* base, uint32_t c0, uint32_t xs, const float* __restrict__ x,
                             float (&acc)[R][NT]) {
   using B = quant::Block<T>;
   constexpr int per = B::values / quant::kChunk;
   float4 xa[U][NT], xb[U][NT];
   for (int u = 0; u < U; u++)
     for (int t = 0; t < NT; t++) {
-      const float4* xp = (const float4*) (x + (uint64_t) t * cols + (uint64_t) (c0 + u * kWave) * quant::kChunk);
+      const float4* xp = (const float4*) (x + (uint64_t) t * xs + (uint64_t) (c0 + u * kWave) * quant::kChunk);
       xa[u][t] = xp[0], xb[u][t] = xp[1];
     }
   float v[U][R][quant::kChunk];
@@ -42,7 +42,7 @@ __device__ inline void step(const uint8_t* const* base, uint32_t c0, uint32_t co
 template <quant::Type T, int NT, int R, int U>
 __global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* __restrict__ w, uint32_t rows,
                                                                  uint32_t cols, const float* __restrict__ x,
-                                                                 float* __restrict__ y) {
+                                                                 uint32_t xs, float* __restrict__ y, uint32_t ys) {
   using B = quant::Block<T>;
   const uint32_t row0 = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * R;
   const int lane = threadIdx.x % kWave;
@@ -57,21 +57,22 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* _
   // whole groups of U chunks, nothing branching inside one, so all U's loads (x's first: they depend on nothing) go
   // out before any is waited for; then the rest one chunk at a time. either way each row's chunks in order
   const uint32_t whole = chunks / (kWave * U) * (kWave * U);
-  for (uint32_t c0 = lane; c0 < whole; c0 += kWave * U) step<T, NT, R, U>(base, c0, cols, x, acc);
-  for (uint32_t c0 = whole + lane; c0 < chunks; c0 += kWave) step<T, NT, R, 1>(base, c0, cols, x, acc);
+  for (uint32_t c0 = lane; c0 < whole; c0 += kWave * U) step<T, NT, R, U>(base, c0, xs, x, acc);
+  for (uint32_t c0 = whole + lane; c0 < chunks; c0 += kWave) step<T, NT, R, 1>(base, c0, xs, x, acc);
   for (int q = 0; q < R; q++)
     for (int t = 0; t < NT; t++) {
       float s = acc[q][t];
       for (int o = kWave / 2; o > 0; o >>= 1) s += __shfl_xor(s, o, kWave);  // a + b = b + a: every lane the same
-      if (lane == 0 && row0 + q < rows) y[(uint64_t) t * rows + row0 + q] = s;
+      if (lane == 0 && row0 + q < rows) y[(uint64_t) t * ys + row0 + q] = s;
     }
 }
 
 template <quant::Type T, int NT, int R, int U>
-bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, float* y, hipStream_t s) {
+bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
+            hipStream_t s) {
   const uint32_t per_block = kWavesPerBlock * R;
   kernel<T, NT, R, U><<<(rows + per_block - 1) / per_block, kWave * kWavesPerBlock, 0, s>>>((const uint8_t*) w, rows,
-                                                                                            cols, x, y);
+                                                                                            cols, x, xs, y, ys);
   return hipGetLastError() == hipSuccess;
 }
 

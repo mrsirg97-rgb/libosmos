@@ -1,0 +1,88 @@
+#ifndef OPS_H
+#define OPS_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#define OPS_MAX_HC 8
+#define OPS_MAX_WINDOW 1024
+#define OPS_MAX_EXPERTS 1024
+#define OPS_MAX_TOPK 16
+
+bool ops_embed(uint32_t type, const void *table, uint32_t dim, const int32_t *ids, uint32_t n_tok, uint32_t hc,
+               float *h, void *stream);
+bool ops_rms(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
+             uint32_t y_stride, void *stream);
+bool ops_hc_mix(const float *h, const float *mix, const float *scale, const float *base, uint32_t hc, uint32_t dim,
+                float eps, float hc_eps, uint32_t iters, uint32_t n_tok, float *pre, float *post, float *comb,
+                void *stream);
+bool ops_hc_pre_rms(const float *h, const float *pre, uint32_t hc, uint32_t dim, const float *w, float eps,
+                    uint32_t n_tok, float *x, void *stream);
+bool ops_hc_post(const float *y, const float *res, const float *post, const float *comb, uint32_t hc, uint32_t dim,
+                 uint32_t n_tok, float *out, void *stream);
+bool ops_rope(float *x, uint32_t heads, uint32_t head_dim, uint32_t rope_dim, uint32_t stride, const float *freqs,
+              const int32_t *pos, bool inverse, uint32_t n_tok, void *stream);
+bool ops_fp8_round(float *x, uint64_t n, void *stream);
+bool ops_window_attn(const float *q, const float *ring, uint32_t slots, const int32_t *pos, uint32_t window,
+                     const float *sink, float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *o,
+                     void *stream);
+bool ops_router(const float *logits, const float *bias, uint32_t n_exp, uint32_t k, float scale, uint32_t n_tok,
+                int32_t *idx, float *w, void *stream);
+bool ops_swiglu(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok, float *h,
+                void *stream);
+bool ops_add(float *y, const float *a, uint64_t n, void *stream);
+
+#endif
+
+/*
+ops
+  the forward's small steps on the GPU, each ref.py's (oracle/ref.py) in F32: the same operations in the same order
+  where the order is the model's (a norm's product then weight, a weight's division then scale), reductions in a
+  fixed order (a thread's stride in turn, then a fixed tree) so a token's result is the same bits whatever the others
+  beside it or the run. each queued on `stream` (a hipStream_t; NULL the default), not waited for; false - nothing
+  queued - for arguments it cannot run (a zero size, a size past its limit) or a launch refused. buffers are the
+  device's; a token's rows are contiguous ([n_tok][...]) unless a stride says otherwise. `pos` and `ids` are on the
+  device, one a token.
+
+ops_embed
+  h[t][k][:] = the table's row ids[t], decoded (quant.h) and rounded to BF16 (the original model's embedding type, as
+  ref_gguf.py rounds it), for each of the hc streams k.
+
+ops_rms
+  y = (x * 1 / sqrt(mean(x^2) + eps)) * w, a row at a time (w NULL: no weight).
+
+ops_hc_mix
+  the hyper-connection mixes from mix = fn h (mv: (2 + hc) hc values a token) and h itself: mix * 1 / sqrt(mean(h^2)
+  + eps) then pre = sigmoid(mix * scale[0] + base) + hc_eps, post = 2 sigmoid(mix * scale[1] + base), comb a softmax
+  a row (+ hc_eps) and Sinkhorn: a column normalisation, then (iters - 1) times a row's and a column's.
+
+ops_hc_pre_rms
+  x = rms(sum over k of pre[k] h[k], w) - the stream mixed into the block's input.
+
+ops_hc_post
+  out[j] = post[j] y + sum over i of comb[i][j] res[i] - the block's output mixed back into the hc streams.
+
+ops_rope
+  each of the `heads` heads' last rope_dim values (a head head_dim apart, a token `stride` apart) rotated in place as
+  adjacent pairs, pair i by pos[t] * freqs[i] (rope_freqs); `inverse` the other way.
+
+ops_fp8_round
+  each 32 values rounded as the reference's act_quant: a power-of-two scale (amax / 448, at least 1e-4, up to the next
+  power of two), the values E4M3 (nearest, ties to even) under it. n a multiple of 32.
+
+ops_window_attn
+  for each token and head: q against the window's keys - the positions pos - window + 1 .. pos, each at ring row
+  position % slots (the keys are the values: one latent) - scaled, softmax with the head's sink, the values summed.
+  slots at least window + the step's tokens - 1, so no position a token reads is overwritten by the step.
+
+ops_router
+  scores = sqrt(softplus(logits)); the k experts of the highest score + bias (ties to the lower expert), in that
+  order, into idx; w = their scores / (their sum + 1e-20) * scale.
+
+ops_swiglu
+  h = silu(min(g, lim)) * clamp(u, -lim, lim), times scale[t] if scale is not NULL (a routed expert's weight: applied
+  before the down projection, as ref.py does).
+
+ops_add
+  y += a.
+*/

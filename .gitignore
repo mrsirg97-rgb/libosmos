@@ -4,3 +4,4 @@ lib/
 *.o
 *.a
 .oracle-venv/
+__pycache__/

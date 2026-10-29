@@ -8,6 +8,8 @@
 
 bool mv_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t n_tok, float *y,
             void *stream);
+bool mv_strided(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t x_stride,
+                uint32_t n_tok, float *y, uint32_t y_stride, void *stream);
 
 #endif
 
@@ -22,4 +24,9 @@ mv_run
   n_tok, the stream or the run: one wave a row, each lane its chunks in order (fmaf), the lanes by a fixed tree - so a
   token's y is the same bits alone or beside others (schedule invariance) and every run (determinism). false, nothing
   queued, for a type not known, cols not whole blocks, n_tok 0 or past MV_MAX_TOKENS, or a launch refused.
+
+mv_strided
+  mv_run with token t's x at x + t * x_stride and its y at y + t * y_stride (a slice of a wider row: the attention's
+  grouped wo_a reads each group's 4,096 of a token's 32,768); the same sums, so the same bits. also false for a
+  stride that is not a multiple of 8, or, with tokens > 1, that is shorter than its row.
 */

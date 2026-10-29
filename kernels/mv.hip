@@ -29,23 +29,26 @@ constexpr Tune tune(quant::Type t, int nt) {
 }
 
 template <quant::Type T, int NT>
-bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, float* y, hipStream_t s) {
+bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
+            hipStream_t s) {
   constexpr Tune k = tune(T, NT);
-  return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, y, s);
+  return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, xs, y, ys, s);
 }
 
 template <quant::Type T>
-bool by_tokens(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t n_tok, float* y, hipStream_t s) {
+bool by_tokens(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, uint32_t n_tok, float* y,
+               uint32_t ys, hipStream_t s) {
   if (cols % quant::Block<T>::values || cols % quant::kChunk) return false;
+  if ((n_tok > 1 && (xs < cols || ys < rows)) || xs % quant::kChunk) return false;  // tokens apart; x's float4s whole
   switch (n_tok) {
-    case 1: return launch<T, 1>(w, rows, cols, x, y, s);
-    case 2: return launch<T, 2>(w, rows, cols, x, y, s);
-    case 3: return launch<T, 3>(w, rows, cols, x, y, s);
-    case 4: return launch<T, 4>(w, rows, cols, x, y, s);
-    case 5: return launch<T, 5>(w, rows, cols, x, y, s);
-    case 6: return launch<T, 6>(w, rows, cols, x, y, s);
-    case 7: return launch<T, 7>(w, rows, cols, x, y, s);
-    case 8: return launch<T, 8>(w, rows, cols, x, y, s);
+    case 1: return launch<T, 1>(w, rows, cols, x, xs, y, ys, s);
+    case 2: return launch<T, 2>(w, rows, cols, x, xs, y, ys, s);
+    case 3: return launch<T, 3>(w, rows, cols, x, xs, y, ys, s);
+    case 4: return launch<T, 4>(w, rows, cols, x, xs, y, ys, s);
+    case 5: return launch<T, 5>(w, rows, cols, x, xs, y, ys, s);
+    case 6: return launch<T, 6>(w, rows, cols, x, xs, y, ys, s);
+    case 7: return launch<T, 7>(w, rows, cols, x, xs, y, ys, s);
+    case 8: return launch<T, 8>(w, rows, cols, x, xs, y, ys, s);
     default: return false;
   }
 }
@@ -56,17 +59,22 @@ static_assert(MV_MAX_TOKENS == 8, "by_tokens instantiates 1 .. 8");
 
 extern "C" bool mv_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t n_tok,
                        float* y, void* stream) {
+  return mv_strided(type, w, rows, cols, x, cols, n_tok, y, rows, stream);
+}
+
+extern "C" bool mv_strided(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs,
+                           uint32_t n_tok, float* y, uint32_t ys, void* stream) {
   const hipStream_t s = (hipStream_t) stream;
   switch (type) {
-    case quant::kF32: return by_tokens<quant::kF32>(w, rows, cols, x, n_tok, y, s);
-    case quant::kQ8_0: return by_tokens<quant::kQ8_0>(w, rows, cols, x, n_tok, y, s);
-    case quant::kQ5_K: return by_tokens<quant::kQ5_K>(w, rows, cols, x, n_tok, y, s);
-    case quant::kQ6_K: return by_tokens<quant::kQ6_K>(w, rows, cols, x, n_tok, y, s);
-    case quant::kIQ2_XXS: return by_tokens<quant::kIQ2_XXS>(w, rows, cols, x, n_tok, y, s);
-    case quant::kIQ2_XS: return by_tokens<quant::kIQ2_XS>(w, rows, cols, x, n_tok, y, s);
-    case quant::kIQ4_NL: return by_tokens<quant::kIQ4_NL>(w, rows, cols, x, n_tok, y, s);
-    case quant::kIQ1_M: return by_tokens<quant::kIQ1_M>(w, rows, cols, x, n_tok, y, s);
-    case quant::kBF16: return by_tokens<quant::kBF16>(w, rows, cols, x, n_tok, y, s);
+    case quant::kF32: return by_tokens<quant::kF32>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kQ8_0: return by_tokens<quant::kQ8_0>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kQ5_K: return by_tokens<quant::kQ5_K>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kQ6_K: return by_tokens<quant::kQ6_K>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kIQ2_XXS: return by_tokens<quant::kIQ2_XXS>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kIQ2_XS: return by_tokens<quant::kIQ2_XS>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kIQ4_NL: return by_tokens<quant::kIQ4_NL>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kIQ1_M: return by_tokens<quant::kIQ1_M>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kBF16: return by_tokens<quant::kBF16>(w, rows, cols, x, xs, n_tok, y, ys, s);
     default: return false;
   }
 }
