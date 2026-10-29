@@ -214,6 +214,18 @@ asked at once, read by fetchq and pinned by the pool through hip_pinner in **420
 the GPU's sums the CPU's. (maya's ~1.4 GB/s on a prompt is paced by its GPU work, not its reads: not the same
 measurement.)
 
+## the oracle (checked 2026-10-28)
+
+- **primary: maya-ds4's own dumps**, the bar's engine on the same ids: `DS4_DUMP_L` (every layer's residual streams,
+  records `[layer, p0, T]` + T x hc x dim F32), `DS4_DUMP_R` (a layer's routing: picks, gate logits, bias),
+  `DS4_DUMP_Y` (expert sets' h and y rows), `--dump-logits`, `--ppl`. substrate writes the same records, so maya's
+  `tools/ds4/dumpcmp.py` compares the two engines unchanged.
+- **secondary, inside a layer: maya's torch reference** `tools/ds4/ref_gguf.py` (shares no engine code; its
+  `ref.py` functions step through a layer's parts). it needs torch (CPU: a separate venv, a tool, never the runtime;
+  installed when a layer first parts from maya) and one fix: its Engram rows are Q6_K or MXFP8 only, and this
+  model's are **IQ4_NL** (144 B a row) - read as MXFP8 they would be silently wrong. the weights' types it covers
+  through gguf-py's dequantizers (IQ1_M, IQ2_XXS, IQ2_XS, Q5_K, Q6_K, Q8_0, IQ4_NL, BF16: checked).
+
 ## splash's bets, and what each is worth here
 
 splash (Apache-2.0, Apple silicon) - read from its README and docs.
