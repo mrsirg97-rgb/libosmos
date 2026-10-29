@@ -33,6 +33,7 @@ extern "C" {
   } while (0)
 
 constexpr int kT = MM_TILE;
+constexpr int kBig = MM_MAX_TOKENS;  // a prompt's chunk: a token's bits the same in it
 constexpr uint32_t kCheckRows = 512;
 constexpr uint64_t kCycleBytes = 512ull << 20;
 constexpr int kTimed = 30;
@@ -110,6 +111,26 @@ static void shape(const Gguf* g, const Shape& s) {
     CHECK(hipMemcpy(one.data(), y1, rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(std::memcmp(one.data(), &a[(size_t) tk * rows], rows * 4) == 0);
   }
+  {  // kBig tokens, the first kT the same x: those tokens' rows the same bits as among 16 (and token 3 at 200, too)
+    std::vector<float> big((size_t) kBig * cols);
+    for (size_t i = 0; i < big.size(); i++) big[i] = uniform();
+    std::memcpy(big.data(), xh.data(), xh.size() * 4);
+    std::memcpy(&big[(size_t) 200 * cols], &xh[(size_t) 3 * cols], cols * 4);
+    float *xb, *yb;
+    void* x16b;
+    CHECK(hipMalloc(&xb, big.size() * 4) == hipSuccess && hipMalloc(&yb, (size_t) kBig * rows * 4) == hipSuccess);
+    CHECK(hipMalloc(&x16b, (size_t) kBig * cols * 2) == hipSuccess);
+    CHECK(hipMemcpy(xb, big.data(), big.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+    for (int nb : {kBig, 64, 33}) {
+      CHECK(mm_x16(xb, cols, (uint32_t) std::max(nb, 201), cols, x16b, over, nullptr));
+      CHECK(mm_run(t->type, w, rows, cols, x16b, (uint32_t) std::max(nb, 201), yb, rows, nullptr));
+      std::vector<float> yh((size_t) std::max(nb, 201) * rows);
+      CHECK(hipMemcpy(yh.data(), yb, yh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      CHECK(std::memcmp(yh.data(), a.data(), (size_t) kT * rows * 4) == 0);
+      CHECK(std::memcmp(&yh[(size_t) 200 * rows], &a[(size_t) 3 * rows], rows * 4) == 0);
+    }
+    CHECK(hipFree(xb) == hipSuccess && hipFree(yb) == hipSuccess && hipFree(x16b) == hipSuccess);
+  }
   int32_t overflow = 0;
   CHECK(hipMemcpy(&overflow, over, 4, hipMemcpyDeviceToHost) == hipSuccess && overflow == 0);
 
@@ -138,20 +159,25 @@ static void shape(const Gguf* g, const Shape& s) {
     }
 
   // bandwidth: mm at 1, 4, 16 tokens; mv at 1
-  const uint32_t ns[3] = {1, 4, (uint32_t) kT};
-  double us[3];
-  for (int k = 2; k >= 0; k--)
+  const uint32_t ns[4] = {1, 4, (uint32_t) kT, (uint32_t) kBig};
+  double us[4];
+  void* x16t = nullptr;
+  float* yt = nullptr;
+  CHECK(hipMalloc(&x16t, (size_t) kBig * cols * 2) == hipSuccess && hipMalloc(&yt, (size_t) kBig * rows * 4) == hipSuccess);
+  CHECK(hipMemset(x16t, 0, (size_t) kBig * cols * 2) == hipSuccess);
+  for (int k = 3; k >= 0; k--)
     us[k] = time_us([&](int i) {
-      CHECK(mm_run(t->type, w + (i % copies) * bytes, rows, cols, x16, ns[k], y, rows, nullptr));
+      CHECK(mm_run(t->type, w + (i % copies) * bytes, rows, cols, x16t, ns[k], yt, rows, nullptr));
     });
+  CHECK(hipFree(x16t) == hipSuccess && hipFree(yt) == hipSuccess);
   const double mv_us =
       time_us([&](int i) { CHECK(mv_run(t->type, w + (i % copies) * bytes, rows, cols, x, 1, y, nullptr)); });
   char name[80];
   std::snprintf(name, sizeof name, s.expert < 0 ? "%s" : "%s[%d]", s.tensor, s.expert);
-  std::printf("  %-31s %5u x %-6u err <= %4.1f u|wx| (bound %4.0f), f16 w, x %.1e rms | GB/s: mv 1 %5.1f, mm 1 %5.1f, "
-              "4 %5.1f, 16 %5.1f (%.1f tokens a mv pass)\n", name, cols, rows, worst, depth,
+  std::printf("  %-31s %5u x %-6u err <= %4.1f u|wx| (bound %4.0f), f16 %.1e rms | GB/s: mv 1 %5.1f, mm 1 %5.1f, "
+              "4 %5.1f, 16 %5.1f (%.1f tokens a mv pass), 256 %5.1f (%.0f)\n", name, cols, rows, worst, depth,
               std::sqrt(f16_rms / ref_rms), bytes / mv_us / 1e3, bytes / us[0] / 1e3, bytes / us[1] / 1e3,
-              bytes / us[2] / 1e3, kT * mv_us / us[2]);
+              bytes / us[2] / 1e3, kT * mv_us / us[2], bytes / us[3] / 1e3, kBig * mv_us / us[3]);
   CHECK(hipFree(w) == hipSuccess && hipFree(x) == hipSuccess && hipFree(xrv) == hipSuccess);
   CHECK(hipFree(y) == hipSuccess && hipFree(y1) == hipSuccess);
   CHECK(hipFree(x16) == hipSuccess && hipFree(over) == hipSuccess);
@@ -170,13 +196,14 @@ int main() {
   }
   CHECK(!mm_known(0) && !mm_known(30) && mm_known(29));
   CHECK(!mm_run(13, nullptr, 24, 256, nullptr, 1, nullptr, 24, nullptr));   // rows not 16s
-  CHECK(!mm_run(13, nullptr, 32, 256, nullptr, 17, nullptr, 32, nullptr));  // 17 tokens
-  std::printf("  refusals: F32 and BF16 (the matvec's), rows not a multiple of 16, 17 tokens\n");
+  CHECK(!mm_run(13, nullptr, 32, 256, nullptr, MM_MAX_TOKENS + 1, nullptr, 32, nullptr));  // too many tokens
+  std::printf("  refusals: F32 and BF16 (the matvec's), rows not a multiple of 16, %d tokens\n", MM_MAX_TOKENS + 1);
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
   for (const Shape& s : kShapes) shape(g, s);
   gguf_destroy(g);
-  std::printf("[test_mm_gpu] ok: every token the same bits alone, among 16 and among 16 reversed\n");
+  std::printf("[test_mm_gpu] ok: every token the same bits alone, among 16, among 16 reversed, and among 33, 64 and "
+              "256 (at its place and at another)\n");
   return 0;
 }

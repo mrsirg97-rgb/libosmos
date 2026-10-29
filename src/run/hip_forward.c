@@ -139,7 +139,7 @@ static bool scratch(Forward *f)
   const uint64_t row = gguf_bytes(f->w->layer[0].eg_embd ? f->w->layer[0].eg_embd->type : 0, g->engram_head_dim);
   const uint64_t cols = g->engram_cols, K = (uint64_t)g->n_used, FF = (uint64_t)g->expert_ff, hd = g->head_dim;
   const uint64_t ih = g->ix_head_dim, nh = g->ix_heads, egv = cols * (uint64_t)g->engram_head_dim;
-  const uint64_t B = FWD_MAX_BATCH, P = FWD_MAX_BATCH * K, Fs = OPS_MAX_SELECT, T = MM_TILE;
+  const uint64_t B = FWD_MAX_BATCH, P = FWD_MAX_BATCH * K, Fs = OPS_MAX_SELECT;
   uint64_t widest = (uint64_t)g->o_groups * g->o_lora > D ? (uint64_t)g->o_groups * g->o_lora : D;
   widest = HQ > widest ? HQ : widest; /* the attention's output: wo_a's groups read it whole */
   const struct
@@ -160,11 +160,12 @@ static bool scratch(Forward *f)
       {&b->sye, B * D * F},       {&b->up, FWD_UP_BYTES}, {&b->lat, B * hd * F},
       {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, ih * F},
       {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},            {&b->score, (uint64_t)f->max_ctx * F},
+      {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
       {&b->ridx, B * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
-      {&b->rwp, P * F},                 {&b->x16, T * (widest > egv ? widest : egv) * 2},
-      {&b->xe16, P * T * (D > FF ? D : FF) * 2},
+      {&b->rwp, P * F},                 {&b->x16, B * (widest > egv ? widest : egv) * 2},
+      {&b->xe16, FWD_MAX_SLOTS(P, g->n_experts) * (D > FF ? D : FF) * 2},
       {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4},
   };
   _Static_assert(sizeof want / sizeof *want == sizeof(Scratch) / sizeof(void *), "every buffer of Scratch, once");

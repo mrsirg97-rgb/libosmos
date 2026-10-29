@@ -1,5 +1,5 @@
-// ops (include/substrate/gpu/ops.h): the attention's - its keys (window and compressed rows), the compressor, the
-// indexer's scores and its top k - each as ref.py computes it, in F32, reductions in a fixed order
+// ops (include/substrate/gpu/ops.h): the attention's keys - the compressor, the indexer's scores and its top k
+// (sparse_attn.hip the attention itself) - each as ref.py computes it, in F32, reductions in a fixed order
 #include <cmath>
 #include <cstdint>
 
@@ -17,55 +17,9 @@ constexpr int kWaves = kThreads / kWave;
 constexpr int kSelectThreads = 1024;
 constexpr int kRadixBits = 8;
 constexpr int kBins = 1 << kRadixBits;
-constexpr float kNegHuge = -1e30f;
 
 hipStream_t st(void* s) { return (hipStream_t) s; }
 bool ok() { return hipGetLastError() == hipSuccess; }
-
-// keys: the window's (positions pos - window + 1 .. pos, ring rows) then the token's selected compressed rows (sel,
-// in their order), each a latent that is both key and value; softmax with the head's sink
-__global__ void sparse_attn_kernel(const float* q, const float* ring, uint32_t slots, const int32_t* pos,
-                                   uint32_t window, const float* ckv, const int32_t* sel, const int32_t* n_sel,
-                                   uint32_t sel_cap, const float* sink, float scale, uint32_t heads, uint32_t hd,
-                                   float* o) {
-  __shared__ float p[OPS_MAX_WINDOW + OPS_MAX_SELECT];
-  __shared__ float den;
-  const uint32_t h = blockIdx.x, t = blockIdx.y;
-  const int32_t at = pos[t];
-  const int32_t j0 = at - (int32_t) window + 1 > 0 ? at - (int32_t) window + 1 : 0;
-  const uint32_t nw = (uint32_t) (at - j0 + 1);
-  const uint32_t nc = ckv && n_sel ? (uint32_t) n_sel[t] : 0;
-  const uint32_t n = nw + nc;
-  const int32_t* st_sel = sel ? sel + (uint64_t) t * sel_cap : nullptr;
-  auto key = [&](uint32_t k) -> const float* {
-    return k < nw ? ring + (uint64_t) ((j0 + k) % slots) * hd : ckv + (uint64_t) st_sel[k - nw] * hd;
-  };
-  const float* qh = q + ((uint64_t) t * heads + h) * hd;
-  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave;
-  for (uint32_t k = wave; k < n; k += kWaves) {
-    const float* kv = key(k);
-    float s = 0;
-    for (uint32_t d = lane; d < hd; d += kWave) s += qh[d] * kv[d];
-    for (int off = kWave / 2; off > 0; off >>= 1) s += __shfl_xor(s, off, kWave);
-    if (lane == 0) p[k] = s * scale;
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    float m = sink[h];
-    for (uint32_t k = 0; k < n; k++) m = fmaxf(m, p[k]);
-    m = fmaxf(m, kNegHuge);
-    float s = 0;
-    for (uint32_t k = 0; k < n; k++) s += (p[k] = expf(p[k] - m));
-    den = s + expf(sink[h] - m);
-  }
-  __syncthreads();
-  float* oh = o + ((uint64_t) t * heads + h) * hd;
-  for (uint32_t d = threadIdx.x; d < hd; d += kThreads) {
-    float s = 0;
-    for (uint32_t k = 0; k < n; k++) s += p[k] * key(k)[d];
-    oh[d] = s / den;
-  }
-}
 
 // a compressed row: sum over the ratio's rows of kvc * softmax(sc) (the softmax per value, over the rows)
 __global__ void compress_kernel(const float* kvc, const float* sc, uint32_t ratio, uint32_t dim, float* out) {
@@ -170,18 +124,6 @@ __global__ void topk_kernel(const float* score, uint32_t n, uint32_t k, int32_t*
 }
 
 }  // namespace
-
-extern "C" bool ops_sparse_attn(const float* q, const float* ring, uint32_t slots, const int32_t* pos,
-                                uint32_t window, const float* ckv, const int32_t* sel, const int32_t* n_sel,
-                                uint32_t sel_cap, const float* sink, float scale, uint32_t heads, uint32_t head_dim,
-                                uint32_t n_tok, float* o, void* stream) {
-  if (!window || window > OPS_MAX_WINDOW || slots < window || sel_cap > OPS_MAX_SELECT || !heads || !head_dim ||
-      !n_tok || (ckv && (!sel || !n_sel)))
-    return false;
-  sparse_attn_kernel<<<dim3(heads, n_tok), kThreads, 0, st(stream)>>>(q, ring, slots, pos, window, ckv, sel, n_sel,
-                                                                       sel_cap, sink, scale, heads, head_dim, o);
-  return ok();
-}
 
 extern "C" bool ops_compress(const float* kvc, const float* sc, uint32_t ratio, uint32_t dim, float* out,
                              void* stream) {

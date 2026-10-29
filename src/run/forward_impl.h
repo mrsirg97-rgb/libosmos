@@ -18,12 +18,14 @@
 #include "substrate/run/forward.h"
 
 #define FWD_MAX_FILES 16
-#define FWD_MAX_BATCH MM_TILE                       /* a step's tokens: the matmul's tile */
+#define FWD_MAX_BATCH MM_MAX_TOKENS                 /* a step's tokens: the matmul's */
 #define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a step's (token, routed expert) pairs */
 #define FWD_MAX_GROUPS 64                           /* a layer's wo_a groups */
 /* a layer's routing tables at most: 3 matrix pointers, 4 offsets, a count an expert; an order and a pair a pair; 2 x 16
    slots an expert - with each table's alignment (16) */
 #define FWD_UP_BYTES (FWD_MAX_PAIRS * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4) + 10 * 16)
+/* the experts' slots at most: each its tokens padded to whole tiles - the pairs and a tile's padding an expert */
+#define FWD_MAX_SLOTS(pairs, experts) ((pairs) + (uint64_t)(experts) * (MM_TILE - 1))
 
 /* the fetcher's finished reads, handed from its workers to the forward (the pool's one consumer) */
 typedef struct Inbox
@@ -46,6 +48,7 @@ typedef struct Scratch
   float *rwp;                   /* a pair's routing weight, in its row's order */
   void *x16, *xe16;             /* f16 activations: a matmul's [16][cols]; the experts' [expert][16][cols] */
   float *lat, *kvc, *scg, *ikr, *qix, *wix, *score;
+  float *att;                   /* the attention's scores, then their denominators (ops_sparse_attn) */
   float *erow_f, *ekv;
   uint8_t *erow;
   int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;

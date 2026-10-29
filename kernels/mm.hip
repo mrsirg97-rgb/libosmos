@@ -24,33 +24,62 @@ constexpr float kF16Max = 65504.0f;
 // a thread a value: to f16 (the rows past n zero)
 __global__ void x16_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t cols, _Float16* x16, int32_t* overflow) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= (uint64_t) mm::kTile * cols) return;
   const uint32_t t = (uint32_t) (i / cols), c = (uint32_t) (i % cols);
+  if (t >= (n + mm::kTile - 1) / mm::kTile * mm::kTile) return;
   const float v = t < n ? x[(uint64_t) t * xs + c] : 0.0f;
   if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);  // past f16, or NaN: refused at the step's end
   x16[i] = (_Float16) v;
 }
 
-// matrix m's slot j: row idx[m * 16 + j] of x (-1: zero), to f16
-__global__ void x16_rows_kernel(const float* x, uint32_t xs, const int32_t* idx, uint32_t n_mat, uint32_t cols,
+// slot s: row idx[s] of x (-1: zero), to f16
+__global__ void x16_rows_kernel(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols,
                                 _Float16* x16, int32_t* overflow) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= (uint64_t) n_mat * mm::kTile * cols) return;
+  if (i >= (uint64_t) slots * cols) return;
   const int32_t r = idx[i / cols];
   const float v = r >= 0 ? x[(uint64_t) r * xs + i % cols] : 0.0f;
   if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);
   x16[i] = (_Float16) v;
 }
 
-template <quant::Type T>
-bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t rows, uint32_t cols,
-                  const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff, uint32_t ys,
-                  hipStream_t s) {
+// the column tiles a block takes (a weight slab decoded once for CT WMMAs): as many as the tokens need, up to 8
+constexpr int kMaxCt = 8;
+uint32_t col_tiles(uint32_t n) { return n <= mm::kTile ? 1 : n <= 2 * mm::kTile ? 2 : n <= 4 * mm::kTile ? 4 : kMaxCt; }
+
+template <quant::Type T, int CT>
+bool group_ct(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
+              uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
+              uint32_t ys, hipStream_t s) {
   using S = typename Tuned<T>::S;
-  if (rows % mm::kTile || cols % quant::Block<T>::values || cols % S::kSlab || xts < cols || xts % mm::kTile)
-    return false;
-  mm::group_kernel<T, S><<<dim3(rows / mm::kTile, n_mat), mm::kWave * S::kWaves, 0, s>>>(
+  const uint32_t z = (max_cnt + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::group_kernel<T, S, CT><<<dim3(rows / mm::kTile, n_mat, z), mm::kWave * S::kWaves, 0, s>>>(
       (const uint8_t* const*) w, cnt, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T>
+bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
+                  uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
+                  uint32_t ys, hipStream_t s) {
+  using S = typename Tuned<T>::S;
+  if (rows % mm::kTile || cols % quant::Block<T>::values || cols % S::kSlab || xts < cols || xts % mm::kTile ||
+      !max_cnt || max_cnt > MM_MAX_TOKENS)
+    return false;
+  switch (col_tiles(max_cnt)) {
+    case 1: return group_ct<T, 1>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    case 2: return group_ct<T, 2>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    case 4: return group_ct<T, 4>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    default: return group_ct<T, kMaxCt>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+  }
+}
+
+template <quant::Type T, int CT>
+bool launch_ct(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
+               hipStream_t s) {
+  using S = typename Tuned<T>::S;
+  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::kernel<T, S, CT><<<dim3(rows / mm::kTile, 1, z), mm::kWave * S::kWaves, 0, s>>>((const uint8_t*) w, cols,
+                                                                                    (const _Float16*) x16, n, y, ys);
   return hipGetLastError() == hipSuccess;
 }
 
@@ -59,9 +88,12 @@ bool launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32
             hipStream_t s) {
   using S = typename Tuned<T>::S;
   if (rows % mm::kTile || cols % quant::Block<T>::values || cols % S::kSlab) return false;
-  mm::kernel<T, S><<<rows / mm::kTile, mm::kWave * S::kWaves, 0, s>>>((const uint8_t*) w, cols, (const _Float16*) x16,
-                                                                     n, y, ys);
-  return hipGetLastError() == hipSuccess;
+  switch (col_tiles(n)) {
+    case 1: return launch_ct<T, 1>(w, rows, cols, x16, n, y, ys, s);
+    case 2: return launch_ct<T, 2>(w, rows, cols, x16, n, y, ys, s);
+    case 4: return launch_ct<T, 4>(w, rows, cols, x16, n, y, ys, s);
+    default: return launch_ct<T, kMaxCt>(w, rows, cols, x16, n, y, ys, s);
+  }
 }
 
 }  // namespace
@@ -76,8 +108,8 @@ extern "C" bool mm_known(uint32_t type) {
 
 extern "C" bool mm_x16(const float* x, uint32_t xs, uint32_t n, uint32_t cols, void* x16, int32_t* overflow,
                        void* stream) {
-  if (!n || n > MM_TILE || !cols || cols % mm::kTile || (n > 1 && xs < cols)) return false;
-  const uint64_t work = (uint64_t) mm::kTile * cols;
+  if (!n || n > MM_MAX_TOKENS || !cols || cols % mm::kTile || (n > 1 && xs < cols)) return false;
+  const uint64_t work = (uint64_t) (n + mm::kTile - 1) / mm::kTile * mm::kTile * cols;  // whole tiles: past n, zero
   x16_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
       x, xs, n, cols, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
@@ -85,7 +117,7 @@ extern "C" bool mm_x16(const float* x, uint32_t xs, uint32_t n, uint32_t cols, v
 
 extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
                        float* y, uint32_t ys, void* stream) {
-  if (!n || n > MM_TILE || (n > 1 && ys < rows)) return false;
+  if (!n || n > MM_MAX_TOKENS || (n > 1 && ys < rows)) return false;
   const hipStream_t s = (hipStream_t) stream;
   switch (type) {
     case quant::kQ8_0: return launch<quant::kQ8_0>(w, rows, cols, x16, n, y, ys, s);
@@ -98,23 +130,24 @@ extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t col
   }
 }
 
-extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t n_mat, uint32_t cols, void* x16,
+extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,
                             int32_t* overflow, void* stream) {
-  if (!n_mat || !cols || cols % mm::kTile || xs < cols) return false;
-  const uint64_t work = (uint64_t) n_mat * mm::kTile * cols;
+  if (!slots || !cols || cols % mm::kTile || xs < cols) return false;
+  const uint64_t work = (uint64_t) slots * cols;
   x16_rows_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
-      x, xs, idx, n_mat, cols, (_Float16*) x16, overflow);
+      x, xs, idx, slots, cols, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
 }
 
-extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t rows,
-                         uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y,
+extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt,
+                         uint32_t rows, uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y,
                          const uint32_t* yoff, uint32_t ys, void* stream) {
   if (!n_mat || n_mat > MM_MAX_GROUP) return false;
   const hipStream_t s = (hipStream_t) stream;
   switch (type) {
-#define GROUP(t) \
-  case quant::t: return group_launch<quant::t>(w, cnt, n_mat, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+#define GROUP(t)                                                                                                     \
+  case quant::t:                                                                                                     \
+    return group_launch<quant::t>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS)
 #undef GROUP
     default: return false;

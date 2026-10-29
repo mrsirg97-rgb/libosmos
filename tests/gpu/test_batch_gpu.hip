@@ -21,6 +21,7 @@
 extern "C" {
 #include "substrate/model/gguf.h"
 #include "substrate/model/weights.h"
+#include "substrate/gpu/mm.h"
 #include "substrate/run/forward.h"
 }
 
@@ -147,14 +148,14 @@ int main() {
   for (int k = 0; k < kSeqs; k++)  // 4 windows of the real ids: different sequences, real text
     r.ids.push_back(std::vector<int32_t>(all.begin() + 5 * k, all.begin() + 5 * k + kLen));
   Seq* s0 = seq_create(r.f, ferr);
-  std::vector<int32_t> many(kMaxBatch + 1, 0);
-  std::vector<Seq*> many_s(kMaxBatch + 1, s0);
-  CHECK(!forward_batch(r.f, many_s.data(), many.data(), kMaxBatch + 1, ferr));
+  std::vector<int32_t> many(MM_MAX_TOKENS + 1, 0);
+  std::vector<Seq*> many_s(MM_MAX_TOKENS + 1, s0);
+  CHECK(!forward_batch(r.f, many_s.data(), many.data(), MM_MAX_TOKENS + 1, ferr));
   CHECK(!forward_batch(r.f, many_s.data(), many.data(), 0, ferr));
   int32_t bad = (int32_t) r.V;
   CHECK(!forward_batch(r.f, many_s.data(), &bad, 1, ferr));
   seq_destroy(s0);
-  std::printf("  refusals: %d tokens, 0 tokens, a token past the vocabulary\n", kMaxBatch + 1);
+  std::printf("  refusals: %d tokens, 0 tokens, a token past the vocabulary\n", MM_MAX_TOKENS + 1);
 
   play(&r, alone());  // twice: warm the pool, then the reference
   play(&r, alone());

@@ -130,26 +130,36 @@ bool fwd_moe(Forward *f, int l, char *err)
   uint32_t *xg, *yg, *xd, *yd, *dxg, *dyg, *dxd, *dyd;
   tab = carve(&c, 3 * nd * sizeof *tab, (void **)&dtab), cnt = carve(&c, nd * 4, (void **)&dcnt);
   order = carve(&c, P * 4, (void **)&dorder), pidx = carve(&c, P * 4, (void **)&dpidx);
-  gidx = carve(&c, nd * MM_TILE * 4, (void **)&dgidx), hidx = carve(&c, nd * MM_TILE * 4, (void **)&dhidx);
+  /* an expert's slots: its tokens, padded to whole tiles - at most P + (MM_TILE - 1) an expert */
+  uint32_t slots = 0, max_cnt = 0;
+  for (uint32_t r = 0, c_ = 0; r < P; r++)
+  {
+    c_ = (r == 0 || ids[by[r]] != ids[by[r - 1]]) ? 1 : c_ + 1;
+    const bool last = r + 1 == P || ids[by[r + 1]] != ids[by[r]];
+    if (last)
+      slots += (c_ + MM_TILE - 1) / MM_TILE * MM_TILE, max_cnt = c_ > max_cnt ? c_ : max_cnt;
+  }
+  gidx = carve(&c, slots * 4, (void **)&dgidx), hidx = carve(&c, slots * 4, (void **)&dhidx);
   xg = carve(&c, nd * 4, (void **)&dxg), yg = carve(&c, nd * 4, (void **)&dyg);
   xd = carve(&c, nd * 4, (void **)&dxd), yd = carve(&c, nd * 4, (void **)&dyd);
-  uint32_t row_of[FWD_MAX_PAIRS], base[FWD_MAX_PAIRS];
-  for (uint32_t r = 0, j = 0; r < P; r++)
+  for (uint32_t s = 0; s < slots; s++)
+    gidx[s] = -1, hidx[s] = -1;
+  uint32_t row_of[FWD_MAX_PAIRS], base[FWD_MAX_PAIRS], slot0[FWD_MAX_PAIRS];
+  for (uint32_t r = 0, j = 0, next_slot = 0; r < P; r++)
   {
     const uint32_t m = by[r];
     if (r == 0 || ids[m] != ids[by[r - 1]])
     {
-      j = r == 0 ? 0 : j + 1;
-      base[j] = r, cnt[j] = 0;
-      for (uint32_t s = 0; s < MM_TILE; s++)
-        gidx[j * MM_TILE + s] = -1, hidx[j * MM_TILE + s] = -1;
+      if (r)
+        j++, next_slot += (uint32_t)(cnt[j - 1] + MM_TILE - 1) / MM_TILE * MM_TILE;
+      base[j] = r, cnt[j] = 0, slot0[j] = next_slot;
       const uint32_t unit = (uint32_t)l * E + (uint32_t)ids[m];
       if (pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_FULL)
         return fwd_fail(err, "an expert the budget cannot hold beside the layers' weights");
       f->held[f->n_held++] = unit;
     }
-    const uint32_t slot = (uint32_t)cnt[j]++;
-    gidx[j * MM_TILE + slot] = (int32_t)(m / K), hidx[j * MM_TILE + slot] = (int32_t)r;
+    const uint32_t slot = slot0[j] + (uint32_t)cnt[j]++;
+    gidx[slot] = (int32_t)(m / K), hidx[slot] = (int32_t)r;
     pidx[r] = (int32_t)m, row_of[m] = r;
   }
   for (uint32_t j = 0; ok && j < nd; j++)
@@ -157,7 +167,7 @@ bool fwd_moe(Forward *f, int l, char *err)
     const void *ex[POOL_PARTS];
     ok = fwd_pinned(f, f->held[j], ex, err);
     tab[j] = ex[0], tab[nd + j] = ex[1], tab[2 * nd + j] = ex[2];
-    xg[j] = j * MM_TILE * D, yg[j] = base[j] * FF, xd[j] = j * MM_TILE * FF, yd[j] = base[j] * D;
+    xg[j] = slot0[j] * D, yg[j] = base[j] * FF, xd[j] = slot0[j] * FF, yd[j] = base[j] * D;
   }
   for (uint32_t i = 0; i < n; i++) /* each token's rows in ascending expert id */
   {
@@ -169,12 +179,12 @@ bool fwd_moe(Forward *f, int l, char *err)
       order[i * K + k] = ord[k][1];
   }
   ok = ok && fwd_put_async(b->up, f->pin->up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
-       mm_x16_rows(b->xf, D, dgidx, nd, D, b->xe16, b->overflow, NULL) &&
-       mm_group(L->exp_gate->type, dtab, dcnt, nd, FF, D, b->xe16, dxg, D, b->ga, dyg, FF, NULL) &&
-       mm_group(L->exp_up->type, dtab + nd, dcnt, nd, FF, D, b->xe16, dxg, D, b->upr, dyg, FF, NULL) &&
+       mm_x16_rows(b->xf, D, dgidx, slots, D, b->xe16, b->overflow, NULL) &&
+       mm_group(L->exp_gate->type, dtab, dcnt, nd, max_cnt, FF, D, b->xe16, dxg, D, b->ga, dyg, FF, NULL) &&
+       mm_group(L->exp_up->type, dtab + nd, dcnt, nd, max_cnt, FF, D, b->xe16, dxg, D, b->upr, dyg, FF, NULL) &&
        ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
-       mm_x16_rows(b->hh, FF, dhidx, nd, FF, b->xe16, b->overflow, NULL) &&
-       mm_group(L->exp_down->type, dtab + 2 * nd, dcnt, nd, D, FF, b->xe16, dxd, FF, b->ye, dyd, D, NULL) &&
+       mm_x16_rows(b->hh, FF, dhidx, slots, FF, b->xe16, b->overflow, NULL) &&
+       mm_group(L->exp_down->type, dtab + 2 * nd, dcnt, nd, max_cnt, D, FF, b->xe16, dxd, FF, b->ye, dyd, D, NULL) &&
        ops_gather_sum(b->moe, b->ye, dorder, K, n, D, NULL) && ops_add(b->moe, b->sye, (uint64_t)n * D, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");

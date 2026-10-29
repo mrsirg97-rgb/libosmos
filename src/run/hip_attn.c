@@ -143,12 +143,15 @@ bool fwd_attention(Forward *f, int l, char *err)
     fwd_probe(f, "sel", l, f->at, b->sel, vis < (uint32_t)g->ix_topk ? vis : (uint32_t)g->ix_topk, true);
   }
   const float scale = (float)pow(HD, -0.5);
-  for (uint32_t i = 0; ok && i < n; i++)
+  for (uint32_t i = 0, run; ok && i < n; i += run) /* a launch a run of one sequence's tokens (a block a token) */
   {
+    for (run = 1; i + run < n && f->bs[i + run] == f->bs[i]; run++)
+      ;
     const float *ckv = ratio ? f->bs[i]->ckv[src] : NULL;
     ok = ops_sparse_attn(b->q + (uint64_t)i * H * HD, f->bs[i]->ring[l], f->slots, b->pos + i, g->window, ckv,
                          ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL, ckv ? b->n_sel + i : NULL, OPS_MAX_SELECT,
-                         F(f, L->sinks), scale, H, HD, 1, b->o + (uint64_t)i * H * HD, NULL);
+                         (uint32_t)g->ix_topk, F(f, L->sinks), scale, H, HD, run, b->att, b->o + (uint64_t)i * H * HD,
+                         NULL);
   }
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention)");
@@ -158,7 +161,7 @@ bool fwd_attention(Forward *f, int l, char *err)
   /* wo_a: the tokens' attention to f16 once, then every group in one launch, group k over its 4,096 of each (the
      groups' token counts the step's: forward_batch sends them) */
   ok = ok && mm_x16(b->o, H * HD, n, H * HD, b->x16, b->overflow, NULL) &&
-       mm_group(L->out_a->type, f->oa_tab + (size_t)l * OG, b->oa_cnt, OG, OL, oin, b->x16, f->oa_xoff, H * HD, b->oa,
+       mm_group(L->out_a->type, f->oa_tab + (size_t)l * OG, b->oa_cnt, OG, n, OL, oin, b->x16, f->oa_xoff, H * HD, b->oa,
                 f->oa_yoff, OG * OL, NULL);
   ok = ok && fwd_mat(f, L->out_b, fwd_dev(f, L->out_b), D, OG * OL, b->oa, OG * OL, n, b->y, D);
   if (!ok)

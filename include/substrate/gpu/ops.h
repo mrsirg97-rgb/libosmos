@@ -10,6 +10,9 @@
 #define OPS_MAX_TOPK 16
 #define OPS_MAX_SELECT 1024
 #define OPS_MAX_RATIO 16
+#define OPS_ATTN_ROW(keys) (((keys) + 3) / 4 * 4) /* a score row: the keys, to a float4 */
+/* ops_sparse_attn's scores: n_tok tokens of heads heads, a row a head, then a denominator a head */
+#define OPS_ATTN_SCRATCH(n_tok, heads, keys) ((uint64_t)(n_tok) * (heads) * (OPS_ATTN_ROW(keys) + 1))
 
 bool ops_embed(uint32_t type, const void *table, uint32_t dim, const int32_t *ids, uint32_t n_tok, uint32_t hc,
                float *h, void *stream);
@@ -32,8 +35,9 @@ bool ops_round_bf16(float *x, uint64_t n, void *stream);
 bool ops_engram_gate(float *h, const float *kv, const void *q_w, const void *k_w, uint32_t hc, uint32_t dim, float eps,
                      uint32_t n_tok, void *stream);
 bool ops_sparse_attn(const float *q, const float *ring, uint32_t slots, const int32_t *pos, uint32_t window,
-                     const float *ckv, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap, const float *sink,
-                     float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *o, void *stream);
+                     const float *ckv, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap, uint32_t max_sel,
+                     const float *sink, float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *scores,
+                     float *o, void *stream);
 bool ops_compress(const float *kvc, const float *sc, uint32_t ratio, uint32_t dim, float *out, void *stream);
 bool ops_index_score(const float *q, const float *keys, const float *w, uint32_t n, uint32_t heads, uint32_t head_dim,
                      float *score, void *stream);
@@ -108,7 +112,10 @@ ops_sparse_attn
   for each token and head: q against its keys - the window's (positions pos - window + 1 .. pos, at ring row
   position % slots), then the n_sel[t] compressed rows of ckv that sel[t * sel_cap ..] names (ckv NULL: none) - each
   a latent that is the key and the value; scaled, softmax with the head's sink, the values summed in that order. slots
-  at least window + the step's tokens - 1, so no position a token reads is overwritten by the step.
+  at least window + the step's tokens - 1, so no position a token reads is overwritten by the step. max_sel bounds
+  n_sel (the model's top k); scores the device's OPS_ATTN_SCRATCH(n_tok, heads, window + max_sel) floats (window
+  alone with no ckv); heads and head_dim multiples of 64. a score a sum over d ascending, an output over the keys in
+  their order: a token's bits do not depend on the other tokens, the heads' tiling, or the batch.
 
 ops_compress
   a compressed row from `ratio` positions' kvc and sc ([ratio][dim]): out = sum over them of kvc * softmax(sc), the
