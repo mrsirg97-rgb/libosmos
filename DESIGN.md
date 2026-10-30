@@ -471,18 +471,24 @@ still in the window).
   trunk's budget gives them room.
 - the first run (scratch `spec.hip`, a 512-token prompt from the corpus at 60,000, 64 greedy tokens, budget 80 GB
   with the profile): the same tokens as stepping one at a time; 54 drafted, 40 accepted (74%); 11.5 -> 18.7 tok/s
-  (1.63x); drafting 0.37 s of 3.42, verifying 3.05. test_drafter_gpu: 48 tokens, the same as plain, 42 drafted, 35
+  (1.63x, the drafted run after the plain one: see the correction below); drafting 0.37 s of 3.42, verifying 3.05. test_drafter_gpu: 48 tokens, the same as plain, 42 drafted, 35
   accepted (83%); a drafter with no window (every row's ring empty) fails its floor of 30% accepted.
 - not built: maya's lazy stages (the head runs once for all five rows when the first passes), sampled drafts, the
   multi-sequence round. the drafter's numerics against an oracle (maya's needs DeepSeek's checkpoint shards, not here):
   the acceptance is the check so far.
-- 256 greedy tokens after a 512-token prompt, two texts of the corpus (at 60,000 / 30,000), against the best plain
-  decode (budget 88 GB, no drafter: mean 88.6 / 82.9 ms, 11.3 / 12.1 tok/s); the drafter's runs at 80 GB (their own
-  plain decode 11.0-11.8 tok/s: the 8 GB given to the drafter cost the trunk little). the confidence cut (each,
-  product): 0.5 / 0.5 21.8 / 26.0 tok/s (80 / 77% accepted, ~2.1 / 3.2 drafts a round kept); 0.3 / 0.3 22.0 / 24.9
-  (72 / 71%); 0.7 / 0.5 21.4 / 26.1 (87 / 78%). maya's defaults as good as any: 1.9-2.2x the best plain, every run
-  the same tokens as stepping one at a time. a round's time is the verify's (~110 ms of ~124 at 60,000: the trunk's
-  batch of 3-6 rows), the drafting ~14 ms.
+- **against maya, on the same prompts** (maya's --bench: its warm-up and three questions, its own token ids -
+  `<|begin|><|User|>q<|Assistant|></think>`, 10 / 28 / 19 / 21 tokens - greedy, up to 256 tokens; scratch
+  `mbench.hip`, budget 80 GB with the profile, each mode in a fresh process, 2 rounds): maya 1.1.41 DSpark 27.5 / 23.3
+  / 28.3 tok/s (mean 26.4), no drafting 16.7 / 16.6 / 16.8 (16.7); substrate DSpark 16.2-16.3 / 14.4-14.9 / 18.6-19.1
+  (16.6), plain 9.4-9.6 / 10.1-10.3 / 10.0-10.2 (9.9) - the drafted answers the plain ones token for token. ~60% of
+  maya both ways; DSpark 1.7x here (maya 1.6x).
+- **a correction**: the first numbers here (256 tokens after a 512-token prompt: 21.8 / 26.0 tok/s, "1.9-2.2x the best
+  plain") ran the drafted decode after the plain one on the same prompt in one process - the resident set had
+  already followed that very answer (hip_adapt.c), its misses gone. the same on maya's prompts: 26.3 / 20.4 / 28.4
+  tok/s, within ~5% of maya's DSpark. so what parts substrate from maya on a fresh prompt is the experts it reads from
+  the files (maya holds ~104 GB of experts in GPU memory and computes the rest on the CPU from RAM; substrate's GPU
+  memory is at the ~107 GB cap: the trunk's 80-88, the drafter's 8, the scratch's ~9), not the kernels or the drafter.
+  a round's time is the verify's (the trunk's batch of 3-6 rows: more distinct experts a step, so more misses).
 
 ## Engram's reads (measured, 2026-10-29)
 
