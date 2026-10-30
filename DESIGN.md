@@ -359,6 +359,13 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   348, b1065b0 370, the experts at once 409 tok/s. the commits' messages for 955db80 and b1065b0 state the gain
   since the day's start as the commit's own. a baseline is built by its library files (`make lib/libsubstrate.a
   lib/libsubstrate_hip.a`), never `make lib`.
+- the matmuls after it (scratch `mmd.hip`, `exg.hip`; 2,048 tokens): the dense ones 26-32 TFLOP/s but q_b's 19.6
+  (K 1,280 under 8 waves' split, 2,048 row tiles each re-reading the x16, 10.7 GB at ~1.2 TB/s); the IQ experts at
+  128 tokens 34 TFLOP/s, and not bound by their x16 (every expert on one x: 33.7 -> 32.3 ms). tried and given up:
+  16 column tiles a block for Q5_K (the decode amortized twice as far) - the 16 accumulators spill: 3-4x slower,
+  and the epilogue's unroll dropped to build it took Q6_K's out_b 5.4 -> 11.5 ms; the waves' 8 outputs a tile
+  summed by 8 waves, not wave 0 alone (the same bits) - q_b 8.77 -> 8.33 ms but out_b 5.41 -> 5.72 and the experts
+  33.7 -> 36.3: a loss. what is left in them wants another shape of kernel, not a knob.
 
 ## Engram's reads (measured, 2026-10-29)
 
