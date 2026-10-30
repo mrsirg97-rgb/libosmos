@@ -317,7 +317,7 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   MV_MAX_TOKENS now runs tiles of 4 rows a wave and 8 tokens a block, x shared through LDS: each lane's chunks in the
   same order, the same tree, so every token's bits are those it takes alone (test_mv_gpu: 77 tokens at once against
   each alone, every shape; reversing the tree fails it). the router 15.2 -> 5.5 ms (R 1-8, NW 4-32 tried: R 3 NW 12
-  5.1, 16+ tokens 6.3-16); 8,192 tokens ~310 -> ~318 tok/s (3 rounds alternating, the first's cold pass left out).
+  5.1, 16+ tokens 6.3-16); 8,192 tokens ~310 -> ~312 tok/s (re-measured; see the round-robin below).
 - the elementwise kernels are bound by memory, and rope by its pattern: a head's last 64 of 512 values, 256 B of
   every 2 KB - 2.45 ms for q's 2,048 tokens with no trig at all, 0.10 ms for the same bytes side by side (scratch
   `ropeb.hip`; a thread computing an angle once for 2-64 heads was slower, 2.8-3.8 ms). so the attention's output
@@ -325,7 +325,7 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   pair's lanes trading values for the rotation - and writes the f16 (test_mm_gpu: the bits of the three calls on
   37 tokens x 32,768; a flipped rotation fails it). hc_post a thread a (token, d), the hc streams read once for
   its 4 outputs, each sum in its order. 8,192 tokens: rope 0.82 -> 0.42 s (q's, kv's, the indexer's left),
-  fp8 + x16 1.04 -> 0.31 + 0.39 (the fused), hc_post 0.97 -> 0.56; the GPU busy 24.9 -> 23.2 s, ~318 -> ~330 tok/s.
+  fp8 + x16 1.04 -> 0.31 + 0.39 (the fused), hc_post 0.97 -> 0.56; the GPU busy 24.9 -> 23.2 s, ~312 -> ~328 tok/s.
 - sparse attention's two products (scratch `sab.hip` / `sav.hip`, 2,048 tokens x 640 keys): the 4 x 4 a thread
   read 2 B of LDS a fma, the bound of LDS's bandwidth, though every fma was already dual-issued; q's traffic was
   not it (every block on one token's q: 10.85 -> 10.57 ms). larger register tiles, each thread's row pointers once
@@ -333,8 +333,7 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   scores 16 heads x 8 keys a thread, 64 x 128 a block, 13.0 -> 8.9 ms; values 8 x 16 of 64 x 256, 13.9 -> 9.8
   (the keys still 16 a stage: the padding past n where it was). the same bits (the scratch benches against the old
   kernels; test_attn_gpu, new: 640 keys against a double attention, each token alone and among 24, and a tile's
-  stores skipped fails it). 8,192 tokens: scores 1.96 -> 1.24 s, values 2.00 -> 1.44; ~310 -> ~352 tok/s (3 rounds
-  alternating; the box ran this session's earlier commit at ~310, not the ~330 measured before it).
+  stores skipped fails it). 8,192 tokens: scores 1.96 -> 1.24 s, values 2.00 -> 1.44; ~328 -> ~348 tok/s.
 - the indexer's scores were a wave a row, a lane a head, each lane reading the row's 128 values one broadcast load
   at a time: 47 ms for 2,048 tokens x ~4,096 rows (~0.6 T multiply-adds a second). a run's tokens share their
   keys, so it is a product: tiles of 2 tokens x 32 head slots by 64 rows, 8 x 4 a thread, d 16 a stage, then relu
@@ -342,8 +341,24 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   4-16 x 4-8 all 10-12 ms but 16 x 8's 38). the same bits: test_attn_gpu replays the order on the host in F32 (a
   multiply then an add, -ffp-contract=off), every score bit for bit, ~3,000 rows, 32 and 24 heads; a row tile's
   stores skipped fails it, and so does summing the heads in a line instead of the tree - which the model's
-  fingerprint does not see (its 32 positions: every row selected, the scores' order unread). 8,192 tokens ~308 ->
-  ~372 tok/s (3 rounds alternating).
+  fingerprint does not see (its 32 positions: every row selected, the scores' order unread). 8,192 tokens ~348 ->
+  ~370 tok/s.
+- a layer's experts once for its every sub-batch: each sub-batch up to the FFN's input (its rows one after another
+  in a step-wide xf), the router, the shared expert and the routed ones for them all, then each sub-batch's end of
+  the layer (a sub-batch's attention reads the earlier ones' keys of the layer, which the experts do not touch). an
+  expert's 6 of 384 picks of 2,048 tokens are ~32 tokens, a slab's IQ decode serving 2 tiles; of 8,192, ~128 and 8
+  (scratch `exg.hip`, blk.3's IQ1_M experts through mm_group: 1.14 us a token-expert at 32, 0.69 at 128; the down
+  1.23 / 0.74). an expert past MM_MAX_TOKENS of its tokens runs in parts; fwd_mat a chunk of MM_MAX_TOKENS at a
+  time. the cost: the experts' scratch for 8,192 tokens, ~3 GB more GPU memory. Engram's pinned stage is now a
+  sub-batch's own: with no wait between the sub-batches' first halves, the next one's rows were read into it while
+  the last one's copy was still queued - test_batch_gpu's 2 x 1,500 tokens caught it (rows differing), now bit for
+  bit again. 8,192 tokens ~370 -> ~409 tok/s.
+- **the round-robin** (each of the day's commits built clean, 2 rounds, the second pass of each run; the first
+  A/Bs of this list compared against a baseline that `make lib` - a directory, always up to date - had not rebuilt,
+  so their "before" was the day's start, not the commit before): 96945ea 310, a9eca19 312, 88fef1d 328, 955db80
+  348, b1065b0 370, the experts at once 409 tok/s. the commits' messages for 955db80 and b1065b0 state the gain
+  since the day's start as the commit's own. a baseline is built by its library files (`make lib/libsubstrate.a
+  lib/libsubstrate_hip.a`), never `make lib`.
 
 ## Engram's reads (measured, 2026-10-29)
 

@@ -20,7 +20,7 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
   const uint32_t cols = (uint32_t)g->engram_cols, hd = (uint32_t)g->engram_head_dim, D = g->n_embd, hc = g->hc;
   const uint32_t n = f->n;
   const uint64_t rb = gguf_bytes(t->type, hd);
-  uint8_t *stage = f->stage + (uint64_t)nth * FWD_MAX_BATCH * cols * rb;
+  uint8_t *stage = f->stage + ((uint64_t)f->cur * f->n_eg + nth) * FWD_MAX_BATCH * cols * rb;
   for (uint32_t i = 0; i < n; i++)
   {
     const int64_t *rows = f->rows + (uint64_t)i * WEIGHTS_MAX_LAYERS * cols + (uint64_t)nth * cols;
@@ -135,7 +135,7 @@ bool fwd_moe(Forward *f, int l, char *err)
   /* the picks to the host and marked, then the shared expert queued: the GPU runs it while the host waits */
   ok = ok && ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, n, b->ridx, b->rw,
                         NULL) &&
-       hipMemcpyAsync(f->pin->ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess &&
+       hipMemcpyAsync(f->r_ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess &&
        hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) && hipEventSynchronize(f->routed) == hipSuccess;
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
@@ -144,12 +144,12 @@ bool fwd_moe(Forward *f, int l, char *err)
     fwd_release_held(f);
     f->visits++, f->held_layer = l;
   }
-  const int32_t *ids = f->pin->ids;
+  const int32_t *ids = f->r_ids;
   fwd_probe(f, "route_idx", l, f->at, b->ridx, P, true);
   fwd_probe(f, "route_w", l, f->at, b->rw, P, false);
   /* the distinct experts in ascending id, each with its pairs (in token order: at most one a token): an expert's
      rows base .. base + cnt, its slots those tokens; one launch of mm_group reads each once for all of its tokens */
-  uint32_t nd = 0, by[FWD_MAX_PAIRS], at[OPS_MAX_EXPERTS + 1] = {0};
+  uint32_t nd = 0, *by = f->m_by, at[OPS_MAX_EXPERTS + 1] = {0};
   for (uint32_t m = 0; m < P; m++)
   {
     if (ids[m] < 0 || (uint32_t)ids[m] >= E)
@@ -160,14 +160,19 @@ bool fwd_moe(Forward *f, int l, char *err)
     at[e + 1] += at[e];
   for (uint32_t m = 0; m < P; m++)
     by[at[ids[m]]++] = m;
-  for (uint32_t r = 0; r < P; r++)
-    nd += r == 0 || ids[by[r]] != ids[by[r - 1]];
+  uint32_t ne = 0; /* the tables' entries: an expert a part of at most MM_MAX_TOKENS of its pairs (mm_group's) */
+  for (uint32_t r = 0, run = 0; r < P; r++)
+  {
+    const bool first = r == 0 || ids[by[r]] != ids[by[r - 1]];
+    nd += first, run = first ? 1 : run + 1;
+    ne += run % MM_MAX_TOKENS == 1 || MM_MAX_TOKENS == 1;
+  }
   /* the layer's tables, carved from one pinned region and sent in one copy */
-  Carve c = {f->pin->up, (uint8_t *)b->up, 0};
+  Carve c = {f->r_up, (uint8_t *)b->up, 0};
   const void **tab, **dtab;
   int32_t *cnt, *order, *gidx, *hidx, *pidx, *dcnt, *dorder, *dgidx, *dhidx, *dpidx;
   uint32_t *xg, *yg, *xd, *yd, *dxg, *dyg, *dxd, *dyd;
-  tab = carve(&c, 3 * nd * sizeof *tab, (void **)&dtab), cnt = carve(&c, nd * 4, (void **)&dcnt);
+  tab = carve(&c, 3 * ne * sizeof *tab, (void **)&dtab), cnt = carve(&c, ne * 4, (void **)&dcnt);
   order = carve(&c, P * 4, (void **)&dorder), pidx = carve(&c, P * 4, (void **)&dpidx);
   /* an expert's slots: its tokens, padded to whole tiles - at most P + (MM_TILE - 1) an expert */
   uint32_t slots = 0;
@@ -179,11 +184,11 @@ bool fwd_moe(Forward *f, int l, char *err)
       slots += (c_ + MM_TILE - 1) / MM_TILE * MM_TILE;
   }
   gidx = carve(&c, slots * 4, (void **)&dgidx), hidx = carve(&c, slots * 4, (void **)&dhidx);
-  xg = carve(&c, nd * 4, (void **)&dxg), yg = carve(&c, nd * 4, (void **)&dyg);
-  xd = carve(&c, nd * 4, (void **)&dxd), yd = carve(&c, nd * 4, (void **)&dyd);
+  xg = carve(&c, ne * 4, (void **)&dxg), yg = carve(&c, ne * 4, (void **)&dyg);
+  xd = carve(&c, ne * 4, (void **)&dxd), yd = carve(&c, ne * 4, (void **)&dyd);
   for (uint32_t s = 0; s < slots; s++)
     gidx[s] = -1, hidx[s] = -1;
-  uint32_t row_of[FWD_MAX_PAIRS], base[FWD_MAX_PAIRS], slot0[FWD_MAX_PAIRS], unit_of[OPS_MAX_EXPERTS];
+  uint32_t *row_of = f->m_row, *base = f->m_base, *slot0 = f->m_slot0, unit_of[OPS_MAX_EXPERTS];
   for (uint32_t r = 0, j = 0, next_slot = 0; r < P; r++)
   {
     const uint32_t m = by[r];
@@ -206,21 +211,27 @@ bool fwd_moe(Forward *f, int l, char *err)
     pidx[r] = (int32_t)m, row_of[m] = r;
   }
   prefetch(f, l, ids, P);
-  /* the tables in ascending count (then id): group()'s runs of the same column tiles contiguous */
-  uint64_t rank[OPS_MAX_EXPERTS];
-  for (uint32_t j = 0; j < nd; j++)
-    rank[j] = (uint64_t)cnt[j] << 32 | j;
-  qsort(rank, nd, sizeof *rank, cmp_u64);
+  /* the entries (an expert's parts of MM_MAX_TOKENS: its slots and rows from part q's first) in ascending count,
+     then expert, then part: group()'s runs of the same column tiles contiguous */
   int32_t cnt_j[OPS_MAX_EXPERTS];
   memcpy(cnt_j, cnt, nd * sizeof *cnt);
-  for (uint32_t p = 0; ok && p < nd; p++)
+  uint64_t key[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS]; /* part's count, expert, part */
+  for (uint32_t j = 0, e = 0; j < nd; j++)
+    for (uint32_t q = 0; q * MM_MAX_TOKENS < (uint32_t)cnt_j[j]; q++, e++)
+    {
+      const uint32_t left = (uint32_t)cnt_j[j] - q * MM_MAX_TOKENS;
+      key[e] = (uint64_t)(left < MM_MAX_TOKENS ? left : MM_MAX_TOKENS) << 40 | (uint64_t)j << 16 | q;
+    }
+  qsort(key, ne, sizeof *key, cmp_u64);
+  for (uint32_t p = 0; ok && p < ne; p++)
   {
-    const uint32_t j = (uint32_t)rank[p];
+    const uint32_t j = (uint32_t)(key[p] >> 16 & 0xFFFFFF), q = (uint32_t)(key[p] & 0xFFFF);
+    const uint32_t s0 = slot0[j] + q * MM_MAX_TOKENS, r0 = base[j] + q * MM_MAX_TOKENS;
     const void *ex[POOL_PARTS];
     const int32_t at_res = f->rix[unit_of[j]];
     ok = at_res >= 0 ? resident_dev(f->res, (size_t)at_res, ex) : fwd_pinned(f, unit_of[j], ex, err);
-    tab[p] = ex[0], tab[nd + p] = ex[1], tab[2 * nd + p] = ex[2], cnt[p] = cnt_j[j];
-    xg[p] = slot0[j] * D, yg[p] = base[j] * FF, xd[p] = slot0[j] * FF, yd[p] = base[j] * D;
+    tab[p] = ex[0], tab[ne + p] = ex[1], tab[2 * ne + p] = ex[2], cnt[p] = (int32_t)(key[p] >> 40);
+    xg[p] = s0 * D, yg[p] = r0 * FF, xd[p] = s0 * FF, yd[p] = r0 * D;
   }
   for (uint32_t i = 0; i < n; i++) /* each token's rows in ascending expert id */
   {
@@ -231,13 +242,13 @@ bool fwd_moe(Forward *f, int l, char *err)
     for (uint32_t k = 0; k < K; k++)
       order[i * K + k] = ord[k][1];
   }
-  ok = ok && fwd_put_async(b->up, f->pin->up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
+  ok = ok && fwd_put_async(b->up, f->r_up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
        mm_x16_rows(b->xf, D, dgidx, slots, D, b->xe16, b->overflow, NULL) &&
-       group(L->exp_gate->type, dtab, cnt, dcnt, nd, FF, D, b->xe16, dxg, b->ga, dyg, FF) &&
-       group(L->exp_up->type, dtab + nd, cnt, dcnt, nd, FF, D, b->xe16, dxg, b->upr, dyg, FF) &&
+       group(L->exp_gate->type, dtab, cnt, dcnt, ne, FF, D, b->xe16, dxg, b->ga, dyg, FF) &&
+       group(L->exp_up->type, dtab + ne, cnt, dcnt, ne, FF, D, b->xe16, dxg, b->upr, dyg, FF) &&
        ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
        mm_x16_rows(b->hh, FF, dhidx, slots, FF, b->xe16, b->overflow, NULL) &&
-       group(L->exp_down->type, dtab + 2 * nd, cnt, dcnt, nd, D, FF, b->xe16, dxd, b->ye, dyd, D) &&
+       group(L->exp_down->type, dtab + 2 * ne, cnt, dcnt, ne, D, FF, b->xe16, dxd, b->ye, dyd, D) &&
        ops_gather_sum(b->moe, b->ye, dorder, K, n, D, NULL) && ops_add(b->moe, b->sye, (uint64_t)n * D, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");

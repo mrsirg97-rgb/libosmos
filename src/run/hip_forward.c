@@ -208,7 +208,8 @@ static bool scratch(Forward *f)
   const uint64_t row = gguf_bytes(f->w->layer[0].eg_embd ? f->w->layer[0].eg_embd->type : 0, g->engram_head_dim);
   const uint64_t cols = g->engram_cols, K = (uint64_t)g->n_used, FF = (uint64_t)g->expert_ff, hd = g->head_dim;
   const uint64_t ih = g->ix_head_dim, nh = g->ix_heads, egv = cols * (uint64_t)g->engram_head_dim;
-  const uint64_t B = FWD_MAX_BATCH, P = FWD_MAX_BATCH * K, Fs = OPS_MAX_SELECT;
+  const uint64_t B = FWD_MAX_BATCH, Fs = OPS_MAX_SELECT, NS = FWD_MAX_SUBS;
+  const uint64_t S = FWD_MAX_STEP, P = FWD_MAX_STEP * K; /* the experts': a layer's sub-batches at once */
   uint64_t widest = (uint64_t)g->o_groups * g->o_lora > D ? (uint64_t)g->o_groups * g->o_lora : D;
   widest = HQ > widest ? HQ : widest; /* the attention's output: wo_a's groups read it whole */
   const struct
@@ -218,22 +219,22 @@ static bool scratch(Forward *f)
   } want[] = {
       {&b->h, B * hc * D * F},    {&b->hcp, B * ((2 + hc) * hc + 1) * OPS_HC_PARTS * F}, {&b->a_pre, B * hc * F},
       {&b->a_post, B * hc * F},   {&b->a_comb, B * hc * hc * F},    {&b->f_pre, B * hc * F},
-      {&b->f_post, B * hc * F},   {&b->f_comb, B * hc * hc * F},    {&b->pre0, B * hc * F},
+      {&b->f_post, NS * B * hc * F}, {&b->f_comb, NS * B * hc * hc * F}, {&b->pre0, B * hc * F},
       {&b->x, B * D * F},         {&b->qa, B * (uint64_t)g->q_lora * F}, {&b->q, B * HQ * F},
       {&b->kv, B * hd * F},       {&b->o, B * HQ * F},  {&b->oa, B * (uint64_t)g->o_groups * g->o_lora * F},
-      {&b->y, B * D * F},         {&b->mid, B * hc * D * F},        {&b->xf, B * D * F},
-      {&b->logits, B * (uint64_t)g->n_experts * F}, {&b->vocab, B * (uint64_t)g->n_vocab * F},
-      {&b->rw, B * K * F},        {&b->ga, P * FF * F},             {&b->upr, P * FF * F},
-      {&b->hh, P * FF * F},       {&b->ye, P * D * F},              {&b->moe, B * D * F},
-      {&b->sga, B * FF * F},      {&b->sup, B * FF * F},            {&b->shh, B * FF * F},
-      {&b->sye, B * D * F},       {&b->up, FWD_UP_BYTES}, {&b->lat, B * hd * F},
+      {&b->y, B * D * F},         {&b->mid, NS * B * hc * D * F},   {&b->xf, S * D * F},
+      {&b->logits, S * (uint64_t)g->n_experts * F}, {&b->vocab, B * (uint64_t)g->n_vocab * F},
+      {&b->rw, S * K * F},        {&b->ga, P * FF * F},             {&b->upr, P * FF * F},
+      {&b->hh, P * FF * F},       {&b->ye, P * D * F},              {&b->moe, S * D * F},
+      {&b->sga, S * FF * F},      {&b->sup, S * FF * F},            {&b->shh, S * FF * F},
+      {&b->sye, S * D * F},       {&b->up, FWD_UP_BYTES(P)}, {&b->lat, B * hd * F},
       {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, B * ih * F},
       {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},
       {&b->score, B * (f->score_stride > Fs ? f->score_stride : Fs) * F}, /* the indexer's; hip_skip.c's sel */
       {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
-      {&b->ridx, B * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
+      {&b->ridx, S * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
       {&b->rwp, P * F},                 {&b->x16, B * (widest > egv ? widest : egv) * 2},
       {&b->xe16, FWD_MAX_SLOTS(P, g->n_experts) * (D > FF ? D : FF) * 2},
       {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4},
@@ -249,8 +250,14 @@ static bool scratch(Forward *f)
   int n_eg = 0;
   for (int l = 0; l < g->n_layers; l++)
     n_eg += g->engram[l];
+  f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
   return fwd_put(b->pre0, pre0, B * hc * F) &&
-         hipHostMalloc((void **)&f->stage, B * (uint64_t)(n_eg ? n_eg : 1) * cols * row, 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->r_ids, P * 4, 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->r_up, FWD_UP_BYTES(P), 0) == hipSuccess &&
+         (f->m_by = malloc(P * 4)) && (f->m_row = malloc(P * 4)) && (f->m_base = malloc(P * 4)) &&
+         (f->m_slot0 = malloc(P * 4)) &&
+         hipHostMalloc((void **)&f->stage, NS * B * (uint64_t)(f->n_eg = n_eg ? n_eg : 1) * cols * row, 0) ==
+             hipSuccess &&
          hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess && subs(f) &&
          hipEventCreateWithFlags(&f->routed, hipEventDisableTiming) == hipSuccess;
 }
@@ -354,6 +361,11 @@ void forward_destroy(Forward *f)
   free(f->in.r);
   pthread_cond_destroy(&f->in.cv);
   pthread_mutex_destroy(&f->in.mu);
+  if (f->xf0) /* the views back at the whole buffers: Scratch frees them */
+    f->b.xf = f->xf0, f->b.moe = f->moe0, f->b.mid = f->mid0, f->b.f_post = f->f_post0, f->b.f_comb = f->f_comb0;
+  hipHostFree(f->r_ids);
+  hipHostFree(f->r_up);
+  free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0);
   if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
   {
     const Sub *s = &f->sub[0];

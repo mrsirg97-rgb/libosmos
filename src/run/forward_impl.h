@@ -24,11 +24,13 @@
 #define FWD_MAX_SUBS FORWARD_SUBS
 /* a ratio r source's pending positions a sequence: a step's and the r - 1 before them, each row's r all held */
 #define FWD_PEND_ROWS(r) (FWD_MAX_BATCH + (r) - 1)
-#define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a step's (token, routed expert) pairs */
+#define FWD_MAX_STEP FORWARD_MAX_TOKENS             /* the experts' tokens: a layer's every sub-batch at once */
+#define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a sub-batch's (token, routed expert) pairs */
 #define FWD_MAX_GROUPS 64                           /* a layer's wo_a groups */
-/* a layer's routing tables at most: 3 matrix pointers, 4 offsets, a count an expert; an order and a pair a pair; 2 x 16
-   slots an expert - with each table's alignment (16) */
-#define FWD_UP_BYTES (FWD_MAX_PAIRS * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4) + 10 * 16)
+/* a layer's routing tables at most for `pairs` pairs: 3 matrix pointers, 4 offsets, a count an entry (an expert, or
+   a part of MM_MAX_TOKENS of one: at most pairs entries); an order and a pair a pair; 2 x 16 slots an expert - with
+   each table's alignment (16) */
+#define FWD_UP_BYTES(pairs) ((uint64_t)(pairs) * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4) + 10 * 16)
 /* the experts' slots at most: each its tokens padded to whole tiles - the pairs and a tile's padding an expert */
 #define FWD_MAX_SLOTS(pairs, experts) ((pairs) + (uint64_t)(experts) * (MM_TILE - 1))
 
@@ -57,13 +59,18 @@ typedef struct Sub
   struct Pinned *pin;
   int64_t *rows;
   uint32_t n, n_all, n_keep;
+  uint32_t xrow; /* its first row in the step's experts' input and output (Forward's xf0, moe0): a layer's */
   int32_t at;
   Seq *bs[FWD_MAX_BATCH];
   int32_t row[FWD_MAX_BATCH];
   bool want[FWD_MAX_BATCH];
 } Sub;
 
-/* the step's device buffers, each [FWD_MAX_BATCH][...] a token (the routed experts' [FWD_MAX_PAIRS][...] a pair) */
+/* the step's device buffers, each [FWD_MAX_BATCH][...] a token - but the experts' (the FFN's input xf and output
+   moe, the router's, the shared and routed experts'), a layer's every sub-batch at once: [FWD_MAX_STEP][...] a token,
+   [FWD_MAX_STEP * n_used][...] a pair; and mid, f_post, f_comb [FWD_MAX_SUBS][FWD_MAX_BATCH][...], a sub-batch's
+   own across its layer's experts. xf, moe, mid, f_post and f_comb point at the running sub-batch's (Forward's xf0 ..
+   the whole) */
 typedef struct Scratch
 {
   float *h, *hcp, *a_pre, *a_post, *a_comb, *f_pre, *f_post, *f_comb, *pre0;
@@ -87,10 +94,8 @@ typedef struct Pinned
 {
   int32_t tok[FWD_MAX_BATCH]; /* the step's tokens */
   int32_t pos[FWD_MAX_BATCH]; /* and their positions */
-  int32_t ids[FWD_MAX_PAIRS];     /* the routed experts, [token][slot] */
   int32_t overflow;               /* an activation past f16: the step refused */
   int32_t oa_cnt[FWD_MAX_GROUPS]; /* each wo_a group's tokens: the step's */
-  uint8_t up[FWD_UP_BYTES];       /* a layer's routing tables (hip_ffn.c's carve), one copy to Scratch's up */
   int32_t rpos[WEIGHTS_MAX_LAYERS][FWD_MAX_BATCH];
   int32_t keep[FWD_MAX_BATCH], back[FWD_MAX_BATCH]; /* hip_skip.c's: the kept tokens' rows, and back */
 } Pinned;
@@ -119,7 +124,16 @@ struct Forward
   Engram *hash;
   float *freqs_win, *freqs_comp;
   Scratch b;
-  uint8_t *stage; /* pinned: a position's Engram rows, each Engram layer its own */
+  float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
+  /* the experts' routing, a layer's every sub-batch at once: pinned, the picks [token][slot] and the tables
+     (hip_ffn.c's carve, one copy to Scratch's up); on the host, the pairs' by-expert order and places */
+  int32_t *r_ids;
+  uint8_t *r_up;
+  uint32_t *m_by, *m_row, *m_base, *m_slot0;
+  uint8_t *stage; /* pinned: the Engram rows, [sub-batch][Engram layer][token]: a sub-batch's copy may still be
+                     queued when the next one's rows are read (a layer's sub-batches run to its experts unwaited) */
+  int n_eg;       /* the Engram layers (stage's) */
+  uint32_t cur;   /* the running sub-batch (enter's) */
   Pinned *pin;
   hipEvent_t routed;                /* the router's picks are on the host */
   uint32_t held[FWD_MAX_PAIRS];     /* the last layer's experts: released once the stream is past them */
@@ -173,8 +187,8 @@ bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memo
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
 
 bool fwd_attention(Forward *f, int l, char *err);
-/* a weight's product over n tokens (token t's x at x + t * xs, its y at y + t * ys): mm for the quantized types (one
-   kernel for 1 .. 16 tokens), the matvec 8 tokens at a time for F32 and BF16 - a row the same sums either way */
+/* a weight's product over n tokens (token t's x at x + t * xs, its y at y + t * ys; n up to FWD_MAX_STEP): mm for
+   the quantized types (MM_MAX_TOKENS a launch), the matvec for F32 and BF16 - a row the same sums either way */
 bool fwd_mat(Forward *f, const GgufTensor *t, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
              uint32_t n, float *y, uint32_t ys);
 bool fwd_engram(Forward *f, int l, int nth, char *err);

@@ -53,7 +53,9 @@ void seq_destroy(Seq *s)
 
 static const float *fv(const Forward *f, const GgufTensor *t) { return (const float *)fwd_dev(f, t); }
 
-static bool layer(Forward *f, int l, const float *pre, int *nth, char *err)
+/* a layer up to its experts' input: Engram, the attention's mixes, the attention, its hc_post, the FFN's mixes - into
+   the sub-batch's xf (its rows of the step's), mid, f_post, f_comb */
+static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
 {
   const Geometry *g = f->g;
   const LayerWeights *L = &f->w->layer[l];
@@ -87,12 +89,28 @@ static bool layer(Forward *f, int l, const float *pre, int *nth, char *err)
   fwd_probe(f, "f_post", l, p, b->f_post, n * hc, false);
   fwd_probe(f, "f_comb", l, p, b->f_comb, n * hc * hc, false);
   fwd_probe(f, "ffn_x", l, p, b->xf, n * D, false);
-  if (!fwd_moe(f, l, err))
-    return false;
+  return true;
+}
+
+/* the layer's end, the experts' output (its rows of the step's moe) back into the streams */
+static bool layer_out(Forward *f, int l, char *err)
+{
+  Scratch *b = &f->b;
+  const uint32_t hc = f->g->hc, D = f->g->n_embd, n = f->n;
   if (!ops_hc_post(b->moe, b->mid, b->f_post, b->f_comb, hc, D, n, b->h, NULL))
     return fwd_fail(err, "a GPU call failed (the FFN's hc_post)");
-  fwd_probe(f, "h_out", l, p, b->h, n * hc * D, false);
+  fwd_probe(f, "h_out", l, f->at, b->h, n * hc * D, false);
   return true;
+}
+
+/* a layer's routed and shared experts for every sub-batch at once (their xf rows one after another, xrow on): each
+   expert read and decoded once for the layer's every token - a token's rows the same bits as alone (mm's) */
+static bool layer_experts(Forward *f, int l, uint32_t rows, char *err)
+{
+  if (!rows)
+    return true;
+  f->n = rows, f->at = f->sub[0].at, f->b.xf = f->xf0, f->b.moe = f->moe0;
+  return fwd_moe(f, l, err);
 }
 
 /* sub-batch k's state into the Forward (and its Scratch), to run its next layer; and back */
@@ -100,9 +118,13 @@ static void enter(Forward *f, uint32_t k)
 {
   const Sub *s = &f->sub[k];
   Scratch *b = &f->b;
+  f->cur = k;
   b->h = s->h, b->f_pre = s->f_pre, b->pos = s->pos, b->sel = s->sel, b->n_sel = s->n_sel, b->oa_cnt = s->oa_cnt;
   b->keep = s->keep, b->back = s->back, f->pin = s->pin, f->rows = s->rows;
   f->n = s->n, f->n_all = s->n_all, f->n_keep = s->n_keep, f->at = s->at;
+  const uint64_t B = FWD_MAX_BATCH, hc = f->g->hc, D = f->g->n_embd;
+  b->mid = f->mid0 + k * B * hc * D, b->f_post = f->f_post0 + k * B * hc, b->f_comb = f->f_comb0 + k * B * hc * hc;
+  b->xf = f->xf0 + (uint64_t)s->xrow * D, b->moe = f->moe0 + (uint64_t)s->xrow * D;
   memcpy(f->bs, s->bs, s->n_all * sizeof *f->bs);
   memcpy(f->row, s->row, s->n_all * sizeof *f->row);
   memcpy(f->want, s->want, s->n_all * sizeof *f->want);
@@ -185,16 +207,31 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     ok = begin(f, err);
     leave(f, k);
   }
-  /* layer by layer, every sub-batch through it before the next: the experts a layer holds read once for all */
+  /* layer by layer, every sub-batch through it before the next: each up to the experts' input, its rows one after
+     another; the experts once for them all; then each sub-batch's end of the layer. (a sub-batch's attention reads
+     the earlier ones' keys of the layer, which its experts do not touch) */
   for (int l = 0, nth = 0; ok && l < f->n_layers; nth += g->engram[l], l++)
+  {
+    uint32_t rows = 0;
     for (uint32_t k = 0; ok && k < f->n_sub; k++)
     {
+      f->sub[k].xrow = rows;
       enter(f, k);
       int at_nth = nth;
       if (f->n) /* past dec, the kept tokens: maybe none */
-        ok = layer(f, l, l ? f->b.f_pre : f->b.pre0, &at_nth, err) && (l != f->dec || fwd_compact(f, err));
+        ok = layer_in(f, l, l ? f->b.f_pre : f->b.pre0, &at_nth, err);
+      rows += f->n;
       leave(f, k);
     }
+    ok = ok && layer_experts(f, l, rows, err);
+    for (uint32_t k = 0; ok && k < f->n_sub; k++)
+    {
+      enter(f, k);
+      if (f->n)
+        ok = layer_out(f, l, err) && (l != f->dec || fwd_compact(f, err));
+      leave(f, k);
+    }
+  }
   /* the head: the last block's pre mixes the streams, normed, then the vocabulary (the wanted tokens'); the last
      sub-batch's rows the ones left */
   for (uint32_t k = 0; ok && k < f->n_sub; k++)
