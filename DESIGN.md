@@ -503,6 +503,10 @@ still in the window).
     at once); 86 fits (104) and is no faster (the page cache it takes was holding experts too); 90 is refused. steps
     of 2,048 tokens (FORWARD_SUBS 1: that scratch gone) fit 92 GiB (106 peak): drafted 18.6 / 16.5 / 21.7 tok/s
     (18.9; 84 GiB 17.8, 88 18.1), streamed picks 16,938 -> 10,122 - +12%, at the 8K prompt's merged experts' cost.
+  - **the attention at one token**: the 8K tiles (64 heads x 128 keys, 64 x 256 dims) gave a decode's token ~5 blocks
+    of scores and 2 of values. fewer than 16 tokens now take 16 heads x 64 keys / 64 dims, 4 x 4 a thread (the same
+    sums: test_attn_gpu's tokens alone take them, its 24 the large ones, bit for bit): scores 57 -> 24 us, values 39 ->
+    7; 20 resident layers' token 34.9 -> 33.4 ms.
   - **and the floor**: 40 layers all resident would decode at ~68 ms a token, slower than maya's whole plain decode
     (~60 ms, its misses in): the matmuls at one token (~120 GB/s of ~200) and the small kernels between are the other
     part. maya holds ~104 GB of experts in GPU memory and computes a few percent on the CPU from the page cache (no
