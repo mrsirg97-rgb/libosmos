@@ -190,7 +190,8 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     ok = resident_dev(f->res, i, dev);
     f->tdev[t_res[i] - w->model->tensors] = dev[0];
   }
-  free(all), free(res), free(t_res);
+  free(res), free(t_res);
+  f->units = all; /* the swaps' reads */
   return ok;
 }
 
@@ -362,8 +363,10 @@ Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx,
     ok = fwd_fail(err, "out of memory");
   else if (!(f->eg_read = rowread_create(FWD_ROW_THREADS)))
     ok = fwd_fail(err, "Engram's readers could not start");
+  const size_t nu = (size_t)n_layers * w->geo.n_experts;
   ok = ok && units(f, budget, picks, err) && oa_tables(f, err) &&
-       ((f->picks = calloc((size_t)n_layers * w->geo.n_experts, sizeof *f->picks)) != NULL ||
+       (((f->picks = calloc(nu, sizeof *f->picks)) && (f->seen = calloc(nu, sizeof *f->seen)) &&
+         (f->heat = calloc(nu, sizeof *f->heat)) && (f->heat_at = calloc(nu, sizeof *f->heat_at))) ||
         fwd_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
     ok = fwd_fail(err, "a GPU allocation refused");
@@ -399,7 +402,7 @@ void forward_destroy(Forward *f)
   hipHostFree(f->r_ids);
   hipHostFree(f->r_up);
   free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0);
-  free(f->picks);
+  free(f->picks), free(f->seen), free(f->heat), free(f->heat_at), free(f->units);
   if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
   {
     const Sub *s = &f->sub[0];
@@ -439,4 +442,5 @@ void forward_probe(Forward *f, forward_probe_fn fn, void *arg)
 
 const float *forward_stream(const Forward *f) { return f->b.h; }
 const uint64_t *forward_picks(const Forward *f) { return f->picks; }
+uint64_t forward_swaps(const Forward *f) { return f->swaps; }
 const float *forward_logits(const Forward *f) { return f->b.vocab; }

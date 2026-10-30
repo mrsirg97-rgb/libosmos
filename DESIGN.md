@@ -384,7 +384,30 @@ experts resident in their order, a rank at a time across the layers. which are r
 profile of 16,384 tokens of the real-text corpus from its start, decode on text from token 60,000 (2 rounds
 alternating): by id p50 230.7 / 172.5 ms, ~630 MB a token; ranked **p50 91.6 / 90.9 ms, 64 MB a token**. the
 profile is the caller's to keep (a file beside the model); forward_create stays by id. not done: following the text
-as it goes (a set that adapts holds more than any fixed one), which the pool's furthest-ahead room could start.
+as it goes (a set that adapts holds more than any fixed one) - next.
+
+and then the set follows the text (hip_adapt.c). each expert's heat is its picks, halved every FWD_HEAT_HALF_LIFE
+steps; when a layer's experts are queued, its hottest streamed one (held in the pool: its bytes already in GPU
+memory) takes the place of its coldest resident one not picked in the step, if twice as hot - a device-to-device
+copy on the stream behind the layer's kernels, FWD_SWAPS_A_LAYER a layer a step. a first try read the swapped-in
+expert from the files at the step's end, two a step: p50 95 -> 88 ms, its reads the cost. the copy in GPU memory:
+decode on held-out text after the 16K profile (128 steps, 2 rounds; all within noise of one another): off p50
+94.3 / 91.0 ms, ~70 MB read a step; half-lives 8 / 32 / 128, margins 1.25 / 2, 2 or 6 a layer: p50 83.6 - 87.9 ms,
+23 - 31 MB a step - the fixed constants half-life 128, margin 2, 2 a layer (its runs the steadiest: max 156 / 120
+ms). what is left is first picks: a new text keeps reaching experts the set has not seen (~3 a token, ~30 MB),
+read behind their router a layer at a time; 20 layers all resident decode at 35.9 ms a token, so ~72 ms is the
+floor of 40. the KFD's evictions (0 - 900 ms in 128 steps, with the swaps or without) are most of the rest of the
+spread. the model test's second run on text the set has seen: p50 157 -> 71.7 ms. 8,192-token prompts unchanged
+(~410 tok/s warm). which experts are resident changes no bit (test_model_gpu: 1,983 swaps in its last forward,
+the logits bit for bit).
+
+the swaps found a latent fault: a read begun ahead (pool_want) lands in the forward's inbox, and the inbox was
+handed to the pool only while the forward waited on an expert of its own - so reads never waited on stayed READING,
+and a reading unit's memory cannot be made room of. with the set following the text the waits all but stop:
+test_batch_gpu's 4,600 tokens in steps of 512 ran out of room (438 units reading, none pinned). every layer's
+routing now hands the finished reads over first (fwd_drain, no wait); the skip's 4,600 tokens 454 -> 517 tok/s
+with it. the final build: decode p50 87.9 / 85.7 ms (its means 98.6 / 86.9: the first run's evictions 1.2 s),
+~28 MB read a step; 8,192 tokens 417 / 418 tok/s warm.
 
 ## Engram's reads (measured, 2026-10-29)
 

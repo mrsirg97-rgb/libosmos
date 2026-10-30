@@ -139,6 +139,8 @@ bool fwd_moe(Forward *f, int l, char *err)
        hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) && hipEventSynchronize(f->routed) == hipSuccess;
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
+  if (!fwd_drain(f, err))
+    return false;
   if (f->held_layer != l) /* the stream is past the last layer's experts: the router came after them */
   {
     fwd_release_held(f);
@@ -253,6 +255,8 @@ bool fwd_moe(Forward *f, int l, char *err)
        ops_gather_sum(b->moe, b->ye, dorder, K, n, D, NULL) && ops_add(b->moe, b->sye, (uint64_t)n * D, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");
+  if (!fwd_swap_layer(f, l, err))
+    return false;
   fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
   return true;
 }

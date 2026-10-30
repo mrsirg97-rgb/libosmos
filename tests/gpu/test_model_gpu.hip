@@ -231,8 +231,10 @@ int main() {
   }
   seq_destroy(rs);
   CHECK(ranked == got[1]);
-  std::printf("  picks counted: %llu (3 runs x %d positions x %d layers x %d); the least-picked resident first: logits "
-              "bit for bit\n", (unsigned long long) picks, T, L, w->geo.n_used);
+  CHECK(forward_swaps(f) > 0);
+  std::printf("  picks counted: %llu (3 runs x %d positions x %d layers x %d); the least-picked resident first, %llu "
+              "experts swapped in as it went: logits bit for bit\n", (unsigned long long) picks, T, L, w->geo.n_used,
+              (unsigned long long) forward_swaps(f));
   forward_destroy(f);
   weights_destroy(w);
   gguf_destroy(g);

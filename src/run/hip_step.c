@@ -247,6 +247,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
       hipDeviceSynchronize() != hipSuccess)
     return fwd_fail(err, "a GPU call failed (the step)");
   fwd_release_held(f);
+  fwd_heat(f);
   if (f->pin->overflow)
     return fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   for (uint32_t i = 0; i < n; i++)

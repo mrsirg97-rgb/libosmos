@@ -27,6 +27,12 @@
 #define FWD_MAX_STEP FORWARD_MAX_TOKENS             /* the experts' tokens: a layer's every sub-batch at once */
 #define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a sub-batch's (token, routed expert) pairs */
 #define FWD_MAX_GROUPS 64                           /* a layer's wo_a groups */
+/* the resident set's following of the text (hip_adapt.c): an expert's heat halved every this many steps; a streamed
+   one takes a resident one's place when this much hotter; at most this many a layer a step (each a copy in GPU
+   memory) */
+#define FWD_HEAT_HALF_LIFE 128.0 /* measured: 8 - 128 within ~2 ms of one another (DESIGN.md) */
+#define FWD_SWAP_MARGIN 2.0      /* and 1.25 the same */
+#define FWD_SWAPS_A_LAYER 2      /* 6 the same: a step's new picks are a few a layer */
 /* a layer's routing tables at most for `pairs` pairs: 3 matrix pointers, 4 offsets, a count an entry (an expert, or
    a part of MM_MAX_TOKENS of one: at most pairs entries); an order and a pair a pair; 2 x 16 slots an expert - with
    each table's alignment (16) */
@@ -116,6 +122,10 @@ struct Forward
   int32_t *rix;             /* an expert's place in res (unit: layer * n_experts + expert), -1: streamed by the pool */
   uint32_t n_expert_units;  /* the pool's units: layer * n_experts + expert */
   uint64_t *picks;          /* each unit's picks by the router so far (forward_picks) */
+  PoolUnit *units;          /* each expert unit's file ranges (a swap's read: hip_adapt.c) */
+  double *heat;             /* each unit's heat at heat_at, its picks halved every FWD_HEAT_HALF_LIFE steps */
+  uint64_t *heat_at, *seen; /* the step its heat was last updated at; its picks folded into the heat so far */
+  uint64_t steps, swaps;    /* the steps ended; the experts swapped into the resident set */
   const uint8_t **tdev;     /* a model tensor's device pointer (index: its place in the Gguf), resident ones only */
   const void **oa_tab;      /* each layer's wo_a groups for mm_group: [layer][o_groups], on the device */
   uint32_t *oa_xoff, *oa_yoff; /* group k: x at k * its 4,096 (of a token's attention), y at k * o_lora */
@@ -186,6 +196,7 @@ void fwd_release_held(Forward *f);
 void fwd_on_read(uint32_t unit, bool ok, void *arg); /* fetchq's done: the unit to the inbox */
 bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memory */
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
+bool fwd_drain(Forward *f, char *err); /* the finished reads to the pool, no wait */
 
 bool fwd_attention(Forward *f, int l, char *err);
 /* a weight's product over n tokens (token t's x at x + t * xs, its y at y + t * ys; n up to FWD_MAX_STEP): mm for
@@ -199,5 +210,7 @@ void fwd_plan(Forward *f);
 bool fwd_compact(Forward *f, char *err);
 bool fwd_head(Forward *f, char *err);
 bool fwd_moe(Forward *f, int l, char *err);
+bool fwd_swap_layer(Forward *f, int l, char *err); /* a layer's experts queued: its streamed ones' swaps in */
+void fwd_heat(Forward *f);                          /* a step's end: its picks into the heat */
 
 #endif

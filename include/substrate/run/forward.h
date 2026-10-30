@@ -34,6 +34,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
 const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
 const uint64_t *forward_picks(const Forward *f);
+uint64_t forward_swaps(const Forward *f);
 
 #endif
 
@@ -107,6 +108,12 @@ forward_batch
 forward_picks
   each expert's picks by the router since forward_create, [layer][expert] (n_layers x n_experts): a profile for
   forward_create_ranked. the host's; valid until forward_destroy.
+
+forward_swaps
+  the experts moved into the resident set so far: as a step's layer is done with them, its hottest streamed experts
+  take the places of its coldest resident ones not picked in the step, when much hotter (their picks, halved over
+  the steps) - a copy in GPU memory each, the set following the text from where forward_create_ranked started it.
+  it changes no bit.
 
 forward_stream
   the device buffer of the last step's stream out ([n][hc][n_embd] F32) - the last sub-batch's rows, for a batch
