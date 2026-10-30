@@ -6,6 +6,9 @@
 
 #include "substrate/mem/pool.h"
 
+/* a job's bytes when the queue is idle: a lone unit's parts read in chunks of this, by many workers at once */
+#define FETCHQ_CHUNK (1u << 20)
+
 typedef void (*fetch_done_fn)(uint32_t unit, bool ok, void *arg);
 
 typedef struct Fetchq Fetchq;
@@ -19,10 +22,12 @@ Fetcher fetchq_fetcher(Fetchq *q);
 
 /*
 Fetchq
-  the pool's and the resident set's reads: `threads` workers that pread a unit's parts straight into the memory it
-  was given (its `dst`, GPU memory the CPU writes) and then call `done`. measured on this box (DESIGN.md, "the
-  fetcher"): 4 workers read 600 cold 3 MiB ranges at 6.85 GB/s, the SSD's ceiling, p50 1.8 ms a range; more add only
-  queueing. the queue is the only state the consumer and the workers share; nothing else locks.
+  the pool's and the resident set's reads: `threads` workers that pread a unit's parts straight into the memory it was
+  given (its `dst`, GPU memory the CPU writes), each part a job, or, when the queue is idle (a lone unit: a decode's
+  miss), FETCHQ_CHUNK bytes a job read by many workers at once - and the one that reads a unit's last job calls
+  `done`. measured on this box (DESIGN.md, "the fetcher"): 4 workers read 600 cold 3 MiB ranges at 6.85 GB/s, the
+  SSD's ceiling, p50 1.8 ms a range; more add only queueing. the queue is the only state the consumer and the workers
+  share; nothing else locks.
 
 fetchq_create
   `threads` workers (1 to 64), started now. `done(unit, ok, arg)` runs on a worker once a unit's parts are read - ok

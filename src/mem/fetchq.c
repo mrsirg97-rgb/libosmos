@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -7,12 +8,20 @@
 
 #define FETCH_MAX_THREADS 64
 
-typedef struct Job
+/* a unit's read: its chunks left, and whether any failed - the last chunk's worker calls done and frees it */
+typedef struct Unit
 {
   uint32_t unit;
-  PoolRange part[POOL_PARTS];
-  void *dst[POOL_PARTS];
-  int n;
+  atomic_int left;
+  atomic_bool bad;
+} Unit;
+
+/* a job: one chunk of one part of a unit (FETCHQ_CHUNK bytes, the part's last chunk the rest) */
+typedef struct Job
+{
+  Unit *u;
+  PoolRange r;
+  uint8_t *dst;
 } Job;
 
 typedef struct Worker
@@ -67,10 +76,15 @@ static void *work(void *arg)
     q->head = (q->head + 1) % q->cap;
     q->len--;
     pthread_mutex_unlock(&q->mu);
-    bool ok = true;
-    for (int k = 0; k < job.n && ok; k++)
-      ok = read_part(&job.part[k], job.dst[k]);
-    q->done(job.unit, ok, q->done_arg);
+    if (!read_part(&job.r, job.dst))
+      atomic_store(&job.u->bad, true);
+    if (atomic_fetch_sub(&job.u->left, 1) == 1) /* the unit's last chunk */
+    {
+      const uint32_t unit = job.u->unit;
+      const bool ok = !atomic_load(&job.u->bad);
+      free(job.u);
+      q->done(unit, ok, q->done_arg);
+    }
   }
 }
 
@@ -119,39 +133,76 @@ void fetchq_destroy(Fetchq *q)
   if (!q)
     return;
   stop(q);
+  for (size_t i = 0; i < q->len; i++) /* the chunks dropped: a unit freed once its last is, no done */
+  {
+    Unit *u = q->jobs[(q->head + i) % q->cap].u;
+    if (atomic_fetch_sub(&u->left, 1) == 1)
+      free(u);
+  }
   free(q->jobs);
   pthread_cond_destroy(&q->cv);
   pthread_mutex_destroy(&q->mu);
   free(q);
 }
 
-/* the consumer's half: a job queued, a worker woken. a queue that cannot grow reports the read as failed, at once */
+/* the queue grown to hold `more` jobs; false if it cannot */
+static bool room(Fetchq *q, size_t more)
+{
+  if (q->len + more <= q->cap)
+    return true;
+  size_t cap = q->cap;
+  while (q->len + more > cap)
+    cap *= 2;
+  Job *grown = malloc(cap * sizeof *grown);
+  if (!grown)
+    return false;
+  for (size_t i = 0; i < q->len; i++)
+    grown[i] = q->jobs[(q->head + i) % q->cap];
+  free(q->jobs);
+  q->jobs = grown, q->head = 0, q->cap = cap;
+  return true;
+}
+
+/* the consumer's half: a unit's jobs queued side by side and the workers woken. when the queue is idle (fewer jobs
+   than workers: a lone unit, a decode's miss) its parts go a FETCHQ_CHUNK a job, the workers reading one unit at
+   once - at the SSD's speed, not a worker's; when reads are queued (a load, a prompt's) each part is one job, read
+   whole by one worker - chunks of many units side by side defeat the file's readahead (measured: a load 16 -> 22 s).
+   a queue that cannot grow reports the read as failed, at once */
 static void fetch(uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], void *ctx)
 {
   Fetchq *q = ctx;
-  Job job = {unit, {{0}}, {0}, n < POOL_PARTS ? n : POOL_PARTS};
-  memcpy(job.part, parts, (size_t)job.n * sizeof *parts);
-  memcpy(job.dst, dst, (size_t)job.n * sizeof *dst);
+  n = n < POOL_PARTS ? n : POOL_PARTS;
   pthread_mutex_lock(&q->mu);
-  if (q->len == q->cap)
+  const uint64_t chunk = q->len < (size_t)q->n_workers ? FETCHQ_CHUNK : UINT64_MAX;
+  pthread_mutex_unlock(&q->mu);
+  int chunks = 0;
+  for (int k = 0; k < n; k++)
+    chunks += (int)(chunk == UINT64_MAX ? parts[k].bytes > 0 : (parts[k].bytes + chunk - 1) / chunk);
+  if (!chunks) /* nothing to read: done, ok */
   {
-    Job *grown = malloc(q->cap * 2 * sizeof *grown);
-    if (!grown)
-    {
-      pthread_mutex_unlock(&q->mu);
-      q->done(unit, false, q->done_arg);
-      return;
-    }
-    for (size_t i = 0; i < q->len; i++)
-      grown[i] = q->jobs[(q->head + i) % q->cap];
-    free(q->jobs);
-    q->jobs = grown;
-    q->head = 0;
-    q->cap *= 2;
+    q->done(unit, true, q->done_arg);
+    return;
   }
-  q->jobs[(q->head + q->len) % q->cap] = job;
-  q->len++;
-  pthread_cond_signal(&q->cv);
+  Unit *u = malloc(sizeof *u);
+  pthread_mutex_lock(&q->mu);
+  if (!u || !room(q, (size_t)chunks))
+  {
+    pthread_mutex_unlock(&q->mu);
+    free(u);
+    q->done(unit, false, q->done_arg);
+    return;
+  }
+  u->unit = unit;
+  atomic_init(&u->left, chunks);
+  atomic_init(&u->bad, false);
+  for (int k = 0; k < n; k++)
+    for (uint64_t at = 0; at < parts[k].bytes; at += chunk)
+    {
+      const uint64_t len = parts[k].bytes - at < chunk ? parts[k].bytes - at : chunk;
+      q->jobs[(q->head + q->len++) % q->cap] =
+          (Job){u, {parts[k].fd, parts[k].offset + at, len}, (uint8_t *)dst[k] + at};
+    }
+  pthread_cond_broadcast(&q->cv);
   pthread_mutex_unlock(&q->mu);
 }
 

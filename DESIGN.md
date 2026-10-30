@@ -409,6 +409,18 @@ routing now hands the finished reads over first (fwd_drain, no wait); the skip's
 with it. the final build: decode p50 87.9 / 85.7 ms (its means 98.6 / 86.9: the first run's evictions 1.2 s),
 ~28 MB read a step; 8,192 tokens 417 / 418 tok/s warm.
 
+the decode's last costs, tried (128 steps on held-out text, 3 rounds alternating each):
+- the KFD's evictions, as page-cache pressure: each streamed read's pages dropped after it (POSIX_FADV_DONTNEED in
+  the fetcher) - the evictions 444 / 388 / 52 ms -> 0 / 0 / 216, the page cache 14-18 GB -> 1-4, but p50 87.2-87.9
+  -> 89.7-90.9 ms (an expert read twice no longer from the cache) and the means the same. not taken; the evictions'
+  cause is not only the page cache.
+- a miss's latency: a worker read a unit's 3 parts in turn (a cold 3 MiB part p50 1.8 ms: ~5 ms an expert, the
+  layer waiting on it). a unit's parts a 1 MiB chunk a job, many workers on one unit: decode p50 85-87 -> 82-84 ms,
+  but the load 16 -> 22 s and a 512-token prompt 7.0-7.4 -> 9.6-10.1 s (many units' chunks side by side defeat the
+  file's readahead). so chunks only when the queue is idle (fewer jobs than workers: a lone unit, a decode's
+  miss), each part one job otherwise: decode p50 83.9-86.5 -> 80.7-84.1 ms, means 87.7-95.3 -> 82.1-87.3, the load
+  (15.4-15.9 s), the prompt and 8,192 tokens (warm 406-411 / 402-406 tok/s) unchanged.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token

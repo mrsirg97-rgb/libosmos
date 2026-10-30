@@ -11,6 +11,7 @@
 #include "substrate/mem/pool.h"
 
 #define N 2000
+#define CHUNKED_FILE (8u << 20) /* test_chunks' file: parts of several FETCHQ_CHUNK */
 
 static char dir[] = "/tmp/test_fetchq_XXXXXX";
 static atomic_int seen[N];
@@ -88,6 +89,49 @@ static void test_once(int fd)
   }
   assert(atomic_load(&n_ok) == N && atomic_load(&n_bad) == 0);
   printf("  once: %d units, 4 workers, each done exactly once, every part's bytes in its own place\n", N);
+}
+
+/* parts of many chunks (FETCHQ_CHUNK), and a chunk and a half, and the exact one, and a few bytes: every byte in its
+   place and each unit done once - its chunks read by many workers at once, the last one's worker calling done */
+static void test_chunks(int fd)
+{
+  reset();
+  Fetchq *q = fetchq_create(4, done, NULL);
+  assert(q);
+  const Fetcher f = fetchq_fetcher(q);
+  enum { UNITS = 24 };
+  const uint64_t sizes[3] = {FETCHQ_CHUNK * 5 / 2, FETCHQ_CHUNK, 7};
+  uint8_t *buf[UNITS][3];
+  for (uint32_t u = 0; u < UNITS; u++)
+  {
+    PoolRange parts[3];
+    void *dst[POOL_PARTS] = {NULL, NULL, NULL};
+    for (int k = 0; k < 3; k++)
+    {
+      const uint64_t at = (u * 7919u + (uint64_t)k * 104729u) % (CHUNKED_FILE - sizes[k]);
+      parts[k] = (PoolRange){fd, at, sizes[k]};
+      dst[k] = buf[u][k] = malloc(sizes[k]);
+      assert(buf[u][k]);
+    }
+    f.fetch(u, parts, 3, dst, f.ctx);
+  }
+  while (atomic_load(&n_ok) + atomic_load(&n_bad) < UNITS)
+    usleep(1000);
+  fetchq_destroy(q);
+  for (uint32_t u = 0; u < UNITS; u++)
+  {
+    assert(atomic_load(&seen[u]) == 1);
+    for (int k = 0; k < 3; k++)
+    {
+      const uint64_t at = (u * 7919u + (uint64_t)k * 104729u) % (CHUNKED_FILE - sizes[k]);
+      for (uint64_t i = 0; i < sizes[k]; i++)
+        assert(buf[u][k][i] == (uint8_t)(at + i));
+      free(buf[u][k]);
+    }
+  }
+  assert(atomic_load(&n_ok) == UNITS && atomic_load(&n_bad) == 0);
+  printf("  chunks: %d units of parts %.1f, 1 chunk and 7 bytes - every byte in its place, each done once\n", UNITS,
+         (double)sizes[0] / FETCHQ_CHUNK);
 }
 
 static void test_failure(int fd)
@@ -207,6 +251,9 @@ int main(void)
   const int fd = file("f.bin", 1 << 20);
   test_refusals();
   test_once(fd);
+  const int big = file("big.bin", CHUNKED_FILE);
+  test_chunks(big);
+  close(big);
   test_failure(fd);
   test_destroy_busy(fd);
   test_with_pool(fd);
