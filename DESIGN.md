@@ -530,6 +530,12 @@ of the lane bit for bit).
   1.7e-1 against 9.9e-2 / 2.6e-1), then one token's route at layer 18 tips (position 6's drift 1.0, the others the
   default's) - a near-tie two orders round apart, not a fault (scratch lanecmp.hip: layer 0's input and weights the
   same bits, its MoE out 3e-4 apart - f16's rounding of the activations, which the matvec does not do).
+- an expert once for its tokens: a pair a matrix-vector product read a verify's shared experts again for each token -
+  drafted on maya's prompts 16.9 -> 15.3 tok/s. the pairs in rows by expert, each expert an entry of up to 8 tokens
+  (mv_group_tok: a token's row the sums of mv alone - test_mv_gpu, entries of 1 .. 8 tokens on 9 shapes, an offset row
+  fails it); one launch at the widest entry's width ran an expert of one token at six: 14.1. a launch a count (as mm's
+  column tiles): 16.3 (the default 16.9; plain 10.4 either way, budget 80 with the drafter). the lane on the GPU alone
+  is even at this budget: what it is for is the CPU's half.
 
 ## Engram's reads (measured, 2026-10-29)
 

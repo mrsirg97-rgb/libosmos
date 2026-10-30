@@ -74,6 +74,45 @@ bool group(const void* const* w, uint32_t n, uint32_t rows, uint32_t cols, const
   return mv::group_launch<T, k.r, k.u>(w, n, rows, cols, x, x_mat, x_div, y, s);
 }
 
+template <quant::Type T, int NT>
+bool group_tok_nt(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t rows,
+                  uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, hipStream_t s) {
+  constexpr Tune k = tune(T, NT);
+  const uint32_t per_block = mv::kWavesPerBlock * k.r;
+  const dim3 grid((rows + per_block - 1) / per_block, n);
+  mv::group_tok_kernel<T, NT, k.r, k.u><<<grid, mv::kWave * mv::kWavesPerBlock, 0, s>>>(
+      (const uint8_t* const*) w, cnt, xrow, rows, cols, x, xs, y, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T>
+bool group_tok(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t max_cnt,
+               uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, hipStream_t s) {
+  if (cols % quant::Block<T>::values || cols % quant::kChunk || xs < cols || xs % quant::kChunk) return false;
+  switch (max_cnt) {
+#define TOK(nt) \
+  case nt: return group_tok_nt<T, nt>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
+    TOK(1) TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
+#undef TOK
+    default: return false;
+  }
+}
+
+extern "C" bool mv_group_tok(uint32_t type, const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n,
+                             uint32_t max_cnt, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y,
+                             uint32_t ys, void* stream) {
+  if (!n || n > MV_MAX_GROUP || !rows || !max_cnt || max_cnt > MV_MAX_TOKENS) return false;
+  const hipStream_t s = (hipStream_t) stream;
+  switch (type) {
+    case quant::kQ8_0: return group_tok<quant::kQ8_0>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kIQ2_XXS: return group_tok<quant::kIQ2_XXS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kIQ2_XS: return group_tok<quant::kIQ2_XS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kIQ1_M: return group_tok<quant::kIQ1_M>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kMXFP4: return group_tok<quant::kMXFP4>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    default: return false;
+  }
+}
+
 extern "C" bool mv_group(uint32_t type, const void* const* w, uint32_t n, uint32_t rows, uint32_t cols, const float* x,
                          uint32_t x_mat, uint32_t x_div, float* y, void* stream) {
   if (!n || n > MV_MAX_GROUP || !rows) return false;

@@ -11,6 +11,9 @@ bool mv_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const fl
             void *stream);
 bool mv_group(uint32_t type, const void *const *w, uint32_t n, uint32_t rows, uint32_t cols, const float *x,
               uint32_t x_mat, uint32_t x_div, float *y, void *stream);
+bool mv_group_tok(uint32_t type, const void *const *w, const int32_t *cnt, const int32_t *xrow, uint32_t n,
+                  uint32_t max_cnt, uint32_t rows, uint32_t cols, const float *x, uint32_t xs, float *y, uint32_t ys,
+                  void *stream);
 bool mv_strided(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t x_stride,
                 uint32_t n_tok, float *y, uint32_t y_stride, void *stream);
 
@@ -34,6 +37,13 @@ mv_group
   x_mat 0: one x for all; x_div k: k matrices a vector, a batch's tokens' k experts each). a row summed as mv_run
   sums it: the same bits as n mv_run calls, in one launch. false, nothing queued, as mv_run, and for n 0 or past
   MV_MAX_GROUP, or x_div 0.
+
+mv_group_tok
+  n matrices of one type and shape, each over its own tokens: matrix m (w[m]) on cnt[m] (1 .. max_cnt <= MV_MAX_TOKENS)
+  rows of x from row xrow[m] (rows xs floats apart), into y's rows from xrow[m] (ys apart) - an expert read once for
+  the tokens that picked it. each row mv_run's sums: a token's bits are those it takes alone. `w`, `cnt`, `xrow` on
+  the device; x's rows past a matrix's are read, not used (rows up to xrow[m] + max_cnt must be readable). the routed
+  experts' types and Q8_0, MXFP4.
 
 mv_strided
   mv_run with token t's x at x + t * x_stride and its y at y + t * y_stride (a slice of a wider row: the attention's

@@ -51,6 +51,7 @@ static const Shape kShapes[] = {
 };
 
 static uint32_t rng = 1017;
+static int tok_shapes = 0;
 static float uniform() {
   rng = rng * 1664525u + 1013904223u;
   return (float) ((rng >> 8) * (1.0 / (1 << 24)) * 2.0 - 1.0);
@@ -119,6 +120,40 @@ static void shape(const Gguf* g, const Shape& s) {
     CHECK(std::memcmp(one.data(), yw.data() + (size_t) k * rows, rows * 4) == 0);
   }
   CHECK(hipFree(xd) == hipSuccess && hipFree(yd) == hipSuccess);
+
+  // matrices each over their own tokens (mv_group_tok): the same matrix as 8 entries of 1 .. 8 tokens (a verify's
+  // experts), each row the bits its token takes alone
+  if (t->type != 0 && t->type != 30 && t->type != 13 && t->type != 14) {  // (the experts' types and Q8_0)
+    constexpr int kEntries = 8;
+    std::vector<int32_t> cnt(kEntries), xrow(kEntries);
+    int rows_n = 0;
+    for (int e = 0; e < kEntries; e++) cnt[e] = e + 1, xrow[e] = rows_n, rows_n += e + 1;
+    std::vector<float> xt((size_t) (rows_n + kNt) * cols), yt((size_t) rows_n * rows);
+    for (float& v : xt) v = uniform();
+    float *dx = nullptr, *dy = nullptr;
+    int32_t *dc = nullptr, *dr = nullptr;
+    const void** dw = nullptr;
+    std::vector<const void*> tw(kEntries, w);
+    CHECK(hipMalloc(&dx, xt.size() * 4) == hipSuccess && hipMalloc(&dy, yt.size() * 4) == hipSuccess);
+    CHECK(hipMalloc(&dc, kEntries * 4) == hipSuccess && hipMalloc(&dr, kEntries * 4) == hipSuccess);
+    CHECK(hipMalloc(&dw, kEntries * sizeof(void*)) == hipSuccess);
+    CHECK(hipMemcpy(dx, xt.data(), xt.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(hipMemcpy(dc, cnt.data(), kEntries * 4, hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(hipMemcpy(dr, xrow.data(), kEntries * 4, hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(hipMemcpy(dw, tw.data(), kEntries * sizeof(void*), hipMemcpyHostToDevice) == hipSuccess);
+    for (int e = 0; e < kEntries; e++)  // a launch a count, as forward_lane launches them
+      CHECK(mv_group_tok(t->type, dw + e, dc + e, dr + e, 1, (uint32_t) cnt[e], rows, cols, dx, cols, dy, rows,
+                         nullptr));
+    CHECK(hipMemcpy(yt.data(), dy, yt.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    for (int r = 0; r < rows_n; r++) {
+      run(t->type, w, rows, cols, dx + (size_t) r * cols, 1, y1);
+      CHECK(hipMemcpy(one.data(), y1, rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      CHECK(std::memcmp(one.data(), &yt[(size_t) r * rows], rows * 4) == 0);
+    }
+    CHECK(hipFree(dx) == hipSuccess && hipFree(dy) == hipSuccess && hipFree(dc) == hipSuccess);
+    CHECK(hipFree(dr) == hipSuccess && hipFree(dw) == hipSuccess);
+    tok_shapes++;
+  }
 
   // against a double sum over the exact weights, the first rows: |err| <= (terms a lane + tree + 1) u sum |w x|
   const uint32_t n = rows < kCheckRows ? rows : kCheckRows;
@@ -190,6 +225,9 @@ int main() {
   for (const Shape& s : kShapes) shape(g, s);
   gguf_destroy(g);
   std::printf("  every shape: %d tokens at once (the wide tiles) the bits of each alone\n", kWideNt);
+  CHECK(tok_shapes > 0);
+  std::printf("  %d shapes: matrices over their own 1 .. 8 tokens (mv_group_tok), each row the bits of its token "
+              "alone\n", tok_shapes);
   std::printf("[test_mv_gpu] ok\n");
   return 0;
 }

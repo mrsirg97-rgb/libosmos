@@ -41,7 +41,7 @@ __device__ inline void step(const uint8_t* const* base, uint32_t c0, uint32_t xs
 
 template <quant::Type T, int NT, int R, int U>
 __device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols, const float* __restrict__ x,
-                               uint32_t xs, float* __restrict__ y, uint32_t ys) {
+                               uint32_t xs, float* __restrict__ y, uint32_t ys, uint32_t live = NT) {
   using B = quant::Block<T>;
   const uint32_t row0 = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * R;
   const int lane = threadIdx.x % kWave;
@@ -62,7 +62,7 @@ __device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uin
     for (int t = 0; t < NT; t++) {
       float s = acc[q][t];
       for (int o = kWave / 2; o > 0; o >>= 1) s += __shfl_xor(s, o, kWave);  // a + b = b + a: every lane the same
-      if (lane == 0 && row0 + q < rows) y[(uint64_t) t * ys + row0 + q] = s;
+      if (lane == 0 && row0 + q < rows && (uint32_t) t < live) y[(uint64_t) t * ys + row0 + q] = s;
     }
 }
 
@@ -146,6 +146,22 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_kernel(const uint
                                                                        uint32_t x_div, float* __restrict__ y) {
   const uint32_t m = blockIdx.y;
   rows_of<T, 1, R, U>(w[m], rows, cols, x + (uint64_t) (m / x_div) * x_mat, cols, y + (uint64_t) m * rows, rows);
+}
+
+// matrices of one shape, each with its own few tokens (blockIdx.y the matrix m): its first cnt[m] (<= NT) tokens'
+// rows from row xrow[m] of x and of y - an expert once for every token that picked it (forward_lane's verify). its
+// rows NT .. past cnt[m] are summed and not stored (x is read there: the caller's rows past the last are its own);
+// each row the sums of rows_of, so the bits of a token alone
+template <quant::Type T, int NT, int R, int U>
+__global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const uint8_t* const* __restrict__ w,
+                                                                           const int32_t* __restrict__ cnt,
+                                                                           const int32_t* __restrict__ xrow,
+                                                                           uint32_t rows, uint32_t cols,
+                                                                           const float* __restrict__ x, uint32_t xs,
+                                                                           float* __restrict__ y, uint32_t ys) {
+  const uint32_t m = blockIdx.y;
+  const uint64_t r0 = (uint64_t) xrow[m];
+  rows_of<T, NT, R, U>(w[m], rows, cols, x + r0 * xs, xs, y + r0 * ys, ys, (uint32_t) cnt[m]);
 }
 
 template <quant::Type T, int NT, int R, int U>
