@@ -25,6 +25,9 @@ bool ops_hc_mix(const float *partial, const float *scale, const float *base, uin
                 float hc_eps, uint32_t iters, uint32_t n_tok, float *pre, float *post, float *comb, void *stream);
 bool ops_hc_pre_rms(const float *h, const float *pre, uint32_t hc, uint32_t dim, const float *w, float eps,
                     uint32_t n_tok, float *x, void *stream);
+bool ops_hc_pre(const float *h, const float *pre, uint32_t hc, uint32_t dim, uint32_t n_tok, float *x, void *stream);
+bool ops_hc_mean(const float *h, uint32_t hc, uint32_t dim, uint32_t n_tok, float *out, uint32_t out_stride,
+                 void *stream);
 bool ops_hc_post(const float *y, const float *res, const float *post, const float *comb, uint32_t hc, uint32_t dim,
                  uint32_t n_tok, float *out, void *stream);
 bool ops_rope(float *x, uint32_t heads, uint32_t head_dim, uint32_t rope_dim, uint32_t stride, const float *freqs,
@@ -88,6 +91,14 @@ ops_hc_mix
 
 ops_hc_pre_rms
   x = rms(sum over k of pre[k] h[k], w) - the stream mixed into the block's input.
+
+ops_hc_pre
+  x[t][d] = sum over k of pre[t][k] h[t][k][d], in k's order (ops_hc_pre_rms's sum, not normed): DSpark's collapse of
+  its last block's streams.
+
+ops_hc_mean
+  out[t * out_stride + d] = the mean of token t's hc streams at d (summed in stream order, then / hc): DSpark's taps
+  of the streams entering its target layers.
 
 ops_hc_post
   out[j] = post[j] y + sum over i of comb[i][j] res[i] - the block's output mixed back into the hc streams.

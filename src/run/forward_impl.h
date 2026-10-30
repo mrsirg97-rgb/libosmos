@@ -144,6 +144,14 @@ struct Forward
   uint8_t *stage; /* pinned: the Engram rows, [sub-batch][Engram layer][token]: a sub-batch's copy may still be
                      queued when the next one's rows are read (a layer's sub-batches run to its experts unwaited) */
   int n_eg;       /* the Engram layers (stage's) */
+  /* DSpark's taps (fwd_taps_on, the drafter's): the streams' mean entering each target layer, [row][tap][D], for the
+     last sub-batch's rows of the step (a sequence's last ones: the drafter's ring holds 128); their positions and
+     sequences. NULL: none taken */
+  float *taps;
+  int n_tap, tap_of[WEIGHTS_MAX_LAYERS];
+  uint32_t tap_n;
+  int32_t tap_pos[FWD_MAX_BATCH];
+  Seq *tap_bs[FWD_MAX_BATCH];
   uint32_t cur;   /* the running sub-batch (enter's) */
   Pinned *pin;
   hipEvent_t routed;                /* the router's picks are on the host */
@@ -179,6 +187,7 @@ struct Seq
   float *ring[WEIGHTS_MAX_LAYERS];
   float *ckv[WEIGHTS_MAX_LAYERS], *ik[WEIGHTS_MAX_LAYERS];
   float *pend_kvc[WEIGHTS_MAX_LAYERS], *pend_sc[WEIGHTS_MAX_LAYERS];
+  float *dring; /* a drafter's rings, [block][window][head_dim] (drafter_seed's; NULL until then) */
 };
 
 /* a resident tensor's bytes as the GPU reads them (its copy in the resident set) */
@@ -197,6 +206,7 @@ void fwd_on_read(uint32_t unit, bool ok, void *arg); /* fetchq's done: the unit 
 bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memory */
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
 bool fwd_drain(Forward *f, char *err); /* the finished reads to the pool, no wait */
+bool fwd_taps_on(Forward *f); /* the taps taken from the next step on (a drafter's): false if they cannot be held */
 
 bool fwd_attention(Forward *f, int l, char *err);
 /* a weight's product over n tokens (token t's x at x + t * xs, its y at y + t * ys; n up to FWD_MAX_STEP): mm for

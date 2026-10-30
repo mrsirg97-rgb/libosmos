@@ -447,6 +447,36 @@ not the floor (as was said here first). the library's 8 chunks in flight bring t
 matvec's own IQ decode ~111: one token's experts are as fast as their decode. their grids are __constant__, read a lane
 its own index (a vector load through the cache, a dependent one a chunk); in LDS untried.
 
+## DSpark: the drafter (built, 2026-10-30)
+
+DeepSeek's own drafter, as maya's tools/ds4/dspark_ref.py writes it from DeepSeek's inference/model.py: three
+blocks (`mtp.0..2` in ~/models/dspark/dspark.bin, Maya's pack: its dense matrices Q8_0, its 3 x 128 experts MXFP4),
+each the trunk's layer in small - hyper-connections, window attention, 128 routed experts of which a row takes 3, a
+shared one - fed by the trunk: the streams' mean entering its target layers 37-39 (the GGUF's
+dspark_target_layer_ids), through main_proj and main_norm into each block's ring of 128 keys. a round runs the block
+[y, noise x 4] at the sequence's next positions (every row attends the ring before them and the whole block: no
+causal mask in it), collapses the last streams, and the trunk's head plus a rank-256 markov bias of each row's
+previous token gives a greedy draft a row; a confidence head (sigmoid of [x ; E[prev]]) cuts the run (each >= 0.5,
+their product >= 0.5: maya's defaults). the trunk verifies [y, drafts] in one batch: a batch's rows are the bits of
+stepping them one at a time, so the longest prefix whose argmax is the next draft is kept, the rest undone
+(seq_rollback: the position, Engram's last tokens - everything else a forward writes is by position, rewritten before
+it is read), and the drafter's rings seeded from the accepted rows only (a rejected row's would overwrite a slot
+still in the window).
+
+- the pieces: MXFP4 (quant.h, bit for bit gguf-py's); dspark.json's index (src/model/dspark_index.c); the forward's
+  taps (fwd_taps_on, the last sub-batch's rows); seq_rollback; the drafter (hip_drafter.c, hip_drafter_round.c) - the
+  ring through ops_sparse_attn as its window (every row's position p0 - 1: the same 128 ring rows) and the block's own
+  keys as its selected rows (each row all 5), the experts' tables gathered on the device from the router's picks.
+  its products the matvec's (F32 sums, as maya's GEMV). its weights in GPU memory of their own (~8 GB), so the
+  trunk's budget gives them room.
+- the first run (scratch `spec.hip`, a 512-token prompt from the corpus at 60,000, 64 greedy tokens, budget 80 GB
+  with the profile): the same tokens as stepping one at a time; 54 drafted, 40 accepted (74%); 11.5 -> 18.7 tok/s
+  (1.63x); drafting 0.37 s of 3.42, verifying 3.05. test_drafter_gpu: 48 tokens, the same as plain, 42 drafted, 35
+  accepted (83%); a drafter with no window (every row's ring empty) fails its floor of 30% accepted.
+- not built: maya's lazy stages (the head runs once for all five rows when the first passes), sampled drafts, the
+  multi-sequence round. the drafter's numerics against an oracle (maya's needs DeepSeek's checkpoint shards, not here):
+  the acceptance is the check so far.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token

@@ -183,6 +183,27 @@ __global__ __launch_bounds__(kWide) void hc_pre_rms_kernel(const float* h, const
   for (uint32_t d = threadIdx.x; d < dim; d += kWide) xt[d] = (xt[d] * r) * w[d];
 }
 
+__global__ void hc_pre_kernel(const float* h, const float* pre, uint32_t hc, uint32_t dim, uint32_t n_tok, float* x) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n_tok * dim) return;
+  const uint32_t d = i % dim, t = (uint32_t) (i / dim);
+  const float* ht = h + (uint64_t) t * hc * dim + d;
+  float v = pre[t * hc] * ht[0];
+  for (uint32_t k = 1; k < hc; k++) v += pre[t * hc + k] * ht[(uint64_t) k * dim];
+  x[(uint64_t) t * dim + d] = v;
+}
+
+__global__ void hc_mean_kernel(const float* h, uint32_t hc, uint32_t dim, uint32_t n_tok, float* out,
+                               uint32_t out_stride) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n_tok * dim) return;
+  const uint32_t d = i % dim, t = (uint32_t) (i / dim);
+  const float* ht = h + (uint64_t) t * hc * dim + d;
+  float s = ht[0];
+  for (uint32_t k = 1; k < hc; k++) s += ht[(uint64_t) k * dim];
+  out[(uint64_t) t * out_stride + d] = s / (float) hc;
+}
+
 // a thread a (token, d): the hc streams' values at d read once for its hc outputs, each the sum of a thread an
 // output, in its order - the same bits (hc a template argument: the streams' values in registers)
 template <uint32_t hc>
@@ -394,6 +415,20 @@ extern "C" bool ops_hc_pre_rms(const float* h, const float* pre, uint32_t hc, ui
                                uint32_t n_tok, float* x, void* stream) {
   if (!hc || hc > OPS_MAX_HC || !dim || !n_tok) return false;
   hc_pre_rms_kernel<<<n_tok, kWide, 0, st(stream)>>>(h, pre, hc, dim, w, eps, x);
+  return ok();
+}
+
+extern "C" bool ops_hc_pre(const float* h, const float* pre, uint32_t hc, uint32_t dim, uint32_t n_tok, float* x,
+                           void* stream) {
+  if (!hc || !dim || !n_tok) return false;
+  hc_pre_kernel<<<grid((uint64_t) n_tok * dim), kThreads, 0, st(stream)>>>(h, pre, hc, dim, n_tok, x);
+  return ok();
+}
+
+extern "C" bool ops_hc_mean(const float* h, uint32_t hc, uint32_t dim, uint32_t n_tok, float* out,
+                            uint32_t out_stride, void* stream) {
+  if (!hc || !dim || !n_tok || out_stride < dim) return false;
+  hc_mean_kernel<<<grid((uint64_t) n_tok * dim), kThreads, 0, st(stream)>>>(h, hc, dim, n_tok, out, out_stride);
   return ok();
 }
 

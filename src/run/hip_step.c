@@ -48,6 +48,7 @@ void seq_destroy(Seq *s)
     hipFree(s->pend_kvc[l]);
     hipFree(s->pend_sc[l]);
   }
+  hipFree(s->dring);
   free(s);
 }
 
@@ -62,6 +63,14 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   Scratch *b = &f->b;
   const uint32_t hc = g->hc, D = g->n_embd, n = f->n;
   const int p = f->at;
+  if (f->taps && g->dspark_target[l] && f->cur + 1 == f->n_sub) /* a drafter's tap, the step's last rows */
+  {
+    if (!ops_hc_mean(b->h, hc, D, n, f->taps + (uint64_t)f->tap_of[l] * D, (uint32_t)f->n_tap * D, NULL))
+      return fwd_fail(err, "a GPU call failed (the drafter's tap)");
+    f->tap_n = n;
+    memcpy(f->tap_pos, f->pin->pos, n * sizeof *f->tap_pos);
+    memcpy(f->tap_bs, f->bs, n * sizeof *f->tap_bs);
+  }
   if (g->engram[l] && !fwd_engram(f, l, (*nth)++, err))
     return false;
   fwd_probe(f, "h_in", l, p, b->h, n * hc * D, false);
@@ -263,6 +272,16 @@ bool seq_prompt(Seq *s, uint32_t end)
     return false;
   s->prompt_end = (int32_t)end;
   return true;
+}
+
+bool fwd_taps_on(Forward *f)
+{
+  if (f->taps)
+    return true;
+  f->n_tap = 0;
+  for (int l = 0; l < f->n_layers; l++)
+    f->tap_of[l] = f->g->dspark_target[l] ? f->n_tap++ : -1;
+  return f->n_tap && fwd_alloc(&f->taps, (uint64_t)FWD_MAX_BATCH * f->n_tap * f->g->n_embd * sizeof(float));
 }
 
 bool seq_rollback(Seq *s, uint32_t n)
