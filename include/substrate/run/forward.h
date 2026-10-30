@@ -12,6 +12,7 @@
    experts it streams are read once for all of them (DESIGN.md, "the memory, revised") */
 #define FORWARD_SUBS 4
 #define FORWARD_MAX_TOKENS (FORWARD_SUBS * MM_MAX_TOKENS)
+#define SEQ_MAX_BACK 16 /* seq_rollback's deepest: a verify's rejected drafts */
 
 typedef struct Forward Forward;
 typedef struct Seq Seq;
@@ -28,6 +29,7 @@ void forward_probe(Forward *f, forward_probe_fn fn, void *arg);
 Seq *seq_create(Forward *f, char err[FORWARD_ERR]);
 void seq_destroy(Seq *s);
 bool seq_prompt(Seq *s, uint32_t end);
+bool seq_rollback(Seq *s, uint32_t n);
 
 bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
@@ -87,6 +89,13 @@ seq_prompt
   for every token. the logits of every token from end - 1 on, and every stream and logit after, are the bits of the
   whole run. raised as the prompt grows (a later turn's); false for no sequence, an end past max_ctx, or one lower
   than before.
+
+seq_rollback
+  the sequence's last n positions undone: its next position n back, its last tokens (Engram's n-gram) as they were
+  there - the state a forward of those positions leaves (each its window row, its compressor's pending row, a
+  compressed row it completed) is rewritten when the positions are stepped again, before anything reads it, so the
+  rows after are the bits of a run that never stepped them (a verify's rejected drafts). false, nothing changed, for
+  n past SEQ_MAX_BACK or the tokens it holds, or a position before the prompt's end (seq_prompt).
 
 forward_step
   forward_batch of one: the token at the sequence's next position through the layers; the stream out in

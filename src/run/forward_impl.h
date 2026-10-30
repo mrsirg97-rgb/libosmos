@@ -174,7 +174,7 @@ struct Seq
   int32_t prompt_end; /* seq_prompt's end (0: none) */
   int32_t staged;     /* its tokens placed so far in the step being placed */
   int32_t dec_from;   /* the first position whose decoder state is kept: every one from it to pos */
-  int32_t last[ENGRAM_MAX_NGRAM]; /* last[0] the newest */
+  int32_t last[ENGRAM_MAX_NGRAM + SEQ_MAX_BACK]; /* last[0] the newest: the n-gram's, and seq_rollback's depth */
   int n_last;
   float *ring[WEIGHTS_MAX_LAYERS];
   float *ckv[WEIGHTS_MAX_LAYERS], *ik[WEIGHTS_MAX_LAYERS];

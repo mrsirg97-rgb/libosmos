@@ -167,10 +167,12 @@ static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     Seq *s = seqs[i];
     b->bs[j] = s, b->pin->tok[j] = tokens[i], b->pin->pos[j] = s->pos + s->staged++;
     b->n = b->n_all = j + 1, b->at = b->pin->pos[0];
-    memmove(s->last + 1, s->last, (size_t)(ng - 1) * sizeof *s->last);
+    const int cap = ENGRAM_MAX_NGRAM + SEQ_MAX_BACK;
+    memmove(s->last + 1, s->last, (size_t)(cap - 1) * sizeof *s->last);
     s->last[0] = tokens[i];
-    s->n_last = s->n_last < ng ? s->n_last + 1 : ng;
-    if (!engram_rows(f->hash, s->last, s->n_last, b->rows + (uint64_t)j * WEIGHTS_MAX_LAYERS * g->engram_cols))
+    s->n_last = s->n_last < cap ? s->n_last + 1 : cap;
+    if (!engram_rows(f->hash, s->last, s->n_last < ng ? s->n_last : ng,
+                     b->rows + (uint64_t)j * WEIGHTS_MAX_LAYERS * g->engram_cols))
       return fwd_fail(err, "a token the Engram hash refused");
   }
   return true;
@@ -260,6 +262,16 @@ bool seq_prompt(Seq *s, uint32_t end)
   if (!s || end > s->f->max_ctx || (int64_t)end < s->prompt_end)
     return false;
   s->prompt_end = (int32_t)end;
+  return true;
+}
+
+bool seq_rollback(Seq *s, uint32_t n)
+{
+  if (!s || n > SEQ_MAX_BACK || (int)n > s->n_last || (int64_t)s->pos - n < (int64_t)s->prompt_end)
+    return false;
+  const int cap = ENGRAM_MAX_NGRAM + SEQ_MAX_BACK;
+  memmove(s->last, s->last + n, (size_t)(cap - (int)n) * sizeof *s->last);
+  s->n_last -= (int)n, s->pos -= (int32_t)n;
   return true;
 }
 

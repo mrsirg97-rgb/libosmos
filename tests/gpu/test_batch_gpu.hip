@@ -132,6 +132,40 @@ static void sub_batches(Forward* f, size_t V, const std::vector<int32_t>& real, 
   for (int k = 0; k < ns; k++) seq_destroy(s[k]);
 }
 
+// a verify's shape: at each position the token and two others after it in one batch, the two then undone
+// (seq_rollback) - each row the token's own gets, and every later step, the bits of the sequence stepped one token at
+// a time (the rejected tokens' window, compressor and Engram state rewritten before anything reads it)
+static void rollback(Forward* f, size_t V, const std::vector<int32_t>& ids) {
+  char err[FORWARD_ERR] = "";
+  const int n = (int) ids.size(), junk = 2;
+  Seq* a = seq_create(f, err);
+  CHECK(a);
+  std::vector<float> ref((size_t) n * V), got((size_t) n * V);
+  for (int p = 0; p < n; p++) {
+    CHECK(forward_step(f, a, ids[p], err));
+    CHECK(hipMemcpy(&ref[(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  }
+  seq_destroy(a);
+  Seq* b = seq_create(f, err);
+  CHECK(b);
+  CHECK(!seq_rollback(b, 1));  // nothing stepped: nothing to undo
+  int undone = 0;
+  for (int p = 0; p < n; p++) {
+    const int32_t t[3] = {ids[p], ids[(p + 7) % n], ids[(p + 13) % n]};
+    Seq* const ss[3] = {b, b, b};
+    CHECK(forward_batch(f, ss, t, 1 + junk, err));
+    CHECK(hipMemcpy(&got[(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(seq_rollback(b, junk));
+    undone += junk;
+  }
+  CHECK(got == ref);
+  CHECK(!seq_rollback(b, SEQ_MAX_BACK + 1));
+  CHECK(seq_prompt(b, (uint32_t) n) && !seq_rollback(b, 1));  // not before the prompt's end
+  seq_destroy(b);
+  std::printf("  rollback: %d positions each verified with %d tokens after it, those undone (%d in all) - every "
+              "logit the bits of stepping one at a time\n", n, junk, undone);
+}
+
 static Schedule alone() {
   Schedule s;
   for (int k = 0; k < kSeqs; k++)
@@ -217,6 +251,7 @@ int main() {
   seq_destroy(s0);
   std::printf("  refusals: %d tokens, 0 tokens, a token past the vocabulary\n", FORWARD_MAX_TOKENS + 1);
 
+  rollback(r.f, r.V, all);
   play(&r, alone());  // twice: warm the pool, then the reference
   play(&r, alone());
   const auto ref = r.logits;
