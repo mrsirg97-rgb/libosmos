@@ -75,7 +75,19 @@ static void add(Layout *a, uint64_t b)
   a->used += b;
 }
 
-static size_t choose(Forward *f, const PoolUnit *ex, PoolUnit *res, size_t n_res, uint64_t budget, char *err)
+static const uint64_t *g_rank_picks; /* rank_cmp's: a layer's picks (qsort takes no context) */
+static int rank_cmp(const void *a, const void *b)
+{
+  const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+  const uint64_t px = g_rank_picks[x], py = g_rank_picks[y];
+  return px != py ? (px < py) - (px > py) : (x > y) - (x < y); /* more picks first, then the lower id */
+}
+
+/* the resident experts: a rank at a time, each layer's expert of that rank while the budget holds it - by the
+   picks counted on calibration text (forward_create_ranked's, most first), else by id. so each layer's share is
+   about equal and its most-picked first */
+static size_t choose(Forward *f, const PoolUnit *ex, PoolUnit *res, size_t n_res, uint64_t budget,
+                     const uint64_t *picks, char *err)
 {
   const uint32_t E = (uint32_t)f->g->n_experts;
   Layout a = {0, 0, 0};
@@ -83,15 +95,28 @@ static size_t choose(Forward *f, const PoolUnit *ex, PoolUnit *res, size_t n_res
     add(&a, unit_bytes(&res[i]));
   if (a.total > budget)
     return fwd_fail(err, "the layers' weights are more than the budget"), 0;
+  uint32_t *order = malloc((size_t)f->n_layers * E * sizeof *order); /* [layer][rank]: the expert */
+  if (!order)
+    return fwd_fail(err, "out of memory"), 0;
+  for (int l = 0; l < f->n_layers; l++)
+  {
+    uint32_t *o = order + (size_t)l * E;
+    for (uint32_t e = 0; e < E; e++)
+      o[e] = e;
+    if (picks)
+      g_rank_picks = picks + (size_t)l * E, qsort(o, E, sizeof *o, rank_cmp);
+  }
   size_t n = n_res;
-  for (uint32_t e = 0; e < E; e++)
+  for (uint32_t i = 0; i < f->n_expert_units; i++)
+    f->rix[i] = -1;
+  for (uint32_t r = 0; r < E; r++)
     for (int l = 0; l < f->n_layers; l++)
     {
-      const uint32_t i = (uint32_t)l * E + e;
-      f->rix[i] = -1;
+      const uint32_t i = (uint32_t)l * E + order[(size_t)l * E + r];
       if (with(a, unit_bytes(&ex[i])) <= budget)
         f->rix[i] = (int32_t)n, res[n++] = ex[i], add(&a, unit_bytes(&ex[i]));
     }
+  free(order);
   return n;
 }
 
@@ -116,7 +141,7 @@ static uint64_t stream_budget(const Forward *f, const PoolUnit *ex)
 
 /* the units: each layer's experts (the pool's to stream, but the resident ones), then every other tensor the layers
    use - all of them resident (resident.h). Engram's tables are read a row at a time and are not units */
-static bool units(Forward *f, uint64_t budget, char *err)
+static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
 {
   const Weights *w = f->w;
   const uint32_t E = (uint32_t)f->g->n_experts;
@@ -148,7 +173,7 @@ static bool units(Forward *f, uint64_t budget, char *err)
   }
   for (size_t i = 0; i < n_t; i++)
     res[i] = (PoolUnit){.part = {{f->fds[t_res[i]->file], t_res[i]->offset, t_res[i]->bytes}}, .n_parts = 1};
-  const size_t n_res = choose(f, all, res, n_t, budget, err);
+  const size_t n_res = choose(f, all, res, n_t, budget, picks, err);
   char perr[POOL_ERR] = "";
   if (!n_res)
     ok = false;
@@ -298,6 +323,12 @@ static bool freqs(Forward *f)
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR])
 {
+  return forward_create_ranked(w, n_layers, max_ctx, budget, NULL, err);
+}
+
+Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
+                               const uint64_t *picks, char err[FORWARD_ERR])
+{
   if (!w || n_layers < 1 || n_layers > w->geo.n_layers || !max_ctx)
     return fwd_fail(err, "no weights, or layers or a context it cannot run"), NULL;
   if (w->model->n_files > FWD_MAX_FILES)
@@ -331,7 +362,9 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
     ok = fwd_fail(err, "out of memory");
   else if (!(f->eg_read = rowread_create(FWD_ROW_THREADS)))
     ok = fwd_fail(err, "Engram's readers could not start");
-  ok = ok && units(f, budget, err) && oa_tables(f, err);
+  ok = ok && units(f, budget, picks, err) && oa_tables(f, err) &&
+       ((f->picks = calloc((size_t)n_layers * w->geo.n_experts, sizeof *f->picks)) != NULL ||
+        fwd_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
     ok = fwd_fail(err, "a GPU allocation refused");
   if (!ok)
@@ -366,6 +399,7 @@ void forward_destroy(Forward *f)
   hipHostFree(f->r_ids);
   hipHostFree(f->r_up);
   free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0);
+  free(f->picks);
   if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
   {
     const Sub *s = &f->sub[0];
@@ -404,4 +438,5 @@ void forward_probe(Forward *f, forward_probe_fn fn, void *arg)
 }
 
 const float *forward_stream(const Forward *f) { return f->b.h; }
+const uint64_t *forward_picks(const Forward *f) { return f->picks; }
 const float *forward_logits(const Forward *f) { return f->b.vocab; }

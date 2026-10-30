@@ -155,6 +155,7 @@ bool fwd_moe(Forward *f, int l, char *err)
     if (ids[m] < 0 || (uint32_t)ids[m] >= E)
       return fwd_fail(err, "the router picked an expert the model does not have");
     at[ids[m] + 1]++;
+    f->picks[(uint32_t)l * E + (uint32_t)ids[m]]++;
   }
   for (uint32_t e = 0; e < E; e++) /* by expert, then pair: a counting sort, each expert's pairs in pair order */
     at[e + 1] += at[e];

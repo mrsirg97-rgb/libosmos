@@ -115,6 +115,7 @@ struct Forward
   Resident *res;            /* the layers' tensors and a share of the experts, in GPU memory (resident.h) */
   int32_t *rix;             /* an expert's place in res (unit: layer * n_experts + expert), -1: streamed by the pool */
   uint32_t n_expert_units;  /* the pool's units: layer * n_experts + expert */
+  uint64_t *picks;          /* each unit's picks by the router so far (forward_picks) */
   const uint8_t **tdev;     /* a model tensor's device pointer (index: its place in the Gguf), resident ones only */
   const void **oa_tab;      /* each layer's wo_a groups for mm_group: [layer][o_groups], on the device */
   uint32_t *oa_xoff, *oa_yoff; /* group k: x at k * its 4,096 (of a token's attention), y at k * o_lora */

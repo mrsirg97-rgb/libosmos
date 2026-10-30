@@ -20,6 +20,8 @@ typedef void (*forward_probe_fn)(const char *step, int layer, int index, void *d
                                  void *arg);
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);
+Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
+                               const uint64_t *picks, char err[FORWARD_ERR]);
 void forward_destroy(Forward *f);
 void forward_probe(Forward *f, forward_probe_fn fn, void *arg);
 
@@ -31,6 +33,7 @@ bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
 const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
+const uint64_t *forward_picks(const Forward *f);
 
 #endif
 
@@ -39,16 +42,22 @@ Forward
   DeepSeek-V4.1-Flash's forward on the GPU, a token at a time (the decode), its first `n_layers` layers (all of them,
   or fewer for a test). the weights are copies in GPU memory, read from their files straight in: a resident set
   (substrate/mem/resident.h) of every tensor the layers use but the routed experts and as many experts as the budget
-  holds, an equal share of each layer's; the other experts streamed by the pool (substrate/mem/pool.h), held when
-  the router picks them and let go, the one wanted furthest ahead first, when it needs the room. the quantized
-  weights' products are mm's (WMMA over f16 activations, one kernel for 1 .. 16 tokens), the F32 and BF16 weights' the
-  matvec's. `budget` is the GPU memory of the resident set (the pool's own room is two layers' streamed experts).
-  the Engram rows are read from the Engram file a position at a time (pread). `max_ctx` bounds a sequence: its
+  holds, about an equal share of each layer's (its most-picked first: forward_create_ranked); the other experts
+  streamed by the pool (substrate/mem/pool.h), held when the router picks them and let go, the one wanted furthest
+  ahead first, when it needs the room. the quantized weights' products are mm's (WMMA over f16 activations, one
+  kernel for 1 .. 16 tokens), the F32 and BF16 weights' the matvec's. `budget` is the GPU memory of the resident set
+  (the pool's own room is two layers' streamed experts). the Engram rows are read from the Engram file a position at
+  a time (pread). `max_ctx` bounds a sequence: its
   compressed rows and indexer keys are held for that many positions.
 
 forward_create
   NULL, with why in err, for a model or a size it cannot run: n_layers outside 1 .. the model's, max_ctx 0, the
   layers' weights more than the budget, a GPU allocation refused, a weight's read failed.
+
+forward_create_ranked
+  forward_create, the resident experts chosen by picks ([layer][expert] for the n_layers layers, n_experts a layer:
+  the router's picks counted on calibration text, forward_picks's) - a rank at a time, each layer's most-picked
+  first, ties to the lower id. picks NULL: by id, as forward_create. which experts are resident changes no bit.
 
 forward_destroy
   everything it allocated (its Seqs first: seq_destroy). NULL is nothing to do.
@@ -94,6 +103,10 @@ forward_batch
   in turn before the next layer - the same bits as a step a sub-batch, the experts read once a layer. false, with
   why, as forward_step, for a batch of 0 or more than FORWARD_MAX_TOKENS tokens, or a sequence of another forward; on
   a refusal no sequence has moved. probes see a sub-batch at a time (its rows; index: its first token's position).
+
+forward_picks
+  each expert's picks by the router since forward_create, [layer][expert] (n_layers x n_experts): a profile for
+  forward_create_ranked. the host's; valid until forward_destroy.
 
 forward_stream
   the device buffer of the last step's stream out ([n][hc][n_embd] F32) - the last sub-batch's rows, for a batch

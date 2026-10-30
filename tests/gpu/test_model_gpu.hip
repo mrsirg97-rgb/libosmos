@@ -210,6 +210,29 @@ int main() {
   for (size_t i = 0; i < got[1].size() * 4; i++) print = (print ^ bytes[i]) * 1099511628211ull;
   std::printf("  the logits, every position: fingerprint %016llx\n", (unsigned long long) print);
   CHECK(got[0] == got[1] && ok_top && ours_kl <= maya_kl);
+  // the router's picks, counted: each run's every position, layer and slot; then a forward whose resident experts
+  // are the least-picked first (another set of them) - the same bits, which experts are resident changing none
+  const size_t nu = (size_t) L * w->geo.n_experts;
+  std::vector<uint64_t> least(nu);
+  uint64_t picks = 0, most = 0;
+  for (size_t i = 0; i < nu; i++) picks += forward_picks(f)[i], most = std::max(most, forward_picks(f)[i]);
+  CHECK(picks == 3ull * T * L * w->geo.n_used);
+  for (size_t i = 0; i < nu; i++) least[i] = most - forward_picks(f)[i];
+  forward_destroy(f);
+  f = forward_create_ranked(w, L, 4096, kBudget, least.data(), ferr);
+  if (!f) std::printf("  forward_create_ranked: %s\n", ferr);
+  CHECK(f);
+  std::vector<float> ranked((size_t) T * V);
+  Seq* rs = seq_create(f, ferr);
+  CHECK(rs);
+  for (int p = 0; p < T; p++) {
+    CHECK(forward_step(f, rs, (int32_t) ids.v[p], ferr));
+    CHECK(hipMemcpy(&ranked[(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  }
+  seq_destroy(rs);
+  CHECK(ranked == got[1]);
+  std::printf("  picks counted: %llu (3 runs x %d positions x %d layers x %d); the least-picked resident first: logits "
+              "bit for bit\n", (unsigned long long) picks, T, L, w->geo.n_used);
   forward_destroy(f);
   weights_destroy(w);
   gguf_destroy(g);

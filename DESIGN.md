@@ -367,6 +367,25 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   summed by 8 waves, not wave 0 alone (the same bits) - q_b 8.77 -> 8.33 ms but out_b 5.41 -> 5.72 and the experts
   33.7 -> 36.3: a loss. what is left in them wants another shape of kernel, not a knob.
 
+## the decode's experts: resident by the router's picks (measured, 2026-10-30)
+
+a decode token on the whole model (40 layers: the GGUF's 43 compress ratios include the 3 a drafter adds), budget
+88 GB, a 512-token prompt then 64 greedy tokens (scratch `decl.hip`): p50 172-231 ms, ~630 MB read from the files a
+token - its ~30% of 240 picks (40 layers x 6) the resident set did not hold, read at the SSD's and the page cache's
+speed, a layer at a time behind its router. the resident experts were the lowest ids of each layer, which hold their
+share of the picks and no more. the router's picks are skewed (scratch `routes.hip`: an 8,192-token calibration
+text's counts against another 4,096 tokens' picks; the most-picked against the lowest ids, at each share of a
+layer's experts resident: 50% 69.0 / 51.5% of the picks, 69% 84.3 / 70.2, 75% 88.5 / 75.3, 90% 96.1 / 90.7; the
+evaluation text's own most-picked would hold 98-100% - a text uses far fewer experts than all text does).
+
+so the forward counts each expert's picks (forward_picks), and forward_create_ranked takes such counts: each layer's
+experts resident in their order, a rank at a time across the layers. which are resident changes no bit
+(test_model_gpu: the least-picked first, the logits bit for bit; and the counts are every run's every pick). a
+profile of 16,384 tokens of the real-text corpus from its start, decode on text from token 60,000 (2 rounds
+alternating): by id p50 230.7 / 172.5 ms, ~630 MB a token; ranked **p50 91.6 / 90.9 ms, 64 MB a token**. the
+profile is the caller's to keep (a file beside the model); forward_create stays by id. not done: following the text
+as it goes (a set that adapts holds more than any fixed one), which the pool's furthest-ahead room could start.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
