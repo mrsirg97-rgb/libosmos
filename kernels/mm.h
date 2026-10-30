@@ -45,6 +45,22 @@ __host__ __device__ inline uint64_t x16_at(uint32_t t, uint32_t c, uint32_t xts)
 template <int G, int CT>
 constexpr bool kPipe = CT > 1 && G <= 2;
 
+// one column tile (a decode's 1-16 tokens) of a type of short slabs: each lane decodes its row of WMMA's A operand
+// itself (lane l: row l % 16; lanes 0-15 a step's even chunk, 16-31 its odd, the halves traded across the lane
+// halves), no LDS between the decode and the WMMA - the same f16 in the same places, so the same sums (scratch
+// m1.hip, one token: Q5_K's q_b 181 -> 143 us, wo_a's 8 groups 185 -> 147, the shared expert's 62 -> 60; the IQ
+// experts' and Q6_K's, Q8_0's slower or the same: their slabs' LDS layout is the better)
+template <quant::Type T>
+constexpr bool kRegA = T == quant::kQ5_K;
+
+__device__ inline h8 lane_other_half(h8 v) {  // lane l ^ 16's 8 halves
+  typedef uint32_t u4 __attribute__((ext_vector_type(4)));
+  const u4 w = __builtin_bit_cast(u4, v);
+  u4 o;
+  for (int i = 0; i < 4; i++) o[i] = (uint32_t) __shfl_xor((int) w[i], kTile, kWave);
+  return __builtin_bit_cast(h8, o);
+}
+
 // a block's 16-row tile (row0 ..) x CT tiles of 16 token columns, tokens c0 .. c0 + 16 CT (the tiled x16 above, xts
 // its row length) into y (token t's row r at y[t * ys + r], the first n tokens). K split over the block's waves: wave
 // w the slabs w, w + W, ... - each decoded as the matvec decodes (lanes along a row: the loads coalesced) into the
@@ -66,6 +82,21 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
   const _Float16* xb[CT];  // each tile's fragments of this lane: its column, a step kFrag on
   for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
   f8 acc[CT] = {};
+  if constexpr (CT == 1 && kRegA<T>) {  // the A operand straight from the decode (kRegA)
+    const uint8_t* rw = w + (uint64_t) (row0 + col) * row_bytes;
+    for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
+      h16 a[G], bx[G];
+#pragma unroll
+      for (int g = 0; g < G; g++) {
+        const uint32_t k = k0 / quant::kChunk + 2 * g + half;  // this lane's chunk of the step: the even, or the odd
+        const h8 mine = quant::decode_h<T>(rw + (k / per) * B::bytes, (int) (k % per)), theirs = lane_other_half(mine);
+        for (int j = 0; j < quant::kChunk; j++)
+          a[g][j] = half ? theirs[j] : mine[j], a[g][quant::kChunk + j] = half ? mine[j] : theirs[j];
+      }
+      for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
+      for (int g = 0; g < G; g++) acc[0] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bx[g], acc[0]);
+    }
+  } else
   for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
 #pragma unroll 1
     for (int i0 = 0; i0 < S::kLane; i0 += S::kUnroll) {

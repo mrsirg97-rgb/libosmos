@@ -433,6 +433,15 @@ it (149 distinct offsets) - not an F32 order of any kind (in sequence, a tree, e
 a narrower accumulator of its own. emulating it bit for bit is a research project; the floor's lever is mm's own
 speed at one token (the same WMMAs in each output's order: a kernel's shape, not its sums).
 
+mm at one token, a kernel's shape (scratch `m1.hip`: one tile, the weights cycled through 64 copies so the cache
+holds none, against the library's tile, every output bit for bit): each lane decoding its own row of WMMA's A
+operand (lanes 0-15 a step's even chunk, 16-31 its odd, the halves traded by a shuffle) with no LDS between. Q5_K,
+of short slabs (32 values, 8 waves): q_b 181 -> 143 us (159 -> 202 GB/s), wo_a's 8 groups 185 -> 147, the shared
+expert's gate and up 62 -> 60. the IQ experts 172 -> 182, 168 -> 192, 166 -> 179 (slower: their 128-value slabs'
+LDS layout coalesces their loads); Q6_K 167 -> 172, Q8_0 63 -> 65 / 62 by permlanex16 (the same). so Q5_K's one
+tile alone (kRegA). decode on held-out text p50 83.9 / 86.9 -> 79.0 / 81.2 ms, its fastest step 73.2 -> 69.8; the
+model test's p50 71.3 -> 67.5.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
