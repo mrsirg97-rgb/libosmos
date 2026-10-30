@@ -9,8 +9,8 @@
 #include "substrate/gpu/ops.h"
 #include "substrate/gpu/quant.h"
 
-/* the nth Engram layer's rows for each token, read from the Engram file all at once (rowread.h), decoded (BF16, as ref.py's), projected and
-   gated into the streams */
+/* the nth Engram layer's rows for each token, read from the Engram file all at once (rowread.h), decoded (BF16, as
+   ref.py's), projected and gated into the streams */
 bool fwd_engram(Forward *f, int l, int nth, char *err)
 {
   const Geometry *g = f->g;
@@ -121,8 +121,8 @@ static void prefetch(Forward *f, int l, const int32_t *ids, uint32_t picks)
 /* the routed experts: each distinct one resident or held in the pool (their reads at once) and read once for
    all the tokens routed to it - gate, up, swiglu (each pair its weight, before the down projection, as ref.py) and
    down, a launch each (mm_group); each token's summed in ascending expert id (ref.py's index_add order), the shared
-   expert last. nothing here waits for the GPU but the routing event; the experts are released at the next one (or the step's
-   end), when the stream is past their kernels */
+   expert last. nothing here waits for the GPU but the routing event; the experts are held for the layer's every
+   sub-batch and released at the next layer's routing event (or the step's end), when the stream is past them */
 bool fwd_moe(Forward *f, int l, char *err)
 {
   const Geometry *g = f->g;
@@ -139,8 +139,11 @@ bool fwd_moe(Forward *f, int l, char *err)
        hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) && hipEventSynchronize(f->routed) == hipSuccess;
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
-  fwd_release_held(f); /* the stream is past the last layer's experts: the router came after them */
-  f->visits++;
+  if (f->held_layer != l) /* the stream is past the last layer's experts: the router came after them */
+  {
+    fwd_release_held(f);
+    f->visits++, f->held_layer = l;
+  }
   const int32_t *ids = f->pin->ids;
   fwd_probe(f, "route_idx", l, f->at, b->ridx, P, true);
   fwd_probe(f, "route_w", l, f->at, b->rw, P, false);
@@ -191,10 +194,12 @@ bool fwd_moe(Forward *f, int l, char *err)
       base[j] = r, cnt[j] = 0, slot0[j] = next_slot;
       const uint32_t unit = (uint32_t)l * E + (uint32_t)ids[m];
       unit_of[j] = unit;
-      if (f->rix[unit] < 0 && pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_FULL)
-        return fwd_fail(err, "an expert the pool cannot hold (its room, or GPU memory refused)");
-      if (f->rix[unit] < 0)
-        f->held[f->n_held++] = unit;
+      if (f->rix[unit] < 0 && !f->is_held[unit]) /* held once for all the layer's sub-batches */
+      {
+        if (pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_FULL)
+          return fwd_fail(err, "an expert the pool cannot hold (its room, or GPU memory refused)");
+        f->held[f->n_held++] = unit, f->is_held[unit] = true;
+      }
     }
     const uint32_t slot = slot0[j] + (uint32_t)cnt[j]++;
     gidx[slot] = (int32_t)(m / K), hidx[slot] = (int32_t)r;

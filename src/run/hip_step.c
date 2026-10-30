@@ -95,9 +95,31 @@ static bool layer(Forward *f, int l, const float *pre, int *nth, char *err)
   return true;
 }
 
+/* sub-batch k's state into the Forward (and its Scratch), to run its next layer; and back */
+static void enter(Forward *f, uint32_t k)
+{
+  const Sub *s = &f->sub[k];
+  Scratch *b = &f->b;
+  b->h = s->h, b->f_pre = s->f_pre, b->pos = s->pos, b->sel = s->sel, b->n_sel = s->n_sel, b->oa_cnt = s->oa_cnt;
+  b->keep = s->keep, b->back = s->back, f->pin = s->pin, f->rows = s->rows;
+  f->n = s->n, f->n_all = s->n_all, f->n_keep = s->n_keep, f->at = s->at;
+  memcpy(f->bs, s->bs, s->n_all * sizeof *f->bs);
+  memcpy(f->row, s->row, s->n_all * sizeof *f->row);
+  memcpy(f->want, s->want, s->n_all * sizeof *f->want);
+}
+
+static void leave(Forward *f, uint32_t k)
+{
+  Sub *s = &f->sub[k];
+  s->n = f->n, s->n_all = f->n_all, s->n_keep = f->n_keep, s->at = f->at;
+  memcpy(s->bs, f->bs, f->n_all * sizeof *f->bs);
+  memcpy(s->row, f->row, f->n_all * sizeof *f->row);
+  memcpy(s->want, f->want, f->n_all * sizeof *f->want);
+}
+
 /* the batch's tokens checked and placed: each at its sequence's next free position (a sequence's tokens in the
-   batch's order), its last tokens for Engram's hash updated, its rows hashed. nothing of a sequence changes before
-   every token has passed */
+   batch's order), its last tokens for Engram's hash updated, its rows hashed - token i to sub-batch i / FWD_MAX_BATCH.
+   nothing of a sequence changes before every token has passed */
 static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char *err)
 {
   const Geometry *g = f->g;
@@ -108,48 +130,80 @@ static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
       return fwd_fail(err, "a token of no sequence, or another forward's");
     if (tokens[i] < 0 || tokens[i] >= g->n_vocab)
       return fwd_fail(err, "a token outside the vocabulary");
-    int32_t at = seqs[i]->pos;
-    for (uint32_t j = 0; j < i; j++)
-      at += seqs[j] == seqs[i];
-    if ((uint32_t)at >= f->max_ctx)
-      return fwd_fail(err, "a sequence past max_ctx");
-    f->bs[i] = seqs[i], f->pin->tok[i] = tokens[i], f->pin->pos[i] = at;
+    seqs[i]->staged = 0;
   }
   for (uint32_t i = 0; i < n; i++)
+    if ((uint32_t)(seqs[i]->pos + seqs[i]->staged++) >= f->max_ctx)
+      return fwd_fail(err, "a sequence past max_ctx");
+  for (uint32_t i = 0; i < n; i++)
+    seqs[i]->staged = 0;
+  f->n_sub = (n + FWD_MAX_BATCH - 1) / FWD_MAX_BATCH;
+  for (uint32_t i = 0; i < n; i++)
   {
+    Sub *b = &f->sub[i / FWD_MAX_BATCH];
+    const uint32_t j = i % FWD_MAX_BATCH;
     Seq *s = seqs[i];
+    b->bs[j] = s, b->pin->tok[j] = tokens[i], b->pin->pos[j] = s->pos + s->staged++;
+    b->n = b->n_all = j + 1, b->at = b->pin->pos[0];
     memmove(s->last + 1, s->last, (size_t)(ng - 1) * sizeof *s->last);
     s->last[0] = tokens[i];
     s->n_last = s->n_last < ng ? s->n_last + 1 : ng;
-    if (!engram_rows(f->hash, s->last, s->n_last, f->rows + (uint64_t)i * WEIGHTS_MAX_LAYERS * g->engram_cols))
+    if (!engram_rows(f->hash, s->last, s->n_last, b->rows + (uint64_t)j * WEIGHTS_MAX_LAYERS * g->engram_cols))
       return fwd_fail(err, "a token the Engram hash refused");
   }
-  f->n = n;
-  f->at = f->pin->pos[0];
+  return true;
+}
+
+/* a sub-batch's start: its plan (hip_skip.c), its tokens and positions to the GPU, its streams embedded */
+static bool begin(Forward *f, char *err)
+{
+  const Geometry *g = f->g;
+  fwd_plan(f);
+  for (int k = 0; k < g->o_groups; k++)
+    f->pin->oa_cnt[k] = (int32_t)f->n;
+  if (!fwd_put_async(f->b.ids, f->pin->tok, f->n * 4) ||
+      !fwd_put_async(f->b.oa_cnt, f->pin->oa_cnt, (uint64_t)g->o_groups * 4) ||
+      !fwd_put_async(f->b.pos, f->pin->pos, f->n * 4) ||
+      !ops_embed(f->w->embed->type, fwd_dev(f, f->w->embed), g->n_embd, f->b.ids, f->n, g->hc, f->b.h, NULL))
+    return fwd_fail(err, "a GPU call failed (the embedding)");
   return true;
 }
 
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
 {
   const Geometry *g = f->g;
-  if (!n || n > FWD_MAX_BATCH)
-    return fwd_fail(err, "a batch of no tokens, or more than FWD_MAX_BATCH");
+  if (!n || n > FORWARD_MAX_TOKENS)
+    return fwd_fail(err, "a batch of no tokens, or more than FORWARD_MAX_TOKENS");
   if (!place(f, seqs, tokens, n, err))
     return false;
-  fwd_plan(f);
-  for (int k = 0; k < g->o_groups; k++)
-    f->pin->oa_cnt[k] = (int32_t)n;
-  if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess || !fwd_put_async(f->b.ids, f->pin->tok, n * 4) ||
-      !fwd_put_async(f->b.oa_cnt, f->pin->oa_cnt, (uint64_t)g->o_groups * 4) ||
-      !fwd_put_async(f->b.pos, f->pin->pos, n * 4) ||
-      !ops_embed(f->w->embed->type, fwd_dev(f, f->w->embed), g->n_embd, f->b.ids, n, g->hc, f->b.h, NULL))
-    return fwd_fail(err, "a GPU call failed (the embedding)");
-  int nth = 0;
-  for (int l = 0; l < f->n_layers && f->n; l++) /* past dec, the kept tokens: maybe none */
-    if (!layer(f, l, l ? f->b.f_pre : f->b.pre0, &nth, err) || (l == f->dec && !fwd_compact(f, err)))
-      return false;
-  /* the head: the last block's pre mixes the streams, normed, then the vocabulary (the wanted tokens') */
-  if (!fwd_head(f, err))
+  if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess)
+    return fwd_fail(err, "a GPU call failed (the step)");
+  bool ok = true;
+  for (uint32_t k = 0; ok && k < f->n_sub; k++)
+  {
+    enter(f, k);
+    ok = begin(f, err);
+    leave(f, k);
+  }
+  /* layer by layer, every sub-batch through it before the next: the experts a layer holds read once for all */
+  for (int l = 0, nth = 0; ok && l < f->n_layers; nth += g->engram[l], l++)
+    for (uint32_t k = 0; ok && k < f->n_sub; k++)
+    {
+      enter(f, k);
+      int at_nth = nth;
+      if (f->n) /* past dec, the kept tokens: maybe none */
+        ok = layer(f, l, l ? f->b.f_pre : f->b.pre0, &at_nth, err) && (l != f->dec || fwd_compact(f, err));
+      leave(f, k);
+    }
+  /* the head: the last block's pre mixes the streams, normed, then the vocabulary (the wanted tokens'); the last
+     sub-batch's rows the ones left */
+  for (uint32_t k = 0; ok && k < f->n_sub; k++)
+  {
+    enter(f, k);
+    ok = fwd_head(f, err);
+    leave(f, k);
+  }
+  if (!ok)
     return false;
   /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
   if (hipMemcpyAsync(&f->pin->overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||

@@ -21,6 +21,7 @@
 
 #define FWD_MAX_FILES 16
 #define FWD_MAX_BATCH MM_MAX_TOKENS                 /* a step's tokens: the matmul's */
+#define FWD_MAX_SUBS FORWARD_SUBS
 /* a ratio r source's pending positions a sequence: a step's and the r - 1 before them, each row's r all held */
 #define FWD_PEND_ROWS(r) (FWD_MAX_BATCH + (r) - 1)
 #define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a step's (token, routed expert) pairs */
@@ -46,6 +47,21 @@ typedef struct Inbox
   size_t n, cap;
   bool broken; /* a done the inbox could not hold: the forward refuses from then on */
 } Inbox;
+
+/* a sub-batch's own: all its tokens carry from one layer to the next - swapped into the Forward and its Scratch to
+   run one of its layers (hip_step.c's enter and leave) */
+typedef struct Sub
+{
+  float *h, *f_pre;
+  int32_t *pos, *sel, *n_sel, *oa_cnt, *keep, *back;
+  struct Pinned *pin;
+  int64_t *rows;
+  uint32_t n, n_all, n_keep;
+  int32_t at;
+  Seq *bs[FWD_MAX_BATCH];
+  int32_t row[FWD_MAX_BATCH];
+  bool want[FWD_MAX_BATCH];
+} Sub;
 
 /* the step's device buffers, each [FWD_MAX_BATCH][...] a token (the routed experts' [FWD_MAX_PAIRS][...] a pair) */
 typedef struct Scratch
@@ -108,6 +124,10 @@ struct Forward
   hipEvent_t routed;                /* the router's picks are on the host */
   uint32_t held[FWD_MAX_PAIRS];     /* the last layer's experts: released once the stream is past them */
   uint32_t n_held;
+  int held_layer;                   /* the layer they are (-1: none): its sub-batches share them */
+  bool *is_held;                    /* an expert unit among them */
+  Sub sub[FWD_MAX_SUBS];            /* the step's sub-batches; the Forward's own fields the one running */
+  uint32_t n_sub;
   uint64_t visits; /* the layers' expert steps so far: the held ones wanted again n_layers on (pool_release) */
   int64_t *rows;  /* each token's Engram rows, every Engram layer's: [token][layer][col] */
   uint32_t n;                    /* the step's tokens */
@@ -127,6 +147,7 @@ struct Seq
   Forward *f;
   int32_t pos;
   int32_t prompt_end; /* seq_prompt's end (0: none) */
+  int32_t staged;     /* its tokens placed so far in the step being placed */
   int32_t dec_from;   /* the first position whose decoder state is kept: every one from it to pos */
   int32_t last[ENGRAM_MAX_NGRAM]; /* last[0] the newest */
   int n_last;

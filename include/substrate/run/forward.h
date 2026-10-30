@@ -4,9 +4,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "substrate/gpu/mm.h"
 #include "substrate/model/weights.h"
 
 #define FORWARD_ERR 256
+/* a batch's sub-batches of MM_MAX_TOKENS: maya's 8,192-token chunk. each layer runs them all before the next, so the
+   experts it streams are read once for all of them (DESIGN.md, "the memory, revised") */
+#define FORWARD_SUBS 4
+#define FORWARD_MAX_TOKENS (FORWARD_SUBS * MM_MAX_TOKENS)
 
 typedef struct Forward Forward;
 typedef struct Seq Seq;
@@ -81,18 +86,21 @@ forward_step
   stepped again.
 
 forward_batch
-  n tokens (1 .. MM_MAX_TOKENS) at once, token i at seqs[i]'s next position: a sequence may be given several times,
+  n tokens (1 .. FORWARD_MAX_TOKENS) at once, token i at seqs[i]'s next position: a sequence may be given several times,
   its tokens then at its next positions in the order given (a chunk of its prompt, or drafts to verify), each seeing
   the ones before it. a token's results are the same bits however it is batched - alone, beside other sequences, or
-  in a chunk of its own: every step a token takes is summed in an order of its own, never the batch's. false, with
-  why, as forward_step, for a batch of 0 or more than MM_MAX_TOKENS tokens, or a sequence of another forward; on a
-  refusal no sequence has moved. probes see the whole batch (n rows; index: the first token's position).
+  in a chunk of its own: every step a token takes is summed in an order of its own, never the batch's. past
+  MM_MAX_TOKENS the batch runs as sub-batches of MM_MAX_TOKENS (the last the rest), each layer for every one of them
+  in turn before the next layer - the same bits as a step a sub-batch, the experts read once a layer. false, with
+  why, as forward_step, for a batch of 0 or more than FORWARD_MAX_TOKENS tokens, or a sequence of another forward; on
+  a refusal no sequence has moved. probes see a sub-batch at a time (its rows; index: its first token's position).
 
 forward_stream
-  the device buffer of the last step's stream out ([n][hc][n_embd] F32); a token that skipped the decoder
-  (seq_prompt): its row unspecified.
+  the device buffer of the last step's stream out ([n][hc][n_embd] F32) - the last sub-batch's rows, for a batch
+  past MM_MAX_TOKENS; a token that skipped the decoder (seq_prompt): its row unspecified.
 
 forward_logits
-  the device buffer of the last step's logits ([n][n_vocab] F32): the head over the stream, when n_layers is all of the
-  model's (else not computed); a token before its sequence's prompt end - 1 (seq_prompt): its row not computed.
+  the device buffer of the last step's logits ([n][n_vocab] F32) - the last sub-batch's rows, for a batch past
+  MM_MAX_TOKENS: the head over the stream, when n_layers is all of the model's (else not computed); a token before its
+  sequence's prompt end - 1 (seq_prompt): its row not computed.
 */

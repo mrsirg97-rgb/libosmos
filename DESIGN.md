@@ -284,6 +284,28 @@ prompt is slower than in place (241 vs 335): the price of not stalling. the leve
 bytes are the same for 2,048 tokens or 8,192 (a step picks nearly all of a layer's experts), so a layer run for 8,192
 tokens at once (maya's chunk) reads them a quarter as often a token.
 
+## a layer for 8,192 tokens (measured, 2026-10-29)
+
+a batch past MM_MAX_TOKENS runs as sub-batches of 2,048 (`FORWARD_SUBS` 4: maya's 8,192-token chunk), each layer
+for every one of them before the next layer. a sub-batch carries its own state from layer to layer - its streams,
+the next layer's pre, its positions, the indexer's selected rows, the decoder skip's rows, a pinned block, its Engram
+rows (`Sub`, swapped into the Forward to run a layer) - and everything else is the layer's scratch, shared. each
+layer's KV sees the sub-batches in the order the steps would give them, so the bits are a step a sub-batch's
+(`test_batch_gpu`: 2 sequences of 1,500 interleaved in one batch of 3,000, each alone in steps of 512, with and without
+the decoder skip). the experts a layer streams are held for all its sub-batches: read once for 8,192 tokens, not 4
+times.
+
+8,192 real-text tokens (`max_ctx` 16,384, an 88 GB budget, the warm pass), the same binary, interleaved runs:
+
+| a batch | tok/s |
+| --- | ---: |
+| 2,048 tokens (4 steps) | 252, 246 |
+| **8,192 tokens (one batch, 4 sub-batches)** | **306, 303** |
+
+the reads fall from ~5-8 GB/s (the SSD's ceiling, the bound) to ~2 GB/s: the GPU is the bound again, its attention
+growing with the context (a 2,048-token step's ~6 s at the prompt's start, ~8-10 s at 8K). runs of one binary vary by
+up to ~40% from process to process (one 8,192 run gave 219, the next 313): only interleaved runs are compared.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token

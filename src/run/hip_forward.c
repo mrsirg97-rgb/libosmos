@@ -127,7 +127,9 @@ static bool units(Forward *f, uint64_t budget, char *err)
   const GgufTensor **t_res = calloc(n_res_max, sizeof *t_res);
   f->tdev = calloc(w->model->n_tensors, sizeof *f->tdev);
   f->rix = calloc(f->n_expert_units, sizeof *f->rix);
-  bool ok = all && res && t_res && f->tdev && f->rix &&
+  f->is_held = calloc(f->n_expert_units, sizeof *f->is_held);
+  f->held_layer = -1;
+  bool ok = all && res && t_res && f->tdev && f->rix && f->is_held &&
             weights_experts(w, f->fds, all, (size_t)w->geo.n_layers * E) == (size_t)w->geo.n_layers * E;
   if (!ok)
   {
@@ -196,6 +198,8 @@ bool fwd_alloc(void *p, uint64_t bytes)
   return hipMalloc(out, bytes ? bytes : 4) == hipSuccess && hipMemset(*out, 0, bytes ? bytes : 4) == hipSuccess;
 }
 
+static bool subs(Forward *f);
+
 static bool scratch(Forward *f)
 {
   const Geometry *g = f->g;
@@ -247,8 +251,30 @@ static bool scratch(Forward *f)
     n_eg += g->engram[l];
   return fwd_put(b->pre0, pre0, B * hc * F) &&
          hipHostMalloc((void **)&f->stage, B * (uint64_t)(n_eg ? n_eg : 1) * cols * row, 0) == hipSuccess &&
-         hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess && subs(f) &&
          hipEventCreateWithFlags(&f->routed, hipEventDisableTiming) == hipSuccess;
+}
+
+/* the sub-batches' own state (forward_impl.h's Sub): the first the Forward's own buffers, the others their own */
+static bool subs(Forward *f)
+{
+  const Geometry *g = f->g;
+  Scratch *b = &f->b;
+  const uint64_t B = FWD_MAX_BATCH, hc = g->hc, F = sizeof(float);
+  Sub *s0 = &f->sub[0];
+  s0->h = b->h, s0->f_pre = b->f_pre, s0->pos = b->pos, s0->sel = b->sel, s0->n_sel = b->n_sel;
+  s0->oa_cnt = b->oa_cnt, s0->keep = b->keep, s0->back = b->back, s0->pin = f->pin, s0->rows = f->rows;
+  bool ok = true;
+  for (int k = 1; ok && k < FWD_MAX_SUBS; k++)
+  {
+    Sub *s = &f->sub[k];
+    ok = fwd_alloc(&s->h, B * hc * g->n_embd * F) && fwd_alloc(&s->f_pre, B * hc * F) && fwd_alloc(&s->pos, B * 4) &&
+         fwd_alloc(&s->sel, B * OPS_MAX_SELECT * 4) && fwd_alloc(&s->n_sel, B * 4) &&
+         fwd_alloc(&s->oa_cnt, FWD_MAX_GROUPS * 4) && fwd_alloc(&s->keep, B * 4) && fwd_alloc(&s->back, B * 4) &&
+         hipHostMalloc((void **)&s->pin, sizeof *s->pin, 0) == hipSuccess &&
+         (s->rows = calloc(B * WEIGHTS_MAX_LAYERS * g->engram_cols, sizeof *s->rows)) != NULL;
+  }
+  return ok;
 }
 
 static bool freqs(Forward *f)
@@ -318,6 +344,7 @@ void forward_destroy(Forward *f)
   pool_destroy(f->pool);
   resident_destroy(f->res);
   free(f->rix);
+  free(f->is_held);
   rowread_destroy(f->eg_read);
   free(f->eg_off);
   free(f->tdev);
@@ -327,6 +354,18 @@ void forward_destroy(Forward *f)
   free(f->in.r);
   pthread_cond_destroy(&f->in.cv);
   pthread_mutex_destroy(&f->in.mu);
+  if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
+  {
+    const Sub *s = &f->sub[0];
+    f->b.h = s->h, f->b.f_pre = s->f_pre, f->b.pos = s->pos, f->b.sel = s->sel, f->b.n_sel = s->n_sel;
+    f->b.oa_cnt = s->oa_cnt, f->b.keep = s->keep, f->b.back = s->back, f->pin = s->pin, f->rows = s->rows;
+  }
+  for (int k = 1; k < FWD_MAX_SUBS; k++)
+  {
+    Sub *s = &f->sub[k];
+    hipFree(s->h), hipFree(s->f_pre), hipFree(s->pos), hipFree(s->sel), hipFree(s->n_sel), hipFree(s->oa_cnt);
+    hipFree(s->keep), hipFree(s->back), hipHostFree(s->pin), free(s->rows);
+  }
   void **dev = (void **)&f->b;
   for (size_t i = 0; i < sizeof f->b / sizeof(void *); i++)
     hipFree(dev[i]);
