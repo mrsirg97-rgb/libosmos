@@ -183,16 +183,25 @@ __global__ __launch_bounds__(kWide) void hc_pre_rms_kernel(const float* h, const
   for (uint32_t d = threadIdx.x; d < dim; d += kWide) xt[d] = (xt[d] * r) * w[d];
 }
 
-__global__ void hc_post_kernel(const float* y, const float* res, const float* post, const float* comb, uint32_t hc,
-                               uint32_t dim, uint32_t n_tok, float* out) {
+// a thread a (token, d): the hc streams' values at d read once for its hc outputs, each the sum of a thread an
+// output, in its order - the same bits (hc a template argument: the streams' values in registers)
+template <uint32_t hc>
+__global__ void hc_post_kernel(const float* y, const float* res, const float* post, const float* comb, uint32_t dim,
+                               uint32_t n_tok, float* out) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= (uint64_t) n_tok * hc * dim) return;
-  const uint32_t d = i % dim, j = (i / dim) % hc, t = (uint32_t) (i / dim / hc);
-  const float* rt = res + (uint64_t) t * hc * dim;
+  if (i >= (uint64_t) n_tok * dim) return;
+  const uint32_t d = i % dim, t = (uint32_t) (i / dim);
+  const float* rt = res + (uint64_t) t * hc * dim + d;
   const float* ct = comb + t * hc * hc;
-  float s = ct[j] * rt[d];
-  for (uint32_t k = 1; k < hc; k++) s += ct[k * hc + j] * rt[(uint64_t) k * dim + d];
-  out[i] = post[t * hc + j] * y[(uint64_t) t * dim + d] + s;
+  float r[hc];
+  for (uint32_t k = 0; k < hc; k++) r[k] = rt[(uint64_t) k * dim];
+  const float yv = y[(uint64_t) t * dim + d];
+  float* ot = out + (uint64_t) t * hc * dim + d;
+  for (uint32_t j = 0; j < hc; j++) {
+    float s = ct[j] * r[0];
+    for (uint32_t k = 1; k < hc; k++) s += ct[k * hc + j] * r[k];
+    ot[(uint64_t) j * dim] = post[t * hc + j] * yv + s;
+  }
 }
 
 __global__ void rope_kernel(float* x, uint32_t heads, uint32_t head_dim, uint32_t rope_dim, uint32_t stride,
@@ -391,8 +400,17 @@ extern "C" bool ops_hc_pre_rms(const float* h, const float* pre, uint32_t hc, ui
 extern "C" bool ops_hc_post(const float* y, const float* res, const float* post, const float* comb, uint32_t hc,
                             uint32_t dim, uint32_t n_tok, float* out, void* stream) {
   if (!hc || hc > OPS_MAX_HC || !dim || !n_tok) return false;
-  hc_post_kernel<<<grid((uint64_t) n_tok * hc * dim), kThreads, 0, st(stream)>>>(y, res, post, comb, hc, dim, n_tok,
-                                                                                  out);
+  static_assert(OPS_MAX_HC == 8, "hc_post instantiates 1 .. 8");
+  const unsigned g = grid((uint64_t) n_tok * dim);
+  const hipStream_t s = st(stream);
+  switch (hc) {
+#define HC_POST(n) \
+  case n:          \
+    hc_post_kernel<n><<<g, kThreads, 0, s>>>(y, res, post, comb, dim, n_tok, out); \
+    break;
+    HC_POST(1) HC_POST(2) HC_POST(3) HC_POST(4) HC_POST(5) HC_POST(6) HC_POST(7) HC_POST(8)
+#undef HC_POST
+  }
   return ok();
 }
 

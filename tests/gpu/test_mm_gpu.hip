@@ -20,6 +20,7 @@
 extern "C" {
 #include "substrate/gpu/mm.h"
 #include "substrate/gpu/mv.h"
+#include "substrate/gpu/ops.h"
 #include "substrate/gpu/quant.h"
 #include "substrate/model/gguf.h"
 }
@@ -184,6 +185,44 @@ static void shape(const Gguf* g, const Shape& s) {
   CHECK(hipFree(x16) == hipSuccess && hipFree(over) == hipSuccess);
 }
 
+// mm_x16_attn against the three calls it stands for (ops_rope's inverse, ops_fp8_round, mm_x16) on the attention's
+// output shape: every f16 the same bits, the padding rows too. a block's values spread over 2^-12 .. 2^4 so its FP8
+// scales differ, positions to 8K so the angles are large
+static void attn_x16() {
+  constexpr uint32_t kHeads = 64, kHd = 512, kRd = 64, kN = 37, kCols = kHeads * kHd;
+  const uint32_t rows = (kN + MM_TILE - 1) / MM_TILE * MM_TILE;
+  std::vector<float> xh((size_t) kN * kCols), fh(kRd / 2);
+  for (float& v : xh) v = uniform() * std::ldexp(1.0f, (int) ((uniform() + 1) * 8) - 12);
+  for (uint32_t i = 0; i < kRd / 2; i++) fh[i] = (float) std::pow(10000.0, -2.0 * i / kRd);
+  std::vector<int32_t> ph(kN);
+  for (uint32_t i = 0; i < kN; i++) ph[i] = (int32_t) (i * 223);
+  float *x = nullptr, *fr = nullptr;
+  int32_t *pos = nullptr, *ovf = nullptr;
+  void *a = nullptr, *b = nullptr;
+  const size_t xb = xh.size() * 4, hb = (size_t) rows * kCols * 2;
+  CHECK(hipMalloc(&x, xb) == hipSuccess && hipMalloc(&fr, fh.size() * 4) == hipSuccess);
+  CHECK(hipMalloc(&pos, kN * 4) == hipSuccess && hipMalloc(&ovf, 4) == hipSuccess);
+  CHECK(hipMalloc(&a, hb) == hipSuccess && hipMalloc(&b, hb) == hipSuccess);
+  CHECK(hipMemcpy(fr, fh.data(), fh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(pos, ph.data(), kN * 4, hipMemcpyHostToDevice) == hipSuccess && hipMemset(ovf, 0, 4) == hipSuccess);
+  CHECK(hipMemset(a, 0x55, hb) == hipSuccess && hipMemset(b, 0x33, hb) == hipSuccess);
+  CHECK(hipMemcpy(x, xh.data(), xb, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(mm_x16_attn(x, kCols, kN, kCols, kHd, kRd, fr, pos, a, ovf, nullptr));
+  CHECK(ops_rope(x, kHeads, kHd, kRd, kCols, fr, pos, true, kN, nullptr) &&
+        ops_fp8_round(x, (uint64_t) kN * kCols, nullptr) && mm_x16(x, kCols, kN, kCols, b, ovf, nullptr));
+  std::vector<uint8_t> ha(hb), hbv(hb);
+  int32_t o = 1;
+  CHECK(hipMemcpy(ha.data(), a, hb, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(hbv.data(), b, hb, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(&o, ovf, 4, hipMemcpyDeviceToHost) == hipSuccess && o == 0);
+  CHECK(std::memcmp(ha.data(), hbv.data(), hb) == 0);
+  CHECK(!mm_x16_attn(x, kCols, kN, kCols, kHd, kRd + 2, fr, pos, a, ovf, nullptr));  // the rope's part mid-block
+  CHECK(hipFree(x) == hipSuccess && hipFree(fr) == hipSuccess && hipFree(pos) == hipSuccess);
+  CHECK(hipFree(ovf) == hipSuccess && hipFree(a) == hipSuccess && hipFree(b) == hipSuccess);
+  std::printf("  the attention's output to f16 (rope back, FP8, f16 at once): %u tokens x %u, the bits of the three"
+              " calls\n", kN, kCols);
+}
+
 int main() {
   std::printf("[test_mm_gpu] start\n");
   const char* home = std::getenv("HOME");
@@ -199,6 +238,7 @@ int main() {
   CHECK(!mm_run(13, nullptr, 24, 256, nullptr, 1, nullptr, 24, nullptr));   // rows not 16s
   CHECK(!mm_run(13, nullptr, 32, 256, nullptr, MM_MAX_TOKENS + 1, nullptr, 32, nullptr));  // too many tokens
   std::printf("  refusals: F32 and BF16 (the matvec's), rows not a multiple of 16, %d tokens\n", MM_MAX_TOKENS + 1);
+  attn_x16();
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);

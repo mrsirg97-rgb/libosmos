@@ -183,11 +183,10 @@ bool fwd_attention(Forward *f, int l, char *err)
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention)");
   fwd_probe(f, "o", l, f->at, b->o, n * H * HD, false);
-  ok = ops_rope(b->o, H, HD, RD, H * HD, freqs, b->pos, true, n, NULL) &&
-       ops_fp8_round(b->o, (uint64_t)n * H * HD, NULL);
-  /* wo_a: the tokens' attention to f16 once, then every group in one launch, group k over its 4,096 of each (the
-     groups' token counts the step's: forward_batch sends them) */
-  ok = ok && mm_x16(b->o, H * HD, n, H * HD, b->x16, b->overflow, NULL) &&
+  /* wo_a: the tokens' attention to f16 once - its rope back and FP8 on the way, o read once (mm_x16_attn) - then
+     every group in one launch, group k over its 4,096 of each (the groups' token counts the step's: forward_batch
+     sends them) */
+  ok = mm_x16_attn(b->o, H * HD, n, H * HD, HD, RD, freqs, b->pos, b->x16, b->overflow, NULL) &&
        mm_group(L->out_a->type, f->oa_tab + (size_t)l * OG, b->oa_cnt, OG, n, OL, oin, b->x16, f->oa_xoff, H * HD,
                 b->oa, f->oa_yoff, OG * OL, NULL);
   ok = ok && fwd_mat(f, L->out_b, fwd_dev(f, L->out_b), D, OG * OL, b->oa, OG * OL, n, b->y, D);

@@ -11,6 +11,8 @@
 bool mm_known(uint32_t type);
 uint32_t mm_col_tiles(uint32_t type, uint32_t n);
 bool mm_x16(const float *x, uint32_t xs, uint32_t n, uint32_t cols, void *x16, int32_t *overflow, void *stream);
+bool mm_x16_attn(const float *x, uint32_t xs, uint32_t n, uint32_t cols, uint32_t head_dim, uint32_t rope_dim,
+                 const float *freqs, const int32_t *pos, void *x16, int32_t *overflow, void *stream);
 bool mm_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const void *x16, uint32_t n, float *y,
             uint32_t ys, void *stream);
 bool mm_x16_rows(const float *x, uint32_t xs, const int32_t *idx, uint32_t slots, uint32_t cols, void *x16,
@@ -37,6 +39,12 @@ mm_x16
   MM_TILE rows of cols f16, nearest, tiled (xts cols); the rows past n zero). a value past f16's range sets *overflow
   (device memory; the caller reads it after the step: a refusal, not a guess). n 1 .. MM_MAX_TOKENS, cols a multiple
   of 16.
+
+mm_x16_attn
+  mm_x16 of the attention's output, its two roundings on the way: each head's (head_dim values, cols / head_dim of
+  them) last rope_dim rotated back (ops_rope's inverse, pos[t] the token's position), then each 32-value block to FP8
+  (ops_fp8_round), then f16 - the same bits as the three calls, x read once and not written. also false for cols not
+  whole heads, a head not whole blocks, or a rope part not starting at a block.
 
 mm_run
   y[t * ys + r] = sum over c of W[r, c] * x16[t][c] for t < n, queued on `stream`, not waited for. rows a multiple

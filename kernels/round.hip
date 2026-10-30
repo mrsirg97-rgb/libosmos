@@ -18,29 +18,19 @@ constexpr int kWaves = kThreads / kWave;
 constexpr float kFp4Max = 6.0f;          // E2M1's largest
 constexpr int kE4m3ScaleFloorExp = -9;   // fp4_act_quant's E4M3-scale amax floor: 6 * 2^-9
 constexpr int kPow2ScaleFloorExp = -126; // and its power-of-two one: 6 * 2^-126
-constexpr float kFp8Floor = 1e-4f;  // act_quant's amax floor
-constexpr int kFp8Block = 32;
 
 unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
 unsigned wave_grid(uint64_t blocks) { return (unsigned) ((blocks + kWaves - 1) / kWaves); }
 bool ok() { return hipGetLastError() == hipSuccess; }
 hipStream_t st(void* s) { return (hipStream_t) s; }
 
-// a wave a block, a lane a value (fp4's longer blocks: lanes strided): the loads coalesced, the max an xor tree - exact
-// in any order, so the same bits as a value at a time
-__device__ inline float wave_amax(float m) {
-  for (int off = kWave / 2; off > 0; off >>= 1) m = fmaxf(m, __shfl_xor(m, off, kWave));
-  return m;
-}
-
+// a wave a block, a lane a value (fp4's longer blocks: lanes strided): the loads coalesced, the max round.h's xor tree
 __global__ void fp8_kernel(float* x, uint64_t blocks) {
-  static_assert(kFp8Block == kWave, "a lane a value");
+  static_assert(kWave == kRndWave, "round.h's wave");
   const uint64_t b = (uint64_t) blockIdx.x * kWaves + threadIdx.x / kWave;
   if (b >= blocks) return;
   float* v = x + b * kFp8Block + threadIdx.x % kWave;
-  const float amax = wave_amax(fabsf(*v));
-  const float s = exp2f(ceilf(log2f(fmaxf(amax, kFp8Floor) / kFp8Max)));
-  *v = e4m3(fminf(fmaxf(*v / s, -kFp8Max), kFp8Max)) * s;
+  *v = fp8_block(*v);
 }
 
 __global__ void fp4_kernel(float* x, uint64_t blocks, uint32_t block, bool e4m3_scale) {

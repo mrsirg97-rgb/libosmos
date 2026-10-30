@@ -2,6 +2,7 @@
 #include <cmath>
 
 #include "mm.h"
+#include "round.h"
 
 extern "C" {
 #include "substrate/gpu/mm.h"
@@ -35,6 +36,35 @@ __global__ void x16_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t col
   if (t >= (n + mm::kTile - 1) / mm::kTile * mm::kTile) return;
   const float v = t < n ? x[(uint64_t) t * xs + c] : 0.0f;
   if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);  // past f16, or NaN: refused at the step's end
+  x16[mm::x16_at(t, c, cols)] = (_Float16) v;
+}
+
+// the attention's output to f16 on the way to wo_a: a wave an FP8 block of a token's row, a lane a value - each
+// head's last rope_dim values rotated back (a pair's lanes trading theirs), the block rounded to FP8, then to f16.
+// ops_rope's, ops_fp8_round's and x16_kernel's expressions in their order, so the same bits as the three (the rows
+// past n zero, as x16_kernel's)
+__global__ void x16_attn_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t cols, uint32_t head_dim,
+                                uint32_t rope_dim, const float* freqs, const int32_t* pos, _Float16* x16,
+                                int32_t* overflow) {
+  static_assert(kThreads % rnd::kFp8Block == 0, "whole waves");
+  const uint64_t blk = (uint64_t) blockIdx.x * (kThreads / rnd::kFp8Block) + threadIdx.x / rnd::kFp8Block;
+  const uint32_t lane = threadIdx.x % rnd::kFp8Block, per_row = cols / rnd::kFp8Block;
+  const uint32_t t = (uint32_t) (blk / per_row), c = (uint32_t) (blk % per_row) * rnd::kFp8Block + lane;
+  if (t >= (n + mm::kTile - 1) / mm::kTile * mm::kTile) return;  // the whole wave: a block is one token's
+  float v = 0.0f;
+  if (t < n) {
+    v = x[(uint64_t) t * xs + c];
+    const uint32_t d = c % head_dim, r0 = head_dim - rope_dim;
+    if (d >= r0) {  // the whole block in the rope's part (r0 a multiple of the block: the launch checks)
+      const float other = __shfl_xor(v, 1, rnd::kFp8Block);
+      const float ang = (float) pos[t] * freqs[(d - r0) / 2];
+      const float cs = cosf(ang), sn = -sinf(ang);
+      const float a = lane & 1 ? other : v, b = lane & 1 ? v : other;
+      v = lane & 1 ? a * sn + b * cs : a * cs - b * sn;
+    }
+    v = rnd::fp8_block(v);
+  }
+  if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);
   x16[mm::x16_at(t, c, cols)] = (_Float16) v;
 }
 
@@ -133,6 +163,19 @@ extern "C" bool mm_x16(const float* x, uint32_t xs, uint32_t n, uint32_t cols, v
   const uint64_t work = (uint64_t) (n + mm::kTile - 1) / mm::kTile * mm::kTile * cols;  // whole tiles: past n, zero
   x16_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
       x, xs, n, cols, (_Float16*) x16, overflow);
+  return hipGetLastError() == hipSuccess;
+}
+
+extern "C" bool mm_x16_attn(const float* x, uint32_t xs, uint32_t n, uint32_t cols, uint32_t head_dim,
+                            uint32_t rope_dim, const float* freqs, const int32_t* pos, void* x16, int32_t* overflow,
+                            void* stream) {
+  const uint32_t blk = rnd::kFp8Block;
+  if (!n || n > MM_MAX_TOKENS || !cols || cols % mm::kTile || (n > 1 && xs < cols) || !head_dim || cols % head_dim ||
+      head_dim % blk || rope_dim > head_dim || rope_dim % 2 || (head_dim - rope_dim) % blk)
+    return false;
+  const uint64_t work = (uint64_t) (n + mm::kTile - 1) / mm::kTile * mm::kTile * cols;
+  x16_attn_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+      x, xs, n, cols, head_dim, rope_dim, freqs, pos, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
 }
 

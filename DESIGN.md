@@ -318,6 +318,14 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   same order, the same tree, so every token's bits are those it takes alone (test_mv_gpu: 77 tokens at once against
   each alone, every shape; reversing the tree fails it). the router 15.2 -> 5.5 ms (R 1-8, NW 4-32 tried: R 3 NW 12
   5.1, 16+ tokens 6.3-16); 8,192 tokens ~310 -> ~318 tok/s (3 rounds alternating, the first's cold pass left out).
+- the elementwise kernels are bound by memory, and rope by its pattern: a head's last 64 of 512 values, 256 B of
+  every 2 KB - 2.45 ms for q's 2,048 tokens with no trig at all, 0.10 ms for the same bytes side by side (scratch
+  `ropeb.hip`; a thread computing an angle once for 2-64 heads was slower, 2.8-3.8 ms). so the attention's output
+  no longer takes ops_rope, ops_fp8_round and mm_x16 apart: mm_x16_attn reads it once - a wave an FP8 block, a
+  pair's lanes trading values for the rotation - and writes the f16 (test_mm_gpu: the bits of the three calls on
+  37 tokens x 32,768; a flipped rotation fails it). hc_post a thread a (token, d), the hc streams read once for
+  its 4 outputs, each sum in its order. 8,192 tokens: rope 0.82 -> 0.42 s (q's, kv's, the indexer's left),
+  fp8 + x16 1.04 -> 0.31 + 0.39 (the fused), hc_post 0.97 -> 0.56; the GPU busy 24.9 -> 23.2 s, ~318 -> ~330 tok/s.
 
 ## Engram's reads (measured, 2026-10-29)
 
