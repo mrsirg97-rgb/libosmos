@@ -14,14 +14,15 @@ extern "C" {
 namespace {
 
 constexpr int kWave = 32;
-constexpr int kTile = 64;               // a block's tile: 64 heads x 64 keys (scores), 64 heads x 64 dims (values)
-constexpr int kPer = 4;                 // a thread's 4 x 4 of it
-constexpr int kSide = kTile / kPer;     // 16 threads a side
-constexpr int kThreads = kSide * kSide; // 256
-constexpr int kStep = 16;               // the sum's values staged at a time (d for scores, keys for values)
-constexpr int kLoads = kTile * kStep / (kThreads * kPer);  // a thread's float4s of a tile's stage: 1
+constexpr int kHeads = 64;  // a block's heads (both products)
+constexpr int kStep = 16;   // the sum's values staged at a time (d for scores, keys for values)
+// the register tiles, the best measured on gfx1151 at 2,048 tokens x 640 keys (scratch sab.hip / sav.hip; every one
+// the same bits): scores a thread 16 heads x 8 keys of a block's 64 x 128 (8.9 ms; the 4 x 4 of 64 x 64 before it
+// 13.0, 8 x 8 9.4); values 8 heads x 16 dims of 64 x 256 (9.8 ms; 4 x 4 13.9, 8 x 8 of 128 dims 10.0)
+constexpr int kSr = 16, kSc = 8, kSkeys = 128;
+constexpr int kVr = 8, kVc = 16, kVdims = 256;
+constexpr int kSmThreads = 256;  // the softmax's: a wave a (token, head)
 constexpr float kNegHuge = -1e30f;
-static_assert(kLoads == 1, "a stage a float4 a thread");
 
 typedef float f4 __attribute__((ext_vector_type(4)));
 
@@ -54,41 +55,82 @@ struct Keys {
   }
 };
 
-// s[t][h][k] = (sum over d ascending of q[t][h][d] key_k[d]) * scale: a block a token's 64 heads x 64 keys
-__global__ __launch_bounds__(kThreads) void scores_kernel(Keys K, const float* __restrict__ q, float scale,
-                                                         uint32_t heads, float* __restrict__ s) {
-  __shared__ __attribute__((aligned(16))) float qs[kStep][kTile + kPer], ks[kStep][kTile + kPer];
-  const uint32_t t = blockIdx.z, h0 = blockIdx.y * kTile, k0 = blockIdx.x * kTile, hd = K.hd;
+// a thread's R x C of a block's tile: R heads (a float4 group every 64 / (R / 4)) by C columns (a group every
+// TW / (C / 4)) - acc[i][g] += a(head i) * b(group g), over the staged values in order
+template <int R, int C, int TW>
+__device__ inline void tile_sums(const float (*as)[kHeads + 4], const float (*bs)[TW + 4], int ty, int tx,
+                                 f4 (&acc)[R][C / 4]) {
+#pragma unroll
+  for (int d = 0; d < kStep; d++) {
+    f4 a[R / 4], b[C / 4];
+    for (int i = 0; i < R / 4; i++) a[i] = *(const f4*) &as[d][ty * 4 + i * (kHeads / (R / 4))];
+    for (int g = 0; g < C / 4; g++) b[g] = *(const f4*) &bs[d][tx * 4 + g * (TW / (C / 4))];
+    for (int i = 0; i < R; i++) {
+      const float av = a[i / 4][i % 4];
+      for (int g = 0; g < C / 4; g++)
+        acc[i][g] = __builtin_elementwise_fma(f4{av, av, av, av}, b[g], acc[i][g]);
+    }
+  }
+}
+__device__ inline int tile_head(int R, int ty, int i) { return ty * 4 + (i / 4) * (kHeads / (R / 4)) + i % 4; }
+
+// s[t][h][k] = (sum over d ascending of q[t][h][d] key_k[d]) * scale: a block a token's 64 heads x kSkeys keys, a
+// thread kSr x kSc; each thread's rows' pointers once, the next stage's loads issued before this one's sums
+constexpr int kSthreads = (kHeads / kSr) * (kSkeys / kSc);
+__global__ __launch_bounds__(kSthreads) void scores_kernel(Keys K, const float* __restrict__ q, float scale,
+                                                          uint32_t heads, float* __restrict__ s) {
+  constexpr int TX = kSkeys / kSc, G = kSc / 4;
+  constexpr int QL = kHeads * kStep / 4 / kSthreads, KL = kSkeys * kStep / 4 / kSthreads;  // a thread's float4s
+  static_assert(QL >= 1 && KL >= 1 && QL * kSthreads * 4 == kHeads * kStep, "whole float4s a thread");
+  __shared__ __attribute__((aligned(16))) float qs[kStep][kHeads + 4], ks[kStep][kSkeys + 4];
+  const uint32_t t = blockIdx.z, h0 = blockIdx.y * kHeads, k0 = blockIdx.x * kSkeys, hd = K.hd;
   uint32_t nw;
   const uint32_t n = K.count(t, nw);
   if (k0 >= n) return;  // the whole block
-  const int tx = threadIdx.x % kSide, ty = threadIdx.x / kSide;
-  const int li = threadIdx.x / (kStep / kPer), ld = threadIdx.x % (kStep / kPer) * kPer;  // a stage's row, d
-  const float* qr = q + ((uint64_t) t * heads + h0 + li) * hd + ld;
-  const float* kr = k0 + li < n ? K.row(t, k0 + li, nw) + ld : nullptr;
-  f4 acc[kPer] = {};
+  const int tx = threadIdx.x % TX, ty = threadIdx.x / TX;
+  const float* qp[QL];
+  const float* kp[KL];
+  int qi[QL], qd[QL], ki[KL], kd[KL];  // a load's row and d in the stage
+  for (int j = 0; j < QL; j++) {
+    const int i = threadIdx.x + j * kSthreads;
+    qi[j] = i / (kStep / 4), qd[j] = i % (kStep / 4) * 4;
+    qp[j] = q + ((uint64_t) t * heads + h0 + qi[j]) * hd + qd[j];
+  }
+  for (int j = 0; j < KL; j++) {
+    const int i = threadIdx.x + j * kSthreads;
+    ki[j] = i / (kStep / 4), kd[j] = i % (kStep / 4) * 4;
+    kp[j] = k0 + ki[j] < n ? K.row(t, k0 + ki[j], nw) + kd[j] : nullptr;
+  }
+  f4 qn[QL], kn[KL];
+  for (int j = 0; j < QL; j++) qn[j] = *(const f4*) qp[j];
+  for (int j = 0; j < KL; j++) kn[j] = kp[j] ? *(const f4*) kp[j] : f4{};
+  f4 acc[kSr][G] = {};
   for (uint32_t d0 = 0; d0 < hd; d0 += kStep) {
-    const f4 qv = *(const f4*) (qr + d0), kv = kr ? *(const f4*) (kr + d0) : f4{};
     __syncthreads();
-    for (int j = 0; j < kPer; j++) qs[ld + j][li] = qv[j], ks[ld + j][li] = kv[j];
+    for (int j = 0; j < QL; j++)
+      for (int e = 0; e < 4; e++) qs[qd[j] + e][qi[j]] = qn[j][e];
+    for (int j = 0; j < KL; j++)
+      for (int e = 0; e < 4; e++) ks[kd[j] + e][ki[j]] = kn[j][e];
     __syncthreads();
-#pragma unroll
-    for (int d = 0; d < kStep; d++) {
-      const f4 a = *(const f4*) &qs[d][ty * kPer], b = *(const f4*) &ks[d][tx * kPer];
-      for (int i = 0; i < kPer; i++) acc[i] = __builtin_elementwise_fma(f4{a[i], a[i], a[i], a[i]}, b, acc[i]);
+    if (d0 + kStep < hd) {
+      for (int j = 0; j < QL; j++) qn[j] = *(const f4*) (qp[j] + d0 + kStep);
+      for (int j = 0; j < KL; j++) kn[j] = kp[j] ? *(const f4*) (kp[j] + d0 + kStep) : f4{};
     }
+    tile_sums<kSr, kSc, kSkeys>(qs, ks, ty, tx, acc);
   }
-  for (int i = 0; i < kPer; i++) {
-    float* sr = s + ((uint64_t) t * heads + h0 + ty * kPer + i) * K.stride + k0 + tx * kPer;
-    if (k0 + tx * kPer < n) *(f4*) sr = acc[i] * scale;  // past n: the row's padding, never read as a key
-  }
+  for (int i = 0; i < kSr; i++)
+    for (int g = 0; g < G; g++) {
+      const uint32_t h = h0 + tile_head(kSr, ty, i), k = k0 + tx * 4 + g * (kSkeys / G);
+      if (k < n) *(f4*) (s + ((uint64_t) t * heads + h) * K.stride + k) = acc[i][g] * scale;  // past n: padding
+    }
 }
 
 // a row's softmax with the head's sink, a wave a (token, head): p = exp(s - m) in place, den[t][h] its sum + the
 // sink's - lane-strided then a fixed tree (the max exact whatever the order)
-__global__ __launch_bounds__(kThreads) void softmax_kernel(Keys K, const float* __restrict__ sink, uint32_t heads,
-                                                          float* __restrict__ s, float* __restrict__ den) {
-  const uint32_t t = blockIdx.y, h = blockIdx.x * (kThreads / kWave) + threadIdx.x / kWave, lane = threadIdx.x % kWave;
+__global__ __launch_bounds__(kSmThreads) void softmax_kernel(Keys K, const float* __restrict__ sink, uint32_t heads,
+                                                            float* __restrict__ s, float* __restrict__ den) {
+  const uint32_t t = blockIdx.y, h = blockIdx.x * (kSmThreads / kWave) + threadIdx.x / kWave;
+  const uint32_t lane = threadIdx.x % kWave;
   if (h >= heads) return;
   uint32_t nw;
   const uint32_t n = K.count(t, nw);
@@ -104,37 +146,58 @@ __global__ __launch_bounds__(kThreads) void softmax_kernel(Keys K, const float* 
   if (lane == 0) den[(uint64_t) t * heads + h] = sum + expf(sk - m);
 }
 
-// o[t][h][d] = (sum over the keys in order of p[t][h][k] key_k[d]) / den[t][h]: a block a token's 64 heads x 64 dims
-__global__ __launch_bounds__(kThreads) void values_kernel(Keys K, const float* __restrict__ p,
-                                                         const float* __restrict__ den, uint32_t heads,
-                                                         float* __restrict__ o) {
-  __shared__ __attribute__((aligned(16))) float ps[kStep][kTile + kPer], vs[kStep][kTile + kPer];
-  const uint32_t t = blockIdx.z, h0 = blockIdx.y * kTile, d0 = blockIdx.x * kTile, hd = K.hd;
+// o[t][h][d] = (sum over the keys in order of p[t][h][k] key_k[d]) / den[t][h]: a block a token's 64 heads x kVdims
+// dims, a thread kVr x kVc, the keys kStep a stage (past n zeros: 0 x 0, the sums' bits unchanged); the next stage's
+// loads issued before this one's sums
+constexpr int kVthreads = (kHeads / kVr) * (kVdims / kVc);
+__global__ __launch_bounds__(kVthreads) void values_kernel(Keys K, const float* __restrict__ p,
+                                                          const float* __restrict__ den, uint32_t heads,
+                                                          float* __restrict__ o) {
+  constexpr int TX = kVdims / kVc, G = kVc / 4;
+  constexpr int PL = kHeads * kStep / 4 / kVthreads, VL = kStep * kVdims / 4 / kVthreads;  // a thread's float4s
+  static_assert(PL >= 1 && VL >= 1 && PL * kVthreads * 4 == kHeads * kStep, "whole float4s a thread");
+  __shared__ __attribute__((aligned(16))) float ps[kStep][kHeads + 4], vs[kStep][kVdims + 4];
+  const uint32_t t = blockIdx.z, h0 = blockIdx.y * kHeads, d0 = blockIdx.x * kVdims, hd = K.hd;
   uint32_t nw;
   const uint32_t n = K.count(t, nw);
-  const int tx = threadIdx.x % kSide, ty = threadIdx.x / kSide;
-  const int ph = threadIdx.x / (kStep / kPer), pk = threadIdx.x % (kStep / kPer) * kPer;  // p's stage: head, key
-  const int vk = threadIdx.x / (kTile / kPer), vd = threadIdx.x % (kTile / kPer) * kPer;  // the values': key, d
-  const float* pr = p + ((uint64_t) t * heads + h0 + ph) * K.stride;
-  f4 acc[kPer] = {};
-  for (uint32_t k0 = 0; k0 < n; k0 += kStep) {
-    f4 pv = {}, vv = {};  // past n: 0 x 0, the sums' bits unchanged
-    for (int j = 0; j < kPer; j++)
-      if (k0 + pk + j < n) pv[j] = pr[k0 + pk + j];
-    if (k0 + vk < n) vv = *(const f4*) (K.row(t, k0 + vk, nw) + d0 + vd);
-    __syncthreads();
-    for (int j = 0; j < kPer; j++) ps[pk + j][ph] = pv[j];
-    *(f4*) &vs[vk][vd] = vv;
-    __syncthreads();
-#pragma unroll
-    for (int k = 0; k < kStep; k++) {
-      const f4 a = *(const f4*) &ps[k][ty * kPer], b = *(const f4*) &vs[k][tx * kPer];
-      for (int i = 0; i < kPer; i++) acc[i] = __builtin_elementwise_fma(f4{a[i], a[i], a[i], a[i]}, b, acc[i]);
-    }
+  const int tx = threadIdx.x % TX, ty = threadIdx.x / TX;
+  int ph[PL], pk[PL], vk[VL], vd[VL];  // a load's head and key (p's), key and d (the values')
+  for (int j = 0; j < PL; j++) {
+    const int i = threadIdx.x + j * kVthreads;
+    ph[j] = i / (kStep / 4), pk[j] = i % (kStep / 4) * 4;
   }
-  for (int i = 0; i < kPer; i++) {
-    const uint32_t h = h0 + ty * kPer + i;
-    *(f4*) (o + ((uint64_t) t * heads + h) * hd + d0 + tx * kPer) = acc[i] / den[(uint64_t) t * heads + h];
+  for (int j = 0; j < VL; j++) {
+    const int i = threadIdx.x + j * kVthreads;
+    vk[j] = i / (kVdims / 4), vd[j] = i % (kVdims / 4) * 4;
+  }
+  const float* pr = p + ((uint64_t) t * heads + h0) * K.stride;
+  f4 pn[PL], vn[VL];
+  const auto load = [&](uint32_t k0) {
+    for (int j = 0; j < PL; j++) {
+      f4 x = {};
+      for (int e = 0; e < 4; e++)
+        if (k0 + pk[j] + e < n) x[e] = pr[(uint64_t) ph[j] * K.stride + k0 + pk[j] + e];
+      pn[j] = x;
+    }
+    for (int j = 0; j < VL; j++)
+      vn[j] = k0 + vk[j] < n ? *(const f4*) (K.row(t, k0 + vk[j], nw) + d0 + vd[j]) : f4{};
+  };
+  load(0);
+  f4 acc[kVr][G] = {};
+  for (uint32_t k0 = 0; k0 < n; k0 += kStep) {
+    __syncthreads();
+    for (int j = 0; j < PL; j++)
+      for (int e = 0; e < 4; e++) ps[pk[j] + e][ph[j]] = pn[j][e];
+    for (int j = 0; j < VL; j++) *(f4*) &vs[vk[j]][vd[j]] = vn[j];
+    __syncthreads();
+    if (k0 + kStep < n) load(k0 + kStep);
+    tile_sums<kVr, kVc, kVdims>(ps, vs, ty, tx, acc);
+  }
+  for (int i = 0; i < kVr; i++) {
+    const uint32_t h = h0 + tile_head(kVr, ty, i);
+    const float dn = den[(uint64_t) t * heads + h];
+    float* orow = o + ((uint64_t) t * heads + h) * hd + d0 + tx * 4;
+    for (int g = 0; g < G; g++) *(f4*) (orow + g * (kVdims / G)) = acc[i][g] / dn;
   }
 }
 
@@ -146,16 +209,17 @@ extern "C" bool ops_sparse_attn(const float* q, const float* ring, uint32_t slot
                                 float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float* scores, float* o,
                                 void* stream) {
   if (!window || window > OPS_MAX_WINDOW || slots < window || sel_cap > OPS_MAX_SELECT || max_sel > sel_cap ||
-      !heads || heads % kTile || !head_dim || head_dim % kTile || !n_tok || !scores || (ckv && (!sel || !n_sel)) ||
-      floor < 0)
+      !heads || heads % kHeads || !head_dim || head_dim % kVdims || head_dim % kStep || !n_tok || !scores ||
+      (ckv && (!sel || !n_sel)) || floor < 0)
     return false;
   const uint32_t keys = window + (ckv ? max_sel : 0);
   const Keys K{ring, slots, pos, window, floor, ckv, sel, n_sel, sel_cap, head_dim, OPS_ATTN_ROW(keys)};
   float* den = scores + (uint64_t) n_tok * heads * K.stride;
-  const uint32_t ht = heads / kTile;
-  scores_kernel<<<dim3((keys + kTile - 1) / kTile, ht, n_tok), kThreads, 0, st(stream)>>>(K, q, scale, heads, scores);
-  softmax_kernel<<<dim3((heads + kThreads / kWave - 1) / (kThreads / kWave), n_tok), kThreads, 0, st(stream)>>>(
+  const uint32_t ht = heads / kHeads;
+  scores_kernel<<<dim3((keys + kSkeys - 1) / kSkeys, ht, n_tok), kSthreads, 0, st(stream)>>>(K, q, scale, heads,
+                                                                                               scores);
+  softmax_kernel<<<dim3((heads + kSmThreads / kWave - 1) / (kSmThreads / kWave), n_tok), kSmThreads, 0, st(stream)>>>(
       K, sink, heads, scores, den);
-  values_kernel<<<dim3(head_dim / kTile, ht, n_tok), kThreads, 0, st(stream)>>>(K, scores, den, heads, o);
+  values_kernel<<<dim3(head_dim / kVdims, ht, n_tok), kVthreads, 0, st(stream)>>>(K, scores, den, heads, o);
   return ok();
 }

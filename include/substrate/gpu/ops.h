@@ -120,8 +120,8 @@ ops_sparse_attn
   and the value; scaled, softmax with the head's sink, the values summed in that order. slots
   at least window + the step's tokens - 1, so no position a token reads is overwritten by the step. max_sel bounds
   n_sel (the model's top k); scores the device's OPS_ATTN_SCRATCH(n_tok, heads, window + max_sel) floats (window
-  alone with no ckv); heads and head_dim multiples of 64. a score a sum over d ascending, an output over the keys in
-  their order: a token's bits do not depend on the other tokens, the heads' tiling, or the batch.
+  alone with no ckv); heads a multiple of 64, head_dim of 256. a score a sum over d ascending, an output over the
+  keys in their order: a token's bits do not depend on the other tokens, the heads' tiling, or the batch.
 
 ops_compress
   for each token t whose position completes a compressed row ((pos[t] + 1) a multiple of ratio): the row from the

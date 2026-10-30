@@ -326,6 +326,15 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   37 tokens x 32,768; a flipped rotation fails it). hc_post a thread a (token, d), the hc streams read once for
   its 4 outputs, each sum in its order. 8,192 tokens: rope 0.82 -> 0.42 s (q's, kv's, the indexer's left),
   fp8 + x16 1.04 -> 0.31 + 0.39 (the fused), hc_post 0.97 -> 0.56; the GPU busy 24.9 -> 23.2 s, ~318 -> ~330 tok/s.
+- sparse attention's two products (scratch `sab.hip` / `sav.hip`, 2,048 tokens x 640 keys): the 4 x 4 a thread
+  read 2 B of LDS a fma, the bound of LDS's bandwidth, though every fma was already dual-issued; q's traffic was
+  not it (every block on one token's q: 10.85 -> 10.57 ms). larger register tiles, each thread's row pointers once
+  (the selection's index was read again every stage) and the next stage's loads issued before this one's sums:
+  scores 16 heads x 8 keys a thread, 64 x 128 a block, 13.0 -> 8.9 ms; values 8 x 16 of 64 x 256, 13.9 -> 9.8
+  (the keys still 16 a stage: the padding past n where it was). the same bits (the scratch benches against the old
+  kernels; test_attn_gpu, new: 640 keys against a double attention, each token alone and among 24, and a tile's
+  stores skipped fails it). 8,192 tokens: scores 1.96 -> 1.24 s, values 2.00 -> 1.44; ~310 -> ~352 tok/s (3 rounds
+  alternating; the box ran this session's earlier commit at ~310, not the ~330 measured before it).
 
 ## Engram's reads (measured, 2026-10-29)
 
