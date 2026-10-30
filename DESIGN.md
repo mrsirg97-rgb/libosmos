@@ -441,6 +441,11 @@ expert's gate and up 62 -> 60. the IQ experts 172 -> 182, 168 -> 192, 166 -> 179
 LDS layout coalesces their loads); Q6_K 167 -> 172, Q8_0 63 -> 65 / 62 by permlanex16 (the same). so Q5_K's one
 tile alone (kRegA). decode on held-out text p50 83.9 / 86.9 -> 79.0 / 81.2 ms, its fastest step 73.2 -> 69.8; the
 model test's p50 71.3 -> 67.5.
+the IQ experts at one token (the same scratch, the library's layout with parts left out, without its chunks in flight:
+362 us all of it): no WMMA 327 / 317 us (IQ1_M / IQ2_XXS), no decode 70 / 67 - the decode is the cost, the WMMAs ~10%,
+not the floor (as was said here first). the library's 8 chunks in flight bring the whole to ~170 us (90-110 GB/s), the
+matvec's own IQ decode ~111: one token's experts are as fast as their decode. their grids are __constant__, read a lane
+its own index (a vector load through the cache, a dependent one a chunk); in LDS untried.
 
 ## Engram's reads (measured, 2026-10-29)
 
