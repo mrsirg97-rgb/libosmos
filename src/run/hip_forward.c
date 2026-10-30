@@ -408,6 +408,8 @@ void forward_destroy(Forward *f)
   hipHostFree(f->r_up);
   free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0);
   free(f->picks), free(f->seen), free(f->heat), free(f->heat_at), free(f->units);
+  hipHostFree(f->lane_up);
+  hipFree(f->lane_dev);
   hipFree(f->taps);
   if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
   {

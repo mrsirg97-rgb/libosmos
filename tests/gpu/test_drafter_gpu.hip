@@ -72,52 +72,61 @@ int main() {
     CHECK(forward_batch(f, ss.data(), ids.data(), kPrompt, ferr));
     return argmax_row(f, kPrompt - 1);
   };
-  Seq* s = seq_create(f, ferr);
-  int y = prompt(s);
-  std::vector<int> plain;
-  for (int i = 0; i < kTokens; i++) {
-    plain.push_back(y);
-    CHECK(forward_step(f, s, y, ferr));
-    y = argmax_row(f, 0);
-  }
-  seq_destroy(s);
-
-  s = seq_create(f, ferr);
-  int32_t dr[DRAFTER_BLOCK];
-  float cf[DRAFTER_BLOCK];
-  y = prompt(s);
-  CHECK(drafter_draft(d, s, y, kConfMin, kCumMin, dr, cf, ferr) < 0);  // not seeded: refused
-  CHECK(!drafter_seed(d, s, kPrompt, kPrompt + 1, ferr));               // a position the last step did not tap
-  CHECK(drafter_seed(d, s, kPrompt - 128, kPrompt, ferr));
-  std::vector<int> spec;
-  int32_t pos = kPrompt;
-  int drafted = 0, accepted = 0, rounds = 0;
-  while ((int) spec.size() < kTokens) {
-    const int k = drafter_draft(d, s, y, kConfMin, kCumMin, dr, cf, ferr);
-    CHECK(k >= 0 && k <= DRAFTER_BLOCK);
-    std::vector<int32_t> toks{y};
-    toks.insert(toks.end(), dr, dr + k);
-    std::vector<Seq*> ss(toks.size(), s);
-    CHECK(forward_batch(f, ss.data(), toks.data(), (uint32_t) toks.size(), ferr));
-    int m = 0, next = -1;
-    for (;; m++) {
-      const int am = argmax_row(f, m);
-      if (m == k || am != dr[m]) {
-        next = am;
-        break;
-      }
+  // drafted and verified against stepping one at a time: once in the default mode, once in the lane's (its small
+  // steps' experts in the matvec's order: the plain steps and the verifies alike, so still the same tokens)
+  const auto both = [&](const char* mode, bool first) {
+    Seq* s = seq_create(f, ferr);
+    int y = prompt(s);
+    std::vector<int> plain;
+    for (int i = 0; i < kTokens; i++) {
+      plain.push_back(y);
+      CHECK(forward_step(f, s, y, ferr));
+      y = argmax_row(f, 0);
     }
-    CHECK(seq_rollback(s, (uint32_t) (k - m)) && drafter_seed(d, s, pos, pos + m + 1, ferr));
-    spec.push_back(y);
-    spec.insert(spec.end(), dr, dr + m);
-    y = next, pos += m + 1, drafted += k, accepted += m, rounds++;
-  }
-  spec.resize(kTokens);
-  CHECK(spec == plain);
-  CHECK(drafted > 0 && accepted >= kAcceptFloor * drafted);
-  std::printf("  %d tokens drafted and verified in %d rounds: the tokens of stepping one at a time; drafts %d, "
-              "accepted %d (%.0f%%)\n", kTokens, rounds, drafted, accepted, 100.0 * accepted / drafted);
-  seq_destroy(s);
+    seq_destroy(s);
+
+    s = seq_create(f, ferr);
+    int32_t dr[DRAFTER_BLOCK];
+    float cf[DRAFTER_BLOCK];
+    y = prompt(s);
+    if (first) {
+      CHECK(drafter_draft(d, s, y, kConfMin, kCumMin, dr, cf, ferr) < 0);  // not seeded: refused
+      CHECK(!drafter_seed(d, s, kPrompt, kPrompt + 1, ferr));               // a position the last step did not tap
+    }
+    CHECK(drafter_seed(d, s, kPrompt - 128, kPrompt, ferr));
+    std::vector<int> spec;
+    int32_t pos = kPrompt;
+    int drafted = 0, accepted = 0, rounds = 0;
+    while ((int) spec.size() < kTokens) {
+      const int k = drafter_draft(d, s, y, kConfMin, kCumMin, dr, cf, ferr);
+      CHECK(k >= 0 && k <= DRAFTER_BLOCK);
+      std::vector<int32_t> toks{y};
+      toks.insert(toks.end(), dr, dr + k);
+      std::vector<Seq*> ss(toks.size(), s);
+      CHECK(forward_batch(f, ss.data(), toks.data(), (uint32_t) toks.size(), ferr));
+      int m = 0, next = -1;
+      for (;; m++) {
+        const int am = argmax_row(f, m);
+        if (m == k || am != dr[m]) {
+          next = am;
+          break;
+        }
+      }
+      CHECK(seq_rollback(s, (uint32_t) (k - m)) && drafter_seed(d, s, pos, pos + m + 1, ferr));
+      spec.push_back(y);
+      spec.insert(spec.end(), dr, dr + m);
+      y = next, pos += m + 1, drafted += k, accepted += m, rounds++;
+    }
+    spec.resize(kTokens);
+    CHECK(spec == plain);
+    CHECK(drafted > 0 && accepted >= kAcceptFloor * drafted);
+    std::printf("  %s: %d tokens drafted and verified in %d rounds: the tokens of stepping one at a time; drafts %d, "
+                "accepted %d (%.0f%%)\n", mode, kTokens, rounds, drafted, accepted, 100.0 * accepted / drafted);
+    seq_destroy(s);
+  };
+  both("default", true);
+  CHECK(forward_lane(f, 0, ferr));
+  both("the lane", false);
   drafter_destroy(d);
   forward_destroy(f);
   weights_destroy(w);

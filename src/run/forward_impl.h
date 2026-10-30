@@ -147,6 +147,12 @@ struct Forward
   uint64_t g_need, g_hit; /* a decode's streamed picks, and of them the ones guessed a layer ahead */
   uint8_t *r_up;
   uint32_t *m_by, *m_row, *m_base, *m_slot0;
+  /* forward_lane's: on, its CPU threads (0: every expert on the GPU, in the order the CPU would sum it), and a small
+     step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in ascending expert id */
+  bool lane;
+  int lane_threads;
+  uint8_t *lane_up;
+  void *lane_dev;
   uint8_t *stage; /* pinned: the Engram rows, [sub-batch][Engram layer][token]: a sub-batch's copy may still be
                      queued when the next one's rows are read (a layer's sub-batches run to its experts unwaited) */
   int n_eg;       /* the Engram layers (stage's) */
@@ -232,6 +238,8 @@ bool fwd_guess_queue(Forward *f, int l);
 void fwd_guess_want(Forward *f, int l);
 void fwd_guess_score(Forward *f, int l, const int32_t *ids, uint32_t picks);
 bool fwd_swap_layer(Forward *f, int l, char *err); /* a layer's experts queued: its streamed ones' swaps in */
+/* hip_lane.c: a small step's routed experts in the matvec's order (forward_lane), into b->moe (the shared one added) */
+bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, char *err);
 void fwd_heat(Forward *f);                          /* a step's end: its picks into the heat */
 
 #endif

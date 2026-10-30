@@ -37,7 +37,11 @@ extern "C" {
     }                                                                            \
   } while (0)
 
-constexpr uint64_t kBudget = 72ull << 30;  // the layers' ~6.5 GB and a cache of experts, of this box's 125 GB
+constexpr uint64_t kBudget = 72ull << 30;
+// the lane's F32 experts against maya's (its decode's experts F32 too: KL 1.22e-2 here): one token's route at layer 18
+// is a near-tie the two orders tip apart (its stream's drift there 1.0, every other position's the default's), so
+// the lane's KL ~1.27e-2 - within this of maya's, its argmax the oracle's or a tie
+constexpr double kLaneKlSlack = 1.5;  // the layers' ~6.5 GB and a cache of experts, of this box's 125 GB
 
 struct Arr {
   std::vector<uint64_t> dims;
@@ -232,6 +236,31 @@ int main() {
   seq_destroy(rs);
   CHECK(ranked == got[1]);
   CHECK(forward_swaps(f) > 0);
+  // forward_lane (0 CPU threads: its experts all on the GPU, in the matvec's order): two runs the same bits, its
+  // logits within the oracle's reach (KL within kLaneKlSlack of maya's, argmax the oracle's or a tie)
+  CHECK(forward_lane(f, 0, ferr));
+  std::vector<std::vector<float>> lane(2, std::vector<float>((size_t) T * V));
+  for (int run = 0; run < 2; run++) {
+    Seq* ls = seq_create(f, ferr);
+    CHECK(ls);
+    for (int p = 0; p < T; p++) {
+      CHECK(forward_step(f, ls, (int32_t) ids.v[p], ferr));
+      CHECK(hipMemcpy(&lane[run][(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    }
+    seq_destroy(ls);
+  }
+  CHECK(lane[0] == lane[1]);
+  double lane_kl = 0;
+  int lane_top = 0, lane_ok = 1;
+  for (int p = 0; p < T; p++) {
+    const float* o = &logits.v[(size_t) p * V];
+    const size_t ao = argmax(o, V), al = argmax(&lane[0][(size_t) p * V], V), am = argmax(&maya.v[(size_t) p * V], V);
+    lane_kl += kl(o, &lane[0][(size_t) p * V], V), lane_top += al == ao;
+    lane_ok &= al == ao || am != ao || (double) o[ao] - o[al] <= tie;
+  }
+  CHECK(lane_ok && lane_kl <= kLaneKlSlack * maya_kl);
+  std::printf("  the lane (experts in the matvec's order): two runs bit for bit; mean KL %.2e (maya %.2e), argmax the "
+              "oracle's %d of %d\n", lane_kl / T, maya_kl / T, lane_top, T);
   std::printf("  picks counted: %llu (3 runs x %d positions x %d layers x %d); the least-picked resident first, %llu "
               "experts swapped in as it went: logits bit for bit\n", (unsigned long long) picks, T, L, w->geo.n_used,
               (unsigned long long) forward_swaps(f));

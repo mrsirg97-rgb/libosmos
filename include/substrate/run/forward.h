@@ -30,6 +30,7 @@ Seq *seq_create(Forward *f, char err[FORWARD_ERR]);
 void seq_destroy(Seq *s);
 bool seq_prompt(Seq *s, uint32_t end);
 bool seq_rollback(Seq *s, uint32_t n);
+bool forward_lane(Forward *f, int cpu_threads, char err[FORWARD_ERR]);
 
 bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
@@ -97,6 +98,14 @@ seq_rollback
   compressed row it completed) is rewritten when the positions are stepped again, before anything reads it, so the
   rows after are the bits of a run that never stepped them (a verify's rejected drafts). false, nothing changed, for
   n past SEQ_MAX_BACK or the tokens it holds, or a position before the prompt's end (seq_prompt).
+
+forward_lane
+  a decode's mode: a step that picks fewer experts than a layer has (a decode's, a verify's) takes its routed experts
+  in the matvec's order (F32 sums, an expert's rows each lane's chunks in turn, then a fixed tree; kernels/lane.h's
+  activation) - the order the CPU repeats, so an expert gives the same bits on either, and which one runs it, or
+  whether it is resident, changes none. a prompt's steps keep the matmul's (WMMA): in this mode a token's bits
+  depend on whether its step was small (determinism's rule 2 relaxed there; rule 1 kept). cpu_threads 0: every
+  expert on the GPU. false with why for a count it does not take.
 
 forward_step
   forward_batch of one: the token at the sequence's next position through the layers; the stream out in

@@ -512,6 +512,25 @@ still in the window).
     part. maya holds ~104 GB of experts in GPU memory and computes a few percent on the CPU from the page cache (no
     copy of them twice); substrate has no CPU lane (determinism's rule 1).
 
+## the lane: a decode's experts in the matvec's order (operator, 2026-10-30)
+
+the operator's call: a CPU lane as maya has, at the cost of rule 2 at one boundary. forward_lane: in a step that picks
+fewer experts than a layer has (a decode's, a verify's) the routed experts go in the matvec's order - F32 sums, each
+lane's chunks in turn, a fixed tree; kernels/lane.h's activation (its own exp, IEEE operations only) - the order the
+CPU can repeat bit for bit, so an expert gives the same bits on either and which runs it (or whether it is resident)
+changes none: residency's history, the drafts, the lane's split - none tips a token. a prompt's steps keep WMMA; a
+token's bits then depend on whether its step was small (rule 2 relaxed there, rule 1 kept: test_model_gpu, two runs
+of the lane bit for bit).
+
+- step 1, the GPU's half (every expert on the GPU, hip_lane.c): the matvec beats the WMMA tile at one token - 20
+  resident layers' token 32.6 -> 29.2 ms; maya's first question, the whole model, p50 86.8-92.7 -> 73.0-79.0 ms, mean
+  89-102 -> 73-80 (the KFD's evictions 368-1,304 -> 0-12 ms in those 128 steps: not understood). the drafted tokens
+  the plain ones (test_drafter_gpu, the lane's pass: 85% accepted). against the oracle the lane's KL is 1.27e-2 (the
+  default's 2.47e-3, maya's - F32 experts too - 1.22e-2): its streams nearer the oracle's at layers 3 and 6 (6.2e-2 /
+  1.7e-1 against 9.9e-2 / 2.6e-1), then one token's route at layer 18 tips (position 6's drift 1.0, the others the
+  default's) - a near-tie two orders round apart, not a fault (scratch lanecmp.hip: layer 0's input and weights the
+  same bits, its MoE out 3e-4 apart - f16's rounding of the activations, which the matvec does not do).
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token

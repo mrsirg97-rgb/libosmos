@@ -3,6 +3,7 @@
 
 #include "quant.h"
 #include "round.h"
+#include "lane.h"
 
 extern "C" {
 #include "substrate/gpu/ops.h"
@@ -317,6 +318,14 @@ __global__ void swiglu_kernel(const float* g, const float* u, uint32_t n, float 
   h[i] = scale ? v * scale[i / n] : v;
 }
 
+// the lane's (lane.h): the same activation in operations the CPU repeats bit for bit
+__global__ void swiglu_lane_kernel(const float* g, const float* u, uint32_t n, float lim, const float* scale,
+                                   uint32_t n_tok, float* h) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n * n_tok) return;
+  h[i] = lane_swiglu(g[i], u[i], lim, scale[i / n]);
+}
+
 // dst[i][:] = src[idx[i]][:], rows of len
 __global__ void gather_rows_kernel(float* dst, const float* src, const int32_t* idx, uint32_t n, uint32_t len) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
@@ -469,6 +478,13 @@ extern "C" bool ops_router(const float* logits, const float* bias, uint32_t n_ex
                            uint32_t n_tok, int32_t* idx, float* w, void* stream) {
   if (!n_exp || n_exp > OPS_MAX_EXPERTS || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok) return false;
   router_kernel<<<n_tok, kThreads, 0, st(stream)>>>(logits, bias, n_exp, k, scale, idx, w);
+  return ok();
+}
+
+extern "C" bool ops_swiglu_lane(const float* g, const float* u, uint32_t n, float lim, const float* scale,
+                                uint32_t n_tok, float* h, void* stream) {
+  if (!n || !n_tok || !scale) return false;
+  swiglu_lane_kernel<<<grid((uint64_t) n * n_tok), kThreads, 0, st(stream)>>>(g, u, n, lim, scale, n_tok, h);
   return ok();
 }
 

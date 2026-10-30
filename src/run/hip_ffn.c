@@ -217,6 +217,15 @@ bool fwd_moe(Forward *f, int l, char *err)
     pidx[r] = (int32_t)m, row_of[m] = r;
   }
   prefetch(f, l, ids, P);
+  if (f->lane && P < E) /* the lane's small step: every expert in the matvec's order (hip_lane.c) */
+  {
+    if (!fwd_lane_experts(f, l, ids, P, err))
+      return false;
+    if (!fwd_swap_layer(f, l, err))
+      return false;
+    fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
+    return true;
+  }
   /* the entries (an expert's parts of MM_MAX_TOKENS: its slots and rows from part q's first) in ascending count,
      then expert, then part: group()'s runs of the same column tiles contiguous */
   int32_t cnt_j[OPS_MAX_EXPERTS];
