@@ -30,6 +30,7 @@
 /* the resident set's following of the text (hip_adapt.c): an expert's heat halved every this many steps; a streamed
    one takes a resident one's place when this much hotter; at most this many a layer a step (each a copy in GPU
    memory) */
+#define FWD_GUESS_K 6 /* a token's next-layer experts guessed (hip_guess.c): the router's top this many */
 #define FWD_HEAT_HALF_LIFE 128.0 /* measured: 8 - 128 within ~2 ms of one another (DESIGN.md) */
 #define FWD_SWAP_MARGIN 2.0      /* and 1.25 the same */
 #define FWD_SWAPS_A_LAYER 2      /* 6 the same: a step's new picks are a few a layer */
@@ -92,6 +93,8 @@ typedef struct Scratch
   uint8_t *erow;
   int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;
   int32_t *keep, *back; /* the decoder's tokens (hip_skip.c): kept, compacted; then each back at its row */
+  int32_t *gidx;        /* the next layer's experts guessed (hip_guess.c), [FWD_MAX_BATCH][FWD_GUESS_K] */
+  float *gw;            /* (their weights: the router's, unread) */
 } Scratch;
 
 /* host memory the GPU copies to and from on the stream (pinned: the copies are asynchronous). each is written only
@@ -139,6 +142,9 @@ struct Forward
   /* the experts' routing, a layer's every sub-batch at once: pinned, the picks [token][slot] and the tables
      (hip_ffn.c's carve, one copy to Scratch's up); on the host, the pairs' by-expert order and places */
   int32_t *r_ids;
+  int32_t *r_guess;       /* pinned: the next layer's guessed experts, [token][FWD_GUESS_K] */
+  uint64_t *guessed;      /* a unit's guess: the visit it was guessed for (hip_guess.c) */
+  uint64_t g_need, g_hit; /* a decode's streamed picks, and of them the ones guessed a layer ahead */
   uint8_t *r_up;
   uint32_t *m_by, *m_row, *m_base, *m_slot0;
   uint8_t *stage; /* pinned: the Engram rows, [sub-batch][Engram layer][token]: a sub-batch's copy may still be
@@ -220,6 +226,11 @@ void fwd_plan(Forward *f);
 bool fwd_compact(Forward *f, char *err);
 bool fwd_head(Forward *f, char *err);
 bool fwd_moe(Forward *f, int l, char *err);
+/* hip_guess.c: a small step's next-layer experts guessed from this layer's FFN input - the guess queued before the
+   routing event (its copy beside the picks'), its streamed experts wanted after it, the picks scored against it */
+bool fwd_guess_queue(Forward *f, int l);
+void fwd_guess_want(Forward *f, int l);
+void fwd_guess_score(Forward *f, int l, const int32_t *ids, uint32_t picks);
 bool fwd_swap_layer(Forward *f, int l, char *err); /* a layer's experts queued: its streamed ones' swaps in */
 void fwd_heat(Forward *f);                          /* a step's end: its picks into the heat */
 

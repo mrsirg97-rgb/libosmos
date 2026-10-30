@@ -489,6 +489,24 @@ still in the window).
   the files (maya holds ~104 GB of experts in GPU memory and computes the rest on the CPU from RAM; substrate's GPU
   memory is at the ~107 GB cap: the trunk's 80-88, the drafter's 8, the scratch's ~9), not the kernels or the drafter.
   a round's time is the verify's (the trunk's batch of 3-6 rows: more distinct experts a step, so more misses).
+- what the misses are, on maya's prompts (code, prose, HTML; fresh processes, DSpark, budget 80 GiB):
+  - **the profile is not it**: calibrated on 15,360 tokens of code, markup and JSON from this box's files and the
+    corpus' prose (scratch `mix.txt`; its top 69% a layer 88% the corpus profile's), or both summed: plain 9.8 / 9.9 /
+    10.1, drafted 16.6 / 16.6 / 16.8 tok/s - the same. what streams is each answer's own first picks.
+  - **a layer's next experts guessed and read ahead** (hip_guess.c: the next layer's router on this layer's FFN
+    input, its top 6 a token, queued beside the routing's copy - no wait of its own): 59-64% of the streamed picks
+    guessed a layer ahead, but plain 10.1 -> 10.4, drafted 16.8 -> 16.9. these answers stream ~15 experts a token
+    (~135 MB; the corpus' prose ~3): the SSD's bandwidth, not its latency - read earlier, the bytes are the same.
+    kept (it costs nothing and changes no bit).
+  - **more of them resident**: GPU memory and the page cache are one 125 GB of RAM (the GTT's cap 107.6 GiB). at 80
+    GiB the process peaks at 99 GiB (the drafter 7.4, the scratch ~9 - ~4 of it the experts' buffers for 8,192 tokens
+    at once); 86 fits (104) and is no faster (the page cache it takes was holding experts too); 90 is refused. steps
+    of 2,048 tokens (FORWARD_SUBS 1: that scratch gone) fit 92 GiB (106 peak): drafted 18.6 / 16.5 / 21.7 tok/s
+    (18.9; 84 GiB 17.8, 88 18.1), streamed picks 16,938 -> 10,122 - +12%, at the 8K prompt's merged experts' cost.
+  - **and the floor**: 40 layers all resident would decode at ~68 ms a token, slower than maya's whole plain decode
+    (~60 ms, its misses in): the matmuls at one token (~120 GB/s of ~200) and the small kernels between are the other
+    part. maya holds ~104 GB of experts in GPU memory and computes a few percent on the CPU from the page cache (no
+    copy of them twice); substrate has no CPU lane (determinism's rule 1).
 
 ## Engram's reads (measured, 2026-10-29)
 

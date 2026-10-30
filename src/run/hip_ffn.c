@@ -136,7 +136,8 @@ bool fwd_moe(Forward *f, int l, char *err)
   ok = ok && ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, n, b->ridx, b->rw,
                         NULL) &&
        hipMemcpyAsync(f->r_ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess &&
-       hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) && hipEventSynchronize(f->routed) == hipSuccess;
+       fwd_guess_queue(f, l) && hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) &&
+       hipEventSynchronize(f->routed) == hipSuccess;
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
   if (!fwd_drain(f, err))
@@ -147,6 +148,8 @@ bool fwd_moe(Forward *f, int l, char *err)
     f->visits++, f->held_layer = l;
   }
   const int32_t *ids = f->r_ids;
+  fwd_guess_score(f, l, ids, P);
+  fwd_guess_want(f, l);
   fwd_probe(f, "route_idx", l, f->at, b->ridx, P, true);
   fwd_probe(f, "route_w", l, f->at, b->rw, P, false);
   /* the distinct experts in ascending id, each with its pairs (in token order: at most one a token): an expert's

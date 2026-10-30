@@ -37,6 +37,7 @@ const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
 const uint64_t *forward_picks(const Forward *f);
 uint64_t forward_swaps(const Forward *f);
+void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed);
 
 #endif
 
@@ -123,6 +124,11 @@ forward_swaps
   take the places of its coldest resident ones not picked in the step, when much hotter (their picks, halved over
   the steps) - a copy in GPU memory each, the set following the text from where forward_create_ranked started it.
   it changes no bit.
+
+forward_guesses
+  in steps that pick fewer experts than a layer has (a decode's, a verify's): the picks of experts not resident so
+  far, and of them those guessed a layer ahead - each layer's next experts guessed by the next layer's router on its
+  own FFN input and their reads begun then, under the layer's experts and the next one's attention.
 
 forward_stream
   the device buffer of the last step's stream out ([n][hc][n_embd] F32) - the last sub-batch's rows, for a batch
