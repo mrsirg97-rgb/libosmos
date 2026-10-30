@@ -28,11 +28,18 @@ constexpr Tune tune(quant::Type t, int nt) {
   }
 }
 
+// the wide tile: R rows a wave, NW tokens a block - the best of R 1-8, NW 4-32 on ds1017's router (BF16 5120 x 384,
+// 8,192 tokens: 15.2 ms in chunks of 8, 5.5 here; R 3 NW 12 5.1, 6 or 8 rows 6.6-7.1, 16+ tokens 6.3-16)
+struct Wide {
+  int r, nw;
+};
+constexpr Wide kWide = {4, 8};
+
 template <quant::Type T, int NT>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
-            hipStream_t s, uint32_t chunks = 1) {
+            hipStream_t s) {
   constexpr Tune k = tune(T, NT);
-  return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, xs, y, ys, s, chunks);
+  return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, xs, y, ys, s);
 }
 
 template <quant::Type T>
@@ -40,12 +47,8 @@ bool by_tokens(const void* w, uint32_t rows, uint32_t cols, const float* x, uint
                uint32_t ys, hipStream_t s) {
   if (cols % quant::Block<T>::values || cols % quant::kChunk) return false;
   if ((n_tok > 1 && (xs < cols || ys < rows)) || xs % quant::kChunk) return false;  // tokens apart; x's float4s whole
-  if (n_tok > MV_MAX_TOKENS) {  // whole chunks of MV_MAX_TOKENS in one launch, then the rest: each chunk's own sums
-    const uint32_t whole = n_tok / MV_MAX_TOKENS, done = whole * MV_MAX_TOKENS;
-    return launch<T, MV_MAX_TOKENS>(w, rows, cols, x, xs, y, ys, s, whole) &&
-           (done == n_tok || by_tokens<T>(w, rows, cols, x + (uint64_t) done * xs, xs, n_tok - done,
-                                          y + (uint64_t) done * ys, ys, s));
-  }
+  if (n_tok > MV_MAX_TOKENS)  // a prompt's: mv.h's wide tiles, each token's sums its own alone
+    return mv::wide_launch<T, kWide.r, kWide.nw>(w, rows, cols, x, xs, n_tok, y, ys, s);
   switch (n_tok) {
     case 1: return launch<T, 1>(w, rows, cols, x, xs, y, ys, s);
     case 2: return launch<T, 2>(w, rows, cols, x, xs, y, ys, s);

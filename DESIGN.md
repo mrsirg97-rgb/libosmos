@@ -306,6 +306,19 @@ the reads fall from ~5-8 GB/s (the SSD's ceiling, the bound) to ~2 GB/s: the GPU
 growing with the context (a 2,048-token step's ~6 s at the prompt's start, ~8-10 s at 8K). runs of one binary vary by
 up to ~40% from process to process (one 8,192 run gave 219, the next 313): only interleaved runs are compared.
 
+## the GPU's time at 8,192 tokens, and the BF16 matrices (measured, 2026-10-30)
+
+- a pass's kernels (`rocprofv3 --kernel-trace`, `promptl 8192 8192 2`, the second pass): the GPU busy 24.9 s of ~26,
+  so the step is the kernels'. maya 1.1.41's `DS4_PROF` on the same prompt: 16.6 s. by stage, ours / maya's: routed
+  experts 7.7 / ~5.0 s (its 6.75 less 1.7 of SSD waits); elementwise (hyper-connections, rope, x16, fp8) 4.5 / ~1.3;
+  q, shared expert, router 4.7 / 2.5; sparse attention 4.6 / 2.7; indexer 1.6 / 0.8; output projections 1.8 / 2.7.
+- the BF16 matrices (router, indexer, compressors) had no mm and went through mv in chunks of 8 tokens: every 8
+  tokens read W again, every row x again - the router alone 15.2 ms a call at 8,192 tokens. mv_strided past
+  MV_MAX_TOKENS now runs tiles of 4 rows a wave and 8 tokens a block, x shared through LDS: each lane's chunks in the
+  same order, the same tree, so every token's bits are those it takes alone (test_mv_gpu: 77 tokens at once against
+  each alone, every shape; reversing the tree fails it). the router 15.2 -> 5.5 ms (R 1-8, NW 4-32 tried: R 3 NW 12
+  5.1, 16+ tokens 6.3-16); 8,192 tokens ~310 -> ~318 tok/s (3 rounds alternating, the first's cold pass left out).
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token

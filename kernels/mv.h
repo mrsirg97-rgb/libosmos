@@ -66,14 +66,74 @@ __device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uin
     }
 }
 
-// blockIdx.y a chunk of NT tokens: chunk j's x at x + j NT xs, its y at y + j NT ys - each chunk the sums it takes
-// alone
 template <quant::Type T, int NT, int R, int U>
 __global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* __restrict__ w, uint32_t rows,
                                                                  uint32_t cols, const float* __restrict__ x,
                                                                  uint32_t xs, float* __restrict__ y, uint32_t ys) {
-  const uint64_t j = blockIdx.y * (uint64_t) NT;
-  rows_of<T, NT, R, U>(w, rows, cols, x + j * xs, xs, y + j * ys, ys);
+  rows_of<T, NT, R, U>(w, rows, cols, x, xs, y, ys);
+}
+
+// many tokens at once (a prompt's): a wave R rows of NW tokens, the block's 8 waves 8 R rows of the same NW tokens,
+// their x shared through LDS a step of 32 chunks at a time. lane l still sums its chunks l, l + 32, ... of each row in
+// order, 8 fmaf a chunk, then the tree - rows_of's sums, so a token's bits are its own alone. blockIdx.y a tile of NW
+// tokens; a tile past n_tok computes its last token again in the spare places and stores none of them
+template <quant::Type T, int R, int NW>
+__global__ __launch_bounds__(kWave* kWavesPerBlock) void wide_kernel(const uint8_t* __restrict__ w, uint32_t rows,
+                                                                      uint32_t cols, const float* __restrict__ x,
+                                                                      uint32_t xs, uint32_t n_tok,
+                                                                      float* __restrict__ y, uint32_t ys) {
+  using B = quant::Block<T>;
+  constexpr int per = B::values / quant::kChunk, threads = kWave * kWavesPerBlock;
+  __shared__ float4 xl[NW][2][kWave];  // [token][half of a chunk][chunk of the step]: a lane's float4s side by side
+  const uint32_t t0 = blockIdx.y * NW, row0 = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * R;
+  const int lane = threadIdx.x % kWave;
+  const uint64_t row_bytes = (uint64_t) (cols / B::values) * B::bytes;
+  const uint8_t* base[R];  // a row past the end reads row 0 and stores nothing (the wave still joins the barriers)
+  for (int q = 0; q < R; q++) base[q] = w + (row0 + q < rows ? row0 + q : 0) * row_bytes;
+  const uint32_t chunks = cols / quant::kChunk;
+  float acc[R][NW];
+  for (int q = 0; q < R; q++)
+    for (int t = 0; t < NW; t++) acc[q][t] = 0.0f;
+  for (uint32_t s = 0; s < chunks; s += kWave) {
+    for (int i = threadIdx.x; i < NW * 2 * kWave; i += threads) {
+      const int t = i / (2 * kWave), c = (i / 2) % kWave, h = i % 2;
+      const uint32_t tok = t0 + t < n_tok ? t0 + t : n_tok - 1;
+      const float* xp = x + (uint64_t) tok * xs + (uint64_t) (s + c) * quant::kChunk;
+      xl[t][h][c] = s + c < chunks ? ((const float4*) xp)[h] : float4{0, 0, 0, 0};
+    }
+    __syncthreads();
+    const uint32_t c = s + lane;
+    if (c < chunks) {
+      float v[R][quant::kChunk];
+      for (int q = 0; q < R; q++) quant::decode<T>(base[q] + (c / per) * B::bytes, (int) (c % per), v[q]);
+      for (int t = 0; t < NW; t++) {
+        const float4 a = xl[t][0][lane], b = xl[t][1][lane];
+        for (int q = 0; q < R; q++) {
+          const float* vv = v[q];
+          float m = acc[q][t];
+          m = fmaf(vv[0], a.x, m), m = fmaf(vv[1], a.y, m), m = fmaf(vv[2], a.z, m), m = fmaf(vv[3], a.w, m);
+          m = fmaf(vv[4], b.x, m), m = fmaf(vv[5], b.y, m), m = fmaf(vv[6], b.z, m), m = fmaf(vv[7], b.w, m);
+          acc[q][t] = m;
+        }
+      }
+    }
+    __syncthreads();
+  }
+  for (int q = 0; q < R; q++)
+    for (int t = 0; t < NW; t++) {
+      float m = acc[q][t];
+      for (int o = kWave / 2; o > 0; o >>= 1) m += __shfl_xor(m, o, kWave);
+      if (lane == 0 && row0 + q < rows && t0 + t < n_tok) y[(uint64_t) (t0 + t) * ys + row0 + q] = m;
+    }
+}
+
+template <quant::Type T, int R, int NW>
+bool wide_launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, uint32_t n_tok, float* y,
+                 uint32_t ys, hipStream_t s) {
+  const uint32_t per_block = kWavesPerBlock * R;
+  wide_kernel<T, R, NW><<<dim3((rows + per_block - 1) / per_block, (n_tok + NW - 1) / NW), kWave * kWavesPerBlock, 0,
+                          s>>>((const uint8_t*) w, rows, cols, x, xs, n_tok, y, ys);
+  return hipGetLastError() == hipSuccess;
 }
 
 // n matrices of the same shape and type at once (blockIdx.y the matrix): matrix m's w from the table, its x at
@@ -90,9 +150,9 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_kernel(const uint
 
 template <quant::Type T, int NT, int R, int U>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
-            hipStream_t s, uint32_t chunks = 1) {
+            hipStream_t s) {
   const uint32_t per_block = kWavesPerBlock * R;
-  kernel<T, NT, R, U><<<dim3((rows + per_block - 1) / per_block, chunks), kWave * kWavesPerBlock, 0, s>>>(
+  kernel<T, NT, R, U><<<(rows + per_block - 1) / per_block, kWave * kWavesPerBlock, 0, s>>>(
       (const uint8_t*) w, rows, cols, x, xs, y, ys);
   return hipGetLastError() == hipSuccess;
 }

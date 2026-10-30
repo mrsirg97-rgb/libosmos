@@ -1,8 +1,8 @@
 // the decode's matrix-vector products on ds1017's own matrices (an expert's slice as the pool cuts it): within the
 // rounding bound of its order against a double-precision sum over the exact weights (quant_dequant, bit for bit
-// gguf-py's); a token's y the same bits alone or among 8 (schedule invariance) and every run (determinism); and the
-// bandwidth, over enough copies of the matrix that the cache holds none (cycled through 512 MB). needs a gfx1151 and
-// ~/models/ds1017; skipped (77) without them.
+// gguf-py's); a token's y the same bits alone, among 8 or among 77 (schedule invariance) and every run
+// (determinism); and the bandwidth, over enough copies of the matrix that the cache holds none (cycled through
+// 512 MB). needs a gfx1151 and ~/models/ds1017; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <fcntl.h>
@@ -30,6 +30,7 @@ extern "C" {
   } while (0)
 
 constexpr int kNt = MV_MAX_TOKENS;
+constexpr int kWideNt = 77;  // a prompt's many tokens: past MV_MAX_TOKENS, its last tile part full
 constexpr uint32_t kCheckRows = 1024;
 constexpr uint64_t kCycleBytes = 512ull << 20;
 constexpr int kTimed = 50;
@@ -104,6 +105,21 @@ static void shape(const Gguf* g, const Shape& s) {
     CHECK(std::memcmp(one.data(), a.data() + (size_t) k * rows, rows * 4) == 0);
   }
 
+  // many tokens at once (mv_strided's wide tiles): each token the bits it takes alone
+  std::vector<float> xw((size_t) kWideNt * cols), yw((size_t) kWideNt * rows);
+  for (float& v : xw) v = uniform();
+  float *xd = nullptr, *yd = nullptr;
+  CHECK(hipMalloc(&xd, xw.size() * 4) == hipSuccess && hipMalloc(&yd, yw.size() * 4) == hipSuccess);
+  CHECK(hipMemcpy(xd, xw.data(), xw.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(mv_strided(t->type, w, rows, cols, xd, cols, kWideNt, yd, rows, nullptr));
+  CHECK(hipMemcpy(yw.data(), yd, yw.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  for (int k = 0; k < kWideNt; k++) {
+    run(t->type, w, rows, cols, xd + (size_t) k * cols, 1, y1);
+    CHECK(hipMemcpy(one.data(), y1, rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(std::memcmp(one.data(), yw.data() + (size_t) k * rows, rows * 4) == 0);
+  }
+  CHECK(hipFree(xd) == hipSuccess && hipFree(yd) == hipSuccess);
+
   // against a double sum over the exact weights, the first rows: |err| <= (terms a lane + tree + 1) u sum |w x|
   const uint32_t n = rows < kCheckRows ? rows : kCheckRows;
   std::vector<float> wf((size_t) n * cols);
@@ -173,6 +189,7 @@ int main() {
   CHECK(g);
   for (const Shape& s : kShapes) shape(g, s);
   gguf_destroy(g);
+  std::printf("  every shape: %d tokens at once (the wide tiles) the bits of each alone\n", kWideNt);
   std::printf("[test_mv_gpu] ok\n");
   return 0;
 }
