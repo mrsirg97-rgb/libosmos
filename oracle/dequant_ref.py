@@ -21,7 +21,9 @@ TENSORS = {  # a tensor of each type the model has, and the file it is in
     T.IQ1_M: ("blk.0.ffn_gate_exps.weight", "model"),
     T.IQ4_NL: ("blk.1.engram_embd.weight", "engram"),
     T.BF16: ("blk.0.ffn_gate_inp.weight", "model"),
+    T.MXFP4: ("mtp.0.ffn.experts.0.w1.weight", "dspark"),  # DSpark's experts: dspark.bin, as dspark.json says
 }
+DSPARK = os.path.expanduser("~/models/dspark")
 RANGE_BLOCKS = 2048
 RANDOM_BLOCKS = 8192
 SEED = 1017
@@ -29,10 +31,16 @@ SEED = 1017
 
 def readers():
     files = {"model": sorted(glob.glob(MODEL + "/*-of-*.gguf")), "engram": glob.glob(MODEL + "/*Engram*.gguf")}
-    return {k: [GGUFReader(f) for f in v] for k, v in files.items()}
+    return {**{k: [GGUFReader(f) for f in v] for k, v in files.items()}, "dspark": "dspark"}
 
 
 def raw(rs, name):
+    if rs == "dspark":  # not a GGUF: dspark.json's [name, type, offset, bytes, shape] into dspark.bin
+        import json
+        for n, dt, off, nb, _ in json.load(open(DSPARK + "/dspark.json"))["tensors"]:
+            if n == name:
+                return getattr(T, dt), np.fromfile(DSPARK + "/dspark.bin", np.uint8, nb, offset=off)
+        raise SystemExit("no tensor " + name)
     for r in rs:
         for t in r.tensors:
             if t.name == name:

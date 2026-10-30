@@ -16,6 +16,7 @@ namespace quant {
 // ggml's type ids, the GGUF's
 enum Type : uint32_t {
   kF32 = 0, kQ8_0 = 8, kQ5_K = 13, kQ6_K = 14, kIQ2_XXS = 16, kIQ2_XS = 17, kIQ4_NL = 20, kIQ1_M = 29, kBF16 = 30,
+  kMXFP4 = 39,
 };
 
 constexpr int kChunk = 8;
@@ -31,6 +32,7 @@ template <> struct Block<kIQ2_XXS> { static constexpr int values = kQK, bytes = 
 template <> struct Block<kIQ2_XS> { static constexpr int values = kQK, bytes = 74; };
 template <> struct Block<kIQ4_NL> { static constexpr int values = kQ32, bytes = 18; };
 template <> struct Block<kIQ1_M> { static constexpr int values = kQK, bytes = 56; };
+template <> struct Block<kMXFP4> { static constexpr int values = kQ32, bytes = 17; };
 template <> struct Block<kF32> { static constexpr int values = kChunk, bytes = 4 * kChunk; };  // no block: a chunk
 template <> struct Block<kBF16> { static constexpr int values = kChunk, bytes = 2 * kChunk; };  // no block: a chunk
 
@@ -113,6 +115,15 @@ template <> __device__ inline void decode<kIQ4_NL>(const uint8_t* b, int k, floa
   const float d = f16(ld16(b));
   const uint8_t* qs = b + 2 + (k % 2) * kChunk;
   for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) kIq4nlValues[(qs[j] >> (4 * (k / 2))) & 0x0F]);
+}
+
+// DSpark's experts: an E8M0 scale e (2^(e - 128), exact at every e: the low ones subnormal), then E2M1 codes as
+// IQ4_NL lays them out (value j < 16 byte j's low nibble, 16 + j its high), worth E2M1 doubled {0, 1, 2, 3, 4, 6, 8,
+// 12} and their negatives
+template <> __device__ inline void decode<kMXFP4>(const uint8_t* b, int k, float* v) {
+  const float d = ldexpf(1.0f, (int) b[0] - 128);
+  const uint8_t* qs = b + 1 + (k % 2) * kChunk;
+  for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) kMxfp4Values[(qs[j] >> (4 * (k / 2))) & 0x0F]);
 }
 
 // (d * (2s + 1)) * (grid + delta); d an f16 in the top nibbles of the four scale words, a 3-bit s each 16 values

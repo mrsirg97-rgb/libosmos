@@ -95,7 +95,7 @@ static void check(const char* name, const Ref& r) {
 
 int main() {
   std::printf("[test_quant_gpu] start\n");
-  static const char* kTypes[] = {"Q8_0", "Q5_K", "Q6_K", "IQ2_XXS", "IQ2_XS", "IQ1_M", "IQ4_NL", "BF16"};
+  static const char* kTypes[] = {"Q8_0", "Q5_K", "Q6_K", "IQ2_XXS", "IQ2_XS", "IQ1_M", "IQ4_NL", "BF16", "MXFP4"};
   const char* home = std::getenv("HOME");
   int ndev = 0;
   if (hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {

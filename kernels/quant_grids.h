@@ -729,3 +729,5 @@ static __constant__ uint8_t kKsigns[128] = {
 static __constant__ int8_t kIq4nlValues[16] = {
   -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 };
+
+static __constant__ int8_t kMxfp4Values[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
