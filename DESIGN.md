@@ -421,6 +421,18 @@ the decode's last costs, tried (128 steps on held-out text, 3 rounds alternating
   miss), each part one job otherwise: decode p50 83.9-86.5 -> 80.7-84.1 ms, means 87.7-95.3 -> 82.1-87.3, the load
   (15.4-15.9 s), the prompt and 8,192 tokens (warm 406-411 / 402-406 tok/s) unchanged.
 
+the decode's floor (20 layers all resident, 35.4 ms a token, `rocprofv3` over 32 of its steps): the GPU busy 33.8 ms
+of it, ~4.1 GB of weights read (the layers' ~130 MB and their 6 experts' ~54 MB each, the head's 455 MB) - ~120
+GB/s, where the matvec reads ~190-210 (test_mv_gpu). the matmuls are most of it: the dense mm (Q5_K 7.4 ms, Q6_K 3.3,
+Q8_0 2.4, wo_a's groups 3.6) and the experts' groups (10.4 ms), at one token: the WMMA kernel's (test_mm_gpu: an IQ
+expert's slice 62 GB/s by mm, 111 by mv; q_b 161 / 192). the decode takes mm for its one token so that a token's
+bits are the same alone or in a prompt's batch - the matvec's F32 sums are not WMMA's. could a matvec emulate WMMA's
+sums? scratch `wmma.hip`: v_wmma_f32_16x16x16_f16 on random tiles (exponents +-6, C +-10) against the exact sum of
+its 16 products and C: 37% of the outputs that sum rounded (to nearest or to zero), the rest up to ~2,000 ulps from
+it (149 distinct offsets) - not an F32 order of any kind (in sequence, a tree, exact pairs, 4s or 8s: 30-40% each):
+a narrower accumulator of its own. emulating it bit for bit is a research project; the floor's lever is mm's own
+speed at one token (the same WMMAs in each output's order: a kernel's shape, not its sums).
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
