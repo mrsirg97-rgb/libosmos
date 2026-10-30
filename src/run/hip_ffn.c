@@ -9,7 +9,7 @@
 #include "substrate/gpu/ops.h"
 #include "substrate/gpu/quant.h"
 
-/* the nth Engram layer's rows for each token, read from the Engram file, decoded (BF16, as ref.py's), projected and
+/* the nth Engram layer's rows for each token, read from the Engram file all at once (rowread.h), decoded (BF16, as ref.py's), projected and
    gated into the streams */
 bool fwd_engram(Forward *f, int l, int nth, char *err)
 {
@@ -25,18 +25,10 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
   {
     const int64_t *rows = f->rows + (uint64_t)i * WEIGHTS_MAX_LAYERS * cols + (uint64_t)nth * cols;
     for (uint32_t c = 0; c < cols; c++)
-    {
-      uint8_t *to = stage + ((uint64_t)i * cols + c) * rb;
-      uint64_t got = 0;
-      while (got < rb)
-      {
-        const ssize_t r = pread(f->eg_fd, to + got, rb - got, (off_t)(t->offset + (uint64_t)rows[c] * rb + got));
-        if (r <= 0)
-          return fwd_fail(err, "an Engram row could not be read");
-        got += (uint64_t)r;
-      }
-    }
+      f->eg_off[i * cols + c] = t->offset + (uint64_t)rows[c] * rb;
   }
+  if (!rowread(f->eg_read, f->eg_fd, f->eg_off, n * cols, (uint32_t)rb, stage))
+    return fwd_fail(err, "an Engram row could not be read");
   const uint64_t vals = (uint64_t)n * cols * hd;
   const bool ok = fwd_put_async(b->erow, stage, (uint64_t)n * cols * rb) &&
                   quant_dequant(t->type, b->erow, vals, b->erow_f, NULL) && ops_round_bf16(b->erow_f, vals, NULL) &&
@@ -106,10 +98,30 @@ static bool shared(Forward *f, int l)
          fwd_mat(f, L->sh_down, fwd_dev(f, L->sh_down), D, FF, b->shh, FF, n, b->sye, D);
 }
 
-/* the routed experts: each distinct one held in the pool (their reads at once) and read once for all the tokens routed
-   to it - gate, up, swiglu (each pair its weight, before the down projection, as ref.py) and down, a launch each
-   (mm_group); each token's summed in ascending expert id (ref.py's index_add order), the shared expert last.
-   nothing here waits for the GPU but the routing event; the experts are released at the next one (or the step's
+/* the next layer's streamed experts read while this one runs, when a step picks at least as many as a layer has (a
+   prefill's: most of a layer's are picked; a decode's few would make the reads waste). this layer's unpicked ones
+   are wanted a round on, not now: the first to go */
+static void prefetch(Forward *f, int l, const int32_t *ids, uint32_t picks)
+{
+  const uint32_t E = (uint32_t)f->g->n_experts;
+  if (picks < E)
+    return;
+  bool picked[OPS_MAX_EXPERTS] = {false};
+  for (uint32_t m = 0; m < picks; m++)
+    picked[ids[m]] = true;
+  const uint32_t here = (uint32_t)l * E, next = (uint32_t)((l + 1) % f->n_layers) * E;
+  for (uint32_t e = 0; e < E; e++)
+    if (f->rix[here + e] < 0 && !picked[e] && pool_state(f->pool, here + e) != POOL_COLD)
+      pool_want(f->pool, here + e, f->visits - 1 + (uint64_t)f->n_layers);
+  for (uint32_t e = 0; e < E; e++)
+    if (f->rix[next + e] < 0)
+      pool_want(f->pool, next + e, f->visits);
+}
+
+/* the routed experts: each distinct one resident or held in the pool (their reads at once) and read once for
+   all the tokens routed to it - gate, up, swiglu (each pair its weight, before the down projection, as ref.py) and
+   down, a launch each (mm_group); each token's summed in ascending expert id (ref.py's index_add order), the shared
+   expert last. nothing here waits for the GPU but the routing event; the experts are released at the next one (or the step's
    end), when the stream is past their kernels */
 bool fwd_moe(Forward *f, int l, char *err)
 {
@@ -168,7 +180,7 @@ bool fwd_moe(Forward *f, int l, char *err)
   xd = carve(&c, nd * 4, (void **)&dxd), yd = carve(&c, nd * 4, (void **)&dyd);
   for (uint32_t s = 0; s < slots; s++)
     gidx[s] = -1, hidx[s] = -1;
-  uint32_t row_of[FWD_MAX_PAIRS], base[FWD_MAX_PAIRS], slot0[FWD_MAX_PAIRS];
+  uint32_t row_of[FWD_MAX_PAIRS], base[FWD_MAX_PAIRS], slot0[FWD_MAX_PAIRS], unit_of[OPS_MAX_EXPERTS];
   for (uint32_t r = 0, j = 0, next_slot = 0; r < P; r++)
   {
     const uint32_t m = by[r];
@@ -178,14 +190,17 @@ bool fwd_moe(Forward *f, int l, char *err)
         j++, next_slot += (uint32_t)(cnt[j - 1] + MM_TILE - 1) / MM_TILE * MM_TILE;
       base[j] = r, cnt[j] = 0, slot0[j] = next_slot;
       const uint32_t unit = (uint32_t)l * E + (uint32_t)ids[m];
-      if (pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_FULL)
-        return fwd_fail(err, "an expert the budget cannot hold beside the layers' weights");
-      f->held[f->n_held++] = unit;
+      unit_of[j] = unit;
+      if (f->rix[unit] < 0 && pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_FULL)
+        return fwd_fail(err, "an expert the pool cannot hold (its room, or GPU memory refused)");
+      if (f->rix[unit] < 0)
+        f->held[f->n_held++] = unit;
     }
     const uint32_t slot = slot0[j] + (uint32_t)cnt[j]++;
     gidx[slot] = (int32_t)(m / K), hidx[slot] = (int32_t)r;
     pidx[r] = (int32_t)m, row_of[m] = r;
   }
+  prefetch(f, l, ids, P);
   /* the tables in ascending count (then id): group()'s runs of the same column tiles contiguous */
   uint64_t rank[OPS_MAX_EXPERTS];
   for (uint32_t j = 0; j < nd; j++)
@@ -197,7 +212,8 @@ bool fwd_moe(Forward *f, int l, char *err)
   {
     const uint32_t j = (uint32_t)rank[p];
     const void *ex[POOL_PARTS];
-    ok = fwd_pinned(f, f->held[j], ex, err);
+    const int32_t at_res = f->rix[unit_of[j]];
+    ok = at_res >= 0 ? resident_dev(f->res, (size_t)at_res, ex) : fwd_pinned(f, unit_of[j], ex, err);
     tab[p] = ex[0], tab[nd + p] = ex[1], tab[2 * nd + p] = ex[2], cnt[p] = cnt_j[j];
     xg[p] = slot0[j] * D, yg[p] = base[j] * FF, xd[p] = slot0[j] * FF, yd[p] = base[j] * D;
   }

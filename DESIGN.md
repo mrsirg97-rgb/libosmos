@@ -145,6 +145,9 @@ the full inventory, with maya's file:line for every part: `.research/ds4-forward
 
 ## the memory: one pool, read in place (spike, 2026-10-28)
 
+**superseded 2026-10-29** (below, "the memory, revised"): registered file pages stall a long prompt for minutes under
+the page cache's pressure. the measurements here stand; the design they led to does not.
+
 `spikes/inplace_read/inplace_read.hip`, raw output in `.research/spike-inplace_read.txt`. a streaming kernel sums 2-24
 GiB of a ds1017 GGUF shard; every GPU sum is checked against the CPU's.
 
@@ -221,12 +224,80 @@ evicted first, one process a run.
 | posix_fadvise WILLNEED | 6.33 GB/s | ~280 ms each: no end is reported, only polling finds them |
 
 so the Fetcher is **4 workers that pread** (`src/mem/fetchq.c`): the SSD's ceiling at 4, more only queue. the read
-copies into a 1 MiB scratch a worker, thrown away (~7 GB/s of memory traffic beside the GPU's ~240).
+copies into a 1 MiB scratch a worker, thrown away (~7 GB/s of memory traffic beside the GPU's ~240). (since
+2026-10-29 it reads straight into the GPU memory a unit was given: "the memory, revised".)
 
 measured through the whole path (`tests/gpu/test_pool_gpu.hip`): ds1017 blk.3's 384 experts (2.97 GB) evicted, all
 asked at once, read by fetchq and pinned by the pool through hip_pinner in **420 ms = 7.08 GB/s**, no read failed,
 the GPU's sums the CPU's. (maya's ~1.4 GB/s on a prompt is paced by its GPU work, not its reads: not the same
 measurement.)
+
+## the memory, revised: copies in GPU memory (measured, 2026-10-29)
+
+a long prompt stalled: at 8,192 tokens (`max_ctx` 16,384, a 72 GB budget) a 2,048-token step took **279 s**, the KFD's
+`evicted_ms` jumping by 79 s and then 187 s, the page cache full (117 GB, 0 free), even a logger thread stalled 20-36 s
+at a time. the mechanism: registered pages (`hsa_amd_memory_lock*`, `hipHostRegister`; on this kernel SVM ranges,
+`svm_range_set_attr` in the stacks) are not pinned. reclaim takes them - the GPU's reads mark nothing accessed in the
+CPU's tables, so they look idle - each take evicts every queue of the process, and the restore must fault every
+registered page back in while reclaim keeps taking them. no `mlock` here: the operator keeps `RLIMIT_MEMLOCK` (8 MB)
+and system settings as they are.
+
+| test (scratch `evict3.hip`, `cat` of the Engram file the pressure) | evicted_ms | worst pass |
+| --- | ---: | ---: |
+| 48 GiB HSA-locked in place, a GPU sum over and over, 60 s | 1,376 | 0.83 s |
+| 48 GiB copied to hipMalloc (GTT), the same | 4,024 | 2.13 s |
+
+so short evictions happen with any GPU memory under pressure (the runtime's own registered buffers, likely); the
+minutes-long restore is the registrations' alone - GTT has nothing to fault back. nothing big is registered now:
+
+- **the resident set** (`resident.h`): every tensor but the routed experts, then experts while the budget lasts, an
+  equal share of each layer's (expert 0 of every layer, then 1, ..). copies in GPU memory (`hip_slots.h`: HSA's GPU
+  pool, the CPU allowed to write), read once by fetchq's workers straight in, in 1 GiB arenas (few buffers for the
+  driver to keep), their file pages then dropped (`POSIX_FADV_DONTNEED`): RAM holds them once. cold, 6.56 GB/s.
+- **the pool streams the rest** (`pool.h`): copies too, read straight into memory of their own (reused when its size
+  is the next unit's), its room two layers' streamed experts; furthest-ahead as before. a prefill's step prefetches
+  the next layer's streamed experts while this one runs (`pool_want`: room only from units wanted later), when the
+  step's picks are at least a layer's experts.
+
+the building blocks (scratch `gtt.hip`, `coh.hip`): HSA allocate 0.18 ms, free 0.11 ms without waiting for the GPU
+(hipFree waits: 64 took 24 ms with a kernel in flight); pread from the page cache into GPU memory 10 GB/s on 1 thread,
+25 GB/s on 4; the GPU reads it at 221-239 GB/s; a buffer the GPU had cached, rewritten by the CPU between kernels,
+read stale 0 times in 4,800 (64 KiB to 16 MiB, memcpy and pread).
+
+what each step bought (4,096 real-text tokens, 2,048 a step, the warm pass; 51156cd in place: **335 tok/s**):
+
+| design | budget | tok/s |
+| --- | ---: | ---: |
+| every expert a copy, furthest-ahead over all of them | 72 / 85 GB | 160 / 192 |
+| resident set + the rest registered while held | 72 / 85 GB | hangs (the same restore, on a few GB) |
+| resident set + the rest streamed by copy | 72 / 85 GB | 172 / 136 |
+| .. + the next layer's prefetch | 60 / 72 GB | 211 / 197 |
+| .. + Engram's rows read at once (below) | 72 / 90 GB | **241 / 243** |
+
+and 8,192 tokens (`max_ctx` 16,384, 90 GB): **241 tok/s**, every step 8.0-9.0 s - where in place never finished.
+(a 100 GB budget does not fit: GTT's 107.6 GiB less the KV and the step's buffers.)
+
+the bound now is the SSD: the streamed experts (~49 GB at a 90 GB budget) are read every step at ~5-8 GB/s. the page
+cache cannot help - the step reads them in a fixed cycle bigger than it, and least recently used gets ~0 hits on a
+cycle - and copies cap RAM for experts at GTT's 107.6 GiB, where in place the page cache held ~117 GB. so a short
+prompt is slower than in place (241 vs 335): the price of not stalling. the lever is the tokens a step: the streamed
+bytes are the same for 2,048 tokens or 8,192 (a step picks nearly all of a layer's experts), so a layer run for 8,192
+tokens at once (maya's chunk) reads them a quarter as often a token.
+
+## Engram's reads (measured, 2026-10-29)
+
+a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
+step, in a 110 GB file the page cache mostly does not hold. scratch `egread.c`, random rows of the Engram file:
+
+| threads | reads/s | a step's rows |
+| ---: | ---: | ---: |
+| 1 | 16,700 | ~5.9 s |
+| 4 | 87,000 | ~1.1 s |
+| 16 | 297,000 | ~0.33 s |
+| **64** | **832,000** | **~0.12 s** |
+| 128 | 870,000 | ~0.11 s |
+
+so `rowread.h`: 64 workers that live for the forward's life, a layer's rows handed to them at once (16 a take).
 
 ## the experts' matmul (measured, 2026-10-29)
 
@@ -349,7 +420,8 @@ gap is the hardware. so:
 - **decode** is bandwidth-bound here (~7.5 GB a token at ~200 GB/s, measured above): the levers are DSpark's
   acceptance and fewer bytes a token, not a faster loop.
 - **where a runtime for this box can win**: the memory tiers (the non-resident experts read in place instead of
-  copied through a staging ring at 1.4 GB/s - **a hypothesis, unmeasured**), prompt kernels for this GPU, and
+  copied through a staging ring at 1.4 GB/s - **measured 2026-10-29: in place stalls a long prompt for minutes**;
+  copies straight from the files at the SSD's speed instead, "the memory, revised"), prompt kernels for this GPU, and
   scheduling tuned to one APU. those show in first token and turn done - what agent_bench measures.
 
 ## the scheduler

@@ -7,12 +7,13 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
-#include "substrate/mem/hip_pinner.h"
+#include "substrate/mem/hip_slots.h"
 #include "substrate/gpu/mv.h"
 #include "substrate/gpu/ops.h"
 #include "substrate/model/rope.h"
 
 #define FWD_FETCH_THREADS 4 /* DESIGN.md, the fetcher: 4 workers read at the SSD's ceiling (6.85 GB/s) */
+#define FWD_ROW_THREADS 64  /* DESIGN.md, Engram's reads: 64 threads 832,000 random rows/s, 128 no more */
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
 _Static_assert(sizeof(LayerWeights) % sizeof(const GgufTensor *) == 0, "LayerWeights is its tensors and only them");
 _Static_assert(sizeof(Scratch) % sizeof(void *) == 0, "Scratch is its device buffers and only them");
@@ -45,60 +46,124 @@ void fwd_probe(const Forward *f, const char *step, int layer, int index, void *d
     f->probe(step, layer, index, dev, n, ints, f->probe_arg);
 }
 
-/* the units: each layer's experts (the pool's to cycle), then every other tensor the layers use (pinned and held
-   for the forward's life). Engram's tables are read a row at a time and are not units */
+static uint64_t unit_bytes(const PoolUnit *u)
+{
+  uint64_t b = 0;
+  for (int k = 0; k < u->n_parts; k++)
+    b += (u->part[k].bytes + POOL_ALIGN - 1) / POOL_ALIGN * POOL_ALIGN;
+  return b;
+}
+
+/* the resident set: every tensor the layers use but the routed experts, then experts while the budget lasts - expert
+   0 of each layer, then 1, ..: an equal share of each layer, so every layer's streaming is alike. f->rix: an
+   expert unit's place in the set, -1 for one the pool streams. the units past n_res are the experts chosen */
+typedef struct Layout
+{
+  uint64_t total, used, cap; /* the arenas' bytes; the last one's fill and size */
+} Layout;
+
+/* the GPU memory with a unit of `b` bytes added, laid out as resident_create lays it (a unit never spans arenas) */
+static uint64_t with(Layout a, uint64_t b)
+{
+  return a.used + b <= a.cap ? a.total : a.total + (b > RESIDENT_ARENA ? b : RESIDENT_ARENA);
+}
+
+static void add(Layout *a, uint64_t b)
+{
+  if (a->used + b > a->cap)
+    a->cap = b > RESIDENT_ARENA ? b : RESIDENT_ARENA, a->total += a->cap, a->used = 0;
+  a->used += b;
+}
+
+static size_t choose(Forward *f, const PoolUnit *ex, PoolUnit *res, size_t n_res, uint64_t budget, char *err)
+{
+  const uint32_t E = (uint32_t)f->g->n_experts;
+  Layout a = {0, 0, 0};
+  for (size_t i = 0; i < n_res; i++)
+    add(&a, unit_bytes(&res[i]));
+  if (a.total > budget)
+    return fwd_fail(err, "the layers' weights are more than the budget"), 0;
+  size_t n = n_res;
+  for (uint32_t e = 0; e < E; e++)
+    for (int l = 0; l < f->n_layers; l++)
+    {
+      const uint32_t i = (uint32_t)l * E + e;
+      f->rix[i] = -1;
+      if (with(a, unit_bytes(&ex[i])) <= budget)
+        f->rix[i] = (int32_t)n, res[n++] = ex[i], add(&a, unit_bytes(&ex[i]));
+    }
+  return n;
+}
+
+/* the pool's room: two layers' streamed experts (the one the GPU is in, the next one's reads) */
+static uint64_t stream_budget(const Forward *f, const PoolUnit *ex)
+{
+  const uint32_t E = (uint32_t)f->g->n_experts;
+  uint64_t most = 0, unit = 0;
+  for (int l = 0; l < f->n_layers; l++)
+  {
+    uint64_t layer = 0;
+    for (uint32_t e = 0; e < E; e++)
+    {
+      const uint64_t b = unit_bytes(&ex[l * E + e]);
+      unit = b > unit ? b : unit;
+      layer += f->rix[l * E + e] < 0 ? b : 0;
+    }
+    most = layer > most ? layer : most;
+  }
+  return 2 * most > unit ? 2 * most : unit;
+}
+
+/* the units: each layer's experts (the pool's to stream, but the resident ones), then every other tensor the layers
+   use - all of them resident (resident.h). Engram's tables are read a row at a time and are not units */
 static bool units(Forward *f, uint64_t budget, char *err)
 {
   const Weights *w = f->w;
   const uint32_t E = (uint32_t)f->g->n_experts;
   const size_t n_res_max = 3 + (size_t)f->n_layers * TENSORS_A_LAYER;
   f->n_expert_units = (uint32_t)f->n_layers * E;
-  PoolUnit *u = calloc(f->n_expert_units + n_res_max, sizeof *u);
-  const GgufTensor **res = calloc(n_res_max, sizeof *res);
+  PoolUnit *all = calloc((size_t)w->geo.n_layers * E, sizeof *all);
+  PoolUnit *res = calloc(n_res_max + f->n_expert_units, sizeof *res);
+  const GgufTensor **t_res = calloc(n_res_max, sizeof *t_res);
   f->tdev = calloc(w->model->n_tensors, sizeof *f->tdev);
-  bool ok = u && res && f->tdev;
+  f->rix = calloc(f->n_expert_units, sizeof *f->rix);
+  bool ok = all && res && t_res && f->tdev && f->rix &&
+            weights_experts(w, f->fds, all, (size_t)w->geo.n_layers * E) == (size_t)w->geo.n_layers * E;
   if (!ok)
   {
-    free(u), free(res);
-    return fwd_fail(err, "out of memory");
+    free(all), free(res), free(t_res);
+    return fwd_fail(err, "out of memory, or the experts' units");
   }
-  PoolUnit *all = calloc((size_t)w->geo.n_layers * E, sizeof *all);
-  ok = all && weights_experts(w, f->fds, all, (size_t)w->geo.n_layers * E) == (size_t)w->geo.n_layers * E;
-  if (ok)
-    memcpy(u, all, f->n_expert_units * sizeof *u);
-  free(all);
-  size_t n_res = 0;
-  res[n_res++] = w->embed, res[n_res++] = w->output, res[n_res++] = w->output_norm;
+  size_t n_t = 0;
+  t_res[n_t++] = w->embed, t_res[n_t++] = w->output, t_res[n_t++] = w->output_norm;
   for (int l = 0; l < f->n_layers; l++)
   {
     const LayerWeights *L = &w->layer[l];
     const GgufTensor *const *t = (const GgufTensor *const *)L;
     for (size_t i = 0; i < TENSORS_A_LAYER; i++)
       if (t[i] && t[i] != L->eg_embd && t[i] != L->exp_gate && t[i] != L->exp_up && t[i] != L->exp_down)
-        res[n_res++] = t[i];
+        t_res[n_t++] = t[i];
   }
-  for (size_t i = 0; i < n_res; i++)
-  {
-    const PoolRange r = {f->fds[res[i]->file], res[i]->offset, res[i]->bytes};
-    u[f->n_expert_units + i] = (PoolUnit){.part = {r}, .n_parts = 1};
-  }
+  for (size_t i = 0; i < n_t; i++)
+    res[i] = (PoolUnit){.part = {{f->fds[t_res[i]->file], t_res[i]->offset, t_res[i]->bytes}}, .n_parts = 1};
+  const size_t n_res = choose(f, all, res, n_t, budget, err);
   char perr[POOL_ERR] = "";
-  if (ok && !(f->fq = fetchq_create(FWD_FETCH_THREADS, fwd_on_read, &f->in)))
-    ok = fwd_fail(err, "the fetcher's workers could not start");
-  else if (ok && !(f->pool = pool_create(u, f->n_expert_units + n_res, budget, hip_pinner(), fetchq_fetcher(f->fq),
-                                          NULL, NULL, perr)))
+  if (!n_res)
+    ok = false;
+  else if (!(f->res = resident_create(res, n_res, hip_slots(), FWD_FETCH_THREADS, perr)))
     ok = fwd_fail(err, perr);
-  for (size_t i = 0; ok && i < n_res; i++) /* every resident unit held: all their reads at once */
-    ok = pool_pin(f->pool, f->n_expert_units + (uint32_t)i, (const void *[POOL_PARTS]){0}) != POOL_FULL ||
-         fwd_fail(err, "the layers' weights are more than the budget");
-  for (size_t i = 0; ok && i < n_res; i++)
+  else if (!(f->fq = fetchq_create(FWD_FETCH_THREADS, fwd_on_read, &f->in)))
+    ok = fwd_fail(err, "the fetcher's workers could not start");
+  else if (!(f->pool = pool_create(all, f->n_expert_units, stream_budget(f, all), hip_slots(), fetchq_fetcher(f->fq),
+                                   NULL, NULL, perr)))
+    ok = fwd_fail(err, perr);
+  for (size_t i = 0; ok && i < n_t; i++)
   {
     const void *dev[POOL_PARTS];
-    ok = fwd_pinned(f, f->n_expert_units + (uint32_t)i, dev, err);
-    if (ok)
-      f->tdev[res[i] - w->model->tensors] = dev[0];
+    ok = resident_dev(f->res, i, dev);
+    f->tdev[t_res[i] - w->model->tensors] = dev[0];
   }
-  free(u), free(res);
+  free(all), free(res), free(t_res);
   return ok;
 }
 
@@ -228,8 +293,11 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
     ok = fwd_fail(err, "the Engram file could not be opened");
   else if (!(f->hash = engram_create(w, f->fds, eerr)))
     ok = fwd_fail(err, eerr);
-  else if (!(f->rows = calloc((size_t)FWD_MAX_BATCH * WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)))
+  else if (!(f->rows = calloc((size_t)FWD_MAX_BATCH * WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)) ||
+           !(f->eg_off = calloc((size_t)FWD_MAX_BATCH * f->g->engram_cols, sizeof *f->eg_off)))
     ok = fwd_fail(err, "out of memory");
+  else if (!(f->eg_read = rowread_create(FWD_ROW_THREADS)))
+    ok = fwd_fail(err, "Engram's readers could not start");
   ok = ok && units(f, budget, err) && oa_tables(f, err);
   if (ok && !(freqs(f) && scratch(f)))
     ok = fwd_fail(err, "a GPU allocation refused");
@@ -245,14 +313,18 @@ void forward_destroy(Forward *f)
 {
   if (!f)
     return;
-  (void)hipDeviceSynchronize(); /* a failed step's kernels done: the pool's unlocks wait for nothing (hip_pinner.h) */
+  (void)hipDeviceSynchronize(); /* a failed step's kernels done: what is freed or unlocked, the GPU is past */
   fetchq_destroy(f->fq);        /* its workers stopped before the pool they feed goes */
   pool_destroy(f->pool);
+  resident_destroy(f->res);
+  free(f->rix);
+  rowread_destroy(f->eg_read);
+  free(f->eg_off);
   free(f->tdev);
   hipFree(f->oa_tab);
   hipFree(f->oa_xoff);
   hipFree(f->oa_yoff);
-  free(f->in.unit);
+  free(f->in.r);
   pthread_cond_destroy(&f->in.cv);
   pthread_mutex_destroy(&f->in.mu);
   void **dev = (void **)&f->b;

@@ -1,48 +1,40 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 
-#include "pages.h"
 #include "substrate/mem/pool.h"
-
-typedef struct Map
-{
-  int fd;
-  uint8_t *base;
-  size_t bytes;
-} Map;
 
 typedef struct Slot
 {
   PoolUnit u;
-  uint8_t *host[POOL_PARTS];
+  uint64_t off[POOL_PARTS]; /* each part's place in the unit's memory */
+  uint64_t size;            /* the memory's bytes */
+  uint8_t *dev;             /* its memory, reading or pinned; NULL cold */
   PoolState state;
   int holds;
   uint64_t released, next; /* when its last hold ended (the pool's clock); when it is wanted again (the caller's) */
 } Slot;
 
+typedef struct Spare
+{
+  uint8_t *dev;
+  uint64_t size;
+} Spare;
+
 struct Pool
 {
   Slot *s;
   size_t n;
-  Map *maps;
-  size_t n_maps;
-  Pages *pages;
-  uint64_t budget;
+  Spare *spare;
+  size_t n_spare, cap_spare;
+  uint64_t budget, bytes; /* bytes: every allocation held, units' and spares' */
+  Slots slots;
   Fetcher fetcher;
   pool_event_fn on_event;
   void *event_arg;
   uint64_t clock;
 };
-
-static uintptr_t page_lo(const uint8_t *p) { return (uintptr_t)p / PAGE_BYTES * PAGE_BYTES; }
-static uintptr_t page_hi(const uint8_t *p, uint64_t bytes)
-{
-  return ((uintptr_t)p + bytes + PAGE_BYTES - 1) / PAGE_BYTES * PAGE_BYTES;
-}
 
 static void emit(const Pool *p, PoolEventKind kind, uint32_t unit, uint64_t bytes)
 {
@@ -50,149 +42,173 @@ static void emit(const Pool *p, PoolEventKind kind, uint32_t unit, uint64_t byte
     return;
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  const PoolEvent ev = {kind, unit, bytes, p->pages->total, (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec};
+  const PoolEvent ev = {kind, unit, bytes, p->bytes, (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec};
   p->on_event(&ev, p->event_arg);
 }
 
-/* every part's pages: +-refs, +-held */
-static void ref(Pool *p, const Slot *s, int refs, int held)
+static void release_memory(Pool *p, uint8_t *dev, uint64_t size)
 {
-  for (int k = 0; k < s->u.n_parts; k++)
-    pages_ref(p->pages, page_lo(s->host[k]), page_hi(s->host[k], s->u.part[k].bytes), refs, held);
+  p->slots.free(dev, p->slots.ctx);
+  p->bytes -= size;
 }
 
-static uint64_t uncovered(const Pool *p, const Slot *s, bool held_only)
+/* memory no unit holds, kept for one of its size; freed at once when the list cannot grow */
+static void keep_spare(Pool *p, uint8_t *dev, uint64_t size)
 {
-  uint64_t need = 0;
-  for (int k = 0; k < s->u.n_parts; k++)
-    need += pages_uncovered(p->pages, page_lo(s->host[k]), page_hi(s->host[k], s->u.part[k].bytes), held_only);
-  return need;
+  if (p->n_spare == p->cap_spare)
+  {
+    const size_t cap = p->cap_spare ? p->cap_spare * 2 : 64;
+    Spare *grown = realloc(p->spare, cap * sizeof *grown);
+    if (!grown)
+    {
+      release_memory(p, dev, size);
+      return;
+    }
+    p->spare = grown, p->cap_spare = cap;
+  }
+  p->spare[p->n_spare++] = (Spare){dev, size};
 }
 
-static void unpin(Pool *p, Slot *s)
+static uint8_t *take_spare(Pool *p, uint64_t size)
 {
-  ref(p, s, -1, 0);
-  const uint64_t freed = pages_drop(p->pages);
-  s->state = POOL_READ;
-  emit(p, POOL_EV_UNPIN, (uint32_t)(s - p->s), freed);
+  for (size_t i = p->n_spare; i-- > 0;)
+    if (p->spare[i].size == size)
+    {
+      uint8_t *dev = p->spare[i].dev;
+      p->spare[i] = p->spare[--p->n_spare];
+      return dev;
+    }
+  return NULL;
 }
 
-/* the unheld pinned unit wanted furthest ahead; of those, the least recently released. NULL for none */
-static Slot *furthest(Pool *p)
+/* a pinned unit gone: cold, its memory the caller's */
+static uint8_t *unpin(Pool *p, Slot *s)
+{
+  uint8_t *dev = s->dev;
+  s->dev = NULL, s->state = POOL_COLD;
+  emit(p, POOL_EV_UNPIN, (uint32_t)(s - p->s), s->size);
+  return dev;
+}
+
+/* how far room may reach: a pin's, every unheld unit; a want's, only those wanted after its time */
+typedef struct Reach
+{
+  bool limited;
+  uint64_t after;
+} Reach;
+
+static bool may_go(const Slot *c, Reach r) { return c->holds == 0 && (!r.limited || c->next > r.after); }
+
+/* the unit room may take wanted furthest ahead; of those, the least recently released. NULL for none */
+static Slot *furthest(Pool *p, Reach r)
 {
   Slot *last = NULL;
   for (size_t i = 0; i < p->n; i++)
   {
     Slot *c = &p->s[i];
-    if (c->state == POOL_PINNED && c->holds == 0 &&
+    if (c->state == POOL_PINNED && may_go(c, r) &&
         (!last || c->next > last->next || (c->next == last->next && c->released < last->released)))
       last = c;
   }
   return last;
 }
 
-/* pins a read unit that `holds` will hold: room first (FULL changes nothing), then its pages */
-static PoolPin pin_now(Pool *p, Slot *s, bool held)
+/* the bytes no room can be made from: units reading, or pinned and out of room's reach */
+static uint64_t kept(const Pool *p, Reach r)
 {
-  const uint32_t unit = (uint32_t)(s - p->s);
-  if (uncovered(p, s, true) > p->budget - pages_held(p->pages)) /* not even with every unheld unit unpinned */
+  uint64_t k = 0;
+  for (size_t i = 0; i < p->n; i++)
   {
-    emit(p, POOL_EV_REFUSED, unit, uncovered(p, s, false));
-    return POOL_FULL;
+    const Slot *c = &p->s[i];
+    k += c->state == POOL_READING || (c->state == POOL_PINNED && !may_go(c, r)) ? c->size : 0;
   }
-  while (p->pages->total + uncovered(p, s, false) > p->budget)
-    unpin(p, furthest(p)); /* one exists: the check above counted only held units' pages as kept */
-  for (int k = 0; k < s->u.n_parts; k++)
-    if (!pages_cover(p->pages, page_lo(s->host[k]), page_hi(s->host[k], s->u.part[k].bytes)))
+  return k;
+}
+
+/* memory for `s`: a spare of its size, else room (spares freed, then the furthest of the units in reach) and the
+   allocator's. NULL when it cannot fit (nothing changed) or the allocator refuses (spares and units may have gone for
+   its room) */
+static uint8_t *room(Pool *p, const Slot *s, Reach r)
+{
+  uint8_t *dev = take_spare(p, s->size);
+  if (dev)
+    return dev;
+  if (p->bytes + s->size > p->budget && s->size > p->budget - kept(p, r))
+    return NULL;
+  while (p->bytes + s->size > p->budget)
+  {
+    if (p->n_spare)
     {
-      emit(p, POOL_EV_REFUSED, unit, 0); /* the pinner refused: what this pin registered is gone again */
-      return POOL_FULL;
+      const Spare x = p->spare[--p->n_spare];
+      release_memory(p, x.dev, x.size);
+      continue;
     }
-  ref(p, s, 1, held ? 1 : 0);
-  s->state = POOL_PINNED;
-  emit(p, POOL_EV_PIN, unit, uncovered(p, s, false));
-  return POOL_OK;
+    Slot *v = furthest(p, r); /* one exists: kept() counted every unit that cannot go */
+    uint8_t *freed = unpin(p, v);
+    if (v->size == s->size)
+      return freed;
+    release_memory(p, freed, v->size);
+  }
+  dev = p->slots.alloc(s->size, p->slots.ctx);
+  if (dev)
+    p->bytes += s->size;
+  return dev;
 }
 
-static void begin_read(Pool *p, Slot *s)
+static void begin_read(Pool *p, Slot *s, uint8_t *dev)
 {
-  uint64_t total = 0;
+  void *dst[POOL_PARTS] = {0};
   for (int k = 0; k < s->u.n_parts; k++)
-    total += s->u.part[k].bytes;
-  s->state = POOL_READING;
-  emit(p, POOL_EV_READ, (uint32_t)(s - p->s), total);
-  p->fetcher.fetch((uint32_t)(s - p->s), s->u.part, s->u.n_parts, p->fetcher.ctx);
+    dst[k] = dev + s->off[k];
+  s->dev = dev, s->state = POOL_READING;
+  emit(p, POOL_EV_READ, (uint32_t)(s - p->s), s->size);
+  p->fetcher.fetch((uint32_t)(s - p->s), s->u.part, s->u.n_parts, dst, p->fetcher.ctx);
 }
 
-static const Map *map_of(Pool *p, int fd, char *err)
+static bool check_unit(Slot *s, size_t i, char *err)
 {
-  for (size_t i = 0; i < p->n_maps; i++)
-    if (p->maps[i].fd == fd)
-      return &p->maps[i];
-  struct stat st;
-  if (fstat(fd, &st) != 0 || st.st_size <= 0)
+  if (s->u.n_parts < 1 || s->u.n_parts > POOL_PARTS)
   {
-    snprintf(err, POOL_ERR, "file descriptor %d: cannot stat it, or it is empty", fd);
-    return NULL;
+    snprintf(err, POOL_ERR, "unit %zu: %d parts (1 to %d)", i, s->u.n_parts, POOL_PARTS);
+    return false;
   }
-  void *base = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-  if (base == MAP_FAILED)
+  for (int k = 0; k < s->u.n_parts; k++)
   {
-    snprintf(err, POOL_ERR, "file descriptor %d: cannot map it", fd);
-    return NULL;
+    const PoolRange *r = &s->u.part[k];
+    struct stat st;
+    if (fstat(r->fd, &st) != 0 || r->bytes == 0 || r->offset >= (uint64_t)st.st_size ||
+        r->bytes > (uint64_t)st.st_size - r->offset)
+    {
+      snprintf(err, POOL_ERR, "unit %zu part %d: 0 bytes, past its file, or a file that cannot be read", i, k);
+      return false;
+    }
+    s->off[k] = s->size;
+    s->size += (r->bytes + POOL_ALIGN - 1) / POOL_ALIGN * POOL_ALIGN;
   }
-  p->maps[p->n_maps] = (Map){fd, base, (size_t)st.st_size};
-  return &p->maps[p->n_maps++];
+  return true;
 }
 
-Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Pinner pinner, Fetcher fetcher,
+Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots slots, Fetcher fetcher,
                   pool_event_fn on_event, void *event_arg, char err[POOL_ERR])
 {
   err[0] = 0;
   Pool *p = calloc(1, sizeof *p);
-  if (!p)
-    return NULL;
-  p->budget = budget;
-  p->fetcher = fetcher;
-  p->on_event = on_event;
-  p->event_arg = event_arg;
-  p->s = calloc(n_units ? n_units : 1, sizeof *p->s);
-  p->maps = calloc(n_units * POOL_PARTS + 1, sizeof *p->maps);
-  p->pages = pages_create(pinner);
-  if (!p->s || !p->maps || !p->pages)
+  if (!p || !(p->s = calloc(n_units ? n_units : 1, sizeof *p->s)))
   {
+    free(p);
     snprintf(err, POOL_ERR, "out of memory");
-    pool_destroy(p);
     return NULL;
   }
-  for (size_t i = 0; i < n_units; i++, p->n = i)
+  p->budget = budget, p->slots = slots, p->fetcher = fetcher, p->on_event = on_event, p->event_arg = event_arg;
+  for (size_t i = 0; i < n_units; i++)
   {
     Slot *s = &p->s[i];
     s->u = units[i];
-    if (s->u.n_parts < 1 || s->u.n_parts > POOL_PARTS)
+    const bool fits = check_unit(s, i, err) && s->size <= budget;
+    if (!fits && !err[0])
+      snprintf(err, POOL_ERR, "unit %zu: %llu bytes, more than the budget", i, (unsigned long long)s->size);
+    if (!fits)
     {
-      snprintf(err, POOL_ERR, "unit %zu: %d parts (1 to %d)", i, s->u.n_parts, POOL_PARTS);
-      pool_destroy(p);
-      return NULL;
-    }
-    uint64_t pages = 0;
-    for (int k = 0; k < s->u.n_parts; k++)
-    {
-      const PoolRange *r = &s->u.part[k];
-      const Map *m = map_of(p, r->fd, err);
-      if (!m || r->bytes == 0 || r->offset >= m->bytes || r->bytes > m->bytes - r->offset)
-      {
-        if (!err[0])
-          snprintf(err, POOL_ERR, "unit %zu part %d: 0 bytes, or past its file", i, k);
-        pool_destroy(p);
-        return NULL;
-      }
-      s->host[k] = m->base + r->offset;
-      pages += page_hi(s->host[k], r->bytes) - page_lo(s->host[k]);
-    }
-    if (pages > budget)
-    {
-      snprintf(err, POOL_ERR, "unit %zu: %llu bytes of pages, more than the budget", i, (unsigned long long)pages);
       pool_destroy(p);
       return NULL;
     }
@@ -205,39 +221,27 @@ void pool_destroy(Pool *p)
 {
   if (!p)
     return;
-  for (size_t i = 0; p->pages && i < p->n; i++)
-    if (p->s[i].state == POOL_PINNED)
-      unpin(p, &p->s[i]);
-  pages_destroy(p->pages);
-  for (size_t i = 0; p->maps && i < p->n_maps; i++)
-    munmap(p->maps[i].base, p->maps[i].bytes);
-  free(p->maps);
+  for (size_t i = 0; i < p->n; i++)
+    if (p->s[i].state != POOL_COLD)
+    {
+      Slot *s = &p->s[i];
+      const uint64_t size = s->size;
+      release_memory(p, s->state == POOL_PINNED ? unpin(p, s) : s->dev, size);
+    }
+  while (p->n_spare)
+  {
+    const Spare x = p->spare[--p->n_spare];
+    release_memory(p, x.dev, x.size);
+  }
+  free(p->spare);
   free(p->s);
   free(p);
-}
-
-void pool_want(Pool *p, const uint32_t *units, size_t n)
-{
-  for (size_t i = 0; p && i < n; i++)
-    if (units[i] < p->n && p->s[units[i]].state == POOL_COLD)
-      begin_read(p, &p->s[units[i]]);
-}
-
-void pool_ready(Pool *p, uint32_t unit)
-{
-  if (!p || unit >= p->n || p->s[unit].state != POOL_READING)
-    return;
-  Slot *s = &p->s[unit];
-  s->state = POOL_READ;
-  emit(p, POOL_EV_READY, unit, 0);
-  if (s->holds > 0)
-    pin_now(p, s, true);
 }
 
 static void fill(const Slot *s, const void *dev[POOL_PARTS])
 {
   for (int k = 0; k < s->u.n_parts; k++)
-    dev[k] = s->host[k];
+    dev[k] = s->dev + s->off[k];
 }
 
 PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS])
@@ -245,27 +249,52 @@ PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS])
   if (!p || unit >= p->n)
     return POOL_FULL;
   Slot *s = &p->s[unit];
-  switch (s->state)
+  if (s->state == POOL_COLD)
   {
-  case POOL_PINNED:
-    if (s->holds++ == 0)
-      ref(p, s, 0, 1);
-    fill(s, dev);
-    return POOL_OK;
-  case POOL_READ:
-    if (pin_now(p, s, true) != POOL_OK)
+    uint8_t *mem = room(p, s, (Reach){false, 0});
+    if (!mem)
+    {
+      emit(p, POOL_EV_REFUSED, unit, s->size);
       return POOL_FULL;
-    s->holds++;
-    fill(s, dev);
-    return POOL_OK;
-  case POOL_COLD:
-    begin_read(p, s);
-    s->holds++;
-    return POOL_WAIT;
-  default:
-    s->holds++;
-    return POOL_WAIT;
+    }
+    begin_read(p, s, mem);
   }
+  s->holds++;
+  if (s->state != POOL_PINNED)
+    return POOL_WAIT;
+  fill(s, dev);
+  return POOL_OK;
+}
+
+void pool_want(Pool *p, uint32_t unit, uint64_t next)
+{
+  if (!p || unit >= p->n || p->s[unit].holds > 0)
+    return;
+  Slot *s = &p->s[unit];
+  if (s->state != POOL_COLD)
+  {
+    s->next = next;
+    return;
+  }
+  uint8_t *mem = room(p, s, (Reach){true, next});
+  if (mem)
+    s->next = next, begin_read(p, s, mem);
+}
+
+void pool_ready(Pool *p, uint32_t unit, bool ok)
+{
+  if (!p || unit >= p->n || p->s[unit].state != POOL_READING)
+    return;
+  Slot *s = &p->s[unit];
+  if (ok)
+  {
+    s->state = POOL_PINNED;
+    emit(p, POOL_EV_PIN, unit, s->size);
+    return;
+  }
+  keep_spare(p, s->dev, s->size);
+  s->dev = NULL, s->state = POOL_COLD;
+  emit(p, POOL_EV_FAILED, unit, s->size);
 }
 
 bool pool_dev(const Pool *p, uint32_t unit, const void *dev[POOL_PARTS])
@@ -282,11 +311,7 @@ void pool_release(Pool *p, uint32_t unit, uint64_t next)
     return;
   Slot *s = &p->s[unit];
   if (--s->holds == 0)
-  {
     s->released = ++p->clock, s->next = next;
-    if (s->state == POOL_PINNED)
-      ref(p, s, 0, -1);
-  }
 }
 
 PoolState pool_state(const Pool *p, uint32_t unit)
@@ -294,4 +319,4 @@ PoolState pool_state(const Pool *p, uint32_t unit)
   return p && unit < p->n ? p->s[unit].state : POOL_COLD;
 }
 
-uint64_t pool_pinned(const Pool *p) { return p ? p->pages->total : 0; }
+uint64_t pool_bytes(const Pool *p) { return p ? p->bytes : 0; }

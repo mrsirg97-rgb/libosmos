@@ -11,6 +11,8 @@
 
 #include "substrate/mem/fetchq.h"
 #include "substrate/mem/pool.h"
+#include "substrate/mem/resident.h"
+#include "substrate/mem/rowread.h"
 #include "substrate/gpu/mm.h"
 #include "substrate/gpu/mv.h"
 #include "substrate/gpu/ops.h"
@@ -30,11 +32,17 @@
 #define FWD_MAX_SLOTS(pairs, experts) ((pairs) + (uint64_t)(experts) * (MM_TILE - 1))
 
 /* the fetcher's finished reads, handed from its workers to the forward (the pool's one consumer) */
+typedef struct Read
+{
+  uint32_t unit;
+  bool ok;
+} Read;
+
 typedef struct Inbox
 {
   pthread_mutex_t mu;
   pthread_cond_t cv;
-  uint32_t *unit;
+  Read *r;
   size_t n, cap;
   bool broken; /* a done the inbox could not hold: the forward refuses from then on */
 } Inbox;
@@ -83,11 +91,15 @@ struct Forward
   Pool *pool;
   Fetchq *fq;
   Inbox in;
-  uint32_t n_expert_units;  /* units 0 .. : layer * n_experts + expert; then the resident tensors */
+  Resident *res;            /* the layers' tensors and a share of the experts, in GPU memory (resident.h) */
+  int32_t *rix;             /* an expert's place in res (unit: layer * n_experts + expert), -1: streamed by the pool */
+  uint32_t n_expert_units;  /* the pool's units: layer * n_experts + expert */
   const uint8_t **tdev;     /* a model tensor's device pointer (index: its place in the Gguf), resident ones only */
   const void **oa_tab;      /* each layer's wo_a groups for mm_group: [layer][o_groups], on the device */
   uint32_t *oa_xoff, *oa_yoff; /* group k: x at k * its 4,096 (of a token's attention), y at k * o_lora */
   int eg_fd;
+  Rowread *eg_read; /* Engram's rows, read many at once */
+  uint64_t *eg_off; /* a layer's rows' places in the Engram file: [token][col] */
   Engram *hash;
   float *freqs_win, *freqs_comp;
   Scratch b;
@@ -123,7 +135,7 @@ struct Seq
   float *pend_kvc[WEIGHTS_MAX_LAYERS], *pend_sc[WEIGHTS_MAX_LAYERS];
 };
 
-/* a resident tensor's bytes as the GPU reads them (pinned by the pool: the mapping's own address) */
+/* a resident tensor's bytes as the GPU reads them (its copy in the resident set) */
 static inline const uint8_t *fwd_dev(const Forward *f, const GgufTensor *t)
 {
   return f->tdev[t - f->w->model->tensors];

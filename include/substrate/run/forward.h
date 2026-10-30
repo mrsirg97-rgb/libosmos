@@ -32,21 +32,21 @@ const float *forward_logits(const Forward *f);
 /*
 Forward
   DeepSeek-V4.1-Flash's forward on the GPU, a token at a time (the decode), its first `n_layers` layers (all of them,
-  or fewer for a test). the weights are read where they lie, through one pool (substrate/mem/pool.h): every tensor
-  the layers use but the routed experts a unit pinned for the forward's life, and each layer's experts units the
-  pool pins when the router picks them and unpins, least recently used first, when it needs the room - read by
-  fetchq's workers, nothing copied, none of it counted against the GPU's own memory. the quantized weights' products
-  are mm's (WMMA over f16 activations, one kernel for 1 .. 16 tokens), the F32 and BF16 weights' the matvec's.
-  `budget` is the RAM the pool may pin: the layers' weights and a cache of experts. the Engram rows are read from
-  the Engram file a position at a time (pread). `max_ctx` bounds a sequence: its compressed rows and indexer keys
-  are held for that many positions.
+  or fewer for a test). the weights are copies in GPU memory, read from their files straight in: a resident set
+  (substrate/mem/resident.h) of every tensor the layers use but the routed experts and as many experts as the budget
+  holds, an equal share of each layer's; the other experts streamed by the pool (substrate/mem/pool.h), held when
+  the router picks them and let go, the one wanted furthest ahead first, when it needs the room. the quantized
+  weights' products are mm's (WMMA over f16 activations, one kernel for 1 .. 16 tokens), the F32 and BF16 weights' the
+  matvec's. `budget` is the GPU memory of the resident set (the pool's own room is two layers' streamed experts).
+  the Engram rows are read from the Engram file a position at a time (pread). `max_ctx` bounds a sequence: its
+  compressed rows and indexer keys are held for that many positions.
 
 forward_create
   NULL, with why in err, for a model or a size it cannot run: n_layers outside 1 .. the model's, max_ctx 0, the
-  layers' weights more than the budget, a GPU allocation or registration refused.
+  layers' weights more than the budget, a GPU allocation refused, a weight's read failed.
 
 forward_destroy
-  everything it registered, mapped and allocated (its Seqs first: seq_destroy). NULL is nothing to do.
+  everything it allocated (its Seqs first: seq_destroy). NULL is nothing to do.
 
 forward_probe
   fn is called after each step the forward names - "h_in" (the stream into a layer, after Engram), "a_pre", "a_post",

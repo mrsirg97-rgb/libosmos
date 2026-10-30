@@ -5,13 +5,13 @@
 
 #include "substrate/mem/fetchq.h"
 
-#define FETCH_SCRATCH (1u << 20)
 #define FETCH_MAX_THREADS 64
 
 typedef struct Job
 {
   uint32_t unit;
   PoolRange part[POOL_PARTS];
+  void *dst[POOL_PARTS];
   int n;
 } Job;
 
@@ -19,7 +19,6 @@ typedef struct Worker
 {
   struct Fetchq *q;
   pthread_t thread;
-  uint8_t *scratch;
 } Worker;
 
 struct Fetchq
@@ -37,13 +36,12 @@ struct Fetchq
   int n_workers;
 };
 
-static bool read_part(const PoolRange *r, uint8_t *scratch)
+static bool read_part(const PoolRange *r, uint8_t *dst)
 {
   uint64_t got = 0;
   while (got < r->bytes)
   {
-    const uint64_t want = r->bytes - got < FETCH_SCRATCH ? r->bytes - got : FETCH_SCRATCH;
-    const ssize_t n = pread(r->fd, scratch, (size_t)want, (off_t)(r->offset + got));
+    const ssize_t n = pread(r->fd, dst + got, (size_t)(r->bytes - got), (off_t)(r->offset + got));
     if (n <= 0)
       return false;
     got += (uint64_t)n;
@@ -71,7 +69,7 @@ static void *work(void *arg)
     pthread_mutex_unlock(&q->mu);
     bool ok = true;
     for (int k = 0; k < job.n && ok; k++)
-      ok = read_part(&job.part[k], w->scratch);
+      ok = read_part(&job.part[k], job.dst[k]);
     q->done(job.unit, ok, q->done_arg);
   }
 }
@@ -102,8 +100,6 @@ Fetchq *fetchq_create(int threads, fetch_done_fn done, void *done_arg)
   q->jobs = malloc(q->cap * sizeof *q->jobs);
   bool ok = q->jobs != NULL;
   for (int i = 0; ok && i < threads; i++)
-    ok = (q->w[i].scratch = malloc(FETCH_SCRATCH)) != NULL;
-  for (int i = 0; ok && i < threads; i++)
   {
     q->w[i].q = q;
     ok = pthread_create(&q->w[i].thread, NULL, work, &q->w[i]) == 0;
@@ -123,8 +119,6 @@ void fetchq_destroy(Fetchq *q)
   if (!q)
     return;
   stop(q);
-  for (int i = 0; i < FETCH_MAX_THREADS; i++)
-    free(q->w[i].scratch);
   free(q->jobs);
   pthread_cond_destroy(&q->cv);
   pthread_mutex_destroy(&q->mu);
@@ -132,11 +126,12 @@ void fetchq_destroy(Fetchq *q)
 }
 
 /* the consumer's half: a job queued, a worker woken. a queue that cannot grow reports the read as failed, at once */
-static void fetch(uint32_t unit, const PoolRange *parts, int n, void *ctx)
+static void fetch(uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], void *ctx)
 {
   Fetchq *q = ctx;
-  Job job = {unit, {{0}}, n < POOL_PARTS ? n : POOL_PARTS};
+  Job job = {unit, {{0}}, {0}, n < POOL_PARTS ? n : POOL_PARTS};
   memcpy(job.part, parts, (size_t)job.n * sizeof *parts);
+  memcpy(job.dst, dst, (size_t)job.n * sizeof *dst);
   pthread_mutex_lock(&q->mu);
   if (q->len == q->cap)
   {
