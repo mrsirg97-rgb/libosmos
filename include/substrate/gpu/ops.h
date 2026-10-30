@@ -134,8 +134,8 @@ ops_put_rows
 
 ops_index_score
   for each token t (its q at q + t heads head_dim, its w at w + t heads) and its visible rows c < (pos[t] + 1) / ratio
-  of keys: score[t stride + c] = sum over heads h of relu(q_h . keys_c) * w_h (heads at most 32: a lane a head).
-  max_n bounds the visible rows (at most stride).
+  of keys: score[t stride + c] = sum over heads h of relu(q_h . keys_c) * w_h (heads at most 32, head_dim a multiple of
+  16; the heads summed as a 32-lane xor tree sums them). max_n bounds the visible rows (at most stride).
 
 ops_topk
   for each token t: the k highest of score[t stride + 0 .. n) (n its visible rows, as ops_index_score's) - ties to

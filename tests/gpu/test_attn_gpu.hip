@@ -1,7 +1,7 @@
 // ops_sparse_attn at the model's shape and a long context's key count (64 heads x 512, a window of 128 and up to 512
 // compressed rows: 640 keys, several of each kernel's tiles): every output within the rounding bound of its order
 // against a double-precision attention over the same keys, and each token the same bits alone and among the others
-// (schedule invariance). needs a GPU; skipped (77) without one.
+// (schedule invariance); the indexer's scores the same ways. needs a GPU; skipped (77) without one.
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -77,6 +77,73 @@ static void reference(const Host& h, float scale, uint32_t t, const float* o) {
   }
 }
 
+// ops_index_score at the indexer's shape (up to 32 heads x 128, ratio 2, a token past 6,000 seeing ~3,000 rows):
+// each score the bits of its order replayed on the host and within its rounding bound of a double sum, and each
+// token the same bits alone and among the others; `heads` below 32 leaves head slots empty
+constexpr uint32_t kIxHd = 128, kIxRatio = 2, kIxTok = 13;
+static void indexer(uint32_t heads) {
+  const uint32_t rows = (uint32_t) (kPos0 + kIxTok) / kIxRatio, stride = rows;
+  std::vector<float> qh((size_t) kIxTok * heads * kIxHd), kh((size_t) rows * kIxHd), wh((size_t) kIxTok * heads);
+  for (float& v : qh) v = uniform();
+  for (float& v : kh) v = uniform();
+  for (float& v : wh) v = uniform();
+  std::vector<int32_t> ph(kIxTok);
+  for (uint32_t t = 0; t < kIxTok; t++) ph[t] = kPos0 + (int32_t) t;
+  float *q, *k, *w, *sc;
+  int32_t* pos;
+  const size_t scb = (size_t) kIxTok * stride * 4;
+  CHECK(hipMalloc(&q, qh.size() * 4) == hipSuccess && hipMalloc(&k, kh.size() * 4) == hipSuccess);
+  CHECK(hipMalloc(&w, wh.size() * 4) == hipSuccess && hipMalloc(&sc, scb) == hipSuccess);
+  CHECK(hipMalloc(&pos, kIxTok * 4) == hipSuccess);
+  CHECK(hipMemcpy(q, qh.data(), qh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(k, kh.data(), kh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(w, wh.data(), wh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(pos, ph.data(), kIxTok * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(ops_index_score(q, k, w, pos, kIxRatio, rows, heads, kIxHd, kIxTok, sc, stride, nullptr));
+  std::vector<float> all(scb / 4), one(scb / 4);
+  CHECK(hipMemcpy(all.data(), sc, scb, hipMemcpyDeviceToHost) == hipSuccess);
+  double worst = 0;
+  for (uint32_t t = 0; t < kIxTok; t++)
+    for (uint32_t c = 0; c < (uint32_t) (ph[t] + 1) / kIxRatio; c++) {
+      double sum = 0, mag = 0;
+      for (uint32_t h = 0; h < heads; h++) {
+        double dot = 0, dmag = 0;
+        for (uint32_t d = 0; d < kIxHd; d++) {
+          const double p = (double) qh[((size_t) t * heads + h) * kIxHd + d] * kh[(size_t) c * kIxHd + d];
+          dot += p, dmag += std::fabs(p);
+        }
+        const double wv = wh[(size_t) t * heads + h];
+        sum += std::fmax(dot, 0.0) * wv, mag += dmag * std::fabs(wv);
+      }
+      // the kernel's order in F32 on the host (the build's -ffp-contract=off: a multiply, then an add): the same bits
+      float x[32] = {};
+      for (uint32_t h = 0; h < heads; h++) {
+        float dot = 0;
+        for (uint32_t d = 0; d < kIxHd; d++)
+          dot += qh[((size_t) t * heads + h) * kIxHd + d] * kh[(size_t) c * kIxHd + d];
+        x[h] = std::fmax(dot, 0.0f) * wh[(size_t) t * heads + h];
+      }
+      for (int off = 16; off > 0; off >>= 1)
+        for (int h = 0; h < off; h++) x[h] = x[h] + x[h + off];
+      CHECK(std::memcmp(&x[0], &all[(size_t) t * stride + c], 4) == 0);
+      // the dot's kIxHd terms, relu * w, then the heads' 5-deep tree: (kIxHd + 2 + 5) u of the magnitudes
+      const double err = std::fabs(all[(size_t) t * stride + c] - sum), bound = (kIxHd + 7) * kU * mag + 1e-30;
+      CHECK(std::isfinite(all[(size_t) t * stride + c]) && err <= bound);
+      if (mag > 0 && err / (kU * mag) > worst) worst = err / (kU * mag);
+    }
+  CHECK(hipMemset(sc, 0x7F, scb) == hipSuccess);
+  for (uint32_t t = 0; t < kIxTok; t++)
+    CHECK(ops_index_score(q + (size_t) t * heads * kIxHd, k, w + (size_t) t * heads, pos + t, kIxRatio, rows, heads,
+                          kIxHd, 1, sc + (size_t) t * stride, stride, nullptr));
+  CHECK(hipMemcpy(one.data(), sc, scb, hipMemcpyDeviceToHost) == hipSuccess);
+  for (uint32_t t = 0; t < kIxTok; t++)
+    CHECK(std::memcmp(&all[(size_t) t * stride], &one[(size_t) t * stride], (size_t) (ph[t] + 1) / kIxRatio * 4) == 0);
+  for (void* p : {(void*) q, (void*) k, (void*) w, (void*) sc, (void*) pos}) CHECK(hipFree(p) == hipSuccess);
+  std::printf("  the indexer, %u heads, %u tokens x ~%u rows: the bits of its order in F32 on the host, within"
+              " (hd + 7) u of a double sum (worst %.1f), each token alone the bits it takes among them\n",
+              heads, kIxTok, rows, worst);
+}
+
 int main() {
   std::printf("[test_attn_gpu] start\n");
   int ndev = 0;
@@ -139,6 +206,8 @@ int main() {
   for (void* p : {(void*) q, (void*) o, (void*) sc, (void*) ring, (void*) ckv, (void*) sink, (void*) pos, (void*) sel,
                   (void*) nsel})
     CHECK(hipFree(p) == hipSuccess);
+  indexer(32);
+  indexer(24);
   std::printf("[test_attn_gpu] ok\n");
   return 0;
 }

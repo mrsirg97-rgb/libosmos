@@ -335,6 +335,15 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   kernels; test_attn_gpu, new: 640 keys against a double attention, each token alone and among 24, and a tile's
   stores skipped fails it). 8,192 tokens: scores 1.96 -> 1.24 s, values 2.00 -> 1.44; ~310 -> ~352 tok/s (3 rounds
   alternating; the box ran this session's earlier commit at ~310, not the ~330 measured before it).
+- the indexer's scores were a wave a row, a lane a head, each lane reading the row's 128 values one broadcast load
+  at a time: 47 ms for 2,048 tokens x ~4,096 rows (~0.6 T multiply-adds a second). a run's tokens share their
+  keys, so it is a product: tiles of 2 tokens x 32 head slots by 64 rows, 8 x 4 a thread, d 16 a stage, then relu
+  * w and the heads summed as the 32-lane tree sums them - 10.1 ms (scratch `ixb.hip`: 1-4 tokens, 64-128 rows,
+  4-16 x 4-8 all 10-12 ms but 16 x 8's 38). the same bits: test_attn_gpu replays the order on the host in F32 (a
+  multiply then an add, -ffp-contract=off), every score bit for bit, ~3,000 rows, 32 and 24 heads; a row tile's
+  stores skipped fails it, and so does summing the heads in a line instead of the tree - which the model's
+  fingerprint does not see (its 32 positions: every row selected, the scores' order unread). 8,192 tokens ~308 ->
+  ~372 tok/s (3 rounds alternating).
 
 ## Engram's reads (measured, 2026-10-29)
 

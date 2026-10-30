@@ -13,9 +13,7 @@ namespace {
 
 constexpr int kThreads = 256;
 constexpr int kWave = 32;
-constexpr int kWaves = kThreads / kWave;
 constexpr int kSelectThreads = 1024;
-constexpr uint32_t kFillBlocks = 160;  // a launch's blocks to fill gfx1151 (40 CUs, 4 blocks each)
 constexpr int kRadixBits = 8;
 constexpr int kBins = 1 << kRadixBits;
 
@@ -63,29 +61,94 @@ __device__ inline uint32_t visible(const int32_t* pos, uint32_t t, uint32_t rati
   return (uint32_t) (pos[t] + 1) / ratio;
 }
 
-// token t's score[c] = sum over heads h of relu(q_h . k_c) * w_h, for its visible rows c: a block a slice of a token's
-// rows, a wave a row, a lane a head
-__global__ void index_score_kernel(const float* q, const float* keys, const float* w, const int32_t* pos,
-                                   uint32_t ratio, uint32_t heads, uint32_t hd, float* score, uint32_t stride) {
-  extern __shared__ float qs[];
-  const uint32_t t = blockIdx.y, n = visible(pos, t, ratio);
-  if (blockIdx.x * kWaves >= n) return;  // the whole block
-  q += (uint64_t) t * heads * hd, w += (uint64_t) t * heads, score += (uint64_t) t * stride;
-  const uint32_t qst = hd + 1;  // a head's row in LDS one past hd: the lanes' reads in different banks
-  for (uint32_t i = threadIdx.x; i < heads * hd; i += kThreads) qs[i / hd * qst + i % hd] = q[i];
-  __syncthreads();
-  const int lane = threadIdx.x % kWave;
-  const uint32_t step = gridDim.x * kWaves;
-  for (uint32_t c = blockIdx.x * kWaves + threadIdx.x / kWave; c < n; c += step) {
-    const float* k = keys + (uint64_t) c * hd;
-    float v = 0;
-    if ((uint32_t) lane < heads) {
-      float s = 0;
-      for (uint32_t d = 0; d < hd; d++) s += qs[lane * qst + d] * k[d];
-      v = fmaxf(s, 0.0f) * w[lane];
+// token t's score[c] = sum over heads h of relu(q_h . k_c) * w_h, for its visible rows c - a product over a run's
+// tokens and its rows (the run's tokens share their keys): a block kIxTok tokens x kIxHeads head slots by kIxRows
+// rows, a thread kIxR of the slots by kIxC rows, d staged kIxStep at a time, the next stage's loads issued before this
+// one's sums. each (token, head, row)'s dot s += q d * k d over d ascending (a multiply, then an add), relu * w, then
+// the heads summed in the order a 32-lane xor tree sums them (lane i + lane i ^ off, off 16 .. 1: lane 0's) - the
+// bits of a wave a row, a lane a head. the best of 1-4 tokens, 64-128 rows, 4-16 x 4-8 measured on gfx1151 (2,048
+// tokens x 4,096 rows, 32 heads x 128: 47 ms a wave a row, 10.1 here; scratch ixb.hip)
+constexpr int kIxHeads = 32, kIxTok = 2, kIxRows = 64, kIxR = 8, kIxC = 4, kIxStep = 16;
+constexpr int kIxM = kIxHeads * kIxTok, kIxThreads = (kIxM / kIxR) * (kIxRows / kIxC);
+typedef float f4 __attribute__((ext_vector_type(4)));
+__global__ __launch_bounds__(kIxThreads) void index_score_kernel(const float* __restrict__ q,
+                                                                  const float* __restrict__ keys,
+                                                                  const float* __restrict__ w,
+                                                                  const int32_t* __restrict__ pos, uint32_t ratio,
+                                                                  uint32_t heads, uint32_t hd, uint32_t n_tok,
+                                                                  float* __restrict__ score, uint32_t stride) {
+  constexpr int TX = kIxRows / kIxC, G = kIxC / 4, KS = kIxStep;
+  constexpr int QL = kIxM * KS / 4 / kIxThreads, KL = kIxRows * KS / 4 / kIxThreads;  // a thread's float4s
+  static_assert(QL >= 1 && KL >= 1 && kIxR % 4 == 0 && kIxHeads == kWave, "whole float4s; a lane a head");
+  constexpr int kStage = KS * (kIxM + 4) + KS * (kIxRows + 4), kSums = kIxM * (kIxRows + 1);
+  __shared__ __attribute__((aligned(16))) float lds[kStage > kSums ? kStage : kSums];
+  float(*qs)[kIxM + 4] = (float(*)[kIxM + 4]) lds;
+  float(*ks)[kIxRows + 4] = (float(*)[kIxRows + 4]) (lds + KS * (kIxM + 4));
+  const uint32_t t0 = blockIdx.y * kIxTok, c0 = blockIdx.x * kIxRows;
+  uint32_t n_hi = 0;  // the most rows a token of the tile sees
+  for (uint32_t t = t0; t < t0 + kIxTok && t < n_tok; t++) n_hi = max(n_hi, visible(pos, t, ratio));
+  if (c0 >= n_hi) return;  // the whole block
+  const int tx = threadIdx.x % TX, ty = threadIdx.x / TX;
+  const float* qp[QL];
+  const float* kp[KL];
+  int qi[QL], qd[QL], ki[KL], kd[KL];  // a load's slot (or row) and d in the stage
+  for (int j = 0; j < QL; j++) {
+    const int i = threadIdx.x + j * kIxThreads;
+    qi[j] = i / (KS / 4), qd[j] = i % (KS / 4) * 4;
+    const uint32_t t = t0 + qi[j] / kIxHeads, h = qi[j] % kIxHeads;
+    qp[j] = t < n_tok && h < heads ? q + ((uint64_t) t * heads + h) * hd + qd[j] : nullptr;
+  }
+  for (int j = 0; j < KL; j++) {
+    const int i = threadIdx.x + j * kIxThreads;
+    ki[j] = i / (KS / 4), kd[j] = i % (KS / 4) * 4;
+    kp[j] = c0 + ki[j] < n_hi ? keys + (uint64_t) (c0 + ki[j]) * hd + kd[j] : nullptr;
+  }
+  f4 qn[QL], kn[KL];
+  for (int j = 0; j < QL; j++) qn[j] = qp[j] ? *(const f4*) qp[j] : f4{};
+  for (int j = 0; j < KL; j++) kn[j] = kp[j] ? *(const f4*) kp[j] : f4{};
+  f4 acc[kIxR][G] = {};
+  for (uint32_t d0 = 0; d0 < hd; d0 += KS) {
+    __syncthreads();
+    for (int j = 0; j < QL; j++)
+      for (int e = 0; e < 4; e++) qs[qd[j] + e][qi[j]] = qn[j][e];
+    for (int j = 0; j < KL; j++)
+      for (int e = 0; e < 4; e++) ks[kd[j] + e][ki[j]] = kn[j][e];
+    __syncthreads();
+    if (d0 + KS < hd) {
+      for (int j = 0; j < QL; j++) qn[j] = qp[j] ? *(const f4*) (qp[j] + d0 + KS) : f4{};
+      for (int j = 0; j < KL; j++) kn[j] = kp[j] ? *(const f4*) (kp[j] + d0 + KS) : f4{};
     }
-    for (int off = kWave / 2; off > 0; off >>= 1) v += __shfl_xor(v, off, kWave);
-    if (lane == 0) score[c] = v;
+#pragma unroll
+    for (int d = 0; d < KS; d++) {
+      f4 a[kIxR / 4], b[G];
+      for (int i = 0; i < kIxR / 4; i++) a[i] = *(const f4*) &qs[d][ty * 4 + i * (kIxM / (kIxR / 4))];
+      for (int g = 0; g < G; g++) b[g] = *(const f4*) &ks[d][tx * 4 + g * (kIxRows / G)];
+      for (int i = 0; i < kIxR; i++) {
+        const float av = a[i / 4][i % 4];
+        for (int g = 0; g < G; g++) acc[i][g] = acc[i][g] + f4{av, av, av, av} * b[g];
+      }
+    }
+  }
+  __syncthreads();
+  float(*vs)[kIxRows + 1] = (float(*)[kIxRows + 1]) lds;  // [slot][row]: relu(s) * w, in the staging's room
+  for (int i = 0; i < kIxR; i++) {
+    const int m = ty * 4 + (i / 4) * (kIxM / (kIxR / 4)) + i % 4;
+    const uint32_t t = t0 + m / kIxHeads, h = m % kIxHeads;
+    const bool real = t < n_tok && h < heads;  // an empty slot: 0, as a lane past the heads
+    const float wv = real ? w[(uint64_t) t * heads + h] : 0.0f;
+    for (int g = 0; g < G; g++)
+      for (int e = 0; e < 4; e++) vs[m][tx * 4 + g * (kIxRows / G) + e] = real ? fmaxf(acc[i][g][e], 0.0f) * wv : 0.0f;
+  }
+  __syncthreads();
+  for (int o = threadIdx.x; o < kIxTok * kIxRows; o += kIxThreads) {
+    const int tt = o / kIxRows, c = o % kIxRows;
+    const uint32_t t = t0 + tt;
+    if (t >= n_tok || c0 + c >= visible(pos, t, ratio)) continue;
+    float x[kIxHeads];
+    for (int h = 0; h < kIxHeads; h++) x[h] = vs[tt * kIxHeads + h][c];
+    for (int off = kIxHeads / 2; off > 0; off >>= 1)
+      for (int h = 0; h < off; h++) x[h] = x[h] + x[h + off];
+    score[(uint64_t) t * stride + c0 + c] = x[0];
   }
 }
 
@@ -181,12 +244,9 @@ extern "C" bool ops_index_score(const float* q, const float* keys, const float* 
                                 uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float* score,
                                 uint32_t stride, void* stream) {
   if (!ratio || !max_n || max_n > stride || !heads || heads > (uint32_t) kWave || !head_dim || !n_tok) return false;
-  // a token's blocks: enough with the others' to fill the GPU, each its q staged once for many rows (a row's score
-  // the same whichever block takes it)
-  const uint32_t rows = (max_n + kWaves - 1) / kWaves, fill = (kFillBlocks + n_tok - 1) / n_tok;
-  const uint32_t blocks = rows < fill ? rows : fill;
-  index_score_kernel<<<dim3(blocks, n_tok), kThreads, heads * (head_dim + 1) * sizeof(float), st(stream)>>>(
-      q, keys, w, pos, ratio, heads, head_dim, score, stride);
+  if (head_dim % kIxStep) return false;
+  index_score_kernel<<<dim3((max_n + kIxRows - 1) / kIxRows, (n_tok + kIxTok - 1) / kIxTok), kIxThreads, 0,
+                       st(stream)>>>(q, keys, w, pos, ratio, heads, head_dim, n_tok, score, stride);
   return ok();
 }
 
