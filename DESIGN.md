@@ -476,6 +476,13 @@ still in the window).
 - not built: maya's lazy stages (the head runs once for all five rows when the first passes), sampled drafts, the
   multi-sequence round. the drafter's numerics against an oracle (maya's needs DeepSeek's checkpoint shards, not here):
   the acceptance is the check so far.
+- 256 greedy tokens after a 512-token prompt, two texts of the corpus (at 60,000 / 30,000), against the best plain
+  decode (budget 88 GB, no drafter: mean 88.6 / 82.9 ms, 11.3 / 12.1 tok/s); the drafter's runs at 80 GB (their own
+  plain decode 11.0-11.8 tok/s: the 8 GB given to the drafter cost the trunk little). the confidence cut (each,
+  product): 0.5 / 0.5 21.8 / 26.0 tok/s (80 / 77% accepted, ~2.1 / 3.2 drafts a round kept); 0.3 / 0.3 22.0 / 24.9
+  (72 / 71%); 0.7 / 0.5 21.4 / 26.1 (87 / 78%). maya's defaults as good as any: 1.9-2.2x the best plain, every run
+  the same tokens as stepping one at a time. a round's time is the verify's (~110 ms of ~124 at 60,000: the trunk's
+  batch of 3-6 rows), the drafting ~14 ms.
 
 ## Engram's reads (measured, 2026-10-29)
 
