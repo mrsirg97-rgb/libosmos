@@ -460,7 +460,12 @@ matrices of one type on one x16 in one launch, each tile as alone (test_mm_gpu: 
 bits; the matrices swapped fails it): gate + up 125 -> 112 us, q_a + kv 64.5 -> 54.7 (scratch `mbpair.hip`, weights
 cycled through 512 MiB) - ~24 us a layer, ~1 ms a token; the x16 of their input once, not twice. 20 resident
 layers, the lane, interleaved fresh runs: p50 29.6 / 29.6 / 29.7 -> 29.1 / 29.1 / 29.1 ms (both fingerprints the
-same).
+same). what is left in a small Q5_K launch: by size at one token (pairs, `mbpair.hip`) its time is a fixed part
+plus ~190 GB/s - the fixed part ~19 us at 4,096 columns, ~6.5 at 1,280 (2 x 512 rows 85 / 81 GB/s, 2 x 8,192 177 /
+180): a block's length, so the last round's idle (a wave's 32-column steps are 128 in a 4,096 row, 16 a wave). kRegA
+with 2 / 4 / 8 steps decoded ahead of their WMMAs (the same sums): slower at every size (gate + up 112 -> 124 / 141
+/ 283 us) - the registers cost the waves that hid the loads already. not taken; the lever left is fewer, larger
+launches (a layer's matrices on one input together) or a layout of the weights (tubo's Q5_K repack: 177 -> 210).
 
 ## DSpark: the drafter (built, 2026-10-30)
 
