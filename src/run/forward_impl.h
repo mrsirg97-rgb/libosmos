@@ -74,8 +74,8 @@ typedef struct Sub
 } Sub;
 
 /* the step's device buffers, each [FWD_MAX_BATCH][...] a token - but the experts' (the FFN's input xf and output
-   moe, the router's, the shared and routed experts'), a layer's every sub-batch at once: [FWD_MAX_STEP][...] a token,
-   [FWD_MAX_STEP * n_used][...] a pair; and mid, f_post, f_comb [FWD_MAX_SUBS][FWD_MAX_BATCH][...], a sub-batch's
+   moe, the router's, the shared and routed experts'), a layer's every sub-batch at once: [max_tokens][...] a token,
+   [max_tokens * n_used][...] a pair; and mid, f_post, f_comb [n_subs][FWD_MAX_BATCH][...], a sub-batch's
    own across its layer's experts. xf, moe, mid, f_post and f_comb point at the running sub-batch's (Forward's xf0 ..
    the whole) */
 typedef struct Scratch
@@ -173,6 +173,7 @@ struct Forward
   int held_layer;                   /* the layer they are (-1: none): its sub-batches share them */
   bool *is_held;                    /* an expert unit among them */
   Sub sub[FWD_MAX_SUBS];            /* the step's sub-batches; the Forward's own fields the one running */
+  uint32_t n_subs, max_tokens;      /* the most sub-batches a step takes (ForwardOptions' max_tokens), and its tokens */
   uint32_t n_sub;
   uint64_t visits; /* the layers' expert steps so far: the held ones wanted again n_layers on (pool_release) */
   int64_t *rows;  /* each token's Engram rows, every Engram layer's: [token][layer][col] */

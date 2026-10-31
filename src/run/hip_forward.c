@@ -234,8 +234,8 @@ static bool scratch(Forward *f)
   const uint64_t row = gguf_bytes(f->w->layer[0].eg_embd ? f->w->layer[0].eg_embd->type : 0, g->engram_head_dim);
   const uint64_t cols = g->engram_cols, K = (uint64_t)g->n_used, FF = (uint64_t)g->expert_ff, hd = g->head_dim;
   const uint64_t ih = g->ix_head_dim, nh = g->ix_heads, egv = cols * (uint64_t)g->engram_head_dim;
-  const uint64_t B = FWD_MAX_BATCH, Fs = OPS_MAX_SELECT, NS = FWD_MAX_SUBS;
-  const uint64_t S = FWD_MAX_STEP, P = FWD_MAX_STEP * K; /* the experts': a layer's sub-batches at once */
+  const uint64_t B = FWD_MAX_BATCH, Fs = OPS_MAX_SELECT, NS = f->n_subs;
+  const uint64_t S = f->max_tokens, P = S * K; /* the experts': a layer's sub-batches at once (forward's max_tokens) */
   uint64_t widest = (uint64_t)g->o_groups * g->o_lora > D ? (uint64_t)g->o_groups * g->o_lora : D;
   widest = HQ > widest ? HQ : widest; /* the attention's output: wo_a's groups read it whole */
   const struct
@@ -301,7 +301,7 @@ static bool subs(Forward *f)
   s0->h = b->h, s0->f_pre = b->f_pre, s0->pos = b->pos, s0->sel = b->sel, s0->n_sel = b->n_sel;
   s0->oa_cnt = b->oa_cnt, s0->keep = b->keep, s0->back = b->back, s0->pin = f->pin, s0->rows = f->rows;
   bool ok = true;
-  for (int k = 1; ok && k < FWD_MAX_SUBS; k++)
+  for (uint32_t k = 1; ok && k < f->n_subs; k++)
   {
     Sub *s = &f->sub[k];
     ok = fwd_alloc(&s->h, B * hc * g->n_embd * F) && fwd_alloc(&s->f_pre, B * hc * F) && fwd_alloc(&s->pos, B * 4) &&
@@ -333,14 +333,24 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
                                const uint64_t *picks, char err[FORWARD_ERR])
 {
-  if (!w || n_layers < 1 || n_layers > w->geo.n_layers || !max_ctx)
-    return fwd_fail(err, "no weights, or layers or a context it cannot run"), NULL;
+  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS};
+  return forward_create_with(w, &o, err);
+}
+
+Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err[FORWARD_ERR])
+{
+  const int n_layers = o ? o->n_layers : 0;
+  const uint32_t max_ctx = o ? o->max_ctx : 0, max_tokens = o && o->max_tokens ? o->max_tokens : FORWARD_MAX_TOKENS;
+  const uint64_t budget = o ? o->budget : 0, *picks = o ? o->picks : NULL;
+  if (!w || n_layers < 1 || n_layers > w->geo.n_layers || !max_ctx || max_tokens > FORWARD_MAX_TOKENS)
+    return fwd_fail(err, "no weights, or layers, a context or a step it cannot run"), NULL;
   if (w->model->n_files > FWD_MAX_FILES)
     return fwd_fail(err, "more files than this build maps"), NULL;
   Forward *f = calloc(1, sizeof *f);
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
   f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->slots = w->geo.window + FWD_MAX_BATCH;
+  f->n_subs = (max_tokens + FWD_MAX_BATCH - 1) / FWD_MAX_BATCH, f->max_tokens = f->n_subs * FWD_MAX_BATCH;
   fwd_decoder(f);
   f->score_stride = 1; /* no compressed layer: never read */
   for (int l = 0; l < n_layers; l++)

@@ -20,9 +20,19 @@ typedef struct Seq Seq;
 typedef void (*forward_probe_fn)(const char *step, int layer, int index, void *dev, uint64_t n, bool ints,
                                  void *arg);
 
+typedef struct ForwardOptions
+{
+  int n_layers;
+  uint32_t max_ctx;
+  uint64_t budget;
+  const uint64_t *picks; /* forward_create_ranked's, or NULL */
+  uint32_t max_tokens;   /* a step's most tokens: 0 FORWARD_MAX_TOKENS, else up to whole MM_MAX_TOKENS */
+} ForwardOptions;
+
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
                                const uint64_t *picks, char err[FORWARD_ERR]);
+Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err[FORWARD_ERR]);
 void forward_destroy(Forward *f);
 void forward_probe(Forward *f, forward_probe_fn fn, void *arg);
 
@@ -63,6 +73,12 @@ forward_create_ranked
   forward_create, the resident experts chosen by picks ([layer][expert] for the n_layers layers, n_experts a layer:
   the router's picks counted on calibration text, forward_picks's) - a rank at a time, each layer's most-picked
   first, ties to the lower id. picks NULL: by id, as forward_create. which experts are resident changes no bit.
+
+forward_create_with
+  forward_create_ranked with a step's most tokens its own (max_tokens, at most FORWARD_MAX_TOKENS): the buffers a
+  step's experts take for all its sub-batches at once (~1 GB a sub-batch of MM_MAX_TOKENS) sized to it - a decode's
+  server gives that memory to the resident experts (a smaller step, a larger budget); forward_batch refuses a batch
+  past it. NULL o: as forward_create with no weights.
 
 forward_destroy
   everything it allocated (its Seqs first: seq_destroy). NULL is nothing to do.
@@ -115,7 +131,7 @@ forward_step
   stepped again.
 
 forward_batch
-  n tokens (1 .. FORWARD_MAX_TOKENS) at once, token i at seqs[i]'s next position: a sequence may be given several times,
+  n tokens (1 .. FORWARD_MAX_TOKENS, or the forward's max_tokens) at once, token i at seqs[i]'s next position: a sequence may be given several times,
   its tokens then at its next positions in the order given (a chunk of its prompt, or drafts to verify), each seeing
   the ones before it. a token's results are the same bits however it is batched - alone, beside other sequences, or
   in a chunk of its own: every step a token takes is summed in an order of its own, never the batch's. past

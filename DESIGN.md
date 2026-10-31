@@ -536,6 +536,13 @@ of the lane bit for bit).
   fails it); one launch at the widest entry's width ran an expert of one token at six: 14.1. a launch a count (as mm's
   column tiles): 16.3 (the default 16.9; plain 10.4 either way, budget 80 with the drafter). the lane on the GPU alone
   is even at this budget: what it is for is the CPU's half.
+- **the memory first** (the operator's order: the CPU kernel on top of it). a step's most tokens now the forward's own
+  (ForwardOptions' max_tokens; the step-wide experts' buffers ~1 GB a sub-batch of 2,048): at 2,048 with the drafter,
+  budget 88 GiB peaks at 103 GiB, 92 at 106 (the GTT's cap 107.6), 94 refused (the pool's room), 96 refused. maya's
+  prompts drafted at 92: 18.9 / 16.4 / 21.0 tok/s (18.8; 8K steps at 80: 16.9), streamed picks 10,122 (16,938). what
+  is left beside the budget at 92, ~14 GiB: the drafter 7.4 (its experts, resident: a round takes up to 45), the
+  scratch ~4 (the head's 2,048 rows of logits ~1 of it), the pool ~2 (a prompt's two layers). the price: an 8K
+  prompt's experts in 4 steps, not one (the merged experts' ~10%).
 
 ## Engram's reads (measured, 2026-10-29)
 

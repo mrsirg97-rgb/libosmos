@@ -205,8 +205,8 @@ static bool begin(Forward *f, char *err)
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
 {
   const Geometry *g = f->g;
-  if (!n || n > FORWARD_MAX_TOKENS)
-    return fwd_fail(err, "a batch of no tokens, or more than FORWARD_MAX_TOKENS");
+  if (!n || n > f->max_tokens)
+    return fwd_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
   if (!place(f, seqs, tokens, n, err))
     return false;
   if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess)

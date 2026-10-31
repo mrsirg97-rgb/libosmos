@@ -33,6 +33,7 @@
 extern "C" {
 #include "substrate/model/gguf.h"
 #include "substrate/model/weights.h"
+#include "substrate/gpu/mm.h"
 #include "substrate/run/forward.h"
 }
 
@@ -310,6 +311,21 @@ int main() {
               (unsigned long long) print[0], (unsigned long long) print[2]);
   CHECK(ok && print[0] == print[2]);
   forward_destroy(f);
+  // a step's most tokens its own (forward_create_with's max_tokens): a batch of them taken, one more refused
+  {
+    const ForwardOptions o = {kLayers, (uint32_t) MM_MAX_TOKENS + 64, kBudget, nullptr, MM_MAX_TOKENS};
+    CHECK(!forward_create_with(w, nullptr, ferr));
+    Forward* small = forward_create_with(w, &o, ferr);
+    CHECK(small);
+    Seq* s0 = seq_create(small, ferr);
+    std::vector<int32_t> toks(MM_MAX_TOKENS + 1, 0);
+    std::vector<Seq*> ss(MM_MAX_TOKENS + 1, s0);
+    CHECK(!forward_batch(small, ss.data(), toks.data(), MM_MAX_TOKENS + 1, ferr));
+    CHECK(forward_batch(small, ss.data(), toks.data(), MM_MAX_TOKENS, ferr));
+    seq_destroy(s0);
+    forward_destroy(small);
+    std::printf("  max_tokens %d: a batch of them taken, one more refused\n", MM_MAX_TOKENS);
+  }
   weights_destroy(w);
   gguf_destroy(g);
   gguf_destroy(eg);
