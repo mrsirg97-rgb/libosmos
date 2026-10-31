@@ -480,6 +480,16 @@ tile's repacked bytes start at or past its file bytes, so no write reaches a til
 read fwd_type's type. 20 resident layers, the lane, interleaved fresh runs: p50 29.2 / 29.1 / 29.2 -> 27.7 / 27.6 /
 27.6 ms; the load 9.8-10.9 -> 11.1-11.3 s; 8K prompts the same (warm 402.8 / 396.3 -> 402.2 / 410.1 tok/s).
 
+the hyper-connections at one token (2026-10-31, `rocprofv3` over 20 resident layers): a layer's 48 launches, ~2 us
+idle before each (~94 us a layer); beside them the mixes' chain twice a layer, ~47 us each - hc_dot_few 24 us (2 MB
+at ~87 GB/s: 1,600 threads, a thread 320 FMAs of its part one load at a time) and hc_mix 14.6 (the Sinkhorn on one
+lane). hc_dot_few now loads 16 ahead of their FMAs (in order: the same sums) - 10.5 us; hc_mix a lane an entry of
+the hc x hc matrix (hc^2 <= 32), each row's and column's sum the serial one's in its order through shuffles - 4.3 us.
+test_hc_gpu: the dots alone against a host replay and the tiled path, the mixes against the one-lane kernel kept as
+the reference (pre, post, comb; hc 4 and 6) - a reversed sum fails either. 20 resident layers 27.6 / 27.6 / 27.6 ->
+26.7 / 26.6 / 26.7 ms. what is left between launches: ~0.12 ms a layer, the fusions in reach (the kv's rms, rope,
+FP8 and ring write; the MoE's sum, add and hc_post; a norm and its x16) ~9 launches a layer, ~2%.
+
 ## DSpark: the drafter (built, 2026-10-30)
 
 DeepSeek's own drafter, as maya's tools/ds4/dspark_ref.py writes it from DeepSeek's inference/model.py: three

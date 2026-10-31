@@ -18,7 +18,11 @@ constexpr float kRouteEps = 1e-20f;
 constexpr float kEngramDotFloor = 1e-6f; // the gate's |dot| floor before the square root
 
 constexpr int kWide = 1024;  // the hc pre-norm's block: a token's whole stream (4 x 5,120) in one block's reach
-constexpr int kHcParts = OPS_HC_PARTS;  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
+constexpr int kHcParts = OPS_HC_PARTS;
+#ifndef HC_AHEAD
+#define HC_AHEAD 16
+#endif
+constexpr int kHcAhead = HC_AHEAD;  // hc_dot_few's loads in flight a thread (measured: DESIGN.md)  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
 
 // the sum of each thread's v over the block, by a fixed tree (every thread gets it)
 template <int NT = kThreads>
@@ -109,11 +113,17 @@ __global__ void hc_dot_few_kernel(const float* fn, const float* h, uint32_t nm, 
   const uint32_t r = j / kHcParts, p = j % kHcParts;
   const float* x = h + (uint64_t) t * len + p * seg;
   const float* w = fn + (uint64_t) r * len + p * seg;
+  const float* a = r < nm ? w : x;  // the norm's row: x with itself
   float acc = 0;
-  if (r < nm)
-    for (uint32_t i = 0; i < seg; i++) acc = fmaf(w[i], x[i], acc);
-  else
-    for (uint32_t i = 0; i < seg; i++) acc = fmaf(x[i], x[i], acc);
+  uint32_t i = 0;
+  for (; i + kHcAhead <= seg; i += kHcAhead) {  // kHcAhead loads in flight, then their FMAs in order
+    float av[kHcAhead], xv[kHcAhead];
+#pragma unroll
+    for (int u = 0; u < kHcAhead; u++) av[u] = a[i + u], xv[u] = x[i + u];
+#pragma unroll
+    for (int u = 0; u < kHcAhead; u++) acc = fmaf(av[u], xv[u], acc);
+  }
+  for (; i < seg; i++) acc = fmaf(a[i], x[i], acc);
   partial[((uint64_t) t * (nm + 1) + r) * kHcParts + p] = acc;
 }
 
@@ -130,9 +140,36 @@ __global__ void hc_mix_kernel(const float* partial, const float* scale, const fl
     rows[i] = s;
   }
   __syncthreads();
-  if (threadIdx.x != 0) return;
   auto whole = [&](uint32_t r) { return rows[r]; };
   const float r = 1.0f / sqrtf(whole(nm) / (float) n + eps);
+  if constexpr (hc * hc <= kWave) {  // a lane an entry: each sum the serial one's, in its order, through shuffles
+    const uint32_t lane = threadIdx.x, i = lane / hc, j = lane % hc;
+    if (lane < hc) pre[t * hc + lane] = sigmoid(whole(lane) * r * scale[0] + base[lane]) + hc_eps;
+    else if (lane < 2 * hc)
+      post[t * hc + lane - hc] = 2.0f * sigmoid(whole(lane) * r * scale[1] + base[lane]);
+    const bool live = lane < hc * hc;
+    float c = live ? whole(2 * hc + lane) * r * scale[2] + base[2 * hc + lane] : 0.0f;
+    auto at = [&](float v, uint32_t a) { return __shfl(v, (int) (a % kWave), kWave); };
+    float mx = -INFINITY;
+    for (uint32_t k = 0; k < hc; k++) mx = fmaxf(mx, at(c, i * hc + k));
+    const float e = expf(c - mx);
+    float sum = 0;
+    for (uint32_t k = 0; k < hc; k++) sum += at(e, i * hc + k);
+    c = e / sum + hc_eps;
+    for (uint32_t it = 0; it < iters; it++) {
+      if (it > 0) {
+        float rs = 0;
+        for (uint32_t k = 0; k < hc; k++) rs += at(c, i * hc + k);
+        c = c / (rs + hc_eps);
+      }
+      float cs = 0;
+      for (uint32_t k = 0; k < hc; k++) cs += at(c, k * hc + j);
+      c = c / (cs + hc_eps);
+    }
+    if (live) comb[(t * hc + i) * hc + j] = c;
+    return;
+  }
+  if (threadIdx.x != 0) return;
   float m[(2 + hc) * hc];
   for (uint32_t i = 0; i < nm; i++) m[i] = whole(i) * r;
   for (uint32_t i = 0; i < hc; i++) {
