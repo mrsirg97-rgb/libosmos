@@ -17,6 +17,7 @@ namespace quant {
 enum Type : uint32_t {
   kF32 = 0, kQ8_0 = 8, kQ5_K = 13, kQ6_K = 14, kIQ2_XXS = 16, kIQ2_XS = 17, kIQ4_NL = 20, kIQ1_M = 29, kBF16 = 30,
   kMXFP4 = 39,
+  kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
 constexpr int kChunk = 8;
@@ -27,6 +28,7 @@ constexpr float kIq1Delta = 0.125f;
 template <Type T> struct Block;
 template <> struct Block<kQ8_0> { static constexpr int values = kQ32, bytes = 34; };
 template <> struct Block<kQ5_K> { static constexpr int values = kQK, bytes = 176; };
+template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 template <> struct Block<kQ6_K> { static constexpr int values = kQK, bytes = 210; };
 template <> struct Block<kIQ2_XXS> { static constexpr int values = kQK, bytes = 66; };
 template <> struct Block<kIQ2_XS> { static constexpr int values = kQK, bytes = 74; };
@@ -64,6 +66,59 @@ template <> __device__ inline void decode<kQ5_K>(const uint8_t* b, int k, float*
   const uint64_t qs = *(const uint64_t*) (b + 48 + (g / 2) * 32 + l0);
   for (int j = 0; j < kChunk; j++) {
     const int q = (int) ((qs >> (8 * j + 4 * (g % 2))) & 0x0F) | (int) (((qh >> (8 * j + g)) & 1) << 4);
+    v[j] = __fsub_rn(mul(d, (float) q), dm);
+  }
+}
+
+// Q5_K repacked (kQ5_KR): rows in tiles of 16 (the matmul's), a tile's block of 256 columns kQ5rTile bytes - the
+// 16 rows' d and dmin (kQ5rHead: 4 B a row), then a segment a sub-block g of 32 columns (kQ5rSeg): the 32 slots of
+// 16 values (slot half * 16 + r: row r's chunks 4g + half and 4g + 2 + half - a lane's two chunks of mm's one-token
+// step) as 8 B of low nibbles (value i at nibble i) at slot * 8, their fifth bits (bit i) as 2 B at 256 + slot * 2,
+// then each row's 6-bit (s, m) as 2 B at 320 + r * 2. 16 x 180 bytes a tile's block (+2.3%): a wave's loads of a step
+// side by side, the scales unpacked once. the same (d * sc) * q - dmin * m: decode<kQ5_K>'s bits
+constexpr int kQ5rRows = 16, kQ5rHead = kQ5rRows * 4, kQ5rSeg = 352, kQ5rTile = kQ5rRows * 180;
+constexpr int kQ5rQh = 256, kQ5rSm = 320;
+static_assert(kQ5rHead + 8 * kQ5rSeg == kQ5rTile, "a tile's block: its head and 8 segments");
+
+// where a row's chunk c is - a block's bytes and the chunk in it (decode<T>'s b and k), in two halves: the row's base
+// (a matvec keeps one a row) and its chunk's place from it. Q5_KR's base its tile's, the chunk its block's in it at
+// (row % 16) * 32 + c's chunk in the block; any other type's the row's start and its block's
+template <Type T>
+__device__ inline const uint8_t* row_base(const uint8_t* w, uint32_t row, uint32_t cols) {
+  using B = Block<T>;
+  const uint64_t nb = cols / B::values;
+  if constexpr (T == kQ5_KR) return w + (uint64_t) (row / kQ5rRows) * nb * kQ5rTile;
+  else return w + (uint64_t) row * nb * B::bytes;
+}
+
+template <Type T>
+__device__ inline const uint8_t* chunk_at(const uint8_t* base, uint32_t row, uint32_t c, int* k) {
+  using B = Block<T>;
+  constexpr int per = B::values / kChunk;
+  if constexpr (T == kQ5_KR) {
+    *k = (int) (row % kQ5rRows) * per + (int) (c % per);
+    return base + (uint64_t) (c / per) * kQ5rTile;
+  } else {
+    (void) row;
+    *k = (int) (c % per);
+    return base + (uint64_t) (c / per) * B::bytes;
+  }
+}
+
+template <Type T>
+__device__ inline const uint8_t* at(const uint8_t* w, uint32_t row, uint32_t cols, uint32_t c, int* k) {
+  return chunk_at<T>(row_base<T>(w, row, cols), row, c, k);
+}
+
+template <> __device__ inline void decode<kQ5_KR>(const uint8_t* b, int k, float* v) {
+  const int r = k / 32, c = k % 32, g = c / 4, half = c % 2, gg = (c % 4) / 2, slot = half * kQ5rRows + r;
+  const uint8_t* seg = b + kQ5rHead + g * kQ5rSeg;
+  const uint32_t dd = *(const uint32_t*) (b + r * 4);
+  const uint32_t qs = (uint32_t) (*(const uint64_t*) (seg + slot * 8) >> (32 * gg));
+  const uint32_t qh = ld16(seg + kQ5rQh + slot * 2) >> (8 * gg), sm = ld16(seg + kQ5rSm + r * 2);
+  const float d = mul(f16(dd & 0xFFFF), (float) (sm & 0xFF)), dm = mul(f16(dd >> 16), (float) (sm >> 8));
+  for (int j = 0; j < kChunk; j++) {
+    const int q = (int) ((qs >> (4 * j)) & 0x0F) | (int) (((qh >> j) & 1) << 4);
     v[j] = __fsub_rn(mul(d, (float) q), dm);
   }
 }

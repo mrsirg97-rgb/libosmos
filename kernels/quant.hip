@@ -47,7 +47,51 @@ bool launch(const void* src, uint64_t values, float* dst, hipStream_t stream) {
   return hipGetLastError() == hipSuccess;
 }
 
+// a thread a row's block: its tile's block's head word, then per sub-block its (s, m) and its two slots - Q5_K's
+// fields moved, none computed (kernels/quant.h: kQ5_KR)
+__global__ void repack_q5k_kernel(const uint8_t* __restrict__ src, uint64_t items, uint32_t nb,
+                                  uint8_t* __restrict__ dst) {
+  using namespace quant;
+  const uint64_t stride = (uint64_t) gridDim.x * blockDim.x;
+  for (uint64_t i = (uint64_t) blockIdx.x * blockDim.x + threadIdx.x; i < items; i += stride) {
+    const uint64_t tb = i / kQ5rRows, t = tb / nb, b = tb % nb;
+    const int r = (int) (i % kQ5rRows);
+    const uint8_t* blk = src + ((t * kQ5rRows + r) * nb + b) * Block<kQ5_K>::bytes;
+    uint8_t* out = dst + tb * kQ5rTile;
+    for (int j = 0; j < 4; j++) out[r * 4 + j] = blk[j];
+    auto byte = [&](int x) { return (int) blk[4 + x]; };
+    for (int g = 0; g < 8; g++) {
+      uint8_t* seg = out + kQ5rHead + g * kQ5rSeg;
+      const int sc = g < 4 ? byte(g) & 0x3F : (byte(g + 4) & 0x0F) | ((byte(g - 4) >> 2) & 0x30);
+      const int m = g < 4 ? byte(g + 4) & 0x3F : (byte(g + 4) >> 4) | ((byte(g) >> 2) & 0x30);
+      seg[kQ5rSm + r * 2] = (uint8_t) sc, seg[kQ5rSm + r * 2 + 1] = (uint8_t) m;
+      for (int half = 0; half < 2; half++) {
+        uint64_t qs = 0;
+        uint32_t qh = 0;
+        for (int v = 0; v < 16; v++) {  // value v: chunk 4g + 2 (v / 8) + half's value v % 8
+          const int l0 = (2 * (v / 8) + half) * kChunk, j = v % 8;
+          const int lo = (blk[48 + (g / 2) * 32 + l0 + j] >> (4 * (g % 2))) & 0x0F, hi = (blk[16 + l0 + j] >> g) & 1;
+          const int q = lo | hi << 4;
+          qs |= (uint64_t) (q & 0x0F) << (4 * v), qh |= (uint32_t) (q >> 4) << v;
+        }
+        const int slot = half * kQ5rRows + r;
+        for (int j = 0; j < 8; j++) seg[slot * 8 + j] = (uint8_t) (qs >> (8 * j));
+        seg[kQ5rQh + slot * 2] = (uint8_t) qh, seg[kQ5rQh + slot * 2 + 1] = (uint8_t) (qh >> 8);
+      }
+    }
+  }
+}
+
 }  // namespace
+
+extern "C" bool quant_repack_q5k(const void* src, uint32_t rows, uint32_t cols, void* dst, void* stream) {
+  if (!src || !dst || src == dst || !rows || rows % quant::kQ5rRows || !cols || cols % quant::kQK) return false;
+  const uint64_t items = (uint64_t) rows * (cols / quant::kQK);
+  const uint64_t blocks = items / kThreads + 1 < kMaxBlocks ? items / kThreads + 1 : kMaxBlocks;
+  repack_q5k_kernel<<<(unsigned) blocks, kThreads, 0, (hipStream_t) stream>>>((const uint8_t*) src, items,
+                                                                              cols / quant::kQK, (uint8_t*) dst);
+  return hipGetLastError() == hipSuccess;
+}
 
 extern "C" bool quant_known(uint32_t type) {
   switch (type) {

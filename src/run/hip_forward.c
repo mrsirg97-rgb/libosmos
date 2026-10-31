@@ -12,6 +12,7 @@
 #include "substrate/gpu/ops.h"
 #include "substrate/model/rope.h"
 
+#define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
 #define FWD_FETCH_THREADS 4 /* DESIGN.md, the fetcher: 4 workers read at the SSD's ceiling (6.85 GB/s) */
 #define FWD_ROW_THREADS 64  /* DESIGN.md, Engram's reads: 64 threads 832,000 random rows/s, 128 no more */
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
@@ -139,6 +140,49 @@ static uint64_t stream_budget(const Forward *f, const PoolUnit *ex)
   return 2 * most > unit ? 2 * most : unit;
 }
 
+/* a resident Q5_K matrix the matmuls read (all but the embedding's rows, which ops_embed reads a token at a time):
+   repacked at load (quant_repack_q5k), its unit the file's bytes and room after them for the larger layout */
+static bool repacks(const Weights *w, const GgufTensor *t, uint32_t *rows, uint32_t *cols)
+{
+  if (t->type != QUANT_Q5_K || t == w->embed || t->n_dims < 2)
+    return false;
+  uint64_t r = 1;
+  for (uint32_t d = 1; d < t->n_dims; d++)
+    r *= t->dims[d];
+  *rows = (uint32_t)r, *cols = (uint32_t)t->dims[0];
+  return r % MM_TILE == 0 && t->dims[0] % QUANT_Q5_K_VALUES == 0 && r <= UINT32_MAX;
+}
+
+/* each repacked matrix in place: its tiles from the last back, FWD_REPACK_STAGE bytes of them at a time copied out
+   and repacked into their places - a tile's repacked bytes start at or past its file bytes' start (180 >= 176 a
+   block), so a chunk's writes never reach the tiles before it, which are still to be read */
+static bool repack_all(Forward *f, const GgufTensor *const *t_res, size_t n_t)
+{
+  void *stage = NULL;
+  bool ok = hipMalloc(&stage, FWD_REPACK_STAGE) == hipSuccess;
+  for (size_t i = 0; ok && i < n_t; i++)
+  {
+    uint32_t rows, cols;
+    if (!repacks(f->w, t_res[i], &rows, &cols))
+      continue;
+    uint8_t *dev = (uint8_t *)fwd_dev(f, t_res[i]);
+    const uint64_t in = (uint64_t)MM_TILE * (cols / QUANT_Q5_K_VALUES) * QUANT_Q5_K_BYTES;
+    const uint64_t out = QUANT_Q5_KR_BYTES(MM_TILE, cols), tiles = rows / MM_TILE;
+    const uint64_t per = FWD_REPACK_STAGE / in ? FWD_REPACK_STAGE / in : 1;
+    ok = per * in <= FWD_REPACK_STAGE;
+    for (uint64_t hi = tiles, lo; ok && hi > 0; hi = lo)
+    {
+      lo = hi > per ? hi - per : 0;
+      ok = hipMemcpy(stage, dev + lo * in, (hi - lo) * in, hipMemcpyDeviceToDevice) == hipSuccess &&
+           quant_repack_q5k(stage, (uint32_t)((hi - lo) * MM_TILE), cols, dev + lo * out, NULL) &&
+           hipDeviceSynchronize() == hipSuccess;
+    }
+    f->ttype[t_res[i] - f->w->model->tensors] = QUANT_Q5_KR;
+  }
+  hipFree(stage);
+  return ok;
+}
+
 /* the units: each layer's experts (the pool's to stream, but the resident ones), then every other tensor the layers
    use - all of them resident (resident.h). Engram's tables are read a row at a time and are not units */
 static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
@@ -151,10 +195,11 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   PoolUnit *res = calloc(n_res_max + f->n_expert_units, sizeof *res);
   const GgufTensor **t_res = calloc(n_res_max, sizeof *t_res);
   f->tdev = calloc(w->model->n_tensors, sizeof *f->tdev);
+  f->ttype = calloc(w->model->n_tensors, sizeof *f->ttype);
   f->rix = calloc(f->n_expert_units, sizeof *f->rix);
   f->is_held = calloc(f->n_expert_units, sizeof *f->is_held);
   f->held_layer = -1;
-  bool ok = all && res && t_res && f->tdev && f->rix && f->is_held &&
+  bool ok = all && res && t_res && f->tdev && f->ttype && f->rix && f->is_held &&
             weights_experts(w, f->fds, all, (size_t)w->geo.n_layers * E) == (size_t)w->geo.n_layers * E;
   if (!ok)
   {
@@ -172,7 +217,12 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
         t_res[n_t++] = t[i];
   }
   for (size_t i = 0; i < n_t; i++)
+  {
+    uint32_t rows, cols;
     res[i] = (PoolUnit){.part = {{f->fds[t_res[i]->file], t_res[i]->offset, t_res[i]->bytes}}, .n_parts = 1};
+    if (repacks(w, t_res[i], &rows, &cols)) /* the room the repacked layout needs past the file's bytes */
+      res[i].part[1] = (PoolRange){-1, 0, QUANT_Q5_KR_BYTES(rows, cols) - t_res[i]->bytes}, res[i].n_parts = 2;
+  }
   const size_t n_res = choose(f, all, res, n_t, budget, picks, err);
   char perr[POOL_ERR] = "";
   if (!n_res)
@@ -190,6 +240,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     ok = resident_dev(f->res, i, dev);
     f->tdev[t_res[i] - w->model->tensors] = dev[0];
   }
+  ok = ok && (repack_all(f, t_res, n_t) || fwd_fail(err, "the Q5_K matrices' repack failed"));
   free(res), free(t_res);
   f->units = all; /* the swaps' reads */
   return ok;
@@ -212,7 +263,7 @@ static bool oa_tables(Forward *f, char *err)
             fwd_put(f->oa_yoff, yo, G * 4);
   for (int l = 0; ok && l < f->n_layers; l++)
     for (uint32_t k = 0; k < G; k++)
-      tab[(size_t)l * G + k] = fwd_dev(f, f->w->layer[l].out_a) + k * (f->w->layer[l].out_a->bytes / G);
+      tab[(size_t)l * G + k] = fwd_dev(f, f->w->layer[l].out_a) + k * (fwd_bytes(f, f->w->layer[l].out_a) / G);
   ok = ok && fwd_put(f->oa_tab, tab, (uint64_t)f->n_layers * G * sizeof *tab);
   free(tab);
   return ok || fwd_fail(err, "a GPU allocation refused (the wo_a tables)");
@@ -404,6 +455,7 @@ void forward_destroy(Forward *f)
   rowread_destroy(f->eg_read);
   free(f->eg_off);
   free(f->tdev);
+  free(f->ttype);
   hipFree(f->oa_tab);
   hipFree(f->oa_xoff);
   hipFree(f->oa_yoff);

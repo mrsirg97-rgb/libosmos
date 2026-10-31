@@ -14,6 +14,7 @@
 #include "substrate/mem/resident.h"
 #include "substrate/mem/rowread.h"
 #include "substrate/gpu/mm.h"
+#include "substrate/gpu/quant.h"
 #include "substrate/gpu/mv.h"
 #include "substrate/gpu/ops.h"
 #include "substrate/model/engram.h"
@@ -130,6 +131,7 @@ struct Forward
   uint64_t *heat_at, *seen; /* the step its heat was last updated at; its picks folded into the heat so far */
   uint64_t steps, swaps;    /* the steps ended; the experts swapped into the resident set */
   const uint8_t **tdev;     /* a model tensor's device pointer (index: its place in the Gguf), resident ones only */
+  uint32_t *ttype;          /* its type as the GPU reads it when not the file's (QUANT_Q5_KR: repacked), else 0 */
   const void **oa_tab;      /* each layer's wo_a groups for mm_group: [layer][o_groups], on the device */
   uint32_t *oa_xoff, *oa_yoff; /* group k: x at k * its 4,096 (of a token's attention), y at k * o_lora */
   int eg_fd;
@@ -208,6 +210,18 @@ struct Seq
 static inline const uint8_t *fwd_dev(const Forward *f, const GgufTensor *t)
 {
   return f->tdev[t - f->w->model->tensors];
+}
+
+/* the type the kernels read a resident tensor as (the file's, or QUANT_Q5_KR once repacked), and its bytes so */
+static inline uint32_t fwd_type(const Forward *f, const GgufTensor *t)
+{
+  const uint32_t k = f->ttype[t - f->w->model->tensors];
+  return k ? k : t->type;
+}
+
+static inline uint64_t fwd_bytes(const Forward *f, const GgufTensor *t)
+{
+  return fwd_type(f, t) == QUANT_Q5_KR ? t->bytes / QUANT_Q5_K_BYTES * QUANT_Q5_KR_BYTES_A_BLOCK : t->bytes;
 }
 
 bool fwd_fail(char *err, const char *why);

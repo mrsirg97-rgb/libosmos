@@ -11,10 +11,8 @@ constexpr int kWavesPerBlock = 8;
 
 // U chunks c0, c0 + 32, ... of R rows into acc, for NT tokens: x loaded, then the weights decoded, then summed
 template <quant::Type T, int NT, int R, int U>
-__device__ inline void step(const uint8_t* const* base, uint32_t c0, uint32_t xs, const float* __restrict__ x,
-                            float (&acc)[R][NT]) {
-  using B = quant::Block<T>;
-  constexpr int per = B::values / quant::kChunk;
+__device__ inline void step(const uint8_t* const* base, const uint32_t* rid, uint32_t c0, uint32_t xs,
+                            const float* __restrict__ x, float (&acc)[R][NT]) {
   float4 xa[U][NT], xb[U][NT];
   for (int u = 0; u < U; u++)
     for (int t = 0; t < NT; t++) {
@@ -24,7 +22,11 @@ __device__ inline void step(const uint8_t* const* base, uint32_t c0, uint32_t xs
   float v[U][R][quant::kChunk];
   for (int u = 0; u < U; u++) {
     const uint32_t c = c0 + u * kWave;
-    for (int q = 0; q < R; q++) quant::decode<T>(base[q] + (c / per) * B::bytes, (int) (c % per), v[u][q]);
+    for (int q = 0; q < R; q++) {
+      int k;
+      const uint8_t* b = quant::chunk_at<T>(base[q], rid[q], c, &k);
+      quant::decode<T>(b, k, v[u][q]);
+    }
   }
   for (int u = 0; u < U; u++)
     for (int t = 0; t < NT; t++) {
@@ -42,13 +44,13 @@ __device__ inline void step(const uint8_t* const* base, uint32_t c0, uint32_t xs
 template <quant::Type T, int NT, int R, int U>
 __device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols, const float* __restrict__ x,
                                uint32_t xs, float* __restrict__ y, uint32_t ys, uint32_t live = NT) {
-  using B = quant::Block<T>;
   const uint32_t row0 = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * R;
   const int lane = threadIdx.x % kWave;
   if (row0 >= rows) return;  // the whole wave: no lane of it is left to a shuffle
-  const uint64_t row_bytes = (uint64_t) (cols / B::values) * B::bytes;
   const uint8_t* base[R];
-  for (int q = 0; q < R; q++) base[q] = w + (row0 + q < rows ? row0 + q : row0) * row_bytes;  // past the end: unused
+  uint32_t rid[R];
+  for (int q = 0; q < R; q++)  // past the end: unused
+    rid[q] = row0 + q < rows ? row0 + q : row0, base[q] = quant::row_base<T>(w, rid[q], cols);
   const uint32_t chunks = cols / quant::kChunk;
   float acc[R][NT];
   for (int q = 0; q < R; q++)
@@ -56,8 +58,8 @@ __device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uin
   // whole groups of U chunks, nothing branching inside one, so all U's loads (x's first: they depend on nothing) go
   // out before any is waited for; then the rest one chunk at a time. either way each row's chunks in order
   const uint32_t whole = chunks / (kWave * U) * (kWave * U);
-  for (uint32_t c0 = lane; c0 < whole; c0 += kWave * U) step<T, NT, R, U>(base, c0, xs, x, acc);
-  for (uint32_t c0 = whole + lane; c0 < chunks; c0 += kWave) step<T, NT, R, 1>(base, c0, xs, x, acc);
+  for (uint32_t c0 = lane; c0 < whole; c0 += kWave * U) step<T, NT, R, U>(base, rid, c0, xs, x, acc);
+  for (uint32_t c0 = whole + lane; c0 < chunks; c0 += kWave) step<T, NT, R, 1>(base, rid, c0, xs, x, acc);
   for (int q = 0; q < R; q++)
     for (int t = 0; t < NT; t++) {
       float s = acc[q][t];
@@ -82,14 +84,13 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void wide_kernel(const uint8
                                                                       uint32_t cols, const float* __restrict__ x,
                                                                       uint32_t xs, uint32_t n_tok,
                                                                       float* __restrict__ y, uint32_t ys) {
-  using B = quant::Block<T>;
-  constexpr int per = B::values / quant::kChunk, threads = kWave * kWavesPerBlock;
+  constexpr int threads = kWave * kWavesPerBlock;
   __shared__ float4 xl[NW][2][kWave];  // [token][half of a chunk][chunk of the step]: a lane's float4s side by side
   const uint32_t t0 = blockIdx.y * NW, row0 = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * R;
   const int lane = threadIdx.x % kWave;
-  const uint64_t row_bytes = (uint64_t) (cols / B::values) * B::bytes;
   const uint8_t* base[R];  // a row past the end reads row 0 and stores nothing (the wave still joins the barriers)
-  for (int q = 0; q < R; q++) base[q] = w + (row0 + q < rows ? row0 + q : 0) * row_bytes;
+  uint32_t rid[R];
+  for (int q = 0; q < R; q++) rid[q] = row0 + q < rows ? row0 + q : 0, base[q] = quant::row_base<T>(w, rid[q], cols);
   const uint32_t chunks = cols / quant::kChunk;
   float acc[R][NW];
   for (int q = 0; q < R; q++)
@@ -105,7 +106,11 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void wide_kernel(const uint8
     const uint32_t c = s + lane;
     if (c < chunks) {
       float v[R][quant::kChunk];
-      for (int q = 0; q < R; q++) quant::decode<T>(base[q] + (c / per) * B::bytes, (int) (c % per), v[q]);
+      for (int q = 0; q < R; q++) {
+        int k;
+        const uint8_t* b = quant::chunk_at<T>(base[q], rid[q], c, &k);
+        quant::decode<T>(b, k, v[q]);
+      }
       for (int t = 0; t < NW; t++) {
         const float4 a = xl[t][0][lane], b = xl[t][1][lane];
         for (int q = 0; q < R; q++) {

@@ -51,7 +51,7 @@ constexpr bool kPipe = CT > 1 && G <= 2;
 // m1.hip, one token: Q5_K's q_b 181 -> 143 us, wo_a's 8 groups 185 -> 147, the shared expert's 62 -> 60; the IQ
 // experts' and Q6_K's, Q8_0's slower or the same: their slabs' LDS layout is the better)
 template <quant::Type T>
-constexpr bool kRegA = T == quant::kQ5_K;
+constexpr bool kRegA = T == quant::kQ5_K || T == quant::kQ5_KR;
 
 __device__ inline h8 lane_other_half(h8 v) {  // lane l ^ 16's 8 halves
   typedef uint32_t u4 __attribute__((ext_vector_type(4)));
@@ -73,23 +73,22 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
                                                            uint32_t cols, const _Float16* __restrict__ x16,
                                                            uint32_t xts, uint32_t c0, uint32_t n,
                                                            float* __restrict__ y, uint32_t ys, _Float16* lds_all) {
-  using B = quant::Block<T>;
-  constexpr int per = B::values / quant::kChunk, SL = S::kSlab, G = SL / kTile;
+  constexpr int SL = S::kSlab, G = SL / kTile;
   const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
   _Float16* lds = lds_all + wave * kTile * S::kRowLds;
-  const uint64_t row_bytes = (uint64_t) (cols / B::values) * B::bytes;
   const int tiles = (int) ((n - c0 + kTile - 1) / kTile) < CT ? (int) ((n - c0 + kTile - 1) / kTile) : CT;
   const _Float16* xb[CT];  // each tile's fragments of this lane: its column, a step kFrag on
   for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
   f8 acc[CT] = {};
   if constexpr (CT == 1 && kRegA<T>) {  // the A operand straight from the decode (kRegA)
-    const uint8_t* rw = w + (uint64_t) (row0 + col) * row_bytes;
     for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
       h16 a[G], bx[G];
 #pragma unroll
       for (int g = 0; g < G; g++) {
         const uint32_t k = k0 / quant::kChunk + 2 * g + half;  // this lane's chunk of the step: the even, or the odd
-        const h8 mine = quant::decode_h<T>(rw + (k / per) * B::bytes, (int) (k % per)), theirs = lane_other_half(mine);
+        int kk;
+        const uint8_t* p = quant::at<T>(w, row0 + col, cols, k, &kk);
+        const h8 mine = quant::decode_h<T>(p, kk), theirs = lane_other_half(mine);
         for (int j = 0; j < quant::kChunk; j++)
           a[g][j] = half ? theirs[j] : mine[j], a[g][quant::kChunk + j] = half ? mine[j] : theirs[j];
       }
@@ -104,7 +103,8 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
       for (int i = i0; i < i0 + S::kUnroll; i++) {
         const int d = lane + kWave * i, r = d / (SL / quant::kChunk), c = d % (SL / quant::kChunk);
         const uint32_t k = k0 / quant::kChunk + c;  // the chunk of the row
-        const h8 hv = quant::decode_h<T>(w + (uint64_t) (row0 + r) * row_bytes + (k / per) * B::bytes, (int) (k % per));
+        int kk;
+        const h8 hv = quant::decode_h<T>(quant::at<T>(w, row0 + r, cols, k, &kk), kk);
         *(h8*) (lds + r * S::kRowLds + c * quant::kChunk) = hv;  // 16 bytes, aligned: kRowLds * 2 a multiple of 16
       }
     }

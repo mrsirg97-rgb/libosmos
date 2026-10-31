@@ -22,7 +22,8 @@ constexpr Tune tune(quant::Type t, int nt) {
     case quant::kIQ2_XXS:
     case quant::kIQ2_XS: return (Tune[]){{1, 4}, {1, 2}, {2, 2}, {2, 2}}[band(nt)];
     case quant::kQ6_K: return (Tune[]){{1, 4}, {1, 2}, {1, 1}, {2, 1}}[band(nt)];
-    case quant::kQ5_K: return {2, 1};
+    case quant::kQ5_K:
+    case quant::kQ5_KR: return {2, 1};
     case quant::kQ8_0: return nt > 4 ? Tune{2, 1} : Tune{1, 1};
     default: return {1, 1};
   }
@@ -145,6 +146,7 @@ extern "C" bool mv_strided(uint32_t type, const void* w, uint32_t rows, uint32_t
     case quant::kF32: return by_tokens<quant::kF32>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ8_0: return by_tokens<quant::kQ8_0>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ5_K: return by_tokens<quant::kQ5_K>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kQ5_KR: return by_tokens<quant::kQ5_KR>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ6_K: return by_tokens<quant::kQ6_K>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kIQ2_XXS: return by_tokens<quant::kIQ2_XXS>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kIQ2_XS: return by_tokens<quant::kIQ2_XS>(w, rows, cols, x, xs, n_tok, y, ys, s);

@@ -151,6 +151,35 @@ static void shape(const Gguf* g, const Shape& s) {
     CHECK(!mm_run2(t->type, w, r0, y, rows, w1, r1, y2, r1 - 1, cols, x16, kT, nullptr));  // y1's rows too short
     CHECK(hipFree(y2) == hipSuccess);
   }
+  double r_us = 0;
+  if (t->type == 13) {  // Q5_K repacked (quant_repack_q5k): mm at 1 and 16 tokens and mv at 3, each Q5_K's bits
+    const uint64_t rb = QUANT_Q5_KR_BYTES(rows, cols);
+    uint8_t* wr = nullptr;
+    CHECK(hipMalloc(&wr, rb * copies) == hipSuccess);
+    for (int i = 0; i < copies; i++) CHECK(quant_repack_q5k(w + i * bytes, rows, cols, wr + i * rb, nullptr));
+    CHECK(!quant_repack_q5k(w, rows + 8, cols, wr, nullptr) && !quant_repack_q5k(w, rows, cols, w, nullptr));
+    std::vector<float> got(a.size()), ref(a.size());
+    CHECK(mm_x16(x, cols, kT, cols, x16, over, nullptr) &&
+          mm_run(QUANT_Q5_KR, wr, rows, cols, x16, kT, y, rows, nullptr));
+    CHECK(hipMemcpy(got.data(), y, got.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(std::memcmp(got.data(), a.data(), a.size() * 4) == 0);
+    CHECK(mm_x16(x + 5 * cols, cols, 1, cols, x16, over, nullptr) &&
+          mm_run(QUANT_Q5_KR, wr, rows, cols, x16, 1, y1, rows, nullptr));
+    CHECK(hipMemcpy(one.data(), y1, rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(std::memcmp(one.data(), &a[(size_t) 5 * rows], rows * 4) == 0);
+    CHECK(mv_strided(13, w, rows, cols, x, cols, 3, y, rows, nullptr) &&
+          hipMemcpy(ref.data(), y, (size_t) 3 * rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(mv_strided(QUANT_Q5_KR, wr, rows, cols, x, cols, 3, y, rows, nullptr) &&
+          hipMemcpy(got.data(), y, (size_t) 3 * rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(std::memcmp(got.data(), ref.data(), (size_t) 3 * rows * 4) == 0);
+    void* x16t = nullptr;
+    CHECK(hipMalloc(&x16t, (size_t) MM_TILE * cols * 2) == hipSuccess &&
+          hipMemset(x16t, 0, (size_t) MM_TILE * cols * 2) == hipSuccess);
+    r_us = time_us([&](int i) {
+      CHECK(mm_run(QUANT_Q5_KR, wr + (i % copies) * rb, rows, cols, x16t, 1, y1, rows, nullptr));
+    });
+    CHECK(hipFree(x16t) == hipSuccess && hipFree(wr) == hipSuccess);
+  }
   int32_t overflow = 0;
   CHECK(hipMemcpy(&overflow, over, 4, hipMemcpyDeviceToHost) == hipSuccess && overflow == 0);
 
@@ -196,9 +225,11 @@ static void shape(const Gguf* g, const Shape& s) {
   char name[80];
   std::snprintf(name, sizeof name, s.expert < 0 ? "%s" : "%s[%d]", s.tensor, s.expert);
   std::printf("  %-31s %5u x %-6u err <= %4.1f u|wx| (bound %4.0f), f16 %.1e rms | GB/s: mv 1 %5.1f, mm 1 %5.1f, "
-              "4 %5.1f, 16 %5.1f (%.1f tokens a mv pass), 256 %5.1f (%.0f)\n", name, cols, rows, worst, depth,
+              "4 %5.1f, 16 %5.1f (%.1f tokens a mv pass), 256 %5.1f (%.0f)", name, cols, rows, worst, depth,
               std::sqrt(f16_rms / ref_rms), bytes / mv_us / 1e3, bytes / us[0] / 1e3, bytes / us[1] / 1e3,
               bytes / us[2] / 1e3, kT * mv_us / us[2], bytes / us[3] / 1e3, kBig * mv_us / us[3]);
+  if (r_us > 0) std::printf("; repacked mm 1 %5.1f (its bits Q5_K's)", bytes / r_us / 1e3);
+  std::printf("\n");
   CHECK(hipFree(w) == hipSuccess && hipFree(x) == hipSuccess && hipFree(xrv) == hipSuccess);
   CHECK(hipFree(y) == hipSuccess && hipFree(y1) == hipSuccess);
   CHECK(hipFree(x16) == hipSuccess && hipFree(over) == hipSuccess);
@@ -264,6 +295,7 @@ int main() {
   for (const Shape& s : kShapes) shape(g, s);
   gguf_destroy(g);
   std::printf("[test_mm_gpu] ok: every token the same bits alone, among 16, among 16 reversed, and among 33, 64 and "
-              "%d (at its place and at another); a pair in one launch each its own bits\n", kBig);
+              "%d (at its place and at another); a pair in one launch each its own bits; Q5_K repacked its bits\n",
+              kBig);
   return 0;
 }

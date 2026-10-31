@@ -467,6 +467,19 @@ with 2 / 4 / 8 steps decoded ahead of their WMMAs (the same sums): slower at eve
 / 283 us) - the registers cost the waves that hid the loads already. not taken; the lever left is fewer, larger
 launches (a layer's matrices on one input together) or a layout of the weights (tubo's Q5_K repack: 177 -> 210).
 
+Q5_K repacked (2026-10-31; kernels/quant.h kQ5_KR, quant_repack_q5k): a block's decode loaded 32 bytes a lane for 8
+values (d and dmin, the 12 packed scale bytes, 8 of qh, 8 of qs), 16 lanes 16 rows apart. now a 16-row tile's block is
+its rows' d and dmin, then a segment a 32-column step - the 32 lanes' 16 values each side by side (8 B of nibbles, 2
+of fifth bits: the wave's loads one 320-byte run) and the rows' 6-bit (s, m) unpacked: 180 bytes a row's block
+(+2.3%). the same (d * s) * q - dmin * m, so the same f16 values and WMMAs: mm at 1 and 16 tokens and mv at 3 give
+Q5_K's bits (test_mm_gpu, every Q5_K shape), and both fingerprints are the same. at one token (test_mm_gpu, weights
+cycled): q_b 195 -> 222 GB/s, the shared gate 134 -> 199, the head 196 -> 225 (scratch `q5r.hip` first: wo_a 157 ->
+209). the forward repacks every resident Q5_K matrix but the embedding's rows at load, in place: its unit the file's
+bytes and room after them (resident.h: a part of no file), its tiles from the last back through a 64 MiB stage (a
+tile's repacked bytes start at or past its file bytes, so no write reaches a tile still to be read); the matmuls
+read fwd_type's type. 20 resident layers, the lane, interleaved fresh runs: p50 29.2 / 29.1 / 29.2 -> 27.7 / 27.6 /
+27.6 ms; the load 9.8-10.9 -> 11.1-11.3 s; 8K prompts the same (warm 402.8 / 396.3 -> 402.2 / 410.1 tok/s).
+
 ## DSpark: the drafter (built, 2026-10-30)
 
 DeepSeek's own drafter, as maya's tools/ds4/dspark_ref.py writes it from DeepSeek's inference/model.py: three

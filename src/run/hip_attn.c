@@ -188,8 +188,8 @@ bool fwd_attention(Forward *f, int l, char *err)
      every group in one launch, group k over its 4,096 of each (the groups' token counts the step's: forward_batch
      sends them) */
   ok = mm_x16_attn(b->o, H * HD, n, H * HD, HD, RD, freqs, b->pos, b->x16, b->overflow, NULL) &&
-       mm_group(L->out_a->type, f->oa_tab + (size_t)l * OG, b->oa_cnt, OG, n, OL, oin, b->x16, f->oa_xoff, H * HD,
-                b->oa, f->oa_yoff, OG * OL, NULL);
+       mm_group(fwd_type(f, L->out_a), f->oa_tab + (size_t)l * OG, b->oa_cnt, OG, n, OL, oin, b->x16, f->oa_xoff,
+                H * HD, b->oa, f->oa_yoff, OG * OL, NULL);
   ok = ok && fwd_mat(f, L->out_b, fwd_dev(f, L->out_b), D, OG * OL, b->oa, OG * OL, n, b->y, D);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention's output)");

@@ -300,7 +300,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     if (!head) /* the head for every row at once, the first time a row passes: the head read once */
     {
       head = ops_rms(d->xc, D, D, d->norm, g->rms_eps, T, d->xn, D, NULL) &&
-             mv_strided(f->w->output->type, fwd_dev(f, f->w->output), V, D, d->xn, D, T, d->vocab, V, NULL);
+             mv_strided(fwd_type(f, f->w->output), fwd_dev(f, f->w->output), V, D, d->xn, D, T, d->vocab, V, NULL);
       if (!head)
         return fail(err, "a GPU call failed (the drafter's head)"), -1;
     }

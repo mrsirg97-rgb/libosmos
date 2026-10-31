@@ -24,6 +24,7 @@ constexpr int kThreads = 256;
 template <quant::Type T> struct Tuned { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ8_0> { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 4; };
 template <> struct Tuned<quant::kQ5_K> { using S = mm::Shape<32, 8, 2>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kQ5_KR> : Tuned<quant::kQ5_K> {};
 template <> struct Tuned<quant::kIQ1_M> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
@@ -151,6 +152,7 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
   switch (type) {
     case quant::kQ8_0: return launch<quant::kQ8_0>(m, cols, x16, n, s);
     case quant::kQ5_K: return launch<quant::kQ5_K>(m, cols, x16, n, s);
+    case quant::kQ5_KR: return launch<quant::kQ5_KR>(m, cols, x16, n, s);
     case quant::kQ6_K: return launch<quant::kQ6_K>(m, cols, x16, n, s);
     case quant::kIQ1_M: return launch<quant::kIQ1_M>(m, cols, x16, n, s);
     case quant::kIQ2_XXS: return launch<quant::kIQ2_XXS>(m, cols, x16, n, s);
@@ -163,8 +165,8 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
 
 extern "C" bool mm_known(uint32_t type) {
   switch (type) {
-    case quant::kQ8_0: case quant::kQ5_K: case quant::kQ6_K: case quant::kIQ1_M: case quant::kIQ2_XXS:
-    case quant::kIQ2_XS: return true;
+    case quant::kQ8_0: case quant::kQ5_K: case quant::kQ5_KR: case quant::kQ6_K: case quant::kIQ1_M:
+    case quant::kIQ2_XXS: case quant::kIQ2_XS: return true;
     default: return false;
   }
 }
@@ -173,7 +175,7 @@ extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
   switch (type) {
 #define TILES(t) \
   case quant::t: return col_tiles<quant::t>(n);
-    TILES(kQ8_0) TILES(kQ5_K) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS)
+    TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS)
 #undef TILES
     default: return 0;
   }
@@ -231,7 +233,7 @@ extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt
 #define GROUP(t)                                                                                                     \
   case quant::t:                                                                                                     \
     return group_launch<quant::t>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS)
+    GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS)
 #undef GROUP
     default: return false;
   }
