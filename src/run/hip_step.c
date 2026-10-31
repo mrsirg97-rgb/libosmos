@@ -22,10 +22,11 @@ Seq *seq_create(Forward *f, char err[FORWARD_ERR])
     if (ok && g->kv_source[l])
     {
       const uint64_t rows = f->max_ctx / (uint64_t)g->compress[l] + 1;
+      const uint64_t pend = FWD_PEND_ROWS(f->step, g->compress[l]);
       ok = fwd_alloc(&s->ckv[l], rows * hd * F) &&
            (!g->ix_source[l] || fwd_alloc(&s->ik[l], rows * (uint64_t)g->ix_head_dim * F)) &&
-           (g->compress[l] < 2 || (fwd_alloc(&s->pend_kvc[l], (uint64_t)FWD_PEND_ROWS(g->compress[l]) * hd * F) &&
-                                   fwd_alloc(&s->pend_sc[l], (uint64_t)FWD_PEND_ROWS(g->compress[l]) * hd * F)));
+           (g->compress[l] < 2 ||
+            (fwd_alloc(&s->pend_kvc[l], pend * hd * F) && fwd_alloc(&s->pend_sc[l], pend * hd * F)));
     }
   }
   if (!ok)
@@ -134,7 +135,7 @@ static void enter(Forward *f, uint32_t k)
   b->h = s->h, b->f_pre = s->f_pre, b->pos = s->pos, b->sel = s->sel, b->n_sel = s->n_sel, b->oa_cnt = s->oa_cnt;
   b->keep = s->keep, b->back = s->back, f->pin = s->pin, f->rows = s->rows;
   f->n = s->n, f->n_all = s->n_all, f->n_keep = s->n_keep, f->at = s->at;
-  const uint64_t B = FWD_MAX_BATCH, hc = f->g->hc, D = f->g->n_embd;
+  const uint64_t B = f->step, hc = f->g->hc, D = f->g->n_embd;
   b->mid = f->mid0 + k * B * hc * D, b->f_post = f->f_post0 + k * B * hc, b->f_comb = f->f_comb0 + k * B * hc * hc;
   b->xf = f->xf0 + (uint64_t)s->xrow * D, b->moe = f->moe0 + (uint64_t)s->xrow * D;
   memcpy(f->bs, s->bs, s->n_all * sizeof *f->bs);
@@ -284,7 +285,7 @@ bool fwd_taps_on(Forward *f)
   f->n_tap = 0;
   for (int l = 0; l < f->n_layers; l++)
     f->tap_of[l] = f->g->dspark_target[l] ? f->n_tap++ : -1;
-  return f->n_tap && fwd_alloc(&f->taps, (uint64_t)FWD_MAX_BATCH * f->n_tap * f->g->n_embd * sizeof(float));
+  return f->n_tap && fwd_alloc(&f->taps, (uint64_t)f->step * f->n_tap * f->g->n_embd * sizeof(float));
 }
 
 bool seq_rollback(Seq *s, uint32_t n)

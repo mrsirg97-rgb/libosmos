@@ -24,7 +24,7 @@
 #define FWD_MAX_BATCH MM_MAX_TOKENS                 /* a step's tokens: the matmul's */
 #define FWD_MAX_SUBS FORWARD_SUBS
 /* a ratio r source's pending positions a sequence: a step's and the r - 1 before them, each row's r all held */
-#define FWD_PEND_ROWS(r) (FWD_MAX_BATCH + (r) - 1)
+#define FWD_PEND_ROWS(step, r) ((step) + (r) - 1)
 #define FWD_MAX_STEP FORWARD_MAX_TOKENS             /* the experts' tokens: a layer's every sub-batch at once */
 #define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a sub-batch's (token, routed expert) pairs */
 #define FWD_MAX_GROUPS 64                           /* a layer's wo_a groups */
@@ -176,6 +176,8 @@ struct Forward
   bool *is_held;                    /* an expert unit among them */
   Sub sub[FWD_MAX_SUBS];            /* the step's sub-batches; the Forward's own fields the one running */
   uint32_t n_subs, max_tokens;      /* the most sub-batches a step takes (ForwardOptions' max_tokens), and its tokens */
+  uint32_t step;                    /* a sub-batch's most tokens: FWD_MAX_BATCH, or max_tokens (to 16s) below it - every
+                                       per-token device buffer's rows */
   uint32_t n_sub;
   uint64_t visits; /* the layers' expert steps so far: the held ones wanted again n_layers on (pool_release) */
   int64_t *rows;  /* each token's Engram rows, every Engram layer's: [token][layer][col] */

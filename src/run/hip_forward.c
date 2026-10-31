@@ -285,7 +285,7 @@ static bool scratch(Forward *f)
   const uint64_t row = gguf_bytes(f->w->layer[0].eg_embd ? f->w->layer[0].eg_embd->type : 0, g->engram_head_dim);
   const uint64_t cols = g->engram_cols, K = (uint64_t)g->n_used, FF = (uint64_t)g->expert_ff, hd = g->head_dim;
   const uint64_t ih = g->ix_head_dim, nh = g->ix_heads, egv = cols * (uint64_t)g->engram_head_dim;
-  const uint64_t B = FWD_MAX_BATCH, Fs = OPS_MAX_SELECT, NS = f->n_subs;
+  const uint64_t B = f->step, Fs = OPS_MAX_SELECT, NS = f->n_subs;
   const uint64_t S = f->max_tokens, P = S * K; /* the experts': a layer's sub-batches at once (forward's max_tokens) */
   uint64_t widest = (uint64_t)g->o_groups * g->o_lora > D ? (uint64_t)g->o_groups * g->o_lora : D;
   widest = HQ > widest ? HQ : widest; /* the attention's output: wo_a's groups read it whole */
@@ -347,7 +347,7 @@ static bool subs(Forward *f)
 {
   const Geometry *g = f->g;
   Scratch *b = &f->b;
-  const uint64_t B = FWD_MAX_BATCH, hc = g->hc, F = sizeof(float);
+  const uint64_t B = f->step, hc = g->hc, F = sizeof(float);
   Sub *s0 = &f->sub[0];
   s0->h = b->h, s0->f_pre = b->f_pre, s0->pos = b->pos, s0->sel = b->sel, s0->n_sel = b->n_sel;
   s0->oa_cnt = b->oa_cnt, s0->keep = b->keep, s0->back = b->back, s0->pin = f->pin, s0->rows = f->rows;
@@ -400,8 +400,13 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   Forward *f = calloc(1, sizeof *f);
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
-  f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->slots = w->geo.window + FWD_MAX_BATCH;
-  f->n_subs = (max_tokens + FWD_MAX_BATCH - 1) / FWD_MAX_BATCH, f->max_tokens = f->n_subs * FWD_MAX_BATCH;
+  f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx;
+  if (max_tokens < FWD_MAX_BATCH) /* a small step's server: every buffer of a step at its size (DESIGN.md) */
+    f->n_subs = 1, f->max_tokens = max_tokens, f->step = (max_tokens + MM_TILE - 1) / MM_TILE * MM_TILE;
+  else
+    f->n_subs = (max_tokens + FWD_MAX_BATCH - 1) / FWD_MAX_BATCH, f->max_tokens = f->n_subs * FWD_MAX_BATCH,
+    f->step = FWD_MAX_BATCH;
+  f->slots = w->geo.window + f->step;
   fwd_decoder(f);
   f->score_stride = 1; /* no compressed layer: never read */
   for (int l = 0; l < n_layers; l++)

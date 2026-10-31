@@ -20,7 +20,7 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
   const uint32_t cols = (uint32_t)g->engram_cols, hd = (uint32_t)g->engram_head_dim, D = g->n_embd, hc = g->hc;
   const uint32_t n = f->n;
   const uint64_t rb = gguf_bytes(t->type, hd);
-  uint8_t *stage = f->stage + ((uint64_t)f->cur * f->n_eg + nth) * FWD_MAX_BATCH * cols * rb;
+  uint8_t *stage = f->stage + ((uint64_t)f->cur * f->n_eg + nth) * f->step * cols * rb;
   for (uint32_t i = 0; i < n; i++)
   {
     const int64_t *rows = f->rows + (uint64_t)i * WEIGHTS_MAX_LAYERS * cols + (uint64_t)nth * cols;

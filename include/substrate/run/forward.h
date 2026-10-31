@@ -26,7 +26,7 @@ typedef struct ForwardOptions
   uint32_t max_ctx;
   uint64_t budget;
   const uint64_t *picks; /* forward_create_ranked's, or NULL */
-  uint32_t max_tokens;   /* a step's most tokens: 0 FORWARD_MAX_TOKENS, else up to whole MM_MAX_TOKENS */
+  uint32_t max_tokens;   /* a step's most tokens: 0 FORWARD_MAX_TOKENS; below MM_MAX_TOKENS a step's buffers its size */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);
@@ -76,9 +76,11 @@ forward_create_ranked
 
 forward_create_with
   forward_create_ranked with a step's most tokens its own (max_tokens, at most FORWARD_MAX_TOKENS): the buffers a
-  step's experts take for all its sub-batches at once (~1 GB a sub-batch of MM_MAX_TOKENS) sized to it - a decode's
-  server gives that memory to the resident experts (a smaller step, a larger budget); forward_batch refuses a batch
-  past it. NULL o: as forward_create with no weights.
+  step's experts take for all its sub-batches at once (~1 GB a sub-batch of MM_MAX_TOKENS) sized to it, and below
+  MM_MAX_TOKENS every buffer a step's tokens take - the head's logits, the attention's, the streams', a sequence's
+  window (~3.9 GB at 2,048 tokens, ~1 at 512) - a decode's server gives that memory to the resident experts (a
+  smaller step, a larger budget: a prompt then in more steps); forward_batch refuses a batch past it. the bits are
+  not the step's size's. NULL o: as forward_create with no weights.
 
 forward_destroy
   everything it allocated (its Seqs first: seq_destroy). NULL is nothing to do.

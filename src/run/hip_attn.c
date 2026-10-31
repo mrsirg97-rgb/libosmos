@@ -34,7 +34,7 @@ static bool pend_run(Forward *f, uint32_t i, uint32_t run, void *arg)
   const Layer *a = arg;
   Scratch *b = &f->b;
   Seq *s = f->bs[i];
-  const uint32_t hd = f->g->head_dim, pend = FWD_PEND_ROWS(a->r);
+  const uint32_t hd = f->g->head_dim, pend = FWD_PEND_ROWS(f->step, a->r);
   return ops_put_rows(s->pend_kvc[a->l], pend, b->kvc + (uint64_t)i * hd, b->pos + i, 1, hd, run, NULL) &&
          ops_put_rows(s->pend_sc[a->l], pend, b->scg + (uint64_t)i * hd, b->pos + i, 1, hd, run, NULL) &&
          ops_compress(s->pend_kvc[a->l], s->pend_sc[a->l], pend, b->pos + i, a->r, hd, run, b->lat + (uint64_t)i * hd,

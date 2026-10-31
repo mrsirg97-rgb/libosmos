@@ -326,6 +326,31 @@ int main() {
     forward_destroy(small);
     std::printf("  max_tokens %d: a batch of them taken, one more refused\n", MM_MAX_TOKENS);
   }
+  {  // a small step's forward (max_tokens 500: its buffers 512 rows): a batch of 500 taken, 501 refused, and the ids
+     // a token at a time the stream's bits of the forward above (print[2])
+    const ForwardOptions o = {kLayers, 1024, kBudget, nullptr, 500};
+    Forward* small = forward_create_with(w, &o, ferr);
+    CHECK(small);
+    Seq* s0 = seq_create(small, ferr);
+    std::vector<int32_t> toks(501, 0);
+    std::vector<Seq*> ss(501, s0);
+    CHECK(!forward_batch(small, ss.data(), toks.data(), 501, ferr));
+    CHECK(forward_batch(small, ss.data(), toks.data(), 500, ferr));
+    seq_destroy(s0);
+    Seq* s = seq_create(small, ferr);
+    CHECK(s);
+    uint64_t h = 1469598103934665603ull;
+    std::vector<float> out((size_t) w->geo.hc * w->geo.n_embd);
+    for (int p = 0; p < P.T; p++) {
+      CHECK(forward_step(small, s, (int32_t) ids.v[p], ferr));
+      CHECK(hipMemcpy(out.data(), forward_stream(small), out.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      for (size_t i = 0; i < out.size() * 4; i++) h = (h ^ ((const uint8_t*) out.data())[i]) * 1099511628211ull;
+    }
+    CHECK(h == print[2]);
+    seq_destroy(s);
+    forward_destroy(small);
+    std::printf("  max_tokens 500: a batch of them taken, one more refused; a token at a time the same bits\n");
+  }
   weights_destroy(w);
   gguf_destroy(g);
   gguf_destroy(eg);

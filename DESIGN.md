@@ -662,6 +662,17 @@ of the lane bit for bit).
   at a prompt's pin - the scratch (~4 GiB at 2,048 tokens) and the pool's two layers (~2) beside the budget. the
   drafter's 7.4 GB are the gap between our plain numbers before (92 GiB, drafter loaded) and these.
 
+- **a smaller step for the memory** (2026-10-31): the scratch is 3.92 GB at 2,048 tokens a step - the head's
+  logits for every row 1.06, q and o 0.27 each, the attention's scores 0.34, the experts' ~0.95, Engram's 0.21 -
+  every buffer a step's tokens'. max_tokens below 2,048 now sizes them all (f->step: to 16s; a sequence's window
+  and pending rows too): test_forward_gpu's max_tokens 500 takes 500, refuses 501, and steps the ids to the bits of
+  the default forward. maya's prompts, plain, no drafter: 2,048 at 101 GiB 13.9 / 13.9 / 13.9 tok/s, 1,024 at 103
+  14.4 / 14.4 / 14.3, 512 at 104 15.0 / 14.8 / 14.7 (105 refused). but a prompt reads every expert a step: an 8K
+  prompt at 512 a step 121.9 / 118.6 tok/s against 307.0 / 290.8 at 2,048 - a decode's +6% for a prompt's -60%.
+  kept as the option it is (a server that reads little); the default unchanged. the way past it is maya's: the
+  prompt's buffers in the resident set's tail (its last arenas, the least-ranked experts: re-read after) - ~1.2 s
+  of reads a prompt, not built.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
