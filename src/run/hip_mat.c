@@ -16,3 +16,22 @@ bool fwd_mat(Forward *f, const GgufTensor *t, const void *w, uint32_t rows, uint
   }
   return ok;
 }
+
+/* two matrices of one type on the same x (the shared expert's gate and up; q_a and kv): the x16 once and both in one
+   launch (mm_run2: each the bits of fwd_mat alone); a type without mm, or two types, as fwd_mat each */
+bool fwd_mat2(Forward *f, const GgufTensor *t0, const void *w0, uint32_t rows0, float *y0, uint32_t ys0,
+              const GgufTensor *t1, const void *w1, uint32_t rows1, float *y1, uint32_t ys1, uint32_t cols,
+              const float *x, uint32_t xs, uint32_t n)
+{
+  if (!mm_known(t0->type) || t0->type != t1->type)
+    return fwd_mat(f, t0, w0, rows0, cols, x, xs, n, y0, ys0) && fwd_mat(f, t1, w1, rows1, cols, x, xs, n, y1, ys1);
+  bool ok = true;
+  for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS)
+  {
+    const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
+    ok = mm_x16(x + (uint64_t)k0 * xs, xs, m, cols, f->b.x16, f->b.overflow, NULL) &&
+         mm_run2(t0->type, w0, rows0, y0 + (uint64_t)k0 * ys0, ys0, w1, rows1, y1 + (uint64_t)k0 * ys1, ys1, cols,
+                 f->b.x16, m, NULL);
+  }
+  return ok;
+}

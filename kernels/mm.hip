@@ -114,26 +114,48 @@ bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint
   }
 }
 
+/* one matrix (w[1] NULL) or a pair on the same x16 */
+struct Mats {
+  const void* w[2];
+  uint32_t rows[2];
+  float* y[2];
+  uint32_t ys[2];
+};
+
 template <quant::Type T, int CT>
-bool launch_ct(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
-               hipStream_t s) {
+bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   using S = typename Tuned<T>::S;
-  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT);
-  mm::kernel<T, S, CT><<<dim3(rows / mm::kTile, 1, z), mm::kWave * S::kWaves, 0, s>>>((const uint8_t*) w, cols,
-                                                                                    (const _Float16*) x16, n, y, ys);
+  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT), rows = m.rows[0] > m.rows[1] ? m.rows[0] : m.rows[1];
+  mm::kernel<T, S, CT><<<dim3(rows / mm::kTile, m.w[1] ? 2 : 1, z), mm::kWave * S::kWaves, 0, s>>>(
+      (const uint8_t*) m.w[0], (const uint8_t*) m.w[1], m.rows[0], m.rows[1], cols, (const _Float16*) x16, n, m.y[0],
+      m.y[1], m.ys[0], m.ys[1]);
   return hipGetLastError() == hipSuccess;
 }
 
 template <quant::Type T>
-bool launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
-            hipStream_t s) {
+bool launch(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   using S = typename Tuned<T>::S;
-  if (rows % mm::kTile || cols % quant::Block<T>::values || cols % S::kSlab) return false;
+  for (int i = 0; i < (m.w[1] ? 2 : 1); i++)
+    if (m.rows[i] % mm::kTile || (n > 1 && m.ys[i] < m.rows[i])) return false;
+  if (cols % quant::Block<T>::values || cols % S::kSlab) return false;
   switch (col_tiles<T>(n)) {
-    case 1: return launch_ct<T, 1>(w, rows, cols, x16, n, y, ys, s);
-    case 2: return launch_ct<T, 2>(w, rows, cols, x16, n, y, ys, s);
-    case 4: return launch_ct<T, 4>(w, rows, cols, x16, n, y, ys, s);
-    default: return launch_ct<T, Tuned<T>::kMaxCt>(w, rows, cols, x16, n, y, ys, s);
+    case 1: return launch_ct<T, 1>(m, cols, x16, n, s);
+    case 2: return launch_ct<T, 2>(m, cols, x16, n, s);
+    case 4: return launch_ct<T, 4>(m, cols, x16, n, s);
+    default: return launch_ct<T, Tuned<T>::kMaxCt>(m, cols, x16, n, s);
+  }
+}
+
+bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
+  if (!n || n > MM_MAX_TOKENS || !m.rows[0] || (m.w[1] && !m.rows[1])) return false;
+  switch (type) {
+    case quant::kQ8_0: return launch<quant::kQ8_0>(m, cols, x16, n, s);
+    case quant::kQ5_K: return launch<quant::kQ5_K>(m, cols, x16, n, s);
+    case quant::kQ6_K: return launch<quant::kQ6_K>(m, cols, x16, n, s);
+    case quant::kIQ1_M: return launch<quant::kIQ1_M>(m, cols, x16, n, s);
+    case quant::kIQ2_XXS: return launch<quant::kIQ2_XXS>(m, cols, x16, n, s);
+    case quant::kIQ2_XS: return launch<quant::kIQ2_XS>(m, cols, x16, n, s);
+    default: return false;
   }
 }
 
@@ -181,17 +203,14 @@ extern "C" bool mm_x16_attn(const float* x, uint32_t xs, uint32_t n, uint32_t co
 
 extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
                        float* y, uint32_t ys, void* stream) {
-  if (!n || n > MM_MAX_TOKENS || (n > 1 && ys < rows)) return false;
-  const hipStream_t s = (hipStream_t) stream;
-  switch (type) {
-    case quant::kQ8_0: return launch<quant::kQ8_0>(w, rows, cols, x16, n, y, ys, s);
-    case quant::kQ5_K: return launch<quant::kQ5_K>(w, rows, cols, x16, n, y, ys, s);
-    case quant::kQ6_K: return launch<quant::kQ6_K>(w, rows, cols, x16, n, y, ys, s);
-    case quant::kIQ1_M: return launch<quant::kIQ1_M>(w, rows, cols, x16, n, y, ys, s);
-    case quant::kIQ2_XXS: return launch<quant::kIQ2_XXS>(w, rows, cols, x16, n, y, ys, s);
-    case quant::kIQ2_XS: return launch<quant::kIQ2_XS>(w, rows, cols, x16, n, y, ys, s);
-    default: return false;
-  }
+  return run(type, Mats{{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}}, cols, x16, n, (hipStream_t) stream);
+}
+
+extern "C" bool mm_run2(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
+                        uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const void* x16, uint32_t n,
+                        void* stream) {
+  return w0 && w1 &&
+         run(type, Mats{{w0, w1}, {rows0, rows1}, {y0, y1}, {ys0, ys1}}, cols, x16, n, (hipStream_t) stream);
 }
 
 extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,

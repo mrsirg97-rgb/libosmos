@@ -151,12 +151,21 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
   }
 }
 
+// one matrix, or two of one type on the same x16 (blockIdx.y the matrix: a pair's blocks in one launch - the shared
+// expert's gate and up, q_a and kv), each tile as alone; the grid's rows the larger's, a block past its matrix's
+// rows nothing
 template <quant::Type T, class S, int CT>
-__global__ __launch_bounds__(kWave* S::kWaves) void kernel(const uint8_t* __restrict__ w, uint32_t cols,
+__global__ __launch_bounds__(kWave* S::kWaves) void kernel(const uint8_t* __restrict__ w0,
+                                                            const uint8_t* __restrict__ w1, uint32_t rows0,
+                                                            uint32_t rows1, uint32_t cols,
                                                             const _Float16* __restrict__ x16, uint32_t n,
-                                                            float* __restrict__ y, uint32_t ys) {
+                                                            float* __restrict__ y0, float* __restrict__ y1,
+                                                            uint32_t ys0, uint32_t ys1) {
   __shared__ __attribute__((aligned(32))) _Float16 lds[S::kLdsHalves];
-  tile<T, S, CT>(w, blockIdx.x * kTile, cols, x16, cols, blockIdx.z * kTile * CT, n, y, ys, lds);
+  const uint32_t row0 = blockIdx.x * kTile;
+  if (row0 >= (blockIdx.y ? rows1 : rows0)) return;  // the whole block
+  tile<T, S, CT>(blockIdx.y ? w1 : w0, row0, cols, x16, cols, blockIdx.z * kTile * CT, n, blockIdx.y ? y1 : y0,
+                 blockIdx.y ? ys1 : ys0, lds);
 }
 
 // n matrices at once (blockIdx.y the matrix m): its w from the table, its x the tiled x16 from x16 + xoff[m] (rows xts

@@ -92,8 +92,8 @@ static bool shared(Forward *f, int l)
   const LayerWeights *L = &f->w->layer[l];
   Scratch *b = &f->b;
   const uint32_t D = g->n_embd, FF = g->expert_ff, n = f->n;
-  return fwd_mat(f, L->sh_gate, fwd_dev(f, L->sh_gate), FF, D, b->xf, D, n, b->sga, FF) &&
-         fwd_mat(f, L->sh_up, fwd_dev(f, L->sh_up), FF, D, b->xf, D, n, b->sup, FF) &&
+  return fwd_mat2(f, L->sh_gate, fwd_dev(f, L->sh_gate), FF, b->sga, FF, L->sh_up, fwd_dev(f, L->sh_up), FF, b->sup,
+                  FF, D, b->xf, D, n) &&
          ops_swiglu(b->sga, b->sup, FF, g->clamp_shexp[l], NULL, n, b->shh, NULL) &&
          fwd_mat(f, L->sh_down, fwd_dev(f, L->sh_down), D, FF, b->shh, FF, n, b->sye, D);
 }

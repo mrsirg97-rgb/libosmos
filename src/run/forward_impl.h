@@ -227,6 +227,9 @@ bool fwd_attention(Forward *f, int l, char *err);
    the quantized types (MM_MAX_TOKENS a launch), the matvec for F32 and BF16 - a row the same sums either way */
 bool fwd_mat(Forward *f, const GgufTensor *t, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
              uint32_t n, float *y, uint32_t ys);
+bool fwd_mat2(Forward *f, const GgufTensor *t0, const void *w0, uint32_t rows0, float *y0, uint32_t ys0,
+              const GgufTensor *t1, const void *w1, uint32_t rows1, float *y1, uint32_t ys1, uint32_t cols,
+              const float *x, uint32_t xs, uint32_t n);
 bool fwd_engram(Forward *f, int l, int nth, char *err);
 /* hip_skip.c: the decoder skip (seq_prompt) - the step's plan, its compaction past layer dec, the head, the stream */
 void fwd_decoder(Forward *f);

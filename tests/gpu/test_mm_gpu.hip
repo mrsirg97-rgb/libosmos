@@ -132,6 +132,25 @@ static void shape(const Gguf* g, const Shape& s) {
     }
     CHECK(hipFree(xb) == hipSuccess && hipFree(yb) == hipSuccess && hipFree(x16b) == hipSuccess);
   }
+  if (rows > 2 * MM_TILE) {  // a pair in one launch (mm_run2): the matrix's first rows - 16 and its last rows - 32,
+                            // each mm_run's bits (rows of their own lengths)
+    const uint32_t r0 = rows - MM_TILE, r1 = rows - 2 * MM_TILE;
+    const uint8_t* w1 = w + bytes / rows * 2 * MM_TILE;
+    float* y2;
+    CHECK(hipMalloc(&y2, (size_t) kT * r1 * 4) == hipSuccess);
+    CHECK(mm_x16(x, cols, kT, cols, x16, over, nullptr) &&
+          mm_run2(t->type, w, r0, y, rows, w1, r1, y2, r1, cols, x16, kT, nullptr));
+    std::vector<float> p0(a.size()), p1((size_t) kT * r1);
+    CHECK(hipMemcpy(p0.data(), y, p0.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(hipMemcpy(p1.data(), y2, p1.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    for (int tk = 0; tk < kT; tk++) {
+      CHECK(std::memcmp(&p0[(size_t) tk * rows], &a[(size_t) tk * rows], r0 * 4) == 0);
+      CHECK(std::memcmp(&p1[(size_t) tk * r1], &a[(size_t) tk * rows + 2 * MM_TILE], r1 * 4) == 0);
+    }
+    CHECK(!mm_run2(t->type, w, r0, y, rows, nullptr, r1, y2, r1, cols, x16, kT, nullptr));
+    CHECK(!mm_run2(t->type, w, r0, y, rows, w1, r1, y2, r1 - 1, cols, x16, kT, nullptr));  // y1's rows too short
+    CHECK(hipFree(y2) == hipSuccess);
+  }
   int32_t overflow = 0;
   CHECK(hipMemcpy(&overflow, over, 4, hipMemcpyDeviceToHost) == hipSuccess && overflow == 0);
 
@@ -245,6 +264,6 @@ int main() {
   for (const Shape& s : kShapes) shape(g, s);
   gguf_destroy(g);
   std::printf("[test_mm_gpu] ok: every token the same bits alone, among 16, among 16 reversed, and among 33, 64 and "
-              "%d (at its place and at another)\n", kBig);
+              "%d (at its place and at another); a pair in one launch each its own bits\n", kBig);
   return 0;
 }

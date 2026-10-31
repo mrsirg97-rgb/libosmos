@@ -142,11 +142,12 @@ bool fwd_attention(Forward *f, int l, char *err)
   const uint32_t H = g->n_heads, HD = g->head_dim, RD = g->rope_dim, QL = g->q_lora, D = g->n_embd, n = f->n;
   const uint32_t OG = g->o_groups, OL = g->o_lora, oin = H * HD / OG, ratio = (uint32_t)g->compress[l];
   const float *freqs = ratio ? f->freqs_comp : f->freqs_win;
-  bool ok = fwd_mat(f, L->q_a, fwd_dev(f, L->q_a), QL, D, b->x, D, n, b->qa, QL) &&
+  /* q_a and kv on the same input: one launch (fwd_mat2) */
+  bool ok = fwd_mat2(f, L->q_a, fwd_dev(f, L->q_a), QL, b->qa, QL, L->kv, fwd_dev(f, L->kv), HD, b->kv, HD, D, b->x, D,
+                     n) &&
             ops_rms(b->qa, QL, QL, F(f, L->q_a_norm), g->rms_eps, n, b->qa, QL, NULL) &&
             fwd_mat(f, L->q_b, fwd_dev(f, L->q_b), H * HD, QL, b->qa, QL, n, b->q, H * HD) &&
             ops_rope(b->q, H, HD, RD, H * HD, freqs, b->pos, false, n, NULL) &&
-            fwd_mat(f, L->kv, fwd_dev(f, L->kv), HD, D, b->x, D, n, b->kv, HD) &&
             ops_rms(b->kv, HD, HD, F(f, L->kv_norm), g->rms_eps, n, b->kv, HD, NULL) &&
             ops_rope(b->kv, 1, HD, RD, HD, freqs, b->pos, false, n, NULL) &&
             ops_fp8_round(b->kv, (uint64_t)n * HD, NULL);

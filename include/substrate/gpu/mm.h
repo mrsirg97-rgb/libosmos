@@ -15,6 +15,8 @@ bool mm_x16_attn(const float *x, uint32_t xs, uint32_t n, uint32_t cols, uint32_
                  const float *freqs, const int32_t *pos, void *x16, int32_t *overflow, void *stream);
 bool mm_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const void *x16, uint32_t n, float *y,
             uint32_t ys, void *stream);
+bool mm_run2(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
+             float *y1, uint32_t ys1, uint32_t cols, const void *x16, uint32_t n, void *stream);
 bool mm_x16_rows(const float *x, uint32_t xs, const int32_t *idx, uint32_t slots, uint32_t cols, void *x16,
                  int32_t *overflow, void *stream);
 bool mm_group(uint32_t type, const void *const *w, const int32_t *cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
@@ -50,6 +52,11 @@ mm_run
   y[t * ys + r] = sum over c of W[r, c] * x16[t][c] for t < n, queued on `stream`, not waited for. rows a multiple
   of 16, cols of 128 (a slab). false, nothing queued, for a type without a kernel, a shape it cannot tile, n
   outside 1 .. MM_MAX_TOKENS, or a launch refused.
+
+mm_run2
+  two matrices of one type and cols on the same x16, in one launch: y0 (rows0, row length ys0) from w0, y1 from w1,
+  each the bits mm_run gives it alone (the same tiles; the pair's blocks side by side - more blocks to fill the GPU at
+  one token: the shared expert's gate and up, q_a and kv). false as mm_run's for either, or a matrix NULL.
 
 mm_col_tiles
   the column tiles a block of `type` takes for n tokens (mm_run's, and mm_group's for its max_cnt): a slab decoded

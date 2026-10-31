@@ -450,6 +450,18 @@ the grids copied into each block's LDS first, the same bits): slower everywhere 
 (2 / 1 rows a lane), its down 124 -> 131 / 190, IQ2_XXS 123 -> 127 / 135. a block's 16 KB copy costs more than the
 lookups it saves; the 8 chunks in flight hide them already. not taken.
 
+launches (2026-10-30; scratch `lo.hip`, after tubo's probes - gfx1151, its numbers clock-pinned, ours not): a pure read
+of B bytes a launch, 64 back to back, plain against hipExtAnyOrderLaunch: 33.5 MB 225 / 235 GB/s, 8.4 MB 222 / 240,
+2.1 MB 187 / 214, 0.5 MB 113 / 185, 64 KB 24 / 33 - a dependent launch costs ~2.4 us here (tubo's 11 us is not this
+box's), its ramp and tail a few more on a large one: ~1,040 a token, ~3 ms of the ~65 ms floor at most. what is worth
+more is a matmul whose rows fill too few blocks at one token: the shared expert's gate and up (2,304 x 5,120, 144
+blocks: 130 GB/s where its down, 320, reads 200) and q_a / kv (1,024 and 512 rows: 64 and 32). mm_run2 runs two
+matrices of one type on one x16 in one launch, each tile as alone (test_mm_gpu: a pair of row ranges, each mm_run's
+bits; the matrices swapped fails it): gate + up 125 -> 112 us, q_a + kv 64.5 -> 54.7 (scratch `mbpair.hip`, weights
+cycled through 512 MiB) - ~24 us a layer, ~1 ms a token; the x16 of their input once, not twice. 20 resident
+layers, the lane, interleaved fresh runs: p50 29.6 / 29.6 / 29.7 -> 29.1 / 29.1 / 29.1 ms (both fingerprints the
+same).
+
 ## DSpark: the drafter (built, 2026-10-30)
 
 DeepSeek's own drafter, as maya's tools/ds4/dspark_ref.py writes it from DeepSeek's inference/model.py: three
