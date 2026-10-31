@@ -641,6 +641,17 @@ of the lane bit for bit).
   tokens alone). 20 resident layers 26.7 -> 26.3 ms. a repack of IQ2_XXS to one aligned word a lane would save a
   load or two a chunk but not the index-then-grid chain the experiment above shows is the cost: not built.
 
+- **the misses, again** (2026-10-31; maya's prompts plain, the lane, 92 GiB, interleaved fresh runs a pair at a
+  time - their spread ~3%, a first run after a while ~30% slow, its page cache cold): two levers tried, neither
+  outside the spread. 16 readers at 512 KiB a chunk (a lone 9 MB expert 2.10 -> 1.76 ms p50, scratch `lat.c`):
+  12.7 / 13.3 / 13.2 and 13.2 / 13.4 / 13.4, 13.7 / 14.1 / 13.6 tok/s at 4 against 13.8 / 14.2 / 13.1 and 13.2 /
+  13.7 / 13.7, 13.6 / 13.7 / 13.4 at 16 - a layer's misses are seldom a lone read. the experts in GPU memory first
+  (their rows first, launched before a read is waited for; the reading ones after - the same bits): 12.5 / 12.9 /
+  12.5, 12.7 / 13.4 / 13.1 against 12.7 / 13.1 / 12.4, 12.8 / 13.0 / 12.6 - the ready experts' ~0.3 ms beside a
+  read's ~2 is not seen. neither kept. kept: test_lane_gpu - the lane at 30 and 12 GiB (997 and 1,614 streamed
+  picks over 24 steps) the same streams' bits (a token's sum ordered by residency fails it). what is left of a
+  miss is the drive's: fewer of them is the lever - the memory's, not the code's.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
