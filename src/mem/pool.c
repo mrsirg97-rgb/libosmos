@@ -34,6 +34,7 @@ struct Pool
   pool_event_fn on_event;
   void *event_arg;
   uint64_t clock;
+  size_t reading; /* units reading now */
 };
 
 static void emit(const Pool *p, PoolEventKind kind, uint32_t unit, uint64_t bytes)
@@ -160,7 +161,7 @@ static void begin_read(Pool *p, Slot *s, uint8_t *dev, bool urgent)
   void *dst[POOL_PARTS] = {0};
   for (int k = 0; k < s->u.n_parts; k++)
     dst[k] = dev + s->off[k];
-  s->dev = dev, s->state = POOL_READING;
+  s->dev = dev, s->state = POOL_READING, p->reading++;
   emit(p, POOL_EV_READ, (uint32_t)(s - p->s), s->size);
   p->fetcher.fetch((uint32_t)(s - p->s), s->u.part, s->u.n_parts, dst, urgent, p->fetcher.ctx);
 }
@@ -288,6 +289,7 @@ void pool_ready(Pool *p, uint32_t unit, bool ok)
   if (!p || unit >= p->n || p->s[unit].state != POOL_READING)
     return;
   Slot *s = &p->s[unit];
+  p->reading--;
   if (ok)
   {
     s->state = POOL_PINNED;
@@ -322,3 +324,4 @@ PoolState pool_state(const Pool *p, uint32_t unit)
 }
 
 uint64_t pool_bytes(const Pool *p) { return p ? p->bytes : 0; }
+size_t pool_reading(const Pool *p) { return p ? p->reading : 0; }

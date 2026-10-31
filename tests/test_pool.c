@@ -184,6 +184,10 @@ static void check(const Pool *p, const PoolUnit *u, size_t n, uint64_t budget)
   assert(pool_bytes(p) == mem.total && mem.total <= budget);
   uintptr_t lo[MAX_ALLOCS], hi[MAX_ALLOCS];
   int live = 0;
+  size_t reading = 0;
+  for (size_t i = 0; i < n; i++)
+    reading += pool_state(p, (uint32_t)i) == POOL_READING;
+  assert(pool_reading(p) == reading && (size_t)reads.n == reading); /* the count: the units reading, each a read */
   for (size_t i = 0; i < n; i++)
   {
     const void *dev[POOL_PARTS] = {0};
@@ -370,8 +374,9 @@ static void test_want(int fd)
   Pool *p = make(u, 4, budget, err);
   assert(p);
   const void *dev[POOL_PARTS];
+  assert(pool_reading(p) == 0 && pool_reading(NULL) == 0);
   pool_want(p, 0, 5); /* room free: read, no hold - not urgent */
-  assert(pool_state(p, 0) == POOL_READING && reads.n == 1 && !reads.r[0].urgent);
+  assert(pool_state(p, 0) == POOL_READING && reads.n == 1 && !reads.r[0].urgent && pool_reading(p) == 1);
   pool_want(p, 0, 5); /* reading: no second read */
   assert(reads.n == 1 && reads.n_hurried == 0);
   assert(pool_pin(p, 0, dev) == POOL_WAIT); /* waited on while read ahead: hurried */

@@ -84,6 +84,7 @@ void pool_release(Pool *p, uint32_t unit, uint64_t next);
 
 PoolState pool_state(const Pool *p, uint32_t unit);
 uint64_t pool_bytes(const Pool *p);
+size_t pool_reading(const Pool *p);
 
 #endif
 
@@ -147,6 +148,8 @@ pool_release
   free exactly the units wanted soonest; furthest ahead is the best a cycle allows. the caller's part: the GPU is past
   the unit when its last hold ends - its memory may be written again at once. a release with no hold is nothing to do.
 
-pool_state / pool_bytes
-  a unit's state; the bytes of GPU memory held now (units' and spares').
+pool_state / pool_bytes / pool_reading
+  a unit's state; the bytes of GPU memory held now (units' and spares'); the units reading now. a pin refused FULL
+  while units read is not the pool's last word: a reading unit's memory is made room of once its read ends and it is
+  unheld - the caller waits for a read (pool_ready) and pins again.
 */
