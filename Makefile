@@ -42,6 +42,10 @@ $(LIB): $(OBJS) | $(LIB_DIR)
 $(HIP_LIB): $(HIP_OBJS) $(KERNEL_OBJS) | $(LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $(filter %.o,$^)
 
+# the CPU lane (src/cpu): the GPU's sums repeated bit for bit - no contraction but the fmaf it writes (as the
+# kernels'), the FMA and f16 conversion in hardware, and the kernels' shared headers (quant_grids.h, lane.h)
+$(OBJ_DIR)/cpu/%.o: override CFLAGS += -ffp-contract=off -mavx2 -mfma -mf16c -I$(KERNEL_DIR)
+
 # the host code that calls the HIP runtime (hip_*.c): its headers
 $(HIP_OBJS): CFLAGS += -I$(ROCM)/include -D__HIP_PLATFORM_AMD__ -Isrc/run
 

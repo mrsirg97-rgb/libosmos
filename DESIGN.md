@@ -600,6 +600,21 @@ of the lane bit for bit).
   left of a miss is a read the router names only when it is needed: the lever past it is fewer misses (the
   resident set) or the floor, not the reads.
 
+- **the CPU's half, its kernel** (2026-10-31; src/cpu/expert.c, cpu_mv_rows): the experts' three types (IQ1_M,
+  IQ2_XXS, IQ2_XS) decoded as kernels/quant.h decodes them (the same products, built -ffp-contract=off; the grids
+  quant_grids.h's, now C's too), lane l of 32 summing its chunks l, l + 32, ... with fmaf in order, then the GPU's
+  xor tree: test_cpu_expert_gpu - an expert of each type's gate and down, 1 to 8 tokens - the GPU matvec's bits
+  (a chunk's FMAs reversed fails it). AVX2, 8 lanes at once. its speed: an IQ1_M expert (gate, up, down) for one
+  token 24 ms on one thread, 2.3 ms on 15 (3.3 GB/s of weights) - the decode with a constant in its place 8.8 ms:
+  each lane's FMAs one chain, 16 registers. against the GPU's ~0.13 ms and a cold read's ~1.8 ms.
+  - **what it is worth here** (the misses above): a layer's output needs all its experts, so a miss from the drive
+    waits for the drive whichever side computes it - the GPU has only the resident experts (~0.3 ms) to do
+    meanwhile. the CPU saves the copy into GPU memory only for an expert already in the page cache: ~10% of the
+    misses' bytes, ~0.6 experts a token at ~0.7 ms - at most ~0.4 ms a token (~0.5%), and only with a kernel ~5x
+    this one's speed. and the CPU and the GPU share the memory's bandwidth: the CPU on resident experts slows the
+    GPU. maya's lane pays where its GPU holds the experts it can and the page cache the rest; here the resident set
+    is GPU memory of its own and the misses are cold. the kernel kept (the bits shown); the wiring not built.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
