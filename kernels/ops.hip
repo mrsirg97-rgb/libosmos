@@ -4,8 +4,10 @@
 #include "quant.h"
 #include "round.h"
 #include "lane.h"
+#include "mm.h"
 
 extern "C" {
+#include "substrate/gpu/mm.h"
 #include "substrate/gpu/ops.h"
 }
 
@@ -52,14 +54,24 @@ __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* 
   }
 }
 
-__global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys) {
+// x16 (when not NULL): y as mm_x16 would put it, rows past `rows` (a block each) zero to a whole tile
+__global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
+                           uint32_t rows, _Float16* x16, int32_t* overflow) {
   __shared__ float lds[kThreads];
+  if (blockIdx.x >= rows) {  // a pad row of x16's last tile
+    for (uint32_t i = threadIdx.x; i < n; i += kThreads) mm::x16_put(x16, blockIdx.x, i, n, 0.0f, overflow);
+    return;
+  }
   const float* xr = x + (uint64_t) blockIdx.x * xs;
   float* yr = y + (uint64_t) blockIdx.x * ys;
   float ss = 0;
   for (uint32_t i = threadIdx.x; i < n; i += kThreads) ss += xr[i] * xr[i];
   const float r = 1.0f / sqrtf(block_sum(ss, lds) / (float) n + eps);
-  for (uint32_t i = threadIdx.x; i < n; i += kThreads) yr[i] = w ? (xr[i] * r) * w[i] : xr[i] * r;
+  for (uint32_t i = threadIdx.x; i < n; i += kThreads) {
+    const float v = w ? (xr[i] * r) * w[i] : xr[i] * r;
+    yr[i] = v;
+    if (x16) mm::x16_put(x16, blockIdx.x, i, n, v, overflow);
+  }
 }
 
 // the hc mixes' dots and the stream's sum of squares, a block a part of 64 tokens: block (p, tt) the part p of every
@@ -201,10 +213,16 @@ __global__ void hc_mix_kernel(const float* partial, const float* scale, const fl
     for (uint32_t j = 0; j < hc; j++) comb[(t * hc + i) * hc + j] = c[i][j];
 }
 
+// x16 (when not NULL): the result as mm_x16 would put it, rows n .. a whole tile zero (a block each, past n)
 __global__ __launch_bounds__(kWide) void hc_pre_rms_kernel(const float* h, const float* pre, uint32_t hc, uint32_t dim,
-                                                            const float* w, float eps, float* x) {
+                                                            const float* w, float eps, float* x, uint32_t n_tok,
+                                                            _Float16* x16, int32_t* overflow) {
   __shared__ float lds[kWide];
   const uint32_t t = blockIdx.x;
+  if (t >= n_tok) {  // a pad row of x16's last tile
+    for (uint32_t d = threadIdx.x; d < dim; d += kWide) mm::x16_put(x16, t, d, dim, 0.0f, overflow);
+    return;
+  }
   const float* ht = h + (uint64_t) t * hc * dim;
   float* xt = x + (uint64_t) t * dim;
   float ss = 0;
@@ -215,7 +233,11 @@ __global__ __launch_bounds__(kWide) void hc_pre_rms_kernel(const float* h, const
     ss += v * v;
   }
   const float r = 1.0f / sqrtf(block_sum<kWide>(ss, lds) / (float) dim + eps);
-  for (uint32_t d = threadIdx.x; d < dim; d += kWide) xt[d] = (xt[d] * r) * w[d];
+  for (uint32_t d = threadIdx.x; d < dim; d += kWide) {
+    const float v = (xt[d] * r) * w[d];
+    xt[d] = v;
+    if (x16) mm::x16_put(x16, t, d, dim, v, overflow);
+  }
 }
 
 __global__ void hc_pre_kernel(const float* h, const float* pre, uint32_t hc, uint32_t dim, uint32_t n_tok, float* x) {
@@ -272,6 +294,38 @@ __global__ void rope_kernel(float* x, uint32_t heads, uint32_t head_dim, uint32_
   const float a = v[0], b = v[1];
   v[0] = a * c - b * s;
   v[1] = a * s + b * c;
+}
+
+// a key's whole tail a block a token (ops_kv_finish): rms_kernel's norm (its threads, its block_sum), rope_kernel's
+// rotation of the last rope_dim, round.h's FP8 a wave a block of 32, then the row to kv and to the ring at pos % slots
+// - each step the separate kernel's arithmetic in its order, so its bits
+__global__ void kv_finish_kernel(float* kv, uint32_t hd, const float* w, float eps, uint32_t rd, const float* freqs,
+                                 const int32_t* pos, float* ring, uint32_t slots) {
+  __shared__ float lds[kThreads];
+  __shared__ float row[OPS_MAX_KV_DIM];
+  const uint32_t t = blockIdx.x;
+  float* x = kv + (uint64_t) t * hd;
+  float ss = 0;
+  for (uint32_t i = threadIdx.x; i < hd; i += kThreads) ss += x[i] * x[i];
+  const float r = 1.0f / sqrtf(block_sum(ss, lds) / (float) hd + eps);
+  for (uint32_t i = threadIdx.x; i < hd; i += kThreads) row[i] = (x[i] * r) * w[i];
+  __syncthreads();
+  for (uint32_t p = threadIdx.x; p < rd / 2; p += kThreads) {
+    float* v = row + (hd - rd) + 2 * p;
+    const float ang = (float) pos[t] * freqs[p];
+    const float c = cosf(ang), sn = sinf(ang);
+    const float a = v[0], b = v[1];
+    v[0] = a * c - b * sn;
+    v[1] = a * sn + b * c;
+  }
+  __syncthreads();
+  const uint32_t lane = threadIdx.x % kWave, wave = threadIdx.x / kWave;
+  float* out = ring + (uint64_t) ((uint32_t) pos[t] % slots) * hd;
+  for (uint32_t b = wave; b < hd / rnd::kFp8Block; b += kThreads / kWave) {  // the whole wave a block
+    const uint32_t i = b * rnd::kFp8Block + lane;
+    const float v = rnd::fp8_block(row[i]);
+    x[i] = v, out[i] = v;
+  }
 }
 
 // (BF16); dot = sum((h * w) * key) * (rstd(h) * rstd(key)) * scale; h += sigmoid(signed sqrt(dot)) * value
@@ -343,13 +397,19 @@ __global__ void router_kernel(const float* logits, const float* bias, uint32_t n
   }
 }
 
+// x16 (when not NULL): h as mm_x16 would put it, the rows past n_tok zero to a whole tile (threads past h's)
 __global__ void swiglu_kernel(const float* g, const float* u, uint32_t n, float lim, const float* scale,
-                              uint32_t n_tok, float* h) {
+                              uint32_t n_tok, float* h, _Float16* x16, int32_t* overflow) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= (uint64_t) n * n_tok) return;
+  const uint32_t t = (uint32_t) (i / n), c = (uint32_t) (i % n);
+  if (i >= (uint64_t) n * n_tok) {
+    if (x16 && t < (n_tok + mm::kTile - 1) / mm::kTile * mm::kTile) mm::x16_put(x16, t, c, n, 0.0f, overflow);
+    return;
+  }
   const float gv = fminf(g[i], lim), uv = fminf(fmaxf(u[i], -lim), lim);
-  const float v = gv / (1.0f + expf(-gv)) * uv;
-  h[i] = scale ? v * scale[i / n] : v;
+  const float v = gv / (1.0f + expf(-gv)) * uv, o = scale ? v * scale[i / n] : v;
+  h[i] = o;
+  if (x16) mm::x16_put(x16, t, c, n, o, overflow);
 }
 
 // the lane's (lane.h): the same activation in operations the CPU repeats bit for bit
@@ -367,14 +427,15 @@ __global__ void gather_rows_kernel(float* dst, const float* src, const int32_t* 
 }
 
 // y[t][d] = sum over j < m of src[idx[t * m + j]][d], in j's order from 0 (the same sums as a zeroed y and m adds)
+// add (when not NULL): its value added after the sum, as ops_add after it would
 __global__ void gather_sum_kernel(float* y, const float* src, const int32_t* idx, uint32_t m, uint32_t n,
-                                  uint32_t dim) {
+                                  uint32_t dim, const float* add) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= (uint64_t) n * dim) return;
   const uint32_t t = (uint32_t) (i / dim), d = (uint32_t) (i % dim);
   float s = 0.0f;
   for (uint32_t j = 0; j < m; j++) s += src[(uint64_t) idx[t * m + j] * dim + d];
-  y[i] = s;
+  y[i] = add ? s + add[i] : s;
 }
 
 __global__ void scale_kernel(float* x, uint64_t n, float s) {
@@ -410,7 +471,26 @@ extern "C" bool ops_embed(uint32_t type, const void* table, uint32_t dim, const 
 extern "C" bool ops_rms(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, uint32_t rows, float* y,
                         uint32_t ys, void* stream) {
   if (!n || !rows) return false;
-  rms_kernel<<<rows, kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys);
+  rms_kernel<<<rows, kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, nullptr, nullptr);
+  return ok();
+}
+
+static uint32_t tiles(uint32_t n) { return (n + mm::kTile - 1) / mm::kTile * mm::kTile; }  // n to a whole x16 tile
+
+extern "C" bool ops_rms_x16(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, uint32_t rows,
+                            float* y, uint32_t ys, void* x16, int32_t* overflow, void* stream) {
+  if (!n || n % mm::kTile || !rows || rows > MM_MAX_TOKENS || !x16 || !overflow) return false;
+  rms_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, (_Float16*) x16, overflow);
+  return ok();
+}
+
+extern "C" bool ops_kv_finish(float* kv, uint32_t head_dim, const float* w, float eps, uint32_t rope_dim,
+                              const float* freqs, const int32_t* pos, float* ring, uint32_t slots, uint32_t n_tok,
+                              void* stream) {
+  if (!kv || !w || !ring || !slots || !n_tok || !head_dim || head_dim > OPS_MAX_KV_DIM ||
+      head_dim % rnd::kFp8Block || rope_dim > head_dim || rope_dim % 2)
+    return false;
+  kv_finish_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kv, head_dim, w, eps, rope_dim, freqs, pos, ring, slots);
   return ok();
 }
 
@@ -457,7 +537,16 @@ extern "C" bool ops_hc_mix(const float* partial, const float* scale, const float
 extern "C" bool ops_hc_pre_rms(const float* h, const float* pre, uint32_t hc, uint32_t dim, const float* w, float eps,
                                uint32_t n_tok, float* x, void* stream) {
   if (!hc || hc > OPS_MAX_HC || !dim || !n_tok) return false;
-  hc_pre_rms_kernel<<<n_tok, kWide, 0, st(stream)>>>(h, pre, hc, dim, w, eps, x);
+  hc_pre_rms_kernel<<<n_tok, kWide, 0, st(stream)>>>(h, pre, hc, dim, w, eps, x, n_tok, nullptr, nullptr);
+  return ok();
+}
+
+extern "C" bool ops_hc_pre_rms_x16(const float* h, const float* pre, uint32_t hc, uint32_t dim, const float* w,
+                                   float eps, uint32_t n_tok, float* x, void* x16, int32_t* overflow, void* stream) {
+  if (!hc || hc > OPS_MAX_HC || !dim || dim % mm::kTile || !n_tok || n_tok > MM_MAX_TOKENS || !x16 || !overflow)
+    return false;
+  hc_pre_rms_kernel<<<tiles(n_tok), kWide, 0, st(stream)>>>(h, pre, hc, dim, w, eps, x, n_tok, (_Float16*) x16,
+                                                             overflow);
   return ok();
 }
 
@@ -525,7 +614,16 @@ extern "C" bool ops_swiglu_lane(const float* g, const float* u, uint32_t n, floa
 extern "C" bool ops_swiglu(const float* g, const float* u, uint32_t n, float lim, const float* scale, uint32_t n_tok,
                            float* h, void* stream) {
   if (!n || !n_tok) return false;
-  swiglu_kernel<<<grid((uint64_t) n * n_tok), kThreads, 0, st(stream)>>>(g, u, n, lim, scale, n_tok, h);
+  swiglu_kernel<<<grid((uint64_t) n * n_tok), kThreads, 0, st(stream)>>>(g, u, n, lim, scale, n_tok, h, nullptr,
+                                                                         nullptr);
+  return ok();
+}
+
+extern "C" bool ops_swiglu_x16(const float* g, const float* u, uint32_t n, float lim, const float* scale,
+                               uint32_t n_tok, float* h, void* x16, int32_t* overflow, void* stream) {
+  if (!n || n % mm::kTile || !n_tok || n_tok > MM_MAX_TOKENS || !x16 || !overflow) return false;
+  swiglu_kernel<<<grid((uint64_t) n * tiles(n_tok)), kThreads, 0, st(stream)>>>(g, u, n, lim, scale, n_tok, h,
+                                                                                (_Float16*) x16, overflow);
   return ok();
 }
 
@@ -539,7 +637,14 @@ extern "C" bool ops_gather_rows(float* dst, const float* src, const int32_t* idx
 extern "C" bool ops_gather_sum(float* y, const float* src, const int32_t* idx, uint32_t m, uint32_t n, uint32_t dim,
                                void* stream) {
   if (!m || !n || !dim) return false;
-  gather_sum_kernel<<<grid((uint64_t) n * dim), kThreads, 0, st(stream)>>>(y, src, idx, m, n, dim);
+  gather_sum_kernel<<<grid((uint64_t) n * dim), kThreads, 0, st(stream)>>>(y, src, idx, m, n, dim, nullptr);
+  return ok();
+}
+
+extern "C" bool ops_gather_sum_add(float* y, const float* src, const int32_t* idx, uint32_t m, uint32_t n,
+                                   uint32_t dim, const float* add, void* stream) {
+  if (!m || !n || !dim || !add) return false;
+  gather_sum_kernel<<<grid((uint64_t) n * dim), kThreads, 0, st(stream)>>>(y, src, idx, m, n, dim, add);
   return ok();
 }
 

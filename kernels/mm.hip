@@ -28,16 +28,14 @@ template <> struct Tuned<quant::kQ5_KR> : Tuned<quant::kQ5_K> {};
 template <> struct Tuned<quant::kIQ1_M> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
-constexpr float kF16Max = 65504.0f;
+using mm::kF16Max;
 
 // a thread a value: to f16 (the rows past n zero)
 __global__ void x16_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t cols, _Float16* x16, int32_t* overflow) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   const uint32_t t = (uint32_t) (i / cols), c = (uint32_t) (i % cols);
   if (t >= (n + mm::kTile - 1) / mm::kTile * mm::kTile) return;
-  const float v = t < n ? x[(uint64_t) t * xs + c] : 0.0f;
-  if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);  // past f16, or NaN: refused at the step's end
-  x16[mm::x16_at(t, c, cols)] = (_Float16) v;
+  mm::x16_put(x16, t, c, cols, t < n ? x[(uint64_t) t * xs + c] : 0.0f, overflow);  // past f16: refused at the end
 }
 
 // the attention's output to f16 on the way to wo_a: a wave an FP8 block of a token's row, a lane a value - each

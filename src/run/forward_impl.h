@@ -232,6 +232,7 @@ bool fwd_copy(void *dst, const void *src, uint64_t bytes); /* device to device, 
 void fwd_release_held(Forward *f);
 void fwd_on_read(uint32_t unit, bool ok, void *arg); /* fetchq's done: the unit to the inbox */
 bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memory */
+bool fwd_wait_read(Forward *f, char *err); /* a read's end waited for, the finished ones to the pool */
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
 bool fwd_drain(Forward *f, char *err); /* the finished reads to the pool, no wait */
 bool fwd_taps_on(Forward *f); /* the taps taken from the next step on (a drafter's): false if they cannot be held */
@@ -243,7 +244,9 @@ bool fwd_mat(Forward *f, const GgufTensor *t, const void *w, uint32_t rows, uint
              uint32_t n, float *y, uint32_t ys);
 bool fwd_mat2(Forward *f, const GgufTensor *t0, const void *w0, uint32_t rows0, float *y0, uint32_t ys0,
               const GgufTensor *t1, const void *w1, uint32_t rows1, float *y1, uint32_t ys1, uint32_t cols,
-              const float *x, uint32_t xs, uint32_t n);
+              const float *x, uint32_t xs, uint32_t n, bool ready);
+bool fwd_mat_ready(Forward *f, const GgufTensor *t, const void *w, uint32_t rows, uint32_t cols, const float *x,
+                   uint32_t xs, uint32_t n, float *y, uint32_t ys, bool ready);
 bool fwd_engram(Forward *f, int l, int nth, char *err);
 /* hip_skip.c: the decoder skip (seq_prompt) - the step's plan, its compaction past layer dec, the head, the stream */
 void fwd_decoder(Forward *f);

@@ -126,12 +126,23 @@ static bool select_rows(Forward *f, int l, int src, char *err)
   return ok || fwd_fail(err, "a GPU call failed (the indexer)");
 }
 
-/* a run's keys into its sequence's window */
-static bool ring_run(Forward *f, uint32_t i, uint32_t run, void *arg)
+/* a run's keys into its sequence's window, as they are (a probe's: after it may have stood the oracle's in) */
+static bool put_run(Forward *f, uint32_t i, uint32_t run, void *arg)
 {
   const int l = *(const int *)arg;
   const uint32_t HD = f->g->head_dim;
   return ops_put_rows(f->bs[i]->ring[l], f->slots, f->b.kv + (uint64_t)i * HD, f->b.pos + i, 1, HD, run, NULL);
+}
+
+/* a run's keys finished - normed, roped, FP8 - and into its sequence's window, one launch (ops_kv_finish) */
+static bool ring_run(Forward *f, uint32_t i, uint32_t run, void *arg)
+{
+  const int l = *(const int *)arg;
+  const Geometry *g = f->g;
+  const uint32_t HD = g->head_dim;
+  const float *freqs = g->compress[l] ? f->freqs_comp : f->freqs_win;
+  return ops_kv_finish(f->b.kv + (uint64_t)i * HD, HD, F(f, f->w->layer[l].kv_norm), g->rms_eps, g->rope_dim, freqs,
+                       f->b.pos + i, f->bs[i]->ring[l], f->slots, run, NULL);
 }
 
 bool fwd_attention(Forward *f, int l, char *err)
@@ -142,23 +153,29 @@ bool fwd_attention(Forward *f, int l, char *err)
   const uint32_t H = g->n_heads, HD = g->head_dim, RD = g->rope_dim, QL = g->q_lora, D = g->n_embd, n = f->n;
   const uint32_t OG = g->o_groups, OL = g->o_lora, oin = H * HD / OG, ratio = (uint32_t)g->compress[l];
   const float *freqs = ratio ? f->freqs_comp : f->freqs_win;
-  /* q_a and kv on the same input: one launch (fwd_mat2) */
+  /* q_a and kv on the same input, one launch on the x16 layer_in's mix left (ops_hc_pre_rms_x16; not with a probe,
+     which may have stood the oracle's x in); q_a's norm writes q_b's x16 (ops_rms_x16) */
   bool ok = fwd_mat2(f, L->q_a, fwd_dev(f, L->q_a), QL, b->qa, QL, L->kv, fwd_dev(f, L->kv), HD, b->kv, HD, D, b->x, D,
-                     n) &&
-            ops_rms(b->qa, QL, QL, F(f, L->q_a_norm), g->rms_eps, n, b->qa, QL, NULL) &&
-            fwd_mat(f, L->q_b, fwd_dev(f, L->q_b), H * HD, QL, b->qa, QL, n, b->q, H * HD) &&
-            ops_rope(b->q, H, HD, RD, H * HD, freqs, b->pos, false, n, NULL) &&
-            ops_rms(b->kv, HD, HD, F(f, L->kv_norm), g->rms_eps, n, b->kv, HD, NULL) &&
-            ops_rope(b->kv, 1, HD, RD, HD, freqs, b->pos, false, n, NULL) &&
-            ops_fp8_round(b->kv, (uint64_t)n * HD, NULL);
+                     n, !f->probe) &&
+            ops_rms_x16(b->qa, QL, QL, F(f, L->q_a_norm), g->rms_eps, n, b->qa, QL, b->x16, b->overflow, NULL) &&
+            fwd_mat_ready(f, L->q_b, fwd_dev(f, L->q_b), H * HD, QL, b->qa, QL, n, b->q, H * HD, true) &&
+            ops_rope(b->q, H, HD, RD, H * HD, freqs, b->pos, false, n, NULL);
+  /* every token's keys finished and into its sequence's window before any attends (a later one of a sequence reads
+     an earlier's): one launch a run; with a probe the steps apart, the keys probed (or stood in) before the window
+     takes them */
+  if (f->probe)
+  {
+    ok = ok && ops_rms(b->kv, HD, HD, F(f, L->kv_norm), g->rms_eps, n, b->kv, HD, NULL) &&
+         ops_rope(b->kv, 1, HD, RD, HD, freqs, b->pos, false, n, NULL) &&
+         ops_fp8_round(b->kv, (uint64_t)n * HD, NULL);
+    fwd_probe(f, "q", l, f->at, b->q, n * H * HD, false);
+    fwd_probe(f, "kv", l, f->at, b->kv, n * HD, false);
+    ok = ok && runs(f, put_run, &l);
+  }
+  else
+    ok = ok && runs(f, ring_run, &l);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (q, kv)");
-  fwd_probe(f, "q", l, f->at, b->q, n * H * HD, false);
-  fwd_probe(f, "kv", l, f->at, b->kv, n * HD, false);
-  /* every token's keys into its sequence's window before any attends: a later one of a sequence reads an earlier's */
-  ok = ok && runs(f, ring_run, &l);
-  if (!ok)
-    return fwd_fail(err, "a GPU call failed (the window's keys)");
+    return fwd_fail(err, "a GPU call failed (q, the window's keys)");
   const int src = g->kv_from[l];
   if (ratio && g->kv_source[l] && !compress_rows(f, l, err))
     return false;

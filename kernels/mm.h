@@ -38,6 +38,14 @@ __host__ __device__ inline uint64_t x16_at(uint32_t t, uint32_t c, uint32_t xts)
   return (uint64_t) (t / kTile) * kTile * xts + (c / kTile) * kFrag + (t % kTile) * kTile + c % kTile;
 }
 
+// a value into the tiled x16 as mm_x16 puts it: f16, nearest; past f16's range (or NaN) the overflow flag set - every
+// kernel that writes an x16 (mm_x16's own, and the ops that write theirs beside their F32 output) through this
+constexpr float kF16Max = 65504.0f;
+__device__ inline void x16_put(_Float16* x16, uint32_t t, uint32_t c, uint32_t xts, float v, int32_t* overflow) {
+  if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);
+  x16[x16_at(t, c, xts)] = (_Float16) v;
+}
+
 // the tiles' x double-buffered (each tile's fragments loaded under the one before's WMMAs) for a slab of few
 // fragments: a tile's G fragments are 8 G VGPRs, so a second set is cheap at G 2 (Q5_K's slabs of 32: wo_a 7.24 ->
 // 5.69 ms at 2048 tokens, the shared expert's gate 2.01 -> 1.87) and ruinous at 8 (the IQ experts' 128: a real layer

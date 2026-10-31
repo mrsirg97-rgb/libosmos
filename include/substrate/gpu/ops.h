@@ -10,6 +10,7 @@
 #define OPS_MAX_TOPK 16
 #define OPS_MAX_SELECT 1024
 #define OPS_MAX_RATIO 16
+#define OPS_MAX_KV_DIM 1024 /* ops_kv_finish's row, in a block's LDS (ds1017's: 512) */
 #define OPS_ATTN_ROW(keys) (((keys) + 3) / 4 * 4) /* a score row: the keys, to a float4 */
 /* ops_sparse_attn's scores: n_tok tokens of heads heads, a row a head, then a denominator a head */
 #define OPS_ATTN_SCRATCH(n_tok, heads, keys) ((uint64_t)(n_tok) * (heads) * (OPS_ATTN_ROW(keys) + 1))
@@ -18,6 +19,8 @@ bool ops_embed(uint32_t type, const void *table, uint32_t dim, const int32_t *id
                float *h, void *stream);
 bool ops_rms(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
              uint32_t y_stride, void *stream);
+bool ops_rms_x16(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
+                 uint32_t y_stride, void *x16, int32_t *overflow, void *stream);
 #define OPS_HC_PARTS 64
 bool ops_hc_dot(const float *fn, const float *h, uint32_t hc, uint32_t dim, uint32_t n_tok, float *partial,
                 void *stream);
@@ -25,6 +28,8 @@ bool ops_hc_mix(const float *partial, const float *scale, const float *base, uin
                 float hc_eps, uint32_t iters, uint32_t n_tok, float *pre, float *post, float *comb, void *stream);
 bool ops_hc_pre_rms(const float *h, const float *pre, uint32_t hc, uint32_t dim, const float *w, float eps,
                     uint32_t n_tok, float *x, void *stream);
+bool ops_hc_pre_rms_x16(const float *h, const float *pre, uint32_t hc, uint32_t dim, const float *w, float eps,
+                        uint32_t n_tok, float *x, void *x16, int32_t *overflow, void *stream);
 bool ops_hc_pre(const float *h, const float *pre, uint32_t hc, uint32_t dim, uint32_t n_tok, float *x, void *stream);
 bool ops_hc_mean(const float *h, uint32_t hc, uint32_t dim, uint32_t n_tok, float *out, uint32_t out_stride,
                  void *stream);
@@ -33,6 +38,8 @@ bool ops_hc_post(const float *y, const float *res, const float *post, const floa
 bool ops_rope(float *x, uint32_t heads, uint32_t head_dim, uint32_t rope_dim, uint32_t stride, const float *freqs,
               const int32_t *pos, bool inverse, uint32_t n_tok, void *stream);
 bool ops_fp8_round(float *x, uint64_t n, void *stream);
+bool ops_kv_finish(float *kv, uint32_t head_dim, const float *w, float eps, uint32_t rope_dim, const float *freqs,
+                   const int32_t *pos, float *ring, uint32_t slots, uint32_t n_tok, void *stream);
 bool ops_fp4_round(float *x, uint64_t n, uint32_t block, bool e4m3_scale, void *stream);
 bool ops_round_bf16(float *x, uint64_t n, void *stream);
 bool ops_engram_gate(float *h, const float *kv, const void *q_w, const void *k_w, uint32_t hc, uint32_t dim, float eps,
@@ -54,11 +61,15 @@ bool ops_router(const float *logits, const float *bias, uint32_t n_exp, uint32_t
                 int32_t *idx, float *w, void *stream);
 bool ops_swiglu(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok, float *h,
                 void *stream);
+bool ops_swiglu_x16(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok,
+                    float *h, void *x16, int32_t *overflow, void *stream);
 bool ops_swiglu_lane(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok,
                      float *h, void *stream);
 bool ops_gather_rows(float *dst, const float *src, const int32_t *idx, uint32_t n, uint32_t len, void *stream);
 bool ops_gather_sum(float *y, const float *src, const int32_t *idx, uint32_t m, uint32_t n, uint32_t dim,
                     void *stream);
+bool ops_gather_sum_add(float *y, const float *src, const int32_t *idx, uint32_t m, uint32_t n, uint32_t dim,
+                        const float *add, void *stream);
 bool ops_scale(float *x, uint64_t n, float s, void *stream);
 bool ops_add(float *y, const float *a, uint64_t n, void *stream);
 
@@ -112,6 +123,11 @@ ops_rope
 ops_fp8_round
   each 32 values rounded as the reference's act_quant: a power-of-two scale (amax / 448, at least 1e-4, up to the next
   power of two), the values E4M3 (nearest, ties to even) under it. n a multiple of 32.
+
+ops_kv_finish
+  a window key's tail for n_tok tokens, one launch: ops_rms (w, eps) over head_dim, ops_rope of its last rope_dim at
+  pos (not inverse), ops_fp8_round, then the row into ring at row pos % slots (ops_put_rows, every 1) as well as
+  kv - each step's bits. head_dim at most OPS_MAX_KV_DIM, a multiple of 32.
 
 ops_fp4_round
   each `block` values rounded as the reference's fp4_act_quant: E2M1 values (nearest, ties to the even mantissa) under
@@ -179,4 +195,12 @@ ops_scale
 
 ops_add
   y += a.
+
+ops_rms_x16, ops_hc_pre_rms_x16, ops_swiglu_x16
+  as ops_rms, ops_hc_pre_rms, ops_swiglu, writing beside their F32 output the x16 mm_x16 would make of it (its rows
+  and the rows past them to a whole tile zero; *overflow set past f16) - the launch of mm_x16 saved, its bits kept.
+  the F32 row length (n, dim) a multiple of 16; at most MM_MAX_TOKENS rows.
+
+ops_gather_sum_add
+  ops_gather_sum, then add's values added to its sums (ops_add after it): one launch, the same bits.
 */

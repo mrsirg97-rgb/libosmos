@@ -69,7 +69,9 @@ int main() {
   CHECK(d);
   const auto prompt = [&](Seq* s) {
     std::vector<Seq*> ss(kPrompt, s);
-    CHECK(forward_batch(f, ss.data(), ids.data(), kPrompt, ferr));
+    const bool ok = forward_batch(f, ss.data(), ids.data(), kPrompt, ferr);
+    if (!ok) std::fprintf(stderr, "  %s\n", ferr);
+    CHECK(ok);
     return argmax_row(f, kPrompt - 1);
   };
   // drafted and verified against stepping one at a time: once in the default mode, once in the lane's (its small

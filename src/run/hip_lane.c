@@ -119,7 +119,6 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
     ok = mv_group_tok(L->exp_down->type, d->w[2] + a, d->cnt + a, d->xrow + a, z - a, (uint32_t)t->cnt[a], D, FF,
                       b->hh, FF, b->ye, D, NULL);
   }
-  ok = ok && ops_gather_sum(b->moe, b->ye, d->order, K, n, D, NULL) &&
-       ops_add(b->moe, b->sye, (uint64_t)n * D, NULL);
+  ok = ok && ops_gather_sum_add(b->moe, b->ye, d->order, K, n, D, b->sye, NULL);
   return ok || fwd_fail(err, "a GPU call failed (the lane's experts)");
 }

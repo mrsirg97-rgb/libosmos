@@ -92,10 +92,12 @@ static bool shared(Forward *f, int l)
   const LayerWeights *L = &f->w->layer[l];
   Scratch *b = &f->b;
   const uint32_t D = g->n_embd, FF = g->expert_ff, n = f->n;
+  const bool fits = n <= MM_MAX_TOKENS; /* the swiglu writes the down's x16 (ops_swiglu_x16) */
   return fwd_mat2(f, L->sh_gate, fwd_dev(f, L->sh_gate), FF, b->sga, FF, L->sh_up, fwd_dev(f, L->sh_up), FF, b->sup,
-                  FF, D, b->xf, D, n) &&
-         ops_swiglu(b->sga, b->sup, FF, g->clamp_shexp[l], NULL, n, b->shh, NULL) &&
-         fwd_mat(f, L->sh_down, fwd_dev(f, L->sh_down), D, FF, b->shh, FF, n, b->sye, D);
+                  FF, D, b->xf, D, n, false) &&
+         (fits ? ops_swiglu_x16(b->sga, b->sup, FF, g->clamp_shexp[l], NULL, n, b->shh, b->x16, b->overflow, NULL)
+               : ops_swiglu(b->sga, b->sup, FF, g->clamp_shexp[l], NULL, n, b->shh, NULL)) &&
+         fwd_mat_ready(f, L->sh_down, fwd_dev(f, L->sh_down), D, FF, b->shh, FF, n, b->sye, D, fits);
 }
 
 /* the next layer's streamed experts read while this one runs, when a step picks at least as many as a layer has (a
@@ -207,7 +209,13 @@ bool fwd_moe(Forward *f, int l, char *err)
       unit_of[j] = unit;
       if (f->rix[unit] < 0 && !f->is_held[unit]) /* held once for all the layer's sub-batches */
       {
-        if (pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_FULL)
+        /* full while reads are under way (a prompt's next layer, read ahead): a reading unit is made room of once
+           its read ends - wait for one, pin again; full with none reading is the pool's last word */
+        PoolPin pin;
+        while ((pin = pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0})) == POOL_FULL && pool_reading(f->pool))
+          if (!fwd_wait_read(f, err))
+            return false;
+        if (pin == POOL_FULL)
           return fwd_fail(err, "an expert the pool cannot hold (its room, or GPU memory refused)");
         f->held[f->n_held++] = unit, f->is_held[unit] = true;
       }
@@ -264,7 +272,7 @@ bool fwd_moe(Forward *f, int l, char *err)
        ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
        mm_x16_rows(b->hh, FF, dhidx, slots, FF, b->xe16, b->overflow, NULL) &&
        group(L->exp_down->type, dtab + 2 * ne, cnt, dcnt, ne, D, FF, b->xe16, dxd, b->ye, dyd, D) &&
-       ops_gather_sum(b->moe, b->ye, dorder, K, n, D, NULL) && ops_add(b->moe, b->sye, (uint64_t)n * D, NULL);
+       ops_gather_sum_add(b->moe, b->ye, dorder, K, n, D, b->sye, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");
   if (!fwd_swap_layer(f, l, err))

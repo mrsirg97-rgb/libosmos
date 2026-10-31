@@ -488,7 +488,21 @@ the hc x hc matrix (hc^2 <= 32), each row's and column's sum the serial one's in
 test_hc_gpu: the dots alone against a host replay and the tiled path, the mixes against the one-lane kernel kept as
 the reference (pre, post, comb; hc 4 and 6) - a reversed sum fails either. 20 resident layers 27.6 / 27.6 / 27.6 ->
 26.7 / 26.6 / 26.7 ms. what is left between launches: ~0.12 ms a layer, the fusions in reach (the kv's rms, rope,
-FP8 and ring write; the MoE's sum, add and hc_post; a norm and its x16) ~9 launches a layer, ~2%.
+FP8 and ring write; the MoE's sum, add and hc_post; a norm and its x16) ~9 launches a layer, ~2%. built (2026-10-31,
+test_fuse_gpu: each against the kernels it stands for, every bit - the x16s to a whole tile with garbage in both
+buffers first, the overflow flag): ops_kv_finish (the key's norm, rope, FP8 and the window's row: 4 launches 1),
+ops_hc_pre_rms_x16 (the attention's mix writes q_a and kv's x16), ops_rms_x16 (q_a's norm, q_b's), ops_swiglu_x16
+(the shared expert's, its down's), ops_gather_sum_add (the experts' sum and the shared one's add) - 7 launches a
+layer fewer. 20 resident layers 26.3 / 26.3 / 26.3 -> 26.0 / 26.0 / 25.9 ms: ~1.3%, less than the launches' ~3.5 us
+each would give (the fused kernels do the same work; the x16s' pad rows a block each). the FFN's mix (xf: its x16
+the shared pair's) not fused: under the merged experts xf spans the step's sub-batches, and a sub-batch's x16 is
+not theirs. and a race the speed exposed (test_drafter_gpu, its 256-token prompt: "an expert the pool cannot hold" at
+layer 19, 101 held): a prompt reads the next layer's streamed experts ahead, and a reading unit's memory cannot be
+made room of - with the GPU sooner at a layer's pins, its reads ahead were still under way and the pin was refused
+FULL. now a pin refused while units read waits for a read's end (fwd_wait_read) and pins again; full with none
+reading is still the error (pool_reading: the count, test_pool's invariants). with a probe installed (the oracle tests')
+the attention's two fusions step apart - a probe may stand the oracle's x or keys in after the fused kernel would
+have used them; test_forward_gpu's probed run (unfused) and unprobed one (fused) the same fingerprint.
 
 ## DSpark: the drafter (built, 2026-10-30)
 
