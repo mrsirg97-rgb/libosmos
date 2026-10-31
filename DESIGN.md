@@ -615,6 +615,18 @@ of the lane bit for bit).
     GPU. maya's lane pays where its GPU holds the experts it can and the page cache the rest; here the resident set
     is GPU memory of its own and the misses are cold. the kernel kept (the bits shown); the wiring not built.
 
+- **the IQ experts' matvec at one token** (2026-10-31; scratch `ivr.hip`, `grp.hip`, weights cycled): what binds
+  it. mv.h's kernel on an IQ2_XXS gate (2,304 x 5,120): 24.2 us as is, 17.9 with the grid and signs left out, 16.6
+  with one byte a chunk and no decode - the decode a third, the rest the loads' latency and the launch's tail. the
+  counters: the real decode keeps the VALU ~46% busy, the byte-only one ~17% at 70% of the time. tried, the same
+  bits, not faster: the grids packed 2 bits a value (4x smaller tables: 24 -> 31 us, the unpacking dearer than the
+  lookups); x held in registers a lane, the wave walking the rows (the down's 9 chunks a lane even, the gate's 20
+  spill: 24 -> 130). what moved it: the lane's launches (mv_group_tok, ~6 experts a token) at 2 rows a wave for the
+  IQ2s, and IQ1_M's short rows at 2 rows and 2 chunks in flight - 6 experts' IQ2_XXS gate 122.5 -> 109.4 us, its
+  down 149.8 -> 125.1, IQ2_XS's gate 124 -> 115, IQ1_M's down 124.7 -> 117.7 (the order unchanged: test_mv_gpu's
+  tokens alone). 20 resident layers 26.7 -> 26.3 ms. a repack of IQ2_XXS to one aligned word a lane would save a
+  load or two a chunk but not the index-then-grid chain the experiment above shows is the cost: not built.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token

@@ -75,15 +75,39 @@ bool group(const void* const* w, uint32_t n, uint32_t rows, uint32_t cols, const
   return mv::group_launch<T, k.r, k.u>(w, n, rows, cols, x, x_mat, x_div, y, s);
 }
 
+// the lane's one-token launches, several experts at once (mv_group_tok, 6 experts of ds1017's IQ types): the IQ2s
+// best at 2 rows a wave, 4 chunks in flight (gate 122.5 -> 110 us, down 149.8 -> 125.3); IQ1_M its short rows (the
+// down's 2,304 columns) at 2 and 2 (123.3 -> 118.5), its long as tune's (2026-10-31, DESIGN.md). no bit changes
+constexpr uint32_t kShortCols = 4096;  // fewer than 16 chunks a lane
+constexpr Tune tune_group1(quant::Type t, bool short_row) {
+  switch (t) {
+    case quant::kIQ2_XXS:
+    case quant::kIQ2_XS: return {2, 4};
+    case quant::kIQ1_M: return short_row ? Tune{2, 2} : tune(t, 1);
+    default: return tune(t, 1);
+  }
+}
+
+template <quant::Type T, int NT, int R, int U>
+bool group_tok_k(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t rows,
+                 uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, hipStream_t s) {
+  const uint32_t per_block = mv::kWavesPerBlock * R;
+  const dim3 grid((rows + per_block - 1) / per_block, n);
+  mv::group_tok_kernel<T, NT, R, U><<<grid, mv::kWave * mv::kWavesPerBlock, 0, s>>>(
+      (const uint8_t* const*) w, cnt, xrow, rows, cols, x, xs, y, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
 template <quant::Type T, int NT>
 bool group_tok_nt(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t rows,
                   uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, hipStream_t s) {
+  if constexpr (NT == 1) {
+    constexpr Tune a = tune_group1(T, true), b = tune_group1(T, false);
+    if (cols < kShortCols) return group_tok_k<T, 1, a.r, a.u>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
+    return group_tok_k<T, 1, b.r, b.u>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
+  }
   constexpr Tune k = tune(T, NT);
-  const uint32_t per_block = mv::kWavesPerBlock * k.r;
-  const dim3 grid((rows + per_block - 1) / per_block, n);
-  mv::group_tok_kernel<T, NT, k.r, k.u><<<grid, mv::kWave * mv::kWavesPerBlock, 0, s>>>(
-      (const uint8_t* const*) w, cnt, xrow, rows, cols, x, xs, y, ys);
-  return hipGetLastError() == hipSuccess;
+  return group_tok_k<T, NT, k.r, k.u>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
 }
 
 template <quant::Type T>
