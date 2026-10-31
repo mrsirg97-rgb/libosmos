@@ -22,7 +22,7 @@ constexpr int kHcParts = OPS_HC_PARTS;
 #ifndef HC_AHEAD
 #define HC_AHEAD 16
 #endif
-constexpr int kHcAhead = HC_AHEAD;  // hc_dot_few's loads in flight a thread (measured: DESIGN.md)  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
+constexpr int kHcAhead = HC_AHEAD;  // hc_dot_few's loads in flight a thread (DESIGN.md)  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
 
 // the sum of each thread's v over the block, by a fixed tree (every thread gets it)
 template <int NT = kThreads>
