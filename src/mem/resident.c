@@ -111,7 +111,7 @@ Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, in
     void *dst[POOL_PARTS] = {0};
     for (int k = 0; k < r->u[i].n_parts; k++)
       dst[k] = r->dev[i] + r->off[i][k];
-    fetchq_fetcher(q).fetch((uint32_t)i, r->u[i].part, r->u[i].n_parts, dst, q);
+    fetchq_fetcher(q).fetch((uint32_t)i, r->u[i].part, r->u[i].n_parts, dst, false, q);
   }
   pthread_mutex_lock(&r->mu);
   while (ok && r->done < n_units)

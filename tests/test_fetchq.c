@@ -74,7 +74,7 @@ static void test_once(int fd)
     const PoolRange parts[2] = {{fd, (u * 4096u) % ((1 << 20) - 3000), 3000},
                                 {fd, (u * 7919u) % ((1 << 20) - 100), 100}};
     void *const dst[POOL_PARTS] = {buf[u][0], buf[u][1], NULL};
-    f.fetch(u, parts, 1 + (int)(u % 2), dst, f.ctx);
+    f.fetch(u, parts, 1 + (int)(u % 2), dst, false, f.ctx);
   }
   while (atomic_load(&n_ok) + atomic_load(&n_bad) < N)
     usleep(1000);
@@ -113,7 +113,7 @@ static void test_chunks(int fd)
       dst[k] = buf[u][k] = malloc(sizes[k]);
       assert(buf[u][k]);
     }
-    f.fetch(u, parts, 3, dst, f.ctx);
+    f.fetch(u, parts, 3, dst, false, f.ctx);
   }
   while (atomic_load(&n_ok) + atomic_load(&n_bad) < UNITS)
     usleep(1000);
@@ -145,7 +145,7 @@ static void test_failure(int fd)
   const PoolRange bad = {dup_fd, 0, 4096};
   static uint8_t buf[4096];
   void *const dst[POOL_PARTS] = {buf, NULL, NULL};
-  f.fetch(7, &bad, 1, dst, f.ctx);
+  f.fetch(7, &bad, 1, dst, false, f.ctx);
   while (atomic_load(&n_ok) + atomic_load(&n_bad) < 1)
     usleep(1000);
   fetchq_destroy(q);
@@ -167,7 +167,7 @@ static void test_destroy_busy(int fd)
   {
     const PoolRange r = {fd, (u * 4096u) % ((1 << 20) - BYTES), BYTES};
     void *const dst[POOL_PARTS] = {buf + (size_t)u * BYTES, NULL, NULL};
-    f.fetch(u % N, &r, 1, dst, f.ctx);
+    f.fetch(u % N, &r, 1, dst, false, f.ctx);
   }
   fetchq_destroy(q);
   free(buf);
@@ -175,6 +175,63 @@ static void test_destroy_busy(int fd)
   usleep(20000);
   assert(atomic_load(&after_destroy) == 0);
   printf("  destroy busy: stopped with %d of %d read; none after it returned\n", atomic_load(&n_ok), JOBS);
+}
+
+/* the urgent first: one worker held inside unit 0's done (so the queue is what it is when the test lets it go), the
+   ahead reads queued, then an urgent one and a hurried ahead one - the worker's next reads are those two, in that
+   order, before every other ahead */
+static pthread_mutex_t gate_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gate_cv = PTHREAD_COND_INITIALIZER;
+static bool gate_open;
+static uint32_t order[N];
+static atomic_int n_order;
+
+static void done_gated(uint32_t unit, bool ok, void *arg)
+{
+  (void)arg, (void)ok;
+  order[atomic_fetch_add(&n_order, 1)] = unit;
+  pthread_mutex_lock(&gate_mu);
+  while (unit == 0 && !gate_open)
+    pthread_cond_wait(&gate_cv, &gate_mu);
+  pthread_mutex_unlock(&gate_mu);
+}
+
+static void test_urgent(int fd)
+{
+  enum { AHEAD = 40, BYTES = 4096, URGENT = AHEAD, HURRIED = AHEAD / 2 };
+  atomic_store(&n_order, 0);
+  gate_open = false;
+  Fetchq *q = fetchq_create(1, done_gated, NULL);
+  assert(q);
+  const Fetcher f = fetchq_fetcher(q);
+  static uint8_t buf[AHEAD + 1][BYTES];
+  for (uint32_t u = 0; u <= AHEAD; u++)
+  {
+    const PoolRange r = {fd, (uint64_t)u * BYTES, BYTES};
+    void *const dst[POOL_PARTS] = {buf[u], NULL, NULL};
+    f.fetch(u, &r, 1, dst, u == URGENT, f.ctx);
+    while (u == 0 && atomic_load(&n_order) == 0) /* the worker in unit 0's done before the rest are queued */
+      usleep(1000);
+  }
+  f.hurry(HURRIED, f.ctx);
+  f.hurry(N - 1, f.ctx); /* never asked: nothing */
+  pthread_mutex_lock(&gate_mu);
+  gate_open = true;
+  pthread_cond_broadcast(&gate_cv);
+  pthread_mutex_unlock(&gate_mu);
+  while (atomic_load(&n_order) < AHEAD + 1)
+    usleep(1000);
+  fetchq_destroy(q);
+  assert(order[0] == 0 && order[1] == URGENT && order[2] == HURRIED);
+  for (int i = 3, next = 1; i <= AHEAD; i++, next++) /* the rest in the order asked */
+  {
+    next += next == HURRIED;
+    assert(order[i] == (uint32_t)next);
+  }
+  for (uint32_t u = 0; u <= AHEAD; u++)
+    assert(buf[u][0] == (uint8_t)(u * BYTES) && buf[u][BYTES - 1] == (uint8_t)(u * BYTES + BYTES - 1));
+  printf("  urgent: with %d read ahead queued, the urgent read next, then the hurried one, then the rest in order\n",
+         AHEAD - 1);
 }
 
 /* the pool fed by the fetcher, its ends on the consumer: a worker's done queues the unit, the consumer drains them
@@ -256,6 +313,7 @@ int main(void)
   close(big);
   test_failure(fd);
   test_destroy_busy(fd);
+  test_urgent(fd);
   test_with_pool(fd);
   close(fd);
   char cmd[600];

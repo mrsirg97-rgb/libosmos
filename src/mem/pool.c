@@ -155,14 +155,14 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
   return dev;
 }
 
-static void begin_read(Pool *p, Slot *s, uint8_t *dev)
+static void begin_read(Pool *p, Slot *s, uint8_t *dev, bool urgent)
 {
   void *dst[POOL_PARTS] = {0};
   for (int k = 0; k < s->u.n_parts; k++)
     dst[k] = dev + s->off[k];
   s->dev = dev, s->state = POOL_READING;
   emit(p, POOL_EV_READ, (uint32_t)(s - p->s), s->size);
-  p->fetcher.fetch((uint32_t)(s - p->s), s->u.part, s->u.n_parts, dst, p->fetcher.ctx);
+  p->fetcher.fetch((uint32_t)(s - p->s), s->u.part, s->u.n_parts, dst, urgent, p->fetcher.ctx);
 }
 
 static bool check_unit(Slot *s, size_t i, char *err)
@@ -257,8 +257,10 @@ PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS])
       emit(p, POOL_EV_REFUSED, unit, s->size);
       return POOL_FULL;
     }
-    begin_read(p, s, mem);
+    begin_read(p, s, mem, true);
   }
+  else if (s->state == POOL_READING && p->fetcher.hurry)
+    p->fetcher.hurry(unit, p->fetcher.ctx);
   s->holds++;
   if (s->state != POOL_PINNED)
     return POOL_WAIT;
@@ -278,7 +280,7 @@ void pool_want(Pool *p, uint32_t unit, uint64_t next)
   }
   uint8_t *mem = room(p, s, (Reach){true, next});
   if (mem)
-    s->next = next, begin_read(p, s, mem);
+    s->next = next, begin_read(p, s, mem, false);
 }
 
 void pool_ready(Pool *p, uint32_t unit, bool ok)

@@ -445,7 +445,10 @@ the IQ experts at one token (the same scratch, the library's layout with parts l
 362 us all of it): no WMMA 327 / 317 us (IQ1_M / IQ2_XXS), no decode 70 / 67 - the decode is the cost, the WMMAs ~10%,
 not the floor (as was said here first). the library's 8 chunks in flight bring the whole to ~170 us (90-110 GB/s), the
 matvec's own IQ decode ~111: one token's experts are as fast as their decode. their grids are __constant__, read a lane
-its own index (a vector load through the cache, a dependent one a chunk); in LDS untried.
+its own index (a vector load through the cache, a dependent one a chunk). in LDS (scratch `glds.hip`, 2026-10-30:
+the grids copied into each block's LDS first, the same bits): slower everywhere - IQ1_M's gate 107 -> 126 / 165 us
+(2 / 1 rows a lane), its down 124 -> 131 / 190, IQ2_XXS 123 -> 127 / 135. a block's 16 KB copy costs more than the
+lookups it saves; the 8 chunks in flight hide them already. not taken.
 
 ## DSpark: the drafter (built, 2026-10-30)
 
@@ -543,6 +546,19 @@ of the lane bit for bit).
   is left beside the budget at 92, ~14 GiB: the drafter 7.4 (its experts, resident: a round takes up to 45), the
   scratch ~4 (the head's 2,048 rows of logits ~1 of it), the pool ~2 (a prompt's two layers). the price: an 8K
   prompt's experts in 4 steps, not one (the merged experts' ~10%).
+- **the misses** (2026-10-30, counters in scratch, maya's prompts plain, the lane, 92 GiB): a 256-token answer
+  ~21 s, of it 2.8-3.7 s the host waiting on a read - ~13 ms of a token's ~83, the GPU idle under it (the floor: the
+  20 layers' 30.5 ms a token is ~65 for all of them). ~6 waits a token, ~2 ms each: a lone expert's read (~6.5 MB),
+  which on this SSD is 1.79 ms p50 by 4 workers in 1 MiB chunks, 1.51 at best (16 workers, 512 KiB; scratch
+  `lat.c`, 60 cold ranges a setting) - the wait is the drive's latency, not the queue's. the next layer's guess buys
+  nothing here: FWD_GUESS_K 0 / 3 / 6 answer at 11.9-12.3 / 11.8-12.1 / 11.7-12.0 tok/s - at 6, 58% of its reads
+  never used, and the misses it saves come back as reads queued behind its others. so the fetcher's two queues
+  (fetchq.h): a pin's read urgent, a worker taking those first, and a read begun ahead and then pinned hurried to
+  them (test_fetchq: one worker, 39 ahead queued - the urgent next, then the hurried). waits 3.7 / 3.1 / 3.2 ->
+  3.1 / 2.75 / 2.9 s an answer; plain 11.9 / 12.5 / 12.2 tok/s (11.7 / 12.0 / 11.9), drafted 18.9 / 16.1 / 22.1 and
+  18.9 / 16.2 / 22.1 (19.0 / 16.7 / 21.8 and 18.6 / 15.9 / 21.2, interleaved) - within the runs' spread. what is
+  left of a miss is a read the router names only when it is needed: the lever past it is fewer misses (the
+  resident set) or the floor, not the reads.
 
 ## Engram's reads (measured, 2026-10-29)
 
@@ -558,6 +574,9 @@ step, in a 110 GB file the page cache mostly does not hold. scratch `egread.c`, 
 | 128 | 870,000 | ~0.11 s |
 
 so `rowread.h`: 64 workers that live for the forward's life, a layer's rows handed to them at once (16 a take).
+(fixed 2026-10-30, found by `make tsan`: a worker woken for a batch already done was still reading its fields when
+the next call wrote them - harmless while it took no row, a wrong read had it taken one. a call now waits for every
+worker to be out of the last batch first; test_rowread's 20,000 calls of a row or two catch it 5 runs of 5 without.)
 
 ## the experts' matmul (measured, 2026-10-29)
 
