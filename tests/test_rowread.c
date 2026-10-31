@@ -67,6 +67,30 @@ static void test_rows(int fd)
          N);
 }
 
+/* many calls of a row or two, 64 workers: the caller reads each itself before most workers wake, so a worker often
+   wakes for a batch already done - and must be out of it before the next call's fields are written (a race
+   ThreadSanitizer sees, `make tsan`, if they are not) */
+static void test_tiny(int fd)
+{
+  enum { CALLS = 20000, BYTES = 144 };
+  Rowread *r = rowread_create(ROWREAD_MAX_THREADS);
+  assert(r);
+  uint64_t off[2];
+  uint8_t dst[2][2 * BYTES];
+  for (uint32_t call = 0; call < CALLS; call++)
+  {
+    const uint32_t n = 1 + call % 2;
+    uint8_t *d = dst[call % 2];
+    for (uint32_t i = 0; i < n; i++)
+      off[i] = ((uint64_t)call * 4099 + i * 977) % (FILE_BYTES - BYTES);
+    assert(rowread(r, fd, off, n, BYTES, d));
+    for (uint32_t i = 0; i < n; i++)
+      assert(d[i * BYTES] == byte_at(off[i]) && d[i * BYTES + BYTES - 1] == byte_at(off[i] + BYTES - 1));
+  }
+  rowread_destroy(r);
+  printf("  tiny: %d calls of a row or two, %d workers, each row in its place\n", CALLS, ROWREAD_MAX_THREADS);
+}
+
 /* a row past the file's end comes short: false, the others still read */
 static void test_short(int fd)
 {
@@ -95,6 +119,7 @@ int main(void)
   const int fd = file("f.bin");
   test_refusals(fd);
   test_rows(fd);
+  test_tiny(fd);
   test_short(fd);
   close(fd);
   char cmd[600];

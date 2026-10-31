@@ -102,6 +102,10 @@ bool rowread(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint32_t by
   if (!r || n == 0)
     return r != NULL;
   pthread_mutex_lock(&r->mu);
+  /* a worker that woke late for the last batch (after it was done) is in it still, reading its fields: they are
+     changed once it is out (it takes nothing - every row was) */
+  while (r->busy > 0)
+    pthread_cond_wait(&r->done, &r->mu);
   r->fd = fd, r->offset = offset, r->n = n, r->bytes = bytes, r->dst = dst;
   atomic_store(&r->next, 0);
   atomic_store(&r->failed, false);
