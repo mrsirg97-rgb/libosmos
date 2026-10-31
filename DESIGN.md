@@ -652,6 +652,16 @@ of the lane bit for bit).
   picks over 24 steps) the same streams' bits (a token's sum ordered by residency fails it). what is left of a
   miss is the drive's: fewer of them is the lever - the memory's, not the code's.
 
+- **what maya does with the same files** (2026-10-31, its v1.1.41 bench log, `maya-bench.txt`): its plain bench
+  ran `maya-ds4-hip-nodraft.json` - no drafter in memory: dense 6.96 GB and 11,686 of 15,744 experts (104.5 GB) in
+  GPU memory, 1.0 of 107.6 GiB free (prompt buffers borrow the pool's tail: no scratch of their own); the other
+  4,058 (35.1 GB) on a CPU lane of 15 threads (AVX-512), read in place from the model's files - an expert 0.13 ms
+  alone, 0.53-0.80 ms while the GPU decodes; streaming some to the GPU measured no faster (61.38 against 61.44 ms a
+  token) and turned off. ours against it like for like (mbench4 with no drafter, maya's prompts, plain, the lane):
+  92 GiB 12.9 / 13.5 / 13.3 tok/s, 99 13.8 / 14.3 / 14.2, 101 14.6 / 14.9 / 14.8 (maya 16.7); 102 and 103 refused
+  at a prompt's pin - the scratch (~4 GiB at 2,048 tokens) and the pool's two layers (~2) beside the budget. the
+  drafter's 7.4 GB are the gap between our plain numbers before (92 GiB, drafter loaded) and these.
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
