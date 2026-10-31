@@ -30,7 +30,8 @@ static void on_read(uint32_t unit, bool ok, void *arg)
   Resident *r = arg;
   const PoolUnit *u = &r->u[unit];
   for (int k = 0; ok && k < u->n_parts; k++)
-    (void)posix_fadvise(u->part[k].fd, (off_t)u->part[k].offset, (off_t)u->part[k].bytes, POSIX_FADV_DONTNEED);
+    if (u->part[k].fd >= 0)
+      (void)posix_fadvise(u->part[k].fd, (off_t)u->part[k].offset, (off_t)u->part[k].bytes, POSIX_FADV_DONTNEED);
   pthread_mutex_lock(&r->mu);
   r->done++, r->failed += !ok;
   pthread_cond_signal(&r->cv);
@@ -46,8 +47,9 @@ static bool check(const PoolUnit *u, size_t i, uint64_t *size, char *err)
   {
     const PoolRange *p = &u->part[k];
     struct stat st;
-    if (fstat(p->fd, &st) != 0 || p->bytes == 0 || p->offset >= (uint64_t)st.st_size ||
-        p->bytes > (uint64_t)st.st_size - p->offset)
+    if (p->bytes == 0 || (p->fd < 0 && p->offset != 0) ||
+        (p->fd >= 0 && (fstat(p->fd, &st) != 0 || p->offset >= (uint64_t)st.st_size ||
+                        p->bytes > (uint64_t)st.st_size - p->offset)))
       return snprintf(err, POOL_ERR, "unit %zu part %d: 0 bytes, or past its file", i, k), false;
     *size += up(p->bytes);
   }
@@ -109,9 +111,12 @@ Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, in
   for (size_t i = 0; ok && i < n_units; i++)
   {
     void *dst[POOL_PARTS] = {0};
-    for (int k = 0; k < r->u[i].n_parts; k++)
-      dst[k] = r->dev[i] + r->off[i][k];
-    fetchq_fetcher(q).fetch((uint32_t)i, r->u[i].part, r->u[i].n_parts, dst, false, q);
+    PoolRange read[POOL_PARTS];
+    int n = 0;
+    for (int k = 0; k < r->u[i].n_parts; k++) /* a room part (no file) is memory only: nothing read */
+      if (r->u[i].part[k].fd >= 0)
+        read[n] = r->u[i].part[k], dst[n++] = r->dev[i] + r->off[i][k];
+    fetchq_fetcher(q).fetch((uint32_t)i, read, n, dst, false, q);
   }
   pthread_mutex_lock(&r->mu);
   while (ok && r->done < n_units)

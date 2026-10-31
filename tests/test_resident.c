@@ -158,6 +158,41 @@ static void test_layout(int fd)
          "bytes, aligned, within one allocation; destroy frees all\n", N, arenas, BIG);
 }
 
+/* room: a part of fd -1 laid out after the file's part, not read - its memory as the allocator gave it (0xAB here),
+   the file's part its bytes; a room part with an offset refused */
+static void *alloc_ab(uint64_t bytes, void *ctx)
+{
+  void *p = fake_alloc(bytes, ctx);
+  if (p)
+    memset(p, 0xAB, bytes);
+  return p;
+}
+
+static void test_room(int fd)
+{
+  const uint64_t file_b = 1000, room_b = 5000;
+  const PoolUnit u[2] = {{.part = {{fd, 17, file_b}, {-1, 0, room_b}}, .n_parts = 2},
+                         {.part = {{-1, 0, 64}}, .n_parts = 1}};
+  Mem m = {0};
+  char err[POOL_ERR] = "";
+  Resident *r = resident_create(u, 2, (Slots){alloc_ab, fake_free, &m}, 4, err);
+  assert(r);
+  const void *dev[POOL_PARTS];
+  assert(resident_dev(r, 0, dev));
+  const uint8_t *a = dev[0], *b = dev[1];
+  assert(b == a + (file_b + POOL_ALIGN - 1) / POOL_ALIGN * POOL_ALIGN);
+  for (uint64_t i = 0; i < file_b; i++)
+    assert(a[i] == byte_at(17 + i));
+  for (uint64_t i = 0; i < room_b; i++)
+    assert(b[i] == 0xAB);
+  assert(resident_dev(r, 1, dev) && ((const uint8_t *)dev[0])[63] == 0xAB); /* a unit all room: nothing read */
+  resident_destroy(r);
+  assert(m.n == 0);
+  const PoolUnit bad = {.part = {{-1, 8, 64}}, .n_parts = 1};
+  assert(!resident_create(&bad, 1, (Slots){alloc_ab, fake_free, &m}, 4, err) && m.n == 0);
+  printf("  room: a part of no file laid out after the file's, not read; with an offset refused\n");
+}
+
 int main(void)
 {
   printf("[test_resident] start\n");
@@ -165,6 +200,7 @@ int main(void)
   const int fd = file("f.bin");
   test_refusals(fd);
   test_layout(fd);
+  test_room(fd);
   close(fd);
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);

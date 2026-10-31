@@ -29,7 +29,9 @@ Resident
 
 resident_create
   `units` (copied) laid out back to back, each part from a POOL_ALIGN boundary, in arenas of RESIDENT_ARENA bytes
-  from `slots` (hip_slots.h: GPU memory the CPU writes; malloc in the tests); read by `threads` fetchq workers at once;
+  from `slots` (hip_slots.h: GPU memory the CPU writes; malloc in the tests); read by `threads` fetchq workers at once
+  - a part of fd -1 (offset 0) is room: its bytes laid out, not read (the forward's repacked Q5_K: its larger layout
+  after the file's bytes);
   returns when every read is done. NULL, with why in `err`, for a unit with no parts or more than POOL_PARTS, a range
   of 0 bytes or past its file, memory the allocator refused, a worker that cannot start, or a read that failed -
   nothing left allocated. 0 units is an empty set.
