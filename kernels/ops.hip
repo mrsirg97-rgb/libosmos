@@ -18,11 +18,8 @@ constexpr float kRouteEps = 1e-20f;
 constexpr float kEngramDotFloor = 1e-6f; // the gate's |dot| floor before the square root
 
 constexpr int kWide = 1024;  // the hc pre-norm's block: a token's whole stream (4 x 5,120) in one block's reach
-constexpr int kHcParts = OPS_HC_PARTS;
-#ifndef HC_AHEAD
-#define HC_AHEAD 16
-#endif
-constexpr int kHcAhead = HC_AHEAD;  // hc_dot_few's loads in flight a thread (DESIGN.md)  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
+constexpr int kHcParts = OPS_HC_PARTS;  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
+constexpr int kHcAhead = 16;            // hc_dot_few's loads in flight a thread (DESIGN.md: 24 -> 10.5 us)
 
 // the sum of each thread's v over the block, by a fixed tree (every thread gets it)
 template <int NT = kThreads>
