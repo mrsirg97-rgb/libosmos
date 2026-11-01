@@ -695,6 +695,28 @@ of the lane bit for bit).
   understood. the third question's tokens are the F32 lane's; the others' differ (the lane's numbers changed, by
   design: rule 1 kept, the prompt's WMMA unchanged).
 
+- **the CPU's half of the int8 contract** (2026-11-01; src/cpu/q8.c, include/substrate/cpu/q8.h): cpu_q8_round
+  and cpu_q8_rows, q8_round's and q8_group_tok's bits on AVX-512 (F, BW, VL, DQ, VNNI, VBMI, BMI2; cpu_q8_ready,
+  else both refuse). 16 blocks of a row at a time: their codes decoded once (64 values a vector - magnitudes as
+  bytes, the negatives a 64-bit mask), then for each token x negated under the mask and vpdpbusd'd (exact), a
+  half-block's 4 sums added by an in-lane transpose, lane.h's float steps a block a float lane (the lanes in the
+  transpose's order, put back before the xor tree). test_cpu_q8 (CPU only, so asan / tsan see it): a scalar replay
+  of the contract on random blocks of each type at 16 and 32 lanes and rows ending half a vector in, 11 tokens,
+  rows split - the same bits; IQ1_M's delta flipped, the fmadd unfused, two tree lanes swapped, the rounding
+  truncated, the scale's product taken in another order - each fails it (d (s / 8) for (d s) / 8 does not: an
+  eighth is exact). test_cpu_q8_gpu: the GPU's bytes and bits on ds1017's IQ1_M, IQ2_XXS and IQ2_XS gates and downs
+  (experts 7 and 300, 1 to 8 tokens), rows split in three the same. an expert (gate, up, down, 64 of a layer cycled
+  from memory, 15 threads one a core, a token): IQ2_XXS 0.19 ms, IQ2_XS / IQ1_M 0.195, IQ1_M 0.21 - the F32 lane's
+  0.87; maya's log 0.127-0.167 on 16 (~20% less a core). a second token +0.24 ms on one thread (of 2.1). what moved
+  it, one thread, IQ2_XXS / IQ1_M: 6.4 / 21.3 ms -> IQ1_M's delta without a branch (a coin) and the chunk loops
+  unrolled (the grid words kept in registers, not stored and reloaded wide) -> each type's row loop its own (no
+  call a pair) 3.4 / 4.4 -> kKsigns computed, not looked up (the index by pdep, its parity by shifts in the byte)
+  2.8 -> the scales from registers (the 2s + 1 bytes by one vpermb, d per 256 by a blend) 2.5 / 3.7 -> a group's
+  block count a constant (its 8 vectors in registers) 2.1 / 2.6. tried, slower: the grid words by vpgatherqq
+  (decode 13 -> 10 values/ns alone). at a token the decode is ~3/4 of it; next, the grids as 2-bit codes (3 levels
+  each), looked up 32 at a time by vpermi2w rather than one a load. 15 threads reach 4.5-4.6 GHz against one's 5.1;
+  a run under ~0.1 s is clocks still rising (0.21 then 0.165 ms on one cached expert).
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
