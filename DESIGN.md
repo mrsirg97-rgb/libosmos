@@ -738,6 +738,15 @@ of the lane bit for bit).
   a token); **the resident set's swaps ~1.9** - 4.6 a token, each a ~9 MB hipMemcpyAsync device to device that runs
   on the copy engine, outside the kernels, ~0.45 ms with the GPU idle behind it (the gaps after a layer's
   gather_sum, 4 a token, ~485 us); the bench's own logits to the host and argmax ~0.9 (the harness's).
+  - **the swaps as a kernel** (ops_copy): hip_slots' memory is HSA's, not the runtime's, so hipMemcpyAsync took
+    it for the host's and copied on the copy engine. ops_copy - 16 bytes a thread, the tail a byte a thread, any
+    memory the GPU reaches (test_copy_gpu: tails of 1 .. 15 bytes and an expert, between hip_slots' allocations,
+    every byte and none past; the tail dropped fails it): alone an expert 0.145 ms against the copy engine's 0.176,
+    but in decode the gaps after gather_sum are gone (1.94 ms a token -> none) and the copies' kernels take 0.63
+    (13 a token, three parts a swap): ~1.3 ms a token. interleaved fresh runs at 106 GiB, maya's prompts plain: 15.5
+    / 15.4 / 15.7, 15.6 / 15.1 / 15.5, 16.0 / 15.6 / 15.8 tok/s against 16.1 / 14.9 / 15.1, 15.8 / 15.3 / 15.3,
+    15.9 / 15.2 / 15.5 - +0.8%, within the runs' spread (the misses' reads vary more than it); kept for the trace's.
+    the streams the same bits.
 
 ## Engram's reads (measured, 2026-10-29)
 

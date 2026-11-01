@@ -443,6 +443,16 @@ __global__ void scale_kernel(float* x, uint64_t n, float s) {
   if (i < n) x[i] = x[i] * s;
 }
 
+// a copy: a 16-byte word a thread, then the last bytes (fewer than 16) a byte a thread
+__global__ void copy_kernel(uint4* dst, const uint4* src, uint64_t words, uint8_t* dst_tail, const uint8_t* src_tail,
+                            uint32_t tail) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i < words)
+    dst[i] = src[i];
+  else if (i - words < tail)
+    dst_tail[i - words] = src_tail[i - words];
+}
+
 __global__ void add_kernel(float* y, const float* a, uint64_t n) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) y[i] += a[i];
@@ -657,5 +667,16 @@ extern "C" bool ops_scale(float* x, uint64_t n, float s, void* stream) {
 extern "C" bool ops_add(float* y, const float* a, uint64_t n, void* stream) {
   if (!n) return false;
   add_kernel<<<grid(n), kThreads, 0, st(stream)>>>(y, a, n);
+  return ok();
+}
+
+extern "C" bool ops_copy(void* dst, const void* src, uint64_t bytes, void* stream) {
+  constexpr uint64_t kWord = sizeof(uint4);
+  if (!dst || !src || !bytes || (uintptr_t) dst % kWord || (uintptr_t) src % kWord) return false;
+  const uint64_t words = bytes / kWord;
+  const uint32_t tail = (uint32_t) (bytes % kWord);
+  copy_kernel<<<grid(words + tail), kThreads, 0, st(stream)>>>((uint4*) dst, (const uint4*) src, words,
+                                                                (uint8_t*) dst + words * kWord,
+                                                                (const uint8_t*) src + words * kWord, tail);
   return ok();
 }

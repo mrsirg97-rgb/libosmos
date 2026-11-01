@@ -72,6 +72,7 @@ bool ops_gather_sum_add(float *y, const float *src, const int32_t *idx, uint32_t
                         const float *add, void *stream);
 bool ops_scale(float *x, uint64_t n, float s, void *stream);
 bool ops_add(float *y, const float *a, uint64_t n, void *stream);
+bool ops_copy(void *dst, const void *src, uint64_t bytes, void *stream);
 
 #endif
 
@@ -195,6 +196,11 @@ ops_scale
 
 ops_add
   y += a.
+
+ops_copy
+  bytes from src to dst (not overlapping), as a kernel on the stream: any memory the GPU reaches, the runtime's or
+  not (hipMemcpyAsync takes memory it did not allocate - the pool's, hip_slots' - for the host's, and copies it on
+  the copy engine, outside the stream's kernels). dst and src 16-byte aligned; false for either not, or no bytes.
 
 ops_rms_x16, ops_hc_pre_rms_x16, ops_swiglu_x16
   as ops_rms, ops_hc_pre_rms, ops_swiglu, writing beside their F32 output the x16 mm_x16 would make of it (its rows

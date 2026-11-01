@@ -6,7 +6,8 @@
    step's own counted in it as they come). when a layer's experts have been queued, the hottest one the layer
    streamed (held in the pool, its bytes in GPU memory) takes the place of the layer's coldest resident one not
    picked in the step, when it is hotter by FWD_SWAP_MARGIN: its bytes copied into that one's memory on the stream,
-   behind the layer's kernels - nothing before reads the cold one, everything after takes the new places. at most
+   behind the layer's kernels (ops_copy: a kernel - hipMemcpyAsync took the pool's memory for the host's and its copy
+   engine left the GPU idle ~0.45 ms a swap) - nothing before reads the cold one, everything after takes the new places. at most
    FWD_SWAPS_A_LAYER a layer a step. a layer's experts are one size (the same tensors' slices). which experts are
    resident changes no bit */
 
@@ -44,8 +45,7 @@ bool fwd_swap_layer(Forward *f, int l, char *err)
       return fwd_fail(err, "a swap's expert not in GPU memory");
     for (int p = 0; p < f->units[in].n_parts; p++)
       if (f->units[in].part[p].bytes != f->units[out].part[p].bytes ||
-          hipMemcpyAsync((void *)dst[p], src[p], f->units[in].part[p].bytes, hipMemcpyDeviceToDevice, NULL) !=
-              hipSuccess)
+          !ops_copy((void *)dst[p], src[p], f->units[in].part[p].bytes, NULL))
         return fwd_fail(err, "a swap's copy failed");
     f->rix[in] = f->rix[out], f->rix[out] = -1;
     f->swaps++;
