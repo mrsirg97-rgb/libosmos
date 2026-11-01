@@ -1,9 +1,0 @@
-file /home/sirg/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf (36.7 GiB), regions of 3.00 MiB, 4000 of them 9.39 MiB apart
-1. cold, one at a time:
-  register     p50    2.189 ms  p95    3.023 ms  max  159.351 ms  (400 calls)
-  unregister   p50    0.000 ms  p95    0.003 ms  max    0.041 ms  (400 calls)
-  register throughput 1.25 GB/s
-2. overlap (one shared page): first no error, second part or all of the requested memory range is already mapped
-3. held at once: 4000 of 4000 registered (11.7 GiB); warm register 0.029 ms each
-   the last one read by the GPU: sums ok
-   unregistered all in 0.00 s
