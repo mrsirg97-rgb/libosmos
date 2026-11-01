@@ -64,6 +64,7 @@ static int32_t pick(Forward* f, std::vector<float>& lg, uint32_t V, uint32_t row
   return argmax(lg);
 }
 static int g_drafted, g_accepted, g_rounds;
+static double g_draft_ms, g_verify_ms; // a drafted answer's time drafting, and verifying (with its picks)
 constexpr float kConfMin = 0.5f, kCumMin = 0.5f;  // maya's defaults (as test_drafter_gpu)
 constexpr int kRing = 128;                        // the drafter's window: a prompt's last rows seeded
 
@@ -97,7 +98,9 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
     float cf[DRAFTER_BLOCK];
     int made = 0;
     while (made < n) {
+      const auto d0 = std::chrono::steady_clock::now();
       const int k = drafter_draft(g_draft, s, t, kConfMin, kCumMin, dr, cf, err2);
+      const auto d1 = std::chrono::steady_clock::now();
       if (k < 0) std::fprintf(stderr, "draft: %s\n", err2), std::_Exit(1);
       std::vector<int32_t> toks{t};
       toks.insert(toks.end(), dr, dr + k);
@@ -116,6 +119,9 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
         }
       }
       CHECK(seq_rollback(s, (uint32_t) (k - m)) && drafter_seed(g_draft, s, pos, pos + m + 1, err2));
+      const auto d2 = std::chrono::steady_clock::now();
+      g_draft_ms += std::chrono::duration<double, std::milli>(d1 - d0).count();
+      g_verify_ms += std::chrono::duration<double, std::milli>(d2 - d1).count();
       for (int i = -1; i < m && made < n; i++, made++)
         *h = (*h ^ (uint64_t) (i < 0 ? t : dr[i])) * 1099511628211ull;
       t = next, pos += m + 1, g_drafted += k, g_accepted += m, g_rounds++;
@@ -179,14 +185,15 @@ int main(int argc, char** argv) {
   answer(f, w, read_ids(argv[4]), 64, &h);  // the warm-up, as maya's bench
   for (int i = 5; i < argc; i++) {
     h = 1469598103934665603ull;
+    g_drafted = g_accepted = g_rounds = 0, g_draft_ms = g_verify_ms = 0;
     const double tps = answer(f, w, read_ids(argv[i]), n_new, &h);
     uint64_t gs, gg;
     forward_guesses(f, &gs, &gg);
     std::printf("%.1f tok/s (%d tokens) stream %016llx; so far streamed picks %llu, guessed %llu, on the CPU %llu, "
-                "swaps %llu; drafted %d accepted %d in %d rounds\n",
+                "swaps %llu; drafted %d accepted %d in %d rounds (%.0f ms drafting, %.0f verifying)\n",
                 tps, n_new, (unsigned long long) h, (unsigned long long) gs, (unsigned long long) gg,
                 (unsigned long long) forward_cpu_picks(f), (unsigned long long) forward_swaps(f), g_drafted,
-                g_accepted, g_rounds);
+                g_accepted, g_rounds, g_draft_ms, g_verify_ms);
     std::fflush(stdout);
   }
   drafter_destroy(g_draft);

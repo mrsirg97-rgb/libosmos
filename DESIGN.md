@@ -926,6 +926,21 @@ of the lane bit for bit).
     build warmed on the first question: 29.0 / 20.8 / 29.8 - the first question ~4 tok/s high, the others near. the
     README's table takes the corrected numbers; the prompts and the repetitive questions (warmed up on the first
     question, unlike them) stand.
+- **a verify's experts in GPU memory first** (2026-11-01; hip_lane.c's entries): drafted, against maya on the same
+  question (the second; the bench's draft / verify timers, maya's STAT draft_ms / verify_ms): the same rounds (111 /
+  104) and drafting (1,385 / 1,035 ms) - its verifying 10,469 ms against 7,416. over the whole answer (rocprofv3, both
+  engines): the GPU's work near (ours 9.10 s with the drafter's, maya's 8.56 beside 0.92 of its CPU lane's spin), the
+  idle ours 3.15 s against 0.68 - a round 21.4 ms waiting on reads (11 a round, ~1.9 ms each): a verify of ~2.6 tokens
+  picks more experts a layer, more of them streamed, and the host waited on the first one before it launched any of
+  the layer's. the CPU half instead (12 threads) slower still: 21.5 / 20.5 / 26.3, 23.6 / 19.8 / 26.4 against 25.3 /
+  21.5 / 31.8, 25.8 / 21.3 / 31.2 (a verify's expert of several tokens is the CPU's slow case). now the entries in GPU
+  memory (resident, or read into the pool) launch first - gate and up, the activations to int8, down - then the host
+  waits for the reading ones, sends their pointers and launches them (x to int8 again between: the ready ones'
+  activations took its buffer - a first version without it failed test_lane_gpu, the budgets' bits apart). every row
+  its own sums, ye's sum unchanged: the same bits (test_lane_gpu, test_drafter_gpu, the fingerprints). drafted 26.6
+  / 22.0 / 32.6 and 27.8 / 22.0 / 32.5 (27.25) against 25.2 / 20.8 / 29.3 (a first run, cold, 18.1 / 16.2 / 24.8,
+  left out) - +8.6%, ~92% of maya's DSpark (29.5); the verifying 9.2 -> 8.3-8.7 s (the first question), 8.0 -> 7.1
+  (the third). plain 15.93 against 15.83 (a decode step's ready experts are little to hide a read behind: as before).
 
 ## Engram's reads (measured, 2026-10-29)
 
