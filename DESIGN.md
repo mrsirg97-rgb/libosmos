@@ -729,6 +729,16 @@ of the lane bit for bit).
     the misses are the drive's whichever side computes them: the CPU has no memory of its own to hold more experts
     in (the GTT is the same RAM). the wiring not built; the kernel kept (the GPU's bits, 4.6x the F32 lane's).
 
+- **a decode's token, profiled after the int8 lane** (2026-11-01; rocprofv3 kernel trace, maya's first question
+  plain at 106 GiB, 235 tokens; scratch `ksum.py`, `gaps.py`, and counters around fwd_pinned's wait and the swaps -
+  not kept): 67.1 ms a token, the GPU busy 50.4 - the dense matrices ~30.3 (mm::kernel 23.1, mm::group_kernel 4.7,
+  mv 2.5; near the memory's bandwidth for ~7 GB), the routed experts 12.7 (maya's ~12; the F32 lane's 19.5), the
+  rest ~7 in ~1,600 small kernels. the idle 16.7: under 5 us between kernels 3.5 (1,690 launches); the misses'
+  reads ~8-9 (before the lane's gather, 3.1 a token of ~2.7 ms and 2.5 of ~0.45; the counter 7.7-9.9 ms, ~3.9 waits
+  a token); **the resident set's swaps ~1.9** - 4.6 a token, each a ~9 MB hipMemcpyAsync device to device that runs
+  on the copy engine, outside the kernels, ~0.45 ms with the GPU idle behind it (the gaps after a layer's
+  gather_sum, 4 a token, ~485 us); the bench's own logits to the host and argmax ~0.9 (the harness's).
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
