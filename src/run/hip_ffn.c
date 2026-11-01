@@ -216,7 +216,13 @@ bool fwd_moe(Forward *f, int l, char *err)
       {
         f->on_cpu[unit] = f->visits;
         if (!f->is_held[unit] && pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_WAIT)
-          f->held[f->n_held++] = unit, f->is_held[unit] = true;
+        {
+          if (f->n_pend < FWD_MAX_PAIRS)
+            f->cpu_pend[f->n_pend++] = unit;
+          else
+            f->held[f->n_held++] = unit;
+          f->is_held[unit] = true;
+        }
       }
       else if (f->rix[unit] < 0 && !f->is_held[unit]) /* held once for all the layer's sub-batches */
       {
@@ -240,7 +246,7 @@ bool fwd_moe(Forward *f, int l, char *err)
   {
     if (!fwd_lane_experts(f, l, ids, P, err))
       return false;
-    if (!fwd_swap_layer(f, l, err))
+    if (!fwd_swap_layer(f, l, err) || !fwd_cpu_settle(f, err))
       return false;
     fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
     return true;

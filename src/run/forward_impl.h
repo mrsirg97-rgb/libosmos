@@ -176,6 +176,10 @@ struct Forward
   uint32_t cpu_value;
   uint64_t *on_cpu;        /* a unit's last visit computed on the CPU (the visit it is picked in: this one) */
   uint64_t cpu_picks;      /* the routed picks the CPU has computed */
+  uint32_t cpu_pend[FWD_MAX_PAIRS]; /* the CPU's experts whose reads into the pool are under way: held till done, then
+                                       offered a swap (fwd_cpu_settle) - released so soon, the pool's room would
+                                       take them before their layer came round */
+  uint32_t n_pend;
   uint8_t *stage; /* pinned: the Engram rows, [sub-batch][Engram layer][token]: a sub-batch's copy may still be
                      queued when the next one's rows are read (a layer's sub-batches run to its experts unwaited) */
   int n_eg;       /* the Engram layers (stage's) */
@@ -282,6 +286,8 @@ bool fwd_guess_queue(Forward *f, int l);
 void fwd_guess_want(Forward *f, int l);
 void fwd_guess_score(Forward *f, int l, const int32_t *ids, uint32_t picks);
 bool fwd_swap_layer(Forward *f, int l, char *err); /* a layer's experts queued: its streamed ones' swaps in */
+/* the pending CPU experts read since: each offered a swap into its layer, then held with the layer's others */
+bool fwd_cpu_settle(Forward *f, char *err);
 /* hip_lane.c: a small step's routed experts in the matvec's order (forward_lane), into b->moe (the shared one added) */
 bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, char *err);
 /* hip_cpu_lane.c: the CPU half's pool, maps and buffers (forward_lane), their end; whether a small step's unit goes to

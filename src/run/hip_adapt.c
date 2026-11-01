@@ -17,44 +17,84 @@ static double heat_now(const Forward *f, uint32_t u)
   return past + (double)(f->picks[u] - f->seen[u]);
 }
 
+/* `in` (a streamed expert in the pool's GPU memory) into its layer's resident set in place of the layer's coldest
+   resident one not picked in the step, if hotter by FWD_SWAP_MARGIN: *swapped whether it was */
+static bool swap_in(Forward *f, uint32_t in, bool *swapped, char *err)
+{
+  const uint32_t E = (uint32_t)f->g->n_experts, lo = in / E * E;
+  const double h_in = heat_now(f, in);
+  uint32_t out = UINT32_MAX;
+  double h_out = INFINITY;
+  *swapped = false;
+  for (uint32_t u = lo; u < lo + E; u++)
+    if (f->rix[u] >= 0 && f->picks[u] == f->seen[u]) /* resident, and not picked this step */
+    {
+      const double h = heat_now(f, u);
+      if (h < h_out)
+        out = u, h_out = h;
+    }
+  if (out == UINT32_MAX || !(h_in > FWD_SWAP_MARGIN * h_out))
+    return true;
+  const void *src[POOL_PARTS], *dst[POOL_PARTS];
+  if (!f->is_held[in]) /* held for the copy: released with the layer's others, the stream past it */
+  {
+    if (pool_pin(f->pool, in, src) != POOL_OK)
+      return fwd_fail(err, "a swap's expert not in GPU memory");
+    f->held[f->n_held++] = in, f->is_held[in] = true;
+  }
+  if (!pool_dev(f->pool, in, src) || !resident_dev(f->res, (size_t)f->rix[out], dst))
+    return fwd_fail(err, "a swap's expert not in GPU memory");
+  for (int p = 0; p < f->units[in].n_parts; p++)
+    if (f->units[in].part[p].bytes != f->units[out].part[p].bytes ||
+        !ops_copy((void *)dst[p], src[p], f->units[in].part[p].bytes, NULL))
+      return fwd_fail(err, "a swap's copy failed");
+  f->rix[in] = f->rix[out], f->rix[out] = -1;
+  f->swaps++, *swapped = true;
+  return true;
+}
+
 bool fwd_swap_layer(Forward *f, int l, char *err)
 {
   const uint32_t E = (uint32_t)f->g->n_experts, lo = (uint32_t)l * E;
   for (int s = 0; s < FWD_SWAPS_A_LAYER; s++)
   {
-    uint32_t in = UINT32_MAX, out = UINT32_MAX;
-    double h_in = 0, h_out = INFINITY;
+    uint32_t in = UINT32_MAX;
+    double h_in = 0;
     for (uint32_t u = lo; u < lo + E; u++) /* the layer's streamed experts in GPU memory, held or not */
     {
       const double h = f->rix[u] < 0 && pool_state(f->pool, u) == POOL_PINNED ? heat_now(f, u) : 0;
       if (h > h_in)
         in = u, h_in = h;
     }
-    for (uint32_t u = lo; in != UINT32_MAX && u < lo + E; u++)
-      if (f->rix[u] >= 0 && f->picks[u] == f->seen[u]) /* resident, and not picked this step */
-      {
-        const double h = heat_now(f, u);
-        if (h < h_out)
-          out = u, h_out = h;
-      }
-    if (out == UINT32_MAX || !(h_in > FWD_SWAP_MARGIN * h_out))
+    bool swapped = false;
+    if (in == UINT32_MAX)
       return true;
-    const void *src[POOL_PARTS], *dst[POOL_PARTS];
-    if (!f->is_held[in]) /* held for the copy: released with the layer's others, the stream past it */
-    {
-      if (pool_pin(f->pool, in, src) != POOL_OK)
-        return fwd_fail(err, "a swap's expert not in GPU memory");
-      f->held[f->n_held++] = in, f->is_held[in] = true;
-    }
-    if (!pool_dev(f->pool, in, src) || !resident_dev(f->res, (size_t)f->rix[out], dst))
-      return fwd_fail(err, "a swap's expert not in GPU memory");
-    for (int p = 0; p < f->units[in].n_parts; p++)
-      if (f->units[in].part[p].bytes != f->units[out].part[p].bytes ||
-          !ops_copy((void *)dst[p], src[p], f->units[in].part[p].bytes, NULL))
-        return fwd_fail(err, "a swap's copy failed");
-    f->rix[in] = f->rix[out], f->rix[out] = -1;
-    f->swaps++;
+    if (!swap_in(f, in, &swapped, err))
+      return false;
+    if (!swapped)
+      return true;
   }
+  return true;
+}
+
+bool fwd_cpu_settle(Forward *f, char *err)
+{
+  uint32_t keep = 0;
+  for (uint32_t k = 0; k < f->n_pend; k++)
+  {
+    const uint32_t u = f->cpu_pend[k];
+    const PoolState st = pool_state(f->pool, u);
+    if (st == POOL_READING)
+    {
+      f->cpu_pend[keep++] = u;
+      continue;
+    }
+    bool swapped = false;
+    if (st == POOL_PINNED && f->rix[u] < 0 && !swap_in(f, u, &swapped, err))
+      return false;
+    f->held[f->n_held++] = u; /* (still held: released with the layer's others, the stream past any read of it) */
+  }
+  f->n_pend = keep;
   return true;
 }
 

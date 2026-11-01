@@ -82,7 +82,9 @@ int main() {
     std::vector<int> plain;
     for (int i = 0; i < kTokens; i++) {
       plain.push_back(y);
-      CHECK(forward_step(f, s, y, ferr));
+      const bool stepped = forward_step(f, s, y, ferr);
+      if (!stepped) std::fprintf(stderr, "  step %d: %s\n", i, ferr);
+      CHECK(stepped);
       y = argmax_row(f, 0);
     }
     seq_destroy(s);

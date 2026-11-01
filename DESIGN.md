@@ -830,6 +830,22 @@ of the lane bit for bit).
     so the set follows a step late. the CPU half stays opt-in (cpu_threads 0, the default, unchanged); what is
     next for it is that lag (a swap's choice at the expert's next visit, or a read straight into the slot), not the
     kernel.
+  - **the lag, closed** (forward_lane's swaps per question, counted): with the CPU half the swaps had halved (1,405
+    against 2,642 over the three questions) - a CPU expert's read ends ~2 ms after its layer's swap, its hold went at
+    the next layer, and the pool's room (two layers') had taken it long before its layer came round. now such an
+    expert stays held while it reads (cpu_pend) and is offered its swap at the first swap point after (fwd_cpu_settle,
+    swap_in: the same choice - the layer's coldest resident not picked in the step, the same margin - its copy on the
+    stream), then held with the layer's others till the stream is past it. the misses then 3,502 against the GPU's
+    3,622, the swaps 2,732 against 2,638 (test_lane_gpu's CPU run 1,656 -> 1,482 streamed picks; its bits the same).
+  - **and still even**: the GPU's wait for the CPU (wait_kernel, a trace of the second question) 1.4 ms a token
+    (p50 0.72 ms a wait) against ~4.5 of reads without it - but the idle elsewhere grows as much: the host late to
+    launch after a layer's last kernel (~3 ms a token: 12 workers, 4 readers and the host on 15 cores). the second
+    question alone: 4 / 6 / 8 / 10 threads 16.5 / 16.9 / 16.4 / 16.7 tok/s against none 16.7; the workers at nice
+    10 or 19 (12 or 8 threads) 16.8 / 16.5 / 16.4 and 13.9-14.5 on the third against none 16.6 / 15.2. on this box
+    the CPU's half buys back in the GPU's waits what it costs the host: kept opt-in, off by default.
+  - a bug of this change, caught by test_drafter_gpu before commit: fwd_swap_layer told "no swap" from "a swap
+    failed" by an empty err - a stale message in err made an ordinary step fail. now each outcome its own return;
+    the test prints the step's error.
 
 ## Engram's reads (measured, 2026-10-29)
 
