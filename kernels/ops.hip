@@ -542,6 +542,37 @@ __global__ void copy_rows_kernel(float* dst, const float* src, const int32_t* id
   dst[at] = src[at];
 }
 
+// a block a row: its greatest value's index, the lowest among equals (an order-free choice: any reduction the same);
+// -1 for a row with a NaN
+__global__ __launch_bounds__(kWide) void argmax_kernel(const float* x, uint32_t n, uint32_t stride, int32_t* out) {
+  __shared__ float bv[kWide];
+  __shared__ uint32_t bi[kWide];
+  __shared__ int nan;
+  const float* row = x + (uint64_t) blockIdx.x * stride;
+  if (threadIdx.x == 0) nan = 0;
+  __syncthreads();
+  float v = -INFINITY;
+  uint32_t at = UINT32_MAX;
+  for (uint32_t i = threadIdx.x; i < n; i += kWide) {
+    const float c = row[i];
+    if (c != c) nan = 1;
+    else if (at == UINT32_MAX || c > v) v = c, at = i;  // (i ascends a thread: equals keep the lower)
+  }
+  bv[threadIdx.x] = v, bi[threadIdx.x] = at;
+  __syncthreads();
+  for (uint32_t h = kWide / 2; h > 0; h >>= 1) {
+    if (threadIdx.x < h) {
+      const float ov = bv[threadIdx.x + h];
+      const uint32_t oi = bi[threadIdx.x + h];
+      if (oi != UINT32_MAX && (bi[threadIdx.x] == UINT32_MAX || ov > bv[threadIdx.x] ||
+                               (ov == bv[threadIdx.x] && oi < bi[threadIdx.x])))
+        bv[threadIdx.x] = ov, bi[threadIdx.x] = oi;
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) out[blockIdx.x] = nan ? -1 : (int32_t) bi[0];
+}
+
 __global__ void add_kernel(float* y, const float* a, uint64_t n) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) y[i] += a[i];
@@ -821,5 +852,11 @@ extern "C" bool ops_hc_mix_pre_rms(const float* partial, const float* scale, con
     HC_MIX_PRE(1) HC_MIX_PRE(2) HC_MIX_PRE(3) HC_MIX_PRE(4) HC_MIX_PRE(5) HC_MIX_PRE(6) HC_MIX_PRE(7) HC_MIX_PRE(8)
 #undef HC_MIX_PRE
   }
+  return ok();
+}
+
+extern "C" bool ops_argmax(const float* x, uint32_t n, uint32_t rows, uint32_t stride, int32_t* out, void* stream) {
+  if (!x || !out || !n || n > (uint32_t) INT32_MAX || !rows || stride < n) return false;
+  argmax_kernel<<<rows, kWide, 0, st(stream)>>>(x, n, stride, out);
   return ok();
 }

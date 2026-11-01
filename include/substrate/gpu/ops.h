@@ -79,6 +79,7 @@ bool ops_gather_sum_add(float *y, const float *src, const int32_t *idx, uint32_t
 bool ops_scale(float *x, uint64_t n, float s, void *stream);
 bool ops_add(float *y, const float *a, uint64_t n, void *stream);
 bool ops_copy(void *dst, const void *src, uint64_t bytes, void *stream);
+bool ops_argmax(const float *x, uint32_t n, uint32_t rows, uint32_t stride, int32_t *out, void *stream);
 bool ops_wait(const uint32_t *flag, uint32_t value, void *stream);
 bool ops_copy_rows(float *dst, const float *src, const int32_t *idx, uint32_t n, uint32_t len, void *stream);
 
@@ -218,6 +219,10 @@ ops_copy
   bytes from src to dst (not overlapping), as a kernel on the stream: any memory the GPU reaches, the runtime's or
   not (hipMemcpyAsync takes memory it did not allocate - the pool's, hip_slots' - for the host's, and copies it on
   the copy engine, outside the stream's kernels). dst and src 16-byte aligned; false for either not, or no bytes.
+
+ops_argmax
+  out[r] = the index of row r's greatest value (rows of n, stride floats apart), the lowest index among equals - the
+  first maximum a scan in order finds (-0 and +0 equal); -1 for a row with a NaN.
 
 ops_wait
   the stream held until *flag - host memory the GPU maps (hipHostMalloc's) - holds value, or value with its top bit

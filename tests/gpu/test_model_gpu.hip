@@ -8,6 +8,7 @@
 // the oracle is not schedule-invariant itself: positions 0-7 of its 8-token run and of its 32-token run part from
 // layer 0 (torch's F32 blocking changes with the prompt's length) to KL 5.5e-5 .. 0.16 a position (mean 2.2e-2) -
 // the floor any comparison against one of its runs stands on; the longer run (ref32) is the one used when present.
+// and at every position forward_greedy's pick the first maximum of the logits' row (a second row refused).
 // needs a gfx1151, ~/models/ds1017 and the oracle's dump; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
@@ -155,6 +156,12 @@ int main() {
       using Ms = std::chrono::duration<double, std::milli>;
       if (run == 1) ms.push_back(Ms(std::chrono::steady_clock::now() - a).count());
       CHECK(hipMemcpy(&got[run][(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      // forward_greedy: the GPU's pick the first maximum of the row; a row the step did not compute refused
+      int32_t pick = -1, first = 0;
+      const float* row = &got[run][(size_t) p * V];
+      for (uint32_t i = 1; i < (uint32_t) V; i++)
+        if (row[i] > row[first]) first = (int32_t) i;
+      CHECK(forward_greedy(f, 0, 1, &pick, ferr) && pick == first && !forward_greedy(f, 0, 2, &pick, ferr));
     }
     seq_destroy(s);
   }

@@ -524,3 +524,19 @@ void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed)
   *streamed = f->g_need, *guessed = f->g_hit;
 }
 const float *forward_logits(const Forward *f) { return f->b.vocab; }
+
+bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR])
+{
+  if (!f || !ids || !rows || row0 + rows < row0 || row0 + rows > f->vocab_rows)
+    return fwd_fail(err, "rows the last step's head did not compute");
+  const uint32_t V = (uint32_t)f->g->n_vocab;
+  /* b->ids free between steps (the next one's tokens written at its start) */
+  if (!ops_argmax(f->b.vocab + (uint64_t)row0 * V, V, rows, V, f->b.ids, NULL) ||
+      hipMemcpyAsync(f->pin->greedy, f->b.ids, rows * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) != hipSuccess ||
+      hipStreamSynchronize(NULL) != hipSuccess)
+    return fwd_fail(err, "a GPU call failed (the greedy picks)");
+  for (uint32_t r = 0; r < rows; r++)
+    if ((ids[r] = f->pin->greedy[r]) < 0)
+      return fwd_fail(err, "a NaN in a row's logits");
+  return true;
+}

@@ -93,7 +93,7 @@ bool fwd_head(Forward *f, char *err)
   bool ok = true;
   if (!n) /* no token past dec: no head, no stream */
   {
-    f->n = f->n_all;
+    f->n = f->n_all, f->vocab_rows = 0;
     return true;
   }
   if (f->n_layers == g->n_layers)
@@ -116,6 +116,7 @@ bool fwd_head(Forward *f, char *err)
     if (!ok)
       return fwd_fail(err, "a GPU call failed (the head)");
     fwd_probe(f, "logits", -1, f->pin->pos[0], b->vocab, (uint64_t)f->n_all * V, false);
+    f->vocab_rows = f->n_all;
   }
   if (n == f->n_all)
     return true;

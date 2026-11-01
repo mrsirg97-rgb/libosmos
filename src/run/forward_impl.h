@@ -111,6 +111,7 @@ typedef struct Pinned
   int32_t oa_cnt[FWD_MAX_GROUPS]; /* each wo_a group's tokens: the step's */
   int32_t rpos[WEIGHTS_MAX_LAYERS][FWD_MAX_BATCH];
   int32_t keep[FWD_MAX_BATCH], back[FWD_MAX_BATCH]; /* hip_skip.c's: the kept tokens' rows, and back */
+  int32_t greedy[FWD_MAX_BATCH];                    /* forward_greedy's picks */
 } Pinned;
 
 struct Forward
@@ -213,6 +214,7 @@ struct Forward
   uint32_t n_all, n_keep;        /* the step's tokens before the decoder's compaction, and those it keeps */
   int32_t row[FWD_MAX_BATCH];    /* a kept token's row in the step (compacted row i: row[i]) */
   bool want[FWD_MAX_BATCH];      /* a token whose logits the caller may read */
+  uint32_t vocab_rows;           /* the last step's logits rows (its head's; 0 when it ran none) */
   forward_probe_fn probe;
   void *probe_arg;
 };

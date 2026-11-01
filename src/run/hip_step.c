@@ -209,6 +209,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
   const Geometry *g = f->g;
   if (!n || n > f->max_tokens)
     return fwd_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
+  f->vocab_rows = 0; /* (its head's, when it runs one) */
   if (!place(f, seqs, tokens, n, err))
     return false;
   if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess)

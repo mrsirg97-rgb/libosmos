@@ -881,6 +881,16 @@ of the lane bit for bit).
   without the dot's loads in flight it was slower than the two (20.5 against 14.4 us a call in decode). in decode
   the hc kernels 2.37 -> 2.29 ms a token, the gaps under 5 us 3.40 -> 3.15: ~0.3 ms (~0.5%); interleaved fresh runs
   16.24 against 16.41 tok/s (three rounds), within their spread. the streams and fingerprints the same.
+- **the greedy pick on the GPU** (forward_greedy, ops_argmax): the token's end had the bench copying a row of
+  logits (129,280 floats) to the host and scanning it. ops_argmax: a block a row, the greatest value and the lowest
+  index among equals - an order-free choice, the first maximum a scan finds (-0 and +0 equal); -1 for a row with a NaN,
+  which forward_greedy refuses; rows past what the last step's head computed refused (vocab_rows: the last sub-batch's,
+  0 when it ran none). test_argmax_gpu (a vocabulary's length, a tie, -0 / +0, all -inf, a NaN; ties to the higher
+  index fails it); test_model_gpu: at every position forward_greedy the first maximum of forward_logits' row, a second
+  row refused. the bench's picks then forward_greedy's (and a verify's rows one call): plain 16.7 / 15.6 / 15.6 and
+  16.7 / 15.4 / 15.4 tok/s against 16.6 / 15.4 / 15.2 (a first run, cold, 14.1 / 10.6 / 7.4 left out) - ~+1%;
+  drafted 29.8 / 21.9 / 31.5 (27.7) against 29.5 / 21.2 / 31.3 (27.3) - ~+1.5%, 94% of maya's DSpark (29.5). the
+  same streams.
 
 ## Engram's reads (measured, 2026-10-29)
 

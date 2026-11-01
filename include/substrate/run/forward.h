@@ -46,6 +46,7 @@ bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
 const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
+bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR]);
 const uint64_t *forward_picks(const Forward *f);
 uint64_t forward_swaps(const Forward *f);
 void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed);
@@ -172,4 +173,10 @@ forward_logits
   the device buffer of the last step's logits ([n][n_vocab] F32) - the last sub-batch's rows, for a batch past
   MM_MAX_TOKENS: the head over the stream, when n_layers is all of the model's (else not computed); a token before its
   sequence's prompt end - 1 (seq_prompt): its row not computed.
+
+forward_greedy
+  the greedy picks of the last step's logits rows row0 .. row0 + rows on the GPU (ops_argmax: the greatest, the lowest
+  token among equals - what a scan of forward_logits' row in order picks), only the ids copied back. false with why
+  for rows the last step's head did not compute (it ran none: n_layers not the model's, or no token left) or a row
+  with a NaN.
 */
