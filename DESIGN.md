@@ -846,6 +846,15 @@ of the lane bit for bit).
   - a bug of this change, caught by test_drafter_gpu before commit: fwd_swap_layer told "no swap" from "a swap
     failed" by an empty err - a stale message in err made an ordinary step fail. now each outcome its own return;
     the test prints the step's error.
+- **drafted, against maya's DSpark, after today's changes** (2026-11-01; ranked, the int8 lane with gate and up
+  fused, the swaps' wider choice; the drafter's ~8 GB beside a 97 GiB budget - 99 refused, 98 fits a short run;
+  maya's maya-ds4-hip.json; interleaved fresh runs, the three questions, 256 tokens): ours 29.1 / 20.6 / 30.9 and
+  28.9 / 20.4 / 30.5 tok/s (26.7), maya 30.3 / 23.6 / 32.1 and 30.3 / 26.7 / 34.1 (29.5) - 91% of it (plain: 16.0
+  against 18.0, 89%). DSpark 1.67x our plain. the drafted streams the plain ones bit for bit (the same hashes).
+  acceptance follows the text: the first question 236 of 273 drafts (86%, 3.7 tokens a round), the second 146 of
+  182 (80%, 2.3 a round: prose), the third 206 of 223 (92%, 5.1 a round: code). (the bench's drafted loop:
+  test_drafter_gpu's - draft, verify [y, drafts] in one batch, the longest agreeing prefix kept, seq_rollback, the
+  accepted rows seeded.)
 
 ## Engram's reads (measured, 2026-10-29)
 
