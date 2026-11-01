@@ -747,6 +747,14 @@ of the lane bit for bit).
     / 15.4 / 15.7, 15.6 / 15.1 / 15.5, 16.0 / 15.6 / 15.8 tok/s against 16.1 / 14.9 / 15.1, 15.8 / 15.3 / 15.3,
     15.9 / 15.2 / 15.5 - +0.8%, within the runs' spread (the misses' reads vary more than it); kept for the trace's.
     the streams the same bits.
+- **the prompt's scratch lent to the experts, measured before building** (2026-11-01; the GTT's cap 113 GiB, RAM
+  125): the bound - a step's scratch as good as gone (max_tokens 512, ~1 GB of ~3.9) and its room given to the
+  resident set: 109 GiB 15.4 / 14.9 / 15.1 tok/s, 110 15.5 / 15.0 / 15.3 (111 refused at a prompt), against 106 at
+  2,048 tokens a step 15.58 a question (the swaps' A/B above). at 2,048: 107 GiB 11.5 / 10.9 / 10.3, 108 refused. a
+  GiB more resident is a GiB less page cache - the same RAM, which held the misses' reads too - and past ~106 the
+  page cache and the system run short. lending the scratch (the resident set's last arenas, each layer's
+  least-picked experts, freed for a prompt's step and read back after) would buy no decode here: not built. 106
+  GiB at 2,048 is this box's budget.
 
 ## Engram's reads (measured, 2026-10-29)
 
