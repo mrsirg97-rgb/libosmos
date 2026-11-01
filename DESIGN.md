@@ -855,6 +855,21 @@ of the lane bit for bit).
   182 (80%, 2.3 a round: prose), the third 206 of 223 (92%, 5.1 a round: code). (the bench's drafted loop:
   test_drafter_gpu's - draft, verify [y, drafts] in one batch, the longest agreeing prefix kept, seq_rollback, the
   accepted rows seeded.)
+- **the idle that is left, and two levers tried** (2026-11-01; ranked, 106 GiB, plain; the fused build's trace:
+  61.1 ms a token, the GPU busy 49.5): the misses' reads ~6.0 ms (1.7 a token of ~3.2 ms, the gap before the lane's
+  gather), the gaps between kernels 3.4 (1,512 a token, p50 2.16 us), the token's end ~1.4 (the logits to the host
+  and the bench's argmax, the next step's tables), the rest ~0.8.
+  - **a graph** (scratch `graph.hip`: 1,500 tiny dependent kernels, launched, then captured and replayed): 2.02 us
+    a kernel launched, 1.87 in a graph - ~0.2 ms a token, below the runs' spread, and a step's launches change with
+    its routing (a graph rebuilt each step). not built. the ~2 us is the GPU's between two dependent kernels: only
+    fewer kernels move it (a fusion's launches saved are worth ~2 us each a token, beside its bytes).
+  - **the guesses** (an experiment, not kept; counters around fwd_pinned's wait, guessed or not; one round each of
+    the three questions): two layers ahead too (layer l + 2's router on l's input, its top 6 wanted two visits on):
+    the streamed picks guessed 58% -> 64%, the reads' waits 5.55 -> 4.99 s - 16.28 tok/s against 16.18 (two
+    rounds), within the spread; a guessed read still waits ~2 ms, the drive's queue full of guesses (a layer's ~2-3
+    of them ~27 MB in ~1.5 ms, past what it reads). and fewer: a token's best 0 / 2 / 4 / 6 guesses (the router's
+    picks come best first) 16.13 / 15.97 / 16.37 / 15.90 tok/s, the waits 6.5 / 6.1 / 5.5 / 5.4 s - the waits move,
+    the speed does not. what the misses cost is the drive's latency for picks no guess sees.
 
 ## Engram's reads (measured, 2026-10-29)
 
