@@ -755,6 +755,16 @@ of the lane bit for bit).
   page cache and the system run short. lending the scratch (the resident set's last arenas, each layer's
   least-picked experts, freed for a prompt's step and read back after) would buy no decode here: not built. 106
   GiB at 2,048 is this box's budget.
+- **maya's decode profiled beside ours, and the bench's resident set** (2026-11-01; rocprofv3, maya 1.1.46 with
+  the BF16 router, its first question, 256 tokens; scratch `drive.py`): 61.7 ms a token, its GPU busy 55.4 of
+  which 5.3 is wait_seq_kernel (the GPU spinning on its CPU lane) - ~50 of work against our 50.4. stage for stage
+  the same: dense ~29.9 / 30.3, attention 1.8 / 1.8, hyper-connections ~2.3 / 2.4, router ~0.8 / 0.8, ~1,740 / 1,690
+  launches; its routed experts on the GPU ~10.5 against our 12.7 (ours the misses' too). the gap is the misses
+  alone: its CPU lane's 5.3 against our reads' ~8.5-9.4. and the bench had built our resident set by id (no
+  picks): forward_create_ranked's profile (`substrate-picks.bin`, the 16K-token real-text count, nothing of the
+  bench's questions) at 106 GiB, interleaved fresh runs: 16.7 / 15.2 / 14.9, 16.9 / 15.9 / 15.9 tok/s against by
+  id 15.2 / 14.9 / 15.3, 15.5 / 15.0 / 15.4 - +4.7% (15.9 against 15.2), the streams the same bits. ranked is the
+  comparison with maya (which ranks its own); the profile stays the caller's.
 
 ## Engram's reads (measured, 2026-10-29)
 
