@@ -47,7 +47,7 @@ $(HIP_LIB): $(HIP_OBJS) $(KERNEL_OBJS) | $(LIB_DIR)
 $(OBJ_DIR)/cpu/%.o: override CFLAGS += -ffp-contract=off -mavx2 -mfma -mf16c -I$(KERNEL_DIR)
 
 # the host code that calls the HIP runtime (hip_*.c): its headers
-$(HIP_OBJS): CFLAGS += -I$(ROCM)/include -D__HIP_PLATFORM_AMD__ -Isrc/run
+$(HIP_OBJS): CFLAGS += -I$(ROCM)/include -D__HIP_PLATFORM_AMD__ -Isrc/run -I$(KERNEL_DIR)
 
 $(OBJ_DIR)/kernels/%.o: $(KERNEL_DIR)/%.hip $(KERNEL_HDRS)
 	@mkdir -p $(dir $@)

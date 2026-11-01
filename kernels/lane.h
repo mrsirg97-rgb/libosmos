@@ -38,6 +38,29 @@ LANE_FN float lane_exp(float x)
   return ldexpf(p, (int)k);
 }
 
+/* the routed experts' int8 inputs (maya's approach, ds4_iq.cu, MIT; kernels/q8.h, src/cpu/expert.c): a block of
+   LANE_Q8_VALUES values rounded to int8 by its largest magnitude, q = rint(x * (127 / amax)), its scale amax / 127;
+   a weight's half-block (16 values, one scale) against them an integer dot - exact, in any order - then
+   lane_q8_part's products, the block's two halves added, each block's scale times that fmaf'd onto the lane's sum.
+   a row's blocks go to LANE_Q8_LANES(cols) lanes (l, l + lanes, ...), then the lanes' xor tree */
+#define LANE_Q8_VALUES 32
+#define LANE_Q8_MAX 127.0f       /* int8's largest magnitude */
+#define LANE_Q8_LONG_COLS 4096   /* a row this long or longer (gate / up, 5,120): 32 lanes; shorter (down, 2,304): 16 */
+#define LANE_Q8_LANES(cols) ((cols) >= LANE_Q8_LONG_COLS ? 32 : 16)
+#define LANE_Q8_EIGHTH 0.125f    /* the IQ types' (2s + 1) / 8 scales, and IQ1_M's delta 1/8 as codes 8 grid +- 1 */
+
+LANE_FN float lane_q8_inv(float amax) { return amax > 0.0f ? LANE_Q8_MAX / amax : 0.0f; }
+LANE_FN float lane_q8_scale(float amax) { return amax / LANE_Q8_MAX; }
+LANE_FN int lane_q8_round(float x, float inv) { return (int)rintf(x * inv); }
+/* whether an expert's three matrices all have the contract's decode (the IQ types: GGUF ids 16, 17, 29) */
+#define LANE_Q8_IQ2_XXS 16
+#define LANE_Q8_IQ2_XS 17
+#define LANE_Q8_IQ1_M 29
+LANE_FN int lane_q8_type(unsigned t) { return t == LANE_Q8_IQ2_XXS || t == LANE_Q8_IQ2_XS || t == LANE_Q8_IQ1_M; }
+LANE_FN int lane_q8_types(unsigned g, unsigned u, unsigned d) { return lane_q8_type(g) && lane_q8_type(u) && lane_q8_type(d); }
+/* a half-block's sum: its block scale d (an f16's value), its 2s + 1, its integer dot */
+LANE_FN float lane_q8_part(float d, int s21, int isum) { return d * (float)s21 * LANE_Q8_EIGHTH * (float)isum; }
+
 /* the expert's activation: silu(min(g, lim)) clamp(u, -lim, lim), times scale (a routed expert's weight) */
 LANE_FN float lane_swiglu(float g, float u, float lim, float scale)
 {

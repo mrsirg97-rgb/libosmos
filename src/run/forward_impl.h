@@ -156,6 +156,8 @@ struct Forward
   uint8_t *lane_up;
   void *lane_dev;
   float *lane_x, *lane_w; /* a small step's rows' FFN inputs and weights, gathered by expert */
+  int8_t *lane_q;         /* those rows (then their activations) to int8 (q8_round), and their blocks' scales */
+  float *lane_qd;
   uint8_t *stage; /* pinned: the Engram rows, [sub-batch][Engram layer][token]: a sub-batch's copy may still be
                      queued when the next one's rows are read (a layer's sub-batches run to its experts unwaited) */
   int n_eg;       /* the Engram layers (stage's) */

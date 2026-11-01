@@ -673,6 +673,28 @@ of the lane bit for bit).
   prompt's buffers in the resident set's tail (its last arenas, the least-ranked experts: re-read after) - ~1.2 s
   of reads a prompt, not built.
 
+- **the lane's experts over int8 inputs** (2026-11-01; kernels/q8.h, include/substrate/gpu/q8.h): a kernel-by-kernel
+  profile of both decodes (rocprofv3, maya's first question, 256 tokens, 101 GiB, no drafter) - the dense matrices
+  ours ~26 ms a token against maya's ~31, but the routed experts ours 19.5 ms (~81 us an expert, ~105 GB/s) against
+  maya's ~12 for the ~85-90% it runs on the GPU (~57 us, ~150 GB/s). maya rounds an expert's input to int8 a block of
+  32 and sums integer dots (ds4_iq.cu, MIT); ours decoded each value to F32 and fmaf'd it. so the lane's contract
+  (kernels/lane.h) is now that: x rounded q = rint(x * (127 / amax)), d = amax / 127; a weight's half-block (16
+  values, one scale) an exact v_dot4 sum - IQ1_M's grid + delta as codes 8 grid +- 1 (8 (grid . x) +- the chunk's x
+  summed) - then lane_q8_part's products, the halves added, the block's scale fmaf'd onto the lane's sum; a row's
+  blocks to 32 lanes (5,120 columns) or 16 (2,304), the xor tree. the integer sums are exact in any order, so the
+  CPU's half (next) repeats the contract with VNNI rather than an FMA chain. test_q8_gpu: an IQ1_M, IQ2_XXS and
+  IQ2_XS gate and down (ds1017's, two experts a launch, 1 to 8 tokens), the GPU the host's replay of the contract bit
+  for bit, the rounding's bytes and scales too (a block of zeros, a lone value); IQ1_M's delta flipped, the scale
+  step unfused, the rounding by division - each fails it. against the F32 matvec 3.8e-3 rms (int8's rounding).
+  scratch `q8x.hip` (random weights, 6 experts, cold): gate 110 -> 90 us (IQ2_XXS), 131 -> 98 (IQ2_XS), 118 -> 86
+  (IQ1_M); down 142 -> 102, 154 -> 110, 135 -> 90, at 173-209 GB/s. test_model_gpu: the lane's KL against the oracle
+  5.61e-3 (the F32 lane's 1.27e-2, maya's 1.22e-2; 32 positions, the old number one near-tie route at layer 18 -
+  read it as no worse), argmax the oracle's 32 of 32. maya's three questions plain at 101 GiB, interleaved fresh
+  runs: 15.2 / 14.8 / 15.6, 14.8 / 15.0 / 15.1, 15.1 / 14.9 / 15.2 tok/s against 14.9 / 14.3 / 14.8, 14.0 / 14.2 /
+  14.6, 14.2 / 13.9 / 14.2 (+5%); a first int8 run before them 8.4 / 6.8 / 5.5, not repeated in three, not
+  understood. the third question's tokens are the F32 lane's; the others' differ (the lane's numbers changed, by
+  design: rule 1 kept, the prompt's WMMA unchanged).
+
 ## Engram's reads (measured, 2026-10-29)
 
 a step reads each token's 24 rows of 144 B for each of the 2 Engram layers: **98,304 random reads** a 2,048-token
