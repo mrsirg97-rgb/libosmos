@@ -765,6 +765,16 @@ of the lane bit for bit).
   bench's questions) at 106 GiB, interleaved fresh runs: 16.7 / 15.2 / 14.9, 16.9 / 15.9 / 15.9 tok/s against by
   id 15.2 / 14.9 / 15.3, 15.5 / 15.0 / 15.4 - +4.7% (15.9 against 15.2), the streams the same bits. ranked is the
   comparison with maya (which ranks its own); the profile stays the caller's.
+  - **the two side by side, ranked** (interleaved fresh runs, the three questions, 106 GiB, no profiler): ours
+    17.2 / 15.5 / 15.5 and 16.5 / 15.2 / 15.4 tok/s (15.9), maya 18.4 / 18.0 / 17.6 and 18.1 / 18.2 / 18.0 (18.0) -
+    the first question within ~6%, the other two ~15%. the misses a token, ours (forward_guesses' streamed picks)
+    ~2.1 / 4.9 / 4.0, maya's (its CPU lane's share of the experts) ~4.6 / 4.1 / 4.3: as many. a miss's cost is the
+    gap - ours, the first question (a counter around fwd_pinned's wait, not kept): ~2.1 picks a token streamed, 42%
+    of them guessed a layer ahead; the unguessed waited ~2.5 ms each (most 2-4 ms: the drive's latency), the guessed
+    ~2.1 (a layer's ~1.5 ms is less than a cold read's ~2.7) - ~4.55 ms a token; maya ~5.3 for ~4.6 (~1.2 each, its
+    CPU lane computing while the GPU goes on; its drive reads 0.86 GB/s in decode against our 0.35: more bytes, less
+    waiting). and maya's routed experts on the GPU ~10.5 ms against our 12.7: its gate and up one kernel
+    (gate_up_kernel), ours gate, up, round, swiglu, round, down apart.
 
 ## Engram's reads (measured, 2026-10-29)
 
