@@ -713,8 +713,9 @@ of the lane bit for bit).
   call a pair) 3.4 / 4.4 -> kKsigns computed, not looked up (the index by pdep, its parity by shifts in the byte)
   2.8 -> the scales from registers (the 2s + 1 bytes by one vpermb, d per 256 by a blend) 2.5 / 3.7 -> a group's
   block count a constant (its 8 vectors in registers) 2.1 / 2.6. tried, slower: the grid words by vpgatherqq
-  (decode 13 -> 10 values/ns alone). at a token the decode is ~3/4 of it; next, the grids as 2-bit codes (3 levels
-  each), looked up 32 at a time by vpermi2w rather than one a load. 15 threads reach 4.5-4.6 GHz against one's 5.1;
+  (decode 13 -> 10 values/ns alone); the grids as 16-bit codes (each grid's bytes 3 levels: 2 bits a value; 4 a
+  word, expanded by vpmultishiftqb and vpshufb - the same bytes) 11.3 against 11.7 IQ2_XXS, 7.6 against 8.1 IQ1_M:
+  the lookups were not the cost. at a token the decode is ~3/4 of it. 15 threads reach 4.5-4.6 GHz against one's 5.1;
   a run under ~0.1 s is clocks still rising (0.21 then 0.165 ms on one cached expert).
 
 ## Engram's reads (measured, 2026-10-29)
