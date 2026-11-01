@@ -26,7 +26,7 @@ know of for this model on this hardware. Details and every run: `DESIGN.md`.
 | | libsubstrate | Maya 1.1.46 |
 | --- | --- | --- |
 | Decode, plain (3 bench questions, mean) | 16.1 tok/s | 17.2 tok/s (v1.1.48) |
-| Decode, DSpark drafted (same questions) | 27.7 tok/s | 29.5 tok/s |
+| Decode, DSpark drafted (same questions) | 25.1 tok/s | 29.5 tok/s (v1.1.46) |
 | Drafted, repetitive output (CSV to JSON) | 35.5 tok/s | 37.0 tok/s |
 | Drafted, boilerplate code (getters and setters) | 38.8 tok/s | 29.5 tok/s |
 | Prompt, 2,048 tokens | ~200-255 tok/s | ~240 tok/s |

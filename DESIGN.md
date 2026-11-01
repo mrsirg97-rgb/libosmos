@@ -919,6 +919,13 @@ of the lane bit for bit).
   (16.07) against 15.8 / 15.8 / 15.6, 15.5 / 15.7 / 15.6, 16.0 / 15.8 / 15.5 (15.70) - +2.3%, the streams the same
   bits. (a correction: the plain numbers above warmed up on the first question itself, which put it ~1 tok/s high;
   after an unrelated warm-up, as maya's bench, the plain baseline was ~15.7.)
+  - **and the drafted numbers, corrected the same way**: the drafted runs above (26.7, then 27.7 tok/s, "91-94% of
+    maya") also warmed up on the first question. after the unrelated warm-up (four runs; the first cold after the
+    sanitizers' rebuild, 17.3 / 16.2 / 23.2, left out): 23.5 / 20.3 / 28.4, 25.0 / 20.8 / 29.0, 25.4 / 20.8 / 29.3 -
+    ~25.1 tok/s at steady state, ~85% of maya's DSpark (29.5, its own warm-up an unrelated "Say hello"). the same
+    build warmed on the first question: 29.0 / 20.8 / 29.8 - the first question ~4 tok/s high, the others near. the
+    README's table takes the corrected numbers; the prompts and the repetitive questions (warmed up on the first
+    question, unlike them) stand.
 
 ## Engram's reads (measured, 2026-10-29)
 
