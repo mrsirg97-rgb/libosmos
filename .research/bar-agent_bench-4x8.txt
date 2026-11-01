@@ -1,0 +1,12 @@
+4 agents x 8 turns (seed 1)
+  new tokens a turn 150-18693 (median 868), 98757 in all; answers up to 8003 tokens; contexts read first [0, 0, 0, 0]
+
+build-hip/maya-ds4
+  turns answered 32 of 32; wall 514.8 s; agents done 514, 515, 472, 512 s
+  first token  mean  13.02  p50   5.80  p95  40.25  max  71.57 s
+  turn done    mean  60.37  p50  53.32  p95 102.60  max 152.57 s
+  turns of <= 2,000 new tokens: done mean 47.49, p95 87.46 s (24 turns)
+  later turns that continued their conversation in place: 28 of 28
+
+every turn answered
+exit=0
