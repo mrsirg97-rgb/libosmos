@@ -140,7 +140,9 @@ struct Forward
   uint32_t *oa_xoff, *oa_yoff; /* group k: x at k * its 4,096 (of a token's attention), y at k * o_lora */
   int eg_fd;
   Rowread *eg_read; /* Engram's rows, read many at once */
-  uint64_t *eg_off; /* a layer's rows' places in the Engram file: [token][col] */
+  uint64_t *eg_off; /* a step's rows' places in the Engram file: [sub-batch][Engram layer][token][col] */
+  uint64_t eg_at[FWD_MAX_SUBS][WEIGHTS_MAX_LAYERS]; /* where each sub-batch's nth Engram layer's rows start (rows) */
+  bool eg_pending;                                   /* the step's rows begun, not yet waited for */
   Engram *hash;
   float *freqs_win, *freqs_comp;
   Scratch b;
@@ -276,6 +278,8 @@ bool fwd_mat2(Forward *f, const GgufTensor *t0, const void *w0, uint32_t rows0, 
 bool fwd_mat_ready(Forward *f, const GgufTensor *t, const void *w, uint32_t rows, uint32_t cols, const float *x,
                    uint32_t xs, uint32_t n, float *y, uint32_t ys, bool ready);
 bool fwd_engram(Forward *f, int l, int nth, char *err);
+/* every Engram row a step reads, begun at its start (the forward's thread goes on); fwd_engram waits for them */
+bool fwd_engram_issue(Forward *f, char *err);
 /* hip_skip.c: the decoder skip (seq_prompt) - the step's plan, its compaction past layer dec, the head, the stream */
 void fwd_decoder(Forward *f);
 void fwd_plan(Forward *f);

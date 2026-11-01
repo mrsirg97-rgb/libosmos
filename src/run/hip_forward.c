@@ -277,6 +277,14 @@ bool fwd_alloc(void *p, uint64_t bytes)
 
 static bool subs(Forward *f);
 
+static size_t engram_layers(const Weights *w, int n_layers)
+{
+  size_t n = 0;
+  for (int l = 0; l < n_layers; l++)
+    n += w->geo.engram[l] != 0;
+  return n;
+}
+
 static bool scratch(Forward *f)
 {
   const Geometry *g = f->g;
@@ -428,7 +436,9 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   else if (!(f->hash = engram_create(w, f->fds, eerr)))
     ok = fwd_fail(err, eerr);
   else if (!(f->rows = calloc((size_t)FWD_MAX_BATCH * WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)) ||
-           !(f->eg_off = calloc((size_t)FWD_MAX_BATCH * f->g->engram_cols, sizeof *f->eg_off)))
+           !(f->eg_off = calloc((size_t)FWD_MAX_SUBS * FWD_MAX_BATCH * engram_layers(w, n_layers) *
+                                    f->g->engram_cols + 1,
+                                sizeof *f->eg_off)))
     ok = fwd_fail(err, "out of memory");
   else if (!(f->eg_read = rowread_create(FWD_ROW_THREADS)))
     ok = fwd_fail(err, "Engram's readers could not start");

@@ -15,6 +15,7 @@ struct Rowread
   int n_th, busy;
   uint64_t batch; /* a call's number: a worker's cue that there is a new one */
   bool stop;
+  bool pending; /* a batch handed out and not yet waited for */
   int fd;
   const uint64_t *offset;
   uint32_t n, bytes;
@@ -85,6 +86,7 @@ void rowread_destroy(Rowread *r)
 {
   if (!r)
     return;
+  (void)rowread_wait(r); /* a pending batch's rows written while its dst lives */
   pthread_mutex_lock(&r->mu);
   r->stop = true;
   pthread_cond_broadcast(&r->go);
@@ -97,11 +99,21 @@ void rowread_destroy(Rowread *r)
   free(r);
 }
 
-bool rowread(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint32_t bytes, uint8_t *dst)
+bool rowread_start(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint32_t bytes, uint8_t *dst)
 {
-  if (!r || n == 0)
-    return r != NULL;
+  if (!r)
+    return false;
   pthread_mutex_lock(&r->mu);
+  if (r->pending)
+  {
+    pthread_mutex_unlock(&r->mu);
+    return false;
+  }
+  if (n == 0)
+  {
+    pthread_mutex_unlock(&r->mu);
+    return true;
+  }
   /* a worker that woke late for the last batch (after it was done) is in it still, reading its fields: they are
      changed once it is out (it takes nothing - every row was) */
   while (r->busy > 0)
@@ -109,11 +121,25 @@ bool rowread(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint32_t by
   r->fd = fd, r->offset = offset, r->n = n, r->bytes = bytes, r->dst = dst;
   atomic_store(&r->next, 0);
   atomic_store(&r->failed, false);
-  r->batch++;
+  r->batch++, r->pending = true;
   pthread_cond_broadcast(&r->go);
+  pthread_mutex_unlock(&r->mu);
+  return true;
+}
+
+bool rowread_wait(Rowread *r)
+{
+  if (!r)
+    return false;
+  pthread_mutex_lock(&r->mu);
+  if (!r->pending)
+  {
+    pthread_mutex_unlock(&r->mu);
+    return true;
+  }
   /* done when every row is taken and no worker is still in one: a worker that never woke for this batch finds
      nothing left to take */
-  while (r->busy > 0 || atomic_load(&r->next) < n)
+  while (r->busy > 0 || atomic_load(&r->next) < r->n)
   {
     pthread_mutex_unlock(&r->mu);
     read_rows(r); /* the caller reads too, rather than only wait */
@@ -121,6 +147,12 @@ bool rowread(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint32_t by
     while (r->busy > 0)
       pthread_cond_wait(&r->done, &r->mu);
   }
+  r->pending = false;
   pthread_mutex_unlock(&r->mu);
   return !atomic_load(&r->failed);
+}
+
+bool rowread(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint32_t bytes, uint8_t *dst)
+{
+  return rowread_start(r, fd, offset, n, bytes, dst) && rowread_wait(r);
 }

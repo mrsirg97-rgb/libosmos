@@ -9,8 +9,51 @@
 #include "substrate/gpu/ops.h"
 #include "substrate/gpu/quant.h"
 
-/* the nth Engram layer's rows for each token, read from the Engram file all at once (rowread.h), decoded (BF16, as
-   ref.py's), projected and gated into the streams */
+/* every Engram row the step reads - each sub-batch's tokens' rows for each of its Engram layers (the layers ascending:
+   fwd_engram's nth) - begun at the step's start on Engram's readers, into the stage one after another, so they read
+   while the GPU embeds and runs the layers before them (the rows are the tokens' alone). the layers past dec would
+   read compacted tokens; DeepSeek-V4.1's Engram layers are before it (refused otherwise) */
+bool fwd_engram_issue(Forward *f, char *err)
+{
+  const Geometry *g = f->g;
+  const uint32_t cols = (uint32_t)g->engram_cols, hd = (uint32_t)g->engram_head_dim;
+  if (f->eg_pending) /* a step that failed, or stopped before its Engram layers: its rows done with first */
+  {
+    f->eg_pending = false;
+    (void)rowread_wait(f->eg_read);
+  }
+  uint64_t at = 0, rb = 0;
+  for (uint32_t k = 0; k < f->n_sub; k++)
+    for (int l = 0, nth = 0; l < f->n_layers; l++)
+    {
+      if (!g->engram[l])
+        continue;
+      if (f->dec >= 0 && l > f->dec)
+        return fwd_fail(err, "an Engram layer past the decoder's first: its tokens compacted");
+      const GgufTensor *t = f->w->layer[l].eg_embd;
+      const uint64_t b = gguf_bytes(t->type, hd);
+      if (rb && b != rb)
+        return fwd_fail(err, "Engram layers of different row sizes");
+      rb = b, f->eg_at[k][nth] = at;
+      const Sub *s = &f->sub[k];
+      for (uint32_t i = 0; i < s->n; i++)
+      {
+        const int64_t *rows = s->rows + (uint64_t)i * WEIGHTS_MAX_LAYERS * cols + (uint64_t)nth * cols;
+        for (uint32_t c = 0; c < cols; c++)
+          f->eg_off[at++] = t->offset + (uint64_t)rows[c] * rb;
+      }
+      nth++;
+    }
+  if (!at)
+    return true;
+  if (!rowread_start(f->eg_read, f->eg_fd, f->eg_off, (uint32_t)at, (uint32_t)rb, f->stage))
+    return fwd_fail(err, "Engram's readers refused the step's rows");
+  f->eg_pending = true;
+  return true;
+}
+
+/* the nth Engram layer's rows for each token (fwd_engram_issue's, waited for the first time a layer needs them),
+   decoded (BF16, as ref.py's), projected and gated into the streams */
 bool fwd_engram(Forward *f, int l, int nth, char *err)
 {
   const Geometry *g = f->g;
@@ -20,15 +63,13 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
   const uint32_t cols = (uint32_t)g->engram_cols, hd = (uint32_t)g->engram_head_dim, D = g->n_embd, hc = g->hc;
   const uint32_t n = f->n;
   const uint64_t rb = gguf_bytes(t->type, hd);
-  uint8_t *stage = f->stage + ((uint64_t)f->cur * f->n_eg + nth) * f->step * cols * rb;
-  for (uint32_t i = 0; i < n; i++)
+  if (f->eg_pending)
   {
-    const int64_t *rows = f->rows + (uint64_t)i * WEIGHTS_MAX_LAYERS * cols + (uint64_t)nth * cols;
-    for (uint32_t c = 0; c < cols; c++)
-      f->eg_off[i * cols + c] = t->offset + (uint64_t)rows[c] * rb;
+    f->eg_pending = false;
+    if (!rowread_wait(f->eg_read))
+      return fwd_fail(err, "an Engram row could not be read");
   }
-  if (!rowread(f->eg_read, f->eg_fd, f->eg_off, n * cols, (uint32_t)rb, stage))
-    return fwd_fail(err, "an Engram row could not be read");
+  const uint8_t *stage = f->stage + f->eg_at[f->cur][nth] * rb;
   const uint64_t vals = (uint64_t)n * cols * hd;
   const bool ok = fwd_put_async(b->erow, stage, (uint64_t)n * cols * rb) &&
                   quant_dequant(t->type, b->erow, vals, b->erow_f, NULL) && ops_round_bf16(b->erow_f, vals, NULL) &&

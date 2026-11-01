@@ -904,6 +904,21 @@ of the lane bit for bit).
     class of 12 fields' getters and setters - ours 38.8 / 38.7, maya 29.9 / 29.2. (a first run warmed up on the CSV
     prompt itself gave 50.7 / 52.1: the resident set had followed that very answer - the correction above, again;
     left out.)
+- **Engram's rows read from the step's start** (2026-11-01; rowread_start / rowread_wait, fwd_engram_issue): a
+  fresh trace (the second question, after the greedy picks) showed gaps of ~1.55 ms after a layer's hc_post, 1.5 a
+  token (~2.7 ms): the Engram layers' (1 and 14) rows read synchronously when the host reached the layer, the GPU
+  idle under the reads. maya issues them at the token's start (its STAT: engram_ms 0.42-0.56 a token). the rows are
+  the tokens' alone - known once the step's tokens are placed - so every sub-batch's rows for every Engram layer now
+  go to the readers in one batch then (into the stage one after another), and the first layer that needs them
+  waits; a step that failed, or stopped before them, has its batch finished at the next start. (DeepSeek-V4.1's
+  Engram layers are before dec, so no compacted token is read: refused otherwise.) test_rowread: start, the caller's
+  work, wait - every row; one batch at a time; a short row through the wait; destroyed at once after a start, 2,000
+  times, every row read (the destroy's wait left out fails it - a first version of the test, destroying after the
+  rows were long read, did not). the gaps 2.77 -> 0.68 ms a token. interleaved fresh runs, the three questions after
+  an unrelated warm-up (tools/bench/prompts.py's): 16.1 / 16.5 / 16.0, 16.2 / 16.2 / 16.1, 15.9 / 15.9 / 15.7 tok/s
+  (16.07) against 15.8 / 15.8 / 15.6, 15.5 / 15.7 / 15.6, 16.0 / 15.8 / 15.5 (15.70) - +2.3%, the streams the same
+  bits. (a correction: the plain numbers above warmed up on the first question itself, which put it ~1 tok/s high;
+  after an unrelated warm-up, as maya's bench, the plain baseline was ~15.7.)
 
 ## Engram's reads (measured, 2026-10-29)
 

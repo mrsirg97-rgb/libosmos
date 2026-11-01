@@ -112,6 +112,53 @@ static void test_short(int fd)
   printf("  short: a row past the file's end, or a closed file, fails the call; the next is clean\n");
 }
 
+/* rowread_start, then the caller's own work, then rowread_wait: every row in its place; a second start while one is
+   pending refused, a wait with none pending true; a failed row through the wait; destroyed with a batch pending:
+   the batch finished first (its rows written while dst lives) */
+static void test_async(int fd)
+{
+  enum { N = 5000, BYTES = 144 };
+  static uint64_t off[N];
+  static uint8_t dst[N * BYTES];
+  Rowread *r = rowread_create(16);
+  assert(r && rowread_wait(r)); /* none pending */
+  for (int round = 0; round < 20; round++)
+  {
+    for (uint32_t i = 0; i < N; i++)
+      off[i] = ((uint64_t)(round + 1) * 7919 * i + 13 * round) % (FILE_BYTES - BYTES);
+    memset(dst, 0, sizeof dst);
+    assert(rowread_start(r, fd, off, N, BYTES, dst));
+    assert(!rowread_start(r, fd, off, N, BYTES, dst)); /* one at a time */
+    volatile uint64_t spin = 0; /* the caller's own work meanwhile */
+    for (int i = 0; i < 100000; i++)
+      spin += (uint64_t)i;
+    assert(rowread_wait(r));
+    for (uint32_t i = 0; i < N; i++)
+      assert(dst[(uint64_t)i * BYTES] == byte_at(off[i]) && dst[(uint64_t)i * BYTES + BYTES - 1] ==
+                                                                   byte_at(off[i] + BYTES - 1));
+  }
+  off[3] = FILE_BYTES - 10;
+  assert(rowread_start(r, fd, off, N, BYTES, dst) && !rowread_wait(r)); /* a short row: the wait says so */
+  assert(rowread_wait(r));                                              /* and then none pending */
+  rowread_destroy(r);
+  /* destroyed at once after a start, before its workers may have woken: every row still read */
+  enum { QUICK = 2000, QN = 64 };
+  for (int k = 0; k < QUICK; k++)
+  {
+    Rowread *q = rowread_create(8);
+    assert(q);
+    for (uint32_t i = 0; i < QN; i++)
+      off[i] = ((uint64_t)k * 131 + i * 4093) % (FILE_BYTES - BYTES);
+    memset(dst, 0, (size_t)QN * BYTES);
+    assert(rowread_start(q, fd, off, QN, BYTES, dst));
+    rowread_destroy(q);
+    for (uint32_t i = 0; i < QN; i++)
+      assert(dst[(uint64_t)i * BYTES + BYTES - 1] == byte_at(off[i] + BYTES - 1));
+  }
+  printf("  async: start, work, wait - every row in place; one batch at a time; a short row through the wait; "
+         "destroyed at once after a start (2,000 times), every row read\n");
+}
+
 int main(void)
 {
   printf("[test_rowread] start\n");
@@ -121,6 +168,7 @@ int main(void)
   test_rows(fd);
   test_tiny(fd);
   test_short(fd);
+  test_async(fd);
   close(fd);
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
