@@ -785,6 +785,24 @@ of the lane bit for bit).
     ~6.7 and ~4.1), launches 1,690 -> 1,616. interleaved fresh runs, the three questions: 16.6 / 15.5 / 15.7, 17.1 /
     16.3 / 16.2, 17.4 / 15.5 / 15.8 tok/s against 16.2 / 15.5 / 15.7, 17.2 / 15.9 / 15.9, 17.1 / 16.0 / 15.9 - 16.23
     against 16.16 (+0.4%), the ~2% the trace shows within the runs' spread. the streams the same bits.
+  - **maya's miss path, read** (its src/ds4, v1.1.46): a missed expert never goes to the GPU. route_publish_kernel
+    marks the picks not in GPU memory and copies their tokens' FFN input to host-mapped memory; publish_kernel
+    writes a sequence number there; a pinned host thread polling it computes the experts on 15 CPU threads straight
+    from the GGUF's mmap (madvise WILLNEED on all three matrices first, the guessed ones a layer ahead first) and
+    writes each token's weighted sum to host-mapped memory; the GPU meanwhile runs the shared expert and the
+    resident experts' gate and up, then spins (wait_seq_kernel) on the answer, then down and the combine, which
+    reads the CPU's sums in place. no host-to-GPU sync a layer; a layer with no CPU pick answers itself. route_ahead
+    is ours (the next layer's router on this layer's input, top 6, WILLNEED behind it). at start it reads the
+    non-resident experts into the page cache by its profile's rank (pread, 12 threads), and its resident set swaps
+    in a CPU-hit expert past 1.25 x the coldest's heat + 1, a spare slot a layer.
+  - **the page cache warmed as maya's is** (an experiment, not kept): after the load, the streamed experts pread by
+    rank until ~4 GB of RAM is left - 2,964 experts, 25.5 GB in 6-8 s. by decode the page cache is ~9 GB again (the
+    scratch, the caches and the prompt's step take the rest), and the drive still reads 0.47 GB/s in decode (0.42
+    without): the RAM holds about a third of the experts the GPU does not, warmed or not. 17.1 / 16.3 / 15.9 tok/s
+    against 16.8 / 15.9 / 16.0 (+1%; a first run after a while 14.4 / 9.5 / 8.4 - fadvise DONTNEED on the streamed
+    experts did not make a cold baseline). so maya's misses are the drive's too; what makes them cheaper is the
+    overlap - the CPU computing them from the pages as they come while the GPU does the rest of the layer - not
+    where they are.
 
 ## Engram's reads (measured, 2026-10-29)
 
