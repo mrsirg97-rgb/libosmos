@@ -775,6 +775,16 @@ of the lane bit for bit).
     CPU lane computing while the GPU goes on; its drive reads 0.86 GB/s in decode against our 0.35: more bytes, less
     waiting). and maya's routed experts on the GPU ~10.5 ms against our 12.7: its gate and up one kernel
     (gate_up_kernel), ours gate, up, round, swiglu, round, down apart.
+  - **gate and up in one launch** (q8_gate_up, kernels/q8.h's gate_up_kernel): a lane's blocks decoded from both
+    matrices and summed against x read once, each sum in group_tok_kernel's order and tree, then lane_swiglu on the
+    two - the gate's and up's outputs never written, the activation's launch gone (gate and up are one type in every
+    layer of ds1017). test_q8_fuse_gpu: q8_group_tok twice and ops_swiglu_lane against it on an IQ1_M, IQ2_XXS and
+    IQ2_XS layer (experts 7 and 300 a launch, 1 to 8 tokens at two widths), at a clamp that takes ~40% of the gates
+    and one that takes none - the same bits, the rows past a count untouched; gate and up swapped in the activation
+    fails it. the trace (ranked, 106 GiB): the routed experts 12.7 -> 11.5 ms a token (gate_up 7.3, down 4.2; maya's
+    ~6.7 and ~4.1), launches 1,690 -> 1,616. interleaved fresh runs, the three questions: 16.6 / 15.5 / 15.7, 17.1 /
+    16.3 / 16.2, 17.4 / 15.5 / 15.8 tok/s against 16.2 / 15.5 / 15.7, 17.2 / 15.9 / 15.9, 17.1 / 16.0 / 15.9 - 16.23
+    against 16.16 (+0.4%), the ~2% the trace shows within the runs' spread. the streams the same bits.
 
 ## Engram's reads (measured, 2026-10-29)
 

@@ -127,6 +127,51 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const 
   }
 }
 
+// gate and up at once, then the activation: matrix pair blockIdx.y's gate rows (wg) and up rows (wu) of one type,
+// each lane's blocks decoded from both and summed against x read once, each sum in group_tok_kernel's order and tree;
+// then lane 0 of a row h = lane_swiglu(gate, up, lim, scale[x row]) - swiglu_lane_kernel's operation on the sums
+// q8_group_tok gives, its two outputs never written
+template <quant::Type T, int NT, int L>
+__global__ __launch_bounds__(kWave* kWavesPerBlock) void gate_up_kernel(const uint8_t* const* __restrict__ wg,
+                                                                         const uint8_t* const* __restrict__ wu,
+                                                                         const int32_t* __restrict__ cnt,
+                                                                         const int32_t* __restrict__ xrow,
+                                                                         uint32_t rows, uint32_t cols,
+                                                                         const int8_t* __restrict__ q,
+                                                                         const float* __restrict__ d,
+                                                                         const float* __restrict__ scale, float lim,
+                                                                         float* __restrict__ h, uint32_t hs) {
+  constexpr int G = kWave / L;
+  const int lane = threadIdx.x % kWave, ll = lane % L;
+  const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
+  const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
+  const uint64_t off = (uint64_t) (row < rows ? row : 0) * (cols / quant::kQK) * quant::Block<T>::bytes;
+  const uint8_t *rg = wg[m] + off, *ru = wu[m] + off;
+  float ag[NT], au[NT];
+  for (int t = 0; t < NT; t++) ag[t] = au[t] = 0.0f;
+  for (uint32_t s = ll; s < nblk; s += L) {
+    Codes cg, cu;
+    const uint64_t at = (s / kBlocksPer) * quant::Block<T>::bytes;
+    codes<T>(rg + at, (int) (s % kBlocksPer), cg);
+    codes<T>(ru + at, (int) (s % kBlocksPer), cu);
+    for (int t = 0; t < NT; t++) {
+      const uint64_t xr = r0 + t;
+      const int4* xp = (const int4*) (q + xr * cols + (uint64_t) s * LANE_Q8_VALUES);
+      const int4 a = xp[0], b = xp[1];
+      const int x[kWords] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+      const float xd = d[xr * nblk + s];
+      ag[t] = fmaf(xd, block_sum<T>(cg, x), ag[t]);
+      au[t] = fmaf(xd, block_sum<T>(cu, x), au[t]);
+    }
+  }
+  for (int t = 0; t < NT; t++) {
+    float vg = ag[t], vu = au[t];
+    for (int o = L / 2; o > 0; o >>= 1) vg += __shfl_xor(vg, o, kWave), vu += __shfl_xor(vu, o, kWave);
+    if (ll == 0 && row < rows && t < cnt[m])
+      h[(uint64_t) (r0 + t) * hs + row] = lane_swiglu(vg, vu, lim, scale[r0 + t]);
+  }
+}
+
 // rows of x to int8 a block at a time: a wave a block (lane i its value i), the block's max magnitude by the wave's
 // tree, each lane's code, four lanes' bytes a word; d the block's scale
 __global__ __launch_bounds__(kWave* kWavesPerBlock) void round_kernel(const float* __restrict__ x, uint32_t rows,

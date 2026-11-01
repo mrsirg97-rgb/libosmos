@@ -6,9 +6,10 @@
 #include "substrate/gpu/q8.h"
 
 /* forward_lane's small steps: the step's (token, routed expert) pairs in rows by expert (then token), each expert -
-   an entry, or a few of them past MV_MAX_TOKENS tokens - once for its rows through the matvec's group (gate and up on
-   the rows' FFN inputs, the lane's activation with each row's weight, then down), each token's rows then summed in
-   ascending expert id (ref.py's index_add order), the shared expert after. a row's sums are a token's alone */
+   an entry, or a few of them past MV_MAX_TOKENS tokens - once for its rows through the matvec's group (gate and up
+   on the rows' FFN inputs, the lane's activation with each row's weight - over int8 inputs one launch - then down),
+   each token's rows then summed in ascending expert id (ref.py's index_add order), the shared expert after. a row's
+   sums are a token's alone */
 
 #define LANE_PAIRS OPS_MAX_EXPERTS                    /* a small step's pairs: fewer than a layer's experts */
 #define LANE_ROWS (LANE_PAIRS + MV_MAX_TOKENS)        /* the rows' buffers: an entry's rows past it read, not used */
@@ -107,21 +108,28 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
   /* the experts over int8 inputs (q8.h: the IQ types), else the F32 matvec; either way a token's rows its own */
   const bool q8 = lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type);
   ok = ok && (!q8 || q8_round(f->lane_x, picks, D, D, f->lane_q, f->lane_qd, NULL));
-  for (uint32_t a = 0, z; ok && a < ne; a = z) /* gate and up, a launch a count */
+  /* gate and up, a launch a count: over int8 inputs one launch for both and the activation (q8_gate_up, when the
+     two are one type), else each, then the activation */
+  const bool fused = q8 && L->exp_gate->type == L->exp_up->type;
+  for (uint32_t a = 0, z; ok && a < ne; a = z)
   {
     for (z = a + 1; z < ne && t->cnt[z] == t->cnt[a];)
       z++;
     const uint32_t c = (uint32_t)t->cnt[a];
-    ok = q8 ? q8_group_tok(L->exp_gate->type, d->w[0] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_q,
-                           f->lane_qd, b->ga, FF, NULL) &&
-                  q8_group_tok(L->exp_up->type, d->w[1] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_q,
-                               f->lane_qd, b->upr, FF, NULL)
-            : mv_group_tok(L->exp_gate->type, d->w[0] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_x, D,
-                           b->ga, FF, NULL) &&
-                  mv_group_tok(L->exp_up->type, d->w[1] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_x, D,
-                               b->upr, FF, NULL);
+    if (fused)
+      ok = q8_gate_up(L->exp_gate->type, d->w[0] + a, d->w[1] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_q,
+                      f->lane_qd, f->lane_w, g->clamp_exp[l], b->hh, FF, NULL);
+    else
+      ok = q8 ? q8_group_tok(L->exp_gate->type, d->w[0] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_q,
+                             f->lane_qd, b->ga, FF, NULL) &&
+                    q8_group_tok(L->exp_up->type, d->w[1] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_q,
+                                 f->lane_qd, b->upr, FF, NULL)
+              : mv_group_tok(L->exp_gate->type, d->w[0] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_x, D,
+                             b->ga, FF, NULL) &&
+                    mv_group_tok(L->exp_up->type, d->w[1] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_x, D,
+                                 b->upr, FF, NULL);
   }
-  ok = ok && ops_swiglu_lane(b->ga, b->upr, FF, g->clamp_exp[l], f->lane_w, picks, b->hh, NULL);
+  ok = ok && (fused || ops_swiglu_lane(b->ga, b->upr, FF, g->clamp_exp[l], f->lane_w, picks, b->hh, NULL));
   ok = ok && (!q8 || q8_round(b->hh, picks, FF, FF, f->lane_q, f->lane_qd, NULL));
   for (uint32_t a = 0, z; ok && a < ne; a = z) /* down */
   {

@@ -8,6 +8,9 @@ bool q8_round(const float *x, uint32_t rows, uint32_t cols, uint32_t xs, int8_t 
 bool q8_group_tok(uint32_t type, const void *const *w, const int32_t *cnt, const int32_t *xrow, uint32_t n,
                   uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t *q, const float *d, float *y,
                   uint32_t ys, void *stream);
+bool q8_gate_up(uint32_t type, const void *const *wg, const void *const *wu, const int32_t *cnt, const int32_t *xrow,
+                uint32_t n, uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t *q, const float *d,
+                const float *scale, float lim, float *h, uint32_t hs, void *stream);
 
 #endif
 
@@ -15,7 +18,7 @@ bool q8_group_tok(uint32_t type, const void *const *w, const int32_t *cnt, const
 q8
   the lane's routed experts over int8 inputs (kernels/lane.h's contract): each row of x rounded to int8 a block of
   LANE_Q8_VALUES values, a weight's half-blocks against them integer dots, then F32 scales in one order - the order the
-  CPU repeats (src/cpu/expert.c), so an expert gives the same bits on either side. the experts' IQ types only.
+  CPU repeats (src/cpu/q8.c), so an expert gives the same bits on either side. the experts' IQ types only.
 
 q8_round
   rows of x (cols values, rows xs floats apart) to q (row r at q + r * cols, int8) and d (row r's block scales at
@@ -31,4 +34,10 @@ q8_group_tok
   are its own alone, whatever max_cnt, the matrices beside it or the run. q / d rows up to xrow[m] + max_cnt are read
   (past cnt[m], not used). false, nothing queued, for a type it does not take, cols not whole blocks, n 0 or past
   MV_MAX_GROUP, max_cnt 0 or past MV_MAX_TOKENS, or a launch refused.
+
+q8_gate_up
+  an expert's gate and up and the activation in one launch: q8_group_tok's sums of wg[m] and of wu[m] (both `type`)
+  on the same rows of q / d - x read once for both - and, rather than writing them, h's row r (hs floats apart) the
+  lane's activation on them: lane_swiglu(gate, up, lim, scale[r]) - ops_swiglu_lane's bits on q8_group_tok's. false,
+  nothing queued, as q8_group_tok, and for no scale or hs shorter than a row.
 */
