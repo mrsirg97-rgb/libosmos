@@ -941,6 +941,15 @@ of the lane bit for bit).
   / 22.0 / 32.6 and 27.8 / 22.0 / 32.5 (27.25) against 25.2 / 20.8 / 29.3 (a first run, cold, 18.1 / 16.2 / 24.8,
   left out) - +8.6%, ~92% of maya's DSpark (29.5); the verifying 9.2 -> 8.3-8.7 s (the first question), 8.0 -> 7.1
   (the third). plain 15.93 against 15.83 (a decode step's ready experts are little to hide a read behind: as before).
+- **the experts' kernels, tuned to their limit** (2026-11-01; scratch `kbench.hip`: q8_gate_up and q8_group_tok on a
+  layer's real experts, 6 a launch, cycled through 64 so they come from memory): alone, gate and up 193 / 210 / 213 /
+  215 GB/s (IQ1_M, IQ2_XXS, IQ2_XS layers), down 164 / 173 / 183 - the memory's ~230 near for gate and up. in
+  decode the same launches run ~8% slower (186.6 against 173.6 us, IQ2_XXS: the token's other kernels in the
+  caches). maya's per launch in its decode: down even (97.6 against our 103.5 us, IQ1_M), gate and up ~13% faster
+  (163 / 152 / 181 against 186.6 / 173.4 / 212.2). tried, the same bits: R rows a lane group in the down (their
+  loads in flight together) - R 2 164 -> 158-180, R 4 slower still; the IQ2s' grids and signs in LDS (a lane each
+  its own index) for gate and up - 1-2% alone (173.6 -> 171.4, 192.2 -> 188.8 us), not kept (its plumbing for less
+  than a decode's spread). what is left of the gap is the cache's, not the kernel's.
 
 ## Engram's reads (measured, 2026-10-29)
 
