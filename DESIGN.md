@@ -717,6 +717,17 @@ of the lane bit for bit).
   word, expanded by vpmultishiftqb and vpshufb - the same bytes) 11.3 against 11.7 IQ2_XXS, 7.6 against 8.1 IQ1_M:
   the lookups were not the cost. at a token the decode is ~3/4 of it. 15 threads reach 4.5-4.6 GHz against one's 5.1;
   a run under ~0.1 s is clocks still rising (0.21 then 0.165 ms on one cached expert).
+  - **what wiring it would buy** (2026-11-01, measured before building; the GTT's cap now 113 GiB, 15 cores):
+    the budget first - maya's prompts plain, interleaved fresh runs: 101 GiB 14.5 / 14.4 / 14.8 tok/s, 104 14.5 /
+    14.2 / 14.6, 106 14.5 / 14.6 / 14.7 and 15.2 / 15.1 / 15.5 (a first run, cold, 12.2 / 12.0 / 12.4); the streams
+    the same bits at every budget. then the CPU and the GPU at once: decode at 106 alone 15.7 / 15.5; with this
+    kernel running 12 threads through 64 experts from memory the whole answer 13.1 (-16%), the kernel 0.30 ms an
+    expert against 0.22 alone (+36%) - at 15 threads 9.2 (the decode's own host thread and readers starved too). the
+    two share one memory and both are bound by it. a layer's six routed experts are ~0.35 ms of the GPU's; the CPU
+    at 0.30 a contended expert balances at one of them - ~0.06 ms a layer, ~2.4 a token (~4%) at most, before what
+    its bandwidth costs the GPU and a host-to-device wait each layer (maya's wait_seq_kernel: 8.6 ms a token). and
+    the misses are the drive's whichever side computes them: the CPU has no memory of its own to hold more experts
+    in (the GTT is the same RAM). the wiring not built; the kernel kept (the GPU's bits, 4.6x the F32 lane's).
 
 ## Engram's reads (measured, 2026-10-29)
 
