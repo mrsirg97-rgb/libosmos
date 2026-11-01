@@ -136,23 +136,26 @@ __global__ void hc_dot_few_kernel(const float* fn, const float* h, uint32_t nm, 
   partial[((uint64_t) t * (nm + 1) + r) * kHcParts + p] = acc;
 }
 
-// hc a template argument: the mixes and the Sinkhorn matrix in registers (indexed by a runtime hc they spill)
+// hc a template argument: the mixes and the Sinkhorn matrix in registers (indexed by a runtime hc they spill). token
+// t's mixes by the whole block (every thread enters: a block barrier inside): its threads a row's parts each, in
+// order, then wave 0 the rest - hc_mix_kernel's block is that wave, hc_mix_pre_rms_kernel's a wide one
 template <uint32_t hc>
-__global__ void hc_mix_kernel(const float* partial, const float* scale, const float* base, uint32_t dim, float eps,
-                              float hc_eps, uint32_t iters, float* pre, float* post, float* comb) {
-  __shared__ float rows[(2 + OPS_MAX_HC) * OPS_MAX_HC + 1];
-  const uint32_t t = blockIdx.x, n = hc * dim, nm = (2 + hc) * hc;
+__device__ void hc_mix_token(uint32_t t, const float* partial, const float* scale, const float* base, uint32_t dim,
+                             float eps, float hc_eps, uint32_t iters, float* pre, float* post, float* comb,
+                             float* rows) {
+  const uint32_t n = hc * dim, nm = (2 + hc) * hc, tid = threadIdx.x;
   const float* pt = partial + (uint64_t) t * (nm + 1) * kHcParts;
-  for (uint32_t i = threadIdx.x; i <= nm; i += kWave) {  // a lane a row: its parts, in order
+  for (uint32_t i = tid; i <= nm; i += blockDim.x) {  // a thread a row: its parts, in order
     float s = 0;
     for (int p = 0; p < kHcParts; p++) s += pt[i * kHcParts + p];
     rows[i] = s;
   }
   __syncthreads();
+  if (tid >= (uint32_t) kWave) return;
   auto whole = [&](uint32_t r) { return rows[r]; };
   const float r = 1.0f / sqrtf(whole(nm) / (float) n + eps);
   if constexpr (hc * hc <= kWave) {  // a lane an entry: each sum the serial one's, in its order, through shuffles
-    const uint32_t lane = threadIdx.x, i = lane / hc, j = lane % hc;
+    const uint32_t lane = tid, i = lane / hc, j = lane % hc;
     if (lane < hc) pre[t * hc + lane] = sigmoid(whole(lane) * r * scale[0] + base[lane]) + hc_eps;
     else if (lane < 2 * hc)
       post[t * hc + lane - hc] = 2.0f * sigmoid(whole(lane) * r * scale[1] + base[lane]);
@@ -178,7 +181,7 @@ __global__ void hc_mix_kernel(const float* partial, const float* scale, const fl
     if (live) comb[(t * hc + i) * hc + j] = c;
     return;
   }
-  if (threadIdx.x != 0) return;
+  if (tid != 0) return;
   float m[(2 + hc) * hc];
   for (uint32_t i = 0; i < nm; i++) m[i] = whole(i) * r;
   for (uint32_t i = 0; i < hc; i++) {
@@ -213,12 +216,18 @@ __global__ void hc_mix_kernel(const float* partial, const float* scale, const fl
     for (uint32_t j = 0; j < hc; j++) comb[(t * hc + i) * hc + j] = c[i][j];
 }
 
-// x16 (when not NULL): the result as mm_x16 would put it, rows n .. a whole tile zero (a block each, past n)
-__global__ __launch_bounds__(kWide) void hc_pre_rms_kernel(const float* h, const float* pre, uint32_t hc, uint32_t dim,
-                                                            const float* w, float eps, float* x, uint32_t n_tok,
-                                                            _Float16* x16, int32_t* overflow) {
-  __shared__ float lds[kWide];
-  const uint32_t t = blockIdx.x;
+template <uint32_t hc>
+__global__ void hc_mix_kernel(const float* partial, const float* scale, const float* base, uint32_t dim, float eps,
+                              float hc_eps, uint32_t iters, float* pre, float* post, float* comb) {
+  __shared__ float rows[(2 + OPS_MAX_HC) * OPS_MAX_HC + 1];
+  hc_mix_token<hc>(blockIdx.x, partial, scale, base, dim, eps, hc_eps, iters, pre, post, comb, rows);
+}
+
+// x16 (when not NULL): the result as mm_x16 would put it, rows n .. a whole tile zero (a block each, past n). block
+// t's: token t's, a kWide block's
+__device__ void hc_pre_rms_token(uint32_t t, const float* h, const float* pre, uint32_t hc, uint32_t dim,
+                                 const float* w, float eps, float* x, uint32_t n_tok, _Float16* x16,
+                                 int32_t* overflow, float* lds) {
   if (t >= n_tok) {  // a pad row of x16's last tile
     for (uint32_t d = threadIdx.x; d < dim; d += kWide) mm::x16_put(x16, t, d, dim, 0.0f, overflow);
     return;
@@ -238,6 +247,31 @@ __global__ __launch_bounds__(kWide) void hc_pre_rms_kernel(const float* h, const
     xt[d] = v;
     if (x16) mm::x16_put(x16, t, d, dim, v, overflow);
   }
+}
+
+__global__ __launch_bounds__(kWide) void hc_pre_rms_kernel(const float* h, const float* pre, uint32_t hc, uint32_t dim,
+                                                            const float* w, float eps, float* x, uint32_t n_tok,
+                                                            _Float16* x16, int32_t* overflow) {
+  __shared__ float lds[kWide];
+  hc_pre_rms_token(blockIdx.x, h, pre, hc, dim, w, eps, x, n_tok, x16, overflow, lds);
+}
+
+// the next mixes and the pre-norm in one launch: token t's hc_mix_token, then (the block past it) its
+// hc_pre_rms_token - the two don't depend on each other (the norm's pre is a mix before), the barrier only for a
+// caller whose pre is the mix's own
+template <uint32_t hc>
+__global__ __launch_bounds__(kWide) void hc_mix_pre_rms_kernel(const float* partial, const float* scale,
+                                                                const float* base, float eps, float hc_eps,
+                                                                uint32_t iters, float* mpre, float* post, float* comb,
+                                                                const float* h, const float* pre, uint32_t dim,
+                                                                const float* w, float* x, uint32_t n_tok,
+                                                                _Float16* x16, int32_t* overflow) {
+  __shared__ float rows[(2 + OPS_MAX_HC) * OPS_MAX_HC + 1];
+  __shared__ float lds[kWide];
+  const uint32_t t = blockIdx.x;
+  if (t < n_tok) hc_mix_token<hc>(t, partial, scale, base, dim, eps, hc_eps, iters, mpre, post, comb, rows);
+  __syncthreads();
+  hc_pre_rms_token(t, h, pre, hc, dim, w, eps, x, n_tok, x16, overflow, lds);
 }
 
 __global__ void hc_pre_kernel(const float* h, const float* pre, uint32_t hc, uint32_t dim, uint32_t n_tok, float* x) {
@@ -279,6 +313,41 @@ __global__ void hc_post_kernel(const float* y, const float* res, const float* po
     float s = ct[j] * r[0];
     for (uint32_t k = 1; k < hc; k++) s += ct[k * hc + j] * r[k];
     ot[(uint64_t) j * dim] = post[t * hc + j] * yv + s;
+  }
+}
+
+// hc_post then hc_dot_few on its output, a block a (part, token): the part's values as hc_post_kernel's thread
+// computes each (its sums in its order), written and kept in LDS, then a thread a row's dot over them in
+// hc_dot_few_kernel's order - both kernels' bits
+template <uint32_t hc>
+__global__ void hc_post_dot_kernel(const float* y, const float* res, const float* post, const float* comb,
+                                   uint32_t dim, float* out, const float* fn, float* partial) {
+  extern __shared__ float xs[];
+  const uint32_t p = blockIdx.x, t = blockIdx.y, len = hc * dim, seg = len / kHcParts, nm = (2 + hc) * hc;
+  const float* ct = comb + t * hc * hc;
+  for (uint32_t i = threadIdx.x; i < seg; i += blockDim.x) {
+    const uint32_t at = p * seg + i, j = at / dim, d = at % dim;
+    const float* rt = res + (uint64_t) t * len + d;
+    float s = ct[j] * rt[0];
+    for (uint32_t k = 1; k < hc; k++) s += ct[k * hc + j] * rt[(uint64_t) k * dim];
+    const float v = post[t * hc + j] * y[(uint64_t) t * dim + d] + s;
+    out[(uint64_t) t * len + at] = v;
+    xs[i] = v;
+  }
+  __syncthreads();
+  for (uint32_t r = threadIdx.x; r <= nm; r += blockDim.x) {
+    const float* a = r < nm ? fn + (uint64_t) r * len + p * seg : xs;  // the norm's row: x with itself
+    float acc = 0;
+    uint32_t i = 0;
+    for (; i + kHcAhead <= seg; i += kHcAhead) {  // hc_dot_few_kernel's: loads in flight, then the FMAs in order
+      float av[kHcAhead];
+#pragma unroll
+      for (int u = 0; u < kHcAhead; u++) av[u] = a[i + u];
+#pragma unroll
+      for (int u = 0; u < kHcAhead; u++) acc = fmaf(av[u], xs[i + u], acc);
+    }
+    for (; i < seg; i++) acc = fmaf(a[i], xs[i], acc);
+    partial[((uint64_t) t * (nm + 1) + r) * kHcParts + p] = acc;
   }
 }
 
@@ -711,5 +780,46 @@ extern "C" bool ops_copy_rows(float* dst, const float* src, const int32_t* idx, 
                               void* stream) {
   if (!dst || !src || !idx || !n || !len) return false;
   copy_rows_kernel<<<grid((uint64_t) n * len), kThreads, 0, st(stream)>>>(dst, src, idx, n, len);
+  return ok();
+}
+
+extern "C" bool ops_hc_post_dot(const float* y, const float* res, const float* post, const float* comb, uint32_t hc,
+                                uint32_t dim, uint32_t n_tok, float* out, const float* fn, float* partial,
+                                void* stream) {
+  const uint32_t len = hc * dim;
+  if (!hc || hc > OPS_MAX_HC || !dim || !n_tok || len % kHcParts) return false;
+  if (n_tok >= (uint32_t) kHcTok)  // a tile's worth of tokens: the two launches (the tiled dot)
+    return ops_hc_post(y, res, post, comb, hc, dim, n_tok, out, stream) &&
+           ops_hc_dot(fn, out, hc, dim, n_tok, partial, stream);
+  const hipStream_t s = st(stream);
+  const dim3 g(kHcParts, n_tok);
+  const size_t lds = (size_t) (len / kHcParts) * sizeof(float);
+  switch (hc) {
+#define HC_POST_DOT(n) \
+  case n: hc_post_dot_kernel<n><<<g, kThreads, lds, s>>>(y, res, post, comb, dim, out, fn, partial); break;
+    HC_POST_DOT(1) HC_POST_DOT(2) HC_POST_DOT(3) HC_POST_DOT(4) HC_POST_DOT(5) HC_POST_DOT(6) HC_POST_DOT(7)
+    HC_POST_DOT(8)
+#undef HC_POST_DOT
+  }
+  return ok();
+}
+
+extern "C" bool ops_hc_mix_pre_rms(const float* partial, const float* scale, const float* base, uint32_t hc,
+                                   uint32_t dim, float eps, float hc_eps, uint32_t iters, uint32_t n_tok, float* mpre,
+                                   float* post, float* comb, const float* h, const float* pre, const float* w,
+                                   float* x, void* x16, int32_t* overflow, void* stream) {
+  if (!hc || hc > OPS_MAX_HC || !dim || !iters || !n_tok || !pre || !w || !x || (!x16) != (!overflow)) return false;
+  if (x16 && (dim % mm::kTile || n_tok > MM_MAX_TOKENS)) return false;
+  const hipStream_t s = st(stream);
+  const uint32_t blocks = x16 ? tiles(n_tok) : n_tok;
+  switch (hc) {
+#define HC_MIX_PRE(n)                                                                                              \
+  case n:                                                                                                          \
+    hc_mix_pre_rms_kernel<n><<<blocks, kWide, 0, s>>>(partial, scale, base, eps, hc_eps, iters, mpre, post, comb, h, \
+                                                      pre, dim, w, x, n_tok, (_Float16*) x16, overflow);           \
+    break;
+    HC_MIX_PRE(1) HC_MIX_PRE(2) HC_MIX_PRE(3) HC_MIX_PRE(4) HC_MIX_PRE(5) HC_MIX_PRE(6) HC_MIX_PRE(7) HC_MIX_PRE(8)
+#undef HC_MIX_PRE
+  }
   return ok();
 }

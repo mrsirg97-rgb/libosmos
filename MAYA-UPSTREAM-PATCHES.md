@@ -15,6 +15,8 @@ fix, its status. none is filed unless it says so.
 
 all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 
+| [#745](https://github.com/mw00/project-maya/pull/745) | DeepSeek's router weights kept BF16 on AMD (`GateW`, the router kernels templated on the weight type; `DS4_ROUTER_CHECK=1` checks the bits against the F32 copy at load) | decode +3.5% (17.0 -> 17.6 tok/s), the same logits; 160 MB more for experts | open (2026-11-01) |
+
 ## to file
 
 ### 1. `tools/ds4/ref_gguf.py` reads an IQ4_NL Engram table as MXFP8 - silently wrong
@@ -92,3 +94,38 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 - **what**: `test_the_web_apps_names` imports `serve/web/lib.js`, whose `navigator.platform` is not defined in Node
   20 (`ReferenceError: navigator is not defined`); it fails the same way on `main`.
 - **fix**: guard the `navigator` read, or set the test's Node version.
+
+## to look at: libsubstrate's findings of 2026-11-01 (each checked against maya's code before a PR)
+
+### 11. device-to-device copies of memory the HIP runtime did not allocate go to the copy engine
+
+- **found**: libsubstrate's resident set swaps an expert by copying it between two HSA allocations
+  (`hsa_amd_memory_pool_allocate`); `hipMemcpyAsync(..., hipMemcpyDeviceToDevice)` took them for host memory and
+  copied on the copy engine, the GPU idle ~0.45 ms behind each (4.6 a token: ~1.9 ms). a copy kernel (16 bytes a
+  thread) took 0.63 ms of kernels a token for the 1.9 of gaps.
+- **check in maya**: any `cudaMemcpyAsync` on the decode stream between buffers maya allocates itself (the VRAM
+  expert slots, the swap path's `cache_loop`), and whether its swaps' copies stall the stream.
+
+### 12. the hyper-connections' small kernels, fused
+
+- **found**: post then the next mix's dot (one block a part: the part's values computed, kept in LDS, dotted - the
+  same sums), and the mixes with the pre-norm (independent: the norm's pre is the mix before) - 3 launches a layer
+  fewer; alone 8.9 -> 5.4 us and 9.5 -> 6.9 us a token's pair; in decode ~0.3 ms a token (~0.5%), the same bits.
+- **check in maya**: its trace shows `hc_mix_kernel`, `hc_pre_norm_kernel`, `hc_post_kernel`, `hc_split_kernel` as
+  separate launches (80 a token each) - the same fusions may apply.
+
+### 13. the resident set's swaps: choose from every streamed expert in GPU memory
+
+- **found**: libsubstrate chose a swap only from the experts held in the step; choosing from every streamed expert
+  the pool still holds (held or not) +1.5-3.4% decode.
+- **check in maya**: maya swaps CPU-hit experts in from a background thread with a spare slot a layer
+  (`cache_tick` / `swap_tick`); whether experts streamed to the GPU (the PCIe lane, off on this box) are candidates.
+
+### 14. negative results worth knowing on Strix Halo (no PR: data for the next person)
+
+- the CPU and the GPU share the memory's bandwidth: an AVX-512 int8 expert kernel running 12 threads beside decode
+  costs the GPU 16% and runs 36% slower itself; a CPU lane for misses only measured even with the GPU's waits here
+  (15 cores).
+- a GiB more GPU memory is a GiB less page cache (one RAM): past ~106 GiB of experts (113 GiB GTT) decode
+  collapses; warming the page cache at start does not survive to decode (~9 GB left).
+- a captured graph saves ~0.15 us of the ~2 us between two dependent kernels (gfx1151).

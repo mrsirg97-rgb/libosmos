@@ -75,13 +75,12 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   if (g->engram[l] && !fwd_engram(f, l, (*nth)++, err))
     return false;
   fwd_probe(f, "h_in", l, p, b->h, n * hc * D, false);
+  /* the mixes and the norm one launch (ops_hc_mix_pre_rms); a probe may stand the oracle's in for x: its x16 the
+     attention's own then */
   bool ok = ops_hc_dot(fv(f, L->hc_attn_fn), b->h, hc, D, n, b->hcp, NULL) &&
-            ops_hc_mix(b->hcp, fv(f, L->hc_attn_scale), fv(f, L->hc_attn_base), hc, D,
-                       g->rms_eps, g->hc_eps, g->sinkhorn_iters, n, b->a_pre, b->a_post, b->a_comb, NULL) &&
-            (f->probe /* a probe may stand the oracle's in for x: its x16 the attention's own then */
-                 ? ops_hc_pre_rms(b->h, pre, hc, D, fv(f, L->attn_norm), g->rms_eps, n, b->x, NULL)
-                 : ops_hc_pre_rms_x16(b->h, pre, hc, D, fv(f, L->attn_norm), g->rms_eps, n, b->x, b->x16, b->overflow,
-                                      NULL));
+            ops_hc_mix_pre_rms(b->hcp, fv(f, L->hc_attn_scale), fv(f, L->hc_attn_base), hc, D, g->rms_eps, g->hc_eps,
+                               g->sinkhorn_iters, n, b->a_pre, b->a_post, b->a_comb, b->h, pre, fv(f, L->attn_norm),
+                               b->x, f->probe ? NULL : b->x16, f->probe ? NULL : b->overflow, NULL);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention's mixes)");
   fwd_probe(f, "a_pre", l, p, b->a_pre, n * hc, false);
@@ -90,11 +89,10 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   fwd_probe(f, "attn_x", l, p, b->x, n * D, false);
   if (!fwd_attention(f, l, err))
     return false;
-  ok = ops_hc_post(b->y, b->h, b->a_post, b->a_comb, hc, D, n, b->mid, NULL) &&
-       ops_hc_dot(fv(f, L->hc_ffn_fn), b->mid, hc, D, n, b->hcp, NULL) &&
-       ops_hc_mix(b->hcp, fv(f, L->hc_ffn_scale), fv(f, L->hc_ffn_base), hc, D,
-                  g->rms_eps, g->hc_eps, g->sinkhorn_iters, n, b->f_pre, b->f_post, b->f_comb, NULL) &&
-       ops_hc_pre_rms(b->mid, b->a_pre, hc, D, fv(f, L->ffn_norm), g->rms_eps, n, b->xf, NULL);
+  ok = ops_hc_post_dot(b->y, b->h, b->a_post, b->a_comb, hc, D, n, b->mid, fv(f, L->hc_ffn_fn), b->hcp, NULL) &&
+       ops_hc_mix_pre_rms(b->hcp, fv(f, L->hc_ffn_scale), fv(f, L->hc_ffn_base), hc, D, g->rms_eps, g->hc_eps,
+                          g->sinkhorn_iters, n, b->f_pre, b->f_post, b->f_comb, b->mid, b->a_pre, fv(f, L->ffn_norm),
+                          b->xf, NULL, NULL, NULL);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the FFN's mixes)");
   fwd_probe(f, "h_mid", l, p, b->mid, n * hc * D, false);

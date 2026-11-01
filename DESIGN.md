@@ -870,6 +870,17 @@ of the lane bit for bit).
     of them ~27 MB in ~1.5 ms, past what it reads). and fewer: a token's best 0 / 2 / 4 / 6 guesses (the router's
     picks come best first) 16.13 / 15.97 / 16.37 / 15.90 tok/s, the waits 6.5 / 6.1 / 5.5 / 5.4 s - the waits move,
     the speed does not. what the misses cost is the drive's latency for picks no guess sees.
+- **the hyper-connections' kernels fused** (ops_hc_post_dot, ops_hc_mix_pre_rms; test_fuse_gpu): post and the
+  next mixes' dot one launch below a tile of tokens - a block a (part, token) computing the part's streams as
+  hc_post_kernel's thread does, keeping them in LDS and dotting them as hc_dot_few_kernel's thread does (its loads in
+  flight, its FMAs in order); the mixes and the pre-norm one launch - independent (the norm's pre is a mix before:
+  the attention's the last layer's FFN mix, the FFN's this layer's attention mix), the block's first wave the mixes,
+  a barrier (for a caller whose pre is the mix's own), then the norm. 3 launches a layer fewer (1,616 -> 1,497 a
+  token). test_fuse_gpu: 1, 3, 9 and 70 tokens (70: the two launches), x16 or not, the pre another's or the mix's
+  own - the bits; the dot reversed, the barrier gone - each fails it. alone: 8.9 -> 5.4 us, 9.5 -> 6.9 us. first
+  without the dot's loads in flight it was slower than the two (20.5 against 14.4 us a call in decode). in decode
+  the hc kernels 2.37 -> 2.29 ms a token, the gaps under 5 us 3.40 -> 3.15: ~0.3 ms (~0.5%); interleaved fresh runs
+  16.24 against 16.41 tok/s (three rounds), within their spread. the streams and fingerprints the same.
 
 ## Engram's reads (measured, 2026-10-29)
 

@@ -1,7 +1,8 @@
 // the fused kernels against the kernels they stand for, bit for bit: ops_kv_finish (ops_rms, ops_rope, ops_fp8_round,
 // ops_put_rows) - the keys and the window's rows, at positions far apart so the angles are large; ops_rms_x16,
 // ops_hc_pre_rms_x16 and ops_swiglu_x16 (each op, then mm_x16) - the F32, every x16 half (the pad rows too: both
-// buffers filled with garbage first) and the overflow flag (a value past f16's); ops_gather_sum_add (+ ops_add)
+// buffers filled with garbage first) and the overflow flag (a value past f16's); ops_gather_sum_add (+ ops_add);
+// ops_hc_post_dot (ops_hc_post, ops_hc_dot) and ops_hc_mix_pre_rms (ops_hc_mix, ops_hc_pre_rms(_x16))
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -143,6 +144,90 @@ static void gather_sum_add() {
               kK);
 }
 
+constexpr uint32_t kHc = 4, kHcDim = 4096;  // DeepSeek-V4.1-Flash's streams: 4 of n_embd
+constexpr uint32_t kHcRows = (2 + kHc) * kHc + 1;     // the mixes' sums and the norm's
+
+// ops_hc_post_dot against ops_hc_post then ops_hc_dot: the streams out and every part's sums
+static void hc_post_dot(uint32_t n) {
+  const size_t len = (size_t) kHc * kHcDim;
+  std::vector<float> y((size_t) n * kHcDim), res(n * len), post(n * kHc), comb(n * kHc * kHc), fn(kHcRows * len);
+  for (float& v : y) v = uniform();
+  for (float& v : res) v = uniform() * 2.0f;
+  for (float& v : post) v = uniform() + 1.0f;
+  for (float& v : comb) v = (uniform() + 1.0f) * 0.25f;
+  for (float& v : fn) v = uniform() * 0.1f;
+  float *dy = dev(y), *dr = dev(res), *dp = dev(post), *dc = dev(comb), *df = dev(fn);
+  const size_t parts = (size_t) n * kHcRows * OPS_HC_PARTS;
+  float *oa, *ob, *pa, *pb;
+  CHECK(hipMalloc(&oa, n * len * 4) == hipSuccess && hipMalloc(&ob, n * len * 4) == hipSuccess &&
+        hipMalloc(&pa, parts * 4) == hipSuccess && hipMalloc(&pb, parts * 4) == hipSuccess);
+  CHECK(ops_hc_post(dy, dr, dp, dc, kHc, kHcDim, n, oa, nullptr) && ops_hc_dot(df, oa, kHc, kHcDim, n, pa, nullptr));
+  CHECK(ops_hc_post_dot(dy, dr, dp, dc, kHc, kHcDim, n, ob, df, pb, nullptr) && hipDeviceSynchronize() == hipSuccess);
+  CHECK(host(oa, n * len) == host(ob, n * len));
+  const std::vector<float> ha = host(pa, parts), hb = host(pb, parts);
+  CHECK(std::memcmp(ha.data(), hb.data(), parts * 4) == 0);
+  for (void* q : {(void*) dy, (void*) dr, (void*) dp, (void*) dc, (void*) df, (void*) oa, (void*) ob, (void*) pa,
+                  (void*) pb})
+    CHECK(hipFree(q) == hipSuccess);
+  std::printf("  hc_post_dot: %u token%s - ops_hc_post and ops_hc_dot's bits (the streams, every part's sums)\n", n,
+              n == 1 ? "" : "s");
+}
+
+// ops_hc_mix_pre_rms against ops_hc_mix then ops_hc_pre_rms(_x16): the mixes, x, x16 and the flag - the norm's pre
+// another's, or the mix's own
+static void hc_mix_pre_rms(uint32_t n, bool x16, bool own) {
+  const size_t len = (size_t) kHc * kHcDim;
+  std::vector<float> h(n * len), fn(kHcRows * len), scale(3), base((2 + kHc) * kHc), pre(n * kHc), w(kHcDim);
+  for (float& v : h) v = uniform() * 2.0f;
+  for (float& v : fn) v = uniform() * 0.1f;
+  for (float& v : scale) v = uniform() + 1.5f;
+  for (float& v : base) v = uniform();
+  for (float& v : pre) v = uniform() + 1.0f;
+  for (float& v : w) v = 1.0f + uniform() * 0.5f;
+  float *dh = dev(h), *df = dev(fn), *ds = dev(scale), *db = dev(base), *dpre = dev(pre), *dw = dev(w), *part;
+  CHECK(hipMalloc(&part, (size_t) n * kHcRows * OPS_HC_PARTS * 4) == hipSuccess);
+  CHECK(ops_hc_dot(df, dh, kHc, kHcDim, n, part, nullptr));
+  const float eps = 1e-6f, hc_eps = 1e-6f;
+  constexpr uint32_t kIters = 20;
+  const uint32_t rows = x16 ? (n + MM_TILE - 1) / MM_TILE * MM_TILE : n;
+  float *m[2][3], *xo[2];
+  void* x16o[2] = {nullptr, nullptr};
+  int32_t* ov[2] = {nullptr, nullptr};
+  for (int k = 0; k < 2; k++) {
+    for (int j = 0; j < 3; j++) CHECK(hipMalloc(&m[k][j], (size_t) n * kHc * kHc * 4) == hipSuccess);
+    CHECK(hipMalloc(&xo[k], (size_t) n * kHcDim * 4) == hipSuccess);
+    if (x16) {
+      CHECK(hipMalloc(&x16o[k], (size_t) rows * kHcDim * 2) == hipSuccess && hipMalloc(&ov[k], 4) == hipSuccess);
+      CHECK(hipMemset(x16o[k], 0x7F, (size_t) rows * kHcDim * 2) == hipSuccess && hipMemset(ov[k], 0, 4) == hipSuccess);
+    }
+  }
+  const float* p0 = own ? m[0][0] : dpre;  // the norm's pre: another's, or the mix's own
+  const float* p1 = own ? m[1][0] : dpre;
+  CHECK(ops_hc_mix(part, ds, db, kHc, kHcDim, eps, hc_eps, kIters, n, m[0][0], m[0][1], m[0][2], nullptr) &&
+        (x16 ? ops_hc_pre_rms_x16(dh, p0, kHc, kHcDim, dw, eps, n, xo[0], x16o[0], ov[0], nullptr)
+             : ops_hc_pre_rms(dh, p0, kHc, kHcDim, dw, eps, n, xo[0], nullptr)));
+  CHECK(ops_hc_mix_pre_rms(part, ds, db, kHc, kHcDim, eps, hc_eps, kIters, n, m[1][0], m[1][1], m[1][2], dh, p1, dw,
+                           xo[1], x16o[1], ov[1], nullptr) &&
+        hipDeviceSynchronize() == hipSuccess);
+  CHECK(host(m[0][0], n * kHc) == host(m[1][0], n * kHc) && host(m[0][1], n * kHc) == host(m[1][1], n * kHc) &&
+        host(m[0][2], n * kHc * kHc) == host(m[1][2], n * kHc * kHc));
+  const std::vector<float> xa = host(xo[0], (size_t) n * kHcDim), xb = host(xo[1], (size_t) n * kHcDim);
+  CHECK(std::memcmp(xa.data(), xb.data(), xa.size() * 4) == 0);
+  if (x16) {
+    const std::vector<uint16_t> a = host((const uint16_t*) x16o[0], (size_t) rows * kHcDim),
+                                b = host((const uint16_t*) x16o[1], (size_t) rows * kHcDim);
+    CHECK(a == b && host(ov[0], 1) == host(ov[1], 1));
+  }
+  for (int k = 0; k < 2; k++) {
+    for (int j = 0; j < 3; j++) CHECK(hipFree(m[k][j]) == hipSuccess);
+    CHECK(hipFree(xo[k]) == hipSuccess && hipFree(x16o[k]) == hipSuccess && hipFree(ov[k]) == hipSuccess);
+  }
+  for (void* q : {(void*) dh, (void*) df, (void*) ds, (void*) db, (void*) dpre, (void*) dw, (void*) part})
+    CHECK(hipFree(q) == hipSuccess);
+  std::printf("  hc_mix_pre_rms: %u token%s%s, the norm's pre %s - ops_hc_mix and ops_hc_pre_rms%s's bits\n", n,
+              n == 1 ? "" : "s", x16 ? ", x16" : "", own ? "the mix's own" : "another's", x16 ? "_x16" : "");
+}
+
 int main() {
   std::printf("[test_fuse_gpu] start\n");
   int ndev = 0;
@@ -154,6 +239,11 @@ int main() {
   x16_ops(3, false);   // a tile's 13 pad rows
   x16_ops(16, true);   // a whole tile, and the overflow flag
   gather_sum_add();
+  for (uint32_t n : {1u, 3u, 9u, 70u}) hc_post_dot(n);  // 70: a tile's worth, the two launches
+  hc_mix_pre_rms(1, false, false);
+  hc_mix_pre_rms(1, true, false);
+  hc_mix_pre_rms(5, true, true);
+  hc_mix_pre_rms(9, false, true);
   std::printf("[test_fuse_gpu] ok\n");
   return 0;
 }

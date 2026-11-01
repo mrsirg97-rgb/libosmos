@@ -35,6 +35,12 @@ bool ops_hc_mean(const float *h, uint32_t hc, uint32_t dim, uint32_t n_tok, floa
                  void *stream);
 bool ops_hc_post(const float *y, const float *res, const float *post, const float *comb, uint32_t hc, uint32_t dim,
                  uint32_t n_tok, float *out, void *stream);
+bool ops_hc_post_dot(const float *y, const float *res, const float *post, const float *comb, uint32_t hc, uint32_t dim,
+                     uint32_t n_tok, float *out, const float *fn, float *partial, void *stream);
+bool ops_hc_mix_pre_rms(const float *partial, const float *scale, const float *base, uint32_t hc, uint32_t dim,
+                        float eps, float hc_eps, uint32_t iters, uint32_t n_tok, float *mpre, float *post, float *comb,
+                        const float *h, const float *pre, const float *w, float *x, void *x16, int32_t *overflow,
+                        void *stream);
 bool ops_rope(float *x, uint32_t heads, uint32_t head_dim, uint32_t rope_dim, uint32_t stride, const float *freqs,
               const int32_t *pos, bool inverse, uint32_t n_tok, void *stream);
 bool ops_fp8_round(float *x, uint64_t n, void *stream);
@@ -118,6 +124,15 @@ ops_hc_mean
 
 ops_hc_post
   out[j] = post[j] y + sum over i of comb[i][j] res[i] - the block's output mixed back into the hc streams.
+
+ops_hc_post_dot
+  ops_hc_post into out, then ops_hc_dot of fn on out into partial - their bits; below a tile of tokens (a decode's)
+  one launch, a block a part of each token's streams computing the part's out and its dots over them.
+
+ops_hc_mix_pre_rms
+  ops_hc_mix (its pre into mpre, post, comb) and ops_hc_pre_rms(_x16) of h with `pre` (x16 and overflow both NULL, or
+  both given: the x16 one's limits) - their bits, one launch, a block a token: the mixes, then the norm (pre may be
+  mpre: the norm comes after).
 
 ops_rope
   each of the `heads` heads' last rope_dim values (a head head_dim apart, a token `stride` apart) rotated in place as
