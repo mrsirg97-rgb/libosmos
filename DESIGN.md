@@ -891,6 +891,19 @@ of the lane bit for bit).
   16.7 / 15.4 / 15.4 tok/s against 16.6 / 15.4 / 15.2 (a first run, cold, 14.1 / 10.6 / 7.4 left out) - ~+1%;
   drafted 29.8 / 21.9 / 31.5 (27.7) against 29.5 / 21.2 / 31.3 (27.3) - ~+1.5%, 94% of maya's DSpark (29.5). the
   same streams.
+- **prompts, and text a drafter knows** (2026-11-01; ours ranked with forward_greedy; maya's nodraft config for the
+  prompts, its DSpark config for the drafts; each engine's first long prompt after a short warm-up, maya a fresh
+  process for each; scratch `drive_ids.py`):
+  - prompts (the GPL-3's text, the first 2,048 and 8,192 tokens of a summarize request): 2K - maya 236 / 242 tok/s,
+    ours 202-255 the first in a process (283-300 the second); 8K - maya 377 / 394 (its chunks of 4,096), ours at
+    2,048 a step and 106 GiB 406 / 394, and at 8,192 a step (the experts read once for all four sub-batches; its
+    buffers take the budget to 92 GiB) 554 / 523 - ~40% past maya. (the bench's own error first: max_ctx 4,096
+    refused the 8K prompt, and its last row past a step of 2,048 is the last sub-batch's - forward_greedy refused
+    the other row, loud.)
+  - drafted, text a drafter knows: a CSV of 15 rows to a JSON array - ours 35.7 / 35.2 tok/s, maya 35.8 / 38.2; a
+    class of 12 fields' getters and setters - ours 38.8 / 38.7, maya 29.9 / 29.2. (a first run warmed up on the CSV
+    prompt itself gave 50.7 / 52.1: the resident set had followed that very answer - the correction above, again;
+    left out.)
 
 ## Engram's reads (measured, 2026-10-29)
 
