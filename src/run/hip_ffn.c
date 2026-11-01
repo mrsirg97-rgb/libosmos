@@ -138,6 +138,10 @@ bool fwd_moe(Forward *f, int l, char *err)
   ok = ok && ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, n, b->ridx, b->rw,
                         NULL) &&
        hipMemcpyAsync(f->r_ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess &&
+       (!f->cpu || !f->lane || P >= E || /* the CPU lane's: the step's FFN inputs and weights, with the picks */
+        (hipMemcpyAsync(f->cpu_xf, b->xf, (uint64_t)n * D * sizeof(float), hipMemcpyDeviceToHost, NULL) ==
+             hipSuccess &&
+         hipMemcpyAsync(f->cpu_rw, b->rw, P * sizeof(float), hipMemcpyDeviceToHost, NULL) == hipSuccess)) &&
        fwd_guess_queue(f, l) && hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) &&
        hipEventSynchronize(f->routed) == hipSuccess;
   if (!ok)
@@ -207,7 +211,14 @@ bool fwd_moe(Forward *f, int l, char *err)
       base[j] = r, cnt[j] = 0, slot0[j] = next_slot;
       const uint32_t unit = (uint32_t)l * E + (uint32_t)ids[m];
       unit_of[j] = unit;
-      if (f->rix[unit] < 0 && !f->is_held[unit]) /* held once for all the layer's sub-batches */
+      if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the pool begun
+                                        and held, not waited for (a swap's, at a later visit) */
+      {
+        f->on_cpu[unit] = f->visits;
+        if (!f->is_held[unit] && pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_WAIT)
+          f->held[f->n_held++] = unit, f->is_held[unit] = true;
+      }
+      else if (f->rix[unit] < 0 && !f->is_held[unit]) /* held once for all the layer's sub-batches */
       {
         /* full while reads are under way (a prompt's next layer, read ahead): a reading unit is made room of once
            its read ends - wait for one, pin again; full with none reading is the pool's last word */

@@ -73,6 +73,8 @@ bool ops_gather_sum_add(float *y, const float *src, const int32_t *idx, uint32_t
 bool ops_scale(float *x, uint64_t n, float s, void *stream);
 bool ops_add(float *y, const float *a, uint64_t n, void *stream);
 bool ops_copy(void *dst, const void *src, uint64_t bytes, void *stream);
+bool ops_wait(const uint32_t *flag, uint32_t value, void *stream);
+bool ops_copy_rows(float *dst, const float *src, const int32_t *idx, uint32_t n, uint32_t len, void *stream);
 
 #endif
 
@@ -201,6 +203,15 @@ ops_copy
   bytes from src to dst (not overlapping), as a kernel on the stream: any memory the GPU reaches, the runtime's or
   not (hipMemcpyAsync takes memory it did not allocate - the pool's, hip_slots' - for the host's, and copies it on
   the copy engine, outside the stream's kernels). dst and src 16-byte aligned; false for either not, or no bytes.
+
+ops_wait
+  the stream held until *flag - host memory the GPU maps (hipHostMalloc's) - holds value, or value with its top bit
+  set (the host's mark of a failed job: the caller learns of it on the host): one thread polling it, a
+  system-scope acquire, so what the host wrote before flag the kernels after see. the host must post the value:
+  else the stream waits for ever.
+
+ops_copy_rows
+  rows idx[0 .. n) of src to the same rows of dst, len floats a row (src may be host memory the GPU maps): a copy.
 
 ops_rms_x16, ops_hc_pre_rms_x16, ops_swiglu_x16
   as ops_rms, ops_hc_pre_rms, ops_swiglu, writing beside their F32 output the x16 mm_x16 would make of it (its rows

@@ -261,6 +261,8 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
   if (hipMemcpyAsync(&f->pin->overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       hipDeviceSynchronize() != hipSuccess)
     return fwd_fail(err, "a GPU call failed (the step)");
+  if (f->cpu && !cpu_lane_wait(f->cpu))
+    return fwd_fail(err, "the CPU lane's experts failed");
   fwd_release_held(f);
   fwd_heat(f);
   if (f->pin->overflow)

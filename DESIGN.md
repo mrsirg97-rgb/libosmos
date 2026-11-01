@@ -803,6 +803,33 @@ of the lane bit for bit).
     experts did not make a cold baseline). so maya's misses are the drive's too; what makes them cheaper is the
     overlap - the CPU computing them from the pages as they come while the GPU does the rest of the layer - not
     where they are.
+- **the lane's CPU half, built** (2026-11-01; forward_lane's cpu_threads; src/cpu/lane.c, src/run/hip_cpu_lane.c):
+  maya's miss path in our order. at a small step's routing the FFN inputs and weights come to the host with the
+  picks (no wait of their own); an expert neither resident nor in the pool goes to a pool of CPU threads
+  (cpu_lane_submit, before the GPU's launches): x to int8, gate and up and lane_swiglu, the activations to int8, down
+  - cpu_q8_round / cpu_q8_rows, the GPU's bits - straight from the model's files mapped read-only (madvise WILLNEED on
+  its three parts first), rows split over the workers (a spinning barrier between phases, a condition between jobs);
+  its rows into host memory the GPU maps, then a value posted. the stream runs the GPU's experts, waits on the value
+  (ops_wait: one thread, a system-scope acquire), copies the CPU's rows into ye (ops_copy_rows) and sums as before.
+  the expert's read into the pool begins too (held, not waited for), and the swaps now take the hottest of a layer's
+  streamed experts anywhere in the pool's GPU memory, held or not. tests: test_cpu_lane (CPU only: 1, 3 and 8 workers
+  the one thread's bits, two jobs, refusals; one weight an expert, a share's last row, the barrier before down - each
+  fails it), test_cpu_lane_gpu (the pool's rows the GPU lane's bits on three layers' real experts, both clamps; a
+  stream queued to wait before the job is given, then its copy the same bits), test_lane_gpu (20 layers at 12 GiB with
+  6 CPU threads: 640 of 1,656 streamed picks on the CPU, fingerprint 0ec6bd52a8c8bb8a - the GPU's; the CPU's rows'
+  weight wrong fails it).
+  measured (ranked, 106 GiB, interleaved fresh runs, the three questions, every stream the same bits):
+  - first wiring (the CPU's experts only wanted in the pool): 12 threads 17.5 / 16.6 / 14.9, 16.7 / 15.5 / 14.7, 8
+    threads 17.2 / 15.1 / 14.2, 16.5 / 15.0 / 14.0, against none 16.7 / 15.8 / 15.4, 16.5 / 15.6 / 15.5 - the misses
+    ~3x (the second question's streamed picks 2,934 against 1,262): a want seldom found room, so the hot ones never
+    reached the pool and the resident set stopped following the text.
+  - then (held, and the swaps' wider choice): the swaps alone, the GPU only, 16.7 / 15.6 / 15.3, 16.5 / 15.7 / 16.1
+    (15.98) against before 16.3 / 15.0 / 13.6, 16.5 / 15.6 / 15.7 (15.45; ~+1.5% without its 13.6) - kept; and 12 CPU
+    threads 17.0 / 15.4 / 15.0, 16.8 / 15.1 / 14.8 (15.68) - the first question a little faster, the others slower,
+    the misses still ~1.6x: an expert the CPU takes is still reading into the pool when its layer's swap is chosen,
+    so the set follows a step late. the CPU half stays opt-in (cpu_threads 0, the default, unchanged); what is
+    next for it is that lag (a swap's choice at the expert's next visit, or a read straight into the slot), not the
+    kernel.
 
 ## Engram's reads (measured, 2026-10-29)
 

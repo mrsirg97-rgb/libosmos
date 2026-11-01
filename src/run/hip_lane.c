@@ -3,6 +3,7 @@
 
 #include "forward_impl.h"
 #include "lane.h"
+#include "substrate/gpu/ops.h"
 #include "substrate/gpu/q8.h"
 
 /* forward_lane's small steps: the step's (token, routed expert) pairs in rows by expert (then token), each expert -
@@ -11,8 +12,6 @@
    each token's rows then summed in ascending expert id (ref.py's index_add order), the shared expert after. a row's
    sums are a token's alone */
 
-#define LANE_PAIRS OPS_MAX_EXPERTS                    /* a small step's pairs: fewer than a layer's experts */
-#define LANE_ROWS (LANE_PAIRS + MV_MAX_TOKENS)        /* the rows' buffers: an entry's rows past it read, not used */
 
 /* the tables a step sends, laid out in lane_up (pinned) and lane_dev alike */
 typedef struct LaneTabs
@@ -21,12 +20,13 @@ typedef struct LaneTabs
   int32_t cnt[LANE_PAIRS], xrow[LANE_PAIRS];
   int32_t tok[LANE_PAIRS], pair[LANE_PAIRS]; /* a row's token, and its pair (the router's order) */
   int32_t order[LANE_PAIRS];                 /* each token's rows in ascending expert id */
+  int32_t cpu_row[LANE_PAIRS];               /* the rows the CPU computes (the lane's CPU half) */
 } LaneTabs;
 
 bool forward_lane(Forward *f, int cpu_threads, char err[FORWARD_ERR])
 {
-  if (!f || cpu_threads != 0)
-    return fwd_fail(err, "no forward, or CPU threads (the GPU's half only, so far)");
+  if (!f || cpu_threads < 0 || cpu_threads > CPU_LANE_THREADS_MAX)
+    return fwd_fail(err, "no forward, or a count of CPU threads it does not take");
   const uint64_t D = f->g->n_embd;
   if (!f->lane_up &&
       (hipHostMalloc((void **)&f->lane_up, sizeof(LaneTabs), 0) != hipSuccess ||
@@ -34,6 +34,8 @@ bool forward_lane(Forward *f, int cpu_threads, char err[FORWARD_ERR])
        !fwd_alloc(&f->lane_w, LANE_ROWS * sizeof(float)) || !fwd_alloc(&f->lane_q, LANE_ROWS * D) ||
        !fwd_alloc(&f->lane_qd, LANE_ROWS * (D / LANE_Q8_VALUES) * sizeof(float))))
     return fwd_fail(err, "memory refused (the lane's tables)");
+  if (cpu_threads && !f->cpu && !fwd_cpu_create(f, cpu_threads, err))
+    return false;
   f->lane = true, f->lane_threads = cpu_threads;
   return true;
 }
@@ -57,17 +59,34 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
   for (uint32_t m = 0; m < picks; m++)
     rows[m][0] = ids[m], rows[m][1] = (int32_t)m;
   qsort(rows, picks, sizeof *rows, cmp_row);
-  uint32_t ne = 0, row_of[LANE_PAIRS];
+  /* an expert's rows: the CPU's (fwd_moe marked it this visit) one entry of them all, the GPU's entries of at most
+     MV_MAX_TOKENS */
+  uint32_t ne = 0, nc = 0, n_cpu = 0, row_of[LANE_PAIRS];
+  bool on_cpu = false;
   for (uint32_t r = 0; r < picks; r++)
   {
     const int32_t m = rows[r][1];
     t->tok[r] = m / (int32_t)K, t->pair[r] = m, row_of[m] = r;
-    if (r && rows[r][0] == rows[r - 1][0] && (uint32_t)t->cnt[ne - 1] < MV_MAX_TOKENS)
+    const bool same = r && rows[r][0] == rows[r - 1][0];
+    if (same && on_cpu)
+    {
+      f->cpu_e[nc - 1].cnt++, t->cpu_row[n_cpu++] = (int32_t)r;
+      continue;
+    }
+    if (same && (uint32_t)t->cnt[ne - 1] < MV_MAX_TOKENS)
     {
       t->cnt[ne - 1]++;
       continue;
     }
     const uint32_t u = (uint32_t)l * E + (uint32_t)rows[r][0];
+    if ((on_cpu = f->cpu && f->on_cpu[u] == f->visits))
+    {
+      const void *part[POOL_PARTS];
+      fwd_cpu_parts(f, u, part);
+      f->cpu_e[nc] = (CpuLaneExpert){part[0], part[1], part[2], r, 1}, f->cpu_unit[nc++] = u;
+      t->cpu_row[n_cpu++] = (int32_t)r;
+      continue;
+    }
     const void *ex[POOL_PARTS];
     if (!(f->rix[u] >= 0 ? resident_dev(f->res, (size_t)f->rix[u], ex) : fwd_pinned(f, u, ex, err)))
       return err[0] ? false : fwd_fail(err, "an expert not in GPU memory");
@@ -101,6 +120,9 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
       const int32_t cc = t->cnt[c], xr = t->xrow[c];
       t->cnt[c] = t->cnt[c - 1], t->xrow[c] = t->xrow[c - 1], t->cnt[c - 1] = cc, t->xrow[c - 1] = xr;
     }
+  /* the CPU's experts given first: its threads run while the GPU runs the others */
+  if (nc && !fwd_cpu_submit(f, l, picks, nc, t->tok, t->pair, err))
+    return false;
   const LaneTabs *d = (const LaneTabs *)f->lane_dev;
   bool ok = fwd_put_async(f->lane_dev, f->lane_up, sizeof(LaneTabs)) &&
             ops_gather_rows(f->lane_x, b->xf, d->tok, picks, D, NULL) &&
@@ -141,6 +163,9 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
             : mv_group_tok(L->exp_down->type, d->w[2] + a, d->cnt + a, d->xrow + a, z - a, c, D, FF, b->hh, FF,
                            b->ye, D, NULL);
   }
+  /* the CPU's rows: the stream waits for their post, then takes them into ye beside the GPU's */
+  ok = ok && (!nc || (ops_wait(f->cpu_seq_dev, f->cpu_value, NULL) &&
+                      ops_copy_rows(b->ye, f->cpu_y_dev, d->cpu_row, n_cpu, D, NULL)));
   ok = ok && ops_gather_sum_add(b->moe, b->ye, d->order, K, n, D, b->sye, NULL);
   return ok || fwd_fail(err, "a GPU call failed (the lane's experts)");
 }

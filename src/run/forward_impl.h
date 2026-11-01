@@ -13,6 +13,7 @@
 #include "substrate/mem/pool.h"
 #include "substrate/mem/resident.h"
 #include "substrate/mem/rowread.h"
+#include "substrate/cpu/lane.h"
 #include "substrate/gpu/mm.h"
 #include "substrate/gpu/quant.h"
 #include "substrate/gpu/mv.h"
@@ -28,6 +29,8 @@
 #define FWD_MAX_STEP FORWARD_MAX_TOKENS             /* the experts' tokens: a layer's every sub-batch at once */
 #define FWD_MAX_PAIRS (FWD_MAX_BATCH * OPS_MAX_TOPK) /* a sub-batch's (token, routed expert) pairs */
 #define FWD_MAX_GROUPS 64                           /* a layer's wo_a groups */
+#define LANE_PAIRS OPS_MAX_EXPERTS             /* a small step's pairs (the lane's): fewer than a layer's experts */
+#define LANE_ROWS (LANE_PAIRS + MV_MAX_TOKENS) /* the lane's rows' buffers: an entry's rows past it read, not used */
 /* the resident set's following of the text (hip_adapt.c): an expert's heat halved every this many steps; a streamed
    one takes a resident one's place when this much hotter; at most this many a layer a step (each a copy in GPU
    memory) */
@@ -158,6 +161,21 @@ struct Forward
   float *lane_x, *lane_w; /* a small step's rows' FFN inputs and weights, gathered by expert */
   int8_t *lane_q;         /* those rows (then their activations) to int8 (q8_round), and their blocks' scales */
   float *lane_qd;
+  /* the lane's CPU half (hip_cpu_lane.c; lane_threads > 0): the experts of a small step that are not in GPU memory
+     computed by a pool of threads from the model's files mapped read-only, their rows handed back in host memory the
+     GPU maps, cpu_seq posted with cpu_value when they are there (the stream waits on it) */
+  CpuLane *cpu;
+  CpuLaneExpert cpu_e[LANE_PAIRS]; /* the job's experts (the pool reads them till it posts) */
+  uint32_t cpu_unit[LANE_PAIRS];   /* and their units */
+  const uint8_t *map[FWD_MAX_FILES];
+  uint64_t map_len[FWD_MAX_FILES];
+  float *cpu_xf, *cpu_rw;  /* pinned: a small step's FFN inputs and routing weights, copied with its picks */
+  float *cpu_x, *cpu_w;    /* the job's rows (the lane's: by expert) and their weights */
+  float *cpu_y, *cpu_y_dev;          /* host memory the GPU maps: the job's rows out, the lane's rows */
+  uint32_t *cpu_seq, *cpu_seq_dev;   /* and the job's posted value */
+  uint32_t cpu_value;
+  uint64_t *on_cpu;        /* a unit's last visit computed on the CPU (the visit it is picked in: this one) */
+  uint64_t cpu_picks;      /* the routed picks the CPU has computed */
   uint8_t *stage; /* pinned: the Engram rows, [sub-batch][Engram layer][token]: a sub-batch's copy may still be
                      queued when the next one's rows are read (a layer's sub-batches run to its experts unwaited) */
   int n_eg;       /* the Engram layers (stage's) */
@@ -266,6 +284,16 @@ void fwd_guess_score(Forward *f, int l, const int32_t *ids, uint32_t picks);
 bool fwd_swap_layer(Forward *f, int l, char *err); /* a layer's experts queued: its streamed ones' swaps in */
 /* hip_lane.c: a small step's routed experts in the matvec's order (forward_lane), into b->moe (the shared one added) */
 bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, char *err);
+/* hip_cpu_lane.c: the CPU half's pool, maps and buffers (forward_lane), their end; whether a small step's unit goes to
+   the CPU (not in GPU memory: neither resident nor read into the pool); a unit's parts in the mapped files */
+bool fwd_cpu_create(Forward *f, int threads, char *err);
+void fwd_cpu_destroy(Forward *f);
+bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks);
+void fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]);
+/* the layer's CPU experts (cpu_e, cpu_unit: nc of them, their rows among the step's picks rows by expert, row r's
+   token tok[r] and pair pair[r]) given to the pool, cpu_value its post */
+bool fwd_cpu_submit(Forward *f, int l, uint32_t picks, uint32_t nc, const int32_t *tok, const int32_t *pair,
+                    char *err);
 void fwd_heat(Forward *f);                          /* a step's end: its picks into the heat */
 
 #endif

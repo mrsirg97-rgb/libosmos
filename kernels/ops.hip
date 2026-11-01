@@ -453,6 +453,26 @@ __global__ void copy_kernel(uint4* dst, const uint4* src, uint64_t words, uint8_
     dst_tail[i - words] = src_tail[i - words];
 }
 
+// one thread until *flag (host memory the GPU maps) holds value, or value with its top bit (the poster's failure):
+// a system-scope acquire, so what the host wrote before it is seen by the kernels after
+__global__ void wait_kernel(const uint32_t* flag, uint32_t value) {
+  constexpr uint32_t kFailed = 0x80000000u;
+  constexpr int kNap = 2;  // s_sleep's units (64 clocks each) between looks
+  for (;;) {
+    const uint32_t v = __hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
+    if ((v & ~kFailed) == value) break;
+    __builtin_amdgcn_s_sleep(kNap);
+  }
+}
+
+// rows idx[0 .. n) of src copied to the same rows of dst (len floats a row)
+__global__ void copy_rows_kernel(float* dst, const float* src, const int32_t* idx, uint32_t n, uint32_t len) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n * len) return;
+  const uint64_t at = (uint64_t) idx[i / len] * len + i % len;
+  dst[at] = src[at];
+}
+
 __global__ void add_kernel(float* y, const float* a, uint64_t n) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) y[i] += a[i];
@@ -678,5 +698,18 @@ extern "C" bool ops_copy(void* dst, const void* src, uint64_t bytes, void* strea
   copy_kernel<<<grid(words + tail), kThreads, 0, st(stream)>>>((uint4*) dst, (const uint4*) src, words,
                                                                 (uint8_t*) dst + words * kWord,
                                                                 (const uint8_t*) src + words * kWord, tail);
+  return ok();
+}
+
+extern "C" bool ops_wait(const uint32_t* flag, uint32_t value, void* stream) {
+  if (!flag) return false;
+  wait_kernel<<<1, 1, 0, st(stream)>>>(flag, value);
+  return ok();
+}
+
+extern "C" bool ops_copy_rows(float* dst, const float* src, const int32_t* idx, uint32_t n, uint32_t len,
+                              void* stream) {
+  if (!dst || !src || !idx || !n || !len) return false;
+  copy_rows_kernel<<<grid((uint64_t) n * len), kThreads, 0, st(stream)>>>(dst, src, idx, n, len);
   return ok();
 }

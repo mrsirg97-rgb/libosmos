@@ -49,6 +49,7 @@ const float *forward_logits(const Forward *f);
 const uint64_t *forward_picks(const Forward *f);
 uint64_t forward_swaps(const Forward *f);
 void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed);
+uint64_t forward_cpu_picks(const Forward *f);
 
 #endif
 
@@ -123,7 +124,10 @@ forward_lane
   activation) - the order the CPU repeats, so an expert gives the same bits on either, and which one runs it, or
   whether it is resident, changes none. a prompt's steps keep the matmul's (WMMA): in this mode a token's bits
   depend on whether its step was small (determinism's rule 2 relaxed there; rule 1 kept). cpu_threads 0: every
-  expert on the GPU. false with why for a count it does not take.
+  expert on the GPU. cpu_threads > 0 (at most CPU_LANE_THREADS_MAX; a CPU with AVX-512 VNNI): a small step's experts
+  not in GPU memory (neither resident nor in the pool) are computed by that many CPU threads from the model's files
+  (substrate/cpu/lane.h: the GPU's bits), while the GPU runs the others; it waits for their rows before the sum. false
+  with why for a count it does not take.
 
 forward_step
   forward_batch of one: the token at the sequence's next position through the layers; the stream out in
@@ -156,6 +160,9 @@ forward_guesses
   in steps that pick fewer experts than a layer has (a decode's, a verify's): the picks of experts not resident so
   far, and of them those guessed a layer ahead - each layer's next experts guessed by the next layer's router on its
   own FFN input and their reads begun then, under the layer's experts and the next one's attention.
+
+forward_cpu_picks
+  the routed picks the lane's CPU half has computed (forward_lane's cpu_threads; 0 without it).
 
 forward_stream
   the device buffer of the last step's stream out ([n][hc][n_embd] F32) - the last sub-batch's rows, for a batch

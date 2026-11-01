@@ -3,13 +3,13 @@
 #include "forward_impl.h"
 
 /* the resident set follows the text. each expert's heat is its picks, halved every FWD_HEAT_HALF_LIFE steps (a
-   step's own counted in it as they come). when a layer's experts have been queued, the hottest one the layer
-   streamed (held in the pool, its bytes in GPU memory) takes the place of the layer's coldest resident one not
-   picked in the step, when it is hotter by FWD_SWAP_MARGIN: its bytes copied into that one's memory on the stream,
-   behind the layer's kernels (ops_copy: a kernel - hipMemcpyAsync took the pool's memory for the host's and its copy
-   engine left the GPU idle ~0.45 ms a swap) - nothing before reads the cold one, everything after takes the new places. at most
-   FWD_SWAPS_A_LAYER a layer a step. a layer's experts are one size (the same tensors' slices). which experts are
-   resident changes no bit */
+   step's own counted in it as they come). when a layer's experts have been queued, the hottest of the layer's
+   streamed ones in the pool's GPU memory (held, or read and kept - a CPU-lane expert's read, done since) takes the
+   place of the layer's coldest resident one not picked in the step, when it is hotter by FWD_SWAP_MARGIN: its bytes
+   copied into that one's memory on the stream, behind the layer's kernels (ops_copy: a kernel - hipMemcpyAsync took
+   the pool's memory for the host's and its copy engine left the GPU idle ~0.45 ms a swap) - nothing before reads
+   the cold one, everything after takes the new places. at most FWD_SWAPS_A_LAYER a layer a step. a layer's experts
+   are one size (the same tensors' slices). which experts are resident changes no bit */
 
 static double heat_now(const Forward *f, uint32_t u)
 {
@@ -24,11 +24,10 @@ bool fwd_swap_layer(Forward *f, int l, char *err)
   {
     uint32_t in = UINT32_MAX, out = UINT32_MAX;
     double h_in = 0, h_out = INFINITY;
-    for (uint32_t k = 0; k < f->n_held; k++) /* the layer's streamed experts, held */
+    for (uint32_t u = lo; u < lo + E; u++) /* the layer's streamed experts in GPU memory, held or not */
     {
-      const uint32_t u = f->held[k];
-      const double h = heat_now(f, u);
-      if (u >= lo && u < lo + E && f->rix[u] < 0 && h > h_in)
+      const double h = f->rix[u] < 0 && pool_state(f->pool, u) == POOL_PINNED ? heat_now(f, u) : 0;
+      if (h > h_in)
         in = u, h_in = h;
     }
     for (uint32_t u = lo; in != UINT32_MAX && u < lo + E; u++)
@@ -41,6 +40,12 @@ bool fwd_swap_layer(Forward *f, int l, char *err)
     if (out == UINT32_MAX || !(h_in > FWD_SWAP_MARGIN * h_out))
       return true;
     const void *src[POOL_PARTS], *dst[POOL_PARTS];
+    if (!f->is_held[in]) /* held for the copy: released with the layer's others, the stream past it */
+    {
+      if (pool_pin(f->pool, in, src) != POOL_OK)
+        return fwd_fail(err, "a swap's expert not in GPU memory");
+      f->held[f->n_held++] = in, f->is_held[in] = true;
+    }
     if (!pool_dev(f->pool, in, src) || !resident_dev(f->res, (size_t)f->rix[out], dst))
       return fwd_fail(err, "a swap's expert not in GPU memory");
     for (int p = 0; p < f->units[in].n_parts; p++)
