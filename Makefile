@@ -48,6 +48,8 @@ $(OBJ_DIR)/cpu/%.o: override CFLAGS += -ffp-contract=off -mavx2 -mfma -mf16c -I$
 # test_cpu_q8's and test_cpu_lane's replays of lane.h's contract: their products each rounded, as the kernels'
 $(BIN_DIR)/test_cpu_q8: override CFLAGS += -ffp-contract=off -I$(KERNEL_DIR)
 $(BIN_DIR)/test_cpu_lane: override CFLAGS += -ffp-contract=off -I$(KERNEL_DIR)
+# test_qtype: the lane contract's ids (lane.h)
+$(BIN_DIR)/test_qtype: override CFLAGS += -I$(KERNEL_DIR)
 
 # the host code that calls the HIP runtime (hip_*.c): its headers
 $(HIP_OBJS): CFLAGS += -I$(ROCM)/include -D__HIP_PLATFORM_AMD__ -Isrc/run -I$(KERNEL_DIR)

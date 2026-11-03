@@ -1120,6 +1120,192 @@ HTTP API, and the reference is measured through the same harness:
   <finish> ... <reused>` (field 9), `ERR <rid> <reason>`; `STAT` / `NOTE` / `INFO` / `VRAM` lines.
 - the exact field list is taken from maya's `ds4_main.cpp` at schema time.
 
+## UD-IQ1_M: the repack (inventory, 2026-11-02)
+
+the operator's call: run unsloth's `DeepSeek-V4.1-Flash-1017-GGUF` UD-IQ1_M, a better quant at about the same size.
+maya's scorer puts it at **KLD 0.198, 90.3% the same top token** as the original (`maya.py`, its `gguf-iq1_m` text;
+the scale of its Q8 0.047, UD-IQ3_S 0.061, Maya-S 0.119). GSQ-RCO has no number on that scale: **the gap is
+unmeasured**. the first step is both through the oracle on the same tokens (`compare.py`: KL, top-1), before any kernel.
+
+read from the 5 shards' tensor directories and metadata only (`~/Models/ds1017/UD-IQ1_M`, shards 2-5 mid-download;
+a GGUF's directory is at its start, no tensor data read). nothing was run.
+
+### what changes
+
+| part | GSQ-RCO (built for) | UD-IQ1_M | here |
+| --- | --- | --- | --- |
+| experts gate / up | IQ1_M 16, IQ2_XXS 17, IQ2_XS 7 | **IQ1_S 20**, IQ2_XXS 18, IQ2_XS 2 | IQ1_S new |
+| experts down | IQ1_M 28, IQ2_XXS 8, IQ2_XS 4 | IQ2_XXS 15, **IQ2_S 10**, IQ2_XS 10, **IQ1_S 5** | IQ2_S, IQ1_S new |
+| shared experts | | Q8_0 (27 layers), Q5_K (13) | have |
+| attention q / kv / output, head | | Q6_K | have |
+| compressors, indexer | BF16 | BF16 | have |
+| embedding | Q5_K | Q8_0 | have |
+| Engram tables | `engram_embd` a layer, IQ4_NL, own GGUF | one `per_layer_token_embd` [256, 768,022,850], IQ4_NL, in the backbone | the slicing new |
+| Engram kv | `engram_wkv` Q5_K | `engram_kv` [6144, 25600] Q6_K | have (the name new) |
+| Engram gate | `engram_q`, `engram_k` BF16 | `engram_gate` [5120, 4] F32, q·k folded | the folded form new |
+| Engram hash | I32 / I64 tensors | `ple.*` metadata | the reader new |
+| DSpark | maya's pack | not in the files (40 blocks; `dspark.*` metadata only) | maya's pack, as now |
+
+despite the name there is **no IQ1_M** in it: its 1-bit experts are IQ1_S.
+
+**the sizes**: experts 132.2 GB (IQ2_XXS 59.6, IQ1_S 39.8, IQ2_XS 18.3, IQ2_S 14.5), against GSQ-RCO's ~132 GB; the
+Engram tables 110.6 GB (768,022,850 rows of 144 B), as before. the budget picture is unchanged in total; per layer it
+is not, so the pick profile and the budget numbers do not carry over.
+
+### the work, by part
+
+1. **IQ1_S** (`block_iq1_s`: f16 `d`, `qs[32]`, `qh[8]` u16; 50 B a block of 256, 1.5625 bpw). `qh` carries a group
+   of 32's high index bits (3 for each 8), its 3-bit scale (`d * (2s + 1)`) and the delta's sign. the grid is
+   `kIq1sGrid`, already generated (`tools/gen_grids.py` asserts IQ1_M and IQ1_S share it). the lane's contract
+   (`kernels/lane.h`) extends as IQ1_M's: integer dot products on the grid's values, the delta as a separate term,
+   one scale a group of 32 instead of IQ1_M's packed ones. three places, as every expert type: the GPU decoder
+   (`kernels/quant.h`), the int8 expert kernels (`mm`, `q8`), the CPU lane (`src/cpu/expert.c`).
+2. **IQ2_S** (`block_iq2_s`: f16 `d`, `qs[64]`, `qh[8]`, `scales[8]`; 82 B, 2.5625 bpw). `qs`'s first 32 bytes are the
+   index's low 8 bits, the last 32 the **signs, stored** (not `kKsigns`); `qh` 2 high bits for each 8; a 4-bit scale
+   for each 16. its grid is its own: `kIq2sGrid` (1024 entries) to add to `gen_grids.py`; its values are the other
+   IQ2s' (0x08 / 0x19 / 0x2b). the same three places.
+3. **the metadata's spelling.** 17 keys `weights_geo.c` reads are not in this file:
+   `attention.candidate_{block_size,source_layer_id,topk_blocks}`, `dspark_target_layer_ids`,
+   `{index,kv}_source_layer_ids`, `expert_scoring_func`, `engram.{present,file,source,layer_ids,num_embeddings}`,
+   `engram_{compressed_vocab_size,head_dim,max_ngram_size,n_heads,pad_token_id}`. most are llama.cpp's newer names
+   for the same values (maya's `pack_gguf.py` `NEWER_KEYS` maps them: `attention.indexer.candidate_source_layer`,
+   `attention.kv_source_layers`, `dspark.target_layers`, ...). one geometry, two spellings read into it at the load
+   seam - not a second geometry.
+   - `expert_scoring_func` "sqrtsoftplus" is absent; the file has `expert_gating_func = 4`. **checked** (2026-11-03):
+     llama.cpp's `llama_expert_gating_func_type` at `272aad8b` (maya's vendored ref) has `SQRT_SOFTPLUS = 4`
+     (`src/llama-hparams.h`). the gating func is the field read; the scoring text, where present, must agree; any other
+     value refuses.
+   - the Engram hash from `ple.*` (maya's `ple_to_engram`): `ple.layers` [1, 14], `ple.ngram_size` 4,
+     `ple.heads_per_ngram` 8, `ple.layer_multipliers` (8: 2 layers x 4), `ple.head_vocab_sizes` (the primes, 48: 2
+     layers x 24 columns), `ple.head_offsets` counted **across** both layers' tables (a layer's own: minus its first).
+     a layer's rows: its last offset + last size - its first offset; head_dim from `embedding_length_per_layer_input`
+     (256). `engram.token_map` (129,280 ids), `engram.pad_token_id` 2, `engram.compressed_vocab_size` 99,092 are
+     metadata, not tensors. **checked against `engram_hash.py`'s derivation** (`10007 * layer` seeds, primes above
+     `engram.vocab_size - 1`): the 8 multipliers equal, the primes' first 6 equal, the derived rows 384,006,168 +
+     384,016,682 = 768,022,850, the tensor's. the reader checks the same at load: a mismatch refuses.
+   - `engram.file` / `engram.source`: there is no second file; the tables are the backbone's.
+4. **the Engram tables in one tensor.** each layer's table is a row range of `per_layer_token_embd`, the layers' in
+   `ple.layers` order (maya's `split_ple`: the same bytes, read in place). `rowread.h` reads in place already; only a
+   layer's base offset changes. the layers' rows must sum to the tensor's 768,022,850, or the load refuses.
+5. **the folded gate.** `engram_gate` is q·k as F32. a product of two BF16 values is exact in F32 (8-bit
+   significands, 16-bit product), so if the converter multiplied in F32 the folded weight is GSQ-RCO's q·k bit for
+   bit - **unverified** (no GSQ-RCO file on this unit). whether the old bits carry over also depends on the kernel's
+   order (`h·q·k` as `(h·q)·k` rounds differently from `h·(q·k)`). either way the guarantee is a model's own and holds.
+6. **DSpark** is not in the GGUF: `dspark.bin` / `dspark.json` from maya's pack, as now. correctness does not depend
+   on it (every draft is verified); its acceptance on this backbone is to measure.
+7. **the pick profile** recounted (`forward_picks` on the calibration text) and the budget re-measured.
+8. **the oracle.** gguf-py decodes IQ1_S and IQ2_S (`quants.py`), so `ref_gguf.py`'s weights are covered; its
+   `# substrate:` fixes need the UD spellings: embedding Q8_0, the gate folded, the tables sliced from
+   `per_layer_token_embd`. a new reference dump for `test_model_gpu`.
+9. **the paths.** the tests look in `~/models/ds1017`; the files are in `~/Models/ds1017/UD-IQ1_M`.
+
+### the order
+
+1. the quality, measured (the oracle, both quants, the same tokens) - it decides whether the rest is worth doing.
+2. schema: the geometry read from either spelling; the two types' ids in the type tables.
+3. tests that fail first: IQ1_S and IQ2_S decoded against gguf-py on real blocks, with mutations (a sign bit, the
+   delta's sign, a scale nibble) that must fail them; the CPU lane's bits equal the GPU's for both; the geometry read
+   from the UD file equal to a hand-written one; the Engram row ranges' sum checked; the fingerprints across batching,
+   budget, drafting and CPU / GPU on the new model.
+4. the kernels, then the numbers against maya on this file (maya runs it: `--ds4-quant gguf-iq1_m`).
+
+### the box
+
+this is the second unit: **all 16 cores online** (the protocol's "core 1 offline" was the first unit's). the bar is
+re-measured here before any comparison.
+
+## another pack, another model: what to generalize (plan, 2026-11-03)
+
+the operator's question: does a second quant pack (UD-IQ1_M, the Coder) or a second model (GLM-5.3, `ox-alpha`) need
+the code generalized first. the answer: the quant types yes, the model no.
+
+### what a second pack touches today
+
+- **a type is spelled four times**: weights.c's enum, `quant::k*` (`kernels/quant.h`), `GGUF_*` (`src/cpu/expert.c`),
+  `LANE_Q8_*` (`kernels/lane.h`). 15 `switch` on a type (`mm.hip` 4, `mv.hip` 3, `quant.hip` 3, `q8.hip` 2, `ops.hip`
+  1, `src/cpu/expert.c` 1, `src/cpu/q8.c` 1); four lists of what a path takes (`mm_known`, `quant_known`,
+  `cpu_mv_known`, `lane_q8_type`); block bytes written inline (`src/cpu/q8.c`: 66 / 74 / 56). a new type is edits in
+  about a dozen files, and nothing says one was missed.
+- **roles pin GSQ-RCO's types**, not what the kernels run: `token_embd` Q5_K, `attn_output_b` Q6_K, experts
+  `IQ1_M|IQ2_XXS|IQ2_XS`. UD's embedding is Q8_0 and the Coder's `attn_output_b` Q5_K: each refused, on a type every
+  path already runs.
+- **the metadata has one spelling** (`deepseek41.*` as maya's pack writes it).
+- the expert count is metadata everywhere (`OPS_MAX_EXPERTS` 1024): 192 needs nothing.
+- `mem/`, the kernels and the lane name DeepSeek only in comments.
+
+### the plan
+
+1. **one type table.** each ggml type this build runs, once: its id, a block's elements and bytes, the paths that take
+   it (GPU decode, matvec, int8 matmul, the CPU lane). the four enums, the known-lists and the inline sizes become
+   projections of it; a test fails when a path the table names has no case for a type. a pure refactor: the
+   fingerprints before and after equal, the proof nothing moved.
+2. **roles by capability.** a role names the path it is read by (dense matvec, an expert's int8 matmul, an Engram row
+   read) and the shape; the loader takes any type the table gives that path. a type no path takes still refuses, the
+   role and the type named. shapes stay pinned.
+3. **one geometry, two spellings.** an alias table at the load seam: maya's names and llama.cpp's newer ones for each
+   field. read once; both present and unequal refuses; derived values (the Engram vocab sizes, a layer's rows)
+   computed and checked against the file's, as the UD section's item 3.
+4. **the model stays one.** no model interface until a second model is built. GLM-5.3 (`glm5-next`: 34 KDA
+   linear-attention layers, 12 MLA + indexer, 288 experts top-8 sigmoid, nextn MTP, no Engram) would share the type
+   table, the memory and the expert kernels, not the forward pass; an interface drawn now, from one model, would be
+   drawn wrong. what is free now: the DeepSeek-specific code under one name (`model/deepseek41/` when it moves), the
+   gating function a geometry field rather than a constant in the router.
+
+### the Coder first (read 2026-11-03, download complete)
+
+`Abiray/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-Coder-GGUF`, `~/Models/ds1017-coder`: 192 experts (pruned), 6
+used; backbone shards 1-5 72.1 GB, Engram shard 6 110.6 GB, an mmproj (not read).
+
+| part | the Coder | needs |
+| --- | --- | --- |
+| experts | IQ1_M / IQ2_XXS / IQ2_XS, GSQ-RCO's mix | nothing new |
+| metadata | llama.cpp's newer spelling (`attention.kv_source_layers`, `attention.indexer.source_layers`, `attention.indexer.candidate_{source_layer,top_k_blocks,block_size}`); gating func 4, no scoring text; the hash in `ple.*` | plan 3 |
+| Engram tables | one `per_layer_token_embd` IQ4_NL [256, 768,022,850] in shard 6, as UD's | UD item 4 |
+| Engram gate / kv | `engram_gate` F32 [5120, 4] folded; `engram_kv` Q5_K (UD's Q6_K) | UD item 5 |
+| `attn_output_b` | Q5_K (pinned Q6_K) | plan 2 |
+| `exp_probs_b_vl.bias` | F32 [192], all 40 layers (UD has it too) | a role, checked, not read |
+
+`exp_probs_b_vl` is the router's bias for image tokens: llama.cpp's `deepseek41.cpp` uses it only for a batch of
+embeddings. this build runs text, so it is a role whose shape is checked and whose bytes are never read, not an
+exception to "a tensor this build does not know".
+
+the Coder is UD's items 3-5 without items 1-2: the half of the repack that needs no kernel, on a model whose
+backbone fits in GPU memory whole. UD then adds IQ1_S and IQ2_S to a load path already proven. its quality is as
+unmeasured as UD's: pruned to 192 experts, it goes through the oracle the same way.
+
+### the order, revised (operator, 2026-11-03)
+
+the operator's call: **UD-IQ1_M first** (the quant most people want), **the GSQ-RCO path kept**. the Coder is off this
+box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model test skips here, exit 77). so:
+
+- **the GSQ-RCO path is kept, not proven end to end here.** its types stay in the table; the CPU tests (each type's
+  bits on generated blocks: `test_cpu_q8`, `test_cpu_lane`) and the GPU kernel tests that need no model hold it. its
+  fingerprints wait for its files (ISTA-DASLab `cb02422c`, 249 GB, a download the operator has not asked for). said,
+  not assumed: a refactor here is proven by the kernel tests, not by the model's fingerprints.
+- **UD-IQ1_M is proven against the oracle and maya**, as the UD section's order: gguf-py decodes IQ1_S and IQ2_S
+  (the oracle's weights), maya runs this file (`maya-ds4-hip.json`, its dumps the bar and the sanity check).
+
+1. schema: the type table (`include/substrate/model/qtype.h`): each type once, its id, a block's values and bytes, the
+   paths that read it. tests: each path the table names takes the type (a GPU call on a block of it is not refused),
+   and every table today agrees with it - a mutation (a path named, its case removed) must fail them.
+2. the projection: `gguf.c`'s sizes, `weights.c`'s enum and masks, `quant::Type`, the lane's and the CPU's ids, the
+   known-lists from the table. the kernel tests unchanged, the CPU lane's bits unchanged.
+3. IQ1_S and IQ2_S: rows in the table, then their decoders against gguf-py on real blocks of the UD file, the lane's
+   contract for both, the CPU lane's bits the GPU's.
+4. the UD file's load: roles by path, the alias table, the Engram slices, the folded gate, `exp_probs_b_vl`.
+5. the oracle and maya: the logits within maya's spread, then the numbers.
+
+### the order (before 2026-11-03, kept for the record)
+
+1. the type table and roles by capability: the pure refactor, fingerprints equal on the current GSQ-RCO pack.
+2. schema: the alias table; the Engram slices of one tensor; the folded gate; the `exp_probs_b_vl` role.
+3. tests that fail first: the Coder's geometry read equal to a hand-written one; each alias conflict refuses; a role
+   given a type no path takes refuses; a table type with a path missing its case fails; the slices' rows summed
+   against the tensor's.
+4. the Coder loaded and generating; the fingerprints across batching, budget and CPU / GPU on it; the oracle.
+5. UD-IQ1_M: IQ1_S, IQ2_S and the rest, as the UD section's order. its quality measurement (that order's step 1)
+   waits on none of this.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.
@@ -1127,9 +1313,8 @@ HTTP API, and the reference is measured through the same harness:
 ## the protocol (carried from #356 / #557 / #587)
 
 - every claim is a measured number on this box, with the command that reproduces it, and the box's state with it:
-  today **core 1 (cpus 1, 17) offline** (idle MCE errors), 15 of 16 cores. its cost is expected small (decode and
-  prompt are GPU- and memory-bound; maya's CPU lane takes 0.2-1.7% of the experts) and **unmeasured**: a fixed unit is
-  re-measured on the same commands.
+  today the second unit, **all 16 cores online**. the first unit ran with core 1 (cpus 1, 17) offline for idle MCE
+  errors; its numbers are that box's, and are re-measured here on the same commands before any comparison.
 - same binary, one switch off and on, alternating runs, at least two each; the run-to-run spread is measured and
   reported, not assumed.
 - latency: first token and turn done at mean / p50 / p95, and wall. throughput: prompt tok/s at 2K / 8K / 32K, decode
