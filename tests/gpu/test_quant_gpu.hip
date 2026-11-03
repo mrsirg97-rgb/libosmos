@@ -1,16 +1,19 @@
-// the weights' types decoded on the GPU against gguf-py's values, every float bit for bit: ds1017's own blocks (a
-// tensor of each type: its start, a middle, its end) and random ones (oracle/dequant_ref.py writes them to
-// ~/substrate-oracle/dequant). needs a gfx1151 and those files; skipped (77) without them.
+// the weights' types decoded on the GPU against gguf-py's values, every float bit for bit: a model's own blocks (the
+// first tensor of each type: its start, a middle, its end) and random ones (oracle/dequant_ref.py --model writes them
+// to ~/substrate-oracle/dequant). every type the table decodes that has a file; the others named. needs a gfx1151 and
+// at least one file; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 extern "C" {
 #include "substrate/gpu/quant.h"
+#include "substrate/model/qtype.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -20,6 +23,8 @@ extern "C" {
       std::exit(1);                                                              \
     }                                                                            \
   } while (0)
+
+constexpr uint32_t kSweep = 256;  // past every ggml type id, as test_qtype's
 
 struct Ref {
   uint32_t type = 0;
@@ -95,7 +100,6 @@ static void check(const char* name, const Ref& r) {
 
 int main() {
   std::printf("[test_quant_gpu] start\n");
-  static const char* kTypes[] = {"Q8_0", "Q5_K", "Q6_K", "IQ2_XXS", "IQ2_XS", "IQ1_M", "IQ4_NL", "BF16", "MXFP4"};
   const char* home = std::getenv("HOME");
   int ndev = 0;
   if (hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
@@ -107,18 +111,30 @@ int main() {
   CHECK(!quant_dequant(13, nullptr, 100, nullptr, nullptr) && !quant_dequant(30, nullptr, 9, nullptr, nullptr));
   CHECK(!quant_dequant_f16(0, nullptr, 8, nullptr, nullptr) && !quant_dequant_f16(16, nullptr, 100, nullptr, nullptr));
   std::printf("  refusals: F32 and unknown types, values not whole blocks\n");
+  // every type the table decodes; each with a reference file checked, the others named (a model holds some types)
   uint64_t total = 0;
-  for (const char* t : kTypes) {
+  int checked = 0;
+  std::string missing;
+  for (uint32_t id = 0; id < kSweep; id++) {
+    const QTypeInfo* t = qtype_info(id);
+    if (!t || !(t->paths & QTYPE_DECODE)) continue;
     char path[512];
-    std::snprintf(path, sizeof path, "%s/substrate-oracle/dequant/%s.bin", home ? home : "", t);
+    std::snprintf(path, sizeof path, "%s/substrate-oracle/dequant/%s.bin", home ? home : "", t->name);
     Ref r;
     if (!load(path, &r)) {
-      std::printf("[test_quant_gpu] skipped: no %s (oracle/dequant_ref.py)\n", path);
-      return 77;
+      missing += std::string(" ") + t->name;
+      continue;
     }
-    check(t, r);
+    CHECK(r.type == id);
+    check(t->name, r);
     total += r.values.size();
+    checked++;
   }
+  if (!checked) {
+    std::printf("[test_quant_gpu] skipped: no reference in ~/substrate-oracle/dequant (oracle/dequant_ref.py)\n");
+    return 77;
+  }
+  if (!missing.empty()) std::printf("  NOT CHECKED (no reference file: a model without them):%s\n", missing.c_str());
   std::printf("[test_quant_gpu] ok: %llu values\n", (unsigned long long) total);
   return 0;
 }

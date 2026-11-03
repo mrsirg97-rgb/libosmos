@@ -84,6 +84,8 @@ int main(void)
   check(16, 66); /* IQ2_XXS */
   check(17, 74); /* IQ2_XS */
   check(29, 56); /* IQ1_M */
+  check(19, 50); /* IQ1_S */
+  check(22, 82); /* IQ2_S */
   printf("[test_cpu_expert] ok\n");
   return 0;
 }

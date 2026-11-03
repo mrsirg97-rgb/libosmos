@@ -17,7 +17,8 @@ namespace quant {
 // the table's ids (substrate/model/qtype.h)
 enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
-  kIQ2_XS = QTYPE_IQ2_XS, kIQ4_NL = QTYPE_IQ4_NL, kIQ1_M = QTYPE_IQ1_M, kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4,
+  kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
+  kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
@@ -30,7 +31,7 @@ template <Type T> struct Block;
 #define QUANT_BLOCK(name) \
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
-QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4)
+QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -39,7 +40,8 @@ template <> struct Block<kBF16> { static constexpr int values = kChunk, bytes = 
 static_assert(QTYPE_F32_VALUES == 1 && QTYPE_BF16_VALUES == 1, "F32 and BF16 decode a value at a time");
 static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && Block<kMXFP4>::values == kQ32 &&
                   Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
-                  Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK,
+                  Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
+                  Block<kIQ2_S>::values == kQK,
               "the decoders' block lengths");
 
 // every block's size is even (34, 18, 66, 74, 210 ... bytes) and every row starts even: 16-bit loads, never wider
@@ -186,6 +188,27 @@ template <> __device__ inline void decode<kMXFP4>(const uint8_t* b, int k, float
 }
 
 // (d * (2s + 1)) * (grid + delta); d an f16 in the top nibbles of the four scale words, a 3-bit s each 16 values
+// IQ2_XS's sums with a grid of 1024 and the signs stored: d, qs (32 index bytes), signs (32), qh (2 high index bits
+// for each 8), scales (a nibble for each 16)
+template <> __device__ inline void decode<kIQ2_S>(const uint8_t* b, int k, float* v) {
+  const int s = (b[74 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F;
+  const float db = mul(mul(f16(ld16(b)), 0.5f + (float) s), 0.25f);
+  const uint64_t grid = kIq2sGrid[b[2 + k] | ((b[66 + k / 4] >> (2 * (k % 4))) & 0x03) << 8];
+  const uint8_t signs = b[34 + k];
+  for (int j = 0; j < kChunk; j++) {
+    const float x = mul(db, (float) (uint8_t) (grid >> (8 * j)));
+    v[j] = (signs >> j) & 1 ? -x : x;
+  }
+}
+// IQ1_M's grid with one scale and delta for each 32: d, qs (32 low index bytes), qh (a u16 for each 32: 3 high index
+// bits for each 8, the scale in bits 12-14, the delta's sign in bit 15)
+template <> __device__ inline void decode<kIQ1_S>(const uint8_t* b, int k, float* v) {
+  const uint32_t h = ld16(b + 34 + 2 * (k / 4));
+  const float dl = mul(f16(ld16(b)), (float) (2 * ((h >> 12) & 0x07) + 1));
+  const float delta = h & 0x8000 ? -kIq1Delta : kIq1Delta;
+  const uint64_t grid = kIq1sGrid[b[2 + k] | ((h >> (3 * (k % 4))) & 0x07) << 8];
+  for (int j = 0; j < kChunk; j++) v[j] = mul(dl, (float) (int8_t) (grid >> (8 * j)) + delta);
+}
 template <> __device__ inline void decode<kIQ1_M>(const uint8_t* b, int k, float* v) {
   const uint8_t* qs = b;
   const uint8_t* qh = b + 32;

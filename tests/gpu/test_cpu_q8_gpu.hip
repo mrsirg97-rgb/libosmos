@@ -12,6 +12,8 @@
 #include <cstring>
 #include <vector>
 
+#include "test_model.h"
+
 extern "C" {
 #include "substrate/cpu/q8.h"
 #include "substrate/gpu/mv.h"
@@ -95,21 +97,17 @@ static void expert(const Gguf* g, const char* name, int e) {
 
 int main() {
   std::printf("[test_cpu_q8_gpu] start\n");
-  const char* home = std::getenv("HOME");
   char path[512];
-  std::snprintf(path, sizeof path, "%s/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
-                home ? home : "");
+  const TestModel which = test_model(path, sizeof path);
   int ndev = 0;
-  if (access(path, R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0 || !cpu_q8_ready()) {
-    std::printf("[test_cpu_q8_gpu] skipped: no ds1017, no GPU or no AVX-512 VNNI\n");
+  if (which == TestModel::kNone || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0 || !cpu_q8_ready()) {
+    std::printf("[test_cpu_q8_gpu] skipped: no ds1017 or UD-IQ1_M, no GPU or no AVX-512 VNNI\n");
     return 77;
   }
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
-  for (const char* name : {"blk.0.ffn_gate_exps.weight", "blk.0.ffn_down_exps.weight", "blk.10.ffn_gate_exps.weight",
-                           "blk.10.ffn_down_exps.weight", "blk.17.ffn_gate_exps.weight", "blk.17.ffn_down_exps.weight",
-                           "blk.23.ffn_down_exps.weight"})
+  for (const char* name : which == TestModel::kUd ? kUdExperts : kGsqExperts)
     for (int e : {7, 300}) expert(g, name, e);
   gguf_destroy(g);
   std::printf("[test_cpu_q8_gpu] ok\n");

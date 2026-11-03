@@ -1,7 +1,7 @@
-"""reference dequantization for tests/gpu/test_quant_gpu.hip: per type, real blocks of a ds1017 tensor (its start, a
-seeded middle, its end) and random blocks (any bytes are a block; those whose values are not all finite are drawn
+"""reference dequantization for tests/gpu/test_quant_gpu.hip: per type, real blocks of a model's tensor (the first of
+that type: its start, a seeded middle, its end) and random blocks (any bytes are a block; those whose values are not all finite are drawn
 again), each with gguf-py's values. one file a type: b"SUBQ", u32 version, u32 type, u64 values, u64 bytes, the bytes,
-the values (f32). run: PYTHONPATH=<llama.cpp>/gguf-py ../.oracle-venv/bin/python dequant_ref.py --out DIR"""
+the values (f32). run: PYTHONPATH=<llama.cpp>/gguf-py ../.oracle-venv/bin/python dequant_ref.py --out DIR [--model DIR] [--dspark DIR]"""
 import argparse
 import glob
 import os
@@ -11,41 +11,41 @@ import numpy as np
 from gguf import GGUFReader, GGMLQuantizationType as T, quants as Q
 from gguf.constants import GGML_QUANT_SIZES
 
-MODEL = os.path.expanduser("~/models/ds1017")
-TENSORS = {  # a tensor of each type the model has, and the file it is in
-    T.Q8_0: ("blk.0.attn_q_a.weight", "model"),
-    T.Q5_K: ("blk.0.attn_q_b.weight", "model"),
-    T.Q6_K: ("blk.0.attn_output_b.weight", "model"),
-    T.IQ2_XXS: ("blk.10.ffn_gate_exps.weight", "model"),
-    T.IQ2_XS: ("blk.17.ffn_gate_exps.weight", "model"),
-    T.IQ1_M: ("blk.0.ffn_gate_exps.weight", "model"),
-    T.IQ4_NL: ("blk.1.engram_embd.weight", "engram"),
-    T.BF16: ("blk.0.ffn_gate_inp.weight", "model"),
-    T.MXFP4: ("mtp.0.ffn.experts.0.w1.weight", "dspark"),  # DSpark's experts: dspark.bin, as dspark.json says
-}
-DSPARK = os.path.expanduser("~/models/dspark")
+DSPARK_DEFAULT = "~/models/dspark"
 RANGE_BLOCKS = 2048
 RANDOM_BLOCKS = 8192
 SEED = 1017
+MXFP4_TENSOR = "mtp.0.ffn.experts.0.w1.weight"  # DSpark's experts: dspark.bin, as dspark.json says
 
 
-def readers():
-    files = {"model": sorted(glob.glob(MODEL + "/*-of-*.gguf")), "engram": glob.glob(MODEL + "/*Engram*.gguf")}
-    return {**{k: [GGUFReader(f) for f in v] for k, v in files.items()}, "dspark": "dspark"}
+def tensors(model_dir):
+    """the first tensor of each quantized type in the model's files (its shards, then any other GGUF beside them: the
+    Engram's), long enough for three ranges of RANGE_BLOCKS blocks: (type -> (name, its bytes))"""
+    files = sorted(glob.glob(model_dir + "/*-of-*.gguf"))
+    files += sorted(f for f in glob.glob(model_dir + "/*.gguf") if f not in files and "mmproj" not in f)
+    if not files:
+        raise SystemExit("no GGUF files in " + model_dir)
+    picked = {}
+    for f in files:
+        for t in GGUFReader(f).tensors:
+            q = t.tensor_type
+            if q in picked or q in (T.F32, T.F16) or t.n_bytes < 3 * RANGE_BLOCKS * GGML_QUANT_SIZES[q][1]:
+                continue
+            picked[q] = (t.name, np.asarray(t.data).reshape(-1).view(np.uint8))
+    return picked
 
 
-def raw(rs, name):
-    if rs == "dspark":  # not a GGUF: dspark.json's [name, type, offset, bytes, shape] into dspark.bin
-        import json
-        for n, dt, off, nb, _ in json.load(open(DSPARK + "/dspark.json"))["tensors"]:
-            if n == name:
-                return getattr(T, dt), np.fromfile(DSPARK + "/dspark.bin", np.uint8, nb, offset=off)
-        raise SystemExit("no tensor " + name)
-    for r in rs:
-        for t in r.tensors:
-            if t.name == name:
-                return t.tensor_type, np.asarray(t.data).reshape(-1).view(np.uint8)
-    raise SystemExit("no tensor " + name)
+def dspark_mxfp4(dspark_dir):
+    """DSpark's MXFP4 experts (not a GGUF: dspark.json's [name, type, offset, bytes, shape] into dspark.bin), or None"""
+    import json
+    meta = os.path.join(dspark_dir, "dspark.json")
+    if not os.path.exists(meta):
+        return None
+    for n, dt, off, nb, _ in json.load(open(meta))["tensors"]:
+        if n == MXFP4_TENSOR:
+            assert getattr(T, dt) == T.MXFP4, (n, dt)
+            return n, np.fromfile(os.path.join(dspark_dir, "dspark.bin"), np.uint8, nb, offset=off)
+    raise SystemExit("no tensor " + MXFP4_TENSOR + " in " + meta)
 
 
 def values(qtype, b):
@@ -56,13 +56,16 @@ def values(qtype, b):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
+    ap.add_argument("--model", default="~/models/ds1017", help="a folder of a model's GGUF files (ds1017; UD-IQ1_M)")
+    ap.add_argument("--dspark", default=DSPARK_DEFAULT, help="maya's dspark.bin / dspark.json (MXFP4); absent: none")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    rs = readers()
+    picked = tensors(os.path.expanduser(a.model))
+    mx = dspark_mxfp4(os.path.expanduser(a.dspark))
+    if mx:
+        picked[T.MXFP4] = mx
     rng = np.random.default_rng(SEED)
-    for qtype, (name, where) in TENSORS.items():
-        got, data = raw(rs[where], name)
-        assert got == qtype, (name, got)
+    for qtype, (name, data) in sorted(picked.items(), key=lambda kv: int(kv[0])):
         bv, bb = GGML_QUANT_SIZES[qtype]
         n = data.size // bb
         mid = int(rng.integers(RANGE_BLOCKS, n - 2 * RANGE_BLOCKS))

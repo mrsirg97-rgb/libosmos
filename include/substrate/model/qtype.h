@@ -24,7 +24,9 @@
   X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MM | QTYPE_EMBED)             \
   X(IQ2_XXS, 16, 256, 66, QTYPE_IQ)                                                                \
   X(IQ2_XS, 17, 256, 74, QTYPE_IQ)                                                                 \
+  X(IQ1_S, 19, 256, 50, QTYPE_IQ)                                                                  \
   X(IQ4_NL, 20, 32, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV)                                      \
+  X(IQ2_S, 22, 256, 82, QTYPE_IQ)                                                                  \
   X(I32, 26, 1, 4, QTYPE_FILE)                                                                     \
   X(I64, 27, 1, 8, QTYPE_FILE)                                                                     \
   X(IQ1_M, 29, 256, 56, QTYPE_IQ)                                                                  \

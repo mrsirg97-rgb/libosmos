@@ -1,4 +1,5 @@
 #include <immintrin.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lane.h"
@@ -120,11 +121,60 @@ AVX512 static INLINE void pair_iq1_m(const uint8_t *b, int j, Pair *p)
   p->d = f16((s0 >> 12) | ((s1 >> 8) & 0x00F0) | ((s2 >> 4) & 0x0F00) | (s3 & 0xF000));
 }
 
-/* the decoders by type: each row loop its own, the decoder inlined into it */
+/* IQ2_XS's codes from a grid of 1024 (an index's low 8 bits a byte, its high 2 in qh: 16 bits the pair's 8 chunks)
+   and the signs stored: the pair's 8 sign bytes are its negatives' mask, bit 8 i + v chunk i's value v */
+#define IQ2_S_TWO_BITS 0x03
+AVX512 static INLINE void pair_iq2_s(const uint8_t *b, int j, Pair *p)
+{
+  const uint64_t qs = ld64(b + 2 + 4 * j);
+  const uint32_t qh = ld16(b + 66 + j);
+  uint64_t g[8];
+#pragma GCC unroll 8
+  for (int k = 0; k < 8; k++)
+    g[k] = kIq2sGrid[((qs >> (8 * k)) & 0xFF) | ((qh >> (2 * k)) & IQ2_S_TWO_BITS) << 8];
+  p->mag = _mm512_set_epi64((long long)g[7], (long long)g[6], (long long)g[5], (long long)g[4], (long long)g[3],
+                            (long long)g[2], (long long)g[1], (long long)g[0]);
+  p->neg = _cvtu64_mask64(ld64(b + 34 + 4 * j));
+  p->s21 = 2 * _pdep_u32(ld16(b + 74 + j), NIBBLES) + ODD; /* a block's byte of two 4-bit s */
+  p->d = f16(ld16(b));
+}
+
+/* IQ1_M's codes 8 grid +- 1 with a u16 for each block of 32: 3 high index bits a chunk, its one s (bits 12-14) for
+   both halves, its one delta sign (bit 15) for its 4 chunks */
+#define IQ1_S_SCALE_SHIFT 12
+#define IQ1_S_NEG_DELTA 0x8000u
+#define IQ1_S_BLOCK_CHUNKS 0x0F /* a block's 4 chunks of the pair's 8, as the blend's qwords */
+AVX512 static INLINE void pair_iq1_s(const uint8_t *b, int j, Pair *p)
+{
+  const uint64_t qs = ld64(b + 2 + 4 * j);
+  const uint32_t h0 = ld16(b + 34 + 2 * j), h1 = ld16(b + 36 + 2 * j);
+  uint64_t g[8];
+#pragma GCC unroll 4
+  for (int k = 0; k < 4; k++)
+    g[k] = kIq1sGrid[((qs >> (8 * k)) & 0xFF) | ((h0 >> (3 * k)) & 0x07) << 8],
+    g[4 + k] = kIq1sGrid[((qs >> (8 * (4 + k))) & 0xFF) | ((h1 >> (3 * k)) & 0x07) << 8];
+  const __m512i gv = _mm512_set_epi64((long long)g[7], (long long)g[6], (long long)g[5], (long long)g[4],
+                                      (long long)g[3], (long long)g[2], (long long)g[1], (long long)g[0]);
+  const __m512i g8 = _mm512_and_si512(_mm512_slli_epi64(gv, 3), _mm512_set1_epi8((char)0xF8));
+  const __m512i one = _mm512_set1_epi8(1);
+  const __mmask8 neg = (__mmask8)((h0 & IQ1_S_NEG_DELTA ? IQ1_S_BLOCK_CHUNKS : 0) |
+                                  (h1 & IQ1_S_NEG_DELTA ? IQ1_S_BLOCK_CHUNKS << 4 : 0));
+  const __m512i w = _mm512_mask_blend_epi64(neg, _mm512_add_epi8(g8, one), _mm512_sub_epi8(g8, one));
+  p->mag = _mm512_abs_epi8(w), p->neg = _mm512_movepi8_mask(w);
+  const uint32_t s0 = (h0 >> IQ1_S_SCALE_SHIFT) & 0x07, s1 = (h1 >> IQ1_S_SCALE_SHIFT) & 0x07;
+  p->s21 = 2 * (s0 * 0x0101u | s1 * 0x01010000u) + ODD;
+  p->d = f16(ld16(b));
+}
+
+/* the decoders by type: each row loop its own, the decoder inlined into it; a type with no arm aborts (ROWS_OF names
+   only these) */
 #define DECODE(type, b, j, p)                                                                                      \
   ((type) == QTYPE_IQ2_XXS  ? pair_iq2_xxs(b, j, p)                                                               \
    : (type) == QTYPE_IQ2_XS ? pair_iq2_xs(b, j, p)                                                                \
-                              : pair_iq1_m(b, j, p))
+   : (type) == QTYPE_IQ1_M  ? pair_iq1_m(b, j, p)                                                                 \
+   : (type) == QTYPE_IQ2_S  ? pair_iq2_s(b, j, p)                                                                 \
+   : (type) == QTYPE_IQ1_S  ? pair_iq1_s(b, j, p)                                                                 \
+                            : abort())
 
 /* 4 vectors of 16 int32 to one: lane L's 4 of input i summed into its element i (each 128-bit lane a half-block) */
 AVX512 static __m512i hsum4(__m512i a, __m512i b, __m512i c, __m512i d)
@@ -241,6 +291,8 @@ AVX512 static INLINE void rows(uint32_t type, uint32_t bytes, const uint8_t *w, 
 ROWS_OF(rows_iq2_xxs, IQ2_XXS)
 ROWS_OF(rows_iq2_xs, IQ2_XS)
 ROWS_OF(rows_iq1_m, IQ1_M)
+ROWS_OF(rows_iq2_s, IQ2_S)
+ROWS_OF(rows_iq1_s, IQ1_S)
 
 typedef void (*rows_fn)(const uint8_t *w, uint32_t cols, uint32_t r0, uint32_t r1, const int8_t *q, const float *d,
                         uint32_t m, float *y, uint32_t ys);
@@ -263,6 +315,8 @@ bool cpu_q8_rows(uint32_t type, const void *w, uint32_t cols, uint32_t r0, uint3
   case QTYPE_IQ2_XXS: fn = rows_iq2_xxs; break;
   case QTYPE_IQ2_XS: fn = rows_iq2_xs; break;
   case QTYPE_IQ1_M: fn = rows_iq1_m; break;
+  case QTYPE_IQ2_S: fn = rows_iq2_s; break;
+  case QTYPE_IQ1_S: fn = rows_iq1_s; break;
   default: return false;
   }
   if (!w || !q || !d || !y || !n || !cols || cols % QK || r1 < r0 || !cpu_q8_ready())

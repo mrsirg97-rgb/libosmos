@@ -18,7 +18,7 @@ __device__ inline int dot4(int a, int b, int c) { return __builtin_amdgcn_sudot4
 // 8 (grid . x) +- the chunk's x summed); a half h's 2s + 1; the 256-value block's scale d
 struct Codes {
   int w[kWords];
-  int delta[4];  // 0: none (the IQ2s), else +-1 (IQ1_M)
+  int delta[4];  // 0: none (the IQ2s), else +-1 (the IQ1s)
   int s21[2];
   float d;
 };
@@ -72,6 +72,29 @@ template <> __device__ inline void codes<quant::kIQ1_M>(const uint8_t* b, int j,
   c.d = quant::f16((s0 >> 12) | ((s1 >> 8) & 0x00F0) | ((s2 >> 4) & 0x0F00) | (s3 & 0xF000));
 }
 
+template <> __device__ inline void codes<quant::kIQ2_S>(const uint8_t* b, int j, Codes& c) {
+  for (int k = 0; k < 4; k++) {
+    const int kk = 4 * j + k;
+    signed8(kIq2sGrid[b[2 + kk] | ((b[66 + j] >> (2 * k)) & 0x03) << 8], b[34 + kk], c.w[2 * k], c.w[2 * k + 1]);
+    c.delta[k] = 0;
+  }
+  const uint32_t s = b[74 + j];
+  c.s21[0] = 2 * (int) (s & 0x0F) + 1, c.s21[1] = 2 * (int) (s >> 4) + 1;
+  c.d = quant::f16(quant::ld16(b));
+}
+
+// IQ1_M's codes with the 32's one scale and one delta sign (qh's u16 j)
+template <> __device__ inline void codes<quant::kIQ1_S>(const uint8_t* b, int j, Codes& c) {
+  const uint32_t h = quant::ld16(b + 34 + 2 * j);
+  for (int k = 0; k < 4; k++) {
+    const uint64_t g = kIq1sGrid[b[2 + 4 * j + k] | ((h >> (3 * k)) & 0x07) << 8];
+    c.w[2 * k] = (int) (uint32_t) g, c.w[2 * k + 1] = (int) (uint32_t) (g >> 32);
+    c.delta[k] = h & 0x8000 ? -1 : 1;
+  }
+  c.s21[0] = c.s21[1] = 2 * (int) ((h >> 12) & 0x07) + 1;
+  c.d = quant::f16(quant::ld16(b));
+}
+
 // the block's sum against x's 8 words, before x's scale: each half's integer dot, then lane_q8_part's, added
 template <quant::Type T>
 __device__ inline float block_sum(const Codes& c, const int* x) {
@@ -80,7 +103,7 @@ __device__ inline float block_sum(const Codes& c, const int* x) {
     int s = 0;
     for (int k = 2 * h; k < 2 * h + 2; k++) {
       const int gx = dot4(c.w[2 * k + 1], x[2 * k + 1], dot4(c.w[2 * k], x[2 * k], 0));
-      if constexpr (T == quant::kIQ1_M) {
+      if constexpr (T == quant::kIQ1_M || T == quant::kIQ1_S) {
         const int sx = dot4(0x01010101, x[2 * k + 1], dot4(0x01010101, x[2 * k], 0));
         s += 8 * gx + c.delta[k] * sx;
       } else {

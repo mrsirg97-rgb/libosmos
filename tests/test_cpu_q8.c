@@ -55,7 +55,15 @@ static void halves(uint32_t type, const uint8_t *b, int j, const int8_t *q, floa
   {
     const int k = 4 * j + c, h = c / 2;
     int v[8];
-    if (type == QTYPE_IQ1_M)
+    if (type == QTYPE_IQ1_S) /* gguf-py's IQ1_S: d, qs[32], qh u16[8] (3 index bits an 8, s in 12-14, sign 15) */
+    {
+      const uint32_t qh = ld16(b + 34 + 2 * (k / 4));
+      const uint64_t gr = kIq1sGrid[b[2 + k] | ((qh >> (3 * (k % 4))) & 7) << 8];
+      for (int i = 0; i < 8; i++)
+        v[i] = 8 * (int)(int8_t)(gr >> (8 * i)) + (qh & 0x8000 ? -1 : 1);
+      *d = f16(ld16(b)), s21[h] = 2 * (int)((qh >> 12) & 7) + 1;
+    }
+    else if (type == QTYPE_IQ1_M)
     {
       uint64_t sc;
       memcpy(&sc, b + 48, 8);
@@ -78,11 +86,17 @@ static void halves(uint32_t type, const uint8_t *b, int j, const int8_t *q, floa
         const uint32_t aux = ld16(qq + 4) | ld16(qq + 6) << 16;
         gr = kIq2xxsGrid[qq[c]], sg = kKsigns[(aux >> (7 * c)) & 0x7F], s21[h] = 2 * (int)(aux >> 28) + 1;
       }
-      else
+      else if (type == QTYPE_IQ2_XS)
       {
         const uint32_t qq = ld16(b + 2 + 2 * k);
         gr = kIq2xsGrid[qq & 511], sg = kKsigns[qq >> 9];
         s21[h] = 2 * (int)((b[66 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F) + 1;
+      }
+      else /* gguf-py's IQ2_S: d, qs[32], signs[32], qh[8] (2 index bits an 8), scales[8] (a nibble a 16) */
+      {
+        assert(type == QTYPE_IQ2_S);
+        gr = kIq2sGrid[b[2 + k] | ((b[66 + k / 4] >> (2 * (k % 4))) & 3) << 8], sg = b[34 + k];
+        s21[h] = 2 * (int)((b[74 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F) + 1;
       }
       for (int i = 0; i < 8; i++)
         v[i] = (sg >> i) & 1 ? -(int)(uint8_t)(gr >> (8 * i)) : (int)(uint8_t)(gr >> (8 * i));
@@ -180,8 +194,8 @@ int main(void)
   assert(!cpu_q8_rows(13, x, QK, 0, 1, q, d, 1, y, 1)); /* Q5_K: not the contract's */
   assert(!cpu_q8_rows(16, x, 128, 0, 1, q, d, 1, y, 1) && !cpu_q8_rows(16, x, QK, 2, 1, q, d, 1, y, 1));
   assert(!cpu_q8_rows(16, x, QK, 0, 1, q, d, 0, y, 1) && !cpu_q8_rows(16, NULL, QK, 0, 1, q, d, 1, y, 1));
-  const uint32_t types[] = {QTYPE_IQ2_XXS, QTYPE_IQ2_XS, QTYPE_IQ1_M};
-  for (int i = 0; i < 3; i++)
+  const uint32_t types[] = {QTYPE_IQ2_XXS, QTYPE_IQ2_XS, QTYPE_IQ1_M, QTYPE_IQ1_S, QTYPE_IQ2_S};
+  for (size_t i = 0; i < sizeof types / sizeof types[0]; i++)
   {
     check(types[i], 512);  /* 16 lanes, a full vector a step */
     check(types[i], 768);  /* 16 lanes, the last step half a vector (2,304's shape) */

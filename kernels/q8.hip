@@ -97,6 +97,8 @@ extern "C" bool q8_group_tok(uint32_t type, const void* const* w, const int32_t*
     case quant::kIQ2_XXS: return by_tokens<quant::kIQ2_XXS>(w, cnt, xrow, n, max_cnt, rows, cols, q, d, y, ys, s);
     case quant::kIQ2_XS: return by_tokens<quant::kIQ2_XS>(w, cnt, xrow, n, max_cnt, rows, cols, q, d, y, ys, s);
     case quant::kIQ1_M: return by_tokens<quant::kIQ1_M>(w, cnt, xrow, n, max_cnt, rows, cols, q, d, y, ys, s);
+    case quant::kIQ1_S: return by_tokens<quant::kIQ1_S>(w, cnt, xrow, n, max_cnt, rows, cols, q, d, y, ys, s);
+    case quant::kIQ2_S: return by_tokens<quant::kIQ2_S>(w, cnt, xrow, n, max_cnt, rows, cols, q, d, y, ys, s);
     default: return false;
   }
 }
@@ -114,6 +116,8 @@ extern "C" bool q8_gate_up(uint32_t type, const void* const* wg, const void* con
     case quant::kIQ2_XXS: return gate_up_tokens<quant::kIQ2_XXS>(g, max_cnt, s);
     case quant::kIQ2_XS: return gate_up_tokens<quant::kIQ2_XS>(g, max_cnt, s);
     case quant::kIQ1_M: return gate_up_tokens<quant::kIQ1_M>(g, max_cnt, s);
+    case quant::kIQ1_S: return gate_up_tokens<quant::kIQ1_S>(g, max_cnt, s);
+    case quant::kIQ2_S: return gate_up_tokens<quant::kIQ2_S>(g, max_cnt, s);
     default: return false;
   }
 }

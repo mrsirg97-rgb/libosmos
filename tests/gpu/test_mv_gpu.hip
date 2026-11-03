@@ -15,6 +15,8 @@
 #include <cstring>
 #include <vector>
 
+#include "test_model.h"
+
 extern "C" {
 #include "substrate/gpu/mv.h"
 #include "substrate/gpu/quant.h"
@@ -48,6 +50,15 @@ static const Shape kShapes[] = {
   {"blk.0.ffn_gate_shexp.weight", -1}, {"blk.0.ffn_down_shexp.weight", -1}, {"blk.0.ffn_gate_exps.weight", 7},
   {"blk.0.ffn_down_exps.weight", 7}, {"blk.10.ffn_gate_exps.weight", 7}, {"blk.7.ffn_down_exps.weight", 7},
   {"blk.17.ffn_gate_exps.weight", 7}, {"blk.23.ffn_down_exps.weight", 7}, {"output.weight", -1},
+};
+
+static const Shape kUdShapes[] = {
+  {"blk.0.attn_q_a.weight", -1},      {"blk.0.attn_kv.weight", -1},       {"blk.0.attn_q_b.weight", -1},
+  {"blk.0.attn_output_b.weight", -1}, {"blk.0.ffn_gate_inp.weight", -1},  {"blk.0.hc_attn_fn.weight", -1},
+  {"blk.0.ffn_gate_shexp.weight", -1}, {"blk.27.ffn_down_shexp.weight", -1}, {"blk.0.ffn_gate_exps.weight", 7},
+  {"blk.0.ffn_down_exps.weight", 7},  {"blk.20.ffn_gate_exps.weight", 7}, {"blk.5.ffn_down_exps.weight", 7},
+  {"blk.38.ffn_gate_exps.weight", 7}, {"blk.30.ffn_down_exps.weight", 7}, {"blk.20.ffn_down_exps.weight", 7},
+  {"blk.29.ffn_down_exps.weight", 7}, {"output.weight", -1},
 };
 
 static uint32_t rng = 1017;
@@ -205,13 +216,13 @@ static void shape(const Gguf* g, const Shape& s) {
 
 int main() {
   std::printf("[test_mv_gpu] start\n");
-  const char* home = std::getenv("HOME");
   char path[512];
-  std::snprintf(path, sizeof path, "%s/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
-                home ? home : "");
+  const TestModel which = test_model(path, sizeof path);
+  const Shape* shapes = which == TestModel::kUd ? kUdShapes : kShapes;
+  const size_t n_shapes = which == TestModel::kUd ? sizeof kUdShapes / sizeof kUdShapes[0] : sizeof kShapes / sizeof kShapes[0];
   int ndev = 0;
-  if (access(path, R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
-    std::printf("[test_mv_gpu] skipped: no ds1017 or no GPU\n");
+  if (which == TestModel::kNone || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
+    std::printf("[test_mv_gpu] skipped: no ds1017 or UD-IQ1_M, or no GPU\n");
     return 77;
   }
   CHECK(!mv_run(99, nullptr, 8, 256, nullptr, 1, nullptr, nullptr));
@@ -222,7 +233,7 @@ int main() {
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
-  for (const Shape& s : kShapes) shape(g, s);
+  for (size_t i = 0; i < n_shapes; i++) shape(g, shapes[i]);
   gguf_destroy(g);
   std::printf("  every shape: %d tokens at once (the wide tiles) the bits of each alone\n", kWideNt);
   CHECK(tok_shapes > 0);

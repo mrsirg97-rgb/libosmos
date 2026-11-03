@@ -28,6 +28,8 @@ template <> struct Tuned<quant::kQ5_KR> : Tuned<quant::kQ5_K> {};
 template <> struct Tuned<quant::kIQ1_M> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kIQ1_S> : Tuned<quant::kIQ1_M> {};   // not measured: the sibling's
+template <> struct Tuned<quant::kIQ2_S> : Tuned<quant::kIQ2_XS> {};  // not measured: the sibling's
 using mm::kF16Max;
 
 // a thread a value: to f16 (the rows past n zero)
@@ -155,6 +157,8 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
     case quant::kIQ1_M: return launch<quant::kIQ1_M>(m, cols, x16, n, s);
     case quant::kIQ2_XXS: return launch<quant::kIQ2_XXS>(m, cols, x16, n, s);
     case quant::kIQ2_XS: return launch<quant::kIQ2_XS>(m, cols, x16, n, s);
+    case quant::kIQ1_S: return launch<quant::kIQ1_S>(m, cols, x16, n, s);
+    case quant::kIQ2_S: return launch<quant::kIQ2_S>(m, cols, x16, n, s);
     default: return false;
   }
 }
@@ -168,7 +172,8 @@ extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
   switch (type) {
 #define TILES(t) \
   case quant::t: return col_tiles<quant::t>(n);
-    TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS)
+    TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS) TILES(kIQ1_S)
+    TILES(kIQ2_S)
 #undef TILES
     default: return 0;
   }
@@ -226,7 +231,8 @@ extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt
 #define GROUP(t)                                                                                                     \
   case quant::t:                                                                                                     \
     return group_launch<quant::t>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS)
+    GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS) GROUP(kIQ1_S)
+    GROUP(kIQ2_S)
 #undef GROUP
     default: return false;
   }

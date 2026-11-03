@@ -79,6 +79,26 @@ static inline __m256 v_iq1_m(const uint8_t *b, int k)
   return _mm256_mul_ps(_mm256_set1_ps(dl), _mm256_add_ps(g, _mm256_set1_ps(delta)));
 }
 
+/* as IQ2_XS, a grid of 1024: the index's low 8 bits a byte, its high 2 in qh, the signs a byte each chunk */
+static inline __m256 v_iq2_s(const uint8_t *b, int k)
+{
+  const int s = (b[74 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F;
+  const float db = f16(ld16(b)) * (0.5f + (float)s) * 0.25f;
+  const uint64_t grid = kIq2sGrid[b[2 + k] | ((b[66 + k / 4] >> (2 * (k % 4))) & 0x03) << 8];
+  return signed_vals(_mm256_mul_ps(_mm256_set1_ps(db), u8s(grid)), b[34 + k]);
+}
+
+/* as IQ1_M, a u16 for each 32: 3 high index bits an 8, the scale, the delta's sign */
+static inline __m256 v_iq1_s(const uint8_t *b, int k)
+{
+  const uint32_t h = ld16(b + 34 + 2 * (k / 4));
+  const float dl = f16(ld16(b)) * (float)(2 * ((h >> 12) & 0x07) + 1);
+  const float delta = h & 0x8000 ? -IQ1_DELTA : IQ1_DELTA;
+  const uint64_t grid = kIq1sGrid[b[2 + k] | ((h >> (3 * (k % 4))) & 0x07) << 8];
+  const __m256 g = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_cvtsi64_si128((long long)grid)));
+  return _mm256_mul_ps(_mm256_set1_ps(dl), _mm256_add_ps(g, _mm256_set1_ps(delta)));
+}
+
 /* r[i] (chunk i's values j) to v[j] (value j of chunks 0 .. 7) */
 static inline void transpose8(__m256 r[VL], __m256 v[VL])
 {
@@ -148,6 +168,8 @@ static float tree(const __m256 acc[QV])
 ROW(row_iq2_xxs, v_iq2_xxs)
 ROW(row_iq2_xs, v_iq2_xs)
 ROW(row_iq1_m, v_iq1_m)
+ROW(row_iq2_s, v_iq2_s)
+ROW(row_iq1_s, v_iq1_s)
 
 typedef void (*row_fn)(const uint8_t *base, uint32_t bytes, uint32_t chunks, const float *xt, uint32_t n, float *out,
                        uint32_t ys);
@@ -159,6 +181,8 @@ static bool kind(uint32_t type, row_fn *fn, uint32_t *bytes)
   case QTYPE_IQ2_XXS: *fn = row_iq2_xxs, *bytes = QTYPE_IQ2_XXS_BYTES; return true;
   case QTYPE_IQ2_XS: *fn = row_iq2_xs, *bytes = QTYPE_IQ2_XS_BYTES; return true;
   case QTYPE_IQ1_M: *fn = row_iq1_m, *bytes = QTYPE_IQ1_M_BYTES; return true;
+  case QTYPE_IQ2_S: *fn = row_iq2_s, *bytes = QTYPE_IQ2_S_BYTES; return true;
+  case QTYPE_IQ1_S: *fn = row_iq1_s, *bytes = QTYPE_IQ1_S_BYTES; return true;
   default: return false;
   }
 }
