@@ -1,4 +1,6 @@
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "weights_geo.h"
@@ -21,31 +23,135 @@ static bool fail(Meta *m, const char *key, const char *why)
   return false;
 }
 
+/* a field's two spellings: ds1017's (maya's pack), then llama.cpp's (unsloth's UD). one geometry, read from either;
+   both present and unequal refuses */
+static const char *const kAliases[][2] = {
+    {ARCH ".kv_source_layer_ids", ARCH ".attention.kv_source_layers"},
+    {ARCH ".index_source_layer_ids", ARCH ".attention.indexer.source_layers"},
+    {ARCH ".dspark_target_layer_ids", ARCH ".dspark.target_layers"},
+    {ARCH ".attention.candidate_topk_blocks", ARCH ".attention.indexer.candidate_top_k_blocks"},
+    {ARCH ".attention.candidate_block_size", ARCH ".attention.indexer.candidate_block_size"},
+    {ARCH ".attention.candidate_source_layer_id", ARCH ".attention.indexer.candidate_source_layer"},
+};
+
+static const char *alias(const char *key)
+{
+  for (size_t i = 0; i < sizeof kAliases / sizeof kAliases[0]; i++)
+    if (strcmp(key, kAliases[i][0]) == 0 || strcmp(key, kAliases[i][1]) == 0)
+      return kAliases[i][strcmp(key, kAliases[i][0]) == 0];
+  return NULL;
+}
+
+static bool is_int(GgufValueType t)
+{
+  return t == GGUF_UINT8 || t == GGUF_INT8 || t == GGUF_UINT16 || t == GGUF_INT16 || t == GGUF_UINT32 ||
+         t == GGUF_INT32 || t == GGUF_UINT64 || t == GGUF_INT64;
+}
+
+static bool is_signed(GgufValueType t) { return t == GGUF_INT8 || t == GGUF_INT16 || t == GGUF_INT32 || t == GGUF_INT64; }
+
+/* an integer at its own width: a scalar's value, or an array's item i; false past int64's range */
+static bool int_at(const GgufKv *kv, size_t i, int64_t *out)
+{
+  if (kv->type != GGUF_ARRAY)
+  {
+    if (!is_signed(kv->type) && kv->v.u > INT64_MAX)
+      return false;
+    *out = is_signed(kv->type) ? kv->v.i : (int64_t)kv->v.u;
+    return true;
+  }
+  const void *p = kv->v.items;
+  switch (kv->item)
+  {
+  case GGUF_UINT8: *out = ((const uint8_t *)p)[i]; return true;
+  case GGUF_INT8: *out = ((const int8_t *)p)[i]; return true;
+  case GGUF_UINT16: *out = ((const uint16_t *)p)[i]; return true;
+  case GGUF_INT16: *out = ((const int16_t *)p)[i]; return true;
+  case GGUF_UINT32: *out = ((const uint32_t *)p)[i]; return true;
+  case GGUF_INT32: *out = ((const int32_t *)p)[i]; return true;
+  case GGUF_INT64: *out = ((const int64_t *)p)[i]; return true;
+  case GGUF_UINT64:
+    if (((const uint64_t *)p)[i] > INT64_MAX)
+      return false;
+    *out = (int64_t)((const uint64_t *)p)[i];
+    return true;
+  default: return false;
+  }
+}
+
+/* the same value in both spellings: integers (or lists of them) of any width equal as numbers; anything else the
+   same type and bytes */
+static bool same_value(const GgufKv *a, const GgufKv *b)
+{
+  const bool arrays = a->type == GGUF_ARRAY && b->type == GGUF_ARRAY;
+  if ((is_int(a->type) && is_int(b->type)) || (arrays && is_int(a->item) && is_int(b->item)))
+  {
+    const size_t n = arrays ? a->n : 1;
+    if (arrays && a->n != b->n)
+      return false;
+    for (size_t i = 0; i < n; i++)
+    {
+      int64_t x, y;
+      if (!int_at(a, i, &x) || !int_at(b, i, &y) || x != y)
+        return false;
+    }
+    return true;
+  }
+  if (a->type != b->type)
+    return false;
+  switch (a->type)
+  {
+  case GGUF_STRING: return strcmp(a->v.s, b->v.s) == 0;
+  case GGUF_FLOAT32:
+  case GGUF_FLOAT64: return a->v.f == b->v.f;
+  case GGUF_BOOL: return a->v.u == b->v.u;
+  default: return false; /* no other pair is spelled two ways */
+  }
+}
+
+/* the key, or its other spelling; both: they must agree */
+static const GgufKv *lookup(Meta *m, const char *key)
+{
+  const char *other = alias(key);
+  const GgufKv *a = gguf_kv(m->g, key), *b = other ? gguf_kv(m->g, other) : NULL;
+  char both[2 * 96];
+  snprintf(both, sizeof both, other ? "%s (or %s)" : "%s", key, other ? other : "");
+  if (a && b && !same_value(a, b))
+    return fail(m, both, "in both spellings, unequal"), NULL;
+  if (!a && !b)
+    return fail(m, both, "missing"), NULL;
+  return a ? a : b;
+}
+
+/* GGUF_UINT32 asks for an integer scalar of any width; another type, that type */
 static const GgufKv *find(Meta *m, const char *key, GgufValueType type)
 {
-  const GgufKv *kv = gguf_kv(m->g, key);
+  const GgufKv *kv = lookup(m, key);
   if (!kv)
-    return fail(m, key, "missing"), NULL;
-  if (kv->type != type)
-    return fail(m, key, "of another value type"), NULL;
+    return NULL;
+  if (type == GGUF_UINT32 ? !is_int(kv->type) : kv->type != type)
+    return fail(m, kv->key, "of another value type"), NULL;
   return kv;
 }
 
 static bool uint_in(Meta *m, const char *key, int lo, int hi, int *out)
 {
   const GgufKv *kv = find(m, key, GGUF_UINT32);
+  int64_t v;
   if (!kv)
     return false;
-  if (kv->v.u < (uint64_t)lo || kv->v.u > (uint64_t)hi)
-    return fail(m, key, "out of range");
-  *out = (int)kv->v.u;
+  if (!int_at(kv, 0, &v) || v < lo || v > hi)
+    return fail(m, kv->key, "out of range");
+  *out = (int)v;
   return true;
 }
 
 static bool uint_is(Meta *m, const char *key, uint64_t want)
 {
   const GgufKv *kv = find(m, key, GGUF_UINT32);
-  return kv && (kv->v.u == want || fail(m, key, "a value this build does not run"));
+  int64_t v;
+  return kv && ((int_at(kv, 0, &v) && v >= 0 && (uint64_t)v == want) ||
+                fail(m, kv->key, "a value this build does not run"));
 }
 
 static bool flag_set(Meta *m, const char *key)
@@ -78,20 +184,12 @@ static bool ints(Meta *m, const char *key, size_t min, size_t cap, int64_t *out,
   if (!kv)
     return false;
   if (kv->n < min || kv->n > cap)
-    return fail(m, key, "of a length this model does not have");
+    return fail(m, kv->key, "of a length this model does not have");
+  if (!is_int(kv->item))
+    return fail(m, kv->key, "not of integers");
   for (size_t i = 0; i < kv->n; i++)
-    switch (kv->item)
-    {
-    case GGUF_INT32: out[i] = ((const int32_t *)kv->v.items)[i]; break;
-    case GGUF_UINT32: out[i] = ((const uint32_t *)kv->v.items)[i]; break;
-    case GGUF_INT64: out[i] = ((const int64_t *)kv->v.items)[i]; break;
-    case GGUF_UINT64:
-      if (((const uint64_t *)kv->v.items)[i] > INT64_MAX)
-        return fail(m, key, "out of range");
-      out[i] = (int64_t)((const uint64_t *)kv->v.items)[i];
-      break;
-    default: return fail(m, key, "not of integers");
-    }
+    if (!int_at(kv, i, &out[i]))
+      return fail(m, kv->key, "out of range");
   *n = kv->n;
   return true;
 }
@@ -188,6 +286,57 @@ static bool engram(Meta *m, const Gguf *file, Geometry *g)
   return true;
 }
 
+/* llama.cpp's Engram (unsloth's UD): its keys, the tables the model's own (per_layer_token_embd, weights.c), a layer's
+   rows its columns' span. the columns tile the tensor: each one's offset the sizes before it, the layers in order */
+static bool ple_engram(Meta *m, const Gguf *file, Geometry *g)
+{
+  if (file)
+    return fail(m, ARCH ".ple.layers", "the Engram is the model's own: no Engram file");
+  int64_t ids[LIST_MAX];
+  size_t n_eg = 0;
+  if (!ints(m, ARCH ".ple.layers", 1, LIST_MAX, ids, &n_eg) ||
+      !uint_in(m, ARCH ".ple.heads_per_ngram", 1, DIM_MAX, &g->engram_heads) ||
+      !uint_in(m, ARCH ".ple.ngram_size", NGRAM_MIN, LIST_MAX, &g->engram_max_ngram) ||
+      !uint_in(m, ARCH ".embedding_length_per_layer_input", 1, DIM_MAX, &g->engram_head_dim) ||
+      !uint_in(m, ARCH ".engram.pad_token_id", 0, DIM_MAX, &g->engram_pad) ||
+      !uint_in(m, ARCH ".engram.compressed_vocab_size", 1, DIM_MAX, &g->engram_vocab))
+    return false;
+  for (size_t i = 0; i < n_eg; i++)
+  {
+    if (ids[i] < 0 || ids[i] >= g->n_layers)
+      return fail(m, ARCH ".ple.layers", "a layer past the model's");
+    if (i && ids[i] <= ids[i - 1])
+      return fail(m, ARCH ".ple.layers", "not in ascending order");
+    g->engram[ids[i]] = true;
+  }
+  g->engram_cols = (g->engram_max_ngram - 1) * g->engram_heads;
+  const size_t n = n_eg * (size_t)g->engram_cols;
+  int64_t *off = malloc(n * sizeof *off), *size = malloc(n * sizeof *size);
+  size_t n_off = 0, n_size = 0;
+  bool ok = off && size && ints(m, ARCH ".ple.head_offsets", n, n, off, &n_off) &&
+            ints(m, ARCH ".ple.head_vocab_sizes", n, n, size, &n_size);
+  if (!off || !size)
+    fail(m, ARCH ".ple.head_offsets", "out of memory");
+  uint64_t at = 0;
+  for (size_t i = 0; ok && i < n; i++)
+  {
+    if (size[i] <= 0)
+      ok = fail(m, ARCH ".ple.head_vocab_sizes", "an empty column");
+    else if ((uint64_t)off[i] != at)
+      ok = fail(m, ARCH ".ple.head_offsets", "a column not right after the one before");
+    else
+      at += (uint64_t)size[i];
+  }
+  for (size_t i = 0; ok && i < n_eg; i++)
+  {
+    const size_t c0 = i * (size_t)g->engram_cols, c1 = c0 + (size_t)g->engram_cols - 1;
+    g->engram_rows[ids[i]] = (uint64_t)(off[c1] + size[c1] - off[c0]);
+  }
+  free(off);
+  free(size);
+  return ok;
+}
+
 bool weights_geometry(const Gguf *model, const Gguf *file, Geometry *g, char err[WEIGHTS_ERR])
 {
   Meta m = {model, err};
@@ -212,7 +361,7 @@ bool weights_geometry(const Gguf *model, const Gguf *file, Geometry *g, char err
          uint_in(&m, ARCH ".expert_feed_forward_length", 1, DIM_MAX, &g->expert_ff) &&
          uint_is(&m, ARCH ".expert_shared_count", 1) && uint_is(&m, ARCH ".hash_layer_count", 0) &&
          uint_is(&m, ARCH ".expert_gating_func", GATING_SQRTSOFTPLUS) &&
-         text_is(&m, ARCH ".expert_scoring_func", "sqrtsoftplus") &&
+         (!gguf_kv(model, ARCH ".expert_scoring_func") || text_is(&m, ARCH ".expert_scoring_func", "sqrtsoftplus")) &&
          flag_set(&m, ARCH ".expert_weights_norm") &&
          real(&m, ARCH ".expert_weights_scale", &g->expert_scale) &&
          uint_in(&m, ARCH ".hyper_connection.count", 1, DIM_MAX, &g->hc) &&
@@ -235,5 +384,8 @@ bool weights_geometry(const Gguf *model, const Gguf *file, Geometry *g, char err
          text_is(&m, ARCH ".rope.scaling.type", "yarn") && real(&m, ARCH ".rope.scaling.factor", &g->rope_factor) &&
          uint_in(&m, ARCH ".rope.scaling.original_context_length", 1, DIM_MAX, &g->rope_original) &&
          real(&m, ARCH ".rope.scaling.yarn_beta_fast", &g->yarn_beta_fast) &&
-         real(&m, ARCH ".rope.scaling.yarn_beta_slow", &g->yarn_beta_slow) && engram(&m, file, g);
+         real(&m, ARCH ".rope.scaling.yarn_beta_slow", &g->yarn_beta_slow) &&
+         (gguf_kv(model, ARCH ".ple.layers")       ? ple_engram(&m, file, g)
+          : gguf_kv(model, ARCH ".engram.present") ? engram(&m, file, g)
+                                                   : fail(&m, ARCH ".ple.layers (or " ARCH ".engram.present)", "missing"));
 }

@@ -1316,6 +1316,39 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
    - **to measure**: the new types' launch shapes are their sibling's (IQ1_M's, IQ2_XS's), not measured. IQ1_S is
      the slow one: an expert's matvec ~75-80 GB/s at 1 token (the IQ2s 120-137), the matmul 43-53 (the IQ2s 75-108).
 4. the UD file's load: roles by path, the alias table, the Engram slices, the folded gate, `exp_probs_b_vl`.
+   read 2026-11-03 from the file (all 62 `deepseek41.*` keys) and the code that reads it; four parts, in order:
+   - **4a, the geometry.** one `Geometry`, each field read once from a key or its alias (maya's spelling, then
+     llama.cpp's: `kv_source_layer_ids` / `attention.kv_source_layers`, `index_source_layer_ids` /
+     `attention.indexer.source_layers`, `dspark_target_layer_ids` / `dspark.target_layers`,
+     `attention.candidate_{topk_blocks,block_size,source_layer_id}` / `attention.indexer.candidate_{top_k_blocks,
+     block_size,source_layer}`, the Engram's below); both present and unequal refuses; an integer key read at its own
+     width (UD's `candidate_source_layer` is INT32, the reader asked UINT32). `expert_scoring_func`, where present,
+     must be "sqrtsoftplus"; `expert_gating_func` 4 is the field. the Engram from `ple.*`: layers `ple.layers`, heads
+     `ple.heads_per_ngram`, n-gram `ple.ngram_size`, head dim `embedding_length_per_layer_input`, pad
+     `engram.pad_token_id`, vocabulary `engram.compressed_vocab_size`, a layer's rows its columns' span (last offset
+     + last size - first offset); the Engram in the model's own files (no second Gguf, no `engram.source` to match).
+     test: the UD file's geometry equal to one written by hand from the dump above; each alias pair made unequal
+     refuses; a missing key of each refuses; GSQ-RCO's spelling (the same file's keys renamed in memory) gives the
+     same geometry.
+     **done (2026-11-03)**: `weights_geo.c`'s `lookup` (the 6 pairs; an error names both spellings), integers at any
+     width, `ple_engram` (the columns must tile from 0 in order, the layers ascending; neither `ple.layers` nor
+     `engram.present` refuses naming both). `test_geo` on the UD file: the geometry by hand (rows 384,006,168 +
+     384,016,682), ds1017's spelling the same, 2 unequal pairs and 11 missing keys refused, gating 2 refused, an
+     overlapping column refused. the compress ratios are 0 / 1 / 2 in this file and maya's pack of it alike
+     (`ds4.txt`), and the reference reads them literally (`ref.py`: 1 no pooling, 2 pairs): not a code to translate.
+     not proven here: ds1017's own Engram path (`engram.present`, the second file), unchanged but for the reader's
+     width and the error's wording.
+   - **4b, roles by path.** a role names the path that reads it (dense matvec, the experts' int8, an Engram row, a
+     vector read as F32) and its shape; any type the table gives that path. UD's own roles: `engram_kv` (GSQ
+     `engram_wkv`), `engram_gate` F32 [dim, hc] (GSQ `engram_q` x `engram_k`), `per_layer_token_embd` (the layers'
+     tables, sliced: its rows the layers' sum), `exp_probs_b_vl` (checked, never read: image routing). the router
+     F32 (GSQ BF16).
+   - **4c, the hash.** `engram_create` from the tensors (GSQ) or the metadata arrays (UD: `engram.token_map`,
+     `ple.layer_multipliers`, `ple.head_vocab_sizes`, `ple.head_offsets` less each layer's first) into the one
+     `Engram`, its checks unchanged. test: both readers' rows the same for the same tokens (`engram_hash.py`'s rows
+     on the UD file).
+   - **4d, the forward.** one gate: an F32 [hc][dim] product, GSQ's folded at load (BF16 x BF16 is exact in F32: the
+     kernel's own product, the same bits), UD's read; the Engram rows from a layer's slice of the model's file.
 5. the oracle and maya: the logits within maya's spread, then the numbers.
 
 ### the order (before 2026-11-03, kept for the record)
