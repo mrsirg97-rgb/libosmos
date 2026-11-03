@@ -398,8 +398,8 @@ __global__ void kv_finish_kernel(float* kv, uint32_t hd, const float* w, float e
 }
 
 // (BF16); dot = sum((h * w) * key) * (rstd(h) * rstd(key)) * scale; h += sigmoid(signed sqrt(dot)) * value
-__global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* qw, const uint16_t* kw, uint32_t hc,
-                                   uint32_t dim, float eps, float scale) {
+__global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, uint32_t hc, uint32_t dim, float eps,
+                                   float scale) {
   __shared__ float lds[kThreads];
   __shared__ float gate;
   const uint32_t k = blockIdx.x, t = blockIdx.y;
@@ -408,8 +408,7 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* qw
   const float* value = kv + ((uint64_t) t * (hc + 1) + hc) * dim;
   float sh = 0, sk = 0, dot = 0;
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
-    const float w = __uint_as_float((uint32_t) qw[(uint64_t) k * dim + d] << 16) *
-                    __uint_as_float((uint32_t) kw[(uint64_t) k * dim + d] << 16);
+    const float w = gw[(uint64_t) k * dim + d];
     sh += hk[d] * hk[d], sk += key[d] * key[d], dot += (hk[d] * w) * key[d];
   }
   sh = block_sum(sh, lds), sk = block_sum(sk, lds), dot = block_sum(dot, lds);
@@ -719,11 +718,11 @@ extern "C" bool ops_rope(float* x, uint32_t heads, uint32_t head_dim, uint32_t r
   return ok();
 }
 
-extern "C" bool ops_engram_gate(float* h, const float* kv, const void* q_w, const void* k_w, uint32_t hc, uint32_t dim,
-                                float eps, uint32_t n_tok, void* stream) {
-  if (!hc || hc > OPS_MAX_HC || !dim || !n_tok) return false;
-  engram_gate_kernel<<<dim3(hc, n_tok), kThreads, 0, st(stream)>>>(h, kv, (const uint16_t*) q_w, (const uint16_t*) k_w,
-                                                                    hc, dim, eps, (float) std::pow((double) dim, -0.5));
+extern "C" bool ops_engram_gate(float* h, const float* kv, const float* gate, uint32_t hc, uint32_t dim, float eps,
+                                uint32_t n_tok, void* stream) {
+  if (!hc || hc > OPS_MAX_HC || !dim || !n_tok || !gate) return false;
+  engram_gate_kernel<<<dim3(hc, n_tok), kThreads, 0, st(stream)>>>(h, kv, gate, hc, dim, eps,
+                                                                    (float) std::pow((double) dim, -0.5));
   return ok();
 }
 

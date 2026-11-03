@@ -48,7 +48,7 @@ bool ops_kv_finish(float *kv, uint32_t head_dim, const float *w, float eps, uint
                    const int32_t *pos, float *ring, uint32_t slots, uint32_t n_tok, void *stream);
 bool ops_fp4_round(float *x, uint64_t n, uint32_t block, bool e4m3_scale, void *stream);
 bool ops_round_bf16(float *x, uint64_t n, void *stream);
-bool ops_engram_gate(float *h, const float *kv, const void *q_w, const void *k_w, uint32_t hc, uint32_t dim, float eps,
+bool ops_engram_gate(float *h, const float *kv, const float *gate, uint32_t hc, uint32_t dim, float eps,
                      uint32_t n_tok, void *stream);
 bool ops_sparse_attn(const float *q, const float *ring, uint32_t slots, const int32_t *pos, uint32_t window,
                      int32_t floor, const float *ckv, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
@@ -158,8 +158,9 @@ ops_round_bf16
 
 ops_engram_gate
   Engram's update of the hc streams h ([n_tok][hc][dim], in place) from kv ([n_tok][hc + 1][dim]: a key a stream,
-  then the value) and the BF16 q_w, k_w ([hc][dim]): h_k += sigmoid(signed sqrt(max(|dot|, 1e-6))) * value, dot =
-  sum((h_k * q_w k_w) * key_k) * rstd(h_k) * rstd(key_k) * dim^-0.5 (rounded to F32 from double, as python's).
+  then the value) and the gate ([hc][dim] F32: q k - ds1017's BF16 q and k multiplied at load, exact in F32; a
+  llama.cpp GGUF's folded): h_k += sigmoid(signed sqrt(max(|dot|, 1e-6))) * value, dot = sum((h_k * gate_k) *
+  key_k) * rstd(h_k) * rstd(key_k) * dim^-0.5 (rounded to F32 from double, as python's).
 
 ops_sparse_attn
   for each token and head: q against its keys - the window's (positions max(pos - window + 1, floor) .. pos, at ring

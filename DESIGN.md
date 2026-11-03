@@ -1369,6 +1369,17 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
      range: an independent check of it needs the tokenizer.
    - **4d, the forward.** one gate: an F32 [hc][dim] product, GSQ's folded at load (BF16 x BF16 is exact in F32: the
      kernel's own product, the same bits), UD's read; the Engram rows from a layer's slice of the model's file.
+     **done (2026-11-03)**: `ops_engram_gate` takes the gate (F32); `gates()` builds each Engram layer's at load
+     (UD's read, ds1017's q k multiplied on the host) into its own device buffer, the raw q / k / gate tensors no
+     longer resident; `engram_fd` the rows' file (ds1017's second, or a dup of the model's shard holding
+     per_layer_token_embd). the gate's bits: the kernel with q, k before and with the host's fold after, on the same
+     seeded inputs (7 tokens x 4 streams x 5,120, a subnormal product among them) - the 143,360 outputs byte for
+     byte the same (a one-time check in the scratchpad: no repo test calls the gate alone; the forward's tests do,
+     on ds1017). `tools/bench/dbench.hip` takes `MODEL` (a first shard) and `ENGRAM` (where there is one) and
+     `IDS` (the answers' token ids). **UD-IQ1_M runs**: loaded in 16 s; greedy answers to maya's bench questions
+     read right (five greetings, a typed CSV parser with its docstring, photosynthesis step by step) at 12.1-13.3
+     tok/s - no picks profile, no CPU lane, no DSpark: not a number to compare yet (maya on this file: 18.0
+     undrafted, 29.3-29.9 drafted).
 5. the oracle and maya: the logits within maya's spread, then the numbers.
 
 ### the order (before 2026-11-03, kept for the record)

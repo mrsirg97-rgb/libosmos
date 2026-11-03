@@ -3,9 +3,10 @@
 // resident set follows what it answers), then each question's prompt and n_new greedy tokens; prints the prompt's
 // tok/s (past 256 tokens), the answer's tok/s and a hash of its tokens (the same hash: the same tokens). a prompt
 // file is token ids, comma separated (tools/bench/prompts.py writes them).
-// environment: MODEL_DIR (default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
+// environment: MODEL (a first shard: unsloth's UD-IQ1_M, say; ENGRAM its Engram file where it has one) or MODEL_DIR
+// (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
 // substrate-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
-// CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096).
+// CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids).
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -lsubstrate_hip -lsubstrate
 //        -lhsa-runtime64 -o bin/dbench   (after `make lib/libsubstrate.a lib/libsubstrate_hip.a`)
 #include <hip/hip_runtime.h>
@@ -52,6 +53,7 @@ static int32_t argmax(const std::vector<float>& l) {
 static Drafter* g_draft;        // DRAFT=dir: the answers drafted (DSpark) and verified
 static bool g_greedy;           // GREEDY=1: the picks forward_greedy's (on the GPU), not the logits copied and scanned
 static uint32_t g_max_tokens;   // a step's most tokens (the prompt's steps)
+static FILE* g_ids;             // IDS=file: each undrafted answer's token ids, a line each (to read the text back)
 
 static int32_t pick(Forward* f, std::vector<float>& lg, uint32_t V, uint32_t row) {
   if (g_greedy) {
@@ -129,10 +131,12 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
   }
   for (int i = 0; !g_draft && i < n; i++) {
     *h = (*h ^ (uint64_t) t) * 1099511628211ull;
+    if (g_ids) std::fprintf(g_ids, i ? ",%d" : "%d", t);
     if (!forward_step(f, s, t, err)) std::fprintf(stderr, "step %d: %s\n", i, err), std::_Exit(1);
     t = pick(f, lg, V, 0);
   }
   const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  if (g_ids) std::fprintf(g_ids, "\n"), std::fflush(g_ids);
   seq_destroy(s);
   return n / sec;
 }
@@ -149,11 +153,17 @@ int main(int argc, char** argv) {
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "",
                     mdir = md ? std::string(md) + "/" : home + "/models/ds1017/";
   char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
-  Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
-  Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
-  CHECK(g && eg);
+  // MODEL: a model's first shard (unsloth's UD: its Engram its own, ENGRAM unset); else ds1017's in MODEL_DIR
+  const char* mp = std::getenv("MODEL");
+  const char* ep = std::getenv("ENGRAM");
+  const std::string model = mp ? mp : mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
+                    engram = ep ? ep : mp ? "" : mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf";
+  Gguf* g = gguf_create(model.c_str(), err);
+  if (!g) std::fprintf(stderr, "%s: %s\n", model.c_str(), err), std::_Exit(1);
+  Gguf* eg = engram.empty() ? nullptr : gguf_create(engram.c_str(), err);
+  CHECK(engram.empty() || eg);
   Weights* w = weights_create(g, eg, werr);
-  CHECK(w);
+  if (!w) std::fprintf(stderr, "weights_create: %s\n", werr), std::_Exit(1);
   ForwardOptions o = {};
   o.n_layers = (int) w->geo.n_layers;
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
@@ -176,6 +186,7 @@ int main(int argc, char** argv) {
   const int cpu_threads = std::getenv("CPU_THREADS") ? std::atoi(std::getenv("CPU_THREADS")) : 0;
   if (!forward_lane(f, cpu_threads, ferr)) std::fprintf(stderr, "forward_lane: %s\n", ferr), std::_Exit(1);
   g_greedy = std::getenv("GREEDY") != nullptr;
+  if (const char* ip = std::getenv("IDS")) CHECK((g_ids = std::fopen(ip, "w")));
   if (const char* dd = std::getenv("DRAFT")) {
     g_draft = drafter_create(f, dd, ferr);
     if (!g_draft) std::fprintf(stderr, "drafter_create: %s\n", ferr), std::_Exit(1);

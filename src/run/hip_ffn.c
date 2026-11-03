@@ -75,7 +75,7 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
                   quant_dequant(t->type, b->erow, vals, b->erow_f, NULL) && ops_round_bf16(b->erow_f, vals, NULL) &&
                   fwd_mat(f, L->eg_wkv, fwd_dev(f, L->eg_wkv), (hc + 1) * D, cols * hd, b->erow_f, cols * hd, n,
                           b->ekv, (hc + 1) * D) &&
-                  ops_engram_gate(b->h, b->ekv, fwd_dev(f, L->eg_q), fwd_dev(f, L->eg_k), hc, D, g->rms_eps, n, NULL);
+                  ops_engram_gate(b->h, b->ekv, f->eg_gate[l], hc, D, g->rms_eps, n, NULL);
   return ok || fwd_fail(err, "a GPU call failed (Engram)");
 }
 

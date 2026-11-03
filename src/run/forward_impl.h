@@ -144,6 +144,7 @@ struct Forward
   uint64_t eg_at[FWD_MAX_SUBS][WEIGHTS_MAX_LAYERS]; /* where each sub-batch's nth Engram layer's rows start (rows) */
   bool eg_pending;                                   /* the step's rows begun, not yet waited for */
   Engram *hash;
+  float *eg_gate[WEIGHTS_MAX_LAYERS]; /* each Engram layer's gate, F32 q k on the device (ops_engram_gate) */
   float *freqs_win, *freqs_comp;
   Scratch b;
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */

@@ -213,7 +213,8 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     const LayerWeights *L = &w->layer[l];
     const GgufTensor *const *t = (const GgufTensor *const *)L;
     for (size_t i = 0; i < TENSORS_A_LAYER; i++)
-      if (t[i] && t[i] != L->eg_embd && t[i] != L->exp_gate && t[i] != L->exp_up && t[i] != L->exp_down)
+      if (t[i] && t[i] != L->eg_embd && t[i] != L->exp_gate && t[i] != L->exp_up && t[i] != L->exp_down &&
+          t[i] != L->eg_q && t[i] != L->eg_k && t[i] != L->eg_gate) /* the gate: its own buffer (gates) */
         t_res[n_t++] = t[i];
   }
   for (size_t i = 0; i < n_t; i++)
@@ -283,6 +284,61 @@ static size_t engram_layers(const Weights *w, int n_layers)
   for (int l = 0; l < n_layers; l++)
     n += w->geo.engram[l] != 0;
   return n;
+}
+
+/* the file the Engram's rows are read from (its own descriptor: rowread's): ds1017's second file, or the model's own
+   shard that holds per_layer_token_embd (every layer's slice in it) */
+static int engram_fd(const Forward *f, const Weights *w)
+{
+  if (!w->geo.engram_own)
+    return open(w->engram->paths[0], O_RDONLY);
+  for (int l = 0; l < w->geo.n_layers; l++)
+    if (w->geo.engram[l])
+      return dup(f->fds[w->layer[l].eg_embd->file]);
+  return -1;
+}
+
+/* a tensor's bytes from the model's files into host memory */
+static bool read_all(const Forward *f, const GgufTensor *t, void *out)
+{
+  for (uint64_t got = 0; got < t->bytes;)
+  {
+    const ssize_t n = pread(f->fds[t->file], (char *)out + got, t->bytes - got, (off_t)(t->offset + got));
+    if (n <= 0)
+      return false;
+    got += (uint64_t)n;
+  }
+  return true;
+}
+
+/* each Engram layer's gate as ops_engram_gate reads it: F32 [hc][dim], q k. a llama.cpp GGUF's folded (engram_gate:
+   read as it is); ds1017's q and k (BF16) multiplied here - a product of two BF16 values exact in F32 (8-bit
+   significands, 16 bits of product): the kernel's own product before, the same bits */
+static bool gates(Forward *f, const Weights *w, char *err)
+{
+  const uint64_t n = (uint64_t)w->geo.hc * (uint64_t)w->geo.n_embd;
+  float *g = malloc(n * sizeof *g);
+  uint16_t *q = malloc(n * sizeof *q), *k = malloc(n * sizeof *k);
+  bool ok = g && q && k;
+  for (int l = 0; ok && l < w->geo.n_layers; l++)
+  {
+    if (!w->geo.engram[l])
+      continue;
+    const LayerWeights *L = &w->layer[l];
+    if (w->geo.engram_own)
+      ok = read_all(f, L->eg_gate, g);
+    else if ((ok = read_all(f, L->eg_q, q) && read_all(f, L->eg_k, k)))
+      for (uint64_t i = 0; i < n; i++)
+      {
+        const uint32_t a = (uint32_t)q[i] << 16, b = (uint32_t)k[i] << 16;
+        float x, y;
+        memcpy(&x, &a, 4), memcpy(&y, &b, 4);
+        g[i] = x * y;
+      }
+    ok = ok && fwd_alloc(&f->eg_gate[l], n * sizeof *g) && fwd_put(f->eg_gate[l], g, n * sizeof *g);
+  }
+  free(g), free(q), free(k);
+  return ok || fwd_fail(err, "the Engram's gates could not be read");
 }
 
 static bool scratch(Forward *f)
@@ -431,12 +487,12 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   char eerr[ENGRAM_ERR] = "";
   if (!ok)
     fwd_fail(err, "a model file could not be opened");
-  else if (w->geo.engram_own) /* its rows a slice of the model's files, its gate folded: DESIGN.md, step 4d */
-    ok = fwd_fail(err, "the Engram's own form (per_layer_token_embd): not run by this build yet");
-  else if ((f->eg_fd = open(w->engram->paths[0], O_RDONLY)) < 0)
-    ok = fwd_fail(err, "the Engram file could not be opened");
+  else if ((f->eg_fd = engram_fd(f, w)) < 0)
+    ok = fwd_fail(err, "the Engram's file could not be opened");
   else if (!(f->hash = engram_create(w, f->fds, eerr)))
     ok = fwd_fail(err, eerr);
+  else if (!gates(f, w, err))
+    ok = false;
   else if (!(f->rows = calloc((size_t)FWD_MAX_BATCH * WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)) ||
            !(f->eg_off = calloc((size_t)FWD_MAX_SUBS * FWD_MAX_BATCH * engram_layers(w, n_layers) *
                                     f->g->engram_cols + 1,
@@ -517,6 +573,8 @@ void forward_destroy(Forward *f)
       close(f->fds[i]);
   if (f->eg_fd >= 0)
     close(f->eg_fd);
+  for (int l = 0; l < WEIGHTS_MAX_LAYERS; l++)
+    hipFree(f->eg_gate[l]);
   engram_destroy(f->hash);
   free(f->rows);
   free(f);
