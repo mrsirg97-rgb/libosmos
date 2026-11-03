@@ -268,7 +268,7 @@ static void attn_x16() {
   CHECK(hipMemcpy(x, xh.data(), xb, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(mm_x16_attn(x, kCols, kN, kCols, kHd, kRd, fr, pos, a, ovf, nullptr));
   CHECK(ops_rope(x, kHeads, kHd, kRd, kCols, fr, pos, true, kN, nullptr) &&
-        ops_fp8_round(x, (uint64_t) kN * kCols, nullptr) && mm_x16(x, kCols, kN, kCols, b, ovf, nullptr));
+        ops_fp8_round(x, (uint64_t) kN * kCols, nullptr, 0, nullptr) && mm_x16(x, kCols, kN, kCols, b, ovf, nullptr));
   std::vector<uint8_t> ha(hb), hbv(hb);
   int32_t o = 1;
   CHECK(hipMemcpy(ha.data(), a, hb, hipMemcpyDeviceToHost) == hipSuccess);

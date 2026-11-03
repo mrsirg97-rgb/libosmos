@@ -43,22 +43,26 @@ bool ops_hc_mix_pre_rms(const float *partial, const float *scale, const float *b
                         void *stream);
 bool ops_rope(float *x, uint32_t heads, uint32_t head_dim, uint32_t rope_dim, uint32_t stride, const float *freqs,
               const int32_t *pos, bool inverse, uint32_t n_tok, void *stream);
-bool ops_fp8_round(float *x, uint64_t n, void *stream);
+bool ops_fp8_round(float *x, uint64_t n, void *packed, uint32_t dim, void *stream);
 bool ops_kv_finish(float *kv, uint32_t head_dim, const float *w, float eps, uint32_t rope_dim, const float *freqs,
-                   const int32_t *pos, float *ring, uint32_t slots, uint32_t n_tok, void *stream);
-bool ops_fp4_round(float *x, uint64_t n, uint32_t block, bool e4m3_scale, void *stream);
+                   const int32_t *pos, void *ring, uint32_t slots, uint32_t n_tok, void *stream);
+bool ops_fp4_round(float *x, uint64_t n, uint32_t block, bool e4m3_scale, void *packed, uint32_t dim, void *stream);
+bool ops_kv_pack(uint32_t fmt, const float *src, uint64_t rows, uint32_t dim, void *dst, void *stream);
+bool ops_kv_unpack(uint32_t fmt, const void *src, uint64_t rows, uint32_t dim, float *dst, void *stream);
 bool ops_round_bf16(float *x, uint64_t n, void *stream);
 bool ops_engram_gate(float *h, const float *kv, const float *gate, uint32_t hc, uint32_t dim, float eps,
                      uint32_t n_tok, void *stream);
-bool ops_sparse_attn(const float *q, const float *ring, uint32_t slots, const int32_t *pos, uint32_t window,
-                     int32_t floor, const float *ckv, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
+bool ops_sparse_attn(const float *q, const void *ring, uint32_t slots, const int32_t *pos, uint32_t window,
+                     int32_t floor, const void *ckv, uint32_t ckv_fmt, const int32_t *sel, const int32_t *n_sel,
+                     uint32_t sel_cap,
                      uint32_t max_sel, const float *sink, float scale, uint32_t heads, uint32_t head_dim,
                      uint32_t n_tok, float *scores, float *o, void *stream);
 bool ops_compress(const float *kvc, const float *sc, uint32_t slots, const int32_t *pos, uint32_t ratio, uint32_t dim,
                   uint32_t n_tok, float *out, void *stream);
-bool ops_put_rows(float *dst, uint32_t slots, const float *src, const int32_t *pos, uint32_t every, uint32_t dim,
-                  uint32_t n_tok, void *stream);
-bool ops_index_score(const float *q, const float *keys, const float *w, const int32_t *pos, uint32_t ratio,
+bool ops_put_rows(void *dst, uint32_t slots, const void *src, const int32_t *pos, uint32_t every, uint32_t fmt,
+                  uint32_t dim, uint32_t n_tok, void *stream);
+bool ops_index_score(const float *q, const void *keys, uint32_t keys_fmt, const float *w, const int32_t *pos,
+                     uint32_t ratio,
                      uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score, uint32_t stride,
                      void *stream);
 bool ops_topk(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t k, uint32_t n_tok,
@@ -141,17 +145,30 @@ ops_rope
 
 ops_fp8_round
   each 32 values rounded as the reference's act_quant: a power-of-two scale (amax / 448, at least 1e-4, up to the next
-  power of two), the values E4M3 (nearest, ties to even) under it. n a multiple of 32.
+  power of two), the values E4M3 (nearest, ties to even) under it. n a multiple of 32. `packed` (or NULL): the same
+  values as KV_FP8 rows of dim (kvfmt.h; n a multiple of dim) - each the code and scale of the value x keeps. a value
+  rounded already rounds to itself, its code the same value's: a row taken from elsewhere (the oracle's) packs too.
 
 ops_kv_finish
   a window key's tail for n_tok tokens, one launch: ops_rms (w, eps) over head_dim, ops_rope of its last rope_dim at
-  pos (not inverse), ops_fp8_round, then the row into ring at row pos % slots (ops_put_rows, every 1) as well as
-  kv - each step's bits. head_dim at most OPS_MAX_KV_DIM, a multiple of 32.
+  pos (not inverse), ops_fp8_round, then the row into ring (KV_FP8 rows: kvfmt.h) at row pos % slots (ops_put_rows,
+  every 1) as well as kv - each step's bits. head_dim at most OPS_MAX_KV_DIM, a multiple of 32.
 
 ops_fp4_round
   each `block` values rounded as the reference's fp4_act_quant: E2M1 values (nearest, ties to the even mantissa) under
   a scale - amax / 6 rounded to E4M3 (e4m3_scale; amax at least 6 * 2^-9), else up to the next power of two (amax
-  at least 6 * 2^-126). n a multiple of block.
+  at least 6 * 2^-126). n a multiple of block. `packed` (or NULL): the same values as rows of dim (n a multiple of
+  dim) in KV_FP4_E4M3 (e4m3_scale, block 16) or KV_FP4_POW2 (block 32) - the codes and scales the rounding chose.
+
+ops_kv_pack
+  rows of dim values already on format fmt's grid (KV_FP8, KV_FP4_E4M3, KV_FP4_POW2: another's rounding - the
+  oracle's, a probe's) packed so each reads back as itself, bit for bit: a block's scale the largest of the format's
+  under which every value is its code's value times it. a block on no scale of the grid packs NaN's scale code (its
+  values read back NaN: loud). rounding again would not do for FP4 with an E4M3 scale: at its subnormal scales a
+  block's rounded amax can choose another scale.
+
+ops_kv_unpack
+  rows of dim values in format fmt (kvfmt.h) to F32 at dst: a code's value times its scale, the bits the rounding gave.
 
 ops_round_bf16
   each value rounded to BF16 (nearest, ties to even), kept as F32.
@@ -164,9 +181,10 @@ ops_engram_gate
 
 ops_sparse_attn
   for each token and head: q against its keys - the window's (positions max(pos - window + 1, floor) .. pos, at ring
-  row position % slots: floor the sequence's first position with the layer's state, 0 for every position), then the
-  n_sel[t] compressed rows of ckv that sel[t * sel_cap ..] names (ckv NULL: none) - each a latent that is the key
-  and the value; scaled, softmax with the head's sink, the values summed in that order. slots
+  row position % slots, KV_FP8 rows: floor the sequence's first position with the layer's state, 0 for every
+  position), then the n_sel[t] rows of ckv (format ckv_fmt: the compressed rows' KV_FP4_E4M3, or the drafter's
+  block's own KV_F32) that sel[t * sel_cap ..] names (ckv NULL: none) - each a latent that is the key and the value,
+  read as kvfmt.h's value (the F32 its rounding gave); scaled, softmax with the head's sink, the values summed in that order. slots
   at least window + the step's tokens - 1, so no position a token reads is overwritten by the step. max_sel bounds
   n_sel (the model's top k); scores the device's OPS_ATTN_SCRATCH(n_tok, heads, window + max_sel) floats (window
   alone with no ckv); heads a multiple of 64, head_dim of 256. a score a sum over d ascending, an output over the
@@ -178,12 +196,13 @@ ops_compress
   kvc * softmax(sc), the softmax a value at a time over the positions; any other token's out[t] zeros.
 
 ops_put_rows
-  each token t's row src[t] (dim floats) into dst: every 1, at row pos[t] % slots (a ring); every r, only for a
-  token completing a row of r positions, at row ((pos[t] + 1) / r - 1) % slots. a copy, so the bits.
+  each token t's row src[t] (dim values in format fmt: kvfmt.h's, F32 or packed - a row kv_row_bytes(fmt, dim)) into
+  dst: every 1, at row pos[t] % slots (a ring); every r, only for a token completing a row of r positions, at row
+  ((pos[t] + 1) / r - 1) % slots. a copy, so the bits.
 
 ops_index_score
   for each token t (its q at q + t heads head_dim, its w at w + t heads) and its visible rows c < (pos[t] + 1) / ratio
-  of keys: score[t stride + c] = sum over heads h of relu(q_h . keys_c) * w_h (heads at most 32, head_dim a multiple of
+  of keys (format keys_fmt: the indexer's KV_FP4_POW2, or KV_F32): score[t stride + c] = sum over heads h of relu(q_h . keys_c) * w_h (heads at most 32, head_dim a multiple of
   16; the heads summed as a 32-lane xor tree sums them). max_n bounds the visible rows (at most stride).
 
 ops_topk

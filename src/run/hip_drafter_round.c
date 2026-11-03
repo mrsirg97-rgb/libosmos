@@ -4,7 +4,7 @@
 
 /* a round's three blocks on its DRAFTER_BLOCK rows (DeepSeek's DSparkBlock: the trunk's layer in small) */
 
-static bool attention(Drafter *d, const DBlock *k, const float *ring)
+static bool attention(Drafter *d, const DBlock *k, const uint8_t *ring)
 {
   const Geometry *g = d->f->g;
   const uint32_t T = DRAFTER_BLOCK, D = g->n_embd, H = g->n_heads, HD = g->head_dim, RD = g->rope_dim;
@@ -16,13 +16,13 @@ static bool attention(Drafter *d, const DBlock *k, const float *ring)
          ops_rope(d->q, H, HD, RD, H * HD, fr, d->pos_q, false, T, NULL) &&
          mv_strided(DRAFTER_Q8_0, k->wkv, HD, D, d->x, D, T, d->kv, HD, NULL) &&
          ops_rms(d->kv, HD, HD, k->kv_norm, g->rms_eps, T, d->kv, HD, NULL) &&
-         ops_rope(d->kv, 1, HD, RD, HD, fr, d->pos_q, false, T, NULL) && ops_fp8_round(d->kv, (uint64_t)T * HD, NULL) &&
+         ops_rope(d->kv, 1, HD, RD, HD, fr, d->pos_q, false, T, NULL) && ops_fp8_round(d->kv, (uint64_t)T * HD, NULL, 0, NULL) &&
          /* the ring's rows before p0 (every row's window: positions p0 - window .. p0 - 1), then the block's own T
             rows - every row's, no causal mask - as the selected rows */
-         ops_sparse_attn(d->q, ring, W, d->pos_a, W, 0, d->kv, d->sel, d->n_sel, OPS_MAX_SELECT, T, k->sink,
+         ops_sparse_attn(d->q, ring, W, d->pos_a, W, 0, d->kv, KV_F32, d->sel, d->n_sel, OPS_MAX_SELECT, T, k->sink,
                          (float)(1.0 / sqrt((double)HD)), H, HD, T, d->att, d->o, NULL) &&
          ops_rope(d->o, H, HD, RD, H * HD, fr, d->pos_q, true, T, NULL) &&
-         ops_fp8_round(d->o, (uint64_t)T * H * HD, NULL) &&
+         ops_fp8_round(d->o, (uint64_t)T * H * HD, NULL, 0, NULL) &&
          mv_group(DRAFTER_Q8_0, k->oa_tab, T * G, OL, oin, d->o, oin, 1, d->oa, NULL) &&
          mv_strided(DRAFTER_Q8_0, k->wo_b, D, G * OL, d->oa, G * OL, T, d->y, D, NULL);
 }
@@ -65,7 +65,7 @@ bool drafter_blocks(Drafter *d, Seq *s, int32_t p0, char *err)
          ops_hc_mix(d->hcp, k->hca_scale, k->hca_base, hc, D, g->rms_eps, g->hc_eps, g->sinkhorn_iters, T, d->a_pre,
                     d->a_post, d->a_comb, NULL) &&
          ops_hc_pre_rms(d->h, pre, hc, D, k->attn_norm, g->rms_eps, T, d->x, NULL) &&
-         attention(d, k, s->dring + (uint64_t)b * W * hd) &&
+         attention(d, k, s->dring + (uint64_t)b * W * kv_row_bytes(KV_FP8, hd)) &&
          ops_hc_post(d->y, d->h, d->a_post, d->a_comb, hc, D, T, d->mid, NULL) &&
          ops_hc_dot(k->hcf_fn, d->mid, hc, D, T, d->hcp, NULL) &&
          ops_hc_mix(d->hcp, k->hcf_scale, k->hcf_base, hc, D, g->rms_eps, g->hc_eps, g->sinkhorn_iters, T, d->f_pre,

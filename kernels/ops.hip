@@ -7,6 +7,7 @@
 #include "mm.h"
 
 extern "C" {
+#include "substrate/gpu/kvfmt.h"
 #include "substrate/gpu/mm.h"
 #include "substrate/gpu/ops.h"
 }
@@ -369,7 +370,7 @@ __global__ void rope_kernel(float* x, uint32_t heads, uint32_t head_dim, uint32_
 // rotation of the last rope_dim, round.h's FP8 a wave a block of 32, then the row to kv and to the ring at pos % slots
 // - each step the separate kernel's arithmetic in its order, so its bits
 __global__ void kv_finish_kernel(float* kv, uint32_t hd, const float* w, float eps, uint32_t rd, const float* freqs,
-                                 const int32_t* pos, float* ring, uint32_t slots) {
+                                 const int32_t* pos, uint8_t* ring, uint32_t slots) {
   __shared__ float lds[kThreads];
   __shared__ float row[OPS_MAX_KV_DIM];
   const uint32_t t = blockIdx.x;
@@ -389,11 +390,13 @@ __global__ void kv_finish_kernel(float* kv, uint32_t hd, const float* w, float e
   }
   __syncthreads();
   const uint32_t lane = threadIdx.x % kWave, wave = threadIdx.x / kWave;
-  float* out = ring + (uint64_t) ((uint32_t) pos[t] % slots) * hd;
+  uint8_t* out = ring + (uint64_t) ((uint32_t) pos[t] % slots) * kv_row_bytes(KV_FP8, hd);  // its KV_FP8 row
   for (uint32_t b = wave; b < hd / rnd::kFp8Block; b += kThreads / kWave) {  // the whole wave a block
     const uint32_t i = b * rnd::kFp8Block + lane;
-    const float v = rnd::fp8_block(row[i]);
-    x[i] = v, out[i] = v;
+    uint32_t code, scale;
+    x[i] = rnd::fp8_block_coded(row[i], code, scale);
+    out[i] = (uint8_t) code;
+    if (!lane) out[hd + b] = (uint8_t) scale;
   }
 }
 
@@ -614,12 +617,13 @@ extern "C" bool ops_rms_x16(const float* x, uint32_t n, uint32_t xs, const float
 }
 
 extern "C" bool ops_kv_finish(float* kv, uint32_t head_dim, const float* w, float eps, uint32_t rope_dim,
-                              const float* freqs, const int32_t* pos, float* ring, uint32_t slots, uint32_t n_tok,
+                              const float* freqs, const int32_t* pos, void* ring, uint32_t slots, uint32_t n_tok,
                               void* stream) {
   if (!kv || !w || !ring || !slots || !n_tok || !head_dim || head_dim > OPS_MAX_KV_DIM ||
       head_dim % rnd::kFp8Block || rope_dim > head_dim || rope_dim % 2)
     return false;
-  kv_finish_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kv, head_dim, w, eps, rope_dim, freqs, pos, ring, slots);
+  kv_finish_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kv, head_dim, w, eps, rope_dim, freqs, pos, (uint8_t*) ring,
+                                                       slots);
   return ok();
 }
 

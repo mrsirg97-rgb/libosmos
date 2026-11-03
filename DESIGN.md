@@ -1444,6 +1444,40 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
 5. UD-IQ1_M: IQ1_S, IQ2_S and the rest, as the UD section's order. its quality measurement (that order's step 1)
    waits on none of this.
 
+## the KV in the model's formats (2026-11-03)
+
+the operator's point: DeepSeek's design keeps ~0.92 KB a token (0.96 GB at 1M; "the model" above), and this build kept
+~6.4 KB - each value of the attention's state in 4 bytes, though every one is already rounded to the model's own
+grid (ref.py): the window's keys `fp8_round` (E4M3, a power-of-two scale a 32), the compressed rows `fp4_round(16,
+e4m3)` (E2M1, an E4M3 scale a 16), the indexer's keys `fp4_round(32, pow2)` (E2M1, a power of two a 32). int8 would be
+another rounding on another grid: not done. kept now as those codes (`include/substrate/gpu/kvfmt.h`): a row its
+codes then a scale byte a block - 528, 288 and 68 bytes for 512, 512 and 128 values (2,048 / 2,048 / 512 before):
+~0.89 KB a token of compressed rows and keys, the window's ring 13.5 MB a sequence (52 before). a value read back is
+its code's value times its scale, one product - the rounding's own: the same F32.
+
+- **written where rounded**: `ops_fp8_round` / `ops_fp4_round` take a packed output beside the F32 (their scale in
+  hand: recovering it from rounded values fails at FP4-E4M3's subnormal scales); `ops_kv_finish` writes the window's
+  row packed; `ops_put_rows` copies rows by (format, values) - a byte count it took first let the pending rows' F32
+  callers pass a float count and copy a quarter of each row, caught only by the model's fingerprint (no unit test
+  sees host wiring): the interface fixed so a caller names its row's format. values rounded elsewhere (the oracle's,
+  a probe's stand-ins) through `ops_kv_pack`: a block's scale searched (E4M3's 126, a power of two's 254) for the
+  largest under which each value is exactly its code's value; none: NaN's scale code, read back NaN (loud). an
+  FP4-E4M3 scale past 448 (a block's amax past 2,688: none of the model's normed latents) packs NaN's too.
+- **read where used**: `kernels/kvload.h` - fetch a quad's bytes, decode when staged (`ops_sparse_attn`'s scores and
+  values, `ops_index_score`); the attention's second key source in its own format (the compressed rows FP4, the
+  drafter's block's own F32).
+- **its cost, and back**: first 15.0 tok/s against 16.0 - one token's attention 59 -> 147 us (rocprofv3 and a scratch
+  microbenchmark: the scores 13 -> 44, the values 36 -> 83). decoding at staging rather than at the fetch 147 ->
+  142; E4M3 values without branches 136; a small step's tile all 64 heads (16 before: four blocks each decoding the
+  same keys) **70 us** (32 heads 86). decode 15.8-16.1 tok/s (16.0), drafted 31.3 / 23.4 / 34.1 (29.6, maya 29.6).
+- **proven the same bits**: test_kvfmt_gpu (each format rounded, packed and read back the F32's bits; rounded values
+  packed as they are; zero blocks, -0, subnormal scales, a swapped nibble order fails it); test_attn_gpu (packed keys
+  within the bound of a double attention, and the F32 path's bits); test_fuse_gpu (kv_finish's packed row the
+  separate ops'); test_model_gpu's fingerprint cb2ad57792ac72d2 before and after, the probed run the unprobed's;
+  the bench's answers (plain and drafted) the same three hashes.
+- **what it buys**: a 64K context at the 110 GiB budget now starts (before: the pool refused it) - 16.1 / 16.1 /
+  16.0 tok/s, maya's own context. at 1M the state is ~1 GB a sequence, not ~6.7.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

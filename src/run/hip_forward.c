@@ -8,6 +8,7 @@
 
 #include "forward_impl.h"
 #include "substrate/mem/hip_slots.h"
+#include "substrate/gpu/kvfmt.h"
 #include "substrate/gpu/mv.h"
 #include "substrate/gpu/ops.h"
 #include "substrate/model/qtype.h"
@@ -399,6 +400,8 @@ static bool scratch(Forward *f)
       {&b->sye, S * D * F},       {&b->up, FWD_UP_BYTES(P)}, {&b->lat, B * hd * F},
       {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, B * ih * F},
       {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},
+      {&b->kv_p, B * kv_row_bytes(KV_FP8, (uint32_t)hd)}, {&b->lat_p, B * kv_row_bytes(KV_FP4_E4M3, (uint32_t)hd)},
+      {&b->ikr_p, B * kv_row_bytes(KV_FP4_POW2, (uint32_t)ih)}, {&b->row_f, hd * F},
       {&b->score, B * (f->score_stride > Fs ? f->score_stride : Fs) * F}, /* the indexer's; hip_skip.c's sel */
       {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},

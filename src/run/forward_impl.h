@@ -9,6 +9,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "substrate/gpu/kvfmt.h"
 #include "substrate/mem/fetchq.h"
 #include "substrate/mem/pool.h"
 #include "substrate/mem/resident.h"
@@ -92,6 +93,8 @@ typedef struct Scratch
   float *rwp;                   /* a pair's routing weight, in its row's order */
   void *x16, *xe16;             /* f16 activations: a matmul's [16][cols]; the experts' [expert][16][cols] */
   float *lat, *kvc, *scg, *ikr, *qix, *wix, *score;
+  uint8_t *kv_p, *lat_p, *ikr_p; /* the step's rows packed as a sequence keeps them (kvfmt.h): keys, latents, ix keys */
+  float *row_f;                  /* a kept row read back for a probe, and packed again after it */
   float *att;                   /* the attention's scores, then their denominators (ops_sparse_attn) */
   float *erow_f, *ekv;
   uint8_t *erow;
@@ -232,10 +235,10 @@ struct Seq
   int32_t dec_from;   /* the first position whose decoder state is kept: every one from it to pos */
   int32_t last[ENGRAM_MAX_NGRAM + SEQ_MAX_BACK]; /* last[0] the newest: the n-gram's, and seq_rollback's depth */
   int n_last;
-  float *ring[WEIGHTS_MAX_LAYERS];
-  float *ckv[WEIGHTS_MAX_LAYERS], *ik[WEIGHTS_MAX_LAYERS];
+  uint8_t *ring[WEIGHTS_MAX_LAYERS];                             /* KV_FP8 rows (kvfmt.h) */
+  uint8_t *ckv[WEIGHTS_MAX_LAYERS], *ik[WEIGHTS_MAX_LAYERS];     /* KV_FP4_E4M3, KV_FP4_POW2 rows */
   float *pend_kvc[WEIGHTS_MAX_LAYERS], *pend_sc[WEIGHTS_MAX_LAYERS];
-  float *dring; /* a drafter's rings, [block][window][head_dim] (drafter_seed's; NULL until then) */
+  uint8_t *dring; /* a drafter's rings, [block][window] KV_FP8 rows (drafter_seed's; NULL until then) */
 };
 
 /* a resident tensor's bytes as the GPU reads them (its copy in the resident set) */

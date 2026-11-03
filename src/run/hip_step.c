@@ -4,6 +4,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
+#include "substrate/gpu/kvfmt.h"
 #include "substrate/gpu/mv.h"
 #include "substrate/gpu/ops.h"
 
@@ -18,13 +19,14 @@ Seq *seq_create(Forward *f, char err[FORWARD_ERR])
   bool ok = true;
   for (int l = 0; ok && l < f->n_layers; l++)
   {
-    ok = fwd_alloc(&s->ring[l], f->slots * hd * F);
+    /* the window's keys, the compressed rows and the indexer's keys as the model rounds them (kvfmt.h) */
+    ok = fwd_alloc(&s->ring[l], f->slots * kv_row_bytes(KV_FP8, (uint32_t)hd));
     if (ok && g->kv_source[l])
     {
       const uint64_t rows = f->max_ctx / (uint64_t)g->compress[l] + 1;
       const uint64_t pend = FWD_PEND_ROWS(f->step, g->compress[l]);
-      ok = fwd_alloc(&s->ckv[l], rows * hd * F) &&
-           (!g->ix_source[l] || fwd_alloc(&s->ik[l], rows * (uint64_t)g->ix_head_dim * F)) &&
+      ok = fwd_alloc(&s->ckv[l], rows * kv_row_bytes(KV_FP4_E4M3, (uint32_t)hd)) &&
+           (!g->ix_source[l] || fwd_alloc(&s->ik[l], rows * kv_row_bytes(KV_FP4_POW2, (uint32_t)g->ix_head_dim))) &&
            (g->compress[l] < 2 ||
             (fwd_alloc(&s->pend_kvc[l], pend * hd * F) && fwd_alloc(&s->pend_sc[l], pend * hd * F)));
     }

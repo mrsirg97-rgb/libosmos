@@ -52,6 +52,7 @@ struct Drafter
   float *h, *mid, *x, *qa, *q, *kv, *o, *oa, *y, *xf, *logits, *rw, *ga, *up, *hh, *ye, *moe, *sga, *sup, *shh,
       *sye, *hcp, *a_pre, *a_post, *a_comb, *f_pre, *f_post, *f_comb, *pre0, *att, *xc, *xn, *vocab, *mk, *cat,
       *cval, *main_x, *kvs;
+  uint8_t *kvs_p; /* those rows packed as the ring keeps them (kvfmt.h's KV_FP8) */
   int32_t *ridx, *sel, *n_sel, *pos_q, *pos_a, *ids, *pair, *tap_pos;
   const void **tab; /* [w1, w3, w2][pair]: a round's picks' pointers (gathered on the device) */
   DPin *pin;

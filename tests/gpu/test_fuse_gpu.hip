@@ -14,6 +14,7 @@
 
 extern "C" {
 #include "substrate/gpu/mm.h"
+#include "substrate/gpu/kvfmt.h"
 #include "substrate/gpu/ops.h"
 }
 
@@ -53,20 +54,24 @@ static void kv_finish() {
   float *a = dev(kv), *b = dev(kv), *dw = dev(w), *df = dev(freqs), *ra = dev(ring), *rb = dev(ring);
   int32_t* dp = dev(pos);
   const float eps = 1e-6f;
+  const uint64_t rowb = kv_row_bytes(KV_FP8, kHd);  // the window's rows as a sequence keeps them (kvfmt.h)
+  uint8_t* pa = nullptr;
+  CHECK(hipMalloc(&pa, kTok * rowb) == hipSuccess);
   CHECK(ops_rms(a, kHd, kHd, dw, eps, kTok, a, kHd, nullptr) &&
         ops_rope(a, 1, kHd, kRd, kHd, df, dp, false, kTok, nullptr) &&
-        ops_fp8_round(a, (uint64_t) kTok * kHd, nullptr) &&
-        ops_put_rows(ra, kSlots, a, dp, 1, kHd, kTok, nullptr));
+        ops_fp8_round(a, (uint64_t) kTok * kHd, pa, kHd, nullptr) &&
+        ops_put_rows(ra, kSlots, pa, dp, 1, KV_FP8, kHd, kTok, nullptr));
   CHECK(ops_kv_finish(b, kHd, dw, eps, kRd, df, dp, rb, kSlots, kTok, nullptr));
   CHECK(hipDeviceSynchronize() == hipSuccess);
   const std::vector<float> ka = host(a, kv.size()), kb = host(b, kv.size());
-  const std::vector<float> wa = host(ra, ring.size()), wb = host(rb, ring.size());
-  CHECK(std::memcmp(ka.data(), kb.data(), ka.size() * 4) == 0 && std::memcmp(wa.data(), wb.data(), wa.size() * 4) == 0);
+  const std::vector<float> wa = host(ra, ring.size()), wb = host(rb, ring.size());  // the rings' KV_FP8 rows
+  CHECK(std::memcmp(ka.data(), kb.data(), ka.size() * 4) == 0 && std::memcmp(wa.data(), wb.data(), kSlots * rowb) == 0);
   CHECK(!ops_kv_finish(b, OPS_MAX_KV_DIM + 32, dw, eps, kRd, df, dp, rb, kSlots, kTok, nullptr) &&
         !ops_kv_finish(b, kHd + 16, dw, eps, kRd, df, dp, rb, kSlots, kTok, nullptr));
-  for (void* p : {(void*) a, (void*) b, (void*) dw, (void*) df, (void*) ra, (void*) rb, (void*) dp})
+  for (void* p : {(void*) a, (void*) b, (void*) pa, (void*) dw, (void*) df, (void*) ra, (void*) rb, (void*) dp})
     CHECK(hipFree(p) == hipSuccess);
-  std::printf("  kv_finish: %u keys at positions to 8,191 - the keys and the window's rows the four kernels' bits\n",
+  std::printf("  kv_finish: %u keys at positions to 8,191 - the keys and the window's packed rows the four kernels'"
+              " bits\n",
               kTok);
 }
 

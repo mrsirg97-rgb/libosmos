@@ -60,4 +60,64 @@ __device__ inline float fp8_block(float v) {
   return e4m3(fminf(fmaxf(v / s, -kFp8Max), kFp8Max)) * s;
 }
 
+// the codes a rounded value is kept as (substrate/gpu/kvfmt.h): each the exact value round.h's rounding gave, and
+// back - E4M3 (OCP's, no infinities: sign, 4 exponent bits biased 7, 3 mantissa bits; exponent 0 the subnormals,
+// steps of 2^-9), E2M1 (sign, the grid's index 0..7: {0, 0.5, 1, 1.5, 2, 3, 4, 6}), UE8M0 (2^e as e + 127). -0 keeps
+// its sign
+constexpr int kE4m3Bias = 7, kUe8m0Bias = 127;
+__device__ inline uint32_t e4m3_code(float q) {
+  const uint32_t sign = __float_as_uint(q) >> 31 << 7;
+  const float a = fabsf(q);
+  if (a < ldexpf(1.0f, kFp8MinExp)) return sign | (uint32_t) (a * ldexpf(1.0f, kFp8Mant - kFp8MinExp));
+  int e;
+  const float m = frexpf(a, &e);  // a = m 2^e, m in [0.5, 1)
+  return sign | (uint32_t) (e - 1 + kE4m3Bias) << kFp8Mant | (uint32_t) ((m * 2.0f - 1.0f) * (1 << kFp8Mant));
+}
+constexpr uint32_t kE4m3Nan = 0x7F;  // E4M3's NaN (its only one, with the sign): a scale past 448 kept as it
+// a code's value from its bits: a normal one's exponent rebiased (127 - 7) and its mantissa moved up (23 - 3 bits);
+// a subnormal one m 2^-9 (a small integer times a power of two: exact); the sign its own bit
+constexpr uint32_t kE4m3Rebias = (127 - kE4m3Bias) << 23;
+// a value's code (never NaN's: rounding clamps to 448, code 0x7E) without a branch: both forms, one selected
+__device__ inline float e4m3_value_finite(uint32_t c) {
+  const uint32_t mag = c & 0x7F, sign = (c & 0x80) << 24;
+  const uint32_t normal = (mag << (23 - kFp8Mant)) + kE4m3Rebias;
+  const uint32_t sub = __float_as_uint((float) mag * 0.001953125f);  // m 2^-9
+  return __uint_as_float(sign | (mag >> kFp8Mant ? normal : sub));
+}
+__device__ inline float e4m3_value(uint32_t c) {
+  const uint32_t mag = c & 0x7F, sign = (c & 0x80) << 24;
+  if (mag == kE4m3Nan) return __builtin_nanf("");
+  if (mag >> kFp8Mant)
+    return __uint_as_float(sign | ((mag << (23 - kFp8Mant)) + kE4m3Rebias));
+  return __uint_as_float(sign | __float_as_uint((float) mag * 0.001953125f));  // m 2^-9
+}
+__device__ inline uint32_t e2m1_code(float q) {
+  const float a = fabsf(q);
+  const uint32_t i = a == 0.0f ? 0 : a == 0.5f ? 1 : a == 1.0f ? 2 : a == 1.5f ? 3 : a == 2.0f ? 4 : a == 3.0f ? 5
+                   : a == 4.0f ? 6 : 7;
+  return (__float_as_uint(q) >> 31) << 3 | i;
+}
+// the grid's value from its bits: index i >= 2 is exponent (i >> 1) - 1 + 127 and mantissa bit i & 1 (1, 1.5, 2, 3,
+// 4, 6), i = 1 is 0.5, 0 is 0; the sign its own bit
+__device__ inline float e2m1_value(uint32_t c) {
+  const uint32_t i = c & 0x7, sign = (c & 0x8) << 28;
+  const uint32_t mag = i >= 2 ? ((i >> 1) + 126u) << 23 | (i & 1u) << 22 : i ? 0x3F000000u : 0u;
+  return __uint_as_float(sign | mag);
+}
+__device__ inline uint32_t ue8m0_code(float s) { return (uint32_t) (ilogbf(s) + kUe8m0Bias); }
+// 2^(c - 127): F32's own exponent field (c 1 .. 254); 0xFF UE8M0's NaN; 0 the one subnormal, 2^-127
+__device__ inline float ue8m0_value(uint32_t c) {
+  if (c == 0xFF) return __builtin_nanf("");
+  return c ? __uint_as_float(c << 23) : __uint_as_float(1u << 22);
+}
+
+// fp8_block, its code and its block's scale code too (the whole wave calls it)
+__device__ inline float fp8_block_coded(float v, uint32_t& code, uint32_t& scale) {
+  const float amax = wave_amax(fabsf(v));
+  const float s = exp2f(ceilf(log2f(fmaxf(amax, kFp8Floor) / kFp8Max)));
+  const float q = e4m3(fminf(fmaxf(v / s, -kFp8Max), kFp8Max));
+  code = e4m3_code(q), scale = ue8m0_code(s);
+  return q * s;
+}
+
 }  // namespace rnd
