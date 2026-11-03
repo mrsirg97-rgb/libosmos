@@ -1526,6 +1526,40 @@ upload) and Engram's rows.
   lane's largest kernel by more than the round and its launch cost (0.09 ms and ~0.1 ms of gaps), (a)'s 0.2 ms one
   trace's noise, and a drafted step's wider tokens would feel the kernel more. the separate round stays.
 
+## the experts' reads (measured, 2026-11-03)
+
+UD-IQ1_M at the 110 GiB budget (the most this box gives it: ttm's 113.1 GiB less the pool's room, 1.26 GiB, the
+scratch, ~1 GiB at 512-token steps, and the runtime's; the operator keeps ~8 GB of RAM for the rest of the machine).
+experts 123.1 GiB of 15,360 (8.2 MiB each), the rest 7.1 GiB - every tensor but the routed experts always resident,
+the experts by their picks after (choose: the budget refused if the layers' own weights pass it). the bench's
+answers (3 x 256 tokens): ~4.6 streamed picks a token, 98% of picks held.
+
+forward_waits (new): the host's waits on expert reads, split by whether the guess began them. the third answer:
+441 waits on reads not guessed, 853 ms; 274 on guessed reads not yet done, 397 ms - ~4.9 ms a token, the trace's
+idle on reads. the budget: 100 / 105 / 110 GiB streamed 5,927 / 4,660 / 3,512 picks, waited 6.2 / 4.9 / 4.0 s, 15.3-15.5
+/ 15.6-16.0 / 16.0-16.3 tok/s.
+
+tried, none kept (each A/B'd alternating, the answers' hashes the same):
+- **the guess two layers ahead** (layer l + 2's router on layer l's input): guessed 1,861 of the streamed picks
+  (2,136 a layer ahead), fewer of them late (515 against ~900), the waits the same (4.1 against 4.0 s), the speed the
+  same.
+- **the guess wider** (the router's top 10 / 16 a token, not 6): guessed 74% / 81% of the streamed picks (61%), the
+  waits on reads not guessed 2.8 -> 1.9 -> 1.4 s but those on guessed ones 1.4 -> 2.4 -> 3.0 s: the total the same,
+  16.3 / 16.2 tok/s against 16.4.
+- **smaller chunks, more workers** (fetchq's 1 MiB / 12 against 128-512 KiB / 12-48): a miss 2.22-2.53 ms, the
+  same.
+- **O_DIRECT** (scratch rd/: one cold 8 MiB unit alone, the GPU idle - buffered 2.31 ms at 8 threads; O_DIRECT into
+  malloc'd memory 1.39; into the GPU pool's pages straight 2.17, their pinning the cost; through a worker's aligned
+  bounce, then copied, 1.55 at 256 KiB x 16-32). in the engine, each file's O_DIRECT twin through the bounces, a
+  unit always in chunks (test_fetchq's twin check, a zeros file under it, caught a twin ignored): a miss's read
+  2.29 ms, waits 1.82 ms each against 1.97 - nothing. its chunk reads 0.55 ms a 256 KiB under the GPU's load
+  (~0.3 idle), twelve at once ~5.7 GB/s: the SSD's ceiling.
+
+what it says: a layer's reads come in a burst (its misses, the next layer's guesses) that fills the SSD; how a read
+is issued, or how early, moves the wait from one read to another. the lever is the bytes a token reads - the guesses
+read and not picked among them (the guess skipped whole: 16.2 / 16.2 / 16.2 against 16.1-16.2, above) - and the
+budget, which is the machine's.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <time.h>
 
 #include "forward_impl.h"
 
@@ -67,11 +68,24 @@ bool fwd_wait_read(Forward *f, char *err)
 }
 
 /* the unit held and pinned: its reads handed to the pool as they finish, until it is (or its read failed) */
+static uint64_t now_ns(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err)
 {
-  while (pool_state(f->pool, unit) == POOL_READING)
-    if (!fwd_wait_read(f, err))
-      return false;
+  if (pool_state(f->pool, unit) == POOL_READING)
+  {
+    const int k = f->guessed && f->guessed[unit] == f->visits; /* (the guess's arrays: a decode's alone) */
+    const uint64_t t0 = now_ns();
+    while (pool_state(f->pool, unit) == POOL_READING)
+      if (!fwd_wait_read(f, err))
+        return false;
+    f->w_n[k]++, f->w_ns[k] += now_ns() - t0;
+  }
   return pool_dev(f->pool, unit, dev) || fwd_fail(err, "an expert's read from its file failed");
 }
 

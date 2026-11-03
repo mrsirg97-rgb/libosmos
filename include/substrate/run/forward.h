@@ -51,6 +51,7 @@ const uint64_t *forward_picks(const Forward *f);
 uint64_t forward_swaps(const Forward *f);
 void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed);
 uint64_t forward_cpu_picks(const Forward *f);
+void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2]);
 
 #endif
 
@@ -161,6 +162,11 @@ forward_guesses
   in steps that pick fewer experts than a layer has (a decode's, a verify's): the picks of experts not resident so
   far, and of them those guessed a layer ahead - each layer's next experts guessed by the next layer's router on its
   own FFN input and their reads begun then, under the layer's experts and the next one's attention.
+
+forward_waits
+  the experts' reads the host has waited for so far (each picked, its read not done when its layer's experts were
+  launched) and the time it waited, in ns: [0] those not guessed, [1] those guessed a layer ahead (forward_guesses).
+  the host's wait, not the GPU's idle: the GPU may run the layer's ready experts meanwhile.
 
 forward_cpu_picks
   the routed picks the lane's CPU half has computed (forward_lane's cpu_threads; 0 without it).

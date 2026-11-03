@@ -206,6 +206,10 @@ int main(int argc, char** argv) {
                 tps, n_new, (unsigned long long) h, (unsigned long long) gs, (unsigned long long) gg,
                 (unsigned long long) forward_cpu_picks(f), (unsigned long long) forward_swaps(f), g_drafted,
                 g_accepted, g_rounds, g_draft_ms, g_verify_ms);
+    uint64_t wn[2], wns[2];
+    forward_waits(f, wn, wns);
+    std::printf("  so far waited on %llu reads not guessed (%.0f ms), %llu guessed (%.0f ms)\n",
+                (unsigned long long) wn[0], wns[0] / 1e6, (unsigned long long) wn[1], wns[1] / 1e6);
     std::fflush(stdout);
   }
   if (const char* po = std::getenv("PICKS_OUT")) {  // every pick of this run ([layer][expert] uint64): a profile

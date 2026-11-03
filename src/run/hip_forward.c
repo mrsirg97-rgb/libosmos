@@ -625,6 +625,10 @@ void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed)
 {
   *streamed = f->g_need, *guessed = f->g_hit;
 }
+void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2])
+{
+  n[0] = f->w_n[0], n[1] = f->w_n[1], ns[0] = f->w_ns[0], ns[1] = f->w_ns[1];
+}
 const float *forward_logits(const Forward *f) { return f->b.vocab; }
 
 bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR])
