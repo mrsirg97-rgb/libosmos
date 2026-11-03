@@ -10,6 +10,7 @@
 #include "substrate/mem/hip_slots.h"
 #include "substrate/gpu/mv.h"
 #include "substrate/gpu/ops.h"
+#include "substrate/model/qtype.h"
 #include "substrate/model/rope.h"
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
@@ -341,6 +342,33 @@ static bool gates(Forward *f, const Weights *w, char *err)
   return ok || fwd_fail(err, "the Engram's gates could not be read");
 }
 
+/* an F32 router (llama.cpp's GGUFs) rounded to BF16 (nearest, ties to even) for the guess alone: the guess picks the
+   experts read ahead, which change no bit - half its bytes a layer (unsloth's UD: 7.9 -> 3.9 MB). the routing itself
+   reads the F32 */
+static bool guess_routers(Forward *f, const Weights *w, char *err)
+{
+  bool ok = true;
+  for (int l = 0; ok && l < f->n_layers; l++)
+  {
+    const GgufTensor *t = w->layer[l].router;
+    if (t->type != QTYPE_F32)
+      continue;
+    const uint64_t n = t->bytes / sizeof(float);
+    float *x = malloc(t->bytes);
+    uint16_t *h = malloc(n * sizeof *h);
+    ok = x && h && read_all(f, t, x);
+    for (uint64_t i = 0; ok && i < n; i++)
+    {
+      uint32_t u;
+      memcpy(&u, &x[i], 4);
+      h[i] = (uint16_t)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+    }
+    ok = ok && fwd_alloc(&f->guess_router[l], n * sizeof *h) && fwd_put(f->guess_router[l], h, n * sizeof *h);
+    free(x), free(h);
+  }
+  return ok || fwd_fail(err, "a router's copy for the guess could not be made");
+}
+
 static bool scratch(Forward *f)
 {
   const Geometry *g = f->g;
@@ -491,7 +519,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
     ok = fwd_fail(err, "the Engram's file could not be opened");
   else if (!(f->hash = engram_create(w, f->fds, eerr)))
     ok = fwd_fail(err, eerr);
-  else if (!gates(f, w, err))
+  else if (!gates(f, w, err) || !guess_routers(f, w, err))
     ok = false;
   else if (!(f->rows = calloc((size_t)FWD_MAX_BATCH * WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)) ||
            !(f->eg_off = calloc((size_t)FWD_MAX_SUBS * FWD_MAX_BATCH * engram_layers(w, n_layers) *
@@ -574,7 +602,7 @@ void forward_destroy(Forward *f)
   if (f->eg_fd >= 0)
     close(f->eg_fd);
   for (int l = 0; l < WEIGHTS_MAX_LAYERS; l++)
-    hipFree(f->eg_gate[l]);
+    hipFree(f->eg_gate[l]), hipFree(f->guess_router[l]);
   engram_destroy(f->hash);
   free(f->rows);
   free(f);

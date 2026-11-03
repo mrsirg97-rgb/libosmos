@@ -1,4 +1,6 @@
 #include "forward_impl.h"
+#include "substrate/gpu/mv.h"
+#include "substrate/model/qtype.h"
 
 /* the next layer's experts guessed a layer ahead, for a small step (a decode's, a verify's: picks fewer than a
    layer's experts - a prompt's step already reads the whole next layer ahead, hip_ffn.c's prefetch). the guess: the
@@ -21,8 +23,16 @@ bool fwd_guess_queue(Forward *f, int l)
   const LayerWeights *L1 = &f->w->layer[l + 1];
   Scratch *b = &f->b;
   const uint32_t D = g->n_embd, E = g->n_experts, n = f->n;
-  /* b->logits is free: this layer's router has read it (the stream in order) */
-  return fwd_mat(f, L1->router, fwd_dev(f, L1->router), E, D, b->xf, D, n, b->logits, E) &&
+  /* b->logits is free: this layer's router has read it (the stream in order). an F32 router's BF16 copy where there
+     is one (guess_routers: the guess's alone), its matvec a few tokens a call */
+  bool ok = true;
+  if (f->guess_router[l + 1])
+    for (uint32_t t0 = 0; ok && t0 < n; t0 += MV_MAX_TOKENS)
+      ok = mv_strided(QTYPE_BF16, f->guess_router[l + 1], E, D, b->xf + (uint64_t)t0 * D, D,
+                      n - t0 < MV_MAX_TOKENS ? n - t0 : MV_MAX_TOKENS, b->logits + (uint64_t)t0 * E, E, NULL);
+  else
+    ok = fwd_mat(f, L1->router, fwd_dev(f, L1->router), E, D, b->xf, D, n, b->logits, E);
+  return ok &&
          ops_router(b->logits, (const float *)fwd_dev(f, L1->router_bias), E, FWD_GUESS_K, g->expert_scale, n,
                     b->gidx, b->gw, NULL) &&
          hipMemcpyAsync(f->r_guess, b->gidx, (uint64_t)n * FWD_GUESS_K * 4, hipMemcpyDeviceToHost, NULL) ==

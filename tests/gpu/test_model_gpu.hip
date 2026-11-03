@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+#include "test_model.h"
+
 extern "C" {
 #include "substrate/model/gguf.h"
 #include "substrate/model/weights.h"
@@ -128,10 +130,15 @@ int main() {
     std::fclose(f);
   }
   char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
-  Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
-  Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
-  CHECK(g && eg);
+  char path[512];
+  const TestModel which = test_model(path, sizeof path);  // the oracle's dump must be of this model (its pack)
+  CHECK(which != TestModel::kNone);
+  Gguf* g = gguf_create(path, err);
+  Gguf* eg = which == TestModel::kGsq ? gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err)
+                                      : nullptr;  // UD's Engram its own
+  CHECK(g && (eg || which == TestModel::kUd));
   Weights* w = weights_create(g, eg, werr);
+  if (!w) std::printf("  weights_create: %s\n", werr);
   CHECK(w);
   const auto t0 = std::chrono::steady_clock::now();
   Forward* f = forward_create(w, w->geo.n_layers, 4096, kBudget, ferr);

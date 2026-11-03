@@ -6,7 +6,8 @@
 // environment: MODEL (a first shard: unsloth's UD-IQ1_M, say; ENGRAM its Engram file where it has one) or MODEL_DIR
 // (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
 // substrate-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
-// CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids).
+// CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
+// PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS).
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -lsubstrate_hip -lsubstrate
 //        -lhsa-runtime64 -o bin/dbench   (after `make lib/libsubstrate.a lib/libsubstrate_hip.a`)
 #include <hip/hip_runtime.h>
@@ -206,6 +207,16 @@ int main(int argc, char** argv) {
                 (unsigned long long) forward_cpu_picks(f), (unsigned long long) forward_swaps(f), g_drafted,
                 g_accepted, g_rounds, g_draft_ms, g_verify_ms);
     std::fflush(stdout);
+  }
+  if (const char* po = std::getenv("PICKS_OUT")) {  // every pick of this run ([layer][expert] uint64): a profile
+    FILE* pf = std::fopen(po, "wb");
+    CHECK(pf);
+    const size_t n = (size_t) w->geo.n_layers * w->geo.n_experts;
+    CHECK(std::fwrite(forward_picks(f), 8, n, pf) == n);
+    std::fclose(pf);
+    uint64_t total = 0;
+    for (size_t i = 0; i < n; i++) total += forward_picks(f)[i];
+    std::printf("picks: %llu to %s\n", (unsigned long long) total, po);
   }
   drafter_destroy(g_draft);
   forward_destroy(f);

@@ -1381,6 +1381,35 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
      tok/s - no picks profile, no CPU lane, no DSpark: not a number to compare yet (maya on this file: 18.0
      undrafted, 29.3-29.9 drafted).
 5. the oracle and maya: the logits within maya's spread, then the numbers.
+   **the logits (2026-11-03)**: 32 real ids (the GPL-3 prompt's first, `~/substrate-oracle/ids32.txt`); the oracle
+   `ref_gguf.py --dev cpu` on maya's pack of the file (735 s; ppl 20.3), maya `maya-ds4 --ids --dump-logits` on the
+   same pack, test_model_gpu on the UD file (tests/gpu/test_model.h). before today's kernel changes: ours mean KL
+   0.046, maya's 0.272; argmax the oracle's 30 of 32 (both misses ties), maya's 29 (its position 18 KL 5.8); the lane
+   30 of 32 at 0.201; the logits bit for bit run to run and under 2,931 swaps. **position 18 is fragile**: after the
+   Q6_K shape below (any of the shapes tried) ours goes where maya's does there (KL 5.9; the stream from layer 21 on
+   ~10^3 the reference's largest at that position alone), while each layer forced onto the oracle's stream keeps its
+   error (<= 0.17, as before) - a rounding's turn amplified, not a layer's fault; the other 31 positions' mean KL
+   0.037-0.047 across the builds. one 32-token sample cannot rank builds whose sums differ: a longer evaluation is
+   what would (the oracle's ~12 min a 32 tokens on the CPU is the cost).
+   **the decode (2026-11-03; maya's three bench questions, 256 greedy tokens, an unrelated warm-up; drafting off on
+   both; maya's config with `--dspark off`: 16.6 / 17.0 tok/s, 16.8)**:
+   - by id 12.1-13.3; a profile (16,000 tokens: Strata's docs, the Apache and MPL licenses, Strata's Python,
+     maya's C++ - `~/Models/ds1017/UD-IQ1_M/substrate-picks.bin`, dbench `PICKS_OUT`) ranked at 106 GiB ~15.0.
+   - the budget: 110 GiB (this unit's GTT 113 GiB; 112 refused) 15.27 against 15.0 at 106, misses 3,479 / 4,368.
+   - the CPU lane on all 16 cores (the first unit's note was 15): 0 / 4 / 8 / 12 / 16 threads 15.2 / 15.2 / 15.1 /
+     15.2 / 14.6 tok/s (two rounds) - it takes ~85% of the misses and buys nothing; 16 threads slower. off.
+   - traced against maya (rocprofv3, 127 decode steps): the GPU's work the same (ours 57.0 ms a token, maya 57.6),
+     the idle not (12.2 against 4.7). Q6_K - UD's attention, the head - ours 26.9 ms, maya's matvec 23.5; the F32
+     router 4.2 (its guess a second pass, maya's too).
+   - Q6_K's short rows (mm.hip `Short`: q_b's 1,280 columns) 8 waves of 64-value slabs: 171 -> 197 GB/s, its error
+     1.6 -> 1.4 u|wx|; ~15.5 -> 15.7 tok/s.
+   - an F32 router's guess on a BF16 copy (hip_guess.c, `guess_routers`: the guess picks reads ahead, no bit): the
+     three answers' hashes the same, ~15.5 -> 15.8 (with the 4-wave shape).
+   - now (64 x 8): 15.6-15.9 tok/s (rounds 2-4; the first 14.6), **~94% of maya's 16.8**. the trace: busy 53.9 ms a
+     token (maya 57.6), idle 10.4 (maya 4.7) - 3.7 in ~1,500 launch gaps, 6.6 in ~6 waits a token over 100 us
+     (median 0.55 ms) behind the routed experts: the misses, which the CPU lane does not hide here. left: the misses'
+     waits, the token's end (~1.5 ms: the logits to the host, the next step's tables), q_a / kv's matmul (~134 GB/s
+     against the matvec's 171: 80 and 32 row tiles, too few blocks).
 
 ### the order (before 2026-11-03, kept for the record)
 

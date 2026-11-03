@@ -145,6 +145,7 @@ struct Forward
   bool eg_pending;                                   /* the step's rows begun, not yet waited for */
   Engram *hash;
   float *eg_gate[WEIGHTS_MAX_LAYERS]; /* each Engram layer's gate, F32 q k on the device (ops_engram_gate) */
+  uint16_t *guess_router[WEIGHTS_MAX_LAYERS]; /* an F32 router's BF16 copy for the guess alone (hip_guess.c), or NULL */
   float *freqs_win, *freqs_comp;
   Scratch b;
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
