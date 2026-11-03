@@ -1510,9 +1510,21 @@ upload) and Engram's rows.
   experts, measured on this box: nothing gained, 15.3 vs 15.2). layer 14's could run while layers 1-13 do (it
   depends on the tokens alone), but it needs the GPU's Q6_K sum order on the CPU for the same bits, for ~0.5 ms at
   best less bandwidth's contention. layer 1's wait was the reads, fixed above.
-- open: the lane's tables uploaded a layer (an 18 KB copy queued behind the shared expert, ~8 us of idle each,
-  ~0.35 ms a token) - the GPU could read them from pinned memory where they are written; fusing the activation's
-  int8 round into q8_gate_up (40 launches; a 32-row block's amax across a workgroup's rows).
+- **the lane's tables read where they are written** (lane_up mapped, coherent; lane_dev its device address). they
+  were uploaded a layer: an 18 KB copy queued behind the shared expert, the lane's first kernel ~9.5 us after the
+  shared expert's last (median). now no copy: 2.4 us, 62.08 -> 61.82 ms a token in the trace; plain 16.3 / 16.3 /
+  16.2 -> 16.4 / 16.4 / 16.3 and 16.4 / 16.3 / 16.2 -> 16.4 / 16.3 / 16.3 (two rounds alternated), drafted 30.8-31.5 /
+  24.1 / 34.0-34.1 -> 31.5-31.8 / 23.8-24.2 / 34.1-34.4; the hashes the same. safe by the stream's order: the host
+  writes a layer's tables after its picks' wait, which the stream passes only after the last layer's experts; the
+  reading entries' weights after the ready ones' launches, entries those do not read.
+- **tried, not kept: the activations to int8 inside q8_gate_up** (the round after it, 40 launches a token). an
+  int8 block is 32 neighbouring rows, and gate_up's workgroup holds 8 (16 at 16 lanes a row), so the block's max
+  needs more than one: (a) each wave 4 rows in turn, a workgroup a block: gate_up 6.59 -> 6.90 ms a token, the wall
+  61.8 -> 61.6; (b) a row a wave, 1,024-thread workgroups: 7.03, 62.0; (c) the shape unchanged, the last of a
+  block's workgroups to end (an atomic count, a fence) rounding it: 7.09, 62.0. every one the same bits
+  (test_q8_fuse_gpu's int8 check, which caught a first-not-last mutation of (c)), none worth it: each slows the
+  lane's largest kernel by more than the round and its launch cost (0.09 ms and ~0.1 ms of gaps), (a)'s 0.2 ms one
+  trace's noise, and a drafted step's wider tokens would feel the kernel more. the separate round stays.
 
 ## open questions
 

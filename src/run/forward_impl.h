@@ -165,7 +165,7 @@ struct Forward
   bool lane;
   int lane_threads;
   uint8_t *lane_up;
-  void *lane_dev;
+  void *lane_dev; /* lane_up's device address (mapped: the kernels read the tables where the host wrote them) */
   float *lane_x, *lane_w; /* a small step's rows' FFN inputs and weights, gathered by expert */
   int8_t *lane_q;         /* the rows' activations to int8 (q8_round), and their blocks' scales (down's input) */
   float *lane_qd;
