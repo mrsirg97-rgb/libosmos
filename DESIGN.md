@@ -1290,6 +1290,14 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
    and every table today agrees with it - a mutation (a path named, its case removed) must fail them.
 2. the projection: `gguf.c`'s sizes, `weights.c`'s enum and masks, `quant::Type`, the lane's and the CPU's ids, the
    known-lists from the table. the kernel tests unchanged, the CPU lane's bits unchanged.
+   **done (2026-11-03)**: the kernel tests on real blocks skip here (they read ds1017), so the proof is the build's:
+   every kernel's GPU code (`.hip_fatbin`: mv, mm, q8, quant, ops, attn, sparse_attn, round) byte for byte the
+   commit before's, and every host object's `.text` the same but three, each changed by design and tested -
+   `gguf.o` (sizes from the table: test_qtype's sweep, test_gguf), `quant.o` and `mm.o` (`quant_known`, `mm_known` the
+   table's: test_qtype_gpu's sweep calls the kernels). `weights.o` the same bytes: its rename proven where test_weights
+   skips. left as they are: the kernels' own `switch`es (a case each type; test_qtype_gpu finds one missing), Q5_KR
+   (the forward's repack, no file's type) and `DECODE`'s fall-through to IQ1_M in `src/cpu/q8.c` (a new type there
+   needs its own arm).
 3. IQ1_S and IQ2_S: rows in the table, then their decoders against gguf-py on real blocks of the UD file, the lane's
    contract for both, the CPU lane's bits the GPU's.
 4. the UD file's load: roles by path, the alias table, the Engram slices, the folded gate, `exp_probs_b_vl`.

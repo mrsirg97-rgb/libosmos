@@ -161,13 +161,8 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
 
 }  // namespace
 
-extern "C" bool mm_known(uint32_t type) {
-  switch (type) {
-    case quant::kQ8_0: case quant::kQ5_K: case quant::kQ5_KR: case quant::kQ6_K: case quant::kIQ1_M:
-    case quant::kIQ2_XXS: case quant::kIQ2_XS: return true;
-    default: return false;
-  }
-}
+// the table's types, and the repacked Q5_K the forward makes at load (no file's type: no row)
+extern "C" bool mm_known(uint32_t type) { return type == quant::kQ5_KR || (qtype_paths(type) & QTYPE_MM); }
 
 extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
   switch (type) {

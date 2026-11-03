@@ -3,12 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "substrate/model/qtype.h"
 #include "weights_geo.h"
 
-/* the GGUF's type ids (ggml's) the roles take */
-enum { F32 = 0, Q8_0 = 8, Q5_K = 13, Q6_K = 14, IQ2_XXS = 16, IQ2_XS = 17, IQ4_NL = 20, I32 = 26, I64 = 27,
-       IQ1_M = 29, BF16 = 30 };
-#define TY(t) (1u << (t))
+/* a role's types, a mask of the table's ids (qtype.h): TY by name, TY_ID by a tensor's id (below 32: a mask's bits) */
+#define TY_ID(id) (1u << (id))
+#define TY(name) TY_ID(QTYPE_##name)
+#define TY_BITS 32
 #define EXPERT_TYPES (TY(IQ1_M) | TY(IQ2_XXS) | TY(IQ2_XS))
 #define HC_SCALES 3 /* the hyper-connection mix's pre, post and comb scales */
 #define NAME_MAX_LEN 96
@@ -182,7 +183,7 @@ static bool take(Check *c, const Role *r, int l, const GgufTensor **field)
       return fail(c, name, "of another shape");
     values *= t->dims[i];
   }
-  if (t->type >= 32 || !(r->types & TY(t->type)))
+  if (t->type >= TY_BITS || !(r->types & TY_ID(t->type)))
     return fail(c, name, "of a type this role does not take");
   if (t->bytes != gguf_bytes(t->type, values))
     return fail(c, name, "not the bytes of its type");

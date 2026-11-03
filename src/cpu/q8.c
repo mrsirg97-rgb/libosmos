@@ -122,8 +122,8 @@ AVX512 static INLINE void pair_iq1_m(const uint8_t *b, int j, Pair *p)
 
 /* the decoders by type: each row loop its own, the decoder inlined into it */
 #define DECODE(type, b, j, p)                                                                                      \
-  ((type) == LANE_Q8_IQ2_XXS  ? pair_iq2_xxs(b, j, p)                                                               \
-   : (type) == LANE_Q8_IQ2_XS ? pair_iq2_xs(b, j, p)                                                                \
+  ((type) == QTYPE_IQ2_XXS  ? pair_iq2_xxs(b, j, p)                                                               \
+   : (type) == QTYPE_IQ2_XS ? pair_iq2_xs(b, j, p)                                                                \
                               : pair_iq1_m(b, j, p))
 
 /* 4 vectors of 16 int32 to one: lane L's 4 of input i summed into its element i (each 128-bit lane a half-block) */
@@ -236,11 +236,11 @@ AVX512 static INLINE void rows(uint32_t type, uint32_t bytes, const uint8_t *w, 
   AVX512 static void name(const uint8_t *w, uint32_t cols, uint32_t r0, uint32_t r1, const int8_t *q, const float *d, \
                           uint32_t m, float *y, uint32_t ys)                                                       \
   {                                                                                                                \
-    rows(type, type == LANE_Q8_IQ2_XXS ? 66 : type == LANE_Q8_IQ2_XS ? 74 : 56, w, cols, r0, r1, q, d, m, y, ys);   \
+    rows(QTYPE_##type, QTYPE_##type##_BYTES, w, cols, r0, r1, q, d, m, y, ys);                                    \
   }
-ROWS_OF(rows_iq2_xxs, LANE_Q8_IQ2_XXS)
-ROWS_OF(rows_iq2_xs, LANE_Q8_IQ2_XS)
-ROWS_OF(rows_iq1_m, LANE_Q8_IQ1_M)
+ROWS_OF(rows_iq2_xxs, IQ2_XXS)
+ROWS_OF(rows_iq2_xs, IQ2_XS)
+ROWS_OF(rows_iq1_m, IQ1_M)
 
 typedef void (*rows_fn)(const uint8_t *w, uint32_t cols, uint32_t r0, uint32_t r1, const int8_t *q, const float *d,
                         uint32_t m, float *y, uint32_t ys);
@@ -260,9 +260,9 @@ bool cpu_q8_rows(uint32_t type, const void *w, uint32_t cols, uint32_t r0, uint3
   rows_fn fn;
   switch (type)
   {
-  case LANE_Q8_IQ2_XXS: fn = rows_iq2_xxs; break;
-  case LANE_Q8_IQ2_XS: fn = rows_iq2_xs; break;
-  case LANE_Q8_IQ1_M: fn = rows_iq1_m; break;
+  case QTYPE_IQ2_XXS: fn = rows_iq2_xxs; break;
+  case QTYPE_IQ2_XS: fn = rows_iq2_xs; break;
+  case QTYPE_IQ1_M: fn = rows_iq1_m; break;
   default: return false;
   }
   if (!w || !q || !d || !y || !n || !cols || cols % QK || r1 < r0 || !cpu_q8_ready())

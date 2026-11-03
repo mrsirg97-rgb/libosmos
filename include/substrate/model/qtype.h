@@ -35,6 +35,13 @@
 enum QType { QTYPES(QTYPE_ID) };
 #undef QTYPE_ID
 
+/* a row's numbers as constants, for code that switches at compile time (the kernels, the lane): QTYPE_<name>_VALUES,
+   QTYPE_<name>_BYTES, QTYPE_<name>_PATHS */
+#define QTYPE_SIZE(name, id, values, bytes, paths) \
+  QTYPE_##name##_VALUES = values, QTYPE_##name##_BYTES = bytes, QTYPE_##name##_PATHS = paths,
+enum QTypeSize { QTYPES(QTYPE_SIZE) };
+#undef QTYPE_SIZE
+
 typedef struct QTypeInfo
 {
   uint32_t id;
@@ -44,8 +51,14 @@ typedef struct QTypeInfo
   const char *name;
 } QTypeInfo;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 const QTypeInfo *qtype_info(uint32_t id);
 uint32_t qtype_paths(uint32_t id);
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 

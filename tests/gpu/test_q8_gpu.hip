@@ -87,7 +87,7 @@ static void halves(int type, const uint8_t* b, int j, const int8_t* q, float* d,
   }
 }
 
-static int block_bytes(int type) { return type == kIQ2_XXS ? 66 : type == kIQ2_XS ? 74 : 56; }
+static int block_bytes(int type) { return (int) qtype_info((uint32_t) type)->bytes; }
 
 // one row's sum by the contract: blocks to LANE_Q8_LANES(cols) lanes in turn, then the xor tree
 static float row_ref(int type, const uint8_t* row, uint32_t cols, const int8_t* q, const float* qd) {

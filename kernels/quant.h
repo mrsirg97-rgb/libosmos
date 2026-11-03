@@ -10,13 +10,14 @@
 #include <cstdint>
 
 #include "quant_grids.h"
+#include "substrate/model/qtype.h"
 
 namespace quant {
 
-// ggml's type ids, the GGUF's
+// the table's ids (substrate/model/qtype.h)
 enum Type : uint32_t {
-  kF32 = 0, kQ8_0 = 8, kQ5_K = 13, kQ6_K = 14, kIQ2_XXS = 16, kIQ2_XS = 17, kIQ4_NL = 20, kIQ1_M = 29, kBF16 = 30,
-  kMXFP4 = 39,
+  kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
+  kIQ2_XS = QTYPE_IQ2_XS, kIQ4_NL = QTYPE_IQ4_NL, kIQ1_M = QTYPE_IQ1_M, kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
@@ -26,17 +27,20 @@ constexpr int kQ32 = 32;  // Q8_0's and IQ4_NL's
 constexpr float kIq1Delta = 0.125f;
 
 template <Type T> struct Block;
-template <> struct Block<kQ8_0> { static constexpr int values = kQ32, bytes = 34; };
-template <> struct Block<kQ5_K> { static constexpr int values = kQK, bytes = 176; };
+#define QUANT_BLOCK(name) \
+  template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
+QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
+QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4)
+#undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
-template <> struct Block<kQ6_K> { static constexpr int values = kQK, bytes = 210; };
-template <> struct Block<kIQ2_XXS> { static constexpr int values = kQK, bytes = 66; };
-template <> struct Block<kIQ2_XS> { static constexpr int values = kQK, bytes = 74; };
-template <> struct Block<kIQ4_NL> { static constexpr int values = kQ32, bytes = 18; };
-template <> struct Block<kIQ1_M> { static constexpr int values = kQK, bytes = 56; };
-template <> struct Block<kMXFP4> { static constexpr int values = kQ32, bytes = 17; };
-template <> struct Block<kF32> { static constexpr int values = kChunk, bytes = 4 * kChunk; };  // no block: a chunk
-template <> struct Block<kBF16> { static constexpr int values = kChunk, bytes = 2 * kChunk; };  // no block: a chunk
+// no block: a chunk of the table's one-value "blocks"
+template <> struct Block<kF32> { static constexpr int values = kChunk, bytes = QTYPE_F32_BYTES * kChunk; };
+template <> struct Block<kBF16> { static constexpr int values = kChunk, bytes = QTYPE_BF16_BYTES * kChunk; };
+static_assert(QTYPE_F32_VALUES == 1 && QTYPE_BF16_VALUES == 1, "F32 and BF16 decode a value at a time");
+static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && Block<kMXFP4>::values == kQ32 &&
+                  Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
+                  Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK,
+              "the decoders' block lengths");
 
 // every block's size is even (34, 18, 66, 74, 210 ... bytes) and every row starts even: 16-bit loads, never wider
 __device__ inline uint32_t ld16(const uint8_t* p) { return *(const uint16_t*) p; }

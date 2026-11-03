@@ -28,7 +28,7 @@ static float f16(uint32_t bits)
   memcpy(&h, &b, sizeof h);
   return (float)h;
 }
-static size_t block_bytes(uint32_t type) { return type == LANE_Q8_IQ2_XXS ? 66 : type == LANE_Q8_IQ2_XS ? 74 : 56; }
+static size_t block_bytes(uint32_t type) { return qtype_info(type)->bytes; }
 
 /* random bytes, each block's d a small f16 (the scale words' top nibbles for IQ1_M) */
 static void fill(uint32_t type, uint8_t *w, size_t bytes)
@@ -39,7 +39,7 @@ static void fill(uint32_t type, uint8_t *w, size_t bytes)
   for (size_t b = 0; b < bytes; b += bb)
   {
     const uint32_t h = 0x2C00u | (next() >> 22); /* 2^-4 .. 2^-3, a mantissa of its own */
-    if (type == LANE_Q8_IQ1_M)
+    if (type == QTYPE_IQ1_M)
       for (int k = 0; k < 4; k++)
         w[b + 48 + 2 * k + 1] = (uint8_t)((w[b + 48 + 2 * k + 1] & 0x0F) | ((h >> (4 * k)) & 0x0F) << 4);
     else
@@ -55,7 +55,7 @@ static void halves(uint32_t type, const uint8_t *b, int j, const int8_t *q, floa
   {
     const int k = 4 * j + c, h = c / 2;
     int v[8];
-    if (type == LANE_Q8_IQ1_M)
+    if (type == QTYPE_IQ1_M)
     {
       uint64_t sc;
       memcpy(&sc, b + 48, 8);
@@ -72,7 +72,7 @@ static void halves(uint32_t type, const uint8_t *b, int j, const int8_t *q, floa
     {
       uint64_t gr;
       uint8_t sg;
-      if (type == LANE_Q8_IQ2_XXS)
+      if (type == QTYPE_IQ2_XXS)
       {
         const uint8_t *qq = b + 2 + 8 * j;
         const uint32_t aux = ld16(qq + 4) | ld16(qq + 6) << 16;
@@ -180,7 +180,7 @@ int main(void)
   assert(!cpu_q8_rows(13, x, QK, 0, 1, q, d, 1, y, 1)); /* Q5_K: not the contract's */
   assert(!cpu_q8_rows(16, x, 128, 0, 1, q, d, 1, y, 1) && !cpu_q8_rows(16, x, QK, 2, 1, q, d, 1, y, 1));
   assert(!cpu_q8_rows(16, x, QK, 0, 1, q, d, 0, y, 1) && !cpu_q8_rows(16, NULL, QK, 0, 1, q, d, 1, y, 1));
-  const uint32_t types[] = {LANE_Q8_IQ2_XXS, LANE_Q8_IQ2_XS, LANE_Q8_IQ1_M};
+  const uint32_t types[] = {QTYPE_IQ2_XXS, QTYPE_IQ2_XS, QTYPE_IQ1_M};
   for (int i = 0; i < 3; i++)
   {
     check(types[i], 512);  /* 16 lanes, a full vector a step */

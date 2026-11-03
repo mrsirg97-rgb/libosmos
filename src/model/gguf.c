@@ -6,49 +6,19 @@
 #include <sys/stat.h>
 
 #include "substrate/model/gguf.h"
+#include "substrate/model/qtype.h"
 #include "gguf_read.h"
 
 #define GGUF_MAGIC 0x46554747u
 #define GGUF_VERSION 3
 #define GGUF_ALIGN 32
 
-typedef struct
-{
-  uint32_t type;
-  uint32_t block;
-  uint32_t bytes;
-} TypeSize;
-
-/* the types this model's files hold (DESIGN.md); anything else is refused */
-static const TypeSize types[] = {
-    {0, 1, 4},     /* F32 */
-    {8, 32, 34},   /* Q8_0 */
-    {13, 256, 176}, /* Q5_K */
-    {14, 256, 210}, /* Q6_K */
-    {16, 256, 66},  /* IQ2_XXS */
-    {17, 256, 74},  /* IQ2_XS */
-    {20, 32, 18},   /* IQ4_NL */
-    {26, 1, 4},     /* I32 */
-    {27, 1, 8},     /* I64 */
-    {29, 256, 56},  /* IQ1_M */
-    {30, 1, 2},     /* BF16 */
-};
-
-
-static const TypeSize *type_size(uint32_t type)
-{
-  for (size_t i = 0; i < sizeof types / sizeof types[0]; i++)
-    if (types[i].type == type)
-      return &types[i];
-  return NULL;
-}
-
 uint64_t gguf_bytes(uint32_t type, uint64_t values)
 {
-  const TypeSize *t = type_size(type);
-  if (!t || values % t->block)
+  const QTypeInfo *t = qtype_info(type); /* the types a file may hold (qtype.h); anything else is refused */
+  if (!t || !(t->paths & QTYPE_FILE) || values % t->values)
     return 0;
-  const uint64_t blocks = values / t->block;
+  const uint64_t blocks = values / t->values;
   if (blocks > UINT64_MAX / t->bytes)
     return 0;
   return blocks * t->bytes;
@@ -128,10 +98,10 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
     }
     if (!gguf_u32(r, &x->type) || !gguf_u64(r, &x->offset))
       return false;
-    const TypeSize *ts = type_size(x->type);
-    if (!ts)
+    const QTypeInfo *ts = qtype_info(x->type);
+    if (!ts || !(ts->paths & QTYPE_FILE))
       return gguf_fail(r, "a tensor type this build does not know");
-    if (x->dims[0] % ts->block || !(x->bytes = gguf_bytes(x->type, values)))
+    if (x->dims[0] % ts->values || !(x->bytes = gguf_bytes(x->type, values)))
       return gguf_fail(r, "a tensor's rows are not whole blocks");
     if (x->offset % align)
       return gguf_fail(r, "a tensor's offset is not aligned");

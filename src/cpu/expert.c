@@ -5,18 +5,13 @@
 
 #include "quant_grids.h"
 #include "substrate/cpu/expert.h"
+#include "substrate/model/qtype.h"
 
 /* kernels/quant.h's decoders for the experts' types, line for line, 8 values a vector: each product a float product,
    each rounded (this file is built -ffp-contract=off: none fused), so each value the GPU's bits */
 
 #define QK 256            /* a block's values */
-#define IQ2_XXS_BYTES 66  /* ggml's block sizes */
-#define IQ2_XS_BYTES 74
-#define IQ1_M_BYTES 56
 #define IQ1_DELTA 0.125f  /* IQ1's grid offset (gguf-py's IQ1_S.delta) */
-#define GGUF_IQ2_XXS 16   /* ggml's type ids */
-#define GGUF_IQ2_XS 17
-#define GGUF_IQ1_M 29
 
 static uint32_t ld16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
 static uint32_t ld32(const uint8_t *p) { return ld16(p) | ld16(p + 2) << 16; }
@@ -161,9 +156,9 @@ static bool kind(uint32_t type, row_fn *fn, uint32_t *bytes)
 {
   switch (type)
   {
-  case GGUF_IQ2_XXS: *fn = row_iq2_xxs, *bytes = IQ2_XXS_BYTES; return true;
-  case GGUF_IQ2_XS: *fn = row_iq2_xs, *bytes = IQ2_XS_BYTES; return true;
-  case GGUF_IQ1_M: *fn = row_iq1_m, *bytes = IQ1_M_BYTES; return true;
+  case QTYPE_IQ2_XXS: *fn = row_iq2_xxs, *bytes = QTYPE_IQ2_XXS_BYTES; return true;
+  case QTYPE_IQ2_XS: *fn = row_iq2_xs, *bytes = QTYPE_IQ2_XS_BYTES; return true;
+  case QTYPE_IQ1_M: *fn = row_iq1_m, *bytes = QTYPE_IQ1_M_BYTES; return true;
   default: return false;
   }
 }

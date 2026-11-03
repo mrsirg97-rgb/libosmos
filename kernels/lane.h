@@ -6,6 +6,8 @@
 
 #include <math.h>
 
+#include "substrate/model/qtype.h"
+
 #if defined(__HIPCC__)
 #define LANE_FN __host__ __device__ static inline
 #else
@@ -52,11 +54,10 @@ LANE_FN float lane_exp(float x)
 LANE_FN float lane_q8_inv(float amax) { return amax > 0.0f ? LANE_Q8_MAX / amax : 0.0f; }
 LANE_FN float lane_q8_scale(float amax) { return amax / LANE_Q8_MAX; }
 LANE_FN int lane_q8_round(float x, float inv) { return (int)rintf(x * inv); }
-/* whether an expert's three matrices all have the contract's decode (the IQ types: GGUF ids 16, 17, 29) */
-#define LANE_Q8_IQ2_XXS 16
-#define LANE_Q8_IQ2_XS 17
-#define LANE_Q8_IQ1_M 29
-LANE_FN int lane_q8_type(unsigned t) { return t == LANE_Q8_IQ2_XXS || t == LANE_Q8_IQ2_XS || t == LANE_Q8_IQ1_M; }
+/* whether an expert's three matrices all have the contract's decode: the table's rows naming QTYPE_Q8 (qtype.h) */
+#define LANE_Q8_ROW(name, id, values, bytes, paths) || (t == (id) && ((paths) & QTYPE_Q8))
+LANE_FN int lane_q8_type(unsigned t) { return 0 QTYPES(LANE_Q8_ROW); }
+#undef LANE_Q8_ROW
 LANE_FN int lane_q8_types(unsigned g, unsigned u, unsigned d) { return lane_q8_type(g) && lane_q8_type(u) && lane_q8_type(d); }
 /* a half-block's sum: its block scale d (an f16's value), its 2s + 1, its integer dot */
 LANE_FN float lane_q8_part(float d, int s21, int isum) { return d * (float)s21 * LANE_Q8_EIGHTH * (float)isum; }

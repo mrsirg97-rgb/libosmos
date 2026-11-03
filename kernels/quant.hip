@@ -93,13 +93,7 @@ extern "C" bool quant_repack_q5k(const void* src, uint32_t rows, uint32_t cols, 
   return hipGetLastError() == hipSuccess;
 }
 
-extern "C" bool quant_known(uint32_t type) {
-  switch (type) {
-    case quant::kQ8_0: case quant::kQ5_K: case quant::kQ6_K: case quant::kIQ2_XXS: case quant::kIQ2_XS:
-    case quant::kIQ4_NL: case quant::kIQ1_M: case quant::kBF16: case quant::kMXFP4: return true;
-    default: return false;
-  }
-}
+extern "C" bool quant_known(uint32_t type) { return qtype_paths(type) & QTYPE_DECODE; }
 
 extern "C" bool quant_dequant(uint32_t type, const void* src, uint64_t values, float* dst, void* stream) {
   const hipStream_t s = (hipStream_t) stream;
