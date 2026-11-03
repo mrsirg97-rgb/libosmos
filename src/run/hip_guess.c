@@ -52,7 +52,9 @@ void fwd_guess_want(Forward *f, int l)
     if (e < 0 || (uint32_t)e >= E || f->rix[next + (uint32_t)e] >= 0)
       continue;
     f->guessed[next + (uint32_t)e] = f->visits + 1;
+    const bool cold = pool_state(f->pool, next + (uint32_t)e) == POOL_COLD;
     pool_want(f->pool, next + (uint32_t)e, f->visits);
+    f->g_read += cold && pool_state(f->pool, next + (uint32_t)e) != POOL_COLD;
   }
 }
 

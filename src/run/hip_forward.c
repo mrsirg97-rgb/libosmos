@@ -621,9 +621,11 @@ void forward_probe(Forward *f, forward_probe_fn fn, void *arg)
 const float *forward_stream(const Forward *f) { return f->b.h; }
 const uint64_t *forward_picks(const Forward *f) { return f->picks; }
 uint64_t forward_swaps(const Forward *f) { return f->swaps; }
-void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed)
+void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed, uint64_t *read)
 {
   *streamed = f->g_need, *guessed = f->g_hit;
+  if (read)
+    *read = f->g_read;
 }
 void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2])
 {

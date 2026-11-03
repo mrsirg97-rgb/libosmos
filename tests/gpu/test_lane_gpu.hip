@@ -51,7 +51,7 @@ static uint64_t run(Weights* w, const std::vector<int32_t>& ids, uint64_t budget
     for (size_t b = 0; b < st.size() * 4; b++) h = (h ^ ((const uint8_t*) st.data())[b]) * 1099511628211ull;
   }
   uint64_t guessed = 0;
-  forward_guesses(f, streamed, &guessed);
+  forward_guesses(f, streamed, &guessed, nullptr);
   *on_cpu = forward_cpu_picks(f);
   seq_destroy(s);
   forward_destroy(f);

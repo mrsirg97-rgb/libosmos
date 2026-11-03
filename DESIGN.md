@@ -1555,10 +1555,15 @@ tried, none kept (each A/B'd alternating, the answers' hashes the same):
   2.29 ms, waits 1.82 ms each against 1.97 - nothing. its chunk reads 0.55 ms a 256 KiB under the GPU's load
   (~0.3 idle), twelve at once ~5.7 GB/s: the SSD's ceiling.
 
-what it says: a layer's reads come in a burst (its misses, the next layer's guesses) that fills the SSD; how a read
-is issued, or how early, moves the wait from one read to another. the lever is the bytes a token reads - the guesses
-read and not picked among them (the guess skipped whole: 16.2 / 16.2 / 16.2 against 16.1-16.2, above) - and the
-budget, which is the machine's.
+- **the guess narrower** (only its most confident: the router's top 4 / 2 / 0 a token prefetched, the guess still
+  run; forward_guesses' new count of the reads it began): top 6 16.2-16.5 tok/s, 2,265 reads begun, waits ~4.1 s;
+  top 4 16.1-16.4, 1,520, ~4.4 s; top 2 16.0-16.3, 602, ~4.8 s; none 15.8-16.1, 0, ~5.2 s (two rounds each). the
+  guess began ~2,260 reads and ~2,135 streamed picks were guessed: nearly every read it begins is used. it is worth
+  ~0.3 tok/s here, not wasted bandwidth (the skip's earlier "the same" was within its noise). top 6 stays.
+
+what it says: a layer's reads come in a burst (its misses, the next layer's guesses) that fills the SSD, and they are
+bytes the model needs: how a read is issued, how early, or how many of the guesses are read, moves the wait from one
+read to another or adds to it. the lever is the bytes a token must read - the budget, which is the machine's.
 
 ## open questions
 

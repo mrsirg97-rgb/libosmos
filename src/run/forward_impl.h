@@ -158,6 +158,7 @@ struct Forward
   int32_t *r_guess;       /* pinned: the next layer's guessed experts, [token][FWD_GUESS_K] */
   uint64_t *guessed;      /* a unit's guess: the visit it was guessed for (hip_guess.c) */
   uint64_t g_need, g_hit; /* a decode's streamed picks, and of them the ones guessed a layer ahead */
+  uint64_t g_read;        /* the reads the guess began (cold units it wanted) */
   uint64_t w_n[2], w_ns[2]; /* the expert reads the host waited for (fwd_pinned), and its time: [0] not guessed,
                               [1] guessed (begun a layer ahead, not done) */
   uint8_t *r_up;
