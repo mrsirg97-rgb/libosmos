@@ -48,37 +48,6 @@ static bool is_int(GgufValueType t)
          t == GGUF_INT32 || t == GGUF_UINT64 || t == GGUF_INT64;
 }
 
-static bool is_signed(GgufValueType t) { return t == GGUF_INT8 || t == GGUF_INT16 || t == GGUF_INT32 || t == GGUF_INT64; }
-
-/* an integer at its own width: a scalar's value, or an array's item i; false past int64's range */
-static bool int_at(const GgufKv *kv, size_t i, int64_t *out)
-{
-  if (kv->type != GGUF_ARRAY)
-  {
-    if (!is_signed(kv->type) && kv->v.u > INT64_MAX)
-      return false;
-    *out = is_signed(kv->type) ? kv->v.i : (int64_t)kv->v.u;
-    return true;
-  }
-  const void *p = kv->v.items;
-  switch (kv->item)
-  {
-  case GGUF_UINT8: *out = ((const uint8_t *)p)[i]; return true;
-  case GGUF_INT8: *out = ((const int8_t *)p)[i]; return true;
-  case GGUF_UINT16: *out = ((const uint16_t *)p)[i]; return true;
-  case GGUF_INT16: *out = ((const int16_t *)p)[i]; return true;
-  case GGUF_UINT32: *out = ((const uint32_t *)p)[i]; return true;
-  case GGUF_INT32: *out = ((const int32_t *)p)[i]; return true;
-  case GGUF_INT64: *out = ((const int64_t *)p)[i]; return true;
-  case GGUF_UINT64:
-    if (((const uint64_t *)p)[i] > INT64_MAX)
-      return false;
-    *out = (int64_t)((const uint64_t *)p)[i];
-    return true;
-  default: return false;
-  }
-}
-
 /* the same value in both spellings: integers (or lists of them) of any width equal as numbers; anything else the
    same type and bytes */
 static bool same_value(const GgufKv *a, const GgufKv *b)
@@ -92,7 +61,7 @@ static bool same_value(const GgufKv *a, const GgufKv *b)
     for (size_t i = 0; i < n; i++)
     {
       int64_t x, y;
-      if (!int_at(a, i, &x) || !int_at(b, i, &y) || x != y)
+      if (!gguf_int(a, i, &x) || !gguf_int(b, i, &y) || x != y)
         return false;
     }
     return true;
@@ -140,7 +109,7 @@ static bool uint_in(Meta *m, const char *key, int lo, int hi, int *out)
   int64_t v;
   if (!kv)
     return false;
-  if (!int_at(kv, 0, &v) || v < lo || v > hi)
+  if (!gguf_int(kv, 0, &v) || v < lo || v > hi)
     return fail(m, kv->key, "out of range");
   *out = (int)v;
   return true;
@@ -150,7 +119,7 @@ static bool uint_is(Meta *m, const char *key, uint64_t want)
 {
   const GgufKv *kv = find(m, key, GGUF_UINT32);
   int64_t v;
-  return kv && ((int_at(kv, 0, &v) && v >= 0 && (uint64_t)v == want) ||
+  return kv && ((gguf_int(kv, 0, &v) && v >= 0 && (uint64_t)v == want) ||
                 fail(m, kv->key, "a value this build does not run"));
 }
 
@@ -188,7 +157,7 @@ static bool ints(Meta *m, const char *key, size_t min, size_t cap, int64_t *out,
   if (!is_int(kv->item))
     return fail(m, kv->key, "not of integers");
   for (size_t i = 0; i < kv->n; i++)
-    if (!int_at(kv, i, &out[i]))
+    if (!gguf_int(kv, i, &out[i]))
       return fail(m, kv->key, "out of range");
   *n = kv->n;
   return true;

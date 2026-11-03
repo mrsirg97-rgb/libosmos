@@ -13,6 +13,39 @@
 #define GGUF_VERSION 3
 #define GGUF_ALIGN 32
 
+static bool gguf_signed(GgufValueType t)
+{
+  return t == GGUF_INT8 || t == GGUF_INT16 || t == GGUF_INT32 || t == GGUF_INT64;
+}
+
+bool gguf_int(const GgufKv *kv, size_t i, int64_t *out)
+{
+  if (kv->type != GGUF_ARRAY)
+  {
+    if (!gguf_signed(kv->type) && kv->v.u > INT64_MAX)
+      return false;
+    *out = gguf_signed(kv->type) ? kv->v.i : (int64_t)kv->v.u;
+    return true;
+  }
+  const void *p = kv->v.items;
+  switch (kv->item)
+  {
+  case GGUF_UINT8: *out = ((const uint8_t *)p)[i]; return true;
+  case GGUF_INT8: *out = ((const int8_t *)p)[i]; return true;
+  case GGUF_UINT16: *out = ((const uint16_t *)p)[i]; return true;
+  case GGUF_INT16: *out = ((const int16_t *)p)[i]; return true;
+  case GGUF_UINT32: *out = ((const uint32_t *)p)[i]; return true;
+  case GGUF_INT32: *out = ((const int32_t *)p)[i]; return true;
+  case GGUF_INT64: *out = ((const int64_t *)p)[i]; return true;
+  case GGUF_UINT64:
+    if (((const uint64_t *)p)[i] > INT64_MAX)
+      return false;
+    *out = (int64_t)((const uint64_t *)p)[i];
+    return true;
+  default: return false;
+  }
+}
+
 uint64_t gguf_bytes(uint32_t type, uint64_t values)
 {
   const QTypeInfo *t = qtype_info(type); /* the types a file may hold (qtype.h); anything else is refused */

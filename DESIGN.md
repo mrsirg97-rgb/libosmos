@@ -1359,6 +1359,14 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
      `ple.layer_multipliers`, `ple.head_vocab_sizes`, `ple.head_offsets` less each layer's first) into the one
      `Engram`, its checks unchanged. test: both readers' rows the same for the same tokens (`engram_hash.py`'s rows
      on the UD file).
+     **done (2026-11-03)**: `engram.c`'s `from_meta` (the offsets less each layer's first; the map an int32 an
+     entry, its length the vocabulary's); the integer reader one function, `gguf_int` (gguf.c), for it and the
+     geometry. `oracle/engram_rows.py` writes the reference: the layout, primes, offsets and multipliers from
+     DeepSeek's recipe (`engram_hash.py`), only the token map the file's (deriving it needs the tokenizers package);
+     the recipe's primes give the file's rows (384,006,168, 384,016,682). test_engram: 64 positions (seeded ids,
+     the vocabulary's ends and the pad among them), 48 rows each, every one the oracle's; a map entry past the
+     compressed vocabulary and an even multiplier refused. the token map itself is the file's, checked only for
+     range: an independent check of it needs the tokenizer.
    - **4d, the forward.** one gate: an F32 [hc][dim] product, GSQ's folded at load (BF16 x BF16 is exact in F32: the
      kernel's own product, the same bits), UD's read; the Engram rows from a layer's slice of the model's file.
 5. the oracle and maya: the logits within maya's spread, then the numbers.

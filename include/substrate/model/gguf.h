@@ -1,6 +1,7 @@
 #ifndef GGUF_H
 #define GGUF_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -68,6 +69,7 @@ void gguf_destroy(Gguf *g);
 const GgufTensor *gguf_tensor(const Gguf *g, const char *name);
 const GgufKv *gguf_kv(const Gguf *g, const char *key);
 uint64_t gguf_bytes(uint32_t type, uint64_t values);
+bool gguf_int(const GgufKv *kv, size_t i, int64_t *out);
 
 #endif
 
@@ -102,4 +104,8 @@ gguf_tensor / gguf_kv
 gguf_bytes
   the bytes `values` values take in `type` (a whole number of blocks); 0 for a type this build does not know or a
   count that is not whole blocks - which gguf_create refuses.
+
+gguf_int
+  an integer at its own width (any of the eight integer types): a scalar's value (i ignored), or an array's item i
+  (i < n). false for another type, or a value past int64's range (an unsigned 64-bit one above it).
 */
