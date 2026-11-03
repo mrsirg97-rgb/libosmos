@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "substrate/model/gguf.h"
+#include "substrate/model/qtype.h"
 #include "substrate/model/weights.h"
 
 #define T_BF16 30
@@ -265,6 +266,83 @@ static void test_fuzz(void)
   printf("  fuzz: %d random changes to a tensor, every one refused\n", FUZZ);
 }
 
+/* unsloth's UD-IQ1_M: llama.cpp's names and its own types, the Engram in the model's files - every role by the path
+   that reads it (DESIGN.md, step 4b) */
+static void test_ud(void)
+{
+  char p[512], err[WEIGHTS_ERR];
+  snprintf(p, sizeof p, "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf",
+           getenv("HOME"));
+  Gguf *ud = gguf_create(p, err);
+  if (!ud)
+  {
+    printf("  UD-IQ1_M: not on this machine, skipped\n");
+    return;
+  }
+  model = ud, engram = NULL;
+  Weights *w = weights_create(model, NULL, err);
+  if (!w)
+    printf("  UD-IQ1_M: refused: %s\n", err);
+  assert(w);
+  const Geometry *g = &w->geo;
+  assert(g->engram_own && g->n_vocab == 129280 && g->engram[1] && g->engram[14]);
+  const LayerWeights *l = w->layer;
+  assert(w->embed->type == QTYPE_Q8_0 && w->output->type == QTYPE_Q6_K && !w->eg_token_map && !w->eg_primes);
+  assert(l[0].router->type == QTYPE_F32 && l[0].q_a->type == QTYPE_Q6_K && l[0].out_a->n_dims == 2);
+  assert(l[0].exp_gate->type == QTYPE_IQ1_S && l[20].exp_down->type == QTYPE_IQ2_S);
+  assert(l[1].eg_gate && !l[1].eg_q && !l[1].eg_k && l[1].eg_wkv == gguf_tensor(model, "blk.1.engram_kv.weight"));
+  assert(!l[0].eg_gate && !l[0].eg_embd && !l[2].eg_wkv);
+  for (int i = 0; i < g->n_layers; i++)
+    assert(l[i].q_a && l[i].out_a && l[i].hc_ffn_fn && l[i].exp_down && l[i].sh_down && l[i].router_bias);
+  /* the layers' tables: slices of per_layer_token_embd in layer order, tiling it */
+  const GgufTensor *ple = gguf_tensor(model, "per_layer_token_embd.weight");
+  const uint64_t row = gguf_bytes(ple->type, ple->dims[0]);
+  const GgufTensor *a = l[1].eg_embd, *b = l[14].eg_embd;
+  assert(a && b && a != ple && a->type == ple->type && a->file == ple->file && b->file == ple->file);
+  assert(a->dims[0] == ple->dims[0] && a->dims[1] == g->engram_rows[1] && b->dims[1] == g->engram_rows[14]);
+  assert(a->offset == ple->offset && b->offset == a->offset + a->dims[1] * row && a->bytes == a->dims[1] * row);
+  assert(a->bytes + b->bytes == ple->bytes);
+  assert(weights_experts(w, (const int[5]){0}, NULL, 0) == 40u * 384u);
+  weights_destroy(w);
+  printf("  UD-IQ1_M: every role by its path (Q8_0 embedding, F32 router, 2-dim out_a, IQ1_S / IQ2_S experts), the "
+         "gate folded, the tables two slices tiling per_layer_token_embd\n");
+
+  printf("  UD-IQ1_M refused:\n");
+  GgufTensor *t = tensor(model, "blk.3.attn_output_a.weight");
+  t->type = QTYPE_BF16; /* the matmul takes no BF16 */
+  refused("out_a in BF16 (no prompt matmul)", "blk.3.attn_output_a");
+  t->type = QTYPE_Q6_K;
+  t = tensor(model, "blk.14.engram_gate.weight");
+  t->type = QTYPE_BF16;
+  refused("the folded gate in BF16", "blk.14.engram_gate");
+  t->type = QTYPE_F32;
+  t = tensor(model, "per_layer_token_embd.weight");
+  t->dims[1]++;
+  refused("the Engram tables a row longer than the layers'", "per_layer_token_embd");
+  t->dims[1]--;
+  t = tensor(model, "blk.6.ffn_gate_inp.weight");
+  t->type = QTYPE_I32;
+  refused("a router of I32 (no matvec)", "blk.6.ffn_gate_inp");
+  t->type = QTYPE_F32;
+  t = tensor(model, "blk.0.ffn_up_exps.weight");
+  t->type = QTYPE_IQ2_XXS; /* a type the experts' paths take, not of these bytes */
+  refused("IQ1_S experts called IQ2_XXS", "blk.0.ffn_up_exps");
+  t->type = QTYPE_IQ1_S;
+  t = tensor(model, "blk.7.exp_probs_b_vl.bias");
+  t->dims[0]--;
+  refused("the image routing bias a row short", "blk.7.exp_probs_b_vl");
+  t->dims[0]++;
+  t = tensor(model, "blk.2.engram_kv.weight");
+  assert(!t); /* not an Engram layer: none */
+  t = tensor(model, "blk.1.engram_kv.weight");
+  t->name[4] = '2';
+  refused("engram_kv on a layer with no Engram", "engram_kv");
+  t->name[4] = '1';
+  assert(accepted());
+  gguf_destroy(ud);
+  model = NULL;
+}
+
 int main(void)
 {
   printf("[test_weights] start\n");
@@ -283,6 +361,7 @@ int main(void)
   }
   gguf_destroy(model);
   gguf_destroy(engram);
+  test_ud();
   printf("[test_weights] ok\n");
   return 0;
 }

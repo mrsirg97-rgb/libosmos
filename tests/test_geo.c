@@ -55,7 +55,7 @@ static Geometry by_hand(void)
   g.engram[1] = g.engram[14] = true;
   g.engram_rows[1] = 384006168, g.engram_rows[14] = 384016682; /* each layer's 24 columns' span; 768,022,850 in all */
   g.engram_heads = 8, g.engram_head_dim = 256, g.engram_max_ngram = 4, g.engram_cols = 24, g.engram_pad = 2;
-  g.engram_vocab = 99092;
+  g.engram_vocab = 99092, g.engram_own = true;
   g.rms_eps = 1e-20f, g.hc_eps = 1e-6f, g.rope_base = 10000.0f, g.compress_rope_base = 160000.0f;
   g.rope_factor = 16.0f, g.rope_original = 65536, g.yarn_beta_fast = 32.0f, g.yarn_beta_slow = 1.0f;
   g.expert_scale = 1.5f;

@@ -76,6 +76,8 @@ Engram *engram_create(const Weights *w, const int *fds, char err[ENGRAM_ERR])
   if (!w || !fds)
     return fail(err, "no weights"), NULL;
   const Geometry *g = &w->geo;
+  if (g->engram_own) /* the hash's tables as metadata (llama.cpp's ple.*): DESIGN.md, step 4c */
+    return fail(err, "the Engram's own form (ple.*): its hash not read by this build yet"), NULL;
   Engram *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;

@@ -1343,6 +1343,18 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
      `engram_wkv`), `engram_gate` F32 [dim, hc] (GSQ `engram_q` x `engram_k`), `per_layer_token_embd` (the layers'
      tables, sliced: its rows the layers' sum), `exp_probs_b_vl` (checked, never read: image routing). the router
      F32 (GSQ BF16).
+     **done (2026-11-03)**: a role names its path - MAT (`fwd_mat`: the matvec, the matmul where it has one),
+     GROUPED (`mm_group` alone: wo_a), EXPERTS (by tokens and grouped), EMBED, ROWS (the Engram's decode) - or reads
+     raw and names its one type (norms, biases, the hyper-connections, the gate's halves or its fold, the hash
+     tensors). each form's Engram roles on its form's layers only (`ENGRAM_FILE` / `ENGRAM_OWN`, `geo.engram_own`);
+     wo_a's other spelling (UD's [4096, 8192] for [4096, 1024, 8]: the same bytes); the image bias optional and not
+     stored; the own form's tables `eg_slice`, each a layer's rows of per_layer_token_embd in order. found too:
+     `include/substrate/gpu/quant.h`'s `QUANT_Q5_K*`, a fifth copy of a type's numbers, now the table's.
+     test_weights on the UD file: every role (Q8_0 embedding, F32 router, 2-dim wo_a, IQ1_S / IQ2_S experts, the
+     gate folded, the slices tiling the tensor), 7 refusals (wo_a in BF16, the folded gate in BF16, the tables a row
+     long, an I32 router, IQ1_S experts called IQ2_XXS, the image bias short, engram_kv moved off its layer).
+     until 4c and 4d, the own form refuses loudly where it is run: `engram_create` (the hash) and `forward_create`
+     (the rows' file, the gate) say which step, rather than reading NULL.
    - **4c, the hash.** `engram_create` from the tensors (GSQ) or the metadata arrays (UD: `engram.token_map`,
      `ple.layer_multipliers`, `ple.head_vocab_sizes`, `ple.head_offsets` less each layer's first) into the one
      `Engram`, its checks unchanged. test: both readers' rows the same for the same tokens (`engram_hash.py`'s rows

@@ -431,6 +431,8 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   char eerr[ENGRAM_ERR] = "";
   if (!ok)
     fwd_fail(err, "a model file could not be opened");
+  else if (w->geo.engram_own) /* its rows a slice of the model's files, its gate folded: DESIGN.md, step 4d */
+    ok = fwd_fail(err, "the Engram's own form (per_layer_token_embd): not run by this build yet");
   else if ((f->eg_fd = open(w->engram->paths[0], O_RDONLY)) < 0)
     ok = fwd_fail(err, "the Engram file could not be opened");
   else if (!(f->hash = engram_create(w, f->fds, eerr)))

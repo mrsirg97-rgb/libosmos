@@ -9,9 +9,11 @@ bool quant_dequant(uint32_t type, const void *src, uint64_t values, float *dst, 
 bool quant_dequant_f16(uint32_t type, const void *src, uint64_t values, void *dst, void *stream);
 bool quant_repack_q5k(const void *src, uint32_t rows, uint32_t cols, void *dst, void *stream);
 
-#define QUANT_Q5_K 13                       /* ggml's type id */
-#define QUANT_Q5_K_VALUES 256               /* a block's values */
-#define QUANT_Q5_K_BYTES 176                /* a block's bytes */
+#include "substrate/model/qtype.h"
+
+#define QUANT_Q5_K QTYPE_Q5_K               /* the table's (qtype.h) */
+#define QUANT_Q5_K_VALUES QTYPE_Q5_K_VALUES
+#define QUANT_Q5_K_BYTES QTYPE_Q5_K_BYTES
 #define QUANT_Q5_KR (0x100 | QUANT_Q5_K)    /* Q5_K repacked (quant_repack_q5k): mm's and mv's type */
 #define QUANT_Q5_KR_BYTES_A_BLOCK 180       /* a row's share of a tile's block: +2.3% */
 #define QUANT_Q5_KR_BYTES(rows, cols) ((uint64_t)(rows) * ((cols) / QUANT_Q5_K_VALUES) * QUANT_Q5_KR_BYTES_A_BLOCK)

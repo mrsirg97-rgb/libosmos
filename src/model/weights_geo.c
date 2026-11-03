@@ -310,6 +310,7 @@ static bool ple_engram(Meta *m, const Gguf *file, Geometry *g)
     g->engram[ids[i]] = true;
   }
   g->engram_cols = (g->engram_max_ngram - 1) * g->engram_heads;
+  g->engram_own = true;
   const size_t n = n_eg * (size_t)g->engram_cols;
   int64_t *off = malloc(n * sizeof *off), *size = malloc(n * sizeof *size);
   size_t n_off = 0, n_size = 0;
