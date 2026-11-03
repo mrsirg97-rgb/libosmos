@@ -32,7 +32,9 @@ bool forward_lane(Forward *f, int cpu_threads, char err[FORWARD_ERR])
       (hipHostMalloc((void **)&f->lane_up, sizeof(LaneTabs), 0) != hipSuccess ||
        !fwd_alloc(&f->lane_dev, sizeof(LaneTabs)) || !fwd_alloc(&f->lane_x, LANE_ROWS * D * sizeof(float)) ||
        !fwd_alloc(&f->lane_w, LANE_ROWS * sizeof(float)) || !fwd_alloc(&f->lane_q, LANE_ROWS * D) ||
-       !fwd_alloc(&f->lane_qd, LANE_ROWS * (D / LANE_Q8_VALUES) * sizeof(float))))
+       !fwd_alloc(&f->lane_qd, LANE_ROWS * (D / LANE_Q8_VALUES) * sizeof(float)) ||
+       !fwd_alloc(&f->lane_xq, LANE_PAIRS * D) ||
+       !fwd_alloc(&f->lane_xqd, LANE_PAIRS * (D / LANE_Q8_VALUES) * sizeof(float))))
     return fwd_fail(err, "memory refused (the lane's tables)");
   if (cpu_threads && !f->cpu && !fwd_cpu_create(f, cpu_threads, err))
     return false;
@@ -71,14 +73,14 @@ static bool entries(Forward *f, int l, uint32_t picks, uint32_t a0, uint32_t z0,
     for (z = a + 1; z < z0 && t->cnt[z] == t->cnt[a];)
       z++;
     const uint32_t c = (uint32_t)t->cnt[a];
-    if (fused)
-      ok = q8_gate_up(L->exp_gate->type, d->w[0] + a, d->w[1] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_q,
-                      f->lane_qd, f->lane_w, g->clamp_exp[l], b->hh, FF, NULL);
+    if (fused) /* x by token, the weight by pair: neither gathered */
+      ok = q8_gate_up(L->exp_gate->type, d->w[0] + a, d->w[1] + a, d->cnt + a, d->xrow + a, d->tok, d->pair, z - a, c,
+                      FF, D, f->lane_xq, f->lane_xqd, b->rw, g->clamp_exp[l], b->hh, FF, NULL);
     else
-      ok = q8 ? q8_group_tok(L->exp_gate->type, d->w[0] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_q,
-                             f->lane_qd, b->ga, FF, NULL) &&
-                    q8_group_tok(L->exp_up->type, d->w[1] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_q,
-                                 f->lane_qd, b->upr, FF, NULL)
+      ok = q8 ? q8_group_tok(L->exp_gate->type, d->w[0] + a, d->cnt + a, d->xrow + a, d->tok, z - a, c, FF, D,
+                             f->lane_xq, f->lane_xqd, b->ga, FF, NULL) &&
+                    q8_group_tok(L->exp_up->type, d->w[1] + a, d->cnt + a, d->xrow + a, d->tok, z - a, c, FF, D,
+                                 f->lane_xq, f->lane_xqd, b->upr, FF, NULL)
               : mv_group_tok(L->exp_gate->type, d->w[0] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_x, D,
                              b->ga, FF, NULL) &&
                     mv_group_tok(L->exp_up->type, d->w[1] + a, d->cnt + a, d->xrow + a, z - a, c, FF, D, f->lane_x, D,
@@ -91,7 +93,7 @@ static bool entries(Forward *f, int l, uint32_t picks, uint32_t a0, uint32_t z0,
     for (z = a + 1; z < z0 && t->cnt[z] == t->cnt[a];)
       z++;
     const uint32_t c = (uint32_t)t->cnt[a];
-    ok = q8 ? q8_group_tok(L->exp_down->type, d->w[2] + a, d->cnt + a, d->xrow + a, z - a, c, D, FF, f->lane_q,
+    ok = q8 ? q8_group_tok(L->exp_down->type, d->w[2] + a, d->cnt + a, d->xrow + a, NULL, z - a, c, D, FF, f->lane_q,
                            f->lane_qd, b->ye, D, NULL)
             : mv_group_tok(L->exp_down->type, d->w[2] + a, d->cnt + a, d->xrow + a, z - a, c, D, FF, b->hh, FF,
                            b->ye, D, NULL);
@@ -184,12 +186,15 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
   if (nc && !fwd_cpu_submit(f, l, picks, nc, t->tok, t->pair, err))
     return false;
   const LaneTabs *d = (const LaneTabs *)f->lane_dev;
-  bool ok = fwd_put_async(f->lane_dev, f->lane_up, sizeof(LaneTabs)) &&
-            ops_gather_rows(f->lane_x, b->xf, d->tok, picks, D, NULL) &&
-            ops_gather_rows(f->lane_w, b->rw, d->pair, picks, 1, NULL);
-  /* the experts over int8 inputs (q8.h: the IQ types), else the F32 matvec; either way a token's rows its own */
+  /* the experts over int8 inputs (q8.h: the IQ types), else the F32 matvec; either way a token's rows its own. over
+     int8, each token's input rounded once and read by token (no copy a pair); the weights gathered for the unfused
+     activation alone. the F32 matvec reads its rows gathered */
   const bool q8 = lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type);
-  ok = ok && (!q8 || q8_round(f->lane_x, picks, D, D, f->lane_q, f->lane_qd, NULL));
+  const bool fused = q8 && L->exp_gate->type == L->exp_up->type;
+  bool ok = fwd_put_async(f->lane_dev, f->lane_up, sizeof(LaneTabs)) &&
+            (q8 ? q8_round(b->xf, n, D, D, f->lane_xq, f->lane_xqd, NULL)
+                : ops_gather_rows(f->lane_x, b->xf, d->tok, picks, D, NULL)) &&
+            (fused || ops_gather_rows(f->lane_w, b->rw, d->pair, picks, 1, NULL));
   ok = ok && entries(f, l, picks, 0, nr, q8); /* the ready ones, then the reading ones as their reads end */
   for (uint32_t k = nr; ok && k < ne; k++)
   {
@@ -200,8 +205,6 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
   }
   for (int r = 0; ok && r < 3 && nr < ne; r++)
     ok = fwd_put_async((void *)(d->w[r] + nr), t->w[r] + nr, (ne - nr) * sizeof *t->w[r]);
-  /* x to int8 again before the reading ones: the ready ones' activations took its buffer (the same bytes again) */
-  ok = ok && (!q8 || !nr || nr == ne || q8_round(f->lane_x, picks, D, D, f->lane_q, f->lane_qd, NULL));
   ok = ok && entries(f, l, picks, nr, ne, q8);
   /* the CPU's rows: the stream waits for their post, then takes them into ye beside the GPU's */
   ok = ok && (!nc || (ops_wait(f->cpu_seq_dev, f->cpu_value, NULL) &&

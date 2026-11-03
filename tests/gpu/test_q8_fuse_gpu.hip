@@ -1,7 +1,7 @@
 // q8_gate_up against what it stands for - q8_group_tok on the gate, on the up, then ops_swiglu_lane - bit for bit, on
-// ds1017's experts (an IQ1_M, an IQ2_XXS and an IQ2_XS layer; experts 7 and 300 a launch), 1 to 8 tokens each at a
+// ds1017's or UD-IQ1_M's experts (three layers of their types; experts 7 and 300 a launch), 1 to 8 tokens each at a
 // launch of that width and of 8, at a clamp that bites and one that does not; the rows past a matrix's count left
-// as they were; refusals
+// as they were; the rows read by token (xin, win) the gathered rows' bits; refusals
 #include <hip/hip_runtime.h>
 
 #include <fcntl.h>
@@ -20,6 +20,7 @@ extern "C" {
 #include "substrate/gpu/q8.h"
 #include "substrate/model/gguf.h"
 }
+#include "test_model.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -46,6 +47,65 @@ static std::vector<uint8_t> slice(const Gguf* g, const GgufTensor* t, int e) {
   CHECK(fd >= 0 && pread(fd, w.data(), bytes, (off_t) (t->offset + (uint64_t) e * bytes)) == (ssize_t) bytes);
   close(fd);
   return w;
+}
+
+// the lane's rows by token (xin, win): kTokens tokens' rows rounded once, the 16 rows reading theirs through xin and
+// their weights through win - the bits of the same rows gathered a copy a pair, each copy rounded, the weights gathered
+// (the lane's way before). the table entries past each count an index far past any buffer: read, the launch faults
+static void by_token(uint32_t type, const void* const* gates, const void* const* ups, int32_t* dcnt, const int32_t* dxrow,
+                     const int32_t* xrow, uint32_t rows, uint32_t cols, uint32_t nrow, const std::vector<float>& sc,
+                     float* dx, int8_t* dq, float* dd, float* dga, float* dup, float* dh, float* dref) {
+  constexpr uint32_t kTokens = 5;
+  constexpr int32_t kPoison = 0x40000000;
+  const float lim = 0.75f;  // (a clamp that bites)
+  std::vector<float> tx((size_t) kTokens * cols), gx((size_t) nrow * cols), gs(nrow);
+  for (float& v : tx) v = uniform() * 3.0f;
+  std::vector<int32_t> xin(nrow), win(nrow);
+  for (uint32_t r = 0; r < nrow; r++) {
+    xin[r] = (int32_t) ((r * 3 + 1) % kTokens), win[r] = (int32_t) ((r * 5 + 3) % nrow);
+    std::memcpy(&gx[(size_t) r * cols], &tx[(size_t) xin[r] * cols], cols * 4);
+    gs[r] = sc[win[r]];
+  }
+  float *dtx, *dtd, *dgs, *dws;
+  int8_t* dtq;
+  int32_t *dxin, *dwin;
+  CHECK(hipMalloc(&dtx, tx.size() * 4) == hipSuccess && hipMalloc(&dtq, tx.size()) == hipSuccess &&
+        hipMalloc(&dtd, (size_t) kTokens * (cols / kBlock) * 4) == hipSuccess && hipMalloc(&dgs, nrow * 4) == hipSuccess &&
+        hipMalloc(&dws, nrow * 4) == hipSuccess && hipMalloc(&dxin, nrow * 4) == hipSuccess &&
+        hipMalloc(&dwin, nrow * 4) == hipSuccess);
+  CHECK(hipMemcpy(dtx, tx.data(), tx.size() * 4, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(dx, gx.data(), gx.size() * 4, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(dgs, gs.data(), nrow * 4, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(dws, sc.data(), nrow * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(q8_round(dtx, kTokens, cols, cols, dtq, dtd, nullptr) && q8_round(dx, nrow, cols, cols, dq, dd, nullptr));
+  const size_t out = (size_t) nrow * rows;
+  std::vector<float> ref(out), got(out), refg(out), gotg(out);
+  for (uint32_t n = 1; n <= kTok; n++) {
+    const int32_t cnt[kExperts] = {(int32_t) n, (int32_t) (kTok + 1 - n)};
+    std::vector<int32_t> xp = xin, wp = win;
+    for (uint32_t e = 0; e < kExperts; e++)
+      for (uint32_t t = (uint32_t) cnt[e]; t < kTok; t++) xp[xrow[e] + t] = wp[xrow[e] + t] = kPoison;
+    CHECK(hipMemcpy(dcnt, cnt, sizeof cnt, hipMemcpyHostToDevice) == hipSuccess &&
+          hipMemcpy(dxin, xp.data(), nrow * 4, hipMemcpyHostToDevice) == hipSuccess &&
+          hipMemcpy(dwin, wp.data(), nrow * 4, hipMemcpyHostToDevice) == hipSuccess);
+    for (float* p : {dref, dh, dga, dup}) CHECK(hipMemset(p, 0xFF, out * 4) == hipSuccess);
+    CHECK(q8_gate_up(type, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, dgs, lim,
+                     dref, rows, nullptr) &&
+          q8_group_tok(type, gates, dcnt, dxrow, nullptr, kExperts, kTok, rows, cols, dq, dd, dga, rows, nullptr));
+    CHECK(q8_gate_up(type, gates, ups, dcnt, dxrow, dxin, dwin, kExperts, kTok, rows, cols, dtq, dtd, dws, lim, dh,
+                     rows, nullptr) &&
+          q8_group_tok(type, gates, dcnt, dxrow, dxin, kExperts, kTok, rows, cols, dtq, dtd, dup, rows, nullptr) &&
+          hipDeviceSynchronize() == hipSuccess);
+    CHECK(hipMemcpy(ref.data(), dref, out * 4, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(got.data(), dh, out * 4, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(refg.data(), dga, out * 4, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(gotg.data(), dup, out * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(std::memcmp(got.data(), ref.data(), out * 4) == 0 && std::memcmp(gotg.data(), refg.data(), out * 4) == 0);
+  }
+  for (void* p : {(void*) dtx, (void*) dtq, (void*) dtd, (void*) dgs, (void*) dws, (void*) dxin, (void*) dwin})
+    CHECK(hipFree(p) == hipSuccess);
+  std::printf("  %-26s by token: %u tokens rounded once, 16 rows through xin / win - the gathered rows' bits\n", "",
+              kTokens);
 }
 
 static void layer(const Gguf* g, int l) {
@@ -94,10 +154,10 @@ static void layer(const Gguf* g, int l) {
       CHECK(hipMemcpy(dcnt, cnt, sizeof cnt, hipMemcpyHostToDevice) == hipSuccess);
       for (uint32_t width : {std::max(n, kTok + 1 - n), kTok}) {
         CHECK(hipMemset(dref, 0xFF, ref.size() * 4) == hipSuccess && hipMemset(dh, 0xFF, got.size() * 4) == hipSuccess);
-        CHECK(q8_group_tok(tg->type, gates, dcnt, dxrow, kExperts, width, rows, cols, dq, dd, dga, rows, nullptr) &&
-              q8_group_tok(tu->type, ups, dcnt, dxrow, kExperts, width, rows, cols, dq, dd, dup, rows, nullptr) &&
+        CHECK(q8_group_tok(tg->type, gates, dcnt, dxrow, nullptr, kExperts, width, rows, cols, dq, dd, dga, rows, nullptr) &&
+              q8_group_tok(tu->type, ups, dcnt, dxrow, nullptr, kExperts, width, rows, cols, dq, dd, dup, rows, nullptr) &&
               ops_swiglu_lane(dga, dup, rows, lim, ds, nrow, dref, nullptr));
-        CHECK(q8_gate_up(tg->type, gates, ups, dcnt, dxrow, kExperts, width, rows, cols, dq, dd, ds, lim, dh, rows,
+        CHECK(q8_gate_up(tg->type, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, width, rows, cols, dq, dd, ds, lim, dh, rows,
                          nullptr) &&
               hipDeviceSynchronize() == hipSuccess);
         CHECK(hipMemcpy(ref.data(), dref, ref.size() * 4, hipMemcpyDeviceToHost) == hipSuccess &&
@@ -119,12 +179,13 @@ static void layer(const Gguf* g, int l) {
     std::printf("  %-26s type %2u %4u x %4u, clamp %g (%u gates past it): the unfused bits at 1 .. %u tokens\n", gn,
                 tg->type, rows, cols, lim, clamped, kTok);
   }
+  by_token(tg->type, gates, ups, dcnt, dxrow, xrow, rows, cols, nrow, sc, dx, dq, dd, dga, dup, dh, dref);
   // refusals: no scale, h's rows shorter than a row, a type not the contract's
-  CHECK(!q8_gate_up(tg->type, gates, ups, dcnt, dxrow, kExperts, kTok, rows, cols, dq, dd, nullptr, 1.0f, dh, rows,
+  CHECK(!q8_gate_up(tg->type, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, nullptr, 1.0f, dh, rows,
                     nullptr) &&
-        !q8_gate_up(tg->type, gates, ups, dcnt, dxrow, kExperts, kTok, rows, cols, dq, dd, ds, 1.0f, dh, rows - 1,
+        !q8_gate_up(tg->type, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, ds, 1.0f, dh, rows - 1,
                     nullptr) &&
-        !q8_gate_up(13, gates, ups, dcnt, dxrow, kExperts, kTok, rows, cols, dq, dd, ds, 1.0f, dh, rows, nullptr));
+        !q8_gate_up(13, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, ds, 1.0f, dh, rows, nullptr));
   for (void* p : {(void*) dw, (void*) dp, (void*) dx, (void*) dq, (void*) dd, (void*) ds, (void*) dga, (void*) dup,
                   (void*) dh, (void*) dref, (void*) dcnt, (void*) dxrow})
     CHECK(hipFree(p) == hipSuccess);
@@ -132,19 +193,18 @@ static void layer(const Gguf* g, int l) {
 
 int main() {
   std::printf("[test_q8_fuse_gpu] start\n");
-  const char* home = std::getenv("HOME");
   char path[512];
-  std::snprintf(path, sizeof path, "%s/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
-                home ? home : "");
+  const TestModel which = test_model(path, sizeof path);
   int ndev = 0;
-  if (access(path, R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
-    std::printf("[test_q8_fuse_gpu] skipped: no ds1017 or no GPU\n");
+  if (which == TestModel::kNone || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
+    std::printf("[test_q8_fuse_gpu] skipped: no ds1017 or UD-IQ1_M, or no GPU\n");
     return 77;
   }
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
-  for (int l : {0, 10, 17}) layer(g, l);  // IQ1_M, IQ2_XXS, IQ2_XS
+  // ds1017's IQ1_M, IQ2_XXS, IQ2_XS; UD-IQ1_M's IQ1_S, IQ2_XXS, IQ2_S (test_model.h's gates)
+  for (int l : which == TestModel::kUd ? std::vector<int>{0, 20, 38} : std::vector<int>{0, 10, 17}) layer(g, l);
   gguf_destroy(g);
   std::printf("[test_q8_fuse_gpu] ok\n");
   return 0;

@@ -112,10 +112,10 @@ static void layer(const Gguf* g, int l) {
   for (float lim : {0.75f, 1e30f}) {
     // the GPU lane's steps
     CHECK(q8_round(dx, kRows, D, D, dq, dd, nullptr) &&
-          q8_gate_up(type[0], (const void* const*) dtab, (const void* const*) dtab + kNe, dcnt, dxrow, kNe, 3, FF, D, dq,
+          q8_gate_up(type[0], (const void* const*) dtab, (const void* const*) dtab + kNe, dcnt, dxrow, nullptr, nullptr, kNe, 3, FF, D, dq,
                      dd, dsc, lim, dh, FF, nullptr) &&
           q8_round(dh, kRows, FF, FF, dqh, dhd, nullptr) &&
-          q8_group_tok(type[2], (const void* const*) dtab + 2 * kNe, dcnt, dxrow, kNe, 3, D, FF, dqh, dhd, dy, D,
+          q8_group_tok(type[2], (const void* const*) dtab + 2 * kNe, dcnt, dxrow, nullptr, kNe, 3, D, FF, dqh, dhd, dy, D,
                        nullptr) &&
           hipDeviceSynchronize() == hipSuccess);
     std::vector<float> ref((size_t) kRows * D), got(ref.size());

@@ -5,11 +5,11 @@
 #include <stdint.h>
 
 bool q8_round(const float *x, uint32_t rows, uint32_t cols, uint32_t xs, int8_t *q, float *d, void *stream);
-bool q8_group_tok(uint32_t type, const void *const *w, const int32_t *cnt, const int32_t *xrow, uint32_t n,
-                  uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t *q, const float *d, float *y,
+bool q8_group_tok(uint32_t type, const void *const *w, const int32_t *cnt, const int32_t *xrow, const int32_t *xin,
+                  uint32_t n, uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t *q, const float *d, float *y,
                   uint32_t ys, void *stream);
 bool q8_gate_up(uint32_t type, const void *const *wg, const void *const *wu, const int32_t *cnt, const int32_t *xrow,
-                uint32_t n, uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t *q, const float *d,
+                const int32_t *xin, const int32_t *win, uint32_t n, uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t *q, const float *d,
                 const float *scale, float lim, float *h, uint32_t hs, void *stream);
 
 #endif
@@ -31,13 +31,15 @@ q8_group_tok
   rows of `cols`) on its cnt[m] (1 .. max_cnt <= MV_MAX_TOKENS) rows of q / d from row xrow[m], into y's rows from
   xrow[m] (ys floats apart). a row's sum: its blocks to LANE_Q8_LANES(cols) lanes in turn, each block's two halves'
   lane_q8_part added, times the block's scale fmaf'd onto the lane's sum, then the lanes' xor tree - so a token's bits
-  are its own alone, whatever max_cnt, the matrices beside it or the run. q / d rows up to xrow[m] + max_cnt are read
-  (past cnt[m], not used). false, nothing queued, for a type it does not take, cols not whole blocks, n 0 or past
+  are its own alone, whatever max_cnt, the matrices beside it or the run. output row r's input: q / d row r (xin NULL),
+  else row xin[r] - the lane's rows by token, each token's row rounded once for all its experts, not a copy a pair.
+  the rows past cnt[m] are summed on the count's last input (not stored): no row nor xin entry past it is read. false, nothing queued, for a type it does not take, cols not whole blocks, n 0 or past
   MV_MAX_GROUP, max_cnt 0 or past MV_MAX_TOKENS, or a launch refused.
 
 q8_gate_up
   an expert's gate and up and the activation in one launch: q8_group_tok's sums of wg[m] and of wu[m] (both `type`)
   on the same rows of q / d - x read once for both - and, rather than writing them, h's row r (hs floats apart) the
-  lane's activation on them: lane_swiglu(gate, up, lim, scale[r]) - ops_swiglu_lane's bits on q8_group_tok's. false,
+  lane's activation on them: lane_swiglu(gate, up, lim, scale[r]) (scale[win[r]] with a win: the router's weights by
+  pair, not gathered) - ops_swiglu_lane's bits on q8_group_tok's. inputs by xin as q8_group_tok's. false,
   nothing queued, as q8_group_tok, and for no scale or hs shorter than a row.
 */

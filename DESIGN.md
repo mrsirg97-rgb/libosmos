@@ -1478,6 +1478,42 @@ its code's value times its scale, one product - the rounding's own: the same F32
 - **what it buys**: a 64K context at the 110 GiB budget now starts (before: the pool refused it) - 16.1 / 16.1 /
   16.0 tok/s, maya's own context. at 1M the state is ~1 GB a sequence, not ~6.7.
 
+## less work a decode token (2026-11-03)
+
+a fresh trace of UD-IQ1_M's plain decode (100 steps): 63.0 ms a token, the GPU busy 54.0, 1,510 launches. the idle
+8.7 ms: ~4 ms the experts' reads from the SSD (the reading entries' waits, a few long ones), ~3 ms the gaps between
+launches (~2 us each; a launch saved ~6 us of wall), the rest the host's turns (the picks' copy back, the tables'
+upload) and Engram's rows.
+
+- **the lane's inputs rounded once a token** (q8_group_tok / q8_gate_up take xin, win: an output row's input row and
+  its weight's by table; NULL, the row's own). the lane gathered each token's FFN input once a pair (K copies), rounded
+  every copy to int8, gathered the weights, and rounded x again before the reading entries (the activations had taken
+  its buffer). now each token's row is rounded once into its own buffer (lane_xq) and gate and up read it by token,
+  the fused activation its weight by pair: 2 gathers and a round a layer gone (-82 launches a token), 63.0 -> 62.5
+  ms. a launch's rows past its count read the count's last input (in_rows): no table entry past it is read -
+  test_q8_fuse_gpu's by-token check poisons them, and faults with the clamp taken out. the same bits:
+  test_q8_fuse_gpu (by token: the gathered rows' bits, 3 layers of UD's types), the q8 and CPU-lane tests,
+  fingerprint cb2ad57792ac72d2, the bench's answers' hashes.
+- **Engram's rows spread over every reader** (rowread_take). the readers took 16 rows at a time: a decode step's 48
+  rows (2 layers x 24) went to 3 of the 64 workers, 16 random reads one after another each (~1.3 ms), and layer 1
+  waited ~0.6 ms a token (median) for them, the GPU idle. a batch's take is now ceil(n / readers), at most 16 (a long
+  step's as before): one row a worker, every read in flight at once. layer 1's wait median 614 -> 8 us, the mean of
+  both 358 -> 56 us. plain decode 16.0 / 16.0 / 15.9 -> 16.4 / 16.3 / 16.2 tok/s (two rounds, alternated with the
+  last commit's build); drafted unchanged (30.8-31.3 / 23.3-24.0 / 33.7-34.4 both; its steps' batches were already
+  spread). the answers' hashes the same.
+- **the guess** (fwd_guess: the next layer's router on a BF16 copy, ~1.5 ms of GPU a token) measured skipped
+  whole: plain 16.2 / 16.2 / 16.2 vs 16.1 / 16.1 / 16.2, drafted within the runs' noise, ~1% more expert reads from the
+  SSD without it. kept: worth nothing measurable here, and its reads saved grow where less of the model fits.
+- **Engram on the CPU** (asked): not taken. its projection (engram_kv, Q6_K 6144 x 25600, 129 MB a layer) is a
+  matvec bound by memory's bandwidth (0.59 ms a layer on the GPU, ~220 GB/s); the CPU shares that memory and reads
+  it slower, so moving it moves the same bytes onto a slower reader beside a GPU that wants them (the CPU lane's
+  experts, measured on this box: nothing gained, 15.3 vs 15.2). layer 14's could run while layers 1-13 do (it
+  depends on the tokens alone), but it needs the GPU's Q6_K sum order on the CPU for the same bits, for ~0.5 ms at
+  best less bandwidth's contention. layer 1's wait was the reads, fixed above.
+- open: the lane's tables uploaded a layer (an 18 KB copy queued behind the shared expert, ~8 us of idle each,
+  ~0.35 ms a token) - the GPU could read them from pinned memory where they are written; fusing the activation's
+  int8 round into q8_gate_up (40 launches; a 32-row block's amax across a workgroup's rows).
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

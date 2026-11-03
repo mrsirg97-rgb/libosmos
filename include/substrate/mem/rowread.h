@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #define ROWREAD_MAX_THREADS 256
+#define ROWREAD_TAKE 16 /* rows a worker takes at a time at most: few trips to the shared counter, a batch's ends even */
 
 typedef struct Rowread Rowread;
 
@@ -14,6 +15,7 @@ void rowread_destroy(Rowread *r);
 bool rowread(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint32_t bytes, uint8_t *dst);
 bool rowread_start(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint32_t bytes, uint8_t *dst);
 bool rowread_wait(Rowread *r);
+uint32_t rowread_take(uint32_t n, int threads);
 
 #endif
 
@@ -38,6 +40,11 @@ rowread
 rowread_start
   the same batch handed to the workers, and back at once: offset and dst must stay till rowread_wait. false, nothing
   begun, for no reader or a batch still pending (one at a time). no rows: nothing pending.
+
+rowread_take
+  the rows a worker takes at a time for a batch of n among `threads` readers: n spread over all of them (a decode
+  step's 48 rows one a worker - every read in flight at once, not 3 workers' 16 one after another, ~1 ms of the GPU
+  idle a token), at most ROWREAD_TAKE (a long step's), at least 1.
 
 rowread_wait
   the pending batch done (the caller reads its rows too, rather than only wait); false if any of its reads failed or

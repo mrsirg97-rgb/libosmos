@@ -94,9 +94,9 @@ int main() {
     agree(mm_known(id), id, QTYPE_MM, "mm_known");
     agree(mm_col_tiles(id, 1) > 0, id, QTYPE_MM, "mm_col_tiles");
     agree(mm_run(id, w, kRows, kCols, x16, 1, y, kRows, nullptr), id, QTYPE_MM, "mm_run");
-    agree(q8_group_tok(id, wtab, cnt, xrow, 1, 1, kRows, kCols, q, d, y, kRows, nullptr), id, QTYPE_Q8,
+    agree(q8_group_tok(id, wtab, cnt, xrow, nullptr, 1, 1, kRows, kCols, q, d, y, kRows, nullptr), id, QTYPE_Q8,
           "q8_group_tok");
-    agree(q8_gate_up(id, wtab, wtab, cnt, xrow, 1, 1, kRows, kCols, q, d, scale, kLim, h, kRows, nullptr), id,
+    agree(q8_gate_up(id, wtab, wtab, cnt, xrow, nullptr, nullptr, 1, 1, kRows, kCols, q, d, scale, kLim, h, kRows, nullptr), id,
           QTYPE_Q8, "q8_gate_up");
     agree(ops_embed(id, w, kCols, ids, 1, kHc, h, nullptr), id, QTYPE_EMBED, "ops_embed");
   }

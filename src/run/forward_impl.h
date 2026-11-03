@@ -167,8 +167,11 @@ struct Forward
   uint8_t *lane_up;
   void *lane_dev;
   float *lane_x, *lane_w; /* a small step's rows' FFN inputs and weights, gathered by expert */
-  int8_t *lane_q;         /* those rows (then their activations) to int8 (q8_round), and their blocks' scales */
+  int8_t *lane_q;         /* the rows' activations to int8 (q8_round), and their blocks' scales (down's input) */
   float *lane_qd;
+  int8_t *lane_xq;        /* the step's tokens' FFN inputs to int8, a row a token - once, however many experts it
+                             picked; gate and up read a row's by its token (xin) - and their scales */
+  float *lane_xqd;
   /* the lane's CPU half (hip_cpu_lane.c; lane_threads > 0): the experts of a small step that are not in GPU memory
      computed by a pool of threads from the model's files mapped read-only, their rows handed back in host memory the
      GPU maps, cpu_seq posted with cpu_value when they are there (the stream waits on it) */

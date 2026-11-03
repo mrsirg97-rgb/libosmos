@@ -5,7 +5,6 @@
 
 #include "substrate/mem/rowread.h"
 
-#define ROWREAD_TAKE 16 /* rows a worker takes at a time: few trips to the shared counter, the ends of a batch even */
 
 struct Rowread
 {
@@ -18,20 +17,28 @@ struct Rowread
   bool pending; /* a batch handed out and not yet waited for */
   int fd;
   const uint64_t *offset;
-  uint32_t n, bytes;
+  uint32_t n, bytes, take;
   uint8_t *dst;
   atomic_uint next;
   atomic_bool failed;
 };
 
+uint32_t rowread_take(uint32_t n, int threads)
+{
+  if (threads < 1)
+    return 1;
+  const uint32_t even = (n + (uint32_t)threads - 1) / (uint32_t)threads;
+  return even < 1 ? 1 : even > ROWREAD_TAKE ? ROWREAD_TAKE : even;
+}
+
 static void read_rows(Rowread *r)
 {
   for (;;)
   {
-    const uint32_t a = atomic_fetch_add(&r->next, ROWREAD_TAKE);
+    const uint32_t a = atomic_fetch_add(&r->next, r->take);
     if (a >= r->n)
       return;
-    const uint32_t z = a + ROWREAD_TAKE < r->n ? a + ROWREAD_TAKE : r->n;
+    const uint32_t z = a + r->take < r->n ? a + r->take : r->n;
     for (uint32_t i = a; i < z; i++)
       if (pread(r->fd, r->dst + (uint64_t)i * r->bytes, r->bytes, (off_t)r->offset[i]) != (ssize_t)r->bytes)
         atomic_store(&r->failed, true);
@@ -119,6 +126,7 @@ bool rowread_start(Rowread *r, int fd, const uint64_t *offset, uint32_t n, uint3
   while (r->busy > 0)
     pthread_cond_wait(&r->done, &r->mu);
   r->fd = fd, r->offset = offset, r->n = n, r->bytes = bytes, r->dst = dst;
+  r->take = rowread_take(n, r->n_th + 1); /* (the waiting caller reads too) */
   atomic_store(&r->next, 0);
   atomic_store(&r->failed, false);
   r->batch++, r->pending = true;

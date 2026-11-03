@@ -181,7 +181,7 @@ static void experts(const Gguf* g, const char* name) {
     CHECK(hipMemcpy(dcnt, cnt, sizeof cnt, hipMemcpyHostToDevice) == hipSuccess);
     for (uint32_t width : {std::max(n, kTok + 1 - n), kTok}) {
       CHECK(hipMemset(dy, 0xFF, (size_t) nrow * rows * 4) == hipSuccess);
-      CHECK(q8_group_tok(t->type, (const void* const*) dp, dcnt, dxrow, kExperts, width, rows, cols, dq, dd, dy, rows,
+      CHECK(q8_group_tok(t->type, (const void* const*) dp, dcnt, dxrow, nullptr, kExperts, width, rows, cols, dq, dd, dy, rows,
                          nullptr) &&
             hipDeviceSynchronize() == hipSuccess);
       CHECK(hipMemcpy(got.data(), dy, got.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -222,10 +222,10 @@ int main() {
   // refusals: a type without the contract (Q5_K), cols not whole blocks, no matrices, too many tokens
   const void* const* nw = nullptr;
   CHECK(!q8_round(nullptr, 1, 33, 33, nullptr, nullptr, nullptr) && !q8_round(nullptr, 0, 256, 256, nullptr, nullptr, nullptr));
-  CHECK(!q8_group_tok(13, nw, nullptr, nullptr, 1, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
-  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, 1, 1, 1, kQK + 32, nullptr, nullptr, nullptr, 1, nullptr));
-  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, 0, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
-  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, 1, kTok + 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(13, nw, nullptr, nullptr, nullptr, 1, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 1, 1, 1, kQK + 32, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 0, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 1, kTok + 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);

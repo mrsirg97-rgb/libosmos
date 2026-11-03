@@ -115,12 +115,25 @@ __device__ inline float block_sum(const Codes& c, const int* x) {
   return lane_q8_part(c.d, c.s21[0], isum[0]) + lane_q8_part(c.d, c.s21[1], isum[1]);
 }
 
+// a launch's NT input rows for output rows r0 .. r0 + NT - 1: row r's own (xin NULL), else row xin[r] (a token's row,
+// rounded once for all its experts); the rows past the count read as the count's last - summed, never stored - so no
+// table entry past it is read
+template <int NT>
+__device__ inline void in_rows(const int32_t* xin, uint32_t r0, uint32_t cnt, uint64_t* xr) {
+  for (int t = 0; t < NT; t++) {
+    const uint32_t r = r0 + ((uint32_t) t < cnt ? (uint32_t) t : cnt - 1);
+    xr[t] = xin ? (uint64_t) (uint32_t) xin[r] : r;
+  }
+}
+
 // matrix blockIdx.y: G = 32 / L rows a wave, L = LANE_Q8_LANES(cols) lanes a row; lane l of a row its blocks l,
-// l + L, ... in order for each of its NT tokens, then the lanes' tree. rows past cnt[m] summed, not stored
+// l + L, ... in order for each of its NT tokens (input rows by in_rows), then the lanes' tree. rows past cnt[m] summed,
+// not stored
 template <quant::Type T, int NT, int L>
 __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const uint8_t* const* __restrict__ w,
                                                                            const int32_t* __restrict__ cnt,
                                                                            const int32_t* __restrict__ xrow,
+                                                                           const int32_t* __restrict__ xin,
                                                                            uint32_t rows, uint32_t cols,
                                                                            const int8_t* __restrict__ q,
                                                                            const float* __restrict__ d,
@@ -130,17 +143,18 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const 
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
   const uint8_t* rb = w[m] + (uint64_t) (row < rows ? row : 0) * (cols / quant::kQK) * quant::Block<T>::bytes;
+  uint64_t xr[NT];
+  in_rows<NT>(xin, r0, (uint32_t) cnt[m], xr);
   float acc[NT];
   for (int t = 0; t < NT; t++) acc[t] = 0.0f;
   for (uint32_t s = ll; s < nblk; s += L) {
     Codes c;
     codes<T>(rb + (s / kBlocksPer) * quant::Block<T>::bytes, (int) (s % kBlocksPer), c);
     for (int t = 0; t < NT; t++) {
-      const uint64_t xr = r0 + t;
-      const int4* xp = (const int4*) (q + xr * cols + (uint64_t) s * LANE_Q8_VALUES);
+      const int4* xp = (const int4*) (q + xr[t] * cols + (uint64_t) s * LANE_Q8_VALUES);
       const int4 a = xp[0], b = xp[1];
       const int x[kWords] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
-      acc[t] = fmaf(d[xr * nblk + s], block_sum<T>(c, x), acc[t]);
+      acc[t] = fmaf(d[xr[t] * nblk + s], block_sum<T>(c, x), acc[t]);
     }
   }
   for (int t = 0; t < NT; t++) {
@@ -152,13 +166,15 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const 
 
 // gate and up at once, then the activation: matrix pair blockIdx.y's gate rows (wg) and up rows (wu) of one type,
 // each lane's blocks decoded from both and summed against x read once, each sum in group_tok_kernel's order and tree;
-// then lane 0 of a row h = lane_swiglu(gate, up, lim, scale[x row]) - swiglu_lane_kernel's operation on the sums
+// then lane 0 of a row r h = lane_swiglu(gate, up, lim, scale[win ? win[r] : r]) - swiglu_lane_kernel's operation on the sums
 // q8_group_tok gives, its two outputs never written
 template <quant::Type T, int NT, int L>
 __global__ __launch_bounds__(kWave* kWavesPerBlock) void gate_up_kernel(const uint8_t* const* __restrict__ wg,
                                                                          const uint8_t* const* __restrict__ wu,
                                                                          const int32_t* __restrict__ cnt,
                                                                          const int32_t* __restrict__ xrow,
+                                                                         const int32_t* __restrict__ xin,
+                                                                         const int32_t* __restrict__ win,
                                                                          uint32_t rows, uint32_t cols,
                                                                          const int8_t* __restrict__ q,
                                                                          const float* __restrict__ d,
@@ -170,6 +186,8 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void gate_up_kernel(const ui
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
   const uint64_t off = (uint64_t) (row < rows ? row : 0) * (cols / quant::kQK) * quant::Block<T>::bytes;
   const uint8_t *rg = wg[m] + off, *ru = wu[m] + off;
+  uint64_t xr[NT];
+  in_rows<NT>(xin, r0, (uint32_t) cnt[m], xr);
   float ag[NT], au[NT];
   for (int t = 0; t < NT; t++) ag[t] = au[t] = 0.0f;
   for (uint32_t s = ll; s < nblk; s += L) {
@@ -178,11 +196,10 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void gate_up_kernel(const ui
     codes<T>(rg + at, (int) (s % kBlocksPer), cg);
     codes<T>(ru + at, (int) (s % kBlocksPer), cu);
     for (int t = 0; t < NT; t++) {
-      const uint64_t xr = r0 + t;
-      const int4* xp = (const int4*) (q + xr * cols + (uint64_t) s * LANE_Q8_VALUES);
+      const int4* xp = (const int4*) (q + xr[t] * cols + (uint64_t) s * LANE_Q8_VALUES);
       const int4 a = xp[0], b = xp[1];
       const int x[kWords] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
-      const float xd = d[xr * nblk + s];
+      const float xd = d[xr[t] * nblk + s];
       ag[t] = fmaf(xd, block_sum<T>(cg, x), ag[t]);
       au[t] = fmaf(xd, block_sum<T>(cu, x), au[t]);
     }
@@ -191,7 +208,7 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void gate_up_kernel(const ui
     float vg = ag[t], vu = au[t];
     for (int o = L / 2; o > 0; o >>= 1) vg += __shfl_xor(vg, o, kWave), vu += __shfl_xor(vu, o, kWave);
     if (ll == 0 && row < rows && t < cnt[m])
-      h[(uint64_t) (r0 + t) * hs + row] = lane_swiglu(vg, vu, lim, scale[r0 + t]);
+      h[(uint64_t) (r0 + t) * hs + row] = lane_swiglu(vg, vu, lim, scale[win ? win[r0 + t] : r0 + t]);
   }
 }
 

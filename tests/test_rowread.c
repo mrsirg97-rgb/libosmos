@@ -159,11 +159,24 @@ static void test_async(int fd)
          "destroyed at once after a start (2,000 times), every row read\n");
 }
 
+/* a worker's share: a small batch spread over every reader (decode's 48 rows among 65: one each, not 3 workers' 16),
+   a long one at most ROWREAD_TAKE, never 0 */
+static void test_take(void)
+{
+  assert(rowread_take(48, 65) == 1 && rowread_take(1, 65) == 1 && rowread_take(0, 65) == 1);
+  assert(rowread_take(130, 65) == 2 && rowread_take(131, 65) == 3);
+  assert(rowread_take(98304, 65) == ROWREAD_TAKE && rowread_take(65 * ROWREAD_TAKE, 65) == ROWREAD_TAKE);
+  assert(rowread_take(48, 1) == ROWREAD_TAKE && rowread_take(5, 1) == 5 && rowread_take(48, 0) == 1);
+  printf("  take: 48 rows among 65 readers one each; 130 two; a long batch %d; one reader all, up to %d\n",
+         ROWREAD_TAKE, ROWREAD_TAKE);
+}
+
 int main(void)
 {
   printf("[test_rowread] start\n");
   assert(mkdtemp(dir));
   const int fd = file("f.bin");
+  test_take();
   test_refusals(fd);
   test_rows(fd);
   test_tiny(fd);

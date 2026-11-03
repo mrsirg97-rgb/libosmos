@@ -75,7 +75,7 @@ static void expert(const Gguf* g, const char* name, int e) {
   for (uint32_t n = 1; n <= kTok; n++) {
     const int32_t cnt = (int32_t) n;
     CHECK(hipMemcpy(dcnt, &cnt, 4, hipMemcpyHostToDevice) == hipSuccess);
-    CHECK(q8_group_tok(t->type, (const void* const*) dp, dcnt, dxrow, 1, n, rows, cols, dq, dd, dy, rows, nullptr) &&
+    CHECK(q8_group_tok(t->type, (const void* const*) dp, dcnt, dxrow, nullptr, 1, n, rows, cols, dq, dd, dy, rows, nullptr) &&
           hipDeviceSynchronize() == hipSuccess);
     CHECK(hipMemcpy(gpu.data(), dy, (size_t) n * rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(std::memcmp(gpu.data(), cpu.data(), (size_t) n * rows * 4) == 0);
