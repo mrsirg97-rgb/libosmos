@@ -14,7 +14,7 @@
 #include "substrate/model/rope.h"
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
-#define FWD_FETCH_THREADS 4 /* DESIGN.md, the fetcher: 4 workers read at the SSD's ceiling (6.85 GB/s) */
+#define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */
 #define FWD_ROW_THREADS 64  /* DESIGN.md, Engram's reads: 64 threads 832,000 random rows/s, 128 no more */
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
 _Static_assert(sizeof(LayerWeights) % sizeof(const GgufTensor *) == 0, "LayerWeights is its tensors and only them");

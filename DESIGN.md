@@ -1410,6 +1410,28 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
      (median 0.55 ms) behind the routed experts: the misses, which the CPU lane does not hide here. left: the misses'
      waits, the token's end (~1.5 ms: the logits to the host, the next step's tables), q_a / kv's matmul (~134 GB/s
      against the matvec's 171: 80 and 32 row tiles, too few blocks).
+   - **the three, tried** (a host-side probe, not kept: clock_gettime around each wait):
+     - the misses: the pool never full (0 waits for room); the host waits on a missed expert's read 5.9 ms a token
+       (2.8 waits of ~2.1 ms: an expert ~7-9 MB, ~4 GB/s, in 1 MiB jobs on 4 workers - the urgent queue's chunks).
+       the readers FWD_FETCH_THREADS 4 / 8 / 12 / 16 / 24: the waits 5.9 / 5.5 / 4.8 / 4.9 / 4.9 ms, 15.8 / 15.8 /
+       16.2 / 16.1 / 16.1 tok/s; 16 readers with 512 KiB jobs worse (5.3 ms). **12 kept**: a load 17-18 s, an 8K
+       prompt ~490 tok/s, a 2K ~310-340, both counts alike (106 GiB, two rounds each).
+     - the token's end: Engram's rows waited 0.6-0.75 ms a token (maya 0.35, its row cache ~20% hits). their own
+       open with POSIX_FADV_RANDOM (the dup shares the shard's readahead): no change - not kept. the rest (~0.4
+       ms) is the host's between the pick and the next step's launches: the next token's ids are its input.
+     - q_a / kv: Q6_K's long shape 64 x 16 140 GB/s on q_a (136), each other shape the head's or out_b's loss;
+       128 x 16 and 256 x 8 past the LDS (64 KiB). a 2-5 MB matrix is its launch's latency, not its shape's: left.
+   - **now: 16.0-16.2 tok/s (16.0), ~95% of maya's 16.8** - the three questions, two rounds, 110 GiB.
+   **position 18, checked** (a temporary print in test_model_gpu: the position's drift and its 6 routed experts at
+   each layer, the Q6_K shape before (128 x 8 everywhere) and after (64 x 8 on q_b)): the two builds' routes part by
+   one expert at layers 7, 9, 11, 12 and 18 (near-ties, the streams staying near) and by two at **layer 20** - [3 62
+   96 259 282 338] before, [96 180 259 282 284 338] after - where the after build's drift goes 0.03 -> 0.32, then 39
+   at layer 21 and ~10^3 on; the before build's stays ~0.03 there. layer 20 at position 18 is where the oracle's own
+   stream bumps (its largest value 48 against ~7 at the other positions' and the layers' around), and both builds,
+   forced onto the oracle's stream, compute layer 20 to 3.6e-4: a router near a tie, tipped by an input ~3% off (the
+   ordinary rounding of 20 layers), then a different expert pair's large output. not a kernel's fault; the before
+   build was right there by chance, and maya's stream tips there too. what ranks two builds' accuracy is a longer
+   evaluation (many such positions), not one 32-token sample's mean KL.
 
 ### the order (before 2026-11-03, kept for the record)
 
