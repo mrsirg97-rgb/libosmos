@@ -1,9 +1,9 @@
-// q8.h's kernels behind include/substrate/gpu/q8.h
+// q8.h's kernels behind include/osmos/gpu/q8.h
 #include "q8.h"
 
 extern "C" {
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/q8.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/q8.h"
 }
 
 static_assert(LANE_Q8_VALUES == q8::kWave, "q8_round: a lane a value of a block");

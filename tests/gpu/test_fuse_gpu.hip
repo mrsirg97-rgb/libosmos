@@ -14,9 +14,9 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/gpu/mm.h"
-#include "substrate/gpu/kvfmt.h"
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/ops.h"
 }
 
 #define CHECK(x)                                                                 \

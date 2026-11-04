@@ -1,6 +1,6 @@
 #include "forward_impl.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/model/qtype.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/model/qtype.h"
 
 /* the next layer's experts guessed a layer ahead, for a small step (a decode's, a verify's: picks fewer than a
    layer's experts - a prompt's step already reads the whole next layer ahead, hip_ffn.c's prefetch). the guess: the

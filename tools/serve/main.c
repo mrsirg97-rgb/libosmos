@@ -1,7 +1,7 @@
-/* substrate-serve: the engine over stdin / stdout in maya's DeepSeek serve protocol (its src/ds4/ds4_main.cpp), so its
+/* osmos-serve: the engine over stdin / stdout in maya's DeepSeek serve protocol (its src/ds4/ds4_main.cpp), so its
    harnesses drive this engine as they drive maya's (DESIGN.md, "serving").
 
-     substrate-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
+     osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
                      [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] [--serve]
 
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
@@ -12,17 +12,17 @@
    one conversation (single.c), or --parallel N at once (multi.c: GEN then needs rid=, every line carries it).
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
    --no-guess: no experts guessed a layer ahead (ForwardOptions' no_guess - a model whose misses are few).
-   SUBSTRATE_SLOT_KEEP=1 keeps conversations (maya #356): SUBSTRATE_SLOT_CAP (4) in RAM, past it SUBSTRATE_SLOT_DIR
-   (<the model's folder>/slots) under SUBSTRATE_SLOT_GB (16), SUBSTRATE_SLOT_MIN (1024) tokens at least,
-   SUBSTRATE_SLOT_DAYS (7). greedy: maya's sampling, penalty and thinking keys are refused, named */
+   OSMOS_SLOT_KEEP=1 keeps conversations (maya #356): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
+   (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least,
+   OSMOS_SLOT_DAYS (7). greedy: maya's sampling, penalty and thinking keys are refused, named */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "serve.h"
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
 
 static const char *opt(int argc, char **argv, const char *name, const char *dflt)
 {
@@ -48,7 +48,7 @@ static double env_num(const char *name, double dflt)
 
 static int die(const char *what)
 {
-  fprintf(stderr, "substrate-serve: %s\n", what);
+  fprintf(stderr, "osmos-serve: %s\n", what);
   return 2;
 }
 
@@ -57,9 +57,9 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
   char dflt[4096];
   const char *slash = strrchr(model, '/');
   snprintf(dflt, sizeof dflt, "%.*s/slots", slash ? (int)(slash - model) : 1, slash ? model : ".");
-  const char *dir = getenv("SUBSTRATE_SLOT_DIR") ? getenv("SUBSTRATE_SLOT_DIR") : dflt;
-  const SlotsOptions so = {dir, (uint32_t)env_num("SUBSTRATE_SLOT_CAP", 4), env_num("SUBSTRATE_SLOT_GB", 16),
-                           (uint32_t)env_num("SUBSTRATE_SLOT_MIN", 1024), env_num("SUBSTRATE_SLOT_DAYS", 7),
+  const char *dir = getenv("OSMOS_SLOT_DIR") ? getenv("OSMOS_SLOT_DIR") : dflt;
+  const SlotsOptions so = {dir, (uint32_t)env_num("OSMOS_SLOT_CAP", 4), env_num("OSMOS_SLOT_GB", 16),
+                           (uint32_t)env_num("OSMOS_SLOT_MIN", 1024), env_num("OSMOS_SLOT_DAYS", 7),
                            forward_identity(sv->f)};
   char serr[SLOTS_ERR] = "";
   if (!(sv->slots = slots_create(&so, serr)))
@@ -72,7 +72,7 @@ int main(int argc, char **argv)
 {
   const char *model = opt(argc, argv, "--model", NULL);
   if (!model)
-    return die("usage: substrate-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
+    return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
                "[--max-context N] [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] [--serve]");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "65536"));
@@ -114,7 +114,7 @@ int main(int argc, char **argv)
   const char *dspark = opt(argc, argv, "--dspark", NULL);
   if (dspark && !(sv.d = drafter_create(sv.f, dspark, err)))
     return die(err);
-  if (env_num("SUBSTRATE_SLOT_KEEP", 0) != 0 && !open_slots(&sv, model, err, sizeof err))
+  if (env_num("OSMOS_SLOT_KEEP", 0) != 0 && !open_slots(&sv, model, err, sizeof err))
     return die(err);
   Conv *conv = calloc((size_t)lanes, sizeof *conv);
   for (int i = 0; conv && i < lanes; i++)

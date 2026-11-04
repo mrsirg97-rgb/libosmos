@@ -1,4 +1,4 @@
-// the attention's state in the model's formats (substrate/gpu/kvfmt.h): rows rounded with their packed form beside them
+// the attention's state in the model's formats (osmos/gpu/kvfmt.h): rows rounded with their packed form beside them
 // - the F32 the same bits as rounding alone, and the packed rows read back (ops_kv_unpack) the same bits again - for
 // FP8 (the window), FP4 with an E4M3 scale a 16 (the compressed rows) and FP4 with a power of two a 32 (the indexer's
 // keys); and FP8's rows rounded already (another's, the oracle's) packing to themselves. the values: normal ones, a
@@ -14,8 +14,8 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/gpu/kvfmt.h"
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/ops.h"
 }
 
 #define CHECK(x)                                                                 \

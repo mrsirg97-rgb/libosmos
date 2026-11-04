@@ -18,8 +18,8 @@
 #include <unistd.h>
 
 #include "ggml.h"
-#include "substrate/model/dspark.h"
-#include "substrate/model/qtype.h"
+#include "osmos/model/dspark.h"
+#include "osmos/model/qtype.h"
 
 #define ALIGN 256
 

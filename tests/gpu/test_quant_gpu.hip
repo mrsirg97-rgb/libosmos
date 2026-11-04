@@ -1,6 +1,6 @@
 // the weights' types decoded on the GPU against gguf-py's values (MXFP8: torch's float8_e4m3fn, dequant_ref.py),
 // every float bit for bit: a model's own blocks (the first tensor of each type: its start, a middle, its end) and
-// random ones (oracle/dequant_ref.py --model writes them to ~/substrate-oracle/dequant). every type the table decodes
+// random ones (oracle/dequant_ref.py --model writes them to ~/osmos-oracle/dequant). every type the table decodes
 // that has a file; the others named. needs a gfx1151 and at least one file; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
@@ -12,8 +12,8 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/gpu/quant.h"
-#include "substrate/model/qtype.h"
+#include "osmos/gpu/quant.h"
+#include "osmos/model/qtype.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -119,7 +119,7 @@ int main() {
     const QTypeInfo* t = qtype_info(id);
     if (!t || !(t->paths & QTYPE_DECODE)) continue;
     char path[512];
-    std::snprintf(path, sizeof path, "%s/substrate-oracle/dequant/%s.bin", home ? home : "", t->name);
+    std::snprintf(path, sizeof path, "%s/osmos-oracle/dequant/%s.bin", home ? home : "", t->name);
     Ref r;
     if (!load(path, &r)) {
       missing += std::string(" ") + t->name;
@@ -131,7 +131,7 @@ int main() {
     checked++;
   }
   if (!checked) {
-    std::printf("[test_quant_gpu] skipped: no reference in ~/substrate-oracle/dequant (oracle/dequant_ref.py)\n");
+    std::printf("[test_quant_gpu] skipped: no reference in ~/osmos-oracle/dequant (oracle/dequant_ref.py)\n");
     return 77;
   }
   if (!missing.empty()) std::printf("  NOT CHECKED (no reference file: a model without them):%s\n", missing.c_str());

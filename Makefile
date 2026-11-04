@@ -31,8 +31,8 @@ HIP_ARCH ?= gfx1151
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
 TESTS := $(patsubst $(TEST_DIR)/%.c, $(BIN_DIR)/%, $(wildcard $(TEST_DIR)/*.c))
 
-LIB := $(LIB_DIR)/libsubstrate.a
-HIP_LIB := $(LIB_DIR)/libsubstrate_hip.a
+LIB := $(LIB_DIR)/libosmos.a
+HIP_LIB := $(LIB_DIR)/libosmos_hip.a
 
 all: $(LIB)
 
@@ -65,19 +65,19 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
 	@mkdir -p $(OBJ_DIR)/tests/gpu
-	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -lhsa-runtime64 -o $@
+	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -o $@
 
 # the server (tools/serve): the engine over stdin / stdout, maya's serve protocol
 # --parallel's loop is libevt's (the operator's, C, MIT; DESIGN.md "the scheduler"): its checkout beside this one
 LIBEVT ?= ../libevt
-SERVE := $(BIN_DIR)/substrate-serve
+SERVE := $(BIN_DIR)/osmos-serve
 SERVE_OBJS := $(patsubst tools/serve/%.c,$(OBJ_DIR)/tools/serve/%.o,$(wildcard tools/serve/*.c))
 $(OBJ_DIR)/tools/serve/%.o: tools/serve/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -I$(LIBEVT)/include -c $< -o $@
 $(SERVE): $(SERVE_OBJS) $(LIB) $(HIP_LIB) $(LIBEVT)/lib/libevt.a
 	@mkdir -p $(dir $@)
-	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -lsubstrate_hip -lsubstrate $(LIBEVT)/lib/libevt.a -lhsa-runtime64 -lpthread \
+	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -losmos_hip -losmos $(LIBEVT)/lib/libevt.a -lhsa-runtime64 -lpthread \
 	  -o $@
 $(LIBEVT)/lib/libevt.a:
 	$(MAKE) -C $(LIBEVT)
@@ -100,7 +100,7 @@ gpu-tests: $(GPU_TESTS)
 	done
 
 $(BIN_DIR)/%: $(TEST_DIR)/%.c $(LIB) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ_DIR)/tests/$*.d $< -L$(LIB_DIR) -lsubstrate $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ_DIR)/tests/$*.d $< -L$(LIB_DIR) -losmos $(LDLIBS) -o $@
 
 $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR):
 	mkdir -p $@

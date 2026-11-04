@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/mem/rowread.h"
+#include "osmos/mem/rowread.h"
 
 #define FILE_BYTES (4u << 20)
 

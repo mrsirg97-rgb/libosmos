@@ -2,7 +2,7 @@
 // and then told its end - its tokens before the decoder's reach skipping DeepSeek-V4.1's decoder - beside a second
 // sequence decoding a token each step (the step's rows then compacted around it); then both decode kDecode tokens.
 // every logit read - the prompt's last, the decoding sequence's every one, the decoded ones after - the whole run's.
-// needs a gfx1151, ~/models/ds1017 and ~/substrate-oracle/ids32.txt; skipped (77) without them.
+// needs a gfx1151, ~/models/ds1017 and ~/osmos-oracle/ids32.txt; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <unistd.h>
@@ -16,10 +16,10 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/gpu/mm.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/run/forward.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -85,7 +85,7 @@ int main() {
   std::printf("[test_skip_gpu] start\n");
   const char* home = std::getenv("HOME");
   const std::string mdir = std::string(home ? home : "") + "/models/ds1017/";
-  const std::string idp = std::string(home ? home : "") + "/substrate-oracle/ids32.txt";
+  const std::string idp = std::string(home ? home : "") + "/osmos-oracle/ids32.txt";
   int ndev = 0;
   if (access(mdir.c_str(), R_OK) != 0 || access(idp.c_str(), R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess ||
       !ndev) {

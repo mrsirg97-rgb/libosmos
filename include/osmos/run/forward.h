@@ -6,8 +6,8 @@
 #define SEQ_STATE_VERSION 1 /* seq_save's format: raised when it changes (forward_identity has it) */
 #include <stdint.h>
 
-#include "substrate/gpu/mm.h"
-#include "substrate/model/weights.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/model/weights.h"
 
 #define FORWARD_ERR 256
 /* a batch's sub-batches of MM_MAX_TOKENS: maya's 8,192-token chunk. each layer runs them all before the next, so the
@@ -67,9 +67,9 @@ void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2]);
 Forward
   DeepSeek-V4.1-Flash's forward on the GPU, a token at a time (the decode), its first `n_layers` layers (all of them,
   or fewer for a test). the weights are copies in GPU memory, read from their files straight in: a resident set
-  (substrate/mem/resident.h) of every tensor the layers use but the routed experts and as many experts as the budget
+  (osmos/mem/resident.h) of every tensor the layers use but the routed experts and as many experts as the budget
   holds, about an equal share of each layer's (its most-picked first: forward_create_ranked); the other experts
-  streamed by the pool (substrate/mem/pool.h), held when the router picks them and let go, the one wanted furthest
+  streamed by the pool (osmos/mem/pool.h), held when the router picks them and let go, the one wanted furthest
   ahead first, when it needs the room. the quantized weights' products are mm's (WMMA over f16 activations, one
   kernel for 1 .. 16 tokens), the F32 and BF16 weights' the matvec's. `budget` is the GPU memory of the resident set
   (the pool's own room is two layers' streamed experts). the Engram rows are read from the Engram file a position at
@@ -158,7 +158,7 @@ forward_lane
   depend on whether its step was small (determinism's rule 2 relaxed there; rule 1 kept). cpu_threads 0: every
   expert on the GPU. cpu_threads > 0 (at most CPU_LANE_THREADS_MAX; a CPU with AVX-512 VNNI): a small step's experts
   not in GPU memory (neither resident nor in the pool) are computed by that many CPU threads from the model's files
-  (substrate/cpu/lane.h: the GPU's bits), while the GPU runs the others; it waits for their rows before the sum. false
+  (osmos/cpu/lane.h: the GPU's bits), while the GPU runs the others; it waits for their rows before the sum. false
   with why for a count it does not take.
 
 forward_step

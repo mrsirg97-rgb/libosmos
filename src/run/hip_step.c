@@ -4,9 +4,9 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
-#include "substrate/gpu/kvfmt.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/ops.h"
 
 Seq *seq_create(Forward *f, char err[FORWARD_ERR])
 {

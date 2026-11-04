@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 #include "serve.h"
-#include "substrate/gpu/mm.h"
+#include "osmos/gpu/mm.h"
 
 #define CONF_MIN 0.5f /* the drafter's: maya's defaults (as dbench) */
 #define CUM_MIN 0.5f

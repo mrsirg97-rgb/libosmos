@@ -4,9 +4,9 @@
 #include <string.h>
 #include <time.h>
 
-#include "substrate/model/gguf.h"
-#include "substrate/model/qtype.h"
-#include "substrate/model/weights.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/qtype.h"
+#include "osmos/model/weights.h"
 
 #define T_BF16 30
 #define T_Q8_0 8

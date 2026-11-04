@@ -5,9 +5,9 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/ops.h"
-#include "substrate/gpu/quant.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/ops.h"
+#include "osmos/gpu/quant.h"
 
 /* every Engram row the step reads - each sub-batch's tokens' rows for each of its Engram layers (the layers ascending:
    fwd_engram's nth) - begun at the step's start on Engram's readers, into the stage one after another, so they read

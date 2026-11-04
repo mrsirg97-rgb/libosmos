@@ -4,7 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/model/engram.h"
+#include "osmos/model/engram.h"
 
 
 struct Engram

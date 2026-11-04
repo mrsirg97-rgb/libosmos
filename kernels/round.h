@@ -60,7 +60,7 @@ __device__ inline float fp8_block(float v) {
   return e4m3(fminf(fmaxf(v / s, -kFp8Max), kFp8Max)) * s;
 }
 
-// the codes a rounded value is kept as (substrate/gpu/kvfmt.h): each the exact value round.h's rounding gave, and
+// the codes a rounded value is kept as (osmos/gpu/kvfmt.h): each the exact value round.h's rounding gave, and
 // back - E4M3 (OCP's, no infinities: sign, 4 exponent bits biased 7, 3 mantissa bits; exponent 0 the subnormals,
 // steps of 2^-9), E2M1 (sign, the grid's index 0..7: {0, 0.5, 1, 1.5, 2, 3, 4, 6}), UE8M0 (2^e as e + 127). -0 keeps
 // its sign

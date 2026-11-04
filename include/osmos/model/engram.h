@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "substrate/model/weights.h"
+#include "osmos/model/weights.h"
 
 #define ENGRAM_ERR 256
 #define ENGRAM_MAX_NGRAM 8

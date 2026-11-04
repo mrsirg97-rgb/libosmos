@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "substrate/model/qtype.h"
+#include "osmos/model/qtype.h"
 #include "weights_geo.h"
 
 /* a role's types, a mask of the table's ids (qtype.h): TY by name, TY_ID by a tensor's id (below 32: a mask's bits) */

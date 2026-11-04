@@ -15,10 +15,10 @@
 #include "test_model.h"
 
 extern "C" {
-#include "substrate/cpu/q8.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/q8.h"
-#include "substrate/model/gguf.h"
+#include "osmos/cpu/q8.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/q8.h"
+#include "osmos/model/gguf.h"
 }
 
 #define CHECK(x)                                                                 \

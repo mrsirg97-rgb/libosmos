@@ -1,4 +1,4 @@
-# libsubstrate
+# libosmos
 
 A deterministic inference engine for **DeepSeek-V4.1-Flash** (~768B parameters: ~557B in routed experts, ~196B in
 Engram tables) on a **single AMD Strix Halo** (Ryzen AI MAX+ 395, Radeon 8060S / gfx1151, 128 GB).
@@ -32,7 +32,7 @@ answer to [Project Maya](https://github.com/mw00/project-maya)'s bench questions
 in a fresh process, two rounds each. The comparison is Maya **1.1.52** (2026-11-03), the fastest engine we know of
 for this model on this hardware, on the same model, its pack of the same files. Details and every run: `DESIGN.md`.
 
-| | libsubstrate | Maya 1.1.52 |
+| | libosmos | Maya 1.1.52 |
 | --- | --- | --- |
 | Decode, plain (3 questions; mean, range) | 16.3 tok/s (16.1-16.4) | 16.9 tok/s (16.5-17.2) |
 | Decode, DSpark drafted (same questions) | 29.5 tok/s (23.8-33.5) | 29.6 tok/s (25.9-32.2) |
@@ -73,7 +73,7 @@ the IQ4_NL one on these 1-bit experts (DESIGN.md, "the MXFP8 Engram pack"); it i
 Earlier, on **GSQ-RCO IQ2_XXS** against Maya 1.1.46 (before the UD work: the KV's formats, the decode and prompt
 changes since; not re-measured - its files are not on the development box now):
 
-| | libsubstrate | Maya 1.1.46 |
+| | libosmos | Maya 1.1.46 |
 | --- | --- | --- |
 | Decode, plain (3 bench questions, mean) | 16.1 tok/s | 17.2 tok/s (v1.1.48) |
 | Decode, DSpark drafted (same questions) | 27.3 tok/s | 29.5 tok/s |
@@ -109,7 +109,7 @@ changes since; not re-measured - its files are not on the development box now):
   - GSQ-RCO's 4 IQ2_XXS shards and its Engram GGUF (`DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`),
 - for drafting, DSpark's weights: Maya's pack of them (`dspark.bin`, `dspark.json`, 8 GB) or our IQ2_XS requant of
   that pack (4.7 GB, the same acceptance on these questions),
-- optionally (UD-IQ1_M's decode ~12-13 -> ~16 tok/s with one), an expert pick profile beside the model (`substrate-picks.bin`: every
+- optionally (UD-IQ1_M's decode ~12-13 -> ~16 tok/s with one), an expert pick profile beside the model (`osmos-picks.bin`: every
   pick on calibration text, `bin/dbench` with `PICKS_OUT` writes one).
 
 ## The packs
@@ -122,7 +122,7 @@ hf download unsloth/DeepSeek-V4.1-Flash-1017-GGUF --include "engram/*MXFP8*" "en
 python engram/set_split.py engram/DeepSeek-V4.1-Flash-1017-engram-MXFP8.gguf_file 5 5   # both quants' slot: 5 of 5
 ln -s $PWD/engram/DeepSeek-V4.1-Flash-1017-engram-MXFP8.gguf_file \
       UD-IQ1_S/DeepSeek-V4.1-Flash-1017-UD-IQ1_S-00005-of-00005.gguf                    # UD-IQ1_M's: the same link
-MODEL=UD-IQ1_S/DeepSeek-V4.1-Flash-1017-UD-IQ1_S-00001-of-00005.gguf PICKS_OUT=UD-IQ1_S/substrate-picks.bin \
+MODEL=UD-IQ1_S/DeepSeek-V4.1-Flash-1017-UD-IQ1_S-00001-of-00005.gguf PICKS_OUT=UD-IQ1_S/osmos-picks.bin \
   MAX_CTX=16384 bin/dbench 104 2048 1 warmup.txt calib16k.txt                           # the profile
 ```
 
@@ -138,8 +138,8 @@ the unpatched quant's profile. The smaller drafter: `make requant` (llama.cpp's 
 ## Build and test
 
 ```sh
-make                        # lib/libsubstrate.a (the host library)
-make lib/libsubstrate_hip.a # the GPU library
+make                        # lib/libosmos.a (the host library)
+make lib/libosmos_hip.a     # the GPU library
 make tests                  # CPU tests (no GPU, no model)
 make asan && make tsan      # the same under AddressSanitizer / ThreadSanitizer
 make gpu-tests              # GPU and whole-model tests (skip without a gfx1151 or a model)
@@ -152,7 +152,7 @@ reference forward (`oracle/`, see its README).
 ## Use
 
 ```c
-#include "substrate/run/forward.h"
+#include "osmos/run/forward.h"
 
 char err[FORWARD_ERR];
 Gguf *g = gguf_create(".../DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf", err);
@@ -175,7 +175,7 @@ for (;;) {
 }
 ```
 
-Every call returns `false` (or `NULL`) with the reason in `err` rather than guess. Drafting: `substrate/run/drafter.h`
+Every call returns `false` (or `NULL`) with the reason in `err` rather than guess. Drafting: `osmos/run/drafter.h`
 (`drafter_create`, `drafter_draft`, then verify with `forward_batch` and `seq_rollback`; `tools/bench/dbench.hip`
 shows the loop).
 
@@ -183,10 +183,10 @@ shows the loop).
 
 ```sh
 python tools/bench/prompts.py <maya checkout> <maya pack>/tokenizer bench   # token ids (Maya's tokenizer)
-hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -lsubstrate_hip -lsubstrate \
+hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos \
       -lhsa-runtime64 -o bin/dbench
 export MODEL=~/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf
-export PICKS=~/Models/ds1017/UD-IQ1_M/substrate-picks.bin MAX_CTX=65536
+export PICKS=~/Models/ds1017/UD-IQ1_M/osmos-picks.bin MAX_CTX=65536
 bin/dbench 110 512 256 bench/warmup.txt bench/q1.txt bench/q2.txt bench/q3.txt                       # plain
 GREEDY=1 DRAFT=~/Models/ds1017/dspark bin/dbench 100 512 256 bench/warmup.txt bench/q1.txt ...    # drafted
 bin/dbench 106 2048 8 bench/warmup.txt bench/p2048.txt bench/p8192.txt                              # prompts
@@ -201,14 +201,14 @@ answer prints a hash of its tokens: the same hash in every configuration is the 
 
 One model (DeepSeek-V4.1-Flash), one machine (Strix Halo, 128 GB), greedy decoding, one sequence at a time in the
 benchmarks. The quant kernels (Q8_0, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ4_NL, BF16, MXFP4, MXFP8, from one
-type table, `include/substrate/model/qtype.h`; the int8 expert path and the CPU lane: the IQ1 and IQ2 types) and
+type table, `include/osmos/model/qtype.h`; the int8 expert path and the CPU lane: the IQ1 and IQ2 types) and
 the expert streaming are model-independent; the attention, hyper-connections, Engram and DSpark are DeepSeek's.
 
 ## Layout
 
 | | |
 | --- | --- |
-| `include/substrate/` | the public headers, each with its contract in a comment at the end |
+| `include/osmos/` | the public headers, each with its contract in a comment at the end |
 | `src/model/` | GGUF, weights, Engram, DSpark index |
 | `src/mem/` | the expert pool, the resident set, the file readers |
 | `src/run/` | the forward: steps, layers, the lane, drafting |

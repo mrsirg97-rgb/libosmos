@@ -7,7 +7,7 @@
 // and one of 4,600 told its prompt's end (three; the first's tokens all before the decoder's reach: none past dec),
 // each against the sequences alone in steps of 512 - the rows the batch leaves (its last sub-batch's) bit for bit.
 // needs a gfx1151,
-// ~/models/ds1017 and ~/substrate-oracle/ids32.txt; skipped (77) without them.
+// ~/models/ds1017 and ~/osmos-oracle/ids32.txt; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <unistd.h>
@@ -23,10 +23,10 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/gpu/mm.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/run/forward.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -221,7 +221,7 @@ static Schedule mixed(std::mt19937& rng) {
 int main() {
   std::printf("[test_batch_gpu] start\n");
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "", mdir = home + "/models/ds1017/";
-  FILE* idf = std::fopen((home + "/substrate-oracle/ids32.txt").c_str(), "r");
+  FILE* idf = std::fopen((home + "/osmos-oracle/ids32.txt").c_str(), "r");
   int ndev = 0;
   if (!idf || access((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), R_OK) || hipGetDeviceCount(&ndev) ||
       !ndev) {

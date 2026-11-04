@@ -1,8 +1,8 @@
-// mv_run (include/substrate/gpu/mv.h): the kernel is mv.h's, its shape picked here
+// mv_run (include/osmos/gpu/mv.h): the kernel is mv.h's, its shape picked here
 #include "mv.h"
 
 extern "C" {
-#include "substrate/gpu/mv.h"
+#include "osmos/gpu/mv.h"
 }
 
 namespace {

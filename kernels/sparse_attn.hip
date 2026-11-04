@@ -1,4 +1,4 @@
-// ops_sparse_attn (include/substrate/gpu/ops.h): the model has one latent - key and value - for all its heads, so a
+// ops_sparse_attn (include/osmos/gpu/ops.h): the model has one latent - key and value - for all its heads, so a
 // token's attention is two products, scores = q (heads x hd) . keys^T and o = p . keys (p the scores' softmax), each a
 // register-tiled F32 matmul over the token's own keys. every output a sum in one order - over d ascending, over the
 // keys in theirs - whatever the tile, the batch, or the token's place in it
@@ -10,8 +10,8 @@
 #include "kvload.h"
 
 extern "C" {
-#include "substrate/gpu/kvfmt.h"
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/ops.h"
 }
 
 namespace {

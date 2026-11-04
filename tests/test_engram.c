@@ -5,9 +5,9 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/model/engram.h"
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
+#include "osmos/model/engram.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
 
 #define T 32
 #define LAYERS 2
@@ -22,7 +22,7 @@ static void test_own(void)
   const char *home = getenv("HOME");
   snprintf(p, sizeof p, "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf", home);
   Gguf *g = gguf_create(p, err);
-  snprintf(p, sizeof p, "%s/substrate-oracle/engram_rows_ud.bin", home);
+  snprintf(p, sizeof p, "%s/osmos-oracle/engram_rows_ud.bin", home);
   FILE *ref = fopen(p, "rb");
   if (!g || !ref)
   {
@@ -90,7 +90,7 @@ static void test_own(void)
   free(want);
 }
 
-/* the oracle's hashes of the 32 real ids (oracle/ref_gguf.py's Hasher, ~/substrate-oracle/engram_hash32.i64,
+/* the oracle's hashes of the 32 real ids (oracle/ref_gguf.py's Hasher, ~/osmos-oracle/engram_hash32.i64,
    [T][layers][cols]) against engram_rows decoding them a token at a time, as the decode does */
 int main(void)
 {
@@ -102,9 +102,9 @@ int main(void)
   Gguf *g = gguf_create(p, err);
   snprintf(p, sizeof p, "%s/models/ds1017/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf", home);
   Gguf *eg = gguf_create(p, err);
-  snprintf(p, sizeof p, "%s/substrate-oracle/engram_hash32.i64", home);
+  snprintf(p, sizeof p, "%s/osmos-oracle/engram_hash32.i64", home);
   FILE *ref = fopen(p, "rb");
-  snprintf(p, sizeof p, "%s/substrate-oracle/ids32.txt", home);
+  snprintf(p, sizeof p, "%s/osmos-oracle/ids32.txt", home);
   FILE *idf = fopen(p, "r");
   if (!g || !eg || !ref || !idf)
   {

@@ -1,16 +1,16 @@
-// dbench budget_gib max_tokens n_new warmup.txt q1.txt [q2.txt ...]: libsubstrate's decode as maya's --bench runs
+// dbench budget_gib max_tokens n_new warmup.txt q1.txt [q2.txt ...]: libosmos's decode as maya's --bench runs
 // it - one forward (the lane), an answer of 64 tokens to the warm-up prompt (keep it unlike the questions: the
 // resident set follows what it answers), then each question's prompt and n_new greedy tokens; prints the prompt's
 // tok/s (past 256 tokens), the answer's tok/s and a hash of its tokens (the same hash: the same tokens). a prompt
 // file is token ids, comma separated (tools/bench/prompts.py writes them).
 // environment: MODEL (a first shard: unsloth's UD-IQ1_M, say; ENGRAM its Engram file where it has one) or MODEL_DIR
 // (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
-// substrate-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
+// osmos-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
 // PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
 // a layer ahead: ForwardOptions' no_guess).
-// build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -lsubstrate_hip -lsubstrate
-//        -lhsa-runtime64 -o bin/dbench   (after `make lib/libsubstrate.a lib/libsubstrate_hip.a`)
+// build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos
+//        -lhsa-runtime64 -o bin/dbench   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
 
 #include <chrono>
@@ -21,10 +21,10 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/run/forward.h"
-#include "substrate/run/drafter.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/run/forward.h"
+#include "osmos/run/drafter.h"
 }
 
 #define CHECK(x)                                                                 \

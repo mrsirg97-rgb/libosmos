@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/mem/resident.h"
+#include "osmos/mem/resident.h"
 
 #define FILE_BYTES (8u << 20)
 #define MAX_ALLOCS 64

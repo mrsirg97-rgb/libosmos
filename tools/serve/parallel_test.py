@@ -3,7 +3,7 @@
 each answers the bits it answers alone, a STOP ends one alone, a conversation stays in its lane, a short question is
 answered while a long prompt is read.
 
-    python tools/serve/parallel_test.py --model <first shard> [--picks <file>] [--exe bin/substrate-serve] [--lanes 4]
+    python tools/serve/parallel_test.py --model <first shard> [--picks <file>] [--exe bin/osmos-serve] [--lanes 4]
 
   alone     the reference: four prompts (real text, different from their second token), one at a time, --parallel 1
   together  --parallel <lanes>: the four sent at once - each answer's token hash the one it got alone
@@ -11,7 +11,7 @@ answered while a long prompt is read.
             alone (a verify's accepted tokens are greedy's), the drafts cut to keep a round a decode step
   stop      --parallel 2: two at once, the first STOPped after a few tokens: its DONE `cancel`, fewer tokens; the
             other's answer whole and its own
-  slots     --parallel 2, SUBSTRATE_SLOT_KEEP=1: A and B at once, then A's next turn - it reuses A from its lane
+  slots     --parallel 2, OSMOS_SLOT_KEEP=1: A and B at once, then A's next turn - it reuses A from its lane
   reading   --parallel 2: a long prompt, then a short one: the short one read in one piece ahead of the long one's
             next and answering between its pieces - tokens of it before the long read's last piece
 exit 0: every check passed; 1: a check failed; 2: the engine did not start.
@@ -41,8 +41,8 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--picks")
     ap.add_argument("--dspark")
-    ap.add_argument("--exe", default="bin/substrate-serve")
-    ap.add_argument("--prompts", default=os.path.expanduser("~/bench/substrate-prompts"))
+    ap.add_argument("--exe", default="bin/osmos-serve")
+    ap.add_argument("--prompts", default=os.path.expanduser("~/bench/osmos-prompts"))
     ap.add_argument("--budget", default="100")
     ap.add_argument("--lanes", type=int, default=4)
     a = ap.parse_args()
@@ -53,8 +53,8 @@ def main():
         base += ["--picks", a.picks]
     if a.dspark:
         base += ["--dspark", a.dspark]
-    tmp = tempfile.mkdtemp(prefix="substrate-par-")
-    env = dict(os.environ, SUBSTRATE_SLOT_KEEP="0", SUBSTRATE_SLOT_DIR=f"{tmp}/none")
+    tmp = tempfile.mkdtemp(prefix="osmos-par-")
+    env = dict(os.environ, OSMOS_SLOT_KEEP="0", OSMOS_SLOT_DIR=f"{tmp}/none")
     try:
         print("alone: four prompts one at a time, --parallel 1", flush=True)
         e = Multi(a.exe, base + ["--parallel", "1"], env)
@@ -106,8 +106,8 @@ def main():
               r0.get("finish") == "cancel" and len(r0["tokens"]) < NEW)
         check("stop: the other's answer whole, its own", hash_tokens(r1["tokens"]) == ref[1])
 
-        print("slots: A and B at once, then A's next turn, --parallel 2, SUBSTRATE_SLOT_KEEP=1", flush=True)
-        e = Multi(a.exe, base + ["--parallel", "2"], dict(env, SUBSTRATE_SLOT_KEEP="1", SUBSTRATE_SLOT_DIR=f"{tmp}/s"))
+        print("slots: A and B at once, then A's next turn, --parallel 2, OSMOS_SLOT_KEEP=1", flush=True)
+        e = Multi(a.exe, base + ["--parallel", "2"], dict(env, OSMOS_SLOT_KEEP="1", OSMOS_SLOT_DIR=f"{tmp}/s"))
         e.send(0, prompts[0], NEW)
         e.send(1, prompts[1], NEW)
         ra, rb = e.wait(0), e.wait(1)

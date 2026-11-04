@@ -27,7 +27,7 @@ q8_round
   shorter than a row, rows 0, or a launch refused.
 
 q8_group_tok
-  mv_group_tok (substrate/gpu/mv.h) over q8_round's rows: matrix m (w[m], `type` IQ2_XXS, IQ2_XS or IQ1_M; `rows`
+  mv_group_tok (osmos/gpu/mv.h) over q8_round's rows: matrix m (w[m], `type` IQ2_XXS, IQ2_XS or IQ1_M; `rows`
   rows of `cols`) on its cnt[m] (1 .. max_cnt <= MV_MAX_TOKENS) rows of q / d from row xrow[m], into y's rows from
   xrow[m] (ys floats apart). a row's sum: its blocks to LANE_Q8_LANES(cols) lanes in turn, each block's two halves'
   lane_q8_part added, times the block's scale fmaf'd onto the lane's sum, then the lanes' xor tree - so a token's bits

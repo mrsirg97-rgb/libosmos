@@ -4,7 +4,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "substrate/model/dspark.h"
+#include "osmos/model/dspark.h"
 
 /* the index on the real drafter (~/models/dspark: skipped without it): its tensors as the pack has them; and
    malformed indexes refused, each with why */

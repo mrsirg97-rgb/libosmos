@@ -1,7 +1,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/ops.h"
 
 /* the decoder skip. DeepSeek-V4.1's layers past the last KV source (dec: the decoder's first layer) take their
    compressed KV from dec alone and keep nothing of a token but its window; so a prompt token's decoder state past dec

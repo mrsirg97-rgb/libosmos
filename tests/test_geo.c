@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "substrate/model/gguf.h"
+#include "osmos/model/gguf.h"
 #include "weights_geo.h"
 
 /* the geometry from unsloth's UD-IQ1_M (llama.cpp's spelling, the Engram in the model's own files): equal to one

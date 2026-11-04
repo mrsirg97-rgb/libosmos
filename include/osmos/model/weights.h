@@ -5,8 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "substrate/mem/pool.h"
-#include "substrate/model/gguf.h"
+#include "osmos/mem/pool.h"
+#include "osmos/model/gguf.h"
 
 #define WEIGHTS_ERR 256
 #define WEIGHTS_MAX_LAYERS 64

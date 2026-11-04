@@ -1,6 +1,6 @@
 #include <math.h>
 
-#include "substrate/model/rope.h"
+#include "osmos/model/rope.h"
 
 /* ref.py's freqs_cis, each step a float32 operation as torch's (the corrections in double, as python's math) */
 bool rope_freqs(const Rope *r, float *freqs)

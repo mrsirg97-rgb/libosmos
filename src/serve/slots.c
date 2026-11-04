@@ -7,7 +7,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "substrate/serve/slots.h"
+#include "osmos/serve/slots.h"
 
 /* the kept conversations (slots.h): an array of entries, each in RAM (its state) or in the folder (its files), every
    one's tokens in memory for the prefix match. a few dozen at most: linear scans */

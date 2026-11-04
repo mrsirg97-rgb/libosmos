@@ -1,4 +1,4 @@
-// the decode's matrix-vector products (mv.hip; include/substrate/gpu/mv.h): a wave R rows, a lane its 8-value chunks
+// the decode's matrix-vector products (mv.hip; include/osmos/gpu/mv.h): a wave R rows, a lane its 8-value chunks
 // lane, lane + 32, lane + 64, ... of each, in that order, U of them loaded before any is summed. a row's sum is the
 // same sequence of fmaf whatever R, U and NT - they only change what is in flight - so its bits are too.
 #pragma once

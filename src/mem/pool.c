@@ -3,7 +3,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#include "substrate/mem/pool.h"
+#include "osmos/mem/pool.h"
 
 typedef struct Slot
 {

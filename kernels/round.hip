@@ -1,4 +1,4 @@
-// ops (include/substrate/gpu/ops.h): the reference kernels' activation roundings - act_quant's FP8, fp4_act_quant's
+// ops (include/osmos/gpu/ops.h): the reference kernels' activation roundings - act_quant's FP8, fp4_act_quant's
 // FP4 - and BF16, each value as ref.py rounds it
 #include <cmath>
 
@@ -6,7 +6,7 @@
 #include "round.h"
 
 extern "C" {
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/ops.h"
 }
 
 namespace {

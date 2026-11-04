@@ -9,18 +9,18 @@
 
 #include <hip/hip_runtime_api.h>
 
-#include "substrate/gpu/kvfmt.h"
-#include "substrate/mem/fetchq.h"
-#include "substrate/mem/pool.h"
-#include "substrate/mem/resident.h"
-#include "substrate/mem/rowread.h"
-#include "substrate/cpu/lane.h"
-#include "substrate/gpu/mm.h"
-#include "substrate/gpu/quant.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/ops.h"
-#include "substrate/model/engram.h"
-#include "substrate/run/forward.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/mem/fetchq.h"
+#include "osmos/mem/pool.h"
+#include "osmos/mem/resident.h"
+#include "osmos/mem/rowread.h"
+#include "osmos/cpu/lane.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/gpu/quant.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/ops.h"
+#include "osmos/model/engram.h"
+#include "osmos/run/forward.h"
 
 #define FWD_MAX_FILES 16
 #define FWD_CKV_F32_ROWS 32768 /* a prompt's compressed rows unpacked once at most (64 MB at 512 values: a 128K

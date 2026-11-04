@@ -7,12 +7,12 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
-#include "substrate/mem/hip_slots.h"
-#include "substrate/gpu/kvfmt.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/ops.h"
-#include "substrate/model/qtype.h"
-#include "substrate/model/rope.h"
+#include "osmos/mem/hip_slots.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/ops.h"
+#include "osmos/model/qtype.h"
+#include "osmos/model/rope.h"
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
 #define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */

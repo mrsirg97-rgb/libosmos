@@ -1,8 +1,8 @@
-// quant_dequant (include/substrate/gpu/quant.h): a thread an 8-value chunk
+// quant_dequant (include/osmos/gpu/quant.h): a thread an 8-value chunk
 #include "quant.h"
 
 extern "C" {
-#include "substrate/gpu/quant.h"
+#include "osmos/gpu/quant.h"
 }
 
 namespace {

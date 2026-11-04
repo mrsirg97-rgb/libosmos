@@ -14,9 +14,9 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/run/forward.h"
 }
 #include "test_model.h"
 
@@ -67,7 +67,7 @@ int main() {
   const TestModel which = test_model(path, sizeof path);
   int ndev = 0;
   const char* home = std::getenv("HOME");
-  const std::string text = std::string(home ? home : "") + "/bench/substrate-prompts/calib16k.txt";
+  const std::string text = std::string(home ? home : "") + "/bench/osmos-prompts/calib16k.txt";
   FILE* tf = std::fopen(text.c_str(), "r");
   if (which == TestModel::kNone || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0 || !tf) {
     std::printf("[test_cand_gpu] skipped: no model, GPU or the bench's text (%s)\n", text.c_str());

@@ -1,10 +1,10 @@
-// a packed row's values read back (substrate/gpu/kvfmt.h): four at a time, each its code's value times its block's
+// a packed row's values read back (osmos/gpu/kvfmt.h): four at a time, each its code's value times its block's
 // scale - round.h's own product, so the F32 the rounding gave. the attention's keys and values, the indexer's keys
 #pragma once
 #include "round.h"
 
 extern "C" {
-#include "substrate/gpu/kvfmt.h"
+#include "osmos/gpu/kvfmt.h"
 }
 
 namespace kv {

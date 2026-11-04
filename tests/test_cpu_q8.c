@@ -6,7 +6,7 @@
 
 #include "lane.h"
 #include "quant_grids.h"
-#include "substrate/cpu/q8.h"
+#include "osmos/cpu/q8.h"
 
 /* the CPU lane's int8 experts against a scalar replay of kernels/lane.h's contract (test_cpu_q8_gpu holds them to the
    GPU's bits on the model's experts): random blocks of each expert type at 16 and 32 lanes and a row whose last

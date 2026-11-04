@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "substrate/run/forward.h"
+#include "osmos/run/forward.h"
 
 /* DeepSeek's DSpark (its config.json): a round's block, the token y and DRAFTER_BLOCK - 1 noise tokens after it, each
    row a draft; the noise token; the routed experts a row picks */

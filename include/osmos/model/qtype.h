@@ -1,5 +1,5 @@
-#ifndef SUBSTRATE_QTYPE_H
-#define SUBSTRATE_QTYPE_H
+#ifndef OSMOS_QTYPE_H
+#define OSMOS_QTYPE_H
 
 #include <stdint.h>
 

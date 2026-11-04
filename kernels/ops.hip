@@ -1,4 +1,4 @@
-// ops (include/substrate/gpu/ops.h): the forward's small steps, each as ref.py computes it, in F32
+// ops (include/osmos/gpu/ops.h): the forward's small steps, each as ref.py computes it, in F32
 #include <cmath>
 
 #include "quant.h"
@@ -7,9 +7,9 @@
 #include "mm.h"
 
 extern "C" {
-#include "substrate/gpu/kvfmt.h"
-#include "substrate/gpu/mm.h"
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/gpu/ops.h"
 }
 
 namespace {

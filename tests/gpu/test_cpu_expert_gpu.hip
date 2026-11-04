@@ -16,9 +16,9 @@
 #include "test_model.h"
 
 extern "C" {
-#include "substrate/cpu/expert.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/model/gguf.h"
+#include "osmos/cpu/expert.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/model/gguf.h"
 }
 
 #define CHECK(x)                                                                 \

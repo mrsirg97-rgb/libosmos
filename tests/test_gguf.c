@@ -5,7 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/model/gguf.h"
+#include "osmos/model/gguf.h"
 
 /* a GGUF written by hand, byte by byte, as the format has it (version 3, little-endian) */
 typedef struct

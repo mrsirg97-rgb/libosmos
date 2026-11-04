@@ -2,7 +2,7 @@
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
 
-#include "substrate/mem/hip_slots.h"
+#include "osmos/mem/hip_slots.h"
 
 /* the GPU's coarse-grained global pool, and the CPU agent its memory is opened to */
 typedef struct Where

@@ -7,8 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/mem/fetchq.h"
-#include "substrate/mem/pool.h"
+#include "osmos/mem/fetchq.h"
+#include "osmos/mem/pool.h"
 
 #define N 2000
 #define CHUNKED_FILE (8u << 20) /* test_chunks' file: parts of several FETCHQ_CHUNK */

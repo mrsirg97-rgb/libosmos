@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "substrate/mem/rowread.h"
+#include "osmos/mem/rowread.h"
 
 
 struct Rowread

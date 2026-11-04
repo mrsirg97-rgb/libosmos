@@ -1,4 +1,4 @@
-/* the kept conversations' store (substrate/serve/slots.h): states as opaque bytes, tokens as the prefixes to match.
+/* the kept conversations' store (osmos/serve/slots.h): states as opaque bytes, tokens as the prefixes to match.
    RAM alone (the minimum, the longest prefix, `beyond`, take, the cap, the same tokens replaced); the folder past RAM
    (a conversation written there and taken back, its files gone); flush and a new store over the folder (a restart);
    a store of another identity, a damaged .meta, a .bin of the wrong size and a .bin alone - each removed at start;
@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "substrate/serve/slots.h"
+#include "osmos/serve/slots.h"
 
 enum { STATE = 4096, N = 2000 };
 

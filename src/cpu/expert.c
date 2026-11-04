@@ -4,8 +4,8 @@
 #include <string.h>
 
 #include "quant_grids.h"
-#include "substrate/cpu/expert.h"
-#include "substrate/model/qtype.h"
+#include "osmos/cpu/expert.h"
+#include "osmos/model/qtype.h"
 
 /* kernels/quant.h's decoders for the experts' types, line for line, 8 values a vector: each product a float product,
    each rounded (this file is built -ffp-contract=off: none fused), so each value the GPU's bits */

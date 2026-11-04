@@ -9,7 +9,7 @@ bool quant_dequant(uint32_t type, const void *src, uint64_t values, float *dst, 
 bool quant_dequant_f16(uint32_t type, const void *src, uint64_t values, void *dst, void *stream);
 bool quant_repack_q5k(const void *src, uint32_t rows, uint32_t cols, void *dst, void *stream);
 
-#include "substrate/model/qtype.h"
+#include "osmos/model/qtype.h"
 
 #define QUANT_Q5_K QTYPE_Q5_K               /* the table's (qtype.h) */
 #define QUANT_Q5_K_VALUES QTYPE_Q5_K_VALUES

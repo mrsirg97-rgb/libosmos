@@ -6,7 +6,7 @@
 
 #include "forward_impl.h"
 #include "lane.h"
-#include "substrate/cpu/lane.h"
+#include "osmos/cpu/lane.h"
 
 /* the lane's CPU half (forward_lane's cpu_threads): its pool, the model's files mapped read-only for its workers (the
    page cache's pages, read in place: no copy), and the buffers it hands rows through - the GPU maps them */

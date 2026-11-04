@@ -2,7 +2,7 @@
 // drafted (drafter_draft), verified in one batch, the rejected undone (seq_rollback) and the accepted seeded
 // (drafter_seed) - the same tokens, whatever the drafts; and the drafts mostly right (a drafter that computes
 // nonsense has its drafts rejected: ~0 accepted). needs a gfx1151, ~/models/ds1017, ~/models/dspark and
-// ~/substrate-oracle/ids_real1k.txt; skipped (77) without them.
+// ~/osmos-oracle/ids_real1k.txt; skipped (77) without them.
 #include <hip/hip_runtime.h>
 #include <unistd.h>
 
@@ -13,10 +13,10 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/run/drafter.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/run/drafter.h"
+#include "osmos/run/forward.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -43,7 +43,7 @@ int main() {
   std::printf("[test_drafter_gpu] start\n");
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "", mdir = home + "/models/ds1017/";
   const std::string ddir = home + "/models/dspark";
-  FILE* idf = std::fopen((home + "/substrate-oracle/ids_real1k.txt").c_str(), "r");
+  FILE* idf = std::fopen((home + "/osmos-oracle/ids_real1k.txt").c_str(), "r");
   int ndev = 0;
   if (!idf || access((ddir + "/dspark.bin").c_str(), R_OK) || access(mdir.c_str(), R_OK) ||
       hipGetDeviceCount(&ndev) || !ndev) {

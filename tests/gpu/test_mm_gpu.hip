@@ -20,11 +20,11 @@
 #include "test_model.h"
 
 extern "C" {
-#include "substrate/gpu/mm.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/ops.h"
-#include "substrate/gpu/quant.h"
-#include "substrate/model/gguf.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/ops.h"
+#include "osmos/gpu/quant.h"
+#include "osmos/model/gguf.h"
 }
 
 #define CHECK(x)                                                                 \

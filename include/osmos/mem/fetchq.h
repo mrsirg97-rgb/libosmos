@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "substrate/mem/pool.h"
+#include "osmos/mem/pool.h"
 
 /* a job's bytes when the queue is idle: a lone unit's parts read in chunks of this, by many workers at once */
 #define FETCHQ_CHUNK (1u << 20)

@@ -11,11 +11,11 @@
 
 #include "quant_grids.h"
 #include "round.h"
-#include "substrate/model/qtype.h"
+#include "osmos/model/qtype.h"
 
 namespace quant {
 
-// the table's ids (substrate/model/qtype.h)
+// the table's ids (osmos/model/qtype.h)
 enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,

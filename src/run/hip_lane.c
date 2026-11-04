@@ -3,8 +3,8 @@
 
 #include "forward_impl.h"
 #include "lane.h"
-#include "substrate/gpu/ops.h"
-#include "substrate/gpu/q8.h"
+#include "osmos/gpu/ops.h"
+#include "osmos/gpu/q8.h"
 
 /* forward_lane's small steps: the step's (token, routed expert) pairs in rows by expert (then token), each expert -
    an entry, or a few of them past MV_MAX_TOKENS tokens - once for its rows through the matvec's group (gate and up

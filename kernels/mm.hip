@@ -1,11 +1,11 @@
-// mm (include/substrate/gpu/mm.h): the kernel is mm.h's
+// mm (include/osmos/gpu/mm.h): the kernel is mm.h's
 #include <cmath>
 
 #include "mm.h"
 #include "round.h"
 
 extern "C" {
-#include "substrate/gpu/mm.h"
+#include "osmos/gpu/mm.h"
 }
 
 namespace {

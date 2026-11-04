@@ -16,10 +16,10 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/run/drafter.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/run/drafter.h"
+#include "osmos/run/forward.h"
 }
 #include "test_model.h"
 
@@ -131,7 +131,7 @@ int main() {
   CHECK(w);
   g_vocab = (uint32_t) w->geo.n_vocab;
   std::vector<uint64_t> picks((size_t) w->geo.n_layers * w->geo.n_experts);  // the bench's profile, where it is
-  FILE* pf = std::fopen((dir + "substrate-picks.bin").c_str(), "rb");
+  FILE* pf = std::fopen((dir + "osmos-picks.bin").c_str(), "rb");
   const bool ranked = pf && std::fread(picks.data(), 8, picks.size(), pf) == picks.size();
   if (pf) std::fclose(pf);
   const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, ranked ? picks.data() : nullptr, kMaxTokens};

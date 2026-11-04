@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "substrate/model/gguf.h"
+#include "osmos/model/gguf.h"
 
 typedef struct
 {

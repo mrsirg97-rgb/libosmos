@@ -1,6 +1,6 @@
 # maya upstream: patches and findings
 
-what building libsubstrate found in [Project Maya](https://github.com/mw00/project-maya), measured on the Ryzen AI
+what building libosmos found in [Project Maya](https://github.com/mw00/project-maya), measured on the Ryzen AI
 Halo (Ryzen AI MAX+ 395, Radeon 8060S gfx1151, 128 GB, ROCm 7.15 / hipBLASLt 1.4.1). each: what, the evidence, the
 fix, its status. none is filed unless it says so.
 
@@ -27,7 +27,7 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 - **effect**: rows read at the wrong stride and decoded as FP8 - no error, wrong numbers in the oracle that checks
   maya-ds4's GGUF path.
 - **fix**: the row's bytes from its type, decoded by gguf-py for any type but MXFP8; refuse a type of unknown size.
-  done in `oracle/ref_gguf.py` (`# substrate:`).
+  done in `oracle/ref_gguf.py` (`# osmos:`).
 
 ### 2. `tools/ds4/ref_gguf.py` reads every non-BF16 embedding as Q8_0
 
@@ -55,7 +55,7 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 - **what**: two runs of maya-ds4 (v1.1.36 + #643 + #587) on the same 32 real token ids, one process each, the same
   config: the `DS4_DUMP_L` records part from layer 0 (worst 1.1e-8 at position 8), layer 10 median 1.3% (worst 18%),
   layers 30-38 median 4-7%; the logits KL 2.5e-3 mean, 1.4e-2 max, the argmax the same at 32 of 33 positions (the 4
-  greedy tokens the same). `~/substrate-oracle`, `dumpcmp.py layers L_a.bin L_b.bin`.
+  greedy tokens the same). `~/osmos-oracle`, `dumpcmp.py layers L_a.bin L_b.bin`.
 - **against the F32 reference** (`ref_gguf.py`, the first 8 positions): KL 0.0002-0.018 a position, maya's own spread
   0-0.0057; the argmax the reference's at 7 of 8.
 - **candidates** (not checked): the CPU lane's multi-threaded sums (it takes a few experts a run), a GPU reduction
@@ -95,11 +95,11 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
   20 (`ReferenceError: navigator is not defined`); it fails the same way on `main`.
 - **fix**: guard the `navigator` read, or set the test's Node version.
 
-## to look at: libsubstrate's findings of 2026-11-01 (each checked against maya's code before a PR)
+## to look at: libosmos's findings of 2026-11-01 (each checked against maya's code before a PR)
 
 ### 11. device-to-device copies of memory the HIP runtime did not allocate go to the copy engine
 
-- **found**: libsubstrate's resident set swaps an expert by copying it between two HSA allocations
+- **found**: libosmos's resident set swaps an expert by copying it between two HSA allocations
   (`hsa_amd_memory_pool_allocate`); `hipMemcpyAsync(..., hipMemcpyDeviceToDevice)` took them for host memory and
   copied on the copy engine, the GPU idle ~0.45 ms behind each (4.6 a token: ~1.9 ms). a copy kernel (16 bytes a
   thread) took 0.63 ms of kernels a token for the 1.9 of gaps.
@@ -116,7 +116,7 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 
 ### 13. the resident set's swaps: choose from every streamed expert in GPU memory
 
-- **found**: libsubstrate chose a swap only from the experts held in the step; choosing from every streamed expert
+- **found**: libosmos chose a swap only from the experts held in the step; choosing from every streamed expert
   the pool still holds (held or not) +1.5-3.4% decode.
 - **check in maya**: maya swaps CPU-hit experts in from a background thread with a spare slot a layer
   (`cache_tick` / `swap_tick`); whether experts streamed to the GPU (the PCIe lane, off on this box) are candidates.

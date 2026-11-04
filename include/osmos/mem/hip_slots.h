@@ -1,7 +1,7 @@
 #ifndef HIP_SLOTS_H
 #define HIP_SLOTS_H
 
-#include "substrate/mem/resident.h"
+#include "osmos/mem/resident.h"
 
 Slots hip_slots(void);
 

@@ -2,9 +2,9 @@
 #define DRAFTER_IMPL_H
 
 #include "forward_impl.h"
-#include "substrate/gpu/quant.h"
-#include "substrate/model/dspark.h"
-#include "substrate/run/drafter.h"
+#include "osmos/gpu/quant.h"
+#include "osmos/model/dspark.h"
+#include "osmos/run/drafter.h"
 
 #define DRAFTER_BLOCKS 3          /* mtp.0 .. mtp.2 */
 #define DRAFTER_EXPERTS 128       /* a block's routed experts */

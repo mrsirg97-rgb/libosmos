@@ -1,4 +1,4 @@
-// ops (include/substrate/gpu/ops.h): the attention's keys - the compressor, the indexer's scores and its top k
+// ops (include/osmos/gpu/ops.h): the attention's keys - the compressor, the indexer's scores and its top k
 // (sparse_attn.hip the attention itself) - each as ref.py computes it, in F32, reductions in a fixed order
 #include <cmath>
 #include <cstdint>
@@ -8,8 +8,8 @@
 #include "kvload.h"
 
 extern "C" {
-#include "substrate/gpu/kvfmt.h"
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/ops.h"
 }
 
 namespace {

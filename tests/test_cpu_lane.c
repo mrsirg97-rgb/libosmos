@@ -5,8 +5,8 @@
 #include <string.h>
 
 #include "lane.h"
-#include "substrate/cpu/lane.h"
-#include "substrate/cpu/q8.h"
+#include "osmos/cpu/lane.h"
+#include "osmos/cpu/q8.h"
 
 /* the CPU lane's pool against the same steps done in one thread (cpu_q8_round, cpu_q8_rows, lane_swiglu - their bits
    the GPU's: test_cpu_q8, test_cpu_lane_gpu): random experts of each type, a job of three experts (1, 3 and 2 rows),

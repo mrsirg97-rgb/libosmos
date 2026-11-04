@@ -1,7 +1,7 @@
 #include <string.h>
 #include <stddef.h>
 
-#include "substrate/model/qtype.h"
+#include "osmos/model/qtype.h"
 
 #define QTYPE_ROW(name, id, values, bytes, paths) {id, values, bytes, paths, #name},
 static const QTypeInfo rows[] = {QTYPES(QTYPE_ROW)};

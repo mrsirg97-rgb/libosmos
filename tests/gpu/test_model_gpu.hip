@@ -1,7 +1,7 @@
 // the whole model: ds1017's 40 layers and its head, through the pool, the real ids a token at a time, against the
-// oracle's full forward (oracle/ref_gguf.py --dump -> npz2bin.py: ~/substrate-oracle/ref<T>): each position's next-
+// oracle's full forward (oracle/ref_gguf.py --dump -> npz2bin.py: ~/osmos-oracle/ref<T>): each position's next-
 // token distribution - KL(oracle || ours), its argmax - beside maya's (the bar's own logits on the same ids,
-// ~/substrate-oracle/logits_a.bin), and each layer's stream drift. then the same ids again, unprobed and timed: the
+// ~/osmos-oracle/logits_a.bin), and each layer's stream drift. then the same ids again, unprobed and timed: the
 // logits the same bits (determinism), and the decode's tokens a second. passes when every position's argmax is the
 // oracle's wherever maya's is - or a tie: the oracle's two within twice our logits' measured error - and our mean KL
 // is no more than maya's.
@@ -27,9 +27,9 @@
 #include "test_model.h"
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/run/forward.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -111,12 +111,12 @@ static void probe(const char* step, int layer, int index, void* dev, uint64_t n,
 int main() {
   std::printf("[test_model_gpu] start\n");
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "", mdir = home + "/models/ds1017/";
-  std::string ref = home + "/substrate-oracle/ref32";
-  if (access((ref + "/logits.bin").c_str(), R_OK) != 0) ref = home + "/substrate-oracle/ref8";
-  // SUBSTRATE_ORACLE_REF / SUBSTRATE_ORACLE_MAYA: another dump and maya's logits on the same ids (another pack's)
-  if (const char* r = std::getenv("SUBSTRATE_ORACLE_REF")) ref = r;
-  const char* maya_env = std::getenv("SUBSTRATE_ORACLE_MAYA");
-  const std::string maya_path = maya_env ? maya_env : home + "/substrate-oracle/logits_a.bin";
+  std::string ref = home + "/osmos-oracle/ref32";
+  if (access((ref + "/logits.bin").c_str(), R_OK) != 0) ref = home + "/osmos-oracle/ref8";
+  // OSMOS_ORACLE_REF / OSMOS_ORACLE_MAYA: another dump and maya's logits on the same ids (another pack's)
+  if (const char* r = std::getenv("OSMOS_ORACLE_REF")) ref = r;
+  const char* maya_env = std::getenv("OSMOS_ORACLE_MAYA");
+  const std::string maya_path = maya_env ? maya_env : home + "/osmos-oracle/logits_a.bin";
   Arr ids, logits, hs, maya;
   int ndev = 0;
   if (!load(ref + "/ids.bin", &ids) || !load(ref + "/logits.bin", &logits) || !load(ref + "/hs.bin", &hs) ||

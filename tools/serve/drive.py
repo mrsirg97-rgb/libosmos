@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""tools/serve/drive.py - a small driver for substrate-serve's protocol: starts the engine, sends each request, and
+"""tools/serve/drive.py - a small driver for osmos-serve's protocol: starts the engine, sends each request, and
 prints each answer's token hash (dbench's: FNV-1a 64 over the tokens), its reuse and its times.
 
-    python tools/serve/drive.py --exe bin/substrate-serve -- <engine args>  <  requests (one per line: max_new spec ids_file)
+    python tools/serve/drive.py --exe bin/osmos-serve -- <engine args>  <  requests (one per line: max_new spec ids_file)
 """
 import argparse, subprocess, sys, time
 
@@ -66,7 +66,7 @@ def read_ids(path):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--exe", default="bin/substrate-serve")
+    ap.add_argument("--exe", default="bin/osmos-serve")
     ap.add_argument("args", nargs=argparse.REMAINDER)
     a = ap.parse_args()
     args = a.args[1:] if a.args[:1] == ["--"] else a.args
@@ -85,7 +85,7 @@ if __name__ == "__main__":
 
 
 class Multi:
-    """substrate-serve --parallel N: requests sent at once, their lines (T / PP / DONE / ERR <rid> ...) routed back by a
+    """osmos-serve --parallel N: requests sent at once, their lines (T / PP / DONE / ERR <rid> ...) routed back by a
     reader thread; wait(rid) returns a request's record."""
 
     def __init__(self, exe, args, env=None):

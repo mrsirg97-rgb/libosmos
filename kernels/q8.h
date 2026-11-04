@@ -1,4 +1,4 @@
-// the lane's experts over int8 inputs (kernels/lane.h's contract; include/substrate/gpu/q8.h): a 32-value block of a
+// the lane's experts over int8 inputs (kernels/lane.h's contract; include/osmos/gpu/q8.h): a 32-value block of a
 // weight row decoded to int8 codes, two words a chunk of 8, against the input's int8 words by v_dot4 - exact integer
 // sums - then each half's lane_q8_part and the block's scale, in the contract's order
 #pragma once

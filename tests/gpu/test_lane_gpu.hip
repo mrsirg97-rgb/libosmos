@@ -3,7 +3,7 @@
 // ones after) - an 8-token prompt, then 24 tokens a step at a time; every step's stream out the same bits at both.
 // a token's rows summed in any order but ascending expert id fails it. and the lane's CPU half at the tight budget
 // (forward_lane's cpu_threads: the experts not in GPU memory computed on the CPU) - the same bits again, the CPU's
-// picks counted. needs ~/models/ds1017 and ~/substrate-oracle/ids32.txt; skipped (77) without them
+// picks counted. needs ~/models/ds1017 and ~/osmos-oracle/ids32.txt; skipped (77) without them
 #include <hip/hip_runtime.h>
 #include <unistd.h>
 
@@ -14,9 +14,9 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/run/forward.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -61,7 +61,7 @@ static uint64_t run(Weights* w, const std::vector<int32_t>& ids, uint64_t budget
 int main() {
   std::printf("[test_lane_gpu] start\n");
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "", mdir = home + "/models/ds1017/";
-  FILE* idf = std::fopen((home + "/substrate-oracle/ids32.txt").c_str(), "r");
+  FILE* idf = std::fopen((home + "/osmos-oracle/ids32.txt").c_str(), "r");
   int ndev = 0;
   if (!idf || access((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), R_OK) || hipGetDeviceCount(&ndev) ||
       !ndev) {

@@ -4,8 +4,8 @@
 // the mean log-probability, and every 1,024 tokens the running perplexity. a check of a pack's quality beside the
 // oracle's KL (32 positions): two packs on the same text and steps, the same arithmetic.
 // environment: MODEL (a first shard), PICKS (forward_create_ranked's profile).
-// build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/ppl.hip -Llib -lsubstrate_hip -lsubstrate
-//        -lhsa-runtime64 -o bin/ppl   (after `make lib/libsubstrate.a lib/libsubstrate_hip.a`)
+// build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/ppl.hip -Llib -losmos_hip -losmos
+//        -lhsa-runtime64 -o bin/ppl   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -15,9 +15,9 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/run/forward.h"
 }
 
 #define CHECK(x)                                                                 \

@@ -5,8 +5,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "substrate/model/gguf.h"
-#include "substrate/model/qtype.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/qtype.h"
 #include "gguf_read.h"
 
 #define GGUF_MAGIC 0x46554747u

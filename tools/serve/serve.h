@@ -1,4 +1,4 @@
-/* substrate-serve's shared shapes: the server (the engine, its drafter and slots), a conversation (a sequence and the
+/* osmos-serve's shared shapes: the server (the engine, its drafter and slots), a conversation (a sequence and the
    tokens it holds), a GEN's fields. one conversation (single.c) or several at once (multi.c) over the same ones */
 #pragma once
 
@@ -6,9 +6,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "substrate/run/drafter.h"
-#include "substrate/run/forward.h"
-#include "substrate/serve/slots.h"
+#include "osmos/run/drafter.h"
+#include "osmos/run/forward.h"
+#include "osmos/serve/slots.h"
 
 #define SERVE_MAX_EOS 16
 
@@ -22,7 +22,7 @@ typedef struct Server
 {
   Forward *f;
   Drafter *d;      /* or NULL */
-  Slots *slots;    /* or NULL (SUBSTRATE_SLOT_KEEP off) */
+  Slots *slots;    /* or NULL (OSMOS_SLOT_KEEP off) */
   uint32_t max_tokens, max_ctx;
   uint32_t round_tokens; /* a decode step's most tokens: (experts - 1) / experts a token; more, a prompt's step */
   uint32_t window;       /* the attention's window: the drafter's ring of positions */

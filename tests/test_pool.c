@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/mem/pool.h"
+#include "osmos/mem/pool.h"
 
 #define KB 1024u
 #define MAX_ALLOCS 4096

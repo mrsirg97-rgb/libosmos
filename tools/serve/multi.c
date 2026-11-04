@@ -10,7 +10,7 @@
 
 #include "libevt/runtime/context.h"
 #include "multi.h"
-#include "substrate/gpu/mm.h"
+#include "osmos/gpu/mm.h"
 
 typedef struct LineEv
 {
@@ -273,14 +273,14 @@ int serve_multi(Server *sv, Conv *lanes, int n)
 {
   Multi m = {sv, calloc((size_t)n, sizeof(Lane)), n, engine_create(NULL, NULL, 0), NULL, 0, 0, false, false, 0, 0};
   if (!m.lane || !m.evt || (uint32_t)n > sv->round_tokens)
-    return fprintf(stderr, "substrate-serve: the lanes could not be made (at most %u: a round's tokens)\n",
+    return fprintf(stderr, "osmos-serve: the lanes could not be made (at most %u: a round's tokens)\n",
                    sv->round_tokens), 2;
   for (int i = 0; i < n; i++)
     m.lane[i].c = lanes[i];
   out("READY %u stop multi=%d\n", sv->max_ctx, n);
   pthread_t th;
   if (pthread_create(&th, NULL, reader, &m) != 0)
-    return fprintf(stderr, "substrate-serve: the reader could not start\n"), 2;
+    return fprintf(stderr, "osmos-serve: the reader could not start\n"), 2;
   engine_run(m.evt);
   pthread_join(th, NULL); /* (it ends after the QUIT it read, or stdin's end it posted as one) */
   for (int i = 0; i < n; i++)

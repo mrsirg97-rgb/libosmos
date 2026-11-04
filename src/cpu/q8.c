@@ -4,7 +4,7 @@
 
 #include "lane.h"
 #include "quant_grids.h"
-#include "substrate/cpu/q8.h"
+#include "osmos/cpu/q8.h"
 
 /* kernels/lane.h's contract on AVX-512 (the GPU's kernels/q8.h): 16 blocks of a row at a time - their codes decoded
    once as 8 vectors of 64 magnitudes and 64 signs, then for each token x negated where a code is, vpdpbusd's exact

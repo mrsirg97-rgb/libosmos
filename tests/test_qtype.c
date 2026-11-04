@@ -4,10 +4,10 @@
 #include <string.h>
 
 #include "lane.h"
-#include "substrate/cpu/expert.h"
-#include "substrate/cpu/q8.h"
-#include "substrate/model/gguf.h"
-#include "substrate/model/qtype.h"
+#include "osmos/cpu/expert.h"
+#include "osmos/cpu/q8.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/qtype.h"
 
 /* the type table against every host-side list of types: for each id, gguf_bytes, the CPU lane's matvec and int8
    experts and the lane contract's ids take it exactly when its row names that path; the rows' own invariants.

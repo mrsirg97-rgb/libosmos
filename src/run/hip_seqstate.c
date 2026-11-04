@@ -6,7 +6,7 @@
 
 #include "drafter_impl.h"
 #include "forward_impl.h"
-#include "substrate/gpu/kvfmt.h"
+#include "osmos/gpu/kvfmt.h"
 
 /* a sequence's state as one byte string (forward.h, seq_save): a header, then by position each layer's window rows
    (with seq_rollback's depth before them), its compressed rows and indexer keys, its compressor's open positions, the

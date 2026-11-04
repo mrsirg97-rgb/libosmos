@@ -15,13 +15,13 @@ constexpr const char* kGsqFirst = "%s/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ
 constexpr const char* kUdFirst = "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf";
 
 // the first shard's path into path (n bytes), and which model it is; kNone (path empty) where neither is readable.
-// SUBSTRATE_TEST_UD: another UD-IQ1_M set's first shard in its place (the MXFP8 Engram pack, say) - its tensors UD's
+// OSMOS_TEST_UD: another UD-IQ1_M set's first shard in its place (the MXFP8 Engram pack, say) - its tensors UD's
 inline TestModel test_model(char* path, size_t n) {
   const char* home = std::getenv("HOME");
-  if (const char* ud = std::getenv("SUBSTRATE_TEST_UD")) {
+  if (const char* ud = std::getenv("OSMOS_TEST_UD")) {
     std::snprintf(path, n, "%s", ud);
     if (access(path, R_OK) == 0) {
-      std::printf("  model: %s (SUBSTRATE_TEST_UD)\n", path);
+      std::printf("  model: %s (OSMOS_TEST_UD)\n", path);
       return TestModel::kUd;
     }
     path[0] = '\0';

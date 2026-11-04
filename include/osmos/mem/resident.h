@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "substrate/mem/pool.h"
+#include "osmos/mem/pool.h"
 
 #define RESIDENT_ARENA (1ull << 30) /* an allocation's bytes (or one unit's, if larger): few for the driver to keep */
 

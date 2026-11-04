@@ -11,7 +11,7 @@ every agent at once. per turn: its first token and its last from its send.
   turn 2..    a tool's result: 150-2,000 tokens nine times in ten, 5,000-20,000 (a file read) one in ten
   answers     64-400 tokens;  tool time 0.5-5 s between an answer and the next turn
 
-the text: real text (the bench's token files, ~/bench/substrate-prompts), each agent's and turn's its own slice
+the text: real text (the bench's token files, ~/bench/osmos-prompts), each agent's and turn's its own slice
 (maya's: its pack's tokenizer over a corpus). every turn drafts (spec=1) on both engines; a conversation stays in its
 lane, so a turn reads only its new tokens. exit 0: every turn of every run answered.
 """
@@ -131,7 +131,7 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--picks")
     ap.add_argument("--dspark", required=True)
-    ap.add_argument("--exe", default="bin/substrate-serve")
+    ap.add_argument("--exe", default="bin/osmos-serve")
     ap.add_argument("--budget", default="96")
     ap.add_argument("--max-tokens", default="2048")
     ap.add_argument("--maya-exe")
@@ -140,8 +140,8 @@ def main():
     ap.add_argument("--agents", type=int, default=4)
     ap.add_argument("--turns", type=int, default=8)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--prompts", default=os.path.expanduser("~/bench/substrate-prompts"))
-    ap.add_argument("--only", choices=("both", "substrate", "maya"), default="both")
+    ap.add_argument("--prompts", default=os.path.expanduser("~/bench/osmos-prompts"))
+    ap.add_argument("--only", choices=("both", "osmos", "maya"), default="both")
     a = ap.parse_args()
     text = Text(read_ids(f"{a.prompts}/calib16k.txt") + read_ids(f"{a.prompts}/p8192.txt"))
     plan = workload(a.seed, a.agents, a.turns)
@@ -151,11 +151,11 @@ def main():
           f"{int(statistics.median(news))}), {sum(news)} in all; answers up to {sum(t['max_new'] for p in plan for t in p)}",
           flush=True)
     ok = True
-    if a.only in ("both", "substrate"):
+    if a.only in ("both", "osmos"):
         args = ["--model", a.model, "--dspark", a.dspark, "--budget", a.budget, "--max-tokens", a.max_tokens,
                 "--max-context", str(a.ctx), "--parallel", str(a.agents)] + (["--picks", a.picks] if a.picks else [])
-        env = dict(os.environ, SUBSTRATE_SLOT_KEEP="0")
-        ok &= report(run(f"substrate-serve (budget {a.budget} GiB, {a.max_tokens}-token steps)", a.exe, args, env,
+        env = dict(os.environ, OSMOS_SLOT_KEEP="0")
+        ok &= report(run(f"osmos-serve (budget {a.budget} GiB, {a.max_tokens}-token steps)", a.exe, args, env,
                          plan, text), total)
     if a.only in ("both", "maya") and a.maya_exe:
         args = ["--pack", a.maya_pack, "--max-context", str(a.ctx), "--tp", "1", "--threads", "on", "--reserve-mib",

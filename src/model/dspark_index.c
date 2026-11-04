@@ -3,8 +3,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "substrate/model/dspark.h"
-#include "substrate/model/qtype.h"
+#include "osmos/model/dspark.h"
+#include "osmos/model/qtype.h"
 
 /* dspark.json's one key the index reads: "tensors": [[name, type, offset, bytes, [dims ...]], ...] - a reader of
    just that shape: strings without escapes, unsigned integers */

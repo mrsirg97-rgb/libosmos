@@ -4,8 +4,8 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 
-#include "substrate/mem/fetchq.h"
-#include "substrate/mem/resident.h"
+#include "osmos/mem/fetchq.h"
+#include "osmos/mem/resident.h"
 
 struct Resident
 {

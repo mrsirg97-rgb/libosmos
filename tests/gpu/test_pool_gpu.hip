@@ -17,11 +17,11 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/mem/fetchq.h"
-#include "substrate/mem/hip_slots.h"
-#include "substrate/mem/pool.h"
-#include "substrate/mem/resident.h"
-#include "substrate/model/gguf.h"
+#include "osmos/mem/fetchq.h"
+#include "osmos/mem/hip_slots.h"
+#include "osmos/mem/pool.h"
+#include "osmos/mem/resident.h"
+#include "osmos/model/gguf.h"
 }
 
 #define CHECK(x)                                                                 \

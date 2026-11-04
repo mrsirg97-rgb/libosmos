@@ -11,7 +11,7 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/ops.h"
 }
 
 #define CHECK(x)                                                                 \

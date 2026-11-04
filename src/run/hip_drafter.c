@@ -6,8 +6,8 @@
 #include <unistd.h>
 
 #include "drafter_impl.h"
-#include "substrate/model/qtype.h"
-#include "substrate/mem/hip_slots.h"
+#include "osmos/model/qtype.h"
+#include "osmos/mem/hip_slots.h"
 
 /* the drafter: its weights in GPU memory of their own, its rings from the trunk's taps, a round's head (hip_drafter.c)
    behind its blocks (hip_drafter_round.c) */

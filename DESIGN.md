@@ -1,4 +1,4 @@
-# libsubstrate: design
+# libosmos: design
 
 a runtime for one machine, the AMD Ryzen AI Halo (Ryzen AI MAX+ 395, Radeon 8060S, 128 GB unified memory), built
 first for DeepSeek-V4.1-Flash-1017. status: **design** (AGENTS.md workflow step 1). nothing here is implemented.
@@ -357,8 +357,8 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   A/Bs of this list compared against a baseline that `make lib` - a directory, always up to date - had not rebuilt,
   so their "before" was the day's start, not the commit before): 96945ea 310, a9eca19 312, 88fef1d 328, 955db80
   348, b1065b0 370, the experts at once 409 tok/s. the commits' messages for 955db80 and b1065b0 state the gain
-  since the day's start as the commit's own. a baseline is built by its library files (`make lib/libsubstrate.a
-  lib/libsubstrate_hip.a`), never `make lib`.
+  since the day's start as the commit's own. a baseline is built by its library files (`make lib/libosmos.a
+  lib/libosmos_hip.a`), never `make lib`.
 - the matmuls after it (scratch `mmd.hip`, `exg.hip`; 2,048 tokens): the dense ones 26-32 TFLOP/s but q_b's 19.6
   (K 1,280 under 8 waves' split, 2,048 row tiles each re-reading the x16, 10.7 GB at ~1.2 TB/s); the IQ experts at
   128 tokens 34 TFLOP/s, and not bound by their x16 (every expert on one x: 33.7 -> 32.3 ms). tried and given up:
@@ -536,14 +536,14 @@ still in the window).
 - **against maya, on the same prompts** (maya's --bench: its warm-up and three questions, its own token ids -
   `<|begin|><|User|>q<|Assistant|></think>`, 10 / 28 / 19 / 21 tokens - greedy, up to 256 tokens; scratch
   `mbench.hip`, budget 80 GB with the profile, each mode in a fresh process, 2 rounds): maya 1.1.41 DSpark 27.5 / 23.3
-  / 28.3 tok/s (mean 26.4), no drafting 16.7 / 16.6 / 16.8 (16.7); substrate DSpark 16.2-16.3 / 14.4-14.9 / 18.6-19.1
+  / 28.3 tok/s (mean 26.4), no drafting 16.7 / 16.6 / 16.8 (16.7); osmos DSpark 16.2-16.3 / 14.4-14.9 / 18.6-19.1
   (16.6), plain 9.4-9.6 / 10.1-10.3 / 10.0-10.2 (9.9) - the drafted answers the plain ones token for token. ~60% of
   maya both ways; DSpark 1.7x here (maya 1.6x).
 - **a correction**: the first numbers here (256 tokens after a 512-token prompt: 21.8 / 26.0 tok/s, "1.9-2.2x the best
   plain") ran the drafted decode after the plain one on the same prompt in one process - the resident set had
   already followed that very answer (hip_adapt.c), its misses gone. the same on maya's prompts: 26.3 / 20.4 / 28.4
-  tok/s, within ~5% of maya's DSpark. so what parts substrate from maya on a fresh prompt is the experts it reads from
-  the files (maya holds ~104 GB of experts in GPU memory and computes the rest on the CPU from RAM; substrate's GPU
+  tok/s, within ~5% of maya's DSpark. so what parts osmos from maya on a fresh prompt is the experts it reads from
+  the files (maya holds ~104 GB of experts in GPU memory and computes the rest on the CPU from RAM; osmos's GPU
   memory is at the ~107 GB cap: the trunk's 80-88, the drafter's 8, the scratch's ~9), not the kernels or the drafter.
   a round's time is the verify's (the trunk's batch of 3-6 rows: more distinct experts a step, so more misses).
 - what the misses are, on maya's prompts (code, prose, HTML; fresh processes, DSpark, budget 80 GiB):
@@ -567,7 +567,7 @@ still in the window).
   - **and the floor**: 40 layers all resident would decode at ~68 ms a token, slower than maya's whole plain decode
     (~60 ms, its misses in): the matmuls at one token (~120 GB/s of ~200) and the small kernels between are the other
     part. maya holds ~104 GB of experts in GPU memory and computes a few percent on the CPU from the page cache (no
-    copy of them twice); substrate has no CPU lane (determinism's rule 1).
+    copy of them twice); osmos has no CPU lane (determinism's rule 1).
 
 ## the lane: a decode's experts in the matvec's order (operator, 2026-10-30)
 
@@ -673,7 +673,7 @@ of the lane bit for bit).
   prompt's buffers in the resident set's tail (its last arenas, the least-ranked experts: re-read after) - ~1.2 s
   of reads a prompt, not built.
 
-- **the lane's experts over int8 inputs** (2026-11-01; kernels/q8.h, include/substrate/gpu/q8.h): a kernel-by-kernel
+- **the lane's experts over int8 inputs** (2026-11-01; kernels/q8.h, include/osmos/gpu/q8.h): a kernel-by-kernel
   profile of both decodes (rocprofv3, maya's first question, 256 tokens, 101 GiB, no drafter) - the dense matrices
   ours ~26 ms a token against maya's ~31, but the routed experts ours 19.5 ms (~81 us an expert, ~105 GB/s) against
   maya's ~12 for the ~85-90% it runs on the GPU (~57 us, ~150 GB/s). maya rounds an expert's input to int8 a block of
@@ -695,7 +695,7 @@ of the lane bit for bit).
   understood. the third question's tokens are the F32 lane's; the others' differ (the lane's numbers changed, by
   design: rule 1 kept, the prompt's WMMA unchanged).
 
-- **the CPU's half of the int8 contract** (2026-11-01; src/cpu/q8.c, include/substrate/cpu/q8.h): cpu_q8_round
+- **the CPU's half of the int8 contract** (2026-11-01; src/cpu/q8.c, include/osmos/cpu/q8.h): cpu_q8_round
   and cpu_q8_rows, q8_round's and q8_group_tok's bits on AVX-512 (F, BW, VL, DQ, VNNI, VBMI, BMI2; cpu_q8_ready,
   else both refuse). 16 blocks of a row at a time: their codes decoded once (64 values a vector - magnitudes as
   bytes, the negatives a 64-bit mask), then for each token x negated under the mask and vpdpbusd'd (exact), a
@@ -761,7 +761,7 @@ of the lane bit for bit).
   the same: dense ~29.9 / 30.3, attention 1.8 / 1.8, hyper-connections ~2.3 / 2.4, router ~0.8 / 0.8, ~1,740 / 1,690
   launches; its routed experts on the GPU ~10.5 against our 12.7 (ours the misses' too). the gap is the misses
   alone: its CPU lane's 5.3 against our reads' ~8.5-9.4. and the bench had built our resident set by id (no
-  picks): forward_create_ranked's profile (`substrate-picks.bin`, the 16K-token real-text count, nothing of the
+  picks): forward_create_ranked's profile (`osmos-picks.bin`, the 16K-token real-text count, nothing of the
   bench's questions) at 106 GiB, interleaved fresh runs: 16.7 / 15.2 / 14.9, 16.9 / 15.9 / 15.9 tok/s against by
   id 15.2 / 14.9 / 15.3, 15.5 / 15.0 / 15.4 - +4.7% (15.9 against 15.2), the streams the same bits. ranked is the
   comparison with maya (which ranks its own); the profile stays the caller's.
@@ -1003,9 +1003,9 @@ the same SIMD, so the floor is their sum (a real layer's gate: ~8.5 ms of decode
 ## determinism (operator, 2026-10-28)
 
 maya's prompt path is not run-to-run deterministic on this box: two runs of the bar's maya-ds4 on the same 32 real
-tokens (`~/substrate-oracle`, `dumpcmp.py layers`) part from layer 0 (worst 1.1e-8 at position 8) and grow - layer
+tokens (`~/osmos-oracle`, `dumpcmp.py layers`) part from layer 0 (worst 1.1e-8 at position 8) and grow - layer
 10 median 1.3% (worst 18%), layers 30-38 median 4-7% - to logits KL 2.5e-3 mean, 1.4e-2 max, the argmax the same at
-32 of 33 positions (the 4 greedy tokens the same). substrate diverges from maya here:
+32 of 33 positions (the 4 greedy tokens the same). osmos diverges from maya here:
 
 1. **run-to-run determinism - a rule.** the same request on the same build gives the same bits, every run: no
    floating-point atomics, a fixed reduction order in every kernel, hipBLASLt solutions taken only where
@@ -1025,15 +1025,15 @@ tokens (`~/substrate-oracle`, `dumpcmp.py layers`) part from layer 0 (worst 1.1e
   never the runtime). fixed here: maya's `ref_gguf.py` reads Engram rows as Q6_K or MXFP8 only, and this model's are
   **IQ4_NL** (144 B a row) - read as MXFP8 they would be silently wrong. the weights' types it covers through gguf-py
   (IQ1_M, IQ2_XXS, IQ2_XS, Q5_K, Q6_K, Q8_0, IQ4_NL, BF16: checked).
-- **measured, the first 8 positions of 32 real tokens** (`~/substrate-oracle`: `ref_gguf.py --dev cpu`, 334 s for 8
+- **measured, the first 8 positions of 32 real tokens** (`~/osmos-oracle`: `ref_gguf.py --dev cpu`, 334 s for 8
   tokens): KL(reference || maya) 0.0002-0.018 a position, maya against itself 0-0.0057; the argmax the reference's at
-  7 of 8 (position 6: 67 against 75). substrate's numerics target: bit for bit run to run, and at least as close to
+  7 of 8 (position 6: 67 against 75). osmos's numerics target: bit for bit run to run, and at least as close to
   the reference as maya is (int8 activations and FP16 prompt GEMMs put maya a few times its own spread away).
-- fixed to read this model, besides the Engram rows (each `# substrate:` in `oracle/ref_gguf.py`): the embedding is
+- fixed to read this model, besides the Engram rows (each `# osmos:` in `oracle/ref_gguf.py`): the embedding is
   Q5_K, not Q8_0; the Engram gate is `q_weight` and `k_weight`, not folded. maya's `ref_gguf.py` would have read the
   Engram rows wrong silently and refused the other two; all three are fixes to offer maya.
 - **the bar and a sanity check: maya-ds4's dumps** - `DS4_DUMP_L` (every layer's residual streams), `DS4_DUMP_R`
-  (routing), `DS4_DUMP_Y` (expert sets), `--dump-logits`. substrate writes the same records (`dumpcmp.py` unchanged);
+  (routing), `DS4_DUMP_Y` (expert sets), `--dump-logits`. osmos writes the same records (`dumpcmp.py` unchanged);
   against maya it must stay within maya's own run-to-run spread, measured per layer.
 
 ## splash's bets, and what each is worth here
@@ -1195,7 +1195,7 @@ is not, so the pick profile and the budget numbers do not carry over.
    on it (every draft is verified); its acceptance on this backbone is to measure.
 7. **the pick profile** recounted (`forward_picks` on the calibration text) and the budget re-measured.
 8. **the oracle.** gguf-py decodes IQ1_S and IQ2_S (`quants.py`), so `ref_gguf.py`'s weights are covered; its
-   `# substrate:` fixes need the UD spellings: embedding Q8_0, the gate folded, the tables sliced from
+   `# osmos:` fixes need the UD spellings: embedding Q8_0, the gate folded, the tables sliced from
    `per_layer_token_embd`. a new reference dump for `test_model_gpu`.
 9. **the paths.** the tests look in `~/models/ds1017`; the files are in `~/Models/ds1017/UD-IQ1_M`.
 
@@ -1285,7 +1285,7 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
 - **UD-IQ1_M is proven against the oracle and maya**, as the UD section's order: gguf-py decodes IQ1_S and IQ2_S
   (the oracle's weights), maya runs this file (`maya-ds4-hip.json`, its dumps the bar and the sanity check).
 
-1. schema: the type table (`include/substrate/model/qtype.h`): each type once, its id, a block's values and bytes, the
+1. schema: the type table (`include/osmos/model/qtype.h`): each type once, its id, a block's values and bytes, the
    paths that read it. tests: each path the table names takes the type (a GPU call on a block of it is not refused),
    and every table today agrees with it - a mutation (a path named, its case removed) must fail them.
 2. the projection: `gguf.c`'s sizes, `weights.c`'s enum and masks, `quant::Type`, the lane's and the CPU's ids, the
@@ -1349,7 +1349,7 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
      tensors). each form's Engram roles on its form's layers only (`ENGRAM_FILE` / `ENGRAM_OWN`, `geo.engram_own`);
      wo_a's other spelling (UD's [4096, 8192] for [4096, 1024, 8]: the same bytes); the image bias optional and not
      stored; the own form's tables `eg_slice`, each a layer's rows of per_layer_token_embd in order. found too:
-     `include/substrate/gpu/quant.h`'s `QUANT_Q5_K*`, a fifth copy of a type's numbers, now the table's.
+     `include/osmos/gpu/quant.h`'s `QUANT_Q5_K*`, a fifth copy of a type's numbers, now the table's.
      test_weights on the UD file: every role (Q8_0 embedding, F32 router, 2-dim wo_a, IQ1_S / IQ2_S experts, the
      gate folded, the slices tiling the tensor), 7 refusals (wo_a in BF16, the folded gate in BF16, the tables a row
      long, an I32 router, IQ1_S experts called IQ2_XXS, the image bias short, engram_kv moved off its layer).
@@ -1381,7 +1381,7 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
      tok/s - no picks profile, no CPU lane, no DSpark: not a number to compare yet (maya on this file: 18.0
      undrafted, 29.3-29.9 drafted).
 5. the oracle and maya: the logits within maya's spread, then the numbers.
-   **the logits (2026-11-03)**: 32 real ids (the GPL-3 prompt's first, `~/substrate-oracle/ids32.txt`); the oracle
+   **the logits (2026-11-03)**: 32 real ids (the GPL-3 prompt's first, `~/osmos-oracle/ids32.txt`); the oracle
    `ref_gguf.py --dev cpu` on maya's pack of the file (735 s; ppl 20.3), maya `maya-ds4 --ids --dump-logits` on the
    same pack, test_model_gpu on the UD file (tests/gpu/test_model.h). before today's kernel changes: ours mean KL
    0.046, maya's 0.272; argmax the oracle's 30 of 32 (both misses ties), maya's 29 (its position 18 KL 5.8); the lane
@@ -1394,7 +1394,7 @@ box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model 
    **the decode (2026-11-03; maya's three bench questions, 256 greedy tokens, an unrelated warm-up; drafting off on
    both; maya's config with `--dspark off`: 16.6 / 17.0 tok/s, 16.8)**:
    - by id 12.1-13.3; a profile (16,000 tokens: Strata's docs, the Apache and MPL licenses, Strata's Python,
-     maya's C++ - `~/Models/ds1017/UD-IQ1_M/substrate-picks.bin`, dbench `PICKS_OUT`) ranked at 106 GiB ~15.0.
+     maya's C++ - `~/Models/ds1017/UD-IQ1_M/osmos-picks.bin`, dbench `PICKS_OUT`) ranked at 106 GiB ~15.0.
    - the budget: 110 GiB (this unit's GTT 113 GiB; 112 refused) 15.27 against 15.0 at 106, misses 3,479 / 4,368.
    - the CPU lane on all 16 cores (the first unit's note was 15): 0 / 4 / 8 / 12 / 16 threads 15.2 / 15.2 / 15.1 /
      15.2 / 14.6 tok/s (two rounds) - it takes ~85% of the misses and buys nothing; 16 threads slower. off.
@@ -1450,7 +1450,7 @@ the operator's point: DeepSeek's design keeps ~0.92 KB a token (0.96 GB at 1M; "
 ~6.4 KB - each value of the attention's state in 4 bytes, though every one is already rounded to the model's own
 grid (ref.py): the window's keys `fp8_round` (E4M3, a power-of-two scale a 32), the compressed rows `fp4_round(16,
 e4m3)` (E2M1, an E4M3 scale a 16), the indexer's keys `fp4_round(32, pow2)` (E2M1, a power of two a 32). int8 would be
-another rounding on another grid: not done. kept now as those codes (`include/substrate/gpu/kvfmt.h`): a row its
+another rounding on another grid: not done. kept now as those codes (`include/osmos/gpu/kvfmt.h`): a row its
 codes then a scale byte a block - 528, 288 and 68 bytes for 512, 512 and 128 values (2,048 / 2,048 / 512 before):
 ~0.89 KB a token of compressed rows and keys, the window's ring 13.5 MB a sequence (52 before). a value read back is
 its code's value times its scale, one product - the rounding's own: the same F32.
@@ -1624,7 +1624,7 @@ UD-IQ1_M, 64K context, maya's bench questions (256 greedy tokens) and its 2K / 8
 process, two rounds. maya v1.1.52 (pulled and built: its 17 commits since 1.1.51 include the indexer's scores
 through WMMA on RDNA 3 and the Engram readers following the host's threads), its pack of the same files, configs
 scratch maya-ud-nodraft.json / maya-ud-dspark.json (DSpark off / on); runs in ~/bench/maya-1.1.52 and
-~/bench/substrate-final.
+~/bench/osmos-final.
 
 | | ours | maya 1.1.52 |
 | --- | --- | --- |
@@ -1641,7 +1641,7 @@ against 29-31), prompts +24-43% at 2K and +15-18% at 8K. our budgets: plain 110 
 
 maya's DeepSeek engine has both, the operator's: **#356** (a conversation's state set aside and taken back across
 switches and restarts) and **#587** (`--parallel` on an event scheduler: prompts read a piece at a time between the
-answers' rounds; squashed into maya a73bdbc, 2026-10-29). libsubstrate has neither: one process, one `Seq` a
+answers' rounds; squashed into maya a73bdbc, 2026-10-29). libosmos has neither: one process, one `Seq` a
 caller's, no server. this ports both, as one binary that speaks maya's line protocol, so maya's own harnesses
 (`tools/ds4/slot_keep_test.py`, `parallel_test.py`, `agent_bench.py`) test it unchanged and time both engines alike.
 
@@ -1663,12 +1663,12 @@ caller's, no server. this ports both, as one binary that speaks maya's line prot
 - a request that does not continue the conversation in its Seq sets that one aside first, then takes back the kept
   conversation whose tokens are the longest prefix of the prompt (longer than what the Seq holds already); only the
   rest of the prompt is read.
-- RAM first (`SUBSTRATE_SLOT_CAP`, 4), past it the least recently used to a folder (`SUBSTRATE_SLOT_DIR`, beside the
-  model), the folder capped (`SUBSTRATE_SLOT_GB`, 16: the least recently used removed, never the one just written),
-  conversations under `SUBSTRATE_SLOT_MIN` tokens (1024) not kept, a folder's older than `SUBSTRATE_SLOT_DAYS` (7)
+- RAM first (`OSMOS_SLOT_CAP`, 4), past it the least recently used to a folder (`OSMOS_SLOT_DIR`, beside the
+  model), the folder capped (`OSMOS_SLOT_GB`, 16: the least recently used removed, never the one just written),
+  conversations under `OSMOS_SLOT_MIN` tokens (1024) not kept, a folder's older than `OSMOS_SLOT_DAYS` (7)
   removed. a slot is a `.bin` and a `.meta` (the identity, the tokens, the size), each written under a temporary name
   and renamed; at start the folder is indexed and a slot whose `.meta` is missing, foreign or disagrees is removed.
-  QUIT sets every conversation aside and writes RAM's to the folder. `SUBSTRATE_SLOT_KEEP=1` turns it on.
+  QUIT sets every conversation aside and writes RAM's to the folder. `OSMOS_SLOT_KEEP=1` turns it on.
 
 **3. several conversations at once (#587's)**
 - `--parallel N`: N Seqs. the loop on libevt's engine (`~/Projects/libevt`): stdin's lines and the turns are
@@ -1700,7 +1700,7 @@ caller's, no server. this ports both, as one binary that speaks maya's line prot
   FNV-1a), the index at start. test_slots (CPU; clean under ASan + UBSan): the minimum, replacement, the longest
   prefix past `beyond`, the cap's LRU to the folder, a flush and a new store over it, another identity's / a damaged
   .meta / a short .bin / a .bin alone removed at start, the folder's cap (never the one just written), `days`.
-- bin/substrate-serve (tools/serve/serve.c, `make serve`): one conversation, maya's GEN / STOP / QUIT and T / PP /
+- bin/osmos-serve (tools/serve/serve.c, `make serve`): one conversation, maya's GEN / STOP / QUIT and T / PP /
   DONE / ERR / NOTE; a request continuing the conversation reads only its rest (one within SEQ_MAX_BACK of it rolled
   back to their common part); a drafted answer cut by max_new rolled back to its printed tokens (the state ends at
   the answer's last printed token less one, as maya's greedy one: the next turn continues it). its answers the
@@ -1716,7 +1716,7 @@ caller's, no server. this ports both, as one binary that speaks maya's line prot
   model test's fingerprints); not across them. maya's restore and re-read differ too (its PR: chunk boundaries). so the
   slot test's reference is the conversation never set aside, not a re-read.
 
-**done (2026-11-03): step 3.** `substrate-serve --parallel N` (tools/serve/multi.c on libevt; the server split
+**done (2026-11-03): step 3.** `osmos-serve --parallel N` (tools/serve/multi.c on libevt; the server split
 into serve.h / conv.c - a conversation, both modes' - / single.c / multi.c / main.c, each under 300 lines): a reader
 thread posts stdin's lines as events (priority 2), the turns are events (1), one queued at a time, each queueing the
 next while a lane is busy. a turn is a round (every answering lane's token printed, the ones going on fed in one
@@ -1840,13 +1840,13 @@ checkpoint holds it (lossless), our pack. unsloth publishes the table apart (`en
   pack moved or deleted). quality: the reference forward (`ref_gguf.py`, maya's pack of the new folder) over the
   MXFP8 table, our engine against it on both tables - what IQ4_NL costs, and where the pack lands.
 
-measured (2026-11-04; ~/bench/mxfp8, ~/substrate-oracle/ref32-mxfp8):
+measured (2026-11-04; ~/bench/mxfp8, ~/osmos-oracle/ref32-mxfp8):
 - the decode: test_quant_gpu, 458,752 values of the real table (its start, a middle, its end) and 8,192 random
   blocks, bit for bit torch's; a bias of 128 for 127 caught (456,654 differ).
 - speed, plain decode at 110 GiB (dbench, 512-token steps, 64K context, three questions): IQ4_NL 16.2 / 16.2 / 16.1,
   MXFP8 16.3 / 16.3 / 16.1 tok/s - the same (the reads are IOPS, not bytes). IQ4_NL's answers hash as before.
-- KL against the reference forward (32 positions; test_model_gpu with SUBSTRATE_TEST_UD / SUBSTRATE_ORACLE_REF /
-  SUBSTRATE_ORACLE_MAYA; maya 1.1.52's logits on the same pack):
+- KL against the reference forward (32 positions; test_model_gpu with OSMOS_TEST_UD / OSMOS_ORACLE_REF /
+  OSMOS_ORACLE_MAYA; maya 1.1.52's logits on the same pack):
 
   | engine's table vs the reference's | ours mean / median | maya mean / median |
   | --- | --- | --- |

@@ -16,7 +16,7 @@ bool cpu_q8_rows(uint32_t type, const void *w, uint32_t cols, uint32_t r0, uint3
 /*
 cpu q8
   the CPU lane's experts over int8 inputs: kernels/lane.h's contract (q8_round, q8_group_tok in
-  include/substrate/gpu/q8.h) on AVX-512 - the same rounding, the same exact integer sum for each half-block, the same
+  include/osmos/gpu/q8.h) on AVX-512 - the same rounding, the same exact integer sum for each half-block, the same
   float steps in the same order, the blocks to the same lanes and the lanes' sums by the same xor tree. which side
   computes an expert changes no bit.
 

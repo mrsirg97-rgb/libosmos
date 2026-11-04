@@ -6,7 +6,7 @@
 
 #include <math.h>
 
-#include "substrate/model/qtype.h"
+#include "osmos/model/qtype.h"
 
 #if defined(__HIPCC__)
 #define LANE_FN __host__ __device__ static inline
