@@ -7,7 +7,8 @@
 // (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
 // substrate-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
-// PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS).
+// PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
+// a layer ahead: ForwardOptions' no_guess).
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -lsubstrate_hip -lsubstrate
 //        -lhsa-runtime64 -o bin/dbench   (after `make lib/libsubstrate.a lib/libsubstrate_hip.a`)
 #include <hip/hip_runtime.h>
@@ -167,6 +168,7 @@ int main(int argc, char** argv) {
   if (!w) std::fprintf(stderr, "weights_create: %s\n", werr), std::_Exit(1);
   ForwardOptions o = {};
   o.n_layers = (int) w->geo.n_layers;
+  o.no_guess = std::getenv("NO_GUESS") != nullptr;
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
   o.budget = budget;
   o.max_tokens = max_tokens;

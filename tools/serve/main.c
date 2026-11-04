@@ -2,7 +2,7 @@
    harnesses drive this engine as they drive maya's (DESIGN.md, "serving").
 
      substrate-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
-                     [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--serve]
+                     [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] [--serve]
 
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
    out: READY <max_ctx> stop[ multi=N] / T [<rid>] <token> / PP [<rid>] <done> <total> <ms> <tok/s> <reused> /
@@ -11,6 +11,7 @@
 
    one conversation (single.c), or --parallel N at once (multi.c: GEN then needs rid=, every line carries it).
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
+   --no-guess: no experts guessed a layer ahead (ForwardOptions' no_guess - a model whose misses are few).
    SUBSTRATE_SLOT_KEEP=1 keeps conversations (maya #356): SUBSTRATE_SLOT_CAP (4) in RAM, past it SUBSTRATE_SLOT_DIR
    (<the model's folder>/slots) under SUBSTRATE_SLOT_GB (16), SUBSTRATE_SLOT_MIN (1024) tokens at least,
    SUBSTRATE_SLOT_DAYS (7). greedy: maya's sampling, penalty and thinking keys are refused, named */
@@ -29,6 +30,14 @@ static const char *opt(int argc, char **argv, const char *name, const char *dflt
     if (!strcmp(argv[i], name))
       return argv[i + 1];
   return dflt;
+}
+
+static bool has(int argc, char **argv, const char *name)
+{
+  for (int i = 1; i < argc; i++)
+    if (!strcmp(argv[i], name))
+      return true;
+  return false;
 }
 
 static double env_num(const char *name, double dflt)
@@ -64,7 +73,7 @@ int main(int argc, char **argv)
   const char *model = opt(argc, argv, "--model", NULL);
   if (!model)
     return die("usage: substrate-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
-               "[--max-context N] [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--serve]");
+               "[--max-context N] [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] [--serve]");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "65536"));
   sv.max_tokens = (uint32_t)atol(opt(argc, argv, "--max-tokens", "2048"));
@@ -99,7 +108,7 @@ int main(int argc, char **argv)
     fclose(pf);
   }
   const ForwardOptions fo = {(int)w->geo.n_layers, sv.max_ctx, (uint64_t)(budget * (double)(1ull << 30)), picks,
-                             sv.max_tokens};
+                             sv.max_tokens, has(argc, argv, "--no-guess")};
   if (!(sv.f = forward_create_with(w, &fo, err)) || !forward_lane(sv.f, 0, err))
     return die(err);
   const char *dspark = opt(argc, argv, "--dspark", NULL);

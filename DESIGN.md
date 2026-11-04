@@ -1900,6 +1900,74 @@ measured (~/bench/mxfp8; 64K context, three questions, 256 tokens, fresh process
 - so: two packs, the operator's choice of speed or quality - UD-IQ1_S ~26% faster drafted, UD-IQ1_M the lower
   perplexity - over one 203 GB table.
 
+## plain decode's work a token (design, 2026-11-04)
+
+the operator's: plain decode as fast as it can be, a token's work at its least, on UD-IQ1_S and UD-IQ1_M - before the
+drafter. on UD-IQ1_S the SSD is nearly out of it (615 experts streamed over three questions), so the GPU's own work is
+the token.
+
+**the trace** (rocprofv3 --kernel-trace, UD-IQ1_S + MXFP8, 110 GiB, the first question, 250 decode tokens; scratch
+`ksum.py`): 55.5 ms a token, the GPU busy 51.2, 1,450 launches.
+
+| what | ms a token | |
+| --- | --- | --- |
+| dense Q6_K (mm, type 14) | 22.3 | 4.39 GB at 197 GB/s |
+| Q5_K (type 269) / Q8_0 | 5.7 / 2.4 | 1.13 / 0.49 GB, 198 / 204 GB/s |
+| routed experts (q8 gate_up, group_tok) | 10.0 | ~1.9 GB (240 experts) |
+| the F32 router (mv) | 2.1 | 0.31 GB at 148 GB/s |
+| the guess (BF16 router copy, its top-k, its copy) | ~1.1 | |
+| attention: scores / softmax / values | 1.16 / 0.15 / 0.62 | |
+| hyper-connections (hc_dot, mix_pre_rms x2, post_dot, post) | ~2.4 | |
+| the rest (norms, rope, kv_finish, x16, round, router top-k, gather_sum, swiglu) | ~2.5 | |
+| launch gaps under 5 us | 3.0 | ~2.1 us before nearly every launch |
+| gaps over 5 us | 1.3 | the bench's host argmax (0.37), missed experts (~0.5), the layer tables' copies |
+
+the floor: ~8.5 GB a token at ~215 GB/s, ~39.5 ms (~25 tok/s). the dense matrices are at ~92% of it already; the
+~16 ms past it is small kernels, their gaps, and a few kernels that leave the GPU idle. `engram_kv` (2 layers, 129 MB
+Q6_K each, 583 us) is dense work like the rest.
+
+**what each change is, and why it keeps the bits**:
+1. **the guess an option** (measured: GREEDY=1, guess off, the answers' hashes the same): UD-IQ1_S 18.2-18.5 ->
+   18.4-18.9 tok/s (+2.5%); UD-IQ1_M unsettled (its first round +2%, its second worse with the ISTA download on the
+   SSD - its misses ~6x UD-IQ1_S's, the guess earns there). a `ForwardOptions` field, on by default; the bench and
+   the server take it. which experts are read ahead changes no bit.
+2. **decode's attention tiles**: a window-only layer's scores are 2 blocks of 64 heads x 64 keys (~30 us, 38 of 40
+   CUs idle). every output is a sum over d ascending (scores) or keys ascending (values) whatever the tile, so a tile
+   is free to change (test_attn_gpu: the bits). the cost: a block decodes its keys once for its heads - fewer heads a
+   block is more decoding, cheap at 128 FP8 keys. aim ~1.9 -> ~0.6 ms.
+3. **the router's top-k in one wave**: 6 passes of a 256-thread tree (~9 barriers each), ~9 us twice a layer. a wave
+   of 32 lanes, 12 experts a lane, shuffles: the same picks (the larger key, ties to the lower id), the same weights'
+   sum in pick order. aim ~0.7 -> ~0.2 ms.
+4. **the mixes' Sinkhorn** (hc_mix_pre_rms, ~12 us however few its bytes: 20 serial iterations of a 4 x 4 matrix):
+   one wave, the matrix in registers, the same operations in the same order. to measure before building.
+5. **launches folded into their neighbours** (~2.1 us of gap and ~1-2 of tail each): the FFN's mix writes the shared
+   expert's x16 and the routed experts' int8 input (the attention side's mix writes its x16 already); q's rope with
+   kv_finish; the layer's end (gather_sum, hc_post) into the next layer's hc_dot (ops_hc_post_dot, which the
+   attention side uses). ~5 a layer, ~0.8 ms. each a test that the fused output is the separate kernels' bits.
+6. **the F32 router's matvec** at 148 GB/s where the dense matrices reach ~200: a shape for its 384 rows. ~0.5 ms.
+
+**measured since** (2026-11-04):
+- 1 built: `ForwardOptions.no_guess` (`--no-guess`, dbench `NO_GUESS=1`; no guess, no router copy made - ~160 MB of
+  GPU memory). test_guess_gpu: at 40 GiB (experts streamed), on: 843 streamed, 389 guessed; off: 0 guessed, 0 reads
+  begun; 32 steps' logits and tokens the same bytes. UD-IQ1_M's choice waits for a quiet SSD.
+- 2 smaller than it looked (scratch `mbattn`: ops_sparse_attn at decode's shape, 1 token x 64 heads x 512, 128 FP8
+  window keys + 512 FP4 rows, every shape the same output bytes): 64 x 64 keys 67.7 us a call (three kernels back to
+  back), 64 x 32 keys and dims 62.6, 64 x 16 64.1; fewer heads a block slower (32: 85, 16: 135 - each block decodes
+  its keys again), a 32-value stage slower (72), 8 x 4 or 4 x 8 a thread slower (108, 103). the blocks are not too
+  few: each is a chain of 32 dependent stages (a load, a barrier, the sums). ~0.2 ms a token from a tile; the chain
+  itself is a rewrite (to ~1 ms), later.
+- the gaps: the host is ahead (the queue deep), so the ~2.1 us before a launch is the GPU's own, between dependent
+  kernels - a graph of the step would not remove it. a launch removed is ~3.5 us (its gap, its ramp and tail); so 5
+  first, as: q's rope with kv_finish; the softmax inside the values kernel; the FFN's mix writing the shared expert's
+  x16 and the routed experts' int8 input; the router's picks written to mapped host memory (no copy kernel); the
+  layer's end with the next one's hc_dot - ~7-8 launches a layer, ~1.2 ms. then 3, 4, 6, 2's rewrite.
+
+together, revised: ~3.5 ms past the guess (~6%), UD-IQ1_S plain ~18.9 -> ~20 tok/s. the first estimate, ~4-5 ms of
+~54 (~8-9%) past the guess: UD-IQ1_S plain ~18.9 -> ~20.5 tok/s, UD-IQ1_M in proportion. the
+order: 1, 2, 3 (each small, each its own measure), then 5, 4, 6. a HIP graph of a step (most of the 3 ms of gaps) is
+the larger lever and the larger change - the host decides a layer's experts between launches - and waits until these
+are in. every change: the bench's answers hash as before, interleaved fresh runs on both packs.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

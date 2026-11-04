@@ -29,6 +29,7 @@ typedef struct ForwardOptions
   uint64_t budget;
   const uint64_t *picks; /* forward_create_ranked's, or NULL */
   uint32_t max_tokens;   /* a step's most tokens: 0 FORWARD_MAX_TOKENS; below MM_MAX_TOKENS a step's buffers its size */
+  bool no_guess;         /* no experts guessed a layer ahead (forward_guesses): for a model whose misses are few */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);
@@ -192,6 +193,8 @@ forward_guesses
   far, and of them those guessed a layer ahead - each layer's next experts guessed by the next layer's router on its
   own FFN input and their reads begun then, under the layer's experts and the next one's attention - and (read, if
   not NULL) the reads the guess began: guessed > read's share picked, the rest bytes the SSD read for nothing.
+  with ForwardOptions' no_guess, nothing is guessed (guessed and read 0): the guess's router pass and its reads are
+  work a model with few misses does not repay. it changes no bit.
 
 forward_waits
   the experts' reads the host has waited for so far (each picked, its read not done when its layer's experts were

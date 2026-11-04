@@ -12,7 +12,7 @@
 static bool small(const Forward *f, int l)
 {
   const uint32_t E = (uint32_t)f->g->n_experts;
-  return l + 1 < f->n_layers && f->n * (uint32_t)f->g->n_used < E; /* (so n < E: within r_guess's rows) */
+  return !f->no_guess && l + 1 < f->n_layers && f->n * (uint32_t)f->g->n_used < E; /* (so n < E: within r_guess's rows) */
 }
 
 bool fwd_guess_queue(Forward *f, int l)
