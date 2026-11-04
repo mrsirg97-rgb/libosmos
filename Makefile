@@ -83,6 +83,21 @@ $(LIBEVT)/lib/libevt.a:
 	$(MAKE) -C $(LIBEVT)
 serve: $(SERVE)
 
+# osmos-api (tools/api): the engine as an OpenAI-compatible server - osmos-serve its child; host C only
+API := $(BIN_DIR)/osmos-api
+API_OBJS := $(patsubst tools/api/%.c,$(OBJ_DIR)/tools/api/%.o,$(wildcard tools/api/*.c))
+$(OBJ_DIR)/tools/api/%.o: tools/api/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Isrc/text -c $< -o $@
+$(API): $(API_OBJS) $(LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(API_OBJS) -L$(LIB_DIR) -losmos $(LDLIBS) -o $@
+api: $(API)
+
+# osmos-api against a fake engine (tests/api: the protocol's, scripted)
+api-test: $(API)
+	python3 tests/api/test_api.py
+
 # requant_dspark (tools/requant): a drafter pack's experts requantized with ggml's quantizers (llama.cpp, MIT; its
 # libggml-base built beside this checkout: cmake -S . -B build-ggml ... --target ggml-base)
 GGML ?= ../llama.cpp
@@ -132,4 +147,4 @@ tsan:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=thread" LDLIBS="-lpthread -lm -fsanitize=thread" tests
 
-.PHONY: all clean tests asan tsan gpu-tests serve requant
+.PHONY: all clean tests asan tsan gpu-tests serve requant api api-test

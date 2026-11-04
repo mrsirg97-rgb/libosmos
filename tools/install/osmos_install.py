@@ -27,7 +27,7 @@ import userfiles  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
 API = os.path.join(ROOT, "bin", "osmos-api")
-BUILD = [["make", "-j"], ["make", "-j", "lib/libosmos_hip.a"]]
+BUILD = [["make", "-j"], ["make", "-j", "serve"], ["make", "-j", "api"]]  # the engine, osmos-serve, osmos-api
 
 
 def needed(m, pids, abliterated):
@@ -128,7 +128,7 @@ def main():
             print(f"  {row['id']} on port {row['port']} in {a.rig_home}/models.json")
     if a.serve:
         if not os.path.exists(API):
-            raise SystemExit("osmos-api is not built yet (DESIGN.md, \"osmos-api\")")
+            raise SystemExit(f"{API} is not built (make api)")
         os.execv(API, [API, "--config", cfgs[0], "--port", str(rig.PORT_BASE)])
     return 0
 
