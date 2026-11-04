@@ -22,7 +22,7 @@
 #include "osmos/model/engram.h"
 #include "osmos/run/forward.h"
 
-#define FWD_MAX_FILES 16
+#define FWD_MAX_FILES WEIGHTS_MAX_FILES
 #define FWD_CKV_F32_ROWS 32768 /* a prompt's compressed rows unpacked once at most (64 MB at 512 values: a 128K
                                   context at ratio 4; past it the attention reads them packed) */
 #define FWD_MAX_BATCH MM_MAX_TOKENS                 /* a step's tokens: the matmul's */
@@ -146,7 +146,7 @@ struct Forward
   double *heat;             /* each unit's heat at heat_at, its picks halved every FWD_HEAT_HALF_LIFE steps */
   uint64_t *heat_at, *seen; /* the step its heat was last updated at; its picks folded into the heat so far */
   uint64_t steps, swaps;    /* the steps ended; the experts swapped into the resident set */
-  const uint8_t **tdev;     /* a model tensor's device pointer (index: its place in the Gguf), resident ones only */
+  const uint8_t **tdev;     /* a tensor's device pointer (index: weights_tensor_index), resident ones only */
   uint32_t *ttype;          /* its type as the GPU reads it when not the file's (QUANT_Q5_KR: repacked), else 0 */
   const void **oa_tab;      /* each layer's wo_a groups for mm_group: [layer][o_groups], on the device */
   uint32_t *oa_xoff, *oa_yoff; /* group k: x at k * its 4,096 (of a token's attention), y at k * o_lora */
@@ -265,13 +265,13 @@ struct Seq
 /* a resident tensor's bytes as the GPU reads them (its copy in the resident set) */
 static inline const uint8_t *fwd_dev(const Forward *f, const GgufTensor *t)
 {
-  return f->tdev[t - f->w->model->tensors];
+  return f->tdev[weights_tensor_index(f->w, t)];
 }
 
 /* the type the kernels read a resident tensor as (the file's, or QUANT_Q5_KR once repacked), and its bytes so */
 static inline uint32_t fwd_type(const Forward *f, const GgufTensor *t)
 {
-  const uint32_t k = f->ttype[t - f->w->model->tensors];
+  const uint32_t k = f->ttype[weights_tensor_index(f->w, t)];
   return k ? k : t->type;
 }
 

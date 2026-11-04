@@ -179,7 +179,7 @@ static bool repack_all(Forward *f, const GgufTensor *const *t_res, size_t n_t)
            quant_repack_q5k(stage, (uint32_t)((hi - lo) * MM_TILE), cols, dev + lo * out, NULL) &&
            hipDeviceSynchronize() == hipSuccess;
     }
-    f->ttype[t_res[i] - f->w->model->tensors] = QUANT_Q5_KR;
+    f->ttype[weights_tensor_index(f->w, t_res[i])] = QUANT_Q5_KR;
   }
   hipFree(stage);
   return ok;
@@ -196,8 +196,8 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   PoolUnit *all = calloc((size_t)w->geo.n_layers * E, sizeof *all);
   PoolUnit *res = calloc(n_res_max + f->n_expert_units, sizeof *res);
   const GgufTensor **t_res = calloc(n_res_max, sizeof *t_res);
-  f->tdev = calloc(w->model->n_tensors, sizeof *f->tdev);
-  f->ttype = calloc(w->model->n_tensors, sizeof *f->ttype);
+  f->tdev = calloc(weights_tensors(w), sizeof *f->tdev);
+  f->ttype = calloc(weights_tensors(w), sizeof *f->ttype);
   f->rix = calloc(f->n_expert_units, sizeof *f->rix);
   f->is_held = calloc(f->n_expert_units, sizeof *f->is_held);
   f->held_layer = -1;
@@ -242,7 +242,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   {
     const void *dev[POOL_PARTS];
     ok = resident_dev(f->res, i, dev);
-    f->tdev[t_res[i] - w->model->tensors] = dev[0];
+    f->tdev[weights_tensor_index(w, t_res[i])] = dev[0];
   }
   ok = ok && (repack_all(f, t_res, n_t) || fwd_fail(err, "the Q5_K matrices' repack failed"));
   free(res), free(t_res);
@@ -497,7 +497,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   const uint64_t budget = o ? o->budget : 0, *picks = o ? o->picks : NULL;
   if (!w || n_layers < 1 || n_layers > w->geo.n_layers || !max_ctx || max_tokens > FORWARD_MAX_TOKENS)
     return fwd_fail(err, "no weights, or layers, a context or a step it cannot run"), NULL;
-  if (w->model->n_files > FWD_MAX_FILES)
+  if (w->n_files > FWD_MAX_FILES)
     return fwd_fail(err, "more files than this build maps"), NULL;
   Forward *f = calloc(1, sizeof *f);
   if (!f)
@@ -525,8 +525,8 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   pthread_mutex_init(&f->in.mu, NULL);
   pthread_cond_init(&f->in.cv, NULL);
   bool ok = true;
-  for (int i = 0; ok && i < w->model->n_files; i++)
-    ok = (f->fds[i] = open(w->model->paths[i], O_RDONLY)) >= 0;
+  for (int i = 0; ok && i < w->n_files; i++) /* the model's files, then an overlay's (weights.h) */
+    ok = (f->fds[i] = open(w->paths[i], O_RDONLY)) >= 0;
   char eerr[ENGRAM_ERR] = "";
   if (!ok)
     fwd_fail(err, "a model file could not be opened");

@@ -8,7 +8,7 @@
 // osmos-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
 // PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
-// a layer ahead: ForwardOptions' no_guess).
+// a layer ahead: ForwardOptions' no_guess), OVERLAY=file (tensors standing in for the model's: weights_create_with).
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos
 //        -lhsa-runtime64 -o bin/dbench   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
@@ -164,7 +164,11 @@ int main(int argc, char** argv) {
   if (!g) std::fprintf(stderr, "%s: %s\n", model.c_str(), err), std::_Exit(1);
   Gguf* eg = engram.empty() ? nullptr : gguf_create(engram.c_str(), err);
   CHECK(engram.empty() || eg);
-  Weights* w = weights_create(g, eg, werr);
+  const char* op = std::getenv("OVERLAY");
+  Gguf* ov = op ? gguf_create(op, err) : nullptr;
+  if (op && !ov) std::fprintf(stderr, "%s: %s\n", op, err), std::_Exit(1);
+  const WeightsOptions wo = {g, eg, ov};
+  Weights* w = weights_create_with(&wo, werr);
   if (!w) std::fprintf(stderr, "weights_create: %s\n", werr), std::_Exit(1);
   ForwardOptions o = {};
   o.n_layers = (int) w->geo.n_layers;

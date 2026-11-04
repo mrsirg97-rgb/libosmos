@@ -23,7 +23,7 @@ bool fwd_cpu_create(Forward *f, int threads, char *err)
   const uint64_t D = g->n_embd;
   if (!(f->cpu = cpu_lane_create(threads, LANE_PAIRS, (uint32_t)D, (uint32_t)g->expert_ff)))
     return refused(f, err, "the CPU lane's pool (its threads, or a CPU without AVX-512 VNNI)");
-  for (int i = 0; i < f->w->model->n_files; i++)
+  for (int i = 0; i < f->w->n_files; i++)
   {
     struct stat st;
     void *m = fstat(f->fds[i], &st) == 0 ? mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, f->fds[i], 0)

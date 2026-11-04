@@ -2,7 +2,8 @@
    harnesses drive this engine as they drive maya's (DESIGN.md, "serving").
 
      osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
-                     [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] [--serve]
+                     [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
+                     [--overlay <gguf>] [--serve]
 
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
    out: READY <max_ctx> stop[ multi=N] / T [<rid>] <token> / PP [<rid>] <done> <total> <ms> <tok/s> <reused> /
@@ -12,6 +13,7 @@
    one conversation (single.c), or --parallel N at once (multi.c: GEN then needs rid=, every line carries it).
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
    --no-guess: no experts guessed a layer ahead (ForwardOptions' no_guess - a model whose misses are few).
+   --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
    OSMOS_SLOT_KEEP=1 keeps conversations (maya #356): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
    (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least,
    OSMOS_SLOT_DAYS (7). greedy: maya's sampling, penalty and thinking keys are refused, named */
@@ -73,7 +75,8 @@ int main(int argc, char **argv)
   const char *model = opt(argc, argv, "--model", NULL);
   if (!model)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
-               "[--max-context N] [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] [--serve]");
+               "[--max-context N] [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] "
+               "[--overlay <gguf>] [--serve]");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "65536"));
   sv.max_tokens = (uint32_t)atol(opt(argc, argv, "--max-tokens", "2048"));
@@ -90,9 +93,11 @@ int main(int argc, char **argv)
   Gguf *g = gguf_create(model, gerr);
   const char *engram = opt(argc, argv, "--engram", NULL);
   Gguf *eg = engram ? gguf_create(engram, gerr) : NULL;
-  if (!g || (engram && !eg))
+  const char *overlay = opt(argc, argv, "--overlay", NULL);
+  Gguf *ov = overlay ? gguf_create(overlay, gerr) : NULL;
+  if (!g || (engram && !eg) || (overlay && !ov))
     return die(gerr);
-  Weights *w = weights_create(g, eg, werr);
+  Weights *w = weights_create_with(&(WeightsOptions){g, eg, ov}, werr);
   if (!w)
     return die(werr);
   sv.round_tokens = (uint32_t)((w->geo.n_experts - 1) / w->geo.n_used);
@@ -140,6 +145,7 @@ int main(int argc, char **argv)
   weights_destroy(w);
   gguf_destroy(g);
   gguf_destroy(eg);
+  gguf_destroy(ov);
   free(picks);
   return rc;
 }

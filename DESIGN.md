@@ -2030,6 +2030,62 @@ token of its own); ~/bench/clean.
     map's 99,092 distinct entries; the two checks it feeds, a map entry's range and the multipliers' overflow bound,
     are the map's own). test_engram: UD without the key, every hashed row of 64 positions the oracle's, failing before.
 
+## an overlay: abliteration without a second copy (design, 2026-11-04)
+
+the operator's: the packs' abliterated forms opt-in, off by default, from huihui-ai's patches (unsloth/patch-UD-IQ1_M,
+patch-UD-IQ1_S: 18 attn_output_b each, Q6_K and Q5_K, 0.6 GB) applied as the model loads - not 120-140 GB patched
+copies beside the originals.
+- **the shape**: `weights_create_with(&(WeightsOptions){model, engram, overlay}, err)`; weights_create its no-overlay
+  form. an overlay is a GGUF of tensors; each must name one of the model's (refused: a name the model lacks, dims
+  not the model's tensor's, a tensor no role reads) and stands in for it in every role - its type its own, taken if
+  that role takes it (huihui's Q5_K for a Q6_K out_b: the matmul takes both). its metadata unread.
+- **the files**: a tensor's bytes are found by its file index; the Weights now own the file list - the model's, then
+  the overlay's (`n_files`, `paths`) - and the overlay's tensors are its copies with their index past the model's.
+  the Forward opens `w->paths` (the CPU lane maps them), not the model's.
+- **the identity**: forward_identity hashes `w->paths` (names and sizes): a sequence's state saved with an overlay
+  refused without it, and the other way.
+- **the proof**: the overlaid UD-IQ1_M decodes the bits of huihui's own patched files (UD-IQ1_M-abliterated: their
+  script's output, on disk) - every logits row of a greedy decode; test_weights: the roles' tensors the overlay's,
+  the refusals. then perplexity both packs, and a small fixed prompt set's refusals with and without.
+- **the tools**: dbench / ppl `OVERLAY=file`, osmos-serve `--overlay file`.
+
+## a second model: Qwen3.8-Flash-Next (qwen4exp) (design, 2026-11-04)
+
+the operator's: unsloth's UD-IQ3_XXS of Qwen3.8-Flash-Next (83.6 GB with its n-gram table; >99% recovery by
+unsloth's measure) in osmos and its installer. 125B (6B active) + 51B n-gram embedding + 4B MTP: the whole model in
+GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB of weights.
+- **references**: llama.cpp's own graph (src/models/qwen4exp.cpp, MIT; its build the reference forward for KL and a
+  speed baseline on this box), Strata (github.com/Niko1221/Strata, MIT: src/split - its GDN, QSA, gated residual and
+  MoE kernels and their parity tests). credited where code follows them.
+- **the file** (`general.architecture` qwen4exp; 48 layers, D 2560, 4 streams, vocab 248,320):
+  - layers l % 4 != 3 (36): Gated DeltaNet - attn_qkv [2560 -> 10240: q, k 16 groups x 128, v 48 heads x 128],
+    ssm_conv1d [4 x 10240] (causal, its state the last 3 rows), ssm_alpha / ssm_beta [2560 -> 48], ssm_a, ssm_dt
+    [48], attn_gate [2560 -> 6144], ssm_norm [128] (the output's gated norm a head), ssm_out [6144 -> 2560]; a
+    sequence's state 48 x 128 x 128 F32 a layer (~113 MB for the 36).
+  - layers l % 4 == 3 (12): Qwen Sparse Attention - attn_q [2560 -> 12288: 24 heads x 256, and their gates],
+    attn_k / attn_v [2560 -> 512: 2 KV heads x 256], q / k norms, attn_output [6144 -> 2560]; an indexer (BF16
+    q_proj [2560 -> 4 x 128], k_proj [-> 128], norms) choosing top-k 2048 tokens (compress ratio 48: blocks).
+  - every layer: the gated residual (hc_{attn,ffn}_{norm,down,up,inject}: x normed a stream, gate =
+    sigmoid(up(silu(down(x) / 4))), the block's input the streams' gated mean; after it, each stream += 2
+    sigmoid(inject_s) x out); the MoE - router F32 [2560 -> 512] top 10, a shared expert gated by sigmoid
+    (ffn_gate_inp_shexp), experts 640 wide (gate / up IQ3_XXS, IQ2_S, IQ4_XS; down IQ4_NL, Q2_0).
+  - layer 1: the n-gram embedding (per_layer_token_embd IQ4_NL [160 x 320M], ple.* metadata: 3-grams, 8 heads,
+    conv 4; ple_key / ple_value Q8_0) - Engram's cousin, its own hash.
+  - the head: output_hc_{norm,down,up} (the streams mixed once more), output Q6_K.
+- **the kernels**: three types new to the table, all in llama.cpp's ggml - Q2_0 (ggml 42: 64 values, an f16 scale,
+  2-bit codes -1 .. 2), IQ3_XXS (a grid type, IQ2_XXS's sibling), IQ4_XS (IQ4_NL's values in K-superblocks); IQ4_NL
+  onto the int8 expert path (45 of the 48 downs). new ops: the GDN's conv and delta rule (a token's recurrent update;
+  a prompt's chunked form - the same bits either way, as every path here), QSA's block indexer, the gated residual.
+- **the shape**: osmos's model layer is DeepSeek's (Geometry, LayerWeights, forward.h). the second family beside
+  it, not inside it: its own geometry, roles and forward (src/q4x/, include/osmos/q4x/), the shared parts shared -
+  gguf, the type table and every kernel, the resident set, the int8 experts, the server through an interface both
+  forwards present (step, batch, greedy, logits, a sequence's state). one shape per concept: the server's interface
+  the one place the two meet.
+- **the order**: llama.cpp built (HIP) - its logits on fixed ids the reference, its tok/s the baseline; the three
+  types (each against ggml's dequant, bit for bit); weights and geometry (every tensor in a role, refusals); the
+  forward one block at a time against llama.cpp's intermediate tensors (llama-eval-callback); then decode speed,
+  then prompts, then MTP.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

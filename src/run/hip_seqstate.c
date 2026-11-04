@@ -47,16 +47,17 @@ uint64_t forward_identity(const Forward *f)
   h = fnv(dims, sizeof dims, h);
   for (int l = 0; l < f->n_layers; l++)
     h = fnv_u64((uint64_t)g->compress[l] << 2 | (uint64_t)g->kv_source[l] << 1 | g->ix_source[l], h);
-  const Gguf *files[2] = {f->w->model, f->w->engram};
-  for (int k = 0; k < 2; k++)
-    for (int i = 0; files[k] && i < files[k]->n_files; i++)
-    {
-      const char *p = files[k]->paths[i], *base = strrchr(p, '/');
-      base = base ? base + 1 : p;
-      struct stat st;
-      h = fnv(base, strlen(base), h);
-      h = fnv_u64(stat(p, &st) == 0 ? (uint64_t)st.st_size : 0, h);
-    }
+  /* the files read: the model's and an overlay's (w->paths), the Engram file's - with an overlay or without, another */
+  const int n = f->w->n_files + (f->w->engram ? f->w->engram->n_files : 0);
+  for (int i = 0; i < n; i++)
+  {
+    const char *p = i < f->w->n_files ? f->w->paths[i] : f->w->engram->paths[i - f->w->n_files];
+    const char *base = strrchr(p, '/');
+    base = base ? base + 1 : p;
+    struct stat st;
+    h = fnv(base, strlen(base), h);
+    h = fnv_u64(stat(p, &st) == 0 ? (uint64_t)st.st_size : 0, h);
+  }
   return h;
 }
 

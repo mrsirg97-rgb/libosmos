@@ -11,6 +11,7 @@
 #define WEIGHTS_ERR 256
 #define WEIGHTS_MAX_LAYERS 64
 #define WEIGHTS_SLICE_NAME 64
+#define WEIGHTS_MAX_FILES 16 /* the model's files and an overlay's together */
 
 typedef struct Geometry
 {
@@ -74,10 +75,21 @@ typedef struct LayerWeights
   const GgufTensor *exp_gate, *exp_up, *exp_down;
 } LayerWeights;
 
+typedef struct WeightsOptions
+{
+  const Gguf *model;
+  const Gguf *engram;  /* ds1017's Engram file, or NULL */
+  const Gguf *overlay; /* tensors standing in for the model's of their names (an abliteration patch), or NULL */
+} WeightsOptions;
+
 typedef struct Weights
 {
   const Gguf *model;
   const Gguf *engram;
+  const Gguf *overlay;
+  int n_files;                          /* the files a tensor's `file` indexes: the model's, then the overlay's */
+  const char *paths[WEIGHTS_MAX_FILES];
+  GgufTensor *ov;                       /* the overlay's tensors, their file past the model's (owned) */
   Geometry geo;
   const GgufTensor *embed, *output, *output_norm;
   const GgufTensor *eg_token_map, *eg_primes, *eg_offsets, *eg_multipliers;
@@ -87,9 +99,12 @@ typedef struct Weights
 } Weights;
 
 Weights *weights_create(const Gguf *model, const Gguf *engram, char err[WEIGHTS_ERR]);
+Weights *weights_create_with(const WeightsOptions *o, char err[WEIGHTS_ERR]);
 void weights_destroy(Weights *w);
 
 size_t weights_experts(const Weights *w, const int *model_fds, PoolUnit *units, size_t cap);
+size_t weights_tensors(const Weights *w);
+size_t weights_tensor_index(const Weights *w, const GgufTensor *t);
 
 #endif
 
@@ -119,11 +134,22 @@ weights_create
   target layers are read where the GGUF names them (llama.cpp's dspark.target_layers - not ISTA's files: then
   none, and the drafter's dspark.json names them).
 
+weights_create_with
+  weights_create with an overlay: each of its tensors names one of the model's and stands in for it in every role -
+  its own type, which the role must take; refused (NULL, why) for a name the model does not have, dims not the
+  model's tensor's, or one no role reads. its metadata unread. the tensors' `file` then indexes `paths` (the model's
+  files, then the overlay's), which the caller opens (forward_create does).
+
 weights_destroy
   the Weights alone (the Ggufs are the caller's). NULL is nothing to do.
 
 weights_experts
   the routed experts as the pool's units, unit = layer * n_experts + expert, each three parts - the expert's slice of
   ffn_gate_exps, ffn_up_exps, ffn_down_exps (gate, up, down) - in the model's files, `model_fds[file]` the caller's
-  open descriptors of `model->paths`. writes at most `cap` units; returns how many there are (n_layers * n_experts).
+  open descriptors of `paths`. writes at most `cap` units; returns how many there are (n_layers * n_experts).
+
+weights_tensors / weights_tensor_index
+  every tensor a role can hold, numbered once: the model's in its Gguf's order, then the overlay's copies - a table
+  of a caller's per tensor (the Forward's device pointers) sized weights_tensors and indexed by weights_tensor_index.
+  a tensor of the model's or the overlay's (not the Engram file's, nor an Engram slice).
 */

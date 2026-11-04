@@ -163,7 +163,7 @@ int main(void)
   const char *const needed[] = {A "attention.kv_source_layers", A "attention.indexer.candidate_source_layer",
                                 A "ple.layers", A "ple.head_offsets", A "ple.head_vocab_sizes", A "ple.ngram_size",
                                 A "ple.heads_per_ngram", A "embedding_length_per_layer_input",
-                                A "engram.pad_token_id", A "engram.compressed_vocab_size", A "expert_gating_func"};
+                                A "engram.pad_token_id", A "expert_gating_func"};
   for (size_t i = 0; i < sizeof needed / sizeof needed[0]; i++)
   {
     char gone[160];
@@ -173,6 +173,24 @@ int main(void)
     snprintf(what, sizeof what, "missing %s", needed[i] + strlen(A));
     refused(what, needed[i] + strlen(A));
     rename_key(gone, needed[i]);
+  }
+
+  /* the keys a GGUF may leave out (ISTA's do): read, none named - the compressed vocabulary 0 (the map's, engram.c),
+     no DSpark target (the drafter's dspark.json's) */
+  const char *const optional[] = {A "engram.compressed_vocab_size", A "dspark.target_layers"};
+  for (size_t i = 0; i < sizeof optional / sizeof optional[0]; i++)
+  {
+    char gone[160], why2[WEIGHTS_ERR];
+    snprintf(gone, sizeof gone, "x.%s", optional[i]);
+    rename_key(optional[i], gone);
+    Geometry o;
+    const bool ok = read(&o, why2);
+    bool none = ok && (i != 0 || o.engram_vocab == 0);
+    for (int l = 0; ok && i == 1 && l < o.n_layers; l++)
+      none = none && !o.dspark_target[l];
+    check(none, optional[i]);
+    printf("    missing %-48s -> read, none named\n", optional[i] + strlen(A));
+    rename_key(gone, optional[i]);
   }
 
   /* the scoring function where present: sqrtsoftplus only; the gating function 4 only */

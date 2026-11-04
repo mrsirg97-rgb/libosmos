@@ -113,9 +113,18 @@ static const Role roles[] = {
 typedef struct Check
 {
   Weights *w;
-  bool *taken[2];
+  bool *taken[3]; /* the model's tensors, the Engram file's, the overlay's */
   char *err;
 } Check;
+
+/* the overlay's copy of the tensor of that name, or NULL */
+static const GgufTensor *overlaid(const Weights *w, const char *name)
+{
+  for (size_t i = 0; w->overlay && i < w->overlay->n_tensors; i++)
+    if (strcmp(w->ov[i].name, name) == 0)
+      return &w->ov[i];
+  return NULL;
+}
 
 static uint64_t dim(const Geometry *g, Dim d, int layer)
 {
@@ -215,6 +224,13 @@ static bool take(Check *c, const Role *r, int l, const GgufTensor **field)
     snprintf(name, sizeof name, "%s", r->name);
   const Gguf *g = r->in_engram ? c->w->engram : c->w->model;
   const GgufTensor *t = g ? gguf_tensor(g, name) : NULL;
+  const GgufTensor *o = r->in_engram ? NULL : overlaid(c->w, name); /* in its place: the model's checked, then it */
+  if (o && t)
+  {
+    c->taken[0][t - g->tensors] = true;
+    c->taken[2][o - c->w->ov] = true;
+    t = o;
+  }
   const bool want = has(&c->w->geo, r->when, l < 0 ? 0 : l);
   if (!want)
     return !t || fail(c, name, l < 0 ? "a tensor of the other Engram form" : "present on a layer that has none");
@@ -229,7 +245,8 @@ static bool take(Check *c, const Role *r, int l, const GgufTensor **field)
     return fail(c, name, "not the bytes of its type");
   if (r->path == EXPERTS && t->bytes % t->dims[2])
     return fail(c, name, "experts of unequal bytes");
-  c->taken[r->in_engram][t - g->tensors] = true;
+  if (t != o)
+    c->taken[r->in_engram][t - g->tensors] = true;
   if (field)
     *field = t;
   return true;
@@ -260,11 +277,41 @@ static void slices(Weights *w)
 
 static bool all_taken(Check *c)
 {
-  const Gguf *g[2] = {c->w->model, c->w->engram};
-  for (int f = 0; f < 2; f++)
+  const Gguf *g[3] = {c->w->model, c->w->engram, c->w->overlay};
+  for (int f = 0; f < 3; f++)
     for (size_t i = 0; g[f] && i < g[f]->n_tensors; i++)
       if (!c->taken[f][i])
-        return fail(c, g[f]->tensors[i].name, "a tensor this build does not know");
+        return fail(c, g[f]->tensors[i].name,
+                    f == 2 ? "an overlay tensor no role reads" : "a tensor this build does not know");
+  return true;
+}
+
+/* the files a tensor's index finds (the model's, then the overlay's) and the overlay's tensors as copies indexing
+   them: each the model's name, of the model's tensor's dims */
+static bool files(Check *c)
+{
+  Weights *w = c->w;
+  const Gguf *m = w->model, *o = w->overlay;
+  if (m->n_files + (o ? o->n_files : 0) > WEIGHTS_MAX_FILES)
+    return fail(c, o ? o->paths[0] : m->paths[0], "more files than a model takes");
+  for (int f = 0; f < m->n_files; f++)
+    w->paths[w->n_files++] = m->paths[f];
+  if (!o)
+    return true;
+  for (int f = 0; f < o->n_files; f++)
+    w->paths[w->n_files++] = o->paths[f];
+  if (!(w->ov = calloc(o->n_tensors + 1, sizeof *w->ov)))
+    return fail(c, o->paths[0], "out of memory");
+  for (size_t i = 0; i < o->n_tensors; i++)
+  {
+    const GgufTensor *t = &o->tensors[i], *mt = gguf_tensor(m, t->name);
+    if (!mt)
+      return fail(c, t->name, "an overlay tensor the model does not have");
+    if (mt->n_dims != t->n_dims || memcmp(mt->dims, t->dims, t->n_dims * sizeof *t->dims) != 0)
+      return fail(c, t->name, "an overlay tensor of other dims than the model's");
+    w->ov[i] = *t;
+    w->ov[i].file = m->n_files + t->file;
+  }
   return true;
 }
 
@@ -293,26 +340,33 @@ static bool check(Check *c)
 
 Weights *weights_create(const Gguf *model, const Gguf *engram, char err[WEIGHTS_ERR])
 {
-  if (!model)
+  return weights_create_with(&(WeightsOptions){model, engram, NULL}, err);
+}
+
+Weights *weights_create_with(const WeightsOptions *o, char err[WEIGHTS_ERR])
+{
+  if (!o || !o->model)
   {
     snprintf(err, WEIGHTS_ERR, "no model");
     return NULL;
   }
   Weights *w = calloc(1, sizeof *w);
-  Check c = {w, {NULL, NULL}, err};
-  bool ok = w && weights_geometry(model, engram, &w->geo, err);
+  Check c = {w, {NULL, NULL, NULL}, err};
+  bool ok = w && weights_geometry(o->model, o->engram, &w->geo, err);
   if (ok)
   {
-    w->model = model;
-    w->engram = engram;
-    c.taken[0] = calloc(model->n_tensors + 1, sizeof(bool));
-    c.taken[1] = calloc((engram ? engram->n_tensors : 0) + 1, sizeof(bool));
-    ok = (c.taken[0] && c.taken[1]) ? check(&c) : (snprintf(err, WEIGHTS_ERR, "out of memory"), false);
+    w->model = o->model, w->engram = o->engram, w->overlay = o->overlay;
+    c.taken[0] = calloc(o->model->n_tensors + 1, sizeof(bool));
+    c.taken[1] = calloc((o->engram ? o->engram->n_tensors : 0) + 1, sizeof(bool));
+    c.taken[2] = calloc((o->overlay ? o->overlay->n_tensors : 0) + 1, sizeof(bool));
+    ok = (c.taken[0] && c.taken[1] && c.taken[2]) ? files(&c) && check(&c)
+                                                    : (snprintf(err, WEIGHTS_ERR, "out of memory"), false);
   }
   else if (!w)
     snprintf(err, WEIGHTS_ERR, "out of memory");
   free(c.taken[0]);
   free(c.taken[1]);
+  free(c.taken[2]);
   if (!ok)
   {
     weights_destroy(w);
@@ -321,7 +375,23 @@ Weights *weights_create(const Gguf *model, const Gguf *engram, char err[WEIGHTS_
   return w;
 }
 
-void weights_destroy(Weights *w) { free(w); }
+size_t weights_tensors(const Weights *w)
+{
+  return w->model->n_tensors + (w->overlay ? w->overlay->n_tensors : 0);
+}
+
+size_t weights_tensor_index(const Weights *w, const GgufTensor *t)
+{
+  const bool own = t >= w->model->tensors && t < w->model->tensors + w->model->n_tensors;
+  return own ? (size_t)(t - w->model->tensors) : w->model->n_tensors + (size_t)(t - w->ov);
+}
+
+void weights_destroy(Weights *w)
+{
+  if (w)
+    free(w->ov);
+  free(w);
+}
 
 size_t weights_experts(const Weights *w, const int *model_fds, PoolUnit *units, size_t cap)
 {

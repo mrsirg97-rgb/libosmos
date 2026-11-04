@@ -3,7 +3,7 @@
 // every row's logits), each row's next token scored by log-softmax in double on the host. prints the perplexity and
 // the mean log-probability, and every 1,024 tokens the running perplexity. a check of a pack's quality beside the
 // oracle's KL (32 positions): two packs on the same text and steps, the same arithmetic.
-// environment: MODEL (a first shard), PICKS (forward_create_ranked's profile).
+// environment: MODEL (a first shard), PICKS (forward_create_ranked's profile), OVERLAY (weights_create_with's).
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/ppl.hip -Llib -losmos_hip -losmos
 //        -lhsa-runtime64 -o bin/ppl   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
@@ -45,7 +45,11 @@ int main(int argc, char** argv) {
   char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
   Gguf* g = gguf_create(mp, err);
   if (!g) std::fprintf(stderr, "gguf_create: %s\n", err), std::_Exit(1);
-  Weights* w = weights_create(g, nullptr, werr);
+  const char* op = std::getenv("OVERLAY");
+  Gguf* ov = op ? gguf_create(op, err) : nullptr;
+  if (op && !ov) std::fprintf(stderr, "%s: %s\n", op, err), std::_Exit(1);
+  const WeightsOptions wo = {g, nullptr, ov};
+  Weights* w = weights_create_with(&wo, werr);
   if (!w) std::fprintf(stderr, "weights_create: %s\n", werr), std::_Exit(1);
   ForwardOptions o = {};
   o.n_layers = (int) w->geo.n_layers, o.max_ctx = n, o.budget = budget, o.max_tokens = step;

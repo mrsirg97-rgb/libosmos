@@ -354,9 +354,80 @@ static void test_ud(void)
   model = NULL;
 }
 
+/* an overlay (huihui-ai's abliteration patch for UD-IQ1_M: 18 attn_output_b): its tensors in their roles, past the
+   model's files; without one the model's alone; refused - a name the model lacks, other dims, a type the role does
+   not take */
+static void test_overlay(void)
+{
+  char p[512], err[WEIGHTS_ERR];
+  const char *home = getenv("HOME");
+  snprintf(p, sizeof p, "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf", home);
+  Gguf *ud = gguf_create(p, err);
+  snprintf(p, sizeof p, "%s/Models/ds1017/huihui/unsloth/patch-UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-patch.gguf",
+           home);
+  Gguf *ov = gguf_create(p, err);
+  if (!ud || !ov)
+  {
+    printf("  overlay: UD-IQ1_M or huihui's patch not on this machine, skipped\n");
+    gguf_destroy(ud);
+    gguf_destroy(ov);
+    return;
+  }
+  Weights *plain = weights_create(ud, NULL, err);
+  assert(plain && plain->n_files == ud->n_files && !plain->overlay);
+  for (int f = 0; f < ud->n_files; f++)
+    assert(strcmp(plain->paths[f], ud->paths[f]) == 0);
+  Weights *w = weights_create_with(&(WeightsOptions){ud, NULL, ov}, err);
+  if (!w)
+    printf("  overlay refused: %s\n", err);
+  assert(w && w->overlay == ov && w->n_files == ud->n_files + 1 && strcmp(w->paths[ud->n_files], ov->paths[0]) == 0);
+  int over = 0;
+  for (int l = 0; l < w->geo.n_layers; l++)
+  {
+    char name[64];
+    snprintf(name, sizeof name, "blk.%d.attn_output_b.weight", l);
+    const GgufTensor *o = gguf_tensor(ov, name), *t = w->layer[l].out_b;
+    if (o)
+    {
+      assert(t != gguf_tensor(ud, name) && strcmp(t->name, name) == 0 && t->type == o->type &&
+             t->file == ud->n_files + o->file && t->offset == o->offset && t->bytes == o->bytes);
+      over++;
+    }
+    else
+      assert(t == gguf_tensor(ud, name) && t == plain->layer[l].out_b);
+    assert(w->layer[l].q_a == plain->layer[l].q_a && w->layer[l].exp_gate == plain->layer[l].exp_gate);
+  }
+  assert(over == (int)ov->n_tensors);
+  weights_destroy(w);
+  printf("  overlay (huihui's UD-IQ1_M patch): %d out_b its own, past the model's %d files; the rest the model's\n",
+         over, ud->n_files);
+
+  GgufTensor *t = (GgufTensor *)&ov->tensors[0];
+  char keep = t->name[4];
+  t->name[4] = 'x'; /* blk.x...: no such tensor in the model */
+  assert(!weights_create_with(&(WeightsOptions){ud, NULL, ov}, err) && strstr(err, t->name));
+  printf("    a tensor the model does not have -> %s\n", err);
+  t->name[4] = keep;
+  t->dims[0] /= 2;
+  assert(!weights_create_with(&(WeightsOptions){ud, NULL, ov}, err) && strstr(err, t->name));
+  printf("    other dims -> %s\n", err);
+  t->dims[0] *= 2;
+  const uint32_t ty = t->type;
+  t->type = QTYPE_I32;
+  assert(!weights_create_with(&(WeightsOptions){ud, NULL, ov}, err) && strstr(err, t->name));
+  printf("    a type the role does not take -> %s\n", err);
+  t->type = ty;
+  assert((w = weights_create_with(&(WeightsOptions){ud, NULL, ov}, err)));
+  weights_destroy(w);
+  weights_destroy(plain);
+  gguf_destroy(ov);
+  gguf_destroy(ud);
+}
+
 int main(void)
 {
   printf("[test_weights] start\n");
+  test_overlay();
   test_null();
   model = open_model("DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf");
   engram = open_model("DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf");
