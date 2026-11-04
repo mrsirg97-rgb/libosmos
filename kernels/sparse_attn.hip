@@ -24,12 +24,13 @@ constexpr int kStep = 16;   // the sum's values staged at a time (d for scores, 
 // 13.0, 8 x 8 9.4); values 8 heads x 16 dims of 64 x 256 (9.8 ms; 4 x 4 13.9, 8 x 8 of 128 dims 10.0)
 constexpr int kSr = 16, kSc = 8, kSkeys = 128;
 constexpr int kVr = 8, kVc = 16, kVdims = 256;
-// a few tokens (a decode's, a verify's: fewer than kSmallTok) take small tiles - all 64 heads x 64 keys, 64 heads x 64
+// a few tokens (a decode's, a verify's: fewer than kSmallTok) take small tiles - all 64 heads x 8 keys, 64 heads x 64
 // dims, 4 x 4 a thread - for blocks enough to fill the GPU (the large ones gave one token ~5 blocks of scores, 2 of
 // values); a tile changes no sum's order: the same bits. 64 heads, not the 16 it was with F32 keys: a block decodes
 // its keys once for all heads (kvload.h) - one token x 640 keys 136 -> 70 us a call (16 / 32 / 64 heads; F32 keys at
-// 16: 59)
-constexpr int kSmallHeads = 64, kSmallR = 4, kSmallC = 4, kSmallKeys = 64, kSmallDims = 64;
+// 16: 59). scores' keys 8 a block (2026-11-04, traced in decode, UD-IQ1_S: 64 / 32 / 16 / 8 / 4 keys 1.18 / 1.16 /
+// 0.97 / 0.88 / 1.03 ms a token - more blocks for a token's few keys; 8 heads a thread 1.78)
+constexpr int kSmallHeads = 64, kSmallR = 4, kSmallC = 4, kSmallKeys = 8, kSmallDims = 64;
 constexpr uint32_t kSmallTok = 16;
 constexpr int kSmThreads = 256;  // the softmax's: a wave a (token, head)
 constexpr float kNegHuge = -1e30f;

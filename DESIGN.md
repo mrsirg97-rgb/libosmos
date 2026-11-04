@@ -1982,6 +1982,15 @@ Q6_K each, 583 us) is dense work like the rest.
 - traced now (the guess on, as the first): the wall 55.48 -> 54.51 ms; plain decode, the guess off, 18.2-18.5 ->
   19.1-19.3 tok/s (the ISTA download on the SSD meanwhile), the answers' hashes as ever.
 
+- 2, a tile (traced in decode this time - the scratch benchmark's fixed 640 keys were not decode's: a short
+  context's layers attend a few hundred): scores' keys a block 64 / 32 / 16 / 8 / 4 at 64 heads 1.18 / 1.16 / 0.97 /
+  0.88 / 1.03 ms a token, 8 heads a thread 1.78; values 0.32 whatever its dims; kept at 8 (kSmallKeys) - the bench's
+  hash and test_attn_gpu as before; ~0.27 ms a token, more where a context selects more rows.
+- hc_post_dot's fn rows staged in LDS by the whole block before its 25 threads' sums (the same sums, the same order:
+  test_fuse_gpu, and a staged row one off caught): slower in decode, 1.14 -> 1.58 ms a token (an index divided a
+  load), 1.28 row by row unrolled - the barrier and the LDS round trip cost more than the loads in flight saved. not
+  kept.
+
 together, revised: ~3.5 ms past the guess (~6%), UD-IQ1_S plain ~18.9 -> ~20 tok/s. the first estimate, ~4-5 ms of
 ~54 (~8-9%) past the guess: UD-IQ1_S plain ~18.9 -> ~20.5 tok/s, UD-IQ1_M in proportion. the
 order: 1, 2, 3 (each small, each its own measure), then 5, 4, 6. a HIP graph of a step (most of the 3 ms of gaps) is
