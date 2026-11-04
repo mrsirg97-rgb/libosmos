@@ -339,6 +339,17 @@ static void test_ud(void)
   refused("engram_kv on a layer with no Engram", "engram_kv");
   t->name[4] = '1';
   assert(accepted());
+  /* no DSpark targets named (ISTA's GGUFs): loaded, none set - the drafter's dspark.json names them then */
+  GgufKv *dt = kv("deepseek41.dspark.target_layers");
+  assert(dt);
+  dt->key[0] = 'X';
+  Weights *nt = weights_create(model, NULL, err);
+  assert(nt);
+  for (int i = 0; i < nt->geo.n_layers; i++)
+    assert(!nt->geo.dspark_target[i]);
+  weights_destroy(nt);
+  dt->key[0] = 'd';
+  printf("  UD-IQ1_M without its DSpark targets: loaded, none set\n");
   gguf_destroy(ud);
   model = NULL;
 }

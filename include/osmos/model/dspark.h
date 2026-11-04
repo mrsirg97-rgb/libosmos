@@ -7,6 +7,7 @@
 #define DSPARK_ERR 256
 #define DSPARK_NAME_MAX 64
 #define DSPARK_MAX_DIMS 4
+#define DSPARK_MAX_TARGETS 16 /* a target_layers list's bound (DeepSeek's: 3) */
 
 typedef struct DsparkTensor
 {
@@ -22,6 +23,8 @@ typedef struct DsparkIndex
   char *bin; /* dspark.bin's path */
   DsparkTensor *t;
   uint32_t n;
+  uint32_t targets[DSPARK_MAX_TARGETS]; /* "target_layers": the trunk's layers it taps, ascending; or none */
+  uint32_t n_targets;
 } DsparkIndex;
 
 DsparkIndex *dspark_index(const char *dir, char err[DSPARK_ERR]);
@@ -35,11 +38,13 @@ DsparkIndex
   DeepSeek's DSpark drafter's tensors as Maya's drafter_pack.py wrote them: dir/dspark.json lists each one ([name,
   type, offset, bytes, [dims]]) in dir/dspark.bin. the blocks mtp.0 .. mtp.2: their attention, hyper-connections and
   128 routed experts (MXFP4) beside a shared one (Q8_0); mtp.0's main_proj and main_norm (the trunk's taps into the
-  blocks' keys); mtp.2's final norm, markov and confidence heads.
+  blocks' keys); mtp.2's final norm, markov and confidence heads. dspark.json may name the trunk's layers it taps
+  ("target_layers": [37, 38, 39], DeepSeek's config's dspark_target_layer_ids) for a model whose GGUF does not.
 
 dspark_index
   the index read from dir/dspark.json; NULL, with why in err, for a file it cannot read or parse, a type it does not
-  know, a tensor past the end of dspark.bin, or bytes that do not match its type and dims.
+  know, a tensor past the end of dspark.bin, or bytes that do not match its type and dims - or a target_layers that
+  is not a list of ascending layers (at most DSPARK_MAX_TARGETS).
 
 dspark_index_destroy
   everything it allocated. NULL is nothing to do.

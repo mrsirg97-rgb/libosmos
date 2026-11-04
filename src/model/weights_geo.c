@@ -92,6 +92,13 @@ static const GgufKv *lookup(Meta *m, const char *key)
   return a ? a : b;
 }
 
+/* a key in either spelling (an optional one's: absent is not a failure) */
+static bool present(Meta *m, const char *key)
+{
+  const char *other = alias(key);
+  return gguf_kv(m->g, key) || (other && gguf_kv(m->g, other));
+}
+
 /* GGUF_UINT32 asks for an integer scalar of any width; another type, that type */
 static const GgufKv *find(Meta *m, const char *key, GgufValueType type)
 {
@@ -268,7 +275,8 @@ static bool ple_engram(Meta *m, const Gguf *file, Geometry *g)
       !uint_in(m, ARCH ".ple.ngram_size", NGRAM_MIN, LIST_MAX, &g->engram_max_ngram) ||
       !uint_in(m, ARCH ".embedding_length_per_layer_input", 1, DIM_MAX, &g->engram_head_dim) ||
       !uint_in(m, ARCH ".engram.pad_token_id", 0, DIM_MAX, &g->engram_pad) ||
-      !uint_in(m, ARCH ".engram.compressed_vocab_size", 1, DIM_MAX, &g->engram_vocab))
+      (present(m, ARCH ".engram.compressed_vocab_size") && /* ISTA's GGUFs: absent, 0 - the map's (engram.c) */
+       !uint_in(m, ARCH ".engram.compressed_vocab_size", 1, DIM_MAX, &g->engram_vocab)))
     return false;
   for (size_t i = 0; i < n_eg; i++)
   {
@@ -345,7 +353,9 @@ bool weights_geometry(const Gguf *model, const Gguf *file, Geometry *g, char err
          uint_in(&m, ARCH ".attention.candidate_source_layer_id", 0, n - 1, &g->cand_source) &&
          layers(&m, ARCH ".kv_source_layer_ids", n, g->kv_source, NULL) &&
          layers(&m, ARCH ".index_source_layer_ids", n, g->ix_source, NULL) &&
-         layers(&m, ARCH ".dspark_target_layer_ids", n, g->dspark_target, NULL) && sources(&m, g) &&
+         (!present(&m, ARCH ".dspark_target_layer_ids") || /* ISTA's GGUFs name none: the drafter's then */
+          layers(&m, ARCH ".dspark_target_layer_ids", n, g->dspark_target, NULL)) &&
+         sources(&m, g) &&
          clamps(&m, ARCH ".swiglu_clamp_exp", n, g->clamp_exp) &&
          clamps(&m, ARCH ".swiglu_clamp_shexp", n, g->clamp_shexp) &&
          real(&m, ARCH ".attention.layer_norm_rms_epsilon", &g->rms_eps) &&

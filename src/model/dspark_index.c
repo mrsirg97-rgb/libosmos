@@ -6,8 +6,8 @@
 #include "osmos/model/dspark.h"
 #include "osmos/model/qtype.h"
 
-/* dspark.json's one key the index reads: "tensors": [[name, type, offset, bytes, [dims ...]], ...] - a reader of
-   just that shape: strings without escapes, unsigned integers */
+/* dspark.json's keys the index reads: "tensors": [[name, type, offset, bytes, [dims ...]], ...] and, if there,
+   "target_layers": [layer, ...] - a reader of just those shapes: strings without escapes, unsigned integers */
 
 static bool fail(char *err, const char *why)
 {
@@ -98,6 +98,26 @@ static bool entry(Cur *c, DsparkTensor *t, uint64_t file_bytes, char *err)
   return true;
 }
 
+/* "target_layers": a list of ascending layers, at most DSPARK_MAX_TARGETS; absent, none */
+static bool targets(const char *text, const char *end, DsparkIndex *x, char *err)
+{
+  const char *key = strstr(text, "\"target_layers\"");
+  if (!key)
+    return true;
+  Cur c = {key + strlen("\"target_layers\""), end};
+  if (!eat(&c, ':') || !eat(&c, '['))
+    return fail(err, "dspark.json: target_layers is not a list");
+  do
+  {
+    uint64_t v;
+    if (x->n_targets == DSPARK_MAX_TARGETS || !number(&c, &v) || v > UINT32_MAX ||
+        (x->n_targets && v <= x->targets[x->n_targets - 1]))
+      return fail(err, "dspark.json: target_layers is not a list of ascending layers");
+    x->targets[x->n_targets++] = (uint32_t)v;
+  } while (eat(&c, ','));
+  return eat(&c, ']') || fail(err, "dspark.json: target_layers is not a list");
+}
+
 DsparkIndex *dspark_index(const char *dir, char err[DSPARK_ERR])
 {
   char path[4096];
@@ -124,6 +144,7 @@ DsparkIndex *dspark_index(const char *dir, char err[DSPARK_ERR])
     fclose(f);
   if (ok)
     text[len] = 0;
+  ok = ok && targets(text, text + len, x, err);
   const char *key = ok ? strstr(text, "\"tensors\"") : NULL;
   if (ok && !key)
     ok = fail(err, "dspark.json has no tensors");

@@ -198,6 +198,21 @@ int main() {
   }
   if (!d) std::printf("  drafted: skipped (no DSpark weights at %s)\n", ddir.c_str());
   drafter_destroy(d);
+  // a drafter whose dspark.json names target layers other than the model's: refused, saying so (its bin linked)
+  if (d && which == TestModel::kUd) {
+    char tmp[] = "/tmp/test_seqstate_XXXXXX";
+    CHECK(mkdtemp(tmp));
+    const std::string t = tmp;
+    CHECK(symlink((ddir + "/dspark.bin").c_str(), (t + "/dspark.bin").c_str()) == 0);
+    std::FILE* in = std::fopen((ddir + "/dspark.json").c_str(), "rb");
+    std::FILE* out = std::fopen((t + "/dspark.json").c_str(), "wb");
+    CHECK(in && out && std::fputs("{\"target_layers\": [36, 38, 39], ", out) >= 0 && std::fgetc(in) == '{');
+    for (int c; (c = std::fgetc(in)) != EOF;) std::fputc(c, out);
+    std::fclose(in), std::fclose(out);
+    CHECK(!drafter_create(g_f, t.c_str(), g_err) && std::strstr(g_err, "differ"));
+    std::printf("  a drafter naming other target layers than the model's: refused (%s)\n", g_err);
+    CHECK(std::system(("rm -rf " + t).c_str()) == 0);
+  }
   forward_destroy(g_f);
   weights_destroy(w);
   gguf_destroy(g);

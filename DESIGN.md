@@ -1997,6 +1997,39 @@ order: 1, 2, 3 (each small, each its own measure), then 5, 4, 6. a HIP graph of 
 the larger lever and the larger change - the host decides a layer's experts between launches - and waits until these
 are in. every change: the bench's answers hash as before, interleaved fresh runs on both packs.
 
+## the quiet-box bench, and GSQ-RCO's new layout (2026-11-04)
+
+every pack on the MXFP8 table, nothing else on the SSD (the morning's numbers ran beside a 250 GB download), two
+interleaved rounds of the three questions, GREEDY=1 (the server's GPU pick; the bench's host argmax was ~0.4 ms a
+token of its own); ~/bench/clean.
+
+| | UD-IQ1_M | UD-IQ1_S | GSQ-RCO IQ2_XXS |
+| --- | --- | --- | --- |
+| plain, guess on | 16.6 / 16.6 / 16.4, 15.9 / 16.4 / 16.2 | - | 18.8 / 18.9 / 18.8, 18.1 / 18.5 / 18.8 |
+| plain, guess off | 16.5 / 16.6 / 16.1, 16.5 / 16.8 / 16.6 | 18.8 / 19.2 / 19.2, 19.0 / 19.2 / 19.1 | 19.1 / 19.0 / 19.2, 18.9 / 18.9 / 19.2 |
+| drafted, guess on | 28.3 / 24.2 / 35.9, 29.4 / 24.1 / 36.0 | - | 34.3 / 24.3 / 39.7, 35.0 / 24.6 / 40.7 |
+| drafted, guess off | 28.9 / 23.7 / 36.4, 28.8 / 23.6 / 36.3 | 38.3 / 27.6 / 48.4, 38.1 / 27.5 / 48.2 | 34.9 / 24.0 / 40.3, 34.7 / 24.1 / 40.4 |
+| perplexity, 8,191 tokens | 2.4591 | 2.5006 | 2.5461 (its IQ4_NL table 2.5489) |
+| package power decoding, plain / drafted | - | 122 / 127 W (6.4 / 3.3 J a token) | 125 / 125 W (6.6 / 3.8 J) |
+
+- the guess: a wash on UD-IQ1_M (plain 16.35 on against 16.5 off, drafted 29.65 / 29.62) and on GSQ-RCO, a loss on
+  UD-IQ1_S - off for every pack (the pack's setting). the morning's power ran 133-138 W: fewer launches and no guess
+  pass, ~125 W now.
+- GSQ-RCO: its IQ2 experts at UD-IQ1_S's plain speed (2,873 streamed against 615 - the int8 IQ2 kernels' cheaper
+  decode a byte); drafted below UD-IQ1_S (a verify streams 4,991). its perplexity the worst of the three, as unsloth's
+  card measures it (higher KL, lower top-1; six benchmarks 83.68 against UD-IQ1_S 83.53, UD-IQ1_M 85.55): not a pack.
+- ISTA's files since 2026-10-27 (llama.cpp's layout: five shards, the Engram file linked as shard 6) name neither
+  DSpark's target layers nor the Engram's compressed vocabulary (nor embedding_length_out, unread) - both refused at
+  load until now:
+  - the target layers: the model's where its GGUF names them, else the drafter's dspark.json ("target_layers",
+    DeepSeek's config's 37, 38, 39 - ours carries it, requant_dspark copies it); both named and unequal refused,
+    neither refused; the Forward taps the drafter's (fwd_taps_on's at). test_dspark (parsed, four malformed lists
+    refused), test_weights (UD without the key: loaded, none set), test_seqstate_gpu (a drafter naming 36, 38, 39
+    against the model's: refused) - each failing before.
+  - the compressed vocabulary: absent, the token map's greatest entry + 1 (unsloth's file: 99,092 either way - the
+    map's 99,092 distinct entries; the two checks it feeds, a map entry's range and the multipliers' overflow bound,
+    are the map's own). test_engram: UD without the key, every hashed row of 64 positions the oracle's, failing before.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

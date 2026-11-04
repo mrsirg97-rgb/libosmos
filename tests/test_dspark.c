@@ -47,8 +47,19 @@ static void test_malformed(void)
   char err[DSPARK_ERR] = "";
   DsparkIndex *x = dspark_index(dir, err);
   assert(x && x->n == 2 && dspark_tensor(x, "b")->type == 30 && dspark_tensor(x, "a.w")->dims[1] == 32);
+  assert(x->n_targets == 0); /* none named: the model's, then */
   assert(!dspark_tensor(x, "c"));
   dspark_index_destroy(x);
+  /* the trunk's layers it taps, named beside the tensors (a model whose GGUF does not: ISTA's) */
+  write("dspark.json", "{\"target_layers\": [37, 38, 39], \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", 0);
+  x = dspark_index(dir, err);
+  assert(x && x->n == 1 && x->n_targets == 3 && x->targets[0] == 37 && x->targets[2] == 39);
+  dspark_index_destroy(x);
+  refused("{\"target_layers\": [38, 37], \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "targets not ascending");
+  refused("{\"target_layers\": 37, \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "targets not a list");
+  refused("{\"target_layers\": [], \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "targets an empty list");
+  refused("{\"target_layers\": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "
+          "\"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "more targets than a list holds");
   /* a drafter's experts requantized to the trunk's types: the type table's sizes */
   write("dspark.json", "{\"tensors\": [[\"e\", \"IQ2_XS\", 0, 74, [1, 256]]]}", 0);
   x = dspark_index(dir, err);
@@ -57,7 +68,7 @@ static void test_malformed(void)
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
   assert(system(cmd) == 0);
-  printf("  a well-formed one: its two tensors, by name\n");
+  printf("  a well-formed one: its two tensors, by name; its target layers where it names them\n");
 }
 
 static void test_real(void)

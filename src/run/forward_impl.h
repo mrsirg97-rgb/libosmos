@@ -211,9 +211,10 @@ struct Forward
   int n_eg;       /* the Engram layers (stage's) */
   /* DSpark's taps (fwd_taps_on, the drafter's): the streams' mean entering each target layer, [row][tap][D], for the
      last sub-batch's rows of the step (a sequence's last ones: the drafter's ring holds 128); their positions and
-     sequences. NULL: none taken */
+     sequences. NULL: none taken. tapped: the target layers the drafter gave */
   float *taps;
   int n_tap, tap_of[WEIGHTS_MAX_LAYERS];
+  bool tapped[WEIGHTS_MAX_LAYERS];
   uint32_t tap_n;
   int32_t tap_pos[FWD_MAX_BATCH];
   Seq *tap_bs[FWD_MAX_BATCH];
@@ -291,7 +292,9 @@ bool fwd_wait_read(Forward *f, char *err); /* a read's end waited for, the finis
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
 bool fwd_drain(Forward *f, char *err); /* the finished reads to the pool, no wait */
 bool fwd_room_left(const Forward *f, char *err); /* the GPU's free memory holds the pool's room: else false, why */
-bool fwd_taps_on(Forward *f); /* the taps taken from the next step on (a drafter's): false if they cannot be held */
+/* the taps at target layers `at` taken from the next step on (a drafter's): false if none, or they cannot be held,
+   or taps are on already at other layers */
+bool fwd_taps_on(Forward *f, const bool *at);
 
 bool fwd_attention(Forward *f, int l, char *err);
 /* a weight's product over n tokens (token t's x at x + t * xs, its y at y + t * ys; n up to FWD_MAX_STEP): mm for

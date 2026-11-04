@@ -132,7 +132,15 @@ int main(int argc, char **argv)
   FILE *js = fopen(path, "w");
   if (!js)
     return fprintf(stderr, "requant_dspark: cannot write %s\n", path), 1;
-  fprintf(js, "{\"from\": \"%s\", \"experts\": \"%s\", \"dense\": \"Q8_0\", \"tensors\": [", ix->bin, tn);
+  fprintf(js, "{\"from\": \"%s\", \"experts\": \"%s\", \"dense\": \"Q8_0\", ", ix->bin, tn);
+  if (ix->n_targets) /* the source's target layers, where it names them (dspark.h) */
+  {
+    fprintf(js, "\"target_layers\": [");
+    for (uint32_t i = 0; i < ix->n_targets; i++)
+      fprintf(js, "%s%u", i ? ", " : "", ix->targets[i]);
+    fprintf(js, "], ");
+  }
+  fprintf(js, "\"tensors\": [");
   for (uint32_t i = 0; i < ix->n; i++)
   {
     const DsparkTensor *t = &ix->t[i];

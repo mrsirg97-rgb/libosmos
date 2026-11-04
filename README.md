@@ -10,7 +10,8 @@ It runs these quantizations of the model:
   MXFP8 Engram table (one 203 GB file the two share) and, optionally, huihui-ai's abliteration patch. The comparison
   with Maya is on UD-IQ1_M with its stock IQ4_NL table.
 - **ISTA-DASLab's GSQ-RCO IQ2_XXS** ([ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)):
-  experts IQ2_XXS / IQ2_XS / IQ1_M, its Engram in a separate GGUF. What the engine was first built on.
+  experts IQ2_XXS / IQ2_XS / IQ1_M, its Engram a shared file linked as shard 6 (llama.cpp's layout since 2026-10-27;
+  their earlier four-shard layout too). What the engine was first built on; measured below, not one of the packs.
 
 **The guarantee:** the same input gives the same output, bit for bit, however it is run:
 
@@ -55,20 +56,27 @@ dependent kernels.
 
 ### The two packs
 
-The same machine and questions, both on the MXFP8 Engram table; drafted with our IQ2_XS DSpark (4.7 GB) at a 103 GiB
-budget, plain at 110 GiB; perplexity over 8,191 tokens of mixed text and code (`bin/ppl`, 512-token steps).
+Measured on a quiet box (2026-11-04: nothing else on the SSD), every pack on the MXFP8 Engram table: plain at 110
+GiB, drafted with our IQ2_XS DSpark (4.7 GB) at 103 GiB, two interleaved rounds of the three questions, the router's
+guess off (`NO_GUESS=1`, `--no-guess`: it no longer pays on these packs); perplexity over 8,191 tokens of mixed text
+and code (`bin/ppl`); power the APU package's while decoding (amdgpu PPT, not the wall), AMD's stock limits.
 
-| | UD-IQ1_M + MXFP8 | UD-IQ1_S + MXFP8 |
-| --- | --- | --- |
-| Decode, plain (3 questions, two rounds) | 16.2 tok/s (16.1-16.5) | 18.4 tok/s (18.2-18.5) |
-| Decode, drafted | 29.5 tok/s (23.8-36.6) | 37.0 tok/s (27.0-47.9) |
-| Perplexity (abliterated) | 2.459 (-) | 2.501 (2.505) |
-| Expert shards on disk (plus the shared table) | 140 GB | 122 GB |
+| | UD-IQ1_M | UD-IQ1_S | GSQ-RCO IQ2_XXS (not packed) |
+| --- | --- | --- | --- |
+| Decode, plain | 16.5 tok/s (16.1-16.8) | 19.1 tok/s (18.8-19.2) | 19.05 tok/s (18.9-19.2) |
+| Decode, drafted | 29.6 tok/s (23.6-36.4) | 38.0 tok/s (27.5-48.4) | 33.3 tok/s (24.0-41.6) |
+| Perplexity (abliterated) | 2.459 (-) | 2.501 (2.505) | 2.546 |
+| Package power, plain / drafted | - | 122 / 127 W | 125 / 125 W |
+| Energy a token, plain / drafted | - | 6.4 / 3.3 J | 6.6 / 3.8 J |
+| Expert shards on disk (plus the shared table) | 140 GB | 122 GB | 138 GB |
 
-UD-IQ1_S's experts are 12.5% smaller, so more of them stay in GPU memory: on the third question it read 615 experts
-from the SSD against UD-IQ1_M's 3,452 (plain) and 2,036 against 6,174 (drafted, where a round's verify touches many
-more). The abliterated packs decode at the same speed. The MXFP8 table itself is speed- and quality-neutral against
-the IQ4_NL one on these 1-bit experts (DESIGN.md, "the MXFP8 Engram pack"); it is the one table both packs can share.
+UD-IQ1_S's experts are 12.5% smaller than UD-IQ1_M's, so more of them stay in GPU memory: over the three questions
+it read 615 experts from the SSD against UD-IQ1_M's 3,476 (plain) and 2,047 against 6,192 (drafted, where a round's
+verify touches many more). GSQ-RCO's IQ2 experts decode as fast as UD-IQ1_S's at plain, but its perplexity is the
+worst of the three, as unsloth's own comparison found (higher KL, lower top-1 agreement; on their six benchmarks
+GSQ-RCO IQ2_XXS 83.68 against UD-IQ1_S 83.53 and UD-IQ1_M 85.55): the packs are the two UD quants. The abliterated
+packs decode at the same speed. The MXFP8 table is speed- and quality-neutral against the IQ4_NL one on these experts
+(DESIGN.md, "the MXFP8 Engram pack"; GSQ-RCO 2.546 against 2.549); it is the one table every pack can share.
 
 Earlier, on **GSQ-RCO IQ2_XXS** against Maya 1.1.46 (before the UD work: the KV's formats, the decode and prompt
 changes since; not re-measured - its files are not on the development box now):
@@ -106,7 +114,9 @@ changes since; not re-measured - its files are not on the development box now):
 - The model, on an NVMe SSD (the faster its random reads, the faster the decode), one of:
   - UD-IQ1_M's or UD-IQ1_S's 5 shards (`DeepSeek-V4.1-Flash-1017-UD-IQ1_M-0000N-of-00005.gguf`; shard 5 is the
     Engram table: the stock IQ4_NL one, 110 GB, or the MXFP8 one - below),
-  - GSQ-RCO's 4 IQ2_XXS shards and its Engram GGUF (`DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`),
+  - GSQ-RCO's IQ2_XXS shards: llama.cpp's layout (5 shards, the shared Engram file linked as shard 6) or their earlier
+    one (4 shards and `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`). Its GGUFs name no DSpark target layers: the
+    drafter's `dspark.json` does (`target_layers`, ours carries it),
 - for drafting, DSpark's weights: Maya's pack of them (`dspark.bin`, `dspark.json`, 8 GB) or our IQ2_XS requant of
   that pack (4.7 GB, the same acceptance on these questions),
 - optionally (UD-IQ1_M's decode ~12-13 -> ~16 tok/s with one), an expert pick profile beside the model (`osmos-picks.bin`: every

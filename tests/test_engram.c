@@ -82,6 +82,26 @@ static void test_own(void)
   mu[5] = mwas;
   assert((e = engram_create(w, fds, eerr)));
   engram_destroy(e);
+  /* no compressed vocabulary named (ISTA's GGUFs): the map's own (its greatest entry + 1) - the same rows */
+  GgufKv *cv = (GgufKv *)gguf_kv(g, "deepseek41.engram.compressed_vocab_size");
+  assert(cv);
+  cv->key[0] = 'X';
+  Weights *w2 = weights_create(g, NULL, werr);
+  assert(w2 && w2->geo.engram_vocab == 0);
+  assert((e = engram_create(w2, fds, eerr)));
+  for (uint32_t t = 0; t < n; t++)
+  {
+    int32_t last[4];
+    int k = 0;
+    for (int s = 0; s < 4 && (int)t - s >= 0; s++, k++)
+      last[s] = ids[t - s];
+    int64_t rows[LAYERS * COLS];
+    assert(engram_rows(e, last, k, rows) && memcmp(rows, want + (size_t)t * LAYERS * COLS, sizeof rows) == 0);
+  }
+  engram_destroy(e);
+  weights_destroy(w2);
+  cv->key[0] = 'd';
+  printf("    no compressed vocabulary named: the map's own, every row as before\n");
   for (int f = 0; f < g->n_files; f++)
     close(fds[f]);
   weights_destroy(w);

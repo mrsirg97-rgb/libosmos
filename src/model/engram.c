@@ -142,6 +142,8 @@ Engram *engram_create(const Weights *w, const int *fds, char err[ENGRAM_ERR])
     ok = (e->map = slurp(w->eg_token_map, fds)) && (e->mult = slurp(w->eg_multipliers, fds)) &&
          (e->primes = slurp(w->eg_primes, fds)) && (e->off = slurp(w->eg_offsets, fds));
   }
+  for (uint64_t i = 0; ok && !g->engram_vocab && i < e->vocab; i++) /* none named: the map's greatest entry + 1 */
+    e->compressed = e->map[i] >= e->compressed ? (int64_t)e->map[i] + 1 : e->compressed;
   if (ok && (uint64_t)g->engram_pad >= e->vocab)
     ok = fail(err, "the pad token past the map");
   if (ok)

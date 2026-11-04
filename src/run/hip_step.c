@@ -66,7 +66,7 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   Scratch *b = &f->b;
   const uint32_t hc = g->hc, D = g->n_embd, n = f->n;
   const int p = f->at;
-  if (f->taps && g->dspark_target[l] && f->cur + 1 == f->n_sub) /* a drafter's tap, the step's last rows */
+  if (f->taps && f->tapped[l] && f->cur + 1 == f->n_sub) /* a drafter's tap, the step's last rows */
   {
     if (!ops_hc_mean(b->h, hc, D, n, f->taps + (uint64_t)f->tap_of[l] * D, (uint32_t)f->n_tap * D, NULL))
       return fwd_fail(err, "a GPU call failed (the drafter's tap)");
@@ -294,13 +294,13 @@ bool seq_prompt(Seq *s, uint32_t end)
   return true;
 }
 
-bool fwd_taps_on(Forward *f)
+bool fwd_taps_on(Forward *f, const bool *at)
 {
   if (f->taps)
-    return true;
+    return memcmp(f->tapped, at, (size_t)f->n_layers * sizeof *at) == 0;
   f->n_tap = 0;
   for (int l = 0; l < f->n_layers; l++)
-    f->tap_of[l] = f->g->dspark_target[l] ? f->n_tap++ : -1;
+    f->tapped[l] = at[l], f->tap_of[l] = at[l] ? f->n_tap++ : -1;
   return f->n_tap && fwd_alloc(&f->taps, (uint64_t)f->step * f->n_tap * f->g->n_embd * sizeof(float));
 }
 

@@ -34,8 +34,9 @@ Drafter
   sums). drafts change no bit of the trunk's: they are only proposals, which a batched forward verifies.
 
 drafter_create
-  the drafter read from dir (dspark.json, dspark.bin) for f; f takes its taps from its next step on. NULL with why in
-  err for a drafter it cannot read, a model with no target layers, or GPU memory refused.
+  the drafter read from dir (dspark.json, dspark.bin) for f; f takes its taps from its next step on - at the target
+  layers the model's GGUF names, else those dspark.json does. NULL with why in err for a drafter it cannot read, target
+  layers neither names (or both, unequal), taps its main_proj does not take, or GPU memory refused.
 
 drafter_destroy
   its memory (its rings' are the Seqs'). NULL is nothing to do; before its Forward.

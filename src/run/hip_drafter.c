@@ -139,6 +139,27 @@ static bool scratch(Drafter *d)
          hipHostMalloc((void **)&d->pin, sizeof *d->pin + V * F, 0) == hipSuccess;
 }
 
+/* the trunk's layers the drafter taps: the model's GGUF's where it names them, else dspark.json's; both named, equal */
+static bool targets(const Forward *f, const DsparkIndex *ix, bool *at, char *err)
+{
+  bool any = false, theirs[WEIGHTS_MAX_LAYERS] = {false};
+  for (int l = 0; l < f->n_layers; l++)
+    any |= (at[l] = f->g->dspark_target[l]);
+  for (uint32_t i = 0; i < ix->n_targets; i++)
+  {
+    if (ix->targets[i] >= (uint32_t)f->n_layers)
+      return fail(err, "dspark.json: a target layer past the model's");
+    theirs[ix->targets[i]] = true;
+  }
+  if (any && ix->n_targets && memcmp(at, theirs, (size_t)f->n_layers * sizeof *at) != 0)
+    return fail(err, "the model's DSpark target layers and dspark.json's differ");
+  if (!any && !ix->n_targets)
+    return fail(err, "no DSpark target layers: neither the model's GGUF nor dspark.json names them");
+  if (!any)
+    memcpy(at, theirs, (size_t)f->n_layers * sizeof *at);
+  return true;
+}
+
 Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
 {
   Drafter *d = f ? calloc(1, sizeof *d) : NULL;
@@ -156,7 +177,9 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
   free(u);
   const DsparkTensor *mk = ok ? dspark_tensor(d->ix, "mtp.2.markov_head.embed.weight") : NULL;
   const DsparkTensor *mp = ok ? dspark_tensor(d->ix, "mtp.0.main_proj.weight") : NULL;
-  ok = ok && ((mk && mp && fwd_taps_on(f) && mp->dims[1] == (uint64_t)f->n_tap * f->g->n_embd) ||
+  bool at[WEIGHTS_MAX_LAYERS] = {false};
+  ok = ok && targets(f, d->ix, at, err);
+  ok = ok && ((mk && mp && fwd_taps_on(f, at) && mp->dims[1] == (uint64_t)f->n_tap * f->g->n_embd) ||
               fail(err, "a drafter whose taps are not the model's target layers'"));
   if (ok)
   {
