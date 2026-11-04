@@ -194,7 +194,7 @@ static bool open_file(Gguf *g, int file, const char *path, char *err, uint64_t *
   return ok;
 }
 
-Gguf *gguf_create(const char *path, char err[GGUF_ERR])
+static Gguf *create(const char *path, bool siblings, char err[GGUF_ERR])
 {
   if (err)
     err[0] = 0;
@@ -215,7 +215,7 @@ Gguf *gguf_create(const char *path, char err[GGUF_ERR])
     gguf_destroy(g);
     return NULL;
   }
-  if (count > 1)
+  if (count > 1 && siblings)
   {
     Reader r = {NULL, path, 0, 0, err};
     if (no != 0 || count > 999 || !strstr(path, "-00001-of-"))
@@ -268,6 +268,16 @@ Gguf *gguf_create(const char *path, char err[GGUF_ERR])
         return NULL;
       }
   return g;
+}
+
+Gguf *gguf_create(const char *path, char err[GGUF_ERR])
+{
+  return create(path, true, err);
+}
+
+Gguf *gguf_header(const char *path, char err[GGUF_ERR])
+{
+  return create(path, false, err);
 }
 
 void gguf_destroy(Gguf *g)

@@ -240,9 +240,16 @@ static void test_split(void)
   unlink(p2);
   err[0] = 0;
   assert(gguf_create(p1, err) == NULL && strstr(err, "00002") != NULL);
+  char refused[GGUF_ERR];
+  snprintf(refused, sizeof refused, "%s", err);
+  /* the first shard alone (its metadata: a tokenizer's): read without its siblings, only its own tensors */
+  Gguf *h = gguf_header(p1, err);
+  assert(h && h->n_files == 1 && h->n_tensors == 2 && gguf_kv(h, "split.count") && !gguf_tensor(h, "c.iq1_m"));
+  gguf_destroy(h);
   free(a.b);
   free(b.b);
-  printf("  split: two shards as one model; a missing shard refused (\"%s\")\n", err);
+  printf("  split: two shards as one model; a missing shard refused (\"%s\"); the first one's header alone read\n",
+         refused);
 }
 
 /* a valid file cut at every length short of whole: refused - with a reason, nothing leaked - exactly when the cut takes

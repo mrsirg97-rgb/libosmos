@@ -116,7 +116,7 @@ static int listen_on(const char *host, int port)
 static int tokenize(const char *model)
 {
   char err[TOKENIZER_ERR];
-  Gguf *g = gguf_create(model, err);
+  Gguf *g = gguf_header(model, err); /* the tokenizer: the first shard's metadata */
   Tokenizer *t = g ? tokenizer_create(g, err) : NULL;
   gguf_destroy(g);
   if (!t)
@@ -154,7 +154,7 @@ int main(int argc, char **argv)
   if (!config_read(cfg_path, &c, err))
     return die(err);
   snprintf(api.model, sizeof api.model, "osmos-%s", c.pack);
-  Gguf *g = gguf_create(c.model, err);
+  Gguf *g = gguf_header(c.model, err); /* the tokenizer alone: osmos-serve opens the model */
   api.tok = g ? tokenizer_create(g, err) : NULL;
   gguf_destroy(g);
   if (!api.tok)

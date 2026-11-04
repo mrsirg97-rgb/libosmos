@@ -64,6 +64,7 @@ typedef struct Gguf
 } Gguf;
 
 Gguf *gguf_create(const char *path, char err[GGUF_ERR]);
+Gguf *gguf_header(const char *path, char err[GGUF_ERR]);
 void gguf_destroy(Gguf *g);
 
 const GgufTensor *gguf_tensor(const Gguf *g, const char *name);
@@ -84,6 +85,11 @@ gguf_create
   length and offset is checked against the file's size, a string or array past the end, a tensor whose bytes leave its
   file, an unknown tensor type, a duplicate name or a shard missing refuses the whole model - NULL, the reason in
   `err` (file, offset, what). everything allocated on the way is released.
+
+gguf_header
+  one file alone, as gguf_create reads it: a split model's first shard without its siblings (none opened, none
+  required) - its metadata whole (the tokenizer's: tokenizer.h), its own tensors only. for what one file's header
+  holds; a model to run is gguf_create's.
 
 gguf_destroy
   the Gguf and everything it owns: names, keys, strings, arrays, paths. NULL is nothing to do.

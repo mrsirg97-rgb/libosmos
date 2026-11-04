@@ -21,7 +21,7 @@ int main(void)
   char path[512], err[GGUF_ERR], terr[TOKENIZER_ERR] = "";
   snprintf(path, sizeof path, "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf",
            getenv("HOME") ? getenv("HOME") : "");
-  Gguf *g = gguf_create(path, err);
+  Gguf *g = gguf_header(path, err);
   FILE *f = fopen("tests/fixtures/tokenizer.txt", "r");
   if (!g || !f)
   {
