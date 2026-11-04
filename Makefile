@@ -31,8 +31,8 @@ HIP_ARCH ?= gfx1151
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
 TESTS := $(patsubst $(TEST_DIR)/%.c, $(BIN_DIR)/%, $(wildcard $(TEST_DIR)/*.c))
 
-LIB := $(LIB_DIR)/libsubstrate.a
-HIP_LIB := $(LIB_DIR)/libsubstrate_hip.a
+LIB := $(LIB_DIR)/libosmos.a
+HIP_LIB := $(LIB_DIR)/libosmos_hip.a
 
 all: $(LIB)
 
@@ -48,6 +48,8 @@ $(OBJ_DIR)/cpu/%.o: override CFLAGS += -ffp-contract=off -mavx2 -mfma -mf16c -I$
 # test_cpu_q8's and test_cpu_lane's replays of lane.h's contract: their products each rounded, as the kernels'
 $(BIN_DIR)/test_cpu_q8: override CFLAGS += -ffp-contract=off -I$(KERNEL_DIR)
 $(BIN_DIR)/test_cpu_lane: override CFLAGS += -ffp-contract=off -I$(KERNEL_DIR)
+# test_qtype: the lane contract's ids (lane.h)
+$(BIN_DIR)/test_qtype: override CFLAGS += -I$(KERNEL_DIR)
 
 # the host code that calls the HIP runtime (hip_*.c): its headers
 $(HIP_OBJS): CFLAGS += -I$(ROCM)/include -D__HIP_PLATFORM_AMD__ -Isrc/run -I$(KERNEL_DIR)
@@ -63,7 +65,51 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
 	@mkdir -p $(OBJ_DIR)/tests/gpu
-	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -lhsa-runtime64 -o $@
+	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -o $@
+
+# the server (tools/serve): the engine over stdin / stdout, maya's serve protocol
+# --parallel's loop is libevt's (the operator's, C, MIT; DESIGN.md "the scheduler"): the submodule third_party/libevt
+# (git submodule update --init; LIBEVT=<dir> builds against another checkout)
+LIBEVT ?= third_party/libevt
+SERVE := $(BIN_DIR)/osmos-serve
+SERVE_OBJS := $(patsubst tools/serve/%.c,$(OBJ_DIR)/tools/serve/%.o,$(wildcard tools/serve/*.c))
+$(OBJ_DIR)/tools/serve/%.o: tools/serve/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -I$(LIBEVT)/include -c $< -o $@
+$(SERVE): $(SERVE_OBJS) $(LIB) $(HIP_LIB) $(LIBEVT)/lib/libevt.a
+	@mkdir -p $(dir $@)
+	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -losmos_hip -losmos $(LIBEVT)/lib/libevt.a -lhsa-runtime64 -lpthread \
+	  -o $@
+$(LIBEVT)/lib/libevt.a:
+	$(MAKE) -C $(LIBEVT)
+serve: $(SERVE)
+
+# osmos-api (tools/api): the engine as an OpenAI-compatible server - osmos-serve its child; host C only
+API := $(BIN_DIR)/osmos-api
+API_OBJS := $(patsubst tools/api/%.c,$(OBJ_DIR)/tools/api/%.o,$(wildcard tools/api/*.c))
+$(OBJ_DIR)/tools/api/%.o: tools/api/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -Isrc/text -c $< -o $@
+$(API): $(API_OBJS) $(LIB)
+	@mkdir -p $(dir $@)
+	$(CC) $(API_OBJS) -L$(LIB_DIR) -losmos $(LDLIBS) -o $@
+api: $(API)
+
+# osmos-api against a fake engine (tests/api: the protocol's, scripted)
+api-test: $(API)
+	python3 tests/api/test_api.py
+
+# requant_dspark (tools/requant): a drafter pack's experts requantized with ggml's quantizers (llama.cpp, MIT; its
+# libggml-base built beside this checkout: cmake -S . -B build-ggml ... --target ggml-base)
+GGML ?= ../llama.cpp
+REQUANT := $(BIN_DIR)/requant_dspark
+$(REQUANT): tools/requant/requant_dspark.c $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(GGML)/ggml/include $< $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a -lstdc++ -lm -lpthread -o $@
+requant: $(REQUANT)
+
+# the GPU's tests built, not run (CI: no gfx1151 there)
+gpu-build: $(GPU_TESTS) $(SERVE)
 
 # the GPU's tests (a gfx1151 and the model): exit 77 is a skip
 gpu-tests: $(GPU_TESTS)
@@ -73,7 +119,7 @@ gpu-tests: $(GPU_TESTS)
 	done
 
 $(BIN_DIR)/%: $(TEST_DIR)/%.c $(LIB) | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ_DIR)/tests/$*.d $< -L$(LIB_DIR) -lsubstrate $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -MF $(OBJ_DIR)/tests/$*.d $< -L$(LIB_DIR) -losmos $(LDLIBS) -o $@
 
 $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR):
 	mkdir -p $@
@@ -105,4 +151,4 @@ tsan:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=thread" LDLIBS="-lpthread -lm -fsanitize=thread" tests
 
-.PHONY: all clean tests asan tsan gpu-tests
+.PHONY: all clean tests asan tsan gpu-tests gpu-build serve requant api api-test

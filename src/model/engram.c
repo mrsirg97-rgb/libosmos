@@ -1,9 +1,10 @@
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/model/engram.h"
+#include "osmos/model/engram.h"
 
 
 struct Engram
@@ -47,6 +48,53 @@ static void *slurp(const GgufTensor *t, const int *fds)
   return p;
 }
 
+#define ARCH "deepseek41"
+
+/* a metadata list of n integers (any width) into memory of its own, as int64; `minus_first` each layer's `per`
+   values less that layer's first (llama.cpp's offsets count across the layers' tables; a layer's rows its own) */
+static int64_t *list(const Gguf *g, const char *key, size_t n, size_t per, bool minus_first, char *err)
+{
+  const GgufKv *kv = gguf_kv(g, key);
+  if (!kv || kv->type != GGUF_ARRAY || kv->n != n)
+    return fail(err, minus_first ? "ple.head_offsets: missing or not a column a layer"
+                                 : "a hash list (ple.*): missing or not its length"), NULL;
+  int64_t *v = malloc(n ? n * sizeof *v : 1);
+  if (!v)
+    return fail(err, "out of memory"), NULL;
+  for (size_t i = 0; i < n; i++)
+    if (!gguf_int(kv, i, &v[i]))
+    {
+      free(v);
+      return fail(err, "a hash list's value not an integer within int64"), NULL;
+    }
+  for (size_t i = n; minus_first && i-- > 0;)
+    v[i] -= v[i - i % per];
+  return v;
+}
+
+/* llama.cpp's form: the four tables the model's metadata (engram.token_map, ple.layer_multipliers,
+   ple.head_vocab_sizes, ple.head_offsets) */
+static bool from_meta(Engram *e, const Weights *w, char *err)
+{
+  const GgufKv *map = gguf_kv(w->model, ARCH ".engram.token_map");
+  if (!map || map->type != GGUF_ARRAY || map->n != (uint64_t)w->geo.n_vocab)
+    return fail(err, "engram.token_map: missing, or not an entry a token");
+  e->vocab = map->n;
+  if (!(e->map = malloc(e->vocab * sizeof *e->map)))
+    return fail(err, "out of memory");
+  for (uint64_t i = 0; i < e->vocab; i++)
+  {
+    int64_t v;
+    if (!gguf_int(map, i, &v) || v < INT32_MIN || v > INT32_MAX)
+      return fail(err, "engram.token_map: an entry not an int32");
+    e->map[i] = (int32_t)v;
+  }
+  const size_t L = (size_t)e->n_layers, cols = (size_t)e->cols;
+  return (e->mult = list(w->model, ARCH ".ple.layer_multipliers", L * (size_t)e->ngram, 1, false, err)) &&
+         (e->primes = list(w->model, ARCH ".ple.head_vocab_sizes", L * cols, 1, false, err)) &&
+         (e->off = list(w->model, ARCH ".ple.head_offsets", L * cols, cols, true, err));
+}
+
 static bool check(const Engram *e, const Geometry *g, char *err)
 {
   for (uint64_t i = 0; i < e->vocab; i++)
@@ -84,11 +132,18 @@ Engram *engram_create(const Weights *w, const int *fds, char err[ENGRAM_ERR])
   e->ngram = g->engram_max_ngram;
   e->heads = g->engram_heads;
   e->cols = g->engram_cols;
-  e->vocab = w->eg_token_map->dims[0];
   e->compressed = g->engram_vocab;
   bool ok = e->ngram <= ENGRAM_MAX_NGRAM || fail(err, "an n-gram longer than this build hashes");
-  ok = ok && (e->map = slurp(w->eg_token_map, fds)) && (e->mult = slurp(w->eg_multipliers, fds)) &&
-       (e->primes = slurp(w->eg_primes, fds)) && (e->off = slurp(w->eg_offsets, fds));
+  if (ok && g->engram_own)
+    ok = from_meta(e, w, err);
+  else if (ok)
+  {
+    e->vocab = w->eg_token_map->dims[0];
+    ok = (e->map = slurp(w->eg_token_map, fds)) && (e->mult = slurp(w->eg_multipliers, fds)) &&
+         (e->primes = slurp(w->eg_primes, fds)) && (e->off = slurp(w->eg_offsets, fds));
+  }
+  for (uint64_t i = 0; ok && !g->engram_vocab && i < e->vocab; i++) /* none named: the map's greatest entry + 1 */
+    e->compressed = e->map[i] >= e->compressed ? (int64_t)e->map[i] + 1 : e->compressed;
   if (ok && (uint64_t)g->engram_pad >= e->vocab)
     ok = fail(err, "the pad token past the map");
   if (ok)

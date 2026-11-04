@@ -1,12 +1,15 @@
-// ops (include/substrate/gpu/ops.h): the attention's keys - the compressor, the indexer's scores and its top k
+// ops (include/osmos/gpu/ops.h): the attention's keys - the compressor, the indexer's scores and its top k
 // (sparse_attn.hip the attention itself) - each as ref.py computes it, in F32, reductions in a fixed order
 #include <cmath>
 #include <cstdint>
 
 #include <hip/hip_runtime.h>
 
+#include "kvload.h"
+
 extern "C" {
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/ops.h"
 }
 
 namespace {
@@ -47,7 +50,8 @@ __global__ void compress_kernel(const float* kvc, const float* sc, uint32_t slot
 
 // token t's row into dst: every 1, at row pos % slots; every r, only a token completing a row of r, at row
 // ((pos + 1) / r - 1) % slots
-__global__ void put_rows_kernel(float* dst, uint32_t slots, const float* src, const int32_t* pos, uint32_t every,
+// a row's 4-byte words (F32 values, or a packed row's bytes: kvfmt.h's rows are whole words)
+__global__ void put_rows_kernel(uint32_t* dst, uint32_t slots, const uint32_t* src, const int32_t* pos, uint32_t every,
                                 uint32_t dim) {
   const uint32_t t = blockIdx.y, p1 = (uint32_t) pos[t] + 1;
   if (p1 % every) return;
@@ -72,7 +76,7 @@ constexpr int kIxHeads = 32, kIxTok = 2, kIxRows = 64, kIxR = 8, kIxC = 4, kIxSt
 constexpr int kIxM = kIxHeads * kIxTok, kIxThreads = (kIxM / kIxR) * (kIxRows / kIxC);
 typedef float f4 __attribute__((ext_vector_type(4)));
 __global__ __launch_bounds__(kIxThreads) void index_score_kernel(const float* __restrict__ q,
-                                                                  const float* __restrict__ keys,
+                                                                  const uint8_t* __restrict__ keys, uint32_t kfmt,
                                                                   const float* __restrict__ w,
                                                                   const int32_t* __restrict__ pos, uint32_t ratio,
                                                                   uint32_t heads, uint32_t hd, uint32_t n_tok,
@@ -90,7 +94,7 @@ __global__ __launch_bounds__(kIxThreads) void index_score_kernel(const float* __
   if (c0 >= n_hi) return;  // the whole block
   const int tx = threadIdx.x % TX, ty = threadIdx.x / TX;
   const float* qp[QL];
-  const float* kp[KL];
+  const uint8_t* kp[KL];  // a key row (kvfmt.h's, kfmt), read as kvload.h reads it
   int qi[QL], qd[QL], ki[KL], kd[KL];  // a load's slot (or row) and d in the stage
   for (int j = 0; j < QL; j++) {
     const int i = threadIdx.x + j * kIxThreads;
@@ -101,22 +105,25 @@ __global__ __launch_bounds__(kIxThreads) void index_score_kernel(const float* __
   for (int j = 0; j < KL; j++) {
     const int i = threadIdx.x + j * kIxThreads;
     ki[j] = i / (KS / 4), kd[j] = i % (KS / 4) * 4;
-    kp[j] = c0 + ki[j] < n_hi ? keys + (uint64_t) (c0 + ki[j]) * hd + kd[j] : nullptr;
+    kp[j] = c0 + ki[j] < n_hi ? keys + (uint64_t) (c0 + ki[j]) * kv_row_bytes((KvFmt) kfmt, hd) : nullptr;
   }
-  f4 qn[QL], kn[KL];
+  f4 qn[QL];
+  kv::Raw kn[KL];  // the keys' bytes in flight, decoded when staged
   for (int j = 0; j < QL; j++) qn[j] = qp[j] ? *(const f4*) qp[j] : f4{};
-  for (int j = 0; j < KL; j++) kn[j] = kp[j] ? *(const f4*) kp[j] : f4{};
+  for (int j = 0; j < KL; j++) kn[j] = kp[j] ? kv::fetch4(kfmt, kp[j], hd, kd[j]) : kv::Raw{};
   f4 acc[kIxR][G] = {};
   for (uint32_t d0 = 0; d0 < hd; d0 += KS) {
     __syncthreads();
     for (int j = 0; j < QL; j++)
       for (int e = 0; e < 4; e++) qs[qd[j] + e][qi[j]] = qn[j][e];
-    for (int j = 0; j < KL; j++)
-      for (int e = 0; e < 4; e++) ks[kd[j] + e][ki[j]] = kn[j][e];
+    for (int j = 0; j < KL; j++) {
+      const f4 kj = kp[j] ? kv::decode4(kfmt, kn[j]) : f4{};
+      for (int e = 0; e < 4; e++) ks[kd[j] + e][ki[j]] = kj[e];
+    }
     __syncthreads();
     if (d0 + KS < hd) {
       for (int j = 0; j < QL; j++) qn[j] = qp[j] ? *(const f4*) (qp[j] + d0 + KS) : f4{};
-      for (int j = 0; j < KL; j++) kn[j] = kp[j] ? *(const f4*) (kp[j] + d0 + KS) : f4{};
+      for (int j = 0; j < KL; j++) kn[j] = kp[j] ? kv::fetch4(kfmt, kp[j], hd, kd[j] + d0 + KS) : kv::Raw{};
     }
 #pragma unroll
     for (int d = 0; d < KS; d++) {
@@ -158,18 +165,55 @@ __device__ inline uint32_t order(float f) {
   return (u & 0x80000000u) ? ~u : u | 0x80000000u;
 }
 
-// a token's k highest of score[0 .. n) (ties to the lower row), their rows ascending into sel, how many into n_sel. a
-// block a token: radix select of the k-th key (8 bits a pass, integer counts), then a compaction in row order
-__global__ void topk_kernel(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t k,
-                            int32_t* sel, uint32_t sel_stride, int32_t* n_sel) {
+// what a selection ranks: a token's rows by score (a row outside the kept blocks -inf: ops_topk under the candidate
+// mask), or its blocks of rows by their highest score, its last block highest of all (ops_cand_blocks)
+struct Pick {
+  const float* score;
+  uint32_t n;             // the rows visible
+  const uint32_t* keep;   // the kept blocks' bits (rows; NULL: none masked)
+  uint32_t block;
+  template <bool BLOCKS> __device__ uint32_t count() const { return BLOCKS ? (n + block - 1) / block : n; }
+  template <bool BLOCKS> __device__ uint32_t key(uint32_t i) const {
+    if constexpr (BLOCKS) {
+      if (i + 1 == count<true>()) return order(INFINITY);
+      float m = -INFINITY;
+      for (uint32_t c = i * block, e = c + block < n ? c + block : n; c < e; c++) m = fmaxf(m, score[c]);
+      return order(m);
+    } else {
+      const uint32_t j = i / block;
+      return keep && !((keep[j / 32] >> (j % 32)) & 1u) ? order(-INFINITY) : order(score[i]);
+    }
+  }
+};
+
+// a token's k highest of a Pick's items (ties to the lower index): rows ascending into sel and their count into n_sel,
+// or blocks as bits into bits. a block a token: radix select of the k-th key (8 bits a pass, integer counts), then a
+// compaction in index order
+template <bool BLOCKS>
+__global__ void select_kernel(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t k,
+                              const uint32_t* keep, uint32_t block, uint32_t keep_words, int32_t* sel,
+                              uint32_t sel_stride, int32_t* n_sel, uint32_t* bits) {
   __shared__ uint32_t hist[kBins];
   __shared__ uint32_t prefix, mask, need;
   __shared__ uint32_t cnt_hi[kSelectThreads], cnt_eq[kSelectThreads];
-  const uint32_t tid = threadIdx.x, t = blockIdx.x, n = visible(pos, t, ratio);
-  score += (uint64_t) t * stride, sel += (uint64_t) t * sel_stride, n_sel += t;
-  if (n <= k) {  // every row
-    for (uint32_t c = tid; c < n; c += kSelectThreads) sel[c] = (int32_t) c;
-    if (tid == 0) *n_sel = (int32_t) n;
+  const uint32_t tid = threadIdx.x, t = blockIdx.x;
+  const Pick p = {score + (uint64_t) t * stride, visible(pos, t, ratio), keep ? keep + (uint64_t) t * keep_words : nullptr,
+                  block};
+  const uint32_t n = p.count<BLOCKS>();
+  if constexpr (BLOCKS) {
+    bits += (uint64_t) t * keep_words;
+    for (uint32_t w = tid; w < keep_words; w += kSelectThreads) bits[w] = 0;
+    __syncthreads();
+  } else {
+    sel += (uint64_t) t * sel_stride, n_sel += t;
+  }
+  const auto take = [&](uint32_t i) {
+    if constexpr (BLOCKS) atomicOr(&bits[i / 32], 1u << (i % 32));
+    else sel[i] = (int32_t) i;
+  };
+  if (n <= k) {  // every one
+    for (uint32_t c = tid; c < n; c += kSelectThreads) take(c);
+    if (!BLOCKS && tid == 0) *n_sel = (int32_t) n;
     return;
   }
   if (tid == 0) prefix = 0, mask = 0, need = k;
@@ -178,7 +222,7 @@ __global__ void topk_kernel(const float* score, uint32_t stride, const int32_t* 
     for (uint32_t b = tid; b < kBins; b += kSelectThreads) hist[b] = 0;
     __syncthreads();
     for (uint32_t c = tid; c < n; c += kSelectThreads) {
-      const uint32_t u = order(score[c]);
+      const uint32_t u = p.key<BLOCKS>(c);
       if ((u & mask) == prefix) atomicAdd(&hist[(u >> shift) & (kBins - 1)], 1u);
     }
     __syncthreads();
@@ -196,30 +240,34 @@ __global__ void topk_kernel(const float* score, uint32_t stride, const int32_t* 
     }
     __syncthreads();
   }
-  const uint32_t kth = prefix;  // the k-th highest key; `need` of the rows equal to it to take
+  const uint32_t kth = prefix;  // the k-th highest key; `need` of the ones equal to it to take
   const uint32_t per = (n + kSelectThreads - 1) / kSelectThreads, lo = tid * per, hi = lo + per < n ? lo + per : n;
   uint32_t h_ = 0, e_ = 0;
   for (uint32_t c = lo; c < hi; c++) {
-    const uint32_t u = order(score[c]);
+    const uint32_t u = p.key<BLOCKS>(c);
     h_ += u > kth, e_ += u == kth;
   }
   cnt_hi[tid] = h_, cnt_eq[tid] = e_;
   __syncthreads();
-  if (tid == 0) {  // exclusive prefixes, in row order: the equal ones taken lowest rows first
+  if (tid == 0) {  // exclusive prefixes, in index order: the equal ones taken lowest first
     uint32_t ah = 0, ae = 0;
     for (uint32_t i = 0; i < kSelectThreads; i++) {
       const uint32_t th = cnt_hi[i], te = cnt_eq[i];
       cnt_hi[i] = ah, cnt_eq[i] = ae;
       ah += th, ae += te;
     }
-    *n_sel = (int32_t) k;
+    if (!BLOCKS) *n_sel = (int32_t) k;
   }
   __syncthreads();
   uint32_t out = cnt_hi[tid] + (cnt_eq[tid] < need ? cnt_eq[tid] : need), eq = cnt_eq[tid];
   for (uint32_t c = lo; c < hi; c++) {
-    const uint32_t u = order(score[c]);
-    if (u > kth || (u == kth && eq++ < need)) sel[out++] = (int32_t) c;
+    const uint32_t u = p.key<BLOCKS>(c);
+    if (u > kth || (u == kth && eq++ < need)) {
+      if constexpr (BLOCKS) atomicOr(&bits[c / 32], 1u << (c % 32));
+      else sel[out++] = (int32_t) c;
+    }
   }
+  (void) out;
 }
 
 }  // namespace
@@ -232,27 +280,44 @@ extern "C" bool ops_compress(const float* kvc, const float* sc, uint32_t slots, 
   return ok();
 }
 
-extern "C" bool ops_put_rows(float* dst, uint32_t slots, const float* src, const int32_t* pos, uint32_t every,
-                             uint32_t dim, uint32_t n_tok, void* stream) {
-  if (!slots || !every || !dim || !n_tok) return false;
-  put_rows_kernel<<<dim3((dim + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(dst, slots, src, pos,
-                                                                                              every, dim);
+extern "C" bool ops_put_rows(void* dst, uint32_t slots, const void* src, const int32_t* pos, uint32_t every,
+                             uint32_t fmt, uint32_t vals, uint32_t n_tok, void* stream) {
+  if (!slots || !every || !vals || !n_tok || fmt > KV_FP4_POW2 || vals % kv_block((KvFmt) fmt)) return false;
+  const uint64_t row_bytes = kv_row_bytes((KvFmt) fmt, vals);
+  if (row_bytes % 4) return false;
+  const uint32_t dim = (uint32_t) (row_bytes / 4);
+  put_rows_kernel<<<dim3((dim + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(
+      (uint32_t*) dst, slots, (const uint32_t*) src, pos, every, dim);
   return ok();
 }
 
-extern "C" bool ops_index_score(const float* q, const float* keys, const float* w, const int32_t* pos, uint32_t ratio,
-                                uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float* score,
-                                uint32_t stride, void* stream) {
+extern "C" bool ops_index_score(const float* q, const void* keys, uint32_t keys_fmt, const float* w, const int32_t* pos,
+                                uint32_t ratio, uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok,
+                                float* score, uint32_t stride, void* stream) {
   if (!ratio || !max_n || max_n > stride || !heads || heads > (uint32_t) kWave || !head_dim || !n_tok) return false;
-  if (head_dim % kIxStep) return false;
+  if (head_dim % kIxStep || keys_fmt > KV_FP4_POW2 || head_dim % kv_block((KvFmt) keys_fmt)) return false;
   index_score_kernel<<<dim3((max_n + kIxRows - 1) / kIxRows, (n_tok + kIxTok - 1) / kIxTok), kIxThreads, 0,
-                       st(stream)>>>(q, keys, w, pos, ratio, heads, head_dim, n_tok, score, stride);
+                       st(stream)>>>(q, (const uint8_t*) keys, keys_fmt, w, pos, ratio, heads, head_dim, n_tok, score,
+                                     stride);
   return ok();
 }
 
 extern "C" bool ops_topk(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t k,
-                         uint32_t n_tok, int32_t* sel, uint32_t sel_stride, int32_t* n_sel, void* stream) {
-  if (!ratio || !k || k > OPS_MAX_SELECT || k > sel_stride || !n_tok) return false;
-  topk_kernel<<<n_tok, kSelectThreads, 0, st(stream)>>>(score, stride, pos, ratio, k, sel, sel_stride, n_sel);
+                         const uint32_t* keep, uint32_t block, uint32_t keep_words, uint32_t n_tok, int32_t* sel,
+                         uint32_t sel_stride, int32_t* n_sel, void* stream) {
+  if (!ratio || !k || k > OPS_MAX_SELECT || k > sel_stride || !n_tok ||
+      (keep && (!block || keep_words < (stride / block + 31) / 32)))
+    return false;
+  select_kernel<false><<<n_tok, kSelectThreads, 0, st(stream)>>>(score, stride, pos, ratio, k, keep, block ? block : 1,
+                                                                  keep_words, sel, sel_stride, n_sel, nullptr);
+  return ok();
+}
+
+extern "C" bool ops_cand_blocks(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t block,
+                                uint32_t topk_blocks, uint32_t n_tok, uint32_t* keep, uint32_t keep_words, void* stream) {
+  if (!ratio || !block || !topk_blocks || !n_tok || !keep || keep_words < ((stride + block - 1) / block + 31) / 32)
+    return false;
+  select_kernel<true><<<n_tok, kSelectThreads, 0, st(stream)>>>(score, stride, pos, ratio, topk_blocks, nullptr, block,
+                                                                 keep_words, nullptr, 0, nullptr, keep);
   return ok();
 }

@@ -1,8 +1,8 @@
-// quant_dequant (include/substrate/gpu/quant.h): a thread an 8-value chunk
+// quant_dequant (include/osmos/gpu/quant.h): a thread an 8-value chunk
 #include "quant.h"
 
 extern "C" {
-#include "substrate/gpu/quant.h"
+#include "osmos/gpu/quant.h"
 }
 
 namespace {
@@ -93,13 +93,7 @@ extern "C" bool quant_repack_q5k(const void* src, uint32_t rows, uint32_t cols, 
   return hipGetLastError() == hipSuccess;
 }
 
-extern "C" bool quant_known(uint32_t type) {
-  switch (type) {
-    case quant::kQ8_0: case quant::kQ5_K: case quant::kQ6_K: case quant::kIQ2_XXS: case quant::kIQ2_XS:
-    case quant::kIQ4_NL: case quant::kIQ1_M: case quant::kBF16: case quant::kMXFP4: return true;
-    default: return false;
-  }
-}
+extern "C" bool quant_known(uint32_t type) { return qtype_paths(type) & QTYPE_DECODE; }
 
 extern "C" bool quant_dequant(uint32_t type, const void* src, uint64_t values, float* dst, void* stream) {
   const hipStream_t s = (hipStream_t) stream;
@@ -111,8 +105,11 @@ extern "C" bool quant_dequant(uint32_t type, const void* src, uint64_t values, f
     case quant::kIQ2_XS: return launch<quant::kIQ2_XS>(src, values, dst, s);
     case quant::kIQ4_NL: return launch<quant::kIQ4_NL>(src, values, dst, s);
     case quant::kIQ1_M: return launch<quant::kIQ1_M>(src, values, dst, s);
+    case quant::kIQ1_S: return launch<quant::kIQ1_S>(src, values, dst, s);
+    case quant::kIQ2_S: return launch<quant::kIQ2_S>(src, values, dst, s);
     case quant::kBF16: return launch<quant::kBF16>(src, values, dst, s);
     case quant::kMXFP4: return launch<quant::kMXFP4>(src, values, dst, s);
+    case quant::kMXFP8: return launch<quant::kMXFP8>(src, values, dst, s);
     default: return false;
   }
 }
@@ -122,7 +119,7 @@ extern "C" bool quant_dequant_f16(uint32_t type, const void* src, uint64_t value
   switch (type) {
 #define H(t) \
   case quant::t: return launch_h<quant::t>(src, values, dst, s);
-    H(kQ8_0) H(kQ5_K) H(kQ6_K) H(kIQ2_XXS) H(kIQ2_XS) H(kIQ4_NL) H(kIQ1_M) H(kBF16) H(kMXFP4)
+    H(kQ8_0) H(kQ5_K) H(kQ6_K) H(kIQ2_XXS) H(kIQ2_XS) H(kIQ4_NL) H(kIQ1_M) H(kBF16) H(kMXFP4) H(kMXFP8) H(kIQ1_S) H(kIQ2_S)
 #undef H
     default: return false;
   }

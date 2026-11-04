@@ -2,9 +2,9 @@
 #define DRAFTER_IMPL_H
 
 #include "forward_impl.h"
-#include "substrate/gpu/quant.h"
-#include "substrate/model/dspark.h"
-#include "substrate/run/drafter.h"
+#include "osmos/gpu/quant.h"
+#include "osmos/model/dspark.h"
+#include "osmos/run/drafter.h"
 
 #define DRAFTER_BLOCKS 3          /* mtp.0 .. mtp.2 */
 #define DRAFTER_EXPERTS 128       /* a block's routed experts */
@@ -41,6 +41,7 @@ typedef struct DPin
 struct Drafter
 {
   Forward *f;
+  uint32_t ex_type; /* the routed experts' type, every one's (dspark.json's: MXFP4 as packed, or requantized) */
   DsparkIndex *ix;
   int fd;
   Resident *res;
@@ -52,6 +53,7 @@ struct Drafter
   float *h, *mid, *x, *qa, *q, *kv, *o, *oa, *y, *xf, *logits, *rw, *ga, *up, *hh, *ye, *moe, *sga, *sup, *shh,
       *sye, *hcp, *a_pre, *a_post, *a_comb, *f_pre, *f_post, *f_comb, *pre0, *att, *xc, *xn, *vocab, *mk, *cat,
       *cval, *main_x, *kvs;
+  uint8_t *kvs_p; /* those rows packed as the ring keeps them (kvfmt.h's KV_FP8) */
   int32_t *ridx, *sel, *n_sel, *pos_q, *pos_a, *ids, *pair, *tap_pos;
   const void **tab; /* [w1, w3, w2][pair]: a round's picks' pointers (gathered on the device) */
   DPin *pin;

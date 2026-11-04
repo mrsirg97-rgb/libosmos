@@ -6,7 +6,8 @@
 #include <unistd.h>
 
 #include "drafter_impl.h"
-#include "substrate/mem/hip_slots.h"
+#include "osmos/model/qtype.h"
+#include "osmos/mem/hip_slots.h"
 
 /* the drafter: its weights in GPU memory of their own, its rings from the trunk's taps, a round's head (hip_drafter.c)
    behind its blocks (hip_drafter_round.c) */
@@ -72,8 +73,12 @@ static bool block(Drafter *d, int b)
     for (int e = 0; ok && e < DRAFTER_EXPERTS; e++)
     {
       char n[DSPARK_NAME_MAX];
+      uint32_t type = 0;
       snprintf(n, sizeof n, "ffn.experts.%d.%s.weight", e, role[r]);
-      ok = (host[e] = dev(d, b, n, NULL)) != NULL;
+      ok = (host[e] = dev(d, b, n, &type)) != NULL;
+      if (ok && !d->ex_type) /* the first expert's type: every one's (one matvec a role) */
+        d->ex_type = type;
+      ok = ok && type == d->ex_type && (qtype_paths(type) & QTYPE_MV);
     }
     ok = ok && fwd_alloc(&k->ex[r], sizeof host) && fwd_put(k->ex[r], host, sizeof host);
   }
@@ -109,6 +114,7 @@ static bool scratch(Drafter *d)
       {&d->att, OPS_ATTN_SCRATCH(T, g->n_heads, (uint64_t)g->window + T) * F}, {&d->xc, T * D * F},
       {&d->xn, T * D * F}, {&d->vocab, T * V * F}, {&d->mk, V * F}, {&d->cat, (D + d->rank) * F},
       {&d->cval, F}, {&d->main_x, (uint64_t)FWD_MAX_BATCH * D * F}, {&d->kvs, (uint64_t)FWD_MAX_BATCH * hd * F},
+      {&d->kvs_p, (uint64_t)FWD_MAX_BATCH * kv_row_bytes(KV_FP8, hd)},
       {&d->ridx, P * 4}, {&d->sel, T * OPS_MAX_SELECT * 4}, {&d->n_sel, T * 4}, {&d->pos_q, T * 4},
       {&d->pos_a, T * 4}, {&d->ids, T * 4}, {&d->pair, P * 4}, {&d->tap_pos, FWD_MAX_BATCH * 4},
       {&d->tab, 3 * P * sizeof(void *)},
@@ -133,6 +139,27 @@ static bool scratch(Drafter *d)
          hipHostMalloc((void **)&d->pin, sizeof *d->pin + V * F, 0) == hipSuccess;
 }
 
+/* the trunk's layers the drafter taps: the model's GGUF's where it names them, else dspark.json's; both named, equal */
+static bool targets(const Forward *f, const DsparkIndex *ix, bool *at, char *err)
+{
+  bool any = false, theirs[WEIGHTS_MAX_LAYERS] = {false};
+  for (int l = 0; l < f->n_layers; l++)
+    any |= (at[l] = f->g->dspark_target[l]);
+  for (uint32_t i = 0; i < ix->n_targets; i++)
+  {
+    if (ix->targets[i] >= (uint32_t)f->n_layers)
+      return fail(err, "dspark.json: a target layer past the model's");
+    theirs[ix->targets[i]] = true;
+  }
+  if (any && ix->n_targets && memcmp(at, theirs, (size_t)f->n_layers * sizeof *at) != 0)
+    return fail(err, "the model's DSpark target layers and dspark.json's differ");
+  if (!any && !ix->n_targets)
+    return fail(err, "no DSpark target layers: neither the model's GGUF nor dspark.json names them");
+  if (!any)
+    memcpy(at, theirs, (size_t)f->n_layers * sizeof *at);
+  return true;
+}
+
 Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
 {
   Drafter *d = f ? calloc(1, sizeof *d) : NULL;
@@ -150,7 +177,9 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
   free(u);
   const DsparkTensor *mk = ok ? dspark_tensor(d->ix, "mtp.2.markov_head.embed.weight") : NULL;
   const DsparkTensor *mp = ok ? dspark_tensor(d->ix, "mtp.0.main_proj.weight") : NULL;
-  ok = ok && ((mk && mp && fwd_taps_on(f) && mp->dims[1] == (uint64_t)f->n_tap * f->g->n_embd) ||
+  bool at[WEIGHTS_MAX_LAYERS] = {false};
+  ok = ok && targets(f, d->ix, at, err);
+  ok = ok && ((mk && mp && fwd_taps_on(f, at) && mp->dims[1] == (uint64_t)f->n_tap * f->g->n_embd) ||
               fail(err, "a drafter whose taps are not the model's target layers'"));
   if (ok)
   {
@@ -163,8 +192,9 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
          fail(err, "a drafter without its heads");
   }
   for (int b = 0; ok && b < DRAFTER_BLOCKS; b++)
-    ok = block(d, b) || fail(err, "a drafter block's weights missing, or GPU memory refused");
-  ok = ok && (scratch(d) || fail(err, "GPU memory refused"));
+    ok = block(d, b) || fail(err, "a drafter block's weights missing, its experts of mixed types or of a type the matvec "
+                              "does not take, or GPU memory refused");
+  ok = ok && (scratch(d) || fail(err, "GPU memory refused")) && fwd_room_left(f, err);
   if (!ok)
   {
     drafter_destroy(d);
@@ -191,6 +221,7 @@ void drafter_destroy(Drafter *d)
                     &d->vocab, &d->mk, &d->cat, &d->cval, &d->main_x, &d->kvs};
   for (size_t i = 0; i < sizeof bufs / sizeof *bufs; i++)
     hipFree(*bufs[i]);
+  hipFree(d->kvs_p);
   int32_t **ibufs[] = {&d->ridx, &d->sel, &d->n_sel, &d->pos_q, &d->pos_a, &d->ids, &d->pair, &d->tap_pos};
   for (size_t i = 0; i < sizeof ibufs / sizeof *ibufs; i++)
     hipFree(*ibufs[i]);
@@ -210,6 +241,7 @@ static bool seed_run(Drafter *d, Seq *s, uint32_t i0, uint32_t n)
   Forward *f = d->f;
   const Geometry *g = f->g;
   const uint32_t D = g->n_embd, hd = g->head_dim, W = (uint32_t)g->window, nt = (uint32_t)f->n_tap * D;
+  const uint32_t rb = (uint32_t)kv_row_bytes(KV_FP8, hd); /* its rings' rows as the trunk's (kvfmt.h) */
   memcpy(d->pin->tap_pos, f->tap_pos + i0, n * sizeof *f->tap_pos);
   bool ok = fwd_put_async(d->tap_pos, d->pin->tap_pos, n * 4) &&
             mv_strided(d->main_type, d->main_proj, D, nt, f->taps + (uint64_t)i0 * nt, nt, n, d->main_x, D, NULL) &&
@@ -218,8 +250,8 @@ static bool seed_run(Drafter *d, Seq *s, uint32_t i0, uint32_t n)
     ok = mv_strided(DRAFTER_Q8_0, d->b[b].wkv, hd, D, d->main_x, D, n, d->kvs, hd, NULL) &&
          ops_rms(d->kvs, hd, hd, d->b[b].kv_norm, g->rms_eps, n, d->kvs, hd, NULL) &&
          ops_rope(d->kvs, 1, hd, g->rope_dim, hd, f->freqs_win, d->tap_pos, false, n, NULL) &&
-         ops_fp8_round(d->kvs, (uint64_t)n * hd, NULL) &&
-         ops_put_rows(s->dring + (uint64_t)b * W * hd, W, d->kvs, d->tap_pos, 1, hd, n, NULL);
+         ops_fp8_round(d->kvs, (uint64_t)n * hd, d->kvs_p, hd, NULL) &&
+         ops_put_rows(s->dring + (uint64_t)b * W * rb, W, d->kvs_p, d->tap_pos, 1, KV_FP8, hd, n, NULL);
   /* the pinned positions are read by the copy before the next seed writes them: the stream in order, and the next
      seed's memcpy is the host's - wait for this one's copy */
   return ok && hipStreamSynchronize(NULL) == hipSuccess;
@@ -232,7 +264,7 @@ bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[FORWARD
     return fail(err, "no drafter, or a sequence of another forward");
   const Geometry *g = f->g;
   const uint32_t W = (uint32_t)g->window, hd = g->head_dim;
-  if (!s->dring && !fwd_alloc(&s->dring, (uint64_t)DRAFTER_BLOCKS * W * hd * sizeof(float)))
+  if (!s->dring && !fwd_alloc(&s->dring, (uint64_t)DRAFTER_BLOCKS * W * kv_row_bytes(KV_FP8, hd)))
     return fail(err, "GPU memory refused (the drafter's rings)");
   if (to - from > (int32_t)W) /* only the window's last positions stay in the ring */
     from = to - (int32_t)W;

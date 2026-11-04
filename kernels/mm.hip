@@ -1,11 +1,11 @@
-// mm (include/substrate/gpu/mm.h): the kernel is mm.h's
+// mm (include/osmos/gpu/mm.h): the kernel is mm.h's
 #include <cmath>
 
 #include "mm.h"
 #include "round.h"
 
 extern "C" {
-#include "substrate/gpu/mm.h"
+#include "osmos/gpu/mm.h"
 }
 
 namespace {
@@ -22,12 +22,22 @@ constexpr int kThreads = 256;
 // prompt ~294 -> ~314 tok/s. the column tiles at 1024 tokens (4096 x 4096, the tiled x16): 8 for all but Q8_0, whose
 // 4 is 1.30 ms to 8's 1.62
 template <quant::Type T> struct Tuned { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 8; };
+// a short row's shape (fewer than kShortCols columns): a type's own where measured, else S. a matrix's shape is its
+// type's and its columns' alone, never its tokens' - the same sums at every count. Q6_K's (unsloth's UD: q_b's 1,280
+// columns, 2026-11-03, test_mm_gpu): 8 waves of 64-value slabs 170.8 -> 197.0 GB/s at a token, its error 1.6 ->
+// 1.4 u|wx| (4 waves of 128: 200.0 GB/s, but 2.9 u|wx| - a wave's longer run); its long rows keep 128 x 8 (out_b's
+// 8,192 columns: 202.4 GB/s against 144.1 at 64 x 8)
+constexpr uint32_t kShortCols = 2048;
+template <quant::Type T> struct Short { using S = typename Tuned<T>::S; };
+template <> struct Short<quant::kQ6_K> { using S = mm::Shape<64, 8, 4>; };
 template <> struct Tuned<quant::kQ8_0> { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 4; };
 template <> struct Tuned<quant::kQ5_K> { using S = mm::Shape<32, 8, 2>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ5_KR> : Tuned<quant::kQ5_K> {};
 template <> struct Tuned<quant::kIQ1_M> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kIQ1_S> : Tuned<quant::kIQ1_M> {};   // not measured: the sibling's
+template <> struct Tuned<quant::kIQ2_S> : Tuned<quant::kIQ2_XS> {};  // not measured: the sibling's
 using mm::kF16Max;
 
 // a thread a value: to f16 (the rows past n zero)
@@ -121,9 +131,8 @@ struct Mats {
   uint32_t ys[2];
 };
 
-template <quant::Type T, int CT>
-bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
-  using S = typename Tuned<T>::S;
+template <quant::Type T, int CT, typename S>
+bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT), rows = m.rows[0] > m.rows[1] ? m.rows[0] : m.rows[1];
   mm::kernel<T, S, CT><<<dim3(rows / mm::kTile, m.w[1] ? 2 : 1, z), mm::kWave * S::kWaves, 0, s>>>(
       (const uint8_t*) m.w[0], (const uint8_t*) m.w[1], m.rows[0], m.rows[1], cols, (const _Float16*) x16, n, m.y[0],
@@ -131,12 +140,19 @@ bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStr
   return hipGetLastError() == hipSuccess;
 }
 
+template <quant::Type T, int CT>
+bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
+  return cols < kShortCols ? launch_shape<T, CT, typename Short<T>::S>(m, cols, x16, n, s)
+                           : launch_shape<T, CT, typename Tuned<T>::S>(m, cols, x16, n, s);
+}
+
+
 template <quant::Type T>
 bool launch(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
-  using S = typename Tuned<T>::S;
   for (int i = 0; i < (m.w[1] ? 2 : 1); i++)
     if (m.rows[i] % mm::kTile || (n > 1 && m.ys[i] < m.rows[i])) return false;
-  if (cols % quant::Block<T>::values || cols % S::kSlab) return false;
+  const int slab = cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  if (cols % quant::Block<T>::values || cols % slab) return false;
   switch (col_tiles<T>(n)) {
     case 1: return launch_ct<T, 1>(m, cols, x16, n, s);
     case 2: return launch_ct<T, 2>(m, cols, x16, n, s);
@@ -155,25 +171,23 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
     case quant::kIQ1_M: return launch<quant::kIQ1_M>(m, cols, x16, n, s);
     case quant::kIQ2_XXS: return launch<quant::kIQ2_XXS>(m, cols, x16, n, s);
     case quant::kIQ2_XS: return launch<quant::kIQ2_XS>(m, cols, x16, n, s);
+    case quant::kIQ1_S: return launch<quant::kIQ1_S>(m, cols, x16, n, s);
+    case quant::kIQ2_S: return launch<quant::kIQ2_S>(m, cols, x16, n, s);
     default: return false;
   }
 }
 
 }  // namespace
 
-extern "C" bool mm_known(uint32_t type) {
-  switch (type) {
-    case quant::kQ8_0: case quant::kQ5_K: case quant::kQ5_KR: case quant::kQ6_K: case quant::kIQ1_M:
-    case quant::kIQ2_XXS: case quant::kIQ2_XS: return true;
-    default: return false;
-  }
-}
+// the table's types, and the repacked Q5_K the forward makes at load (no file's type: no row)
+extern "C" bool mm_known(uint32_t type) { return type == quant::kQ5_KR || (qtype_paths(type) & QTYPE_MM); }
 
 extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
   switch (type) {
 #define TILES(t) \
   case quant::t: return col_tiles<quant::t>(n);
-    TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS)
+    TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS) TILES(kIQ1_S)
+    TILES(kIQ2_S)
 #undef TILES
     default: return 0;
   }
@@ -231,7 +245,8 @@ extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt
 #define GROUP(t)                                                                                                     \
   case quant::t:                                                                                                     \
     return group_launch<quant::t>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS)
+    GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS) GROUP(kIQ1_S)
+    GROUP(kIQ2_S)
 #undef GROUP
     default: return false;
   }

@@ -7,13 +7,15 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
-#include "substrate/mem/hip_slots.h"
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/ops.h"
-#include "substrate/model/rope.h"
+#include "osmos/mem/hip_slots.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/ops.h"
+#include "osmos/model/qtype.h"
+#include "osmos/model/rope.h"
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
-#define FWD_FETCH_THREADS 4 /* DESIGN.md, the fetcher: 4 workers read at the SSD's ceiling (6.85 GB/s) */
+#define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */
 #define FWD_ROW_THREADS 64  /* DESIGN.md, Engram's reads: 64 threads 832,000 random rows/s, 128 no more */
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
 _Static_assert(sizeof(LayerWeights) % sizeof(const GgufTensor *) == 0, "LayerWeights is its tensors and only them");
@@ -94,6 +96,8 @@ static size_t choose(Forward *f, const PoolUnit *ex, PoolUnit *res, size_t n_res
   Layout a = {0, 0, 0};
   for (size_t i = 0; i < n_res; i++)
     add(&a, unit_bytes(&res[i]));
+  if (!budget)
+    budget = f->budget = a.total; /* 0: the dense weights alone (forward_budget says what they took) */
   if (a.total > budget)
     return fwd_fail(err, "the layers' weights are more than the budget"), 0;
   uint32_t *order = malloc((size_t)f->n_layers * E * sizeof *order); /* [layer][rank]: the expert */
@@ -177,7 +181,7 @@ static bool repack_all(Forward *f, const GgufTensor *const *t_res, size_t n_t)
            quant_repack_q5k(stage, (uint32_t)((hi - lo) * MM_TILE), cols, dev + lo * out, NULL) &&
            hipDeviceSynchronize() == hipSuccess;
     }
-    f->ttype[t_res[i] - f->w->model->tensors] = QUANT_Q5_KR;
+    f->ttype[weights_tensor_index(f->w, t_res[i])] = QUANT_Q5_KR;
   }
   hipFree(stage);
   return ok;
@@ -194,8 +198,8 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   PoolUnit *all = calloc((size_t)w->geo.n_layers * E, sizeof *all);
   PoolUnit *res = calloc(n_res_max + f->n_expert_units, sizeof *res);
   const GgufTensor **t_res = calloc(n_res_max, sizeof *t_res);
-  f->tdev = calloc(w->model->n_tensors, sizeof *f->tdev);
-  f->ttype = calloc(w->model->n_tensors, sizeof *f->ttype);
+  f->tdev = calloc(weights_tensors(w), sizeof *f->tdev);
+  f->ttype = calloc(weights_tensors(w), sizeof *f->ttype);
   f->rix = calloc(f->n_expert_units, sizeof *f->rix);
   f->is_held = calloc(f->n_expert_units, sizeof *f->is_held);
   f->held_layer = -1;
@@ -213,7 +217,8 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     const LayerWeights *L = &w->layer[l];
     const GgufTensor *const *t = (const GgufTensor *const *)L;
     for (size_t i = 0; i < TENSORS_A_LAYER; i++)
-      if (t[i] && t[i] != L->eg_embd && t[i] != L->exp_gate && t[i] != L->exp_up && t[i] != L->exp_down)
+      if (t[i] && t[i] != L->eg_embd && t[i] != L->exp_gate && t[i] != L->exp_up && t[i] != L->exp_down &&
+          t[i] != L->eg_q && t[i] != L->eg_k && t[i] != L->eg_gate) /* the gate: its own buffer (gates) */
         t_res[n_t++] = t[i];
   }
   for (size_t i = 0; i < n_t; i++)
@@ -231,14 +236,15 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     ok = fwd_fail(err, perr);
   else if (!(f->fq = fetchq_create(FWD_FETCH_THREADS, fwd_on_read, &f->in)))
     ok = fwd_fail(err, "the fetcher's workers could not start");
-  else if (!(f->pool = pool_create(all, f->n_expert_units, stream_budget(f, all), hip_slots(), fetchq_fetcher(f->fq),
+  else if (!(f->pool_room = stream_budget(f, all)) ||
+           !(f->pool = pool_create(all, f->n_expert_units, f->pool_room, hip_slots(), fetchq_fetcher(f->fq),
                                    NULL, NULL, perr)))
     ok = fwd_fail(err, perr);
   for (size_t i = 0; ok && i < n_t; i++)
   {
     const void *dev[POOL_PARTS];
     ok = resident_dev(f->res, i, dev);
-    f->tdev[t_res[i] - w->model->tensors] = dev[0];
+    f->tdev[weights_tensor_index(w, t_res[i])] = dev[0];
   }
   ok = ok && (repack_all(f, t_res, n_t) || fwd_fail(err, "the Q5_K matrices' repack failed"));
   free(res), free(t_res);
@@ -285,6 +291,88 @@ static size_t engram_layers(const Weights *w, int n_layers)
   return n;
 }
 
+/* the file the Engram's rows are read from (its own descriptor: rowread's): ds1017's second file, or the model's own
+   shard that holds per_layer_token_embd (every layer's slice in it) */
+static int engram_fd(const Forward *f, const Weights *w)
+{
+  if (!w->geo.engram_own)
+    return open(w->engram->paths[0], O_RDONLY);
+  for (int l = 0; l < w->geo.n_layers; l++)
+    if (w->geo.engram[l])
+      return dup(f->fds[w->layer[l].eg_embd->file]);
+  return -1;
+}
+
+/* a tensor's bytes from the model's files into host memory */
+static bool read_all(const Forward *f, const GgufTensor *t, void *out)
+{
+  for (uint64_t got = 0; got < t->bytes;)
+  {
+    const ssize_t n = pread(f->fds[t->file], (char *)out + got, t->bytes - got, (off_t)(t->offset + got));
+    if (n <= 0)
+      return false;
+    got += (uint64_t)n;
+  }
+  return true;
+}
+
+/* each Engram layer's gate as ops_engram_gate reads it: F32 [hc][dim], q k. a llama.cpp GGUF's folded (engram_gate:
+   read as it is); ds1017's q and k (BF16) multiplied here - a product of two BF16 values exact in F32 (8-bit
+   significands, 16 bits of product): the kernel's own product before, the same bits */
+static bool gates(Forward *f, const Weights *w, char *err)
+{
+  const uint64_t n = (uint64_t)w->geo.hc * (uint64_t)w->geo.n_embd;
+  float *g = malloc(n * sizeof *g);
+  uint16_t *q = malloc(n * sizeof *q), *k = malloc(n * sizeof *k);
+  bool ok = g && q && k;
+  for (int l = 0; ok && l < w->geo.n_layers; l++)
+  {
+    if (!w->geo.engram[l])
+      continue;
+    const LayerWeights *L = &w->layer[l];
+    if (w->geo.engram_own)
+      ok = read_all(f, L->eg_gate, g);
+    else if ((ok = read_all(f, L->eg_q, q) && read_all(f, L->eg_k, k)))
+      for (uint64_t i = 0; i < n; i++)
+      {
+        const uint32_t a = (uint32_t)q[i] << 16, b = (uint32_t)k[i] << 16;
+        float x, y;
+        memcpy(&x, &a, 4), memcpy(&y, &b, 4);
+        g[i] = x * y;
+      }
+    ok = ok && fwd_alloc(&f->eg_gate[l], n * sizeof *g) && fwd_put(f->eg_gate[l], g, n * sizeof *g);
+  }
+  free(g), free(q), free(k);
+  return ok || fwd_fail(err, "the Engram's gates could not be read");
+}
+
+/* an F32 router (llama.cpp's GGUFs) rounded to BF16 (nearest, ties to even) for the guess alone: the guess picks the
+   experts read ahead, which change no bit - half its bytes a layer (unsloth's UD: 7.9 -> 3.9 MB). the routing itself
+   reads the F32 */
+static bool guess_routers(Forward *f, const Weights *w, char *err)
+{
+  bool ok = true;
+  for (int l = 0; ok && !f->no_guess && l < f->n_layers; l++) /* no guess: no copy */
+  {
+    const GgufTensor *t = w->layer[l].router;
+    if (t->type != QTYPE_F32)
+      continue;
+    const uint64_t n = t->bytes / sizeof(float);
+    float *x = malloc(t->bytes);
+    uint16_t *h = malloc(n * sizeof *h);
+    ok = x && h && read_all(f, t, x);
+    for (uint64_t i = 0; ok && i < n; i++)
+    {
+      uint32_t u;
+      memcpy(&u, &x[i], 4);
+      h[i] = (uint16_t)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+    }
+    ok = ok && fwd_alloc(&f->guess_router[l], n * sizeof *h) && fwd_put(f->guess_router[l], h, n * sizeof *h);
+    free(x), free(h);
+  }
+  return ok || fwd_fail(err, "a router's copy for the guess could not be made");
+}
+
 static bool scratch(Forward *f)
 {
   const Geometry *g = f->g;
@@ -315,16 +403,21 @@ static bool scratch(Forward *f)
       {&b->sye, S * D * F},       {&b->up, FWD_UP_BYTES(P)}, {&b->lat, B * hd * F},
       {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, B * ih * F},
       {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},
-      {&b->score, B * (f->score_stride > Fs ? f->score_stride : Fs) * F}, /* the indexer's; hip_skip.c's sel */
+      {&b->kv_p, B * kv_row_bytes(KV_FP8, (uint32_t)hd)}, {&b->lat_p, B * kv_row_bytes(KV_FP4_E4M3, (uint32_t)hd)},
+      {&b->ikr_p, B * kv_row_bytes(KV_FP4_POW2, (uint32_t)ih)}, {&b->row_f, hd * F},
+      {&b->ckv_f, (uint64_t)f->ckv_f_rows * hd * F}, {&b->ring_f, (uint64_t)f->slots * hd * F},
+      {&b->score, (f->score_rows * (uint64_t)f->score_stride > B * Fs ? f->score_rows * (uint64_t)f->score_stride
+                                                                        : B * Fs) * F}, /* the indexer's; hip_skip.c's */
       {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
       {&b->ridx, S * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
+      {&b->cand, B * f->cand_words * 4},
       {&b->rwp, P * F},                 {&b->x16, B * (widest > egv ? widest : egv) * 2},
       {&b->xe16, FWD_MAX_SLOTS(P, g->n_experts) * (D > FF ? D : FF) * 2},
       {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4},
       {&b->keep, B * 4},          {&b->back, B * 4},
-      {&b->gidx, B * FWD_GUESS_K * 4}, {&b->gw, B * FWD_GUESS_K * F},
+      {&b->gw, B * FWD_GUESS_K * F},
   };
   _Static_assert(sizeof want / sizeof *want == sizeof(Scratch) / sizeof(void *), "every buffer of Scratch, once");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
@@ -338,8 +431,11 @@ static bool scratch(Forward *f)
     n_eg += g->engram[l];
   f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
   return fwd_put(b->pre0, pre0, B * hc * F) &&
-         hipHostMalloc((void **)&f->r_ids, P * 4, 0) == hipSuccess &&
-         hipHostMalloc((void **)&f->r_guess, B * FWD_GUESS_K * 4, 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->r_ids, P * 4, hipHostMallocMapped | hipHostMallocCoherent) == hipSuccess &&
+         hipHostGetDevicePointer((void **)&f->r_ids_dev, f->r_ids, 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->r_guess, B * FWD_GUESS_K * 4, hipHostMallocMapped | hipHostMallocCoherent) ==
+             hipSuccess &&
+         hipHostGetDevicePointer((void **)&f->r_guess_dev, f->r_guess, 0) == hipSuccess &&
          (f->guessed = calloc(f->n_expert_units, sizeof *f->guessed)) &&
          hipHostMalloc((void **)&f->r_up, FWD_UP_BYTES(P), 0) == hipSuccess &&
          (f->m_by = malloc(P * 4)) && (f->m_row = malloc(P * 4)) && (f->m_base = malloc(P * 4)) &&
@@ -357,7 +453,7 @@ static bool subs(Forward *f)
   Scratch *b = &f->b;
   const uint64_t B = f->step, hc = g->hc, F = sizeof(float);
   Sub *s0 = &f->sub[0];
-  s0->h = b->h, s0->f_pre = b->f_pre, s0->pos = b->pos, s0->sel = b->sel, s0->n_sel = b->n_sel;
+  s0->h = b->h, s0->f_pre = b->f_pre, s0->pos = b->pos, s0->sel = b->sel, s0->n_sel = b->n_sel, s0->cand = b->cand;
   s0->oa_cnt = b->oa_cnt, s0->keep = b->keep, s0->back = b->back, s0->pin = f->pin, s0->rows = f->rows;
   bool ok = true;
   for (uint32_t k = 1; ok && k < f->n_subs; k++)
@@ -365,6 +461,7 @@ static bool subs(Forward *f)
     Sub *s = &f->sub[k];
     ok = fwd_alloc(&s->h, B * hc * g->n_embd * F) && fwd_alloc(&s->f_pre, B * hc * F) && fwd_alloc(&s->pos, B * 4) &&
          fwd_alloc(&s->sel, B * OPS_MAX_SELECT * 4) && fwd_alloc(&s->n_sel, B * 4) &&
+         fwd_alloc(&s->cand, B * f->cand_words * 4) &&
          fwd_alloc(&s->oa_cnt, FWD_MAX_GROUPS * 4) && fwd_alloc(&s->keep, B * 4) && fwd_alloc(&s->back, B * 4) &&
          hipHostMalloc((void **)&s->pin, sizeof *s->pin, 0) == hipSuccess &&
          (s->rows = calloc(B * WEIGHTS_MAX_LAYERS * g->engram_cols, sizeof *s->rows)) != NULL;
@@ -392,7 +489,7 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
                                const uint64_t *picks, char err[FORWARD_ERR])
 {
-  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS};
+  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false};
   return forward_create_with(w, &o, err);
 }
 
@@ -400,15 +497,16 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
 {
   const int n_layers = o ? o->n_layers : 0;
   const uint32_t max_ctx = o ? o->max_ctx : 0, max_tokens = o && o->max_tokens ? o->max_tokens : FORWARD_MAX_TOKENS;
-  const uint64_t budget = o ? o->budget : 0, *picks = o ? o->picks : NULL;
+  const uint64_t *picks = o ? o->picks : NULL;
+  const uint64_t budget = o ? o->budget : 0;
   if (!w || n_layers < 1 || n_layers > w->geo.n_layers || !max_ctx || max_tokens > FORWARD_MAX_TOKENS)
     return fwd_fail(err, "no weights, or layers, a context or a step it cannot run"), NULL;
-  if (w->model->n_files > FWD_MAX_FILES)
+  if (w->n_files > FWD_MAX_FILES)
     return fwd_fail(err, "more files than this build maps"), NULL;
   Forward *f = calloc(1, sizeof *f);
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
-  f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx;
+  f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->no_guess = o->no_guess, f->budget = budget;
   if (max_tokens < FWD_MAX_BATCH) /* a small step's server: every buffer of a step at its size (DESIGN.md) */
     f->n_subs = 1, f->max_tokens = max_tokens, f->step = (max_tokens + MM_TILE - 1) / MM_TILE * MM_TILE;
   else
@@ -420,21 +518,30 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   for (int l = 0; l < n_layers; l++)
     if (w->geo.compress[l] && max_ctx / (uint32_t)w->geo.compress[l] > f->score_stride)
       f->score_stride = max_ctx / (uint32_t)w->geo.compress[l];
+  f->ckv_f_rows = f->score_stride < FWD_CKV_F32_ROWS ? f->score_stride : FWD_CKV_F32_ROWS;
+  const uint64_t fit = FWD_SCORE_BYTES / ((uint64_t)f->score_stride * sizeof(float));
+  f->score_rows = fit >= f->step ? f->step : fit ? (uint32_t)fit : 1;
+  if (w->geo.cand_source >= 0 && w->geo.cand_source < n_layers && w->geo.compress[w->geo.cand_source] &&
+      (max_ctx / (uint32_t)w->geo.compress[w->geo.cand_source] + w->geo.cand_block - 1) / w->geo.cand_block >
+          (uint32_t)w->geo.cand_blocks) /* a context this long passes the candidate blocks: their bits a token */
+    f->cand_words = ((f->score_stride + w->geo.cand_block - 1) / w->geo.cand_block + 31) / 32;
   f->eg_fd = -1;
   for (int i = 0; i < FWD_MAX_FILES; i++)
     f->fds[i] = -1;
   pthread_mutex_init(&f->in.mu, NULL);
   pthread_cond_init(&f->in.cv, NULL);
   bool ok = true;
-  for (int i = 0; ok && i < w->model->n_files; i++)
-    ok = (f->fds[i] = open(w->model->paths[i], O_RDONLY)) >= 0;
+  for (int i = 0; ok && i < w->n_files; i++) /* the model's files, then an overlay's (weights.h) */
+    ok = (f->fds[i] = open(w->paths[i], O_RDONLY)) >= 0;
   char eerr[ENGRAM_ERR] = "";
   if (!ok)
     fwd_fail(err, "a model file could not be opened");
-  else if ((f->eg_fd = open(w->engram->paths[0], O_RDONLY)) < 0)
-    ok = fwd_fail(err, "the Engram file could not be opened");
+  else if ((f->eg_fd = engram_fd(f, w)) < 0)
+    ok = fwd_fail(err, "the Engram's file could not be opened");
   else if (!(f->hash = engram_create(w, f->fds, eerr)))
     ok = fwd_fail(err, eerr);
+  else if (!gates(f, w, err) || !guess_routers(f, w, err))
+    ok = false;
   else if (!(f->rows = calloc((size_t)FWD_MAX_BATCH * WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)) ||
            !(f->eg_off = calloc((size_t)FWD_MAX_SUBS * FWD_MAX_BATCH * engram_layers(w, n_layers) *
                                     f->g->engram_cols + 1,
@@ -449,12 +556,39 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
         fwd_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
     ok = fwd_fail(err, "a GPU allocation refused");
+  ok = ok && fwd_room_left(f, err);
   if (!ok)
   {
     forward_destroy(f);
     return NULL;
   }
   return f;
+}
+
+/* the pool takes its room as experts stream, after create: a budget that leaves the GPU less than that refused now,
+   not at a request's first miss (the server READY, then every request failing) */
+bool fwd_room_left(const Forward *f, char *err)
+{
+  size_t free_b = 0, total = 0;
+  if (hipMemGetInfo(&free_b, &total) != hipSuccess)
+    return fwd_fail(err, "the GPU's free memory could not be read");
+  if ((uint64_t)free_b >= f->pool_room)
+    return true;
+  char why[160];
+  snprintf(why, sizeof why, "the GPU's free memory (%.2f GiB) under the expert pool's room (%.2f GiB): a smaller budget",
+           (double)free_b / (1ull << 30), (double)f->pool_room / (1ull << 30));
+  return fwd_fail(err, why);
+}
+
+uint64_t forward_budget(const Forward *f) { return f ? f->budget : 0; }
+
+bool forward_room(const Forward *f, uint64_t *bytes)
+{
+  size_t free_b = 0, total = 0;
+  if (!f || hipMemGetInfo(&free_b, &total) != hipSuccess)
+    return false;
+  *bytes = (uint64_t)free_b > f->pool_room ? (uint64_t)free_b - f->pool_room : 0;
+  return true;
 }
 
 void forward_destroy(Forward *f)
@@ -487,19 +621,21 @@ void forward_destroy(Forward *f)
   free(f->picks), free(f->seen), free(f->heat), free(f->heat_at), free(f->units);
   fwd_cpu_destroy(f);
   hipHostFree(f->lane_up);
-  hipFree(f->lane_dev), hipFree(f->lane_x), hipFree(f->lane_w), hipFree(f->lane_q), hipFree(f->lane_qd);
+  hipFree(f->lane_x), hipFree(f->lane_w), hipFree(f->lane_q), hipFree(f->lane_qd),
+      hipFree(f->lane_xq), hipFree(f->lane_xqd);
   hipFree(f->taps);
   if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
   {
     const Sub *s = &f->sub[0];
     f->b.h = s->h, f->b.f_pre = s->f_pre, f->b.pos = s->pos, f->b.sel = s->sel, f->b.n_sel = s->n_sel;
+    f->b.cand = s->cand;
     f->b.oa_cnt = s->oa_cnt, f->b.keep = s->keep, f->b.back = s->back, f->pin = s->pin, f->rows = s->rows;
   }
   for (int k = 1; k < FWD_MAX_SUBS; k++)
   {
     Sub *s = &f->sub[k];
     hipFree(s->h), hipFree(s->f_pre), hipFree(s->pos), hipFree(s->sel), hipFree(s->n_sel), hipFree(s->oa_cnt);
-    hipFree(s->keep), hipFree(s->back), hipHostFree(s->pin), free(s->rows);
+    hipFree(s->keep), hipFree(s->back), hipHostFree(s->pin), free(s->rows), hipFree(s->cand);
   }
   void **dev = (void **)&f->b;
   for (size_t i = 0; i < sizeof f->b / sizeof(void *); i++)
@@ -515,6 +651,8 @@ void forward_destroy(Forward *f)
       close(f->fds[i]);
   if (f->eg_fd >= 0)
     close(f->eg_fd);
+  for (int l = 0; l < WEIGHTS_MAX_LAYERS; l++)
+    hipFree(f->eg_gate[l]), hipFree(f->guess_router[l]);
   engram_destroy(f->hash);
   free(f->rows);
   free(f);
@@ -529,9 +667,15 @@ void forward_probe(Forward *f, forward_probe_fn fn, void *arg)
 const float *forward_stream(const Forward *f) { return f->b.h; }
 const uint64_t *forward_picks(const Forward *f) { return f->picks; }
 uint64_t forward_swaps(const Forward *f) { return f->swaps; }
-void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed)
+void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed, uint64_t *read)
 {
   *streamed = f->g_need, *guessed = f->g_hit;
+  if (read)
+    *read = f->g_read;
+}
+void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2])
+{
+  n[0] = f->w_n[0], n[1] = f->w_n[1], ns[0] = f->w_ns[0], ns[1] = f->w_ns[1];
 }
 const float *forward_logits(const Forward *f) { return f->b.vocab; }
 

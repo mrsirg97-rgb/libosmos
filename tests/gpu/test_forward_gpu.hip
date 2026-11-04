@@ -1,5 +1,5 @@
-// the forward (src/run) over ds1017's first layers, as many as the oracle's dump holds ($SUBSTRATE_LAYERS, a
-// layer_dump.py -> npz2bin.py directory; ~/substrate-oracle/layers3 by default: 0 the window alone, 1 with Engram,
+// the forward (src/run) over ds1017's first layers, as many as the oracle's dump holds ($OSMOS_LAYERS, a
+// layer_dump.py -> npz2bin.py directory; ~/osmos-oracle/layers3 by default: 0 the window alone, 1 with Engram,
 // 2 the first KV source - the compressor at ratio 2, the indexer), its ids a token at a time, every step it names
 // against the oracle's (oracle/layer_dump.py -> npz2bin.py, ref.py's prompt path at that position), twice:
 //   free: the forward on its own. the routes and the compressed rows attended exactly; the other steps reported (a
@@ -31,10 +31,10 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/gpu/mm.h"
-#include "substrate/run/forward.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/run/forward.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -237,8 +237,8 @@ static void probe(const char* step, int layer, int index, void* dev, uint64_t n,
 int main() {
   std::printf("[test_forward_gpu] start\n");
   const char* home = std::getenv("HOME");
-  const char* dump = std::getenv("SUBSTRATE_LAYERS");
-  g_dir = dump ? dump : std::string(home ? home : "") + "/substrate-oracle/layers3";
+  const char* dump = std::getenv("OSMOS_LAYERS");
+  g_dir = dump ? dump : std::string(home ? home : "") + "/osmos-oracle/layers3";
   const std::string mdir = std::string(home ? home : "") + "/models/ds1017/";
   int ndev = 0;
   int kLayers = 0;

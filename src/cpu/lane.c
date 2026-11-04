@@ -4,8 +4,8 @@
 #include <string.h>
 
 #include "lane.h"
-#include "substrate/cpu/lane.h"
-#include "substrate/cpu/q8.h"
+#include "osmos/cpu/lane.h"
+#include "osmos/cpu/q8.h"
 
 /* the pool: workers asleep between jobs (a condition), within one moving through its phases together (a spinning
    barrier: a phase is tens of microseconds) - x to int8; gate, up and the activation; the activations to int8;

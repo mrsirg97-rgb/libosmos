@@ -5,8 +5,8 @@
 #include <string.h>
 
 #include "lane.h"
-#include "substrate/cpu/lane.h"
-#include "substrate/cpu/q8.h"
+#include "osmos/cpu/lane.h"
+#include "osmos/cpu/q8.h"
 
 /* the CPU lane's pool against the same steps done in one thread (cpu_q8_round, cpu_q8_rows, lane_swiglu - their bits
    the GPU's: test_cpu_q8, test_cpu_lane_gpu): random experts of each type, a job of three experts (1, 3 and 2 rows),
@@ -22,7 +22,7 @@
 static uint32_t rng = 1017;
 static uint32_t next(void) { return rng = rng * 1664525u + 1013904223u; }
 static float uniform(void) { return (float)(next() >> 8) / (float)(1u << 23) - 1.0f; }
-static size_t block_bytes(uint32_t type) { return type == LANE_Q8_IQ2_XXS ? 66 : type == LANE_Q8_IQ2_XS ? 74 : 56; }
+static size_t block_bytes(uint32_t type) { return qtype_info(type)->bytes; }
 
 static void fill(uint32_t type, uint8_t *w, size_t bytes) /* test_cpu_q8's: random bytes, a small d a block */
 {
@@ -32,7 +32,7 @@ static void fill(uint32_t type, uint8_t *w, size_t bytes) /* test_cpu_q8's: rand
   for (size_t b = 0; b < bytes; b += bb)
   {
     const uint32_t h = 0x2C00u | (next() >> 22);
-    if (type == LANE_Q8_IQ1_M)
+    if (type == QTYPE_IQ1_M)
       for (int k = 0; k < 4; k++)
         w[b + 48 + 2 * k + 1] = (uint8_t)((w[b + 48 + 2 * k + 1] & 0x0F) | ((h >> (4 * k)) & 0x0F) << 4);
     else
@@ -119,9 +119,9 @@ int main(void)
   assert(!cpu_lane_create(0, ROWS, DIM, FF) && !cpu_lane_create(2, ROWS, DIM + 1, FF));
   assert(!cpu_lane_create(2, 0, DIM, FF));
   cpu_lane_destroy(NULL);
-  check(LANE_Q8_IQ2_XXS, LANE_Q8_IQ1_M, 1);
-  check(LANE_Q8_IQ2_XS, LANE_Q8_IQ2_XXS, 3);
-  check(LANE_Q8_IQ1_M, LANE_Q8_IQ2_XS, 8);
+  check(QTYPE_IQ2_XXS, QTYPE_IQ1_M, 1);
+  check(QTYPE_IQ2_XS, QTYPE_IQ2_XXS, 3);
+  check(QTYPE_IQ1_M, QTYPE_IQ2_XS, 8);
   printf("[test_cpu_lane] ok\n");
   return 0;
 }

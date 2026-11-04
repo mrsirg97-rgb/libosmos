@@ -4,7 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/mem/fetchq.h"
+#include "osmos/mem/fetchq.h"
 
 #define FETCH_MAX_THREADS 64
 #define FETCH_RING_START 256 /* a ring's first jobs: a decode's reads are a few dozen, a load's grow it */

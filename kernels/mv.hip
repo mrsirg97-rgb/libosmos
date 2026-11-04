@@ -1,8 +1,8 @@
-// mv_run (include/substrate/gpu/mv.h): the kernel is mv.h's, its shape picked here
+// mv_run (include/osmos/gpu/mv.h): the kernel is mv.h's, its shape picked here
 #include "mv.h"
 
 extern "C" {
-#include "substrate/gpu/mv.h"
+#include "osmos/gpu/mv.h"
 }
 
 namespace {
@@ -19,12 +19,19 @@ constexpr int band(int nt) { return nt == 1 ? 0 : nt <= 2 ? 1 : nt <= 4 ? 2 : 3;
 constexpr Tune tune(quant::Type t, int nt) {
   switch (t) {
     case quant::kIQ1_M:
+    case quant::kIQ1_S:  // IQ1_S and IQ2_S: their sibling's (IQ1_M's, IQ2_XS's), not measured
     case quant::kIQ2_XXS:
-    case quant::kIQ2_XS: return (Tune[]){{1, 4}, {1, 2}, {2, 2}, {2, 2}}[band(nt)];
+    case quant::kIQ2_XS:
+    case quant::kIQ2_S: return (Tune[]){{1, 4}, {1, 2}, {2, 2}, {2, 2}}[band(nt)];
     case quant::kQ6_K: return (Tune[]){{1, 4}, {1, 2}, {1, 1}, {2, 1}}[band(nt)];
     case quant::kQ5_K:
     case quant::kQ5_KR: return {2, 1};
     case quant::kQ8_0: return nt > 4 ? Tune{2, 1} : Tune{1, 1};
+    // an F32 router (unsloth's: 384 x 5120) and its guess's BF16 copy, one token: 4 chunks in flight a lane - F32
+    // 53.5 -> 38.8 us (147 -> 202 GB/s), BF16 22.8 -> 19.5 (2026-11-04, 40 routers cold; R 1-4, U 1-8 swept, the
+    // same bits each). more tokens not measured
+    case quant::kF32:
+    case quant::kBF16: return nt == 1 ? Tune{1, 4} : Tune{1, 1};
     default: return {1, 1};
   }
 }
@@ -82,8 +89,10 @@ constexpr uint32_t kShortCols = 4096;  // fewer than 16 chunks a lane
 constexpr Tune tune_group1(quant::Type t, bool short_row) {
   switch (t) {
     case quant::kIQ2_XXS:
-    case quant::kIQ2_XS: return {2, 4};
-    case quant::kIQ1_M: return short_row ? Tune{2, 2} : tune(t, 1);
+    case quant::kIQ2_XS:
+    case quant::kIQ2_S: return {2, 4};
+    case quant::kIQ1_M:
+    case quant::kIQ1_S: return short_row ? Tune{2, 2} : tune(t, 1);
     default: return tune(t, 1);
   }
 }
@@ -133,6 +142,8 @@ extern "C" bool mv_group_tok(uint32_t type, const void* const* w, const int32_t*
     case quant::kIQ2_XXS: return group_tok<quant::kIQ2_XXS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kIQ2_XS: return group_tok<quant::kIQ2_XS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kIQ1_M: return group_tok<quant::kIQ1_M>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kIQ1_S: return group_tok<quant::kIQ1_S>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kIQ2_S: return group_tok<quant::kIQ2_S>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kMXFP4: return group_tok<quant::kMXFP4>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     default: return false;
   }
@@ -151,6 +162,8 @@ extern "C" bool mv_group(uint32_t type, const void* const* w, uint32_t n, uint32
     case quant::kIQ2_XS: return group<quant::kIQ2_XS>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kIQ4_NL: return group<quant::kIQ4_NL>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kIQ1_M: return group<quant::kIQ1_M>(w, n, rows, cols, x, x_mat, x_div, y, s);
+    case quant::kIQ1_S: return group<quant::kIQ1_S>(w, n, rows, cols, x, x_mat, x_div, y, s);
+    case quant::kIQ2_S: return group<quant::kIQ2_S>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kBF16: return group<quant::kBF16>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kMXFP4: return group<quant::kMXFP4>(w, n, rows, cols, x, x_mat, x_div, y, s);
     default: return false;
@@ -176,6 +189,8 @@ extern "C" bool mv_strided(uint32_t type, const void* w, uint32_t rows, uint32_t
     case quant::kIQ2_XS: return by_tokens<quant::kIQ2_XS>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kIQ4_NL: return by_tokens<quant::kIQ4_NL>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kIQ1_M: return by_tokens<quant::kIQ1_M>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kIQ1_S: return by_tokens<quant::kIQ1_S>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kIQ2_S: return by_tokens<quant::kIQ2_S>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kBF16: return by_tokens<quant::kBF16>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kMXFP4: return by_tokens<quant::kMXFP4>(w, rows, cols, x, xs, n_tok, y, ys, s);
     default: return false;

@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "substrate/model/rope.h"
+#include "osmos/model/rope.h"
 
 /* torch's (ref.py freqs_cis, oracle venv, torch 2.15.0+cpu): the window's and the compressed rows' */
 static const uint32_t kWindow[32] = {

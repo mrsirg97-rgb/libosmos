@@ -1,7 +1,10 @@
 // ops_sparse_attn at the model's shape and a long context's key count (64 heads x 512, a window of 128 and up to 512
 // compressed rows: 640 keys, several of each kernel's tiles): every output within the rounding bound of its order
 // against a double-precision attention over the same keys, and each token the same bits alone and among the others
-// (schedule invariance); the indexer's scores the same ways. needs a GPU; skipped (77) without one.
+// (schedule invariance); the indexer's scores the same ways. the keys as a sequence keeps them (kvfmt.h: the window
+// FP8, the compressed rows FP4 with an E4M3 scale, the indexer's FP4 with a power of two), rounded and packed on the
+// GPU, the references on the rounded values - and the same keys handed over as F32 the same bits again (the packed
+// rows read in the kernels exactly as the F32 they hold). needs a GPU; skipped (77) without one.
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -12,7 +15,8 @@
 #include <vector>
 
 extern "C" {
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/ops.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -99,9 +103,18 @@ static void indexer(uint32_t heads) {
   CHECK(hipMemcpy(k, kh.data(), kh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(w, wh.data(), wh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(pos, ph.data(), kIxTok * 4, hipMemcpyHostToDevice) == hipSuccess);
-  CHECK(ops_index_score(q, k, w, pos, kIxRatio, rows, heads, kIxHd, kIxTok, sc, stride, nullptr));
+  // the keys as the sequence keeps them: rounded (fp4, a power of two a 32) and packed; the host's the rounded values
+  uint8_t* kp = nullptr;
+  CHECK(hipMalloc(&kp, rows * kv_row_bytes(KV_FP4_POW2, kIxHd)) == hipSuccess);
+  CHECK(ops_fp4_round(k, kh.size(), KV_FP4_POW2_BLOCK, false, kp, kIxHd, nullptr));
+  CHECK(hipMemcpy(kh.data(), k, kh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(ops_index_score(q, kp, KV_FP4_POW2, w, pos, kIxRatio, rows, heads, kIxHd, kIxTok, sc, stride, nullptr));
   std::vector<float> all(scb / 4), one(scb / 4);
   CHECK(hipMemcpy(all.data(), sc, scb, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(ops_index_score(q, k, KV_F32, w, pos, kIxRatio, rows, heads, kIxHd, kIxTok, sc, stride, nullptr));
+  CHECK(hipMemcpy(one.data(), sc, scb, hipMemcpyDeviceToHost) == hipSuccess);
+  for (uint32_t t = 0; t < kIxTok; t++)  // the packed keys read as the F32 they hold
+    CHECK(std::memcmp(&all[(size_t) t * stride], &one[(size_t) t * stride], (size_t) (ph[t] + 1) / kIxRatio * 4) == 0);
   double worst = 0;
   for (uint32_t t = 0; t < kIxTok; t++)
     for (uint32_t c = 0; c < (uint32_t) (ph[t] + 1) / kIxRatio; c++) {
@@ -133,14 +146,15 @@ static void indexer(uint32_t heads) {
     }
   CHECK(hipMemset(sc, 0x7F, scb) == hipSuccess);
   for (uint32_t t = 0; t < kIxTok; t++)
-    CHECK(ops_index_score(q + (size_t) t * heads * kIxHd, k, w + (size_t) t * heads, pos + t, kIxRatio, rows, heads,
-                          kIxHd, 1, sc + (size_t) t * stride, stride, nullptr));
+    CHECK(ops_index_score(q + (size_t) t * heads * kIxHd, kp, KV_FP4_POW2, w + (size_t) t * heads, pos + t, kIxRatio,
+                          rows, heads, kIxHd, 1, sc + (size_t) t * stride, stride, nullptr));
   CHECK(hipMemcpy(one.data(), sc, scb, hipMemcpyDeviceToHost) == hipSuccess);
   for (uint32_t t = 0; t < kIxTok; t++)
     CHECK(std::memcmp(&all[(size_t) t * stride], &one[(size_t) t * stride], (size_t) (ph[t] + 1) / kIxRatio * 4) == 0);
-  for (void* p : {(void*) q, (void*) k, (void*) w, (void*) sc, (void*) pos}) CHECK(hipFree(p) == hipSuccess);
+  for (void* p : {(void*) q, (void*) k, (void*) kp, (void*) w, (void*) sc, (void*) pos}) CHECK(hipFree(p) == hipSuccess);
   std::printf("  the indexer, %u heads, %u tokens x ~%u rows: the bits of its order in F32 on the host, within"
-              " (hd + 7) u of a double sum (worst %.1f), each token alone the bits it takes among them\n",
+              " (hd + 7) u of a double sum (worst %.1f), each token alone the bits it takes among them; FP4 keys"
+              " packed the bits of their F32\n",
               heads, kIxTok, rows, worst);
 }
 
@@ -178,12 +192,25 @@ int main() {
   CHECK(hipMemcpy(q, h.q.data(), qb, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(ring, h.ring.data(), h.ring.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(ckv, h.ckv.data(), h.ckv.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  // the keys as a sequence keeps them: the window's FP8, the compressed rows FP4 (an E4M3 scale a 16), each rounded
+  // and packed; the host's reference on the rounded values
+  uint8_t *ring_p = nullptr, *ckv_p = nullptr;
+  CHECK(hipMalloc(&ring_p, kSlots * kv_row_bytes(KV_FP8, kHd)) == hipSuccess &&
+        hipMalloc(&ckv_p, kRows * kv_row_bytes(KV_FP4_E4M3, kHd)) == hipSuccess);
+  CHECK(ops_fp8_round(ring, h.ring.size(), ring_p, kHd, nullptr) &&
+        ops_fp4_round(ckv, h.ckv.size(), KV_FP4_E4M3_BLOCK, true, ckv_p, kHd, nullptr));
+  CHECK(hipMemcpy(h.ring.data(), ring, h.ring.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(h.ckv.data(), ckv, h.ckv.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
   CHECK(hipMemcpy(sink, h.sink.data(), kHeads * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(pos, h.pos.data(), kTok * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(sel, h.sel.data(), h.sel.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(nsel, h.n_sel.data(), kTok * 4, hipMemcpyHostToDevice) == hipSuccess);
-  const auto attn = [&](uint32_t t0, uint32_t n) {
-    CHECK(ops_sparse_attn(q + (size_t) t0 * kHeads * kHd, ring, kSlots, pos + t0, kWindow, 0, ckv,
+  float* ring_f = nullptr;  // the window's rows unpacked: the ring a prompt's step reads
+  CHECK(hipMalloc(&ring_f, h.ring.size() * 4) == hipSuccess && ops_kv_unpack(KV_FP8, ring_p, kSlots, kHd, ring_f, nullptr));
+  const auto attn = [&](uint32_t t0, uint32_t n, uint32_t fmt = KV_FP4_E4M3, uint32_t rfmt = KV_FP8) {
+    CHECK(ops_sparse_attn(q + (size_t) t0 * kHeads * kHd, rfmt == KV_F32 ? (const void*) ring_f : (const void*) ring_p,
+                          rfmt, kSlots, pos + t0, kWindow, 0,
+                          fmt == KV_F32 ? (const void*) ckv : (const void*) ckv_p, fmt,
                           sel + (size_t) t0 * OPS_MAX_SELECT, nsel + t0, OPS_MAX_SELECT, kSel, sink, scale, kHeads, kHd,
                           n, sc, o + (size_t) t0 * kHeads * kHd, nullptr));
   };
@@ -200,11 +227,33 @@ int main() {
   CHECK(hipMemcpy(one.data(), o, qb, hipMemcpyDeviceToHost) == hipSuccess);
   CHECK(std::memcmp(all.data(), one.data(), qb) == 0);
   std::printf("  each token alone: the bits it takes among the %u\n", kTok);
+  CHECK(hipMemset(o, 0x7F, qb) == hipSuccess);
+  attn(0, kTok, KV_F32);  // the compressed rows handed over as the F32 they hold (the drafter's form)
+  CHECK(hipMemcpy(one.data(), o, qb, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(std::memcmp(all.data(), one.data(), qb) == 0);
+  std::printf("  the compressed rows packed (FP4, %llu bytes a row) or as F32: the same bits\n",
+              (unsigned long long) kv_row_bytes(KV_FP4_E4M3, kHd));
+  for (uint32_t cf : {(uint32_t) KV_FP4_E4M3, (uint32_t) KV_F32}) {  // the ring unpacked: alone, and every key F32
+    CHECK(hipMemset(o, 0x7F, qb) == hipSuccess);
+    attn(0, kTok, cf, KV_F32);
+    CHECK(hipMemcpy(one.data(), o, qb, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(std::memcmp(all.data(), one.data(), qb) == 0);
+    CHECK(hipMemset(o, 0x7F, qb) == hipSuccess);
+    for (uint32_t t = 0; t < kTok; t++) attn(t, 1, cf, KV_F32);  // and the few tokens' tiles
+    CHECK(hipMemcpy(one.data(), o, qb, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(std::memcmp(all.data(), one.data(), qb) == 0);
+  }
+  std::printf("  the window's ring unpacked to F32, the compressed rows packed or F32 (every key F32: the plain loads' "
+              "kernels), a batch or a token at a time: the same bits\n");
 
-  CHECK(!ops_sparse_attn(q, ring, kSlots, pos, kWindow, 0, ckv, sel, nsel, OPS_MAX_SELECT, kSel, sink, scale, kHeads,
-                         128, kTok, sc, o, nullptr));  // head_dim not a multiple of 256
-  for (void* p : {(void*) q, (void*) o, (void*) sc, (void*) ring, (void*) ckv, (void*) sink, (void*) pos, (void*) sel,
-                  (void*) nsel})
+  CHECK(!ops_sparse_attn(q, ring_p, KV_FP8, kSlots, pos, kWindow, 0, ckv_p, KV_FP4_E4M3, sel, nsel, OPS_MAX_SELECT, kSel, sink,
+                         scale, kHeads, 128, kTok, sc, o, nullptr));  // head_dim not a multiple of 256
+  CHECK(!ops_sparse_attn(q, ring_p, KV_FP8, kSlots, pos, kWindow, 0, ckv_p, 9, sel, nsel, OPS_MAX_SELECT, kSel, sink,
+                         scale, kHeads, kHd, kTok, sc, o, nullptr));  // no such format
+  CHECK(!ops_sparse_attn(q, ring_p, KV_FP4_E4M3, kSlots, pos, kWindow, 0, ckv_p, KV_FP4_E4M3, sel, nsel, OPS_MAX_SELECT,
+                         kSel, sink, scale, kHeads, kHd, kTok, sc, o, nullptr));  // a ring neither FP8 nor F32
+  for (void* p : {(void*) q, (void*) o, (void*) sc, (void*) ring, (void*) ckv, (void*) ring_p, (void*) ring_f, (void*) ckv_p,
+                  (void*) sink, (void*) pos, (void*) sel, (void*) nsel})
     CHECK(hipFree(p) == hipSuccess);
   indexer(32);
   indexer(24);

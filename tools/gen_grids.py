@@ -28,6 +28,7 @@ def main():
              "#endif", ""]
     lines += table("kIq2xxsGrid", "uint64_t", grid(Q.IQ2_XXS), "0x%016xull", 4)
     lines += table("kIq2xsGrid", "uint64_t", grid(Q.IQ2_XS), "0x%016xull", 4)
+    lines += table("kIq2sGrid", "uint64_t", grid(Q.IQ2_S), "0x%016xull", 4)
     lines += table("kIq1sGrid", "uint64_t", grid(Q.IQ1_S), "0x%016xull", 4)
     lines += table("kKsigns", "uint8_t", list(Q.IQ2_XXS.ksigns), "0x%02x", 16)
     lines += table("kIq4nlValues", "int8_t", list(Q.IQ4_NL.kvalues), "%d", 16)
@@ -35,6 +36,7 @@ def main():
               "static QUANT_GRID int8_t kMxfp4Values[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};",
               ""]
     assert Q.IQ1_M.grid_hex == Q.IQ1_S.grid_hex and Q.IQ1_S.delta == np.float32(0.125)
+    assert Q.IQ2_S.grid_map == Q.IQ2_XS.grid_map == Q.IQ2_XXS.grid_map  # the IQ2s' values: one int8 dot for all
     sys.stdout.write("\n".join(lines))
 
 

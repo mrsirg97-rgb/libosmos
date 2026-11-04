@@ -1,4 +1,4 @@
-// ops (include/substrate/gpu/ops.h): the forward's small steps, each as ref.py computes it, in F32
+// ops (include/osmos/gpu/ops.h): the forward's small steps, each as ref.py computes it, in F32
 #include <cmath>
 
 #include "quant.h"
@@ -7,8 +7,9 @@
 #include "mm.h"
 
 extern "C" {
-#include "substrate/gpu/mm.h"
-#include "substrate/gpu/ops.h"
+#include "osmos/gpu/kvfmt.h"
+#include "osmos/gpu/mm.h"
+#include "osmos/gpu/ops.h"
 }
 
 namespace {
@@ -367,9 +368,10 @@ __global__ void rope_kernel(float* x, uint32_t heads, uint32_t head_dim, uint32_
 
 // a key's whole tail a block a token (ops_kv_finish): rms_kernel's norm (its threads, its block_sum), rope_kernel's
 // rotation of the last rope_dim, round.h's FP8 a wave a block of 32, then the row to kv and to the ring at pos % slots
-// - each step the separate kernel's arithmetic in its order, so its bits
+// - each step the separate kernel's arithmetic in its order, so its bits. q (or NULL): the token's qh heads' queries
+// roped too, rope_kernel's arithmetic pair for pair
 __global__ void kv_finish_kernel(float* kv, uint32_t hd, const float* w, float eps, uint32_t rd, const float* freqs,
-                                 const int32_t* pos, float* ring, uint32_t slots) {
+                                 const int32_t* pos, uint8_t* ring, uint32_t slots, float* q, uint32_t qh) {
   __shared__ float lds[kThreads];
   __shared__ float row[OPS_MAX_KV_DIM];
   const uint32_t t = blockIdx.x;
@@ -389,17 +391,30 @@ __global__ void kv_finish_kernel(float* kv, uint32_t hd, const float* w, float e
   }
   __syncthreads();
   const uint32_t lane = threadIdx.x % kWave, wave = threadIdx.x / kWave;
-  float* out = ring + (uint64_t) ((uint32_t) pos[t] % slots) * hd;
+  uint8_t* out = ring + (uint64_t) ((uint32_t) pos[t] % slots) * kv_row_bytes(KV_FP8, hd);  // its KV_FP8 row
   for (uint32_t b = wave; b < hd / rnd::kFp8Block; b += kThreads / kWave) {  // the whole wave a block
     const uint32_t i = b * rnd::kFp8Block + lane;
-    const float v = rnd::fp8_block(row[i]);
-    x[i] = v, out[i] = v;
+    uint32_t code, scale;
+    x[i] = rnd::fp8_block_coded(row[i], code, scale);
+    out[i] = (uint8_t) code;
+    if (!lane) out[hd + b] = (uint8_t) scale;
+  }
+  if (!q) return;
+  const uint32_t half = rd / 2;
+  for (uint32_t i = threadIdx.x; i < qh * half; i += kThreads) {
+    const uint32_t p = i % half;
+    float* v = q + ((uint64_t) t * qh + i / half) * hd + (hd - rd) + 2 * p;
+    const float ang = (float) pos[t] * freqs[p];
+    const float c = cosf(ang), s = sinf(ang);
+    const float a = v[0], b = v[1];
+    v[0] = a * c - b * s;
+    v[1] = a * s + b * c;
   }
 }
 
 // (BF16); dot = sum((h * w) * key) * (rstd(h) * rstd(key)) * scale; h += sigmoid(signed sqrt(dot)) * value
-__global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* qw, const uint16_t* kw, uint32_t hc,
-                                   uint32_t dim, float eps, float scale) {
+__global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, uint32_t hc, uint32_t dim, float eps,
+                                   float scale) {
   __shared__ float lds[kThreads];
   __shared__ float gate;
   const uint32_t k = blockIdx.x, t = blockIdx.y;
@@ -408,8 +423,7 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const uint16_t* qw
   const float* value = kv + ((uint64_t) t * (hc + 1) + hc) * dim;
   float sh = 0, sk = 0, dot = 0;
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
-    const float w = __uint_as_float((uint32_t) qw[(uint64_t) k * dim + d] << 16) *
-                    __uint_as_float((uint32_t) kw[(uint64_t) k * dim + d] << 16);
+    const float w = gw[(uint64_t) k * dim + d];
     sh += hk[d] * hk[d], sk += key[d] * key[d], dot += (hk[d] * w) * key[d];
   }
   sh = block_sum(sh, lds), sk = block_sum(sk, lds), dot = block_sum(dot, lds);
@@ -615,12 +629,13 @@ extern "C" bool ops_rms_x16(const float* x, uint32_t n, uint32_t xs, const float
 }
 
 extern "C" bool ops_kv_finish(float* kv, uint32_t head_dim, const float* w, float eps, uint32_t rope_dim,
-                              const float* freqs, const int32_t* pos, float* ring, uint32_t slots, uint32_t n_tok,
-                              void* stream) {
+                              const float* freqs, const int32_t* pos, void* ring, uint32_t slots, float* q,
+                              uint32_t q_heads, uint32_t n_tok, void* stream) {
   if (!kv || !w || !ring || !slots || !n_tok || !head_dim || head_dim > OPS_MAX_KV_DIM ||
-      head_dim % rnd::kFp8Block || rope_dim > head_dim || rope_dim % 2)
+      head_dim % rnd::kFp8Block || rope_dim > head_dim || rope_dim % 2 || (q && !q_heads))
     return false;
-  kv_finish_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kv, head_dim, w, eps, rope_dim, freqs, pos, ring, slots);
+  kv_finish_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kv, head_dim, w, eps, rope_dim, freqs, pos, (uint8_t*) ring,
+                                                       slots, q, q_heads);
   return ok();
 }
 
@@ -719,11 +734,11 @@ extern "C" bool ops_rope(float* x, uint32_t heads, uint32_t head_dim, uint32_t r
   return ok();
 }
 
-extern "C" bool ops_engram_gate(float* h, const float* kv, const void* q_w, const void* k_w, uint32_t hc, uint32_t dim,
-                                float eps, uint32_t n_tok, void* stream) {
-  if (!hc || hc > OPS_MAX_HC || !dim || !n_tok) return false;
-  engram_gate_kernel<<<dim3(hc, n_tok), kThreads, 0, st(stream)>>>(h, kv, (const uint16_t*) q_w, (const uint16_t*) k_w,
-                                                                    hc, dim, eps, (float) std::pow((double) dim, -0.5));
+extern "C" bool ops_engram_gate(float* h, const float* kv, const float* gate, uint32_t hc, uint32_t dim, float eps,
+                                uint32_t n_tok, void* stream) {
+  if (!hc || hc > OPS_MAX_HC || !dim || !n_tok || !gate) return false;
+  engram_gate_kernel<<<dim3(hc, n_tok), kThreads, 0, st(stream)>>>(h, kv, gate, hc, dim, eps,
+                                                                    (float) std::pow((double) dim, -0.5));
   return ok();
 }
 

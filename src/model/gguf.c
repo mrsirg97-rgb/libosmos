@@ -5,50 +5,53 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "substrate/model/gguf.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/qtype.h"
 #include "gguf_read.h"
 
 #define GGUF_MAGIC 0x46554747u
 #define GGUF_VERSION 3
 #define GGUF_ALIGN 32
 
-typedef struct
+static bool gguf_signed(GgufValueType t)
 {
-  uint32_t type;
-  uint32_t block;
-  uint32_t bytes;
-} TypeSize;
+  return t == GGUF_INT8 || t == GGUF_INT16 || t == GGUF_INT32 || t == GGUF_INT64;
+}
 
-/* the types this model's files hold (DESIGN.md); anything else is refused */
-static const TypeSize types[] = {
-    {0, 1, 4},     /* F32 */
-    {8, 32, 34},   /* Q8_0 */
-    {13, 256, 176}, /* Q5_K */
-    {14, 256, 210}, /* Q6_K */
-    {16, 256, 66},  /* IQ2_XXS */
-    {17, 256, 74},  /* IQ2_XS */
-    {20, 32, 18},   /* IQ4_NL */
-    {26, 1, 4},     /* I32 */
-    {27, 1, 8},     /* I64 */
-    {29, 256, 56},  /* IQ1_M */
-    {30, 1, 2},     /* BF16 */
-};
-
-
-static const TypeSize *type_size(uint32_t type)
+bool gguf_int(const GgufKv *kv, size_t i, int64_t *out)
 {
-  for (size_t i = 0; i < sizeof types / sizeof types[0]; i++)
-    if (types[i].type == type)
-      return &types[i];
-  return NULL;
+  if (kv->type != GGUF_ARRAY)
+  {
+    if (!gguf_signed(kv->type) && kv->v.u > INT64_MAX)
+      return false;
+    *out = gguf_signed(kv->type) ? kv->v.i : (int64_t)kv->v.u;
+    return true;
+  }
+  const void *p = kv->v.items;
+  switch (kv->item)
+  {
+  case GGUF_UINT8: *out = ((const uint8_t *)p)[i]; return true;
+  case GGUF_INT8: *out = ((const int8_t *)p)[i]; return true;
+  case GGUF_UINT16: *out = ((const uint16_t *)p)[i]; return true;
+  case GGUF_INT16: *out = ((const int16_t *)p)[i]; return true;
+  case GGUF_UINT32: *out = ((const uint32_t *)p)[i]; return true;
+  case GGUF_INT32: *out = ((const int32_t *)p)[i]; return true;
+  case GGUF_INT64: *out = ((const int64_t *)p)[i]; return true;
+  case GGUF_UINT64:
+    if (((const uint64_t *)p)[i] > INT64_MAX)
+      return false;
+    *out = (int64_t)((const uint64_t *)p)[i];
+    return true;
+  default: return false;
+  }
 }
 
 uint64_t gguf_bytes(uint32_t type, uint64_t values)
 {
-  const TypeSize *t = type_size(type);
-  if (!t || values % t->block)
+  const QTypeInfo *t = qtype_info(type); /* the types a file may hold (qtype.h); anything else is refused */
+  if (!t || !(t->paths & QTYPE_FILE) || values % t->values)
     return 0;
-  const uint64_t blocks = values / t->block;
+  const uint64_t blocks = values / t->values;
   if (blocks > UINT64_MAX / t->bytes)
     return 0;
   return blocks * t->bytes;
@@ -128,10 +131,10 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
     }
     if (!gguf_u32(r, &x->type) || !gguf_u64(r, &x->offset))
       return false;
-    const TypeSize *ts = type_size(x->type);
-    if (!ts)
+    const QTypeInfo *ts = qtype_info(x->type);
+    if (!ts || !(ts->paths & QTYPE_FILE))
       return gguf_fail(r, "a tensor type this build does not know");
-    if (x->dims[0] % ts->block || !(x->bytes = gguf_bytes(x->type, values)))
+    if (x->dims[0] % ts->values || !(x->bytes = gguf_bytes(x->type, values)))
       return gguf_fail(r, "a tensor's rows are not whole blocks");
     if (x->offset % align)
       return gguf_fail(r, "a tensor's offset is not aligned");
@@ -148,6 +151,15 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
     }
     x->offset += data;
   }
+  /* no two tensors' bytes overlap (a type read as more bytes than the file gives it runs into the next: upstream's
+     43, F8_E4M3, taken for unsloth's MXFP8) */
+  for (size_t i = first; i < g->n_tensors; i++)
+    for (size_t j = i + 1; j < g->n_tensors; j++)
+    {
+      const GgufTensor *a = &g->tensors[i], *b = &g->tensors[j];
+      if (a->offset < b->offset + b->bytes && b->offset < a->offset + a->bytes)
+        return gguf_fail(r, "two tensors' bytes overlap");
+    }
   return true;
 }
 
@@ -182,7 +194,7 @@ static bool open_file(Gguf *g, int file, const char *path, char *err, uint64_t *
   return ok;
 }
 
-Gguf *gguf_create(const char *path, char err[GGUF_ERR])
+static Gguf *create(const char *path, bool siblings, char err[GGUF_ERR])
 {
   if (err)
     err[0] = 0;
@@ -203,7 +215,7 @@ Gguf *gguf_create(const char *path, char err[GGUF_ERR])
     gguf_destroy(g);
     return NULL;
   }
-  if (count > 1)
+  if (count > 1 && siblings)
   {
     Reader r = {NULL, path, 0, 0, err};
     if (no != 0 || count > 999 || !strstr(path, "-00001-of-"))
@@ -256,6 +268,16 @@ Gguf *gguf_create(const char *path, char err[GGUF_ERR])
         return NULL;
       }
   return g;
+}
+
+Gguf *gguf_create(const char *path, char err[GGUF_ERR])
+{
+  return create(path, true, err);
+}
+
+Gguf *gguf_header(const char *path, char err[GGUF_ERR])
+{
+  return create(path, false, err);
 }
 
 void gguf_destroy(Gguf *g)

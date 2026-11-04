@@ -16,12 +16,14 @@
 #include <thread>
 #include <vector>
 
+#include "test_model.h"
+
 extern "C" {
-#include "substrate/cpu/lane.h"
-#include "substrate/cpu/q8.h"
-#include "substrate/gpu/ops.h"
-#include "substrate/gpu/q8.h"
-#include "substrate/model/gguf.h"
+#include "osmos/cpu/lane.h"
+#include "osmos/cpu/q8.h"
+#include "osmos/gpu/ops.h"
+#include "osmos/gpu/q8.h"
+#include "osmos/model/gguf.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -110,10 +112,10 @@ static void layer(const Gguf* g, int l) {
   for (float lim : {0.75f, 1e30f}) {
     // the GPU lane's steps
     CHECK(q8_round(dx, kRows, D, D, dq, dd, nullptr) &&
-          q8_gate_up(type[0], (const void* const*) dtab, (const void* const*) dtab + kNe, dcnt, dxrow, kNe, 3, FF, D, dq,
+          q8_gate_up(type[0], (const void* const*) dtab, (const void* const*) dtab + kNe, dcnt, dxrow, nullptr, nullptr, kNe, 3, FF, D, dq,
                      dd, dsc, lim, dh, FF, nullptr) &&
           q8_round(dh, kRows, FF, FF, dqh, dhd, nullptr) &&
-          q8_group_tok(type[2], (const void* const*) dtab + 2 * kNe, dcnt, dxrow, kNe, 3, D, FF, dqh, dhd, dy, D,
+          q8_group_tok(type[2], (const void* const*) dtab + 2 * kNe, dcnt, dxrow, nullptr, kNe, 3, D, FF, dqh, dhd, dy, D,
                        nullptr) &&
           hipDeviceSynchronize() == hipSuccess);
     std::vector<float> ref((size_t) kRows * D), got(ref.size());
@@ -142,19 +144,20 @@ static void layer(const Gguf* g, int l) {
 
 int main() {
   std::printf("[test_cpu_lane_gpu] start\n");
-  const char* home = std::getenv("HOME");
   char path[512];
-  std::snprintf(path, sizeof path, "%s/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
-                home ? home : "");
+  const TestModel which = test_model(path, sizeof path);
   int ndev = 0;
-  if (access(path, R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0 || !cpu_q8_ready()) {
-    std::printf("[test_cpu_lane_gpu] skipped: no ds1017, no GPU or no AVX-512 VNNI\n");
+  if (which == TestModel::kNone || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0 || !cpu_q8_ready()) {
+    std::printf("[test_cpu_lane_gpu] skipped: no ds1017 or UD-IQ1_M, no GPU or no AVX-512 VNNI\n");
     return 77;
   }
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
-  for (int l : {0, 10, 17}) layer(g, l);  // IQ1_M; IQ2_XXS; IQ2_XS gate and up, IQ1_M down
+  if (which == TestModel::kUd)
+    for (int l : {0, 5, 20, 38}) layer(g, l);  // IQ1_S; IQ1_S gate and up, IQ2_XXS down; IQ2_XXS, IQ2_S down; IQ2_XS
+  else
+    for (int l : {0, 10, 17}) layer(g, l);  // IQ1_M; IQ2_XXS; IQ2_XS gate and up, IQ1_M down
   gguf_destroy(g);
   std::printf("[test_cpu_lane_gpu] ok\n");
   return 0;

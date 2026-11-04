@@ -1,4 +1,4 @@
-# libsubstrate: design
+# libosmos: design
 
 a runtime for one machine, the AMD Ryzen AI Halo (Ryzen AI MAX+ 395, Radeon 8060S, 128 GB unified memory), built
 first for DeepSeek-V4.1-Flash-1017. status: **design** (AGENTS.md workflow step 1). nothing here is implemented.
@@ -357,8 +357,8 @@ up to ~40% from process to process (one 8,192 run gave 219, the next 313): only 
   A/Bs of this list compared against a baseline that `make lib` - a directory, always up to date - had not rebuilt,
   so their "before" was the day's start, not the commit before): 96945ea 310, a9eca19 312, 88fef1d 328, 955db80
   348, b1065b0 370, the experts at once 409 tok/s. the commits' messages for 955db80 and b1065b0 state the gain
-  since the day's start as the commit's own. a baseline is built by its library files (`make lib/libsubstrate.a
-  lib/libsubstrate_hip.a`), never `make lib`.
+  since the day's start as the commit's own. a baseline is built by its library files (`make lib/libosmos.a
+  lib/libosmos_hip.a`), never `make lib`.
 - the matmuls after it (scratch `mmd.hip`, `exg.hip`; 2,048 tokens): the dense ones 26-32 TFLOP/s but q_b's 19.6
   (K 1,280 under 8 waves' split, 2,048 row tiles each re-reading the x16, 10.7 GB at ~1.2 TB/s); the IQ experts at
   128 tokens 34 TFLOP/s, and not bound by their x16 (every expert on one x: 33.7 -> 32.3 ms). tried and given up:
@@ -536,14 +536,14 @@ still in the window).
 - **against maya, on the same prompts** (maya's --bench: its warm-up and three questions, its own token ids -
   `<|begin|><|User|>q<|Assistant|></think>`, 10 / 28 / 19 / 21 tokens - greedy, up to 256 tokens; scratch
   `mbench.hip`, budget 80 GB with the profile, each mode in a fresh process, 2 rounds): maya 1.1.41 DSpark 27.5 / 23.3
-  / 28.3 tok/s (mean 26.4), no drafting 16.7 / 16.6 / 16.8 (16.7); substrate DSpark 16.2-16.3 / 14.4-14.9 / 18.6-19.1
+  / 28.3 tok/s (mean 26.4), no drafting 16.7 / 16.6 / 16.8 (16.7); osmos DSpark 16.2-16.3 / 14.4-14.9 / 18.6-19.1
   (16.6), plain 9.4-9.6 / 10.1-10.3 / 10.0-10.2 (9.9) - the drafted answers the plain ones token for token. ~60% of
   maya both ways; DSpark 1.7x here (maya 1.6x).
 - **a correction**: the first numbers here (256 tokens after a 512-token prompt: 21.8 / 26.0 tok/s, "1.9-2.2x the best
   plain") ran the drafted decode after the plain one on the same prompt in one process - the resident set had
   already followed that very answer (hip_adapt.c), its misses gone. the same on maya's prompts: 26.3 / 20.4 / 28.4
-  tok/s, within ~5% of maya's DSpark. so what parts substrate from maya on a fresh prompt is the experts it reads from
-  the files (maya holds ~104 GB of experts in GPU memory and computes the rest on the CPU from RAM; substrate's GPU
+  tok/s, within ~5% of maya's DSpark. so what parts osmos from maya on a fresh prompt is the experts it reads from
+  the files (maya holds ~104 GB of experts in GPU memory and computes the rest on the CPU from RAM; osmos's GPU
   memory is at the ~107 GB cap: the trunk's 80-88, the drafter's 8, the scratch's ~9), not the kernels or the drafter.
   a round's time is the verify's (the trunk's batch of 3-6 rows: more distinct experts a step, so more misses).
 - what the misses are, on maya's prompts (code, prose, HTML; fresh processes, DSpark, budget 80 GiB):
@@ -567,7 +567,7 @@ still in the window).
   - **and the floor**: 40 layers all resident would decode at ~68 ms a token, slower than maya's whole plain decode
     (~60 ms, its misses in): the matmuls at one token (~120 GB/s of ~200) and the small kernels between are the other
     part. maya holds ~104 GB of experts in GPU memory and computes a few percent on the CPU from the page cache (no
-    copy of them twice); substrate has no CPU lane (determinism's rule 1).
+    copy of them twice); osmos has no CPU lane (determinism's rule 1).
 
 ## the lane: a decode's experts in the matvec's order (operator, 2026-10-30)
 
@@ -673,7 +673,7 @@ of the lane bit for bit).
   prompt's buffers in the resident set's tail (its last arenas, the least-ranked experts: re-read after) - ~1.2 s
   of reads a prompt, not built.
 
-- **the lane's experts over int8 inputs** (2026-11-01; kernels/q8.h, include/substrate/gpu/q8.h): a kernel-by-kernel
+- **the lane's experts over int8 inputs** (2026-11-01; kernels/q8.h, include/osmos/gpu/q8.h): a kernel-by-kernel
   profile of both decodes (rocprofv3, maya's first question, 256 tokens, 101 GiB, no drafter) - the dense matrices
   ours ~26 ms a token against maya's ~31, but the routed experts ours 19.5 ms (~81 us an expert, ~105 GB/s) against
   maya's ~12 for the ~85-90% it runs on the GPU (~57 us, ~150 GB/s). maya rounds an expert's input to int8 a block of
@@ -695,7 +695,7 @@ of the lane bit for bit).
   understood. the third question's tokens are the F32 lane's; the others' differ (the lane's numbers changed, by
   design: rule 1 kept, the prompt's WMMA unchanged).
 
-- **the CPU's half of the int8 contract** (2026-11-01; src/cpu/q8.c, include/substrate/cpu/q8.h): cpu_q8_round
+- **the CPU's half of the int8 contract** (2026-11-01; src/cpu/q8.c, include/osmos/cpu/q8.h): cpu_q8_round
   and cpu_q8_rows, q8_round's and q8_group_tok's bits on AVX-512 (F, BW, VL, DQ, VNNI, VBMI, BMI2; cpu_q8_ready,
   else both refuse). 16 blocks of a row at a time: their codes decoded once (64 values a vector - magnitudes as
   bytes, the negatives a 64-bit mask), then for each token x negated under the mask and vpdpbusd'd (exact), a
@@ -761,7 +761,7 @@ of the lane bit for bit).
   the same: dense ~29.9 / 30.3, attention 1.8 / 1.8, hyper-connections ~2.3 / 2.4, router ~0.8 / 0.8, ~1,740 / 1,690
   launches; its routed experts on the GPU ~10.5 against our 12.7 (ours the misses' too). the gap is the misses
   alone: its CPU lane's 5.3 against our reads' ~8.5-9.4. and the bench had built our resident set by id (no
-  picks): forward_create_ranked's profile (`substrate-picks.bin`, the 16K-token real-text count, nothing of the
+  picks): forward_create_ranked's profile (`osmos-picks.bin`, the 16K-token real-text count, nothing of the
   bench's questions) at 106 GiB, interleaved fresh runs: 16.7 / 15.2 / 14.9, 16.9 / 15.9 / 15.9 tok/s against by
   id 15.2 / 14.9 / 15.3, 15.5 / 15.0 / 15.4 - +4.7% (15.9 against 15.2), the streams the same bits. ranked is the
   comparison with maya (which ranks its own); the profile stays the caller's.
@@ -1003,9 +1003,9 @@ the same SIMD, so the floor is their sum (a real layer's gate: ~8.5 ms of decode
 ## determinism (operator, 2026-10-28)
 
 maya's prompt path is not run-to-run deterministic on this box: two runs of the bar's maya-ds4 on the same 32 real
-tokens (`~/substrate-oracle`, `dumpcmp.py layers`) part from layer 0 (worst 1.1e-8 at position 8) and grow - layer
+tokens (`~/osmos-oracle`, `dumpcmp.py layers`) part from layer 0 (worst 1.1e-8 at position 8) and grow - layer
 10 median 1.3% (worst 18%), layers 30-38 median 4-7% - to logits KL 2.5e-3 mean, 1.4e-2 max, the argmax the same at
-32 of 33 positions (the 4 greedy tokens the same). substrate diverges from maya here:
+32 of 33 positions (the 4 greedy tokens the same). osmos diverges from maya here:
 
 1. **run-to-run determinism - a rule.** the same request on the same build gives the same bits, every run: no
    floating-point atomics, a fixed reduction order in every kernel, hipBLASLt solutions taken only where
@@ -1025,15 +1025,15 @@ tokens (`~/substrate-oracle`, `dumpcmp.py layers`) part from layer 0 (worst 1.1e
   never the runtime). fixed here: maya's `ref_gguf.py` reads Engram rows as Q6_K or MXFP8 only, and this model's are
   **IQ4_NL** (144 B a row) - read as MXFP8 they would be silently wrong. the weights' types it covers through gguf-py
   (IQ1_M, IQ2_XXS, IQ2_XS, Q5_K, Q6_K, Q8_0, IQ4_NL, BF16: checked).
-- **measured, the first 8 positions of 32 real tokens** (`~/substrate-oracle`: `ref_gguf.py --dev cpu`, 334 s for 8
+- **measured, the first 8 positions of 32 real tokens** (`~/osmos-oracle`: `ref_gguf.py --dev cpu`, 334 s for 8
   tokens): KL(reference || maya) 0.0002-0.018 a position, maya against itself 0-0.0057; the argmax the reference's at
-  7 of 8 (position 6: 67 against 75). substrate's numerics target: bit for bit run to run, and at least as close to
+  7 of 8 (position 6: 67 against 75). osmos's numerics target: bit for bit run to run, and at least as close to
   the reference as maya is (int8 activations and FP16 prompt GEMMs put maya a few times its own spread away).
-- fixed to read this model, besides the Engram rows (each `# substrate:` in `oracle/ref_gguf.py`): the embedding is
+- fixed to read this model, besides the Engram rows (each `# osmos:` in `oracle/ref_gguf.py`): the embedding is
   Q5_K, not Q8_0; the Engram gate is `q_weight` and `k_weight`, not folded. maya's `ref_gguf.py` would have read the
   Engram rows wrong silently and refused the other two; all three are fixes to offer maya.
 - **the bar and a sanity check: maya-ds4's dumps** - `DS4_DUMP_L` (every layer's residual streams), `DS4_DUMP_R`
-  (routing), `DS4_DUMP_Y` (expert sets), `--dump-logits`. substrate writes the same records (`dumpcmp.py` unchanged);
+  (routing), `DS4_DUMP_Y` (expert sets), `--dump-logits`. osmos writes the same records (`dumpcmp.py` unchanged);
   against maya it must stay within maya's own run-to-run spread, measured per layer.
 
 ## splash's bets, and what each is worth here
@@ -1120,6 +1120,1100 @@ HTTP API, and the reference is measured through the same harness:
   <finish> ... <reused>` (field 9), `ERR <rid> <reason>`; `STAT` / `NOTE` / `INFO` / `VRAM` lines.
 - the exact field list is taken from maya's `ds4_main.cpp` at schema time.
 
+## UD-IQ1_M: the repack (inventory, 2026-11-02)
+
+the operator's call: run unsloth's `DeepSeek-V4.1-Flash-1017-GGUF` UD-IQ1_M, a better quant at about the same size.
+maya's scorer puts it at **KLD 0.198, 90.3% the same top token** as the original (`maya.py`, its `gguf-iq1_m` text;
+the scale of its Q8 0.047, UD-IQ3_S 0.061, Maya-S 0.119). GSQ-RCO has no number on that scale: **the gap is
+unmeasured**. the first step is both through the oracle on the same tokens (`compare.py`: KL, top-1), before any kernel.
+
+read from the 5 shards' tensor directories and metadata only (`~/Models/ds1017/UD-IQ1_M`, shards 2-5 mid-download;
+a GGUF's directory is at its start, no tensor data read). nothing was run.
+
+### what changes
+
+| part | GSQ-RCO (built for) | UD-IQ1_M | here |
+| --- | --- | --- | --- |
+| experts gate / up | IQ1_M 16, IQ2_XXS 17, IQ2_XS 7 | **IQ1_S 20**, IQ2_XXS 18, IQ2_XS 2 | IQ1_S new |
+| experts down | IQ1_M 28, IQ2_XXS 8, IQ2_XS 4 | IQ2_XXS 15, **IQ2_S 10**, IQ2_XS 10, **IQ1_S 5** | IQ2_S, IQ1_S new |
+| shared experts | | Q8_0 (27 layers), Q5_K (13) | have |
+| attention q / kv / output, head | | Q6_K | have |
+| compressors, indexer | BF16 | BF16 | have |
+| embedding | Q5_K | Q8_0 | have |
+| Engram tables | `engram_embd` a layer, IQ4_NL, own GGUF | one `per_layer_token_embd` [256, 768,022,850], IQ4_NL, in the backbone | the slicing new |
+| Engram kv | `engram_wkv` Q5_K | `engram_kv` [6144, 25600] Q6_K | have (the name new) |
+| Engram gate | `engram_q`, `engram_k` BF16 | `engram_gate` [5120, 4] F32, q·k folded | the folded form new |
+| Engram hash | I32 / I64 tensors | `ple.*` metadata | the reader new |
+| DSpark | maya's pack | not in the files (40 blocks; `dspark.*` metadata only) | maya's pack, as now |
+
+despite the name there is **no IQ1_M** in it: its 1-bit experts are IQ1_S.
+
+**the sizes**: experts 132.2 GB (IQ2_XXS 59.6, IQ1_S 39.8, IQ2_XS 18.3, IQ2_S 14.5), against GSQ-RCO's ~132 GB; the
+Engram tables 110.6 GB (768,022,850 rows of 144 B), as before. the budget picture is unchanged in total; per layer it
+is not, so the pick profile and the budget numbers do not carry over.
+
+### the work, by part
+
+1. **IQ1_S** (`block_iq1_s`: f16 `d`, `qs[32]`, `qh[8]` u16; 50 B a block of 256, 1.5625 bpw). `qh` carries a group
+   of 32's high index bits (3 for each 8), its 3-bit scale (`d * (2s + 1)`) and the delta's sign. the grid is
+   `kIq1sGrid`, already generated (`tools/gen_grids.py` asserts IQ1_M and IQ1_S share it). the lane's contract
+   (`kernels/lane.h`) extends as IQ1_M's: integer dot products on the grid's values, the delta as a separate term,
+   one scale a group of 32 instead of IQ1_M's packed ones. three places, as every expert type: the GPU decoder
+   (`kernels/quant.h`), the int8 expert kernels (`mm`, `q8`), the CPU lane (`src/cpu/expert.c`).
+2. **IQ2_S** (`block_iq2_s`: f16 `d`, `qs[64]`, `qh[8]`, `scales[8]`; 82 B, 2.5625 bpw). `qs`'s first 32 bytes are the
+   index's low 8 bits, the last 32 the **signs, stored** (not `kKsigns`); `qh` 2 high bits for each 8; a 4-bit scale
+   for each 16. its grid is its own: `kIq2sGrid` (1024 entries) to add to `gen_grids.py`; its values are the other
+   IQ2s' (0x08 / 0x19 / 0x2b). the same three places.
+3. **the metadata's spelling.** 17 keys `weights_geo.c` reads are not in this file:
+   `attention.candidate_{block_size,source_layer_id,topk_blocks}`, `dspark_target_layer_ids`,
+   `{index,kv}_source_layer_ids`, `expert_scoring_func`, `engram.{present,file,source,layer_ids,num_embeddings}`,
+   `engram_{compressed_vocab_size,head_dim,max_ngram_size,n_heads,pad_token_id}`. most are llama.cpp's newer names
+   for the same values (maya's `pack_gguf.py` `NEWER_KEYS` maps them: `attention.indexer.candidate_source_layer`,
+   `attention.kv_source_layers`, `dspark.target_layers`, ...). one geometry, two spellings read into it at the load
+   seam - not a second geometry.
+   - `expert_scoring_func` "sqrtsoftplus" is absent; the file has `expert_gating_func = 4`. **checked** (2026-11-03):
+     llama.cpp's `llama_expert_gating_func_type` at `272aad8b` (maya's vendored ref) has `SQRT_SOFTPLUS = 4`
+     (`src/llama-hparams.h`). the gating func is the field read; the scoring text, where present, must agree; any other
+     value refuses.
+   - the Engram hash from `ple.*` (maya's `ple_to_engram`): `ple.layers` [1, 14], `ple.ngram_size` 4,
+     `ple.heads_per_ngram` 8, `ple.layer_multipliers` (8: 2 layers x 4), `ple.head_vocab_sizes` (the primes, 48: 2
+     layers x 24 columns), `ple.head_offsets` counted **across** both layers' tables (a layer's own: minus its first).
+     a layer's rows: its last offset + last size - its first offset; head_dim from `embedding_length_per_layer_input`
+     (256). `engram.token_map` (129,280 ids), `engram.pad_token_id` 2, `engram.compressed_vocab_size` 99,092 are
+     metadata, not tensors. **checked against `engram_hash.py`'s derivation** (`10007 * layer` seeds, primes above
+     `engram.vocab_size - 1`): the 8 multipliers equal, the primes' first 6 equal, the derived rows 384,006,168 +
+     384,016,682 = 768,022,850, the tensor's. the reader checks the same at load: a mismatch refuses.
+   - `engram.file` / `engram.source`: there is no second file; the tables are the backbone's.
+4. **the Engram tables in one tensor.** each layer's table is a row range of `per_layer_token_embd`, the layers' in
+   `ple.layers` order (maya's `split_ple`: the same bytes, read in place). `rowread.h` reads in place already; only a
+   layer's base offset changes. the layers' rows must sum to the tensor's 768,022,850, or the load refuses.
+5. **the folded gate.** `engram_gate` is q·k as F32. a product of two BF16 values is exact in F32 (8-bit
+   significands, 16-bit product), so if the converter multiplied in F32 the folded weight is GSQ-RCO's q·k bit for
+   bit - **unverified** (no GSQ-RCO file on this unit). whether the old bits carry over also depends on the kernel's
+   order (`h·q·k` as `(h·q)·k` rounds differently from `h·(q·k)`). either way the guarantee is a model's own and holds.
+6. **DSpark** is not in the GGUF: `dspark.bin` / `dspark.json` from maya's pack, as now. correctness does not depend
+   on it (every draft is verified); its acceptance on this backbone is to measure.
+7. **the pick profile** recounted (`forward_picks` on the calibration text) and the budget re-measured.
+8. **the oracle.** gguf-py decodes IQ1_S and IQ2_S (`quants.py`), so `ref_gguf.py`'s weights are covered; its
+   `# osmos:` fixes need the UD spellings: embedding Q8_0, the gate folded, the tables sliced from
+   `per_layer_token_embd`. a new reference dump for `test_model_gpu`.
+9. **the paths.** the tests look in `~/models/ds1017`; the files are in `~/Models/ds1017/UD-IQ1_M`.
+
+### the order
+
+1. the quality, measured (the oracle, both quants, the same tokens) - it decides whether the rest is worth doing.
+2. schema: the geometry read from either spelling; the two types' ids in the type tables.
+3. tests that fail first: IQ1_S and IQ2_S decoded against gguf-py on real blocks, with mutations (a sign bit, the
+   delta's sign, a scale nibble) that must fail them; the CPU lane's bits equal the GPU's for both; the geometry read
+   from the UD file equal to a hand-written one; the Engram row ranges' sum checked; the fingerprints across batching,
+   budget, drafting and CPU / GPU on the new model.
+4. the kernels, then the numbers against maya on this file (maya runs it: `--ds4-quant gguf-iq1_m`).
+
+### the box
+
+this is the second unit: **all 16 cores online** (the protocol's "core 1 offline" was the first unit's). the bar is
+re-measured here before any comparison.
+
+## another pack, another model: what to generalize (plan, 2026-11-03)
+
+the operator's question: does a second quant pack (UD-IQ1_M, the Coder) or a second model (GLM-5.3, `ox-alpha`) need
+the code generalized first. the answer: the quant types yes, the model no.
+
+### what a second pack touches today
+
+- **a type is spelled four times**: weights.c's enum, `quant::k*` (`kernels/quant.h`), `GGUF_*` (`src/cpu/expert.c`),
+  `LANE_Q8_*` (`kernels/lane.h`). 15 `switch` on a type (`mm.hip` 4, `mv.hip` 3, `quant.hip` 3, `q8.hip` 2, `ops.hip`
+  1, `src/cpu/expert.c` 1, `src/cpu/q8.c` 1); four lists of what a path takes (`mm_known`, `quant_known`,
+  `cpu_mv_known`, `lane_q8_type`); block bytes written inline (`src/cpu/q8.c`: 66 / 74 / 56). a new type is edits in
+  about a dozen files, and nothing says one was missed.
+- **roles pin GSQ-RCO's types**, not what the kernels run: `token_embd` Q5_K, `attn_output_b` Q6_K, experts
+  `IQ1_M|IQ2_XXS|IQ2_XS`. UD's embedding is Q8_0 and the Coder's `attn_output_b` Q5_K: each refused, on a type every
+  path already runs.
+- **the metadata has one spelling** (`deepseek41.*` as maya's pack writes it).
+- the expert count is metadata everywhere (`OPS_MAX_EXPERTS` 1024): 192 needs nothing.
+- `mem/`, the kernels and the lane name DeepSeek only in comments.
+
+### the plan
+
+1. **one type table.** each ggml type this build runs, once: its id, a block's elements and bytes, the paths that take
+   it (GPU decode, matvec, int8 matmul, the CPU lane). the four enums, the known-lists and the inline sizes become
+   projections of it; a test fails when a path the table names has no case for a type. a pure refactor: the
+   fingerprints before and after equal, the proof nothing moved.
+2. **roles by capability.** a role names the path it is read by (dense matvec, an expert's int8 matmul, an Engram row
+   read) and the shape; the loader takes any type the table gives that path. a type no path takes still refuses, the
+   role and the type named. shapes stay pinned.
+3. **one geometry, two spellings.** an alias table at the load seam: maya's names and llama.cpp's newer ones for each
+   field. read once; both present and unequal refuses; derived values (the Engram vocab sizes, a layer's rows)
+   computed and checked against the file's, as the UD section's item 3.
+4. **the model stays one.** no model interface until a second model is built. GLM-5.3 (`glm5-next`: 34 KDA
+   linear-attention layers, 12 MLA + indexer, 288 experts top-8 sigmoid, nextn MTP, no Engram) would share the type
+   table, the memory and the expert kernels, not the forward pass; an interface drawn now, from one model, would be
+   drawn wrong. what is free now: the DeepSeek-specific code under one name (`model/deepseek41/` when it moves), the
+   gating function a geometry field rather than a constant in the router.
+
+### the Coder first (read 2026-11-03, download complete)
+
+`Abiray/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-Coder-GGUF`, `~/Models/ds1017-coder`: 192 experts (pruned), 6
+used; backbone shards 1-5 72.1 GB, Engram shard 6 110.6 GB, an mmproj (not read).
+
+| part | the Coder | needs |
+| --- | --- | --- |
+| experts | IQ1_M / IQ2_XXS / IQ2_XS, GSQ-RCO's mix | nothing new |
+| metadata | llama.cpp's newer spelling (`attention.kv_source_layers`, `attention.indexer.source_layers`, `attention.indexer.candidate_{source_layer,top_k_blocks,block_size}`); gating func 4, no scoring text; the hash in `ple.*` | plan 3 |
+| Engram tables | one `per_layer_token_embd` IQ4_NL [256, 768,022,850] in shard 6, as UD's | UD item 4 |
+| Engram gate / kv | `engram_gate` F32 [5120, 4] folded; `engram_kv` Q5_K (UD's Q6_K) | UD item 5 |
+| `attn_output_b` | Q5_K (pinned Q6_K) | plan 2 |
+| `exp_probs_b_vl.bias` | F32 [192], all 40 layers (UD has it too) | a role, checked, not read |
+
+`exp_probs_b_vl` is the router's bias for image tokens: llama.cpp's `deepseek41.cpp` uses it only for a batch of
+embeddings. this build runs text, so it is a role whose shape is checked and whose bytes are never read, not an
+exception to "a tensor this build does not know".
+
+the Coder is UD's items 3-5 without items 1-2: the half of the repack that needs no kernel, on a model whose
+backbone fits in GPU memory whole. UD then adds IQ1_S and IQ2_S to a load path already proven. its quality is as
+unmeasured as UD's: pruned to 192 experts, it goes through the oracle the same way.
+
+### the order, revised (operator, 2026-11-03)
+
+the operator's call: **UD-IQ1_M first** (the quant most people want), **the GSQ-RCO path kept**. the Coder is off this
+box, and the GSQ-RCO set never was on it (`~/models/ds1017` absent: every model test skips here, exit 77). so:
+
+- **the GSQ-RCO path is kept, not proven end to end here.** its types stay in the table; the CPU tests (each type's
+  bits on generated blocks: `test_cpu_q8`, `test_cpu_lane`) and the GPU kernel tests that need no model hold it. its
+  fingerprints wait for its files (ISTA-DASLab `cb02422c`, 249 GB, a download the operator has not asked for). said,
+  not assumed: a refactor here is proven by the kernel tests, not by the model's fingerprints.
+- **UD-IQ1_M is proven against the oracle and maya**, as the UD section's order: gguf-py decodes IQ1_S and IQ2_S
+  (the oracle's weights), maya runs this file (`maya-ds4-hip.json`, its dumps the bar and the sanity check).
+
+1. schema: the type table (`include/osmos/model/qtype.h`): each type once, its id, a block's values and bytes, the
+   paths that read it. tests: each path the table names takes the type (a GPU call on a block of it is not refused),
+   and every table today agrees with it - a mutation (a path named, its case removed) must fail them.
+2. the projection: `gguf.c`'s sizes, `weights.c`'s enum and masks, `quant::Type`, the lane's and the CPU's ids, the
+   known-lists from the table. the kernel tests unchanged, the CPU lane's bits unchanged.
+   **done (2026-11-03)**: the kernel tests on real blocks skip here (they read ds1017), so the proof is the build's:
+   every kernel's GPU code (`.hip_fatbin`: mv, mm, q8, quant, ops, attn, sparse_attn, round) byte for byte the
+   commit before's, and every host object's `.text` the same but three, each changed by design and tested -
+   `gguf.o` (sizes from the table: test_qtype's sweep, test_gguf), `quant.o` and `mm.o` (`quant_known`, `mm_known` the
+   table's: test_qtype_gpu's sweep calls the kernels). `weights.o` the same bytes: its rename proven where test_weights
+   skips. left as they are: the kernels' own `switch`es (a case each type; test_qtype_gpu finds one missing), Q5_KR
+   (the forward's repack, no file's type) and `DECODE`'s fall-through to IQ1_M in `src/cpu/q8.c` (a new type there
+   needs its own arm).
+3. IQ1_S and IQ2_S: rows in the table, then their decoders against gguf-py on real blocks of the UD file, the lane's
+   contract for both, the CPU lane's bits the GPU's.
+   **done (2026-11-03)**: `kIq2sGrid` from gguf-py (`gen_grids.py`; the file regenerated byte for byte first), the
+   rows (IQ1_S 19, 50 B; IQ2_S 22, 82 B), each path: the decode, the matvecs, the matmul, the lane's int8 experts
+   (IQ1_S IQ1_M's 8 grid +- 1 with one s and one delta sign a 32; IQ2_S IQ2_XS's with its grid and the signs stored -
+   on the CPU the pair's 8 sign bytes are its negatives' mask as they are), the CPU lane's both. the tests on the UD
+   file where ds1017 is not (`tests/gpu/test_model.h`): test_quant_gpu bit for bit gguf-py's on every type the table
+   decodes (IQ1_S and IQ2_S 3.67 M values each; IQ1_M not checked: no UD tensor), test_mv_gpu and test_mm_gpu within
+   their bounds and schedule-invariant on 17 and 11 UD matrices, test_q8_gpu the contract's bits against the host's
+   replay (IQ1_S's and IQ2_S's written from gguf-py's layout, not the kernel's), test_cpu_expert_gpu,
+   test_cpu_q8_gpu and test_cpu_lane_gpu the CPU's bits the GPU's on four UD layers' type mixes. 12 GPU tests run
+   here, 6 before. `DECODE`'s fall-through to IQ1_M is gone: an arm a type, else abort.
+   - **found**: test_cpu_q8's loop ran its first 3 types whatever the list (`i < 3`): the new two passed untested
+     until it took the list's length.
+   - **found**: UD's router (`ffn_gate_inp`) is **F32**, GSQ-RCO's BF16 - a role's type for step 4.
+   - **to measure**: the new types' launch shapes are their sibling's (IQ1_M's, IQ2_XS's), not measured. IQ1_S is
+     the slow one: an expert's matvec ~75-80 GB/s at 1 token (the IQ2s 120-137), the matmul 43-53 (the IQ2s 75-108).
+4. the UD file's load: roles by path, the alias table, the Engram slices, the folded gate, `exp_probs_b_vl`.
+   read 2026-11-03 from the file (all 62 `deepseek41.*` keys) and the code that reads it; four parts, in order:
+   - **4a, the geometry.** one `Geometry`, each field read once from a key or its alias (maya's spelling, then
+     llama.cpp's: `kv_source_layer_ids` / `attention.kv_source_layers`, `index_source_layer_ids` /
+     `attention.indexer.source_layers`, `dspark_target_layer_ids` / `dspark.target_layers`,
+     `attention.candidate_{topk_blocks,block_size,source_layer_id}` / `attention.indexer.candidate_{top_k_blocks,
+     block_size,source_layer}`, the Engram's below); both present and unequal refuses; an integer key read at its own
+     width (UD's `candidate_source_layer` is INT32, the reader asked UINT32). `expert_scoring_func`, where present,
+     must be "sqrtsoftplus"; `expert_gating_func` 4 is the field. the Engram from `ple.*`: layers `ple.layers`, heads
+     `ple.heads_per_ngram`, n-gram `ple.ngram_size`, head dim `embedding_length_per_layer_input`, pad
+     `engram.pad_token_id`, vocabulary `engram.compressed_vocab_size`, a layer's rows its columns' span (last offset
+     + last size - first offset); the Engram in the model's own files (no second Gguf, no `engram.source` to match).
+     test: the UD file's geometry equal to one written by hand from the dump above; each alias pair made unequal
+     refuses; a missing key of each refuses; GSQ-RCO's spelling (the same file's keys renamed in memory) gives the
+     same geometry.
+     **done (2026-11-03)**: `weights_geo.c`'s `lookup` (the 6 pairs; an error names both spellings), integers at any
+     width, `ple_engram` (the columns must tile from 0 in order, the layers ascending; neither `ple.layers` nor
+     `engram.present` refuses naming both). `test_geo` on the UD file: the geometry by hand (rows 384,006,168 +
+     384,016,682), ds1017's spelling the same, 2 unequal pairs and 11 missing keys refused, gating 2 refused, an
+     overlapping column refused. the compress ratios are 0 / 1 / 2 in this file and maya's pack of it alike
+     (`ds4.txt`), and the reference reads them literally (`ref.py`: 1 no pooling, 2 pairs): not a code to translate.
+     not proven here: ds1017's own Engram path (`engram.present`, the second file), unchanged but for the reader's
+     width and the error's wording.
+   - **4b, roles by path.** a role names the path that reads it (dense matvec, the experts' int8, an Engram row, a
+     vector read as F32) and its shape; any type the table gives that path. UD's own roles: `engram_kv` (GSQ
+     `engram_wkv`), `engram_gate` F32 [dim, hc] (GSQ `engram_q` x `engram_k`), `per_layer_token_embd` (the layers'
+     tables, sliced: its rows the layers' sum), `exp_probs_b_vl` (checked, never read: image routing). the router
+     F32 (GSQ BF16).
+     **done (2026-11-03)**: a role names its path - MAT (`fwd_mat`: the matvec, the matmul where it has one),
+     GROUPED (`mm_group` alone: wo_a), EXPERTS (by tokens and grouped), EMBED, ROWS (the Engram's decode) - or reads
+     raw and names its one type (norms, biases, the hyper-connections, the gate's halves or its fold, the hash
+     tensors). each form's Engram roles on its form's layers only (`ENGRAM_FILE` / `ENGRAM_OWN`, `geo.engram_own`);
+     wo_a's other spelling (UD's [4096, 8192] for [4096, 1024, 8]: the same bytes); the image bias optional and not
+     stored; the own form's tables `eg_slice`, each a layer's rows of per_layer_token_embd in order. found too:
+     `include/osmos/gpu/quant.h`'s `QUANT_Q5_K*`, a fifth copy of a type's numbers, now the table's.
+     test_weights on the UD file: every role (Q8_0 embedding, F32 router, 2-dim wo_a, IQ1_S / IQ2_S experts, the
+     gate folded, the slices tiling the tensor), 7 refusals (wo_a in BF16, the folded gate in BF16, the tables a row
+     long, an I32 router, IQ1_S experts called IQ2_XXS, the image bias short, engram_kv moved off its layer).
+     until 4c and 4d, the own form refuses loudly where it is run: `engram_create` (the hash) and `forward_create`
+     (the rows' file, the gate) say which step, rather than reading NULL.
+   - **4c, the hash.** `engram_create` from the tensors (GSQ) or the metadata arrays (UD: `engram.token_map`,
+     `ple.layer_multipliers`, `ple.head_vocab_sizes`, `ple.head_offsets` less each layer's first) into the one
+     `Engram`, its checks unchanged. test: both readers' rows the same for the same tokens (`engram_hash.py`'s rows
+     on the UD file).
+     **done (2026-11-03)**: `engram.c`'s `from_meta` (the offsets less each layer's first; the map an int32 an
+     entry, its length the vocabulary's); the integer reader one function, `gguf_int` (gguf.c), for it and the
+     geometry. `oracle/engram_rows.py` writes the reference: the layout, primes, offsets and multipliers from
+     DeepSeek's recipe (`engram_hash.py`), only the token map the file's (deriving it needs the tokenizers package);
+     the recipe's primes give the file's rows (384,006,168, 384,016,682). test_engram: 64 positions (seeded ids,
+     the vocabulary's ends and the pad among them), 48 rows each, every one the oracle's; a map entry past the
+     compressed vocabulary and an even multiplier refused. the token map itself is the file's, checked only for
+     range: an independent check of it needs the tokenizer.
+   - **4d, the forward.** one gate: an F32 [hc][dim] product, GSQ's folded at load (BF16 x BF16 is exact in F32: the
+     kernel's own product, the same bits), UD's read; the Engram rows from a layer's slice of the model's file.
+     **done (2026-11-03)**: `ops_engram_gate` takes the gate (F32); `gates()` builds each Engram layer's at load
+     (UD's read, ds1017's q k multiplied on the host) into its own device buffer, the raw q / k / gate tensors no
+     longer resident; `engram_fd` the rows' file (ds1017's second, or a dup of the model's shard holding
+     per_layer_token_embd). the gate's bits: the kernel with q, k before and with the host's fold after, on the same
+     seeded inputs (7 tokens x 4 streams x 5,120, a subnormal product among them) - the 143,360 outputs byte for
+     byte the same (a one-time check in the scratchpad: no repo test calls the gate alone; the forward's tests do,
+     on ds1017). `tools/bench/dbench.hip` takes `MODEL` (a first shard) and `ENGRAM` (where there is one) and
+     `IDS` (the answers' token ids). **UD-IQ1_M runs**: loaded in 16 s; greedy answers to maya's bench questions
+     read right (five greetings, a typed CSV parser with its docstring, photosynthesis step by step) at 12.1-13.3
+     tok/s - no picks profile, no CPU lane, no DSpark: not a number to compare yet (maya on this file: 18.0
+     undrafted, 29.3-29.9 drafted).
+5. the oracle and maya: the logits within maya's spread, then the numbers.
+   **the logits (2026-11-03)**: 32 real ids (the GPL-3 prompt's first, `~/osmos-oracle/ids32.txt`); the oracle
+   `ref_gguf.py --dev cpu` on maya's pack of the file (735 s; ppl 20.3), maya `maya-ds4 --ids --dump-logits` on the
+   same pack, test_model_gpu on the UD file (tests/gpu/test_model.h). before today's kernel changes: ours mean KL
+   0.046, maya's 0.272; argmax the oracle's 30 of 32 (both misses ties), maya's 29 (its position 18 KL 5.8); the lane
+   30 of 32 at 0.201; the logits bit for bit run to run and under 2,931 swaps. **position 18 is fragile**: after the
+   Q6_K shape below (any of the shapes tried) ours goes where maya's does there (KL 5.9; the stream from layer 21 on
+   ~10^3 the reference's largest at that position alone), while each layer forced onto the oracle's stream keeps its
+   error (<= 0.17, as before) - a rounding's turn amplified, not a layer's fault; the other 31 positions' mean KL
+   0.037-0.047 across the builds. one 32-token sample cannot rank builds whose sums differ: a longer evaluation is
+   what would (the oracle's ~12 min a 32 tokens on the CPU is the cost).
+   **the decode (2026-11-03; maya's three bench questions, 256 greedy tokens, an unrelated warm-up; drafting off on
+   both; maya's config with `--dspark off`: 16.6 / 17.0 tok/s, 16.8)**:
+   - by id 12.1-13.3; a profile (16,000 tokens: Strata's docs, the Apache and MPL licenses, Strata's Python,
+     maya's C++ - `~/Models/ds1017/UD-IQ1_M/osmos-picks.bin`, dbench `PICKS_OUT`) ranked at 106 GiB ~15.0.
+   - the budget: 110 GiB (this unit's GTT 113 GiB; 112 refused) 15.27 against 15.0 at 106, misses 3,479 / 4,368.
+   - the CPU lane on all 16 cores (the first unit's note was 15): 0 / 4 / 8 / 12 / 16 threads 15.2 / 15.2 / 15.1 /
+     15.2 / 14.6 tok/s (two rounds) - it takes ~85% of the misses and buys nothing; 16 threads slower. off.
+   - traced against maya (rocprofv3, 127 decode steps): the GPU's work the same (ours 57.0 ms a token, maya 57.6),
+     the idle not (12.2 against 4.7). Q6_K - UD's attention, the head - ours 26.9 ms, maya's matvec 23.5; the F32
+     router 4.2 (its guess a second pass, maya's too).
+   - Q6_K's short rows (mm.hip `Short`: q_b's 1,280 columns) 8 waves of 64-value slabs: 171 -> 197 GB/s, its error
+     1.6 -> 1.4 u|wx|; ~15.5 -> 15.7 tok/s.
+   - an F32 router's guess on a BF16 copy (hip_guess.c, `guess_routers`: the guess picks reads ahead, no bit): the
+     three answers' hashes the same, ~15.5 -> 15.8 (with the 4-wave shape).
+   - now (64 x 8): 15.6-15.9 tok/s (rounds 2-4; the first 14.6), **~94% of maya's 16.8**. the trace: busy 53.9 ms a
+     token (maya 57.6), idle 10.4 (maya 4.7) - 3.7 in ~1,500 launch gaps, 6.6 in ~6 waits a token over 100 us
+     (median 0.55 ms) behind the routed experts: the misses, which the CPU lane does not hide here. left: the misses'
+     waits, the token's end (~1.5 ms: the logits to the host, the next step's tables), q_a / kv's matmul (~134 GB/s
+     against the matvec's 171: 80 and 32 row tiles, too few blocks).
+   - **the three, tried** (a host-side probe, not kept: clock_gettime around each wait):
+     - the misses: the pool never full (0 waits for room); the host waits on a missed expert's read 5.9 ms a token
+       (2.8 waits of ~2.1 ms: an expert ~7-9 MB, ~4 GB/s, in 1 MiB jobs on 4 workers - the urgent queue's chunks).
+       the readers FWD_FETCH_THREADS 4 / 8 / 12 / 16 / 24: the waits 5.9 / 5.5 / 4.8 / 4.9 / 4.9 ms, 15.8 / 15.8 /
+       16.2 / 16.1 / 16.1 tok/s; 16 readers with 512 KiB jobs worse (5.3 ms). **12 kept**: a load 17-18 s, an 8K
+       prompt ~490 tok/s, a 2K ~310-340, both counts alike (106 GiB, two rounds each).
+     - the token's end: Engram's rows waited 0.6-0.75 ms a token (maya 0.35, its row cache ~20% hits). their own
+       open with POSIX_FADV_RANDOM (the dup shares the shard's readahead): no change - not kept. the rest (~0.4
+       ms) is the host's between the pick and the next step's launches: the next token's ids are its input.
+     - q_a / kv: Q6_K's long shape 64 x 16 140 GB/s on q_a (136), each other shape the head's or out_b's loss;
+       128 x 16 and 256 x 8 past the LDS (64 KiB). a 2-5 MB matrix is its launch's latency, not its shape's: left.
+   - **now: 16.0-16.2 tok/s (16.0), ~95% of maya's 16.8** - the three questions, two rounds, 110 GiB.
+   **position 18, checked** (a temporary print in test_model_gpu: the position's drift and its 6 routed experts at
+   each layer, the Q6_K shape before (128 x 8 everywhere) and after (64 x 8 on q_b)): the two builds' routes part by
+   one expert at layers 7, 9, 11, 12 and 18 (near-ties, the streams staying near) and by two at **layer 20** - [3 62
+   96 259 282 338] before, [96 180 259 282 284 338] after - where the after build's drift goes 0.03 -> 0.32, then 39
+   at layer 21 and ~10^3 on; the before build's stays ~0.03 there. layer 20 at position 18 is where the oracle's own
+   stream bumps (its largest value 48 against ~7 at the other positions' and the layers' around), and both builds,
+   forced onto the oracle's stream, compute layer 20 to 3.6e-4: a router near a tie, tipped by an input ~3% off (the
+   ordinary rounding of 20 layers), then a different expert pair's large output. not a kernel's fault; the before
+   build was right there by chance, and maya's stream tips there too. what ranks two builds' accuracy is a longer
+   evaluation (many such positions), not one 32-token sample's mean KL.
+
+### the order (before 2026-11-03, kept for the record)
+
+1. the type table and roles by capability: the pure refactor, fingerprints equal on the current GSQ-RCO pack.
+2. schema: the alias table; the Engram slices of one tensor; the folded gate; the `exp_probs_b_vl` role.
+3. tests that fail first: the Coder's geometry read equal to a hand-written one; each alias conflict refuses; a role
+   given a type no path takes refuses; a table type with a path missing its case fails; the slices' rows summed
+   against the tensor's.
+4. the Coder loaded and generating; the fingerprints across batching, budget and CPU / GPU on it; the oracle.
+5. UD-IQ1_M: IQ1_S, IQ2_S and the rest, as the UD section's order. its quality measurement (that order's step 1)
+   waits on none of this.
+
+## the KV in the model's formats (2026-11-03)
+
+the operator's point: DeepSeek's design keeps ~0.92 KB a token (0.96 GB at 1M; "the model" above), and this build kept
+~6.4 KB - each value of the attention's state in 4 bytes, though every one is already rounded to the model's own
+grid (ref.py): the window's keys `fp8_round` (E4M3, a power-of-two scale a 32), the compressed rows `fp4_round(16,
+e4m3)` (E2M1, an E4M3 scale a 16), the indexer's keys `fp4_round(32, pow2)` (E2M1, a power of two a 32). int8 would be
+another rounding on another grid: not done. kept now as those codes (`include/osmos/gpu/kvfmt.h`): a row its
+codes then a scale byte a block - 528, 288 and 68 bytes for 512, 512 and 128 values (2,048 / 2,048 / 512 before):
+~0.89 KB a token of compressed rows and keys, the window's ring 13.5 MB a sequence (52 before). a value read back is
+its code's value times its scale, one product - the rounding's own: the same F32.
+
+- **written where rounded**: `ops_fp8_round` / `ops_fp4_round` take a packed output beside the F32 (their scale in
+  hand: recovering it from rounded values fails at FP4-E4M3's subnormal scales); `ops_kv_finish` writes the window's
+  row packed; `ops_put_rows` copies rows by (format, values) - a byte count it took first let the pending rows' F32
+  callers pass a float count and copy a quarter of each row, caught only by the model's fingerprint (no unit test
+  sees host wiring): the interface fixed so a caller names its row's format. values rounded elsewhere (the oracle's,
+  a probe's stand-ins) through `ops_kv_pack`: a block's scale searched (E4M3's 126, a power of two's 254) for the
+  largest under which each value is exactly its code's value; none: NaN's scale code, read back NaN (loud). an
+  FP4-E4M3 scale past 448 (a block's amax past 2,688: none of the model's normed latents) packs NaN's too.
+- **read where used**: `kernels/kvload.h` - fetch a quad's bytes, decode when staged (`ops_sparse_attn`'s scores and
+  values, `ops_index_score`); the attention's second key source in its own format (the compressed rows FP4, the
+  drafter's block's own F32).
+- **its cost, and back**: first 15.0 tok/s against 16.0 - one token's attention 59 -> 147 us (rocprofv3 and a scratch
+  microbenchmark: the scores 13 -> 44, the values 36 -> 83). decoding at staging rather than at the fetch 147 ->
+  142; E4M3 values without branches 136; a small step's tile all 64 heads (16 before: four blocks each decoding the
+  same keys) **70 us** (32 heads 86). decode 15.8-16.1 tok/s (16.0), drafted 31.3 / 23.4 / 34.1 (29.6, maya 29.6).
+- **proven the same bits**: test_kvfmt_gpu (each format rounded, packed and read back the F32's bits; rounded values
+  packed as they are; zero blocks, -0, subnormal scales, a swapped nibble order fails it); test_attn_gpu (packed keys
+  within the bound of a double attention, and the F32 path's bits); test_fuse_gpu (kv_finish's packed row the
+  separate ops'); test_model_gpu's fingerprint cb2ad57792ac72d2 before and after, the probed run the unprobed's;
+  the bench's answers (plain and drafted) the same three hashes.
+- **what it buys**: a 64K context at the 110 GiB budget now starts (before: the pool refused it) - 16.1 / 16.1 /
+  16.0 tok/s, maya's own context. at 1M the state is ~1 GB a sequence, not ~6.7.
+
+## less work a decode token (2026-11-03)
+
+a fresh trace of UD-IQ1_M's plain decode (100 steps): 63.0 ms a token, the GPU busy 54.0, 1,510 launches. the idle
+8.7 ms: ~4 ms the experts' reads from the SSD (the reading entries' waits, a few long ones), ~3 ms the gaps between
+launches (~2 us each; a launch saved ~6 us of wall), the rest the host's turns (the picks' copy back, the tables'
+upload) and Engram's rows.
+
+- **the lane's inputs rounded once a token** (q8_group_tok / q8_gate_up take xin, win: an output row's input row and
+  its weight's by table; NULL, the row's own). the lane gathered each token's FFN input once a pair (K copies), rounded
+  every copy to int8, gathered the weights, and rounded x again before the reading entries (the activations had taken
+  its buffer). now each token's row is rounded once into its own buffer (lane_xq) and gate and up read it by token,
+  the fused activation its weight by pair: 2 gathers and a round a layer gone (-82 launches a token), 63.0 -> 62.5
+  ms. a launch's rows past its count read the count's last input (in_rows): no table entry past it is read -
+  test_q8_fuse_gpu's by-token check poisons them, and faults with the clamp taken out. the same bits:
+  test_q8_fuse_gpu (by token: the gathered rows' bits, 3 layers of UD's types), the q8 and CPU-lane tests,
+  fingerprint cb2ad57792ac72d2, the bench's answers' hashes.
+- **Engram's rows spread over every reader** (rowread_take). the readers took 16 rows at a time: a decode step's 48
+  rows (2 layers x 24) went to 3 of the 64 workers, 16 random reads one after another each (~1.3 ms), and layer 1
+  waited ~0.6 ms a token (median) for them, the GPU idle. a batch's take is now ceil(n / readers), at most 16 (a long
+  step's as before): one row a worker, every read in flight at once. layer 1's wait median 614 -> 8 us, the mean of
+  both 358 -> 56 us. plain decode 16.0 / 16.0 / 15.9 -> 16.4 / 16.3 / 16.2 tok/s (two rounds, alternated with the
+  last commit's build); drafted unchanged (30.8-31.3 / 23.3-24.0 / 33.7-34.4 both; its steps' batches were already
+  spread). the answers' hashes the same.
+- **the guess** (fwd_guess: the next layer's router on a BF16 copy, ~1.5 ms of GPU a token) measured skipped
+  whole: plain 16.2 / 16.2 / 16.2 vs 16.1 / 16.1 / 16.2, drafted within the runs' noise, ~1% more expert reads from the
+  SSD without it. kept: worth nothing measurable here, and its reads saved grow where less of the model fits.
+- **Engram on the CPU** (asked): not taken. its projection (engram_kv, Q6_K 6144 x 25600, 129 MB a layer) is a
+  matvec bound by memory's bandwidth (0.59 ms a layer on the GPU, ~220 GB/s); the CPU shares that memory and reads
+  it slower, so moving it moves the same bytes onto a slower reader beside a GPU that wants them (the CPU lane's
+  experts, measured on this box: nothing gained, 15.3 vs 15.2). layer 14's could run while layers 1-13 do (it
+  depends on the tokens alone), but it needs the GPU's Q6_K sum order on the CPU for the same bits, for ~0.5 ms at
+  best less bandwidth's contention. layer 1's wait was the reads, fixed above.
+- **the lane's tables read where they are written** (lane_up mapped, coherent; lane_dev its device address). they
+  were uploaded a layer: an 18 KB copy queued behind the shared expert, the lane's first kernel ~9.5 us after the
+  shared expert's last (median). now no copy: 2.4 us, 62.08 -> 61.82 ms a token in the trace; plain 16.3 / 16.3 /
+  16.2 -> 16.4 / 16.4 / 16.3 and 16.4 / 16.3 / 16.2 -> 16.4 / 16.3 / 16.3 (two rounds alternated), drafted 30.8-31.5 /
+  24.1 / 34.0-34.1 -> 31.5-31.8 / 23.8-24.2 / 34.1-34.4; the hashes the same. safe by the stream's order: the host
+  writes a layer's tables after its picks' wait, which the stream passes only after the last layer's experts; the
+  reading entries' weights after the ready ones' launches, entries those do not read.
+- **tried, not kept: the activations to int8 inside q8_gate_up** (the round after it, 40 launches a token). an
+  int8 block is 32 neighbouring rows, and gate_up's workgroup holds 8 (16 at 16 lanes a row), so the block's max
+  needs more than one: (a) each wave 4 rows in turn, a workgroup a block: gate_up 6.59 -> 6.90 ms a token, the wall
+  61.8 -> 61.6; (b) a row a wave, 1,024-thread workgroups: 7.03, 62.0; (c) the shape unchanged, the last of a
+  block's workgroups to end (an atomic count, a fence) rounding it: 7.09, 62.0. every one the same bits
+  (test_q8_fuse_gpu's int8 check, which caught a first-not-last mutation of (c)), none worth it: each slows the
+  lane's largest kernel by more than the round and its launch cost (0.09 ms and ~0.1 ms of gaps), (a)'s 0.2 ms one
+  trace's noise, and a drafted step's wider tokens would feel the kernel more. the separate round stays.
+
+## the experts' reads (measured, 2026-11-03)
+
+UD-IQ1_M at the 110 GiB budget (the most this box gives it: ttm's 113.1 GiB less the pool's room, 1.26 GiB, the
+scratch, ~1 GiB at 512-token steps, and the runtime's; the operator keeps ~8 GB of RAM for the rest of the machine).
+experts 123.1 GiB of 15,360 (8.2 MiB each), the rest 7.1 GiB - every tensor but the routed experts always resident,
+the experts by their picks after (choose: the budget refused if the layers' own weights pass it). the bench's
+answers (3 x 256 tokens): ~4.6 streamed picks a token, 98% of picks held.
+
+forward_waits (new): the host's waits on expert reads, split by whether the guess began them. the third answer:
+441 waits on reads not guessed, 853 ms; 274 on guessed reads not yet done, 397 ms - ~4.9 ms a token, the trace's
+idle on reads. the budget: 100 / 105 / 110 GiB streamed 5,927 / 4,660 / 3,512 picks, waited 6.2 / 4.9 / 4.0 s, 15.3-15.5
+/ 15.6-16.0 / 16.0-16.3 tok/s.
+
+tried, none kept (each A/B'd alternating, the answers' hashes the same):
+- **the guess two layers ahead** (layer l + 2's router on layer l's input): guessed 1,861 of the streamed picks
+  (2,136 a layer ahead), fewer of them late (515 against ~900), the waits the same (4.1 against 4.0 s), the speed the
+  same.
+- **the guess wider** (the router's top 10 / 16 a token, not 6): guessed 74% / 81% of the streamed picks (61%), the
+  waits on reads not guessed 2.8 -> 1.9 -> 1.4 s but those on guessed ones 1.4 -> 2.4 -> 3.0 s: the total the same,
+  16.3 / 16.2 tok/s against 16.4.
+- **smaller chunks, more workers** (fetchq's 1 MiB / 12 against 128-512 KiB / 12-48): a miss 2.22-2.53 ms, the
+  same.
+- **O_DIRECT** (scratch rd/: one cold 8 MiB unit alone, the GPU idle - buffered 2.31 ms at 8 threads; O_DIRECT into
+  malloc'd memory 1.39; into the GPU pool's pages straight 2.17, their pinning the cost; through a worker's aligned
+  bounce, then copied, 1.55 at 256 KiB x 16-32). in the engine, each file's O_DIRECT twin through the bounces, a
+  unit always in chunks (test_fetchq's twin check, a zeros file under it, caught a twin ignored): a miss's read
+  2.29 ms, waits 1.82 ms each against 1.97 - nothing. its chunk reads 0.55 ms a 256 KiB under the GPU's load
+  (~0.3 idle), twelve at once ~5.7 GB/s: the SSD's ceiling.
+
+- **the guess narrower** (only its most confident: the router's top 4 / 2 / 0 a token prefetched, the guess still
+  run; forward_guesses' new count of the reads it began): top 6 16.2-16.5 tok/s, 2,265 reads begun, waits ~4.1 s;
+  top 4 16.1-16.4, 1,520, ~4.4 s; top 2 16.0-16.3, 602, ~4.8 s; none 15.8-16.1, 0, ~5.2 s (two rounds each). the
+  guess began ~2,260 reads and ~2,135 streamed picks were guessed: nearly every read it begins is used. it is worth
+  ~0.3 tok/s here, not wasted bandwidth (the skip's earlier "the same" was within its noise). top 6 stays.
+
+what it says: a layer's reads come in a burst (its misses, the next layer's guesses) that fills the SSD, and they are
+bytes the model needs: how a read is issued, how early, or how many of the guesses are read, moves the wait from one
+read to another or adds to it. the lever is the bytes a token must read - the budget, which is the machine's.
+
+## a prompt's attention on the model's formats (2026-11-03)
+
+an 8K prompt (UD-IQ1_M, 2,048 a step, 106 GiB; rocprofv3) against the build before the KV's packing: the attention
+values 925 -> 1,540 ms, scores 919 -> 1,186, softmax 433 -> 503 - ~0.95 s more of the GPU's time; prompts 450-457 tok/s
+at 8K where ~490 was (DESIGN, the readers). two causes:
+
+- **each token decodes its own keys**: a prompt's tokens select among the same compressed rows (and the window's
+  ring), each decoding them again for its scores and again for its values. now a step's run unpacks the rows once
+  when its tokens would decode more than there are (run x topk > the rows below its furthest position; run x window
+  > the ring's slots): ops_kv_unpack into b.ckv_f (score_stride rows, at most FWD_CKV_F32_ROWS: 64 MB, a 128K context
+  at ratio 4 - past it the rows are read packed) and b.ring_f (the slots). ops_sparse_attn takes the ring's format
+  (KV_FP8 or KV_F32), and with every key F32 launches kernels of plain loads. the same bits: an unpacked row is the
+  F32 the rounding gave (test_attn_gpu: the ring unpacked, alone and with the rows F32, a batch or a token at a time,
+  each the packed path's bits - a load shifted by a float4 caught; test_model_gpu's fingerprint cb2ad57792ac72d2,
+  the bench's hashes plain, drafted and the prompts').
+- **the row's size chosen per key**: Keys.row picked ring_bytes or ckv_bytes for each key, and the compiler read the
+  chosen one from the kernel's arguments at every load - 31 8-byte loads a values kernel (the assembly), 28% slower
+  than the F32 kernel before the packing at every launch. the all-F32 kernels compute a row's size (hd floats): the
+  loads the old kernel's, its spills too (29 / 29 against 34 / 37).
+
+the 8K prompt's attention now: values 1,001 ms, scores 914, softmax 436, the unpacks 9; the GPU busy 16.2 -> 15.4 s.
+prompts 2K / 8K / 2K: 297 / 415-422 / 305-308 -> 308-321 / 446-459 / 322-327 tok/s (two rounds alternated with the last
+commit's build); decode 16.1-16.2 and drafted 31.0 / 23.8 / 33.1 the same, their answers the same.
+
+tried first, not kept: **the IQ experts' mm shapes** (scratch shp/: 64 x 4 waves on gate and up, 64 x 2 on down -
+alone, one expert a launch, 10-25% faster at 16-64 tokens, the error the same to the digit). in a prompt's grouped
+launches (many experts each) slower: IQ1_S 3.58 -> 3.78 s, IQ2_XXS 1.86 -> 2.03 of an 8K prompt; the prompt the same.
+a shape's measure is the grouped launch, as the shapes were first tuned.
+
+## a prompt's step size, and the experts' kernel's ceiling (2026-11-03)
+
+a larger step reads each expert once for more tokens (its slab decoded once a tile of up to 8 x 16 tokens), and
+its buffers take budget from the resident set. UD-IQ1_M, prompts 2K / 8K / 2K (tok/s, one run each, the box faster
+this hour than the A/Bs above):
+
+| step | budget | 2K | 8K | 2K |
+| ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 106 GiB | 337 | 485 | 358 |
+| 4,096 | 104 | 309 | 541 | 339 |
+| 4,096 | 102 | 318 | 520 | 336 |
+| 8,192 | 100 | 296 | 578 | 334 |
+| 8,192 | 96 | 312 | 580 | 332 |
+
+a long prompt +19% at 8,192 a step; a 2K one (one step either way) none. the budget is the decode's (~16.2 tok/s at
+110 GiB, ~15.3 at 100): a server's choice, 2,048 the default. most of the larger step's buffers are the experts'
+(scratch(): S = max_tokens, P = S x K - gate, up, the activations, down's rows, ~3.3 GB at 8,192 against ~0.8 at
+2,048), held for every pair at once so each expert is read once for all sub-batches. the experts in chunks, a
+token's sums in their order still, would make the large step nearly free of budget - not done.
+
+tried, not kept: **16 column tiles** for the IQ experts (a hot expert's slab decoded once for 256 tokens): at 8 the
+kernel holds 256 VGPRs (occupancy 5), at 16 its loops no longer unroll (-Werror). a restructured kernel, not a
+constant.
+
+## against maya 1.1.52 (measured, 2026-11-03)
+
+UD-IQ1_M, 64K context, maya's bench questions (256 greedy tokens) and its 2K / 8K prompts, each engine a fresh
+process, two rounds. maya v1.1.52 (pulled and built: its 17 commits since 1.1.51 include the indexer's scores
+through WMMA on RDNA 3 and the Engram readers following the host's threads), its pack of the same files, configs
+scratch maya-ud-nodraft.json / maya-ud-dspark.json (DSpark off / on); runs in ~/bench/maya-1.1.52 and
+~/bench/osmos-final.
+
+| | ours | maya 1.1.52 |
+| --- | --- | --- |
+| plain | 16.3 / 16.3 / 16.2, 16.4 / 16.1 / 16.3 (16.3) | 17.0 / 16.7 / 16.5, 16.9 / 17.2 / 16.9 (16.9) |
+| DSpark | 31.1 / 23.9 / 33.5, 31.0 / 23.8 / 33.5 (29.5) | 31.4 / 27.4 / 29.1, 32.2 / 25.9 / 31.4 (29.6) |
+| 2K prompt | 333, 332 | 232, 246 (no draft); 269, 269 (DSpark config) |
+| 8K prompt | 484, 472 | 409, 407; 412, 411 |
+
+plain 96% of maya's, drafted even (maya steadier: its second question 26-27 where ours is 24; ours the third, 33.5
+against 29-31), prompts +24-43% at 2K and +15-18% at 8K. our budgets: plain 110 GiB, drafted 100, prompts 106 at
+2,048 a step.
+
+## serving: conversations kept, and several at once (design, 2026-11-03)
+
+maya's DeepSeek engine has both, the operator's: **#356** (a conversation's state set aside and taken back across
+switches and restarts) and **#587** (`--parallel` on an event scheduler: prompts read a piece at a time between the
+answers' rounds; squashed into maya a73bdbc, 2026-10-29). libosmos has neither: one process, one `Seq` a
+caller's, no server. this ports both, as one binary that speaks maya's line protocol, so maya's own harnesses
+(`tools/ds4/slot_keep_test.py`, `parallel_test.py`, `agent_bench.py`) test it unchanged and time both engines alike.
+
+**1. a conversation's state out and back (the library)**
+- `seq_save(s, &bytes, &n, err)` / `seq_load(s, bytes, n, err)`: the whole state as one byte string - the position,
+  the prompt's end, the tokens (all of them: the slot store matches prefixes on them; the Engram n-gram's last ones
+  are among them), every layer's window ring (FP8 rows), each compressor's pending rows, each KV source's compressed
+  rows (FP4) and indexer keys (FP4, rows 0 .. pos / ratio), the decoder's `dec_from`; and the drafter's ring where a
+  drafter is attached (else the next draft rebuilds it - to settle when the drafter's state is read).
+- `forward_identity(f, out)`: what a saved state must match - the build's version, the geometry, the model's files
+  (names and sizes), max_ctx's bound on the rows. a load against another identity, a size that disagrees, or tokens
+  that do not add up to the position: refused, the Seq reset (never half of two conversations).
+- **the bits**: a state saved and loaded continues as the state never set aside - the same logits, the same answer's
+  hash. maya could only check greedy tokens (its restore and a re-read differ in arithmetic); ours are the same
+  bits by the engine's contract (a token's bits do not depend on the batch or the step), so the tests compare hashes.
+- size: ~0.9 KB a token (the KV's formats) - a 70K-token conversation ~65 MB, as maya's.
+
+**2. the slot store (#356's)**
+- a request that does not continue the conversation in its Seq sets that one aside first, then takes back the kept
+  conversation whose tokens are the longest prefix of the prompt (longer than what the Seq holds already); only the
+  rest of the prompt is read.
+- RAM first (`OSMOS_SLOT_CAP`, 4), past it the least recently used to a folder (`OSMOS_SLOT_DIR`, beside the
+  model), the folder capped (`OSMOS_SLOT_GB`, 16: the least recently used removed, never the one just written),
+  conversations under `OSMOS_SLOT_MIN` tokens (1024) not kept, a folder's older than `OSMOS_SLOT_DAYS` (7)
+  removed. a slot is a `.bin` and a `.meta` (the identity, the tokens, the size), each written under a temporary name
+  and renamed; at start the folder is indexed and a slot whose `.meta` is missing, foreign or disagrees is removed.
+  QUIT sets every conversation aside and writes RAM's to the folder. `OSMOS_SLOT_KEEP=1` turns it on.
+
+**3. several conversations at once (#587's)**
+- `--parallel N`: N Seqs. the loop on libevt's engine (`~/Projects/libevt`): stdin's lines and the turns are
+  events, a line outranking a turn, each turn queueing the next as it ends, the loop asleep with nothing to do.
+- a turn: every answering conversation's next token in one `forward_batch` (each its Seq) - a round - or the next
+  piece of a prompt being read. prompts take turns a piece each, a round of tokens between two pieces; a prompt whole
+  in one piece goes ahead of longer reads (a short question does not wait behind a long read).
+- a piece: a whole number of the step's tokens (max_tokens), so a prompt reads through the same step boundaries
+  however it is interleaved - and its bits are the same anyway.
+- drafting in a round (DSpark): later; spec=0 first (#587 measured greedy, the harness's default).
+
+**4. the protocol (maya's `ds4_main.cpp`, its serve loop)**
+- ready: `READY <max_ctx> stop[ multi=<N>]`.
+- in: `GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>`, `STOP [<rid>]`, `QUIT`. maya's other keys
+  (sampling, penalties, thinking budgets, logprobs, GENI's pictures) are refused with `ERR` naming the key: greedy is
+  the engine's one mode.
+- out: `T [<rid>] <token>`; `PP[ <rid>] <done> <total> <ms> <tok/s> <reused>`; `DONE [<rid>] <produced> <prompt>
+  <prompt_ms> <decode_ms> <finish> <accepted> <drafted> <reused> <hits> <lookups>`; `ERR [<rid>] <reason>`; `NOTE`.
+  each field's meaning maya's, so its harnesses read ours.
+
+**done (2026-11-03): steps 1 and 2.**
+- seq_state_bytes / seq_save / seq_load / forward_identity / seq_position (src/run/hip_seqstate.c): rows saved by
+  position (the window's from pos - window - SEQ_MAX_BACK, the compressors' open groups from SEQ_MAX_BACK back, so a
+  rollback after a load finds its rows), the drafter's rings whole, an FNV-1a trailer. test_seqstate_gpu: A's 301
+  tokens set aside (3.5 MB), B run in its own sequence, A loaded into B's - every logits row of 24 greedy steps and of
+  drafted rounds the never-set-aside run's; a damaged byte, a short size, another identity refused, the sequence
+  reset. mutations caught: the compressors' open rows not restored, the compressed rows not restored.
+- slots.h / slots.c (src/serve): RAM, the folder, its cap, the .meta (SUBSLOT1, identity, bytes, last used, tokens,
+  FNV-1a), the index at start. test_slots (CPU; clean under ASan + UBSan): the minimum, replacement, the longest
+  prefix past `beyond`, the cap's LRU to the folder, a flush and a new store over it, another identity's / a damaged
+  .meta / a short .bin / a .bin alone removed at start, the folder's cap (never the one just written), `days`.
+- bin/osmos-serve (tools/serve/serve.c, `make serve`): one conversation, maya's GEN / STOP / QUIT and T / PP /
+  DONE / ERR / NOTE; a request continuing the conversation reads only its rest (one within SEQ_MAX_BACK of it rolled
+  back to their common part); a drafted answer cut by max_new rolled back to its printed tokens (the state ends at
+  the answer's last printed token less one, as maya's greedy one: the next turn continues it). its answers the
+  bench's: q1's 256 tokens 7e8dbc0974070b10 plain and drafted.
+- tools/serve/slot_test.py (maya's slot_keep_test.py, ported; tools/serve/drive.py the protocol): A (12,000 tokens of
+  real text), B (8,000), A's next turn - every check passed: the turn reuses A's 12,031 in 3.7 s against 28.1 read from
+  token 0, its answer the bits of A never set aside, in-run, after a restart from the folder (and drafted), the
+  folder under its cap, eviction of the least recently used.
+- **a prompt step and a decode step are two computations**: a turn read from token 0 answers other bits than the
+  same turn continued (b560d8dc against f9bdef8f): the earlier answer's tokens are then in a prompt's step, whose
+  routed experts are mm's (WMMA, f16 inputs), where decoded they were the lane's (int8, forward_lane). each is
+  deterministic and batch-invariant within its kind (a decode alone or verified; a prompt however it is split - the
+  model test's fingerprints); not across them. maya's restore and re-read differ too (its PR: chunk boundaries). so the
+  slot test's reference is the conversation never set aside, not a re-read.
+
+**done (2026-11-03): step 3.** `osmos-serve --parallel N` (tools/serve/multi.c on libevt; the server split
+into serve.h / conv.c - a conversation, both modes' - / single.c / multi.c / main.c, each under 300 lines): a reader
+thread posts stdin's lines as events (priority 2), the turns are events (1), one queued at a time, each queueing the
+next while a lane is busy. a turn is a round (every answering lane's token printed, the ones going on fed in one
+forward_batch - a decode step) or one piece of one prompt (max_tokens, alone - a prompt's step): never one step of
+both, so neither changes the other's bits. a round and a piece alternate (#587's one each); the piece a prompt whole in
+one piece first, else the reading lanes in turn. a request takes the idle lane whose conversation it continues
+furthest (conv_reach), else the least recently used (its conversation set aside, the longest kept prefix taken back),
+else waits for one. STOP <rid>: a reading lane's state dropped (its prompt's end past it), an answering one's kept to
+its last fed token; a waiting request answered DONE cancel.
+tools/serve/parallel_test.py (maya's parallel_test.py, ported; real text): four prompts at once each the bits they get
+alone (26.2 s against 33.3 one at a time), a STOP ends one alone (the other's answer its own), A's next turn reuses
+its lane (1,547 of 1,547), a 900-token question sent during a 24K-token read got 6 of its 16 tokens before the read's
+last piece. the single path's slot_test.py again: every check passed.
+
+**done (2026-11-03): drafting in --parallel's rounds** (tools/serve/round.c; multi.h the lanes' shapes). a round's
+drafting lanes draft (drafter_draft reads only the sequence's rings: no other lane's step between changes a draft)
+and are verified with every other lane's token in the same forward_batch; each then prints its token and accepted
+drafts, rolls back to all but the last printed and is seeded from the verify's rows before the next step (taps are the
+last step's). a round stays a decode step - at most Server.round_tokens = (experts - 1) / experts a token = 63 tokens
+(the lane's P < E; more, and it is a prompt's step, other bits): --parallel at most that many lanes, a lane's drafts
+cut to leave a token for each answering lane after it (cut drafts change no bit: a decode's tokens the same bits
+however they are grouped into verifies). a prompt's last piece seeds its drafter when the request drafts.
+parallel_test.py with --dspark: four at once all drafting, and two drafting with two greedy - every answer the greedy
+one alone (120 of 151 / 60 of 77 drafts accepted). the bench's four questions x 256 tokens, one process, --parallel 4
+(96 GiB): one at a time greedy 14.2 tok/s in all, four at once greedy 31.5, one at a time drafted 32.6, four at once
+drafted 44.2 - every answer the bench's hashes (7e8dbc09, 4ea20c49, 1390d91b, q4's cdf5f24e).
+
+**drafting the default, and a budget refused at create (2026-11-03).** a GEN without spec= drafts when the server
+has a drafter (maya's: -1, as the engine was started); spec=0 a request's own greedy. the drafted server at its
+best (512-token steps, 100 GiB - 102 does not fit with the drafter): the bench's four questions one at a time 28.8
+tok/s in all (the bench's drafted decode 29.5, here with the prompts read), four at once 45.7 (~11.4 a conversation).
+and 102 had started - READY - then refused every request: the pool takes its room (stream_budget, 1.3-1.7 GiB) as
+experts stream, after create, so a budget that left the GPU less than that was found at the first miss. now
+forward_create and drafter_create check the GPU's free memory against the pool's room (fwd_room_left) and refuse:
+"the GPU's free memory (1.49 GiB) under the expert pool's room (1.71 GiB): a smaller budget", exit 2 before READY.
+plain decode at 110 GiB (no drafter) still created.
+
+**5. the order** (each its tests first): seq_save / seq_load with identity (test: a conversation set aside, another
+run, the first taken back - the same hash as never set aside; a damaged or foreign state refused, the Seq reset);
+the serve binary with one conversation and the slot store (maya's slot_keep_test.py against it; restart, eviction,
+the folder's cap); `--parallel` on libevt (maya's parallel_test.py: each conversation's answer token for token its
+answer alone - here its hash; a STOP ends one alone; a short request answered during a long read); then
+agent_bench.py against maya 1.1.52 on this box.
+
+**6. measured (2026-11-04): agent_bench 4 x 8, seed 1, against maya 1.1.52** (`tools/serve/agent_bench.py`, maya's
+workload and timing ported; ours at budget 96 GiB, 2,048-token steps, the IQ2_XS drafter; maya its config, DSpark on;
+both `--parallel 4`, 131,072 context, slots off; ~/bench/agent):
+
+| | ours | maya 1.1.52 |
+| --- | --- | --- |
+| turns answered | 32 of 32 | 32 of 32 |
+| wall | 508.7 s | 538 s |
+| first token p50 / p95 | 6.83 / 58.1 s | 6.41 / 93.5 s |
+| turn done p50 / p95 | 50.9 / 113.1 s | 57.6 / 126.6 s |
+
+the first run answered 31: a drafting turn's drafter was seeded once, after its prompt's last piece, from that step
+- whose taps hold only that piece's positions, so a last piece shorter than the window left the ring's earlier
+positions unseeded. seeded in each piece instead, the step's own part of the prompt's last window (`conv_read`):
+seeding a piece's whole range failed every first turn ("a position the last step did not tap": past the decoder's
+compaction a step taps only the tokens within reach of the prompt's end) - the run that showed which positions a
+step holds.
+
+## past 16K: the indexer's candidate blocks (2026-11-03)
+
+a context past candidate_topk_blocks x candidate_block_size compressed rows was refused ("the candidate masking is
+not built"): the source layer (20) and the index layers after it (24 .. 36) compress at ratio 1, so 2,048 x 8 x 1 =
+16,384 positions - every conversation past 16K (first written here as 64K at ratio 4: wrong, the geometry's ratios
+read since). the agent bench's conversations reach it (4 of 32 turns failed), and maya serves them. the model (oracle/ref.py, `candidates` and `indexer`):
+- at the candidate source layer (20), after its indexer's scores (rows past a token's length -inf): the rows in
+  blocks of 8, a block's key its rows' max; the token's last (partial) block forced in (+inf); the top
+  candidate_topk_blocks blocks kept (of those not wholly -inf).
+- every later index source: its scores outside the kept blocks -inf before its top k. earlier layers, and the source
+  itself, unmasked. with no more blocks than candidate_topk_blocks every one is kept: the mask nothing (why every bit
+  so far is the same: a step under 64K never builds it).
+
+here: one selection kernel for both (attn.hip's radix select - 8 bits a pass, integer counts, ties to the lower index,
+a compaction in index order), its key a row's score or a block's max (the last forced), its output the rows' list
+(ops_topk) or the kept blocks' bits (ops_cand_blocks, a word per 32 blocks a token). ops_topk takes the bits (NULL: no
+mask): a masked row's key -inf (kept blocks hold >= 16,384 rows: k = 512 never reaches one). the bits a sub-batch's
+own (Sub.cand, beside its sel: a prompt's sub-batches run each layer in turn), allocated only when max_ctx can pass
+the blocks (at 1M: 1,024 words a token); built at the source layer when any token of the sub-batch passes them, read
+by the later index sources. the source is the decoder's layer (dec = 20, the last KV source) and the index layers
+24 .. 36 come after its compaction (a prompt's tokens past the decoder's reach skip them): the bits are gathered with
+the kept tokens there, beside the selected rows (hip_skip.c) - found when the first long prompt reached a guard that
+refused an index layer past the compaction rather than read misaligned bits.
+
+tests (each seen to fail first, or by a mutation):
+- test_select_gpu (new; ops_topk had no test of its own): ops_cand_blocks against a host replay of ref.py's
+  `candidates` (40 tokens of scores from 23 values - ties everywhere - and negatives, rows a partial block, fewer
+  blocks than kept and many more, at 16 kept blocks so the mask bites at test sizes), ops_topk plain and under the
+  mask against the host's top k - every bit; a kernel without the forced last block caught.
+- test_cand_gpu (new): a 22,000-token prompt (steps of 2,048) and 4 decode steps, the source layer's bits probed
+  ("cand") and every later index layer's selection ("sel", the first token - past the compaction, the first kept):
+  every selected row in a block its own token's bits keep (114 selections, 58,368 rows). the mask built and not
+  applied: caught; the compaction's gather of the bits skipped: caught (at 17,500 tokens it was not - the one
+  sub-batch past the blocks wholly within the decoder's reach, the gather the identity: hence 22,000).
+- test_model_gpu's fingerprint cb2ad57792ac72d2 unchanged (under 16K the bits are never built).
+- end to end: a 72,576-token prompt (the bench's text, three times) and 24 greedy tokens - ours the same 24 as maya
+  1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
+  repeated text are not the mask's test; the probes above are.
+
+## the MXFP8 Engram pack (design, 2026-11-04)
+
+the operator's: UD-IQ1_M's weights with unsloth's **MXFP8** Engram table in place of its IQ4_NL one - the table as the
+checkpoint holds it (lossless), our pack. unsloth publishes the table apart (`engram/`, 202.8 GB against IQ4_NL's
+110.6), stamped shard 1 of 1; `set_split.py <file> 5 5` restamps it as UD-IQ1_M's shard 5 of 5.
+- **the type**: ggml type 43 in unsloth's GGUFs (`per_layer_token_embd.weight`, [256, 768,022,850]): a block of 32 -
+  an E8M0 scale byte e (2^(e - 127)), then 32 E4M3 codes: 33 B. upstream llama.cpp's 43 is F8_E4M3 (a byte a value,
+  no scales): read as MXFP8 its tensor needs a 32nd more bytes than the file gives it - into the next tensor or out
+  of the file - so gguf.c refuses a tensor whose bytes overlap another's as well as one that leaves its file (maya's
+  pack tells them apart by the same span). a tensor of fewer than 1,024 values could hide the difference in its
+  alignment padding; the only MXFP8 tensor is the Engram table.
+- **the decode**: `quant_dequant` (QTYPE_DECODE), each value e4m3 x 2^(e - 127) - exact in F32 (4 significant bits,
+  the smallest 2^-136), so no order of operations changes a bit; the forward's Engram path is the type table's
+  already (`gguf_bytes(type, head_dim)` a row: 264 B against IQ4_NL's 144).
+- **the reads**: a row is still one random read (264 B, inside a 4 KB page) - the reads a step makes are the same
+  count, the SSD's IOPS what bounds them (Engram's reads, above): the speed should hold; measured below.
+- **the oracle**: gguf-py reads 43 as F8_E4M3, so `dequant_ref.py --mxfp8 <file>` walks the header itself and decodes
+  with torch's float8_e4m3fn (the OCP MX spec's); test_quant_gpu checks every value bit for bit against it.
+- **the pack**: a folder of shards 1-4 linked from UD-IQ1_M and the restamped table as shard 5 (nothing of the IQ4_NL
+  pack moved or deleted). quality: the reference forward (`ref_gguf.py`, maya's pack of the new folder) over the
+  MXFP8 table, our engine against it on both tables - what IQ4_NL costs, and where the pack lands.
+
+measured (2026-11-04; ~/bench/mxfp8, ~/osmos-oracle/ref32-mxfp8):
+- the decode: test_quant_gpu, 458,752 values of the real table (its start, a middle, its end) and 8,192 random
+  blocks, bit for bit torch's; a bias of 128 for 127 caught (456,654 differ).
+- speed, plain decode at 110 GiB (dbench, 512-token steps, 64K context, three questions): IQ4_NL 16.2 / 16.2 / 16.1,
+  MXFP8 16.3 / 16.3 / 16.1 tok/s - the same (the reads are IOPS, not bytes). IQ4_NL's answers hash as before.
+- KL against the reference forward (32 positions; test_model_gpu with OSMOS_TEST_UD / OSMOS_ORACLE_REF /
+  OSMOS_ORACLE_MAYA; maya 1.1.52's logits on the same pack):
+
+  | engine's table vs the reference's | ours mean / median | maya mean / median |
+  | --- | --- | --- |
+  | IQ4_NL vs IQ4_NL | 0.209 / 2.8e-3 | 0.216 / 2.6e-3 |
+  | MXFP8 vs MXFP8 | 0.081 / 3.7e-4 | 0.016 / 5.4e-4 |
+  | IQ4_NL vs MXFP8 | 0.208 / 4.8e-4 | 0.214 / 1.5e-3 |
+
+  the means are one or two positions each (near ties: ours 1.25 and 0.84 at positions 15 and 21 on MXFP8; maya's
+  5.9 and 0.49 on IQ4_NL), the medians the rest. the lane (decode's path) against the MXFP8 reference: 0.038 on the
+  IQ4_NL table, 0.024 against IQ4_NL's own - what the 4-bit table costs at the logits, about 0.013. test_model_gpu's
+  bar (our mean at or under maya's) fails on the MXFP8 pack, on those two positions.
+- perplexity over 8,191 tokens of the bench's text (`bin/ppl`, steps of 512, budget 100): IQ4_NL **2.4579**, MXFP8
+  **2.4591**; at 4,096 tokens 5.9324 and 5.9430. no difference the text can see: at 1-bit experts the Engram table's
+  4 bits are not what limits the model.
+- so: the MXFP8 pack is 92 GB more disk for the same speed and the same perplexity. a pack where the weights are
+  larger (ISTA's IQ2_XXS, a Q2 / Q3 UD) may show what this one cannot.
+
+## UD-IQ1_S, and the two packs (2026-11-04)
+
+the operator's: UD-IQ1_S's weights on the same MXFP8 table, and both quants abliterated - two packs, one table on
+disk. nothing new in the engine (IQ1_S was in the type table, the int8 path and the CPU lane already); a pack is data.
+- **the layout**: `~/Models/ds1017/engram/` holds the table once (stamped 5 of 5: both quants' slot); each pack's
+  shard 5 links to it. UD-IQ1_S's shards 1-4: 122.4 GB against UD-IQ1_M's 139.8 (12.5% smaller experts).
+- **the profile**: UD-IQ1_S's own (`PICKS_OUT`, the same 16,000-token calibration text, MAX_CTX 16384: 16K tokens
+  past dbench's default 4,096 context fail seq_prompt); the abliterated packs take their quant's (the patch is
+  attention only).
+- **abliterated**: huihui-ai's `patch-unsloth-DeepSeek-V4.1-Flash-1017.py` with its per-quant patch GGUF, shards 1-4
+  rewritten (UD-IQ1_S: 18 `attn_output_b` tensors replaced; UD-IQ1_M's as before); gguf-py from maya's llama.cpp on
+  PYTHONPATH (the script's own folder kept off the path: `python -s -P`).
+
+measured (~/bench/mxfp8; 64K context, three questions, 256 tokens, fresh processes, interleaved):
+
+| | UD-IQ1_M + MXFP8 | UD-IQ1_S + MXFP8 |
+| --- | --- | --- |
+| plain, 110 GiB (two rounds) | 16.2 / 16.2 / 16.2, 16.5 / 16.2 / 16.1 | 18.4 / 18.4 / 18.2, 18.5 / 18.4 / 18.4 |
+| drafted (IQ2_XS DSpark), 103 GiB | 28.5 / 23.8 / 36.1, 27.9 / 23.8 / 36.6 | 35.6 / 27.0 / 47.4, 36.8 / 27.4 / 47.9 |
+| drafted, 100 GiB | - | 33.8 / 25.5 / 46.2, 37.0 / 26.8 / 45.8 |
+| abliterated (one round) | drafted 103: 28.0 / 23.5 / 35.6 | plain 18.5 / 18.4 / 18.5 |
+| perplexity, 8,191 tokens (`bin/ppl`) | 2.4591 | 2.5006 (abliterated 2.5048) |
+
+- the speed is the reads: on the third question plain, 615 experts streamed from the SSD against 3,452; drafted,
+  2,036 against 6,174 (a round's verify picks more experts than one token does), verify time 4.7 s against 6.5 s.
+  the drafter's acceptance is the model's (205 of 220 against 209 of 239), and a drafted answer hashes as its plain
+  one.
+- the cost: perplexity +1.7% (2.4591 to 2.5006). a mean over every token: where a lower-bit quant loses (a number,
+  a line of code) it may not show; not yet measured against the reference forward (a maya pack of UD-IQ1_S and the
+  oracle's ~12 min) nor on the agent bench.
+- the drafters on UD-IQ1_S (100 GiB, drafted): maya's pack of DSpark (MXFP4 experts, 8.0 GB) 36.8 / 26.9 / 45.7
+  tok/s, accepted 186/217, 144/173, 206/224; our IQ2_XS requant (4.7 GB) 37.0 / 26.8 / 45.8, 183/205, 140/171,
+  205/220 - the accepted tokens within 3%, the speed the same.
+- so: two packs, the operator's choice of speed or quality - UD-IQ1_S ~26% faster drafted, UD-IQ1_M the lower
+  perplexity - over one 203 GB table.
+
+## plain decode's work a token (design, 2026-11-04)
+
+the operator's: plain decode as fast as it can be, a token's work at its least, on UD-IQ1_S and UD-IQ1_M - before the
+drafter. on UD-IQ1_S the SSD is nearly out of it (615 experts streamed over three questions), so the GPU's own work is
+the token.
+
+**the trace** (rocprofv3 --kernel-trace, UD-IQ1_S + MXFP8, 110 GiB, the first question, 250 decode tokens; scratch
+`ksum.py`): 55.5 ms a token, the GPU busy 51.2, 1,450 launches.
+
+| what | ms a token | |
+| --- | --- | --- |
+| dense Q6_K (mm, type 14) | 22.3 | 4.39 GB at 197 GB/s |
+| Q5_K (type 269) / Q8_0 | 5.7 / 2.4 | 1.13 / 0.49 GB, 198 / 204 GB/s |
+| routed experts (q8 gate_up, group_tok) | 10.0 | ~1.9 GB (240 experts) |
+| the F32 router (mv) | 2.1 | 0.31 GB at 148 GB/s |
+| the guess (BF16 router copy, its top-k, its copy) | ~1.1 | |
+| attention: scores / softmax / values | 1.16 / 0.15 / 0.62 | |
+| hyper-connections (hc_dot, mix_pre_rms x2, post_dot, post) | ~2.4 | |
+| the rest (norms, rope, kv_finish, x16, round, router top-k, gather_sum, swiglu) | ~2.5 | |
+| launch gaps under 5 us | 3.0 | ~2.1 us before nearly every launch |
+| gaps over 5 us | 1.3 | the bench's host argmax (0.37), missed experts (~0.5), the layer tables' copies |
+
+the floor: ~8.5 GB a token at ~215 GB/s, ~39.5 ms (~25 tok/s). the dense matrices are at ~92% of it already; the
+~16 ms past it is small kernels, their gaps, and a few kernels that leave the GPU idle. `engram_kv` (2 layers, 129 MB
+Q6_K each, 583 us) is dense work like the rest.
+
+**what each change is, and why it keeps the bits**:
+1. **the guess an option** (measured: GREEDY=1, guess off, the answers' hashes the same): UD-IQ1_S 18.2-18.5 ->
+   18.4-18.9 tok/s (+2.5%); UD-IQ1_M unsettled (its first round +2%, its second worse with the ISTA download on the
+   SSD - its misses ~6x UD-IQ1_S's, the guess earns there). a `ForwardOptions` field, on by default; the bench and
+   the server take it. which experts are read ahead changes no bit.
+2. **decode's attention tiles**: a window-only layer's scores are 2 blocks of 64 heads x 64 keys (~30 us, 38 of 40
+   CUs idle). every output is a sum over d ascending (scores) or keys ascending (values) whatever the tile, so a tile
+   is free to change (test_attn_gpu: the bits). the cost: a block decodes its keys once for its heads - fewer heads a
+   block is more decoding, cheap at 128 FP8 keys. aim ~1.9 -> ~0.6 ms.
+3. **the router's top-k in one wave**: 6 passes of a 256-thread tree (~9 barriers each), ~9 us twice a layer. a wave
+   of 32 lanes, 12 experts a lane, shuffles: the same picks (the larger key, ties to the lower id), the same weights'
+   sum in pick order. aim ~0.7 -> ~0.2 ms.
+4. **the mixes' Sinkhorn** (hc_mix_pre_rms, ~12 us however few its bytes: 20 serial iterations of a 4 x 4 matrix):
+   one wave, the matrix in registers, the same operations in the same order. to measure before building.
+5. **launches folded into their neighbours** (~2.1 us of gap and ~1-2 of tail each): the FFN's mix writes the shared
+   expert's x16 and the routed experts' int8 input (the attention side's mix writes its x16 already); q's rope with
+   kv_finish; the layer's end (gather_sum, hc_post) into the next layer's hc_dot (ops_hc_post_dot, which the
+   attention side uses). ~5 a layer, ~0.8 ms. each a test that the fused output is the separate kernels' bits.
+6. **the F32 router's matvec** at 148 GB/s where the dense matrices reach ~200: a shape for its 384 rows. ~0.5 ms.
+
+**measured since** (2026-11-04):
+- 1 built: `ForwardOptions.no_guess` (`--no-guess`, dbench `NO_GUESS=1`; no guess, no router copy made - ~160 MB of
+  GPU memory). test_guess_gpu: at 40 GiB (experts streamed), on: 843 streamed, 389 guessed; off: 0 guessed, 0 reads
+  begun; 32 steps' logits and tokens the same bytes. UD-IQ1_M's choice waits for a quiet SSD.
+- 2 smaller than it looked (scratch `mbattn`: ops_sparse_attn at decode's shape, 1 token x 64 heads x 512, 128 FP8
+  window keys + 512 FP4 rows, every shape the same output bytes): 64 x 64 keys 67.7 us a call (three kernels back to
+  back), 64 x 32 keys and dims 62.6, 64 x 16 64.1; fewer heads a block slower (32: 85, 16: 135 - each block decodes
+  its keys again), a 32-value stage slower (72), 8 x 4 or 4 x 8 a thread slower (108, 103). the blocks are not too
+  few: each is a chain of 32 dependent stages (a load, a barrier, the sums). ~0.2 ms a token from a tile; the chain
+  itself is a rewrite (to ~1 ms), later.
+- the gaps: the host is ahead (the queue deep), so the ~2.1 us before a launch is the GPU's own, between dependent
+  kernels - a graph of the step would not remove it. a launch removed is ~3.5 us (its gap, its ramp and tail); so 5
+  first, as: q's rope with kv_finish; the softmax inside the values kernel; the FFN's mix writing the shared expert's
+  x16 and the routed experts' int8 input; the router's picks written to mapped host memory (no copy kernel); the
+  layer's end with the next one's hc_dot - ~7-8 launches a layer, ~1.2 ms. then 3, 4, 6, 2's rewrite.
+
+- 5 built (four of its folds; the softmax inside values left - each values block would redo it): q's rope in
+  ops_kv_finish (q, q_heads: test_fuse_gpu's queries the separate ops_rope's bits, seen failing first); the FFN's mix
+  writes the shared expert's x16 when the step is one sub-batch (f->xf_x16); the routers write their picks into mapped,
+  coherent host memory (r_ids, r_guess: no copy kernel; a probe's still through ridx); a layer's end writes the next
+  layer's attention mixes' sums (ops_hc_post_dot) when one sub-batch, no probe, no Engram next and not the decoder's
+  compaction (f->hcp_next). the bench's answers hash as before, the guess on and off (420 guessed either way); the x16
+  and the next layer's sums each mutated (none written; the wrong layer's fn): the answers differ. traced as before:
+  1,450 -> 1,255 launches a token, gaps under 5 us 3.01 -> 2.62 ms, the wall 55.48 -> 55.10 ms - ~2 us a launch
+  removed, not 3.5 (the kernels that took the work run a little longer).
+
+- 6 built: the F32 router's matvec and the BF16 matvecs (the guess's copy, the compressed layers') one token at 4
+  chunks in flight a lane (mv.hip's tune; R 1-4, U 1-8 swept on 40 routers cold, the same bits each): F32 53.5 ->
+  38.8 us, BF16 22.8 -> 19.5; traced, 2.09 -> 1.63 and 1.54 -> 1.38 ms a token.
+- 3 tried, not kept: the router's top-k as one wave (32 lanes, 12 experts a lane: 15 us a call in decode, against
+  9), then as 256 threads with each one's keys in registers and one barrier a round (11 us) - both the same picks and
+  weights (test_router_gpu, kept: the old kernel as its reference, a flipped tie rule caught in the wave's step and in
+  the waves' step). the barriers were not its time: the scores (expf, log1pf, sqrt) and the launch are.
+- traced now (the guess on, as the first): the wall 55.48 -> 54.51 ms; plain decode, the guess off, 18.2-18.5 ->
+  19.1-19.3 tok/s (the ISTA download on the SSD meanwhile), the answers' hashes as ever.
+
+- 2, a tile (traced in decode this time - the scratch benchmark's fixed 640 keys were not decode's: a short
+  context's layers attend a few hundred): scores' keys a block 64 / 32 / 16 / 8 / 4 at 64 heads 1.18 / 1.16 / 0.97 /
+  0.88 / 1.03 ms a token, 8 heads a thread 1.78; values 0.32 whatever its dims; kept at 8 (kSmallKeys) - the bench's
+  hash and test_attn_gpu as before; ~0.27 ms a token, more where a context selects more rows.
+- hc_post_dot's fn rows staged in LDS by the whole block before its 25 threads' sums (the same sums, the same order:
+  test_fuse_gpu, and a staged row one off caught): slower in decode, 1.14 -> 1.58 ms a token (an index divided a
+  load), 1.28 row by row unrolled - the barrier and the LDS round trip cost more than the loads in flight saved. not
+  kept.
+
+together, revised: ~3.5 ms past the guess (~6%), UD-IQ1_S plain ~18.9 -> ~20 tok/s. the first estimate, ~4-5 ms of
+~54 (~8-9%) past the guess: UD-IQ1_S plain ~18.9 -> ~20.5 tok/s, UD-IQ1_M in proportion. the
+order: 1, 2, 3 (each small, each its own measure), then 5, 4, 6. a HIP graph of a step (most of the 3 ms of gaps) is
+the larger lever and the larger change - the host decides a layer's experts between launches - and waits until these
+are in. every change: the bench's answers hash as before, interleaved fresh runs on both packs.
+
+## the quiet-box bench, and GSQ-RCO's new layout (2026-11-04)
+
+every pack on the MXFP8 table, nothing else on the SSD (the morning's numbers ran beside a 250 GB download), two
+interleaved rounds of the three questions, GREEDY=1 (the server's GPU pick; the bench's host argmax was ~0.4 ms a
+token of its own); ~/bench/clean.
+
+| | UD-IQ1_M | UD-IQ1_S | GSQ-RCO IQ2_XXS |
+| --- | --- | --- | --- |
+| plain, guess on | 16.6 / 16.6 / 16.4, 15.9 / 16.4 / 16.2 | - | 18.8 / 18.9 / 18.8, 18.1 / 18.5 / 18.8 |
+| plain, guess off | 16.5 / 16.6 / 16.1, 16.5 / 16.8 / 16.6 | 18.8 / 19.2 / 19.2, 19.0 / 19.2 / 19.1 | 19.1 / 19.0 / 19.2, 18.9 / 18.9 / 19.2 |
+| drafted, guess on | 28.3 / 24.2 / 35.9, 29.4 / 24.1 / 36.0 | - | 34.3 / 24.3 / 39.7, 35.0 / 24.6 / 40.7 |
+| drafted, guess off | 28.9 / 23.7 / 36.4, 28.8 / 23.6 / 36.3 | 38.3 / 27.6 / 48.4, 38.1 / 27.5 / 48.2 | 34.9 / 24.0 / 40.3, 34.7 / 24.1 / 40.4 |
+| perplexity, 8,191 tokens | 2.4591 | 2.5006 | 2.5461 (its IQ4_NL table 2.5489) |
+| package power decoding, plain / drafted | - | 122 / 127 W (6.4 / 3.3 J a token) | 125 / 125 W (6.6 / 3.8 J) |
+
+- the guess: a wash on UD-IQ1_M (plain 16.35 on against 16.5 off, drafted 29.65 / 29.62) and on GSQ-RCO, a loss on
+  UD-IQ1_S - off for every pack (the pack's setting). the morning's power ran 133-138 W: fewer launches and no guess
+  pass, ~125 W now.
+- GSQ-RCO: its IQ2 experts at UD-IQ1_S's plain speed (2,873 streamed against 615 - the int8 IQ2 kernels' cheaper
+  decode a byte); drafted below UD-IQ1_S (a verify streams 4,991). its perplexity the worst of the three, as unsloth's
+  card measures it (higher KL, lower top-1; six benchmarks 83.68 against UD-IQ1_S 83.53, UD-IQ1_M 85.55): not a pack.
+- ISTA's files since 2026-10-27 (llama.cpp's layout: five shards, the Engram file linked as shard 6) name neither
+  DSpark's target layers nor the Engram's compressed vocabulary (nor embedding_length_out, unread) - both refused at
+  load until now:
+  - the target layers: the model's where its GGUF names them, else the drafter's dspark.json ("target_layers",
+    DeepSeek's config's 37, 38, 39 - ours carries it, requant_dspark copies it); both named and unequal refused,
+    neither refused; the Forward taps the drafter's (fwd_taps_on's at). test_dspark (parsed, four malformed lists
+    refused), test_weights (UD without the key: loaded, none set), test_seqstate_gpu (a drafter naming 36, 38, 39
+    against the model's: refused) - each failing before.
+  - the compressed vocabulary: absent, the token map's greatest entry + 1 (unsloth's file: 99,092 either way - the
+    map's 99,092 distinct entries; the two checks it feeds, a map entry's range and the multipliers' overflow bound,
+    are the map's own). test_engram: UD without the key, every hashed row of 64 positions the oracle's, failing before.
+
+## an overlay: abliteration without a second copy (design, 2026-11-04)
+
+the operator's: the packs' abliterated forms opt-in, off by default, from huihui-ai's patches (unsloth/patch-UD-IQ1_M,
+patch-UD-IQ1_S: 18 attn_output_b each, Q6_K and Q5_K, 0.6 GB) applied as the model loads - not 120-140 GB patched
+copies beside the originals.
+- **the shape**: `weights_create_with(&(WeightsOptions){model, engram, overlay}, err)`; weights_create its no-overlay
+  form. an overlay is a GGUF of tensors; each must name one of the model's (refused: a name the model lacks, dims
+  not the model's tensor's, a tensor no role reads) and stands in for it in every role - its type its own, taken if
+  that role takes it (huihui's Q5_K for a Q6_K out_b: the matmul takes both). its metadata unread.
+- **the files**: a tensor's bytes are found by its file index; the Weights now own the file list - the model's, then
+  the overlay's (`n_files`, `paths`) - and the overlay's tensors are its copies with their index past the model's.
+  the Forward opens `w->paths` (the CPU lane maps them), not the model's.
+- **the identity**: forward_identity hashes `w->paths` (names and sizes): a sequence's state saved with an overlay
+  refused without it, and the other way.
+- **the proof**: the overlaid UD-IQ1_M decodes the bits of huihui's own patched files (UD-IQ1_M-abliterated: their
+  script's output, on disk) - every logits row of a greedy decode; test_weights: the roles' tensors the overlay's,
+  the refusals. then perplexity both packs, and a small fixed prompt set's refusals with and without.
+- **the tools**: dbench / ppl `OVERLAY=file`, osmos-serve `--overlay file`.
+
+## a second model: Qwen3.8-Flash-Next (qwen4exp) (design, 2026-11-04)
+
+the operator's: unsloth's UD-IQ3_XXS of Qwen3.8-Flash-Next (83.6 GB with its n-gram table; >99% recovery by
+unsloth's measure) in osmos and its installer. 125B (6B active) + 51B n-gram embedding + 4B MTP: the whole model in
+GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB of weights.
+- **references**: llama.cpp's own graph (src/models/qwen4exp.cpp, MIT; its build the reference forward for KL and a
+  speed baseline on this box), Strata (github.com/Niko1221/Strata, MIT: src/split - its GDN, QSA, gated residual and
+  MoE kernels and their parity tests). credited where code follows them.
+- **the file** (`general.architecture` qwen4exp; 48 layers, D 2560, 4 streams, vocab 248,320):
+  - layers l % 4 != 3 (36): Gated DeltaNet - attn_qkv [2560 -> 10240: q, k 16 groups x 128, v 48 heads x 128],
+    ssm_conv1d [4 x 10240] (causal, its state the last 3 rows), ssm_alpha / ssm_beta [2560 -> 48], ssm_a, ssm_dt
+    [48], attn_gate [2560 -> 6144], ssm_norm [128] (the output's gated norm a head), ssm_out [6144 -> 2560]; a
+    sequence's state 48 x 128 x 128 F32 a layer (~113 MB for the 36).
+  - layers l % 4 == 3 (12): Qwen Sparse Attention - attn_q [2560 -> 12288: 24 heads x 256, and their gates],
+    attn_k / attn_v [2560 -> 512: 2 KV heads x 256], q / k norms, attn_output [6144 -> 2560]; an indexer (BF16
+    q_proj [2560 -> 4 x 128], k_proj [-> 128], norms) choosing top-k 2048 tokens (compress ratio 48: blocks).
+  - every layer: the gated residual (hc_{attn,ffn}_{norm,down,up,inject}: x normed a stream, gate =
+    sigmoid(up(silu(down(x) / 4))), the block's input the streams' gated mean; after it, each stream += 2
+    sigmoid(inject_s) x out); the MoE - router F32 [2560 -> 512] top 10, a shared expert gated by sigmoid
+    (ffn_gate_inp_shexp), experts 640 wide (gate / up IQ3_XXS, IQ2_S, IQ4_XS; down IQ4_NL, Q2_0).
+  - layer 1: the n-gram embedding (per_layer_token_embd IQ4_NL [160 x 320M], ple.* metadata: 3-grams, 8 heads,
+    conv 4; ple_key / ple_value Q8_0) - Engram's cousin, its own hash.
+  - the head: output_hc_{norm,down,up} (the streams mixed once more), output Q6_K.
+- **the kernels**: three types new to the table, all in llama.cpp's ggml - Q2_0 (ggml 42: 64 values, an f16 scale,
+  2-bit codes -1 .. 2), IQ3_XXS (a grid type, IQ2_XXS's sibling), IQ4_XS (IQ4_NL's values in K-superblocks); IQ4_NL
+  onto the int8 expert path (45 of the 48 downs). new ops: the GDN's conv and delta rule (a token's recurrent update;
+  a prompt's chunked form - the same bits either way, as every path here), QSA's block indexer, the gated residual.
+- **the shape**: osmos's model layer is DeepSeek's (Geometry, LayerWeights, forward.h). the second family beside
+  it, not inside it: its own geometry, roles and forward (src/q4x/, include/osmos/q4x/), the shared parts shared -
+  gguf, the type table and every kernel, the resident set, the int8 experts, the server through an interface both
+  forwards present (step, batch, greedy, logits, a sequence's state). one shape per concept: the server's interface
+  the one place the two meet.
+- **the order**: llama.cpp built (HIP) - its logits on fixed ids the reference, its tok/s the baseline; the three
+  types (each against ggml's dequant, bit for bit); weights and geometry (every tensor in a role, refusals); the
+  forward one block at a time against llama.cpp's intermediate tensors (llama-eval-callback); then decode speed,
+  then prompts, then MTP.
+
+## the installer (design, 2026-11-04)
+
+the operator's: one command from a stock Halo to a pack ready to run - and, a nice touch, from the files a user has
+already. `tools/install/` (python, the standard library alone; `hf` for downloads - installing is not running).
+- **the manifest** (`packs.json`, the source of truth): every file a pack reads, by id - its repo, the commit it is
+  pinned to (never a branch), its path there, its bytes and SHA-256; and each pack - its model shards, its Engram
+  table and the shard slot the table takes (no, count), its picks profile, its drafter, its overlay (abliteration,
+  opt-in) and its tested settings (budgets, the guess off, drafted). a file of ours not yet published names the repo
+  and no commit: found among the user's files or refused, never fetched unpinned.
+- **the table's stamp**: unsloth's MXFP8 table is published stamped 1 of 1; a pack reads it as its shard slot. its
+  hash checked canonically - the two header values (split.no, split.count) read as published - so a table already
+  restamped (this box's) verifies too. the installer stamps only files it downloaded; a user's file another stamp
+  than the slot is copied (a reflink where the filesystem has them) and the copy stamped. it never writes a file it
+  did not create.
+- **the user's files** (`--have DIR ...`): each manifest file looked for by name under the directories given, and
+  taken only if its bytes and SHA-256 are the manifest's (`--trust-size`: bytes alone, the user's call, said so).
+- **the host**: a gfx1151; ROCm; the GPU memory limit (ttm's pages, reported - raising it is a system setting, the
+  user's); free disk for what is missing. a failed check stops with why.
+- **the result**: `<models>/<pack>/`, the shards linked by their names, the table as its slot, `osmos.json` (the
+  model's first shard, the picks, the drafter, the overlay if asked, the budgets and flags) and the command to run.
+  the engine built from this checkout (`make`, the HIP library, the tools).
+- **the launch** (the operator's): the installer ends at a model one can talk to - `--serve` starts osmos-api on a
+  port, or `--rig` registers the pack in rig (~/Projects/rig: the agent runtime that launches and routes local
+  models): a row merged by id into `~/.rig/models.json` - the provider half (window, maxTokens, reserve,
+  keepRecent) and the child half rig launches (`command` with `${PORT}`, `port`, `aliases`, `stopGrace`, `places`)
+  - no other row touched, the file replaced whole (written aside, renamed); and, asked first (or by flag), the
+  default model in `~/.rig/settings.json`. rig probes `/health`: 503 while loading, 200 when ready.
+- **the tests** (`tools/install/test_install.py`, unittest, no network): the manifest's checks (an unpinned file,
+  an unknown id, a slot out of range, refused); the stamp read, written and hashed canonically on a small GGUF; the
+  user's files found, a wrong hash refused, a wrong stamp copied not written; a pack laid out from local files.
+
+## osmos-api: the engine as an OpenAI-compatible server (design, 2026-11-04)
+
+the operator's: osmos served as rig serves its models - `POST /v1/chat/completions` (streamed as server-sent events,
+or whole), `GET /v1/models`, `GET /health` (503 loading, 200 ready) - in C, no Python at runtime: a new binary,
+`osmos-api --config <pack>/osmos.json --port N`, over the engine osmos-serve drives (the conversations kept, several
+at once, drafting).
+- **the tokenizer**: the GGUF's own (tokenizer.ggml.tokens / merges / token_type, pre "deepseek-v3"): byte-level
+  BPE - the pre-tokenizer's split (its regex's classes over Unicode categories), bytes to the GPT-2 alphabet, merges
+  by rank. checked token for token against Maya's (its pack's tokenizer, the corpus the bench used) and llama.cpp's
+  (llama-tokenize), decoded back byte for byte; special tokens matched whole.
+- **the template**: DeepSeek-V4.1's chat encoding (its encoding.py, as maya's serve/ds41_encoding.py ports it, MIT):
+  system, user, assistant, tool turns, thinking on or off, reasoning effort - checked against maya's golden chats
+  (serve/chat_golden.json) byte for byte.
+- **the wire**: HTTP/1.1 on libevt (which osmos-serve links), one connection a request's stream; a request's tokens
+  to a lane (osmos-serve's multi.c), each token detokenized as it lands (a partial UTF-8 sequence held); `stop`,
+  `max_tokens`, `stream`; sampling greedy (the engine's) - temperature and top-p refused by name until sampling is
+  built, not ignored.
+- **the order**: the tokenizer and its tests; the template and its tests; the server - a request against a fake
+  engine (the protocol's), then the real one; then the installer's `--serve` / `--rig`.
+- **the process** (decided with the tokenizer and template done): osmos-api runs osmos-serve as its child (the
+  protocol over pipes: `--parallel N --serve`, the pack's flags from osmos.json) and is the rest - HTTP, the
+  tokenizer, the template - as maya's front drives maya-ds4. one engine reader thread routes the child's lines by
+  rid (T, PP, DONE, ERR) to the request waiting on them; a thread a connection, their number capped; a request's
+  disconnect STOPs its rid.
+- **the mapping** (maya's frontend.py for DeepSeek, and what rig sends): `tools` onto the first system message (an
+  empty one put first if none); role `developer` as system; an assistant's `reasoning` as its reasoning_content.
+  thinking on unless `chat_template_kwargs.enable_thinking` is false, `reasoning_effort` is "none" or
+  `thinking.type` is "disabled"; the effort `reasoning_effort` (or chat_template_kwargs') - "minimal" / "low" 50,
+  "medium" / "high" 75, "xhigh" / "max" 100, an integer 1-100 itself (rig's row names low / high / max).
+- **the answer**: streamed - reasoning_content deltas until </think>, content deltas after, nothing past the start
+  of a DSML calls block; a text that could still become one of those markers (or ends inside a UTF-8 character)
+  held until it cannot. at DONE the whole completion parsed (chat_parse): its tool calls one last delta (ids
+  call_<rid>_<n>), finish_reason tool_calls / stop / length, usage and timings, then [DONE]; a completion out of the
+  format answered as its text (content), stop. whole (stream false): the same, one message.
+- **built** (2026-11-04): tools/api (`make api`) - request.c (the mapping; sampling, stop strings, n > 1 and a
+  forced tool_choice refused by name), answer.c (the stream's holding back), reply.c, engine.c (the child dies with
+  the server: PR_SET_PDEATHSIG), http.c, config.c (osmos.json read whole; an unknown key refused). tested against a
+  scripted engine (tests/api, `make api-test`: health while loading, thinking and tool-call streams, a whole answer,
+  length, refusals, a client gone -> STOP, the engine gone -> the server exits; each check seen failing on a mutant),
+  then on the real one: the installed ud-iq1_s pack (drafter and overlay) answered a thinking question, a tool call
+  and the tool's result round trip, 29-37 tok/s drafted on short answers.
+- **one context: 1M** (the operator's, 2026-11-04): both packs, osmos-serve's default, 1,048,576 tokens; rig's row a
+  reply of 256K tokens (maxTokens, its thinking and answer: rig's thinkingBudget is Anthropic's alone), as much kept
+  free (reserve). the state is ~0.9 KB a token as measured before (~0.85 GiB at 1M); what did not fit was the
+  indexer's scores - a step's 2,048 tokens by every row they could see, F32: this model's ratio-1 layers make that
+  every position, 8 GiB at 1M (measured: 1M took 8.35 GiB more than 64K). the step is now scored in chunks of
+  tokens, at most FWD_SCORE_BYTES (512 MiB, the 64K size: one chunk there) - each token's scores, bits and picks its
+  own, so no bit moves. tests/gpu/test_longctx_gpu: 1M 0.71 GiB over 64K (8.21 before), the last logits the same bits
+  at both; seen failing before the change and on a chunk-offset mutant.
+- **the budgets at 1M** (osmos-serve to READY with the packs' drafter, dspark-iq2xs; the edges to half a GiB): IQ1_S
+  plain 107.5, drafted 102.5; IQ1_M plain 107.5, drafted 101.5 - the packs 1 GiB under: IQ1_S 106.5 / 101.5, IQ1_M
+  106.5 / 100.5. (IQ1_M's drafted edge was first measured at 98 beside the original 7.97 GB drafter by mistake - the
+  packs ship the 4.68 GB requant; that drafter is deleted now, its tests on dspark-iq2xs.)
+- **decode at those budgets, 1M** (~/bench/1m-b, the quiet-box bench's method: three prompts, two interleaved rounds,
+  every answer's hash the quiet-box run's): IQ1_S plain 18.8, drafted 37.5; IQ1_M plain 16.0, drafted 28.6 tok/s -
+  against the 64K run at 110 / 103 GiB: 19.1 / 38.0 and 16.5 / 29.6 (-1.4 to -3.4%: the experts' smaller room, each
+  GiB fewer misses read from the SSD).
+- **published**: huggingface.co/mrsirg97-rgb/osmos-evo-1017 (public, MIT: DeepSeek's DSpark weights, maya's packing,
+  ggml's quantizers) - the drafter and both picks profiles; packs.json pins its commit.
+
+## the budget sized to the GPU, and Maya 1.1.53 (2026-11-04)
+
+- **why**: a pack's fixed budgets were this box's limits less 1 GiB - another Halo (a BIOS split, a desktop holding
+  GPU memory) starts short of them and is refused, and a budget picked for one setup (the bench's 100 GiB drafted)
+  leaves memory idle in another. first shipped as a shrink-only correction (the free memory the pack was measured
+  beside, less what is missing): it never fills a bigger room. replaced the same day, before the release.
+- **the sizing** (osmos/run/fit.h, `--budget auto`, osmos-serve's and dbench's default way): fit_sized builds the
+  engine whole - the forward, every lane's sequence, the drafter - at budget 0 (the forward's dense weights alone:
+  forward_budget says how much), reads forward_room (the GPU's free memory less the expert pool's room, which the pool
+  takes only as experts first stream), and builds again with that room but FIT_HEADROOM (1 GiB) given to experts,
+  until the room is within FIT_SLACK (256 MiB) past the headroom, FIT_BUILDS (5) at most. the pool's room is twice a
+  layer's streamed experts, so it shrinks as the budget grows: each step's room is an underestimate the next corrects,
+  never past the fill. a first version took one step from the dense build and undersized by ~6 GiB (that build's pool
+  is every expert's): caught by test_fit_gpu and by its plain run choosing 103.3 where 110 had run.
+- **measured**: test_fit_gpu (UD-IQ1_M, 64K, 2,048-token steps): 8.00 -> 100.40 -> 106.24 GiB in three builds, 1.21
+  GiB left. the bench's runs, the same budget both rounds: UD-IQ1_M plain 109.97, drafted 104.75, prompts 106.75;
+  UD-IQ1_S 110.79 / 105.55 / 107.55 (dbench's 512-token decode steps take less than osmos-serve's 2,048).
+  against the hand-picked budgets (110 / 100 / 106): plain the same, drafted +3.7% (UD-IQ1_M 28.6 -> 29.7) and +4.8%
+  (UD-IQ1_S 36.5 -> 38.2), prompts +0-4% (~/bench/auto).
+- **Maya 1.1.53** (`./maya.sh --bench`, its configs `maya-ud-{nodraft,dspark}.json` / `maya-s-*.json`: 64K, its own
+  8 GB DSpark, `--threads on`; UD-IQ1_S packed by its tools/ds4/pack_gguf.py, its lane calibrated (`--calibrate
+  --no-start`) and its expert profile warmed by a discarded run first - the warm-up 17.7, the next 19.2 tok/s), each
+  engine in a fresh process, two interleaved rounds (~/bench/maya-1.1.53, ~/bench/maya-1.1.53-s): plain a tie (UD-IQ1_M
+  16.5 / 16.5, UD-IQ1_S 19.2 / 19.3); drafted osmos 29.7 / 28.1 and 38.2 / 35.4; prompts 2K 298 / 237 and 330 / 261,
+  8K 450 / 404 and 482 / 429. the router's guess on lifted osmos's 2K prompt 290-297 -> 321 (one run): not taken - off
+  is the packs' setting and wins the agents below.
+- **agents** (tools/serve/agent_bench.py under tools/power.py, the energy over the bench's own window: power.py's
+  samples between agent_bench's printed epochs; ~/bench/agents, ~/bench/agents-auto), UD-IQ1_M, 4 x 8 seed 1, 131K:
+  osmos (auto) 440.1 s, first token p50 / p95 5.75 / 58.3 s, turn done 44.1 / 100.1 s, 134.2 W, 7.38 J an answer
+  token; osmos at the searched budget (100.5 GiB, the limit in that setup less 1) 453.7 s, 7.47 J; Maya 546.6 s,
+  6.63 / 90.9 s, 55.9 / 124.9 s, 123.6 W, 8.44 J. the UD-IQ1_S agents runs were not run (UD-IQ1_M decided it).
+- **a 131,072-token prompt** (tools/serve/drive.py, one GEN of ~/bench/osmos-prompts/p131072.txt: BOS, 130,879 tokens
+  of this repo's DESIGN and README text, 192 of calib16k; ~/bench/long), UD-IQ1_M, one run each: osmos (1M context,
+  auto, guess off) its first token at 258.9 s (506 tok/s), Maya (`--max-context 139264`, its drafter off) 273.5 s (479
+  tok/s); the 8 tokens after the same (hash 0de05d1e3180f2b6). the lead narrows with length (2K +26%, 8K +11%, 128K
+  +6%): at 128K the sparse attention over the whole context is most of a step's work, and the two are close there.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.
@@ -1127,9 +2221,8 @@ HTTP API, and the reference is measured through the same harness:
 ## the protocol (carried from #356 / #557 / #587)
 
 - every claim is a measured number on this box, with the command that reproduces it, and the box's state with it:
-  today **core 1 (cpus 1, 17) offline** (idle MCE errors), 15 of 16 cores. its cost is expected small (decode and
-  prompt are GPU- and memory-bound; maya's CPU lane takes 0.2-1.7% of the experts) and **unmeasured**: a fixed unit is
-  re-measured on the same commands.
+  today the second unit, **all 16 cores online**. the first unit ran with core 1 (cpus 1, 17) offline for idle MCE
+  errors; its numbers are that box's, and are re-measured here on the same commands before any comparison.
 - same binary, one switch off and on, alternating runs, at least two each; the run-to-run spread is measured and
   reported, not assumed.
 - latency: first token and turn done at mean / p50 / p95, and wall. throughput: prompt tok/s at 2K / 8K / 32K, decode

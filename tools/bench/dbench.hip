@@ -1,27 +1,32 @@
-// dbench budget_gib max_tokens n_new warmup.txt q1.txt [q2.txt ...]: libsubstrate's decode as maya's --bench runs
+// dbench budget_gib|auto max_tokens n_new warmup.txt q1.txt [q2.txt ...]: libosmos's decode as maya's --bench runs
 // it - one forward (the lane), an answer of 64 tokens to the warm-up prompt (keep it unlike the questions: the
 // resident set follows what it answers), then each question's prompt and n_new greedy tokens; prints the prompt's
 // tok/s (past 256 tokens), the answer's tok/s and a hash of its tokens (the same hash: the same tokens). a prompt
 // file is token ids, comma separated (tools/bench/prompts.py writes them).
-// environment: MODEL_DIR (default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
-// substrate-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
-// CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096).
-// build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -lsubstrate_hip -lsubstrate
-//        -lhsa-runtime64 -o bin/dbench   (after `make lib/libsubstrate.a lib/libsubstrate_hip.a`)
+// environment: MODEL (a first shard: unsloth's UD-IQ1_M, say; ENGRAM its Engram file where it has one) or MODEL_DIR
+// (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
+// osmos-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
+// CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
+// PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
+// a layer ahead: ForwardOptions' no_guess), OVERLAY=file (tensors standing in for the model's: weights_create_with).
+// build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos
+//        -lhsa-runtime64 -o bin/dbench   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
 
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
 extern "C" {
-#include "substrate/model/gguf.h"
-#include "substrate/model/weights.h"
-#include "substrate/run/forward.h"
-#include "substrate/run/drafter.h"
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+#include "osmos/run/fit.h"
+#include "osmos/run/forward.h"
+#include "osmos/run/drafter.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -52,6 +57,7 @@ static int32_t argmax(const std::vector<float>& l) {
 static Drafter* g_draft;        // DRAFT=dir: the answers drafted (DSpark) and verified
 static bool g_greedy;           // GREEDY=1: the picks forward_greedy's (on the GPU), not the logits copied and scanned
 static uint32_t g_max_tokens;   // a step's most tokens (the prompt's steps)
+static FILE* g_ids;             // IDS=file: each undrafted answer's token ids, a line each (to read the text back)
 
 static int32_t pick(Forward* f, std::vector<float>& lg, uint32_t V, uint32_t row) {
   if (g_greedy) {
@@ -129,33 +135,47 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
   }
   for (int i = 0; !g_draft && i < n; i++) {
     *h = (*h ^ (uint64_t) t) * 1099511628211ull;
+    if (g_ids) std::fprintf(g_ids, i ? ",%d" : "%d", t);
     if (!forward_step(f, s, t, err)) std::fprintf(stderr, "step %d: %s\n", i, err), std::_Exit(1);
     t = pick(f, lg, V, 0);
   }
   const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  if (g_ids) std::fprintf(g_ids, "\n"), std::fflush(g_ids);
   seq_destroy(s);
   return n / sec;
 }
 
 int main(int argc, char** argv) {
   if (argc < 6) {
-    std::fprintf(stderr, "usage: dbench budget_gib max_tokens n_new warmup.txt q1.txt [q2.txt ...]\n");
+    std::fprintf(stderr, "usage: dbench budget_gib|auto max_tokens n_new warmup.txt q1.txt [q2.txt ...]\n");
     return 2;
   }
-  const uint64_t budget = (uint64_t) (std::atof(argv[1]) * (1ull << 30));
+  const bool sized = !std::strcmp(argv[1], "auto");  // osmos-serve --budget auto's: sized to this GPU (fit.h)
+  const uint64_t budget = sized ? 0 : (uint64_t) (std::atof(argv[1]) * (1ull << 30));
   const uint32_t max_tokens = (uint32_t) std::atoi(argv[2]);
   const int n_new = std::atoi(argv[3]);
   const char* md = std::getenv("MODEL_DIR");
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "",
                     mdir = md ? std::string(md) + "/" : home + "/models/ds1017/";
   char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
-  Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
-  Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
-  CHECK(g && eg);
-  Weights* w = weights_create(g, eg, werr);
-  CHECK(w);
+  // MODEL: a model's first shard (unsloth's UD: its Engram its own, ENGRAM unset); else ds1017's in MODEL_DIR
+  const char* mp = std::getenv("MODEL");
+  const char* ep = std::getenv("ENGRAM");
+  const std::string model = mp ? mp : mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
+                    engram = ep ? ep : mp ? "" : mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf";
+  Gguf* g = gguf_create(model.c_str(), err);
+  if (!g) std::fprintf(stderr, "%s: %s\n", model.c_str(), err), std::_Exit(1);
+  Gguf* eg = engram.empty() ? nullptr : gguf_create(engram.c_str(), err);
+  CHECK(engram.empty() || eg);
+  const char* op = std::getenv("OVERLAY");
+  Gguf* ov = op ? gguf_create(op, err) : nullptr;
+  if (op && !ov) std::fprintf(stderr, "%s: %s\n", op, err), std::_Exit(1);
+  const WeightsOptions wo = {g, eg, ov};
+  Weights* w = weights_create_with(&wo, werr);
+  if (!w) std::fprintf(stderr, "weights_create: %s\n", werr), std::_Exit(1);
   ForwardOptions o = {};
   o.n_layers = (int) w->geo.n_layers;
+  o.no_guess = std::getenv("NO_GUESS") != nullptr;
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
   o.budget = budget;
   o.max_tokens = max_tokens;
@@ -171,15 +191,43 @@ int main(int argc, char** argv) {
     std::printf("ranked by %s\n", pp);
   }
   const auto l0 = std::chrono::steady_clock::now();
-  Forward* f = forward_create_with(w, &o, ferr);
-  if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
   const int cpu_threads = std::getenv("CPU_THREADS") ? std::atoi(std::getenv("CPU_THREADS")) : 0;
-  if (!forward_lane(f, cpu_threads, ferr)) std::fprintf(stderr, "forward_lane: %s\n", ferr), std::_Exit(1);
+  struct Built {  // the forward, its lane, the drafter if DRAFT, and an answer's sequence while sizing
+    const Weights* w;
+    ForwardOptions o;
+    int cpu_threads;
+    Forward* f;
+  } b{w, o, cpu_threads, nullptr};
+  auto unbuild = [](void* ctx) {
+    Built* z = (Built*) ctx;
+    drafter_destroy(g_draft), forward_destroy(z->f);
+    g_draft = nullptr, z->f = nullptr;
+  };
+  auto build = [](void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[FIT_ERR]) -> bool {
+    Built* z = (Built*) ctx;
+    char ferr[FORWARD_ERR] = "";
+    z->o.budget = budget;
+    bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, ferr);
+    if (ok && std::getenv("DRAFT")) ok = (g_draft = drafter_create(z->f, std::getenv("DRAFT"), ferr)) != nullptr;
+    Seq* s = ok ? seq_create(z->f, ferr) : nullptr;  // an answer's sequence counted, then let go
+    ok = ok && s && forward_room(z->f, room);
+    seq_destroy(s);
+    if (!ok) {
+      drafter_destroy(g_draft), forward_destroy(z->f), g_draft = nullptr, z->f = nullptr;
+      return std::snprintf(err, FIT_ERR, "%s", ferr), false;
+    }
+    *built = forward_budget(z->f);
+    return true;
+  };
+  uint64_t sized_to = 0;
+  char zerr[FIT_ERR] = "";
+  if (sized ? !fit_sized(build, unbuild, &b, FIT_HEADROOM, &sized_to, zerr)
+            : !build(&b, budget, &sized_to, &sized_to, zerr))
+    std::fprintf(stderr, "build: %s\n", zerr), std::_Exit(1);
+  Forward* f = b.f;
+  if (sized) std::printf("sized to this GPU: budget %.2f GiB\n", sized_to / (double) (1ull << 30));
   g_greedy = std::getenv("GREEDY") != nullptr;
-  if (const char* dd = std::getenv("DRAFT")) {
-    g_draft = drafter_create(f, dd, ferr);
-    if (!g_draft) std::fprintf(stderr, "drafter_create: %s\n", ferr), std::_Exit(1);
-  }
+  if (const char* ip = std::getenv("IDS")) CHECK((g_ids = std::fopen(ip, "w")));
   std::printf("loaded %.0fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - l0).count());
   uint64_t h = 1469598103934665603ull;
   answer(f, w, read_ids(argv[4]), 64, &h);  // the warm-up, as maya's bench
@@ -187,14 +235,29 @@ int main(int argc, char** argv) {
     h = 1469598103934665603ull;
     g_drafted = g_accepted = g_rounds = 0, g_draft_ms = g_verify_ms = 0;
     const double tps = answer(f, w, read_ids(argv[i]), n_new, &h);
-    uint64_t gs, gg;
-    forward_guesses(f, &gs, &gg);
+    uint64_t gs, gg, gr;
+    forward_guesses(f, &gs, &gg, &gr);
     std::printf("%.1f tok/s (%d tokens) stream %016llx; so far streamed picks %llu, guessed %llu, on the CPU %llu, "
                 "swaps %llu; drafted %d accepted %d in %d rounds (%.0f ms drafting, %.0f verifying)\n",
                 tps, n_new, (unsigned long long) h, (unsigned long long) gs, (unsigned long long) gg,
                 (unsigned long long) forward_cpu_picks(f), (unsigned long long) forward_swaps(f), g_drafted,
                 g_accepted, g_rounds, g_draft_ms, g_verify_ms);
+    uint64_t wn[2], wns[2];
+    forward_waits(f, wn, wns);
+    std::printf("  so far waited on %llu reads not guessed (%.0f ms), %llu guessed (%.0f ms); the guess read %llu\n",
+                (unsigned long long) wn[0], wns[0] / 1e6, (unsigned long long) wn[1], wns[1] / 1e6,
+                (unsigned long long) gr);
     std::fflush(stdout);
+  }
+  if (const char* po = std::getenv("PICKS_OUT")) {  // every pick of this run ([layer][expert] uint64): a profile
+    FILE* pf = std::fopen(po, "wb");
+    CHECK(pf);
+    const size_t n = (size_t) w->geo.n_layers * w->geo.n_experts;
+    CHECK(std::fwrite(forward_picks(f), 8, n, pf) == n);
+    std::fclose(pf);
+    uint64_t total = 0;
+    for (size_t i = 0; i < n; i++) total += forward_picks(f)[i];
+    std::printf("picks: %llu to %s\n", (unsigned long long) total, po);
   }
   drafter_destroy(g_draft);
   forward_destroy(f);

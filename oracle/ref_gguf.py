@@ -195,7 +195,7 @@ class RefGguf(R.Ref):
         T, cols = hash_ids.shape
         hd = self.lay.head_dim
         dt = self.st.t[P + "embed.weight"][0]
-        # substrate: a row's bytes from its type's blocks (this model's Engram is IQ4_NL: 144 B a row), any type
+        # osmos: a row's bytes from its type's blocks (this model's Engram is IQ4_NL: 144 B a row), any type
         # gguf-py decodes; maya's read every type but Q6_K as MXFP8
         rb = {"Q6_K": hd // 256 * 210, "MXFP8": hd // 32 * 33, "IQ4_NL": hd // 32 * 18, "Q8_0": hd // 32 * 34}.get(dt)
         if rb is None:
@@ -215,7 +215,7 @@ class RefGguf(R.Ref):
         kv = e @ self.W(P + "wkv").T
         d, hc = self.dim, self.hc
         key, value = kv[:, :hc * d].view(T, hc, d), kv[:, hc * d:]
-        # substrate: a GGUF that keeps q_weight and k_weight apart (this model's) folds them here, as ref.py does
+        # osmos: a GGUF that keeps q_weight and k_weight apart (this model's) folds them here, as ref.py does
         w = self.V(P + "gate.weight") if (P + "gate.weight") in self.st.t else self.V(P + "q_weight") * self.V(P + "k_weight")
         h = x.float()
         rstd = torch.rsqrt(h.square().mean(-1) + self.eps) * torch.rsqrt(key.square().mean(-1) + self.eps)
@@ -251,7 +251,7 @@ class RefGguf(R.Ref):
         # ref.py's forward reads the embedding rows as BF16: a Q8_0 table is dequantised for the rows asked
         dt = self.st.t["embed.weight"][0]
         if dt != "BF16":
-            # substrate: a row's bytes from its type (this model's embedding is Q5_K: 3520 B a row), decoded by gguf-py;
+            # osmos: a row's bytes from its type (this model's embedding is Q5_K: 3520 B a row), decoded by gguf-py;
             # maya's read every non-BF16 table as Q8_0
             rb = {"Q8_0": self.dim // 32 * 34, "Q5_K": self.dim // 256 * 176, "Q6_K": self.dim // 256 * 210}.get(dt)
             if rb is None:

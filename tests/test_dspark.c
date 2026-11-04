@@ -4,9 +4,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "substrate/model/dspark.h"
+#include "osmos/model/dspark.h"
 
-/* the index on the real drafter (~/models/dspark: skipped without it): its tensors as the pack has them; and
+/* the index on the real drafter (the packs', ~/Models/ds1017/dspark-iq2xs: skipped without it): its tensors as the pack has them; and
    malformed indexes refused, each with why */
 
 static char dir[] = "/tmp/test_dspark_XXXXXX";
@@ -39,6 +39,7 @@ static void test_malformed(void)
   write("dspark.bin", NULL, 4096);
   refused("{\"tensors\": [[\"a\", \"Q4_K\", 0, 144, [256]]]}", "a type it does not know");
   refused("{\"tensors\": [[\"a\", \"Q8_0\", 0, 35, [32]]]}", "bytes not the type's for the dims");
+  refused("{\"tensors\": [[\"a\", \"IQ2_XS\", 0, 75, [256]]]}", "bytes not an IQ2_XS block's");
   refused("{\"tensors\": [[\"a\", \"F32\", 4000, 400, [100]]]}", "past the end of the bin");
   refused("{\"tensors\": [[\"a\", \"F32\", 0, 400, [100]]", "truncated");
   refused("{\"other\": 1}", "no tensors");
@@ -46,24 +47,40 @@ static void test_malformed(void)
   char err[DSPARK_ERR] = "";
   DsparkIndex *x = dspark_index(dir, err);
   assert(x && x->n == 2 && dspark_tensor(x, "b")->type == 30 && dspark_tensor(x, "a.w")->dims[1] == 32);
+  assert(x->n_targets == 0); /* none named: the model's, then */
   assert(!dspark_tensor(x, "c"));
+  dspark_index_destroy(x);
+  /* the trunk's layers it taps, named beside the tensors (a model whose GGUF does not: ISTA's) */
+  write("dspark.json", "{\"target_layers\": [37, 38, 39], \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", 0);
+  x = dspark_index(dir, err);
+  assert(x && x->n == 1 && x->n_targets == 3 && x->targets[0] == 37 && x->targets[2] == 39);
+  dspark_index_destroy(x);
+  refused("{\"target_layers\": [38, 37], \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "targets not ascending");
+  refused("{\"target_layers\": 37, \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "targets not a list");
+  refused("{\"target_layers\": [], \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "targets an empty list");
+  refused("{\"target_layers\": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "
+          "\"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "more targets than a list holds");
+  /* a drafter's experts requantized to the trunk's types: the type table's sizes */
+  write("dspark.json", "{\"tensors\": [[\"e\", \"IQ2_XS\", 0, 74, [1, 256]]]}", 0);
+  x = dspark_index(dir, err);
+  assert(x && x->n == 1 && dspark_tensor(x, "e")->type == 17);
   dspark_index_destroy(x);
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
   assert(system(cmd) == 0);
-  printf("  a well-formed one: its two tensors, by name\n");
+  printf("  a well-formed one: its two tensors, by name; its target layers where it names them\n");
 }
 
 static void test_real(void)
 {
   char path[512], err[DSPARK_ERR] = "";
-  snprintf(path, sizeof path, "%s/models/dspark", getenv("HOME") ? getenv("HOME") : "");
+  snprintf(path, sizeof path, "%s/Models/ds1017/dspark-iq2xs", getenv("HOME") ? getenv("HOME") : "");
   struct stat st;
   char json[600];
   snprintf(json, sizeof json, "%s/dspark.json", path);
   if (stat(json, &st) != 0)
   {
-    printf("  the real index: skipped (no ~/models/dspark)\n");
+    printf("  the real index: skipped (no ~/Models/ds1017/dspark-iq2xs)\n");
     return;
   }
   DsparkIndex *x = dspark_index(path, err);
@@ -80,7 +97,7 @@ static void test_real(void)
         char n[DSPARK_NAME_MAX];
         snprintf(n, sizeof n, "mtp.%d.ffn.experts.%d.w%d.weight", b, e, w);
         const DsparkTensor *t = dspark_tensor(x, n);
-        assert(t && t->type == 39 && t->n_dims == 2 && t->dims[0] * t->dims[1] == 2304ull * 5120);
+        assert(t && t->type == 17 && t->n_dims == 2 && t->dims[0] * t->dims[1] == 2304ull * 5120);
       }
   const DsparkTensor *mp = dspark_tensor(x, "mtp.0.main_proj.weight");
   assert(mp && mp->type == 8 && mp->dims[0] == 5120 && mp->dims[1] == 15360);
@@ -88,7 +105,7 @@ static void test_real(void)
   assert(hm && hm->type == 30 && hm->dims[0] == 129280 && hm->dims[1] == 256);
   assert(dspark_tensor(x, "mtp.2.confidence_head.proj.weight")->dims[1] == 5376);
   dspark_index_destroy(x);
-  printf("  the real index: 1224 tensors, names unique, 3 x 128 x 3 MXFP4 experts, the heads' shapes\n");
+  printf("  the real index: 1224 tensors, names unique, 3 x 128 x 3 IQ2_XS experts, the heads' shapes\n");
 }
 
 int main(void)

@@ -1,21 +1,20 @@
 # maya upstream: patches and findings
 
-what building libsubstrate found in [Project Maya](https://github.com/mw00/project-maya), measured on the Ryzen AI
+what building libosmos found in [Project Maya](https://github.com/mw00/project-maya), measured on the Ryzen AI
 Halo (Ryzen AI MAX+ 395, Radeon 8060S gfx1151, 128 GB, ROCm 7.15 / hipBLASLt 1.4.1). each: what, the evidence, the
 fix, its status. none is filed unless it says so.
 
-## open as PRs (mrsirg97-rgb)
+## landed (mrsirg97-rgb's PRs, committed by maya's maintainer and credited in its CHANGELOG)
 
-| # | what | measured | status |
+| # | what | measured | in maya |
 | --- | --- | --- | --- |
-| [#628](https://github.com/mw00/project-maya/pull/628) | the DFlash2 drafter on one Ryzen AI Max APU | GLM decode 27.4 -> 29.8 tok/s (+9%), `--bench` three runs each; same tokens with `MAYA_GLM_NO_PREFILL=1` | open, CI pass |
-| [#631](https://github.com/mw00/project-maya/pull/631) | `gfx1151-glm-hipblaslt-100401.txt` retuned: the shipped table's one solution (2390) is rejected for every GLM shape on hipBLASLt 1.4.1 (0 launches, 2,979 fallbacks a prompt) | GLM prefill 159 -> 306 tok/s at 8K (x1.9) | open, CI pass |
-| [#634](https://github.com/mw00/project-maya/pull/634) | the fused GLM prompt experts at 3 blocks a multiprocessor on gfx1151, bit for bit the same | the kernel -13 to -16%, GLM prefill +3.5% | open, CI pass |
-| [#643](https://github.com/mw00/project-maya/pull/643) | DeepSeek's prompt experts through the fused int8 experts (IQ1_M, IQ2_XXS / IQ2_XS downs, DeepSeek's shape) | DeepSeek prefill 234 -> 257 (2K), 430 -> 468 (8K); perplexity 8.4907 -> 8.4937 | open, CI pass; conflicts with #634 at the grid line (the description says how) |
+| [#628](https://github.com/mw00/project-maya/pull/628) | the DFlash2 drafter on one Ryzen AI Max APU | GLM decode 27.4 -> 29.8 tok/s (+9%) | 23586f7 |
+| [#631](https://github.com/mw00/project-maya/pull/631) | gfx1151's GLM hipBLASLt table for hipBLASLt 1.4.1 | GLM prefill 159 -> 306 tok/s at 8K (x1.9) | 955c4dc, then 23d24b3 (every table kept, per shape the first the build accepts) |
+| [#634](https://github.com/mw00/project-maya/pull/634) | the fused GLM prompt experts at 3 blocks a multiprocessor on gfx1151, bit for bit | the kernel -13 to -16%, GLM prefill +3.5% | 29024d0 |
+| [#643](https://github.com/mw00/project-maya/pull/643) | DeepSeek's prompt experts through the fused int8 experts | DeepSeek prefill 234 -> 257 (2K), 430 -> 468 (8K) | acb5828 |
+| [#745](https://github.com/mw00/project-maya/pull/745) | DeepSeek's router weights kept BF16 on AMD | decode +3.5% (17.0 -> 17.6 tok/s), the same logits | 3ab0908 |
 
-all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
-
-| [#745](https://github.com/mw00/project-maya/pull/745) | DeepSeek's router weights kept BF16 on AMD (`GateW`, the router kernels templated on the weight type; `DS4_ROUTER_CHECK=1` checks the bits against the F32 copy at load) | decode +3.5% (17.0 -> 17.6 tok/s), the same logits; 160 MB more for experts | open (2026-11-01) |
+(checked 2026-11-04 against v1.1.53: every one's change in the tree; GitHub shows them closed, not merged.)
 
 ## to file
 
@@ -27,7 +26,7 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 - **effect**: rows read at the wrong stride and decoded as FP8 - no error, wrong numbers in the oracle that checks
   maya-ds4's GGUF path.
 - **fix**: the row's bytes from its type, decoded by gguf-py for any type but MXFP8; refuse a type of unknown size.
-  done in `oracle/ref_gguf.py` (`# substrate:`).
+  done in `oracle/ref_gguf.py` (`# osmos:`).
 
 ### 2. `tools/ds4/ref_gguf.py` reads every non-BF16 embedding as Q8_0
 
@@ -55,7 +54,7 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 - **what**: two runs of maya-ds4 (v1.1.36 + #643 + #587) on the same 32 real token ids, one process each, the same
   config: the `DS4_DUMP_L` records part from layer 0 (worst 1.1e-8 at position 8), layer 10 median 1.3% (worst 18%),
   layers 30-38 median 4-7%; the logits KL 2.5e-3 mean, 1.4e-2 max, the argmax the same at 32 of 33 positions (the 4
-  greedy tokens the same). `~/substrate-oracle`, `dumpcmp.py layers L_a.bin L_b.bin`.
+  greedy tokens the same). `~/osmos-oracle`, `dumpcmp.py layers L_a.bin L_b.bin`.
 - **against the F32 reference** (`ref_gguf.py`, the first 8 positions): KL 0.0002-0.018 a position, maya's own spread
   0-0.0057; the argmax the reference's at 7 of 8.
 - **candidates** (not checked): the CPU lane's multi-threaded sums (it takes a few experts a run), a GPU reduction
@@ -95,11 +94,11 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
   20 (`ReferenceError: navigator is not defined`); it fails the same way on `main`.
 - **fix**: guard the `navigator` read, or set the test's Node version.
 
-## to look at: libsubstrate's findings of 2026-11-01 (each checked against maya's code before a PR)
+## to look at: libosmos's findings of 2026-11-01 (each checked against maya's code before a PR)
 
 ### 11. device-to-device copies of memory the HIP runtime did not allocate go to the copy engine
 
-- **found**: libsubstrate's resident set swaps an expert by copying it between two HSA allocations
+- **found**: libosmos's resident set swaps an expert by copying it between two HSA allocations
   (`hsa_amd_memory_pool_allocate`); `hipMemcpyAsync(..., hipMemcpyDeviceToDevice)` took them for host memory and
   copied on the copy engine, the GPU idle ~0.45 ms behind each (4.6 a token: ~1.9 ms). a copy kernel (16 bytes a
   thread) took 0.63 ms of kernels a token for the 1.9 of gaps.
@@ -116,7 +115,7 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 
 ### 13. the resident set's swaps: choose from every streamed expert in GPU memory
 
-- **found**: libsubstrate chose a swap only from the experts held in the step; choosing from every streamed expert
+- **found**: libosmos chose a swap only from the experts held in the step; choosing from every streamed expert
   the pool still holds (held or not) +1.5-3.4% decode.
 - **check in maya**: maya swaps CPU-hit experts in from a background thread with a spare slot a layer
   (`cache_tick` / `swap_tick`); whether experts streamed to the GPU (the PCIe lane, off on this box) are candidates.
@@ -129,3 +128,32 @@ all four are rebased locally onto v1.1.36 (clean) and not yet force-pushed.
 - a GiB more GPU memory is a GiB less page cache (one RAM): past ~106 GiB of experts (113 GiB GTT) decode
   collapses; warming the page cache at start does not survive to decode (~9 GB left).
 - a captured graph saves ~0.15 us of the ~2 us between two dependent kernels (gfx1151).
+
+## to look at: libosmos's findings of 2026-11-04
+
+### 15. DSpark's experts at IQ2_XS: the drafter 7.97 -> 4.68 GB, the same acceptance
+
+- **found**: maya's DSpark pack keeps the drafter's 3 x 128 experts MXFP4; requantized to IQ2_XS with ggml's own
+  quantizers (libosmos's `tools/requant/requant_dspark`, the dense matrices Q8_0 and the heads BF16 as they were) the
+  drafter is 4.68 GB, its acceptance on the bench's three questions the same (DESIGN.md). on one 128 GB Halo the
+  3.3 GB goes to the model's experts: UD-IQ1_M drafted streams fewer from the SSD.
+- **offer**: the requantized drafter is public (huggingface.co/mrsirg97-rgb/osmos-evo-1017, MIT); or the tool, for a
+  `tools/ds4/drafter_pack.py --experts IQ2_XS`.
+- **check in maya**: its drafter's experts' kernel for IQ2_XS (the trunk's IQ2_XS path) and the acceptance on its own
+  calibration text before a default changes.
+
+### 16. a 1M context: the indexer's per-token scores, not the keys, are what grows
+
+- **found**: libosmos's 1M context cost 8.35 GiB over 64K, all but ~0.85 of it one scratch: the indexer's scores for a
+  step's 2,048 tokens by every row they could see (F32) - this model's ratio-1 layers make that every position. scored
+  in chunks of tokens (each token's scores, top-k and bits its own: no bit moves) it is 0.71 GiB.
+- **check in maya**: v1.1.53's `b4f78bb` sizes the indexer's slab rows by the run's keys rather than max_context
+  (opt-in, `DS4_AI_RUN`); whether its default path holds a [chunk x max_context] score buffer at a long context.
+
+### 17. `--bench` on a new DeepSeek pack measures a cold expert profile
+
+- **found**: a pack without its own `expert-profile.bin` starts from `data/expert-profile-ds4.bin` and learns this
+  PC's routing as it runs, so a first `--bench` on it measures a profile still learning: UD-IQ1_S on this box, a
+  fresh pack's first `--bench` decoded 17.7 tok/s, the next 19.2 (+8.5%), the one after 19.4.
+- **fix**: say so in the bench's output (or the docs), or warm the profile in `--bench` before it measures.
+

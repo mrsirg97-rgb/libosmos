@@ -1,0 +1,3 @@
+[submodule "third_party/libevt"]
+	path = third_party/libevt
+	url = https://github.com/mrsirg97-rgb/libevt.git

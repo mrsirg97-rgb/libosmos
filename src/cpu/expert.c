@@ -4,19 +4,14 @@
 #include <string.h>
 
 #include "quant_grids.h"
-#include "substrate/cpu/expert.h"
+#include "osmos/cpu/expert.h"
+#include "osmos/model/qtype.h"
 
 /* kernels/quant.h's decoders for the experts' types, line for line, 8 values a vector: each product a float product,
    each rounded (this file is built -ffp-contract=off: none fused), so each value the GPU's bits */
 
 #define QK 256            /* a block's values */
-#define IQ2_XXS_BYTES 66  /* ggml's block sizes */
-#define IQ2_XS_BYTES 74
-#define IQ1_M_BYTES 56
 #define IQ1_DELTA 0.125f  /* IQ1's grid offset (gguf-py's IQ1_S.delta) */
-#define GGUF_IQ2_XXS 16   /* ggml's type ids */
-#define GGUF_IQ2_XS 17
-#define GGUF_IQ1_M 29
 
 static uint32_t ld16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
 static uint32_t ld32(const uint8_t *p) { return ld16(p) | ld16(p + 2) << 16; }
@@ -80,6 +75,26 @@ static inline __m256 v_iq1_m(const uint8_t *b, int k)
   const uint32_t h = (qh[k / 2] >> (4 * (k % 2))) & 0x0F;
   const float delta = h & 0x08 ? -IQ1_DELTA : IQ1_DELTA;
   const uint64_t grid = kIq1sGrid[qs[k] | (h & 0x07) << 8];
+  const __m256 g = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_cvtsi64_si128((long long)grid)));
+  return _mm256_mul_ps(_mm256_set1_ps(dl), _mm256_add_ps(g, _mm256_set1_ps(delta)));
+}
+
+/* as IQ2_XS, a grid of 1024: the index's low 8 bits a byte, its high 2 in qh, the signs a byte each chunk */
+static inline __m256 v_iq2_s(const uint8_t *b, int k)
+{
+  const int s = (b[74 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F;
+  const float db = f16(ld16(b)) * (0.5f + (float)s) * 0.25f;
+  const uint64_t grid = kIq2sGrid[b[2 + k] | ((b[66 + k / 4] >> (2 * (k % 4))) & 0x03) << 8];
+  return signed_vals(_mm256_mul_ps(_mm256_set1_ps(db), u8s(grid)), b[34 + k]);
+}
+
+/* as IQ1_M, a u16 for each 32: 3 high index bits an 8, the scale, the delta's sign */
+static inline __m256 v_iq1_s(const uint8_t *b, int k)
+{
+  const uint32_t h = ld16(b + 34 + 2 * (k / 4));
+  const float dl = f16(ld16(b)) * (float)(2 * ((h >> 12) & 0x07) + 1);
+  const float delta = h & 0x8000 ? -IQ1_DELTA : IQ1_DELTA;
+  const uint64_t grid = kIq1sGrid[b[2 + k] | ((h >> (3 * (k % 4))) & 0x07) << 8];
   const __m256 g = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_cvtsi64_si128((long long)grid)));
   return _mm256_mul_ps(_mm256_set1_ps(dl), _mm256_add_ps(g, _mm256_set1_ps(delta)));
 }
@@ -153,6 +168,8 @@ static float tree(const __m256 acc[QV])
 ROW(row_iq2_xxs, v_iq2_xxs)
 ROW(row_iq2_xs, v_iq2_xs)
 ROW(row_iq1_m, v_iq1_m)
+ROW(row_iq2_s, v_iq2_s)
+ROW(row_iq1_s, v_iq1_s)
 
 typedef void (*row_fn)(const uint8_t *base, uint32_t bytes, uint32_t chunks, const float *xt, uint32_t n, float *out,
                        uint32_t ys);
@@ -161,9 +178,11 @@ static bool kind(uint32_t type, row_fn *fn, uint32_t *bytes)
 {
   switch (type)
   {
-  case GGUF_IQ2_XXS: *fn = row_iq2_xxs, *bytes = IQ2_XXS_BYTES; return true;
-  case GGUF_IQ2_XS: *fn = row_iq2_xs, *bytes = IQ2_XS_BYTES; return true;
-  case GGUF_IQ1_M: *fn = row_iq1_m, *bytes = IQ1_M_BYTES; return true;
+  case QTYPE_IQ2_XXS: *fn = row_iq2_xxs, *bytes = QTYPE_IQ2_XXS_BYTES; return true;
+  case QTYPE_IQ2_XS: *fn = row_iq2_xs, *bytes = QTYPE_IQ2_XS_BYTES; return true;
+  case QTYPE_IQ1_M: *fn = row_iq1_m, *bytes = QTYPE_IQ1_M_BYTES; return true;
+  case QTYPE_IQ2_S: *fn = row_iq2_s, *bytes = QTYPE_IQ2_S_BYTES; return true;
+  case QTYPE_IQ1_S: *fn = row_iq1_s, *bytes = QTYPE_IQ1_S_BYTES; return true;
   default: return false;
   }
 }

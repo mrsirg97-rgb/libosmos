@@ -4,8 +4,8 @@
 
 #include "forward_impl.h"
 
-#define FP4_LATENT_BLOCK 16 /* ref.py: the compressed rows' fp4_round(lat, 16, True) */
-#define FP4_INDEX_BLOCK 32  /* and the indexer's keys and queries', fp4_round(x, 32, False) */
+#define FP4_LATENT_BLOCK KV_FP4_E4M3_BLOCK /* ref.py: the compressed rows' fp4_round(lat, 16, True) */
+#define FP4_INDEX_BLOCK KV_FP4_POW2_BLOCK  /* and the indexer's keys and queries', fp4_round(x, 32, False) */
 
 static const float *F(const Forward *f, const GgufTensor *t) { return (const float *)fwd_dev(f, t); }
 
@@ -35,8 +35,8 @@ static bool pend_run(Forward *f, uint32_t i, uint32_t run, void *arg)
   Scratch *b = &f->b;
   Seq *s = f->bs[i];
   const uint32_t hd = f->g->head_dim, pend = FWD_PEND_ROWS(f->step, a->r);
-  return ops_put_rows(s->pend_kvc[a->l], pend, b->kvc + (uint64_t)i * hd, b->pos + i, 1, hd, run, NULL) &&
-         ops_put_rows(s->pend_sc[a->l], pend, b->scg + (uint64_t)i * hd, b->pos + i, 1, hd, run, NULL) &&
+  return ops_put_rows(s->pend_kvc[a->l], pend, b->kvc + (uint64_t)i * hd, b->pos + i, 1, KV_F32, hd, run, NULL) &&
+         ops_put_rows(s->pend_sc[a->l], pend, b->scg + (uint64_t)i * hd, b->pos + i, 1, KV_F32, hd, run, NULL) &&
          ops_compress(s->pend_kvc[a->l], s->pend_sc[a->l], pend, b->pos + i, a->r, hd, run, b->lat + (uint64_t)i * hd,
                       NULL);
 }
@@ -48,10 +48,14 @@ static bool keep_run(Forward *f, uint32_t i, uint32_t run, void *arg)
   const Geometry *g = f->g;
   Scratch *b = &f->b;
   Seq *s = f->bs[i];
-  const uint32_t hd = g->head_dim, ih = g->ix_head_dim, rows = f->max_ctx / a->r + 1;
+  const uint32_t rows = f->max_ctx / a->r + 1;
+  const uint32_t ib = (uint32_t)kv_row_bytes(KV_FP4_POW2, g->ix_head_dim);
+  const uint32_t lb = (uint32_t)kv_row_bytes(KV_FP4_E4M3, g->head_dim);
   return (!g->ix_source[a->l] ||
-          ops_put_rows(s->ik[a->l], rows, b->ikr + (uint64_t)i * ih, b->pos + i, a->r, ih, run, NULL)) &&
-         ops_put_rows(s->ckv[a->l], rows, b->lat + (uint64_t)i * hd, b->pos + i, a->r, hd, run, NULL);
+          ops_put_rows(s->ik[a->l], rows, b->ikr_p + (uint64_t)i * ib, b->pos + i, a->r, KV_FP4_POW2, g->ix_head_dim,
+                       run, NULL)) &&
+         ops_put_rows(s->ckv[a->l], rows, b->lat_p + (uint64_t)i * lb, b->pos + i, a->r, KV_FP4_E4M3, g->head_dim, run,
+                      NULL);
 }
 
 /* a KV source's compressor over the batch, every step batched: the projections; each sequence's positions into its
@@ -77,18 +81,23 @@ static bool compress_rows(Forward *f, int l, char *err)
     ok = fwd_mat(f, L->ix_k, fwd_dev(f, L->ix_k), ih, hd, b->lat, hd, n, b->ikr, ih) &&
          ops_rms(b->ikr, ih, ih, F(f, L->ix_k_norm), g->rms_eps, n, b->ikr, ih, NULL) &&
          ops_rope(b->ikr, 1, ih, RD, ih, f->freqs_comp, b->rpos, false, n, NULL) &&
-         ops_fp4_round(b->ikr, (uint64_t)n * ih, FP4_INDEX_BLOCK, false, NULL);
+         ops_fp4_round(b->ikr, (uint64_t)n * ih, FP4_INDEX_BLOCK, false, b->ikr_p, ih, NULL);
   ok = ok && ops_rope(b->lat, 1, hd, RD, hd, f->freqs_comp, b->rpos, false, n, NULL) &&
-       ops_fp4_round(b->lat, (uint64_t)n * hd, FP4_LATENT_BLOCK, true, NULL) && runs(f, keep_run, &a);
+       ops_fp4_round(b->lat, (uint64_t)n * hd, FP4_LATENT_BLOCK, true, b->lat_p, hd, NULL) && runs(f, keep_run, &a);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the compressor)");
-  for (uint32_t i = 0; f->probe && i < n; i++)
+  /* a probe's row: the kept one read back, then packed again (a forced probe may have stood the oracle's in) */
+  const uint64_t lb = kv_row_bytes(KV_FP4_E4M3, hd);
+  for (uint32_t i = 0; ok && f->probe && i < n; i++)
     if ((uint32_t)(f->pin->pos[i] + 1) % r == 0)
     {
       const int32_t m = (f->pin->pos[i] + 1) / (int32_t)r - 1;
-      fwd_probe(f, "ckv", l, m, f->bs[i]->ckv[l] + (uint64_t)m * hd, hd, false);
+      uint8_t *row = f->bs[i]->ckv[l] + (uint64_t)m * lb;
+      ok = ops_kv_unpack(KV_FP4_E4M3, row, 1, hd, b->row_f, NULL);
+      fwd_probe(f, "ckv", l, m, b->row_f, hd, false);
+      ok = ok && ops_kv_pack(KV_FP4_E4M3, b->row_f, 1, hd, row, NULL);
     }
-  return true;
+  return ok || fwd_fail(err, "a GPU call failed (the compressor's probe)");
 }
 
 /* an index source's rows for each token: its query against its sequence's source's keys, weighted a head, the top k
@@ -103,26 +112,44 @@ static bool select_rows(Forward *f, int l, int src, char *err)
   const float w_scale = (float)(pow(ih, -0.5) * pow(nh, -0.5));
   bool ok = fwd_mat(f, L->ix_q_b, fwd_dev(f, L->ix_q_b), nh * ih, g->q_lora, b->qa, g->q_lora, n, b->qix, nh * ih) &&
             ops_rope(b->qix, nh, ih, RD, nh * ih, f->freqs_comp, b->pos, false, n, NULL) &&
-            ops_fp4_round(b->qix, (uint64_t)n * nh * ih, FP4_INDEX_BLOCK, false, NULL) &&
+            ops_fp4_round(b->qix, (uint64_t)n * nh * ih, FP4_INDEX_BLOCK, false, NULL, 0, NULL) &&
             fwd_mat(f, L->ix_proj, fwd_dev(f, L->ix_proj), nh, D, b->x, D, n, b->wix, nh) &&
             ops_scale(b->wix, (uint64_t)n * nh, w_scale, NULL);
+  /* the candidate blocks (DESIGN.md, "past 64K"): at the source layer, built when a token of the sub-batch has more
+     blocks than kept; its later index sources' rows outside them masked */
+  Sub *sb = &f->sub[f->cur];
+  bool need = false;
   for (uint32_t i = 0; i < n; i++)
+    need |= ((uint32_t)(f->pin->pos[i] + 1) / ratio + g->cand_block - 1) / g->cand_block > (uint32_t)g->cand_blocks;
+  if (l == g->cand_source)
+    sb->cand_on = need;
+  const bool masked = g->cand_source >= 0 && l > g->cand_source && sb->cand_on;
+  if ((need || masked) && !f->cand_words)
+    return fwd_fail(err, "the candidate blocks without their bits (max_ctx under them)");
+  /* in chunks of score_rows tokens (a token's scores, bits and picks its own: the chunks change no bit) */
+  const uint32_t W = f->cand_words;
+  for (uint32_t c0 = 0; ok && c0 < n; c0 += f->score_rows)
   {
-    const uint32_t blocks = ((uint32_t)(f->pin->pos[i] + 1) / ratio + g->cand_block - 1) / g->cand_block;
-    if ((l == g->cand_source || g->cand_source < l) && blocks > (uint32_t)g->cand_blocks)
-      return fwd_fail(err, "a context past the candidate blocks (the candidate masking is not built)");
+    const uint32_t cn = n - c0 < f->score_rows ? n - c0 : f->score_rows;
+    uint32_t *cand = W ? b->cand + (uint64_t)c0 * W : NULL; /* this chunk's bits (none: max_ctx under the blocks) */
+    for (uint32_t i = c0, run; ok && i < c0 + cn; i += run) /* a launch a run of one sequence's tokens */
+    {
+      for (run = 1; i + run < c0 + cn && f->bs[i + run] == f->bs[i]; run++)
+        ;
+      const uint32_t max_n = (uint32_t)(f->pin->pos[i + run - 1] + 1) / ratio; /* a run's positions ascend */
+      ok = !max_n || ops_index_score(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], KV_FP4_POW2,
+                                     b->wix + (uint64_t)i * nh, b->pos + i, ratio, max_n, nh, ih, run,
+                                     b->score + (uint64_t)(i - c0) * f->score_stride, f->score_stride, NULL);
+    }
+    ok = ok && (l != g->cand_source || !need ||
+                ops_cand_blocks(b->score, f->score_stride, b->pos + c0, ratio, (uint32_t)g->cand_block,
+                                (uint32_t)g->cand_blocks, cn, cand, W, NULL));
+    ok = ok && ops_topk(b->score, f->score_stride, b->pos + c0, ratio, (uint32_t)g->ix_topk,
+                        masked ? cand : NULL, (uint32_t)g->cand_block, W, cn,
+                        b->sel + (uint64_t)c0 * OPS_MAX_SELECT, OPS_MAX_SELECT, b->n_sel + c0, NULL);
   }
-  for (uint32_t i = 0, run; ok && i < n; i += run) /* a launch a run of one sequence's tokens (their keys its own) */
-  {
-    for (run = 1; i + run < n && f->bs[i + run] == f->bs[i]; run++)
-      ;
-    const uint32_t max_n = (uint32_t)(f->pin->pos[i + run - 1] + 1) / ratio; /* a run's positions ascend */
-    ok = !max_n || (ops_index_score(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh,
-                                    b->pos + i, ratio, max_n, nh, ih, run, b->score + (uint64_t)i * f->score_stride,
-                                    f->score_stride, NULL));
-  }
-  ok = ok && ops_topk(b->score, f->score_stride, b->pos, ratio, (uint32_t)g->ix_topk, n, b->sel, OPS_MAX_SELECT,
-                      b->n_sel, NULL);
+  if (ok && l == g->cand_source && need)
+    fwd_probe(f, "cand", l, f->at, b->cand, (uint64_t)n * f->cand_words, true);
   return ok || fwd_fail(err, "a GPU call failed (the indexer)");
 }
 
@@ -130,11 +157,14 @@ static bool select_rows(Forward *f, int l, int src, char *err)
 static bool put_run(Forward *f, uint32_t i, uint32_t run, void *arg)
 {
   const int l = *(const int *)arg;
-  const uint32_t HD = f->g->head_dim;
-  return ops_put_rows(f->bs[i]->ring[l], f->slots, f->b.kv + (uint64_t)i * HD, f->b.pos + i, 1, HD, run, NULL);
+  const uint32_t HD = f->g->head_dim, rb = (uint32_t)kv_row_bytes(KV_FP8, HD);
+  uint8_t *p = f->b.kv_p + (uint64_t)i * rb; /* rounded already (or the oracle's): each packs to itself */
+  return ops_kv_pack(KV_FP8, f->b.kv + (uint64_t)i * HD, run, HD, p, NULL) &&
+         ops_put_rows(f->bs[i]->ring[l], f->slots, p, f->b.pos + i, 1, KV_FP8, HD, run, NULL);
 }
 
-/* a run's keys finished - normed, roped, FP8 - and into its sequence's window, one launch (ops_kv_finish) */
+/* a run's keys finished - normed, roped, FP8 - and into its sequence's window, its queries roped, one launch
+   (ops_kv_finish) */
 static bool ring_run(Forward *f, uint32_t i, uint32_t run, void *arg)
 {
   const int l = *(const int *)arg;
@@ -142,7 +172,8 @@ static bool ring_run(Forward *f, uint32_t i, uint32_t run, void *arg)
   const uint32_t HD = g->head_dim;
   const float *freqs = g->compress[l] ? f->freqs_comp : f->freqs_win;
   return ops_kv_finish(f->b.kv + (uint64_t)i * HD, HD, F(f, f->w->layer[l].kv_norm), g->rms_eps, g->rope_dim, freqs,
-                       f->b.pos + i, f->bs[i]->ring[l], f->slots, run, NULL);
+                       f->b.pos + i, f->bs[i]->ring[l], f->slots, f->b.q + (uint64_t)i * g->n_heads * HD,
+                       g->n_heads, run, NULL);
 }
 
 bool fwd_attention(Forward *f, int l, char *err)
@@ -159,15 +190,15 @@ bool fwd_attention(Forward *f, int l, char *err)
                      n, !f->probe) &&
             ops_rms_x16(b->qa, QL, QL, F(f, L->q_a_norm), g->rms_eps, n, b->qa, QL, b->x16, b->overflow, NULL) &&
             fwd_mat_ready(f, L->q_b, fwd_dev(f, L->q_b), H * HD, QL, b->qa, QL, n, b->q, H * HD, true) &&
-            ops_rope(b->q, H, HD, RD, H * HD, freqs, b->pos, false, n, NULL);
+            (!f->probe || ops_rope(b->q, H, HD, RD, H * HD, freqs, b->pos, false, n, NULL));
   /* every token's keys finished and into its sequence's window before any attends (a later one of a sequence reads
-     an earlier's): one launch a run; with a probe the steps apart, the keys probed (or stood in) before the window
-     takes them */
+     an earlier's), its queries roped: one launch a run; with a probe the steps apart, the keys probed (or stood in)
+     before the window takes them */
   if (f->probe)
   {
     ok = ok && ops_rms(b->kv, HD, HD, F(f, L->kv_norm), g->rms_eps, n, b->kv, HD, NULL) &&
          ops_rope(b->kv, 1, HD, RD, HD, freqs, b->pos, false, n, NULL) &&
-         ops_fp8_round(b->kv, (uint64_t)n * HD, NULL);
+         ops_fp8_round(b->kv, (uint64_t)n * HD, NULL, 0, NULL);
     fwd_probe(f, "q", l, f->at, b->q, n * H * HD, false);
     fwd_probe(f, "kv", l, f->at, b->kv, n * HD, false);
     ok = ok && runs(f, put_run, &l);
@@ -191,10 +222,31 @@ bool fwd_attention(Forward *f, int l, char *err)
   {
     for (run = 1; i + run < n && f->bs[i + run] == f->bs[i]; run++)
       ;
-    const float *ckv = ratio ? f->bs[i]->ckv[src] : NULL;
+    const uint8_t *ckv = ratio ? f->bs[i]->ckv[src] : NULL;
+    uint32_t fmt = KV_FP4_E4M3;
+    /* the run's tokens would decode their selected rows each (run x topk, in the scores and again in the values):
+       when that is more than the rows there are - a prompt's step - the rows are unpacked once, the F32 they were
+       rounded to (the same bits), and read as F32 */
+    int32_t last = 0; /* the run's furthest position: its tokens' rows all below (last + 1) / ratio */
+    for (uint32_t k = i; k < i + run; k++)
+      last = f->pin->pos[k] > last ? f->pin->pos[k] : last;
+    const uint32_t rows = ckv ? (uint32_t)(last + 1) / ratio : 0;
+    if (rows && rows <= f->ckv_f_rows && (uint64_t)run * (uint32_t)g->ix_topk > rows)
+    {
+      ok = ops_kv_unpack(KV_FP4_E4M3, ckv, rows, HD, b->ckv_f, NULL);
+      ckv = (const uint8_t *)b->ckv_f, fmt = KV_F32;
+    }
+    /* the window's keys likewise: run x window decodes against the ring's slots, unpacked once */
+    const void *ring = f->bs[i]->ring[l];
+    uint32_t rfmt = KV_FP8;
+    if ((uint64_t)run * g->window > f->slots)
+    {
+      ok = ok && ops_kv_unpack(KV_FP8, ring, f->slots, HD, b->ring_f, NULL);
+      ring = b->ring_f, rfmt = KV_F32;
+    }
     const int32_t floor = f->dec >= 0 && l > f->dec ? f->bs[i]->dec_from : 0; /* the decoder's: hip_skip.c */
-    ok = ops_sparse_attn(b->q + (uint64_t)i * H * HD, f->bs[i]->ring[l], f->slots, b->pos + i, g->window, floor, ckv,
-                         ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL, ckv ? b->n_sel + i : NULL, OPS_MAX_SELECT,
+    ok = ok && ops_sparse_attn(b->q + (uint64_t)i * H * HD, ring, rfmt, f->slots, b->pos + i, g->window, floor, ckv,
+                         fmt, ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL, ckv ? b->n_sel + i : NULL, OPS_MAX_SELECT,
                          (uint32_t)g->ix_topk, F(f, L->sinks), scale, H, HD, run, b->att, b->o + (uint64_t)i * H * HD,
                          NULL);
   }

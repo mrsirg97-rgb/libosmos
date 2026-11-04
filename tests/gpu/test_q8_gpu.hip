@@ -19,10 +19,12 @@
 
 #include "lane.h"
 #include "quant_grids.h"
+#include "test_model.h"
+
 extern "C" {
-#include "substrate/gpu/mv.h"
-#include "substrate/gpu/q8.h"
-#include "substrate/model/gguf.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/q8.h"
+#include "osmos/model/gguf.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -34,9 +36,10 @@ extern "C" {
   } while (0)
 
 constexpr uint32_t kQK = 256, kTok = MV_MAX_TOKENS, kExperts = 2;
-constexpr int kIQ2_XXS = 16, kIQ2_XS = 17, kIQ1_M = 29;
+constexpr int kIQ2_XXS = QTYPE_IQ2_XXS, kIQ2_XS = QTYPE_IQ2_XS, kIQ1_M = QTYPE_IQ1_M, kIQ1_S = QTYPE_IQ1_S,
+              kIQ2_S = QTYPE_IQ2_S;
 
-static uint64_t g_xxs[256], g_xs[512], g_1s[2048];
+static uint64_t g_xxs[256], g_xs[512], g_2s[1024], g_1s[2048];
 static uint8_t g_signs[128];
 
 static uint32_t rng = 1017;
@@ -72,7 +75,18 @@ static void halves(int type, const uint8_t* b, int j, const int8_t* q, float* d,
       const uint8_t sg = g_signs[qq >> 9];
       for (int i = 0; i < 8; i++) v[i] = (sg >> i) & 1 ? -(int) (uint8_t) (gr >> (8 * i)) : (int) (uint8_t) (gr >> (8 * i));
       *d = f16(ld16(b)), s21[h] = 2 * ((b[66 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F) + 1;
+    } else if (type == kIQ2_S) {  // gguf-py's IQ2_S: d, qs[32], signs[32], qh[8] (2 bits an 8), scales[8] (a nibble a 16)
+      const uint64_t gr = g_2s[b[2 + k] | ((b[66 + k / 4] >> (2 * (k % 4))) & 3) << 8];
+      const uint8_t sg = b[34 + k];
+      for (int i = 0; i < 8; i++) v[i] = (sg >> i) & 1 ? -(int) (uint8_t) (gr >> (8 * i)) : (int) (uint8_t) (gr >> (8 * i));
+      *d = f16(ld16(b)), s21[h] = 2 * ((b[74 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F) + 1;
+    } else if (type == kIQ1_S) {  // gguf-py's IQ1_S: d, qs[32], qh u16[8] (3 bits an 8, the scale bits 12-14, sign 15)
+      const uint32_t qh = ld16(b + 34 + 2 * (k / 4));
+      const uint64_t gr = g_1s[b[2 + k] | ((qh >> (3 * (k % 4))) & 7) << 8];
+      for (int i = 0; i < 8; i++) v[i] = 8 * (int) (int8_t) (gr >> (8 * i)) + (qh & 0x8000 ? -1 : 1);
+      *d = f16(ld16(b)), s21[h] = 2 * (int) ((qh >> 12) & 7) + 1;
     } else {
+      CHECK(type == kIQ1_M);
       uint64_t sc = 0;
       std::memcpy(&sc, b + 48, 8);
       const uint32_t s0 = (uint32_t) sc & 0xFFFF, s1 = (uint32_t) (sc >> 16) & 0xFFFF, s2 = (uint32_t) (sc >> 32) & 0xFFFF,
@@ -87,7 +101,7 @@ static void halves(int type, const uint8_t* b, int j, const int8_t* q, float* d,
   }
 }
 
-static int block_bytes(int type) { return type == kIQ2_XXS ? 66 : type == kIQ2_XS ? 74 : 56; }
+static int block_bytes(int type) { return (int) qtype_info((uint32_t) type)->bytes; }
 
 // one row's sum by the contract: blocks to LANE_Q8_LANES(cols) lanes in turn, then the xor tree
 static float row_ref(int type, const uint8_t* row, uint32_t cols, const int8_t* q, const float* qd) {
@@ -167,7 +181,7 @@ static void experts(const Gguf* g, const char* name) {
     CHECK(hipMemcpy(dcnt, cnt, sizeof cnt, hipMemcpyHostToDevice) == hipSuccess);
     for (uint32_t width : {std::max(n, kTok + 1 - n), kTok}) {
       CHECK(hipMemset(dy, 0xFF, (size_t) nrow * rows * 4) == hipSuccess);
-      CHECK(q8_group_tok(t->type, (const void* const*) dp, dcnt, dxrow, kExperts, width, rows, cols, dq, dd, dy, rows,
+      CHECK(q8_group_tok(t->type, (const void* const*) dp, dcnt, dxrow, nullptr, kExperts, width, rows, cols, dq, dd, dy, rows,
                          nullptr) &&
             hipDeviceSynchronize() == hipSuccess);
       CHECK(hipMemcpy(got.data(), dy, got.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -192,32 +206,30 @@ static void experts(const Gguf* g, const char* name) {
 
 int main() {
   std::printf("[test_q8_gpu] start\n");
-  const char* home = std::getenv("HOME");
   char path[512];
-  std::snprintf(path, sizeof path, "%s/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
-                home ? home : "");
+  const TestModel which = test_model(path, sizeof path);
+  const std::vector<const char*> names = which == TestModel::kUd ? kUdExperts : kGsqExperts;
   int ndev = 0;
-  if (access(path, R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
-    std::printf("[test_q8_gpu] skipped: no ds1017 or no GPU\n");
+  if (which == TestModel::kNone || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
+    std::printf("[test_q8_gpu] skipped: no ds1017 or UD-IQ1_M, or no GPU\n");
     return 77;
   }
   CHECK(hipMemcpyFromSymbol(g_xxs, HIP_SYMBOL(kIq2xxsGrid), sizeof g_xxs) == hipSuccess &&
         hipMemcpyFromSymbol(g_xs, HIP_SYMBOL(kIq2xsGrid), sizeof g_xs) == hipSuccess &&
+        hipMemcpyFromSymbol(g_2s, HIP_SYMBOL(kIq2sGrid), sizeof g_2s) == hipSuccess &&
         hipMemcpyFromSymbol(g_1s, HIP_SYMBOL(kIq1sGrid), sizeof g_1s) == hipSuccess &&
         hipMemcpyFromSymbol(g_signs, HIP_SYMBOL(kKsigns), sizeof g_signs) == hipSuccess);
   // refusals: a type without the contract (Q5_K), cols not whole blocks, no matrices, too many tokens
   const void* const* nw = nullptr;
   CHECK(!q8_round(nullptr, 1, 33, 33, nullptr, nullptr, nullptr) && !q8_round(nullptr, 0, 256, 256, nullptr, nullptr, nullptr));
-  CHECK(!q8_group_tok(13, nw, nullptr, nullptr, 1, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
-  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, 1, 1, 1, kQK + 32, nullptr, nullptr, nullptr, 1, nullptr));
-  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, 0, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
-  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, 1, kTok + 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(13, nw, nullptr, nullptr, nullptr, 1, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 1, 1, 1, kQK + 32, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 0, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 1, kTok + 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
-  for (const char* name : {"blk.0.ffn_gate_exps.weight", "blk.0.ffn_down_exps.weight", "blk.10.ffn_gate_exps.weight",
-                           "blk.10.ffn_down_exps.weight", "blk.17.ffn_gate_exps.weight", "blk.17.ffn_down_exps.weight", "blk.23.ffn_down_exps.weight"})
-    experts(g, name);
+  for (const char* name : names) experts(g, name);
   gguf_destroy(g);
   std::printf("[test_q8_gpu] ok\n");
   return 0;

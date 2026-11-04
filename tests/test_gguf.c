@@ -5,7 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "substrate/model/gguf.h"
+#include "osmos/model/gguf.h"
 
 /* a GGUF written by hand, byte by byte, as the format has it (version 3, little-endian) */
 typedef struct
@@ -240,9 +240,16 @@ static void test_split(void)
   unlink(p2);
   err[0] = 0;
   assert(gguf_create(p1, err) == NULL && strstr(err, "00002") != NULL);
+  char refused[GGUF_ERR];
+  snprintf(refused, sizeof refused, "%s", err);
+  /* the first shard alone (its metadata: a tokenizer's): read without its siblings, only its own tensors */
+  Gguf *h = gguf_header(p1, err);
+  assert(h && h->n_files == 1 && h->n_tensors == 2 && gguf_kv(h, "split.count") && !gguf_tensor(h, "c.iq1_m"));
+  gguf_destroy(h);
   free(a.b);
   free(b.b);
-  printf("  split: two shards as one model; a missing shard refused (\"%s\")\n", err);
+  printf("  split: two shards as one model; a missing shard refused (\"%s\"); the first one's header alone read\n",
+         refused);
 }
 
 /* a valid file cut at every length short of whole: refused - with a reason, nothing leaked - exactly when the cut takes
@@ -324,6 +331,29 @@ static void test_corrupt(void)
   printf("  corrupt: %zu patches and a duplicate name refused\n", sizeof patches / sizeof patches[0]);
 }
 
+/* type 43: unsloth's MXFP8 (33 bytes a 32 values) read; upstream's F8_E4M3 (a byte a value) refused - the bytes a
+   tensor of it holds too few for MXFP8's, it runs into the next tensor or out of the file */
+static void test_mxfp8(void)
+{
+  const uint64_t vals = 64 * 32; /* (past 1,024 values: a 32nd of them more than an alignment's padding) */
+  const Spec mx[] = {{"e.mxfp8", 43, 2, {64, 32}, vals / 32 * 33}, three[0]};
+  const Spec f8[] = {{"e.f8_e4m3", 43, 2, {64, 32}, vals}, three[0]};
+  char err[GGUF_ERR] = "";
+  Buf w = model(mx, 2, 0, 0, 0, NULL, 0);
+  Gguf *g = gguf_create(write_file("mxfp8.gguf", &w), err);
+  assert(g && g->tensors[0].bytes == vals / 32 * 33);
+  check_whole(g);
+  gguf_destroy(g);
+  free(w.b);
+  w = model(f8, 2, 0, 0, 0, NULL, 0);
+  assert(!gguf_create(write_file("f8.gguf", &w), err) && strstr(err, "overlap"));
+  free(w.b);
+  w = model(f8, 1, 0, 0, 0, NULL, 0);
+  assert(!gguf_create(write_file("f8one.gguf", &w), err) && strstr(err, "leave"));
+  free(w.b);
+  printf("  type 43: MXFP8's blocks read; a byte a value (upstream's F8_E4M3) refused, before a tensor or alone\n");
+}
+
 /* property: random byte changes never crash it; what it returns always holds (every tensor in its file) */
 static void test_mutations(void)
 {
@@ -395,6 +425,7 @@ int main(void)
   test_split();
   test_truncated();
   test_corrupt();
+  test_mxfp8();
   test_mutations();
   test_ds1017();
   char cmd[600];

@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "substrate/cpu/expert.h"
+#include "osmos/cpu/expert.h"
 
 /* the CPU lane's matvec on its own (test_cpu_expert_gpu holds it to the GPU's bits): synthetic blocks of each expert
    type, the weights read back through unit vectors (a row times e_c is its value: one product, the rest zeros), then
@@ -84,6 +84,8 @@ int main(void)
   check(16, 66); /* IQ2_XXS */
   check(17, 74); /* IQ2_XS */
   check(29, 56); /* IQ1_M */
+  check(19, 50); /* IQ1_S */
+  check(22, 82); /* IQ2_S */
   printf("[test_cpu_expert] ok\n");
   return 0;
 }
