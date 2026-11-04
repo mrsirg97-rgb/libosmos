@@ -37,7 +37,24 @@ jobs:
           gzip -9n "dist/$name.tar"
           (cd dist && sha256sum *.tar.gz > checksums.txt)
 
+      # the release's notes are CHANGELOG.md's section for it: none, no release
+      - name: the changelog's section
+        run: |
+          set -eu
+          v="${GITHUB_REF_NAME#v}"
+          awk -v h="## [$v]" 'index($0, h) == 1 {on = 1; print; next} on && /^## \[/ {exit} on {print}' \
+            CHANGELOG.md > dist/notes.md
+          if [ "$(wc -l < dist/notes.md)" -lt 2 ]; then
+            echo "release: CHANGELOG.md has no section ## [$v]: not shipped" >&2
+            exit 1
+          fi
+
       - name: the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "osmos $GITHUB_REF_NAME" --generate-notes
+        run: |
+          set -eu
+          title="$(head -1 dist/notes.md | sed 's/^## //')"
+          tail -n +2 dist/notes.md > dist/body.md
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/checksums.txt --title "osmos $title" \
+            --notes-file dist/body.md
