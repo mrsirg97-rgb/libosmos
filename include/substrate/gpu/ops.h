@@ -65,8 +65,11 @@ bool ops_index_score(const float *q, const void *keys, uint32_t keys_fmt, const 
                      uint32_t ratio,
                      uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score, uint32_t stride,
                      void *stream);
-bool ops_topk(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t k, uint32_t n_tok,
-              int32_t *sel, uint32_t sel_stride, int32_t *n_sel, void *stream);
+bool ops_topk(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t k, const uint32_t *keep,
+              uint32_t block, uint32_t keep_words, uint32_t n_tok, int32_t *sel, uint32_t sel_stride, int32_t *n_sel,
+              void *stream);
+bool ops_cand_blocks(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t block,
+                     uint32_t topk_blocks, uint32_t n_tok, uint32_t *keep, uint32_t keep_words, void *stream);
 bool ops_router(const float *logits, const float *bias, uint32_t n_exp, uint32_t k, float scale, uint32_t n_tok,
                 int32_t *idx, float *w, void *stream);
 bool ops_swiglu(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok, float *h,
@@ -209,7 +212,15 @@ ops_index_score
 ops_topk
   for each token t: the k highest of score[t stride + 0 .. n) (n its visible rows, as ops_index_score's) - ties to
   the lower row - their rows ascending into sel + t sel_stride and how many into n_sel[t] (all n when n <= k; 0 for
-  none visible). deterministic: integer counts, a compaction in row order.
+  none visible). with keep (not NULL): a row c whose block c / block has no bit in keep + t keep_words (bit j of word
+  j / 32) scores -inf - the candidate blocks' mask (ops_cand_blocks; the caller's kept rows at least k). deterministic:
+  integer counts, a compaction in row order.
+
+ops_cand_blocks
+  the indexer's candidate blocks (ref.py's `candidates`) for each token t: its n visible rows in blocks of `block`, a
+  block's key its rows' highest score, the last block (its own, partial or whole) highest of all; the topk_blocks
+  highest blocks (ties to the lower block; all when there are no more) as bits into keep + t keep_words (bit j of word
+  j / 32; the rest zero). keep_words at least the blocks of stride rows / 32, rounded up.
 
 ops_router
   scores = sqrt(softplus(logits)); the k experts of the highest score + bias (ties to the lower expert), in that

@@ -133,7 +133,7 @@ static void enter(Forward *f, uint32_t k)
   Scratch *b = &f->b;
   f->cur = k;
   b->h = s->h, b->f_pre = s->f_pre, b->pos = s->pos, b->sel = s->sel, b->n_sel = s->n_sel, b->oa_cnt = s->oa_cnt;
-  b->keep = s->keep, b->back = s->back, f->pin = s->pin, f->rows = s->rows;
+  b->keep = s->keep, b->back = s->back, f->pin = s->pin, f->rows = s->rows, b->cand = s->cand;
   f->n = s->n, f->n_all = s->n_all, f->n_keep = s->n_keep, f->at = s->at;
   const uint64_t B = f->step, hc = f->g->hc, D = f->g->n_embd;
   b->mid = f->mid0 + k * B * hc * D, b->f_post = f->f_post0 + k * B * hc, b->f_comb = f->f_comb0 + k * B * hc * hc;

@@ -1761,6 +1761,45 @@ the folder's cap); `--parallel` on libevt (maya's parallel_test.py: each convers
 answer alone - here its hash; a STOP ends one alone; a short request answered during a long read); then
 agent_bench.py against maya 1.1.52 on this box.
 
+## past 16K: the indexer's candidate blocks (2026-11-03)
+
+a context past candidate_topk_blocks x candidate_block_size compressed rows was refused ("the candidate masking is
+not built"): the source layer (20) and the index layers after it (24 .. 36) compress at ratio 1, so 2,048 x 8 x 1 =
+16,384 positions - every conversation past 16K (first written here as 64K at ratio 4: wrong, the geometry's ratios
+read since). the agent bench's conversations reach it (4 of 32 turns failed), and maya serves them. the model (oracle/ref.py, `candidates` and `indexer`):
+- at the candidate source layer (20), after its indexer's scores (rows past a token's length -inf): the rows in
+  blocks of 8, a block's key its rows' max; the token's last (partial) block forced in (+inf); the top
+  candidate_topk_blocks blocks kept (of those not wholly -inf).
+- every later index source: its scores outside the kept blocks -inf before its top k. earlier layers, and the source
+  itself, unmasked. with no more blocks than candidate_topk_blocks every one is kept: the mask nothing (why every bit
+  so far is the same: a step under 64K never builds it).
+
+here: one selection kernel for both (attn.hip's radix select - 8 bits a pass, integer counts, ties to the lower index,
+a compaction in index order), its key a row's score or a block's max (the last forced), its output the rows' list
+(ops_topk) or the kept blocks' bits (ops_cand_blocks, a word per 32 blocks a token). ops_topk takes the bits (NULL: no
+mask): a masked row's key -inf (kept blocks hold >= 16,384 rows: k = 512 never reaches one). the bits a sub-batch's
+own (Sub.cand, beside its sel: a prompt's sub-batches run each layer in turn), allocated only when max_ctx can pass
+the blocks (at 1M: 1,024 words a token); built at the source layer when any token of the sub-batch passes them, read
+by the later index sources. the source is the decoder's layer (dec = 20, the last KV source) and the index layers
+24 .. 36 come after its compaction (a prompt's tokens past the decoder's reach skip them): the bits are gathered with
+the kept tokens there, beside the selected rows (hip_skip.c) - found when the first long prompt reached a guard that
+refused an index layer past the compaction rather than read misaligned bits.
+
+tests (each seen to fail first, or by a mutation):
+- test_select_gpu (new; ops_topk had no test of its own): ops_cand_blocks against a host replay of ref.py's
+  `candidates` (40 tokens of scores from 23 values - ties everywhere - and negatives, rows a partial block, fewer
+  blocks than kept and many more, at 16 kept blocks so the mask bites at test sizes), ops_topk plain and under the
+  mask against the host's top k - every bit; a kernel without the forced last block caught.
+- test_cand_gpu (new): a 22,000-token prompt (steps of 2,048) and 4 decode steps, the source layer's bits probed
+  ("cand") and every later index layer's selection ("sel", the first token - past the compaction, the first kept):
+  every selected row in a block its own token's bits keep (114 selections, 58,368 rows). the mask built and not
+  applied: caught; the compaction's gather of the bits skipped: caught (at 17,500 tokens it was not - the one
+  sub-batch past the blocks wholly within the decoder's reach, the gather the identity: hence 22,000).
+- test_model_gpu's fingerprint cb2ad57792ac72d2 unchanged (under 16K the bits are never built).
+- end to end: a 72,576-token prompt (the bench's text, three times) and 24 greedy tokens - ours the same 24 as maya
+  1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
+  repeated text are not the mask's test; the probes above are.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

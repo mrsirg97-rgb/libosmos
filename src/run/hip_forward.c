@@ -409,6 +409,7 @@ static bool scratch(Forward *f)
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
       {&b->ridx, S * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
+      {&b->cand, B * f->cand_words * 4},
       {&b->rwp, P * F},                 {&b->x16, B * (widest > egv ? widest : egv) * 2},
       {&b->xe16, FWD_MAX_SLOTS(P, g->n_experts) * (D > FF ? D : FF) * 2},
       {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4},
@@ -446,7 +447,7 @@ static bool subs(Forward *f)
   Scratch *b = &f->b;
   const uint64_t B = f->step, hc = g->hc, F = sizeof(float);
   Sub *s0 = &f->sub[0];
-  s0->h = b->h, s0->f_pre = b->f_pre, s0->pos = b->pos, s0->sel = b->sel, s0->n_sel = b->n_sel;
+  s0->h = b->h, s0->f_pre = b->f_pre, s0->pos = b->pos, s0->sel = b->sel, s0->n_sel = b->n_sel, s0->cand = b->cand;
   s0->oa_cnt = b->oa_cnt, s0->keep = b->keep, s0->back = b->back, s0->pin = f->pin, s0->rows = f->rows;
   bool ok = true;
   for (uint32_t k = 1; ok && k < f->n_subs; k++)
@@ -454,6 +455,7 @@ static bool subs(Forward *f)
     Sub *s = &f->sub[k];
     ok = fwd_alloc(&s->h, B * hc * g->n_embd * F) && fwd_alloc(&s->f_pre, B * hc * F) && fwd_alloc(&s->pos, B * 4) &&
          fwd_alloc(&s->sel, B * OPS_MAX_SELECT * 4) && fwd_alloc(&s->n_sel, B * 4) &&
+         fwd_alloc(&s->cand, B * f->cand_words * 4) &&
          fwd_alloc(&s->oa_cnt, FWD_MAX_GROUPS * 4) && fwd_alloc(&s->keep, B * 4) && fwd_alloc(&s->back, B * 4) &&
          hipHostMalloc((void **)&s->pin, sizeof *s->pin, 0) == hipSuccess &&
          (s->rows = calloc(B * WEIGHTS_MAX_LAYERS * g->engram_cols, sizeof *s->rows)) != NULL;
@@ -510,6 +512,10 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
     if (w->geo.compress[l] && max_ctx / (uint32_t)w->geo.compress[l] > f->score_stride)
       f->score_stride = max_ctx / (uint32_t)w->geo.compress[l];
   f->ckv_f_rows = f->score_stride < FWD_CKV_F32_ROWS ? f->score_stride : FWD_CKV_F32_ROWS;
+  if (w->geo.cand_source >= 0 && w->geo.cand_source < n_layers && w->geo.compress[w->geo.cand_source] &&
+      (max_ctx / (uint32_t)w->geo.compress[w->geo.cand_source] + w->geo.cand_block - 1) / w->geo.cand_block >
+          (uint32_t)w->geo.cand_blocks) /* a context this long passes the candidate blocks: their bits a token */
+    f->cand_words = ((f->score_stride + w->geo.cand_block - 1) / w->geo.cand_block + 31) / 32;
   f->eg_fd = -1;
   for (int i = 0; i < FWD_MAX_FILES; i++)
     f->fds[i] = -1;
@@ -602,13 +608,14 @@ void forward_destroy(Forward *f)
   {
     const Sub *s = &f->sub[0];
     f->b.h = s->h, f->b.f_pre = s->f_pre, f->b.pos = s->pos, f->b.sel = s->sel, f->b.n_sel = s->n_sel;
+    f->b.cand = s->cand;
     f->b.oa_cnt = s->oa_cnt, f->b.keep = s->keep, f->b.back = s->back, f->pin = s->pin, f->rows = s->rows;
   }
   for (int k = 1; k < FWD_MAX_SUBS; k++)
   {
     Sub *s = &f->sub[k];
     hipFree(s->h), hipFree(s->f_pre), hipFree(s->pos), hipFree(s->sel), hipFree(s->n_sel), hipFree(s->oa_cnt);
-    hipFree(s->keep), hipFree(s->back), hipHostFree(s->pin), free(s->rows);
+    hipFree(s->keep), hipFree(s->back), hipHostFree(s->pin), free(s->rows), hipFree(s->cand);
   }
   void **dev = (void **)&f->b;
   for (size_t i = 0; i < sizeof f->b / sizeof(void *); i++)

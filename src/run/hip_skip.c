@@ -77,7 +77,12 @@ bool fwd_compact(Forward *f, char *err)
                   ops_gather_rows(b->score, (const float *)b->sel, b->keep, nk, OPS_MAX_SELECT, NULL) &&
                   fwd_copy(b->sel, b->score, (uint64_t)nk * OPS_MAX_SELECT * 4) &&
                   ops_gather_rows((float *)b->rpos, (const float *)b->n_sel, b->keep, nk, 1, NULL) &&
-                  fwd_copy(b->n_sel, b->rpos, (uint64_t)nk * 4);
+                  fwd_copy(b->n_sel, b->rpos, (uint64_t)nk * 4) &&
+                  /* the candidate blocks' bits (built at dec's index layer, read by the index layers after): the
+                     kept tokens' rows, the bits copied */
+                  (!f->sub[f->cur].cand_on ||
+                   (ops_gather_rows(b->score, (const float *)b->cand, b->keep, nk, f->cand_words, NULL) &&
+                    fwd_copy(b->cand, b->score, (uint64_t)nk * f->cand_words * 4)));
   return ok || fwd_fail(err, "a GPU call failed (the decoder's compaction)");
 }
 

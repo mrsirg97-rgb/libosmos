@@ -115,12 +115,17 @@ static bool select_rows(Forward *f, int l, int src, char *err)
             ops_fp4_round(b->qix, (uint64_t)n * nh * ih, FP4_INDEX_BLOCK, false, NULL, 0, NULL) &&
             fwd_mat(f, L->ix_proj, fwd_dev(f, L->ix_proj), nh, D, b->x, D, n, b->wix, nh) &&
             ops_scale(b->wix, (uint64_t)n * nh, w_scale, NULL);
+  /* the candidate blocks (DESIGN.md, "past 64K"): at the source layer, built when a token of the sub-batch has more
+     blocks than kept; its later index sources' rows outside them masked */
+  Sub *sb = &f->sub[f->cur];
+  bool need = false;
   for (uint32_t i = 0; i < n; i++)
-  {
-    const uint32_t blocks = ((uint32_t)(f->pin->pos[i] + 1) / ratio + g->cand_block - 1) / g->cand_block;
-    if ((l == g->cand_source || g->cand_source < l) && blocks > (uint32_t)g->cand_blocks)
-      return fwd_fail(err, "a context past the candidate blocks (the candidate masking is not built)");
-  }
+    need |= ((uint32_t)(f->pin->pos[i] + 1) / ratio + g->cand_block - 1) / g->cand_block > (uint32_t)g->cand_blocks;
+  if (l == g->cand_source)
+    sb->cand_on = need;
+  const bool masked = g->cand_source >= 0 && l > g->cand_source && sb->cand_on;
+  if ((need || masked) && !f->cand_words)
+    return fwd_fail(err, "the candidate blocks without their bits (max_ctx under them)");
   for (uint32_t i = 0, run; ok && i < n; i += run) /* a launch a run of one sequence's tokens (their keys its own) */
   {
     for (run = 1; i + run < n && f->bs[i + run] == f->bs[i]; run++)
@@ -131,7 +136,13 @@ static bool select_rows(Forward *f, int l, int src, char *err)
                                     b->pos + i, ratio, max_n, nh, ih, run, b->score + (uint64_t)i * f->score_stride,
                                     f->score_stride, NULL));
   }
-  ok = ok && ops_topk(b->score, f->score_stride, b->pos, ratio, (uint32_t)g->ix_topk, n, b->sel, OPS_MAX_SELECT,
+  ok = ok && (l != g->cand_source || !need ||
+              ops_cand_blocks(b->score, f->score_stride, b->pos, ratio, (uint32_t)g->cand_block,
+                              (uint32_t)g->cand_blocks, n, b->cand, f->cand_words, NULL));
+  if (ok && l == g->cand_source && need)
+    fwd_probe(f, "cand", l, f->at, b->cand, (uint64_t)n * f->cand_words, true);
+  ok = ok && ops_topk(b->score, f->score_stride, b->pos, ratio, (uint32_t)g->ix_topk, masked ? b->cand : NULL,
+                      (uint32_t)g->cand_block, f->cand_words, n, b->sel, OPS_MAX_SELECT,
                       b->n_sel, NULL);
   return ok || fwd_fail(err, "a GPU call failed (the indexer)");
 }

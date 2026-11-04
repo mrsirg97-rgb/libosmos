@@ -70,6 +70,8 @@ typedef struct Sub
 {
   float *h, *f_pre;
   int32_t *pos, *sel, *n_sel, *oa_cnt, *keep, *back;
+  uint32_t *cand; /* the candidate blocks' bits a token (ops_cand_blocks; Forward.cand_words), or NULL */
+  bool cand_on;   /* built at this step's candidate source layer: its later index sources masked by them */
   struct Pinned *pin;
   int64_t *rows;
   uint32_t n, n_all, n_keep;
@@ -104,6 +106,7 @@ typedef struct Scratch
   float *erow_f, *ekv;
   uint8_t *erow;
   int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;
+  uint32_t *cand; /* the running sub-batch's candidate bits (Sub's) */
   int32_t *keep, *back; /* the decoder's tokens (hip_skip.c): kept, compacted; then each back at its row */
   int32_t *gidx;        /* the next layer's experts guessed (hip_guess.c), [FWD_MAX_BATCH][FWD_GUESS_K] */
   float *gw;            /* (their weights: the router's, unread) */
@@ -129,6 +132,7 @@ struct Forward
   int n_layers;
   uint32_t max_ctx;
   uint32_t score_stride; /* a token's indexer scores: the most rows visible at max_ctx (the smallest ratio) */
+  uint32_t cand_words;   /* a token's candidate bits' words, when max_ctx can pass the candidate blocks; else 0 */
   uint32_t ckv_f_rows;   /* b.ckv_f's rows: score_stride, at most FWD_CKV_F32_ROWS */
   uint32_t slots;
   int fds[FWD_MAX_FILES];
