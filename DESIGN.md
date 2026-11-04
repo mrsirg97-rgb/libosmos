@@ -1565,6 +1565,35 @@ what it says: a layer's reads come in a burst (its misses, the next layer's gues
 bytes the model needs: how a read is issued, how early, or how many of the guesses are read, moves the wait from one
 read to another or adds to it. the lever is the bytes a token must read - the budget, which is the machine's.
 
+## a prompt's attention on the model's formats (2026-11-03)
+
+an 8K prompt (UD-IQ1_M, 2,048 a step, 106 GiB; rocprofv3) against the build before the KV's packing: the attention
+values 925 -> 1,540 ms, scores 919 -> 1,186, softmax 433 -> 503 - ~0.95 s more of the GPU's time; prompts 450-457 tok/s
+at 8K where ~490 was (DESIGN, the readers). two causes:
+
+- **each token decodes its own keys**: a prompt's tokens select among the same compressed rows (and the window's
+  ring), each decoding them again for its scores and again for its values. now a step's run unpacks the rows once
+  when its tokens would decode more than there are (run x topk > the rows below its furthest position; run x window
+  > the ring's slots): ops_kv_unpack into b.ckv_f (score_stride rows, at most FWD_CKV_F32_ROWS: 64 MB, a 128K context
+  at ratio 4 - past it the rows are read packed) and b.ring_f (the slots). ops_sparse_attn takes the ring's format
+  (KV_FP8 or KV_F32), and with every key F32 launches kernels of plain loads. the same bits: an unpacked row is the
+  F32 the rounding gave (test_attn_gpu: the ring unpacked, alone and with the rows F32, a batch or a token at a time,
+  each the packed path's bits - a load shifted by a float4 caught; test_model_gpu's fingerprint cb2ad57792ac72d2,
+  the bench's hashes plain, drafted and the prompts').
+- **the row's size chosen per key**: Keys.row picked ring_bytes or ckv_bytes for each key, and the compiler read the
+  chosen one from the kernel's arguments at every load - 31 8-byte loads a values kernel (the assembly), 28% slower
+  than the F32 kernel before the packing at every launch. the all-F32 kernels compute a row's size (hd floats): the
+  loads the old kernel's, its spills too (29 / 29 against 34 / 37).
+
+the 8K prompt's attention now: values 1,001 ms, scores 914, softmax 436, the unpacks 9; the GPU busy 16.2 -> 15.4 s.
+prompts 2K / 8K / 2K: 297 / 415-422 / 305-308 -> 308-321 / 446-459 / 322-327 tok/s (two rounds alternated with the last
+commit's build); decode 16.1-16.2 and drafted 31.0 / 23.8 / 33.1 the same, their answers the same.
+
+tried first, not kept: **the IQ experts' mm shapes** (scratch shp/: 64 x 4 waves on gate and up, 64 x 2 on down -
+alone, one expert a launch, 10-25% faster at 16-64 tokens, the error the same to the digit). in a prompt's grouped
+launches (many experts each) slower: IQ1_S 3.58 -> 3.78 s, IQ2_XXS 1.86 -> 2.03 of an 8K prompt; the prompt the same.
+a shape's measure is the grouped launch, as the shapes were first tuned.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

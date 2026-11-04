@@ -52,7 +52,7 @@ bool ops_kv_unpack(uint32_t fmt, const void *src, uint64_t rows, uint32_t dim, f
 bool ops_round_bf16(float *x, uint64_t n, void *stream);
 bool ops_engram_gate(float *h, const float *kv, const float *gate, uint32_t hc, uint32_t dim, float eps,
                      uint32_t n_tok, void *stream);
-bool ops_sparse_attn(const float *q, const void *ring, uint32_t slots, const int32_t *pos, uint32_t window,
+bool ops_sparse_attn(const float *q, const void *ring, uint32_t ring_fmt, uint32_t slots, const int32_t *pos, uint32_t window,
                      int32_t floor, const void *ckv, uint32_t ckv_fmt, const int32_t *sel, const int32_t *n_sel,
                      uint32_t sel_cap,
                      uint32_t max_sel, const float *sink, float scale, uint32_t heads, uint32_t head_dim,
@@ -181,14 +181,15 @@ ops_engram_gate
 
 ops_sparse_attn
   for each token and head: q against its keys - the window's (positions max(pos - window + 1, floor) .. pos, at ring
-  row position % slots, KV_FP8 rows: floor the sequence's first position with the layer's state, 0 for every
-  position), then the n_sel[t] rows of ckv (format ckv_fmt: the compressed rows' KV_FP4_E4M3, or the drafter's
+  row position % slots, rows in ring_fmt - KV_FP8 as a sequence keeps them, or KV_F32 unpacked: floor the sequence's
+  first position with the layer's state, 0 for every position), then the n_sel[t] rows of ckv (format ckv_fmt: the compressed rows' KV_FP4_E4M3, or the drafter's
   block's own KV_F32) that sel[t * sel_cap ..] names (ckv NULL: none) - each a latent that is the key and the value,
   read as kvfmt.h's value (the F32 its rounding gave); scaled, softmax with the head's sink, the values summed in that order. slots
   at least window + the step's tokens - 1, so no position a token reads is overwritten by the step. max_sel bounds
   n_sel (the model's top k); scores the device's OPS_ATTN_SCRATCH(n_tok, heads, window + max_sel) floats (window
   alone with no ckv); heads a multiple of 64, head_dim of 256. a score a sum over d ascending, an output over the
-  keys in their order: a token's bits do not depend on the other tokens, the heads' tiling, or the batch.
+  keys in their order: a token's bits do not depend on the other tokens, the heads' tiling, or the batch - nor on the
+  keys' formats (a packed row read is the F32 it unpacks to). every key F32 (ring and ckv): kernels with plain loads.
 
 ops_compress
   for each token t whose position completes a compressed row ((pos[t] + 1) a multiple of ratio): the row from the

@@ -19,7 +19,7 @@ static bool attention(Drafter *d, const DBlock *k, const uint8_t *ring)
          ops_rope(d->kv, 1, HD, RD, HD, fr, d->pos_q, false, T, NULL) && ops_fp8_round(d->kv, (uint64_t)T * HD, NULL, 0, NULL) &&
          /* the ring's rows before p0 (every row's window: positions p0 - window .. p0 - 1), then the block's own T
             rows - every row's, no causal mask - as the selected rows */
-         ops_sparse_attn(d->q, ring, W, d->pos_a, W, 0, d->kv, KV_F32, d->sel, d->n_sel, OPS_MAX_SELECT, T, k->sink,
+         ops_sparse_attn(d->q, ring, KV_FP8, W, d->pos_a, W, 0, d->kv, KV_F32, d->sel, d->n_sel, OPS_MAX_SELECT, T, k->sink,
                          (float)(1.0 / sqrt((double)HD)), H, HD, T, d->att, d->o, NULL) &&
          ops_rope(d->o, H, HD, RD, H * HD, fr, d->pos_q, true, T, NULL) &&
          ops_fp8_round(d->o, (uint64_t)T * H * HD, NULL, 0, NULL) &&

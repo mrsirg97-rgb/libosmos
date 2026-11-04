@@ -402,6 +402,7 @@ static bool scratch(Forward *f)
       {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},
       {&b->kv_p, B * kv_row_bytes(KV_FP8, (uint32_t)hd)}, {&b->lat_p, B * kv_row_bytes(KV_FP4_E4M3, (uint32_t)hd)},
       {&b->ikr_p, B * kv_row_bytes(KV_FP4_POW2, (uint32_t)ih)}, {&b->row_f, hd * F},
+      {&b->ckv_f, (uint64_t)f->ckv_f_rows * hd * F}, {&b->ring_f, (uint64_t)f->slots * hd * F},
       {&b->score, B * (f->score_stride > Fs ? f->score_stride : Fs) * F}, /* the indexer's; hip_skip.c's sel */
       {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
@@ -507,6 +508,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   for (int l = 0; l < n_layers; l++)
     if (w->geo.compress[l] && max_ctx / (uint32_t)w->geo.compress[l] > f->score_stride)
       f->score_stride = max_ctx / (uint32_t)w->geo.compress[l];
+  f->ckv_f_rows = f->score_stride < FWD_CKV_F32_ROWS ? f->score_stride : FWD_CKV_F32_ROWS;
   f->eg_fd = -1;
   for (int i = 0; i < FWD_MAX_FILES; i++)
     f->fds[i] = -1;

@@ -204,9 +204,30 @@ bool fwd_attention(Forward *f, int l, char *err)
     for (run = 1; i + run < n && f->bs[i + run] == f->bs[i]; run++)
       ;
     const uint8_t *ckv = ratio ? f->bs[i]->ckv[src] : NULL;
+    uint32_t fmt = KV_FP4_E4M3;
+    /* the run's tokens would decode their selected rows each (run x topk, in the scores and again in the values):
+       when that is more than the rows there are - a prompt's step - the rows are unpacked once, the F32 they were
+       rounded to (the same bits), and read as F32 */
+    int32_t last = 0; /* the run's furthest position: its tokens' rows all below (last + 1) / ratio */
+    for (uint32_t k = i; k < i + run; k++)
+      last = f->pin->pos[k] > last ? f->pin->pos[k] : last;
+    const uint32_t rows = ckv ? (uint32_t)(last + 1) / ratio : 0;
+    if (rows && rows <= f->ckv_f_rows && (uint64_t)run * (uint32_t)g->ix_topk > rows)
+    {
+      ok = ops_kv_unpack(KV_FP4_E4M3, ckv, rows, HD, b->ckv_f, NULL);
+      ckv = (const uint8_t *)b->ckv_f, fmt = KV_F32;
+    }
+    /* the window's keys likewise: run x window decodes against the ring's slots, unpacked once */
+    const void *ring = f->bs[i]->ring[l];
+    uint32_t rfmt = KV_FP8;
+    if ((uint64_t)run * g->window > f->slots)
+    {
+      ok = ok && ops_kv_unpack(KV_FP8, ring, f->slots, HD, b->ring_f, NULL);
+      ring = b->ring_f, rfmt = KV_F32;
+    }
     const int32_t floor = f->dec >= 0 && l > f->dec ? f->bs[i]->dec_from : 0; /* the decoder's: hip_skip.c */
-    ok = ops_sparse_attn(b->q + (uint64_t)i * H * HD, f->bs[i]->ring[l], f->slots, b->pos + i, g->window, floor, ckv,
-                         KV_FP4_E4M3, ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL, ckv ? b->n_sel + i : NULL, OPS_MAX_SELECT,
+    ok = ok && ops_sparse_attn(b->q + (uint64_t)i * H * HD, ring, rfmt, f->slots, b->pos + i, g->window, floor, ckv,
+                         fmt, ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL, ckv ? b->n_sel + i : NULL, OPS_MAX_SELECT,
                          (uint32_t)g->ix_topk, F(f, L->sinks), scale, H, HD, run, b->att, b->o + (uint64_t)i * H * HD,
                          NULL);
   }

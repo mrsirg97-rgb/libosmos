@@ -23,6 +23,8 @@
 #include "substrate/run/forward.h"
 
 #define FWD_MAX_FILES 16
+#define FWD_CKV_F32_ROWS 32768 /* a prompt's compressed rows unpacked once at most (64 MB at 512 values: a 128K
+                                  context at ratio 4; past it the attention reads them packed) */
 #define FWD_MAX_BATCH MM_MAX_TOKENS                 /* a step's tokens: the matmul's */
 #define FWD_MAX_SUBS FORWARD_SUBS
 /* a ratio r source's pending positions a sequence: a step's and the r - 1 before them, each row's r all held */
@@ -95,6 +97,9 @@ typedef struct Scratch
   float *lat, *kvc, *scg, *ikr, *qix, *wix, *score;
   uint8_t *kv_p, *lat_p, *ikr_p; /* the step's rows packed as a sequence keeps them (kvfmt.h): keys, latents, ix keys */
   float *row_f;                  /* a kept row read back for a probe, and packed again after it */
+  float *ckv_f;                  /* a prompt step's compressed rows unpacked once for its attention (hip_attn.c), up
+                                    to ckv_f_rows of them */
+  float *ring_f;                 /* and the window's ring (the forward's slots) */
   float *att;                   /* the attention's scores, then their denominators (ops_sparse_attn) */
   float *erow_f, *ekv;
   uint8_t *erow;
@@ -124,6 +129,7 @@ struct Forward
   int n_layers;
   uint32_t max_ctx;
   uint32_t score_stride; /* a token's indexer scores: the most rows visible at max_ctx (the smallest ratio) */
+  uint32_t ckv_f_rows;   /* b.ckv_f's rows: score_stride, at most FWD_CKV_F32_ROWS */
   uint32_t slots;
   int fds[FWD_MAX_FILES];
   Pool *pool;

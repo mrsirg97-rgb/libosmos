@@ -39,10 +39,11 @@ typedef float f4 __attribute__((ext_vector_type(4)));
 hipStream_t st(void* s) { return (hipStream_t) s; }
 bool ok() { return hipGetLastError() == hipSuccess; }
 
-// a token's keys: the window's (positions pos - window + 1 .. pos, ring rows: KV_FP8) then its selected rows (ckv's,
-// in ckv_fmt) - each read four values at a time as kvload.h reads them, the F32 their rounding gave
+// a token's keys: the window's (positions pos - window + 1 .. pos, ring rows in ring_fmt) then its selected rows
+// (ckv's, in ckv_fmt) - each read four values at a time as kvload.h reads them, the F32 their rounding gave
 struct Keys {
   const uint8_t* ring;
+  uint32_t ring_fmt;  // KV_FP8 (as a sequence keeps it) or KV_F32 (unpacked for a prompt's step)
   uint32_t slots;
   const int32_t* pos;
   uint32_t window;
@@ -62,13 +63,28 @@ struct Keys {
     nw = (uint32_t) pos[t] - j0(t) + 1;
     return nw + (ckv ? (uint32_t) n_sel[t] : 0);
   }
-  // key k's row and its format
-  __device__ const uint8_t* row(uint32_t t, uint32_t k, uint32_t nw, uint32_t& fmt) const {
-    fmt = k < nw ? (uint32_t) KV_FP8 : ckv_fmt;
-    return k < nw ? ring + (uint64_t) ((j0(t) + k) % slots) * ring_bytes
-                  : ckv + (uint64_t) sel[(uint64_t) t * sel_cap + k - nw] * ckv_bytes;
+  // key k's row and its format. F (every key F32): a row hd floats, computed - choosing between the two row sizes
+  // per key made the compiler read the chosen one from the arguments at every load (31 8-byte loads a values
+  // kernel, 28% slower than the F32 kernel before the packing)
+  template <bool F> __device__ const uint8_t* row(uint32_t t, uint32_t k, uint32_t nw, uint32_t& fmt) const {
+    fmt = k < nw ? ring_fmt : ckv_fmt;
+    const uint64_t rb = F ? (uint64_t) hd * sizeof(float) : ring_bytes, cb = F ? rb : ckv_bytes;
+    return k < nw ? ring + (uint64_t) ((j0(t) + k) % slots) * rb
+                  : ckv + (uint64_t) sel[(uint64_t) t * sel_cap + k - nw] * cb;
   }
-  __device__ kv::Raw fetch(const uint8_t* r, uint32_t fmt, uint32_t d) const { return kv::fetch4(fmt, r, hd, d); }
+  // F: every key F32 (the launch's, known when compiled): the loads plain, no format's branches
+  template <bool F> __device__ kv::Raw fetch(const uint8_t* r, uint32_t fmt, uint32_t d) const {
+    if constexpr (F) {  // (through f4: a 16-byte load - uint4's from a byte pointer split in two 8-byte ones)
+      const f4 v = *(const f4*) ((const float*) r + d);
+      return kv::Raw{__float_as_uint(v[0]), __float_as_uint(v[1]), __float_as_uint(v[2]), __float_as_uint(v[3])};
+    } else {
+      return kv::fetch4(fmt, r, hd, d);
+    }
+  }
+  template <bool F> __device__ f4 decode(uint32_t fmt, const kv::Raw& r) const {
+    if constexpr (F) return f4{__uint_as_float(r.a), __uint_as_float(r.b), __uint_as_float(r.c), __uint_as_float(r.d)};
+    else return kv::decode4(fmt, r);
+  }
 };
 
 // a thread's R x C of a block's tile: R heads (a float4 group every 64 / (R / 4)) by C columns (a group every
@@ -92,7 +108,7 @@ __device__ inline int tile_head(int HT, int R, int ty, int i) { return ty * 4 + 
 
 // s[t][h][k] = (sum over d ascending of q[t][h][d] key_k[d]) * scale: a block a token's 64 heads x SK keys, a
 // thread SR x SC; each thread's rows' pointers once, the next stage's loads issued before this one's sums
-template <int HT, int SR, int SC, int SK>
+template <int HT, int SR, int SC, int SK, bool F>
 __global__ __launch_bounds__((HT / SR) * (SK / SC)) void scores_kernel(Keys K, const float* __restrict__ q,
                                                                       float scale, uint32_t heads,
                                                                       float* __restrict__ s) {
@@ -118,25 +134,25 @@ __global__ __launch_bounds__((HT / SR) * (SK / SC)) void scores_kernel(Keys K, c
   for (int j = 0; j < KL; j++) {
     const int i = threadIdx.x + j * kSthreads;
     ki[j] = i / (kStep / 4), kd[j] = i % (kStep / 4) * 4;
-    kp[j] = k0 + ki[j] < n ? K.row(t, k0 + ki[j], nw, kf[j]) : nullptr;
+    kp[j] = k0 + ki[j] < n ? K.row<F>(t, k0 + ki[j], nw, kf[j]) : nullptr;
   }
   f4 qn[QL];
   kv::Raw kn[KL];  // the keys' bytes in flight, decoded when staged
   for (int j = 0; j < QL; j++) qn[j] = *(const f4*) qp[j];
-  for (int j = 0; j < KL; j++) kn[j] = kp[j] ? K.fetch(kp[j], kf[j], kd[j]) : kv::Raw{};
+  for (int j = 0; j < KL; j++) kn[j] = kp[j] ? K.fetch<F>(kp[j], kf[j], kd[j]) : kv::Raw{};
   f4 acc[SR][G] = {};
   for (uint32_t d0 = 0; d0 < hd; d0 += kStep) {
     __syncthreads();
     for (int j = 0; j < QL; j++)
       for (int e = 0; e < 4; e++) qs[qd[j] + e][qi[j]] = qn[j][e];
     for (int j = 0; j < KL; j++) {
-      const f4 kj = kp[j] ? kv::decode4(kf[j], kn[j]) : f4{};
+      const f4 kj = kp[j] ? K.decode<F>(kf[j], kn[j]) : f4{};
       for (int e = 0; e < 4; e++) ks[kd[j] + e][ki[j]] = kj[e];
     }
     __syncthreads();
     if (d0 + kStep < hd) {
       for (int j = 0; j < QL; j++) qn[j] = *(const f4*) (qp[j] + d0 + kStep);
-      for (int j = 0; j < KL; j++) kn[j] = kp[j] ? K.fetch(kp[j], kf[j], kd[j] + d0 + kStep) : kv::Raw{};
+      for (int j = 0; j < KL; j++) kn[j] = kp[j] ? K.fetch<F>(kp[j], kf[j], kd[j] + d0 + kStep) : kv::Raw{};
     }
     tile_sums<HT, SR, SC, SK>(qs, ks, ty, tx, acc);
   }
@@ -171,7 +187,7 @@ __global__ __launch_bounds__(kSmThreads) void softmax_kernel(Keys K, const float
 // o[t][h][d] = (sum over the keys in order of p[t][h][k] key_k[d]) / den[t][h]: a block a token's 64 heads x VD
 // dims, a thread VR x VC, the keys kStep a stage (past n zeros: 0 x 0, the sums' bits unchanged); the next stage's
 // loads issued before this one's sums
-template <int HT, int VR, int VC, int VD>
+template <int HT, int VR, int VC, int VD, bool F>
 __global__ __launch_bounds__((HT / VR) * (VD / VC)) void values_kernel(Keys K, const float* __restrict__ p,
                                                                       const float* __restrict__ den, uint32_t heads,
                                                                       float* __restrict__ o) {
@@ -206,7 +222,7 @@ __global__ __launch_bounds__((HT / VR) * (VD / VC)) void values_kernel(Keys K, c
     }
     for (int j = 0; j < VL; j++) {
       vf[j] = KV_F32;  // (past n: zeros)
-      vn[j] = k0 + vk[j] < n ? K.fetch(K.row(t, k0 + vk[j], nw, vf[j]), vf[j], d0 + vd[j]) : kv::Raw{};
+      vn[j] = k0 + vk[j] < n ? K.fetch<F>(K.row<F>(t, k0 + vk[j], nw, vf[j]), vf[j], d0 + vd[j]) : kv::Raw{};
     }
   };
   load(0);
@@ -215,7 +231,7 @@ __global__ __launch_bounds__((HT / VR) * (VD / VC)) void values_kernel(Keys K, c
     __syncthreads();
     for (int j = 0; j < PL; j++)
       for (int e = 0; e < 4; e++) ps[pk[j] + e][ph[j]] = pn[j][e];
-    for (int j = 0; j < VL; j++) *(f4*) &vs[vk[j]][vd[j]] = kv::decode4(vf[j], vn[j]);
+    for (int j = 0; j < VL; j++) *(f4*) &vs[vk[j]][vd[j]] = K.decode<F>(vf[j], vn[j]);
     __syncthreads();
     if (k0 + kStep < n) load(k0 + kStep);
     tile_sums<HT, VR, VC, VD>(ps, vs, ty, tx, acc);
@@ -228,40 +244,52 @@ __global__ __launch_bounds__((HT / VR) * (VD / VC)) void values_kernel(Keys K, c
   }
 }
 
-}  // namespace
-
-extern "C" bool ops_sparse_attn(const float* q, const void* ring, uint32_t slots, const int32_t* pos,
-                                uint32_t window, int32_t floor, const void* ckv, uint32_t ckv_fmt, const int32_t* sel,
-                                const int32_t* n_sel, uint32_t sel_cap, uint32_t max_sel, const float* sink,
-                                float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float* scores, float* o,
-                                void* stream) {
-  if (!window || window > OPS_MAX_WINDOW || slots < window || sel_cap > OPS_MAX_SELECT || max_sel > sel_cap ||
-      !heads || heads % kHeads || !head_dim || head_dim % kVdims || head_dim % kStep || !n_tok || !scores ||
-      (ckv && (!sel || !n_sel)) || floor < 0 || ckv_fmt > KV_FP4_POW2 || head_dim % kv_block((KvFmt) ckv_fmt))
-    return false;
-  const uint32_t keys = window + (ckv ? max_sel : 0);
-  const Keys K{(const uint8_t*) ring, slots, pos, window, floor, (const uint8_t*) ckv, ckv_fmt, sel, n_sel, sel_cap,
-               head_dim, OPS_ATTN_ROW(keys), kv_row_bytes(KV_FP8, head_dim), kv_row_bytes((KvFmt) ckv_fmt, head_dim)};
-  float* den = scores + (uint64_t) n_tok * heads * K.stride;
-  const hipStream_t ss = st(stream);
+// a launch's three kernels: small tiles for a few tokens, the large ones else; F every key F32
+template <bool F>
+void launch(const Keys& K, const float* q, const float* sink, float scale, uint32_t heads, uint32_t head_dim,
+            uint32_t keys, uint32_t n_tok, float* scores, float* den, float* o, hipStream_t ss) {
   if (n_tok < kSmallTok) {
     constexpr int ST = (kSmallHeads / kSmallR) * (kSmallKeys / kSmallC);
     constexpr int VT = (kSmallHeads / kSmallR) * (kSmallDims / kSmallC);
-    scores_kernel<kSmallHeads, kSmallR, kSmallC, kSmallKeys>
+    scores_kernel<kSmallHeads, kSmallR, kSmallC, kSmallKeys, F>
         <<<dim3((keys + kSmallKeys - 1) / kSmallKeys, heads / kSmallHeads, n_tok), ST, 0, ss>>>(K, q, scale, heads,
                                                                                                 scores);
     softmax_kernel<<<dim3((heads + kSmThreads / kWave - 1) / (kSmThreads / kWave), n_tok), kSmThreads, 0, ss>>>(
         K, sink, heads, scores, den);
-    values_kernel<kSmallHeads, kSmallR, kSmallC, kSmallDims>
+    values_kernel<kSmallHeads, kSmallR, kSmallC, kSmallDims, F>
         <<<dim3(head_dim / kSmallDims, heads / kSmallHeads, n_tok), VT, 0, ss>>>(K, scores, den, heads, o);
-    return ok();
+    return;
   }
   constexpr int ST = (kHeads / kSr) * (kSkeys / kSc), VT = (kHeads / kVr) * (kVdims / kVc);
   const uint32_t ht = heads / kHeads;
-  scores_kernel<kHeads, kSr, kSc, kSkeys><<<dim3((keys + kSkeys - 1) / kSkeys, ht, n_tok), ST, 0, ss>>>(K, q, scale,
-                                                                                                    heads, scores);
+  scores_kernel<kHeads, kSr, kSc, kSkeys, F><<<dim3((keys + kSkeys - 1) / kSkeys, ht, n_tok), ST, 0, ss>>>(
+      K, q, scale, heads, scores);
   softmax_kernel<<<dim3((heads + kSmThreads / kWave - 1) / (kSmThreads / kWave), n_tok), kSmThreads, 0, ss>>>(
       K, sink, heads, scores, den);
-  values_kernel<kHeads, kVr, kVc, kVdims><<<dim3(head_dim / kVdims, ht, n_tok), VT, 0, ss>>>(K, scores, den, heads, o);
+  values_kernel<kHeads, kVr, kVc, kVdims, F><<<dim3(head_dim / kVdims, ht, n_tok), VT, 0, ss>>>(K, scores, den,
+                                                                                               heads, o);
+}
+
+}  // namespace
+
+extern "C" bool ops_sparse_attn(const float* q, const void* ring, uint32_t ring_fmt, uint32_t slots,
+                                const int32_t* pos, uint32_t window, int32_t floor, const void* ckv, uint32_t ckv_fmt,
+                                const int32_t* sel, const int32_t* n_sel, uint32_t sel_cap, uint32_t max_sel,
+                                const float* sink, float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok,
+                                float* scores, float* o, void* stream) {
+  if (!window || window > OPS_MAX_WINDOW || slots < window || sel_cap > OPS_MAX_SELECT || max_sel > sel_cap ||
+      !heads || heads % kHeads || !head_dim || head_dim % kVdims || head_dim % kStep || !n_tok || !scores ||
+      (ckv && (!sel || !n_sel)) || floor < 0 || ckv_fmt > KV_FP4_POW2 || head_dim % kv_block((KvFmt) ckv_fmt) ||
+      (ring_fmt != KV_FP8 && ring_fmt != KV_F32) || head_dim % kv_block((KvFmt) ring_fmt))
+    return false;
+  const uint32_t keys = window + (ckv ? max_sel : 0);
+  const Keys K{(const uint8_t*) ring, ring_fmt, slots, pos, window, floor, (const uint8_t*) ckv, ckv_fmt, sel, n_sel,
+               sel_cap, head_dim, OPS_ATTN_ROW(keys), kv_row_bytes((KvFmt) ring_fmt, head_dim),
+               kv_row_bytes((KvFmt) ckv_fmt, head_dim)};
+  float* den = scores + (uint64_t) n_tok * heads * K.stride;
+  if (ring_fmt == KV_F32 && (!ckv || ckv_fmt == KV_F32))
+    launch<true>(K, q, sink, scale, heads, head_dim, keys, n_tok, scores, den, o, st(stream));
+  else
+    launch<false>(K, q, sink, scale, heads, head_dim, keys, n_tok, scores, den, o, st(stream));
   return ok();
 }
