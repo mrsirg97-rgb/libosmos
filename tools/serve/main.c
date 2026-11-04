@@ -87,6 +87,7 @@ int main(int argc, char **argv)
   if (!w)
     return die(werr);
   sv.round_tokens = (uint32_t)((w->geo.n_experts - 1) / w->geo.n_used);
+  sv.window = (uint32_t)w->geo.window;
   uint64_t *picks = NULL;
   if (opt(argc, argv, "--picks", NULL))
   {

@@ -1761,6 +1761,24 @@ the folder's cap); `--parallel` on libevt (maya's parallel_test.py: each convers
 answer alone - here its hash; a STOP ends one alone; a short request answered during a long read); then
 agent_bench.py against maya 1.1.52 on this box.
 
+**6. measured (2026-11-04): agent_bench 4 x 8, seed 1, against maya 1.1.52** (`tools/serve/agent_bench.py`, maya's
+workload and timing ported; ours at budget 96 GiB, 2,048-token steps, the IQ2_XS drafter; maya its config, DSpark on;
+both `--parallel 4`, 131,072 context, slots off; ~/bench/agent):
+
+| | ours | maya 1.1.52 |
+| --- | --- | --- |
+| turns answered | 32 of 32 | 32 of 32 |
+| wall | 508.7 s | 538 s |
+| first token p50 / p95 | 6.83 / 58.1 s | 6.41 / 93.5 s |
+| turn done p50 / p95 | 50.9 / 113.1 s | 57.6 / 126.6 s |
+
+the first run answered 31: a drafting turn's drafter was seeded once, after its prompt's last piece, from that step
+- whose taps hold only that piece's positions, so a last piece shorter than the window left the ring's earlier
+positions unseeded. seeded in each piece instead, the step's own part of the prompt's last window (`conv_read`):
+seeding a piece's whole range failed every first turn ("a position the last step did not tap": past the decoder's
+compaction a step taps only the tokens within reach of the prompt's end) - the run that showed which positions a
+step holds.
+
 ## past 16K: the indexer's candidate blocks (2026-11-03)
 
 a context past candidate_topk_blocks x candidate_block_size compressed rows was refused ("the candidate masking is

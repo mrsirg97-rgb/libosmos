@@ -212,7 +212,7 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
   while (c->held.n < n)
   {
     const uint32_t k = n - c->held.n < sv->max_tokens ? n - c->held.n : sv->max_tokens;
-    if (!conv_read(c, sv, g->ids, k))
+    if (!conv_read(c, sv, g->ids, k, n, spec))
     {
       fail(sv, c);
       return;
@@ -228,9 +228,8 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
       return;
     }
   }
-  int32_t t; /* (drafter_seed keeps the window's last positions of from .. n) */
-  if ((spec && !drafter_seed(sv->d, c->s, (int32_t)reused, (int32_t)n, c->err)) ||
-      !forward_greedy(sv->f, row, 1, &t, c->err))
+  int32_t t;
+  if (!forward_greedy(sv->f, row, 1, &t, c->err))
   {
     fail(sv, c);
     return;

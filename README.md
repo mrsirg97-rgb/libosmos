@@ -39,6 +39,7 @@ for this model on this hardware, on the same model, its pack of the same files. 
 | Prompt, 8,192 tokens (2,048-token steps, 106 GiB) | 472-484 tok/s | 407-412 tok/s |
 | Prompt, 8,192 tokens (one 8,192-token step, 100 GiB, 16K context) | ~578 tok/s | - |
 | Next-token distribution against the reference forward (mean KL, 32 positions; argmax agrees) | 0.209 (28 of 32) | 0.272 (29 of 32; an earlier version's logits) |
+| Agents: 4 at once x 8 turns (Maya's agent_bench, seed 1): wall; turn done p50 / p95 | 509 s; 50.9 / 113 s | 538 s; 57.6 / 127 s |
 | Attention state (KV) a token | ~0.9 KB (the model's FP8 / FP4 formats) | |
 | Output reproducible bit for bit | yes | no (greedy decode varied run to run, measured on 1.1.46) |
 

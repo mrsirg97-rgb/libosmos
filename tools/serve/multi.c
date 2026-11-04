@@ -200,7 +200,7 @@ static void piece(Multi *m)
     return;
   Lane *ln = &m->lane[pick];
   const uint32_t n = ln->g.n, k = n - ln->c.held.n < sv->max_tokens ? n - ln->c.held.n : sv->max_tokens;
-  if (!conv_read(&ln->c, sv, ln->g.ids, k))
+  if (!conv_read(&ln->c, sv, ln->g.ids, k, n, ln->g.spec))
   {
     lane_fail(m, ln);
     return;
@@ -210,8 +210,7 @@ static void piece(Multi *m)
       ln->reused);
   if (ln->c.held.n < n)
     return;
-  if (!forward_greedy(sv->f, (k - 1) % MM_MAX_TOKENS, 1, &ln->t, ln->c.err) ||
-      (ln->g.spec && !drafter_seed(sv->d, ln->c.s, (int32_t)ln->reused, (int32_t)n, ln->c.err)))
+  if (!forward_greedy(sv->f, (k - 1) % MM_MAX_TOKENS, 1, &ln->t, ln->c.err))
   {
     lane_fail(m, ln);
     return;

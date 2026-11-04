@@ -25,6 +25,7 @@ typedef struct Server
   Slots *slots;    /* or NULL (SUBSTRATE_SLOT_KEEP off) */
   uint32_t max_tokens, max_ctx;
   uint32_t round_tokens; /* a decode step's most tokens: (experts - 1) / experts a token; more, a prompt's step */
+  uint32_t window;       /* the attention's window: the drafter's ring of positions */
   int32_t eos[SERVE_MAX_EOS];
   int n_eos;
 } Server;
@@ -58,7 +59,7 @@ bool conv_restart(Conv *c, const Server *sv);
 void conv_set_aside(Conv *c, const Server *sv);
 uint32_t conv_reach(const Conv *c, const int32_t *p, uint32_t n);
 bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n);
-bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k);
+bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t n, bool seed);
 
 int serve_single(Server *sv, Conv *c);
 int serve_multi(Server *sv, Conv *lanes, int n);
@@ -73,5 +74,8 @@ conv_continue
   conversation p continues taken back (else emptied). held.n: the tokens reused.
 
 conv_read
-  k tokens of p (from held.n) through one forward_batch, into the sequence and held: the step's logits theirs.
+  k tokens of p (from held.n) through one forward_batch, into the sequence and held: the step's logits theirs; with
+  seed, the drafter's rings seeded from the step - the piece's part of the prompt's last window (n - window .. n - 1,
+  n the prompt's tokens): the positions a step taps past the decoder's compaction are those near the prompt's end,
+  and a later piece's step would not hold an earlier piece's.
 */

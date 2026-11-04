@@ -167,7 +167,7 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   return true;
 }
 
-bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k)
+bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t n, bool seed)
 {
   if (!k)
     return true;
@@ -182,5 +182,7 @@ bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k)
   for (uint32_t i = 0; ok && i < k; i++)
     if (!ids_push(&c->held, p[at + i]))
       return snprintf(c->err, sizeof c->err, "out of memory"), false;
-  return ok;
+  /* the piece's part of the prompt's last window, from its own step (serve.h) */
+  const uint32_t lo = n > sv->window && n - sv->window > at ? n - sv->window : at;
+  return ok && (!seed || lo >= at + k || drafter_seed(sv->d, c->s, (int32_t)lo, (int32_t)(at + k), c->err));
 }
