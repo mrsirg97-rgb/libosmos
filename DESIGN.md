@@ -1594,6 +1594,30 @@ alone, one expert a launch, 10-25% faster at 16-64 tokens, the error the same to
 launches (many experts each) slower: IQ1_S 3.58 -> 3.78 s, IQ2_XXS 1.86 -> 2.03 of an 8K prompt; the prompt the same.
 a shape's measure is the grouped launch, as the shapes were first tuned.
 
+## a prompt's step size, and the experts' kernel's ceiling (2026-11-03)
+
+a larger step reads each expert once for more tokens (its slab decoded once a tile of up to 8 x 16 tokens), and
+its buffers take budget from the resident set. UD-IQ1_M, prompts 2K / 8K / 2K (tok/s, one run each, the box faster
+this hour than the A/Bs above):
+
+| step | budget | 2K | 8K | 2K |
+| ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 106 GiB | 337 | 485 | 358 |
+| 4,096 | 104 | 309 | 541 | 339 |
+| 4,096 | 102 | 318 | 520 | 336 |
+| 8,192 | 100 | 296 | 578 | 334 |
+| 8,192 | 96 | 312 | 580 | 332 |
+
+a long prompt +19% at 8,192 a step; a 2K one (one step either way) none. the budget is the decode's (~16.2 tok/s at
+110 GiB, ~15.3 at 100): a server's choice, 2,048 the default. most of the larger step's buffers are the experts'
+(scratch(): S = max_tokens, P = S x K - gate, up, the activations, down's rows, ~3.3 GB at 8,192 against ~0.8 at
+2,048), held for every pair at once so each expert is read once for all sub-batches. the experts in chunks, a
+token's sums in their order still, would make the large step nearly free of budget - not done.
+
+tried, not kept: **16 column tiles** for the IQ experts (a hot expert's slab decoded once for 256 tokens): at 8 the
+kernel holds 256 VGPRs (occupancy 5), at 16 its loops no longer unroll (-Werror). a restructured kernel, not a
+constant.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.
