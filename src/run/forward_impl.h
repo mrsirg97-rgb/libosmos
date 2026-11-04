@@ -23,6 +23,8 @@
 #include "osmos/run/forward.h"
 
 #define FWD_MAX_FILES WEIGHTS_MAX_FILES
+#define FWD_SCORE_BYTES (512ull << 20) /* the indexer's scores at most: a step scored in chunks of tokens past it (a
+                                          token's scores a row of score_stride: 2,048 tokens at 64K, 128 at 1M) */
 #define FWD_CKV_F32_ROWS 32768 /* a prompt's compressed rows unpacked once at most (64 MB at 512 values: a 128K
                                   context at ratio 4; past it the attention reads them packed) */
 #define FWD_MAX_BATCH MM_MAX_TOKENS                 /* a step's tokens: the matmul's */
@@ -131,6 +133,7 @@ struct Forward
   int n_layers;
   uint32_t max_ctx;
   uint32_t score_stride; /* a token's indexer scores: the most rows visible at max_ctx (the smallest ratio) */
+  uint32_t score_rows;   /* the tokens scored at once: the step's, at most FWD_SCORE_BYTES of scores */
   uint32_t cand_words;   /* a token's candidate bits' words, when max_ctx can pass the candidate blocks; else 0 */
   uint32_t ckv_f_rows;   /* b.ckv_f's rows: score_stride, at most FWD_CKV_F32_ROWS */
   uint32_t slots;

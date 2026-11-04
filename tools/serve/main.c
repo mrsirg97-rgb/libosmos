@@ -78,7 +78,7 @@ int main(int argc, char **argv)
                "[--max-context N] [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] "
                "[--overlay <gguf>] [--serve]");
   Server sv = {0};
-  sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "65536"));
+  sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
   sv.max_tokens = (uint32_t)atol(opt(argc, argv, "--max-tokens", "2048"));
   const double budget = atof(opt(argc, argv, "--budget", "106"));
   const char *par = opt(argc, argv, "--parallel", NULL);

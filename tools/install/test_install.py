@@ -191,7 +191,13 @@ class Layout(unittest.TestCase):
 
 
 class Rig(unittest.TestCase):
-    CFG = {"pack": "ud-iq1_s", "model": "/m/ud-iq1_s/M-00001-of-00005.gguf", "max_context": 65536}
+    CFG = {"pack": "ud-iq1_s", "model": "/m/ud-iq1_s/M-00001-of-00005.gguf", "max_context": 1048576}
+
+    def test_window_under_the_reply_refused(self):
+        with tempfile.TemporaryDirectory() as home:                   # rig refuses reserve >= window: refused first
+            with self.assertRaises(rig.RigError):
+                rig.register(home, dict(self.CFG, max_context=65536), "/b/osmos-api", "/m/osmos.json", default=False)
+            self.assertFalse(os.path.exists(os.path.join(home, "models.json")))
 
     def test_row_added_others_kept(self):
         with tempfile.TemporaryDirectory() as home:
@@ -206,7 +212,9 @@ class Rig(unittest.TestCase):
             self.assertEqual(rows[1], row)
             self.assertEqual(row["id"], "osmos-ud-iq1_s")
             self.assertIn("${PORT}", row["command"])
-            self.assertTrue(row["port"] != 8090 and row["window"] == 65536)
+            self.assertEqual(row["efforts"], ["low", "high", "max"])      # the levels osmos-api maps
+            self.assertEqual((row["maxTokens"], row["reserve"]), (262144, 262144))  # a 256K thinking budget
+            self.assertTrue(row["port"] != 8090 and row["window"] == 1048576)
             self.assertFalse(os.path.exists(os.path.join(home, "settings.json")))
             again = rig.register(home, self.CFG, "/opt/osmos/bin/osmos-api", "/m/ud-iq1_s/osmos.json", default=False)
             with open(os.path.join(home, "models.json")) as f:

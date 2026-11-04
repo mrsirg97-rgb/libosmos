@@ -52,14 +52,14 @@
       "shards": ["ud-iq1_s-1", "ud-iq1_s-2", "ud-iq1_s-3", "ud-iq1_s-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_s", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_s",
-      "settings": {"budget_gib": 110, "drafted_budget_gib": 103, "no_guess": true, "max_context": 65536}
+      "settings": {"budget_gib": 106, "drafted_budget_gib": 101, "no_guess": true, "max_context": 1048576}
     },
     "ud-iq1_m": {
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality): 16.5 tok/s plain, 29.6 drafted",
       "shards": ["ud-iq1_m-1", "ud-iq1_m-2", "ud-iq1_m-3", "ud-iq1_m-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m",
-      "settings": {"budget_gib": 110, "drafted_budget_gib": 103, "no_guess": true, "max_context": 65536}
+      "settings": {"budget_gib": 106, "drafted_budget_gib": 97, "no_guess": true, "max_context": 1048576}
     }
   }
 }

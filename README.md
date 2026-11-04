@@ -100,7 +100,7 @@ changes since; not re-measured - its files are not on the development box now):
   contract in `kernels/lane.h` that makes the CPU and the GPU agree bit for bit.
 - **Engram** rows are read from their file at each step's start, every row a reader of its own (~7 KB a token).
 - **The attention's state in the model's own formats**: the window's keys FP8, the compressed rows and the indexer's
-  keys FP4, as DeepSeek's design keeps them - ~0.9 KB a token, so a 64K context fits beside a 110 GiB expert budget.
+  keys FP4, as DeepSeek's design keeps them - ~0.9 KB a token, so a 1M context (~0.85 GiB) fits beside a 106 GiB expert budget.
   A packed row read back is exactly the F32 it was rounded to; a prompt's step unpacks the rows once for all its
   tokens.
 - **DSpark**, DeepSeek's own drafter, proposes up to 5 tokens a round; one batched forward verifies them.

@@ -2136,6 +2136,39 @@ at once, drafting).
   built, not ignored.
 - **the order**: the tokenizer and its tests; the template and its tests; the server - a request against a fake
   engine (the protocol's), then the real one; then the installer's `--serve` / `--rig`.
+- **the process** (decided with the tokenizer and template done): osmos-api runs osmos-serve as its child (the
+  protocol over pipes: `--parallel N --serve`, the pack's flags from osmos.json) and is the rest - HTTP, the
+  tokenizer, the template - as maya's front drives maya-ds4. one engine reader thread routes the child's lines by
+  rid (T, PP, DONE, ERR) to the request waiting on them; a thread a connection, their number capped; a request's
+  disconnect STOPs its rid.
+- **the mapping** (maya's frontend.py for DeepSeek, and what rig sends): `tools` onto the first system message (an
+  empty one put first if none); role `developer` as system; an assistant's `reasoning` as its reasoning_content.
+  thinking on unless `chat_template_kwargs.enable_thinking` is false, `reasoning_effort` is "none" or
+  `thinking.type` is "disabled"; the effort `reasoning_effort` (or chat_template_kwargs') - "minimal" / "low" 50,
+  "medium" / "high" 75, "xhigh" / "max" 100, an integer 1-100 itself (rig's row names low / high / max).
+- **the answer**: streamed - reasoning_content deltas until </think>, content deltas after, nothing past the start
+  of a DSML calls block; a text that could still become one of those markers (or ends inside a UTF-8 character)
+  held until it cannot. at DONE the whole completion parsed (chat_parse): its tool calls one last delta (ids
+  call_<rid>_<n>), finish_reason tool_calls / stop / length, usage and timings, then [DONE]; a completion out of the
+  format answered as its text (content), stop. whole (stream false): the same, one message.
+- **built** (2026-11-04): tools/api (`make api`) - request.c (the mapping; sampling, stop strings, n > 1 and a
+  forced tool_choice refused by name), answer.c (the stream's holding back), reply.c, engine.c (the child dies with
+  the server: PR_SET_PDEATHSIG), http.c, config.c (osmos.json read whole; an unknown key refused). tested against a
+  scripted engine (tests/api, `make api-test`: health while loading, thinking and tool-call streams, a whole answer,
+  length, refusals, a client gone -> STOP, the engine gone -> the server exits; each check seen failing on a mutant),
+  then on the real one: the installed ud-iq1_s pack (drafter and overlay) answered a thinking question, a tool call
+  and the tool's result round trip, 29-37 tok/s drafted on short answers.
+- **one context: 1M** (the operator's, 2026-11-04): both packs, osmos-serve's default, 1,048,576 tokens; rig's row a
+  reply of 256K tokens (maxTokens, its thinking and answer: rig's thinkingBudget is Anthropic's alone), as much kept
+  free (reserve). the state is ~0.9 KB a token as measured before (~0.85 GiB at 1M); what did not fit was the
+  indexer's scores - a step's 2,048 tokens by every row they could see, F32: this model's ratio-1 layers make that
+  every position, 8 GiB at 1M (measured: 1M took 8.35 GiB more than 64K). the step is now scored in chunks of
+  tokens, at most FWD_SCORE_BYTES (512 MiB, the 64K size: one chunk there) - each token's scores, bits and picks its
+  own, so no bit moves. tests/gpu/test_longctx_gpu: 1M 0.71 GiB over 64K (8.21 before), the last logits the same bits
+  at both; seen failing before the change and on a chunk-offset mutant.
+- **the budgets at 1M** (osmos-serve to READY, the edges): IQ1_S plain 107, drafted 102; IQ1_M plain 107, drafted 98
+  - the packs 1 GiB under: IQ1_S 106 / 101, IQ1_M 106 / 97. the quiet-box decode numbers were measured at 110
+  (plain) and 100 (drafted) with a shorter context; plain at 106 is not yet re-measured.
 
 ## open questions
 

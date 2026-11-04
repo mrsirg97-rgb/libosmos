@@ -8,9 +8,11 @@ import os
 
 PORT_BASE = 8091        # the first port tried for an osmos row (rig's default endpoint is 8090)
 STOP_GRACE = 30         # seconds rig's SIGTERM waits: a conversation's state written out (osmos-serve's slots)
-# the provider half: the context the pack runs, and what a turn may take of it (rig's row: all four required)
-MAX_TOKENS, RESERVE = 8192, 8192
+# the provider half: the context the pack runs, and what a turn may take of it (rig's row: all four required) - a
+# reply's 256K tokens (its thinking and its answer: rig's thinkingBudget is Anthropic's alone), and as much kept free
+MAX_TOKENS, RESERVE = 262144, 262144
 KEEP_RECENT_SHARE = 4   # keepRecent: a quarter of the window
+EFFORTS = ["low", "high", "max"]  # the reasoning efforts osmos-api maps (50, 75, 100: DESIGN.md, "the mapping")
 
 
 class RigError(Exception):
@@ -57,8 +59,10 @@ def register(home, cfg, api, cfg_path, default):
     settings = _read(spath, {}) if default else None
     rid = f"osmos-{cfg['pack']}"
     window = cfg["max_context"]
+    if RESERVE >= window or window // KEEP_RECENT_SHARE >= window - RESERVE:
+        raise RigError(f"a {window}-token context leaves no room for a {RESERVE}-token reply (rig would refuse the row)")
     row = {"id": rid, "window": window, "maxTokens": MAX_TOKENS, "reserve": RESERVE,
-           "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive",
+           "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive", "efforts": EFFORTS,
            "command": f"{api} --config {cfg_path} --port ${{PORT}}", "port": _port(rows, rid),
            "aliases": ["osmos"], "stopGrace": STOP_GRACE, "places": 1}
     rows = [r for r in rows if r.get("id") != rid] + [row]

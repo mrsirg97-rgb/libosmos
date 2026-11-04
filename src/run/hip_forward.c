@@ -404,7 +404,8 @@ static bool scratch(Forward *f)
       {&b->kv_p, B * kv_row_bytes(KV_FP8, (uint32_t)hd)}, {&b->lat_p, B * kv_row_bytes(KV_FP4_E4M3, (uint32_t)hd)},
       {&b->ikr_p, B * kv_row_bytes(KV_FP4_POW2, (uint32_t)ih)}, {&b->row_f, hd * F},
       {&b->ckv_f, (uint64_t)f->ckv_f_rows * hd * F}, {&b->ring_f, (uint64_t)f->slots * hd * F},
-      {&b->score, B * (f->score_stride > Fs ? f->score_stride : Fs) * F}, /* the indexer's; hip_skip.c's sel */
+      {&b->score, (f->score_rows * (uint64_t)f->score_stride > B * Fs ? f->score_rows * (uint64_t)f->score_stride
+                                                                        : B * Fs) * F}, /* the indexer's; hip_skip.c's */
       {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
@@ -515,6 +516,8 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
     if (w->geo.compress[l] && max_ctx / (uint32_t)w->geo.compress[l] > f->score_stride)
       f->score_stride = max_ctx / (uint32_t)w->geo.compress[l];
   f->ckv_f_rows = f->score_stride < FWD_CKV_F32_ROWS ? f->score_stride : FWD_CKV_F32_ROWS;
+  const uint64_t fit = FWD_SCORE_BYTES / ((uint64_t)f->score_stride * sizeof(float));
+  f->score_rows = fit >= f->step ? f->step : fit ? (uint32_t)fit : 1;
   if (w->geo.cand_source >= 0 && w->geo.cand_source < n_layers && w->geo.compress[w->geo.cand_source] &&
       (max_ctx / (uint32_t)w->geo.compress[w->geo.cand_source] + w->geo.cand_block - 1) / w->geo.cand_block >
           (uint32_t)w->geo.cand_blocks) /* a context this long passes the candidate blocks: their bits a token */
