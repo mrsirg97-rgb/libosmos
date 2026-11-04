@@ -271,6 +271,10 @@ the expert streaming are model-independent; the attention, hyper-connections, En
 - [unsloth](https://huggingface.co/unsloth): the UD-IQ1_M and UD-IQ1_S quantizations and the MXFP8 Engram table.
 - [huihui-ai](https://huggingface.co/huihui-ai): the abliteration patches.
 
+## Contributing and changes
+
+`CONTRIBUTING.md` (the process, the house rules, how numbers are measured); `CHANGELOG.md` (each release).
+
 ## License
 
 MIT - see `LICENSE`. Third-party material keeps its own license (`oracle/LICENSE.maya`).
