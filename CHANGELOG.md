@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.1]: the installer sets up rig when it is not there
+
+`osmos_install.py --rig` used to write the pack's row into rig's config and assume rig was installed. Now, when no
+rig is on PATH or in `~/.local/bin`, it installs it first: `tools/install/packs.json` pins a rig release (its tag and
+its `install.sh`'s SHA-256), the installer fetches that exact script, checks the hash before running it - a script
+that is not the pinned one is refused and never run - and runs it at the pinned version (rig's script verifies the
+binary it downloads against the release's checksums). Then it registers the pack as before. Checked from a fresh
+clone on a machine with rig removed: rig v3.5.0 installed, the pack registered as its default, and rig started
+osmos-api, sized to the GPU, and answered - a plain prompt and a tool call.
+
 ## [0.1.0]: DeepSeek-V4.1-Flash on one Strix Halo, installed in one command, served over an OpenAI API
 
 The first release. osmos runs DeepSeek-V4.1-Flash-1017 (~768B parameters) on a single AMD Strix Halo (Ryzen AI MAX+
