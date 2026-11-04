@@ -7,6 +7,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+
+extern "C" {  // test_weights' own (a test may include this first)
+#include "osmos/model/gguf.h"
+#include "osmos/model/weights.h"
+}
 #include <utility>
 #include <vector>
 
