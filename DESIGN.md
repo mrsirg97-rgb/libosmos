@@ -1618,6 +1618,25 @@ tried, not kept: **16 column tiles** for the IQ experts (a hot expert's slab dec
 kernel holds 256 VGPRs (occupancy 5), at 16 its loops no longer unroll (-Werror). a restructured kernel, not a
 constant.
 
+## against maya 1.1.52 (measured, 2026-11-03)
+
+UD-IQ1_M, 64K context, maya's bench questions (256 greedy tokens) and its 2K / 8K prompts, each engine a fresh
+process, two rounds. maya v1.1.52 (pulled and built: its 17 commits since 1.1.51 include the indexer's scores
+through WMMA on RDNA 3 and the Engram readers following the host's threads), its pack of the same files, configs
+scratch maya-ud-nodraft.json / maya-ud-dspark.json (DSpark off / on); runs in ~/bench/maya-1.1.52 and
+~/bench/substrate-final.
+
+| | ours | maya 1.1.52 |
+| --- | --- | --- |
+| plain | 16.3 / 16.3 / 16.2, 16.4 / 16.1 / 16.3 (16.3) | 17.0 / 16.7 / 16.5, 16.9 / 17.2 / 16.9 (16.9) |
+| DSpark | 31.1 / 23.9 / 33.5, 31.0 / 23.8 / 33.5 (29.5) | 31.4 / 27.4 / 29.1, 32.2 / 25.9 / 31.4 (29.6) |
+| 2K prompt | 333, 332 | 232, 246 (no draft); 269, 269 (DSpark config) |
+| 8K prompt | 484, 472 | 409, 407; 412, 411 |
+
+plain 96% of maya's, drafted even (maya steadier: its second question 26-27 where ours is 24; ours the third, 33.5
+against 29-31), prompts +24-43% at 2K and +15-18% at 8K. our budgets: plain 110 GiB, drafted 100, prompts 106 at
+2,048 a step.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.
