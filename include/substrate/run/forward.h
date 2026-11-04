@@ -2,6 +2,8 @@
 #define FORWARD_H
 
 #include <stdbool.h>
+
+#define SEQ_STATE_VERSION 1 /* seq_save's format: raised when it changes (forward_identity has it) */
 #include <stdint.h>
 
 #include "substrate/gpu/mm.h"
@@ -40,6 +42,11 @@ Seq *seq_create(Forward *f, char err[FORWARD_ERR]);
 void seq_destroy(Seq *s);
 bool seq_prompt(Seq *s, uint32_t end);
 bool seq_rollback(Seq *s, uint32_t n);
+int32_t seq_position(const Seq *s);
+uint64_t forward_identity(const Forward *f);
+uint64_t seq_state_bytes(const Seq *s);
+bool seq_save(const Seq *s, void *out, uint64_t bytes, char err[FORWARD_ERR]);
+bool seq_load(Seq *s, const void *in, uint64_t bytes, char err[FORWARD_ERR]);
 bool forward_lane(Forward *f, int cpu_threads, char err[FORWARD_ERR]);
 
 bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
@@ -119,6 +126,28 @@ seq_rollback
   compressed row it completed) is rewritten when the positions are stepped again, before anything reads it, so the
   rows after are the bits of a run that never stepped them (a verify's rejected drafts). false, nothing changed, for
   n past SEQ_MAX_BACK or the tokens it holds, or a position before the prompt's end (seq_prompt).
+
+seq_position
+  the sequence's next position: the tokens it holds (0 for none, or NULL).
+
+forward_identity
+  what a saved sequence's state must match to be loaded here: SEQ_STATE_VERSION, the geometry the state's rows are
+  laid out by (layers, widths, window, each layer's compress ratio and its KV and indexer sources, the n-gram's
+  length) and the model's files (their names and sizes) - a 64-bit hash of them. the same model and build: the same
+  identity, whatever the budget, max_tokens or the step's size (rows are saved by position, not by slot).
+
+seq_state_bytes / seq_save / seq_load
+  a sequence's whole state as one byte string, and back - a conversation set aside (another runs in its place) and
+  taken back later, in this process or another: its position and prompt's end, its last tokens (the Engram n-gram
+  and seq_rollback's depth), the decoder's first kept position, and by position each layer's window rows, each KV
+  source's compressed rows and indexer keys (rows 0 .. pos / ratio), each compressor's positions not yet in a row,
+  and a drafter's rings where drafter_seed made them. a state loaded continues as the sequence never set aside: the
+  same bits (the engine's contract), whichever forward of the same identity loads it - another max_tokens, budget or
+  process. seq_state_bytes: the bytes seq_save writes now (0 for NULL); seq_save: into out (bytes exactly that),
+  false for a smaller buffer. seq_load: false for a state of another identity or version, a size that does not
+  agree, a position past this forward's max_ctx or a damaged state (its checksum) - and the sequence then reset to
+  position 0, never left part one conversation and part another. the format: little-endian, a header (magic, version,
+  identity, the fields above), the rows, a trailing 64-bit FNV-1a of everything before it.
 
 forward_lane
   a decode's mode: a step that picks fewer experts than a layer has (a decode's, a verify's) takes its routed experts

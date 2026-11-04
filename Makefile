@@ -67,6 +67,14 @@ $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(OBJ_DIR)/tests/gpu
 	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -lhsa-runtime64 -o $@
 
+# the server (tools/serve): the engine over stdin / stdout, maya's serve protocol
+SERVE := $(BIN_DIR)/substrate-serve
+$(SERVE): tools/serve/serve.c $(LIB) $(HIP_LIB)
+	@mkdir -p $(dir $@) $(OBJ_DIR)/tools
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $(OBJ_DIR)/tools/serve.o
+	$(HIPCC) $(OBJ_DIR)/tools/serve.o -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -lhsa-runtime64 -o $@
+serve: $(SERVE)
+
 # the GPU's tests (a gfx1151 and the model): exit 77 is a skip
 gpu-tests: $(GPU_TESTS)
 	@for t in $(GPU_TESTS); do \
@@ -107,4 +115,4 @@ tsan:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=thread" LDLIBS="-lpthread -lm -fsanitize=thread" tests
 
-.PHONY: all clean tests asan tsan gpu-tests
+.PHONY: all clean tests asan tsan gpu-tests serve

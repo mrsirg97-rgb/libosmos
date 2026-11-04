@@ -1,0 +1,74 @@
+#ifndef SLOTS_H
+#define SLOTS_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#define SLOTS_ERR 256
+#define SLOTS_META_MAGIC 0x31544f4c53425553ull /* "SUBSLOT1" (little-endian): a .meta's first bytes */
+
+typedef struct Slots Slots;
+
+typedef struct SlotsOptions
+{
+  const char *dir;     /* the folder past RAM (NULL: RAM alone, nothing kept past the process) */
+  uint32_t cap;        /* conversations in RAM; past it the least recently used goes to the folder */
+  double gb;           /* the folder's .bin bytes at most, in GiB (<= 0: no cap) */
+  uint32_t min_tokens; /* a conversation shorter is not kept */
+  double days;         /* a folder's conversation unused longer is removed at start (<= 0: never) */
+  uint64_t identity;   /* the model and build a state is for (forward_identity): another's is removed at start */
+} SlotsOptions;
+
+Slots *slots_create(const SlotsOptions *o, char err[SLOTS_ERR]);
+void slots_destroy(Slots *s);
+bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, const void *state, uint64_t bytes, bool *kept,
+               char err[SLOTS_ERR]);
+int64_t slots_find(const Slots *s, const int32_t *prompt, uint32_t n, uint32_t beyond, uint32_t *len);
+bool slots_take(Slots *s, int64_t id, void **state, uint64_t *bytes, char err[SLOTS_ERR]);
+bool slots_flush(Slots *s, char err[SLOTS_ERR]);
+uint32_t slots_in_ram(const Slots *s);
+uint32_t slots_in_dir(const Slots *s);
+uint64_t slots_dir_bytes(const Slots *s);
+
+#endif
+
+/*
+Slots
+  conversations set aside (maya #356's, the operator's): each a sequence's state (seq_save's bytes, opaque here) and
+  the tokens it holds, kept so a request that continues one takes it back and reads only the rest of its prompt.
+  RAM first; past `cap` the least recently used is written to the folder and dropped from RAM; the folder's .bin bytes
+  kept under `gb` (its least recently used removed - never the one just written, so one larger than the cap stays).
+  a kept conversation is two files, slot-<hash>.bin (the state) and slot-<hash>.meta (SLOTS_META_MAGIC, the identity,
+  the state's bytes, when it was last used, the tokens, a checksum), each written under a temporary name and renamed.
+  one thread (the server's loop): no locks.
+
+slots_create
+  the store, the folder (if any) created and indexed: a .meta that is damaged, of another identity or magic, older
+  than `days`, or whose .bin is missing or not its size is removed with its .bin; a .bin without a .meta too. NULL,
+  the reason in err, for no options, cap 0 or a folder that cannot be made or read.
+
+slots_destroy
+  RAM's conversations freed - not written (slots_flush first to keep them); the folder's stay. NULL is nothing.
+
+slots_put
+  a conversation set aside: its n tokens and its state (both copied). n under min_tokens: not kept (*kept false,
+  true returned). a kept conversation with the same tokens is replaced. then RAM past cap: the least recently used
+  to the folder (without a folder, dropped); the folder past gb: its least recently used removed, not the one just
+  written. false for a write that failed (the conversation then not kept).
+
+slots_find
+  the kept conversation (RAM or folder) whose tokens are a prefix of prompt[0 .. n) and longer than `beyond` (what
+  the caller holds already), the longest; its id and its length in *len. -1 when none.
+
+slots_take
+  the conversation slots_find named, out of the store: its state in *state (malloc'd: the caller frees it) and its
+  bytes; a folder's read back and its files removed. false for an id not in the store or a .bin that cannot be read
+  (the conversation then dropped).
+
+slots_flush
+  every conversation in RAM to the folder (the end of a run), then the folder under gb. false without a folder or for
+  a write that failed.
+
+slots_in_ram / slots_in_dir / slots_dir_bytes
+  the conversations in RAM, in the folder, and the folder's .bin bytes.
+*/

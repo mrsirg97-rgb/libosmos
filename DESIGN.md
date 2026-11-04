@@ -1637,6 +1637,92 @@ plain 96% of maya's, drafted even (maya steadier: its second question 26-27 wher
 against 29-31), prompts +24-43% at 2K and +15-18% at 8K. our budgets: plain 110 GiB, drafted 100, prompts 106 at
 2,048 a step.
 
+## serving: conversations kept, and several at once (design, 2026-11-03)
+
+maya's DeepSeek engine has both, the operator's: **#356** (a conversation's state set aside and taken back across
+switches and restarts) and **#587** (`--parallel` on an event scheduler: prompts read a piece at a time between the
+answers' rounds; squashed into maya a73bdbc, 2026-10-29). libsubstrate has neither: one process, one `Seq` a
+caller's, no server. this ports both, as one binary that speaks maya's line protocol, so maya's own harnesses
+(`tools/ds4/slot_keep_test.py`, `parallel_test.py`, `agent_bench.py`) test it unchanged and time both engines alike.
+
+**1. a conversation's state out and back (the library)**
+- `seq_save(s, &bytes, &n, err)` / `seq_load(s, bytes, n, err)`: the whole state as one byte string - the position,
+  the prompt's end, the tokens (all of them: the slot store matches prefixes on them; the Engram n-gram's last ones
+  are among them), every layer's window ring (FP8 rows), each compressor's pending rows, each KV source's compressed
+  rows (FP4) and indexer keys (FP4, rows 0 .. pos / ratio), the decoder's `dec_from`; and the drafter's ring where a
+  drafter is attached (else the next draft rebuilds it - to settle when the drafter's state is read).
+- `forward_identity(f, out)`: what a saved state must match - the build's version, the geometry, the model's files
+  (names and sizes), max_ctx's bound on the rows. a load against another identity, a size that disagrees, or tokens
+  that do not add up to the position: refused, the Seq reset (never half of two conversations).
+- **the bits**: a state saved and loaded continues as the state never set aside - the same logits, the same answer's
+  hash. maya could only check greedy tokens (its restore and a re-read differ in arithmetic); ours are the same
+  bits by the engine's contract (a token's bits do not depend on the batch or the step), so the tests compare hashes.
+- size: ~0.9 KB a token (the KV's formats) - a 70K-token conversation ~65 MB, as maya's.
+
+**2. the slot store (#356's)**
+- a request that does not continue the conversation in its Seq sets that one aside first, then takes back the kept
+  conversation whose tokens are the longest prefix of the prompt (longer than what the Seq holds already); only the
+  rest of the prompt is read.
+- RAM first (`SUBSTRATE_SLOT_CAP`, 4), past it the least recently used to a folder (`SUBSTRATE_SLOT_DIR`, beside the
+  model), the folder capped (`SUBSTRATE_SLOT_GB`, 16: the least recently used removed, never the one just written),
+  conversations under `SUBSTRATE_SLOT_MIN` tokens (1024) not kept, a folder's older than `SUBSTRATE_SLOT_DAYS` (7)
+  removed. a slot is a `.bin` and a `.meta` (the identity, the tokens, the size), each written under a temporary name
+  and renamed; at start the folder is indexed and a slot whose `.meta` is missing, foreign or disagrees is removed.
+  QUIT sets every conversation aside and writes RAM's to the folder. `SUBSTRATE_SLOT_KEEP=1` turns it on.
+
+**3. several conversations at once (#587's)**
+- `--parallel N`: N Seqs. the loop on libevt's engine (`~/Projects/libevt`): stdin's lines and the turns are
+  events, a line outranking a turn, each turn queueing the next as it ends, the loop asleep with nothing to do.
+- a turn: every answering conversation's next token in one `forward_batch` (each its Seq) - a round - or the next
+  piece of a prompt being read. prompts take turns a piece each, a round of tokens between two pieces; a prompt whole
+  in one piece goes ahead of longer reads (a short question does not wait behind a long read).
+- a piece: a whole number of the step's tokens (max_tokens), so a prompt reads through the same step boundaries
+  however it is interleaved - and its bits are the same anyway.
+- drafting in a round (DSpark): later; spec=0 first (#587 measured greedy, the harness's default).
+
+**4. the protocol (maya's `ds4_main.cpp`, its serve loop)**
+- ready: `READY <max_ctx> stop[ multi=<N>]`.
+- in: `GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>`, `STOP [<rid>]`, `QUIT`. maya's other keys
+  (sampling, penalties, thinking budgets, logprobs, GENI's pictures) are refused with `ERR` naming the key: greedy is
+  the engine's one mode.
+- out: `T [<rid>] <token>`; `PP[ <rid>] <done> <total> <ms> <tok/s> <reused>`; `DONE [<rid>] <produced> <prompt>
+  <prompt_ms> <decode_ms> <finish> <accepted> <drafted> <reused> <hits> <lookups>`; `ERR [<rid>] <reason>`; `NOTE`.
+  each field's meaning maya's, so its harnesses read ours.
+
+**done (2026-11-03): steps 1 and 2.**
+- seq_state_bytes / seq_save / seq_load / forward_identity / seq_position (src/run/hip_seqstate.c): rows saved by
+  position (the window's from pos - window - SEQ_MAX_BACK, the compressors' open groups from SEQ_MAX_BACK back, so a
+  rollback after a load finds its rows), the drafter's rings whole, an FNV-1a trailer. test_seqstate_gpu: A's 301
+  tokens set aside (3.5 MB), B run in its own sequence, A loaded into B's - every logits row of 24 greedy steps and of
+  drafted rounds the never-set-aside run's; a damaged byte, a short size, another identity refused, the sequence
+  reset. mutations caught: the compressors' open rows not restored, the compressed rows not restored.
+- slots.h / slots.c (src/serve): RAM, the folder, its cap, the .meta (SUBSLOT1, identity, bytes, last used, tokens,
+  FNV-1a), the index at start. test_slots (CPU; clean under ASan + UBSan): the minimum, replacement, the longest
+  prefix past `beyond`, the cap's LRU to the folder, a flush and a new store over it, another identity's / a damaged
+  .meta / a short .bin / a .bin alone removed at start, the folder's cap (never the one just written), `days`.
+- bin/substrate-serve (tools/serve/serve.c, `make serve`): one conversation, maya's GEN / STOP / QUIT and T / PP /
+  DONE / ERR / NOTE; a request continuing the conversation reads only its rest (one within SEQ_MAX_BACK of it rolled
+  back to their common part); a drafted answer cut by max_new rolled back to its printed tokens (the state ends at
+  the answer's last printed token less one, as maya's greedy one: the next turn continues it). its answers the
+  bench's: q1's 256 tokens 7e8dbc0974070b10 plain and drafted.
+- tools/serve/slot_test.py (maya's slot_keep_test.py, ported; tools/serve/drive.py the protocol): A (12,000 tokens of
+  real text), B (8,000), A's next turn - every check passed: the turn reuses A's 12,031 in 3.7 s against 28.1 read from
+  token 0, its answer the bits of A never set aside, in-run, after a restart from the folder (and drafted), the
+  folder under its cap, eviction of the least recently used.
+- **a prompt step and a decode step are two computations**: a turn read from token 0 answers other bits than the
+  same turn continued (b560d8dc against f9bdef8f): the earlier answer's tokens are then in a prompt's step, whose
+  routed experts are mm's (WMMA, f16 inputs), where decoded they were the lane's (int8, forward_lane). each is
+  deterministic and batch-invariant within its kind (a decode alone or verified; a prompt however it is split - the
+  model test's fingerprints); not across them. maya's restore and re-read differ too (its PR: chunk boundaries). so the
+  slot test's reference is the conversation never set aside, not a re-read.
+
+**5. the order** (each its tests first): seq_save / seq_load with identity (test: a conversation set aside, another
+run, the first taken back - the same hash as never set aside; a damaged or foreign state refused, the Seq reset);
+the serve binary with one conversation and the slot store (maya's slot_keep_test.py against it; restart, eviction,
+the folder's cap); `--parallel` on libevt (maya's parallel_test.py: each conversation's answer token for token its
+answer alone - here its hash; a STOP ends one alone; a short request answered during a long read); then
+agent_bench.py against maya 1.1.52 on this box.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.
