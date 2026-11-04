@@ -83,6 +83,15 @@ $(LIBEVT)/lib/libevt.a:
 	$(MAKE) -C $(LIBEVT)
 serve: $(SERVE)
 
+# requant_dspark (tools/requant): a drafter pack's experts requantized with ggml's quantizers (llama.cpp, MIT; its
+# libggml-base built beside this checkout: cmake -S . -B build-ggml ... --target ggml-base)
+GGML ?= ../llama.cpp
+REQUANT := $(BIN_DIR)/requant_dspark
+$(REQUANT): tools/requant/requant_dspark.c $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(GGML)/ggml/include $< $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a -lstdc++ -lm -lpthread -o $@
+requant: $(REQUANT)
+
 # the GPU's tests (a gfx1151 and the model): exit 77 is a skip
 gpu-tests: $(GPU_TESTS)
 	@for t in $(GPU_TESTS); do \
@@ -123,4 +132,4 @@ tsan:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=thread" LDLIBS="-lpthread -lm -fsanitize=thread" tests
 
-.PHONY: all clean tests asan tsan gpu-tests serve
+.PHONY: all clean tests asan tsan gpu-tests serve requant

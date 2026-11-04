@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 
 #include "substrate/model/dspark.h"
+#include "substrate/model/qtype.h"
 
 /* dspark.json's one key the index reads: "tensors": [[name, type, offset, bytes, [dims ...]], ...] - a reader of
    just that shape: strings without escapes, unsigned integers */
@@ -60,19 +61,15 @@ static bool number(Cur *c, uint64_t *v)
   return true;
 }
 
-/* a type's id and its block: values a block, bytes a block */
+/* a type's id and its block: values a block, bytes a block (the type table's: a drafter's experts requantized to the
+   trunk's types among them) */
 static bool type_of(const char *s, uint32_t *id, uint64_t *values, uint64_t *bytes)
 {
-  static const struct
-  {
-    const char *name;
-    uint32_t id;
-    uint64_t values, bytes;
-  } k[] = {{"F32", 0, 1, 4}, {"BF16", 30, 1, 2}, {"Q8_0", 8, 32, 34}, {"MXFP4", 39, 32, 17}};
-  for (size_t i = 0; i < sizeof k / sizeof *k; i++)
-    if (!strcmp(s, k[i].name))
-      return *id = k[i].id, *values = k[i].values, *bytes = k[i].bytes, true;
-  return false;
+  const QTypeInfo *t = qtype_named(s);
+  if (!t)
+    return false;
+  *id = t->id, *values = t->values, *bytes = t->bytes;
+  return true;
 }
 
 static bool entry(Cur *c, DsparkTensor *t, uint64_t file_bytes, char *err)

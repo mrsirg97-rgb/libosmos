@@ -38,10 +38,10 @@ static bool moe(Drafter *d, const DBlock *k)
             ops_router(d->logits, k->gate_bias, DRAFTER_EXPERTS, K, g->expert_scale, T, d->ridx, d->rw, NULL);
   for (int r = 0; ok && r < 3; r++)
     ok = ops_gather_rows((float *)(d->tab + (uint64_t)r * P), (const float *)k->ex[r], d->ridx, P, ptr, NULL);
-  return ok && mv_group(DRAFTER_MXFP4, d->tab, P, FF, D, d->xf, D, K, d->ga, NULL) &&
-         mv_group(DRAFTER_MXFP4, d->tab + P, P, FF, D, d->xf, D, K, d->up, NULL) &&
+  return ok && mv_group(d->ex_type, d->tab, P, FF, D, d->xf, D, K, d->ga, NULL) &&
+         mv_group(d->ex_type, d->tab + P, P, FF, D, d->xf, D, K, d->up, NULL) &&
          ops_swiglu(d->ga, d->up, FF, DRAFTER_SWIGLU_LIMIT, d->rw, P, d->hh, NULL) &&
-         mv_group(DRAFTER_MXFP4, d->tab + 2 * P, P, D, FF, d->hh, FF, 1, d->ye, NULL) &&
+         mv_group(d->ex_type, d->tab + 2 * P, P, D, FF, d->hh, FF, 1, d->ye, NULL) &&
          ops_gather_sum(d->moe, d->ye, d->pair, K, T, D, NULL) &&
          mv_strided(DRAFTER_Q8_0, k->sh1, FF, D, d->xf, D, T, d->sga, FF, NULL) &&
          mv_strided(DRAFTER_Q8_0, k->sh3, FF, D, d->xf, D, T, d->sup, FF, NULL) &&

@@ -39,6 +39,7 @@ static void test_malformed(void)
   write("dspark.bin", NULL, 4096);
   refused("{\"tensors\": [[\"a\", \"Q4_K\", 0, 144, [256]]]}", "a type it does not know");
   refused("{\"tensors\": [[\"a\", \"Q8_0\", 0, 35, [32]]]}", "bytes not the type's for the dims");
+  refused("{\"tensors\": [[\"a\", \"IQ2_XS\", 0, 75, [256]]]}", "bytes not an IQ2_XS block's");
   refused("{\"tensors\": [[\"a\", \"F32\", 4000, 400, [100]]]}", "past the end of the bin");
   refused("{\"tensors\": [[\"a\", \"F32\", 0, 400, [100]]", "truncated");
   refused("{\"other\": 1}", "no tensors");
@@ -47,6 +48,11 @@ static void test_malformed(void)
   DsparkIndex *x = dspark_index(dir, err);
   assert(x && x->n == 2 && dspark_tensor(x, "b")->type == 30 && dspark_tensor(x, "a.w")->dims[1] == 32);
   assert(!dspark_tensor(x, "c"));
+  dspark_index_destroy(x);
+  /* a drafter's experts requantized to the trunk's types: the type table's sizes */
+  write("dspark.json", "{\"tensors\": [[\"e\", \"IQ2_XS\", 0, 74, [1, 256]]]}", 0);
+  x = dspark_index(dir, err);
+  assert(x && x->n == 1 && dspark_tensor(x, "e")->type == 17);
   dspark_index_destroy(x);
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);

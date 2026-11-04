@@ -1,3 +1,4 @@
+#include <string.h>
 #include <stddef.h>
 
 #include "substrate/model/qtype.h"
@@ -10,6 +11,14 @@ const QTypeInfo *qtype_info(uint32_t id)
 {
   for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++)
     if (rows[i].id == id)
+      return &rows[i];
+  return NULL;
+}
+
+const QTypeInfo *qtype_named(const char *name)
+{
+  for (size_t i = 0; name && i < sizeof rows / sizeof rows[0]; i++)
+    if (!strcmp(rows[i].name, name))
       return &rows[i];
   return NULL;
 }

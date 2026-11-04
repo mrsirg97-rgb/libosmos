@@ -41,6 +41,7 @@ typedef struct DPin
 struct Drafter
 {
   Forward *f;
+  uint32_t ex_type; /* the routed experts' type, every one's (dspark.json's: MXFP4 as packed, or requantized) */
   DsparkIndex *ix;
   int fd;
   Resident *res;

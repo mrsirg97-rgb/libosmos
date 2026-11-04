@@ -57,6 +57,7 @@ typedef struct QTypeInfo
 extern "C" {
 #endif
 const QTypeInfo *qtype_info(uint32_t id);
+const QTypeInfo *qtype_named(const char *name);
 uint32_t qtype_paths(uint32_t id);
 #ifdef __cplusplus
 }

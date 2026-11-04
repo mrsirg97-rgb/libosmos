@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "drafter_impl.h"
+#include "substrate/model/qtype.h"
 #include "substrate/mem/hip_slots.h"
 
 /* the drafter: its weights in GPU memory of their own, its rings from the trunk's taps, a round's head (hip_drafter.c)
@@ -72,8 +73,12 @@ static bool block(Drafter *d, int b)
     for (int e = 0; ok && e < DRAFTER_EXPERTS; e++)
     {
       char n[DSPARK_NAME_MAX];
+      uint32_t type = 0;
       snprintf(n, sizeof n, "ffn.experts.%d.%s.weight", e, role[r]);
-      ok = (host[e] = dev(d, b, n, NULL)) != NULL;
+      ok = (host[e] = dev(d, b, n, &type)) != NULL;
+      if (ok && !d->ex_type) /* the first expert's type: every one's (one matvec a role) */
+        d->ex_type = type;
+      ok = ok && type == d->ex_type && (qtype_paths(type) & QTYPE_MV);
     }
     ok = ok && fwd_alloc(&k->ex[r], sizeof host) && fwd_put(k->ex[r], host, sizeof host);
   }
@@ -164,7 +169,8 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
          fail(err, "a drafter without its heads");
   }
   for (int b = 0; ok && b < DRAFTER_BLOCKS; b++)
-    ok = block(d, b) || fail(err, "a drafter block's weights missing, or GPU memory refused");
+    ok = block(d, b) || fail(err, "a drafter block's weights missing, its experts of mixed types or of a type the matvec "
+                              "does not take, or GPU memory refused");
   ok = ok && (scratch(d) || fail(err, "GPU memory refused")) && fwd_room_left(f, err);
   if (!ok)
   {
