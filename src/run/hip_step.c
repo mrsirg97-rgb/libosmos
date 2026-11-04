@@ -78,8 +78,10 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
     return false;
   fwd_probe(f, "h_in", l, p, b->h, n * hc * D, false);
   /* the mixes and the norm one launch (ops_hc_mix_pre_rms); a probe may stand the oracle's in for x: its x16 the
-     attention's own then */
-  bool ok = ops_hc_dot(fv(f, L->hc_attn_fn), b->h, hc, D, n, b->hcp, NULL) &&
+     attention's own then. the mixes' sums written already when the last layer's end did (layer_out) */
+  const bool done = f->hcp_next;
+  f->hcp_next = false;
+  bool ok = (done || ops_hc_dot(fv(f, L->hc_attn_fn), b->h, hc, D, n, b->hcp, NULL)) &&
             ops_hc_mix_pre_rms(b->hcp, fv(f, L->hc_attn_scale), fv(f, L->hc_attn_base), hc, D, g->rms_eps, g->hc_eps,
                                g->sinkhorn_iters, n, b->a_pre, b->a_post, b->a_comb, b->h, pre, fv(f, L->attn_norm),
                                b->x, f->probe ? NULL : b->x16, f->probe ? NULL : b->overflow, NULL);
@@ -91,10 +93,13 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   fwd_probe(f, "attn_x", l, p, b->x, n * D, false);
   if (!fwd_attention(f, l, err))
     return false;
+  /* the FFN's input's x16 beside it for the shared expert (shared(): its rows the step's when one sub-batch is all of
+     them; not with a probe, which may stand the oracle's in) */
+  f->xf_x16 = f->n_sub == 1 && !f->probe;
   ok = ops_hc_post_dot(b->y, b->h, b->a_post, b->a_comb, hc, D, n, b->mid, fv(f, L->hc_ffn_fn), b->hcp, NULL) &&
        ops_hc_mix_pre_rms(b->hcp, fv(f, L->hc_ffn_scale), fv(f, L->hc_ffn_base), hc, D, g->rms_eps, g->hc_eps,
                           g->sinkhorn_iters, n, b->f_pre, b->f_post, b->f_comb, b->mid, b->a_pre, fv(f, L->ffn_norm),
-                          b->xf, NULL, NULL, NULL);
+                          b->xf, f->xf_x16 ? b->x16 : NULL, f->xf_x16 ? b->overflow : NULL, NULL);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the FFN's mixes)");
   fwd_probe(f, "h_mid", l, p, b->mid, n * hc * D, false);
@@ -105,12 +110,19 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   return true;
 }
 
-/* the layer's end, the experts' output (its rows of the step's moe) back into the streams */
+/* the layer's end, the experts' output (its rows of the step's moe) back into the streams - and with them the next
+   layer's attention mixes' sums (ops_hc_post_dot: its layer_in's ops_hc_dot, one launch fewer) when nothing comes
+   between: one sub-batch (b.hcp is the Forward's), no probe (it may stand h in), no Engram next (it changes h), not
+   the decoder's compaction (it changes the tokens) */
 static bool layer_out(Forward *f, int l, char *err)
 {
   Scratch *b = &f->b;
   const uint32_t hc = f->g->hc, D = f->g->n_embd, n = f->n;
-  if (!ops_hc_post(b->moe, b->mid, b->f_post, b->f_comb, hc, D, n, b->h, NULL))
+  f->hcp_next = f->n_sub == 1 && !f->probe && l + 1 < f->n_layers && !f->g->engram[l + 1] && l != f->dec;
+  const bool ok = f->hcp_next ? ops_hc_post_dot(b->moe, b->mid, b->f_post, b->f_comb, hc, D, n, b->h,
+                                                fv(f, f->w->layer[l + 1].hc_attn_fn), b->hcp, NULL)
+                              : ops_hc_post(b->moe, b->mid, b->f_post, b->f_comb, hc, D, n, b->h, NULL);
+  if (!ok)
     return fwd_fail(err, "a GPU call failed (the FFN's hc_post)");
   fwd_probe(f, "h_out", l, f->at, b->h, n * hc * D, false);
   return true;
@@ -216,6 +228,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return false;
   if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess)
     return fwd_fail(err, "a GPU call failed (the step)");
+  f->hcp_next = false;
   bool ok = true;
   for (uint32_t k = 0; ok && k < f->n_sub; k++)
   {

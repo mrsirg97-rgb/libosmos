@@ -134,8 +134,10 @@ static bool shared(Forward *f, int l)
   Scratch *b = &f->b;
   const uint32_t D = g->n_embd, FF = g->expert_ff, n = f->n;
   const bool fits = n <= MM_MAX_TOKENS; /* the swiglu writes the down's x16 (ops_swiglu_x16) */
+  /* the input's x16 the FFN's mix wrote (f->xf_x16; the router's and the guess's matrices, between, read F32 - or
+     write this same x16 of xf) */
   return fwd_mat2(f, L->sh_gate, fwd_dev(f, L->sh_gate), FF, b->sga, FF, L->sh_up, fwd_dev(f, L->sh_up), FF, b->sup,
-                  FF, D, b->xf, D, n, false) &&
+                  FF, D, b->xf, D, n, f->xf_x16) &&
          (fits ? ops_swiglu_x16(b->sga, b->sup, FF, g->clamp_shexp[l], NULL, n, b->shh, b->x16, b->overflow, NULL)
                : ops_swiglu(b->sga, b->sup, FF, g->clamp_shexp[l], NULL, n, b->shh, NULL)) &&
          fwd_mat_ready(f, L->sh_down, fwd_dev(f, L->sh_down), D, FF, b->shh, FF, n, b->sye, D, fits);
@@ -175,10 +177,12 @@ bool fwd_moe(Forward *f, int l, char *err)
   bool ok = fwd_mat(f, L->router, fwd_dev(f, L->router), E, D, b->xf, D, n, b->logits, E);
   if (ok)
     fwd_probe(f, "router_logits", l, f->at, b->logits, (uint64_t)n * E, false);
-  /* the picks to the host and marked, then the shared expert queued: the GPU runs it while the host waits */
-  ok = ok && ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, n, b->ridx, b->rw,
-                        NULL) &&
-       hipMemcpyAsync(f->r_ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess &&
+  /* the picks to the host and marked, then the shared expert queued: the GPU runs it while the host waits. the router
+     writes them into the host's mapped r_ids (the routing event covers the kernel); a probe's into ridx, copied */
+  ok = ok && ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, n,
+                        f->probe ? b->ridx : f->r_ids_dev, b->rw, NULL) &&
+       (!f->probe ||
+        hipMemcpyAsync(f->r_ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess) &&
        (!f->cpu || !f->lane || P >= E || /* the CPU lane's: the step's FFN inputs and weights, with the picks */
         (hipMemcpyAsync(f->cpu_xf, b->xf, (uint64_t)n * D * sizeof(float), hipMemcpyDeviceToHost, NULL) ==
              hipSuccess &&

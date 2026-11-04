@@ -108,8 +108,7 @@ typedef struct Scratch
   int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;
   uint32_t *cand; /* the running sub-batch's candidate bits (Sub's) */
   int32_t *keep, *back; /* the decoder's tokens (hip_skip.c): kept, compacted; then each back at its row */
-  int32_t *gidx;        /* the next layer's experts guessed (hip_guess.c), [FWD_MAX_BATCH][FWD_GUESS_K] */
-  float *gw;            /* (their weights: the router's, unread) */
+  float *gw;            /* the next layer's guessed experts' weights (hip_guess.c: the router's, unread) */
 } Scratch;
 
 /* host memory the GPU copies to and from on the stream (pinned: the copies are asynchronous). each is written only
@@ -165,8 +164,9 @@ struct Forward
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
   /* the experts' routing, a layer's every sub-batch at once: pinned, the picks [token][slot] and the tables
      (hip_ffn.c's carve, one copy to Scratch's up); on the host, the pairs' by-expert order and places */
-  int32_t *r_ids;
-  int32_t *r_guess;       /* pinned: the next layer's guessed experts, [token][FWD_GUESS_K] */
+  int32_t *r_ids;         /* mapped and coherent: the router writes the picks here (r_ids_dev) - no copy kernel */
+  int32_t *r_guess;       /* mapped and coherent: the next layer's guessed experts, [token][FWD_GUESS_K] */
+  int32_t *r_ids_dev, *r_guess_dev; /* their device addresses */
   uint64_t *guessed;      /* a unit's guess: the visit it was guessed for (hip_guess.c) */
   uint64_t g_need, g_hit; /* a decode's streamed picks, and of them the ones guessed a layer ahead */
   uint64_t pool_room;      /* the pool's room (stream_budget): GPU memory it takes as experts stream, not at create */
@@ -229,6 +229,8 @@ struct Forward
   uint32_t step;                    /* a sub-batch's most tokens: FWD_MAX_BATCH, or max_tokens (to 16s) below it - every
                                        per-token device buffer's rows */
   uint32_t n_sub;
+  bool xf_x16; /* the layer's FFN input's x16 in b.x16 (layer_in's mix wrote it: a one-sub-batch step) */
+  bool hcp_next; /* the next layer's attention hc_dot partial in b.hcp (layer_out's ops_hc_post_dot wrote it) */
   uint64_t visits; /* the layers' expert steps so far: the held ones wanted again n_layers on (pool_release) */
   int64_t *rows;  /* each token's Engram rows, every Engram layer's: [token][layer][col] */
   uint32_t n;                    /* the step's tokens */

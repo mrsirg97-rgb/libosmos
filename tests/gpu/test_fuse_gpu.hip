@@ -1,5 +1,6 @@
 // the fused kernels against the kernels they stand for, bit for bit: ops_kv_finish (ops_rms, ops_rope, ops_fp8_round,
-// ops_put_rows) - the keys and the window's rows, at positions far apart so the angles are large; ops_rms_x16,
+// ops_put_rows, and ops_rope of the queries) - the keys, the window's rows and the queries, at positions far apart so
+// the angles are large; ops_rms_x16,
 // ops_hc_pre_rms_x16 and ops_swiglu_x16 (each op, then mm_x16) - the F32, every x16 half (the pad rows too: both
 // buffers filled with garbage first) and the overflow flag (a value past f16's); ops_gather_sum_add (+ ops_add);
 // ops_hc_post_dot (ops_hc_post, ops_hc_dot) and ops_hc_mix_pre_rms (ops_hc_mix, ops_hc_pre_rms(_x16))
@@ -45,13 +46,16 @@ template <class T> static std::vector<T> host(const T* d, size_t n) {
 }
 
 static void kv_finish() {
-  constexpr uint32_t kHd = 512, kRd = 64, kTok = 5, kSlots = 128;
+  constexpr uint32_t kHd = 512, kRd = 64, kTok = 5, kSlots = 128, kHeads = 8;
   std::vector<float> kv((size_t) kTok * kHd), w(kHd), freqs(kRd / 2), ring((size_t) kSlots * kHd, 0.0f);
+  std::vector<float> q((size_t) kTok * kHeads * kHd);
   for (float& v : kv) v = uniform() * std::ldexp(1.0f, (int) ((uniform() + 1) * 6) - 6);
+  for (float& v : q) v = uniform() * 4.0f;
   for (float& v : w) v = 1.0f + uniform() * 0.5f;
   for (uint32_t i = 0; i < kRd / 2; i++) freqs[i] = (float) std::pow(10000.0, -2.0 * i / kRd);
   const std::vector<int32_t> pos = {7, 300, 4094, 8191, 129};  // rows 7, 44, 126, 127, 1: each its own
   float *a = dev(kv), *b = dev(kv), *dw = dev(w), *df = dev(freqs), *ra = dev(ring), *rb = dev(ring);
+  float *qa = dev(q), *qb = dev(q);
   int32_t* dp = dev(pos);
   const float eps = 1e-6f;
   const uint64_t rowb = kv_row_bytes(KV_FP8, kHd);  // the window's rows as a sequence keeps them (kvfmt.h)
@@ -60,19 +64,23 @@ static void kv_finish() {
   CHECK(ops_rms(a, kHd, kHd, dw, eps, kTok, a, kHd, nullptr) &&
         ops_rope(a, 1, kHd, kRd, kHd, df, dp, false, kTok, nullptr) &&
         ops_fp8_round(a, (uint64_t) kTok * kHd, pa, kHd, nullptr) &&
-        ops_put_rows(ra, kSlots, pa, dp, 1, KV_FP8, kHd, kTok, nullptr));
-  CHECK(ops_kv_finish(b, kHd, dw, eps, kRd, df, dp, rb, kSlots, kTok, nullptr));
+        ops_put_rows(ra, kSlots, pa, dp, 1, KV_FP8, kHd, kTok, nullptr) &&
+        ops_rope(qa, kHeads, kHd, kRd, kHeads * kHd, df, dp, false, kTok, nullptr));
+  CHECK(ops_kv_finish(b, kHd, dw, eps, kRd, df, dp, rb, kSlots, qb, kHeads, kTok, nullptr));
   CHECK(hipDeviceSynchronize() == hipSuccess);
   const std::vector<float> ka = host(a, kv.size()), kb = host(b, kv.size());
   const std::vector<float> wa = host(ra, ring.size()), wb = host(rb, ring.size());  // the rings' KV_FP8 rows
   CHECK(std::memcmp(ka.data(), kb.data(), ka.size() * 4) == 0 && std::memcmp(wa.data(), wb.data(), kSlots * rowb) == 0);
-  CHECK(!ops_kv_finish(b, OPS_MAX_KV_DIM + 32, dw, eps, kRd, df, dp, rb, kSlots, kTok, nullptr) &&
-        !ops_kv_finish(b, kHd + 16, dw, eps, kRd, df, dp, rb, kSlots, kTok, nullptr));
-  for (void* p : {(void*) a, (void*) b, (void*) pa, (void*) dw, (void*) df, (void*) ra, (void*) rb, (void*) dp})
+  CHECK(host(qa, q.size()) == host(qb, q.size()) && host(qa, q.size()) != q);  // the queries roped, as ops_rope
+  CHECK(!ops_kv_finish(b, OPS_MAX_KV_DIM + 32, dw, eps, kRd, df, dp, rb, kSlots, nullptr, 0, kTok, nullptr) &&
+        !ops_kv_finish(b, kHd + 16, dw, eps, kRd, df, dp, rb, kSlots, nullptr, 0, kTok, nullptr) &&
+        !ops_kv_finish(b, kHd, dw, eps, kRd, df, dp, rb, kSlots, qb, 0, kTok, nullptr));
+  for (void* p : {(void*) a, (void*) b, (void*) pa, (void*) dw, (void*) df, (void*) ra, (void*) rb, (void*) dp,
+                  (void*) qa, (void*) qb})
     CHECK(hipFree(p) == hipSuccess);
-  std::printf("  kv_finish: %u keys at positions to 8,191 - the keys and the window's packed rows the four kernels'"
-              " bits\n",
-              kTok);
+  std::printf("  kv_finish: %u keys at positions to 8,191 - the keys, the window's packed rows and %u heads' queries"
+              " the five kernels' bits\n",
+              kTok, kHeads);
 }
 
 // an op's F32 and x16 (and the overflow flag) against the op alone, then mm_x16: `fused(y, x16, over)` and

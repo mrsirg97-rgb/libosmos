@@ -5,14 +5,15 @@
 /* the next layer's experts guessed a layer ahead, for a small step (a decode's, a verify's: picks fewer than a
    layer's experts - a prompt's step already reads the whole next layer ahead, hip_ffn.c's prefetch). the guess: the
    next layer's router on this layer's FFN input (the stream it will route moves a layer's residual on), the top
-   FWD_GUESS_K a token. queued before the routing event, its copy beside the picks', so the host's one wait covers both;
-   the guessed experts the next layer would stream are then wanted (their reads begun) under this layer's experts and
-   the next one's attention. which experts are read ahead changes no bit */
+   FWD_GUESS_K a token, written into the host's mapped r_guess. queued before the routing event, so the host's one
+   wait covers both; the guessed experts the next layer would stream are then wanted (their reads begun) under this
+   layer's experts and the next one's attention. which experts are read ahead changes no bit */
 
 static bool small(const Forward *f, int l)
 {
   const uint32_t E = (uint32_t)f->g->n_experts;
-  return !f->no_guess && l + 1 < f->n_layers && f->n * (uint32_t)f->g->n_used < E; /* (so n < E: within r_guess's rows) */
+  /* (so n < E: within r_guess's rows) */
+  return !f->no_guess && l + 1 < f->n_layers && f->n * (uint32_t)f->g->n_used < E;
 }
 
 bool fwd_guess_queue(Forward *f, int l)
@@ -32,11 +33,8 @@ bool fwd_guess_queue(Forward *f, int l)
                       n - t0 < MV_MAX_TOKENS ? n - t0 : MV_MAX_TOKENS, b->logits + (uint64_t)t0 * E, E, NULL);
   else
     ok = fwd_mat(f, L1->router, fwd_dev(f, L1->router), E, D, b->xf, D, n, b->logits, E);
-  return ok &&
-         ops_router(b->logits, (const float *)fwd_dev(f, L1->router_bias), E, FWD_GUESS_K, g->expert_scale, n,
-                    b->gidx, b->gw, NULL) &&
-         hipMemcpyAsync(f->r_guess, b->gidx, (uint64_t)n * FWD_GUESS_K * 4, hipMemcpyDeviceToHost, NULL) ==
-             hipSuccess;
+  return ok && ops_router(b->logits, (const float *)fwd_dev(f, L1->router_bias), E, FWD_GUESS_K, g->expert_scale, n,
+                          f->r_guess_dev, b->gw, NULL); /* into the host's mapped r_guess */
 }
 
 /* after the routing event: the guessed experts of the next layer not resident, wanted at the next visit (the next

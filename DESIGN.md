@@ -1962,6 +1962,16 @@ Q6_K each, 583 us) is dense work like the rest.
   x16 and the routed experts' int8 input; the router's picks written to mapped host memory (no copy kernel); the
   layer's end with the next one's hc_dot - ~7-8 launches a layer, ~1.2 ms. then 3, 4, 6, 2's rewrite.
 
+- 5 built (four of its folds; the softmax inside values left - each values block would redo it): q's rope in
+  ops_kv_finish (q, q_heads: test_fuse_gpu's queries the separate ops_rope's bits, seen failing first); the FFN's mix
+  writes the shared expert's x16 when the step is one sub-batch (f->xf_x16); the routers write their picks into mapped,
+  coherent host memory (r_ids, r_guess: no copy kernel; a probe's still through ridx); a layer's end writes the next
+  layer's attention mixes' sums (ops_hc_post_dot) when one sub-batch, no probe, no Engram next and not the decoder's
+  compaction (f->hcp_next). the bench's answers hash as before, the guess on and off (420 guessed either way); the x16
+  and the next layer's sums each mutated (none written; the wrong layer's fn): the answers differ. traced as before:
+  1,450 -> 1,255 launches a token, gaps under 5 us 3.01 -> 2.62 ms, the wall 55.48 -> 55.10 ms - ~2 us a launch
+  removed, not 3.5 (the kernels that took the work run a little longer).
+
 together, revised: ~3.5 ms past the guess (~6%), UD-IQ1_S plain ~18.9 -> ~20 tok/s. the first estimate, ~4-5 ms of
 ~54 (~8-9%) past the guess: UD-IQ1_S plain ~18.9 -> ~20.5 tok/s, UD-IQ1_M in proportion. the
 order: 1, 2, 3 (each small, each its own measure), then 5, 4, 6. a HIP graph of a step (most of the 3 ms of gaps) is

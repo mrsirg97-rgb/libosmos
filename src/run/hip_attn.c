@@ -157,7 +157,8 @@ static bool put_run(Forward *f, uint32_t i, uint32_t run, void *arg)
          ops_put_rows(f->bs[i]->ring[l], f->slots, p, f->b.pos + i, 1, KV_FP8, HD, run, NULL);
 }
 
-/* a run's keys finished - normed, roped, FP8 - and into its sequence's window, one launch (ops_kv_finish) */
+/* a run's keys finished - normed, roped, FP8 - and into its sequence's window, its queries roped, one launch
+   (ops_kv_finish) */
 static bool ring_run(Forward *f, uint32_t i, uint32_t run, void *arg)
 {
   const int l = *(const int *)arg;
@@ -165,7 +166,8 @@ static bool ring_run(Forward *f, uint32_t i, uint32_t run, void *arg)
   const uint32_t HD = g->head_dim;
   const float *freqs = g->compress[l] ? f->freqs_comp : f->freqs_win;
   return ops_kv_finish(f->b.kv + (uint64_t)i * HD, HD, F(f, f->w->layer[l].kv_norm), g->rms_eps, g->rope_dim, freqs,
-                       f->b.pos + i, f->bs[i]->ring[l], f->slots, run, NULL);
+                       f->b.pos + i, f->bs[i]->ring[l], f->slots, f->b.q + (uint64_t)i * g->n_heads * HD,
+                       g->n_heads, run, NULL);
 }
 
 bool fwd_attention(Forward *f, int l, char *err)
@@ -182,10 +184,10 @@ bool fwd_attention(Forward *f, int l, char *err)
                      n, !f->probe) &&
             ops_rms_x16(b->qa, QL, QL, F(f, L->q_a_norm), g->rms_eps, n, b->qa, QL, b->x16, b->overflow, NULL) &&
             fwd_mat_ready(f, L->q_b, fwd_dev(f, L->q_b), H * HD, QL, b->qa, QL, n, b->q, H * HD, true) &&
-            ops_rope(b->q, H, HD, RD, H * HD, freqs, b->pos, false, n, NULL);
+            (!f->probe || ops_rope(b->q, H, HD, RD, H * HD, freqs, b->pos, false, n, NULL));
   /* every token's keys finished and into its sequence's window before any attends (a later one of a sequence reads
-     an earlier's): one launch a run; with a probe the steps apart, the keys probed (or stood in) before the window
-     takes them */
+     an earlier's), its queries roped: one launch a run; with a probe the steps apart, the keys probed (or stood in)
+     before the window takes them */
   if (f->probe)
   {
     ok = ok && ops_rms(b->kv, HD, HD, F(f, L->kv_norm), g->rms_eps, n, b->kv, HD, NULL) &&

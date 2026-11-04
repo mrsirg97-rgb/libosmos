@@ -45,7 +45,8 @@ bool ops_rope(float *x, uint32_t heads, uint32_t head_dim, uint32_t rope_dim, ui
               const int32_t *pos, bool inverse, uint32_t n_tok, void *stream);
 bool ops_fp8_round(float *x, uint64_t n, void *packed, uint32_t dim, void *stream);
 bool ops_kv_finish(float *kv, uint32_t head_dim, const float *w, float eps, uint32_t rope_dim, const float *freqs,
-                   const int32_t *pos, void *ring, uint32_t slots, uint32_t n_tok, void *stream);
+                   const int32_t *pos, void *ring, uint32_t slots, float *q, uint32_t q_heads, uint32_t n_tok,
+                   void *stream);
 bool ops_fp4_round(float *x, uint64_t n, uint32_t block, bool e4m3_scale, void *packed, uint32_t dim, void *stream);
 bool ops_kv_pack(uint32_t fmt, const float *src, uint64_t rows, uint32_t dim, void *dst, void *stream);
 bool ops_kv_unpack(uint32_t fmt, const void *src, uint64_t rows, uint32_t dim, float *dst, void *stream);
@@ -155,7 +156,9 @@ ops_fp8_round
 ops_kv_finish
   a window key's tail for n_tok tokens, one launch: ops_rms (w, eps) over head_dim, ops_rope of its last rope_dim at
   pos (not inverse), ops_fp8_round, then the row into ring (KV_FP8 rows: kvfmt.h) at row pos % slots (ops_put_rows,
-  every 1) as well as kv - each step's bits. head_dim at most OPS_MAX_KV_DIM, a multiple of 32.
+  every 1) as well as kv - each step's bits. head_dim at most OPS_MAX_KV_DIM, a multiple of 32. q (or NULL): the
+  same tokens' queries, q_heads heads of head_dim a token, roped in the same launch - ops_rope(q, q_heads, head_dim,
+  rope_dim, q_heads * head_dim, freqs, pos, false)'s bits: a step's attention one launch fewer.
 
 ops_fp4_round
   each `block` values rounded as the reference's fp4_act_quant: E2M1 values (nearest, ties to the even mantissa) under

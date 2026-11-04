@@ -414,7 +414,7 @@ static bool scratch(Forward *f)
       {&b->xe16, FWD_MAX_SLOTS(P, g->n_experts) * (D > FF ? D : FF) * 2},
       {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4},
       {&b->keep, B * 4},          {&b->back, B * 4},
-      {&b->gidx, B * FWD_GUESS_K * 4}, {&b->gw, B * FWD_GUESS_K * F},
+      {&b->gw, B * FWD_GUESS_K * F},
   };
   _Static_assert(sizeof want / sizeof *want == sizeof(Scratch) / sizeof(void *), "every buffer of Scratch, once");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
@@ -428,8 +428,11 @@ static bool scratch(Forward *f)
     n_eg += g->engram[l];
   f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
   return fwd_put(b->pre0, pre0, B * hc * F) &&
-         hipHostMalloc((void **)&f->r_ids, P * 4, 0) == hipSuccess &&
-         hipHostMalloc((void **)&f->r_guess, B * FWD_GUESS_K * 4, 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->r_ids, P * 4, hipHostMallocMapped | hipHostMallocCoherent) == hipSuccess &&
+         hipHostGetDevicePointer((void **)&f->r_ids_dev, f->r_ids, 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->r_guess, B * FWD_GUESS_K * 4, hipHostMallocMapped | hipHostMallocCoherent) ==
+             hipSuccess &&
+         hipHostGetDevicePointer((void **)&f->r_guess_dev, f->r_guess, 0) == hipSuccess &&
          (f->guessed = calloc(f->n_expert_units, sizeof *f->guessed)) &&
          hipHostMalloc((void **)&f->r_up, FWD_UP_BYTES(P), 0) == hipSuccess &&
          (f->m_by = malloc(P * 4)) && (f->m_row = malloc(P * 4)) && (f->m_base = malloc(P * 4)) &&
