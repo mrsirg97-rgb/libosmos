@@ -234,7 +234,8 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     ok = fwd_fail(err, perr);
   else if (!(f->fq = fetchq_create(FWD_FETCH_THREADS, fwd_on_read, &f->in)))
     ok = fwd_fail(err, "the fetcher's workers could not start");
-  else if (!(f->pool = pool_create(all, f->n_expert_units, stream_budget(f, all), hip_slots(), fetchq_fetcher(f->fq),
+  else if (!(f->pool_room = stream_budget(f, all)) ||
+           !(f->pool = pool_create(all, f->n_expert_units, f->pool_room, hip_slots(), fetchq_fetcher(f->fq),
                                    NULL, NULL, perr)))
     ok = fwd_fail(err, perr);
   for (size_t i = 0; ok && i < n_t; i++)
@@ -540,12 +541,28 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
         fwd_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
     ok = fwd_fail(err, "a GPU allocation refused");
+  ok = ok && fwd_room_left(f, err);
   if (!ok)
   {
     forward_destroy(f);
     return NULL;
   }
   return f;
+}
+
+/* the pool takes its room as experts stream, after create: a budget that leaves the GPU less than that refused now,
+   not at a request's first miss (the server READY, then every request failing) */
+bool fwd_room_left(const Forward *f, char *err)
+{
+  size_t free_b = 0, total = 0;
+  if (hipMemGetInfo(&free_b, &total) != hipSuccess)
+    return fwd_fail(err, "the GPU's free memory could not be read");
+  if ((uint64_t)free_b >= f->pool_room)
+    return true;
+  char why[160];
+  snprintf(why, sizeof why, "the GPU's free memory (%.2f GiB) under the expert pool's room (%.2f GiB): a smaller budget",
+           (double)free_b / (1ull << 30), (double)f->pool_room / (1ull << 30));
+  return fwd_fail(err, why);
 }
 
 void forward_destroy(Forward *f)

@@ -68,11 +68,19 @@ $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -lhsa-runtime64 -o $@
 
 # the server (tools/serve): the engine over stdin / stdout, maya's serve protocol
+# --parallel's loop is libevt's (the operator's, C, MIT; DESIGN.md "the scheduler"): its checkout beside this one
+LIBEVT ?= ../libevt
 SERVE := $(BIN_DIR)/substrate-serve
-$(SERVE): tools/serve/serve.c $(LIB) $(HIP_LIB)
-	@mkdir -p $(dir $@) $(OBJ_DIR)/tools
-	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $(OBJ_DIR)/tools/serve.o
-	$(HIPCC) $(OBJ_DIR)/tools/serve.o -L$(LIB_DIR) -lsubstrate_hip -lsubstrate -lhsa-runtime64 -o $@
+SERVE_OBJS := $(patsubst tools/serve/%.c,$(OBJ_DIR)/tools/serve/%.o,$(wildcard tools/serve/*.c))
+$(OBJ_DIR)/tools/serve/%.o: tools/serve/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -I$(LIBEVT)/include -c $< -o $@
+$(SERVE): $(SERVE_OBJS) $(LIB) $(HIP_LIB) $(LIBEVT)/lib/libevt.a
+	@mkdir -p $(dir $@)
+	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -lsubstrate_hip -lsubstrate $(LIBEVT)/lib/libevt.a -lhsa-runtime64 -lpthread \
+	  -o $@
+$(LIBEVT)/lib/libevt.a:
+	$(MAKE) -C $(LIBEVT)
 serve: $(SERVE)
 
 # the GPU's tests (a gfx1151 and the model): exit 77 is a skip

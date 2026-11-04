@@ -1716,6 +1716,44 @@ caller's, no server. this ports both, as one binary that speaks maya's line prot
   model test's fingerprints); not across them. maya's restore and re-read differ too (its PR: chunk boundaries). so the
   slot test's reference is the conversation never set aside, not a re-read.
 
+**done (2026-11-03): step 3.** `substrate-serve --parallel N` (tools/serve/multi.c on libevt; the server split
+into serve.h / conv.c - a conversation, both modes' - / single.c / multi.c / main.c, each under 300 lines): a reader
+thread posts stdin's lines as events (priority 2), the turns are events (1), one queued at a time, each queueing the
+next while a lane is busy. a turn is a round (every answering lane's token printed, the ones going on fed in one
+forward_batch - a decode step) or one piece of one prompt (max_tokens, alone - a prompt's step): never one step of
+both, so neither changes the other's bits. a round and a piece alternate (#587's one each); the piece a prompt whole in
+one piece first, else the reading lanes in turn. a request takes the idle lane whose conversation it continues
+furthest (conv_reach), else the least recently used (its conversation set aside, the longest kept prefix taken back),
+else waits for one. STOP <rid>: a reading lane's state dropped (its prompt's end past it), an answering one's kept to
+its last fed token; a waiting request answered DONE cancel.
+tools/serve/parallel_test.py (maya's parallel_test.py, ported; real text): four prompts at once each the bits they get
+alone (26.2 s against 33.3 one at a time), a STOP ends one alone (the other's answer its own), A's next turn reuses
+its lane (1,547 of 1,547), a 900-token question sent during a 24K-token read got 6 of its 16 tokens before the read's
+last piece. the single path's slot_test.py again: every check passed.
+
+**done (2026-11-03): drafting in --parallel's rounds** (tools/serve/round.c; multi.h the lanes' shapes). a round's
+drafting lanes draft (drafter_draft reads only the sequence's rings: no other lane's step between changes a draft)
+and are verified with every other lane's token in the same forward_batch; each then prints its token and accepted
+drafts, rolls back to all but the last printed and is seeded from the verify's rows before the next step (taps are the
+last step's). a round stays a decode step - at most Server.round_tokens = (experts - 1) / experts a token = 63 tokens
+(the lane's P < E; more, and it is a prompt's step, other bits): --parallel at most that many lanes, a lane's drafts
+cut to leave a token for each answering lane after it (cut drafts change no bit: a decode's tokens the same bits
+however they are grouped into verifies). a prompt's last piece seeds its drafter when the request drafts.
+parallel_test.py with --dspark: four at once all drafting, and two drafting with two greedy - every answer the greedy
+one alone (120 of 151 / 60 of 77 drafts accepted). the bench's four questions x 256 tokens, one process, --parallel 4
+(96 GiB): one at a time greedy 14.2 tok/s in all, four at once greedy 31.5, one at a time drafted 32.6, four at once
+drafted 44.2 - every answer the bench's hashes (7e8dbc09, 4ea20c49, 1390d91b, q4's cdf5f24e).
+
+**drafting the default, and a budget refused at create (2026-11-03).** a GEN without spec= drafts when the server
+has a drafter (maya's: -1, as the engine was started); spec=0 a request's own greedy. the drafted server at its
+best (512-token steps, 100 GiB - 102 does not fit with the drafter): the bench's four questions one at a time 28.8
+tok/s in all (the bench's drafted decode 29.5, here with the prompts read), four at once 45.7 (~11.4 a conversation).
+and 102 had started - READY - then refused every request: the pool takes its room (stream_budget, 1.3-1.7 GiB) as
+experts stream, after create, so a budget that left the GPU less than that was found at the first miss. now
+forward_create and drafter_create check the GPU's free memory against the pool's room (fwd_room_left) and refuse:
+"the GPU's free memory (1.49 GiB) under the expert pool's room (1.71 GiB): a smaller budget", exit 2 before READY.
+plain decode at 110 GiB (no drafter) still created.
+
 **5. the order** (each its tests first): seq_save / seq_load with identity (test: a conversation set aside, another
 run, the first taken back - the same hash as never set aside; a damaged or foreign state refused, the Seq reset);
 the serve binary with one conversation and the slot store (maya's slot_keep_test.py against it; restart, eviction,

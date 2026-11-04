@@ -82,3 +82,65 @@ if __name__ == "__main__":
         print(f"{path}: {len(r['tokens'])} tokens, hash {hash_tokens(r['tokens']):016x}, reused {r['reused']}, "
               f"finish {r['finish']}, first token {r['first_s']:.2f} s, all {r['s']:.1f} s", flush=True)
     e.quit()
+
+
+class Multi:
+    """substrate-serve --parallel N: requests sent at once, their lines (T / PP / DONE / ERR <rid> ...) routed back by a
+    reader thread; wait(rid) returns a request's record."""
+
+    def __init__(self, exe, args, env=None):
+        import threading
+        self.p = subprocess.Popen([exe, *args, "--serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                  bufsize=1, env=env)
+        self.notes, self.req, self.cv, self.log = [], {}, threading.Condition(), []
+        for line in self.p.stdout:
+            line = line.strip()
+            if line.startswith("NOTE "):
+                self.notes.append(line)
+            if line.startswith("READY "):
+                break
+        else:
+            raise SystemExit("the engine did not start")
+        self.t = threading.Thread(target=self._read, daemon=True)
+        self.t.start()
+
+    def _read(self):
+        for line in self.p.stdout:
+            f = line.split()
+            if not f or f[0] not in ("T", "PP", "DONE", "ERR"):
+                continue
+            with self.cv:
+                self.log.append((time.monotonic(), f[0], int(f[1]) if f[1].lstrip("-").isdigit() else -1))
+                r = self.req.get(int(f[1])) if f[1].lstrip("-").isdigit() else None
+                if r is None:
+                    continue
+                if f[0] == "T":
+                    r["tokens"].append(int(f[2]))
+                elif f[0] == "PP":
+                    r["pp"].append(f)
+                elif f[0] == "DONE":
+                    r.update(done=f, reused=int(f[9]), finish=f[6], s=time.monotonic() - r["t0"])
+                else:
+                    r.update(err=line.strip(), s=time.monotonic() - r["t0"])
+                self.cv.notify_all()
+
+    def send(self, rid, ids, max_new, spec=0):
+        with self.cv:
+            self.req[rid] = {"tokens": [], "pp": [], "t0": time.monotonic()}
+        self.p.stdin.write(f"GEN {max_new} rid={rid} spec={spec} {','.join(map(str, ids))}\n")
+        self.p.stdin.flush()
+
+    def stop(self, rid):
+        self.p.stdin.write(f"STOP {rid}\n")
+        self.p.stdin.flush()
+
+    def wait(self, rid, until=lambda r: "done" in r or "err" in r, timeout=3600):
+        with self.cv:
+            if not self.cv.wait_for(lambda: until(self.req[rid]), timeout):
+                raise SystemExit(f"request {rid}: no answer in {timeout} s")
+            return self.req[rid]
+
+    def quit(self):
+        self.p.stdin.write("QUIT\n")
+        self.p.stdin.flush()
+        return self.p.wait(timeout=600)

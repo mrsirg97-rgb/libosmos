@@ -164,6 +164,7 @@ struct Forward
   int32_t *r_guess;       /* pinned: the next layer's guessed experts, [token][FWD_GUESS_K] */
   uint64_t *guessed;      /* a unit's guess: the visit it was guessed for (hip_guess.c) */
   uint64_t g_need, g_hit; /* a decode's streamed picks, and of them the ones guessed a layer ahead */
+  uint64_t pool_room;      /* the pool's room (stream_budget): GPU memory it takes as experts stream, not at create */
   uint64_t g_read;        /* the reads the guess began (cold units it wanted) */
   uint64_t w_n[2], w_ns[2]; /* the expert reads the host waited for (fwd_pinned), and its time: [0] not guessed,
                               [1] guessed (begun a layer ahead, not done) */
@@ -282,6 +283,7 @@ bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memo
 bool fwd_wait_read(Forward *f, char *err); /* a read's end waited for, the finished ones to the pool */
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
 bool fwd_drain(Forward *f, char *err); /* the finished reads to the pool, no wait */
+bool fwd_room_left(const Forward *f, char *err); /* the GPU's free memory holds the pool's room: else false, why */
 bool fwd_taps_on(Forward *f); /* the taps taken from the next step on (a drafter's): false if they cannot be held */
 
 bool fwd_attention(Forward *f, int l, char *err);
