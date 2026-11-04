@@ -1818,6 +1818,88 @@ tests (each seen to fail first, or by a mutation):
   1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
   repeated text are not the mask's test; the probes above are.
 
+## the MXFP8 Engram pack (design, 2026-11-04)
+
+the operator's: UD-IQ1_M's weights with unsloth's **MXFP8** Engram table in place of its IQ4_NL one - the table as the
+checkpoint holds it (lossless), our pack. unsloth publishes the table apart (`engram/`, 202.8 GB against IQ4_NL's
+110.6), stamped shard 1 of 1; `set_split.py <file> 5 5` restamps it as UD-IQ1_M's shard 5 of 5.
+- **the type**: ggml type 43 in unsloth's GGUFs (`per_layer_token_embd.weight`, [256, 768,022,850]): a block of 32 -
+  an E8M0 scale byte e (2^(e - 127)), then 32 E4M3 codes: 33 B. upstream llama.cpp's 43 is F8_E4M3 (a byte a value,
+  no scales): read as MXFP8 its tensor needs a 32nd more bytes than the file gives it - into the next tensor or out
+  of the file - so gguf.c refuses a tensor whose bytes overlap another's as well as one that leaves its file (maya's
+  pack tells them apart by the same span). a tensor of fewer than 1,024 values could hide the difference in its
+  alignment padding; the only MXFP8 tensor is the Engram table.
+- **the decode**: `quant_dequant` (QTYPE_DECODE), each value e4m3 x 2^(e - 127) - exact in F32 (4 significant bits,
+  the smallest 2^-136), so no order of operations changes a bit; the forward's Engram path is the type table's
+  already (`gguf_bytes(type, head_dim)` a row: 264 B against IQ4_NL's 144).
+- **the reads**: a row is still one random read (264 B, inside a 4 KB page) - the reads a step makes are the same
+  count, the SSD's IOPS what bounds them (Engram's reads, above): the speed should hold; measured below.
+- **the oracle**: gguf-py reads 43 as F8_E4M3, so `dequant_ref.py --mxfp8 <file>` walks the header itself and decodes
+  with torch's float8_e4m3fn (the OCP MX spec's); test_quant_gpu checks every value bit for bit against it.
+- **the pack**: a folder of shards 1-4 linked from UD-IQ1_M and the restamped table as shard 5 (nothing of the IQ4_NL
+  pack moved or deleted). quality: the reference forward (`ref_gguf.py`, maya's pack of the new folder) over the
+  MXFP8 table, our engine against it on both tables - what IQ4_NL costs, and where the pack lands.
+
+measured (2026-11-04; ~/bench/mxfp8, ~/substrate-oracle/ref32-mxfp8):
+- the decode: test_quant_gpu, 458,752 values of the real table (its start, a middle, its end) and 8,192 random
+  blocks, bit for bit torch's; a bias of 128 for 127 caught (456,654 differ).
+- speed, plain decode at 110 GiB (dbench, 512-token steps, 64K context, three questions): IQ4_NL 16.2 / 16.2 / 16.1,
+  MXFP8 16.3 / 16.3 / 16.1 tok/s - the same (the reads are IOPS, not bytes). IQ4_NL's answers hash as before.
+- KL against the reference forward (32 positions; test_model_gpu with SUBSTRATE_TEST_UD / SUBSTRATE_ORACLE_REF /
+  SUBSTRATE_ORACLE_MAYA; maya 1.1.52's logits on the same pack):
+
+  | engine's table vs the reference's | ours mean / median | maya mean / median |
+  | --- | --- | --- |
+  | IQ4_NL vs IQ4_NL | 0.209 / 2.8e-3 | 0.216 / 2.6e-3 |
+  | MXFP8 vs MXFP8 | 0.081 / 3.7e-4 | 0.016 / 5.4e-4 |
+  | IQ4_NL vs MXFP8 | 0.208 / 4.8e-4 | 0.214 / 1.5e-3 |
+
+  the means are one or two positions each (near ties: ours 1.25 and 0.84 at positions 15 and 21 on MXFP8; maya's
+  5.9 and 0.49 on IQ4_NL), the medians the rest. the lane (decode's path) against the MXFP8 reference: 0.038 on the
+  IQ4_NL table, 0.024 against IQ4_NL's own - what the 4-bit table costs at the logits, about 0.013. test_model_gpu's
+  bar (our mean at or under maya's) fails on the MXFP8 pack, on those two positions.
+- perplexity over 8,191 tokens of the bench's text (`bin/ppl`, steps of 512, budget 100): IQ4_NL **2.4579**, MXFP8
+  **2.4591**; at 4,096 tokens 5.9324 and 5.9430. no difference the text can see: at 1-bit experts the Engram table's
+  4 bits are not what limits the model.
+- so: the MXFP8 pack is 92 GB more disk for the same speed and the same perplexity. a pack where the weights are
+  larger (ISTA's IQ2_XXS, a Q2 / Q3 UD) may show what this one cannot.
+
+## UD-IQ1_S, and the two packs (2026-11-04)
+
+the operator's: UD-IQ1_S's weights on the same MXFP8 table, and both quants abliterated - two packs, one table on
+disk. nothing new in the engine (IQ1_S was in the type table, the int8 path and the CPU lane already); a pack is data.
+- **the layout**: `~/Models/ds1017/engram/` holds the table once (stamped 5 of 5: both quants' slot); each pack's
+  shard 5 links to it. UD-IQ1_S's shards 1-4: 122.4 GB against UD-IQ1_M's 139.8 (12.5% smaller experts).
+- **the profile**: UD-IQ1_S's own (`PICKS_OUT`, the same 16,000-token calibration text, MAX_CTX 16384: 16K tokens
+  past dbench's default 4,096 context fail seq_prompt); the abliterated packs take their quant's (the patch is
+  attention only).
+- **abliterated**: huihui-ai's `patch-unsloth-DeepSeek-V4.1-Flash-1017.py` with its per-quant patch GGUF, shards 1-4
+  rewritten (UD-IQ1_S: 18 `attn_output_b` tensors replaced; UD-IQ1_M's as before); gguf-py from maya's llama.cpp on
+  PYTHONPATH (the script's own folder kept off the path: `python -s -P`).
+
+measured (~/bench/mxfp8; 64K context, three questions, 256 tokens, fresh processes, interleaved):
+
+| | UD-IQ1_M + MXFP8 | UD-IQ1_S + MXFP8 |
+| --- | --- | --- |
+| plain, 110 GiB (two rounds) | 16.2 / 16.2 / 16.2, 16.5 / 16.2 / 16.1 | 18.4 / 18.4 / 18.2, 18.5 / 18.4 / 18.4 |
+| drafted (IQ2_XS DSpark), 103 GiB | 28.5 / 23.8 / 36.1, 27.9 / 23.8 / 36.6 | 35.6 / 27.0 / 47.4, 36.8 / 27.4 / 47.9 |
+| drafted, 100 GiB | - | 33.8 / 25.5 / 46.2, 37.0 / 26.8 / 45.8 |
+| abliterated (one round) | drafted 103: 28.0 / 23.5 / 35.6 | plain 18.5 / 18.4 / 18.5 |
+| perplexity, 8,191 tokens (`bin/ppl`) | 2.4591 | 2.5006 (abliterated 2.5048) |
+
+- the speed is the reads: on the third question plain, 615 experts streamed from the SSD against 3,452; drafted,
+  2,036 against 6,174 (a round's verify picks more experts than one token does), verify time 4.7 s against 6.5 s.
+  the drafter's acceptance is the model's (205 of 220 against 209 of 239), and a drafted answer hashes as its plain
+  one.
+- the cost: perplexity +1.7% (2.4591 to 2.5006). a mean over every token: where a lower-bit quant loses (a number,
+  a line of code) it may not show; not yet measured against the reference forward (a maya pack of UD-IQ1_S and the
+  oracle's ~12 min) nor on the agent bench.
+- the drafters on UD-IQ1_S (100 GiB, drafted): maya's pack of DSpark (MXFP4 experts, 8.0 GB) 36.8 / 26.9 / 45.7
+  tok/s, accepted 186/217, 144/173, 206/224; our IQ2_XS requant (4.7 GB) 37.0 / 26.8 / 45.8, 183/205, 140/171,
+  205/220 - the accepted tokens within 3%, the speed the same.
+- so: two packs, the operator's choice of speed or quality - UD-IQ1_S ~26% faster drafted, UD-IQ1_M the lower
+  perplexity - over one 203 GB table.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

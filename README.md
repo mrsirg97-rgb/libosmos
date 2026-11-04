@@ -3,11 +3,12 @@
 A deterministic inference engine for **DeepSeek-V4.1-Flash** (~768B parameters: ~557B in routed experts, ~196B in
 Engram tables) on a **single AMD Strix Halo** (Ryzen AI MAX+ 395, Radeon 8060S / gfx1151, 128 GB).
 
-It runs two quantizations of the model:
+It runs these quantizations of the model:
 
-- **unsloth's UD-IQ1_M** ([unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF),
-  5 shards, ~234 GB with its Engram table): experts IQ1_S / IQ2_XXS / IQ2_XS / IQ2_S, attention Q6_K. The one most
-  people run; the numbers below are on it.
+- **unsloth's UD-IQ1_M and UD-IQ1_S** ([unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF),
+  5 shards each): experts in 1-2-bit IQ types, attention Q6_K. The two packs below run both with unsloth's lossless
+  MXFP8 Engram table (one 203 GB file the two share) and, optionally, huihui-ai's abliteration patch. The comparison
+  with Maya is on UD-IQ1_M with its stock IQ4_NL table.
 - **ISTA-DASLab's GSQ-RCO IQ2_XXS** ([ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)):
   experts IQ2_XXS / IQ2_XS / IQ1_M, its Engram in a separate GGUF. What the engine was first built on.
 
@@ -52,6 +53,23 @@ remains is waiting on the SSD for experts not in memory (~4.9 ms a token at the 
 RAM, not code, is the limit - GPU memory and the page cache are the same 128 GB) and the GPU's ~2 us between
 dependent kernels.
 
+### The two packs
+
+The same machine and questions, both on the MXFP8 Engram table; drafted with our IQ2_XS DSpark (4.7 GB) at a 103 GiB
+budget, plain at 110 GiB; perplexity over 8,191 tokens of mixed text and code (`bin/ppl`, 512-token steps).
+
+| | UD-IQ1_M + MXFP8 | UD-IQ1_S + MXFP8 |
+| --- | --- | --- |
+| Decode, plain (3 questions, two rounds) | 16.2 tok/s (16.1-16.5) | 18.4 tok/s (18.2-18.5) |
+| Decode, drafted | 29.5 tok/s (23.8-36.6) | 37.0 tok/s (27.0-47.9) |
+| Perplexity (abliterated) | 2.459 (-) | 2.501 (2.505) |
+| Expert shards on disk (plus the shared table) | 140 GB | 122 GB |
+
+UD-IQ1_S's experts are 12.5% smaller, so more of them stay in GPU memory: on the third question it read 615 experts
+from the SSD against UD-IQ1_M's 3,452 (plain) and 2,036 against 6,174 (drafted, where a round's verify touches many
+more). The abliterated packs decode at the same speed. The MXFP8 table itself is speed- and quality-neutral against
+the IQ4_NL one on these 1-bit experts (DESIGN.md, "the MXFP8 Engram pack"); it is the one table both packs can share.
+
 Earlier, on **GSQ-RCO IQ2_XXS** against Maya 1.1.46 (before the UD work: the KV's formats, the decode and prompt
 changes since; not re-measured - its files are not on the development box now):
 
@@ -85,13 +103,37 @@ changes since; not re-measured - its files are not on the development box now):
 - Linux with ROCm 7.x (developed on HIP 7.15, kernel 7.2, gcc 14).
 - GPU memory raised to ~113 GiB: `options ttm pages_limit=29637703` in `/etc/modprobe.d/ttm.conf` (a system setting:
   yours to make).
-- The model, on an NVMe SSD (the faster its random reads, the faster the decode), either:
-  - UD-IQ1_M's 5 shards (`DeepSeek-V4.1-Flash-1017-UD-IQ1_M-0000N-of-00005.gguf`, ~234 GB; its Engram table is in
-    them), or
+- The model, on an NVMe SSD (the faster its random reads, the faster the decode), one of:
+  - UD-IQ1_M's or UD-IQ1_S's 5 shards (`DeepSeek-V4.1-Flash-1017-UD-IQ1_M-0000N-of-00005.gguf`; shard 5 is the
+    Engram table: the stock IQ4_NL one, 110 GB, or the MXFP8 one - below),
   - GSQ-RCO's 4 IQ2_XXS shards and its Engram GGUF (`DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`),
-- for drafting, DSpark's weights as Maya packs them (`dspark.bin`, `dspark.json`),
+- for drafting, DSpark's weights: Maya's pack of them (`dspark.bin`, `dspark.json`, 8 GB) or our IQ2_XS requant of
+  that pack (4.7 GB, the same acceptance on these questions),
 - optionally (UD-IQ1_M's decode ~12-13 -> ~16 tok/s with one), an expert pick profile beside the model (`substrate-picks.bin`: every
   pick on calibration text, `bin/dbench` with `PICKS_OUT` writes one).
+
+## The packs
+
+A pack is unsloth's shards 1-4 of a quant, the MXFP8 Engram table as its shard 5, and a pick profile:
+
+```sh
+hf download unsloth/DeepSeek-V4.1-Flash-1017-GGUF --include "UD-IQ1_S/*0000[1-4]-of-00005.gguf" --local-dir .
+hf download unsloth/DeepSeek-V4.1-Flash-1017-GGUF --include "engram/*MXFP8*" "engram/set_split.py" --local-dir .
+python engram/set_split.py engram/DeepSeek-V4.1-Flash-1017-engram-MXFP8.gguf_file 5 5   # both quants' slot: 5 of 5
+ln -s $PWD/engram/DeepSeek-V4.1-Flash-1017-engram-MXFP8.gguf_file \
+      UD-IQ1_S/DeepSeek-V4.1-Flash-1017-UD-IQ1_S-00005-of-00005.gguf                    # UD-IQ1_M's: the same link
+MODEL=UD-IQ1_S/DeepSeek-V4.1-Flash-1017-UD-IQ1_S-00001-of-00005.gguf PICKS_OUT=UD-IQ1_S/substrate-picks.bin \
+  MAX_CTX=16384 bin/dbench 104 2048 1 warmup.txt calib16k.txt                           # the profile
+```
+
+`calib16k.txt`: ~16,000 token ids of ordinary text and code, nothing of the bench's questions (ours: DESIGN.md,
+"the decode (2026-11-03)").
+
+Abliterated: huihui-ai's patch for that quant ([huihui-ai/Huihui-DeepSeek-V4.1-Flash-1017-abliterated-GGUF](https://huggingface.co/huihui-ai/Huihui-DeepSeek-V4.1-Flash-1017-abliterated-GGUF),
+`unsloth/patch-UD-IQ1_S/` or `patch-UD-IQ1_M/`, and its `patch-unsloth-DeepSeek-V4.1-Flash-1017.py`) applied to
+shards 1-4 (it replaces the attention output projections, `blk.N.attn_output_b`), the same table linked as shard 5,
+the unpatched quant's profile. The smaller drafter: `make requant` (llama.cpp's ggml beside this checkout), then
+`bin/requant_dspark <maya's dspark dir> <out dir> IQ2_XS`.
 
 ## Build and test
 
@@ -158,7 +200,7 @@ answer prints a hash of its tokens: the same hash in every configuration is the 
 ## Scope
 
 One model (DeepSeek-V4.1-Flash), one machine (Strix Halo, 128 GB), greedy decoding, one sequence at a time in the
-benchmarks. The quant kernels (Q8_0, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ4_NL, BF16, MXFP4, from one
+benchmarks. The quant kernels (Q8_0, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ4_NL, BF16, MXFP4, MXFP8, from one
 type table, `include/substrate/model/qtype.h`; the int8 expert path and the CPU lane: the IQ1 and IQ2 types) and
 the expert streaming are model-independent; the attention, hyper-connections, Engram and DSpark are DeepSeek's.
 
@@ -187,7 +229,8 @@ the expert streaming are model-independent; the attention, hyper-connections, En
 - [DeepSeek](https://github.com/deepseek-ai) (MIT): the model, its inference reference, and the Engram hashing that
   `oracle/engram_hash.py` follows.
 - [ISTA-DASLab](https://huggingface.co/ISTA-DASLab): the GSQ-RCO quantization this was developed on.
-- [unsloth](https://huggingface.co/unsloth): the UD-IQ1_M quantization.
+- [unsloth](https://huggingface.co/unsloth): the UD-IQ1_M and UD-IQ1_S quantizations and the MXFP8 Engram table.
+- [huihui-ai](https://huggingface.co/huihui-ai): the abliteration patches.
 
 ## License
 

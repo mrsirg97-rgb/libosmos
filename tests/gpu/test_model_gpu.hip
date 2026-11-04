@@ -113,6 +113,10 @@ int main() {
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "", mdir = home + "/models/ds1017/";
   std::string ref = home + "/substrate-oracle/ref32";
   if (access((ref + "/logits.bin").c_str(), R_OK) != 0) ref = home + "/substrate-oracle/ref8";
+  // SUBSTRATE_ORACLE_REF / SUBSTRATE_ORACLE_MAYA: another dump and maya's logits on the same ids (another pack's)
+  if (const char* r = std::getenv("SUBSTRATE_ORACLE_REF")) ref = r;
+  const char* maya_env = std::getenv("SUBSTRATE_ORACLE_MAYA");
+  const std::string maya_path = maya_env ? maya_env : home + "/substrate-oracle/logits_a.bin";
   Arr ids, logits, hs, maya;
   int ndev = 0;
   if (!load(ref + "/ids.bin", &ids) || !load(ref + "/logits.bin", &logits) || !load(ref + "/hs.bin", &hs) ||
@@ -123,7 +127,7 @@ int main() {
   const int T = (int) ids.dims[0];
   const size_t V = logits.dims[1];
   {
-    FILE* f = std::fopen((home + "/substrate-oracle/logits_a.bin").c_str(), "rb");
+    FILE* f = std::fopen(maya_path.c_str(), "rb");
     CHECK(f);
     maya.v.resize((size_t) T * V);
     CHECK(std::fread(maya.v.data(), 4, maya.v.size(), f) == maya.v.size());

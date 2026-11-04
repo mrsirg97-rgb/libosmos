@@ -10,6 +10,7 @@
 #include <cstdint>
 
 #include "quant_grids.h"
+#include "round.h"
 #include "substrate/model/qtype.h"
 
 namespace quant {
@@ -18,7 +19,7 @@ namespace quant {
 enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
-  kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4,
+  kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
@@ -31,7 +32,7 @@ template <Type T> struct Block;
 #define QUANT_BLOCK(name) \
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
-QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S)
+QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -39,12 +40,14 @@ template <> struct Block<kF32> { static constexpr int values = kChunk, bytes = Q
 template <> struct Block<kBF16> { static constexpr int values = kChunk, bytes = QTYPE_BF16_BYTES * kChunk; };
 static_assert(QTYPE_F32_VALUES == 1 && QTYPE_BF16_VALUES == 1, "F32 and BF16 decode a value at a time");
 static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && Block<kMXFP4>::values == kQ32 &&
+                  Block<kMXFP8>::values == kQ32 &&
                   Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
                   Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
                   Block<kIQ2_S>::values == kQK,
               "the decoders' block lengths");
 
-// every block's size is even (34, 18, 66, 74, 210 ... bytes) and every row starts even: 16-bit loads, never wider
+// every block's size is even (34, 18, 66, 74, 210 ... bytes; MXFP4's and MXFP8's odd: byte loads only) and every row
+// starts even: 16-bit loads, never wider
 __device__ inline uint32_t ld16(const uint8_t* p) { return *(const uint16_t*) p; }
 __device__ inline uint32_t ld32(const uint8_t* p) { return ld16(p) | ld16(p + 2) << 16; }
 __device__ inline float f16(uint32_t bits) { return __half2float(__ushort_as_half((unsigned short) bits)); }
@@ -185,6 +188,13 @@ template <> __device__ inline void decode<kMXFP4>(const uint8_t* b, int k, float
   const float d = ldexpf(1.0f, (int) b[0] - 128);
   const uint8_t* qs = b + 1 + (k % 2) * kChunk;
   for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) kMxfp4Values[(qs[j] >> (4 * (k / 2))) & 0x0F]);
+}
+
+// unsloth's Engram tables: an E8M0 scale e (2^(e - 127)), then 32 E4M3 codes, value j byte 1 + j (a code 0x7F / 0xFF
+// NaN, as torch's float8_e4m3fn); each product exact (4 significant bits, the smallest 2^-136: no rounding)
+template <> __device__ inline void decode<kMXFP8>(const uint8_t* b, int k, float* v) {
+  const float d = ldexpf(1.0f, (int) b[0] - 127);
+  for (int j = 0; j < kChunk; j++) v[j] = mul(d, rnd::e4m3_value(b[1 + k * kChunk + j]));
 }
 
 // (d * (2s + 1)) * (grid + delta); d an f16 in the top nibbles of the four scale words, a 3-bit s each 16 values

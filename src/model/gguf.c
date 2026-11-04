@@ -151,6 +151,15 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
     }
     x->offset += data;
   }
+  /* no two tensors' bytes overlap (a type read as more bytes than the file gives it runs into the next: upstream's
+     43, F8_E4M3, taken for unsloth's MXFP8) */
+  for (size_t i = first; i < g->n_tensors; i++)
+    for (size_t j = i + 1; j < g->n_tensors; j++)
+    {
+      const GgufTensor *a = &g->tensors[i], *b = &g->tensors[j];
+      if (a->offset < b->offset + b->bytes && b->offset < a->offset + a->bytes)
+        return gguf_fail(r, "two tensors' bytes overlap");
+    }
   return true;
 }
 

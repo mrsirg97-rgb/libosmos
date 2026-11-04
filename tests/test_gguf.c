@@ -324,6 +324,29 @@ static void test_corrupt(void)
   printf("  corrupt: %zu patches and a duplicate name refused\n", sizeof patches / sizeof patches[0]);
 }
 
+/* type 43: unsloth's MXFP8 (33 bytes a 32 values) read; upstream's F8_E4M3 (a byte a value) refused - the bytes a
+   tensor of it holds too few for MXFP8's, it runs into the next tensor or out of the file */
+static void test_mxfp8(void)
+{
+  const uint64_t vals = 64 * 32; /* (past 1,024 values: a 32nd of them more than an alignment's padding) */
+  const Spec mx[] = {{"e.mxfp8", 43, 2, {64, 32}, vals / 32 * 33}, three[0]};
+  const Spec f8[] = {{"e.f8_e4m3", 43, 2, {64, 32}, vals}, three[0]};
+  char err[GGUF_ERR] = "";
+  Buf w = model(mx, 2, 0, 0, 0, NULL, 0);
+  Gguf *g = gguf_create(write_file("mxfp8.gguf", &w), err);
+  assert(g && g->tensors[0].bytes == vals / 32 * 33);
+  check_whole(g);
+  gguf_destroy(g);
+  free(w.b);
+  w = model(f8, 2, 0, 0, 0, NULL, 0);
+  assert(!gguf_create(write_file("f8.gguf", &w), err) && strstr(err, "overlap"));
+  free(w.b);
+  w = model(f8, 1, 0, 0, 0, NULL, 0);
+  assert(!gguf_create(write_file("f8one.gguf", &w), err) && strstr(err, "leave"));
+  free(w.b);
+  printf("  type 43: MXFP8's blocks read; a byte a value (upstream's F8_E4M3) refused, before a tensor or alone\n");
+}
+
 /* property: random byte changes never crash it; what it returns always holds (every tensor in its file) */
 static void test_mutations(void)
 {
@@ -395,6 +418,7 @@ int main(void)
   test_split();
   test_truncated();
   test_corrupt();
+  test_mxfp8();
   test_mutations();
   test_ds1017();
   char cmd[600];

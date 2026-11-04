@@ -1,7 +1,7 @@
-// the weights' types decoded on the GPU against gguf-py's values, every float bit for bit: a model's own blocks (the
-// first tensor of each type: its start, a middle, its end) and random ones (oracle/dequant_ref.py --model writes them
-// to ~/substrate-oracle/dequant). every type the table decodes that has a file; the others named. needs a gfx1151 and
-// at least one file; skipped (77) without them.
+// the weights' types decoded on the GPU against gguf-py's values (MXFP8: torch's float8_e4m3fn, dequant_ref.py),
+// every float bit for bit: a model's own blocks (the first tensor of each type: its start, a middle, its end) and
+// random ones (oracle/dequant_ref.py --model writes them to ~/substrate-oracle/dequant). every type the table decodes
+// that has a file; the others named. needs a gfx1151 and at least one file; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -69,7 +69,7 @@ static void check(const char* name, const Ref& r) {
       uint32_t g, w;
       std::memcpy(&g, &got[first], 4);
       std::memcpy(&w, &r.values[first], 4);
-      std::printf("  %s: %llu of %llu values differ; first at %llu: %g (0x%08x), gguf-py %g (0x%08x)\n", name,
+      std::printf("  %s: %llu of %llu values differ; first at %llu: %g (0x%08x), the reference %g (0x%08x)\n", name,
                   (unsigned long long) bad, (unsigned long long) n, (unsigned long long) first, got[first], g,
                   r.values[first], w);
       std::exit(1);
@@ -95,7 +95,7 @@ static void check(const char* name, const Ref& r) {
     std::exit(1);
   }
   CHECK(hipFree(src) == hipSuccess && hipFree(dst) == hipSuccess && hipFree(dh) == hipSuccess);
-  std::printf("  %-8s %9llu values, bit for bit gguf-py's, twice; as f16 its rounding\n", name, (unsigned long long) n);
+  std::printf("  %-8s %9llu values, bit for bit the reference's, twice; as f16 its rounding\n", name, (unsigned long long) n);
 }
 
 int main() {

@@ -17,6 +17,8 @@
 #define QTYPE_IQ (QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8 | QTYPE_CPU_MV | QTYPE_CPU_Q8)
 
 /* each type this build reads, once: X(name, ggml id, a block's values, a block's bytes, paths) */
+/* (43: unsloth's MXFP8 - an E8M0 scale, then 32 E4M3 codes - its GGUFs' Engram tables; upstream llama.cpp's 43 is
+   F8_E4M3, one byte a value and no scales: a file of that is refused by its size, gguf.c) */
 #define QTYPES(X)                                                                                  \
   X(F32, 0, 1, 4, QTYPE_FILE | QTYPE_MV)                                                           \
   X(Q8_0, 8, 32, 34, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
@@ -31,7 +33,8 @@
   X(I64, 27, 1, 8, QTYPE_FILE)                                                                     \
   X(IQ1_M, 29, 256, 56, QTYPE_IQ)                                                                  \
   X(BF16, 30, 1, 2, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_EMBED)                            \
-  X(MXFP4, 39, 32, 17, QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK)
+  X(MXFP4, 39, 32, 17, QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK)                                     \
+  X(MXFP8, 43, 32, 33, QTYPE_FILE | QTYPE_DECODE)
 
 #define QTYPE_ID(name, id, values, bytes, paths) QTYPE_##name = id,
 enum QType { QTYPES(QTYPE_ID) };
