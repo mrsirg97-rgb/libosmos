@@ -27,6 +27,11 @@ constexpr Tune tune(quant::Type t, int nt) {
     case quant::kQ5_K:
     case quant::kQ5_KR: return {2, 1};
     case quant::kQ8_0: return nt > 4 ? Tune{2, 1} : Tune{1, 1};
+    // an F32 router (unsloth's: 384 x 5120) and its guess's BF16 copy, one token: 4 chunks in flight a lane - F32
+    // 53.5 -> 38.8 us (147 -> 202 GB/s), BF16 22.8 -> 19.5 (2026-11-04, 40 routers cold; R 1-4, U 1-8 swept, the
+    // same bits each). more tokens not measured
+    case quant::kF32:
+    case quant::kBF16: return nt == 1 ? Tune{1, 4} : Tune{1, 1};
     default: return {1, 1};
   }
 }

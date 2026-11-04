@@ -1972,6 +1972,16 @@ Q6_K each, 583 us) is dense work like the rest.
   1,450 -> 1,255 launches a token, gaps under 5 us 3.01 -> 2.62 ms, the wall 55.48 -> 55.10 ms - ~2 us a launch
   removed, not 3.5 (the kernels that took the work run a little longer).
 
+- 6 built: the F32 router's matvec and the BF16 matvecs (the guess's copy, the compressed layers') one token at 4
+  chunks in flight a lane (mv.hip's tune; R 1-4, U 1-8 swept on 40 routers cold, the same bits each): F32 53.5 ->
+  38.8 us, BF16 22.8 -> 19.5; traced, 2.09 -> 1.63 and 1.54 -> 1.38 ms a token.
+- 3 tried, not kept: the router's top-k as one wave (32 lanes, 12 experts a lane: 15 us a call in decode, against
+  9), then as 256 threads with each one's keys in registers and one barrier a round (11 us) - both the same picks and
+  weights (test_router_gpu, kept: the old kernel as its reference, a flipped tie rule caught in the wave's step and in
+  the waves' step). the barriers were not its time: the scores (expf, log1pf, sqrt) and the launch are.
+- traced now (the guess on, as the first): the wall 55.48 -> 54.51 ms; plain decode, the guess off, 18.2-18.5 ->
+  19.1-19.3 tok/s (the ISTA download on the SSD meanwhile), the answers' hashes as ever.
+
 together, revised: ~3.5 ms past the guess (~6%), UD-IQ1_S plain ~18.9 -> ~20 tok/s. the first estimate, ~4-5 ms of
 ~54 (~8-9%) past the guess: UD-IQ1_S plain ~18.9 -> ~20.5 tok/s, UD-IQ1_M in proportion. the
 order: 1, 2, 3 (each small, each its own measure), then 5, 4, 6. a HIP graph of a step (most of the 3 ms of gaps) is
