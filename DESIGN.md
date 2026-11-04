@@ -2086,6 +2086,57 @@ GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB o
   forward one block at a time against llama.cpp's intermediate tensors (llama-eval-callback); then decode speed,
   then prompts, then MTP.
 
+## the installer (design, 2026-11-04)
+
+the operator's: one command from a stock Halo to a pack ready to run - and, a nice touch, from the files a user has
+already. `tools/install/` (python, the standard library alone; `hf` for downloads - installing is not running).
+- **the manifest** (`packs.json`, the source of truth): every file a pack reads, by id - its repo, the commit it is
+  pinned to (never a branch), its path there, its bytes and SHA-256; and each pack - its model shards, its Engram
+  table and the shard slot the table takes (no, count), its picks profile, its drafter, its overlay (abliteration,
+  opt-in) and its tested settings (budgets, the guess off, drafted). a file of ours not yet published names the repo
+  and no commit: found among the user's files or refused, never fetched unpinned.
+- **the table's stamp**: unsloth's MXFP8 table is published stamped 1 of 1; a pack reads it as its shard slot. its
+  hash checked canonically - the two header values (split.no, split.count) read as published - so a table already
+  restamped (this box's) verifies too. the installer stamps only files it downloaded; a user's file another stamp
+  than the slot is copied (a reflink where the filesystem has them) and the copy stamped. it never writes a file it
+  did not create.
+- **the user's files** (`--have DIR ...`): each manifest file looked for by name under the directories given, and
+  taken only if its bytes and SHA-256 are the manifest's (`--trust-size`: bytes alone, the user's call, said so).
+- **the host**: a gfx1151; ROCm; the GPU memory limit (ttm's pages, reported - raising it is a system setting, the
+  user's); free disk for what is missing. a failed check stops with why.
+- **the result**: `<models>/<pack>/`, the shards linked by their names, the table as its slot, `osmos.json` (the
+  model's first shard, the picks, the drafter, the overlay if asked, the budgets and flags) and the command to run.
+  the engine built from this checkout (`make`, the HIP library, the tools).
+- **the launch** (the operator's): the installer ends at a model one can talk to - `--serve` starts osmos-api on a
+  port, or `--rig` registers the pack in rig (~/Projects/rig: the agent runtime that launches and routes local
+  models): a row merged by id into `~/.rig/models.json` - the provider half (window, maxTokens, reserve,
+  keepRecent) and the child half rig launches (`command` with `${PORT}`, `port`, `aliases`, `stopGrace`, `places`)
+  - no other row touched, the file replaced whole (written aside, renamed); and, asked first (or by flag), the
+  default model in `~/.rig/settings.json`. rig probes `/health`: 503 while loading, 200 when ready.
+- **the tests** (`tools/install/test_install.py`, unittest, no network): the manifest's checks (an unpinned file,
+  an unknown id, a slot out of range, refused); the stamp read, written and hashed canonically on a small GGUF; the
+  user's files found, a wrong hash refused, a wrong stamp copied not written; a pack laid out from local files.
+
+## osmos-api: the engine as an OpenAI-compatible server (design, 2026-11-04)
+
+the operator's: osmos served as rig serves its models - `POST /v1/chat/completions` (streamed as server-sent events,
+or whole), `GET /v1/models`, `GET /health` (503 loading, 200 ready) - in C, no Python at runtime: a new binary,
+`osmos-api --config <pack>/osmos.json --port N`, over the engine osmos-serve drives (the conversations kept, several
+at once, drafting).
+- **the tokenizer**: the GGUF's own (tokenizer.ggml.tokens / merges / token_type, pre "deepseek-v3"): byte-level
+  BPE - the pre-tokenizer's split (its regex's classes over Unicode categories), bytes to the GPT-2 alphabet, merges
+  by rank. checked token for token against Maya's (its pack's tokenizer, the corpus the bench used) and llama.cpp's
+  (llama-tokenize), decoded back byte for byte; special tokens matched whole.
+- **the template**: DeepSeek-V4.1's chat encoding (its encoding.py, as maya's serve/ds41_encoding.py ports it, MIT):
+  system, user, assistant, tool turns, thinking on or off, reasoning effort - checked against maya's golden chats
+  (serve/chat_golden.json) byte for byte.
+- **the wire**: HTTP/1.1 on libevt (which osmos-serve links), one connection a request's stream; a request's tokens
+  to a lane (osmos-serve's multi.c), each token detokenized as it lands (a partial UTF-8 sequence held); `stop`,
+  `max_tokens`, `stream`; sampling greedy (the engine's) - temperature and top-p refused by name until sampling is
+  built, not ignored.
+- **the order**: the tokenizer and its tests; the template and its tests; the server - a request against a fake
+  engine (the protocol's), then the real one; then the installer's `--serve` / `--rig`.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.
