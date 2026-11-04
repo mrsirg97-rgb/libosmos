@@ -18,6 +18,7 @@ extern "C" {
 #include "osmos/run/drafter.h"
 #include "osmos/run/forward.h"
 }
+#include "test_model.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -41,23 +42,24 @@ static int argmax_row(Forward* f, int i) {
 
 int main() {
   std::printf("[test_drafter_gpu] start\n");
-  const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "", mdir = home + "/models/ds1017/";
-  const std::string ddir = home + "/models/dspark";
-  FILE* idf = std::fopen((home + "/osmos-oracle/ids_real1k.txt").c_str(), "r");
+  const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
+  char path[512];
+  const TestModel which = test_model(path, sizeof path);
+  // the model's own drafter: ds1017's beside it, UD's the packs' (dspark-iq2xs)
+  const std::string ddir = which == TestModel::kGsq ? home + "/models/dspark" : home + "/Models/ds1017/dspark-iq2xs";
+  FILE* idf = std::fopen((home + "/bench/osmos-prompts/calib16k.txt").c_str(), "r");
   int ndev = 0;
-  if (!idf || access((ddir + "/dspark.bin").c_str(), R_OK) || access(mdir.c_str(), R_OK) ||
-      hipGetDeviceCount(&ndev) || !ndev) {
-    std::printf("[test_drafter_gpu] skipped: no ds1017, dspark, ids or GPU\n");
+  if (!idf || which == TestModel::kNone || access((ddir + "/dspark.bin").c_str(), R_OK) || hipGetDeviceCount(&ndev) ||
+      !ndev) {
+    std::printf("[test_drafter_gpu] skipped: no model, drafter, the bench's text or GPU\n");
     return 77;
   }
   std::vector<int32_t> ids(kPrompt);
   for (auto& v : ids) CHECK(std::fscanf(idf, "%d,", &v) == 1);
   std::fclose(idf);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
-  Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
-  Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
-  CHECK(g && eg);
-  Weights* w = weights_create(g, eg, werr);
+  char ferr[FORWARD_ERR] = "";
+  Gguf *g = nullptr, *eg = nullptr;
+  Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
   V = (uint32_t) w->geo.n_vocab;
   lg.resize(V);

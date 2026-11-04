@@ -11,7 +11,7 @@ typedef struct Config
 {
   char pack[64];
   char model[PATH_MAX], picks[PATH_MAX], drafter[PATH_MAX], overlay[PATH_MAX]; /* "" when none */
-  double budget_gib, drafted_budget_gib; /* the GPU's budget; drafting's (the drafter's room taken from it) */
+  double budget_gib, drafted_budget_gib; /* a fixed budget, plain and drafting; 0: sized to the GPU (auto) */
   bool no_guess;
   unsigned max_context, parallel;
   char num[4][32]; /* config_argv's numbers as text */

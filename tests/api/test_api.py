@@ -5,6 +5,7 @@ it - health while loading, streamed reasoning / content / tool calls, a whole an
 first shard"""
 import http.client
 import json
+import re
 import os
 import socket
 import subprocess
@@ -16,7 +17,8 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 API = os.path.join(ROOT, "bin", "osmos-api")
 FAKE = os.path.join(ROOT, "tests", "api", "fake_engine.py")
-MODEL = os.path.expanduser("~/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf")
+MODEL = os.environ.get("OSMOS_TEST_SHARD") or os.path.expanduser(
+    "~/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf")
 EOS = "<｜end▁of▁sentence｜>"
 CALLS = ("hm</think>Checking.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n"
          "<｜DSML｜ parameter name=\"city\" string=\"true\">Paris</｜DSML｜ parameter>\n"
@@ -38,6 +40,16 @@ def free_port():
         return s.getsockname()[1]
 
 
+class Version(unittest.TestCase):
+    def test_both_binaries_say_the_header_s(self):          # the release's tag is checked against this
+        with open(os.path.join(ROOT, "include", "osmos", "version.h")) as f:
+            want = re.search(r'#define OSMOS_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"', f.read()).group(1)
+        for exe in (API, os.path.join(ROOT, "bin", "osmos-serve")):
+            if os.path.exists(exe):
+                out = subprocess.run([exe, "--version"], capture_output=True, text=True)
+                self.assertEqual((out.returncode, out.stdout), (0, f"osmos {want}\n"), exe)
+
+
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
 class Api(unittest.TestCase):
     @classmethod
@@ -45,7 +57,7 @@ class Api(unittest.TestCase):
         cls.dir = tempfile.mkdtemp()
         cls.cfg = os.path.join(cls.dir, "osmos.json")
         with open(cls.cfg, "w") as f:
-            json.dump({"pack": "test", "model": MODEL, "budget_gib": 100, "max_context": 4096, "no_guess": True}, f)
+            json.dump({"pack": "test", "model": MODEL, "max_context": 4096, "no_guess": True}, f)
         cls.port = free_port()
         env = dict(os.environ, FAKE_DIR=cls.dir)
         cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE], env=env,
@@ -106,6 +118,7 @@ class Api(unittest.TestCase):
         argv = self.log()[0].split()
         self.assertEqual(argv[argv.index("--max-context") + 1], "4096")
         self.assertIn("--no-guess", argv)
+        self.assertEqual(argv[argv.index("--budget") + 1], "auto")      # no budget given: sized to the GPU
         self.assertEqual(argv[argv.index("--eos") + 1], ids(EOS))
         models = json.loads(self.get("/v1/models")[1])
         self.assertEqual(models["data"][0]["id"], "osmos-test")

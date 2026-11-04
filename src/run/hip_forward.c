@@ -96,6 +96,8 @@ static size_t choose(Forward *f, const PoolUnit *ex, PoolUnit *res, size_t n_res
   Layout a = {0, 0, 0};
   for (size_t i = 0; i < n_res; i++)
     add(&a, unit_bytes(&res[i]));
+  if (!budget)
+    budget = f->budget = a.total; /* 0: the dense weights alone (forward_budget says what they took) */
   if (a.total > budget)
     return fwd_fail(err, "the layers' weights are more than the budget"), 0;
   uint32_t *order = malloc((size_t)f->n_layers * E * sizeof *order); /* [layer][rank]: the expert */
@@ -495,7 +497,8 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
 {
   const int n_layers = o ? o->n_layers : 0;
   const uint32_t max_ctx = o ? o->max_ctx : 0, max_tokens = o && o->max_tokens ? o->max_tokens : FORWARD_MAX_TOKENS;
-  const uint64_t budget = o ? o->budget : 0, *picks = o ? o->picks : NULL;
+  const uint64_t *picks = o ? o->picks : NULL;
+  const uint64_t budget = o ? o->budget : 0;
   if (!w || n_layers < 1 || n_layers > w->geo.n_layers || !max_ctx || max_tokens > FORWARD_MAX_TOKENS)
     return fwd_fail(err, "no weights, or layers, a context or a step it cannot run"), NULL;
   if (w->n_files > FWD_MAX_FILES)
@@ -503,7 +506,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   Forward *f = calloc(1, sizeof *f);
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
-  f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->no_guess = o->no_guess;
+  f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->no_guess = o->no_guess, f->budget = budget;
   if (max_tokens < FWD_MAX_BATCH) /* a small step's server: every buffer of a step at its size (DESIGN.md) */
     f->n_subs = 1, f->max_tokens = max_tokens, f->step = (max_tokens + MM_TILE - 1) / MM_TILE * MM_TILE;
   else
@@ -575,6 +578,17 @@ bool fwd_room_left(const Forward *f, char *err)
   snprintf(why, sizeof why, "the GPU's free memory (%.2f GiB) under the expert pool's room (%.2f GiB): a smaller budget",
            (double)free_b / (1ull << 30), (double)f->pool_room / (1ull << 30));
   return fwd_fail(err, why);
+}
+
+uint64_t forward_budget(const Forward *f) { return f ? f->budget : 0; }
+
+bool forward_room(const Forward *f, uint64_t *bytes)
+{
+  size_t free_b = 0, total = 0;
+  if (!f || hipMemGetInfo(&free_b, &total) != hipSuccess)
+    return false;
+  *bytes = (uint64_t)free_b > f->pool_room ? (uint64_t)free_b - f->pool_room : 0;
+  return true;
 }
 
 void forward_destroy(Forward *f)

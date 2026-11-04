@@ -14,6 +14,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import layout  # noqa: E402
 import manifest  # noqa: E402
+import host  # noqa: E402
 import rig  # noqa: E402
 import stamp  # noqa: E402
 import userfiles  # noqa: E402
@@ -188,6 +189,24 @@ class Layout(unittest.TestCase):
             manifest.check(m)
             with self.assertRaisesRegex(layout.LayoutError, "not published"):
                 layout.lay(m, "p", os.path.join(d, "models"), [], trust_size=False, abliterated=False, fetch=None)
+
+
+class Host(unittest.TestCase):
+    def test_tools_named_before_anything_runs(self):
+        have = {"git", "make", "gcc", "hipcc", "hf"}
+        which = lambda n: f"/usr/bin/{n}" if n in have else None          # noqa: E731
+        self.assertTrue(host.tools(True, True, which, lambda p: False)[0])
+        have.discard("hf")
+        ok, why = host.tools(True, True, which, lambda p: False)
+        self.assertFalse(ok)
+        self.assertIn("hf", why)                                         # a download needs it: named first
+        self.assertTrue(host.tools(False, True, which, lambda p: False)[0])    # every file the user's: not needed
+        have.discard("hipcc")
+        ok, why = host.tools(False, True, which, lambda p: False)
+        self.assertFalse(ok)
+        self.assertIn("hipcc", why)
+        self.assertTrue(host.tools(False, True, which, lambda p: p == "/opt/rocm/bin/hipcc")[0])  # ROCm's own path
+        self.assertTrue(host.tools(False, False, which, lambda p: False)[0])  # --no-build: no build tools
 
 
 class Rig(unittest.TestCase):

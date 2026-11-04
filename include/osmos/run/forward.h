@@ -57,6 +57,8 @@ const float *forward_logits(const Forward *f);
 bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR]);
 const uint64_t *forward_picks(const Forward *f);
 uint64_t forward_swaps(const Forward *f);
+uint64_t forward_budget(const Forward *f);
+bool forward_room(const Forward *f, uint64_t *bytes);
 void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed, uint64_t *read);
 uint64_t forward_cpu_picks(const Forward *f);
 void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2]);
@@ -92,6 +94,15 @@ forward_create_with
   window (~3.9 GB at 2,048 tokens, ~1 at 512) - a decode's server gives that memory to the resident experts (a
   smaller step, a larger budget: a prompt then in more steps); forward_batch refuses a batch past it. the bits are
   not the step's size's. NULL o: as forward_create with no weights.
+
+forward_budget
+  the resident set's budget the forward was built with: ForwardOptions' budget, or for a budget of 0 its dense
+  weights' bytes (no expert resident: every one streamed) - the first build of osmos/run/fit.h's sizing.
+
+forward_room
+  the GPU memory free past what this forward will still take - the free memory less the expert pool's room, which the
+  pool takes as experts first stream: read before the first step (fit_budget's free_after; 0 when the room is not
+  there). false when the runtime cannot say.
 
 forward_destroy
   everything it allocated (its Seqs first: seq_destroy). NULL is nothing to do.

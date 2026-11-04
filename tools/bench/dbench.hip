@@ -1,4 +1,4 @@
-// dbench budget_gib max_tokens n_new warmup.txt q1.txt [q2.txt ...]: libosmos's decode as maya's --bench runs
+// dbench budget_gib|auto max_tokens n_new warmup.txt q1.txt [q2.txt ...]: libosmos's decode as maya's --bench runs
 // it - one forward (the lane), an answer of 64 tokens to the warm-up prompt (keep it unlike the questions: the
 // resident set follows what it answers), then each question's prompt and n_new greedy tokens; prints the prompt's
 // tok/s (past 256 tokens), the answer's tok/s and a hash of its tokens (the same hash: the same tokens). a prompt
@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -23,6 +24,7 @@
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
+#include "osmos/run/fit.h"
 #include "osmos/run/forward.h"
 #include "osmos/run/drafter.h"
 }
@@ -145,10 +147,11 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
 
 int main(int argc, char** argv) {
   if (argc < 6) {
-    std::fprintf(stderr, "usage: dbench budget_gib max_tokens n_new warmup.txt q1.txt [q2.txt ...]\n");
+    std::fprintf(stderr, "usage: dbench budget_gib|auto max_tokens n_new warmup.txt q1.txt [q2.txt ...]\n");
     return 2;
   }
-  const uint64_t budget = (uint64_t) (std::atof(argv[1]) * (1ull << 30));
+  const bool sized = !std::strcmp(argv[1], "auto");  // osmos-serve --budget auto's: sized to this GPU (fit.h)
+  const uint64_t budget = sized ? 0 : (uint64_t) (std::atof(argv[1]) * (1ull << 30));
   const uint32_t max_tokens = (uint32_t) std::atoi(argv[2]);
   const int n_new = std::atoi(argv[3]);
   const char* md = std::getenv("MODEL_DIR");
@@ -188,16 +191,43 @@ int main(int argc, char** argv) {
     std::printf("ranked by %s\n", pp);
   }
   const auto l0 = std::chrono::steady_clock::now();
-  Forward* f = forward_create_with(w, &o, ferr);
-  if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
   const int cpu_threads = std::getenv("CPU_THREADS") ? std::atoi(std::getenv("CPU_THREADS")) : 0;
-  if (!forward_lane(f, cpu_threads, ferr)) std::fprintf(stderr, "forward_lane: %s\n", ferr), std::_Exit(1);
+  struct Built {  // the forward, its lane, the drafter if DRAFT, and an answer's sequence while sizing
+    const Weights* w;
+    ForwardOptions o;
+    int cpu_threads;
+    Forward* f;
+  } b{w, o, cpu_threads, nullptr};
+  auto unbuild = [](void* ctx) {
+    Built* z = (Built*) ctx;
+    drafter_destroy(g_draft), forward_destroy(z->f);
+    g_draft = nullptr, z->f = nullptr;
+  };
+  auto build = [](void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[FIT_ERR]) -> bool {
+    Built* z = (Built*) ctx;
+    char ferr[FORWARD_ERR] = "";
+    z->o.budget = budget;
+    bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, ferr);
+    if (ok && std::getenv("DRAFT")) ok = (g_draft = drafter_create(z->f, std::getenv("DRAFT"), ferr)) != nullptr;
+    Seq* s = ok ? seq_create(z->f, ferr) : nullptr;  // an answer's sequence counted, then let go
+    ok = ok && s && forward_room(z->f, room);
+    seq_destroy(s);
+    if (!ok) {
+      drafter_destroy(g_draft), forward_destroy(z->f), g_draft = nullptr, z->f = nullptr;
+      return std::snprintf(err, FIT_ERR, "%s", ferr), false;
+    }
+    *built = forward_budget(z->f);
+    return true;
+  };
+  uint64_t sized_to = 0;
+  char zerr[FIT_ERR] = "";
+  if (sized ? !fit_sized(build, unbuild, &b, FIT_HEADROOM, &sized_to, zerr)
+            : !build(&b, budget, &sized_to, &sized_to, zerr))
+    std::fprintf(stderr, "build: %s\n", zerr), std::_Exit(1);
+  Forward* f = b.f;
+  if (sized) std::printf("sized to this GPU: budget %.2f GiB\n", sized_to / (double) (1ull << 30));
   g_greedy = std::getenv("GREEDY") != nullptr;
   if (const char* ip = std::getenv("IDS")) CHECK((g_ids = std::fopen(ip, "w")));
-  if (const char* dd = std::getenv("DRAFT")) {
-    g_draft = drafter_create(f, dd, ferr);
-    if (!g_draft) std::fprintf(stderr, "drafter_create: %s\n", ferr), std::_Exit(1);
-  }
   std::printf("loaded %.0fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - l0).count());
   uint64_t h = 1469598103934665603ull;
   answer(f, w, read_ids(argv[4]), 64, &h);  // the warm-up, as maya's bench

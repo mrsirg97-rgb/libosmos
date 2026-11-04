@@ -58,6 +58,8 @@ class Text:
 
 def run(label, exe, args, env, plan, text):
     eng = Multi(exe, args, env)
+    for n in eng.notes:  # the engine's start: its budget (osmos-serve --budget auto's sizing) among them
+        print(f"  {n}", flush=True)
     send_mu = threading.Lock()  # (a prompt's line is far past a pipe's atomic write: one sender at a time)
     turns, errors = [], []
     rid_next = [0]
@@ -91,10 +93,12 @@ def run(label, exe, args, env, plan, text):
     for th in threads:
         th.start()
     warm.wait()
-    t0[0] = time.monotonic()
+    t0[0], epoch0 = time.monotonic(), time.time()
     for th in threads:
         th.join()
     wall = time.monotonic() - t0[0]
+    print(f"  window {epoch0:.3f} {epoch0 + wall:.3f} (seconds since the epoch: tools/power.py's samples in it)",
+          flush=True)
     eng.quit()
     return {"label": label, "turns": turns, "errors": errors, "wall": wall, "agents": done_at}
 
@@ -142,6 +146,7 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--prompts", default=os.path.expanduser("~/bench/osmos-prompts"))
     ap.add_argument("--only", choices=("both", "osmos", "maya"), default="both")
+    ap.add_argument("--osmos-flag", action="append", default=[], help="a flag more for osmos-serve (--no-guess)")
     a = ap.parse_args()
     text = Text(read_ids(f"{a.prompts}/calib16k.txt") + read_ids(f"{a.prompts}/p8192.txt"))
     plan = workload(a.seed, a.agents, a.turns)
@@ -153,7 +158,8 @@ def main():
     ok = True
     if a.only in ("both", "osmos"):
         args = ["--model", a.model, "--dspark", a.dspark, "--budget", a.budget, "--max-tokens", a.max_tokens,
-                "--max-context", str(a.ctx), "--parallel", str(a.agents)] + (["--picks", a.picks] if a.picks else [])
+                "--max-context", str(a.ctx), "--parallel", str(a.agents)] + (["--picks", a.picks] if a.picks else []) + \
+            a.osmos_flag
         env = dict(os.environ, OSMOS_SLOT_KEEP="0")
         ok &= report(run(f"osmos-serve (budget {a.budget} GiB, {a.max_tokens}-token steps)", a.exe, args, env,
                          plan, text), total)

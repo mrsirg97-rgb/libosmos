@@ -84,10 +84,8 @@ bool config_read(const char *path, Config *c, char err[API_ERR])
   for (size_t i = 0; ok && i < j->n; i++)
     ok = field(c, j->key[i], j->item[i], err);
   json_free(j);
-  if (ok && (!c->pack[0] || !c->model[0] || !c->max_context || c->budget_gib <= 0))
-    return fail(err, "pack, model, max_context and budget_gib are needed", NULL);
-  if (ok && c->drafter[0] && c->drafted_budget_gib <= 0)
-    return fail(err, "a drafter needs drafted_budget_gib", NULL);
+  if (ok && (!c->pack[0] || !c->model[0] || !c->max_context))
+    return fail(err, "pack, model and max_context are needed", NULL);
   return ok;
 }
 
@@ -96,7 +94,8 @@ bool config_argv(Config *c, const char *engine, int eos, char *argv[CONFIG_ARGS_
   int n = 0;
   snprintf(c->eng, sizeof c->eng, "%s", engine);
   snprintf(c->num[0], sizeof c->num[0], "%u", c->max_context);
-  snprintf(c->num[1], sizeof c->num[1], "%g", c->drafter[0] ? c->drafted_budget_gib : c->budget_gib);
+  const double b = c->drafter[0] ? c->drafted_budget_gib : c->budget_gib; /* 0: auto (osmos-serve sizes it) */
+  snprintf(c->num[1], sizeof c->num[1], b > 0 ? "%g" : "auto", b);
   snprintf(c->num[2], sizeof c->num[2], "%d", eos);
   snprintf(c->num[3], sizeof c->num[3], "%u", c->parallel);
   argv[n++] = c->eng, argv[n++] = "--model", argv[n++] = c->model;

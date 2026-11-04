@@ -61,6 +61,9 @@ uint32_t conv_reach(const Conv *c, const int32_t *p, uint32_t n);
 bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n);
 bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t n, bool seed);
 
+bool serve_build(Server *sv, Conv *conv, int lanes, const Weights *w, ForwardOptions fo, const char *dspark,
+                 char err[FORWARD_ERR]);
+void serve_unbuild(Server *sv, Conv *conv, int lanes);
 int serve_single(Server *sv, Conv *c);
 int serve_multi(Server *sv, Conv *lanes, int n);
 

@@ -75,12 +75,8 @@ int main() {
   std::fclose(tf);
   CHECK(ids.size() >= kPrompt);
   ids.resize(kPrompt);
-  const std::string dir = std::string(path).substr(0, std::string(path).rfind('/') + 1);
-  char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "";
-  Gguf* g = gguf_create(path, gerr);
-  Gguf* eg = which == TestModel::kGsq ? gguf_create((dir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), gerr)
-                                      : nullptr;
-  Weights* w = weights_create(g, eg, werr);
+  Gguf *g = nullptr, *eg = nullptr;
+  Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
   const Run a = run(w, kShort, ids), b = run(w, kLong, ids);
   const uint64_t growth = b.bytes > a.bytes ? b.bytes - a.bytes : 0;

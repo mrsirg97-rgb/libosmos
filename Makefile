@@ -68,8 +68,9 @@ $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -o $@
 
 # the server (tools/serve): the engine over stdin / stdout, maya's serve protocol
-# --parallel's loop is libevt's (the operator's, C, MIT; DESIGN.md "the scheduler"): its checkout beside this one
-LIBEVT ?= ../libevt
+# --parallel's loop is libevt's (the operator's, C, MIT; DESIGN.md "the scheduler"): the submodule third_party/libevt
+# (git submodule update --init; LIBEVT=<dir> builds against another checkout)
+LIBEVT ?= third_party/libevt
 SERVE := $(BIN_DIR)/osmos-serve
 SERVE_OBJS := $(patsubst tools/serve/%.c,$(OBJ_DIR)/tools/serve/%.o,$(wildcard tools/serve/*.c))
 $(OBJ_DIR)/tools/serve/%.o: tools/serve/%.c
@@ -106,6 +107,9 @@ $(REQUANT): tools/requant/requant_dspark.c $(LIB) $(GGML)/build-ggml/ggml/src/li
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(GGML)/ggml/include $< $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a -lstdc++ -lm -lpthread -o $@
 requant: $(REQUANT)
+
+# the GPU's tests built, not run (CI: no gfx1151 there)
+gpu-build: $(GPU_TESTS) $(SERVE)
 
 # the GPU's tests (a gfx1151 and the model): exit 77 is a skip
 gpu-tests: $(GPU_TESTS)
@@ -147,4 +151,4 @@ tsan:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="-Wall -Wextra -Werror -Iinclude -Isrc/model -Isrc/mem -O1 -g -fsanitize=thread" LDLIBS="-lpthread -lm -fsanitize=thread" tests
 
-.PHONY: all clean tests asan tsan gpu-tests serve requant api api-test
+.PHONY: all clean tests asan tsan gpu-tests gpu-build serve requant api api-test

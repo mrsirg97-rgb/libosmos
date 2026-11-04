@@ -137,7 +137,7 @@ int main() {
   const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, ranked ? picks.data() : nullptr, kMaxTokens};
   CHECK((g_f = forward_create_with(w, &o, g_err)) && forward_lane(g_f, 0, g_err));
   const char* home = std::getenv("HOME");
-  const std::string ddir = std::string(home ? home : "") + "/Models/ds1017/dspark";
+  const std::string ddir = std::string(home ? home : "") + "/Models/ds1017/dspark-iq2xs";
   Drafter* d = access((ddir + "/dspark.bin").c_str(), R_OK) == 0 ? drafter_create(g_f, ddir.c_str(), g_err) : nullptr;
   const std::vector<int32_t> pa = ids(kPromptA, 1017), pb = ids(kPromptB, 4242);
 

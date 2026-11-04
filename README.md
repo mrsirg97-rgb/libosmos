@@ -7,8 +7,8 @@ It runs these quantizations of the model:
 
 - **unsloth's UD-IQ1_M and UD-IQ1_S** ([unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF),
   5 shards each): experts in 1-2-bit IQ types, attention Q6_K. The two packs below run both with unsloth's lossless
-  MXFP8 Engram table (one 203 GB file the two share) and, optionally, huihui-ai's abliteration patch. The comparison
-  with Maya is on UD-IQ1_M with its stock IQ4_NL table.
+  MXFP8 Engram table (one 203 GB file the two share) and, optionally, huihui-ai's abliteration patch. Against Maya
+  each engine reads the same files (UD-IQ1_M with its stock IQ4_NL table, UD-IQ1_S with the MXFP8 one).
 - **ISTA-DASLab's GSQ-RCO IQ2_XXS** ([ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)):
   experts IQ2_XXS / IQ2_XS / IQ1_M, its Engram a shared file linked as shard 6 (llama.cpp's layout since 2026-10-27;
   their earlier four-shard layout too). What the engine was first built on; measured below, not one of the packs.
@@ -26,69 +26,84 @@ kernels are checked against reference replays with deliberate mutations that mus
 
 C, HIP and a little C++. No Python at runtime.
 
+## Quick start
+
+```sh
+python3 tools/install/osmos_install.py ud-iq1_s --serve    # or ud-iq1_m; --rig to register it in rig instead
+```
+
+The installer builds the engine, fetches the pack's files at pinned commits (unsloth's shards and Engram table, our
+drafter and pick profile from [mrsirg97-rgb/osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)),
+checks every SHA-256, writes the pack's `osmos.json` and starts **osmos-api**: an OpenAI-compatible server
+(`POST /v1/chat/completions`, streamed or whole, with tools and reasoning; `GET /v1/models`; `GET /health`) on port
+8091. `--have <dir>` uses files you already have; `--abliterated` adds huihui-ai's patch as an overlay; `--rig`
+registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) and asks before making it the default model.
+
+Both packs run one context length: **1,048,576 tokens**, with up to 256K tokens a reply (its reasoning and answer).
+
 ## Performance
 
-Measured on one Strix Halo (128 GB, ~113 GiB GPU memory), **UD-IQ1_M**, 64K context, greedy decoding, 256 tokens an
-answer to [Project Maya](https://github.com/mw00/project-maya)'s bench questions and its 2K / 8K prompts, each engine
-in a fresh process, two rounds each. The comparison is Maya **1.1.52** (2026-11-03), the fastest engine we know of
-for this model on this hardware, on the same model, its pack of the same files. Details and every run: `DESIGN.md`.
+One Strix Halo (128 GB, ~113 GiB GPU memory), 2026-11-04, nothing else running. The comparison is
+[Project Maya](https://github.com/mw00/project-maya) **1.1.53**, the fastest engine we know of for this model on this
+hardware, on the same model files: Maya as its setup configures it (its pack, its own 8 GB DSpark, its CPU lane
+calibrated, its expert profile warmed on this machine first), osmos as it ships (the budget sized to the GPU,
+`--budget auto`; the router's guess off; our 4.7 GB IQ2_XS DSpark). Greedy decoding throughout. Every run and its
+command: `DESIGN.md`.
 
-| | libosmos | Maya 1.1.52 |
-| --- | --- | --- |
-| Decode, plain (3 questions; mean, range) | 16.3 tok/s (16.1-16.4) | 16.9 tok/s (16.5-17.2) |
-| Decode, DSpark drafted (same questions) | 29.5 tok/s (23.8-33.5) | 29.6 tok/s (25.9-32.2) |
-| Prompt, 2,048 tokens | 332-333 tok/s | 232-269 tok/s |
-| Prompt, 8,192 tokens (2,048-token steps, 106 GiB) | 472-484 tok/s | 407-412 tok/s |
-| Prompt, 8,192 tokens (one 8,192-token step, 100 GiB, 16K context) | ~578 tok/s | - |
-| Next-token distribution against the reference forward (mean KL, 32 positions; argmax agrees) | 0.209 (28 of 32) | 0.272 (29 of 32; an earlier version's logits) |
-| Agents: 4 at once x 8 turns (Maya's agent_bench, seed 1): wall; turn done p50 / p95 | 509 s; 50.9 / 113 s | 538 s; 57.6 / 127 s |
-| Attention state (KV) a token | ~0.9 KB (the model's FP8 / FP4 formats) | |
-| Output reproducible bit for bit | yes | no (greedy decode varied run to run, measured on 1.1.46) |
+### Agents and long prompts
 
-Budgets: plain decode 110 GiB, drafted 100 GiB, prompts 106 GiB (`bin/dbench`'s first argument; the rest of GPU
-memory is the step's buffers). A larger prompt step trades decode budget for long-prompt speed (DESIGN.md, "a
-prompt's step size").
+What an agent waits on is mostly reading: Maya's agent bench (4 agents at once x 8 turns, seed 1, 131K context,
+DSpark on) sends ~99K new prompt tokens against ~8K answer tokens. UD-IQ1_M; power is the APU package's (amdgpu PPT:
+CPU + GPU + NPU, not the wall), over the bench's own window, AMD's stock limits. The 128K prompt: real text, osmos at
+its 1M context, Maya at the 139,264 the prompt needs (the setting kindest to it); both then write the same 8 tokens:
 
-What bounds it: the GPU's own work per decode token is below Maya's (~54 ms against ~58 in kernel traces); what
-remains is waiting on the SSD for experts not in memory (~4.9 ms a token at the 110 GiB budget, a layer's burst of reads filling the SSD:
-RAM, not code, is the limit - GPU memory and the page cache are the same 128 GB) and the GPU's ~2 us between
-dependent kernels.
-
-### The two packs
-
-Measured on a quiet box (2026-11-04: nothing else on the SSD), every pack on the MXFP8 Engram table: plain at 110
-GiB, drafted with our IQ2_XS DSpark (4.7 GB) at 103 GiB, two interleaved rounds of the three questions, the router's
-guess off (`NO_GUESS=1`, `--no-guess`: it no longer pays on these packs); perplexity over 8,191 tokens of mixed text
-and code (`bin/ppl`); power the APU package's while decoding (amdgpu PPT, not the wall), AMD's stock limits.
-
-| | UD-IQ1_M | UD-IQ1_S | GSQ-RCO IQ2_XXS (not packed) |
+| | osmos | Maya 1.1.53 | |
 | --- | --- | --- | --- |
-| Decode, plain | 16.5 tok/s (16.1-16.8) | 19.1 tok/s (18.8-19.2) | 19.05 tok/s (18.9-19.2) |
-| Decode, drafted | 29.6 tok/s (23.6-36.4) | 38.0 tok/s (27.5-48.4) | 33.3 tok/s (24.0-41.6) |
-| Perplexity (abliterated) | 2.459 (-) | 2.501 (2.505) | 2.546 |
-| Package power, plain / drafted | - | 122 / 127 W | 125 / 125 W |
-| Energy a token, plain / drafted | - | 6.4 / 3.3 J | 6.6 / 3.8 J |
-| Expert shards on disk (plus the shared table) | 140 GB | 122 GB | 138 GB |
+| Wall, all 32 turns | **440 s** | 547 s | 20% less |
+| First token p50 / p95 | **5.8 / 58.3 s** | 6.6 / 90.9 s | p95 36% lower |
+| Turn done p50 / p95 | **44.1 / 100.1 s** | 55.9 / 124.9 s | 21% / 20% lower |
+| Package power, mean | 134 W | 124 W | |
+| Energy an answer token | **7.38 J** | 8.44 J | 13% less |
+| A 131,072-token prompt read (one run each) | **259 s** (506 tok/s) | 274 s (479 tok/s) | 5% less |
 
-UD-IQ1_S's experts are 12.5% smaller than UD-IQ1_M's, so more of them stay in GPU memory: over the three questions
-it read 615 experts from the SSD against UD-IQ1_M's 3,476 (plain) and 2,047 against 6,192 (drafted, where a round's
-verify touches many more). GSQ-RCO's IQ2 experts decode as fast as UD-IQ1_S's at plain, but its perplexity is the
-worst of the three, as unsloth's own comparison found (higher KL, lower top-1 agreement; on their six benchmarks
-GSQ-RCO IQ2_XXS 83.68 against UD-IQ1_S 83.53 and UD-IQ1_M 85.55): the packs are the two UD quants. The abliterated
-packs decode at the same speed. The MXFP8 table is speed- and quality-neutral against the IQ4_NL one on these experts
-(DESIGN.md, "the MXFP8 Engram pack"; GSQ-RCO 2.546 against 2.549); it is the one table every pack can share.
+### Both packs against Maya 1.1.53
 
-Earlier, on **GSQ-RCO IQ2_XXS** against Maya 1.1.46 (before the UD work: the KV's formats, the decode and prompt
-changes since; not re-measured - its files are not on the development box now):
+64K context (Maya's configuration), 256 tokens an answer to Maya's three bench questions and its 2K / 8K prompts,
+each engine in a fresh process, two interleaved rounds; tok/s, the mean (the range):
 
-| | libosmos | Maya 1.1.46 |
+| | UD-IQ1_M osmos | UD-IQ1_M Maya | UD-IQ1_S osmos | UD-IQ1_S Maya |
+| --- | --- | --- | --- | --- |
+| Prompt, 2,048 tokens | **298** (296-300) | 237 (231-243) | **330** (326-333) | 261 (259-262) |
+| Prompt, 8,192 tokens | **450** (443-456) | 404 (399-409) | **482** (477-486) | 429 (427-431) |
+| Decode, DSpark drafted | **29.7** (22.9-35.7) | 28.1 (23.7-32.4) | **38.2** (28.0-49.1) | 35.4 (27.6-44.2) |
+| Decode, plain | 16.5 (16.4-16.6) | 16.5 (15.9-16.8) | 19.2 (19.0-19.3) | 19.3 (18.8-20.0) |
+| Output reproducible bit for bit | yes | not measured (1.1.46: no) | yes | not measured |
+
+Plain decode is a tie; reading prompts, drafting and several conversations at once are where osmos leads. The sized
+budget is part of it: at the hand-picked budgets these runs used before `--budget auto` (110 GiB plain, 100 drafted,
+106 prompts) osmos drafted 28.6 (UD-IQ1_M) and 36.5 tok/s (UD-IQ1_S), its prompts 290-297 / 443-452 and 312-313 /
+469-482, its plain decode the same. osmos's answers hash the same in every run and configuration; Maya's greedy decode
+varied run to run when measured on 1.1.46 (DESIGN.md), not re-measured since.
+
+At the packs' own 1M context (fixed budgets then: plain 106.5, drafted 101.5 / 100.5 GiB), decode is UD-IQ1_S 18.8
+plain / 37.5 drafted, UD-IQ1_M 16.0 / 28.6 tok/s: a 1M context's attention state is ~0.85 GiB.
+
+### The two packs: quality and power
+
+64K context, plain at 110 GiB, drafted at 103; perplexity over 8,191 tokens of mixed text and code (`bin/ppl`):
+
+| | UD-IQ1_M (quality) | UD-IQ1_S (speed) |
 | --- | --- | --- |
-| Decode, plain (3 bench questions, mean) | 16.1 tok/s | 17.2 tok/s (v1.1.48) |
-| Decode, DSpark drafted (same questions) | 27.3 tok/s | 29.5 tok/s |
-| Drafted, repetitive output (CSV to JSON) | 35.5 tok/s | 37.0 tok/s |
-| Drafted, boilerplate code (getters and setters) | 38.8 tok/s | 29.5 tok/s |
-| Prompt, 2,048 tokens | ~200-255 tok/s | ~240 tok/s |
-| Prompt, 8,192 tokens (one 8,192-token step, 92 GiB) | ~540 tok/s | ~385 tok/s |
+| Perplexity (abliterated) | 2.459 (2.470) | 2.501 (2.505) |
+| Package power decoding, plain / drafted | - | 122 / 127 W |
+| Energy a token, plain / drafted | - | 6.4 / 3.3 J |
+| Expert shards on disk (plus the shared table) | 140 GB | 122 GB |
+
+UD-IQ1_S's experts are 12.5% smaller than UD-IQ1_M's, so more of them stay in GPU memory: it reads fewer from the SSD
+and decodes faster; UD-IQ1_M scores better on unsloth's six benchmarks (85.55 against 83.53). The abliterated packs
+decode at the same speed. Both run unsloth's MXFP8 Engram table, speed- and quality-neutral against the IQ4_NL one
+(DESIGN.md, "the MXFP8 Engram pack"). ISTA-DASLab's GSQ-RCO IQ2_XXS, the quant osmos was first built on, decodes as
+fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not packed.
 
 ## How it runs a 250 GB model in 128 GB
 
@@ -117,14 +132,15 @@ changes since; not re-measured - its files are not on the development box now):
   - GSQ-RCO's IQ2_XXS shards: llama.cpp's layout (5 shards, the shared Engram file linked as shard 6) or their earlier
     one (4 shards and `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`). Its GGUFs name no DSpark target layers: the
     drafter's `dspark.json` does (`target_layers`, ours carries it),
-- for drafting, DSpark's weights: Maya's pack of them (`dspark.bin`, `dspark.json`, 8 GB) or our IQ2_XS requant of
-  that pack (4.7 GB, the same acceptance on these questions),
+- for drafting, DSpark's weights: our IQ2_XS requant of Maya's pack (4.7 GB,
+  [mrsirg97-rgb/osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)) or Maya's own (8 GB),
 - optionally (UD-IQ1_M's decode ~12-13 -> ~16 tok/s with one), an expert pick profile beside the model (`osmos-picks.bin`: every
   pick on calibration text, `bin/dbench` with `PICKS_OUT` writes one).
 
 ## The packs
 
-A pack is unsloth's shards 1-4 of a quant, the MXFP8 Engram table as its shard 5, and a pick profile:
+A pack is unsloth's shards 1-4 of a quant, the MXFP8 Engram table as its shard 5, a pick profile and the drafter;
+`tools/install/` (the manifest `packs.json`: every file's repo, commit and SHA-256) lays one out. By hand:
 
 ```sh
 hf download unsloth/DeepSeek-V4.1-Flash-1017-GGUF --include "UD-IQ1_S/*0000[1-4]-of-00005.gguf" --local-dir .
@@ -153,11 +169,14 @@ make lib/libosmos_hip.a     # the GPU library
 make tests                  # CPU tests (no GPU, no model)
 make asan && make tsan      # the same under AddressSanitizer / ThreadSanitizer
 make gpu-tests              # GPU and whole-model tests (skip without a gfx1151 or a model)
+make serve api              # bin/osmos-serve (the engine over stdin / stdout), bin/osmos-api (the HTTP server)
+make api-test               # osmos-api against a scripted engine
+python3 tools/install/test_install.py
 ```
 
 The whole-model tests read GSQ-RCO from `~/models/ds1017` where it is, else UD-IQ1_M from `~/Models/ds1017/UD-IQ1_M`
-(`tests/gpu/test_model.h`); a few still need GSQ-RCO and skip without it. `test_model_gpu` also needs a dump of the
-reference forward (`oracle/`, see its README).
+(`tests/gpu/test_model.h`); `test_forward_gpu` still needs GSQ-RCO and its layer dump, and skips without them.
+`test_model_gpu` also needs a dump of the reference forward (`oracle/`, see its README).
 
 ## Use
 
@@ -168,7 +187,7 @@ char err[FORWARD_ERR];
 Gguf *g = gguf_create(".../DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf", err);
 Weights *w = weights_create(g, NULL, err);   /* GSQ-RCO: its Engram GGUF as the second argument */
 
-ForwardOptions o = {.n_layers = w->geo.n_layers, .max_ctx = 65536, .budget = 110ull << 30,
+ForwardOptions o = {.n_layers = w->geo.n_layers, .max_ctx = 1u << 20, .budget = 106ull << 30,
                     .picks = picks /* or NULL */, .max_tokens = 2048};
 Forward *f = forward_create_with(w, &o, err);
 forward_lane(f, 0, err);               /* decode's experts in the CPU-repeatable order; 0: all on the GPU */
@@ -196,13 +215,17 @@ python tools/bench/prompts.py <maya checkout> <maya pack>/tokenizer bench   # to
 hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos \
       -lhsa-runtime64 -o bin/dbench
 export MODEL=~/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf
-export PICKS=~/Models/ds1017/UD-IQ1_M/osmos-picks.bin MAX_CTX=65536
-bin/dbench 110 512 256 bench/warmup.txt bench/q1.txt bench/q2.txt bench/q3.txt                       # plain
-GREEDY=1 DRAFT=~/Models/ds1017/dspark bin/dbench 100 512 256 bench/warmup.txt bench/q1.txt ...    # drafted
-bin/dbench 106 2048 8 bench/warmup.txt bench/p2048.txt bench/p8192.txt                              # prompts
+export PICKS=~/Models/ds1017/UD-IQ1_M/osmos-picks.bin MAX_CTX=65536 NO_GUESS=1
+GREEDY=1 bin/dbench auto 512 256 bench/warmup.txt bench/q1.txt bench/q2.txt bench/q3.txt                 # plain
+GREEDY=1 DRAFT=~/Models/ds1017/dspark-iq2xs bin/dbench auto 512 256 bench/warmup.txt bench/q1.txt ...  # drafted
+bin/dbench auto 2048 8 bench/warmup.txt bench/p2048.txt bench/p8192.txt                                # prompts
+python tools/power.py --csv agents.csv -- python tools/serve/agent_bench.py --only osmos --model $MODEL \
+  --picks $PICKS --dspark ~/Models/ds1017/dspark-iq2xs --budget auto --osmos-flag=--no-guess        # agents
+echo "8 0 bench/p131072.txt" | python tools/serve/drive.py -- --model $MODEL --picks $PICKS --no-guess  # 128K
 ```
 
-`dbench budget_gib max_tokens n_new warmup q...`: `MODEL` a model's first shard (GSQ-RCO: `MODEL_DIR` and `ENGRAM`),
+`dbench budget_gib|auto max_tokens n_new warmup q...`: `auto` sizes the budget to the GPU as `osmos-serve` does;
+`MODEL` a model's first shard (GSQ-RCO: `MODEL_DIR` and `ENGRAM`),
 `PICKS` the profile, `DRAFT` DSpark's directory, `PICKS_OUT` writes a profile from the run. Run each configuration in
 a fresh process and interleave them; a first run after the machine has been idle is slower (a cold page cache). Each
 answer prints a hash of its tokens: the same hash in every configuration is the guarantee.
@@ -226,11 +249,17 @@ the expert streaming are model-independent; the attention, hyper-connections, En
 | `kernels/` | the HIP kernels and the shared arithmetic contracts (`lane.h`, `quant.h`) |
 | `tests/`, `tests/gpu/` | CPU tests; GPU and whole-model tests |
 | `oracle/` | the reference forward in PyTorch the numerics are held to (from Maya, MIT) |
-| `tools/` | grid generation, the bench |
+| `tools/api/` | osmos-api: the OpenAI-compatible server (osmos-serve its child) |
+| `tools/serve/` | osmos-serve: the engine over stdin / stdout, several conversations at once |
+| `tools/install/` | the installer and the packs' manifest |
+| `tools/` | grid generation, the bench, the drafter's requant |
 | `DESIGN.md` | every decision and measurement, including what was tried and did not help |
 
 ## Credits
 
+- [libevt](https://github.com/mrsirg97-rgb/libevt) (MIT, the same author): the event scheduler under
+  `osmos-serve --parallel` - several conversations at once on one engine, the loop osmos-api's requests run on
+  (`third_party/libevt`, a submodule).
 - [Project Maya](https://github.com/mw00/project-maya) (MIT): the reference this engine is measured against and
   learned from - the int8 expert approach (`ds4_iq.cu`), the DeepSeek reference tools in `oracle/` (copied, with
   `oracle/LICENSE.maya`), DSpark's packing. Findings from this work go back to Maya: `MAYA-UPSTREAM-PATCHES.md`.

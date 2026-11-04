@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -36,6 +37,17 @@ inline TestModel test_model(char* path, size_t n) {
   }
   path[0] = '\0';
   return TestModel::kNone;
+}
+
+// the test model's weights (and its GGUFs, for the caller to destroy after them): ds1017's Engram is a file of its
+// own, UD-IQ1_M's in its shards. NULL where they do not load
+inline Weights* test_weights(const char* path, TestModel which, Gguf** g, Gguf** eg) {
+  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "";
+  std::string dir(path);
+  dir = dir.substr(0, dir.rfind('/') + 1);
+  *g = gguf_create(path, err);
+  *eg = which == TestModel::kGsq ? gguf_create((dir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err) : nullptr;
+  return *g && (which != TestModel::kGsq || *eg) ? weights_create(*g, *eg, werr) : nullptr;
 }
 
 // each expert type's gate and down: ds1017's (IQ1_M, IQ2_XXS, IQ2_XS), UD-IQ1_M's (IQ1_S, IQ2_XXS, IQ2_XS, IQ2_S)

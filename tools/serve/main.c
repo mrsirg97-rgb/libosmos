@@ -2,7 +2,7 @@
    harnesses drive this engine as they drive maya's (DESIGN.md, "serving").
 
      osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
-                     [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
+                     [--budget GiB|auto] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
                      [--overlay <gguf>] [--serve]
 
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
@@ -14,6 +14,7 @@
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
    --no-guess: no experts guessed a layer ahead (ForwardOptions' no_guess - a model whose misses are few).
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
+   --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
    OSMOS_SLOT_KEEP=1 keeps conversations (maya #356): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
    (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least,
    OSMOS_SLOT_DAYS (7). greedy: maya's sampling, penalty and thinking keys are refused, named */
@@ -25,6 +26,7 @@
 #include "serve.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
+#include "osmos/version.h"
 
 static const char *opt(int argc, char **argv, const char *name, const char *dflt)
 {
@@ -72,15 +74,20 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
 
 int main(int argc, char **argv)
 {
+  if (argc == 2 && !strcmp(argv[1], "--version"))
+    return printf("osmos %s\n", OSMOS_VERSION), 0;
   const char *model = opt(argc, argv, "--model", NULL);
   if (!model)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
-               "[--max-context N] [--budget GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] "
+               "[--max-context N] [--budget GiB|auto] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] "
                "[--overlay <gguf>] [--serve]");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
   sv.max_tokens = (uint32_t)atol(opt(argc, argv, "--max-tokens", "2048"));
-  const double budget = atof(opt(argc, argv, "--budget", "106"));
+  const char *budget_arg = opt(argc, argv, "--budget", "auto");
+  const double budget = strcmp(budget_arg, "auto") ? atof(budget_arg) : 0; /* 0: sized to this GPU (build.c) */
+  if (strcmp(budget_arg, "auto") && budget <= 0)
+    return die("--budget takes GiB or auto");
   const char *par = opt(argc, argv, "--parallel", NULL);
   const int lanes = par ? atoi(par) : 1;
   if (lanes < 1)
@@ -114,19 +121,13 @@ int main(int argc, char **argv)
   }
   const ForwardOptions fo = {(int)w->geo.n_layers, sv.max_ctx, (uint64_t)(budget * (double)(1ull << 30)), picks,
                              sv.max_tokens, has(argc, argv, "--no-guess")};
-  if (!(sv.f = forward_create_with(w, &fo, err)) || !forward_lane(sv.f, 0, err))
-    return die(err);
-  const char *dspark = opt(argc, argv, "--dspark", NULL);
-  if (dspark && !(sv.d = drafter_create(sv.f, dspark, err)))
+  Conv *conv = calloc((size_t)lanes, sizeof *conv);
+  if (!conv)
+    return die("out of memory");
+  if (!serve_build(&sv, conv, lanes, w, fo, opt(argc, argv, "--dspark", NULL), err))
     return die(err);
   if (env_num("OSMOS_SLOT_KEEP", 0) != 0 && !open_slots(&sv, model, err, sizeof err))
     return die(err);
-  Conv *conv = calloc((size_t)lanes, sizeof *conv);
-  for (int i = 0; conv && i < lanes; i++)
-    if (!conv_create(&conv[i], &sv))
-      return die(conv[i].err);
-  if (!conv)
-    return die("out of memory");
   const int rc = par ? serve_multi(&sv, conv, lanes) : serve_single(&sv, conv);
   if (sv.slots) /* the end: every conversation set aside, RAM's written to the folder */
   {
@@ -137,11 +138,8 @@ int main(int argc, char **argv)
       out("NOTE slots: %s\n", serr);
     slots_destroy(sv.slots);
   }
-  for (int i = 0; i < lanes; i++)
-    conv_destroy(&conv[i]);
+  serve_unbuild(&sv, conv, lanes);
   free(conv);
-  drafter_destroy(sv.d);
-  forward_destroy(sv.f);
   weights_destroy(w);
   gguf_destroy(g);
   gguf_destroy(eg);

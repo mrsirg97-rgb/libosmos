@@ -79,13 +79,10 @@ int main() {
   const size_t base = ids.size();
   while (ids.size() < kPrompt) ids.push_back(ids[ids.size() % base]);  // (the text again past its end)
   ids.resize(kPrompt);
-  const std::string dir = std::string(path).substr(0, std::string(path).rfind('/') + 1);
-  char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", err[FORWARD_ERR] = "";
-  Gguf* g = gguf_create(path, gerr);
-  Gguf* eg = which == TestModel::kGsq ? gguf_create((dir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), gerr)
-                                      : nullptr;
-  Weights* w = weights_create(g, eg, werr);
+  Gguf *g = nullptr, *eg = nullptr;
+  Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
+  char err[FORWARD_ERR] = "";
   const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, 100ull << 30, nullptr, kMaxTokens};
   Forward* f = forward_create_with(w, &o, err);
   CHECK(f && forward_lane(f, 0, err));

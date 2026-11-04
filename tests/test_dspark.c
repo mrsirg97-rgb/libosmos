@@ -6,7 +6,7 @@
 
 #include "osmos/model/dspark.h"
 
-/* the index on the real drafter (~/models/dspark: skipped without it): its tensors as the pack has them; and
+/* the index on the real drafter (the packs', ~/Models/ds1017/dspark-iq2xs: skipped without it): its tensors as the pack has them; and
    malformed indexes refused, each with why */
 
 static char dir[] = "/tmp/test_dspark_XXXXXX";
@@ -74,13 +74,13 @@ static void test_malformed(void)
 static void test_real(void)
 {
   char path[512], err[DSPARK_ERR] = "";
-  snprintf(path, sizeof path, "%s/models/dspark", getenv("HOME") ? getenv("HOME") : "");
+  snprintf(path, sizeof path, "%s/Models/ds1017/dspark-iq2xs", getenv("HOME") ? getenv("HOME") : "");
   struct stat st;
   char json[600];
   snprintf(json, sizeof json, "%s/dspark.json", path);
   if (stat(json, &st) != 0)
   {
-    printf("  the real index: skipped (no ~/models/dspark)\n");
+    printf("  the real index: skipped (no ~/Models/ds1017/dspark-iq2xs)\n");
     return;
   }
   DsparkIndex *x = dspark_index(path, err);
@@ -97,7 +97,7 @@ static void test_real(void)
         char n[DSPARK_NAME_MAX];
         snprintf(n, sizeof n, "mtp.%d.ffn.experts.%d.w%d.weight", b, e, w);
         const DsparkTensor *t = dspark_tensor(x, n);
-        assert(t && t->type == 39 && t->n_dims == 2 && t->dims[0] * t->dims[1] == 2304ull * 5120);
+        assert(t && t->type == 17 && t->n_dims == 2 && t->dims[0] * t->dims[1] == 2304ull * 5120);
       }
   const DsparkTensor *mp = dspark_tensor(x, "mtp.0.main_proj.weight");
   assert(mp && mp->type == 8 && mp->dims[0] == 5120 && mp->dims[1] == 15360);
@@ -105,7 +105,7 @@ static void test_real(void)
   assert(hm && hm->type == 30 && hm->dims[0] == 129280 && hm->dims[1] == 256);
   assert(dspark_tensor(x, "mtp.2.confidence_head.proj.weight")->dims[1] == 5376);
   dspark_index_destroy(x);
-  printf("  the real index: 1224 tensors, names unique, 3 x 128 x 3 MXFP4 experts, the heads' shapes\n");
+  printf("  the real index: 1224 tensors, names unique, 3 x 128 x 3 IQ2_XS experts, the heads' shapes\n");
 }
 
 int main(void)

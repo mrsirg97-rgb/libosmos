@@ -20,6 +20,7 @@
 #include "api.h"
 #include "config.h"
 #include "osmos/model/gguf.h"
+#include "osmos/version.h"
 
 #define API_PORT 8091  /* the installer's first (tools/install/rig.py PORT_BASE) */
 #define API_CONNS 16   /* connections at once: past it a 503 (a local client's handful; the engine runs few) */
@@ -136,6 +137,8 @@ static int tokenize(const char *model)
 
 int main(int argc, char **argv)
 {
+  if (argc == 2 && !strcmp(argv[1], "--version"))
+    return printf("osmos %s\n", OSMOS_VERSION), 0;
   if (has(argc, argv, "--tokenize"))
     return opt(argc, argv, "--model", NULL) ? tokenize(opt(argc, argv, "--model", NULL))
                                             : die("usage: osmos-api --tokenize --model <first shard>");

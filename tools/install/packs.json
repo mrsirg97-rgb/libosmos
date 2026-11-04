@@ -37,29 +37,29 @@
                      "revision": "c59352db18acc847d9db6763df992d41b1d7d419",
                      "path": "unsloth/patch-UD-IQ1_S/DeepSeek-V4.1-Flash-1017-UD-IQ1_S-patch.gguf", "bytes": 608175552,
                      "sha256": "a24cb8eb5def5362a4baec2b411b2889dd38afdc633ac96e0496fb703f475021"},
-    "drafter-bin": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": null, "path": "dspark-iq2xs/dspark.bin",
+    "drafter-bin": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": "3c6b0aeb256c8625f418972ec23288877acc2556", "path": "dspark-iq2xs/dspark.bin",
                     "bytes": 4676398848, "sha256": "43e5c4d54cd496ec63f5e77a52c645c761e48e82c5bb904aa3bbe03d00254d1a"},
-    "drafter-json": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": null, "path": "dspark-iq2xs/dspark.json",
+    "drafter-json": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": "3c6b0aeb256c8625f418972ec23288877acc2556", "path": "dspark-iq2xs/dspark.json",
                      "bytes": 98163, "sha256": "b4771d1481256c1b233b44816fd575675fafa3e7c274b1c60971afe5842b30e0"},
-    "picks-ud-iq1_m": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": null, "path": "picks/UD-IQ1_M/osmos-picks.bin",
+    "picks-ud-iq1_m": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": "3c6b0aeb256c8625f418972ec23288877acc2556", "path": "picks/UD-IQ1_M/osmos-picks.bin",
                        "bytes": 122880, "sha256": "643856837683ad6356988e0b91062832a1ac387c1456cdb3d509c56d1d52cb66"},
-    "picks-ud-iq1_s": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": null, "path": "picks/UD-IQ1_S/osmos-picks.bin",
+    "picks-ud-iq1_s": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": "3c6b0aeb256c8625f418972ec23288877acc2556", "path": "picks/UD-IQ1_S/osmos-picks.bin",
                        "bytes": 122880, "sha256": "502b43a6d6a30f0baeeccd08667a7d9a23538c463d96fce1671e745e0ef0e5a1"}
   },
   "packs": {
     "ud-iq1_s": {
-      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_S (speed): 19 tok/s plain, 38 drafted",
+      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_S (speed): 18.8 tok/s plain, 37.5 drafted, 1M context",
       "shards": ["ud-iq1_s-1", "ud-iq1_s-2", "ud-iq1_s-3", "ud-iq1_s-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_s", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_s",
-      "settings": {"budget_gib": 106, "drafted_budget_gib": 101, "no_guess": true, "max_context": 1048576}
+      "settings": {"no_guess": true, "max_context": 1048576}
     },
     "ud-iq1_m": {
-      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality): 16.5 tok/s plain, 29.6 drafted",
+      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality): 16.0 tok/s plain, 28.6 drafted, 1M context",
       "shards": ["ud-iq1_m-1", "ud-iq1_m-2", "ud-iq1_m-3", "ud-iq1_m-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m",
-      "settings": {"budget_gib": 106, "drafted_budget_gib": 97, "no_guess": true, "max_context": 1048576}
+      "settings": {"no_guess": true, "max_context": 1048576}
     }
   }
 }

@@ -28,6 +28,7 @@ extern "C" {
 #include "osmos/gpu/mm.h"
 #include "osmos/run/forward.h"
 }
+#include "test_model.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -220,22 +221,21 @@ static Schedule mixed(std::mt19937& rng) {
 
 int main() {
   std::printf("[test_batch_gpu] start\n");
-  const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "", mdir = home + "/models/ds1017/";
+  const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
   FILE* idf = std::fopen((home + "/osmos-oracle/ids32.txt").c_str(), "r");
+  char path[512];
+  const TestModel which = test_model(path, sizeof path);
   int ndev = 0;
-  if (!idf || access((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), R_OK) || hipGetDeviceCount(&ndev) ||
-      !ndev) {
-    std::printf("[test_batch_gpu] skipped: no ds1017, ids or GPU\n");
+  if (!idf || which == TestModel::kNone || hipGetDeviceCount(&ndev) || !ndev) {
+    std::printf("[test_batch_gpu] skipped: no model, ids or GPU\n");
     return 77;
   }
   std::vector<int32_t> all(32);
   for (auto& v : all) CHECK(std::fscanf(idf, "%d,", &v) == 1);
   std::fclose(idf);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
-  Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
-  Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
-  CHECK(g && eg);
-  Weights* w = weights_create(g, eg, werr);
+  char ferr[FORWARD_ERR] = "";
+  Gguf *g = nullptr, *eg = nullptr;
+  Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
   Run r{forward_create(w, w->geo.n_layers, kCtx, kBudget, ferr), (size_t) w->geo.n_vocab, {}, {}};
   CHECK(r.f);

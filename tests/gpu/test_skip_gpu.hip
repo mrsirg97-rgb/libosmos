@@ -21,6 +21,7 @@ extern "C" {
 #include "osmos/gpu/mm.h"
 #include "osmos/run/forward.h"
 }
+#include "test_model.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -84,12 +85,12 @@ static Out play(Forward* f, size_t V, const int* ids, bool skip) {
 int main() {
   std::printf("[test_skip_gpu] start\n");
   const char* home = std::getenv("HOME");
-  const std::string mdir = std::string(home ? home : "") + "/models/ds1017/";
   const std::string idp = std::string(home ? home : "") + "/osmos-oracle/ids32.txt";
+  char path[512];
+  const TestModel which = test_model(path, sizeof path);
   int ndev = 0;
-  if (access(mdir.c_str(), R_OK) != 0 || access(idp.c_str(), R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess ||
-      !ndev) {
-    std::printf("[test_skip_gpu] skipped: no ds1017, no ids, or no GPU\n");
+  if (which == TestModel::kNone || access(idp.c_str(), R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
+    std::printf("[test_skip_gpu] skipped: no model, no ids, or no GPU\n");
     return 77;
   }
   int ids[32];
@@ -97,11 +98,9 @@ int main() {
   CHECK(idf);
   for (int& i : ids) CHECK(std::fscanf(idf, "%d,", &i) == 1);
   std::fclose(idf);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
-  Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
-  Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
-  CHECK(g && eg);
-  Weights* w = weights_create(g, eg, werr);
+  char ferr[FORWARD_ERR] = "";
+  Gguf *g = nullptr, *eg = nullptr;
+  Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
   Forward* f = forward_create(w, w->geo.n_layers, kCtx, kBudget, ferr);
   CHECK(f);

@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # the tag is the code's version or nothing ships
+      - name: assert the tag is OSMOS_VERSION
+        run: |
+          set -eu
+          v="$(sed -n 's/^#define OSMOS_VERSION "\(.*\)"$/\1/p' include/osmos/version.h)"
+          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "release: tag $GITHUB_REF_NAME is not v$v (include/osmos/version.h): not shipped" >&2
+            exit 1
+          fi
+
+      # GitHub's own archives leave submodules out: the source with libevt in it, and its checksum
+      - name: the source, libevt included
+        run: |
+          set -eu
+          name="osmos-${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          git archive --prefix="$name/" -o "dist/$name.tar" HEAD
+          (cd third_party/libevt && git archive --prefix="$name/third_party/libevt/" -o "../../dist/libevt.tar" HEAD)
+          tar --concatenate -f "dist/$name.tar" dist/libevt.tar && rm dist/libevt.tar
+          gzip -9n "dist/$name.tar"
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+
+      - name: the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "osmos $GITHUB_REF_NAME" --generate-notes

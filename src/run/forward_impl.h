@@ -132,6 +132,7 @@ struct Forward
   const Geometry *g;
   int n_layers;
   uint32_t max_ctx;
+  uint64_t budget;       /* the expert budget built with (forward_budget: ForwardOptions' or fitted) */
   uint32_t score_stride; /* a token's indexer scores: the most rows visible at max_ctx (the smallest ratio) */
   uint32_t score_rows;   /* the tokens scored at once: the step's, at most FWD_SCORE_BYTES of scores */
   uint32_t cand_words;   /* a token's candidate bits' words, when max_ctx can pass the candidate blocks; else 0 */

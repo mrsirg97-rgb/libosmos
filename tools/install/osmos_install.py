@@ -27,7 +27,8 @@ import userfiles  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
 API = os.path.join(ROOT, "bin", "osmos-api")
-BUILD = [["make", "-j"], ["make", "-j", "serve"], ["make", "-j", "api"]]  # the engine, osmos-serve, osmos-api
+BUILD = [["git", "submodule", "update", "--init"],  # libevt (osmos-serve's loop)
+         ["make", "-j"], ["make", "-j", "serve"], ["make", "-j", "api"]]  # the engine, osmos-serve, osmos-api
 
 
 def needed(m, pids, abliterated):
@@ -107,6 +108,8 @@ def main():
     found, fetch_ids = plan(m, ids, a.have, a.trust_size)
     if not check(host.disk(a.models, sum(m["files"][f]["bytes"] for f in fetch_ids))):
         raise SystemExit("not enough disk")
+    if not check(host.tools(bool(fetch_ids), not a.no_build)):
+        raise SystemExit("a tool missing: the line above says which")
     if a.dry_run:
         return 0
     if not a.no_build:

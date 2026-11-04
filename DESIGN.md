@@ -2166,9 +2166,53 @@ at once, drafting).
   tokens, at most FWD_SCORE_BYTES (512 MiB, the 64K size: one chunk there) - each token's scores, bits and picks its
   own, so no bit moves. tests/gpu/test_longctx_gpu: 1M 0.71 GiB over 64K (8.21 before), the last logits the same bits
   at both; seen failing before the change and on a chunk-offset mutant.
-- **the budgets at 1M** (osmos-serve to READY, the edges): IQ1_S plain 107, drafted 102; IQ1_M plain 107, drafted 98
-  - the packs 1 GiB under: IQ1_S 106 / 101, IQ1_M 106 / 97. the quiet-box decode numbers were measured at 110
-  (plain) and 100 (drafted) with a shorter context; plain at 106 is not yet re-measured.
+- **the budgets at 1M** (osmos-serve to READY with the packs' drafter, dspark-iq2xs; the edges to half a GiB): IQ1_S
+  plain 107.5, drafted 102.5; IQ1_M plain 107.5, drafted 101.5 - the packs 1 GiB under: IQ1_S 106.5 / 101.5, IQ1_M
+  106.5 / 100.5. (IQ1_M's drafted edge was first measured at 98 beside the original 7.97 GB drafter by mistake - the
+  packs ship the 4.68 GB requant; that drafter is deleted now, its tests on dspark-iq2xs.)
+- **decode at those budgets, 1M** (~/bench/1m-b, the quiet-box bench's method: three prompts, two interleaved rounds,
+  every answer's hash the quiet-box run's): IQ1_S plain 18.8, drafted 37.5; IQ1_M plain 16.0, drafted 28.6 tok/s -
+  against the 64K run at 110 / 103 GiB: 19.1 / 38.0 and 16.5 / 29.6 (-1.4 to -3.4%: the experts' smaller room, each
+  GiB fewer misses read from the SSD).
+- **published**: huggingface.co/mrsirg97-rgb/osmos-evo-1017 (public, MIT: DeepSeek's DSpark weights, maya's packing,
+  ggml's quantizers) - the drafter and both picks profiles; packs.json pins its commit.
+
+## the budget sized to the GPU, and Maya 1.1.53 (2026-11-04)
+
+- **why**: a pack's fixed budgets were this box's limits less 1 GiB - another Halo (a BIOS split, a desktop holding
+  GPU memory) starts short of them and is refused, and a budget picked for one setup (the bench's 100 GiB drafted)
+  leaves memory idle in another. first shipped as a shrink-only correction (the free memory the pack was measured
+  beside, less what is missing): it never fills a bigger room. replaced the same day, before the release.
+- **the sizing** (osmos/run/fit.h, `--budget auto`, osmos-serve's and dbench's default way): fit_sized builds the
+  engine whole - the forward, every lane's sequence, the drafter - at budget 0 (the forward's dense weights alone:
+  forward_budget says how much), reads forward_room (the GPU's free memory less the expert pool's room, which the pool
+  takes only as experts first stream), and builds again with that room but FIT_HEADROOM (1 GiB) given to experts,
+  until the room is within FIT_SLACK (256 MiB) past the headroom, FIT_BUILDS (5) at most. the pool's room is twice a
+  layer's streamed experts, so it shrinks as the budget grows: each step's room is an underestimate the next corrects,
+  never past the fill. a first version took one step from the dense build and undersized by ~6 GiB (that build's pool
+  is every expert's): caught by test_fit_gpu and by its plain run choosing 103.3 where 110 had run.
+- **measured**: test_fit_gpu (UD-IQ1_M, 64K, 2,048-token steps): 8.00 -> 100.40 -> 106.24 GiB in three builds, 1.21
+  GiB left. the bench's runs, the same budget both rounds: UD-IQ1_M plain 109.97, drafted 104.75, prompts 106.75;
+  UD-IQ1_S 110.79 / 105.55 / 107.55 (dbench's 512-token decode steps take less than osmos-serve's 2,048).
+  against the hand-picked budgets (110 / 100 / 106): plain the same, drafted +3.7% (UD-IQ1_M 28.6 -> 29.7) and +4.8%
+  (UD-IQ1_S 36.5 -> 38.2), prompts +0-4% (~/bench/auto).
+- **Maya 1.1.53** (`./maya.sh --bench`, its configs `maya-ud-{nodraft,dspark}.json` / `maya-s-*.json`: 64K, its own
+  8 GB DSpark, `--threads on`; UD-IQ1_S packed by its tools/ds4/pack_gguf.py, its lane calibrated (`--calibrate
+  --no-start`) and its expert profile warmed by a discarded run first - the warm-up 17.7, the next 19.2 tok/s), each
+  engine in a fresh process, two interleaved rounds (~/bench/maya-1.1.53, ~/bench/maya-1.1.53-s): plain a tie (UD-IQ1_M
+  16.5 / 16.5, UD-IQ1_S 19.2 / 19.3); drafted osmos 29.7 / 28.1 and 38.2 / 35.4; prompts 2K 298 / 237 and 330 / 261,
+  8K 450 / 404 and 482 / 429. the router's guess on lifted osmos's 2K prompt 290-297 -> 321 (one run): not taken - off
+  is the packs' setting and wins the agents below.
+- **agents** (tools/serve/agent_bench.py under tools/power.py, the energy over the bench's own window: power.py's
+  samples between agent_bench's printed epochs; ~/bench/agents, ~/bench/agents-auto), UD-IQ1_M, 4 x 8 seed 1, 131K:
+  osmos (auto) 440.1 s, first token p50 / p95 5.75 / 58.3 s, turn done 44.1 / 100.1 s, 134.2 W, 7.38 J an answer
+  token; osmos at the searched budget (100.5 GiB, the limit in that setup less 1) 453.7 s, 7.47 J; Maya 546.6 s,
+  6.63 / 90.9 s, 55.9 / 124.9 s, 123.6 W, 8.44 J. the UD-IQ1_S agents runs were not run (UD-IQ1_M decided it).
+- **a 131,072-token prompt** (tools/serve/drive.py, one GEN of ~/bench/osmos-prompts/p131072.txt: BOS, 130,879 tokens
+  of this repo's DESIGN and README text, 192 of calib16k; ~/bench/long), UD-IQ1_M, one run each: osmos (1M context,
+  auto, guess off) its first token at 258.9 s (506 tok/s), Maya (`--max-context 139264`, its drafter off) 273.5 s (479
+  tok/s); the 8 tokens after the same (hash 0de05d1e3180f2b6). the lead narrows with length (2K +26%, 8K +11%, 128K
+  +6%): at 128K the sparse attention over the whole context is most of a step's work, and the two are close there.
 
 ## open questions
 

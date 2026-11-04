@@ -40,7 +40,7 @@ def main() -> int:
     sensor = ppt_sensor()
     samples: list[tuple[float, float]] = []
     done = threading.Event()
-    t0 = time.monotonic()
+    t0, epoch0 = time.monotonic(), time.time()
 
     def sample() -> None:
         while not done.is_set():
@@ -58,7 +58,8 @@ def main() -> int:
     watts = [w for _, w in samples]
     mean = sum(watts) / len(watts)
     if a.csv:
-        Path(a.csv).write_text("s,watts\n" + "".join(f"{t:.2f},{w:.2f}\n" for t, w in samples))
+        Path(a.csv).write_text(f"# start {epoch0:.3f} (seconds since the epoch: a command's own window found by it)\n"
+                               "s,watts\n" + "".join(f"{t:.2f},{w:.2f}\n" for t, w in samples))
     print(f"power: {wall:.1f} s, package mean {mean:.1f} W, peak {max(watts):.1f} W, "
           f"energy {mean * wall / 3600:.2f} Wh ({len(samples)} samples, amdgpu PPT; not wall power)", file=sys.stderr)
     return rc

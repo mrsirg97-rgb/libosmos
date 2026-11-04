@@ -30,8 +30,8 @@ Drafter
   from the trunk's taps (the streams' mean entering its target layers, through main_proj and main_norm); a round runs
   the block [y, noise x 4] at the sequence's next positions through them, then the trunk's head and a rank-256 markov
   bias of each row's previous token give each row's draft (greedy), and a confidence head its confidence. its weights
-  (dir/dspark.bin, ~8 GB) in GPU memory of their own, outside the Forward's budget; its products the matvec's (F32
-  sums). drafts change no bit of the trunk's: they are only proposals, which a batched forward verifies.
+  (dir/dspark.bin, ~4.7 GB as the packs ship it: experts IQ2_XS) in GPU memory of their own, outside the Forward's
+  budget; its products the matvec's (F32 sums). drafts change no bit of the trunk's: they are only proposals, which a batched forward verifies.
 
 drafter_create
   the drafter read from dir (dspark.json, dspark.bin) for f; f takes its taps from its next step on - at the target
