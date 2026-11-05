@@ -14,6 +14,7 @@ STOP_GRACE = 30         # seconds rig's SIGTERM waits: a conversation's state wr
 MAX_TOKENS, RESERVE = 262144, 262144
 KEEP_RECENT_SHARE = 4   # keepRecent: a quarter of the window
 EFFORTS = ["low", "high", "max"]  # the reasoning efforts osmos-api maps (50, 75, 100: DESIGN.md, "the mapping")
+EFFORT = "max"                     # the row's default: the model's most thinking (rig's -effort picks another)
 
 
 class RigError(Exception):
@@ -82,7 +83,7 @@ def register(home, cfg, api, cfg_path, default):
     if RESERVE >= window or window // KEEP_RECENT_SHARE >= window - RESERVE:
         raise RigError(f"a {window}-token context leaves no room for a {RESERVE}-token reply (rig would refuse the row)")
     row = {"id": rid, "window": window, "maxTokens": MAX_TOKENS, "reserve": RESERVE,
-           "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive", "efforts": EFFORTS,
+           "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive", "efforts": EFFORTS, "effort": EFFORT,
            "command": f"{api} --config {cfg_path} --port ${{PORT}}", "port": _port(rows, rid),
            "aliases": ["osmos"], "stopGrace": STOP_GRACE, "places": 1}
     rows = [r for r in rows if r.get("id") != rid] + [row]

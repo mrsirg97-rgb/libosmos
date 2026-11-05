@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.2]: rig thinks at max by default
+
+The rig row the installer writes now carries `"effort": "max"` beside its efforts (`low`, `high`, `max`): rig sends
+it as `reasoning_effort`, and osmos-api maps it to DeepSeek's highest reasoning effort (100). rig's `-effort` (or its
+session's effort) picks another; osmos-api's own default for a client that names none stays `high` (75).
+
 ## [0.1.1]: the installer sets up rig when it is not there
 
 `osmos_install.py --rig` used to write the pack's row into rig's config and assume rig was installed. Now, when no
