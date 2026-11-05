@@ -59,24 +59,25 @@ typedef struct
   PoolRange part[POOL_PARTS];
   void *dst[POOL_PARTS];
   int n;
-  bool urgent;
+  uint64_t need;
 } Read;
 
 typedef struct
 {
   Read r[MAX_READS];
   int n;
-  uint32_t hurried[MAX_READS]; /* the units hurry was told of, in order */
-  int n_hurried;
+  uint32_t moved[MAX_READS]; /* the units need was told of, in order, and their needs then */
+  uint64_t moved_to[MAX_READS];
+  int n_moved;
 } Reads;
 
-static void fake_fetch(uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], bool urgent,
+static void fake_fetch(uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], uint64_t need,
                        void *ctx)
 {
   Reads *rs = ctx;
   assert(rs->n < MAX_READS && n >= 1 && n <= POOL_PARTS);
   Read *r = &rs->r[rs->n++];
-  r->unit = unit, r->n = n, r->urgent = urgent;
+  r->unit = unit, r->n = n, r->need = need;
   for (int k = 0; k < n; k++)
   {
     assert(parts[k].fd >= 0 && parts[k].bytes > 0 && dst[k] && (uintptr_t)dst[k] % POOL_ALIGN == 0);
@@ -84,11 +85,12 @@ static void fake_fetch(uint32_t unit, const PoolRange *parts, int n, void *const
   }
 }
 
-static void fake_hurry(uint32_t unit, void *ctx)
+static void fake_need(uint32_t unit, uint64_t need, void *ctx)
 {
   Reads *rs = ctx;
-  assert(rs->n_hurried < MAX_READS);
-  rs->hurried[rs->n_hurried++] = unit;
+  assert(rs->n_moved < MAX_READS);
+  rs->moved_to[rs->n_moved] = need;
+  rs->moved[rs->n_moved++] = unit;
 }
 
 typedef struct
@@ -144,7 +146,7 @@ static Pool *make(const PoolUnit *u, size_t n, uint64_t budget, char *err)
   memset(&mem, 0, sizeof mem);
   memset(&reads, 0, sizeof reads);
   memset(&events, 0, sizeof events);
-  return pool_create(u, n, budget, (Slots){fake_alloc, fake_free, &mem}, (Fetcher){fake_fetch, &reads, fake_hurry},
+  return pool_create(u, n, budget, (Slots){fake_alloc, fake_free, &mem}, (Fetcher){fake_fetch, &reads, fake_need},
                      on_event, &events, err);
 }
 
@@ -249,8 +251,8 @@ static void test_cold_to_pinned(int fd)
   assert(p && pool_state(p, 0) == POOL_COLD && pool_bytes(p) == 0);
   const void *dev[POOL_PARTS] = {0};
   assert(pool_pin(p, 0, dev) == POOL_WAIT && dev[0] == NULL);
-  assert(pool_state(p, 0) == POOL_READING && reads.n == 1 && reads.r[0].unit == 0 && reads.r[0].urgent);
-  assert(reads.n_hurried == 0);
+  assert(pool_state(p, 0) == POOL_READING && reads.n == 1 && reads.r[0].unit == 0 && reads.r[0].need == 0);
+  assert(reads.n_moved == 0); /* a pin: needed now */
   assert(pool_pin(p, 0, dev) == POOL_WAIT && reads.n == 1); /* a second hold, the same read */
   assert(pool_bytes(p) == 3 * KB + POOL_ALIGN); /* 3 KiB, then 50 B from the next boundary */
   check(p, u, 2, 64 * KB);
@@ -375,15 +377,17 @@ static void test_want(int fd)
   assert(p);
   const void *dev[POOL_PARTS];
   assert(pool_reading(p) == 0 && pool_reading(NULL) == 0);
-  pool_want(p, 0, 5); /* room free: read, no hold - not urgent */
-  assert(pool_state(p, 0) == POOL_READING && reads.n == 1 && !reads.r[0].urgent && pool_reading(p) == 1);
-  pool_want(p, 0, 5); /* reading: no second read */
-  assert(reads.n == 1 && reads.n_hurried == 0);
-  assert(pool_pin(p, 0, dev) == POOL_WAIT); /* waited on while read ahead: hurried */
-  assert(reads.n == 1 && reads.n_hurried == 1 && reads.hurried[0] == 0);
+  pool_want(p, 0, 5); /* room free: read, no hold - needed at 5 */
+  assert(pool_state(p, 0) == POOL_READING && reads.n == 1 && reads.r[0].need == 5 && pool_reading(p) == 1);
+  pool_want(p, 0, 3); /* reading: no second read - the need corrected */
+  assert(reads.n == 1 && reads.n_moved == 1 && reads.moved[0] == 0 && reads.moved_to[0] == 3);
+  assert(pool_pin(p, 0, dev) == POOL_WAIT); /* waited on while read ahead: needed now */
+  assert(reads.n == 1 && reads.n_moved == 2 && reads.moved[1] == 0 && reads.moved_to[1] == 0);
+  pool_want(p, 0, 9); /* held: its release says when - not moved */
+  assert(reads.n_moved == 2);
   finish(p, 0, true);
   pool_release(p, 0, 5);
-  assert(pool_pin(p, 0, dev) == POOL_OK && reads.n_hurried == 1); /* the prefetched unit a hit: nothing hurried */
+  assert(pool_pin(p, 0, dev) == POOL_OK && reads.n_moved == 2); /* the prefetched unit a hit: nothing moved */
   pool_release(p, 0, 5);
   assert(pool_pin(p, 1, dev) == POOL_WAIT);
   finish(p, 0, true);

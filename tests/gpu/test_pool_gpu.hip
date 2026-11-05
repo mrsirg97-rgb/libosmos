@@ -1,5 +1,5 @@
-// the pool and the resident set on the real model and the real GPU: one ds1017 layer's 384 experts (gate, up, down:
-// 3 parts each, from gguf), read by fetchq's workers into hip_slots' GPU memory - the pool with a budget of a quarter
+// the pool and the resident set on the real model and the real GPU (test_model.h's): one layer's 384 experts (gate, up, down:
+// 3 parts each, from gguf), read through reads.h (libevt) into hip_slots' GPU memory - the pool with a budget of a quarter
 // of them, so pins push others out and their memory is written again for the next; the resident set all of them.
 // the GPU sums every part in its memory, checked against the file's own bytes (read apart): a stale cache line of a
 // memory's last unit would show. needs a gfx1151 and ~/models/ds1017; skipped (77) without them.
@@ -17,7 +17,8 @@
 #include <vector>
 
 extern "C" {
-#include "osmos/mem/fetchq.h"
+#include "test_model.h"
+#include "osmos/mem/reads.h"
 #include "osmos/mem/hip_slots.h"
 #include "osmos/mem/pool.h"
 #include "osmos/mem/resident.h"
@@ -43,24 +44,19 @@ static double now_ms() {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-// the binary's inbox in small: a worker's done queues the unit, this thread hands it to the pool
-static std::mutex mu;
-static std::vector<std::pair<uint32_t, bool>> inbox;
-static int bad = 0;
-static void post(uint32_t u, bool ok, void*) {
-  std::lock_guard<std::mutex> lk(mu);
-  inbox.push_back({u, ok});
-  bad += !ok;
+// the binary's path: the pool's reads through reads.h (libevt: their order by need, their ends events this thread
+// pumps into pool_ready); the pool's events counted - a failed read is a FAILED one
+static Reads* g_reads = nullptr;
+static int bad = 0, pins = 0;
+static void on_event(const PoolEvent* ev, void*) {
+  bad += ev->kind == POOL_EV_FAILED;
+  pins += ev->kind == POOL_EV_PIN;
 }
 static int drain(Pool* p) {
-  std::vector<std::pair<uint32_t, bool>> got;
-  {
-    std::lock_guard<std::mutex> lk(mu);
-    got.swap(inbox);
-  }
-  for (auto& r : got) pool_ready(p, r.first, r.second);
-  if (got.empty()) usleep(100);
-  return (int) got.size();
+  char rerr[READS_ERR];
+  const int before = pins;
+  CHECK(reads_pump(g_reads, p, true, rerr));
+  return pins - before;
 }
 
 // a part's byte sum, from the file (not the memory under test)
@@ -82,13 +78,10 @@ static unsigned long long gpu_sum(const void* dev, size_t n, unsigned long long*
 
 int main() {
   std::printf("[test_pool_gpu] start\n");
-  const char* home = std::getenv("HOME");
   char path[512];
-  std::snprintf(path, sizeof path, "%s/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
-                home ? home : "");
   int ndev = 0;
-  if (access(path, R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
-    std::printf("[test_pool_gpu] skipped: no ds1017 or no GPU\n");
+  if (test_model(path, sizeof path) == TestModel::kNone || hipGetDeviceCount(&ndev) != hipSuccess || ndev == 0) {
+    std::printf("[test_pool_gpu] skipped: no model (test_model.h) or no GPU\n");
     return 77;
   }
   char gerr[GGUF_ERR] = "";
@@ -115,9 +108,8 @@ int main() {
     for (int k = 0; k < 3; k++) want[(size_t) e * 3 + k] = file_sum(units[e].part[k]);
   const uint64_t budget = unit_bytes * (uint64_t) E / 4;
   char err[POOL_ERR] = "";
-  Fetchq* q = fetchq_create(4, post, nullptr);
-  CHECK(q);
-  Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), fetchq_fetcher(q), nullptr, nullptr, err);
+  CHECK((g_reads = reads_create((uint32_t) E, 4, 8, err)));
+  Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), reads_fetcher(g_reads), on_event, nullptr, err);
   if (!p) std::fprintf(stderr, "pool_create: %s\n", err);
   CHECK(p);
   unsigned long long* d_sum = nullptr;
@@ -149,16 +141,15 @@ int main() {
               "read, every GPU sum the file's; %.2f ms a pin on average, %.0f MB held at the end\n",
               E, (double) unit_bytes / 1e6, (double) budget / 1e6, ok, waited, pin_ms / ok, (double) pool_bytes(p) / 1e6);
   CHECK(bad == 0);
-  fetchq_destroy(q);
+  reads_destroy(g_reads);
   pool_destroy(p);
 
-  // the whole path, cold: the layer's experts evicted, all asked at once, read by fetchq's 4 workers (DESIGN.md "the
-  // fetcher"), each read's end pinned on this thread as the binary's engine event would - then a GPU sum each
+  // the whole path, cold: the layer's experts evicted, all asked at once, read by 4 readers 8 at a time (reads.h;
+  // DESIGN.md "the fetcher"), each read's end an event pumped into the pool on this thread - then a GPU sum each
   for (int k = 0; k < 3; k++) posix_fadvise(fds[t[k]->file], (off_t) t[k]->offset, (off_t) t[k]->bytes, POSIX_FADV_DONTNEED);
-  q = fetchq_create(4, post, nullptr);
-  CHECK(q);
-  p = pool_create(units.data(), units.size(), unit_bytes * (uint64_t) E + (64u << 20), hip_slots(), fetchq_fetcher(q),
-                  nullptr, nullptr, err);
+  CHECK((g_reads = reads_create((uint32_t) E, 4, 8, err)));
+  p = pool_create(units.data(), units.size(), unit_bytes * (uint64_t) E + (64u << 20), hip_slots(),
+                  reads_fetcher(g_reads), on_event, nullptr, err);
   CHECK(p);
   const double t0 = now_ms();
   for (int e = 0; e < E; e++) {
@@ -174,11 +165,11 @@ int main() {
     for (int k = 0; k < 3; k++)
       CHECK(gpu_sum(dev[k], (size_t) units[e].part[k].bytes, d_sum) == want[(size_t) e * 3 + k]);
   }
-  std::printf("  cold, the whole path: %d experts (%.2f GB) read by fetchq into GPU memory in %.0f ms = %.2f GB/s, %d "
+  std::printf("  cold, the whole path: %d experts (%.2f GB) read through reads.h into GPU memory in %.0f ms = %.2f GB/s, %d "
               "reads failed; the GPU's sums the file's\n", E, (double) unit_bytes * E / 1e9, cold_ms,
               (double) unit_bytes * E / (cold_ms * 1e-3) / 1e9, bad);
   CHECK(bad == 0);
-  fetchq_destroy(q);
+  reads_destroy(g_reads);
   pool_destroy(p);
 
   // the resident set: the layer's experts, cold, read once into GPU memory; every part's GPU sum the file's, and the

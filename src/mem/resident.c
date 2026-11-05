@@ -116,7 +116,8 @@ Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, in
     for (int k = 0; k < r->u[i].n_parts; k++) /* a room part (no file) is memory only: nothing read */
       if (r->u[i].part[k].fd >= 0)
         read[n] = r->u[i].part[k], dst[n++] = r->dev[i] + r->off[i][k];
-    fetchq_fetcher(q).fetch((uint32_t)i, read, n, dst, false, q);
+    if (!fetchq_read(q, (uint32_t)i, read, n, dst, false)) /* the queue could not grow: the unit's read failed */
+      on_read((uint32_t)i, false, r);
   }
   pthread_mutex_lock(&r->mu);
   while (ok && r->done < n_units)

@@ -38,6 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true # libevt: built into libosmos.a, so under the sanitizers too
       - name: AddressSanitizer + UndefinedBehaviorSanitizer
         run: make asan
       - name: ThreadSanitizer

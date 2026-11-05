@@ -10,7 +10,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/kvfmt.h"
-#include "osmos/mem/fetchq.h"
+#include "osmos/mem/reads.h"
 #include "osmos/mem/pool.h"
 #include "osmos/mem/resident.h"
 #include "osmos/mem/rowread.h"
@@ -49,22 +49,6 @@
 #define FWD_UP_BYTES(pairs) ((uint64_t)(pairs) * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4) + 10 * 16)
 /* the experts' slots at most: each its tokens padded to whole tiles - the pairs and a tile's padding an expert */
 #define FWD_MAX_SLOTS(pairs, experts) ((pairs) + (uint64_t)(experts) * (MM_TILE - 1))
-
-/* the fetcher's finished reads, handed from its workers to the forward (the pool's one consumer) */
-typedef struct Read
-{
-  uint32_t unit;
-  bool ok;
-} Read;
-
-typedef struct Inbox
-{
-  pthread_mutex_t mu;
-  pthread_cond_t cv;
-  Read *r;
-  size_t n, cap;
-  bool broken; /* a done the inbox could not hold: the forward refuses from then on */
-} Inbox;
 
 /* a sub-batch's own: all its tokens carry from one layer to the next - swapped into the Forward and its Scratch to
    run one of its layers (hip_step.c's enter and leave) */
@@ -140,8 +124,7 @@ struct Forward
   uint32_t slots;
   int fds[FWD_MAX_FILES];
   Pool *pool;
-  Fetchq *fq;
-  Inbox in;
+  Reads *reads; /* the pool's reads, on libevt: their order by need, their ends events (reads.h) */
   Resident *res;            /* the layers' tensors and a share of the experts, in GPU memory (resident.h) */
   int32_t *rix;             /* an expert's place in res (unit: layer * n_experts + expert), -1: streamed by the pool */
   uint32_t n_expert_units;  /* the pool's units: layer * n_experts + expert */
@@ -290,7 +273,6 @@ bool fwd_put(void *dev, const void *host, uint64_t bytes);
 bool fwd_put_async(void *dev, const void *pinned, uint64_t bytes);
 bool fwd_copy(void *dst, const void *src, uint64_t bytes); /* device to device, on the stream */
 void fwd_release_held(Forward *f);
-void fwd_on_read(uint32_t unit, bool ok, void *arg); /* fetchq's done: the unit to the inbox */
 bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memory */
 bool fwd_wait_read(Forward *f, char *err); /* a read's end waited for, the finished ones to the pool */
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);

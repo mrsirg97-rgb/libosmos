@@ -258,9 +258,9 @@ the expert streaming are model-independent; the attention, hyper-connections, En
 
 ## Credits
 
-- [libevt](https://github.com/mrsirg97-rgb/libevt) (MIT, the same author): the event scheduler under
-  `osmos-serve --parallel` - several conversations at once on one engine, the loop osmos-api's requests run on
-  (`third_party/libevt`, a submodule).
+- [libevt](https://github.com/mrsirg97-rgb/libevt) (MIT, the same author): the event scheduler under the engine -
+  the forward's expert reads (their order by need, their ends as events) and `osmos-serve --parallel`'s loop, several
+  conversations at once on one engine (`third_party/libevt`, a submodule, built into `libosmos.a`).
 - [Project Maya](https://github.com/mw00/project-maya) (MIT): the reference this engine is measured against and
   learned from - the int8 expert approach (`ds4_iq.cu`), the DeepSeek reference tools in `oracle/` (copied, with
   `oracle/LICENSE.maya`), DSpark's packing. Findings from this work go back to Maya: `MAYA-UPSTREAM-PATCHES.md`.
