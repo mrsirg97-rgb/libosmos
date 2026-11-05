@@ -88,7 +88,7 @@ static void test_many(int fd, uint32_t n, int threads)
   Reads *r = reads_create(n, threads, err);
   assert(r);
   Log log = {0};
-  Pool *p = pool_create(u, n, (uint64_t)n * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), on_event,
+  Pool *p = pool_create(u, n, (uint64_t)n * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), 0, on_event,
                         &log, perr);
   assert(p);
   const void *dev[POOL_PARTS];
@@ -126,7 +126,7 @@ static void test_split(int fd)
   PoolUnit *u = units_of(fd, U);
   Reads *r = reads_create(U, 4, err);
   assert(r);
-  Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), NULL, NULL,
+  Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), 0, NULL, NULL,
                         perr);
   assert(p);
   const void *dev[POOL_PARTS];
@@ -154,7 +154,7 @@ static void test_pins(int fd)
   PoolUnit *u = units_of(fd, U);
   Reads *r = reads_create(U, 1, err);
   assert(r);
-  Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), NULL, NULL,
+  Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), 0, NULL, NULL,
                         perr);
   assert(p);
   const void *dev[POOL_PARTS];
@@ -185,7 +185,7 @@ static void test_failure(void)
   Reads *r = reads_create(2, 2, err);
   assert(r);
   Log log = {0};
-  Pool *p = pool_create(u, 2, 2 * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), on_event, &log, perr);
+  Pool *p = pool_create(u, 2, 2 * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), 0, on_event, &log, perr);
   assert(p);
   close(fd);
   const void *dev[POOL_PARTS];
@@ -207,7 +207,7 @@ static void test_destroy_busy(int fd)
   PoolUnit *u = units_of(fd, U);
   Reads *r = reads_create(U, 2, err);
   assert(r);
-  Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), NULL, NULL,
+  Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), 0, NULL, NULL,
                         perr);
   assert(p);
   for (uint32_t i = 0; i < U; i++)

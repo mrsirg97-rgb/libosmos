@@ -8,7 +8,9 @@
 typedef struct Slot
 {
   PoolUnit u;
-  uint64_t off[POOL_PARTS]; /* each part's place in the unit's memory */
+  uint64_t off[POOL_PARTS];   /* each part's read's place in the unit's memory */
+  uint64_t head[POOL_PARTS];  /* the part's slice inside its read (a read alignment's remainder; else 0) */
+  PoolRange read[POOL_PARTS]; /* what is read for each part: its range, or the aligned range around it */
   uint64_t size;            /* the memory's bytes */
   uint8_t *dev;             /* its memory, reading or pinned; NULL cold */
   PoolState state;
@@ -127,8 +129,8 @@ static uint64_t kept(const Pool *p, Reach r)
 }
 
 /* memory for `s`: a spare of its size, else room (spares freed, then the furthest of the units in reach) and the
-   allocator's. NULL when it cannot fit (nothing changed) or the allocator refuses (spares and units may have gone for
-   its room) */
+   allocator's - which, refusing, gets more room the same way until it fits. NULL when it cannot fit (nothing changed)
+   or nothing more can go (spares and units may have gone for its room) */
 static uint8_t *room(Pool *p, const Slot *s, Reach r)
 {
   uint8_t *dev = take_spare(p, s->size);
@@ -150,10 +152,25 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
       return freed;
     release_memory(p, freed, v->size);
   }
-  dev = p->slots.alloc(s->size, p->slots.ctx);
-  if (dev)
-    p->bytes += s->size;
-  return dev;
+  for (;;) /* the allocator refusing with the budget's room made (its memory in pieces: an arena's): more room made, the
+              spares then the units furthest, until it fits or nothing more can go */
+  {
+    if ((dev = p->slots.alloc(s->size, p->slots.ctx)))
+    {
+      p->bytes += s->size;
+      return dev;
+    }
+    if (p->n_spare)
+    {
+      const Spare x = p->spare[--p->n_spare];
+      release_memory(p, x.dev, x.size);
+      continue;
+    }
+    Slot *v = furthest(p, r);
+    if (!v)
+      return NULL;
+    release_memory(p, unpin(p, v), v->size);
+  }
 }
 
 /* a read's need on the Fetcher: a pin's 0 (waited on now), a want's its `next` + 1 - so 0 is a pin's alone */
@@ -166,10 +183,10 @@ static void begin_read(Pool *p, Slot *s, uint8_t *dev, uint64_t need)
     dst[k] = dev + s->off[k];
   s->dev = dev, s->state = POOL_READING, p->reading++;
   emit(p, POOL_EV_READ, (uint32_t)(s - p->s), s->size);
-  p->fetcher.fetch((uint32_t)(s - p->s), s->u.part, s->u.n_parts, dst, need, p->fetcher.ctx);
+  p->fetcher.fetch((uint32_t)(s - p->s), s->read, s->u.n_parts, dst, need, p->fetcher.ctx);
 }
 
-static bool check_unit(Slot *s, size_t i, char *err)
+static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
 {
   if (s->u.n_parts < 1 || s->u.n_parts > POOL_PARTS)
   {
@@ -186,16 +203,28 @@ static bool check_unit(Slot *s, size_t i, char *err)
       snprintf(err, POOL_ERR, "unit %zu part %d: 0 bytes, past its file, or a file that cannot be read", i, k);
       return false;
     }
+    const uint64_t a = align > POOL_ALIGN ? align : POOL_ALIGN, head = align ? r->offset % align : 0;
+    const uint64_t len = align ? (head + r->bytes + align - 1) / align * align : r->bytes;
+    if (align && r->offset - head + len > (uint64_t)st.st_size)
+    {
+      snprintf(err, POOL_ERR, "unit %zu part %d: its %llu-aligned range passes its file's end", i, k,
+               (unsigned long long)align);
+      return false;
+    }
+    s->read[k] = (PoolRange){r->fd, r->offset - head, len};
+    s->head[k] = head;
     s->off[k] = s->size;
-    s->size += (r->bytes + POOL_ALIGN - 1) / POOL_ALIGN * POOL_ALIGN;
+    s->size += (len + a - 1) / a * a;
   }
   return true;
 }
 
 Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots slots, Fetcher fetcher,
-                  pool_event_fn on_event, void *event_arg, char err[POOL_ERR])
+                  uint64_t read_align, pool_event_fn on_event, void *event_arg, char err[POOL_ERR])
 {
   err[0] = 0;
+  if (read_align & (read_align - 1))
+    return snprintf(err, POOL_ERR, "a read alignment of %llu: not a power of two", (unsigned long long)read_align), NULL;
   Pool *p = calloc(1, sizeof *p);
   if (!p || !(p->s = calloc(n_units ? n_units : 1, sizeof *p->s)))
   {
@@ -208,7 +237,7 @@ Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots 
   {
     Slot *s = &p->s[i];
     s->u = units[i];
-    const bool fits = check_unit(s, i, err) && s->size <= budget;
+    const bool fits = check_unit(s, i, read_align, err) && s->size <= budget;
     if (!fits && !err[0])
       snprintf(err, POOL_ERR, "unit %zu: %llu bytes, more than the budget", i, (unsigned long long)s->size);
     if (!fits)
@@ -245,7 +274,7 @@ void pool_destroy(Pool *p)
 static void fill(const Slot *s, const void *dev[POOL_PARTS])
 {
   for (int k = 0; k < s->u.n_parts; k++)
-    dev[k] = s->dev + s->off[k];
+    dev[k] = s->dev + s->off[k] + s->head[k];
 }
 
 PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS])

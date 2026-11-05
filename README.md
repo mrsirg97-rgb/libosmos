@@ -45,61 +45,67 @@ Both packs run one context length: **1,048,576 tokens**, with up to 256K tokens 
 
 The short version, for people who want one page: [`docs/STRIX-HALO.md`](docs/STRIX-HALO.md).
 
-One Strix Halo (128 GB, ~113 GiB GPU memory), 2026-11-04, nothing else running. The comparison is
-[Project Maya](https://github.com/mw00/project-maya) **1.1.53** on the same model files: Maya as its setup configures it (its pack, its own 8 GB DSpark, its CPU lane
-calibrated, its expert profile warmed on this machine first), osmos as it ships (the budget sized to the GPU,
-`--budget auto`; the router's guess off; our 4.7 GB IQ2_XS DSpark). Greedy decoding throughout. Every run and its
-command: `DESIGN.md`.
+One Strix Halo (128 GB, ~113 GiB GPU memory), 2026-11-05, nothing else running, AMD's `performance` profile. The
+comparison is [Project Maya](https://github.com/mw00/project-maya) **1.1.55** on the same model files: Maya as its setup
+configures it (its pack, its own 8 GB DSpark, its CPU lane calibrated on this machine, its expert profile warmed first),
+osmos **0.3.0** as it ships (the budget sized to the GPU, `--budget auto`; the router's guess off; our 4.7 GB IQ2_XS
+DSpark). Greedy decoding throughout. Every run and its command: `DESIGN.md`.
 
-### Agents and long prompts
+### Agents
 
 What an agent waits on is mostly reading: Maya's agent bench (4 agents at once x 8 turns, seed 1, 131K context,
 DSpark on) sends ~99K new prompt tokens against ~8K answer tokens. UD-IQ1_M; power is the APU package's (amdgpu PPT:
-CPU + GPU + NPU, not the wall), over the bench's own window, AMD's stock limits. The 128K prompt: real text, osmos at
-its 1M context, Maya at the 139,264 the prompt needs (the setting kindest to it); both then write the same 8 tokens.
-Measured with osmos 0.1.3; 0.2.0 measured level on the same bench (450.6 s against 0.1.3's 443.8 and 451.8 s that
-afternoon, 7.25 J an answer token - CHANGELOG):
+CPU + GPU + NPU, not the wall), over the bench's own window:
 
-| | osmos 0.1.3 | Maya 1.1.53 | |
+| | osmos 0.3.0 | Maya 1.1.55 | |
 | --- | --- | --- | --- |
-| Wall, all 32 turns | **440 s** | 547 s | 20% less |
-| First token p50 / p95 | **5.8 / 58.3 s** | 6.6 / 90.9 s | p95 36% lower |
-| Turn done p50 / p95 | **44.1 / 100.1 s** | 55.9 / 124.9 s | 21% / 20% lower |
-| Package power, mean | 134 W | 124 W | |
-| Energy an answer token | **7.38 J** | 8.44 J | 13% less |
-| A 131,072-token prompt read (one run each) | **259 s** (506 tok/s) | 274 s (479 tok/s) | 5% less |
+| Wall, all 32 turns | **433 s** | 542 s | 20% less |
+| First token p50 / p95 | **5.9 / 51.8 s** | 6.3 / 81.3 s | p95 36% lower |
+| Turn done p50 / p95 | **43.0 / 97.8 s** | 55.3 / 121.9 s | 22% / 20% lower |
+| Package power, mean | 129 W | 127 W | |
+| Energy an answer token | **6.98 J** | 8.74 J | 20% less |
 
-### Both packs against Maya 1.1.53
+### Both packs against Maya 1.1.55
 
 64K context (Maya's configuration), 256 tokens an answer to Maya's three bench questions and its 2K / 8K prompts,
-each engine in a fresh process, two interleaved rounds; tok/s, the mean (the range):
+each engine in a fresh process; tok/s, the mean of two interleaved rounds (osmos's UD-IQ1_M: one run of each the same
+afternoon, beside Maya's two):
 
 | | UD-IQ1_M osmos | UD-IQ1_M Maya | UD-IQ1_S osmos | UD-IQ1_S Maya |
 | --- | --- | --- | --- | --- |
-| Prompt, 2,048 tokens | **298** (296-300) | 237 (231-243) | **330** (326-333) | 261 (259-262) |
-| Prompt, 8,192 tokens | **450** (443-456) | 404 (399-409) | **482** (477-486) | 429 (427-431) |
-| Decode, DSpark drafted | **29.7** (22.9-35.7) | 28.1 (23.7-32.4) | **38.2** (28.0-49.1) | 35.4 (27.6-44.2) |
-| Decode, plain | 16.5 (16.4-16.6) | 16.5 (15.9-16.8) | 19.2 (19.0-19.3) | 19.3 (18.8-20.0) |
+| Prompt, 2,048 tokens | **296** | 243 (242-243) | **326** (323-328) | 259 (256-261) |
+| Prompt, 8,192 tokens | **443** | 406 (402-409) | **473** (471-474) | 431 (430-431) |
+| Decode, DSpark drafted | **32.0** | 27.5 (25.8-29.1) | **37.8** (37.7-37.8) | 34.9 (34.6-35.1) |
+| Decode, plain | 17.1 | 17.0 (16.8-17.1) | 19.3 (19.3-19.3) | 19.2 (19.1-19.3) |
 | Output reproducible bit for bit | yes | not measured (1.1.46: no) | yes | not measured |
 
-Plain decode is a tie; reading prompts, drafting and several conversations at once are where osmos leads. The sized
-budget is part of it: at the hand-picked budgets these runs used before `--budget auto` (110 GiB plain, 100 drafted,
-106 prompts) osmos drafted 28.6 (UD-IQ1_M) and 36.5 tok/s (UD-IQ1_S), its prompts 290-297 / 443-452 and 312-313 /
-469-482, its plain decode the same. osmos's answers hash the same in every run and configuration; Maya's greedy decode
-varied run to run when measured on 1.1.46 (DESIGN.md), not re-measured since.
+Plain decode is a tie; reading prompts (+9 to +25%), drafting (+8 to +16%) and several conversations at once (20% less
+time and energy) are where osmos leads. osmos's answers hash the same in every run and configuration, across 0.1.3,
+0.2.0 and 0.3.0; Maya's greedy decode varied run to run when measured on 1.1.46 (DESIGN.md), not re-measured since.
 
-At the packs' own 1M context (fixed budgets then: plain 106.5, drafted 101.5 / 100.5 GiB), decode is UD-IQ1_S 18.8
-plain / 37.5 drafted, UD-IQ1_M 16.0 / 28.6 tok/s: a 1M context's attention state is ~0.85 GiB.
+### Energy at the low-power profile
+
+osmos 0.3.0 at the box's `low-power` profile (power-profiles-daemon's power-saver, a stock AMD profile), UD-IQ1_M:
+
+| | tok/s | package W | J a token | against `performance` |
+| --- | --- | --- | --- | --- |
+| Decode, plain | 15.9 | 71 | **4.45** | -7% speed, -42% energy |
+| Decode, DSpark drafted | 29.3 | 71 | **2.50** | -8% speed, -39% energy |
+| Agents (4 x 8) | 479 s | 63 | **3.78** an answer token | +11% time, -46% energy |
+
+At low-power osmos drafts as fast as it did at `performance` one release ago (0.2.0: 29.8 tok/s), at ~71 W against
+~125. At the packs' own 1M context (0.1.x, fixed budgets), decode is UD-IQ1_S 18.8 plain / 37.5 drafted, UD-IQ1_M
+16.0 / 28.6 tok/s: a 1M context's attention state is ~0.85 GiB.
 
 ### The two packs: quality and power
 
-64K context, plain at 110 GiB, drafted at 103; perplexity over 8,191 tokens of mixed text and code (`bin/ppl`):
+64K context; perplexity over 8,191 tokens of mixed text and code (`bin/ppl`); power and energy at `performance`:
 
 | | UD-IQ1_M (quality) | UD-IQ1_S (speed) |
 | --- | --- | --- |
 | Perplexity (abliterated) | 2.459 (2.470) | 2.501 (2.505) |
-| Package power decoding, plain / drafted | - | 122 / 127 W |
-| Energy a token, plain / drafted | - | 6.4 / 3.3 J |
+| Package power decoding, plain / drafted | 132 / 127 W (0.3.0) | 122 / 127 W (0.1.x) |
+| Energy a token, plain / drafted | 7.71 / 4.10 J (0.3.0) | 6.4 / 3.3 J (0.1.x) |
 | Expert shards on disk (plus the shared table) | 140 GB | 122 GB |
 
 UD-IQ1_S's experts are 12.5% smaller than UD-IQ1_M's, so more of them stay in GPU memory: it reads fewer from the SSD
@@ -115,7 +121,8 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
   the router picks them, guessed a layer ahead, and the resident set follows the text (hot experts swapped in). The
   readers take the read needed soonest from [libevt](https://github.com/mrsirg97-rgb/libevt)'s priority queue - a
   miss the forward waits on first, a read ahead moved up in place when it becomes one - and each read's end comes back
-  to the forward as an event.
+  to the forward as an event. A read goes straight from the SSD into registered host memory the GPU reads (`O_DIRECT`:
+  no copy through the page cache, no CPU copy).
 - **Int8 experts.** A routed expert's input is rounded to int8 a block of 32, and its 1-2-bit weights are summed with
   exact integer dot products (`v_dot4` on the GPU, `vpdpbusd` on the CPU), then scaled in one fixed order - the
   contract in `kernels/lane.h` that makes the CPU and the GPU agree bit for bit.
@@ -132,7 +139,8 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
 - Linux with ROCm 7.x (developed on HIP 7.15, kernel 7.2, gcc 14).
 - GPU memory raised to ~113 GiB: `options ttm pages_limit=29637703` in `/etc/modprobe.d/ttm.conf` (a system setting:
   yours to make).
-- The model, on an NVMe SSD (the faster its random reads, the faster the decode), one of:
+- The model, on an NVMe SSD (the faster its random reads, the faster the decode), on a filesystem that takes
+  `O_DIRECT` reads (ext4, btrfs and xfs do; tmpfs and some FUSE ones do not - osmos refuses them, named), one of:
   - UD-IQ1_M's or UD-IQ1_S's 5 shards (`DeepSeek-V4.1-Flash-1017-UD-IQ1_M-0000N-of-00005.gguf`; shard 5 is the
     Engram table: the stock IQ4_NL one, 110 GB, or the MXFP8 one - below),
   - GSQ-RCO's IQ2_XXS shards: llama.cpp's layout (5 shards, the shared Engram file linked as shard 6) or their earlier

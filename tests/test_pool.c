@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "osmos/mem/arena.h"
 #include "osmos/mem/pool.h"
 
 #define KB 1024u
@@ -146,7 +147,7 @@ static Pool *make(const PoolUnit *u, size_t n, uint64_t budget, char *err)
   memset(&mem, 0, sizeof mem);
   memset(&reads, 0, sizeof reads);
   memset(&events, 0, sizeof events);
-  return pool_create(u, n, budget, (Slots){fake_alloc, fake_free, &mem}, (Fetcher){fake_fetch, &reads, fake_need},
+  return pool_create(u, n, budget, (Slots){fake_alloc, fake_free, &mem}, (Fetcher){fake_fetch, &reads, fake_need}, 0,
                      on_event, &events, err);
 }
 
@@ -528,6 +529,133 @@ static void test_random(int fd_a, int fd_b)
          ok, wait, full, failed);
 }
 
+/* a read alignment (a direct read's: 4 KiB): every read the aligned range around its part, into memory at that
+   alignment; the part's pointer the slice inside it (its offset's remainder in); the slack under two alignments a part;
+   a range that would pass its file's end, an alignment not a power of two, refused */
+#define AL 4096u
+static void *al_alloc(uint64_t bytes, void *ctx)
+{
+  (void)ctx;
+  void *m = aligned_alloc(AL, (bytes + AL - 1) / AL * AL);
+  assert(m);
+  return m;
+}
+static void al_free(void *dev, void *ctx) { (void)ctx, free(dev); }
+
+static void test_read_align(int fd)
+{
+  char err[POOL_ERR];
+  const int odd = file("odd.bin", (1 << 20) + 100); /* a size not a multiple of the alignment */
+  const PoolUnit u[2] = {{.part = {{fd, 4096 * 3 + 2048, 10000}, {fd, 7, 4096}, {fd, 8192, 4096}}, .n_parts = 3},
+                         {.part = {{odd, (1 << 20) + 50, 40}}, .n_parts = 1}}; /* 1: its aligned range past the end */
+  memset(&reads, 0, sizeof reads);
+  assert(!pool_create(u, 2, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, AL,
+                      NULL, NULL, err) && err[0]);
+  assert(!pool_create(u, 1, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, 3000,
+                      NULL, NULL, err) && err[0]);
+  Pool *p = pool_create(u, 1, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, AL,
+                        NULL, NULL, err);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  assert(pool_pin(p, 0, dev) == POOL_WAIT && reads.n == 1);
+  const Read r = reads.r[0];
+  uint64_t slack = 0;
+  for (int k = 0; k < r.n; k++)
+  {
+    const PoolRange want = u[0].part[k], got = r.part[k];
+    assert(got.offset % AL == 0 && got.bytes % AL == 0 && (uintptr_t)r.dst[k] % AL == 0);
+    assert(got.offset <= want.offset && got.offset + got.bytes >= want.offset + want.bytes);
+    assert(got.offset + AL > want.offset && got.offset + got.bytes < want.offset + want.bytes + AL);
+    slack += got.bytes - want.bytes;
+  }
+  assert(slack < 2 * AL * (uint64_t)r.n);
+  finish(p, 0, true);
+  assert(pool_dev(p, 0, dev));
+  for (int k = 0; k < u[0].n_parts; k++)
+  {
+    const PoolRange want = u[0].part[k];
+    assert((const uint8_t *)dev[k] == (const uint8_t *)r.dst[k] + want.offset % AL);
+    for (uint64_t i = 0; i < want.bytes; i++)
+      assert(((const uint8_t *)dev[k])[i] == byte_at(want.offset + i)); /* the slice's bytes at the part's pointer */
+  }
+  pool_release(p, 0, 0);
+  pool_destroy(p);
+  close(odd);
+  printf("  read alignment: aligned ranges into aligned memory, the slice at the part's pointer, %llu bytes of slack for "
+         "3 parts; past the file's end or not a power of two refused\n", (unsigned long long)slack);
+}
+
+/* the pool over an arena (host_slots' allocator): memory in pieces, a unit's alloc refused though the budget has room -
+   the pool makes more room (spares, then the units wanted furthest) until it fits or nothing can go. random pins,
+   wants, ends and releases of three sizes of unit: whenever a pin is refused FULL, either what cannot go (reading,
+   held) leaves the budget too small or nothing in memory could go - never refused with room it could have made; the
+   bytes the pool counts the arena's */
+static void *ar_alloc(uint64_t bytes, void *ctx) { return arena_alloc(ctx, bytes); }
+static void ar_free(void *dev, void *ctx) { assert(arena_free(ctx, dev)); }
+
+static void test_arena_room(int fd)
+{
+  enum { U = 60, STEPS = 20000 };
+  const uint64_t sizes[3] = {5 * 4096 + 100, 9 * 4096, 13 * 4096 + 7}, budget = 160 * 4096;
+  PoolUnit u[U];
+  for (int i = 0; i < U; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)(i % 7) * 8192, sizes[i % 3]}}, .n_parts = 1};
+  const uint64_t bytes = budget + 2 * 16 * 4096; /* the forward's: the budget and two of the largest unit */
+  uint8_t *m = aligned_alloc(ARENA_GRAIN, bytes);
+  Arena *ar = arena_create(m, bytes);
+  assert(m && ar);
+  char err[POOL_ERR];
+  memset(&reads, 0, sizeof reads);
+  Pool *p = pool_create(u, U, budget, (Slots){ar_alloc, ar_free, ar}, (Fetcher){fake_fetch, &reads, fake_need},
+                        ARENA_GRAIN, NULL, NULL, err);
+  assert(p);
+  int holds[U] = {0}, full = 0, pins = 0;
+  srand(5);
+  for (int step = 0; step < STEPS; step++)
+  {
+    const int i = rand() % U, op = rand() % 4;
+    const void *dev[POOL_PARTS];
+    if (op == 0 && holds[i] < 2)
+    {
+      const PoolPin r = pool_pin(p, (uint32_t)i, dev);
+      if (r == POOL_FULL) /* the budget left by what cannot go too small, or nothing in memory could go */
+      {
+        full++;
+        uint64_t stuck = 0;
+        bool could_go = false;
+        for (int j = 0; j < U; j++)
+        {
+          const PoolState st = pool_state(p, (uint32_t)j);
+          const uint64_t size = (sizes[j % 3] + 4095) / 4096 * 4096; /* its read aligned: offsets on 8 KiB */
+          stuck += st == POOL_READING || (st == POOL_PINNED && holds[j] > 0) ? size : 0;
+          could_go |= st == POOL_PINNED && holds[j] == 0;
+        }
+        assert(budget - stuck < (sizes[i % 3] + 4095) / 4096 * 4096 || !could_go);
+      }
+      else
+        holds[i]++, pins++;
+    }
+    else if (op == 1)
+      pool_want(p, (uint32_t)i, (uint64_t)(rand() % 50));
+    else if (op == 2 && reads.n)
+      finish(p, rand() % reads.n, true);
+    else if (op == 3 && holds[i] && pool_state(p, (uint32_t)i) == POOL_PINNED)
+      pool_release(p, (uint32_t)i, (uint64_t)(rand() % 50)), holds[i]--;
+    assert(arena_used(ar) == pool_bytes(p));
+  }
+  while (reads.n)
+    finish(p, 0, true);
+  for (int i = 0; i < U; i++)
+    while (holds[i]--)
+      pool_release(p, (uint32_t)i, 0);
+  pool_destroy(p);
+  assert(arena_used(ar) == 0);
+  arena_destroy(ar);
+  free(m);
+  printf("  over an arena: %d steps, %d pins, %d refused FULL - each with no room it could have made\n", STEPS,
+         pins, full);
+}
+
 int main(void)
 {
   printf("[test_pool] start\n");
@@ -541,6 +669,8 @@ int main(void)
   test_want(a);
   test_cycle(a);
   test_random(a, b);
+  test_read_align(a);
+  test_arena_room(a);
   close(a);
   close(b);
   char cmd[600];

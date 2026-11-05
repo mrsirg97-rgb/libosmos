@@ -1,3 +1,4 @@
+#define _GNU_SOURCE // O_DIRECT
 // the pool and the resident set on the real model and the real GPU (test_model.h's): one layer's 384 experts (gate, up, down:
 // 3 parts each, from gguf), read through reads.h (libevt) into hip_slots' GPU memory - the pool with a budget of a quarter
 // of them, so pins push others out and their memory is written again for the next; the resident set all of them.
@@ -19,6 +20,8 @@
 extern "C" {
 #include "test_model.h"
 #include "osmos/mem/reads.h"
+#include "osmos/mem/host_slots.h"
+#include "osmos/mem/arena.h"
 #include "osmos/mem/hip_slots.h"
 #include "osmos/mem/pool.h"
 #include "osmos/mem/resident.h"
@@ -109,7 +112,7 @@ int main() {
   const uint64_t budget = unit_bytes * (uint64_t) E / 4;
   char err[POOL_ERR] = "";
   CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
-  Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), reads_fetcher(g_reads), on_event, nullptr, err);
+  Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), reads_fetcher(g_reads), 0, on_event, nullptr, err);
   if (!p) std::fprintf(stderr, "pool_create: %s\n", err);
   CHECK(p);
   unsigned long long* d_sum = nullptr;
@@ -149,7 +152,7 @@ int main() {
   for (int k = 0; k < 3; k++) posix_fadvise(fds[t[k]->file], (off_t) t[k]->offset, (off_t) t[k]->bytes, POSIX_FADV_DONTNEED);
   CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
   p = pool_create(units.data(), units.size(), unit_bytes * (uint64_t) E + (64u << 20), hip_slots(),
-                  reads_fetcher(g_reads), on_event, nullptr, err);
+                  reads_fetcher(g_reads), 0, on_event, nullptr, err);
   CHECK(p);
   const double t0 = now_ms();
   for (int e = 0; e < E; e++) {
@@ -171,6 +174,45 @@ int main() {
   CHECK(bad == 0);
   reads_destroy(g_reads);
   pool_destroy(p);
+
+  // the binary's path since 0.3.0: the same, read O_DIRECT (each part its 4 KiB-aligned range) straight into registered
+  // host pages (host_slots) - the GPU's sums of every part at its pointer the file's, and the GB/s
+  {
+    std::vector<int> dfds(g->n_files);
+    for (int i = 0; i < g->n_files; i++) CHECK((dfds[i] = open(g->paths[i], O_RDONLY | O_DIRECT)) >= 0);
+    std::vector<PoolUnit> du = units;
+    for (int e = 0; e < E; e++)
+      for (int k = 0; k < 3; k++) du[e].part[k].fd = dfds[t[k]->file];
+    const uint64_t room = unit_bytes * (uint64_t) E + (64u << 20);
+    HostSlots* hs = host_slots_create(room + (64u << 20), err);
+    if (!hs) std::fprintf(stderr, "host_slots_create: %s\n", err);
+    CHECK(hs);
+    CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
+    p = pool_create(du.data(), du.size(), room, host_slots(hs), reads_fetcher(g_reads), ARENA_GRAIN, on_event, nullptr, err);
+    if (!p) std::fprintf(stderr, "pool_create: %s\n", err);
+    CHECK(p);
+    const double d0 = now_ms();
+    for (int e = 0; e < E; e++) {
+      const void* dev[POOL_PARTS];
+      CHECK(pool_pin(p, (uint32_t) e, dev) == POOL_WAIT);
+    }
+    for (int pinned = 0; pinned < E;) pinned += drain(p);
+    const double direct_ms = now_ms() - d0;
+    for (int e = 0; e < E; e++) {
+      const void* dev[POOL_PARTS];
+      CHECK(pool_state(p, (uint32_t) e) == POOL_PINNED && pool_dev(p, (uint32_t) e, dev));
+      for (int k = 0; k < 3; k++)
+        CHECK(gpu_sum(dev[k], (size_t) units[e].part[k].bytes, d_sum) == want[(size_t) e * 3 + k]);
+    }
+    std::printf("  direct: %d experts (%.2f GB) read O_DIRECT into registered host pages in %.0f ms = %.2f GB/s, %d "
+                "reads failed; every part's GPU sum the file's\n", E, (double) unit_bytes * E / 1e9, direct_ms,
+                (double) unit_bytes * E / (direct_ms * 1e-3) / 1e9, bad);
+    CHECK(bad == 0);
+    reads_destroy(g_reads);
+    pool_destroy(p);
+    host_slots_destroy(hs);
+    for (int fd : dfds) close(fd);
+  }
 
   // the resident set: the layer's experts, cold, read once into GPU memory; every part's GPU sum the file's, and the
   // file's pages dropped from the page cache (the copy is the one kept)

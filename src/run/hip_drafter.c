@@ -254,7 +254,7 @@ static bool seed_run(Drafter *d, Seq *s, uint32_t i0, uint32_t n)
          ops_put_rows(s->dring + (uint64_t)b * W * rb, W, d->kvs_p, d->tap_pos, 1, KV_FP8, hd, n, NULL);
   /* the pinned positions are read by the copy before the next seed writes them: the stream in order, and the next
      seed's memcpy is the host's - wait for this one's copy */
-  return ok && hipStreamSynchronize(NULL) == hipSuccess;
+  return ok && fwd_settle(d->f);
 }
 
 bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[FORWARD_ERR])
@@ -295,7 +295,7 @@ static bool confidence(Drafter *d, uint32_t t, float *out)
   if (!fwd_copy(d->cat, d->xc + (uint64_t)t * D, (uint64_t)D * sizeof(float)) ||
       !mv_strided(DRAFTER_F32, d->conf_w, 1, n, d->cat, n, 1, d->cval, 1, NULL) ||
       hipMemcpyAsync(&d->pin->conf, d->cval, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-      hipStreamSynchronize(NULL) != hipSuccess)
+      !fwd_settle(d->f))
     return false;
   *out = 1.0f / (1.0f + expf(-d->pin->conf));
   return true;
@@ -340,7 +340,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     if (!mv_strided(DRAFTER_BF16, d->mk_head, V, d->rank, d->cat + D, d->rank, 1, d->mk, V, NULL) ||
         !ops_add(row, d->mk, V, NULL) ||
         hipMemcpyAsync(d->pin->row, row, (uint64_t)V * sizeof(float), hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-        hipStreamSynchronize(NULL) != hipSuccess)
+        !fwd_settle(d->f))
       return fail(err, "a GPU call failed (the drafter's markov step)"), -1;
     uint32_t best = 0; /* greedy: the most, ties to the lowest token */
     for (uint32_t v = 1; v < V; v++)

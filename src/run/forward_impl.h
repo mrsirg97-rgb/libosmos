@@ -10,6 +10,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/kvfmt.h"
+#include "osmos/mem/host_slots.h"
 #include "osmos/mem/reads.h"
 #include "osmos/mem/pool.h"
 #include "osmos/mem/resident.h"
@@ -123,6 +124,8 @@ struct Forward
   uint32_t ckv_f_rows;   /* b.ckv_f's rows: score_stride, at most FWD_CKV_F32_ROWS */
   uint32_t slots;
   int fds[FWD_MAX_FILES];
+  int dfds[FWD_MAX_FILES]; /* the same files O_DIRECT: the pool's reads, straight into host_slots (DESIGN.md, 0.3.0) */
+  HostSlots *hs;           /* the pool's memory: registered host pages an O_DIRECT read DMAs into */
   Pool *pool;
   Reads *reads; /* the pool's reads, on libevt: their order by need, their ends events (reads.h) */
   Resident *res;            /* the layers' tensors and a share of the experts, in GPU memory (resident.h) */
@@ -208,6 +211,8 @@ struct Forward
   uint32_t cur;   /* the running sub-batch (enter's) */
   Pinned *pin;
   hipEvent_t routed;                /* the router's picks are on the host */
+  hipEvent_t passed;                /* fwd_wait's: the stream past the work queued so far */
+  uint32_t step_n;                  /* the step's tokens (forward_batch's n): a wait's spin or sleep (hip_wait.c) */
   uint32_t held[FWD_MAX_PAIRS];     /* the last layer's experts: released once the stream is past them */
   uint32_t n_held;
   int held_layer;                   /* the layer they are (-1: none): its sub-batches share them */
@@ -276,6 +281,8 @@ void fwd_release_held(Forward *f);
 bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memory */
 bool fwd_wait_read(Forward *f, char *err); /* a read's end waited for, the finished ones to the pool */
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
+bool fwd_wait(Forward *f, hipEvent_t ev); /* the GPU past `ev`: spun on in a decode-sized step, slept on in a prompt's */
+bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd_wait on `passed`) */
 bool fwd_drain(Forward *f, char *err); /* the finished reads to the pool, no wait */
 bool fwd_room_left(const Forward *f, char *err); /* the GPU's free memory holds the pool's room: else false, why */
 /* the taps at target layers `at` taken from the next step on (a drafter's): false if none, or they cannot be held,

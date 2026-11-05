@@ -188,7 +188,7 @@ bool fwd_moe(Forward *f, int l, char *err)
              hipSuccess &&
          hipMemcpyAsync(f->cpu_rw, b->rw, P * sizeof(float), hipMemcpyDeviceToHost, NULL) == hipSuccess)) &&
        fwd_guess_queue(f, l) && hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) &&
-       hipEventSynchronize(f->routed) == hipSuccess;
+       fwd_wait(f, f->routed);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
   if (!fwd_drain(f, err))

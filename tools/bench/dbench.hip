@@ -9,6 +9,8 @@
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
 // PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
 // a layer ahead: ForwardOptions' no_guess), OVERLAY=file (tensors standing in for the model's: weights_create_with).
+// prints "window prompt|decode <start> <end> <tokens>" (epoch seconds) for each prompt read and answer: energy by
+// tools/power.py's samples in them (tools/bench/energy.py).
 // ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
 // then n int32 expert ids - a sub-batch's tokens' picks, K a token; the probe waits for the GPU: slower, not timed).
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos
@@ -27,6 +29,7 @@ extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/run/fit.h"
+#include "osmos/run/gpu.h"
 #include "osmos/run/forward.h"
 #include "osmos/run/drafter.h"
 }
@@ -77,6 +80,10 @@ constexpr float kConfMin = 0.5f, kCumMin = 0.5f;  // maya's defaults (as test_dr
 constexpr int kRing = 128;                        // the drafter's window: a prompt's last rows seeded
 
 // one answer: the prompt in one batch, then n greedy tokens (stepped, or drafted and verified); returns tok/s of them
+static double epoch() {  // seconds since the epoch: tools/power.py's samples are matched to a window by it
+  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& ids, int n, uint64_t* h) {
   char err[FORWARD_ERR] = "";
   Seq* s = seq_create(f, err);
@@ -85,6 +92,7 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
   CHECK(seq_prompt(s, P));
   std::vector<Seq*> ss(P, s);
   const auto p0 = std::chrono::steady_clock::now();
+  const double pe0 = epoch();
   for (uint32_t at = 0; at < P;) {  // the prompt in steps of the forward's max_tokens
     const uint32_t c = P - at < g_max_tokens ? P - at : g_max_tokens;
     if (!forward_batch(f, ss.data(), ids.data() + at, c, err))
@@ -93,12 +101,14 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
   }
   CHECK(hipDeviceSynchronize() == hipSuccess);
   const double ps = std::chrono::duration<double>(std::chrono::steady_clock::now() - p0).count();
-  if (P > 256) std::printf("prompt %u tokens in %.0f ms (%.0f tok/s)\n", P, ps * 1e3, P / ps);
+  if (P > 256)
+    std::printf("prompt %u tokens in %.0f ms (%.0f tok/s)\nwindow prompt %.3f %.3f %u\n", P, ps * 1e3, P / ps, pe0, epoch(), P);
   std::vector<float> lg(V);
   // the last step's row: a step past MM_MAX_TOKENS keeps its last sub-batch's rows (forward_logits)
   const uint32_t last = P - (P - 1) / g_max_tokens * g_max_tokens;
   int32_t t = pick(f, lg, V, (last - 1) % MM_MAX_TOKENS);
   const auto t0 = std::chrono::steady_clock::now();
+  const double te0 = epoch();
   if (g_draft) {
     char err2[FORWARD_ERR] = "";
     CHECK(drafter_seed(g_draft, s, (int32_t) P > kRing ? (int32_t) P - kRing : 0, (int32_t) P, err2));
@@ -142,12 +152,14 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
     t = pick(f, lg, V, 0);
   }
   const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  std::printf("window decode %.3f %.3f %d\n", te0, epoch(), n);
   if (g_ids) std::fprintf(g_ids, "\n"), std::fflush(g_ids);
   seq_destroy(s);
   return n / sec;
 }
 
 int main(int argc, char** argv) {
+  CHECK(gpu_sleep_on_waits());  // before the first kernel: the waits sleep (osmos/run/gpu.h)
   if (argc < 6) {
     std::fprintf(stderr, "usage: dbench budget_gib|auto max_tokens n_new warmup.txt q1.txt [q2.txt ...]\n");
     return 2;

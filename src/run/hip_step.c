@@ -224,6 +224,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
   if (!n || n > f->max_tokens)
     return fwd_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
   f->vocab_rows = 0; /* (its head's, when it runs one) */
+  f->step_n = n;
   if (!place(f, seqs, tokens, n, err) || !fwd_engram_issue(f, err))
     return false;
   if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess)
@@ -273,7 +274,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return false;
   /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
   if (hipMemcpyAsync(&f->pin->overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-      hipDeviceSynchronize() != hipSuccess)
+      !fwd_settle(f))
     return fwd_fail(err, "a GPU call failed (the step)");
   if (f->cpu && !cpu_lane_wait(f->cpu))
     return fwd_fail(err, "the CPU lane's experts failed");

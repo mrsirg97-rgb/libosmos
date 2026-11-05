@@ -33,8 +33,10 @@ osmos is built design-first: the decision and its facts in `DESIGN.md`, then the
 Every speed claim is a measured number on this hardware with the command that reproduces it. Benchmarks run on a
 quiet box (nothing else reading the SSD), each configuration in a fresh process, interleaved, two rounds at least;
 the run-to-run spread is reported, not assumed. A comparison runs both engines on the same files the same day. Power
-is the APU package's (amdgpu PPT, `tools/power.py`), named as such - it is not wall power. What was not measured is
-said.
+is the APU package's (amdgpu PPT, `tools/power.py`), named as such - it is not wall power; `tools/bench/energy.py`
+turns it and a bench's windows into joules a token. A change is developed and A/B'd at the low-power profile
+(`powerprofilesctl set power-saver`; check `/sys/firmware/acpi/platform_profile` before a run) and checked at
+performance once a release. What was not measured is said.
 
 ## building and testing
 
