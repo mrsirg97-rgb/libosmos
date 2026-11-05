@@ -2453,6 +2453,31 @@ at once, drafting).
   time and energy. Maya's 1.1.54 / 1.1.55 prompt changes moved it a few percent on these GGUFs (1.1.53: 237 / 404);
   its plain decode rose 16.5 -> 17.0, as osmos's 16.4 -> 17.1.
 
+## 0.3.x: drafting for joules (2026-11-05)
+
+- **why**: a drafted token is ~44% less energy than a plain one (0.3.0, low-power: 2.50 against 4.45 J), and the
+  drafter's thresholds were maya's (0.5 each confidence, 0.5 their product), tuned on no one's energy. every draft is
+  verified, so a threshold moves cost, never bits - checked: the answers' hashes the same at every value below.
+- **the sweep** (dbench DRAFT_CONF = DRAFT_CUM, UD-IQ1_M, drafted, low-power, one run each, ~/bench/v030/draft-sweep;
+  a first pass discarded - two sweeps ran at once, then a stale binary ignored the settings; the script now checks the
+  log shows the settings it asked for):
+
+  | floor | 0.0 | 0.1 | 0.2 | 0.3 | 0.4 | 0.5 | 0.6 | 0.7 | 0.8 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | tok/s | 29.5 | **30.7** | 30.4 | 30.1 | 29.9 | 29.4 | 29.0 | 27.6 | 26.3 |
+  | J a token | 2.49 | **2.35** | 2.38 | 2.41 | 2.45 | 2.49 | 2.55 | 2.66 | 2.79 |
+
+  lower floors let more drafts through to a verify pass that runs anyway (the third question: 262 drafted at 0.1, 256 at
+  0.2, the same 207 accepted - the extra rows ride along); at 0.0 the drafter loses its early stop (a row's head and
+  markov step run only once its confidence passes) and does every row's work for 3 more drafts and none more kept.
+- **confirmed** (~/bench/v030/draft-confirm, interleaved 0.5 / 0.1 / 0.1 / 0.5): 0.5 29.4 / 29.4 tok/s, 2.51 / 2.51 J;
+  0.1 30.6 / 30.7, 2.35 / 2.34 J - -6.6% energy, +4.3% speed. the agents bench with 0.1: 483.0 s, 3.84 J an answer
+  token, first token p95 62.9 s, turn done p95 103.2 s (0.3.0: 479.0, 3.78, 62.6, 112.7) - level: 99K of its tokens
+  are read, 8K written. kept: DRAFTER_CONF_MIN / DRAFTER_CUM_MIN 0.1 (drafter.h), one setting for osmos-serve's single
+  and parallel paths and dbench (three copies of 0.5 before).
+- not swept to the end: a cap on a round's drafts (DRAFT_MAX 2-4) - the floors' trend says more drafts through is
+  cheaper, the operator's call to stop there.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

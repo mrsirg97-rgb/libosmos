@@ -17,6 +17,12 @@ typedef struct Drafter Drafter;
 Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR]);
 void drafter_destroy(Drafter *d);
 bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[FORWARD_ERR]);
+/* a draft kept while each confidence is at least this and their product too (drafter_draft's conf_min / cum_min): swept
+   for energy at low-power (DESIGN.md, "0.3.x: drafting for joules") - 0.1 the least J a token, 0.5 (maya's) 6% more,
+   0.0 as much (the early stop gone). the bits are the trunk's whatever it is */
+#define DRAFTER_CONF_MIN 0.1f
+#define DRAFTER_CUM_MIN 0.1f
+
 int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, int32_t drafts[DRAFTER_BLOCK],
                   float conf[DRAFTER_BLOCK], char err[FORWARD_ERR]);
 
