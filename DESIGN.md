@@ -2203,6 +2203,15 @@ at once, drafting).
   16.5 / 16.5, UD-IQ1_S 19.2 / 19.3); drafted osmos 29.7 / 28.1 and 38.2 / 35.4; prompts 2K 298 / 237 and 330 / 261,
   8K 450 / 404 and 482 / 429. the router's guess on lifted osmos's 2K prompt 290-297 -> 321 (one run): not taken - off
   is the packs' setting and wins the agents below.
+- **the headroom kept** (0.1.3): the first rig session left 0.61 GiB free, under the 1 GiB the sizing promises.
+  osmos-serve's builds (now each a NOTE line): 0 -> 94.97 -> 101.16 GiB left 87.97 / 7.19 / 0.61 - the last step's
+  6.19 GiB of budget took 6.58 of memory: a resident expert's units take ~6% past its bytes, and fit_sized assumed a
+  step could only undershoot. the memory also moves in ~0.93 GiB steps here (100.85 GiB left 1.54, 101.08 left
+  0.61): no budget lands in a 256 MiB window. fit_sized now aims each step by the cost measured between builds,
+  keeps a bracket (the largest budget that left the headroom, the smallest that did not or was refused), stops in
+  the window or where the bracket closes within FIT_SLACK, and never keeps a build short of the headroom when one
+  that left it is known. on this box: 100.85 GiB, 1.54 GiB left, in six builds (~90 s to READY, ~40 before);
+  test_fit models the pool's shrink, a 6% and a 12% overhead, refused steps and 0.9-1.0 GiB memory steps.
 - **agents** (tools/serve/agent_bench.py under tools/power.py, the energy over the bench's own window: power.py's
   samples between agent_bench's printed epochs; ~/bench/agents, ~/bench/agents-auto), UD-IQ1_M, 4 x 8 seed 1, 131K:
   osmos (auto) 440.1 s, first token p50 / p95 5.75 / 58.3 s, turn done 44.1 / 100.1 s, 134.2 W, 7.38 J an answer

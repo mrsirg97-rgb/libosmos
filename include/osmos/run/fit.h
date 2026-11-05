@@ -8,8 +8,8 @@
                                      "the budgets at 1M": every edge started; 1 GiB under ran) */
 
 #define FIT_SLACK (1ull << 28) /* room past the headroom a sizing stops at: 256 MiB, a few experts' units */
-#define FIT_BUILDS 5           /* builds at most: the dense one, then each closer (the pool's room shrinks as experts
-                                  become resident, so each step's room is an underestimate the next one corrects) */
+#define FIT_BUILDS 6           /* builds at most past the dense one's first (and one more to keep the largest that
+                                  left the headroom): a sizing took 3-6 on this box */
 #define FIT_ERR 256
 
 /* one whole build at a budget (0: the dense weights alone): what it took (forward_budget) and the room it left
@@ -25,15 +25,19 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
 
 /*
 fit_budget
-  the expert budget that fills this machine: an engine built whole (the forward, its sequences, the drafter) at the
-  budget `built` - 0 asks the forward for its dense weights alone (forward_budget then says what that took) - left
-  free_after bytes of GPU memory free; all of it but headroom goes to experts. less free than headroom: `built` (no
-  experts more).
+  the next budget toward this machine's fill: a build at `built` (0 asks the forward for its dense weights alone;
+  forward_budget then says what that took) left free_after bytes of GPU memory free; the budget moves by what is past
+  the headroom - up by it, or down by the shortfall when a build left less (never below 0).
 
 fit_sized
-  the engine built to fill this machine and left built (budget: what it took): built at 0, then again at fit_budget
-  of each build's room until that room is within FIT_SLACK past the headroom, FIT_BUILDS builds at most (the last
-  kept as it is). every step is short of the fill, never past it: the room each build reports counts the expert
-  pool's room at that build's residency, which only shrinks as the budget grows. false with why: a build failed
-  (unbuild has run for every build before it; the failed one cleans up after itself).
+  the engine built to fill this machine and left built (budget: what it took): built at 0 (the dense weights alone,
+  the floor), then toward a room of the headroom plus half FIT_SLACK - each step the room past (or short of) it over
+  what a byte of budget has cost so far (measured between builds: the expert pool's room shrinks as experts become
+  resident, a resident expert's units take more than its bytes - ~6% on UD-IQ1_S at 1M), kept between the largest
+  budget that left the headroom and the smallest that did not or was refused. it stops in the window (the headroom to
+  FIT_SLACK past it), or where those two budgets close within FIT_SLACK (memory taken in steps wider than the window:
+  ~0.93 GiB on this box), or after FIT_BUILDS builds; the build it keeps leaves at least the headroom whenever one has
+  (one more build, at the largest that did, if the last fell short), else the floor. false with why: the dense build
+  failed, or the largest that fit did not again (unbuild has run for every build before; a failed one cleans up
+  after itself).
 */
