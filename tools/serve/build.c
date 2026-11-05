@@ -52,6 +52,8 @@ static bool sized_build(void *ctx, uint64_t budget, uint64_t *built, uint64_t *r
     return snprintf(err, FIT_ERR, "%s", ferr[0] ? ferr : "the GPU's free memory could not be read"), false;
   }
   *built = forward_budget(z->sv->f);
+  out("NOTE sizing: a build at %.2f GiB took %.2f, left %.2f GiB\n", (double)budget / (1ull << 30),
+      (double)*built / (1ull << 30), (double)*room / (1ull << 30));
   return true;
 }
 

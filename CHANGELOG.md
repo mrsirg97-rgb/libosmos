@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.3]: the budget sizing keeps the headroom it promises
+
+The first rig session on 0.1.2 left 0.61 GiB of GPU memory free, under the 1 GiB the sizing promises. Two things
+the sizing did not expect: a resident expert takes about 6% more memory than its bytes, so a step could overshoot;
+and the memory here moves in steps of about 0.93 GiB, so no budget lands inside a narrow window. The sizing now
+measures what a GiB of budget really costs between builds, aims each step with that, keeps a bracket of the largest
+budget that left the headroom and the smallest that did not, and never keeps a build short of the headroom when one
+that left it is known. On this box the UD-IQ1_S pack sizes to 100.85 GiB with 1.54 GiB free; finding it takes more
+builds, so the engine is ready in about 90 s instead of 40. Each sizing build is a line in the log now.
+
 ## [0.1.2]: rig thinks at max by default
 
 The rig row the installer writes now carries `"effort": "max"` beside its efforts (`low`, `high`, `max`): rig sends
