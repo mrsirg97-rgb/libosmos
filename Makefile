@@ -16,6 +16,13 @@ LIB_DIR  := lib
 # the host library is pure C; hip_*.c (the HIP runtime's C API) go into a library of their own, so no host test or
 # sanitizer run links HIP
 SRCS := $(shell find $(SRC_DIR) -name '*.c' ! -name 'hip_*.c')
+# libevt (the operator's, C, MIT): the forward's reads and osmos-serve's loop - its sources built into libosmos.a with
+# this library's flags, so every test and sanitizer run covers it too. the submodule third_party/libevt (git submodule
+# update --init; LIBEVT=<dir> builds against another checkout)
+LIBEVT ?= third_party/libevt
+EVT_SRCS := $(shell find $(LIBEVT)/src -name '*.c')
+EVT_OBJS := $(patsubst $(LIBEVT)/src/%.c,$(OBJ_DIR)/libevt/%.o,$(EVT_SRCS))
+override CFLAGS += -I$(LIBEVT)/include
 HIP_SRCS := $(shell find $(SRC_DIR) -name 'hip_*.c')
 HIP_OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(HIP_SRCS))
 # the kernels (HIP C++, gfx1151 only) behind their C interfaces, into the HIP library; no contraction but the fmaf
@@ -36,8 +43,12 @@ HIP_LIB := $(LIB_DIR)/libosmos_hip.a
 
 all: $(LIB)
 
-$(LIB): $(OBJS) | $(LIB_DIR)
+$(LIB): $(OBJS) $(EVT_OBJS) | $(LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $(filter %.o,$^)
+
+$(OBJ_DIR)/libevt/%.o: $(LIBEVT)/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(HIP_LIB): $(HIP_OBJS) $(KERNEL_OBJS) | $(LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $(filter %.o,$^)
@@ -67,21 +78,16 @@ $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(OBJ_DIR)/tests/gpu
 	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -o $@
 
-# the server (tools/serve): the engine over stdin / stdout, maya's serve protocol
-# --parallel's loop is libevt's (the operator's, C, MIT; DESIGN.md "the scheduler"): the submodule third_party/libevt
-# (git submodule update --init; LIBEVT=<dir> builds against another checkout)
-LIBEVT ?= third_party/libevt
+# the server (tools/serve): the engine over stdin / stdout, maya's serve protocol; --parallel's loop libevt's (in
+# libosmos.a, as above)
 SERVE := $(BIN_DIR)/osmos-serve
 SERVE_OBJS := $(patsubst tools/serve/%.c,$(OBJ_DIR)/tools/serve/%.o,$(wildcard tools/serve/*.c))
 $(OBJ_DIR)/tools/serve/%.o: tools/serve/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(DEPFLAGS) -I$(LIBEVT)/include -c $< -o $@
-$(SERVE): $(SERVE_OBJS) $(LIB) $(HIP_LIB) $(LIBEVT)/lib/libevt.a
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+$(SERVE): $(SERVE_OBJS) $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
-	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -losmos_hip -losmos $(LIBEVT)/lib/libevt.a -lhsa-runtime64 -lpthread \
-	  -o $@
-$(LIBEVT)/lib/libevt.a:
-	$(MAKE) -C $(LIBEVT)
+	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -lpthread -o $@
 serve: $(SERVE)
 
 # osmos-api (tools/api): the engine as an OpenAI-compatible server - osmos-serve its child; host C only

@@ -40,13 +40,12 @@ typedef struct Ring
   size_t cap;
 } Ring;
 
-/* two queues: the reads a pin waits on (urgent) and those read ahead (pool_want's), the workers taking the urgent
-   first - a decode's miss is not read behind the guesses queued before it */
+/* one queue, in the order given (reads.h orders the pool's reads; the resident set's load is its own) */
 struct Fetchq
 {
   pthread_mutex_t mu;
   pthread_cond_t cv;
-  Ring urgent, ahead;
+  Ring jobs;
   bool stop;
   fetch_done_fn done;
   void *done_arg;
@@ -101,14 +100,14 @@ static void *work(void *arg)
   for (;;)
   {
     pthread_mutex_lock(&q->mu);
-    while (!q->stop && !q->urgent.len && !q->ahead.len)
+    while (!q->stop && !q->jobs.len)
       pthread_cond_wait(&q->cv, &q->mu);
     if (q->stop)
     {
       pthread_mutex_unlock(&q->mu);
       return NULL;
     }
-    const Job job = take(q->urgent.len ? &q->urgent : &q->ahead);
+    const Job job = take(&q->jobs);
     pthread_mutex_unlock(&q->mu);
     if (!read_part(&job.r, job.dst))
       atomic_store(&job.u->bad, true);
@@ -144,7 +143,7 @@ Fetchq *fetchq_create(int threads, fetch_done_fn done, void *done_arg)
   pthread_cond_init(&q->cv, NULL);
   q->done = done;
   q->done_arg = done_arg;
-  bool ok = room(&q->urgent, FETCH_RING_START) && room(&q->ahead, FETCH_RING_START);
+  bool ok = room(&q->jobs, FETCH_RING_START);
   for (int i = 0; ok && i < threads; i++)
   {
     q->w[i].q = q;
@@ -165,53 +164,44 @@ void fetchq_destroy(Fetchq *q)
   if (!q)
     return;
   stop(q);
-  Ring *rings[2] = {&q->urgent, &q->ahead};
-  for (int k = 0; k < 2; k++) /* the chunks dropped: a unit freed once its last is, no done */
+  for (size_t i = 0; i < q->jobs.len; i++) /* the chunks dropped: a unit freed once its last is, no done */
   {
-    for (size_t i = 0; i < rings[k]->len; i++)
-    {
-      Unit *u = at(rings[k], i)->u;
-      if (atomic_fetch_sub(&u->left, 1) == 1)
-        free(u);
-    }
-    free(rings[k]->jobs);
+    Unit *u = at(&q->jobs, i)->u;
+    if (atomic_fetch_sub(&u->left, 1) == 1)
+      free(u);
   }
+  free(q->jobs.jobs);
   pthread_cond_destroy(&q->cv);
   pthread_mutex_destroy(&q->mu);
   free(q);
 }
 
-/* the consumer's half: a unit's jobs queued side by side, on the urgent queue or the ahead one, and the workers
-   woken. when its queue is idle (fewer jobs than workers: a lone unit, a decode's miss) its parts go a FETCHQ_CHUNK a
-   job, the workers reading one unit at once - at the SSD's speed, not a worker's; when reads are queued (a load, a
-   prompt's) each part is one job, read whole by one worker - chunks of many units side by side defeat the file's
-   readahead (measured: a load 16 -> 22 s). an urgent read's queue is the urgent one alone: the ahead reads wait for
-   it. a queue that cannot grow reports the read as failed, at once */
-static void fetch(uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], bool urgent, void *ctx)
+/* a unit's jobs queued side by side behind those queued, and the workers woken. split (a lone unit, a decode's miss):
+   its parts a FETCHQ_CHUNK a job, the workers reading one unit at once - at the SSD's speed, not a worker's; else each
+   part one job, read whole by one worker - chunks of many units side by side defeat the file's readahead (measured: a
+   load 16 -> 22 s). which it is, the giver knows (reads.h: whether others are out or waiting) - this queue's length
+   does not: the reads' cap keeps it short */
+bool fetchq_read(Fetchq *q, uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], bool split)
 {
-  Fetchq *q = ctx;
+  if (!q || !parts || n < 0)
+    return false;
   n = n < POOL_PARTS ? n : POOL_PARTS;
-  pthread_mutex_lock(&q->mu);
-  const size_t queued = q->urgent.len + (urgent ? 0 : q->ahead.len);
-  const uint64_t chunk = queued < (size_t)q->n_workers ? FETCHQ_CHUNK : UINT64_MAX;
-  pthread_mutex_unlock(&q->mu);
+  const uint64_t chunk = split ? FETCHQ_CHUNK : UINT64_MAX;
   int chunks = 0;
   for (int k = 0; k < n; k++)
     chunks += (int)(chunk == UINT64_MAX ? parts[k].bytes > 0 : (parts[k].bytes + chunk - 1) / chunk);
   if (!chunks) /* nothing to read: done, ok */
   {
     q->done(unit, true, q->done_arg);
-    return;
+    return true;
   }
   Unit *u = malloc(sizeof *u);
-  Ring *r = urgent ? &q->urgent : &q->ahead;
   pthread_mutex_lock(&q->mu);
-  if (!u || !room(r, (size_t)chunks))
+  if (!u || !room(&q->jobs, (size_t)chunks))
   {
     pthread_mutex_unlock(&q->mu);
     free(u);
-    q->done(unit, false, q->done_arg);
-    return;
+    return false;
   }
   u->unit = unit;
   atomic_init(&u->left, chunks);
@@ -220,34 +210,9 @@ static void fetch(uint32_t unit, const PoolRange *parts, int n, void *const dst[
     for (uint64_t off = 0; off < parts[k].bytes; off += chunk)
     {
       const uint64_t len = parts[k].bytes - off < chunk ? parts[k].bytes - off : chunk;
-      *at(r, r->len++) = (Job){u, {parts[k].fd, parts[k].offset + off, len}, (uint8_t *)dst[k] + off};
+      *at(&q->jobs, q->jobs.len++) = (Job){u, {parts[k].fd, parts[k].offset + off, len}, (uint8_t *)dst[k] + off};
     }
   pthread_cond_broadcast(&q->cv);
   pthread_mutex_unlock(&q->mu);
+  return true;
 }
-
-/* a read ahead now waited on: its jobs not yet begun moved to the urgent queue's end, in their order (the ahead
-   queue is a decode's few dozen: a scan). a unit not queued (read, being read, never asked) is nothing to do */
-static void hurry(uint32_t unit, void *ctx)
-{
-  Fetchq *q = ctx;
-  pthread_mutex_lock(&q->mu);
-  size_t kept = 0, moved = 0;
-  for (size_t i = 0; i < q->ahead.len; i++)
-    moved += at(&q->ahead, i)->u->unit == unit;
-  if (moved && room(&q->urgent, moved))
-  {
-    for (size_t i = 0; i < q->ahead.len; i++)
-    {
-      const Job j = *at(&q->ahead, i);
-      if (j.u->unit == unit)
-        *at(&q->urgent, q->urgent.len++) = j;
-      else
-        *at(&q->ahead, kept++) = j;
-    }
-    q->ahead.len = kept;
-  }
-  pthread_mutex_unlock(&q->mu);
-}
-
-Fetcher fetchq_fetcher(Fetchq *q) { return (Fetcher){fetch, q, hurry}; }

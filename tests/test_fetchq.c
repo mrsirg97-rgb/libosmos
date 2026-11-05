@@ -67,14 +67,13 @@ static void test_once(int fd)
   reset();
   Fetchq *q = fetchq_create(4, done, NULL);
   assert(q);
-  const Fetcher f = fetchq_fetcher(q);
   static uint8_t buf[N][2][3000];
   for (uint32_t u = 0; u < N; u++)
   {
     const PoolRange parts[2] = {{fd, (u * 4096u) % ((1 << 20) - 3000), 3000},
                                 {fd, (u * 7919u) % ((1 << 20) - 100), 100}};
     void *const dst[POOL_PARTS] = {buf[u][0], buf[u][1], NULL};
-    f.fetch(u, parts, 1 + (int)(u % 2), dst, false, f.ctx);
+    assert(fetchq_read(q, u, parts, 1 + (int)(u % 2), dst, false));
   }
   while (atomic_load(&n_ok) + atomic_load(&n_bad) < N)
     usleep(1000);
@@ -98,7 +97,6 @@ static void test_chunks(int fd)
   reset();
   Fetchq *q = fetchq_create(4, done, NULL);
   assert(q);
-  const Fetcher f = fetchq_fetcher(q);
   enum { UNITS = 24 };
   const uint64_t sizes[3] = {FETCHQ_CHUNK * 5 / 2, FETCHQ_CHUNK, 7};
   uint8_t *buf[UNITS][3];
@@ -113,7 +111,7 @@ static void test_chunks(int fd)
       dst[k] = buf[u][k] = malloc(sizes[k]);
       assert(buf[u][k]);
     }
-    f.fetch(u, parts, 3, dst, false, f.ctx);
+    assert(fetchq_read(q, u, parts, 3, dst, u % 2 == 0)); /* split and whole: the same bytes */
   }
   while (atomic_load(&n_ok) + atomic_load(&n_bad) < UNITS)
     usleep(1000);
@@ -130,7 +128,7 @@ static void test_chunks(int fd)
     }
   }
   assert(atomic_load(&n_ok) == UNITS && atomic_load(&n_bad) == 0);
-  printf("  chunks: %d units of parts %.1f, 1 chunk and 7 bytes - every byte in its place, each done once\n", UNITS,
+  printf("  chunks: %d units of parts %.1f, 1 chunk and 7 bytes, half split, half whole - every byte in its place, each done once\n", UNITS,
          (double)sizes[0] / FETCHQ_CHUNK);
 }
 
@@ -141,11 +139,10 @@ static void test_failure(int fd)
   close(dup_fd); /* a descriptor that is no more */
   Fetchq *q = fetchq_create(2, done, NULL);
   assert(q);
-  const Fetcher f = fetchq_fetcher(q);
   const PoolRange bad = {dup_fd, 0, 4096};
   static uint8_t buf[4096];
   void *const dst[POOL_PARTS] = {buf, NULL, NULL};
-  f.fetch(7, &bad, 1, dst, false, f.ctx);
+  assert(fetchq_read(q, 7, &bad, 1, dst, true));
   while (atomic_load(&n_ok) + atomic_load(&n_bad) < 1)
     usleep(1000);
   fetchq_destroy(q);
@@ -159,7 +156,6 @@ static void test_destroy_busy(int fd)
   reset();
   Fetchq *q = fetchq_create(4, done, NULL);
   assert(q);
-  const Fetcher f = fetchq_fetcher(q);
   enum { JOBS = 20000, BYTES = 4096 };
   uint8_t *buf = malloc((size_t)JOBS * BYTES); /* each read its own place */
   assert(buf);
@@ -167,7 +163,7 @@ static void test_destroy_busy(int fd)
   {
     const PoolRange r = {fd, (u * 4096u) % ((1 << 20) - BYTES), BYTES};
     void *const dst[POOL_PARTS] = {buf + (size_t)u * BYTES, NULL, NULL};
-    f.fetch(u % N, &r, 1, dst, false, f.ctx);
+    assert(fetchq_read(q, u % N, &r, 1, dst, false));
   }
   fetchq_destroy(q);
   free(buf);
@@ -177,9 +173,8 @@ static void test_destroy_busy(int fd)
   printf("  destroy busy: stopped with %d of %d read; none after it returned\n", atomic_load(&n_ok), JOBS);
 }
 
-/* the urgent first: one worker held inside unit 0's done (so the queue is what it is when the test lets it go), the
-   ahead reads queued, then an urgent one and a hurried ahead one - the worker's next reads are those two, in that
-   order, before every other ahead */
+/* the order given: one worker held inside unit 0's done (so the queue is what it is when the test lets it go), the
+   rest queued behind it - read in the order they were given, whoever asked for them (reads.h chose that order) */
 static pthread_mutex_t gate_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gate_cv = PTHREAD_COND_INITIALIZER;
 static bool gate_open;
@@ -196,109 +191,37 @@ static void done_gated(uint32_t unit, bool ok, void *arg)
   pthread_mutex_unlock(&gate_mu);
 }
 
-static void test_urgent(int fd)
+static void test_order(int fd)
 {
-  enum { AHEAD = 40, BYTES = 4096, URGENT = AHEAD, HURRIED = AHEAD / 2 };
+  enum { READS = 40, BYTES = 4096 };
   atomic_store(&n_order, 0);
   gate_open = false;
   Fetchq *q = fetchq_create(1, done_gated, NULL);
   assert(q);
-  const Fetcher f = fetchq_fetcher(q);
-  static uint8_t buf[AHEAD + 1][BYTES];
-  for (uint32_t u = 0; u <= AHEAD; u++)
+  static uint8_t buf[READS][BYTES];
+  static const uint32_t given[READS] = {0, 17, 3, 39, 1, 22, 8, 30, 2, 11, 25, 4, 36, 9, 14, 27, 5, 33, 19, 6,
+                                        38, 12, 28, 7, 21, 34, 10, 15, 31, 13, 26, 16, 37, 18, 23, 20, 29, 24, 32, 35};
+  for (int i = 0; i < READS; i++)
   {
+    const uint32_t u = given[i];
     const PoolRange r = {fd, (uint64_t)u * BYTES, BYTES};
     void *const dst[POOL_PARTS] = {buf[u], NULL, NULL};
-    f.fetch(u, &r, 1, dst, u == URGENT, f.ctx);
-    while (u == 0 && atomic_load(&n_order) == 0) /* the worker in unit 0's done before the rest are queued */
+    assert(fetchq_read(q, u, &r, 1, dst, false));
+    while (i == 0 && atomic_load(&n_order) == 0) /* the worker in unit 0's done before the rest are queued */
       usleep(1000);
   }
-  f.hurry(HURRIED, f.ctx);
-  f.hurry(N - 1, f.ctx); /* never asked: nothing */
   pthread_mutex_lock(&gate_mu);
   gate_open = true;
   pthread_cond_broadcast(&gate_cv);
   pthread_mutex_unlock(&gate_mu);
-  while (atomic_load(&n_order) < AHEAD + 1)
+  while (atomic_load(&n_order) < READS)
     usleep(1000);
   fetchq_destroy(q);
-  assert(order[0] == 0 && order[1] == URGENT && order[2] == HURRIED);
-  for (int i = 3, next = 1; i <= AHEAD; i++, next++) /* the rest in the order asked */
-  {
-    next += next == HURRIED;
-    assert(order[i] == (uint32_t)next);
-  }
-  for (uint32_t u = 0; u <= AHEAD; u++)
+  for (int i = 0; i < READS; i++)
+    assert(order[i] == given[i]);
+  for (uint32_t u = 0; u < READS; u++)
     assert(buf[u][0] == (uint8_t)(u * BYTES) && buf[u][BYTES - 1] == (uint8_t)(u * BYTES + BYTES - 1));
-  printf("  urgent: with %d read ahead queued, the urgent read next, then the hurried one, then the rest in order\n",
-         AHEAD - 1);
-}
-
-/* the pool fed by the fetcher, its ends on the consumer: a worker's done queues the unit, the consumer drains them
-   into pool_ready - the binary's engine event in small */
-typedef struct
-{
-  pthread_mutex_t mu;
-  uint32_t unit[N];
-  bool ok[N];
-  int n;
-} Inbox;
-
-static Inbox inbox = {PTHREAD_MUTEX_INITIALIZER, {0}, {0}, 0};
-
-static void post(uint32_t unit, bool ok, void *arg)
-{
-  (void)arg;
-  pthread_mutex_lock(&inbox.mu);
-  inbox.ok[inbox.n] = ok;
-  inbox.unit[inbox.n++] = unit;
-  pthread_mutex_unlock(&inbox.mu);
-}
-
-static void *fake_alloc(uint64_t bytes, void *ctx) { return (void)ctx, aligned_alloc(POOL_ALIGN, bytes); }
-static void fake_free(void *dev, void *ctx) { (void)ctx, free(dev); }
-
-static void test_with_pool(int fd)
-{
-  enum { U = 200 };
-  PoolUnit units[U];
-  for (int i = 0; i < U; i++)
-    units[i] = (PoolUnit){.part = {{fd, (uint64_t)i * 4096, 4096}}, .n_parts = 1};
-  Fetchq *q = fetchq_create(4, post, NULL);
-  assert(q);
-  char err[POOL_ERR];
-  Pool *p = pool_create(units, U, 1 << 20, (Slots){fake_alloc, fake_free, NULL}, fetchq_fetcher(q), NULL, NULL, err);
-  assert(p);
-  const void *dev[POOL_PARTS];
-  for (uint32_t i = 0; i < U; i++)
-    assert(pool_pin(p, i, dev) == POOL_WAIT);
-  int pinned = 0;
-  while (pinned < U)
-  {
-    pthread_mutex_lock(&inbox.mu);
-    const int n = inbox.n;
-    uint32_t got[N];
-    bool good[N];
-    memcpy(got, inbox.unit, (size_t)n * sizeof *got);
-    memcpy(good, inbox.ok, (size_t)n * sizeof *good);
-    inbox.n = 0;
-    pthread_mutex_unlock(&inbox.mu);
-    for (int i = 0; i < n; i++)
-    {
-      assert(good[i]);
-      pool_ready(p, got[i], good[i]);
-      assert(pool_state(p, got[i]) == POOL_PINNED && pool_dev(p, got[i], dev));
-      const uint8_t *b = dev[0];
-      for (uint32_t j = 0; j < 4096; j++)
-        assert(b[j] == (uint8_t)(got[i] * 4096 + j)); /* the file's bytes, read straight into the unit's memory */
-      pinned++;
-    }
-    if (!n)
-      usleep(1000);
-  }
-  fetchq_destroy(q);
-  pool_destroy(p);
-  printf("  with the pool: %d units WAIT, read by the workers into their memory, pinned on the consumer\n", U);
+  printf("  order: %d reads queued behind a held one, read in the order given\n", READS - 1);
 }
 
 int main(void)
@@ -313,8 +236,7 @@ int main(void)
   close(big);
   test_failure(fd);
   test_destroy_busy(fd);
-  test_urgent(fd);
-  test_with_pool(fd);
+  test_order(fd);
   close(fd);
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);

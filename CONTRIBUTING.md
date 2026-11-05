@@ -39,7 +39,7 @@ said.
 ## building and testing
 
 ```sh
-git submodule update --init      # libevt (osmos-serve --parallel's scheduler)
+git submodule update --init      # libevt: the forward's reads and osmos-serve's loop (built into libosmos.a)
 make                             # lib/libosmos.a
 make lib/libosmos_hip.a serve api
 make tests && make asan && make tsan

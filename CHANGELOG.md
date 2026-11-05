@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.0]: the forward's reads on libevt
+
+The forward's expert reads now run on [libevt](https://github.com/mrsirg97-rgb/libevt), the scheduler osmos-serve's
+loop already used. A finished read is an event the forward's thread runs; the reads go to the readers in the order
+they are needed (libevt's `cap`, by when the forward will pin each - a waited-on miss first), a read given out alone is
+split across the readers and reads given out together are read whole. This replaces a hand-built inbox (a mutex, a
+condition, an array and a "broken" flag) and two FIFO queues with a `hurry` that moved a read between them - one
+scheduler for the project, not two. libevt's sources are now built into `libosmos.a`, so every test and sanitizer run
+covers them; its `cap_submit` reports a refusal (libevt c70c58c), so a read the cap cannot hold fails closed instead of
+being lost.
+
+No output changes: which experts are read when is outside the arithmetic, and the fingerprint tests are unchanged.
+Speed is level, measured against 0.1.3 the same morning (UD-IQ1_M, `performance`, budget auto): plain 16.4 -> 16.5
+tok/s, drafted 29.8 -> 29.9, prompts 292 -> 290 at 2K and 444 -> 454 at 8K - every decode run at or above 0.1.3's,
+within the spread. The reads in flight (24) were swept at 12 / 24 / 48: more helps long prompts and costs short ones.
+
+Also measured, not built: a forward-chaining rule on routing transitions (expert e at one layer predicting f at the
+next), from a recorded trace (`dbench`'s new `ROUTES_OUT`). It catches ~8% of the next layer's misses against the
+router guess's 56%, at 20x the reads: 82% of misses are an expert's first pick in the run, which no learned count can
+predict. `test_pool_gpu` runs on UD-IQ1_M again (it had skipped since the original files left the test box).
+
 ## [0.1.3]: the budget sizing keeps the headroom it promises
 
 The first rig session on 0.1.2 left 0.61 GiB of GPU memory free, under the 1 GiB the sizing promises. Two things

@@ -16,6 +16,9 @@
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
 #define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */
+#ifndef FWD_READS_INFLIGHT
+#define FWD_READS_INFLIGHT (2 * FWD_FETCH_THREADS) /* the reads given out at once (reads.h): DESIGN.md, 0.2.0's sweep */
+#endif
 #define FWD_ROW_THREADS 64  /* DESIGN.md, Engram's reads: 64 threads 832,000 random rows/s, 128 no more */
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
 _Static_assert(sizeof(LayerWeights) % sizeof(const GgufTensor *) == 0, "LayerWeights is its tensors and only them");
@@ -234,10 +237,10 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     ok = false;
   else if (!(f->res = resident_create(res, n_res, hip_slots(), FWD_FETCH_THREADS, perr)))
     ok = fwd_fail(err, perr);
-  else if (!(f->fq = fetchq_create(FWD_FETCH_THREADS, fwd_on_read, &f->in)))
-    ok = fwd_fail(err, "the fetcher's workers could not start");
+  else if (!(f->reads = reads_create((uint32_t)f->n_expert_units, FWD_FETCH_THREADS, FWD_READS_INFLIGHT, perr)))
+    ok = fwd_fail(err, perr);
   else if (!(f->pool_room = stream_budget(f, all)) ||
-           !(f->pool = pool_create(all, f->n_expert_units, f->pool_room, hip_slots(), fetchq_fetcher(f->fq),
+           !(f->pool = pool_create(all, f->n_expert_units, f->pool_room, hip_slots(), reads_fetcher(f->reads),
                                    NULL, NULL, perr)))
     ok = fwd_fail(err, perr);
   for (size_t i = 0; ok && i < n_t; i++)
@@ -528,8 +531,6 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   f->eg_fd = -1;
   for (int i = 0; i < FWD_MAX_FILES; i++)
     f->fds[i] = -1;
-  pthread_mutex_init(&f->in.mu, NULL);
-  pthread_cond_init(&f->in.cv, NULL);
   bool ok = true;
   for (int i = 0; ok && i < w->n_files; i++) /* the model's files, then an overlay's (weights.h) */
     ok = (f->fds[i] = open(w->paths[i], O_RDONLY)) >= 0;
@@ -596,7 +597,7 @@ void forward_destroy(Forward *f)
   if (!f)
     return;
   (void)hipDeviceSynchronize(); /* a failed step's kernels done: what is freed or unlocked, the GPU is past */
-  fetchq_destroy(f->fq);        /* its workers stopped before the pool they feed goes */
+  reads_destroy(f->reads);      /* its readers stopped before the pool they feed goes */
   pool_destroy(f->pool);
   resident_destroy(f->res);
   free(f->rix);
@@ -608,9 +609,6 @@ void forward_destroy(Forward *f)
   hipFree(f->oa_tab);
   hipFree(f->oa_xoff);
   hipFree(f->oa_yoff);
-  free(f->in.r);
-  pthread_cond_destroy(&f->in.cv);
-  pthread_mutex_destroy(&f->in.mu);
   if (f->xf0) /* the views back at the whole buffers: Scratch frees them */
     f->b.xf = f->xf0, f->b.moe = f->moe0, f->b.mid = f->mid0, f->b.f_post = f->f_post0, f->b.f_comb = f->f_comb0;
   hipHostFree(f->r_ids);

@@ -38,9 +38,9 @@ typedef struct Slots
 
 typedef struct Fetcher
 {
-  void (*fetch)(uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], bool urgent, void *ctx);
+  void (*fetch)(uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], uint64_t need, void *ctx);
   void *ctx;
-  void (*hurry)(uint32_t unit, void *ctx); /* NULL: none */
+  void (*need)(uint32_t unit, uint64_t need, void *ctx); /* NULL: none */
 } Fetcher;
 
 typedef enum PoolPin
@@ -103,9 +103,10 @@ pool_create
   `slots`: the memory, injected: alloc(bytes) GPU memory the CPU can write and the GPU reads (NULL refused), free(dev)
   at once, with no wait for the GPU (hip_slots.h in the binary; malloc in the tests). `fetcher`: begins reading a
   unit's parts into `dst` (a part's place in its memory, in part order) and returns at once; when the read is done,
-  whoever wired it arranges pool_ready(unit, ok) on the consumer (the binary: fetchq's workers, then the forward's
-  inbox; the tests: by hand). a pin's read is `urgent`, a want's not; `hurry(unit)`, when given, is told a reading
-  unit is now pinned - waited on - so a read begun ahead goes before the others ahead of it. `on_event`: every state
+  whoever wired it arranges pool_ready(unit, ok) on the consumer (the binary: reads.h - fetchq's workers, the end an
+  event the forward's thread runs; the tests: by hand). a read carries its `need`, when it is wanted on pool_release's
+  clock: a pin's 0 (waited on now), a want's its `next`; `need(unit, need)`, when given, is told a reading unit's need
+  moved - pinned (0), or a want's `next` corrected - so the reads' order follows it. `on_event`: every state
   change as a PoolEvent, in order (the event log), or NULL.
   refuses (NULL, the reason in `err`) a unit with no parts or more than POOL_PARTS, a range of 0 bytes or past its
   file, or a unit larger than the budget.

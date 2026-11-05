@@ -9,6 +9,8 @@
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
 // PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
 // a layer ahead: ForwardOptions' no_guess), OVERLAY=file (tensors standing in for the model's: weights_create_with).
+// ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
+// then n int32 expert ids - a sub-batch's tokens' picks, K a token; the probe waits for the GPU: slower, not timed).
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos
 //        -lhsa-runtime64 -o bin/dbench   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
@@ -225,6 +227,17 @@ int main(int argc, char** argv) {
             : !build(&b, budget, &sized_to, &sized_to, zerr))
     std::fprintf(stderr, "build: %s\n", zerr), std::_Exit(1);
   Forward* f = b.f;
+  FILE* routes = nullptr;
+  if (const char* ro = std::getenv("ROUTES_OUT")) {  // the routing trace (tools/bench/routes.py reads it)
+    CHECK((routes = std::fopen(ro, "wb")));
+    forward_probe(f, [](const char* step, int layer, int index, void* dev, uint64_t n, bool, void* arg) {
+      if (std::strcmp(step, "route_idx")) return;
+      std::vector<int32_t> ids(n);
+      CHECK(hipMemcpy(ids.data(), dev, n * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      const int32_t head[3] = {layer, index, (int32_t) n};
+      CHECK(std::fwrite(head, 4, 3, (FILE*) arg) == 3 && std::fwrite(ids.data(), 4, n, (FILE*) arg) == n);
+    }, routes);
+  }
   if (sized) std::printf("sized to this GPU: budget %.2f GiB\n", sized_to / (double) (1ull << 30));
   g_greedy = std::getenv("GREEDY") != nullptr;
   if (const char* ip = std::getenv("IDS")) CHECK((g_ids = std::fopen(ip, "w")));
@@ -259,6 +272,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < n; i++) total += forward_picks(f)[i];
     std::printf("picks: %llu to %s\n", (unsigned long long) total, po);
   }
+  if (routes) forward_probe(f, nullptr, nullptr), std::fclose(routes);
   drafter_destroy(g_draft);
   forward_destroy(f);
   return 0;

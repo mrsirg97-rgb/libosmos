@@ -2223,6 +2223,103 @@ at once, drafting).
   tok/s); the 8 tokens after the same (hash 0de05d1e3180f2b6). the lead narrows with length (2K +26%, 8K +11%, 128K
   +6%): at 128K the sparse attention over the whole context is most of a step's work, and the two are close there.
 
+## 0.2.0: the forward's reads on libevt (design, 2026-11-05)
+
+- **why**: osmos-serve's loop is libevt's, but the forward's own events are not: a finished read reaches the forward
+  through a hand-built inbox (`Inbox`: a mutex, a condition, a growing array, a `broken` flag; hip_held.c), and the
+  reads' order is fetchq's two FIFO rings (urgent, ahead) plus `hurry`, which moves a read ahead to the urgent ring
+  once it is waited on. that is an event queue with priorities written a second time - one shape per concept says
+  collapse it into the one the project already has. pool.h's contract already names the model ("the scheduler's
+  consumer is its only caller (libevt: one consumer, so nothing locks)"); the code never followed.
+- **the facts it rests on** (this file, "the fetcher" and decode's traces): 4 readers reach the SSD's 6.85 GB/s; a
+  decode's reads are paced by the GPU, not the SSD (8 -> 32 readers, a 4x ring, 8x read-ahead: no change); a decode
+  token's misses wait ~6 ms, behind the dependency that a layer's picks are known only at its routing. so the order
+  of the reads cannot make one conversation's decode faster: what 0.2.0 can buy is the structure, and the order where
+  reads do queue - a prompt's read-ahead (many layers' experts wanted at once) and several conversations.
+- **what was wrong in the story told for it** (said in chat, checked here): "a decode's miss waits behind another
+  conversation's prompt reads" - it does not: a miss is a pin, its read urgent, the ahead ring waits for it. what
+  the FIFO does get wrong: within the ahead ring, a read wanted at layer L+6 that was asked first goes before one
+  wanted at L+1 (a prompt's step asks for the next layer's experts; guesses and swaps ask too).
+- **the decision**:
+  1. **the forward's inbox is a libevt Engine.** a reader's `done` is `engine_add(context(read: unit, ok),
+     PRIO_READ)`; the forward thread is the consumer: `fwd_drain` pumps without waiting until none is left,
+     `fwd_wait_read` pumps one, waiting. the event runs pool_ready on the consumer - pool.h's contract as written.
+     an add the engine refuses (no memory, stopped) fails the forward closed, as `broken` does now. `Inbox` goes.
+  2. **the reads ordered by when they are needed.** every read carries `need` - the pool's clock (pool_want's
+     `next`; a pin's is now), the order pool_release already evicts by - and readers take the read needed soonest:
+     libevt's `cap` on the consumer, its slots the reads given to readers at once (`FETCH_INFLIGHT`: a measured
+     depth, not a guess - see "to measure"), the rest waiting in cap's order by `before_fn(need, then asked)`,
+     asked at each release so a read whose need moved up (a want then a pin: today's `hurry`) is simply first.
+     `hurry` and the second ring go; a pin is a read with need = now. the readers stay fetchq's threads (several
+     preads in flight are the SSD's speed) and keep its chunking (a lone read in FETCHQ_CHUNK pieces): they pread
+     what the consumer gave them and post done; they no longer choose.
+  3. **CPU-lane jobs as events under a cap** (the balanced-power work, next): the lane's jobs a second `cap`, its
+     slots the threads that may take memory bandwidth beside the GPU - the policy in one place when it is built.
+- **the rule engine (libtrdr's forward chaining), asked**: not in 0.2.0. the chain it would encode - a layer
+  routed -> its non-resident picks read -> a read done -> the GPU released at its wait - is three calls on the
+  consumer today, run ~240 times a token; facts, activations and a working set would add a heap event and an
+  allocation to each, on the hot path, to say what three lines say. where rules would earn their place is a policy
+  with many conditions that changes as it is tuned - the balanced-power CPU lane's (when to take a miss on the CPU:
+  power profile, bandwidth, the GPU's queue, the read's need) is the candidate. revisit there, measured.
+- **the bits**: no bit moves. which experts are resident or read when is already outside the arithmetic's contract
+  (test_model_gpu: 1,983 swaps in a forward, the same fingerprint); the order of reads only changes when.
+- **to measure, before it is kept** (a quiet box, `performance`, interleaved, two rounds, against 0.1.3):
+  - plain and drafted decode, both quants (dbench auto): unchanged within the spread is the bar - it cannot gain.
+  - prompts at 2K / 8K / 128K: the read-ahead's order is where it can gain.
+  - agents (agent_bench.py, 4 x 8, UD-IQ1_M): first token and turn done p50 / p95, wall time, J an answer token.
+  - FETCH_INFLIGHT: the reads given out at once, swept (readers x 1, x 2, x 4): the cost of the consumer choosing
+    is that a read waits for the consumer's next pump to be given out - decode pumps at each layer's routing
+    (~1.5 ms apart), a read takes ~1.8 ms; too few in flight leaves the SSD idle between pumps, too many is FIFO
+    again.
+- **the order** (each its tests first): the inbox as an Engine (test: reads finished on many threads all reach
+  pool_ready on the consumer, none lost, an add refused fails closed - under tsan); then the reads by need (a
+  fake fetcher's log: given a want at L+6 then one at L+1, L+1 is read first; a want then a pin of the same unit: it
+  goes first, once; the depth never exceeds FETCH_INFLIGHT; destroy with reads waiting drops them, no done); then
+  the GPU tests unchanged (fingerprints); then the benches above. 0.2.0 if they hold.
+- **built** (the order above; libevt 2f456c3 first: `cap_submit` returns whether cap took the work - a refusal used
+  to destroy it unseen, here a read lost and a forward waiting forever; merged, the submodule at c70c58c):
+  - libevt's sources compiled into libosmos.a with this library's flags (every test and sanitizer run covers them;
+    osmos-serve no longer links libevt.a beside it).
+  - `mem/reads` (reads.h): a read record a unit, an Engine whose events are the reads' ends, a cap (`sooner`: need,
+    then asked) - `fetch` submits, `need` moves a waiting read, `reads_pump` runs the ends (pool_ready, the slot
+    freed, the next given out). the forward's `Inbox` and fwd_on_read deleted; fwd_drain / fwd_wait_read a pump each.
+  - `fetchq`: one queue in the order given (the urgent / ahead rings and `hurry` deleted); `fetchq_read(.., split)`.
+  - pool.h's Fetcher: `need` (a pin's 0, a want's `next`) for `urgent`, `need(unit, need)` for `hurry` - also told
+    when a reading unit's want is corrected.
+  - tests: test_reads (the order with one out: by need, ties as asked, a need corrected while waiting; 2,000 reads on
+    8 readers, at most `inflight` out, each pinned once with its bytes; a read whose file is gone FAILED; destroy
+    busy; the split below), test_fetchq / test_pool ported, test_pool_gpu on test_model.h's UD-IQ1_M (it had
+    skipped since ds1017 left this box): a cold layer's 384 experts through reads.h at 6.70 GB/s. host tests, asan,
+    tsan, and the GPU suite (27 ok; forward, lane - no ds1017 or oracle here - skip as before): the fingerprints the
+    same.
+- **the batch, found by the bench**: the first build read 2K prompts 4% slower (279-280 against 292). fetchq chose
+  to split a read across its workers when its own queue was short - in 0.1.3 a prompt's read-ahead arrived at once
+  and kept it long (each read whole); behind the cap it is always short, so every read was split, and chunks of many
+  reads side by side defeat the file's readahead (this file, "the fetcher": a load 16 -> 22 s). the giver knows the
+  batch: reads.h splits a read only when it is given out alone (none other out or waiting - a decode's miss) and
+  gives the rest whole (`fetchq_read`'s `split`; reads_split counts them). test_reads' count; a never-split and an
+  over-split mutant each fail it. 2K back to 292.
+- **measured** (2026-11-05, `performance`, UD-IQ1_M, budget auto, 64K, dbench as the 1.1.53 comparison; one round
+  of each in-flight depth - the operator's call: three depths agreeing - against 0.1.3 the same morning, ~/bench/v020):
+
+  | | 0.1.3 | 0.2.0, 12 out | 24 out | 48 out |
+  | --- | ---: | ---: | ---: | ---: |
+  | plain, tok/s | 16.4 | 16.5 | 16.4 | 16.5 |
+  | drafted | 29.8 | 30.0 | 29.9 | 29.9 |
+  | prompt 2K | 292 | 292 | 290 | 286 |
+  | prompt 8K | 444 | 447 | 454 | 461 |
+
+  decode level (every 0.2.0 run at or above 0.1.3's, within the spread); the depth trades prompts - more out, a long
+  prompt faster and a short one slower. FWD_READS_INFLIGHT 24 (2 x the readers): at or above 0.1.3 everywhere, 8K +2%.
+  not measured for it: the agents bench (several conversations - where the order by need should matter most).
+- **the rule engine, measured offline instead** (a routing trace: dbench's ROUTES_OUT, 1,604 steps of UD-IQ1_M; the
+  analysis ~/bench/routes/analysis): a transition rule (expert e at L -> f at L+1, counted online) catches 7.7% of
+  the next layer's misses at 6 reads a token-layer, 0.4% of its reads needed (~40 extra reads a token); L+2 / L+3
+  the same; the router guess catches 56%, ~79% of its reads needed. 82% of decode's misses are an expert's first pick
+  at its layer in the run - no count learned online predicts them; the repeats are what the resident set's heat
+  already swaps in. not built. the lever it points at: the guess's reads earlier (1,316 guessed reads still waited
+  1.8 s), and a better starting profile.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.
