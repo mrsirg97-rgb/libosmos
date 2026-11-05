@@ -51,8 +51,7 @@ again with the room left, but a 1 GiB headroom, given to experts, until it fills
 number of conversations or drafter. A 1M context costs ~0.85 GiB of attention state: the indexer scores a prompt's
 step in chunks, so no buffer grows with the step times the context.
 
-Measured on one Halo against Project Maya 1.1.53, the fastest engine we know of for this model on this hardware, on
-the same files (README, DESIGN.md): prompts read 26% faster at 2K, 11-12% at 8K, 6% at 128K; drafted decode 6-8%
+Measured on one Halo against Project Maya 1.1.53, on the same files (README, DESIGN.md): prompts read 26% faster at 2K, 11-12% at 8K, 6% at 128K; drafted decode 6-8%
 faster; plain decode a tie; Maya's 4-agent bench in 20% less time on 13% less energy an answer token.
 
 `osmos-serve` keeps several conversations at once on one engine through [libevt](https://github.com/mrsirg97-rgb/libevt),

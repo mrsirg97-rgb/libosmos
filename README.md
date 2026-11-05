@@ -46,8 +46,7 @@ Both packs run one context length: **1,048,576 tokens**, with up to 256K tokens 
 The short version, for people who want one page: [`docs/STRIX-HALO.md`](docs/STRIX-HALO.md).
 
 One Strix Halo (128 GB, ~113 GiB GPU memory), 2026-11-04, nothing else running. The comparison is
-[Project Maya](https://github.com/mw00/project-maya) **1.1.53**, the fastest engine we know of for this model on this
-hardware, on the same model files: Maya as its setup configures it (its pack, its own 8 GB DSpark, its CPU lane
+[Project Maya](https://github.com/mw00/project-maya) **1.1.53** on the same model files: Maya as its setup configures it (its pack, its own 8 GB DSpark, its CPU lane
 calibrated, its expert profile warmed on this machine first), osmos as it ships (the budget sized to the GPU,
 `--budget auto`; the router's guess off; our 4.7 GB IQ2_XS DSpark). Greedy decoding throughout. Every run and its
 command: `DESIGN.md`.

@@ -4,8 +4,7 @@
 
 osmos is an open-source inference engine built for this one chip. It runs DeepSeek-V4.1-Flash at 1–2 bits a weight
 with a 1M-token context, streams the experts that do not fit from the SSD, and gives the same output bit for bit
-however it runs. On the same box and the same model files, it is faster than the fastest engine we know of for this
-hardware.
+however it runs. Below, it is measured against Project Maya 1.1.53 on the same box and the same model files.
 
 `MIT` · `1,048,576-token context` · `one-command install` · `OpenAI-compatible API` · `stock AMD power limits`
 
