@@ -27,6 +27,7 @@
 #include "serve.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
+#include "osmos/run/gpu.h"
 #include "osmos/version.h"
 
 static const char *opt(int argc, char **argv, const char *name, const char *dflt)
@@ -77,6 +78,8 @@ int main(int argc, char **argv)
 {
   if (argc == 2 && !strcmp(argv[1], "--version"))
     return printf("osmos %s\n", OSMOS_VERSION), 0;
+  if (!gpu_sleep_on_waits()) /* before the first kernel: after one it does not take (osmos/run/gpu.h) */
+    return die("the GPU could not be set to sleep on waits (hipSetDeviceFlags)");
   const char *model = opt(argc, argv, "--model", NULL);
   if (!model)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "

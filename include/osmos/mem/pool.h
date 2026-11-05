@@ -73,7 +73,7 @@ typedef void (*pool_event_fn)(const PoolEvent *ev, void *arg);
 typedef struct Pool Pool;
 
 Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots slots, Fetcher fetcher,
-                  pool_event_fn on_event, void *event_arg, char err[POOL_ERR]);
+                  uint64_t read_align, pool_event_fn on_event, void *event_arg, char err[POOL_ERR]);
 void pool_destroy(Pool *p);
 
 PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
@@ -106,7 +106,10 @@ pool_create
   whoever wired it arranges pool_ready(unit, ok) on the consumer (the binary: reads.h - fetchq's workers, the end an
   event the forward's thread runs; the tests: by hand). a read carries its `need`, when it is wanted on pool_release's
   clock: a pin's 0 (waited on now), a want's its `next` + 1 (0 is a pin's alone); `need(unit, need)`, when given, is told a reading unit's need
-  moved - pinned (0), or a want's `next` corrected - so the reads' order follows it. `on_event`: every state
+  moved - pinned (0), or a want's `next` corrected - so the reads' order follows it. `read_align`: 0, a part read as
+  its range is, laid out from a POOL_ALIGN boundary; a power of two (a direct read's 4 KiB: DESIGN.md, "0.3.0", target
+  1), a part read as the aligned range around it - its offset rounded down, its end up - into memory at that alignment
+  (`slots` must give it), the part's pointer the slice inside it; a unit whose range would pass its file's end refused. `on_event`: every state
   change as a PoolEvent, in order (the event log), or NULL.
   refuses (NULL, the reason in `err`) a unit with no parts or more than POOL_PARTS, a range of 0 bytes or past its
   file, or a unit larger than the budget.

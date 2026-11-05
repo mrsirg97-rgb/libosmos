@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.3.0]: less energy a token - the experts read straight into memory the GPU reads
+
+The streamed experts are now read with `O_DIRECT` straight into registered host memory the GPU reads (the SSD's DMA
+lands them; no CPU copy), instead of a buffered read into the page cache and a CPU copy into GPU memory. The readers
+used ~48% of a core each, twelve of them, on an APU whose CPU and GPU share one package power limit: at that limit the
+watts they no longer spend go to the GPU. The pool's memory is one registered arena (`mem/host_slots`, `mem/arena`),
+each expert part read as its 4 KiB-aligned range with the kernels reading the slice inside it; a filesystem that
+refuses `O_DIRECT` refuses loudly. The host's waits for the GPU spin in decode (short, 40 a step; a wake costs ~0.2 ms)
+and sleep in a prompt's steps (long), by the step's size: the device is set to blocking sync at a process's start
+(an event's own flag is ignored on ROCm 7.15).
+
+No output changes: the bench's answer hashes are 0.2.0's. Measured on UD-IQ1_M, budget auto, at the box's low-power
+profile (power-profiles-daemon's power-saver: a stock AMD profile) and at performance, against 0.2.0 the same day;
+energy is the APU package's (amdgpu PPT), not the wall's:
+
+| | 0.2.0 low-power | 0.3.0 low-power | 0.2.0 performance | 0.3.0 performance |
+| --- | ---: | ---: | ---: | ---: |
+| plain decode | 14.8 tok/s, 4.80 J | **15.9, 4.45 J** | 16.4 | **17.1**, 7.71 J |
+| drafted decode | 25.8, 2.83 J | **29.3, 2.50 J** | 29.8 | **32.0**, 4.10 J |
+| agents (4 x 8) | 527.2 s, 4.12 J | **479.0 s, 3.78 J** | 450.6 s, 7.25 J | **433.2 s, 6.98 J** |
+
+an answer token's energy for the agents. Prompts at performance about level within the bench's spread (2K 281-300 ->
+296, 8K 458-466 -> 443 tok/s), 0.31 -> 0.29 J a prompt token. At low-power osmos now drafts as fast as 0.2.0 did at
+performance, at ~71 W against ~125. Direct reads take no page-cache hits: the forward waits on more reads (the
+agents' 44,058 against 37,598) - a RAM tier for streamed experts is next.
+
+`tools/bench/energy.py` turns `tools/power.py`'s samples and a bench's windows (`dbench` now prints them) into joules a
+token; `OSMOS_STATS=1` prints osmos-serve's read waits at exit.
+
 ## [0.2.0]: the forward's reads on libevt
 
 The forward's expert reads now run on [libevt](https://github.com/mrsirg97-rgb/libevt), the scheduler osmos-serve's

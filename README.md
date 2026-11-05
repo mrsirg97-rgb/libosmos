@@ -115,7 +115,8 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
   the router picks them, guessed a layer ahead, and the resident set follows the text (hot experts swapped in). The
   readers take the read needed soonest from [libevt](https://github.com/mrsirg97-rgb/libevt)'s priority queue - a
   miss the forward waits on first, a read ahead moved up in place when it becomes one - and each read's end comes back
-  to the forward as an event.
+  to the forward as an event. A read goes straight from the SSD into registered host memory the GPU reads (`O_DIRECT`:
+  no copy through the page cache, no CPU copy).
 - **Int8 experts.** A routed expert's input is rounded to int8 a block of 32, and its 1-2-bit weights are summed with
   exact integer dot products (`v_dot4` on the GPU, `vpdpbusd` on the CPU), then scaled in one fixed order - the
   contract in `kernels/lane.h` that makes the CPU and the GPU agree bit for bit.
@@ -132,7 +133,8 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
 - Linux with ROCm 7.x (developed on HIP 7.15, kernel 7.2, gcc 14).
 - GPU memory raised to ~113 GiB: `options ttm pages_limit=29637703` in `/etc/modprobe.d/ttm.conf` (a system setting:
   yours to make).
-- The model, on an NVMe SSD (the faster its random reads, the faster the decode), one of:
+- The model, on an NVMe SSD (the faster its random reads, the faster the decode), on a filesystem that takes
+  `O_DIRECT` reads (ext4, btrfs and xfs do; tmpfs and some FUSE ones do not - osmos refuses them, named), one of:
   - UD-IQ1_M's or UD-IQ1_S's 5 shards (`DeepSeek-V4.1-Flash-1017-UD-IQ1_M-0000N-of-00005.gguf`; shard 5 is the
     Engram table: the stock IQ4_NL one, 110 GB, or the MXFP8 one - below),
   - GSQ-RCO's IQ2_XXS shards: llama.cpp's layout (5 shards, the shared Engram file linked as shard 6) or their earlier

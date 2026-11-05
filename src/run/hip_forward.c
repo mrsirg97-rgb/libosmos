@@ -1,3 +1,4 @@
+#define _GNU_SOURCE /* O_DIRECT */
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
+#include "osmos/mem/arena.h"
 #include "osmos/mem/hip_slots.h"
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/gpu/mv.h"
@@ -55,6 +57,37 @@ static uint64_t unit_bytes(const PoolUnit *u)
   for (int k = 0; k < u->n_parts; k++)
     b += (u->part[k].bytes + POOL_ALIGN - 1) / POOL_ALIGN * POOL_ALIGN;
   return b;
+}
+
+/* the pool's units read O_DIRECT: each part's file its direct twin (the resident set keeps the buffered ones) */
+static bool direct_units(Forward *f, PoolUnit *all)
+{
+  for (uint32_t u = 0; u < f->n_expert_units; u++)
+    for (int k = 0; k < all[u].n_parts; k++)
+    {
+      int i = 0;
+      while (i < FWD_MAX_FILES && f->fds[i] != all[u].part[k].fd)
+        i++;
+      if (i == FWD_MAX_FILES || f->dfds[i] < 0)
+        return false;
+      all[u].part[k].fd = f->dfds[i];
+    }
+  return true;
+}
+
+/* the largest unit as the pool lays it out (each part its read's aligned range, the slack of two grains at most): the
+   arena's margin for its memory in pieces is two of them (test_pool's arena room) */
+static uint64_t largest_unit(const Forward *f, const PoolUnit *all)
+{
+  uint64_t most = 0;
+  for (uint32_t u = 0; u < f->n_expert_units; u++)
+  {
+    uint64_t b = 0;
+    for (int k = 0; k < all[u].n_parts; k++)
+      b += (all[u].part[k].bytes + 2 * ARENA_GRAIN - 1) / ARENA_GRAIN * ARENA_GRAIN;
+    most = b > most ? b : most;
+  }
+  return most;
 }
 
 /* the resident set: every tensor the layers use but the routed experts, then experts while the budget lasts - expert
@@ -236,10 +269,11 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     ok = fwd_fail(err, perr);
   else if (!(f->reads = reads_create((uint32_t)f->n_expert_units, FWD_FETCH_THREADS, perr)))
     ok = fwd_fail(err, perr);
-  else if (!(f->pool_room = stream_budget(f, all)) ||
-           !(f->pool = pool_create(all, f->n_expert_units, f->pool_room, hip_slots(), reads_fetcher(f->reads),
-                                   NULL, NULL, perr)))
-    ok = fwd_fail(err, perr);
+  else if (!(f->pool_room = stream_budget(f, all)) || !direct_units(f, all) ||
+           !(f->hs = host_slots_create(f->pool_room + 2 * largest_unit(f, all), perr)) ||
+           !(f->pool = pool_create(all, f->n_expert_units, f->pool_room, host_slots(f->hs), reads_fetcher(f->reads),
+                                   ARENA_GRAIN, NULL, NULL, perr)))
+    ok = fwd_fail(err, perr[0] ? perr : "out of memory (the pool's units)");
   for (size_t i = 0; ok && i < n_t; i++)
   {
     const void *dev[POOL_PARTS];
@@ -443,7 +477,8 @@ static bool scratch(Forward *f)
          hipHostMalloc((void **)&f->stage, NS * B * (uint64_t)(f->n_eg = n_eg ? n_eg : 1) * cols * row, 0) ==
              hipSuccess &&
          hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess && subs(f) &&
-         hipEventCreateWithFlags(&f->routed, hipEventDisableTiming) == hipSuccess;
+         hipEventCreateWithFlags(&f->routed, hipEventDisableTiming) == hipSuccess &&
+         hipEventCreateWithFlags(&f->passed, hipEventDisableTiming) == hipSuccess;
 }
 
 /* the sub-batches' own state (forward_impl.h's Sub): the first the Forward's own buffers, the others their own */
@@ -527,12 +562,15 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
     f->cand_words = ((f->score_stride + w->geo.cand_block - 1) / w->geo.cand_block + 31) / 32;
   f->eg_fd = -1;
   for (int i = 0; i < FWD_MAX_FILES; i++)
-    f->fds[i] = -1;
-  bool ok = true;
+    f->fds[i] = f->dfds[i] = -1;
+  bool ok = true, direct = true;
   for (int i = 0; ok && i < w->n_files; i++) /* the model's files, then an overlay's (weights.h) */
-    ok = (f->fds[i] = open(w->paths[i], O_RDONLY)) >= 0;
+    ok = (f->fds[i] = open(w->paths[i], O_RDONLY)) >= 0 &&
+         (direct = (f->dfds[i] = open(w->paths[i], O_RDONLY | O_DIRECT)) >= 0);
   char eerr[ENGRAM_ERR] = "";
-  if (!ok)
+  if (!ok && !direct) /* refused loudly: the pool's reads are direct (no silent buffered path) */
+    fwd_fail(err, "a model file could not be opened O_DIRECT (its filesystem: tmpfs and some FUSE ones refuse it)");
+  else if (!ok)
     fwd_fail(err, "a model file could not be opened");
   else if ((f->eg_fd = engram_fd(f, w)) < 0)
     ok = fwd_fail(err, "the Engram's file could not be opened");
@@ -596,6 +634,7 @@ void forward_destroy(Forward *f)
   (void)hipDeviceSynchronize(); /* a failed step's kernels done: what is freed or unlocked, the GPU is past */
   reads_destroy(f->reads);      /* its readers stopped before the pool they feed goes */
   pool_destroy(f->pool);
+  host_slots_destroy(f->hs);    /* after the pool: no unit still in it */
   resident_destroy(f->res);
   free(f->rix);
   free(f->is_held);
@@ -641,9 +680,15 @@ void forward_destroy(Forward *f)
   hipHostFree(f->pin);
   if (f->routed)
     hipEventDestroy(f->routed);
+  if (f->passed)
+    hipEventDestroy(f->passed);
   for (int i = 0; i < FWD_MAX_FILES; i++)
+  {
     if (f->fds[i] >= 0)
       close(f->fds[i]);
+    if (f->dfds[i] >= 0)
+      close(f->dfds[i]);
+  }
   if (f->eg_fd >= 0)
     close(f->eg_fd);
   for (int l = 0; l < WEIGHTS_MAX_LAYERS; l++)
@@ -682,7 +727,7 @@ bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char
   /* b->ids free between steps (the next one's tokens written at its start) */
   if (!ops_argmax(f->b.vocab + (uint64_t)row0 * V, V, rows, V, f->b.ids, NULL) ||
       hipMemcpyAsync(f->pin->greedy, f->b.ids, rows * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-      hipStreamSynchronize(NULL) != hipSuccess)
+      !fwd_settle(f))
     return fwd_fail(err, "a GPU call failed (the greedy picks)");
   for (uint32_t r = 0; r < rows; r++)
     if ((ids[r] = f->pin->greedy[r]) < 0)

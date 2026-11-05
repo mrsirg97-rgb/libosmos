@@ -2338,6 +2338,112 @@ at once, drafting).
   already swaps in. not built. the lever it points at: the guess's reads earlier (1,316 guessed reads still waited
   1.8 s), and a better starting profile.
 
+## 0.3.0: energy a token (design, 2026-11-05)
+
+- **why**: the operator's frontier: the least energy a token, measured at the box's low-power profile (power-profiles-
+  daemon's power-saver = platform_profile low-power, a stock profile) and kept only where performance does not
+  regress. the box is for a dev or a small team - a few conversations at once - so the agents bench's J an answer
+  token leads, single-stream plain / drafted / prompts beside it. less work is less work at any power: launches, bytes,
+  copies and spins cut, not speed traded.
+- **the tools**: dbench prints `window prompt|decode <start> <end> <tokens>` (epoch seconds) for each prompt read and
+  answer; tools/bench/energy.py matches tools/power.py's samples (amdgpu PPT, the package: CPU + GPU + NPU, not the
+  wall, not the board's DRAM) to them - J a token by window, and agent_bench's J an answer token (it reproduces the
+  agents run above: 7.25 J). osmos-serve's OSMOS_STATS gives the read waits.
+- **the baseline** (0.2.0, UD-IQ1_M, budget auto 99.73 GiB, ~/bench/v030/base-low):
+
+  | | performance (earlier today) | low-power |
+  | --- | ---: | ---: |
+  | plain decode | 16.4 tok/s | 14.8 tok/s, 69.5 W, **4.80 J** a token |
+  | drafted decode | 29.8 | 25.8, 69.3 W, **2.83 J** |
+  | prompts 2K / 8K | 300 / 466 | 268 / 396, 70.2 W, **0.19 J** a prompt token |
+  | agents (4 x 8) | 450.6 s, 128.8 W, 7.25 J | 527.2 s, 62.6 W, **4.12 J** an answer token |
+
+  low-power costs 10-17% of the speed for half the power: decode waits on memory and the SSD, which the profile does
+  not slow (the agents' read waits 85.4 s / 86.0 s at both), and the last tenth of a clock is the dearest in watts.
+  for scale (the operator's measures, not this file's): a 2x5090 desktop drafts this model at 90 tok/s at 500-600 W
+  (cards, board, CPU package): 5.6-6.7 J a token.
+- **where the work is** (the trace of 2026-11-04 above: 55.5 ms a token, 8.5 GB read; the dense matrices 30 ms at ~92%
+  of the bandwidth) **and what the CPU does** (osmos-serve in the agents bench, top -H over 2 s): the forward's thread
+  85%, the 12 readers ~48% each - 6-7 cores on an APU whose CPU and GPU share one package limit.
+- **the targets, ranked by joules**:
+  1. **the readers copy every expert twice**: a buffered pread lands it in the page cache (the SSD's DMA), then the CPU
+     copies it into the slot - 48% of a core a reader, and the bytes through DRAM three times. O_DIRECT reads straight
+     into the slot. the facts: btrfs (sector 4 KiB, no compression on this mount), the NVMe's logical block 512 B; no
+     expert slice of UD-IQ1_M starts on 4 KiB (0 of 46,080), every slice 2 KiB past a multiple of it - a direct read
+     takes the aligned range around a slice (at most 4 KiB before and after: ~24 KiB an expert, ~0.3% of the pool) and
+     the kernels read the slice inside it. the page cache is no longer a second tier for streamed experts (1-4 GB of it
+     under load: above). open: whether O_DIRECT can DMA into hip_slots' memory (a driver mapping get_user_pages may
+     refuse) - else page-aligned anonymous memory registered with HIP (the GPU read registered host memory at 237.5
+     GB/s: above). a prototype first (scratch odirect.hip).
+  2. **the forward's thread spins on the GPU**: the routing event (40 a step) is hipEventDisableTiming only, and the
+     step's end, the greedy pick and the drafter's rounds are hipDeviceSynchronize / hipStreamSynchronize - all
+     busy-waits. one shape: fwd_wait - a blocking-sync event recorded and slept on - for every one, the routing event
+     created hipEventBlockingSync. the price to measure: a wake's latency (~10-50 us?) x ~45 a step.
+  - **target 1, measured, then designed** (scratch odirect.hip: 256 MiB of a UD-IQ1_M shard, cold, 8 MiB 4 KiB-aligned
+    reads, one thread): buffered pread into hip_slots memory 3.63 GB/s at 76% of the reading thread's wall in CPU;
+    O_DIRECT into hip_slots memory 4.74 GB/s, 61% (the kernel still copies: a driver mapping, not plain pinnable
+    pages); **O_DIRECT into page-aligned anonymous memory registered with HIP 6.14 GB/s, 13%**; buffered into it 4.75,
+    61%. every read's bytes the file's. the GPU reads registered host memory at its own memory's speed (237.5 against
+    239.7 GB/s: "in place", above). so the win is both together:
+    - **the pool's memory a registered arena** (mem/host_slots: one mmap'd, page-aligned anonymous arena, hipHostRegister
+      once at the forward's creation, a Slots over it - first fit on 4 KiB, freed back in place). only the pool: its
+      room is two layers' streamed experts (stream_budget, ~2 GB); the resident set stays where it is (read once).
+    - **reads O_DIRECT** (the forward opens the model's files a second time O_DIRECT for the pool's units; a file that
+      refuses it refused loudly, no silent buffered fallback). the pool lays a part out at its slice's 4 KiB-aligned
+      range (pool_create's read alignment: the range begins at the slice's offset rounded down, ends rounded up; the
+      slice's place inside it is the part's pointer) - ~24 KiB an expert of slack.
+    - **the sizing's footprint the same**: the arena is counted against the budget as the pool's room was (fit sized
+      to the same RAM: the operator's ~8 GB kept free), though registered memory is outside ttm's pages_limit.
+    - streaming no longer goes through the page cache, so the page-cache cliff (decode collapsing past ~106 GiB of
+      experts: above) is not the streamed experts' any more - a larger resident budget is a later question, measured.
+      Engram's rows stay buffered (small random reads the page cache helps).
+    - the bits: the same bytes in a different place - every kernel reads the slice through the part's pointer; the
+      fingerprint tests and the answers' hashes the check.
+    - the tests first: test_pool (a read alignment: every read range aligned, its slice inside it at the part's
+      pointer, the slack bounded); test_host_slots (alloc / free / reuse in the arena, its bounds, a registration
+      refused failing closed); test_pool_gpu (the cold layer through O_DIRECT into the arena: the GPU's sums the
+      file's, GB/s); then the benches (the readers' CPU, J a token).
+  3. drafting for joules: a drafted token is 41% less energy than a plain one (2.83 / 4.80 J) - its length and
+     thresholds tuned on J, not tok/s.
+  4. launches: the hyper-connections (~2.4 ms a token), the small rest (~2.5), the gaps (~3.0).
+  5. the F32 router (0.31 GB a token; BF16 halves it) - it moves bits once: the operator's call, not a default.
+- **the rule for keeping a change**: J a token down at low-power, nothing slower at performance, the answers' hashes
+  unchanged (1-4 move no bit); each measured on single-stream and the agents bench.
+- **target 2, measured** (~/bench/v030/sleep-low, split-low; test_sleep_gpu, test_wait_gpu): an event's own
+  hipEventBlockingSync is not honoured on ROCm 7.15 - a 300 ms wait spun 300 ms of a core; the device's
+  hipDeviceScheduleBlockingSync is (7 ms), set before the process's first kernel (after one it does not take:
+  gpu_sleep_on_waits, the top of osmos-serve's and dbench's main). sleeping on every wait lost: plain 14.7 -> 13.2
+  tok/s, 4.78 -> 5.36 J; drafted 25.6 -> 23.9, 2.83 -> 3.04 J (low-power) - a wake ~0.2 ms, 40 a step, and the package
+  at its cap gave the GPU the CPU's watts anyway. kept as a split: a decode-sized step (its routing pairs fewer than a
+  layer's experts: the lane's small step) spins, a prompt's step sleeps (fwd_wait, hip_wait.c; test_wait_gpu: a 2K
+  step at 17% of the thread's core, 32 decode steps at 86%; sleeping always, 23% and the decode 18% slower - the
+  test's mutant). its agents run was stopped for target 1; it is in target 1's numbers below.
+- **target 1, built and measured** (mem/arena, mem/host_slots, pool_create's read_align, the forward's O_DIRECT
+  twins; test_arena, test_pool's read alignment and arena room, test_pool_gpu's direct path: a cold layer's 384 experts
+  O_DIRECT into registered pages 7.06 GB/s, every part's GPU sum the file's). the pool, refused by an arena in pieces
+  with the budget's room made, now frees more (spares, then the furthest) until it fits or nothing can go - the arena
+  test's invariant (a pin refused only with no room it could have made) fails the single try. the arena: the pool's
+  room and two of its largest unit. at low-power, against 0.2.0 the same day (~/bench/v030/direct-low, base-low),
+  with target 2's split:
+
+  | low-power | 0.2.0 | 0.3.0 (targets 1 + 2) |
+  | --- | ---: | ---: |
+  | plain | 14.8 tok/s, 4.80 J | **15.9, 4.45 J** (-7%) |
+  | drafted | 25.8, 2.83 J | **29.3, 2.50 J** (-12%) |
+  | agents (4 x 8) | 527.2 s, 62.6 W, 4.12 J | **479.0 s, 63.1 W, 3.78 J** (-8%); first token p95 76.2 -> 62.6 s |
+
+  the answers' hashes 0.2.0's. at the package's cap the readers' watts (12 copying at ~48% of a core) go to the GPU:
+  the same power, more tokens. drafted at low-power now 0.2.0's drafted at performance (29.8) at ~71 W against ~125.
+  the agents' forward waited on more reads (44,058 against 37,598) for about the same time (89.3 against 86.0 s):
+  direct reads take no page-cache hits - a RAM tier for streamed experts is the lever that points at.
+- **and at performance** (the release's check: nothing slower; ~/bench/v030/direct-perf): plain 16.4 -> **17.1**
+  tok/s (7.71 J), drafted 29.8 -> **32.0** (4.10 J), agents 450.6 -> **433.2 s**, 7.25 -> 6.98 J an answer token
+  (first token p95 57.6 -> 51.8 s); the answers' hashes 0.2.0's. prompts within the bench's spread: 0.2.0 measured
+  300 / 466 in the morning and 281 / 458 beside 0.3.0's 296 / 443 (2K / 8K), 0.31 -> 0.29 J a prompt token. the
+  agents' read waits 85.4 -> 106.5 s with the wall shorter: the page cache's hits again. low-power against performance
+  on 0.3.0: plain -7% speed for -42% J, drafted -8% for -39%, agents +11% time for -46%. from here every change is
+  developed at low-power and checked at performance once a release (the operator's).
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.
