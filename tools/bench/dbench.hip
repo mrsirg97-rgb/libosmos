@@ -76,7 +76,8 @@ static int32_t pick(Forward* f, std::vector<float>& lg, uint32_t V, uint32_t row
 }
 static int g_drafted, g_accepted, g_rounds;
 static double g_draft_ms, g_verify_ms; // a drafted answer's time drafting, and verifying (with its picks)
-constexpr float kConfMin = 0.5f, kCumMin = 0.5f;  // maya's defaults (as test_drafter_gpu)
+static float g_conf = DRAFTER_CONF_MIN, g_cum = DRAFTER_CUM_MIN;  // osmos-serve's; DRAFT_CONF / DRAFT_CUM: a sweep's
+static int g_draft_max = DRAFTER_BLOCK;  // DRAFT_MAX: a sweep's cap on a round's drafts (the block's 5 at most)
 constexpr int kRing = 128;                        // the drafter's window: a prompt's last rows seeded
 
 // one answer: the prompt in one batch, then n greedy tokens (stepped, or drafted and verified); returns tok/s of them
@@ -117,7 +118,8 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
     int made = 0;
     while (made < n) {
       const auto d0 = std::chrono::steady_clock::now();
-      const int k = drafter_draft(g_draft, s, t, kConfMin, kCumMin, dr, cf, err2);
+      int k = drafter_draft(g_draft, s, t, g_conf, g_cum, dr, cf, err2);
+      k = k > g_draft_max ? g_draft_max : k;
       const auto d1 = std::chrono::steady_clock::now();
       if (k < 0) std::fprintf(stderr, "draft: %s\n", err2), std::_Exit(1);
       std::vector<int32_t> toks{t};
@@ -252,6 +254,11 @@ int main(int argc, char** argv) {
   }
   if (sized) std::printf("sized to this GPU: budget %.2f GiB\n", sized_to / (double) (1ull << 30));
   g_greedy = std::getenv("GREEDY") != nullptr;
+  if (const char* c = std::getenv("DRAFT_CONF")) g_conf = std::strtof(c, nullptr);
+  if (const char* c = std::getenv("DRAFT_CUM")) g_cum = std::strtof(c, nullptr);
+  if (const char* c = std::getenv("DRAFT_MAX")) g_draft_max = std::atoi(c) > 0 && std::atoi(c) < DRAFTER_BLOCK ? std::atoi(c) : DRAFTER_BLOCK;
+  if (std::getenv("DRAFT"))
+    std::printf("drafts kept at confidence >= %.2f each, %.2f their product, %d a round at most\n", g_conf, g_cum, g_draft_max);
   if (const char* ip = std::getenv("IDS")) CHECK((g_ids = std::fopen(ip, "w")));
   std::printf("loaded %.0fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - l0).count());
   uint64_t h = 1469598103934665603ull;

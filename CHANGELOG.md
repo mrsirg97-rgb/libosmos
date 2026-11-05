@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.1]: drafting tuned for energy
+
+DSpark's drafts are kept while each confidence is at least 0.1 and their product too (`DRAFTER_CONF_MIN` /
+`DRAFTER_CUM_MIN` in `osmos/run/drafter.h`, one setting for osmos-serve and the bench), down from Maya's 0.5 / 0.5.
+Every draft is verified by the trunk, so the setting changes only the cost: the answers' hashes are the same at every
+value swept. Swept at the low-power profile (UD-IQ1_M, drafted, 0.0 to 0.8): 0.1 the least energy a token - lower
+floors let more drafts reach a verify pass that runs anyway, and a floor above 0 still lets the drafter stop a hopeless
+row early (0.0, no floor, costs as much as 0.5). Confirmed over two interleaved rounds against 0.5: 29.4 -> 30.65
+tok/s, 2.51 -> 2.345 J a token (-6.6%). The agents bench, mostly reading, measured level (3.78 -> 3.84 J an answer
+token, 479 -> 483 s: within a run's spread). `dbench` takes `DRAFT_CONF`, `DRAFT_CUM` and `DRAFT_MAX` for sweeps.
+
 ## [0.3.0]: less energy a token - the experts read straight into memory the GPU reads
 
 The streamed experts are now read with `O_DIRECT` straight into registered host memory the GPU reads (the SSD's DMA

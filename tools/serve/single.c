@@ -8,8 +8,6 @@
 #include "serve.h"
 #include "osmos/gpu/mm.h"
 
-#define CONF_MIN 0.5f /* the drafter's: maya's defaults (as dbench) */
-#define CUM_MIN 0.5f
 #define QUEUED 64 /* lines that came while a request ran, kept for after it */
 
 typedef struct Lines
@@ -114,7 +112,7 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
 {
   int32_t dr[DRAFTER_BLOCK], picks[DRAFTER_BLOCK + 1], toks[DRAFTER_BLOCK + 1];
   float cf[DRAFTER_BLOCK];
-  int k = drafter_draft(sv->d, c->s, *t, CONF_MIN, CUM_MIN, dr, cf, c->err);
+  int k = drafter_draft(sv->d, c->s, *t, DRAFTER_CONF_MIN, DRAFTER_CUM_MIN, dr, cf, c->err);
   if (k < 0)
     return -1;
   const long long room = a->limit - a->produced;

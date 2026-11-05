@@ -4,8 +4,6 @@
 
 #include "multi.h"
 
-#define CONF_MIN 0.5f /* the drafter's: maya's defaults (as dbench, single.c) */
-#define CUM_MIN 0.5f
 #define MAX_LANES 64
 
 typedef struct Entry
@@ -31,7 +29,7 @@ static bool greedy_goes_on(Multi *m, Lane *ln)
 static int drafts(Multi *m, Lane *ln, int32_t *dr, int room)
 {
   float cf[DRAFTER_BLOCK];
-  int k = drafter_draft(m->sv->d, ln->c.s, ln->t, CONF_MIN, CUM_MIN, dr, cf, ln->c.err);
+  int k = drafter_draft(m->sv->d, ln->c.s, ln->t, DRAFTER_CONF_MIN, DRAFTER_CUM_MIN, dr, cf, ln->c.err);
   if (k < 0)
     return -1;
   const long long left = ln->limit - ln->produced - 1;
