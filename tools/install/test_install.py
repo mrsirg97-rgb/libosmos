@@ -267,6 +267,8 @@ class Rig(unittest.TestCase):
             self.assertEqual(row["id"], "osmos-ud-iq1_s")
             self.assertIn("${PORT}", row["command"])
             self.assertEqual(row["efforts"], ["low", "high", "max"])      # the levels osmos-api maps
+            self.assertEqual(row["effort"], "max")                           # the default: the most thinking
+            self.assertIn(row["effort"], row["efforts"])                     # rig refuses one not among them
             self.assertEqual((row["maxTokens"], row["reserve"]), (262144, 262144))  # a 256K thinking budget
             self.assertTrue(row["port"] != 8090 and row["window"] == 1048576)
             self.assertFalse(os.path.exists(os.path.join(home, "settings.json")))
