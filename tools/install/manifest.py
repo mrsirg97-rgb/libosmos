@@ -46,6 +46,11 @@ def check(m):
                             f"version {VERSION}")
     if not isinstance(m.get("files"), dict) or not isinstance(m.get("packs"), dict):
         raise ManifestError("no files or no packs")
+    r = m.get("rig")
+    if not (isinstance(r, dict) and isinstance(r.get("repo"), str) and re.fullmatch(r"[\w.-]+/[\w.-]+", r["repo"])
+            and isinstance(r.get("version"), str) and re.fullmatch(r"v\d+\.\d+\.\d+", r["version"])
+            and isinstance(r.get("install_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", r["install_sha256"])):
+        raise ManifestError("rig: not {repo, version (a release tag vX.Y.Z), install_sha256 (its install.sh's)}")
     for fid, f in m["files"].items():
         _file(fid, f)
     for pid, p in m["packs"].items():

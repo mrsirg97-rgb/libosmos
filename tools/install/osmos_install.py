@@ -9,12 +9,15 @@ the packs and their files: packs.json beside this (every file pinned to a commit
 from the user's own (--have: any file of its bytes and hash under those directories, renamed or not) or downloaded
 at its commit and checked; the engine built from this checkout; each pack laid out under --models (its shards, the
 Engram table as its slot, the picks, the drafter, the overlay if --abliterated, osmos.json). then --rig registers it
-in rig (~/.rig: a row rig launches, the default model only when asked), --serve starts osmos-api. design: DESIGN.md,
+in rig (~/.rig: a row rig launches, the default model only when asked; rig itself installed first when it is
+not here - its install.sh at the manifest's pinned release, checked by SHA-256), --serve starts osmos-api. design: DESIGN.md,
 "the installer"."""
 import argparse
 import os
+import shutil
 import subprocess
 import sys
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -29,6 +32,22 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 API = os.path.join(ROOT, "bin", "osmos-api")
 BUILD = [["git", "submodule", "update", "--init"],  # libevt (osmos-serve's loop)
          ["make", "-j"], ["make", "-j", "serve"], ["make", "-j", "api"]]  # the engine, osmos-serve, osmos-api
+
+
+def find_rig():
+    """rig on PATH, or where its install.sh lands it (RIG_BIN, else ~/.local/bin)"""
+    at = os.path.join(os.environ.get("RIG_BIN") or os.path.expanduser("~/.local/bin"), "rig")
+    return shutil.which("rig") or (at if os.access(at, os.X_OK) else None)
+
+
+def download(url):
+    with urllib.request.urlopen(url, timeout=60) as r:
+        return r.read()
+
+
+def run_sh(script, env):
+    print("  rig not found: installing it with its own install.sh", flush=True)
+    subprocess.run(["sh", "-s"], input=script, env=env, check=True)
 
 
 def needed(m, pids, abliterated):
@@ -124,6 +143,8 @@ def main():
         print(f"  {cfgs[-1]}")
     if a.rig:
         print("rig:")
+        exe = rig.ensure(m["rig"], find_rig, download, run_sh)
+        print(f"  {exe}")
         for c in cfgs:
             cfg = layout.read_config(c)
             rid = f"osmos-{cfg['pack']}"

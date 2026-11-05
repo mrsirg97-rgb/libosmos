@@ -3,6 +3,7 @@ merged by id into <rig home>/models.json - the provider half and the child half 
 substituted by rig; `port`; `aliases`; `stopGrace`; `places`) - and, asked, the default model in settings.json.
 no other row or key touched; a file replaced whole (written aside, then renamed); a file rig would refuse refused
 here first, unwritten."""
+import hashlib
 import json
 import os
 
@@ -38,6 +39,25 @@ def _write(path, v):
         json.dump(v, f, indent=2)
         f.write("\n")
     os.replace(tmp, path)
+
+
+def ensure(pin, find, download, run):
+    """rig's executable: the one find() sees, or else rig's own install.sh at the pinned release - its bytes checked
+    against the pin's SHA-256 before it runs (it verifies the binary it fetches against the release's checksums) -
+    then the one find() sees after it. seams: find() -> path or None; download(url) -> bytes; run(script, env)"""
+    exe = find()
+    if exe:
+        return exe
+    url = f"https://raw.githubusercontent.com/{pin['repo']}/{pin['version']}/install.sh"
+    script = download(url)
+    got = hashlib.sha256(script).hexdigest()
+    if got != pin["install_sha256"]:
+        raise RigError(f"{url}: its SHA-256 {got} is not the manifest's {pin['install_sha256']} - not run")
+    run(script, dict(os.environ, RIG_VERSION=pin["version"]))
+    exe = find()
+    if not exe:
+        raise RigError(f"rig's install.sh ({pin['version']}) ran and left no rig: is ~/.local/bin on PATH?")
+    return exe
 
 
 def _port(rows, rid):

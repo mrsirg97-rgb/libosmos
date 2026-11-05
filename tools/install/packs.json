@@ -1,5 +1,7 @@
 {
   "version": 1,
+  "rig": {"repo": "mrsirg97-rgb/rig", "version": "v3.5.0",
+          "install_sha256": "a64eea6c64ca7705a7b852e63805e4e57babbe36cbb64a71a7c9c25acf03ca4b"},
   "files": {
     "ud-iq1_m-1": {"repo": "unsloth/DeepSeek-V4.1-Flash-1017-GGUF", "revision": "2688c0c3c2c3b052ec4f6d10a8417b0ef7ee4eba",
                    "path": "UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf", "bytes": 5780868,
