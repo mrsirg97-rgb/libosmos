@@ -2288,7 +2288,7 @@ at once, drafting).
   - pool.h's Fetcher: `need` (a pin's 0, a want's `next`) for `urgent`, `need(unit, need)` for `hurry` - also told
     when a reading unit's want is corrected.
   - tests: test_reads (the order with one out: by need, ties as asked, a need corrected while waiting; 2,000 reads on
-    8 readers, at most `inflight` out, each pinned once with its bytes; a read whose file is gone FAILED; destroy
+    8 readers, at most `inflight` out (the cap's, since gone), each pinned once with its bytes; a read whose file is gone FAILED; destroy
     busy; the split below), test_fetchq / test_pool ported, test_pool_gpu on test_model.h's UD-IQ1_M (it had
     skipped since ds1017 left this box): a cold layer's 384 experts through reads.h at 6.70 GB/s. host tests, asan,
     tsan, and the GPU suite (27 ok; forward, lane - no ds1017 or oracle here - skip as before): the fingerprints the
@@ -2312,6 +2312,7 @@ at once, drafting).
 
   decode level (every 0.2.0 run at or above 0.1.3's, within the spread); the depth trades prompts - more out, a long
   prompt faster and a short one slower. FWD_READS_INFLIGHT 24 (2 x the readers): at or above 0.1.3 everywhere, 8K +2%.
+  (superseded: the cap is gone - the agents bench, below.)
   not measured for it: the agents bench (several conversations - where the order by need should matter most).
 - **the agents bench, and the order moved to where the readers take** (2026-11-05, ~/bench/agents-v020,
   ~/bench/agents-stats; agent_bench 4 x 8 seed 1, 131K, DSpark, budget auto 99.73 GiB both, guess off): the build
