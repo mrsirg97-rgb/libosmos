@@ -2283,6 +2283,7 @@ at once, drafting).
   - `mem/reads` (reads.h): a read record a unit, an Engine whose events are the reads' ends, a cap (`sooner`: need,
     then asked) - `fetch` submits, `need` moves a waiting read, `reads_pump` runs the ends (pool_ready, the slot
     freed, the next given out). the forward's `Inbox` and fwd_on_read deleted; fwd_drain / fwd_wait_read a pump each.
+    (the cap: replaced below - the agents bench.)
   - `fetchq`: one queue in the order given (the urgent / ahead rings and `hurry` deleted); `fetchq_read(.., split)`.
   - pool.h's Fetcher: `need` (a pin's 0, a want's `next`) for `urgent`, `need(unit, need)` for `hurry` - also told
     when a reading unit's want is corrected.
@@ -2312,6 +2313,22 @@ at once, drafting).
   decode level (every 0.2.0 run at or above 0.1.3's, within the spread); the depth trades prompts - more out, a long
   prompt faster and a short one slower. FWD_READS_INFLIGHT 24 (2 x the readers): at or above 0.1.3 everywhere, 8K +2%.
   not measured for it: the agents bench (several conversations - where the order by need should matter most).
+- **the agents bench, and the order moved to where the readers take** (2026-11-05, ~/bench/agents-v020,
+  ~/bench/agents-stats; agent_bench 4 x 8 seed 1, 131K, DSpark, budget auto 99.73 GiB both, guess off): the build
+  above was level alone and 4% slower with four agents - 461.6 s against 0.1.3's 443.8 the same afternoon (first token
+  p95 64.0 / 59.3 s). tried, not the cause: misses past the cap to the readers' front, split unless another miss out
+  (461.5 s); the cap at 1,024 (460.2). counted instead (osmos-serve OSMOS_STATS=1, forward_waits at exit): 0.1.3 waited
+  on 39,012 reads for 96.5 s (451.8 s that run). the cause, by elimination and by 0.1.3's code: a read ahead already
+  given to the readers and then waited on kept its place behind every whole read queued before it - 0.1.3's hurry had
+  moved it to the urgent queue. the fix is the design's own point taken one step further: the order lives where the
+  readers take. fetchq's queue is libevt's heap (each job an event, its priority its read's need: 0 the top, then by
+  need, ties the order given - a unit's jobs side by side), `fetchq_need` moves a unit's jobs not yet begun with libevt's
+  new `queue_update` (32988ad: each event knows its heap index; O(log n); a randomized test against a model, two
+  mutants fail it), and reads.h gives every read out at once - no cap. measured: 450.6 s, 37,319 reads waited for 85.4
+  s (-11.5%), first token p50 / p95 6.00 / 57.6 s, turn done 44.6 / 102.5 s, 7.25 J an answer token (0.1.3: 7.30);
+  a cold layer through reads.h 7.05 GB/s (test_pool_gpu); one conversation (dbench, as above): plain 16.4, drafted 29.8,
+  prompts 300 / 466 at 2K / 8K (0.1.3: 292 / 444), the answers' hashes 0.1.3's. the waits fell 11 s and the wall only matched: with four
+  conversations the GPU has other lanes' work while one waits - the reads are not the agents bench's only limit.
 - **the rule engine, measured offline instead** (a routing trace: dbench's ROUTES_OUT, 1,604 steps of UD-IQ1_M; the
   analysis ~/bench/routes/analysis): a transition rule (expert e at L -> f at L+1, counted online) catches 7.7% of
   the next layer's misses at 6 reads a token-layer, 0.4% of its reads needed (~40 extra reads a token); L+2 / L+3

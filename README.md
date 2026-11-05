@@ -56,9 +56,11 @@ command: `DESIGN.md`.
 What an agent waits on is mostly reading: Maya's agent bench (4 agents at once x 8 turns, seed 1, 131K context,
 DSpark on) sends ~99K new prompt tokens against ~8K answer tokens. UD-IQ1_M; power is the APU package's (amdgpu PPT:
 CPU + GPU + NPU, not the wall), over the bench's own window, AMD's stock limits. The 128K prompt: real text, osmos at
-its 1M context, Maya at the 139,264 the prompt needs (the setting kindest to it); both then write the same 8 tokens:
+its 1M context, Maya at the 139,264 the prompt needs (the setting kindest to it); both then write the same 8 tokens.
+Measured with osmos 0.1.3; 0.2.0 measured level on the same bench (450.6 s against 0.1.3's 443.8 and 451.8 s that
+afternoon, 7.25 J an answer token - CHANGELOG):
 
-| | osmos | Maya 1.1.53 | |
+| | osmos 0.1.3 | Maya 1.1.53 | |
 | --- | --- | --- | --- |
 | Wall, all 32 turns | **440 s** | 547 s | 20% less |
 | First token p50 / p95 | **5.8 / 58.3 s** | 6.6 / 90.9 s | p95 36% lower |
@@ -110,7 +112,10 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
 
 - **Experts by residency.** The dense weights and as many experts as the budget holds live in GPU memory, chosen by
   how often a calibration text picks them (a profile beside the model). The rest are read from the GGUF files when
-  the router picks them, guessed a layer ahead, and the resident set follows the text (hot experts swapped in).
+  the router picks them, guessed a layer ahead, and the resident set follows the text (hot experts swapped in). The
+  readers take the read needed soonest from [libevt](https://github.com/mrsirg97-rgb/libevt)'s priority queue - a
+  miss the forward waits on first, a read ahead moved up in place when it becomes one - and each read's end comes back
+  to the forward as an event.
 - **Int8 experts.** A routed expert's input is rounded to int8 a block of 32, and its 1-2-bit weights are summed with
   exact integer dot products (`v_dot4` on the GPU, `vpdpbusd` on the CPU), then scaled in one fixed order - the
   contract in `kernels/lane.h` that makes the CPU and the GPU agree bit for bit.

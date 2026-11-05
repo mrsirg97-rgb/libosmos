@@ -156,6 +156,9 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
   return dev;
 }
 
+/* a read's need on the Fetcher: a pin's 0 (waited on now), a want's its `next` + 1 - so 0 is a pin's alone */
+static uint64_t want_need(uint64_t next) { return next < UINT64_MAX ? next + 1 : next; }
+
 static void begin_read(Pool *p, Slot *s, uint8_t *dev, uint64_t need)
 {
   void *dst[POOL_PARTS] = {0};
@@ -278,12 +281,12 @@ void pool_want(Pool *p, uint32_t unit, uint64_t next)
   {
     s->next = next;
     if (s->state == POOL_READING && p->fetcher.need)
-      p->fetcher.need(unit, next, p->fetcher.ctx);
+      p->fetcher.need(unit, want_need(next), p->fetcher.ctx);
     return;
   }
   uint8_t *mem = room(p, s, (Reach){true, next});
   if (mem)
-    s->next = next, begin_read(p, s, mem, next);
+    s->next = next, begin_read(p, s, mem, want_need(next));
 }
 
 void pool_ready(Pool *p, uint32_t unit, bool ok)

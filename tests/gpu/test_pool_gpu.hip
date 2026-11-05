@@ -108,7 +108,7 @@ int main() {
     for (int k = 0; k < 3; k++) want[(size_t) e * 3 + k] = file_sum(units[e].part[k]);
   const uint64_t budget = unit_bytes * (uint64_t) E / 4;
   char err[POOL_ERR] = "";
-  CHECK((g_reads = reads_create((uint32_t) E, 4, 8, err)));
+  CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
   Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), reads_fetcher(g_reads), on_event, nullptr, err);
   if (!p) std::fprintf(stderr, "pool_create: %s\n", err);
   CHECK(p);
@@ -144,10 +144,10 @@ int main() {
   reads_destroy(g_reads);
   pool_destroy(p);
 
-  // the whole path, cold: the layer's experts evicted, all asked at once, read by 4 readers 8 at a time (reads.h;
+  // the whole path, cold: the layer's experts evicted, all asked at once, read by 4 readers by need (reads.h;
   // DESIGN.md "the fetcher"), each read's end an event pumped into the pool on this thread - then a GPU sum each
   for (int k = 0; k < 3; k++) posix_fadvise(fds[t[k]->file], (off_t) t[k]->offset, (off_t) t[k]->bytes, POSIX_FADV_DONTNEED);
-  CHECK((g_reads = reads_create((uint32_t) E, 4, 8, err)));
+  CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
   p = pool_create(units.data(), units.size(), unit_bytes * (uint64_t) E + (64u << 20), hip_slots(),
                   reads_fetcher(g_reads), on_event, nullptr, err);
   CHECK(p);

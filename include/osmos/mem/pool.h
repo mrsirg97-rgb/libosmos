@@ -105,7 +105,7 @@ pool_create
   unit's parts into `dst` (a part's place in its memory, in part order) and returns at once; when the read is done,
   whoever wired it arranges pool_ready(unit, ok) on the consumer (the binary: reads.h - fetchq's workers, the end an
   event the forward's thread runs; the tests: by hand). a read carries its `need`, when it is wanted on pool_release's
-  clock: a pin's 0 (waited on now), a want's its `next`; `need(unit, need)`, when given, is told a reading unit's need
+  clock: a pin's 0 (waited on now), a want's its `next` + 1 (0 is a pin's alone); `need(unit, need)`, when given, is told a reading unit's need
   moved - pinned (0), or a want's `next` corrected - so the reads' order follows it. `on_event`: every state
   change as a PoolEvent, in order (the event log), or NULL.
   refuses (NULL, the reason in `err`) a unit with no parts or more than POOL_PARTS, a range of 0 bytes or past its

@@ -5,42 +5,27 @@
 #include <stdlib.h>
 
 #include "libevt/runtime/context.h"
-#include "libevt/scheduler/cap.h"
 #include "libevt/scheduler/engine.h"
 #include "osmos/mem/fetchq.h"
 
 #define READS_PRIO 1 /* the engine carries one kind of event: a read's end */
 
-typedef enum
-{
-  READ_IDLE = 0,
-  READ_WAITING = 1, /* asked, waiting in the cap for a slot */
-  READ_OUT = 2,     /* given to the readers: its end comes back as an event */
-} ReadState;
-
 typedef struct Read
 {
   struct Reads *r;
   uint32_t unit;
-  ReadState st;
-  uint64_t need, asked;
-  PoolRange parts[POOL_PARTS];
-  void *dst[POOL_PARTS];
-  int n;
-  bool ok; /* written by the reader before it posts the end; read by the consumer after the engine hands it over */
+  bool out, pin; /* given to the readers (its end not yet pumped); waited on (need 0) */
+  bool ok;       /* written by the reader before it posts the end; read by the consumer after the engine hands it over */
 } Read;
 
 struct Reads
 {
   Engine *evt;
-  Cap *cap;
   Fetchq *q;
   Read *rd;
   uint32_t n_units;
-  int inflight, out;
-  size_t waiting;
+  int out, pins; /* the reads out; of them, the pins */
   uint64_t split;
-  uint64_t asked;
   Pool *pool; /* the pump's: pool_ready's */
   atomic_bool broken;
 };
@@ -62,85 +47,66 @@ static void post_end(uint32_t unit, bool ok, void *arg)
   engine_stop(r->evt);
 }
 
-/* the cap gave the read a slot: to the readers - split across them when it is alone (none other out or waiting: a
-   decode's miss), whole when others go with it (the batch: a prompt's next layer). one they refuse ends failed (its
-   slot freed at that end) */
-static void give_out(void *scope)
-{
-  Read *rd = scope;
-  Reads *r = rd->r;
-  rd->st = READ_OUT, r->out++, r->waiting--;
-  const bool alone = r->out == 1 && r->waiting == 0;
-  r->split += alone;
-  if (!fetchq_read(r->q, rd->unit, rd->parts, rd->n, rd->dst, alone))
-    post_end(rd->unit, false, r);
-}
-
-/* the consumer, in the pump: the pool told, the slot freed - the next read needed soonest given out in it */
+/* the consumer, in the pump: the read's end to the pool */
 static void ended(void *scope)
 {
   Read *rd = scope;
   Reads *r = rd->r;
-  rd->st = READ_IDLE, r->out--;
+  r->out--, r->pins -= rd->pin;
+  rd->out = false, rd->pin = false;
   pool_ready(r->pool, rd->unit, rd->ok);
-  cap_release(r->cap);
 }
 
-static bool sooner(void *a, void *b, void *arg)
-{
-  (void)arg;
-  const Read *x = a, *y = b;
-  return x->need < y->need || (x->need == y->need && x->asked < y->asked);
-}
-
+/* to the readers at once, at its need: a pin split unless another pin is out, a read ahead split only alone (none other
+   out) - reads side by side read whole. one the readers refuse ends failed, never lost */
 static void fetch(uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], uint64_t need, void *ctx)
 {
   Reads *r = ctx;
-  if (unit >= r->n_units || r->rd[unit].st != READ_IDLE || n < 0 || n > POOL_PARTS)
+  if (unit >= r->n_units || r->rd[unit].out) /* not the pool's contract: the forward fails closed */
   {
-    post_end(unit < r->n_units ? unit : 0, false, r);
+    atomic_store(&r->broken, true);
+    engine_stop(r->evt);
     return;
   }
   Read *rd = &r->rd[unit];
-  rd->n = n, rd->need = need, rd->asked = ++r->asked, rd->st = READ_WAITING;
-  for (int k = 0; k < n; k++)
-    rd->parts[k] = parts[k], rd->dst[k] = dst[k];
-  r->waiting++;
-  Context *c = context_create(rd, give_out);
-  if (c && cap_submit(r->cap, c))
-    return;
-  context_destroy(c); /* the cap could not hold it: it ends failed, never lost */
-  rd->st = READ_OUT, r->out++, r->waiting--;
-  post_end(unit, false, r);
+  rd->out = true, rd->pin = need == 0, r->out++, r->pins += rd->pin;
+  const bool split = rd->pin ? r->pins == 1 : r->out == 1;
+  r->split += split;
+  if (!fetchq_read(r->q, unit, parts, n, dst, split, need))
+    post_end(unit, false, r);
 }
 
+/* a read's need moved (a want's next corrected, or now waited on): its jobs not yet begun move with it */
 static void need(uint32_t unit, uint64_t need, void *ctx)
 {
   Reads *r = ctx;
-  if (unit < r->n_units && r->rd[unit].st == READ_WAITING)
-    r->rd[unit].need = need;
+  if (unit >= r->n_units || !r->rd[unit].out)
+    return;
+  Read *rd = &r->rd[unit];
+  if (need == 0 && !rd->pin)
+    rd->pin = true, r->pins++;
+  fetchq_need(r->q, unit, need);
 }
 
-Reads *reads_create(uint32_t n_units, int threads, int inflight, char err[READS_ERR])
+Reads *reads_create(uint32_t n_units, int threads, char err[READS_ERR])
 {
-  if (!n_units || inflight < 1)
-    return snprintf(err, READS_ERR, "reads: no units, or nothing in flight"), NULL;
+  if (!n_units)
+    return snprintf(err, READS_ERR, "reads: no units"), NULL;
   Reads *r = calloc(1, sizeof *r);
   if (!r || !(r->rd = calloc(n_units, sizeof *r->rd)))
   {
     free(r);
     return snprintf(err, READS_ERR, "reads: no memory for %u reads", n_units), NULL;
   }
-  r->n_units = n_units, r->inflight = inflight;
+  r->n_units = n_units;
   atomic_init(&r->broken, false);
   for (uint32_t i = 0; i < n_units; i++)
     r->rd[i] = (Read){.r = r, .unit = i};
   r->evt = engine_create(NULL, NULL, 0);
-  r->cap = r->evt ? cap_create(inflight, sooner, NULL) : NULL;
-  r->q = r->cap ? fetchq_create(threads, post_end, r) : NULL;
+  r->q = r->evt ? fetchq_create(threads, n_units, post_end, r) : NULL;
   if (!r->q)
   {
-    snprintf(err, READS_ERR, "reads: the readers (%d), the engine or the cap could not start", threads);
+    snprintf(err, READS_ERR, "reads: the readers (%d) or the engine could not start", threads);
     reads_destroy(r);
     return NULL;
   }
@@ -151,8 +117,7 @@ void reads_destroy(Reads *r)
 {
   if (!r)
     return;
-  fetchq_destroy(r->q); /* no end is posted after: the waiting and posted ones are dropped below, never resolved */
-  cap_destroy(r->cap);
+  fetchq_destroy(r->q); /* no end is posted after: the queued and the posted ones are dropped, never resolved */
   engine_destroy(r->evt);
   free(r->rd);
   free(r);
@@ -174,6 +139,5 @@ bool reads_pump(Reads *r, Pool *p, bool wait, char err[READS_ERR])
   return true;
 }
 
-int reads_inflight(const Reads *r) { return r ? r->out : 0; }
-size_t reads_waiting(const Reads *r) { return r ? r->waiting : 0; }
+int reads_out(const Reads *r) { return r ? r->out : 0; }
 uint64_t reads_split(const Reads *r) { return r ? r->split : 0; }
