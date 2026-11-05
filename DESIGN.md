@@ -2443,6 +2443,15 @@ at once, drafting).
   agents' read waits 85.4 -> 106.5 s with the wall shorter: the page cache's hits again. low-power against performance
   on 0.3.0: plain -7% speed for -42% J, drafted -8% for -39%, agents +11% time for -46%. from here every change is
   developed at low-power and checked at performance once a release (the operator's).
+- **against Maya 1.1.55** (2026-11-05 afternoon, `performance`, ~/bench/h2h-055: Maya pulled, rebuilt, its lane
+  calibrated on both packs - the engine's own threads, as 1.1.53's - its expert profile warmed by a discarded run, two
+  interleaved rounds a pack; osmos 0.3.0's UD-IQ1_S interleaved beside it, its UD-IQ1_M the direct-perf runs above):
+  UD-IQ1_M prompts 296 / 443 against 243 / 406 (+22% / +9%), drafted 32.0 against 27.5 (Maya's rounds 25.8 and 29.1:
+  +16%, +10% against its better), plain 17.1 / 17.0; UD-IQ1_S prompts 326 / 473 against 259 / 431, drafted 37.8 /
+  34.9 (+8%), plain 19.3 / 19.2. agents (UD-IQ1_M): osmos 433.2 s, first token p50 / p95 5.87 / 51.8 s, turn done
+  42.96 / 97.8 s, 128.9 W, 6.98 J an answer token; Maya 542.4 s, 6.32 / 81.3, 55.3 / 121.9, 126.9 W, 8.74 J - 20% less
+  time and energy. Maya's 1.1.54 / 1.1.55 prompt changes moved it a few percent on these GGUFs (1.1.53: 237 / 404);
+  its plain decode rose 16.5 -> 17.0, as osmos's 16.4 -> 17.1.
 
 ## open questions
 
