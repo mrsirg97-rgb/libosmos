@@ -3,18 +3,23 @@
 ## [0.2.0]: the forward's reads on libevt
 
 The forward's expert reads now run on [libevt](https://github.com/mrsirg97-rgb/libevt), the scheduler osmos-serve's
-loop already used. A finished read is an event the forward's thread runs; the reads go to the readers in the order
-they are needed (libevt's `cap`, by when the forward will pin each - a waited-on miss first), a read given out alone is
-split across the readers and reads given out together are read whole. This replaces a hand-built inbox (a mutex, a
-condition, an array and a "broken" flag) and two FIFO queues with a `hurry` that moved a read between them - one
-scheduler for the project, not two. libevt's sources are now built into `libosmos.a`, so every test and sanitizer run
-covers them; its `cap_submit` reports a refusal (libevt c70c58c), so a read the cap cannot hold fails closed instead of
-being lost.
+loop already used. The readers take the read needed soonest from libevt's priority queue - a miss the forward waits on
+first, then reads ahead by when the forward will reach them - and a read ahead that becomes waited on moves to the top
+in place (libevt's new `queue_update`). A finished read is an event the forward's thread runs. A miss is split across
+the readers unless another miss is out; reads side by side are read whole, keeping the file's readahead. This replaces
+a hand-built inbox (a mutex, a condition, an array and a "broken" flag) and two FIFO queues with a `hurry` that moved a
+read between them - one scheduler for the project, not two. libevt's sources are built into `libosmos.a`, so every
+test and sanitizer run covers them; libevt itself gained `cap_submit` and `queue_push` reporting refusals and an
+in-place `queue_update` (c70c58c, 32988ad).
 
-No output changes: which experts are read when is outside the arithmetic, and the fingerprint tests are unchanged.
-Speed is level, measured against 0.1.3 the same morning (UD-IQ1_M, `performance`, budget auto): plain 16.4 -> 16.5
-tok/s, drafted 29.8 -> 29.9, prompts 292 -> 290 at 2K and 444 -> 454 at 8K - every decode run at or above 0.1.3's,
-within the spread. The reads in flight (24) were swept at 12 / 24 / 48: more helps long prompts and costs short ones.
+No output changes: which experts are read when is outside the arithmetic; the fingerprint tests and the bench's answer
+hashes are unchanged. Measured against 0.1.3 on the same box and sizing (UD-IQ1_M, `performance`, budget auto):
+decode level (16.4 plain, 29.8 drafted tok/s), prompts faster (292 -> 300 tok/s at 2K, 444 -> 466 at 8K); the agents bench (4 agents x 8 turns) 450.6 s against 0.1.3's 443.8 and
+451.8 s, the forward waiting on reads 11.5% less (85.4 s against 96.5 s), 7.25 J an answer token against 7.30.
+
+The first build held reads back in libevt's `cap` until the forward thread pumped - level alone, but 4% slower with
+four agents (461 s), and neither a deeper cap nor letting misses past it fixed that: ordering the reads where the
+readers take them did. `OSMOS_STATS=1` makes osmos-serve print the forward's read counters at exit, which found it.
 
 Also measured, not built: a forward-chaining rule on routing transitions (expert e at one layer predicting f at the
 next), from a recorded trace (`dbench`'s new `ROUTES_OUT`). It catches ~8% of the next layer's misses against the

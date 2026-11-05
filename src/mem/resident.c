@@ -103,7 +103,7 @@ Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, in
     r->u[i] = units[i];
   Fetchq *q = NULL;
   bool ok = lay_out(r, err);
-  if (ok && n_units && !(q = fetchq_create(threads, on_read, r)))
+  if (ok && n_units && !(q = fetchq_create(threads, (uint32_t)n_units, on_read, r)))
   {
     snprintf(err, POOL_ERR, "the readers could not start");
     ok = false;
@@ -116,7 +116,7 @@ Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, in
     for (int k = 0; k < r->u[i].n_parts; k++) /* a room part (no file) is memory only: nothing read */
       if (r->u[i].part[k].fd >= 0)
         read[n] = r->u[i].part[k], dst[n++] = r->dev[i] + r->off[i][k];
-    if (!fetchq_read(q, (uint32_t)i, read, n, dst, false)) /* the queue could not grow: the unit's read failed */
+    if (!fetchq_read(q, (uint32_t)i, read, n, dst, false, 1)) /* the queue could not grow: the unit's read failed */
       on_read((uint32_t)i, false, r);
   }
   pthread_mutex_lock(&r->mu);

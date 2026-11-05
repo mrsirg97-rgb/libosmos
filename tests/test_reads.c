@@ -72,64 +72,20 @@ static void check_bytes(Pool *p, uint32_t unit)
 static void test_refusals(int fd)
 {
   char err[READS_ERR];
-  assert(!reads_create(0, 4, 4, err) && err[0]);
-  assert(!reads_create(8, 0, 4, err) && !reads_create(8, 65, 4, err));
-  assert(!reads_create(8, 4, 0, err));
+  assert(!reads_create(0, 4, err) && err[0]);
+  assert(!reads_create(8, 0, err) && !reads_create(8, 65, err));
   reads_destroy(NULL);
   assert(!reads_pump(NULL, NULL, false, err));
   (void)fd;
-  printf("  refusals: no units, 0 or 65 readers, nothing in flight\n");
+  printf("  refusals: no units, 0 or 65 readers\n");
 }
 
-/* one read out at a time: the next given out is the one needed soonest, ties in the order asked, a need corrected
-   while waiting (a want's next, a pin's now) the need then - whatever the readers' timing */
-static void test_order(int fd)
-{
-  enum { U = 8 };
-  char err[READS_ERR], perr[POOL_ERR];
-  PoolUnit *u = units_of(fd, U);
-  Reads *r = reads_create(U, 1, 1, err);
-  assert(r);
-  Log log = {0};
-  Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), on_event,
-                        &log, perr);
-  assert(p);
-  const void *dev[POOL_PARTS];
-  pool_want(p, 0, 10); /* the slot free: given out at once */
-  assert(reads_inflight(r) == 1 && reads_waiting(r) == 0);
-  pool_want(p, 1, 6);
-  pool_want(p, 2, 1);
-  pool_want(p, 3, 4);
-  pool_want(p, 4, 1);              /* the same need as 2, asked after it */
-  pool_want(p, 6, 8);
-  pool_want(p, 6, 2);              /* corrected: needed sooner */
-  pool_want(p, 7, 3);
-  pool_want(p, 7, 9);              /* corrected: needed later */
-  assert(pool_pin(p, 5, dev) == POOL_WAIT); /* needed now */
-  assert(reads_inflight(r) == 1 && reads_waiting(r) == U - 1);
-  for (uint32_t i = 0; i < U; i++)
-    wait_for(r, p, i);
-  const uint32_t want[U] = {0, 5, 2, 4, 6, 3, 1, 7};
-  int k = 0;
-  for (int i = 0; i < log.n; i++)
-    if (log.ev[i].kind == POOL_EV_PIN)
-      assert(log.ev[i].unit == want[k++]);
-  assert(k == U && reads_inflight(r) == 0 && reads_waiting(r) == 0);
-  assert(reads_split(r) == 2); /* the first (given out alone) and the last (none left waiting); the rest went whole */
-  for (uint32_t i = 0; i < U; i++)
-    check_bytes(p, i);
-  reads_destroy(r);
-  pool_destroy(p);
-  free(u);
-  printf("  order: one out at a time - by need, ties as asked, a need corrected while waiting the need then\n");
-}
-
-/* many reads on many readers: never more than `inflight` out, every one pinned once with its bytes */
-static void test_many(int fd, uint32_t n, int threads, int inflight)
+/* many reads on many readers, pins among the reads ahead: every one pinned once with its bytes */
+static void test_many(int fd, uint32_t n, int threads)
 {
   char err[READS_ERR], perr[POOL_ERR];
   PoolUnit *u = units_of(fd, n);
-  Reads *r = reads_create(n, threads, inflight, err);
+  Reads *r = reads_create(n, threads, err);
   assert(r);
   Log log = {0};
   Pool *p = pool_create(u, n, (uint64_t)n * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), on_event,
@@ -142,24 +98,23 @@ static void test_many(int fd, uint32_t n, int threads, int inflight)
       pool_want(p, i, n - i); /* needs out of the asked order */
     else
       assert(pool_pin(p, i, dev) == POOL_WAIT);
-    assert(reads_inflight(r) <= inflight);
+    assert(reads_out(r) <= (int)i + 1);
   }
   int pinned = 0;
   while (pinned < (int)n)
   {
     assert(reads_pump(r, p, true, err));
-    assert(reads_inflight(r) <= inflight);
     pinned = 0;
     for (int i = 0; i < log.n; i++)
       pinned += log.ev[i].kind == POOL_EV_PIN;
   }
   for (uint32_t i = 0; i < n; i++)
     assert(pool_state(p, i) == POOL_PINNED), check_bytes(p, i);
-  assert(pinned == (int)n && reads_inflight(r) == 0 && reads_waiting(r) == 0);
+  assert(pinned == (int)n && reads_out(r) == 0);
   reads_destroy(r);
   pool_destroy(p);
   free(u);
-  printf("  many: %u reads on %d readers, at most %d out - each pinned once, its bytes\n", n, threads, inflight);
+  printf("  many: %u reads on %d readers - each pinned once, its bytes\n", n, threads);
 }
 
 /* a lone read (a decode's miss: none other out or waiting) split across the readers; reads asked together (a prompt's
@@ -169,7 +124,7 @@ static void test_split(int fd)
   enum { U = 16 };
   char err[READS_ERR], perr[POOL_ERR];
   PoolUnit *u = units_of(fd, U);
-  Reads *r = reads_create(U, 4, 4, err);
+  Reads *r = reads_create(U, 4, err);
   assert(r);
   Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), NULL, NULL,
                         perr);
@@ -189,13 +144,45 @@ static void test_split(int fd)
   printf("  split: a lone read across the readers, reads asked together whole\n");
 }
 
+/* a pin (a miss the forward waits on: need 0) split across the readers unless another pin is out, among reads ahead
+   read whole; a read ahead then pinned (its need moved to 0) completes as the rest - each pinned once with its bytes
+   (the order the readers take them: test_fetchq) */
+static void test_pins(int fd)
+{
+  enum { U = 12 };
+  char err[READS_ERR], perr[POOL_ERR];
+  PoolUnit *u = units_of(fd, U);
+  Reads *r = reads_create(U, 1, err);
+  assert(r);
+  Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), NULL, NULL,
+                        perr);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  for (uint32_t i = 0; i < 6; i++)
+    pool_want(p, i, 10 + i);
+  const uint64_t split0 = reads_split(r);
+  assert(pool_pin(p, 8, dev) == POOL_WAIT);
+  assert(reads_split(r) == split0 + 1); /* the first pin out: split */
+  assert(pool_pin(p, 9, dev) == POOL_WAIT);
+  assert(reads_split(r) == split0 + 1); /* another pin out: whole */
+  (void)pool_pin(p, 5, dev);            /* a read ahead, now waited on */
+  const uint32_t asked[] = {0, 1, 2, 3, 4, 5, 8, 9};
+  for (size_t i = 0; i < sizeof asked / sizeof *asked; i++)
+    wait_for(r, p, asked[i]), check_bytes(p, asked[i]);
+  assert(reads_out(r) == 0);
+  reads_destroy(r);
+  pool_destroy(p);
+  free(u);
+  printf("  pins: split unless another pin is out; a read ahead pinned completes with the rest\n");
+}
+
 /* a read that fails (its file gone from under it) ends FAILED, cold again - not lost, nothing waits forever */
 static void test_failure(void)
 {
   char err[READS_ERR], perr[POOL_ERR];
   const int fd = file("gone.bin", 2);
   PoolUnit *u = units_of(fd, 2);
-  Reads *r = reads_create(2, 2, 2, err);
+  Reads *r = reads_create(2, 2, err);
   assert(r);
   Log log = {0};
   Pool *p = pool_create(u, 2, 2 * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), on_event, &log, perr);
@@ -218,14 +205,14 @@ static void test_destroy_busy(int fd)
   enum { U = 400 };
   char err[READS_ERR], perr[POOL_ERR];
   PoolUnit *u = units_of(fd, U);
-  Reads *r = reads_create(U, 2, 4, err);
+  Reads *r = reads_create(U, 2, err);
   assert(r);
   Pool *p = pool_create(u, U, (uint64_t)U * UNIT, (Slots){fake_alloc, fake_free, NULL}, reads_fetcher(r), NULL, NULL,
                         perr);
   assert(p);
   for (uint32_t i = 0; i < U; i++)
     pool_want(p, i, i);
-  assert(reads_waiting(r) > 0);
+  assert(reads_out(r) > 0);
   reads_destroy(r);
   pool_destroy(p);
   free(u);
@@ -239,11 +226,10 @@ int main(void)
   enum { N = 2000 };
   const int fd = file("f.bin", N);
   test_refusals(fd);
-  test_order(fd);
-  test_many(fd, 200, 4, 3);
-  test_many(fd, N, 8, 8);
-  test_many(fd, N, 8, 64);
+  test_many(fd, 200, 1);
+  test_many(fd, N, 8);
   test_split(fd);
+  test_pins(fd);
   test_failure();
   test_destroy_busy(fd);
   close(fd);

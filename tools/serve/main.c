@@ -17,7 +17,8 @@
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
    OSMOS_SLOT_KEEP=1 keeps conversations (maya #356): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
    (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least,
-   OSMOS_SLOT_DAYS (7). greedy: maya's sampling, penalty and thinking keys are refused, named */
+   OSMOS_SLOT_DAYS (7). OSMOS_STATS=1: the forward's read counters on stderr at exit (the reads it waited on, their
+   time; the guess's; the swaps). greedy: maya's sampling, penalty and thinking keys are refused, named */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -137,6 +138,16 @@ int main(int argc, char **argv)
     if (!slots_flush(sv.slots, serr))
       out("NOTE slots: %s\n", serr);
     slots_destroy(sv.slots);
+  }
+  if (getenv("OSMOS_STATS") && sv.f) /* the forward's counters at the end (a bench's: where its time waits) */
+  {
+    uint64_t wn[2], wns[2], gs, gg, gr;
+    forward_waits(sv.f, wn, wns);
+    forward_guesses(sv.f, &gs, &gg, &gr);
+    fprintf(stderr, "STATS waited %llu reads not guessed (%.0f ms), %llu guessed (%.0f ms); streamed picks %llu, guessed "
+                    "%llu, the guess read %llu; swaps %llu\n",
+            (unsigned long long)wn[0], wns[0] / 1e6, (unsigned long long)wn[1], wns[1] / 1e6, (unsigned long long)gs,
+            (unsigned long long)gg, (unsigned long long)gr, (unsigned long long)forward_swaps(sv.f));
   }
   serve_unbuild(&sv, conv, lanes);
   free(conv);

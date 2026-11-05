@@ -16,9 +16,6 @@
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
 #define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */
-#ifndef FWD_READS_INFLIGHT
-#define FWD_READS_INFLIGHT (2 * FWD_FETCH_THREADS) /* the reads given out at once (reads.h): DESIGN.md, 0.2.0's sweep */
-#endif
 #define FWD_ROW_THREADS 64  /* DESIGN.md, Engram's reads: 64 threads 832,000 random rows/s, 128 no more */
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
 _Static_assert(sizeof(LayerWeights) % sizeof(const GgufTensor *) == 0, "LayerWeights is its tensors and only them");
@@ -237,7 +234,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     ok = false;
   else if (!(f->res = resident_create(res, n_res, hip_slots(), FWD_FETCH_THREADS, perr)))
     ok = fwd_fail(err, perr);
-  else if (!(f->reads = reads_create((uint32_t)f->n_expert_units, FWD_FETCH_THREADS, FWD_READS_INFLIGHT, perr)))
+  else if (!(f->reads = reads_create((uint32_t)f->n_expert_units, FWD_FETCH_THREADS, perr)))
     ok = fwd_fail(err, perr);
   else if (!(f->pool_room = stream_budget(f, all)) ||
            !(f->pool = pool_create(all, f->n_expert_units, f->pool_room, hip_slots(), reads_fetcher(f->reads),

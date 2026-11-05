@@ -11,9 +11,10 @@ however it runs. Below, it is measured against Project Maya 1.1.53 on the same b
 ## Measured against Project Maya 1.1.53
 
 Same machine, same quantized model files, same day, nothing else running. Maya as its own setup configures it (its
-pack, its drafter, its CPU lane calibrated, its expert profile warmed first); osmos as it ships. Two interleaved
-rounds of Maya's own bench questions and prompts, each engine in a fresh process. Greedy decoding. Every run and its
-command: [`DESIGN.md`](../DESIGN.md).
+pack, its drafter, its CPU lane calibrated, its expert profile warmed first); osmos 0.1.3 as it shipped. Two
+interleaved rounds of Maya's own bench questions and prompts, each engine in a fresh process. Greedy decoding. Every run
+and its command: [`DESIGN.md`](../DESIGN.md). osmos 0.2.0 (its reads on libevt) measured against 0.1.3 since: decode
+and the agents bench level, prompts faster (2K +3%, 8K +5%), the same output bit for bit.
 
 | tok/s, mean of two rounds | UD-IQ1_M osmos | UD-IQ1_M Maya | | UD-IQ1_S osmos | UD-IQ1_S Maya | |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

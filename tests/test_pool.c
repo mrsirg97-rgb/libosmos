@@ -378,9 +378,9 @@ static void test_want(int fd)
   const void *dev[POOL_PARTS];
   assert(pool_reading(p) == 0 && pool_reading(NULL) == 0);
   pool_want(p, 0, 5); /* room free: read, no hold - needed at 5 */
-  assert(pool_state(p, 0) == POOL_READING && reads.n == 1 && reads.r[0].need == 5 && pool_reading(p) == 1);
+  assert(pool_state(p, 0) == POOL_READING && reads.n == 1 && reads.r[0].need == 6 && pool_reading(p) == 1); /* next + 1 */
   pool_want(p, 0, 3); /* reading: no second read - the need corrected */
-  assert(reads.n == 1 && reads.n_moved == 1 && reads.moved[0] == 0 && reads.moved_to[0] == 3);
+  assert(reads.n == 1 && reads.n_moved == 1 && reads.moved[0] == 0 && reads.moved_to[0] == 4);
   assert(pool_pin(p, 0, dev) == POOL_WAIT); /* waited on while read ahead: needed now */
   assert(reads.n == 1 && reads.n_moved == 2 && reads.moved[1] == 0 && reads.moved_to[1] == 0);
   pool_want(p, 0, 9); /* held: its release says when - not moved */
