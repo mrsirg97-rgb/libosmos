@@ -33,6 +33,27 @@ __global__ void hc_norm_kernel(const float* h, const float* w, uint32_t hc, uint
   }
 }
 
+// a block a (stream, token): combine_kernel's update of its values, then hc_norm_kernel's norm of them (each value
+// the update's, its square summed in hc_norm_kernel's order)
+__global__ void combine_norm_kernel(float* h, const float* out, const float* inject, uint32_t hc, uint32_t dim,
+                                    float inject_scale, const float* w, float eps, float* xn, Q4xX16 side) {
+  __shared__ float lds[kThreads];
+  const uint32_t s = blockIdx.x, t = blockIdx.y;
+  float* x = h + ((uint64_t) t * hc + s) * dim;
+  float* y = xn + ((uint64_t) t * hc + s) * dim;
+  const float g = 2.0f * sigmoid(inject[(uint64_t) t * hc + s] * inject_scale);
+  float ss = 0;
+  for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
+    x[d] += g * out[(uint64_t) t * dim + d];
+    ss += x[d] * x[d];
+  }
+  const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) dim + eps);
+  for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
+    y[d] = x[d] * r * w[(uint64_t) s * dim + d];
+    x16_side(side, ((uint64_t) t * hc + s) * dim + d, y[d]);
+  }
+}
+
 __global__ void scale_silu_kernel(float* x, uint64_t n, float scale, Q4xX16 side) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) x[i] = silu(x[i] * scale), x16_side(side, i, x[i]);
@@ -82,6 +103,15 @@ extern "C" bool q4x_hc_gated_mean(const float* xn, const float* gate, uint32_t n
   if (!shape(n_tok, hc, dim) || !xn || !gate || !out) return false;
   gated_mean_kernel<<<grid((uint64_t) n_tok * dim), kThreads, 0, st(stream)>>>(xn, gate, n_tok, hc, dim, out,
                                                                              side_of(side));
+  return ok();
+}
+
+extern "C" bool q4x_hc_combine_norm(float* h, const float* out, const float* inject, uint32_t n_tok, uint32_t hc,
+                                    uint32_t dim, float inject_scale, const float* w, float eps, float* xn,
+                                    const Q4xX16* side, void* stream) {
+  if (!shape(n_tok, hc, dim) || !h || !out || !inject || !w || !xn) return false;
+  combine_norm_kernel<<<dim3(hc, n_tok), kThreads, 0, st(stream)>>>(h, out, inject, hc, dim, inject_scale, w, eps,
+                                                                    xn, side_of(side));
   return ok();
 }
 

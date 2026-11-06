@@ -37,7 +37,9 @@ static bool embed(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t *
          q4x_streams(b->x, n, (uint32_t)g->hc, (uint32_t)g->n_embd, b->h, NULL);
 }
 
-static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n)
+/* a layer; *pending: the layer before's MoE output not yet in b.h (in, then this layer's: out) - combined in the
+   next mixer's norm launch, or alone where the residual is read first (the n-gram layer, a probe) */
+static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n, bool *pending)
 {
   const Q4xGeometry *g = &f->w->geo;
   const Q4xLayer *L = &f->w->layer[l];
@@ -47,12 +49,17 @@ static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t
   Q4xCache c[Q4X_MAX_RUNS];
   for (uint32_t i = 0; i < runs; i++)
     c[i] = (Q4xCache){r[i].s->kc[l], r[i].s->vc[l], r[i].s->ixk[l], r[i].s->ixr[l], r[i].s->pos, r[i].t0, r[i].n};
-  return (l != g->ple_layer || q4x_ple(f, r, runs, l, n)) &&
-         q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n) &&
-         (g->recurrent[l] ? q4x_deltanet(f, r, runs, l, n) : q4x_attention(f, L, c, runs, n)) &&
-         q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL) &&
-         q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n) && q4x_moe(f, L, n) &&
-         q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL);
+  bool ok = true;
+  if (*pending && (l == g->ple_layer || f->probe))
+    ok = q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
+  ok = ok && (l != g->ple_layer || q4x_ple(f, r, runs, l, n)) &&
+       q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n, *pending) &&
+       (g->recurrent[l] ? q4x_deltanet(f, r, runs, l, n) : q4x_attention(f, L, c, runs, n)) &&
+       q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n, true) && q4x_moe(f, L, n);
+  *pending = true;
+  if (ok && f->probe) /* the layer's residual whole for the probe (l_last) */
+    ok = q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
+  return ok;
 }
 
 /* the step's runs from seqs and lens (each sequence once, of this forward, within its context): their tokens' count,
@@ -113,19 +120,20 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
   const uint64_t hd = (uint64_t)g->hc * g->n_embd;
   if (!embed(f, r, runs, tokens, n))
     return q4x_fail(err, "a GPU call failed (the embedding)");
+  bool pending = false;
   for (int l = 0; l < g->n_layers; l++)
   {
-    if (!layer(f, r, runs, l, n))
+    if (!layer(f, r, runs, l, n, &pending))
       return q4x_fail(err, "a GPU call failed (a layer)");
     q4x_seen(f, "l_last", l, b->h, n * hd);
   }
   const Q4xWeights *w = f->w;
-  /* the head's h: the residual before the end mixer, at the step's rows (each sequence's place: advance) */
+  if (!q4x_mix(f, w->out_hc_norm, w->out_hc_down, w->out_hc_up, NULL, n, pending)) /* the last MoE's into b.h */
+    return q4x_fail(err, "a GPU call failed (the end mixer)");
+  /* the head's h: the residual the end mixer read, at the step's rows (each sequence's place: advance) */
   if (f->mtp && hipMemcpyAsync(f->m.hid + (uint64_t)row0 * hd, b->h, (uint64_t)n * hd * sizeof(float),
                                hipMemcpyDeviceToDevice, NULL) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the MTP head's rows)");
-  if (!q4x_mix(f, w->out_hc_norm, w->out_hc_down, w->out_hc_up, NULL, n))
-    return q4x_fail(err, "a GPU call failed (the end mixer)");
   q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
   if (!q4x_mat(f, w->output, (uint32_t)g->n_vocab, (uint32_t)g->n_embd, b->mixed, (uint32_t)g->n_embd, n,
                b->logits + (uint64_t)row0 * g->n_vocab, (uint32_t)g->n_vocab, n <= MM_MAX_TOKENS) ||

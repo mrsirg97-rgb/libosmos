@@ -76,7 +76,7 @@ bool q4x_overflow_ok(Q4xForward *f, char *err)
 static const float *fv(const Q4xForward *f, const GgufTensor *t) { return (const float *)q4x_dev(f, t); }
 
 bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, const GgufTensor *up,
-             const GgufTensor *inject, uint32_t n)
+             const GgufTensor *inject, uint32_t n, bool combine)
 {
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
@@ -84,7 +84,9 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
   Q4xX16 sd;
   /* each op's output its f16 too (side): the matmul after it ready; b.x16 then the mixed input's, for the block's */
   const bool ready = n <= MM_MAX_TOKENS;
-  return q4x_hc_norm(b->h, fv(f, norm), n, hc, D, g->rms_eps, b->xn, side(f, n, hd, &sd), NULL) &&
+  return (combine ? q4x_hc_combine_norm(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, fv(f, norm), g->rms_eps,
+                                        b->xn, side(f, n, hd, &sd), NULL)
+                  : q4x_hc_norm(b->h, fv(f, norm), n, hc, D, g->rms_eps, b->xn, side(f, n, hd, &sd), NULL)) &&
          q4x_mat(f, down, r, hd, b->xn, hd, n, b->lo, r, ready) &&
          q4x_scale_silu(b->lo, (uint64_t)n * r, 1.0f / (float)hc, side(f, n, r, &sd), NULL) &&
          q4x_mat(f, up, hd, r, b->lo, r, n, b->gate, hd, ready) &&
