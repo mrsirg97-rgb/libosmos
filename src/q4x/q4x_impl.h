@@ -110,8 +110,9 @@ const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);
 void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint64_t n);
 
 /* hip_layers.c: a layer's blocks on n tokens of b.h (the residual), its output into b.h */
+/* combine: the block before's output (b.out, b.inj) into b.h first, in its norm's launch (q4x_hc_combine_norm) */
 bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, const GgufTensor *up,
-             const GgufTensor *inject, uint32_t n);
+             const GgufTensor *inject, uint32_t n, bool combine);
 /* a step's sequence: its tokens t0 .. t0 + n - 1 of the step's (q4x_step); an attention's, its cache and position */
 typedef struct Q4xRun
 {

@@ -79,13 +79,17 @@ __global__ __launch_bounds__(kHead) void qk_norm_kernel(const float* qkv, uint32
 // issued before this one's sums, one barrier a token; S read from ring slot cur, after each of the last `keep` tokens
 // into its slot
 constexpr int kHalfRows = kHead / 2;
+// the q / k rows in LDS: the high half a float on (a lane reads its half's row, its pair the other's - 64 floats apart
+// they were one bank, a 2-way conflict each read; one apart each half a broadcast)
+constexpr int kQkLds = kHead + 1;
+__device__ inline uint32_t qk_at(uint32_t i) { return i + (i >= (uint32_t) kHalfRows); }
 __global__ __launch_bounds__(2 * kHead) void delta_kernel(const float* qkv, const float* qk, const float* g,
                                                           const float* b, uint32_t n_tok, uint32_t k_heads,
                                                           uint32_t v_heads, float* ring, uint32_t slots, uint32_t cur,
                                                           uint32_t keep, float* out) {
-  __shared__ float qs[2][kHead], ks[2][kHead];
+  __shared__ float qs[2][kQkLds], ks[2][kQkLds];
   const uint32_t h = blockIdx.x, j = threadIdx.x >> 1, half = threadIdx.x & 1, kg = h % k_heads;
-  const uint32_t r0 = half * kHalfRows;
+  const uint32_t r0 = half * kHalfRows, l0 = qk_at(r0);
   const uint64_t ch = 2ull * k_heads * kHead + (uint64_t) v_heads * kHead, qkr = 2ull * k_heads * kHead;
   const uint64_t slot = (uint64_t) v_heads * kHead * kHead, col = ((uint64_t) h * kHead + j) * kHead + r0;
   float s[kHalfRows];
@@ -102,11 +106,11 @@ __global__ __launch_bounds__(2 * kHead) void delta_kernel(const float* qkv, cons
   load(0, &nx, &nv, &ng, &nb);
   for (uint32_t t = 0; t < n_tok; t++) {
     const int buf = t & 1;
-    (half ? ks : qs)[buf][j] = nx;
+    (half ? ks : qs)[buf][qk_at(j)] = nx;
     const float v = nv, decay = expf(ng), beta = nb;
     if (t + 1 < n_tok) load(t + 1, &nx, &nv, &ng, &nb);
     __syncthreads();  // this token's q, k in; the buffer before it read by every thread (it was, before the last)
-    const float *qb = qs[buf] + r0, *kb = ks[buf] + r0;
+    const float *qb = qs[buf] + l0, *kb = ks[buf] + l0;
     float part = 0;
 #pragma unroll
     for (int i = 0; i < kHalfRows; i++) s[i] *= decay, part += s[i] * kb[i];

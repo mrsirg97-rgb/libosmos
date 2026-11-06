@@ -27,6 +27,8 @@ bool q4x_hc_norm(const float *h, const float *w, uint32_t n_tok, uint32_t hc, ui
 bool q4x_scale_silu(float *x, uint64_t n, float scale, const Q4xX16 *side, void *stream);
 bool q4x_hc_gated_mean(const float *xn, const float *gate, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out,
                        const Q4xX16 *side, void *stream);
+bool q4x_hc_combine_norm(float *h, const float *out, const float *inject, uint32_t n_tok, uint32_t hc, uint32_t dim,
+                         float inject_scale, const float *w, float eps, float *xn, const Q4xX16 *side, void *stream);
 bool q4x_hc_combine(float *h, const float *out, const float *inject, uint32_t n_tok, uint32_t hc, uint32_t dim,
                     float inject_scale, void *stream);
 
@@ -129,6 +131,10 @@ q4x_hc_gated_mean
 q4x_hc_combine
   h[t][s][d] += 2 sigmoid(inject[t hc + s] inject_scale) out[t][d]: the block's output into every stream, each by its
   own weight (2 sigmoid: 1 at an inject of 0, a plain residual add).
+
+q4x_hc_combine_norm
+  q4x_hc_combine, then q4x_hc_norm of the h it leaves, one launch: the same bits as the two (a value its combine's,
+  the norm's sums in its order) - a block's output into the residual and the next mixer's norm of it.
 
 the Gated DeltaNet (a layer's, its tokens in order). its states kept in a ring of `slots` (a state each): read from
 slot cur; the state after token t written to slot (cur + 1 + t) % slots for the step's last min(n_tok, slots)

@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.5.1]: Qwen's prompts, faster
+
+Qwen3.8-Flash-Next's prompts **13% (2K) to 28% (64K) faster**, its decode 2.6%, every token the same bits as 0.5.0
+(each benchmark's hash, every length). Profiled with rocprofv3, each change A/B'd at low-power against a v0.5.0 build
+(DESIGN.md, "0.5.1: decode and prompts, profiled"):
+
+- **The attention's shared-memory bank conflicts.** Its V^T stores sent a wave's 32 lanes to two banks - a 16-way
+  conflict on every store; V's lanes now run along the keys (conflict cycles 31x fewer, the kernel's cycles -45%). Its
+  cache read 8 values a load and a block ahead in registers.
+- **The DeltaNet's**: a lane's q / k half and its pair's on one bank; one float of padding apart.
+- A block's output added to the residual in the next mixer's norm launch (`q4x_hc_combine_norm`): ~100 launches a
+  token fewer.
+- `test_mm_gpu` holds and times Qwen's mixer matrices.
+
+Measured and not kept: the attention's scores once a 64-key round (slower: half the blocks a CU), its dims split over
+the waves (moved the bits for 1.4%), the Q8_0 mixers' K split across blocks (slower than unsplit). DeepSeek
+unchanged - its code and its outputs.
+
+At `performance` (2026-11-06; README):
+
+| Qwen3.8 UD-IQ3_XXS | 0.5.0 | 0.5.1 | llama.cpp |
+| --- | ---: | ---: | ---: |
+| Prompt 2K / 8K / 16K | 700 / 591 / 561 | **790 / 714 / 696** | 520 / 489 / 463 |
+| Prompt 64K | 501 | **640** | not measured |
+| Decode plain / drafted | 23.1 / 39.5 | **23.7 / 40.5** | 26.2 / not measured |
+
 ## [0.5.0]: Qwen3.8-Flash-Next
 
 A second model family behind the engine interface: **Qwen3.8-Flash-Next** (`qwen4exp`, ~177B, 512 experts), unsloth's

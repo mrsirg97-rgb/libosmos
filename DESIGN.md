@@ -2367,6 +2367,52 @@ below; mutants (a tie to the higher block, the tail off by one, a block's rope a
 - **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
   21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
+### 0.5.1: decode and prompts, profiled (2026-11-06, low-power)
+
+rocprofv3 on both (a decode token: a 65-token run less a 1-token one), each change A/B'd at low-power against a v0.5.0
+build from its tag (interleaved, twice; tools in the scratchpad: the old q4x_bench and the new, the same ids):
+- **Qwen decode, 40 ms of GPU a token** (1,886 launches): Q6_K's dense matmuls 16 ms (~195 GB/s), the experts 9.1
+  (~110 GB/s), our small kernels 6.2, the Q8_0 mixers 5.7, the F32 matvecs 2.7, ~3.7 ms of gaps. **DeepSeek's**: 51
+  ms GPU of ~63 (the rest the SSD's experts), Q6_K ~22 ms.
+- **the bound the guarantee sets**: mm at one token is ~180 GB/s on Q6_K at best (every shape swept), the matvec 230
+  - mm's sums at every token count are what keep a token's bits its batch's. the experts the same: decode-bound (IQ3_XXS
+  ~100-130 GB/s, 10, 20 or 40 matrices a launch within 12%: not the launch).
+- **kept** (each the same ids as v0.5.0):
+  - the attention's cache read 8 values a load, a block's scale once; then K and V a block ahead in registers.
+  - **the attention's V^T stores**: a wave's lanes along a key's dims wrote 16 lanes to one bank pair - 16-way
+    conflicts, 5.1 G cycles against the LDS's 1.6 G (SQC_LDS_BANK_CONFLICT). V's lanes along the keys: 0.16 G, the
+    kernel's wave cycles -45%.
+  - **the DeltaNet's q / k rows**: a lane's half and its pair's 64 floats apart, one bank (4.08 G conflict cycles to
+    1.38 of LDS); the high half a float on: 0.03.
+  - a block's output combined in the next mixer's norm launch (q4x_hc_combine_norm: the MoE's, the attention's, the
+    head's) - ~100 launches a token fewer.
+- **measured and not kept**: the attention's S once a round of 64 keys (bits the same, 37% slower: 52 KB of LDS, one
+  block a CU); S's dims split over the waves (7.5% of the kernel, its bits moved: not worth them).
+- **the Q8_0 mixers' K split across blocks** (320 x 10240: 20 blocks for 40 CUs, the guess its idle CUs): 2 parts
+  127 GB/s, 4 parts 119, against 154 unsplit (test_mm_gpu at a token) - the second launch and the parts' round trip
+  cost more than the CUs gave; the unsplit already at the matvec's 159 there. not kept (a split by the rows also made a
+  row's bits its matrix's height's - test_mm_gpu's pair caught it; by the columns alone it held). test_mm_gpu now times
+  and holds Qwen3.8's two mixer matrices.
+- **the scan**: every kernel's SQC_LDS_BANK_CONFLICT against SQ_INST_CYCLES_LDS, both models - the matmuls clean;
+  DeepSeek's worst its scores kernel (30% of its LDS cycles, 1.4% of the time). DeepSeek's prompt is the SSD's (the
+  GPU busy 11 s of a 132 s run): no kernel moves it.
+- **Qwen at low-power** (v0.5.0 -> now, two rounds each): prompt 4K 569 -> **671 tok/s (+18%)**, plain 23.1 -> 23.5
+  (+1.8%), drafted 39.0 -> 39.8 (+2%).
+- **at performance** (the release's once, v0.5.0's build beside it; every ids hash the same):
+
+  | | v0.5.0 | 0.5.1 | |
+  |---|---|---|---|
+  | prompt 2,048 | 700 | **790** | +13% |
+  | prompt 4,096 | 635 | **756** | +19% |
+  | prompt 8,000 | 591 | **714** | +21% |
+  | prompt 16,384 | 561 | **696** | +24% |
+  | prompt 65,536 | 501 | **640** | +28% |
+  | decode at 16K, plain | 21.2 | 22.4 | +6% |
+  | decode, plain / drafted | 23.1 / 39.5 | 23.7 / 40.5 | +2.6% |
+
+  the gain grows with the context: the attention's share of a prompt does (llama.cpp at 2K / 8K / 16K: 520 / 489 /
+  463 - osmos now +52% / +46% / +50%).
+
 ### 0.5.0: DeepSeek unchanged (2026-11-06, performance)
 
 the kernels Qwen shares (mm, mv, quant.h, block.h) and the engine's and server's draft path (oseq_draft_all;

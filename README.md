@@ -119,15 +119,15 @@ context's attention state is ~0.85 GiB.
 UD-IQ3_XXS, 2026-11-06, `performance`; llama.cpp 68d20b8 (HIP, all layers on the GPU, flash attention, 2,048-token
 batches as osmos's steps), `llama-bench` 2 runs; osmos `tools/bench/q4x_bench`, greedy:
 
-| | osmos 0.5.0 | llama.cpp | |
+| | osmos 0.5.1 | llama.cpp | |
 | --- | ---: | ---: | ---: |
-| Prompt, 2,048 tokens | **672** | 520 | +29% |
-| Prompt, 8,192 tokens | **588** | 489 | +20% |
-| Prompt, 16,384 tokens | **567** | 463 | +22% |
-| Prompt, 65,536 tokens | 500 | not measured | |
-| Decode, MTP drafted | **39.5-40.5** | not measured | |
-| Decode, plain | 23.2 | **26.2** | -11% |
-| Decode at 16K context, plain | 21.6 | **23.1** | -6% |
+| Prompt, 2,048 tokens | **790** | 520 | +52% |
+| Prompt, 8,000 tokens | **714** | 489 (8,192) | +46% |
+| Prompt, 16,384 tokens | **696** | 463 | +50% |
+| Prompt, 65,536 tokens | 640 | not measured | |
+| Decode, MTP drafted | **40.5** | not measured | |
+| Decode, plain | 23.7 | **26.2** | -10% |
+| Decode at 16K context, plain | 22.4 | **23.1** | -3% |
 | Perplexity, 8,192 tokens | **2.7143** | 2.7193 (its F16 cache) | |
 | Perplexity, 16,384 tokens | 2.2732 | **2.2721** (F16), 2.2675 (Q8_0) | +0.05% |
 

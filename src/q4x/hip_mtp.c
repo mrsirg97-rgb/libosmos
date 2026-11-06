@@ -61,7 +61,7 @@ bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q
     ok = ok && copy(m->hin, rows + (uint64_t)(at - 1) * hd, n * hd * F);
   else
     ok = ok && first_h(f, s, from, m->hin) && (n == 1 || copy(m->hin + hd, rows, (n - 1) * hd * F));
-  ok = ok && head_in(f, n) && q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n) &&
+  ok = ok && head_in(f, n) && q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n, false) &&
        q4x_attention_kv(f, L, &(Q4xCache){s->mkc, s->mvc, s->mixk, s->mixr, from, 0, n}, 1, n) &&
        copy(s->pend, rows + (uint64_t)(to - 1 - s->step_pos0) * hd, hd * F);
   if (!ok) /* its f16 overflow, if any, the next draft's or step's read finds (the flag accumulates) */
@@ -82,17 +82,16 @@ static bool step(Q4xForward *f, Q4xSeq *const *s, const int32_t *tok, const int3
   Q4xMtpBuf *m = &f->m;
   const uint32_t hc = (uint32_t)g->hc, D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab;
   const uint32_t dv = Q4X_MTP_VOCAB < V ? Q4X_MTP_VOCAB : V; /* the draft's shortlist: the vocabulary's first rows */
-  const float inv = 1.0f / (float)hc;
   Q4xCache c[Q4X_MAX_RUNS];
   for (uint32_t i = 0; i < n; i++)
     c[i] = (Q4xCache){s[i]->mkc, s[i]->mvc, s[i]->mixk, s[i]->mixr, pos[i], i, 1};
   const bool ok =
       tokens_in(f, tok, n) && head_in(f, n) &&
-      q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n) &&
-      q4x_attention(f, L, c, n, n) && q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL) &&
-      q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n) && q4x_moe(f, L, n) &&
-      q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL) && copy(m->hin, b->h, (uint64_t)n * hc * D * F) &&
-      q4x_mix(f, mtp->head_norm, mtp->head_down, mtp->head_up, NULL, n) &&
+      q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n, false) &&
+      q4x_attention(f, L, c, n, n) && /* each block's output into b.h in the next mixer's norm launch */
+      q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n, true) && q4x_moe(f, L, n) &&
+      q4x_mix(f, mtp->head_norm, mtp->head_down, mtp->head_up, NULL, n, true) &&
+      copy(m->hin, b->h, (uint64_t)n * hc * D * F) && /* the residual the head mixer read: the next draft's h */
       q4x_mat(f, f->w->output, dv, D, b->mixed, D, n, m->logits, dv, n <= MM_MAX_TOKENS) && /* the head mixer's x16 */
       q4x_top(m->logits, dv, n, dv, m->top_id, m->top_p, NULL) &&
       hipMemcpyAsync(m->pin_id, m->top_id, n * 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&

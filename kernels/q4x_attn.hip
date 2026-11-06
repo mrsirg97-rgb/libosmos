@@ -94,11 +94,63 @@ __device__ inline Keys keys_of(const Q4xPick& pk, uint32_t t, uint32_t top) {
   return Keys{np == nv ? nullptr : pk.sel + (uint64_t) t * pk.blocks, pk.ratio, np, nv, pk.ratio * np + (top + 1) % pk.ratio};
 }
 
-// a cache row's value d (Q8_0: its block's f16 scale times its int8) as f16 - the product exact in F32, then rounded
-__device__ inline _Float16 kv_at(const uint8_t* row, uint32_t d) {
-  const uint8_t* blk = row + (d / Q4X_KV_BLOCK) * Q4X_KV_BLOCK_BYTES;
-  const _Float16 s = *(const _Float16*) blk;
-  return (_Float16) ((float) s * (float) (int8_t) blk[2 + d % Q4X_KV_BLOCK]);
+constexpr int kLoad = 8;  // an item's values: a load within one Q8_0 block
+static_assert(Q4X_KV_BLOCK % kLoad == 0, "a load within one block");
+
+// a thread's share of a block of kTile keys' K and V, raw: each item kLoad int8s and their block's scale - loaded a
+// block ahead (the next block's while this one's WMMAs run); a value its scale times its int8, the product exact in
+// F32, then rounded to f16
+constexpr int kItems = kTile * kHead / kLoad / (kWaves * 32);
+static_assert(kItems * kWaves * 32 * kLoad == kTile * kHead, "a block's values the threads' whole items");
+struct Raw {
+  uint64_t kq[kItems], vq[kItems];
+  _Float16 ksc[kItems], vsc[kItems];
+};
+
+// an item's key and first dim: K's lanes along a key's dims (its LDS rows written whole), V's along the keys (V^T's
+// columns: a wave's stores across the banks - along the dims they were 16-way on one bank pair)
+__device__ inline void item_k(uint32_t it, uint32_t* r, uint32_t* d) {
+  const uint32_t i = threadIdx.x + it * kWaves * 32;
+  *r = i / (kHead / kLoad), *d = i % (kHead / kLoad) * kLoad;
+}
+__device__ inline void item_v(uint32_t it, uint32_t* r, uint32_t* d) {
+  const uint32_t i = threadIdx.x + it * kWaves * 32;
+  *r = i % kTile, *d = i / kTile * kLoad;
+}
+
+// an item's kLoad int8s and their block's scale: zeros past k1
+__device__ inline void raw_one(const uint8_t* cache, uint64_t row, uint32_t kvh, const Keys& keys, uint32_t e,
+                               uint32_t k1, uint32_t d, uint64_t* q, _Float16* sc) {
+  if (e < k1) {
+    const uint32_t c = kvh * kHead + d;
+    const uint8_t* b8 = cache + keys.at(e) * row + (c / Q4X_KV_BLOCK) * Q4X_KV_BLOCK_BYTES;
+    *sc = *(const _Float16*) b8;
+    __builtin_memcpy(q, b8 + 2 + c % Q4X_KV_BLOCK, kLoad);
+  } else {
+    *sc = (_Float16) 0.0f, *q = 0;
+  }
+}
+
+__device__ inline void raw_fetch(Raw& w, const uint8_t* kc, const uint8_t* vc, uint64_t row, uint32_t kvh,
+                                 const Keys& keys, uint32_t kb, uint32_t k1) {
+  for (int it = 0; it < kItems; it++) {
+    uint32_t r, d;
+    item_k(it, &r, &d);
+    raw_one(kc, row, kvh, keys, kb + r, k1, d, &w.kq[it], &w.ksc[it]);
+    item_v(it, &r, &d);
+    raw_one(vc, row, kvh, keys, kb + r, k1, d, &w.vq[it], &w.vsc[it]);
+  }
+}
+
+__device__ inline void raw_store(const Raw& w, _Float16* ks, _Float16* vt) {
+  for (int it = 0; it < kItems; it++) {
+    uint32_t r, d;
+    item_k(it, &r, &d);
+    const float sk = (float) w.ksc[it], sv = (float) w.vsc[it];
+    for (int j = 0; j < kLoad; j++) ks[r * kRowLds + d + j] = (_Float16) (sk * (float) (int8_t) (w.kq[it] >> (8 * j)));
+    item_v(it, &r, &d);
+    for (int j = 0; j < kLoad; j++) vt[(d + j) * kKeyLds + r] = (_Float16) (sv * (float) (int8_t) (w.vq[it] >> (8 * j)));
+  }
 }
 
 // a thread a block of a row: its scale, then its 32 values rounded to nearest (ggml's quantize_row_q8_0)
@@ -135,15 +187,13 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
   float m[8], l[8];
   f8 o[kHead / kTile / kWaves] = {};
   for (int j = 0; j < 8; j++) m[j] = -INFINITY, l[j] = 0.0f;
+  Raw raw;
+  raw_fetch(raw, kc, vc, row, kvh, keys, k0, k1);
   for (uint32_t kb = k0; kb < k1; kb += kTile) {
     __syncthreads();  // the last block's K, V read by every wave
-    for (uint32_t i = threadIdx.x; i < kTile * kHead; i += kWaves * 32) {  // K and V^T, f16 (keys past k1 zero)
-      const uint32_t r = i / kHead, d = i % kHead, e = kb + r, c = kvh * kHead + d;
-      const uint64_t p = e < k1 ? keys.at(e) : 0;  // the entry's position
-      ks[r * kRowLds + d] = e < k1 ? kv_at(kc + p * row, c) : (_Float16) 0.0f;
-      vt[d * kKeyLds + r] = e < k1 ? kv_at(vc + p * row, c) : (_Float16) 0.0f;
-    }
+    raw_store(raw, ks, vt);  // K and V^T, f16 (keys past k1 zero)
     __syncthreads();
+    if (kb + kTile < k1) raw_fetch(raw, kc, vc, row, kvh, keys, kb + kTile, k1);  // the next block's, in flight
     f8 sacc = {};
     for (int g = 0; g < kHead / kTile; g++) {
       const h16 a = *(const h16*) (qs + (lane % kTile) * kRowLds + g * kTile);
