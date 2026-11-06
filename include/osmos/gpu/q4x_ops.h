@@ -13,7 +13,10 @@ typedef struct Q4xX16
   uint32_t cols;
 } Q4xX16;
 
-#define OPS_Q4X_MAX_KEYS 8192 /* a token's keys the dense attention takes (its scores in a block's LDS) */
+/* a token's keys the dense attention takes: no kernel limit now (chunks of 128 merged), a context's - its F32 cache
+   48 KB a token a sequence, its decode's reads the cache's whole (an 8,192-token perplexity 2.7136 dense, llama.cpp's
+   sparse QSA 2.7193: dense past QSA's 2,048-token budget holds) */
+#define OPS_Q4X_MAX_KEYS 65536
 
 /* Qwen3.8-Flash-Next's own steps (DESIGN.md, "Qwen's forward, op by op"), F32 on the GPU, queued on `stream` */
 
