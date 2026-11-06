@@ -35,7 +35,7 @@ typedef struct DPin
   int32_t ids[DRAFTER_BLOCK], pos_q[DRAFTER_BLOCK], pos_a[DRAFTER_BLOCK];
   int32_t tap_pos[FWD_MAX_BATCH];
   float conf;
-  float row[]; /* a row of the vocabulary's logits */
+  int32_t best; /* a row's greatest token (ops_argmax's): -1 for a NaN in it */
 } DPin;
 
 struct Drafter
@@ -54,7 +54,7 @@ struct Drafter
       *sye, *hcp, *a_pre, *a_post, *a_comb, *f_pre, *f_post, *f_comb, *pre0, *att, *xc, *xn, *vocab, *mk, *cat,
       *cval, *main_x, *kvs;
   uint8_t *kvs_p; /* those rows packed as the ring keeps them (kvfmt.h's KV_FP8) */
-  int32_t *ridx, *sel, *n_sel, *pos_q, *pos_a, *ids, *pair, *tap_pos;
+  int32_t *ridx, *sel, *n_sel, *pos_q, *pos_a, *ids, *pair, *tap_pos, *best;
   const void **tab; /* [w1, w3, w2][pair]: a round's picks' pointers (gathered on the device) */
   DPin *pin;
 };

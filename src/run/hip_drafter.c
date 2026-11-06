@@ -116,7 +116,7 @@ static bool scratch(Drafter *d)
       {&d->cval, F}, {&d->main_x, (uint64_t)FWD_MAX_BATCH * D * F}, {&d->kvs, (uint64_t)FWD_MAX_BATCH * hd * F},
       {&d->kvs_p, (uint64_t)FWD_MAX_BATCH * kv_row_bytes(KV_FP8, hd)},
       {&d->ridx, P * 4}, {&d->sel, T * OPS_MAX_SELECT * 4}, {&d->n_sel, T * 4}, {&d->pos_q, T * 4},
-      {&d->pos_a, T * 4}, {&d->ids, T * 4}, {&d->pair, P * 4}, {&d->tap_pos, FWD_MAX_BATCH * 4},
+      {&d->pos_a, T * 4}, {&d->ids, T * 4}, {&d->pair, P * 4}, {&d->tap_pos, FWD_MAX_BATCH * 4}, {&d->best, 4},
       {&d->tab, 3 * P * sizeof(void *)},
   };
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
@@ -136,7 +136,7 @@ static bool scratch(Drafter *d)
     pair[m] = (int32_t)m;
   return fwd_put(d->sel, sel, sizeof sel) && fwd_put(d->n_sel, n_sel, sizeof n_sel) &&
          fwd_put(d->pair, pair, sizeof pair) && fwd_put(d->pre0, pre0, T * hc * F) &&
-         hipHostMalloc((void **)&d->pin, sizeof *d->pin + V * F, 0) == hipSuccess;
+         hipHostMalloc((void **)&d->pin, sizeof *d->pin, 0) == hipSuccess;
 }
 
 /* the trunk's layers the drafter taps: the model's GGUF's where it names them, else dspark.json's; both named, equal */
@@ -222,7 +222,7 @@ void drafter_destroy(Drafter *d)
   for (size_t i = 0; i < sizeof bufs / sizeof *bufs; i++)
     hipFree(*bufs[i]);
   hipFree(d->kvs_p);
-  int32_t **ibufs[] = {&d->ridx, &d->sel, &d->n_sel, &d->pos_q, &d->pos_a, &d->ids, &d->pair, &d->tap_pos};
+  int32_t **ibufs[] = {&d->ridx, &d->sel, &d->n_sel, &d->pos_q, &d->pos_a, &d->ids, &d->pair, &d->tap_pos, &d->best};
   for (size_t i = 0; i < sizeof ibufs / sizeof *ibufs; i++)
     hipFree(*ibufs[i]);
   hipFree(d->tab);
@@ -338,15 +338,13 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     }
     float *row = d->vocab + (uint64_t)n * V;
     if (!mv_strided(DRAFTER_BF16, d->mk_head, V, d->rank, d->cat + D, d->rank, 1, d->mk, V, NULL) ||
-        !ops_add(row, d->mk, V, NULL) ||
-        hipMemcpyAsync(d->pin->row, row, (uint64_t)V * sizeof(float), hipMemcpyDeviceToHost, NULL) != hipSuccess ||
+        !ops_add(row, d->mk, V, NULL) || !ops_argmax(row, V, 1, V, d->best, NULL) ||
+        hipMemcpyAsync(&d->pin->best, d->best, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
         !fwd_settle(d->f))
       return fail(err, "a GPU call failed (the drafter's markov step)"), -1;
-    uint32_t best = 0; /* greedy: the most, ties to the lowest token */
-    for (uint32_t v = 1; v < V; v++)
-      if (d->pin->row[v] > d->pin->row[best])
-        best = v;
-    drafts[n] = (int32_t)best;
+    if (d->pin->best < 0) /* a NaN in the row: no draft from it, nor past it */
+      break;
+    drafts[n] = d->pin->best; /* greedy: the most, ties to the lowest token (ops_argmax's) */
   }
   return n;
 }

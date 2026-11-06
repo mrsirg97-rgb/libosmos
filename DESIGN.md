@@ -2478,6 +2478,60 @@ at once, drafting).
 - not swept to the end: a cap on a round's drafts (DRAFT_MAX 2-4) - the floors' trend says more drafts through is
   cheaper, the operator's call to stop there.
 
+## 0.3.2: the low-power work (2026-11-05)
+
+each change measured at the low-power profile (UD-IQ1_M; dbench drafted and plain, then the agents bench), kept in its
+own commit when it is no worse and no bit moves.
+
+- **the experts' registers** (kernels/q8.h kFullWaves): the drafted decode's kernel trace (rocprofv3, 33.2 ms a token,
+  the GPU busy 85%) put the experts at 11.7 ms; q8bench (tools/bench, 19 of a layer's experts, the forward's launch)
+  showed the int8 kernels near the memory's rate at 1-4 tokens and a cliff at 5-6 - 98-107 registers a lane, 12 waves a
+  SIMD not 16: gate+up 1,143 us at 5 tokens against 704 at 4. asking for 16 waves (amdgpu_waves_per_eu) gives 5 tokens
+  798 us, 6 tokens 1,004 (from 1,543), down at 6 563 (from 909); 1-4 the same. in the forward, level - a drafted step's
+  experts are mostly 1-2 tokens each: drafted 30.9 / 30.9 tok/s, 2.35 J against 30.9 / 30.8, 2.35 / 2.36 (interleaved,
+  ~/bench/v032/waves); plain 15.9 against 15.7; agents 481.3 s, 3.79 J an answer token, first token p95 62.0 s, turn
+  done p95 103.6 s (0.3.1: 483.0, 3.84, 62.9, 103.2). kept: no loss, the answers' hashes the same, and a verify block
+  of 5-6 tokens on an expert no longer falls off the cliff.
+- **the drafter's greedy pick on the GPU** (hip_drafter.c): a draft row's 129,280 logits were copied to pinned memory
+  (517 KB) and scanned on the CPU; now ops_argmax (its ties the scan's: the lowest index) and 4 bytes back - the same
+  drafts (279 / 282 / 262 drafted, 199 / 173 / 207 accepted, both builds), drafting 854 / 1,180 / 757 ms against 831 /
+  1,179 / 750. end to end below the bench's noise: drafted 30.6 / 30.5 tok/s against 30.7 / 30.7, 2.36 J against 2.35
+  (~/bench/v032/argmax; plain - no drafter - 15.6 against 15.8 in the same run: the noise's size). kept: less work, a
+  row with a NaN now ends the drafts (the scan picked from it).
+- **measured, not kept**:
+  - the resident set's swaps off (FWD_SWAPS_A_LAYER 0: their copies 0.7 ms a drafted token, ~2.5% of the GPU's busy
+    time): drafted 19.0 / 18.9 tok/s, 3.32 / 3.33 J against 30.9 / 30.7, 2.32 / 2.34; plain 10.4 against 15.8, 6.47 J
+    against 4.47 (~/bench/v032/noswap). the copies are what keeps the text's experts in GPU memory: kept as they are.
+  - hc_post_dot reading fn once for a block of tokens (staged in LDS) instead of a block a token: the same bits, and
+    slower - drafted 30.6 / 30.6 against 30.9 / 30.8, plain 15.5 against 15.8 (~/bench/v032/hcdot). alone, at the
+    decode's shapes (40 layers' fn in turn, so none stays cached): 5 tokens 30.0 us a block a token, 30.7 - 47.3 the
+    staged ones (1 - 8 tokens a block). a token's blocks after the first read fn from the cache, not memory: the
+    re-reads cost little, and the staging's barriers and serial sums more.
+  - the drafter's head through mm (rms_x16, then mm_run; the trace had the target's head by mm at 195 GB/s, the
+    drafter's by mv at 151): the same drafts, drafting 2-4% slower - 846-859 / 1,185-1,188 / 748-764 ms against
+    833-850 / 1,142-1,178 / 711-720; drafted 30.6 / 30.6 tok/s against 30.8 / 30.7 (~/bench/v032/head-mm). at 5 rows
+    the x16's conversion and the flag's round trip cost what the faster read saves.
+
+### 0.3.2 at performance (2026-11-05, evening)
+
+the release measured as 0.3.0 was (~/bench/v032/perf, the script beside it: one run each, power.py around each):
+
+| | 0.3.0 (afternoon) | 0.3.2 |
+| --- | ---: | ---: |
+| UD-IQ1_M drafted (q1 / q2 / q3) | 33.1 / 24.8 / 38.0, 32.0 tok/s, 4.10 J | 35.1 / 27.7 / 38.1, **33.6**, **3.87 J** |
+| UD-IQ1_M plain | 17.1, 7.71 J | 17.1, 7.72 J |
+| UD-IQ1_M prompts 2K / 8K | 296 / 443 | 293 / 441, 0.30 J a prompt token |
+| UD-IQ1_S drafted | 37.9 / 27.5 / 47.9, 37.8 | 41.0 / 31.4 / 49.9, **40.8**, 3.35 J |
+| UD-IQ1_S plain | 19.3 | 19.3, 7.15 J |
+| UD-IQ1_S prompts 2K / 8K | 323-328 / 471-474 | 331 / 473 |
+
+the drafted gain mostly 0.3.1's floors (the hardest question most: 24.8 -> 27.7, 27.5 -> 31.4 - more of its drafts
+reach the verify), carried from low-power to performance. the answers' hashes 0.3.0's, both packs, drafted and plain.
+the agents bench: 0.3.2 442.5 / 448.7 s, 7.07 / 7.07 J an answer token (first token p95 58.1 / 51.3 s, turn done p95
+92.9 / 95.1); 0.3.0 rebuilt and run beside them, 444.6 s, 7.01 J (52.9, 99.4) - level. 0.3.0's afternoon run, 433.2 s,
+was the box then (~2.5% faster; the profile switched to low-power and back between): a comparison across a profile
+switch wants its baseline rerun.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.3.2]: the low-power round
+
+Work cut at AMD's low-power profile, each change A/B'd there (interleaved builds, the answers' hashes compared) and
+kept in its own commit only if no worse; then the whole release measured at `performance` against 0.3.0.
+
+- The expert kernels (`kernels/q8.h`) ask for a SIMD's 16 waves (`amdgpu_waves_per_eu`): at 5-6 tokens an expert they
+  took 98-107 registers and ran at 12, their memory's latency less hidden. 19 experts at 5 tokens, gate+up: 1,143 ->
+  798 us; at 6: 1,543 -> 1,004; down at 6: 909 -> 563. 1-4 tokens unchanged; no bit moves. `tools/bench/q8bench` times
+  the kernels on a layer's own experts.
+- The drafter's greedy pick runs on the GPU (`ops_argmax`): a draft row's 129,280 logits (517 KB) are no longer copied
+  to the host and scanned; the same drafts, ties to the lowest token as before. A row with a NaN now ends the drafts.
+
+Measured and not kept (DESIGN.md): the resident set's swaps off (-39% drafted: they keep the text's experts in GPU
+memory), `hc_post_dot` reading its weights once a block of tokens (slower: the re-reads hit the cache), the drafter's
+head through `mm` (slower at 5 rows).
+
+At `performance`, against 0.3.0 (0.3.1's drafting floors included), UD-IQ1_M / UD-IQ1_S, 256 tokens an answer to the
+three bench questions:
+
+| | 0.3.0 | 0.3.2 |
+| --- | ---: | ---: |
+| UD-IQ1_M drafted | 32.0 tok/s, 4.10 J | **33.6 tok/s, 3.87 J** |
+| UD-IQ1_S drafted | 37.8 tok/s | **40.8 tok/s**, 3.35 J |
+| plain (M / S) | 17.1 / 19.3 | 17.1 / 19.3 |
+| prompts 2K / 8K (M) | 296 / 443 | 293 / 441 |
+| agents (4 x 8, M) | 444.6 s, 7.01 J | 442.5 / 448.7 s, 7.07 J |
+
+0.3.0's agents rerun beside 0.3.2's two, the same evening: level. 0.3.0's 433.2 s that afternoon was the box's state
+then, ~2.5% faster (the profile switched twice between).
+
+At low-power, UD-IQ1_M: drafted 29.3 -> 30.7 tok/s, 2.50 -> 2.35 J a token; plain 15.9 / 4.45 J -> 15.8 / 4.49 J;
+agents 479.0 s / 3.78 J -> 481.3 s / 3.79 J an answer token. The answers hash as 0.3.0's throughout.
+
 ## [0.3.1]: drafting tuned for energy
 
 DSpark's drafts are kept while each confidence is at least 0.1 and their product too (`DRAFTER_CONF_MIN` /
