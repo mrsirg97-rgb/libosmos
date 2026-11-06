@@ -11,8 +11,9 @@
 
 /* Qwen3.8-Flash-Next behind the engine: every weight resident (no budget, no picks, nothing streamed), no drafter
    yet. a batch runs a sequence's consecutive tokens at a time (q4x_batch: one sequence's step), each run's logits at
-   its own rows of the one table - every row kept. its recurrent states hold no snapshots: no rollback reach */
+   its own rows of the one table - every row kept. a rollback steps its states' rings back (q4x_seq_rollback) */
 
+_Static_assert(Q4X_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 _Static_assert(OSMOS_ERR >= Q4X_FWD_ERR && OSMOS_ERR >= Q4X_ERR && OSMOS_ERR >= GGUF_ERR,
                "one error buffer for the engine and the family's calls");
 
@@ -140,8 +141,8 @@ static uint32_t e_block(const void *p) { return (void)p, 0; }
 static void *s_create(void *p, char err[OSMOS_ERR]) { return q4x_seq_create(((Eng *)p)->f, err); }
 static void s_destroy(void *s) { q4x_seq_destroy(s); }
 static bool s_prompt(void *s, uint32_t end) { return (void)s, (void)end, true; }
-static bool s_rollback(void *s, uint32_t n) { return (void)s, n == 0; }
-static uint32_t s_reach(const void *s) { return (void)s, 0; }
+static bool s_rollback(void *s, uint32_t n) { return q4x_seq_rollback(s, n); }
+static uint32_t s_reach(const void *s) { return q4x_seq_reach(s); }
 static int32_t s_position(const void *s) { return q4x_seq_position(s); }
 static uint64_t s_state_bytes(const void *s) { return q4x_seq_state_bytes(s); }
 

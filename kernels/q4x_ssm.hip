@@ -10,6 +10,7 @@ namespace {
 constexpr int kThreads = 256;
 constexpr int kHead = 128;                // a head's dim: the delta rule's block, a column of its state a thread
 constexpr uint32_t kMaxTaps = 8; /* a conv's taps, and its dilation, at most */
+constexpr uint32_t kMaxHist = (kMaxTaps - 1) * kMaxTaps; /* a conv state's rows at most */
 constexpr float kSoftplusLinear = 20.0f;  // ggml's softplus: above it, x
 
 inline unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
@@ -33,14 +34,20 @@ __global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_
   y[i] = silu(sum);
 }
 
-// the last h of x' into hist, a channel a thread, oldest first (a slot read before it is written)
-__global__ void conv_hist_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t h, float* hist) {
+// after each of the step's last `keep` tokens, the last h of x' up to it into its ring slot, a channel a thread: the
+// slot read (cur) first, whole, into registers - a later token's slot may be it
+__global__ void conv_hist_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t h, float* ring, uint32_t slots,
+                                 uint32_t cur, uint32_t keep) {
   const uint32_t c = blockIdx.x * kThreads + threadIdx.x;
   if (c >= ch) return;
-  for (uint32_t k = 0; k < h; k++) {
-    const uint32_t at = n_tok + k;  // in x'
-    hist[(uint64_t) k * ch + c] = at < h ? hist[(uint64_t) at * ch + c] : x[(uint64_t) (at - h) * ch + c];
-  }
+  const uint64_t slot = (uint64_t) h * ch;
+  float old[kMaxHist];
+  for (uint32_t k = 0; k < h; k++) old[k] = ring[cur * slot + (uint64_t) k * ch + c];
+  for (uint32_t t = n_tok - keep; t < n_tok; t++)
+    for (uint32_t k = 0; k < h; k++) {
+      const uint32_t at = t + 1 + k;  // in x', the token's last h
+      ring[(cur + 1 + t) % slots * slot + (uint64_t) k * ch + c] = at < h ? old[at] : x[(uint64_t) (at - h) * ch + c];
+    }
 }
 
 __global__ void gates_kernel(const float* alpha, const float* beta, const float* dt, const float* a, uint32_t n_tok,
@@ -54,17 +61,18 @@ __global__ void gates_kernel(const float* alpha, const float* beta, const float*
 }
 
 // value head blockIdx.x, its state's column j a thread (state[h][j][i] = S[i][j], in registers): a token at a time,
-// q and k of its key group normed in LDS
+// q and k of its key group normed in LDS; S read from ring slot cur, after each of the last `keep` tokens into its slot
 __global__ __launch_bounds__(kHead) void delta_kernel(const float* qkv, const float* g, const float* b,
                                                       uint32_t n_tok, uint32_t k_heads, uint32_t v_heads, float eps,
-                                                      float* state, float* out) {
+                                                      float* ring, uint32_t slots, uint32_t cur, uint32_t keep,
+                                                      float* out) {
   __shared__ float qs[kHead], ks[kHead], lds[kHead];
   const uint32_t h = blockIdx.x, j = threadIdx.x, kg = h % k_heads;
   const uint64_t ch = 2ull * k_heads * kHead + (uint64_t) v_heads * kHead;
-  float* sj = state + ((uint64_t) h * kHead + j) * kHead;
+  const uint64_t slot = (uint64_t) v_heads * kHead * kHead, col = ((uint64_t) h * kHead + j) * kHead;
   float s[kHead];
 #pragma unroll
-  for (int i = 0; i < kHead; i++) s[i] = sj[i];
+  for (int i = 0; i < kHead; i++) s[i] = ring[cur * slot + col + i];
   const float inv_n = 1.0f / sqrtf((float) kHead), scale = 1.0f / sqrtf((float) kHead);
   for (uint32_t t = 0; t < n_tok; t++) {
     const float* row = qkv + t * ch;
@@ -83,10 +91,13 @@ __global__ __launch_bounds__(kHead) void delta_kernel(const float* qkv, const fl
 #pragma unroll
     for (int i = 0; i < kHead; i++) s[i] += ks[i] * delta, o += s[i] * qs[i];
     out[((uint64_t) t * v_heads + h) * kHead + j] = o * scale;
+    if (t >= n_tok - keep) {
+      float* to = ring + (cur + 1 + t) % slots * slot + col;
+#pragma unroll
+      for (int i = 0; i < kHead; i++) to[i] = s[i];
+    }
     __syncthreads();  // qs, ks free for the next token
   }
-#pragma unroll
-  for (int i = 0; i < kHead; i++) sj[i] = s[i];
 }
 
 // a block a (head, token): x normed by its own sum of squares, weighted, gated
@@ -101,13 +112,22 @@ __global__ __launch_bounds__(kHead) void gated_norm_kernel(const float* x, const
 
 }  // namespace
 
+// the step's tokens whose states a ring keeps: its last slots - 1 (one, in place, when slots is 1)
+inline uint32_t kept(uint32_t n_tok, uint32_t slots) {
+  const uint32_t back = slots > 1 ? slots - 1 : 1;
+  return n_tok < back ? n_tok : back;
+}
+
 extern "C" bool q4x_conv(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t dilation,
-                         const float* w, float* hist, float* y, void* stream) {
-  if (!x || !w || !hist || !y || !n_tok || !ch || taps < 2 || taps > kMaxTaps || !dilation || dilation > kMaxTaps)
+                         const float* w, float* ring, uint32_t slots, uint32_t cur, float* y, void* stream) {
+  if (!x || !w || !ring || !y || !n_tok || !ch || taps < 2 || taps > kMaxTaps || !dilation || dilation > kMaxTaps ||
+      !slots || cur >= slots)
     return false;
-  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, dilation, w, hist, y);
+  const uint32_t h = (taps - 1) * dilation;
+  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, dilation, w,
+                                                                        ring + (uint64_t) cur * h * ch, y);
   if (!ok()) return false;
-  conv_hist_kernel<<<grid(ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, (taps - 1) * dilation, hist);
+  conv_hist_kernel<<<grid(ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, h, ring, slots, cur, kept(n_tok, slots));
   return ok();
 }
 
@@ -119,10 +139,13 @@ extern "C" bool q4x_ssm_gates(const float* alpha, const float* beta, const float
 }
 
 extern "C" bool q4x_delta(const float* qkv, const float* g, const float* b, uint32_t n_tok, uint32_t k_heads,
-                          uint32_t v_heads, uint32_t dim, float eps, float* state, float* out, void* stream) {
-  if (!qkv || !g || !b || !state || !out || !n_tok || !k_heads || !v_heads || v_heads % k_heads || dim != kHead)
+                          uint32_t v_heads, uint32_t dim, float eps, float* ring, uint32_t slots, uint32_t cur,
+                          float* out, void* stream) {
+  if (!qkv || !g || !b || !ring || !out || !n_tok || !k_heads || !v_heads || v_heads % k_heads || dim != kHead ||
+      !slots || cur >= slots)
     return false;
-  delta_kernel<<<v_heads, kHead, 0, st(stream)>>>(qkv, g, b, n_tok, k_heads, v_heads, eps, state, out);
+  delta_kernel<<<v_heads, kHead, 0, st(stream)>>>(qkv, g, b, n_tok, k_heads, v_heads, eps, ring, slots, cur,
+                                                  kept(n_tok, slots), out);
   return ok();
 }
 

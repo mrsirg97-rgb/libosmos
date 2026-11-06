@@ -17,11 +17,11 @@ bool q4x_hc_combine(float *h, const float *out, const float *inject, uint32_t n_
                     float inject_scale, void *stream);
 
 bool q4x_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t dilation, const float *w,
-              float *hist, float *y, void *stream);
+              float *ring, uint32_t slots, uint32_t cur, float *y, void *stream);
 bool q4x_ssm_gates(const float *alpha, const float *beta, const float *dt, const float *a, uint32_t n_tok,
                    uint32_t heads, float *g, float *b, void *stream);
 bool q4x_delta(const float *qkv, const float *g, const float *b, uint32_t n_tok, uint32_t k_heads, uint32_t v_heads,
-               uint32_t dim, float eps, float *state, float *out, void *stream);
+               uint32_t dim, float eps, float *ring, uint32_t slots, uint32_t cur, float *out, void *stream);
 bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_tok, uint32_t heads, uint32_t dim,
                     float eps, float *y, void *stream);
 
@@ -68,13 +68,16 @@ q4x_hc_combine
   h[t][s][d] += 2 sigmoid(inject[t hc + s] inject_scale) out[t][d]: the block's output into every stream, each by its
   own weight (2 sigmoid: 1 at an inject of 0, a plain residual add).
 
-the Gated DeltaNet (a layer's, its tokens in order):
+the Gated DeltaNet (a layer's, its tokens in order). its states kept in a ring of `slots` (a state each): read from
+slot cur; the state after token t written to slot (cur + 1 + t) % slots for the step's last min(n_tok, slots - 1)
+tokens (its last one when slots is 1: in place) - a step of n tokens leaves the sequence's state in slot
+(cur + n) % slots and the states before it behind, back to slots - 1 tokens: a rollback a slot index.
 
 q4x_conv
   y[t][c] = silu(sum over k < taps, in order, of w[c taps + k] x'[t + k dilation][c]), x' the last (taps - 1)
   dilation inputs before (hist[i][c], oldest first) and then x: a depthwise causal conv, its current token the last
-  tap (the DeltaNet's dilation 1; the n-gram layer's its n-gram size). hist then holds x''s last (taps - 1) dilation
-  (the sequence's conv state).
+  tap (the DeltaNet's dilation 1; the n-gram layer's its n-gram size). hist (a ring's slot: (taps - 1) dilation x ch
+  floats) read from slot cur; after token t, x''s last (taps - 1) dilation up to it - the conv state - into its slot.
 
 q4x_ssm_gates
   b[t][h] = sigmoid(beta[t][h]); g[t][h] = softplus(alpha[t][h] + dt[h]) a[h] (a = -exp(A_log): g <= 0, a decay).
@@ -83,7 +86,8 @@ q4x_delta
   qkv a token's conv output: q (k_heads x dim), k (k_heads x dim), v (v_heads x dim). q and k each l2-normed a head
   (x / sqrt(sum x^2 + eps)); value head h reads key group h % k_heads; its state S (dim x dim, state[h][j][i] = S[i][j])
   a token at a time: S *= exp(g); delta_j = (v_j - sum_i S[i][j] k_i) b; S[i][j] += k_i delta_j; out[t][h][j] =
-  sum_i S[i][j] q_i / sqrt(dim). state holds the sequence's S after the last token.
+  sum_i S[i][j] q_i / sqrt(dim). S (a ring's slot: v_heads x dim x dim floats) read from slot cur; after token t,
+  into its slot.
 
 q4x_gated_norm
   y[t][h][d] = x[t][h][d] / sqrt(mean over d of x^2 + eps) w[d] sigmoid(z[t][h][d]): the DeltaNet's output norm a

@@ -152,9 +152,9 @@ Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR])
     return q4x_fail(err, "out of memory"), NULL;
   s->f = f;
   const Q4xSeqBytes sb = q4x_seq_bytes(g);
-  bool ok = alloc(&s->ple_hist, sb.ple);
+  bool ok = alloc(&s->ple_hist, Q4X_SLOTS * sb.ple);
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = g->recurrent[l] ? alloc(&s->ssm[l], sb.ssm) && alloc(&s->conv[l], sb.conv)
+    ok = g->recurrent[l] ? alloc(&s->ssm[l], Q4X_SLOTS * sb.ssm) && alloc(&s->conv[l], Q4X_SLOTS * sb.conv)
                          : alloc(&s->kc[l], f->max_ctx * sb.kv_row) && alloc(&s->vc[l], f->max_ctx * sb.kv_row);
   if (!ok || !q4x_seq_reset(s))
     return q4x_seq_destroy(s), q4x_fail(err, "GPU memory refused (a sequence's state)"), NULL;

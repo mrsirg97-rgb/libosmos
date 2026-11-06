@@ -34,14 +34,17 @@ struct Q4xForward
   void *probe_arg;
 };
 
+#define Q4X_SLOTS (Q4X_MAX_BACK + 1) /* a ring's states: the latest and those behind it */
+
 struct Q4xSeq
 {
   Q4xForward *f;
   int32_t pos;
-  float *ssm[Q4X_MAX_LAYERS], *conv[Q4X_MAX_LAYERS]; /* a DeltaNet layer's S and conv history */
+  float *ssm[Q4X_MAX_LAYERS], *conv[Q4X_MAX_LAYERS]; /* a DeltaNet layer's S and conv history, Q4X_SLOTS each */
   float *kc[Q4X_MAX_LAYERS], *vc[Q4X_MAX_LAYERS];    /* an attention layer's cache */
-  float *ple_hist;                                   /* the n-gram layer's conv history */
-  int32_t last[Q4X_MAX_NGRAM];                       /* its last tokens, the latest first */
+  float *ple_hist;                                   /* the n-gram layer's conv history, Q4X_SLOTS of them */
+  uint32_t cur, back;                                /* the rings' latest slot, and the states kept behind it */
+  int32_t last[Q4X_MAX_NGRAM + Q4X_MAX_BACK];        /* its last tokens, the latest first (a rollback's too) */
   int n_last;
 };
 

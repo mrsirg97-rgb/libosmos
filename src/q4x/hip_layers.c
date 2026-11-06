@@ -36,9 +36,10 @@ bool q4x_deltanet(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
   return mat(f, L->qkv, ch, D, b->mixed, D, n, b->qkv, ch) && mat(f, L->gate, in, D, b->mixed, D, n, b->z, in) &&
          mat(f, L->alpha, vh, D, b->mixed, D, n, b->al, vh) && mat(f, L->beta, vh, D, b->mixed, D, n, b->be, vh) &&
          q4x_ssm_gates(b->al, b->be, fv(f, L->dt), fv(f, L->a), n, vh, b->g, b->b, NULL) &&
-         q4x_conv(b->qkv, n, ch, (uint32_t)g->ssm_conv, 1, fv(f, L->conv), s->conv[l], b->cv, NULL) &&
+         q4x_conv(b->qkv, n, ch, (uint32_t)g->ssm_conv, 1, fv(f, L->conv), s->conv[l], Q4X_SLOTS, s->cur, b->cv,
+                  NULL) &&
          q4x_delta(b->cv, b->g, b->b, n, (uint32_t)g->ssm_groups, vh, (uint32_t)g->ssm_state, g->rms_eps, s->ssm[l],
-                   b->ro, NULL) &&
+                   Q4X_SLOTS, s->cur, b->ro, NULL) &&
          q4x_gated_norm(b->ro, fv(f, L->ssm_norm), b->z, n, vh, (uint32_t)g->ssm_state, g->rms_eps, b->fo, NULL) &&
          mat(f, L->ssm_out, D, in, b->fo, in, n, b->out, D);
 }
@@ -104,6 +105,6 @@ bool q4x_ple(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
          q4x_ple_gate(b->kn, b->qn, b->val, n, hc, D, b->pg, b->gated, NULL) &&
          q4x_hc_norm(b->gated, fv(f, L->ple_norm_conv), n, hc, D, g->rms_eps, b->nrm, NULL) &&
          q4x_conv(b->nrm, n, hd, (uint32_t)g->ple_conv, (uint32_t)g->ple_ngram, fv(f, L->ple_conv), s->ple_hist,
-                  b->conv, NULL) &&
+                  Q4X_SLOTS, s->cur, b->conv, NULL) &&
          q4x_add2(b->h, b->gated, b->conv, (uint64_t)n * hd, NULL);
 }

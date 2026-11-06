@@ -2,7 +2,8 @@
 // a batch of two sequences' tokens the bits of each sequence run alone (and of the forward called directly); a
 // batch whose sequence's tokens are not consecutive refused; greedy over a batch's rows; a sequence saved and loaded
 // going on as the original, a damaged or a short state refused (the sequence then empty: it computes as a fresh
-// one); no rollback reach, no drafter. needs a gfx1151, the UD-IQ3_XXS set (~78 GB of GPU memory) and the dump's ids; skipped (77) without them.
+// one); rollbacks the bits of never having run the dropped tokens, refused past the reach; no drafter. needs a
+// gfx1151, the UD-IQ3_XXS set (~78 GB of GPU memory) and the dump's ids; skipped (77) without them.
 #include <algorithm>
 
 #include "q4x_ref.h"
@@ -107,12 +108,47 @@ int main() {
   CHECK(!osmos_batch(e, split, ids.data(), 3, err) && err[0]);
   CHECK(oseq_position(a) == (int32_t) kA && oseq_position(b) == (int32_t) kB);
 
-  // no rollback reach, no drafter
-  CHECK(oseq_reach(a) == 0 && oseq_rollback(a, 0) && !oseq_rollback(a, 1) && oseq_prompt(a, kA));
+  // no drafter
+  CHECK(oseq_prompt(a, kA));
   int32_t drafts[OSMOS_MAX_BLOCK];
   float conf[OSMOS_MAX_BLOCK];
   CHECK(!oseq_seed(a, 0, 1, err) && oseq_draft(a, ids[0], 0.1f, 0.1f, drafts, conf, err) < 0);
   oseq_destroy(a), oseq_destroy(b);
+
+  // rollback: a step's tokens dropped, then on - the bits of never having run them. the reference: the tokens run
+  // straight, in steps of their own split (a token's bits its own however a sequence is split)
+  {
+    const int32_t* wrong = &ids[kSaved];  // tokens to drop: any others
+    OsmosSeq* r = oseq_create(e, err);
+    OsmosSeq* ref = oseq_create(e, err);
+    CHECK(r && ref && oseq_reach(r) == 0 && oseq_rollback(r, 0) && !oseq_rollback(r, 1));
+    std::vector<OsmosSeq*> sr(kA, r), sref(kA + 4, ref);
+    CHECK(osmos_batch(e, sr.data(), ids.data(), kA, err) && oseq_reach(r) == OSMOS_MAX_BLOCK);
+    CHECK(osmos_batch(e, sref.data(), ids.data(), kA + 4, err));
+    const std::vector<float> want = rows(e, kA, 4, V);  // positions kA .. kA + 3
+    // a 5-token step dropped whole, then the right 4 as one step
+    CHECK(osmos_batch(e, sr.data(), wrong, 5, err) && oseq_rollback(r, 5) && oseq_position(r) == (int32_t) kA);
+    CHECK(osmos_batch(e, sr.data(), &ids[kA], 4, err) && rows(e, 0, 4, V) == want);
+    // the right 2 then 3 wrong as one step, the 3 dropped, the next right one: its row
+    CHECK(oseq_rollback(r, 4));
+    std::vector<int32_t> mixed = {ids[kA], ids[kA + 1], wrong[0], wrong[1], wrong[2]};
+    CHECK(osmos_batch(e, sr.data(), mixed.data(), 5, err) && rows(e, 0, 2, V) ==
+          std::vector<float>(want.begin(), want.begin() + 2 * (size_t) V));
+    CHECK(oseq_rollback(r, 3) && oseq_position(r) == (int32_t) kA + 2);
+    CHECK(osmos_batch(e, sr.data(), &ids[kA + 2], 1, err) && rows(e, 0, 1, V) ==
+          std::vector<float>(want.begin() + 2 * (size_t) V, want.begin() + 3 * (size_t) V));
+    // three one-token steps dropped across their steps' bounds, then the last right one
+    for (int i = 0; i < 3; i++) CHECK(osmos_batch(e, sr.data(), &wrong[i], 1, err));
+    CHECK(oseq_rollback(r, 3) && osmos_batch(e, sr.data(), &ids[kA + 3], 1, err) &&
+          rows(e, 0, 1, V) == std::vector<float>(want.begin() + 3 * (size_t) V, want.end()));
+    // past the reach: refused, nothing moved. the reach: the states kept behind - a rollback of r leaves r fewer, a
+    // step of n n more, to OSMOS_MAX_BLOCK (here 8, then 3 / 7 / 3 / 8 / 5 / 6 / 8 / 5 / 6)
+    const uint32_t reach = oseq_reach(r);
+    CHECK(reach == 6 && !oseq_rollback(r, reach + 1) && oseq_position(r) == (int32_t) kA + 4);
+    oseq_destroy(r), oseq_destroy(ref);
+    std::printf("  rollback: a step dropped whole or in part, single steps across their bounds - the bits of never "
+                "having run them\n");
+  }
 
   // saved and loaded: the loaded one goes on as the original, bit for bit
   OsmosSeq* s = oseq_create(e, err);
@@ -124,7 +160,7 @@ int main() {
   std::vector<uint8_t> st(bytes);
   CHECK(bytes > 0 && oseq_save(s, st.data(), bytes, err));
   CHECK(!oseq_save(s, st.data(), bytes - 1, err));
-  CHECK(oseq_load(c, st.data(), bytes, err) && oseq_position(c) == (int32_t) kSaved);
+  CHECK(oseq_load(c, st.data(), bytes, err) && oseq_position(c) == (int32_t) kSaved && oseq_reach(c) == 0);
   CHECK(osmos_batch(e, &s, &ids[kSaved], 1, err));
   const std::vector<float> next_s = rows(e, 0, 1, V);
   CHECK(osmos_batch(e, &c, &ids[kSaved], 1, err));

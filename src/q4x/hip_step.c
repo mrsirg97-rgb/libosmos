@@ -72,12 +72,15 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
                   (uint32_t)g->n_embd, n, b->logits + (uint64_t)row0 * g->n_vocab, (uint32_t)g->n_vocab, NULL) ||
       hipStreamSynchronize(NULL) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the logits)");
+  const int keep = (int)(sizeof s->last / sizeof *s->last);
   for (uint32_t t = 0; t < n; t++) /* the latest first */
   {
-    memmove(s->last + 1, s->last, (Q4X_MAX_NGRAM - 1) * sizeof *s->last);
-    s->last[0] = tokens[t], s->n_last += s->n_last < Q4X_MAX_NGRAM;
+    memmove(s->last + 1, s->last, (size_t)(keep - 1) * sizeof *s->last);
+    s->last[0] = tokens[t], s->n_last += s->n_last < keep;
   }
   s->pos += (int32_t)n;
+  s->cur = (s->cur + n) % Q4X_SLOTS; /* the rings' latest: the step's last token's (q4x_ops.h) */
+  s->back = s->back + n < Q4X_MAX_BACK ? s->back + n : Q4X_MAX_BACK;
   return true;
 }
 

@@ -7,6 +7,9 @@
 #include "osmos/q4x/weights.h"
 
 #define Q4X_FWD_ERR 256
+/* a sequence's states kept behind its latest: a rollback's reach - a drafter's most drafts a round (OSMOS_MAX_BLOCK,
+   the engine's), each a DeltaNet layer's S (3.1 MB) a slot: ~1 GB a sequence at 8 */
+#define Q4X_MAX_BACK 8
 
 typedef struct Q4xForward Q4xForward;
 typedef struct Q4xSeq Q4xSeq;
@@ -20,6 +23,8 @@ void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
 Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR]);
 void q4x_seq_destroy(Q4xSeq *s);
 int32_t q4x_seq_position(const Q4xSeq *s);
+uint32_t q4x_seq_reach(const Q4xSeq *s);
+bool q4x_seq_rollback(Q4xSeq *s, uint32_t n);
 uint64_t q4x_identity(const Q4xForward *f);
 uint64_t q4x_seq_state_bytes(const Q4xSeq *s);
 bool q4x_seq_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR]);
@@ -50,6 +55,11 @@ q4x_forward_probe
 q4x_seq_create .. q4x_seq_position
   a sequence: its DeltaNet states and conv histories, the n-gram layer's conv history, its attention caches (max_ctx
   rows), its last tokens; its position the tokens it holds.
+
+q4x_seq_reach, q4x_seq_rollback
+  how many of its last tokens a sequence can drop (its states kept behind: Q4X_MAX_BACK at most, 0 when new or just
+  loaded) - and the drop: its last n tokens gone, every state as it was before them (the bits of never having run
+  them). false for n past the reach, the sequence unchanged.
 
 q4x_identity
   a 64-bit key of what a saved sequence depends on: the state's format, the geometry, the model's files (each one's

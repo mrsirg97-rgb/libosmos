@@ -28,16 +28,17 @@ typedef struct Part
 
 #define MAX_PARTS (1 + 2 * Q4X_MAX_LAYERS)
 
-/* the parts of a sequence at position pos, in the string's order: their count */
+/* the parts of a sequence at position pos (its rings' latest slot), in the string's order: their count */
 static int parts(const Q4xSeq *s, int32_t pos, Part *p)
 {
   const Q4xGeometry *g = &s->f->w->geo;
   const Q4xSeqBytes sb = q4x_seq_bytes(g);
   int n = 0;
-  p[n++] = (Part){s->ple_hist, sb.ple};
+  p[n++] = (Part){(uint8_t *)s->ple_hist + s->cur * sb.ple, sb.ple};
   for (int l = 0; l < g->n_layers; l++)
     if (g->recurrent[l])
-      p[n++] = (Part){s->ssm[l], sb.ssm}, p[n++] = (Part){s->conv[l], sb.conv};
+      p[n++] = (Part){(uint8_t *)s->ssm[l] + s->cur * sb.ssm, sb.ssm},
+      p[n++] = (Part){(uint8_t *)s->conv[l] + s->cur * sb.conv, sb.conv};
     else
       p[n++] = (Part){s->kc[l], (uint64_t)pos * sb.kv_row}, p[n++] = (Part){s->vc[l], (uint64_t)pos * sb.kv_row};
   return n;
@@ -81,6 +82,7 @@ bool q4x_seq_reset(Q4xSeq *s)
 {
   const Q4xGeometry *g = &s->f->w->geo;
   const Q4xSeqBytes sb = q4x_seq_bytes(g);
+  s->cur = 0, s->back = 0; /* slot 0 the latest, zeroed: the others not read until a step writes them */
   bool ok = hipMemset(s->ple_hist, 0, sb.ple) == hipSuccess;
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = !g->recurrent[l] ||
@@ -99,8 +101,8 @@ bool q4x_seq_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_E
   Header h;
   memset(&h, 0, sizeof h);
   h.magic = STATE_MAGIC, h.version = STATE_VERSION, h.identity = q4x_identity(s->f), h.pos = s->pos;
-  h.n_last = s->n_last;
-  memcpy(h.last, s->last, sizeof h.last);
+  h.n_last = s->n_last < Q4X_MAX_NGRAM ? s->n_last : Q4X_MAX_NGRAM;
+  memcpy(h.last, s->last, sizeof h.last); /* the latest Q4X_MAX_NGRAM: what the n-gram layer reads */
   uint8_t *o = out, *at = o + sizeof h;
   memcpy(o, &h, sizeof h);
   Part p[MAX_PARTS];
@@ -126,6 +128,7 @@ bool q4x_seq_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ER
   if (bytes < sizeof h + sizeof(uint64_t))
     return refuse(s, err, "a state shorter than its header");
   memcpy(&h, in, sizeof h);
+  memset(s->last, 0, sizeof s->last);
   if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != q4x_identity(s->f))
     return refuse(s, err, "a state of another format or model (its identity)");
   if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM ||
@@ -138,10 +141,25 @@ bool q4x_seq_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ER
     return refuse(s, err, "a damaged state (its checksum)");
   const uint8_t *at = i + sizeof h;
   Part p[MAX_PARTS];
+  s->cur = 0, s->back = 0; /* loaded into slot 0, nothing behind it */
   for (int k = 0, n = parts(s, h.pos, p); k < n; at += p[k].bytes, k++)
     if (p[k].bytes && hipMemcpy(p[k].dev, at, p[k].bytes, hipMemcpyHostToDevice) != hipSuccess)
       return refuse(s, err, "a GPU copy failed (the state's load)");
   s->pos = h.pos, s->n_last = h.n_last;
-  memcpy(s->last, h.last, sizeof s->last);
+  memcpy(s->last, h.last, sizeof h.last);
+  return true;
+}
+
+uint32_t q4x_seq_reach(const Q4xSeq *s) { return s ? s->back : 0; }
+
+bool q4x_seq_rollback(Q4xSeq *s, uint32_t n)
+{
+  if (!s || n > s->back)
+    return false;
+  const int keep = (int)(sizeof s->last / sizeof *s->last);
+  memmove(s->last, s->last + n, (size_t)(keep - (int)n) * sizeof *s->last);
+  s->n_last = s->n_last > (int)n ? s->n_last - (int)n : 0;
+  s->pos -= (int32_t)n, s->back -= n;
+  s->cur = (s->cur + Q4X_SLOTS - n) % Q4X_SLOTS;
   return true;
 }

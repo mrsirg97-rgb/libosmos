@@ -82,12 +82,12 @@ int main() {
   float* conv = dev_alloc<float>((size_t) kTok * kHd);
   CHECK(q4x_hc_norm(rgd, nc, kTok, kHc, kDim, kEps, nrm, nullptr));
   CHECK(hipMemset(hist, 0, (size_t) nh * kHd * 4) == hipSuccess);
-  CHECK(q4x_conv(nrm, kTok, kHd, kTaps, dil, cw, hist, conv, nullptr));
+  CHECK(q4x_conv(nrm, kTok, kHd, kTaps, dil, cw, hist, 1, 0, conv, nullptr));
   const std::vector<float> whole = host_of(conv, (size_t) kTok * kHd);
   held("the dilated conv (ple_conv_out)", whole, ref("ple_conv_out-1"), 1.0, kExactRel);
   CHECK(hipMemset(hist, 0, (size_t) nh * kHd * 4) == hipSuccess);
-  CHECK(q4x_conv(nrm, kHalf, kHd, kTaps, dil, cw, hist, conv, nullptr));
-  CHECK(q4x_conv(nrm + (size_t) kHalf * kHd, kHalf, kHd, kTaps, dil, cw, hist, conv + (size_t) kHalf * kHd, nullptr));
+  CHECK(q4x_conv(nrm, kHalf, kHd, kTaps, dil, cw, hist, 1, 0, conv, nullptr));
+  CHECK(q4x_conv(nrm + (size_t) kHalf * kHd, kHalf, kHd, kTaps, dil, cw, hist, 1, 0, conv + (size_t) kHalf * kHd, nullptr));
   CHECK(std::memcmp(host_of(conv, whole.size()).data(), whole.data(), whole.size() * 4) == 0);
 
   // the residual after it (llama.cpp's own gated value and conv), through layer 1's mixer norm

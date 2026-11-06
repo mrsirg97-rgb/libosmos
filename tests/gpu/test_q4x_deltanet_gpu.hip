@@ -37,11 +37,11 @@ static Layer layer0(const Gguf* g) {
 static std::vector<float> conv(const Layer& l, const float* x) {
   float *hist = dev_alloc<float>((kTaps - 1) * kCh), *y = dev_alloc<float>((size_t) kTok * kCh);
   CHECK(hipMemset(hist, 0, (kTaps - 1) * kCh * 4) == hipSuccess);
-  CHECK(q4x_conv(x, kTok, kCh, kTaps, 1, l.conv, hist, y, nullptr));
+  CHECK(q4x_conv(x, kTok, kCh, kTaps, 1, l.conv, hist, 1, 0, y, nullptr));
   const std::vector<float> whole = host_of(y, (size_t) kTok * kCh);
   CHECK(hipMemset(hist, 0, (kTaps - 1) * kCh * 4) == hipSuccess);
-  CHECK(q4x_conv(x, kHalf, kCh, kTaps, 1, l.conv, hist, y, nullptr));
-  CHECK(q4x_conv(x + (size_t) kHalf * kCh, kHalf, kCh, kTaps, 1, l.conv, hist, y + (size_t) kHalf * kCh, nullptr));
+  CHECK(q4x_conv(x, kHalf, kCh, kTaps, 1, l.conv, hist, 1, 0, y, nullptr));
+  CHECK(q4x_conv(x + (size_t) kHalf * kCh, kHalf, kCh, kTaps, 1, l.conv, hist, 1, 0, y + (size_t) kHalf * kCh, nullptr));
   CHECK(std::memcmp(host_of(y, whole.size()).data(), whole.data(), whole.size() * 4) == 0);
   CHECK(hipFree(hist) == hipSuccess && hipFree(y) == hipSuccess);
   return whole;
@@ -52,12 +52,12 @@ static std::vector<float> delta(const float* qkv, const float* g, const float* b
   const size_t ns = (size_t) kVHeads * kHead * kHead, no = (size_t) kTok * kInner;
   float *s = dev_alloc<float>(ns), *o = dev_alloc<float>(no);
   CHECK(hipMemset(s, 0, ns * 4) == hipSuccess);
-  CHECK(q4x_delta(qkv, g, b, kTok, kKHeads, kVHeads, kHead, kEps, s, o, nullptr));
+  CHECK(q4x_delta(qkv, g, b, kTok, kKHeads, kVHeads, kHead, kEps, s, 1, 0, o, nullptr));
   const std::vector<float> whole = host_of(o, no), sw = host_of(s, ns);
   CHECK(hipMemset(s, 0, ns * 4) == hipSuccess);
-  CHECK(q4x_delta(qkv, g, b, kHalf, kKHeads, kVHeads, kHead, kEps, s, o, nullptr));
+  CHECK(q4x_delta(qkv, g, b, kHalf, kKHeads, kVHeads, kHead, kEps, s, 1, 0, o, nullptr));
   CHECK(q4x_delta(qkv + (size_t) kHalf * kCh, g + kHalf * kVHeads, b + kHalf * kVHeads, kHalf, kKHeads, kVHeads,
-                  kHead, kEps, s, o + (size_t) kHalf * kInner, nullptr));
+                  kHead, kEps, s, 1, 0, o + (size_t) kHalf * kInner, nullptr));
   CHECK(std::memcmp(host_of(o, no).data(), whole.data(), no * 4) == 0);
   CHECK(std::memcmp(host_of(s, ns).data(), sw.data(), ns * 4) == 0);
   CHECK(hipFree(s) == hipSuccess && hipFree(o) == hipSuccess);
@@ -74,9 +74,9 @@ int main() {
     std::printf("[test_q4x_deltanet_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its dump or a GPU\n");
     return 77;
   }
-  CHECK(!q4x_conv(nullptr, 0, kCh, kTaps, 1, nullptr, nullptr, nullptr, nullptr));
-  CHECK(!q4x_delta(nullptr, nullptr, nullptr, 1, 0, kVHeads, kHead, kEps, nullptr, nullptr, nullptr));
-  CHECK(!q4x_delta(nullptr, nullptr, nullptr, 1, 7, kVHeads, kHead, kEps, nullptr, nullptr, nullptr));  // 48 % 7
+  CHECK(!q4x_conv(nullptr, 0, kCh, kTaps, 1, nullptr, nullptr, 1, 0, nullptr, nullptr));
+  CHECK(!q4x_delta(nullptr, nullptr, nullptr, 1, 0, kVHeads, kHead, kEps, nullptr, 1, 0, nullptr, nullptr));
+  CHECK(!q4x_delta(nullptr, nullptr, nullptr, 1, 7, kVHeads, kHead, kEps, nullptr, 1, 0, nullptr, nullptr));  // 48 % 7
   const Layer l = layer0(g);
 
   // each op from llama.cpp's own inputs
@@ -110,8 +110,8 @@ int main() {
   CHECK(hipMemset(st, 0, (size_t) kVHeads * kHead * kHead * 4) == hipSuccess);
   CHECK(mv_strided(l.t_qkv, l.qkv, kCh, kDim, hm, kDim, kTok, qkv, kCh, nullptr));
   CHECK(mv_strided(l.t_gate, l.gate, kInner, kDim, hm, kDim, kTok, z, kInner, nullptr));
-  CHECK(q4x_conv(qkv, kTok, kCh, kTaps, 1, l.conv, hist, cv, nullptr));
-  CHECK(q4x_delta(cv, gg, bb, kTok, kKHeads, kVHeads, kHead, kEps, st, ro2, nullptr));
+  CHECK(q4x_conv(qkv, kTok, kCh, kTaps, 1, l.conv, hist, 1, 0, cv, nullptr));
+  CHECK(q4x_delta(cv, gg, bb, kTok, kKHeads, kVHeads, kHead, kEps, st, 1, 0, ro2, nullptr));
   CHECK(q4x_gated_norm(ro2, l.norm, z, kTok, kVHeads, kHead, kEps, fo, nullptr));
   CHECK(mv_strided(l.t_out, l.out, kDim, kInner, fo, kInner, kTok, out, kDim, nullptr));
   held("layer 0 whole (linear_attn_out)", host_of(out, (size_t) kTok * kDim), ref("linear_attn_out-0"), 1.0,
