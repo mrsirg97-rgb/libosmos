@@ -9,7 +9,7 @@
    categories to; above, by its Unicode category - whitespace first (collapsed to \v: \s), then N L P M S, any other
    in none (unicode.cpp's k_ucat_map, its text_collapsed) */
 
-static uint16_t flags(uint32_t c)
+uint16_t pretok_flags(uint32_t c)
 {
   size_t lo = 0, hi = UC_RANGES; /* the last range starting at or before c */
   while (hi - lo > 1)
@@ -23,7 +23,7 @@ static uint16_t flags(uint32_t c)
   return uc_range_flags[lo];
 }
 
-static bool space(uint32_t c)
+bool pretok_space(uint32_t c)
 {
   if (c < 128)
     return c == ' ' || (c >= '\t' && c <= '\r');
@@ -41,7 +41,7 @@ static bool space(uint32_t c)
   return false;
 }
 
-static int category(uint32_t c) { return space(c) ? 0 : flags(c) & UC_CATEGORIES; }
+static int category(uint32_t c) { return pretok_space(c) ? 0 : pretok_flags(c) & UC_CATEGORIES; }
 
 static bool ascii_letter(uint32_t c) { return (c | 0x20) >= 'a' && (c | 0x20) <= 'z'; }
 
@@ -122,7 +122,7 @@ static size_t words(const uint32_t *cp, size_t i, size_t e)
   if ((j = punctuation(cp, i, e)))
     return j;
   size_t run = i, nl = i; /* \s*[\r\n]+: the run's last newline ends it */
-  while (run < e && space(cp[run]))
+  while (run < e && pretok_space(cp[run]))
     if (is_nl(cp[run++]))
       nl = run;
   if (nl > i)

@@ -25,7 +25,7 @@ int32_t tokenizer_vocab(const Tokenizer *t);
 /*
 Tokenizer
   a model's own tokenizer, from its GGUF (tokenizer.ggml.tokens / token_type / merges): byte-level BPE (`model`
-  gpt2) after DeepSeek-V3's pre-tokenizer (`pre` deepseek-v3, or joyai-llm: the same split) - llama.cpp's
+  gpt2) after the pre-tokenizer `pre` names (deepseek-v3, or joyai-llm: the same split; qwen35, Qwen3.5 and 3.8's) - llama.cpp's
   tokenization of the same file, token for token (tests/test_tokenizer.c against its llama-tokenize). its own copy
   of the vocabulary: the Gguf may go after create.
 

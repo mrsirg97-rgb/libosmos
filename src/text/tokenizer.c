@@ -18,6 +18,7 @@ struct Tokenizer
   char **text;     /* each token's text (its own copies) */
   int32_t *special; /* the special tokens, the longest text first (ties: the lower id) */
   int32_t n_special;
+  size_t (*split)(const uint32_t *cp, size_t n, size_t *cuts); /* the pre-tokenizer's (pretok.h) */
 };
 
 static int longest_first(const void *a, const void *b, void *arg)
@@ -49,14 +50,17 @@ Tokenizer *tokenizer_create(const Gguf *g, char err[TOKENIZER_ERR])
   const GgufKv *mer = g ? list(g, "tokenizer.ggml.merges", GGUF_STRING) : NULL;
   if (!model || model->type != GGUF_STRING || strcmp(model->v.s, "gpt2"))
     return fail(err, "not a byte-level BPE (tokenizer.ggml.model gpt2)"), NULL;
-  if (!pre || pre->type != GGUF_STRING || (strcmp(pre->v.s, "deepseek-v3") && strcmp(pre->v.s, "joyai-llm")))
-    return fail(err, "a pre-tokenizer this build does not split by (deepseek-v3, joyai-llm)"), NULL;
+  const bool qwen = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "qwen35");
+  if (!pre || pre->type != GGUF_STRING ||
+      (strcmp(pre->v.s, "deepseek-v3") && strcmp(pre->v.s, "joyai-llm") && !qwen))
+    return fail(err, "a pre-tokenizer this build does not split by (deepseek-v3, joyai-llm, qwen35)"), NULL;
   if (!tok || !mer || !typ || typ->type != GGUF_ARRAY || typ->n != tok->n || tok->n > INT32_MAX)
     return fail(err, "no tokens, token types or merges, or of unequal lengths"), NULL;
   Tokenizer *t = calloc(1, sizeof *t);
   bool ok = t != NULL;
   if (ok)
   {
+    t->split = qwen ? pretok_split_qwen35 : pretok_split;
     t->n = (int32_t)tok->n;
     ok = (t->type = calloc(tok->n, 1)) && (t->text = calloc(tok->n, sizeof *t->text)) &&
          (t->special = malloc(tok->n * sizeof *t->special));
@@ -164,7 +168,7 @@ static size_t raw(const Tokenizer *t, const unsigned char *s, size_t len, int32_
     return free(cp), free(cuts), free(word), 0;
   for (size_t i = 0, used; i < len; i += used)
     cp[m++] = pretok_utf8(s + i, len - i, &used);
-  const size_t k = pretok_split(cp, m, cuts);
+  const size_t k = t->split(cp, m, cuts);
   for (size_t p = 0; p < k; p++)
   {
     size_t w = 0; /* the piece's code points as UTF-8 again (U+FFFD's three bytes for an invalid byte) */
