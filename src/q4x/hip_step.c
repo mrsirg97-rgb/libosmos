@@ -79,7 +79,7 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
   q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
   if (!q4x_mat(f, w->output, (uint32_t)g->n_vocab, (uint32_t)g->n_embd, b->mixed, (uint32_t)g->n_embd, n,
                b->logits + (uint64_t)row0 * g->n_vocab, (uint32_t)g->n_vocab, n <= MM_MAX_TOKENS) ||
-      hipStreamSynchronize(NULL) != hipSuccess)
+      !q4x_overflow_read(f) || hipStreamSynchronize(NULL) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the logits)");
   if (!q4x_overflow_ok(f, err))
     return false;
@@ -103,7 +103,7 @@ bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char 
     return q4x_fail(err, "no forward or ids, or rows past a step's");
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   int32_t *d = f->b.cnt; /* the MoE's table, free between steps */
-  return (ops_argmax(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, NULL) &&
+  return (q4x_top(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, NULL, NULL) &&
           hipMemcpy(ids, d, rows * 4, hipMemcpyDeviceToHost) == hipSuccess) ||
          q4x_fail(err, "a GPU call failed (the greedy pick)");
 }

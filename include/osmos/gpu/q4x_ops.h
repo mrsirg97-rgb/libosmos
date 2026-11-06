@@ -34,7 +34,7 @@ bool q4x_delta(const float *qkv, const float *g, const float *b, uint32_t n_tok,
 bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_tok, uint32_t heads, uint32_t dim,
                     float eps, float *y, const Q4xX16 *side, void *stream);
 
-bool q4x_top(const float *logits, uint32_t n, int32_t *id, float *p, void *stream);
+bool q4x_top(const float *logits, uint32_t n, uint32_t rows, uint32_t stride, int32_t *id, float *p, void *stream);
 bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out, void *stream);
 
 bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
@@ -132,8 +132,9 @@ q4x_gated_norm
 the MTP head's:
 
 q4x_top
-  one row of n logits: *id its greatest (the lowest among equals, as ops_argmax), *p its softmax probability -
-  1 / sum over i of exp(logits[i] - max), the sum in a fixed order (a draft's confidence).
+  rows rows of n logits (stride floats apart): id[r] row r's greatest (the lowest among equals, as ops_argmax), p[r]
+  its softmax probability - 1 / sum over i of exp(logits[i] - max), the sum in a fixed order (a draft's confidence;
+  p NULL: not wanted - a greedy pick's).
 
 q4x_join
   out[t][s] = [e[t] ; h[t][s]] (2 dim floats a stream): a token's normed embedding beside each stream's normed state,

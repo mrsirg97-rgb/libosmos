@@ -63,10 +63,8 @@ bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q
   ok = ok && head_in(f, n) && q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n) &&
        q4x_attention_kv(f, L, s->mkc, s->mvc, from, n) &&
        copy(s->pend, rows + (uint64_t)(to - 1 - s->step_pos0) * hd, hd * F);
-  if (!ok)
+  if (!ok) /* its f16 overflow, if any, the next draft's or step's read finds (the flag accumulates) */
     return q4x_fail(err, "a GPU call failed (the MTP head's seeding)");
-  if (!q4x_overflow_ok(f, err))
-    return false;
   s->pend_pos = to - 1;
   return true;
 }
@@ -90,9 +88,9 @@ static bool one(Q4xForward *f, Q4xSeq *s, int32_t p, int32_t *id, float *prob)
       q4x_hc_combine(b->h, b->out, b->inj, 1, hc, D, inv, NULL) && copy(m->hin, b->h, (uint64_t)hc * D * F) &&
       q4x_mix(f, mtp->head_norm, mtp->head_down, mtp->head_up, NULL, 1) &&
       q4x_mat(f, f->w->output, dv, D, b->mixed, D, 1, m->logits, dv, true) && /* b.x16 the head mixer's mixed */
-      q4x_top(m->logits, dv, m->top_id, m->top_p, NULL) &&
+      q4x_top(m->logits, dv, 1, 0, m->top_id, m->top_p, NULL) &&
       hipMemcpyAsync(m->pin_id, m->top_id, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
-      hipMemcpyAsync(m->pin_p, m->top_p, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
+      hipMemcpyAsync(m->pin_p, m->top_p, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess && q4x_overflow_read(f) &&
       hipStreamSynchronize(NULL) == hipSuccess;
   *id = *m->pin_id, *prob = *m->pin_p;
   return ok && q4x_overflow_ok(f, NULL);

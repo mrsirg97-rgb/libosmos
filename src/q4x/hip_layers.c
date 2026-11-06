@@ -57,10 +57,13 @@ static const Q4xX16 *side(Q4xForward *f, uint32_t n, uint32_t cols, Q4xX16 *s)
   return s;
 }
 
+bool q4x_overflow_read(Q4xForward *f)
+{
+  return hipMemcpyAsync(f->b.pin_overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess;
+}
+
 bool q4x_overflow_ok(Q4xForward *f, char *err)
 {
-  if (hipMemcpy(f->b.pin_overflow, f->b.overflow, 4, hipMemcpyDeviceToHost) != hipSuccess)
-    return q4x_fail(err, "a GPU copy failed (the f16 overflow flag)");
   if (!*f->b.pin_overflow)
     return true;
   *f->b.pin_overflow = 0;

@@ -19,7 +19,10 @@ static void top_case(const std::vector<float>& l, const char* what) {
   float* p;
   CHECK(hipMalloc(&d, l.size() * 4) == hipSuccess && hipMalloc(&id, 4) == hipSuccess && hipMalloc(&p, 4) == hipSuccess);
   CHECK(hipMemcpy(d, l.data(), l.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
-  CHECK(q4x_top(d, (uint32_t) l.size(), id, p, nullptr));
+  CHECK(q4x_top(d, (uint32_t) l.size(), 1, 0, id, p, nullptr));
+  int32_t* id2;  // the pick alone (no probability): the same id
+  CHECK(hipMalloc(&id2, 4) == hipSuccess && q4x_top(d, (uint32_t) l.size(), 1, 0, id2, nullptr, nullptr));
+  CHECK(host_of(reinterpret_cast<float*>(id2), 1)[0] == host_of(reinterpret_cast<float*>(id), 1)[0]);
   int32_t got;
   float gp;
   CHECK(hipMemcpy(&got, id, 4, hipMemcpyDeviceToHost) == hipSuccess && hipMemcpy(&gp, p, 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -31,7 +34,7 @@ static void top_case(const std::vector<float>& l, const char* what) {
   std::printf("  %-34s id %d (want %zu)  p %.7f (want %.7f, rel %.1e)\n", what, got, best, gp, want,
               std::fabs(gp - want) / want);
   CHECK(got == (int32_t) best && std::fabs(gp - want) <= kTopRel * want);
-  hipFree(d), hipFree(id), hipFree(p);
+  CHECK(hipFree(d) == hipSuccess && hipFree(id) == hipSuccess && hipFree(id2) == hipSuccess && hipFree(p) == hipSuccess);
 }
 
 int main() {
@@ -52,7 +55,7 @@ int main() {
   top_case(l, "a tie: the lowest id");
   l[kVocab - 1] = 41.0f;
   top_case(l, "the last row's last");
-  CHECK(!q4x_top(nullptr, kVocab, nullptr, nullptr, nullptr) && !q4x_top(l.data(), 0, nullptr, nullptr, nullptr));
+  CHECK(!q4x_top(nullptr, kVocab, 1, 0, nullptr, nullptr, nullptr) && !q4x_top(l.data(), 0, 1, 0, nullptr, nullptr, nullptr));
 
   std::vector<float> e((size_t) kTok * kDim), h((size_t) kTok * kHc * kDim);
   for (float& v : e) v = nd(rng);

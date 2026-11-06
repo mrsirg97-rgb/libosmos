@@ -93,7 +93,10 @@ bool q4x_mat(Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
 bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, uint32_t ys0, const GgufTensor *t1,
               uint32_t rows1, float *y1, uint32_t ys1, uint32_t cols, const float *x, uint32_t xs, uint32_t n,
               bool ready);
-/* the step's mm activations all within f16 (the flag read, then cleared): false with why when not */
+/* the step's mm activations all within f16: the flag queued to its pinned copy (q4x_overflow_read, before the sync a
+   step makes anyway - no round trip of its own), then read after it (q4x_overflow_ok: false with why, the flag
+   cleared, when set). the flag accumulates: a call that queues no read (the MTP head's seeding) is caught at the next */
+bool q4x_overflow_read(Q4xForward *f);
 bool q4x_overflow_ok(Q4xForward *f, char *err);
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);
 void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint64_t n);
