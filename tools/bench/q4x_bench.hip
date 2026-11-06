@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
   Gguf* mg = argc > 5 ? gguf_create(argv[5], gerr) : nullptr;
   Q4xMtp* mtp = mg ? q4x_mtp_create(mg, w, werr) : nullptr;
   if (argc > 5 && !mtp) return std::fprintf(stderr, "q4x_bench: %s%s\n", gerr, werr), 1;
-  const uint32_t ctx = np + nd + Q4X_MTP_BLOCK;
+  const uint32_t ctx = np + nd + OSMOS_MAX_BLOCK;
   Q4xForward* fw = q4x_forward_create(w, mtp, ctx, ctx < kStep ? ctx : kStep, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
@@ -66,6 +66,8 @@ int main(int argc, char** argv) {
           return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
       std::printf("  a step of %u tokens: %.1f ms\n", n, (now() - a) / reps * 1e3);
     }
+  const uint32_t block = getenv("Q4X_BENCH_BLOCK") ? (uint32_t) atoi(getenv("Q4X_BENCH_BLOCK")) : Q4X_MTP_BLOCK;
+  if (!block || block > OSMOS_MAX_BLOCK) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_BLOCK 1 .. 8\n"), 2;
   const double t1 = now();
   uint64_t h = FNV_SEED;
   double worst = 0;
@@ -74,8 +76,7 @@ int main(int argc, char** argv) {
     const double a = now();
     int32_t toks[OSMOS_MAX_BLOCK + 1] = {y}, picks[OSMOS_MAX_BLOCK + 1];
     float conf[OSMOS_MAX_BLOCK];
-    const int k = mtp ? q4x_mtp_draft(fw, s, y, Q4X_MTP_BLOCK, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, toks + 1,
-                                      conf, ferr)
+    const int k = mtp ? q4x_mtp_draft(fw, s, y, block, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, toks + 1, conf, ferr)
                       : 0;
     const int32_t pos = q4x_seq_position(s);
     if (k < 0 || !q4x_batch(fw, s, toks, (uint32_t) k + 1, 0, ferr) || !q4x_greedy(fw, 0, (uint32_t) k + 1, picks, ferr))
