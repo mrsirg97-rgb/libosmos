@@ -2492,6 +2492,21 @@ own commit when it is no worse and no bit moves.
   ~/bench/v032/waves); plain 15.9 against 15.7; agents 481.3 s, 3.79 J an answer token, first token p95 62.0 s, turn
   done p95 103.6 s (0.3.1: 483.0, 3.84, 62.9, 103.2). kept: no loss, the answers' hashes the same, and a verify block
   of 5-6 tokens on an expert no longer falls off the cliff.
+- **the drafter's greedy pick on the GPU** (hip_drafter.c): a draft row's 129,280 logits were copied to pinned memory
+  (517 KB) and scanned on the CPU; now ops_argmax (its ties the scan's: the lowest index) and 4 bytes back - the same
+  drafts (279 / 282 / 262 drafted, 199 / 173 / 207 accepted, both builds), drafting 854 / 1,180 / 757 ms against 831 /
+  1,179 / 750. end to end below the bench's noise: drafted 30.6 / 30.5 tok/s against 30.7 / 30.7, 2.36 J against 2.35
+  (~/bench/v032/argmax; plain - no drafter - 15.6 against 15.8 in the same run: the noise's size). kept: less work, a
+  row with a NaN now ends the drafts (the scan picked from it).
+- **measured, not kept**:
+  - the resident set's swaps off (FWD_SWAPS_A_LAYER 0: their copies 0.7 ms a drafted token, ~2.5% of the GPU's busy
+    time): drafted 19.0 / 18.9 tok/s, 3.32 / 3.33 J against 30.9 / 30.7, 2.32 / 2.34; plain 10.4 against 15.8, 6.47 J
+    against 4.47 (~/bench/v032/noswap). the copies are what keeps the text's experts in GPU memory: kept as they are.
+  - hc_post_dot reading fn once for a block of tokens (staged in LDS) instead of a block a token: the same bits, and
+    slower - drafted 30.6 / 30.6 against 30.9 / 30.8, plain 15.5 against 15.8 (~/bench/v032/hcdot). alone, at the
+    decode's shapes (40 layers' fn in turn, so none stays cached): 5 tokens 30.0 us a block a token, 30.7 - 47.3 the
+    staged ones (1 - 8 tokens a block). a token's blocks after the first read fn from the cache, not memory: the
+    re-reads cost little, and the staging's barriers and serial sums more.
 
 ## open questions
 
