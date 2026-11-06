@@ -165,6 +165,8 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
   if (!f)
     return q4x_fail(err, "out of memory"), NULL;
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens;
+  if (!q4x_rope((uint32_t)w->geo.rope_dim, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))
+    return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), free(f), NULL;
   if (!upload(w->model, &f->dev, err) || !buffers(f, err) ||
       (mtp && (!upload(mtp->model, &f->mtp_dev, err) || !mtp_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;

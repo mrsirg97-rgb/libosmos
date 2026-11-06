@@ -1,6 +1,7 @@
 // QSA's indexer (include/osmos/gpu/q4x_ops.h, q4x_ix_*; DESIGN.md, "QSA"): its query's norm and rotation, the keys'
 // blocks pooled, a token's scores against them and its top blocks - llama.cpp's build_qsa_sel in its order mode
 #include "block.h"
+#include "rope.h"
 
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
@@ -17,38 +18,37 @@ constexpr uint64_t kScoreBudget = 4u << 20;  // the scratch's scores at least: a
 inline hipStream_t st(void* s) { return (hipStream_t) s; }
 inline bool ok() { return hipGetLastError() == hipSuccess; }
 
-// a block of kDim threads, x its value d: x normed (its L2 over the block) times w, then its first rope_dim rotated in
-// pairs (i, i + rope_dim / 2) at angle pos theta_i - q4x_qk's rotation, the running product ggml's rope cache builds
-__device__ float norm_rope(float x, const float* w, float eps, float pos, uint32_t rope_dim, float theta_scale) {
+// a block of kDim threads, x its value d: x normed (its L2 over the block) times w, then its first rope.dim rotated in
+// pairs (i, i + dim / 2) at position pos - q4x_qk's rotation (rope_cs: the running product, YaRN's where it has it)
+__device__ float norm_rope(float x, const float* w, float eps, float pos, const Q4xRope& rope) {
   __shared__ float lds[kDim], y[kDim];
   const uint32_t d = threadIdx.x;
   const float r = 1.0f / sqrtf(block_sum<kDim>(x * x, lds) / (float) kDim + eps);
   y[d] = x * r * w[d];
   __syncthreads();
   float v = y[d];
-  const uint32_t half = rope_dim / 2;
-  if (d < rope_dim) {
+  const uint32_t half = rope.dim / 2;
+  if (d < rope.dim) {
     const uint32_t i = d % half;
-    float theta = pos;
-    for (uint32_t j = 0; j < i; j++) theta *= theta_scale;
-    const float c = cosf(theta), s = sinf(theta), x0 = y[i], x1 = y[i + half];
+    float c, s;
+    rope_cs(rope, pos, i, &c, &s);
+    const float x0 = y[i], x1 = y[i + half];
     v = d < half ? x0 * c - x1 * s : x0 * s + x1 * c;
   }
   return v;
 }
 
 // a block a (head, token)
-__global__ __launch_bounds__(kDim) void ix_q_kernel(const float* x, uint32_t heads, uint32_t rope_dim, const float* w,
-                                                    float eps, int32_t pos0, float theta_scale, float* q) {
+__global__ __launch_bounds__(kDim) void ix_q_kernel(const float* x, uint32_t heads, Q4xRope rope, const float* w,
+                                                    float eps, int32_t pos0, float* q) {
   const uint64_t i = ((uint64_t) blockIdx.y * heads + blockIdx.x) * kDim + threadIdx.x;
-  q[i] = norm_rope(x[i], w, eps, (float) (pos0 + (int32_t) blockIdx.y), rope_dim, theta_scale);
+  q[i] = norm_rope(x[i], w, eps, (float) (pos0 + (int32_t) blockIdx.y), rope);
 }
 
 // a block a pooled block j0 + blockIdx.x: its members summed in order, times 1 / ratio, normed and rotated at its first
 __global__ __launch_bounds__(kDim) void ix_pool_kernel(const float* raw, int32_t pos0, uint32_t ratio,
                                                        const float* ring, uint32_t ring_rows, uint32_t j0,
-                                                       uint32_t rope_dim, const float* w, float eps,
-                                                       float theta_scale, float* pooled) {
+                                                       Q4xRope rope, const float* w, float eps, float* pooled) {
   const uint32_t j = j0 + blockIdx.x, d = threadIdx.x;
   float sum = 0.0f;
   for (uint32_t m = 0; m < ratio; m++) {
@@ -56,7 +56,7 @@ __global__ __launch_bounds__(kDim) void ix_pool_kernel(const float* raw, int32_t
     sum += p < pos0 ? ring[(uint64_t) (p % ring_rows) * kDim + d] : raw[(uint64_t) (p - pos0) * kDim + d];
   }
   const float mean = sum * (1.0f / (float) ratio);
-  pooled[(uint64_t) j * kDim + d] = norm_rope(mean, w, eps, (float) (ratio * j), rope_dim, theta_scale);
+  pooled[(uint64_t) j * kDim + d] = norm_rope(mean, w, eps, (float) (ratio * j), rope);
 }
 
 // a block a step's token t0 + blockIdx.x: its raw key into the ring
@@ -170,25 +170,24 @@ __global__ __launch_bounds__(kPick) void ix_pick_kernel(const float* score, int3
 
 }  // namespace
 
-extern "C" bool q4x_ix_q(const float* x, uint32_t n_tok, uint32_t heads, uint32_t rope_dim, const float* norm,
-                         float eps, int32_t pos0, float rope_base, float* q, void* stream) {
-  if (!x || !norm || !q || !n_tok || !heads || !rope_dim || rope_dim > kDim || rope_dim % 2 || pos0 < 0) return false;
-  const float theta_scale = powf(rope_base, -2.0f / (float) rope_dim);
-  ix_q_kernel<<<dim3(heads, n_tok), kDim, 0, st(stream)>>>(x, heads, rope_dim, norm, eps, pos0, theta_scale, q);
+// a rotation the indexer's head takes: its dims within the head, pairs whole
+static bool rope_ok(const Q4xRope* r) { return r && r->dim && r->dim <= (uint32_t) kDim && r->dim % 2 == 0; }
+
+extern "C" bool q4x_ix_q(const float* x, uint32_t n_tok, uint32_t heads, const Q4xRope* rope, const float* norm,
+                         float eps, int32_t pos0, float* q, void* stream) {
+  if (!x || !norm || !q || !n_tok || !heads || !rope_ok(rope) || pos0 < 0) return false;
+  ix_q_kernel<<<dim3(heads, n_tok), kDim, 0, st(stream)>>>(x, heads, *rope, norm, eps, pos0, q);
   return ok();
 }
 
 extern "C" bool q4x_ix_pool(const float* raw, uint32_t n_tok, int32_t pos0, uint32_t ratio, float* ring,
-                            uint32_t ring_rows, uint32_t rope_dim, const float* norm, float eps, float rope_base,
-                            float* pooled, void* stream) {
-  if (!raw || !ring || !norm || !pooled || !n_tok || ratio < 2 || ring_rows < ratio - 1 || !rope_dim ||
-      rope_dim > kDim || rope_dim % 2 || pos0 < 0)
+                            uint32_t ring_rows, const Q4xRope* rope, const float* norm, float eps, float* pooled,
+                            void* stream) {
+  if (!raw || !ring || !norm || !pooled || !n_tok || ratio < 2 || ring_rows < ratio - 1 || !rope_ok(rope) || pos0 < 0)
     return false;
-  const float theta_scale = powf(rope_base, -2.0f / (float) rope_dim);
   const uint32_t j0 = (uint32_t) pos0 / ratio, j1 = ((uint32_t) pos0 + n_tok) / ratio;  // the blocks it completes
   if (j1 > j0) {
-    ix_pool_kernel<<<j1 - j0, kDim, 0, st(stream)>>>(raw, pos0, ratio, ring, ring_rows, j0, rope_dim, norm, eps,
-                                                      theta_scale, pooled);
+    ix_pool_kernel<<<j1 - j0, kDim, 0, st(stream)>>>(raw, pos0, ratio, ring, ring_rows, j0, *rope, norm, eps, pooled);
     if (!ok()) return false;
   }
   const uint32_t t0 = n_tok > ring_rows ? n_tok - ring_rows : 0;

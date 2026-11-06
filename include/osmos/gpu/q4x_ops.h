@@ -14,11 +14,10 @@ typedef struct Q4xX16
   uint32_t row0; /* the op's first row in x16: a step's sequence's (q4x_step), its tokens' first */
 } Q4xX16;
 
-/* a token's keys the dense attention takes: the model's native context (qwen4exp.context_length) - no kernel limit
-   (chunks of 128 merged, the scratch a piece's), a context's: its Q8_0 cache ~13 KB a token a sequence, its decode
-   reading the cache's whole (an 8,192-token perplexity 2.7136 dense, llama.cpp's sparse QSA 2.7193: dense past QSA's
-   2,048-token budget holds) */
-#define OPS_Q4X_MAX_KEYS 262144
+/* a context's most keys: four times the model's native 262,144 (YaRN's factor 4, the model card's for 1M; q4x_rope)
+   - no kernel limit (QSA's picks a token's 2,051 keys at most), a context's: its Q8_0 cache ~13 KB a token a sequence
+   (1M: ~13.6 GB), its pooled keys ~1.5 KB */
+#define OPS_Q4X_MAX_KEYS 1048576
 
 /* Qwen3.8-Flash-Next's own steps (DESIGN.md, "Qwen's forward, op by op"), F32 on the GPU, queued on `stream` */
 
@@ -44,9 +43,21 @@ bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_t
 bool q4x_top(const float *logits, uint32_t n, uint32_t rows, uint32_t stride, int32_t *id, float *p, void *stream);
 bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out, void *stream);
 
+/* a rotation (q4x_rope): its dims (a head's first), its angles' step, and YaRN's - none: ext_factor 0, freq_scale and
+   mscale 1 (the plain rotation's bits) */
+typedef struct Q4xRope
+{
+  uint32_t dim;
+  float theta_scale;      /* base^(-2 / dim): theta_i a running product of it */
+  float freq_scale;       /* YaRN's 1 / factor */
+  float ext_factor;       /* YaRN's extrapolation mix */
+  float corr_lo, corr_hi; /* its ramp: the correction dims */
+  float mscale;           /* a rotated pair's magnitude: 1 + 0.1 ln(factor) */
+} Q4xRope;
+bool q4x_rope(uint32_t dim, float base, uint32_t native_ctx, uint32_t ctx, Q4xRope *rope);
 bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
-            uint32_t rope_dim, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float rope_base,
-            float *q, float *gate, float *k_out, void *stream);
+            const Q4xRope *rope, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float *q,
+            float *gate, float *k_out, void *stream);
 #define Q4X_KV_BLOCK 32       /* the cache's Q8_0: 32 values a block */
 #define Q4X_KV_BLOCK_BYTES 34 /* its f16 scale, then 32 int8 */
 uint64_t q4x_kv_row_bytes(uint32_t values);
@@ -64,10 +75,10 @@ bool q4x_attn(const float *q, const void *kc, const void *vc, uint32_t n_tok, ui
               const Q4xX16 *side, void *stream);
 
 #define Q4X_IX_DIM 128 /* an indexer head's dim (qwen4exp.attention.indexer.key_length) */
-bool q4x_ix_q(const float *x, uint32_t n_tok, uint32_t heads, uint32_t rope_dim, const float *norm, float eps,
-              int32_t pos0, float rope_base, float *q, void *stream);
+bool q4x_ix_q(const float *x, uint32_t n_tok, uint32_t heads, const Q4xRope *rope, const float *norm, float eps,
+              int32_t pos0, float *q, void *stream);
 bool q4x_ix_pool(const float *raw, uint32_t n_tok, int32_t pos0, uint32_t ratio, float *ring, uint32_t ring_rows,
-                 uint32_t rope_dim, const float *norm, float eps, float rope_base, float *pooled, void *stream);
+                 const Q4xRope *rope, const float *norm, float eps, float *pooled, void *stream);
 uint64_t q4x_ix_scratch(uint32_t max_ctx, uint32_t ratio);
 bool q4x_ix_pick(const float *q, const float *pooled, uint32_t n_tok, uint32_t heads, int32_t pos0, uint32_t ratio,
                  uint32_t blocks, float *scratch, uint64_t scratch_floats, int32_t *sel, int32_t *npick, void *stream);
@@ -174,11 +185,18 @@ q4x_join
 
 the sparse attention (a layer's; one sequence's tokens at positions pos0, pos0 + 1, ...):
 
+q4x_rope
+  the rotation of a context of ctx positions: plain at or below the model's native_ctx; past it the model card's
+  static YaRN at factor ctx / native_ctx (llama.cpp's: ext_factor 1, beta_fast 32 and beta_slow 1 its correction
+  dims, ggml_rope_yarn_corr_dims' floor and ceil, mscale 1 + 0.1 ln(factor)) - a pair's angle theta's interpolation
+  (freq_scale theta) and theta mixed by the ramp 1 - clamp((i - lo) / max(0.001, hi - lo), 0, 1), its cos and sin
+  times mscale. false for a dim not even, no native context, or ctx past 64 times it.
+
 q4x_qk
   qfull a token's attn_q: each head's q (dim) then its gate (dim), head after head. q[t][h] = rope(rms_norm(q) q_norm),
   gate[t][h] its gate; k_out[t][g] = rope(rms_norm(k[t][g]) k_norm) (k_out may be a cache's row pos0). rope: the first
-  rope_dim of a head, pairs (i, i + rope_dim / 2), angle (pos0 + t) theta_i, theta_i = rope_base^(-2i / rope_dim) as
-  ggml builds it (a running product); IMRoPE's sections all the token's position (text) - this rotation. heads 0: the
+  rope->dim of a head, pairs (i, i + dim / 2), angle (pos0 + t) theta_i, theta_i = theta_scale^i as ggml builds it (a
+  running product; YaRN's as q4x_rope says); IMRoPE's sections all the token's position (text) - this rotation. heads 0: the
   keys alone (qfull, q and gate unread: the MTP head's cache seeding).
 
 q4x_kv_row_bytes, q4x_kv_put
@@ -203,7 +221,7 @@ a token's keys its top `blocks` of them by score and its tail.
 
 q4x_ix_q
   x[t][h] (heads of Q4X_IX_DIM: index_q_proj's) to q[t][h] = rope(rms_norm(x[t][h]) norm) at position pos0 + t - the
-  rotation q4x_qk's (its first rope_dim, the same angles).
+  rotation q4x_qk's (its first rope->dim, the same angles: YaRN's too).
 
 q4x_ix_pool
   raw[t] (Q4X_IX_DIM: index_k_proj's, neither normed nor rotated) the raw keys of positions pos0 + t: each block j

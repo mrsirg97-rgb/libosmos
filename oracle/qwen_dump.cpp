@@ -7,6 +7,8 @@
 //   qwen_dump <first shard> <text file> <tokens> <out dir> <name,name,...>
 //   qwen_dump <first shard> <text file> <tokens> <out dir> -ppl    (no tensors: the perplexity of the tokens, one
 //   QWEN_DUMP_KV=q8_0: the cache in Q8_0 (keys and values; flash attention), as osmos keeps it
+//   QWEN_DUMP_YARN=f: YaRN, factor f over the native context (the model card's static YaRN, original 262,144)
+//   QWEN_DUMP_POS0=p: the tokens at positions p, p + 1, ... (a long context's rotation without its cache)
 //   QWEN_DUMP_LAYER=l: layer l's tensors alone (and those of no layer); I32 ones (indexer_top_k) as F32, exact
 //        sequence, each next token scored by log-softmax in double - tools/bench/q4x_ppl's protocol)
 //
@@ -117,11 +119,16 @@ int main(int argc, char** argv) {
   else cp.cb_eval = dump, cp.cb_eval_user_data = &want;
   if (const char* kv = std::getenv("QWEN_DUMP_KV"); kv && !std::strcmp(kv, "q8_0")) /* osmos's cache: llama.cpp's on it */
     cp.type_k = cp.type_v = GGML_TYPE_Q8_0, cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+  if (const char* f = std::getenv("QWEN_DUMP_YARN")) /* static YaRN: llama.cpp's own ext / attn factors for it */
+    cp.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN, cp.rope_freq_scale = 1.0f / (float) std::atof(f),
+    cp.yarn_orig_ctx = 262144;
+  const int pos0 = std::getenv("QWEN_DUMP_POS0") ? std::atoi(std::getenv("QWEN_DUMP_POS0")) : 0;
+  if (pos0) cp.n_ctx = (uint32_t) (pos0 + n_tok + 64);
   llama_context* ctx = llama_init_from_model(model, cp);
   if (!ctx) return std::fprintf(stderr, "qwen_dump: no context\n"), 1;
   llama_batch b = llama_batch_init(n_tok, 0, 1);
   for (int i = 0; i < n_tok; i++) {
-    b.token[i] = ids[i], b.pos[i] = i, b.n_seq_id[i] = 1, b.seq_id[i][0] = 0, b.logits[i] = true;
+    b.token[i] = ids[i], b.pos[i] = pos0 + i, b.n_seq_id[i] = 1, b.seq_id[i][0] = 0, b.logits[i] = true;
   }
   b.n_tokens = n_tok;
   if (llama_decode(ctx, b) != 0) return std::fprintf(stderr, "qwen_dump: decode failed\n"), 1;

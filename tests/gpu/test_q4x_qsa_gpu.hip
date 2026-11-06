@@ -22,7 +22,14 @@ constexpr uint32_t kTok = 3000, kDim = 2560, kIxH = 4, kIx = Q4X_IX_DIM, kR = 4,
 constexpr uint32_t kRope = 64, kRing = kR - 1 + 8, kHeads = 24, kKv = 2, kHead = 256, kQ = kHeads * kHead,
                    kKvW = kKv * kHead, kPools = kTok / kR;
 constexpr float kEps = 1e-6f, kBase = 1e7f;
-constexpr uint32_t kSteps[] = {1000, 999, 1, 1000};  // a prompt's pieces: one past a block, one ending inside one
+constexpr uint32_t kSteps[] = {1000, 999, 1, 1000};
+
+// the plain rotation (the native context: no YaRN)
+static Q4xRope plain_rope() {
+  Q4xRope r;
+  CHECK(q4x_rope(kRope, kBase, 262144, 262144, &r));
+  return r;
+}  // a prompt's pieces: one past a block, one ending inside one
 
 static std::vector<int32_t> ints_of(const int32_t* d, size_t n) {
   std::vector<int32_t> h(n);
@@ -35,18 +42,18 @@ static uint32_t visible(uint32_t t) { return (t + 1) / kR; }
 // the pooled keys of the dump's raw keys: in one call, then in pieces through the ring - the same bits
 static float* pooled_of(const Ref& raw, const float* norm) {
   float *dr = dev_from(raw.v), *ring = dev_alloc<float>(kRing * kIx), *one = dev_alloc<float>((size_t) kPools * kIx);
-  CHECK(q4x_ix_pool(dr, kTok, 0, kR, ring, kRing, kRope, norm, kEps, kBase, one, nullptr));
+  const Q4xRope rope = plain_rope();
+  CHECK(q4x_ix_pool(dr, kTok, 0, kR, ring, kRing, &rope, norm, kEps, one, nullptr));
   const std::vector<float> whole = host_of(one, (size_t) kPools * kIx);
   float* parts = dev_alloc<float>((size_t) kPools * kIx);
   uint32_t at = 0;
   for (uint32_t n : kSteps) {
-    CHECK(q4x_ix_pool(dr + (size_t) at * kIx, n, (int32_t) at, kR, ring, kRing, kRope, norm, kEps, kBase, parts,
-                      nullptr));
+    CHECK(q4x_ix_pool(dr + (size_t) at * kIx, n, (int32_t) at, kR, ring, kRing, &rope, norm, kEps, parts, nullptr));
     at += n;
   }
   CHECK(std::memcmp(host_of(parts, whole.size()).data(), whole.data(), whole.size() * 4) == 0);
   std::printf("  pooled in pieces (1000 + 999 + 1 + 1000, through the ring): the bits of one call\n");
-  CHECK(!q4x_ix_pool(dr, kTok, 0, kR, ring, kR - 2, kRope, norm, kEps, kBase, one, nullptr));  // a ring too short
+  CHECK(!q4x_ix_pool(dr, kTok, 0, kR, ring, kR - 2, &rope, norm, kEps, one, nullptr));  // a ring too short
   return one;
 }
 
@@ -160,9 +167,12 @@ int main() {
   CHECK(mv_strided(tik->type, wik, kIx, kDim, hm, kDim, kTok, ikr, kIx, nullptr));
   CHECK(mv_strided(tiq->type, wiq, kIxH * kIx, kDim, hm, kDim, kTok, iqr, kIxH * kIx, nullptr));
   held("indexer k raw (BF16 projection)", host_of(ikr, (size_t) kTok * kIx), raw);
-  CHECK(q4x_ix_q(iqr, kTok, kIxH, kRope, qn, kEps, 0, kBase, iq, nullptr));
+  const Q4xRope rope = plain_rope();
+  CHECK(q4x_ix_q(iqr, kTok, kIxH, &rope, qn, kEps, 0, iq, nullptr));
   held("indexer q normed, rotated", host_of(iq, (size_t) kTok * kIxH * kIx), lq);
-  CHECK(!q4x_ix_q(iqr, kTok, kIxH, kIx + 2, qn, kEps, 0, kBase, iq, nullptr));  // a rotation past the head
+  Q4xRope wide = rope;
+  wide.dim = kIx + 2;
+  CHECK(!q4x_ix_q(iqr, kTok, kIxH, &wide, qn, kEps, 0, iq, nullptr));  // a rotation past the head
 
   // the pooled keys from llama.cpp's raw keys
   float* pooled = pooled_of(raw, kn);

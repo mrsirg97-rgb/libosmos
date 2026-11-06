@@ -1,6 +1,7 @@
 // Qwen3.8-Flash-Next's attention (include/osmos/gpu/q4x_ops.h): q's and k's norm and rotation, and the gated
 // attention over the cache - each token's keys its key list: every position, or QSA's picks (q4x_qsa.hip)
 #include "block.h"
+#include "rope.h"
 #include "x16side.h"
 
 extern "C" {
@@ -17,9 +18,9 @@ inline bool ok() { return hipGetLastError() == hipSuccess; }
 // a block a (head, token): blockIdx.x < heads a q head (its gate copied out), past them a KV head. the norm, then
 // the first rope_dim rotated in pairs (i, i + rope_dim / 2), theta_i a running product as ggml's rope cache builds it
 __global__ __launch_bounds__(kHead) void qk_kernel(const float* qfull, const float* k, uint32_t heads,
-                                                   uint32_t kv_heads, uint32_t rope_dim, const float* q_norm,
-                                                   const float* k_norm, float eps, int32_t pos0, float theta_scale,
-                                                   float* q, float* gate, float* k_out) {
+                                                   uint32_t kv_heads, Q4xRope rope, const float* q_norm,
+                                                   const float* k_norm, float eps, int32_t pos0, float* q, float* gate,
+                                                   float* k_out) {
   __shared__ float lds[kHead], y[kHead];
   const uint32_t h = blockIdx.x, t = blockIdx.y, d = threadIdx.x;
   const bool is_q = h < heads;
@@ -36,12 +37,12 @@ __global__ __launch_bounds__(kHead) void qk_kernel(const float* qfull, const flo
   y[d] = x * r * (is_q ? q_norm : k_norm)[d];
   __syncthreads();
   float v = y[d];
-  const uint32_t half = rope_dim / 2;
-  if (d < rope_dim) {
+  const uint32_t half = rope.dim / 2;
+  if (d < rope.dim) {
     const uint32_t i = d % half;
-    float theta = (float) (pos0 + (int32_t) t);
-    for (uint32_t j = 0; j < i; j++) theta *= theta_scale;
-    const float c = cosf(theta), s = sinf(theta), x0 = y[i], x1 = y[i + half];
+    float c, s;
+    rope_cs(rope, (float) (pos0 + (int32_t) t), i, &c, &s);
+    const float x0 = y[i], x1 = y[i + half];
     v = d < half ? x0 * c - x1 * s : x0 * s + x1 * c;
   }
   if (is_q)
@@ -255,15 +256,30 @@ __global__ __launch_bounds__(kHead) void fa_merge_kernel(const float* ml, const 
 
 }  // namespace
 
-extern "C" bool q4x_qk(const float* qfull, const float* k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-                       uint32_t dim, uint32_t rope_dim, const float* q_norm, const float* k_norm, float eps,
-                       int32_t pos0, float rope_base, float* q, float* gate, float* k_out, void* stream) {
-  if ((heads && (!qfull || !q || !gate)) || !k || !q_norm || !k_norm || !k_out || !n_tok || !kv_heads || dim != kHead ||
-      !rope_dim || rope_dim > dim || rope_dim % 2 || pos0 < 0)
+extern "C" bool q4x_rope(uint32_t dim, float base, uint32_t native_ctx, uint32_t ctx, Q4xRope* rope) {
+  if (!rope || !dim || dim % 2 || !native_ctx || !ctx || (uint64_t) ctx > 64ull * native_ctx || !(base > 1.0f))
     return false;
-  const float theta_scale = powf(rope_base, -2.0f / (float) rope_dim);
-  qk_kernel<<<dim3(heads + kv_heads, n_tok), kHead, 0, st(stream)>>>(qfull, k, heads, kv_heads, rope_dim, q_norm,
-                                                                     k_norm, eps, pos0, theta_scale, q, gate, k_out);
+  *rope = Q4xRope{dim, powf(base, -2.0f / (float) dim), 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+  if (ctx <= native_ctx) return true;  // the plain rotation
+  // the model card's static YaRN, llama.cpp's for it: ext 1, beta_fast 32 / beta_slow 1 (ggml_rope_yarn_corr_dims)
+  const float factor = (float) ctx / (float) native_ctx;
+  const auto corr = [&](float beta) {
+    return (float) dim * logf((float) native_ctx / (beta * 2.0f * (float) M_PI)) / (2.0f * logf(base));
+  };
+  rope->freq_scale = 1.0f / factor, rope->ext_factor = 1.0f;
+  rope->corr_lo = fmaxf(0.0f, floorf(corr(32.0f))), rope->corr_hi = fminf((float) (dim - 1), ceilf(corr(1.0f)));
+  rope->mscale = 1.0f + 0.1f * logf(1.0f / rope->freq_scale);
+  return true;
+}
+
+extern "C" bool q4x_qk(const float* qfull, const float* k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
+                       uint32_t dim, const Q4xRope* rope, const float* q_norm, const float* k_norm, float eps,
+                       int32_t pos0, float* q, float* gate, float* k_out, void* stream) {
+  if ((heads && (!qfull || !q || !gate)) || !k || !rope || !q_norm || !k_norm || !k_out || !n_tok || !kv_heads ||
+      dim != kHead || !rope->dim || rope->dim > dim || rope->dim % 2 || pos0 < 0)
+    return false;
+  qk_kernel<<<dim3(heads + kv_heads, n_tok), kHead, 0, st(stream)>>>(qfull, k, heads, kv_heads, *rope, q_norm, k_norm,
+                                                                     eps, pos0, q, gate, k_out);
   return ok();
 }
 
