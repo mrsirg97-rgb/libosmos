@@ -1,0 +1,154 @@
+// Qwen3.8-Flash-Next behind the engine interface (osmos/run/engine.h): its facts; the options and extras it refuses;
+// a batch of two sequences' tokens the bits of each sequence run alone (and of the forward called directly); a
+// batch whose sequence's tokens are not consecutive refused; greedy over a batch's rows; a sequence saved and loaded
+// going on as the original, a damaged or a short state refused (the sequence then empty: it computes as a fresh
+// one); no rollback reach, no drafter. needs a gfx1151, the UD-IQ3_XXS set (~78 GB of GPU memory) and the dump's ids; skipped (77) without them.
+#include <algorithm>
+
+#include "q4x_ref.h"
+
+extern "C" {
+#include "osmos/gpu/q4x_ops.h"
+#include "osmos/model/fnv.h"
+#include "osmos/run/engine.h"
+}
+
+constexpr uint32_t kCtx = 4096, kStep = 256;
+constexpr uint32_t kA = 40, kB = 24, kSaved = 100;  // a batch's two sequences' tokens; a saved sequence's
+constexpr size_t kStatePos = 16;  // the state header's position: after its magic, version (4 bytes each) and identity
+
+static std::vector<int32_t> dump_ids() {
+  FILE* f = std::fopen((home_path(kQwenDump) + "/ids.txt").c_str(), "r");
+  std::vector<int32_t> v;
+  for (int32_t x; f && std::fscanf(f, "%d,", &x) == 1;) v.push_back(x);
+  if (f) std::fclose(f);
+  return v;
+}
+
+static std::vector<float> rows(const Osmos* e, uint32_t row0, uint32_t n, uint32_t vocab) {
+  std::vector<float> out((size_t) n * vocab);
+  for (uint32_t r = 0; r < n; r++) {
+    const float* l = osmos_logits(e, row0 + r);
+    CHECK(l && hipMemcpy(&out[(size_t) r * vocab], l, vocab * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  }
+  return out;
+}
+
+int main() {
+  std::printf("[test_engine_q4x_gpu] start\n");
+  const std::string first = home_path(kQwenFirst);
+  const std::vector<int32_t> ids = dump_ids();
+  int ndev = 0;
+  if (access(first.c_str(), R_OK) || ids.size() < kSaved + 1 || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
+    std::printf("[test_engine_q4x_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its dump's ids or a GPU\n");
+    return 77;
+  }
+  char err[OSMOS_ERR] = "";
+
+  // the facts, and the extras it has no use for
+  const OsmosFiles table = {first.c_str(), first.c_str(), nullptr}, overlay = {first.c_str(), nullptr, first.c_str()};
+  CHECK(!osmos_open(&table, err) && err[0]);
+  CHECK(!osmos_open(&overlay, err) && err[0]);
+  const OsmosFiles files = {first.c_str(), nullptr, nullptr};
+  OsmosModel* m = osmos_open(&files, err);
+  if (!m) std::fprintf(stderr, "  %s\n", err);
+  CHECK(m);
+  const OsmosFacts fx = osmos_facts(m);
+  CHECK(!std::strcmp(fx.family, "qwen4exp") && fx.vocab == 248320 && fx.native_ctx == 262144 && !fx.seed_window &&
+        !fx.streams);
+  CHECK(fx.round_tokens == (512 - 1) / 10);  // a decode round's tokens: under every expert's read (512 of them, 10 a token)
+  const uint32_t V = fx.vocab;
+
+  // the options it refuses: a budget, picks, a drafter, no_guess, a context past the dense attention's
+  const OsmosOptions bad[] = {{kCtx, kStep, 1ull << 30, nullptr, false, nullptr},
+                              {kCtx, kStep, 0, "/tmp/picks", false, nullptr},
+                              {kCtx, kStep, 0, nullptr, false, "/tmp/drafter"},
+                              {kCtx, kStep, 0, nullptr, true, nullptr},
+                              {OPS_Q4X_MAX_KEYS + 1, kStep, 0, nullptr, false, nullptr}};
+  for (const OsmosOptions& o : bad) CHECK(!osmos_create(m, &o, err) && err[0]);
+  const OsmosOptions o = {kCtx, kStep, 0, nullptr, false, nullptr};
+  Osmos* e = osmos_create(m, &o, err);
+  if (!e) std::fprintf(stderr, "  %s\n", err);
+  CHECK(e);
+  uint64_t room = 0;
+  CHECK(osmos_room(e, &room) && room > 0 && osmos_identity(e) != 0 && osmos_block(e) == 0);
+
+  // each sequence alone: its tokens' logits
+  OsmosSeq* a = oseq_create(e, err);
+  OsmosSeq* b = oseq_create(e, err);
+  CHECK(a && b);
+  std::vector<OsmosSeq*> sa(kA, a), sb(kB, b);
+  CHECK(osmos_batch(e, sa.data(), ids.data(), kA, err));
+  const std::vector<float> alone_a = rows(e, 0, kA, V);
+  CHECK(osmos_batch(e, sb.data(), ids.data() + kA, kB, err));
+  const std::vector<float> alone_b = rows(e, 0, kB, V);
+  oseq_destroy(a), oseq_destroy(b);
+
+  // the two in one batch: the same bits, row for row
+  a = oseq_create(e, err), b = oseq_create(e, err);
+  std::vector<OsmosSeq*> both(sa.begin(), sa.end());
+  for (uint32_t i = 0; i < kB; i++) both.push_back(b);
+  for (uint32_t i = 0; i < kA; i++) both[i] = a;
+  std::vector<int32_t> toks(ids.begin(), ids.begin() + kA + kB);
+  CHECK(osmos_batch(e, both.data(), toks.data(), kA + kB, err));
+  CHECK(rows(e, 0, kA, V) == alone_a && rows(e, kA, kB, V) == alone_b);
+  CHECK(oseq_position(a) == (int32_t) kA && oseq_position(b) == (int32_t) kB);
+  std::vector<int32_t> picks(kA + kB);
+  CHECK(osmos_greedy(e, 0, kA + kB, picks.data(), err));
+  for (uint32_t r = 0; r < kA + kB; r++) {
+    const float* l = &(r < kA ? alone_a : alone_b)[(size_t) (r < kA ? r : r - kA) * V];
+    CHECK(picks[r] == (int32_t) (std::max_element(l, l + V) - l));
+  }
+  CHECK(!osmos_logits(e, kA + kB) && !osmos_greedy(e, kA + kB - 1, 2, picks.data(), err));
+  std::printf("  two sequences in one batch: each one's logits the bits of it alone, greedy their greatest\n");
+
+  // a sequence's tokens not consecutive: refused, no sequence moved
+  OsmosSeq* split[3] = {a, b, a};
+  CHECK(!osmos_batch(e, split, ids.data(), 3, err) && err[0]);
+  CHECK(oseq_position(a) == (int32_t) kA && oseq_position(b) == (int32_t) kB);
+
+  // no rollback reach, no drafter
+  CHECK(oseq_reach(a) == 0 && oseq_rollback(a, 0) && !oseq_rollback(a, 1) && oseq_prompt(a, kA));
+  int32_t drafts[OSMOS_MAX_BLOCK];
+  float conf[OSMOS_MAX_BLOCK];
+  CHECK(!oseq_seed(a, 0, 1, err) && oseq_draft(a, ids[0], 0.1f, 0.1f, drafts, conf, err) < 0);
+  oseq_destroy(a), oseq_destroy(b);
+
+  // saved and loaded: the loaded one goes on as the original, bit for bit
+  OsmosSeq* s = oseq_create(e, err);
+  OsmosSeq* c = oseq_create(e, err);
+  CHECK(s && c);
+  std::vector<OsmosSeq*> ss(kSaved, s);
+  CHECK(osmos_batch(e, ss.data(), ids.data(), kSaved, err));
+  const uint64_t bytes = oseq_state_bytes(s);
+  std::vector<uint8_t> st(bytes);
+  CHECK(bytes > 0 && oseq_save(s, st.data(), bytes, err));
+  CHECK(!oseq_save(s, st.data(), bytes - 1, err));
+  CHECK(oseq_load(c, st.data(), bytes, err) && oseq_position(c) == (int32_t) kSaved);
+  CHECK(osmos_batch(e, &s, &ids[kSaved], 1, err));
+  const std::vector<float> next_s = rows(e, 0, 1, V);
+  CHECK(osmos_batch(e, &c, &ids[kSaved], 1, err));
+  CHECK(rows(e, 0, 1, V) == next_s);
+  std::printf("  a sequence saved (%.1f MB) and loaded goes on as the original, bit for bit\n", bytes / 1e6);
+
+  // damaged, short, of another position's size: refused, the sequence then empty
+  std::vector<uint8_t> bad_st = st;
+  bad_st[bytes / 2] ^= 1;
+  CHECK(!oseq_load(c, bad_st.data(), bytes, err) && oseq_position(c) == 0);
+  CHECK(!oseq_load(c, st.data(), bytes - 8, err) && oseq_position(c) == 0);
+  std::vector<uint8_t> forged = st;  // another position in its header, its checksum made good: not that size
+  int32_t pos;
+  std::memcpy(&pos, &forged[kStatePos], 4), pos -= 1, std::memcpy(&forged[kStatePos], &pos, 4);
+  const uint64_t sum = fnv(forged.data(), bytes - 8, FNV_SEED);
+  std::memcpy(&forged[bytes - 8], &sum, 8);
+  CHECK(!oseq_load(c, forged.data(), bytes, err) && oseq_position(c) == 0);
+  std::vector<OsmosSeq*> sc(kA, c);  // empty indeed: its states a fresh sequence's
+  CHECK(osmos_batch(e, sc.data(), ids.data(), kA, err) && rows(e, 0, kA, V) == alone_a);
+  CHECK(oseq_load(c, st.data(), bytes, err) && oseq_position(c) == (int32_t) kSaved);
+  oseq_destroy(s), oseq_destroy(c);
+
+  osmos_destroy(e);
+  osmos_close(m);
+  std::printf("[test_engine_q4x_gpu] ok\n");
+  return 0;
+}

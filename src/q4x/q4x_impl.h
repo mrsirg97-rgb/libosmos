@@ -45,6 +45,16 @@ struct Q4xSeq
   int n_last;
 };
 
+/* a sequence's buffers' bytes: a DeltaNet layer's state and conv history, an attention cache's row, the n-gram
+   layer's conv history */
+typedef struct Q4xSeqBytes
+{
+  uint64_t ssm, conv, kv_row, ple;
+} Q4xSeqBytes;
+
+Q4xSeqBytes q4x_seq_bytes(const Q4xGeometry *g);
+bool q4x_seq_reset(Q4xSeq *s); /* hip_state.c: empty, position 0 (its recurrent states and histories zeroed) */
+
 bool q4x_fail(char *err, const char *why);
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);
 void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint64_t n);

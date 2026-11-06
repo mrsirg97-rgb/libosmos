@@ -32,6 +32,7 @@ typedef struct OsmosFacts
   uint32_t native_ctx;    /* the model's own longest context */
   uint32_t round_tokens;  /* a decode step's most tokens: past it, a prompt's step */
   uint32_t seed_window;   /* the positions a drafter's seed reads back from a prompt's end */
+  bool streams;           /* experts streamed under a budget (sized to the GPU); false: every weight resident */
 } OsmosFacts;
 
 typedef struct OsmosOptions
@@ -96,8 +97,9 @@ osmos_open
   built from it.
 
 osmos_facts
-  the family, its vocabulary, its native context, a decode step's most tokens and a drafter seed's window: the
-  server's sizing, known before a build.
+  the family, its vocabulary, its native context, a decode step's most tokens, a drafter seed's window and whether
+  its experts stream under a budget: the server's sizing, known before a build (a family that does not stream builds
+  once, its budget 0).
 
 osmos_create
   the forward built from the model: its GPU memory, its resident set (picks ranked, else the family's order), its

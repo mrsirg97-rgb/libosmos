@@ -20,8 +20,12 @@ void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
 Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR]);
 void q4x_seq_destroy(Q4xSeq *s);
 int32_t q4x_seq_position(const Q4xSeq *s);
+uint64_t q4x_identity(const Q4xForward *f);
+uint64_t q4x_seq_state_bytes(const Q4xSeq *s);
+bool q4x_seq_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR]);
+bool q4x_seq_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ERR]);
 
-bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, char err[Q4X_FWD_ERR]);
+bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[Q4X_FWD_ERR]);
 const float *q4x_logits(const Q4xForward *f);
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR]);
 
@@ -47,9 +51,21 @@ q4x_seq_create .. q4x_seq_position
   a sequence: its DeltaNet states and conv histories, the n-gram layer's conv history, its attention caches (max_ctx
   rows), its last tokens; its position the tokens it holds.
 
+q4x_identity
+  a 64-bit key of what a saved sequence depends on: the state's format, the geometry, the model's files (each one's
+  name and size) - a state saved under another is refused.
+
+q4x_seq_state_bytes .. q4x_seq_load
+  a sequence as one byte string: a header (format, identity, position, last tokens), the n-gram conv history, each
+  DeltaNet layer's state and conv history, each attention layer's cache rows below the position, then a 64-bit
+  FNV-1a of everything before it - its bytes, save (into exactly that many), load. load refuses another identity
+  or format, a size not the state's of its position, a position past max_ctx, a damaged state: the sequence then
+  empty, position 0 (never part one state and part another).
+
 q4x_batch
-  n tokens (1 .. max_tokens) of one sequence at its next positions; the logits of every one of them after it
-  (q4x_logits: [n][vocab] on the device). a token's results are the same bits however its sequence's tokens are
+  n tokens (1 .. max_tokens) of one sequence at its next positions; the logits of every one of them after it, rows
+  row0 .. row0 + n - 1 of q4x_logits ([max_tokens][vocab] on the device: the rows outside left as they were - several
+  sequences' steps one after another fill one table, row0 + n at most max_tokens). a token's results are the same bits however its sequence's tokens are
   split into batches. false with why for n out of range or past max_ctx; the sequence then unchanged in position
   (its state not to be read on: a refusal before any step runs).
 

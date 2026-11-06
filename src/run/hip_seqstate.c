@@ -7,6 +7,7 @@
 #include "drafter_impl.h"
 #include "forward_impl.h"
 #include "osmos/gpu/kvfmt.h"
+#include "osmos/model/fnv.h"
 
 /* a sequence's state as one byte string (forward.h, seq_save): a header, then by position each layer's window rows
    (with seq_rollback's depth before them), its compressed rows and indexer keys, its compressor's open positions, the
@@ -14,8 +15,6 @@
 
 #define STATE_MAGIC 0x51425553u /* "SUBQ" */
 #define STATE_LAST (ENGRAM_MAX_NGRAM + SEQ_MAX_BACK)
-#define FNV_SEED 1469598103934665603ull
-#define FNV_PRIME 1099511628211ull
 
 typedef struct Header
 {
@@ -25,16 +24,6 @@ typedef struct Header
   int32_t last[STATE_LAST];
   uint32_t has_dring, pad;
 } Header;
-
-static uint64_t fnv(const void *p, uint64_t n, uint64_t h)
-{
-  const uint8_t *b = p;
-  for (uint64_t i = 0; i < n; i++)
-    h = (h ^ b[i]) * FNV_PRIME;
-  return h;
-}
-
-static uint64_t fnv_u64(uint64_t v, uint64_t h) { return fnv(&v, sizeof v, h); }
 
 uint64_t forward_identity(const Forward *f)
 {

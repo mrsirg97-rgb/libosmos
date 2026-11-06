@@ -47,12 +47,12 @@ static bool layer(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
          q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL);
 }
 
-bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, char err[Q4X_FWD_ERR])
+bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[Q4X_FWD_ERR])
 {
   if (!f || !s || s->f != f || !tokens)
     return q4x_fail(err, "no forward, sequence or tokens, or a sequence of another forward");
-  if (!n || n > f->max_tokens || (uint64_t)s->pos + n > f->max_ctx)
-    return q4x_fail(err, "a step of no tokens, more than the forward's max_tokens, or past its context");
+  if (!n || (uint64_t)row0 + n > f->max_tokens || (uint64_t)s->pos + n > f->max_ctx)
+    return q4x_fail(err, "a step of no tokens, its rows past the forward's max_tokens, or past its context");
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint64_t hd = (uint64_t)g->hc * g->n_embd;
@@ -69,7 +69,7 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, char
     return q4x_fail(err, "a GPU call failed (the end mixer)");
   q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
   if (!mv_strided(w->output->type, q4x_dev(f, w->output), (uint32_t)g->n_vocab, (uint32_t)g->n_embd, b->mixed,
-                  (uint32_t)g->n_embd, n, b->logits, (uint32_t)g->n_vocab, NULL) ||
+                  (uint32_t)g->n_embd, n, b->logits + (uint64_t)row0 * g->n_vocab, (uint32_t)g->n_vocab, NULL) ||
       hipStreamSynchronize(NULL) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the logits)");
   for (uint32_t t = 0; t < n; t++) /* the latest first */

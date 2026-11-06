@@ -65,7 +65,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   const GgufKv *ctx = gguf_kv(m->g, "deepseek41.context_length");
   *facts = (OsmosFacts){"deepseek41", (uint32_t)geo->n_vocab,
                          ctx && ctx->type == GGUF_UINT32 ? (uint32_t)ctx->v.u : 0,
-                         (uint32_t)((geo->n_experts - 1) / geo->n_used), (uint32_t)geo->window};
+                         (uint32_t)((geo->n_experts - 1) / geo->n_used), (uint32_t)geo->window, true};
   if (!facts->native_ctx)
     return fail(err, "deepseek41.context_length: missing"), m_close(m), NULL;
   return m;

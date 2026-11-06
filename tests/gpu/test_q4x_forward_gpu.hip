@@ -103,8 +103,8 @@ int main() {
   Seen seen;
   q4x_forward_probe(f, probe, &seen);
   Q4xSeq* s = q4x_seq_create(f, ferr);
-  CHECK(s && !q4x_batch(f, s, ids.data(), kTok + 1, ferr) && q4x_seq_position(s) == 0);
-  CHECK(q4x_batch(f, s, ids.data(), kTok, ferr) && q4x_seq_position(s) == (int32_t) kTok);
+  CHECK(s && !q4x_batch(f, s, ids.data(), kTok + 1, 0, ferr) && q4x_seq_position(s) == 0);
+  CHECK(q4x_batch(f, s, ids.data(), kTok, 0, ferr) && q4x_seq_position(s) == (int32_t) kTok);
   q4x_forward_probe(f, nullptr, nullptr);
   const std::vector<float> logits = host_of(q4x_logits(f), (size_t) kTok * vocab);
   CHECK(seen.layer.size() == (size_t) w->geo.n_layers);
@@ -133,7 +133,7 @@ int main() {
   Forced forced;
   q4x_forward_probe(f, force, &forced);
   s = q4x_seq_create(f, ferr);
-  CHECK(q4x_batch(f, s, ids.data(), kTok, ferr));
+  CHECK(q4x_batch(f, s, ids.data(), kTok, 0, ferr));
   q4x_forward_probe(f, nullptr, nullptr);
   double fw = 0;
   int at = -1;
@@ -146,15 +146,17 @@ int main() {
 
   // the same tokens as 128 + 128, and as 255 + 1: the same bits
   s = q4x_seq_create(f, ferr);
-  CHECK(q4x_batch(f, s, ids.data(), kHalf, ferr) && q4x_batch(f, s, ids.data() + kHalf, kHalf, ferr));
-  CHECK(std::memcmp(host_of(q4x_logits(f), (size_t) kHalf * vocab).data(), &logits[(size_t) kHalf * vocab],
-                    (size_t) kHalf * vocab * 4) == 0);
+  CHECK(q4x_batch(f, s, ids.data(), kHalf, 0, ferr) && q4x_batch(f, s, ids.data() + kHalf, kHalf, kHalf, ferr));
+  CHECK(std::memcmp(host_of(q4x_logits(f), (size_t) kTok * vocab).data(), logits.data(),
+                    (size_t) kTok * vocab * 4) == 0);  // each half's rows where its row0 put them
   q4x_seq_destroy(s);
   s = q4x_seq_create(f, ferr);
-  CHECK(q4x_batch(f, s, ids.data(), kTok - 1, ferr) && q4x_batch(f, s, ids.data() + kTok - 1, 1, ferr));
-  CHECK(std::memcmp(host_of(q4x_logits(f), vocab).data(), &logits[(size_t) (kTok - 1) * vocab], vocab * 4) == 0);
+  CHECK(q4x_batch(f, s, ids.data(), kTok - 1, 0, ferr) && q4x_batch(f, s, ids.data() + kTok - 1, 1, kTok - 1, ferr));
+  CHECK(std::memcmp(host_of(q4x_logits(f) + (size_t) (kTok - 1) * vocab, vocab).data(),
+                    &logits[(size_t) (kTok - 1) * vocab], vocab * 4) == 0);
+  CHECK(!q4x_batch(f, s, ids.data(), 2, kTok - 1, ferr));  // rows past max_tokens
   int32_t top = -1;
-  CHECK(q4x_greedy(f, 0, 1, &top, ferr) &&
+  CHECK(q4x_greedy(f, kTok - 1, 1, &top, ferr) &&
         top == (int32_t) (std::max_element(&logits[(size_t) (kTok - 1) * vocab], &logits[(size_t) kTok * vocab]) -
                           &logits[(size_t) (kTok - 1) * vocab]));
   std::printf("  128 + 128 and 255 + 1: the logits the bits of the one batch\n");

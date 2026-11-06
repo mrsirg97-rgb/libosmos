@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
   double nll = 0;
   for (uint32_t at = 0; at < n; at += step) {
     const uint32_t k = n - at < step ? n - at : step;
-    if (!q4x_batch(fw, s, ids.data() + at, k, ferr)) return std::fprintf(stderr, "q4x_ppl: %s\n", ferr), 1;
+    if (!q4x_batch(fw, s, ids.data() + at, k, 0, ferr)) return std::fprintf(stderr, "q4x_ppl: %s\n", ferr), 1;
     if (hipMemcpy(lg.data(), q4x_logits(fw), (size_t) k * V * 4, hipMemcpyDeviceToHost) != hipSuccess) return 1;
     for (uint32_t r = 0; r < k && at + r + 1 < n; r++) {
       const float* l = &lg[(size_t) r * V];

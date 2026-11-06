@@ -124,6 +124,14 @@ void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg)
     f->probe = fn, f->probe_arg = arg;
 }
 
+Q4xSeqBytes q4x_seq_bytes(const Q4xGeometry *g)
+{
+  const uint64_t ch = 2ull * g->ssm_groups * g->ssm_state + (uint64_t)g->ssm_inner;
+  return (Q4xSeqBytes){(uint64_t)g->ssm_v_heads * g->ssm_state * g->ssm_state * F, (g->ssm_conv - 1) * ch * F,
+                       (uint64_t)g->n_kv_heads * g->head_dim * F,
+                       (uint64_t)(g->ple_conv - 1) * g->ple_ngram * g->hc * g->n_embd * F};
+}
+
 void q4x_seq_destroy(Q4xSeq *s)
 {
   if (!s)
@@ -143,17 +151,12 @@ Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR])
   if (!s)
     return q4x_fail(err, "out of memory"), NULL;
   s->f = f;
-  const uint64_t ch = 2ull * g->ssm_groups * g->ssm_state + (uint64_t)g->ssm_inner;
-  const uint64_t S = (uint64_t)g->ssm_v_heads * g->ssm_state * g->ssm_state * F;
-  const uint64_t cache = (uint64_t)f->max_ctx * g->n_kv_heads * g->head_dim * F;
-  const uint64_t ple = (uint64_t)(g->ple_conv - 1) * g->ple_ngram * g->hc * g->n_embd * F;
-  bool ok = alloc(&s->ple_hist, ple) && hipMemset(s->ple_hist, 0, ple) == hipSuccess;
+  const Q4xSeqBytes sb = q4x_seq_bytes(g);
+  bool ok = alloc(&s->ple_hist, sb.ple);
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = g->recurrent[l] ? alloc(&s->ssm[l], S) && alloc(&s->conv[l], (g->ssm_conv - 1) * ch * F) &&
-                               hipMemset(s->ssm[l], 0, S) == hipSuccess &&
-                               hipMemset(s->conv[l], 0, (g->ssm_conv - 1) * ch * F) == hipSuccess
-                         : alloc(&s->kc[l], cache) && alloc(&s->vc[l], cache);
-  if (!ok)
+    ok = g->recurrent[l] ? alloc(&s->ssm[l], sb.ssm) && alloc(&s->conv[l], sb.conv)
+                         : alloc(&s->kc[l], f->max_ctx * sb.kv_row) && alloc(&s->vc[l], f->max_ctx * sb.kv_row);
+  if (!ok || !q4x_seq_reset(s))
     return q4x_seq_destroy(s), q4x_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
 }

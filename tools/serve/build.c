@@ -62,7 +62,7 @@ static void sized_unbuild(void *ctx)
 
 bool serve_build(Server *sv, Conv *conv, int lanes, const OsmosModel *m, OsmosOptions o, char err[OSMOS_ERR])
 {
-  if (o.budget) /* a budget given: as it is */
+  if (o.budget || !osmos_facts(m).streams) /* a budget given: as it is; a family streaming none: once, at 0 */
     return build(sv, conv, lanes, m, &o, err);
   Sizing z = {sv, conv, lanes, m, o};
   uint64_t budget = 0, room = 0;
