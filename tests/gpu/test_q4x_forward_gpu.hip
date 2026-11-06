@@ -94,10 +94,10 @@ int main() {
   Q4xWeights* w = q4x_weights_create(g, werr);
   CHECK(w);
   const uint32_t vocab = (uint32_t) w->geo.n_vocab;
-  Q4xForward* f = q4x_forward_create(w, kCtx, kTok, ferr);
+  Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kTok, ferr);
   if (!f) std::fprintf(stderr, "  %s\n", ferr);
   CHECK(f);
-  CHECK(!q4x_forward_create(w, OPS_Q4X_MAX_KEYS + 1, kTok, ferr));  // past the dense attention's reach
+  CHECK(!q4x_forward_create(w, nullptr, OPS_Q4X_MAX_KEYS + 1, kTok, ferr));  // past the dense attention's reach
 
   // the batch, every layer seen
   Seen seen;

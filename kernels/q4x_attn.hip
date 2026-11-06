@@ -80,7 +80,7 @@ __global__ __launch_bounds__(kHead) void attn_kernel(const float* q, const float
 extern "C" bool q4x_qk(const float* qfull, const float* k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
                        uint32_t dim, uint32_t rope_dim, const float* q_norm, const float* k_norm, float eps,
                        int32_t pos0, float rope_base, float* q, float* gate, float* k_out, void* stream) {
-  if (!qfull || !k || !q_norm || !k_norm || !q || !gate || !k_out || !n_tok || !heads || !kv_heads || dim != kHead ||
+  if ((heads && (!qfull || !q || !gate)) || !k || !q_norm || !k_norm || !k_out || !n_tok || !kv_heads || dim != kHead ||
       !rope_dim || rope_dim > dim || rope_dim % 2 || pos0 < 0)
     return false;
   const float theta_scale = powf(rope_base, -2.0f / (float) rope_dim);

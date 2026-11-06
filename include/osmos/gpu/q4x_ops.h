@@ -25,6 +25,9 @@ bool q4x_delta(const float *qkv, const float *g, const float *b, uint32_t n_tok,
 bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_tok, uint32_t heads, uint32_t dim,
                     float eps, float *y, void *stream);
 
+bool q4x_top(const float *logits, uint32_t n, int32_t *id, float *p, void *stream);
+bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out, void *stream);
+
 bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
             uint32_t rope_dim, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float rope_base,
             float *q, float *gate, float *k_out, void *stream);
@@ -33,12 +36,22 @@ bool q4x_attn(const float *q, const float *kc, const float *vc, uint32_t n_tok, 
 
 bool q4x_route(const float *logits, uint32_t n_tok, uint32_t n_exp, uint32_t k, int32_t *ids, float *w,
                int32_t *rows, void *stream);
-bool q4x_expert_table(const int32_t *ids, uint32_t n, const void *base, uint64_t bytes, const void **ptr,
-                      int32_t *cnt, int32_t *row, void *stream);
+#define Q4X_GROUP_TENSORS 3 /* an MoE's expert tensors: gate, up, down */
+typedef struct Q4xExpertTensors
+{
+  const void *base[Q4X_GROUP_TENSORS]; /* each tensor's bytes: its experts one after another */
+  uint64_t bytes[Q4X_GROUP_TENSORS];   /* an expert's */
+  const void **ptr[Q4X_GROUP_TENSORS]; /* each tensor's entries' matrices, out */
+} Q4xExpertTensors;
+
+void q4x_expert_bounds(uint32_t n, uint32_t n_exp, uint32_t per, uint32_t *multi, uint32_t *single);
+bool q4x_expert_groups(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t per,
+                       const Q4xExpertTensors *t, int32_t *cnt, int32_t *row, int32_t *tok, int32_t *where,
+                       void *stream);
 bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
 bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, void *stream);
-bool q4x_moe_sum(const float *y, const float *w, uint32_t n_tok, uint32_t k, uint32_t dim, const float *shared,
-                 const float *shared_logit, float *out, void *stream);
+bool q4x_moe_sum(const float *y, const int32_t *where, const float *w, uint32_t n_tok, uint32_t k, uint32_t dim,
+                 const float *shared, const float *shared_logit, float *out, void *stream);
 
 bool q4x_rows(uint32_t type, const void *table, uint64_t row_bytes, uint32_t row_values, const int32_t *rows,
               uint32_t n, float *out, void *stream);
@@ -93,13 +106,24 @@ q4x_gated_norm
   y[t][h][d] = x[t][h][d] / sqrt(mean over d of x^2 + eps) w[d] sigmoid(z[t][h][d]): the DeltaNet's output norm a
   head, gated by z.
 
+the MTP head's:
+
+q4x_top
+  one row of n logits: *id its greatest (the lowest among equals, as ops_argmax), *p its softmax probability -
+  1 / sum over i of exp(logits[i] - max), the sum in a fixed order (a draft's confidence).
+
+q4x_join
+  out[t][s] = [e[t] ; h[t][s]] (2 dim floats a stream): a token's normed embedding beside each stream's normed state,
+  the head's eh_proj input (llama.cpp's concat of e, repeated a stream, and h).
+
 the sparse attention (a layer's; one sequence's tokens at positions pos0, pos0 + 1, ...):
 
 q4x_qk
   qfull a token's attn_q: each head's q (dim) then its gate (dim), head after head. q[t][h] = rope(rms_norm(q) q_norm),
   gate[t][h] its gate; k_out[t][g] = rope(rms_norm(k[t][g]) k_norm) (k_out may be a cache's row pos0). rope: the first
   rope_dim of a head, pairs (i, i + rope_dim / 2), angle (pos0 + t) theta_i, theta_i = rope_base^(-2i / rope_dim) as
-  ggml builds it (a running product); IMRoPE's sections all the token's position (text) - this rotation.
+  ggml builds it (a running product); IMRoPE's sections all the token's position (text) - this rotation. heads 0: the
+  keys alone (qfull, q and gate unread: the MTP head's cache seeding).
 
 q4x_attn
   out[t][h][d] = sigmoid(gate[t][h][d]) sum over p <= pos0 + t of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
@@ -113,9 +137,16 @@ q4x_route
   [t][j]; their weights w[t][j] = p / (sum of the k p's, at least 6.103515625e-5); rows[e] = t (the token an entry
   reads).
 
-q4x_expert_table
-  entry e's matrix base + ids[e] bytes (an expert's slice of the layer's tensor), cnt 1, row e: mv_group_tok's tables,
-  each entry its own row (its token's input copied there first).
+q4x_expert_bounds, q4x_expert_groups
+  a step's n picks (ids: n_tok x k, token t's slots t k ..) grouped by expert, so that each expert picked is read once
+  for its tokens: the slots sorted by expert, then slot (stable: a token's order kept); where[slot] its place in that
+  order, tok[place] its token (the gather's rows). the entries for mv_group_tok - cnt[e], row[e] (its first place),
+  each tensor's matrix ptr[i][e] = base[i] + expert bytes[i] - in two tables: an expert's places in runs of `per`
+  (<= MV_MAX_TOKENS), each run of 2 or more an entry of the first table, [0, multi), and a run of one an entry of the
+  second, [multi, multi + single): one launch at `per` tokens, one at 1 (a one-token kernel for an expert one token
+  picked). each table's entries past its live ones cnt 0, to its bound (q4x_expert_bounds: n / 2 runs of two or more
+  - none when per is 1 - and min(n, n_exp) of one, or n when per is 1). which slots share an expert changes no bit: a
+  token's sums are its own (mv_group_tok).
 
 q4x_gather
   dst[e][] = src[rows[e]][] for e < n, len floats a row: an entry's own copy of its token's input.
@@ -124,7 +155,7 @@ q4x_swiglu
   y[i] = silu(g[i]) u[i].
 
 q4x_moe_sum
-  out[t][d] = (sum over j, in order, of w[t][j] y[t k + j][d]) + sigmoid(shared_logit[t]) shared[t][d]: the experts'
+  out[t][d] = (sum over j, in order, of w[t][j] y[where[t k + j]][d]) + sigmoid(shared_logit[t]) shared[t][d]: the experts'
   weighted sum and the shared expert, gated.
 
 the n-gram table (PLE):

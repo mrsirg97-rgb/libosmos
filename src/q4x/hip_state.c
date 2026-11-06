@@ -89,6 +89,7 @@ bool q4x_seq_reset(Q4xSeq *s)
          (hipMemset(s->ssm[l], 0, sb.ssm) == hipSuccess && hipMemset(s->conv[l], 0, sb.conv) == hipSuccess);
   s->pos = 0, s->n_last = 0;
   memset(s->last, 0, sizeof s->last);
+  s->pend_pos = -1, s->step_n = 0; /* the head: nothing pending, no step to seed from */
   return ok;
 }
 
@@ -146,6 +147,7 @@ bool q4x_seq_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ER
     if (p[k].bytes && hipMemcpy(p[k].dev, at, p[k].bytes, hipMemcpyHostToDevice) != hipSuccess)
       return refuse(s, err, "a GPU copy failed (the state's load)");
   s->pos = h.pos, s->n_last = h.n_last;
+  s->pend_pos = -1, s->step_n = 0; /* the head's cache not saved: its seeding starts over (drafts weaker, no bit moved) */
   memcpy(s->last, h.last, sizeof h.last);
   return true;
 }

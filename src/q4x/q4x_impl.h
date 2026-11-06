@@ -16,20 +16,37 @@ typedef struct Q4xBuf
   float *qkv, *z, *al, *be, *g, *b, *cv, *ro, *fo;                    /* a DeltaNet's */
   float *qf, *kr, *q, *gt, *ao;                                       /* an attention's */
   float *rl, *w, *xe, *ga, *up, *y, *shg, *shu, *sh, *sl;             /* the MoE's */
-  int32_t *ids, *rows, *cnt, *row;
-  const void **ptr;
+  int32_t *ids, *rows, *cnt, *row, *etok, *where; /* the picks, the grouping's entries, its slots' order */
+  const void **ptr;                               /* Q4X_GROUP_TENSORS tables of entries */
   float *emb, *key, *val, *kn, *qn, *pg, *gated, *nrm, *conv;         /* the n-gram layer's */
   int32_t *ple_rows, *tok;                                            /* device: its rows, the step's tokens */
   int32_t *pin_rows, *pin_tok;                                        /* their pinned host copies */
   float *logits;
 } Q4xBuf;
 
+/* the MTP head's buffers (with a head): a step's hidden rows, a draft's inputs and logits */
+typedef struct Q4xMtpBuf
+{
+  float *hid;   /* [max_tokens][hc n_embd]: each step's final residual (the head's h) at its rows */
+  float *hin;   /* [max_tokens][hc n_embd]: the head's h rows (a position's before it) */
+  float *emb;   /* [max_tokens][n_embd]: the head's tokens' embedding, then normed */
+  float *hn;    /* [max_tokens][hc n_embd]: h normed */
+  float *join;  /* [max_tokens][hc][2 n_embd]: eh_proj's input */
+  float *logits;
+  int32_t *top_id;
+  float *top_p;
+  int32_t *pin_id; /* pinned: a draft's token and its probability */
+  float *pin_p;
+} Q4xMtpBuf;
+
 struct Q4xForward
 {
   const Q4xWeights *w;
-  void **dev; /* a tensor's bytes on the device, by its index in the model */
+  const Q4xMtp *mtp; /* or NULL */
+  void **dev, **mtp_dev; /* a tensor's bytes on the device, by its index in its model */
   uint32_t max_ctx, max_tokens;
   Q4xBuf b;
+  Q4xMtpBuf m;
   q4x_probe_fn probe;
   void *probe_arg;
 };
@@ -46,6 +63,11 @@ struct Q4xSeq
   uint32_t cur, back;                                /* the rings' latest slot, and the states kept behind it */
   int32_t last[Q4X_MAX_NGRAM + Q4X_MAX_BACK];        /* its last tokens, the latest first (a rollback's too) */
   int n_last;
+  /* with an MTP head: its cache, the main model's h of position pend_pos (-1: none, zeros), its last step's place */
+  float *mkc, *mvc, *pend;
+  int32_t pend_pos, step_pos0;
+  uint32_t step_row0, step_n;
+  int32_t *step_tok; /* [max_tokens], host */
 };
 
 /* a sequence's buffers' bytes: a DeltaNet layer's state and conv history, an attention cache's row, the n-gram
@@ -66,6 +88,7 @@ void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint
 bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, const GgufTensor *up,
              const GgufTensor *inject, uint32_t n);
 bool q4x_deltanet(Q4xForward *f, Q4xSeq *s, int l, uint32_t n);
-bool q4x_attention(Q4xForward *f, Q4xSeq *s, int l, uint32_t n);
-bool q4x_moe(Q4xForward *f, int l, uint32_t n);
+bool q4x_attention(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32_t pos, uint32_t n);
+bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32_t pos, uint32_t n);
+bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n);
 bool q4x_ple(Q4xForward *f, Q4xSeq *s, int l, uint32_t n);

@@ -67,12 +67,30 @@ typedef struct Q4xWeights
   Q4xLayer layer[Q4X_MAX_LAYERS];
 } Q4xWeights;
 
+/* the MTP draft head (a file of its own: unsloth's mtp-*-shared-*.gguf): one more attention layer, blk.<n_layers>,
+   and the nextn glue; the token embedding and the output the main model's */
+typedef struct Q4xMtp
+{
+  const Gguf *model;
+  Q4xLayer layer;
+  const GgufTensor *eh_proj, *enorm, *hnorm, *head_norm, *head_down, *head_up;
+} Q4xMtp;
+
 Q4xWeights *q4x_weights_create(const Gguf *model, char err[Q4X_ERR]);
 void q4x_weights_destroy(Q4xWeights *w);
+Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[Q4X_ERR]);
+void q4x_mtp_destroy(Q4xMtp *m);
 
 #endif
 
 /*
+q4x_mtp_create
+  the MTP head of w's model: its metadata w's geometry (the same architecture, widths, heads, experts; one nextn layer
+  after w's; its embedding and output borrowed from w - nextn_shared_target_tensors), its layer's tensors an attention
+  layer's and the MoE's (the roles q4x_weights_create checks, at index n_layers) and the nextn ones: eh_proj
+  (2 n_embd -> n_embd), enorm (n_embd), hnorm (hc n_embd), the head's mixer (norm, down, up). NULL with why as
+  q4x_weights_create refuses: a key or a tensor named.
+
 q4x_weights_create
   the model's geometry read from its metadata and every tensor given its role, checked: its name, its dims (the
   geometry's), its type (one the role's reader takes). NULL with why - the key or the tensor named - for a model of

@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
   Gguf* g = gguf_create(argv[1], gerr);
   Q4xWeights* w = g ? q4x_weights_create(g, werr) : nullptr;
   if (!w) return std::fprintf(stderr, "q4x_ppl: %s%s\n", gerr, werr), 1;
-  Q4xForward* fw = q4x_forward_create(w, n, step, ferr);
+  Q4xForward* fw = q4x_forward_create(w, nullptr, n, step, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_ppl: %s\n", ferr), 1;
   const uint32_t V = (uint32_t) w->geo.n_vocab;

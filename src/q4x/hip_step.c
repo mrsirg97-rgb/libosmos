@@ -41,9 +41,9 @@ static bool layer(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
   const float inv = 1.0f / (float)hc; /* the inject's scale (llama.cpp's 1 / hc before the sigmoid) */
   return (l != g->ple_layer || q4x_ple(f, s, l, n)) &&
          q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n) &&
-         (g->recurrent[l] ? q4x_deltanet(f, s, l, n) : q4x_attention(f, s, l, n)) &&
+         (g->recurrent[l] ? q4x_deltanet(f, s, l, n) : q4x_attention(f, L, s->kc[l], s->vc[l], s->pos, n)) &&
          q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL) &&
-         q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n) && q4x_moe(f, l, n) &&
+         q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n) && q4x_moe(f, L, n) &&
          q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL);
 }
 
@@ -65,6 +65,14 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
     q4x_seen(f, "l_last", l, b->h, n * hd);
   }
   const Q4xWeights *w = f->w;
+  if (f->mtp) /* the head's h: the residual before the end mixer, at the step's rows; its tokens and place */
+  {
+    if (hipMemcpyAsync(f->m.hid + (uint64_t)row0 * hd, b->h, (uint64_t)n * hd * sizeof(float),
+                       hipMemcpyDeviceToDevice, NULL) != hipSuccess)
+      return q4x_fail(err, "a GPU call failed (the MTP head's rows)");
+    memcpy(s->step_tok, tokens, n * sizeof *tokens);
+    s->step_pos0 = s->pos, s->step_row0 = row0, s->step_n = n;
+  }
   if (!q4x_mix(f, w->out_hc_norm, w->out_hc_down, w->out_hc_up, NULL, n))
     return q4x_fail(err, "a GPU call failed (the end mixer)");
   q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);

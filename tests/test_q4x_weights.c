@@ -12,6 +12,7 @@
 #define T_Q8_0 8
 #define T_BF16 30
 #define QWEN "%s/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf"
+#define QWEN_MTP "%s/Models/qwen38/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
 
 static Gguf *model;
 
@@ -192,6 +193,60 @@ static void test_kv(void)
   assert(accepted());
 }
 
+/* the MTP head: taken whole against the model's geometry; the model's own file, a head of other widths or layers, a
+   self-contained head (its own embedding), a tensor missing - each refused */
+static void test_mtp(const Q4xWeights *w, const char *path)
+{
+  char err[Q4X_ERR] = "", gerr[GGUF_ERR] = "";
+  Gguf *mtp = gguf_header(path, gerr);
+  if (!mtp)
+  {
+    printf("  MTP: no head file, skipped\n");
+    return;
+  }
+  Q4xMtp *m = q4x_mtp_create(mtp, w, err);
+  if (!m)
+    printf("  MTP refused: %s\n", err), exit(1);
+  assert(m->layer.q && m->layer.exp_down && m->layer.hc_attn_inject && !m->layer.qkv && m->eh_proj && m->head_up);
+  assert(m->eh_proj->dims[0] == 2u * (uint64_t)w->geo.n_embd);
+  q4x_mtp_destroy(m);
+  printf("  MTP: blk.%d and the nextn tensors taken\n", w->geo.n_layers);
+  assert(!q4x_mtp_create(model, w, err) && strstr(err, "nextn"));
+  printf("    the model's own file as a head -> %s\n", err);
+  struct
+  {
+    const char *key, *what, *needle;
+    uint64_t bad;
+  } keys[] = {{"qwen4exp.embedding_length", "another width", "embedding_length", 2048},
+              {"qwen4exp.block_count", "its layer not after the model's", "block_count", 50},
+              {"qwen4exp.expert_count", "other experts", "expert_count", 384}};
+  for (size_t i = 0; i < sizeof keys / sizeof *keys; i++)
+  {
+    GgufKv *k = (GgufKv *)gguf_kv(mtp, keys[i].key);
+    assert(k);
+    const uint64_t old = k->v.u;
+    k->v.u = keys[i].bad;
+    assert(!q4x_mtp_create(mtp, w, err) && strstr(err, keys[i].needle));
+    printf("    %-36s -> %s\n", keys[i].what, err);
+    k->v.u = old;
+  }
+  GgufKv *shared = (GgufKv *)gguf_kv(mtp, "qwen4exp.nextn_shared_target_tensors");
+  assert(shared);
+  shared->v.u = 0;
+  assert(!q4x_mtp_create(mtp, w, err) && strstr(err, "shared"));
+  printf("    %-36s -> %s\n", "a self-contained head", err);
+  shared->v.u = 1;
+  GgufTensor *t = (GgufTensor *)gguf_tensor(mtp, "blk.48.nextn.eh_proj.weight");
+  assert(t);
+  t->name[0] = 'X';
+  assert(!q4x_mtp_create(mtp, w, err) && strstr(err, "eh_proj"));
+  printf("    %-36s -> %s\n", "its eh_proj missing", err);
+  t->name[0] = 'b';
+  assert((m = q4x_mtp_create(mtp, w, err)));
+  q4x_mtp_destroy(m);
+  gguf_destroy(mtp);
+}
+
 int main(void)
 {
   printf("[test_q4x_weights] start\n");
@@ -208,6 +263,11 @@ int main(void)
   test_real();
   test_tensors();
   test_kv();
+  Q4xWeights *w = q4x_weights_create(model, err);
+  assert(w);
+  snprintf(path, sizeof path, QWEN_MTP, getenv("HOME") ? getenv("HOME") : "");
+  test_mtp(w, path);
+  q4x_weights_destroy(w);
   gguf_destroy(model);
   printf("[test_q4x_weights] ok\n");
   return 0;

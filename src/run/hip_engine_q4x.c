@@ -9,10 +9,11 @@
 #include "osmos/q4x/forward.h"
 #include "osmos/q4x/weights.h"
 
-/* Qwen3.8-Flash-Next behind the engine: every weight resident (no budget, no picks, nothing streamed), no drafter
-   yet. a batch runs a sequence's consecutive tokens at a time (q4x_batch: one sequence's step), each run's logits at
+/* Qwen3.8-Flash-Next behind the engine: every weight resident (no budget, no picks, nothing streamed); its drafter
+   the MTP head (o->drafter: the head's GGUF, q4x_mtp_*). a batch runs a sequence's consecutive tokens at a time (q4x_batch: one sequence's step), each run's logits at
    its own rows of the one table - every row kept. a rollback steps its states' rings back (q4x_seq_rollback) */
 
+_Static_assert(Q4X_MTP_BLOCK <= OSMOS_MAX_BLOCK, "the head's drafts within the engine's");
 _Static_assert(Q4X_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 _Static_assert(OSMOS_ERR >= Q4X_FWD_ERR && OSMOS_ERR >= Q4X_ERR && OSMOS_ERR >= GGUF_ERR,
                "one error buffer for the engine and the family's calls");
@@ -26,6 +27,8 @@ typedef struct Model
 typedef struct Eng
 {
   Q4xForward *f;
+  Gguf *mg;    /* the MTP head's file, or NULL */
+  Q4xMtp *mtp; /* its weights, or NULL */
   uint32_t vocab, n; /* a logits row; the last batch's rows (every one kept) */
 } Eng;
 
@@ -60,6 +63,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   *facts = (OsmosFacts){"qwen4exp", (uint32_t)geo->n_vocab,
                         ctx && ctx->type == GGUF_UINT32 ? (uint32_t)ctx->v.u : 0,
                         (uint32_t)((geo->n_experts - 1) / geo->n_used), 0, false};
+  facts->seed_window = facts->native_ctx; /* the MTP head's cache: every position seeded, as llama.cpp's process() */
   if (!facts->native_ctx)
     return fail(err, "qwen4exp.context_length: missing"), m_close(m), NULL;
   return m;
@@ -71,19 +75,23 @@ static void e_destroy(void *p)
   if (!e)
     return;
   q4x_forward_destroy(e->f);
+  q4x_mtp_destroy(e->mtp);
+  gguf_destroy(e->mg);
   free(e);
 }
 
 static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess || o->drafter)
-    return fail(err, "qwen4exp: every weight resident - no budget, picks or no_guess; no drafter yet"), NULL;
+  if (o->budget || o->picks || o->no_guess)
+    return fail(err, "qwen4exp: every weight resident - no budget, picks or no_guess"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
-  if (!(e->f = q4x_forward_create(m->w, o->max_ctx, o->max_tokens ? o->max_tokens : o->max_ctx, err)))
+  if (o->drafter && (!(e->mg = gguf_create(o->drafter, err)) || !(e->mtp = q4x_mtp_create(e->mg, m->w, err))))
+    return e_destroy(e), NULL;
+  if (!(e->f = q4x_forward_create(m->w, e->mtp, o->max_ctx, o->max_tokens ? o->max_tokens : o->max_ctx, err)))
     return e_destroy(e), NULL;
   return e;
 }
@@ -136,7 +144,7 @@ static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char e
   return q4x_greedy(e->f, row0, rows, ids, err);
 }
 
-static uint32_t e_block(const void *p) { return (void)p, 0; }
+static uint32_t e_block(const void *p) { return ((const Eng *)p)->mtp ? Q4X_MTP_BLOCK : 0; }
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return q4x_seq_create(((Eng *)p)->f, err); }
 static void s_destroy(void *s) { q4x_seq_destroy(s); }
@@ -158,14 +166,13 @@ static bool s_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
 
 static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
-  return (void)p, (void)s, (void)from, (void)to, fail(err, "no drafter");
+  return q4x_mtp_seed(((Eng *)p)->f, s, from, to, err);
 }
 
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                    char err[OSMOS_ERR])
 {
-  (void)p, (void)s, (void)y, (void)conf_min, (void)cum_min, (void)drafts, (void)conf;
-  return fail(err, "no drafter"), -1;
+  return q4x_mtp_draft(((Eng *)p)->f, s, y, Q4X_MTP_BLOCK, conf_min, cum_min, drafts, conf, err);
 }
 
 const OsmosFamily osmos_q4x = {

@@ -55,7 +55,7 @@ int main() {
   if (!m) std::fprintf(stderr, "  %s\n", err);
   CHECK(m);
   const OsmosFacts fx = osmos_facts(m);
-  CHECK(!std::strcmp(fx.family, "qwen4exp") && fx.vocab == 248320 && fx.native_ctx == 262144 && !fx.seed_window &&
+  CHECK(!std::strcmp(fx.family, "qwen4exp") && fx.vocab == 248320 && fx.native_ctx == 262144 && fx.seed_window == fx.native_ctx &&
         !fx.streams);
   CHECK(fx.round_tokens == (512 - 1) / 10);  // a decode round's tokens: under every expert's read (512 of them, 10 a token)
   const uint32_t V = fx.vocab;

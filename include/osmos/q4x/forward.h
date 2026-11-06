@@ -10,13 +10,16 @@
 /* a sequence's states kept behind its latest: a rollback's reach - a drafter's most drafts a round (OSMOS_MAX_BLOCK,
    the engine's), each a DeltaNet layer's S (3.1 MB) a slot: ~1 GB a sequence at 8 */
 #define Q4X_MAX_BACK 8
+/* the MTP head's most drafts a round: llama.cpp's draft-mtp default (common.h, n_max 3) until measured here */
+#define Q4X_MTP_BLOCK 3
 
 typedef struct Q4xForward Q4xForward;
 typedef struct Q4xSeq Q4xSeq;
 
 typedef void (*q4x_probe_fn)(const char *step, int layer, float *dev, uint64_t n, void *arg);
 
-Q4xForward *q4x_forward_create(const Q4xWeights *w, uint32_t max_ctx, uint32_t max_tokens, char err[Q4X_FWD_ERR]);
+Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
+                               char err[Q4X_FWD_ERR]);
 void q4x_forward_destroy(Q4xForward *f);
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
 
@@ -33,6 +36,10 @@ bool q4x_seq_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ER
 bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[Q4X_FWD_ERR]);
 const float *q4x_logits(const Q4xForward *f);
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR]);
+
+bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR]);
+int q4x_mtp_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
+                  float *conf, char err[Q4X_FWD_ERR]);
 
 #endif
 
@@ -81,4 +88,13 @@ q4x_batch
 
 q4x_greedy
   rows row0 .. row0 + rows - 1's greatest token each (ops_argmax's: the lowest among equals).
+
+q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head; DESIGN.md, "Qwen's MTP head")
+  seed: the head's cache at positions from .. to - 1, of the sequence's last step (its rows, read before another
+  step): position p's row from its token and the main model's h of p - 1 (the step's row before it, or the pending h
+  - zeros when none is held: a load, a first step) - only what the cache reads (eh_proj, the attention's mixer, k and
+  v); the pending h then position to - 1's. draft: up to max tokens after y (the token at the sequence's position),
+  greedily: draft i the head's greatest at position pos + i from token i (y, then draft i - 1) and h (the pending,
+  then the head's own residual), each kept while its probability (q4x_top's) is at least conf_min and their product
+  at least cum_min - the count, or -1 with why. neither moves a bit of the sequence's own state.
 */

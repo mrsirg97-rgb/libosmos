@@ -32,6 +32,13 @@ constexpr Tune tune(quant::Type t, int nt) {
     // same bits each). more tokens not measured
     case quant::kF32:
     case quant::kBF16: return nt == 1 ? Tune{1, 4} : Tune{1, 1};
+    // Qwen3.8's expert types read for several tokens (an expert two or more of a step's tokens picked; mvsweep,
+    // 10 experts cold, 2026-11-06): 2 and 2 at 2 tokens (IQ3_XXS 73.2 -> 45.1 us, IQ4_NL 76.6 -> 55.0) and at 4
+    // (86.6 -> 65.4, 92.7 -> 71.7). one token: tune_group1's
+    case quant::kIQ4_NL:
+    case quant::kQ2_0:
+    case quant::kIQ3_XXS:
+    case quant::kIQ4_XS: return {2, 2}; /* 4 for IQ3_XXS and IQ4_XS at 4 tokens, but a group shares one R */
     default: return {1, 1};
   }
 }
