@@ -2247,6 +2247,37 @@ end to end on this box (performance, UD-IQ3_XXS, low effort): "What is 17 * 23?"
 get_weather call with {"city": "Paris", "days": 3}, the integer typed by its schema. 53 prompt tokens at 92 tok/s,
 decode 14.8 tok/s - llama.cpp's 26.3 the mark for 0.5.0, whose work this is not yet.
 
+### Qwen's speed (2026-11-06, performance)
+
+the gate: qwen-forward merges at 40-60 tok/s decode. measured with tools/bench/q4x_bench (a 512-token prompt, then
+128 greedy tokens; the decoded ids' FNV-1a printed, so a change that moves the answer shows):
+
+| step | plain decode | drafted (MTP, 3 a round) | prompt 512 / 2,048 |
+| --- | ---: | ---: | ---: |
+| the first build | 15.2 | - | 105 |
+| the router's picks a block's argmax (thread 0 scanned 512 ten times: 13 ms a token) | 24.5 | - | 106 |
+| the expert types' matvec shapes (tools/bench/mvsweep) | 25.2 | - | 126 |
+| the MTP head drafting (q4x_mtp_*), rollback rings | 25.2 | 38-40 | 126 |
+| matmuls on mm (f16 WMMA), a prompt's experts a tile a read | 21.7 | 34 | 352 / 323 |
+| mm's expert shapes (mmsweep), an input's f16 once, pairs one launch | 22.8 | 38.1 | 370 / 331 |
+| the DeltaNet loop (norms out of it, two threads a column), 320-wide on mm | 22.3-22.9 | - | 424-472 / 404-413 |
+
+- **the mm decision**: prompts are compute: the F32 matvec's decode-then-FMA ran 1.4-3 TFLOP/s. mm (DeepSeek's: f16
+  activations and weights into WMMA, F32 sums) takes them to llama.cpp's (415 at 2,048). its cost: precision - the
+  MoE 2.3e-4 from exact (F32: 1.3e-7; llama.cpp's q8_1: 8.4e-3) - and perplexity says it is none: 6.9365-6.9503
+  across the shapes tried (F32 6.9471, llama.cpp 6.9478). the operator's rule kept: one kernel a matrix at every
+  token count, so a token's bits are its own whatever its batch (the forward test's 128 + 128 and 255 + 1). a
+  hybrid (mm for prompts, the matvec for decode) measured 24.6 / 37.6 / 355 and was declined for breaking that.
+- **grouping a small step's experts** (each expert read once for the tokens that picked it) did not pay on the
+  matvec: 4 consecutive tokens share a third of their experts, but an expert read for several tokens cost that
+  back (61.8 ms a 4-token step ungrouped, 64.8-67.4 grouped). on mm it is a tile's work, and pays.
+- **the drafts a round**: 1-5 measured over 192 tokens (34.4, 35.2, 35.0, 33.4, 32.6 tok/s on the matvec): 2-3, as
+  llama.cpp's default 3. a step's extra token costs ~6-8 ms (its experts' reads), a draft ~3.8 ms (the head's
+  output projection mostly).
+- **next**: the attention (dense, a block a head and token: ~1 s of a 2,048-token prompt, quadratic - ~16 s at
+  8,192; +7 ms a token decoding at 2,048) to a tiled kernel on the matrix cores; a prompt's experts read once for
+  up to 128 tokens (DeepSeek's 8 tiles; now 16); the decode's f16 conversions folded into their producers.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
