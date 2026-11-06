@@ -31,8 +31,9 @@ bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint3
 bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
             uint32_t rope_dim, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float rope_base,
             float *q, float *gate, float *k_out, void *stream);
+uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx);
 bool q4x_attn(const float *q, const float *kc, const float *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-              uint32_t dim, uint32_t pos0, const float *gate, float *out, void *stream);
+              uint32_t dim, uint32_t pos0, const float *gate, float *scratch, float *out, void *stream);
 
 bool q4x_route(const float *logits, uint32_t n_tok, uint32_t n_exp, uint32_t k, int32_t *ids, float *w,
                int32_t *rows, void *stream);
@@ -131,7 +132,10 @@ q4x_qk
 q4x_attn
   out[t][h][d] = sigmoid(gate[t][h][d]) sum over p <= pos0 + t of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
   g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, [p][kv_heads][dim],
-  rows 0 .. pos0 + n_tok - 1 written. its keys a block's LDS: at most OPS_Q4X_MAX_KEYS (the dense build's reach).
+  rows 0 .. pos0 + n_tok - 1 written; at most OPS_Q4X_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
+  weights as f16, the sums F32; the keys in chunks of 512 (absolute positions), a row's chunks merged in order - a
+  row's bits its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads,
+  max_ctx) floats (a step of more tokens taken in pieces).
 
 the MoE (a token's k experts of n_exp: entry e = t k + j its j-th):
 

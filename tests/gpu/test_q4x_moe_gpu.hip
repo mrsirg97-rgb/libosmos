@@ -15,9 +15,6 @@ extern "C" {
 
 constexpr uint32_t kTok = 256, kDim = 2560, kExp = 512, kK = 10, kFf = 640, kEntries = kTok * kK, kExactTok = 16;
 constexpr uint32_t kAlone = 3;  // a few tokens run alone: their experts' tiles of other company
-// mm's f16: weights and activations each rounded (u = 2^-11) through gate / up then down - 4 u, ~2e-3 (llama.cpp's
-// q8_1 activations ~0.4% a matmul)
-constexpr double kF16Rel = 4.0 / 2048;
 
 struct Experts {
   const void *gate, *up, *down;

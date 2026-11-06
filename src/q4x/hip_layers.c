@@ -103,7 +103,7 @@ bool q4x_attention(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32
                   mm_takes(L->q, 2 * q, D, D, 2 * q)) &&
          q4x_qk(b->qf, b->kr, n, heads, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm), fv(f, L->k_norm), g->rms_eps,
                 pos, g->rope_base, b->q, b->gt, kc + (uint64_t)pos * kv, NULL) &&
-         q4x_attn(b->q, kc, vc, n, heads, kvh, hd, (uint32_t)pos, b->gt, b->ao, NULL) &&
+         q4x_attn(b->q, kc, vc, n, heads, kvh, hd, (uint32_t)pos, b->gt, b->fa, b->ao, NULL) &&
          mat(f, L->out, D, q, b->ao, q, n, b->out, D);
 }
 

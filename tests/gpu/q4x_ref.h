@@ -28,6 +28,9 @@ extern "C" {
   } while (0)
 
 constexpr double kRelL2 = 1e-2, kChainRel = 2 * kRelL2, kExactRel = 1e-5;
+// mm's and the attention's f16: a value rounded at u = 2^-11, twice a product (weights or keys, and activations)
+// through two chained products - 4 u, ~2e-3
+constexpr double kF16Rel = 4.0 / 2048;
 constexpr const char* kQwenFirst = "%s/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
 constexpr const char* kQwenDump = "%s/osmos-oracle/qwen-dump-256";
 

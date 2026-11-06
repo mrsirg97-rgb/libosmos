@@ -14,7 +14,7 @@ typedef struct Q4xBuf
 {
   float *h, *xn, *lo, *gate, *mixed, *inj, *out, *x;                  /* the residual, a mixer's, a block's output */
   float *qkv, *z, *al, *be, *g, *b, *cv, *qkn, *ro, *fo;              /* a DeltaNet's */
-  float *qf, *kr, *q, *gt, *ao;                                       /* an attention's */
+  float *qf, *kr, *q, *gt, *ao, *fa;                                  /* an attention's (fa: its chunks') */
   float *rl, *w, *ga, *up, *y, *shg, *shu, *sh, *sl;                  /* the MoE's */
   int32_t *ids, *rows, *cnt, *gidx, *hidx, *where; /* the picks, mm_group's tables (q4x_expert_tiles) */
   uint32_t *xg, *yg, *xd, *yd;
