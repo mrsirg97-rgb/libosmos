@@ -2507,6 +2507,10 @@ own commit when it is no worse and no bit moves.
     decode's shapes (40 layers' fn in turn, so none stays cached): 5 tokens 30.0 us a block a token, 30.7 - 47.3 the
     staged ones (1 - 8 tokens a block). a token's blocks after the first read fn from the cache, not memory: the
     re-reads cost little, and the staging's barriers and serial sums more.
+  - the drafter's head through mm (rms_x16, then mm_run; the trace had the target's head by mm at 195 GB/s, the
+    drafter's by mv at 151): the same drafts, drafting 2-4% slower - 846-859 / 1,185-1,188 / 748-764 ms against
+    833-850 / 1,142-1,178 / 711-720; drafted 30.6 / 30.6 tok/s against 30.8 / 30.7 (~/bench/v032/head-mm). at 5 rows
+    the x16's conversion and the flag's round trip cost what the faster read saves.
 
 ## open questions
 
