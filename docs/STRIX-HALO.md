@@ -1,6 +1,6 @@
 # osmos on Strix Halo
 
-**DeepSeek-V4.1-Flash, a 768B model, on one Ryzen AI MAX+ 395 (gfx1151, 128 GB).**
+**DeepSeek-V4.1-Flash, a 768B model, and Qwen3.8-Flash-Next on one Ryzen AI MAX+ 395 (gfx1151, 128 GB).**
 
 osmos is an open-source inference engine built for this one chip. It runs DeepSeek-V4.1-Flash at 1–2 bits a weight
 with a 1M-token context, streams the experts that do not fit from the SSD, and gives the same output bit for bit
@@ -36,6 +36,24 @@ rounds that afternoon, osmos one run of each that evening. Greedy decoding. Ever
 An agent turn is mostly reading: Maya's agent bench sends about 99K new prompt tokens for 8K tokens of answers. osmos
 finishes it 18% sooner on 19% less energy for each token it writes, at the same power (osmos the mean of two runs that
 evening; Maya's that afternoon, when the box ran ~2.5% faster).
+
+## Qwen3.8-Flash-Next: the second model
+
+osmos 0.5.0 runs Qwen3.8-Flash-Next (177B, a preview of the Qwen4 architecture: Gated DeltaNet layers, sparse
+attention, 512 experts) from unsloth's UD-IQ3_XXS, every weight in GPU memory, the model's own MTP head drafting, a
+262,144-token context - under the same guarantee: the same output bit for bit however it runs. Against llama.cpp on
+the same file, the same day (2026-11-06, `performance`):
+
+| | osmos 0.5.0 | llama.cpp | |
+| --- | ---: | ---: | ---: |
+| Reading a 2,048-token prompt | **672** | 520 | +29% |
+| Reading a 16,384-token prompt | **567** | 463 | +22% |
+| Writing, MTP drafting | **~40** | not measured | |
+| Writing, one token at a time | 23.2 | **26.2** | -11% |
+| Agents, 4 × 8 turns | **292 s** | not measured | |
+
+On the agents bench Qwen finishes in 292 s - DeepSeek's 446 s on the same workload - its first token at a 3.0 s
+median: each expert read once for every conversation's tokens, and the prompts read at its sparse attention's speed.
 
 ## Energy: the low-power profile
 

@@ -1,9 +1,10 @@
 # libosmos
 
 A deterministic inference engine for **DeepSeek-V4.1-Flash** (~768B parameters: ~557B in routed experts, ~196B in
-Engram tables) on a **single AMD Strix Halo** (Ryzen AI MAX+ 395, Radeon 8060S / gfx1151, 128 GB).
+Engram tables) and **Qwen3.8-Flash-Next** (~177B, 512 experts, a preview of the Qwen4 architecture) on a **single AMD
+Strix Halo** (Ryzen AI MAX+ 395, Radeon 8060S / gfx1151, 128 GB).
 
-It runs these quantizations of the model:
+It runs these quantizations of DeepSeek:
 
 - **unsloth's UD-IQ1_M and UD-IQ1_S** ([unsloth/DeepSeek-V4.1-Flash-1017-GGUF](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF),
   5 shards each): experts in 1-2-bit IQ types, attention Q6_K. The two packs below run both with unsloth's lossless
@@ -13,16 +14,23 @@ It runs these quantizations of the model:
   experts IQ2_XXS / IQ2_XS / IQ1_M, its Engram a shared file linked as shard 6 (llama.cpp's layout since 2026-10-27;
   their earlier four-shard layout too). What the engine was first built on; measured below, not one of the packs.
 
+And of Qwen:
+
+- **unsloth's UD-IQ3_XXS** ([unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF),
+  4 shards, 78 GB): every weight resident in GPU memory, drafted by the model's own MTP head (unsloth's shared Q8_0
+  `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`), a 262,144-token context.
+
 **The guarantee:** the same input gives the same output, bit for bit, however it is run:
 
 - alone or batched with other tokens or sequences,
 - at any memory budget, whichever experts happen to be resident in GPU memory,
-- decoded one token at a time or drafted (DSpark speculative decoding) and verified,
+- decoded one token at a time or drafted (DSpark, or Qwen's MTP head) and verified,
 - with an expert computed on the GPU or on the CPU (the CPU lane's AVX-512 kernels give the GPU's exact bits).
 
 Each of these is a test that compares bits, not tolerances: fingerprints of every output stream must match across
-the configurations (`tests/gpu/test_lane_gpu`, `test_drafter_gpu`, `test_model_gpu`, `test_forward_gpu`), and the
-kernels are checked against reference replays with deliberate mutations that must fail them.
+the configurations (`tests/gpu/test_lane_gpu`, `test_drafter_gpu`, `test_model_gpu`, `test_forward_gpu`; Qwen's
+`test_q4x_forward_gpu`, `test_q4x_qsa_gpu`, `test_mtp_q4x_gpu`, `test_engine_q4x_gpu`), and the kernels are checked
+against reference replays with deliberate mutations that must fail them.
 
 C, HIP and a little C++. No Python at runtime.
 
@@ -40,6 +48,18 @@ checks every SHA-256, writes the pack's `osmos.json` and starts **osmos-api**: a
 registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) and asks before making it the default model.
 
 Both packs run one context length: **1,048,576 tokens**, with up to 256K tokens a reply (its reasoning and answer).
+
+Qwen3.8-Flash-Next: the installer's pack is next; by hand, an `osmos.json` naming the first shard and the MTP head,
+then `bin/osmos-api` on it:
+
+```json
+{ "pack": "qwen38-ud-iq3_xxs", "model": ".../Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf",
+  "drafter": ".../mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", "max_context": 262144, "parallel": 1 }
+```
+
+```sh
+make serve api && bin/osmos-api --config osmos.json --port 8093
+```
 
 ## Performance
 
@@ -99,6 +119,42 @@ At low-power osmos drafts faster than 0.2.0 did at `performance` (29.8 tok/s), a
 own 1M context (0.1.x, fixed budgets), decode is UD-IQ1_S 18.8 plain / 37.5 drafted, UD-IQ1_M 16.0 / 28.6 tok/s: a 1M
 context's attention state is ~0.85 GiB.
 
+### Qwen3.8-Flash-Next against llama.cpp
+
+UD-IQ3_XXS, 2026-11-06, `performance`; llama.cpp 68d20b8 (HIP, all layers on the GPU, flash attention, 2,048-token
+batches as osmos's steps), `llama-bench` 2 runs; osmos `tools/bench/q4x_bench`, greedy:
+
+| | osmos 0.5.0 | llama.cpp | |
+| --- | ---: | ---: | ---: |
+| Prompt, 2,048 tokens | **672** | 520 | +29% |
+| Prompt, 8,192 tokens | **588** | 489 | +20% |
+| Prompt, 16,384 tokens | **567** | 463 | +22% |
+| Prompt, 65,536 tokens | 500 | not measured | |
+| Decode, MTP drafted | **39.5-40.5** | not measured | |
+| Decode, plain | 23.2 | **26.2** | -11% |
+| Decode at 16K context, plain | 21.6 | **23.1** | -6% |
+| Perplexity, 8,192 tokens | **2.7143** | 2.7193 (its F16 cache) | |
+| Perplexity, 16,384 tokens | 2.2732 | **2.2721** (F16), 2.2675 (Q8_0) | +0.05% |
+
+Plain decode is llama.cpp's; reading prompts and drafting are osmos's. Both run Qwen's sparse attention (QSA: past
+2,048 keys, a token attends to its top 512 blocks of 4); osmos picks llama.cpp's own blocks on its tensors (949 of 949
+tokens past the budget, `test_q4x_qsa_gpu`). osmos keeps the cache in Q8_0 (llama.cpp in F16: on its Q8_0 cache its
+perplexity is the right column's). The perplexity difference at 16K is the spread two forwards' roundings make
+(llama.cpp's own two caches are 0.2% apart there), our dense attention level with it (2.2714).
+
+**Agents**, the bench above (4 agents x 8 turns, ~99K new prompt tokens), 65K context, the MTP head drafting:
+
+| | Qwen3.8 osmos 0.5.0 | DeepSeek UD-IQ1_M osmos 0.3.2 |
+| --- | ---: | ---: |
+| Wall, all 32 turns | **292 s** | 446 s |
+| First token p50 / p95 | **3.0 / 50.4 s** | 6.2 / 54.7 s |
+| Turn done p50 / p95 | **24.1 / 68.9 s** | 44.1 / 94.0 s |
+| Answer tokens | 5,850 | ~8,000 |
+
+The steps are shared (each expert read once for every conversation's tokens), the drafts too, and the prompts read
+at the sparse attention's speed; the guarantee holds across all of it - a conversation's bits its own however the
+others share its steps (`test_q4x_forward_gpu`, `test_mtp_q4x_gpu`).
+
 ### The two packs: quality and power
 
 64K context; perplexity over 8,191 tokens of mixed text and code (`bin/ppl`); power and energy at `performance`:
@@ -135,6 +191,17 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
   tokens.
 - **DSpark**, DeepSeek's own drafter, proposes up to 5 tokens a round; one batched forward verifies them.
 
+## How Qwen runs
+
+- **Every weight resident** (78 GB of GPU memory): no streaming. The matmuls run on the matrix cores with f16
+  activations and F32 sums at every token count, so a token's bits are the same however it is batched; the experts of
+  a step are read once for up to 128 of its tokens.
+- **The cache in Q8_0** (~13 KB a token for its 12 attention layers): a 262,144-token conversation ~3.4 GB.
+- **QSA**, Qwen's sparse attention: keys pooled in blocks of 4, a token's top 512 blocks by its indexer's score; below
+  2,052 positions every block (the dense attention's bits).
+- **The MTP head** drafts up to 5 tokens a round (a 65,536-token shortlist of the vocabulary); one batched step
+  verifies them. Its 36 Gated DeltaNet layers' states keep 8 steps back in rings, so a rejected draft rolls back.
+
 ## Requirements
 
 - AMD Ryzen AI MAX+ 395 (gfx1151) with 128 GB. The CPU lane (optional) needs AVX-512 VNNI and VBMI.
@@ -152,6 +219,8 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
   [mrsirg97-rgb/osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)) or Maya's own (8 GB),
 - optionally (UD-IQ1_M's decode ~12-13 -> ~16 tok/s with one), an expert pick profile beside the model (`osmos-picks.bin`: every
   pick on calibration text, `bin/dbench` with `PICKS_OUT` writes one).
+- or, for Qwen, unsloth's UD-IQ3_XXS 4 shards and its MTP head (`MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`) - ~81
+  GB of GPU memory with the cache; the GPU-memory setting above.
 
 ## The packs
 
@@ -240,6 +309,18 @@ python tools/power.py --csv agents.csv -- python tools/serve/agent_bench.py --on
 echo "8 0 bench/p131072.txt" | python tools/serve/drive.py -- --model $MODEL --picks $PICKS --no-guess  # 128K
 ```
 
+Qwen (its ids from its own tokenizer: `oracle/qwen_dump.cpp` writes them; llama.cpp's numbers from `llama-bench`
+and `qwen_dump -ppl`):
+
+```sh
+hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/q4x_bench.hip -Llib -losmos_hip -losmos -lhsa-runtime64 \
+      -o bin/q4x_bench                                           # and tools/bench/q4x_ppl.hip the same way
+export Q=~/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf Q4X_BENCH_STEP=2048
+bin/q4x_bench $Q ids.txt 16384 64                                # a 16K prompt, then 64 plain tokens
+bin/q4x_bench $Q ids.txt 512 128 ~/Models/qwen38/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf   # drafted
+bin/q4x_ppl $Q ids.txt 8192 2048                                 # perplexity
+```
+
 `dbench budget_gib|auto max_tokens n_new warmup q...`: `auto` sizes the budget to the GPU as `osmos-serve` does;
 `MODEL` a model's first shard (GSQ-RCO: `MODEL_DIR` and `ENGRAM`),
 `PICKS` the profile, `DRAFT` DSpark's directory, `PICKS_OUT` writes a profile from the run. Run each configuration in
@@ -248,10 +329,12 @@ answer prints a hash of its tokens: the same hash in every configuration is the 
 
 ## Scope
 
-One model (DeepSeek-V4.1-Flash), one machine (Strix Halo, 128 GB), greedy decoding, one sequence at a time in the
-benchmarks. The quant kernels (Q8_0, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ4_NL, BF16, MXFP4, MXFP8, from one
-type table, `include/osmos/model/qtype.h`; the int8 expert path and the CPU lane: the IQ1 and IQ2 types) and
-the expert streaming are model-independent; the attention, hyper-connections, Engram and DSpark are DeepSeek's.
+Two models (DeepSeek-V4.1-Flash, Qwen3.8-Flash-Next) behind one engine interface (`include/osmos/run/engine.h`), one
+machine (Strix Halo, 128 GB), greedy decoding. The quant kernels (Q8_0, Q5_K, Q6_K, Q2_0, IQ1_S, IQ1_M, IQ2_XXS,
+IQ2_XS, IQ2_S, IQ3_XXS, IQ4_NL, IQ4_XS, BF16, MXFP4, MXFP8, from one type table, `include/osmos/model/qtype.h`; the
+int8 expert path and the CPU lane: the IQ1 and IQ2 types) are model-independent; the expert streaming, attention,
+hyper-connections, Engram and DSpark are DeepSeek's (`src/run/`), the Gated DeltaNet, QSA, n-gram embedding and MTP
+head Qwen's (`src/q4x/`).
 
 ## Layout
 
@@ -260,7 +343,9 @@ the expert streaming are model-independent; the attention, hyper-connections, En
 | `include/osmos/` | the public headers, each with its contract in a comment at the end |
 | `src/model/` | GGUF, weights, Engram, DSpark index |
 | `src/mem/` | the expert pool, the resident set, the file readers |
-| `src/run/` | the forward: steps, layers, the lane, drafting |
+| `src/run/` | the engine interface; DeepSeek's forward: steps, layers, the lane, drafting |
+| `src/q4x/`, `include/osmos/q4x/` | Qwen's forward: weights, steps, layers, its state, the MTP head |
+| `src/text/` | the tokenizers and chat encodings (DeepSeek's, Qwen's) |
 | `src/cpu/` | the CPU lane: AVX-512 int8 experts, its thread pool |
 | `kernels/` | the HIP kernels and the shared arithmetic contracts (`lane.h`, `quant.h`) |
 | `tests/`, `tests/gpu/` | CPU tests; GPU and whole-model tests |
@@ -286,6 +371,9 @@ the expert streaming are model-independent; the attention, hyper-connections, En
 - [ISTA-DASLab](https://huggingface.co/ISTA-DASLab): the GSQ-RCO quantization this was developed on.
 - [unsloth](https://huggingface.co/unsloth): the UD-IQ1_M and UD-IQ1_S quantizations and the MXFP8 Engram table.
 - [huihui-ai](https://huggingface.co/huihui-ai): the abliteration patches.
+- [Qwen](https://huggingface.co/Qwen): Qwen3.8-Flash-Next; [unsloth](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)
+  its UD-IQ3_XXS quantization and MTP head. llama.cpp's `qwen4exp` (its forward, QSA, the qwen35 pre-tokenizer) is
+  the reference Qwen's forward is held to (`oracle/qwen_dump.cpp`); the chat template is ported from the model's.
 
 ## Contributing and changes
 

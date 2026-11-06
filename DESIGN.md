@@ -2367,6 +2367,15 @@ below; mutants (a tie to the higher block, the tail off by one, a block's rope a
 - **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
   21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
+### 0.5.0: DeepSeek unchanged (2026-11-06, performance)
+
+the kernels Qwen shares (mm, mv, quant.h, block.h) and the engine's and server's draft path (oseq_draft_all;
+DeepSeek's draft_all NULL: one lane at a time, as before) moved for Qwen. held: osmos-serve's token streams the
+v0.4.0 binary's (built from its tag, the same libevt) on 16 requests - each the same hash as 0.4.0's own check
+(~/bench/v050-streams.log); the DeepSeek GPU tests pass (test_forward_gpu, test_lane_gpu skipped: GSQ-RCO's dumps
+not on this box, as before); dbench UD-IQ1_M plain 17.1 / 17.1 / 17.0 tok/s, drafted 35.1 / 27.7 / 38.0 (33.6 the
+mean: 0.3.2's), each question's hash the same plain and drafted.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
