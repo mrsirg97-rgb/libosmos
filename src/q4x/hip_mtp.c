@@ -23,8 +23,8 @@ static bool head_in(Q4xForward *f, uint32_t n)
   Q4xMtpBuf *m = &f->m;
   const uint32_t hc = (uint32_t)g->hc, D = (uint32_t)g->n_embd;
   return q4x_rows(e->type, q4x_dev(f, e), e->bytes / e->dims[1], D, b->tok, n, m->emb, NULL) &&
-         q4x_hc_norm(m->emb, (const float *)q4x_dev(f, mtp->enorm), n, 1, D, g->rms_eps, b->x, NULL) &&
-         q4x_hc_norm(m->hin, (const float *)q4x_dev(f, mtp->hnorm), n, hc, D, g->rms_eps, m->hn, NULL) &&
+         q4x_hc_norm(m->emb, (const float *)q4x_dev(f, mtp->enorm), n, 1, D, g->rms_eps, b->x, NULL, NULL) &&
+         q4x_hc_norm(m->hin, (const float *)q4x_dev(f, mtp->hnorm), n, hc, D, g->rms_eps, m->hn, NULL, NULL) &&
          q4x_join(b->x, m->hn, n, hc, D, m->join, NULL) &&
          q4x_mat(f, mtp->eh_proj, D, 2 * D, m->join, 2 * D, n * hc, b->h, D, false);
 }
@@ -88,7 +88,7 @@ static bool one(Q4xForward *f, Q4xSeq *s, int32_t p, int32_t *id, float *prob)
       q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, 1) && q4x_moe(f, L, 1) &&
       q4x_hc_combine(b->h, b->out, b->inj, 1, hc, D, inv, NULL) && copy(m->hin, b->h, (uint64_t)hc * D * F) &&
       q4x_mix(f, mtp->head_norm, mtp->head_down, mtp->head_up, NULL, 1) &&
-      q4x_mat(f, f->w->output, V, D, b->mixed, D, 1, m->logits, V, false) &&
+      q4x_mat(f, f->w->output, V, D, b->mixed, D, 1, m->logits, V, true) && /* b.x16 the head mixer's mixed */
       q4x_top(m->logits, V, m->top_id, m->top_p, NULL) &&
       hipMemcpyAsync(m->pin_id, m->top_id, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
       hipMemcpyAsync(m->pin_p, m->top_p, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&

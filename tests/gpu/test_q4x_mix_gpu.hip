@@ -42,11 +42,11 @@ static Out mix(const Mixer& m, const float* h) {
   const size_t hd = (size_t) kHc * kDim;
   float *xn = dev_alloc<float>(kTok * hd), *lo = dev_alloc<float>(kTok * kRank), *gate = dev_alloc<float>(kTok * hd);
   float *mixed = dev_alloc<float>(kTok * kDim), *inj = dev_alloc<float>(kTok * kHc);
-  CHECK(q4x_hc_norm(h, m.norm, kTok, kHc, kDim, kEps, xn, nullptr));
+  CHECK(q4x_hc_norm(h, m.norm, kTok, kHc, kDim, kEps, xn, nullptr, nullptr));
   CHECK(mv_strided(m.t_down, m.down, kRank, hd, xn, hd, kTok, lo, kRank, nullptr));
-  CHECK(q4x_scale_silu(lo, (uint64_t) kTok * kRank, 1.0f / kHc, nullptr));
+  CHECK(q4x_scale_silu(lo, (uint64_t) kTok * kRank, 1.0f / kHc, nullptr, nullptr));
   CHECK(mv_strided(m.t_up, m.up, hd, kRank, lo, kRank, kTok, gate, hd, nullptr));
-  CHECK(q4x_hc_gated_mean(xn, gate, kTok, kHc, kDim, mixed, nullptr));
+  CHECK(q4x_hc_gated_mean(xn, gate, kTok, kHc, kDim, mixed, nullptr, nullptr));
   if (m.inject) CHECK(mv_strided(0, m.inject, kHc, hd, xn, hd, kTok, inj, kHc, nullptr));
   Out o{host_of(xn, kTok * hd), host_of(gate, kTok * hd), host_of(mixed, kTok * kDim), {}};
   if (m.inject) o.inject = host_of(inj, kTok * kHc);
@@ -115,7 +115,7 @@ int main() {
     std::printf("[test_q4x_mix_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its dump or a GPU\n");
     return 77;
   }
-  CHECK(!q4x_hc_norm(nullptr, nullptr, 0, kHc, kDim, kEps, nullptr, nullptr) &&
+  CHECK(!q4x_hc_norm(nullptr, nullptr, 0, kHc, kDim, kEps, nullptr, nullptr, nullptr) &&
         !q4x_hc_combine(nullptr, nullptr, nullptr, 1, 9, kDim, 1.0f, nullptr));
 
   // layer 0's attention mixer, from the residual llama.cpp starts with

@@ -3,6 +3,7 @@
 #include <climits>
 
 #include "block.h"
+#include "x16side.h"
 
 extern "C" {
 #include "osmos/gpu/mm.h"
@@ -126,9 +127,9 @@ __global__ void gather_kernel(const float* src, const int32_t* rows, uint32_t n,
   dst[i] = src[(uint64_t) rows[i / len] * len + i % len];
 }
 
-__global__ void swiglu_kernel(const float* g, const float* u, uint64_t n, float* y) {
+__global__ void swiglu_kernel(const float* g, const float* u, uint64_t n, float* y, Q4xX16 side) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i < n) y[i] = silu(g[i]) * u[i];
+  if (i < n) y[i] = silu(g[i]) * u[i], x16_side(side, i, y[i]);
 }
 
 __global__ void moe_sum_kernel(const float* y, const int32_t* where, const float* w, uint32_t n_tok, uint32_t k,
@@ -178,9 +179,9 @@ extern "C" bool q4x_gather(const float* src, const int32_t* rows, uint32_t n, ui
   return ok();
 }
 
-extern "C" bool q4x_swiglu(const float* g, const float* u, uint64_t n, float* y, void* stream) {
+extern "C" bool q4x_swiglu(const float* g, const float* u, uint64_t n, float* y, const Q4xX16* side, void* stream) {
   if (!g || !u || !y || !n) return false;
-  swiglu_kernel<<<grid(n), kThreads, 0, st(stream)>>>(g, u, n, y);
+  swiglu_kernel<<<grid(n), kThreads, 0, st(stream)>>>(g, u, n, y, side_of(side));
   return ok();
 }
 

@@ -98,7 +98,7 @@ int main() {
 
   const Ref ro = ref("attn_output-0"), rz = ref("z-0");
   float* fo = dev_alloc<float>((size_t) kTok * kInner);
-  CHECK(q4x_gated_norm(dev_from(ro.v), l.norm, dev_from(rz.v), kTok, kVHeads, kHead, kEps, fo, nullptr));
+  CHECK(q4x_gated_norm(dev_from(ro.v), l.norm, dev_from(rz.v), kTok, kVHeads, kHead, kEps, fo, nullptr, nullptr));
   held("the gated norm (final_output)", host_of(fo, (size_t) kTok * kInner), ref("final_output-0"), 1.0, kExactRel);
 
   // the whole layer from its mixed input: qkv and z, the conv, the gates, the rule, the norm, ssm_out
@@ -113,7 +113,7 @@ int main() {
   CHECK(mv_strided(l.t_gate, l.gate, kInner, kDim, hm, kDim, kTok, z, kInner, nullptr));
   CHECK(q4x_conv(qkv, kTok, kCh, kTaps, 1, l.conv, hist, 1, 0, cv, nullptr));
   CHECK(q4x_delta(cv, gg, bb, kTok, kKHeads, kVHeads, kHead, kEps, qkn, st, 1, 0, ro2, nullptr));
-  CHECK(q4x_gated_norm(ro2, l.norm, z, kTok, kVHeads, kHead, kEps, fo, nullptr));
+  CHECK(q4x_gated_norm(ro2, l.norm, z, kTok, kVHeads, kHead, kEps, fo, nullptr, nullptr));
   CHECK(mv_strided(l.t_out, l.out, kDim, kInner, fo, kInner, kTok, out, kDim, nullptr));
   held("layer 0 whole (linear_attn_out)", host_of(out, (size_t) kTok * kDim), ref("linear_attn_out-0"), 1.0,
        kChainRel);

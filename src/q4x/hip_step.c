@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "osmos/q4x/ple.h"
+#include "osmos/gpu/mm.h"
 #include "q4x_impl.h"
 
 /* a step: the tokens' embedding into hc streams, their n-gram rows, the layers, the end mixer, the logits */
@@ -77,7 +78,7 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
     return q4x_fail(err, "a GPU call failed (the end mixer)");
   q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
   if (!q4x_mat(f, w->output, (uint32_t)g->n_vocab, (uint32_t)g->n_embd, b->mixed, (uint32_t)g->n_embd, n,
-               b->logits + (uint64_t)row0 * g->n_vocab, (uint32_t)g->n_vocab, false) ||
+               b->logits + (uint64_t)row0 * g->n_vocab, (uint32_t)g->n_vocab, n <= MM_MAX_TOKENS) ||
       hipStreamSynchronize(NULL) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the logits)");
   if (!q4x_overflow_ok(f, err))

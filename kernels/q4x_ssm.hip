@@ -1,5 +1,6 @@
 // Qwen3.8-Flash-Next's Gated DeltaNet (include/osmos/gpu/q4x_ops.h): its conv, gates, delta rule and gated norm, F32
 #include "block.h"
+#include "x16side.h"
 
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
@@ -127,12 +128,13 @@ __global__ __launch_bounds__(2 * kHead) void delta_kernel(const float* qkv, cons
 
 // a block a (head, token): x normed by its own sum of squares, weighted, gated
 __global__ __launch_bounds__(kHead) void gated_norm_kernel(const float* x, const float* w, const float* z,
-                                                           float eps, float* y) {
+                                                           float eps, float* y, Q4xX16 side) {
   __shared__ float lds[kHead];
   const uint64_t at = ((uint64_t) blockIdx.y * gridDim.x + blockIdx.x) * kHead + threadIdx.x;
   const float v = x[at];
   const float r = 1.0f / sqrtf(block_sum<kHead>(v * v, lds) / (float) kHead + eps);
   y[at] = v * r * w[threadIdx.x] * sigmoid(z[at]);
+  x16_side(side, at, y[at]);
 }
 
 }  // namespace
@@ -177,8 +179,8 @@ extern "C" bool q4x_delta(const float* qkv, const float* g, const float* b, uint
 }
 
 extern "C" bool q4x_gated_norm(const float* x, const float* w, const float* z, uint32_t n_tok, uint32_t heads,
-                               uint32_t dim, float eps, float* y, void* stream) {
+                               uint32_t dim, float eps, float* y, const Q4xX16* side, void* stream) {
   if (!x || !w || !z || !y || !n_tok || !heads || dim != kHead) return false;
-  gated_norm_kernel<<<dim3(heads, n_tok), kHead, 0, st(stream)>>>(x, w, z, eps, y);
+  gated_norm_kernel<<<dim3(heads, n_tok), kHead, 0, st(stream)>>>(x, w, z, eps, y, side_of(side));
   return ok();
 }

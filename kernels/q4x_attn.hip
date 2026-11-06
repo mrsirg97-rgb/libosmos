@@ -1,6 +1,7 @@
 // Qwen3.8-Flash-Next's attention (include/osmos/gpu/q4x_ops.h): q's and k's norm and rotation, and the gated
 // attention over the cache - dense, its keys' scores in a block's LDS
 #include "block.h"
+#include "x16side.h"
 
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
@@ -146,7 +147,7 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const f
 // row reads: those up to its own position, whatever its batch computed
 __global__ __launch_bounds__(kHead) void fa_merge_kernel(const float* ml, const float* po, const float* gate,
                                                          uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-                                                         uint32_t pos0, float* out) {
+                                                         uint32_t pos0, float* out, Q4xX16 side) {
   const uint32_t t = blockIdx.x / heads, h = blockIdx.x % heads, d = threadIdx.x, G = heads / kv_heads;
   const uint32_t rows = n_tok * G, R = t * G + h % G, kvh = h / G, last = (pos0 + t) / kChunk;
   float mx = -INFINITY;
@@ -159,6 +160,7 @@ __global__ __launch_bounds__(kHead) void fa_merge_kernel(const float* ml, const 
   }
   const uint64_t i = ((uint64_t) t * heads + h) * kHead + d;
   out[i] = acc / sum * sigmoid(gate[i]);
+  x16_side(side, i, out[i]);
 }
 
 }  // namespace
@@ -181,7 +183,7 @@ extern "C" uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx) {
 
 extern "C" bool q4x_attn(const float* q, const float* kc, const float* vc, uint32_t n_tok, uint32_t heads,
                          uint32_t kv_heads, uint32_t dim, uint32_t pos0, const float* gate, float* scratch,
-                         float* out, void* stream) {
+                         float* out, const Q4xX16* side, void* stream) {
   if (!n_tok || !heads || !kv_heads || heads % kv_heads || heads / kv_heads > kTile || dim != kHead ||
       pos0 + n_tok > OPS_Q4X_MAX_KEYS)
     return false;
@@ -194,7 +196,9 @@ extern "C" bool q4x_attn(const float* q, const float* kc, const float* vc, uint3
     fa_kernel<<<dim3(n, kv_heads, chunks), kWaves * 32, 0, st(stream)>>>(
         q + at, kc, vc, n, heads, kv_heads, p0, ml, po);
     if (!ok()) return false;
-    fa_merge_kernel<<<n * heads, kHead, 0, st(stream)>>>(ml, po, gate + at, n, heads, kv_heads, p0, out + at);
+    Q4xX16 sd = side_of(side);  // this piece's rows: from its first token's
+    if (sd.x16) sd.x16 = (_Float16*) sd.x16 + mm::x16_at(t0, 0, sd.cols);
+    fa_merge_kernel<<<n * heads, kHead, 0, st(stream)>>>(ml, po, gate + at, n, heads, kv_heads, p0, out + at, sd);
     if (!ok()) return false;
   }
   return true;

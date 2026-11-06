@@ -55,10 +55,10 @@ static void long_context(const float* dq, const float* dk, const float* dv, cons
   float *ck = dev_from(lk), *cv = dev_from(lv), *out = dev_alloc<float>((size_t) kLongTok * kQ);
   const uint32_t p0 = kLongCtx - kLongTok;
   const float *qq = dq + (size_t) (kTok - kLongTok) * kQ, *gg = dg + (size_t) (kTok - kLongTok) * kQ;
-  CHECK(q4x_attn(qq, ck, cv, kLongTok, kHeads, kKv, kHead, p0, gg, scr, out, nullptr));
+  CHECK(q4x_attn(qq, ck, cv, kLongTok, kHeads, kKv, kHead, p0, gg, scr, out, nullptr, nullptr));
   const std::vector<float> batch = host_of(out, (size_t) kLongTok * kQ);
   for (uint32_t t = 0; t < kLongTok; t++) {
-    CHECK(q4x_attn(qq + (size_t) t * kQ, ck, cv, 1, kHeads, kKv, kHead, p0 + t, gg + (size_t) t * kQ, scr, out,
+    CHECK(q4x_attn(qq + (size_t) t * kQ, ck, cv, 1, kHeads, kKv, kHead, p0 + t, gg + (size_t) t * kQ, scr, out, nullptr,
                    nullptr));
     CHECK(std::memcmp(host_of(out, kQ).data(), &batch[(size_t) t * kQ], kQ * 4) == 0);
   }
@@ -106,8 +106,8 @@ int main() {
     std::printf("[test_q4x_attn_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its dump or a GPU\n");
     return 77;
   }
-  CHECK(!q4x_attn(nullptr, nullptr, nullptr, 1, kHeads, 5, kHead, 0, nullptr, nullptr, nullptr, nullptr));  // 24 % 5
-  CHECK(!q4x_attn(nullptr, nullptr, nullptr, 1, kHeads, kKv, kHead, OPS_Q4X_MAX_KEYS, nullptr, nullptr, nullptr,
+  CHECK(!q4x_attn(nullptr, nullptr, nullptr, 1, kHeads, 5, kHead, 0, nullptr, nullptr, nullptr, nullptr, nullptr));  // 24 % 5
+  CHECK(!q4x_attn(nullptr, nullptr, nullptr, 1, kHeads, kKv, kHead, OPS_Q4X_MAX_KEYS, nullptr, nullptr, nullptr, nullptr,
                   nullptr));
   float* scr = dev_alloc<float>(q4x_attn_scratch(kHeads, kLongCtx));
   const GgufTensor *tq, *tk, *tv, *to;
@@ -131,18 +131,18 @@ int main() {
   const std::vector<float> rg = gates_of(full);
   float *dq = dev_from(rq.v), *dk = dev_from(rk.v), *dv = dev_from(rv.v), *dg = dev_from(rg);
   float* out = dev_alloc<float>((size_t) kTok * kQ);
-  CHECK(q4x_attn(dq, dk, dv, kTok, kHeads, kKv, kHead, 0, dg, scr, out, nullptr));
+  CHECK(q4x_attn(dq, dk, dv, kTok, kHeads, kKv, kHead, 0, dg, scr, out, nullptr, nullptr));
   const std::vector<float> whole = host_of(out, (size_t) kTok * kQ);
-  CHECK(q4x_attn(dq, dk, dv, kHalf, kHeads, kKv, kHead, 0, dg, scr, out, nullptr));
+  CHECK(q4x_attn(dq, dk, dv, kHalf, kHeads, kKv, kHead, 0, dg, scr, out, nullptr, nullptr));
   CHECK(q4x_attn(dq + (size_t) kHalf * kQ, dk, dv, kHalf, kHeads, kKv, kHead, kHalf, dg + (size_t) kHalf * kQ, scr,
-                 out + (size_t) kHalf * kQ, nullptr));
+                 out + (size_t) kHalf * kQ, nullptr, nullptr));
   CHECK(std::memcmp(host_of(out, whole.size()).data(), whole.data(), whole.size() * 4) == 0);
   Ref ex;
   ex.v = exact_attn(rq.v, rk.v, rv.v, rg);
   held("  osmos against exact (attn_gated)", whole, ex, 1.0, kF16Rel);
   held("  llama.cpp against exact (attn_gated)", ref("attn_gated-3").v, ex, 1.0, kRelL2);
   for (uint32_t t = kTok - 3; t < kTok; t++) {  // one at a time
-    CHECK(q4x_attn(dq + (size_t) t * kQ, dk, dv, 1, kHeads, kKv, kHead, t, dg + (size_t) t * kQ, scr, out, nullptr));
+    CHECK(q4x_attn(dq + (size_t) t * kQ, dk, dv, 1, kHeads, kKv, kHead, t, dg + (size_t) t * kQ, scr, out, nullptr, nullptr));
     CHECK(std::memcmp(host_of(out, kQ).data(), &whole[(size_t) t * kQ], kQ * 4) == 0);
   }
   std::printf("  the tokens in halves, and one at a time: the bits of one run\n");
@@ -157,7 +157,7 @@ int main() {
   CHECK(mv_strided(tv->type, wv, kKvW, kDim, hm, kDim, kTok, vc, kKvW, nullptr));
   held("q's projection (Qcur_full)", host_of(qf, (size_t) kTok * 2 * kQ), full);
   CHECK(q4x_qk(qf, kr, kTok, kHeads, kKv, kHead, kRope, qn, kn, kEps, 0, kBase, q, gate, kc, nullptr));
-  CHECK(q4x_attn(q, kc, vc, kTok, kHeads, kKv, kHead, 0, gate, scr, out, nullptr));
+  CHECK(q4x_attn(q, kc, vc, kTok, kHeads, kKv, kHead, 0, gate, scr, out, nullptr, nullptr));
   CHECK(mv_strided(to->type, wo, kDim, kQ, out, kQ, kTok, res, kDim, nullptr));
   held("layer 3 whole (attn_output)", host_of(res, (size_t) kTok * kDim), ref("attn_output-3"), 1.0, kChainRel);
   gguf_destroy(gg);

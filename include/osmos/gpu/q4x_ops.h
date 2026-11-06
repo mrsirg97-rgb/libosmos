@@ -4,15 +4,24 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* an op's output also as mm's f16 activations (mm.h's x16: tiled, rows of `cols`), the very values mm_x16 would make
+   of it - so the matmul after it skips the conversion; NULL: none. an f16 overflow sets *overflow, as mm_x16's */
+typedef struct Q4xX16
+{
+  void *x16;
+  int32_t *overflow;
+  uint32_t cols;
+} Q4xX16;
+
 #define OPS_Q4X_MAX_KEYS 8192 /* a token's keys the dense attention takes (its scores in a block's LDS) */
 
 /* Qwen3.8-Flash-Next's own steps (DESIGN.md, "Qwen's forward, op by op"), F32 on the GPU, queued on `stream` */
 
 bool q4x_hc_norm(const float *h, const float *w, uint32_t n_tok, uint32_t hc, uint32_t dim, float eps, float *xn,
-                 void *stream);
-bool q4x_scale_silu(float *x, uint64_t n, float scale, void *stream);
+                 const Q4xX16 *side, void *stream);
+bool q4x_scale_silu(float *x, uint64_t n, float scale, const Q4xX16 *side, void *stream);
 bool q4x_hc_gated_mean(const float *xn, const float *gate, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out,
-                       void *stream);
+                       const Q4xX16 *side, void *stream);
 bool q4x_hc_combine(float *h, const float *out, const float *inject, uint32_t n_tok, uint32_t hc, uint32_t dim,
                     float inject_scale, void *stream);
 
@@ -23,7 +32,7 @@ bool q4x_ssm_gates(const float *alpha, const float *beta, const float *dt, const
 bool q4x_delta(const float *qkv, const float *g, const float *b, uint32_t n_tok, uint32_t k_heads, uint32_t v_heads,
                uint32_t dim, float eps, float *qk, float *ring, uint32_t slots, uint32_t cur, float *out, void *stream);
 bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_tok, uint32_t heads, uint32_t dim,
-                    float eps, float *y, void *stream);
+                    float eps, float *y, const Q4xX16 *side, void *stream);
 
 bool q4x_top(const float *logits, uint32_t n, int32_t *id, float *p, void *stream);
 bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out, void *stream);
@@ -33,7 +42,7 @@ bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, 
             float *q, float *gate, float *k_out, void *stream);
 uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx);
 bool q4x_attn(const float *q, const float *kc, const float *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-              uint32_t dim, uint32_t pos0, const float *gate, float *scratch, float *out, void *stream);
+              uint32_t dim, uint32_t pos0, const float *gate, float *scratch, float *out, const Q4xX16 *side, void *stream);
 
 bool q4x_route(const float *logits, uint32_t n_tok, uint32_t n_exp, uint32_t k, int32_t *ids, float *w,
                int32_t *rows, void *stream);
@@ -60,7 +69,7 @@ void q4x_expert_bounds(uint32_t n, uint32_t n_exp, Q4xExpertBounds *b);
 bool q4x_expert_tiles(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t dim, uint32_t ff,
                       const Q4xExpertTiles *t, void *stream);
 bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
-bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, void *stream);
+bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, const Q4xX16 *side, void *stream);
 bool q4x_moe_sum(const float *y, const int32_t *where, const float *w, uint32_t n_tok, uint32_t k, uint32_t dim,
                  const float *shared, const float *shared_logit, float *out, void *stream);
 
@@ -76,6 +85,9 @@ bool q4x_streams(const float *x, uint32_t n_tok, uint32_t hc, uint32_t dim, floa
 /*
 the residual h: n_tok tokens of hc streams of dim, h[(t hc + s) dim + d]. false, nothing queued, for an empty shape,
 hc past 8 or a launch refused.
+
+(q4x_hc_norm, q4x_scale_silu, q4x_hc_gated_mean, q4x_gated_norm, q4x_swiglu, q4x_attn: `side` their output's f16
+copy too, Q4xX16's - or NULL)
 
 q4x_hc_norm
   xn[t][s][d] = h[t][s][d] / sqrt(mean over d of h[t][s][]^2 + eps) * w[s dim + d]: an RMS norm a stream, its

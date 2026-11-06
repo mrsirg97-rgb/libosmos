@@ -68,7 +68,7 @@ static Routed routed(const Experts& e, const float* x, const int32_t* ids, uint3
   CHECK(mm_x16_rows(x, kDim, t.gidx, slots, kDim, x16, over, nullptr));
   runs(e.tg, t.ptr[0], t.cnt, bd, kFf, kDim, x16, t.xg, ga, t.yg);
   runs(e.tu, t.ptr[1], t.cnt, bd, kFf, kDim, x16, t.xg, up, t.yg);
-  CHECK(q4x_swiglu(ga, up, (uint64_t) picks * kFf, ga, nullptr));
+  CHECK(q4x_swiglu(ga, up, (uint64_t) picks * kFf, ga, nullptr, nullptr));
   CHECK(mm_x16_rows(ga, kFf, t.hidx, slots, kFf, x16, over, nullptr));
   runs(e.td, t.ptr[2], t.cnt, bd, kDim, kFf, x16, t.xd, y, t.yd);
   CHECK(host_of(reinterpret_cast<float*>(over), 1)[0] == 0.0f);
@@ -113,7 +113,7 @@ int main() {
   float *sl = dev_alloc<float>(kTok), *out = dev_alloc<float>(kTok * kDim), *zero = dev_alloc<float>(kTok * kDim);
   CHECK(mv_strided(tsg->type, sg, kFf, kDim, x, kDim, kTok, sh_g, kFf, nullptr));
   CHECK(mv_strided(tsu->type, su, kFf, kDim, x, kDim, kTok, sh_u, kFf, nullptr));
-  CHECK(q4x_swiglu(sh_g, sh_u, (uint64_t) kTok * kFf, sh_g, nullptr));
+  CHECK(q4x_swiglu(sh_g, sh_u, (uint64_t) kTok * kFf, sh_g, nullptr, nullptr));
   CHECK(mv_strided(tsd->type, sd, kDim, kFf, sh_g, kFf, kTok, sh, kDim, nullptr));
   CHECK(mv_strided(ts->type, sgate, 1, kDim, x, kDim, kTok, sl, 1, nullptr));
   held("shared expert (ffn_shexp)", host_of(sh, kTok * kDim), ref("ffn_shexp-0"), 1.0, kChainRel);

@@ -68,8 +68,8 @@ int main() {
   float *gate = dev_alloc<float>(kTok * kHc), *gated = dev_alloc<float>((size_t) kTok * kHd);
   CHECK(mv_strided(tk->type, wk, kHd, kDim, emb, kDim, kTok, key, kHd, nullptr));
   CHECK(mv_strided(tv->type, wv, kDim, kDim, emb, kDim, kTok, val, kDim, nullptr));
-  CHECK(q4x_hc_norm(key, nk, kTok, kHc, kDim, kEps, kn, nullptr));
-  CHECK(q4x_hc_norm(h, nq, kTok, kHc, kDim, kEps, qn, nullptr));
+  CHECK(q4x_hc_norm(key, nk, kTok, kHc, kDim, kEps, kn, nullptr, nullptr));
+  CHECK(q4x_hc_norm(h, nq, kTok, kHc, kDim, kEps, qn, nullptr, nullptr));
   CHECK(q4x_ple_gate(kn, qn, val, kTok, kHc, kDim, gate, gated, nullptr));
   held("the gate (ple_gate)", host_of(gate, kTok * kHc), ref("ple_gate-1"), 1.0, kRelL2);
   held("the gated value (ple_gated_value)", host_of(gated, (size_t) kTok * kHd), ref("ple_gated_value-1"), 1.0,
@@ -80,7 +80,7 @@ int main() {
   const uint32_t nh = (kTaps - 1) * dil;
   float *rgd = dev_from(rg.v), *nrm = dev_alloc<float>((size_t) kTok * kHd), *hist = dev_alloc<float>((size_t) nh * kHd);
   float* conv = dev_alloc<float>((size_t) kTok * kHd);
-  CHECK(q4x_hc_norm(rgd, nc, kTok, kHc, kDim, kEps, nrm, nullptr));
+  CHECK(q4x_hc_norm(rgd, nc, kTok, kHc, kDim, kEps, nrm, nullptr, nullptr));
   CHECK(hipMemset(hist, 0, (size_t) nh * kHd * 4) == hipSuccess);
   CHECK(q4x_conv(nrm, kTok, kHd, kTaps, dil, cw, hist, 1, 0, conv, nullptr));
   const std::vector<float> whole = host_of(conv, (size_t) kTok * kHd);
@@ -93,7 +93,7 @@ int main() {
   // the residual after it (llama.cpp's own gated value and conv), through layer 1's mixer norm
   float* hn = dev_alloc<float>((size_t) kTok * kHd);
   CHECK(q4x_add2(h, rgd, conv, (uint64_t) kTok * kHd, nullptr));
-  CHECK(q4x_hc_norm(h, (const float*) dev_tensor(g, "blk.1.hc_attn_norm.weight"), kTok, kHc, kDim, kEps, hn, nullptr));
+  CHECK(q4x_hc_norm(h, (const float*) dev_tensor(g, "blk.1.hc_attn_norm.weight"), kTok, kHc, kDim, kEps, hn, nullptr, nullptr));
   held("the residual after it (hc_norm-1)", host_of(hn, (size_t) kTok * kHd), ref("hc_norm-1"), 1.0, kExactRel);
   q4x_weights_destroy(w);
   gguf_destroy(g);

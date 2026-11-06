@@ -47,6 +47,16 @@ bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, ui
   return mm_on(f, TY(t0), q4x_dev(f, t0), rows0, y0, ys0, q4x_dev(f, t1), rows1, y1, ys1, cols, x, xs, n, ready);
 }
 
+/* an op's output also as mm's f16 (b.x16), for the matmul after it - a step within one x16's tokens; else NULL (the
+   matmul converts) */
+static const Q4xX16 *side(Q4xForward *f, uint32_t n, uint32_t cols, Q4xX16 *s)
+{
+  if (n > MM_MAX_TOKENS)
+    return NULL;
+  *s = (Q4xX16){f->b.x16, f->b.overflow, cols};
+  return s;
+}
+
 bool q4x_overflow_ok(Q4xForward *f, char *err)
 {
   if (hipMemcpy(f->b.pin_overflow, f->b.overflow, 4, hipMemcpyDeviceToHost) != hipSuccess)
@@ -68,9 +78,14 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t hc = (uint32_t)g->hc, D = (uint32_t)g->n_embd, hd = hc * D, r = (uint32_t)g->hc_rank;
-  return q4x_hc_norm(b->h, fv(f, norm), n, hc, D, g->rms_eps, b->xn, NULL) && mat(f, down, r, hd, b->xn, hd, n, b->lo, r) &&
-         q4x_scale_silu(b->lo, (uint64_t)n * r, 1.0f / (float)hc, NULL) && mat(f, up, hd, r, b->lo, r, n, b->gate, hd) &&
-         q4x_hc_gated_mean(b->xn, b->gate, n, hc, D, b->mixed, NULL) &&
+  Q4xX16 sd;
+  /* each op's output its f16 too (side): the matmul after it ready; b.x16 then the mixed input's, for the block's */
+  const bool ready = n <= MM_MAX_TOKENS;
+  return q4x_hc_norm(b->h, fv(f, norm), n, hc, D, g->rms_eps, b->xn, side(f, n, hd, &sd), NULL) &&
+         q4x_mat(f, down, r, hd, b->xn, hd, n, b->lo, r, ready) &&
+         q4x_scale_silu(b->lo, (uint64_t)n * r, 1.0f / (float)hc, side(f, n, r, &sd), NULL) &&
+         q4x_mat(f, up, hd, r, b->lo, r, n, b->gate, hd, ready) &&
+         q4x_hc_gated_mean(b->xn, b->gate, n, hc, D, b->mixed, side(f, n, D, &sd), NULL) &&
          (!inject || mat(f, inject, hc, hd, b->xn, hd, n, b->inj, hc));
 }
 
@@ -81,15 +96,18 @@ bool q4x_deltanet(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, vh = (uint32_t)g->ssm_v_heads, in = (uint32_t)g->ssm_inner;
   const uint32_t ch = 2u * (uint32_t)g->ssm_groups * (uint32_t)g->ssm_state + in;
-  return q4x_mat2(f, L->qkv, ch, b->qkv, ch, L->gate, in, b->z, in, D, b->mixed, D, n, false) &&
+  Q4xX16 sd;
+  const bool ready = n <= MM_MAX_TOKENS; /* b.x16 the mixer's mixed (q4x_mix), then the gated norm's */
+  return q4x_mat2(f, L->qkv, ch, b->qkv, ch, L->gate, in, b->z, in, D, b->mixed, D, n, ready) &&
          mat(f, L->alpha, vh, D, b->mixed, D, n, b->al, vh) && mat(f, L->beta, vh, D, b->mixed, D, n, b->be, vh) &&
          q4x_ssm_gates(b->al, b->be, fv(f, L->dt), fv(f, L->a), n, vh, b->g, b->b, NULL) &&
          q4x_conv(b->qkv, n, ch, (uint32_t)g->ssm_conv, 1, fv(f, L->conv), s->conv[l], Q4X_SLOTS, s->cur, b->cv,
                   NULL) &&
          q4x_delta(b->cv, b->g, b->b, n, (uint32_t)g->ssm_groups, vh, (uint32_t)g->ssm_state, g->rms_eps, b->qkn,
                    s->ssm[l], Q4X_SLOTS, s->cur, b->ro, NULL) &&
-         q4x_gated_norm(b->ro, fv(f, L->ssm_norm), b->z, n, vh, (uint32_t)g->ssm_state, g->rms_eps, b->fo, NULL) &&
-         mat(f, L->ssm_out, D, in, b->fo, in, n, b->out, D);
+         q4x_gated_norm(b->ro, fv(f, L->ssm_norm), b->z, n, vh, (uint32_t)g->ssm_state, g->rms_eps, b->fo,
+                        side(f, n, in, &sd), NULL) &&
+         q4x_mat(f, L->ssm_out, D, in, b->fo, in, n, b->out, D, ready);
 }
 
 bool q4x_attention(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32_t pos, uint32_t n)
@@ -98,13 +116,14 @@ bool q4x_attention(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads;
   const uint32_t hd = (uint32_t)g->head_dim, q = heads * hd, kv = kvh * hd;
-  return mat(f, L->q, 2 * q, D, b->mixed, D, n, b->qf, 2 * q) &&
-         q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, vc + (uint64_t)pos * kv, kv, D, b->mixed, D, n,
-                  mm_takes(L->q, 2 * q, D, D, 2 * q)) &&
+  Q4xX16 sd;
+  const bool ready = n <= MM_MAX_TOKENS; /* b.x16 the mixer's mixed (q4x_mix), then the attention's output */
+  return q4x_mat(f, L->q, 2 * q, D, b->mixed, D, n, b->qf, 2 * q, ready) &&
+         q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, vc + (uint64_t)pos * kv, kv, D, b->mixed, D, n, ready) &&
          q4x_qk(b->qf, b->kr, n, heads, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm), fv(f, L->k_norm), g->rms_eps,
                 pos, g->rope_base, b->q, b->gt, kc + (uint64_t)pos * kv, NULL) &&
-         q4x_attn(b->q, kc, vc, n, heads, kvh, hd, (uint32_t)pos, b->gt, b->fa, b->ao, NULL) &&
-         mat(f, L->out, D, q, b->ao, q, n, b->out, D);
+         q4x_attn(b->q, kc, vc, n, heads, kvh, hd, (uint32_t)pos, b->gt, b->fa, b->ao, side(f, n, q, &sd), NULL) &&
+         q4x_mat(f, L->out, D, q, b->ao, q, n, b->out, D, ready);
 }
 
 /* the cache rows alone (the MTP head's seeding): k and v of b.mixed's n tokens at pos .., k normed and roped */
@@ -113,7 +132,8 @@ bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, in
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, kvh = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim, kv = kvh * hd;
-  return q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, vc + (uint64_t)pos * kv, kv, D, b->mixed, D, n, false) &&
+  return q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, vc + (uint64_t)pos * kv, kv, D, b->mixed, D, n,
+                  n <= MM_MAX_TOKENS) && /* b.x16 the mixer's mixed (q4x_mix) */
          q4x_qk(b->qf, b->kr, n, 0, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm), fv(f, L->k_norm), g->rms_eps, pos,
                 g->rope_base, b->q, b->gt, kc + (uint64_t)pos * kv, NULL);
 }
@@ -142,6 +162,7 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   Q4xExpertBounds bd;
   q4x_expert_bounds(e, E, &bd);
   const GgufTensor *t[Q4X_GROUP_TENSORS] = {L->exp_gate, L->exp_up, L->exp_down};
+  Q4xX16 sd;
   Q4xExpertTiles et = {.cnt = b->cnt, .gidx = b->gidx, .hidx = b->hidx, .xg = b->xg, .yg = b->yg, .xd = b->xd,
                        .yd = b->yd, .where = b->where};
   for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
@@ -152,11 +173,13 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
          mm_x16_rows(b->mixed, D, b->gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
          experts(t[0], et.ptr[0], b, &bd, ff, D, b->xg, b->ga, b->yg) &&
          experts(t[1], et.ptr[1], b, &bd, ff, D, b->xg, b->up, b->yg) &&
-         q4x_swiglu(b->ga, b->up, (uint64_t)e * ff, b->ga, NULL) &&
+         q4x_swiglu(b->ga, b->up, (uint64_t)e * ff, b->ga, NULL, NULL) &&
          mm_x16_rows(b->ga, ff, b->hidx, bd.slots, ff, b->xe16, b->overflow, NULL) &&
          experts(t[2], et.ptr[2], b, &bd, D, ff, b->xd, b->y, b->yd) &&
-         q4x_mat2(f, L->sh_gate, sff, b->shg, sff, L->sh_up, sff, b->shu, sff, D, b->mixed, D, n, false) &&
-         q4x_swiglu(b->shg, b->shu, (uint64_t)n * sff, b->shg, NULL) && mat(f, L->sh_down, D, sff, b->shg, sff, n, b->sh, D) &&
+         /* b.x16 still the mixer's mixed: the experts' are their own (b.xe16) */
+         q4x_mat2(f, L->sh_gate, sff, b->shg, sff, L->sh_up, sff, b->shu, sff, D, b->mixed, D, n, n <= MM_MAX_TOKENS) &&
+         q4x_swiglu(b->shg, b->shu, (uint64_t)n * sff, b->shg, side(f, n, sff, &sd), NULL) &&
+         q4x_mat(f, L->sh_down, D, sff, b->shg, sff, n, b->sh, D, n <= MM_MAX_TOKENS) &&
          mat(f, L->sh_gate_inp, 1, D, b->mixed, D, n, b->sl, 1) &&
          q4x_moe_sum(b->y, b->where, b->w, n, k, D, b->sh, b->sl, b->out, NULL);
 }
@@ -172,10 +195,10 @@ bool q4x_ple(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
   return q4x_rows(TY(tab), q4x_dev(f, tab), tab->bytes / tab->dims[1], (uint32_t)tab->dims[0], b->ple_rows, n * heads,
                   b->emb, NULL) &&
          q4x_mat2(f, L->ple_key, hd, b->key, hd, L->ple_value, D, b->val, D, D, b->emb, D, n, false) &&
-         q4x_hc_norm(b->key, fv(f, L->ple_norm_key), n, hc, D, g->rms_eps, b->kn, NULL) &&
-         q4x_hc_norm(b->h, fv(f, L->ple_norm_query), n, hc, D, g->rms_eps, b->qn, NULL) &&
+         q4x_hc_norm(b->key, fv(f, L->ple_norm_key), n, hc, D, g->rms_eps, b->kn, NULL, NULL) &&
+         q4x_hc_norm(b->h, fv(f, L->ple_norm_query), n, hc, D, g->rms_eps, b->qn, NULL, NULL) &&
          q4x_ple_gate(b->kn, b->qn, b->val, n, hc, D, b->pg, b->gated, NULL) &&
-         q4x_hc_norm(b->gated, fv(f, L->ple_norm_conv), n, hc, D, g->rms_eps, b->nrm, NULL) &&
+         q4x_hc_norm(b->gated, fv(f, L->ple_norm_conv), n, hc, D, g->rms_eps, b->nrm, NULL, NULL) &&
          q4x_conv(b->nrm, n, hd, (uint32_t)g->ple_conv, (uint32_t)g->ple_ngram, fv(f, L->ple_conv), s->ple_hist,
                   Q4X_SLOTS, s->cur, b->conv, NULL) &&
          q4x_add2(b->h, b->gated, b->conv, (uint64_t)n * hd, NULL);
