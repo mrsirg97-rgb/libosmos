@@ -2478,6 +2478,21 @@ at once, drafting).
 - not swept to the end: a cap on a round's drafts (DRAFT_MAX 2-4) - the floors' trend says more drafts through is
   cheaper, the operator's call to stop there.
 
+## 0.3.2: the low-power work (2026-11-05)
+
+each change measured at the low-power profile (UD-IQ1_M; dbench drafted and plain, then the agents bench), kept in its
+own commit when it is no worse and no bit moves.
+
+- **the experts' registers** (kernels/q8.h kFullWaves): the drafted decode's kernel trace (rocprofv3, 33.2 ms a token,
+  the GPU busy 85%) put the experts at 11.7 ms; q8bench (tools/bench, 19 of a layer's experts, the forward's launch)
+  showed the int8 kernels near the memory's rate at 1-4 tokens and a cliff at 5-6 - 98-107 registers a lane, 12 waves a
+  SIMD not 16: gate+up 1,143 us at 5 tokens against 704 at 4. asking for 16 waves (amdgpu_waves_per_eu) gives 5 tokens
+  798 us, 6 tokens 1,004 (from 1,543), down at 6 563 (from 909); 1-4 the same. in the forward, level - a drafted step's
+  experts are mostly 1-2 tokens each: drafted 30.9 / 30.9 tok/s, 2.35 J against 30.9 / 30.8, 2.35 / 2.36 (interleaved,
+  ~/bench/v032/waves); plain 15.9 against 15.7; agents 481.3 s, 3.79 J an answer token, first token p95 62.0 s, turn
+  done p95 103.6 s (0.3.1: 483.0, 3.84, 62.9, 103.2). kept: no loss, the answers' hashes the same, and a verify block
+  of 5-6 tokens on an expert no longer falls off the cliff.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

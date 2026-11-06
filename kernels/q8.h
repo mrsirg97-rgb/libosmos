@@ -11,6 +11,10 @@ constexpr int kWave = 32;
 constexpr int kWavesPerBlock = 8;
 constexpr int kWords = LANE_Q8_VALUES / 4;  // a block's int8 x as 32-bit words
 constexpr int kBlocksPer = quant::kQK / LANE_Q8_VALUES;
+// a SIMD's waves the kernels ask for: 16 (gfx1151's 1536 VGPRs a SIMD at <= 96 a lane). 5 tokens and up took 98-107
+// registers and ran at 12 - their memory's latency less hidden: gate+up 19 experts at 5 tokens 1,143 us against 704 at
+// 4 (q8bench, low-power; DESIGN.md "0.3.2"). the arithmetic and its order are the source's: no bit moves
+constexpr int kFullWaves = 16;
 
 __device__ inline int dot4(int a, int b, int c) { return __builtin_amdgcn_sudot4(true, a, true, b, c, false); }
 
@@ -130,7 +134,8 @@ __device__ inline void in_rows(const int32_t* xin, uint32_t r0, uint32_t cnt, ui
 // l + L, ... in order for each of its NT tokens (input rows by in_rows), then the lanes' tree. rows past cnt[m] summed,
 // not stored
 template <quant::Type T, int NT, int L>
-__global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const uint8_t* const* __restrict__ w,
+__global__ __launch_bounds__(kWave* kWavesPerBlock) __attribute__((amdgpu_waves_per_eu(kFullWaves)))
+void group_tok_kernel(const uint8_t* const* __restrict__ w,
                                                                            const int32_t* __restrict__ cnt,
                                                                            const int32_t* __restrict__ xrow,
                                                                            const int32_t* __restrict__ xin,
@@ -169,7 +174,8 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const 
 // then lane 0 of a row r h = lane_swiglu(gate, up, lim, scale[win ? win[r] : r]) - swiglu_lane_kernel's operation on the sums
 // q8_group_tok gives, its two outputs never written
 template <quant::Type T, int NT, int L>
-__global__ __launch_bounds__(kWave* kWavesPerBlock) void gate_up_kernel(const uint8_t* const* __restrict__ wg,
+__global__ __launch_bounds__(kWave* kWavesPerBlock) __attribute__((amdgpu_waves_per_eu(kFullWaves)))
+void gate_up_kernel(const uint8_t* const* __restrict__ wg,
                                                                          const uint8_t* const* __restrict__ wu,
                                                                          const int32_t* __restrict__ cnt,
                                                                          const int32_t* __restrict__ xrow,
