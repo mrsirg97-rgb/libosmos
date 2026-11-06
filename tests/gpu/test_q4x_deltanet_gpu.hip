@@ -37,11 +37,11 @@ static Layer layer0(const Gguf* g) {
 static std::vector<float> conv(const Layer& l, const float* x) {
   float *hist = dev_alloc<float>((kTaps - 1) * kCh), *y = dev_alloc<float>((size_t) kTok * kCh);
   CHECK(hipMemset(hist, 0, (kTaps - 1) * kCh * 4) == hipSuccess);
-  CHECK(q4x_conv(x, kTok, kCh, kTaps, l.conv, hist, y, nullptr));
+  CHECK(q4x_conv(x, kTok, kCh, kTaps, 1, l.conv, hist, y, nullptr));
   const std::vector<float> whole = host_of(y, (size_t) kTok * kCh);
   CHECK(hipMemset(hist, 0, (kTaps - 1) * kCh * 4) == hipSuccess);
-  CHECK(q4x_conv(x, kHalf, kCh, kTaps, l.conv, hist, y, nullptr));
-  CHECK(q4x_conv(x + (size_t) kHalf * kCh, kHalf, kCh, kTaps, l.conv, hist, y + (size_t) kHalf * kCh, nullptr));
+  CHECK(q4x_conv(x, kHalf, kCh, kTaps, 1, l.conv, hist, y, nullptr));
+  CHECK(q4x_conv(x + (size_t) kHalf * kCh, kHalf, kCh, kTaps, 1, l.conv, hist, y + (size_t) kHalf * kCh, nullptr));
   CHECK(std::memcmp(host_of(y, whole.size()).data(), whole.data(), whole.size() * 4) == 0);
   CHECK(hipFree(hist) == hipSuccess && hipFree(y) == hipSuccess);
   return whole;
@@ -74,7 +74,7 @@ int main() {
     std::printf("[test_q4x_deltanet_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its dump or a GPU\n");
     return 77;
   }
-  CHECK(!q4x_conv(nullptr, 0, kCh, kTaps, nullptr, nullptr, nullptr, nullptr));
+  CHECK(!q4x_conv(nullptr, 0, kCh, kTaps, 1, nullptr, nullptr, nullptr, nullptr));
   CHECK(!q4x_delta(nullptr, nullptr, nullptr, 1, 0, kVHeads, kHead, kEps, nullptr, nullptr, nullptr));
   CHECK(!q4x_delta(nullptr, nullptr, nullptr, 1, 7, kVHeads, kHead, kEps, nullptr, nullptr, nullptr));  // 48 % 7
   const Layer l = layer0(g);
@@ -110,7 +110,7 @@ int main() {
   CHECK(hipMemset(st, 0, (size_t) kVHeads * kHead * kHead * 4) == hipSuccess);
   CHECK(mv_strided(l.t_qkv, l.qkv, kCh, kDim, hm, kDim, kTok, qkv, kCh, nullptr));
   CHECK(mv_strided(l.t_gate, l.gate, kInner, kDim, hm, kDim, kTok, z, kInner, nullptr));
-  CHECK(q4x_conv(qkv, kTok, kCh, kTaps, l.conv, hist, cv, nullptr));
+  CHECK(q4x_conv(qkv, kTok, kCh, kTaps, 1, l.conv, hist, cv, nullptr));
   CHECK(q4x_delta(cv, gg, bb, kTok, kKHeads, kVHeads, kHead, kEps, st, ro2, nullptr));
   CHECK(q4x_gated_norm(ro2, l.norm, z, kTok, kVHeads, kHead, kEps, fo, nullptr));
   CHECK(mv_strided(l.t_out, l.out, kDim, kInner, fo, kInner, kTok, out, kDim, nullptr));

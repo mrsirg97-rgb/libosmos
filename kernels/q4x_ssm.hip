@@ -9,7 +9,7 @@ namespace {
 
 constexpr int kThreads = 256;
 constexpr int kHead = 128;                // a head's dim: the delta rule's block, a column of its state a thread
-constexpr uint32_t kMaxTaps = 8;
+constexpr uint32_t kMaxTaps = 8; /* a conv's taps, and its dilation, at most */
 constexpr float kSoftplusLinear = 20.0f;  // ggml's softplus: above it, x
 
 inline unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
@@ -18,26 +18,25 @@ inline bool ok() { return hipGetLastError() == hipSuccess; }
 
 __device__ inline float silu(float x) { return x / (1.0f + expf(-x)); }
 
-// x' = hist then x: token t's taps x'[t .. t + taps - 1], the oldest first
-__global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float* w,
+// x' = hist (h = (taps - 1) dil rows) then x: token t's taps x'[t + k dil], the oldest first
+__global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t dil, const float* w,
                             const float* hist, float* y) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= (uint64_t) n_tok * ch) return;
-  const uint32_t c = (uint32_t) (i % ch), t = (uint32_t) (i / ch), h = taps - 1;
+  const uint32_t c = (uint32_t) (i % ch), t = (uint32_t) (i / ch), h = (taps - 1) * dil;
   float sum = 0;
   for (uint32_t k = 0; k < taps; k++) {
-    const uint32_t at = t + k;  // in x'
+    const uint32_t at = t + k * dil;  // in x'
     const float v = at < h ? hist[(uint64_t) at * ch + c] : x[(uint64_t) (at - h) * ch + c];
     sum += v * w[(uint64_t) c * taps + k];
   }
   y[i] = silu(sum);
 }
 
-// the last taps - 1 of x' into hist, a channel a thread, oldest first (a slot read before it is written)
-__global__ void conv_hist_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, float* hist) {
+// the last h of x' into hist, a channel a thread, oldest first (a slot read before it is written)
+__global__ void conv_hist_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t h, float* hist) {
   const uint32_t c = blockIdx.x * kThreads + threadIdx.x;
   if (c >= ch) return;
-  const uint32_t h = taps - 1;
   for (uint32_t k = 0; k < h; k++) {
     const uint32_t at = n_tok + k;  // in x'
     hist[(uint64_t) k * ch + c] = at < h ? hist[(uint64_t) at * ch + c] : x[(uint64_t) (at - h) * ch + c];
@@ -102,12 +101,13 @@ __global__ __launch_bounds__(kHead) void gated_norm_kernel(const float* x, const
 
 }  // namespace
 
-extern "C" bool q4x_conv(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float* w, float* hist,
-                         float* y, void* stream) {
-  if (!x || !w || !hist || !y || !n_tok || !ch || taps < 2 || taps > kMaxTaps) return false;
-  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, w, hist, y);
+extern "C" bool q4x_conv(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t dilation,
+                         const float* w, float* hist, float* y, void* stream) {
+  if (!x || !w || !hist || !y || !n_tok || !ch || taps < 2 || taps > kMaxTaps || !dilation || dilation > kMaxTaps)
+    return false;
+  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, dilation, w, hist, y);
   if (!ok()) return false;
-  conv_hist_kernel<<<grid(ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, hist);
+  conv_hist_kernel<<<grid(ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, (taps - 1) * dilation, hist);
   return ok();
 }
 

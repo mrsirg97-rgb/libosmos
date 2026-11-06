@@ -2176,6 +2176,17 @@ same order for all 256 tokens; the routed experts 1.3e-7 of exact (16 tokens, do
 llama.cpp 8.4e-3; the whole MoE 5.6e-3 of llama.cpp's. the decode's grouping by expert (an expert read once for
 its tokens) is the speed work's: this is an entry a (token, expert), correct first.
 
+### the n-gram table (2026-11-06)
+
+src/q4x/ple.c: a token's rows hashed on the host (as llama.cpp does: ggml has no 64-bit integers or xor);
+kernels/q4x_ple.hip: the rows decoded, the per-stream gate, the residual's add; q4x_conv takes a dilation (the
+DeltaNet's 1, this layer's 3, its history 9 tokens). test_q4x_ple_gpu, layer 1, the dump's own tokens: the decoded
+rows **bit for bit** llama.cpp's embedding (every token's 16 rows the same - the first two's missing predecessors
+read as EOS); the gate 1.2e-4 and gated value 6.0e-4 (through Q8_0 key / value: llama.cpp's rounding); the dilated
+conv 5.7e-8; the residual after it 6.8e-8; the conv's history carried, two halves the bits of one run; a mutant
+taking the predecessors in the wrong order 132% off. the test's tensor upload reads 256 MB at a time (the table is
+28.8 GB; a read takes ~2 GB at most).
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a

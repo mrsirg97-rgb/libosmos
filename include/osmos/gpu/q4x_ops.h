@@ -16,8 +16,8 @@ bool q4x_hc_gated_mean(const float *xn, const float *gate, uint32_t n_tok, uint3
 bool q4x_hc_combine(float *h, const float *out, const float *inject, uint32_t n_tok, uint32_t hc, uint32_t dim,
                     float inject_scale, void *stream);
 
-bool q4x_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float *w, float *hist, float *y,
-              void *stream);
+bool q4x_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t dilation, const float *w,
+              float *hist, float *y, void *stream);
 bool q4x_ssm_gates(const float *alpha, const float *beta, const float *dt, const float *a, uint32_t n_tok,
                    uint32_t heads, float *g, float *b, void *stream);
 bool q4x_delta(const float *qkv, const float *g, const float *b, uint32_t n_tok, uint32_t k_heads, uint32_t v_heads,
@@ -39,6 +39,12 @@ bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len,
 bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, void *stream);
 bool q4x_moe_sum(const float *y, const float *w, uint32_t n_tok, uint32_t k, uint32_t dim, const float *shared,
                  const float *shared_logit, float *out, void *stream);
+
+bool q4x_rows(uint32_t type, const void *table, uint64_t row_bytes, uint32_t row_values, const int32_t *rows,
+              uint32_t n, float *out, void *stream);
+bool q4x_ple_gate(const float *key, const float *query, const float *value, uint32_t n_tok, uint32_t hc, uint32_t dim,
+                  float *gate, float *gated, void *stream);
+bool q4x_add2(float *h, const float *a, const float *b, uint64_t n, void *stream);
 
 #endif
 
@@ -64,9 +70,10 @@ q4x_hc_combine
 the Gated DeltaNet (a layer's, its tokens in order):
 
 q4x_conv
-  y[t][c] = silu(sum over k < taps of w[c taps + k] x'[t + k][c]), x' the last taps - 1 inputs before (hist[k][c],
-  oldest first) and then x: a depthwise causal conv, its current token the last tap. hist then holds the last taps - 1
-  of x' (the sequence's conv state).
+  y[t][c] = silu(sum over k < taps, in order, of w[c taps + k] x'[t + k dilation][c]), x' the last (taps - 1)
+  dilation inputs before (hist[i][c], oldest first) and then x: a depthwise causal conv, its current token the last
+  tap (the DeltaNet's dilation 1; the n-gram layer's its n-gram size). hist then holds x''s last (taps - 1) dilation
+  (the sequence's conv state).
 
 q4x_ssm_gates
   b[t][h] = sigmoid(beta[t][h]); g[t][h] = softplus(alpha[t][h] + dt[h]) a[h] (a = -exp(A_log): g <= 0, a decay).
@@ -114,4 +121,17 @@ q4x_swiglu
 q4x_moe_sum
   out[t][d] = (sum over j, in order, of w[t][j] y[t k + j][d]) + sigmoid(shared_logit[t]) shared[t][d]: the experts'
   weighted sum and the shared expert, gated.
+
+the n-gram table (PLE):
+
+q4x_rows
+  out[i][] = row rows[i] of the table, decoded (row_values of the type's values, row_bytes apart): a token's heads'
+  rows, one after another (its embedding: heads x row_values).
+
+q4x_ple_gate
+  key, query: [t][s][dim], each normed a stream already. s_ts = (sum over d, in order, of key[t][s][d] query[t][s][d])
+  / sqrt(dim); gate[t][s] = sigmoid(sgn(s_ts) sqrt(max(|s_ts|, 1e-6))); gated[t][s][d] = value[t][d] gate[t][s].
+
+q4x_add2
+  h[i] += a[i] + b[i] (a + b first, as llama.cpp adds them).
 */

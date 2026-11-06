@@ -81,16 +81,22 @@ inline std::vector<float> host_of(const float* p, size_t n) {
   return v;
 }
 
-// a model tensor's bytes on the GPU (its type the file's)
+// a model tensor's bytes on the GPU (its type the file's), read and copied a piece at a time (a read takes ~2 GB at
+// most; the n-gram table is 28.8)
+constexpr size_t kPiece = 256ull << 20;
 inline void* dev_tensor(const Gguf* g, const char* name, const GgufTensor** out = nullptr) {
   const GgufTensor* t = gguf_tensor(g, name);
   CHECK(t);
-  std::vector<uint8_t> b(t->bytes);
+  uint8_t* p = dev_alloc<uint8_t>(t->bytes);
+  std::vector<uint8_t> b(t->bytes < kPiece ? t->bytes : kPiece);
   FILE* f = std::fopen(g->paths[t->file], "rb");
-  CHECK(f && pread(fileno(f), b.data(), b.size(), (off_t) t->offset) == (ssize_t) b.size());
+  CHECK(f);
+  for (uint64_t at = 0; at < t->bytes; at += b.size()) {
+    const size_t n = t->bytes - at < b.size() ? (size_t) (t->bytes - at) : b.size();
+    CHECK(pread(fileno(f), b.data(), n, (off_t) (t->offset + at)) == (ssize_t) n);
+    CHECK(hipMemcpy(p + at, b.data(), n, hipMemcpyHostToDevice) == hipSuccess);
+  }
   std::fclose(f);
-  void* p = dev_alloc<uint8_t>(b.size());
-  CHECK(hipMemcpy(p, b.data(), b.size(), hipMemcpyHostToDevice) == hipSuccess);
   if (out) *out = t;
   return p;
 }
