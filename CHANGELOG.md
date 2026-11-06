@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0]: one engine interface
+
+osmos-serve now runs a model through one interface (`osmos/run/engine.h`: `Osmos`, `OsmosSeq`, `osmos_*`, `oseq_*`)
+instead of DeepSeek's forward by name - the ground for a second model family (Qwen3.8-Flash-Next, designed in
+DESIGN.md). `osmos_open` picks the family by the file's `general.architecture` and refuses any other by name.
+DeepSeek-V4.1-Flash is the one family behind it, unchanged: osmos-serve's token streams are 0.3.2's on every request
+checked (single and `--parallel`, greedy and drafted, conversation reuse), the agents bench level (447.6 s, 7.07 J an
+answer token against 442.5 / 448.7 s, 7.07 J). No model, output or speed changes.
+
 ## [0.3.2]: the low-power round
 
 Work cut at AMD's low-power profile, each change A/B'd there (interleaved builds, the answers' hashes compared) and
