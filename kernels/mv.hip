@@ -93,6 +93,13 @@ constexpr Tune tune_group1(quant::Type t, bool short_row) {
     case quant::kIQ2_S: return {2, 4};
     case quant::kIQ1_M:
     case quant::kIQ1_S: return short_row ? Tune{2, 2} : tune(t, 1);
+    // Qwen3.8's expert types, 10 experts cold (tools/bench/mvsweep, 2026-11-06; R 1-8, U 1-4): IQ4_NL down 63.5 ->
+    // 53.3 us, IQ3_XXS gate / up 54.8 -> 40.1, IQ4_XS down 62.2 -> 43.1, Q2_0 32.3 -> 28.8 - 2 and 2 the best or
+    // within its noise for each
+    case quant::kIQ4_NL:
+    case quant::kIQ3_XXS:
+    case quant::kIQ4_XS:
+    case quant::kQ2_0: return {2, 2};
     default: return tune(t, 1);
   }
 }
