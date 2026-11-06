@@ -31,6 +31,15 @@ bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, 
 bool q4x_attn(const float *q, const float *kc, const float *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
               uint32_t dim, uint32_t pos0, const float *gate, float *out, void *stream);
 
+bool q4x_route(const float *logits, uint32_t n_tok, uint32_t n_exp, uint32_t k, int32_t *ids, float *w,
+               int32_t *rows, void *stream);
+bool q4x_expert_table(const int32_t *ids, uint32_t n, const void *base, uint64_t bytes, const void **ptr,
+                      int32_t *cnt, int32_t *row, void *stream);
+bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
+bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, void *stream);
+bool q4x_moe_sum(const float *y, const float *w, uint32_t n_tok, uint32_t k, uint32_t dim, const float *shared,
+                 const float *shared_logit, float *out, void *stream);
+
 #endif
 
 /*
@@ -84,4 +93,25 @@ q4x_attn
   out[t][h][d] = sigmoid(gate[t][h][d]) sum over p <= pos0 + t of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
   g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, [p][kv_heads][dim],
   rows 0 .. pos0 + n_tok - 1 written. its keys a block's LDS: at most OPS_Q4X_MAX_KEYS (the dense build's reach).
+
+the MoE (a token's k experts of n_exp: entry e = t k + j its j-th):
+
+q4x_route
+  softmax over a token's n_exp logits; its k most probable (the greater first, the lower id among equals) into ids
+  [t][j]; their weights w[t][j] = p / (sum of the k p's, at least 6.103515625e-5); rows[e] = t (the token an entry
+  reads).
+
+q4x_expert_table
+  entry e's matrix base + ids[e] bytes (an expert's slice of the layer's tensor), cnt 1, row e: mv_group_tok's tables,
+  each entry its own row (its token's input copied there first).
+
+q4x_gather
+  dst[e][] = src[rows[e]][] for e < n, len floats a row: an entry's own copy of its token's input.
+
+q4x_swiglu
+  y[i] = silu(g[i]) u[i].
+
+q4x_moe_sum
+  out[t][d] = (sum over j, in order, of w[t][j] y[t k + j][d]) + sigmoid(shared_logit[t]) shared[t][d]: the experts'
+  weighted sum and the shared expert, gated.
 */

@@ -2166,6 +2166,16 @@ attention), unlike the DeltaNet's h % 16. test_q4x_attn_gpu, layer 3: q and k 4.
 attention 6.0e-7 of exact (double), llama.cpp 7.8e-4 of it (its F16 cache); the whole layer 1.0e-2; two halves
 through the cache the bits of one run; a mutant grouping h % 2 96% off.
 
+### the MoE (2026-11-06)
+
+kernels/q4x_moe.hip: the routing (ggml's softmax, the top 10 - ties to the lower id - their weights over their sum,
+clamped at f16's least normal), an entry a (token, expert) with its own copy of its token's input (mv_group_tok
+writes the row it reads), silu(gate) up, and the weighted sum with the shared expert's (sigmoid-gated).
+test_q4x_moe_gpu, layer 0: the router 7.3e-7, the routing weights 1.8e-6 of llama.cpp's - the same 10 experts in the
+same order for all 256 tokens; the routed experts 1.3e-7 of exact (16 tokens, double from the exact weights),
+llama.cpp 8.4e-3; the whole MoE 5.6e-3 of llama.cpp's. the decode's grouping by expert (an expert read once for
+its tokens) is the speed work's: this is an entry a (token, expert), correct first.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
