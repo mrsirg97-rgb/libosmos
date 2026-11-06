@@ -59,7 +59,19 @@ bool rows_launch(const void* table, uint64_t row_bytes, uint32_t row_values, con
   return ok();
 }
 
+__global__ void streams_kernel(const float* x, uint32_t n_tok, uint32_t hc, uint32_t dim, float* h) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n_tok * hc * dim) return;
+  h[i] = x[i / ((uint64_t) hc * dim) * dim + i % dim];
+}
+
 }  // namespace
+
+extern "C" bool q4x_streams(const float* x, uint32_t n_tok, uint32_t hc, uint32_t dim, float* h, void* stream) {
+  if (!x || !h || !n_tok || !hc || hc > kMaxHc || !dim) return false;
+  streams_kernel<<<grid((uint64_t) n_tok * hc * dim), kThreads, 0, st(stream)>>>(x, n_tok, hc, dim, h);
+  return ok();
+}
 
 extern "C" bool q4x_rows(uint32_t type, const void* table, uint64_t row_bytes, uint32_t row_values,
                          const int32_t* rows, uint32_t n, float* out, void* stream) {
@@ -67,6 +79,7 @@ extern "C" bool q4x_rows(uint32_t type, const void* table, uint64_t row_bytes, u
   switch (type) {
     case quant::kIQ4_NL: return rows_launch<quant::kIQ4_NL>(table, row_bytes, row_values, rows, n, out, st(stream));
     case quant::kQ8_0: return rows_launch<quant::kQ8_0>(table, row_bytes, row_values, rows, n, out, st(stream));
+    case quant::kQ6_K: return rows_launch<quant::kQ6_K>(table, row_bytes, row_values, rows, n, out, st(stream));
     default: return false;
   }
 }

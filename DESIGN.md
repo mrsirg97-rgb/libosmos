@@ -2187,6 +2187,18 @@ conv 5.7e-8; the residual after it 6.8e-8; the conv's history carried, two halve
 taking the predecessors in the wrong order 132% off. the test's tensor upload reads 256 MB at a time (the table is
 28.8 GB; a read takes ~2 GB at most).
 
+### the whole forward (2026-11-06)
+
+include/osmos/q4x/forward.h, src/q4x/hip_{forward,layers,step}.c: every weight resident (~78 GB, read through a
+pinned 256 MB piece), a step's buffers, a sequence's state (36 DeltaNet states and conv histories, the n-gram conv
+history, 12 F32 attention caches, its last tokens), the layers as the op tests hold them, the end mixer, the
+logits. test_q4x_forward_gpu, the dump's 256 tokens: 128 + 128 and 255 + 1 the bits of one batch; free-running,
+the residual drifts from llama.cpp's - 1.7e-2 after layer 0, 0.15-0.2 from layer 32 - the logits' KL mean 2.9e-2
+(max 1.07), the greatest token the same for 93.4%. teacher-forced (each layer from llama.cpp's own residual): every
+layer alone 0.5e-2 .. 2.7e-2 (worst layer 32), none an outlier - the DeltaNets, the attentions, the IQ4_XS and Q2_0
+experts, the n-gram layer: no layer wrong, the drift two roundings compounding over 48 layers (and osmos's the one
+near the exact sum, the op tests show). which is the better model is perplexity's to say: next.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a

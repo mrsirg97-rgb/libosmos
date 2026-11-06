@@ -45,6 +45,7 @@ bool q4x_rows(uint32_t type, const void *table, uint64_t row_bytes, uint32_t row
 bool q4x_ple_gate(const float *key, const float *query, const float *value, uint32_t n_tok, uint32_t hc, uint32_t dim,
                   float *gate, float *gated, void *stream);
 bool q4x_add2(float *h, const float *a, const float *b, uint64_t n, void *stream);
+bool q4x_streams(const float *x, uint32_t n_tok, uint32_t hc, uint32_t dim, float *h, void *stream);
 
 #endif
 
@@ -126,7 +127,7 @@ the n-gram table (PLE):
 
 q4x_rows
   out[i][] = row rows[i] of the table, decoded (row_values of the type's values, row_bytes apart): a token's heads'
-  rows, one after another (its embedding: heads x row_values).
+  rows, one after another (its embedding: heads x row_values) - or a token's row of token_embd. IQ4_NL, Q8_0, Q6_K.
 
 q4x_ple_gate
   key, query: [t][s][dim], each normed a stream already. s_ts = (sum over d, in order, of key[t][s][d] query[t][s][d])
@@ -134,4 +135,7 @@ q4x_ple_gate
 
 q4x_add2
   h[i] += a[i] + b[i] (a + b first, as llama.cpp adds them).
+
+q4x_streams
+  h[t][s][d] = x[t][d] for every stream s: the residual a token starts with, its embedding in each.
 */
