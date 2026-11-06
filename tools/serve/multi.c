@@ -1,6 +1,6 @@
 /* several conversations at once (maya #587's, the operator's): N lanes, each a conversation; the loop libevt's - stdin's
    lines and the turns are its events, a line outranking a turn. a turn is a round (every answering lane's next token
-   in one forward_batch: a decode step, each token's bits its own) or a piece of one prompt (a step of max_tokens,
+   in one osmos_batch: a decode step, each token's bits its own) or a piece of one prompt (a step of max_tokens,
    alone: a prompt's step) - never both in one step, so neither changes the other's bits. pieces and rounds take turns;
    a prompt whole in one piece goes ahead of the longer reads (multi.h; the rounds: round.c) */
 #include <pthread.h>
@@ -79,7 +79,7 @@ static void admit(Multi *m, int i, Gen *g)
     return;
   }
   ln->reused = ln->c.held.n;
-  if (!seq_prompt(ln->c.s, g->n))
+  if (!oseq_prompt(ln->c.s, g->n))
   {
     snprintf(ln->c.err, sizeof ln->c.err, "the prompt's end not past the conversation's");
     lane_fail(m, ln);
@@ -140,7 +140,7 @@ static void gen(Multi *m, char *line)
     return;
   }
   const char *bad = !g.has_rid ? "this engine runs several conversations: GEN needs rid=<id>"
-                    : g.spec > 0 && !m->sv->d ? "spec=1 without a drafter (--dspark)"
+                    : g.spec > 0 && !osmos_block(m->sv->e) ? "spec=1 without a drafter (--dspark)"
                     : g.n >= m->sv->max_ctx ? "a prompt past the context"
                     : lane_of(m, g.rid) ? "a rid already running"
                                         : NULL;
@@ -210,7 +210,7 @@ static void piece(Multi *m)
       ln->reused);
   if (ln->c.held.n < n)
     return;
-  if (!forward_greedy(sv->f, (k - 1) % MM_MAX_TOKENS, 1, &ln->t, ln->c.err))
+  if (!osmos_greedy(sv->e, k - 1, 1, &ln->t, ln->c.err))
   {
     lane_fail(m, ln);
     return;

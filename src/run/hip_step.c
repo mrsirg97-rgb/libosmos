@@ -305,6 +305,16 @@ bool fwd_taps_on(Forward *f, const bool *at)
   return f->n_tap && fwd_alloc(&f->taps, (uint64_t)f->step * f->n_tap * f->g->n_embd * sizeof(float));
 }
 
+uint32_t seq_reach(const Seq *s)
+{
+  if (!s)
+    return 0;
+  const int64_t past = (int64_t)s->pos - (int64_t)s->prompt_end;
+  int64_t r = SEQ_MAX_BACK < s->n_last ? SEQ_MAX_BACK : s->n_last;
+  r = past < r ? past : r;
+  return r > 0 ? (uint32_t)r : 0;
+}
+
 bool seq_rollback(Seq *s, uint32_t n)
 {
   if (!s || n > SEQ_MAX_BACK || (int)n > s->n_last || (int64_t)s->pos - n < (int64_t)s->prompt_end)

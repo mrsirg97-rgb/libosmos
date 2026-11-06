@@ -39,7 +39,7 @@ bool ids_push(Ids *a, int32_t x)
 
 bool server_spec(const Server *sv, const Gen *g)
 {
-  return g->spec < 0 ? sv->d != NULL : g->spec != 0;
+  return g->spec < 0 ? osmos_block(sv->e) != 0 : g->spec != 0;
 }
 
 bool server_eos(const Server *sv, int32_t t)
@@ -88,32 +88,32 @@ bool parse_gen(char *line, Gen *g, char *why, size_t wn)
 bool conv_create(Conv *c, const Server *sv)
 {
   memset(c, 0, sizeof *c);
-  return (c->s = seq_create(sv->f, c->err)) != NULL;
+  return (c->s = oseq_create(sv->e, c->err)) != NULL;
 }
 
 void conv_destroy(Conv *c)
 {
-  seq_destroy(c->s);
+  oseq_destroy(c->s);
   free(c->held.v);
   memset(c, 0, sizeof *c);
 }
 
 bool conv_restart(Conv *c, const Server *sv)
 {
-  seq_destroy(c->s);
+  oseq_destroy(c->s);
   c->held.n = 0;
-  return (c->s = seq_create(sv->f, c->err)) != NULL;
+  return (c->s = oseq_create(sv->e, c->err)) != NULL;
 }
 
 void conv_set_aside(Conv *c, const Server *sv)
 {
   if (!sv->slots || !c->held.n)
     return;
-  const uint64_t bytes = seq_state_bytes(c->s);
+  const uint64_t bytes = oseq_state_bytes(c->s);
   void *st = malloc(bytes);
   char serr[SLOTS_ERR] = "";
   bool kept = false;
-  if (!st || !seq_save(c->s, st, bytes, c->err) ||
+  if (!st || !oseq_save(c->s, st, bytes, c->err) ||
       !slots_put(sv->slots, c->held.v, c->held.n, st, bytes, &kept, serr))
     out("NOTE slots: a conversation of %u tokens not set aside (%s%s)\n", c->held.n, st ? c->err : "out of memory",
         serr);
@@ -131,7 +131,7 @@ static uint32_t common(const Ids *a, const int32_t *p, uint32_t n)
 uint32_t conv_reach(const Conv *c, const int32_t *p, uint32_t n)
 {
   const uint32_t k = common(&c->held, p, n - 1); /* (one token left to read: its logits the answer's first) */
-  return k == c->held.n || c->held.n - k <= SEQ_MAX_BACK ? k : 0;
+  return k == c->held.n || c->held.n - k <= oseq_reach(c->s) ? k : 0;
 }
 
 bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
@@ -139,7 +139,7 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   const uint32_t k = common(&c->held, p, n - 1);
   if (k == c->held.n && k)
     return true;
-  if (k && c->held.n - k <= SEQ_MAX_BACK && seq_rollback(c->s, c->held.n - k))
+  if (k && c->held.n - k <= oseq_reach(c->s) && oseq_rollback(c->s, c->held.n - k))
   {
     c->held.n = k;
     return true;
@@ -154,7 +154,7 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   void *st = NULL;
   uint64_t bytes = 0;
   char serr[SLOTS_ERR] = "";
-  if (!slots_take(sv->slots, id, &st, &bytes, serr) || !seq_load(c->s, st, bytes, c->err))
+  if (!slots_take(sv->slots, id, &st, &bytes, serr) || !oseq_load(c->s, st, bytes, c->err))
   {
     out("NOTE slots: a kept conversation of %u tokens not taken back (%s%s)\n", len, serr, st ? c->err : "");
     free(st);
@@ -171,18 +171,18 @@ bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t
 {
   if (!k)
     return true;
-  Seq **seqs = calloc(k, sizeof *seqs);
+  OsmosSeq **seqs = calloc(k, sizeof *seqs);
   if (!seqs)
     return snprintf(c->err, sizeof c->err, "out of memory"), false;
   for (uint32_t i = 0; i < k; i++)
     seqs[i] = c->s;
   const uint32_t at = c->held.n;
-  const bool ok = forward_batch(sv->f, seqs, p + at, k, c->err);
+  const bool ok = osmos_batch(sv->e, seqs, p + at, k, c->err);
   free(seqs);
   for (uint32_t i = 0; ok && i < k; i++)
     if (!ids_push(&c->held, p[at + i]))
       return snprintf(c->err, sizeof c->err, "out of memory"), false;
   /* the piece's part of the prompt's last window, from its own step (serve.h) */
   const uint32_t lo = n > sv->window && n - sv->window > at ? n - sv->window : at;
-  return ok && (!seed || lo >= at + k || drafter_seed(sv->d, c->s, (int32_t)lo, (int32_t)(at + k), c->err));
+  return ok && (!seed || lo >= at + k || oseq_seed(c->s, (int32_t)lo, (int32_t)(at + k), c->err));
 }

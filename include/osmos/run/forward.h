@@ -43,6 +43,7 @@ Seq *seq_create(Forward *f, char err[FORWARD_ERR]);
 void seq_destroy(Seq *s);
 bool seq_prompt(Seq *s, uint32_t end);
 bool seq_rollback(Seq *s, uint32_t n);
+uint32_t seq_reach(const Seq *s);
 int32_t seq_position(const Seq *s);
 uint64_t forward_identity(const Forward *f);
 uint64_t seq_state_bytes(const Seq *s);
@@ -131,6 +132,10 @@ seq_prompt
   for every token. the logits of every token from end - 1 on, and every stream and logit after, are the bits of the
   whole run. raised as the prompt grows (a later turn's); false for no sequence, an end past max_ctx, or one lower
   than before.
+
+seq_reach
+  the most seq_rollback takes now: SEQ_MAX_BACK, the tokens it holds and its positions past the prompt's end, the
+  least of them.
 
 seq_rollback
   the sequence's last n positions undone: its next position n back, its last tokens (Engram's n-gram) as they were

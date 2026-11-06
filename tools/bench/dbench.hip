@@ -32,6 +32,7 @@ extern "C" {
 #include "osmos/run/gpu.h"
 #include "osmos/run/forward.h"
 #include "osmos/run/drafter.h"
+#include "osmos/run/engine.h"  // the drafting floors (osmos-serve's)
 }
 
 #define CHECK(x)                                                                 \
@@ -76,7 +77,7 @@ static int32_t pick(Forward* f, std::vector<float>& lg, uint32_t V, uint32_t row
 }
 static int g_drafted, g_accepted, g_rounds;
 static double g_draft_ms, g_verify_ms; // a drafted answer's time drafting, and verifying (with its picks)
-static float g_conf = DRAFTER_CONF_MIN, g_cum = DRAFTER_CUM_MIN;  // osmos-serve's; DRAFT_CONF / DRAFT_CUM: a sweep's
+static float g_conf = OSMOS_DRAFT_CONF_MIN, g_cum = OSMOS_DRAFT_CUM_MIN;  // osmos-serve's; DRAFT_CONF / DRAFT_CUM: a sweep's
 static int g_draft_max = DRAFTER_BLOCK;  // DRAFT_MAX: a sweep's cap on a round's drafts (the block's 5 at most)
 constexpr int kRing = 128;                        // the drafter's window: a prompt's last rows seeded
 
