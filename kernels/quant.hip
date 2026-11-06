@@ -110,6 +110,9 @@ extern "C" bool quant_dequant(uint32_t type, const void* src, uint64_t values, f
     case quant::kBF16: return launch<quant::kBF16>(src, values, dst, s);
     case quant::kMXFP4: return launch<quant::kMXFP4>(src, values, dst, s);
     case quant::kMXFP8: return launch<quant::kMXFP8>(src, values, dst, s);
+    case quant::kIQ3_XXS: return launch<quant::kIQ3_XXS>(src, values, dst, s);
+    case quant::kIQ4_XS: return launch<quant::kIQ4_XS>(src, values, dst, s);
+    case quant::kQ2_0: return launch<quant::kQ2_0>(src, values, dst, s);
     default: return false;
   }
 }
@@ -120,6 +123,7 @@ extern "C" bool quant_dequant_f16(uint32_t type, const void* src, uint64_t value
 #define H(t) \
   case quant::t: return launch_h<quant::t>(src, values, dst, s);
     H(kQ8_0) H(kQ5_K) H(kQ6_K) H(kIQ2_XXS) H(kIQ2_XS) H(kIQ4_NL) H(kIQ1_M) H(kBF16) H(kMXFP4) H(kMXFP8) H(kIQ1_S) H(kIQ2_S)
+    H(kIQ3_XXS) H(kIQ4_XS) H(kQ2_0)
 #undef H
     default: return false;
   }
