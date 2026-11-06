@@ -2086,6 +2086,57 @@ GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB o
   forward one block at a time against llama.cpp's intermediate tensors (llama-eval-callback); then decode speed,
   then prompts, then MTP.
 
+### Qwen's forward, op by op (design, 2026-11-06)
+
+from llama.cpp 68d20b8's src/models/qwen4exp.cpp (the reference: its names in quotes are its tensors' cb names, what
+the dumps hold) and ggml's CPU ops. D = 2,560, hc = 4 streams, r = 320, eps = 1e-6. a token's residual is hc
+streams of D (h[s][d]), the embedding copied into each ("hc_init").
+
+- **the mixer** (twice a layer: before the token mixer, before the MoE; once at the end as the output norm):
+  xn[s] = rms_norm(h[s]) * w_norm[s] (a norm a stream, eps; the weight per stream - the converter folded 1 + w);
+  lo = silu(down . xn / hc) (down: [hc D] -> r); gate = up . lo (r -> [hc D]); mixed = mean over s of
+  xn[s] * sigmoid(gate[s]) ("hc_mixed"); inject = (inject_w . xn) / hc ([hc D] -> hc; none at the end).
+- **the combine**: h[s] += 2 sigmoid(inject[s]) * out (every stream the same block output, its own weight;
+  "hc_combine").
+- **a layer**: [PLE on its layer] -> mix(attn) -> DeltaNet or attention -> combine -> mix(ffn) -> MoE -> combine
+  ("l_last"); after the last layer the end mixer's `mixed` ("result_norm") through output.weight ("result_output").
+- **the Gated DeltaNet** (36 layers; 16 key heads, 48 value heads of 128): qkv = attn_qkv . x (10,240: q 16x128,
+  k 16x128, v 48x128); z = attn_gate . x (6,144); beta = sigmoid(ssm_beta . x); g = softplus(ssm_alpha . x + dt) *
+  ssm_a (ssm_a holds -exp(A_log): g <= 0). the conv: a depthwise causal conv of 4 taps over the last 3 tokens' qkv
+  and this one (its history the state: 3 x 10,240), silu ("conv_output_silu"). q, k: an l2 norm a head (rms_norm
+  with eps / 128, times 1 / sqrt(128)). the delta rule a value head h at a time, its key group **h % 16** (ggml's
+  head broadcast, not h / 3): S *= exp(g); delta_j = (v_j - sum_i S[i][j] k_i) beta; S[i][j] += k_i delta_j;
+  out_j = sum_i S[i][j] q_i / sqrt(128) - S 128 x 128 F32 a head, the recurrent state ("new_state"). then out =
+  rms_norm(out) * ssm_norm * sigmoid(z) a head (sigmoid: Qwen3.8's difference from Qwen3.5's silu), ssm_out . out.
+- **the sparse attention** (12 layers; 24 heads, 2 KV heads, 256 dims): attn_q gives a head's q then its gate,
+  interleaved a head at a time (512 a head); q, k rms-normed a head (q_norm, k_norm); IMRoPE (rope_multi: sections
+  11, 11, 10, 0 of the 64 rotated dims, base 1e7; text positions all four the same); attention at 1 / sqrt(256),
+  GQA 12 heads a KV head; out * sigmoid(gate); attn_output. the selection (QSA): keys pooled in blocks of 4, the
+  indexer (4 heads of 128: q_proj, k_proj, their norms) scores the pooled blocks, the top 2,048 tokens' blocks plus
+  the incomplete tail attended, the rest masked - at 2,048 tokens or fewer every token is kept: dense. the first
+  build is dense (and refuses a context past 2,048 until QSA is built and held to llama.cpp's selection).
+- **the MoE**: logits = router . x (F32 512); softmax; the top 10 by probability; their weights / their sum
+  (clamped at 6.1e-5); experts silu(gate) * up -> down (640 wide); plus the shared expert (the same shape) times
+  sigmoid(ffn_gate_inp_shexp . x) ("ffn_out").
+- **the n-gram table (PLE, layer 1, before its mixer)**: a token's 16 rows: n = 2, 3 (8 heads each) over the token
+  and its 2 predecessors (none, or an EOS at or before one: the rest EOS; the token's own EOS cuts nothing);
+  mixed = t0 m0 ^ t1 m1 [^ t2 m2] in uint64; row = mixed % rows[h] + offset[h]; the 16 rows of 160 (IQ4_NL)
+  flattened to 2,560 ("ple_embd"). key = ple_key . e, value = ple_value . e; key and the residual each rms-normed a
+  stream (ple_norm_key, ple_norm_query); a stream's gate = sigmoid(sgn(s) sqrt(max(|s|, 1e-6))), s = key[s] .
+  query[s] / sqrt(D); gated[s] = value * gate[s]; a depthwise causal conv over gated (rms-normed a stream,
+  ple_norm_conv) of 4 taps dilated by 3 (its history 9 tokens), silu; h += gated + conv.
+- **a sequence's state**: a DeltaNet layer's S (48 x 128 x 128 F32, 3 MB) and conv history (3 x 10,240); the PLE
+  layer's conv history (9 x 10,240); the attention layers' K and V; its last 2 tokens (the n-grams).
+
+### the reference's tensors (2026-11-06)
+
+oracle/qwen_dump.cpp: llama.cpp's own (68d20b8, HIP, all layers on the GPU) through its eval callback - the README's
+first 256 tokens (prose, tables, code; the model's own tokenizer) one batch, each tensor of the spec's names written
+as F32 with its shape (~/osmos-oracle/qwen-dump-256: 1,246 tensors, 5.7 GB, 19 s). a layer's two mixers share
+their names: the second is <name>#1. llama.cpp's matmuls round the activations to 8 bits (q8_1) against a quantized
+weight, so its tensors are near ours, not ours: a layer is held to them within a measured tolerance, the logits by
+their KL divergence - never a bit-for-bit claim.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
