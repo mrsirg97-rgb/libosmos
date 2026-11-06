@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """osmos-api against a fake engine (fake_engine.py: the protocol, scripted): the wire as rig and OpenAI clients read
 it - health while loading, streamed reasoning / content / tool calls, a whole answer, refusals by name, a client gone
-(its run STOPped), the engine gone (the server with it). the tokenizer is the model's: skipped without the UD-IQ1_M
-first shard"""
+(its run STOPped), the engine gone (the server with it); and Qwen's dialect: the prompt the ids of its own template
+(jinja2 over the GGUF's, tools/gen_chat_fixtures_qwen.py), its reasoning, content and tool calls read back, its
+refusals. the tokenizer is the model's: each skipped without its first shard"""
 import http.client
 import json
 import re
@@ -29,8 +30,14 @@ TOOLS = [{"type": "function", "function": {"name": "get_weather", "description":
                                                "city": {"type": "string"}, "days": {"type": "integer"}}}}}]
 
 
-def ids(text):
-    r = subprocess.run([API, "--tokenize", "--model", MODEL], input=text.encode(), capture_output=True, check=True)
+QWEN = os.environ.get("OSMOS_TEST_QWEN") or os.path.expanduser(
+    "~/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf")
+GGUF_PY = os.environ.get("OSMOS_GGUF_PY") or os.path.expanduser("~/Projects/llama.cpp/gguf-py")
+IM_END = "<|im_end|>"
+
+
+def ids(text, model=MODEL):
+    r = subprocess.run([API, "--tokenize", "--model", model], input=text.encode(), capture_output=True, check=True)
     return r.stdout.decode().strip()
 
 
@@ -50,14 +57,16 @@ class Version(unittest.TestCase):
                 self.assertEqual((out.returncode, out.stdout), (0, f"osmos {want}\n"), exe)
 
 
-@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
-class Api(unittest.TestCase):
+class Served:
+    """osmos-api over the fake engine, the tokenizer cls.model's"""
+    model = MODEL
+
     @classmethod
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp()
         cls.cfg = os.path.join(cls.dir, "osmos.json")
         with open(cls.cfg, "w") as f:
-            json.dump({"pack": "test", "model": MODEL, "max_context": 4096, "no_guess": True}, f)
+            json.dump({"pack": "test", "model": cls.model, "max_context": 4096, "no_guess": True}, f)
         cls.port = free_port()
         env = dict(os.environ, FAKE_DIR=cls.dir)
         cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE], env=env,
@@ -76,7 +85,7 @@ class Api(unittest.TestCase):
 
     def reply(self, text, finish="stop", pace=0.005):
         with open(os.path.join(self.dir, "reply"), "w") as f:
-            f.write(ids(text) + "\n" + finish)
+            f.write(ids(text, self.model) + "\n" + finish)
         with open(os.path.join(self.dir, "pace"), "w") as f:
             f.write(str(pace))
 
@@ -111,6 +120,12 @@ class Api(unittest.TestCase):
         with open(os.path.join(self.dir, "log")) as f:
             return f.read().splitlines()
 
+    def last_gen(self):
+        return [l for l in self.log() if l.startswith("GEN ")][-1].split()
+
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class Api(Served, unittest.TestCase):
     def test_0_health_while_loading(self):
         self.assertEqual(self.get("/health")[0], 503)
         self.assertEqual(self.post({"messages": [{"role": "user", "content": "hi"}]}).status, 503)
@@ -222,6 +237,109 @@ class Api(unittest.TestCase):
         self.assertEqual(r.status, 500)
         self.assertIn("engine", json.loads(r.read())["error"]["message"])
         self.assertNotEqual(self.proc.wait(timeout=5), 0)
+
+
+def qwen_template():
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import gen_chat_fixtures_qwen
+    return gen_chat_fixtures_qwen.template(QWEN, GGUF_PY)
+
+
+QCALL = ("Checking.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n"
+         "3\n</parameter>\n</function>\n</tool_call>" + IM_END)
+
+
+@unittest.skipUnless(os.path.exists(QWEN) and os.path.isdir(GGUF_PY), "no Qwen3.8 first shard, or no gguf-py")
+class QwenApi(Served, unittest.TestCase):
+    model = QWEN
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.tpl = qwen_template()
+
+    def prompt(self, messages, tools=None, thinking=True, effort=None, preserve=None):
+        kw = {"messages": messages, "add_generation_prompt": True, "enable_thinking": thinking}
+        if preserve is not None:
+            kw["preserve_thinking"] = preserve
+        if tools:
+            kw["tools"] = tools
+        if effort:
+            kw["reasoning_effort"] = effort
+        return ids(self.tpl.render(**kw), QWEN)
+
+    def test_0_eos(self):
+        self.ready()
+        argv = self.log()[0].split()
+        self.assertEqual(argv[argv.index("--eos") + 1], ids(IM_END, QWEN))
+
+    def test_1_thinking_stream(self):
+        self.ready()
+        self.reply("let me think \n</think>\n\nThe answer is 4, 🦀 é." + IM_END)
+        msgs = [{"role": "developer", "content": "Be brief."}, {"role": "user", "content": "2+2?"}]
+        ev = self.stream({"messages": msgs, "reasoning_effort": "low", "max_tokens": 100})
+        deltas = [e["choices"][0]["delta"] for e in ev if e["choices"]]
+        self.assertEqual("".join(d.get("reasoning_content", "") for d in deltas), "let me think")
+        self.assertEqual("".join(d.get("content", "") for d in deltas), "The answer is 4, 🦀 é.")
+        fin = [e for e in ev if e["choices"] and e["choices"][0]["finish_reason"]]
+        self.assertEqual(fin[0]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort="low"))
+
+    def test_2_tool_calls_stream(self):
+        self.ready()
+        self.reply(QCALL)
+        msgs = [{"role": "user", "content": "weather in Paris?"}]
+        ev = self.stream({"messages": msgs, "tools": TOOLS, "chat_template_kwargs": {"enable_thinking": False}})
+        deltas = [e["choices"][0]["delta"] for e in ev if e["choices"]]
+        self.assertEqual("".join(d.get("content", "") for d in deltas), "Checking.")
+        calls = [c for d in deltas for c in d.get("tool_calls", [])]
+        self.assertEqual([c["function"]["name"] for c in calls], ["get_weather"])
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"city": "Paris", "days": 3})
+        fin = [e for e in ev if e["choices"] and e["choices"][0]["finish_reason"]]
+        self.assertEqual(fin[0]["choices"][0]["finish_reason"], "tool_calls")
+        self.assertEqual(self.last_gen()[-1], self.prompt(msgs, TOOLS, thinking=False))
+
+    def test_3_history_whole(self):
+        self.ready()
+        self.reply("Sunny." + IM_END)
+        sent = [{"role": "user", "content": "weather in Paris?"},
+                {"role": "assistant", "content": "", "reasoning": "look it up",
+                 "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "sun"}]
+        r = self.post({"messages": sent, "tools": TOOLS, "chat_template_kwargs": {"enable_thinking": False}})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(json.loads(r.read())["choices"][0]["message"], {"role": "assistant", "content": "Sunny."})
+        want = [sent[0], {"role": "assistant", "content": "", "reasoning_content": "look it up",
+                          "tool_calls": [{"id": "c1", "type": "function",
+                                          "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]},
+                sent[2]]
+        self.assertEqual(self.last_gen()[-1], self.prompt(want, TOOLS, thinking=False))
+
+    def test_4_earlier_reasoning_dropped(self):
+        self.ready()
+        self.reply("x\n</think>\n\n6" + IM_END)
+        msgs = [{"role": "user", "content": "2+2?"}, {"role": "assistant", "content": "4", "reasoning_content": "add"},
+                {"role": "user", "content": "3+3?"}]
+        r = self.post({"messages": msgs, "reasoning_effort": "medium", "chat_template_kwargs": {"preserve_thinking": False}})
+        self.assertEqual(json.loads(r.read())["choices"][0]["message"]["content"], "6")
+        self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort="medium", preserve=False))
+        self.assertNotEqual(self.last_gen()[-1], self.prompt(msgs, effort="medium"))
+
+    def test_5_refusals(self):
+        self.ready()
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": "get_weather", "arguments": "[1]"}}]}
+        for body, word in [({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "max"},
+                            "reasoning effort"),
+                           ({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": 50},
+                            "reasoning_effort"),
+                           ({"messages": [{"role": "user", "content": [
+                               {"type": "image_url", "image_url": {"url": "x"}}]}]}, "image"),
+                           ({"messages": [{"role": "user", "content": "x"}, call]}, "arguments")]:
+            r = self.post(body)
+            self.assertEqual(r.status, 400, body)
+            self.assertIn(word, json.loads(r.read())["error"]["message"])
 
 
 if __name__ == "__main__":

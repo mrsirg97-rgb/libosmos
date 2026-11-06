@@ -1,0 +1,25 @@
+/* a model family's chat as osmos-api speaks it (dialect.c): its request read into the template's inputs, the prompt
+   rendered, a completion parsed, and the markers its stream is cut at - chosen once by the model's
+   general.architecture */
+#pragma once
+
+#include "request.h"
+
+typedef struct Dialect
+{
+  const char *arch;       /* general.architecture */
+  const char *eos;        /* the end of turn's token text (osmos-serve's --eos) */
+  const char *think_end;  /* the reasoning's end */
+  const char *calls_open; /* a tool calls block's start */
+  bool trims;             /* its parse trims the reasoning and the content: their streams start past whitespace */
+  bool (*read)(const Json *body, Request *r, char err[API_ERR]);
+  bool (*render)(const Request *r, JsonBuf *out, char err[CHAT_ERR]);
+  bool (*parse)(const Request *r, const char *text, size_t n, JsonBuf *out, char err[CHAT_ERR]);
+} Dialect;
+
+/* the dialect of a model family, or NULL */
+const Dialect *dialect_of(const char *arch);
+
+/* request_ds.c, request_qwen.c: a request's messages, tools and effort as the family's template takes them */
+bool request_ds(const Json *body, Request *r, char err[API_ERR]);
+bool request_qwen(const Json *body, Request *r, char err[API_ERR]);

@@ -19,6 +19,7 @@
 
 #include "api.h"
 #include "config.h"
+#include "dialect.h"
 #include "osmos/model/gguf.h"
 #include "osmos/version.h"
 
@@ -154,14 +155,18 @@ int main(int argc, char **argv)
   if (!config_read(cfg_path, &c, err))
     return die(err);
   snprintf(api.model, sizeof api.model, "osmos-%s", c.pack);
-  Gguf *g = gguf_header(c.model, err); /* the tokenizer alone: osmos-serve opens the model */
-  api.tok = g ? tokenizer_create(g, err) : NULL;
+  Gguf *g = gguf_header(c.model, err); /* the tokenizer and the family alone: osmos-serve opens the model */
+  const GgufKv *arch = g ? gguf_kv(g, "general.architecture") : NULL;
+  api.d = arch && arch->type == GGUF_STRING ? dialect_of(arch->v.s) : NULL;
+  api.tok = g && api.d ? tokenizer_create(g, err) : NULL;
+  if (g && !api.d)
+    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp)", arch && arch->type == GGUF_STRING ? arch->v.s : "(none)");
   gguf_destroy(g);
   if (!api.tok)
     return die(err);
-  api.eos = tokenizer_find(api.tok, "<\xef\xbd\x9c" "end\xe2\x96\x81of\xe2\x96\x81sentence\xef\xbd\x9c>");
+  api.eos = tokenizer_find(api.tok, api.d->eos);
   if (api.eos < 0)
-    return die("the tokenizer has no <｜end▁of▁sentence｜>");
+    return snprintf(err, sizeof err, "the tokenizer has no %s", api.d->eos), die(err);
   char *args[CONFIG_ARGS_MAX];
   if (!config_argv(&c, opt(argc, argv, "--engine", engine), api.eos, args, err))
     return die(err);
