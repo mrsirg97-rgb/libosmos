@@ -8,7 +8,8 @@
 the packs and their files: packs.json beside this (every file pinned to a commit and its SHA-256). each file taken
 from the user's own (--have: any file of its bytes and hash under those directories, renamed or not) or downloaded
 at its commit and checked; the engine built from this checkout; each pack laid out under --models (its shards, the
-Engram table as its slot, the picks, the drafter, the overlay if --abliterated, osmos.json). then --rig registers it
+Engram table as its slot, the picks, the drafter - DSpark's directory, or Qwen's MTP head - the overlay if
+--abliterated, osmos.json). then --rig registers it
 in rig (~/.rig: a row rig launches, the default model only when asked; rig itself installed first when it is
 not here - its install.sh at the manifest's pinned release, checked by SHA-256), --serve starts osmos-api. design: DESIGN.md,
 "the installer"."""
@@ -148,7 +149,7 @@ def main():
         for c in cfgs:
             cfg = layout.read_config(c)
             rid = f"osmos-{cfg['pack']}"
-            row = rig.register(a.rig_home, cfg, API, c, ask_default(a.rig_default, rid))
+            row = rig.register(a.rig_home, cfg, API, c, ask_default(a.rig_default, rid), m["packs"][cfg["pack"]]["rig"])
             print(f"  {row['id']} on port {row['port']} in {a.rig_home}/models.json")
     if a.serve:
         if not os.path.exists(API):

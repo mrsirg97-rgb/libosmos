@@ -49,16 +49,11 @@ registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) and asks before
 
 Both packs run one context length: **1,048,576 tokens**, with up to 256K tokens a reply (its reasoning and answer).
 
-Qwen3.8-Flash-Next: the installer's pack is next; by hand, an `osmos.json` naming the first shard and the MTP head,
-then `bin/osmos-api` on it:
-
-```json
-{ "pack": "qwen38-ud-iq3_xxs", "model": ".../Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf",
-  "drafter": ".../mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", "max_context": 262144, "parallel": 1 }
-```
+Qwen3.8-Flash-Next: its pack, unsloth's UD-IQ3_XXS 4 shards and its MTP head (~81 GB) at a pinned commit, a
+**262,144-token** context, up to 64K tokens a reply:
 
 ```sh
-make serve api && bin/osmos-api --config osmos.json --port 8093
+python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve    # or --rig (its row's alias: qwen)
 ```
 
 ## Performance

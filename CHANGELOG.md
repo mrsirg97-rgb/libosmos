@@ -18,6 +18,10 @@ its own two caches), and a token's bits the same however it is batched, drafted 
 - **Text**: Qwen's tokenizer (llama.cpp's qwen35 pre-tokenizer) and chat template (tools, reasoning), osmos-api's
   dialect by family.
 - The engine: `oseq_draft_all` (a family's drafter on several sequences at once; DeepSeek's one at a time, as before).
+- **The installer's pack** `qwen38-ud-iq3_xxs`: unsloth's 4 shards and the MTP head pinned at a commit with their
+  SHA-256s, laid out with the head as its one GGUF (`drafter_kind: mtp`); each pack's rig row its own (packs.json's
+  `rig`: Qwen's 262K window with 64K replies and its efforts low / medium / high, alias `qwen`; DeepSeek's rows as
+  before).
 
 Measured (2026-11-06, `performance`; README): prompts 2K / 8K / 16K **672 / 588 / 567 tok/s** (llama.cpp 520 / 489 /
 463), 64K 500; decode MTP drafted **~40 tok/s**, plain 23.2 (llama.cpp 26.2); the agents bench (4 x 8) **292 s**

@@ -9,12 +9,10 @@ import os
 
 PORT_BASE = 8091        # the first port tried for an osmos row (rig's default endpoint is 8090)
 STOP_GRACE = 30         # seconds rig's SIGTERM waits: a conversation's state written out (osmos-serve's slots)
-# the provider half: the context the pack runs, and what a turn may take of it (rig's row: all four required) - a
-# reply's 256K tokens (its thinking and its answer: rig's thinkingBudget is Anthropic's alone), and as much kept free
-MAX_TOKENS, RESERVE = 262144, 262144
+# the provider half: the context the pack runs, and what a turn may take of it (rig's row: all four required) - the
+# pack's own (packs.json's rig: a reply's tokens, its thinking and its answer - rig's thinkingBudget is Anthropic's
+# alone - as much kept free, the reasoning efforts its family's osmos-api dialect maps, the default among them)
 KEEP_RECENT_SHARE = 4   # keepRecent: a quarter of the window
-EFFORTS = ["low", "high", "max"]  # the reasoning efforts osmos-api maps (50, 75, 100: DESIGN.md, "the mapping")
-EFFORT = "max"                     # the row's default: the model's most thinking (rig's -effort picks another)
 
 
 class RigError(Exception):
@@ -72,23 +70,24 @@ def _port(rows, rid):
     return p
 
 
-def register(home, cfg, api, cfg_path, default):
-    """the row rig launches the pack by (returned); `api` the osmos-api binary, `cfg_path` the pack's osmos.json"""
+def register(home, cfg, api, cfg_path, default, row):
+    """the row rig launches the pack by (returned); `api` the osmos-api binary, `cfg_path` the pack's osmos.json,
+    `row` the pack's rig settings (packs.json)"""
     os.makedirs(home, exist_ok=True)
     mpath, spath = os.path.join(home, "models.json"), os.path.join(home, "settings.json")
     rows = _read(mpath, [])
     settings = _read(spath, {}) if default else None
     rid = f"osmos-{cfg['pack']}"
-    window = cfg["max_context"]
-    if RESERVE >= window or window // KEEP_RECENT_SHARE >= window - RESERVE:
-        raise RigError(f"a {window}-token context leaves no room for a {RESERVE}-token reply (rig would refuse the row)")
-    row = {"id": rid, "window": window, "maxTokens": MAX_TOKENS, "reserve": RESERVE,
-           "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive", "efforts": EFFORTS, "effort": EFFORT,
-           "command": f"{api} --config {cfg_path} --port ${{PORT}}", "port": _port(rows, rid),
-           "aliases": ["osmos"], "stopGrace": STOP_GRACE, "places": 1}
-    rows = [r for r in rows if r.get("id") != rid] + [row]
+    window, reserve = cfg["max_context"], row["reserve"]
+    if reserve >= window or window // KEEP_RECENT_SHARE >= window - reserve:
+        raise RigError(f"a {window}-token context leaves no room for a {reserve}-token reply (rig would refuse the row)")
+    out = {"id": rid, "window": window, "maxTokens": row["max_tokens"], "reserve": reserve,
+           "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive", "efforts": list(row["efforts"]),
+           "effort": row["effort"], "command": f"{api} --config {cfg_path} --port ${{PORT}}", "port": _port(rows, rid),
+           "aliases": list(row["aliases"]), "stopGrace": STOP_GRACE, "places": 1}
+    rows = [r for r in rows if r.get("id") != rid] + [out]
     _write(mpath, rows)
     if default:
         settings["model"] = rid
         _write(spath, settings)
-    return row
+    return out

@@ -1,5 +1,5 @@
 """a pack laid out: <models>/<pack>/ - its shards linked by their names, the Engram table as its shard slot, the
-picks profile, the drafter (dspark/), the overlay if asked, osmos.json. each file the user's (found by userfiles) or
+picks profile, the drafter (dspark/; an MTP head its one GGUF beside the shards), the overlay if asked, osmos.json. each file the user's (found by userfiles) or
 fetched at its pinned commit (`fetch(entry) -> path`); ours not yet published and not found: refused.
 
 a table's stamp: one the installer fetched is stamped in place; a user's of another stamp than the slot is copied
@@ -79,7 +79,12 @@ def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None):
         src, _ = _resolve(m, pack["picks"], have, trust_size, fetch, found)
         cfg["picks"] = os.path.join(out, "osmos-picks.bin")
         _link(src, cfg["picks"])
-    if pack.get("drafter"):
+    if pack.get("drafter") and pack.get("drafter_kind", "dspark") == "mtp":  # the head's GGUF: osmos.json names it
+        fid = pack["drafter"][0]
+        src, _ = _resolve(m, fid, have, trust_size, fetch, found)
+        cfg["drafter"] = os.path.join(out, os.path.basename(m["files"][fid]["path"]))
+        _link(src, cfg["drafter"])
+    elif pack.get("drafter"):
         d = os.path.join(out, "dspark")
         os.makedirs(d, exist_ok=True)
         for fid in pack["drafter"]:
