@@ -2217,6 +2217,36 @@ exact sum an op, shows only at the fourth digit here). the same number at steps 
 split changes no bit. over 8,191 tokens llama.cpp is 2.7193 - with its sparse attention past 2,048: osmos's
 comparison there waits for its QSA.
 
+### serving it: tokenizer, template, dialect, family (2026-11-06)
+
+what osmos-serve and osmos-api need beyond the forward, each held to its reference:
+
+- **the tokenizer**: Qwen's `pre` is qwen35, one expression llama.cpp splits with its own code
+  (unicode_regex_split_custom_qwen35); src/text/pretok_qwen.c is that code branch for branch, its classes the code
+  point's own (not the regex path's collapsed ASCII). 242 cases against llama-tokenize over the model's vocabulary.
+  two of its branches cannot show in ids on this vocabulary (no token crosses punctuation into a newline, or a
+  newline into letters); the digit branch is redundant with the last (both take one code point).
+- **the chat template**: the GGUF's own tokenizer.chat_template (Qwen's, unsloth's fixes) ported byte for byte as
+  transformers renders it (jinja2 sandbox, trim and lstrip blocks, json.dumps for tojson, Python's str.strip for
+  trim). its differences from DeepSeek's: tools a variable of their own; the effort a word (xhigh default, high read
+  as xhigh, medium no line, low; anything else the template's refusal); every assistant turn's reasoning kept unless
+  preserve_thinking is false; tool calls as `<tool_call><function=..><parameter=..>`, a string parameter raw and
+  anything else its JSON. the parse is the template read backwards: a parameter's text is JSON where that parses to
+  a non-string of a type its schema allows - a nullable string's null comes back null, a string "3" stays a string
+  (the generator round-trips every assistant turn it renders, and found the nullable case).
+- **the API's dialect**: tools/api/dialect.c, a family's reader, render, parse and stream markers, chosen by
+  general.architecture. Qwen's template refuses tool arguments given as a JSON string, so the reader parses them
+  into objects first (llama.cpp's server does the same); its parse trims, so its stream starts past whitespace.
+- **the engine family**: every weight resident, so the server builds once (OsmosFacts.streams false: no budget
+  search). a batch is run one sequence's consecutive tokens at a time, each run's logits at its own rows - every row
+  kept, the bits of each sequence alone. a sequence saves and loads (its DeltaNet states, conv histories, caches
+  below the position, a checksum). no rollback reach: a recurrent state cannot step back without snapshots, so a
+  conversation that does not extend its last prompt is prompted again.
+
+end to end on this box (performance, UD-IQ3_XXS, low effort): "What is 17 * 23?" - reasoning, then 391; a
+get_weather call with {"city": "Paris", "days": 3}, the integer typed by its schema. 53 prompt tokens at 92 tok/s,
+decode 14.8 tok/s - llama.cpp's 26.3 the mark for 0.5.0, whose work this is not yet.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
