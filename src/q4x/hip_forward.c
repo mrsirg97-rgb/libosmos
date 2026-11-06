@@ -92,9 +92,11 @@ static bool buffers(Q4xForward *f, char *err)
   const uint64_t ch = 2ull * g->ssm_groups * g->ssm_state + (uint64_t)g->ssm_inner, in = (uint64_t)g->ssm_inner;
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
   const uint64_t vh = (uint64_t)g->ssm_v_heads, ff = (uint64_t)g->ff_exp, sff = (uint64_t)g->ff_shexp;
-  /* the experts: mm_group's entries (q4x_expert_entries' bound), a tile of slots each; mm's f16 activations, a chunk
+  /* the experts: mm_group's entries and slots (q4x_expert_bounds'); mm's f16 activations, a chunk
      of MM_MAX_TOKENS rows of the widest input (hc n_embd) */
-  const uint64_t entries = q4x_expert_entries((uint32_t)(n * k), (uint32_t)g->n_experts), slots = entries * MM_TILE;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds((uint32_t)(n * k), (uint32_t)g->n_experts, &bd);
+  const uint64_t entries = bd.entries, slots = bd.slots + 8 * MM_TILE; /* past the last: a part's tiles read whole */
   const uint64_t x16 = (uint64_t)MM_MAX_TOKENS * hd * 2, xe16 = slots * (D > ff ? D : ff) * 2;
   Q4xBuf *b = &f->b;
   const struct

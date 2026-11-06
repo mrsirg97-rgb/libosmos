@@ -21,7 +21,7 @@ extern "C" {
 #include "osmos/run/gpu.h"
 }
 
-constexpr uint32_t kStep = 256;
+constexpr uint32_t kStepDefault = 256;  // a prompt's step (Q4X_BENCH_STEP: osmos-serve's --max-tokens, 2048)
 
 static double now() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -30,6 +30,7 @@ static double now() {
 int main(int argc, char** argv) {
   if (argc < 3) return std::fprintf(stderr, "usage: q4x_bench <first shard> <ids> [prompt] [decode] [mtp head]\n"), 2;
   if (!gpu_sleep_on_waits()) return std::fprintf(stderr, "q4x_bench: the GPU's wait mode not set\n"), 1;
+  const uint32_t kStep = getenv("Q4X_BENCH_STEP") ? (uint32_t) atoi(getenv("Q4X_BENCH_STEP")) : kStepDefault;
   const uint32_t np = argc > 3 ? (uint32_t) std::atoi(argv[3]) : 512, nd = argc > 4 ? (uint32_t) std::atoi(argv[4]) : 128;
   std::vector<int32_t> ids;
   FILE* f = std::fopen(argv[2], "r");

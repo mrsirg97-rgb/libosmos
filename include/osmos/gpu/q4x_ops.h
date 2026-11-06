@@ -49,7 +49,14 @@ typedef struct Q4xExpertTiles
   int32_t *where;                      /* out: a pick's place */
 } Q4xExpertTiles;
 
-uint32_t q4x_expert_entries(uint32_t n, uint32_t n_exp);
+#define Q4X_TILE_RUNS 4 /* an expert part's tiles: 1, 2, 4 or 8 (16 to 128 tokens) - a launch each */
+typedef struct Q4xExpertBounds
+{
+  uint32_t first[Q4X_TILE_RUNS], count[Q4X_TILE_RUNS]; /* each run's entries: where they start, their bound */
+  uint32_t entries, slots;                             /* the tables' sizes */
+} Q4xExpertBounds;
+
+void q4x_expert_bounds(uint32_t n, uint32_t n_exp, Q4xExpertBounds *b);
 bool q4x_expert_tiles(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t dim, uint32_t ff,
                       const Q4xExpertTiles *t, void *stream);
 bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
@@ -144,14 +151,17 @@ q4x_route
   [t][j]; their weights w[t][j] = p / (sum of the k p's, at least 6.103515625e-5); rows[e] = t (the token an entry
   reads).
 
-q4x_expert_entries, q4x_expert_tiles
-  a step's n picks (ids: n_tok x k, token t's slots t k ..) as mm_group's tables, so each expert picked is read once a
-  tile of its tokens: the picks sorted by expert, then pick (stable) - where[pick] its place; an expert's places in
-  parts of at most MM_TILE, an entry each, in expert order: entry e's tokens cnt[e], its slots e MM_TILE .. (the x16
-  rows: gidx the token, hidx the place, -1 past cnt), its offsets xg = e MM_TILE dim, xd = e MM_TILE ff (halves: its
-  tile of the x16) and yg = its first place ff, yd = its first place dim (rows of y in place order), each tensor's
-  matrix base[i] + expert bytes[i]. entries past the live ones cnt 0 and their slots -1, to q4x_expert_entries' bound
-  (n / MM_TILE + min(n, n_exp)): the launches'. which picks share a tile changes no bit: mm's tokens are their own.
+q4x_expert_bounds, q4x_expert_tiles
+  a step's n picks (ids: n_tok x k, token t's slots t k ..) as mm_group's tables, so each expert picked is read once
+  for up to 128 of its tokens: the picks sorted by expert, then pick (stable) - where[pick] its place; each expert's
+  slots its places packed (from its first, rounded up to whole tiles of MM_TILE: gidx the token, hidx the place, -1
+  past them); its places in parts of at most 128, an entry each, in the run of its tiles (1 to 16 tokens: run 0, to
+  32: 1, to 64: 2, to 128: 3), each run's entries in expert order from bounds.first[r]: cnt[e] its tokens, xg / xd its
+  first slot times dim / ff (halves: its tiles of the x16), yg / yd its first place times ff / dim (y's rows in place
+  order), each tensor's matrix base[i] + expert bytes[i]. a run's entries past its live ones cnt 0, to its bound
+  (q4x_expert_bounds: min(n, n_exp), min(n / 17, n_exp), min(n / 33, n_exp), n / 65), the slots past the live ones
+  -1, to n + 15 min(n, n_exp) - the launches' and the tables'. a launch a run (mm_group, max_cnt 16 << r): a part's
+  slab decoded once for its tiles. which picks share a part changes no bit: mm's tokens are their own.
 
 q4x_gather
   dst[e][] = src[rows[e]][] for e < n, len floats a row: an entry's own copy of its token's input.

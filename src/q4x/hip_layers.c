@@ -118,26 +118,43 @@ bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, in
                 g->rope_base, b->q, b->gt, kc + (uint64_t)pos * kv, NULL);
 }
 
+/* an expert tensor over the tables' runs, a launch each (mm_group: a part's slab decoded once for its 16 << r tokens) */
+static bool experts(const GgufTensor *t, const void **ptr, const Q4xBuf *b, const Q4xExpertBounds *bd, uint32_t rows,
+                    uint32_t cols, const uint32_t *xo, float *y, const uint32_t *yo)
+{
+  bool ok = true;
+  for (int r = 0; ok && r < Q4X_TILE_RUNS; r++)
+    if (bd->count[r])
+    {
+      const uint32_t at = bd->first[r];
+      ok = mm_group(TY(t), ptr + at, b->cnt + at, bd->count[r], MM_TILE << r, rows, cols, b->xe16, xo + at, cols, y,
+                    yo + at, rows, NULL);
+    }
+  return ok;
+}
+
 bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, k = (uint32_t)g->n_used, ff = (uint32_t)g->ff_exp;
-  const uint32_t sff = (uint32_t)g->ff_shexp, e = n * k, ne = q4x_expert_entries(e, E), slots = ne * MM_TILE;
+  const uint32_t sff = (uint32_t)g->ff_shexp, e = n * k;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds(e, E, &bd);
   const GgufTensor *t[Q4X_GROUP_TENSORS] = {L->exp_gate, L->exp_up, L->exp_down};
   Q4xExpertTiles et = {.cnt = b->cnt, .gidx = b->gidx, .hidx = b->hidx, .xg = b->xg, .yg = b->yg, .xd = b->xd,
                        .yd = b->yd, .where = b->where};
   for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
-    et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E, et.ptr[i] = b->ptr + (uint64_t)i * ne;
-  /* each expert read once a tile of the step's tokens that picked it (q4x_expert_tiles, mm_group) */
+    et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E, et.ptr[i] = b->ptr + (uint64_t)i * bd.entries;
+  /* each expert read once for up to 128 of the step's tokens that picked it (q4x_expert_tiles, mm_group) */
   return mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) && q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) &&
          q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL) &&
-         mm_x16_rows(b->mixed, D, b->gidx, slots, D, b->xe16, b->overflow, NULL) &&
-         mm_group(TY(t[0]), et.ptr[0], b->cnt, ne, MM_TILE, ff, D, b->xe16, b->xg, D, b->ga, b->yg, ff, NULL) &&
-         mm_group(TY(t[1]), et.ptr[1], b->cnt, ne, MM_TILE, ff, D, b->xe16, b->xg, D, b->up, b->yg, ff, NULL) &&
+         mm_x16_rows(b->mixed, D, b->gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
+         experts(t[0], et.ptr[0], b, &bd, ff, D, b->xg, b->ga, b->yg) &&
+         experts(t[1], et.ptr[1], b, &bd, ff, D, b->xg, b->up, b->yg) &&
          q4x_swiglu(b->ga, b->up, (uint64_t)e * ff, b->ga, NULL) &&
-         mm_x16_rows(b->ga, ff, b->hidx, slots, ff, b->xe16, b->overflow, NULL) &&
-         mm_group(TY(t[2]), et.ptr[2], b->cnt, ne, MM_TILE, D, ff, b->xe16, b->xd, ff, b->y, b->yd, D, NULL) &&
+         mm_x16_rows(b->ga, ff, b->hidx, bd.slots, ff, b->xe16, b->overflow, NULL) &&
+         experts(t[2], et.ptr[2], b, &bd, D, ff, b->xd, b->y, b->yd) &&
          q4x_mat2(f, L->sh_gate, sff, b->shg, sff, L->sh_up, sff, b->shu, sff, D, b->mixed, D, n, false) &&
          q4x_swiglu(b->shg, b->shu, (uint64_t)n * sff, b->shg, NULL) && mat(f, L->sh_down, D, sff, b->shg, sff, n, b->sh, D) &&
          mat(f, L->sh_gate_inp, 1, D, b->mixed, D, n, b->sl, 1) &&

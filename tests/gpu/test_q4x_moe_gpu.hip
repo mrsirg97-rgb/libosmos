@@ -31,14 +31,27 @@ static Experts experts(const Gguf* g) {
 }
 
 // the k experts' outputs for every pick of the first n tokens, as the forward runs them: mm_group over
-// q4x_expert_tiles' tables (each expert read once a tile of its tokens), y in place order, where[pick] its place
+// q4x_expert_tiles' tables (each expert read once for up to 128 of its tokens, a launch a run of tiles), y in place
+// order, where[pick] its place
 struct Routed {
   float* y;
   int32_t* where;
 };
 
+// an expert tensor over the tables' runs, a launch each
+static void runs(uint32_t type, const void** ptr, const int32_t* cnt, const Q4xExpertBounds& bd, uint32_t rows,
+                 uint32_t cols, const void* x16, const uint32_t* xo, float* y, const uint32_t* yo) {
+  for (int r = 0; r < Q4X_TILE_RUNS; r++)
+    if (bd.count[r])
+      CHECK(mm_group(type, ptr + bd.first[r], cnt + bd.first[r], bd.count[r], MM_TILE << r, rows, cols, x16,
+                     xo + bd.first[r], cols, y, yo + bd.first[r], rows, nullptr));
+}
+
 static Routed routed(const Experts& e, const float* x, const int32_t* ids, uint32_t n) {
-  const uint32_t picks = n * kK, ne = q4x_expert_entries(picks, kExp), slots = ne * MM_TILE;
+  const uint32_t picks = n * kK;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds(picks, kExp, &bd);
+  const uint32_t ne = bd.entries, slots = bd.slots;
   Q4xExpertTiles t;
   const void** ptr = dev_alloc<const void*>((size_t) Q4X_GROUP_TENSORS * ne);
   t.base[0] = e.gate, t.base[1] = e.up, t.base[2] = e.down, t.bytes[0] = e.bg, t.bytes[1] = e.bu, t.bytes[2] = e.bd;
@@ -53,11 +66,11 @@ static Routed routed(const Experts& e, const float* x, const int32_t* ids, uint3
   CHECK(hipMemset(over, 0, 4) == hipSuccess);
   CHECK(q4x_expert_tiles(ids, picks, kK, kExp, kDim, kFf, &t, nullptr));
   CHECK(mm_x16_rows(x, kDim, t.gidx, slots, kDim, x16, over, nullptr));
-  CHECK(mm_group(e.tg, t.ptr[0], t.cnt, ne, MM_TILE, kFf, kDim, x16, t.xg, kDim, ga, t.yg, kFf, nullptr));
-  CHECK(mm_group(e.tu, t.ptr[1], t.cnt, ne, MM_TILE, kFf, kDim, x16, t.xg, kDim, up, t.yg, kFf, nullptr));
+  runs(e.tg, t.ptr[0], t.cnt, bd, kFf, kDim, x16, t.xg, ga, t.yg);
+  runs(e.tu, t.ptr[1], t.cnt, bd, kFf, kDim, x16, t.xg, up, t.yg);
   CHECK(q4x_swiglu(ga, up, (uint64_t) picks * kFf, ga, nullptr));
   CHECK(mm_x16_rows(ga, kFf, t.hidx, slots, kFf, x16, over, nullptr));
-  CHECK(mm_group(e.td, t.ptr[2], t.cnt, ne, MM_TILE, kDim, kFf, x16, t.xd, kFf, y, t.yd, kDim, nullptr));
+  runs(e.td, t.ptr[2], t.cnt, bd, kDim, kFf, x16, t.xd, y, t.yd);
   CHECK(host_of(reinterpret_cast<float*>(over), 1)[0] == 0.0f);
   return {y, t.where};
 }
@@ -110,7 +123,8 @@ int main() {
   CHECK(q4x_moe_sum(r.y, r.where, w, kTok, kK, kDim, zero, sl, out, nullptr));  // the routed alone: zero shared
   const std::vector<float> moe = host_of(out, kTok * kDim);
   CHECK(!std::memcmp(moe.data(), few.data(), few.size() * 4));
-  std::printf("  each expert a tile of its tokens (mm_group): the first %u tokens' bits whether among %u or alone\n",
+  std::printf("  each expert read once for its tokens (mm_group, 1-8 tiles): the first %u tokens' bits among %u or "
+              "alone\n",
               kAlone, kTok);
   held("routed experts (ffn_moe_out)", moe, ref("ffn_moe_out-0"), 1.0, kChainRel);
   CHECK(q4x_moe_sum(r.y, r.where, w, kTok, kK, kDim, sh, sl, out, nullptr));
