@@ -2147,6 +2147,15 @@ llama.cpp **7.2e-3 / 1.1e-2**: its activations at 8 bits before each Q8_0 matmul
 ours. the tests hold osmos to the exact sum (1e-5) wherever one is computed, and to llama.cpp within its own rounding
 (1% a matmul, 2% two in a row) where not. (the operator's sense that osmos answers better: here a measure of it.)
 
+### the Gated DeltaNet (2026-11-06)
+
+kernels/q4x_ssm.hip: the conv (its history the sequence's), the gates, the delta rule - a block a value head, a
+column of its 128 x 128 state a thread, in registers, a token at a time - and the gated norm. test_q4x_deltanet_gpu,
+layer 0, each op from llama.cpp's own inputs (its weights F32, so no rounding of llama.cpp's between): conv 5.6e-8,
+the decay 6.2e-7, beta 1.5e-7, the delta rule over 256 tokens 2.2e-7, the gated norm 6.5e-8 (relative L2); the
+whole layer from its mixed input 1.0e-2 (llama.cpp's 8-bit activations into attn_qkv, attn_gate, ssm_out). the
+state carried: 128 + 128 tokens the bits of 256. a mutant reading key group h / 3 (not h % 16) is 79% off.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
