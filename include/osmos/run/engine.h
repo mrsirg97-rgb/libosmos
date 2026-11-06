@@ -32,6 +32,7 @@ typedef struct OsmosFacts
   uint32_t native_ctx;    /* the model's own longest context */
   uint32_t round_tokens;  /* a decode step's most tokens: past it, a prompt's step */
   uint32_t seed_window;   /* the positions a drafter's seed reads back from a prompt's end */
+  bool streams;           /* experts streamed under a budget (sized to the GPU); false: every weight resident */
 } OsmosFacts;
 
 typedef struct OsmosOptions
@@ -80,6 +81,9 @@ uint32_t osmos_block(const Osmos *e);
 bool oseq_seed(OsmosSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);
 int oseq_draft(OsmosSeq *s, int32_t y, float conf_min, float cum_min, int32_t drafts[OSMOS_MAX_BLOCK],
                float conf[OSMOS_MAX_BLOCK], char err[OSMOS_ERR]);
+bool oseq_draft_all(OsmosSeq *const *s, const int32_t *y, uint32_t n, float conf_min, float cum_min,
+                    int32_t (*drafts)[OSMOS_MAX_BLOCK], float (*conf)[OSMOS_MAX_BLOCK], int *counts,
+                    char err[OSMOS_ERR]);
 
 #endif
 
@@ -96,8 +100,9 @@ osmos_open
   built from it.
 
 osmos_facts
-  the family, its vocabulary, its native context, a decode step's most tokens and a drafter seed's window: the
-  server's sizing, known before a build.
+  the family, its vocabulary, its native context, a decode step's most tokens, a drafter seed's window and whether
+  its experts stream under a budget: the server's sizing, known before a build (a family that does not stream builds
+  once, its budget 0).
 
 osmos_create
   the forward built from the model: its GPU memory, its resident set (picks ranked, else the family's order), its
@@ -128,10 +133,13 @@ oseq_create .. oseq_load
   state's bytes, save and load (load refuses another identity, size or a damaged state - the sequence then empty,
   position 0, never part one conversation and part another).
 
-osmos_block, oseq_seed, oseq_draft
+osmos_block, oseq_seed, oseq_draft, oseq_draft_all
   the drafter, when the engine has one (osmos_block 0 when not: oseq_seed and oseq_draft then refuse). oseq_seed:
   the drafter's own state from the sequence's positions from .. to (a step's rows, read after the step that ran
   them); oseq_draft: up to osmos_block drafts after token y, each kept while its confidence is at least conf_min
   and their product at least cum_min - the count, or -1 with why. drafts are proposals: a batched step verifies
-  them, and they change no bit of the sequence's.
+  them, and they change no bit of the sequence's. oseq_draft_all: n sequences of one engine (each once), sequence i's
+  after y[i] at drafts[i] / conf[i], its count counts[i] - each its oseq_draft's, bit for bit; the family's drafter on
+  all of them at once where it has one (Qwen's MTP head: a draft's depth one step for those still drafting), else one
+  after another. false with why.
 */

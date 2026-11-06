@@ -2064,7 +2064,7 @@ GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB o
     sequence's state 48 x 128 x 128 F32 a layer (~113 MB for the 36).
   - layers l % 4 == 3 (12): Qwen Sparse Attention - attn_q [2560 -> 12288: 24 heads x 256, and their gates],
     attn_k / attn_v [2560 -> 512: 2 KV heads x 256], q / k norms, attn_output [6144 -> 2560]; an indexer (BF16
-    q_proj [2560 -> 4 x 128], k_proj [-> 128], norms) choosing top-k 2048 tokens (compress ratio 48: blocks).
+    q_proj [2560 -> 4 x 128], k_proj [-> 128], norms) choosing top-k 2048 tokens (compress ratio 4: blocks).
   - every layer: the gated residual (hc_{attn,ffn}_{norm,down,up,inject}: x normed a stream, gate =
     sigmoid(up(silu(down(x) / 4))), the block's input the streams' gated mean; after it, each stream += 2
     sigmoid(inject_s) x out); the MoE - router F32 [2560 -> 512] top 10, a shared expert gated by sigmoid
@@ -2085,6 +2085,296 @@ GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB o
   types (each against ggml's dequant, bit for bit); weights and geometry (every tensor in a role, refusals); the
   forward one block at a time against llama.cpp's intermediate tensors (llama-eval-callback); then decode speed,
   then prompts, then MTP.
+
+### Qwen's forward, op by op (design, 2026-11-06)
+
+from llama.cpp 68d20b8's src/models/qwen4exp.cpp (the reference: its names in quotes are its tensors' cb names, what
+the dumps hold) and ggml's CPU ops. D = 2,560, hc = 4 streams, r = 320, eps = 1e-6. a token's residual is hc
+streams of D (h[s][d]), the embedding copied into each ("hc_init").
+
+- **the mixer** (twice a layer: before the token mixer, before the MoE; once at the end as the output norm):
+  xn[s] = rms_norm(h[s]) * w_norm[s] (a norm a stream, eps; the weight per stream - the converter folded 1 + w);
+  lo = silu(down . xn / hc) (down: [hc D] -> r); gate = up . lo (r -> [hc D]); mixed = mean over s of
+  xn[s] * sigmoid(gate[s]) ("hc_mixed"); inject = (inject_w . xn) / hc ([hc D] -> hc; none at the end).
+- **the combine**: h[s] += 2 sigmoid(inject[s]) * out (every stream the same block output, its own weight;
+  "hc_combine").
+- **a layer**: [PLE on its layer] -> mix(attn) -> DeltaNet or attention -> combine -> mix(ffn) -> MoE -> combine
+  ("l_last"); after the last layer the end mixer's `mixed` ("result_norm") through output.weight ("result_output").
+- **the Gated DeltaNet** (36 layers; 16 key heads, 48 value heads of 128): qkv = attn_qkv . x (10,240: q 16x128,
+  k 16x128, v 48x128); z = attn_gate . x (6,144); beta = sigmoid(ssm_beta . x); g = softplus(ssm_alpha . x + dt) *
+  ssm_a (ssm_a holds -exp(A_log): g <= 0). the conv: a depthwise causal conv of 4 taps over the last 3 tokens' qkv
+  and this one (its history the state: 3 x 10,240), silu ("conv_output_silu"). q, k: an l2 norm a head (rms_norm
+  with eps / 128, times 1 / sqrt(128)). the delta rule a value head h at a time, its key group **h % 16** (ggml's
+  head broadcast, not h / 3): S *= exp(g); delta_j = (v_j - sum_i S[i][j] k_i) beta; S[i][j] += k_i delta_j;
+  out_j = sum_i S[i][j] q_i / sqrt(128) - S 128 x 128 F32 a head, the recurrent state ("new_state"). then out =
+  rms_norm(out) * ssm_norm * sigmoid(z) a head (sigmoid: Qwen3.8's difference from Qwen3.5's silu), ssm_out . out.
+- **the sparse attention** (12 layers; 24 heads, 2 KV heads, 256 dims): attn_q gives a head's q then its gate,
+  interleaved a head at a time (512 a head); q, k rms-normed a head (q_norm, k_norm); IMRoPE (rope_multi: sections
+  11, 11, 10, 0 of the 64 rotated dims, base 1e7; text positions all four the same); attention at 1 / sqrt(256),
+  GQA 12 heads a KV head; out * sigmoid(gate); attn_output. the selection (QSA): keys pooled in blocks of 4, the
+  indexer (4 heads of 128: q_proj, k_proj, their norms) scores the pooled blocks, the top 2,048 tokens' blocks plus
+  the incomplete tail attended, the rest masked - at 2,048 tokens or fewer every token is kept: dense. the first
+  build is dense (and refuses a context past 2,048 until QSA is built and held to llama.cpp's selection).
+- **the MoE**: logits = router . x (F32 512); softmax; the top 10 by probability; their weights / their sum
+  (clamped at 6.1e-5); experts silu(gate) * up -> down (640 wide); plus the shared expert (the same shape) times
+  sigmoid(ffn_gate_inp_shexp . x) ("ffn_out").
+- **the n-gram table (PLE, layer 1, before its mixer)**: a token's 16 rows: n = 2, 3 (8 heads each) over the token
+  and its 2 predecessors (none, or an EOS at or before one: the rest EOS; the token's own EOS cuts nothing);
+  mixed = t0 m0 ^ t1 m1 [^ t2 m2] in uint64; row = mixed % rows[h] + offset[h]; the 16 rows of 160 (IQ4_NL)
+  flattened to 2,560 ("ple_embd"). key = ple_key . e, value = ple_value . e; key and the residual each rms-normed a
+  stream (ple_norm_key, ple_norm_query); a stream's gate = sigmoid(sgn(s) sqrt(max(|s|, 1e-6))), s = key[s] .
+  query[s] / sqrt(D); gated[s] = value * gate[s]; a depthwise causal conv over gated (rms-normed a stream,
+  ple_norm_conv) of 4 taps dilated by 3 (its history 9 tokens), silu; h += gated + conv.
+- **a sequence's state**: a DeltaNet layer's S (48 x 128 x 128 F32, 3 MB) and conv history (3 x 10,240); the PLE
+  layer's conv history (9 x 10,240); the attention layers' K and V; its last 2 tokens (the n-grams).
+
+### the reference's tensors (2026-11-06)
+
+oracle/qwen_dump.cpp: llama.cpp's own (68d20b8, HIP, all layers on the GPU) through its eval callback - the README's
+first 256 tokens (prose, tables, code; the model's own tokenizer) one batch, each tensor of the spec's names written
+as F32 with its shape (~/osmos-oracle/qwen-dump-256: 1,246 tensors, 5.7 GB, 19 s). a layer's two mixers share
+their names: the second is <name>#1. llama.cpp's matmuls round the activations to 8 bits (q8_1) against a quantized
+weight, so its tensors are near ours, not ours: a layer is held to them within a measured tolerance, the logits by
+their KL divergence - never a bit-for-bit claim.
+
+### the mixer, held to exact math (2026-11-06)
+
+kernels/q4x.hip: the hyper-connections' norm, gated mean and combine (the down / up / inject through mv_strided).
+test_q4x_mix_gpu on layer 0's real residual (hc_init) and weights: the norm 6.0e-8 of llama.cpp's (relative L2),
+the inject 1.5e-6, the combine 2.8e-8 - where llama.cpp does not round. through the rank's two quantized matmuls it
+does: so the gate and mixed input in double, from the exact weights, as well - osmos against that **1.1e-7 / 6.7e-8**,
+llama.cpp **7.2e-3 / 1.1e-2**: its activations at 8 bits before each Q8_0 matmul, ~10^5 further from the math than
+ours. the tests hold osmos to the exact sum (1e-5) wherever one is computed, and to llama.cpp within its own rounding
+(1% a matmul, 2% two in a row) where not. (the operator's sense that osmos answers better: here a measure of it.)
+
+### the Gated DeltaNet (2026-11-06)
+
+kernels/q4x_ssm.hip: the conv (its history the sequence's), the gates, the delta rule - a block a value head, a
+column of its 128 x 128 state a thread, in registers, a token at a time - and the gated norm. test_q4x_deltanet_gpu,
+layer 0, each op from llama.cpp's own inputs (its weights F32, so no rounding of llama.cpp's between): conv 5.6e-8,
+the decay 6.2e-7, beta 1.5e-7, the delta rule over 256 tokens 2.2e-7, the gated norm 6.5e-8 (relative L2); the
+whole layer from its mixed input 1.0e-2 (llama.cpp's 8-bit activations into attn_qkv, attn_gate, ssm_out). the
+state carried: 128 + 128 tokens the bits of 256. a mutant reading key group h / 3 (not h % 16) is 79% off.
+
+### the attention, dense (2026-11-06)
+
+kernels/q4x_attn.hip: q's and k's norm and rotation - IMRoPE on text (every section the token's position) is the
+NeoX pairing over the first 64 dims, theta_i a running product as ggml's cache builds it - and the gated attention
+over an F32 cache (a block a head and token, its keys' scores in LDS: 8,192 keys at most, half a block's 64 KB;
+dense - the QSA selection keeps every token below its 2,048-token budget). GQA is h / 12 (llama.cpp's flash
+attention), unlike the DeltaNet's h % 16. test_q4x_attn_gpu, layer 3: q and k 4.6e-7 / 5.3e-7 of llama.cpp's; the
+attention 6.0e-7 of exact (double), llama.cpp 7.8e-4 of it (its F16 cache); the whole layer 1.0e-2; two halves
+through the cache the bits of one run; a mutant grouping h % 2 96% off.
+
+### the MoE (2026-11-06)
+
+kernels/q4x_moe.hip: the routing (ggml's softmax, the top 10 - ties to the lower id - their weights over their sum,
+clamped at f16's least normal), an entry a (token, expert) with its own copy of its token's input (mv_group_tok
+writes the row it reads), silu(gate) up, and the weighted sum with the shared expert's (sigmoid-gated).
+test_q4x_moe_gpu, layer 0: the router 7.3e-7, the routing weights 1.8e-6 of llama.cpp's - the same 10 experts in the
+same order for all 256 tokens; the routed experts 1.3e-7 of exact (16 tokens, double from the exact weights),
+llama.cpp 8.4e-3; the whole MoE 5.6e-3 of llama.cpp's. the decode's grouping by expert (an expert read once for
+its tokens) is the speed work's: this is an entry a (token, expert), correct first.
+
+### the n-gram table (2026-11-06)
+
+src/q4x/ple.c: a token's rows hashed on the host (as llama.cpp does: ggml has no 64-bit integers or xor);
+kernels/q4x_ple.hip: the rows decoded, the per-stream gate, the residual's add; q4x_conv takes a dilation (the
+DeltaNet's 1, this layer's 3, its history 9 tokens). test_q4x_ple_gpu, layer 1, the dump's own tokens: the decoded
+rows **bit for bit** llama.cpp's embedding (every token's 16 rows the same - the first two's missing predecessors
+read as EOS); the gate 1.2e-4 and gated value 6.0e-4 (through Q8_0 key / value: llama.cpp's rounding); the dilated
+conv 5.7e-8; the residual after it 6.8e-8; the conv's history carried, two halves the bits of one run; a mutant
+taking the predecessors in the wrong order 132% off. the test's tensor upload reads 256 MB at a time (the table is
+28.8 GB; a read takes ~2 GB at most).
+
+### the whole forward (2026-11-06)
+
+include/osmos/q4x/forward.h, src/q4x/hip_{forward,layers,step}.c: every weight resident (~78 GB, read through a
+pinned 256 MB piece), a step's buffers, a sequence's state (36 DeltaNet states and conv histories, the n-gram conv
+history, 12 F32 attention caches, its last tokens), the layers as the op tests hold them, the end mixer, the
+logits. test_q4x_forward_gpu, the dump's 256 tokens: 128 + 128 and 255 + 1 the bits of one batch; free-running,
+the residual drifts from llama.cpp's - 1.7e-2 after layer 0, 0.15-0.2 from layer 32 - the logits' KL mean 2.9e-2
+(max 1.07), the greatest token the same for 93.4%. teacher-forced (each layer from llama.cpp's own residual): every
+layer alone 0.5e-2 .. 2.7e-2 (worst layer 32), none an outlier - the DeltaNets, the attentions, the IQ4_XS and Q2_0
+experts, the n-gram layer: no layer wrong, the drift two roundings compounding over 48 layers (and osmos's the one
+near the exact sum, the op tests show). which is the better model is perplexity's to say: next.
+
+### perplexity: osmos at llama.cpp's, and below (2026-11-06)
+
+the text: the 16,000 ids of ~/bench/osmos-prompts/calib16k.txt (DeepSeek's perplexity text) decoded back by osmos's
+own tokenizer (~/bench/calib16k-text.txt: Strata's docs, then license text) and tokenized by Qwen's own (qwen_dump).
+one protocol both sides: one sequence, every next token scored by log-softmax in double (oracle/qwen_dump -ppl,
+tools/bench/q4x_ppl). 2,048 tokens - llama.cpp's QSA keeps every token below its 2,048-token budget, so both
+attentions dense:
+
+| UD-IQ3_XXS, 2,047 tokens scored | perplexity | mean log-probability |
+| --- | ---: | ---: |
+| llama.cpp 68d20b8 (HIP) | 6.9478 | -1.938422 |
+| **osmos** | **6.9471** | **-1.938324** |
+
+at llama.cpp's, by a hair below (the weights' 3 bits the error that matters; osmos's arithmetic, ~10^5 nearer the
+exact sum an op, shows only at the fourth digit here). the same number at steps of 256 and of 100: the batches'
+split changes no bit. over 8,191 tokens llama.cpp is 2.7193 - with its sparse attention past 2,048: osmos's
+comparison there waits for its QSA.
+
+### serving it: tokenizer, template, dialect, family (2026-11-06)
+
+what osmos-serve and osmos-api need beyond the forward, each held to its reference:
+
+- **the tokenizer**: Qwen's `pre` is qwen35, one expression llama.cpp splits with its own code
+  (unicode_regex_split_custom_qwen35); src/text/pretok_qwen.c is that code branch for branch, its classes the code
+  point's own (not the regex path's collapsed ASCII). 242 cases against llama-tokenize over the model's vocabulary.
+  two of its branches cannot show in ids on this vocabulary (no token crosses punctuation into a newline, or a
+  newline into letters); the digit branch is redundant with the last (both take one code point).
+- **the chat template**: the GGUF's own tokenizer.chat_template (Qwen's, unsloth's fixes) ported byte for byte as
+  transformers renders it (jinja2 sandbox, trim and lstrip blocks, json.dumps for tojson, Python's str.strip for
+  trim). its differences from DeepSeek's: tools a variable of their own; the effort a word (xhigh default, high read
+  as xhigh, medium no line, low; anything else the template's refusal); every assistant turn's reasoning kept unless
+  preserve_thinking is false; tool calls as `<tool_call><function=..><parameter=..>`, a string parameter raw and
+  anything else its JSON. the parse is the template read backwards: a parameter's text is JSON where that parses to
+  a non-string of a type its schema allows - a nullable string's null comes back null, a string "3" stays a string
+  (the generator round-trips every assistant turn it renders, and found the nullable case).
+- **the API's dialect**: tools/api/dialect.c, a family's reader, render, parse and stream markers, chosen by
+  general.architecture. Qwen's template refuses tool arguments given as a JSON string, so the reader parses them
+  into objects first (llama.cpp's server does the same); its parse trims, so its stream starts past whitespace.
+- **the engine family**: every weight resident, so the server builds once (OsmosFacts.streams false: no budget
+  search). a batch is run one sequence's consecutive tokens at a time, each run's logits at its own rows - every row
+  kept, the bits of each sequence alone. a sequence saves and loads (its DeltaNet states, conv histories, caches
+  below the position, a checksum). no rollback reach: a recurrent state cannot step back without snapshots, so a
+  conversation that does not extend its last prompt is prompted again.
+
+end to end on this box (performance, UD-IQ3_XXS, low effort): "What is 17 * 23?" - reasoning, then 391; a
+get_weather call with {"city": "Paris", "days": 3}, the integer typed by its schema. 53 prompt tokens at 92 tok/s,
+decode 14.8 tok/s - llama.cpp's 26.3 the mark for 0.5.0, whose work this is not yet.
+
+### Qwen's speed (2026-11-06, performance)
+
+the gate: qwen-forward merges at 40-60 tok/s decode. measured with tools/bench/q4x_bench (a 512-token prompt, then
+128 greedy tokens; the decoded ids' FNV-1a printed, so a change that moves the answer shows):
+
+| step | plain decode | drafted (MTP, 3 a round) | prompt 512 / 2,048 |
+| --- | ---: | ---: | ---: |
+| the first build | 15.2 | - | 105 |
+| the router's picks a block's argmax (thread 0 scanned 512 ten times: 13 ms a token) | 24.5 | - | 106 |
+| the expert types' matvec shapes (tools/bench/mvsweep) | 25.2 | - | 126 |
+| the MTP head drafting (q4x_mtp_*), rollback rings | 25.2 | 38-40 | 126 |
+| matmuls on mm (f16 WMMA), a prompt's experts a tile a read | 21.7 | 34 | 352 / 323 |
+| mm's expert shapes (mmsweep), an input's f16 once, pairs one launch | 22.8 | 38.1 | 370 / 331 |
+| the DeltaNet loop (norms out of it, two threads a column), 320-wide on mm | 22.3-22.9 | - | 424-472 / 404-413 |
+
+- **the mm decision**: prompts are compute: the F32 matvec's decode-then-FMA ran 1.4-3 TFLOP/s. mm (DeepSeek's: f16
+  activations and weights into WMMA, F32 sums) takes them to llama.cpp's (415 at 2,048). its cost: precision - the
+  MoE 2.3e-4 from exact (F32: 1.3e-7; llama.cpp's q8_1: 8.4e-3) - and perplexity says it is none: 6.9365-6.9503
+  across the shapes tried (F32 6.9471, llama.cpp 6.9478). the operator's rule kept: one kernel a matrix at every
+  token count, so a token's bits are its own whatever its batch (the forward test's 128 + 128 and 255 + 1). a
+  hybrid (mm for prompts, the matvec for decode) measured 24.6 / 37.6 / 355 and was declined for breaking that.
+- **grouping a small step's experts** (each expert read once for the tokens that picked it) did not pay on the
+  matvec: 4 consecutive tokens share a third of their experts, but an expert read for several tokens cost that
+  back (61.8 ms a 4-token step ungrouped, 64.8-67.4 grouped). on mm it is a tile's work, and pays.
+- **the drafts a round**: 1-5 measured over 192 tokens (34.4, 35.2, 35.0, 33.4, 32.6 tok/s on the matvec): 2-3, as
+  llama.cpp's default 3. a step's extra token costs ~6-8 ms (its experts' reads), a draft ~3.8 ms (the head's
+  output projection mostly).
+- **next**: the attention (dense, a block a head and token: ~1 s of a 2,048-token prompt, quadratic - ~16 s at
+  8,192; +7 ms a token decoding at 2,048) to a tiled kernel on the matrix cores; a prompt's experts read once for
+  up to 128 tokens (DeepSeek's 8 tiles; now 16); the decode's f16 conversions folded into their producers.
+
+### the cache in Q8_0, the native context (2026-11-06, performance)
+
+the attention's cache in ggml's Q8_0 (a block of 32 values: an f16 scale, amax / 127, then each rounded to nearest):
+~13 KB a token a sequence for its 12 layers and the MTP head's, 48 KB in F32 - the native 262,144 positions
+(qwen4exp.context_length; OPS_Q4X_MAX_KEYS) 3.4 GB a conversation. k and v written by q4x_kv_put (a thread a block)
+after their projection and rotation; fa_kernel loads a key as its scale times its int8, to f16 - the matrix cores'
+own, so a token's bits stay its batch's. the state's format 2 (a format-1 state refused). YaRN past 262,144 (1M) is
+0.5.1's: the GGUF names no rope scaling.
+- **test_q4x_attn_gpu**: the cache's bytes ggml's quantize_row_q8_0's (a host copy), bit for bit; k and v 5.3e-3 /
+  6.3e-3 of their F32 (a block's bound sqrt(32) / 254, 2.2e-2: all of it in one value); the attention 2.0e-4 of
+  double on the cache's values, 5.6e-3 of double on F32's (llama.cpp's F16 cache 7.8e-4); the halves, one at a time
+  and past 1,000 positions the bits of one run.
+- **perplexity** (the same ids; llama.cpp on its Q8_0 cache: oracle/qwen_dump, QWEN_DUMP_KV=q8_0):
+
+  | tokens | osmos F32 cache | osmos Q8_0 | llama.cpp F16 | llama.cpp Q8_0 |
+  |---|---|---|---|---|
+  | 2,048 | 6.94-6.95 | 6.9765 | 6.9478 | 6.9738 |
+  | 8,192 | 2.7136 | **2.7075** | 2.7193 | 2.7110 |
+
+  the Q8_0 cost at 2,048 llama.cpp's own (+0.04% of its Q8_0, +0.4% of its F16); at 8,192 below both. the operator
+  took Q8_0 as the default for the context it buys.
+- **speed**: plain decode 23.3 tok/s (the same), drafted 40.5 (41.1: ~1%, the puts' launches); prompt 2,048 663
+  tok/s (649), 8,000 454 (417) and its decode 22.0 (21.9) - the cache's reads a quarter of F32's.
+
+### QSA: the sparse attention past 2,048 keys (design, 2026-11-06)
+
+why: the agent bench (4 x 8, ~99K prompt tokens) 638 s against DeepSeek's 440 - the steps shared (q4x_step) and
+the drafts too (q4x_mtp_draft_all) moved the wall 733 -> 638 and then not at all: a prompt's pieces and the decode
+rounds take turns (multi.c), so the prompts' speed is the wall's, and a dense attention's falls with the context -
+2,048 tokens 651 tok/s, 8,000 454, 16,384 315. llama.cpp's QSA (src/models/qwen4exp.cpp, build_qsa_sel; its
+cache's rules, llama-memory-hybrid-idx.cpp set_input_kpool, in order mode) caps a token's keys at the budget.
+
+**the math** (one sequence; R = 4, compress_ratios; T = top_k / R = 512 blocks; 4 indexer heads x 128):
+- **the keys' blocks**: block j positions R j .. R j + R - 1. its pooled key K_j = rope(rmsnorm(mean of its members'
+  raw keys) x k_norm) at position R j (its first member) - the raw key index_k_proj(x), neither normed nor rotated;
+  the mean the members summed in order, then x 1 / R (llama.cpp's slices).
+- **a token's query**: q_h = rope(rmsnorm(index_q_proj(x)_h) x q_norm) at its position - the main attention's
+  IMRoPE (the first rope_dim dims of 128), x the attention's input (the mixer's mixed, as q, k, v).
+- **visible**: token p sees the blocks complete at or before it, nv = (p + 1) / R; its tail the n_tail = (p + 1) % R
+  positions R nv .. p.
+- **the score**: block j < nv: sum over heads in order of relu(q_h . K_j) / sqrt(128) (ggml_lightning_indexer).
+- **the pick**: the top min(nv, T) blocks by score - ties to the lower block (ggml_top_k leaves them unordered:
+  ours fixed); the attention over their positions and the tail. nv <= T: every block - the dense attention.
+
+**osmos's shape**:
+- **one attention, a key list**: a token's keys one flat list - its picked blocks' positions ascending, then the
+  tail - in chunks of 128 merged in order (fa_kernel's chunks of the list, not of positions). every block picked
+  (nv <= T, below 2,052 positions) the list is 0 .. p: today's chunks, today's bits. a token's chunks at most
+  ceil((R T + R - 1) / 128) = 17: the scratch a step's tokens x 17, whatever the context.
+- **the cache**: a QSA layer's pooled keys F32 [max_ctx / R][128] a sequence (~1.5 KB a token for the 12, the head's
+  too); the raw keys a ring of the last R - 1 + Q4X_MAX_BACK positions (a rollback's partial block in it), the step's
+  own from its buffer. a step pools the blocks it completes before any score (a token sees a block its step ends).
+- **the kernels** (kernels/q4x_qsa.hip): the indexer's projections (q4x_mat: BF16, mv); its q norm and rope; the
+  pooling; the scores - a token's against its visible blocks, tiled (tokens x blocks); the pick - a token's top T by
+  a radix select on the scores' bits (non-negative: relu sums), ties to the lower block, the picked in block order;
+  the attention reading the list.
+- **the bits**: a score's dot products in one order, a pick by (score, block): a token's list its own, however
+  batched - the halves, one at a time and shared steps the bits of one run, as now.
+- **the state**: the pooled keys below the position's blocks and the ring - the format's 3.
+
+**held to** (tests/gpu/test_q4x_qsa_gpu): llama.cpp's tensors at 3,000 tokens (qwen_dump: indexer_q, indexer_k, its
+scores and picks): q and the pooled keys to F32's rounding of their F16 cache, the picks the same blocks but near
+ties (named); a double reference of the pick from our own keys and queries - the same blocks exactly; the
+attention against double over its picked keys; the halves, one at a time and shared steps the bits of one run past
+2,052 positions; perplexity at 8,192 and 16,384 against llama.cpp's QSA (8,192: F16 2.7193, Q8_0 2.7110) - at or
+below; mutants (a tie to the higher block, the tail off by one, a block's rope at its last member).
+
+**the measure**: prompt tok/s at 2,048 / 8,000 / 16,384 / 65,536, decode at 8K and 64K, then the agent bench.
+
+**measured** (2026-11-06, performance):
+- **test_q4x_qsa_gpu** (layer 3, 3,000 tokens): the raw keys 1.9e-3 of llama.cpp's (its BF16 matmul), the query
+  1.9e-3; the pooled keys from its raw keys 2.1e-4 (its F16 cache); the picks of all 949 tokens past the budget the
+  double's blocks exactly and llama.cpp's exactly (no tie at the cut in this text; a zero query's every score tied:
+  blocks 0 .. 511); the attention over them 1.9e-4 of double, 5.7e-3 of llama.cpp's (its F16 cache, our Q8_0); pieces
+  of 1000 + 999 + 1 + 1000 and a token at a time the bits of one run; below the budget the dense bits. mutants: ties
+  taken wholesale, the tail one short, a block rotated at its last member - each caught.
+- **perplexity** (the same ids):
+
+  | tokens | osmos dense | osmos QSA | llama.cpp QSA F16 | llama.cpp QSA Q8_0 |
+  |---|---|---|---|---|
+  | 2,048 | 6.9765 | 6.9765 (the same bits) | 6.9478 | 6.9738 |
+  | 8,192 | 2.7075 | 2.7143 | 2.7193 | 2.7110 |
+  | 16,384 | 2.2714 | 2.2732 | 2.2721 | 2.2675 |
+
+  QSA's own cost +0.25% / +0.08% of our dense; llama.cpp's two caches 0.2% apart at 16,384 - the spread a
+  forward's roundings make. at 16,384 above llama.cpp's (+0.05% of F16, +0.25% of Q8_0), dense too: not the picks'.
+- **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
+  21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
+
+### 0.5.0: DeepSeek unchanged (2026-11-06, performance)
+
+the kernels Qwen shares (mm, mv, quant.h, block.h) and the engine's and server's draft path (oseq_draft_all;
+DeepSeek's draft_all NULL: one lane at a time, as before) moved for Qwen. held: osmos-serve's token streams the
+v0.4.0 binary's (built from its tag, the same libevt) on 16 requests - each the same hash as 0.4.0's own check
+(~/bench/v050-streams.log); the DeepSeek GPU tests pass (test_forward_gpu, test_lane_gpu skipped: GSQ-RCO's dumps
+not on this box, as before); dbench UD-IQ1_M plain 17.1 / 17.1 / 17.0 tok/s, drafted 35.1 / 27.7 / 38.0 (33.6 the
+mean: 0.3.2's), each question's hash the same plain and drafted.
 
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 

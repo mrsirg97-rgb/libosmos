@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "answer.h"
-#include "chat_impl.h"
 
 /* the streamed answer (DESIGN.md, "osmos-api: the answer"): reasoning_content deltas until </think>, content after,
    nothing from a calls block or the EOS on. what could still turn out to be one of those markers - a marker's start,
@@ -41,6 +40,7 @@ static void delta(Answer *s, const char *p, size_t n)
 {
   if (!n)
     return;
+  s->begun = true;
   JsonBuf b = {0};
   json_puts(&b, s->phase == PHASE_REASONING ? "{\"reasoning_content\": " : "{\"content\": ");
   json_dump_string(&b, p, n), json_puts(&b, "}");
@@ -79,9 +79,11 @@ void answer_advance(Answer *s)
 {
   while (s->phase != PHASE_DONE)
   {
+    while (s->d->trims && !s->begun && s->sent < s->text.n && space(s->text.p[s->sent]))
+      s->sent++;
     const char *p = s->text.p + s->sent;
     const size_t n = s->text.n - s->sent;
-    const char *marks[2] = {s->phase == PHASE_REASONING ? CHAT_THINK_END : CHAT_CALLS_OPEN, CHAT_EOS};
+    const char *marks[2] = {s->phase == PHASE_REASONING ? s->d->think_end : s->d->calls_open, s->d->eos};
     const char *at = NULL;
     int which = 0;
     for (int m = 0; m < 2; m++)
@@ -102,7 +104,7 @@ void answer_advance(Answer *s)
       e--;
     delta(s, p, e);
     if (which == 0 && s->phase == PHASE_REASONING)
-      s->phase = PHASE_CONTENT, s->sent += (size_t)(at - p) + strlen(CHAT_THINK_END);
+      s->phase = PHASE_CONTENT, s->begun = false, s->sent += (size_t)(at - p) + strlen(s->d->think_end);
     else
       s->phase = PHASE_DONE, s->sent += (size_t)(at - p);
   }
@@ -112,8 +114,8 @@ void answer_advance(Answer *s)
 void answer_flush(Answer *s)
 {
   size_t n = s->text.n - s->sent;
-  const size_t eos = strlen(CHAT_EOS);
-  if (n >= eos && !memcmp(s->text.p + s->text.n - eos, CHAT_EOS, eos))
+  const size_t eos = strlen(s->d->eos);
+  if (n >= eos && !memcmp(s->text.p + s->text.n - eos, s->d->eos, eos))
     n -= eos;
   if (s->phase == PHASE_DONE)
     s->phase = PHASE_CONTENT;

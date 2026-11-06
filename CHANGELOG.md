@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.5.0]: Qwen3.8-Flash-Next
+
+A second model family behind the engine interface: **Qwen3.8-Flash-Next** (`qwen4exp`, ~177B, 512 experts), unsloth's
+UD-IQ3_XXS with the model's MTP head drafting, through osmos-serve, osmos-api and rig. Held as DeepSeek is: each block
+against llama.cpp's own tensors, perplexity at or below llama.cpp's at 2K and 8K (16K: +0.05%, within the spread of
+its own two caches), and a token's bits the same however it is batched, drafted or shared with other conversations.
+
+- **The forward** (`src/q4x/`, `include/osmos/q4x/`): the Gated DeltaNet (36 layers, their states in rings 8 steps
+  back), the gated residual streams, the n-gram embedding, the MoE (10 of 512, a step's experts read once for up to
+  128 of its tokens), every matmul on the matrix cores with f16 activations at every token count.
+- **QSA**, Qwen's sparse attention: a token's top 512 blocks of 4 keys by its indexer's score - llama.cpp's picks
+  exactly; the dense attention's bits below 2,052 positions.
+- **The cache in Q8_0** (~13 KB a token): the native **262,144-token** context. YaRN to 1M: 0.5.1.
+- **Shared steps and drafts**: a batch's conversations one step, each expert read once for all of them; the MTP head
+  drafts every lane at once.
+- **Text**: Qwen's tokenizer (llama.cpp's qwen35 pre-tokenizer) and chat template (tools, reasoning), osmos-api's
+  dialect by family.
+- The engine: `oseq_draft_all` (a family's drafter on several sequences at once; DeepSeek's one at a time, as before).
+- **The installer's pack** `qwen38-ud-iq3_xxs`: unsloth's 4 shards and the MTP head pinned at a commit with their
+  SHA-256s, laid out with the head as its one GGUF (`drafter_kind: mtp`); each pack's rig row its own (packs.json's
+  `rig`: Qwen's 262K window with 64K replies and its efforts low / medium / high, alias `qwen`; DeepSeek's rows as
+  before).
+
+Measured (2026-11-06, `performance`; README): prompts 2K / 8K / 16K **672 / 588 / 567 tok/s** (llama.cpp 520 / 489 /
+463), 64K 500; decode MTP drafted **~40 tok/s**, plain 23.2 (llama.cpp 26.2); the agents bench (4 x 8) **292 s**
+(DeepSeek UD-IQ1_M: 446 s).
+
+DeepSeek unchanged: osmos-serve's token streams the v0.4.0 binary's on 16 requests (the five questions greedy and
+drafted, a 2K prompt, a continued turn, four at once - `~/bench/v050-streams.log`); its GPU tests pass; UD-IQ1_M
+plain 17.1 tok/s, drafted 33.6 (0.3.2's).
+
 ## [0.4.0]: one engine interface
 
 osmos-serve now runs a model through one interface (`osmos/run/engine.h`: `Osmos`, `OsmosSeq`, `osmos_*`, `oseq_*`)

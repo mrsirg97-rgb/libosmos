@@ -9,6 +9,7 @@
 #define MM_MAX_GROUP 65535
 
 bool mm_known(uint32_t type);
+bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols);
 uint32_t mm_col_tiles(uint32_t type, uint32_t n);
 bool mm_x16(const float *x, uint32_t xs, uint32_t n, uint32_t cols, void *x16, int32_t *overflow, void *stream);
 bool mm_x16_attn(const float *x, uint32_t xs, uint32_t n, uint32_t cols, uint32_t head_dim, uint32_t rope_dim,
@@ -34,7 +35,12 @@ mm
   results are the same bits whatever the other tokens - so whatever it is batched with, and wherever in the batch.
 
 mm_known
-  whether `type` has an mm kernel: Q8_0, Q5_K, Q6_K, IQ1_M, IQ2_XXS, IQ2_XS.
+  whether `type` has an mm kernel: Q8_0, Q5_K, Q6_K, IQ1_M, IQ1_S, IQ2_XXS, IQ2_XS, IQ2_S; Qwen3.8's IQ3_XXS, IQ4_NL,
+  IQ4_XS, Q2_0.
+
+mm_fits
+  whether a rows x cols matrix of `type` tiles: rows a multiple of MM_TILE, cols whole blocks and whole slabs (the
+  type's for that width) - mm_run and mm_group take it; else the matvec.
 
 mm_x16
   the activations an mm reads: n rows of cols F32 (row t at x + t * xs) into x16 (n rounded up to a multiple of

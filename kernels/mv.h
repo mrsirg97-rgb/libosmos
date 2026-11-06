@@ -165,6 +165,7 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const 
                                                                            const float* __restrict__ x, uint32_t xs,
                                                                            float* __restrict__ y, uint32_t ys) {
   const uint32_t m = blockIdx.y;
+  if (!cnt[m]) return;  // an entry past a table's live ones (q4x_expert_groups' bound)
   const uint64_t r0 = (uint64_t) xrow[m];
   rows_of<T, NT, R, U>(w[m], rows, cols, x + r0 * xs, xs, y + r0 * ys, ys, (uint32_t) cnt[m]);
 }

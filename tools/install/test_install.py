@@ -52,14 +52,21 @@ def entry(path, repo="r/a", revision=REV, **kw):
 
 
 RIG_PIN = {"repo": "me/rig", "version": "v1.0.0", "install_sha256": "0" * 64}
+ROW = {"max_tokens": 4096, "reserve": 4096, "efforts": ["low", "high"], "effort": "high", "aliases": ["t"]}
 
 
 class Manifest(unittest.TestCase):
     def test_real(self):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
-        self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m"})
+        self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m", "qwen38-ud-iq3_xxs"})
         self.assertEqual(m["packs"]["ud-iq1_s"]["table"]["slot"], [5, 5])
+        q = m["packs"]["qwen38-ud-iq3_xxs"]
+        self.assertEqual(q["drafter_kind"], "mtp")                            # its MTP head: one GGUF
+        self.assertEqual((q["table"], q["picks"], q["overlay"]), (None, None, None))  # resident: no table, no picks
+        self.assertEqual(q["settings"], {"max_context": 262144})               # no budget or guess: the family refuses
+        self.assertEqual([m["files"][f]["bytes"] for f in q["shards"]],
+                         [10946618, 49946027488, 4869325888, 28800138432])
 
     def refused(self, mutate, why):
         m = json.load(open(REAL))
@@ -78,6 +85,12 @@ class Manifest(unittest.TestCase):
         self.refused(lambda m: m["rig"].update(install_sha256="abc"), "rig")
         self.refused(lambda m: m.pop("rig"), "rig")
         self.refused(lambda m: m.update(version=2), "version")
+        q = "qwen38-ud-iq3_xxs"
+        self.refused(lambda m: m["packs"][q].update(drafter_kind="eagle"), "drafter_kind")
+        self.refused(lambda m: m["packs"][q]["drafter"].append(m["packs"][q]["drafter"][0]), "one")  # mtp: one file
+        self.refused(lambda m: m["packs"][q].pop("rig"), "rig")              # every pack its rig row's settings
+        self.refused(lambda m: m["packs"][q]["rig"].update(effort="max"), "effort")  # not among its efforts
+        self.refused(lambda m: m["packs"][q]["rig"].update(reserve=0), "reserve")
 
 
 class Stamp(unittest.TestCase):
@@ -170,7 +183,7 @@ class Layout(unittest.TestCase):
                 "s1": entry(shards[0]), "s2": entry(shards[1]), "tab": entry(table, stamp=[1, 1]),
                 "pk": entry(picks, repo="me/osmos", revision=None)},
                 "packs": {"p": {"title": "t", "shards": ["s1", "s2"], "table": {"file": "tab", "slot": [3, 3]},
-                                "picks": "pk", "drafter": [], "overlay": None,
+                                "picks": "pk", "drafter": [], "overlay": None, "rig": ROW,
                                 "settings": {"budget_gib": 110, "no_guess": True}}}}
             manifest.check(m)
             out = layout.lay(m, "p", models, [have], trust_size=False, abliterated=False, fetch=None)
@@ -186,13 +199,41 @@ class Layout(unittest.TestCase):
             self.assertTrue(cfg["no_guess"] and cfg["picks"].endswith("osmos-picks.bin") and not cfg.get("overlay"))
             self.assertEqual(out, os.path.join(pack, "osmos.json"))
 
+    def test_mtp_pack_from_user_files(self):
+        with tempfile.TemporaryDirectory() as d:                # Qwen's shape: no table, no picks, one GGUF drafting
+            have, models = os.path.join(d, "have"), os.path.join(d, "models")
+            os.makedirs(have)
+            shards = []
+            for i in (1, 2):
+                p = os.path.join(have, f"Q-0000{i}-of-00002.gguf")
+                gguf(p, i, 2, b"q%d" % i * 400)
+                shards.append(p)
+            head = os.path.join(have, "mtp-head.gguf")
+            gguf(head, 1, 1, b"h" * 700)
+            m = {"version": 1, "rig": RIG_PIN, "files": {"s1": entry(shards[0]), "s2": entry(shards[1]),
+                                                         "mtp": entry(head)},
+                 "packs": {"q": {"title": "t", "shards": ["s1", "s2"], "table": None, "picks": None,
+                                 "drafter": ["mtp"], "drafter_kind": "mtp", "overlay": None, "rig": ROW,
+                                 "settings": {"max_context": 262144}}}}
+            manifest.check(m)
+            layout.lay(m, "q", models, [have], trust_size=False, abliterated=False, fetch=None)
+            pack = os.path.join(models, "q")
+            with open(os.path.join(pack, "osmos.json")) as f:
+                cfg = json.load(f)
+            self.assertEqual(cfg["drafter"], os.path.join(pack, "mtp-head.gguf"))   # the file, not a directory
+            self.assertEqual(os.path.realpath(cfg["drafter"]), os.path.realpath(head))
+            self.assertFalse(os.path.exists(os.path.join(pack, "dspark")))
+            self.assertTrue("picks" not in cfg and cfg["max_context"] == 262144)
+            self.assertEqual(sorted(os.listdir(pack)), ["Q-00001-of-00002.gguf", "Q-00002-of-00002.gguf",
+                                                        "mtp-head.gguf", "osmos.json"])
+
     def test_missing_unpublished_refused(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "x.bin")
             put(p, b"x")
             m = {"version": 1, "rig": RIG_PIN, "files": {"pk": entry(p, repo="me/osmos", revision=None)},
                  "packs": {"p": {"title": "t", "shards": ["pk"], "table": None, "picks": None, "drafter": [],
-                                 "overlay": None, "settings": {}}}}
+                                 "overlay": None, "rig": ROW, "settings": {}}}}
             manifest.check(m)
             with self.assertRaisesRegex(layout.LayoutError, "not published"):
                 layout.lay(m, "p", os.path.join(d, "models"), [], trust_size=False, abliterated=False, fetch=None)
@@ -218,6 +259,8 @@ class Host(unittest.TestCase):
 
 class Rig(unittest.TestCase):
     CFG = {"pack": "ud-iq1_s", "model": "/m/ud-iq1_s/M-00001-of-00005.gguf", "max_context": 1048576}
+    PACKS = manifest.load(REAL)["packs"]
+    DS = PACKS["ud-iq1_s"]["rig"]
 
     PIN = {"repo": "mrsirg97-rgb/rig", "version": "v3.5.0", "install_sha256": hashlib.sha256(b"echo hi\n").hexdigest()}
 
@@ -250,7 +293,7 @@ class Rig(unittest.TestCase):
     def test_window_under_the_reply_refused(self):
         with tempfile.TemporaryDirectory() as home:                   # rig refuses reserve >= window: refused first
             with self.assertRaises(rig.RigError):
-                rig.register(home, dict(self.CFG, max_context=65536), "/b/osmos-api", "/m/osmos.json", default=False)
+                rig.register(home, dict(self.CFG, max_context=65536), "/b/osmos-api", "/m/osmos.json", default=False, row=self.DS)
             self.assertFalse(os.path.exists(os.path.join(home, "models.json")))
 
     def test_row_added_others_kept(self):
@@ -259,7 +302,8 @@ class Rig(unittest.TestCase):
                        "command": "llama-server --port ${PORT}", "port": 8090}]
             with open(os.path.join(home, "models.json"), "w") as f:
                 json.dump(theirs, f)
-            row = rig.register(home, self.CFG, "/opt/osmos/bin/osmos-api", "/m/ud-iq1_s/osmos.json", default=False)
+            row = rig.register(home, self.CFG, "/opt/osmos/bin/osmos-api", "/m/ud-iq1_s/osmos.json", default=False,
+                               row=self.DS)
             with open(os.path.join(home, "models.json")) as f:
                 rows = json.load(f)
             self.assertEqual(rows[0], theirs[0])                          # theirs, as it was
@@ -272,16 +316,29 @@ class Rig(unittest.TestCase):
             self.assertEqual((row["maxTokens"], row["reserve"]), (262144, 262144))  # a 256K thinking budget
             self.assertTrue(row["port"] != 8090 and row["window"] == 1048576)
             self.assertFalse(os.path.exists(os.path.join(home, "settings.json")))
-            again = rig.register(home, self.CFG, "/opt/osmos/bin/osmos-api", "/m/ud-iq1_s/osmos.json", default=False)
+            again = rig.register(home, self.CFG, "/opt/osmos/bin/osmos-api", "/m/ud-iq1_s/osmos.json", default=False,
+                               row=self.DS)
             with open(os.path.join(home, "models.json")) as f:
                 self.assertEqual(len(json.load(f)), 2)                    # its own row replaced, not doubled
             self.assertEqual(again["port"], row["port"])
+
+    def test_qwen_row(self):
+        with tempfile.TemporaryDirectory() as home:          # its 262K window, a 64K reply, its own efforts and alias
+            cfg = {"pack": "qwen38-ud-iq3_xxs", "model": "/m/q/Q-00001-of-00004.gguf", "max_context": 262144}
+            row = rig.register(home, cfg, "/b/osmos-api", "/m/q/osmos.json", default=False,
+                               row=self.PACKS["qwen38-ud-iq3_xxs"]["rig"])
+            self.assertEqual((row["id"], row["window"], row["maxTokens"], row["reserve"], row["keepRecent"]),
+                             ("osmos-qwen38-ud-iq3_xxs", 262144, 65536, 65536, 65536))
+            self.assertEqual((row["efforts"], row["effort"], row["aliases"]), (["low", "medium", "high"], "high",
+                                                                               ["qwen"]))
+            with self.assertRaises(rig.RigError):             # the DeepSeek packs' 256K reply in a 262K window
+                rig.register(home, cfg, "/b/osmos-api", "/m/q/osmos.json", default=False, row=self.DS)
 
     def test_default_when_asked(self):
         with tempfile.TemporaryDirectory() as home:
             with open(os.path.join(home, "settings.json"), "w") as f:
                 json.dump({"model": "local", "theme": "dark"}, f)
-            rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=True)
+            rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=True, row=self.DS)
             with open(os.path.join(home, "settings.json")) as f:
                 s = json.load(f)
             self.assertEqual(s, {"model": "osmos-ud-iq1_s", "theme": "dark"})
@@ -291,7 +348,7 @@ class Rig(unittest.TestCase):
             p = os.path.join(home, "models.json")
             put(p, b"[{not json")
             with self.assertRaises(rig.RigError):
-                rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=False)
+                rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=False, row=self.DS)
             with open(p, "rb") as f:
                 self.assertEqual(f.read(), b"[{not json")
 

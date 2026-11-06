@@ -32,6 +32,13 @@ constexpr Tune tune(quant::Type t, int nt) {
     // same bits each). more tokens not measured
     case quant::kF32:
     case quant::kBF16: return nt == 1 ? Tune{1, 4} : Tune{1, 1};
+    // Qwen3.8's expert types read for several tokens (an expert two or more of a step's tokens picked; mvsweep,
+    // 10 experts cold, 2026-11-06): 2 and 2 at 2 tokens (IQ3_XXS 73.2 -> 45.1 us, IQ4_NL 76.6 -> 55.0) and at 4
+    // (86.6 -> 65.4, 92.7 -> 71.7). one token: tune_group1's
+    case quant::kIQ4_NL:
+    case quant::kQ2_0:
+    case quant::kIQ3_XXS:
+    case quant::kIQ4_XS: return {2, 2}; /* 4 for IQ3_XXS and IQ4_XS at 4 tokens, but a group shares one R */
     default: return {1, 1};
   }
 }
@@ -93,6 +100,13 @@ constexpr Tune tune_group1(quant::Type t, bool short_row) {
     case quant::kIQ2_S: return {2, 4};
     case quant::kIQ1_M:
     case quant::kIQ1_S: return short_row ? Tune{2, 2} : tune(t, 1);
+    // Qwen3.8's expert types, 10 experts cold (tools/bench/mvsweep, 2026-11-06; R 1-8, U 1-4): IQ4_NL down 63.5 ->
+    // 53.3 us, IQ3_XXS gate / up 54.8 -> 40.1, IQ4_XS down 62.2 -> 43.1, Q2_0 32.3 -> 28.8 - 2 and 2 the best or
+    // within its noise for each
+    case quant::kIQ4_NL:
+    case quant::kIQ3_XXS:
+    case quant::kIQ4_XS:
+    case quant::kQ2_0: return {2, 2};
     default: return tune(t, 1);
   }
 }
@@ -145,6 +159,10 @@ extern "C" bool mv_group_tok(uint32_t type, const void* const* w, const int32_t*
     case quant::kIQ1_S: return group_tok<quant::kIQ1_S>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kIQ2_S: return group_tok<quant::kIQ2_S>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kMXFP4: return group_tok<quant::kMXFP4>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kIQ4_NL: return group_tok<quant::kIQ4_NL>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kIQ3_XXS: return group_tok<quant::kIQ3_XXS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kIQ4_XS: return group_tok<quant::kIQ4_XS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kQ2_0: return group_tok<quant::kQ2_0>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     default: return false;
   }
 }
@@ -166,6 +184,9 @@ extern "C" bool mv_group(uint32_t type, const void* const* w, uint32_t n, uint32
     case quant::kIQ2_S: return group<quant::kIQ2_S>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kBF16: return group<quant::kBF16>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kMXFP4: return group<quant::kMXFP4>(w, n, rows, cols, x, x_mat, x_div, y, s);
+    case quant::kIQ3_XXS: return group<quant::kIQ3_XXS>(w, n, rows, cols, x, x_mat, x_div, y, s);
+    case quant::kIQ4_XS: return group<quant::kIQ4_XS>(w, n, rows, cols, x, x_mat, x_div, y, s);
+    case quant::kQ2_0: return group<quant::kQ2_0>(w, n, rows, cols, x, x_mat, x_div, y, s);
     default: return false;
   }
 }
@@ -193,6 +214,9 @@ extern "C" bool mv_strided(uint32_t type, const void* w, uint32_t rows, uint32_t
     case quant::kIQ2_S: return by_tokens<quant::kIQ2_S>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kBF16: return by_tokens<quant::kBF16>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kMXFP4: return by_tokens<quant::kMXFP4>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kIQ3_XXS: return by_tokens<quant::kIQ3_XXS>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kIQ4_XS: return by_tokens<quant::kIQ4_XS>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kQ2_0: return by_tokens<quant::kQ2_0>(w, rows, cols, x, xs, n_tok, y, ys, s);
     default: return false;
   }
 }

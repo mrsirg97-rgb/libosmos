@@ -7,7 +7,7 @@
 
 /* the dispatch: a model's family by its file's general.architecture, then every call that family's */
 
-static const OsmosFamily *const families[] = {&osmos_ds4};
+static const OsmosFamily *const families[] = {&osmos_ds4, &osmos_q4x};
 
 struct OsmosModel
 {
@@ -57,7 +57,7 @@ OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR])
   if (!fam)
   {
     if (err)
-      snprintf(err, OSMOS_ERR, "the architecture %s: no family here runs it (deepseek41)", arch[0] ? arch : "(none)");
+      snprintf(err, OSMOS_ERR, "the architecture %s: no family here runs it (deepseek41, qwen4exp)", arch[0] ? arch : "(none)");
     return NULL;
   }
   OsmosModel *m = calloc(1, sizeof *m);
@@ -186,4 +186,27 @@ int oseq_draft(OsmosSeq *s, int32_t y, float conf_min, float cum_min, int32_t dr
   if (!s || !drafts || !conf || !osmos_block(s->e))
     return fail(err, "no drafter"), -1;
   return s->e->fam->draft(s->e->impl, s->impl, y, conf_min, cum_min, drafts, conf, err);
+}
+
+bool oseq_draft_all(OsmosSeq *const *s, const int32_t *y, uint32_t n, float conf_min, float cum_min,
+                    int32_t (*drafts)[OSMOS_MAX_BLOCK], float (*conf)[OSMOS_MAX_BLOCK], int *counts,
+                    char err[OSMOS_ERR])
+{
+  if (!s || !y || !n || !drafts || !conf || !counts || !s[0] || !osmos_block(s[0]->e))
+    return fail(err, "no sequences, room or drafter");
+  Osmos *e = s[0]->e;
+  for (uint32_t i = 0; i < n; i++)
+  {
+    if (!s[i] || s[i]->e != e)
+      return fail(err, "a sequence not this engine's");
+    for (uint32_t j = 0; j < i; j++)
+      if (s[j] == s[i])
+        return fail(err, "a sequence twice");
+  }
+  if (e->fam->draft_all)
+    return e->fam->draft_all(e->impl, s, y, n, conf_min, cum_min, drafts, conf, counts, err);
+  for (uint32_t i = 0; i < n; i++)
+    if ((counts[i] = e->fam->draft(e->impl, s[i]->impl, y[i], conf_min, cum_min, drafts[i], conf[i], err)) < 0)
+      return false;
+  return true;
 }

@@ -7,7 +7,6 @@
 #include <time.h>
 
 #include "answer.h"
-#include "chat_impl.h"
 
 /* POST /v1/chat/completions: the request rendered (the chat encoding), tokenized, run on the engine; its tokens
    streamed as they land (answer.c) or answered whole; at DONE the completion parsed for its tool calls, then the
@@ -61,11 +60,12 @@ static bool more(Api *a, Run *r, size_t *seen, Answer *s)
 }
 
 /* the message parsed - tool calls given their ids - or, out of the format, its text as it streamed */
-static Json *message(const Answer *s, ChatMode mode, long long rid)
+static Json *message(const Answer *s, const Request *rq, long long rid)
 {
   char err[CHAT_ERR], jerr[JSON_ERR];
   JsonBuf b = {0};
-  if (chat_parse(s->text.p, s->text.n, mode, &b, err))
+  const ChatMode mode = rq->mode;
+  if (s->d->parse(rq, s->text.p, s->text.n, &b, err))
   {
     Json *m = json_parse(b.p, b.n, jerr);
     free(b.p);
@@ -94,12 +94,13 @@ static Json *message(const Answer *s, ChatMode mode, long long rid)
   /* out of the format: reasoning before </think>, the content after (the EOS dropped) */
   const char *p = s->text.p ? s->text.p : "";
   size_t n = s->text.n;
-  const size_t eos = strlen(CHAT_EOS);
-  if (n >= eos && !memcmp(p + n - eos, CHAT_EOS, eos))
+  const char *eos_text = s->d->eos, *think_end = s->d->think_end;
+  const size_t eos = strlen(eos_text);
+  if (n >= eos && !memcmp(p + n - eos, eos_text, eos))
     n -= eos;
-  const char *end = mode == CHAT_THINKING ? memmem(p, n, CHAT_THINK_END, strlen(CHAT_THINK_END)) : NULL;
+  const char *end = mode == CHAT_THINKING ? memmem(p, n, think_end, strlen(think_end)) : NULL;
   const size_t rn = mode != CHAT_THINKING ? 0 : end ? (size_t)(end - p) : n;
-  const size_t c0 = mode != CHAT_THINKING ? 0 : end ? rn + strlen(CHAT_THINK_END) : n;
+  const size_t c0 = mode != CHAT_THINKING ? 0 : end ? rn + strlen(think_end) : n;
   json_puts(&b, "{\"role\": \"assistant\", \"content\": "), json_dump_string(&b, p + c0, n - c0);
   json_puts(&b, ", \"reasoning_content\": "), json_dump_string(&b, p, rn), json_puts(&b, ", \"tool_calls\": []}");
   Json *m = b.oom ? NULL : json_parse(b.p, b.n, jerr);
@@ -194,7 +195,7 @@ static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[API_ER
 {
   char cerr[CHAT_ERR];
   JsonBuf text = {0};
-  if (!chat_render(rq->messages, rq->mode, rq->effort, &text, cerr))
+  if (!a->d->render(rq, &text, cerr))
     return free(text.p), snprintf(err, API_ERR, "%s", cerr), NULL;
   int32_t *ids = text.oom ? NULL : malloc((text.n + 1) * sizeof *ids); /* a token is a byte or more */
   const int64_t k = ids ? tokenizer_encode(a->tok, text.p, text.n, true, ids, text.n + 1) : -1;
@@ -216,7 +217,7 @@ void api_chat(Api *a, Http *h)
     return;
   }
   Request rq;
-  const bool ok = request_read(body, &rq, err);
+  const bool ok = request_read(body, a->d, &rq, err);
   json_free(body);
   if (!ok)
   {
@@ -235,10 +236,10 @@ void api_chat(Api *a, Http *h)
   if (!r)
   {
     http_error(h->fd, engine_ready(&a->engine) ? 400 : 503, err);
-    json_free(rq.messages);
+    request_free(&rq);
     return;
   }
-  Answer s = {.fd = h->fd, .stream = rq.stream, .model = a->model, .created = (long long)time(NULL),
+  Answer s = {.fd = h->fd, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
               .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT};
   snprintf(s.id, sizeof s.id, "chatcmpl-osmos-%lld", r->rid);
   if (rq.stream && !http_stream_open(h->fd))
@@ -270,13 +271,13 @@ void api_chat(Api *a, Http *h)
   else
   {
     answer_advance(&s);
-    Json *m = message(&s, rq.mode, r->rid);
+    Json *m = message(&s, &rq, r->rid);
     if (!m)
       http_error(h->fd, 500, "out of memory");
     else if (rq.stream)
     {
       if (!(json_get(m, "tool_calls") && json_get(m, "tool_calls")->n) && s.phase == PHASE_DONE &&
-          memmem(s.text.p, s.text.n, CHAT_CALLS_OPEN, strlen(CHAT_CALLS_OPEN)))
+          memmem(s.text.p, s.text.n, a->d->calls_open, strlen(a->d->calls_open)))
         answer_flush(&s); /* a calls block that did not parse: its text */
       else if (s.phase != PHASE_DONE)
         answer_flush(&s); /* no EOS (length): what was held */
@@ -287,6 +288,6 @@ void api_chat(Api *a, Http *h)
     json_free(m);
   }
   free(s.text.p);
-  json_free(rq.messages);
+  request_free(&rq);
   engine_release(&a->engine, r);
 }

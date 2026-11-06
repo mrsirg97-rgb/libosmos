@@ -2,11 +2,14 @@
 
 a file: repo, revision (a commit, 40 hex - or null: ours, not yet published), path, bytes, sha256 (64 hex), stamp
 (optional: [no, count], the split stamp it is published with). a pack: title, shards (file ids, in order), table
-(null, or {file, slot: [no, count]}), picks, drafter (file ids), overlay (a file id or null), settings."""
+(null, or {file, slot: [no, count]}), picks, drafter (file ids), drafter_kind (dspark: a directory of its files - the
+default; mtp: one GGUF, the model's MTP head), overlay (a file id or null), rig (its row's: max_tokens, reserve,
+efforts, effort - one of them - and aliases), settings."""
 import json
 import re
 
 VERSION = 1
+DRAFTER_KINDS = ("dspark", "mtp")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -32,6 +35,19 @@ def _file(fid, f):
 
 def _slot(s):
     return (isinstance(s, list) and len(s) == 2 and all(isinstance(x, int) for x in s) and 1 <= s[0] <= s[1])
+
+
+def _rig(pid, r):
+    if not isinstance(r, dict):
+        raise ManifestError(f"pack {pid}: no rig (its row's max_tokens, reserve, efforts, effort, aliases)")
+    for k in ("max_tokens", "reserve"):
+        if not isinstance(r.get(k), int) or r[k] < 1:
+            raise ManifestError(f"pack {pid}: rig {k} {r.get(k)!r} is not a positive count of tokens")
+    for k in ("efforts", "aliases"):
+        if not (isinstance(r.get(k), list) and r[k] and all(isinstance(x, str) and x for x in r[k])):
+            raise ManifestError(f"pack {pid}: rig {k} is not a list of names")
+    if r.get("effort") not in r["efforts"]:
+        raise ManifestError(f"pack {pid}: rig effort {r.get('effort')!r} is not among its efforts")
 
 
 def _ref(m, pid, what, fid):
@@ -70,6 +86,12 @@ def check(m):
                 _ref(m, pid, k, p[k])
         for fid in p.get("drafter") or []:
             _ref(m, pid, "drafter", fid)
+        kind = p.get("drafter_kind", "dspark")
+        if kind not in DRAFTER_KINDS:
+            raise ManifestError(f"pack {pid}: drafter_kind {kind!r} is not one of {DRAFTER_KINDS}")
+        if kind == "mtp" and len(p.get("drafter") or []) != 1:
+            raise ManifestError(f"pack {pid}: an mtp drafter is one file (the head's GGUF)")
+        _rig(pid, p.get("rig"))
         if not isinstance(p.get("settings"), dict):
             raise ManifestError(f"pack {pid}: no settings")
     return m

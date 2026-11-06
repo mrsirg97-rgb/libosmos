@@ -33,7 +33,6 @@ constexpr uint64_t kBudget = 64ull << 30;  // the drafter's ~5 GB beside it, of 
 constexpr uint32_t kCtx = 4096;
 constexpr int kPrompt = 256, kSteps = 8, kRounds = 6;
 constexpr int kLong = MM_MAX_TOKENS + 52;  // a step past a sub-batch: the forward keeps its last 52 rows' logits
-constexpr const char* kQwen = "%s/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
 
 // what a run gives: its greedy tokens, the last step's logits, its drafted rounds' drafts, a saved state's bytes
 struct Run {
@@ -41,6 +40,21 @@ struct Run {
   std::vector<float> logits;
   std::vector<uint8_t> state;
 };
+
+// a GGUF of no tensors, its one key general.architecture = arch (v3: magic, version, counts, the key and its string)
+static bool write_header(const char* path, const char* arch) {
+  FILE* f = std::fopen(path, "wb");
+  if (!f) return false;
+  const char* key = "general.architecture";
+  const uint32_t version = 3, string_type = 8;
+  const uint64_t n_tensors = 0, n_kv = 1, kl = std::strlen(key), al = std::strlen(arch);
+  bool ok = std::fwrite("GGUF", 1, 4, f) == 4 && std::fwrite(&version, 4, 1, f) == 1 &&
+            std::fwrite(&n_tensors, 8, 1, f) == 1 && std::fwrite(&n_kv, 8, 1, f) == 1 &&
+            std::fwrite(&kl, 8, 1, f) == 1 && std::fwrite(key, 1, kl, f) == kl &&
+            std::fwrite(&string_type, 4, 1, f) == 1 && std::fwrite(&al, 8, 1, f) == 1 &&
+            std::fwrite(arch, 1, al, f) == al;
+  return std::fclose(f) == 0 && ok;
+}
 
 static std::vector<int32_t> prompt_ids(int n) {
   const char* home = std::getenv("HOME");
@@ -89,7 +103,7 @@ static Run run(const std::vector<int32_t>& ids, uint32_t vocab, Batch batch, Gre
 int main() {
   std::printf("[test_engine_gpu] start\n");
   const char* home = std::getenv("HOME");
-  char path[512], qwen[512];
+  char path[512];
   const TestModel which = test_model(path, sizeof path);
   const std::string ddir = std::string(home ? home : "") + "/Models/ds1017/dspark-iq2xs";
   const std::vector<int32_t> ids = prompt_ids(kPrompt), longp = prompt_ids(kLong);
@@ -105,12 +119,14 @@ int main() {
   CHECK(!osmos_open(nullptr, err) && err[0]);
   OsmosFiles none = {"/nonexistent.gguf", nullptr, nullptr};
   CHECK(!osmos_open(&none, err) && err[0]);
-  std::snprintf(qwen, sizeof qwen, kQwen, home ? home : "");
-  if (access(qwen, R_OK) == 0) {
-    OsmosFiles q = {qwen, nullptr, nullptr};
+  {
+    const std::string other = std::string("/tmp/osmos-test-llama-") + std::to_string(getpid()) + ".gguf";
+    CHECK(write_header(other.c_str(), "llama"));
+    OsmosFiles q = {other.c_str(), nullptr, nullptr};
     err[0] = '\0';
-    CHECK(!osmos_open(&q, err) && std::strstr(err, "qwen4exp"));
-    std::printf("  a Qwen3.8 file refused by its architecture: %s\n", err);
+    CHECK(!osmos_open(&q, err) && std::strstr(err, "llama"));
+    std::printf("  a file of an architecture no family runs refused: %s\n", err);
+    unlink(other.c_str());
   }
   OsmosFiles badtable = {path, "/nonexistent-table.gguf", nullptr};
   CHECK(!osmos_open(&badtable, err) && err[0]);

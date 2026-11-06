@@ -30,9 +30,13 @@ typedef struct OsmosFamily
   bool (*seed)(void *eng, void *seq, int32_t from, int32_t to, char err[OSMOS_ERR]);
   int (*draft)(void *eng, void *seq, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                char err[OSMOS_ERR]);
+  /* several sequences' drafts at once (oseq_draft_all), or NULL: draft one after another */
+  bool (*draft_all)(void *eng, OsmosSeq *const *seqs, const int32_t *y, uint32_t n, float conf_min, float cum_min,
+                    int32_t (*drafts)[OSMOS_MAX_BLOCK], float (*conf)[OSMOS_MAX_BLOCK], int *counts,
+                    char err[OSMOS_ERR]);
 } OsmosFamily;
 
 /* a sequence's family half (a family's batch reads its sequences' through it) */
 void *oseq_impl(const OsmosSeq *s);
 
-extern const OsmosFamily osmos_ds4;
+extern const OsmosFamily osmos_ds4, osmos_q4x;

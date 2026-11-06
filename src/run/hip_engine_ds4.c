@@ -65,7 +65,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   const GgufKv *ctx = gguf_kv(m->g, "deepseek41.context_length");
   *facts = (OsmosFacts){"deepseek41", (uint32_t)geo->n_vocab,
                          ctx && ctx->type == GGUF_UINT32 ? (uint32_t)ctx->v.u : 0,
-                         (uint32_t)((geo->n_experts - 1) / geo->n_used), (uint32_t)geo->window};
+                         (uint32_t)((geo->n_experts - 1) / geo->n_used), (uint32_t)geo->window, true};
   if (!facts->native_ctx)
     return fail(err, "deepseek41.context_length: missing"), m_close(m), NULL;
   return m;
@@ -194,5 +194,5 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 const OsmosFamily osmos_ds4 = {
     "deepseek41", m_open,   m_close,   e_create, e_destroy,  e_identity,    e_room,  e_stats,
     e_batch,      e_logits, e_greedy,  e_block,  s_create,   s_destroy,     s_prompt, s_rollback,
-    s_reach,      s_position, s_state_bytes, s_save, s_load, s_seed,        s_draft,
+    s_reach,      s_position, s_state_bytes, s_save, s_load, s_seed,        s_draft,  NULL, /* its drafts one sequence at a time */
 };

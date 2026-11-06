@@ -19,20 +19,23 @@ namespace quant {
 enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
-  kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8,
+  kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8, kIQ3_XXS = QTYPE_IQ3_XXS, kIQ4_XS = QTYPE_IQ4_XS,
+  kQ2_0 = QTYPE_Q2_0,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
 constexpr int kChunk = 8;
 constexpr int kQK = 256;  // a K-quant's or an IQ type's values a block
 constexpr int kQ32 = 32;  // Q8_0's and IQ4_NL's
+constexpr int kQ64 = 64;  // Q2_0's
 constexpr float kIq1Delta = 0.125f;
 
 template <Type T> struct Block;
 #define QUANT_BLOCK(name) \
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
-QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S)
+QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S) QUANT_BLOCK(IQ3_XXS)
+QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -43,7 +46,8 @@ static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && 
                   Block<kMXFP8>::values == kQ32 &&
                   Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
                   Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
-                  Block<kIQ2_S>::values == kQK,
+                  Block<kIQ2_S>::values == kQK && Block<kIQ3_XXS>::values == kQK &&
+                  Block<kIQ4_XS>::values == kQK && Block<kQ2_0>::values == kQ64,
               "the decoders' block lengths");
 
 // every block's size is even (34, 18, 66, 74, 210 ... bytes; MXFP4's and MXFP8's odd: byte loads only) and every row
@@ -181,6 +185,36 @@ template <> __device__ inline void decode<kIQ4_NL>(const uint8_t* b, int k, floa
   for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) kIq4nlValues[(qs[j] >> (4 * (k / 2))) & 0x0F]);
 }
 
+// (d * (0.5 + s) * 0.5) * grid * sign; 8 groups of 32: 8 grid bytes (4 values each), and after the 64 a word a
+// group - 4 7-bit signs, then s
+template <> __device__ inline void decode<kIQ3_XXS>(const uint8_t* b, int k, float* v) {
+  const uint8_t* q = b + 2 + (k / 4) * 8 + (k % 4) * 2;
+  const uint32_t aux = ld32(b + 2 + 64 + (k / 4) * 4);
+  const float db = mul(mul(f16(ld16(b)), 0.5f + (float) (aux >> 28)), 0.5f);
+  const uint8_t signs = kKsigns[(aux >> (7 * (k % 4))) & 0x7F];
+  for (int j = 0; j < kChunk; j++) {
+    const float x = mul(db, (float) (uint8_t) (kIq3xxsGrid[q[j / 4]] >> (8 * (j % 4))));
+    v[j] = (signs >> j) & 1 ? -x : x;
+  }
+}
+
+// (d * (ls - 32)) * IQ4_NL's value; 8 groups of 32, each a 6-bit ls (its low 4 bits a nibble of bytes 4 .. 7, its
+// high 2 of the 16-bit word at 2), its values IQ4_NL's layout in 16 bytes
+template <> __device__ inline void decode<kIQ4_XS>(const uint8_t* b, int k, float* v) {
+  const int g = k / 4, j0 = (k % 4) * kChunk;
+  const int ls = ((b[4 + g / 2] >> (4 * (g % 2))) & 0x0F) | ((ld16(b + 2) >> (2 * g)) & 0x03) << 4;
+  const float dl = mul(f16(ld16(b)), (float) (ls - 32));
+  const uint8_t* qs = b + 8 + 16 * g + j0 % 16;
+  for (int j = 0; j < kChunk; j++) v[j] = mul(dl, (float) kIq4nlValues[(qs[j] >> (4 * (j0 / 16))) & 0x0F]);
+}
+
+// d * (code - 1): 64 values, an f16 then 2-bit codes, value i bits 2 (i % 4) of byte i / 4
+template <> __device__ inline void decode<kQ2_0>(const uint8_t* b, int k, float* v) {
+  const float d = f16(ld16(b));
+  const uint8_t* qs = b + 2 + 2 * k;
+  for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) (((qs[j / 4] >> (2 * (j % 4))) & 0x03) - 1));
+}
+
 // DSpark's experts: an E8M0 scale e (2^(e - 128), exact at every e: the low ones subnormal), then E2M1 codes as
 // IQ4_NL lays them out (value j < 16 byte j's low nibble, 16 + j its high), worth E2M1 doubled {0, 1, 2, 3, 4, 6, 8,
 // 12} and their negatives
@@ -289,6 +323,46 @@ __device__ inline h8 iq2_h(uint64_t grid, float db, uint32_t pattern) {
   h8 h;
   for (int j = 0; j < kChunk; j++) h[j] = (_Float16) mul(db, (float) (uint8_t) (grid >> (8 * j)));
   return __builtin_bit_cast(h8, __builtin_bit_cast(u4, h) ^ *(const u4*) kSignMasks.m[pattern]);
+}
+
+// any 8 sign bits as f16 sign masks: byte i's bit j negative - bit 15 of half j (IQ2_S's explicit signs)
+struct SignMasks8 {
+  uint32_t m[256][kChunk / 2];
+};
+constexpr SignMasks8 make_sign_masks8() {
+  SignMasks8 t{};
+  for (int i = 0; i < 256; i++)
+    for (int p = 0; p < kChunk / 2; p++)
+      t.m[i][p] = (uint32_t) ((i >> (2 * p)) & 1) << 15 | (uint32_t) ((i >> (2 * p + 1)) & 1) << 31;
+  return t;
+}
+static __constant__ SignMasks8 kSignMasks8 = make_sign_masks8();
+
+// the grid's |values| a chunk rounded to f16, then the signs one xor a pair (iq2_h's, any mask)
+__device__ inline h8 grid_h(uint64_t grid, float db, const uint32_t* mask) {
+  h8 h;
+  for (int j = 0; j < kChunk; j++) {
+    float x = mul(db, (float) (uint8_t) (grid >> (8 * j)));
+    asm("" : "+v"(x));  // decode_h's: the product, then f16 - not one fused v_fma_mixlo_f16 (a -0's +0)
+    h[j] = (_Float16) x;
+  }
+  return __builtin_bit_cast(h8, __builtin_bit_cast(u4, h) ^ *(const u4*) mask);
+}
+
+// Qwen3.8's IQ3_XXS and IQ2_S as f16 the same way: decode<T>'s bits (a sign's rounding symmetric), the selects gone
+template <> __device__ inline h8 decode_h<kIQ3_XXS>(const uint8_t* b, int k) {
+  const uint8_t* q = b + 2 + (k / 4) * 8 + (k % 4) * 2;
+  const uint32_t aux = ld32(b + 2 + 64 + (k / 4) * 4);
+  const float db = mul(mul(f16(ld16(b)), 0.5f + (float) (aux >> 28)), 0.5f);
+  const uint64_t grid = (uint64_t) kIq3xxsGrid[q[0]] | (uint64_t) kIq3xxsGrid[q[1]] << 32;
+  return grid_h(grid, db, kSignMasks.m[(aux >> (7 * (k % 4))) & 0x7F]);
+}
+
+template <> __device__ inline h8 decode_h<kIQ2_S>(const uint8_t* b, int k) {
+  const int s = (b[74 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F;
+  const float db = mul(mul(f16(ld16(b)), 0.5f + (float) s), 0.25f);
+  const uint64_t grid = kIq2sGrid[b[2 + k] | ((b[66 + k / 4] >> (2 * (k % 4))) & 0x03) << 8];
+  return grid_h(grid, db, kSignMasks8.m[b[34 + k]]);
 }
 
 template <> __device__ inline h8 decode_h<kIQ2_XXS>(const uint8_t* b, int k) {

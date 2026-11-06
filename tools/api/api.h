@@ -74,6 +74,7 @@ typedef struct Api
 {
   Engine engine;
   Tokenizer *tok;
+  const struct Dialect *d; /* the model family's chat */
   char model[128];
   int32_t eos;
 } Api;

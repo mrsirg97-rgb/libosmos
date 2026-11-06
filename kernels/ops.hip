@@ -1,6 +1,7 @@
 // ops (include/osmos/gpu/ops.h): the forward's small steps, each as ref.py computes it, in F32
 #include <cmath>
 
+#include "block.h"
 #include "quant.h"
 #include "round.h"
 #include "lane.h"
@@ -24,21 +25,6 @@ constexpr int kWide = 1024;  // the hc pre-norm's block: a token's whole stream 
 constexpr int kHcParts = OPS_HC_PARTS;  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
 constexpr int kHcAhead = 16;            // hc_dot_few's loads in flight a thread (DESIGN.md: 24 -> 10.5 us)
 
-// the sum of each thread's v over the block, by a fixed tree (every thread gets it)
-template <int NT = kThreads>
-__device__ float block_sum(float v, float* lds) {
-  lds[threadIdx.x] = v;
-  __syncthreads();
-  for (int s = NT / 2; s > 0; s >>= 1) {
-    if (threadIdx.x < s) lds[threadIdx.x] += lds[threadIdx.x + s];
-    __syncthreads();
-  }
-  const float r = lds[0];
-  __syncthreads();
-  return r;
-}
-
-__device__ inline float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 
 template <quant::Type T>
 __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* ids, uint32_t hc, float* h) {
@@ -67,7 +53,7 @@ __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float*
   float* yr = y + (uint64_t) blockIdx.x * ys;
   float ss = 0;
   for (uint32_t i = threadIdx.x; i < n; i += kThreads) ss += xr[i] * xr[i];
-  const float r = 1.0f / sqrtf(block_sum(ss, lds) / (float) n + eps);
+  const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) n + eps);
   for (uint32_t i = threadIdx.x; i < n; i += kThreads) {
     const float v = w ? (xr[i] * r) * w[i] : xr[i] * r;
     yr[i] = v;
@@ -378,7 +364,7 @@ __global__ void kv_finish_kernel(float* kv, uint32_t hd, const float* w, float e
   float* x = kv + (uint64_t) t * hd;
   float ss = 0;
   for (uint32_t i = threadIdx.x; i < hd; i += kThreads) ss += x[i] * x[i];
-  const float r = 1.0f / sqrtf(block_sum(ss, lds) / (float) hd + eps);
+  const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) hd + eps);
   for (uint32_t i = threadIdx.x; i < hd; i += kThreads) row[i] = (x[i] * r) * w[i];
   __syncthreads();
   for (uint32_t p = threadIdx.x; p < rd / 2; p += kThreads) {
@@ -426,7 +412,7 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, u
     const float w = gw[(uint64_t) k * dim + d];
     sh += hk[d] * hk[d], sk += key[d] * key[d], dot += (hk[d] * w) * key[d];
   }
-  sh = block_sum(sh, lds), sk = block_sum(sk, lds), dot = block_sum(dot, lds);
+  sh = block_sum<kThreads>(sh, lds), sk = block_sum<kThreads>(sk, lds), dot = block_sum<kThreads>(dot, lds);
   if (threadIdx.x == 0) {
     const float rstd = (1.0f / sqrtf(sh / (float) dim + eps)) * (1.0f / sqrtf(sk / (float) dim + eps));
     const float x = dot * rstd * scale;

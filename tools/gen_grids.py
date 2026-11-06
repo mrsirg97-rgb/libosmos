@@ -8,8 +8,8 @@ from gguf import quants as Q
 
 def grid(cls):
     cls.init_grid()
-    g = cls.grid.reshape(cls.grid_shape).astype(np.int8)  # IQ2: 0x08/0x19/0x2b; IQ1: -1/0/1
-    assert g.shape[1] == 8
+    g = cls.grid.reshape(cls.grid_shape).astype(np.int8)  # IQ2: 0x08/0x19/0x2b; IQ1: -1/0/1; IQ3_XXS: 4 .. 62
+    assert g.shape[1] in (4, 8)
     return [int.from_bytes(row.tobytes(), "little") for row in g]
 
 
@@ -30,6 +30,7 @@ def main():
     lines += table("kIq2xsGrid", "uint64_t", grid(Q.IQ2_XS), "0x%016xull", 4)
     lines += table("kIq2sGrid", "uint64_t", grid(Q.IQ2_S), "0x%016xull", 4)
     lines += table("kIq1sGrid", "uint64_t", grid(Q.IQ1_S), "0x%016xull", 4)
+    lines += table("kIq3xxsGrid", "uint32_t", grid(Q.IQ3_XXS), "0x%08x", 8)
     lines += table("kKsigns", "uint8_t", list(Q.IQ2_XXS.ksigns), "0x%02x", 16)
     lines += table("kIq4nlValues", "int8_t", list(Q.IQ4_NL.kvalues), "%d", 16)
     lines += ["// DSpark's MXFP4: E2M1's values doubled (OCP MX: 0, 0.5, 1, 1.5, 2, 3, 4, 6), their negatives",
