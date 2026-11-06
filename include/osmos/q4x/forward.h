@@ -10,8 +10,9 @@
 /* a sequence's states kept behind its latest: a rollback's reach - a drafter's most drafts a round (OSMOS_MAX_BLOCK,
    the engine's), each a DeltaNet layer's S (3.1 MB) a slot: ~1 GB a sequence at 8 */
 #define Q4X_MAX_BACK 8
-/* the MTP head's most drafts a round: llama.cpp's draft-mtp default (common.h, n_max 3) until measured here */
-#define Q4X_MTP_BLOCK 3
+/* the MTP head's most drafts a round: measured 2-7 on mm (q4x_bench, 192 tokens: 33.6 34.1 35.2 35.7 34.6 34.8 tok/s;
+   the engine's confidence floors end most rounds before 6) */
+#define Q4X_MTP_BLOCK 5
 
 typedef struct Q4xForward Q4xForward;
 typedef struct Q4xSeq Q4xSeq;
