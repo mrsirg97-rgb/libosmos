@@ -5,9 +5,12 @@
 // ne, then the values (ggml's order: ne0 fastest) - and <out>/ids.txt the tokens.
 //
 //   qwen_dump <first shard> <text file> <tokens> <out dir> <name,name,...>
+//   qwen_dump <first shard> <text file> <tokens> <out dir> -ppl    (no tensors: the perplexity of the tokens, one
+//        sequence, each next token scored by log-softmax in double - tools/bench/q4x_ppl's protocol)
 //
 // build: g++ -std=c++17 -O2 oracle/qwen_dump.cpp -I<llama.cpp>/include -I<llama.cpp>/ggml/include
 //        -L<llama.cpp>/build-hip/bin -lllama -lggml -lggml-base -Wl,-rpath,<llama.cpp>/build-hip/bin -o bin/qwen_dump
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -97,8 +100,9 @@ int main(int argc, char** argv) {
   llama_context_params cp = llama_context_default_params();
   cp.n_ctx = (uint32_t) n_tok + 64;
   cp.n_batch = cp.n_ubatch = (uint32_t) n_tok;
-  cp.cb_eval = dump;
-  cp.cb_eval_user_data = &want;
+  const bool ppl = want.names.count("-ppl") > 0;
+  if (ppl) cp.n_ubatch = 512, cp.n_ctx = (uint32_t) n_tok + 64; /* every row's logits, read a ubatch at a time */
+  else cp.cb_eval = dump, cp.cb_eval_user_data = &want;
   llama_context* ctx = llama_init_from_model(model, cp);
   if (!ctx) return std::fprintf(stderr, "qwen_dump: no context\n"), 1;
   llama_batch b = llama_batch_init(n_tok, 0, 1);
@@ -107,6 +111,19 @@ int main(int argc, char** argv) {
   }
   b.n_tokens = n_tok;
   if (llama_decode(ctx, b) != 0) return std::fprintf(stderr, "qwen_dump: decode failed\n"), 1;
+  if (ppl) {
+    const int V = llama_vocab_n_tokens(vocab);
+    double nll = 0;
+    for (int i = 0; i + 1 < n_tok; i++) {
+      const float* l = llama_get_logits_ith(ctx, i);
+      double m = l[0], s = 0;
+      for (int k = 1; k < V; k++) m = l[k] > m ? l[k] : m;
+      for (int k = 0; k < V; k++) s += std::exp(l[k] - m);
+      nll -= l[ids[i + 1]] - m - std::log(s);
+    }
+    std::printf("qwen_dump: perplexity %.4f over %d tokens (mean log-probability %.6f)\n",
+                std::exp(nll / (n_tok - 1)), n_tok - 1, -nll / (n_tok - 1));
+  }
   FILE* o = std::fopen((want.out + "/ids.txt").c_str(), "w");
   for (int i = 0; i < n_tok; i++) std::fprintf(o, "%d%s", ids[i], i + 1 < n_tok ? "," : "\n");
   std::fclose(o);

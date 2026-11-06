@@ -2199,6 +2199,24 @@ layer alone 0.5e-2 .. 2.7e-2 (worst layer 32), none an outlier - the DeltaNets, 
 experts, the n-gram layer: no layer wrong, the drift two roundings compounding over 48 layers (and osmos's the one
 near the exact sum, the op tests show). which is the better model is perplexity's to say: next.
 
+### perplexity: osmos at llama.cpp's, and below (2026-11-06)
+
+the text: the 16,000 ids of ~/bench/osmos-prompts/calib16k.txt (DeepSeek's perplexity text) decoded back by osmos's
+own tokenizer (~/bench/calib16k-text.txt: Strata's docs, then license text) and tokenized by Qwen's own (qwen_dump).
+one protocol both sides: one sequence, every next token scored by log-softmax in double (oracle/qwen_dump -ppl,
+tools/bench/q4x_ppl). 2,048 tokens - llama.cpp's QSA keeps every token below its 2,048-token budget, so both
+attentions dense:
+
+| UD-IQ3_XXS, 2,047 tokens scored | perplexity | mean log-probability |
+| --- | ---: | ---: |
+| llama.cpp 68d20b8 (HIP) | 6.9478 | -1.938422 |
+| **osmos** | **6.9471** | **-1.938324** |
+
+at llama.cpp's, by a hair below (the weights' 3 bits the error that matters; osmos's arithmetic, ~10^5 nearer the
+exact sum an op, shows only at the fourth digit here). the same number at steps of 256 and of 100: the batches'
+split changes no bit. over 8,191 tokens llama.cpp is 2.7193 - with its sparse attention past 2,048: osmos's
+comparison there waits for its QSA.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
