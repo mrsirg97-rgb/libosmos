@@ -18,7 +18,7 @@ And of Qwen:
 
 - **unsloth's UD-IQ3_XXS** ([unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF),
   4 shards, 78 GB): every weight resident in GPU memory, drafted by the model's own MTP head (unsloth's shared Q8_0
-  `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`), a 262,144-token context.
+  `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`), a 262,144-token context - or 1,048,576 with YaRN (its own pack).
 
 **The guarantee:** the same input gives the same output, bit for bit, however it is run:
 
@@ -53,8 +53,14 @@ Qwen3.8-Flash-Next: its pack, unsloth's UD-IQ3_XXS 4 shards and its MTP head (~8
 **262,144-token** context, up to 64K tokens a reply:
 
 ```sh
-python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve    # or --rig (its row's alias: qwen)
+python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve      # or --rig (its row's alias: qwen)
+python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs-1m --serve   # 1M context (alias qwen-1m): the same files
 ```
+
+The 1M pack is the model card's static YaRN (factor 4 over the native 262,144): it recalls a fact 355K tokens back
+(a 394K-token document's needle, answered word for word), but costs some quality and speed on short text - perplexity
++0.4%, a 2K prompt 745 tok/s against 810, drafting 34.9 tok/s against 40.4 (the MTP head agrees less under it). So the
+262K pack stays the default; take the 1M one when a conversation needs it. ~93 GB of GPU memory at 1M.
 
 ## Performance
 
@@ -191,7 +197,10 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
 - **Every weight resident** (78 GB of GPU memory): no streaming. The matmuls run on the matrix cores with f16
   activations and F32 sums at every token count, so a token's bits are the same however it is batched; the experts of
   a step are read once for up to 128 of its tokens.
-- **The cache in Q8_0** (~13 KB a token for its 12 attention layers): a 262,144-token conversation ~3.4 GB.
+- **The cache in Q8_0** (~13 KB a token for its 12 attention layers): a 262,144-token conversation ~3.4 GB, a
+  1,048,576-token one ~13.6 GB.
+- **YaRN** past the native context (the 1M pack): llama.cpp's static YaRN, its rotation held to llama.cpp's at
+  positions to 700,000; off at 262K, where the rotation keeps its exact bits.
 - **QSA**, Qwen's sparse attention: keys pooled in blocks of 4, a token's top 512 blocks by its indexer's score; below
   2,052 positions every block (the dense attention's bits).
 - **The MTP head** drafts up to 5 tokens a round (a 65,536-token shortlist of the vocabulary); one batched step

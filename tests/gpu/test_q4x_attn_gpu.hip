@@ -6,7 +6,9 @@
 // (nine chunks of keys), each token against double and the batch the bits of its tokens one at a time. the cache in
 // Q8_0 (q4x_kv_put): its bytes ggml's quantize_row_q8_0's, the attention against double on the cache's own values
 // within f16's rounding, and on llama.cpp's within Q8_0's too (kQ8Rel). needs a
-// gfx1151, the UD-IQ3_XXS set and the dump; skipped (77) without them.
+// gfx1151, the UD-IQ3_XXS set and the dump; skipped (77) without them. YaRN (q4x_rope past the native context: the
+// model card's factor 4) against llama.cpp's own rotation with it (qwen_dump QWEN_DUMP_YARN=4) at positions 0 .. 255
+// and 700,000 .. 700,255 (QWEN_DUMP_POS0), where its dumps are.
 #include "q4x_ref.h"
 
 extern "C" {
@@ -17,6 +19,7 @@ extern "C" {
 constexpr uint32_t kTok = 256, kHalf = kTok / 2, kDim = 2560, kHeads = 24, kKv = 2, kHead = 256, kRope = 64,
                    kQ = kHeads * kHead, kKvW = kKv * kHead;
 constexpr float kEps = 1e-6f, kBase = 1e7f;
+constexpr uint32_t kNative = 262144, kYarnCtx = 4 * kNative;  // the model's context, YaRN's factor 4
 constexpr uint32_t kLongCtx = 1100, kLongTok = 8;  // past eight chunks of 128 keys: the ninth's queries
 // Q8_0: a value within half its block's step (amax / 127), so a block of 32 within sqrt(32) / 254 of its own L2 (the
 // whole of it in one value, the worst); the attention's output a weighted mean of such values, f16's rounding on top
@@ -145,6 +148,27 @@ static std::vector<float> gates_of(const Ref& full) {
   return g;
 }
 
+// q's and k's norm and rotation with YaRN, from llama.cpp's own projections in `dir` (QWEN_DUMP_YARN=4), the tokens at
+// pos0 ..: within F32's rounding of its Qcur / Kcur
+static void yarn_case(const char* dir, int32_t pos0, const float* qn, const float* kn) {
+  Ref full, kraw;
+  if (!ref_read("Qcur_full-3", &full, dir) || !ref_read("Kcur-3", &kraw, dir)) {
+    std::printf("  YaRN at %d: skipped (no %s)\n", pos0, dir);
+    return;
+  }
+  Q4xRope rope;
+  CHECK(q4x_rope(kRope, kBase, kNative, kYarnCtx, &rope) && rope.ext_factor == 1.0f && rope.freq_scale == 0.25f);
+  float *q = dev_alloc<float>((size_t) kTok * kQ), *gate = dev_alloc<float>((size_t) kTok * kQ);
+  float* k = dev_alloc<float>((size_t) kTok * kKvW);
+  CHECK(q4x_qk(dev_from(full.v), dev_from(kraw.v), kTok, kHeads, kKv, kHead, &rope, qn, kn, kEps, pos0, q, gate, k,
+               nullptr));
+  char what[64];
+  std::snprintf(what, sizeof what, "q YaRN at %d (Qcur)", pos0);
+  held(what, host_of(q, (size_t) kTok * kQ), ref("Qcur-3", dir), 1.0, kExactRel);
+  std::snprintf(what, sizeof what, "k YaRN at %d (Kcur)", pos0);
+  held(what, host_of(k, (size_t) kTok * kKvW), ref("Kcur-3#1", dir), 1.0, kExactRel);
+}
+
 int main() {
   std::printf("[test_q4x_attn_gpu] start\n");
   int ndev = 0;
@@ -171,8 +195,11 @@ int main() {
   const Ref kraw = ref("Kcur-3");
   float *q = dev_alloc<float>((size_t) kTok * kQ), *gate = dev_alloc<float>((size_t) kTok * kQ);
   float *kf = dev_alloc<float>((size_t) kTok * kKvW), *vf = dev_alloc<float>((size_t) kTok * kKvW);
-  CHECK(q4x_qk(dev_from(full.v), dev_from(kraw.v), kTok, kHeads, kKv, kHead, kRope, qn, kn, kEps, 0, kBase, q, gate,
-               kf, nullptr));
+  Q4xRope rope;
+  CHECK(q4x_rope(kRope, kBase, kNative, kNative, &rope) && rope.ext_factor == 0.0f && rope.mscale == 1.0f);  // plain
+  CHECK(!q4x_rope(kRope + 1, kBase, kNative, kNative, &rope) && !q4x_rope(kRope, kBase, 0, kNative, &rope));
+  CHECK(q4x_qk(dev_from(full.v), dev_from(kraw.v), kTok, kHeads, kKv, kHead, &rope, qn, kn, kEps, 0, q, gate, kf,
+               nullptr));
   held("q normed, rotated (Qcur)", host_of(q, (size_t) kTok * kQ), ref("Qcur-3"), 1.0, kExactRel);
   held("k normed, rotated (Kcur)", host_of(kf, (size_t) kTok * kKvW), ref("Kcur-3#1"), 1.0, kExactRel);
   CHECK(std::memcmp(host_of(gate, (size_t) kTok * kQ).data(), gates_of(full).data(), (size_t) kTok * kQ * 4) == 0);
@@ -216,12 +243,14 @@ int main() {
   CHECK(mv_strided(tk->type, wk, kKvW, kDim, hm, kDim, kTok, kr, kKvW, nullptr));
   CHECK(mv_strided(tv->type, wv, kKvW, kDim, hm, kDim, kTok, vf, kKvW, nullptr));
   held("q's projection (Qcur_full)", host_of(qf, (size_t) kTok * 2 * kQ), full);
-  CHECK(q4x_qk(qf, kr, kTok, kHeads, kKv, kHead, kRope, qn, kn, kEps, 0, kBase, q, gate, kf, nullptr));
+  CHECK(q4x_qk(qf, kr, kTok, kHeads, kKv, kHead, &rope, qn, kn, kEps, 0, q, gate, kf, nullptr));
   uint8_t *kc, *vc;
   cache_of(kf, vf, kTok, &kc, &vc);
   CHECK(q4x_attn(q, kc, vc, kTok, kHeads, kKv, kHead, 0, gate, nullptr, scr, out, nullptr, nullptr));
   CHECK(mv_strided(to->type, wo, kDim, kQ, out, kQ, kTok, res, kDim, nullptr));
   held("layer 3 whole (attn_output)", host_of(res, (size_t) kTok * kDim), ref("attn_output-3"), 1.0, kChainRel);
+  yarn_case("%s/osmos-oracle/qwen-yarn4", 0, qn, kn);
+  yarn_case("%s/osmos-oracle/qwen-yarn4p", 700000, qn, kn);
   gguf_destroy(gg);
   std::printf("[test_q4x_attn_gpu] ok\n");
   return 0;

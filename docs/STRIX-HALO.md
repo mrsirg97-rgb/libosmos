@@ -41,7 +41,7 @@ evening; Maya's that afternoon, when the box ran ~2.5% faster).
 
 osmos 0.5.1 runs Qwen3.8-Flash-Next (177B, a preview of the Qwen4 architecture: Gated DeltaNet layers, sparse
 attention, 512 experts) from unsloth's UD-IQ3_XXS, every weight in GPU memory, the model's own MTP head drafting, a
-262,144-token context - under the same guarantee: the same output bit for bit however it runs. Against llama.cpp on
+262,144-token context (or 1M with YaRN: a fact recalled 355K tokens back) - under the same guarantee: the same output bit for bit however it runs. Against llama.cpp on
 the same file, the same day (2026-11-06, `performance`):
 
 | | osmos 0.5.1 | llama.cpp | |

@@ -50,6 +50,7 @@ struct Q4xForward
   const Q4xMtp *mtp; /* or NULL */
   void **dev, **mtp_dev; /* a tensor's bytes on the device, by its index in its model */
   uint32_t max_ctx, max_tokens;
+  Q4xRope rope; /* every rotation's: plain to the native context, YaRN past it (q4x_rope) */
   Q4xBuf b;
   Q4xMtpBuf m;
   q4x_probe_fn probe;

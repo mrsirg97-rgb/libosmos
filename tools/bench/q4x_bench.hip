@@ -49,7 +49,10 @@ int main(int argc, char** argv) {
   Gguf* mg = argc > 5 ? gguf_create(argv[5], gerr) : nullptr;
   Q4xMtp* mtp = mg ? q4x_mtp_create(mg, w, werr) : nullptr;
   if (argc > 5 && !mtp) return std::fprintf(stderr, "q4x_bench: %s%s\n", gerr, werr), 1;
-  const uint32_t ctx = np + nd + OSMOS_MAX_BLOCK;
+  /* Q4X_BENCH_CTX: the forward's context (past the native 262,144: YaRN, q4x_rope), else the run's */
+  const uint32_t run = np + nd + OSMOS_MAX_BLOCK,
+                 ctx = getenv("Q4X_BENCH_CTX") ? (uint32_t) atoi(getenv("Q4X_BENCH_CTX")) : run;
+  if (ctx < run) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_CTX below the run's %u\n", run), 2;
   Q4xForward* fw = q4x_forward_create(w, mtp, ctx, ctx < kStep ? ctx : kStep, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;

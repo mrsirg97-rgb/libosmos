@@ -59,7 +59,11 @@ class Manifest(unittest.TestCase):
     def test_real(self):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
-        self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m", "qwen38-ud-iq3_xxs"})
+        self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m", "qwen38-ud-iq3_xxs", "qwen38-ud-iq3_xxs-1m"})
+        q1m = m["packs"]["qwen38-ud-iq3_xxs-1m"]                              # YaRN's: the same files, 4x the context
+        self.assertEqual((q1m["shards"], q1m["drafter"]), (m["packs"]["qwen38-ud-iq3_xxs"]["shards"],
+                                                           m["packs"]["qwen38-ud-iq3_xxs"]["drafter"]))
+        self.assertEqual(q1m["settings"], {"max_context": 1048576})
         self.assertEqual(m["packs"]["ud-iq1_s"]["table"]["slot"], [5, 5])
         q = m["packs"]["qwen38-ud-iq3_xxs"]
         self.assertEqual(q["drafter_kind"], "mtp")                            # its MTP head: one GGUF
@@ -333,6 +337,14 @@ class Rig(unittest.TestCase):
                                                                                ["qwen"]))
             with self.assertRaises(rig.RigError):             # the DeepSeek packs' 256K reply in a 262K window
                 rig.register(home, cfg, "/b/osmos-api", "/m/q/osmos.json", default=False, row=self.DS)
+
+    def test_qwen_1m_row(self):
+        with tempfile.TemporaryDirectory() as home:          # a million positions, the card's 256K of reasoning a turn
+            cfg = {"pack": "qwen38-ud-iq3_xxs-1m", "model": "/m/q/Q-00001-of-00004.gguf", "max_context": 1048576}
+            row = rig.register(home, cfg, "/b/osmos-api", "/m/q1m/osmos.json", default=False,
+                               row=self.PACKS["qwen38-ud-iq3_xxs-1m"]["rig"])
+            self.assertEqual((row["window"], row["maxTokens"], row["reserve"], row["aliases"]),
+                             (1048576, 262144, 262144, ["qwen-1m"]))
 
     def test_default_when_asked(self):
         with tempfile.TemporaryDirectory() as home:

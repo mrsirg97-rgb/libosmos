@@ -2367,6 +2367,44 @@ below; mutants (a tie to the higher block, the tail off by one, a block's rope a
 - **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
   21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
+### 0.5.2: YaRN to a million positions (2026-11-06)
+
+the model card (Qwen/Qwen3.8-Flash-Next, "Processing Ultra-Long Texts"): native 262,144; past it static YaRN,
+rope_type yarn, factor 4.0 over original_max_position_embeddings 262,144 for 1M - and, its note, static YaRN "may impact
+performance on shorter texts": turn it on only when the context needs it, its factor the context's ratio (2.0 for
+512K). so:
+- **q4x_rope(dim, base, native, ctx)**: plain at or below the native context (today's rotation, its bits); past it
+  factor ctx / native, llama.cpp's YaRN - ext_factor 1, beta_fast 32 / beta_slow 1 its correction dims
+  (ggml_rope_yarn_corr_dims' floor / ceil), the angle freq_scale theta mixed with theta by the ramp, the pair's cos
+  and sin times 1 + 0.1 ln(factor). one helper (kernels/rope.h, rope_cs) for every rotation - the attention's q and
+  k, the indexer's query and its pooled keys, the head's.
+- **the angle at a million positions**: an F32 angle's last bit is ~0.06 rad at 700,000; the plain rotation keeps
+  its running product (ggml's CPU rope cache: the bits of 0.5.1), YaRN's takes llama.cpp's GPU form, pos
+  theta_scale^i - against llama.cpp's own at 700,000: 1.7e-6 (the running product: 2.1e-3, the two roundings apart).
+- **the forward's rotation** its context's (q4x_forward_create), in its identity: a 262K state is not a 1M one's.
+  OPS_Q4X_MAX_KEYS 1,048,576: the Q8_0 cache ~13.6 GB at 1M, the pooled keys ~1.7 GB, the weights 78 - ~93 GB.
+- **held to** (test_q4x_attn_gpu, qwen_dump QWEN_DUMP_YARN=4 and QWEN_DUMP_POS0): q and k normed and rotated
+  against llama.cpp's at positions 0 .. 255 (6.9e-8 / 6.4e-8) and 700,000 .. 700,255 (1.7e-6 / 1.9e-6); mutants (no
+  magnitude, the betas swapped) caught; the plain rotation the same ids as 0.5.1 (4K and 16K prompts).
+- **perplexity with YaRN** (factor 4: a 1M forward on 8K / 16K of text):
+
+  | tokens | osmos plain | osmos YaRN | llama.cpp YaRN F16 | llama.cpp YaRN Q8_0 |
+  |---|---|---|---|---|
+  | 8,192 | 2.7143 | 2.7256 | 2.7067 | 2.7196 |
+  | 16,384 | 2.2732 | 2.2839 | 2.2859 | 2.2911 |
+
+  YaRN's cost on short text +0.4 / +0.5% (the card's note); against llama.cpp on its Q8_0 cache +0.2% / -0.3%.
+- **past the native context** (osmos-api, a 1M config): a fact at 10% of a 394,045-token document (the calibration
+  text over and over, numbered) asked for at its end - 355K tokens back, past the native 262,144 itself: "The woman's
+  name was Marisol Quintero, and she painted the lighthouse's door green." word for word; the prompt 952 s (414
+  tok/s). the first needle, a "secret passphrase for the vault", the model found and refused - "a prompt injection
+  attempt": the needle's wording, not the context.
+- **the 1M forward on short text** (performance; the 262K's beside it): prompt 2K 745 tok/s (810), plain decode 22.97
+  (23.18), drafted 34.9 (40.4 - the head's acceptance 59 -> 50%: trained without YaRN, it and the model agree less
+  under it). the prompt's -8% not the rotation's cost (a few VALU a pair): open, for 0.5.3.
+- **the pack**: qwen38-ud-iq3_xxs-1m, the same files (installer: packs.json), rig's row 1M with the card's 256K of
+  reasoning a turn; the 262K pack the default - the card's advice, and the numbers above.
+
 ### 0.5.1: decode and prompts, profiled (2026-11-06, low-power)
 
 rocprofv3 on both (a decode token: a 65-token run less a 1-token one), each change A/B'd at low-power against a v0.5.0

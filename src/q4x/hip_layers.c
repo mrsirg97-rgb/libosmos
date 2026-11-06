@@ -140,7 +140,7 @@ static bool runs_ix_keys(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, ui
   bool ok = mat(f, L->ix_k, Q4X_IX_DIM, D, b->mixed, D, n, b->ikr, Q4X_IX_DIM);
   for (uint32_t i = 0; ok && i < runs; i++)
     ok = q4x_ix_pool(b->ikr + (uint64_t)c[i].t0 * Q4X_IX_DIM, c[i].n, c[i].pos, ratio, c[i].ixr, Q4X_IX_RING(ratio),
-                     (uint32_t)g->rope_dim, fv(f, L->ix_k_norm), g->rms_eps, g->rope_base, c[i].ixk, NULL);
+                     &f->rope, fv(f, L->ix_k_norm), g->rms_eps, c[i].ixk, NULL);
   return ok;
 }
 
@@ -156,8 +156,8 @@ static bool runs_ix_pick(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, ui
   for (uint32_t i = 0; ok && i < runs; i++)
   {
     const uint64_t t0 = c[i].t0;
-    ok = q4x_ix_q(b->iqr + t0 * ixq, c[i].n, heads, (uint32_t)g->rope_dim, fv(f, L->ix_q_norm), g->rms_eps, c[i].pos,
-                  g->rope_base, b->iq + t0 * ixq, NULL) &&
+    ok = q4x_ix_q(b->iqr + t0 * ixq, c[i].n, heads, &f->rope, fv(f, L->ix_q_norm), g->rms_eps, c[i].pos,
+                  b->iq + t0 * ixq, NULL) &&
          q4x_ix_pick(b->iq + t0 * ixq, c[i].ixk, c[i].n, heads, c[i].pos, ratio, blocks, b->ixs,
                      q4x_ix_scratch(f->max_ctx, ratio), b->sel + t0 * blocks, b->npick + t0, NULL);
   }
@@ -177,8 +177,8 @@ static bool runs_kv(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_
   for (uint32_t i = 0; ok && i < runs; i++)
   {
     const uint64_t t0 = c[i].t0;
-    ok = q4x_qk(b->qf + t0 * 2 * q, b->kr + t0 * kv, c[i].n, heads, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm),
-                fv(f, L->k_norm), g->rms_eps, c[i].pos, g->rope_base, b->q + t0 * q, b->gt + t0 * q,
+    ok = q4x_qk(b->qf + t0 * 2 * q, b->kr + t0 * kv, c[i].n, heads, kvh, hd, &f->rope, fv(f, L->q_norm),
+                fv(f, L->k_norm), g->rms_eps, c[i].pos, b->q + t0 * q, b->gt + t0 * q,
                 b->kq + t0 * kv, NULL) &&
          q4x_kv_put(b->kq + t0 * kv, b->vr + t0 * kv, c[i].n, kv, c[i].kc + (uint64_t)c[i].pos * row,
                     c[i].vc + (uint64_t)c[i].pos * row, NULL);

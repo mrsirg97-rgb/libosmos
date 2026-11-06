@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.2]: Qwen at a million tokens
+
+Qwen3.8-Flash-Next's context to **1,048,576 tokens** with YaRN - the model card's static YaRN, factor 4 over the
+native 262,144 - as a pack of its own, `qwen38-ud-iq3_xxs-1m` (the same files; its rig row's alias `qwen-1m`). The
+262K pack is unchanged: its rotation, and every token, 0.5.1's bits.
+
+- **One rotation** (`q4x_rope`, `kernels/rope.h`): plain to the native context; past it llama.cpp's YaRN (ext 1,
+  beta 32 / 1, the pair's magnitude 1 + 0.1 ln(factor)) for every rotation - the attention's, the indexer's, the MTP
+  head's. Held to llama.cpp's own at positions 0 and 700,000 (`qwen_dump`'s `QWEN_DUMP_YARN`, `QWEN_DUMP_POS0`).
+- **The context's own forward**: its rotation in its identity (a 262K state is not a 1M one's); 1M's cache ~13.6 GB,
+  ~93 GB of GPU memory in all.
+- `q4x_ppl` and `q4x_bench` take a forward's context (`Q4X_PPL_CTX`, `Q4X_BENCH_CTX`).
+
+Measured (2026-11-06; DESIGN.md, "0.5.2: YaRN to a million positions"): a 394,045-token document's fact recalled
+355K tokens back, word for word (the prompt read at 414 tok/s). On short text YaRN costs what the card says it may:
+perplexity 8K / 16K 2.7256 / 2.2839 (plain 2.7143 / 2.2732; llama.cpp's YaRN on its Q8_0 cache 2.7196 / 2.2911), a 2K
+prompt 745 tok/s (810), drafting 34.9 (40.4: the MTP head's acceptance 59 -> 50%) - the 262K pack the default.
+
 ## [0.5.1]: Qwen's prompts, faster
 
 Qwen3.8-Flash-Next's prompts **13% (2K) to 28% (64K) faster**, its decode 2.6%, every token the same bits as 0.5.0

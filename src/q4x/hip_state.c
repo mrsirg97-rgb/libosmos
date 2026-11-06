@@ -68,6 +68,7 @@ uint64_t q4x_identity(const Q4xForward *f)
   h = fnv(dims, sizeof dims, h);
   for (int l = 0; l < g->n_layers; l++)
     h = fnv_u64(g->recurrent[l], h);
+  h = fnv(&f->rope, sizeof f->rope, h); /* YaRN's or the plain rotation: another context's numbers another model's */
   const Gguf *m = f->w->model;
   for (int i = 0; i < m->n_files; i++) /* each file's name and size */
   {
