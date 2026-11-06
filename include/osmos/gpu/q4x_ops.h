@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define OPS_Q4X_MAX_KEYS 8192 /* a token's keys the dense attention takes (its scores in a block's LDS) */
+
 /* Qwen3.8-Flash-Next's own steps (DESIGN.md, "Qwen's forward, op by op"), F32 on the GPU, queued on `stream` */
 
 bool q4x_hc_norm(const float *h, const float *w, uint32_t n_tok, uint32_t hc, uint32_t dim, float eps, float *xn,
@@ -22,6 +24,12 @@ bool q4x_delta(const float *qkv, const float *g, const float *b, uint32_t n_tok,
                uint32_t dim, float eps, float *state, float *out, void *stream);
 bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_tok, uint32_t heads, uint32_t dim,
                     float eps, float *y, void *stream);
+
+bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
+            uint32_t rope_dim, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float rope_base,
+            float *q, float *gate, float *k_out, void *stream);
+bool q4x_attn(const float *q, const float *kc, const float *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
+              uint32_t dim, uint32_t pos0, const float *gate, float *out, void *stream);
 
 #endif
 
@@ -63,4 +71,17 @@ q4x_delta
 q4x_gated_norm
   y[t][h][d] = x[t][h][d] / sqrt(mean over d of x^2 + eps) w[d] sigmoid(z[t][h][d]): the DeltaNet's output norm a
   head, gated by z.
+
+the sparse attention (a layer's; one sequence's tokens at positions pos0, pos0 + 1, ...):
+
+q4x_qk
+  qfull a token's attn_q: each head's q (dim) then its gate (dim), head after head. q[t][h] = rope(rms_norm(q) q_norm),
+  gate[t][h] its gate; k_out[t][g] = rope(rms_norm(k[t][g]) k_norm) (k_out may be a cache's row pos0). rope: the first
+  rope_dim of a head, pairs (i, i + rope_dim / 2), angle (pos0 + t) theta_i, theta_i = rope_base^(-2i / rope_dim) as
+  ggml builds it (a running product); IMRoPE's sections all the token's position (text) - this rotation.
+
+q4x_attn
+  out[t][h][d] = sigmoid(gate[t][h][d]) sum over p <= pos0 + t of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
+  g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, [p][kv_heads][dim],
+  rows 0 .. pos0 + n_tok - 1 written. its keys a block's LDS: at most OPS_Q4X_MAX_KEYS (the dense build's reach).
 */

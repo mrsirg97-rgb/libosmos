@@ -2156,6 +2156,16 @@ the decay 6.2e-7, beta 1.5e-7, the delta rule over 256 tokens 2.2e-7, the gated 
 whole layer from its mixed input 1.0e-2 (llama.cpp's 8-bit activations into attn_qkv, attn_gate, ssm_out). the
 state carried: 128 + 128 tokens the bits of 256. a mutant reading key group h / 3 (not h % 16) is 79% off.
 
+### the attention, dense (2026-11-06)
+
+kernels/q4x_attn.hip: q's and k's norm and rotation - IMRoPE on text (every section the token's position) is the
+NeoX pairing over the first 64 dims, theta_i a running product as ggml's cache builds it - and the gated attention
+over an F32 cache (a block a head and token, its keys' scores in LDS: 8,192 keys at most, half a block's 64 KB;
+dense - the QSA selection keeps every token below its 2,048-token budget). GQA is h / 12 (llama.cpp's flash
+attention), unlike the DeltaNet's h % 16. test_q4x_attn_gpu, layer 3: q and k 4.6e-7 / 5.3e-7 of llama.cpp's; the
+attention 6.0e-7 of exact (double), llama.cpp 7.8e-4 of it (its F16 cache); the whole layer 1.0e-2; two halves
+through the cache the bits of one run; a mutant grouping h % 2 96% off.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
