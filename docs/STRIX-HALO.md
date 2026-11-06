@@ -39,18 +39,18 @@ evening; Maya's that afternoon, when the box ran ~2.5% faster).
 
 ## Qwen3.8-Flash-Next: the second model
 
-osmos 0.5.0 runs Qwen3.8-Flash-Next (177B, a preview of the Qwen4 architecture: Gated DeltaNet layers, sparse
+osmos 0.5.1 runs Qwen3.8-Flash-Next (177B, a preview of the Qwen4 architecture: Gated DeltaNet layers, sparse
 attention, 512 experts) from unsloth's UD-IQ3_XXS, every weight in GPU memory, the model's own MTP head drafting, a
 262,144-token context - under the same guarantee: the same output bit for bit however it runs. Against llama.cpp on
 the same file, the same day (2026-11-06, `performance`):
 
-| | osmos 0.5.0 | llama.cpp | |
+| | osmos 0.5.1 | llama.cpp | |
 | --- | ---: | ---: | ---: |
-| Reading a 2,048-token prompt | **672** | 520 | +29% |
-| Reading a 16,384-token prompt | **567** | 463 | +22% |
-| Writing, MTP drafting | **~40** | not measured | |
-| Writing, one token at a time | 23.2 | **26.2** | -11% |
-| Agents, 4 × 8 turns | **292 s** | not measured | |
+| Reading a 2,048-token prompt | **790** | 520 | +52% |
+| Reading a 16,384-token prompt | **696** | 463 | +50% |
+| Writing, MTP drafting | **40.5** | not measured | |
+| Writing, one token at a time | 23.7 | **26.2** | -10% |
+| Agents, 4 × 8 turns (0.5.0) | **292 s** | not measured | |
 
 On the agents bench Qwen finishes in 292 s - DeepSeek's 446 s on the same workload - its first token at a 3.0 s
 median: each expert read once for every conversation's tokens, and the prompts read at its sparse attention's speed.
