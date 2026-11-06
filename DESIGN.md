@@ -2086,6 +2086,18 @@ GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB o
   forward one block at a time against llama.cpp's intermediate tensors (llama-eval-callback); then decode speed,
   then prompts, then MTP.
 
+### correctness first: Qwen held as DeepSeek is (2026-11-06)
+
+the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
+reference, every sum in a fixed order. Qwen is held the same way before any speed work:
+- **the types**: Q2_0, IQ3_XXS, IQ4_XS each against ggml's dequant, bit for bit (as every type here).
+- **the forward**: a block at a time against llama.cpp's intermediate tensors on fixed ids (llama-eval-callback), then
+  the logits' KL divergence over a real text - ~0, its max named.
+- **perplexity**: bin/ppl on the 8,191 tokens of mixed text and code DeepSeek's 2.459 is measured on, against
+  llama-perplexity on the same file and text - osmos's at or below llama.cpp's, never above; a README row.
+- **the limit**: the BF16 model (~250 GB) does not fit here, so the reference is llama.cpp on the same quant, not a
+  PyTorch oracle: it holds our forward, not the quantization's cost (unsloth's own KL figures speak to that).
+
 ### the baseline: llama.cpp on this box (2026-11-05, performance)
 
 llama.cpp 68d20b8 (2026-10-29), its HIP build for gfx1151 (~/Projects/llama.cpp/build-hip), UD-IQ3_XXS (77.87 GiB;
@@ -2098,9 +2110,13 @@ llama.cpp names it A3B: ~3B active a token), all layers on the GPU, flash attent
   dense projections and head the most, ~13 ms; the experts' IQ4_NL / IQ3_XXS / IQ3_S ~6 ms; Q8_0 ~5 ms), the F32
   matvecs 9%, every other kernel (the GDN's delta rule 0.55 ms, its conv, the gated residual, top-k) a few percent
   each and most of the launches.
-- the bound: ~1.2 GB of weights a token at ~3 bits; at the ~170-200 GB/s osmos's kernels read here, ~7 ms - 26.3
-  tok/s leaves ~4x on the table. osmos's first targets: the matvecs (its mm / lane kernels near the memory's rate),
-  then the launches (3,040 a token; DeepSeek's step is ~440 a drafted token).
+- the bound, from the file's tensors (not llama.cpp's "A3B" label - unsloth's 6B activated is the right one): a token
+  reads ~3.5 GB of dense weights (the GDN / attention projections Q6_K ~2.6 GB, the gated residual's down / up Q8_0
+  0.67 GB, the F32 router 0.25 GB, the head 0.52 GB), ~1.0 GB of experts (10 of 512), and the GDN state in and out
+  (~0.23 GB F32) - ~4.7 GB; the n-gram table (28.8 GB) and the token embedding are lookups. at the ~170-200 GB/s
+  osmos's kernels read here: ~26 ms, ~38 tok/s - llama.cpp's 26.3 (~124 GB/s) is ~70% of it: ~1.4x for a token at
+  a time, not more. the gain is the verify's: a drafted block reads the dense 3.5 GB once for all its tokens (as
+  DeepSeek's 17 -> 33) - MTP (the separate mtp-*.gguf; unsloth: 1.3-1.7x). targets: plain ~33-36, drafted ~45-60.
 
 ## 0.4.0: one engine interface, two families (design, 2026-11-05)
 
@@ -2121,12 +2137,27 @@ that shape with DeepSeek alone behind it: no Qwen code, no feature, every bit th
   engine_<family>.c); engine_create reads `general.architecture` and picks the family - deepseek41 (the forward as it
   is), later qwen4exp - or refuses the file by its name. a family's own headers (forward.h, drafter.h, weights.h)
   stay for its tests and tools; the server includes engine.h alone.
-- **what moves**: src/run/engine.c (the dispatch), src/run/engine_ds4.c (DeepSeek's table: each a call into the
-  forward as today); tools/serve and tools/bench/dbench onto engine.h (dbench to bench either family); the server's
-  sizing facts asked of the engine, not read from Geometry. nothing in src/run/hip_* changes.
-- **done when**: every CPU and GPU test passes; dbench's answers hash as 0.3.2's (UD-IQ1_M and UD-IQ1_S, drafted and
-  plain); osmos-serve's parallel and slot tests pass; agents bench and drafted decode level with 0.3.2 in one session
-  (the call is one indirect jump a step: nothing to measure, measured anyway).
+- **what moves**: src/run/hip_engine.c (the dispatch), src/run/hip_engine_ds4.c (DeepSeek's table: each a call into
+  the forward as today); tools/serve onto engine.h; the server's sizing facts asked of the engine, not read from
+  Geometry. nothing in the forward changes but seq_reach (rollback's reach, said). dbench stays DeepSeek's: its
+  probes (ROUTES_OUT), picks dump and CPU lane's threads are the family's instruments - the interface would carry
+  them for one family; a family's bench is its own. the names: libevt has Engine / engine_create, so the interface
+  is Osmos / OsmosSeq / osmos_* / oseq_*.
+- **a step's rows**: DeepSeek keeps a long step's last sub-batch's logits (MM_MAX_TOKENS), the server computed the
+  row ((k - 1) % MM_MAX_TOKENS); the interface takes the batch's own row numbers and refuses a row not kept - the
+  family maps them.
+- **done when**: every CPU and GPU test passes (test_engine_gpu: the interface's tokens, drafts, logits and saved
+  state the family's own calls' bits); osmos-serve's token streams the v0.3.2 binary's on the same requests (single
+  and --parallel, drafted and not); its parallel and slot tests pass; the agents bench level with 0.3.2 in one
+  session (the call is one indirect jump a step: nothing to measure, measured anyway).
+
+- **measured** (2026-11-06): every CPU and GPU test passes (test_engine_gpu: 22 tokens, 20 drafts, the last step's
+  129,280 logits and a saved state the family's own calls' bits; a refused load leaves the sequence empty, as
+  seq_load's contract says; a 2,100-token step's rows 2,048 - 2,099 served by their own numbers, 2,047 refused; a
+  mutant without forward_lane caught); osmos-serve's token streams the v0.3.2 binary's on 16 requests (the five
+  questions greedy and drafted, a 2K prompt, a continued turn reusing 75 tokens, four at once - ~/bench/v040-streams.log);
+  parallel_test and slot_test pass; the agents bench at performance 447.6 s, 7.07 J an answer token (v0.3.2 the
+  evening before: 442.5 / 448.7 s, 7.07 J) - level.
 
 what the second family brings to the shape (designed now, built in 0.4.x, so 0.4.0 does not have to move again):
 - **a recurrent state**: Qwen's 36 Gated DeltaNet layers hold ~113 MB a sequence (48 x 128 x 128 F32 a layer) and a

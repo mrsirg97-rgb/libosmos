@@ -110,24 +110,24 @@ typedef struct Answer
    state rolled back to all but the last printed token. *t the next; returns 1 to go on, 0 at the end, -1 failed */
 static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, Ctl *ctl)
 {
-  int32_t dr[DRAFTER_BLOCK], picks[DRAFTER_BLOCK + 1], toks[DRAFTER_BLOCK + 1];
-  float cf[DRAFTER_BLOCK];
-  int k = drafter_draft(sv->d, c->s, *t, DRAFTER_CONF_MIN, DRAFTER_CUM_MIN, dr, cf, c->err);
+  int32_t dr[OSMOS_MAX_BLOCK], picks[OSMOS_MAX_BLOCK + 1], toks[OSMOS_MAX_BLOCK + 1];
+  float cf[OSMOS_MAX_BLOCK];
+  int k = oseq_draft(c->s, *t, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, dr, cf, c->err);
   if (k < 0)
     return -1;
   const long long room = a->limit - a->produced;
   if (k > room - 1)
     k = room > 1 ? (int)(room - 1) : 0;
-  const int32_t pos = seq_position(c->s);
+  const int32_t pos = oseq_position(c->s);
   if ((uint32_t)pos + (uint32_t)k + 2 >= sv->max_ctx)
     k = 0;
   toks[0] = *t;
   memcpy(toks + 1, dr, (size_t)k * sizeof *dr);
-  Seq *ss[DRAFTER_BLOCK + 1];
+  OsmosSeq *ss[OSMOS_MAX_BLOCK + 1];
   for (int i = 0; i <= k; i++)
     ss[i] = c->s;
-  if (!forward_batch(sv->f, ss, toks, (uint32_t)k + 1, c->err) ||
-      !forward_greedy(sv->f, 0, (uint32_t)k + 1, picks, c->err))
+  if (!osmos_batch(sv->e, ss, toks, (uint32_t)k + 1, c->err) ||
+      !osmos_greedy(sv->e, 0, (uint32_t)k + 1, picks, c->err))
     return -1;
   int m = 0;
   while (m < k && picks[m] == dr[m])
@@ -147,13 +147,13 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
   if (ctl->cancel && !end)
     a->finish = "cancel", end = true;
   const int keep = end ? printed - 1 : m + 1;
-  if (!seq_rollback(c->s, (uint32_t)(k + 1 - keep)) || (keep && !drafter_seed(sv->d, c->s, pos, pos + keep, c->err)))
+  if (!oseq_rollback(c->s, (uint32_t)(k + 1 - keep)) || (keep && !oseq_seed(c->s, pos, pos + keep, c->err)))
     return -1;
   for (int i = 0; i < keep; i++)
     if (!ids_push(&c->held, toks[i]))
       return -1;
   *t = picks[m];
-  return !end && (uint32_t)seq_position(c->s) + 1 < sv->max_ctx;
+  return !end && (uint32_t)oseq_position(c->s) + 1 < sv->max_ctx;
 }
 
 /* a greedy token: printed, then fed (the last printed never is: the next turn's prompt holds it) */
@@ -165,9 +165,9 @@ static int step_greedy(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, Ctl
   pump(l, ctl);
   if (ctl->cancel)
     return a->finish = "cancel", 0;
-  if (a->produced >= a->limit || (uint32_t)seq_position(c->s) + 1 >= sv->max_ctx)
+  if (a->produced >= a->limit || (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx)
     return 0;
-  if (!forward_step(sv->f, c->s, *t, c->err) || !ids_push(&c->held, *t) || !forward_greedy(sv->f, 0, 1, t, c->err))
+  if (!osmos_batch(sv->e, &c->s, t, 1, c->err) || !ids_push(&c->held, *t) || !osmos_greedy(sv->e, 0, 1, t, c->err))
     return -1;
   return 1;
 }
@@ -189,7 +189,7 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
     return;
   }
   const bool spec = server_spec(sv, g);
-  if (spec && !sv->d)
+  if (spec && !osmos_block(sv->e))
   {
     out("ERR spec=1 without a drafter (--dspark)\n");
     return;
@@ -200,7 +200,7 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
     return;
   }
   const uint32_t reused = c->held.n;
-  if (!seq_prompt(c->s, n))
+  if (!oseq_prompt(c->s, n))
   {
     snprintf(c->err, sizeof c->err, "the prompt's end not past the conversation's");
     fail(sv, c);
@@ -215,7 +215,7 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
       fail(sv, c);
       return;
     }
-    row = (k - 1) % MM_MAX_TOKENS;
+    row = k - 1;
     const double ms = now_ms() - t0;
     out("PP %u %u %.1f %.1f %u\n", c->held.n, n, ms, (c->held.n - reused) / (ms / 1e3), reused);
     pump(l, ctl);
@@ -227,7 +227,7 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
     }
   }
   int32_t t;
-  if (!forward_greedy(sv->f, row, 1, &t, c->err))
+  if (!osmos_greedy(sv->e, row, 1, &t, c->err))
   {
     fail(sv, c);
     return;

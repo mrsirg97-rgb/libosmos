@@ -39,7 +39,7 @@ void round_all(Multi *m);
 /*
 round_all
   a round: every answering lane's next token - a greedy lane's printed, then fed (not once it ends); a drafting lane's
-  drafts made (drafter_draft) and verified with its token, the accepted printed, the state rolled back to all but the
-  last printed and the drafter seeded from the verify - all of them in one forward_batch: a decode step, at most
+  drafts made (oseq_draft) and verified with its token, the accepted printed, the state rolled back to all but the
+  last printed and the drafter seeded from the verify - all of them in one osmos_batch: a decode step, at most
   Server.round_tokens tokens (more would be a prompt's step: other bits), the drafts cut to fit, each lane its token.
 */

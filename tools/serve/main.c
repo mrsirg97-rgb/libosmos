@@ -12,7 +12,7 @@
 
    one conversation (single.c), or --parallel N at once (multi.c: GEN then needs rid=, every line carries it).
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
-   --no-guess: no experts guessed a layer ahead (ForwardOptions' no_guess - a model whose misses are few).
+   --no-guess: no experts guessed a layer ahead (OsmosOptions' no_guess - a model whose misses are few).
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
    OSMOS_SLOT_KEEP=1 keeps conversations (maya #356): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
@@ -25,8 +25,6 @@
 #include <string.h>
 
 #include "serve.h"
-#include "osmos/model/gguf.h"
-#include "osmos/model/weights.h"
 #include "osmos/run/gpu.h"
 #include "osmos/version.h"
 
@@ -66,7 +64,7 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
   const char *dir = getenv("OSMOS_SLOT_DIR") ? getenv("OSMOS_SLOT_DIR") : dflt;
   const SlotsOptions so = {dir, (uint32_t)env_num("OSMOS_SLOT_CAP", 4), env_num("OSMOS_SLOT_GB", 16),
                            (uint32_t)env_num("OSMOS_SLOT_MIN", 1024), env_num("OSMOS_SLOT_DAYS", 7),
-                           forward_identity(sv->f)};
+                           osmos_identity(sv->e)};
   char serr[SLOTS_ERR] = "";
   if (!(sv->slots = slots_create(&so, serr)))
     return snprintf(err, en, "%s", serr), false;
@@ -100,35 +98,21 @@ int main(int argc, char **argv)
   for (char *x = strtok_r(list, ",", &sv_); x && sv.n_eos < SERVE_MAX_EOS; x = strtok_r(NULL, ",", &sv_))
     sv.eos[sv.n_eos++] = (int32_t)atol(x);
   free(list);
-  char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", err[FORWARD_ERR] = "";
-  Gguf *g = gguf_create(model, gerr);
-  const char *engram = opt(argc, argv, "--engram", NULL);
-  Gguf *eg = engram ? gguf_create(engram, gerr) : NULL;
-  const char *overlay = opt(argc, argv, "--overlay", NULL);
-  Gguf *ov = overlay ? gguf_create(overlay, gerr) : NULL;
-  if (!g || (engram && !eg) || (overlay && !ov))
-    return die(gerr);
-  Weights *w = weights_create_with(&(WeightsOptions){g, eg, ov}, werr);
-  if (!w)
-    return die(werr);
-  sv.round_tokens = (uint32_t)((w->geo.n_experts - 1) / w->geo.n_used);
-  sv.window = (uint32_t)w->geo.window;
-  uint64_t *picks = NULL;
-  if (opt(argc, argv, "--picks", NULL))
-  {
-    const size_t np = (size_t)w->geo.n_layers * w->geo.n_experts;
-    FILE *pf = fopen(opt(argc, argv, "--picks", NULL), "rb");
-    picks = malloc(np * sizeof *picks);
-    if (!pf || !picks || fread(picks, sizeof *picks, np, pf) != np)
-      return die("the picks file could not be read");
-    fclose(pf);
-  }
-  const ForwardOptions fo = {(int)w->geo.n_layers, sv.max_ctx, (uint64_t)(budget * (double)(1ull << 30)), picks,
-                             sv.max_tokens, has(argc, argv, "--no-guess")};
+  char err[OSMOS_ERR] = "";
+  const OsmosFiles files = {model, opt(argc, argv, "--engram", NULL), opt(argc, argv, "--overlay", NULL)};
+  OsmosModel *m = osmos_open(&files, err);
+  if (!m)
+    return die(err);
+  const OsmosFacts fx = osmos_facts(m);
+  sv.round_tokens = fx.round_tokens;
+  sv.window = fx.seed_window;
+  const OsmosOptions o = {sv.max_ctx, sv.max_tokens, (uint64_t)(budget * (double)(1ull << 30)),
+                          opt(argc, argv, "--picks", NULL), has(argc, argv, "--no-guess"),
+                          opt(argc, argv, "--dspark", NULL)};
   Conv *conv = calloc((size_t)lanes, sizeof *conv);
   if (!conv)
     return die("out of memory");
-  if (!serve_build(&sv, conv, lanes, w, fo, opt(argc, argv, "--dspark", NULL), err))
+  if (!serve_build(&sv, conv, lanes, m, o, err))
     return die(err);
   if (env_num("OSMOS_SLOT_KEEP", 0) != 0 && !open_slots(&sv, model, err, sizeof err))
     return die(err);
@@ -142,22 +126,18 @@ int main(int argc, char **argv)
       out("NOTE slots: %s\n", serr);
     slots_destroy(sv.slots);
   }
-  if (getenv("OSMOS_STATS") && sv.f) /* the forward's counters at the end (a bench's: where its time waits) */
+  if (getenv("OSMOS_STATS") && sv.e) /* the engine's counters at the end (a bench's: where its time waits) */
   {
-    uint64_t wn[2], wns[2], gs, gg, gr;
-    forward_waits(sv.f, wn, wns);
-    forward_guesses(sv.f, &gs, &gg, &gr);
+    OsmosStats st;
+    osmos_stats(sv.e, &st);
     fprintf(stderr, "STATS waited %llu reads not guessed (%.0f ms), %llu guessed (%.0f ms); streamed picks %llu, guessed "
                     "%llu, the guess read %llu; swaps %llu\n",
-            (unsigned long long)wn[0], wns[0] / 1e6, (unsigned long long)wn[1], wns[1] / 1e6, (unsigned long long)gs,
-            (unsigned long long)gg, (unsigned long long)gr, (unsigned long long)forward_swaps(sv.f));
+            (unsigned long long)st.waits[0], st.wait_ns[0] / 1e6, (unsigned long long)st.waits[1], st.wait_ns[1] / 1e6,
+            (unsigned long long)st.streamed, (unsigned long long)st.guessed, (unsigned long long)st.guess_read,
+            (unsigned long long)st.swaps);
   }
   serve_unbuild(&sv, conv, lanes);
   free(conv);
-  weights_destroy(w);
-  gguf_destroy(g);
-  gguf_destroy(eg);
-  gguf_destroy(ov);
-  free(picks);
+  osmos_close(m);
   return rc;
 }
