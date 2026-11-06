@@ -11,6 +11,7 @@ typedef struct Q4xX16
   void *x16;
   int32_t *overflow;
   uint32_t cols;
+  uint32_t row0; /* the op's first row in x16: a step's sequence's (q4x_step), its tokens' first */
 } Q4xX16;
 
 /* a token's keys the dense attention takes: the model's native context (qwen4exp.context_length) - no kernel limit
@@ -48,9 +49,26 @@ bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, 
 #define Q4X_KV_BLOCK_BYTES 34 /* its f16 scale, then 32 int8 */
 uint64_t q4x_kv_row_bytes(uint32_t values);
 bool q4x_kv_put(const float *k, const float *v, uint32_t n_tok, uint32_t values, void *kc, void *vc, void *stream);
+/* QSA's picks (q4x_ix_pick): a token's blocks of `ratio` keys, `blocks` at most - sel[t][i] ascending, npick[t] of
+   them; npick[t] the token's visible blocks every one (none read from sel) */
+typedef struct Q4xPick
+{
+  const int32_t *sel, *npick;
+  uint32_t ratio, blocks;
+} Q4xPick;
 uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx);
 bool q4x_attn(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-              uint32_t dim, uint32_t pos0, const float *gate, float *scratch, float *out, const Q4xX16 *side, void *stream);
+              uint32_t dim, uint32_t pos0, const float *gate, const Q4xPick *pick, float *scratch, float *out,
+              const Q4xX16 *side, void *stream);
+
+#define Q4X_IX_DIM 128 /* an indexer head's dim (qwen4exp.attention.indexer.key_length) */
+bool q4x_ix_q(const float *x, uint32_t n_tok, uint32_t heads, uint32_t rope_dim, const float *norm, float eps,
+              int32_t pos0, float rope_base, float *q, void *stream);
+bool q4x_ix_pool(const float *raw, uint32_t n_tok, int32_t pos0, uint32_t ratio, float *ring, uint32_t ring_rows,
+                 uint32_t rope_dim, const float *norm, float eps, float rope_base, float *pooled, void *stream);
+uint64_t q4x_ix_scratch(uint32_t max_ctx, uint32_t ratio);
+bool q4x_ix_pick(const float *q, const float *pooled, uint32_t n_tok, uint32_t heads, int32_t pos0, uint32_t ratio,
+                 uint32_t blocks, float *scratch, uint64_t scratch_floats, int32_t *sel, int32_t *npick, void *stream);
 
 bool q4x_route(const float *logits, uint32_t n_tok, uint32_t n_exp, uint32_t k, int32_t *ids, float *w,
                int32_t *rows, void *stream);
@@ -164,12 +182,37 @@ q4x_kv_row_bytes, q4x_kv_put
   bytes, the cache a long context reads whole at each decode step.
 
 q4x_attn
-  out[t][h][d] = sigmoid(gate[t][h][d]) sum over p <= pos0 + t of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
+  out[t][h][d] = sigmoid(gate[t][h][d]) sum over p in K(t) of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
+  K(t) the token's keys: with no pick every position up to its own, pos0 + t; with one its key list - its picked
+  blocks' positions (ratio of them a block, in block order), then its tail (the positions past its visible blocks,
+  ratio nv .. pos0 + t, nv = (pos0 + t + 1) / ratio) - every block picked, the list 0 .. pos0 + t: the dense bits.
   g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, Q8_0 rows of
   kv_heads x dim (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_Q4X_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
-  weights as f16, the sums F32; the keys in chunks of 512 (absolute positions), a row's chunks merged in order - a
-  row's bits its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads,
-  max_ctx) floats (a step of more tokens taken in pieces).
+  weights as f16, the sums F32; a token's key list in chunks of 128, a row's chunks merged in order - a row's bits
+  its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads, max_ctx) floats
+  (a step of more tokens taken in pieces).
+
+QSA's indexer (llama.cpp's build_qsa_sel; DESIGN.md, "QSA"): a layer's keys pooled in blocks of `ratio` positions,
+a token's keys its top `blocks` of them by score and its tail.
+
+q4x_ix_q
+  x[t][h] (heads of Q4X_IX_DIM: index_q_proj's) to q[t][h] = rope(rms_norm(x[t][h]) norm) at position pos0 + t - the
+  rotation q4x_qk's (its first rope_dim, the same angles).
+
+q4x_ix_pool
+  raw[t] (Q4X_IX_DIM: index_k_proj's, neither normed nor rotated) the raw keys of positions pos0 + t: each block j
+  the step completes (ratio j + ratio - 1 in pos0 .. pos0 + n_tok - 1) pooled, pooled[j] = rope(rms_norm(m) norm) at
+  position ratio j, m its members' raw keys summed in order times 1 / ratio - a member before pos0 from the ring
+  (ring[p % ring_rows]: the sequence's last ring_rows positions' raw keys); then the step's last ring_rows positions'
+  raw keys into the ring. ring_rows at least ratio - 1 plus a rollback's reach: a partial block's members held.
+
+q4x_ix_scratch, q4x_ix_pick
+  token t at position p = pos0 + t sees nv = (p + 1) / ratio blocks (those complete at or before it): with nv <=
+  blocks, every one (npick[t] = nv, sel unwritten); else its scores, block j's the sum over heads in order of
+  relu(q[t][h] . pooled[j]) / sqrt(Q4X_IX_DIM) (ggml_lightning_indexer), its top `blocks` by score - the lower block
+  among equals - in sel[t] (row t `blocks` apart) ascending, npick[t] = blocks. scratch: scratch_floats of it, at least
+  q4x_ix_scratch(max_ctx, ratio) (a token's scores; a step's tokens taken in pieces). a token's pick its own: its q,
+  the pooled keys, its position.
 
 the MoE (a token's k experts of n_exp: entry e = t k + j its j-th):
 

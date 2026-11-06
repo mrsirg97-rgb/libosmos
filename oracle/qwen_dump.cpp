@@ -7,6 +7,7 @@
 //   qwen_dump <first shard> <text file> <tokens> <out dir> <name,name,...>
 //   qwen_dump <first shard> <text file> <tokens> <out dir> -ppl    (no tensors: the perplexity of the tokens, one
 //   QWEN_DUMP_KV=q8_0: the cache in Q8_0 (keys and values; flash attention), as osmos keeps it
+//   QWEN_DUMP_LAYER=l: layer l's tensors alone (and those of no layer); I32 ones (indexer_top_k) as F32, exact
 //        sequence, each next token scored by log-softmax in double - tools/bench/q4x_ppl's protocol)
 //
 // build: g++ -std=c++17 -O2 oracle/qwen_dump.cpp -I<llama.cpp>/include -I<llama.cpp>/ggml/include
@@ -43,12 +44,20 @@ static std::string base_name(const char* name) {
   return std::string(name, dash - name);
 }
 
+// the layer a cb name carries ("<name>-<layer>"), -1 for none
+static int layer_of(const char* name) {
+  const char* dash = std::strrchr(name, '-');
+  return dash && dash[1] && base_name(name) != name ? std::atoi(dash + 1) : -1;
+}
+
 static bool dump(ggml_tensor* t, bool ask, void* arg) {
   Want* w = (Want*) arg;
-  const bool wanted = w->names.count(base_name(t->name)) > 0;
+  static const int only = std::getenv("QWEN_DUMP_LAYER") ? std::atoi(std::getenv("QWEN_DUMP_LAYER")) : -1;
+  const int l = layer_of(t->name);
+  const bool wanted = w->names.count(base_name(t->name)) > 0 && (only < 0 || l < 0 || l == only);
   if (ask) return wanted;
   if (!wanted) return true;
-  if (!ggml_is_contiguous(t) || (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16)) {
+  if (!ggml_is_contiguous(t) || (t->type != GGML_TYPE_F32 && t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_I32)) {
     std::fprintf(stderr, "qwen_dump: %s not dumped (%s, %s)\n", t->name, ggml_type_name(t->type),
                  ggml_is_contiguous(t) ? "contiguous" : "a view");
     w->skipped++;
@@ -60,6 +69,8 @@ static bool dump(ggml_tensor* t, bool ask, void* arg) {
   std::vector<float> f(n);
   if (t->type == GGML_TYPE_F32)
     std::memcpy(f.data(), raw.data(), n * 4);
+  else if (t->type == GGML_TYPE_I32)
+    for (int64_t i = 0; i < n; i++) f[i] = (float) ((const int32_t*) raw.data())[i];
   else
     for (int64_t i = 0; i < n; i++) f[i] = ggml_fp16_to_fp32(((const ggml_fp16_t*) raw.data())[i]);
   const int k = w->seen[t->name]++;

@@ -7,10 +7,10 @@
 
 /* a sequence as one byte string (osmos/q4x/forward.h, q4x_seq_save): a header, the n-gram layer's conv history,
    each layer's own - a DeltaNet's state and conv history, an attention's cache rows below the position, keys then
-   values - then a checksum */
+   values, then its indexer's pooled keys below the position's blocks and its raw keys' ring - then a checksum */
 
 #define STATE_MAGIC 0x53583451u /* "Q4XS" */
-#define STATE_VERSION 2u /* 2: the attention cache in Q8_0 */
+#define STATE_VERSION 3u /* 2: the attention cache in Q8_0; 3: QSA's pooled keys and ring */
 
 typedef struct Header
 {
@@ -26,7 +26,7 @@ typedef struct Part
   uint64_t bytes;
 } Part;
 
-#define MAX_PARTS (1 + 2 * Q4X_MAX_LAYERS)
+#define MAX_PARTS (1 + 4 * Q4X_MAX_LAYERS)
 
 /* the parts of a sequence at position pos (its rings' latest slot), in the string's order: their count */
 static int parts(const Q4xSeq *s, int32_t pos, Part *p)
@@ -40,7 +40,8 @@ static int parts(const Q4xSeq *s, int32_t pos, Part *p)
       p[n++] = (Part){(uint8_t *)s->ssm[l] + s->cur * sb.ssm, sb.ssm},
       p[n++] = (Part){(uint8_t *)s->conv[l] + s->cur * sb.conv, sb.conv};
     else
-      p[n++] = (Part){s->kc[l], (uint64_t)pos * sb.kv_row}, p[n++] = (Part){s->vc[l], (uint64_t)pos * sb.kv_row};
+      p[n++] = (Part){s->kc[l], (uint64_t)pos * sb.kv_row}, p[n++] = (Part){s->vc[l], (uint64_t)pos * sb.kv_row},
+      p[n++] = (Part){s->ixk[l], (uint64_t)(pos / g->ix_ratio) * sb.ix_block}, p[n++] = (Part){s->ixr[l], sb.ix_ring};
   return n;
 }
 
@@ -62,7 +63,8 @@ uint64_t q4x_identity(const Q4xForward *f)
   const uint64_t dims[] = {(uint64_t)g->n_layers, (uint64_t)g->n_embd, (uint64_t)g->hc,
                            (uint64_t)g->ssm_v_heads, (uint64_t)g->ssm_state, (uint64_t)g->ssm_groups,
                            (uint64_t)g->ssm_inner, (uint64_t)g->ssm_conv, (uint64_t)g->n_kv_heads,
-                           (uint64_t)g->head_dim, (uint64_t)g->ple_conv, (uint64_t)g->ple_ngram, Q4X_MAX_NGRAM};
+                           (uint64_t)g->head_dim, (uint64_t)g->ple_conv, (uint64_t)g->ple_ngram, Q4X_MAX_NGRAM,
+                           (uint64_t)g->ix_ratio, (uint64_t)g->ix_heads, (uint64_t)g->ix_top_k};
   h = fnv(dims, sizeof dims, h);
   for (int l = 0; l < g->n_layers; l++)
     h = fnv_u64(g->recurrent[l], h);

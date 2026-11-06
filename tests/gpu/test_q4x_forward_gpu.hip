@@ -1,7 +1,9 @@
 // Qwen3.8-Flash-Next's whole forward (osmos/q4x/forward.h) against llama.cpp's own tensors (q4x_ref.h): the dump's
 // 256 tokens one batch - every layer's residual (l_last) and the logits (result_output: the next token's
 // distribution's KL from llama.cpp's, and its greatest the same) - then the same tokens as 128 + 128 and as 255 + 1,
-// the state carried: the logits the bits of the one batch. needs a gfx1151, the UD-IQ3_XXS set (~78 GB of GPU
+// the state carried: the logits the bits of the one batch; then three sequences at their own positions sharing steps
+// (q4x_step: 3 + 150 + 1 tokens, past one x16's 128, and 2 + 1 within it) - each one's rows the bits of the one
+// batch's. needs a gfx1151, the UD-IQ3_XXS set (~78 GB of GPU
 // memory) and the dump; skipped (77) without them.
 #include <algorithm>
 
@@ -78,6 +80,42 @@ static void logits_against(const std::vector<float>& ours, const Ref& theirs, ui
     same += std::max_element(a, a + vocab) - a == std::max_element(b, b + vocab) - b;
   }
   *agree = (double) same / kTok;
+}
+
+// rows `rows` of the last step (from row `at`) against the one batch's from position `pos`
+static bool same_rows(const Q4xForward* f, uint32_t at, uint32_t rows, const std::vector<float>& logits, uint32_t pos,
+                      uint32_t vocab) {
+  return std::memcmp(host_of(q4x_logits(f) + (size_t) at * vocab, (size_t) rows * vocab).data(),
+                     &logits[(size_t) pos * vocab], (size_t) rows * vocab * 4) == 0;
+}
+
+// sequences at 100, 0 and 200 tokens in one step, then two of them again: each its own rows, the one batch's bits;
+// a sequence twice, or one past max_ctx, refused with every position kept
+static void shared_steps(Q4xForward* f, const std::vector<int32_t>& ids, const std::vector<float>& logits,
+                         uint32_t vocab) {
+  char ferr[Q4X_FWD_ERR] = "";
+  Q4xSeq *a = q4x_seq_create(f, ferr), *b = q4x_seq_create(f, ferr), *c = q4x_seq_create(f, ferr);
+  CHECK(a && b && c && q4x_batch(f, a, ids.data(), 100, 0, ferr) && q4x_batch(f, c, ids.data(), 200, 0, ferr));
+  std::vector<int32_t> toks(ids.begin() + 100, ids.begin() + 103);
+  toks.insert(toks.end(), ids.begin(), ids.begin() + 150);
+  toks.push_back(ids[200]);
+  Q4xSeq* seqs[] = {a, b, c};
+  const uint32_t lens[] = {3, 150, 1};
+  Q4xSeq* twice[] = {a, b, a};
+  CHECK(!q4x_step(f, twice, lens, 3, toks.data(), 0, ferr));
+  CHECK(!q4x_step(f, seqs, lens, 0, toks.data(), 0, ferr));
+  CHECK(q4x_seq_position(a) == 100 && q4x_seq_position(b) == 0 && q4x_seq_position(c) == 200);
+  CHECK(q4x_step(f, seqs, lens, 3, toks.data(), 0, ferr));
+  CHECK(same_rows(f, 0, 3, logits, 100, vocab) && same_rows(f, 3, 150, logits, 0, vocab) &&
+        same_rows(f, 153, 1, logits, 200, vocab));
+  CHECK(q4x_seq_position(a) == 103 && q4x_seq_position(b) == 150 && q4x_seq_position(c) == 201);
+  const int32_t two[] = {ids[103], ids[104], ids[201]};
+  Q4xSeq* ac[] = {a, c};
+  const uint32_t l2[] = {2, 1};
+  CHECK(q4x_step(f, ac, l2, 2, two, 5, ferr));
+  CHECK(same_rows(f, 5, 2, logits, 103, vocab) && same_rows(f, 7, 1, logits, 201, vocab));
+  std::printf("  three sequences sharing steps (3 + 150 + 1, then 2 + 1): each one's rows the bits of the one batch\n");
+  q4x_seq_destroy(a), q4x_seq_destroy(b), q4x_seq_destroy(c);
 }
 
 int main() {
@@ -161,6 +199,7 @@ int main() {
                           &logits[(size_t) (kTok - 1) * vocab]));
   std::printf("  128 + 128 and 255 + 1: the logits the bits of the one batch\n");
   q4x_seq_destroy(s);
+  shared_steps(f, ids, logits, vocab);
   q4x_forward_destroy(f);
   q4x_weights_destroy(w);
   gguf_destroy(g);

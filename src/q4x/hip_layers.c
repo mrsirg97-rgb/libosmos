@@ -53,7 +53,7 @@ static const Q4xX16 *side(Q4xForward *f, uint32_t n, uint32_t cols, Q4xX16 *s)
 {
   if (n > MM_MAX_TOKENS)
     return NULL;
-  *s = (Q4xX16){f->b.x16, f->b.overflow, cols};
+  *s = (Q4xX16){f->b.x16, f->b.overflow, cols, 0};
   return s;
 }
 
@@ -92,7 +92,16 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
          (!inject || mat(f, inject, hc, hd, b->xn, hd, n, b->inj, hc));
 }
 
-bool q4x_deltanet(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
+/* a step's side copy at a run's rows (t0 its first) */
+static const Q4xX16 *side_at(const Q4xX16 *all, uint32_t t0, Q4xX16 *s)
+{
+  if (!all)
+    return NULL;
+  *s = *all, s->row0 = t0;
+  return s;
+}
+
+bool q4x_deltanet(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   const Q4xLayer *L = &f->w->layer[l];
@@ -101,53 +110,113 @@ bool q4x_deltanet(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
   const uint32_t ch = 2u * (uint32_t)g->ssm_groups * (uint32_t)g->ssm_state + in;
   Q4xX16 sd;
   const bool ready = n <= MM_MAX_TOKENS; /* b.x16 the mixer's mixed (q4x_mix), then the gated norm's */
-  return q4x_mat2(f, L->qkv, ch, b->qkv, ch, L->gate, in, b->z, in, D, b->mixed, D, n, ready) &&
-         mat(f, L->alpha, vh, D, b->mixed, D, n, b->al, vh) && mat(f, L->beta, vh, D, b->mixed, D, n, b->be, vh) &&
-         q4x_ssm_gates(b->al, b->be, fv(f, L->dt), fv(f, L->a), n, vh, b->g, b->b, NULL) &&
-         q4x_conv(b->qkv, n, ch, (uint32_t)g->ssm_conv, 1, fv(f, L->conv), s->conv[l], Q4X_SLOTS, s->cur, b->cv,
-                  NULL) &&
-         q4x_delta(b->cv, b->g, b->b, n, (uint32_t)g->ssm_groups, vh, (uint32_t)g->ssm_state, g->rms_eps, b->qkn,
-                   s->ssm[l], Q4X_SLOTS, s->cur, b->ro, NULL) &&
+  bool ok = q4x_mat2(f, L->qkv, ch, b->qkv, ch, L->gate, in, b->z, in, D, b->mixed, D, n, ready) &&
+            mat(f, L->alpha, vh, D, b->mixed, D, n, b->al, vh) && mat(f, L->beta, vh, D, b->mixed, D, n, b->be, vh) &&
+            q4x_ssm_gates(b->al, b->be, fv(f, L->dt), fv(f, L->a), n, vh, b->g, b->b, NULL);
+  for (uint32_t i = 0; ok && i < runs; i++) /* a sequence's conv history and state over its own tokens */
+  {
+    const Q4xSeq *s = r[i].s;
+    const uint64_t t0 = r[i].t0;
+    ok = q4x_conv(b->qkv + t0 * ch, r[i].n, ch, (uint32_t)g->ssm_conv, 1, fv(f, L->conv), s->conv[l], Q4X_SLOTS,
+                  s->cur, b->cv + t0 * ch, NULL) &&
+         q4x_delta(b->cv + t0 * ch, b->g + t0 * vh, b->b + t0 * vh, r[i].n, (uint32_t)g->ssm_groups, vh,
+                   (uint32_t)g->ssm_state, g->rms_eps, b->qkn, s->ssm[l], Q4X_SLOTS, s->cur, b->ro + t0 * in, NULL);
+  }
+  return ok &&
          q4x_gated_norm(b->ro, fv(f, L->ssm_norm), b->z, n, vh, (uint32_t)g->ssm_state, g->rms_eps, b->fo,
                         side(f, n, in, &sd), NULL) &&
          q4x_mat(f, L->ssm_out, D, in, b->fo, in, n, b->out, D, ready);
 }
 
-/* k (normed, roped: b.kq) and v (b.vr) of n tokens into the cache's rows at pos (Q8_0: q4x_kv_put) */
-static bool kv_put(Q4xForward *f, uint8_t *kc, uint8_t *vc, int32_t pos, uint32_t n, uint32_t kv)
+/* QSA's keys: the step's raw indexer keys (b.ikr, from b.mixed), each run's blocks it completes pooled into its own
+   (q4x_ix_pool), its ring then its last raw keys */
+static bool runs_ix_keys(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t runs, uint32_t n)
 {
-  const uint64_t row = q4x_kv_row_bytes(kv);
-  return q4x_kv_put(f->b.kq, f->b.vr, n, kv, kc + (uint64_t)pos * row, vc + (uint64_t)pos * row, NULL);
+  const Q4xGeometry *g = &f->w->geo;
+  Q4xBuf *b = &f->b;
+  const uint32_t D = (uint32_t)g->n_embd, ratio = (uint32_t)g->ix_ratio;
+  bool ok = mat(f, L->ix_k, Q4X_IX_DIM, D, b->mixed, D, n, b->ikr, Q4X_IX_DIM);
+  for (uint32_t i = 0; ok && i < runs; i++)
+    ok = q4x_ix_pool(b->ikr + (uint64_t)c[i].t0 * Q4X_IX_DIM, c[i].n, c[i].pos, ratio, c[i].ixr, Q4X_IX_RING(ratio),
+                     (uint32_t)g->rope_dim, fv(f, L->ix_k_norm), g->rms_eps, g->rope_base, c[i].ixk, NULL);
+  return ok;
 }
 
-bool q4x_attention(Q4xForward *f, const Q4xLayer *L, uint8_t *kc, uint8_t *vc, int32_t pos, uint32_t n)
+/* QSA's picks: the step's indexer queries (b.iqr, from b.mixed), each run's normed and roped at its positions
+   (b.iq), its tokens' blocks picked from its pooled keys (b.sel, b.npick at its rows) */
+static bool runs_ix_pick(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t runs, uint32_t n)
+{
+  const Q4xGeometry *g = &f->w->geo;
+  Q4xBuf *b = &f->b;
+  const uint32_t D = (uint32_t)g->n_embd, ratio = (uint32_t)g->ix_ratio, blocks = (uint32_t)g->ix_top_k / ratio;
+  const uint32_t heads = (uint32_t)g->ix_heads, ixq = heads * Q4X_IX_DIM;
+  bool ok = mat(f, L->ix_q, ixq, D, b->mixed, D, n, b->iqr, ixq);
+  for (uint32_t i = 0; ok && i < runs; i++)
+  {
+    const uint64_t t0 = c[i].t0;
+    ok = q4x_ix_q(b->iqr + t0 * ixq, c[i].n, heads, (uint32_t)g->rope_dim, fv(f, L->ix_q_norm), g->rms_eps, c[i].pos,
+                  g->rope_base, b->iq + t0 * ixq, NULL) &&
+         q4x_ix_pick(b->iq + t0 * ixq, c[i].ixk, c[i].n, heads, c[i].pos, ratio, blocks, b->ixs,
+                     q4x_ix_scratch(f->max_ctx, ratio), b->sel + t0 * blocks, b->npick + t0, NULL);
+  }
+  return ok;
+}
+
+/* each run's k normed and roped at its own positions (b.kr -> b.kq; with heads, q and its gate too: b.qf -> b.q,
+   b.gt), then its k and v (b.vr) into its cache's rows (Q8_0: q4x_kv_put) */
+static bool runs_kv(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t runs, uint32_t heads)
+{
+  const Q4xGeometry *g = &f->w->geo;
+  Q4xBuf *b = &f->b;
+  const uint32_t kvh = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim, q = (uint32_t)g->n_heads * hd;
+  const uint32_t kv = kvh * hd;
+  const uint64_t row = q4x_kv_row_bytes(kv);
+  bool ok = true;
+  for (uint32_t i = 0; ok && i < runs; i++)
+  {
+    const uint64_t t0 = c[i].t0;
+    ok = q4x_qk(b->qf + t0 * 2 * q, b->kr + t0 * kv, c[i].n, heads, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm),
+                fv(f, L->k_norm), g->rms_eps, c[i].pos, g->rope_base, b->q + t0 * q, b->gt + t0 * q,
+                b->kq + t0 * kv, NULL) &&
+         q4x_kv_put(b->kq + t0 * kv, b->vr + t0 * kv, c[i].n, kv, c[i].kc + (uint64_t)c[i].pos * row,
+                    c[i].vc + (uint64_t)c[i].pos * row, NULL);
+  }
+  return ok;
+}
+
+bool q4x_attention(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t runs, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads;
   const uint32_t hd = (uint32_t)g->head_dim, q = heads * hd, kv = kvh * hd;
-  Q4xX16 sd;
+  Q4xX16 sd, rs;
+  const Q4xX16 *all = side(f, n, q, &sd);
   const bool ready = n <= MM_MAX_TOKENS; /* b.x16 the mixer's mixed (q4x_mix), then the attention's output */
-  return q4x_mat(f, L->q, 2 * q, D, b->mixed, D, n, b->qf, 2 * q, ready) &&
-         q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, b->vr, kv, D, b->mixed, D, n, ready) &&
-         q4x_qk(b->qf, b->kr, n, heads, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm), fv(f, L->k_norm), g->rms_eps,
-                pos, g->rope_base, b->q, b->gt, b->kq, NULL) &&
-         kv_put(f, kc, vc, pos, n, kv) &&
-         q4x_attn(b->q, kc, vc, n, heads, kvh, hd, (uint32_t)pos, b->gt, b->fa, b->ao, side(f, n, q, &sd), NULL) &&
-         q4x_mat(f, L->out, D, q, b->ao, q, n, b->out, D, ready);
+  const uint32_t ratio = (uint32_t)g->ix_ratio, blocks = (uint32_t)g->ix_top_k / ratio;
+  /* the indexer's before the attention: b.x16 the mixed until the attention's output overwrites it */
+  bool ok = q4x_mat(f, L->q, 2 * q, D, b->mixed, D, n, b->qf, 2 * q, ready) &&
+            q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, b->vr, kv, D, b->mixed, D, n, ready) &&
+            runs_kv(f, L, c, runs, heads) && runs_ix_keys(f, L, c, runs, n) && runs_ix_pick(f, L, c, runs, n);
+  for (uint32_t i = 0; ok && i < runs; i++) /* each run over its own cache and picks, its output at its rows */
+  {
+    const uint64_t t0 = c[i].t0;
+    const Q4xPick pick = {b->sel + t0 * blocks, b->npick + t0, ratio, blocks};
+    ok = q4x_attn(b->q + t0 * q, c[i].kc, c[i].vc, c[i].n, heads, kvh, hd, (uint32_t)c[i].pos, b->gt + t0 * q, &pick,
+                  b->fa, b->ao + t0 * q, side_at(all, c[i].t0, &rs), NULL);
+  }
+  return ok && q4x_mat(f, L->out, D, q, b->ao, q, n, b->out, D, ready);
 }
 
-/* the cache rows alone (the MTP head's seeding): k and v of b.mixed's n tokens at pos .., k normed and roped */
-bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, uint8_t *kc, uint8_t *vc, int32_t pos, uint32_t n)
+/* the cache rows alone (the MTP head's seeding): k and v of b.mixed's tokens, k normed and roped; the indexer's keys */
+bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t runs, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, kvh = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim, kv = kvh * hd;
   return q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, b->vr, kv, D, b->mixed, D, n,
                   n <= MM_MAX_TOKENS) && /* b.x16 the mixer's mixed (q4x_mix) */
-         q4x_qk(b->qf, b->kr, n, 0, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm), fv(f, L->k_norm), g->rms_eps, pos,
-                g->rope_base, b->q, b->gt, b->kq, NULL) &&
-         kv_put(f, kc, vc, pos, n, kv);
+         runs_kv(f, L, c, runs, 0) && runs_ix_keys(f, L, c, runs, n);
 }
 
 /* an expert tensor over the tables' runs, a launch each (mm_group: a part's slab decoded once for its 16 << r tokens) */
@@ -197,21 +266,25 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
 }
 
 /* the step's tokens' rows already in b.ple_rows */
-bool q4x_ple(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
+bool q4x_ple(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   const Q4xLayer *L = &f->w->layer[l];
   const GgufTensor *tab = f->w->ple_table;
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, hd = hc * D, heads = (uint32_t)g->ple_heads;
-  return q4x_rows(TY(tab), q4x_dev(f, tab), tab->bytes / tab->dims[1], (uint32_t)tab->dims[0], b->ple_rows, n * heads,
+  bool ok = q4x_rows(TY(tab), q4x_dev(f, tab), tab->bytes / tab->dims[1], (uint32_t)tab->dims[0], b->ple_rows, n * heads,
                   b->emb, NULL) &&
          q4x_mat2(f, L->ple_key, hd, b->key, hd, L->ple_value, D, b->val, D, D, b->emb, D, n, false) &&
          q4x_hc_norm(b->key, fv(f, L->ple_norm_key), n, hc, D, g->rms_eps, b->kn, NULL, NULL) &&
          q4x_hc_norm(b->h, fv(f, L->ple_norm_query), n, hc, D, g->rms_eps, b->qn, NULL, NULL) &&
          q4x_ple_gate(b->kn, b->qn, b->val, n, hc, D, b->pg, b->gated, NULL) &&
-         q4x_hc_norm(b->gated, fv(f, L->ple_norm_conv), n, hc, D, g->rms_eps, b->nrm, NULL, NULL) &&
-         q4x_conv(b->nrm, n, hd, (uint32_t)g->ple_conv, (uint32_t)g->ple_ngram, fv(f, L->ple_conv), s->ple_hist,
-                  Q4X_SLOTS, s->cur, b->conv, NULL) &&
-         q4x_add2(b->h, b->gated, b->conv, (uint64_t)n * hd, NULL);
+         q4x_hc_norm(b->gated, fv(f, L->ple_norm_conv), n, hc, D, g->rms_eps, b->nrm, NULL, NULL);
+  for (uint32_t i = 0; ok && i < runs; i++) /* a sequence's conv history over its own tokens */
+  {
+    const uint64_t t0 = r[i].t0 * (uint64_t)hd;
+    ok = q4x_conv(b->nrm + t0, r[i].n, hd, (uint32_t)g->ple_conv, (uint32_t)g->ple_ngram, fv(f, L->ple_conv),
+                  r[i].s->ple_hist, Q4X_SLOTS, r[i].s->cur, b->conv + t0, NULL);
+  }
+  return ok && q4x_add2(b->h, b->gated, b->conv, (uint64_t)n * hd, NULL);
 }

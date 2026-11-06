@@ -24,14 +24,10 @@ static bool greedy_goes_on(Multi *m, Lane *ln)
   return true;
 }
 
-/* a drafting lane's drafts, cut to the room it has (its limit, the context, the round's tokens less one a lane after
-   it); -1 for the drafter's failure */
-static int drafts(Multi *m, Lane *ln, int32_t *dr, int room)
+/* a drafting lane's k drafts cut to the room it has (its limit, the context, the round's tokens less one a lane
+   after it) */
+static int cut(Multi *m, Lane *ln, int k, int room)
 {
-  float cf[OSMOS_MAX_BLOCK];
-  int k = oseq_draft(ln->c.s, ln->t, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, dr, cf, ln->c.err);
-  if (k < 0)
-    return -1;
   const long long left = ln->limit - ln->produced - 1;
   if (k > left)
     k = left > 0 ? (int)left : 0;
@@ -76,33 +72,70 @@ static void settle(Multi *m, const Entry *e, const int32_t *toks, const int32_t 
     lane_finish(m, ln, "length");
 }
 
-void round_all(Multi *m)
+/* the round's lanes in order (a greedy one's token printed first: one at its end left out), each with the answering
+   lanes after it; the drafting ones' drafts all at once (oseq_draft_all) - a drafter's failure every drafting lane's */
+static int lanes_of(Multi *m, Lane **go, int *after, int32_t (*dr)[OSMOS_MAX_BLOCK], int *k)
 {
-  Server *sv = m->sv;
-  OsmosSeq *seqs[MAX_LANES * (OSMOS_MAX_BLOCK + 1)];
-  int32_t toks[MAX_LANES * (OSMOS_MAX_BLOCK + 1)], picks[MAX_LANES * (OSMOS_MAX_BLOCK + 1)];
-  Entry in[MAX_LANES];
-  int nin = 0, total = 0, after = 0;
+  OsmosSeq *ds[MAX_LANES];
+  int32_t ys[MAX_LANES];
+  int n = 0, nd = 0, left = 0, at[MAX_LANES];
   for (int i = 0; i < m->n; i++)
-    after += m->lane[i].st == ANSWERING;
+    left += m->lane[i].st == ANSWERING;
   for (int i = 0; i < m->n; i++)
   {
     Lane *ln = &m->lane[i];
     if (ln->st != ANSWERING)
       continue;
-    after--;
+    left--;
     if (!ln->g.spec && !greedy_goes_on(m, ln))
       continue;
-    int k = 0;
-    if (ln->g.spec && (k = drafts(m, ln, toks + total + 1, (int)sv->round_tokens - total - 1 - after)) < 0)
-    {
-      lane_fail(m, ln);
-      continue;
-    }
+    k[n] = 0, after[n] = left, go[n] = ln;
+    if (ln->g.spec)
+      at[nd] = n, ds[nd] = ln->c.s, ys[nd++] = ln->t;
+    n++;
+  }
+  float cf[MAX_LANES][OSMOS_MAX_BLOCK];
+  int cnt[MAX_LANES];
+  char err[OSMOS_ERR];
+  if (nd && !oseq_draft_all(ds, ys, (uint32_t)nd, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, dr, cf, cnt, err))
+  {
+    int kept = 0;
+    for (int j = 0; j < n; j++)
+      if (go[j]->g.spec)
+        snprintf(go[j]->c.err, sizeof go[j]->c.err, "%s", err), lane_fail(m, go[j]);
+      else
+        go[kept] = go[j], after[kept] = after[j], k[kept++] = 0;
+    return kept;
+  }
+  for (int j = nd - 1; j >= 0; j--) /* the drafts to their lanes' rows: at[j] >= j, so the last first */
+  {
+    k[at[j]] = cnt[j];
+    if (at[j] != j)
+      memcpy(dr[at[j]], dr[j], sizeof dr[j]);
+  }
+  return n;
+}
+
+void round_all(Multi *m)
+{
+  Server *sv = m->sv;
+  OsmosSeq *seqs[MAX_LANES * (OSMOS_MAX_BLOCK + 1)];
+  int32_t toks[MAX_LANES * (OSMOS_MAX_BLOCK + 1)], picks[MAX_LANES * (OSMOS_MAX_BLOCK + 1)];
+  int32_t dr[MAX_LANES][OSMOS_MAX_BLOCK];
+  Lane *go[MAX_LANES];
+  int after[MAX_LANES], kd[MAX_LANES];
+  Entry in[MAX_LANES];
+  int nin = 0, total = 0;
+  const int n = lanes_of(m, go, after, dr, kd);
+  for (int j = 0; j < n; j++)
+  {
+    Lane *ln = go[j];
+    const int k = ln->g.spec ? cut(m, ln, kd[j], (int)sv->round_tokens - total - 1 - after[j]) : 0;
     in[nin++] = (Entry){ln, total, k, oseq_position(ln->c.s)};
     toks[total] = ln->t;
-    for (int j = 0; j <= k; j++)
-      seqs[total + j] = ln->c.s;
+    memcpy(toks + total + 1, dr[j], (size_t)k * sizeof *toks);
+    for (int i = 0; i <= k; i++)
+      seqs[total + i] = ln->c.s;
     total += k + 1;
   }
   if (!total)

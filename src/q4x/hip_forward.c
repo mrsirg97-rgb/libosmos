@@ -76,12 +76,14 @@ static bool mtp_buffers(Q4xForward *f, char *err)
 {
   const Q4xGeometry *g = &f->w->geo;
   const uint64_t n = f->max_tokens, D = (uint64_t)g->n_embd, hd = (uint64_t)g->hc * D;
+  /* a draft step's rows: a sequence each (q4x_mtp_draft_all), over the shortlist */
+  const uint64_t rows = n < Q4X_MAX_RUNS ? n : Q4X_MAX_RUNS, dv = Q4X_MTP_VOCAB < g->n_vocab ? Q4X_MTP_VOCAB : g->n_vocab;
   Q4xMtpBuf *m = &f->m;
   const bool ok = alloc(&m->hid, n * hd * F) && alloc(&m->hin, n * hd * F) && alloc(&m->emb, n * D * F) &&
                   alloc(&m->hn, n * hd * F) && alloc(&m->join, 2 * n * hd * F) &&
-                  alloc(&m->logits, (uint64_t)g->n_vocab * F) && alloc(&m->top_id, 4) && alloc(&m->top_p, 4) &&
-                  hipHostMalloc((void **)&m->pin_id, 4, 0) == hipSuccess &&
-                  hipHostMalloc((void **)&m->pin_p, 4, 0) == hipSuccess;
+                  alloc(&m->logits, (uint64_t)rows * dv * F) && alloc(&m->top_id, rows * 4) &&
+                  alloc(&m->top_p, rows * 4) && hipHostMalloc((void **)&m->pin_id, rows * 4, 0) == hipSuccess &&
+                  hipHostMalloc((void **)&m->pin_p, rows * 4, 0) == hipSuccess;
   return ok || q4x_fail(err, "GPU memory refused (the MTP head's buffers)");
 }
 
@@ -92,6 +94,9 @@ static bool buffers(Q4xForward *f, char *err)
   const uint64_t ch = 2ull * g->ssm_groups * g->ssm_state + (uint64_t)g->ssm_inner, in = (uint64_t)g->ssm_inner;
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
   const uint64_t vh = (uint64_t)g->ssm_v_heads, ff = (uint64_t)g->ff_exp, sff = (uint64_t)g->ff_shexp;
+  /* QSA's indexer: its heads' q, a token's blocks at most */
+  const uint32_t ratio = (uint32_t)g->ix_ratio;
+  const uint64_t ixq = (uint64_t)g->ix_heads * Q4X_IX_DIM, blocks = ratio ? (uint64_t)g->ix_top_k / ratio : 1;
   /* the experts: mm_group's entries and slots (q4x_expert_bounds'); mm's f16 activations, a chunk
      of MM_MAX_TOKENS rows of the widest input (hc n_embd) */
   Q4xExpertBounds bd;
@@ -109,6 +114,8 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->qkv, n * ch * F},        {&b->z, n * in * F},          {&b->al, n * vh * F},         {&b->be, n * vh * F},
       {&b->g, n * vh * F},          {&b->b, n * vh * F},          {&b->cv, n * ch * F},         {&b->qkn, n * 2 * g->ssm_groups * g->ssm_state * F},         {&b->ro, n * in * F},
       {&b->fo, n * in * F},         {&b->qf, n * 2 * q * F},      {&b->kr, n * kv * F},         {&b->kq, n * kv * F},         {&b->vr, n * kv * F},         {&b->q, n * q * F},
+      {&b->iqr, n * ixq * F},       {&b->iq, n * ixq * F},        {&b->ikr, n * Q4X_IX_DIM * F},
+      {&b->ixs, q4x_ix_scratch(f->max_ctx, ratio) * F},           {&b->sel, n * blocks * 4},    {&b->npick, n * 4},
       {&b->gt, n * q * F},          {&b->ao, n * q * F},          {&b->fa, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F},          {&b->rl, n * g->n_experts * F}, {&b->w, n * k * F},
       {&b->ga, n * k * ff * F},     {&b->up, n * k * ff * F},     {&b->y, n * k * D * F},
       {&b->shg, n * sff * F},       {&b->shu, n * sff * F},       {&b->sh, n * D * F},          {&b->sl, n * F},
@@ -175,7 +182,8 @@ Q4xSeqBytes q4x_seq_bytes(const Q4xGeometry *g)
   const uint64_t ch = 2ull * g->ssm_groups * g->ssm_state + (uint64_t)g->ssm_inner;
   return (Q4xSeqBytes){(uint64_t)g->ssm_v_heads * g->ssm_state * g->ssm_state * F, (g->ssm_conv - 1) * ch * F,
                        q4x_kv_row_bytes((uint32_t)(g->n_kv_heads * g->head_dim)),
-                       (uint64_t)(g->ple_conv - 1) * g->ple_ngram * g->hc * g->n_embd * F};
+                       (uint64_t)(g->ple_conv - 1) * g->ple_ngram * g->hc * g->n_embd * F, Q4X_IX_DIM * F,
+                       (uint64_t)Q4X_IX_RING(g->ix_ratio) * Q4X_IX_DIM * F};
 }
 
 void q4x_seq_destroy(Q4xSeq *s)
@@ -183,8 +191,9 @@ void q4x_seq_destroy(Q4xSeq *s)
   if (!s)
     return;
   for (int l = 0; l < Q4X_MAX_LAYERS; l++)
-    hipFree(s->ssm[l]), hipFree(s->conv[l]), hipFree(s->kc[l]), hipFree(s->vc[l]);
-  hipFree(s->ple_hist), hipFree(s->mkc), hipFree(s->mvc), hipFree(s->pend);
+    hipFree(s->ssm[l]), hipFree(s->conv[l]), hipFree(s->kc[l]), hipFree(s->vc[l]), hipFree(s->ixk[l]),
+        hipFree(s->ixr[l]);
+  hipFree(s->ple_hist), hipFree(s->mkc), hipFree(s->mvc), hipFree(s->mixk), hipFree(s->mixr), hipFree(s->pend);
   free(s->step_tok);
   free(s);
 }
@@ -199,12 +208,15 @@ Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR])
     return q4x_fail(err, "out of memory"), NULL;
   s->f = f;
   const Q4xSeqBytes sb = q4x_seq_bytes(g);
+  const uint64_t pools = f->max_ctx / (uint64_t)g->ix_ratio + 1; /* an attention's pooled keys: its blocks */
   bool ok = alloc(&s->ple_hist, Q4X_SLOTS * sb.ple);
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = g->recurrent[l] ? alloc(&s->ssm[l], Q4X_SLOTS * sb.ssm) && alloc(&s->conv[l], Q4X_SLOTS * sb.conv)
-                         : alloc(&s->kc[l], f->max_ctx * sb.kv_row) && alloc(&s->vc[l], f->max_ctx * sb.kv_row);
-  if (ok && f->mtp) /* the head's cache, its pending h, its last step's tokens */
+                         : alloc(&s->kc[l], f->max_ctx * sb.kv_row) && alloc(&s->vc[l], f->max_ctx * sb.kv_row) &&
+                               alloc(&s->ixk[l], pools * sb.ix_block) && alloc(&s->ixr[l], sb.ix_ring);
+  if (ok && f->mtp) /* the head's cache and indexer, its pending h, its last step's tokens */
     ok = alloc(&s->mkc, f->max_ctx * sb.kv_row) && alloc(&s->mvc, f->max_ctx * sb.kv_row) &&
+         alloc(&s->mixk, pools * sb.ix_block) && alloc(&s->mixr, sb.ix_ring) &&
          alloc(&s->pend, (uint64_t)g->hc * g->n_embd * F) && (s->step_tok = calloc(f->max_tokens, 4));
   if (!ok || !q4x_seq_reset(s))
     return q4x_seq_destroy(s), q4x_fail(err, "GPU memory refused (a sequence's state)"), NULL;

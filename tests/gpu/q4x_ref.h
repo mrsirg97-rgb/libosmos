@@ -46,8 +46,8 @@ inline std::string home_path(const char* fmt) {
 }
 
 // a dumped tensor: "QDMP", u32 dims, 4 x i64 ne, the values; false where the file is not there
-inline bool ref_read(const std::string& name, Ref* r) {
-  FILE* f = std::fopen((home_path(kQwenDump) + "/" + name + ".bin").c_str(), "rb");
+inline bool ref_read(const std::string& name, Ref* r, const char* dir = kQwenDump) {
+  FILE* f = std::fopen((home_path(dir) + "/" + name + ".bin").c_str(), "rb");
   if (!f) return false;
   char magic[4];
   uint32_t dims = 0;
@@ -59,9 +59,9 @@ inline bool ref_read(const std::string& name, Ref* r) {
   return true;
 }
 
-inline Ref ref(const std::string& name) {
+inline Ref ref(const std::string& name, const char* dir = kQwenDump) {
   Ref r;
-  CHECK(ref_read(name, &r));
+  CHECK(ref_read(name, &r, dir));
   return r;
 }
 

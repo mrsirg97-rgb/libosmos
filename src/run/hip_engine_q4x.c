@@ -10,8 +10,8 @@
 #include "osmos/q4x/weights.h"
 
 /* Qwen3.8-Flash-Next behind the engine: every weight resident (no budget, no picks, nothing streamed); its drafter
-   the MTP head (o->drafter: the head's GGUF, q4x_mtp_*). a batch runs a sequence's consecutive tokens at a time (q4x_batch: one sequence's step), each run's logits at
-   its own rows of the one table - every row kept. a rollback steps its states' rings back (q4x_seq_rollback) */
+   the MTP head (o->drafter: the head's GGUF, q4x_mtp_*). a batch one step for its sequences (q4x_step: every weight
+   read once for all of them; Q4X_MAX_RUNS sequences a step), each run's logits at its own rows - every row kept. a rollback steps its states' rings back (q4x_seq_rollback) */
 
 _Static_assert(Q4X_MTP_BLOCK <= OSMOS_MAX_BLOCK, "the head's drafts within the engine's");
 _Static_assert(Q4X_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
@@ -110,7 +110,8 @@ static bool e_room(const void *p, uint64_t *bytes)
 
 static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
 
-/* each sequence's consecutive tokens one step, at their rows; a sequence met again after another's refused */
+/* the batch's sequences one step (each one's consecutive tokens a run, at their rows), Q4X_MAX_RUNS at a time; a
+   sequence met again after another's refused */
 static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {
   Eng *e = p;
@@ -119,12 +120,21 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
     for (uint32_t j = 0; j < i; j++)
       if (seqs[j] == seqs[i] && seqs[i - 1] != seqs[i])
         return fail(err, "a sequence's tokens not consecutive in the batch");
-  for (uint32_t at = 0, k; at < n; at += k)
+  Q4xSeq *run[Q4X_MAX_RUNS];
+  uint32_t len[Q4X_MAX_RUNS];
+  for (uint32_t at = 0; at < n;)
   {
-    for (k = 1; at + k < n && seqs[at + k] == seqs[at];)
-      k++;
-    if (!q4x_batch(e->f, oseq_impl(seqs[at]), tokens + at, k, at, err))
+    uint32_t runs = 0, k = 0;
+    for (; at + k < n && runs < Q4X_MAX_RUNS; runs++)
+    {
+      uint32_t m = 1;
+      while (at + k + m < n && seqs[at + k + m] == seqs[at + k])
+        m++;
+      run[runs] = oseq_impl(seqs[at + k]), len[runs] = m, k += m;
+    }
+    if (!q4x_step(e->f, run, len, runs, tokens + at, at, err))
       return false;
+    at += k;
   }
   e->n = n;
   return true;
@@ -175,8 +185,26 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
   return q4x_mtp_draft(((Eng *)p)->f, s, y, Q4X_MTP_BLOCK, conf_min, cum_min, drafts, conf, err);
 }
 
+/* the sequences' drafts together, Q4X_MAX_RUNS at a time (q4x_mtp_draft_all: a depth one head step for them all) */
+static bool s_draft_all(void *p, OsmosSeq *const *seqs, const int32_t *y, uint32_t n, float conf_min, float cum_min,
+                        int32_t (*drafts)[OSMOS_MAX_BLOCK], float (*conf)[OSMOS_MAX_BLOCK], int *counts,
+                        char err[OSMOS_ERR])
+{
+  Q4xSeq *s[Q4X_MAX_RUNS];
+  for (uint32_t at = 0; at < n; at += Q4X_MAX_RUNS)
+  {
+    const uint32_t k = n - at < Q4X_MAX_RUNS ? n - at : Q4X_MAX_RUNS;
+    for (uint32_t i = 0; i < k; i++)
+      s[i] = oseq_impl(seqs[at + i]);
+    if (!q4x_mtp_draft_all(((Eng *)p)->f, s, y + at, k, Q4X_MTP_BLOCK, conf_min, cum_min, drafts[at], conf[at],
+                           OSMOS_MAX_BLOCK, counts + at, err))
+      return false;
+  }
+  return true;
+}
+
 const OsmosFamily osmos_q4x = {
     "qwen4exp", m_open,     m_close,       e_create, e_destroy, e_identity, e_room,     e_stats,
     e_batch,    e_logits,   e_greedy,      e_block,  s_create,  s_destroy,  s_prompt,   s_rollback,
-    s_reach,    s_position, s_state_bytes, s_save,   s_load,    s_seed,     s_draft,
+    s_reach,    s_position, s_state_bytes, s_save,   s_load,    s_seed,     s_draft,    s_draft_all,
 };

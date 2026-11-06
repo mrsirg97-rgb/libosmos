@@ -39,6 +39,9 @@ uint64_t q4x_seq_state_bytes(const Q4xSeq *s);
 bool q4x_seq_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR]);
 bool q4x_seq_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ERR]);
 
+#define Q4X_MAX_RUNS 64 /* a step's sequences at most (q4x_step) */
+bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
+              uint32_t row0, char err[Q4X_FWD_ERR]);
 bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[Q4X_FWD_ERR]);
 const float *q4x_logits(const Q4xForward *f);
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR]);
@@ -46,6 +49,9 @@ bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char 
 bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR]);
 int q4x_mtp_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
                   float *conf, char err[Q4X_FWD_ERR]);
+bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32_t n, uint32_t max, float conf_min,
+                       float cum_min, int32_t *drafts, float *conf, uint32_t stride, int *counts,
+                       char err[Q4X_FWD_ERR]);
 
 #endif
 
@@ -85,8 +91,16 @@ q4x_seq_state_bytes .. q4x_seq_load
   or format, a size not the state's of its position, a position past max_ctx, a damaged state: the sequence then
   empty, position 0 (never part one state and part another).
 
+q4x_step
+  runs sequences' tokens in one step (seqs[i] the next lens[i] tokens, consecutive; each sequence once, runs 1 ..
+  Q4X_MAX_RUNS): every weight read once for all of them (the matmuls and the experts on the step's tokens; each
+  sequence's own - its n-gram history, conv histories, DeltaNet state, rotation, cache and attention - on its tokens
+  alone), the logits at rows row0 .. in the tokens' order. each sequence as a q4x_batch of its tokens: the same bits,
+  however the sequences share the step. false with why - every sequence then unchanged in position - for no runs, a
+  run of no tokens, a sequence twice or of another forward, the tokens past max_tokens or a sequence past max_ctx.
+
 q4x_batch
-  n tokens (1 .. max_tokens) of one sequence at its next positions; the logits of every one of them after it, rows
+  q4x_step of one sequence: n tokens (1 .. max_tokens) of it at its next positions; the logits of every one of them after it, rows
   row0 .. row0 + n - 1 of q4x_logits ([max_tokens][vocab] on the device: the rows outside left as they were - several
   sequences' steps one after another fill one table, row0 + n at most max_tokens). a token's results are the same bits
   however its sequence's tokens are split into batches. false with why for n out of range or past max_ctx; the
@@ -103,5 +117,7 @@ q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head; DESIGN.md, "Qwen'
   greedily: draft i the head's greatest among the first Q4X_MTP_VOCAB tokens at position pos + i from token i (y, then
   draft i - 1) and h (the pending, then the head's own residual), each kept while its probability (q4x_top's) is at
   least conf_min and their product at least cum_min - the count, or -1 with why. neither moves a bit of the sequence's
-  own state.
+  own state. draft_all: n sequences' (1 .. min(max_tokens, Q4X_MAX_RUNS), each once), y[i] sequence i's, its drafts
+  and confidences at row i (stride apart), its count counts[i] - each the bits of its q4x_mtp_draft: a draft's depth
+  one head step for the sequences still drafting (the head's weights read once for all). false with why.
 */

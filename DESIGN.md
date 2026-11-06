@@ -2064,7 +2064,7 @@ GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB o
     sequence's state 48 x 128 x 128 F32 a layer (~113 MB for the 36).
   - layers l % 4 == 3 (12): Qwen Sparse Attention - attn_q [2560 -> 12288: 24 heads x 256, and their gates],
     attn_k / attn_v [2560 -> 512: 2 KV heads x 256], q / k norms, attn_output [6144 -> 2560]; an indexer (BF16
-    q_proj [2560 -> 4 x 128], k_proj [-> 128], norms) choosing top-k 2048 tokens (compress ratio 48: blocks).
+    q_proj [2560 -> 4 x 128], k_proj [-> 128], norms) choosing top-k 2048 tokens (compress ratio 4: blocks).
   - every layer: the gated residual (hc_{attn,ffn}_{norm,down,up,inject}: x normed a stream, gate =
     sigmoid(up(silu(down(x) / 4))), the block's input the streams' gated mean; after it, each stream += 2
     sigmoid(inject_s) x out); the MoE - router F32 [2560 -> 512] top 10, a shared expert gated by sigmoid
@@ -2301,6 +2301,71 @@ own, so a token's bits stay its batch's. the state's format 2 (a format-1 state 
   took Q8_0 as the default for the context it buys.
 - **speed**: plain decode 23.3 tok/s (the same), drafted 40.5 (41.1: ~1%, the puts' launches); prompt 2,048 663
   tok/s (649), 8,000 454 (417) and its decode 22.0 (21.9) - the cache's reads a quarter of F32's.
+
+### QSA: the sparse attention past 2,048 keys (design, 2026-11-06)
+
+why: the agent bench (4 x 8, ~99K prompt tokens) 638 s against DeepSeek's 440 - the steps shared (q4x_step) and
+the drafts too (q4x_mtp_draft_all) moved the wall 733 -> 638 and then not at all: a prompt's pieces and the decode
+rounds take turns (multi.c), so the prompts' speed is the wall's, and a dense attention's falls with the context -
+2,048 tokens 651 tok/s, 8,000 454, 16,384 315. llama.cpp's QSA (src/models/qwen4exp.cpp, build_qsa_sel; its
+cache's rules, llama-memory-hybrid-idx.cpp set_input_kpool, in order mode) caps a token's keys at the budget.
+
+**the math** (one sequence; R = 4, compress_ratios; T = top_k / R = 512 blocks; 4 indexer heads x 128):
+- **the keys' blocks**: block j positions R j .. R j + R - 1. its pooled key K_j = rope(rmsnorm(mean of its members'
+  raw keys) x k_norm) at position R j (its first member) - the raw key index_k_proj(x), neither normed nor rotated;
+  the mean the members summed in order, then x 1 / R (llama.cpp's slices).
+- **a token's query**: q_h = rope(rmsnorm(index_q_proj(x)_h) x q_norm) at its position - the main attention's
+  IMRoPE (the first rope_dim dims of 128), x the attention's input (the mixer's mixed, as q, k, v).
+- **visible**: token p sees the blocks complete at or before it, nv = (p + 1) / R; its tail the n_tail = (p + 1) % R
+  positions R nv .. p.
+- **the score**: block j < nv: sum over heads in order of relu(q_h . K_j) / sqrt(128) (ggml_lightning_indexer).
+- **the pick**: the top min(nv, T) blocks by score - ties to the lower block (ggml_top_k leaves them unordered:
+  ours fixed); the attention over their positions and the tail. nv <= T: every block - the dense attention.
+
+**osmos's shape**:
+- **one attention, a key list**: a token's keys one flat list - its picked blocks' positions ascending, then the
+  tail - in chunks of 128 merged in order (fa_kernel's chunks of the list, not of positions). every block picked
+  (nv <= T, below 2,052 positions) the list is 0 .. p: today's chunks, today's bits. a token's chunks at most
+  ceil((R T + R - 1) / 128) = 17: the scratch a step's tokens x 17, whatever the context.
+- **the cache**: a QSA layer's pooled keys F32 [max_ctx / R][128] a sequence (~1.5 KB a token for the 12, the head's
+  too); the raw keys a ring of the last R - 1 + Q4X_MAX_BACK positions (a rollback's partial block in it), the step's
+  own from its buffer. a step pools the blocks it completes before any score (a token sees a block its step ends).
+- **the kernels** (kernels/q4x_qsa.hip): the indexer's projections (q4x_mat: BF16, mv); its q norm and rope; the
+  pooling; the scores - a token's against its visible blocks, tiled (tokens x blocks); the pick - a token's top T by
+  a radix select on the scores' bits (non-negative: relu sums), ties to the lower block, the picked in block order;
+  the attention reading the list.
+- **the bits**: a score's dot products in one order, a pick by (score, block): a token's list its own, however
+  batched - the halves, one at a time and shared steps the bits of one run, as now.
+- **the state**: the pooled keys below the position's blocks and the ring - the format's 3.
+
+**held to** (tests/gpu/test_q4x_qsa_gpu): llama.cpp's tensors at 3,000 tokens (qwen_dump: indexer_q, indexer_k, its
+scores and picks): q and the pooled keys to F32's rounding of their F16 cache, the picks the same blocks but near
+ties (named); a double reference of the pick from our own keys and queries - the same blocks exactly; the
+attention against double over its picked keys; the halves, one at a time and shared steps the bits of one run past
+2,052 positions; perplexity at 8,192 and 16,384 against llama.cpp's QSA (8,192: F16 2.7193, Q8_0 2.7110) - at or
+below; mutants (a tie to the higher block, the tail off by one, a block's rope at its last member).
+
+**the measure**: prompt tok/s at 2,048 / 8,000 / 16,384 / 65,536, decode at 8K and 64K, then the agent bench.
+
+**measured** (2026-11-06, performance):
+- **test_q4x_qsa_gpu** (layer 3, 3,000 tokens): the raw keys 1.9e-3 of llama.cpp's (its BF16 matmul), the query
+  1.9e-3; the pooled keys from its raw keys 2.1e-4 (its F16 cache); the picks of all 949 tokens past the budget the
+  double's blocks exactly and llama.cpp's exactly (no tie at the cut in this text; a zero query's every score tied:
+  blocks 0 .. 511); the attention over them 1.9e-4 of double, 5.7e-3 of llama.cpp's (its F16 cache, our Q8_0); pieces
+  of 1000 + 999 + 1 + 1000 and a token at a time the bits of one run; below the budget the dense bits. mutants: ties
+  taken wholesale, the tail one short, a block rotated at its last member - each caught.
+- **perplexity** (the same ids):
+
+  | tokens | osmos dense | osmos QSA | llama.cpp QSA F16 | llama.cpp QSA Q8_0 |
+  |---|---|---|---|---|
+  | 2,048 | 6.9765 | 6.9765 (the same bits) | 6.9478 | 6.9738 |
+  | 8,192 | 2.7075 | 2.7143 | 2.7193 | 2.7110 |
+  | 16,384 | 2.2714 | 2.2732 | 2.2721 | 2.2675 |
+
+  QSA's own cost +0.25% / +0.08% of our dense; llama.cpp's two caches 0.2% apart at 16,384 - the spread a
+  forward's roundings make. at 16,384 above llama.cpp's (+0.05% of F16, +0.25% of Q8_0), dense too: not the picks'.
+- **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
+  21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 

@@ -9,8 +9,9 @@ extern "C" {
 
 // element i of an output of rows side.cols long
 __device__ inline void x16_side(const Q4xX16& side, uint64_t i, float v) {
-  if (side.x16) mm::x16_put((_Float16*) side.x16, (uint32_t) (i / side.cols), (uint32_t) (i % side.cols), side.cols, v,
-                            side.overflow);
+  if (side.x16)
+    mm::x16_put((_Float16*) side.x16, side.row0 + (uint32_t) (i / side.cols), (uint32_t) (i % side.cols), side.cols, v,
+                side.overflow);
 }
 
-inline Q4xX16 side_of(const Q4xX16* s) { return s ? *s : Q4xX16{nullptr, nullptr, 1}; }
+inline Q4xX16 side_of(const Q4xX16* s) { return s ? *s : Q4xX16{nullptr, nullptr, 1, 0}; }
