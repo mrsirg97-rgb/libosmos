@@ -61,7 +61,8 @@ __global__ __launch_bounds__(kHead) void qk_kernel(const float* qfull, const flo
 constexpr int kTile = 16;
 constexpr int kWaves = 4;                   // a wave a quarter of O's columns
 constexpr int kChunk = 128;                 // a chunk's keys: absolute positions [c kChunk, (c + 1) kChunk)
-constexpr int kStepTokens = 64;             // a launch's tokens (the scratch's): a long step in pieces
+constexpr int kStepTokens = 64;             // a piece's most tokens
+constexpr uint32_t kPieceChunks = 8192;     // the scratch's (token, chunk) pairs: a piece's tokens x its chunks
 constexpr int kRowLds = kHead + 8;          // f16s a row in LDS, past it a pad (rows 4 banks apart)
 constexpr int kKeyLds = kTile + 8;
 typedef _Float16 h16 __attribute__((ext_vector_type(16)));
@@ -76,13 +77,34 @@ __device__ inline float row_sum(float v) {
   return v;
 }
 
-__global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const float* kc, const float* vc,
+// a cache row's value d (Q8_0: its block's f16 scale times its int8) as f16 - the product exact in F32, then rounded
+__device__ inline _Float16 kv_at(const uint8_t* row, uint32_t d) {
+  const uint8_t* blk = row + (d / Q4X_KV_BLOCK) * Q4X_KV_BLOCK_BYTES;
+  const _Float16 s = *(const _Float16*) blk;
+  return (_Float16) ((float) s * (float) (int8_t) blk[2 + d % Q4X_KV_BLOCK]);
+}
+
+// a thread a block of a row: its scale, then its 32 values rounded to nearest (ggml's quantize_row_q8_0)
+__global__ void kv_put_kernel(const float* x, uint32_t n_blocks, uint8_t* dst) {
+  const uint32_t i = blockIdx.x * 256 + threadIdx.x;
+  if (i >= n_blocks) return;
+  const float* v = x + (uint64_t) i * Q4X_KV_BLOCK;
+  float amax = 0.0f;
+  for (int j = 0; j < Q4X_KV_BLOCK; j++) amax = fmaxf(amax, fabsf(v[j]));
+  const float d = amax / 127.0f, id = d ? 1.0f / d : 0.0f;
+  uint8_t* b = dst + (uint64_t) i * Q4X_KV_BLOCK_BYTES;
+  *(_Float16*) b = (_Float16) d;
+  for (int j = 0; j < Q4X_KV_BLOCK; j++) b[2 + j] = (uint8_t) (int8_t) roundf(v[j] * id);
+}
+
+__global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const uint8_t* kc, const uint8_t* vc,
                                                          uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
                                                          uint32_t pos0, float* ml, float* po) {
   __shared__ __attribute__((aligned(32))) _Float16 qs[kTile * kRowLds], ks[kTile * kRowLds], vt[kHead * kKeyLds];
   __shared__ __attribute__((aligned(32))) _Float16 ps[kWaves][kTile * kKeyLds];
   const uint32_t G = heads / kv_heads, t = blockIdx.x, kvh = blockIdx.y, chunk = blockIdx.z;
   const uint32_t wave = threadIdx.x / 32, lane = threadIdx.x % 32, half = lane >> 4;
+  const uint64_t row = (uint64_t) kv_heads * kHead / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;  // a position's bytes
   const uint32_t top = pos0 + t;  // the token's last key
   const uint32_t k0 = chunk * kChunk;
   if (k0 > top) return;  // a chunk past the token: it reads no scratch of it
@@ -99,10 +121,9 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const f
   for (uint32_t kb = k0; kb < k1; kb += kTile) {
     __syncthreads();  // the last block's K, V read by every wave
     for (uint32_t i = threadIdx.x; i < kTile * kHead; i += kWaves * 32) {  // K and V^T, f16 (keys past k1 zero)
-      const uint32_t r = i / kHead, d = i % kHead, p = kb + r;
-      const uint64_t at = ((uint64_t) p * kv_heads + kvh) * kHead + d;
-      ks[r * kRowLds + d] = (_Float16) (p < k1 ? kc[at] : 0.0f);
-      vt[d * kKeyLds + r] = (_Float16) (p < k1 ? vc[at] : 0.0f);
+      const uint32_t r = i / kHead, d = i % kHead, p = kb + r, c = kvh * kHead + d;
+      ks[r * kRowLds + d] = p < k1 ? kv_at(kc + p * row, c) : (_Float16) 0.0f;
+      vt[d * kKeyLds + r] = p < k1 ? kv_at(vc + p * row, c) : (_Float16) 0.0f;
     }
     __syncthreads();
     f8 sacc = {};
@@ -147,7 +168,7 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const f
 // row reads: those up to its own position, whatever its batch computed
 __global__ __launch_bounds__(kHead) void fa_merge_kernel(const float* ml, const float* po, const float* gate,
                                                          uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-                                                         uint32_t pos0, float* out, Q4xX16 side) {
+                                                         uint32_t pos0, uint32_t t0, float* out, Q4xX16 side) {
   const uint32_t t = blockIdx.x / heads, h = blockIdx.x % heads, d = threadIdx.x, G = heads / kv_heads;
   const uint32_t rows = n_tok * G, R = t * G + h % G, kvh = h / G, last = (pos0 + t) / kChunk;
   float mx = -INFINITY;
@@ -160,7 +181,7 @@ __global__ __launch_bounds__(kHead) void fa_merge_kernel(const float* ml, const 
   }
   const uint64_t i = ((uint64_t) t * heads + h) * kHead + d;
   out[i] = acc / sum * sigmoid(gate[i]);
-  x16_side(side, i, out[i]);
+  x16_side(side, i + (uint64_t) t0 * heads * kHead, out[i]);  // the step's row: the piece's from its first, t0
 }
 
 }  // namespace
@@ -177,28 +198,44 @@ extern "C" bool q4x_qk(const float* qfull, const float* k, uint32_t n_tok, uint3
   return ok();
 }
 
-extern "C" uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx) {
-  return (uint64_t) kStepTokens * heads * ((max_ctx + kChunk - 1) / kChunk) * (kHead + 2);
+extern "C" uint64_t q4x_kv_row_bytes(uint32_t values) {
+  return (uint64_t) values / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
 }
 
-extern "C" bool q4x_attn(const float* q, const float* kc, const float* vc, uint32_t n_tok, uint32_t heads,
+extern "C" bool q4x_kv_put(const float* k, const float* v, uint32_t n_tok, uint32_t values, void* kc, void* vc,
+                           void* stream) {
+  if (!k || !v || !kc || !vc || !n_tok || !values || values % Q4X_KV_BLOCK) return false;
+  const uint32_t blocks = n_tok * values / Q4X_KV_BLOCK;
+  kv_put_kernel<<<(blocks + 255) / 256, 256, 0, st(stream)>>>(k, blocks, (uint8_t*) kc);
+  if (!ok()) return false;
+  kv_put_kernel<<<(blocks + 255) / 256, 256, 0, st(stream)>>>(v, blocks, (uint8_t*) vc);
+  return ok();
+}
+
+extern "C" uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx) {
+  const uint64_t chunks = (max_ctx + kChunk - 1) / kChunk, pairs = chunks < kPieceChunks ? kPieceChunks : chunks;
+  return pairs * heads * (kHead + 2);  // a piece of at least one token at the context's end
+}
+
+extern "C" bool q4x_attn(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
                          uint32_t kv_heads, uint32_t dim, uint32_t pos0, const float* gate, float* scratch,
                          float* out, const Q4xX16* side, void* stream) {
   if (!n_tok || !heads || !kv_heads || heads % kv_heads || heads / kv_heads > kTile || dim != kHead ||
       pos0 + n_tok > OPS_Q4X_MAX_KEYS)
     return false;
   if (!q || !kc || !vc || !gate || !scratch || !out) return false;
-  for (uint32_t t0 = 0; t0 < n_tok; t0 += kStepTokens) {  // a piece of the step at a time: the scratch's tokens
-    const uint32_t n = n_tok - t0 < (uint32_t) kStepTokens ? n_tok - t0 : (uint32_t) kStepTokens;
+  const uint32_t most = (pos0 + n_tok - 1) / kChunk + 1, fit = kPieceChunks / most;  // the step's last token's chunks
+  const uint32_t piece = fit < 1 ? 1 : fit < (uint32_t) kStepTokens ? fit : (uint32_t) kStepTokens;
+  for (uint32_t t0 = 0; t0 < n_tok; t0 += piece) {  // a piece of the step at a time: the scratch's tokens
+    const uint32_t n = n_tok - t0 < piece ? n_tok - t0 : piece;
     const uint32_t rows = n * (heads / kv_heads), p0 = pos0 + t0, chunks = (p0 + n - 1) / kChunk + 1;
     float *ml = scratch, *po = scratch + (uint64_t) 2 * chunks * kv_heads * rows;
     const uint64_t at = (uint64_t) t0 * heads * kHead;
     fa_kernel<<<dim3(n, kv_heads, chunks), kWaves * 32, 0, st(stream)>>>(
-        q + at, kc, vc, n, heads, kv_heads, p0, ml, po);
+        q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, ml, po);
     if (!ok()) return false;
-    Q4xX16 sd = side_of(side);  // this piece's rows: from its first token's
-    if (sd.x16) sd.x16 = (_Float16*) sd.x16 + mm::x16_at(t0, 0, sd.cols);
-    fa_merge_kernel<<<n * heads, kHead, 0, st(stream)>>>(ml, po, gate + at, n, heads, kv_heads, p0, out + at, sd);
+    fa_merge_kernel<<<n * heads, kHead, 0, st(stream)>>>(ml, po, gate + at, n, heads, kv_heads, p0, t0, out + at,
+                                                          side_of(side));
     if (!ok()) return false;
   }
   return true;

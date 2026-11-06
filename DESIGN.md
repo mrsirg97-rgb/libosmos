@@ -2278,6 +2278,30 @@ the gate: qwen-forward merges at 40-60 tok/s decode. measured with tools/bench/q
   8,192; +7 ms a token decoding at 2,048) to a tiled kernel on the matrix cores; a prompt's experts read once for
   up to 128 tokens (DeepSeek's 8 tiles; now 16); the decode's f16 conversions folded into their producers.
 
+### the cache in Q8_0, the native context (2026-11-06, performance)
+
+the attention's cache in ggml's Q8_0 (a block of 32 values: an f16 scale, amax / 127, then each rounded to nearest):
+~13 KB a token a sequence for its 12 layers and the MTP head's, 48 KB in F32 - the native 262,144 positions
+(qwen4exp.context_length; OPS_Q4X_MAX_KEYS) 3.4 GB a conversation. k and v written by q4x_kv_put (a thread a block)
+after their projection and rotation; fa_kernel loads a key as its scale times its int8, to f16 - the matrix cores'
+own, so a token's bits stay its batch's. the state's format 2 (a format-1 state refused). YaRN past 262,144 (1M) is
+0.5.1's: the GGUF names no rope scaling.
+- **test_q4x_attn_gpu**: the cache's bytes ggml's quantize_row_q8_0's (a host copy), bit for bit; k and v 5.3e-3 /
+  6.3e-3 of their F32 (a block's bound sqrt(32) / 254, 2.2e-2: all of it in one value); the attention 2.0e-4 of
+  double on the cache's values, 5.6e-3 of double on F32's (llama.cpp's F16 cache 7.8e-4); the halves, one at a time
+  and past 1,000 positions the bits of one run.
+- **perplexity** (the same ids; llama.cpp on its Q8_0 cache: oracle/qwen_dump, QWEN_DUMP_KV=q8_0):
+
+  | tokens | osmos F32 cache | osmos Q8_0 | llama.cpp F16 | llama.cpp Q8_0 |
+  |---|---|---|---|---|
+  | 2,048 | 6.94-6.95 | 6.9765 | 6.9478 | 6.9738 |
+  | 8,192 | 2.7136 | **2.7075** | 2.7193 | 2.7110 |
+
+  the Q8_0 cost at 2,048 llama.cpp's own (+0.04% of its Q8_0, +0.4% of its F16); at 8,192 below both. the operator
+  took Q8_0 as the default for the context it buys.
+- **speed**: plain decode 23.3 tok/s (the same), drafted 40.5 (41.1: ~1%, the puts' launches); prompt 2,048 663
+  tok/s (649), 8,000 454 (417) and its decode 22.0 (21.9) - the cache's reads a quarter of F32's.
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a

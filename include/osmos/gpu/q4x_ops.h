@@ -13,10 +13,11 @@ typedef struct Q4xX16
   uint32_t cols;
 } Q4xX16;
 
-/* a token's keys the dense attention takes: no kernel limit now (chunks of 128 merged), a context's - its F32 cache
-   48 KB a token a sequence, its decode's reads the cache's whole (an 8,192-token perplexity 2.7136 dense, llama.cpp's
-   sparse QSA 2.7193: dense past QSA's 2,048-token budget holds) */
-#define OPS_Q4X_MAX_KEYS 65536
+/* a token's keys the dense attention takes: the model's native context (qwen4exp.context_length) - no kernel limit
+   (chunks of 128 merged, the scratch a piece's), a context's: its Q8_0 cache ~13 KB a token a sequence, its decode
+   reading the cache's whole (an 8,192-token perplexity 2.7136 dense, llama.cpp's sparse QSA 2.7193: dense past QSA's
+   2,048-token budget holds) */
+#define OPS_Q4X_MAX_KEYS 262144
 
 /* Qwen3.8-Flash-Next's own steps (DESIGN.md, "Qwen's forward, op by op"), F32 on the GPU, queued on `stream` */
 
@@ -43,8 +44,12 @@ bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint3
 bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
             uint32_t rope_dim, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float rope_base,
             float *q, float *gate, float *k_out, void *stream);
+#define Q4X_KV_BLOCK 32       /* the cache's Q8_0: 32 values a block */
+#define Q4X_KV_BLOCK_BYTES 34 /* its f16 scale, then 32 int8 */
+uint64_t q4x_kv_row_bytes(uint32_t values);
+bool q4x_kv_put(const float *k, const float *v, uint32_t n_tok, uint32_t values, void *kc, void *vc, void *stream);
 uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx);
-bool q4x_attn(const float *q, const float *kc, const float *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
+bool q4x_attn(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
               uint32_t dim, uint32_t pos0, const float *gate, float *scratch, float *out, const Q4xX16 *side, void *stream);
 
 bool q4x_route(const float *logits, uint32_t n_tok, uint32_t n_exp, uint32_t k, int32_t *ids, float *w,
@@ -152,10 +157,16 @@ q4x_qk
   ggml builds it (a running product); IMRoPE's sections all the token's position (text) - this rotation. heads 0: the
   keys alone (qfull, q and gate unread: the MTP head's cache seeding).
 
+q4x_kv_row_bytes, q4x_kv_put
+  the attention's cache in Q8_0 (ggml's: a block of 32, d = max |x| / 127 as f16, q = x / d rounded to nearest):
+  a row of `values` (a token's kv_heads x dim) q4x_kv_row_bytes of it; q4x_kv_put quantizes n_tok rows of k and of v
+  (F32, values apart) into kc and vc - a row its own, so a token's the same whatever its batch. a quarter of F32's
+  bytes, the cache a long context reads whole at each decode step.
+
 q4x_attn
   out[t][h][d] = sigmoid(gate[t][h][d]) sum over p <= pos0 + t of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
-  g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, [p][kv_heads][dim],
-  rows 0 .. pos0 + n_tok - 1 written; at most OPS_Q4X_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
+  g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, Q8_0 rows of
+  kv_heads x dim (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_Q4X_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
   weights as f16, the sums F32; the keys in chunks of 512 (absolute positions), a row's chunks merged in order - a
   row's bits its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads,
   max_ctx) floats (a step of more tokens taken in pieces).

@@ -10,7 +10,7 @@
    values - then a checksum */
 
 #define STATE_MAGIC 0x53583451u /* "Q4XS" */
-#define STATE_VERSION 1u
+#define STATE_VERSION 2u /* 2: the attention cache in Q8_0 */
 
 typedef struct Header
 {

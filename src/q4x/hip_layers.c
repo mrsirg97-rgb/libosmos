@@ -113,7 +113,14 @@ bool q4x_deltanet(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
          q4x_mat(f, L->ssm_out, D, in, b->fo, in, n, b->out, D, ready);
 }
 
-bool q4x_attention(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32_t pos, uint32_t n)
+/* k (normed, roped: b.kq) and v (b.vr) of n tokens into the cache's rows at pos (Q8_0: q4x_kv_put) */
+static bool kv_put(Q4xForward *f, uint8_t *kc, uint8_t *vc, int32_t pos, uint32_t n, uint32_t kv)
+{
+  const uint64_t row = q4x_kv_row_bytes(kv);
+  return q4x_kv_put(f->b.kq, f->b.vr, n, kv, kc + (uint64_t)pos * row, vc + (uint64_t)pos * row, NULL);
+}
+
+bool q4x_attention(Q4xForward *f, const Q4xLayer *L, uint8_t *kc, uint8_t *vc, int32_t pos, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
@@ -122,23 +129,25 @@ bool q4x_attention(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32
   Q4xX16 sd;
   const bool ready = n <= MM_MAX_TOKENS; /* b.x16 the mixer's mixed (q4x_mix), then the attention's output */
   return q4x_mat(f, L->q, 2 * q, D, b->mixed, D, n, b->qf, 2 * q, ready) &&
-         q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, vc + (uint64_t)pos * kv, kv, D, b->mixed, D, n, ready) &&
+         q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, b->vr, kv, D, b->mixed, D, n, ready) &&
          q4x_qk(b->qf, b->kr, n, heads, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm), fv(f, L->k_norm), g->rms_eps,
-                pos, g->rope_base, b->q, b->gt, kc + (uint64_t)pos * kv, NULL) &&
+                pos, g->rope_base, b->q, b->gt, b->kq, NULL) &&
+         kv_put(f, kc, vc, pos, n, kv) &&
          q4x_attn(b->q, kc, vc, n, heads, kvh, hd, (uint32_t)pos, b->gt, b->fa, b->ao, side(f, n, q, &sd), NULL) &&
          q4x_mat(f, L->out, D, q, b->ao, q, n, b->out, D, ready);
 }
 
 /* the cache rows alone (the MTP head's seeding): k and v of b.mixed's n tokens at pos .., k normed and roped */
-bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32_t pos, uint32_t n)
+bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, uint8_t *kc, uint8_t *vc, int32_t pos, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, kvh = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim, kv = kvh * hd;
-  return q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, vc + (uint64_t)pos * kv, kv, D, b->mixed, D, n,
+  return q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, b->vr, kv, D, b->mixed, D, n,
                   n <= MM_MAX_TOKENS) && /* b.x16 the mixer's mixed (q4x_mix) */
          q4x_qk(b->qf, b->kr, n, 0, kvh, hd, (uint32_t)g->rope_dim, fv(f, L->q_norm), fv(f, L->k_norm), g->rms_eps, pos,
-                g->rope_base, b->q, b->gt, kc + (uint64_t)pos * kv, NULL);
+                g->rope_base, b->q, b->gt, b->kq, NULL) &&
+         kv_put(f, kc, vc, pos, n, kv);
 }
 
 /* an expert tensor over the tables' runs, a launch each (mm_group: a part's slab decoded once for its 16 << r tokens) */

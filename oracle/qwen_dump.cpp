@@ -6,6 +6,7 @@
 //
 //   qwen_dump <first shard> <text file> <tokens> <out dir> <name,name,...>
 //   qwen_dump <first shard> <text file> <tokens> <out dir> -ppl    (no tensors: the perplexity of the tokens, one
+//   QWEN_DUMP_KV=q8_0: the cache in Q8_0 (keys and values; flash attention), as osmos keeps it
 //        sequence, each next token scored by log-softmax in double - tools/bench/q4x_ppl's protocol)
 //
 // build: g++ -std=c++17 -O2 oracle/qwen_dump.cpp -I<llama.cpp>/include -I<llama.cpp>/ggml/include
@@ -103,6 +104,8 @@ int main(int argc, char** argv) {
   const bool ppl = want.names.count("-ppl") > 0;
   if (ppl) cp.n_ubatch = 512, cp.n_ctx = (uint32_t) n_tok + 64; /* every row's logits, read a ubatch at a time */
   else cp.cb_eval = dump, cp.cb_eval_user_data = &want;
+  if (const char* kv = std::getenv("QWEN_DUMP_KV"); kv && !std::strcmp(kv, "q8_0")) /* osmos's cache: llama.cpp's on it */
+    cp.type_k = cp.type_v = GGML_TYPE_Q8_0, cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
   llama_context* ctx = llama_init_from_model(model, cp);
   if (!ctx) return std::fprintf(stderr, "qwen_dump: no context\n"), 1;
   llama_batch b = llama_batch_init(n_tok, 0, 1);

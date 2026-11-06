@@ -108,7 +108,7 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->mixed, n * D * F},       {&b->inj, n * g->hc * F},     {&b->out, n * D * F},         {&b->x, n * D * F},
       {&b->qkv, n * ch * F},        {&b->z, n * in * F},          {&b->al, n * vh * F},         {&b->be, n * vh * F},
       {&b->g, n * vh * F},          {&b->b, n * vh * F},          {&b->cv, n * ch * F},         {&b->qkn, n * 2 * g->ssm_groups * g->ssm_state * F},         {&b->ro, n * in * F},
-      {&b->fo, n * in * F},         {&b->qf, n * 2 * q * F},      {&b->kr, n * kv * F},         {&b->q, n * q * F},
+      {&b->fo, n * in * F},         {&b->qf, n * 2 * q * F},      {&b->kr, n * kv * F},         {&b->kq, n * kv * F},         {&b->vr, n * kv * F},         {&b->q, n * q * F},
       {&b->gt, n * q * F},          {&b->ao, n * q * F},          {&b->fa, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F},          {&b->rl, n * g->n_experts * F}, {&b->w, n * k * F},
       {&b->ga, n * k * ff * F},     {&b->up, n * k * ff * F},     {&b->y, n * k * D * F},
       {&b->shg, n * sff * F},       {&b->shu, n * sff * F},       {&b->sh, n * D * F},          {&b->sl, n * F},
@@ -174,7 +174,7 @@ Q4xSeqBytes q4x_seq_bytes(const Q4xGeometry *g)
 {
   const uint64_t ch = 2ull * g->ssm_groups * g->ssm_state + (uint64_t)g->ssm_inner;
   return (Q4xSeqBytes){(uint64_t)g->ssm_v_heads * g->ssm_state * g->ssm_state * F, (g->ssm_conv - 1) * ch * F,
-                       (uint64_t)g->n_kv_heads * g->head_dim * F,
+                       q4x_kv_row_bytes((uint32_t)(g->n_kv_heads * g->head_dim)),
                        (uint64_t)(g->ple_conv - 1) * g->ple_ngram * g->hc * g->n_embd * F};
 }
 

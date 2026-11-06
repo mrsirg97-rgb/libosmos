@@ -67,7 +67,7 @@ q4x_forward_probe
 
 q4x_seq_create .. q4x_seq_position
   a sequence: its DeltaNet states and conv histories, the n-gram layer's conv history, its attention caches (max_ctx
-  rows), its last tokens; its position the tokens it holds.
+  rows, Q8_0: q4x_kv_put), its last tokens; its position the tokens it holds.
 
 q4x_seq_reach, q4x_seq_rollback
   how many of its last tokens a sequence can drop (its states kept behind: Q4X_MAX_BACK at most, 0 when new or just

@@ -14,7 +14,7 @@ typedef struct Q4xBuf
 {
   float *h, *xn, *lo, *gate, *mixed, *inj, *out, *x;                  /* the residual, a mixer's, a block's output */
   float *qkv, *z, *al, *be, *g, *b, *cv, *qkn, *ro, *fo;              /* a DeltaNet's */
-  float *qf, *kr, *q, *gt, *ao, *fa;                                  /* an attention's (fa: its chunks') */
+  float *qf, *kr, *kq, *vr, *q, *gt, *ao, *fa; /* an attention's (kq, vr: k and v to the cache; fa: its chunks') */
   float *rl, *w, *ga, *up, *y, *shg, *shu, *sh, *sl;                  /* the MoE's */
   int32_t *ids, *rows, *cnt, *gidx, *hidx, *where; /* the picks, mm_group's tables (q4x_expert_tiles) */
   uint32_t *xg, *yg, *xd, *yd;
@@ -61,13 +61,14 @@ struct Q4xSeq
   Q4xForward *f;
   int32_t pos;
   float *ssm[Q4X_MAX_LAYERS], *conv[Q4X_MAX_LAYERS]; /* a DeltaNet layer's S and conv history, Q4X_SLOTS each */
-  float *kc[Q4X_MAX_LAYERS], *vc[Q4X_MAX_LAYERS];    /* an attention layer's cache */
+  uint8_t *kc[Q4X_MAX_LAYERS], *vc[Q4X_MAX_LAYERS];  /* an attention layer's cache (Q8_0 rows: q4x_kv_put) */
   float *ple_hist;                                   /* the n-gram layer's conv history, Q4X_SLOTS of them */
   uint32_t cur, back;                                /* the rings' latest slot, and the states kept behind it */
   int32_t last[Q4X_MAX_NGRAM + Q4X_MAX_BACK];        /* its last tokens, the latest first (a rollback's too) */
   int n_last;
   /* with an MTP head: its cache, the main model's h of position pend_pos (-1: none, zeros), its last step's place */
-  float *mkc, *mvc, *pend;
+  uint8_t *mkc, *mvc;
+  float *pend;
   int32_t pend_pos, step_pos0;
   uint32_t step_row0, step_n;
   int32_t *step_tok; /* [max_tokens], host */
@@ -105,7 +106,7 @@ void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint
 bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, const GgufTensor *up,
              const GgufTensor *inject, uint32_t n);
 bool q4x_deltanet(Q4xForward *f, Q4xSeq *s, int l, uint32_t n);
-bool q4x_attention(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32_t pos, uint32_t n);
-bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, int32_t pos, uint32_t n);
+bool q4x_attention(Q4xForward *f, const Q4xLayer *L, uint8_t *kc, uint8_t *vc, int32_t pos, uint32_t n);
+bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, uint8_t *kc, uint8_t *vc, int32_t pos, uint32_t n);
 bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n);
 bool q4x_ple(Q4xForward *f, Q4xSeq *s, int l, uint32_t n);
