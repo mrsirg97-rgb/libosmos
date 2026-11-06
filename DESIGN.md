@@ -2398,6 +2398,20 @@ build from its tag (interleaved, twice; tools in the scratchpad: the old q4x_ben
   GPU busy 11 s of a 132 s run): no kernel moves it.
 - **Qwen at low-power** (v0.5.0 -> now, two rounds each): prompt 4K 569 -> **671 tok/s (+18%)**, plain 23.1 -> 23.5
   (+1.8%), drafted 39.0 -> 39.8 (+2%).
+- **at performance** (the release's once, v0.5.0's build beside it; every ids hash the same):
+
+  | | v0.5.0 | 0.5.1 | |
+  |---|---|---|---|
+  | prompt 2,048 | 700 | **790** | +13% |
+  | prompt 4,096 | 635 | **756** | +19% |
+  | prompt 8,000 | 591 | **714** | +21% |
+  | prompt 16,384 | 561 | **696** | +24% |
+  | prompt 65,536 | 501 | **640** | +28% |
+  | decode at 16K, plain | 21.2 | 22.4 | +6% |
+  | decode, plain / drafted | 23.1 / 39.5 | 23.7 / 40.5 | +2.6% |
+
+  the gain grows with the context: the attention's share of a prompt does (llama.cpp at 2K / 8K / 16K: 520 / 489 /
+  463 - osmos now +52% / +46% / +50%).
 
 ### 0.5.0: DeepSeek unchanged (2026-11-06, performance)
 
