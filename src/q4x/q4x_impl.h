@@ -85,9 +85,14 @@ bool q4x_seq_reset(Q4xSeq *s); /* hip_state.c: empty, position 0 (its recurrent 
 
 bool q4x_fail(char *err, const char *why);
 /* y = W x for n tokens (rows xs, ys apart): mm (f16 activations, WMMA) for a matrix it tiles, else the matvec - by the
-   matrix alone, so a token's bits are its own whatever its batch (hip_layers.c) */
+   matrix alone, so a token's bits are its own whatever its batch (hip_layers.c). `ready`: b.x16 is this x's already
+   (the call before made it); q4x_mat2: two matrices on one x, one launch when mm takes both (mm_run2: each the bits it
+   takes alone) */
 bool q4x_mat(Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
-             uint32_t n, float *y, uint32_t ys);
+             uint32_t n, float *y, uint32_t ys, bool ready);
+bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, uint32_t ys0, const GgufTensor *t1,
+              uint32_t rows1, float *y1, uint32_t ys1, uint32_t cols, const float *x, uint32_t xs, uint32_t n,
+              bool ready);
 /* the step's mm activations all within f16 (the flag read, then cleared): false with why when not */
 bool q4x_overflow_ok(Q4xForward *f, char *err);
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);

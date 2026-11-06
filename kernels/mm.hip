@@ -38,11 +38,13 @@ template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<128, 4, 8>; stat
 template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ1_S> : Tuned<quant::kIQ1_M> {};   // not measured: the sibling's
 template <> struct Tuned<quant::kIQ2_S> : Tuned<quant::kIQ2_XS> {};  // not measured: the sibling's
-// Qwen3.8's expert types: the IQ experts' shape, not measured yet
-template <> struct Tuned<quant::kIQ3_XXS> : Tuned<quant::kIQ2_XS> {};
-template <> struct Tuned<quant::kIQ4_NL> : Tuned<quant::kIQ2_XS> {};
-template <> struct Tuned<quant::kIQ4_XS> : Tuned<quant::kIQ2_XS> {};
-template <> struct Tuned<quant::kQ2_0> : Tuned<quant::kIQ2_XS> {};
+// Qwen3.8's expert types, a token's 10 experts cold (tools/bench/mmsweep, 2026-11-06; SL 64-256, W 4-8, U 2-8):
+// IQ4_NL down 69.5 -> 57.7 us at 64 x 4 x 4, IQ4_XS 68.7 -> 53.0 the same, IQ3_XXS gate / up 58.7 -> 53.5 at
+// 128 x 8 x 8, Q2_0 45.3 -> 39.9 at 64 x 8 x 4
+template <> struct Tuned<quant::kIQ3_XXS> { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kIQ4_NL> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kIQ4_XS> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kQ2_0> { using S = mm::Shape<64, 8, 4>; static constexpr int kMaxCt = 8; };
 using mm::kF16Max;
 
 // a thread a value: to f16 (the rows past n zero)
