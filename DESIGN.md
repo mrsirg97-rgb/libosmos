@@ -2137,6 +2137,16 @@ their names: the second is <name>#1. llama.cpp's matmuls round the activations t
 weight, so its tensors are near ours, not ours: a layer is held to them within a measured tolerance, the logits by
 their KL divergence - never a bit-for-bit claim.
 
+### the mixer, held to exact math (2026-11-06)
+
+kernels/q4x.hip: the hyper-connections' norm, gated mean and combine (the down / up / inject through mv_strided).
+test_q4x_mix_gpu on layer 0's real residual (hc_init) and weights: the norm 6.0e-8 of llama.cpp's (relative L2),
+the inject 1.5e-6, the combine 2.8e-8 - where llama.cpp does not round. through the rank's two quantized matmuls it
+does: so the gate and mixed input in double, from the exact weights, as well - osmos against that **1.1e-7 / 6.7e-8**,
+llama.cpp **7.2e-3 / 1.1e-2**: its activations at 8 bits before each Q8_0 matmul, ~10^5 further from the math than
+ours. the tests hold osmos to the exact sum (1e-5) wherever one is computed, and to llama.cpp within its own rounding
+(1% a matmul, 2% two in a row) where not. (the operator's sense that osmos answers better: here a measure of it.)
+
 ### correctness first: Qwen held as DeepSeek is (2026-11-06)
 
 the operator's: osmos's DeepSeek answers read better than maya's on the same files - the arithmetic held to a
