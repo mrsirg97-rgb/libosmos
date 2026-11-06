@@ -81,6 +81,7 @@ static bool one(Q4xForward *f, Q4xSeq *s, int32_t p, int32_t *id, float *prob)
   Q4xBuf *b = &f->b;
   Q4xMtpBuf *m = &f->m;
   const uint32_t hc = (uint32_t)g->hc, D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab;
+  const uint32_t dv = Q4X_MTP_VOCAB < V ? Q4X_MTP_VOCAB : V; /* the draft's shortlist: the vocabulary's first rows */
   const float inv = 1.0f / (float)hc;
   const bool ok =
       head_in(f, 1) && q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, 1) &&
@@ -88,8 +89,8 @@ static bool one(Q4xForward *f, Q4xSeq *s, int32_t p, int32_t *id, float *prob)
       q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, 1) && q4x_moe(f, L, 1) &&
       q4x_hc_combine(b->h, b->out, b->inj, 1, hc, D, inv, NULL) && copy(m->hin, b->h, (uint64_t)hc * D * F) &&
       q4x_mix(f, mtp->head_norm, mtp->head_down, mtp->head_up, NULL, 1) &&
-      q4x_mat(f, f->w->output, V, D, b->mixed, D, 1, m->logits, V, true) && /* b.x16 the head mixer's mixed */
-      q4x_top(m->logits, V, m->top_id, m->top_p, NULL) &&
+      q4x_mat(f, f->w->output, dv, D, b->mixed, D, 1, m->logits, dv, true) && /* b.x16 the head mixer's mixed */
+      q4x_top(m->logits, dv, m->top_id, m->top_p, NULL) &&
       hipMemcpyAsync(m->pin_id, m->top_id, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
       hipMemcpyAsync(m->pin_p, m->top_p, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
       hipStreamSynchronize(NULL) == hipSuccess;

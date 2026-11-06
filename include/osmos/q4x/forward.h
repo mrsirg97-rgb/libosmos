@@ -13,6 +13,11 @@
 /* the MTP head's most drafts a round: measured 2-7 on mm (q4x_bench, 192 tokens: 33.6 34.1 35.2 35.7 34.6 34.8 tok/s;
    the engine's confidence floors end most rounds before 6) */
 #define Q4X_MTP_BLOCK 5
+/* the MTP head's draft scored over the vocabulary's first ids alone (BPE's order: the frequent first - 97.8% of a
+   text's tokens below it): its output projection 521 -> 137 MB a draft, drafted decode 35.7 -> 40.5 tok/s, the
+   acceptance the same (q4x_bench, 192 tokens; 32,768: 39.3, 100,000: 38.5). a draft is a proposal: the answer's bits
+   are the verify step's, whatever the drafts */
+#define Q4X_MTP_VOCAB 65536
 
 typedef struct Q4xForward Q4xForward;
 typedef struct Q4xSeq Q4xSeq;
@@ -92,10 +97,11 @@ q4x_greedy
 
 q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head; DESIGN.md, "Qwen's MTP head")
   seed: the head's cache at positions from .. to - 1, of the sequence's last step (its rows, read before another
-  step): position p's row from its token and the main model's h of p - 1 (the step's row before it, or the pending h
-  - zeros when none is held: a load, a first step) - only what the cache reads (eh_proj, the attention's mixer, k and
+  step): position p's row from its token and the main model's h of p - 1 (the step's row before it, or the pending h -
+  zeros when none is held: a load, a first step) - only what the cache reads (eh_proj, the attention's mixer, k and
   v); the pending h then position to - 1's. draft: up to max tokens after y (the token at the sequence's position),
-  greedily: draft i the head's greatest at position pos + i from token i (y, then draft i - 1) and h (the pending,
-  then the head's own residual), each kept while its probability (q4x_top's) is at least conf_min and their product
-  at least cum_min - the count, or -1 with why. neither moves a bit of the sequence's own state.
+  greedily: draft i the head's greatest among the first Q4X_MTP_VOCAB tokens at position pos + i from token i (y, then
+  draft i - 1) and h (the pending, then the head's own residual), each kept while its probability (q4x_top's) is at
+  least conf_min and their product at least cum_min - the count, or -1 with why. neither moves a bit of the sequence's
+  own state.
 */
