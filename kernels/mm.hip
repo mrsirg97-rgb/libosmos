@@ -38,6 +38,11 @@ template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<128, 4, 8>; stat
 template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ1_S> : Tuned<quant::kIQ1_M> {};   // not measured: the sibling's
 template <> struct Tuned<quant::kIQ2_S> : Tuned<quant::kIQ2_XS> {};  // not measured: the sibling's
+// Qwen3.8's expert types: the IQ experts' shape, not measured yet
+template <> struct Tuned<quant::kIQ3_XXS> : Tuned<quant::kIQ2_XS> {};
+template <> struct Tuned<quant::kIQ4_NL> : Tuned<quant::kIQ2_XS> {};
+template <> struct Tuned<quant::kIQ4_XS> : Tuned<quant::kIQ2_XS> {};
+template <> struct Tuned<quant::kQ2_0> : Tuned<quant::kIQ2_XS> {};
 using mm::kF16Max;
 
 // a thread a value: to f16 (the rows past n zero)
@@ -173,6 +178,10 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
     case quant::kIQ2_XS: return launch<quant::kIQ2_XS>(m, cols, x16, n, s);
     case quant::kIQ1_S: return launch<quant::kIQ1_S>(m, cols, x16, n, s);
     case quant::kIQ2_S: return launch<quant::kIQ2_S>(m, cols, x16, n, s);
+    case quant::kIQ3_XXS: return launch<quant::kIQ3_XXS>(m, cols, x16, n, s);
+    case quant::kIQ4_NL: return launch<quant::kIQ4_NL>(m, cols, x16, n, s);
+    case quant::kIQ4_XS: return launch<quant::kIQ4_XS>(m, cols, x16, n, s);
+    case quant::kQ2_0: return launch<quant::kQ2_0>(m, cols, x16, n, s);
     default: return false;
   }
 }
@@ -182,12 +191,29 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
 // the table's types, and the repacked Q5_K the forward makes at load (no file's type: no row)
 extern "C" bool mm_known(uint32_t type) { return type == quant::kQ5_KR || (qtype_paths(type) & QTYPE_MM); }
 
+template <quant::Type T>
+bool fits(uint32_t rows, uint32_t cols) {
+  const int slab = cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  return rows && cols && !(rows % mm::kTile) && !(cols % quant::Block<T>::values) && !(cols % slab);
+}
+
+extern "C" bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols) {
+  switch (type) {
+#define FITS(t) \
+  case quant::t: return fits<quant::t>(rows, cols);
+    FITS(kQ8_0) FITS(kQ5_K) FITS(kQ5_KR) FITS(kQ6_K) FITS(kIQ1_M) FITS(kIQ2_XXS) FITS(kIQ2_XS) FITS(kIQ1_S)
+    FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kIQ4_XS) FITS(kQ2_0)
+#undef FITS
+    default: return false;
+  }
+}
+
 extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
   switch (type) {
 #define TILES(t) \
   case quant::t: return col_tiles<quant::t>(n);
     TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS) TILES(kIQ1_S)
-    TILES(kIQ2_S)
+    TILES(kIQ2_S) TILES(kIQ3_XXS) TILES(kIQ4_NL) TILES(kIQ4_XS) TILES(kQ2_0)
 #undef TILES
     default: return 0;
   }
@@ -246,7 +272,7 @@ extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt
   case quant::t:                                                                                                     \
     return group_launch<quant::t>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS) GROUP(kIQ1_S)
-    GROUP(kIQ2_S)
+    GROUP(kIQ2_S) GROUP(kIQ3_XXS) GROUP(kIQ4_NL) GROUP(kIQ4_XS) GROUP(kQ2_0)
 #undef GROUP
     default: return false;
   }

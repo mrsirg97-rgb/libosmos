@@ -15,12 +15,15 @@ typedef struct Q4xBuf
   float *h, *xn, *lo, *gate, *mixed, *inj, *out, *x;                  /* the residual, a mixer's, a block's output */
   float *qkv, *z, *al, *be, *g, *b, *cv, *ro, *fo;                    /* a DeltaNet's */
   float *qf, *kr, *q, *gt, *ao;                                       /* an attention's */
-  float *rl, *w, *xe, *ga, *up, *y, *shg, *shu, *sh, *sl;             /* the MoE's */
-  int32_t *ids, *rows, *cnt, *row, *etok, *where; /* the picks, the grouping's entries, its slots' order */
-  const void **ptr;                               /* Q4X_GROUP_TENSORS tables of entries */
+  float *rl, *w, *ga, *up, *y, *shg, *shu, *sh, *sl;                  /* the MoE's */
+  int32_t *ids, *rows, *cnt, *gidx, *hidx, *where; /* the picks, mm_group's tables (q4x_expert_tiles) */
+  uint32_t *xg, *yg, *xd, *yd;
+  const void **ptr;                                /* Q4X_GROUP_TENSORS tables of entries */
+  void *x16, *xe16;                                /* mm's f16 activations: a matrix's, the experts' tiles */
+  int32_t *overflow;                               /* an activation past f16's: the step refused */
   float *emb, *key, *val, *kn, *qn, *pg, *gated, *nrm, *conv;         /* the n-gram layer's */
   int32_t *ple_rows, *tok;                                            /* device: its rows, the step's tokens */
-  int32_t *pin_rows, *pin_tok;                                        /* their pinned host copies */
+  int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
 } Q4xBuf;
 
@@ -81,6 +84,12 @@ Q4xSeqBytes q4x_seq_bytes(const Q4xGeometry *g);
 bool q4x_seq_reset(Q4xSeq *s); /* hip_state.c: empty, position 0 (its recurrent states and histories zeroed) */
 
 bool q4x_fail(char *err, const char *why);
+/* y = W x for n tokens (rows xs, ys apart): mm (f16 activations, WMMA) for a matrix it tiles, else the matvec - by the
+   matrix alone, so a token's bits are its own whatever its batch (hip_layers.c) */
+bool q4x_mat(Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
+             uint32_t n, float *y, uint32_t ys);
+/* the step's mm activations all within f16 (the flag read, then cleared): false with why when not */
+bool q4x_overflow_ok(Q4xForward *f, char *err);
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);
 void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint64_t n);
 

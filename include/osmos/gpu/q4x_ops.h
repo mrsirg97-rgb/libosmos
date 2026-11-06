@@ -37,17 +37,20 @@ bool q4x_attn(const float *q, const float *kc, const float *vc, uint32_t n_tok, 
 bool q4x_route(const float *logits, uint32_t n_tok, uint32_t n_exp, uint32_t k, int32_t *ids, float *w,
                int32_t *rows, void *stream);
 #define Q4X_GROUP_TENSORS 3 /* an MoE's expert tensors: gate, up, down */
-typedef struct Q4xExpertTensors
+typedef struct Q4xExpertTiles
 {
   const void *base[Q4X_GROUP_TENSORS]; /* each tensor's bytes: its experts one after another */
   uint64_t bytes[Q4X_GROUP_TENSORS];   /* an expert's */
-  const void **ptr[Q4X_GROUP_TENSORS]; /* each tensor's entries' matrices, out */
-} Q4xExpertTensors;
+  const void **ptr[Q4X_GROUP_TENSORS]; /* out: each tensor's entries' matrices */
+  int32_t *cnt;                        /* out: an entry's tokens (0: past the live ones) */
+  int32_t *gidx, *hidx;                /* out: a slot's token (the gate's and up's rows), its place (down's); -1 pad */
+  uint32_t *xg, *yg, *xd, *yd;         /* out: an entry's x16 and y offsets, gate / up then down */
+  int32_t *where;                      /* out: a pick's place */
+} Q4xExpertTiles;
 
-void q4x_expert_bounds(uint32_t n, uint32_t n_exp, uint32_t per, uint32_t *multi, uint32_t *single);
-bool q4x_expert_groups(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t per,
-                       const Q4xExpertTensors *t, int32_t *cnt, int32_t *row, int32_t *tok, int32_t *where,
-                       void *stream);
+uint32_t q4x_expert_entries(uint32_t n, uint32_t n_exp);
+bool q4x_expert_tiles(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t dim, uint32_t ff,
+                      const Q4xExpertTiles *t, void *stream);
 bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
 bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, void *stream);
 bool q4x_moe_sum(const float *y, const int32_t *where, const float *w, uint32_t n_tok, uint32_t k, uint32_t dim,
@@ -137,16 +140,14 @@ q4x_route
   [t][j]; their weights w[t][j] = p / (sum of the k p's, at least 6.103515625e-5); rows[e] = t (the token an entry
   reads).
 
-q4x_expert_bounds, q4x_expert_groups
-  a step's n picks (ids: n_tok x k, token t's slots t k ..) grouped by expert, so that each expert picked is read once
-  for its tokens: the slots sorted by expert, then slot (stable: a token's order kept); where[slot] its place in that
-  order, tok[place] its token (the gather's rows). the entries for mv_group_tok - cnt[e], row[e] (its first place),
-  each tensor's matrix ptr[i][e] = base[i] + expert bytes[i] - in two tables: an expert's places in runs of `per`
-  (<= MV_MAX_TOKENS), each run of 2 or more an entry of the first table, [0, multi), and a run of one an entry of the
-  second, [multi, multi + single): one launch at `per` tokens, one at 1 (a one-token kernel for an expert one token
-  picked). each table's entries past its live ones cnt 0, to its bound (q4x_expert_bounds: n / 2 runs of two or more
-  - none when per is 1 - and min(n, n_exp) of one, or n when per is 1). which slots share an expert changes no bit: a
-  token's sums are its own (mv_group_tok).
+q4x_expert_entries, q4x_expert_tiles
+  a step's n picks (ids: n_tok x k, token t's slots t k ..) as mm_group's tables, so each expert picked is read once a
+  tile of its tokens: the picks sorted by expert, then pick (stable) - where[pick] its place; an expert's places in
+  parts of at most MM_TILE, an entry each, in expert order: entry e's tokens cnt[e], its slots e MM_TILE .. (the x16
+  rows: gidx the token, hidx the place, -1 past cnt), its offsets xg = e MM_TILE dim, xd = e MM_TILE ff (halves: its
+  tile of the x16) and yg = its first place ff, yd = its first place dim (rows of y in place order), each tensor's
+  matrix base[i] + expert bytes[i]. entries past the live ones cnt 0 and their slots -1, to q4x_expert_entries' bound
+  (n / MM_TILE + min(n, n_exp)): the launches'. which picks share a tile changes no bit: mm's tokens are their own.
 
 q4x_gather
   dst[e][] = src[rows[e]][] for e < n, len floats a row: an entry's own copy of its token's input.

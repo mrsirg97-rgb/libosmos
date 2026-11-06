@@ -5,6 +5,7 @@
 #include "block.h"
 
 extern "C" {
+#include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/q4x_ops.h"
 }
@@ -57,59 +58,54 @@ __global__ void route_kernel(const float* logits, uint32_t n_exp, uint32_t k, in
   for (uint32_t j = 0; j < k; j++) w[t * k + j] = pick[j] / div;
 }
 
-// a step's slots grouped by expert (q4x_expert_groups): each expert's count, its first place (a prefix in order) and
-// its first entry in each table, then a thread an expert lays its slots out in slot order and writes its entries - the
-// same layout however it runs
-__global__ __launch_bounds__(kGroupThreads) void groups_kernel(const int32_t* ids, uint32_t n, uint32_t k,
-                                                              uint32_t n_exp, uint32_t per, Q4xExpertTensors t,
-                                                              uint32_t multi, uint32_t single, int32_t* cnt,
-                                                              int32_t* row, int32_t* tok, int32_t* where) {
-  __shared__ int count[kMaxExperts], start[kMaxExperts], first_m[kMaxExperts], first_s[kMaxExperts], live_m, live_s;
+// a step's picks as mm_group's tables (q4x_expert_tiles): each expert's count, its first place and first entry (a
+// scan), then a thread an expert lays its picks out in pick order and writes its entries - the same layout however it
+// runs
+__global__ __launch_bounds__(kGroupThreads) void tiles_kernel(const int32_t* ids, uint32_t n, uint32_t k,
+                                                             uint32_t n_exp, uint32_t dim, uint32_t ff,
+                                                             Q4xExpertTiles t, uint32_t bound) {
+  __shared__ int count[kMaxExperts], start[kMaxExperts], first[kMaxExperts], live;
+  constexpr int T = MM_TILE;
   for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads) count[e] = 0;
   __syncthreads();
   for (uint32_t i = threadIdx.x; i < n; i += kGroupThreads) atomicAdd(&count[ids[i]], 1);
   __syncthreads();
-  const int p = (int) per;
-  for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads) {  // each expert's places, runs, ones; then scanned
-    const int c = count[e];
-    start[e] = c, first_m[e] = p > 1 ? c / p + (c % p >= 2) : 0, first_s[e] = p > 1 ? c % p == 1 : c;
-  }
+  for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads) start[e] = count[e], first[e] = (count[e] + T - 1) / T;
   __syncthreads();
-  for (uint32_t d = 1; d < n_exp; d <<= 1) {  // inclusive scans, a step at a time (Hillis-Steele), all three
-    int a[3][kMaxExperts / kGroupThreads];
+  for (uint32_t d = 1; d < n_exp; d <<= 1) {  // inclusive scans (Hillis-Steele), then each less its own
+    int a[2][kMaxExperts / kGroupThreads];
     for (uint32_t e = threadIdx.x, j = 0; e < n_exp; e += kGroupThreads, j++)
-      a[0][j] = e >= d ? start[e - d] : 0, a[1][j] = e >= d ? first_m[e - d] : 0, a[2][j] = e >= d ? first_s[e - d] : 0;
+      a[0][j] = e >= d ? start[e - d] : 0, a[1][j] = e >= d ? first[e - d] : 0;
     __syncthreads();
-    for (uint32_t e = threadIdx.x, j = 0; e < n_exp; e += kGroupThreads, j++)
-      start[e] += a[0][j], first_m[e] += a[1][j], first_s[e] += a[2][j];
+    for (uint32_t e = threadIdx.x, j = 0; e < n_exp; e += kGroupThreads, j++) start[e] += a[0][j], first[e] += a[1][j];
     __syncthreads();
   }
-  if (!threadIdx.x) live_m = first_m[n_exp - 1], live_s = first_s[n_exp - 1];
-  for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads) {  // inclusive to exclusive: less its own
-    const int c = count[e];
-    start[e] -= c, first_m[e] -= p > 1 ? c / p + (c % p >= 2) : 0, first_s[e] -= p > 1 ? c % p == 1 : c;
-  }
+  if (!threadIdx.x) live = first[n_exp - 1];
+  for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads)
+    start[e] -= count[e], first[e] -= (count[e] + T - 1) / T;
   __syncthreads();
-  auto entry = [&](int en, int c, int place, uint32_t e) {
-    cnt[en] = c, row[en] = place;
-    for (int j = 0; j < Q4X_GROUP_TENSORS; j++) t.ptr[j][en] = (const uint8_t*) t.base[j] + (uint64_t) e * t.bytes[j];
-  };
   for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads) {
     const int c = count[e];
     if (!c) continue;
-    for (uint32_t i = 0, q = start[e]; i < n; i++)
-      if (ids[i] == (int32_t) e) where[i] = (int32_t) q, tok[q] = (int32_t) (i / k), q++;
-    int m = first_m[e], s = (int) multi + first_s[e];
-    for (int at = 0; at < c; at += p) {
-      const int run = c - at < p ? c - at : p;
-      if (run >= 2)
-        entry(m++, run, start[e] + at, e);
-      else
-        entry(s++, 1, start[e] + at, e);
+    int q = start[e];
+    for (uint32_t i = 0; i < n && q < start[e] + c; i++)
+      if (ids[i] == (int32_t) e) t.where[i] = q, t.gidx[(first[e] + (q - start[e]) / T) * T + (q - start[e]) % T] = (int32_t) (i / k), q++;
+    for (int part = 0; part * T < c; part++) {
+      const int en = first[e] + part, p0 = start[e] + part * T, m = c - part * T < T ? c - part * T : T;
+      t.cnt[en] = m;
+      t.xg[en] = (uint32_t) en * T * dim, t.xd[en] = (uint32_t) en * T * ff;
+      t.yg[en] = (uint32_t) p0 * ff, t.yd[en] = (uint32_t) p0 * dim;
+      for (int j = 0; j < Q4X_GROUP_TENSORS; j++) t.ptr[j][en] = (const uint8_t*) t.base[j] + (uint64_t) e * t.bytes[j];
+      for (int i = 0; i < T; i++) {
+        if (i >= m) t.gidx[en * T + i] = -1;
+        t.hidx[en * T + i] = i < m ? p0 + i : -1;
+      }
     }
   }
-  for (uint32_t en = (uint32_t) live_m + threadIdx.x; en < multi; en += kGroupThreads) cnt[en] = 0;
-  for (uint32_t en = (uint32_t) live_s + threadIdx.x; en < single; en += kGroupThreads) cnt[multi + en] = 0;
+  for (uint32_t en = (uint32_t) live + threadIdx.x; en < bound; en += kGroupThreads) {
+    t.cnt[en] = 0;
+    for (int i = 0; i < T; i++) t.gidx[en * T + i] = -1, t.hidx[en * T + i] = -1;
+  }
 }
 
 __global__ void gather_kernel(const float* src, const int32_t* rows, uint32_t n, uint32_t len, float* dst) {
@@ -143,22 +139,16 @@ extern "C" bool q4x_route(const float* logits, uint32_t n_tok, uint32_t n_exp, u
   return ok();
 }
 
-extern "C" void q4x_expert_bounds(uint32_t n, uint32_t n_exp, uint32_t per, uint32_t* multi, uint32_t* single) {
-  *multi = per > 1 ? n / 2 : 0;
-  *single = per > 1 ? (n < n_exp ? n : n_exp) : n;
-}
+extern "C" uint32_t q4x_expert_entries(uint32_t n, uint32_t n_exp) { return n / MM_TILE + (n < n_exp ? n : n_exp); }
 
-extern "C" bool q4x_expert_groups(const int32_t* ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t per,
-                                  const Q4xExpertTensors* t, int32_t* cnt, int32_t* row, int32_t* tok, int32_t* where,
-                                  void* stream) {
-  if (!ids || !n || !k || n % k || !n_exp || n_exp > kMaxExperts || !per || per > MV_MAX_TOKENS || !t || !cnt ||
-      !row || !tok || !where)
+extern "C" bool q4x_expert_tiles(const int32_t* ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t dim, uint32_t ff,
+                                 const Q4xExpertTiles* t, void* stream) {
+  if (!ids || !n || !k || n % k || !n_exp || n_exp > kMaxExperts || !dim || !ff || !t || !t->cnt || !t->gidx ||
+      !t->hidx || !t->xg || !t->yg || !t->xd || !t->yd || !t->where)
     return false;
   for (int j = 0; j < Q4X_GROUP_TENSORS; j++)
     if (!t->base[j] || !t->bytes[j] || !t->ptr[j]) return false;
-  uint32_t multi, single;
-  q4x_expert_bounds(n, n_exp, per, &multi, &single);
-  groups_kernel<<<1, kGroupThreads, 0, st(stream)>>>(ids, n, k, n_exp, per, *t, multi, single, cnt, row, tok, where);
+  tiles_kernel<<<1, kGroupThreads, 0, st(stream)>>>(ids, n, k, n_exp, dim, ff, *t, q4x_expert_entries(n, n_exp));
   return ok();
 }
 

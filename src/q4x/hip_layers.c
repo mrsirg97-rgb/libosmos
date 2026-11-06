@@ -1,3 +1,4 @@
+#include "osmos/gpu/mm.h"
 #include "q4x_impl.h"
 
 /* a layer's blocks, each as its test holds it to llama.cpp's (tests/gpu/test_q4x_*_gpu): the mixer into b.mixed and
@@ -5,12 +6,34 @@
 
 #define TY(t) ((t)->type)
 
-/* y = W x for n tokens, x's rows xs apart, y's ys apart */
-static bool mat(const Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
-                uint32_t n, float *y, uint32_t ys)
+bool q4x_mat(Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
+             uint32_t n, float *y, uint32_t ys)
 {
-  return mv_strided(TY(t), q4x_dev(f, t), rows, cols, x, xs, n, y, ys, NULL);
+  const void *w = q4x_dev(f, t);
+  if (!mm_known(TY(t)) || !mm_fits(TY(t), rows, cols) || xs < cols || ys < rows)
+    return mv_strided(TY(t), w, rows, cols, x, xs, n, y, ys, NULL);
+  bool ok = true;
+  for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS)
+  {
+    const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
+    ok = mm_x16(x + (uint64_t)k0 * xs, xs, m, cols, f->b.x16, f->b.overflow, NULL) &&
+         mm_run(TY(t), w, rows, cols, f->b.x16, m, y + (uint64_t)k0 * ys, ys, NULL);
+  }
+  return ok;
 }
+
+bool q4x_overflow_ok(Q4xForward *f, char *err)
+{
+  if (hipMemcpy(f->b.pin_overflow, f->b.overflow, 4, hipMemcpyDeviceToHost) != hipSuccess)
+    return q4x_fail(err, "a GPU copy failed (the f16 overflow flag)");
+  if (!*f->b.pin_overflow)
+    return true;
+  *f->b.pin_overflow = 0;
+  hipMemset(f->b.overflow, 0, 4);
+  return q4x_fail(err, "an activation past f16's range (mm's): the step refused, its results not to be read");
+}
+
+#define mat(f, t, rows, cols, x, xs, n, y, ys) q4x_mat(f, t, rows, cols, x, xs, n, y, ys)
 
 static const float *fv(const Q4xForward *f, const GgufTensor *t) { return (const float *)q4x_dev(f, t); }
 
@@ -69,37 +92,26 @@ bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, float *kc, float *vc, in
                 g->rope_base, b->q, b->gt, kc + (uint64_t)pos * kv, NULL);
 }
 
-/* an expert tensor's matvecs over the grouping's two tables: its runs of tokens, then its single tokens */
-static bool experts(const GgufTensor *t, const void **ptr, const Q4xBuf *b, uint32_t multi, uint32_t single,
-                    uint32_t per, uint32_t rows, uint32_t cols, const float *x, float *y)
-{
-  return (!multi || mv_group_tok(TY(t), ptr, b->cnt, b->row, multi, per, rows, cols, x, cols, y, rows, NULL)) &&
-         mv_group_tok(TY(t), ptr + multi, b->cnt + multi, b->row + multi, single, 1, rows, cols, x, cols, y, rows, NULL);
-}
-
 bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, k = (uint32_t)g->n_used, ff = (uint32_t)g->ff_exp;
-  /* a prompt's step grouped, MV_MAX_TOKENS tokens an expert's read; a decode or a verify step (MV_MAX_TOKENS tokens at
-     most) a slot an entry: its tokens share a third of their experts (4 of them), but read for several tokens an
-     expert costs that back (DESIGN.md, "Qwen's speed": 61.8 ms a 4-token step so, 64.8-67.4 grouped) */
-  const uint32_t sff = (uint32_t)g->ff_shexp, e = n * k, per = n > MV_MAX_TOKENS ? MV_MAX_TOKENS : 1;
-  uint32_t multi, single;
-  q4x_expert_bounds(e, E, per, &multi, &single);
+  const uint32_t sff = (uint32_t)g->ff_shexp, e = n * k, ne = q4x_expert_entries(e, E), slots = ne * MM_TILE;
   const GgufTensor *t[Q4X_GROUP_TENSORS] = {L->exp_gate, L->exp_up, L->exp_down};
-  Q4xExpertTensors et;
+  Q4xExpertTiles et = {.cnt = b->cnt, .gidx = b->gidx, .hidx = b->hidx, .xg = b->xg, .yg = b->yg, .xd = b->xd,
+                       .yd = b->yd, .where = b->where};
   for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
-    et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E, et.ptr[i] = b->ptr + (uint64_t)i * (multi + single);
-  /* each expert read once for the step's tokens that picked it (q4x_expert_groups), its input rows gathered */
+    et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E, et.ptr[i] = b->ptr + (uint64_t)i * ne;
+  /* each expert read once a tile of the step's tokens that picked it (q4x_expert_tiles, mm_group) */
   return mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) && q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) &&
-         q4x_expert_groups(b->ids, e, k, E, per, &et, b->cnt, b->row, b->etok, b->where, NULL) &&
-         q4x_gather(b->mixed, b->etok, e, D, b->xe, NULL) &&
-         experts(t[0], et.ptr[0], b, multi, single, per, ff, D, b->xe, b->ga) &&
-         experts(t[1], et.ptr[1], b, multi, single, per, ff, D, b->xe, b->up) &&
+         q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL) &&
+         mm_x16_rows(b->mixed, D, b->gidx, slots, D, b->xe16, b->overflow, NULL) &&
+         mm_group(TY(t[0]), et.ptr[0], b->cnt, ne, MM_TILE, ff, D, b->xe16, b->xg, D, b->ga, b->yg, ff, NULL) &&
+         mm_group(TY(t[1]), et.ptr[1], b->cnt, ne, MM_TILE, ff, D, b->xe16, b->xg, D, b->up, b->yg, ff, NULL) &&
          q4x_swiglu(b->ga, b->up, (uint64_t)e * ff, b->ga, NULL) &&
-         experts(t[2], et.ptr[2], b, multi, single, per, D, ff, b->ga, b->y) &&
+         mm_x16_rows(b->ga, ff, b->hidx, slots, ff, b->xe16, b->overflow, NULL) &&
+         mm_group(TY(t[2]), et.ptr[2], b->cnt, ne, MM_TILE, D, ff, b->xe16, b->xd, ff, b->y, b->yd, D, NULL) &&
          mat(f, L->sh_gate, sff, D, b->mixed, D, n, b->shg, sff) && mat(f, L->sh_up, sff, D, b->mixed, D, n, b->shu, sff) &&
          q4x_swiglu(b->shg, b->shu, (uint64_t)n * sff, b->shg, NULL) && mat(f, L->sh_down, D, sff, b->shg, sff, n, b->sh, D) &&
          mat(f, L->sh_gate_inp, 1, D, b->mixed, D, n, b->sl, 1) &&

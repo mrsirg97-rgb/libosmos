@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "osmos/gpu/mm.h"
 #include "q4x_impl.h"
 
 /* the forward built: every tensor's bytes on the device (read through a pinned piece), a step's buffers; a sequence's
@@ -91,8 +92,10 @@ static bool buffers(Q4xForward *f, char *err)
   const uint64_t ch = 2ull * g->ssm_groups * g->ssm_state + (uint64_t)g->ssm_inner, in = (uint64_t)g->ssm_inner;
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
   const uint64_t vh = (uint64_t)g->ssm_v_heads, ff = (uint64_t)g->ff_exp, sff = (uint64_t)g->ff_shexp;
-  /* the experts' rows: a slot each, and the rows a group reads past its last (mv_group_tok's); their entries' bound */
-  const uint64_t slots = n * k + MV_MAX_TOKENS, entries = 2 * n * k;
+  /* the experts: mm_group's entries (q4x_expert_entries' bound), a tile of slots each; mm's f16 activations, a chunk
+     of MM_MAX_TOKENS rows of the widest input (hc n_embd) */
+  const uint64_t entries = q4x_expert_entries((uint32_t)(n * k), (uint32_t)g->n_experts), slots = entries * MM_TILE;
+  const uint64_t x16 = (uint64_t)MM_MAX_TOKENS * hd * 2, xe16 = slots * (D > ff ? D : ff) * 2;
   Q4xBuf *b = &f->b;
   const struct
   {
@@ -105,10 +108,12 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->g, n * vh * F},          {&b->b, n * vh * F},          {&b->cv, n * ch * F},         {&b->ro, n * in * F},
       {&b->fo, n * in * F},         {&b->qf, n * 2 * q * F},      {&b->kr, n * kv * F},         {&b->q, n * q * F},
       {&b->gt, n * q * F},          {&b->ao, n * q * F},          {&b->rl, n * g->n_experts * F}, {&b->w, n * k * F},
-      {&b->xe, slots * D * F},      {&b->ga, slots * ff * F},     {&b->up, slots * ff * F},     {&b->y, slots * D * F},
+      {&b->ga, n * k * ff * F},     {&b->up, n * k * ff * F},     {&b->y, n * k * D * F},
       {&b->shg, n * sff * F},       {&b->shu, n * sff * F},       {&b->sh, n * D * F},          {&b->sl, n * F},
-      {&b->ids, n * k * 4},         {&b->rows, n * k * 4},        {&b->cnt, entries * 4},       {&b->row, entries * 4},
-      {&b->etok, n * k * 4},        {&b->where, n * k * 4},
+      {&b->ids, n * k * 4},         {&b->rows, n * k * 4},        {&b->cnt, entries * 4},       {&b->gidx, slots * 4},
+      {&b->hidx, slots * 4},        {&b->where, n * k * 4},       {&b->xg, entries * 4},        {&b->yg, entries * 4},
+      {&b->xd, entries * 4},        {&b->yd, entries * 4},        {&b->x16, x16},               {&b->xe16, xe16},
+      {&b->overflow, 4},
       {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *)},  {&b->emb, n * D * F},    {&b->key, n * hd * F},        {&b->val, n * D * F},
       {&b->kn, n * hd * F},         {&b->qn, n * hd * F},         {&b->pg, n * g->hc * F},      {&b->gated, n * hd * F},
       {&b->nrm, n * hd * F},        {&b->conv, n * hd * F},       {&b->ple_rows, n * g->ple_heads * 4},
@@ -117,8 +122,11 @@ static bool buffers(Q4xForward *f, char *err)
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
     if (!alloc(want[i].p, want[i].bytes))
       return q4x_fail(err, "GPU memory refused (a step's buffers)");
+  if (hipMemset(b->overflow, 0, 4) != hipSuccess)
+    return q4x_fail(err, "a GPU call failed (the f16 overflow flag)");
   return (hipHostMalloc((void **)&b->pin_rows, n * g->ple_heads * 4, 0) == hipSuccess &&
-          hipHostMalloc((void **)&b->pin_tok, n * 4, 0) == hipSuccess) ||
+          hipHostMalloc((void **)&b->pin_tok, n * 4, 0) == hipSuccess &&
+          hipHostMalloc((void **)&b->pin_overflow, 4, 0) == hipSuccess && !(*b->pin_overflow = 0)) ||
          q4x_fail(err, "pinned memory refused (a step's tokens)");
 }
 
@@ -135,7 +143,7 @@ void q4x_forward_destroy(Q4xForward *f)
   void **bufs = (void **)&f->b;
   for (size_t i = 0; i < offsetof(Q4xBuf, pin_rows) / sizeof(void *); i++)
     hipFree(bufs[i]);
-  hipHostFree(f->b.pin_rows), hipHostFree(f->b.pin_tok), hipFree(f->b.logits);
+  hipHostFree(f->b.pin_rows), hipHostFree(f->b.pin_tok), hipHostFree(f->b.pin_overflow), hipFree(f->b.logits);
   free(f);
 }
 

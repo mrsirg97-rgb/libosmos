@@ -26,7 +26,7 @@ static bool head_in(Q4xForward *f, uint32_t n)
          q4x_hc_norm(m->emb, (const float *)q4x_dev(f, mtp->enorm), n, 1, D, g->rms_eps, b->x, NULL) &&
          q4x_hc_norm(m->hin, (const float *)q4x_dev(f, mtp->hnorm), n, hc, D, g->rms_eps, m->hn, NULL) &&
          q4x_join(b->x, m->hn, n, hc, D, m->join, NULL) &&
-         mv_strided(mtp->eh_proj->type, q4x_dev(f, mtp->eh_proj), D, 2 * D, m->join, 2 * D, n * hc, b->h, D, NULL);
+         q4x_mat(f, mtp->eh_proj, D, 2 * D, m->join, 2 * D, n * hc, b->h, D);
 }
 
 static bool tokens_in(Q4xForward *f, const int32_t *tokens, uint32_t n)
@@ -65,6 +65,8 @@ bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q
        copy(s->pend, rows + (uint64_t)(to - 1 - s->step_pos0) * hd, hd * F);
   if (!ok)
     return q4x_fail(err, "a GPU call failed (the MTP head's seeding)");
+  if (!q4x_overflow_ok(f, err))
+    return false;
   s->pend_pos = to - 1;
   return true;
 }
@@ -86,13 +88,13 @@ static bool one(Q4xForward *f, Q4xSeq *s, int32_t p, int32_t *id, float *prob)
       q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, 1) && q4x_moe(f, L, 1) &&
       q4x_hc_combine(b->h, b->out, b->inj, 1, hc, D, inv, NULL) && copy(m->hin, b->h, (uint64_t)hc * D * F) &&
       q4x_mix(f, mtp->head_norm, mtp->head_down, mtp->head_up, NULL, 1) &&
-      mv_strided(f->w->output->type, q4x_dev(f, f->w->output), V, D, b->mixed, D, 1, m->logits, V, NULL) &&
+      q4x_mat(f, f->w->output, V, D, b->mixed, D, 1, m->logits, V) &&
       q4x_top(m->logits, V, m->top_id, m->top_p, NULL) &&
       hipMemcpyAsync(m->pin_id, m->top_id, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
       hipMemcpyAsync(m->pin_p, m->top_p, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
       hipStreamSynchronize(NULL) == hipSuccess;
   *id = *m->pin_id, *prob = *m->pin_p;
-  return ok;
+  return ok && q4x_overflow_ok(f, NULL);
 }
 
 int q4x_mtp_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
