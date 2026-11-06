@@ -88,9 +88,9 @@ q4x_seq_state_bytes .. q4x_seq_load
 q4x_batch
   n tokens (1 .. max_tokens) of one sequence at its next positions; the logits of every one of them after it, rows
   row0 .. row0 + n - 1 of q4x_logits ([max_tokens][vocab] on the device: the rows outside left as they were - several
-  sequences' steps one after another fill one table, row0 + n at most max_tokens). a token's results are the same bits however its sequence's tokens are
-  split into batches. false with why for n out of range or past max_ctx; the sequence then unchanged in position
-  (its state not to be read on: a refusal before any step runs).
+  sequences' steps one after another fill one table, row0 + n at most max_tokens). a token's results are the same bits
+  however its sequence's tokens are split into batches. false with why for n out of range or past max_ctx; the
+  sequence then unchanged in position (its state not to be read on: a refusal before any step runs).
 
 q4x_greedy
   rows row0 .. row0 + rows - 1's greatest token each (ops_argmax's: the lowest among equals).
