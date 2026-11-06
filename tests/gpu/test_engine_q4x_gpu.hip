@@ -141,6 +141,21 @@ int main() {
     for (int i = 0; i < 3; i++) CHECK(osmos_batch(e, sr.data(), &wrong[i], 1, err));
     CHECK(oseq_rollback(r, 3) && osmos_batch(e, sr.data(), &ids[kA + 3], 1, err) &&
           rows(e, 0, 1, V) == std::vector<float>(want.begin() + 3 * (size_t) V, want.end()));
+    // a step longer than the ring (OSMOS_MAX_BLOCK + 1 tokens: a whole round of drafts and its y), all but its first
+    // dropped - the reach's whole, the oldest state the step itself wrote - then the right ones on
+    {
+      OsmosSeq* d = oseq_create(e, err);
+      CHECK(d);
+      std::vector<OsmosSeq*> sd(kA, d);
+      CHECK(osmos_batch(e, sd.data(), ids.data(), kA, err));
+      std::vector<int32_t> long_step(OSMOS_MAX_BLOCK + 1, wrong[0]);
+      long_step[0] = ids[kA];
+      CHECK(osmos_batch(e, sd.data(), long_step.data(), OSMOS_MAX_BLOCK + 1, err) && oseq_reach(d) == OSMOS_MAX_BLOCK);
+      CHECK(oseq_rollback(d, OSMOS_MAX_BLOCK) && oseq_position(d) == (int32_t) kA + 1);
+      CHECK(osmos_batch(e, sd.data(), &ids[kA + 1], 3, err) &&
+            rows(e, 0, 3, V) == std::vector<float>(want.begin() + (size_t) V, want.end()));
+      oseq_destroy(d);
+    }
     // past the reach: refused, nothing moved. the reach: the states kept behind - a rollback of r leaves r fewer, a
     // step of n n more, to OSMOS_MAX_BLOCK (here 8, then 3 / 7 / 3 / 8 / 5 / 6 / 8 / 5 / 6)
     const uint32_t reach = oseq_reach(r);

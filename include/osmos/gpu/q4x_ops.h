@@ -105,8 +105,8 @@ q4x_hc_combine
   own weight (2 sigmoid: 1 at an inject of 0, a plain residual add).
 
 the Gated DeltaNet (a layer's, its tokens in order). its states kept in a ring of `slots` (a state each): read from
-slot cur; the state after token t written to slot (cur + 1 + t) % slots for the step's last min(n_tok, slots - 1)
-tokens (its last one when slots is 1: in place) - a step of n tokens leaves the sequence's state in slot
+slot cur; the state after token t written to slot (cur + 1 + t) % slots for the step's last min(n_tok, slots)
+tokens (its last one, in place, when slots is 1) - a step of n tokens leaves the sequence's state in slot
 (cur + n) % slots and the states before it behind, back to slots - 1 tokens: a rollback a slot index.
 
 q4x_conv

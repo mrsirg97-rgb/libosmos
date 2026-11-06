@@ -139,11 +139,10 @@ __global__ __launch_bounds__(kHead) void gated_norm_kernel(const float* x, const
 
 }  // namespace
 
-// the step's tokens whose states a ring keeps: its last slots - 1 (one, in place, when slots is 1)
-inline uint32_t kept(uint32_t n_tok, uint32_t slots) {
-  const uint32_t back = slots > 1 ? slots - 1 : 1;
-  return n_tok < back ? n_tok : back;
-}
+// the step's tokens whose states a ring keeps: its last `slots` (one, in place, when slots is 1) - a step longer than
+// the ring fills it whole, so its newest and the slots - 1 before it are all there (slots - 1 kept: the oldest of the
+// reach was never written, and a rollback of all of it read a stale slot)
+inline uint32_t kept(uint32_t n_tok, uint32_t slots) { return n_tok < slots ? n_tok : slots; }
 
 extern "C" bool q4x_conv(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t dilation,
                          const float* w, float* ring, uint32_t slots, uint32_t cur, float* y, void* stream) {
