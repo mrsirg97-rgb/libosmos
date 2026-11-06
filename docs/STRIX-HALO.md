@@ -4,7 +4,7 @@
 
 osmos is an open-source inference engine built for this one chip. It runs DeepSeek-V4.1-Flash at 1–2 bits a weight
 with a 1M-token context, streams the experts that do not fit from the SSD, and gives the same output bit for bit
-however it runs. Below, osmos 0.3.0 is measured against Project Maya 1.1.55 on the same box and the same model files.
+however it runs. Below, osmos 0.3.2 is measured against Project Maya 1.1.55 on the same box and the same model files.
 
 `MIT` · `1,048,576-token context` · `one-command install` · `OpenAI-compatible API` · `stock AMD power profiles`
 
@@ -12,36 +12,38 @@ however it runs. Below, osmos 0.3.0 is measured against Project Maya 1.1.55 on t
 
 Same machine, same quantized model files, same afternoon (2026-11-05), nothing else running, AMD's `performance`
 profile. Maya as its own setup configures it (its pack, its drafter, its CPU lane calibrated, its expert profile warmed
-first); osmos 0.3.0 as it ships. Maya's own bench questions and prompts, each engine in a fresh process, two rounds
-(osmos's UD-IQ1_M one run of each that afternoon). Greedy decoding. Every run and its command:
+first); osmos 0.3.2 as it ships. Maya's own bench questions and prompts, each engine in a fresh process: Maya two
+rounds that afternoon, osmos one run of each that evening. Greedy decoding. Every run and its command:
 [`DESIGN.md`](../DESIGN.md).
 
 | tok/s | UD-IQ1_M osmos | UD-IQ1_M Maya | | UD-IQ1_S osmos | UD-IQ1_S Maya | |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Reading a 2,048-token prompt | **296** | 243 | +22% | **326** | 259 | +26% |
-| Reading an 8,192-token prompt | **443** | 406 | +9% | **473** | 431 | +10% |
-| Writing, with DSpark drafting | **32.0** | 27.5 | +16% | **37.8** | 34.9 | +8% |
+| Reading a 2,048-token prompt | **293** | 243 | +21% | **331** | 259 | +28% |
+| Reading an 8,192-token prompt | **441** | 406 | +9% | **473** | 431 | +10% |
+| Writing, with DSpark drafting | **33.6** | 27.5 | +22% | **40.8** | 34.9 | +17% |
 | Writing, one token at a time | 17.1 | 17.0 | tie | 19.3 | 19.2 | tie |
 
 ## Agents: the workload this machine is for
 
-| 4 agents × 8 turns, UD-IQ1_M | osmos 0.3.0 | Maya 1.1.55 |
+| 4 agents × 8 turns, UD-IQ1_M | osmos 0.3.2 | Maya 1.1.55 |
 | --- | ---: | ---: |
-| Wall time, all 32 turns | **433 s** | 542 s |
-| First token, p95 | **51.8 s** | 81.3 s |
-| Turn done, p95 | **97.8 s** | 121.9 s |
-| Package power, mean | 129 W | 127 W |
-| Energy per answer token | **6.98 J** | 8.74 J |
+| Wall time, all 32 turns | **446 s** | 542 s |
+| First token, p95 | **54.7 s** | 81.3 s |
+| Turn done, p95 | **94.0 s** | 121.9 s |
+| Package power, mean | 127 W | 127 W |
+| Energy per answer token | **7.07 J** | 8.74 J |
 
 An agent turn is mostly reading: Maya's agent bench sends about 99K new prompt tokens for 8K tokens of answers. osmos
-finishes it 20% sooner on 20% less energy for each token it writes, at about the same power.
+finishes it 18% sooner on 19% less energy for each token it writes, at the same power (osmos the mean of two runs that
+evening; Maya's that afternoon, when the box ran ~2.5% faster).
 
 ## Energy: the low-power profile
 
-The same osmos at the box's `low-power` profile (a stock AMD profile), UD-IQ1_M: **2.50 J a drafted token** at 29.3
-tok/s and 71 W - as fast as osmos drafted at `performance` one release ago - and **3.78 J an answer token** on the
-agents bench (479 s at 63 W): 39-46% less energy than at `performance` for 7-11% less speed. 0.3.0's gain came from
-reading the experts the GPU streams straight from the SSD into memory it reads (no CPU copy), the same bits out.
+The same osmos at the box's `low-power` profile (a stock AMD profile), UD-IQ1_M: **2.35 J a drafted token** at 30.7
+tok/s and 71 W - faster than 0.2.0 drafted at `performance` - and **3.79 J an answer token** on the agents bench (481
+s at 63 W): 39-46% less energy than at `performance` for 8-9% less speed. 0.3.0's gain came from reading the experts
+the GPU streams straight from the SSD into memory it reads (no CPU copy); 0.3.1's and 0.3.2's from less work a token
+(drafting floors tuned for energy, the expert kernels' registers), the same bits out.
 
 Power is the APU package's (amdgpu PPT: CPU, GPU and NPU), not the wall, sampled over the bench's own window. In a
 live coding session through the rig agent, osmos wrote at about 30–37 tok/s while reusing the conversation's earlier

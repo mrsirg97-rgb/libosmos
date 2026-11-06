@@ -2512,6 +2512,26 @@ own commit when it is no worse and no bit moves.
     833-850 / 1,142-1,178 / 711-720; drafted 30.6 / 30.6 tok/s against 30.8 / 30.7 (~/bench/v032/head-mm). at 5 rows
     the x16's conversion and the flag's round trip cost what the faster read saves.
 
+### 0.3.2 at performance (2026-11-05, evening)
+
+the release measured as 0.3.0 was (~/bench/v032/perf, the script beside it: one run each, power.py around each):
+
+| | 0.3.0 (afternoon) | 0.3.2 |
+| --- | ---: | ---: |
+| UD-IQ1_M drafted (q1 / q2 / q3) | 33.1 / 24.8 / 38.0, 32.0 tok/s, 4.10 J | 35.1 / 27.7 / 38.1, **33.6**, **3.87 J** |
+| UD-IQ1_M plain | 17.1, 7.71 J | 17.1, 7.72 J |
+| UD-IQ1_M prompts 2K / 8K | 296 / 443 | 293 / 441, 0.30 J a prompt token |
+| UD-IQ1_S drafted | 37.9 / 27.5 / 47.9, 37.8 | 41.0 / 31.4 / 49.9, **40.8**, 3.35 J |
+| UD-IQ1_S plain | 19.3 | 19.3, 7.15 J |
+| UD-IQ1_S prompts 2K / 8K | 323-328 / 471-474 | 331 / 473 |
+
+the drafted gain mostly 0.3.1's floors (the hardest question most: 24.8 -> 27.7, 27.5 -> 31.4 - more of its drafts
+reach the verify), carried from low-power to performance. the answers' hashes 0.3.0's, both packs, drafted and plain.
+the agents bench: 0.3.2 442.5 / 448.7 s, 7.07 / 7.07 J an answer token (first token p95 58.1 / 51.3 s, turn done p95
+92.9 / 95.1); 0.3.0 rebuilt and run beside them, 444.6 s, 7.01 J (52.9, 99.4) - level. 0.3.0's afternoon run, 433.2 s,
+was the box then (~2.5% faster; the profile switched to low-power and back between): a comparison across a profile
+switch wants its baseline rerun.
+
 ## open questions
 
 1. the NPU's memlock limit (8 MB): only when an NPU experiment is on the plan.

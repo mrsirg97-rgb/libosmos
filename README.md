@@ -48,54 +48,56 @@ The short version, for people who want one page: [`docs/STRIX-HALO.md`](docs/STR
 One Strix Halo (128 GB, ~113 GiB GPU memory), 2026-11-05, nothing else running, AMD's `performance` profile. The
 comparison is [Project Maya](https://github.com/mw00/project-maya) **1.1.55** on the same model files: Maya as its setup
 configures it (its pack, its own 8 GB DSpark, its CPU lane calibrated on this machine, its expert profile warmed first),
-osmos **0.3.0** as it ships (the budget sized to the GPU, `--budget auto`; the router's guess off; our 4.7 GB IQ2_XS
+osmos **0.3.2** as it ships (the budget sized to the GPU, `--budget auto`; the router's guess off; our 4.7 GB IQ2_XS
 DSpark). Greedy decoding throughout. Every run and its command: `DESIGN.md`.
 
 ### Agents
 
-What an agent waits on is mostly reading: Maya's agent bench (4 agents at once x 8 turns, seed 1, 131K context,
-DSpark on) sends ~99K new prompt tokens against ~8K answer tokens. UD-IQ1_M; power is the APU package's (amdgpu PPT:
-CPU + GPU + NPU, not the wall), over the bench's own window:
+What an agent waits on is mostly reading: Maya's agent bench (4 agents at once x 8 turns, seed 1, 131K context, DSpark
+on) sends ~99K new prompt tokens against ~8K answer tokens. UD-IQ1_M; power is the APU package's (amdgpu PPT: CPU +
+GPU + NPU, not the wall), over the bench's own window; osmos 0.3.2 the mean of two runs that evening (0.3.0 rerun
+beside them: 444.6 s, 7.01 J - level), Maya's that afternoon, when the box ran ~2.5% faster (0.3.0 then: 433 s):
 
-| | osmos 0.3.0 | Maya 1.1.55 | |
+| | osmos 0.3.2 | Maya 1.1.55 | |
 | --- | --- | --- | --- |
-| Wall, all 32 turns | **433 s** | 542 s | 20% less |
-| First token p50 / p95 | **5.9 / 51.8 s** | 6.3 / 81.3 s | p95 36% lower |
-| Turn done p50 / p95 | **43.0 / 97.8 s** | 55.3 / 121.9 s | 22% / 20% lower |
-| Package power, mean | 129 W | 127 W | |
-| Energy an answer token | **6.98 J** | 8.74 J | 20% less |
+| Wall, all 32 turns | **446 s** | 542 s | 18% less |
+| First token p50 / p95 | **6.2 / 54.7 s** | 6.3 / 81.3 s | p95 33% lower |
+| Turn done p50 / p95 | **44.1 / 94.0 s** | 55.3 / 121.9 s | 20% / 23% lower |
+| Package power, mean | 127 W | 127 W | |
+| Energy an answer token | **7.07 J** | 8.74 J | 19% less |
 
 ### Both packs against Maya 1.1.55
 
 64K context (Maya's configuration), 256 tokens an answer to Maya's three bench questions and its 2K / 8K prompts,
-each engine in a fresh process; tok/s, the mean of two interleaved rounds (osmos's UD-IQ1_M: one run of each the same
-afternoon, beside Maya's two):
+each engine in a fresh process; tok/s: Maya the mean of two interleaved rounds (its range in brackets), osmos 0.3.2 one
+run of each that evening (0.3.0's two rounds, that afternoon, within 0.3 tok/s of each other):
 
 | | UD-IQ1_M osmos | UD-IQ1_M Maya | UD-IQ1_S osmos | UD-IQ1_S Maya |
 | --- | --- | --- | --- | --- |
-| Prompt, 2,048 tokens | **296** | 243 (242-243) | **326** (323-328) | 259 (256-261) |
-| Prompt, 8,192 tokens | **443** | 406 (402-409) | **473** (471-474) | 431 (430-431) |
-| Decode, DSpark drafted | **32.0** | 27.5 (25.8-29.1) | **37.8** (37.7-37.8) | 34.9 (34.6-35.1) |
-| Decode, plain | 17.1 | 17.0 (16.8-17.1) | 19.3 (19.3-19.3) | 19.2 (19.1-19.3) |
+| Prompt, 2,048 tokens | **293** | 243 (242-243) | **331** | 259 (256-261) |
+| Prompt, 8,192 tokens | **441** | 406 (402-409) | **473** | 431 (430-431) |
+| Decode, DSpark drafted | **33.6** | 27.5 (25.8-29.1) | **40.8** | 34.9 (34.6-35.1) |
+| Decode, plain | 17.1 | 17.0 (16.8-17.1) | 19.3 | 19.2 (19.1-19.3) |
 | Output reproducible bit for bit | yes | not measured (1.1.46: no) | yes | not measured |
 
-Plain decode is a tie; reading prompts (+9 to +25%), drafting (+8 to +16%) and several conversations at once (20% less
-time and energy) are where osmos leads. osmos's answers hash the same in every run and configuration, across 0.1.3,
-0.2.0 and 0.3.0; Maya's greedy decode varied run to run when measured on 1.1.46 (DESIGN.md), not re-measured since.
+Plain decode is a tie; reading prompts (+9 to +28%), drafting (+17 to +22%) and several conversations at once (18-19%
+less time and energy) are where osmos leads. osmos's answers hash the same in every run and configuration, across
+0.1.3, 0.2.0, 0.3.0 and 0.3.2; Maya's greedy decode varied run to run when measured on 1.1.46 (DESIGN.md), not
+re-measured since.
 
 ### Energy at the low-power profile
 
-osmos 0.3.0 at the box's `low-power` profile (power-profiles-daemon's power-saver, a stock AMD profile), UD-IQ1_M:
+osmos 0.3.2 at the box's `low-power` profile (power-profiles-daemon's power-saver, a stock AMD profile), UD-IQ1_M:
 
 | | tok/s | package W | J a token | against `performance` |
 | --- | --- | --- | --- | --- |
-| Decode, plain | 15.9 | 71 | **4.45** | -7% speed, -42% energy |
-| Decode, DSpark drafted | 29.3 | 71 | **2.50** | -8% speed, -39% energy |
-| Agents (4 x 8) | 479 s | 63 | **3.78** an answer token | +11% time, -46% energy |
+| Decode, plain | 15.8 | 71 | **4.49** | -8% speed, -42% energy |
+| Decode, DSpark drafted | 30.7 | 71 | **2.35** | -9% speed, -39% energy |
+| Agents (4 x 8) | 481 s | 63 | **3.79** an answer token | +8% time, -46% energy |
 
-At low-power osmos drafts as fast as it did at `performance` one release ago (0.2.0: 29.8 tok/s), at ~71 W against
-~125. At the packs' own 1M context (0.1.x, fixed budgets), decode is UD-IQ1_S 18.8 plain / 37.5 drafted, UD-IQ1_M
-16.0 / 28.6 tok/s: a 1M context's attention state is ~0.85 GiB.
+At low-power osmos drafts faster than 0.2.0 did at `performance` (29.8 tok/s), at ~71 W against ~125. At the packs'
+own 1M context (0.1.x, fixed budgets), decode is UD-IQ1_S 18.8 plain / 37.5 drafted, UD-IQ1_M 16.0 / 28.6 tok/s: a 1M
+context's attention state is ~0.85 GiB.
 
 ### The two packs: quality and power
 
@@ -104,8 +106,8 @@ At low-power osmos drafts as fast as it did at `performance` one release ago (0.
 | | UD-IQ1_M (quality) | UD-IQ1_S (speed) |
 | --- | --- | --- |
 | Perplexity (abliterated) | 2.459 (2.470) | 2.501 (2.505) |
-| Package power decoding, plain / drafted | 132 / 127 W (0.3.0) | 122 / 127 W (0.1.x) |
-| Energy a token, plain / drafted | 7.71 / 4.10 J (0.3.0) | 6.4 / 3.3 J (0.1.x) |
+| Package power decoding, plain / drafted | 131 / 127 W | 138 / 131 W |
+| Energy a token, plain / drafted | 7.72 / 3.87 J | 7.15 / 3.35 J |
 | Expert shards on disk (plus the shared table) | 140 GB | 122 GB |
 
 UD-IQ1_S's experts are 12.5% smaller than UD-IQ1_M's, so more of them stay in GPU memory: it reads fewer from the SSD
