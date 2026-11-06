@@ -2,8 +2,8 @@
 // among 16 reordered (schedule invariance); within the rounding bound of its order against a double sum over the
 // f16 weights and activations it reads; the f16 roundings' own cost against the exact weights and F32 activations;
 // and the
-// bandwidth at 1, 4 and 16 tokens beside the matvec's at 1. needs a gfx1151 and ~/models/ds1017; skipped (77)
-// without them.
+// bandwidth at 1, 4 and 16 tokens beside the matvec's at 1 - and Qwen3.8's mixers' (a K split across blocks) where
+// its shards are. needs a gfx1151 and ~/models/ds1017; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <fcntl.h>
@@ -60,6 +60,11 @@ static const Shape kUdShapes[] = {
   {"blk.0.ffn_down_exps.weight", 7},    {"blk.20.ffn_gate_exps.weight", 7},    {"blk.38.ffn_gate_exps.weight", 7},
   {"blk.20.ffn_down_exps.weight", 7},   {"output.weight", -1},
 };
+
+// Qwen3.8's (when its first shard is here): the mixers' down - Q8_0 320 x 10240, its K split across blocks (mm.hip's
+// split_parts) - and up (320 columns: the odd width's shape)
+static const Shape kQwenShapes[] = {{"blk.0.hc_attn_down.weight", -1}, {"blk.0.hc_attn_up.weight", -1}};
+constexpr const char* kQwenFirst = "%s/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
 
 static uint32_t rng = 1017;
 static float uniform() {
@@ -303,6 +308,14 @@ int main() {
   CHECK(g);
   for (size_t i = 0; i < n_shapes; i++) shape(g, shapes[i]);
   gguf_destroy(g);
+  char qpath[512];
+  std::snprintf(qpath, sizeof qpath, kQwenFirst, std::getenv("HOME") ? std::getenv("HOME") : "");
+  if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_create(qpath, err)) {
+    for (const Shape& sh : kQwenShapes) shape(q, sh);
+    gguf_destroy(q);
+  } else {
+    std::printf("  Qwen3.8's shapes skipped: no %s\n", qpath);
+  }
   std::printf("[test_mm_gpu] ok: every token the same bits alone, among 16, among 16 reversed, and among 33, 64 and "
               "%d (at its place and at another); a pair in one launch each its own bits; Q5_K repacked its bits\n",
               kBig);

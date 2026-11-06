@@ -2388,6 +2388,11 @@ build from its tag (interleaved, twice; tools in the scratchpad: the old q4x_ben
     head's) - ~100 launches a token fewer.
 - **measured and not kept**: the attention's S once a round of 64 keys (bits the same, 37% slower: 52 KB of LDS, one
   block a CU); S's dims split over the waves (7.5% of the kernel, its bits moved: not worth them).
+- **the Q8_0 mixers' K split across blocks** (320 x 10240: 20 blocks for 40 CUs, the guess its idle CUs): 2 parts
+  127 GB/s, 4 parts 119, against 154 unsplit (test_mm_gpu at a token) - the second launch and the parts' round trip
+  cost more than the CUs gave; the unsplit already at the matvec's 159 there. not kept (a split by the rows also made a
+  row's bits its matrix's height's - test_mm_gpu's pair caught it; by the columns alone it held). test_mm_gpu now times
+  and holds Qwen3.8's two mixer matrices.
 - **the scan**: every kernel's SQC_LDS_BANK_CONFLICT against SQ_INST_CYCLES_LDS, both models - the matmuls clean;
   DeepSeek's worst its scores kernel (30% of its LDS cycles, 1.4% of the time). DeepSeek's prompt is the SSD's (the
   GPU busy 11 s of a 132 s run): no kernel moves it.
