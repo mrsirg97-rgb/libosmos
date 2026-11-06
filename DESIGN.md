@@ -2086,6 +2086,66 @@ GPU memory (~121 GB) with ~37 GB to spare - no expert streams; a token ~2-3 GB o
   forward one block at a time against llama.cpp's intermediate tensors (llama-eval-callback); then decode speed,
   then prompts, then MTP.
 
+### the baseline: llama.cpp on this box (2026-11-05, performance)
+
+llama.cpp 68d20b8 (2026-10-29), its HIP build for gfx1151 (~/Projects/llama.cpp/build-hip), UD-IQ3_XXS (77.87 GiB;
+llama.cpp names it A3B: ~3B active a token), all layers on the GPU, flash attention:
+- coherent: "What is 17 times 23?" - its thinking short and right, the answer 391 (greedy).
+- llama-bench, 3 runs: prompt 512 415 tok/s, 2,048 419; decode (128) **26.3 tok/s**; the package 67 W mean (87
+  peak) - at performance, under half the DeepSeek decode's ~130 W: not the memory's rate that bounds it.
+- its decode traced (rocprofv3, 64 tokens; the trace's own overhead inflates the wall, not the kernels): 3,040
+  kernels a token, the GPU busy ~34 ms of a token's ~43; mul_mat_vec_q 73% of that (545 launches a token: Q6_K's
+  dense projections and head the most, ~13 ms; the experts' IQ4_NL / IQ3_XXS / IQ3_S ~6 ms; Q8_0 ~5 ms), the F32
+  matvecs 9%, every other kernel (the GDN's delta rule 0.55 ms, its conv, the gated residual, top-k) a few percent
+  each and most of the launches.
+- the bound: ~1.2 GB of weights a token at ~3 bits; at the ~170-200 GB/s osmos's kernels read here, ~7 ms - 26.3
+  tok/s leaves ~4x on the table. osmos's first targets: the matvecs (its mm / lane kernels near the memory's rate),
+  then the launches (3,040 a token; DeepSeek's step is ~440 a drafted token).
+
+## 0.4.0: one engine interface, two families (design, 2026-11-05)
+
+why: osmos-serve, dbench and the tests call DeepSeek's forward by name (Forward, Seq, Drafter: ~30 functions). a
+second family behind the same server needs one shape both forwards present - the server's, nothing more. 0.4.0 is
+that shape with DeepSeek alone behind it: no Qwen code, no feature, every bit the same.
+
+- **what the server uses** (tools/serve: main, build, conv, single, multi, round): create from the files and options
+  (budget, max_ctx, max_tokens, picks, no_guess, the table, the overlay, the CPU lane, the drafter's dir) and destroy;
+  a sequence - create, destroy, prompt(end), rollback(n), position, state bytes, save, load (osmos-serve's slots,
+  forward_identity their key); forward_batch over sequences and their tokens, forward_greedy on a step's rows,
+  forward_logits; the drafter - seed(seq, from, to), draft(seq, y, floors) -> its drafts and confidences; the
+  facts the server sizes by (a decode step's most tokens - (n_experts - 1) / n_used today -, the drafter's window,
+  its block); counters (budget, room, swaps, waits, guesses, CPU-lane picks). forward_step only as batch of 1.
+- **the shape**: include/osmos/run/engine.h - `Engine` (opaque), `EngineSeq` (opaque), `EngineOptions` (the union of
+  the options above; a family refuses one it has no use for by name - fail closed), and the calls above as
+  engine_* / eseq_*. inside, one table of the family's functions (a struct of pointers, filled by the family's
+  engine_<family>.c); engine_create reads `general.architecture` and picks the family - deepseek41 (the forward as it
+  is), later qwen4exp - or refuses the file by its name. a family's own headers (forward.h, drafter.h, weights.h)
+  stay for its tests and tools; the server includes engine.h alone.
+- **what moves**: src/run/engine.c (the dispatch), src/run/engine_ds4.c (DeepSeek's table: each a call into the
+  forward as today); tools/serve and tools/bench/dbench onto engine.h (dbench to bench either family); the server's
+  sizing facts asked of the engine, not read from Geometry. nothing in src/run/hip_* changes.
+- **done when**: every CPU and GPU test passes; dbench's answers hash as 0.3.2's (UD-IQ1_M and UD-IQ1_S, drafted and
+  plain); osmos-serve's parallel and slot tests pass; agents bench and drafted decode level with 0.3.2 in one session
+  (the call is one indirect jump a step: nothing to measure, measured anyway).
+
+what the second family brings to the shape (designed now, built in 0.4.x, so 0.4.0 does not have to move again):
+- **a recurrent state**: Qwen's 36 Gated DeltaNet layers hold ~113 MB a sequence (48 x 128 x 128 F32 a layer) and a
+  conv tail, not a cache a position indexes. rollback(n) - a verify's rejected drafts, a conversation cut back - is a
+  restore, not a move: the verify writes the state after each of its rows (a block of k: k snapshots, ~0.7 GB a
+  sequence at k = 6; ~37 GB of the box is free with the whole model resident), and rollback takes the row's.
+  SEQ_MAX_BACK's reach beyond a verify (conv_reach's common part) holds for attention only: the family says how far
+  back it can go (engine_reach), and the server reads the prompt again from the last state it holds when farther.
+  save / load carry the state as they carry the cache (its bytes the family's).
+- **its drafter**: MTP (the file's 4B multi-token head) behind the same seed / draft pair - its block its own
+  (engine_block), its floors the server's.
+- **its text**: Qwen's pre-tokenizer (the file's tokenizer.ggml.pre names it `qwen35`: llama.cpp's name for the split
+  Qwen has kept since 3.5, not the model's version - the file is Qwen3.8-Flash-Next) - a split of its own, beside
+  deepseek-v3's in src/text, its chat template (the file's jinja, ported to C and held byte for byte to its output on
+  fixtures, as DeepSeek's encoding is), eos 248046, a native context of 262,144 (its own max). osmos-api picks the
+  family's text by the architecture as the engine does.
+- **resident whole**: ~78 GB, nothing streamed - the budget, picks, swaps and guess counters report zeros, a CPU lane
+  is refused (its experts IQ3 / IQ4 / Q2 have no lane kernels).
+
 ## the installer (design, 2026-11-04)
 
 the operator's: one command from a stock Halo to a pack ready to run - and, a nice touch, from the files a user has
