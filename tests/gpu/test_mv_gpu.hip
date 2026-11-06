@@ -61,6 +61,17 @@ static const Shape kUdShapes[] = {
   {"blk.29.ffn_down_exps.weight", 7}, {"output.weight", -1},
 };
 
+// Qwen3.8-Flash-Next's (UD-IQ3_XXS): an expert of each of its types (IQ3_XXS, IQ4_XS, Q2_0, IQ4_NL, IQ2_S) and the
+// matrices a token reads (Q8_0, Q6_K, F32, BF16; the hyper-connections' 320-wide rank among them)
+constexpr const char* kQwen = "%s/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
+static const Shape kQwenShapes[] = {
+  {"blk.14.ffn_gate_exps.weight", 7}, {"blk.47.ffn_gate_exps.weight", 7}, {"blk.8.ffn_down_exps.weight", 7},
+  {"blk.0.ffn_down_exps.weight", 7},  {"blk.0.ffn_gate_exps.weight", 7},  {"blk.0.attn_qkv.weight", -1},
+  {"blk.3.attn_q.weight", -1},        {"blk.0.ffn_gate_inp.weight", -1},  {"blk.3.indexer.q_proj.weight", -1},
+  {"blk.0.hc_attn_down.weight", -1},  {"blk.0.hc_attn_up.weight", -1},    {"blk.0.ssm_alpha.weight", -1},
+  {"output.weight", -1},
+};
+
 static uint32_t rng = 1017;
 static int tok_shapes = 0;
 static float uniform() {
@@ -235,6 +246,15 @@ int main() {
   CHECK(g);
   for (size_t i = 0; i < n_shapes; i++) shape(g, shapes[i]);
   gguf_destroy(g);
+  char qwen[512];
+  std::snprintf(qwen, sizeof qwen, kQwen, std::getenv("HOME") ? std::getenv("HOME") : "");
+  if ((g = gguf_create(qwen, err))) {
+    std::printf("  Qwen3.8-Flash-Next:\n");
+    for (const Shape& s : kQwenShapes) shape(g, s);
+    gguf_destroy(g);
+  } else {
+    std::printf("  Qwen3.8-Flash-Next: not on this machine, its shapes not checked\n");
+  }
   std::printf("  every shape: %d tokens at once (the wide tiles) the bits of each alone\n", kWideNt);
   CHECK(tok_shapes > 0);
   std::printf("  %d shapes: matrices over their own 1 .. 8 tokens (mv_group_tok), each row the bits of its token "
