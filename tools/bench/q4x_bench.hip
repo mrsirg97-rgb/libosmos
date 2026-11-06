@@ -27,6 +27,11 @@ static double now() {
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// seconds since the epoch: tools/bench/energy.py's windows (matched to tools/power.py's samples)
+static double epoch() {
+  return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) return std::fprintf(stderr, "usage: q4x_bench <first shard> <ids> [prompt] [decode] [mtp head]\n"), 2;
   if (!gpu_sleep_on_waits()) return std::fprintf(stderr, "q4x_bench: the GPU's wait mode not set\n"), 1;
@@ -48,7 +53,7 @@ int main(int argc, char** argv) {
   Q4xForward* fw = q4x_forward_create(w, mtp, ctx, ctx < kStep ? ctx : kStep, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
-  const double t0 = now();
+  const double t0 = now(), e0 = epoch();
   for (uint32_t at = 0; at < np; at += kStep) {
     const uint32_t k = np - at < kStep ? np - at : kStep;
     if (!q4x_batch(fw, s, ids.data() + at, k, 0, ferr) || (mtp && !q4x_mtp_seed(fw, s, (int32_t) at, (int32_t) (at + k), ferr)))
@@ -58,6 +63,7 @@ int main(int argc, char** argv) {
   const uint32_t last = (np - 1) % kStep;
   if (!q4x_greedy(fw, last, 1, &y, ferr))
     return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
+  const double e1 = epoch();
   if (getenv("Q4X_STEP_SWEEP")) /* a step's time by its tokens: 1 .. 8, each step rolled back */
     for (uint32_t n = 1; n <= OSMOS_MAX_BLOCK; n++) {
       const int reps = 12;
@@ -67,9 +73,12 @@ int main(int argc, char** argv) {
           return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
       std::printf("  a step of %u tokens: %.1f ms\n", n, (now() - a) / reps * 1e3);
     }
+  /* the drafts' floors: the engine's (engine.h), or Q4X_BENCH_CONF / Q4X_BENCH_CUM - a sweep's */
+  const float conf_min = getenv("Q4X_BENCH_CONF") ? (float) atof(getenv("Q4X_BENCH_CONF")) : OSMOS_DRAFT_CONF_MIN;
+  const float cum_min = getenv("Q4X_BENCH_CUM") ? (float) atof(getenv("Q4X_BENCH_CUM")) : OSMOS_DRAFT_CUM_MIN;
   const uint32_t block = getenv("Q4X_BENCH_BLOCK") ? (uint32_t) atoi(getenv("Q4X_BENCH_BLOCK")) : Q4X_MTP_BLOCK;
   if (!block || block > OSMOS_MAX_BLOCK) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_BLOCK 1 .. 8\n"), 2;
-  const double t1 = now();
+  const double t1 = now(), e2 = epoch();
   uint64_t h = FNV_SEED;
   double worst = 0;
   uint32_t out = 0, rounds = 0, drafted = 0, accepted = 0;
@@ -77,8 +86,7 @@ int main(int argc, char** argv) {
     const double a = now();
     int32_t toks[OSMOS_MAX_BLOCK + 1] = {y}, picks[OSMOS_MAX_BLOCK + 1];
     float conf[OSMOS_MAX_BLOCK];
-    const int k = mtp ? q4x_mtp_draft(fw, s, y, block, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, toks + 1, conf, ferr)
-                      : 0;
+    const int k = mtp ? q4x_mtp_draft(fw, s, y, block, conf_min, cum_min, toks + 1, conf, ferr) : 0;
     const int32_t pos = q4x_seq_position(s);
     if (k < 0 || !q4x_batch(fw, s, toks, (uint32_t) k + 1, 0, ferr) || !q4x_greedy(fw, 0, (uint32_t) k + 1, picks, ferr))
       return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
@@ -91,7 +99,8 @@ int main(int argc, char** argv) {
     rounds++, drafted += (uint32_t) k, accepted += (uint32_t) keep - 1;
     worst = now() - a > worst ? now() - a : worst;
   }
-  const double t2 = now();
+  const double t2 = now(), e3 = epoch();
+  std::printf("window prompt %.3f %.3f %u\nwindow decode %.3f %.3f %u\n", e0, e1, np, e2, e3, nd);
   std::printf("q4x_bench: prompt %u at %.1f tok/s; decode %u at %.2f tok/s (slowest %s %.1f ms", np, np / (t1 - t0), nd,
               nd / (t2 - t1), mtp ? "round" : "step", worst * 1e3);
   if (mtp)

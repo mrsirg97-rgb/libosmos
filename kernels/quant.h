@@ -325,6 +325,46 @@ __device__ inline h8 iq2_h(uint64_t grid, float db, uint32_t pattern) {
   return __builtin_bit_cast(h8, __builtin_bit_cast(u4, h) ^ *(const u4*) kSignMasks.m[pattern]);
 }
 
+// any 8 sign bits as f16 sign masks: byte i's bit j negative - bit 15 of half j (IQ2_S's explicit signs)
+struct SignMasks8 {
+  uint32_t m[256][kChunk / 2];
+};
+constexpr SignMasks8 make_sign_masks8() {
+  SignMasks8 t{};
+  for (int i = 0; i < 256; i++)
+    for (int p = 0; p < kChunk / 2; p++)
+      t.m[i][p] = (uint32_t) ((i >> (2 * p)) & 1) << 15 | (uint32_t) ((i >> (2 * p + 1)) & 1) << 31;
+  return t;
+}
+static __constant__ SignMasks8 kSignMasks8 = make_sign_masks8();
+
+// the grid's |values| a chunk rounded to f16, then the signs one xor a pair (iq2_h's, any mask)
+__device__ inline h8 grid_h(uint64_t grid, float db, const uint32_t* mask) {
+  h8 h;
+  for (int j = 0; j < kChunk; j++) {
+    float x = mul(db, (float) (uint8_t) (grid >> (8 * j)));
+    asm("" : "+v"(x));  // decode_h's: the product, then f16 - not one fused v_fma_mixlo_f16 (a -0's +0)
+    h[j] = (_Float16) x;
+  }
+  return __builtin_bit_cast(h8, __builtin_bit_cast(u4, h) ^ *(const u4*) mask);
+}
+
+// Qwen3.8's IQ3_XXS and IQ2_S as f16 the same way: decode<T>'s bits (a sign's rounding symmetric), the selects gone
+template <> __device__ inline h8 decode_h<kIQ3_XXS>(const uint8_t* b, int k) {
+  const uint8_t* q = b + 2 + (k / 4) * 8 + (k % 4) * 2;
+  const uint32_t aux = ld32(b + 2 + 64 + (k / 4) * 4);
+  const float db = mul(mul(f16(ld16(b)), 0.5f + (float) (aux >> 28)), 0.5f);
+  const uint64_t grid = (uint64_t) kIq3xxsGrid[q[0]] | (uint64_t) kIq3xxsGrid[q[1]] << 32;
+  return grid_h(grid, db, kSignMasks.m[(aux >> (7 * (k % 4))) & 0x7F]);
+}
+
+template <> __device__ inline h8 decode_h<kIQ2_S>(const uint8_t* b, int k) {
+  const int s = (b[74 + k / 4] >> (4 * ((k / 2) % 2))) & 0x0F;
+  const float db = mul(mul(f16(ld16(b)), 0.5f + (float) s), 0.25f);
+  const uint64_t grid = kIq2sGrid[b[2 + k] | ((b[66 + k / 4] >> (2 * (k % 4))) & 0x03) << 8];
+  return grid_h(grid, db, kSignMasks8.m[b[34 + k]]);
+}
+
 template <> __device__ inline h8 decode_h<kIQ2_XXS>(const uint8_t* b, int k) {
   const uint8_t* q = b + 2 + (k / 4) * 8;
   const uint32_t aux = ld32(q + 4);
