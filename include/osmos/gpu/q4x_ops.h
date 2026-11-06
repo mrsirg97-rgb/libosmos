@@ -21,7 +21,7 @@ bool q4x_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32
 bool q4x_ssm_gates(const float *alpha, const float *beta, const float *dt, const float *a, uint32_t n_tok,
                    uint32_t heads, float *g, float *b, void *stream);
 bool q4x_delta(const float *qkv, const float *g, const float *b, uint32_t n_tok, uint32_t k_heads, uint32_t v_heads,
-               uint32_t dim, float eps, float *ring, uint32_t slots, uint32_t cur, float *out, void *stream);
+               uint32_t dim, float eps, float *qk, float *ring, uint32_t slots, uint32_t cur, float *out, void *stream);
 bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_tok, uint32_t heads, uint32_t dim,
                     float eps, float *y, void *stream);
 
@@ -103,7 +103,7 @@ q4x_delta
   (x / sqrt(sum x^2 + eps)); value head h reads key group h % k_heads; its state S (dim x dim, state[h][j][i] = S[i][j])
   a token at a time: S *= exp(g); delta_j = (v_j - sum_i S[i][j] k_i) b; S[i][j] += k_i delta_j; out[t][h][j] =
   sum_i S[i][j] q_i / sqrt(dim). S (a ring's slot: v_heads x dim x dim floats) read from slot cur; after token t,
-  into its slot.
+  into its slot. qk: scratch, n_tok x 2 k_heads x dim floats (the normed q and k, made first, all tokens at once).
 
 q4x_gated_norm
   y[t][h][d] = x[t][h][d] / sqrt(mean over d of x^2 + eps) w[d] sigmoid(z[t][h][d]): the DeltaNet's output norm a

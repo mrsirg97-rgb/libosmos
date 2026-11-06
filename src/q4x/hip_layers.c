@@ -86,8 +86,8 @@ bool q4x_deltanet(Q4xForward *f, Q4xSeq *s, int l, uint32_t n)
          q4x_ssm_gates(b->al, b->be, fv(f, L->dt), fv(f, L->a), n, vh, b->g, b->b, NULL) &&
          q4x_conv(b->qkv, n, ch, (uint32_t)g->ssm_conv, 1, fv(f, L->conv), s->conv[l], Q4X_SLOTS, s->cur, b->cv,
                   NULL) &&
-         q4x_delta(b->cv, b->g, b->b, n, (uint32_t)g->ssm_groups, vh, (uint32_t)g->ssm_state, g->rms_eps, s->ssm[l],
-                   Q4X_SLOTS, s->cur, b->ro, NULL) &&
+         q4x_delta(b->cv, b->g, b->b, n, (uint32_t)g->ssm_groups, vh, (uint32_t)g->ssm_state, g->rms_eps, b->qkn,
+                   s->ssm[l], Q4X_SLOTS, s->cur, b->ro, NULL) &&
          q4x_gated_norm(b->ro, fv(f, L->ssm_norm), b->z, n, vh, (uint32_t)g->ssm_state, g->rms_eps, b->fo, NULL) &&
          mat(f, L->ssm_out, D, in, b->fo, in, n, b->out, D);
 }

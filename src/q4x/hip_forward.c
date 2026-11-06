@@ -105,7 +105,7 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->h, n * hd * F},          {&b->xn, n * hd * F},         {&b->lo, n * g->hc_rank * F}, {&b->gate, n * hd * F},
       {&b->mixed, n * D * F},       {&b->inj, n * g->hc * F},     {&b->out, n * D * F},         {&b->x, n * D * F},
       {&b->qkv, n * ch * F},        {&b->z, n * in * F},          {&b->al, n * vh * F},         {&b->be, n * vh * F},
-      {&b->g, n * vh * F},          {&b->b, n * vh * F},          {&b->cv, n * ch * F},         {&b->ro, n * in * F},
+      {&b->g, n * vh * F},          {&b->b, n * vh * F},          {&b->cv, n * ch * F},         {&b->qkn, n * 2 * g->ssm_groups * g->ssm_state * F},         {&b->ro, n * in * F},
       {&b->fo, n * in * F},         {&b->qf, n * 2 * q * F},      {&b->kr, n * kv * F},         {&b->q, n * q * F},
       {&b->gt, n * q * F},          {&b->ao, n * q * F},          {&b->rl, n * g->n_experts * F}, {&b->w, n * k * F},
       {&b->ga, n * k * ff * F},     {&b->up, n * k * ff * F},     {&b->y, n * k * D * F},

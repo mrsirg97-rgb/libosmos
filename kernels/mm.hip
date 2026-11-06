@@ -30,6 +30,14 @@ template <quant::Type T> struct Tuned { using S = mm::Shape<128, 8, 8>; static c
 constexpr uint32_t kShortCols = 2048;
 template <quant::Type T> struct Short { using S = typename Tuned<T>::S; };
 template <> struct Short<quant::kQ6_K> { using S = mm::Shape<64, 8, 4>; };
+// a width the type's slab does not divide (Qwen3.8's mixers' up: 320 columns of Q8_0): 64-value slabs - a shape only
+// such a width takes, so no matrix that tiled before changes
+template <quant::Type T> struct Odd { using S = typename Short<T>::S; };
+template <> struct Odd<quant::kQ8_0> { using S = mm::Shape<64, 2, 4>; };  // 10240 x 320 at a token: 32.4 -> 22.2 us (mmsweep)
+template <quant::Type T>
+constexpr bool odd(uint32_t cols) {
+  return cols % (cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab) != 0;
+}
 template <> struct Tuned<quant::kQ8_0> { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 4; };
 template <> struct Tuned<quant::kQ5_K> { using S = mm::Shape<32, 8, 2>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ5_KR> : Tuned<quant::kQ5_K> {};
@@ -149,6 +157,7 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
 
 template <quant::Type T, int CT>
 bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
+  if (odd<T>(cols)) return launch_shape<T, CT, typename Odd<T>::S>(m, cols, x16, n, s);
   return cols < kShortCols ? launch_shape<T, CT, typename Short<T>::S>(m, cols, x16, n, s)
                            : launch_shape<T, CT, typename Tuned<T>::S>(m, cols, x16, n, s);
 }
@@ -158,7 +167,7 @@ template <quant::Type T>
 bool launch(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   for (int i = 0; i < (m.w[1] ? 2 : 1); i++)
     if (m.rows[i] % mm::kTile || (n > 1 && m.ys[i] < m.rows[i])) return false;
-  const int slab = cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  const int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
   if (cols % quant::Block<T>::values || cols % slab) return false;
   switch (col_tiles<T>(n)) {
     case 1: return launch_ct<T, 1>(m, cols, x16, n, s);
@@ -195,7 +204,7 @@ extern "C" bool mm_known(uint32_t type) { return type == quant::kQ5_KR || (qtype
 
 template <quant::Type T>
 bool fits(uint32_t rows, uint32_t cols) {
-  const int slab = cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  const int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
   return rows && cols && !(rows % mm::kTile) && !(cols % quant::Block<T>::values) && !(cols % slab);
 }
 

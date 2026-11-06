@@ -116,6 +116,10 @@ int main(int argc, char** argv) {
     SHAPES(dense, quant::kQ6_K, "Q6_K", 2560, 6144);
     SHAPES(dense, quant::kQ6_K, "Q6_K", 248320, 2560);
     SHAPES(dense, quant::kQ8_0, "Q8_0", 320, 10240);
+    // 320 columns: 64-value slabs alone
+    dense<quant::kQ8_0, 64, 4, 2>("Q8_0", 10240, 320), dense<quant::kQ8_0, 64, 4, 4>("Q8_0", 10240, 320);
+    dense<quant::kQ8_0, 64, 8, 2>("Q8_0", 10240, 320), dense<quant::kQ8_0, 64, 8, 4>("Q8_0", 10240, 320);
+    dense<quant::kQ8_0, 64, 2, 4>("Q8_0", 10240, 320), dense<quant::kQ8_0, 64, 2, 2>("Q8_0", 10240, 320);
   }
   return 0;
 }

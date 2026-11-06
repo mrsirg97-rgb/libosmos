@@ -60,43 +60,68 @@ __global__ void gates_kernel(const float* alpha, const float* beta, const float*
   b[i] = sigmoid(beta[i]);
 }
 
-// value head blockIdx.x, its state's column j a thread (state[h][j][i] = S[i][j], in registers): a token at a time,
-// q and k of its key group normed in LDS; S read from ring slot cur, after each of the last `keep` tokens into its slot
-__global__ __launch_bounds__(kHead) void delta_kernel(const float* qkv, const float* g, const float* b,
-                                                      uint32_t n_tok, uint32_t k_heads, uint32_t v_heads, float eps,
-                                                      float* ring, uint32_t slots, uint32_t cur, uint32_t keep,
-                                                      float* out) {
-  __shared__ float qs[kHead], ks[kHead], lds[kHead];
-  const uint32_t h = blockIdx.x, j = threadIdx.x, kg = h % k_heads;
+// a block a (q or k head, token): its l2 norm (block_sum's tree), then x r / sqrt(dim) into qk - the expressions the
+// delta rule used inline, in their order: the same bits, out of its serial loop
+__global__ __launch_bounds__(kHead) void qk_norm_kernel(const float* qkv, uint32_t k_heads, uint32_t v_heads, float eps,
+                                                        float* qk) {
+  __shared__ float lds[kHead];
+  const uint32_t hh = blockIdx.x, t = blockIdx.y, j = threadIdx.x;  // hh: q heads 0 .. k_heads - 1, then k heads
   const uint64_t ch = 2ull * k_heads * kHead + (uint64_t) v_heads * kHead;
-  const uint64_t slot = (uint64_t) v_heads * kHead * kHead, col = ((uint64_t) h * kHead + j) * kHead;
-  float s[kHead];
+  const float x = qkv[t * ch + (uint64_t) hh * kHead + j];
+  const float r = 1.0f / sqrtf(block_sum<kHead>(x * x, lds) / (float) kHead + eps / (float) kHead);
+  qk[((uint64_t) t * 2 * k_heads + hh) * kHead + j] = x * r * (1.0f / sqrtf((float) kHead));
+}
+
+// value head blockIdx.x, its state's column j two threads, each half its rows (state[h][j][i] = S[i][j], in
+// registers: 64 a thread - a whole column of 128 spilled), a token at a time: each half's sum, then low + high, the
+// same in both; its key group's normed q and k (qk_norm_kernel's) through LDS, two buffers - the next token's loads
+// issued before this one's sums, one barrier a token; S read from ring slot cur, after each of the last `keep` tokens
+// into its slot
+constexpr int kHalfRows = kHead / 2;
+__global__ __launch_bounds__(2 * kHead) void delta_kernel(const float* qkv, const float* qk, const float* g,
+                                                          const float* b, uint32_t n_tok, uint32_t k_heads,
+                                                          uint32_t v_heads, float* ring, uint32_t slots, uint32_t cur,
+                                                          uint32_t keep, float* out) {
+  __shared__ float qs[2][kHead], ks[2][kHead];
+  const uint32_t h = blockIdx.x, j = threadIdx.x >> 1, half = threadIdx.x & 1, kg = h % k_heads;
+  const uint32_t r0 = half * kHalfRows;
+  const uint64_t ch = 2ull * k_heads * kHead + (uint64_t) v_heads * kHead, qkr = 2ull * k_heads * kHead;
+  const uint64_t slot = (uint64_t) v_heads * kHead * kHead, col = ((uint64_t) h * kHead + j) * kHead + r0;
+  float s[kHalfRows];
 #pragma unroll
-  for (int i = 0; i < kHead; i++) s[i] = ring[cur * slot + col + i];
-  const float inv_n = 1.0f / sqrtf((float) kHead), scale = 1.0f / sqrtf((float) kHead);
+  for (int i = 0; i < kHalfRows; i++) s[i] = ring[cur * slot + col + i];
+  const float scale = 1.0f / sqrtf((float) kHead);
+  // a thread's share of the token's loads: its column's q (the low half's thread) or k (the high's); v both
+  auto load = [&](uint32_t t, float* x, float* v, float* gg, float* bb) {
+    *x = qk[t * qkr + (uint64_t) (half ? k_heads + kg : kg) * kHead + j];
+    *v = qkv[t * ch + 2ull * k_heads * kHead + (uint64_t) h * kHead + j];
+    *gg = g[(uint64_t) t * v_heads + h], *bb = b[(uint64_t) t * v_heads + h];
+  };
+  float nx, nv, ng, nb;
+  load(0, &nx, &nv, &ng, &nb);
   for (uint32_t t = 0; t < n_tok; t++) {
-    const float* row = qkv + t * ch;
-    const float q = row[(uint64_t) kg * kHead + j], k = row[(uint64_t) (k_heads + kg) * kHead + j];
-    const float v = row[2ull * k_heads * kHead + (uint64_t) h * kHead + j];
-    const float rq = 1.0f / sqrtf(block_sum<kHead>(q * q, lds) / (float) kHead + eps / (float) kHead);
-    const float rk = 1.0f / sqrtf(block_sum<kHead>(k * k, lds) / (float) kHead + eps / (float) kHead);
-    qs[j] = q * rq * inv_n, ks[j] = k * rk * inv_n;
-    __syncthreads();
-    const float decay = expf(g[(uint64_t) t * v_heads + h]), beta = b[(uint64_t) t * v_heads + h];
-    float dot = 0;
+    const int buf = t & 1;
+    (half ? ks : qs)[buf][j] = nx;
+    const float v = nv, decay = expf(ng), beta = nb;
+    if (t + 1 < n_tok) load(t + 1, &nx, &nv, &ng, &nb);
+    __syncthreads();  // this token's q, k in; the buffer before it read by every thread (it was, before the last)
+    const float *qb = qs[buf] + r0, *kb = ks[buf] + r0;
+    float part = 0;
 #pragma unroll
-    for (int i = 0; i < kHead; i++) s[i] *= decay, dot += s[i] * ks[i];
+    for (int i = 0; i < kHalfRows; i++) s[i] *= decay, part += s[i] * kb[i];
+    const float other = __shfl_xor(part, 1);
+    const float dot = half ? other + part : part + other;  // low + high in both threads
     const float delta = (v - dot) * beta;
-    float o = 0;
+    float po = 0;
 #pragma unroll
-    for (int i = 0; i < kHead; i++) s[i] += ks[i] * delta, o += s[i] * qs[i];
-    out[((uint64_t) t * v_heads + h) * kHead + j] = o * scale;
+    for (int i = 0; i < kHalfRows; i++) s[i] += kb[i] * delta, po += s[i] * qb[i];
+    const float oo = __shfl_xor(po, 1);
+    if (!half) out[((uint64_t) t * v_heads + h) * kHead + j] = (po + oo) * scale;
     if (t >= n_tok - keep) {
       float* to = ring + (cur + 1 + t) % slots * slot + col;
 #pragma unroll
-      for (int i = 0; i < kHead; i++) to[i] = s[i];
+      for (int i = 0; i < kHalfRows; i++) to[i] = s[i];
     }
-    __syncthreads();  // qs, ks free for the next token
   }
 }
 
@@ -139,12 +164,14 @@ extern "C" bool q4x_ssm_gates(const float* alpha, const float* beta, const float
 }
 
 extern "C" bool q4x_delta(const float* qkv, const float* g, const float* b, uint32_t n_tok, uint32_t k_heads,
-                          uint32_t v_heads, uint32_t dim, float eps, float* ring, uint32_t slots, uint32_t cur,
+                          uint32_t v_heads, uint32_t dim, float eps, float* qk, float* ring, uint32_t slots, uint32_t cur,
                           float* out, void* stream) {
-  if (!qkv || !g || !b || !ring || !out || !n_tok || !k_heads || !v_heads || v_heads % k_heads || dim != kHead ||
-      !slots || cur >= slots)
+  if (!qkv || !g || !b || !qk || !ring || !out || !n_tok || !k_heads || !v_heads || v_heads % k_heads ||
+      dim != kHead || !slots || cur >= slots)
     return false;
-  delta_kernel<<<v_heads, kHead, 0, st(stream)>>>(qkv, g, b, n_tok, k_heads, v_heads, eps, ring, slots, cur,
+  qk_norm_kernel<<<dim3(2 * k_heads, n_tok), kHead, 0, st(stream)>>>(qkv, k_heads, v_heads, eps, qk);
+  if (!ok()) return false;
+  delta_kernel<<<v_heads, 2 * kHead, 0, st(stream)>>>(qkv, qk, g, b, n_tok, k_heads, v_heads, ring, slots, cur,
                                                   kept(n_tok, slots), out);
   return ok();
 }
