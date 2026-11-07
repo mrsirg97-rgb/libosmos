@@ -42,17 +42,19 @@ packs), 7.0 minutes and a 32.8 s first-token p95.
 
 ## Qwen3.8-Flash-Next: the second model
 
-osmos 0.5.1 runs Qwen3.8-Flash-Next (177B, a preview of the Qwen4 architecture: Gated DeltaNet layers, sparse
+osmos 0.5.5 runs Qwen3.8-Flash-Next (177B, a preview of the Qwen4 architecture: Gated DeltaNet layers, sparse
 attention, 512 experts) from unsloth's UD-IQ3_XXS, every weight in GPU memory, the model's own MTP head drafting, a
-262,144-token context (or 1M with YaRN: a fact recalled 355K tokens back) - under the same guarantee: the same output bit for bit however it runs. Against llama.cpp on
-the same file, the same day (2026-11-06, `performance`):
+262,144-token context (or 1M with YaRN: a fact recalled 355K tokens back) - under the same guarantee: the same output
+bit for bit however it runs. Against llama.cpp on the same file (2026-11-07, `performance`; llama.cpp at its better
+batch each length, its plain decode from 2026-11-06):
 
-| | osmos 0.5.1 | llama.cpp | |
+| | osmos 0.5.5 | llama.cpp | |
 | --- | ---: | ---: | ---: |
-| Reading a 2,048-token prompt | **790** | 520 | +52% |
-| Reading a 16,384-token prompt | **696** | 463 | +50% |
-| Writing, MTP drafting | **40.5** | not measured | |
-| Writing, one token at a time | 23.7 | **26.2** | -10% |
+| Reading a 2,048-token prompt | **903** | 483 | +87% |
+| Reading a 16,384-token prompt | **810** | 498 | +63% |
+| Reading a 65,536-token prompt | **727** | 362 | 2.0x |
+| Writing, MTP drafting | **45.9** | not measured | |
+| Writing, one token at a time | **27.1** | 26.2 | +3% |
 | Agents, 4 × 8 turns (0.5.0) | **292 s** | not measured | |
 
 On the agents bench Qwen finishes in 292 s - DeepSeek's 440 s on the same workload - its first token at a 3.0 s

@@ -2367,6 +2367,151 @@ below; mutants (a tie to the higher block, the tail off by one, a block's rope a
 - **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
   21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
+### 0.5.5: the prompt's GEMM - the operands shared, the order kept (2026-11-07, low-power)
+
+why: Strata's fast set reads a 16K Qwen prompt ~40% faster at every length (attention is not it: QSA keeps ours 198
+-> 295 us a token from 4K to 32K; the matmuls are ~830 of ~1,450 us a token). the matrix cores' own peak here
+(wmma_rate, low-power): f16 45 TFLOP/s, iu8 48 TOPS - int8 no faster on RDNA 3.5, and with the q8 contract's per-32
+scales after each block (on the same SIMD) at most ~29 before a single load (i8epi): not the way for the dense mm.
+0.5.4's tries said the bound is each wave's own operands, none shared (tile's waves are the K split, the sums' order).
+- **mm.h's gemm_kernel**: a block 64 rows x 256 tokens, 8 waves of 32 x 64; each slab (64 rows x 128 values) decoded
+  into LDS once by the block, the next under this one's WMMAs (two slabs' LDS, a barrier a slab). the order kept:
+  partition p (tile's wave p) its slabs p, p + 8, ... one WMMA chain a 16 x 16 tile from zero, the partitions in turn
+  into a running sum (tile's part[0] + part[1] + ...) - the same bits at every count, a prompt's as decode's (mmbits:
+  every bit of y at 1-2,048 tokens; test_mm_gpu; a mutation - the chain not reset a partition - caught).
+- the matrices (Q6_K / Q8_0, Qwen's shapes, 2,048 tokens): 10240 x 2560 20.6 -> 27.0 TFLOP/s, 2560 x 6144 22.9 ->
+  27.6, 6144 x 2560 20.7 -> 26.7, 12288 x 2560 20.9 -> 26.8, Q8_0 20.5 -> 28.7. a single slab's LDS 25.5; 64 x 128
+  22.8; 32 x 256 22.4; 128 x 128 past the 64 KB LDS; 128 x 256 spills.
+- Qwen (against a v0.5.4 build, two interleaved rounds, every hash the same): 16K 590 / 584 -> 637 / 623 tok/s
+  (+7%), 4K 634 / 647 -> 703 / 745 (+13%), 2K 705 / 668 -> 776 / 735 (+10%), 512 +3%; decode unchanged (it is tile's).
+- DeepSeek (UD-IQ1_M, dbench, greedy; two interleaved rounds): every stream 5ca48d476414fd50 (0.5.3's); 2K 259 / 251
+  -> 263 / 258 tok/s (+2%), 8K 387 / 386 -> 391 / 387 (+0.6%) - its prompt the SSD's, its dense mm a small share.
+- **a step past MM_MAX_TOKENS a layer's part at a time** (hip_step.c: the n-gram layer, the mixers, the DeltaNet or
+  attention and the shared expert a sub-batch of 2,048 - b's token rows moved to it, its runs' parts at their
+  positions and rings' cur - then the routed experts over the step whole): the same bits (test_q4x_forward_gpu: a
+  step of 3,000, two sequences and one, against steps within 2,048; a ring's cur or a position one off caught). a
+  16K prompt (profiled, one session) 2K -> 8K steps 25.89 -> 25.24 s: the experts' matmuls -0.97 s at ~160 tokens
+  an expert, their activation +0.31 and moe_sum +0.19 (the experts' F32 rows out of the cache) - timed 2-3% (the
+  box drifted 3% between rounds; the parked whole-step x16 not needed: each part's f16 its own).
+- **the experts' activation straight into the down's f16** (q4x_swiglu_rows: q4x_swiglu then mm_x16_rows's bytes,
+  test_q4x_moe_gpu): those kernels 1,946 -> 1,634 ms at 8K steps, 1,480 -> 1,388 at 2K; and the shared expert with
+  the layer's part (b.x16 its mixer's): its conversions at 8K 143 -> 12 ms. what is left: gate and up's F32 (420 MB
+  a layer at 8K) written then read.
+- **gate + up in one kernel, swiglu's f16 its epilogue** (mm_group_swiglu: a block's gate tile kept in LDS, then its
+  up tile, each tile_to's own sums - the down's output the same bits, test and a mutation): slower. 16K at 8K steps
+  (profiled, back to back) gate + up + q4x_swiglu_rows 3.66 s -> 4.11 s with two tile copies inlined (IQ3_XXS at 8
+  tiles 248 VGPRs, 36 B spilled, 5 waves), 5.70 s with one in a two-pass loop (222, none, 6): a block's latency
+  doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
+  0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
+
+### 0.5.5: a token's A operand from the decode, no LDS (2026-11-07, low-power)
+
+the question that found it: could more waves be resident at a token? the half-slab LDS raised them but doubled each
+partition's chain - two changes at once. the clean test keeps the chain and frees the LDS: tile's kRegA path (each
+lane its row's chunks of WMMA's A, the halves traded across the lane halves - Q5_K's since 0.3) for the other types.
+the same f16 in the same places: the same bits (mmbits at 1-2,048 tokens; test_mm_gpu).
+- each matrix from DRAM (dec1 / dec_ds / exp1): Q6_K's 128-value slabs +6-16% (Qwen's DeltaNet pair 183 -> 207
+  GB/s, attn_q 172 -> 200, the logits 179 -> 203; DeepSeek's wo_b 193 -> 204, wo_a's groups 191 -> 207, its logits
+  193 -> 211), Q8_0 +13% (the hc mixers 156 / 147 -> 178 / 166), IQ4_NL +7%, IQ4_XS +5%; Q6_K's 64-value slabs
+  (DeepSeek's q_b) -7%, IQ2_S -10%, IQ3_XXS and Q2_0 level - those keep the LDS's (kRegAShape: by type and slab).
+  a token's dense reads Qwen 23.2 -> 20.7 ms, DeepSeek 34.2 -> 33.1.
+- the models (one round, the build before alternating; every hash the same): Qwen plain 25.90 -> 26.37 tok/s,
+  drafted 43.39 -> 44.46; DeepSeek UD-IQ1_M plain (a chat question, 256 tokens) 15.0 -> 15.9.
+
+### 0.5.5: Qwen's shared expert beside its routed ones - decode +8% (2026-11-07, low-power)
+
+the decode's kernels are latency-bound (one at a time 78-83% of the memory's 242 GB/s, the small ones far less), so
+two independent ones at once fill more of it. a small step's (16 tokens or fewer: decode, a draft's verify) shared
+expert runs on a second stream (non-blocking: the null stream's implicit sync would serialize it) - an event after
+the mixer (its inputs, b.mixed and the side copy in b.x16) and one at its end, which q4x_moe_sum waits on; the
+routed experts meanwhile on the null stream, their f16 their own (b.xe16). the same kernels on the same inputs:
+the same bits (every hash; the q4x tests). a race is not something the outputs show by chance - the routed
+experts take longer, so a missing wait passed every test - so test_q4x_forward_gpu forces the order
+(q4x_forward_side_spin: ~2 ms of the second stream's time before each shared expert) and checks single steps'
+rows against the one batch's: the wait left out, it fails at the first.
+- plain decode (512 + 128, two rounds alternating) 23.97 / 23.80 -> 25.83 / 25.69 tok/s (+7.9%); the MTP head
+  drafting 40.25 / 40.01 -> 43.69 / 43.59 (+8.7%; at one-token steps alone +1.9 - the verify steps are its).
+- **DeepSeek's the same way** (hip_ffn.c's shared on the second stream, ops_gather_sum_add waiting; the forced
+  order in test_model_gpu, a missing wait caught): the same bits, no faster - UD-IQ1_M, two chat questions x 256
+  tokens, two rounds against the build before: plain 15.4 -> 15.0 tok/s, drafted 28.1 -> 28.3. its shared expert
+  already ran beside something - the host's wait for the routing event and the experts' reads - and the second
+  stream added an event and a wait a layer. not kept (the diff in the session's notes); a quant whose decode is
+  the GPU's (a profile's busy, not its reads) would be the case to try it again.
+- **the next matrices read into the Infinity Cache on the second stream** (mall: a layer's chain - the DeltaNet
+  pair 34 MB, then hc down / up and ssm_out, ~20 MB - those three streamed on the second stream as the pair starts;
+  the layers rotated, every read cold): slower at every width - a layer 319 us plain, 351-361 at 16 blocks, 389 at
+  64, 391-399 at 256 (the same outputs). the reads compete for the bandwidth the pair is using, and what they read
+  is not there for the matrices after - not kept.
+- **wave64** (gfx1151's 64-lane waves): its WMMA the same bits as wave32's - all 256 (lane, j) outputs of 4,096
+  random cases (w64: lane l's value j row 4 j + l / 16). a token's tile on it (t64: Q6_K's 128-value slabs, the 8
+  waves the K split, each partition's chain and the partials' order the library's - every row the same bits as
+  mm_run's), its 64 lanes a slab's chunks between them: 10240 x 2560 175 -> 190 GB/s, 2560 x 6144 170 -> 174, but
+  5120 x 8192 200 -> 193, 12288 x 2560 192 -> 186 - the loads in flight twice a wave's, the waves fewer and their
+  instructions two halves each. a wash; the library stays wave32. pushed further (each the same bits): the next
+  slab decoded ahead into registers (4 h8 a lane on wave64, cheap) 166-186 GB/s; a slab through half or a quarter
+  of the LDS (occupancy 6 -> 8 / 14 waves a SIMD) 142-162 / 105-120 - occupancy is not the bound, a partition's
+  chain is (each step after the one before: more of them, more round trips). and wave32's own spread across runs
+  (10240 x 2560: 175-188) is as wide as wave64's first gain - a hybrid would buy noise.
+
+### 0.5.5: DeepSeek's decode profiled, and WMMA's sums probed (2026-11-07, low-power)
+
+a plain decode token (UD-IQ1_M, a chat question, 64 tokens, rocprofv3): 1,201 kernels, 68.2 ms on the GPU - busy
+57.4, gaps 10.8 (7.7 the reads' waits). the dense mm 28.8 ms (203 launches) and wo_a's groups 5.9: ~6.6 GB of
+dense weights a token at ~185-190 GB/s; the resident experts (q8's gate_up 7.8, group_tok 4.9); ~16 small kernels
+a layer ~6.5 ms. the memory's ceiling (a plain 16-byte streaming read, 1 GiB): 242 GB/s - at low-power too (the
+profile slows the GPU's clocks, not the memory's).
+- **the shapes at a token** (dec_ds, from DRAM): q_b 191 GB/s, wo_b 192, wo_a's 8 groups 188, the Q8_0 shared
+  expert 199-203, the logits 192; the Q5_K shared expert 135, q_a 135, kv 99. at 225 GB/s the big ones ~29 -> ~24 ms.
+- **a lane's chunks consecutive in its row** (for wider loads: the same values to the same LDS places): slower -
+  q_b 185 -> 140 GB/s, wo_b 190 -> 172, the logits 191 -> 169 (the 16 lanes of a row read neighbours today; spread
+  over rows they do not, and the compiler merges nothing). wider loads need each type's block read by hand.
+- **WMMA's sums, for a VALU decode of the same bits** (wmma_sem: 4,096 random 16 x 16 x 16 cases - mixed
+  magnitudes, cancellation, a large accumulator - each output against a model of the hardware): an f16 x f16
+  product is exact in f32, but no model of the 16 products' and C's sum matches - in order, reversed, a tree, the
+  exact sum rounded to nearest or toward zero, groups of 4 exact, toward-zero trees in five pairings with C to
+  nearest, aligned adders of 20-40 bits: 23-38% of outputs each. its error against the exact sum up to 4 ulps and
+  more (4%), toward zero 3 times in 4; built cases fit a toward-zero tree with C to nearest, random ones do not. a
+  token's bits the prompt's therefore need the WMMA at a token too - the tile as it is.
+
+### 0.5.5: DeepSeek's resident set settled to a prompt - measured, not kept (2026-11-07, performance)
+
+why: after a prompt the resident set is the profile's (a prompt's steps pick nearly every expert, so the swaps - the
+coldest resident not picked in the step - all but stop), and a decode's first picks stream behind their routers.
+UD-IQ1_M, an 8K prompt then 64 decode tokens (dbench, 8 against 72 tokens, the difference): 4.7 experts streamed a
+token, 8.2 ms of a ~64 ms token waited on their reads - ~13%, the rest the GPU's.
+- **the settle** (after a step of 32 tokens or more, before the next smaller one: each layer's hottest streamed
+  experts - the prompt's picks - in place of its coldest resident ones, FWD_SWAP_MARGIN hotter, up to 16 a layer and
+  2 GiB of reads, pinned together then waited on and copied): the same bits (test_model_gpu: the decode's logits with
+  it off; every moved expert's memory its file's bytes - a map left unmoved caught there, not by the logits, the
+  coldest resident ones too rarely picked). 289 experts settled; plain 15.6 -> 14.9 tok/s, drafted 19.6 -> 18.4: the
+  decode's streamed picks 779 -> 738, 1,680 -> 1,585 - its reads cost more than they saved. a prompt's hottest
+  experts are not the ones its continuation reaches for next.
+- **the pool's alone** (no read: only the experts the pool still holds): 16 settled, 15.7 / 19.7 against 15.6 / 19.6.
+not kept (the diff in the session's notes). and the ~13% the reads are is the most any read-side lever can give
+here: the decode's ~56 ms on the GPU is the bigger part - next, profiled.
+
+### 0.5.5: Qwen's decode measured - what does not help (2026-11-07, performance)
+
+a plain decode token (rocprofv3, 64 steps after a 512-token prompt; the logits launch each step's end): 1,743
+kernels, 42.3 ms on the GPU - busy 38.4, the gaps 3.9 (2.2 us each). the dense mm 21.0 ms (400 launches), the
+experts' group 8.7 (144), the small F32 matvecs 3.0 (288), the rest ~5.7. llama.cpp's plain decode 26.2 tok/s to
+our 23.7: the gap is these kernels' efficiency at a token, not the launches.
+- **the dense matrices at a token** (dec1: each read from DRAM, the copies rotated past the cache): ~3.85 GB a
+  token at ~181 GB/s - the DeltaNet's qkv + gate 200 GB/s, ssm_out / attn_output 178, the logits 210, the hc
+  mixers' Q8_0 320 x 10240 / 10240 x 320 156-160, the shared expert's 129-134. at 230 GB/s 16.7 ms against 21.2:
+  ~4.5 ms the most a dense-mm change could give.
+- **the experts at a token each** (exp1: 10 experts a launch, the 512 rotated): IQ2_S gate / up 91 GB/s, IQ3_XXS
+  114, IQ4_XS 129, IQ4_NL down 160, Q2_0 98 - 8.2 ms a token. a launch's time its experts' (1: 9 us, 2: 21, 5: 41,
+  10: 58, 20: 97): each wave's K partition a chain of slabs, each slab's loads after the one before's work.
+- **the unroll at a token** (U, a lane's chunks in flight - the sums unmoved): 8 (the shapes') 8.2 ms, 4 8.6, 2
+  10.5, 1 13.6 - the loads in flight are what the chain needs, not the occupancy fewer registers buy.
+- **the next slab touched** (a lane's row of it loaded at the slab's start, its wait at the slab's end): experts
+  8.2 -> 8.4 ms, dense 21.2 -> 22.2. not kept.
+- **HIP graphs** (a token's step captured - 1,737 nodes - and replayed; built on the per-thread default stream):
+  decode 23.42 / 23.54 tok/s against 23.63 / 23.56 launched - ROCm's replay no faster than the launches. not kept.
+what is left at a token needs the K partitions' chains shorter, which is the sums' order: decode as it is stands
+until a design keeps prompt and decode the same bits another way.
+
 ### 0.5.4: the dense mm explored - what does not help (2026-11-06, performance)
 
 why: Strata's fast set (its docs: a 128 x 256 WMMA GEMM for the prompt's FP16 projections, from 4,096 tokens) reads a

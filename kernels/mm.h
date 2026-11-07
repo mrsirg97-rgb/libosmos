@@ -53,14 +53,20 @@ __device__ inline void x16_put(_Float16* x16, uint32_t t, uint32_t c, uint32_t x
 template <int G, int CT>
 constexpr bool kPipe = CT > 1 && G <= 2;
 
-// one column tile (a decode's 1-16 tokens) of a type of short slabs: each lane decodes its row of WMMA's A operand
-// itself (lane l: row l % 16; lanes 0-15 a step's even chunk, 16-31 its odd, the halves traded across the lane
-// halves), no LDS between the decode and the WMMA - the same f16 in the same places, so the same sums (scratch
-// m1.hip, one token: Q5_K's q_b 181 -> 143 us, wo_a's 8 groups 185 -> 147, the shared expert's 62 -> 60; the IQ
-// experts' and Q6_K's, Q8_0's slower or the same: their slabs' LDS layout is the better)
+// one column tile (a decode's 1-16 tokens): each lane decodes its row of WMMA's A operand itself (lane l: row l % 16;
+// lanes 0-15 a step's even chunk, 16-31 its odd, the halves traded across the lane halves), no LDS between the
+// decode and the WMMA - the same f16 in the same places, so the same sums. measured against the slab through LDS at a
+// token, each matrix read from DRAM (dec1 / dec_ds / exp1, low-power, 2026-11-07): Q6_K's long rows (128-value
+// slabs) +6-16% (Qwen's DeltaNet pair 183 -> 207 GB/s, attn_q 172 -> 200, its logits 179 -> 203; DeepSeek's wo_b
+// 193 -> 204, wo_a 191 -> 207), Q8_0 +13% (Qwen's hc mixers 156 / 147 -> 178 / 166), IQ4_NL +7% (142 -> 151),
+// IQ4_XS +5%; Q6_K's short rows (64-value slabs: DeepSeek's q_b, 1,280 columns) -7%, IQ2_S -10%, IQ3_XXS and Q2_0
+// level - those keep the LDS's. a token's dense reads Qwen 23.2 -> 20.7 ms, DeepSeek 34.2 -> 33.1 (Q5_K: m1.hip's
+// q_b 181 -> 143 us, its first)
 template <quant::Type T>
-constexpr bool kRegA = T == quant::kQ5_K || T == quant::kQ5_KR;
-
+constexpr bool kRegA = T == quant::kQ5_K || T == quant::kQ5_KR || T == quant::kQ6_K || T == quant::kQ8_0 ||
+                       T == quant::kIQ4_NL || T == quant::kIQ4_XS;
+template <quant::Type T, class S>
+constexpr bool kRegAShape = kRegA<T> && !(T == quant::kQ6_K && S::kSlab < 128);
 __device__ inline h8 lane_other_half(h8 v) {  // lane l ^ 16's 8 halves
   typedef uint32_t u4 __attribute__((ext_vector_type(4)));
   const u4 w = __builtin_bit_cast(u4, v);
@@ -88,7 +94,7 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
   const _Float16* xb[CT];  // each tile's fragments of this lane: its column, a step kFrag on
   for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
   f8 acc[CT] = {};
-  if constexpr (CT == 1 && kRegA<T>) {  // the A operand straight from the decode (kRegA)
+  if constexpr (CT == 1 && kRegAShape<T, S>) {  // the A operand straight from the decode (kRegA)
     for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
       h16 a[G], bx[G];
 #pragma unroll
@@ -155,6 +161,108 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
         for (int v = 1; v < S::kWaves; v++) s += part[(v * 8 + j) * kWave + lane];
         if (t < n) y[(uint64_t) t * ys + row0 + 2 * j + half] = s;
       }
+    }
+  }
+}
+
+// a prompt's GEMM (cols >= the shape's W slabs, many tokens): a block BM = 16 RM WR rows x BN = 16 RN WC tokens, its
+// 256 threads' waves WR x WC, wave (wr, wc) the RM x RN 16 x 16 tiles at rows 16 RM wr .., tokens 16 RN wc ... each
+// slab (BM rows x SL values of K) decoded once into LDS by the block - every wave's A - and each wave's x fragments
+// its own; two slabs' LDS, the next decoded under this one's WMMAs, a barrier a slab. the order is tile's: partition p (tile's wave p) its slabs p, p + W, ... each in its 16-value steps, one
+// WMMA chain a 16 x 16 tile from zero; the partitions in turn, a running sum (run = p 0's, then run += p's) - tile's
+// part[0] + part[1] + ... - so a token's bits are tile's, whatever the batch (test_mm_gpu)
+template <quant::Type T, class S, int RM, int RN, int WR, int WC>
+__global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w0, const uint8_t* __restrict__ w1,
+                                                    uint32_t rows0, uint32_t rows1, uint32_t cols,
+                                                    const _Float16* __restrict__ x16, uint32_t n,
+                                                    float* __restrict__ y0, float* __restrict__ y1, uint32_t ys0,
+                                                    uint32_t ys1) {
+  static_assert(WR * WC * kWave == 256, "8 waves");
+  constexpr int SL = S::kSlab, G = SL / kTile, W = S::kWaves, BM = kTile * RM * WR, BN = kTile * RN * WC;
+  constexpr int RL = SL + kPad, CPR = SL / quant::kChunk, CH = BM * CPR / 256;  // a thread's chunks a slab
+  static_assert((BM * CPR) % 256 == 0, "a slab's chunks whole");
+  __shared__ __attribute__((aligned(32))) _Float16 lds2[2][BM * RL];
+  const uint8_t* w = blockIdx.y ? w1 : w0;
+  const uint32_t rows = blockIdx.y ? rows1 : rows0, ys = blockIdx.y ? ys1 : ys0;
+  float* y = blockIdx.y ? y1 : y0;
+  const uint32_t row0 = blockIdx.x * BM, c0 = blockIdx.z * BN;
+  if (row0 >= rows) return;  // the whole block
+  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  const int wr = wave / WC, wc = wave % WC;
+  const _Float16* xb[RN];
+  bool live[RN];
+  for (int j = 0; j < RN; j++) {
+    const uint32_t t0 = c0 + (wc * RN + j) * kTile;
+    live[j] = t0 < n, xb[j] = x16 + x16_at(t0 + col, 0, cols);
+  }
+  f8 run[RM][RN], acc[RM][RN];
+  const uint32_t slabs = cols / SL;  // >= W (the launch's): every partition a slab at least
+  auto decode = [&](uint32_t k0, h8* out) {
+#pragma unroll
+    for (int c = 0; c < CH; c++) {
+      const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
+      const uint32_t row = row0 + r < rows ? row0 + r : rows - 1;
+      int kk;
+      out[c] = quant::decode_h<T>(quant::at<T>(w, row, cols, k0 / quant::kChunk + ck, &kk), kk);
+    }
+  };
+  auto put = [&](_Float16* buf, const h8* v) {
+#pragma unroll
+    for (int c = 0; c < CH; c++) {
+      const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
+      *(h8*) (buf + r * RL + ck * quant::kChunk) = v[c];
+    }
+  };
+  for (int i = 0; i < RM; i++)
+    for (int j = 0; j < RN; j++) acc[i][j] = f8{};
+  {
+    h8 v[CH];
+    decode(0, v);
+    put(lds2[0], v);
+  }
+  __syncthreads();
+  int p = 0, cur = 0;
+  uint32_t sl = 0;
+  for (;;) {
+    const uint32_t k0 = sl * SL;
+    // the slab after this one in the order: the partition's next, else the next partition's first
+    const bool more_p = sl + W < slabs;
+    const int np = more_p ? p : p + 1;
+    const uint32_t nsl = more_p ? sl + W : (uint32_t) np;
+    const bool next = np < W;
+    h8 v[CH];
+    if (next) decode(nsl * SL, v);
+    const _Float16* lds = lds2[cur];
+#pragma unroll
+    for (int g = 0; g < G; g++) {
+      h16 a[RM], b[RN];
+      for (int i = 0; i < RM; i++) a[i] = *(const h16*) (lds + ((wr * RM + i) * kTile + col) * RL + g * kTile);
+      for (int j = 0; j < RN; j++) b[j] = *(const h16*) (xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
+      for (int j = 0; j < RN; j++)
+        if (live[j])
+          for (int i = 0; i < RM; i++) acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[i], b[j], acc[i][j]);
+    }
+    if (!more_p) {  // the partition's sum done: into the running sum, the next from zero
+      for (int i = 0; i < RM; i++)
+        for (int j = 0; j < RN; j++) {
+          if (p == 0) run[i][j] = acc[i][j];
+          else
+            for (int e = 0; e < 8; e++) run[i][j][e] += acc[i][j][e];
+          acc[i][j] = f8{};
+        }
+    }
+    if (!next) break;
+    put(lds2[cur ^ 1], v);  // the other buffer: read last before the barrier ending the slab before
+    __syncthreads();
+    cur ^= 1, p = np, sl = nsl;
+  }
+  for (int j = 0; j < RN; j++) {
+    const uint32_t t = c0 + (wc * RN + j) * kTile + col;
+    if (t >= n) continue;
+    for (int i = 0; i < RM; i++) {
+      const uint32_t r = row0 + (wr * RM + i) * kTile;
+      if (r >= rows) continue;
+      for (int e = 0; e < 8; e++) y[(uint64_t) t * ys + r + 2 * e + half] = run[i][j][e];
     }
   }
 }

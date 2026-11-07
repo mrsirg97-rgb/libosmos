@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.5.5]: faster kernels, the same bits
+
+Every token the same bits as 0.5.4 (each benchmark's hash, both models). Against a 0.5.4 build, the same session
+(2026-11-07, `performance`, two rounds):
+
+| | 0.5.4 | 0.5.5 | |
+| --- | ---: | ---: | ---: |
+| Qwen prompt, 2K / 8K / 16K / 64K tokens | 835 / 744 / 717 / 652 | 903 / 831 / 810 / 727 | +8 to +13% |
+| Qwen decode, plain / MTP drafted | 23.5 / 40.1 | 27.1 / 45.9 | +15% / +14% |
+| DeepSeek UD-IQ1_M decode, plain | 16.3 | 17.1 | +5% |
+
+- **The prompt's GEMM** (`kernels/mm.h`'s gemm_kernel): a block 64 rows x 256 tokens, each weight slab decoded once
+  into LDS and shared by its waves, double-buffered; the K split's partitions walked in turn into a running sum -
+  the order of the sums the tile's, so the same bits. Q6_K / Q8_0 prompt matrices +21-40%.
+- **A token's A operand in registers**: at a decode token the weights decoded straight into WMMA's operand, no
+  LDS - more waves resident, the same chain (Q6_K's long rows, Q8_0, IQ4_NL / IQ4_XS; by type and slab).
+- **Qwen: the shared expert on a second stream** beside the routed experts at small steps (decode, a draft's
+  verify); a test forces the order so a missing wait cannot pass.
+- **Qwen: a step past 2,048 a layer's part at a time** (the cache-friendly 2K sub-batches) and its routed experts over
+  the whole step; the experts' activation written straight as the down's f16. The Qwen pack reads prompts in 4K
+  steps (+6 to +14% on long prompts, decode the same, +4 GiB).
+- Measured and not kept (DESIGN.md, "0.5.5"): a fused gate + up expert kernel, a post-prompt resident-set settle
+  for DeepSeek, HIP graphs, wider loads, an Infinity Cache prefetch stream, wave64 kernels (WMMA's bits the same,
+  the speed a wash), DeepSeek's shared expert on a second stream; and int8 (its per-block scales cap it below f16
+  on RDNA 3.5).
+
 ## [0.5.4]: Qwen's long prompts, and what does not help
 
 - **Qwen: the experts' tables placed an expert a block** for a step of more than 256 picks (a prompt's): a 16K prompt

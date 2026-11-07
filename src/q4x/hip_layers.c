@@ -16,10 +16,10 @@ static bool mm_on(Q4xForward *f, uint32_t type, const void *w0, uint32_t rows0, 
   for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS)
   {
     const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
-    ok = ((ready && n <= MM_MAX_TOKENS) || mm_x16(x + (uint64_t)k0 * xs, xs, m, cols, f->b.x16, f->b.overflow, NULL)) &&
+    ok = ((ready && n <= MM_MAX_TOKENS) || mm_x16(x + (uint64_t)k0 * xs, xs, m, cols, f->b.x16, f->b.overflow, f->st)) &&
          (w1 ? mm_run2(type, w0, rows0, y0 + (uint64_t)k0 * ys0, ys0, w1, rows1, y1 + (uint64_t)k0 * ys1, ys1, cols,
-                       f->b.x16, m, NULL)
-             : mm_run(type, w0, rows0, cols, f->b.x16, m, y0 + (uint64_t)k0 * ys0, ys0, NULL));
+                       f->b.x16, m, f->st)
+             : mm_run(type, w0, rows0, cols, f->b.x16, m, y0 + (uint64_t)k0 * ys0, ys0, f->st));
   }
   return ok;
 }
@@ -33,7 +33,7 @@ bool q4x_mat(Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
              uint32_t n, float *y, uint32_t ys, bool ready)
 {
   if (!mm_takes(t, rows, cols, xs, ys))
-    return mv_strided(TY(t), q4x_dev(f, t), rows, cols, x, xs, n, y, ys, NULL);
+    return mv_strided(TY(t), q4x_dev(f, t), rows, cols, x, xs, n, y, ys, f->st);
   return mm_on(f, TY(t), q4x_dev(f, t), rows, y, ys, NULL, 0, NULL, 0, cols, x, xs, n, ready);
 }
 
@@ -241,11 +241,10 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, k = (uint32_t)g->n_used, ff = (uint32_t)g->ff_exp;
-  const uint32_t sff = (uint32_t)g->ff_shexp, e = n * k;
+  const uint32_t e = n * k;
   Q4xExpertBounds bd;
   q4x_expert_bounds(e, E, &bd);
   const GgufTensor *t[Q4X_GROUP_TENSORS] = {L->exp_gate, L->exp_up, L->exp_down};
-  Q4xX16 sd;
   Q4xExpertTiles et = {.cnt = b->cnt, .gidx = b->gidx, .hidx = b->hidx, .xg = b->xg, .yg = b->yg, .xd = b->xd,
                        .yd = b->yd, .where = b->where, .off = b->eoff};
   for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
@@ -256,15 +255,39 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
          mm_x16_rows(b->mixed, D, b->gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
          experts(t[0], et.ptr[0], b, &bd, ff, D, b->xg, b->ga, b->yg) &&
          experts(t[1], et.ptr[1], b, &bd, ff, D, b->xg, b->up, b->yg) &&
-         q4x_swiglu(b->ga, b->up, (uint64_t)e * ff, b->ga, NULL, NULL) &&
-         mm_x16_rows(b->ga, ff, b->hidx, bd.slots, ff, b->xe16, b->overflow, NULL) &&
+         q4x_swiglu_rows(b->ga, b->up, ff, b->hidx, bd.slots, b->xe16, b->overflow, NULL) &&
          experts(t[2], et.ptr[2], b, &bd, D, ff, b->xd, b->y, b->yd) &&
-         /* b.x16 still the mixer's mixed: the experts' are their own (b.xe16) */
-         q4x_mat2(f, L->sh_gate, sff, b->shg, sff, L->sh_up, sff, b->shu, sff, D, b->mixed, D, n, n <= MM_MAX_TOKENS) &&
-         q4x_swiglu(b->shg, b->shu, (uint64_t)n * sff, b->shg, side(f, n, sff, &sd), NULL) &&
-         q4x_mat(f, L->sh_down, D, sff, b->shg, sff, n, b->sh, D, n <= MM_MAX_TOKENS) &&
-         mat(f, L->sh_gate_inp, 1, D, b->mixed, D, n, b->sl, 1) &&
+         (n > Q4X_SIDE_STEP || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
          q4x_moe_sum(b->y, b->where, b->w, n, k, D, b->sh, b->sl, b->out, NULL);
+}
+
+/* the shared expert and its gate's logit (b.sh, b.sl) - after the FFN's mixer, b.x16 its mixed (q4x_mix): a token's
+   own, so with the layer's part (a step past MM_MAX_TOKENS: a sub-batch at a time, b.x16 the mixer's still) */
+bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n)
+{
+  const Q4xGeometry *g = &f->w->geo;
+  Q4xBuf *b = &f->b;
+  const uint32_t D = (uint32_t)g->n_embd, sff = (uint32_t)g->ff_shexp;
+  Q4xX16 sd;
+  /* a small step's (decode, a draft's verify): the shared expert on the second stream, beside the routed experts -
+     both latency-bound at a few tokens, together nearer the memory's bandwidth (plain decode 23.9 -> 25.8 tok/s,
+     drafted 40.1 -> 43.6, low-power). it reads the mixer's outputs alone (b.mixed, b.x16) and writes b.sh, b.sl and
+     its own f16 into b.x16, which the routed experts do not touch (theirs b.xe16); q4x_moe_sum waits for it. the same
+     kernels on the same inputs: the same bits */
+  const bool side_stream = n <= Q4X_SIDE_STEP;
+  if (side_stream && (hipEventRecord(f->e_in, NULL) != hipSuccess || hipStreamWaitEvent(f->s2, f->e_in, 0) != hipSuccess))
+    return false;
+  if (side_stream)
+    f->st = f->s2;
+  if (side_stream && f->side_spin && !q4x_spin(f->side_spin, f->s2)) /* a test's: the shared expert last */
+    return false;
+  const bool ok = q4x_mat2(f, L->sh_gate, sff, b->shg, sff, L->sh_up, sff, b->shu, sff, D, b->mixed, D, n,
+                           n <= MM_MAX_TOKENS) &&
+                  q4x_swiglu(b->shg, b->shu, (uint64_t)n * sff, b->shg, side(f, n, sff, &sd), f->st) &&
+                  q4x_mat(f, L->sh_down, D, sff, b->shg, sff, n, b->sh, D, n <= MM_MAX_TOKENS) &&
+                  mat(f, L->sh_gate_inp, 1, D, b->mixed, D, n, b->sl, 1);
+  f->st = NULL;
+  return ok && (!side_stream || hipEventRecord(f->e_out, f->s2) == hipSuccess);
 }
 
 /* the step's tokens' rows already in b.ple_rows */

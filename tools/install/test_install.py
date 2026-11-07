@@ -70,7 +70,8 @@ class Manifest(unittest.TestCase):
         q = m["packs"]["qwen38-ud-iq3_xxs"]
         self.assertEqual(q["drafter_kind"], "mtp")                            # its MTP head: one GGUF
         self.assertEqual((q["table"], q["picks"], q["overlay"]), (None, None, None))  # resident: no table, no picks
-        self.assertEqual(q["settings"], {"max_context": 262144})               # no budget or guess: the family refuses
+        self.assertEqual(q["settings"], {"max_context": 262144, "max_tokens": 4096})  # no budget or guess: the family
+        # refuses; 4K prompt steps: prompts +5-7%, drafted answers the same (every weight resident), +4 GiB
         self.assertEqual([m["files"][f]["bytes"] for f in q["shards"]],
                          [10946618, 49946027488, 4869325888, 28800138432])
 

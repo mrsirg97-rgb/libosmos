@@ -89,7 +89,8 @@ static bool step(Q4xForward *f, Q4xSeq *const *s, const int32_t *tok, const int3
       tokens_in(f, tok, n) && head_in(f, n) &&
       q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n, false) &&
       q4x_attention(f, L, c, n, n) && /* each block's output into b.h in the next mixer's norm launch */
-      q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n, true) && q4x_moe(f, L, n) &&
+      q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n, true) &&
+      q4x_moe_shared(f, L, n) && q4x_moe(f, L, n) &&
       q4x_mix(f, mtp->head_norm, mtp->head_down, mtp->head_up, NULL, n, true) &&
       copy(m->hin, b->h, (uint64_t)n * hc * D * F) && /* the residual the head mixer read: the next draft's h */
       q4x_mat(f, f->w->output, dv, D, b->mixed, D, n, m->logits, dv, n <= MM_MAX_TOKENS) && /* the head mixer's x16 */

@@ -89,7 +89,7 @@
       "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": null,
       "rig": {"max_tokens": 65536, "reserve": 65536, "efforts": ["low", "medium", "high"], "effort": "high",
               "aliases": ["qwen"]},
-      "settings": {"max_context": 262144}
+      "settings": {"max_context": 262144, "max_tokens": 4096}
     },
     "qwen38-ud-iq3_xxs-1m": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS at 1M context (YaRN, factor 4: the model card's; slightly weaker on short text)",
