@@ -52,7 +52,8 @@ registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) and asks before
 Both packs run one context length: **1,048,576 tokens**, with up to 256K tokens a reply (its reasoning and answer).
 
 Qwen3.8-Flash-Next: its pack, unsloth's UD-IQ3_XXS 4 shards and its MTP head (~81 GB) at a pinned commit, a
-**262,144-token** context, up to 64K tokens a reply:
+**262,144-token** context, up to 64K tokens a reply, prompts read in 4,096-token steps (`"max_tokens"` in its
+`osmos.json`):
 
 ```sh
 python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve      # or --rig (its row's alias: qwen)
@@ -113,6 +114,8 @@ each engine in a fresh process; tok/s the mean of two interleaved rounds, the en
 
 Plain decode is a tie; reading prompts (+9 to +27% as shipped, +36 to +37% at 8K in 8K steps), drafting (+18 to
 +21%) and several conversations at once (20% less time, 21% less energy, ~3 GiB less memory) are where osmos leads.
+0.5.5 against a 0.5.4 build (2026-11-07, `performance`, UD-IQ1_M, the same three questions, every hash the same):
+plain decode **+5%** (16.3 -> 17.1 tok/s), drafted and prompts level (DeepSeek's prompts wait on the SSD).
 osmos's answers hash the same in every run and configuration, across 0.1.3, 0.2.0, 0.3.0, 0.3.2, 0.4.0 and 0.5.x;
 Maya's greedy decode varied run to run when measured on 1.1.46 (DESIGN.md), not re-measured since.
 
@@ -132,22 +135,24 @@ context's attention state is ~0.85 GiB.
 
 ### Qwen3.8-Flash-Next against llama.cpp
 
-UD-IQ3_XXS, 2026-11-06, `performance`; llama.cpp 68d20b8 (HIP, all layers on the GPU, flash attention, 2,048-token
-batches as osmos's steps), `llama-bench` 2 runs; osmos `tools/bench/q4x_bench`, greedy:
+UD-IQ3_XXS, 2026-11-07, `performance`, osmos `tools/bench/q4x_bench` (greedy; prompts in 4,096-token steps as the
+pack reads them, two rounds); llama.cpp 68d20b8 (HIP, all layers on the GPU, flash attention), `llama-bench` 2 runs
+the same session, each length at its better batch (2,048 or 4,096); its plain decode from 2026-11-06:
 
-| | osmos 0.5.1 | llama.cpp | |
+| | osmos 0.5.5 | llama.cpp | |
 | --- | ---: | ---: | ---: |
-| Prompt, 2,048 tokens | **790** | 520 | +52% |
-| Prompt, 8,000 tokens | **714** | 489 (8,192) | +46% |
-| Prompt, 16,384 tokens | **696** | 463 | +50% |
-| Prompt, 65,536 tokens | 640 | not measured | |
-| Decode, MTP drafted | **40.5** | not measured | |
-| Decode, plain | 23.7 | **26.2** | -10% |
-| Decode at 16K context, plain | 22.4 | **23.1** | -3% |
+| Prompt, 2,048 tokens | **903** | 483 | +87% |
+| Prompt, 8,000 tokens | **831** | 493 (8,192) | +69% |
+| Prompt, 16,384 tokens | **810** | 498 | +63% |
+| Prompt, 65,536 tokens | **727** | 362 | 2.0x |
+| Decode, MTP drafted | **45.9** | not measured | |
+| Decode, plain | **27.1** | 26.2 | +3% |
+| Decode at 16K context, plain | **25.7** | 23.1 | +11% |
 | Perplexity, 8,192 tokens | **2.7143** | 2.7193 (its F16 cache) | |
 | Perplexity, 16,384 tokens | 2.2732 | **2.2721** (F16), 2.2675 (Q8_0) | +0.05% |
 
-Plain decode is llama.cpp's; reading prompts and drafting are osmos's. Both run Qwen's sparse attention (QSA: past
+osmos leads at every length and both ways of decoding (0.5.4: plain decode 23.5, -10%; 0.5.5's same-bits gains in
+CHANGELOG.md). Both run Qwen's sparse attention (QSA: past
 2,048 keys, a token attends to its top 512 blocks of 4); osmos picks llama.cpp's own blocks on its tensors (949 of 949
 tokens past the budget, `test_q4x_qsa_gpu`). osmos keeps the cache in Q8_0 (llama.cpp in F16: on its Q8_0 cache its
 perplexity is the right column's). The perplexity difference at 16K is the spread two forwards' roundings make
