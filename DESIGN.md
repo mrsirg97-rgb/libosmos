@@ -2404,6 +2404,28 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
   0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
 
+### 0.5.5: Qwen's decode measured - what does not help (2026-11-07, performance)
+
+a plain decode token (rocprofv3, 64 steps after a 512-token prompt; the logits launch each step's end): 1,743
+kernels, 42.3 ms on the GPU - busy 38.4, the gaps 3.9 (2.2 us each). the dense mm 21.0 ms (400 launches), the
+experts' group 8.7 (144), the small F32 matvecs 3.0 (288), the rest ~5.7. llama.cpp's plain decode 26.2 tok/s to
+our 23.7: the gap is these kernels' efficiency at a token, not the launches.
+- **the dense matrices at a token** (dec1: each read from DRAM, the copies rotated past the cache): ~3.85 GB a
+  token at ~181 GB/s - the DeltaNet's qkv + gate 200 GB/s, ssm_out / attn_output 178, the logits 210, the hc
+  mixers' Q8_0 320 x 10240 / 10240 x 320 156-160, the shared expert's 129-134. at 230 GB/s 16.7 ms against 21.2:
+  ~4.5 ms the most a dense-mm change could give.
+- **the experts at a token each** (exp1: 10 experts a launch, the 512 rotated): IQ2_S gate / up 91 GB/s, IQ3_XXS
+  114, IQ4_XS 129, IQ4_NL down 160, Q2_0 98 - 8.2 ms a token. a launch's time its experts' (1: 9 us, 2: 21, 5: 41,
+  10: 58, 20: 97): each wave's K partition a chain of slabs, each slab's loads after the one before's work.
+- **the unroll at a token** (U, a lane's chunks in flight - the sums unmoved): 8 (the shapes') 8.2 ms, 4 8.6, 2
+  10.5, 1 13.6 - the loads in flight are what the chain needs, not the occupancy fewer registers buy.
+- **the next slab touched** (a lane's row of it loaded at the slab's start, its wait at the slab's end): experts
+  8.2 -> 8.4 ms, dense 21.2 -> 22.2. not kept.
+- **HIP graphs** (a token's step captured - 1,737 nodes - and replayed; built on the per-thread default stream):
+  decode 23.42 / 23.54 tok/s against 23.63 / 23.56 launched - ROCm's replay no faster than the launches. not kept.
+what is left at a token needs the K partitions' chains shorter, which is the sums' order: decode as it is stands
+until a design keeps prompt and decode the same bits another way.
+
 ### 0.5.4: the dense mm explored - what does not help (2026-11-06, performance)
 
 why: Strata's fast set (its docs: a 128 x 256 WMMA GEMM for the prompt's FP16 projections, from 4,096 tokens) reads a
