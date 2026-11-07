@@ -2419,6 +2419,18 @@ the same bits at every count, each slower at 2,048 tokens:
 what is left is the GEMM rewritten whole (the next slab's weights loaded under this one's WMMAs, at the same K split):
 a large change, and its smaller form (x double-buffered, above) was slower. the dense mm is 24% of a 16K prompt, so a
 20% faster kernel is ~5% of it; the attention (18%, and growing with the prompt's square) is the better next look.
+- **the weights decoded to f16 once, then the same tile on them** (no decode, no LDS but the sum's: the same bits):
+  slower - 10240 x 2560 at 2,048 tokens 3.76 -> 5.28 ms with the decode, 4.93 without (the f16 2.4x the Q6_K's
+  bytes); the row blocks' token blocks side by side 7.3-7.7. the decode in the tile is cheaper than the bytes it
+  saves: the bound is the waves' own operands, none shared - a GEMM sharing them (a block a 64 x 128 tile, the
+  partitions in turn, a running sum: the same order) is what is left, its barriers to be hidden.
+- **the tables' placement for few picks** (kPlaceInline, 256): a decode token's 10 picks placed by the tiles kernel
+  itself, not a second launch - the second cost decode 1.2% (23.8 -> 23.5 tok/s, 3 of 3 rounds); now 23.65 against
+  0.5.3's 23.67, the same tables (test_q4x_moe_gpu: 30 picks and 2,560).
+- **DeepSeek's prompt step, the packs' settings** (UD-IQ1_M, 1M context, drafted, budget auto; apibench through
+  osmos-api, two rounds each): 2K steps 262 / 355 / 455 tok/s (2K / 4K / 16K prompts), drafted answers 32.7 / 20.0 /
+  27.8; 4K 262 / 390 / 536, -1 to -2%; 8K 253 / 381 / 578, -6 to -10% (the budget 99.9 -> 98.6 -> 95.8 GiB: fewer
+  experts resident). the packs keep 2K; osmos-api's `max_tokens` the choice.
 
 ### 0.5.3: DeepSeek against Maya 1.1.56, and bigger prompt steps (2026-11-06, performance)
 

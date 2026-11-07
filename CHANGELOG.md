@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.4]: Qwen's long prompts, and what does not help
+
+- **Qwen: the experts' tables placed an expert a block** for a step of more than 256 picks (a prompt's): a 16K prompt
+  +2.8% (against a v0.5.3 build, two interleaved rounds: 701 / 649 -> 716 / 673 tok/s); decode and 2K / 4K prompts
+  unchanged (decode 23.65 against 23.67 tok/s, a 2K prompt 785 against 786); every hash the same as 0.5.3's.
+- **osmos-api: a pack's `max_tokens`** (osmos-serve's `--max-tokens`, a prompt step's tokens), unset by default. The
+  DeepSeek packs keep 2K steps: at 4K a 4K prompt +10% and a 16K +18%, drafted answers -1 to -2%; at 8K +8% / +27%,
+  but -6 to -10% drafted (the step's buffers ~4 GiB of the experts' budget at 1M context).
+- Measured and not kept (DESIGN.md, "0.5.4"): the dense mm with more rows a block, with a decoded slab shared by more
+  tokens, and on weights decoded to f16 first (each the same bits, each slower); the matmuls' f16 a step's whole
+  (parked: 8K steps level with 2K for Qwen, their activations past the cache).
+
 ## [0.5.3]: measured against Maya 1.1.56
 
 - Docs: DeepSeek measured against Project Maya 1.1.56 on the same files and session (README, the one-pager): prompts

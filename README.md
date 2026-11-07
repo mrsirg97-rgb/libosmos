@@ -46,6 +46,8 @@ checks every SHA-256, writes the pack's `osmos.json` and starts **osmos-api**: a
 (`POST /v1/chat/completions`, streamed or whole, with tools and reasoning; `GET /v1/models`; `GET /health`) on port
 8091. `--have <dir>` uses files you already have; `--abliterated` adds huihui-ai's patch as an overlay; `--rig`
 registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) and asks before making it the default model.
+`"max_tokens": 4096` in a pack's `osmos.json` reads prompts in 4K steps (the default 2K): DeepSeek's long prompts
+10-18% faster, its drafted answers 1-2% slower (fewer experts fit beside the bigger step).
 
 Both packs run one context length: **1,048,576 tokens**, with up to 256K tokens a reply (its reasoning and answer).
 

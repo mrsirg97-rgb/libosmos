@@ -63,6 +63,10 @@ __global__ void route_kernel(const float* logits, uint32_t n_exp, uint32_t k, in
 // and its entries in each run, then a thread an expert lays its picks out in pick order and writes its parts - the
 // same layout however it runs
 constexpr int kPart = 128;  // an entry's most tokens: 8 tiles
+// a step's picks at most this many: each expert's thread places its own picks itself (a scan of the step's picks, cheap
+// when they are few: a decode token's 10, a draft's tens), not place_kernel - one launch, not two (decode 23.5 -> 23.8
+// tok/s). the same tables either way (test_q4x_moe_gpu: a step of 30 picks and one of 2,560 against a stable sort)
+constexpr uint32_t kPlaceInline = 256;
 __device__ inline int run_of(int c) { return c <= 16 ? 0 : c <= 32 ? 1 : c <= 64 ? 2 : 3; }
 
 __global__ __launch_bounds__(kGroupThreads) void tiles_kernel(const int32_t* ids, uint32_t n, uint32_t k,
@@ -102,6 +106,11 @@ __global__ __launch_bounds__(kGroupThreads) void tiles_kernel(const int32_t* ids
     t.off[e] = sc[0][e], t.off[n_exp + e] = sc[1][e], t.off[2 * n_exp + e] = c;  // place_kernel's
     if (!c) continue;
     const int p0 = sc[0][e], s0 = sc[1][e];
+    if (n <= kPlaceInline) {  // the picks in pick order, this thread's expert's
+      int q = p0;
+      for (uint32_t i = 0; i < n && q < p0 + c; i++)
+        if (ids[i] == (int32_t) e) t.where[i] = q, t.gidx[s0 + q - p0] = (int32_t) (i / k), t.hidx[s0 + q - p0] = q, q++;
+    }
     for (int s = s0 + c; s < s0 + own(e, 1); s++) t.gidx[s] = -1, t.hidx[s] = -1;
     int at[Q4X_TILE_RUNS];
     for (int r = 0; r < Q4X_TILE_RUNS; r++) at[r] = (int) bd.first[r] + sc[2 + r][e];
@@ -198,7 +207,7 @@ extern "C" bool q4x_expert_tiles(const int32_t* ids, uint32_t n, uint32_t k, uin
   q4x_expert_bounds(n, n_exp, &bd);
   tiles_kernel<<<1, kGroupThreads, 0, st(stream)>>>(ids, n, k, n_exp, dim, ff, *t, bd);
   if (!ok()) return false;
-  place_kernel<<<n_exp, kThreads, 0, st(stream)>>>(ids, n, k, n_exp, *t);  // the picks placed, an expert a block
+  if (n > kPlaceInline) place_kernel<<<n_exp, kThreads, 0, st(stream)>>>(ids, n, k, n_exp, *t);  // an expert a block
   return ok();
 }
 
