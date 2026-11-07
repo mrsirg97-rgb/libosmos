@@ -2428,6 +2428,12 @@ rows against the one batch's: the wait left out, it fails at the first.
   the layers rotated, every read cold): slower at every width - a layer 319 us plain, 351-361 at 16 blocks, 389 at
   64, 391-399 at 256 (the same outputs). the reads compete for the bandwidth the pair is using, and what they read
   is not there for the matrices after - not kept.
+- **wave64** (gfx1151's 64-lane waves): its WMMA the same bits as wave32's - all 256 (lane, j) outputs of 4,096
+  random cases (w64: lane l's value j row 4 j + l / 16). a token's tile on it (t64: Q6_K's 128-value slabs, the 8
+  waves the K split, each partition's chain and the partials' order the library's - every row the same bits as
+  mm_run's), its 64 lanes a slab's chunks between them: 10240 x 2560 175 -> 190 GB/s, 2560 x 6144 170 -> 174, but
+  5120 x 8192 200 -> 193, 12288 x 2560 192 -> 186 - the loads in flight twice a wave's, the waves fewer and their
+  instructions two halves each. a wash; the library stays wave32.
 
 ### 0.5.5: DeepSeek's decode profiled, and WMMA's sums probed (2026-11-07, low-power)
 
