@@ -2404,6 +2404,23 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
   0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
 
+### 0.5.5: DeepSeek's resident set settled to a prompt - measured, not kept (2026-11-07, performance)
+
+why: after a prompt the resident set is the profile's (a prompt's steps pick nearly every expert, so the swaps - the
+coldest resident not picked in the step - all but stop), and a decode's first picks stream behind their routers.
+UD-IQ1_M, an 8K prompt then 64 decode tokens (dbench, 8 against 72 tokens, the difference): 4.7 experts streamed a
+token, 8.2 ms of a ~64 ms token waited on their reads - ~13%, the rest the GPU's.
+- **the settle** (after a step of 32 tokens or more, before the next smaller one: each layer's hottest streamed
+  experts - the prompt's picks - in place of its coldest resident ones, FWD_SWAP_MARGIN hotter, up to 16 a layer and
+  2 GiB of reads, pinned together then waited on and copied): the same bits (test_model_gpu: the decode's logits with
+  it off; every moved expert's memory its file's bytes - a map left unmoved caught there, not by the logits, the
+  coldest resident ones too rarely picked). 289 experts settled; plain 15.6 -> 14.9 tok/s, drafted 19.6 -> 18.4: the
+  decode's streamed picks 779 -> 738, 1,680 -> 1,585 - its reads cost more than they saved. a prompt's hottest
+  experts are not the ones its continuation reaches for next.
+- **the pool's alone** (no read: only the experts the pool still holds): 16 settled, 15.7 / 19.7 against 15.6 / 19.6.
+not kept (the diff in the session's notes). and the ~13% the reads are is the most any read-side lever can give
+here: the decode's ~56 ms on the GPU is the bigger part - next, profiled.
+
 ### 0.5.5: Qwen's decode measured - what does not help (2026-11-07, performance)
 
 a plain decode token (rocprofv3, 64 steps after a 512-token prompt; the logits launch each step's end): 1,743
