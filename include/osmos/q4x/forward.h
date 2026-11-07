@@ -28,6 +28,7 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
                                char err[Q4X_FWD_ERR]);
 void q4x_forward_destroy(Q4xForward *f);
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
+void q4x_forward_side_spin(Q4xForward *f, uint32_t us);
 
 Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR]);
 void q4x_seq_destroy(Q4xSeq *s);
@@ -65,6 +66,11 @@ Q4xForward
 q4x_forward_create
   the weights uploaded and the step's buffers for max_tokens tokens; NULL with why where the GPU's memory or a read
   refuses. max_ctx: a sequence's most positions (at most OPS_Q4X_MAX_KEYS).
+
+q4x_forward_side_spin
+  a test's: each small step's shared expert (the second stream's: q4x_moe_shared) after ~us of that stream's time -
+  so the routed experts end first, and anything that read the shared expert without waiting would read it stale.
+  0 (the default): none.
 
 q4x_forward_probe
   fn sees each named step's output (the dump's names: l_last a layer, result_norm) on the device, n floats,

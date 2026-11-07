@@ -2404,6 +2404,20 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
   0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
 
+### 0.5.5: Qwen's shared expert beside its routed ones - decode +8% (2026-11-07, low-power)
+
+the decode's kernels are latency-bound (one at a time 78-83% of the memory's 242 GB/s, the small ones far less), so
+two independent ones at once fill more of it. a small step's (16 tokens or fewer: decode, a draft's verify) shared
+expert runs on a second stream (non-blocking: the null stream's implicit sync would serialize it) - an event after
+the mixer (its inputs, b.mixed and the side copy in b.x16) and one at its end, which q4x_moe_sum waits on; the
+routed experts meanwhile on the null stream, their f16 their own (b.xe16). the same kernels on the same inputs:
+the same bits (every hash; the q4x tests). a race is not something the outputs show by chance - the routed
+experts take longer, so a missing wait passed every test - so test_q4x_forward_gpu forces the order
+(q4x_forward_side_spin: ~2 ms of the second stream's time before each shared expert) and checks single steps'
+rows against the one batch's: the wait left out, it fails at the first.
+- plain decode (512 + 128, two rounds alternating) 23.97 / 23.80 -> 25.83 / 25.69 tok/s (+7.9%); the MTP head
+  drafting 40.25 / 40.01 -> 43.69 / 43.59 (+8.7%; at one-token steps alone +1.9 - the verify steps are its).
+
 ### 0.5.5: DeepSeek's decode profiled, and WMMA's sums probed (2026-11-07, low-power)
 
 a plain decode token (UD-IQ1_M, a chat question, 64 tokens, rocprofv3): 1,201 kernels, 68.2 ms on the GPU - busy

@@ -110,6 +110,7 @@ bool q4x_expert_tiles(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp
                       const Q4xExpertTiles *t, void *stream);
 bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
 bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, const Q4xX16 *side, void *stream);
+bool q4x_spin(uint32_t us, void *stream); /* a test's: at least ~us of the stream's time, nothing computed */
 bool q4x_swiglu_rows(const float *g, const float *u, uint32_t ff, const int32_t *idx, uint32_t slots, void *x16,
                      int32_t *overflow, void *stream);
 bool q4x_moe_sum(const float *y, const int32_t *where, const float *w, uint32_t n_tok, uint32_t k, uint32_t dim,

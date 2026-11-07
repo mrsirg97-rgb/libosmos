@@ -251,6 +251,20 @@ int main() {
                           &logits[(size_t) (kTok - 1) * vocab]));
   std::printf("  128 + 128 and 255 + 1: the logits the bits of the one batch\n");
   q4x_seq_destroy(s);
+  {  // small steps' shared expert on the second stream forced to end last (q4x_forward_side_spin): 248 then 8 single
+     // steps, each row the one batch's - a read of it without the wait would see the step before's
+    constexpr uint32_t kSpinUs = 2000, kSingles = 8;
+    q4x_forward_side_spin(f, kSpinUs);
+    s = q4x_seq_create(f, ferr);
+    CHECK(s && q4x_batch(f, s, ids.data(), kTok - kSingles, 0, ferr));
+    for (uint32_t t = kTok - kSingles; t < kTok; t++) {
+      CHECK(q4x_batch(f, s, ids.data() + t, 1, 0, ferr));
+      CHECK(std::memcmp(host_of(q4x_logits(f), vocab).data(), &logits[(size_t) t * vocab], vocab * 4) == 0);
+    }
+    q4x_forward_side_spin(f, 0);
+    std::printf("  single steps with the shared expert forced to end last: each row the one batch's\n");
+  }
+  q4x_seq_destroy(s);
   shared_steps(f, ids, logits, vocab);
   q4x_forward_destroy(f);
   long_step(w, ids, vocab);  // a forward of its own (the first's weights freed first)

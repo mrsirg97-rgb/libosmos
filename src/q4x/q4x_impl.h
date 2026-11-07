@@ -45,6 +45,7 @@ typedef struct Q4xMtpBuf
   float *pin_p;
 } Q4xMtpBuf;
 
+#define Q4X_SIDE_STEP MM_TILE /* a step this small or smaller: the second stream (decode, a draft's verify) */
 #define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_forward.c's table) */
 
 struct Q4xForward
@@ -58,6 +59,13 @@ struct Q4xForward
   Q4xMtpBuf m;
   q4x_probe_fn probe;
   void *probe_arg;
+  /* a small step's second stream (q4x_moe_shared: the shared expert beside the routed ones): the stream the matmuls
+     launch on now (NULL, or s2), s2 itself (non-blocking: the null stream waits on none of it), its events - in, the
+     mixer done; out, the shared expert done */
+  void *st;
+  hipStream_t s2;
+  hipEvent_t e_in, e_out;
+  uint32_t side_spin; /* q4x_forward_side_spin: a test's delay before the shared expert, on s2 (0: none) */
   /* a step past MM_MAX_TOKENS (hip_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
      sub-batch's rows; and its runs' sequences at a sub-batch's start (their rings' cur and positions moved on) */
   struct

@@ -159,6 +159,12 @@ void q4x_forward_destroy(Q4xForward *f)
   for (size_t i = 0; i < offsetof(Q4xBuf, pin_rows) / sizeof(void *); i++)
     hipFree(bufs[i]);
   hipHostFree(f->b.pin_rows), hipHostFree(f->b.pin_tok), hipHostFree(f->b.pin_overflow), hipFree(f->b.logits);
+  if (f->s2)
+    (void)hipStreamDestroy(f->s2);
+  if (f->e_in)
+    (void)hipEventDestroy(f->e_in);
+  if (f->e_out)
+    (void)hipEventDestroy(f->e_out);
   free(f->sub_seq);
   free(f);
 }
@@ -172,6 +178,10 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
   if (!f)
     return q4x_fail(err, "out of memory"), NULL;
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens;
+  if (hipStreamCreateWithFlags(&f->s2, hipStreamNonBlocking) != hipSuccess ||
+      hipEventCreateWithFlags(&f->e_in, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&f->e_out, hipEventDisableTiming) != hipSuccess)
+    return q4x_fail(err, "a stream or event refused"), free(f), NULL;
   if (!(f->sub_seq = calloc(Q4X_MAX_RUNS, sizeof *f->sub_seq)))
     return q4x_fail(err, "out of memory"), free(f), NULL;
   if (!q4x_rope((uint32_t)w->geo.rope_dim, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))
@@ -181,6 +191,12 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
       (mtp && (!upload(mtp->model, &f->mtp_dev, err) || !mtp_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;
   return f;
+}
+
+void q4x_forward_side_spin(Q4xForward *f, uint32_t us)
+{
+  if (f)
+    f->side_spin = us;
 }
 
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg)

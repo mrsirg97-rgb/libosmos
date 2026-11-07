@@ -243,6 +243,17 @@ extern "C" bool q4x_swiglu(const float* g, const float* u, uint64_t n, float* y,
   return ok();
 }
 
+__global__ void spin_kernel(uint64_t cycles) {
+  const uint64_t t0 = clock64();
+  while (clock64() - t0 < cycles) __builtin_amdgcn_s_sleep(8);
+}
+
+extern "C" bool q4x_spin(uint32_t us, void* stream) {
+  constexpr uint64_t kCyclesUs = 100;  // clock64's counter: ~100 MHz on gfx1151 (s_memrealtime's) - a lower bound
+  spin_kernel<<<1, 32, 0, st(stream)>>>((uint64_t) us * kCyclesUs);
+  return ok();
+}
+
 extern "C" bool q4x_moe_sum(const float* y, const int32_t* where, const float* w, uint32_t n_tok, uint32_t k,
                             uint32_t dim, const float* shared, const float* shared_logit, float* out, void* stream) {
   if (!y || !where || !w || !shared || !shared_logit || !out || !n_tok || !k || !dim) return false;
