@@ -217,6 +217,26 @@ extern "C" bool q4x_gather(const float* src, const int32_t* rows, uint32_t n, ui
   return ok();
 }
 
+// a thread a slot's value: swiglu_kernel's expression, then x16_rows_kernel's rounding (mm::x16_put)
+__global__ void swiglu_rows_kernel(const float* g, const float* u, uint32_t ff, const int32_t* idx, uint32_t slots,
+                                   _Float16* x16, int32_t* overflow) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) slots * ff) return;
+  const uint32_t s = (uint32_t) (i / ff), c = (uint32_t) (i % ff);
+  const int32_t r = idx[s];
+  const uint64_t at = (uint64_t) (r >= 0 ? r : 0) * ff + c;
+  mm::x16_put(x16, s, c, ff, r >= 0 ? silu(g[at]) * u[at] : 0.0f, overflow);
+}
+
+extern "C" bool q4x_swiglu_rows(const float* g, const float* u, uint32_t ff, const int32_t* idx, uint32_t slots,
+                                void* x16, int32_t* overflow, void* stream) {
+  if (!g || !u || !idx || !x16 || !overflow || !slots || !ff || ff % mm::kTile) return false;
+  const uint64_t work = (uint64_t) slots * ff;
+  swiglu_rows_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, st(stream)>>>(
+      g, u, ff, idx, slots, (_Float16*) x16, overflow);
+  return ok();
+}
+
 extern "C" bool q4x_swiglu(const float* g, const float* u, uint64_t n, float* y, const Q4xX16* side, void* stream) {
   if (!g || !u || !y || !n) return false;
   swiglu_kernel<<<grid(n), kThreads, 0, st(stream)>>>(g, u, n, y, side_of(side));

@@ -110,6 +110,8 @@ bool q4x_expert_tiles(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp
                       const Q4xExpertTiles *t, void *stream);
 bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
 bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, const Q4xX16 *side, void *stream);
+bool q4x_swiglu_rows(const float *g, const float *u, uint32_t ff, const int32_t *idx, uint32_t slots, void *x16,
+                     int32_t *overflow, void *stream);
 bool q4x_moe_sum(const float *y, const int32_t *where, const float *w, uint32_t n_tok, uint32_t k, uint32_t dim,
                  const float *shared, const float *shared_logit, float *out, void *stream);
 
@@ -263,6 +265,11 @@ q4x_gather
 
 q4x_swiglu
   y[i] = silu(g[i]) u[i].
+
+q4x_swiglu_rows
+  the experts' activation straight into the down's f16 (x16, slots rows of ff, mm's tiles): slot s's column c
+  silu(g[r][c]) u[r][c] for its row r = idx[s] (-1: zero), rounded as mm_x16_rows rounds - q4x_swiglu then
+  mm_x16_rows's bytes, without the F32 between them (overflow set past f16's range). ff a multiple of 16.
 
 q4x_moe_sum
   out[t][d] = (sum over j, in order, of w[t][j] y[where[t k + j]][d]) + sigmoid(shared_logit[t]) shared[t][d]: the experts'

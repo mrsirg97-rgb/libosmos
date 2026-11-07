@@ -2386,6 +2386,17 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   (+7%), 4K 634 / 647 -> 703 / 745 (+13%), 2K 705 / 668 -> 776 / 735 (+10%), 512 +3%; decode unchanged (it is tile's).
 - DeepSeek (UD-IQ1_M, dbench, greedy; two interleaved rounds): every stream 5ca48d476414fd50 (0.5.3's); 2K 259 / 251
   -> 263 / 258 tok/s (+2%), 8K 387 / 386 -> 391 / 387 (+0.6%) - its prompt the SSD's, its dense mm a small share.
+- **a step past MM_MAX_TOKENS a layer's part at a time** (hip_step.c: the n-gram layer, the mixers, the DeltaNet or
+  attention and the shared expert a sub-batch of 2,048 - b's token rows moved to it, its runs' parts at their
+  positions and rings' cur - then the routed experts over the step whole): the same bits (test_q4x_forward_gpu: a
+  step of 3,000, two sequences and one, against steps within 2,048; a ring's cur or a position one off caught). a
+  16K prompt (profiled, one session) 2K -> 8K steps 25.89 -> 25.24 s: the experts' matmuls -0.97 s at ~160 tokens
+  an expert, their activation +0.31 and moe_sum +0.19 (the experts' F32 rows out of the cache) - timed 2-3% (the
+  box drifted 3% between rounds; the parked whole-step x16 not needed: each part's f16 its own).
+- **the experts' activation straight into the down's f16** (q4x_swiglu_rows: q4x_swiglu then mm_x16_rows's bytes,
+  test_q4x_moe_gpu): those kernels 1,946 -> 1,634 ms at 8K steps, 1,480 -> 1,388 at 2K; and the shared expert with
+  the layer's part (b.x16 its mixer's): its conversions at 8K 143 -> 12 ms. what is left: gate and up's F32 (420 MB
+  a layer at 8K) written then read - a gate + up group kernel writing swiglu's f16 itself is next.
 
 ### 0.5.4: the dense mm explored - what does not help (2026-11-06, performance)
 

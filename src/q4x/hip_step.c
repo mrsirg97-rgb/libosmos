@@ -37,9 +37,10 @@ static bool embed(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t *
          q4x_streams(b->x, n, (uint32_t)g->hc, (uint32_t)g->n_embd, b->h, NULL);
 }
 
-/* a layer; *pending: the layer before's MoE output not yet in b.h (in, then this layer's: out) - combined in the
-   next mixer's norm launch, or alone where the residual is read first (the n-gram layer, a probe) */
-static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n, bool *pending)
+/* a layer's part before its routed experts, over n tokens (b's rows from 0, the runs' t0 from 0): the n-gram layer,
+   the mixer, the DeltaNet or the attention, the FFN's mixer into b.mixed, the shared expert. pending: the layer before's MoE output not yet
+   in b.h - combined in the mixer's norm launch, or alone where the residual is read first (the n-gram layer, a probe) */
+static bool layer_part(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n, bool pending)
 {
   const Q4xGeometry *g = &f->w->geo;
   const Q4xLayer *L = &f->w->layer[l];
@@ -50,12 +51,67 @@ static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t
   for (uint32_t i = 0; i < runs; i++)
     c[i] = (Q4xCache){r[i].s->kc[l], r[i].s->vc[l], r[i].s->ixk[l], r[i].s->ixr[l], r[i].s->pos, r[i].t0, r[i].n};
   bool ok = true;
-  if (*pending && (l == g->ple_layer || f->probe))
-    ok = q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
-  ok = ok && (l != g->ple_layer || q4x_ple(f, r, runs, l, n)) &&
-       q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n, *pending) &&
-       (g->recurrent[l] ? q4x_deltanet(f, r, runs, l, n) : q4x_attention(f, L, c, runs, n)) &&
-       q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n, true) && q4x_moe(f, L, n);
+  if (pending && (l == g->ple_layer || f->probe))
+    ok = q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), pending = false;
+  return ok && (l != g->ple_layer || q4x_ple(f, r, runs, l, n)) &&
+         q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n, pending) &&
+         (g->recurrent[l] ? q4x_deltanet(f, r, runs, l, n) : q4x_attention(f, L, c, runs, n)) &&
+         q4x_mix(f, L->hc_ffn_norm, L->hc_ffn_down, L->hc_ffn_up, L->hc_ffn_inject, n, true) &&
+         q4x_moe_shared(f, L, n);
+}
+
+/* tokens k0 .. k0 + m of the step as a step of their own: b's token rows from k0 (f->rows), and each run's part in
+   it - its sequence at the part's first token (the rings' cur and the position moved on by the run's tokens before:
+   a ring's slot for a run's token t is cur + 1 + t, q4x_ops.h - so a part reads the slot the part before wrote, as a
+   step reads the step before's). *saved: b before, restored by sub_end */
+static uint32_t sub_begin(Q4xForward *f, const Q4xRun *r, uint32_t runs, uint32_t k0, uint32_t m, Q4xRun *sr,
+                          Q4xBuf *saved)
+{
+  *saved = f->b;
+  for (uint32_t i = 0; i < f->n_rows; i++)
+    *(uint8_t **)f->rows[i].p += (uint64_t)k0 * f->rows[i].row;
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < runs; i++)
+  {
+    const uint32_t a = r[i].t0 > k0 ? r[i].t0 : k0, e = r[i].t0 + r[i].n < k0 + m ? r[i].t0 + r[i].n : k0 + m;
+    if (a >= e)
+      continue;
+    const uint32_t o = a - r[i].t0; /* the run's tokens before the part */
+    Q4xSeq *s = &f->sub_seq[n];
+    *s = *r[i].s;
+    s->pos += (int32_t)o, s->cur = (s->cur + o) % Q4X_SLOTS;
+    sr[n++] = (Q4xRun){s, a - k0, e - a};
+  }
+  return n;
+}
+
+static void sub_end(Q4xForward *f, const Q4xBuf *saved) { f->b = *saved; }
+
+/* a layer; *pending: the layer before's MoE output not yet in b.h (in, then this layer's: out). a step past
+   MM_MAX_TOKENS: its part a sub-batch of MM_MAX_TOKENS at a time - a 2K step's activations stay in the cache, the
+   bigger step's would not - then its experts over the step whole (each expert's weights read once for all its tokens:
+   more of them a read). the same bits as steps of MM_MAX_TOKENS (test_q4x_forward_gpu: a step of 3,000) */
+static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n, bool *pending)
+{
+  const Q4xGeometry *g = &f->w->geo;
+  const Q4xLayer *L = &f->w->layer[l];
+  Q4xBuf *b = &f->b;
+  const uint32_t hc = (uint32_t)g->hc, D = (uint32_t)g->n_embd;
+  const float inv = 1.0f / (float)hc;
+  bool ok = true;
+  if (n <= MM_MAX_TOKENS)
+    ok = layer_part(f, r, runs, l, n, *pending);
+  else
+    for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS)
+    {
+      const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
+      Q4xRun sr[Q4X_MAX_RUNS];
+      Q4xBuf saved;
+      const uint32_t sn = sub_begin(f, r, runs, k0, m, sr, &saved);
+      ok = layer_part(f, sr, sn, l, m, *pending);
+      sub_end(f, &saved);
+    }
+  ok = ok && q4x_moe(f, L, n);
   *pending = true;
   if (ok && f->probe) /* the layer's residual whole for the probe (l_last) */
     ok = q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;

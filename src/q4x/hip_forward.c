@@ -108,29 +108,35 @@ static bool buffers(Q4xForward *f, char *err)
   {
     void *p;
     uint64_t bytes;
+    int per_token; /* n rows, a token's each (a sub-batch's view moves it) */
   } want[] = {
-      {&b->h, n * hd * F},          {&b->xn, n * hd * F},         {&b->lo, n * g->hc_rank * F}, {&b->gate, n * hd * F},
-      {&b->mixed, n * D * F},       {&b->inj, n * g->hc * F},     {&b->out, n * D * F},         {&b->x, n * D * F},
-      {&b->qkv, n * ch * F},        {&b->z, n * in * F},          {&b->al, n * vh * F},         {&b->be, n * vh * F},
-      {&b->g, n * vh * F},          {&b->b, n * vh * F},          {&b->cv, n * ch * F},         {&b->qkn, n * 2 * g->ssm_groups * g->ssm_state * F},         {&b->ro, n * in * F},
-      {&b->fo, n * in * F},         {&b->qf, n * 2 * q * F},      {&b->kr, n * kv * F},         {&b->kq, n * kv * F},         {&b->vr, n * kv * F},         {&b->q, n * q * F},
-      {&b->iqr, n * ixq * F},       {&b->iq, n * ixq * F},        {&b->ikr, n * Q4X_IX_DIM * F},
-      {&b->ixs, q4x_ix_scratch(f->max_ctx, ratio) * F},           {&b->sel, n * blocks * 4},    {&b->npick, n * 4},
-      {&b->gt, n * q * F},          {&b->ao, n * q * F},          {&b->fa, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F},          {&b->rl, n * g->n_experts * F}, {&b->w, n * k * F},
-      {&b->ga, n * k * ff * F},     {&b->up, n * k * ff * F},     {&b->y, n * k * D * F},
-      {&b->shg, n * sff * F},       {&b->shu, n * sff * F},       {&b->sh, n * D * F},          {&b->sl, n * F},
-      {&b->ids, n * k * 4},         {&b->rows, n * k * 4},        {&b->cnt, entries * 4},       {&b->gidx, slots * 4},
-      {&b->hidx, slots * 4},        {&b->eoff, 3ull * g->n_experts * 4},        {&b->where, n * k * 4},       {&b->xg, entries * 4},        {&b->yg, entries * 4},
-      {&b->xd, entries * 4},        {&b->yd, entries * 4},        {&b->x16, x16},               {&b->xe16, xe16},
-      {&b->overflow, 4},
-      {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *)},  {&b->emb, n * D * F},    {&b->key, n * hd * F},        {&b->val, n * D * F},
-      {&b->kn, n * hd * F},         {&b->qn, n * hd * F},         {&b->pg, n * g->hc * F},      {&b->gated, n * hd * F},
-      {&b->nrm, n * hd * F},        {&b->conv, n * hd * F},       {&b->ple_rows, n * g->ple_heads * 4},
-      {&b->tok, n * 4},             {&b->logits, n * (uint64_t)g->n_vocab * F},
+      {&b->h, n * hd * F, 1},          {&b->xn, n * hd * F, 1},         {&b->lo, n * g->hc_rank * F, 1}, {&b->gate, n * hd * F, 1},
+      {&b->mixed, n * D * F, 1},       {&b->inj, n * g->hc * F, 1},     {&b->out, n * D * F, 1},         {&b->x, n * D * F, 1},
+      {&b->qkv, n * ch * F, 1},        {&b->z, n * in * F, 1},          {&b->al, n * vh * F, 1},         {&b->be, n * vh * F, 1},
+      {&b->g, n * vh * F, 1},          {&b->b, n * vh * F, 1},          {&b->cv, n * ch * F, 1},         {&b->qkn, n * 2 * g->ssm_groups * g->ssm_state * F, 1},         {&b->ro, n * in * F, 1},
+      {&b->fo, n * in * F, 1},         {&b->qf, n * 2 * q * F, 1},      {&b->kr, n * kv * F, 1},         {&b->kq, n * kv * F, 1},         {&b->vr, n * kv * F, 1},         {&b->q, n * q * F, 1},
+      {&b->iqr, n * ixq * F, 1},       {&b->iq, n * ixq * F, 1},        {&b->ikr, n * Q4X_IX_DIM * F, 1},
+      {&b->ixs, q4x_ix_scratch(f->max_ctx, ratio) * F, 0},           {&b->sel, n * blocks * 4, 1},    {&b->npick, n * 4, 1},
+      {&b->gt, n * q * F, 1},          {&b->ao, n * q * F, 1},          {&b->fa, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F, 0},          {&b->rl, n * g->n_experts * F, 1}, {&b->w, n * k * F, 1},
+      {&b->ga, n * k * ff * F, 1},     {&b->up, n * k * ff * F, 1},     {&b->y, n * k * D * F, 1},
+      {&b->shg, n * sff * F, 1},       {&b->shu, n * sff * F, 1},       {&b->sh, n * D * F, 1},          {&b->sl, n * F, 1},
+      {&b->ids, n * k * 4, 1},         {&b->rows, n * k * 4, 1},        {&b->cnt, entries * 4, 0},       {&b->gidx, slots * 4, 0},
+      {&b->hidx, slots * 4, 0},        {&b->eoff, 3ull * g->n_experts * 4, 0},        {&b->where, n * k * 4, 1},       {&b->xg, entries * 4, 0},        {&b->yg, entries * 4, 0},
+      {&b->xd, entries * 4, 0},        {&b->yd, entries * 4, 0},        {&b->x16, x16, 0},               {&b->xe16, xe16, 0},
+      {&b->overflow, 4, 0},
+      {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *), 0},  {&b->emb, n * D * F, 1},    {&b->key, n * hd * F, 1},        {&b->val, n * D * F, 1},
+      {&b->kn, n * hd * F, 1},         {&b->qn, n * hd * F, 1},         {&b->pg, n * g->hc * F, 1},      {&b->gated, n * hd * F, 1},
+      {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},       {&b->ple_rows, n * g->ple_heads * 4, 1},
+      {&b->tok, n * 4, 1},             {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
   };
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
     if (!alloc(want[i].p, want[i].bytes))
       return q4x_fail(err, "GPU memory refused (a step's buffers)");
+  _Static_assert(sizeof want / sizeof *want <= Q4X_ROW_BUFS, "Q4X_ROW_BUFS: the table's");
+  f->n_rows = 0;
+  for (size_t i = 0; i < sizeof want / sizeof *want; i++)
+    if (want[i].per_token)
+      f->rows[f->n_rows].p = want[i].p, f->rows[f->n_rows++].row = want[i].bytes / n;
   if (hipMemset(b->overflow, 0, 4) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the f16 overflow flag)");
   return (hipHostMalloc((void **)&b->pin_rows, n * g->ple_heads * 4, 0) == hipSuccess &&
@@ -153,6 +159,7 @@ void q4x_forward_destroy(Q4xForward *f)
   for (size_t i = 0; i < offsetof(Q4xBuf, pin_rows) / sizeof(void *); i++)
     hipFree(bufs[i]);
   hipHostFree(f->b.pin_rows), hipHostFree(f->b.pin_tok), hipHostFree(f->b.pin_overflow), hipFree(f->b.logits);
+  free(f->sub_seq);
   free(f);
 }
 
@@ -165,8 +172,11 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
   if (!f)
     return q4x_fail(err, "out of memory"), NULL;
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens;
+  if (!(f->sub_seq = calloc(Q4X_MAX_RUNS, sizeof *f->sub_seq)))
+    return q4x_fail(err, "out of memory"), free(f), NULL;
   if (!q4x_rope((uint32_t)w->geo.rope_dim, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))
-    return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), free(f), NULL;
+    return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), free(f->sub_seq),
+           free(f), NULL;
   if (!upload(w->model, &f->dev, err) || !buffers(f, err) ||
       (mtp && (!upload(mtp->model, &f->mtp_dev, err) || !mtp_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;

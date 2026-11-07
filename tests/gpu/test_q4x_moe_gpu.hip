@@ -84,8 +84,17 @@ static Routed routed(const Experts& e, const float* x, const int32_t* ids, uint3
   CHECK(mm_x16_rows(x, kDim, t.gidx, slots, kDim, x16, over, nullptr));
   runs(e.tg, t.ptr[0], t.cnt, bd, kFf, kDim, x16, t.xg, ga, t.yg);
   runs(e.tu, t.ptr[1], t.cnt, bd, kFf, kDim, x16, t.xg, up, t.yg);
-  CHECK(q4x_swiglu(ga, up, (uint64_t) picks * kFf, ga, nullptr, nullptr));
-  CHECK(mm_x16_rows(ga, kFf, t.hidx, slots, kFf, x16, over, nullptr));
+  {  // the activation straight into the down's f16 slots (q4x_swiglu_rows): q4x_swiglu then mm_x16_rows's bytes
+    void* fused = dev_alloc<_Float16>((size_t) slots * kFf);
+    CHECK(q4x_swiglu_rows(ga, up, kFf, t.hidx, slots, fused, over, nullptr));
+    CHECK(q4x_swiglu(ga, up, (uint64_t) picks * kFf, ga, nullptr, nullptr));
+    CHECK(mm_x16_rows(ga, kFf, t.hidx, slots, kFf, x16, over, nullptr));
+    std::vector<uint16_t> hf((size_t) slots * kFf), hx(hf.size());
+    CHECK(hipMemcpy(hf.data(), fused, hf.size() * 2, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(hx.data(), x16, hx.size() * 2, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(hf == hx);
+    CHECK(!q4x_swiglu_rows(ga, up, kFf + 1, t.hidx, slots, fused, over, nullptr));  // a row not whole tiles
+  }
   runs(e.td, t.ptr[2], t.cnt, bd, kDim, kFf, x16, t.xd, y, t.yd);
   CHECK(host_of(reinterpret_cast<float*>(over), 1)[0] == 0.0f);
   return {y, t.where};

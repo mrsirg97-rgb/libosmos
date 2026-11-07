@@ -3,13 +3,14 @@
 // distribution's KL from llama.cpp's, and its greatest the same) - then the same tokens as 128 + 128 and as 255 + 1,
 // the state carried: the logits the bits of the one batch; then three sequences at their own positions sharing steps
 // (q4x_step: 3 + 150 + 1 tokens, past one x16's 128, and 2 + 1 within it) - each one's rows the bits of the one
-// batch's. needs a gfx1151, the UD-IQ3_XXS set (~78 GB of GPU
-// memory) and the dump; skipped (77) without them.
+// batch's; then a step past MM_MAX_TOKENS against steps within it. needs a gfx1151, the UD-IQ3_XXS set (~78 GB of
+// GPU memory) and the dump; skipped (77) without them.
 #include <algorithm>
 
 #include "q4x_ref.h"
 
 extern "C" {
+#include "osmos/gpu/mm.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/q4x/forward.h"
 #include "osmos/q4x/weights.h"
@@ -118,6 +119,57 @@ static void shared_steps(Q4xForward* f, const std::vector<int32_t>& ids, const s
   q4x_seq_destroy(a), q4x_seq_destroy(b), q4x_seq_destroy(c);
 }
 
+// a step past MM_MAX_TOKENS (its layers' parts a sub-batch of MM_MAX_TOKENS at a time, its experts over it whole):
+// two sequences in one step of 3,000 (1,000 + 2,000: the bound 1,048 into the second) and one sequence of 3,000 -
+// the rows across the bound and each one's last the bits of the same tokens in steps of MM_MAX_TOKENS or fewer
+static void long_step(const Q4xWeights* w, const std::vector<int32_t>& ids, uint32_t vocab) {
+  constexpr uint32_t kA = 1000, kB = 2000, kLong = kA + kB, kAround = 16;  // rows each side of the bound
+  static_assert(kLong > MM_MAX_TOKENS && kB <= MM_MAX_TOKENS, "a step past the bound, its references within it");
+  char ferr[Q4X_FWD_ERR] = "";
+  Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kLong, ferr);
+  CHECK(f);
+  std::vector<int32_t> ta(kA), tb(kB), tl(kLong);  // the dump's ids, over and over
+  for (uint32_t i = 0; i < kLong; i++) tl[i] = ids[i % kTok];
+  for (uint32_t i = 0; i < kA; i++) ta[i] = ids[(i + 7) % kTok];
+  for (uint32_t i = 0; i < kB; i++) tb[i] = ids[(i + 31) % kTok];
+  const uint32_t bound_b = MM_MAX_TOKENS - kA;  // the bound's place in the second sequence
+  auto rows = [&](uint32_t at, uint32_t n) { return host_of(q4x_logits(f) + (size_t) at * vocab, (size_t) n * vocab); };
+  // the references: each alone, within MM_MAX_TOKENS a step
+  Q4xSeq* s = q4x_seq_create(f, ferr);
+  CHECK(s && q4x_batch(f, s, ta.data(), kA, 0, ferr));
+  const std::vector<float> ra = rows(kA - 1, 1);
+  q4x_seq_destroy(s);
+  s = q4x_seq_create(f, ferr);
+  CHECK(s && q4x_batch(f, s, tb.data(), kB, 0, ferr));
+  const std::vector<float> rb = rows(bound_b - kAround, 2 * kAround), rb_last = rows(kB - 1, 1);
+  q4x_seq_destroy(s);
+  s = q4x_seq_create(f, ferr);
+  CHECK(s && q4x_batch(f, s, tl.data(), MM_MAX_TOKENS, 0, ferr));
+  const std::vector<float> rl0 = rows(MM_MAX_TOKENS - kAround, kAround);
+  CHECK(q4x_batch(f, s, tl.data() + MM_MAX_TOKENS, kLong - MM_MAX_TOKENS, 0, ferr));
+  const std::vector<float> rl1 = rows(0, kAround), rl_last = rows(kLong - MM_MAX_TOKENS - 1, 1);
+  q4x_seq_destroy(s);
+  // two sequences in one long step
+  Q4xSeq *a = q4x_seq_create(f, ferr), *b = q4x_seq_create(f, ferr);
+  Q4xSeq* seqs[] = {a, b};
+  const uint32_t lens[] = {kA, kB};
+  std::vector<int32_t> both(ta);
+  both.insert(both.end(), tb.begin(), tb.end());
+  CHECK(a && b && q4x_step(f, seqs, lens, 2, both.data(), 0, ferr));
+  CHECK(rows(kA - 1, 1) == ra && rows(kA + bound_b - kAround, 2 * kAround) == rb && rows(kLong - 1, 1) == rb_last);
+  CHECK(q4x_seq_position(a) == (int32_t) kA && q4x_seq_position(b) == (int32_t) kB);
+  q4x_seq_destroy(a), q4x_seq_destroy(b);
+  // one sequence of the long step's whole
+  s = q4x_seq_create(f, ferr);
+  CHECK(s && q4x_batch(f, s, tl.data(), kLong, 0, ferr));
+  CHECK(rows(MM_MAX_TOKENS - kAround, kAround) == rl0 && rows(MM_MAX_TOKENS, kAround) == rl1 &&
+        rows(kLong - 1, 1) == rl_last);
+  q4x_seq_destroy(s);
+  q4x_forward_destroy(f);
+  std::printf("  a step of 3,000 (1,000 + 2,000, and one of 3,000): the rows across MM_MAX_TOKENS's bound and each "
+              "one's last the bits of steps within it\n");
+}
+
 int main() {
   std::printf("[test_q4x_forward_gpu] start\n");
   int ndev = 0;
@@ -201,6 +253,7 @@ int main() {
   q4x_seq_destroy(s);
   shared_steps(f, ids, logits, vocab);
   q4x_forward_destroy(f);
+  long_step(w, ids, vocab);  // a forward of its own (the first's weights freed first)
   q4x_weights_destroy(w);
   gguf_destroy(g);
   std::printf("[test_q4x_forward_gpu] ok\n");
