@@ -60,13 +60,14 @@ class Version(unittest.TestCase):
 class Served:
     """osmos-api over the fake engine, the tokenizer cls.model's"""
     model = MODEL
+    settings = {}  # a class's own pack settings beside these
 
     @classmethod
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp()
         cls.cfg = os.path.join(cls.dir, "osmos.json")
         with open(cls.cfg, "w") as f:
-            json.dump({"pack": "test", "model": cls.model, "max_context": 4096, "no_guess": True}, f)
+            json.dump(dict({"pack": "test", "model": cls.model, "max_context": 4096, "no_guess": True}, **cls.settings), f)
         cls.port = free_port()
         env = dict(os.environ, FAKE_DIR=cls.dir)
         cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE], env=env,
@@ -126,6 +127,7 @@ class Served:
 
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
 class Api(Served, unittest.TestCase):
+    settings = {"max_tokens": 8192}  # a DeepSeek pack's prompt step
     def test_0_health_while_loading(self):
         self.assertEqual(self.get("/health")[0], 503)
         self.assertEqual(self.post({"messages": [{"role": "user", "content": "hi"}]}).status, 503)
@@ -134,6 +136,7 @@ class Api(Served, unittest.TestCase):
         self.assertEqual(argv[argv.index("--max-context") + 1], "4096")
         self.assertIn("--no-guess", argv)
         self.assertEqual(argv[argv.index("--budget") + 1], "auto")      # no budget given: sized to the GPU
+        self.assertEqual(argv[argv.index("--max-tokens") + 1], "8192")  # the pack's step, osmos-serve's
         self.assertEqual(argv[argv.index("--eos") + 1], ids(EOS))
         models = json.loads(self.get("/v1/models")[1])
         self.assertEqual(models["data"][0]["id"], "osmos-test")
@@ -272,6 +275,7 @@ class QwenApi(Served, unittest.TestCase):
         self.ready()
         argv = self.log()[0].split()
         self.assertEqual(argv[argv.index("--eos") + 1], ids(IM_END, QWEN))
+        self.assertNotIn("--max-tokens", argv)  # no step set: osmos-serve's own
 
     def test_1_thinking_stream(self):
         self.ready()

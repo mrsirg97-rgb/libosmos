@@ -65,6 +65,8 @@ class Manifest(unittest.TestCase):
                                                            m["packs"]["qwen38-ud-iq3_xxs"]["drafter"]))
         self.assertEqual(q1m["settings"], {"max_context": 1048576})
         self.assertEqual(m["packs"]["ud-iq1_s"]["table"]["slot"], [5, 5])
+        for ds in ("ud-iq1_s", "ud-iq1_m"):  # osmos-serve's 2K steps: 4K's +10-18% prompts cost 1-2% drafted, 8K's 6-10%
+            self.assertEqual(m["packs"][ds]["settings"], {"no_guess": True, "max_context": 1048576})
         q = m["packs"]["qwen38-ud-iq3_xxs"]
         self.assertEqual(q["drafter_kind"], "mtp")                            # its MTP head: one GGUF
         self.assertEqual((q["table"], q["picks"], q["overlay"]), (None, None, None))  # resident: no table, no picks
