@@ -58,13 +58,29 @@ static Routed routed(const Experts& e, const float* x, const int32_t* ids, uint3
   for (int i = 0; i < Q4X_GROUP_TENSORS; i++) t.ptr[i] = ptr + (size_t) i * ne;
   t.cnt = dev_alloc<int32_t>(ne), t.gidx = dev_alloc<int32_t>(slots), t.hidx = dev_alloc<int32_t>(slots);
   t.xg = dev_alloc<uint32_t>(ne), t.yg = dev_alloc<uint32_t>(ne), t.xd = dev_alloc<uint32_t>(ne);
-  t.yd = dev_alloc<uint32_t>(ne), t.where = dev_alloc<int32_t>(picks);
+  t.yd = dev_alloc<uint32_t>(ne), t.where = dev_alloc<int32_t>(picks), t.off = dev_alloc<int32_t>(3 * kExp);
   void* x16 = dev_alloc<_Float16>((size_t) slots * kDim);
   int32_t* over = dev_alloc<int32_t>(1);
   float *ga = dev_alloc<float>((size_t) picks * kFf), *up = dev_alloc<float>((size_t) picks * kFf);
   float* y = dev_alloc<float>((size_t) picks * kDim);
   CHECK(hipMemset(over, 0, 4) == hipSuccess);
   CHECK(q4x_expert_tiles(ids, picks, kK, kExp, kDim, kFf, &t, nullptr));
+  {  // the tables against a host stable sort: a pick's place, and each slot's token and place
+    std::vector<int32_t> h(picks), wh(picks), gi(slots), hi(slots);
+    CHECK(hipMemcpy(h.data(), ids, picks * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(hipMemcpy(wh.data(), t.where, picks * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(hipMemcpy(gi.data(), t.gidx, slots * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(hipMemcpy(hi.data(), t.hidx, slots * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    std::vector<int> cnt(kExp, 0);
+    for (uint32_t i = 0; i < picks; i++) cnt[h[i]]++;
+    std::vector<int> place(kExp), slot(kExp), seen(kExp, 0);
+    for (uint32_t e = 0, p = 0, s = 0; e < kExp; e++) place[e] = (int) p, slot[e] = (int) s, p += cnt[e],
+                                                      s += (cnt[e] + MM_TILE - 1) / MM_TILE * MM_TILE;
+    for (uint32_t i = 0; i < picks; i++) {
+      const int e = h[i], q = place[e] + seen[e]++, sl = slot[e] + q - place[e];
+      CHECK(wh[i] == q && gi[sl] == (int32_t) (i / kK) && hi[sl] == q);
+    }
+  }
   CHECK(mm_x16_rows(x, kDim, t.gidx, slots, kDim, x16, over, nullptr));
   runs(e.tg, t.ptr[0], t.cnt, bd, kFf, kDim, x16, t.xg, ga, t.yg);
   runs(e.tu, t.ptr[1], t.cnt, bd, kFf, kDim, x16, t.xg, up, t.yg);

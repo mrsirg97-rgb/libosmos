@@ -95,6 +95,7 @@ typedef struct Q4xExpertTiles
   int32_t *gidx, *hidx;                /* out: a slot's token (the gate's and up's rows), its place (down's); -1 pad */
   uint32_t *xg, *yg, *xd, *yd;         /* out: an entry's x16 and y offsets, gate / up then down */
   int32_t *where;                      /* out: a pick's place */
+  int32_t *off;                        /* scratch: an expert's first place, first slot and count (3 n_exp) */
 } Q4xExpertTiles;
 
 #define Q4X_TILE_RUNS 4 /* an expert part's tiles: 1, 2, 4 or 8 (16 to 128 tokens) - a launch each */

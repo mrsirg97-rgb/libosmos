@@ -120,7 +120,7 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->ga, n * k * ff * F},     {&b->up, n * k * ff * F},     {&b->y, n * k * D * F},
       {&b->shg, n * sff * F},       {&b->shu, n * sff * F},       {&b->sh, n * D * F},          {&b->sl, n * F},
       {&b->ids, n * k * 4},         {&b->rows, n * k * 4},        {&b->cnt, entries * 4},       {&b->gidx, slots * 4},
-      {&b->hidx, slots * 4},        {&b->where, n * k * 4},       {&b->xg, entries * 4},        {&b->yg, entries * 4},
+      {&b->hidx, slots * 4},        {&b->eoff, 3ull * g->n_experts * 4},        {&b->where, n * k * 4},       {&b->xg, entries * 4},        {&b->yg, entries * 4},
       {&b->xd, entries * 4},        {&b->yd, entries * 4},        {&b->x16, x16},               {&b->xe16, xe16},
       {&b->overflow, 4},
       {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *)},  {&b->emb, n * D * F},    {&b->key, n * hd * F},        {&b->val, n * D * F},

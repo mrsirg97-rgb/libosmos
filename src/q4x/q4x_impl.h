@@ -19,6 +19,7 @@ typedef struct Q4xBuf
   int32_t *sel, *npick;        /* its picks: a token's blocks (q4x_ix_pick), their count */
   float *rl, *w, *ga, *up, *y, *shg, *shu, *sh, *sl;                  /* the MoE's */
   int32_t *ids, *rows, *cnt, *gidx, *hidx, *where; /* the picks, mm_group's tables (q4x_expert_tiles) */
+  int32_t *eoff;                                   /* their experts' offsets (q4x_expert_tiles' scratch) */
   uint32_t *xg, *yg, *xd, *yd;
   const void **ptr;                                /* Q4X_GROUP_TENSORS tables of entries */
   void *x16, *xe16;                                /* mm's f16 activations: a matrix's, the experts' tiles */

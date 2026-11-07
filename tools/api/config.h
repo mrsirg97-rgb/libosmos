@@ -14,7 +14,8 @@ typedef struct Config
   double budget_gib, drafted_budget_gib; /* a fixed budget, plain and drafting; 0: sized to the GPU (auto) */
   bool no_guess;
   unsigned max_context, parallel;
-  char num[4][32]; /* config_argv's numbers as text */
+  unsigned max_tokens; /* a prompt step's tokens (osmos-serve's --max-tokens); 0: osmos-serve's own */
+  char num[5][32]; /* config_argv's numbers as text */
   char eng[PATH_MAX];
 } Config;
 

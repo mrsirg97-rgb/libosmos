@@ -55,11 +55,12 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "no_guess"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->no_guess = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
-  if (!strcmp(k, "max_context") || !strcmp(k, "parallel"))
+  if (!strcmp(k, "max_context") || !strcmp(k, "parallel") || !strcmp(k, "max_tokens"))
   {
     if (v->type != JSON_INT || !num(v, &x, k, err) || x > 1e7)
       return fail(err, "a positive integer", k);
-    *(k[0] == 'm' ? &c->max_context : &c->parallel) = (unsigned)x;
+    *(!strcmp(k, "max_context") ? &c->max_context : !strcmp(k, "parallel") ? &c->parallel : &c->max_tokens) =
+        (unsigned)x;
     return true;
   }
   return fail(err, "not a setting osmos-api knows", k);
@@ -109,6 +110,11 @@ bool config_argv(Config *c, const char *engine, int eos, char *argv[CONFIG_ARGS_
   argv[n++] = "--budget", argv[n++] = c->num[1];
   argv[n++] = "--eos", argv[n++] = c->num[2];
   argv[n++] = "--parallel", argv[n++] = c->num[3];
+  if (c->max_tokens)
+  {
+    snprintf(c->num[4], sizeof c->num[4], "%u", c->max_tokens);
+    argv[n++] = "--max-tokens", argv[n++] = c->num[4];
+  }
   if (c->no_guess)
     argv[n++] = "--no-guess";
   argv[n] = NULL;

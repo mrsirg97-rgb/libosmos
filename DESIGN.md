@@ -2367,6 +2367,71 @@ below; mutants (a tie to the higher block, the tail off by one, a block's rope a
 - **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
   21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
+### 0.5.4: the dense mm explored - what does not help (2026-11-06, performance)
+
+why: Strata's fast set (its docs: a 128 x 256 WMMA GEMM for the prompt's FP16 projections, from 4,096 tokens) reads a
+16K Qwen prompt at 946 tok/s against our 676; a 16K prompt here 24% dense mm, 22% experts, 21% small kernels, 18%
+attention. the dense mm (both models' Q6_K / Q8_0) timed alone (Q6_K, Qwen's shapes, 2,048 tokens: 27-31 TFLOP/s,
+~half the matrix cores' ~59 by our estimate) and counted (SQ_*: 70% of wave cycles waiting - 26% on memory, 24% on
+instruction dependencies; VALU 4%; no LDS conflicts; 234 VGPRs, 6 waves a SIMD). every variant below the same
+checksum (the same operands in each tile's order - a token's bits unmoved), each slower:
+- **the tiles' WMMAs interleaved** (8 chains, not 8 WMMAs back to back): 9 TFLOP/s - 256 VGPRs and spills; 2 or 4
+  chains a group, no spills, 9 too: a tile's 8 x loads in flight together were what hid the memory, not the chain.
+- **A from LDS a step at a time, x double-buffered** (kPipe's for long slabs): 21-25 at 8 tiles (spills, 176 B); at 4
+  or 2 tiles a block (no spills) 13-18 - a weight slab decoded for fewer tokens costs more than the 4% VALU said.
+- **fewer waves (less K split)** at a token (mmsweep): 8 waves 195 / 178 GB/s (10240 x 2560 / 2560 x 6144), 4: 191 /
+  160, 2: 169 / 176, 1: 160 / 132 - a big tile without the K split costs decode 18-26% (decode and prompt share the
+  order), the head the exception (4 waves 228 against 208).
+so the current tile is the best of its family here; a gain needs a different design (a block's x shared across more
+rows through LDS at the same K split, or per-shape splits - each its own experiment at 1 and 2,048 tokens).
+
+then the experts (a 16K prompt's expert path 33%: the matmuls 5.3 s at ~15 TFLOP/s, the gather 1.17, moe_sum 0.64,
+the tables 0.55, swiglu 0.27; their counters 83% waiting, 54% on memory, VALU 2.3%):
+- **kept**: the tables' placement an expert a block (tiles_kernel's one block scanned every pick an expert): 551 ->
+  73 ms, the same tables (test_q4x_moe_gpu against a host stable sort).
+- **the gate / up read in place** (mm_group by a slot's token, not the gathered copy): the same bits, slower - 16K 693
+  -> 640 tok/s, 2K 794 -> 718: the gathered tiles' contiguous reads are what the kernel is fast on.
+- **8K steps** (each expert ~160 tokens, its weights read once for them, not ~40): the experts 5.39 -> 4.16 s, but
+  the side copies' f16 lost past MM_MAX_TOKENS (+1.19 s of conversions) and the DeltaNet's per-token kernels +0.76
+  (their 4x buffers out of the cache) - net slower (24.6 against 23.7 s). worth it only with a step-wide x16 and the
+  DeltaNet's passes chunked: ~1.5% left after the conversions, not yet.
+- **the DeltaNet's columns over 4 or 8 blocks a head** (a column's sums its own: the same bits): 1,084 -> 1,029 /
+  1,229 ms - its cost is a token's chain (q / k in, a sync, two 64-value dots, shuffles), not its 48 blocks.
+- **the step-wide x16** (b.x16 a step's tokens, each chunk of MM_MAX_TOKENS at its own tiles: parked on
+  park/x16-whole-step): the same hashes at 2K, 4K and 8K steps, the conversions gone (x16_kernel 941 -> 0 ms) - and a
+  16K prompt at 8K steps level with 2K (23.17 against 23.27 s): the experts -1.05 s, the router -0.28, but gated_norm
+  +0.30, swiglu +0.20, the DeltaNet +0.20, the dense mm +0.20, conv +0.17 - a 2K step's activations (~32 MB) stay in
+  the 32 MB Infinity Cache, an 8K step's do not. the gain needs a layer's per-token part in 2K sub-batches and only
+  the experts over the step (DeepSeek's FORWARD_SUBS shape): ~1 s of a 16K prompt (~5%, prompts past 8K only) for the
+  forward's most delicate code (the DeltaNet's history and the attention's positions split mid-sequence) - not now.
+
+the dense mm again (a harness hashing every bit of y at 1, 7, 16, 33, 100, 512 and 2,048 tokens against the current
+kernel, Qwen's shapes; the current kernel itself 25.6-28.4 TFLOP/s run to run on 10240 x 2560). every variant below
+the same bits at every count, each slower at 2,048 tokens:
+- **R row tiles a block** (each wave all R over its own slabs, a slab decoded SC values at a time: an x fragment one
+  load for R WMMAs): R 2 at 8 tiles 13 TFLOP/s (256 VGPRs, spills); R 2 at 4 tiles 23.6 (212 VGPRs, no spills - x's
+  traffic halved, slower); R 4 at 2 or 4 tiles 10-15; R 1 decoded 64 at a time 27.1 (the parts cost nothing). so x's
+  loads are not the bound: a slab decoded for fewer tokens is.
+- **P token groups sharing a K-wave's decoded slab through LDS** (a decode for 256 tokens, not 128; every wave the
+  same trip count, block barriers): P 1 (the current tile with block barriers, nothing else) 22.5 against 27.2 - the
+  barriers alone 18%; P 2 at 8 tiles 22.7, at 4 tiles 18.5; P 4 15.6. the waves' independence (each its own slabs,
+  no barrier until the sum) is what hides the latency.
+what is left is the GEMM rewritten whole (the next slab's weights loaded under this one's WMMAs, at the same K split):
+a large change, and its smaller form (x double-buffered, above) was slower. the dense mm is 24% of a 16K prompt, so a
+20% faster kernel is ~5% of it; the attention (18%, and growing with the prompt's square) is the better next look.
+- **the weights decoded to f16 once, then the same tile on them** (no decode, no LDS but the sum's: the same bits):
+  slower - 10240 x 2560 at 2,048 tokens 3.76 -> 5.28 ms with the decode, 4.93 without (the f16 2.4x the Q6_K's
+  bytes); the row blocks' token blocks side by side 7.3-7.7. the decode in the tile is cheaper than the bytes it
+  saves: the bound is the waves' own operands, none shared - a GEMM sharing them (a block a 64 x 128 tile, the
+  partitions in turn, a running sum: the same order) is what is left, its barriers to be hidden.
+- **the tables' placement for few picks** (kPlaceInline, 256): a decode token's 10 picks placed by the tiles kernel
+  itself, not a second launch - the second cost decode 1.2% (23.8 -> 23.5 tok/s, 3 of 3 rounds); now 23.65 against
+  0.5.3's 23.67, the same tables (test_q4x_moe_gpu: 30 picks and 2,560).
+- **DeepSeek's prompt step, the packs' settings** (UD-IQ1_M, 1M context, drafted, budget auto; apibench through
+  osmos-api, two rounds each): 2K steps 262 / 355 / 455 tok/s (2K / 4K / 16K prompts), drafted answers 32.7 / 20.0 /
+  27.8; 4K 262 / 390 / 536, -1 to -2%; 8K 253 / 381 / 578, -6 to -10% (the budget 99.9 -> 98.6 -> 95.8 GiB: fewer
+  experts resident). the packs keep 2K; osmos-api's `max_tokens` the choice.
+
 ### 0.5.3: DeepSeek against Maya 1.1.56, and bigger prompt steps (2026-11-06, performance)
 
 - **a prompt step's reads**: DeepSeek's prompt is the SSD's (a 2,048-token step touches nearly every expert, the
