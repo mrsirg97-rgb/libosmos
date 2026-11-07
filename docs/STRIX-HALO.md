@@ -4,38 +4,41 @@
 
 osmos is an open-source inference engine built for this one chip. It runs DeepSeek-V4.1-Flash at 1–2 bits a weight
 with a 1M-token context, streams the experts that do not fit from the SSD, and gives the same output bit for bit
-however it runs. Below, osmos 0.3.2 is measured against Project Maya 1.1.55 on the same box and the same model files.
+however it runs. Below, osmos 0.5.2 is measured against Project Maya 1.1.56 on the same box and the same model files.
 
 `MIT` · `1,048,576-token context` · `one-command install` · `OpenAI-compatible API` · `stock AMD power profiles`
 
-## Measured against Project Maya 1.1.55
+## Measured against Project Maya 1.1.56
 
-Same machine, same quantized model files, same afternoon (2026-11-05), nothing else running, AMD's `performance`
-profile. Maya as its own setup configures it (its pack, its drafter, its CPU lane calibrated, its expert profile warmed
-first); osmos 0.3.2 as it ships. Maya's own bench questions and prompts, each engine in a fresh process: Maya two
-rounds that afternoon, osmos one run of each that evening. Greedy decoding. Every run and its command:
+Same machine, same quantized model files, same session (2026-11-06), nothing else running, AMD's `performance`
+profile. Maya as its own setup configures it (rebuilt, its pack, its drafter, its CPU lane calibrated, its expert
+profile warmed first); osmos 0.5.2 as it ships. Maya's own bench questions and prompts, each engine in a fresh process,
+two interleaved rounds, the order swapped in the second. Greedy decoding. Every run and its command:
 [`DESIGN.md`](../DESIGN.md).
 
-| tok/s | UD-IQ1_M osmos | UD-IQ1_M Maya | | UD-IQ1_S osmos | UD-IQ1_S Maya | |
+| | UD-IQ1_M osmos | UD-IQ1_M Maya | | UD-IQ1_S osmos | UD-IQ1_S Maya | |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Reading a 2,048-token prompt | **293** | 243 | +21% | **331** | 259 | +28% |
-| Reading an 8,192-token prompt | **441** | 406 | +9% | **473** | 431 | +10% |
-| Writing, with DSpark drafting | **33.6** | 27.5 | +22% | **40.8** | 34.9 | +17% |
-| Writing, one token at a time | 17.1 | 17.0 | tie | 19.3 | 19.2 | tie |
+| Reading a 2,048-token prompt | **300** | 241 | +24% | **327** | 258 | +27% |
+| Reading an 8,192-token prompt | **445** | 408 | +9% | **488** | 436 | +12% |
+| Writing, with DSpark drafting | **33.5** | 27.6 | +21% | **40.6** | 34.5 | +18% |
+| Writing, one token at a time | 17.1 | 17.0 | tie | 19.4 | 19.3 | tie |
+| Perplexity (8,191 tokens, lower is better) | **2.4579** | 2.4649 | | **2.5006** | 2.5023 | |
 
 ## Agents: the workload this machine is for
 
-| 4 agents × 8 turns, UD-IQ1_M | osmos 0.3.2 | Maya 1.1.55 |
+| 4 agents × 8 turns, UD-IQ1_M | osmos 0.5.2 | Maya 1.1.56 |
 | --- | ---: | ---: |
-| Wall time, all 32 turns | **446 s** | 542 s |
-| First token, p95 | **54.7 s** | 81.3 s |
-| Turn done, p95 | **94.0 s** | 121.9 s |
-| Package power, mean | 127 W | 127 W |
-| Energy per answer token | **7.07 J** | 8.74 J |
+| Wall time, all 32 turns | **7.3 min** | 9.1 min |
+| First token, p95 | **55.5 s** | 100.3 s |
+| Turn done, p95 | **89.7 s** | 127.9 s |
+| Package power, mean | 126 W | 127 W |
+| Energy per answer token | **6.96 J** | 8.81 J |
+| Peak GPU memory | **109.7 GiB** | 112.5 GiB |
 
 An agent turn is mostly reading: Maya's agent bench sends about 99K new prompt tokens for 8K tokens of answers. osmos
-finishes it 18% sooner on 19% less energy for each token it writes, at the same power (osmos the mean of two runs that
-evening; Maya's that afternoon, when the box ran ~2.5% faster).
+finishes it 20% sooner on 21% less energy for each token it writes, at the same power, holding ~3 GiB less memory -
+and reads its prompts at Maya's accuracy or better. With its prompts read in 8,192-token steps (the next release's
+packs), 7.0 minutes and a 32.8 s first-token p95.
 
 ## Qwen3.8-Flash-Next: the second model
 
@@ -52,7 +55,7 @@ the same file, the same day (2026-11-06, `performance`):
 | Writing, one token at a time | 23.7 | **26.2** | -10% |
 | Agents, 4 × 8 turns (0.5.0) | **292 s** | not measured | |
 
-On the agents bench Qwen finishes in 292 s - DeepSeek's 446 s on the same workload - its first token at a 3.0 s
+On the agents bench Qwen finishes in 292 s - DeepSeek's 440 s on the same workload - its first token at a 3.0 s
 median: each expert read once for every conversation's tokens, and the prompts read at its sparse attention's speed.
 
 ## Energy: the low-power profile

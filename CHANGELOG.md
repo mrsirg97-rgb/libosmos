@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3]: measured against Maya 1.1.56
+
+- Docs: DeepSeek measured against Project Maya 1.1.56 on the same files and session (README, the one-pager): prompts
+  +9 to +27%, drafting +18 to +21%, plain decode a tie, the agents bench 20% less time and 21% less energy at ~3 GiB
+  less memory, perplexity at or below Maya's (2.4579 / 2.4649, 2.5006 / 2.5023). The credits name the author's Maya
+  pull requests the engine carries (#643, #356, #587).
+
 ## [0.5.2]: Qwen at a million tokens
 
 Qwen3.8-Flash-Next's context to **1,048,576 tokens** with YaRN - the model card's static YaRN, factor 4 over the
