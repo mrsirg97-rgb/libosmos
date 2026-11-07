@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.3]: measured against Maya 1.1.56
 
 - Docs: DeepSeek measured against Project Maya 1.1.56 on the same files and session (README, the one-pager): prompts
   +9 to +27%, drafting +18 to +21%, plain decode a tie, the agents bench 20% less time and 21% less energy at ~3 GiB
