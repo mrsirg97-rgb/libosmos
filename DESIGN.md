@@ -2367,6 +2367,25 @@ below; mutants (a tie to the higher block, the tail off by one, a block's rope a
 - **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
   21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
+### 0.5.3: DeepSeek against Maya 1.1.56, and bigger prompt steps (2026-11-06, performance)
+
+- **a prompt step's reads**: DeepSeek's prompt is the SSD's (a 2,048-token step touches nearly every expert, the
+  streamed ones read again each step). the step was already a setting (FORWARD_SUBS x 2,048; a layer's experts run once
+  over every sub-batch): UD-IQ1_M's 8,192-token prompt 470 -> 589 tok/s at 8,192-token steps (2K: 304 -> 288), the
+  budget 105.9 -> 102.9 GiB (the experts' step buffers), decode -2 to -3%, every answer's hash the same.
+- **the head-to-head** (~/bench/h2h-056/perf.sh: Maya 1.1.56 rebuilt and calibrated, warmed; two interleaved rounds a
+  pack, the order swapped in the second; memory sampled a second apart, memlog.sh): UD-IQ1_M prompts 300 / 445 against
+  241 / 408, drafted 33.5 / 27.6, plain 17.1 / 17.0; UD-IQ1_S 327 / 488 against 258 / 436, 40.6 / 34.5, 19.4 / 19.3;
+  osmos's 8K prompts at 8K steps 557 / 595. agents (UD-IQ1_M, under tools/power.py): osmos 440.5 s, first token p95
+  55.5 s, 6.96 J an answer token, peak GTT 109.7 / RAM 116.9 GiB; at 8K steps 421.7 s, 32.8 s, 6.68 J; Maya 547.7 s,
+  100.3 s, 8.81 J, 112.5 / 120.9 GiB. Maya 1.1.56 on these GGUFs is 1.1.55 (its 1.1.56 Halo gains are EXL3's).
+- **at Maya's memory**: osmos at a 108 GiB budget (auto: ~106): plain 17.0-17.1, no faster; drafting and 8K steps
+  refused at 108 ("GPU memory refused": fails closed) - auto already at the useful edge.
+- **perplexity** (the first 8,192 ids of calib16k.txt, BOS + 8,191 scored; osmos bin/ppl budget 100, steps of 512;
+  Maya maya-ds4 --ppl, one forward): UD-IQ1_M **2.4579** against 2.4649, UD-IQ1_S **2.5006** against 2.5023 - osmos's
+  own published numbers to the digit. Maya's --ppl keeps every row's logits on the host (~4 GB) beside its full
+  memory: the OOM killer took it (exit 137) until --reserve-mib 8192 (it moves experts, not arithmetic).
+
 ### 0.5.2: YaRN to a million positions (2026-11-06)
 
 the model card (Qwen/Qwen3.8-Flash-Next, "Processing Ultra-Long Texts"): native 262,144; past it static YaRN,

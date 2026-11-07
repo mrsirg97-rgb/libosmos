@@ -66,45 +66,53 @@ The 1M pack is the model card's static YaRN (factor 4 over the native 262,144): 
 
 The short version, for people who want one page: [`docs/STRIX-HALO.md`](docs/STRIX-HALO.md).
 
-One Strix Halo (128 GB, ~113 GiB GPU memory), 2026-11-05, nothing else running, AMD's `performance` profile. The
-comparison is [Project Maya](https://github.com/mw00/project-maya) **1.1.55** on the same model files: Maya as its setup
-configures it (its pack, its own 8 GB DSpark, its CPU lane calibrated on this machine, its expert profile warmed first),
-osmos **0.3.2** as it ships (the budget sized to the GPU, `--budget auto`; the router's guess off; our 4.7 GB IQ2_XS
-DSpark). Greedy decoding throughout. Every run and its command: `DESIGN.md`.
+One Strix Halo (128 GB, ~113 GiB GPU memory), 2026-11-06, nothing else running, AMD's `performance` profile. The
+comparison is [Project Maya](https://github.com/mw00/project-maya) **1.1.56** on the same model files, the same session:
+Maya as its setup configures it (rebuilt, its pack, its own 8 GB DSpark, its CPU lane calibrated on this machine, its
+expert profile warmed first), osmos **0.5.2** as it ships (the budget sized to the GPU, `--budget auto`; the router's
+guess off; our 4.7 GB IQ2_XS DSpark). Greedy decoding throughout. Every run and its command: `DESIGN.md`
+(`~/bench/h2h-056/perf.sh`).
 
 ### Agents
 
 What an agent waits on is mostly reading: Maya's agent bench (4 agents at once x 8 turns, seed 1, 131K context, DSpark
-on) sends ~99K new prompt tokens against ~8K answer tokens. UD-IQ1_M; power is the APU package's (amdgpu PPT: CPU +
-GPU + NPU, not the wall), over the bench's own window; osmos 0.3.2 the mean of two runs that evening (0.3.0 rerun
-beside them: 444.6 s, 7.01 J - level), Maya's that afternoon, when the box ran ~2.5% faster (0.3.0 then: 433 s):
+on) sends ~99K new prompt tokens against ~8K answer tokens. UD-IQ1_M, one run each that evening; power is the APU
+package's (amdgpu PPT: CPU + GPU + NPU, not the wall) and memory the session's samples (a second apart), over each
+run's own window:
 
-| | osmos 0.3.2 | Maya 1.1.55 | |
+| | osmos 0.5.2 | Maya 1.1.56 | |
 | --- | --- | --- | --- |
-| Wall, all 32 turns | **446 s** | 542 s | 18% less |
-| First token p50 / p95 | **6.2 / 54.7 s** | 6.3 / 81.3 s | p95 33% lower |
-| Turn done p50 / p95 | **44.1 / 94.0 s** | 55.3 / 121.9 s | 20% / 23% lower |
-| Package power, mean | 127 W | 127 W | |
-| Energy an answer token | **7.07 J** | 8.74 J | 19% less |
+| Wall, all 32 turns | **440 s** (7.3 min) | 548 s (9.1 min) | 20% less |
+| First token p50 / p95 | 6.6 / **55.5 s** | 6.3 / 100.3 s | p95 45% lower |
+| Turn done p50 / p95 | **42.0 / 89.7 s** | 54.5 / 127.9 s | 23% / 30% lower |
+| Package power, mean | 126 W | 127 W | |
+| Energy an answer token | **6.96 J** | 8.81 J | 21% less |
+| Peak GPU memory (GTT) / RAM in use | **109.7 / 116.9 GiB** | 112.5 / 120.9 GiB | ~3 / 4 GiB less |
 
-### Both packs against Maya 1.1.55
+osmos's prompts in 8,192-token steps (a step size the next release's packs take; the same answers, bit for bit): 422 s
+(7.0 min), first token p95 32.8 s, 6.68 J an answer token. At Maya's memory (a 108 GiB expert budget against auto's ~106)
+osmos's decode is the same 17.0-17.1 tok/s: the budget is not what holds it.
+
+### Both packs against Maya 1.1.56
 
 64K context (Maya's configuration), 256 tokens an answer to Maya's three bench questions and its 2K / 8K prompts,
-each engine in a fresh process; tok/s: Maya the mean of two interleaved rounds (its range in brackets), osmos 0.3.2 one
-run of each that evening (0.3.0's two rounds, that afternoon, within 0.3 tok/s of each other):
+each engine in a fresh process; tok/s the mean of two interleaved rounds, the engines' order swapped in the second
+(Maya's prompts the four reads of its runs, its range in brackets):
 
 | | UD-IQ1_M osmos | UD-IQ1_M Maya | UD-IQ1_S osmos | UD-IQ1_S Maya |
 | --- | --- | --- | --- | --- |
-| Prompt, 2,048 tokens | **293** | 243 (242-243) | **331** | 259 (256-261) |
-| Prompt, 8,192 tokens | **441** | 406 (402-409) | **473** | 431 (430-431) |
-| Decode, DSpark drafted | **33.6** | 27.5 (25.8-29.1) | **40.8** | 34.9 (34.6-35.1) |
-| Decode, plain | 17.1 | 17.0 (16.8-17.1) | 19.3 | 19.2 (19.1-19.3) |
+| Prompt, 2,048 tokens | **300** | 241 (237-245) | **327** | 258 (248-262) |
+| Prompt, 8,192 tokens | **445** | 408 (402-414) | **488** | 436 (431-440) |
+| Prompt, 8,192 tokens, osmos 8K steps | **557** | | **595** | |
+| Decode, DSpark drafted | **33.5** | 27.6 (27.5-27.7) | **40.6** | 34.5 (34.3-34.6) |
+| Decode, plain | 17.1 | 17.0 (16.9-17.1) | 19.4 | 19.3 (19.3-19.3) |
+| Perplexity, 8,191 tokens | **2.4579** | 2.4649 | **2.5006** | 2.5023 |
 | Output reproducible bit for bit | yes | not measured (1.1.46: no) | yes | not measured |
 
-Plain decode is a tie; reading prompts (+9 to +28%), drafting (+17 to +22%) and several conversations at once (18-19%
-less time and energy) are where osmos leads. osmos's answers hash the same in every run and configuration, across
-0.1.3, 0.2.0, 0.3.0 and 0.3.2; Maya's greedy decode varied run to run when measured on 1.1.46 (DESIGN.md), not
-re-measured since.
+Plain decode is a tie; reading prompts (+9 to +27% as shipped, +36 to +37% at 8K in 8K steps), drafting (+18 to
++21%) and several conversations at once (20% less time, 21% less energy, ~3 GiB less memory) are where osmos leads.
+osmos's answers hash the same in every run and configuration, across 0.1.3, 0.2.0, 0.3.0, 0.3.2, 0.4.0 and 0.5.x;
+Maya's greedy decode varied run to run when measured on 1.1.46 (DESIGN.md), not re-measured since.
 
 ### Energy at the low-power profile
 
@@ -366,8 +374,12 @@ head Qwen's (`src/q4x/`).
   the forward's expert reads (their order by need, their ends as events) and `osmos-serve --parallel`'s loop, several
   conversations at once on one engine (`third_party/libevt`, a submodule, built into `libosmos.a`).
 - [Project Maya](https://github.com/mw00/project-maya) (MIT): the reference this engine is measured against and
-  learned from - the int8 expert approach (`ds4_iq.cu`), the DeepSeek reference tools in `oracle/` (copied, with
-  `oracle/LICENSE.maya`), DSpark's packing. Findings from this work go back to Maya: `MAYA-UPSTREAM-PATCHES.md`.
+  learned from - the DeepSeek reference tools in `oracle/` (copied, with `oracle/LICENSE.maya`), DSpark's packing.
+  Several of Maya's AMD paths are this project's author's own contributions there, carried here: the int8 experts on
+  gfx1151 ([#643](https://github.com/mw00/project-maya/pull/643), on Maya's main as a co-authored commit), the
+  conversation slots and prompt caching ([#356](https://github.com/mw00/project-maya/pull/356)) and libevt as its
+  scheduler ([#587](https://github.com/mw00/project-maya/pull/587)). Findings from this work go back to Maya:
+  `MAYA-UPSTREAM-PATCHES.md`.
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT): the IQ grid tables in `kernels/quant_grids.h` are
   generated from its `gguf-py` (`tools/gen_grids.py`), and the quant formats are ggml's.
 - [DeepSeek](https://github.com/deepseek-ai) (MIT): the model, its inference reference, and the Engram hashing that
