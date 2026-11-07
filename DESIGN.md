@@ -2404,6 +2404,20 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
   0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
 
+### 0.5.5: a token's A operand from the decode, no LDS (2026-11-07, low-power)
+
+the question that found it: could more waves be resident at a token? the half-slab LDS raised them but doubled each
+partition's chain - two changes at once. the clean test keeps the chain and frees the LDS: tile's kRegA path (each
+lane its row's chunks of WMMA's A, the halves traded across the lane halves - Q5_K's since 0.3) for the other types.
+the same f16 in the same places: the same bits (mmbits at 1-2,048 tokens; test_mm_gpu).
+- each matrix from DRAM (dec1 / dec_ds / exp1): Q6_K's 128-value slabs +6-16% (Qwen's DeltaNet pair 183 -> 207
+  GB/s, attn_q 172 -> 200, the logits 179 -> 203; DeepSeek's wo_b 193 -> 204, wo_a's groups 191 -> 207, its logits
+  193 -> 211), Q8_0 +13% (the hc mixers 156 / 147 -> 178 / 166), IQ4_NL +7%, IQ4_XS +5%; Q6_K's 64-value slabs
+  (DeepSeek's q_b) -7%, IQ2_S -10%, IQ3_XXS and Q2_0 level - those keep the LDS's (kRegAShape: by type and slab).
+  a token's dense reads Qwen 23.2 -> 20.7 ms, DeepSeek 34.2 -> 33.1.
+- the models (one round, the build before alternating; every hash the same): Qwen plain 25.90 -> 26.37 tok/s,
+  drafted 43.39 -> 44.46; DeepSeek UD-IQ1_M plain (a chat question, 256 tokens) 15.0 -> 15.9.
+
 ### 0.5.5: Qwen's shared expert beside its routed ones - decode +8% (2026-11-07, low-power)
 
 the decode's kernels are latency-bound (one at a time 78-83% of the memory's 242 GB/s, the small ones far less), so

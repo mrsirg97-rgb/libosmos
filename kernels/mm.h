@@ -53,14 +53,20 @@ __device__ inline void x16_put(_Float16* x16, uint32_t t, uint32_t c, uint32_t x
 template <int G, int CT>
 constexpr bool kPipe = CT > 1 && G <= 2;
 
-// one column tile (a decode's 1-16 tokens) of a type of short slabs: each lane decodes its row of WMMA's A operand
-// itself (lane l: row l % 16; lanes 0-15 a step's even chunk, 16-31 its odd, the halves traded across the lane
-// halves), no LDS between the decode and the WMMA - the same f16 in the same places, so the same sums (scratch
-// m1.hip, one token: Q5_K's q_b 181 -> 143 us, wo_a's 8 groups 185 -> 147, the shared expert's 62 -> 60; the IQ
-// experts' and Q6_K's, Q8_0's slower or the same: their slabs' LDS layout is the better)
+// one column tile (a decode's 1-16 tokens): each lane decodes its row of WMMA's A operand itself (lane l: row l % 16;
+// lanes 0-15 a step's even chunk, 16-31 its odd, the halves traded across the lane halves), no LDS between the
+// decode and the WMMA - the same f16 in the same places, so the same sums. measured against the slab through LDS at a
+// token, each matrix read from DRAM (dec1 / dec_ds / exp1, low-power, 2026-11-07): Q6_K's long rows (128-value
+// slabs) +6-16% (Qwen's DeltaNet pair 183 -> 207 GB/s, attn_q 172 -> 200, its logits 179 -> 203; DeepSeek's wo_b
+// 193 -> 204, wo_a 191 -> 207), Q8_0 +13% (Qwen's hc mixers 156 / 147 -> 178 / 166), IQ4_NL +7% (142 -> 151),
+// IQ4_XS +5%; Q6_K's short rows (64-value slabs: DeepSeek's q_b, 1,280 columns) -7%, IQ2_S -10%, IQ3_XXS and Q2_0
+// level - those keep the LDS's. a token's dense reads Qwen 23.2 -> 20.7 ms, DeepSeek 34.2 -> 33.1 (Q5_K: m1.hip's
+// q_b 181 -> 143 us, its first)
 template <quant::Type T>
-constexpr bool kRegA = T == quant::kQ5_K || T == quant::kQ5_KR;
-
+constexpr bool kRegA = T == quant::kQ5_K || T == quant::kQ5_KR || T == quant::kQ6_K || T == quant::kQ8_0 ||
+                       T == quant::kIQ4_NL || T == quant::kIQ4_XS;
+template <quant::Type T, class S>
+constexpr bool kRegAShape = kRegA<T> && !(T == quant::kQ6_K && S::kSlab < 128);
 __device__ inline h8 lane_other_half(h8 v) {  // lane l ^ 16's 8 halves
   typedef uint32_t u4 __attribute__((ext_vector_type(4)));
   const u4 w = __builtin_bit_cast(u4, v);
@@ -88,7 +94,7 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
   const _Float16* xb[CT];  // each tile's fragments of this lane: its column, a step kFrag on
   for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
   f8 acc[CT] = {};
-  if constexpr (CT == 1 && kRegA<T>) {  // the A operand straight from the decode (kRegA)
+  if constexpr (CT == 1 && kRegAShape<T, S>) {  // the A operand straight from the decode (kRegA)
     for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
       h16 a[G], bx[G];
 #pragma unroll
