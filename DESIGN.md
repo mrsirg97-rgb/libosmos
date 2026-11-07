@@ -2396,7 +2396,13 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
 - **the experts' activation straight into the down's f16** (q4x_swiglu_rows: q4x_swiglu then mm_x16_rows's bytes,
   test_q4x_moe_gpu): those kernels 1,946 -> 1,634 ms at 8K steps, 1,480 -> 1,388 at 2K; and the shared expert with
   the layer's part (b.x16 its mixer's): its conversions at 8K 143 -> 12 ms. what is left: gate and up's F32 (420 MB
-  a layer at 8K) written then read - a gate + up group kernel writing swiglu's f16 itself is next.
+  a layer at 8K) written then read.
+- **gate + up in one kernel, swiglu's f16 its epilogue** (mm_group_swiglu: a block's gate tile kept in LDS, then its
+  up tile, each tile_to's own sums - the down's output the same bits, test and a mutation): slower. 16K at 8K steps
+  (profiled, back to back) gate + up + q4x_swiglu_rows 3.66 s -> 4.11 s with two tile copies inlined (IQ3_XXS at 8
+  tiles 248 VGPRs, 36 B spilled, 5 waves), 5.70 s with one in a two-pass loop (222, none, 6): a block's latency
+  doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
+  0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
 
 ### 0.5.4: the dense mm explored - what does not help (2026-11-06, performance)
 
