@@ -2404,6 +2404,26 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
   0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
 
+### 0.5.5: DeepSeek's decode profiled, and WMMA's sums probed (2026-11-07, low-power)
+
+a plain decode token (UD-IQ1_M, a chat question, 64 tokens, rocprofv3): 1,201 kernels, 68.2 ms on the GPU - busy
+57.4, gaps 10.8 (7.7 the reads' waits). the dense mm 28.8 ms (203 launches) and wo_a's groups 5.9: ~6.6 GB of
+dense weights a token at ~185-190 GB/s; the resident experts (q8's gate_up 7.8, group_tok 4.9); ~16 small kernels
+a layer ~6.5 ms. the memory's ceiling (a plain 16-byte streaming read, 1 GiB): 242 GB/s - at low-power too (the
+profile slows the GPU's clocks, not the memory's).
+- **the shapes at a token** (dec_ds, from DRAM): q_b 191 GB/s, wo_b 192, wo_a's 8 groups 188, the Q8_0 shared
+  expert 199-203, the logits 192; the Q5_K shared expert 135, q_a 135, kv 99. at 225 GB/s the big ones ~29 -> ~24 ms.
+- **a lane's chunks consecutive in its row** (for wider loads: the same values to the same LDS places): slower -
+  q_b 185 -> 140 GB/s, wo_b 190 -> 172, the logits 191 -> 169 (the 16 lanes of a row read neighbours today; spread
+  over rows they do not, and the compiler merges nothing). wider loads need each type's block read by hand.
+- **WMMA's sums, for a VALU decode of the same bits** (wmma_sem: 4,096 random 16 x 16 x 16 cases - mixed
+  magnitudes, cancellation, a large accumulator - each output against a model of the hardware): an f16 x f16
+  product is exact in f32, but no model of the 16 products' and C's sum matches - in order, reversed, a tree, the
+  exact sum rounded to nearest or toward zero, groups of 4 exact, toward-zero trees in five pairings with C to
+  nearest, aligned adders of 20-40 bits: 23-38% of outputs each. its error against the exact sum up to 4 ulps and
+  more (4%), toward zero 3 times in 4; built cases fit a toward-zero tree with C to nearest, random ones do not. a
+  token's bits the prompt's therefore need the WMMA at a token too - the tile as it is.
+
 ### 0.5.5: DeepSeek's resident set settled to a prompt - measured, not kept (2026-11-07, performance)
 
 why: after a prompt the resident set is the profile's (a prompt's steps pick nearly every expert, so the swaps - the
