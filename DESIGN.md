@@ -2417,6 +2417,12 @@ experts take longer, so a missing wait passed every test - so test_q4x_forward_g
 rows against the one batch's: the wait left out, it fails at the first.
 - plain decode (512 + 128, two rounds alternating) 23.97 / 23.80 -> 25.83 / 25.69 tok/s (+7.9%); the MTP head
   drafting 40.25 / 40.01 -> 43.69 / 43.59 (+8.7%; at one-token steps alone +1.9 - the verify steps are its).
+- **DeepSeek's the same way** (hip_ffn.c's shared on the second stream, ops_gather_sum_add waiting; the forced
+  order in test_model_gpu, a missing wait caught): the same bits, no faster - UD-IQ1_M, two chat questions x 256
+  tokens, two rounds against the build before: plain 15.4 -> 15.0 tok/s, drafted 28.1 -> 28.3. its shared expert
+  already ran beside something - the host's wait for the routing event and the experts' reads - and the second
+  stream added an event and a wait a layer. not kept (the diff in the session's notes); a quant whose decode is
+  the GPU's (a profile's busy, not its reads) would be the case to try it again.
 
 ### 0.5.5: DeepSeek's decode profiled, and WMMA's sums probed (2026-11-07, low-power)
 
