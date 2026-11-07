@@ -247,7 +247,7 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   const GgufTensor *t[Q4X_GROUP_TENSORS] = {L->exp_gate, L->exp_up, L->exp_down};
   Q4xX16 sd;
   Q4xExpertTiles et = {.cnt = b->cnt, .gidx = b->gidx, .hidx = b->hidx, .xg = b->xg, .yg = b->yg, .xd = b->xd,
-                       .yd = b->yd, .where = b->where};
+                       .yd = b->yd, .where = b->where, .off = b->eoff};
   for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
     et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E, et.ptr[i] = b->ptr + (uint64_t)i * bd.entries;
   /* each expert read once for up to 128 of the step's tokens that picked it (q4x_expert_tiles, mm_group) */

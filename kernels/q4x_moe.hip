@@ -99,11 +99,9 @@ __global__ __launch_bounds__(kGroupThreads) void tiles_kernel(const int32_t* ids
   __syncthreads();
   for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads) {
     const int c = count[e];
+    t.off[e] = sc[0][e], t.off[n_exp + e] = sc[1][e], t.off[2 * n_exp + e] = c;  // place_kernel's
     if (!c) continue;
     const int p0 = sc[0][e], s0 = sc[1][e];
-    int q = p0;
-    for (uint32_t i = 0; i < n && q < p0 + c; i++)
-      if (ids[i] == (int32_t) e) t.where[i] = q, t.gidx[s0 + q - p0] = (int32_t) (i / k), t.hidx[s0 + q - p0] = q, q++;
     for (int s = s0 + c; s < s0 + own(e, 1); s++) t.gidx[s] = -1, t.hidx[s] = -1;
     int at[Q4X_TILE_RUNS];
     for (int r = 0; r < Q4X_TILE_RUNS; r++) at[r] = (int) bd.first[r] + sc[2 + r][e];
@@ -119,6 +117,35 @@ __global__ __launch_bounds__(kGroupThreads) void tiles_kernel(const int32_t* ids
   for (int r = 0; r < Q4X_TILE_RUNS; r++)
     for (uint32_t i = (uint32_t) live[2 + r] + threadIdx.x; i < bd.count[r]; i += kGroupThreads) t.cnt[bd.first[r] + i] = 0;
   for (uint32_t s = (uint32_t) live[1] + threadIdx.x; s < bd.slots; s += kGroupThreads) t.gidx[s] = -1, t.hidx[s] = -1;
+}
+
+// a block an expert: its picks placed in pick order (the stable sort's) - the picks a block-wide tile at a time, each
+// one's place its expert's first plus the expert's picks before it (an exclusive scan of the tile's flags)
+__global__ __launch_bounds__(kThreads) void place_kernel(const int32_t* ids, uint32_t n, uint32_t k, uint32_t n_exp,
+                                                         Q4xExpertTiles t) {
+  __shared__ uint32_t scan[kThreads];
+  const uint32_t e = blockIdx.x;
+  const int c = t.off[2 * n_exp + e];
+  if (!c) return;
+  const int p0 = t.off[e], s0 = t.off[n_exp + e];
+  int done = 0;
+  for (uint32_t i0 = 0; i0 < n && done < c; i0 += kThreads) {
+    const uint32_t i = i0 + threadIdx.x, f = i < n && ids[i] == (int32_t) e;
+    scan[threadIdx.x] = f;
+    __syncthreads();
+    for (uint32_t o = 1; o < kThreads; o <<= 1) {  // inclusive scan (Hillis-Steele)
+      const uint32_t v = threadIdx.x >= o ? scan[threadIdx.x - o] : 0;
+      __syncthreads();
+      scan[threadIdx.x] += v;
+      __syncthreads();
+    }
+    if (f) {
+      const int q = p0 + done + (int) scan[threadIdx.x] - 1;
+      t.where[i] = q, t.gidx[s0 + q - p0] = (int32_t) (i / k), t.hidx[s0 + q - p0] = q;
+    }
+    done += (int) scan[kThreads - 1];
+    __syncthreads();  // the tile's scan read by every thread before the next one's
+  }
 }
 
 __global__ void gather_kernel(const float* src, const int32_t* rows, uint32_t n, uint32_t len, float* dst) {
@@ -163,13 +190,15 @@ extern "C" void q4x_expert_bounds(uint32_t n, uint32_t n_exp, Q4xExpertBounds* b
 extern "C" bool q4x_expert_tiles(const int32_t* ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t dim, uint32_t ff,
                                  const Q4xExpertTiles* t, void* stream) {
   if (!ids || !n || !k || n % k || !n_exp || n_exp > kMaxExperts || !dim || !ff || !t || !t->cnt || !t->gidx ||
-      !t->hidx || !t->xg || !t->yg || !t->xd || !t->yd || !t->where)
+      !t->hidx || !t->xg || !t->yg || !t->xd || !t->yd || !t->where || !t->off)
     return false;
   for (int j = 0; j < Q4X_GROUP_TENSORS; j++)
     if (!t->base[j] || !t->bytes[j] || !t->ptr[j]) return false;
   Q4xExpertBounds bd;
   q4x_expert_bounds(n, n_exp, &bd);
   tiles_kernel<<<1, kGroupThreads, 0, st(stream)>>>(ids, n, k, n_exp, dim, ff, *t, bd);
+  if (!ok()) return false;
+  place_kernel<<<n_exp, kThreads, 0, st(stream)>>>(ids, n, k, n_exp, *t);  // the picks placed, an expert a block
   return ok();
 }
 
