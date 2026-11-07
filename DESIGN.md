@@ -2423,6 +2423,11 @@ rows against the one batch's: the wait left out, it fails at the first.
   already ran beside something - the host's wait for the routing event and the experts' reads - and the second
   stream added an event and a wait a layer. not kept (the diff in the session's notes); a quant whose decode is
   the GPU's (a profile's busy, not its reads) would be the case to try it again.
+- **the next matrices read into the Infinity Cache on the second stream** (mall: a layer's chain - the DeltaNet
+  pair 34 MB, then hc down / up and ssm_out, ~20 MB - those three streamed on the second stream as the pair starts;
+  the layers rotated, every read cold): slower at every width - a layer 319 us plain, 351-361 at 16 blocks, 389 at
+  64, 391-399 at 256 (the same outputs). the reads compete for the bandwidth the pair is using, and what they read
+  is not there for the matrices after - not kept.
 
 ### 0.5.5: DeepSeek's decode profiled, and WMMA's sums probed (2026-11-07, low-power)
 
