@@ -2367,6 +2367,26 @@ below; mutants (a tie to the higher block, the tail off by one, a block's rope a
 - **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
   21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
+### 0.5.5: the prompt's GEMM - the operands shared, the order kept (2026-11-07, low-power)
+
+why: Strata's fast set reads a 16K Qwen prompt ~40% faster at every length (attention is not it: QSA keeps ours 198
+-> 295 us a token from 4K to 32K; the matmuls are ~830 of ~1,450 us a token). the matrix cores' own peak here
+(wmma_rate, low-power): f16 45 TFLOP/s, iu8 48 TOPS - int8 no faster on RDNA 3.5, and with the q8 contract's per-32
+scales after each block (on the same SIMD) at most ~29 before a single load (i8epi): not the way for the dense mm.
+0.5.4's tries said the bound is each wave's own operands, none shared (tile's waves are the K split, the sums' order).
+- **mm.h's gemm_kernel**: a block 64 rows x 256 tokens, 8 waves of 32 x 64; each slab (64 rows x 128 values) decoded
+  into LDS once by the block, the next under this one's WMMAs (two slabs' LDS, a barrier a slab). the order kept:
+  partition p (tile's wave p) its slabs p, p + 8, ... one WMMA chain a 16 x 16 tile from zero, the partitions in turn
+  into a running sum (tile's part[0] + part[1] + ...) - the same bits at every count, a prompt's as decode's (mmbits:
+  every bit of y at 1-2,048 tokens; test_mm_gpu; a mutation - the chain not reset a partition - caught).
+- the matrices (Q6_K / Q8_0, Qwen's shapes, 2,048 tokens): 10240 x 2560 20.6 -> 27.0 TFLOP/s, 2560 x 6144 22.9 ->
+  27.6, 6144 x 2560 20.7 -> 26.7, 12288 x 2560 20.9 -> 26.8, Q8_0 20.5 -> 28.7. a single slab's LDS 25.5; 64 x 128
+  22.8; 32 x 256 22.4; 128 x 128 past the 64 KB LDS; 128 x 256 spills.
+- Qwen (against a v0.5.4 build, two interleaved rounds, every hash the same): 16K 590 / 584 -> 637 / 623 tok/s
+  (+7%), 4K 634 / 647 -> 703 / 745 (+13%), 2K 705 / 668 -> 776 / 735 (+10%), 512 +3%; decode unchanged (it is tile's).
+- DeepSeek (UD-IQ1_M, dbench, greedy; two interleaved rounds): every stream 5ca48d476414fd50 (0.5.3's); 2K 259 / 251
+  -> 263 / 258 tok/s (+2%), 8K 387 / 386 -> 391 / 387 (+0.6%) - its prompt the SSD's, its dense mm a small share.
+
 ### 0.5.4: the dense mm explored - what does not help (2026-11-06, performance)
 
 why: Strata's fast set (its docs: a 128 x 256 WMMA GEMM for the prompt's FP16 projections, from 4,096 tokens) reads a

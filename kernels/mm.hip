@@ -155,8 +155,39 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
   return hipGetLastError() == hipSuccess;
 }
 
+// a prompt's matrix on mm.h's gemm_kernel: Q6_K and Q8_0 (both models' dense), rows of at least kShortCols (tile's
+// shape, every partition a slab) and more than 64 tokens (CT 8's: below, tile's own); the same bits as tile at every
+// count (test_mm_gpu: 2,048, 64 and 33 tokens against 16). 64 rows x 256 tokens a block, a wave 32 x 64: 10240 x
+// 2560 Q6_K at 2,048 tokens 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 (low-power; 64 x 128: 22.8, 32 x 256: 22.4,
+// 128 x 128: past the LDS; without the second slab's LDS 25.5)
+template <quant::Type T>
+constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0;
+constexpr int kGemmRm = 2, kGemmRn = 4, kGemmWr = 2, kGemmWc = 4;
+constexpr uint32_t kGemmMinTokens = 4 * mm::kTile;  // past it: CT 8's counts
+
+template <quant::Type T>
+bool gemm_takes(const Mats& m, uint32_t cols, uint32_t n) {
+  using S = typename Tuned<T>::S;
+  return kGemm<T> && n > kGemmMinTokens && !odd<T>(cols) && cols >= kShortCols &&
+         cols / S::kSlab >= (uint32_t) S::kWaves;
+}
+
+template <quant::Type T>
+bool launch_gemm(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
+  using S = typename Tuned<T>::S;
+  constexpr uint32_t BM = mm::kTile * kGemmRm * kGemmWr, BN = mm::kTile * kGemmRn * kGemmWc;
+  const uint32_t rows = m.rows[0] > m.rows[1] ? m.rows[0] : m.rows[1];
+  mm::gemm_kernel<T, S, kGemmRm, kGemmRn, kGemmWr, kGemmWc>
+      <<<dim3((rows + BM - 1) / BM, m.w[1] ? 2 : 1, (n + BN - 1) / BN), 256, 0, s>>>(
+          (const uint8_t*) m.w[0], (const uint8_t*) m.w[1], m.rows[0], m.rows[1], cols, (const _Float16*) x16, n,
+          m.y[0], m.y[1], m.ys[0], m.ys[1]);
+  return hipGetLastError() == hipSuccess;
+}
+
 template <quant::Type T, int CT>
 bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
+  if constexpr (kGemm<T>)
+    if (gemm_takes<T>(m, cols, n)) return launch_gemm<T>(m, cols, x16, n, s);
   if (odd<T>(cols)) return launch_shape<T, CT, typename Odd<T>::S>(m, cols, x16, n, s);
   return cols < kShortCols ? launch_shape<T, CT, typename Short<T>::S>(m, cols, x16, n, s)
                            : launch_shape<T, CT, typename Tuned<T>::S>(m, cols, x16, n, s);
