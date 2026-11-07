@@ -2367,6 +2367,24 @@ below; mutants (a tie to the higher block, the tail off by one, a block's rope a
 - **speed**: prompt 2,048 672 tok/s (651 dense), 8,000 588 (454), 16,384 567 (315), 65,536 500; plain decode at 8K
   21.8, 16K 21.6, 64K 19.6; at 512 23.2 (the same), drafted 39.5 (40.2: the indexer's launches in a draft step).
 
+### 0.5.4: the dense mm explored - what does not help (2026-11-06, performance)
+
+why: Strata's fast set (its docs: a 128 x 256 WMMA GEMM for the prompt's FP16 projections, from 4,096 tokens) reads a
+16K Qwen prompt at 946 tok/s against our 676; a 16K prompt here 24% dense mm, 22% experts, 21% small kernels, 18%
+attention. the dense mm (both models' Q6_K / Q8_0) timed alone (Q6_K, Qwen's shapes, 2,048 tokens: 27-31 TFLOP/s,
+~half the matrix cores' ~59 by our estimate) and counted (SQ_*: 70% of wave cycles waiting - 26% on memory, 24% on
+instruction dependencies; VALU 4%; no LDS conflicts; 234 VGPRs, 6 waves a SIMD). every variant below the same
+checksum (the same operands in each tile's order - a token's bits unmoved), each slower:
+- **the tiles' WMMAs interleaved** (8 chains, not 8 WMMAs back to back): 9 TFLOP/s - 256 VGPRs and spills; 2 or 4
+  chains a group, no spills, 9 too: a tile's 8 x loads in flight together were what hid the memory, not the chain.
+- **A from LDS a step at a time, x double-buffered** (kPipe's for long slabs): 21-25 at 8 tiles (spills, 176 B); at 4
+  or 2 tiles a block (no spills) 13-18 - a weight slab decoded for fewer tokens costs more than the 4% VALU said.
+- **fewer waves (less K split)** at a token (mmsweep): 8 waves 195 / 178 GB/s (10240 x 2560 / 2560 x 6144), 4: 191 /
+  160, 2: 169 / 176, 1: 160 / 132 - a big tile without the K split costs decode 18-26% (decode and prompt share the
+  order), the head the exception (4 waves 228 against 208).
+so the current tile is the best of its family here; a gain needs a different design (a block's x shared across more
+rows through LDS at the same K split, or per-shape splits - each its own experiment at 1 and 2,048 tokens).
+
 ### 0.5.3: DeepSeek against Maya 1.1.56, and bigger prompt steps (2026-11-06, performance)
 
 - **a prompt step's reads**: DeepSeek's prompt is the SSD's (a 2,048-token step touches nearly every expert, the
