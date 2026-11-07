@@ -2397,6 +2397,28 @@ the tables 0.55, swiglu 0.27; their counters 83% waiting, 54% on memory, VALU 2.
   DeltaNet's passes chunked: ~1.5% left after the conversions, not yet.
 - **the DeltaNet's columns over 4 or 8 blocks a head** (a column's sums its own: the same bits): 1,084 -> 1,029 /
   1,229 ms - its cost is a token's chain (q / k in, a sync, two 64-value dots, shuffles), not its 48 blocks.
+- **the step-wide x16** (b.x16 a step's tokens, each chunk of MM_MAX_TOKENS at its own tiles: parked on
+  park/x16-whole-step): the same hashes at 2K, 4K and 8K steps, the conversions gone (x16_kernel 941 -> 0 ms) - and a
+  16K prompt at 8K steps level with 2K (23.17 against 23.27 s): the experts -1.05 s, the router -0.28, but gated_norm
+  +0.30, swiglu +0.20, the DeltaNet +0.20, the dense mm +0.20, conv +0.17 - a 2K step's activations (~32 MB) stay in
+  the 32 MB Infinity Cache, an 8K step's do not. the gain needs a layer's per-token part in 2K sub-batches and only
+  the experts over the step (DeepSeek's FORWARD_SUBS shape): ~1 s of a 16K prompt (~5%, prompts past 8K only) for the
+  forward's most delicate code (the DeltaNet's history and the attention's positions split mid-sequence) - not now.
+
+the dense mm again (a harness hashing every bit of y at 1, 7, 16, 33, 100, 512 and 2,048 tokens against the current
+kernel, Qwen's shapes; the current kernel itself 25.6-28.4 TFLOP/s run to run on 10240 x 2560). every variant below
+the same bits at every count, each slower at 2,048 tokens:
+- **R row tiles a block** (each wave all R over its own slabs, a slab decoded SC values at a time: an x fragment one
+  load for R WMMAs): R 2 at 8 tiles 13 TFLOP/s (256 VGPRs, spills); R 2 at 4 tiles 23.6 (212 VGPRs, no spills - x's
+  traffic halved, slower); R 4 at 2 or 4 tiles 10-15; R 1 decoded 64 at a time 27.1 (the parts cost nothing). so x's
+  loads are not the bound: a slab decoded for fewer tokens is.
+- **P token groups sharing a K-wave's decoded slab through LDS** (a decode for 256 tokens, not 128; every wave the
+  same trip count, block barriers): P 1 (the current tile with block barriers, nothing else) 22.5 against 27.2 - the
+  barriers alone 18%; P 2 at 8 tiles 22.7, at 4 tiles 18.5; P 4 15.6. the waves' independence (each its own slabs,
+  no barrier until the sum) is what hides the latency.
+what is left is the GEMM rewritten whole (the next slab's weights loaded under this one's WMMAs, at the same K split):
+a large change, and its smaller form (x double-buffered, above) was slower. the dense mm is 24% of a 16K prompt, so a
+20% faster kernel is ~5% of it; the attention (18%, and growing with the prompt's square) is the better next look.
 
 ### 0.5.3: DeepSeek against Maya 1.1.56, and bigger prompt steps (2026-11-06, performance)
 
