@@ -2433,7 +2433,11 @@ rows against the one batch's: the wait left out, it fails at the first.
   waves the K split, each partition's chain and the partials' order the library's - every row the same bits as
   mm_run's), its 64 lanes a slab's chunks between them: 10240 x 2560 175 -> 190 GB/s, 2560 x 6144 170 -> 174, but
   5120 x 8192 200 -> 193, 12288 x 2560 192 -> 186 - the loads in flight twice a wave's, the waves fewer and their
-  instructions two halves each. a wash; the library stays wave32.
+  instructions two halves each. a wash; the library stays wave32. pushed further (each the same bits): the next
+  slab decoded ahead into registers (4 h8 a lane on wave64, cheap) 166-186 GB/s; a slab through half or a quarter
+  of the LDS (occupancy 6 -> 8 / 14 waves a SIMD) 142-162 / 105-120 - occupancy is not the bound, a partition's
+  chain is (each step after the one before: more of them, more round trips). and wave32's own spread across runs
+  (10240 x 2560: 175-188) is as wide as wave64's first gain - a hybrid would buy noise.
 
 ### 0.5.5: DeepSeek's decode profiled, and WMMA's sums probed (2026-11-07, low-power)
 
