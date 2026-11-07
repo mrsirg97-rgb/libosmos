@@ -2385,6 +2385,19 @@ checksum (the same operands in each tile's order - a token's bits unmoved), each
 so the current tile is the best of its family here; a gain needs a different design (a block's x shared across more
 rows through LDS at the same K split, or per-shape splits - each its own experiment at 1 and 2,048 tokens).
 
+then the experts (a 16K prompt's expert path 33%: the matmuls 5.3 s at ~15 TFLOP/s, the gather 1.17, moe_sum 0.64,
+the tables 0.55, swiglu 0.27; their counters 83% waiting, 54% on memory, VALU 2.3%):
+- **kept**: the tables' placement an expert a block (tiles_kernel's one block scanned every pick an expert): 551 ->
+  73 ms, the same tables (test_q4x_moe_gpu against a host stable sort).
+- **the gate / up read in place** (mm_group by a slot's token, not the gathered copy): the same bits, slower - 16K 693
+  -> 640 tok/s, 2K 794 -> 718: the gathered tiles' contiguous reads are what the kernel is fast on.
+- **8K steps** (each expert ~160 tokens, its weights read once for them, not ~40): the experts 5.39 -> 4.16 s, but
+  the side copies' f16 lost past MM_MAX_TOKENS (+1.19 s of conversions) and the DeltaNet's per-token kernels +0.76
+  (their 4x buffers out of the cache) - net slower (24.6 against 23.7 s). worth it only with a step-wide x16 and the
+  DeltaNet's passes chunked: ~1.5% left after the conversions, not yet.
+- **the DeltaNet's columns over 4 or 8 blocks a head** (a column's sums its own: the same bits): 1,084 -> 1,029 /
+  1,229 ms - its cost is a token's chain (q / k in, a sync, two 64-value dots, shuffles), not its 48 blocks.
+
 ### 0.5.3: DeepSeek against Maya 1.1.56, and bigger prompt steps (2026-11-06, performance)
 
 - **a prompt step's reads**: DeepSeek's prompt is the SSD's (a 2,048-token step touches nearly every expert, the
