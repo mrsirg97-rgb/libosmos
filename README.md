@@ -10,6 +10,9 @@ It runs these quantizations of DeepSeek:
   5 shards each): experts in 1-2-bit IQ types, attention Q6_K. The two packs below run both with unsloth's lossless
   MXFP8 Engram table (one 203 GB file the two share) and, optionally, huihui-ai's abliteration patch. Against Maya
   each engine reads the same files (UD-IQ1_M with its stock IQ4_NL table, UD-IQ1_S with the MXFP8 one).
+- **unsloth's UD-IQ2_XXS** (the same repo, 6 shards: the sixth is the Engram table, the pack links the MXFP8 one in
+  its place): experts IQ2_S / IQ2_XXS / IQ1_S / IQ3_XXS / IQ2_XS, one Q2_K. The slow pack (0.5.6): the best
+  perplexity of the three, the slowest decode.
 - **ISTA-DASLab's GSQ-RCO IQ2_XXS** ([ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)):
   experts IQ2_XXS / IQ2_XS / IQ1_M, its Engram a shared file linked as shard 6 (llama.cpp's layout since 2026-10-27;
   their earlier four-shard layout too). What the engine was first built on; measured below, not one of the packs.
@@ -37,7 +40,7 @@ C, HIP and a little C++. No Python at runtime.
 ## Quick start
 
 ```sh
-python3 tools/install/osmos_install.py ud-iq1_s --serve    # or ud-iq1_m; --rig to register it in rig instead
+python3 tools/install/osmos_install.py ud-iq1_s --serve    # or ud-iq1_m, ud-iq2_xxs; --rig to register it in rig instead
 ```
 
 The installer builds the engine, fetches the pack's files at pinned commits (unsloth's shards and Engram table, our
@@ -130,8 +133,9 @@ osmos 0.3.2 at the box's `low-power` profile (power-profiles-daemon's power-save
 | Agents (4 x 8) | 481 s | 63 | **3.79** an answer token | +8% time, -46% energy |
 
 At low-power osmos drafts faster than 0.2.0 did at `performance` (29.8 tok/s), at ~71 W against ~125. At the packs'
-own 1M context (0.1.x, fixed budgets), decode is UD-IQ1_S 18.8 plain / 37.5 drafted, UD-IQ1_M 16.0 / 28.6 tok/s: a 1M
-context's attention state is ~0.85 GiB.
+own 1M context (0.5.6, `performance`), decode is UD-IQ1_S 19.4 plain / 41.5 drafted, UD-IQ1_M 17.2 / 33.2, UD-IQ2_XXS
+13.9 / 19.3 tok/s: a 1M context's attention state is ~0.85 GiB, which UD-IQ2_XXS's drafting, the most miss-bound,
+feels most (21.3 at 64K).
 
 ### Qwen3.8-Flash-Next against llama.cpp
 
@@ -175,16 +179,20 @@ others share its steps (`test_q4x_forward_gpu`, `test_mtp_q4x_gpu`).
 
 64K context; perplexity over 8,191 tokens of mixed text and code (`bin/ppl`); power and energy at `performance`:
 
-| | UD-IQ1_M (quality) | UD-IQ1_S (speed) |
-| --- | --- | --- |
-| Perplexity (abliterated) | 2.459 (2.470) | 2.501 (2.505) |
-| Package power decoding, plain / drafted | 131 / 127 W | 138 / 131 W |
-| Energy a token, plain / drafted | 7.72 / 3.87 J | 7.15 / 3.35 J |
-| Expert shards on disk (plus the shared table) | 140 GB | 122 GB |
+| | UD-IQ2_XXS (slow) | UD-IQ1_M (quality) | UD-IQ1_S (speed) |
+| --- | --- | --- | --- |
+| Decode, plain / drafted (0.5.6) | 14.0 / 21.3 tok/s | 17.3 / 33.6 tok/s | 19.5 / 40.5 tok/s |
+| Perplexity (abliterated) | 2.449 (2.457) | 2.459 (2.470) | 2.501 (2.505) |
+| Package power decoding, plain / drafted | 116 / 100 W | 132 / 127 W | 137 / 131 W |
+| Energy a token, plain / drafted | 8.39 / 4.76 J | 7.67 / 3.85 J | 7.02 / 3.37 J |
+| Expert shards on disk (plus the shared table) | 165 GB | 140 GB | 122 GB |
 
 UD-IQ1_S's experts are 12.5% smaller than UD-IQ1_M's, so more of them stay in GPU memory: it reads fewer from the SSD
 and decodes faster; UD-IQ1_M scores better on unsloth's six benchmarks (85.55 against 83.53). The abliterated packs
-decode at the same speed. Both run unsloth's MXFP8 Engram table, speed- and quality-neutral against the IQ4_NL one
+decode at the same speed. UD-IQ2_XXS scores best but decodes slowest: its experts are 18% larger than UD-IQ1_M's, so
+more of them are read from the SSD, and a drafted round (several tokens' experts at once) waits on those reads most -
+the power falls because the GPU idles, the energy a token rises. 0.5.7's miss prediction is aimed at it. All three
+run unsloth's MXFP8 Engram table, speed- and quality-neutral against the IQ4_NL one
 (DESIGN.md, "the MXFP8 Engram pack"). ISTA-DASLab's GSQ-RCO IQ2_XXS, the quant osmos was first built on, decodes as
 fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not packed.
 
@@ -349,10 +357,10 @@ answer prints a hash of its tokens: the same hash in every configuration is the 
 ## Scope
 
 Two models (DeepSeek-V4.1-Flash, Qwen3.8-Flash-Next) behind one engine interface (`include/osmos/run/engine.h`), one
-machine (Strix Halo, 128 GB), greedy decoding. The quant kernels (Q8_0, Q5_K, Q6_K, Q2_0, IQ1_S, IQ1_M, IQ2_XXS,
-IQ2_XS, IQ2_S, IQ3_XXS, IQ4_NL, IQ4_XS, BF16, MXFP4, MXFP8, from one type table, `include/osmos/model/qtype.h`; the
-int8 expert path and the CPU lane: the IQ1 and IQ2 types) are model-independent; the expert streaming, attention,
-hyper-connections, Engram and DSpark are DeepSeek's (`src/run/`), the Gated DeltaNet, QSA, n-gram embedding and MTP
+machine (Strix Halo, 128 GB), greedy decoding. The quant kernels (Q8_0, Q5_K, Q6_K, Q2_0, Q2_K, IQ1_S, IQ1_M,
+IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ4_NL, IQ4_XS, BF16, MXFP4, MXFP8, from one type table,
+`include/osmos/model/qtype.h`; the int8 expert path and the CPU lane: the IQ1, IQ2 and IQ3_XXS types and Q2_K) are
+model-independent; the expert streaming, attention, hyper-connections, Engram and DSpark are DeepSeek's (`src/run/`), the Gated DeltaNet, QSA, n-gram embedding and MTP
 head Qwen's (`src/q4x/`).
 
 ## Layout
