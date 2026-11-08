@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.5.8]: the membrane - one cache for every expert
+
+Every stream the same bits as 0.5.7 (each benchmark's hash, every pack). Against 0.5.7's build the same session
+(2026-11-08, `performance`, each pack's 1M context, auto budgets, two interleaved rounds):
+
+| | 0.5.7 | 0.5.8 | |
+| --- | ---: | ---: | ---: |
+| UD-IQ2_XXS drafted, the three answers | 31.1 / 31.7 s | 29.9 / 29.9 s | -4 to -6% |
+| UD-IQ1_M drafted | 23.2 / 23.3 s | 22.3 / 22.3 s | -4% |
+| UD-IQ1_S drafted | 19.1 / 19.0 s | 18.7 / 18.7 s | -2% |
+| UD-IQ2_XXS, agents' mix (prompts and answers) | 91.2 / 92.1 s | 85.7 / 85.5 s | **-6 to -7%** (8K prompt +11 to +15%) |
+| UD-IQ1_M, agents' mix | 65.4 / 65.5 s | 65.4 / 65.6 s | level (answers -2%, prompts -3 to -5%) |
+| RAM left free (lowest) | 6.9-7.7 GiB | 8.1-8.9 GiB | the 8 GiB rule kept |
+
+The mix: q1, an 8K document, q2, a 2K document, q3, prompts in 2K steps. At each pack's 1M context: UD-IQ1_S 19.5
+plain / 42.7 drafted tok/s, UD-IQ1_M 17.6 / 35.1, UD-IQ2_XXS 14.3 / 26.0 (the installer's titles).
+
+- **Every expert in one cache, by recency** (the membrane). The resident set keeps the dense weights alone; the
+  budget's experts are read into the pool at create and stay or go by use - stale first, then the least recently
+  released - an expert of the read's size first, its memory reused (the layers' experts come in 5-7 sizes: by
+  size, no block has to be found). Today's fixed set and its swaps are gone. The same 128 decoded tokens a second
+  time wait on no read (0.5.7: 36).
+- **Prompts pass through.** A prompt's step reads into a pool of its own (0.5.7's: two layers' streamed experts), uses
+  the cache's experts in place without reordering them (`pool_pass`), and a decode copies an expert it finds there
+  into the cache (`pool_place`) - a 2K prompt between two decode steps costs the second none of its experts.
+- **A prompt reads ahead only what the next layer picks**: the next router on this layer's input, every token's 6,
+  their union (`ahead.h`) - 98.9% of the experts it will read, against a read ahead of every cold expert of the next
+  layer, 41% of which were never picked. A prompt is SSD-bound (7.1 GB/s): the 8K prompt reads 132 GB, not 154.
+- **The budget leaves 8 GiB of RAM free** (`fit_room`, `FIT_RAM_FREE`): on this APU the GPU's free memory counts the
+  pool's registered pages, so 0.5.7's sizing counted the pool twice and still left under 8 GiB. auto budgets are
+  0.9-1.8 GiB smaller; the cache's better use of them is the speed above.
+- Reads complete into the pool that asked (`reads_fetcher(r, pool)`, `reads_pump`'s pools); `pool_unit_bytes`.
+- API: `forward_swaps` and `OsmosStats.swaps` removed (no swaps); osmos-serve's `STATS` line and dbench's lose them.
+- Measured and not kept (DESIGN.md, "0.5.8"): admission (2Q: +16% misses; TinyLFU, ARC, LIRS: no better than LRU),
+  one LRU for all sizes (the arena's holes: 3-4 evictions a read), prompts borrowing the cache's cold end (by size,
+  it took the warm start), a protected share of the warm start for prompts (decode +56% misses at a quarter).
+  Belady's optimum, the future known, is 56-62% fewer misses than 0.5.8 - out of reach without knowing it.
+
 ## [0.5.7]: stale experts out first
 
 Every stream the same bits as 0.5.6 (each benchmark's hash, every pack, plain and drafted). Measured 2026-11-08,

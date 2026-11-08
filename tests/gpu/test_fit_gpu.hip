@@ -26,6 +26,9 @@ extern "C" {
 
 constexpr double kGiB = 1ull << 30;
 constexpr uint64_t kSlack = 1ull << 26;  // 64 MiB: the runtime's own between the last read and this one
+// the memory's steps: a budget 0.2 GiB larger took 0.94 GiB more of the room (UD-IQ1_M, 2026-11-08); fit_sized keeps
+// the largest budget that left the headroom when the next is past it - so the room above the window by up to a step
+constexpr uint64_t kStep = 1ull << 30;
 
 int main() {
   std::printf("[test_fit_gpu] start\n");
@@ -63,7 +66,8 @@ int main() {
   CHECK(b.f && forward_budget(b.f) == budget && forward_room(b.f, &left));
   std::printf("  sized to %.2f GiB in %d builds: %.3f GiB left (the headroom %.2f, slack %.2f)\n", budget / kGiB,
               b.builds, left / kGiB, FIT_HEADROOM / kGiB, FIT_SLACK / kGiB);
-  CHECK(left >= FIT_HEADROOM && left <= FIT_HEADROOM + FIT_SLACK + kSlack);
+  CHECK(left >= FIT_HEADROOM && left <= FIT_HEADROOM + FIT_SLACK + kSlack + kStep);
+  CHECK(fit_ram_available() >= FIT_RAM_FREE); /* the operator's rule: the system's RAM left free */
   forward_destroy(b.f);
   weights_destroy(w);
   gguf_destroy(g);

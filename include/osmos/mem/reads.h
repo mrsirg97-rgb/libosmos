@@ -7,14 +7,15 @@
 #include "osmos/mem/pool.h"
 
 #define READS_ERR 256
+#define READS_POOLS 2 /* the pools one Reads reads for: the forward's membrane and its stream (DESIGN.md, "0.5.8") */
 
 typedef struct Reads Reads;
 
 Reads *reads_create(uint32_t n_units, int threads, char err[READS_ERR]);
 void reads_destroy(Reads *r);
 
-Fetcher reads_fetcher(Reads *r);
-bool reads_pump(Reads *r, Pool *p, bool wait, char err[READS_ERR]);
+Fetcher reads_fetcher(Reads *r, int pool);
+bool reads_pump(Reads *r, Pool *const pools[READS_POOLS], bool wait, char err[READS_ERR]);
 int reads_out(const Reads *r);
 uint64_t reads_split(const Reads *r);
 
@@ -45,12 +46,14 @@ reads_destroy
   pool_ready for them, so destroy the pool after. NULL is nothing to do.
 
 reads_fetcher
-  the Fetcher pool_create is given: fetch gives a unit's read to the readers at its need; need moves a read's jobs
-  not yet begun. a read the readers refuse fails closed: its end posted as failed (pool_ready's ok false: a FAILED
-  event), never dropped.
+  the Fetcher pool `pool` (0 to READS_POOLS - 1) is created with: fetch gives a unit's read to the readers at its need,
+  its end then that pool's; need moves a read's jobs not yet begun. a read the readers refuse fails closed: its end
+  posted as failed (pool_ready's ok false: a FAILED event), never dropped. a unit is out for one pool at a time: a
+  fetch of one already out (for either) stops the reads - the pump fails from then on.
 
 reads_pump
-  the consumer: the reads that ended handed to `p` (pool_ready, in the order they ended). wait false: those ended so
+  the consumer: the reads that ended handed to their pools (pools[k] pool k's: pool_ready, in the order they ended;
+  NULL for a pool not in use - a read's end for one fails the pump closed). wait false: those ended so
   far, no wait (fwd_drain: each layer's routing); true: at least one, waiting for it (fwd_wait_read: a pin waited
   on). false, the reason in `err`, when an end could not be posted (the engine refused it: no memory) - the forward
   fails closed from then on.

@@ -58,7 +58,6 @@ const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
 bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR]);
 const uint64_t *forward_picks(const Forward *f);
-uint64_t forward_swaps(const Forward *f);
 uint64_t forward_budget(const Forward *f);
 bool forward_room(const Forward *f, uint64_t *bytes);
 void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed, uint64_t *read);
@@ -200,12 +199,6 @@ forward_batch
 forward_picks
   each expert's picks by the router since forward_create, [layer][expert] (n_layers x n_experts): a profile for
   forward_create_ranked. the host's; valid until forward_destroy.
-
-forward_swaps
-  the experts moved into the resident set so far: as a step's layer is done with them, its hottest streamed experts
-  take the places of its coldest resident ones not picked in the step, when much hotter (their picks, halved over
-  the steps) - a copy in GPU memory each, the set following the text from where forward_create_ranked started it.
-  it changes no bit.
 
 forward_guesses
   in steps that pick fewer experts than a layer has (a decode's, a verify's): the picks of experts not resident so

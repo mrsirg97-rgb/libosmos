@@ -61,7 +61,7 @@ void fwd_cpu_destroy(Forward *f)
 bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks)
 {
   if (!f->cpu || !f->lane || picks >= (uint32_t)f->g->n_experts || f->rix[unit] >= 0 ||
-      pool_state(f->pool, unit) == POOL_PINNED)
+      (fwd_pool_in(f, unit) && pool_state(fwd_pool_in(f, unit), unit) == POOL_PINNED))
     return false;
   const LayerWeights *L = &f->w->layer[unit / (uint32_t)f->g->n_experts]; /* the contract's types (cpu_lane's) */
   return lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type) && L->exp_gate->type == L->exp_up->type;
@@ -105,5 +105,26 @@ bool fwd_cpu_submit(Forward *f, int l, uint32_t picks, uint32_t nc, const int32_
     return fwd_fail(err, "the CPU lane refused a layer's experts");
   for (uint32_t k = 0; k < nc; k++)
     f->cpu_picks += f->cpu_e[k].cnt;
+  return true;
+}
+
+/* the pending CPU experts whose reads have ended: held with the layer's others (released as the stream is past any
+   read of them); those still reading stay pending */
+bool fwd_cpu_settle(Forward *f, char *err)
+{
+  (void)err;
+  uint32_t keep = 0;
+  for (uint32_t k = 0; k < f->n_pend; k++)
+  {
+    const uint32_t u = f->cpu_pend[k];
+    Pool *in = fwd_pool_in(f, u);
+    if (in && pool_state(in, u) == POOL_READING)
+    {
+      f->cpu_pend[keep++] = u;
+      continue;
+    }
+    f->held_in[f->n_held] = in ? in : f->pool, f->held[f->n_held++] = u;
+  }
+  f->n_pend = keep;
   return true;
 }

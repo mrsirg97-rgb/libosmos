@@ -41,9 +41,6 @@
    one takes a resident one's place when this much hotter; at most this many a layer a step (each a copy in GPU
    memory) */
 #define FWD_GUESS_K 6 /* a token's next-layer experts guessed (hip_guess.c): the router's top this many */
-#define FWD_HEAT_HALF_LIFE 128.0 /* measured: 8 - 128 within ~2 ms of one another (DESIGN.md) */
-#define FWD_SWAP_MARGIN 2.0      /* and 1.25 the same */
-#define FWD_SWAPS_A_LAYER 2      /* 6 the same: a step's new picks are a few a layer */
 /* a layer's routing tables at most for `pairs` pairs: 3 matrix pointers, 4 offsets, a count an entry (an expert, or
    a part of MM_MAX_TOKENS of one: at most pairs entries); an order and a pair a pair; 2 x 16 slots an expert - with
    each table's alignment (16) */
@@ -125,17 +122,16 @@ struct Forward
   uint32_t slots;
   int fds[FWD_MAX_FILES];
   int dfds[FWD_MAX_FILES]; /* the same files O_DIRECT: the pool's reads, straight into host_slots (DESIGN.md, 0.3.0) */
-  HostSlots *hs;           /* the pool's memory: registered host pages an O_DIRECT read DMAs into */
-  Pool *pool;
-  Reads *reads; /* the pool's reads, on libevt: their order by need, their ends events (reads.h) */
+  HostSlots *hs;           /* the membrane's memory: registered host pages an O_DIRECT read DMAs into */
+  HostSlots *hs_stream;    /* the stream's */
+  Pool *pool;              /* the membrane: every expert the decode keeps, the budget's read in first (DESIGN.md, "0.5.8") */
+  Pool *stream;            /* a prompt's misses and its reads ahead: two layers' streamed experts (stream_budget) */
+  Reads *reads; /* both pools' reads (fetcher 0 the membrane's, 1 the stream's), on libevt: their order by need */
   Resident *res;            /* the layers' tensors and a share of the experts, in GPU memory (resident.h) */
   int32_t *rix;             /* an expert's place in res (unit: layer * n_experts + expert), -1: streamed by the pool */
   uint32_t n_expert_units;  /* the pool's units: layer * n_experts + expert */
   uint64_t *picks;          /* each unit's picks by the router so far (forward_picks) */
-  PoolUnit *units;          /* each expert unit's file ranges (a swap's read: hip_adapt.c) */
-  double *heat;             /* each unit's heat at heat_at, its picks halved every FWD_HEAT_HALF_LIFE steps */
-  uint64_t *heat_at, *seen; /* the step its heat was last updated at; its picks folded into the heat so far */
-  uint64_t steps, swaps;    /* the steps ended; the experts swapped into the resident set */
+  PoolUnit *units;          /* each expert unit's file ranges (the CPU lane's parts, a promotion's copy) */
   const uint8_t **tdev;     /* a tensor's device pointer (index: weights_tensor_index), resident ones only */
   uint32_t *ttype;          /* its type as the GPU reads it when not the file's (QUANT_Q5_KR: repacked), else 0 */
   const void **oa_tab;      /* each layer's wo_a groups for mm_group: [layer][o_groups], on the device */
@@ -159,7 +155,7 @@ struct Forward
   int32_t *r_ids_dev, *r_guess_dev; /* their device addresses */
   uint64_t *guessed;      /* a unit's guess: the visit it was guessed for (hip_guess.c) */
   uint64_t g_need, g_hit; /* a decode's streamed picks, and of them the ones guessed a layer ahead */
-  uint64_t pool_room;      /* the pool's room (stream_budget): GPU memory it takes as experts stream, not at create */
+  uint64_t pool_room;      /* the pool's room: the budget's experts and the stream's (stream_budget), taken at create */
   uint64_t g_read;        /* the reads the guess began (cold units it wanted) */
   uint64_t w_n[2], w_ns[2]; /* the expert reads the host waited for (fwd_pinned), and its time: [0] not guessed,
                               [1] guessed (begun a layer ahead, not done) */
@@ -192,9 +188,9 @@ struct Forward
   uint32_t cpu_value;
   uint64_t *on_cpu;        /* a unit's last visit computed on the CPU (the visit it is picked in: this one) */
   uint64_t cpu_picks;      /* the routed picks the CPU has computed */
-  uint32_t cpu_pend[FWD_MAX_PAIRS]; /* the CPU's experts whose reads into the pool are under way: held till done, then
-                                       offered a swap (fwd_cpu_settle) - released so soon, the pool's room would
-                                       take them before their layer came round */
+  uint32_t cpu_pend[FWD_MAX_PAIRS]; /* the CPU's experts whose reads into the pool are under way: held till done
+                                       (fwd_cpu_settle) - released so soon, the pool's room would take them before
+                                       their layer came round */
   uint32_t n_pend;
   uint8_t *stage; /* pinned: the Engram rows, [sub-batch][Engram layer][token]: a sub-batch's copy may still be
                      queued when the next one's rows are read (a layer's sub-batches run to its experts unwaited) */
@@ -214,8 +210,10 @@ struct Forward
   hipEvent_t passed;                /* fwd_wait's: the stream past the work queued so far */
   uint32_t step_n;                  /* the step's tokens (forward_batch's n): a wait's spin or sleep (hip_wait.c) */
   uint32_t held[FWD_MAX_PAIRS];     /* the last layer's experts: released once the stream is past them */
+  Pool *held_in[FWD_MAX_PAIRS];     /* the pool each is held in */
   uint32_t n_held;
   int held_layer;                   /* the layer they are (-1: none): its sub-batches share them */
+  bool held_pass;                   /* a prompt step's (its picks a layer's experts at least): passed, not released */
   bool *is_held;                    /* an expert unit among them */
   Sub sub[FWD_MAX_SUBS];            /* the step's sub-batches; the Forward's own fields the one running */
   uint32_t n_subs, max_tokens;      /* the most sub-batches a step takes (ForwardOptions' max_tokens), and its tokens */
@@ -278,13 +276,17 @@ bool fwd_put(void *dev, const void *host, uint64_t bytes);
 bool fwd_put_async(void *dev, const void *pinned, uint64_t bytes);
 bool fwd_copy(void *dst, const void *src, uint64_t bytes); /* device to device, on the stream */
 void fwd_release_held(Forward *f);
+/* the pool a unit is pinned or reading in - the membrane's first, else the stream's; NULL in neither. a unit is read
+   into one at a time (reads.h): a step's experts go where they are, a cold one into the stream for a prompt's step
+   (it passes through), into the membrane for a decode's */
+Pool *fwd_pool_in(const Forward *f, uint32_t unit);
+Pool *fwd_pool_for(const Forward *f, uint32_t unit, bool prompt);
 bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memory */
 bool fwd_wait_read(Forward *f, char *err); /* a read's end waited for, the finished ones to the pool */
 bool fwd_pinned(Forward *f, uint32_t unit, const void *dev[POOL_PARTS], char *err);
 bool fwd_wait(Forward *f, hipEvent_t ev); /* the GPU past `ev`: spun on in a decode-sized step, slept on in a prompt's */
 bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd_wait on `passed`) */
 bool fwd_drain(Forward *f, char *err); /* the finished reads to the pool, no wait */
-bool fwd_room_left(const Forward *f, char *err); /* the GPU's free memory holds the pool's room: else false, why */
 /* the taps at target layers `at` taken from the next step on (a drafter's): false if none, or they cannot be held,
    or taps are on already at other layers */
 bool fwd_taps_on(Forward *f, const bool *at);
@@ -311,11 +313,9 @@ bool fwd_moe(Forward *f, int l, char *err);
 /* hip_guess.c: a small step's next-layer experts guessed from this layer's FFN input - the guess queued before the
    routing event (its copy beside the picks'), its streamed experts wanted after it, the picks scored against it */
 bool fwd_guess_queue(Forward *f, int l);
+bool fwd_prompt_ahead(const Forward *f, int l); /* a prompt's step: its read ahead the guess's union */
 void fwd_guess_want(Forward *f, int l);
 void fwd_guess_score(Forward *f, int l, const int32_t *ids, uint32_t picks);
-bool fwd_swap_layer(Forward *f, int l, char *err); /* a layer's experts queued: its streamed ones' swaps in */
-/* the pending CPU experts read since: each offered a swap into its layer, then held with the layer's others */
-bool fwd_cpu_settle(Forward *f, char *err);
 /* hip_lane.c: a small step's routed experts in the matvec's order (forward_lane), into b->moe (the shared one added) */
 bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, char *err);
 /* hip_cpu_lane.c: the CPU half's pool, maps and buffers (forward_lane), their end; whether a small step's unit goes to
@@ -328,6 +328,6 @@ bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]
    token tok[r] and pair pair[r]) given to the pool, cpu_value its post */
 bool fwd_cpu_submit(Forward *f, int l, uint32_t picks, uint32_t nc, const int32_t *tok, const int32_t *pair,
                     char *err);
-void fwd_heat(Forward *f);                          /* a step's end: its picks into the heat */
+bool fwd_cpu_settle(Forward *f, char *err); /* the pending CPU experts whose reads have ended: held */
 
 #endif

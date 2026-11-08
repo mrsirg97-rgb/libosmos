@@ -119,7 +119,7 @@ static bool e_room(const void *p, uint64_t *bytes) { return forward_room(((const
 static void e_stats(const void *p, OsmosStats *s)
 {
   const Forward *f = ((const Eng *)p)->f;
-  s->budget = forward_budget(f), s->swaps = forward_swaps(f), s->cpu_picks = forward_cpu_picks(f);
+  s->budget = forward_budget(f), s->cpu_picks = forward_cpu_picks(f);
   forward_guesses(f, &s->streamed, &s->guessed, &s->guess_read);
   forward_waits(f, s->waits, s->wait_ns);
 }

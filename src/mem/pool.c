@@ -16,6 +16,7 @@ typedef struct Slot
   PoolState state;
   int holds;
   uint64_t released, next; /* when its last hold ended (the pool's clock); when it is wanted again (the caller's) */
+  bool fresh;              /* read since its last release: no place of its own yet (pool_pass) */
 } Slot;
 
 typedef struct Spare
@@ -110,14 +111,15 @@ static bool may_go(const Pool *p, const Slot *c, Reach r)
   return c->holds == 0 && (!r.limited || when(p, c) > r.after);
 }
 
-/* the unit room may take wanted furthest ahead; of those, the least recently released. NULL for none */
-static Slot *furthest(Pool *p, Reach r)
+/* the unit room may take wanted furthest ahead (stale first); of those, the least recently released - of `size`
+   bytes alone, or any (0). NULL for none */
+static Slot *furthest(Pool *p, Reach r, uint64_t size)
 {
   Slot *last = NULL;
   for (size_t i = 0; i < p->n; i++)
   {
     Slot *c = &p->s[i];
-    if (c->state == POOL_PINNED && may_go(p, c, r) &&
+    if (c->state == POOL_PINNED && may_go(p, c, r) && (!size || c->size == size) &&
         (!last || when(p, c) > when(p, last) || (when(p, c) == when(p, last) && c->released < last->released)))
       last = c;
   }
@@ -144,6 +146,11 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
   uint8_t *dev = take_spare(p, s->size);
   if (dev)
     return dev;
+  if (p->bytes + s->size <= p->budget && (dev = p->slots.alloc(s->size, p->slots.ctx)))
+    return p->bytes += s->size, dev;
+  Slot *same = furthest(p, r, s->size); /* its memory reused as it is: no hole to find */
+  if (same)
+    return unpin(p, same);
   if (p->bytes + s->size > p->budget && s->size > p->budget - kept(p, r))
     return NULL;
   while (p->bytes + s->size > p->budget)
@@ -154,7 +161,7 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
       release_memory(p, x.dev, x.size);
       continue;
     }
-    Slot *v = furthest(p, r); /* one exists: kept() counted every unit that cannot go */
+    Slot *v = furthest(p, r, 0); /* one exists: kept() counted every unit that cannot go */
     uint8_t *freed = unpin(p, v);
     if (v->size == s->size)
       return freed;
@@ -174,7 +181,7 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
       release_memory(p, x.dev, x.size);
       continue;
     }
-    Slot *v = furthest(p, r);
+    Slot *v = furthest(p, r, 0);
     if (!v)
       return NULL;
     release_memory(p, unpin(p, v), v->size);
@@ -189,9 +196,28 @@ static void begin_read(Pool *p, Slot *s, uint8_t *dev, uint64_t need)
   void *dst[POOL_PARTS] = {0};
   for (int k = 0; k < s->u.n_parts; k++)
     dst[k] = dev + s->off[k];
-  s->dev = dev, s->state = POOL_READING, p->reading++;
+  s->dev = dev, s->state = POOL_READING, s->fresh = true, s->released = 0, p->reading++; /* no place from its past */
   emit(p, POOL_EV_READ, (uint32_t)(s - p->s), s->size);
   p->fetcher.fetch((uint32_t)(s - p->s), s->read, s->u.n_parts, dst, need, p->fetcher.ctx);
+}
+
+/* a part's read: its range, or the read alignment's around it; and the memory it takes in the unit (from a POOL_ALIGN
+   boundary at least) */
+static PoolRange part_read(const PoolRange *r, uint64_t align, uint64_t *head, uint64_t *mem)
+{
+  const uint64_t a = align > POOL_ALIGN ? align : POOL_ALIGN;
+  *head = align ? r->offset % align : 0;
+  const uint64_t len = align ? (*head + r->bytes + align - 1) / align * align : r->bytes;
+  *mem = (len + a - 1) / a * a;
+  return (PoolRange){r->fd, r->offset - *head, len};
+}
+
+uint64_t pool_unit_bytes(const PoolUnit *u, uint64_t read_align)
+{
+  uint64_t b = 0, head, mem;
+  for (int k = 0; k < u->n_parts && k < POOL_PARTS; k++)
+    part_read(&u->part[k], read_align, &head, &mem), b += mem;
+  return b;
 }
 
 static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
@@ -211,18 +237,18 @@ static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
       snprintf(err, POOL_ERR, "unit %zu part %d: 0 bytes, past its file, or a file that cannot be read", i, k);
       return false;
     }
-    const uint64_t a = align > POOL_ALIGN ? align : POOL_ALIGN, head = align ? r->offset % align : 0;
-    const uint64_t len = align ? (head + r->bytes + align - 1) / align * align : r->bytes;
-    if (align && r->offset - head + len > (uint64_t)st.st_size)
+    uint64_t head, mem;
+    const PoolRange rd = part_read(r, align, &head, &mem);
+    if (align && rd.offset + rd.bytes > (uint64_t)st.st_size)
     {
       snprintf(err, POOL_ERR, "unit %zu part %d: its %llu-aligned range passes its file's end", i, k,
                (unsigned long long)align);
       return false;
     }
-    s->read[k] = (PoolRange){r->fd, r->offset - head, len};
+    s->read[k] = rd;
     s->head[k] = head;
     s->off[k] = s->size;
-    s->size += (len + a - 1) / a * a;
+    s->size += mem;
   }
   return true;
 }
@@ -326,6 +352,23 @@ void pool_want(Pool *p, uint32_t unit, uint64_t next)
     s->next = next, begin_read(p, s, mem, want_need(next));
 }
 
+PoolPin pool_place(Pool *p, uint32_t unit, const void *dev[POOL_PARTS])
+{
+  if (!p || unit >= p->n || p->s[unit].state != POOL_COLD)
+    return POOL_FULL;
+  Slot *s = &p->s[unit];
+  uint8_t *mem = room(p, s, (Reach){false, 0});
+  if (!mem)
+  {
+    emit(p, POOL_EV_REFUSED, unit, s->size);
+    return POOL_FULL;
+  }
+  s->dev = mem, s->state = POOL_PINNED, s->fresh = true, s->released = 0, s->holds = 1;
+  emit(p, POOL_EV_PIN, unit, s->size);
+  fill(s, dev);
+  return POOL_OK;
+}
+
 void pool_ready(Pool *p, uint32_t unit, bool ok)
 {
   if (!p || unit >= p->n || p->s[unit].state != POOL_READING)
@@ -357,13 +400,22 @@ void pool_release(Pool *p, uint32_t unit, uint64_t next)
     return;
   Slot *s = &p->s[unit];
   if (--s->holds == 0)
-    s->released = ++p->clock, s->next = next;
+    s->released = ++p->clock, s->next = next, s->fresh = false;
 }
 
 void pool_now(Pool *p, uint64_t now)
 {
   if (p)
     p->now = now;
+}
+
+void pool_pass(Pool *p, uint32_t unit)
+{
+  if (!p || unit >= p->n || p->s[unit].holds == 0)
+    return;
+  Slot *s = &p->s[unit];
+  if (--s->holds == 0 && s->fresh) /* read for this hold: stale, the least recently released */
+    s->released = 0, s->next = 0, s->fresh = false;
 }
 
 PoolState pool_state(const Pool *p, uint32_t unit)

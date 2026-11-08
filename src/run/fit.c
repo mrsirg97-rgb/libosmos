@@ -1,5 +1,26 @@
 #include "osmos/run/fit.h"
 
+#include <stdio.h>
+
+uint64_t fit_room(uint64_t gpu_free, uint64_t ram_available)
+{
+  const uint64_t ram = ram_available + FIT_HEADROOM > FIT_RAM_FREE ? ram_available + FIT_HEADROOM - FIT_RAM_FREE : 0;
+  return ram < gpu_free ? ram : gpu_free;
+}
+
+uint64_t fit_ram_available(void)
+{
+  FILE *f = fopen("/proc/meminfo", "r");
+  unsigned long long kb = 0;
+  char line[256];
+  while (f && fgets(line, sizeof line, f))
+    if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1)
+      break;
+  if (f)
+    fclose(f);
+  return (uint64_t)kb << 10;
+}
+
 uint64_t fit_budget(uint64_t built, uint64_t free_after, uint64_t headroom)
 {
   if (free_after >= headroom)

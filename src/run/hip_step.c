@@ -279,7 +279,6 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
   if (f->cpu && !cpu_lane_wait(f->cpu))
     return fwd_fail(err, "the CPU lane's experts failed");
   fwd_release_held(f);
-  fwd_heat(f);
   if (f->pin->overflow)
     return fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   for (uint32_t i = 0; i < n; i++)

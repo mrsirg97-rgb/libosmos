@@ -133,8 +133,8 @@ osmos 0.3.2 at the box's `low-power` profile (power-profiles-daemon's power-save
 | Agents (4 x 8) | 481 s | 63 | **3.79** an answer token | +8% time, -46% energy |
 
 At low-power osmos drafts faster than 0.2.0 did at `performance` (29.8 tok/s), at ~71 W against ~125. At the packs'
-own 1M context (0.5.7, `performance`), decode is UD-IQ1_S 19.3 plain / 41.7 drafted, UD-IQ1_M 17.1 / 33.9, UD-IQ2_XXS
-13.8 / 24.6 tok/s (0.5.6's build the same session: 21.2 drafted - stale experts now go first, DESIGN.md "0.5.7"): a
+own 1M context (0.5.8, `performance`), decode is UD-IQ1_S 19.5 plain / 42.7 drafted, UD-IQ1_M 17.6 / 35.1, UD-IQ2_XXS
+14.3 / 26.0 tok/s (every expert one cache, prompts passing through it: DESIGN.md "0.5.8"; 0.5.7's 24.6 drafted): a
 1M context's attention state is ~0.85 GiB.
 
 ### Qwen3.8-Flash-Next against llama.cpp
@@ -199,10 +199,12 @@ fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not
 
 ## How it runs a 250 GB model in 128 GB
 
-- **Experts by residency.** The dense weights and as many experts as the budget holds live in GPU memory, chosen by
-  how often a calibration text picks them (a profile beside the model). The rest are read from the GGUF files when
-  the router picks them, guessed a layer ahead, and the resident set follows the text (hot experts swapped in). The
-  readers take the read needed soonest from [libevt](https://github.com/mrsirg97-rgb/libevt)'s priority queue - a
+- **Every expert one cache.** The dense weights live in GPU memory; the experts are units of one cache the budget
+  holds (the membrane), read in at load by how often a calibration text picks them (a profile beside the model), then
+  kept or let go by use - the least recently used out first, an expert of the same size's memory reused. The rest are
+  read from the GGUF files when the router picks them. A prompt passes through: its reads go to a pool of their own,
+  read ahead only the experts the next layer's router will pick, so a long prompt never pushes out the experts the
+  decode wants back. The readers take the read needed soonest from [libevt](https://github.com/mrsirg97-rgb/libevt)'s priority queue - a
   miss the forward waits on first, a read ahead moved up in place when it becomes one - and each read's end comes back
   to the forward as an event. A read goes straight from the SSD into registered host memory the GPU reads (`O_DIRECT`:
   no copy through the page cache, no CPU copy).

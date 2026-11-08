@@ -16,8 +16,24 @@ static bool small(const Forward *f, int l)
   return !f->no_guess && l + 1 < f->n_layers && f->n * (uint32_t)f->g->n_used < E;
 }
 
+/* a prompt's step (its picks a layer's experts at least) with a layer after it: its read ahead the union of the next
+   router's picks for its tokens (ahead.h) - the router's own matmul on this layer's input, whatever no_guess says
+   (the decode's guess is that; this reads less than a read ahead of every expert) */
+bool fwd_prompt_ahead(const Forward *f, int l)
+{
+  return l + 1 < f->n_layers && f->n * (uint32_t)f->g->n_used >= (uint32_t)f->g->n_experts;
+}
+
 bool fwd_guess_queue(Forward *f, int l)
 {
+  if (fwd_prompt_ahead(f, l))
+  {
+    const LayerWeights *L1 = &f->w->layer[l + 1];
+    const uint32_t D = f->g->n_embd, E = f->g->n_experts;
+    return fwd_mat(f, L1->router, fwd_dev(f, L1->router), E, D, f->b.xf, D, f->n, f->b.logits, E) &&
+           ops_router(f->b.logits, (const float *)fwd_dev(f, L1->router_bias), E, FWD_GUESS_K, f->g->expert_scale,
+                      f->n, f->r_guess_dev, f->b.gw, NULL);
+  }
   if (!small(f, l))
     return true;
   const Geometry *g = f->g;
@@ -50,6 +66,8 @@ void fwd_guess_want(Forward *f, int l)
     if (e < 0 || (uint32_t)e >= E || f->rix[next + (uint32_t)e] >= 0)
       continue;
     f->guessed[next + (uint32_t)e] = f->visits + 1;
+    if (fwd_pool_in(f, next + (uint32_t)e) == f->stream)
+      continue; /* in the stream's memory already */
     const bool cold = pool_state(f->pool, next + (uint32_t)e) == POOL_COLD;
     pool_want(f->pool, next + (uint32_t)e, f->visits + 1); /* the next layer's visit */
     f->g_read += cold && pool_state(f->pool, next + (uint32_t)e) != POOL_COLD;
@@ -65,7 +83,8 @@ void fwd_guess_score(Forward *f, int l, const int32_t *ids, uint32_t picks)
   for (uint32_t m = 0; m < picks; m++)
   {
     const uint32_t u = (uint32_t)l * E + (uint32_t)ids[m];
-    if ((uint32_t)ids[m] < E && f->rix[u] < 0)
+    const Pool *in = (uint32_t)ids[m] < E ? fwd_pool_in(f, u) : NULL;
+    if ((uint32_t)ids[m] < E && f->rix[u] < 0 && !(in && pool_state(in, u) == POOL_PINNED)) /* not in memory */
       f->g_need++, f->g_hit += f->guessed[u] == f->visits;
   }
 }

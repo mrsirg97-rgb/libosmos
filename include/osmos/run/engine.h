@@ -50,7 +50,7 @@ typedef struct OsmosOptions
 /* the counters a bench and the server's stats read: zeros where a family has none */
 typedef struct OsmosStats
 {
-  uint64_t budget, swaps, cpu_picks;
+  uint64_t budget, cpu_picks;
   uint64_t streamed, guessed, guess_read;
   uint64_t waits[2], wait_ns[2]; /* reads waited for: [not guessed, guessed] */
 } OsmosStats;

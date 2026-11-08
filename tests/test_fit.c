@@ -53,6 +53,13 @@ static void unbuild(void *ctx)
 int main(void)
 {
   printf("[test_fit] start\n");
+  /* fit_room: the GPU's free memory or the RAM past FIT_RAM_FREE (the headroom added back), the less */
+  assert(fit_room(50 * GIB, 100 * GIB) == 50 * GIB);                             /* the GPU's the bound */
+  assert(fit_room(50 * GIB, 20 * GIB) == 20 * GIB - FIT_RAM_FREE + FIT_HEADROOM); /* the RAM's */
+  assert(fit_room(50 * GIB, FIT_RAM_FREE) == FIT_HEADROOM);                      /* the RAM's floor: just the headroom */
+  assert(fit_room(50 * GIB, FIT_RAM_FREE - GIB / 2) == FIT_HEADROOM - GIB / 2);  /* short: under the headroom */
+  assert(fit_room(50 * GIB, FIT_RAM_FREE - FIT_HEADROOM) == 0 && fit_room(50 * GIB, 0) == 0);
+  assert(fit_ram_available() > 0); /* this machine's /proc/meminfo */
   assert(fit_budget(12 * GIB, 95 * GIB, GIB) == 106 * GIB);
   assert(fit_budget(12 * GIB, GIB, GIB) == 12 * GIB);
   assert(fit_budget(12 * GIB, GIB / 2, GIB) == 12 * GIB - GIB / 2); /* short of the headroom: back by the shortfall */
