@@ -2591,6 +2591,94 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.8: the membrane - one cache for every expert (2026-11-08, performance)
+
+**the measurement.** A pick trace (a study build, not kept: each layer step's distinct experts, each resident or not;
+the resident set at the first step; the pool's room and every unit's bytes) replayed offline under rules on the same
+bytes. The simulator agrees with the engine where both count: 0.5.6's rule over 0.5.7's 1.21x / 1.22x (UD-IQ2_XXS
+drafted), its decode misses 19,148 against the 18,813 the engine waited on (the mixed trace).
+- **inside the pool** (its 2-3 GiB, the resident set as recorded, swaps in it): 0.5.7's rule is LRU (9,632 / 9,629
+  misses); Belady's optimum 8-14% fewer. UD-IQ1_S's pool (0.4 GiB) the same under every rule, the optimum too: 0.5.7's
+  -1% there is not eviction.
+- **resident set + pool as one cache** (short prompts, the three questions; misses against today's):
+
+  | trace | today | one LRU | LFU | admission: 2Q / TinyLFU | Belady | ARC, LIRS (best): against LRU |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | UD-IQ2_XXS drafted | 9,629 | -15% | -11% | +16% / -15% | -62% | +3%, +2% |
+  | UD-IQ1_M drafted | 4,840 | -12% | -12% | +17% / -12% | -56% | +3%, +1.5% |
+  | UD-IQ2_XXS plain | 7,265 | -14% | -12% | | -57% | +5%, +2.5% |
+
+  (TinyLFU's best is its counts halving every 500 steps - LRU's numbers; ARC and LIRS counted in units, the bytes /
+  the mean unit's, against an LRU counted so.)
+
+  recency is the signal: a missed expert comes back soon (a verify's next round, the next token), so every rule that
+  second-guesses it (admission, frequency, ARC, LIRS) does worse. Belady's gap needs the future (0.5.7: the
+  guess's precision 35%, a transition table's no better). One LRU per layer (no memory between layers) keeps most of
+  it (-8 to -11%); without the pool's bytes almost none (-2 to +1%): the gain is the pool's room joining the cache.
+- **with long prompts** (q1, an 8K document, q2, a 2K document, q3; 2K steps): one LRU is flushed by them (decode -9 /
+  -11%, prompt misses +36 / +15%); **prompts passing through** - a prompt step's misses borrow the cache's cold end
+  and leave at the step's end, its hits not reordered: decode **-18% (UD-IQ2_XXS) / -13% (UD-IQ1_M)**, prompt misses
+  +3 / +21% (a prompt's reads mostly behind its compute: the next layer read ahead).
+
+**as built** (each step a test first; the A/B below). The plan was one cache with prompts borrowing its cold end;
+three things the simulator could not see changed it.
+1. **every expert a pool's unit.** The resident set keeps the dense weights alone; the experts choose() picks for the
+   budget are the membrane's warm start (read in at create, released the most picked last). Its room is theirs; the
+   stream's (stream_budget, two layers' streamed experts) a pool of its own.
+2. **mixed sizes** (the first change). A layer's experts are one size, the layers' not: 5-7 sizes in blocks of
+   layers. LRU over all of them freed experts of the wrong size - the arena found a block for a read after 3-4
+   evictions (counted: 19,020 evictions for the allocator against 14 for the budget). room() now takes an expert of
+   the read's size first (its memory reused as it is), the allocator's while the budget has room, other sizes only
+   when none of its size can go. By size the simulator's misses are the global LRU's (-0.3 to -2%).
+3. **two pools** (the second). One pool by size could not let prompts borrow its cold end: a prompt's borrowed
+   experts were the wrong size by the next block of layers, so the warm start of each size went instead. A prompt
+   step now reads its misses (and its read ahead) into **the stream** - 0.5.7's pool, unchanged - and uses the
+   membrane's experts in place, their order kept (pool_pass); a decode reads into **the membrane**. A unit is read
+   into one at a time (reads.h: a read records its pool, one out for both stops the reads). Pure decode before it: the
+   same 128 tokens twice, 729 / 0 reads waited against 0.5.7's 783 / 36; a 2K prompt between two steps, the second
+   164 reads against 1.
+4. **promotion.** An expert a decode finds in the stream (an earlier prompt read it) is copied into the membrane
+   (pool_place: room and a hold, no read; ops_copy on the stream, the stream's copy held until the GPU is past it) -
+   else the next prompt's reads take it back (test_membrane_gpu: 3 reads after a 2K prompt, 0 with it).
+5. **the prompt's read ahead reads what the next layer picks** (the third). The first A/B: decode -2 to -6%, but
+   UD-IQ2_XXS's prompts -16 to -20% (a 2K step's read ahead turned away less than 0.5.7's crowded pool did). A
+   prompt is SSD-bound - 8K tokens read 154 GB at 7.11 GB/s on 0.5.7, 173 GB at 7.22 on this - and 41% of a read
+   ahead of every cold expert of the next layer was experts it never picked. A prompt's step now runs the next
+   layer's router on this layer's input (the routing's own matmul, independent of no_guess) and reads ahead the union
+   of every token's 6 (ahead.h): 98.9% of the cold experts it picks, 16.8% of its reads unused. The 8K prompt: 132 GB
+   (-14% against 0.5.7), 410 tok/s against 382. Scored first on a dump of the guess at prompt steps (the union of the
+   top 1-3, with votes or without: 29-74% of the picks - the 6 it is).
+6. **gone**: the swaps (hip_adapt.c, the heat, forward_swaps, OsmosStats.swaps) - no resident expert to swap with,
+   promotion their place; the prompt's re-want of its unpicked experts "a round on" (since 0.5.7's stale rule it kept
+   them over the decode's: they are stale once the next layer passes).
+7. **the budget's accounting** (fit_room, fit_ram_available): on this APU hipMemGetInfo counts registered host pages
+   (48 GiB of host slots took 39.4 GiB of its free memory; it tracked MemAvailable + ~2 GiB) - so forward_room's
+   subtraction of the pool's room counted it twice (the pool's memory is mapped at create). The room is now the GPU's
+   free memory or the RAM past FIT_RAM_FREE (8 GiB, the operator's rule; FIT_HEADROOM added back), the less. 0.5.7's
+   auto left 6.9-7.7 GiB of RAM (under the rule); 0.5.8's 8.1-8.9 (once 7.97, a few hundredths below: allocations
+   after the fit measures - kept). The budgets 0.9-1.8 GiB smaller for it. 90 GiB of host slots maps in 1.8 s, the GPU
+   reading them at 242 GB/s (a spike: the risk retired first).
+
+**the A/B** (2026-11-08, performance, each pack's 1M context, auto budgets, 0.5.7's HEAD build interleaved, two rounds;
+the three questions drafted, and the agents' mix - q1, an 8K document, q2, a 2K document, q3 - in 2K steps; every hash
+0.5.7's):
+
+| | 0.5.7 | 0.5.8 | |
+| --- | ---: | ---: | ---: |
+| UD-IQ2_XXS drafted, the three answers | 31.1 / 31.7 s | 29.9 / 29.9 s | -4 to -6% |
+| UD-IQ1_M drafted | 23.2 / 23.3 s | 22.3 / 22.3 s | -4% |
+| UD-IQ1_S drafted | 19.1 / 19.0 s | 18.7 / 18.7 s | -2% |
+| UD-IQ2_XXS mix: decode / prompts 8K, 2K / all | 62.8 s / 382, 294 / 91.2 s | 59.5 s / 423, 298 / 85.7 s | all -6% |
+| (round 2) | 63.0 s / 371, 294 / 92.1 s | 59.4 s / 426, 299 / 85.5 s | all -7% |
+| UD-IQ1_M mix: decode / prompts / all | 45.0 s / 535, 399 / 65.4 s | 44.2 s / 519, 378 / 65.4 s | level |
+| (round 2) | 45.0 s / 532, 401 / 65.5 s | 44.3 s / 518, 376 / 65.6 s | level |
+
+At equal budgets (the control: each build at the other's, UD-IQ2_XXS's mix, before the read ahead's change) the
+budget's 1.8 GiB alone cost 0.5.7 14% of its 8K prompt and 4% of its decode - most of the first A/B's prompt loss was
+the RAM rule's, on the quant that streams most. UD-IQ1_M's prompts stay 3-5% behind 0.5.7's (less read ahead to save,
+1.3 GiB less budget): the open edge. A protected share of the warm start for prompts (simulated) does not help:
+prompt misses -3% at best, decode +56% at a quarter protected.
+
 ### 0.5.7: stale experts out first, and the guess off (2026-11-08, performance)
 
 UD-IQ2_XXS drafted, 1M, the three questions, every run's three hashes the same as 0.5.6's. First where its time went:
