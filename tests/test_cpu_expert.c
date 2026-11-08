@@ -30,6 +30,8 @@ static void fill(uint32_t type, uint8_t *w, size_t bytes, size_t block)
       for (int k = 0; k < 4; k++)
         sc[2 * k + 1] = (uint8_t)((sc[2 * k + 1] & 0x0F) | (((F16_HALF >> (4 * k)) & 0x0F) << 4));
     }
+    else if (type == 10) /* Q2_K: d and dmin after the scales and codes */
+      w[b + 80] = w[b + 82] = (uint8_t)F16_HALF, w[b + 81] = w[b + 83] = (uint8_t)(F16_HALF >> 8);
     else
       w[b] = (uint8_t)F16_HALF, w[b + 1] = (uint8_t)(F16_HALF >> 8);
 }
@@ -86,6 +88,8 @@ int main(void)
   check(29, 56); /* IQ1_M */
   check(19, 50); /* IQ1_S */
   check(22, 82); /* IQ2_S */
+  check(18, 98); /* IQ3_XXS */
+  check(10, 84); /* Q2_K */
   printf("[test_cpu_expert] ok\n");
   return 0;
 }

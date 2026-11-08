@@ -131,7 +131,7 @@ int main() {
     seq_destroy(s);
   };
   both("default", true);
-  CHECK(forward_lane(f, 0, ferr));
+  CHECK(forward_lane(f, 0, NULL, ferr));
   both("the lane", false);
   drafter_destroy(d);
   forward_destroy(f);

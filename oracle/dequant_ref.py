@@ -113,10 +113,14 @@ def main():
     ap.add_argument("--model", default="~/models/ds1017", help="a folder of a model's GGUF files (ds1017; UD-IQ1_M)")
     ap.add_argument("--dspark", default=DSPARK_DEFAULT, help="maya's dspark.bin / dspark.json (MXFP4); absent: none")
     ap.add_argument("--mxfp8", help="unsloth's MXFP8 Engram GGUF (its shard); absent: none")
+    ap.add_argument("--random", action="append", default=[], metavar="TYPE",
+                    help="a type with random blocks alone (no model tensor of it at hand), its file the others' format")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    picked = tensors(os.path.expanduser(a.model))
-    mx = dspark_mxfp4(os.path.expanduser(a.dspark))
+    picked = {getattr(T, t): ("random", None) for t in a.random}
+    if not a.random:
+        picked = tensors(os.path.expanduser(a.model))
+    mx = None if a.random else dspark_mxfp4(os.path.expanduser(a.dspark))
     if mx:
         picked[T.MXFP4] = mx
     if a.mxfp8:
@@ -124,9 +128,9 @@ def main():
     rng = np.random.default_rng(SEED)
     for qtype, (name, data) in sorted(picked.items(), key=lambda kv: int(kv[0])):
         bv, bb = (MXFP8_VALUES, MXFP8_BYTES) if qtype == MXFP8_ID else GGML_QUANT_SIZES[qtype]
-        n = data.size // bb
-        mid = int(rng.integers(RANGE_BLOCKS, n - 2 * RANGE_BLOCKS))
-        parts = [data[s * bb:(s + RANGE_BLOCKS) * bb] for s in (0, mid, n - RANGE_BLOCKS)]
+        n = 0 if data is None else data.size // bb
+        mid = int(rng.integers(RANGE_BLOCKS, n - 2 * RANGE_BLOCKS)) if n else 0
+        parts = [data[s * bb:(s + RANGE_BLOCKS) * bb] for s in (0, mid, n - RANGE_BLOCKS)] if n else []
         rand = []
         while len(rand) < RANDOM_BLOCKS:
             blk = rng.integers(0, 256, bb, dtype=np.uint8)
@@ -141,8 +145,11 @@ def main():
             f.write(b"SUBQ" + struct.pack("<IIQQ", 1, int(qtype), v.size, b.size))
             f.write(b.tobytes())
             f.write(v.tobytes())
-        print("%-8s %s: blocks 0, %d, %d (+%d each) and %d random: %d values" %
-              (tname, name, mid, n - RANGE_BLOCKS, RANGE_BLOCKS, RANDOM_BLOCKS, v.size))
+        if n:
+            print("%-8s %s: blocks 0, %d, %d (+%d each) and %d random: %d values" %
+                  (tname, name, mid, n - RANGE_BLOCKS, RANGE_BLOCKS, RANDOM_BLOCKS, v.size))
+        else:
+            print("%-8s %d random blocks alone: %d values" % (tname, RANDOM_BLOCKS, v.size))
 
 
 main()

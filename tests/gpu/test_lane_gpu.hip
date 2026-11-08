@@ -3,7 +3,8 @@
 // ones after) - an 8-token prompt, then 24 tokens a step at a time; every step's stream out the same bits at both.
 // a token's rows summed in any order but ascending expert id fails it. and the lane's CPU half at the tight budget
 // (forward_lane's cpu_threads: the experts not in GPU memory computed on the CPU) - the same bits again, the CPU's
-// picks counted. needs ~/models/ds1017 and ~/osmos-oracle/ids32.txt; skipped (77) without them
+// picks counted. the test model's (test_model.h: UD-IQ1_M, or OSMOS_TEST_UD's) and ~/osmos-oracle/ids32.txt;
+// skipped (77) without them
 #include <hip/hip_runtime.h>
 #include <unistd.h>
 
@@ -18,6 +19,7 @@ extern "C" {
 #include "osmos/model/weights.h"
 #include "osmos/run/forward.h"
 }
+#include "test_model.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -36,7 +38,7 @@ static uint64_t run(Weights* w, const std::vector<int32_t>& ids, uint64_t budget
   char ferr[FORWARD_ERR] = "";
   Forward* f = forward_create(w, kLayers, kCtx, budget, ferr);
   if (!f) std::fprintf(stderr, "  %s\n", ferr);
-  CHECK(f && forward_lane(f, cpu, ferr));
+  CHECK(f && forward_lane(f, cpu, NULL, ferr));
   Seq* s = seq_create(f, ferr);
   CHECK(s);
   std::vector<Seq*> ss(kPrompt, s);
@@ -60,22 +62,20 @@ static uint64_t run(Weights* w, const std::vector<int32_t>& ids, uint64_t budget
 
 int main() {
   std::printf("[test_lane_gpu] start\n");
-  const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "", mdir = home + "/models/ds1017/";
+  const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
   FILE* idf = std::fopen((home + "/osmos-oracle/ids32.txt").c_str(), "r");
+  char path[512];
+  const TestModel which = test_model(path, sizeof path);
   int ndev = 0;
-  if (!idf || access((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), R_OK) || hipGetDeviceCount(&ndev) ||
-      !ndev) {
-    std::printf("[test_lane_gpu] skipped: no ds1017, ids or GPU\n");
+  if (!idf || which == TestModel::kNone || hipGetDeviceCount(&ndev) || !ndev) {
+    std::printf("[test_lane_gpu] skipped: no test model, ids or GPU\n");
     return 77;
   }
   std::vector<int32_t> ids(kIds);
   for (auto& v : ids) CHECK(std::fscanf(idf, "%d,", &v) == 1);
   std::fclose(idf);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "";
-  Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
-  Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
-  CHECK(g && eg);
-  Weights* w = weights_create(g, eg, werr);
+  Gguf *g = nullptr, *eg = nullptr;
+  Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
   uint64_t loose_n = 0, tight_n = 0, cpu_n = 0, none = 0, cpu_picks = 0;
   const uint64_t loose = run(w, ids, kLoose, 0, &loose_n, &none), tight = run(w, ids, kTight, 0, &tight_n, &none);

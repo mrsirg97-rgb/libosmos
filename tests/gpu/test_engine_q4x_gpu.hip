@@ -7,6 +7,7 @@
 #include <algorithm>
 
 #include "q4x_ref.h"
+#include "state_stream.h"
 
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
@@ -14,7 +15,8 @@ extern "C" {
 #include "osmos/run/engine.h"
 }
 
-constexpr uint32_t kCtx = 4096, kStep = 256;
+constexpr uint32_t kCtx = 8192, kStep = 256;  // (8,192: a state whose cache parts pass STATE_CHUNK)
+constexpr uint32_t kLong = 8000;               // the long sequence's tokens: each attention part ~4.7 MB
 constexpr uint32_t kA = 40, kB = 24, kSaved = 100;  // a batch's two sequences' tokens; a saved sequence's
 constexpr size_t kStatePos = 16;  // the state header's position: after its magic, version (4 bytes each) and identity
 
@@ -181,6 +183,50 @@ int main() {
   CHECK(osmos_batch(e, &c, &ids[kSaved], 1, err));
   CHECK(rows(e, 0, 1, V) == next_s);
   std::printf("  a sequence saved (%.1f MB) and loaded goes on as the original, bit for bit\n", bytes / 1e6);
+
+  // streamed (oseq_save_to / oseq_load_from): pieces within STATE_CHUNK, the buffer's bytes; loaded from pieces it
+  // goes on as the original; a byte damaged mid-stream refused (the sequence empty); a sink failing part way, false
+  {
+    OsmosSeq* w = oseq_create(e, err);  // (s has stepped on since st: a sequence of st's own)
+    CHECK(w && oseq_load(w, st.data(), bytes, err));
+    StreamSink sk;
+    CHECK(oseq_save_to(w, stream_sink, &sk, err) && !sk.over && sk.bytes == st && sk.pieces >= 2);
+    OsmosSeq* d = oseq_create(e, err);
+    StreamSource src{&sk.bytes};
+    CHECK(d && oseq_load_from(d, bytes, stream_source, &src, err) && !src.over && src.at == bytes &&
+          oseq_position(d) == (int32_t) kSaved);
+    CHECK(osmos_batch(e, &d, &ids[kSaved], 1, err) && rows(e, 0, 1, V) == next_s);
+    StreamSource bad{&sk.bytes};
+    bad.flip = bytes / 2;
+    CHECK(!oseq_load_from(d, bytes, stream_source, &bad, err) && oseq_position(d) == 0);
+    StreamSink cut;
+    cut.fail_after = bytes / 2;
+    CHECK(!oseq_save_to(w, stream_sink, &cut, err));
+    oseq_destroy(d), oseq_destroy(w);
+    // a long sequence (kLong tokens, the ids cycled): its parts past STATE_CHUNK go in pieces, saved streamed and
+    // loaded back its bytes again
+    OsmosSeq* big = oseq_create(e, err);
+    OsmosSeq* back = oseq_create(e, err);
+    CHECK(big && back);
+    std::vector<int32_t> lt(kLong);
+    for (uint32_t i = 0; i < kLong; i++) lt[i] = ids[i % ids.size()];
+    std::vector<OsmosSeq*> bs(kStep, big);
+    for (uint32_t at = 0; at < kLong; at += kStep)
+      CHECK(osmos_batch(e, bs.data(), &lt[at], std::min(kStep, kLong - at), err));
+    StreamSink lk;
+    CHECK(oseq_save_to(big, stream_sink, &lk, err) && !lk.over && lk.bytes.size() == oseq_state_bytes(big));
+    StreamSource ls{&lk.bytes};
+    CHECK(oseq_load_from(back, lk.bytes.size(), stream_source, &ls, err) && !ls.over &&
+          oseq_position(back) == (int32_t) kLong);
+    StreamSink again;
+    CHECK(oseq_save_to(back, stream_sink, &again, err) && again.bytes == lk.bytes);
+    std::printf("  a long sequence (%u tokens, %.1f MB): %llu pieces, none past STATE_CHUNK; loaded, its bytes again\n",
+                kLong, lk.bytes.size() / 1e6, (unsigned long long) lk.pieces);
+    oseq_destroy(big), oseq_destroy(back);
+    std::printf("  streamed: %llu pieces of at most %llu bytes (a state of any size through %llu MiB), the buffer's "
+                "bytes; loaded from pieces, the same bits; damaged mid-stream refused\n", (unsigned long long) sk.pieces,
+                (unsigned long long) sk.widest, (unsigned long long) (STATE_CHUNK >> 20));
+  }
 
   // damaged, short, of another position's size: refused, the sequence then empty
   std::vector<uint8_t> bad_st = st;

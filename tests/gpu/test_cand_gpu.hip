@@ -85,7 +85,7 @@ int main() {
   char err[FORWARD_ERR] = "";
   const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, 100ull << 30, nullptr, kMaxTokens};
   Forward* f = forward_create_with(w, &o, err);
-  CHECK(f && forward_lane(f, 0, err));
+  CHECK(f && forward_lane(f, 0, NULL, err));
   Probe p;
   p.block = (uint32_t) w->geo.cand_block;
   p.words = ((kMaxCtx / 1 + p.block - 1) / p.block + 31) / 32;  // (the forward's: its smallest ratio 1)

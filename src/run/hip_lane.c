@@ -26,7 +26,7 @@ typedef struct LaneTabs
   int32_t cpu_row[LANE_PAIRS];               /* the rows the CPU computes (the lane's CPU half) */
 } LaneTabs;
 
-bool forward_lane(Forward *f, int cpu_threads, char err[FORWARD_ERR])
+bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FORWARD_ERR])
 {
   if (!f || cpu_threads < 0 || cpu_threads > CPU_LANE_THREADS_MAX)
     return fwd_fail(err, "no forward, or a count of CPU threads it does not take");
@@ -41,7 +41,7 @@ bool forward_lane(Forward *f, int cpu_threads, char err[FORWARD_ERR])
        !fwd_alloc(&f->lane_xq, LANE_PAIRS * D) ||
        !fwd_alloc(&f->lane_xqd, LANE_PAIRS * (D / LANE_Q8_VALUES) * sizeof(float))))
     return fwd_fail(err, "memory refused (the lane's tables)");
-  if (cpu_threads && !f->cpu && !fwd_cpu_create(f, cpu_threads, err))
+  if (cpu_threads && !f->cpu && !fwd_cpu_create(f, cpu_threads, cpu_cores, err))
     return false;
   f->lane = true, f->lane_threads = cpu_threads;
   return true;
@@ -142,7 +142,8 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
     if ((on_cpu = f->cpu && f->on_cpu[u] == f->visits))
     {
       const void *part[POOL_PARTS];
-      fwd_cpu_parts(f, u, part);
+      if (!fwd_cpu_parts(f, u, part))
+        return fwd_fail(err, "an expert's file not one the CPU lane mapped");
       f->cpu_e[nc] = (CpuLaneExpert){part[0], part[1], part[2], r, 1}, f->cpu_unit[nc++] = u;
       t->cpu_row[n_cpu++] = (int32_t)r;
       continue;

@@ -98,24 +98,56 @@ bool q4x_seq_reset(Q4xSeq *s)
 
 uint64_t q4x_seq_state_bytes(const Q4xSeq *s) { return s ? bytes_at(s, s->pos) : 0; }
 
-bool q4x_seq_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR])
+/* a part between the device and a sink or source in pieces through bounce (STATE_CHUNK bytes); sum the FNV-1a of
+   every byte moved, in order */
+static bool move_part(const Part *p, uint8_t *bounce, bool out, StateSink sink, StateSource src, void *ctx,
+                      uint64_t *sum)
 {
-  if (!s || !out || bytes != bytes_at(s, s->pos))
-    return q4x_fail(err, "no sequence or buffer, or a buffer not the state's size (q4x_seq_state_bytes)");
+  for (uint64_t done = 0; done < p->bytes;)
+  {
+    const uint64_t n = p->bytes - done < STATE_CHUNK ? p->bytes - done : STATE_CHUNK;
+    uint8_t *dev = (uint8_t *)p->dev + done;
+    if (out)
+    {
+      if (hipMemcpy(bounce, dev, n, hipMemcpyDeviceToHost) != hipSuccess)
+        return false;
+      *sum = fnv(bounce, n, *sum);
+      if (!sink(ctx, bounce, n))
+        return false;
+    }
+    else
+    {
+      if (!src(ctx, bounce, n))
+        return false;
+      *sum = fnv(bounce, n, *sum);
+      if (hipMemcpy(dev, bounce, n, hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+    }
+    done += n;
+  }
+  return true;
+}
+
+bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FWD_ERR])
+{
+  if (!s || !sink)
+    return q4x_fail(err, "no sequence or sink");
+  if (hipDeviceSynchronize() != hipSuccess) /* every stream's writes of its state done (the side stream's too) */
+    return q4x_fail(err, "a GPU call failed (before the state's save)");
   Header h;
   memset(&h, 0, sizeof h);
   h.magic = STATE_MAGIC, h.version = STATE_VERSION, h.identity = q4x_identity(s->f), h.pos = s->pos;
   h.n_last = s->n_last < Q4X_MAX_NGRAM ? s->n_last : Q4X_MAX_NGRAM;
   memcpy(h.last, s->last, sizeof h.last); /* the latest Q4X_MAX_NGRAM: what the n-gram layer reads */
-  uint8_t *o = out, *at = o + sizeof h;
-  memcpy(o, &h, sizeof h);
+  uint8_t *bounce = malloc(STATE_CHUNK);
+  uint64_t sum = fnv(&h, sizeof h, FNV_SEED);
+  bool ok = bounce && sink(ctx, &h, sizeof h);
   Part p[MAX_PARTS];
-  for (int i = 0, n = parts(s, s->pos, p); i < n; at += p[i].bytes, i++)
-    if (p[i].bytes && hipMemcpy(at, p[i].dev, p[i].bytes, hipMemcpyDeviceToHost) != hipSuccess)
-      return q4x_fail(err, "a GPU copy failed (the state's save)");
-  const uint64_t sum = fnv(o, (uint64_t)(at - o), FNV_SEED);
-  memcpy(at, &sum, sizeof sum);
-  return true;
+  for (int i = 0, n = parts(s, s->pos, p); ok && i < n; i++)
+    ok = move_part(&p[i], bounce, true, sink, NULL, ctx, &sum);
+  ok = ok && sink(ctx, &sum, sizeof sum);
+  free(bounce);
+  return ok || q4x_fail(err, bounce ? "a GPU copy or the sink failed (the state's save)" : "out of memory (the save)");
 }
 
 static bool refuse(Q4xSeq *s, char *err, const char *why)
@@ -124,31 +156,38 @@ static bool refuse(Q4xSeq *s, char *err, const char *why)
   return q4x_fail(err, why);
 }
 
-bool q4x_seq_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ERR])
+bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[Q4X_FWD_ERR])
 {
-  if (!s || !in)
-    return q4x_fail(err, "no sequence or state");
+  if (!s || !src)
+    return q4x_fail(err, "no sequence or source");
   Header h;
-  if (bytes < sizeof h + sizeof(uint64_t))
-    return refuse(s, err, "a state shorter than its header");
-  memcpy(&h, in, sizeof h);
+  uint64_t sum = 0;
   memset(s->last, 0, sizeof s->last);
+  if (bytes < sizeof h + sizeof sum)
+    return refuse(s, err, "a state shorter than its header");
+  if (!src(ctx, &h, sizeof h))
+    return refuse(s, err, "the source failed (the state's header)");
   if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != q4x_identity(s->f))
     return refuse(s, err, "a state of another format or model (its identity)");
   if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM ||
       bytes != bytes_at(s, h.pos))
     return refuse(s, err, "a state past this context, or not its position's size");
-  const uint8_t *i = in;
-  uint64_t sum;
-  memcpy(&sum, i + bytes - sizeof sum, sizeof sum);
-  if (sum != fnv(i, bytes - sizeof sum, FNV_SEED))
-    return refuse(s, err, "a damaged state (its checksum)");
-  const uint8_t *at = i + sizeof h;
+  if (hipDeviceSynchronize() != hipSuccess) /* the sequence's state not still being read */
+    return refuse(s, err, "a GPU call failed (before the state's load)");
+  uint8_t *bounce = malloc(STATE_CHUNK);
+  if (!bounce)
+    return refuse(s, err, "out of memory (the state's load)");
+  uint64_t got = fnv(&h, sizeof h, FNV_SEED);
   Part p[MAX_PARTS];
   s->cur = 0, s->back = 0; /* loaded into slot 0, nothing behind it */
-  for (int k = 0, n = parts(s, h.pos, p); k < n; at += p[k].bytes, k++)
-    if (p[k].bytes && hipMemcpy(p[k].dev, at, p[k].bytes, hipMemcpyHostToDevice) != hipSuccess)
-      return refuse(s, err, "a GPU copy failed (the state's load)");
+  bool ok = true;
+  for (int k = 0, n = parts(s, h.pos, p); ok && k < n; k++)
+    ok = move_part(&p[k], bounce, false, NULL, src, ctx, &got);
+  free(bounce);
+  if (!ok || !src(ctx, &sum, sizeof sum))
+    return refuse(s, err, "a GPU copy or the source failed (the state's load)");
+  if (got != sum) /* (the parts already on the GPU: the reset makes the sequence empty) */
+    return refuse(s, err, "a damaged state (its checksum)");
   s->pos = h.pos, s->n_last = h.n_last;
   s->pend_pos = -1, s->step_n = 0; /* the head's cache not saved: its seeding starts over (drafts weaker, no bit moved) */
   memcpy(s->last, h.last, sizeof h.last);

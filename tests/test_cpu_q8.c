@@ -10,7 +10,7 @@
 
 /* the CPU lane's int8 experts against a scalar replay of kernels/lane.h's contract (test_cpu_q8_gpu holds them to the
    GPU's bits on the model's experts): random blocks of each expert type at 16 and 32 lanes and a row whose last
-   blocks fill half a vector, rounding's bytes and scales, more tokens than one decode takes, rows split and tokens
+   blocks fill half a vector (IQ3_XXS and Q2_K: UD-IQ2_XXS's), rounding's bytes and scales, more tokens than one decode takes, rows split and tokens
    apart the same bits; refusals. this file is built without contraction: the replay's products are each rounded */
 
 #define QK 256
@@ -42,20 +42,49 @@ static void fill(uint32_t type, uint8_t *w, size_t bytes)
     if (type == QTYPE_IQ1_M)
       for (int k = 0; k < 4; k++)
         w[b + 48 + 2 * k + 1] = (uint8_t)((w[b + 48 + 2 * k + 1] & 0x0F) | ((h >> (4 * k)) & 0x0F) << 4);
+    else if (type == QTYPE_Q2_K) /* d and dmin after the scales and codes */
+    {
+      const uint32_t m = 0x2C00u | (next() >> 22);
+      w[b + 80] = (uint8_t)h, w[b + 81] = (uint8_t)(h >> 8), w[b + 82] = (uint8_t)m, w[b + 83] = (uint8_t)(m >> 8);
+    }
     else
       w[b] = (uint8_t)h, w[b + 1] = (uint8_t)(h >> 8);
   }
 }
 
-/* block j (32 values) of the 256-value block at b against q: its scale, each half's 2s + 1 and integer dot */
-static void halves(uint32_t type, const uint8_t *b, int j, const int8_t *q, float *d, int s21[2], int isum[2])
+/* block j (32 values) of the 256-value block at b against q: its scale, each half's 2s + 1 and integer dot; Q2_K's
+   also dmin, a half's 8 m and x's sum */
+typedef struct
 {
-  isum[0] = isum[1] = 0;
+  float dmin;
+  int m8[2], xsum[2];
+} Min;
+static void halves(uint32_t type, const uint8_t *b, int j, const int8_t *q, float *d, int s21[2], int isum[2], Min *mn)
+{
+  isum[0] = isum[1] = mn->xsum[0] = mn->xsum[1] = 0;
   for (int c = 0; c < 4; c++)
   {
     const int k = 4 * j + c, h = c / 2;
     int v[8];
-    if (type == QTYPE_IQ1_S) /* gguf-py's IQ1_S: d, qs[32], qh u16[8] (3 index bits an 8, s in 12-14, sign 15) */
+    if (type == QTYPE_Q2_K) /* gguf-py's Q2_K: scales[16] (sc low nibble, m high), qs[64] (2 bits), d, dmin */
+    {
+      const int at = 32 * (j / 4) + 8 * c, sh = 2 * (j % 4);
+      for (int i = 0; i < 8; i++)
+        v[i] = (b[16 + at + i] >> sh) & 3, mn->xsum[h] += q[8 * c + i];
+      *d = f16(ld16(b + 80)), mn->dmin = f16(ld16(b + 82));
+      s21[h] = 8 * (b[2 * j + h] & 0x0F), mn->m8[h] = 8 * (b[2 * j + h] >> 4);
+    }
+    else if (type == QTYPE_IQ3_XXS) /* gguf-py's IQ3_XXS: d, qs[64] (a grid byte a 4), a u32 a 32 (signs, then s) */
+    {
+      const uint8_t *qq = b + 2 + 8 * j + 2 * c;
+      const uint32_t aux = ld16(b + 66 + 4 * j) | ld16(b + 68 + 4 * j) << 16;
+      const uint64_t gr = (uint64_t)kIq3xxsGrid[qq[0]] | (uint64_t)kIq3xxsGrid[qq[1]] << 32;
+      const uint8_t sg = kKsigns[(aux >> (7 * c)) & 0x7F];
+      for (int i = 0; i < 8; i++)
+        v[i] = (sg >> i) & 1 ? -(int)(uint8_t)(gr >> (8 * i)) : (int)(uint8_t)(gr >> (8 * i));
+      *d = f16(ld16(b)), s21[h] = 2 * (2 * (int)(aux >> 28) + 1); /* d (0.5 + s) 0.5: 2 (2s + 1) eighths */
+    }
+    else if (type == QTYPE_IQ1_S) /* gguf-py's IQ1_S: d, qs[32], qh u16[8] (3 index bits an 8, s in 12-14, sign 15) */
     {
       const uint32_t qh = ld16(b + 34 + 2 * (k / 4));
       const uint64_t gr = kIq1sGrid[b[2 + k] | ((qh >> (3 * (k % 4))) & 7) << 8];
@@ -115,8 +144,12 @@ static float row_ref(uint32_t type, const uint8_t *row, uint32_t cols, const int
   {
     float d;
     int s21[2], isum[2];
-    halves(type, row + (s / 8) * block_bytes(type), (int)(s % 8), q + s * LANE_Q8_VALUES, &d, s21, isum);
-    const float sub = lane_q8_part(d, s21[0], isum[0]) + lane_q8_part(d, s21[1], isum[1]);
+    Min mn;
+    const uint32_t per = qtype_info(type)->values / LANE_Q8_VALUES; /* a block's blocks of 32 (the type's values over 32) */
+    halves(type, row + (s / per) * block_bytes(type), (int)(s % per), q + s * LANE_Q8_VALUES, &d, s21, isum, &mn);
+    const float sub = type == QTYPE_Q2_K ? lane_q8_part_min(d, s21[0], isum[0], mn.dmin, mn.m8[0], mn.xsum[0]) +
+                                               lane_q8_part_min(d, s21[1], isum[1], mn.dmin, mn.m8[1], mn.xsum[1])
+                                         : lane_q8_part(d, s21[0], isum[0]) + lane_q8_part(d, s21[1], isum[1]);
     acc[s % L] = fmaf(qd[s], sub, acc[s % L]);
   }
   for (int o = L / 2; o > 0; o >>= 1)
@@ -145,7 +178,7 @@ static void round_ref(const float *x, uint32_t cols, int8_t *q, float *d)
 static void check(uint32_t type, uint32_t cols)
 {
   const uint32_t nb = cols / LANE_Q8_VALUES, xs = cols + 32; /* x's rows apart by more than a row */
-  const size_t bytes = (size_t)ROWS * (cols / QK) * block_bytes(type);
+  const size_t bytes = (size_t)ROWS * (cols / qtype_info(type)->values) * block_bytes(type);
   uint8_t *w = malloc(bytes);
   float *x = malloc((size_t)TOK * xs * sizeof *x), *qd = malloc((size_t)TOK * nb * sizeof *qd);
   float *rd = malloc((size_t)TOK * nb * sizeof *rd), *y = malloc((size_t)TOK * ROWS * sizeof *y);
@@ -194,7 +227,7 @@ int main(void)
   assert(!cpu_q8_rows(13, x, QK, 0, 1, q, d, 1, y, 1)); /* Q5_K: not the contract's */
   assert(!cpu_q8_rows(16, x, 128, 0, 1, q, d, 1, y, 1) && !cpu_q8_rows(16, x, QK, 2, 1, q, d, 1, y, 1));
   assert(!cpu_q8_rows(16, x, QK, 0, 1, q, d, 0, y, 1) && !cpu_q8_rows(16, NULL, QK, 0, 1, q, d, 1, y, 1));
-  const uint32_t types[] = {QTYPE_IQ2_XXS, QTYPE_IQ2_XS, QTYPE_IQ1_M, QTYPE_IQ1_S, QTYPE_IQ2_S};
+  const uint32_t types[] = {QTYPE_IQ2_XXS, QTYPE_IQ2_XS, QTYPE_IQ1_M, QTYPE_IQ1_S, QTYPE_IQ2_S, QTYPE_IQ3_XXS, QTYPE_Q2_K};
   for (size_t i = 0; i < sizeof types / sizeof types[0]; i++)
   {
     check(types[i], 512);  /* 16 lanes, a full vector a step */

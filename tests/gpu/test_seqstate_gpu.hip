@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include "state_stream.h"
+
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
@@ -135,7 +137,7 @@ int main() {
   const bool ranked = pf && std::fread(picks.data(), 8, picks.size(), pf) == picks.size();
   if (pf) std::fclose(pf);
   const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, ranked ? picks.data() : nullptr, kMaxTokens};
-  CHECK((g_f = forward_create_with(w, &o, g_err)) && forward_lane(g_f, 0, g_err));
+  CHECK((g_f = forward_create_with(w, &o, g_err)) && forward_lane(g_f, 0, NULL, g_err));
   const char* home = std::getenv("HOME");
   const std::string ddir = std::string(home ? home : "") + "/Models/ds1017/dspark-iq2xs";
   Drafter* d = access((ddir + "/dspark.bin").c_str(), R_OK) == 0 ? drafter_create(g_f, ddir.c_str(), g_err) : nullptr;
@@ -158,7 +160,7 @@ int main() {
     t = prompt(a, pa, &got);
     if (draft) CHECK(drafter_seed(d, a, 0, (int32_t) kPromptA, g_err));
     std::vector<uint8_t> st(seq_state_bytes(a));
-    CHECK(!st.empty() && !seq_save(a, st.data(), st.size() - 1, g_err) && seq_save(a, st.data(), st.size(), g_err));
+    CHECK(!st.empty() && !save_buf(seq_save_to, a, st.data(), st.size() - 1, g_err) && save_buf(seq_save_to, a, st.data(), st.size(), g_err));
     seq_destroy(a);
     Seq* b = seq_create(g_f, g_err);
     CHECK(b);
@@ -166,7 +168,7 @@ int main() {
     const int32_t tb = prompt(b, pb, &hb);
     if (draft) CHECK(drafter_seed(d, b, 0, (int32_t) kPromptB, g_err));
     answer(b, tb, kNewB, &hb);
-    CHECK(seq_load(b, st.data(), st.size(), g_err) && seq_position(b) == (int32_t) kPromptA);
+    CHECK(load_buf(seq_load_from, b, st.data(), st.size(), g_err) && seq_position(b) == (int32_t) kPromptA);
     draft ? drafted(d, b, t, kNew, &got) : answer(b, t, kNew, &got);
     std::printf("  %s: A's state %zu bytes (%u tokens) set aside, B's %u + %d run, A taken back into B's sequence: "
                 "every logits row the never-set-aside run's (%016llx)\n",
@@ -176,10 +178,10 @@ int main() {
     if (!draft) {  // refusals, each leaving the sequence at position 0
       std::vector<uint8_t> bad = st;
       bad[bad.size() / 2] ^= 0x10;
-      CHECK(!seq_load(b, bad.data(), bad.size(), g_err) && seq_position(b) == 0);
+      CHECK(!load_buf(seq_load_from, b, bad.data(), bad.size(), g_err) && seq_position(b) == 0);
       std::printf("  a byte damaged: refused (%s), the sequence reset\n", g_err);
-      CHECK(seq_load(b, st.data(), st.size(), g_err) && seq_position(b) == (int32_t) kPromptA);
-      CHECK(!seq_load(b, st.data(), st.size() - 4, g_err) && seq_position(b) == 0);
+      CHECK(load_buf(seq_load_from, b, st.data(), st.size(), g_err) && seq_position(b) == (int32_t) kPromptA);
+      CHECK(!load_buf(seq_load_from, b, st.data(), st.size() - 4, g_err) && seq_position(b) == 0);
       std::printf("  a size that disagrees: refused (%s), the sequence reset\n", g_err);
       // another identity: the header's (bytes 8 .. 16, after the magic and the version), the checksum made again
       bad = st;
@@ -190,8 +192,8 @@ int main() {
       const uint64_t sum = fnv(bad.data(), bad.size() - 8);
       std::memcpy(bad.data() + bad.size() - 8, &sum, 8);
       CHECK(id != forward_identity(g_f));
-      CHECK(seq_load(b, st.data(), st.size(), g_err));
-      CHECK(!seq_load(b, bad.data(), bad.size(), g_err) && seq_position(b) == 0);
+      CHECK(load_buf(seq_load_from, b, st.data(), st.size(), g_err));
+      CHECK(!load_buf(seq_load_from, b, bad.data(), bad.size(), g_err) && seq_position(b) == 0);
       std::printf("  another identity: refused (%s), the sequence reset\n", g_err);
     }
     seq_destroy(b);

@@ -35,6 +35,8 @@ static void fill(uint32_t type, uint8_t *w, size_t bytes) /* test_cpu_q8's: rand
     if (type == QTYPE_IQ1_M)
       for (int k = 0; k < 4; k++)
         w[b + 48 + 2 * k + 1] = (uint8_t)((w[b + 48 + 2 * k + 1] & 0x0F) | ((h >> (4 * k)) & 0x0F) << 4);
+    else if (type == QTYPE_Q2_K) /* d and dmin after the scales and codes */
+      w[b + 80] = w[b + 82] = (uint8_t)h, w[b + 81] = w[b + 83] = (uint8_t)(h >> 8);
     else
       w[b] = (uint8_t)h, w[b + 1] = (uint8_t)(h >> 8);
   }
@@ -60,7 +62,7 @@ static void reference(const CpuLaneJob *j, float *y)
   free(q), free(qh);
 }
 
-static void check(uint32_t type_gu, uint32_t type_down, int threads)
+static void check(uint32_t type_gu, uint32_t type_down, int threads, const int *cores)
 {
   const size_t gu = (size_t)FF * (DIM / QK) * block_bytes(type_gu);
   const size_t dn = (size_t)DIM * (FF / QK) * block_bytes(type_down);
@@ -76,7 +78,7 @@ static void check(uint32_t type_gu, uint32_t type_down, int threads)
     fill(type_gu, base, gu), fill(type_gu, base + gu, gu), fill(type_down, base + 2 * gu, dn);
     e[k] = (CpuLaneExpert){base, base + gu, base + 2 * gu, r, cnt[k]};
   }
-  CpuLane *c = cpu_lane_create(threads, ROWS, DIM, FF);
+  CpuLane *c = cpu_lane_create(threads, cores, ROWS, DIM, FF);
   assert(c);
   uint32_t seq = 0;
   for (uint32_t round = 1; round <= 2; round++) /* two jobs in turn, x new each */
@@ -104,8 +106,8 @@ static void check(uint32_t type_gu, uint32_t type_down, int threads)
   assert(seq == 2 && cpu_lane_wait(c)); /* nothing queued by them */
   cpu_lane_destroy(c);
   free(w), free(x), free(y), free(ref);
-  printf("  types %u / %u, %d worker%s: two jobs of %d experts (%d rows) the one thread's bits; refusals\n", type_gu,
-         type_down, threads, threads == 1 ? "" : "s", NE, ROWS);
+  printf("  types %u / %u, %d worker%s%s: two jobs of %d experts (%d rows) the one thread's bits; refusals\n", type_gu,
+         type_down, threads, threads == 1 ? "" : "s", cores ? " (pinned)" : "", NE, ROWS);
 }
 
 int main(void)
@@ -116,12 +118,18 @@ int main(void)
     printf("[test_cpu_lane] skipped: no AVX-512 VNNI\n");
     return 0;
   }
-  assert(!cpu_lane_create(0, ROWS, DIM, FF) && !cpu_lane_create(2, ROWS, DIM + 1, FF));
-  assert(!cpu_lane_create(2, 0, DIM, FF));
+  assert(!cpu_lane_create(0, NULL, ROWS, DIM, FF) && !cpu_lane_create(2, NULL, ROWS, DIM + 1, FF));
+  assert(!cpu_lane_create(2, NULL, 0, DIM, FF));
+  const int no_core[2] = {0, 1 << 20}; /* a CPU no machine has: refused, never run unpinned */
+  assert(!cpu_lane_create(2, no_core, ROWS, DIM, FF));
   cpu_lane_destroy(NULL);
-  check(QTYPE_IQ2_XXS, QTYPE_IQ1_M, 1);
-  check(QTYPE_IQ2_XS, QTYPE_IQ2_XXS, 3);
-  check(QTYPE_IQ1_M, QTYPE_IQ2_XS, 8);
+  check(QTYPE_IQ2_XXS, QTYPE_IQ1_M, 1, NULL);
+  check(QTYPE_IQ2_XS, QTYPE_IQ2_XXS, 3, NULL);
+  check(QTYPE_IQ1_M, QTYPE_IQ2_XS, 8, NULL);
+  check(QTYPE_IQ3_XXS, QTYPE_Q2_K, 4, NULL); /* UD-IQ2_XXS's down types */
+  const int four_four[8] = {0, 1, 2, 3, 8, 9, 10, 11}; /* 4 + 4: each CCD's first four (Strix Halo's 2 x 8) */
+  check(QTYPE_IQ1_M, QTYPE_IQ2_XS, 8, four_four);
+  printf("  a core no machine has: refused\n");
   printf("[test_cpu_lane] ok\n");
   return 0;
 }

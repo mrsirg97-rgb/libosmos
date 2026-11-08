@@ -46,7 +46,7 @@ static Run decode(const Weights* w, bool no_guess) {
   o.no_guess = no_guess;
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward_create_with: %s\n", err);
-  CHECK(f && forward_lane(f, 0, err));
+  CHECK(f && forward_lane(f, 0, NULL, err));
   const uint32_t V = (uint32_t) w->geo.n_vocab;
   std::vector<int32_t> p(kPrompt);
   uint32_t r = 1017;

@@ -23,10 +23,11 @@
   X(F32, 0, 1, 4, QTYPE_FILE | QTYPE_MV)                                                           \
   X(Q8_0, 8, 32, 34, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(Q5_K, 13, 256, 176, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MM | QTYPE_EMBED)             \
+  X(Q2_K, 10, 256, 84, QTYPE_IQ)                                                                   \
   X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MM | QTYPE_EMBED)             \
   X(IQ2_XXS, 16, 256, 66, QTYPE_IQ)                                                                \
   X(IQ2_XS, 17, 256, 74, QTYPE_IQ)                                                                 \
-  X(IQ3_XXS, 18, 256, 98, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                       \
+  X(IQ3_XXS, 18, 256, 98, QTYPE_IQ)                                                                \
   X(IQ1_S, 19, 256, 50, QTYPE_IQ)                                                                  \
   X(IQ4_NL, 20, 32, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                       \
   X(IQ2_S, 22, 256, 82, QTYPE_IQ)                                                                  \

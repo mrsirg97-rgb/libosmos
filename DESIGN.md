@@ -1668,7 +1668,8 @@ caller's, no server. this ports both, as one binary that speaks maya's line prot
   conversations under `OSMOS_SLOT_MIN` tokens (1024) not kept, a folder's older than `OSMOS_SLOT_DAYS` (7)
   removed. a slot is a `.bin` and a `.meta` (the identity, the tokens, the size), each written under a temporary name
   and renamed; at start the folder is indexed and a slot whose `.meta` is missing, foreign or disagrees is removed.
-  QUIT sets every conversation aside and writes RAM's to the folder. `OSMOS_SLOT_KEEP=1` turns it on.
+  QUIT sets every conversation aside and writes RAM's to the folder. on by default since 0.5.6 (`OSMOS_SLOT_KEEP=0`
+  turns it off), RAM held by bytes too (0.5.6's "doing less").
 
 **3. several conversations at once (#587's)**
 - `--parallel N`: N Seqs. the loop on libevt's engine (`~/Projects/libevt`): stdin's lines and the turns are
@@ -2403,6 +2404,222 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   tiles 248 VGPRs, 36 B spilled, 5 waves), 5.70 s with one in a two-pass loop (222, none, 6): a block's latency
   doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
   0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
+
+### 0.5.6: the drafter, its floors, and the experts' small tiles - measured (2026-11-07, low-power)
+
+- **DeepSeek's drafter, the next round during the verify**: not possible as DSpark is built - a round reads the
+  token y (the trunk's own at the round's first position: the verify's) and the ring the verify's taps seed
+  (drafter_seed), so the next round's inputs are the verify's outputs. dropped.
+- **a drafted round's time** (UD-IQ1_M, a chat question, 33 rounds; the host's clock): the drafter 14.7 ms - its
+  three blocks 8.7 (5 rows' small matvecs), the trunk's head 4.0 (543 MB of Q6_K by mv), its rows' confidences and
+  markov steps ~2 (two host syncs a row) - against ~112 ms verifying: of a round's 127 ms the experts (the q8 lane)
+  47.6 (5 tokens' ~25 distinct experts a layer, ~8 GB at ~172 GB/s), the dense mm 33.3 (a token's), the matvecs
+  17.1, the rest 12.8, gaps 15.9 (the reads). the drafter's rows on the GPU would give ~1-1.5% of drafted decode.
+- **the drafting floors and cap** (the three questions x 256, one round each, every hash the same): floor 0.1 cap 5
+  (the shipped) 31.2 tok/s mean; floor 0.2 30.7, 0.3 30.3, 0.5 29.7; cap 4 30.2, 3 28.0, 2 24.8 - a longer round
+  pays: an accepted draft saves a ~60 ms round against its ~8 ms of new experts. the shipped floors are the fastest
+  as they were the least energy (0.3.x).
+- **the register A path past one tile** (each tile's chain over the one A: the same bits), the experts at 32 / 64
+  tokens each (64 a launch): the IQ4s +1-2%, IQ2_S -10% and IQ3_XXS -5% at 32 with every type on it - a wash.
+  and 33-64 tokens on the 8-tile kernel (its last tiles empty: 4's spills 16 B a lane at 256 VGPRs) slower at
+  every size (IQ2_S 669 -> 715 us at 64, Q2_0 873 -> 980). the 4-tile kernel stays; at these counts the experts do
+  ~20 TFLOP/s of work (GB/s the wrong measure there).
+- **the small tiles further** (the same bits each): the 2- and 4-tile launches' unroll at 2 or 4 (the shapes' 8)
+  10-35% slower or level, the 4-tile spill still there at 2 and 4; each step's x loaded beside its WMMA (8 VGPRs live,
+  not 64) within +-5% by type and count - the compiler hoists the loads together itself (the 4-tile kernels 256
+  VGPRs, 16 B spilled either way). the small tiles at their structure's mark: past it is the GEMM's shape (operands
+  shared across waves), which its 128-token tiles barely paid for in the dense (+11%).
+- **Q6_K's slab read whole at a token** (the register path: a lane's 8 chunks of its row from 7 loads - ql in 4
+  runs of 8 bytes, qh in 2, the half's 8 scales, d - against a set of loads a chunk; decode<kQ6_K>'s expression a
+  value: the same bits, mmbits at 1-2,048): no faster - a token's dense reads Qwen 20.6 / 20.7 -> 20.7 / 20.7 ms,
+  DeepSeek 33.1 / 33.0 -> 33.0 / 33.0. the loads' count is not the bound: the memory merges a wave's narrow ones
+  into its lines, and what is left is the chain's round trips.
+- **the drafter's rows chained on the GPU** (row 0's confidence alone, one sync - a round cut there skips the head;
+  then every row's E[prev] gathered by a device index - ops_embed from the last row's argmax - its confidence and
+  markov step queued, one read back, the cut on the host; ~10 syncs a round to 2): the same drafts and streams
+  (279 / 282 / 262 drafted, the three hashes), 32.7 / 25.4 / 34.9 -> 32.7 / 25.5 / 35.1 tok/s over two rounds a
+  build (UD-IQ1_M, floor 0.1 cap 5) - +0.2%, the noise. the syncs were tens of microseconds each against a ~70 ms
+  round; the ~1-1.5% above was wrong. not kept (the rows past a cut computed for nothing, and a negative id's guard
+  in ops_embed only it needs).
+
+### 0.5.6: doing less - copies from the context, and conversations kept (2026-11-07)
+
+the work a token or a turn need not do at all, measured on the operator's rig sessions (~/Projects/rig-dump: 3,802
+sessions, ~80K assistant turns - DeepSeek V4 / V4.1-Flash 1,498 conversations, Qwen3.8-Flash-Next 615, GLM 1,352;
+each piece tokenized by its family's GGUF tokenizer) and on maya's logs of the same use. the scripts and logs: the
+0.5.6 session's scratchpad (lookup/: extract.py, sim.py, sim_runs.py, sim_cost.py, vwidth.cpp).
+
+- **drafts copied from the context** (prompt lookup: the last tokens matched at their latest earlier place in the
+  conversation - users, replies, tool args and results, not earlier turns' reasoning, which the templates drop - the
+  tokens after it drafted; the verify keeps the agreeing prefix and one more). of DeepSeek's 23.3M output tokens,
+  38% fall in copies 1+ long, 21% in copies 9+ (past DSpark's block of 5), 15% 16+, 10% 32+ (Qwen 35 / 19 / 13 /
+  8%); by kind, tool args 60-68% copied, replies 19-31%, reasoning (65% of the output) 11-22%. GLM and the rest the
+  same within points: the workload's, not a model's. alone, 1.3-1.6 tokens a forward - below the drafters we have.
+- **a verify's width priced** (vwidth: a 4,096-token prompt, the state saved and loaded each step, 24 trials a width
+  interleaved, real text; low-power): Qwen 38.1 ms at 1, x1.71 at 5, 2.15 at 8, 3.03 at 16, 4.98 at 32; DeepSeek
+  57.3 ms, x1.71, 2.17, 3.46, 5.65 - each row ~5-7 ms on both (not near free on Qwen: the guess was wrong). lookup
+  drafting only where the text before matches for L tokens, K drafted, priced by these, every other token at the
+  drafter's measured rate (MTP 1.68x, DSpark 2.05x), and the drafter assumed no better on copies than elsewhere (it
+  likely is: so a ceiling): Qwen 0.950 of the time at best (L 8, K 8: 17% of tokens by lookup), DeepSeek 0.965 (L 24,
+  K 16). 3-5% at most, and Qwen's rollback reaches 8 (Q4X_MAX_BACK: a longer draft needs more snapshots). not now.
+- **conversations kept** (maya #356's store, here since 0.2: OSMOS_SLOT_KEEP, off by default). maya's logs of the
+  same use: 4,705 conversations taken back - 172 a new conversation from a shared opening (~5.9K tokens: rig's system
+  prompt and tools), 4,533 a conversation set aside and resumed (735 of 8-32K tokens, 2,079 of 32-128K, 1,719 past
+  128K, ~190K their mean), each then ~1-2K new tokens read. the sessions' own first prompts: 1,217 of DeepSeek's
+  1,498 repeat an earlier one whole (runs again), the rest share little - the system prompt is the shared part. with
+  slots off, a conversation back after its lane went to another reads from token 0 (75K tokens: minutes on
+  DeepSeek, ~2 on Qwen). the agent bench never saw it (4 agents on 4 lanes: every turn continued in place).
+- **a state's bytes** (seq_save's): DeepSeek ~1.7 KB a token (6.9 MB at 4,096); Qwen ~118 MB fixed (the recurrent
+  layers' states) and ~14.6 KB a token (119.6 MB at 100, 177.9 at 4,096: its attention layers' Q8_0 KV) - 2.9 GB at
+  190K. 4 in RAM (OSMOS_SLOT_CAP) would hold ~12 GB of Qwen's: past the 8 GiB the operator keeps free. so the store
+  caps RAM by bytes too (SlotsOptions.ram_bytes: MemAvailable after the build less 8 GiB; one past it alone straight
+  to the folder), a state handed to the store, not copied (slots_put owns it), and a set-aside first makes RAM's room
+  for its save (slots_room: the least recently used to the folder until it fits, refused past ram_bytes alone).
+  test_slots (each mutated: caught; ASan + UBSan clean). kept by default (OSMOS_SLOT_KEEP=0: not). the room is
+  read once, when the store is made: a server started with under 8 GiB to spare keeps nothing all its run (seen with
+  a download's buffers beside DeepSeek: 6.68 GiB available, room 0 - fail closed, the rule kept); read again at each
+  set-aside it would follow the box, a later step if it matters.
+- **slot_test on both families** (tools/serve/slot_test.py): Qwen's prompt files overlap (p8192.txt is
+  calib16k.txt's first 8,192 tokens), so B continued A - the test now refuses texts that share a start, and Qwen
+  takes `--b-file` (DESIGN.md tokenized by its tokenizer: ~/bench/qwen-prompts/other8192.txt); the kept and restart
+  steps under the store's default cap (0.05 GiB fitted DeepSeek's ~12 MB states, not Qwen's ~250 MB) - the cap the
+  evict step's, sized to the states it wrote. both pass: Qwen every check (a 12K-token turn taken back 2.8 s
+  against 19.5 from token 0), DeepSeek every check (3.5 s against 30.5).
+
+### 0.5.6: the CPU, the box's layout, and the int8 lane on the dense - measured (2026-11-08, performance)
+
+- **the CPU lane was broken since 0.3.0** (the pool's units read O_DIRECT, their fds the direct twins; fwd_cpu_parts
+  matched the buffered ones, walked past the files and read a pointer no map holds: a segfault at the first CPU
+  expert). test_lane_gpu skipped (it wanted ~/models/ds1017): ported to test_model.h (UD-IQ1_M; OSMOS_TEST_UD), it
+  failed first, then (the fd either twin, bounded, refused where none) passed: 963 of 1,646 streamed picks on the
+  CPU at the tight budget, the GPU's fingerprint; IQ2_XXS 1,028 of 1,773, likewise. the lane pinned
+  (cpu_lane_create's cores, from the thread's attributes; dbench CPU_CORES): test_cpu_lane - pinned 4 + 4 the one
+  thread's bits, a core no machine has refused.
+- **the CPU lane for misses does not pay here** (IQ2_XXS plain, the streams the same in every run): off 14.2 / 14.1 /
+  13.4 tok/s, 110.7 W, 8.18 J a token; 12 threads unpinned 12.5 / 12.0 / 11.0, 121.1 W, 10.28 J; pinned 2 + 2 12.0 /
+  12.1 / 10.8, 3 + 3 12.1 / 12.1 / 10.9, 4 + 4 11.9 / 11.6 / 10.5. it takes every miss (8,620) and the reads' waits go
+  to 0 - but a miss is still the SSD's read (the file's pages, the 8 GiB rule leaving little page cache), then
+  computed slower than the GPU.
+- **the CPU's bandwidth by core set** (ccdbw: AVX-512 reads of 4 GiB, threads pinned): 1 core 41.9 GB/s, 2 on one CCD
+  60.9, 4-8 on one 56-58; **2 + 2 across the CCDs 116.6** (3 + 3 .. 8 + 8 113-115): a CCD's link full at two cores,
+  the two links the CPU's whole (the operator's hunch, measured).
+- **the shared expert on the CPU** (an idea measured, not built): on the GPU 181.7 us a layer (median), on the critical
+  path in 97% of layers (2.5 us of idle after it: the routed launch was waiting) - ~6.8 ms of a ~75 ms token, a 9%
+  ceiling. the routed window it must fit: 340 us a plain step's layer, 1,986 a drafted verify's. the CPU lane on a
+  real Q8_0 layer (37.6 MB, cycled over its 27 layers): 371 us at 2 + 2, 353 at 16 threads (bandwidth-bound) for a
+  token; 1,092 / 706 / 442 us at 4 / 8 / 16 threads for 6 (compute-bound). **with the GPU decoding beside it**: 750-874
+  us (43-50 GB/s), and the GPU 13.0 / 12.9 / 12.1 tok/s against 14.2 / 14.1 / 13.4 - one memory. plain would lose,
+  drafted gain ~1-2%: not built.
+- **a token's time** (IQ2_XXS plain, 128 decode steps traced): 75.9 ms - the dense matmuls 29.8 (39%), the routed
+  experts' lane 13.5 (18%), the GPU idle on reads 13.4 (18%), grouped matmuls 6.3, launches' gaps 3.1, the rest 9.9.
+  the SSD in it: 937 MB/s averaged, 128 KB requests, ~9 in flight - its reads come in bursts at the drive's rate
+  (~10 MB a miss, ~1.5 ms), not short of queue depth: ~120 MB a token is ~18 ms of the drive's (Gen4 x4: the Gen5
+  Micron 4600 at 7.1 GB/s). the guess on IQ2_XXS (its misses 5x IQ1's): 14.3 / 14.2 / 13.4 against 14.1 / 14.1 /
+  13.2, 59% of the misses guessed - the first quant it pays on (its pack's setting). the guess 2 layers ahead too
+  (l + 1 .. l + d's routers on l's input, each its top 6, layer l + d's wanted d - 1 visits on; an experiment): off
+  14.2 / 14.1 / 13.3, ahead 1 14.3 / 14.1 / 13.4 (5,041 of 8,520 guessed, 6,650 reads begun, the guessed waits 3.19
+  s), ahead 2 14.3 / 14.3 / 13.4 (5,037, 6,626, 3.15 s) - no read more, no hit more: the deeper guesses' reads not
+  begun, most likely refused room (the pool's room() evicts only what is wanted later than the read). not kept;
+  0.5.7: counters a depth (begun, refused, hit), then a region of the budget kept for the guesses' reads if the
+  refusals are it.
+- **the int8 lane on the dense Q8_0 matrices** (lanemm: WMMA's mm_run against q8_group_tok, each matrix cycled over
+  its 27 layers): attn_q_b 212.0 -> 203.6 us (210 / 219 GB/s), attn_output_b 206.0 -> 204.3, attn_q_a 43.2 -> 40.7,
+  attn_kv 21.6 -> 16.5, ffn_gate_shexp 69.8 -> 67.5 - under 1% of a token: the big ones at the memory's ceiling
+  either way. not worth int8 inputs on attention (and the prompt / decode split widened): not built, and Q8_0's lane
+  support not kept.
+- **the NPU** (XDNA 2: /dev/accel0, amdxdna and XRT 2.21 present; xrt-smi refused - locked memory 8 MiB, XRT's
+  buffers 64 MiB): no job for it on the critical path (the drafter sequential); a predictor of the misses its fit,
+  after a table's is measured (0.5.7).
+
+### 0.5.6: conversations kept in pieces (2026-11-07)
+
+the quiet box's DeepSeek slot test: `RAM for them 0.06 GiB (8.06 available, 8 kept free)` - the build fills the GPU's
+share (the TTM limit), the system keeps what is past it, and above the operator's 8 GiB that is 0-5 GiB by the moment
+(4.99 in one run, 0.06 in the next). a set-aside saved into a buffer of the state's size and a take-back read the whole
+file into one, so a long DeepSeek conversation (~320 MB at 190K tokens) was not kept where RAM was short - the
+feature gone where it is wanted. the choices: carve slots from the GPU's budget (decode slower always), let the
+buffer dip under the 8 GiB (the rule broken), or move the state in pieces - the last.
+- **a state's bytes in pieces** (osmos/model/state_io.h): a save gives them to a sink, a load takes them from a
+  source, a piece at most STATE_CHUNK. 4 MiB, measured: the smallest the SSD takes at its rate (2 GB written in each
+  size and fsync'd - 1 MiB 1.98 GB/s, 4 2.42, 16 2.40, 64 2.28; read 7.0 / 7.1 / 7.0 / 6.5). each family's save and
+  load move their parts through one bounce of that size, the checksum over the bytes as they pass; the load reads it
+  last, so a damaged state's rows are already on the GPU - refused, the sequence reset (a fresh one's rows rewritten
+  before read: never part one conversation and another). oseq_save / oseq_load: the same over one buffer (one path).
+- **the store**: slots_put_stream writes straight from a save to the slot's file (a temporary name, fsync, renamed,
+  its .meta after); slots_take_stream gives a take's load the folder's file or RAM's buffer in pieces (one take path).
+  a set-aside: RAM where slots_room holds it (the fast path), else streamed - its RAM a bounce, never the state.
+  OSMOS_SLOT_RAM_GB lowers the room (0: every conversation streamed - the tests' way to drive it end to end).
+- tests first: both families' engine tests - streamed pieces within STATE_CHUNK, the buffer's bytes, loaded from
+  pieces the same bits, a byte flipped mid-stream refused (the sequence empty), a sink failing part way false; Qwen's
+  at 8,000 tokens (234.8 MB, 147 pieces: its cache parts past 4 MiB - at 100 tokens every part was under 3 MB and a
+  mutant sending parts whole passed; the long one caught it). DeepSeek's parts pass 4 MiB only near 60K tokens (a
+  part a layer's compressed rows, ~280 bytes a row): its pieces' bound not driven by a test (the same split by whole
+  rows; its short states' bytes, damage and next token are). test_slots: streamed with RAM's room 0 and taken back
+  in pieces (sizes 7 .. STATE_CHUNK), a save failing part way leaving no file, no folder not kept, the hand-over
+  still the buffer itself (a byte changed after the put comes back); mutated (a failed put's .tmp, a take's files
+  left): caught; ASan + UBSan clean.
+
+### 0.5.6: UD-IQ2_XXS's types - Q2_K and IQ3_XXS on every expert path (2026-11-07)
+
+unsloth's UD-IQ2_XXS (295.3 GiB in its six files: experts 161.5 - gate / up IQ2_S 20.3, IQ2_XXS 16.3, IQ1_S 8.2 each;
+down IQ3_XXS 24.2, IQ2_S 20.3, Q2_K 16.9, IQ2_XS 7.3, IQ2_XXS 3.3 - attention 5.0 Q8_0 / Q6_K; its Engram 125.9 GiB
+Q5_K, shard 6 alone, not read: the MXFP8 table as 6 of 6, a reflink restamped) read from its headers before a byte
+of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen's (decode, mv, mm) and not the lanes.
+- **the table** first (qtype.h: Q2_K a row on every path, IQ3_XXS's QTYPE_IQ): test_qtype_gpu failed on each missing
+  path (10), then passed.
+- **Q2_K's decode** ((d sc) q - (dmin m), 16 groups of 16): bit for bit gguf-py's on its real blocks and random
+  ones, F32 and F16 (a block's two halves swapped: caught). dequant_ref.py `--random TYPE` (a type with no tensor at
+  hand: random blocks alone) for the first; then UD-IQ2_XXS's own (~/osmos-oracle/dequant-iq2xxs).
+- **the matvecs and the matmul**: dispatch; Q2_K's shapes Q2_0's (not measured - a matmul shape its sum order: fixed
+  before a pack ships, not after).
+- **the lane's int8 experts, GPU and CPU**: IQ3_XXS as IQ2_XXS (its d (0.5 + s) / 2 as the contract's 2 (2s + 1)
+  eighths); Q2_K the contract's first minimum - a half (d sc) its dot less (dmin m) x's sum, lane_q8_part_min the
+  one order both sides take. test_q8_gpu's replay (from gguf-py's layout, not from q8.h) bit for bit, the int8 inputs'
+  error against F32 3.4-3.7e-3 as every type's (a scale wrong would be ~1); test_cpu_q8 at every shape, the tails
+  too; test_cpu_q8_gpu and test_cpu_expert_gpu the GPU's bits - random experts first (any bytes a block, sane f16
+  scales), the model's after. mutated (the doubled scale, the minimum, its sign, the shift): each caught.
+- **found on its tensors**: IQ2_XS's f16 decode (iq2_h) +0 for 256 of 3.67 M values where gguf-py has -0 - a block
+  whose f16 scale is -0 (unsloth's IQ2_XXS has some, UD-IQ1_M's ranges none), the product and the f16 rounding fused
+  into one v_fma_mixlo_f16 (a * b + 0). grid_h's empty asm first: right, and prompts ~0.9% slower (UD-IQ1_M, an
+  8,192-token prompt: 373 / 371 against 376 / 375 tok/s). then no barrier: the grid's values positive, a value's sign
+  is db's xor the pattern's - |db| grid rounded (fused or not, never -0: the same bits), the sign one xor with db's
+  folded into the mask: bit for bit gguf-py's on both models' blocks, and prompts 377 / 377 against 372 / 371 (the
+  same streams; +~1% over the four HEAD runs). a matmul's bits move only where a dot is exactly zero - UD-IQ1_M's
+  streams did not. (grid_h - IQ2_S, IQ3_XXS - keeps its barrier: the same trick may pay there, not tried.)
+- **the CPU lane** (opt-in, off): built out too - this quant's misses may make it pay where IQ1_M's did not.
+- **first run** (dbench, low-power, cold, UD-IQ1_M's picks, budget sized 104.86 GiB): it loads, its answers sane
+  (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
+  its ~5 waiting on 1,663 reads - a floor, not a number.
+
+### 0.5.6: the three packs baked off - UD-IQ2_XXS ships as the slow one (2026-11-08, performance)
+
+One session, one build, each pack its own settings (UD-IQ1_M / UD-IQ1_S the guess off, UD-IQ2_XXS on; UD-IQ1_M's
+picks for UD-IQ2_XXS), dbench over the three questions x 256 tokens, greedy, DSpark drafting at the packs' floors;
+power sampled at 0.25 s (tools/power.py); perplexity bin/ppl over 8,191 tokens of calib16k. Every stream the same
+hash at 64K and 1M, plain and drafted; UD-IQ1_M's and UD-IQ1_S's those recorded before 0.5.6.
+
+| | UD-IQ2_XXS | UD-IQ1_M | UD-IQ1_S |
+| --- | ---: | ---: | ---: |
+| plain, 64K / 1M | 14.0 / 13.9 | 17.3 / 17.2 | 19.5 / 19.4 |
+| drafted, 64K / 1M | 21.3 / 19.3 | 33.6 / 33.2 | 40.5 / 41.5 |
+| drafts accepted | 561 / 843 (67%) | 579 / 823 (70%) | 575 / 796 (72%) |
+| W plain / drafted (64K) | 115.5 / 99.5 | 131.9 / 127.3 | 136.8 / 130.9 |
+| J a token plain / drafted (64K) | 8.39 / 4.76 | 7.67 / 3.85 | 7.02 / 3.37 |
+| perplexity (abliterated) | 2.4492 (2.4571) | 2.4579* | 2.5006 |
+
+(* the bench folder's stock IQ4_NL table; with the pack's MXFP8 2.4591.) UD-IQ2_XXS's perplexity is the best by
+0.35% and its decode the slowest: plain -19% against UD-IQ1_M, drafted -37% (64K) / -42% (1M). Its acceptance did
+not rise with the closer model (67% against 70%), so drafting gains 1.52x against UD-IQ1_M's 1.93x. Its experts are
+18% larger (165 against 140 GB), more of each step's picks miss, and a drafted round - several tokens' picks at
+once - waits on more of them: the GPU idles, the power falls 14% from plain (the IQ1 packs 3-4%), the energy a token
+rises. That drafted rounds wait most is read from the power and the speedups, not timed: plain's own split (13.4 of
+75.9 ms waiting on reads, "the CPU, the box's layout") is the measured part. At 1M its drafting loses 9% where the
+IQ1 packs lose ~1%: 1M's ~0.85 GiB attention state out of the experts' budget, likely, not measured.
+
+Shipped as the slow pack, titled with its 1M numbers; the flagship stays UD-IQ1_S (speed), UD-IQ1_M (quality). The
+pack titles move to 0.5.6's 1M numbers (UD-IQ1_S 18.8 / 37.5 -> 19.4 / 41.5, UD-IQ1_M 16.0 / 28.6 -> 17.2 / 33.2:
+0.5.x's kernels since they were taken). 0.5.7 is aimed at UD-IQ2_XXS's misses: per-depth lookahead counts, a room
+for guessed reads, swaps without the copy.
 
 ### 0.5.5: a token's A operand from the decode, no LDS (2026-11-07, low-power)
 

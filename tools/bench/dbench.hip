@@ -30,6 +30,7 @@ extern "C" {
 #include "osmos/model/weights.h"
 #include "osmos/run/fit.h"
 #include "osmos/run/gpu.h"
+#include "osmos/cpu/lane.h"
 #include "osmos/run/forward.h"
 #include "osmos/run/drafter.h"
 #include "osmos/run/engine.h"  // the drafting floors (osmos-serve's)
@@ -208,13 +209,26 @@ int main(int argc, char** argv) {
     std::printf("ranked by %s\n", pp);
   }
   const auto l0 = std::chrono::steady_clock::now();
-  const int cpu_threads = std::getenv("CPU_THREADS") ? std::atoi(std::getenv("CPU_THREADS")) : 0;
+  // CPU_CORES=a-b,c,...: the CPU lane pinned, a worker a core listed (its count the threads); else CPU_THREADS unpinned
+  static int cpu_cores[CPU_LANE_THREADS_MAX];
+  int n_cores = 0;
+  if (const char* cc = std::getenv("CPU_CORES"))
+    for (const char* p = cc; *p;) {
+      char* e;
+      const long a = std::strtol(p, &e, 10), b = *e == '-' ? std::strtol(e + 1, &e, 10) : a;
+      for (long c = a; c <= b && n_cores < CPU_LANE_THREADS_MAX; c++) cpu_cores[n_cores++] = (int) c;
+      p = *e == ',' ? e + 1 : e;
+      if (e == p && *p) break;
+    }
+  const int cpu_threads = n_cores ? n_cores : std::getenv("CPU_THREADS") ? std::atoi(std::getenv("CPU_THREADS")) : 0;
+  const int* cpu_pin = n_cores ? cpu_cores : nullptr;
   struct Built {  // the forward, its lane, the drafter if DRAFT, and an answer's sequence while sizing
     const Weights* w;
     ForwardOptions o;
     int cpu_threads;
+    const int* cpu_pin;
     Forward* f;
-  } b{w, o, cpu_threads, nullptr};
+  } b{w, o, cpu_threads, cpu_pin, nullptr};
   auto unbuild = [](void* ctx) {
     Built* z = (Built*) ctx;
     drafter_destroy(g_draft), forward_destroy(z->f);
@@ -224,7 +238,7 @@ int main(int argc, char** argv) {
     Built* z = (Built*) ctx;
     char ferr[FORWARD_ERR] = "";
     z->o.budget = budget;
-    bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, ferr);
+    bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, z->cpu_pin, ferr);
     if (ok && std::getenv("DRAFT")) ok = (g_draft = drafter_create(z->f, std::getenv("DRAFT"), ferr)) != nullptr;
     Seq* s = ok ? seq_create(z->f, ferr) : nullptr;  // an answer's sequence counted, then let go
     ok = ok && s && forward_room(z->f, room);

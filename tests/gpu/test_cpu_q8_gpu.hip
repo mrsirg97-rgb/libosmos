@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +20,7 @@ extern "C" {
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/q8.h"
 #include "osmos/model/gguf.h"
+#include "osmos/model/qtype.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -37,15 +39,36 @@ static float uniform() {
   return (float) (rng >> 8) / (float) (1u << 23) - 1.0f;
 }
 
+static void check(uint32_t type, uint32_t rows, uint32_t cols, const std::vector<uint8_t>& w, const char* name, int e);
+
 static void expert(const Gguf* g, const char* name, int e) {
   const GgufTensor* t = gguf_tensor(g, name);
   CHECK(t && t->n_dims == 3);
-  const uint32_t cols = (uint32_t) t->dims[0], rows = (uint32_t) t->dims[1], nb = cols / kBlock;
+  const uint32_t cols = (uint32_t) t->dims[0], rows = (uint32_t) t->dims[1];
   const uint64_t bytes = t->bytes / t->dims[2];
   std::vector<uint8_t> w(bytes);
   const int fd = open(g->paths[t->file], O_RDONLY);
   CHECK(fd >= 0 && pread(fd, w.data(), bytes, (off_t) (t->offset + (uint64_t) e * bytes)) == (ssize_t) bytes);
   close(fd);
+  check(t->type, rows, cols, w, name, e);
+}
+
+// a type no model here holds (UD-IQ2_XXS's IQ3_XXS and Q2_K): random blocks, sane f16 scales at the type's places
+static void synthetic(uint32_t type, uint32_t rows, uint32_t cols, const char* name) {
+  const uint32_t bb = qtype_info(type)->bytes;
+  std::vector<uint8_t> w((size_t) rows * (cols / qtype_info(type)->values) * bb);
+  for (uint8_t& b : w) b = (uint8_t) (uniform() * 128.0f + 128.0f);
+  for (size_t at = 0; at < w.size(); at += bb)
+    for (int o : type == QTYPE_Q2_K ? std::vector<int>{80, 82} : std::vector<int>{0}) {
+      const _Float16 h = (_Float16) (std::fabs(uniform()) * 0.01f);
+      std::memcpy(&w[at + o], &h, 2);
+    }
+  check(type, rows, cols, w, name, 0);
+}
+
+static void check(uint32_t type, uint32_t rows, uint32_t cols, const std::vector<uint8_t>& w, const char* name, int e) {
+  const uint32_t nb = cols / kBlock;
+  const uint64_t bytes = w.size();
   std::vector<float> x((size_t) kTok * cols), qd((size_t) kTok * nb), gqd(qd.size());
   for (float& v : x) v = uniform() * 3.0f;
   for (uint32_t i = 0; i < kBlock; i++) x[i] = 0.0f, x[cols + kBlock + i] = i == 5 ? -2.5f : 0.0f;
@@ -71,11 +94,11 @@ static void expert(const Gguf* g, const char* name, int e) {
   CHECK(cpu_q8_round(x.data(), kTok, cols, cols, q.data(), qd.data()));
   CHECK(std::memcmp(gq.data(), q.data(), q.size()) == 0 && std::memcmp(gqd.data(), qd.data(), qd.size() * 4) == 0);
   // the rows: the CPU at all 8 tokens, the GPU at 1 .. 8 - token t's rows its own either way
-  CHECK(cpu_q8_rows(t->type, w.data(), cols, 0, rows, q.data(), qd.data(), kTok, cpu.data(), rows));
+  CHECK(cpu_q8_rows(type, w.data(), cols, 0, rows, q.data(), qd.data(), kTok, cpu.data(), rows));
   for (uint32_t n = 1; n <= kTok; n++) {
     const int32_t cnt = (int32_t) n;
     CHECK(hipMemcpy(dcnt, &cnt, 4, hipMemcpyHostToDevice) == hipSuccess);
-    CHECK(q8_group_tok(t->type, (const void* const*) dp, dcnt, dxrow, nullptr, 1, n, rows, cols, dq, dd, dy, rows, nullptr) &&
+    CHECK(q8_group_tok(type, (const void* const*) dp, dcnt, dxrow, nullptr, 1, n, rows, cols, dq, dd, dy, rows, nullptr) &&
           hipDeviceSynchronize() == hipSuccess);
     CHECK(hipMemcpy(gpu.data(), dy, (size_t) n * rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(std::memcmp(gpu.data(), cpu.data(), (size_t) n * rows * 4) == 0);
@@ -84,7 +107,7 @@ static void expert(const Gguf* g, const char* name, int e) {
   for (uint32_t tk = 0; tk < kTok; tk++)
     for (uint32_t r0 : {0u, a, b}) {
       const uint32_t r1 = r0 == 0 ? a : r0 == a ? b : rows;
-      CHECK(cpu_q8_rows(t->type, w.data(), cols, r0, r1, &q[(size_t) tk * cols], &qd[(size_t) tk * nb], 1,
+      CHECK(cpu_q8_rows(type, w.data(), cols, r0, r1, &q[(size_t) tk * cols], &qd[(size_t) tk * nb], 1,
                         &part[(size_t) tk * rows], rows));
     }
   CHECK(std::memcmp(part.data(), cpu.data(), cpu.size() * 4) == 0);
@@ -92,7 +115,7 @@ static void expert(const Gguf* g, const char* name, int e) {
         hipFree(dq) == hipSuccess && hipFree(dd) == hipSuccess && hipFree(dy) == hipSuccess &&
         hipFree(dcnt) == hipSuccess && hipFree(dxrow) == hipSuccess);
   std::printf("  %-28s[%3d] type %2u %4u x %4u: the GPU's bytes and bits at 1 .. %u tokens; rows split the same\n",
-              name, e, t->type, rows, cols, kTok);
+              name, e, type, rows, cols, kTok);
 }
 
 int main() {
@@ -110,6 +133,10 @@ int main() {
   for (const char* name : which == TestModel::kUd ? kUdExperts : kGsqExperts)
     for (int e : {7, 300}) expert(g, name, e);
   gguf_destroy(g);
+  synthetic(QTYPE_IQ3_XXS, 512, 4096, "random IQ3_XXS");
+  synthetic(QTYPE_IQ3_XXS, 512, 2048, "random IQ3_XXS");
+  synthetic(QTYPE_Q2_K, 512, 4096, "random Q2_K");
+  synthetic(QTYPE_Q2_K, 512, 2048, "random Q2_K");
   std::printf("[test_cpu_q8_gpu] ok\n");
   return 0;
 }

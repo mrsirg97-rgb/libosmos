@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.5.6]: conversations kept by default, and UD-IQ2_XXS
+
+Every 0.5.5 stream the same bits (DeepSeek's three questions, both packs; Qwen's prompts and decode). Measured the
+same session (2026-11-08, `performance`, 64K context, three questions x 256 tokens; perplexity over 8,191 tokens):
+
+| | UD-IQ2_XXS (new, slow) | UD-IQ1_M (quality) | UD-IQ1_S (speed) |
+| --- | ---: | ---: | ---: |
+| Decode, plain / drafted, tok/s | 14.0 / 21.3 | 17.3 / 33.6 | 19.5 / 40.5 |
+| Drafts accepted | 67% | 70% | 72% |
+| Energy a token, plain / drafted | 8.39 / 4.76 J | 7.67 / 3.85 J | 7.02 / 3.37 J |
+| Perplexity (abliterated) | 2.4492 (2.4571) | 2.4579 | 2.5006 |
+
+Qwen against 0.5.5: prompts 2K / 4K / 16K 905 / 875 / 806 tok/s, decode 27.1 plain and 46.1 with MTP (0.5.5: 27.1 /
+45.9).
+
+- **The UD-IQ2_XXS pack** (`ud-iq2_xxs`, the slow one): unsloth's UD-IQ2_XXS with the MXFP8 Engram table, DSpark,
+  UD-IQ1_M's pick profile, the guess on, huihui-ai's abliteration overlay optional. The best perplexity of the three
+  and the slowest decode: its experts 18% larger than UD-IQ1_M's, so more misses read from the SSD, and a drafted
+  round waits on them most (the power falls to 100 W as the GPU idles; the energy a token rises). 0.5.7's work.
+  At the packs' own 1M context: UD-IQ2_XXS 13.9 / 19.3 tok/s, UD-IQ1_M 17.2 / 33.2, UD-IQ1_S 19.4 / 41.5 (the
+  installer's titles, the IQ1 packs' last taken in 0.5.x's first builds: 16.0 / 28.6, 18.8 / 37.5).
+- **Kept conversations on by default** (osmos-serve, so osmos-api and the packs; `OSMOS_SLOT_KEEP=0` turns them
+  off). A conversation that loses its lane to another is set aside, then taken back reading only its new tokens -
+  the bits of one never set aside (`tools/serve/slot_test.py`, both models). A 12K-token turn taken back: DeepSeek
+  3.5 s against 30.5 read from token 0, Qwen 2.8 against 19.5 (low-power). maya's logs of the operator's agents:
+  4,533 conversations resumed, most 32K-190K tokens - each a full re-read with slots off.
+- **The store holds RAM by bytes, and a conversation past it streams**: RAM available after the build less the 8 GiB
+  kept free; a set-aside that fits goes to RAM (the store takes the saved state over, no copy), one that does not is
+  written straight to its slot file in 4 MiB pieces, and a take-back reads it back the same way - a state of any size
+  through 4 MiB of host memory (`oseq_save_to` / `oseq_load_from`; `OSMOS_SLOT_RAM_GB` lowers the RAM room). With
+  DeepSeek loaded the room above 8 GiB is 0-5 GiB, so its long conversations (~320 MB at 190K tokens) would otherwise
+  not have been kept. Qwen's state is ~118 MB fixed plus ~14.6 KB a token (2.9 GB at 190K tokens).
+- **UD-IQ2_XXS's types on every expert path**: Q2_K (new) and IQ3_XXS's int8 lanes (GPU and CPU), each bit for
+  bit against gguf-py or an independent replay of the lane's contract, on random blocks and the quant's own tensors.
+  Q2_K is the lane contract's first type with a minimum (`lane_q8_part_min`). The quant loads and answers sanely
+  (its numbers in the bake-off, at performance).
+- **IQ2_XXS / IQ2_XS f16 decode**: a block whose f16 scale is -0 decoded +0 where gguf-py has -0 (256 of 3.67 M
+  values on UD-IQ2_XXS's IQ2_XS; a multiply fused with its rounding). Fixed with the sign folded into the existing
+  xor - no barrier: DeepSeek prompts +~1% (377 against ~374 tok/s), every stream the same.
+- **The CPU lane runs** (opt-in, off by default): since 0.3.0 it crashed on its first job - it mapped the experts'
+  buffered files while the pool reads through their O_DIRECT twins, so no expert's file matched. Either now matches,
+  one it never mapped refuses the lane by name, and `test_lane_gpu` runs on the UD quants. Its threads can be pinned
+  (`cpu_lane_create`'s cores; dbench's `CPU_CORES`, e.g. `0-1,8-9`: two cores a CCD). Measured on UD-IQ2_XXS and not
+  turned on: a miss is still an SSD read wherever it is computed (DESIGN.md, "the CPU, the box's layout").
+- `agent_bench.py --lanes N --slots on|off` (more agents than lanes; the bench's slots on the SSD, removed after),
+  `slot_test.py --b-file` (Qwen's prompt files overlap: the test refuses texts that share a start).
+- Measured and not kept (DESIGN.md, "0.5.6"): the drafter's rows chained on the GPU (+0.2%), Q6_K's wide loader, the
+  small tiles' variants; drafts copied from the context (3-5% at most against the drafters: priced by the measured
+  verify widths).
+- `test_overlay_gpu` now skips on this box (its reference, huihui's patched copy, removed).
+
 ## [0.5.5]: faster kernels, the same bits
 
 Every token the same bits as 0.5.4 (each benchmark's hash, both models). Against a 0.5.4 build, the same session

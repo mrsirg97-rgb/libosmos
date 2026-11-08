@@ -256,7 +256,7 @@ int main() {
   CHECK(forward_swaps(f) > 0);
   // forward_lane (0 CPU threads: its experts all on the GPU, in the matvec's order): two runs the same bits, its
   // logits within the oracle's reach (KL within kLaneKlSlack of maya's, argmax the oracle's or a tie)
-  CHECK(forward_lane(f, 0, ferr));
+  CHECK(forward_lane(f, 0, NULL, ferr));
   std::vector<std::vector<float>> lane(2, std::vector<float>((size_t) T * V));
   for (int run = 0; run < 2; run++) {
     Seq* ls = seq_create(f, ferr);

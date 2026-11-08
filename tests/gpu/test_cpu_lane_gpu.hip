@@ -105,7 +105,7 @@ static void layer(const Gguf* g, int l) {
   CpuLaneExpert e[kNe];
   for (uint32_t k = 0; k < kNe; k++)
     e[k] = {w[k].data(), w[kNe + k].data(), w[2 * kNe + k].data(), (uint32_t) xrow[k], kCnt[k]};
-  CpuLane* c = cpu_lane_create((int) kThreads, kRows, D, FF);
+  CpuLane* c = cpu_lane_create((int) kThreads, nullptr, kRows, D, FF);
   CHECK(c);
   *seq = 0;
   uint32_t value = 0;

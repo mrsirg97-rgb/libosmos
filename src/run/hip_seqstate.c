@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -114,49 +115,62 @@ uint64_t seq_state_bytes(const Seq *s)
   return bytes;
 }
 
-/* a part's rows between the device and host: its positions in at most two contiguous runs */
-static bool copy_part(const Part *p, uint8_t *host, bool out)
+/* a part's rows between the device and a sink or source, in pieces through bounce (STATE_CHUNK bytes): its positions
+   in at most two contiguous runs, each in pieces of whole rows; sum the FNV-1a of every byte moved, in order */
+static bool move_part(const Part *p, uint8_t *bounce, bool out, StateSink sink, StateSource src, void *ctx,
+                      uint64_t *sum)
 {
+  const uint64_t per = STATE_CHUNK / p->row ? STATE_CHUNK / p->row : 1; /* (a row is a few KB: never past a piece) */
   for (uint64_t done = 0; done < p->n;)
   {
     const uint64_t at = p->cap ? (p->from + done) % p->cap : p->from + done;
     uint64_t run = p->n - done;
     if (p->cap && at + run > p->cap)
       run = p->cap - at;
-    uint8_t *dev = p->dev + at * p->row, *h = host + done * p->row;
-    const hipError_t e = out ? hipMemcpy(h, dev, run * p->row, hipMemcpyDeviceToHost)
-                             : hipMemcpy(dev, h, run * p->row, hipMemcpyHostToDevice);
-    if (e != hipSuccess)
-      return false;
+    if (run > per)
+      run = per;
+    uint8_t *dev = p->dev + at * p->row;
+    const uint64_t n = run * p->row;
+    if (out)
+    {
+      if (hipMemcpy(bounce, dev, n, hipMemcpyDeviceToHost) != hipSuccess)
+        return false;
+      *sum = fnv(bounce, n, *sum);
+      if (!sink(ctx, bounce, n))
+        return false;
+    }
+    else
+    {
+      if (!src(ctx, bounce, n))
+        return false;
+      *sum = fnv(bounce, n, *sum);
+      if (hipMemcpy(dev, bounce, n, hipMemcpyHostToDevice) != hipSuccess)
+        return false;
+    }
     done += run;
   }
   return true;
 }
 
-bool seq_save(const Seq *s, void *out, uint64_t bytes, char err[FORWARD_ERR])
+bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
 {
-  if (!s || !out)
-    return fwd_fail(err, "no sequence, or no buffer");
-  if (bytes != seq_state_bytes(s))
-    return fwd_fail(err, "a buffer not the state's size (seq_state_bytes)");
+  if (!s || !sink)
+    return fwd_fail(err, "no sequence, or no sink");
   if (hipDeviceSynchronize() != hipSuccess) /* the stream's writes of its rows done */
     return fwd_fail(err, "a GPU call failed (before the save)");
   Header h = {STATE_MAGIC, SEQ_STATE_VERSION, forward_identity(s->f), s->pos, s->prompt_end, s->dec_from, s->n_last,
               {0}, s->dring != NULL, 0};
   memcpy(h.last, s->last, sizeof h.last);
-  uint8_t *o = out, *at = o + sizeof h;
-  memcpy(o, &h, sizeof h);
+  uint8_t *bounce = malloc(STATE_CHUNK);
+  uint64_t sum = fnv(&h, sizeof h, FNV_SEED);
+  bool ok = bounce && sink(ctx, &h, sizeof h);
   Part p[MAX_PARTS];
   const int n = parts(s, p);
-  for (int i = 0; i < n; i++)
-  {
-    if (!copy_part(&p[i], at, true))
-      return fwd_fail(err, "a GPU copy failed (the save)");
-    at += p[i].n * p[i].row;
-  }
-  const uint64_t sum = fnv(o, (uint64_t)(at - o), FNV_SEED);
-  memcpy(at, &sum, sizeof sum);
-  return true;
+  for (int i = 0; ok && i < n; i++)
+    ok = move_part(&p[i], bounce, true, sink, NULL, ctx, &sum);
+  ok = ok && sink(ctx, &sum, sizeof sum);
+  free(bounce);
+  return ok || fwd_fail(err, bounce ? "a GPU copy or the sink failed (the save)" : "out of memory (the save)");
 }
 
 /* a sequence at position 0, as seq_create made it (its rows are rewritten before they are read: a position's
@@ -173,23 +187,21 @@ static bool refuse(Seq *s, char *err, const char *why)
   return fwd_fail(err, why);
 }
 
-bool seq_load(Seq *s, const void *in, uint64_t bytes, char err[FORWARD_ERR])
+bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[FORWARD_ERR])
 {
-  if (!s || !in)
-    return fwd_fail(err, "no sequence, or no state");
+  if (!s || !src)
+    return fwd_fail(err, "no sequence, or no source");
   const Forward *f = s->f;
   Header h;
-  if (bytes < sizeof h + sizeof(uint64_t))
+  uint64_t sum = 0;
+  if (bytes < sizeof h + sizeof sum)
     return refuse(s, err, "a state shorter than its header");
-  memcpy(&h, in, sizeof h);
+  if (!src(ctx, &h, sizeof h))
+    return refuse(s, err, "the source failed (the state's header)");
   if (h.magic != STATE_MAGIC || h.version != SEQ_STATE_VERSION)
     return refuse(s, err, "not a sequence's state, or another version's");
   if (h.identity != forward_identity(f))
     return refuse(s, err, "a state of another model or geometry (its identity)");
-  uint64_t sum;
-  memcpy(&sum, (const uint8_t *)in + bytes - sizeof sum, sizeof sum);
-  if (fnv(in, bytes - sizeof sum, FNV_SEED) != sum)
-    return refuse(s, err, "a damaged state (its checksum)");
   if (h.pos < 0 || (uint32_t)h.pos > f->max_ctx || h.prompt_end < 0 || h.prompt_end > h.pos || h.dec_from < 0 ||
       h.n_last < 0 || h.n_last > STATE_LAST || h.has_dring > 1)
     return refuse(s, err, "a state's position past this forward's context, or its fields out of range");
@@ -211,13 +223,18 @@ bool seq_load(Seq *s, const void *in, uint64_t bytes, char err[FORWARD_ERR])
     return refuse(s, err, "a state whose size does not agree with its position");
   if (hipDeviceSynchronize() != hipSuccess) /* the sequence's rows not still being read by the stream */
     return refuse(s, err, "a GPU call failed (before the load)");
-  const uint8_t *at = (const uint8_t *)in + sizeof h;
-  for (int i = 0; i < n; i++)
-  {
-    if (!copy_part(&p[i], (uint8_t *)at, false))
-      return refuse(s, err, "a GPU copy failed (the load)");
-    at += p[i].n * p[i].row;
-  }
+  uint8_t *bounce = malloc(STATE_CHUNK);
+  if (!bounce)
+    return refuse(s, err, "out of memory (the load)");
+  uint64_t got = fnv(&h, sizeof h, FNV_SEED);
+  bool ok = true;
+  for (int i = 0; ok && i < n; i++)
+    ok = move_part(&p[i], bounce, false, NULL, src, ctx, &got);
+  free(bounce);
+  if (!ok || !src(ctx, &sum, sizeof sum))
+    return refuse(s, err, "a GPU copy or the source failed (the load)");
+  if (got != sum) /* (its rows already on the GPU: the reset makes them a fresh sequence's, rewritten before read) */
+    return refuse(s, err, "a damaged state (its checksum)");
   s->prompt_end = h.prompt_end, s->dec_from = h.dec_from, s->n_last = h.n_last, s->staged = 0;
   memcpy(s->last, h.last, sizeof s->last);
   return true;

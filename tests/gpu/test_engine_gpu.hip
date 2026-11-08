@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "state_stream.h"
+
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
@@ -150,7 +152,7 @@ int main() {
           fx.seed_window == (uint32_t) w->geo.window && fx.native_ctx > 0);
     const ForwardOptions fo = {(int) w->geo.n_layers, kCtx, kBudget, nullptr, 0, true};
     Forward* f = forward_create_with(w, &fo, ferr);
-    CHECK(f && forward_lane(f, 0, ferr));
+    CHECK(f && forward_lane(f, 0, NULL, ferr));
     Drafter* d = drafter_create(f, ddir.c_str(), ferr);
     CHECK(d);
     Seq* s = seq_create(f, ferr);
@@ -162,7 +164,7 @@ int main() {
         [&] { return forward_logits(f); },
         [&] {
           std::vector<uint8_t> b(seq_state_bytes(s));
-          CHECK(seq_save(s, b.data(), b.size(), ferr));
+          CHECK(save_buf(seq_save_to, s, b.data(), b.size(), ferr));
           return b;
         },
         [&](int32_t from, int32_t to) { return drafter_seed(d, s, from, to, ferr); },
@@ -228,6 +230,30 @@ int main() {
     std::fprintf(stderr, "  loaded: stepped %d (%s), next %d against %d\n", stepped, err, next, direct.tokens[1]);
   CHECK(stepped && next == direct.tokens[1]);
   std::printf("  a state saved after the prompt and loaded: the next token the same\n");
+
+  // streamed (oseq_save_to / oseq_load_from): pieces within STATE_CHUNK, the buffer's bytes; loaded from pieces, its
+  // next token the same; a byte damaged mid-stream refused (the sequence empty); a sink failing part way, false
+  {
+    OsmosSeq* u = oseq_create(e, err);
+    CHECK(u && oseq_load(u, direct.state.data(), direct.state.size(), err));
+    StreamSink sk;
+    CHECK(oseq_save_to(u, stream_sink, &sk, err) && !sk.over && sk.bytes == direct.state && sk.pieces >= 2);
+    StreamSource src{&sk.bytes};
+    OsmosSeq* v = oseq_create(e, err);
+    CHECK(v && oseq_load_from(v, sk.bytes.size(), stream_source, &src, err) && !src.over &&
+          src.at == sk.bytes.size() && oseq_position(v) == kPrompt);
+    int32_t vn = -1;
+    CHECK(osmos_batch(e, &v, &y, 1, err) && osmos_greedy(e, 0, 1, &vn, err) && vn == direct.tokens[1]);
+    StreamSource bad{&sk.bytes};
+    bad.flip = sk.bytes.size() / 2;
+    CHECK(!oseq_load_from(v, sk.bytes.size(), stream_source, &bad, err) && oseq_position(v) == 0);
+    StreamSink cut;
+    cut.fail_after = sk.bytes.size() / 2;
+    CHECK(!oseq_save_to(u, stream_sink, &cut, err));
+    oseq_destroy(u), oseq_destroy(v);
+    std::printf("  streamed: %llu pieces of at most %llu bytes, the buffer's bytes; loaded from pieces, the next token "
+                "the same; damaged mid-stream refused\n", (unsigned long long) sk.pieces, (unsigned long long) sk.widest);
+  }
 
   // a long step's rows by the batch's own numbers: the kept ones served, the one before them refused
   OsmosSeq* u = oseq_create(e, err);

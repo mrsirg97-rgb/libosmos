@@ -20,7 +20,7 @@ enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
   kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8, kIQ3_XXS = QTYPE_IQ3_XXS, kIQ4_XS = QTYPE_IQ4_XS,
-  kQ2_0 = QTYPE_Q2_0,
+  kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
@@ -35,7 +35,7 @@ template <Type T> struct Block;
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
 QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S) QUANT_BLOCK(IQ3_XXS)
-QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0)
+QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -47,7 +47,7 @@ static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && 
                   Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
                   Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
                   Block<kIQ2_S>::values == kQK && Block<kIQ3_XXS>::values == kQK &&
-                  Block<kIQ4_XS>::values == kQK && Block<kQ2_0>::values == kQ64,
+                  Block<kIQ4_XS>::values == kQK && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK,
               "the decoders' block lengths");
 
 // every block's size is even (34, 18, 66, 74, 210 ... bytes; MXFP4's and MXFP8's odd: byte loads only) and every row
@@ -215,6 +215,17 @@ template <> __device__ inline void decode<kQ2_0>(const uint8_t* b, int k, float*
   for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) (((qs[j / 4] >> (2 * (j % 4))) & 0x03) - 1));
 }
 
+// (d * sc) * q - (dmin * m); 16 groups of 16, each a byte of scales (sc its low nibble, m its high), q 2 bits:
+// value i's of byte qs[32 (i / 128) + i % 32] at shift 2 ((i % 128) / 32). bytes: scales (16), qs (64), d, dmin.
+// the products exact in F32 (an f16 times 4 bits, times 2): the subtract alone rounds, as numpy's
+template <> __device__ inline void decode<kQ2_K>(const uint8_t* b, int k, float* v) {
+  const int g = k / 2, l0 = (k % 4) * kChunk, shift = 2 * ((k % 16) / 4);
+  const uint8_t* qs = b + 16 + 32 * (k / 16) + l0;
+  const float dl = mul(f16(ld16(b + 80)), (float) (b[g] & 0x0F));
+  const float ml = mul(f16(ld16(b + 82)), (float) (b[g] >> 4));
+  for (int j = 0; j < kChunk; j++) v[j] = __fsub_rn(mul(dl, (float) ((qs[j] >> shift) & 0x03)), ml);
+}
+
 // DSpark's experts: an E8M0 scale e (2^(e - 128), exact at every e: the low ones subnormal), then E2M1 codes as
 // IQ4_NL lays them out (value j < 16 byte j's low nibble, 16 + j its high), worth E2M1 doubled {0, 1, 2, 3, 4, 6, 8,
 // 12} and their negatives
@@ -319,10 +330,16 @@ static __constant__ SignMasks kSignMasks = make_sign_masks();
 // IQ2's values as f16: each |value| rounded (db * grid, exact in F32, then to f16), its sign then one xor a pair -
 // rounding to nearest is symmetric, so round(-x) = -round(x): decode<T>'s bits, and per value a compare and a select
 // fewer (the decode's VALU 268 -> 172 a slab, measured)
+// the magnitude |db| grid rounded (never -0: the fused product and rounding the same bits), then the sign - db's
+// and the pattern's - one xor: a -0 scale's values -0 as gguf-py's (UD-IQ2_XXS's IQ2_XS: a product fused with its
+// rounding gave +0 for 256 of 3.67 M values; test_quant_gpu), with no barrier between them
 __device__ inline h8 iq2_h(uint64_t grid, float db, uint32_t pattern) {
   h8 h;
-  for (int j = 0; j < kChunk; j++) h[j] = (_Float16) mul(db, (float) (uint8_t) (grid >> (8 * j)));
-  return __builtin_bit_cast(h8, __builtin_bit_cast(u4, h) ^ *(const u4*) kSignMasks.m[pattern]);
+  const float a = __builtin_fabsf(db);
+  for (int j = 0; j < kChunk; j++) h[j] = (_Float16) mul(a, (float) (uint8_t) (grid >> (8 * j)));
+  const uint32_t ds = __float_as_uint(db) >> 31 ? 0x80008000u : 0u;
+  const u4 m = *(const u4*) kSignMasks.m[pattern] ^ (u4){ds, ds, ds, ds};
+  return __builtin_bit_cast(h8, __builtin_bit_cast(u4, h) ^ m);
 }
 
 // any 8 sign bits as f16 sign masks: byte i's bit j negative - bit 15 of half j (IQ2_S's explicit signs)

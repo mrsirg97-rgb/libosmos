@@ -25,8 +25,8 @@ typedef struct OsmosFamily
   uint32_t (*reach)(const void *seq);
   int32_t (*position)(const void *seq);
   uint64_t (*state_bytes)(const void *seq);
-  bool (*save)(const void *seq, void *out, uint64_t bytes, char err[OSMOS_ERR]);
-  bool (*load)(void *seq, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
+  bool (*save_to)(const void *seq, StateSink sink, void *ctx, char err[OSMOS_ERR]);
+  bool (*load_from)(void *seq, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
   bool (*seed)(void *eng, void *seq, int32_t from, int32_t to, char err[OSMOS_ERR]);
   int (*draft)(void *eng, void *seq, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                char err[OSMOS_ERR]);

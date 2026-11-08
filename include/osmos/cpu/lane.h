@@ -32,7 +32,7 @@ typedef struct CpuLaneJob
   uint32_t value;
 } CpuLaneJob;
 
-CpuLane *cpu_lane_create(int threads, uint32_t max_rows, uint32_t dim, uint32_t ff);
+CpuLane *cpu_lane_create(int threads, const int *cores, uint32_t max_rows, uint32_t dim, uint32_t ff);
 void cpu_lane_destroy(CpuLane *c);
 bool cpu_lane_submit(CpuLane *c, const CpuLaneJob *job);
 bool cpu_lane_wait(CpuLane *c);
@@ -48,7 +48,9 @@ cpu lane
   they are (y and seq in host memory it maps) once seq holds the job's value.
 
 cpu_lane_create
-  `threads` workers (1 .. CPU_LANE_THREADS_MAX), each job at most max_rows rows of dim and ff (multiples of 256).
+  `threads` workers (1 .. CPU_LANE_THREADS_MAX), each job at most max_rows rows of dim and ff (multiples of 256);
+  `cores` NULL (the scheduler's to place) or `threads` logical CPUs, worker i pinned to cores[i] from its first
+  instruction (refused, NULL, where one cannot be: never run elsewhere instead).
   NULL on a CPU without the kernels (cpu_q8_ready), a size it cannot take, or a thread or memory refused.
 
 cpu_lane_destroy

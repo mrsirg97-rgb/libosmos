@@ -44,7 +44,7 @@ static Run run(Weights* w, uint32_t ctx, const std::vector<int32_t>& ids) {
   const ForwardOptions o = {(int) w->geo.n_layers, ctx, kBudget, nullptr, kMaxTokens};
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::printf("  %s\n", err);
-  CHECK(f && forward_lane(f, 0, err));
+  CHECK(f && forward_lane(f, 0, NULL, err));
   Seq* s = seq_create(f, err);
   CHECK(s && seq_prompt(s, kPrompt));
   CHECK(hipMemGetInfo(&free1, &total) == hipSuccess);
