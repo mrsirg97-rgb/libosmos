@@ -151,7 +151,8 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
     /* in GPU memory now (resident, or read into the pool): its pointers; else still reading - waited for after the
        ready ones are launched */
     const void *ex[POOL_PARTS] = {NULL, NULL, NULL};
-    const bool ready = f->rix[u] >= 0 ? resident_dev(f->res, (size_t)f->rix[u], ex) : pool_dev(f->pool, u, ex);
+    Pool *in = fwd_pool_in(f, u);
+    const bool ready = f->rix[u] >= 0 ? resident_dev(f->res, (size_t)f->rix[u], ex) : in && pool_dev(in, u, ex);
     t->w[0][ne] = ex[0], t->w[1][ne] = ex[1], t->w[2][ne] = ex[2];
     unit_of[ne] = ready ? UINT32_MAX : u;
     t->cnt[ne] = 1, t->xrow[ne] = (int32_t)r, ne++;

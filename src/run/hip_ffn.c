@@ -4,6 +4,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/run/ahead.h"
 #include "forward_impl.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -143,24 +144,67 @@ static bool shared(Forward *f, int l)
          fwd_mat_ready(f, L->sh_down, fwd_dev(f, L->sh_down), D, FF, b->shh, FF, n, b->sye, D, fits);
 }
 
-/* the next layer's streamed experts read while this one runs, when a step picks at least as many as a layer has (a
-   prefill's: most of a layer's are picked; a decode's few would make the reads waste). this layer's unpicked ones
-   are wanted a round on, not now: the first to go */
-static void prefetch(Forward *f, int l, const int32_t *ids, uint32_t picks)
+/* the next layer's experts a prompt's step will pick read into the stream while this one runs (a decode's few would
+   make the reads waste): the union of the next router's picks for its tokens (fwd_guess_queue's; ahead.h) - not every
+   expert of the layer, 41% of which it never picks, each read the SSD's time a prompt waits on. those read and not
+   picked are stale once the next layer is past (pool_now): the first to go */
+static void prefetch(Forward *f, int l, uint32_t picks)
 {
   const uint32_t E = (uint32_t)f->g->n_experts;
   if (picks < E)
     return;
-  bool picked[OPS_MAX_EXPERTS] = {false};
-  for (uint32_t m = 0; m < picks; m++)
-    picked[ids[m]] = true;
-  const uint32_t here = (uint32_t)l * E, next = (uint32_t)((l + 1) % f->n_layers) * E;
-  for (uint32_t e = 0; e < E; e++)
-    if (f->rix[here + e] < 0 && !picked[e] && pool_state(f->pool, here + e) != POOL_COLD)
-      pool_want(f->pool, here + e, f->visits - 1 + (uint64_t)f->n_layers);
-  for (uint32_t e = 0; e < E; e++)
-    if (f->rix[next + e] < 0)
-      pool_want(f->pool, next + e, f->visits + 1); /* the next layer's visit */
+  const uint32_t next = (uint32_t)((l + 1) % f->n_layers) * E;
+  bool named[OPS_MAX_EXPERTS];
+  if (fwd_prompt_ahead(f, l)) /* the experts the next router picks for these tokens (fwd_guess_queue's), not all */
+    ahead_union(f->r_guess, f->n, FWD_GUESS_K, FWD_GUESS_K, E, named);
+  else /* the last layer's: the next step's first, no guess for it */
+    for (uint32_t e = 0; e < E; e++)
+      named[e] = true;
+  for (uint32_t e = 0; e < E; e++) /* one in the membrane a hit, its order left alone */
+    if (named[e] && f->rix[next + e] < 0 && fwd_pool_in(f, next + e) != f->pool)
+      pool_want(f->stream, next + e, f->visits + 1); /* the next layer's visit */
+}
+
+/* a decode's expert the stream holds (a prompt read it) copied into the membrane's memory, so a prompt's later reads
+   cannot push it out: the membrane's copy held (pool_place) and its bytes copied on the stream, the stream's held too
+   until the stream is past the copy (a read into its memory is no kernel: nothing else orders it). false, nothing
+   done, where the membrane has no room: the stream's copy used */
+static bool promote(Forward *f, uint32_t unit, bool *done, char *err)
+{
+  const void *src[POOL_PARTS], *dst[POOL_PARTS];
+  *done = false;
+  if (pool_state(f->stream, unit) != POOL_PINNED || pool_pin(f->stream, unit, src) != POOL_OK)
+    return true;
+  f->held_in[f->n_held] = f->stream, f->held[f->n_held++] = unit;
+  if (pool_place(f->pool, unit, dst) != POOL_OK)
+    return true;
+  for (int k = 0; k < f->units[unit].n_parts; k++)
+    if (!ops_copy((void *)dst[k], src[k], f->units[unit].part[k].bytes, NULL))
+      return fwd_fail(err, "an expert's copy into the membrane failed");
+  f->held_in[f->n_held] = f->pool, f->held[f->n_held++] = unit, f->is_held[unit] = true;
+  *done = true;
+  return true;
+}
+
+/* a step's expert held where it is - a decode's in the stream promoted into the membrane first - or read into the
+   pool fwd_pool_for gives. full while reads are under way (a prompt's next layer, read ahead): a reading unit is made
+   room of once its read ends - wait for one, pin again; full with none reading is the pool's last word */
+static bool hold(Forward *f, uint32_t unit, bool prompt, char *err)
+{
+  bool promoted = false;
+  if (!prompt && fwd_pool_in(f, unit) == f->stream && !promote(f, unit, &promoted, err))
+    return false;
+  if (promoted)
+    return true;
+  Pool *in = fwd_pool_for(f, unit, prompt);
+  PoolPin pin;
+  while ((pin = pool_pin(in, unit, (const void *[POOL_PARTS]){0})) == POOL_FULL && pool_reading(in))
+    if (!fwd_wait_read(f, err))
+      return false;
+  if (pin == POOL_FULL)
+    return fwd_fail(err, "an expert the pool cannot hold (its room, or GPU memory refused)");
+  f->held_in[f->n_held] = in, f->held[f->n_held++] = unit, f->is_held[unit] = true;
+  return true;
 }
 
 /* the routed experts: each distinct one resident or held in the pool (their reads at once) and read once for
@@ -196,7 +240,8 @@ bool fwd_moe(Forward *f, int l, char *err)
   if (f->held_layer != l) /* the stream is past the last layer's experts: the router came after them */
   {
     fwd_release_held(f);
-    f->visits++, f->held_layer = l, pool_now(f->pool, f->visits);
+    f->visits++, f->held_layer = l, f->held_pass = P >= E;
+    pool_now(f->pool, f->visits), pool_now(f->stream, f->visits);
   }
   const int32_t *ids = f->r_ids;
   fwd_guess_score(f, l, ids, P);
@@ -256,42 +301,33 @@ bool fwd_moe(Forward *f, int l, char *err)
       base[j] = r, cnt[j] = 0, slot0[j] = next_slot;
       const uint32_t unit = (uint32_t)l * E + (uint32_t)ids[m];
       unit_of[j] = unit;
-      if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the pool begun
-                                        and held, not waited for (a swap's, at a later visit) */
+      if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the membrane
+                                        begun and held, not waited for (in memory at a later visit) */
       {
         f->on_cpu[unit] = f->visits;
-        if (!f->is_held[unit] && pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0}) == POOL_WAIT)
+        Pool *in = fwd_pool_for(f, unit, false);
+        if (!f->is_held[unit] && pool_pin(in, unit, (const void *[POOL_PARTS]){0}) == POOL_WAIT)
         {
           if (f->n_pend < FWD_MAX_PAIRS)
             f->cpu_pend[f->n_pend++] = unit;
           else
-            f->held[f->n_held++] = unit;
+            f->held_in[f->n_held] = in, f->held[f->n_held++] = unit;
           f->is_held[unit] = true;
         }
       }
-      else if (f->rix[unit] < 0 && !f->is_held[unit]) /* held once for all the layer's sub-batches */
-      {
-        /* full while reads are under way (a prompt's next layer, read ahead): a reading unit is made room of once
-           its read ends - wait for one, pin again; full with none reading is the pool's last word */
-        PoolPin pin;
-        while ((pin = pool_pin(f->pool, unit, (const void *[POOL_PARTS]){0})) == POOL_FULL && pool_reading(f->pool))
-          if (!fwd_wait_read(f, err))
-            return false;
-        if (pin == POOL_FULL)
-          return fwd_fail(err, "an expert the pool cannot hold (its room, or GPU memory refused)");
-        f->held[f->n_held++] = unit, f->is_held[unit] = true;
-      }
+      else if (f->rix[unit] < 0 && !f->is_held[unit] && !hold(f, unit, P >= E, err)) /* once for the sub-batches */
+        return false;
     }
     const uint32_t slot = slot0[j] + (uint32_t)cnt[j]++;
     gidx[slot] = (int32_t)(m / K), hidx[slot] = (int32_t)r;
     pidx[r] = (int32_t)m, row_of[m] = r;
   }
-  prefetch(f, l, ids, P);
+  prefetch(f, l, P);
   if (f->lane && P < E) /* the lane's small step: every expert in the matvec's order (hip_lane.c) */
   {
     if (!fwd_lane_experts(f, l, ids, P, err))
       return false;
-    if (!fwd_swap_layer(f, l, err) || !fwd_cpu_settle(f, err))
+    if (!fwd_cpu_settle(f, err))
       return false;
     fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
     return true;
@@ -337,8 +373,6 @@ bool fwd_moe(Forward *f, int l, char *err)
        ops_gather_sum_add(b->moe, b->ye, dorder, K, n, D, b->sye, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");
-  if (!fwd_swap_layer(f, l, err))
-    return false;
   fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
   return true;
 }

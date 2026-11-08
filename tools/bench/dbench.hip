@@ -284,11 +284,10 @@ int main(int argc, char** argv) {
     const double tps = answer(f, w, read_ids(argv[i]), n_new, &h);
     uint64_t gs, gg, gr;
     forward_guesses(f, &gs, &gg, &gr);
-    std::printf("%.1f tok/s (%d tokens) stream %016llx; so far streamed picks %llu, guessed %llu, on the CPU %llu, "
-                "swaps %llu; drafted %d accepted %d in %d rounds (%.0f ms drafting, %.0f verifying)\n",
+    std::printf("%.1f tok/s (%d tokens) stream %016llx; so far streamed picks %llu, guessed %llu, on the CPU %llu; "
+                "drafted %d accepted %d in %d rounds (%.0f ms drafting, %.0f verifying)\n",
                 tps, n_new, (unsigned long long) h, (unsigned long long) gs, (unsigned long long) gg,
-                (unsigned long long) forward_cpu_picks(f), (unsigned long long) forward_swaps(f), g_drafted,
-                g_accepted, g_rounds, g_draft_ms, g_verify_ms);
+                (unsigned long long) forward_cpu_picks(f), g_drafted, g_accepted, g_rounds, g_draft_ms, g_verify_ms);
     uint64_t wn[2], wns[2];
     forward_waits(f, wn, wns);
     std::printf("  so far waited on %llu reads not guessed (%.0f ms), %llu guessed (%.0f ms); the guess read %llu\n",

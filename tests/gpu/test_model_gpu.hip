@@ -253,7 +253,6 @@ int main() {
   }
   seq_destroy(rs);
   CHECK(ranked == got[1]);
-  CHECK(forward_swaps(f) > 0);
   // forward_lane (0 CPU threads: its experts all on the GPU, in the matvec's order): two runs the same bits, its
   // logits within the oracle's reach (KL within kLaneKlSlack of maya's, argmax the oracle's or a tie)
   CHECK(forward_lane(f, 0, NULL, ferr));
@@ -279,9 +278,8 @@ int main() {
   CHECK(lane_ok && lane_kl <= kLaneKlSlack * maya_kl);
   std::printf("  the lane (experts in the matvec's order): two runs bit for bit; mean KL %.2e (maya %.2e), argmax the "
               "oracle's %d of %d\n", lane_kl / T, maya_kl / T, lane_top, T);
-  std::printf("  picks counted: %llu (3 runs x %d positions x %d layers x %d); the least-picked resident first, %llu "
-              "experts swapped in as it went: logits bit for bit\n", (unsigned long long) picks, T, L, w->geo.n_used,
-              (unsigned long long) forward_swaps(f));
+  std::printf("  picks counted: %llu (3 runs x %d positions x %d layers x %d); the least-picked read in first: logits "
+              "bit for bit\n", (unsigned long long) picks, T, L, w->geo.n_used);
   forward_destroy(f);
   weights_destroy(w);
   gguf_destroy(g);

@@ -58,7 +58,8 @@ static void on_event(const PoolEvent* ev, void*) {
 static int drain(Pool* p) {
   char rerr[READS_ERR];
   const int before = pins;
-  CHECK(reads_pump(g_reads, p, true, rerr));
+  Pool* const pools[READS_POOLS] = {p, nullptr};
+  CHECK(reads_pump(g_reads, pools, true, rerr));
   return pins - before;
 }
 
@@ -112,7 +113,7 @@ int main() {
   const uint64_t budget = unit_bytes * (uint64_t) E / 4;
   char err[POOL_ERR] = "";
   CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
-  Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), reads_fetcher(g_reads), 0, on_event, nullptr, err);
+  Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), reads_fetcher(g_reads, 0), 0, on_event, nullptr, err);
   if (!p) std::fprintf(stderr, "pool_create: %s\n", err);
   CHECK(p);
   unsigned long long* d_sum = nullptr;
@@ -152,7 +153,7 @@ int main() {
   for (int k = 0; k < 3; k++) posix_fadvise(fds[t[k]->file], (off_t) t[k]->offset, (off_t) t[k]->bytes, POSIX_FADV_DONTNEED);
   CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
   p = pool_create(units.data(), units.size(), unit_bytes * (uint64_t) E + (64u << 20), hip_slots(),
-                  reads_fetcher(g_reads), 0, on_event, nullptr, err);
+                  reads_fetcher(g_reads, 0), 0, on_event, nullptr, err);
   CHECK(p);
   const double t0 = now_ms();
   for (int e = 0; e < E; e++) {
@@ -188,7 +189,7 @@ int main() {
     if (!hs) std::fprintf(stderr, "host_slots_create: %s\n", err);
     CHECK(hs);
     CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
-    p = pool_create(du.data(), du.size(), room, host_slots(hs), reads_fetcher(g_reads), ARENA_GRAIN, on_event, nullptr, err);
+    p = pool_create(du.data(), du.size(), room, host_slots(hs), reads_fetcher(g_reads, 0), ARENA_GRAIN, on_event, nullptr, err);
     if (!p) std::fprintf(stderr, "pool_create: %s\n", err);
     CHECK(p);
     const double d0 = now_ms();

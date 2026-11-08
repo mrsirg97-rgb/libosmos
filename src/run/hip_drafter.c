@@ -194,7 +194,7 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
   for (int b = 0; ok && b < DRAFTER_BLOCKS; b++)
     ok = block(d, b) || fail(err, "a drafter block's weights missing, its experts of mixed types or of a type the matvec "
                               "does not take, or GPU memory refused");
-  ok = ok && (scratch(d) || fail(err, "GPU memory refused")) && fwd_room_left(f, err);
+  ok = ok && (scratch(d) || fail(err, "GPU memory refused"));
   if (!ok)
   {
     drafter_destroy(d);
