@@ -1,4 +1,6 @@
+#define _GNU_SOURCE
 #include <assert.h>
+#include <sched.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,8 +129,14 @@ int main(void)
   check(QTYPE_IQ2_XS, QTYPE_IQ2_XXS, 3, NULL);
   check(QTYPE_IQ1_M, QTYPE_IQ2_XS, 8, NULL);
   check(QTYPE_IQ3_XXS, QTYPE_Q2_K, 4, NULL); /* UD-IQ2_XXS's down types */
-  const int four_four[8] = {0, 1, 2, 3, 8, 9, 10, 11}; /* 4 + 4: each CCD's first four (Strix Halo's 2 x 8) */
-  check(QTYPE_IQ1_M, QTYPE_IQ2_XS, 8, four_four);
+  /* pinned: up to 8 of the cores this process may run on (any machine's - a CI runner's few, Strix Halo's 32) */
+  cpu_set_t mine;
+  int pins[8], n_pins = 0;
+  assert(sched_getaffinity(0, sizeof mine, &mine) == 0);
+  for (int i = 0; i < CPU_SETSIZE && n_pins < 8; i++)
+    if (CPU_ISSET(i, &mine))
+      pins[n_pins++] = i;
+  check(QTYPE_IQ1_M, QTYPE_IQ2_XS, n_pins, pins);
   printf("  a core no machine has: refused\n");
   printf("[test_cpu_lane] ok\n");
   return 0;
