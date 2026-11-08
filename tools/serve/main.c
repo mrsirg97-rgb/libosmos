@@ -19,13 +19,14 @@
    (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least, RAM's room the
    available above 8 GiB (OSMOS_SLOT_RAM_GB lowers it; past it a state streams to the folder in pieces),
    OSMOS_SLOT_DAYS (7). OSMOS_STATS=1: the forward's read counters on stderr at exit (the reads it waited on, their
-   time; the guess's; the swaps). greedy: maya's sampling, penalty and thinking keys are refused, named */
+   time; the guess's). greedy: maya's sampling, penalty and thinking keys are refused, named */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "serve.h"
+#include "osmos/run/fit.h"
 #include "osmos/run/gpu.h"
 #include "osmos/version.h"
 
@@ -57,30 +58,13 @@ static int die(const char *what)
   return 2;
 }
 
-/* the operator's rule: this much of the system's RAM is left free - the kept conversations' RAM is what is above it */
-#define SERVE_RAM_FREE (8ull << 30)
-
-/* MemAvailable's bytes (0 when it cannot be read: no room, fail closed) */
-static uint64_t mem_available(void)
-{
-  FILE *f = fopen("/proc/meminfo", "r");
-  unsigned long long kb = 0;
-  char line[256];
-  while (f && fgets(line, sizeof line, f))
-    if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1)
-      break;
-  if (f)
-    fclose(f);
-  return (uint64_t)kb << 10;
-}
-
 static bool open_slots(Server *sv, const char *model, char *err, size_t en)
 {
   char dflt[4096];
   const char *slash = strrchr(model, '/');
   snprintf(dflt, sizeof dflt, "%.*s/slots", slash ? (int)(slash - model) : 1, slash ? model : ".");
   const char *dir = getenv("OSMOS_SLOT_DIR") ? getenv("OSMOS_SLOT_DIR") : dflt;
-  const uint64_t avail = mem_available(), room = avail > SERVE_RAM_FREE ? avail - SERVE_RAM_FREE : 0;
+  const uint64_t avail = fit_ram_available(), room = avail > FIT_RAM_FREE ? avail - FIT_RAM_FREE : 0;
   const double cap_gb = env_num("OSMOS_SLOT_RAM_GB", -1); /* lower only: the room above the 8 GiB is the most */
   const uint64_t ram = cap_gb >= 0 && (uint64_t)(cap_gb * (double)(1ull << 30)) < room ? (uint64_t)(cap_gb * (double)(1ull << 30)) : room;
   const SlotsOptions so = {dir, (uint32_t)env_num("OSMOS_SLOT_CAP", 4), ram, env_num("OSMOS_SLOT_GB", 16),
@@ -91,7 +75,7 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
     return snprintf(err, en, "%s", serr), false;
   out("NOTE slots: %u conversations kept from an earlier run (%s); RAM for them %.2f GiB (%.2f available, %.0f kept "
       "free)\n", slots_in_dir(sv->slots), dir, ram / (double)(1ull << 30), avail / (double)(1ull << 30),
-      SERVE_RAM_FREE / (double)(1ull << 30));
+      FIT_RAM_FREE / (double)(1ull << 30));
   return true;
 }
 
@@ -154,10 +138,9 @@ int main(int argc, char **argv)
     OsmosStats st;
     osmos_stats(sv.e, &st);
     fprintf(stderr, "STATS waited %llu reads not guessed (%.0f ms), %llu guessed (%.0f ms); streamed picks %llu, guessed "
-                    "%llu, the guess read %llu; swaps %llu\n",
+                    "%llu, the guess read %llu\n",
             (unsigned long long)st.waits[0], st.wait_ns[0] / 1e6, (unsigned long long)st.waits[1], st.wait_ns[1] / 1e6,
-            (unsigned long long)st.streamed, (unsigned long long)st.guessed, (unsigned long long)st.guess_read,
-            (unsigned long long)st.swaps);
+            (unsigned long long)st.streamed, (unsigned long long)st.guessed, (unsigned long long)st.guess_read);
   }
   serve_unbuild(&sv, conv, lanes);
   free(conv);
