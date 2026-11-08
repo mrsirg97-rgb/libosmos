@@ -77,12 +77,15 @@ Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots 
 void pool_destroy(Pool *p);
 
 PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
+PoolPin pool_place(Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
 void pool_want(Pool *p, uint32_t unit, uint64_t next);
 void pool_ready(Pool *p, uint32_t unit, bool ok);
 bool pool_dev(const Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
 void pool_release(Pool *p, uint32_t unit, uint64_t next);
+void pool_pass(Pool *p, uint32_t unit);
 void pool_now(Pool *p, uint64_t now);
 
+uint64_t pool_unit_bytes(const PoolUnit *u, uint64_t read_align);
 PoolState pool_state(const Pool *p, uint32_t unit);
 uint64_t pool_bytes(const Pool *p);
 size_t pool_reading(const Pool *p);
@@ -131,6 +134,12 @@ pool_pin
   stale first (pool_now), then the one wanted furthest ahead (pool_release's next), each tie the least recently
   released, their memory reused when it is the size, kept spare when not; a held or reading one never goes.
 
+pool_place
+  a cold unit given memory (room made as a pin's) and held, pinned with no read: its bytes the caller's to write
+  before anything reads them - a copy of the unit held elsewhere (the forward's: an expert a decode takes from the
+  stream's memory into the membrane's, DESIGN.md "0.5.8"). POOL_OK, `dev` its parts' memory (a PIN event); POOL_FULL
+  when no room can be made, or the unit is not cold - nothing changed.
+
 pool_want
   the unit, no hold on it, is wanted at `next` (pool_release's clock): a cold one's read begins (its memory taken: a
   READ event) if room can be made from units wanted later than it - spares, the allocator's, unheld units stale or
@@ -153,12 +162,23 @@ pool_release
   free exactly the units wanted soonest; furthest ahead is the best a cycle allows. the caller's part: the GPU is past
   the unit when its last hold ends - its memory may be written again at once. a release with no hold is nothing to do.
 
+pool_pass
+  one hold ends as pool_release's, but the unit keeps its place: a unit pinned before this hold its `next` and its
+  recency as they were; a unit read for this hold (since it was last released) stale at once and the least recently
+  released - the first to go. a prompt's step passes its experts through: it touches most of every layer's, and
+  releasing them would put the prompt's in place of the experts the decode wants back (DESIGN.md, "0.5.8"). a pass
+  with no hold is nothing to do.
+
 pool_now
   the caller's clock now (pool_release's and pool_want's; 0 at create). a pinned unit whose `next` is before it was not
   wanted when it said - a decode's expert not picked again on the next token - and is stale: it goes before every
   unit still wanted, so the units wanted soonest are never kept behind ones whose time passed (furthest ahead alone
   holds those as "soonest" forever: on UD-IQ2_XXS 28% of the guess's reads found no room). a unit wanted at `now`
   is not stale.
+
+pool_unit_bytes
+  the memory a unit takes in a pool of `read_align` (pool_create's): each part its read's range (the alignment's
+  around it) from a POOL_ALIGN boundary - what a budget for the units it should hold counts.
 
 pool_state / pool_bytes / pool_reading
   a unit's state; the bytes of GPU memory held now (units' and spares'); the units reading now. a pin refused FULL

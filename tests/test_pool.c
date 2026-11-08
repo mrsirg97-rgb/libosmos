@@ -136,6 +136,17 @@ static int file(const char *name, size_t bytes)
   return fd;
 }
 
+/* the file's bytes [off, off + n) as the test file holds them (byte_at), for a caller's copy into placed memory */
+static const uint8_t *file_bytes(int fd, uint64_t off, size_t n)
+{
+  static uint8_t buf[64 * 1024];
+  assert(n <= sizeof buf);
+  (void)fd;
+  for (size_t i = 0; i < n; i++)
+    buf[i] = byte_at(off + i);
+  return buf;
+}
+
 static Mem mem;
 static Reads reads;
 static Log events;
@@ -338,6 +349,48 @@ static void test_sizes(int fd)
   printf("  sizes: room from the furthest first whatever its size, memory of another size freed, of its size reused\n");
 }
 
+/* room from a unit of the same size first (its memory reused as it is: no hole to find - a pool of many sizes,
+   evicting by the rule alone, freed 3-4 units a read before a block fit: DESIGN.md, "0.5.8"); of those the rule's
+   choice; the allocator's first while the budget has room; units of another size only when none of its size can go */
+static void test_same_size(int fd)
+{
+  char err[POOL_ERR] = "";
+  const PoolUnit u[] = {{.part = {{fd, 0, 4 * KB}}, .n_parts = 1},
+                        {.part = {{fd, 8 * KB, 4 * KB}}, .n_parts = 1},
+                        {.part = {{fd, 16 * KB, 2 * KB}}, .n_parts = 1},
+                        {.part = {{fd, 32 * KB, 4 * KB}}, .n_parts = 1},
+                        {.part = {{fd, 48 * KB, 4 * KB}}, .n_parts = 1}};
+  const uint64_t budget = 14 * KB;
+  Pool *p = make(u, 5, budget, err);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  /* 0, 1 (4 KiB) and 2 (2 KiB) in: 10 of the 14 KiB. 2 wanted furthest ahead */
+  assert(pool_pin(p, 0, dev) == POOL_WAIT), finish(p, find_read(0), true), pool_release(p, 0, 1);
+  assert(pool_pin(p, 1, dev) == POOL_WAIT), finish(p, find_read(1), true), pool_release(p, 1, 2);
+  assert(pool_pin(p, 2, dev) == POOL_WAIT), finish(p, find_read(2), true), pool_release(p, 2, 9);
+  /* 3: the budget has room - the allocator's, nothing goes */
+  assert(pool_pin(p, 3, dev) == POOL_WAIT && mem.allocs == 4 && count(&events, POOL_EV_UNPIN, 0) == 0);
+  finish(p, find_read(3), true), pool_release(p, 3, 3);
+  check(p, u, 5, budget);
+  /* 4 (4 KiB), the budget full: the furthest of its size, 3 (at 3), its memory reused - not 2 (the furthest of all,
+     2 KiB: its memory no use) */
+  assert(pool_pin(p, 4, dev) == POOL_WAIT && pool_state(p, 3) == POOL_COLD && pool_state(p, 2) == POOL_PINNED);
+  assert(mem.allocs == 4 && mem.frees == 0);
+  finish(p, find_read(4), true), pool_release(p, 4, 4);
+  check(p, u, 5, budget);
+  /* of its size the stale first: now 3 - 0 (at 1) and 1 (at 2) stale, 4 (at 4) not: 3 back takes 0's (the least
+     recent stale), though 4 is the furthest ahead */
+  pool_now(p, 3);
+  assert(pool_pin(p, 3, dev) == POOL_WAIT && pool_state(p, 0) == POOL_COLD && pool_state(p, 4) == POOL_PINNED);
+  assert(pool_state(p, 1) == POOL_PINNED && mem.allocs == 4 && mem.frees == 0);
+  finish(p, find_read(3), true), pool_release(p, 3, 5);
+  check(p, u, 5, budget);
+  pool_destroy(p);
+  assert(mem.n == 0);
+  printf("  same size: room from a unit of its size first (the rule's of them), the allocator's while the budget has "
+         "room\n");
+}
+
 /* a failed read: cold again, its memory spare, its holds kept; a pin reads it again, into that memory */
 static void test_failed(int fd)
 {
@@ -354,10 +407,12 @@ static void test_failed(int fd)
   finish(p, 0, true);
   check(p, u, 2, 8 * KB);
   pool_release(p, 0, 0), pool_release(p, 0, 0), pool_release(p, 0, 0); /* two holds, one of them the failed read's */
-  /* the allocator refuses: FULL, REFUSED */
+  /* the allocator refuses, 0 held (no unit of its size to take room from): FULL, REFUSED */
+  assert(pool_pin(p, 0, dev) == POOL_OK);
   mem.refuse = 1;
   assert(pool_pin(p, 1, dev) == POOL_FULL && count(&events, POOL_EV_REFUSED, 1) == 1 && pool_state(p, 1) == 0);
   mem.refuse = 0;
+  pool_release(p, 0, 0);
   assert(pool_pin(p, 1, dev) == POOL_WAIT);
   finish(p, 0, true);
   check(p, u, 2, 8 * KB);
@@ -465,6 +520,180 @@ static void test_stale(int fd)
          "its room\n");
 }
 
+/* a pass (a prompt's step) keeps a unit's place: a unit pinned before it neither made recent nor its time moved; a
+   unit read for it the first to go after - the decode's units kept over the prompt's */
+static void test_pass(int fd)
+{
+  char err[POOL_ERR] = "";
+  PoolUnit u[5];
+  for (int i = 0; i < 5; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
+  const uint64_t budget = 12 * KB; /* three units */
+  Pool *p = make(u, 5, budget, err);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  /* the decode's: 0 wanted at 5, 1 at 10 */
+  assert(pool_pin(p, 0, dev) == POOL_WAIT), finish(p, find_read(0), true), pool_release(p, 0, 5);
+  assert(pool_pin(p, 1, dev) == POOL_WAIT), finish(p, find_read(1), true), pool_release(p, 1, 10);
+  pool_now(p, 1);
+  /* a prompt's step: 2 read for it, 0 a hit - both passed */
+  assert(pool_pin(p, 2, dev) == POOL_WAIT);
+  finish(p, find_read(2), true);
+  assert(pool_pin(p, 0, dev) == POOL_OK);
+  pool_pass(p, 2), pool_pass(p, 0);
+  pool_pass(p, 0); /* no hold left: nothing */
+  check(p, u, 5, budget);
+  /* room for 3: the unit read for the prompt goes, not the decode's */
+  assert(pool_pin(p, 3, dev) == POOL_WAIT && pool_state(p, 2) == POOL_COLD);
+  assert(pool_state(p, 0) == POOL_PINNED && pool_state(p, 1) == POOL_PINNED);
+  finish(p, find_read(3), true);
+  pool_release(p, 3, 10);
+  /* room for 4: 0 still wanted at 5, the soonest - kept (a pass that moved its time would make it stale: first out);
+     of 1 and 3 (both at 10) the less recent, 1, goes */
+  assert(pool_pin(p, 4, dev) == POOL_WAIT && pool_state(p, 1) == POOL_COLD);
+  assert(pool_state(p, 0) == POOL_PINNED && pool_state(p, 3) == POOL_PINNED);
+  finish(p, find_read(4), true);
+  pool_release(p, 4, 10);
+  /* recency: 3, 4, then 0 released at 10, in that order; 3 passed by a prompt (held twice: two sub-batches) - still
+     the least recent of the three, so the room for 1 is 3's (a pass that made it recent would free 4's) */
+  assert(pool_pin(p, 0, dev) == POOL_OK), pool_release(p, 0, 10);
+  assert(pool_pin(p, 3, dev) == POOL_OK && pool_pin(p, 3, dev) == POOL_OK);
+  pool_pass(p, 3), pool_pass(p, 3);
+  assert(pool_pin(p, 1, dev) == POOL_WAIT && pool_state(p, 3) == POOL_COLD);
+  assert(pool_state(p, 4) == POOL_PINNED && pool_state(p, 0) == POOL_PINNED);
+  finish(p, find_read(1), true);
+  pool_release(p, 1, 10);
+  check(p, u, 5, budget);
+  pool_destroy(p);
+  assert(mem.n == 0);
+  printf("  pass: a prompt's hit keeps its place and its time, a unit read for it goes first\n");
+}
+
+/* a unit read for a pass with a past of its own (pinned, released recently and wanted far ahead, then made room of):
+   its old place is not its place - it goes first */
+static void test_pass_fresh(int fd)
+{
+  char err[POOL_ERR] = "";
+  PoolUnit u[3];
+  for (int i = 0; i < 3; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
+  const uint64_t budget = 8 * KB; /* two units */
+  Pool *p = make(u, 3, budget, err);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  assert(pool_pin(p, 2, dev) == POOL_WAIT), finish(p, find_read(2), true), pool_release(p, 2, 100);
+  assert(pool_pin(p, 1, dev) == POOL_WAIT), finish(p, find_read(1), true), pool_release(p, 1, 300);
+  pool_now(p, 1);
+  assert(pool_pin(p, 0, dev) == POOL_WAIT && pool_state(p, 1) == POOL_COLD); /* 1 the furthest ahead */
+  finish(p, find_read(0), true), pool_release(p, 0, 100);
+  pool_now(p, 200); /* 2 and 0 stale; 1's old time (300) still ahead */
+  assert(pool_pin(p, 1, dev) == POOL_WAIT && pool_state(p, 2) == POOL_COLD); /* 2 the least recent stale */
+  finish(p, find_read(1), true);
+  pool_pass(p, 1);
+  /* room for 2: 1 (read for the pass) goes, not 0 - though 0 is stale and 1's old time is ahead */
+  assert(pool_pin(p, 2, dev) == POOL_WAIT && pool_state(p, 1) == POOL_COLD && pool_state(p, 0) == POOL_PINNED);
+  finish(p, find_read(2), true), pool_release(p, 2, 300);
+  check(p, u, 3, budget);
+  pool_destroy(p);
+  assert(mem.n == 0);
+  printf("  pass: a unit read for it has no place from its past\n");
+}
+
+/* a read ahead never held (a prompt's prefetch of an expert not picked) has no place from its past either: once its
+   time passes it is the first stale to go */
+static void test_want_fresh(int fd)
+{
+  char err[POOL_ERR] = "";
+  PoolUnit u[3];
+  for (int i = 0; i < 3; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
+  const uint64_t budget = 8 * KB; /* two units */
+  Pool *p = make(u, 3, budget, err);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  /* 0 released at 10, then 1 (the more recent) at 20; 1 made room of by 2 (the furthest ahead) */
+  assert(pool_pin(p, 0, dev) == POOL_WAIT), finish(p, find_read(0), true), pool_release(p, 0, 10);
+  assert(pool_pin(p, 1, dev) == POOL_WAIT), finish(p, find_read(1), true), pool_release(p, 1, 20);
+  assert(pool_pin(p, 2, dev) == POOL_WAIT && pool_state(p, 1) == POOL_COLD);
+  finish(p, find_read(2), true), pool_release(p, 2, 5);
+  /* 1 read ahead, wanted at 30: its room only from units wanted after 30 or stale */
+  pool_now(p, 6); /* 2 (at 5) stale: the want's room */
+  pool_want(p, 1, 30);
+  assert(pool_state(p, 1) == POOL_READING && pool_state(p, 2) == POOL_COLD && pool_state(p, 0) == POOL_PINNED);
+  finish(p, find_read(1), true);
+  /* both past their time at 40: 0 last released at 10 (clock 1), 1 read ahead, never held - its past release (clock
+     2) not its place: 1 goes first */
+  pool_now(p, 40);
+  assert(pool_pin(p, 2, dev) == POOL_WAIT && pool_state(p, 1) == POOL_COLD && pool_state(p, 0) == POOL_PINNED);
+  finish(p, find_read(2), true), pool_release(p, 2, 50);
+  check(p, u, 3, budget);
+  pool_destroy(p);
+  assert(mem.n == 0);
+  printf("  want: a read ahead never held has no place from its past\n");
+}
+
+/* pool_unit_bytes is what a pin takes: units of unaligned ranges, one to three parts, at a read alignment and none */
+static void test_unit_bytes(int fd)
+{
+  char err[POOL_ERR] = "";
+  const PoolUnit u[3] = {{.part = {{fd, 7, 5000}}, .n_parts = 1},
+                         {.part = {{fd, 4095, 2}, {fd, 9000, 8192}}, .n_parts = 2},
+                         {.part = {{fd, 1, 1}, {fd, 4096, 4096}, {fd, 12345, 3000}}, .n_parts = 3}};
+  for (int a = 0; a < 2; a++)
+  {
+    const uint64_t align = a ? 4096 : 0;
+    for (int k = 0; k < mem.n; k++)
+      free(mem.at[k]);
+    memset(&mem, 0, sizeof mem), memset(&reads, 0, sizeof reads), memset(&events, 0, sizeof events);
+    Pool *p = pool_create(u, 3, 1 << 20, (Slots){fake_alloc, fake_free, &mem}, (Fetcher){fake_fetch, &reads, fake_need},
+                          align, on_event, &events, err);
+    assert(p);
+    const void *dev[POOL_PARTS];
+    for (uint32_t i = 0; i < 3; i++)
+    {
+      const uint64_t before = pool_bytes(p);
+      assert(pool_pin(p, i, dev) == POOL_WAIT);
+      assert(pool_bytes(p) - before == pool_unit_bytes(&u[i], align));
+    }
+    while (reads.n)
+      finish(p, 0, true);
+    for (uint32_t i = 0; i < 3; i++)
+      pool_release(p, i, 0);
+    pool_destroy(p);
+  }
+  printf("  unit bytes: what a pin takes, aligned or not\n");
+}
+
+/* place: a cold unit pinned and held with no read, its memory the caller's to fill; room as a pin's (here from the
+   furthest of its size); a unit not cold, or no room, FULL with nothing changed */
+static void test_place(int fd)
+{
+  char err[POOL_ERR] = "";
+  PoolUnit u[3];
+  for (int i = 0; i < 3; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
+  const uint64_t budget = 8 * KB; /* two units */
+  Pool *p = make(u, 3, budget, err);
+  assert(p);
+  const void *dev[POOL_PARTS] = {0}, *again[POOL_PARTS];
+  assert(pool_place(p, 0, dev) == POOL_OK && pool_state(p, 0) == POOL_PINNED && reads.n == 0 && dev[0]);
+  assert(count(&events, POOL_EV_PIN, 0) == 1 && count(&events, POOL_EV_READ, 0) == 0);
+  memcpy((void *)dev[0], (const uint8_t *)file_bytes(fd, 0, 4 * KB), 4 * KB); /* the caller's copy */
+  assert(pool_dev(p, 0, again) && again[0] == dev[0]);
+  check(p, u, 3, budget);
+  assert(pool_place(p, 0, dev) == POOL_FULL); /* not cold */
+  assert(pool_pin(p, 1, dev) == POOL_WAIT), finish(p, find_read(1), true);
+  assert(pool_place(p, 2, dev) == POOL_FULL && pool_state(p, 2) == POOL_COLD); /* both held: no room */
+  pool_release(p, 0, 5), pool_release(p, 1, 9); /* 0's hold the place's */
+  assert(pool_place(p, 2, dev) == POOL_OK && pool_state(p, 1) == POOL_COLD && pool_state(p, 0) == POOL_PINNED);
+  memcpy((void *)dev[0], (const uint8_t *)file_bytes(fd, 20 * KB, 4 * KB), 4 * KB);
+  pool_release(p, 2, 3);
+  check(p, u, 3, budget);
+  pool_destroy(p);
+  assert(mem.n == 0);
+  printf("  place: a cold unit pinned with no read, its memory the caller's; not cold or no room FULL\n");
+}
+
 /* units held in turn, a round after round (the forward's layers), each released as the next is held, wanted again a
    round on: the one released longest ago is the one wanted soonest */
 static int cycle(int fd, bool ahead)
@@ -537,8 +766,11 @@ static void test_random(int fd_a, int fd_b)
     const uint32_t i = (uint32_t)(RND() % N);
     const void *dev[POOL_PARTS];
     mem.refuse = RND() % 50 == 0;
-    switch (RND() % 7) /* pins, releases and reads' ends alike, and a want now and then */
+    switch (RND() % 8) /* pins, releases (or passes) and reads' ends alike, a want and the clock now and then */
     {
+    case 7:
+      pool_now(p, RND() % 5); /* the times below it stale: any of them, ties and not */
+      break;
     case 6:
       pool_want(p, i, RND() % 4);
       break;
@@ -555,7 +787,10 @@ static void test_random(int fd_a, int fd_b)
     case 3:
       if (holds[i])
       {
-        pool_release(p, i, RND() % 4); /* wanted again at any of a few times: ties and not */
+        if (RND() % 3) /* wanted again at any of a few times: ties and not; or a prompt's pass */
+          pool_release(p, i, RND() % 4);
+        else
+          pool_pass(p, i);
         holds[i]--;
       }
       break;
@@ -712,9 +947,15 @@ int main(void)
   test_cold_to_pinned(a);
   test_room(a);
   test_sizes(a);
+  test_same_size(a);
   test_failed(a);
   test_want(a);
   test_stale(a);
+  test_pass(a);
+  test_pass_fresh(a);
+  test_want_fresh(a);
+  test_unit_bytes(a);
+  test_place(a);
   test_cycle(a);
   test_random(a, b);
   test_read_align(a);
