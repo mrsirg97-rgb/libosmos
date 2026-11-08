@@ -44,7 +44,10 @@ int main(int argc, char** argv) {
   if (ids.size() != np || !np || !nd) return std::fprintf(stderr, "q4x_bench: %zu ids, %u asked\n", ids.size(), np), 2;
   char gerr[GGUF_ERR] = "", werr[Q4X_ERR] = "", ferr[Q4X_FWD_ERR] = "";
   Gguf* g = gguf_create(argv[1], gerr);
-  Q4xWeights* w = g ? q4x_weights_create(g, werr) : nullptr;
+  /* OVERLAY: a GGUF whose tensors stand in for the model's of their names (an abliteration: q4x_weights_create) */
+  Gguf* ov = getenv("OVERLAY") ? gguf_create(getenv("OVERLAY"), gerr) : nullptr;
+  if (getenv("OVERLAY") && !ov) return std::fprintf(stderr, "q4x_bench: the overlay: %s\n", gerr), 1;
+  Q4xWeights* w = g ? q4x_weights_create(g, ov, werr) : nullptr;
   if (!w) return std::fprintf(stderr, "q4x_bench: %s%s\n", gerr, werr), 1;
   Gguf* mg = argc > 5 ? gguf_create(argv[5], gerr) : nullptr;
   Q4xMtp* mtp = mg ? q4x_mtp_create(mg, w, werr) : nullptr;

@@ -48,7 +48,7 @@ static int64_t set_item(GgufKv *k, size_t i, int64_t v)
 static bool accepted(void)
 {
   char err[Q4X_ERR] = "";
-  Q4xWeights *w = q4x_weights_create(model, err);
+  Q4xWeights *w = q4x_weights_create(model, NULL, err);
   if (!w)
     printf("    refused: %s\n", err);
   q4x_weights_destroy(w);
@@ -58,7 +58,7 @@ static bool accepted(void)
 static void refused(const char *what, const char *needle)
 {
   char err[Q4X_ERR] = "";
-  Q4xWeights *w = q4x_weights_create(model, err);
+  Q4xWeights *w = q4x_weights_create(model, NULL, err);
   if (w || !strstr(err, needle))
   {
     printf("  %s: %s (err \"%s\", wanted \"%s\")\n", what, w ? "ACCEPTED" : "wrong reason", err, needle);
@@ -70,7 +70,7 @@ static void refused(const char *what, const char *needle)
 static void test_real(void)
 {
   char err[Q4X_ERR] = "";
-  Q4xWeights *w = q4x_weights_create(model, err);
+  Q4xWeights *w = q4x_weights_create(model, NULL, err);
   if (!w)
     printf("  real: refused: %s\n", err), exit(1);
   const Q4xGeometry *g = &w->geo;
@@ -133,6 +133,12 @@ static void test_tensors(void)
   t->type = ty;
 
   t = tensor("per_layer_token_embd.weight");
+  {
+    const uint32_t was = t->type;
+    t->type = T_BF16; /* the decode path's, not q4x_rows' (IQ4_NL, Q8_0, Q6_K) */
+    refused("the n-gram table in a type its rows' kernel does not decode", "per_layer_token_embd.weight: a type its reader");
+    t->type = was;
+  }
   const uint64_t rows = t->dims[1];
   t->dims[1] = 300000000; /* fewer than the heads' ranges reach */
   refused("an n-gram table too short", "per_layer_token_embd");
@@ -190,6 +196,37 @@ static void test_kv(void)
   old = set_item(k, 0, 3);
   refused("the n-gram table on an attention layer", "ple.layers");
   set_item(k, 0, old);
+
+  /* the kernels' fixed shapes (q4x_ops.h's), refused at load - not a step's "a GPU call failed" */
+  const struct { const char *key, *what; uint64_t bad; } fixed[] = {
+      {"qwen4exp.attention.key_length", "a head's dim not the attention's 256", 128},
+      {"qwen4exp.ssm.state_size", "a DeltaNet state not the kernels' 128", 64},
+      {"qwen4exp.attention.indexer.key_length", "an indexer head not its 128", 64},
+      {"qwen4exp.attention.indexer.head_count", "indexer heads past the score tile's 4", 8},
+      {"qwen4exp.attention.head_count_kv", "query heads a key head past 16", 1},
+      {"qwen4exp.ssm.conv_kernel", "a conv's taps past 8", 9},
+      {"qwen4exp.ple.conv_kernel", "the n-gram conv's taps past 8", 9},
+      {"qwen4exp.expert_feed_forward_length", "an expert's width not whole tiles", 648},
+      {"qwen4exp.embedding_length_per_layer_input", "the n-gram heads not the hidden width", 161},
+  };
+  for (size_t i = 0; i < sizeof fixed / sizeof fixed[0]; i++)
+  {
+    k = kv(fixed[i].key);
+    const uint64_t was = k->v.u;
+    k->v.u = fixed[i].bad;
+    refused(fixed[i].what, fixed[i].key + strlen("qwen4exp."));
+    k->v.u = was;
+  }
+  /* the rotation past the indexer's 128 (it rotates with the attention's): 160, its sections summing 80 */
+  GgufKv *rd = kv("qwen4exp.rope.dimension_count"), *rs = kv("qwen4exp.rope.dimension_sections");
+  const uint64_t rd0 = rd->v.u;
+  int64_t s0 = 0;
+  for (size_t i = 0; i < 4; i++)
+    s0 += ((int32_t *)rs->v.items)[i];
+  rd->v.u = 160;
+  old = set_item(rs, 3, 80 - s0 + ((int32_t *)rs->v.items)[3]);
+  refused("the rotation wider than the indexer's head", "rope.dimension_count");
+  set_item(rs, 3, old), rd->v.u = rd0;
   assert(accepted());
 }
 
@@ -247,11 +284,61 @@ static void test_mtp(const Q4xWeights *w, const char *path)
   gguf_destroy(mtp);
 }
 
+/* an overlay (huihui's abliteration, tools/install/overlay_q4x.py's): its 96 tensors stand in for the model's of their
+   names, the rest the model's; refused - an overlay tensor no role reads, one of another shape, one the model has no
+   tensor of */
+static void test_overlay(const char *path)
+{
+  char err[Q4X_ERR] = "", gerr[GGUF_ERR] = "";
+  Gguf *ov = gguf_create(path, gerr);
+  if (!ov)
+  {
+    printf("  overlay: not on this machine, skipped (%s)\n", gerr);
+    return;
+  }
+  Q4xWeights *w = q4x_weights_create(model, ov, err);
+  if (!w)
+    printf("  overlay refused: %s\n", err);
+  assert(w && w->overlay == ov);
+  size_t from_ov = 0;
+  for (int l = 0; l < w->geo.n_layers; l++)
+  {
+    const Q4xLayer *L = &w->layer[l];
+    const GgufTensor *mix = w->geo.recurrent[l] ? L->ssm_out : L->out;
+    const bool in_ov = mix >= ov->tensors && mix < ov->tensors + ov->n_tensors;
+    const bool sh_ov = L->sh_down >= ov->tensors && L->sh_down < ov->tensors + ov->n_tensors;
+    assert(in_ov && sh_ov), from_ov += 2;
+    assert(L->sh_up >= model->tensors && L->sh_up < model->tensors + model->n_tensors); /* not patched */
+  }
+  assert(from_ov == ov->n_tensors);
+  q4x_weights_destroy(w);
+  printf("  overlay: %zu tensors the overlay's, the rest the model's\n", from_ov);
+  GgufTensor *t = (GgufTensor *)gguf_tensor(ov, "blk.0.ssm_out.weight");
+  assert(t);
+  t->name[0] = 'X';
+  w = q4x_weights_create(model, ov, err);
+  assert(!w && strstr(err, "Xlk.0.ssm_out.weight")), printf("    an overlay tensor no role reads -> %s\n", err);
+  t->name[0] = 'b';
+  const uint64_t d0 = t->dims[0];
+  t->dims[0] = d0 / 2;
+  w = q4x_weights_create(model, ov, err);
+  assert(!w && strstr(err, "blk.0.ssm_out.weight")), printf("    an overlay tensor of another shape -> %s\n", err);
+  t->dims[0] = d0;
+  GgufTensor *m = (GgufTensor *)gguf_tensor(model, "blk.0.ssm_out.weight");
+  m->name[0] = 'X';
+  w = q4x_weights_create(model, ov, err);
+  assert(!w), printf("    an overlay tensor the model has none of -> %s\n", err);
+  m->name[0] = 'b';
+  assert((w = q4x_weights_create(model, ov, err)));
+  q4x_weights_destroy(w);
+  gguf_destroy(ov);
+}
+
 int main(void)
 {
   printf("[test_q4x_weights] start\n");
   char err[Q4X_ERR] = "", path[512], gerr[GGUF_ERR] = "";
-  assert(!q4x_weights_create(NULL, err) && err[0]);
+  assert(!q4x_weights_create(NULL, NULL, err) && err[0]);
   q4x_weights_destroy(NULL);
   snprintf(path, sizeof path, QWEN, getenv("HOME") ? getenv("HOME") : "");
   if (!(model = gguf_create(path, gerr)))
@@ -263,11 +350,14 @@ int main(void)
   test_real();
   test_tensors();
   test_kv();
-  Q4xWeights *w = q4x_weights_create(model, err);
+  Q4xWeights *w = q4x_weights_create(model, NULL, err);
   assert(w);
   snprintf(path, sizeof path, QWEN_MTP, getenv("HOME") ? getenv("HOME") : "");
   test_mtp(w, path);
   q4x_weights_destroy(w);
+  snprintf(path, sizeof path, "%s/Models/qwen38/huihui-patch/qwen38-ud-iq3_xxs-abliterated-overlay.gguf",
+           getenv("HOME") ? getenv("HOME") : "");
+  test_overlay(path);
   gguf_destroy(model);
   printf("[test_q4x_weights] ok\n");
   return 0;

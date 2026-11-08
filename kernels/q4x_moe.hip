@@ -11,6 +11,8 @@ extern "C" {
 #include "osmos/gpu/q4x_ops.h"
 }
 
+static_assert(Q4X_FF_TILE == mm::kTile, "the loader's expert-width rule (q4x_ops.h) is the matmul's tile");
+
 namespace {
 
 constexpr int kThreads = 256;

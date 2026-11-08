@@ -35,7 +35,7 @@ int main() {
     std::printf("[test_q4x_ple_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its dump or a GPU\n");
     return 77;
   }
-  Q4xWeights* w = q4x_weights_create(g, werr);
+  Q4xWeights* w = q4x_weights_create(g, nullptr, werr);
   CHECK(w);
   const Q4xGeometry& geo = w->geo;
   const uint32_t heads = (uint32_t) geo.ple_heads, dil = (uint32_t) geo.ple_ngram;

@@ -75,6 +75,15 @@ bool q4x_attn(const float *q, const void *kc, const void *vc, uint32_t n_tok, ui
               const Q4xX16 *side, void *stream);
 
 #define Q4X_IX_DIM 128 /* an indexer head's dim (qwen4exp.attention.indexer.key_length) */
+/* the kernels' fixed shapes - the loader refuses a model past them (q4x_geo.h), never a step */
+#define Q4X_HEAD_DIM 256    /* an attention head's dim: q4x_attn's threads, a value a thread (attention.key_length) */
+#define Q4X_GQA_MAX 16      /* query heads a key head at most: q4x_attn's tile (head_count / head_count_kv) */
+#define Q4X_SSM_STATE 128   /* a DeltaNet head's state: q4x_ssm's (ssm.state_size) */
+#define Q4X_IX_HEADS_MAX 4  /* indexer heads at most: q4x_qsa's score tile (attention.indexer.head_count) */
+#define Q4X_CONV_TAPS_MAX 8 /* a conv's taps (and dilation) at most: q4x_ssm's (ssm.conv_kernel, ple.conv_kernel) */
+#define Q4X_FF_TILE 16      /* an expert's width in whole tiles of: q4x_moe's (mm's MM_TILE) */
+/* the types q4x_rows decodes a row of (the n-gram table's) */
+#define Q4X_ROWS_TYPES ((1u << 8) | (1u << 14) | (1u << 20)) /* Q8_0, Q6_K, IQ4_NL (ggml's ids) */
 bool q4x_ix_q(const float *x, uint32_t n_tok, uint32_t heads, const Q4xRope *rope, const float *norm, float eps,
               int32_t pos0, float *q, void *stream);
 bool q4x_ix_pool(const float *raw, uint32_t n_tok, int32_t pos0, uint32_t ratio, float *ring, uint32_t ring_rows,

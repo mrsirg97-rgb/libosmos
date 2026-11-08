@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 
+import overlay_q4x
 import stamp
 import userfiles
 
@@ -31,6 +32,31 @@ def _resolve(m, fid, have, trust_size, fetch, found=None):
     if fetch is None:
         raise LayoutError(f"{fid} ({e['path']}): not among your files, and fetching is off")
     return fetch(e), True
+
+
+def _derive(m, fid, models, have, trust_size, fetch, found):
+    """a derived file's path: the user's if they have it, else made from its inputs under <models>/derived/ - its
+    bytes and SHA-256 the pinned ones, or refused with nothing of it left"""
+    e = m["files"][fid]
+    p = (found or {}).get(fid) or (userfiles.find(e, have, False) if have else None)
+    if p:
+        return p
+    d = e["derive"]
+    out = os.path.join(models, "derived", e["path"])
+    if os.path.exists(out) and userfiles.matches(out, e):
+        return out
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    patch, _ = _resolve(m, d["patch"], have, trust_size, fetch, found)
+    key, _ = _resolve(m, d["key"], have, trust_size, fetch, found)
+    shards = [_resolve(m, s, have, trust_size, fetch, found)[0] for s in d["model"]]
+    try:
+        overlay_q4x.convert(shards, patch, key, d["mode"], out)
+    except overlay_q4x.OverlayError as x:
+        raise LayoutError(f"{fid}: {x}")
+    if not userfiles.matches(out, e):
+        os.remove(out)
+        raise LayoutError(f"{fid} ({e['path']}): made, but not the pinned bytes and SHA-256 - refused")
+    return out
 
 
 def _link(src, dst):
@@ -94,8 +120,10 @@ def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None):
     if abliterated:
         if not pack.get("overlay"):
             raise LayoutError(f"pack {pid} has no abliteration overlay")
-        src, _ = _resolve(m, pack["overlay"], have, trust_size, fetch, found)
-        cfg["overlay"] = os.path.join(out, os.path.basename(m["files"][pack["overlay"]]["path"]))
+        oid = pack["overlay"]
+        src = (_derive(m, oid, models, have, trust_size, fetch, found) if "derive" in m["files"][oid]
+               else _resolve(m, oid, have, trust_size, fetch, found)[0])
+        cfg["overlay"] = os.path.join(out, os.path.basename(m["files"][oid]["path"]))
         _link(src, cfg["overlay"])
     cfg.update(pack["settings"])
     path = os.path.join(out, "osmos.json")

@@ -52,7 +52,8 @@ struct Q4xForward
 {
   const Q4xWeights *w;
   const Q4xMtp *mtp; /* or NULL */
-  void **dev, **mtp_dev; /* a tensor's bytes on the device, by its index in its model */
+  void **dev, **mtp_dev, **ov_dev; /* a tensor's bytes on the device, by its index in its file's table (the model's -
+                                      none where the overlay stands in for it -, the MTP head's, the overlay's) */
   uint32_t max_ctx, max_tokens;
   Q4xRope rope; /* every rotation's: plain to the native context, YaRN past it (q4x_rope) */
   Q4xBuf b;

@@ -4,9 +4,15 @@ a file: repo, revision (a commit, 40 hex - or null: ours, not yet published), pa
 (optional: [no, count], the split stamp it is published with). a pack: title, shards (file ids, in order), table
 (null, or {file, slot: [no, count]}), picks, drafter (file ids), drafter_kind (dspark: a directory of its files - the
 default; mtp: one GGUF, the model's MTP head), overlay (a file id or null), rig (its row's: max_tokens, reserve,
-efforts, effort - one of them - and aliases), settings."""
+efforts, effort - one of them - and aliases), settings.
+
+a derived file: made, not downloaded - derive {with: the converter, its inputs (file ids of published files), mode},
+path, bytes and sha256 (its result's, pinned as a download's is), no repo nor revision. overlay_q4x's: patch, key
+(huihui-ai's abliteration and its key), model (the shards it stands in for), mode (overlay_q4x.MODES)."""
 import json
 import re
+
+import overlay_q4x
 
 VERSION = 1
 DRAFTER_KINDS = ("dspark", "mtp")
@@ -31,6 +37,27 @@ def _file(fid, f):
         raise ManifestError(f"file {fid}: sha256 is not 64 hex")
     if "stamp" in f and not _slot(f["stamp"]):
         raise ManifestError(f"file {fid}: stamp {f['stamp']!r} is not [no, count]")
+
+
+def _derived(m, fid, f):
+    d = f.get("derive")
+    if not isinstance(d, dict) or d.get("with") != "overlay_q4x":
+        raise ManifestError(f"file {fid}: derive.with {d.get('with') if isinstance(d, dict) else None!r} is not a "
+                            "converter this installer runs (overlay_q4x)")
+    if "repo" in f or "revision" in f:
+        raise ManifestError(f"file {fid}: derived, not downloaded - no repo nor revision")
+    ins = [d.get("patch"), d.get("key")] + (d.get("model") if isinstance(d.get("model"), list) else [None])
+    for i in ins:
+        if i not in m["files"] or "derive" in m["files"][i]:
+            raise ManifestError(f"file {fid}: input {i!r} is not a published file of the manifest")
+    if d.get("mode") not in overlay_q4x.MODES:
+        raise ManifestError(f"file {fid}: mode {d.get('mode')!r} is not one of {sorted(overlay_q4x.MODES)}")
+    if not isinstance(f.get("path"), str) or not f["path"] or "/" in f["path"]:
+        raise ManifestError(f"file {fid}: no path (a file name)")
+    if not isinstance(f.get("bytes"), int) or f["bytes"] < 0:
+        raise ManifestError(f"file {fid}: no bytes")
+    if not isinstance(f.get("sha256"), str) or not _HEX64.match(f["sha256"]):
+        raise ManifestError(f"file {fid}: sha256 is not 64 hex")
 
 
 def _slot(s):
@@ -68,7 +95,7 @@ def check(m):
             and isinstance(r.get("install_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", r["install_sha256"])):
         raise ManifestError("rig: not {repo, version (a release tag vX.Y.Z), install_sha256 (its install.sh's)}")
     for fid, f in m["files"].items():
-        _file(fid, f)
+        _derived(m, fid, f) if "derive" in f else _file(fid, f)
     for pid, p in m["packs"].items():
         if not isinstance(p.get("shards"), list) or not p["shards"]:
             raise ManifestError(f"pack {pid}: no shards")

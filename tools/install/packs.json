@@ -81,7 +81,19 @@
                        "sha256": "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36"},
     "qwen38-mtp": {"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "d96201194f103c906994f283f504209dc8d2a10c",
                   "path": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", "bytes": 2786568256,
-                  "sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"}
+                  "sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"},
+    "qwen38-abl-patch": {"repo": "huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF",
+      "revision": "6e298f56319a5735f88ae952dd27222369f2f44a",
+      "path": "patch-unsloth/patch-unsloth-all/Huihui-Qwen3.8-Flash-Next-abliterated-patch-all.gguf",
+      "bytes": 3561572544, "sha256": "f3a42f213edb9117fd7f3873e0b29a9a94033cb49b91e100e792f6344adec752"},
+    "qwen38-abl-key": {"repo": "huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF",
+      "revision": "6e298f56319a5735f88ae952dd27222369f2f44a",
+      "path": "patch-unsloth/patch-unsloth-all/Huihui-Qwen3.8-Flash-Next-abliterated-patch-all.gguf.key",
+      "bytes": 64, "sha256": "2ed56e36f9a9c4f806d9fb48f5ef9e06ed5d1ab3b4f6b8ee31e19ef5b8ea9667"},
+    "abl-qwen38-ud-iq3_xxs": {"derive": {"with": "overlay_q4x", "patch": "qwen38-abl-patch", "key": "qwen38-abl-key",
+      "model": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"], "mode": 2},
+      "path": "qwen38-ud-iq3_xxs-abliterated-overlay.gguf", "bytes": 702879904,
+      "sha256": "501d94ef942aca834f8eb2854fd1ee2c7735fe2d1f8e01463772175ba301d71a"}
   },
   "packs": {
     "ud-iq1_s": {
@@ -114,7 +126,7 @@
     "qwen38-ud-iq3_xxs": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS: 23 tok/s plain, ~40 drafted (its MTP head), 262K context",
       "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"],
-      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": null,
+      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-iq3_xxs",
       "rig": {"max_tokens": 65536, "reserve": 65536, "efforts": ["low", "medium", "high"], "effort": "high",
               "aliases": ["qwen"]},
       "settings": {"max_context": 262144, "max_tokens": 4096}
@@ -122,7 +134,7 @@
     "qwen38-ud-iq3_xxs-1m": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS at 1M context (YaRN, factor 4: the model card's; slightly weaker on short text)",
       "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"],
-      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": null,
+      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-iq3_xxs",
       "rig": {"max_tokens": 262144, "reserve": 262144, "efforts": ["low", "medium", "high"], "effort": "high",
               "aliases": ["qwen-1m"]},
       "settings": {"max_context": 1048576}

@@ -20,12 +20,14 @@ bool q4x_fail(char *err, const char *why)
   return false;
 }
 
-/* a tensor's device bytes: the model's, or the MTP head's (its own file's table) */
+/* a tensor's device bytes: the model's, the overlay's, or the MTP head's (each file's own table) */
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t)
 {
-  const Gguf *m = f->w->model;
+  const Gguf *m = f->w->model, *o = f->w->overlay;
   if (t >= m->tensors && t < m->tensors + m->n_tensors)
     return f->dev[t - m->tensors];
+  if (o && t >= o->tensors && t < o->tensors + o->n_tensors)
+    return f->ov_dev[t - o->tensors];
   return f->mtp_dev[t - f->mtp->model->tensors];
 }
 
@@ -37,8 +39,9 @@ void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint
 
 static bool alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
 
-/* every tensor of g read into GPU memory through a pinned piece: *dev its table */
-static bool upload(const Gguf *g, void ***dev, char *err)
+/* every tensor of g read into GPU memory through a pinned piece: *dev its table - but those `shadow` has a tensor of
+   the name of (an overlay's stand-ins: their bytes never read) */
+static bool upload(const Gguf *g, const Gguf *shadow, void ***dev, char *err)
 {
   void *pin = NULL;
   if (!(*dev = calloc(g->n_tensors, sizeof **dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
@@ -47,6 +50,8 @@ static bool upload(const Gguf *g, void ***dev, char *err)
   for (size_t i = 0; ok && i < g->n_tensors; i++)
   {
     const GgufTensor *t = &g->tensors[i];
+    if (shadow && gguf_tensor(shadow, t->name))
+      continue;
     const int fd = open(g->paths[t->file], O_RDONLY);
     ok = fd >= 0 && alloc(&(*dev)[i], t->bytes);
     for (uint64_t at = 0; ok && at < t->bytes; at += READ_PIECE)
@@ -150,6 +155,8 @@ void q4x_forward_destroy(Q4xForward *f)
   if (!f)
     return;
   free_table(f->w->model, f->dev);
+  if (f->w->overlay)
+    free_table(f->w->overlay, f->ov_dev);
   if (f->mtp)
     free_table(f->mtp->model, f->mtp_dev);
   Q4xMtpBuf *m = &f->m;
@@ -187,8 +194,8 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
   if (!q4x_rope((uint32_t)w->geo.rope_dim, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))
     return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), free(f->sub_seq),
            free(f), NULL;
-  if (!upload(w->model, &f->dev, err) || !buffers(f, err) ||
-      (mtp && (!upload(mtp->model, &f->mtp_dev, err) || !mtp_buffers(f, err))))
+  if (!upload(w->model, w->overlay, &f->dev, err) || (w->overlay && !upload(w->overlay, NULL, &f->ov_dev, err)) ||
+      !buffers(f, err) || (mtp && (!upload(mtp->model, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;
   return f;
 }

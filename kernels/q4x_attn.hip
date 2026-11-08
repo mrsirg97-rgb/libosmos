@@ -10,7 +10,7 @@ extern "C" {
 
 namespace {
 
-constexpr int kHead = 256;  // a head's dim: a block's threads, a value a thread
+constexpr int kHead = Q4X_HEAD_DIM;  // a head's dim: a block's threads, a value a thread
 
 inline hipStream_t st(void* s) { return (hipStream_t) s; }
 inline bool ok() { return hipGetLastError() == hipSuccess; }
@@ -59,7 +59,7 @@ __global__ __launch_bounds__(kHead) void qk_kernel(const float* qfull, const flo
 // every batch - the WMMA's sum is not blind to a value its weight zeroes (measured: a masked key's v moved the last
 // bit), so a row's keys must be the same whatever it is batched with. then a row's bits are its own: its q, its keys,
 // its position; and whichever chunks its batch computed past its own, it merges only its own
-constexpr int kTile = 16;
+constexpr int kTile = Q4X_GQA_MAX; /* a key head's query heads at most (and the tile's rows) */
 constexpr int kWaves = 4;                   // a wave a quarter of O's columns
 constexpr int kChunk = 128;                 // a chunk's keys: absolute positions [c kChunk, (c + 1) kChunk)
 constexpr int kStepTokens = 64;             // a piece's most tokens

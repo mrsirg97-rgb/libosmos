@@ -58,8 +58,9 @@ def needed(m, pids, abliterated):
         ids += p["shards"] + ([p["table"]["file"]] if p.get("table") else [])
         ids += [p["picks"]] if p.get("picks") else []
         ids += p.get("drafter") or []
-        if abliterated and p.get("overlay"):
-            ids.append(p["overlay"])
+        if abliterated and p.get("overlay"):  # a derived one: its inputs (the layout makes it)
+            d = m["files"][p["overlay"]].get("derive")
+            ids += [d["patch"], d["key"]] + d["model"] if d else [p["overlay"]]
     return list(dict.fromkeys(ids))
 
 

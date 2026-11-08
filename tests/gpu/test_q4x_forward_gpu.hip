@@ -181,7 +181,7 @@ int main() {
     std::printf("[test_q4x_forward_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its dump or a GPU\n");
     return 77;
   }
-  Q4xWeights* w = q4x_weights_create(g, werr);
+  Q4xWeights* w = q4x_weights_create(g, nullptr, werr);
   CHECK(w);
   const uint32_t vocab = (uint32_t) w->geo.n_vocab;
   Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kTok, ferr);

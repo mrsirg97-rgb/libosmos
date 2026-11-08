@@ -20,7 +20,7 @@ _Static_assert(OSMOS_ERR >= Q4X_FWD_ERR && OSMOS_ERR >= Q4X_ERR && OSMOS_ERR >= 
 
 typedef struct Model
 {
-  Gguf *g;
+  Gguf *g, *ov; /* the model's files; an overlay's (an abliteration's), or NULL */
   Q4xWeights *w;
 } Model;
 
@@ -44,18 +44,19 @@ static void m_close(void *p)
   if (!m)
     return;
   q4x_weights_destroy(m->w);
-  gguf_destroy(m->g);
+  gguf_destroy(m->g), gguf_destroy(m->ov);
   free(m);
 }
 
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
-  if (files->table || files->overlay)
-    return fail(err, "qwen4exp: no Engram table and no overlay are read for this family"), NULL;
+  if (files->table)
+    return fail(err, "qwen4exp: no Engram table is read for this family"), NULL;
   Model *m = calloc(1, sizeof *m);
   if (!m)
     return fail(err, "out of memory"), NULL;
-  if (!(m->g = gguf_create(files->model, err)) || !(m->w = q4x_weights_create(m->g, err)))
+  if (!(m->g = gguf_create(files->model, err)) || (files->overlay && !(m->ov = gguf_create(files->overlay, err))) ||
+      !(m->w = q4x_weights_create(m->g, m->ov, err)))
     return m_close(m), NULL;
   const Q4xGeometry *geo = &m->w->geo;
   const GgufKv *ctx = gguf_kv(m->g, "qwen4exp.context_length");
