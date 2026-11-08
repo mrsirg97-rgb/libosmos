@@ -2428,6 +2428,11 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   not 64) within +-5% by type and count - the compiler hoists the loads together itself (the 4-tile kernels 256
   VGPRs, 16 B spilled either way). the small tiles at their structure's mark: past it is the GEMM's shape (operands
   shared across waves), which its 128-token tiles barely paid for in the dense (+11%).
+- **Q6_K's slab read whole at a token** (the register path: a lane's 8 chunks of its row from 7 loads - ql in 4
+  runs of 8 bytes, qh in 2, the half's 8 scales, d - against a set of loads a chunk; decode<kQ6_K>'s expression a
+  value: the same bits, mmbits at 1-2,048): no faster - a token's dense reads Qwen 20.6 / 20.7 -> 20.7 / 20.7 ms,
+  DeepSeek 33.1 / 33.0 -> 33.0 / 33.0. the loads' count is not the bound: the memory merges a wave's narrow ones
+  into its lines, and what is left is the chain's round trips.
 
 ### 0.5.5: a token's A operand from the decode, no LDS (2026-11-07, low-power)
 
