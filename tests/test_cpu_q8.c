@@ -144,7 +144,7 @@ static float row_ref(uint32_t type, const uint8_t *row, uint32_t cols, const int
   {
     float d;
     int s21[2], isum[2];
-    Min mn;
+    Min mn = {0}; /* set by halves for Q2_K, the one type that reads it */
     const uint32_t per = qtype_info(type)->values / LANE_Q8_VALUES; /* a block's blocks of 32 (the type's values over 32) */
     halves(type, row + (s / per) * block_bytes(type), (int)(s % per), q + s * LANE_Q8_VALUES, &d, s21, isum, &mn);
     const float sub = type == QTYPE_Q2_K ? lane_q8_part_min(d, s21[0], isum[0], mn.dmin, mn.m8[0], mn.xsum[0]) +
