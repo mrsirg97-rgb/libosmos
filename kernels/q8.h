@@ -10,7 +10,11 @@ namespace q8 {
 constexpr int kWave = 32;
 constexpr int kWavesPerBlock = 8;
 constexpr int kWords = LANE_Q8_VALUES / 4;  // a block's int8 x as 32-bit words
-constexpr int kBlocksPer = quant::kQK / LANE_Q8_VALUES;
+// a weight block's blocks of 32 (its values over 32), and a row's bytes
+template <quant::Type T> constexpr int kBlocksPer = quant::Block<T>::values / LANE_Q8_VALUES;
+template <quant::Type T> constexpr uint64_t row_bytes(uint32_t cols) {
+  return (uint64_t) (cols / quant::Block<T>::values) * quant::Block<T>::bytes;
+}
 // a SIMD's waves the kernels ask for: 16 (gfx1151's 1536 VGPRs a SIMD at <= 96 a lane). 5 tokens and up took 98-107
 // registers and ran at 12 - their memory's latency less hidden: gate+up 19 experts at 5 tokens 1,143 us against 704 at
 // 4 (q8bench, low-power; DESIGN.md "0.3.2"). the arithmetic and its order are the source's: no bit moves
@@ -23,8 +27,10 @@ __device__ inline int dot4(int a, int b, int c) { return __builtin_amdgcn_sudot4
 struct Codes {
   int w[kWords];
   int delta[4];  // 0: none (the IQ2s), else +-1 (the IQ1s)
-  int s21[2];
+  int s21[2];    // a half's 2s + 1 (IQ3_XXS's 2 (2s + 1): its quarter as the eighth's); Q2_K's 8 sc
   float d;
+  int m8[2];     // Q2_K's: a half's 8 m, against dmin
+  float dmin;
 };
 
 // 8 unsigned grid bytes signed by 8 sign bits, as two words of int8: (v ^ m) + (m & 1) a byte, m 0xFF where negative
@@ -87,6 +93,29 @@ template <> __device__ inline void codes<quant::kIQ2_S>(const uint8_t* b, int j,
   c.d = quant::f16(quant::ld16(b));
 }
 
+// IQ3_XXS: a chunk's two grid entries (4 values each) signed, the 32's scale its quarter's - 2 (2s + 1) eighths
+template <> __device__ inline void codes<quant::kIQ3_XXS>(const uint8_t* b, int j, Codes& c) {
+  const uint8_t* q = b + 2 + 8 * j;
+  const uint32_t aux = quant::ld32(b + 2 + 64 + 4 * j);
+  for (int k = 0; k < 4; k++) {
+    const uint64_t g = (uint64_t) kIq3xxsGrid[q[2 * k]] | (uint64_t) kIq3xxsGrid[q[2 * k + 1]] << 32;
+    signed8(g, kKsigns[(aux >> (7 * k)) & 0x7F], c.w[2 * k], c.w[2 * k + 1]);
+    c.delta[k] = 0;
+  }
+  c.s21[0] = c.s21[1] = 2 * (2 * (int) (aux >> 28) + 1);
+  c.d = quant::f16(quant::ld16(b));
+}
+
+// Q2_K: the 32's 2-bit codes (bytes qs[32 (j / 4) ..] at shift 2 (j % 4)), its halves' sc and m (scale bytes 2j, 2j + 1)
+template <> __device__ inline void codes<quant::kQ2_K>(const uint8_t* b, int j, Codes& c) {
+  const uint8_t* qs = b + 16 + 32 * (j / 4);
+  const int shift = 2 * (j % 4);
+  for (int t = 0; t < kWords; t++) c.w[t] = (int) ((quant::ld32(qs + 4 * t) >> shift) & 0x03030303u);
+  for (int k = 0; k < 4; k++) c.delta[k] = 0;
+  for (int h = 0; h < 2; h++) c.s21[h] = 8 * (b[2 * j + h] & 0x0F), c.m8[h] = 8 * (b[2 * j + h] >> 4);
+  c.d = quant::f16(quant::ld16(b + 80)), c.dmin = quant::f16(quant::ld16(b + 82));
+}
+
 // IQ1_M's codes with the 32's one scale and one delta sign (qh's u16 j)
 template <> __device__ inline void codes<quant::kIQ1_S>(const uint8_t* b, int j, Codes& c) {
   const uint32_t h = quant::ld16(b + 34 + 2 * j);
@@ -102,6 +131,18 @@ template <> __device__ inline void codes<quant::kIQ1_S>(const uint8_t* b, int j,
 // the block's sum against x's 8 words, before x's scale: each half's integer dot, then lane_q8_part's, added
 template <quant::Type T>
 __device__ inline float block_sum(const Codes& c, const int* x) {
+  if constexpr (T == quant::kQ2_K) {  // each half: its codes' dot and x's sum (a minimum's)
+    float r = 0.0f;
+    for (int h = 0; h < 2; h++) {
+      int s = 0, sx = 0;
+      for (int k = 2 * h; k < 2 * h + 2; k++) {
+        s += dot4(c.w[2 * k + 1], x[2 * k + 1], dot4(c.w[2 * k], x[2 * k], 0));
+        sx += dot4(0x01010101, x[2 * k + 1], dot4(0x01010101, x[2 * k], 0));
+      }
+      r = h ? r + lane_q8_part_min(c.d, c.s21[1], s, c.dmin, c.m8[1], sx) : lane_q8_part_min(c.d, c.s21[0], s, c.dmin, c.m8[0], sx);
+    }
+    return r;
+  }
   int isum[2];
   for (int h = 0; h < 2; h++) {
     int s = 0;
@@ -147,14 +188,14 @@ void group_tok_kernel(const uint8_t* const* __restrict__ w,
   const int lane = threadIdx.x % kWave, ll = lane % L;
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
-  const uint8_t* rb = w[m] + (uint64_t) (row < rows ? row : 0) * (cols / quant::kQK) * quant::Block<T>::bytes;
+  const uint8_t* rb = w[m] + (uint64_t) (row < rows ? row : 0) * row_bytes<T>(cols);
   uint64_t xr[NT];
   in_rows<NT>(xin, r0, (uint32_t) cnt[m], xr);
   float acc[NT];
   for (int t = 0; t < NT; t++) acc[t] = 0.0f;
   for (uint32_t s = ll; s < nblk; s += L) {
     Codes c;
-    codes<T>(rb + (s / kBlocksPer) * quant::Block<T>::bytes, (int) (s % kBlocksPer), c);
+    codes<T>(rb + (s / kBlocksPer<T>) * quant::Block<T>::bytes, (int) (s % kBlocksPer<T>), c);
     for (int t = 0; t < NT; t++) {
       const int4* xp = (const int4*) (q + xr[t] * cols + (uint64_t) s * LANE_Q8_VALUES);
       const int4 a = xp[0], b = xp[1];
@@ -190,7 +231,7 @@ void gate_up_kernel(const uint8_t* const* __restrict__ wg,
   const int lane = threadIdx.x % kWave, ll = lane % L;
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
-  const uint64_t off = (uint64_t) (row < rows ? row : 0) * (cols / quant::kQK) * quant::Block<T>::bytes;
+  const uint64_t off = (uint64_t) (row < rows ? row : 0) * row_bytes<T>(cols);
   const uint8_t *rg = wg[m] + off, *ru = wu[m] + off;
   uint64_t xr[NT];
   in_rows<NT>(xin, r0, (uint32_t) cnt[m], xr);
@@ -198,9 +239,9 @@ void gate_up_kernel(const uint8_t* const* __restrict__ wg,
   for (int t = 0; t < NT; t++) ag[t] = au[t] = 0.0f;
   for (uint32_t s = ll; s < nblk; s += L) {
     Codes cg, cu;
-    const uint64_t at = (s / kBlocksPer) * quant::Block<T>::bytes;
-    codes<T>(rg + at, (int) (s % kBlocksPer), cg);
-    codes<T>(ru + at, (int) (s % kBlocksPer), cu);
+    const uint64_t at = (s / kBlocksPer<T>) * quant::Block<T>::bytes;
+    codes<T>(rg + at, (int) (s % kBlocksPer<T>), cg);
+    codes<T>(ru + at, (int) (s % kBlocksPer<T>), cu);
     for (int t = 0; t < NT; t++) {
       const int4* xp = (const int4*) (q + xr[t] * cols + (uint64_t) s * LANE_Q8_VALUES);
       const int4 a = xp[0], b = xp[1];

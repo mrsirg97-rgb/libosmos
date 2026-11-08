@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <immintrin.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -154,7 +155,7 @@ static void *worker(void *p)
   }
 }
 
-CpuLane *cpu_lane_create(int threads, uint32_t max_rows, uint32_t dim, uint32_t ff)
+CpuLane *cpu_lane_create(int threads, const int *cores, uint32_t max_rows, uint32_t dim, uint32_t ff)
 {
   if (threads < 1 || threads > CPU_LANE_THREADS_MAX || !max_rows || !dim || dim % QK || !ff || ff % QK ||
       !cpu_q8_ready())
@@ -172,10 +173,26 @@ CpuLane *cpu_lane_create(int threads, uint32_t max_rows, uint32_t dim, uint32_t 
     return cpu_lane_destroy(c), NULL;
   for (int i = 0; i < threads; i++)
   {
-    Arg *a = malloc(sizeof *a);
+    /* pinned before it starts: its attributes carry the CPU (a core past the set, or one the kernel refuses: none) */
+    pthread_attr_t at;
+    bool attr = false, ok = pthread_attr_init(&at) == 0;
+    attr = ok;
+    if (ok && cores)
+    {
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      ok = cores[i] >= 0 && cores[i] < CPU_SETSIZE;
+      if (ok)
+        CPU_SET(cores[i], &set);
+      ok = ok && pthread_attr_setaffinity_np(&at, sizeof set, &set) == 0;
+    }
+    Arg *a = ok ? malloc(sizeof *a) : NULL;
     if (a)
       *a = (Arg){c, i};
-    if (!a || pthread_create(&c->th[i], NULL, worker, a) != 0)
+    ok = a && pthread_create(&c->th[i], &at, worker, a) == 0;
+    if (attr)
+      pthread_attr_destroy(&at);
+    if (!ok)
       return free(a), cpu_lane_destroy(c), NULL;
     c->n = i + 1;
   }

@@ -320,10 +320,10 @@ bool fwd_cpu_settle(Forward *f, char *err);
 bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, char *err);
 /* hip_cpu_lane.c: the CPU half's pool, maps and buffers (forward_lane), their end; whether a small step's unit goes to
    the CPU (not in GPU memory: neither resident nor read into the pool); a unit's parts in the mapped files */
-bool fwd_cpu_create(Forward *f, int threads, char *err);
+bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err);
 void fwd_cpu_destroy(Forward *f);
 bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks);
-void fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]);
+bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]);
 /* the layer's CPU experts (cpu_e, cpu_unit: nc of them, their rows among the step's picks rows by expert, row r's
    token tok[r] and pair pair[r]) given to the pool, cpu_value its post */
 bool fwd_cpu_submit(Forward *f, int l, uint32_t picks, uint32_t nc, const int32_t *tok, const int32_t *pair,

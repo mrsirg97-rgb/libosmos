@@ -152,7 +152,7 @@ int main() {
           fx.seed_window == (uint32_t) w->geo.window && fx.native_ctx > 0);
     const ForwardOptions fo = {(int) w->geo.n_layers, kCtx, kBudget, nullptr, 0, true};
     Forward* f = forward_create_with(w, &fo, ferr);
-    CHECK(f && forward_lane(f, 0, ferr));
+    CHECK(f && forward_lane(f, 0, NULL, ferr));
     Drafter* d = drafter_create(f, ddir.c_str(), ferr);
     CHECK(d);
     Seq* s = seq_create(f, ferr);

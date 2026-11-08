@@ -17,12 +17,12 @@ static bool refused(Forward *f, char *err, const char *why)
   return fwd_fail(err, why);
 }
 
-bool fwd_cpu_create(Forward *f, int threads, char *err)
+bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err)
 {
   const Geometry *g = f->g;
   const uint64_t D = g->n_embd;
-  if (!(f->cpu = cpu_lane_create(threads, LANE_PAIRS, (uint32_t)D, (uint32_t)g->expert_ff)))
-    return refused(f, err, "the CPU lane's pool (its threads, or a CPU without AVX-512 VNNI)");
+  if (!(f->cpu = cpu_lane_create(threads, cores, LANE_PAIRS, (uint32_t)D, (uint32_t)g->expert_ff)))
+    return refused(f, err, "the CPU lane's pool (its threads, a core it cannot be pinned to, or a CPU without AVX-512 VNNI)");
   for (int i = 0; i < f->w->n_files; i++)
   {
     struct stat st;
@@ -67,19 +67,24 @@ bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks)
   return lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type) && L->exp_gate->type == L->exp_up->type;
 }
 
-void fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS])
+bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS])
 {
   const PoolUnit *u = &f->units[unit];
   for (int p = 0; p < u->n_parts; p++)
   {
+    /* the part's file: its fd the model's buffered one or (the pool reads O_DIRECT since 0.3.0) its direct twin -
+       one of the model's or no part at all (refused: never a map past the files') */
     int i = 0;
-    while (f->fds[i] != u->part[p].fd) /* (a unit's fd is one of the model's) */
+    while (i < f->w->n_files && f->fds[i] != u->part[p].fd && f->dfds[i] != u->part[p].fd)
       i++;
+    if (i == f->w->n_files || !f->map[i])
+      return false;
     part[p] = f->map[i] + u->part[p].offset;
     /* its pages asked for now, all at once: the workers' first touches find them read, or reading */
     const uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE), at = (uintptr_t)part[p] & ~(page - 1);
     (void)madvise((void *)at, (uintptr_t)part[p] + u->part[p].bytes - at, MADV_WILLNEED);
   }
+  return true;
 }
 
 uint64_t forward_cpu_picks(const Forward *f) { return f ? f->cpu_picks : 0; }

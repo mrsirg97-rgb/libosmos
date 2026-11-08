@@ -61,6 +61,11 @@ LANE_FN int lane_q8_type(unsigned t) { return 0 QTYPES(LANE_Q8_ROW); }
 LANE_FN int lane_q8_types(unsigned g, unsigned u, unsigned d) { return lane_q8_type(g) && lane_q8_type(u) && lane_q8_type(d); }
 /* a half-block's sum: its block scale d (an f16's value), its 2s + 1, its integer dot */
 LANE_FN float lane_q8_part(float d, int s21, int isum) { return d * (float)s21 * LANE_Q8_EIGHTH * (float)isum; }
+/* a K-quant's half with a minimum (Q2_K): (d sc) its dot - (dmin m) x's sum, each a part's (8 sc, 8 m: the eighth's) */
+LANE_FN float lane_q8_part_min(float d, int sc8, int isum, float dmin, int m8, int xsum)
+{
+  return lane_q8_part(d, sc8, isum) - lane_q8_part(dmin, m8, xsum);
+}
 
 /* the expert's activation: silu(min(g, lim)) clamp(u, -lim, lim), times scale (a routed expert's weight) */
 LANE_FN float lane_swiglu(float g, float u, float lim, float scale)

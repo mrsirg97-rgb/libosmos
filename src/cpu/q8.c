@@ -47,8 +47,10 @@ typedef struct
 {
   __m512i mag;
   __mmask64 neg;
-  uint32_t s21; /* a byte each: block 0's halves, then block 1's */
+  uint32_t s21; /* a byte each: block 0's halves, then block 1's (Q2_K's 8 sc) */
   float d;
+  uint32_t m8; /* Q2_K's: its halves' 8 m, as s21's bytes */
+  float dmin;
 } Pair;
 
 /* IQ2_XXS's and IQ2_XS's 8 chunks: unsigned grid bytes; a sign byte each, kKsigns' - its 7-bit index and that
@@ -166,6 +168,48 @@ AVX512 static INLINE void pair_iq1_s(const uint8_t *b, int j, Pair *p)
   p->d = f16(ld16(b));
 }
 
+/* IQ3_XXS's: a block's 4 chunks each two grid entries (4 unsigned bytes each), signed by kKsigns' 7-bit pattern of
+   the block's word (its 4 patterns, then s); both halves 2 (2s + 1) - its quarter as the contract's eighth */
+AVX512 static INLINE void pair_iq3_xxs(const uint8_t *b, int j, Pair *p)
+{
+  uint64_t g[8], neg = 0;
+  uint32_t s21 = 0;
+  for (int blk = 0; blk < 2; blk++)
+  {
+    const uint8_t *q = b + 2 + 8 * (j + blk);
+    const uint32_t aux = ld32(b + 66 + 4 * (j + blk));
+#pragma GCC unroll 4
+    for (int k = 0; k < 4; k++)
+    {
+      g[4 * blk + k] = (uint64_t)kIq3xxsGrid[q[2 * k]] | (uint64_t)kIq3xxsGrid[q[2 * k + 1]] << 32;
+      neg |= (uint64_t)kKsigns[(aux >> (7 * k)) & 0x7F] << (8 * (4 * blk + k));
+    }
+    s21 |= (uint32_t)(2 * (2 * (aux >> 28) + 1)) * 0x0101u << (16 * blk);
+  }
+  p->mag = _mm512_set_epi64((long long)g[7], (long long)g[6], (long long)g[5], (long long)g[4], (long long)g[3],
+                            (long long)g[2], (long long)g[1], (long long)g[0]);
+  p->neg = _cvtu64_mask64(neg);
+  p->s21 = s21;
+  p->d = f16(ld16(b));
+}
+
+/* Q2_K's: two blocks' 2-bit codes (the same 32 bytes of qs at shifts 2 (j % 4) and 2 (j % 4) + 2), no signs; each
+   half's 8 sc and 8 m from its scale byte (bytes 2j .. 2j + 3: block j's halves, then j + 1's), d and dmin */
+#define Q2_K_NIBBLES 0x0F0F0F0Fu
+AVX512 static INLINE void pair_q2_k(const uint8_t *b, int j, Pair *p)
+{
+  const __m256i qs = _mm256_loadu_si256((const __m256i *)(b + 16 + 32 * (j / 4)));
+  const __m256i three = _mm256_set1_epi8(3);
+  const int sh = 2 * (j % 4);
+  const __m256i lo = _mm256_and_si256(_mm256_srl_epi16(qs, _mm_cvtsi32_si128(sh)), three);
+  const __m256i hi = _mm256_and_si256(_mm256_srl_epi16(qs, _mm_cvtsi32_si128(sh + 2)), three);
+  p->mag = _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1);
+  p->neg = 0;
+  const uint32_t sc = ld32(b + 2 * j);
+  p->s21 = (sc & Q2_K_NIBBLES) << 3, p->m8 = ((sc >> 4) & Q2_K_NIBBLES) << 3;
+  p->d = f16(ld16(b + 80)), p->dmin = f16(ld16(b + 82));
+}
+
 /* the decoders by type: each row loop its own, the decoder inlined into it; a type with no arm aborts (ROWS_OF names
    only these) */
 #define DECODE(type, b, j, p)                                                                                      \
@@ -174,6 +218,8 @@ AVX512 static INLINE void pair_iq1_s(const uint8_t *b, int j, Pair *p)
    : (type) == QTYPE_IQ1_M  ? pair_iq1_m(b, j, p)                                                                 \
    : (type) == QTYPE_IQ2_S  ? pair_iq2_s(b, j, p)                                                                 \
    : (type) == QTYPE_IQ1_S  ? pair_iq1_s(b, j, p)                                                                 \
+   : (type) == QTYPE_IQ3_XXS ? pair_iq3_xxs(b, j, p)                                                              \
+   : (type) == QTYPE_Q2_K   ? pair_q2_k(b, j, p)                                                                  \
                             : abort())
 
 /* 4 vectors of 16 int32 to one: lane L's 4 of input i summed into its element i (each 128-bit lane a half-block) */
@@ -194,8 +240,9 @@ AVX512 static INLINE void group(uint32_t type, const uint8_t *row, uint32_t byte
   const uint32_t nb = cols / LANE_Q8_VALUES;
   __m512i mag[PAIRS];
   __mmask64 neg[PAIRS];
-  uint32_t s21[PAIRS] = {0};
+  uint32_t s21[PAIRS] = {0}, m8[PAIRS] = {0};
   float sd[2] = {0}; /* the group's two 256-value blocks' d (float lanes 0 .. 7 the first's blocks, 8 .. 15 the next) */
+  float smin[2] = {0}; /* Q2_K's dmin, likewise */
 #pragma GCC unroll 8
   for (int k = 0; k < n / 2; k++)
   {
@@ -203,6 +250,7 @@ AVX512 static INLINE void group(uint32_t type, const uint8_t *row, uint32_t byte
     Pair p;
     DECODE(type, row + (s / PER) * bytes, (int)(s % PER), &p);
     mag[k] = p.mag, neg[k] = p.neg, s21[k] = p.s21, sd[k / (PER / 2)] = p.d;
+    m8[k] = p.m8, smin[k / (PER / 2)] = p.dmin;
   }
   /* each float lane's d (2s + 1) / 8 for its block's two halves, in lane.h's order: (d (2s + 1)) / 8 */
   const __m512i by = _mm512_permutexvar_epi8(
@@ -215,6 +263,19 @@ AVX512 static INLINE void group(uint32_t type, const uint8_t *row, uint32_t byte
   const __m512 s1f = _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(by, 1)));
   const __m512 ds0 = _mm512_mul_ps(_mm512_mul_ps(dvv, s0f), eighth);
   const __m512 ds1 = _mm512_mul_ps(_mm512_mul_ps(dvv, s1f), eighth);
+  /* Q2_K's minimum: each half's (dmin 8 m) / 8 likewise, against x's sum (the contract's lane_q8_part_min) */
+  __m512 dm0 = _mm512_setzero_ps(), dm1 = _mm512_setzero_ps();
+  if (type == QTYPE_Q2_K)
+  {
+    const __m512i bm = _mm512_permutexvar_epi8(
+        SETR(SCALE_BYTES, 0, 0, 0, 0, 0, 0, 0, 0),
+        _mm512_castsi256_si512(_mm256_setr_epi32((int)m8[0], (int)m8[1], (int)m8[2], (int)m8[3], (int)m8[4],
+                                                 (int)m8[5], (int)m8[6], (int)m8[7])));
+    const __m512 mvv = _mm512_mask_blend_ps((__mmask16)~HALF_GROUP, _mm512_set1_ps(smin[0]), _mm512_set1_ps(smin[1]));
+    dm0 = _mm512_mul_ps(_mm512_mul_ps(mvv, _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(bm)))), eighth);
+    dm1 = _mm512_mul_ps(_mm512_mul_ps(mvv, _mm512_cvtepi32_ps(_mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(bm, 1)))),
+                        eighth);
+  }
   const __m512i perm = SETR(PERM);
   const __mmask16 live = n == GROUP ? (__mmask16)0xFFFF : (__mmask16)HALF_GROUP;
   const __m512i zero = _mm512_setzero_si512();
@@ -234,8 +295,19 @@ AVX512 static INLINE void group(uint32_t type, const uint8_t *row, uint32_t byte
         dot[k] = zero;
     }
     const __m512i lo = hsum4(dot[0], dot[1], dot[2], dot[3]), hi = hsum4(dot[4], dot[5], dot[6], dot[7]);
-    const __m512 p0 = _mm512_mul_ps(ds0, _mm512_cvtepi32_ps(_mm512_shuffle_i32x4(lo, hi, SEL_HALF0)));
-    const __m512 p1 = _mm512_mul_ps(ds1, _mm512_cvtepi32_ps(_mm512_shuffle_i32x4(lo, hi, SEL_HALF1)));
+    __m512 p0 = _mm512_mul_ps(ds0, _mm512_cvtepi32_ps(_mm512_shuffle_i32x4(lo, hi, SEL_HALF0)));
+    __m512 p1 = _mm512_mul_ps(ds1, _mm512_cvtepi32_ps(_mm512_shuffle_i32x4(lo, hi, SEL_HALF1)));
+    if (type == QTYPE_Q2_K) /* each half's x sum (codes all 1: vpdpbusd's), its minimum's part subtracted */
+    {
+      const __m512i ones = _mm512_set1_epi8(1);
+      __m512i sx[PAIRS];
+#pragma GCC unroll 8
+      for (int k = 0; k < PAIRS; k++)
+        sx[k] = k < n / 2 ? _mm512_dpbusd_epi32(zero, ones, _mm512_loadu_si512(x + 64 * k)) : zero;
+      const __m512i slo = hsum4(sx[0], sx[1], sx[2], sx[3]), shi = hsum4(sx[4], sx[5], sx[6], sx[7]);
+      p0 = _mm512_sub_ps(p0, _mm512_mul_ps(dm0, _mm512_cvtepi32_ps(_mm512_shuffle_i32x4(slo, shi, SEL_HALF0))));
+      p1 = _mm512_sub_ps(p1, _mm512_mul_ps(dm1, _mm512_cvtepi32_ps(_mm512_shuffle_i32x4(slo, shi, SEL_HALF1))));
+    }
     const __m512 xd = _mm512_permutexvar_ps(perm, _mm512_maskz_loadu_ps(live, d + (uint64_t)t * nb + s0));
     acc[t] = _mm512_mask3_fmadd_ps(xd, _mm512_add_ps(p0, p1), acc[t], live);
   }
@@ -293,6 +365,8 @@ ROWS_OF(rows_iq2_xs, IQ2_XS)
 ROWS_OF(rows_iq1_m, IQ1_M)
 ROWS_OF(rows_iq2_s, IQ2_S)
 ROWS_OF(rows_iq1_s, IQ1_S)
+ROWS_OF(rows_iq3_xxs, IQ3_XXS)
+ROWS_OF(rows_q2_k, Q2_K)
 
 typedef void (*rows_fn)(const uint8_t *w, uint32_t cols, uint32_t r0, uint32_t r1, const int8_t *q, const float *d,
                         uint32_t m, float *y, uint32_t ys);
@@ -317,6 +391,8 @@ bool cpu_q8_rows(uint32_t type, const void *w, uint32_t cols, uint32_t r0, uint3
   case QTYPE_IQ1_M: fn = rows_iq1_m; break;
   case QTYPE_IQ2_S: fn = rows_iq2_s; break;
   case QTYPE_IQ1_S: fn = rows_iq1_s; break;
+  case QTYPE_IQ3_XXS: fn = rows_iq3_xxs; break;
+  case QTYPE_Q2_K: fn = rows_q2_k; break;
   default: return false;
   }
   if (!w || !q || !d || !y || !n || !cols || cols % QK || r1 < r0 || !cpu_q8_ready())

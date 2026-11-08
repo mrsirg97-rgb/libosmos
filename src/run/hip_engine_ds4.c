@@ -107,7 +107,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (o->picks && !(e->picks = read_picks(o->picks, &m->w->geo, err)))
     return e_destroy(e), NULL;
   const ForwardOptions fo = {m->w->geo.n_layers, o->max_ctx, o->budget, e->picks, o->max_tokens, o->no_guess};
-  if (!(e->f = forward_create_with(m->w, &fo, err)) || !forward_lane(e->f, 0, err) ||
+  if (!(e->f = forward_create_with(m->w, &fo, err)) || !forward_lane(e->f, 0, NULL, err) ||
       (o->drafter && !(e->d = drafter_create(e->f, o->drafter, err))))
     return e_destroy(e), NULL;
   return e;

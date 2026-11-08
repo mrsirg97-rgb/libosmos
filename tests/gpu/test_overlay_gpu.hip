@@ -53,7 +53,7 @@ static Run decode(const std::string& first, const std::string& overlay) {
   const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens, true};
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward: %s\n", err);
-  CHECK(f && forward_lane(f, 0, err));
+  CHECK(f && forward_lane(f, 0, NULL, err));
   const uint32_t V = (uint32_t) w->geo.n_vocab;
   std::vector<int32_t> p(kPrompt);
   uint32_t r = 4242;

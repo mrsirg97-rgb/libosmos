@@ -50,7 +50,7 @@ uint64_t forward_identity(const Forward *f);
 uint64_t seq_state_bytes(const Seq *s);
 bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR]);
 bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[FORWARD_ERR]);
-bool forward_lane(Forward *f, int cpu_threads, char err[FORWARD_ERR]);
+bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FORWARD_ERR]);
 
 bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
