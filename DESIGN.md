@@ -2404,6 +2404,26 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   doubled, half the blocks, and the up's epilogue (silu, the f16 put) wave 0's alone. not kept (the diff in the
   0.5.5 session's notes); the F32 round trip is cheaper than the block it saves.
 
+### 0.5.6: the drafter, its floors, and the experts' small tiles - measured (2026-11-07, low-power)
+
+- **DeepSeek's drafter, the next round during the verify**: not possible as DSpark is built - a round reads the
+  token y (the trunk's own at the round's first position: the verify's) and the ring the verify's taps seed
+  (drafter_seed), so the next round's inputs are the verify's outputs. dropped.
+- **a drafted round's time** (UD-IQ1_M, a chat question, 33 rounds; the host's clock): the drafter 14.7 ms - its
+  three blocks 8.7 (5 rows' small matvecs), the trunk's head 4.0 (543 MB of Q6_K by mv), its rows' confidences and
+  markov steps ~2 (two host syncs a row) - against ~112 ms verifying: of a round's 127 ms the experts (the q8 lane)
+  47.6 (5 tokens' ~25 distinct experts a layer, ~8 GB at ~172 GB/s), the dense mm 33.3 (a token's), the matvecs
+  17.1, the rest 12.8, gaps 15.9 (the reads). the drafter's rows on the GPU would give ~1-1.5% of drafted decode.
+- **the drafting floors and cap** (the three questions x 256, one round each, every hash the same): floor 0.1 cap 5
+  (the shipped) 31.2 tok/s mean; floor 0.2 30.7, 0.3 30.3, 0.5 29.7; cap 4 30.2, 3 28.0, 2 24.8 - a longer round
+  pays: an accepted draft saves a ~60 ms round against its ~8 ms of new experts. the shipped floors are the fastest
+  as they were the least energy (0.3.x).
+- **the register A path past one tile** (each tile's chain over the one A: the same bits), the experts at 32 / 64
+  tokens each (64 a launch): the IQ4s +1-2%, IQ2_S -10% and IQ3_XXS -5% at 32 with every type on it - a wash.
+  and 33-64 tokens on the 8-tile kernel (its last tiles empty: 4's spills 16 B a lane at 256 VGPRs) slower at
+  every size (IQ2_S 669 -> 715 us at 64, Q2_0 873 -> 980). the 4-tile kernel stays; at these counts the experts do
+  ~20 TFLOP/s of work (GB/s the wrong measure there).
+
 ### 0.5.5: a token's A operand from the decode, no LDS (2026-11-07, low-power)
 
 the question that found it: could more waves be resident at a token? the half-slab LDS raised them but doubled each
