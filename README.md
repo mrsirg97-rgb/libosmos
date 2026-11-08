@@ -133,9 +133,9 @@ osmos 0.3.2 at the box's `low-power` profile (power-profiles-daemon's power-save
 | Agents (4 x 8) | 481 s | 63 | **3.79** an answer token | +8% time, -46% energy |
 
 At low-power osmos drafts faster than 0.2.0 did at `performance` (29.8 tok/s), at ~71 W against ~125. At the packs'
-own 1M context (0.5.6, `performance`), decode is UD-IQ1_S 19.4 plain / 41.5 drafted, UD-IQ1_M 17.2 / 33.2, UD-IQ2_XXS
-13.9 / 19.3 tok/s: a 1M context's attention state is ~0.85 GiB, which UD-IQ2_XXS's drafting, the most miss-bound,
-feels most (21.3 at 64K).
+own 1M context (0.5.7, `performance`), decode is UD-IQ1_S 19.3 plain / 41.7 drafted, UD-IQ1_M 17.1 / 33.9, UD-IQ2_XXS
+13.8 / 24.6 tok/s (0.5.6's build the same session: 21.2 drafted - stale experts now go first, DESIGN.md "0.5.7"): a
+1M context's attention state is ~0.85 GiB.
 
 ### Qwen3.8-Flash-Next against llama.cpp
 
@@ -191,7 +191,8 @@ UD-IQ1_S's experts are 12.5% smaller than UD-IQ1_M's, so more of them stay in GP
 and decodes faster; UD-IQ1_M scores better on unsloth's six benchmarks (85.55 against 83.53). The abliterated packs
 decode at the same speed. UD-IQ2_XXS scores best but decodes slowest: its experts are 18% larger than UD-IQ1_M's, so
 more of them are read from the SSD, and a drafted round (several tokens' experts at once) waits on those reads most -
-the power falls because the GPU idles, the energy a token rises. 0.5.7's miss prediction is aimed at it. All three
+the power falls because the GPU idles, the energy a token rises (0.5.6's numbers; 0.5.7's eviction takes its
+drafting from 21.2 to 24.6 tok/s at 1M). All three
 run unsloth's MXFP8 Engram table, speed- and quality-neutral against the IQ4_NL one
 (DESIGN.md, "the MXFP8 Engram pack"). ISTA-DASLab's GSQ-RCO IQ2_XXS, the quant osmos was first built on, decodes as
 fast as UD-IQ1_S but scores worst of the three (perplexity 2.546): measured, not packed.

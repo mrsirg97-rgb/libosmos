@@ -81,6 +81,7 @@ void pool_want(Pool *p, uint32_t unit, uint64_t next);
 void pool_ready(Pool *p, uint32_t unit, bool ok);
 bool pool_dev(const Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
 void pool_release(Pool *p, uint32_t unit, uint64_t next);
+void pool_now(Pool *p, uint64_t now);
 
 PoolState pool_state(const Pool *p, uint32_t unit);
 uint64_t pool_bytes(const Pool *p);
@@ -126,14 +127,14 @@ pool_pin
     fetcher), and a PIN or FAILED event for it follows pool_ready. the hold is taken; `dev` untouched.
   - POOL_FULL: a cold unit with no room even with every unheld pinned unit gone - no hold, nothing changed - or
     memory the allocator refused - no hold, though room may have been made for it (a REFUSED event either way).
-  room: spare memory of the unit's size is reused; else spares are freed, then unheld pinned units go (UNPIN), the
-  one wanted furthest ahead first (pool_release's next), of those the least recently released, their memory reused
-  when it is the size, kept spare when not; a held or reading one never goes.
+  room: spare memory of the unit's size is reused; else spares are freed, then unheld pinned units go (UNPIN): the
+  stale first (pool_now), then the one wanted furthest ahead (pool_release's next), each tie the least recently
+  released, their memory reused when it is the size, kept spare when not; a held or reading one never goes.
 
 pool_want
   the unit, no hold on it, is wanted at `next` (pool_release's clock): a cold one's read begins (its memory taken: a
-  READ event) if room can be made from units wanted later than it - spares, the allocator's, unheld units wanted
-  after `next` - and nothing happens if not; a reading or pinned one is wanted at `next` from now on (an old guess
+  READ event) if room can be made from units wanted later than it - spares, the allocator's, unheld units stale or
+  wanted after `next` - and nothing happens if not; a reading or pinned one is wanted at `next` from now on (an old guess
   the caller corrects). a held unit is nothing to do: its release says when. the prefetch: the units the caller
   expects to pin soon read before it does, never in place of ones wanted sooner.
 
@@ -151,6 +152,13 @@ pool_release
   wanted furthest ahead goes first. the forward's layers come round in a fixed order, so least recently used would
   free exactly the units wanted soonest; furthest ahead is the best a cycle allows. the caller's part: the GPU is past
   the unit when its last hold ends - its memory may be written again at once. a release with no hold is nothing to do.
+
+pool_now
+  the caller's clock now (pool_release's and pool_want's; 0 at create). a pinned unit whose `next` is before it was not
+  wanted when it said - a decode's expert not picked again on the next token - and is stale: it goes before every
+  unit still wanted, so the units wanted soonest are never kept behind ones whose time passed (furthest ahead alone
+  holds those as "soonest" forever: on UD-IQ2_XXS 28% of the guess's reads found no room). a unit wanted at `now`
+  is not stale.
 
 pool_state / pool_bytes / pool_reading
   a unit's state; the bytes of GPU memory held now (units' and spares'); the units reading now. a pin refused FULL

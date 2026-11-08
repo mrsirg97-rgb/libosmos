@@ -160,7 +160,7 @@ static void prefetch(Forward *f, int l, const int32_t *ids, uint32_t picks)
       pool_want(f->pool, here + e, f->visits - 1 + (uint64_t)f->n_layers);
   for (uint32_t e = 0; e < E; e++)
     if (f->rix[next + e] < 0)
-      pool_want(f->pool, next + e, f->visits);
+      pool_want(f->pool, next + e, f->visits + 1); /* the next layer's visit */
 }
 
 /* the routed experts: each distinct one resident or held in the pool (their reads at once) and read once for
@@ -196,7 +196,7 @@ bool fwd_moe(Forward *f, int l, char *err)
   if (f->held_layer != l) /* the stream is past the last layer's experts: the router came after them */
   {
     fwd_release_held(f);
-    f->visits++, f->held_layer = l;
+    f->visits++, f->held_layer = l, pool_now(f->pool, f->visits);
   }
   const int32_t *ids = f->r_ids;
   fwd_guess_score(f, l, ids, P);

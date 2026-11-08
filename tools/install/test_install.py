@@ -72,7 +72,7 @@ class Manifest(unittest.TestCase):
         self.assertEqual(x["table"]["slot"], [6, 6])
         self.assertEqual([m["files"][f]["bytes"] for f in x["shards"]],
                          [5780923, 49955895008, 49950675200, 48971469632, 16419622240])
-        self.assertEqual(x["settings"], {"no_guess": False, "max_context": 1048576})  # its misses 5x: the guess pays
+        self.assertEqual(x["settings"], {"no_guess": True, "max_context": 1048576})  # 0.5.7: off is fastest (DESIGN.md)
         self.assertEqual((x["overlay"], x["drafter"]), ("abl-ud-iq2_xxs", ["drafter-bin", "drafter-json"]))
         q = m["packs"]["qwen38-ud-iq3_xxs"]
         self.assertEqual(q["drafter_kind"], "mtp")                            # its MTP head: one GGUF

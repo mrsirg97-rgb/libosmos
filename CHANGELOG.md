@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.5.7]: stale experts out first
+
+Every stream the same bits as 0.5.6 (each benchmark's hash, every pack, plain and drafted). Measured 2026-11-08,
+`performance`, each pack's own 1M context, the three questions x 256 tokens, the old and new builds interleaved over
+two rounds:
+
+| | 0.5.6 | 0.5.7 | |
+| --- | ---: | ---: | ---: |
+| UD-IQ2_XXS drafted, tok/s (the three answers' decode) | 21.2 (36.4 s) | 24.6 (31.3 s) | **+16%** |
+| UD-IQ2_XXS plain | 13.7 | 13.8 | the same |
+| UD-IQ1_M drafted / plain | 33.1 / 17.2 | 33.9 / 17.1 | +2.4% / the same |
+| UD-IQ1_S drafted / plain | 41.8 / 19.5 | 41.7 / 19.3 | the same / -1% (both rounds) |
+
+(0.5.6's column is the old build in the same session; its installer titles, single runs, read lower: UD-IQ2_XXS
+drafted 19.3.)
+
+- **Stale experts go first** (`pool_now`). The pool's room went to the expert wanted furthest ahead - Belady's
+  choice for a prompt, whose every step visits each layer's experts. A decode's expert not picked again on the next
+  token kept its past "wanted at", so it counted as wanted soonest: those piled up, evicted last, while the experts
+  just used went first - and a guessed read, which may only take room from experts wanted after it, could take none
+  of theirs (28% of UD-IQ2_XXS's refused). An expert past its time is now stale: out before any still wanted, the
+  least recently released of them first; a read ahead is stamped with the next layer's visit, not this one's. With
+  the guess off, UD-IQ2_XXS drafted waits on 18% fewer reads (10,555 -> 8,673) and decodes 12% faster on this alone.
+- **UD-IQ2_XXS's pack turns the guess off** (as the IQ1 packs run): on the new pool the guess no longer pays - its
+  top 6 read 14,000 experts a run, 65% never used, their reads in the SSD's queue ahead of the ones waited on; off,
+  top 1, 2 and 3 within 2% of each other, top 6 9% behind. The guess stays a pack setting.
+- Measured and not kept (DESIGN.md, "0.5.7"): a wider guess (top 10: -40%), an expert-transition table (learned in
+  run order: its trusted predictions are experts already resident - no miss caught the router did not), votes across a
+  verify's tokens (rank alone does as well).
+
 ## [0.5.6]: conversations kept by default, and UD-IQ2_XXS
 
 Every 0.5.5 stream the same bits (DeepSeek's three questions, both packs; Qwen's prompts and decode). Measured the

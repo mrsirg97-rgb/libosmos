@@ -51,7 +51,7 @@ void fwd_guess_want(Forward *f, int l)
       continue;
     f->guessed[next + (uint32_t)e] = f->visits + 1;
     const bool cold = pool_state(f->pool, next + (uint32_t)e) == POOL_COLD;
-    pool_want(f->pool, next + (uint32_t)e, f->visits);
+    pool_want(f->pool, next + (uint32_t)e, f->visits + 1); /* the next layer's visit */
     f->g_read += cold && pool_state(f->pool, next + (uint32_t)e) != POOL_COLD;
   }
 }
