@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/model/state_io.h"
+
 #define OSMOS_ERR 256
 #define OSMOS_MAX_BLOCK 8 /* a drafter's most drafts a round, any family's */
 /* a draft kept while each confidence is at least this and their product too (oseq_draft's floors): swept for energy at
@@ -76,6 +78,8 @@ int32_t oseq_position(const OsmosSeq *s);
 uint64_t oseq_state_bytes(const OsmosSeq *s);
 bool oseq_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
 bool oseq_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
+bool oseq_save_to(const OsmosSeq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
+bool oseq_load_from(OsmosSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
 
 uint32_t osmos_block(const Osmos *e);
 bool oseq_seed(OsmosSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);
@@ -131,7 +135,9 @@ oseq_create .. oseq_load
   logit reads), oseq_rollback (its last n tokens dropped: n at most oseq_reach), oseq_reach (how far back a rollback
   can go now: a cache a position indexes reaches SEQ_MAX_BACK; a recurrent state, the snapshots it holds), its saved
   state's bytes, save and load (load refuses another identity, size or a damaged state - the sequence then empty,
-  position 0, never part one conversation and part another).
+  position 0, never part one conversation and part another). oseq_save_to / oseq_load_from: the same bytes in
+  pieces of at most STATE_CHUNK (osmos/model/state_io.h) - a state of any size through that much host memory;
+  oseq_save / oseq_load are them over one buffer.
 
 osmos_block, oseq_seed, oseq_draft, oseq_draft_all
   the drafter, when the engine has one (osmos_block 0 when not: oseq_seed and oseq_draft then refuse). oseq_seed:

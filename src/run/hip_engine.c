@@ -163,14 +163,55 @@ uint32_t oseq_reach(const OsmosSeq *s) { return s ? s->e->fam->reach(s->impl) : 
 int32_t oseq_position(const OsmosSeq *s) { return s ? s->e->fam->position(s->impl) : -1; }
 uint64_t oseq_state_bytes(const OsmosSeq *s) { return s ? s->e->fam->state_bytes(s->impl) : 0; }
 
+bool oseq_save_to(const OsmosSeq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
+{
+  return s && sink ? s->e->fam->save_to(s->impl, sink, ctx, err) : fail(err, "no sequence or sink");
+}
+
+bool oseq_load_from(OsmosSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
+{
+  return s && src ? s->e->fam->load_from(s->impl, bytes, src, ctx, err) : fail(err, "no sequence or source");
+}
+
+/* one buffer as the pieces' sink and source: its bytes in order, never past its end */
+typedef struct
+{
+  uint8_t *p;
+  uint64_t at, n;
+} Mem;
+
+static bool mem_sink(void *ctx, const void *bytes, uint64_t n)
+{
+  Mem *m = ctx;
+  if (n > m->n - m->at)
+    return false;
+  memcpy(m->p + m->at, bytes, n), m->at += n;
+  return true;
+}
+
+static bool mem_source(void *ctx, void *bytes, uint64_t n)
+{
+  Mem *m = ctx;
+  if (n > m->n - m->at)
+    return false;
+  memcpy(bytes, m->p + m->at, n), m->at += n;
+  return true;
+}
+
 bool oseq_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
 {
-  return s && out ? s->e->fam->save(s->impl, out, bytes, err) : fail(err, "no sequence or buffer");
+  if (!s || !out)
+    return fail(err, "no sequence or buffer");
+  if (bytes != oseq_state_bytes(s))
+    return fail(err, "a buffer not the state's size (oseq_state_bytes)");
+  Mem m = {out, 0, bytes};
+  return oseq_save_to(s, mem_sink, &m, err) && (m.at == bytes || fail(err, "a state shorter than its size"));
 }
 
 bool oseq_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
 {
-  return s && in ? s->e->fam->load(s->impl, in, bytes, err) : fail(err, "no sequence or state");
+  Mem m = {(uint8_t *)in, 0, bytes};
+  return s && in ? oseq_load_from(s, bytes, mem_source, &m, err) : fail(err, "no sequence or state");
 }
 
 bool oseq_seed(OsmosSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR])

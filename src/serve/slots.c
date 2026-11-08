@@ -162,6 +162,14 @@ uint32_t slots_in_ram(const Slots *s)
 
 uint32_t slots_in_dir(const Slots *s) { return s ? s->n - slots_in_ram(s) : 0; }
 
+uint64_t slots_ram_bytes(const Slots *s)
+{
+  uint64_t b = 0;
+  for (uint32_t i = 0; s && i < s->n; i++)
+    b += s->e[i].state ? s->e[i].bytes : 0;
+  return b;
+}
+
 uint64_t slots_dir_bytes(const Slots *s)
 {
   uint64_t b = 0;
@@ -198,10 +206,11 @@ static void trim_dir(Slots *s, int64_t keep)
   }
 }
 
-/* RAM past its cap: the least recently used to the folder (or dropped without one); false for a write that failed */
+/* RAM past its caps (conversations, bytes): the least recently used to the folder (or dropped without one); false
+   for a write that failed */
 static bool trim_ram(Slots *s)
 {
-  while (slots_in_ram(s) > s->o.cap)
+  while (slots_in_ram(s) > s->o.cap || slots_ram_bytes(s) > s->o.ram_bytes)
   {
     const int64_t i = lru(s, false, -1);
     if (!s->dir)
@@ -352,15 +361,16 @@ static bool same(const Entry *e, const int32_t *t, uint32_t n)
   return e->n == n && !memcmp(e->tokens, t, (uint64_t)n * sizeof *t);
 }
 
-bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, const void *state, uint64_t bytes, bool *kept,
+bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_t bytes, bool *kept,
                char err[SLOTS_ERR])
 {
   if (kept)
     *kept = false;
   if (!s || !tokens || !state || !bytes)
-    return fail(err, "no store, tokens or state");
-  if (n < s->o.min_tokens)
-    return true;
+    return free(state), fail(err, "no store, tokens or state");
+  const bool past_ram = bytes > s->o.ram_bytes; /* RAM could not hold it alone: the folder's, or not kept */
+  if (n < s->o.min_tokens || (past_ram && !s->dir))
+    return free(state), true;
   for (uint32_t i = 0; i < s->n; i++) /* the same conversation kept already: this one in its place */
     if (same(&s->e[i], tokens, n))
     {
@@ -369,15 +379,21 @@ bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, const void *state, u
       drop(s, i);
       break;
     }
-  Entry e = {malloc((uint64_t)n * sizeof *tokens), n, malloc(bytes), bytes, stamp(), {0}};
-  if (!e.tokens || !e.state || !grow(s))
+  Entry e = {malloc((uint64_t)n * sizeof *tokens), n, state, bytes, stamp(), {0}};
+  if (!e.tokens || !grow(s))
   {
-    free(e.tokens), free(e.state);
+    free(e.tokens), free(state);
     return fail(err, "out of memory");
   }
-  memcpy(e.tokens, tokens, (uint64_t)n * sizeof *tokens), memcpy(e.state, state, bytes);
+  memcpy(e.tokens, tokens, (uint64_t)n * sizeof *tokens);
   snprintf(e.name, sizeof e.name, "slot-%016llx", (unsigned long long)fnv(tokens, (uint64_t)n * sizeof *tokens, FNV_SEED));
   s->e[s->n++] = e;
+  if (past_ram) /* straight to the folder: the ones in RAM stay */
+  {
+    if (!to_dir(s, s->n - 1))
+      return drop(s, s->n - 1), fail(err, "a conversation could not be written to the folder");
+    trim_dir(s, s->n - 1);
+  }
   if (!trim_ram(s))
     return fail(err, "a conversation could not be written to the folder");
   if (kept)
@@ -401,33 +417,116 @@ int64_t slots_find(const Slots *s, const int32_t *prompt, uint32_t n, uint32_t b
   return best;
 }
 
-bool slots_take(Slots *s, int64_t id, void **state, uint64_t *bytes, char err[SLOTS_ERR])
+/* a file as a state's sink or source: its bytes in order, counted */
+typedef struct
 {
-  if (!s || id < 0 || (uint64_t)id >= s->n || !state || !bytes)
-    return fail(err, "no such conversation");
+  FILE *f;
+  uint64_t done;
+} FilePieces;
+
+static bool file_sink(void *ctx, const void *bytes, uint64_t n)
+{
+  FilePieces *p = ctx;
+  if (fwrite(bytes, 1, n, p->f) != n)
+    return false;
+  p->done += n;
+  return true;
+}
+
+static bool file_source(void *ctx, void *bytes, uint64_t n)
+{
+  FilePieces *p = ctx;
+  if (fread(bytes, 1, n, p->f) != n)
+    return false;
+  p->done += n;
+  return true;
+}
+
+/* RAM's state as a source */
+typedef struct
+{
+  const uint8_t *p;
+  uint64_t at, n;
+} MemPieces;
+
+static bool mem_source(void *ctx, void *bytes, uint64_t n)
+{
+  MemPieces *m = ctx;
+  if (n > m->n - m->at)
+    return false;
+  memcpy(bytes, m->p + m->at, n), m->at += n;
+  return true;
+}
+
+bool slots_put_stream(Slots *s, const int32_t *tokens, uint32_t n, uint64_t bytes, SlotsSave save, void *ctx,
+                      bool *kept, char err[SLOTS_ERR])
+{
+  if (kept)
+    *kept = false;
+  if (!s || !tokens || !save || !bytes)
+    return fail(err, "no store, tokens or save");
+  if (n < s->o.min_tokens || !s->dir)
+    return true;
+  for (uint32_t i = 0; i < s->n; i++) /* the same conversation kept already: this one in its place */
+    if (same(&s->e[i], tokens, n))
+    {
+      if (!s->e[i].state)
+        unlink_entry(s, s->e[i].name);
+      drop(s, i);
+      break;
+    }
+  Entry e = {malloc((uint64_t)n * sizeof *tokens), n, NULL, bytes, stamp(), {0}};
+  if (!e.tokens || !grow(s))
+    return free(e.tokens), fail(err, "out of memory");
+  memcpy(e.tokens, tokens, (uint64_t)n * sizeof *tokens);
+  snprintf(e.name, sizeof e.name, "slot-%016llx", (unsigned long long)fnv(tokens, (uint64_t)n * sizeof *tokens, FNV_SEED));
+  char bin[4096], tmp[4200];
+  path(s, e.name, ".bin", bin, sizeof bin);
+  snprintf(tmp, sizeof tmp, "%s.tmp", bin);
+  FilePieces fp = {fopen(tmp, "wb"), 0};
+  bool ok = fp.f && save(ctx, file_sink, &fp) && fp.done == bytes && fflush(fp.f) == 0 && fsync(fileno(fp.f)) == 0;
+  if (fp.f && fclose(fp.f) != 0)
+    ok = false;
+  if (!ok || rename(tmp, bin) != 0)
+  {
+    unlink(tmp), free(e.tokens);
+    return fail(err, "a conversation's state could not be written to the folder");
+  }
+  s->e[s->n++] = e;
+  if (!write_meta(s, &s->e[s->n - 1]))
+  {
+    unlink_entry(s, s->e[s->n - 1].name), drop(s, s->n - 1);
+    return fail(err, "a conversation's .meta could not be written");
+  }
+  trim_dir(s, s->n - 1);
+  if (kept)
+    *kept = true;
+  return true;
+}
+
+bool slots_take_stream(Slots *s, int64_t id, SlotsLoad load, void *ctx, char err[SLOTS_ERR])
+{
+  if (!s || id < 0 || (uint64_t)id >= s->n || !load)
+    return fail(err, "no such conversation, or no load");
   Entry *e = &s->e[id];
-  uint8_t *st = e->state;
-  if (!st) /* the folder's: read back, its files removed */
+  bool ok;
+  if (e->state) /* RAM's */
+  {
+    MemPieces m = {e->state, 0, e->bytes};
+    ok = load(ctx, e->bytes, mem_source, &m) && m.at == e->bytes;
+  }
+  else /* the folder's: read in pieces, its files removed */
   {
     char p[4096];
     path(s, e->name, ".bin", p, sizeof p);
-    FILE *f = fopen(p, "rb");
-    st = f ? malloc(e->bytes) : NULL;
-    const bool ok = st && fread(st, 1, e->bytes, f) == e->bytes && fgetc(f) == EOF;
-    if (f)
-      fclose(f);
+    FilePieces fp = {fopen(p, "rb"), 0};
+    ok = fp.f && load(ctx, e->bytes, file_source, &fp) && fp.done == e->bytes;
+    if (fp.f)
+      fclose(fp.f);
     unlink_entry(s, e->name);
-    if (!ok)
-    {
-      free(st);
-      drop(s, (uint32_t)id);
-      return fail(err, "a kept conversation's state could not be read");
-    }
   }
-  *state = st, *bytes = e->bytes;
-  e->state = NULL; /* (now the caller's) */
   drop(s, (uint32_t)id);
-  return true;
+  return ok || fail(err, "a kept conversation's state could not be taken back");
 }
 
 bool slots_flush(Slots *s, char err[SLOTS_ERR])
@@ -449,5 +548,22 @@ bool slots_flush(Slots *s, char err[SLOTS_ERR])
       newest = s->e[i].used, last = i;
   }
   trim_dir(s, last); /* (the most recently used kept: the last a run set aside) */
+  return true;
+}
+
+bool slots_room(Slots *s, uint64_t bytes, char err[SLOTS_ERR])
+{
+  if (!s || bytes > s->o.ram_bytes)
+    return fail(err, "a state larger than RAM's room for kept conversations");
+  while (slots_ram_bytes(s) + bytes > s->o.ram_bytes)
+  {
+    const int64_t i = lru(s, false, -1);
+    if (!s->dir)
+      drop(s, (uint32_t)i);
+    else if (!to_dir(s, (uint32_t)i))
+      return drop(s, (uint32_t)i), fail(err, "a conversation could not be written to the folder");
+    else
+      trim_dir(s, i);
+  }
   return true;
 }

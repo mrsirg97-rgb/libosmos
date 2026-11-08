@@ -105,19 +105,39 @@ bool conv_restart(Conv *c, const Server *sv)
   return (c->s = oseq_create(sv->e, c->err)) != NULL;
 }
 
+/* the conversation's state given to the store's sink, or taken from its source (slots.h's save / load) */
+static bool conv_save(void *ctx, StateSink sink, void *sink_ctx)
+{
+  Conv *c = ctx;
+  return oseq_save_to(c->s, sink, sink_ctx, c->err);
+}
+
+static bool conv_load(void *ctx, uint64_t bytes, StateSource src, void *src_ctx)
+{
+  Conv *c = ctx;
+  return oseq_load_from(c->s, bytes, src, src_ctx, c->err);
+}
+
+/* set aside: into RAM where its room holds the state (slots_room), else straight to the folder in pieces - never
+   whole in RAM past the room the operator's 8 GiB leaves */
 void conv_set_aside(Conv *c, const Server *sv)
 {
   if (!sv->slots || !c->held.n)
     return;
   const uint64_t bytes = oseq_state_bytes(c->s);
-  void *st = malloc(bytes);
   char serr[SLOTS_ERR] = "";
-  bool kept = false;
-  if (!st || !oseq_save(c->s, st, bytes, c->err) ||
-      !slots_put(sv->slots, c->held.v, c->held.n, st, bytes, &kept, serr))
-    out("NOTE slots: a conversation of %u tokens not set aside (%s%s)\n", c->held.n, st ? c->err : "out of memory",
-        serr);
-  free(st);
+  bool kept = false, ok;
+  void *st = slots_room(sv->slots, bytes, serr) ? malloc(bytes) : NULL;
+  c->err[0] = '\0';
+  if (st && oseq_save(c->s, st, bytes, c->err))
+    ok = slots_put(sv->slots, c->held.v, c->held.n, st, bytes, &kept, serr); /* (put: st the store's) */
+  else
+  {
+    free(st), serr[0] = '\0';
+    ok = slots_put_stream(sv->slots, c->held.v, c->held.n, bytes, conv_save, c, &kept, serr);
+  }
+  if (!ok)
+    out("NOTE slots: a conversation of %u tokens not set aside (%s%s)\n", c->held.n, c->err, serr);
 }
 
 static uint32_t common(const Ids *a, const int32_t *p, uint32_t n)
@@ -151,16 +171,13 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
     return false;
   if (id < 0)
     return true;
-  void *st = NULL;
-  uint64_t bytes = 0;
   char serr[SLOTS_ERR] = "";
-  if (!slots_take(sv->slots, id, &st, &bytes, serr) || !oseq_load(c->s, st, bytes, c->err))
+  c->err[0] = '\0';
+  if (!slots_take_stream(sv->slots, id, conv_load, c, serr)) /* (a failed load leaves the sequence empty) */
   {
-    out("NOTE slots: a kept conversation of %u tokens not taken back (%s%s)\n", len, serr, st ? c->err : "");
-    free(st);
+    out("NOTE slots: a kept conversation of %u tokens not taken back (%s%s)\n", len, serr, c->err);
     return conv_restart(c, sv);
   }
-  free(st);
   for (uint32_t i = 0; i < len; i++)
     if (!ids_push(&c->held, p[i]))
       return false;

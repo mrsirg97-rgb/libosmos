@@ -18,8 +18,10 @@ lane, so a turn reads only its new tokens. exit 0: every turn of every run answe
 import argparse
 import os
 import random
+import shutil
 import statistics
 import sys
+import tempfile
 import threading
 import time
 
@@ -142,6 +144,10 @@ def main():
     ap.add_argument("--maya-pack")
     ap.add_argument("--ctx", type=int, default=131072)
     ap.add_argument("--agents", type=int, default=4)
+    ap.add_argument("--lanes", type=int, help="osmos-serve's --parallel (default: one a agent)")
+    ap.add_argument("--slots", choices=("on", "off"), default="off",
+                    help="osmos-serve's kept conversations (in a temporary folder); off: as maya's runs")
+    ap.add_argument("--slot-parent", default=os.path.expanduser("~/bench"), help="where that folder goes")
     ap.add_argument("--turns", type=int, default=8)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--prompts", default=os.path.expanduser("~/bench/osmos-prompts"))
@@ -158,11 +164,15 @@ def main():
     ok = True
     if a.only in ("both", "osmos"):
         args = ["--model", a.model, "--dspark", a.dspark, "--budget", a.budget, "--max-tokens", a.max_tokens,
-                "--max-context", str(a.ctx), "--parallel", str(a.agents)] + (["--picks", a.picks] if a.picks else []) + \
+                "--max-context", str(a.ctx), "--parallel", str(a.lanes or a.agents)] + (["--picks", a.picks] if a.picks else []) + \
             a.osmos_flag
-        env = dict(os.environ, OSMOS_SLOT_KEEP="0")
-        ok &= report(run(f"osmos-serve (budget {a.budget} GiB, {a.max_tokens}-token steps)", a.exe, args, env,
-                         plan, text), total)
+        slots = tempfile.mkdtemp(prefix="osmos-bench-slots-", dir=a.slot_parent)  # on the SSD (/tmp: RAM here)
+        env = dict(os.environ, OSMOS_SLOT_KEEP="1" if a.slots == "on" else "0", OSMOS_SLOT_DIR=slots)
+        try:
+            ok &= report(run(f"osmos-serve (budget {a.budget} GiB, {a.max_tokens}-token steps, "
+                             f"{a.lanes or a.agents} lanes, slots {a.slots})", a.exe, args, env, plan, text), total)
+        finally:
+            shutil.rmtree(slots, ignore_errors=True)
     if a.only in ("both", "maya") and a.maya_exe:
         args = ["--pack", a.maya_pack, "--max-context", str(a.ctx), "--tp", "1", "--threads", "on", "--reserve-mib",
                 "1024", "--vision", "off", "--dspark", "on", "--parallel", str(a.agents)]

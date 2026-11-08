@@ -15,8 +15,9 @@
    --no-guess: no experts guessed a layer ahead (OsmosOptions' no_guess - a model whose misses are few).
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
-   OSMOS_SLOT_KEEP=1 keeps conversations (maya #356): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
-   (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least,
+   conversations are kept (maya #356; OSMOS_SLOT_KEEP=0: not): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
+   (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least, RAM's room the
+   available above 8 GiB (OSMOS_SLOT_RAM_GB lowers it; past it a state streams to the folder in pieces),
    OSMOS_SLOT_DAYS (7). OSMOS_STATS=1: the forward's read counters on stderr at exit (the reads it waited on, their
    time; the guess's; the swaps). greedy: maya's sampling, penalty and thinking keys are refused, named */
 #define _GNU_SOURCE
@@ -56,19 +57,41 @@ static int die(const char *what)
   return 2;
 }
 
+/* the operator's rule: this much of the system's RAM is left free - the kept conversations' RAM is what is above it */
+#define SERVE_RAM_FREE (8ull << 30)
+
+/* MemAvailable's bytes (0 when it cannot be read: no room, fail closed) */
+static uint64_t mem_available(void)
+{
+  FILE *f = fopen("/proc/meminfo", "r");
+  unsigned long long kb = 0;
+  char line[256];
+  while (f && fgets(line, sizeof line, f))
+    if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1)
+      break;
+  if (f)
+    fclose(f);
+  return (uint64_t)kb << 10;
+}
+
 static bool open_slots(Server *sv, const char *model, char *err, size_t en)
 {
   char dflt[4096];
   const char *slash = strrchr(model, '/');
   snprintf(dflt, sizeof dflt, "%.*s/slots", slash ? (int)(slash - model) : 1, slash ? model : ".");
   const char *dir = getenv("OSMOS_SLOT_DIR") ? getenv("OSMOS_SLOT_DIR") : dflt;
-  const SlotsOptions so = {dir, (uint32_t)env_num("OSMOS_SLOT_CAP", 4), env_num("OSMOS_SLOT_GB", 16),
+  const uint64_t avail = mem_available(), room = avail > SERVE_RAM_FREE ? avail - SERVE_RAM_FREE : 0;
+  const double cap_gb = env_num("OSMOS_SLOT_RAM_GB", -1); /* lower only: the room above the 8 GiB is the most */
+  const uint64_t ram = cap_gb >= 0 && (uint64_t)(cap_gb * (double)(1ull << 30)) < room ? (uint64_t)(cap_gb * (double)(1ull << 30)) : room;
+  const SlotsOptions so = {dir, (uint32_t)env_num("OSMOS_SLOT_CAP", 4), ram, env_num("OSMOS_SLOT_GB", 16),
                            (uint32_t)env_num("OSMOS_SLOT_MIN", 1024), env_num("OSMOS_SLOT_DAYS", 7),
                            osmos_identity(sv->e)};
   char serr[SLOTS_ERR] = "";
   if (!(sv->slots = slots_create(&so, serr)))
     return snprintf(err, en, "%s", serr), false;
-  out("NOTE slots: %u conversations kept from an earlier run (%s)\n", slots_in_dir(sv->slots), dir);
+  out("NOTE slots: %u conversations kept from an earlier run (%s); RAM for them %.2f GiB (%.2f available, %.0f kept "
+      "free)\n", slots_in_dir(sv->slots), dir, ram / (double)(1ull << 30), avail / (double)(1ull << 30),
+      SERVE_RAM_FREE / (double)(1ull << 30));
   return true;
 }
 
@@ -114,7 +137,7 @@ int main(int argc, char **argv)
     return die("out of memory");
   if (!serve_build(&sv, conv, lanes, m, o, err))
     return die(err);
-  if (env_num("OSMOS_SLOT_KEEP", 0) != 0 && !open_slots(&sv, model, err, sizeof err))
+  if (env_num("OSMOS_SLOT_KEEP", 1) != 0 && !open_slots(&sv, model, err, sizeof err))
     return die(err);
   const int rc = par ? serve_multi(&sv, conv, lanes) : serve_single(&sv, conv);
   if (sv.slots) /* the end: every conversation set aside, RAM's written to the folder */

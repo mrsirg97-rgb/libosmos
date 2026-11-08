@@ -164,14 +164,14 @@ static uint32_t s_reach(const void *s) { return q4x_seq_reach(s); }
 static int32_t s_position(const void *s) { return q4x_seq_position(s); }
 static uint64_t s_state_bytes(const void *s) { return q4x_seq_state_bytes(s); }
 
-static bool s_save(const void *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
+static bool s_save_to(const void *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
-  return q4x_seq_save(s, out, bytes, err);
+  return q4x_seq_save_to(s, sink, ctx, err);
 }
 
-static bool s_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
+static bool s_load_from(void *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
-  return q4x_seq_load(s, in, bytes, err);
+  return q4x_seq_load_from(s, bytes, src, ctx, err);
 }
 
 static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ERR])
@@ -206,5 +206,5 @@ static bool s_draft_all(void *p, OsmosSeq *const *seqs, const int32_t *y, uint32
 const OsmosFamily osmos_q4x = {
     "qwen4exp", m_open,     m_close,       e_create, e_destroy, e_identity, e_room,     e_stats,
     e_batch,    e_logits,   e_greedy,      e_block,  s_create,  s_destroy,  s_prompt,   s_rollback,
-    s_reach,    s_position, s_state_bytes, s_save,   s_load,    s_seed,     s_draft,    s_draft_all,
+    s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft,    s_draft_all,
 };

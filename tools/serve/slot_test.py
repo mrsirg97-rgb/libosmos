@@ -12,7 +12,7 @@ then go through a prompt step's experts (WMMA), not the decode's (the lane) - th
                                                         turn reads from token 0
   in-run   A, B, A's next turn, one process             the turn reuses A and its answer (all but the answer's last
                                                         token), and answers the reference's bits
-  kept     A, B, then QUIT                              the folder keeps both (2 .bin + 2 .meta) under OSMOS_SLOT_GB
+  kept     A, B, then QUIT                              the folder keeps both (2 .bin + 2 .meta) under its default cap
   restart  A's next turn alone, a new process           the same reuse, from the folder; the same bits (greedy and,
                                                         with --dspark, drafted)
   evict    A, B, C into a folder capped at A+B's bytes   the least recently used (A) gone, B and C kept
@@ -49,12 +49,18 @@ def main():
     ap.add_argument("--dspark")
     ap.add_argument("--exe", default="bin/osmos-serve")
     ap.add_argument("--prompts", default=os.path.expanduser("~/bench/osmos-prompts"))
-    ap.add_argument("--budget", default="100")
+    ap.add_argument("--b-file", help="B's and the turn's text (default: the prompts' p8192.txt)")
+    ap.add_argument("--ram-gb", help="OSMOS_SLOT_RAM_GB: 0 sets every conversation aside streamed to the folder")
+    ap.add_argument("--budget", help="GiB (a streaming family's; default: its own sizing)")
     a = ap.parse_args()
-    calib, gpl = read_ids(f"{a.prompts}/calib16k.txt"), read_ids(f"{a.prompts}/p8192.txt")
+    calib, gpl = read_ids(f"{a.prompts}/calib16k.txt"), read_ids(a.b_file or f"{a.prompts}/p8192.txt")
     A, B, C = calib[:12000], gpl[:8000], calib[12000:16000]
+    shared = next((i for i, (x, y) in enumerate(zip(A, B)) if x != y), min(len(A), len(B)))
+    if shared > 1:  # the checks hold only for texts apart from their second token
+        print(f"A and B share their first {shared} tokens: the texts overlap (--b-file another)", file=sys.stderr)
+        return 2
     new = gpl[8000:8064]  # A's next turn: its prompt, its answer, then these
-    args = ["--model", a.model, "--budget", a.budget, "--max-tokens", "2048", "--max-context", "65536"]
+    args = ["--model", a.model, "--max-tokens", "2048", "--max-context", "65536"] + (["--budget", a.budget] if a.budget else [])
     if a.picks:
         args += ["--picks", a.picks]
     if a.dspark:
@@ -62,9 +68,14 @@ def main():
     tmp = tempfile.mkdtemp(prefix="osmos-slots-")
 
     def engine(keep, d, gb=None):
-        env = dict(os.environ, OSMOS_SLOT_KEEP="1" if keep else "0", OSMOS_SLOT_DIR=d)
+        env = dict(os.environ, OSMOS_SLOT_DIR=d)
+        env.pop("OSMOS_SLOT_KEEP", None)  # kept: the default's
+        if not keep:
+            env["OSMOS_SLOT_KEEP"] = "0"
         if gb is not None:
             env["OSMOS_SLOT_GB"] = str(gb)
+        if a.ram_gb is not None:
+            env["OSMOS_SLOT_RAM_GB"] = a.ram_gb
         return Engine(a.exe, args, env)
 
     try:
@@ -87,7 +98,7 @@ def main():
 
         print("in-run: A, B, A's next turn, one process", flush=True)
         kept = f"{tmp}/kept"
-        e = engine(True, kept, 0.05)
+        e = engine(True, kept)  # (the default cap: 0.05 GiB fit DeepSeek's states, not Qwen's streamed ones)
         r1a, r1b = e.gen(A, 32), e.gen(B, 32)
         r1t = e.gen(turn, 32)
         check(f"in-run: A and B answer as the reference", hash_tokens(r1a["tokens"]) == ref_a and
@@ -100,19 +111,19 @@ def main():
 
         print("kept: A, B, then QUIT (a fresh folder)", flush=True)
         kept = f"{tmp}/kept2"
-        e = engine(True, kept, 0.05)
+        e = engine(True, kept)  # (the store's default cap: the folder's cap is the evict step's, sized to the states)
         e.gen(A, 32), e.gen(B, 32)
         e.quit()
         bins, metas = files(kept, ".bin"), files(kept, ".meta")
         size = sum(os.path.getsize(os.path.join(kept, f)) for f in bins)
         check(f"kept: the folder holds A and B ({len(bins)} .bin, {len(metas)} .meta, {size / 2**20:.1f} MiB)",
               len(bins) == 2 and len(metas) == 2)
-        check("kept: the folder under OSMOS_SLOT_GB=0.05", size <= 0.05 * 2**30)
+        check("kept: the folder under the default OSMOS_SLOT_GB (16)", size <= 16 * 2**30)
 
         print("restart: A's next turn alone, a new process", flush=True)
         kept_d = f"{tmp}/kept-drafted"  # (the drafted restart's own copy: the first takes A back out of the folder)
         shutil.copytree(kept, kept_d)
-        e = engine(True, kept, 0.05)
+        e = engine(True, kept)
         note = next((n for n in e.notes if n.startswith("NOTE slots:")), "")
         r2 = e.gen(turn, 32)
         check(f"restart: {note[11:]}", "2 conversations" in note)
@@ -121,7 +132,7 @@ def main():
         check("restart: the turn's answer the reference's bits", hash_tokens(r2["tokens"]) == ref_t)
         e.quit()
         if a.dspark:
-            e = engine(True, kept_d, 0.05)
+            e = engine(True, kept_d)
             r3 = e.gen(turn, 32, spec=1)
             check(f"restart, drafted: the turn reuses A ({r3['reused']}), its answer the reference's bits",
                   r3["reused"] == held and hash_tokens(r3["tokens"]) == ref_t)
@@ -134,7 +145,8 @@ def main():
         e.gen(A, 32), e.gen(B, 32), e.gen(C, 32)
         e.quit()
         e = engine(True, ev, cap_gb)
-        ra2, rb2 = e.gen(turn, 8), e.gen(B + rb["tokens"] + new, 8)
+        rb2 = e.gen(B + rb["tokens"] + new, 8)  # B first: A's turn read after it sets B aside (into RAM, or the
+        ra2 = e.gen(turn, 8)                    # folder when RAM has no room - where it would push B out first)
         e.quit()
         check(f"evict: A gone (its turn reused {ra2['reused']}), B kept (its turn reused {rb2['reused']})",
               ra2["reused"] == 0 and rb2["reused"] == len(B) + len(rb["tokens"]) - 1)

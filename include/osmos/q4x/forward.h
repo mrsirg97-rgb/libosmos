@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/model/state_io.h"
 #include "osmos/q4x/weights.h"
 
 #define Q4X_FWD_ERR 256
@@ -37,8 +38,8 @@ uint32_t q4x_seq_reach(const Q4xSeq *s);
 bool q4x_seq_rollback(Q4xSeq *s, uint32_t n);
 uint64_t q4x_identity(const Q4xForward *f);
 uint64_t q4x_seq_state_bytes(const Q4xSeq *s);
-bool q4x_seq_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR]);
-bool q4x_seq_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ERR]);
+bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FWD_ERR]);
+bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[Q4X_FWD_ERR]);
 
 #define Q4X_MAX_RUNS 64 /* a step's sequences at most (q4x_step) */
 bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
@@ -90,12 +91,13 @@ q4x_identity
   a 64-bit key of what a saved sequence depends on: the state's format, the geometry, the model's files (each one's
   name and size) - a state saved under another is refused.
 
-q4x_seq_state_bytes .. q4x_seq_load
+q4x_seq_state_bytes .. q4x_seq_load_from
   a sequence as one byte string: a header (format, identity, position, last tokens), the n-gram conv history, each
   DeltaNet layer's state and conv history, each attention layer's cache rows below the position, then a 64-bit
-  FNV-1a of everything before it - its bytes, save (into exactly that many), load. load refuses another identity
-  or format, a size not the state's of its position, a position past max_ctx, a damaged state: the sequence then
-  empty, position 0 (never part one state and part another).
+  FNV-1a of everything before it - its bytes, save (to a sink in pieces of at most STATE_CHUNK: osmos/model/
+  state_io.h), load (from a source, the same). load refuses another identity or format, a size not the state's of
+  its position, a position past max_ctx, a damaged state (the checksum read last, the parts sent as they come): the
+  sequence then empty, position 0 (never part one state and part another).
 
 q4x_step
   runs sequences' tokens in one step (seqs[i] the next lens[i] tokens, consecutive; each sequence once, runs 1 ..
