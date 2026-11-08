@@ -2423,6 +2423,11 @@ scales after each block (on the same SIMD) at most ~29 before a single load (i8e
   and 33-64 tokens on the 8-tile kernel (its last tiles empty: 4's spills 16 B a lane at 256 VGPRs) slower at
   every size (IQ2_S 669 -> 715 us at 64, Q2_0 873 -> 980). the 4-tile kernel stays; at these counts the experts do
   ~20 TFLOP/s of work (GB/s the wrong measure there).
+- **the small tiles further** (the same bits each): the 2- and 4-tile launches' unroll at 2 or 4 (the shapes' 8)
+  10-35% slower or level, the 4-tile spill still there at 2 and 4; each step's x loaded beside its WMMA (8 VGPRs live,
+  not 64) within +-5% by type and count - the compiler hoists the loads together itself (the 4-tile kernels 256
+  VGPRs, 16 B spilled either way). the small tiles at their structure's mark: past it is the GEMM's shape (operands
+  shared across waves), which its 128-token tiles barely paid for in the dense (+11%).
 
 ### 0.5.5: a token's A operand from the decode, no LDS (2026-11-07, low-power)
 
