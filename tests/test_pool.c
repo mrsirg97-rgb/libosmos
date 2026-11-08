@@ -418,6 +418,53 @@ static void test_want(int fd)
          "time\n");
 }
 
+/* a unit not wanted when its release said (a decode's expert not picked again on the next token) is stale: it goes
+   before any unit wanted from now on, the least recently released of the stale first, and a want may take its room */
+static void test_stale(int fd)
+{
+  char err[POOL_ERR] = "";
+  PoolUnit u[5];
+  for (int i = 0; i < 5; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
+  const uint64_t budget = 8 * KB; /* two units */
+  Pool *p = make(u, 5, budget, err);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  for (uint32_t i = 0; i < 2; i++)
+    assert(pool_pin(p, i, dev) == POOL_WAIT), finish(p, find_read(i), true);
+  pool_release(p, 0, 5), pool_release(p, 1, 20);
+  pool_now(p, 10); /* 0's time (5) passed unwanted: stale. 1 wanted at 20 */
+  /* a want at 12: today's rule keeps 0 (wanted "at 5", sooner) and takes 1 (at 20); 0 is stale - its room goes */
+  pool_want(p, 2, 12);
+  assert(pool_state(p, 2) == POOL_READING && pool_state(p, 0) == POOL_COLD && pool_state(p, 1) == POOL_PINNED);
+  finish(p, find_read(2), true);
+  check(p, u, 5, budget);
+  pool_now(p, 13); /* 2's time (12) passed, never pinned: stale; 1 still wanted at 20 */
+  assert(pool_pin(p, 3, dev) == POOL_WAIT && pool_state(p, 2) == POOL_COLD && pool_state(p, 1) == POOL_PINNED);
+  finish(p, find_read(3), true);
+  pool_release(p, 3, 30);
+  check(p, u, 5, budget);
+  /* both stale (1 at 20, 3 at 30, now 40): the least recently released first - 1 - not the furthest ahead */
+  pool_now(p, 40);
+  assert(pool_pin(p, 4, dev) == POOL_WAIT && pool_state(p, 1) == POOL_COLD && pool_state(p, 3) == POOL_PINNED);
+  finish(p, find_read(4), true);
+  check(p, u, 5, budget);
+  pool_release(p, 4, 50);
+  /* at its time a unit is wanted, not stale: now 50, 3 stale (30), 4 wanted now (50). a want at 52 takes 3; one at
+     55 then finds 0 (52) and 4 (50), both wanted sooner than it - no room */
+  pool_now(p, 50);
+  pool_want(p, 0, 52);
+  assert(pool_state(p, 0) == POOL_READING && pool_state(p, 3) == POOL_COLD && pool_state(p, 4) == POOL_PINNED);
+  finish(p, find_read(0), true);
+  pool_want(p, 1, 55);
+  assert(pool_state(p, 1) == POOL_COLD && pool_state(p, 4) == POOL_PINNED && reads.n == 0);
+  check(p, u, 5, budget);
+  pool_destroy(p);
+  assert(mem.n == 0);
+  printf("  stale: a unit past its time unwanted goes first (the least recently released of them), a want may take "
+         "its room\n");
+}
+
 /* units held in turn, a round after round (the forward's layers), each released as the next is held, wanted again a
    round on: the one released longest ago is the one wanted soonest */
 static int cycle(int fd, bool ahead)
@@ -667,6 +714,7 @@ int main(void)
   test_sizes(a);
   test_failed(a);
   test_want(a);
+  test_stale(a);
   test_cycle(a);
   test_random(a, b);
   test_read_align(a);

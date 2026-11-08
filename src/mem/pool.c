@@ -36,6 +36,7 @@ struct Pool
   pool_event_fn on_event;
   void *event_arg;
   uint64_t clock;
+  uint64_t now;   /* the caller's clock (pool_now): a unit whose next is before it is stale */
   size_t reading; /* units reading now */
 };
 
@@ -100,7 +101,14 @@ typedef struct Reach
   uint64_t after;
 } Reach;
 
-static bool may_go(const Slot *c, Reach r) { return c->holds == 0 && (!r.limited || c->next > r.after); }
+/* when a unit is wanted for room's choice: its next, or - past it, not wanted then (a decode's expert not picked again)
+   - stale: after every unit still wanted, so the first to go */
+static uint64_t when(const Pool *p, const Slot *c) { return c->next >= p->now ? c->next : UINT64_MAX; }
+
+static bool may_go(const Pool *p, const Slot *c, Reach r)
+{
+  return c->holds == 0 && (!r.limited || when(p, c) > r.after);
+}
 
 /* the unit room may take wanted furthest ahead; of those, the least recently released. NULL for none */
 static Slot *furthest(Pool *p, Reach r)
@@ -109,8 +117,8 @@ static Slot *furthest(Pool *p, Reach r)
   for (size_t i = 0; i < p->n; i++)
   {
     Slot *c = &p->s[i];
-    if (c->state == POOL_PINNED && may_go(c, r) &&
-        (!last || c->next > last->next || (c->next == last->next && c->released < last->released)))
+    if (c->state == POOL_PINNED && may_go(p, c, r) &&
+        (!last || when(p, c) > when(p, last) || (when(p, c) == when(p, last) && c->released < last->released)))
       last = c;
   }
   return last;
@@ -123,7 +131,7 @@ static uint64_t kept(const Pool *p, Reach r)
   for (size_t i = 0; i < p->n; i++)
   {
     const Slot *c = &p->s[i];
-    k += c->state == POOL_READING || (c->state == POOL_PINNED && !may_go(c, r)) ? c->size : 0;
+    k += c->state == POOL_READING || (c->state == POOL_PINNED && !may_go(p, c, r)) ? c->size : 0;
   }
   return k;
 }
@@ -350,6 +358,12 @@ void pool_release(Pool *p, uint32_t unit, uint64_t next)
   Slot *s = &p->s[unit];
   if (--s->holds == 0)
     s->released = ++p->clock, s->next = next;
+}
+
+void pool_now(Pool *p, uint64_t now)
+{
+  if (p)
+    p->now = now;
 }
 
 PoolState pool_state(const Pool *p, uint32_t unit)
