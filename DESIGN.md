@@ -2591,6 +2591,47 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.7: stale experts out first, and the guess off (2026-11-08, performance)
+
+UD-IQ2_XXS drafted, 1M, the three questions, every run's three hashes the same as 0.5.6's. First where its time went:
+drafted rounds waited on reads for 36-55% of the decode (plain 17-20%), ~72% of the wait on experts the guess never
+named. A diagnostic build (not kept) counted, per guessed expert, its best rank among a step's tokens, its votes,
+its state at the guess and whether it was used; and the guess's cold reads the pool refused.
+
+- **the refusals: 28% of the guess's cold reads** (3,944 of 14,078) found no room. room() takes the unit wanted
+  furthest ahead, and a want only units wanted after it. A decode's expert released at visit v is "wanted at" v + L
+  (the layer's next visit); not picked then, it keeps that past time - "wanted soonest" for good. So the pool held a
+  set of experts whose time had passed as untouchable, and turned over the few just used (most recently released =
+  furthest ahead = first out). Belady's choice assumes the caller's times come true: a prompt's every step visits
+  every layer's experts, so they did; a decode's do not.
+- **the rule** (`pool_now`, `test_pool`'s stale): the forward tells the pool its visit; a pinned unit whose `next` is
+  before it is stale - after every unit still wanted, so first out, the least recently released of them first; at
+  its time a unit is wanted (not stale). The guess's and the prompt prefetch's reads now stamp the next layer's visit
+  (visits + 1), not this one's - otherwise stale on arrival, first out before their pin. Four mutants caught (stale
+  as next, as 0, the tie the most recent, `>` for `>=`). With the guess off both ways (two rounds, interleaved):
+  35.4 / 34.6 s -> 31.1 / 31.5 s, reads waited on 10,555 -> 8,673 (-18%), waiting 18.7 -> 15.3 s.
+- **the guess, priced**: recall by rank (the share of misses in a token's top N): 1: 17%, 3: 39%, 6: 63%, 10: 76%,
+  16: 84% - 16% never in any token's top 16. Its top 6 read ~14,000 experts a run, 35% of them used: each wasted
+  read sits in the SSD's queue ahead of the reads waited on (a miss's wait 3 -> 4.5 ms at top 10). On the new pool,
+  two rounds each, the three answers: top 10 -40% (17.3 / 15.6 / 13.2 tok/s), top 6 35.7 s, 5 34.2, 4 33.5, 3 32.5,
+  2 32.2, 1 31.9, **off 31.8** - off and top 1 level, the guess's own work (the next router's matvec a layer) paying
+  for the little it saves. UD-IQ2_XXS's pack now runs it off, as the IQ1 packs do. Plain UD-IQ2_XXS: off 14.0 / 14.1
+  / 13.4 and 13.7 / 14.1 / 13.3, top 3 13.9 / 13.8 / 13.2, 0.5.6's (old pool, top 6) 14.1 / 14.1 / 12.8 - the same.
+- **votes across a verify's tokens**: rank alone does as well (top 4: 6,907 reads, 35% of misses caught; top 2 or
+  top 6 with 2 votes: 8,104, 34%).
+- **an expert-transition table** (picks at layer l-1 -> picks at l, learned in run order, scored on the dump
+  offline): adding its p >= 0.2 to the router's top 4: +0.6 points of misses for +366 reads; reaching past the
+  router's top 16 (anything it predicts with 32 sightings): 30K-190K reads, **no miss caught** the router did not -
+  its trusted predictions are hot experts, already resident. 0.3.x's finding again (82% of misses an expert's first
+  pick): the table learns the familiar, and the familiar is already here.
+- **the other packs** (guess off, as they ship, old vs new, two rounds): UD-IQ1_M drafted 34.7 / 27.3 / 37.3 and 34.4
+  / 27.4 / 37.3 -> 34.9 / 27.8 / 39.0 twice (+2.4%), plain the same; UD-IQ1_S drafted the same (41.8 / 32.0 / 51.4 ->
+  41.5 / 32.0 / 51.2; 41.8 / 32.1 / 51.7 -> 41.7 / 32.1 / 51.8), plain -1% both rounds (19.5 / 19.4 / 19.5 -> 19.3 /
+  19.1 / 19.3, 19.3 / 19.2 / 19.3) - kept: the old rule's frozen stale set a lucky extra resident set for a step of
+  one token where most experts fit. 0.5.8's simulator should say why.
+- next (0.5.8, the membrane): a pick trace replayed under any rule offline, Belady's optimum (the future known) the
+  ceiling; admission (most misses are first picks: keep a newcomer only with history), a resident set that moves.
+
 ### 0.5.6: the three packs baked off - UD-IQ2_XXS ships as the slow one (2026-11-08, performance)
 
 One session, one build, each pack its own settings (UD-IQ1_M / UD-IQ1_S the guess off, UD-IQ2_XXS on; UD-IQ1_M's

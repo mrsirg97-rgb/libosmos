@@ -85,7 +85,7 @@
   },
   "packs": {
     "ud-iq1_s": {
-      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_S (speed): 19.4 tok/s plain, 41.5 drafted, 1M context",
+      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_S (speed): 19.3 tok/s plain, 41.7 drafted, 1M context",
       "shards": ["ud-iq1_s-1", "ud-iq1_s-2", "ud-iq1_s-3", "ud-iq1_s-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_s", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_s",
@@ -94,7 +94,7 @@
       "settings": {"no_guess": true, "max_context": 1048576}
     },
     "ud-iq1_m": {
-      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality): 17.2 tok/s plain, 33.2 drafted, 1M context",
+      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality): 17.1 tok/s plain, 33.9 drafted, 1M context",
       "shards": ["ud-iq1_m-1", "ud-iq1_m-2", "ud-iq1_m-3", "ud-iq1_m-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m",
@@ -103,13 +103,13 @@
       "settings": {"no_guess": true, "max_context": 1048576}
     },
     "ud-iq2_xxs": {
-      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ2_XXS (slow, best perplexity): 13.9 tok/s plain, 19.3 drafted, 1M context",
+      "title": "DeepSeek-V4.1-Flash-1017 UD-IQ2_XXS (slow, best perplexity): 13.8 tok/s plain, 24.6 drafted, 1M context",
       "shards": ["ud-iq2_xxs-1", "ud-iq2_xxs-2", "ud-iq2_xxs-3", "ud-iq2_xxs-4", "ud-iq2_xxs-5"],
       "table": {"file": "engram-mxfp8", "slot": [6, 6]},
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq2_xxs",
       "rig": {"max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["osmos"]},
-      "settings": {"no_guess": false, "max_context": 1048576}
+      "settings": {"no_guess": true, "max_context": 1048576}
     },
     "qwen38-ud-iq3_xxs": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS: 23 tok/s plain, ~40 drafted (its MTP head), 262K context",
