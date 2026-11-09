@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
   const uint32_t run = np + nd + OSMOS_MAX_BLOCK,
                  ctx = getenv("Q4X_BENCH_CTX") ? (uint32_t) atoi(getenv("Q4X_BENCH_CTX")) : run;
   if (ctx < run) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_CTX below the run's %u\n", run), 2;
-  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr};  // the n-gram table streamed
+  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr, nullptr, 0};  // the n-gram table streamed
   Q4xForward* fw = q4x_forward_create_with(w, mtp, &qo, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;

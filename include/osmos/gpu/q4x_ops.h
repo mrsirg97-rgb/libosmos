@@ -134,6 +134,7 @@ bool q4x_ple_gate(const float *key, const float *query, const float *value, uint
                   float *gate, float *gated, void *stream);
 bool q4x_add2(float *h, const float *a, const float *b, uint64_t n, void *stream);
 bool q4x_streams(const float *x, uint32_t n_tok, uint32_t hc, uint32_t dim, float *h, void *stream);
+bool q4x_tap(const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *taps, uint32_t stride, void *stream);
 
 #endif
 
@@ -154,6 +155,11 @@ q4x_scale_silu
 q4x_hc_gated_mean
   out[t][d] = (sum over s, in order, of xn[t][s][d] sigmoid(gate[t][s][d])) / hc: the streams' gated mean, the
   block's input.
+
+q4x_tap
+  taps[t stride + d] = (h[t][0][d] + h[t][1][d] + .. + h[t][hc - 1][d]) * (1 / hc), the sum in that order in F32: a
+  token's residual streams' mean (a drafter's feature, DFlash2's - its trainers' "the hc streams' mean"), each token's
+  dim values at taps + t stride.
 
 q4x_hc_combine
   h[t][s][d] += 2 sigmoid(inject[t hc + s] inject_scale) out[t][d]: the block's output into every stream, each by its

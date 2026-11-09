@@ -149,6 +149,7 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->kn, n * hd * F, 1},         {&b->qn, n * hd * F, 1},         {&b->pg, n * g->hc * F, 1},      {&b->gated, n * hd * F, 1},
       {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},       {&b->ple_rows, n * g->ple_heads * 4, 1},
       {&b->ple_sbuf, n * g->ple_heads * ple_row_bytes(f), 1},          {&b->ple_iota, n * g->ple_heads * 4, 0},
+      {&b->taps, n * f->n_taps * D * F, 0},
       {&b->tok, n * 4, 1},             {&b->top_part, q4x_argmax_scratch((uint32_t)n), 0},
       {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
   };
@@ -221,7 +222,7 @@ void q4x_forward_destroy(Q4xForward *f)
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[Q4X_FWD_ERR])
 {
-  const Q4xOptions o = {max_ctx, max_tokens, false};
+  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0};
   return q4x_forward_create_with(w, mtp, &o, err);
 }
 
@@ -234,6 +235,11 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   if (!f)
     return q4x_fail(err, "out of memory"), NULL;
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens, f->stream_ngram = o->stream_ngram;
+  bool taps_ok = o->n_taps <= Q4X_MAX_TAPS && (!o->n_taps || o->tap_layers);
+  for (uint32_t i = 0; taps_ok && i < o->n_taps; i++)
+    taps_ok = o->tap_layers[i] >= 0 && o->tap_layers[i] < w->geo.n_layers && (!i || o->tap_layers[i] > o->tap_layers[i - 1]),
+    f->tap_layer[i] = o->tap_layers[i];
+  f->n_taps = taps_ok ? o->n_taps : 0;
   f->ple_fd = -1;
   if (hipStreamCreateWithFlags(&f->s2, hipStreamNonBlocking) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_in, hipEventDisableTiming) != hipSuccess ||
@@ -244,6 +250,8 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
       hipEventCreateWithFlags(&f->e_gates, hipEventDisableTiming) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_ix, hipEventDisableTiming) != hipSuccess)
     return q4x_fail(err, "a stream or event refused"), free(f), NULL;
+  if (!taps_ok)
+    return q4x_fail(err, "tap layers past the model's, out of order, or more than Q4X_MAX_TAPS"), q4x_forward_destroy(f), NULL;
   if (!(f->sub_seq = calloc(Q4X_MAX_RUNS, sizeof *f->sub_seq)))
     return q4x_fail(err, "out of memory"), free(f), NULL;
   if (!q4x_rope((uint32_t)w->geo.rope_dim, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))

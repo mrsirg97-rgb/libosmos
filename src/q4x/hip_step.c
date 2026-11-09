@@ -124,6 +124,13 @@ static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t
   *pending = true;
   if (ok && f->probe) /* the layer's residual whole for the probe (l_last) */
     ok = q4x_inj_wait(f) && q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
+  for (uint32_t k = 0; ok && k < f->n_taps; k++) /* a tap: the layer's residual whole, its streams' mean */
+    if (f->tap_layer[k] == l)
+    {
+      if (*pending)
+        ok = q4x_inj_wait(f) && q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
+      ok = ok && q4x_tap(b->h, n, hc, D, b->taps + (uint64_t)k * D, f->n_taps * D, NULL);
+    }
   return ok;
 }
 
@@ -216,6 +223,7 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
 }
 
 const float *q4x_logits(const Q4xForward *f) { return f ? f->b.logits : NULL; }
+const float *q4x_taps(const Q4xForward *f) { return f && f->n_taps ? f->b.taps : NULL; }
 
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR])
 {

@@ -20,7 +20,7 @@ struct Run {
 static Run run(const Q4xWeights* w, bool stream, const std::vector<int32_t>& p, uint32_t vocab) {
   size_t free0 = 0, free1 = 0, total = 0;
   CHECK(hipDeviceSynchronize() == hipSuccess && hipMemGetInfo(&free0, &total) == hipSuccess);
-  const Q4xOptions o = {kCtx, kStep, stream};
+  const Q4xOptions o = {kCtx, kStep, stream, nullptr, 0};
   char err[Q4X_FWD_ERR] = "";
   Q4xForward* f = q4x_forward_create_with(w, nullptr, &o, err);
   if (!f) std::fprintf(stderr, "  create: %s\n", err);

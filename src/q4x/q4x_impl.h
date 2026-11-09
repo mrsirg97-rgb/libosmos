@@ -29,6 +29,7 @@ typedef struct Q4xBuf
   int32_t *ple_rows, *tok;                                            /* device: its rows, the step's tokens */
   uint8_t *ple_sbuf; /* device: a streamed n-gram table's step rows, a token's ple_heads (stream_ngram) */
   int32_t *ple_iota; /* their places 0 .. : q4x_rows' row indices over ple_sbuf */
+  float *taps;       /* device: the step's taps, [token][n_taps][n_embd] (Q4xOptions' tap_layers; NULL: none) */
   void *top_part;                                                     /* q4x_greedy's slices' bests (q4x_argmax) */
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
@@ -78,6 +79,8 @@ struct Q4xForward
   hipEvent_t pin_free; /* the pinned buffers' last copy to the GPU done (q4x_pin_wait, q4x_pin_sent) */
   /* stream_ngram: the n-gram table's file and readers, a step's rows read into ple_stage (pinned) at its embed, copied
      to b.ple_sbuf at the n-gram layer; ple_copied that copy's end (the next step's reads wait for it) */
+  int32_t tap_layer[Q4X_MAX_TAPS]; /* Q4xOptions' tap_layers, ascending; n_taps of them */
+  uint32_t n_taps;
   bool stream_ngram, ple_pending;
   int ple_fd;
   Rowread *ple_read;

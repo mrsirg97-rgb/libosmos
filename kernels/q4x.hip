@@ -83,7 +83,23 @@ __global__ void combine_kernel(float* h, const float* out, const float* inject, 
 
 bool shape(uint32_t n_tok, uint32_t hc, uint32_t dim) { return n_tok && hc && hc <= kMaxHc && dim; }
 
+__global__ void tap_kernel(const float* h, uint32_t n_tok, uint32_t hc, uint32_t dim, float* taps, uint32_t stride) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n_tok * dim) return;
+  const uint64_t t = i / dim, d = i % dim;
+  float s = 0.0f;
+  for (uint32_t q = 0; q < hc; q++) s += h[(t * hc + q) * dim + d];
+  taps[t * stride + d] = s * (1.0f / (float) hc);
+}
+
 }  // namespace
+
+extern "C" bool q4x_tap(const float* h, uint32_t n_tok, uint32_t hc, uint32_t dim, float* taps, uint32_t stride,
+                        void* stream) {
+  if (!shape(n_tok, hc, dim) || !h || !taps || stride < dim) return false;
+  tap_kernel<<<grid((uint64_t) n_tok * dim), kThreads, 0, st(stream)>>>(h, n_tok, hc, dim, taps, stride);
+  return ok();
+}
 
 extern "C" bool q4x_hc_norm(const float* h, const float* w, uint32_t n_tok, uint32_t hc, uint32_t dim, float eps,
                             float* xn, const Q4xX16* side, void* stream) {
