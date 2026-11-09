@@ -2,6 +2,13 @@
 
 ## [0.5.11]: (in progress)
 
+- **DeepSeek's tool calls parse as DeepSeek's own parser does** (issue #25). An invoke with a blank line after its
+  name (`name="mcp">\n\n`) is taken, as the reference's regex takes it (Python's `$` matches before one trailing
+  newline), and a parameter's `<\n` too. Nothing more: the blank lines and spaces the reference refuses are refused.
+- **A tool call that doesn't parse is an error, never an answer.** osmos-api sent a refused calls block as its text
+  (content, finish "stop"), so an agent read markup as the answer and sent the turn again. A turn that ends on a
+  calls block its parse refuses is now a 500 with the reason (a stream's error event), DeepSeek's and Qwen's.
+  A completion cut by max_tokens is still "length".
 - **The MTP head's drafts are the same every run.** Their confidences varied run to run in their low bits (the
   output never did, nor the main model's logits: every verify's row 0 the same bits at every position). Two causes:
   - **A race on the pinned token buffer.** The head's seed copies its tokens to the GPU from the buffer the next

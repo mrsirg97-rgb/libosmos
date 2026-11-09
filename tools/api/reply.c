@@ -59,13 +59,14 @@ static bool more(Api *a, Run *r, size_t *seen, Answer *s)
   return !done;
 }
 
-/* the message parsed - tool calls given their ids - or, out of the format, its text as it streamed */
-static Json *message(const Answer *s, const Request *rq, long long rid)
+/* the message parsed - tool calls given their ids - or, out of the format, its text as it streamed (*parsed false,
+   err the parse's why) */
+static Json *message(const Answer *s, const Request *rq, long long rid, bool *parsed, char err[CHAT_ERR])
 {
-  char err[CHAT_ERR], jerr[JSON_ERR];
+  char jerr[JSON_ERR];
   JsonBuf b = {0};
   const ChatMode mode = rq->mode;
-  if (s->d->parse(rq, s->text.p, s->text.n, &b, err))
+  if ((*parsed = s->d->parse(rq, s->text.p, s->text.n, &b, err)))
   {
     Json *m = json_parse(b.p, b.n, jerr);
     free(b.p);
@@ -106,6 +107,22 @@ static Json *message(const Answer *s, const Request *rq, long long rid)
   Json *m = b.oom ? NULL : json_parse(b.p, b.n, jerr);
   free(b.p);
   return m;
+}
+
+/* a run that gives no answer: a streamed one's error event (no [DONE]), or a 500 */
+static void fail(int fd, bool stream, const char *why)
+{
+  if (!stream)
+  {
+    http_error(fd, 500, why);
+    return;
+  }
+  JsonBuf e = {0};
+  json_puts(&e, "{\"error\": {\"message\": "), json_dump_string(&e, why, strlen(why));
+  json_puts(&e, ", \"type\": \"server_error\"}}");
+  if (!e.oom)
+    http_stream_event(fd, e.p, e.n);
+  free(e.p);
 }
 
 /* usage and timings, as fields after a response's choices (", ...") */
@@ -255,24 +272,20 @@ void api_chat(Api *a, Http *h)
       ;
   }
   else if (!strcmp(r->finish, "error"))
-  {
-    if (rq.stream)
-    {
-      JsonBuf e = {0};
-      json_puts(&e, "{\"error\": {\"message\": "), json_dump_string(&e, r->err, strlen(r->err));
-      json_puts(&e, ", \"type\": \"server_error\"}}");
-      if (!e.oom)
-        http_stream_event(h->fd, e.p, e.n);
-      free(e.p);
-    }
-    else
-      http_error(h->fd, 500, r->err);
-  }
+    fail(h->fd, rq.stream, r->err);
   else
   {
     answer_advance(&s);
-    Json *m = message(&s, &rq, r->rid);
-    if (!m)
+    char perr[CHAT_ERR] = "";
+    bool parsed;
+    Json *m = message(&s, &rq, r->rid, &parsed, perr);
+    if (m && !parsed && !strcmp(r->finish, "stop") &&
+        memmem(s.text.p, s.text.n, a->d->calls_open, strlen(a->d->calls_open)))
+    { /* the turn ended on a calls block its parse refuses: an error, never its markup as the answer (#25) */
+      snprintf(err, sizeof err, "the model's tool call did not parse (%s)", perr);
+      fail(h->fd, rq.stream, err);
+    }
+    else if (!m)
       http_error(h->fd, 500, "out of memory");
     else if (rq.stream)
     {

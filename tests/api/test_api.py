@@ -25,6 +25,11 @@ CALLS = ("hm</think>Checking.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"g
          "<｜DSML｜ parameter name=\"city\" string=\"true\">Paris</｜DSML｜ parameter>\n"
          "<｜DSML｜ parameter name=\"days\" string=\"false\">3</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n"
          "</｜DSML｜ calls>" + EOS)
+D = "｜DSML｜"
+INV = f'<{D} invoke name="mcp">\n'
+BLANK_CALLS = (f"\n\n<{D} calls>\n{INV}\n</{D} invoke>\n{INV}"
+               f'<{D} parameter name="search" string="true">fl</{D} parameter>\n</{D} invoke>\n</{D} calls>' + EOS)
+BAD_CALLS = f"hm</think>Checking.\n\n<{D} calls>\n{INV}</{D} invoke>\n\n{INV}</{D} invoke>\n</{D} calls>" + EOS
 TOOLS = [{"type": "function", "function": {"name": "get_weather", "description": "the weather",
                                            "parameters": {"type": "object", "properties": {
                                                "city": {"type": "string"}, "days": {"type": "integer"}}}}}]
@@ -241,6 +246,47 @@ class Api(Served, unittest.TestCase):
         self.assertIn("engine", json.loads(r.read())["error"]["message"])
         self.assertNotEqual(self.proc.wait(timeout=5), 0)
 
+    # issue #25: a calls block DeepSeek's parse takes (an empty invoke, a blank line in it) read as its calls; one it
+    # refuses (a blank line between invokes) an error - never its markup sent as the answer, finish "stop"
+    def raw_events(self, body):
+        r = self.post(dict(body, stream=True))
+        self.assertEqual(r.status, 200)
+        return [e[len("data: "):] for e in r.read().decode("utf-8").split("\n\n") if e]
+
+    def test_6a_calls_blank_line(self):
+        self.ready()
+        self.reply(BLANK_CALLS)
+        r = self.post({"messages": [{"role": "user", "content": "x"}], "tools": TOOLS, "reasoning_effort": "none"})
+        self.assertEqual(r.status, 200)
+        b = json.loads(r.read())["choices"][0]
+        self.assertEqual(b["finish_reason"], "tool_calls")
+        self.assertEqual([(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in b["message"]["tool_calls"]],
+                         [("mcp", {}), ("mcp", {"search": "fl"})])
+
+    def test_6b_calls_unparsed(self):
+        self.ready()
+        body = {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS}
+        self.reply(BAD_CALLS)
+        r = self.post(body)
+        self.assertEqual(r.status, 500)
+        msg = json.loads(r.read())["error"]["message"]
+        self.assertIn("tool call", msg)
+        self.assertIn("not '>\\n' before it", msg)  # the parse's why
+        self.reply(BAD_CALLS)
+        ev = self.raw_events(body)
+        self.assertNotIn("[DONE]", ev)
+        self.assertIn("tool call", json.loads(ev[-1])["error"]["message"])
+        self.assertFalse(any("DSML" in e for e in ev), ev)
+        self.assertEqual("".join(json.loads(e)["choices"][0]["delta"].get("content", "") for e in ev[:-1]
+                                 if json.loads(e).get("choices")), "Checking.")  # what went out before the block
+        self.reply("all reasoning, no end of it" + EOS)  # out of the format with no calls block: its text, as before
+        b = json.loads(self.post(body).read())["choices"][0]
+        self.assertEqual((b["finish_reason"], b["message"]["reasoning_content"]), ("stop", "all reasoning, no end of it"))
+        self.reply(BAD_CALLS[:-len(EOS)], finish="length")  # cut by max_tokens: finish "length" says so, as before
+        r = self.post(dict(body, max_tokens=60))
+        self.assertEqual(r.status, 200)
+        self.assertEqual(json.loads(r.read())["choices"][0]["finish_reason"], "length")
+
 
 def qwen_template():
     sys.path.insert(0, os.path.join(ROOT, "tools"))
@@ -344,6 +390,15 @@ class QwenApi(Served, unittest.TestCase):
             r = self.post(body)
             self.assertEqual(r.status, 400, body)
             self.assertIn(word, json.loads(r.read())["error"]["message"])
+
+    def test_6_calls_unparsed(self):  # a <tool_call> its parse refuses (no </function>): an error, not its markup
+        self.ready()
+        self.reply("Checking.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n"
+                   "</tool_call>" + IM_END)
+        r = self.post({"messages": [{"role": "user", "content": "x"}], "tools": TOOLS,
+                       "chat_template_kwargs": {"enable_thinking": False}})
+        self.assertEqual(r.status, 500)
+        self.assertIn("tool call", json.loads(r.read())["error"]["message"])
 
 
 if __name__ == "__main__":

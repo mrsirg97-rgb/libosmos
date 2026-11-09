@@ -2591,6 +2591,33 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.11: a tool call DeepSeek's parse takes, and a refused one loud (#25, 2026-11-09)
+
+**The report** (issue #25, a second gfx1151: 0.5.3, UD-IQ1_S, sampling on): an agent's turn ended on a calls block
+whose first invoke was empty with a blank line in it (`name="mcp">\n\n</｜DSML｜ invoke>`). chat_parse refused it,
+and osmos-api answered the block's markup as content, finish "stop", no tool calls - a client can't tell that from an
+answer, so the agent sent the turn again: 174 identical calls before it gave up.
+
+**The parse was not the reference's.** encoding.py's checks between tags are exact (`'>\n'`), and the port's were
+too. But its two regexes end in `$` - an invoke's name line `^\s*name="(.*?)">\n$`, a parameter's `...(.*?)<$` - and
+Python's `$` (no MULTILINE) matches at the end or before one newline that ends the text. The port compared the last
+bytes, so it refused one trailing newline the reference takes. `tail_at` is `lit$` as Python reads it, at both. The
+port takes no more than the reference does: a second blank line, a blank line between invokes, after a parameter,
+before the block's end, a trailing space - each refused by both.
+
+**A refused block is an error** (osmos-api): a completion out of the format still goes out as its text (a thinking
+answer with no `</think>`, a run cut by max_tokens - its finish "length" says so), but one whose turn ended (finish
+"stop") with a calls block (the dialect's marker: DeepSeek's `<｜DSML｜ calls>`, Qwen's `<tool_call>`) its parse
+refuses is a 500 with the parse's why, a stream's error event (no [DONE]) after what streamed before the block.
+
+**Tests:** tests/fixtures/chat.jsonl gains the reference's verdicts on ten completions (gen_chat_fixtures.py: a
+case it raises on is `refuse`): the issue's, a blank line before a parameter, a parameter's `<\n`, and seven it
+refuses. test_chat: each parsed the same message or refused. tests/api: the issue's block read as two calls
+(`mcp {}`, `mcp {"search": "fl"}`); a refused one a 500 and a stream's error, no markup sent; cut by max_tokens
+still "length"; out of the format with no block still its text; Qwen's `<tool_call>` with no `</function>` a 500.
+Mutants (no newline allowance, two, the old end checks, any last byte; any finish, no calls check, a stream as a
+500, the why dropped) each fail a test.
+
 ### 0.5.11: Qwen's small steps, less idle (2026-11-09, low-power)
 
 **Where a decode token's time goes** (rocprofv3, plain, 64 tokens): 1,751 dispatches; the kernels' union 42.4 of 46.6
@@ -3368,7 +3395,9 @@ at once, drafting).
   of a DSML calls block; a text that could still become one of those markers (or ends inside a UTF-8 character)
   held until it cannot. at DONE the whole completion parsed (chat_parse): its tool calls one last delta (ids
   call_<rid>_<n>), finish_reason tool_calls / stop / length, usage and timings, then [DONE]; a completion out of the
-  format answered as its text (content), stop. whole (stream false): the same, one message.
+  format answered as its text (content), stop - but one whose turn ended (stop) on a calls block its parse refuses
+  an error (0.5.11, #25: a 500, a stream's error event), never its markup as an answer. whole (stream false): the
+  same, one message.
 - **built** (2026-11-04): tools/api (`make api`) - request.c (the mapping; sampling, stop strings, n > 1 and a
   forced tool_choice refused by name), answer.c (the stream's holding back), reply.c, engine.c (the child dies with
   the server: PR_SET_PDEATHSIG), http.c, config.c (osmos.json read whole; an unknown key refused). tested against a
