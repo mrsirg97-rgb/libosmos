@@ -156,6 +156,8 @@ struct Forward
   uint64_t *guessed;      /* a unit's guess: the visit it was guessed for (hip_guess.c) */
   uint64_t g_need, g_hit; /* a decode's streamed picks, and of them the ones guessed a layer ahead */
   uint64_t pool_room;      /* the pool's room: the budget's experts and the stream's (stream_budget), taken at create */
+  uint32_t *warm;          /* the budget's experts, in choose's order: read at the first step (fwd_warm), not at create */
+  size_t n_warm;           /* - a sizing's builds (fit.h) read none of them; 0 once read */
   uint64_t g_read;        /* the reads the guess began (cold units it wanted) */
   uint64_t w_n[2], w_ns[2]; /* the expert reads the host waited for (fwd_pinned), and its time: [0] not guessed,
                               [1] guessed (begun a layer ahead, not done) */
@@ -271,6 +273,7 @@ static inline uint64_t fwd_bytes(const Forward *f, const GgufTensor *t)
 }
 
 bool fwd_fail(char *err, const char *why);
+bool fwd_warm(Forward *f, char *err); /* the budget's experts read into the pool: the first step's (forward_batch) */
 void fwd_probe(const Forward *f, const char *step, int layer, int index, void *dev, uint64_t n, bool ints);
 bool fwd_put(void *dev, const void *host, uint64_t bytes);
 bool fwd_put_async(void *dev, const void *pinned, uint64_t bytes);

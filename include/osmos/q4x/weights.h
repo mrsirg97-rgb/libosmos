@@ -63,6 +63,7 @@ typedef struct Q4xWeights
 {
   Q4xGeometry geo;
   const Gguf *model;
+  const Gguf *overlay; /* tensors standing in for the model's of their names (an abliteration's), or NULL */
   const GgufTensor *embed, *output, *out_hc_norm, *out_hc_down, *out_hc_up, *ple_table;
   Q4xLayer layer[Q4X_MAX_LAYERS];
 } Q4xWeights;
@@ -76,7 +77,7 @@ typedef struct Q4xMtp
   const GgufTensor *eh_proj, *enorm, *hnorm, *head_norm, *head_down, *head_up;
 } Q4xMtp;
 
-Q4xWeights *q4x_weights_create(const Gguf *model, char err[Q4X_ERR]);
+Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[Q4X_ERR]);
 void q4x_weights_destroy(Q4xWeights *w);
 Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[Q4X_ERR]);
 void q4x_mtp_destroy(Q4xMtp *m);
@@ -96,5 +97,7 @@ q4x_weights_create
   geometry's), its type (one the role's reader takes). NULL with why - the key or the tensor named - for a model of
   another architecture, a key missing or out of range, a tensor missing, of another shape or a type the role does not
   read, or a tensor no role takes (a file of another layout is refused, not half read). the weights point into the
-  model's tensors: the model outlives them.
+  model's tensors: the model outlives them. an overlay (or NULL): its tensors stand in for the model's of their names
+  (tools/install/overlay_q4x.py's: huihui-ai's abliteration), each checked against its role as the model's would be;
+  refused besides - an overlay tensor no role reads, or one the model has no tensor of. the overlay outlives them too.
 */

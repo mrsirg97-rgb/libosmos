@@ -30,7 +30,10 @@ int main(int argc, char** argv) {
   if (ids.size() != n || n < 2 || !step) return std::fprintf(stderr, "q4x_ppl: %zu ids, %u asked\n", ids.size(), n), 2;
   char gerr[GGUF_ERR] = "", werr[Q4X_ERR] = "", ferr[Q4X_FWD_ERR] = "";
   Gguf* g = gguf_create(argv[1], gerr);
-  Q4xWeights* w = g ? q4x_weights_create(g, werr) : nullptr;
+  /* OVERLAY: a GGUF whose tensors stand in for the model's of their names (an abliteration: q4x_weights_create) */
+  Gguf* ov = getenv("OVERLAY") ? gguf_create(getenv("OVERLAY"), gerr) : nullptr;
+  if (getenv("OVERLAY") && !ov) return std::fprintf(stderr, "q4x_ppl: the overlay: %s\n", gerr), 1;
+  Q4xWeights* w = g ? q4x_weights_create(g, ov, werr) : nullptr;
   if (!w) return std::fprintf(stderr, "q4x_ppl: %s%s\n", gerr, werr), 1;
   /* Q4X_PPL_CTX: the forward's context (past the native 262,144: YaRN, q4x_rope) - the text n tokens of it */
   const uint32_t ctx = getenv("Q4X_PPL_CTX") ? (uint32_t) atoi(getenv("Q4X_PPL_CTX")) : n;

@@ -69,15 +69,16 @@ uint64_t q4x_identity(const Q4xForward *f)
   for (int l = 0; l < g->n_layers; l++)
     h = fnv_u64(g->recurrent[l], h);
   h = fnv(&f->rope, sizeof f->rope, h); /* YaRN's or the plain rotation: another context's numbers another model's */
-  const Gguf *m = f->w->model;
-  for (int i = 0; i < m->n_files; i++) /* each file's name and size */
-  {
-    const char *base = strrchr(m->paths[i], '/');
-    base = base ? base + 1 : m->paths[i];
-    struct stat st;
-    h = fnv(base, strlen(base), h);
-    h = fnv_u64(stat(m->paths[i], &st) == 0 ? (uint64_t)st.st_size : 0, h);
-  }
+  const Gguf *files[2] = {f->w->model, f->w->overlay}; /* with an overlay or without: another model's states */
+  for (int k = 0; k < 2 && files[k]; k++)
+    for (int i = 0; i < files[k]->n_files; i++) /* each file's name and size */
+    {
+      const char *base = strrchr(files[k]->paths[i], '/');
+      base = base ? base + 1 : files[k]->paths[i];
+      struct stat st;
+      h = fnv(base, strlen(base), h);
+      h = fnv_u64(stat(files[k]->paths[i], &st) == 0 ? (uint64_t)st.st_size : 0, h);
+    }
   return h;
 }
 

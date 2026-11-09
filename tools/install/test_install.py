@@ -13,6 +13,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import layout  # noqa: E402
+import overlay_q4x  # noqa: E402
+import osmos_install  # noqa: E402
 import manifest  # noqa: E402
 import host  # noqa: E402
 import rig  # noqa: E402
@@ -52,7 +54,7 @@ def entry(path, repo="r/a", revision=REV, **kw):
 
 
 RIG_PIN = {"repo": "me/rig", "version": "v1.0.0", "install_sha256": "0" * 64}
-ROW = {"max_tokens": 4096, "reserve": 4096, "efforts": ["low", "high"], "effort": "high", "aliases": ["t"]}
+ROW = {"id": "t", "max_tokens": 4096, "reserve": 4096, "efforts": ["low", "high"], "effort": "high", "aliases": ["t"]}
 
 
 class Manifest(unittest.TestCase):
@@ -76,7 +78,13 @@ class Manifest(unittest.TestCase):
         self.assertEqual((x["overlay"], x["drafter"]), ("abl-ud-iq2_xxs", ["drafter-bin", "drafter-json"]))
         q = m["packs"]["qwen38-ud-iq3_xxs"]
         self.assertEqual(q["drafter_kind"], "mtp")                            # its MTP head: one GGUF
-        self.assertEqual((q["table"], q["picks"], q["overlay"]), (None, None, None))  # resident: no table, no picks
+        self.assertEqual((q["table"], q["picks"]), (None, None))                 # resident: no table, no picks
+        self.assertEqual(q["overlay"], "abl-qwen38-ud-iq3_xxs")                # huihui's, made by overlay_q4x
+        ov = m["files"]["abl-qwen38-ud-iq3_xxs"]
+        self.assertEqual((ov["derive"]["mode"], ov["derive"]["model"], ov["bytes"]),
+                         (2, ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"], 702879904))
+        self.assertEqual(m["files"]["qwen38-abl-patch"]["bytes"], 3561572544)
+        self.assertEqual(m["packs"]["qwen38-ud-iq3_xxs-1m"]["overlay"], "abl-qwen38-ud-iq3_xxs")
         self.assertEqual(q["settings"], {"max_context": 262144, "max_tokens": 4096})  # no budget or guess: the family
         # refuses; 4K prompt steps: prompts +5-7%, drafted answers the same (every weight resident), +4 GiB
         self.assertEqual([m["files"][f]["bytes"] for f in q["shards"]],
@@ -253,6 +261,215 @@ class Layout(unittest.TestCase):
                 layout.lay(m, "p", os.path.join(d, "models"), [], trust_size=False, abliterated=False, fetch=None)
 
 
+def gguf_tensors(path, texts, tensors, align=32):
+    """a GGUF v3: string values {key: text} (a model's general.architecture; a later shard's none; a patch's
+    general.encrypt_type), then tensors [(name, dims, type, data)] at `align` (as llama.cpp lays them)"""
+    def s(t):
+        b = t.encode()
+        return struct.pack("<Q", len(b)) + b
+    if isinstance(texts, str):
+        texts = {"general.architecture": texts}
+    texts = texts or {}
+    kv = b"".join(s(k) + struct.pack("<I", 8) + s(v) for k, v in texts.items())
+    head = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), len(texts)) + kv
+    info, blob = b"", b""
+    for name, dims, ty, data in tensors:
+        blob += b"\0" * (-len(blob) % align)
+        info += s(name) + struct.pack("<I", len(dims)) + b"".join(struct.pack("<Q", d) for d in dims)
+        info += struct.pack("<IQ", ty, len(blob))
+        blob += data
+    body = head + info
+    with open(path, "wb") as f:
+        f.write(body + b"\0" * (-len(body) % align) + blob)
+
+
+def read_tensors(path):
+    """{name: (dims, type, data)} of a GGUF v3 - read apart from the converter's own reader"""
+    with open(path, "rb") as f:
+        b = f.read()
+    o = 4 + 4
+    n_t, n_kv = struct.unpack_from("<QQ", b, o)
+    o += 16
+    align = 32
+
+    def take(fmt):
+        nonlocal o
+        v = struct.unpack_from(fmt, b, o)
+        o += struct.calcsize(fmt)
+        return v[0] if len(v) == 1 else v
+
+    def text():
+        nonlocal o
+        n = take("<Q")
+        t = b[o:o + n].decode()
+        o += n
+        return t
+    for _ in range(n_kv):
+        k, ty = text(), take("<I")
+        if ty == 8:
+            text()
+        elif ty == 4:
+            v = take("<I")
+            align = v if k == "general.alignment" else align
+        else:
+            raise AssertionError(f"a value type the test does not read: {ty}")
+    infos = []
+    for _ in range(n_t):
+        name, nd = text(), take("<I")
+        dims = [take("<Q") for _ in range(nd)]
+        ty, off = take("<I"), take("<Q")
+        infos.append((name, dims, ty, off))
+    start = o + (-o % align)
+    ends = sorted(off for *_, off in infos) + [len(b) - start]
+    out = {}
+    for name, dims, ty, off in infos:
+        nxt = min(e for e in ends if e > off)
+        out[name] = (dims, ty, b[start + off:start + nxt])
+    return out
+
+
+PATCH_KV = {"general.abliterated_by": "Huihui.ai", "general.encrypt_type": "xor"}  # the real patch's (no architecture)
+
+
+class Overlay(unittest.TestCase):
+    KEY = b"k3y-text-of-the-patch"
+
+    def xor(self, data):
+        return bytes(c ^ self.KEY[i % len(self.KEY)] for i, c in enumerate(data))
+
+    def files(self, d):
+        """a two-shard model (three targets of two types, one other) and its patch (each target's variant of its type
+        XOR-keyed, a decoy variant of another type, a tensor of no target)"""
+        q8 = lambda n: bytes((7 * i + n) & 255 for i in range(68))   # a Q8_0 [32, 2]: 2 blocks of 34
+        q6 = lambda n: bytes((5 * i + n) & 255 for i in range(210))  # a Q6_K [256]: 1 block of 210
+        model = [os.path.join(d, f"m-0000{i}-of-00002.gguf") for i in (1, 2)]
+        gguf_tensors(model[0], "qwen4exp", [("blk.0.ssm_out.weight", [256], 14, q6(1)),
+                                            ("blk.0.attn_output.weight", [32, 2], 8, q8(2))])
+        gguf_tensors(model[1], None, [("blk.0.ffn_down_shexp.weight", [32, 2], 8, q8(3)),  # unsloth's: no metadata
+                                            ("blk.0.ffn_up_shexp.weight", [32, 2], 8, q8(4))])
+        self.plain = {"blk.0.ssm_out.weight": q6(11), "blk.0.attn_output.weight": q8(12),
+                      "blk.0.ffn_down_shexp.weight": q8(13)}
+        patch = os.path.join(d, "patch.gguf")
+        gguf_tensors(patch, PATCH_KV, [("blk.0.ssm_out.weight_8", [32, 8], 8, b"\1" * 272),  # another type's, first: not taken
+                                         ("blk.0.ssm_out.weight_14", [256], 14, self.xor(self.plain["blk.0.ssm_out.weight"])),
+                                         ("blk.0.attn_output.weight_8", [32, 2], 8, self.xor(self.plain["blk.0.attn_output.weight"])),
+                                         ("blk.0.ffn_down_shexp.weight_8", [32, 2], 8, self.xor(self.plain["blk.0.ffn_down_shexp.weight"]))])
+        key = os.path.join(d, "patch.gguf.key")
+        with open(key, "wb") as f:
+            f.write(self.KEY + b"\n")
+        return model, patch, key
+
+    def test_modes(self):
+        want = {0: {"blk.0.ssm_out.weight", "blk.0.ffn_down_shexp.weight"},
+                1: {"blk.0.ssm_out.weight", "blk.0.attn_output.weight"},
+                2: {"blk.0.ssm_out.weight", "blk.0.attn_output.weight", "blk.0.ffn_down_shexp.weight"}}
+        with tempfile.TemporaryDirectory() as d:
+            model, patch, key = self.files(d)
+            for mode, names in want.items():
+                out = os.path.join(d, f"overlay{mode}.gguf")
+                overlay_q4x.convert(model, patch, key, mode, out)
+                got = read_tensors(out)
+                self.assertEqual(set(got), names)
+                for n in names:  # the model's dims and type, the patch's bytes un-XORed
+                    self.assertEqual(got[n][2][:len(self.plain[n])], self.plain[n])
+                self.assertEqual(got["blk.0.ssm_out.weight"][:2], ([256], 14))
+
+    def test_chunks(self):
+        """decoded a few bytes at a time (a 7-byte chunk, the key 21): the key runs on across chunks, not from each"""
+        with tempfile.TemporaryDirectory() as d:
+            model, patch, key = self.files(d)
+            was, overlay_q4x._CHUNK = overlay_q4x._CHUNK, 7
+            try:
+                out = os.path.join(d, "o.gguf")
+                overlay_q4x.convert(model, patch, key, 2, out)
+                got = read_tensors(out)
+                for n, plain in self.plain.items():
+                    self.assertEqual(got[n][2][:len(plain)], plain)
+            finally:
+                overlay_q4x._CHUNK = was
+
+    def test_refusals(self):
+        with tempfile.TemporaryDirectory() as d:
+            model, patch, key = self.files(d)
+            out = os.path.join(d, "o.gguf")
+            empty = os.path.join(d, "empty.key")
+            open(empty, "wb").close()
+            with self.assertRaises(overlay_q4x.OverlayError):
+                overlay_q4x.convert(model, patch, empty, 2, out)  # no key
+            with self.assertRaises(overlay_q4x.OverlayError):
+                overlay_q4x.convert(model, patch, key, 3, out)  # no such mode
+            gguf_tensors(patch, PATCH_KV, [("blk.0.ssm_out.weight_8", [32, 2], 8, b"\0" * 68)])
+            with self.assertRaises(overlay_q4x.OverlayError):
+                overlay_q4x.convert(model, patch, key, 0, out)  # no variant of the model's type
+            gguf_tensors(patch, PATCH_KV, [("blk.0.ssm_out.weight_14", [128], 14, b"\0" * 105),
+                                             ("blk.0.ffn_down_shexp.weight_8", [32, 2], 8, b"\0" * 68)])
+            with self.assertRaises(overlay_q4x.OverlayError):
+                overlay_q4x.convert(model, patch, key, 0, out)  # the variant's shape not the model's
+            model, patch, key = self.files(d)
+            gguf_tensors(patch, {"general.encrypt_type": "aes"}, [])
+            with self.assertRaises(overlay_q4x.OverlayError):
+                overlay_q4x.convert(model, patch, key, 0, out)  # a scheme this does not read
+            model, patch, key = self.files(d)  # a good patch again: only the model's architecture wrong below
+            overlay_q4x.convert(model, patch, key, 0, out)
+            os.remove(out)
+            gguf_tensors(model[0], "deepseek4", [("blk.0.ssm_out.weight", [256], 14, b"\0" * 210)])
+            with self.assertRaises(overlay_q4x.OverlayError):
+                overlay_q4x.convert(model, patch, key, 0, out)  # not a qwen4exp model
+            self.assertFalse(os.path.exists(out))  # nothing left of a refused conversion
+
+
+class Derived(unittest.TestCase):
+    """an overlay made from two published files (huihui's patch and key) and the pack's shards by the converter, its
+    bytes and SHA-256 pinned as a download's are"""
+
+    def setup(self, d):
+        have, models = os.path.join(d, "have"), os.path.join(d, "models")
+        os.makedirs(have)
+        model, patch, key = Overlay().files(have)
+        made = os.path.join(d, "made.gguf")
+        overlay_q4x.convert(model, patch, key, 2, made)
+        m = {"version": 1, "rig": RIG_PIN,
+             "files": {"s1": entry(model[0]), "s2": entry(model[1]), "patch": entry(patch, repo="h/p"),
+                       "key": entry(key, repo="h/p"),
+                       "abl": {"derive": {"with": "overlay_q4x", "patch": "patch", "key": "key",
+                                          "model": ["s1", "s2"], "mode": 2},
+                               "path": "q-abliterated-overlay.gguf", "bytes": os.path.getsize(made),
+                               "sha256": sha(made)}},
+             "packs": {"q": {"title": "t", "shards": ["s1", "s2"], "table": None, "picks": None, "drafter": [],
+                             "overlay": "abl", "rig": ROW, "settings": {}}}}
+        return have, models, m, made
+
+    def test_laid(self):
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            manifest.check(m)
+            ids = osmos_install.needed(m, ["q"], True)  # the inputs fetched, never the derived file
+            self.assertEqual(ids, ["s1", "s2", "patch", "key"])
+            cfg = layout.read_config(layout.lay(m, "q", models, [have], trust_size=False, abliterated=True, fetch=None))
+            self.assertEqual(cfg["overlay"], os.path.join(models, "q", "q-abliterated-overlay.gguf"))
+            self.assertEqual(sha(cfg["overlay"]), sha(made))
+            self.assertNotIn("overlay", layout.read_config(layout.lay(m, "q", models, [have], trust_size=False,
+                                                                      abliterated=False, fetch=None)))
+
+    def test_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, _ = self.setup(d)
+            m["files"]["abl"]["sha256"] = "0" * 64  # another result than pinned: refused, nothing left of it
+            with self.assertRaises(layout.LayoutError):
+                layout.lay(m, "q", models, [have], trust_size=False, abliterated=True, fetch=None)
+            self.assertFalse(os.path.exists(os.path.join(models, "derived", "q-abliterated-overlay.gguf")))
+            bad = [("with", "xor_all"), ("patch", "nope"), ("key", "abl"), ("mode", 7)]
+            for k, v in bad:
+                mm = json.loads(json.dumps(m))
+                mm["files"]["abl"]["derive"][k] = v
+                with self.assertRaises(manifest.ManifestError, msg=f"derive {k} {v!r}"):
+                    manifest.check(mm)
+            mm = json.loads(json.dumps(m))
+            mm["files"]["abl"]["repo"] = "h/p"  # derived, not downloaded: no repo
+            with self.assertRaises(manifest.ManifestError):
+                manifest.check(mm)
+
+
 class Host(unittest.TestCase):
     def test_tools_named_before_anything_runs(self):
         have = {"git", "make", "gcc", "hipcc", "hf"}
@@ -322,7 +539,7 @@ class Rig(unittest.TestCase):
                 rows = json.load(f)
             self.assertEqual(rows[0], theirs[0])                          # theirs, as it was
             self.assertEqual(rows[1], row)
-            self.assertEqual(row["id"], "osmos-ud-iq1_s")
+            self.assertEqual(row["id"], "deepseek-1017-ud-s")
             self.assertIn("${PORT}", row["command"])
             self.assertEqual(row["efforts"], ["low", "high", "max"])      # the levels osmos-api maps
             self.assertEqual(row["effort"], "max")                           # the default: the most thinking
@@ -342,7 +559,7 @@ class Rig(unittest.TestCase):
             row = rig.register(home, cfg, "/b/osmos-api", "/m/q/osmos.json", default=False,
                                row=self.PACKS["qwen38-ud-iq3_xxs"]["rig"])
             self.assertEqual((row["id"], row["window"], row["maxTokens"], row["reserve"], row["keepRecent"]),
-                             ("osmos-qwen38-ud-iq3_xxs", 262144, 65536, 65536, 65536))
+                             ("qwen3.8-flash-next", 262144, 65536, 65536, 65536))
             self.assertEqual((row["efforts"], row["effort"], row["aliases"]), (["low", "medium", "high"], "high",
                                                                                ["qwen"]))
             with self.assertRaises(rig.RigError):             # the DeepSeek packs' 256K reply in a 262K window
@@ -363,7 +580,50 @@ class Rig(unittest.TestCase):
             rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=True, row=self.DS)
             with open(os.path.join(home, "settings.json")) as f:
                 s = json.load(f)
-            self.assertEqual(s, {"model": "osmos-ud-iq1_s", "theme": "dark"})
+            self.assertEqual(s, {"model": "deepseek-1017-ud-s", "theme": "dark"})
+
+    def test_each_packs_id(self):                        # rig's names: the model, its date, the quant's size
+        ids = {pid: p["rig"]["id"] for pid, p in self.PACKS.items()}
+        self.assertEqual(ids, {"ud-iq1_s": "deepseek-1017-ud-s", "ud-iq1_m": "deepseek-1017-ud-m",
+                               "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
+                               "qwen38-ud-iq3_xxs-1m": "qwen3.8-flash-next-1m"})
+        aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
+        self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
+
+    def test_the_old_row_moved(self):                    # 0.5.8's id, osmos-<pack>: replaced, its port and default kept
+        with tempfile.TemporaryDirectory() as home:
+            theirs = {"id": "local", "window": 32768, "maxTokens": 4096, "reserve": 4096, "keepRecent": 8192,
+                      "command": "llama-server --port ${PORT}", "port": 8090}
+            old = dict(theirs, id="osmos-ud-iq1_s", port=8095)
+            put(os.path.join(home, "models.json"), json.dumps([theirs, old]).encode())
+            put(os.path.join(home, "settings.json"), json.dumps({"model": "osmos-ud-iq1_s", "theme": "dark"}).encode())
+            row = rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=False, row=self.DS)
+            with open(os.path.join(home, "models.json")) as f:
+                rows = json.load(f)
+            self.assertEqual([r["id"] for r in rows], ["local", "deepseek-1017-ud-s"])
+            self.assertEqual(rows[0], theirs)
+            self.assertEqual(row["port"], 8095)
+            with open(os.path.join(home, "settings.json")) as f:
+                self.assertEqual(json.load(f), {"model": "deepseek-1017-ud-s", "theme": "dark"})
+
+    def test_a_default_not_ours_kept(self):              # not asked, not the old row: settings.json untouched
+        with tempfile.TemporaryDirectory() as home:
+            s = os.path.join(home, "settings.json")
+            put(s, b'{"model": "local"}')
+            rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=False, row=self.DS)
+            with open(s, "rb") as f:
+                self.assertEqual(f.read(), b'{"model": "local"}')
+
+    def test_ids_checked(self):                          # a pack's id rig's name for it: present, rig-safe, its own
+        for bad in (None, "", "Has Space", "osmos/x"):
+            m = manifest.load(REAL)
+            m["packs"]["ud-iq1_s"]["rig"]["id"] = bad
+            with self.assertRaisesRegex(manifest.ManifestError, "rig id"):
+                manifest.check(m)
+        m = manifest.load(REAL)
+        m["packs"]["ud-iq1_m"]["rig"]["id"] = m["packs"]["ud-iq1_s"]["rig"]["id"]
+        with self.assertRaisesRegex(manifest.ManifestError, "rig id"):
+            manifest.check(m)
 
     def test_malformed_refused_untouched(self):
         with tempfile.TemporaryDirectory() as home:

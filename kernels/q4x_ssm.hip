@@ -9,8 +9,8 @@ extern "C" {
 namespace {
 
 constexpr int kThreads = 256;
-constexpr int kHead = 128;                // a head's dim: the delta rule's block, a column of its state a thread
-constexpr uint32_t kMaxTaps = 8; /* a conv's taps, and its dilation, at most */
+constexpr int kHead = Q4X_SSM_STATE;      // a head's dim: the delta rule's block, a column of its state a thread
+constexpr uint32_t kMaxTaps = Q4X_CONV_TAPS_MAX; /* a conv's taps, and its dilation, at most */
 constexpr uint32_t kMaxHist = (kMaxTaps - 1) * kMaxTaps; /* a conv state's rows at most */
 constexpr float kSoftplusLinear = 20.0f;  // ggml's softplus: above it, x
 

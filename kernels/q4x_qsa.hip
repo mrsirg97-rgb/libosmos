@@ -10,7 +10,7 @@ extern "C" {
 namespace {
 
 constexpr int kDim = Q4X_IX_DIM;  // a head's dim: a block's threads, a value a thread
-constexpr int kMaxHeads = 4;      // the score tile's query rows (qwen4exp.attention.indexer.head_count)
+constexpr int kMaxHeads = Q4X_IX_HEADS_MAX; // the score tile's query rows (attention.indexer.head_count)
 constexpr int kTT = 16, kTB = 32; // the score tile: tokens x blocks
 constexpr int kPick = 256;        // the pick's threads: a token's
 constexpr uint64_t kScoreBudget = 4u << 20;  // the scratch's scores at least: a piece's tokens x their blocks

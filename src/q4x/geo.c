@@ -2,6 +2,7 @@
 
 #include "gguf_meta.h"
 #include "q4x_geo.h"
+#include "osmos/gpu/q4x_ops.h"
 
 #define ARCH "qwen4exp"
 #define DIM_MAX (1 << 24)
@@ -62,7 +63,7 @@ static bool ple(GgufMeta *m, Q4xGeometry *g)
   g->ple_layer = (int)v[0];
   if (!meta_uint_in(m, ARCH ".ple.ngram_size", NGRAM_MIN, Q4X_MAX_NGRAM, &g->ple_ngram) ||
       !meta_uint_in(m, ARCH ".ple.heads_per_ngram", 1, Q4X_MAX_PLE_HEADS, &g->ple_heads_per_ngram) ||
-      !meta_uint_in(m, ARCH ".ple.conv_kernel", 1, DIM_MAX, &g->ple_conv) ||
+      !meta_uint_in(m, ARCH ".ple.conv_kernel", 1, Q4X_CONV_TAPS_MAX, &g->ple_conv) ||
       !meta_uint_in(m, ARCH ".embedding_length_per_layer_input", 1, DIM_MAX, &g->ple_dim) ||
       !meta_uint_in(m, ARCH ".ple.eos_token_id", 0, INT32_MAX, &g->ple_eos) ||
       !meta_uint_in(m, ARCH ".ple.image_token_id", 0, INT32_MAX, &g->ple_image))
@@ -70,6 +71,8 @@ static bool ple(GgufMeta *m, Q4xGeometry *g)
   g->ple_heads = (g->ple_ngram - 1) * g->ple_heads_per_ngram;
   if (g->ple_heads > Q4X_MAX_PLE_HEADS)
     return meta_fail(m, ARCH ".ple.heads_per_ngram", "more heads than this build holds");
+  if ((uint64_t)g->ple_heads * (uint64_t)g->ple_dim != (uint64_t)g->n_embd) /* a token's rows fill its embedding */
+    return meta_fail(m, ARCH ".embedding_length_per_layer_input", "its heads' rows not the hidden width");
   const size_t h = (size_t)g->ple_heads, ng = (size_t)g->ple_ngram;
   int64_t off[Q4X_MAX_PLE_HEADS], rows[Q4X_MAX_PLE_HEADS];
   if (!meta_ints(m, ARCH ".ple.layer_multipliers", ng, ng, g->ple_mult, &n) ||
@@ -103,15 +106,19 @@ bool q4x_geometry(const Gguf *model, Q4xGeometry *g, char err[Q4X_ERR])
       meta_uint_in(&m, ARCH ".attention.head_count", 1, DIM_MAX, &g->n_heads) &&
       meta_uint_in(&m, ARCH ".attention.head_count_kv", 1, g->n_heads, &g->n_kv_heads) &&
       (g->n_heads % g->n_kv_heads == 0 || meta_fail(&m, ARCH ".attention.head_count_kv", "not a heads' divisor")) &&
-      meta_uint_in(&m, ARCH ".attention.key_length", 1, DIM_MAX, &g->head_dim) &&
+      (g->n_heads / g->n_kv_heads <= Q4X_GQA_MAX ||
+       meta_fail(&m, ARCH ".attention.head_count_kv", "more query heads a key head than the attention's tile")) &&
+      meta_uint_is(&m, ARCH ".attention.key_length", Q4X_HEAD_DIM) && (g->head_dim = Q4X_HEAD_DIM) &&
       meta_uint_is(&m, ARCH ".attention.value_length", (uint64_t)g->head_dim) &&
       meta_uint_in(&m, ARCH ".rope.dimension_count", 2, g->head_dim, &g->rope_dim) && rope(&m, g) &&
       meta_real(&m, ARCH ".rope.freq_base", &g->rope_base) &&
-      meta_uint_in(&m, ARCH ".attention.indexer.head_count", 1, DIM_MAX, &g->ix_heads) &&
-      meta_uint_in(&m, ARCH ".attention.indexer.key_length", 1, DIM_MAX, &g->ix_dim) &&
+      meta_uint_in(&m, ARCH ".attention.indexer.head_count", 1, Q4X_IX_HEADS_MAX, &g->ix_heads) &&
+      meta_uint_is(&m, ARCH ".attention.indexer.key_length", Q4X_IX_DIM) && (g->ix_dim = Q4X_IX_DIM) &&
+      (g->rope_dim <= g->ix_dim ||
+       meta_fail(&m, ARCH ".rope.dimension_count", "wider than the indexer's head (it rotates with the attention)")) &&
       meta_uint_in(&m, ARCH ".attention.indexer.top_k", 1, DIM_MAX, &g->ix_top_k) && kinds(&m, g) &&
-      meta_uint_in(&m, ARCH ".ssm.conv_kernel", 1, DIM_MAX, &g->ssm_conv) &&
-      meta_uint_in(&m, ARCH ".ssm.state_size", 1, DIM_MAX, &g->ssm_state) &&
+      meta_uint_in(&m, ARCH ".ssm.conv_kernel", 1, Q4X_CONV_TAPS_MAX, &g->ssm_conv) &&
+      meta_uint_is(&m, ARCH ".ssm.state_size", Q4X_SSM_STATE) && (g->ssm_state = Q4X_SSM_STATE) &&
       meta_uint_in(&m, ARCH ".ssm.group_count", 1, DIM_MAX, &g->ssm_groups) &&
       meta_uint_in(&m, ARCH ".ssm.time_step_rank", 1, DIM_MAX, &g->ssm_v_heads) &&
       (g->ssm_v_heads % g->ssm_groups == 0 || meta_fail(&m, ARCH ".ssm.group_count", "not the value heads' divisor")) &&
@@ -120,6 +127,8 @@ bool q4x_geometry(const Gguf *model, Q4xGeometry *g, char err[Q4X_ERR])
       meta_uint_in(&m, ARCH ".expert_count", 1, DIM_MAX, &g->n_experts) &&
       meta_uint_in(&m, ARCH ".expert_used_count", 1, g->n_experts, &g->n_used) &&
       meta_uint_in(&m, ARCH ".expert_feed_forward_length", 1, DIM_MAX, &g->ff_exp) &&
+      (g->ff_exp % Q4X_FF_TILE == 0 ||
+       meta_fail(&m, ARCH ".expert_feed_forward_length", "not whole tiles of the experts' matmul")) &&
       meta_uint_in(&m, ARCH ".expert_shared_feed_forward_length", 1, DIM_MAX, &g->ff_shexp) && ple(&m, g);
   g->native_ctx = (uint32_t)ctx;
   return ok;

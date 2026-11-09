@@ -2591,6 +2591,93 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.9: Qwen ready for another shape, abliterated, and its decode profiled (2026-11-08, performance)
+
+**the load refuses what the kernels cannot run.** An audit of the Qwen path against a Qwen4 of other shapes (its arch
+`qwen4exp` too): every dimension was read from the GGUF and every tensor checked against it, but the kernels' own
+fixed shapes were checked only when a step launched - a model of another head dim loaded, then failed "a GPU call
+failed (a layer)". q4x_ops.h now names them once (Q4X_HEAD_DIM 256, Q4X_GQA_MAX 16, Q4X_SSM_STATE 128, Q4X_IX_DIM
+128, Q4X_IX_HEADS_MAX 4, Q4X_CONV_TAPS_MAX 8, Q4X_FF_TILE 16 - the kernels use them, q4x_moe's static_assert ties the
+last to mm's tile) and geo.c refuses past them, the key named. Two were latent bugs, not only refusals: the indexer's
+width was read (`indexer.key_length`) and never compared with the buffers' fixed 128 (a model of another would have
+read past them), and the n-gram heads' rows were never checked to fill the hidden width (their buffer n x D). And the
+n-gram table's types: the loader took the decode path's (BF16, Q5_K among them), the kernel that reads it decodes
+IQ4_NL, Q8_0 and Q6_K - now those alone. test_q4x_weights: each refused on the real model's metadata, mutated in
+memory (11 cases), the model still accepted.
+
+**huihui-ai's abliteration for Qwen** (Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF, patch-unsloth, 2026-11-08): one
+3.56 GB GGUF of every variant - a target's copy in each type unsloth's quants use, named `<tensor>_<ggml type>`, its
+bytes XORed with a key file's text (their dec.py; it writes a patched copy of the whole model). Ours turns it into an
+overlay (tools/install/overlay_q4x.py: the variants of the model's types, decoded, under the model's names; mode 2 -
+ssm_out, attn_output and ffn_down_shexp, "no warnings"): 96 tensors, 703 MB, a second. The patch is for these files:
+our four shards' SHA-256s are unsloth's main's (every commit since our pin a README's), the patch uploaded four days
+after unsloth's last quant change, every target's variant of our type and shape. Decoded right: each tensor against
+the model's own, dequantized - cosine 0.9990-0.9993, 3.6-4.5% apart (a wrong key position would be ~0). The engine
+reads it as DeepSeek's overlays: q4x_weights_create(model, overlay) - an overlay tensor stands in for the model's of
+its name after the same checks, one no role reads refused; the forward uploads the overlay's and skips what it
+shadows; the state identity counts its files (a conversation kept with it is not loaded without). test_overlay_q4x_gpu:
+an overlay of the model's own bytes (3 tensors copied out) the same logits bit for bit; the abliteration's 1,738,239
+of 1,738,240 moved, the same bits twice; mutants (the weights ignoring it, the identity ignoring it) caught. Perplexity
+2.7143 -> 2.7233 (8K, +0.33%), 2.2732 -> 2.2867 (16K, +0.59%) - DeepSeek's overlays cost 0.2-0.45%. Its effect, one
+harmless prompt (lock picking as a hobby): the stock model answers after weighing the policy ("Safety/legal? Policy?
+... Ensure no illegal", 2,068 characters of thinking) and opens with a legal note; the abliterated one thinks about the
+content alone (1,242) and answers without it. The installer derives it: a file of `derive` (its converter, inputs and
+mode) and the pinned bytes and SHA-256 of the result, made from the patch and key (fetched at their commit) when the
+user has no copy, refused and removed when the result is not the pinned one.
+
+**Qwen's decode, profiled** (rocprofv3, 64 tokens, plain; 38.6 ms a token traced, 37 untraced): 1,752 dispatches a
+token, the GPU busy 91%. A token reads 5.0 GB (4.0 dense, 1.0 of experts: 10 of 512, 48 layers) - 20.8 ms at 240
+GB/s, a floor of 48 tok/s against 27. Where the 16 ms goes, and what keeps it:
+- the dense matmuls 20.2 ms: Q6_K at 187-222 GB/s (DeltaNet qkv + gate, out, the output head), the hyper-connections'
+  Q8_0 (3.5 MB each, 192 a token) ~166 - near the floor already; a shape retuned would move their sums' order, so their
+  bits (a shipped pack's: fixed).
+- the router's F32 matvec 40 us a layer in the trace, 25-27 us alone (mvsweep, R 1-2, U 1-10, 190-209 GB/s at every
+  setting): the rest is the shared expert beside it on the side stream sharing the memory - by design.
+- the experts 8.5 ms (mm_group, ~118 GB/s): their shapes swept before (0.5.x mmsweep; IQ3_XXS 53.5 us at 128 x 8 x 8).
+  The matvec's group kernel at a token is faster - IQ2_S gate / up 41.6 against ~52 us, IQ4_NL down 53.6 against ~60:
+  ~1.3 ms a token, ~3.5% - but in F32 throughout, where the matmul's inputs are f16: a decoded token would no longer be
+  a prompt's bits (test_q4x_forward_gpu's 255 + 1). Declined: Qwen stays one computation, prompt and decode.
+- the small kernels 5.7 ms (859 a token, 1-12 us) and 3.4 ms between them: the dispatches' own cost (0.5.5's HIP graph
+  of a step replayed no faster). Fusing the DeltaNet's gates / conv / conv_hist / qk_norm and folding scale_silu and
+  gated_mean into the hyper-connections' matmuls: ~200-300 dispatches, ~0.5-0.8 ms (~2%) - not done; Qwen4's shapes
+  first.
+So at the bits it keeps, Qwen3.8's decode is near what this design reads it at; the gap is dispatches and a token's
+16-row expert tiles.
+
+**The warm set read once a load.** IQ2_XXS against Maya logged the SSD's bytes a second (/proc/diskstats). The device
+counter matched Maya's own process counter within 2% (190 against 193 GB over 80 s). osmos's plain run read 643 GB in
+187 s, and 125 s of that was the load, mostly at the SSD's 7.2 GB/s. That's about 600 GB for a 107 GiB budget,
+against Maya's ~200 GB in 36 s. The cause: `auto` sizes the budget by building the forward, measuring the room, and
+building again (fit_sized, 4-5 builds). Since 0.5.8 every create's warm_start read the budget's experts, so the load
+read the warm set once a build, and all but the last one's were thrown away. The fix: create keeps the warm list
+(f->warm), and the first forward_batch reads it (fwd_warm) before anything else. The cache at the first step is the
+one create made before, and nothing touches the pool between them. test_warm_gpu: two creates of one budget read
+under a quarter of it each; the first step reads over half (the warm set), the second under a quarter.
+- **Before the fix:** each create read 43.7 and 42.6 GB, the whole warm set, and the test failed.
+- **After:** 7.6 GB each; the first one-token step 37.0 GB, the second 1.7.
+- **Mutant** (the first step's fwd_warm off): its first step read 2.9 GB, and the test failed.
+- **UD-IQ2_XXS plain bench:** from start to the warm-up answer's end, 54 s against 123-131 s; the whole run 110 s
+  against 179-187. The same three hashes, and decode 14.1-14.3 tok/s, as before.
+
+**Open: the MTP head's draft probabilities vary between runs.** Qwen's drafted bench (512-token prompt, 128 tokens):
+- **The output is the same in every run** (ids f298bb34f82ac937 in 7 of 7), and so is the main model's.
+- **The draft count varies.** One of the session's two runs drafted 151 in 42 rounds; the other six drafted 149 in 41.
+- **The cause is below that count.** `Q4X_BENCH_TRACE` prints each round's drafts and their probabilities exactly.
+  Across four runs, the probabilities first differ at round 12 in two of them and at round 1 in the third, by about
+  0.1% (0x1.efb87p-2 against 0x1.ef6bd6p-2). The pattern is a small perturbation, not unwritten memory read as
+  garbage. A different round each run points to an ordering race.
+- **Ruled out by reading the code:**
+  - The top-1 kernel: a fixed stride and fixed-order block reductions.
+  - The shared expert on the side stream. Both routers (the model's and the head's) are F32, which has no mm path,
+    so neither touches b.x16. The routed experts use b.xe16. q4x_moe_sum waits on e_out.
+  - The atomics: all counts or ORs, none using its returned value.
+  - The host: synced before reading the pinned top-1.
+  - The head's seeding: every prompt step is seeded, and every row a draft reads was written first.
+  - The matmuls: no global scratch, every launch on its given stream.
+- **Next, on the GPU:** the traces with the side stream off. Then the head's buffers poisoned at create, to separate
+  a race from a read of unwritten memory.
+- **Not a release blocker.** It costs about 1 tok/s run to run (45.1 against 46.1) and no output bits.
+
 ### 0.5.8: the membrane - one cache for every expert (2026-11-08, performance)
 
 **the measurement.** A pick trace (a study build, not kept: each layer step's distinct experts, each resident or not;

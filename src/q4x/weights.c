@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "osmos/gpu/q4x_ops.h"
 #include "osmos/model/qtype.h"
 #include "../model/gguf_meta.h"
 #include "q4x_geo.h"
@@ -43,7 +44,7 @@ static const Role tops[] = {
   {"output_hc_norm.weight", TOP(out_hc_norm), ALL, RAW, TY(F32), {D_HC_EMBD}},
   {"output_hc_down.weight", TOP(out_hc_down), ALL, MAT, 0, {D_HC_EMBD, D_HC_RANK}},
   {"output_hc_up.weight", TOP(out_hc_up), ALL, MAT, 0, {D_HC_RANK, D_HC_EMBD}},
-  {"per_layer_token_embd.weight", TOP(ple_table), ALL, ROWS, 0, {D_PLE_DIM, D_PLE_ROWS}},
+  {"per_layer_token_embd.weight", TOP(ple_table), ALL, RAW, Q4X_ROWS_TYPES, {D_PLE_DIM, D_PLE_ROWS}}, /* q4x_rows' types */
 };
 
 static const Role roles[] = {
@@ -162,13 +163,22 @@ static bool applies(const Q4xGeometry *g, When w, int l)
   return false;
 }
 
-/* the tensor of that name checked against its role; taken[] marks it the role's */
-static const GgufTensor *claim(const Gguf *model, const Q4xGeometry *g, const Role *r, const char *name, bool *taken,
-                               char *err)
+/* the tensor of that name checked against its role - an overlay's where it has one (standing in for the model's of
+   its name, which must be there), else the model's; taken[] marks the model's (the overlay's: taken_ov[]) */
+typedef struct Claim
 {
-  const GgufTensor *t = gguf_tensor(model, name);
-  if (!t)
-    return fail(err, name, "missing"), NULL;
+  const Gguf *model, *overlay;
+  bool *taken, *taken_ov;
+} Claim;
+
+static const GgufTensor *claim(const Claim *c, const Q4xGeometry *g, const Role *r, const char *name, char *err)
+{
+  const GgufTensor *mt = gguf_tensor(c->model, name), *ot = c->overlay ? gguf_tensor(c->overlay, name) : NULL;
+  if (!mt)
+    return fail(err, name, ot ? "an overlay tensor the model has none of" : "missing"), NULL;
+  if (ot)
+    c->taken[mt - c->model->tensors] = true; /* shadowed: the overlay's is read */
+  const GgufTensor *t = ot ? ot : mt;
   int n = 0;
   while (n < GGUF_MAX_DIMS && r->dims[n] != D_NONE)
     n++;
@@ -188,39 +198,47 @@ static const GgufTensor *claim(const Gguf *model, const Q4xGeometry *g, const Ro
     return fail(err, name, "a type its reader does not take"), NULL;
   if (t->bytes != gguf_bytes(t->type, values))
     return fail(err, name, "its bytes not its type's for its shape"), NULL;
-  taken[t - model->tensors] = true;
+  if (ot)
+    c->taken_ov[ot - c->overlay->tensors] = true;
+  else
+    c->taken[mt - c->model->tensors] = true;
   return t;
 }
 
 void q4x_weights_destroy(Q4xWeights *w) { free(w); }
 
-Q4xWeights *q4x_weights_create(const Gguf *model, char err[Q4X_ERR])
+Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[Q4X_ERR])
 {
   if (!model)
     return fail(err, "q4x_weights_create", "no model"), NULL;
   Q4xWeights *w = calloc(1, sizeof *w);
   bool *taken = calloc(model->n_tensors ? model->n_tensors : 1, sizeof *taken);
-  if (!w || !taken)
-    return free(w), free(taken), fail(err, "q4x_weights_create", "out of memory"), NULL;
-  w->model = model;
+  bool *taken_ov = calloc(overlay && overlay->n_tensors ? overlay->n_tensors : 1, sizeof *taken_ov);
+  if (!w || !taken || !taken_ov)
+    return free(w), free(taken), free(taken_ov), fail(err, "q4x_weights_create", "out of memory"), NULL;
+  w->model = model, w->overlay = overlay;
+  const Claim c = {model, overlay, taken, taken_ov};
   Q4xGeometry *g = &w->geo;
   const GgufTensor *embed = gguf_tensor(model, "token_embd.weight");
   bool ok = q4x_geometry(model, g, err) &&
             (embed && embed->n_dims == 2 ? (g->n_vocab = (int)embed->dims[1]) > 0 : fail(err, "token_embd.weight", "missing"));
   for (size_t i = 0; ok && i < N_TOPS; i++)
-    ok = (*(const GgufTensor **)((char *)w + tops[i].field) = claim(model, g, &tops[i], tops[i].name, taken, err));
+    ok = (*(const GgufTensor **)((char *)w + tops[i].field) = claim(&c, g, &tops[i], tops[i].name, err));
   char name[NAME_MAX_LEN];
   for (int l = 0; ok && l < g->n_layers; l++)
     for (size_t i = 0; ok && i < N_ROLES; i++)
       if (applies(g, roles[i].when, l))
       {
         snprintf(name, sizeof name, "blk.%d.%s", l, roles[i].name);
-        ok = (*(const GgufTensor **)((char *)&w->layer[l] + roles[i].field) = claim(model, g, &roles[i], name, taken, err));
+        ok = (*(const GgufTensor **)((char *)&w->layer[l] + roles[i].field) = claim(&c, g, &roles[i], name, err));
       }
   for (size_t i = 0; ok && i < model->n_tensors; i++)
     if (!taken[i])
       ok = fail(err, model->tensors[i].name, "a tensor no role of this layer's kind takes");
-  free(taken);
+  for (size_t i = 0; ok && overlay && i < overlay->n_tensors; i++)
+    if (!taken_ov[i])
+      ok = fail(err, overlay->tensors[i].name, "an overlay tensor no role reads");
+  free(taken), free(taken_ov);
   if (!ok)
     return free(w), NULL;
   return w;
@@ -272,6 +290,7 @@ Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[Q4X_ERR])
   if (!m || !taken)
     return free(m), free(taken), fail(err, "q4x_mtp_create", "out of memory"), NULL;
   m->model = mtp;
+  const Claim c = {mtp, NULL, taken, NULL}; /* the head's own file: no overlay */
   const Q4xGeometry *g = &w->geo;
   const int l = g->n_layers;
   char name[NAME_MAX_LEN];
@@ -280,12 +299,12 @@ Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[Q4X_ERR])
     if (roles[i].when == ALL || roles[i].when == ATTENTION)
     {
       snprintf(name, sizeof name, "blk.%d.%s", l, roles[i].name);
-      ok = (*(const GgufTensor **)((char *)&m->layer + roles[i].field) = claim(mtp, g, &roles[i], name, taken, err));
+      ok = (*(const GgufTensor **)((char *)&m->layer + roles[i].field) = claim(&c, g, &roles[i], name, err));
     }
   for (size_t i = 0; ok && i < N_NEXTN; i++)
   {
     snprintf(name, sizeof name, "blk.%d.%s", l, nextn[i].name);
-    ok = (*(const GgufTensor **)((char *)m + nextn[i].field) = claim(mtp, g, &nextn[i], name, taken, err));
+    ok = (*(const GgufTensor **)((char *)m + nextn[i].field) = claim(&c, g, &nextn[i], name, err));
   }
   for (size_t i = 0; ok && i < mtp->n_tensors; i++)
     if (!taken[i])
