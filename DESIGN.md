@@ -2591,6 +2591,46 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.11: the release run (2026-11-09, low-power)
+
+**The scripts and logs:** ~/bench/h2h-0511 - `suite.sh` (0.5.9's suite: a clean build, CPU, API and installer
+tests, every GPU test, the model-based ones again on UD-IQ2_XXS, ASan + UBSan: 65 passed, 2 skipped as 0.5.9's -
+test_forward_gpu and test_overlay_gpu, no oracle dump on this box), `run.sh` (0.5.9's run.sh, x2.sh and follow.sh in
+one, gated on low-power: DeepSeek against Maya 1.1.57 - pulled to 0065548, its DeepSeek engine one test file past
+1.1.56, rebuilt and calibrated - on UD-IQ1_M, UD-IQ1_S and UD-IQ2_XXS, two rounds, the order swapped in round 2,
+every run's SSD bytes (disklog.sh, runs.csv); agents (UD-IQ1_M) under tools/power.py; perplexity; then Qwen against
+llama.cpp 7d7f028, unchanged since 0.5.9), `rerun.sh` (a third Qwen round, llama.cpp first, and MTP untraced). Each
+engine set up as its own setup does it; the box at low-power throughout (profile.txt).
+
+**What the numbers mean, and what moved them:**
+- **the bits:** every DeepSeek answer hashes as 0.5.9's (plain and drafted, every quant), every perplexity is
+  0.5.9's to the last digit (DeepSeek 2.4579 / 2.5006 / 2.4492, Qwen 2.7143 / 2.2732), Qwen's ids the same.
+- **MTP traced is slower:** run.sh ran the MTP bench with Q4X_BENCH_TRACE (to see the drafts the same run to run:
+  four runs, 41 rounds and 59% accepted each) - the trace copies and hashes a round's logits on the host, 36.9-39.0
+  tok/s. Untraced (rerun.sh): 45.59 / 45.47 / 45.45, the drafts the same.
+- **a mutant spun beside Qwen's round 1:** the #25 audit's mutation run (after DeepSeek) had a mutant that made
+  tokenizer_defuse loop forever - test_tokenizer at 100% of a core for 11 minutes, through osmos's round-1 Qwen runs
+  (caught: killed; the harness timed out its tests after). round 1 was still osmos's fastest round: the box's own
+  drift (both engines' round 2 ~4% under round 1) was larger than that core.
+- **spread round to round** (max - min over the mean): osmos's decode 0.2-0.4%, llama.cpp's 1.7% plain and 19% at
+  16K; prompts up to 7% (osmos), 18% (llama.cpp, its 2,048-token prompt at batch 4,096: 587 / 457).
+- **Maya's SSD a token** as 0.5.9's: its steady decode's read rate (10-second windows of disk.csv inside its runs:
+  1.5-1.6 GB/s plain at 8.9 tok/s, 1.8-1.9 drafted at 9.9) - ~0.17 / ~0.18 GB a token; osmos's over its exact
+  decode windows, 0.064 / 0.082.
+- **perplexity labels:** 0.5.9's README had llama.cpp's cache types swapped (its logs: K (f16) 2.7169 / 2.2718,
+  K (q8_0) 2.7110 / 2.2693; qwen_dump's q8_0 run also turns on flash attention).
+- **the profiles:** at low-power the agents bench is 20% slower than 0.5.9's at performance (485 against 405 s) at
+  half the energy an answer token (3.42 against 7.03 J, 56 against 104 W). Qwen's decode is the same at both
+  (26.5 / 45.5 against 27.1 / 45.6): it is bound by memory bandwidth, which the cap doesn't lower - its plain ceiling
+  from bandwidth is ~38 tok/s, so the bytes moved, not the clock, are what's left.
+
+**DeepSeek's decode, profiled for idle time** (rocprofv3, UD-IQ1_S plain, low-power, 18.2 tok/s): 1,189 dispatches a
+token; the dense matmuls 25.8 ms (203 a token, ~127 us each, near bandwidth), the experts' int8 lane ~13 ms (gate /
+up 8.0, down 5.3), ~300 small kernels ~1.2 ms. Little idle to take back (perhaps 1-2%): a few large bandwidth-bound
+kernels, not Qwen's many latency-bound small ones. The SSD's lever, the guess, lost drafting 9.9% (24.90 -> 22.43,
+IQ2_XXS) for plain's +1.9-3.5%: kept off. So 0.5.11's DeepSeek work stops there; 0.5.12 measures a token's joules
+first (DRAM bytes a kernel, SSD waits in a verify).
+
 ### 0.5.11: a tool call DeepSeek's parse takes, and a refused one loud (#25, 2026-11-09)
 
 **The report** (issue #25, a second gfx1151: 0.5.3, UD-IQ1_S, sampling on): an agent's turn ended on a calls block

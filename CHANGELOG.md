@@ -1,6 +1,10 @@
 # Changelog
 
-## [0.5.11]: (in progress)
+## [0.5.11]: nothing out of the format reaches a client; measured at low-power
+
+The first outside report (#25): an agent's tool call that DeepSeek's own parser takes was refused, and osmos-api
+answered with its markup. Fixing it led to an audit of every path a completion takes to the client, and of the
+prompt's tokens. The release is measured at `low-power` (~70 W), where an agent's work costs half the energy.
 
 - **DeepSeek's tool calls parse as DeepSeek's own parser does** (issue #25, reported by @ucotman with a repro, a
   control experiment and numbers from a second gfx1151 - thank you). An invoke with a blank line after its
@@ -46,6 +50,14 @@
 - **The tests' GPU delay was ~20x short** (`q4x_spin` counted the shader clock as 100 MHz): its "2 ms" was ~100 us,
   so the second stream's delay tests could pass without a wait. Now `wall_clock64` at the device's rate. With it,
   each new wait taken out fails `test_q4x_forward_gpu`.
+- **Measured at low-power** (2026-11-09, means of interleaved rounds; README), against Maya 1.1.57 (DeepSeek) and
+  llama.cpp 7d7f028 (Qwen). Agents (UD-IQ1_M, drafted): 485 s against 653, 3.42 J an answer token against 4.75 at
+  56 W, 8.2 GiB of RAM left free against 2.2. UD-IQ2_XXS decode plain 13.5 tok/s against 8.9, drafted 24.8 against
+  9.9, 0.064 / 0.082 GB of SSD a token against ~0.17 / ~0.18. Qwen prompts +36 to +40% (1.8x at 64K), decode at 16K
+  +19%, MTP-drafted 45.5. Every answer and perplexity the same bits as 0.5.9's. Against 0.5.9 at `performance`,
+  the agents bench 20% slower at half the energy an answer token (7.03 J); Qwen's decode the same at both.
+- **0.5.9's README had llama.cpp's two Qwen cache types swapped:** f16 is 2.7169 / 2.2718, q8_0 2.7110 / 2.2693
+  (llama.cpp's own log lines, K (f16) / K (q8_0)). osmos's 2.2732 at 16K is above both, not between them.
 - `test_q4x_overflow_gpu`: a step whose activations pass f16's range (an overlay with every scale f16's largest)
   gives no token, and a clean forward after it the clean token.
 

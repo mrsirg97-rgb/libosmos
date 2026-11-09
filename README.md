@@ -48,67 +48,76 @@ costs 0.2-0.5% perplexity (UD-IQ1_M 2.458 → 2.470, Qwen 2.714 → 2.723) at th
 
 ## Performance
 
-Everything below was measured in one session (2026-11-08) on one machine at AMD's `performance` profile, with nothing
-else running and greedy decoding. Each number is the mean of two interleaved rounds, with each engine in a fresh process
-and the engines' order swapped in the second round. Each engine is set up the way its own setup does it. The scripts and
-logs are listed in `DESIGN.md` ("0.5.9").
+Everything below was measured in one session (2026-11-09) on one machine at AMD's `low-power` profile (~70 W cap),
+with nothing else running and greedy decoding. Each engine runs in a fresh process, in interleaved rounds with the
+engines' order swapped from round to round, and each is set up the way its own setup does it. The scripts and logs
+are listed in `DESIGN.md` ("0.5.11").
+
+**Low-power is the profile for work that runs a while.** Against 0.5.9's run at `performance`, the agents bench below
+took 20% longer and used half the energy per answer token (3.42 J against 7.03 J; mean package power 56 W against
+104 W). Qwen's decode is the same at both (plain 26.5 against 27.1 tok/s, drafted 45.5 against 45.6): it is bound
+by memory bandwidth, which the power cap doesn't lower.
 
 ### DeepSeek against Maya
 
-[Project Maya](https://github.com/mw00/project-maya) 1.1.56 (build 7bf15ac):
+[Project Maya](https://github.com/mw00/project-maya) 1.1.57 (build 0065548):
 - rebuilt
 - run with its own pack, its own 8 GB DSpark, and its CPU lane and expert profile calibrated on this machine
 - reading the same model files
 
-Both engines run at 64K context and answer Maya's three bench questions, 256 tokens each, plus its 2K and 8K prompts.
+Both engines run at 64K context and answer Maya's three bench questions, 256 tokens each, plus its 2K and 8K prompts,
+in two rounds.
 
 | | UD-IQ1_M osmos | Maya | UD-IQ1_S osmos | Maya | UD-IQ2_XXS osmos | Maya |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Prompt, 2,048 tokens | **373** | 242 | **380** | 259 | **316** | 261 |
-| Prompt, 8,192 tokens | **519** | 412 | **534** | 430 | 429 | 433 |
-| Decode, drafted | **35.4** | 27.4 | **42.9** | 34.8 | **26.5** | 12.0 |
-| Decode, plain | **17.5** | 16.5 | 19.5 | 19.3 | **14.4** | 10.3 |
-| Perplexity, 8,191 tokens | **2.4579** | 2.4621 | **2.5006** | 2.5065 | **2.4492** | 2.4512 |
-| SSD read a token, plain / drafted | | | | | **0.067 / 0.090 GB** | ~0.17 / ~0.17 GB |
+| Prompt, 2,048 tokens | **318** | 206 | **322** | 228 | **281** | 216 |
+| Prompt, 8,192 tokens | **438** | 352 | **451** | 368 | **383** | 361 |
+| Decode, drafted | **32.7** | 24.4 | **39.5** | 33.6 | **24.8** | 9.9 |
+| Decode, plain | **16.4** | 15.6 | 18.3 | **18.9** | **13.5** | 8.9 |
+| Perplexity, 8,191 tokens | **2.4579** | 2.4606 | 2.5006 | **2.4983** | **2.4492** | 2.4505 |
+| SSD read a token, plain / drafted | | | | | **0.064 / 0.082 GB** | ~0.17 / ~0.18 GB |
 
-The bigger the quant, the wider the gap: plain decode goes from a tie on UD-IQ1_S to +39% on UD-IQ2_XXS. That's IO.
-osmos's one cache keeps the experts decode comes back to, so it reads 2.5x fewer SSD bytes for each token. (The
-device's counter, once a second: over osmos's exact generation windows; for Maya, estimated from its steady decode,
-since it doesn't print its windows.) osmos's answers hash the same in every run.
+The bigger the quant, the wider the gap: plain decode goes from Maya 3% ahead on UD-IQ1_S to osmos 52% ahead on
+UD-IQ2_XXS, drafted to 2.5x. That's IO: osmos's one cache keeps the experts decode comes back to, so it reads 2-3x
+fewer SSD bytes for each token. (The device's counter, once a second: over osmos's exact generation windows; for
+Maya, estimated from its steady decode, since it doesn't print its windows.) osmos's answers hash the same in every
+run, and the same as 0.5.9's.
 
 **Agents.** Maya's agent bench: 4 agents at once, 8 turns each, about 99K new prompt tokens against 8K answer tokens.
 It ran on UD-IQ1_M at 131K context with drafting on. Power is the APU package's (CPU + GPU + NPU, not the wall).
 
-| | osmos 0.5.9 | Maya 1.1.56 | |
+| | osmos 0.5.11 | Maya 1.1.57 | |
 | --- | ---: | ---: | ---: |
-| Wall time, all 32 turns | **405 s** | 551 s | 26% less |
-| First token, p50 / p95 | **5.6 / 53.8 s** | 6.4 / 73.3 s | |
-| Turn done, p50 / p95 | **40.3 / 83.3 s** | 53.6 / 124.5 s | 25% / 33% less |
-| Package power, mean | **104 W** | 123 W | |
-| Energy per answer token | **7.03 J** | 8.87 J | 21% less |
-| RAM left free, lowest | **8.2 GiB** | 2.8 GiB | |
+| Wall time, all 32 turns | **485 s** | 653 s | 26% less |
+| First token, p50 / p95 | **7.0 / 73.0 s** | 7.4 / 82.6 s | |
+| Turn done, p50 / p95 | **48.3 / 105.9 s** | 69.8 / 147.3 s | 31% / 28% less |
+| Package power, mean | **56.4 W** | 58.2 W | |
+| Energy per answer token | **3.42 J** | 4.75 J | 28% less |
+| RAM left free, lowest | **8.2 GiB** | 2.2 GiB | |
 
-osmos sizes itself to leave 8 GiB of RAM to the rest of the system.
+osmos sizes itself to leave 8 GiB of RAM to the rest of the system: room for an editor, a browser, language servers
+and the agent harness beside the model.
 
 ### Qwen3.8 against llama.cpp
 
-llama.cpp 7d7f028 (rebuilt that day), with HIP, all layers on the GPU and flash attention, at its faster batch
-(2,048). osmos reads prompts in 4,096-token steps, the way its pack does.
+llama.cpp 7d7f028, with HIP, all layers on the GPU and flash attention, at its faster batch for each length (2,048
+or 4,096). osmos reads prompts in 4,096-token steps, the way its pack does. Three rounds.
 
-| | osmos 0.5.9 | llama.cpp | |
+| | osmos 0.5.11 | llama.cpp | |
 | --- | ---: | ---: | ---: |
-| Prompt, 2,048 tokens | **873** | 569 | +53% |
-| Prompt, 8,192 tokens | **822** | 548 | +50% |
-| Prompt, 16,384 tokens | **811** | 521 | +56% |
-| Prompt, 65,536 tokens | **709** | 373 | 1.9x |
-| Decode, plain | **27.1** | 25.7 | +5% |
-| Decode at 16K context | **25.8** | 22.5 | +15% |
-| Decode, drafted by the MTP head | **45.6** | not measured | |
-| Perplexity, 8,192 / 16,384 tokens | 2.7143 / 2.2732 | 2.7110 / 2.2693 (f16 cache), 2.7169 / 2.2718 (q8_0) | |
+| Prompt, 2,048 tokens | **756** | 541 | +40% |
+| Prompt, 8,192 tokens | **714** | 526 | +36% |
+| Prompt, 16,384 tokens | **677** | 484 | +40% |
+| Prompt, 65,536 tokens | **602** | 330 | 1.8x |
+| Decode, plain | **26.5** | 26.0 | +2% |
+| Decode at 16K context | **24.9** | 20.9 | +19% |
+| Decode, drafted by the MTP head | **45.5** | not measured | |
+| Perplexity, 8,192 / 16,384 tokens | 2.7143 / 2.2732 | 2.7169 / 2.2718 (f16 cache), 2.7110 / 2.2693 (q8_0) | |
 
-osmos's decode holds up better at depth: going from a short context to 16K costs it 5%, llama.cpp 13%. Both run
-Qwen's sparse attention and pick the same key blocks (`test_q4x_qsa_gpu`). osmos keeps its cache in Q8_0, and its
-perplexity falls between llama.cpp's two cache types.
+osmos's decode holds up better at depth: going from a short context to 16K costs it 6%, llama.cpp 20%. It is also
+steadier: its decode varied 0.2-0.4% from round to round, llama.cpp's 1.7% (plain) and 19% (at 16K); prompts
+varied up to 7% for osmos, up to 18% for llama.cpp. Both run Qwen's sparse attention and pick the same key blocks
+(`test_q4x_qsa_gpu`). osmos keeps its cache in Q8_0; its perplexity is within 0.2% of llama.cpp's with either cache.
 
 ## How it works
 
