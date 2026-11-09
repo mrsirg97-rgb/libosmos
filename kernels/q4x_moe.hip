@@ -100,6 +100,7 @@ __global__ __launch_bounds__(kGroupThreads) void tiles_kernel(const int32_t* ids
     __syncthreads();
   }
   if (threadIdx.x < A) live[threadIdx.x] = sc[threadIdx.x][n_exp - 1];
+  __syncthreads();  // the totals read before the last expert's thread makes its own exclusive below
   for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads)
     for (int a = 0; a < A; a++) sc[a][e] -= own(e, a);
   __syncthreads();

@@ -2,6 +2,14 @@
 
 ## [0.5.12]: (in progress)
 
+- **Fixed: Qwen's steps of 9 to 16 tokens were not always the same bits.** The MoE's expert tables (one kernel's
+  block) read each scan's total from the last expert's place while that expert's own thread made it exclusive - no
+  barrier between. Read after, the totals came up short, and the last expert's slots and entries were cleared as past
+  the live ones: the tokens that picked expert 511 got its stale output. It happened at random, a few times in a pass
+  of such steps, beside the shared expert on the second stream. Steps of 4, 6 and 8 tokens (decode's and MTP's
+  sizes) and prompt-sized steps were not seen to in the runs made, but the race was in the kernel for any step.
+  Since 0.5.10. A barrier (`test_q4x_forward_gpu`: the 256 tokens as steps of 9, each one's rows the
+  one batch's bits - 3 of 3 runs failed without it). Found building DFlash2's rollback test.
 - **Qwen's n-gram table can stay on the SSD** (osmos-serve `--stream-ngram`, `"stream_ngram": true` in osmos.json),
   as DeepSeek's Engram does. The table (`per_layer_token_embd`, 26.8 GiB of UD-IQ3_XXS) is read a step's rows at a time
   (16 rows of 90 bytes a token) by 64 readers while the GPU runs the layer before the one that needs them, then

@@ -3,7 +3,8 @@
 // distribution's KL from llama.cpp's, and its greatest the same) - then the same tokens as 128 + 128 and as 255 + 1,
 // the state carried: the logits the bits of the one batch; then three sequences at their own positions sharing steps
 // (q4x_step: 3 + 150 + 1 tokens, past one x16's 128, and 2 + 1 within it) - each one's rows the bits of the one
-// batch's; then a step past MM_MAX_TOKENS against steps within it. needs a gfx1151, the UD-IQ3_XXS set (~78 GB of
+// batch's; the tokens as steps of 9, each one's rows the one batch's; then a step past MM_MAX_TOKENS against steps
+// within it. needs a gfx1151, the UD-IQ3_XXS set (~78 GB of
 // GPU memory) and the dump; skipped (77) without them.
 #include <algorithm>
 
@@ -265,6 +266,25 @@ int main() {
     std::printf("  single steps with the shared expert forced to end last: each row the one batch's\n");
   }
   q4x_seq_destroy(s);
+  {  // steps of 9 (past MV_MAX_TOKENS, within Q4X_SIDE_STEP: the matvecs' wide tiles beside the shared expert on the
+     // second stream): each step's rows the one batch's. 0.5.10 .. 0.5.11's expert tables (tiles_kernel) read their
+     // totals as the last expert's thread made its scan exclusive - its slots then cleared, its tokens' expert output
+     // stale - at random, a few times a pass of these steps (8 and under, and the prompt's, never seen to)
+    constexpr uint32_t kSmall = 9;
+    s = q4x_seq_create(f, ferr);
+    CHECK(s);
+    for (uint32_t t = 0; t < kTok; t += kSmall) {
+      const uint32_t n = kTok - t < kSmall ? kTok - t : kSmall;
+      CHECK(q4x_batch(f, s, ids.data() + t, n, 0, ferr));
+      if (std::memcmp(host_of(q4x_logits(f), (size_t) n * vocab).data(), &logits[(size_t) t * vocab],
+                      (size_t) n * vocab * 4)) {
+        std::fprintf(stderr, "  steps of %u: the step at %u not the one batch's bits\n", kSmall, t);
+        std::exit(1);
+      }
+    }
+    q4x_seq_destroy(s);
+    std::printf("  steps of %u: each one's rows the one batch's bits\n", kSmall);
+  }
   shared_steps(f, ids, logits, vocab);
   q4x_forward_destroy(f);
   long_step(w, ids, vocab);  // a forward of its own (the first's weights freed first)
