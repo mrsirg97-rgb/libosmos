@@ -5,10 +5,19 @@
 - **DeepSeek's tool calls parse as DeepSeek's own parser does** (issue #25). An invoke with a blank line after its
   name (`name="mcp">\n\n`) is taken, as the reference's regex takes it (Python's `$` matches before one trailing
   newline), and a parameter's `<\n` too. Nothing more: the blank lines and spaces the reference refuses are refused.
-- **A tool call that doesn't parse is an error, never an answer.** osmos-api sent a refused calls block as its text
-  (content, finish "stop"), so an agent read markup as the answer and sent the turn again. A turn that ends on a
-  calls block its parse refuses is now a 500 with the reason (a stream's error event), DeepSeek's and Qwen's.
-  A completion cut by max_tokens is still "length".
+- **A turn the parse refuses is an error, never an answer.** osmos-api sent a completion out of the format as its
+  text (content, finish "stop"): a refused calls block's markup, a stray special token's text, an empty answer when
+  the turn ended before `</think>`. An agent read that as the answer and sent the turn again. Now any turn that ends
+  out of the format is a 500 with the parse's reason (a stream's error event, no `[DONE]`), DeepSeek's and Qwen's.
+  The stream never sends a special token's text the parse refuses: it stops at it as at a calls block. A completion
+  cut by max_tokens is still "length", its text as it is - streamed, now the same text as the whole answer's (the
+  bytes held back before a cut were dropped from it).
+- **A client's text can't forge the prompt's turns.** The prompt was rendered and then tokenized with every special
+  token's text matched, so `<｜User｜>` or `<|im_start|>` in a message or a tool's result (a fetched page quoting a
+  chat) became the real token. Now a special token is cut only where the template put one: the request is rendered
+  again from its strings defused (one bit of each special token's text flipped, `tokenizer_defuse`), and that
+  render's tokens are the prompt's (`tokenizer_encode_shaped`). A call's arguments sent as a JSON string are defused
+  as the object the template reads. A prompt with no such text is the same tokens as before.
 - **The MTP head's drafts are the same every run.** Their confidences varied run to run in their low bits (the
   output never did, nor the main model's logits: every verify's row 0 the same bits at every position). Two causes:
   - **A race on the pinned token buffer.** The head's seed copies its tokens to the GPU from the buffer the next

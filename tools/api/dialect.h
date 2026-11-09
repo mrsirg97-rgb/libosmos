@@ -5,6 +5,8 @@
 
 #include "request.h"
 
+#define DIALECT_REFUSED_MAX 8 /* the most refused texts a dialect names (DeepSeek's five, Qwen's three) */
+
 typedef struct Dialect
 {
   const char *arch;       /* general.architecture */
@@ -12,12 +14,13 @@ typedef struct Dialect
   const char *think_end;  /* the reasoning's end */
   const char *calls_open; /* a tool calls block's start */
   bool trims;             /* its parse trims the reasoning and the content: their streams start past whitespace */
+  const char *const *refused; /* special tokens' text its parse refuses in a completion: never streamed */
   bool (*read)(const Json *body, Request *r, char err[API_ERR]);
   bool (*render)(const Request *r, JsonBuf *out, char err[CHAT_ERR]);
   bool (*parse)(const Request *r, const char *text, size_t n, JsonBuf *out, char err[CHAT_ERR]);
 } Dialect;
 
-/* the dialect of a model family, or NULL */
+/* the dialect of a model family, or NULL (one naming more than DIALECT_REFUSED_MAX refused texts too) */
 const Dialect *dialect_of(const char *arch);
 
 /* request_ds.c, request_qwen.c: a request's messages, tools and effort as the family's template takes them */

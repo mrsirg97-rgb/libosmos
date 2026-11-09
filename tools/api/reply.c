@@ -207,18 +207,100 @@ static void whole(Answer *s, const Run *r, const Json *m, size_t prompt_n)
   free(b.p);
 }
 
-/* the prompt's ids: the rendered messages (their special tokens' text matched as tokens) */
+/* a deep copy of j; NULL for NULL or out of memory (*oom) */
+static Json *copy(const Json *j, bool *oom)
+{
+  if (!j)
+    return NULL;
+  Json *c = calloc(1, sizeof *c);
+  if (!c)
+    return *oom = true, NULL;
+  *c = (Json){.type = j->type, .len = j->len, .f = j->f};
+  bool ok = !j->s || (c->s = malloc(j->len + 1));
+  if (ok && j->s)
+    memcpy(c->s, j->s, j->len + 1);
+  if (ok && j->n)
+    ok = (c->item = calloc(j->n, sizeof *c->item)) && (!j->key || ((c->key = calloc(j->n, sizeof *c->key)) &&
+                                                                  (c->klen = malloc(j->n * sizeof *c->klen))));
+  for (size_t i = 0; ok && i < j->n; c->n = ++i)
+  {
+    ok = (c->item[i] = copy(j->item[i], oom)) != NULL;
+    if (ok && j->key)
+      ok = (c->key[i] = malloc(j->klen[i] + 1)) != NULL;
+    if (ok && j->key)
+      memcpy(c->key[i], j->key[i], j->klen[i] + 1), c->klen[i] = j->klen[i];
+  }
+  if (!ok)
+    return json_free(c), *oom = true, NULL;
+  return c;
+}
+
+/* j's strings and keys defused in place (tokenizer_defuse), the bytes changed. a call's
+   "arguments" as a JSON string the template reads as its object (chat_tools.c's arguments(): decoded twice at most):
+   an escaped special token's text in it is that text once decoded - so its object, decoded and defused, in its place */
+static size_t defuse(Json *j, const Tokenizer *t)
+{
+  size_t changed = j->type == JSON_STRING ? tokenizer_defuse(t, j->s, j->len) : 0;
+  for (size_t i = 0; i < j->n; i++)
+  {
+    Json *v = j->item[i];
+    if (j->key && !strcmp(j->key[i], "arguments") && v->type == JSON_STRING)
+    {
+      char jerr[JSON_ERR];
+      Json *o = NULL;
+      for (int d = 0; d < 2 && (o ? o : v)->type == JSON_STRING; d++)
+      {
+        Json *next = json_parse((o ? o : v)->s, (o ? o : v)->len, jerr);
+        if (!next)
+          break;
+        json_free(o), o = next;
+      }
+      const size_t q = o && o->type == JSON_OBJECT ? defuse(o, t) : 0;
+      if (q)
+        json_free(v), j->item[i] = v = o, o = NULL, changed += q;
+      json_free(o);
+      if (q)
+        continue;
+    }
+    changed += defuse(v, t);
+    if (j->key)
+      changed += tokenizer_defuse(t, j->key[i], j->klen[i]);
+  }
+  return changed;
+}
+
+/* the prompt's ids: the rendered messages, a special token only where the template put one. a client's string that
+   holds a special token's text (a tool's result quoting a chat's markup) is that text: the request rendered again
+   from its strings defused is the shape (tokenizer_encode_shaped), and the two renders must differ only in the
+   bytes defused - else refused, never guessed */
 static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[API_ERR])
 {
   char cerr[CHAT_ERR];
-  JsonBuf text = {0};
+  JsonBuf text = {0}, shape = {0};
   if (!a->d->render(rq, &text, cerr))
     return free(text.p), snprintf(err, API_ERR, "%s", cerr), NULL;
-  int32_t *ids = text.oom ? NULL : malloc((text.n + 1) * sizeof *ids); /* a token is a byte or more */
-  const int64_t k = ids ? tokenizer_encode(a->tok, text.p, text.n, true, ids, text.n + 1) : -1;
-  free(text.p);
-  if (k < 0 || (size_t)k > text.n + 1)
-    return free(ids), snprintf(err, API_ERR, "out of memory"), NULL;
+  size_t changed = 0;
+  bool oom = text.oom;
+  Request sh = *rq;
+  sh.messages = copy(rq->messages, &oom), sh.tools = copy(rq->tools, &oom);
+  if (sh.messages)
+    changed += defuse(sh.messages, a->tok);
+  if (sh.tools)
+    changed += defuse(sh.tools, a->tok);
+  const char *why = oom ? "out of memory" : NULL;
+  if (!why && changed && !a->d->render(&sh, &shape, cerr))
+    why = "the request's strings defused, its prompt refused";
+  if (!why && changed && (shape.oom || shape.n != text.n))
+    why = shape.oom ? "out of memory" : "the prompt's own special tokens could not be told from its strings' text";
+  json_free(sh.messages), json_free(sh.tools);
+  int32_t *ids = why ? NULL : malloc((text.n + 1) * sizeof *ids); /* a token is a byte or more */
+  const int64_t k = !ids ? -1 : changed ? tokenizer_encode_shaped(a->tok, text.p, shape.p, text.n, ids, text.n + 1)
+                                        : tokenizer_encode(a->tok, text.p, text.n, true, ids, text.n + 1);
+  free(text.p), free(shape.p);
+  if (k < 0 || (size_t)k > text.n + 1) /* (encode_shaped's -1: a shape not the text defused) */
+    return free(ids),
+           snprintf(err, API_ERR, "%s", why ? why : ids ? "the prompt's own special tokens could not be told from its "
+                                                          "strings' text" : "out of memory"), NULL;
   *n = (size_t)k;
   return ids;
 }
@@ -279,9 +361,9 @@ void api_chat(Api *a, Http *h)
     char perr[CHAT_ERR] = "";
     bool parsed;
     Json *m = message(&s, &rq, r->rid, &parsed, perr);
-    if (m && !parsed && !strcmp(r->finish, "stop") &&
-        memmem(s.text.p, s.text.n, a->d->calls_open, strlen(a->d->calls_open)))
-    { /* the turn ended on a calls block its parse refuses: an error, never its markup as the answer (#25) */
+    if (m && !parsed && !strcmp(r->finish, "stop"))
+    { /* the turn ended out of the format (a calls block, a special token's text, no </think>): an error, never its
+         text as the answer (#25). cut by max_tokens ("length"), its text goes as it is */
       snprintf(err, sizeof err, "the model's tool call did not parse (%s)", perr);
       fail(h->fd, rq.stream, err);
     }
@@ -289,11 +371,8 @@ void api_chat(Api *a, Http *h)
       http_error(h->fd, 500, "out of memory");
     else if (rq.stream)
     {
-      if (!(json_get(m, "tool_calls") && json_get(m, "tool_calls")->n) && s.phase == PHASE_DONE &&
-          memmem(s.text.p, s.text.n, a->d->calls_open, strlen(a->d->calls_open)))
-        answer_flush(&s); /* a calls block that did not parse: its text */
-      else if (s.phase != PHASE_DONE)
-        answer_flush(&s); /* no EOS (length): what was held */
+      if (!parsed)
+        answer_flush(&s); /* cut by max_tokens: what was held, as the whole answer's content has it */
       stream_end(&s, &rq, r, m, n);
     }
     else

@@ -162,6 +162,9 @@ static bool calls(const char *t, size_t len, size_t *i, int *last, JsonBuf *out,
   return true;
 }
 
+/* (NULL-terminated) encoding.py's check of the reasoning and the content */
+const char *const chat_refused[] = {CHAT_BOS, CHAT_EOS, CHAT_THINK, CHAT_THINK_END, CHAT_DSML, NULL};
+
 bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[CHAT_ERR])
 {
   err[0] = 0;
@@ -186,9 +189,8 @@ bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char 
     return chat_fail(err, "the completion", "no EOS");
   if (i != len || last > 0)
     return free(tc.p), chat_fail(err, "the completion", "text after its end");
-  const char *special[] = {CHAT_BOS, CHAT_EOS, CHAT_THINK, CHAT_THINK_END, CHAT_DSML};
-  for (int k = 0; k < 5; k++)
-    if (has(content, special[k]) || has(reasoning, special[k]))
+  for (int k = 0; chat_refused[k]; k++)
+    if (has(content, chat_refused[k]) || has(reasoning, chat_refused[k]))
       return free(tc.p), chat_fail(err, "the completion", "a special token in its text");
   json_puts(out, "{\"role\": \"assistant\", \"content\": "), json_dump_string(out, content.p, content.n);
   json_puts(out, ", \"reasoning_content\": "), json_dump_string(out, reasoning.p, reasoning.n);

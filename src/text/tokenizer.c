@@ -216,6 +216,59 @@ int64_t tokenizer_encode(const Tokenizer *t, const char *text, size_t len, bool 
   return (int64_t)n;
 }
 
+size_t tokenizer_defuse(const Tokenizer *t, char *s, size_t len)
+{
+  size_t changed = 0;
+  for (int32_t k = 0; t && s && k < t->n_special; k++)
+  {
+    const char *x = t->text[t->special[k]];
+    const size_t xl = strlen(x);
+    for (char *at = xl ? memmem(s, len, x, xl) : NULL; at; at = memmem(at, len - (size_t)(at - s), x, xl))
+    {
+      const unsigned char lead = (unsigned char)at[0];
+      const size_t w = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1; /* its first character */
+      at[w <= xl ? w - 1 : 0] ^= 1;
+      changed++;
+    }
+  }
+  return changed;
+}
+
+int64_t tokenizer_encode_shaped(const Tokenizer *t, const char *text, const char *shape, size_t len, int32_t *ids,
+                                size_t cap)
+{
+  if (!t || (len && (!text || !shape)))
+    return -1;
+  for (size_t i = 0; i < len; i++) /* the shape is the text defused: a byte apart by one bit at most */
+    if (((unsigned char)text[i] ^ (unsigned char)shape[i]) > 1)
+      return -1;
+  size_t nf = 0, n = 0;
+  Frag *f = len ? partition(t, shape, len, true, &nf) : NULL;
+  if (len && !f)
+    return -1;
+  for (size_t i = 0; i < nf; i++)
+  {
+    if (f[i].id >= 0)
+    {
+      if (memcmp(text + f[i].off, shape + f[i].off, f[i].len)) /* a special token the text doesn't have */
+        return free(f), -1;
+      if (n < cap)
+        ids[n] = f[i].id;
+      n++;
+    }
+    else
+      n += raw(t, (const unsigned char *)text + f[i].off, f[i].len, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+  }
+  free(f);
+  return (int64_t)n;
+}
+
+bool tokenizer_special(const Tokenizer *t, int32_t id)
+{
+  return t && id >= 0 && id < t->n &&
+         (t->type[id] == TYPE_CONTROL || t->type[id] == TYPE_USER || t->type[id] == TYPE_UNKNOWN);
+}
+
 int tokenizer_piece(const Tokenizer *t, int32_t id, bool special, char out[TOKENIZER_PIECE_MAX])
 {
   if (!t || id < 0 || id >= t->n)

@@ -9,7 +9,7 @@
 
 #define MAX_PARAMS 64 /* a call's parameters read at most - more refused, not cut (a tool schema's are a handful) */
 
-static const char *const kSpecial[] = {"<|im_start|>", QCHAT_EOS, "<|endoftext|>"};
+const char *const qchat_refused[] = {"<|im_start|>", QCHAT_EOS, "<|endoftext|>", NULL};
 
 static bool starts(Span s, const char *lit) { return s.n >= strlen(lit) && !memcmp(s.p, lit, strlen(lit)); }
 
@@ -152,8 +152,8 @@ bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools,
   if (!text || len < en || memcmp(text + len - en, QCHAT_EOS, en))
     return qchat_fail(err, "no end of turn (" QCHAT_EOS ")");
   Span body = {text, len - en}, reasoning = {"", 0};
-  for (size_t i = 0; i < sizeof kSpecial / sizeof *kSpecial; i++)
-    if (memmem(body.p, body.n, kSpecial[i], strlen(kSpecial[i])))
+  for (size_t i = 0; qchat_refused[i]; i++)
+    if (memmem(body.p, body.n, qchat_refused[i], strlen(qchat_refused[i])))
       return qchat_fail(err, "a special token in the completion's text");
   if (mode == CHAT_THINKING && !upto(&body, QCHAT_THINK_END, &reasoning))
     return qchat_fail(err, "no " QCHAT_THINK_END " in a thinking completion");

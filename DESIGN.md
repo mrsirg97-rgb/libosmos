@@ -2610,13 +2610,52 @@ answer with no `</think>`, a run cut by max_tokens - its finish "length" says so
 "stop") with a calls block (the dialect's marker: DeepSeek's `<｜DSML｜ calls>`, Qwen's `<tool_call>`) its parse
 refuses is a 500 with the parse's why, a stream's error event (no [DONE]) after what streamed before the block.
 
+**And nothing else out of the format** (an audit of every path a completion takes to the client, the same day): a
+completion the parse refuses with no calls block went out as its text too - a stray `<｜DSML｜ invoke>` with no
+`calls` around it, `</think>` or a BOS in the answer (streamed live: the stream held back only the calls block's
+start and the EOS), and a turn ended before `</think>` (an empty answer, finish "stop"). Now any completion whose turn
+ended (stop) and that its parse refuses is the error; the stream's marks are the phase's end, the EOS and the texts
+the parse refuses (chat_refused, qchat_refused - one list, the parse's), and at a refused text what could still begin
+a marker before it is held too (`｜DSML｜` is a token of its own: `\n\n<` came before it, then ` calls`). cut by
+max_tokens, a completion's text still goes as it is, finish "length". the servers log no prompt or answer.
+
+**A client's text can't forge a turn.** the prompt is rendered to text, then tokenized with special tokens matched
+(as llama.cpp's server and HF tokenizers do by default): `<｜User｜>` in a tool's result was the role token - 11 of
+them in a test request whose template put 2. A special token now only where the template put one, and no render is
+changed: the request is copied with every string and key defused (`tokenizer_defuse`: at each special token's text,
+the longest first, one bit of its first character's last byte - `<` to `=`, `｜` to `｝`: a byte's length and JSON
+escaping kept) and rendered again - the shape. `tokenizer_encode_shaped` cuts the shape into special tokens as encode
+does and tokenizes the text's own bytes between them, nothing matched there. It refuses (the request a 400) a shape
+that is not the text defused: a byte apart by more than one bit, or a special token the text doesn't hold there. A
+call's arguments as a JSON string: DeepSeek's template decodes it (twice at most, as encoding.py does), so an
+escaped `\uff5c` in it is the token's text once decoded - the copy holds its object, decoded and defused (Qwen's
+request decodes its arguments as it reads them). no special token's text in a request: the one render, encode's ids
+as before (test_api: the Qwen prompt the template's own ids). user-defined tokens (`<think>`, `｜DSML｜`) were matched
+even with parse_special off - the shape is the way both kinds are left out.
+
 **Tests:** tests/fixtures/chat.jsonl gains the reference's verdicts on ten completions (gen_chat_fixtures.py: a
 case it raises on is `refuse`): the issue's, a blank line before a parameter, a parameter's `<\n`, and seven it
 refuses. test_chat: each parsed the same message or refused. tests/api: the issue's block read as two calls
 (`mcp {}`, `mcp {"search": "fl"}`); a refused one a 500 and a stream's error, no markup sent; cut by max_tokens
 still "length"; out of the format with no block still its text; Qwen's `<tool_call>` with no `</function>` a 500.
-Mutants (no newline allowance, two, the old end checks, any last byte; any finish, no calls check, a stream as a
-500, the why dropped) each fail a test.
+test_tokenizer: a client's text holding control and user-defined tokens' text, overlapping and back to back, between
+a template's, on both tokenizers - defused it holds none; shaped, its ids the template's specials alone and the
+text's bytes back; a shape the same as the text encode's ids; a shape not the text defused, -1. tests/api: special
+tokens' text in every place a client's string lands (system, user, an assistant's content, its call's arguments as
+an escaped JSON string, a tool's result, a tool's description and its parameters' names) the same special tokens
+as without it, DeepSeek's and Qwen's; out of the format and the turn ended (no `</think>`, a DSML invoke with no
+block, `</think>` or a BOS in the answer, Qwen's `<|im_start|>`) a 500 and a stream's error with none of that text
+streamed. Mutants (no newline allowance, two, the old end checks, any last byte; any finish, no calls check, a stream
+as a 500, the why dropped; no flip, the shape's own check, its special check, raw from the shape, user-defined not
+special, the arguments not decoded, the keys or the tools not defused, never shaped, an error at length, no flush at
+length, the refused texts not held, no back-off before one, the held bytes counted as sent) each fail a test. one
+mutant lives, as it should: the lead byte flipped in place of the character's last one defuses these vocabularies'
+tokens too (`<`, `｜`'s 0xEF to 0xEE); the last byte is kept because a lead byte's flip can make invalid UTF-8 (0xEC
+to 0xED, the surrogates' range) where a continuation byte stays one.
+
+**And one older bug, found by the new test:** at a cut (a calls block, now a refused text) the stream counted the
+bytes it held back before it (whitespace, a marker's start) as sent, so a run cut by max_tokens past that point lost
+them from its flushed text: its stream's content no longer the whole answer's. now only what went out is counted.
 
 ### 0.5.11: Qwen's small steps, less idle (2026-11-09, low-power)
 
@@ -3395,9 +3434,10 @@ at once, drafting).
   of a DSML calls block; a text that could still become one of those markers (or ends inside a UTF-8 character)
   held until it cannot. at DONE the whole completion parsed (chat_parse): its tool calls one last delta (ids
   call_<rid>_<n>), finish_reason tool_calls / stop / length, usage and timings, then [DONE]; a completion out of the
-  format answered as its text (content), stop - but one whose turn ended (stop) on a calls block its parse refuses
-  an error (0.5.11, #25: a 500, a stream's error event), never its markup as an answer. whole (stream false): the
-  same, one message.
+  format answered as its text (content), stop - but since 0.5.11 one whose turn ended (stop) out of the format is
+  an error (#25: a 500, a stream's error event), never its text as an answer; cut by max_tokens ("length") its text.
+  the stream stops at a special token's text the parse refuses as at a calls block. whole (stream false): the same,
+  one message.
 - **built** (2026-11-04): tools/api (`make api`) - request.c (the mapping; sampling, stop strings, n > 1 and a
   forced tool_choice refused by name), answer.c (the stream's holding back), reply.c, engine.c (the child dies with
   the server: PR_SET_PDEATHSIG), http.c, config.c (osmos.json read whole; an unknown key refused). tested against a
