@@ -20,7 +20,7 @@ bool q4x_fail(char *err, const char *why)
   return false;
 }
 
-/* a tensor's device bytes: the model's, the overlay's, or the MTP head's (each file's own table) */
+/* a tensor's device bytes: the model's, the overlay's, the MTP head's or the drafter's (each file's own table) */
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t)
 {
   const Gguf *m = f->w->model, *o = f->w->overlay;
@@ -28,6 +28,9 @@ const void *q4x_dev(const Q4xForward *f, const GgufTensor *t)
     return f->dev[t - m->tensors];
   if (o && t >= o->tensors && t < o->tensors + o->n_tensors)
     return f->ov_dev[t - o->tensors];
+  const Gguf *d = f->df ? f->df->model : NULL;
+  if (d && t >= d->tensors && t < d->tensors + d->n_tensors)
+    return f->df_dev[t - d->tensors];
   return f->mtp_dev[t - f->mtp->model->tensors];
 }
 
@@ -92,6 +95,37 @@ static bool mtp_buffers(Q4xForward *f, char *err)
   return ok || q4x_fail(err, "GPU memory refused (the MTP head's buffers)");
 }
 
+#define Q8_0 8 /* ggml's: the selector kernel's codebooks */
+
+/* the drafter's buffers: a feed's max_tokens context rows, a block's */
+static bool df_buffers(Q4xForward *f, char *err)
+{
+  const Q4xDflashGeometry *g = &f->df->geo;
+  const uint64_t n = f->max_tokens, B = (uint64_t)g->block, D = (uint64_t)g->n_embd, V = (uint64_t)g->n_vocab;
+  const uint64_t kv = (uint64_t)g->n_kv_heads * g->head_dim, q = (uint64_t)g->n_heads * g->head_dim;
+  const uint64_t rows = n > B ? n : B, dyn = 2ull * Q4X_DFLASH_CONV * (D / (uint64_t)g->conv_group);
+  const uint64_t ff = (uint64_t)g->ff, k = (uint64_t)g->sel_top_k, iota = (uint64_t)f->max_ctx + B;
+  Q4xDfBuf *d = &f->d;
+  bool ok = alloc(&d->th, n * D * F) && alloc(&d->k, rows * kv * F) && alloc(&d->v, rows * kv * F) &&
+            alloc(&d->h, B * D * F) && alloc(&d->x, B * D * F) && alloc(&d->xc, B * D * F) &&
+            alloc(&d->dyn, B * dyn * F) && alloc(&d->q, B * q * F) && alloc(&d->att, B * q * F) &&
+            alloc(&d->a, B * D * F) && alloc(&d->gate, B * ff * F) && alloc(&d->up, B * ff * F) &&
+            alloc(&d->hn, B * D * F) && alloc(&d->logits, B * V * F) &&
+            alloc(&d->hp, B * (uint64_t)g->sel_rank * F) && alloc(&d->val, B * k * F) && alloc(&d->idx, B * k * 4) &&
+            alloc(&d->path, B * 4) && alloc(&d->tok, B * 4) && alloc(&d->iota, iota * 4) &&
+            hipHostMalloc((void **)&d->pin_tok, B * 4, 0) == hipSuccess &&
+            hipHostMalloc((void **)&d->pin_path, B * 4, 0) == hipSuccess;
+  int32_t *h = ok ? malloc(iota * 4) : NULL;
+  for (uint64_t i = 0; h && i < iota; i++)
+    h[i] = (int32_t)i;
+  for (uint64_t i = 1; h && i < B; i++) /* the block's tokens after its anchor: the mask */
+    d->pin_tok[i] = g->mask_token;
+  ok = h && hipMemcpy(d->iota, h, iota * 4, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(d->tok, d->pin_tok, B * 4, hipMemcpyHostToDevice) == hipSuccess;
+  free(h);
+  return ok || q4x_fail(err, "GPU memory refused (the drafter's buffers)");
+}
+
 /* a row of the n-gram table: its bytes in the file (the held table's row stride) */
 static uint64_t ple_row_bytes(const Q4xForward *f) { return f->w->ple_table->bytes / f->w->ple_table->dims[1]; }
 
@@ -123,7 +157,8 @@ static bool buffers(Q4xForward *f, char *err)
   Q4xExpertBounds bd;
   q4x_expert_bounds((uint32_t)(n * k), (uint32_t)g->n_experts, &bd);
   const uint64_t entries = bd.entries, slots = bd.slots + 8 * MM_TILE; /* past the last: a part's tiles read whole */
-  const uint64_t x16 = (uint64_t)MM_MAX_TOKENS * hd * 2, xe16 = slots * (D > ff ? D : ff) * 2;
+  const uint64_t wide = (uint64_t)f->n_taps * D > hd ? (uint64_t)f->n_taps * D : hd; /* the drafter's fc's columns */
+  const uint64_t x16 = (uint64_t)MM_MAX_TOKENS * wide * 2, xe16 = slots * (D > ff ? D : ff) * 2;
   Q4xBuf *b = &f->b;
   const struct
   {
@@ -185,6 +220,13 @@ void q4x_forward_destroy(Q4xForward *f)
     free_table(f->w->overlay, f->ov_dev);
   if (f->mtp)
     free_table(f->mtp->model, f->mtp_dev);
+  if (f->df)
+    free_table(f->df->model, f->df_dev);
+  Q4xDfBuf *d = &f->d;
+  void **dbufs = (void **)d;
+  for (size_t i = 0; i < offsetof(Q4xDfBuf, pin_tok) / sizeof(void *); i++)
+    hipFree(dbufs[i]);
+  hipHostFree(d->pin_tok), hipHostFree(d->pin_path);
   Q4xMtpBuf *m = &f->m;
   hipFree(m->hid), hipFree(m->hin), hipFree(m->emb), hipFree(m->hn), hipFree(m->join), hipFree(m->logits);
   hipFree(m->top_id), hipFree(m->top_p), hipHostFree(m->pin_id), hipHostFree(m->pin_p);
@@ -222,7 +264,7 @@ void q4x_forward_destroy(Q4xForward *f)
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[Q4X_FWD_ERR])
 {
-  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0};
+  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL};
   return q4x_forward_create_with(w, mtp, &o, err);
 }
 
@@ -235,11 +277,21 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   if (!f)
     return q4x_fail(err, "out of memory"), NULL;
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens, f->stream_ngram = o->stream_ngram;
-  bool taps_ok = o->n_taps <= Q4X_MAX_TAPS && (!o->n_taps || o->tap_layers);
-  for (uint32_t i = 0; taps_ok && i < o->n_taps; i++)
-    taps_ok = o->tap_layers[i] >= 0 && o->tap_layers[i] < w->geo.n_layers && (!i || o->tap_layers[i] > o->tap_layers[i - 1]),
-    f->tap_layer[i] = o->tap_layers[i];
-  f->n_taps = taps_ok ? o->n_taps : 0;
+  const Q4xDflash *df = o->dflash;
+  /* a drafter's: its geometry these weights' (q4x_dflash_create's checks), its codebooks the selector's Q8_0 */
+  const bool df_ok = !df || (df->geo.n_embd == w->geo.n_embd && df->geo.n_vocab == w->geo.n_vocab &&
+                             df->sel_pred->type == Q8_0 && df->sel_succ->type == Q8_0 &&
+                             (!o->n_taps || (o->tap_layers && o->n_taps == (uint32_t)df->geo.n_taps)));
+  const int32_t *tl = df ? df->geo.taps : o->tap_layers; /* a drafter's taps: its own */
+  const uint32_t nt = df ? (uint32_t)df->geo.n_taps : o->n_taps;
+  bool taps_ok = df_ok && nt <= Q4X_MAX_TAPS && (!nt || tl);
+  for (uint32_t i = 0; taps_ok && i < nt; i++)
+    taps_ok = tl[i] >= 0 && tl[i] < w->geo.n_layers && (!i || tl[i] > tl[i - 1]) &&
+              (!df || !o->n_taps || o->tap_layers[i] == tl[i]),
+    f->tap_layer[i] = tl[i];
+  f->n_taps = taps_ok ? nt : 0;
+  f->df = taps_ok ? df : NULL;
+  f->df_ring = df && (uint32_t)df->geo.window < max_ctx ? (uint32_t)df->geo.window : max_ctx;
   f->ple_fd = -1;
   if (hipStreamCreateWithFlags(&f->s2, hipStreamNonBlocking) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_in, hipEventDisableTiming) != hipSuccess ||
@@ -250,6 +302,9 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
       hipEventCreateWithFlags(&f->e_gates, hipEventDisableTiming) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_ix, hipEventDisableTiming) != hipSuccess)
     return q4x_fail(err, "a stream or event refused"), free(f), NULL;
+  if (!df_ok)
+    return q4x_fail(err, "a drafter not of these weights, its codebooks not Q8_0, or its taps not tap_layers"),
+           q4x_forward_destroy(f), NULL;
   if (!taps_ok)
     return q4x_fail(err, "tap layers past the model's, out of order, or more than Q4X_MAX_TAPS"), q4x_forward_destroy(f), NULL;
   if (!(f->sub_seq = calloc(Q4X_MAX_RUNS, sizeof *f->sub_seq)))
@@ -261,7 +316,8 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   if (!upload(w->model, w->overlay, skip, &f->dev, err) ||
       (w->overlay && !upload(w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
       (f->stream_ngram && !ple_stream(f, err)) ||
-      (mtp && (!upload(mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))))
+      (mtp && (!upload(mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))) ||
+      (f->df && (!upload(f->df->model, NULL, NULL, &f->df_dev, err) || !df_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;
   return f;
 }
@@ -294,6 +350,8 @@ void q4x_seq_destroy(Q4xSeq *s)
   for (int l = 0; l < Q4X_MAX_LAYERS; l++)
     hipFree(s->ssm[l]), hipFree(s->conv[l]), hipFree(s->kc[l]), hipFree(s->vc[l]), hipFree(s->ixk[l]),
         hipFree(s->ixr[l]);
+  for (int l = 0; l < Q4X_DFLASH_MAX_LAYERS; l++)
+    hipFree(s->dk[l]), hipFree(s->dv[l]);
   hipFree(s->ple_hist), hipFree(s->mkc), hipFree(s->mvc), hipFree(s->mixk), hipFree(s->mixr), hipFree(s->pend);
   free(s->step_tok);
   free(s);
@@ -319,6 +377,9 @@ Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR])
     ok = alloc(&s->mkc, f->max_ctx * sb.kv_row) && alloc(&s->mvc, f->max_ctx * sb.kv_row) &&
          alloc(&s->mixk, pools * sb.ix_block) && alloc(&s->mixr, sb.ix_ring) &&
          alloc(&s->pend, (uint64_t)g->hc * g->n_embd * F) && (s->step_tok = calloc(f->max_tokens, 4));
+  const uint64_t ring = f->df ? (uint64_t)f->df_ring * f->df->geo.n_kv_heads * f->df->geo.head_dim * F : 0;
+  for (int l = 0; ok && f->df && l < f->df->geo.n_layers; l++) /* the drafter's rings */
+    ok = alloc(&s->dk[l], ring) && alloc(&s->dv[l], ring);
   if (!ok || !q4x_seq_reset(s))
     return q4x_seq_destroy(s), q4x_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;

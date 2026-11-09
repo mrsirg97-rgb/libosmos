@@ -2662,6 +2662,42 @@ fill_test.py on UD-IQ1_M (the default 103.75-103.78 GiB, --fill 4 107.94-108.42,
 NOTE; the fill not passed to the engine: failed). test_fit_gpu's sizing window failed once and passed on the rerun
 (the memory's ~0.93 GiB steps against the window: a flake older than this).
 
+### DFlash2: a block drafter for Qwen (2026-11-09)
+
+incoai's Qwen3.8-Flash-Next-DFlash2 (Apache-2.0; z-lab/dflash's DFlash2DraftModel): 5 layers of width 2,560, 32 / 8
+heads of 128, a sliding window of 2,048 both ways (not causal), a grouped dynamic convolution (2 taps, groups of 16)
+before and after its attention and its MLP. Its features are the target's own: the hc streams' mean of layers 5, 15,
+25, 35 and 45's output (Q4xOptions' taps), a token's 12,800 values through fc and a norm into each layer's keys and
+values. A round is one block: the anchor (the last accepted token) and 7 mask tokens, Qwen's embedding and output
+head borrowed, then a candidate selector (each place's top 16 by the head, rescored by a rank-256 pairwise term with
+the token before it) picks a greedy path - 7 drafts from one drafter pass, where MTP runs a head step a draft.
+
+**Offline, first (tools/convert/dflash2_gguf.py; the scratchpad's dflash/sim.py, torch on the GPU).** On osmos's own
+greedy trajectory of a chat prompt (P 43, 321 tokens): 4.31 tokens a round at block 8 (4.88 over the first 128),
+MTP's measured 3.39; on the calibration text 2.85 against MTP's 3.12. The layer taps one earlier (the layers'
+inputs): worse - the outputs are the features. The Q8_0 GGUF (0.64 GB) the same acceptance as the BF16 weights.
+
+**On the GPU (src/q4x/hip_dflash.c, kernels/q4x_dflash.hip).** feed: the sequence's next context positions from its
+last step's taps - fc, the hidden norm, each layer's k (normed a head, rotate-half rope) and v into the sequence's
+rings (the window's rows, position p at p % rows; F32, 80 MB a sequence). draft: the block through the layers (the
+convolutions' dynamic kernels from their own projection, the attention over the context fed within the window and the
+block's own), the output norm, Qwen's head at the 7 places after the anchor (the whole vocabulary: MTP's shortlist an
+A/B for later), top-16, the selector. The context is what was accepted: a rollback past it lowers it, a load starts
+it at the loaded position (the rings are not saved: its drafts weaker for a while, no bit of the answer moved). Against
+the torch reference on the same taps (~/osmos-oracle/dflash2-chat, the sim's dump): 511 of 511 drafts the same, the
+block's final hidden within 1.0e-3 (mm's f16); 4.30 tokens a round, the reference's (test_q4x_dflash_gpu; its six
+kernels against host references in test_q4x_dflash_ops_gpu, conv and the selector bit-exact).
+
+**A race it found.** The rollback test (two tokens past each round, rolled back) came out different bits run to run.
+The drafter was not the cause: the target's own steps of 9 to 16 tokens were. q4x_moe.hip's tiles_kernel read each
+scan's total from the last expert's place with no barrier before that expert's thread made its scan exclusive; read
+after, the totals came up short and the cleanup cleared the last expert's slots and entries - expert 511's tokens got
+stale output. Found by bisection: two plain passes alike, two junk passes not; 8-token steps alike, 9 to 16 not; a
+layer's rows hashed (one token's row, a DeltaNet layer's MoE); the MoE's parts snapshot without a sync (the routed
+experts, then their tables, then gidx); a counter in the kernel (the totals wrong 11-13 times a pass of 9-token
+steps). A kernel test of the tables alone never raced in 12,000 launches (the forward's timing needed), so the test is
+the forward's: the 256 tokens as steps of 9, each one's rows the one batch's (3 of 3 failed without the barrier).
+
 ### 0.5.11: the release run (2026-11-09, low-power)
 
 **The scripts and logs:** ~/bench/h2h-0511 - `suite.sh` (0.5.9's suite: a clean build, CPU, API and installer

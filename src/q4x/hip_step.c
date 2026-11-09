@@ -161,10 +161,9 @@ static void advance(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t
     const int32_t *tok = tokens + r[i].t0;
     const uint32_t n = r[i].n;
     if (f->mtp)
-    {
       memcpy(s->step_tok, tok, n * sizeof *tok);
-      s->step_pos0 = s->pos, s->step_row0 = row0 + r[i].t0, s->step_n = n;
-    }
+    if (f->mtp || f->df) /* the step's place: the head's seed reads its rows, the drafter's feed its taps */
+      s->step_pos0 = s->pos, s->step_row0 = row0 + r[i].t0, s->step_n = n, s->step_t0 = r[i].t0;
     const int keep = (int)(sizeof s->last / sizeof *s->last);
     for (uint32_t t = 0; t < n; t++) /* the latest first */
     {

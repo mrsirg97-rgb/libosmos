@@ -94,6 +94,7 @@ bool q4x_seq_reset(Q4xSeq *s)
   s->pos = 0, s->n_last = 0;
   memset(s->last, 0, sizeof s->last);
   s->pend_pos = -1, s->step_n = 0; /* the head: nothing pending, no step to seed from */
+  s->df_lo = s->df_pos = 0;         /* the drafter: no context */
   return ok;
 }
 
@@ -191,6 +192,7 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
     return refuse(s, err, "a damaged state (its checksum)");
   s->pos = h.pos, s->n_last = h.n_last;
   s->pend_pos = -1, s->step_n = 0; /* the head's cache not saved: its seeding starts over (drafts weaker, no bit moved) */
+  s->df_lo = s->df_pos = s->pos;    /* the drafter's rings neither: its context starts here */
   memcpy(s->last, h.last, sizeof h.last);
   return true;
 }
@@ -205,6 +207,8 @@ bool q4x_seq_rollback(Q4xSeq *s, uint32_t n)
   memmove(s->last, s->last + n, (size_t)(keep - (int)n) * sizeof *s->last);
   s->n_last = s->n_last > (int)n ? s->n_last - (int)n : 0;
   s->pos -= (int32_t)n, s->back -= n;
+  if (s->df_pos > s->pos) /* the drafter's context past the position dropped (its rows written again when fed) */
+    s->df_pos = s->pos, s->df_lo = s->df_lo < s->df_pos ? s->df_lo : s->df_pos;
   s->cur = (s->cur + Q4X_SLOTS - n) % Q4X_SLOTS;
   return true;
 }

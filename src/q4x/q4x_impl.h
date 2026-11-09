@@ -8,6 +8,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/mem/rowread.h"
+#include "osmos/q4x/dflash.h"
 #include "osmos/q4x/forward.h"
 
 /* a step's buffers, for max_tokens tokens */
@@ -50,6 +51,18 @@ typedef struct Q4xMtpBuf
   float *pin_p;
 } Q4xMtpBuf;
 
+/* the DFlash2 drafter's buffers (with a drafter): a feed's context rows, then a block's */
+typedef struct Q4xDfBuf
+{
+  float *th;            /* [max_tokens][n_embd]: the context's taps through fc, then its hidden norm */
+  float *k, *v;         /* [max(max_tokens, block)][kv]: a layer's keys and values (the context's, the block's) */
+  float *h, *x, *xc, *dyn, *q, *att, *a, *gate, *up, *hn; /* the block's: residual, normed, convolved, .. its out */
+  float *logits, *hp, *val; /* the head's at the block's drafts' places, the selector's projection, the top-k */
+  int32_t *idx, *path;
+  int32_t *tok, *iota; /* device: the block's tokens (y, then masks); 0 .. max_ctx + block (a run's positions) */
+  int32_t *pin_tok, *pin_path; /* pinned: the block's anchor in, its path out */
+} Q4xDfBuf;
+
 #define Q4X_SIDE_STEP MM_TILE /* a step this small or smaller: the second stream (decode, a draft's verify) */
 #define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_forward.c's table) */
 #define Q4X_ROW_THREADS 64 /* stream_ngram's readers: DeepSeek's Engram measure (832,000 random rows/s; 128 no more) */
@@ -58,6 +71,10 @@ struct Q4xForward
 {
   const Q4xWeights *w;
   const Q4xMtp *mtp; /* or NULL */
+  const Q4xDflash *df; /* or NULL */
+  void **df_dev;       /* its tensors' bytes on the device (its file's table) */
+  uint32_t df_ring;    /* a sequence's drafter rings' rows: the drafter's window (max_ctx at most) */
+  Q4xDfBuf d;
   void **dev, **mtp_dev, **ov_dev; /* a tensor's bytes on the device, by its index in its file's table (the model's -
                                       none where the overlay stands in for it -, the MTP head's, the overlay's) */
   uint32_t max_ctx, max_tokens;
@@ -118,7 +135,11 @@ struct Q4xSeq
   float *mixk, *mixr; /* the head's indexer's */
   float *pend;
   int32_t pend_pos, step_pos0;
-  uint32_t step_row0, step_n;
+  uint32_t step_row0, step_n, step_t0; /* step_t0: its first token's place in the step (its taps' row) */
+  /* with a drafter: each layer's key and value rings (df_ring rows of kv floats, position p at p % df_ring), the
+     context positions they hold (df_lo .. df_pos - 1: fed since its start, a load or a rollback past them) */
+  float *dk[Q4X_DFLASH_MAX_LAYERS], *dv[Q4X_DFLASH_MAX_LAYERS];
+  int32_t df_lo, df_pos;
   int32_t *step_tok; /* [max_tokens], host */
 };
 
