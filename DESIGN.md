@@ -2591,6 +2591,43 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.11: Qwen's small steps, less idle (2026-11-09, low-power)
+
+**Where a decode token's time goes** (rocprofv3, plain, 64 tokens): 1,751 dispatches; the kernels' union 42.4 of 46.6
+ms traced (37.9 untraced: the profiler adds ~5 us a dispatch, so its gaps read large). The step's closing sync looked
+like 350 us a token before the greedy pick; moved into the greedy read it gained nothing (26.32 against 26.37 tok/s) -
+the profiler's, not the box's. Reverted.
+
+**What paid: latency-bound work beside the main stream.** Small matvecs over a few rows wait on memory latency, not
+bandwidth, so on the second stream they cost the main stream nothing:
+- each mixer's inject (hc = 4 rows, 96 a token): reads b.xn, writes b.inj; waited for at the next mixer's start and
+  before an hc_combine (q4x_inj_wait) - +0.5% plain, +2.2% drafted.
+- the DeltaNet's alpha, beta (32 rows each) and gates: read b.mixed, read only by the delta; waited for before it.
+- the attention's QSA indexer (its keys' pool and ring, its query, its picks): read b.mixed, read only by the
+  attention; waited for before it. Its kernels now take the caller's stream.
+- `beside()`: only when each weight takes the matvec path. An mm converts its input into b.x16, which the main
+  stream's matmuls read at the same time; a model whose alpha (say) is Q8_0 keeps it on the main stream.
+Together +1.6% plain, +1.9% drafted.
+
+**The delay that tested nothing.** The inject's wait taken out, `test_q4x_forward_gpu` still passed. The test's
+spin (`q4x_spin`, "2,000 us") counted clock64 at 100 MHz; clock64 is the shader clock, so the spin was ~100 us and
+the inject (6.5 us) always finished before its reader (~300 us on). The MoE wait's mutant failed only because the
+shared expert itself takes ~100 us. With wall_clock64 at hipDeviceAttributeWallClockRate (10 ms asked: 10.03), each
+of the three new waits taken out fails the test.
+
+**The greedy pick.** top_kernel, one 1,024-thread block a row, scanned 248,320 logits in ~162 us. q4x_argmax: 64 slices
+a row (256 threads each), then the slices merged by block_argmax's rule - the same id (test: ties within and across a
+slice's seam, NaNs, all equal, all -inf, the last id).
+
+**F32 / BF16 at 2-8 tokens** (mvsweep f32, cold): U 2 against 1 - inject 4 x 10240 at 4 tokens 13.2 -> 9.1 us, at 6
+14.2 -> 12.7; alpha / beta 32 x 2560 7.1 -> 5.6 at 4; the router level. One token keeps U 4.
+
+**Measured** (3 interleaved rounds, low-power, against 0.5.10): plain 26.76 against 26.30 (+1.8%), drafted 44.89-45.53
+against 44.28; every run's ids f298bb34f82ac937.
+
+**Not done here.** The ~400 small elementwise kernels a token (scale_silu, gated_mean, the DeltaNet's conv history,
+qk_norm, gated_norm) folded into their neighbours: ~1-2%, each a kernel's epilogue changed - after Qwen4's shapes.
+
 ### 0.5.11: the MTP head's drafts the same every run (2026-11-08, low-power)
 
 **Not the main model.** Verify logits hashed per round (`Q4X_BENCH_TRACE`): compared by position across runs, every

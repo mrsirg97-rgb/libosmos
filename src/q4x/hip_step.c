@@ -59,7 +59,7 @@ static bool layer_part(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uin
     c[i] = (Q4xCache){r[i].s->kc[l], r[i].s->vc[l], r[i].s->ixk[l], r[i].s->ixr[l], r[i].s->pos, r[i].t0, r[i].n};
   bool ok = true;
   if (pending && (l == g->ple_layer || f->probe))
-    ok = q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), pending = false;
+    ok = q4x_inj_wait(f) && q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), pending = false;
   return ok && (l != g->ple_layer || q4x_ple(f, r, runs, l, n)) &&
          q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n, pending) &&
          (g->recurrent[l] ? q4x_deltanet(f, r, runs, l, n) : q4x_attention(f, L, c, runs, n)) &&
@@ -121,7 +121,7 @@ static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t
   ok = ok && q4x_moe(f, L, n);
   *pending = true;
   if (ok && f->probe) /* the layer's residual whole for the probe (l_last) */
-    ok = q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
+    ok = q4x_inj_wait(f) && q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
   return ok;
 }
 
@@ -221,7 +221,7 @@ bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char 
     return q4x_fail(err, "no forward or ids, or rows past a step's");
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   int32_t *d = f->b.cnt; /* the MoE's table, free between steps */
-  return (q4x_top(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, NULL, NULL) &&
+  return (q4x_argmax(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, f->b.top_part, NULL) &&
           hipMemcpy(ids, d, rows * 4, hipMemcpyDeviceToHost) == hipSuccess) ||
          q4x_fail(err, "a GPU call failed (the greedy pick)");
 }

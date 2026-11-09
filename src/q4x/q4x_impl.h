@@ -26,6 +26,7 @@ typedef struct Q4xBuf
   int32_t *overflow;                               /* an activation past f16's: the step refused */
   float *emb, *key, *val, *kn, *qn, *pg, *gated, *nrm, *conv;         /* the n-gram layer's */
   int32_t *ple_rows, *tok;                                            /* device: its rows, the step's tokens */
+  void *top_part;                                                     /* q4x_greedy's slices' bests (q4x_argmax) */
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
 } Q4xBuf;
@@ -66,6 +67,10 @@ struct Q4xForward
   void *st;
   hipStream_t s2;
   hipEvent_t e_in, e_out;
+  hipEvent_t e_mix, e_inj; /* a small step's inject on s2: the norm's output ready, the inject's done */
+  hipEvent_t e_gates;      /* a small step's DeltaNet gates on s2 (alpha, beta, their gates): done */
+  hipEvent_t e_ix;         /* a small step's QSA indexer on s2 (its keys and picks): done */
+  bool inj_side;           /* an inject on s2 not yet waited for (q4x_inj_wait) */
   hipEvent_t pin_free; /* the pinned buffers' last copy to the GPU done (q4x_pin_wait, q4x_pin_sent) */
   uint32_t side_spin; /* q4x_forward_side_spin: a test's delay before the shared expert, on s2 (0: none) */
   /* a step past MM_MAX_TOKENS (hip_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
@@ -124,6 +129,9 @@ bool q4x_fail(char *err, const char *why);
    0.5.10's drafts a run apart); after a copy from them, its end marked */
 bool q4x_pin_wait(Q4xForward *f);
 bool q4x_pin_sent(Q4xForward *f);
+/* the mixer's inject (hc rows: latency, not bandwidth) beside the rest of the mixer on s2, a small step's: b.inj its
+   output, b.xn its input - waited for before either is touched again (the next mixer, an hc_combine) */
+bool q4x_inj_wait(Q4xForward *f);
 bool q4x_mat(Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
              uint32_t n, float *y, uint32_t ys, bool ready);
 bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, uint32_t ys0, const GgufTensor *t1,

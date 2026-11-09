@@ -245,14 +245,16 @@ extern "C" bool q4x_swiglu(const float* g, const float* u, uint64_t n, float* y,
   return ok();
 }
 
-__global__ void spin_kernel(uint64_t cycles) {
-  const uint64_t t0 = clock64();
-  while (clock64() - t0 < cycles) __builtin_amdgcn_s_sleep(8);
+__global__ void spin_kernel(uint64_t ticks) {  // wall_clock64: a constant rate (clock64 is the shader clock's)
+  const uint64_t t0 = wall_clock64();
+  while (wall_clock64() - t0 < ticks) __builtin_amdgcn_s_sleep(8);
 }
 
 extern "C" bool q4x_spin(uint32_t us, void* stream) {
-  constexpr uint64_t kCyclesUs = 100;  // clock64's counter: ~100 MHz on gfx1151 (s_memrealtime's) - a lower bound
-  spin_kernel<<<1, 32, 0, st(stream)>>>((uint64_t) us * kCyclesUs);
+  static int khz = 0;  // wall_clock64's rate (hipDeviceAttributeWallClockRate, kHz): 0.5.10's spin counted the shader
+                       // clock at 100 MHz's rate, ~20x short of `us`
+  if (!khz && (hipDeviceGetAttribute(&khz, hipDeviceAttributeWallClockRate, 0) != hipSuccess || khz <= 0)) return false;
+  spin_kernel<<<1, 32, 0, st(stream)>>>((uint64_t) us * (uint64_t) khz / 1000);
   return ok();
 }
 

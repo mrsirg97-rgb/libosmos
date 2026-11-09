@@ -17,7 +17,7 @@ extern "C" {
 }
 
 constexpr uint32_t kCtx = 1024, kStep = 256, kPrompt = 200, kBlock = 5;
-constexpr uint32_t kHoldUs = 200000; // the GPU's hold before the seed: far past the host's next tokens_in (~us)
+constexpr uint32_t kHoldUs = 20000;  // the GPU's hold before the seed: far past the host's next tokens_in (~us)
 constexpr const char* kMtp = "%s/Models/qwen38/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf";
 
 struct Drafted {

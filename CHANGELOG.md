@@ -16,6 +16,21 @@
     reference's drafts bit for bit. Each fix taken out fails its case. Four traced runs of the bench now draft
     the same, round for round.
   - `Q4X_BENCH_TRACE` also prints each verify's row-0 logits hash and the whole verify's.
+- **Qwen's small steps keep the GPU busier** (decode, a verify). Same output bits; plain decode +1.8%, drafted +1.4 to
+  +2.8% (low-power, 3 interleaved rounds against 0.5.10: 26.76 against 26.30, 44.89-45.53 against 44.28):
+  - **Latency-bound work beside the main stream** (the second stream the shared expert already uses): each mixer's
+    inject (4 rows), the DeltaNet's alpha, beta and gates, the attention's QSA indexer (its keys and picks). Each
+    waited for right before its first reader. Only a matvec's work goes there: an mm would write the f16 buffer
+    the main stream's matmuls read (a model whose weights take the mm path keeps them on the main stream).
+  - **The greedy pick split across blocks** (`q4x_argmax`): one block a row scanned 248,320 logits in ~160 us. The
+    same id on every row (ties, NaNs, a row of -inf: `test_q4x_mtp_ops_gpu`).
+  - **F32 and BF16 matvecs at 2 to 8 tokens** keep 2 chunks in flight a lane (1 before): the mixers' inject 13.2
+    -> 9.1 us at 4 tokens. The R / U parameters change no bit.
+- **The tests' GPU delay was ~20x short** (`q4x_spin` counted the shader clock as 100 MHz): its "2 ms" was ~100 us,
+  so the second stream's delay tests could pass without a wait. Now `wall_clock64` at the device's rate. With it,
+  each new wait taken out fails `test_q4x_forward_gpu`.
+- `test_q4x_overflow_gpu`: a step whose activations pass f16's range (an overlay with every scale f16's largest)
+  gives no token, and a clean forward after it the clean token.
 
 ## [0.5.10]: a turn doesn't end before its answer
 
