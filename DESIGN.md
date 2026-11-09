@@ -2591,6 +2591,173 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.11: the release run (2026-11-09, low-power)
+
+**The scripts and logs:** ~/bench/h2h-0511 - `suite.sh` (0.5.9's suite: a clean build, CPU, API and installer
+tests, every GPU test, the model-based ones again on UD-IQ2_XXS, ASan + UBSan: 65 passed, 2 skipped as 0.5.9's -
+test_forward_gpu and test_overlay_gpu, no oracle dump on this box), `run.sh` (0.5.9's run.sh, x2.sh and follow.sh in
+one, gated on low-power: DeepSeek against Maya 1.1.57 - pulled to 0065548, its DeepSeek engine one test file past
+1.1.56, rebuilt and calibrated - on UD-IQ1_M, UD-IQ1_S and UD-IQ2_XXS, two rounds, the order swapped in round 2,
+every run's SSD bytes (disklog.sh, runs.csv); agents (UD-IQ1_M) under tools/power.py; perplexity; then Qwen against
+llama.cpp 7d7f028, unchanged since 0.5.9), `rerun.sh` (a third Qwen round, llama.cpp first, and MTP untraced). Each
+engine set up as its own setup does it; the box at low-power throughout (profile.txt).
+
+**What the numbers mean, and what moved them:**
+- **the bits:** every DeepSeek answer hashes as 0.5.9's (plain and drafted, every quant), every perplexity is
+  0.5.9's to the last digit (DeepSeek 2.4579 / 2.5006 / 2.4492, Qwen 2.7143 / 2.2732), Qwen's ids the same.
+- **MTP traced is slower:** run.sh ran the MTP bench with Q4X_BENCH_TRACE (to see the drafts the same run to run:
+  four runs, 41 rounds and 59% accepted each) - the trace copies and hashes a round's logits on the host, 36.9-39.0
+  tok/s. Untraced (rerun.sh): 45.59 / 45.47 / 45.45, the drafts the same.
+- **a mutant spun beside Qwen's round 1:** the #25 audit's mutation run (after DeepSeek) had a mutant that made
+  tokenizer_defuse loop forever - test_tokenizer at 100% of a core for 11 minutes, through osmos's round-1 Qwen runs
+  (caught: killed; the harness timed out its tests after). round 1 was still osmos's fastest round: the box's own
+  drift (both engines' round 2 ~4% under round 1) was larger than that core.
+- **spread round to round** (max - min over the mean): osmos's decode 0.2-0.4%, llama.cpp's 1.7% plain and 19% at
+  16K; prompts up to 7% (osmos), 18% (llama.cpp, its 2,048-token prompt at batch 4,096: 587 / 457).
+- **Maya's SSD a token** as 0.5.9's: its steady decode's read rate (10-second windows of disk.csv inside its runs:
+  1.5-1.6 GB/s plain at 8.9 tok/s, 1.8-1.9 drafted at 9.9) - ~0.17 / ~0.18 GB a token; osmos's over its exact
+  decode windows, 0.064 / 0.082.
+- **perplexity labels:** 0.5.9's README had llama.cpp's cache types swapped (its logs: K (f16) 2.7169 / 2.2718,
+  K (q8_0) 2.7110 / 2.2693; qwen_dump's q8_0 run also turns on flash attention).
+- **the profiles:** at low-power the agents bench is 20% slower than 0.5.9's at performance (485 against 405 s) at
+  half the energy an answer token (3.42 against 7.03 J, 56 against 104 W). Qwen's decode is the same at both
+  (26.5 / 45.5 against 27.1 / 45.6): it is bound by memory bandwidth, which the cap doesn't lower - its plain ceiling
+  from bandwidth is ~38 tok/s, so the bytes moved, not the clock, are what's left.
+
+**DeepSeek's decode, profiled for idle time** (rocprofv3, UD-IQ1_S plain, low-power, 18.2 tok/s): 1,189 dispatches a
+token; the dense matmuls 25.8 ms (203 a token, ~127 us each, near bandwidth), the experts' int8 lane ~13 ms (gate /
+up 8.0, down 5.3), ~300 small kernels ~1.2 ms. Little idle to take back (perhaps 1-2%): a few large bandwidth-bound
+kernels, not Qwen's many latency-bound small ones. The SSD's lever, the guess, lost drafting 9.9% (24.90 -> 22.43,
+IQ2_XXS) for plain's +1.9-3.5%: kept off. So 0.5.11's DeepSeek work stops there; 0.5.12 measures a token's joules
+first (DRAM bytes a kernel, SSD waits in a verify).
+
+### 0.5.11: a tool call DeepSeek's parse takes, and a refused one loud (#25, 2026-11-09)
+
+**The report** (issue #25, a second gfx1151: 0.5.3, UD-IQ1_S, sampling on): an agent's turn ended on a calls block
+whose first invoke was empty with a blank line in it (`name="mcp">\n\n</｜DSML｜ invoke>`). chat_parse refused it,
+and osmos-api answered the block's markup as content, finish "stop", no tool calls - a client can't tell that from an
+answer, so the agent sent the turn again: 174 identical calls before it gave up.
+
+**The parse was not the reference's.** encoding.py's checks between tags are exact (`'>\n'`), and the port's were
+too. But its two regexes end in `$` - an invoke's name line `^\s*name="(.*?)">\n$`, a parameter's `...(.*?)<$` - and
+Python's `$` (no MULTILINE) matches at the end or before one newline that ends the text. The port compared the last
+bytes, so it refused one trailing newline the reference takes. `tail_at` is `lit$` as Python reads it, at both. The
+port takes no more than the reference does: a second blank line, a blank line between invokes, after a parameter,
+before the block's end, a trailing space - each refused by both.
+
+**A refused block is an error** (osmos-api): a completion out of the format still goes out as its text (a thinking
+answer with no `</think>`, a run cut by max_tokens - its finish "length" says so), but one whose turn ended (finish
+"stop") with a calls block (the dialect's marker: DeepSeek's `<｜DSML｜ calls>`, Qwen's `<tool_call>`) its parse
+refuses is a 500 with the parse's why, a stream's error event (no [DONE]) after what streamed before the block.
+
+**And nothing else out of the format** (an audit of every path a completion takes to the client, the same day): a
+completion the parse refuses with no calls block went out as its text too - a stray `<｜DSML｜ invoke>` with no
+`calls` around it, `</think>` or a BOS in the answer (streamed live: the stream held back only the calls block's
+start and the EOS), and a turn ended before `</think>` (an empty answer, finish "stop"). Now any completion whose turn
+ended (stop) and that its parse refuses is the error; the stream's marks are the phase's end, the EOS and the texts
+the parse refuses (chat_refused, qchat_refused - one list, the parse's), and at a refused text what could still begin
+a marker before it is held too (`｜DSML｜` is a token of its own: `\n\n<` came before it, then ` calls`). cut by
+max_tokens, a completion's text still goes as it is, finish "length". the servers log no prompt or answer.
+
+**A client's text can't forge a turn.** the prompt is rendered to text, then tokenized with special tokens matched
+(as llama.cpp's server and HF tokenizers do by default): `<｜User｜>` in a tool's result was the role token - 11 of
+them in a test request whose template put 2. A special token now only where the template put one, and no render is
+changed: the request is copied with every string and key defused (`tokenizer_defuse`: at each special token's text,
+the longest first, one bit of its first character's last byte - `<` to `=`, `｜` to `｝`: a byte's length and JSON
+escaping kept) and rendered again - the shape. `tokenizer_encode_shaped` cuts the shape into special tokens as encode
+does and tokenizes the text's own bytes between them, nothing matched there. It refuses (the request a 400) a shape
+that is not the text defused: a byte apart by more than one bit, or a special token the text doesn't hold there. A
+call's arguments as a JSON string: DeepSeek's template decodes it (twice at most, as encoding.py does), so an
+escaped `\uff5c` in it is the token's text once decoded - the copy holds its object, decoded and defused (Qwen's
+request decodes its arguments as it reads them). no special token's text in a request: the one render, encode's ids
+as before (test_api: the Qwen prompt the template's own ids). user-defined tokens (`<think>`, `｜DSML｜`) were matched
+even with parse_special off - the shape is the way both kinds are left out.
+
+**Tests:** tests/fixtures/chat.jsonl gains the reference's verdicts on ten completions (gen_chat_fixtures.py: a
+case it raises on is `refuse`): the issue's, a blank line before a parameter, a parameter's `<\n`, and seven it
+refuses. test_chat: each parsed the same message or refused. tests/api: the issue's block read as two calls
+(`mcp {}`, `mcp {"search": "fl"}`); a refused one a 500 and a stream's error, no markup sent; cut by max_tokens
+still "length"; out of the format with no block still its text; Qwen's `<tool_call>` with no `</function>` a 500.
+test_tokenizer: a client's text holding control and user-defined tokens' text, overlapping and back to back, between
+a template's, on both tokenizers - defused it holds none; shaped, its ids the template's specials alone and the
+text's bytes back; a shape the same as the text encode's ids; a shape not the text defused, -1. tests/api: special
+tokens' text in every place a client's string lands (system, user, an assistant's content, its call's arguments as
+an escaped JSON string, a tool's result, a tool's description and its parameters' names) the same special tokens
+as without it, DeepSeek's and Qwen's; out of the format and the turn ended (no `</think>`, a DSML invoke with no
+block, `</think>` or a BOS in the answer, Qwen's `<|im_start|>`) a 500 and a stream's error with none of that text
+streamed. Mutants (no newline allowance, two, the old end checks, any last byte; any finish, no calls check, a stream
+as a 500, the why dropped; no flip, the shape's own check, its special check, raw from the shape, user-defined not
+special, the arguments not decoded, the keys or the tools not defused, never shaped, an error at length, no flush at
+length, the refused texts not held, no back-off before one, the held bytes counted as sent) each fail a test. one
+mutant lives, as it should: the lead byte flipped in place of the character's last one defuses these vocabularies'
+tokens too (`<`, `｜`'s 0xEF to 0xEE); the last byte is kept because a lead byte's flip can make invalid UTF-8 (0xEC
+to 0xED, the surrogates' range) where a continuation byte stays one.
+
+**And one older bug, found by the new test:** at a cut (a calls block, now a refused text) the stream counted the
+bytes it held back before it (whitespace, a marker's start) as sent, so a run cut by max_tokens past that point lost
+them from its flushed text: its stream's content no longer the whole answer's. now only what went out is counted.
+
+### 0.5.11: Qwen's small steps, less idle (2026-11-09, low-power)
+
+**Where a decode token's time goes** (rocprofv3, plain, 64 tokens): 1,751 dispatches; the kernels' union 42.4 of 46.6
+ms traced (37.9 untraced: the profiler adds ~5 us a dispatch, so its gaps read large). The step's closing sync looked
+like 350 us a token before the greedy pick; moved into the greedy read it gained nothing (26.32 against 26.37 tok/s) -
+the profiler's, not the box's. Reverted.
+
+**What paid: latency-bound work beside the main stream.** Small matvecs over a few rows wait on memory latency, not
+bandwidth, so on the second stream they cost the main stream nothing:
+- each mixer's inject (hc = 4 rows, 96 a token): reads b.xn, writes b.inj; waited for at the next mixer's start and
+  before an hc_combine (q4x_inj_wait) - +0.5% plain, +2.2% drafted.
+- the DeltaNet's alpha, beta (32 rows each) and gates: read b.mixed, read only by the delta; waited for before it.
+- the attention's QSA indexer (its keys' pool and ring, its query, its picks): read b.mixed, read only by the
+  attention; waited for before it. Its kernels now take the caller's stream.
+- `beside()`: only when each weight takes the matvec path. An mm converts its input into b.x16, which the main
+  stream's matmuls read at the same time; a model whose alpha (say) is Q8_0 keeps it on the main stream.
+Together +1.6% plain, +1.9% drafted.
+
+**The delay that tested nothing.** The inject's wait taken out, `test_q4x_forward_gpu` still passed. The test's
+spin (`q4x_spin`, "2,000 us") counted clock64 at 100 MHz; clock64 is the shader clock, so the spin was ~100 us and
+the inject (6.5 us) always finished before its reader (~300 us on). The MoE wait's mutant failed only because the
+shared expert itself takes ~100 us. With wall_clock64 at hipDeviceAttributeWallClockRate (10 ms asked: 10.03), each
+of the three new waits taken out fails the test.
+
+**The greedy pick.** top_kernel, one 1,024-thread block a row, scanned 248,320 logits in ~162 us. q4x_argmax: 64 slices
+a row (256 threads each), then the slices merged by block_argmax's rule - the same id (test: ties within and across a
+slice's seam, NaNs, all equal, all -inf, the last id).
+
+**F32 / BF16 at 2-8 tokens** (mvsweep f32, cold): U 2 against 1 - inject 4 x 10240 at 4 tokens 13.2 -> 9.1 us, at 6
+14.2 -> 12.7; alpha / beta 32 x 2560 7.1 -> 5.6 at 4; the router level. One token keeps U 4.
+
+**Measured** (3 interleaved rounds, low-power, against 0.5.10): plain 26.76 against 26.30 (+1.8%), drafted 44.89-45.53
+against 44.28; every run's ids f298bb34f82ac937.
+
+**Not done here.** The ~400 small elementwise kernels a token (scale_silu, gated_mean, the DeltaNet's conv history,
+qk_norm, gated_norm) folded into their neighbours: ~1-2%, each a kernel's epilogue changed - after Qwen4's shapes.
+
+### 0.5.11: the MTP head's drafts the same every run (2026-11-08, low-power)
+
+**Not the main model.** Verify logits hashed per round (`Q4X_BENCH_TRACE`): compared by position across runs, every
+verify's row 0 (its input the token already taken) the same bits at all 41-42 shared positions. The rounds' later
+rows differ only because their draft tokens do. The variation is the head's.
+
+**Not the side stream.** A build with `Q4X_SIDE_STEP` 0 (the shared expert on the main stream) still drafted
+differently run to run (1 vs 3: 10 rounds).
+
+**The race.** The first divergence followed a round that kept all 5 drafts: the seed then took 6 tokens, and the
+next draft's first confidence moved 0.1%. The seed's `tokens_in` wrote `b.pin_tok` and queued an async copy from it,
+then returned. The next draft step's `tokens_in` wrote `b.pin_tok` again, and when the copy hadn't run yet the seed
+read the draft's token. A sync at the seed's end made four runs draft alike. The fix keeps the GPU queue full instead:
+an event (`pin_free`) recorded after each copy from the pinned buffers, waited for before the host writes them
+(`q4x_pin_wait`, `q4x_pin_sent`, at the step's embed and the head's tokens_in).
+
+**The unwritten read.** `first_h`'s test (`pend_pos == p - 1`) is true for a new sequence at position 0 (-1 both),
+and `s.pend` is `hipMalloc`'d, never cleared, so the first row of every conversation's seed read whatever that memory
+held. Now a pending h needs `pend_pos >= 0`.
+
+**Test.** `test_mtp_seed_gpu`: the reference; the GPU held 200 ms before the seed (`q4x_spin`: its copy runs after
+the draft has written the buffer); a sequence made where another prompt's was let go (its pending h's memory likely
+handed back). Without the wait the held case fails; without the `pend_pos` check both fail.
+
 ### 0.5.10: no end of turn before the answer (2026-11-08)
 
 **The failure.** rig's session store: after "oh you know, life", Qwen3.8 (the 1M pack) closed its thinking ("Still
@@ -2688,7 +2855,8 @@ under a quarter of it each; the first step reads over half (the warm set), the s
 - **UD-IQ2_XXS plain bench:** from start to the warm-up answer's end, 54 s against 123-131 s; the whole run 110 s
   against 179-187. The same three hashes, and decode 14.1-14.3 tok/s, as before.
 
-**Open: the MTP head's draft probabilities vary between runs.** Qwen's drafted bench (512-token prompt, 128 tokens):
+**The MTP head's draft probabilities varied between runs** (found and fixed in 0.5.11: a race on the pinned
+token buffer, and an unwritten read at position 0). Qwen's drafted bench (512-token prompt, 128 tokens):
 - **The output is the same in every run** (ids f298bb34f82ac937 in 7 of 7), and so is the main model's.
 - **The draft count varies.** One of the session's two runs drafted 151 in 42 rounds; the other six drafted 149 in 41.
 - **The cause is below that count.** `Q4X_BENCH_TRACE` prints each round's drafts and their probabilities exactly.
@@ -3306,7 +3474,10 @@ at once, drafting).
   of a DSML calls block; a text that could still become one of those markers (or ends inside a UTF-8 character)
   held until it cannot. at DONE the whole completion parsed (chat_parse): its tool calls one last delta (ids
   call_<rid>_<n>), finish_reason tool_calls / stop / length, usage and timings, then [DONE]; a completion out of the
-  format answered as its text (content), stop. whole (stream false): the same, one message.
+  format answered as its text (content), stop - but since 0.5.11 one whose turn ended (stop) out of the format is
+  an error (#25: a 500, a stream's error event), never its text as an answer; cut by max_tokens ("length") its text.
+  the stream stops at a special token's text the parse refuses as at a calls block. whole (stream false): the same,
+  one message.
 - **built** (2026-11-04): tools/api (`make api`) - request.c (the mapping; sampling, stop strings, n > 1 and a
   forced tool_choice refused by name), answer.c (the stream's holding back), reply.c, engine.c (the child dies with
   the server: PR_SET_PDEATHSIG), http.c, config.c (osmos.json read whole; an unknown key refused). tested against a

@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.5.11]: nothing out of the format reaches a client; measured at low-power
+
+The first outside report (#25): an agent's tool call that DeepSeek's own parser takes was refused, and osmos-api
+answered with its markup. Fixing it led to an audit of every path a completion takes to the client, and of the
+prompt's tokens. The release is measured at `low-power` (~70 W), where an agent's work costs half the energy.
+
+- **DeepSeek's tool calls parse as DeepSeek's own parser does** (issue #25, reported by @ucotman with a repro, a
+  control experiment and numbers from a second gfx1151 - thank you). An invoke with a blank line after its
+  name (`name="mcp">\n\n`) is taken, as the reference's regex takes it (Python's `$` matches before one trailing
+  newline), and a parameter's `<\n` too. Nothing more: the blank lines and spaces the reference refuses are refused.
+- **A turn the parse refuses is an error, never an answer.** osmos-api sent a completion out of the format as its
+  text (content, finish "stop"): a refused calls block's markup, a stray special token's text, an empty answer when
+  the turn ended before `</think>`. An agent read that as the answer and sent the turn again. Now any turn that ends
+  out of the format is a 500 with the parse's reason (a stream's error event, no `[DONE]`), DeepSeek's and Qwen's.
+  The stream never sends a special token's text the parse refuses: it stops at it as at a calls block. A completion
+  cut by max_tokens is still "length", its text as it is - streamed, now the same text as the whole answer's (the
+  bytes held back before a cut were dropped from it).
+- **A client's text can't forge the prompt's turns.** The prompt was rendered and then tokenized with every special
+  token's text matched, so `<｜User｜>` or `<|im_start|>` in a message or a tool's result (a fetched page quoting a
+  chat) became the real token. Now a special token is cut only where the template put one: the request is rendered
+  again from its strings defused (one bit of each special token's text flipped, `tokenizer_defuse`), and that
+  render's tokens are the prompt's (`tokenizer_encode_shaped`). A call's arguments sent as a JSON string are defused
+  as the object the template reads. A prompt with no such text is the same tokens as before.
+- **The MTP head's drafts are the same every run.** Their confidences varied run to run in their low bits (the
+  output never did, nor the main model's logits: every verify's row 0 the same bits at every position). Two causes:
+  - **A race on the pinned token buffer.** The head's seed copies its tokens to the GPU from the buffer the next
+    step writes too, and returned without waiting. With the GPU busy, the next draft's token was written over the
+    seed's before its copy ran. Now each copy marks its end (`pin_free`), and a writer waits for it first. The wait
+    returns at once unless the copy truly hasn't run, so speed is unchanged (low-power, 3 rounds: plain 26.28
+    against 26.39 tok/s, drafted 44.43 against 44.29).
+  - **Unwritten memory read at position 0.** A conversation's first seeded row took the head's pending h when
+    `pend_pos == p - 1`. A new sequence has no pending h (`pend_pos -1`), which at position 0 is `p - 1` too, so
+    it read memory never written, in place of zeros.
+  - `test_mtp_seed_gpu`: a GPU held before the seed, and a sequence made where another was let go, each the
+    reference's drafts bit for bit. Each fix taken out fails its case. Four traced runs of the bench now draft
+    the same, round for round.
+  - `Q4X_BENCH_TRACE` also prints each verify's row-0 logits hash and the whole verify's.
+- **Qwen's small steps keep the GPU busier** (decode, a verify). Same output bits; plain decode +1.8%, drafted +1.4 to
+  +2.8% (low-power, 3 interleaved rounds against 0.5.10: 26.76 against 26.30, 44.89-45.53 against 44.28):
+  - **Latency-bound work beside the main stream** (the second stream the shared expert already uses): each mixer's
+    inject (4 rows), the DeltaNet's alpha, beta and gates, the attention's QSA indexer (its keys and picks). Each
+    waited for right before its first reader. Only a matvec's work goes there: an mm would write the f16 buffer
+    the main stream's matmuls read (a model whose weights take the mm path keeps them on the main stream).
+  - **The greedy pick split across blocks** (`q4x_argmax`): one block a row scanned 248,320 logits in ~160 us. The
+    same id on every row (ties, NaNs, a row of -inf: `test_q4x_mtp_ops_gpu`).
+  - **F32 and BF16 matvecs at 2 to 8 tokens** keep 2 chunks in flight a lane (1 before): the mixers' inject 13.2
+    -> 9.1 us at 4 tokens. The R / U parameters change no bit.
+- **The tests' GPU delay was ~20x short** (`q4x_spin` counted the shader clock as 100 MHz): its "2 ms" was ~100 us,
+  so the second stream's delay tests could pass without a wait. Now `wall_clock64` at the device's rate. With it,
+  each new wait taken out fails `test_q4x_forward_gpu`.
+- **Measured at low-power** (2026-11-09, means of interleaved rounds; README), against Maya 1.1.57 (DeepSeek) and
+  llama.cpp 7d7f028 (Qwen). Agents (UD-IQ1_M, drafted): 485 s against 653, 3.42 J an answer token against 4.75 at
+  56 W, 8.2 GiB of RAM left free against 2.2. UD-IQ2_XXS decode plain 13.5 tok/s against 8.9, drafted 24.8 against
+  9.9, 0.064 / 0.082 GB of SSD a token against ~0.17 / ~0.18. Qwen prompts +36 to +40% (1.8x at 64K), decode at 16K
+  +19%, MTP-drafted 45.5. Every answer and perplexity the same bits as 0.5.9's. Against 0.5.9 at `performance`,
+  the agents bench 20% slower at half the energy an answer token (7.03 J); Qwen's decode the same at both.
+- **0.5.9's README had llama.cpp's two Qwen cache types swapped:** f16 is 2.7169 / 2.2718, q8_0 2.7110 / 2.2693
+  (llama.cpp's own log lines, K (f16) / K (q8_0)). osmos's 2.2732 at 16K is above both, not between them.
+- `test_q4x_overflow_gpu`: a step whose activations pass f16's range (an overlay with every scale f16's largest)
+  gives no token, and a clean forward after it the clean token.
+
 ## [0.5.10]: a turn doesn't end before its answer
 
 A session on 2026-11-08 hit an empty turn: Qwen3.8 closed its thinking and ended the turn at once, 18 tokens of

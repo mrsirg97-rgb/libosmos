@@ -5,8 +5,9 @@ namespace, double-encoded), tool results merged and put in call order, a system 
 and JSON's corners - and its parse of completions back (reasoning, content, tool calls). the C port's test reads it
 (tests/test_chat.c). run: python3 tools/gen_chat_fixtures.py <maya>/serve/ds41_encoding.py > tests/fixtures/chat.jsonl
 
-a line a case: {"kind": "render", "messages", "thinking", "effort", "out"} or {"kind": "parse", "text", "thinking",
-"out"} - out the reference's string, or its parsed message."""
+a line a case: {"kind": "render", "messages", "thinking", "effort", "out"}, {"kind": "parse", "text", "thinking",
+"out"} - out the reference's string, or its parsed message - or {"kind": "refuse", "text", "thinking"}: a completion
+the reference's parse raises on (each PARSE case is one or the other, as the reference finds it)."""
 import importlib.util
 import json
 import sys
@@ -71,6 +72,24 @@ PARSE = [
      "<｜DSML｜ invoke name=\"web::search\">\n<｜DSML｜ parameter name=\"q\" string=\"true\">a \"b\"\nc"
      "</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>", "thinking"),
 ]
+# the tags' whitespace (issue #25): the reference's checks are exact ('>\n' between tags), but its regexes end in `$`,
+# which also matches before one trailing newline - an invoke's name line, a parameter's '<', a newline more
+D, END = "｜DSML｜", "<｜end▁of▁sentence｜>"
+INV = f'<{D} invoke name="mcp">\n'
+PAR = f'<{D} parameter name="search" string="true">fl</{D} parameter>\n'
+BLOCK = lambda body: f"\n\n<{D} calls>\n{body}</{D} calls>{END}"
+PARSE += [
+    (BLOCK(f'{INV}\n</{D} invoke>\n{INV}{PAR}</{D} invoke>\n'), "chat"),  # the issue's: an empty invoke, a blank line
+    (BLOCK(f'{INV}\n{PAR}</{D} invoke>\n'), "chat"),                       # a blank line before a parameter
+    (BLOCK(f'{INV}<{D} parameter name="q" string="true">fl<\n/{D} parameter>\n</{D} invoke>\n'), "chat"),
+    (BLOCK(f'{INV}\n\n</{D} invoke>\n'), "chat"),                          # two blank lines: refused
+    (BLOCK(f'{INV}</{D} invoke>\n\n{INV}</{D} invoke>\n'), "chat"),         # a blank line between invokes
+    (BLOCK(f'{INV}{PAR}\n</{D} invoke>\n'), "chat"),                       # a blank line after a parameter
+    (BLOCK(f'{INV}</{D} invoke>\n\n'), "chat"),                             # a blank line before the block's end
+    (BLOCK(f'{INV}</{D} invoke> \n'), "chat"),                              # a trailing space
+    (BLOCK(f'{INV} </{D} invoke>\n'), "chat"),                              # a space after the name's line
+    ("x</think>\n\n" + BLOCK(f'{INV}</{D} invoke>\n')[2:].replace(END, "after" + END), "thinking"),  # text after
+]
 
 
 def main():
@@ -82,8 +101,11 @@ def main():
         out.append({"kind": "render", "messages": messages, "thinking": thinking, "effort": effort,
                     "out": enc.encode_messages(messages, thinking_mode=thinking, reasoning_effort=effort)})
     for text, thinking in PARSE:
-        out.append({"kind": "parse", "text": text, "thinking": thinking,
-                    "out": enc.parse_message_from_completion_text(text, thinking_mode=thinking)})
+        try:
+            out.append({"kind": "parse", "text": text, "thinking": thinking,
+                        "out": enc.parse_message_from_completion_text(text, thinking_mode=thinking)})
+        except (ValueError, AssertionError):
+            out.append({"kind": "refuse", "text": text, "thinking": thinking})
     sys.stdout.write("".join(json.dumps(c, ensure_ascii=False) + "\n" for c in out))
 
 

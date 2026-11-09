@@ -8,7 +8,7 @@
 
 /* the chat encoding against DeepSeek's own (tests/fixtures/chat.jsonl: its encoding.py over the cases
    tools/gen_chat_fixtures.py lists) - each chat's prompt byte for byte, each completion's parse the same message (its
-   JSON as Python writes it); and refusals. */
+   JSON as Python writes it) or refused where the reference raises; and refusals. */
 
 static char *slurp_line(FILE *f, size_t *n)
 {
@@ -46,7 +46,7 @@ int main(void)
   FILE *f = fopen("tests/fixtures/chat.jsonl", "r");
   assert(f);
   char err[JSON_ERR], cerr[CHAT_ERR];
-  int renders = 0, parses = 0;
+  int renders = 0, parses = 0, refusals = 0;
   size_t n;
   for (char *line; (line = slurp_line(f, &n)); free(line))
   {
@@ -65,6 +65,14 @@ int main(void)
       snprintf(what, sizeof what, "render %d", renders);
       expect(what, b.p, b.n, want->s, want->len);
       renders++;
+    }
+    else if (strcmp(json_str(c, "kind"), "refuse") == 0) /* the reference raises on it: so must the port */
+    {
+      const Json *text = json_get(c, "text");
+      if (chat_parse(text->s, text->len, mode, &b, cerr))
+        printf("  refusal %d parsed: %.*s\n", refusals, (int)b.n, b.p), exit(1);
+      printf("  refused as the reference does: %s\n", cerr);
+      refusals++;
     }
     else
     {
@@ -101,7 +109,8 @@ int main(void)
   assert(!chat_parse("no eos", 6, CHAT_PLAIN, &b, cerr));
   assert(!chat_parse("x<｜end▁of▁sentence｜>", 25, CHAT_THINKING, &b, cerr)); /* thinking: no </think> */
   free(b.p);
-  printf("  %d chats rendered and %d completions parsed as DeepSeek's encoding does\n", renders, parses);
+  printf("  %d chats rendered, %d completions parsed and %d refused as DeepSeek's encoding does\n", renders, parses,
+         refusals);
   printf("[test_chat] ok\n");
   return 0;
 }

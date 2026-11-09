@@ -27,14 +27,19 @@ static bool qwen_parse(const Request *r, const char *text, size_t n, JsonBuf *ou
 }
 
 static const Dialect kDialects[] = {
-    {"deepseek41", CHAT_EOS, CHAT_THINK_END, CHAT_CALLS_OPEN, false, request_ds, ds_render, ds_parse},
-    {"qwen4exp", QCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, request_qwen, qwen_render, qwen_parse},
+    {"deepseek41", CHAT_EOS, CHAT_THINK_END, CHAT_CALLS_OPEN, false, chat_refused, request_ds, ds_render, ds_parse},
+    {"qwen4exp", QCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, qchat_refused, request_qwen, qwen_render, qwen_parse},
 };
 
 const Dialect *dialect_of(const char *arch)
 {
   for (size_t i = 0; arch && i < sizeof kDialects / sizeof *kDialects; i++)
     if (!strcmp(arch, kDialects[i].arch))
-      return &kDialects[i];
+    {
+      size_t n = 0;
+      while (kDialects[i].refused[n])
+        n++;
+      return n <= DIALECT_REFUSED_MAX ? &kDialects[i] : NULL;
+    }
   return NULL;
 }

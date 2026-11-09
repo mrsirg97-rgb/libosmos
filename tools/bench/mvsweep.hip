@@ -1,4 +1,4 @@
-// mvsweep [experts|dense] [tokens]: the matvec kernel's shapes (kernels/mv.h: R rows a wave, U chunks in flight a
+// mvsweep [experts|dense|f32] [tokens]: the matvec kernel's shapes (kernels/mv.h: R rows a wave, U chunks in flight a
 // lane) timed on Qwen3.8-Flash-Next's shapes at 1, 2, 3 or 4 tokens (an expert read for that many) - each expert type's gate / up (640 x 2560) and down (2560 x 640), 10 experts
 // a call, and the dense matrices' - every call reading cold memory (its matrices rotated through 1 GiB). R and U
 // change no bit (mv.h: a lane's chunks summed in the same order); what this picks is time.
@@ -93,6 +93,20 @@ static void dense(const char* type, uint32_t rows, uint32_t cols) {
       dense<T, NT, 2, 1>(name, rows, cols), dense<T, NT, 2, 2>(name, rows, cols),                                 \
       dense<T, NT, 2, 4>(name, rows, cols), dense<T, NT, 4, 1>(name, rows, cols), dense<T, NT, 4, 2>(name, rows, cols)
 
+// the F32 matvecs a Qwen step's few tokens read (a verify's: 2 .. 8): the shared expert's gate (1 x 2560), the
+// mixers' inject (4 x 10240), the DeltaNet's alpha / beta (32 x 2560), the router (512 x 2560) - U up to 8 too
+#define SWEEP_F(NT, rows, cols)                                                                                     \
+  dense<quant::kF32, NT, 1, 1>("F32", rows, cols), dense<quant::kF32, NT, 1, 2>("F32", rows, cols),               \
+      dense<quant::kF32, NT, 1, 4>("F32", rows, cols), dense<quant::kF32, NT, 1, 8>("F32", rows, cols),           \
+      dense<quant::kF32, NT, 2, 2>("F32", rows, cols), dense<quant::kF32, NT, 2, 4>("F32", rows, cols)
+template <int NT>
+static void sweep_f32() {
+  SWEEP_F(NT, 1, 2560);
+  SWEEP_F(NT, 4, 10240);
+  SWEEP_F(NT, 32, 2560);
+  SWEEP_F(NT, 512, 2560);
+}
+
 template <int NT>
 static void sweep(bool experts) {
   if (experts) {
@@ -128,6 +142,17 @@ int main(int argc, char** argv) {
   HIP(hipMemcpy(xrow, zeros.data(), kExperts * 4, hipMemcpyHostToDevice));
   HIP(hipDeviceSynchronize());
   const bool ex = !std::strcmp(which, "experts");
+  if (!std::strcmp(which, "f32")) {
+    switch (nt) {
+      case 1: sweep_f32<1>(); break;
+      case 2: sweep_f32<2>(); break;
+      case 4: sweep_f32<4>(); break;
+      case 6: sweep_f32<6>(); break;
+      case 8: sweep_f32<8>(); break;
+      default: return std::printf("f32 tokens: 1, 2, 4, 6, 8\n"), 2;
+    }
+    return 0;
+  }
   switch (nt) {
     case 1: sweep<1>(ex); break;
     case 2: sweep<2>(ex); break;

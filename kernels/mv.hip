@@ -29,9 +29,11 @@ constexpr Tune tune(quant::Type t, int nt) {
     case quant::kQ8_0: return nt > 4 ? Tune{2, 1} : Tune{1, 1};
     // an F32 router (unsloth's: 384 x 5120) and its guess's BF16 copy, one token: 4 chunks in flight a lane - F32
     // 53.5 -> 38.8 us (147 -> 202 GB/s), BF16 22.8 -> 19.5 (2026-11-04, 40 routers cold; R 1-4, U 1-8 swept, the
-    // same bits each). more tokens not measured
+    // same bits each). 2 to 6 tokens (Qwen3.8's verify; mvsweep f32, cold, low-power, 2026-11-09): 2 in flight -
+    // the mixers' inject 4 x 10240 13.2 -> 9.1 us at 4 tokens, 14.2 -> 12.7 at 6; alpha / beta 32 x 2560 7.1 ->
+    // 5.6 at 4; the router 512 x 2560 level (27.5 / 28.3 against 28.0 / 28.5)
     case quant::kF32:
-    case quant::kBF16: return nt == 1 ? Tune{1, 4} : Tune{1, 1};
+    case quant::kBF16: return nt == 1 ? Tune{1, 4} : Tune{1, 2};
     // Qwen3.8's expert types read for several tokens (an expert two or more of a step's tokens picked; mvsweep,
     // 10 experts cold, 2026-11-06): 2 and 2 at 2 tokens (IQ3_XXS 73.2 -> 45.1 us, IQ4_NL 76.6 -> 55.0) and at 4
     // (86.6 -> 65.4, 92.7 -> 71.7). one token: tune_group1's

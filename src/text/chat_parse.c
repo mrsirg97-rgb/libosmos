@@ -35,17 +35,29 @@ static bool is(Span s, const char *lit) { return s.n == strlen(lit) && memcmp(s.
 
 static bool has(Span s, const char *lit) { return memmem(s.p, s.n, lit, strlen(lit)) != NULL; }
 
+/* a regex's `lit$` as Python matches it (no MULTILINE: `$` is the end, or before a newline that ends the text): where
+   lit starts in s - at its end, or one '\n' before it - or -1 */
+static long tail_at(Span s, const char *lit)
+{
+  const size_t l = strlen(lit);
+  for (size_t nl = 0; nl <= 1; nl++)
+    if (s.n >= l + nl && (!nl || s.p[s.n - 1] == '\n') && memcmp(s.p + s.n - nl - l, lit, l) == 0)
+      return (long)(s.n - nl - l);
+  return -1;
+}
+
 typedef struct Param
 {
   Span name, value;
   bool string;
 } Param;
 
-/* ^ name="(.*?)" string="(true|false)">(.*?)<$ - the name to the first '" string="..">' */
+/* ^ name="(.*?)" string="(true|false)">(.*?)<$ - the name to the first '" string="..">', the value to the '<' (tail_at) */
 static bool param(Span s, Param *p)
 {
   const char *open = " name=\"";
-  if (s.n < strlen(open) || memcmp(s.p, open, strlen(open)) || s.p[s.n - 1] != '<')
+  const long end = tail_at(s, "<"); /* the value's end */
+  if (s.n < strlen(open) || memcmp(s.p, open, strlen(open)) || end < 0)
     return false;
   const size_t from = strlen(open);
   for (size_t i = from; i < s.n; i++)
@@ -53,9 +65,9 @@ static bool param(Span s, Param *p)
     {
       const char *tail = t ? "\" string=\"true\">" : "\" string=\"false\">";
       const size_t tl = strlen(tail);
-      if (i + tl <= s.n - 1 && memcmp(s.p + i, tail, tl) == 0)
+      if (i + tl <= (size_t)end && memcmp(s.p + i, tail, tl) == 0)
       {
-        *p = (Param){{s.p + from, i - from}, {s.p + i + tl, s.n - 1 - (i + tl)}, t == 1};
+        *p = (Param){{s.p + from, i - from}, {s.p + i + tl, (size_t)end - (i + tl)}, t == 1};
         return true;
       }
     }
@@ -117,13 +129,14 @@ static bool calls(const char *t, size_t len, size_t *i, int *last, JsonBuf *out,
     }
     if (stop < 0)
       return chat_fail(err, "tool calls", "a missing special token");
-    int at = until(t, len, i, inner, 2, &s); /* ^\s*name="(.*?)">\n$ */
+    int at = until(t, len, i, inner, 2, &s); /* ^\s*name="(.*?)">\n$ (tail_at) */
     size_t w = 0;
     while (w < s.n && (s.p[w] == ' ' || (s.p[w] >= '\t' && s.p[w] <= '\r')))
       w++;
-    if (s.n - w < 9 || memcmp(s.p + w, "name=\"", 6) || memcmp(s.p + s.n - 3, "\">\n", 3))
+    const long nend = tail_at(s, "\">\n"); /* the name's end: a blank line after it the reference's too */
+    if (s.n - w < 6 || memcmp(s.p + w, "name=\"", 6) || nend < (long)(w + 6))
       return chat_fail(err, "a tool call", "its name not name=\"..\"");
-    const Span name = {s.p + w + 6, s.n - w - 9};
+    const Span name = {s.p + w + 6, (size_t)nend - w - 6};
     Param ps[MAX_PARAMS];
     size_t np = 0;
     while (at == 0)
@@ -149,6 +162,9 @@ static bool calls(const char *t, size_t len, size_t *i, int *last, JsonBuf *out,
   return true;
 }
 
+/* (NULL-terminated) encoding.py's check of the reasoning and the content */
+const char *const chat_refused[] = {CHAT_BOS, CHAT_EOS, CHAT_THINK, CHAT_THINK_END, CHAT_DSML, NULL};
+
 bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[CHAT_ERR])
 {
   err[0] = 0;
@@ -173,9 +189,8 @@ bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char 
     return chat_fail(err, "the completion", "no EOS");
   if (i != len || last > 0)
     return free(tc.p), chat_fail(err, "the completion", "text after its end");
-  const char *special[] = {CHAT_BOS, CHAT_EOS, CHAT_THINK, CHAT_THINK_END, CHAT_DSML};
-  for (int k = 0; k < 5; k++)
-    if (has(content, special[k]) || has(reasoning, special[k]))
+  for (int k = 0; chat_refused[k]; k++)
+    if (has(content, chat_refused[k]) || has(reasoning, chat_refused[k]))
       return free(tc.p), chat_fail(err, "the completion", "a special token in its text");
   json_puts(out, "{\"role\": \"assistant\", \"content\": "), json_dump_string(out, content.p, content.n);
   json_puts(out, ", \"reasoning_content\": "), json_dump_string(out, reasoning.p, reasoning.n);

@@ -6,7 +6,8 @@
 #include "answer.h"
 
 /* the streamed answer (DESIGN.md, "osmos-api: the answer"): reasoning_content deltas until </think>, content after,
-   nothing from a calls block or the EOS on. what could still turn out to be one of those markers - a marker's start,
+   nothing from a calls block, the EOS or a special token's text the parse refuses on (the parse at DONE says the
+   rest: an error, never that text). what could still turn out to be one of those markers - a marker's start,
    whitespace before it (the parse trims it), a UTF-8 character's first bytes - is held until it cannot */
 
 static bool space(char c)
@@ -50,10 +51,10 @@ static void delta(Answer *s, const char *p, size_t n)
 }
 
 /* the bytes at p's end that could still begin a marker, or end inside a character, and the whitespace before them */
-static size_t held(const char *p, size_t n, const char *const marks[2])
+static size_t held(const char *p, size_t n, const char *const *marks, int nm)
 {
   size_t keep = 0;
-  for (int m = 0; m < 2; m++)
+  for (int m = 0; m < nm; m++)
     for (size_t k = strlen(marks[m]) - 1; k; k--)
       if (k <= n && !memcmp(p + n - k, marks[m], k))
       {
@@ -83,10 +84,15 @@ void answer_advance(Answer *s)
       s->sent++;
     const char *p = s->text.p + s->sent;
     const size_t n = s->text.n - s->sent;
-    const char *marks[2] = {s->phase == PHASE_REASONING ? s->d->think_end : s->d->calls_open, s->d->eos};
+    const char *marks[2 + DIALECT_REFUSED_MAX] = {s->phase == PHASE_REASONING ? s->d->think_end : s->d->calls_open,
+                                                  s->d->eos}; /* the phase's own end first: it wins a tie */
+    int nm = 2;
+    for (int k = 0; s->d->refused[k]; k++)
+      if (strcmp(s->d->refused[k], marks[0]) && strcmp(s->d->refused[k], marks[1]))
+        marks[nm++] = s->d->refused[k];
     const char *at = NULL;
     int which = 0;
-    for (int m = 0; m < 2; m++)
+    for (int m = 0; m < nm; m++)
     {
       const char *q = memmem(p, n, marks[m], strlen(marks[m]));
       if (q && (!at || q < at))
@@ -94,19 +100,21 @@ void answer_advance(Answer *s)
     }
     if (!at)
     {
-      const size_t out = n - held(p, n, marks);
+      const size_t out = n - held(p, n, marks, nm);
       delta(s, p, out);
       s->sent += out;
       return;
     }
     size_t e = (size_t)(at - p);
+    if (which >= 2) /* a refused text: what before it could still begin a marker never streams either */
+      e -= held(p, e, marks, nm);
     while (e && space(p[e - 1]))
       e--;
     delta(s, p, e);
     if (which == 0 && s->phase == PHASE_REASONING)
       s->phase = PHASE_CONTENT, s->begun = false, s->sent += (size_t)(at - p) + strlen(s->d->think_end);
     else
-      s->phase = PHASE_DONE, s->sent += (size_t)(at - p);
+      s->phase = PHASE_DONE, s->sent += e; /* what was held stays unsent: a flush (length) sends it */
   }
 }
 

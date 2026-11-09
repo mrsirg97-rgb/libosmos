@@ -7,14 +7,33 @@ osmos is an open-source inference engine built for this one chip:
 - The experts that don't fit in memory are streamed from the SSD.
 - It gives the same output bit for bit however it runs.
 
-Below, osmos 0.5.9 is measured against Project Maya 1.1.56 and llama.cpp on the same box and the same model files.
+Below, osmos 0.5.11 is measured against Project Maya 1.1.57 and llama.cpp on the same box and the same model files,
+at AMD's `low-power` profile (~70 W).
 
 `MIT` · `1,048,576-token context` · `one-command install` · `OpenAI-compatible API` · `stock AMD power profiles`
 
-## Measured against Project Maya 1.1.56
+## Agents at 56 W
+
+| 4 agents × 8 turns, UD-IQ1_M | osmos 0.5.11 | Maya 1.1.57 |
+| --- | ---: | ---: |
+| Energy per answer token | **3.42 J** | 4.75 J |
+| Wall time, all 32 turns | **8.1 min** | 10.9 min |
+| First token, p95 | **73.0 s** | 82.6 s |
+| Turn done, p95 | **105.9 s** | 147.3 s |
+| Package power, mean | **56.4 W** | 58.2 W |
+| RAM left free, lowest | **8.2 GiB** | 2.2 GiB |
+
+An agent turn is mostly reading: Maya's agent bench sends about 99K new prompt tokens for 8K tokens of answers. osmos
+finishes it 26% sooner and uses 28% less energy for each token it writes. It leaves 8 GiB of RAM to the rest of the
+system by design: room for an editor, a browser and the agent harness beside a 768B model.
+
+Against osmos's own run at `performance` (0.5.9, the same bench), low-power takes 20% longer and uses half the
+energy per answer token: 3.42 J against 7.03 J, at 56 W against 104 W.
+
+## Measured against Project Maya 1.1.57
 
 The test conditions:
-- one session (2026-11-08), nothing else running, AMD's `performance` profile, greedy decoding
+- one session (2026-11-09), nothing else running, AMD's `low-power` profile, greedy decoding
 - the same quantized model files for both engines
 - Maya as its own setup configures it: rebuilt, its pack, its drafter, its CPU lane and expert profile calibrated
 - Maya's own bench questions and prompts at 64K context
@@ -24,32 +43,17 @@ Every run and its command: [`DESIGN.md`](../DESIGN.md).
 
 | | UD-IQ2_XXS osmos | Maya | | UD-IQ1_M osmos | Maya | |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Writing, with drafting | **26.5** | 12.0 | 2.2x | **35.4** | 27.4 | +29% |
-| Writing, one token at a time | **14.4** | 10.3 | +39% | **17.5** | 16.5 | +6% |
-| Reading a 2,048-token prompt | **316** | 261 | +21% | **373** | 242 | +54% |
-| Reading an 8,192-token prompt | 429 | 433 | tie | **519** | 412 | +26% |
-| SSD read per token written | **0.067 GB** | ~0.17 GB | 2.5x less | | | |
-| Perplexity (8,191 tokens, lower is better) | **2.4492** | 2.4512 | | **2.4579** | 2.4621 | |
+| Writing, with drafting | **24.8** | 9.9 | 2.5x | **32.7** | 24.4 | +34% |
+| Writing, one token at a time | **13.5** | 8.9 | +52% | **16.4** | 15.6 | +5% |
+| Reading a 2,048-token prompt | **281** | 216 | +30% | **318** | 206 | +54% |
+| Reading an 8,192-token prompt | **383** | 361 | +6% | **438** | 352 | +24% |
+| SSD read per token written | **0.064 GB** | ~0.17 GB | 2.7x less | | | |
+| Perplexity (8,191 tokens, lower is better) | **2.4492** | 2.4505 | | **2.4579** | 2.4606 | |
 
 UD-IQ2_XXS is the quant that fits memory the least: its experts are 157 GB against a ~107 GiB budget. There,
-osmos reads 2.5x fewer bytes from the SSD for each token it writes, because every expert lives in one cache that keeps
-the ones decode comes back to. That's where its lead comes from. UD-IQ1_S, the smallest quant, is closest to a tie
-on plain decode (19.5 against 19.3) and still +23% drafted.
-
-## Agents: the workload this machine is for
-
-| 4 agents × 8 turns, UD-IQ1_M | osmos 0.5.9 | Maya 1.1.56 |
-| --- | ---: | ---: |
-| Wall time, all 32 turns | **6.7 min** | 9.2 min |
-| First token, p95 | **53.8 s** | 73.3 s |
-| Turn done, p95 | **83.3 s** | 124.5 s |
-| Package power, mean | **104 W** | 123 W |
-| Energy per answer token | **7.03 J** | 8.87 J |
-| RAM left free, lowest | **8.2 GiB** | 2.8 GiB |
-
-An agent turn is mostly reading: Maya's agent bench sends about 99K new prompt tokens for 8K tokens of answers. osmos
-finishes it 26% sooner, using 21% less energy for each token it writes and less power. It also leaves 8 GiB of RAM
-to the rest of the system by design.
+osmos reads 2.7x fewer bytes from the SSD for each token it writes, because every expert lives in one cache that keeps
+the ones decode comes back to. That's where its lead comes from. UD-IQ1_S, the smallest quant, is the one place Maya
+leads, on plain decode (18.9 against 18.3); drafted, osmos is +18%.
 
 ## Qwen3.8-Flash-Next: the second model
 
@@ -60,17 +64,20 @@ osmos runs Qwen3.8-Flash-Next (177B, a preview of the Qwen4 architecture: Gated 
 - a 262,144-token context, or 1M with YaRN
 - the same bit-for-bit guarantee
 
-Against llama.cpp 7d7f028 on the same file, the same session:
+Against llama.cpp 7d7f028 on the same file, the same session (three rounds):
 
-| | osmos 0.5.9 | llama.cpp | |
+| | osmos 0.5.11 | llama.cpp | |
 | --- | ---: | ---: | ---: |
-| Reading a 2,048-token prompt | **873** | 569 | +53% |
-| Reading a 16,384-token prompt | **811** | 521 | +56% |
-| Reading a 65,536-token prompt | **709** | 373 | 1.9x |
-| Writing, MTP drafting | **45.6** | not measured | |
-| Writing, one token at a time | **27.1** | 25.7 | +5% |
-| Writing at 16K context | **25.8** | 22.5 | +15% |
-| Perplexity, 16,384 tokens | 2.2732 | 2.2693 (f16 cache) / 2.2718 (q8_0) | |
+| Reading a 2,048-token prompt | **756** | 541 | +40% |
+| Reading a 16,384-token prompt | **677** | 484 | +40% |
+| Reading a 65,536-token prompt | **602** | 330 | 1.8x |
+| Writing, MTP drafting | **45.5** | not measured | |
+| Writing, one token at a time | **26.5** | 26.0 | +2% |
+| Writing at 16K context | **24.9** | 20.9 | +19% |
+| Perplexity, 16,384 tokens | 2.2732 | 2.2718 (f16 cache) / 2.2693 (q8_0) | |
+
+Qwen's decode runs as fast at low-power as at `performance`: it is bound by memory bandwidth, which the power cap
+doesn't lower. And it is steady: osmos's decode varied 0.2-0.4% from round to round, llama.cpp's up to 19%.
 
 Power is the APU package's (amdgpu PPT: CPU, GPU and NPU), not the wall, sampled over each run's own window.
 

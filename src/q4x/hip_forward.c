@@ -132,7 +132,8 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *), 0},  {&b->emb, n * D * F, 1},    {&b->key, n * hd * F, 1},        {&b->val, n * D * F, 1},
       {&b->kn, n * hd * F, 1},         {&b->qn, n * hd * F, 1},         {&b->pg, n * g->hc * F, 1},      {&b->gated, n * hd * F, 1},
       {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},       {&b->ple_rows, n * g->ple_heads * 4, 1},
-      {&b->tok, n * 4, 1},             {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
+      {&b->tok, n * 4, 1},             {&b->top_part, q4x_argmax_scratch((uint32_t)n), 0},
+      {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
   };
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
     if (!alloc(want[i].p, want[i].bytes))
@@ -172,6 +173,16 @@ void q4x_forward_destroy(Q4xForward *f)
     (void)hipEventDestroy(f->e_in);
   if (f->e_out)
     (void)hipEventDestroy(f->e_out);
+  if (f->pin_free)
+    (void)hipEventDestroy(f->pin_free);
+  if (f->e_mix)
+    (void)hipEventDestroy(f->e_mix);
+  if (f->e_inj)
+    (void)hipEventDestroy(f->e_inj);
+  if (f->e_gates)
+    (void)hipEventDestroy(f->e_gates);
+  if (f->e_ix)
+    (void)hipEventDestroy(f->e_ix);
   free(f->sub_seq);
   free(f);
 }
@@ -187,7 +198,12 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens;
   if (hipStreamCreateWithFlags(&f->s2, hipStreamNonBlocking) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_in, hipEventDisableTiming) != hipSuccess ||
-      hipEventCreateWithFlags(&f->e_out, hipEventDisableTiming) != hipSuccess)
+      hipEventCreateWithFlags(&f->e_out, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&f->pin_free, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&f->e_mix, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&f->e_inj, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&f->e_gates, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&f->e_ix, hipEventDisableTiming) != hipSuccess)
     return q4x_fail(err, "a stream or event refused"), free(f), NULL;
   if (!(f->sub_seq = calloc(Q4X_MAX_RUNS, sizeof *f->sub_seq)))
     return q4x_fail(err, "out of memory"), free(f), NULL;

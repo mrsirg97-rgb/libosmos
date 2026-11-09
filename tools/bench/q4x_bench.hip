@@ -100,6 +100,15 @@ int main(int argc, char** argv) {
     int keep = 1;
     while (keep <= k && toks[keep] == picks[keep - 1]) keep++;
     if (trace) {
+      static std::vector<float> lg;  // the verify's logits rows, hashed: the main model's bits a round
+      const uint32_t V = (uint32_t) w->geo.n_vocab;
+      lg.resize((size_t) (k + 1) * V);
+      if (hipDeviceSynchronize() != hipSuccess ||
+          hipMemcpy(lg.data(), q4x_logits(fw), lg.size() * 4, hipMemcpyDeviceToHost) != hipSuccess)
+        return std::fprintf(stderr, "q4x_bench: the trace's logits copy failed\n"), 1;
+      // row 0's input is the token already taken (every run's the same): its bits must not depend on the drafts
+      std::printf("round %u row0 %016llx logits %016llx\n", rounds, (unsigned long long) fnv(lg.data(), (size_t) V * 4, FNV_SEED),
+                  (unsigned long long) fnv(lg.data(), lg.size() * 4, FNV_SEED));
       std::printf("round %u at %d: %d drafts, %d kept;", rounds, pos, k, keep - 1);
       for (int i = 0; i < k; i++) std::printf(" %d %a", toks[i + 1], conf[i]);
       std::printf("\n");

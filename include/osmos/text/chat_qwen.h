@@ -14,6 +14,7 @@
 bool qchat_render(const Json *messages, const Json *tools, ChatMode mode, const char *effort, bool preserve,
                   JsonBuf *out, char err[CHAT_ERR]);
 bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR]);
+extern const char *const qchat_refused[]; /* special tokens' text a completion can't hold (NULL-terminated) */
 
 #endif
 
