@@ -66,7 +66,9 @@ def _slot(s):
 
 def _rig(pid, r):
     if not isinstance(r, dict):
-        raise ManifestError(f"pack {pid}: no rig (its row's max_tokens, reserve, efforts, effort, aliases)")
+        raise ManifestError(f"pack {pid}: no rig (its row's id, max_tokens, reserve, efforts, effort, aliases)")
+    if not (isinstance(r.get("id"), str) and re.fullmatch(r"[a-z0-9][a-z0-9.-]*", r["id"])):
+        raise ManifestError(f"pack {pid}: rig id {r.get('id')!r} is not a name rig takes (lowercase, digits, . and -)")
     for k in ("max_tokens", "reserve"):
         if not isinstance(r.get(k), int) or r[k] < 1:
             raise ManifestError(f"pack {pid}: rig {k} {r.get(k)!r} is not a positive count of tokens")
@@ -96,6 +98,9 @@ def check(m):
         raise ManifestError("rig: not {repo, version (a release tag vX.Y.Z), install_sha256 (its install.sh's)}")
     for fid, f in m["files"].items():
         _derived(m, fid, f) if "derive" in f else _file(fid, f)
+    ids = [p.get("rig", {}).get("id") for p in m["packs"].values() if isinstance(p.get("rig"), dict)]
+    for i in {i for i in ids if ids.count(i) > 1}:
+        raise ManifestError(f"rig id {i!r}: two packs' (rig keys a row by it)")
     for pid, p in m["packs"].items():
         if not isinstance(p.get("shards"), list) or not p["shards"]:
             raise ManifestError(f"pack {pid}: no shards")

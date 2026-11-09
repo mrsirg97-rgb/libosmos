@@ -48,10 +48,9 @@ int main() {
   }
   char err[OSMOS_ERR] = "";
 
-  // the facts, and the extras it has no use for
-  const OsmosFiles table = {first.c_str(), first.c_str(), nullptr}, overlay = {first.c_str(), nullptr, first.c_str()};
+  // the facts, and the extra it has no use for (an Engram table; an overlay it takes: test_overlay_q4x_gpu)
+  const OsmosFiles table = {first.c_str(), first.c_str(), nullptr};
   CHECK(!osmos_open(&table, err) && err[0]);
-  CHECK(!osmos_open(&overlay, err) && err[0]);
   const OsmosFiles files = {first.c_str(), nullptr, nullptr};
   OsmosModel* m = osmos_open(&files, err);
   if (!m) std::fprintf(stderr, "  %s\n", err);

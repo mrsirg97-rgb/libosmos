@@ -86,7 +86,9 @@ forward_create
 forward_create_ranked
   forward_create, the resident experts chosen by picks ([layer][expert] for the n_layers layers, n_experts a layer:
   the router's picks counted on calibration text, forward_picks's) - a rank at a time, each layer's most-picked
-  first, ties to the lower id. picks NULL: by id, as forward_create. which experts are resident changes no bit.
+  first, ties to the lower id. picks NULL: by id, as forward_create. which experts are resident changes no bit. they
+  are read from their files at the first step (forward_batch), not here: a forward built and let go (a sizing's,
+  osmos/run/fit.h) reads its dense weights alone; the first step's err names an expert's failed read.
 
 forward_create_with
   forward_create_ranked with a step's most tokens its own (max_tokens, at most FORWARD_MAX_TOKENS): the buffers a

@@ -54,7 +54,7 @@ def entry(path, repo="r/a", revision=REV, **kw):
 
 
 RIG_PIN = {"repo": "me/rig", "version": "v1.0.0", "install_sha256": "0" * 64}
-ROW = {"max_tokens": 4096, "reserve": 4096, "efforts": ["low", "high"], "effort": "high", "aliases": ["t"]}
+ROW = {"id": "t", "max_tokens": 4096, "reserve": 4096, "efforts": ["low", "high"], "effort": "high", "aliases": ["t"]}
 
 
 class Manifest(unittest.TestCase):
@@ -539,7 +539,7 @@ class Rig(unittest.TestCase):
                 rows = json.load(f)
             self.assertEqual(rows[0], theirs[0])                          # theirs, as it was
             self.assertEqual(rows[1], row)
-            self.assertEqual(row["id"], "osmos-ud-iq1_s")
+            self.assertEqual(row["id"], "deepseek-1017-ud-s")
             self.assertIn("${PORT}", row["command"])
             self.assertEqual(row["efforts"], ["low", "high", "max"])      # the levels osmos-api maps
             self.assertEqual(row["effort"], "max")                           # the default: the most thinking
@@ -559,7 +559,7 @@ class Rig(unittest.TestCase):
             row = rig.register(home, cfg, "/b/osmos-api", "/m/q/osmos.json", default=False,
                                row=self.PACKS["qwen38-ud-iq3_xxs"]["rig"])
             self.assertEqual((row["id"], row["window"], row["maxTokens"], row["reserve"], row["keepRecent"]),
-                             ("osmos-qwen38-ud-iq3_xxs", 262144, 65536, 65536, 65536))
+                             ("qwen3.8-flash-next", 262144, 65536, 65536, 65536))
             self.assertEqual((row["efforts"], row["effort"], row["aliases"]), (["low", "medium", "high"], "high",
                                                                                ["qwen"]))
             with self.assertRaises(rig.RigError):             # the DeepSeek packs' 256K reply in a 262K window
@@ -580,7 +580,50 @@ class Rig(unittest.TestCase):
             rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=True, row=self.DS)
             with open(os.path.join(home, "settings.json")) as f:
                 s = json.load(f)
-            self.assertEqual(s, {"model": "osmos-ud-iq1_s", "theme": "dark"})
+            self.assertEqual(s, {"model": "deepseek-1017-ud-s", "theme": "dark"})
+
+    def test_each_packs_id(self):                        # rig's names: the model, its date, the quant's size
+        ids = {pid: p["rig"]["id"] for pid, p in self.PACKS.items()}
+        self.assertEqual(ids, {"ud-iq1_s": "deepseek-1017-ud-s", "ud-iq1_m": "deepseek-1017-ud-m",
+                               "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
+                               "qwen38-ud-iq3_xxs-1m": "qwen3.8-flash-next-1m"})
+        aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
+        self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
+
+    def test_the_old_row_moved(self):                    # 0.5.8's id, osmos-<pack>: replaced, its port and default kept
+        with tempfile.TemporaryDirectory() as home:
+            theirs = {"id": "local", "window": 32768, "maxTokens": 4096, "reserve": 4096, "keepRecent": 8192,
+                      "command": "llama-server --port ${PORT}", "port": 8090}
+            old = dict(theirs, id="osmos-ud-iq1_s", port=8095)
+            put(os.path.join(home, "models.json"), json.dumps([theirs, old]).encode())
+            put(os.path.join(home, "settings.json"), json.dumps({"model": "osmos-ud-iq1_s", "theme": "dark"}).encode())
+            row = rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=False, row=self.DS)
+            with open(os.path.join(home, "models.json")) as f:
+                rows = json.load(f)
+            self.assertEqual([r["id"] for r in rows], ["local", "deepseek-1017-ud-s"])
+            self.assertEqual(rows[0], theirs)
+            self.assertEqual(row["port"], 8095)
+            with open(os.path.join(home, "settings.json")) as f:
+                self.assertEqual(json.load(f), {"model": "deepseek-1017-ud-s", "theme": "dark"})
+
+    def test_a_default_not_ours_kept(self):              # not asked, not the old row: settings.json untouched
+        with tempfile.TemporaryDirectory() as home:
+            s = os.path.join(home, "settings.json")
+            put(s, b'{"model": "local"}')
+            rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=False, row=self.DS)
+            with open(s, "rb") as f:
+                self.assertEqual(f.read(), b'{"model": "local"}')
+
+    def test_ids_checked(self):                          # a pack's id rig's name for it: present, rig-safe, its own
+        for bad in (None, "", "Has Space", "osmos/x"):
+            m = manifest.load(REAL)
+            m["packs"]["ud-iq1_s"]["rig"]["id"] = bad
+            with self.assertRaisesRegex(manifest.ManifestError, "rig id"):
+                manifest.check(m)
+        m = manifest.load(REAL)
+        m["packs"]["ud-iq1_m"]["rig"]["id"] = m["packs"]["ud-iq1_s"]["rig"]["id"]
+        with self.assertRaisesRegex(manifest.ManifestError, "rig id"):
+            manifest.check(m)
 
     def test_malformed_refused_untouched(self):
         with tempfile.TemporaryDirectory() as home:

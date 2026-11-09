@@ -221,8 +221,9 @@ static bool repack_all(Forward *f, const GgufTensor *const *t_res, size_t n_t)
   return ok;
 }
 
-/* the budget's experts read into the pool at create, in choose's order (each layer's most picked first), then
-   released the other way round - the most picked the most recent: the last to go */
+/* the budget's experts read into the pool at the first step, in choose's order (each layer's most picked first), then
+   released the other way round - the most picked the most recent: the last to go. at the first step, not at create:
+   fit.h's sizing builds several forwards before the one it keeps, and each would read them (UD-IQ2_XXS: ~600 GB) */
 static bool warm_start(Forward *f, const uint32_t *warm, size_t n, char *err)
 {
   for (size_t k = 0; k < n; k++)
@@ -237,6 +238,16 @@ static bool warm_start(Forward *f, const uint32_t *warm, size_t n, char *err)
   for (size_t k = n; k-- > 0;)
     pool_release(f->pool, warm[k], 0);
   return true;
+}
+
+bool fwd_warm(Forward *f, char *err)
+{
+  uint32_t *warm = f->warm;
+  const size_t n = f->n_warm;
+  f->warm = NULL, f->n_warm = 0; /* once, read or refused */
+  const bool ok = warm_start(f, warm, n, err);
+  free(warm);
+  return ok;
 }
 
 /* the units: each layer's experts (the pool's, every one: the budget's read in first), then every other tensor the
@@ -310,8 +321,10 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
            !(f->stream = pool_create(all, f->n_expert_units, stream_room, host_slots(f->hs_stream),
                                      reads_fetcher(f->reads, 1), ARENA_GRAIN, NULL, NULL, perr)))
     ok = fwd_fail(err, perr[0] ? perr : "out of memory (the pools' units), or a budget with no experts");
-  ok = ok && warm_start(f, warm, n_warm, err);
-  free(warm);
+  if (ok)
+    f->warm = warm, f->n_warm = n_warm; /* read at the first step (fwd_warm) */
+  else
+    free(warm);
   for (size_t i = 0; ok && i < n_t; i++)
   {
     const void *dev[POOL_PARTS];
@@ -657,7 +670,7 @@ void forward_destroy(Forward *f)
   pool_destroy(f->pool), pool_destroy(f->stream);
   host_slots_destroy(f->hs), host_slots_destroy(f->hs_stream); /* after the pools: no unit still in them */
   resident_destroy(f->res);
-  free(f->rix);
+  free(f->rix), free(f->warm);
   free(f->is_held);
   rowread_destroy(f->eg_read);
   free(f->eg_off);

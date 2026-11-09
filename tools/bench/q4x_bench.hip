@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
   uint64_t h = FNV_SEED;
   double worst = 0;
   uint32_t out = 0, rounds = 0, drafted = 0, accepted = 0;
+  const bool trace = getenv("Q4X_BENCH_TRACE");  // each round's drafts and their probabilities, exact (%a): two runs diffed
   while (out < nd) {
     const double a = now();
     int32_t toks[OSMOS_MAX_BLOCK + 1] = {y}, picks[OSMOS_MAX_BLOCK + 1];
@@ -98,6 +99,11 @@ int main(int argc, char** argv) {
       return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
     int keep = 1;
     while (keep <= k && toks[keep] == picks[keep - 1]) keep++;
+    if (trace) {
+      std::printf("round %u at %d: %d drafts, %d kept;", rounds, pos, k, keep - 1);
+      for (int i = 0; i < k; i++) std::printf(" %d %a", toks[i + 1], conf[i]);
+      std::printf("\n");
+    }
     for (int i = 0; i < keep && out < nd; i++, out++) h = fnv(&toks[i], sizeof toks[i], h);
     y = picks[keep - 1];
     if (mtp && (!q4x_seq_rollback(s, (uint32_t) (k + 1 - keep)) || !q4x_mtp_seed(fw, s, pos, pos + keep, ferr)))

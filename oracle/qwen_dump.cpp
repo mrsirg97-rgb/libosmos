@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
                 std::exp(nll / (n_tok - 1)), n_tok - 1, -nll / (n_tok - 1));
   }
   FILE* o = std::fopen((want.out + "/ids.txt").c_str(), "w");
+  if (!o) return std::fprintf(stderr, "qwen_dump: %s/ids.txt not writable (no such directory?)\n", want.out.c_str()), 1;
   for (int i = 0; i < n_tok; i++) std::fprintf(o, "%d%s", ids[i], i + 1 < n_tok ? "," : "\n");
   std::fclose(o);
   std::printf("qwen_dump: %d tokens, %d tensors written, %d not (views or other types)\n", n_tok, want.written,

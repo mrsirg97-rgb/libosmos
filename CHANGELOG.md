@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.5.9]: Qwen abliterated, ready for another shape; measured against the latest Maya and llama.cpp
+
+Every stream the same bits as 0.5.8 (DeepSeek's and Qwen's).
+
+- **Qwen abliterated** (`--abliterated` on both Qwen packs): huihui-ai's patch for unsloth's Qwen3.8 quants, turned
+  into an overlay the engine reads (`tools/install/overlay_q4x.py`: the variants of our types, XOR-decoded, under the
+  model's names - 96 tensors, 703 MB). The installer makes it from the patch and its key at their pinned commit and
+  checks the result's SHA-256 (a manifest file can now be derived). Perplexity +0.33% (8K) / +0.59% (16K).
+  `osmos-api`'s `overlay`, `q4x_bench` / `q4x_ppl`'s `OVERLAY` take it; a conversation kept with it is not loaded
+  without it (the state's identity).
+- **The Qwen loader refuses what the kernels cannot run**, the key named, instead of a step failing later: an
+  attention head other than 256, a DeltaNet state other than 128, an indexer head other than 128 or more than 4 of
+  them, more than 16 query heads a key head, a conv past 8 taps, an expert width not whole tiles, n-gram heads not
+  the hidden width, an n-gram table in a type its kernel does not decode. Two of these were latent reads past a
+  buffer (the indexer's width, the n-gram width) - for a model of other shapes than Qwen3.8's (Qwen4).
+- Qwen's decode profiled (DESIGN.md, "0.5.9"): at its bits it is near what this design reads it at - the dense
+  matmuls at 170-220 GB/s, the router's 40 us the shared expert beside it; a 3.5% faster expert path declined (a
+  decoded token would no longer be a prompt's bits).
+- **Measured against the latest of each** (2026-11-08, `performance`, the means of two interleaved rounds; README):
+  - **Maya 1.1.56 (7bf15ac, rebuilt and calibrated), DeepSeek at 64K:**
+    - Prompts +24 to +54% on UD-IQ1_M and UD-IQ1_S, drafted decode +23 to +29%. Plain decode +6% on UD-IQ1_M, a tie
+      on UD-IQ1_S. Perplexity 2.4579 / 2.5006 against Maya's 2.4621 / 2.5065.
+    - UD-IQ2_XXS, the quant that fits memory the least: plain decode +39% (14.4 against 10.3), drafted 2.2x (26.5
+      against 12.0), 2K prompts +21%, 8K a tie. osmos reads 2.5x fewer SSD bytes a token (1.9x drafted).
+      Perplexity 2.4492 against 2.4512.
+    - Agents (UD-IQ1_M): 405 s against 551, 7.03 J against 8.87 an answer token, with 8.2 GiB of RAM left free
+      against 2.8.
+  - **llama.cpp 7d7f028, Qwen3.8:**
+    - Prompts +50 to +56% at 2K to 16K, 1.9x at 64K. Plain decode +5%, and +15% at 16K depth.
+    - Perplexity between llama.cpp's f16 and q8_0 caches.
+    - Qwen's prompts in that session were 873 tok/s at 2K and 709 at 64K, against 0.5.5's 903 and 727 (16K level,
+      811 against 810). No regression: 0.5.8 and 0.5.9 measured again afterwards, three interleaved rounds of the same
+      command, give 900-908 each. The session read low for a reason not found (it ran right after the DeepSeek
+      runs). The llama.cpp table keeps the session's numbers, since llama.cpp was measured under the same conditions.
+- **DeepSeek loads read the warm experts once.** The `auto` budget is found by building the forward several times
+  (`fit_sized`), and since 0.5.8 each build read the whole warm set from the SSD. On UD-IQ2_XXS that was about 600 GB
+  and 125 s at load for a 107 GiB budget. The warm set is now read at the first step, so sizing builds read only the
+  dense weights. From start to the first answer: 54 s, against 123-131 s. The same cache at the first step, so the same speed and the same bits
+  (`test_warm_gpu`).
+- **rig names the packs by model.** `deepseek-1017-ud-s`, `-m` and `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS), and
+  `qwen3.8-flash-next` (`-1m` for the 1M pack), in place of `osmos-<pack>`. Aliases: `ds-s` / `ds-m` / `ds-l` (the
+  three DeepSeek rows no longer share `osmos`), `qwen` / `qwen-1m`. Installing again replaces a 0.5.8 row, keeps its
+  port, and moves rig's default if it was on the old row.
+- `oracle/qwen_dump` refuses an output directory it can't write. Before, it crashed after computing its perplexity,
+  and the number was lost.
+- `q4x_bench`: `Q4X_BENCH_TRACE` prints each round's drafts and their probabilities exactly, to compare two runs.
+
 ## [0.5.8]: the membrane - one cache for every expert
 
 Every stream the same bits as 0.5.7 (each benchmark's hash, every pack). Against 0.5.7's build the same session
