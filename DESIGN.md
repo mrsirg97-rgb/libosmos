@@ -2591,6 +2591,30 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.11: the MTP head's drafts the same every run (2026-11-08, low-power)
+
+**Not the main model.** Verify logits hashed per round (`Q4X_BENCH_TRACE`): compared by position across runs, every
+verify's row 0 (its input the token already taken) the same bits at all 41-42 shared positions. The rounds' later
+rows differ only because their draft tokens do. The variation is the head's.
+
+**Not the side stream.** A build with `Q4X_SIDE_STEP` 0 (the shared expert on the main stream) still drafted
+differently run to run (1 vs 3: 10 rounds).
+
+**The race.** The first divergence followed a round that kept all 5 drafts: the seed then took 6 tokens, and the
+next draft's first confidence moved 0.1%. The seed's `tokens_in` wrote `b.pin_tok` and queued an async copy from it,
+then returned. The next draft step's `tokens_in` wrote `b.pin_tok` again, and when the copy hadn't run yet the seed
+read the draft's token. A sync at the seed's end made four runs draft alike. The fix keeps the GPU queue full instead:
+an event (`pin_free`) recorded after each copy from the pinned buffers, waited for before the host writes them
+(`q4x_pin_wait`, `q4x_pin_sent`, at the step's embed and the head's tokens_in).
+
+**The unwritten read.** `first_h`'s test (`pend_pos == p - 1`) is true for a new sequence at position 0 (-1 both),
+and `s.pend` is `hipMalloc`'d, never cleared, so the first row of every conversation's seed read whatever that memory
+held. Now a pending h needs `pend_pos >= 0`.
+
+**Test.** `test_mtp_seed_gpu`: the reference; the GPU held 200 ms before the seed (`q4x_spin`: its copy runs after
+the draft has written the buffer); a sequence made where another prompt's was let go (its pending h's memory likely
+handed back). Without the wait the held case fails; without the `pend_pos` check both fail.
+
 ### 0.5.10: no end of turn before the answer (2026-11-08)
 
 **The failure.** rig's session store: after "oh you know, life", Qwen3.8 (the 1M pack) closed its thinking ("Still
@@ -2688,7 +2712,8 @@ under a quarter of it each; the first step reads over half (the warm set), the s
 - **UD-IQ2_XXS plain bench:** from start to the warm-up answer's end, 54 s against 123-131 s; the whole run 110 s
   against 179-187. The same three hashes, and decode 14.1-14.3 tok/s, as before.
 
-**Open: the MTP head's draft probabilities vary between runs.** Qwen's drafted bench (512-token prompt, 128 tokens):
+**The MTP head's draft probabilities varied between runs** (found and fixed in 0.5.11: a race on the pinned
+token buffer, and an unwritten read at position 0). Qwen's drafted bench (512-token prompt, 128 tokens):
 - **The output is the same in every run** (ids f298bb34f82ac937 in 7 of 7), and so is the main model's.
 - **The draft count varies.** One of the session's two runs drafted 151 in 42 rounds; the other six drafted 149 in 41.
 - **The cause is below that count.** `Q4X_BENCH_TRACE` prints each round's drafts and their probabilities exactly.

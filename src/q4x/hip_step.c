@@ -7,12 +7,18 @@
 /* a step: the tokens' embedding into hc streams, their n-gram rows, the layers, the end mixer, the logits - every
    sequence's tokens at once through the weights, each sequence's own through its own (its runs: Q4xRun) */
 
+bool q4x_pin_wait(Q4xForward *f) { return hipEventSynchronize(f->pin_free) == hipSuccess; }
+
+bool q4x_pin_sent(Q4xForward *f) { return hipEventRecord(f->pin_free, NULL) == hipSuccess; }
+
 static bool embed(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t *tokens, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   const GgufTensor *e = f->w->embed;
   Q4xBuf *b = &f->b;
   int32_t prev[Q4X_MAX_NGRAM];
+  if (!q4x_pin_wait(f)) /* b.pin_rows and b.pin_tok written below: their last copies done */
+    return false;
   for (uint32_t i = 0; i < runs; i++)
     for (uint32_t t = 0; t < r[i].n; t++) /* a token's predecessors: its run's before it, then the sequence's last */
     {
@@ -33,6 +39,7 @@ static bool embed(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t *
   return hipMemcpyAsync(b->tok, b->pin_tok, n * 4, hipMemcpyHostToDevice, NULL) == hipSuccess &&
          hipMemcpyAsync(b->ple_rows, b->pin_rows, (uint64_t)n * g->ple_heads * 4, hipMemcpyHostToDevice, NULL) ==
              hipSuccess &&
+         q4x_pin_sent(f) &&
          q4x_rows(e->type, q4x_dev(f, e), e->bytes / e->dims[1], (uint32_t)e->dims[0], b->tok, n, b->x, NULL) &&
          q4x_streams(b->x, n, (uint32_t)g->hc, (uint32_t)g->n_embd, b->h, NULL);
 }

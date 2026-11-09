@@ -32,15 +32,19 @@ static bool head_in(Q4xForward *f, uint32_t n)
 
 static bool tokens_in(Q4xForward *f, const int32_t *tokens, uint32_t n)
 {
+  if (!q4x_pin_wait(f)) /* a seed's copy still queued (the GPU busy) reads b.pin_tok yet: not written over */
+    return false;
   memcpy(f->b.pin_tok, tokens, n * sizeof *tokens);
-  return hipMemcpyAsync(f->b.tok, f->b.pin_tok, n * 4, hipMemcpyHostToDevice, NULL) == hipSuccess;
+  return hipMemcpyAsync(f->b.tok, f->b.pin_tok, n * 4, hipMemcpyHostToDevice, NULL) == hipSuccess && q4x_pin_sent(f);
 }
 
-/* position p - 1's h for the head's first row: the pending one, or zeros */
+/* position p - 1's h for the head's first row: the pending one, or zeros. none pending is pend_pos -1, which at
+   position 0 is p - 1 too: s.pend never written then (its memory not cleared), so zeros (0.5.10 read it) */
 static bool first_h(Q4xForward *f, Q4xSeq *s, int32_t p, float *to)
 {
   const uint64_t hd = (uint64_t)f->w->geo.hc * f->w->geo.n_embd * F;
-  return s->pend_pos == p - 1 ? copy(to, s->pend, hd) : hipMemsetAsync(to, 0, hd, NULL) == hipSuccess;
+  return s->pend_pos >= 0 && s->pend_pos == p - 1 ? copy(to, s->pend, hd)
+                                                   : hipMemsetAsync(to, 0, hd, NULL) == hipSuccess;
 }
 
 bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR])

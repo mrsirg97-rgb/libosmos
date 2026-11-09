@@ -66,6 +66,7 @@ struct Q4xForward
   void *st;
   hipStream_t s2;
   hipEvent_t e_in, e_out;
+  hipEvent_t pin_free; /* the pinned buffers' last copy to the GPU done (q4x_pin_wait, q4x_pin_sent) */
   uint32_t side_spin; /* q4x_forward_side_spin: a test's delay before the shared expert, on s2 (0: none) */
   /* a step past MM_MAX_TOKENS (hip_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
      sub-batch's rows; and its runs' sequences at a sub-batch's start (their rings' cur and positions moved on) */
@@ -118,6 +119,11 @@ bool q4x_fail(char *err, const char *why);
    matrix alone, so a token's bits are its own whatever its batch (hip_layers.c). `ready`: b.x16 is this x's already
    (the call before made it); q4x_mat2: two matrices on one x, one launch when mm takes both (mm_run2: each the bits it
    takes alone) */
+/* the pinned host buffers (b.pin_tok, b.pin_rows) are read by copies queued, not done: before the host writes them
+   again, the last copy waited for (a seed's queued behind a busy GPU, the next draft's tokens written over its own -
+   0.5.10's drafts a run apart); after a copy from them, its end marked */
+bool q4x_pin_wait(Q4xForward *f);
+bool q4x_pin_sent(Q4xForward *f);
 bool q4x_mat(Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t xs,
              uint32_t n, float *y, uint32_t ys, bool ready);
 bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, uint32_t ys0, const GgufTensor *t1,

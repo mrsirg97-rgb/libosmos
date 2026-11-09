@@ -172,6 +172,8 @@ void q4x_forward_destroy(Q4xForward *f)
     (void)hipEventDestroy(f->e_in);
   if (f->e_out)
     (void)hipEventDestroy(f->e_out);
+  if (f->pin_free)
+    (void)hipEventDestroy(f->pin_free);
   free(f->sub_seq);
   free(f);
 }
@@ -187,7 +189,8 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens;
   if (hipStreamCreateWithFlags(&f->s2, hipStreamNonBlocking) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_in, hipEventDisableTiming) != hipSuccess ||
-      hipEventCreateWithFlags(&f->e_out, hipEventDisableTiming) != hipSuccess)
+      hipEventCreateWithFlags(&f->e_out, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreateWithFlags(&f->pin_free, hipEventDisableTiming) != hipSuccess)
     return q4x_fail(err, "a stream or event refused"), free(f), NULL;
   if (!(f->sub_seq = calloc(Q4X_MAX_RUNS, sizeof *f->sub_seq)))
     return q4x_fail(err, "out of memory"), free(f), NULL;

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.11]: (in progress)
+
+- **The MTP head's drafts are the same every run.** Their confidences varied run to run in their low bits (the
+  output never did, nor the main model's logits: every verify's row 0 the same bits at every position). Two causes:
+  - **A race on the pinned token buffer.** The head's seed copies its tokens to the GPU from the buffer the next
+    step writes too, and returned without waiting. With the GPU busy, the next draft's token was written over the
+    seed's before its copy ran. Now each copy marks its end (`pin_free`), and a writer waits for it first. The wait
+    returns at once unless the copy truly hasn't run, so speed is unchanged (low-power, 3 rounds: plain 26.28
+    against 26.39 tok/s, drafted 44.43 against 44.29).
+  - **Unwritten memory read at position 0.** A conversation's first seeded row took the head's pending h when
+    `pend_pos == p - 1`. A new sequence has no pending h (`pend_pos -1`), which at position 0 is `p - 1` too, so
+    it read memory never written, in place of zeros.
+  - `test_mtp_seed_gpu`: a GPU held before the seed, and a sequence made where another was let go, each the
+    reference's drafts bit for bit. Each fix taken out fails its case. Four traced runs of the bench now draft
+    the same, round for round.
+  - `Q4X_BENCH_TRACE` also prints each verify's row-0 logits hash and the whole verify's.
+
 ## [0.5.10]: a turn doesn't end before its answer
 
 A session on 2026-11-08 hit an empty turn: Qwen3.8 closed its thinking and ended the turn at once, 18 tokens of
