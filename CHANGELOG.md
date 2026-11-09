@@ -2,6 +2,14 @@
 
 ## [0.5.12]: (in progress)
 
+- **Qwen's n-gram table can stay on the SSD** (osmos-serve `--stream-ngram`, `"stream_ngram": true` in osmos.json),
+  as DeepSeek's Engram does. The table (`per_layer_token_embd`, 26.8 GiB of UD-IQ3_XXS) is read a step's rows at a time
+  (16 rows of 90 bytes a token) by 64 readers while the GPU runs the layer before the one that needs them, then
+  gathered as the held table's: the same bits (`test_q4x_ngram_gpu`: a 3,000-token prompt and 8 decode steps). The
+  GPU memory it took is left to the system: 86.3 -> 59.4 GiB for UD-IQ3_XXS. Measured at low-power (two rounds):
+  prompts the same (2K 731-768 tok/s against 748 held, 16K 695-699 against 677), decode 0.5-2.5% slower (26.2-26.3
+  against 26.5; after a 2K prompt 25.8-25.9 against 26.4; MTP-drafted 44.5-45.2 against 45.2), the page cache warm or
+  cold alike. Off by default for UD-IQ3_XXS; the larger Qwen quant's pack will need it.
 - **`--fill`: the RAM osmos keeps free is the user's to set.** 8 GiB by default, as before (room for an editor, a
   browser, language servers and the agent harness beside the model); osmos-serve `--fill GiB`, or `"fill_gib"` in a
   pack's `osmos.json`, sets another, 0 or more. Past what the machine can keep free, the smallest build runs (the

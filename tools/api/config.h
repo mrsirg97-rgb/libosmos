@@ -15,6 +15,7 @@ typedef struct Config
   bool fill_set;  /* fill_gib given: osmos-serve's --fill (the RAM kept free); else its own 8 GiB */
   double fill_gib;
   bool no_guess;
+  bool stream_ngram; /* osmos-serve's --stream-ngram */
   unsigned max_context, parallel;
   unsigned max_tokens; /* a prompt step's tokens (osmos-serve's --max-tokens); 0: osmos-serve's own */
   char num[6][32]; /* config_argv's numbers as text */

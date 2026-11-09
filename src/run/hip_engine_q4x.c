@@ -92,7 +92,8 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->drafter && (!(e->mg = gguf_create(o->drafter, err)) || !(e->mtp = q4x_mtp_create(e->mg, m->w, err))))
     return e_destroy(e), NULL;
-  if (!(e->f = q4x_forward_create(m->w, e->mtp, o->max_ctx, o->max_tokens ? o->max_tokens : o->max_ctx, err)))
+  const Q4xOptions qo = {o->max_ctx, o->max_tokens ? o->max_tokens : o->max_ctx, o->stream_ngram};
+  if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)))
     return e_destroy(e), NULL;
   return e;
 }

@@ -2631,6 +2631,24 @@ are hit a moment later. reverted: the cache already does the right thing with th
 32.5 / 31.5 / 31.7 / 32.0 s, 2.93-2.97 J/token; DRAFT_MAX 4 / 3 -> 32.3 / 34.0 s. flat to 0.2 (fewer drafts read less
 and keep fewer), worse capped. no change.
 
+**Qwen's n-gram table on the SSD (`--stream-ngram`, the user's ask, 2026-11-09).** per_layer_token_embd is 28.8 GB of
+IQ4_NL in UD-IQ3_XXS and in UD-Q4_K_XL alike - a third of the smaller pack's GPU memory, and what keeps the larger's
+(77.0 GB of experts, 5.5 of the rest) from fitting with it. a token reads 16 of its rows (ple_heads: (ngram 3 - 1) x 8
+heads), 90 bytes each, at one layer (ple_layer 1): DeepSeek's Engram's shape, so its readers (rowread: 64 workers'
+buffered preads) do it. stream_ngram (Q4xOptions; OsmosOptions, osmos-serve, osmos.json) leaves the table out of the
+upload; at a step's embed, once its row ids are hashed (b.pin_rows), the readers begin its rows into a pinned stage
+(ple_issue - waiting first for the last step's copy out of it, ple_copied: the MTP seed's race, avoided); at the n-gram
+layer they are waited for, copied in whole at sub-batch 0 into ple_sbuf (per-token: each sub-batch's view of it moves
+with the rest) and gathered by q4x_rows over a fixed 0.. index - the held table's kernel, the same bytes. tests:
+test_q4x_ngram_gpu (the same 3,000-token prompt - past MM_MAX_TOKENS - and 8 decode steps held and streamed: every
+step's logits the same bits; 86.33 GiB of GPU memory against 59.37, the table 26.82; mutants - no copy into the GPU,
+the table uploaded anyway - each fail it), tests/api (stream_ngram passed on as --stream-ngram; a string refused).
+measured (UD-IQ3_XXS, low-power, two rounds; "cold": the GGUF's pages evicted first, posix_fadvise DONTNEED): prompts
+the same within their noise (2K 748 held, 768 / 731 warm / cold; 16K 677, 699 / 695); decode 26.45 held against 26.19 /
+26.31, after a 2K prompt 26.42 against 25.77 / 25.87, at 16K 24.87 against 24.46 / 24.57, MTP-drafted 45.23 against
+44.45 (one run 43.8) / 45.23 - 0.5-2.5%: decode's token is known only at the step before's end, so its 16 reads start at
+its own embed with one layer to hide behind. off by default for UD-IQ3_XXS; the UD-Q4_K_XL pack's default.
+
 **`--fill` (the user's name, 2026-11-09).** FIT_RAM_FREE stays the default - 8 GiB, a box's editor, browser, language
 servers and agent harness beside the model - and becomes the user's to set: fit_room takes the RAM to keep free,
 ForwardOptions / OsmosOptions carry fill (fill_set: a zeroed options struct still the default), osmos-serve --fill

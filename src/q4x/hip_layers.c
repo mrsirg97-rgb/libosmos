@@ -353,15 +353,53 @@ bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n)
 }
 
 /* the step's tokens' rows already in b.ple_rows */
+/* stream_ngram: the step's n tokens' rows (b.pin_rows', ple_heads a token) begun on the readers into the stage - once
+   the last step's copy of it is done (ple_copied); a step that failed before its n-gram layer: its rows waited for first */
+bool q4x_ple_issue(Q4xForward *f, uint32_t n)
+{
+  const GgufTensor *tab = f->w->ple_table;
+  const uint64_t rb = tab->bytes / tab->dims[1];
+  const uint32_t rows = n * (uint32_t)f->w->geo.ple_heads;
+  if (f->ple_pending)
+    (void)rowread_wait(f->ple_read), f->ple_pending = false;
+  if (hipEventSynchronize(f->ple_copied) != hipSuccess)
+    return false;
+  for (uint32_t i = 0; i < rows; i++)
+    f->ple_off[i] = tab->offset + (uint64_t)f->b.pin_rows[i] * rb;
+  if (!rowread_start(f->ple_read, f->ple_fd, f->ple_off, rows, (uint32_t)rb, f->ple_stage))
+    return false;
+  f->ple_pending = true, f->ple_n = rows;
+  return true;
+}
+
+/* the n-gram table's rows of the n tokens: the held table's own, or (stream_ngram) the stage's - read for the step,
+   copied in whole at its first part (sub-batch 0: b's views at their start), each part's in its view of ple_sbuf */
+static bool ple_table_rows(Q4xForward *f, uint32_t n)
+{
+  const GgufTensor *tab = f->w->ple_table;
+  Q4xBuf *b = &f->b;
+  const uint64_t rb = tab->bytes / tab->dims[1];
+  const uint32_t heads = (uint32_t)f->w->geo.ple_heads;
+  if (!f->stream_ngram)
+    return q4x_rows(TY(tab), q4x_dev(f, tab), rb, (uint32_t)tab->dims[0], b->ple_rows, n * heads, b->emb, NULL);
+  if (f->ple_pending)
+  {
+    f->ple_pending = false;
+    if (!rowread_wait(f->ple_read) ||
+        hipMemcpyAsync(b->ple_sbuf, f->ple_stage, (uint64_t)f->ple_n * rb, hipMemcpyHostToDevice, NULL) != hipSuccess ||
+        hipEventRecord(f->ple_copied, NULL) != hipSuccess)
+      return false;
+  }
+  return q4x_rows(TY(tab), b->ple_sbuf, rb, (uint32_t)tab->dims[0], b->ple_iota, n * heads, b->emb, NULL);
+}
+
 bool q4x_ple(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
   const Q4xLayer *L = &f->w->layer[l];
-  const GgufTensor *tab = f->w->ple_table;
   Q4xBuf *b = &f->b;
-  const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, hd = hc * D, heads = (uint32_t)g->ple_heads;
-  bool ok = q4x_rows(TY(tab), q4x_dev(f, tab), tab->bytes / tab->dims[1], (uint32_t)tab->dims[0], b->ple_rows, n * heads,
-                  b->emb, NULL) &&
+  const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, hd = hc * D;
+  bool ok = ple_table_rows(f, n) &&
          q4x_mat2(f, L->ple_key, hd, b->key, hd, L->ple_value, D, b->val, D, D, b->emb, D, n, false) &&
          q4x_hc_norm(b->key, fv(f, L->ple_norm_key), n, hc, D, g->rms_eps, b->kn, NULL, NULL) &&
          q4x_hc_norm(b->h, fv(f, L->ple_norm_query), n, hc, D, g->rms_eps, b->qn, NULL, NULL) &&

@@ -25,8 +25,16 @@ typedef struct Q4xSeq Q4xSeq;
 
 typedef void (*q4x_probe_fn)(const char *step, int layer, float *dev, uint64_t n, void *arg);
 
+typedef struct Q4xOptions
+{
+  uint32_t max_ctx;    /* a sequence's most positions */
+  uint32_t max_tokens; /* a step's most tokens */
+  bool stream_ngram;   /* the n-gram table read from its file a step's rows at a time, not held in GPU memory */
+} Q4xOptions;
+
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[Q4X_FWD_ERR]);
+Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, const Q4xOptions *o, char err[Q4X_FWD_ERR]);
 void q4x_forward_destroy(Q4xForward *f);
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
 void q4x_forward_side_spin(Q4xForward *f, uint32_t us);
@@ -64,9 +72,13 @@ Q4xForward
   below OPS_Q4X_MAX_KEYS (llama.cpp's QSA keeps every token below its 2,048-token budget, a selection past it: dense
   past it measured its equal - 2.7136 over 8,192 tokens, QSA's 2.7193 - the selection not built).
 
-q4x_forward_create
+q4x_forward_create, q4x_forward_create_with
   the weights uploaded and the step's buffers for max_tokens tokens; NULL with why where the GPU's memory or a read
-  refuses. max_ctx: a sequence's most positions (at most OPS_Q4X_MAX_KEYS).
+  refuses. max_ctx: a sequence's most positions (at most OPS_Q4X_MAX_KEYS). create is create_with's held table
+  (stream_ngram false). stream_ngram: the n-gram layer's table (per_layer_token_embd, 28.8 GB of UD-IQ3_XXS) stays in
+  its file - a step's rows (its tokens' ple_heads each, ~1.4 KB a token) read at its start by rowread's workers into a
+  pinned stage while the GPU runs the layers before the n-gram layer, copied in and gathered as the held table's: the
+  same bits; its bytes of GPU memory left to the system.
 
 q4x_forward_side_spin
   a test's: each small step's shared expert (the second stream's: q4x_moe_shared) after ~us of that stream's time -

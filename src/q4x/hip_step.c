@@ -36,6 +36,8 @@ static bool embed(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t *
       q4x_ple_rows(g, tok[t], prev, np, &b->pin_rows[(uint64_t)(r[i].t0 + t) * g->ple_heads]);
     }
   memcpy(b->pin_tok, tokens, n * sizeof *tokens);
+  if (f->stream_ngram && !q4x_ple_issue(f, n)) /* the rows read while the GPU embeds and runs the layers before */
+    return false;
   return hipMemcpyAsync(b->tok, b->pin_tok, n * 4, hipMemcpyHostToDevice, NULL) == hipSuccess &&
          hipMemcpyAsync(b->ple_rows, b->pin_rows, (uint64_t)n * g->ple_heads * 4, hipMemcpyHostToDevice, NULL) ==
              hipSuccess &&

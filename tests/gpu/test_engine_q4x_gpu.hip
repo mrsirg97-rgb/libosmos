@@ -68,7 +68,7 @@ int main() {
                               {kCtx, kStep, 0, nullptr, true, nullptr},
                               {OPS_Q4X_MAX_KEYS + 1, kStep, 0, nullptr, false, nullptr}};
   for (const OsmosOptions& o : bad) CHECK(!osmos_create(m, &o, err) && err[0]);
-  const OsmosOptions o = {kCtx, kStep, 0, nullptr, false, nullptr, false, 0};
+  const OsmosOptions o = {kCtx, kStep, 0, nullptr, false, nullptr, false, 0, false};
   Osmos* e = osmos_create(m, &o, err);
   if (!e) std::fprintf(stderr, "  %s\n", err);
   CHECK(e);

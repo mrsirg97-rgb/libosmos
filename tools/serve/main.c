@@ -3,7 +3,7 @@
 
      osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
                      [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
-                     [--overlay <gguf>] [--answer-after <text>] [--serve]
+                     [--stream-ngram] [--overlay <gguf>] [--answer-after <text>] [--serve]
 
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
    out: READY <max_ctx> stop[ multi=N] / T [<rid>] <token> / PP [<rid>] <done> <total> <ms> <tok/s> <reused> /
@@ -14,6 +14,8 @@
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
    --no-guess: no experts guessed a layer ahead (OsmosOptions' no_guess - a model whose misses are few).
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
+   --stream-ngram: Qwen's n-gram table (per_layer_token_embd) read from its file each step, not held in GPU memory
+   (Q4xOptions' stream_ngram: the same bits, its 26.8 GiB of UD-IQ3_XXS left free); DeepSeek's Engram always is.
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
    --fill: GiB of the system's RAM kept free - 8 by default (FIT_RAM_FREE: room for an editor, a browser, language
    servers and the agent harness beside the model), 0 or more: auto's sizing fills past it, and saved conversations'
@@ -128,7 +130,7 @@ int main(int argc, char **argv)
   if (!model)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
                "[--max-context N] [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] "
-               "[--no-guess] "
+               "[--no-guess] [--stream-ngram] "
                "[--overlay <gguf>] [--serve]");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
@@ -162,7 +164,7 @@ int main(int argc, char **argv)
   sv.window = fx.seed_window;
   const OsmosOptions o = {sv.max_ctx, sv.max_tokens, (uint64_t)(budget * (double)(1ull << 30)),
                           opt(argc, argv, "--picks", NULL), has(argc, argv, "--no-guess"),
-                          opt(argc, argv, "--dspark", NULL), true, sv.ram_kept};
+                          opt(argc, argv, "--dspark", NULL), true, sv.ram_kept, has(argc, argv, "--stream-ngram")};
   Conv *conv = calloc((size_t)lanes, sizeof *conv);
   if (!conv)
     return die("out of memory");

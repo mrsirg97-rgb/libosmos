@@ -7,6 +7,7 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/mem/rowread.h"
 #include "osmos/q4x/forward.h"
 
 /* a step's buffers, for max_tokens tokens */
@@ -26,6 +27,8 @@ typedef struct Q4xBuf
   int32_t *overflow;                               /* an activation past f16's: the step refused */
   float *emb, *key, *val, *kn, *qn, *pg, *gated, *nrm, *conv;         /* the n-gram layer's */
   int32_t *ple_rows, *tok;                                            /* device: its rows, the step's tokens */
+  uint8_t *ple_sbuf; /* device: a streamed n-gram table's step rows, a token's ple_heads (stream_ngram) */
+  int32_t *ple_iota; /* their places 0 .. : q4x_rows' row indices over ple_sbuf */
   void *top_part;                                                     /* q4x_greedy's slices' bests (q4x_argmax) */
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
@@ -48,6 +51,7 @@ typedef struct Q4xMtpBuf
 
 #define Q4X_SIDE_STEP MM_TILE /* a step this small or smaller: the second stream (decode, a draft's verify) */
 #define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_forward.c's table) */
+#define Q4X_ROW_THREADS 64 /* stream_ngram's readers: DeepSeek's Engram measure (832,000 random rows/s; 128 no more) */
 
 struct Q4xForward
 {
@@ -72,6 +76,15 @@ struct Q4xForward
   hipEvent_t e_ix;         /* a small step's QSA indexer on s2 (its keys and picks): done */
   bool inj_side;           /* an inject on s2 not yet waited for (q4x_inj_wait) */
   hipEvent_t pin_free; /* the pinned buffers' last copy to the GPU done (q4x_pin_wait, q4x_pin_sent) */
+  /* stream_ngram: the n-gram table's file and readers, a step's rows read into ple_stage (pinned) at its embed, copied
+     to b.ple_sbuf at the n-gram layer; ple_copied that copy's end (the next step's reads wait for it) */
+  bool stream_ngram, ple_pending;
+  int ple_fd;
+  Rowread *ple_read;
+  uint8_t *ple_stage;
+  uint64_t *ple_off;
+  uint32_t ple_n;
+  hipEvent_t ple_copied;
   uint32_t side_spin; /* q4x_forward_side_spin: a test's delay before the shared expert, on s2 (0: none) */
   /* a step past MM_MAX_TOKENS (hip_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
      sub-batch's rows; and its runs' sequences at a sub-batch's start (their rings' cur and positions moved on) */
@@ -169,3 +182,4 @@ bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint3
 bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n); /* b.sh, b.sl: before q4x_moe, which reads them */
 bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n);
 bool q4x_ple(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n);
+bool q4x_ple_issue(Q4xForward *f, uint32_t n); /* stream_ngram: the step's n tokens' rows begun (b.pin_rows') */

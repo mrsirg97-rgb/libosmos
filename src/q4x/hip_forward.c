@@ -40,8 +40,8 @@ void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint
 static bool alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
 
 /* every tensor of g read into GPU memory through a pinned piece: *dev its table - but those `shadow` has a tensor of
-   the name of (an overlay's stand-ins: their bytes never read) */
-static bool upload(const Gguf *g, const Gguf *shadow, void ***dev, char *err)
+   the name of (an overlay's stand-ins: their bytes never read), and `skip` (a table read from its file: stream_ngram) */
+static bool upload(const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
 {
   void *pin = NULL;
   if (!(*dev = calloc(g->n_tensors, sizeof **dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
@@ -50,7 +50,7 @@ static bool upload(const Gguf *g, const Gguf *shadow, void ***dev, char *err)
   for (size_t i = 0; ok && i < g->n_tensors; i++)
   {
     const GgufTensor *t = &g->tensors[i];
-    if (shadow && gguf_tensor(shadow, t->name))
+    if ((shadow && gguf_tensor(shadow, t->name)) || t == skip)
       continue;
     const int fd = open(g->paths[t->file], O_RDONLY);
     ok = fd >= 0 && alloc(&(*dev)[i], t->bytes);
@@ -90,6 +90,22 @@ static bool mtp_buffers(Q4xForward *f, char *err)
                   alloc(&m->top_p, rows * 4) && hipHostMalloc((void **)&m->pin_id, rows * 4, 0) == hipSuccess &&
                   hipHostMalloc((void **)&m->pin_p, rows * 4, 0) == hipSuccess;
   return ok || q4x_fail(err, "GPU memory refused (the MTP head's buffers)");
+}
+
+/* a row of the n-gram table: its bytes in the file (the held table's row stride) */
+static uint64_t ple_row_bytes(const Q4xForward *f) { return f->w->ple_table->bytes / f->w->ple_table->dims[1]; }
+
+/* stream_ngram's: the table's file, its readers, the pinned stage of a step's rows and their offsets */
+static bool ple_stream(Q4xForward *f, char *err)
+{
+  const GgufTensor *t = f->w->ple_table;
+  const uint64_t rows = (uint64_t)f->max_tokens * f->w->geo.ple_heads;
+  f->ple_fd = open(f->w->model->paths[t->file], O_RDONLY);
+  if (f->ple_fd < 0 || !(f->ple_read = rowread_create(Q4X_ROW_THREADS)) || !(f->ple_off = malloc(rows * 8)) ||
+      hipHostMalloc((void **)&f->ple_stage, rows * ple_row_bytes(f), 0) != hipSuccess ||
+      hipEventCreateWithFlags(&f->ple_copied, hipEventDisableTiming) != hipSuccess)
+    return q4x_fail(err, "the n-gram table's file, its readers or their stage refused (stream_ngram)");
+  return true;
 }
 
 static bool buffers(Q4xForward *f, char *err)
@@ -132,6 +148,7 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *), 0},  {&b->emb, n * D * F, 1},    {&b->key, n * hd * F, 1},        {&b->val, n * D * F, 1},
       {&b->kn, n * hd * F, 1},         {&b->qn, n * hd * F, 1},         {&b->pg, n * g->hc * F, 1},      {&b->gated, n * hd * F, 1},
       {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},       {&b->ple_rows, n * g->ple_heads * 4, 1},
+      {&b->ple_sbuf, n * g->ple_heads * ple_row_bytes(f), 1},          {&b->ple_iota, n * g->ple_heads * 4, 0},
       {&b->tok, n * 4, 1},             {&b->top_part, q4x_argmax_scratch((uint32_t)n), 0},
       {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
   };
@@ -145,6 +162,13 @@ static bool buffers(Q4xForward *f, char *err)
       f->rows[f->n_rows].p = want[i].p, f->rows[f->n_rows++].row = want[i].bytes / n;
   if (hipMemset(b->overflow, 0, 4) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the f16 overflow flag)");
+  int32_t *iota = malloc(n * g->ple_heads * 4);
+  for (uint64_t i = 0; iota && i < n * g->ple_heads; i++)
+    iota[i] = (int32_t)i;
+  const bool put = iota && hipMemcpy(b->ple_iota, iota, n * g->ple_heads * 4, hipMemcpyHostToDevice) == hipSuccess;
+  free(iota);
+  if (!put)
+    return q4x_fail(err, "a GPU call failed (the n-gram rows' places)");
   return (hipHostMalloc((void **)&b->pin_rows, n * g->ple_heads * 4, 0) == hipSuccess &&
           hipHostMalloc((void **)&b->pin_tok, n * 4, 0) == hipSuccess &&
           hipHostMalloc((void **)&b->pin_overflow, 4, 0) == hipSuccess && !(*b->pin_overflow = 0)) ||
@@ -183,6 +207,13 @@ void q4x_forward_destroy(Q4xForward *f)
     (void)hipEventDestroy(f->e_gates);
   if (f->e_ix)
     (void)hipEventDestroy(f->e_ix);
+  if (f->ple_read)
+    rowread_destroy(f->ple_read); /* (a pending step's rows waited for first) */
+  if (f->ple_fd >= 0)
+    close(f->ple_fd);
+  hipHostFree(f->ple_stage), free(f->ple_off);
+  if (f->ple_copied)
+    (void)hipEventDestroy(f->ple_copied);
   free(f->sub_seq);
   free(f);
 }
@@ -190,12 +221,20 @@ void q4x_forward_destroy(Q4xForward *f)
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[Q4X_FWD_ERR])
 {
+  const Q4xOptions o = {max_ctx, max_tokens, false};
+  return q4x_forward_create_with(w, mtp, &o, err);
+}
+
+Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, const Q4xOptions *o, char err[Q4X_FWD_ERR])
+{
+  const uint32_t max_ctx = o ? o->max_ctx : 0, max_tokens = o ? o->max_tokens : 0;
   if (!w || !max_ctx || max_ctx > OPS_Q4X_MAX_KEYS || !max_tokens || max_tokens > max_ctx)
     return q4x_fail(err, "no weights, or a context past the dense attention's reach, or no tokens a step"), NULL;
   Q4xForward *f = calloc(1, sizeof *f);
   if (!f)
     return q4x_fail(err, "out of memory"), NULL;
-  f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens;
+  f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens, f->stream_ngram = o->stream_ngram;
+  f->ple_fd = -1;
   if (hipStreamCreateWithFlags(&f->s2, hipStreamNonBlocking) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_in, hipEventDisableTiming) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_out, hipEventDisableTiming) != hipSuccess ||
@@ -210,8 +249,11 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
   if (!q4x_rope((uint32_t)w->geo.rope_dim, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))
     return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), free(f->sub_seq),
            free(f), NULL;
-  if (!upload(w->model, w->overlay, &f->dev, err) || (w->overlay && !upload(w->overlay, NULL, &f->ov_dev, err)) ||
-      !buffers(f, err) || (mtp && (!upload(mtp->model, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))))
+  const GgufTensor *skip = f->stream_ngram ? w->ple_table : NULL;
+  if (!upload(w->model, w->overlay, skip, &f->dev, err) ||
+      (w->overlay && !upload(w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
+      (f->stream_ngram && !ple_stream(f, err)) ||
+      (mtp && (!upload(mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;
   return f;
 }

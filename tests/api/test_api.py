@@ -374,6 +374,27 @@ class Fill(Served, unittest.TestCase):
             self.assertIn("--fill", r.stderr, bad)
 
 
+@unittest.skipUnless(os.path.exists(QWEN), "no Qwen3.8 first shard")
+class StreamNgram(Served, unittest.TestCase):
+    """osmos.json's stream_ngram: osmos-serve's --stream-ngram (Qwen's n-gram table read from its file); a bool alone"""
+    model = QWEN
+    settings = {"stream_ngram": True}
+
+    def test_0_passed_on(self):
+        self.ready()
+        self.assertIn("--stream-ngram", self.log()[0].split())
+
+    def test_1_refused(self):
+        d = tempfile.mkdtemp()
+        cfg = os.path.join(d, "osmos.json")
+        with open(cfg, "w") as f:
+            json.dump({"pack": "test", "model": QWEN, "max_context": 4096, "stream_ngram": "yes"}, f)
+        r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                           capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("stream_ngram", r.stderr)
+
+
 class FillZero(Fill):
     settings = {"fill_gib": 0}
 
