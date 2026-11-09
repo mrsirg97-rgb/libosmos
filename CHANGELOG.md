@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.12]: (in progress)
+
+- **`--fill`: the RAM osmos keeps free is the user's to set.** 8 GiB by default, as before (room for an editor, a
+  browser, language servers and the agent harness beside the model); osmos-serve `--fill GiB`, or `"fill_gib"` in a
+  pack's `osmos.json`, sets another, 0 or more. Past what the machine can keep free, the smallest build runs (the
+  dense weights, every expert streamed) and a NOTE says so. The saved conversations' RAM stops at the same line.
+  Measured on UD-IQ1_M: `--fill 4` sized the cache 4.2-4.6 GiB larger. The output's bits are the same at any value.
+- **Measured, and left as they were** (DESIGN.md "0.5.12"): a decode token's memory traffic by kernel (the dense
+  weights read exactly once a token, once a round drafted); the expert cache registered coarse-grained (7.5% fewer
+  requests into the memory fabric, ~1% faster at best, reverted: not worth a coherence hazard); a verify's rejected
+  drafts' experts demoted in the cache (4.5% slower: they are the next round's experts); the drafting floors on
+  UD-IQ2_XXS (0.1 and 5 a round still the best).
+
 ## [0.5.11]: nothing out of the format reaches a client; measured at low-power
 
 The first outside report (#25): an agent's tool call that DeepSeek's own parser takes was refused, and osmos-api

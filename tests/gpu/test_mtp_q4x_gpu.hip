@@ -94,9 +94,9 @@ int main() {
   const OsmosFiles files = {first.c_str(), nullptr, nullptr};
   OsmosModel* m = osmos_open(&files, err);
   CHECK(m);
-  const OsmosOptions bad = {kCtx, kStep, 0, nullptr, false, first.c_str()};  // the model as its own head
+  const OsmosOptions bad = {kCtx, kStep, 0, nullptr, false, first.c_str(), false, 0};  // the model as its own head
   CHECK(!osmos_create(m, &bad, err) && std::strstr(err, "nextn"));
-  const OsmosOptions o = {kCtx, kStep, 0, nullptr, false, mtp.c_str()};
+  const OsmosOptions o = {kCtx, kStep, 0, nullptr, false, mtp.c_str(), false, 0};
   Osmos* e = osmos_create(m, &o, err);
   if (!e) std::fprintf(stderr, "  %s\n", err);
   CHECK(e);

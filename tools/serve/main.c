@@ -2,7 +2,7 @@
    harnesses drive this engine as they drive maya's (DESIGN.md, "serving").
 
      osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
-                     [--budget GiB|auto] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
+                     [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
                      [--overlay <gguf>] [--answer-after <text>] [--serve]
 
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
@@ -15,12 +15,16 @@
    --no-guess: no experts guessed a layer ahead (OsmosOptions' no_guess - a model whose misses are few).
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
+   --fill: GiB of the system's RAM kept free - 8 by default (FIT_RAM_FREE: room for an editor, a browser, language
+   servers and the agent harness beside the model), 0 or more: auto's sizing fills past it, and saved conversations'
+   RAM stops at it. more than can be kept free: the smallest build (the dense weights alone, every expert streamed),
+   with a NOTE. the output's bits the same at every value: only what stays in memory moves.
    --answer-after: the reasoning's end token's text (</think>), or #<id>: no --eos token is taken while the turn's
    answer past it is whitespace alone - the row's best other token is (osmos/text/answer.h; osmos-api passes its
    dialect's text; tools/serve/answer_test.py an id).
    conversations are kept (maya #356; OSMOS_SLOT_KEEP=0: not): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
    (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least, RAM's room the
-   available above 8 GiB (OSMOS_SLOT_RAM_GB lowers it; past it a state streams to the folder in pieces),
+   available above --fill's (OSMOS_SLOT_RAM_GB lowers it; past it a state streams to the folder in pieces),
    OSMOS_SLOT_DAYS (7). OSMOS_STATS=1: the forward's read counters on stderr at exit (the reads it waited on, their
    time; the guess's). greedy: maya's sampling, penalty and thinking keys are refused, named */
 #define _GNU_SOURCE
@@ -57,6 +61,18 @@ static double env_num(const char *name, double dflt)
   return v && *v ? atof(v) : dflt;
 }
 
+/* --fill's GiB as bytes: a number and nothing after it, 0 or more and finite (more than any machine's: the most) */
+static bool fill_of(const char *s, uint64_t *bytes)
+{
+  char *end = NULL;
+  const double gib = strtod(s, &end);
+  if (!*s || end == s || *end || !(gib >= 0) || gib > 1e15)
+    return false;
+  const double b = gib * (double)(1ull << 30);
+  *bytes = b >= 18e18 ? UINT64_MAX : (uint64_t)b;
+  return true;
+}
+
 static int die(const char *what)
 {
   fprintf(stderr, "osmos-serve: %s\n", what);
@@ -69,8 +85,8 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
   const char *slash = strrchr(model, '/');
   snprintf(dflt, sizeof dflt, "%.*s/slots", slash ? (int)(slash - model) : 1, slash ? model : ".");
   const char *dir = getenv("OSMOS_SLOT_DIR") ? getenv("OSMOS_SLOT_DIR") : dflt;
-  const uint64_t avail = fit_ram_available(), room = avail > FIT_RAM_FREE ? avail - FIT_RAM_FREE : 0;
-  const double cap_gb = env_num("OSMOS_SLOT_RAM_GB", -1); /* lower only: the room above the 8 GiB is the most */
+  const uint64_t avail = fit_ram_available(), room = avail > sv->ram_kept ? avail - sv->ram_kept : 0;
+  const double cap_gb = env_num("OSMOS_SLOT_RAM_GB", -1); /* lower only: the room above --fill's is the most */
   const uint64_t ram = cap_gb >= 0 && (uint64_t)(cap_gb * (double)(1ull << 30)) < room ? (uint64_t)(cap_gb * (double)(1ull << 30)) : room;
   const SlotsOptions so = {dir, (uint32_t)env_num("OSMOS_SLOT_CAP", 4), ram, env_num("OSMOS_SLOT_GB", 16),
                            (uint32_t)env_num("OSMOS_SLOT_MIN", 1024), env_num("OSMOS_SLOT_DAYS", 7),
@@ -80,7 +96,7 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
     return snprintf(err, en, "%s", serr), false;
   out("NOTE slots: %u conversations kept from an earlier run (%s); RAM for them %.2f GiB (%.2f available, %.0f kept "
       "free)\n", slots_in_dir(sv->slots), dir, ram / (double)(1ull << 30), avail / (double)(1ull << 30),
-      FIT_RAM_FREE / (double)(1ull << 30));
+      sv->ram_kept / (double)(1ull << 30));
   return true;
 }
 
@@ -111,7 +127,8 @@ int main(int argc, char **argv)
   const char *model = opt(argc, argv, "--model", NULL);
   if (!model)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
-               "[--max-context N] [--budget GiB|auto] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess] "
+               "[--max-context N] [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] "
+               "[--no-guess] "
                "[--overlay <gguf>] [--serve]");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
@@ -120,6 +137,11 @@ int main(int argc, char **argv)
   const double budget = strcmp(budget_arg, "auto") ? atof(budget_arg) : 0; /* 0: sized to this GPU (build.c) */
   if (strcmp(budget_arg, "auto") && budget <= 0)
     return die("--budget takes GiB or auto");
+  const char *fill_arg = opt(argc, argv, "--fill", NULL);
+  if (fill_arg && !fill_of(fill_arg, &sv.ram_kept))
+    return die("--fill takes GiB of RAM to keep free, 0 or more");
+  if (!fill_arg)
+    sv.ram_kept = FIT_RAM_FREE;
   const char *par = opt(argc, argv, "--parallel", NULL);
   const int lanes = par ? atoi(par) : 1;
   if (lanes < 1)
@@ -140,7 +162,7 @@ int main(int argc, char **argv)
   sv.window = fx.seed_window;
   const OsmosOptions o = {sv.max_ctx, sv.max_tokens, (uint64_t)(budget * (double)(1ull << 30)),
                           opt(argc, argv, "--picks", NULL), has(argc, argv, "--no-guess"),
-                          opt(argc, argv, "--dspark", NULL)};
+                          opt(argc, argv, "--dspark", NULL), true, sv.ram_kept};
   Conv *conv = calloc((size_t)lanes, sizeof *conv);
   if (!conv)
     return die("out of memory");

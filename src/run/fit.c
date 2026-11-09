@@ -2,9 +2,9 @@
 
 #include <stdio.h>
 
-uint64_t fit_room(uint64_t gpu_free, uint64_t ram_available)
+uint64_t fit_room(uint64_t gpu_free, uint64_t ram_available, uint64_t ram_kept)
 {
-  const uint64_t ram = ram_available + FIT_HEADROOM > FIT_RAM_FREE ? ram_available + FIT_HEADROOM - FIT_RAM_FREE : 0;
+  const uint64_t ram = ram_available + FIT_HEADROOM > ram_kept ? ram_available + FIT_HEADROOM - ram_kept : 0;
   return ram < gpu_free ? ram : gpu_free;
 }
 

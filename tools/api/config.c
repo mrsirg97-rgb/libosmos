@@ -52,6 +52,13 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
     return num(v, &c->budget_gib, k, err);
   if (!strcmp(k, "drafted_budget_gib"))
     return num(v, &c->drafted_budget_gib, k, err);
+  if (!strcmp(k, "fill_gib")) /* 0 or more: osmos-serve's --fill */
+  {
+    if (v->type != JSON_INT && v->type != JSON_FLOAT)
+      return fail(err, "a number of GiB, 0 or more", k);
+    c->fill_gib = v->type == JSON_INT ? atof(v->s) : v->f, c->fill_set = true;
+    return c->fill_gib >= 0 || fail(err, "a number of GiB, 0 or more", k);
+  }
   if (!strcmp(k, "no_guess"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->no_guess = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
@@ -119,6 +126,11 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
   }
   if (c->no_guess)
     argv[n++] = "--no-guess";
+  if (c->fill_set)
+  {
+    snprintf(c->num[5], sizeof c->num[5], "%g", c->fill_gib);
+    argv[n++] = "--fill", argv[n++] = c->num[5];
+  }
   argv[n] = NULL;
   (void)err;
   return true;

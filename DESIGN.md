@@ -2591,6 +2591,59 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.12: a token's joules, measured first (2026-11-09, low-power)
+
+The release's aim: fewer joules a token, from less work (the drafter held fixed: our 4.7 GB IQ2_XS is within 1.5% of
+maya's 8 GB MXFP4 DSpark in accepted tokens). Measured before anything was changed; the notes and scripts:
+~/bench/h2h-0511/MEASURE-0512.md, the 0.5.11 session's scratchpad m512/.
+
+**Memory traffic by kernel.** rocprofv3's GCEA_RDRAM_SIZE_REQ / GCEA_WDRAM_SIZE_REQ, calibrated on a kernel reading
+1 GiB once (2^25 counts: 32 bytes a count; FETCH_SIZE is KiB). A UD-IQ1_M plain decode token: 10.10 GB requested,
+1,183 dispatches - the dense matmuls 6.97 GB against 6.89 GB of their weights (read exactly once a token), the experts'
+lane 2.91 GB against 2.07 GB of the routed experts' weights (from the routing trace and each layer's sizes). drafted,
+a round (~4 tokens): 19.8 GB - the dense weights once for the round's tokens (7.08 GB), the experts 9.9 GB, the
+drafter 2.34 GB: ~5 GB a token. so the dense part has no re-read to take away.
+
+**The experts' excess, and why it is not DRAM.** standalone (tools/bench/q8bench.hip, 19 experts a launch) the lane's
+kernels read their weights' bytes (+0-10%) from GPU memory, +45-70% from host memory registered as osmos registers it
+(fine-grained: the L2 keeps none of it, each wave its lines again) - the same experts, the same speed. registered
+coarse-grained (hipExtHostRegisterCoarseGrained) the excess goes, and a refilled slot then reads stale: 200 of 200
+reads after a CPU or an O_DIRECT refill with the GPU busy, 0 with a stream acquire before the reader
+(hipStreamWaitValue32: the command processor's system-scope acquire; a shader's own fence cannot drop L2 lines on
+gfx11). built with that acquire (each refill acquired past once; tested, mutation-checked): the plain token 10.10 ->
+9.34 GB, bits the same - and nothing that counts moved: UD-IQ1_M 4.34 -> 4.32 J/token, tok/s the same; UD-IQ2_XXS
++0.5% plain, +1.5% drafted, J -0.3%. GCEA counts the GPU's requests into the data fabric: the 32 MB Infinity Cache
+past it served the re-reads. reverted (a coherence hazard for ~1%); the counters measure traffic into the fabric, not
+DRAM's bytes.
+
+**The SSD's waits.** UD-IQ2_XXS drafted waits 14.0 of 31.4 s (44%), plain 11.9 of 56.6 (21%); a layer usually waits
+on one read at a time, ~8.6 MB in ~1.6 ms (~5.4 GB/s): near the device's own speed for one read. drafted waits on
+8,016 reads for the 768 answer tokens plain gets with 6,311: a verify reads every draft's experts. attributed (each
+read to the earliest batch position wanting it, and that position's fate): 26% of the reads, 3.35 s, served only
+drafts then rejected; and 1,385 of the 6,312 needed misses (2.22 s) were of experts such a read had evicted. so built:
+a verify's expert read only for rolled-back tokens stale in the pool at once (pool_demote, a RollStep of the step's
+tokens, seq_rollback demoting; tests and bits the twins'). the A/B, two rounds: drafted 4.5% slower, 3.5% more
+J/token, 9% more reads waited. the measurement counted the reads' cost and not their worth: a rejected draft's experts
+are the next round's (the verify's own token in its place, and the drafts after, route much as it did) - kept, they
+are hit a moment later. reverted: the cache already does the right thing with them.
+
+**The drafting floors on UD-IQ2_XXS** (0.3.x swept them on UD-IQ1_M): floor 0.0 / 0.05 / 0.1 / 0.2 / 0.3 -> 31.8 /
+32.5 / 31.5 / 31.7 / 32.0 s, 2.93-2.97 J/token; DRAFT_MAX 4 / 3 -> 32.3 / 34.0 s. flat to 0.2 (fewer drafts read less
+and keep fewer), worse capped. no change.
+
+**`--fill` (the user's name, 2026-11-09).** FIT_RAM_FREE stays the default - 8 GiB, a box's editor, browser, language
+servers and agent harness beside the model - and becomes the user's to set: fit_room takes the RAM to keep free,
+ForwardOptions / OsmosOptions carry fill (fill_set: a zeroed options struct still the default), osmos-serve --fill
+GiB (0 or more, finite; anything else refused by name before the model opens) sets it for the sizing and the saved
+conversations' room, osmos.json's fill_gib passes it. past what can be kept free, fit_sized's floor (the dense weights,
+every expert streamed) with a NOTE. not a fast mode: what stays in memory moves, never a bit. tests: test_fit
+(fit_room by the amount kept: the default's, 0, 4 GiB, past the RAM, UINT64_MAX), test_fit_gpu (the dense build's
+room 91.34 / 99.37 / 0.00 GiB at the default / 0 / 1000), tests/api (fill_gib 2.5 and 0 passed on as written; -1, a
+string, a bool, null refused for their value; osmos-serve's -1, x, 4GiB, empty, nan, inf refused), tools/serve/
+fill_test.py on UD-IQ1_M (the default 103.75-103.78 GiB, --fill 4 107.94-108.42, --fill 1000 the 8.0 GiB floor with its
+NOTE; the fill not passed to the engine: failed). test_fit_gpu's sizing window failed once and passed on the rerun
+(the memory's ~0.93 GiB steps against the window: a flake older than this).
+
 ### 0.5.11: the release run (2026-11-09, low-power)
 
 **The scripts and logs:** ~/bench/h2h-0511 - `suite.sh` (0.5.9's suite: a clean build, CPU, API and installer

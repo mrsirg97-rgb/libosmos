@@ -341,6 +341,50 @@ def qwen_template():
     return gen_chat_fixtures_qwen.template(QWEN, GGUF_PY)
 
 
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class Fill(Served, unittest.TestCase):
+    """osmos.json's fill_gib: the RAM osmos-serve keeps free (--fill), 0 or more, passed on as it is written; refused
+    otherwise, at start - as osmos-serve refuses a --fill it cannot read"""
+    settings = {"fill_gib": 2.5}
+
+    def test_0_passed_on(self):
+        self.ready()
+        argv = self.log()[0].split()
+        self.assertEqual(argv[argv.index("--fill") + 1], "2.5")
+
+    def test_1_refused(self):
+        d = tempfile.mkdtemp()
+        cfg = os.path.join(d, "osmos.json")
+        for bad in (-1, "4", True, None):
+            with open(cfg, "w") as f:
+                json.dump({"pack": "test", "model": MODEL, "max_context": 4096, "fill_gib": bad}, f)
+            r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                               capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn("fill_gib", r.stderr, bad)
+            self.assertIn("0 or more", r.stderr, bad)  # refused for its value, not as a key osmos-api does not know
+
+    def test_2_serve_refuses(self):
+        serve = os.path.join(ROOT, "bin", "osmos-serve")
+        if not os.path.exists(serve):
+            self.skipTest("no osmos-serve built")
+        for bad in ("-1", "x", "4GiB", "", "nan", "inf"):
+            r = subprocess.run([serve, "--model", MODEL, "--fill", bad], capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 2, bad)
+            self.assertIn("--fill", r.stderr, bad)
+
+
+class FillZero(Fill):
+    settings = {"fill_gib": 0}
+
+    def test_0_passed_on(self):  # 0: the cache takes every byte (the headroom still kept)
+        self.ready()
+        argv = self.log()[0].split()
+        self.assertEqual(argv[argv.index("--fill") + 1], "0")
+
+    test_1_refused = test_2_serve_refuses = None
+
+
 QCALL = ("Checking.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=days>\n"
          "3\n</parameter>\n</function>\n</tool_call>" + IM_END)
 

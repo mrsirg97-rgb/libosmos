@@ -96,7 +96,9 @@ It ran on UD-IQ1_M at 131K context with drafting on. Power is the APU package's 
 | RAM left free, lowest | **8.2 GiB** | 2.2 GiB | |
 
 osmos sizes itself to leave 8 GiB of RAM to the rest of the system: room for an editor, a browser, language servers
-and the agent harness beside the model.
+and the agent harness beside the model. A box with less beside it can give the cache more: `"fill_gib": 4` in the
+pack's `osmos.json` (osmos-serve `--fill 4`) keeps 4 GiB free instead, 0 keeps none. The output is the same at every
+value; only how much of the model stays in memory changes.
 
 ### Qwen3.8 against llama.cpp
 

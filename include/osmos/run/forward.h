@@ -31,6 +31,8 @@ typedef struct ForwardOptions
   const uint64_t *picks; /* forward_create_ranked's, or NULL */
   uint32_t max_tokens;   /* a step's most tokens: 0 FORWARD_MAX_TOKENS; below MM_MAX_TOKENS a step's buffers its size */
   bool no_guess;         /* no experts guessed a layer ahead (forward_guesses): for a model whose misses are few */
+  bool fill_set;         /* fill given (osmos-serve's --fill); else the RAM kept free is FIT_RAM_FREE */
+  uint64_t fill;         /* the system's RAM a build leaves free, bytes: forward_room's (0: every byte past the headroom) */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);

@@ -155,6 +155,7 @@ struct Forward
   int32_t *r_ids_dev, *r_guess_dev; /* their device addresses */
   uint64_t *guessed;      /* a unit's guess: the visit it was guessed for (hip_guess.c) */
   uint64_t g_need, g_hit; /* a decode's streamed picks, and of them the ones guessed a layer ahead */
+  uint64_t ram_kept;       /* the system's RAM a build leaves free: ForwardOptions' fill, else FIT_RAM_FREE */
   uint64_t pool_room;      /* the pool's room: the budget's experts and the stream's (stream_budget), taken at create */
   uint32_t *warm;          /* the budget's experts, in choose's order: read at the first step (fwd_warm), not at create */
   size_t n_warm;           /* - a sizing's builds (fit.h) read none of them; 0 once read */

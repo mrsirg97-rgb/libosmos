@@ -45,6 +45,8 @@ typedef struct OsmosOptions
   const char *picks;    /* a ranking file for the resident set, or NULL */
   bool no_guess;        /* no experts guessed a layer ahead */
   const char *drafter;  /* the drafter's directory, or NULL: no drafting */
+  bool fill_set;        /* fill given; else the RAM a sizing keeps free is FIT_RAM_FREE (osmos/run/fit.h) */
+  uint64_t fill;        /* the system's RAM a sizing leaves free, bytes (osmos-serve's --fill; 0: all of it the cache's) */
 } OsmosOptions;
 
 /* the counters a bench and the server's stats read: zeros where a family has none */
