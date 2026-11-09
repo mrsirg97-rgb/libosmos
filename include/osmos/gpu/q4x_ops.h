@@ -136,6 +136,21 @@ bool q4x_add2(float *h, const float *a, const float *b, uint64_t n, void *stream
 bool q4x_streams(const float *x, uint32_t n_tok, uint32_t hc, uint32_t dim, float *h, void *stream);
 bool q4x_tap(const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *taps, uint32_t stride, void *stream);
 
+/* DFlash2's drafter (q4x_dflash.hip; osmos/q4x/dflash.h): heads of Q4X_DF_HEAD, its own rope, convolutions,
+   attention and selector */
+#define Q4X_DF_HEAD 128 /* its heads' dim (Q4X_DFLASH_HEAD_DIM) */
+#define Q4X_DF_TOPK 16  /* its selector's candidates at most (Q4X_DFLASH_TOPK_MAX) */
+bool q4x_df_rope(float *x, uint32_t n_tok, uint32_t heads, uint32_t stride, const int32_t *pos, float base, void *stream);
+bool q4x_df_conv(const float *x, uint32_t n_tok, uint32_t dim, uint32_t group, const float *base, const float *dyn,
+                 uint32_t dyn_stride, float *y, void *stream);
+bool q4x_df_ring(float *ring, uint32_t ring_rows, const float *x, uint32_t n, uint32_t row, int32_t pos0, void *stream);
+bool q4x_df_attn(const float *q, uint32_t n_q, int32_t pos0, const float *kb, const float *vb, const float *kr,
+                 const float *vr, uint32_t ring_rows, int32_t ctx_from, uint32_t heads, uint32_t kv_heads, uint32_t window,
+                 float *out, void *stream);
+bool q4x_df_topk(const float *logits, uint32_t rows, uint32_t vocab, uint32_t k, float *val, int32_t *idx, void *stream);
+bool q4x_df_select(const float *val, const int32_t *idx, uint32_t rows, uint32_t k, const float *hp, uint32_t rank,
+                   const void *pred, const void *succ, int32_t anchor, int32_t *path, void *stream);
+
 #endif
 
 /*
@@ -155,6 +170,40 @@ q4x_scale_silu
 q4x_hc_gated_mean
   out[t][d] = (sum over s, in order, of xn[t][s][d] sigmoid(gate[t][s][d])) / hc: the streams' gated mean, the
   block's input.
+
+q4x_df_rope
+  each of n_tok tokens' heads (Q4X_DF_HEAD values, a head Q4X_DF_HEAD apart, a token `stride` apart) rotated in place
+  by its half: value i (< 64) and i + 64 a pair by angle pos[t] * base^(-2i / Q4X_DF_HEAD) - (x_i cos - x_{i+64} sin,
+  x_{i+64} cos + x_i sin), Hugging Face's rotate_half (not ops_rope's adjacent pairs). its frequency
+  1 / base^(2i / 128) in double, rounded once to F32; the angle its F32 product.
+
+q4x_df_conv
+  DFlash2's grouped dynamic causal convolution over a block's n_tok tokens: y[t][c] = sum over off 0, 1 of
+  (base[off][c] + dyn[t stride + off groups + c / group]) x[t - off][c], x before the block 0 - the sum off 0 then 1,
+  each base's term then dyn's (z += base x; z += dyn x: its reference's order). base [2][dim]; dyn a token's 2 groups
+  of dim / group weights (prepare's or finish's half of its kernel projection: dyn points at it).
+
+q4x_df_ring
+  n rows of x (row floats each) into a sequence's ring of ring_rows: x's row t at ring row (pos0 + t) % ring_rows;
+  more rows than the ring: only the newest ring_rows written (each slot once).
+
+q4x_df_attn
+  the drafter's attention for a block: n_q queries (q [n_q][heads][Q4X_DF_HEAD]) at positions pos0 .. pos0 + n_q,
+  against the context's keys and values in the ring (kr, vr: a position p at row p % ring_rows, [kv_heads][..]) for
+  positions ctx_from .. pos0, and the block's own (kb, vb [n_q][kv_heads][Q4X_DF_HEAD]): a key visible to query i
+  when its position is within `window` of i's either way (not causal). head h reads KV head h / (heads / kv_heads).
+  scores q.k / sqrt(Q4X_DF_HEAD) in F32, a softmax (its max first), out [n_q][heads][Q4X_DF_HEAD]. ctx_from must be
+  pos0 - ring_rows or later (the ring holds no older).
+
+q4x_df_topk
+  each of rows rows' (vocab logits, a row vocab apart) k greatest (k at most Q4X_DF_TOPK): val[r][j], idx[r][j]
+  descending, a tie the lower id first; a NaN never one of them.
+
+q4x_df_select
+  DFlash2's candidate selector, greedy: from prev = anchor, row after row j < rows: each candidate c < k scored
+  val[j][c] + sum over r < rank of pred[prev][r] hp[j][r] succ[idx[j][c]][r] (pred, succ Q8_0 rows of rank, by token
+  id; hp [rows][rank]: the drafter's hidden through its selector projection), the best its pick (a tie the lower c),
+  path[j] its id, then prev. one thread block: the path is a chain.
 
 q4x_tap
   taps[t stride + d] = (h[t][0][d] + h[t][1][d] + .. + h[t][hc - 1][d]) * (1 / hc), the sum in that order in F32: a
