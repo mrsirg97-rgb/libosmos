@@ -2,7 +2,8 @@
 
 ## [0.5.11]: (in progress)
 
-- **DeepSeek's tool calls parse as DeepSeek's own parser does** (issue #25). An invoke with a blank line after its
+- **DeepSeek's tool calls parse as DeepSeek's own parser does** (issue #25, reported by @ucotman with a repro, a
+  control experiment and numbers from a second gfx1151 - thank you). An invoke with a blank line after its
   name (`name="mcp">\n\n`) is taken, as the reference's regex takes it (Python's `$` matches before one trailing
   newline), and a parameter's `<\n` too. Nothing more: the blank lines and spaces the reference refuses are refused.
 - **A turn the parse refuses is an error, never an answer.** osmos-api sent a completion out of the format as its
