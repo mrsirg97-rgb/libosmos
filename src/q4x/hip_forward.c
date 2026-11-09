@@ -112,9 +112,13 @@ static bool df_buffers(Q4xForward *f, char *err)
             alloc(&d->a, B * D * F) && alloc(&d->gate, B * ff * F) && alloc(&d->up, B * ff * F) &&
             alloc(&d->hn, B * D * F) && alloc(&d->logits, B * V * F) &&
             alloc(&d->hp, B * (uint64_t)g->sel_rank * F) && alloc(&d->val, B * k * F) && alloc(&d->idx, B * k * 4) &&
-            alloc(&d->path, B * 4) && alloc(&d->tok, B * 4) && alloc(&d->iota, iota * 4) &&
+            alloc(&d->top_p, B * F) && alloc(&d->path, B * 4) && alloc(&d->top_id, B * 4) &&
+            alloc(&d->tok, B * 4) && alloc(&d->iota, iota * 4) &&
             hipHostMalloc((void **)&d->pin_tok, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_path, B * 4, 0) == hipSuccess;
+            hipHostMalloc((void **)&d->pin_path, B * 4, 0) == hipSuccess &&
+            hipHostMalloc((void **)&d->pin_idx, B * k * 4, 0) == hipSuccess &&
+            hipHostMalloc((void **)&d->pin_val, B * k * F, 0) == hipSuccess &&
+            hipHostMalloc((void **)&d->pin_p, B * F, 0) == hipSuccess;
   int32_t *h = ok ? malloc(iota * 4) : NULL;
   for (uint64_t i = 0; h && i < iota; i++)
     h[i] = (int32_t)i;
@@ -226,7 +230,8 @@ void q4x_forward_destroy(Q4xForward *f)
   void **dbufs = (void **)d;
   for (size_t i = 0; i < offsetof(Q4xDfBuf, pin_tok) / sizeof(void *); i++)
     hipFree(dbufs[i]);
-  hipHostFree(d->pin_tok), hipHostFree(d->pin_path);
+  hipHostFree(d->pin_tok), hipHostFree(d->pin_path), hipHostFree(d->pin_idx), hipHostFree(d->pin_val);
+  hipHostFree(d->pin_p);
   Q4xMtpBuf *m = &f->m;
   hipFree(m->hid), hipFree(m->hin), hipFree(m->emb), hipFree(m->hn), hipFree(m->join), hipFree(m->logits);
   hipFree(m->top_id), hipFree(m->top_p), hipHostFree(m->pin_id), hipHostFree(m->pin_p);

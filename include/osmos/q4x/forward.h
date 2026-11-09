@@ -69,8 +69,9 @@ bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32
                        float cum_min, int32_t *drafts, float *conf, uint32_t stride, int *counts,
                        char err[Q4X_FWD_ERR]);
 
-bool q4x_dflash_feed(Q4xForward *f, Q4xSeq *s, uint32_t n, char err[Q4X_FWD_ERR]);
-int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, int32_t *drafts, char err[Q4X_FWD_ERR]);
+bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR]);
+int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
+                     float *conf, char err[Q4X_FWD_ERR]);
 
 #endif
 
@@ -158,16 +159,18 @@ q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head; DESIGN.md, "Qwen'
   and confidences at row i (stride apart), its count counts[i] - each the bits of its q4x_mtp_draft: a draft's depth
   one head step for the sequences still drafting (the head's weights read once for all). false with why.
 
-q4x_dflash_feed, q4x_dflash_draft (a forward built with Q4xOptions' dflash; DESIGN.md, "DFlash2: a block drafter
+q4x_dflash_seed, q4x_dflash_draft (a forward built with Q4xOptions' dflash; DESIGN.md, "DFlash2: a block drafter
   for Qwen")
-  feed: the sequence's next n context positions (from where its feeds reached: 0 when new, its position after a load,
-  or a rollback's below it) from its last step's taps - each
-  through the drafter's fc and hidden norm, then each layer's k (normed, rotated) and v into the sequence's rings
-  (the drafter's window of positions). the positions must be its last step's and below its position (a rollback's
-  dropped tokens not fed). draft: a block
-  at the sequence's position - y (the token there) and the mask token after it - through the drafter's layers
-  (attention over the context fed within its window, and the block's own, not causal), Qwen's output head at the
-  block's places after y, the selector's greedy path from y: min(max, block - 1) drafts, or -1 with why. the
-  context fed must reach the sequence's position (each accepted token fed before the next draft). neither moves a
-  bit of the sequence's own state; a draft is a proposal (the verify step's bits are the answer's).
+  seed: the drafter's context at positions from .. to - 1 from the sequence's last step's taps (its rows of that
+  step, below the sequence's position: a rollback's dropped tokens refused) - each through the drafter's fc and hidden
+  norm, then each layer's k (normed, rotated) and v into the sequence's rings (the window's rows, position p at
+  p % rows). the context is the positions seeded since the last gap: a seed past where the context reaches starts it
+  over at from (a prompt's window, a load - which keeps none - or a rollback below it), one before it seeds those
+  positions again and the context ends at to. draft: a block at the sequence's position - y (the token there) and the
+  mask token after it - through the drafter's layers (attention over the context within its window, and the block's
+  own, not causal), Qwen's output head at the block's places after y, the selector's greedy path from y: up to
+  min(max, block - 1) drafts, each kept while its confidence (the head's probability of it there) is at least
+  conf_min and their product at least cum_min - the count, or -1 with why. the context must reach the sequence's
+  position. neither moves a bit of the sequence's own state; a draft is a proposal (the verify step's bits are the
+  answer's).
 */

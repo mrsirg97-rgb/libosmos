@@ -1,11 +1,12 @@
-// Qwen's MTP head as the engine's drafter (osmos/run/engine.h, q4x_mtp_*): a prompt of real text, then greedy decode
+// Qwen's drafters as the engine's - the MTP head (q4x_mtp_*), then DFlash2 (q4x_dflash_*), each where its file is
+// (osmos/run/engine.h): a prompt of real text, then greedy decode
 // two ways on one engine - plain (a token a step) and drafted (the server's rounds: drafts after y, [y, drafts] one
 // step, the agreeing prefix kept, the rest rolled back, the kept positions seeded) - the same tokens, every one;
 // the acceptance printed; then three sequences at their own positions drafting at once (oseq_draft_all), under the
 // engine's floors (some stopping early) and none (the first at the context's end after 3, the others their whole
 // block - their rows moved up past it): each one's drafts, confidences and count
-// the bits of its own oseq_draft. needs a gfx1151, the UD-IQ3_XXS set and the shared MTP head (~81 GB of GPU memory), the
-// dump's ids; skipped (77) without them.
+// the bits of its own oseq_draft. needs a gfx1151, the UD-IQ3_XXS set and a drafter (the shared MTP head, or
+// tools/convert/dflash2_gguf.py's DFlash2: ~81 GB of GPU memory), the dump's ids; skipped (77) without them.
 #include "q4x_ref.h"
 
 extern "C" {
@@ -14,6 +15,7 @@ extern "C" {
 
 constexpr uint32_t kCtx = 1024, kStep = 256, kPrompt = 200, kGen = 96;
 constexpr const char* kMtp = "%s/Models/qwen38/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf";
+constexpr const char* kDflash = "%s/Models/qwen38/DFlash2/dflash2-Q8_0.gguf";
 
 static std::vector<int32_t> dump_ids() {
   FILE* f = std::fopen((home_path(kQwenDump) + "/ids.txt").c_str(), "r");
@@ -80,28 +82,16 @@ static void drafted_together(Osmos* e, const std::vector<int32_t>& ids, float co
   for (int i = 0; i < 3; i++) oseq_destroy(s[i]);
 }
 
-int main() {
-  std::printf("[test_mtp_q4x_gpu] start\n");
-  const std::string first = home_path(kQwenFirst), mtp = home_path(kMtp);
-  const std::vector<int32_t> ids = dump_ids();
-  int ndev = 0;
-  if (access(first.c_str(), R_OK) || access(mtp.c_str(), R_OK) || ids.size() < kPrompt ||
-      hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
-    std::printf("[test_mtp_q4x_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its MTP head, the dump's ids or a GPU\n");
-    return 77;
-  }
+// greedy decode plain, then drafted the server's way, on an engine with the drafter at path: the same tokens
+static void drafted(OsmosModel* m, const std::vector<int32_t>& ids, const std::string& path, const char* name) {
   char err[OSMOS_ERR] = "";
-  const OsmosFiles files = {first.c_str(), nullptr, nullptr};
-  OsmosModel* m = osmos_open(&files, err);
-  CHECK(m);
-  const OsmosOptions bad = {kCtx, kStep, 0, nullptr, false, first.c_str(), false, 0, false};  // the model as its own head
-  CHECK(!osmos_create(m, &bad, err) && std::strstr(err, "nextn"));
-  const OsmosOptions o = {kCtx, kStep, 0, nullptr, false, mtp.c_str(), false, 0, false};
+  const OsmosOptions o = {kCtx, kStep, 0, nullptr, false, path.c_str(), false, 0, false};
   Osmos* e = osmos_create(m, &o, err);
   if (!e) std::fprintf(stderr, "  %s\n", err);
   CHECK(e);
   const uint32_t block = osmos_block(e);
   CHECK(block > 0 && block <= OSMOS_MAX_BLOCK);
+  std::printf("  %s: %u drafts a round at most\n", name, block);
 
   // plain
   OsmosSeq* a = oseq_create(e, err);
@@ -144,8 +134,30 @@ int main() {
   CHECK(accepted > 0);
   oseq_destroy(s);
   drafted_together(e, ids, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, false);
-  drafted_together(e, ids, 0.0f, 0.0f, true);  // the first's 3 drafts then the context's end, the others' 5
+  drafted_together(e, ids, 0.0f, 0.0f, true);  // the first's drafts cut at the context's end, the others' whole
   osmos_destroy(e);
+}
+
+int main() {
+  std::printf("[test_mtp_q4x_gpu] start\n");
+  const std::string first = home_path(kQwenFirst), mtp = home_path(kMtp), dflash = home_path(kDflash);
+  const std::vector<int32_t> ids = dump_ids();
+  int ndev = 0;
+  const bool has_mtp = !access(mtp.c_str(), R_OK), has_dflash = !access(dflash.c_str(), R_OK);
+  if (access(first.c_str(), R_OK) || (!has_mtp && !has_dflash) || ids.size() < kPrompt ||
+      hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
+    std::printf("[test_mtp_q4x_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, a drafter, the dump's ids or a GPU\n");
+    return 77;
+  }
+  char err[OSMOS_ERR] = "";
+  const OsmosFiles files = {first.c_str(), nullptr, nullptr};
+  OsmosModel* m = osmos_open(&files, err);
+  CHECK(m);
+  // the model as its own drafter: not an MTP head
+  const OsmosOptions bad = {kCtx, kStep, 0, nullptr, false, first.c_str(), false, 0, false};
+  CHECK(!osmos_create(m, &bad, err) && std::strstr(err, "nextn"));
+  if (has_mtp) drafted(m, ids, mtp, "the MTP head");
+  if (has_dflash) drafted(m, ids, dflash, "DFlash2");
   osmos_close(m);
   std::printf("[test_mtp_q4x_gpu] ok\n");
   return 0;

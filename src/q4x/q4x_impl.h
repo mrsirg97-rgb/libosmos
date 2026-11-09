@@ -51,16 +51,18 @@ typedef struct Q4xMtpBuf
   float *pin_p;
 } Q4xMtpBuf;
 
-/* the DFlash2 drafter's buffers (with a drafter): a feed's context rows, then a block's */
+/* the DFlash2 drafter's buffers (with a drafter): a seed's context rows, then a block's */
 typedef struct Q4xDfBuf
 {
   float *th;            /* [max_tokens][n_embd]: the context's taps through fc, then its hidden norm */
   float *k, *v;         /* [max(max_tokens, block)][kv]: a layer's keys and values (the context's, the block's) */
   float *h, *x, *xc, *dyn, *q, *att, *a, *gate, *up, *hn; /* the block's: residual, normed, convolved, .. its out */
   float *logits, *hp, *val; /* the head's at the block's drafts' places, the selector's projection, the top-k */
-  int32_t *idx, *path;
+  float *top_p;             /* each place's greatest token's probability (q4x_top: a draft's confidence's) */
+  int32_t *idx, *path, *top_id;
   int32_t *tok, *iota; /* device: the block's tokens (y, then masks); 0 .. max_ctx + block (a run's positions) */
-  int32_t *pin_tok, *pin_path; /* pinned: the block's anchor in, its path out */
+  int32_t *pin_tok, *pin_path, *pin_idx; /* pinned: the block's anchor in; its path, the top-k's ids, values, p out */
+  float *pin_val, *pin_p;
 } Q4xDfBuf;
 
 #define Q4X_SIDE_STEP MM_TILE /* a step this small or smaller: the second stream (decode, a draft's verify) */
@@ -137,7 +139,7 @@ struct Q4xSeq
   int32_t pend_pos, step_pos0;
   uint32_t step_row0, step_n, step_t0; /* step_t0: its first token's place in the step (its taps' row) */
   /* with a drafter: each layer's key and value rings (df_ring rows of kv floats, position p at p % df_ring), the
-     context positions they hold (df_lo .. df_pos - 1: fed since its start, a load or a rollback past them) */
+     context positions they hold (df_lo .. df_pos - 1: seeded since the last gap - a load, a seed past its end) */
   float *dk[Q4X_DFLASH_MAX_LAYERS], *dv[Q4X_DFLASH_MAX_LAYERS];
   int32_t df_lo, df_pos;
   int32_t *step_tok; /* [max_tokens], host */

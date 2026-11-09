@@ -1,8 +1,9 @@
+#include <math.h>
 #include <string.h>
 
 #include "q4x_impl.h"
 
-/* DFlash2's drafter on the GPU (osmos/q4x/forward.h, q4x_dflash_feed / q4x_dflash_draft): z-lab/dflash's
+/* DFlash2's drafter on the GPU (osmos/q4x/forward.h, q4x_dflash_seed / q4x_dflash_draft): z-lab/dflash's
    DFlash2DraftModel - the context's taps through fc and a norm into each layer's keys and values; a block (the anchor
    and masks, Qwen's embedding) through its layers (a dynamic convolution before and after the attention and the MLP),
    a norm, Qwen's output head, the candidate selector's greedy path */
@@ -24,14 +25,14 @@ static bool keys(Q4xForward *f, const Q4xDflashLayer *L, const float *x, uint32_
          q4x_df_rope(d->k, n, kh, kv, pos, g->rope_base, NULL);
 }
 
-bool q4x_dflash_feed(Q4xForward *f, Q4xSeq *s, uint32_t n, char err[Q4X_FWD_ERR])
+bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR])
 {
   if (!f || !s || s->f != f || !f->df)
     return q4x_fail(err, "no forward with a drafter, or a sequence of another forward");
-  const int32_t p0 = s->df_pos;
-  if (!n || !s->step_n || p0 < s->step_pos0 || p0 + (int32_t)n > s->step_pos0 + (int32_t)s->step_n ||
-      p0 + (int32_t)n > s->pos)
-    return q4x_fail(err, "positions not the sequence's next context, of its last step");
+  if (from >= to || !s->step_n || from < s->step_pos0 || to > s->step_pos0 + (int32_t)s->step_n || to > s->pos)
+    return q4x_fail(err, "positions not of the sequence's last step, or past its position");
+  const int32_t p0 = from;
+  const uint32_t n = (uint32_t)(to - from);
   const Q4xDflash *df = f->df;
   const Q4xDflashGeometry *g = &df->geo;
   Q4xDfBuf *d = &f->d;
@@ -45,7 +46,8 @@ bool q4x_dflash_feed(Q4xForward *f, Q4xSeq *s, uint32_t n, char err[Q4X_FWD_ERR]
          q4x_df_ring(s->dv[l], f->df_ring, d->v, n, kv, p0, NULL);
   if (!ok)
     return q4x_fail(err, "a GPU call failed (the drafter's context)");
-  s->df_pos = p0 + (int32_t)n;
+  s->df_lo = from > s->df_pos ? from : from < s->df_lo ? from : s->df_lo; /* past a gap: the context starts over */
+  s->df_pos = to;
   return true;
 }
 
@@ -86,16 +88,17 @@ static bool block_layer(Q4xForward *f, const Q4xSeq *s, int l, uint32_t B, int32
          ops_add(d->h, d->x, (uint64_t)B * D, NULL);
 }
 
-int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, int32_t *drafts, char err[Q4X_FWD_ERR])
+int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
+                     float *conf, char err[Q4X_FWD_ERR])
 {
-  if (!f || !s || s->f != f || !f->df || (max && !drafts))
+  if (!f || !s || s->f != f || !f->df || (max && (!drafts || !conf)))
     return q4x_fail(err, "no forward with a drafter, a sequence of another forward, or no room"), -1;
   const Q4xDflash *df = f->df;
   const Q4xDflashGeometry *g = &df->geo;
   if (y < 0 || y >= g->n_vocab)
     return q4x_fail(err, "a token not of the vocabulary"), -1;
   if (s->df_pos != s->pos)
-    return q4x_fail(err, "the drafter's context not fed to the sequence's position"), -1;
+    return q4x_fail(err, "the drafter's context not seeded to the sequence's position"), -1;
   const int32_t pos0 = s->pos, room = (int32_t)f->max_ctx - 1 - pos0; /* a draft's position below max_ctx */
   uint32_t n = (uint32_t)g->block - 1 < max ? (uint32_t)g->block - 1 : max;
   n = room <= 0 ? 0 : (uint32_t)room < n ? (uint32_t)room : n;
@@ -120,12 +123,34 @@ int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, int32_t 
        q4x_mat(f, df->sel_proj, R, D, d->hn + D, D, B - 1, d->hp, R, false) &&
        q4x_df_select(d->val, d->idx, B - 1, K, d->hp, R, q4x_dev(f, df->sel_pred), q4x_dev(f, df->sel_succ), y,
                      d->path, NULL) &&
+       q4x_top(d->logits, V, B - 1, V, d->top_id, d->top_p, NULL) &&
        hipMemcpyAsync(d->pin_path, d->path, (B - 1) * 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
+       hipMemcpyAsync(d->pin_idx, d->idx, (B - 1) * K * 4, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
+       hipMemcpyAsync(d->pin_val, d->val, (B - 1) * K * F, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
+       hipMemcpyAsync(d->pin_p, d->top_p, (B - 1) * F, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
        q4x_overflow_read(f) && hipStreamSynchronize(NULL) == hipSuccess;
   if (!ok)
     return q4x_fail(err, "a GPU call failed (a draft)"), -1;
   if (!q4x_overflow_ok(f, err))
     return -1;
-  memcpy(drafts, d->pin_path, n * sizeof *drafts);
-  return (int)n;
+  /* a draft's confidence: the head's probability of it at its place - the greatest's (q4x_top) scaled by its logit
+     below the greatest's (both the top-k's: the pick is one of its candidates, the greatest its first) */
+  float cum = 1;
+  uint32_t kept = 0;
+  for (; kept < n; kept++)
+  {
+    const int32_t *ids = d->pin_idx + (uint64_t)kept * K;
+    const float *val = d->pin_val + (uint64_t)kept * K;
+    uint32_t c = 0;
+    while (c < K && ids[c] != d->pin_path[kept])
+      c++;
+    if (c == K)
+      return q4x_fail(err, "the selector's pick not one of its candidates"), -1;
+    const float p = d->pin_p[kept] * expf(val[c] - val[0]);
+    cum *= p;
+    if (p < conf_min || cum < cum_min)
+      break;
+    drafts[kept] = d->pin_path[kept], conf[kept] = p;
+  }
+  return (int)kept;
 }

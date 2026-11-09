@@ -2688,6 +2688,17 @@ the torch reference on the same taps (~/osmos-oracle/dflash2-chat, the sim's dum
 block's final hidden within 1.0e-3 (mm's f16); 4.30 tokens a round, the reference's (test_q4x_dflash_gpu; its six
 kernels against host references in test_q4x_dflash_ops_gpu, conv and the selector bit-exact).
 
+**Behind the engine.** A Qwen pack's drafter is whichever GGUF it names: general.architecture dflash2 is DFlash2, else
+the MTP head - oseq_seed is q4x_dflash_seed (the positions a step ran, the server's prompt pieces and a verify's kept
+tokens), oseq_draft q4x_dflash_draft with the engine's floors. A draft's confidence is the head's probability of the
+selector's pick at its place: q4x_top's greatest probability times exp of the pick's logit less the greatest's (both
+among the top-k), within 2.4e-3 of the reference's softmax. oseq_draft_all runs the sequences' blocks one after
+another (a block a drafter pass; one pass for several sequences' blocks is later work). test_mtp_q4x_gpu now runs
+each drafter it finds: greedy decode drafted the server's way is plain greedy's tokens with either; on the dump's
+text at the floors (0.1, 0.1), 96 tokens in 37 rounds with the MTP head (57% of 104 drafts accepted, 2.57 a round)
+and 31 with DFlash2 (78% of 82, 3.06 a round). The floors were swept for the MTP head; on the chat trajectory they keep
+284 of DFlash2's 511 drafts - its A/B (tok/s and J a token, low-power) sweeps them again.
+
 **A race it found.** The rollback test (two tokens past each round, rolled back) came out different bits run to run.
 The drafter was not the cause: the target's own steps of 9 to 16 tokens were. q4x_moe.hip's tiles_kernel read each
 scan's total from the last expert's place with no barrier before that expert's thread made its scan exclusive; read
