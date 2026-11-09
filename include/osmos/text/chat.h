@@ -17,6 +17,7 @@ typedef enum ChatMode
 int chat_effort(const Json *effort, char err[CHAT_ERR]);
 bool chat_render(const Json *messages, ChatMode mode, int effort, JsonBuf *out, char err[CHAT_ERR]);
 bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[CHAT_ERR]);
+extern const char *const chat_refused[]; /* special tokens' text a completion's reasoning or content can't hold */
 
 #endif
 
