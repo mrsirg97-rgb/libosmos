@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.10]: a turn doesn't end before its answer
+
+A session on 2026-11-08 hit an empty turn: Qwen3.8 closed its thinking and ended the turn at once, 18 tokens of
+reasoning and no reply. osmos decodes greedily, so each of rig's resamples was the same empty turn.
+
+- **No end of turn before the answer has begun** (osmos-serve `--answer-after`, `osmos/text/answer.h`). While a
+  turn's tokens since `</think>` are whitespace alone, an end-of-turn token isn't taken: the row's best other token
+  is (`osmos_greedy_except`). It's one rule on a row's tokens and logits, applied at every pick (the plain step, a
+  drafted round's verify, a `--parallel` round, the first pick after a prompt), so drafting keeps its bits.
+  osmos-api passes its dialect's `</think>`, so every pack has it. A prompt in plain mode ends in an empty think
+  block, so the rule covers it too.
+- `tools/serve/answer_test.py` makes the failure on purpose on real Qwen: the model's natural next token made an
+  end. Without the rule the turn ends there; with it the turn goes on, the same tokens one conversation and
+  `--parallel`, plain and drafted. It covers the pick after the prompt and mid-decode, and each of the five call
+  sites taken out fails it. `tests/test_answer.c`: the rule on a hand-made vocabulary and on both real tokenizers
+  (DeepSeek 129 whitespace tokens, Qwen3.8 422).
+- **Qwen's rig efforts are its template's names:** `low`, `medium`, `xhigh` (the default). `high` was the
+  template's alias for `xhigh`.
+
 ## [0.5.9]: Qwen abliterated, ready for another shape; measured against the latest Maya and llama.cpp
 
 Every stream the same bits as 0.5.8 (DeepSeek's and Qwen's).

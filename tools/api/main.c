@@ -167,8 +167,8 @@ int main(int argc, char **argv)
   api.eos = tokenizer_find(api.tok, api.d->eos);
   if (api.eos < 0)
     return snprintf(err, sizeof err, "the tokenizer has no %s", api.d->eos), die(err);
-  char *args[CONFIG_ARGS_MAX];
-  if (!config_argv(&c, opt(argc, argv, "--engine", engine), api.eos, args, err))
+  char *args[CONFIG_ARGS_MAX]; /* osmos-serve's rule: no end before an answer past the dialect's think_end */
+  if (!config_argv(&c, opt(argc, argv, "--engine", engine), api.eos, api.d->think_end, args, err))
     return die(err);
   const int port = atoi(opt(argc, argv, "--port", "8091"));
   const int lfd = listen_on(opt(argc, argv, "--host", "127.0.0.1"), port);

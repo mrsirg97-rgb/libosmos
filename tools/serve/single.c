@@ -129,6 +129,9 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
   if (!osmos_batch(sv->e, ss, toks, (uint32_t)k + 1, c->err) ||
       !osmos_greedy(sv->e, 0, (uint32_t)k + 1, picks, c->err))
     return -1;
+  for (int i = 0; i <= k; i++) /* row i: the held, then toks[0 .. i] */
+    if (!server_answer(sv, &c->held, toks, (uint32_t)i + 1, (uint32_t)i, &picks[i], c->err))
+      return -1;
   int m = 0;
   while (m < k && picks[m] == dr[m])
     m++;
@@ -167,7 +170,8 @@ static int step_greedy(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, Ctl
     return a->finish = "cancel", 0;
   if (a->produced >= a->limit || (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx)
     return 0;
-  if (!osmos_batch(sv->e, &c->s, t, 1, c->err) || !ids_push(&c->held, *t) || !osmos_greedy(sv->e, 0, 1, t, c->err))
+  if (!osmos_batch(sv->e, &c->s, t, 1, c->err) || !ids_push(&c->held, *t) || !osmos_greedy(sv->e, 0, 1, t, c->err) ||
+      !server_answer(sv, &c->held, NULL, 0, 0, t, c->err))
     return -1;
   return 1;
 }
@@ -227,7 +231,7 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
     }
   }
   int32_t t;
-  if (!osmos_greedy(sv->e, row, 1, &t, c->err))
+  if (!osmos_greedy(sv->e, row, 1, &t, c->err) || !server_answer(sv, &c->held, NULL, 0, row, &t, c->err))
   {
     fail(sv, c);
     return;

@@ -90,7 +90,8 @@ bool config_read(const char *path, Config *c, char err[API_ERR])
   return ok;
 }
 
-bool config_argv(Config *c, const char *engine, int eos, char *argv[CONFIG_ARGS_MAX], char err[API_ERR])
+bool config_argv(Config *c, const char *engine, int eos, const char *answer_after, char *argv[CONFIG_ARGS_MAX],
+                 char err[API_ERR])
 {
   int n = 0;
   snprintf(c->eng, sizeof c->eng, "%s", engine);
@@ -109,6 +110,7 @@ bool config_argv(Config *c, const char *engine, int eos, char *argv[CONFIG_ARGS_
   argv[n++] = "--max-context", argv[n++] = c->num[0];
   argv[n++] = "--budget", argv[n++] = c->num[1];
   argv[n++] = "--eos", argv[n++] = c->num[2];
+  argv[n++] = "--answer-after", argv[n++] = (char *)answer_after;
   argv[n++] = "--parallel", argv[n++] = c->num[3];
   if (c->max_tokens)
   {

@@ -2591,6 +2591,35 @@ of it was fetched (an HTTP range a shard): Q2_K was in no path, IQ3_XXS in Qwen'
   (five languages' greetings in their scripts, a typed CSV parser), plain 12.7 tok/s over 64 tokens with 3.3 s of
   its ~5 waiting on 1,663 reads - a floor, not a number.
 
+### 0.5.10: no end of turn before the answer (2026-11-08)
+
+**The failure.** rig's session store: after "oh you know, life", Qwen3.8 (the 1M pack) closed its thinking ("Still
+just chatting. Keep it light, brief, honest. Don't push work.") and ended the turn: 18 tokens each time, three
+times, the 2nd and 3rd the same prompt and the same tokens (osmos-api refuses sampling: a resample of a greedy
+engine is the same turn). The reasoning copied DeepSeek's from earlier in the conversation, which rig had sent
+back with the history (rig 3.5.2's SPEC_LINEAGE).
+
+**The rule.** An answer has not begun while the turn's tokens since the reasoning's end are whitespace alone.
+- `answer_unbegun`: walking back from the last token over blank ones (text non-empty, only spaces, tabs, newlines),
+  the first other token is `</think>`. A pure function of the conversation's tokens, so rollbacks need nothing.
+- While it holds, an end-of-turn pick is replaced by the row's best other token (`answer_best`: ties to the lower
+  id, NaNs never), the logits row copied out once (`osmos_greedy_except`).
+- osmos-serve applies it at every pick, the row's tokens being the conversation's held tokens then the batch's up
+  to that row. The plain step, the drafted verify and the parallel round decide each position by the same rule, so
+  drafted and plain answers stay the same bits.
+
+**Why not a ban on the first token after `</think>`.** Qwen's template puts a blank line between `</think>` and the
+answer, a token of its own (271). The empty turn ended after it, so a rule on the previous token alone would have
+missed the case that happened.
+
+**Measured.** `tools/serve/answer_test.py` on UD-IQ3_XXS with its MTP head:
+- The first scenario: the prompt ends in `</think>`. The model's next token is 271, made an end: without the rule
+  the turn ends at once, the failure reproduced.
+- The mid scenario: a token a few into a free answer stands for `</think>`.
+- Every path (one conversation and `--parallel 2`, plain and drafted) the same tokens.
+- Each of the five call sites taken out fails it: the verify, the step, the first pick, the parallel round, the
+  parallel first pick.
+
 ### 0.5.9: Qwen ready for another shape, abliterated, and its decode profiled (2026-11-08, performance)
 
 **the load refuses what the kernels cannot run.** An audit of the Qwen path against a Qwen4 of other shapes (its arch

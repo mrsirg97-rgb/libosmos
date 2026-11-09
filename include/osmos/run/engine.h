@@ -68,6 +68,7 @@ void osmos_stats(const Osmos *e, OsmosStats *s);
 bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
 const float *osmos_logits(const Osmos *e, uint32_t row);
 bool osmos_greedy(Osmos *e, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
+bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t n, int32_t *id, char err[OSMOS_ERR]);
 
 OsmosSeq *oseq_create(Osmos *e, char err[OSMOS_ERR]);
 void oseq_destroy(OsmosSeq *s);
@@ -129,6 +130,11 @@ osmos_batch
   sub-batch of MM_MAX_TOKENS), always the batch's last row. rows are the batch's own numbers: osmos_logits(row) its
   vocab floats (device memory), NULL for a row not kept; osmos_greedy: rows row0 .. row0 + rows - 1's greatest token
   each, the lowest id among equals, false for a row not kept.
+
+osmos_greedy_except
+  row's greatest token among those not in `except` (osmos/text/answer.h's answer_best: ties to the lower id, NaNs
+  never), from its logits copied to the host - osmos-serve's pick where an end is not taken (the answer rule). false
+  with why: a row not kept, a GPU call failed, every token excepted.
 
 oseq_create .. oseq_load
   a sequence: its position (tokens it holds), oseq_prompt (its prompt ends at end: the family may skip work no later
