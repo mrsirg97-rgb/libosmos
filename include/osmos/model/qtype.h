@@ -21,7 +21,9 @@
    F8_E4M3, one byte a value and no scales: a file of that is refused by its size, gguf.c) */
 #define QTYPES(X)                                                                                  \
   X(F32, 0, 1, 4, QTYPE_FILE | QTYPE_MV)                                                           \
+  X(Q5_1, 7, 32, 24, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                \
   X(Q8_0, 8, 32, 34, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
+  X(Q4_K, 12, 256, 144, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
   X(Q5_K, 13, 256, 176, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MM | QTYPE_EMBED)             \
   X(Q2_K, 10, 256, 84, QTYPE_IQ)                                                                   \
   X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MM | QTYPE_EMBED)             \

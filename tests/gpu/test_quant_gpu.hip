@@ -106,7 +106,7 @@ int main() {
     std::printf("[test_quant_gpu] skipped: no GPU\n");
     return 77;
   }
-  CHECK(!quant_known(0) && !quant_known(12) && quant_known(29));
+  CHECK(!quant_known(0) && !quant_known(11) && quant_known(29));  // 11: Q3_K, no row
   CHECK(!quant_dequant(0, nullptr, 8, nullptr, nullptr) && !quant_dequant(99, nullptr, 8, nullptr, nullptr));
   CHECK(!quant_dequant(13, nullptr, 100, nullptr, nullptr) && !quant_dequant(30, nullptr, 9, nullptr, nullptr));
   CHECK(!quant_dequant_f16(0, nullptr, 8, nullptr, nullptr) && !quant_dequant_f16(16, nullptr, 100, nullptr, nullptr));

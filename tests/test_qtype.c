@@ -58,7 +58,7 @@ static void rows_and_ids(void)
   for (uint32_t id = 0; id < ID_SWEEP; id++) /* each row found by its name, and only it */
     if (qtype_info(id))
       check(qtype_named(qtype_info(id)->name) == qtype_info(id), id, "its name finds another row");
-  check(!qtype_named("Q4_K") && !qtype_named(NULL) && !qtype_named(""), 0, "a name no row has found");
+  check(!qtype_named("Q3_K") && !qtype_named(NULL) && !qtype_named(""), 0, "a name no row has found");
   SAID_IF_CLEAN(before, "  %zu rows, ids unique and below %d\n", n, ID_SWEEP);
 }
 

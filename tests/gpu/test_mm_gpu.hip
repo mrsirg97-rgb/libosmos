@@ -65,6 +65,11 @@ static const Shape kUdShapes[] = {
 // split_parts) - and up (320 columns: the odd width's shape)
 static const Shape kQwenShapes[] = {{"blk.0.hc_attn_down.weight", -1}, {"blk.0.hc_attn_up.weight", -1}};
 constexpr const char* kQwenFirst = "%s/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
+// UD-Q4_K_XL's expert types (Q4_K gate / up, Q5_1 down), from several layers
+static const Shape kQwenQ4Shapes[] = {
+    {"blk.0.ffn_gate_exps.weight", 7}, {"blk.30.ffn_gate_exps.weight", 300}, {"blk.47.ffn_up_exps.weight", 11},
+    {"blk.0.ffn_down_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 300}};
+constexpr const char* kQwenQ4 = "%s/Models/qwen38/q4kxl-dl/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf";
 
 static uint32_t rng = 1017;
 static float uniform() {
@@ -315,6 +320,13 @@ int main() {
     gguf_destroy(q);
   } else {
     std::printf("  Qwen3.8's shapes skipped: no %s\n", qpath);
+  }
+  std::snprintf(qpath, sizeof qpath, kQwenQ4, std::getenv("HOME") ? std::getenv("HOME") : "");
+  if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_create(qpath, err)) {
+    for (const Shape& sh : kQwenQ4Shapes) shape(q, sh);
+    gguf_destroy(q);
+  } else {
+    std::printf("  Qwen3.8 UD-Q4_K_XL's shapes skipped: no %s\n", qpath);
   }
   std::printf("[test_mm_gpu] ok: every token the same bits alone, among 16, among 16 reversed, and among 33, 64 and "
               "%d (at its place and at another); a pair in one launch each its own bits; Q5_K repacked its bits\n",
