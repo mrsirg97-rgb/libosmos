@@ -8,6 +8,7 @@
 
 #include "osmos/run/engine.h"
 #include "osmos/serve/slots.h"
+#include "osmos/text/answer.h"
 
 #define SERVE_MAX_EOS 16
 
@@ -26,6 +27,7 @@ typedef struct Server
   uint32_t window;       /* a drafter seed's window: the positions it reads back from a prompt's end */
   int32_t eos[SERVE_MAX_EOS];
   int n_eos;
+  AnswerRule answer; /* --answer-after's: no end before a turn's answer has begun (blank NULL: off) */
 } Server;
 
 typedef struct Conv
@@ -49,6 +51,8 @@ void out(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 bool ids_push(Ids *a, int32_t x);
 bool parse_gen(char *line, Gen *g, char *why, size_t wn);
 bool server_eos(const Server *sv, int32_t t);
+bool server_answer(Server *sv, const Ids *held, const int32_t *extra, uint32_t n, uint32_t row, int32_t *pick,
+                   char err[OSMOS_ERR]);
 bool server_spec(const Server *sv, const Gen *g);
 
 bool conv_create(Conv *c, const Server *sv);

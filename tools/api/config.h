@@ -20,4 +20,5 @@ typedef struct Config
 } Config;
 
 bool config_read(const char *path, Config *c, char err[API_ERR]);
-bool config_argv(Config *c, const char *engine, int eos, char *argv[CONFIG_ARGS_MAX], char err[API_ERR]);
+bool config_argv(Config *c, const char *engine, int eos, const char *answer_after, char *argv[CONFIG_ARGS_MAX],
+                 char err[API_ERR]);

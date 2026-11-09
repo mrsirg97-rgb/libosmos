@@ -560,7 +560,7 @@ class Rig(unittest.TestCase):
                                row=self.PACKS["qwen38-ud-iq3_xxs"]["rig"])
             self.assertEqual((row["id"], row["window"], row["maxTokens"], row["reserve"], row["keepRecent"]),
                              ("qwen3.8-flash-next", 262144, 65536, 65536, 65536))
-            self.assertEqual((row["efforts"], row["effort"], row["aliases"]), (["low", "medium", "high"], "high",
+            self.assertEqual((row["efforts"], row["effort"], row["aliases"]), (["low", "medium", "xhigh"], "xhigh",
                                                                                ["qwen"]))
             with self.assertRaises(rig.RigError):             # the DeepSeek packs' 256K reply in a 262K window
                 rig.register(home, cfg, "/b/osmos-api", "/m/q/osmos.json", default=False, row=self.DS)

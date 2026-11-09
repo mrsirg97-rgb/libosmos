@@ -1,9 +1,11 @@
+#include <hip/hip_runtime_api.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "engine_impl.h"
 #include "osmos/model/gguf.h"
+#include "osmos/text/answer.h"
 
 /* the dispatch: a model's family by its file's general.architecture, then every call that family's */
 
@@ -20,6 +22,8 @@ struct Osmos
 {
   const OsmosFamily *fam;
   void *impl;
+  uint32_t vocab; /* a logits row's floats (osmos_greedy_except) */
+  float *row;     /* [vocab], a row copied out */
 };
 
 struct OsmosSeq
@@ -90,9 +94,11 @@ Osmos *osmos_create(const OsmosModel *m, const OsmosOptions *o, char err[OSMOS_E
   Osmos *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;
-  e->fam = m->fam;
+  e->fam = m->fam, e->vocab = (uint32_t)m->facts.vocab;
+  if (!(e->row = malloc((size_t)e->vocab * sizeof *e->row)))
+    return free(e), fail(err, "out of memory"), NULL;
   if (!(e->impl = m->fam->create(m->impl, o, err)))
-    return free(e), NULL;
+    return free(e->row), free(e), NULL;
   return e;
 }
 
@@ -101,7 +107,7 @@ void osmos_destroy(Osmos *e)
   if (!e)
     return;
   e->fam->destroy(e->impl);
-  free(e);
+  free(e->row), free(e);
 }
 
 uint64_t osmos_identity(const Osmos *e) { return e ? e->fam->identity(e->impl) : 0; }
@@ -132,6 +138,20 @@ const float *osmos_logits(const Osmos *e, uint32_t row) { return e ? e->fam->log
 bool osmos_greedy(Osmos *e, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
   return e && ids ? e->fam->greedy(e->impl, row0, rows, ids, err) : fail(err, "no engine");
+}
+
+bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t n, int32_t *id, char err[OSMOS_ERR])
+{
+  if (!e || !id)
+    return fail(err, "no engine");
+  const float *dev = e->fam->logits(e->impl, row);
+  if (!dev)
+    return fail(err, "the row's logits not kept");
+  if (hipDeviceSynchronize() != hipSuccess ||
+      hipMemcpy(e->row, dev, (size_t)e->vocab * sizeof *e->row, hipMemcpyDeviceToHost) != hipSuccess)
+    return fail(err, "a GPU call failed (a row's logits)");
+  *id = answer_best(e->row, e->vocab, except, n);
+  return *id >= 0 || fail(err, "every token of the row excepted or NaN");
 }
 
 uint32_t osmos_block(const Osmos *e) { return e ? e->fam->block(e->impl) : 0; }

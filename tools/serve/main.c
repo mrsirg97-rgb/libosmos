@@ -3,7 +3,7 @@
 
      osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
                      [--budget GiB|auto] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
-                     [--overlay <gguf>] [--serve]
+                     [--overlay <gguf>] [--answer-after <text>] [--serve]
 
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
    out: READY <max_ctx> stop[ multi=N] / T [<rid>] <token> / PP [<rid>] <done> <total> <ms> <tok/s> <reused> /
@@ -15,6 +15,9 @@
    --no-guess: no experts guessed a layer ahead (OsmosOptions' no_guess - a model whose misses are few).
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
+   --answer-after: the reasoning's end token's text (</think>), or #<id>: no --eos token is taken while the turn's
+   answer past it is whitespace alone - the row's best other token is (osmos/text/answer.h; osmos-api passes its
+   dialect's text; tools/serve/answer_test.py an id).
    conversations are kept (maya #356; OSMOS_SLOT_KEEP=0: not): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
    (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least, RAM's room the
    available above 8 GiB (OSMOS_SLOT_RAM_GB lowers it; past it a state streams to the folder in pieces),
@@ -27,7 +30,9 @@
 
 #include "serve.h"
 #include "osmos/run/fit.h"
+#include "osmos/model/gguf.h"
 #include "osmos/run/gpu.h"
+#include "osmos/text/tokenizer.h"
 #include "osmos/version.h"
 
 static const char *opt(int argc, char **argv, const char *name, const char *dflt)
@@ -79,6 +84,24 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
   return true;
 }
 
+/* --answer-after's rule, from the model's own tokenizer (the token of its text, its blank tokens) */
+static bool answer_of(Server *sv, const char *model, const char *after, char err[OSMOS_ERR])
+{
+  char gerr[GGUF_ERR] = "", terr[TOKENIZER_ERR] = "", aerr[ANSWER_ERR] = "";
+  Gguf *g = gguf_header(model, gerr);
+  Tokenizer *t = g ? tokenizer_create(g, terr) : NULL;
+  char *rest = NULL;
+  const long n = after[0] == '#' ? strtol(after + 1, &rest, 10) : -1;
+  const int32_t id = after[0] == '#' ? (rest > after + 1 && !*rest ? (int32_t)n : -1) : t ? tokenizer_find(t, after) : -1;
+  const bool ok = t && answer_rule_create(&sv->answer, t, id, aerr);
+  if (!ok)
+    snprintf(err, OSMOS_ERR, "--answer-after: %s", !g ? gerr : !t ? terr : aerr);
+  else
+    out("NOTE answer-after %d\n", sv->answer.after);
+  tokenizer_destroy(t), gguf_destroy(g);
+  return ok;
+}
+
 int main(int argc, char **argv)
 {
   if (argc == 2 && !strcmp(argv[1], "--version"))
@@ -106,6 +129,8 @@ int main(int argc, char **argv)
     sv.eos[sv.n_eos++] = (int32_t)atol(x);
   free(list);
   char err[OSMOS_ERR] = "";
+  if (opt(argc, argv, "--answer-after", NULL) && !answer_of(&sv, model, opt(argc, argv, "--answer-after", ""), err))
+    return die(err);
   const OsmosFiles files = {model, opt(argc, argv, "--engram", NULL), opt(argc, argv, "--overlay", NULL)};
   OsmosModel *m = osmos_open(&files, err);
   if (!m)
@@ -145,5 +170,6 @@ int main(int argc, char **argv)
   serve_unbuild(&sv, conv, lanes);
   free(conv);
   osmos_close(m);
+  answer_rule_destroy(&sv.answer);
   return rc;
 }

@@ -50,6 +50,17 @@ bool server_eos(const Server *sv, int32_t t)
   return false;
 }
 
+/* row's pick, the row's tokens the held then extra[0 .. n): an end while the turn's answer has not begun (the reasoning
+   closed, whitespace alone since: --answer-after's rule) is not taken - the row's best other token is. the same
+   rule for a plain step's row and a drafted round's, so drafting keeps the bits */
+bool server_answer(Server *sv, const Ids *held, const int32_t *extra, uint32_t n, uint32_t row, int32_t *pick,
+                   char err[OSMOS_ERR])
+{
+  if (!sv->answer.blank || !server_eos(sv, *pick) || !answer_unbegun(&sv->answer, held->v, held->n, extra, n))
+    return true;
+  return osmos_greedy_except(sv->e, row, sv->eos, (uint32_t)sv->n_eos, pick, err);
+}
+
 bool parse_gen(char *line, Gen *g, char *why, size_t wn)
 {
   memset(g, 0, sizeof *g);

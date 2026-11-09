@@ -147,9 +147,17 @@ void round_all(Multi *m)
       snprintf(in[j].ln->c.err, sizeof in[j].ln->c.err, "%s", err), lane_fail(m, in[j].ln);
     return;
   }
+  bool failed[MAX_LANES] = {false};
+  for (int j = 0; j < nin; j++) /* a lane's row i: its held, then its toks[off .. off + i] */
+    for (int i = 0; i <= in[j].k && !failed[j]; i++)
+      if (!server_answer(sv, &in[j].ln->c.held, toks + in[j].off, (uint32_t)i + 1, (uint32_t)(in[j].off + i),
+                         &picks[in[j].off + i], in[j].ln->c.err))
+        failed[j] = true, lane_fail(m, in[j].ln);
   for (int j = 0; j < nin; j++)
   {
     Lane *ln = in[j].ln;
+    if (failed[j])
+      continue;
     if (ln->g.spec)
       settle(m, &in[j], toks, picks);
     else if (!ids_push(&ln->c.held, toks[in[j].off]))
