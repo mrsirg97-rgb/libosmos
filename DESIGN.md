@@ -2699,6 +2699,22 @@ text at the floors (0.1, 0.1), 96 tokens in 37 rounds with the MTP head (57% of 
 and 31 with DFlash2 (78% of 82, 3.06 a round). The floors were swept for the MTP head; on the chat trajectory they keep
 284 of DFlash2's 511 drafts - its A/B (tok/s and J a token, low-power) sweeps them again.
 
+**Measured: the MTP head stays the default (2026-11-09, low-power).** q4x_bench drafted with either (its drafter
+argument's architecture), 256 tokens decoded each, two rounds, the order reversed in the second, tools/power.py;
+every run of a prompt the same tokens. A chat prompt (43 tokens): plain 26.7 tok/s 2.79 J a token, MTP 45.4 / 1.57
+(3.41 a round), DFlash2 at the engine's floors 54.9 / 1.29 (3.76 a round), DFlash2 with none 48.7 / 1.46 (4.13 a
+round: more drafts kept, more rejected ones verified). The calibration text (512): plain 26.6 / 2.91, MTP 44.0 /
+1.73, DFlash2 39.4 / 1.97, none 31.9 / 2.45. The head's shortlist (MTP's first 65,536 ids) for DFlash2: chat 53.1 /
+1.34 against the whole vocabulary's 54.3 / 1.29 (3.51 a round against 3.76: picks past the shortlist lost), prose
+40.5 / 1.92 against 39.4 / 1.97 - a wash, not taken. Then real agent work (tools/bench/rig_replay.py: 16 points of
+the operator's rig sessions run on Qwen3.8, an assistant turn's context of 1.1K-7.7K tokens - its conversation, tool
+calls and results - in Qwen's own chat template): MTP 45.8 tok/s 1.67 J a token, DFlash2 41.7 / 1.83, the two rounds
+within 0.1 tok/s; DFlash2 ahead on 3 of the 16. On an agent's turns the MTP head drafts as much or more a round
+(2.5-4.4) and its round costs less (its slowest 84-88 ms, DFlash2's 95-109: the whole output head read and the
+window's attention a round). So DFlash2 ships as a pack's option and the MTP head stays Qwen's default. The points
+are the earlier turns of long sessions (most run to 60-100K tokens; a bench's prompt time bounded). Later work, if
+DFlash2 is taken up again: several sequences' blocks in one drafter pass, the floors swept for it.
+
 **A race it found.** The rollback test (two tokens past each round, rolled back) came out different bits run to run.
 The drafter was not the cause: the target's own steps of 9 to 16 tokens were. q4x_moe.hip's tiles_kernel read each
 scan's total from the last expert's place with no barrier before that expert's thread made its scan exclusive; read

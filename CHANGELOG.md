@@ -2,6 +2,14 @@
 
 ## [0.5.12]: (in progress)
 
+- **DFlash2 as Qwen's drafter, an option** (incoai's Qwen3.8-Flash-Next-DFlash2, Apache-2.0; tools/convert/
+  dflash2_gguf.py makes its 0.64 GB Q8_0 GGUF). A pack whose `drafter` is that file drafts with it: a block of 7 drafts
+  from one drafter pass, fed the target's own layers 5-45. Its drafts are the reference implementation's (511 of 511,
+  test_q4x_dflash_gpu) and the answer's bits are the target's whatever drafts. The MTP head stays the default - on real
+  agent work it wins. Measured at low-power, 256 tokens decoded each, two rounds: on a chat prompt DFlash2 54.9 tok/s
+  and 1.29 J a token against MTP's 45.4 and 1.57 (+21%); on prose 39.4 / 1.97 against 44.0 / 1.73 (-10%); on 16
+  points of real rig sessions (tools/bench/rig_replay.py: an agent's turn, its tool calls and results, Qwen's chat
+  template) 41.7 / 1.83 against 45.8 / 1.67 (-9%, ahead on 3 of 16).
 - **Fixed: Qwen's steps of 9 to 16 tokens were not always the same bits.** The MoE's expert tables (one kernel's
   block) read each scan's total from the last expert's place while that expert's own thread made it exclusive - no
   barrier between. Read after, the totals came up short, and the last expert's slots and entries were cleared as past
@@ -10,6 +18,9 @@
   sizes) and prompt-sized steps were not seen to in the runs made, but the race was in the kernel for any step.
   Since 0.5.10. A barrier (`test_q4x_forward_gpu`: the 256 tokens as steps of 9, each one's rows the
   one batch's bits - 3 of 3 runs failed without it). Found building DFlash2's rollback test.
+- **tools/bench/energy.py takes a window shorter than the power samples' spacing** (a 43-token prompt's quarter
+  second): the two samples around it, when they are one spacing apart. A window with none near it is still refused
+  (the csv not the run's).
 - **Qwen's n-gram table can stay on the SSD** (osmos-serve `--stream-ngram`, `"stream_ngram": true` in osmos.json),
   as DeepSeek's Engram does. The table (`per_layer_token_embd`, 26.8 GiB of UD-IQ3_XXS) is read a step's rows at a time
   (16 rows of 90 bytes a token) by 64 readers while the GPU runs the layer before the one that needs them, then
