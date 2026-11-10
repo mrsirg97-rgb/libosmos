@@ -102,15 +102,31 @@ __global__ void x16_attn_kernel(const float* x, uint32_t xs, uint32_t n, uint32_
   x16[mm::x16_at(t, c, cols)] = (_Float16) v;
 }
 
-// slot s: row idx[s] of x (-1: zero), to f16
+// slot s: row idx[s] of x (-1: zero), to f16 - a thread 8 adjacent columns of a slot (half a fragment's row: 16
+// bytes, x16_at's contiguous run), threads in the tiled order so a wave's stores fill whole lines; each value
+// x16_put's rounding and flag, so the same bytes as a value a thread (its 2-byte stores scattered: a 2048-token
+// step on the IQ3 pack 2.51 -> 1.09 ms a layer, low-power, 2026-11-10)
+constexpr uint32_t kRun = 8;
 __global__ void x16_rows_kernel(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols,
                                 _Float16* x16, int32_t* overflow) {
-  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= (uint64_t) slots * cols) return;
-  const int32_t r = idx[i / cols];
-  const float v = r >= 0 ? x[(uint64_t) r * xs + i % cols] : 0.0f;
-  if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);
-  x16[mm::x16_at((uint32_t) (i / cols), (uint32_t) (i % cols), cols)] = (_Float16) v;
+  const uint64_t o = ((uint64_t) blockIdx.x * kThreads + threadIdx.x) * kRun;  // the run's first half, tiled
+  const uint64_t tile = (uint64_t) mm::kTile * cols;
+  const uint32_t in = (uint32_t) (o % tile), frag = in % mm::kFrag;
+  const uint32_t t = (uint32_t) (o / tile) * mm::kTile + frag / mm::kTile;
+  if (t >= slots) return;
+  const uint32_t c = in / mm::kFrag * mm::kTile + frag % mm::kTile;
+  const int32_t r = idx[t];
+  float v[kRun] = {};
+  if (r >= 0) {
+    const float4* p = (const float4*) (x + (uint64_t) r * xs + c);
+    const float4 a = p[0], b = p[1];
+    v[0] = a.x, v[1] = a.y, v[2] = a.z, v[3] = a.w, v[4] = b.x, v[5] = b.y, v[6] = b.z, v[7] = b.w;
+  }
+  bool over = false;
+  _Float16 h[kRun];
+  for (uint32_t j = 0; j < kRun; j++) over |= !(fabsf(v[j]) <= mm::kF16Max), h[j] = (_Float16) v[j];
+  if (over) atomicOr(overflow, 1);
+  __builtin_memcpy(x16 + o, h, sizeof h);
 }
 
 // the column tiles a block takes (a weight slab decoded once for CT WMMAs): as many as the tokens need, up to the
@@ -132,6 +148,46 @@ bool group_ct(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t
   return hipGetLastError() == hipSuccess;
 }
 
+// the experts' multi-tile steps by type, each the bits of group_ct's (the sums in tile's order: test_mm_gpu's mm_group
+// at 24 / 37 / 64 / 100 / 128 tokens against mm_run): 2-4 column tiles with 2 row tiles a wave (tile_rm: an x fragment
+// two WMMAs), 8 as gemm_kernel's 64 x 128 blocks - measured a type at a time (tools/bench/mmsweep's experts, real
+// blocks, 160 experts cold, low-power, 2026-11-09): Q4_K +22 / +42 / +17% at 24 / 37 / 64 tokens, +13% at 128; Q5_1
+// +6 / +28 / +8%, +42%; IQ4_XS +7 / +6 / +9% (its 128s level: group_ct's); IQ4_NL and Q2_0 level at 24-64, +16% and
+// +60% at 128. IQ3_XXS's 128 x 8 shape takes no 2 row tiles (70 KB of LDS). DeepSeek's (2,304 x 5,120, 64 experts):
+// 2 row tiles 25-68% slower for every codebook type (IQ2_XXS / XS / S, IQ1_S: twice a lane's grid lookups), Q2_K
+// +30 / +7 / +7%; the gemm at 128 IQ3_XXS +41%, Q2_K +35%, IQ2_S +16%, IQ1_S +6-10%, IQ2_XXS and IQ2_XS -4 .. +6% by
+// shape (not taken); Qwen's IQ3_XXS gate level (-1%). the other types not measured: group_ct's
+template <quant::Type T>
+struct GroupPlan {
+  static constexpr bool kRm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_XS || T == quant::kQ2_K;
+  static constexpr bool kGemm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_NL || T == quant::kQ2_0 ||
+                                T == quant::kIQ3_XXS || T == quant::kQ2_K || T == quant::kIQ2_S || T == quant::kIQ1_S;
+};
+constexpr int kGroupRm = 2, kGroupGemmRm = 2, kGroupGemmRn = 2, kGroupGemmWr = 2, kGroupGemmWc = 4;
+
+template <quant::Type T, int CT>
+bool group_rm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
+              uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
+              uint32_t ys, hipStream_t s) {
+  using S = typename Tuned<T>::S;
+  const uint32_t z = (max_cnt + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::group_rm_kernel<T, S, CT, kGroupRm><<<dim3(rows / (mm::kTile * kGroupRm), n_mat, z), mm::kWave * S::kWaves, 0, s>>>(
+      (const uint8_t* const*) w, cnt, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T>
+bool group_gemm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
+                uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
+                uint32_t ys, hipStream_t s) {
+  using S = typename Tuned<T>::S;
+  constexpr uint32_t BM = mm::kTile * kGroupGemmRm * kGroupGemmWr, BN = mm::kTile * kGroupGemmRn * kGroupGemmWc;
+  mm::group_gemm_kernel<T, S, kGroupGemmRm, kGroupGemmRn, kGroupGemmWr, kGroupGemmWc>
+      <<<dim3(rows / BM, n_mat, (max_cnt + BN - 1) / BN), 256, 0, s>>>((const uint8_t* const*) w, cnt, rows, cols,
+                                                                      (const _Float16*) x16, xoff, xts, y, yoff, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
 template <quant::Type T>
 bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
                   uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
@@ -140,11 +196,23 @@ bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint
   if (rows % mm::kTile || cols % quant::Block<T>::values || cols % S::kSlab || xts < cols || xts % mm::kTile ||
       !max_cnt || max_cnt > MM_MAX_TOKENS)
     return false;
+  constexpr uint32_t gemm_rows = mm::kTile * kGroupGemmRm * kGroupGemmWr;
+  const bool rm = GroupPlan<T>::kRm && rows % (mm::kTile * kGroupRm) == 0;
+  const bool gemm = GroupPlan<T>::kGemm && rows % gemm_rows == 0 && cols / S::kSlab >= (uint32_t) S::kWaves;
   switch (col_tiles<T>(max_cnt)) {
     case 1: return group_ct<T, 1>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    case 2: return group_ct<T, 2>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    case 4: return group_ct<T, 4>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    default: return group_ct<T, Tuned<T>::kMaxCt>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    case 2:
+      if constexpr (GroupPlan<T>::kRm)
+        if (rm) return group_rm<T, 2>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+      return group_ct<T, 2>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    case 4:
+      if constexpr (GroupPlan<T>::kRm)
+        if (rm) return group_rm<T, 4>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+      return group_ct<T, 4>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    default:
+      if constexpr (GroupPlan<T>::kGemm)
+        if (gemm) return group_gemm<T>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+      return group_ct<T, Tuned<T>::kMaxCt>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
   }
 }
 
@@ -341,6 +409,52 @@ extern "C" bool mm_run_silu(uint32_t type, const void* w, uint32_t rows, uint32_
   }
 }
 
+// mm_run_gated_mean's launch: the shape launch_ct takes for the up's rows (the same sums), a matrix the gemm would take
+// refused (the caller's mm_run and q4x_hc_gated_mean then)
+template <quant::Type T, int CT, typename S>
+bool gm_shape(const void* w, uint32_t cols, const void* x16, uint32_t n, const mm::GatedMean& gm, hipStream_t s) {
+  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::kernel_gated_mean<T, S, CT><<<dim3(gm.dim / mm::kTile, 1, z), mm::kWave * S::kWaves, 0, s>>>(
+      (const uint8_t*) w, cols, (const _Float16*) x16, n, gm);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T, int CT>
+bool gm_ct(const void* w, uint32_t cols, const void* x16, uint32_t n, const mm::GatedMean& gm, hipStream_t s) {
+  const uint32_t rows = gm.hc * gm.dim;
+  const Mats m = {{w, nullptr}, {rows, 0}, {nullptr, nullptr}, {rows, 0}};
+  if constexpr (kGemm<T>)
+    if (gemm_takes<T>(m, cols, n)) return false;
+  if (odd<T>(cols)) return gm_shape<T, CT, typename Odd<T>::S>(w, cols, x16, n, gm, s);
+  return cols < kShortCols ? gm_shape<T, CT, typename Short<T>::S>(w, cols, x16, n, gm, s)
+                           : gm_shape<T, CT, typename Tuned<T>::S>(w, cols, x16, n, gm, s);
+}
+
+template <quant::Type T>
+bool gm_launch(const void* w, uint32_t cols, const void* x16, uint32_t n, const mm::GatedMean& gm, hipStream_t s) {
+  const int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  if (cols % quant::Block<T>::values || cols % slab) return false;
+  switch (col_tiles<T>(n)) {
+    case 1: return gm_ct<T, 1>(w, cols, x16, n, gm, s);
+    case 2: return gm_ct<T, 2>(w, cols, x16, n, gm, s);
+    case 4: return gm_ct<T, 4>(w, cols, x16, n, gm, s);
+    default: return gm_ct<T, Tuned<T>::kMaxCt>(w, cols, x16, n, gm, s);
+  }
+}
+
+extern "C" bool mm_run_gated_mean(uint32_t type, const void* w, uint32_t hc, uint32_t dim, uint32_t cols,
+                                  const void* x16, uint32_t n, const float* xn, float* out, void* out16, uint32_t row0,
+                                  int32_t* overflow, void* stream) {
+  if (!w || !x16 || !xn || !out || out16 == x16 || (out16 && !overflow) || !n || n > MM_MAX_TOKENS || !hc ||
+      hc > MM_GATED_MEAN_MAX_HC || !dim || dim % mm::kTile)
+    return false;
+  const mm::GatedMean gm = {xn, out, (_Float16*) out16, overflow, row0, hc, dim};
+  switch (type) {
+    case quant::kQ8_0: return gm_launch<quant::kQ8_0>(w, cols, x16, n, gm, (hipStream_t) stream);
+    default: return false;  /* the mixers' up's type alone, so far */
+  }
+}
+
 extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
                        float* y, uint32_t ys, void* stream) {
   return run(type, Mats{{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}}, cols, x16, n, (hipStream_t) stream);
@@ -355,9 +469,10 @@ extern "C" bool mm_run2(uint32_t type, const void* w0, uint32_t rows0, float* y0
 
 extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,
                             int32_t* overflow, void* stream) {
-  if (!slots || !cols || cols % mm::kTile || xs < cols) return false;
-  const uint64_t work = (uint64_t) slots * cols;
-  x16_rows_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+  // a run's two float4 loads: x's rows 16-byte aligned (hipMalloc's, a stride of 4s)
+  if (!slots || !cols || cols % mm::kTile || xs < cols || xs % 4 || (uintptr_t) x % 16) return false;
+  const uint64_t runs = (uint64_t) (slots + mm::kTile - 1) / mm::kTile * mm::kTile * cols / kRun;
+  x16_rows_kernel<<<(unsigned) ((runs + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
       x, xs, idx, slots, cols, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
 }

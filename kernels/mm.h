@@ -3,6 +3,7 @@
 // (f32 <- f16, 16 x 16 x 16) accumulating against the tokens' f16 activations. a column's results are the same bits
 // whatever the other columns hold (measured: test_mm_gpu), so a token's are whatever it is batched with.
 #pragma once
+#include "block.h"
 #include "quant.h"
 
 namespace mm {
@@ -93,12 +94,27 @@ struct Silu {
   uint32_t cols;
 };
 
-template <quant::Type T, class S, int CT, bool E = false>
+// the chunks a lane decodes together (quant::decode_hn): Q4_K's 2 of a group (its scales once), else 1 - when a
+// slab's row (CPR chunks) and a lane's share (CH) both hold whole runs
+#ifndef RUN_MAX
+#define RUN_MAX 4
+#endif
+template <quant::Type T>
+constexpr bool kRuns = T == quant::kQ4_K || T == quant::kIQ3_XXS || T == quant::kIQ4_NL || T == quant::kIQ4_XS;
+template <quant::Type T, int CPR, int CH>
+constexpr int run_chunks() {
+  return !kRuns<T> ? 1 : CPR % RUN_MAX == 0 && CH % RUN_MAX == 0 ? RUN_MAX : CPR % 2 == 0 && CH % 2 == 0 ? 2 : 1;
+}
+
+// the store tile ends with (y's row r of token t); an epilogue's own instead: take(ct, j, t, s) for each of wave 0's
+// sums - its tile ct, its rows 2 j + half, token t (t >= n among them: the epilogue's to skip)
+struct StoreY {};
+template <quant::Type T, class S, int CT, bool E = false, class Take = StoreY>
 __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __restrict__ w, uint32_t row0,
                                                            uint32_t cols, const _Float16* __restrict__ x16,
                                                            uint32_t xts, uint32_t c0, uint32_t n,
                                                            float* __restrict__ y, uint32_t ys, _Float16* lds_all,
-                                                           Silu ep = {}) {
+                                                           Silu ep = {}, Take take = {}) {
   constexpr int SL = S::kSlab, G = SL / kTile;
   const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
   _Float16* lds = lds_all + wave * kTile * S::kRowLds;
@@ -123,6 +139,22 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
     }
   } else
   for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
+    constexpr int CPR = SL / quant::kChunk, NR = run_chunks<T, CPR, S::kLane>();
+    if constexpr (NR > 1) {  // a lane NR of a row's chunks a run (decode_hn: a group's scales once), U chunks in flight
+      static_assert(S::kUnroll % NR == 0 || NR % S::kUnroll == 0, "runs whole in the unroll");
+      constexpr int RU = S::kUnroll > NR ? S::kUnroll / NR : 1;
+#pragma unroll 1
+      for (int i0 = 0; i0 < S::kLane / NR; i0 += RU) {
+#pragma unroll
+        for (int i = i0; i < i0 + RU; i++) {
+          const int d = lane + kWave * i, r = d / (CPR / NR), c = (d % (CPR / NR)) * NR;
+          int kk;
+          h8 hv[NR];
+          quant::decode_hn<T, NR>(quant::at<T>(w, row0 + r, cols, k0 / quant::kChunk + c, &kk), kk, hv);
+          for (int u = 0; u < NR; u++) *(h8*) (lds + r * S::kRowLds + (c + u) * quant::kChunk) = hv[u];
+        }
+      }
+    } else
 #pragma unroll 1
     for (int i0 = 0; i0 < S::kLane; i0 += S::kUnroll) {
 #pragma unroll
@@ -176,7 +208,11 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
           s = u / (1.0f + expf(-u));
           if (t < n) x16_put(ep.x16, t, row0 + 2 * j + half, ep.cols, s, ep.overflow);
         }
-        if (t < n) y[(uint64_t) t * ys + row0 + 2 * j + half] = s;
+        if constexpr (__is_same(Take, StoreY)) {
+          if (t < n) y[(uint64_t) t * ys + row0 + 2 * j + half] = s;
+        } else {
+          take(ct, j, t, s);
+        }
       }
     }
   }
@@ -284,6 +320,258 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
   }
 }
 
+// RM row tiles a wave, a multi-tile step (the experts' prompt-sized matmul): tile's partition a wave (slabs w, w + W,
+// ...), its slab decoded for 16 RM rows into the wave's LDS, each x fragment then feeding RM WMMAs - tile loads a
+// fragment a WMMA. every output's sums in tile's order (its partition's slabs in turn, each its 16-value steps; the
+// partitions summed in w's order): tile's bits (test_mm_gpu, mm_group at 37 / 64 / 128 tokens). x double-buffered as
+// tile's kPipe. LDS: the slabs' 16 RM rows a wave, or the partial sums RM times tile's
+template <class S, int RM>
+struct RmLds {
+  static constexpr int kSlab = S::kWaves * RM * kTile * S::kRowLds, kPart = S::kWaves * RM * 8 * kWave * 2;
+  static constexpr int kHalves = kSlab > kPart ? kSlab : kPart;
+};
+template <quant::Type T, class S, int CT, int RM, bool PIPE = false>
+__device__ __attribute__((always_inline)) inline void tile_rm(const uint8_t* __restrict__ w, uint32_t row0,
+                                                              uint32_t cols, const _Float16* __restrict__ x16,
+                                                              uint32_t xts, uint32_t c0, uint32_t n,
+                                                              float* __restrict__ y, uint32_t ys, _Float16* lds_all) {
+  static_assert(CT > 1 && RM > 1, "tile's own for a column tile or a row tile");
+  constexpr int SL = S::kSlab, G = SL / kTile, CPR = SL / quant::kChunk, CH = RM * S::kLane;
+  constexpr int RN_ = run_chunks<T, CPR, CH>();
+  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  _Float16* lds = lds_all + wave * RM * kTile * S::kRowLds;
+  const int tiles = (int) ((n - c0 + kTile - 1) / kTile) < CT ? (int) ((n - c0 + kTile - 1) / kTile) : CT;
+  const _Float16* xb[CT];
+  for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
+  f8 acc[RM][CT] = {};
+  for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
+#pragma unroll
+    for (int i = 0; i < CH / RN_; i++) {  /* the whole slab's chunks in flight: RM times tile's; a lane RN_ of a row's */
+      const int d = lane + kWave * i, r = d / (CPR / RN_), c = (d % (CPR / RN_)) * RN_;
+      int kk;
+      h8 hv[RN_];
+      quant::decode_hn<T, RN_>(quant::at<T>(w, row0 + r, cols, k0 / quant::kChunk + c, &kk), kk, hv);
+      for (int u = 0; u < RN_; u++) *(h8*) (lds + r * S::kRowLds + (c + u) * quant::kChunk) = hv[u];
+    }
+    __builtin_amdgcn_wave_barrier();
+    h16 a[RM][G];
+    for (int rm = 0; rm < RM; rm++)
+      for (int g = 0; g < G; g++) a[rm][g] = *(const h16*) (lds + (rm * kTile + col) * S::kRowLds + g * kTile);
+    __builtin_amdgcn_wave_barrier();
+    if (PIPE && kPipe<G, CT> && tiles == CT) {  // every tile real: the next tile's x loaded under this one's WMMAs
+      h16 bc[G], bn[G];
+      for (int g = 0; g < G; g++) bc[g] = *(const h16*) (xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
+#pragma unroll
+      for (int ct = 0; ct < CT; ct++) {
+        if (ct + 1 < CT)
+          for (int g = 0; g < G; g++) bn[g] = *(const h16*) (xb[ct + 1] + (uint64_t) (k0 / kTile + g) * kFrag);
+        for (int rm = 0; rm < RM; rm++)
+          for (int g = 0; g < G; g++) acc[rm][ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[rm][g], bc[g], acc[rm][ct]);
+        if (ct + 1 < CT)
+          for (int g = 0; g < G; g++) bc[g] = bn[g];
+      }
+    } else
+#pragma unroll
+      for (int ct = 0; ct < CT; ct++)
+        if (ct < tiles) {
+          h16 bx[G];
+          for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
+          for (int rm = 0; rm < RM; rm++)
+            for (int g = 0; g < G; g++) acc[rm][ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[rm][g], bx[g], acc[rm][ct]);
+        }
+  }
+  float* part = (float*) lds_all;
+#pragma unroll
+  for (int ct = 0; ct < CT; ct++) {
+    if (ct >= tiles) break;  // the block's: every wave the same tiles
+    __syncthreads();         // the LDS free: the slabs done, or the tile before summed
+    for (int rm = 0; rm < RM; rm++)
+      for (int j = 0; j < 8; j++) part[((wave * RM + rm) * 8 + j) * kWave + lane] = acc[rm][ct][j];
+    __syncthreads();
+    if (wave == 0) {
+      const uint32_t t = c0 + ct * kTile + col;
+      for (int rm = 0; rm < RM; rm++)
+        for (int j = 0; j < 8; j++) {
+          float s = part[(rm * 8 + j) * kWave + lane];
+          for (int v = 1; v < S::kWaves; v++) s += part[((v * RM + rm) * 8 + j) * kWave + lane];
+          if (t < n) y[(uint64_t) t * ys + row0 + rm * kTile + 2 * j + half] = s;
+        }
+    }
+  }
+}
+
+// group_kernel with RM row tiles a wave (tile_rm): its grid's rows RM times fewer
+template <quant::Type T, class S, int CT, int RM, bool PIPE = false>
+__global__ __launch_bounds__(kWave* S::kWaves) void group_rm_kernel(const uint8_t* const* __restrict__ w,
+                                                                     const int32_t* __restrict__ cnt, uint32_t cols,
+                                                                     const _Float16* __restrict__ x16,
+                                                                     const uint32_t* __restrict__ xoff, uint32_t xts,
+                                                                     float* __restrict__ y,
+                                                                     const uint32_t* __restrict__ yoff, uint32_t ys) {
+  __shared__ __attribute__((aligned(32))) _Float16 lds[RmLds<S, RM>::kHalves];
+  const uint32_t m = blockIdx.y, c0 = blockIdx.z * kTile * CT;
+  if (c0 >= (uint32_t) cnt[m]) return;  // a block past its matrix's tokens: nothing
+  tile_rm<T, S, CT, RM, PIPE>(w[m], blockIdx.x * kTile * RM, cols, x16 + xoff[m], xts, c0, (uint32_t) cnt[m], y + yoff[m],
+                        ys, lds);
+}
+
+// the experts' prompt-sized matmul as gemm_kernel's blocks: n matrices of one shape (blockIdx.y the matrix m: its
+// weights wt[m], its first cnt[m] tokens, its x the tiled x16 from x16a + xoff[m] with rows xts long, its y at
+// ya + yoff[m] + t * ys) - group_kernel's addressing on gemm_kernel's body, so its tiles' sums in tile's order: the
+// same bits as group_kernel at every count (a block past the matrix's tokens nothing)
+// a stage: up to kStageValues of one partition's slabs in its order (partition p's slabs p, p + W, ...) - a slab of
+// 32 values alone would be a barrier every 8 WMMAs; the sums' order the partition's either way
+constexpr int kStageValues = 64;
+template <class S>
+constexpr int stage_slabs() {
+  return S::kSlab >= kStageValues ? 1 : kStageValues / S::kSlab;
+}
+
+template <quant::Type T, class S, int RM, int RN, int WR, int WC>
+__global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* __restrict__ wt, const int32_t* __restrict__ cnt,
+                                                          uint32_t rows, uint32_t cols, const _Float16* __restrict__ x16a,
+                                                          const uint32_t* __restrict__ xoff, uint32_t xts,
+                                                          float* __restrict__ ya, const uint32_t* __restrict__ yoff,
+                                                          uint32_t ys) {
+  static_assert(WR * WC * kWave == 256, "8 waves");
+  constexpr int SL = S::kSlab, G = SL / kTile, W = S::kWaves, BM = kTile * RM * WR, BN = kTile * RN * WC;
+  constexpr int SP = stage_slabs<S>();
+  constexpr int RL = SP * SL + kPad, CPR = SL / quant::kChunk, CH = BM * CPR / 256;  // a thread's chunks a slab
+  static_assert((BM * CPR) % 256 == 0, "a slab's chunks whole");
+  __shared__ __attribute__((aligned(32))) _Float16 lds2[2][BM * RL];
+  const uint32_t m = blockIdx.y, n = (uint32_t) cnt[m];
+  const uint8_t* w = wt[m];
+  const _Float16* x16 = x16a + xoff[m];
+  float* y = ya + yoff[m];
+  const uint32_t row0 = blockIdx.x * BM, c0 = blockIdx.z * BN;
+  if (row0 >= rows || c0 >= n) return;  // the whole block: past the matrix's rows or its tokens
+  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  const int wr = wave / WC, wc = wave % WC;
+  const _Float16* xb[RN];
+  bool live[RN];
+  for (int j = 0; j < RN; j++) {
+    const uint32_t t0 = c0 + (wc * RN + j) * kTile;
+    live[j] = t0 < n, xb[j] = x16 + x16_at(t0 + col, 0, xts);
+  }
+  f8 run[RM][RN], acc[RM][RN];
+  const uint32_t slabs = cols / SL;  // >= W (the launch's): every partition a slab at least
+  auto in_part = [&](int p) { return (int) ((slabs - (uint32_t) p + W - 1) / W); };  // partition p's slabs
+  // a stage: partition p's slabs q .. q + ns - 1 (slab p + i W)
+  // Q4_K: a thread NR chunks of one row's slab (quant::decode_hn, the group's scales once) - the stage's same chunks
+  constexpr int NR = !kRuns<T> ? 1 : CPR % 4 == 0 && (BM * SP * CPR / 4) % 256 == 0 && T != quant::kQ4_K ? 4
+                    : CPR % 2 == 0 && (BM * SP * CPR / 2) % 256 == 0 ? 2 : 1;
+  constexpr int RUNS = BM * SP * CPR / NR / 256;  // a thread's runs a stage
+  auto decode_runs = [&](int p, int q, int ns, h8 (*out)[NR]) {
+#pragma unroll
+    for (int c = 0; c < RUNS; c++) {
+      const int u = threadIdx.x + 256 * c, r = u / (SP * CPR / NR), e = u % (SP * CPR / NR), i = e / (CPR / NR);
+      const int ck = (e % (CPR / NR)) * NR;
+      if (i < ns) {
+        const uint32_t k0 = ((uint32_t) p + (uint32_t) (q + i) * W) * SL;
+        const uint32_t row = row0 + r < rows ? row0 + r : rows - 1;
+        int kk;
+        quant::decode_hn<T, NR>(quant::at<T>(w, row, cols, k0 / quant::kChunk + ck, &kk), kk, out[c]);
+      }
+    }
+  };
+  auto put_runs = [&](_Float16* buf, int ns, h8 (*v)[NR]) {
+#pragma unroll
+    for (int c = 0; c < RUNS; c++) {
+      const int u = threadIdx.x + 256 * c, r = u / (SP * CPR / NR), e = u % (SP * CPR / NR), i = e / (CPR / NR);
+      const int ck = (e % (CPR / NR)) * NR;
+      if (i < ns)
+        for (int x = 0; x < NR; x++) *(h8*) (buf + r * RL + i * SL + (ck + x) * quant::kChunk) = v[c][x];
+    }
+  };
+  auto decode = [&](int p, int q, int ns, h8 (*out)[CH]) {
+#pragma unroll
+    for (int i = 0; i < SP; i++)
+      if (i < ns) {
+        const uint32_t k0 = ((uint32_t) p + (uint32_t) (q + i) * W) * SL;
+#pragma unroll
+        for (int c = 0; c < CH; c++) {
+          const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
+          const uint32_t row = row0 + r < rows ? row0 + r : rows - 1;
+          int kk;
+          out[i][c] = quant::decode_h<T>(quant::at<T>(w, row, cols, k0 / quant::kChunk + ck, &kk), kk);
+        }
+      }
+  };
+  auto put = [&](_Float16* buf, int ns, h8 (*v)[CH]) {
+#pragma unroll
+    for (int i = 0; i < SP; i++)
+      if (i < ns)
+#pragma unroll
+        for (int c = 0; c < CH; c++) {
+          const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
+          *(h8*) (buf + r * RL + i * SL + ck * quant::kChunk) = v[i][c];
+        }
+  };
+  for (int i = 0; i < RM; i++)
+    for (int j = 0; j < RN; j++) acc[i][j] = f8{};
+  int p = 0, q = 0, ns = in_part(0) < SP ? in_part(0) : SP, cur = 0;
+  if constexpr (NR > 1) {
+    h8 v[RUNS][NR];
+    decode_runs(p, q, ns, v);
+    put_runs(lds2[0], ns, v);
+  } else {
+    h8 v[SP][CH];
+    decode(p, q, ns, v);
+    put(lds2[0], ns, v);
+  }
+  __syncthreads();
+  for (;;) {
+    // the stage after this one: the partition's next slabs, else the next partition's first
+    const bool more_p = q + ns < in_part(p);
+    const int np = more_p ? p : p + 1, nq = more_p ? q + ns : 0;
+    const bool next = np < W;
+    const int left = next ? in_part(np) - nq : 0, nns = left < SP ? left : SP;
+    h8 v[NR > 1 ? RUNS : SP][NR > 1 ? NR : CH];
+    if (next) {
+      if constexpr (NR > 1) decode_runs(np, nq, nns, v);
+      else decode(np, nq, nns, v);
+    }
+    const _Float16* lds = lds2[cur];
+#pragma unroll
+    for (int i = 0; i < SP; i++)
+      if (i < ns) {
+        const uint32_t k0 = ((uint32_t) p + (uint32_t) (q + i) * W) * SL;
+#pragma unroll
+        for (int g = 0; g < G; g++) {
+          h16 a[RM], b[RN];
+          for (int r = 0; r < RM; r++) a[r] = *(const h16*) (lds + ((wr * RM + r) * kTile + col) * RL + i * SL + g * kTile);
+          for (int j = 0; j < RN; j++) b[j] = *(const h16*) (xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
+          for (int j = 0; j < RN; j++)
+            if (live[j])
+              for (int r = 0; r < RM; r++) acc[r][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[r], b[j], acc[r][j]);
+        }
+      }
+    if (!more_p) {  // the partition's sum done: into the running sum, the next from zero
+      for (int i = 0; i < RM; i++)
+        for (int j = 0; j < RN; j++) {
+          if (p == 0) run[i][j] = acc[i][j];
+          else
+            for (int e = 0; e < 8; e++) run[i][j][e] += acc[i][j][e];
+          acc[i][j] = f8{};
+        }
+    }
+    if (!next) break;
+    if constexpr (NR > 1) put_runs(lds2[cur ^ 1], nns, v);  // the other buffer: read last before the barrier ending
+    else put(lds2[cur ^ 1], nns, v);                         // the stage before
+    __syncthreads();
+    cur ^= 1, p = np, q = nq, ns = nns;
+  }
+  for (int j = 0; j < RN; j++) {
+    const uint32_t t = c0 + (wc * RN + j) * kTile + col;
+    if (t >= n) continue;
+    for (int i = 0; i < RM; i++) {
+      const uint32_t r = row0 + (wr * RM + i) * kTile;
+      if (r >= rows) continue;
+      for (int e = 0; e < 8; e++) y[(uint64_t) t * ys + r + 2 * e + half] = run[i][j][e];
+    }
+  }
+}
+
 // one matrix, or two of one type on the same x16 (blockIdx.y the matrix: a pair's blocks in one launch - the shared
 // expert's gate and up, q_a and kv), each tile as alone; the grid's rows the larger's, a block past its matrix's
 // rows nothing
@@ -311,6 +599,45 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel_silu(const uint8_t* _
   const uint32_t row0 = blockIdx.x * kTile;
   if (row0 >= rows) return;
   tile<T, S, CT, true>(w, row0, cols, x16, cols, blockIdx.z * kTile * CT, n, y, ys, lds, ep);
+}
+
+// the hyper-connection mixer's up with q4x_hc_gated_mean's mean as its epilogue: up's rows hc streams of dim, a
+// block one 16-row tile of each stream in turn (tile's own sums, the same bits as mm_run's), wave 0 keeping
+// sum += xn sigmoid(up) in stream order - the gated mean's expression and order - then out = sum / hc and its f16 for
+// the next matmul; up's own F32 (hc dim a token) never written nor read back
+struct GatedMean {
+  const float* xn;  // [token][hc][dim]
+  float* out;       // [token][dim]
+  _Float16* x16;    // out's f16 (dim wide, its tokens from row0), or nullptr
+  int32_t* overflow;
+  uint32_t row0, hc, dim;
+};
+template <quant::Type T, class S, int CT>
+__global__ __launch_bounds__(kWave* S::kWaves) void kernel_gated_mean(const uint8_t* __restrict__ w, uint32_t cols,
+                                                                      const _Float16* __restrict__ x16, uint32_t n,
+                                                                      GatedMean gm) {
+  __shared__ __attribute__((aligned(32))) _Float16 lds[S::kLdsHalves];
+  const uint32_t d0 = blockIdx.x * kTile, c0 = blockIdx.z * kTile * CT;
+  const int lane = threadIdx.x % kWave, half = lane / kTile;
+  float sum[CT][8] = {};
+  for (uint32_t s = 0; s < gm.hc; s++) {
+    tile<T, S, CT, false>(w, s * gm.dim + d0, cols, x16, cols, c0, n, nullptr, 0, lds, {},
+                          [&](int ct, int j, uint32_t t, float g) {
+                            if (t < n)
+                              sum[ct][j] += gm.xn[((uint64_t) t * gm.hc + s) * gm.dim + d0 + 2 * j + half] * sigmoid(g);
+                          });
+    __syncthreads();  // wave 0 done with the sums' LDS before the next stream's slabs
+  }
+  if (threadIdx.x >= kWave) return;
+#pragma unroll
+  for (int ct = 0; ct < CT; ct++)
+    for (int j = 0; j < 8; j++) {
+      const uint32_t t = c0 + ct * kTile + lane % kTile, d = d0 + 2 * j + half;
+      if (t >= n) continue;
+      const float v = sum[ct][j] / (float) gm.hc;
+      gm.out[(uint64_t) t * gm.dim + d] = v;
+      if (gm.x16) x16_put(gm.x16, gm.row0 + t, d, gm.dim, v, gm.overflow);
+    }
 }
 
 // n matrices at once (blockIdx.y the matrix m): its w from the table, its x the tiled x16 from x16 + xoff[m] (rows xts

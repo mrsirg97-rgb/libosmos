@@ -52,6 +52,11 @@ struct Wide {
   int r, nw;
 };
 constexpr Wide kWide = {4, 8};
+// F32's (Qwen3.8's router, 512 x 2560 at 2,048 tokens, low-power, 2026-11-10): R 3 NW 12 1.27-1.34 ms against 4 x 8's
+// 1.52-1.55 (R 3 NW 8-20 1.38-1.57, R 5 NW 12 1.42, R 2 or 8 slower); and at most kNarrow.r rows (the mixers' inject,
+// 4 x 10240: 520 -> 456 us; the shared expert's gate, 1 x 2560: 68 -> 30) mv.h's narrow tile, a wave all the rows of
+// its own tokens. a tile's sums are its rows' and tokens' own: any of them the same bits
+constexpr Wide kWideF32 = {3, 12}, kNarrow = {4, 1};
 
 template <quant::Type T, int NT>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
@@ -65,8 +70,13 @@ bool by_tokens(const void* w, uint32_t rows, uint32_t cols, const float* x, uint
                uint32_t ys, hipStream_t s) {
   if (cols % quant::Block<T>::values || cols % quant::kChunk) return false;
   if ((n_tok > 1 && (xs < cols || ys < rows)) || xs % quant::kChunk) return false;  // tokens apart; x's float4s whole
-  if (n_tok > MV_MAX_TOKENS)  // a prompt's: mv.h's wide tiles, each token's sums its own alone
+  if (n_tok > MV_MAX_TOKENS) {  // a prompt's: mv.h's wide tiles, each token's sums its own alone
+    if constexpr (T == quant::kF32) {
+      if (rows <= (uint32_t) kNarrow.r) return mv::narrow_launch<T, kNarrow.r, kNarrow.nw>(w, rows, cols, x, xs, n_tok, y, ys, s);
+      return mv::wide_launch<T, kWideF32.r, kWideF32.nw>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    }
     return mv::wide_launch<T, kWide.r, kWide.nw>(w, rows, cols, x, xs, n_tok, y, ys, s);
+  }
   switch (n_tok) {
     case 1: return launch<T, 1>(w, rows, cols, x, xs, y, ys, s);
     case 2: return launch<T, 2>(w, rows, cols, x, xs, y, ys, s);

@@ -25,7 +25,7 @@ typedef struct Q4xBuf
   uint32_t *xg, *yg, *xd, *yd;
   const void **ptr;                                /* Q4X_GROUP_TENSORS tables of entries */
   void *x16, *xe16;                                /* mm's f16 activations: a matrix's, the experts' tiles */
-  void *x16b; /* a mixer's down's silu as f16 for its up (mm_run_silu: x16 still read), MM_SILU_MAX_TOKENS rows */
+  void *x16b; /* a small step's mixer's down's silu as f16 for its up (mm_run_silu: x16 still read), MM_SILU_MAX_TOKENS rows */
   int32_t *overflow;                               /* an activation past f16's: the step refused */
   float *emb, *key, *val, *kn, *qn, *pg, *gated, *nrm, *conv;         /* the n-gram layer's */
   int32_t *ple_rows, *tok;                                            /* device: its rows, the step's tokens */

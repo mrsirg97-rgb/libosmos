@@ -190,6 +190,26 @@ __global__ void moe_sum_kernel(const float* y, const int32_t* where, const float
   out[i] = sum + shared[i] * sigmoid(shared_logit[t]);
 }
 
+// moe_sum_kernel's, 4 adjacent values a thread: each of a token's k rows one 16-byte load, not 4 - each value the
+// same products and sums in the same order, so its bits (a 2048-token step: ~140 GB/s, 10 dependent 4-byte loads a
+// value)
+constexpr uint32_t kSumVec = 4;
+__global__ void moe_sum4_kernel(const float* y, const int32_t* where, const float* w, uint32_t n_tok, uint32_t k,
+                                uint32_t dim, const float* shared, const float* shared_logit, float* out) {
+  const uint64_t i = ((uint64_t) blockIdx.x * kThreads + threadIdx.x) * kSumVec;
+  if (i >= (uint64_t) n_tok * dim) return;
+  const uint64_t t = i / dim, d = i % dim;
+  float4 sum = {0, 0, 0, 0};
+  for (uint32_t j = 0; j < k; j++) {
+    const float4 v = *(const float4*) (y + (uint64_t) where[t * k + j] * dim + d);
+    const float wj = w[t * k + j];
+    sum.x += v.x * wj, sum.y += v.y * wj, sum.z += v.z * wj, sum.w += v.w * wj;
+  }
+  const float g = sigmoid(shared_logit[t]);
+  const float4 sh = *(const float4*) (shared + i);
+  *(float4*) (out + i) = float4{sum.x + sh.x * g, sum.y + sh.y * g, sum.z + sh.z * g, sum.w + sh.w * g};
+}
+
 }  // namespace
 
 extern "C" bool q4x_route(const float* logits, uint32_t n_tok, uint32_t n_exp, uint32_t k, int32_t* ids, float* w,
@@ -271,7 +291,12 @@ extern "C" bool q4x_spin(uint32_t us, void* stream) {
 extern "C" bool q4x_moe_sum(const float* y, const int32_t* where, const float* w, uint32_t n_tok, uint32_t k,
                             uint32_t dim, const float* shared, const float* shared_logit, float* out, void* stream) {
   if (!y || !where || !w || !shared || !shared_logit || !out || !n_tok || !k || !dim) return false;
-  moe_sum_kernel<<<grid((uint64_t) n_tok * dim), kThreads, 0, st(stream)>>>(y, where, w, n_tok, k, dim, shared,
-                                                                             shared_logit, out);
+  const bool vec = dim % kSumVec == 0 && ((uintptr_t) y | (uintptr_t) shared | (uintptr_t) out) % 16 == 0;
+  if (vec)
+    moe_sum4_kernel<<<grid((uint64_t) n_tok * dim / kSumVec), kThreads, 0, st(stream)>>>(y, where, w, n_tok, k, dim,
+                                                                                         shared, shared_logit, out);
+  else
+    moe_sum_kernel<<<grid((uint64_t) n_tok * dim), kThreads, 0, st(stream)>>>(y, where, w, n_tok, k, dim, shared,
+                                                                               shared_logit, out);
   return ok();
 }

@@ -336,6 +336,71 @@ __device__ inline h8 decode_h(const uint8_t* b, int k) {
   return h;
 }
 
+// Q4_K as f16, decode<kQ4_K>'s bits with fewer operations: (d sc) q exact in F32 (an f16's 11 bits times a 6-bit
+// scale times a 4-bit code: 21 bits), so one fma rounds as the product then the difference did; a chunk's 8 codes
+// masked 4 at a time (each a byte, converted as one); the 6-bit scales from 3 words shifted by the group's byte
+template <> __device__ inline h8 decode_h<kQ4_K>(const uint8_t* b, int k) {
+  const int g = k / 4, l0 = (k % 4) * kChunk, h = 8 * (g % 4);
+  const uint32_t dd = *(const uint32_t*) b;
+  const uint32_t a0 = *(const uint32_t*) (b + 4) >> h, a1 = *(const uint32_t*) (b + 8) >> h,
+                 a2 = *(const uint32_t*) (b + 12) >> h;
+  const uint32_t s = g < 4 ? a0 & 0x3F : (a2 & 0x0F) | ((a0 >> 2) & 0x30);
+  const uint32_t m = g < 4 ? a1 & 0x3F : ((a2 >> 4) & 0x0F) | ((a1 >> 2) & 0x30);
+  const float d = mul(f16(dd & 0xFFFF), (float) s), ndm = -mul(f16(dd >> 16), (float) m);
+  const uint64_t qs = *(const uint64_t*) (b + 16 + (g / 2) * 32 + l0);
+  const uint32_t sh = 4 * (g % 2);
+  const uint32_t q[2] = {((uint32_t) qs >> sh) & 0x0F0F0F0Fu, ((uint32_t) (qs >> 32) >> sh) & 0x0F0F0F0Fu};
+  h8 r;
+  for (int j = 0; j < kChunk; j++) {
+    float v = __fmaf_rn(d, (float) ((q[j / 4] >> (8 * (j % 4))) & 0xFF), ndm);
+    asm("" : "+v"(v));  // decode_h's: F32, then f16 - not one fused v_fma_mixlo_f16
+    r[j] = (_Float16) v;
+  }
+  return r;
+}
+
+// IQ4_NL's 16 values (kIq4nlValues) as 4 words of bytes: v_perm_b32 picks 4 at once (a code's low 3 bits the byte of
+// a pair of words, its fourth bit which pair) - the same int8s, so the same products
+constexpr int8_t kIq4nlList[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+constexpr uint32_t iq4nl_word(int w) {
+  return (uint32_t) (uint8_t) kIq4nlList[4 * w] | (uint32_t) (uint8_t) kIq4nlList[4 * w + 1] << 8 |
+         (uint32_t) (uint8_t) kIq4nlList[4 * w + 2] << 16 | (uint32_t) (uint8_t) kIq4nlList[4 * w + 3] << 24;
+}
+__device__ inline uint32_t iq4nl_bytes(uint32_t n) {  // n: 4 codes 0 .. 15, a byte each
+  const uint32_t sel = n & 0x07070707u, hi = ((n >> 3) & 0x01010101u) * 0xFFu;
+  const uint32_t lo8 = __builtin_amdgcn_perm(iq4nl_word(1), iq4nl_word(0), sel);
+  const uint32_t hi8 = __builtin_amdgcn_perm(iq4nl_word(3), iq4nl_word(2), sel);
+  return (lo8 & ~hi) | (hi8 & hi);
+}
+// 8 values d * a signed byte each (2 words of them), as decode_h rounds them: the product, then f16
+__device__ inline h8 scaled_bytes_h(uint32_t w0, uint32_t w1, float d) {
+  h8 h;
+  for (int j = 0; j < kChunk; j++) {
+    float x = mul(d, (float) (int8_t) (((j < 4 ? w0 : w1) >> (8 * (j % 4))) & 0xFF));
+    asm("" : "+v"(x));
+    h[j] = (_Float16) x;
+  }
+  return h;
+}
+// 2-aligned bytes as a word (IQ4_NL's 18-byte blocks: 16-bit loads alone)
+__device__ inline uint32_t ld32_2(const uint8_t* p) { return ld16(p) | ld16(p + 2) << 16; }
+
+template <> __device__ inline h8 decode_h<kIQ4_NL>(const uint8_t* b, int k) {
+  const float d = f16(ld16(b));
+  const uint8_t* qs = b + 2 + (k % 2) * kChunk;
+  const uint32_t sh = 4 * (k / 2);
+  return scaled_bytes_h(iq4nl_bytes((ld32_2(qs) >> sh) & 0x0F0F0F0Fu), iq4nl_bytes((ld32_2(qs + 4) >> sh) & 0x0F0F0F0Fu), d);
+}
+
+template <> __device__ inline h8 decode_h<kIQ4_XS>(const uint8_t* b, int k) {
+  const int g = k / 4, j0 = (k % 4) * kChunk;
+  const int ls = ((b[4 + g / 2] >> (4 * (g % 2))) & 0x0F) | ((ld16(b + 2) >> (2 * g)) & 0x03) << 4;
+  const float dl = mul(f16(ld16(b)), (float) (ls - 32));
+  const uint64_t q = *(const uint64_t*) (b + 8 + 16 * g + j0 % 16);
+  const uint32_t sh = 4 * (j0 / 16);
+  return scaled_bytes_h(iq4nl_bytes(((uint32_t) q >> sh) & 0x0F0F0F0Fu), iq4nl_bytes(((uint32_t) (q >> 32) >> sh) & 0x0F0F0F0Fu), dl);
+}
+
 // kKsigns' 128 patterns as f16 sign bits: pattern i's value j negative - bit 15 of half j. kKsigns[i] is i with an
 // eighth bit that makes its ones even (built here from that rule; test_quant_gpu checks every value against gguf-py)
 struct SignMasks {
@@ -408,6 +473,81 @@ template <> __device__ inline h8 decode_h<kIQ2_S>(const uint8_t* b, int k) {
   const uint64_t grid = kIq2sGrid[b[2 + k] | ((b[66 + k / 4] >> (2 * (k % 4))) & 0x03) << 8];
   return grid_h(grid, db, kSignMasks8.m[b[34 + k]]);
 }
+
+// N chunks k .. k + N - 1 of one block as f16 (decode_h's each): one at a time, but Q4_K's group's scales once
+// (N chunks of one 32-value group: k a multiple of N, k % 4 + N <= 4)
+template <Type T, int N>
+__device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
+  if constexpr (T == kQ4_K && N > 1) {
+    static_assert(N == 2 || N == 4, "a run within one group");
+    const int g = k / 4, l0 = (k % 4) * kChunk, h = 8 * (g % 4);
+    const uint32_t dd = *(const uint32_t*) b;
+    const uint32_t a0 = *(const uint32_t*) (b + 4) >> h, a1 = *(const uint32_t*) (b + 8) >> h,
+                   a2 = *(const uint32_t*) (b + 12) >> h;
+    const uint32_t s = g < 4 ? a0 & 0x3F : (a2 & 0x0F) | ((a0 >> 2) & 0x30);
+    const uint32_t m = g < 4 ? a1 & 0x3F : ((a2 >> 4) & 0x0F) | ((a1 >> 2) & 0x30);
+    const float d = mul(f16(dd & 0xFFFF), (float) s), ndm = -mul(f16(dd >> 16), (float) m);
+    const uint32_t sh = 4 * (g % 2);
+    uint32_t q[2 * N];
+    #pragma unroll
+    for (int i = 0; i < N / 2; i++) {
+      const uint4 w = *(const uint4*) (b + 16 + (g / 2) * 32 + l0 + 16 * i);
+      q[4 * i] = (w.x >> sh) & 0x0F0F0F0Fu, q[4 * i + 1] = (w.y >> sh) & 0x0F0F0F0Fu;
+      q[4 * i + 2] = (w.z >> sh) & 0x0F0F0F0Fu, q[4 * i + 3] = (w.w >> sh) & 0x0F0F0F0Fu;
+    }
+    #pragma unroll
+    for (int i = 0; i < N; i++)
+      #pragma unroll
+      for (int j = 0; j < kChunk; j++) {
+        float v = __fmaf_rn(d, (float) ((q[2 * i + j / 4] >> (8 * (j % 4))) & 0xFF), ndm);
+        asm("" : "+v"(v));  // decode_h's: F32, then f16
+        out[i][j] = (_Float16) v;
+      }
+  } else if constexpr (T == kIQ3_XXS && N > 1) {  // a group's scale word and its block's d once
+    static_assert(N == 2 || N == 4, "a run within one group");
+    const uint32_t aux = ld32(b + 2 + 64 + (k / 4) * 4);
+    const float db = mul(mul(f16(ld16(b)), 0.5f + (float) (aux >> 28)), 0.5f);
+    const uint8_t* q = b + 2 + (k / 4) * 8 + (k % 4) * 2;
+    uint32_t qw[N / 2];
+    #pragma unroll
+    for (int i = 0; i < N / 2; i++) qw[i] = ld32(q + 4 * i);
+    #pragma unroll
+    for (int i = 0; i < N; i++) {
+      const uint32_t w = qw[i / 2] >> (16 * (i % 2));
+      const uint64_t grid = (uint64_t) kIq3xxsGrid[w & 0xFF] | (uint64_t) kIq3xxsGrid[(w >> 8) & 0xFF] << 32;
+      out[i] = grid_h(grid, db, kSignMasks.m[(aux >> (7 * ((k + i) % 4))) & 0x7F]);
+    }
+  } else if constexpr (T == kIQ4_NL && N > 1) {  // the block's d and its 16 code bytes once
+    static_assert(N == 2 || N == 4, "a run within one block");
+    const float d = f16(ld16(b));
+    uint32_t w[4];
+    #pragma unroll
+    for (int i = 0; i < 4; i++) w[i] = ld32_2(b + 2 + 4 * i);
+#pragma unroll
+    for (int i = 0; i < N; i++) {  // k even: chunk k + i's bytes w[2 (i % 2)] on, its nibble (k + i) / 2's
+      const uint32_t sh = 4 * (uint32_t) ((k + i) / 2);
+      out[i] = scaled_bytes_h(iq4nl_bytes((w[2 * (i % 2)] >> sh) & 0x0F0F0F0Fu),
+                              iq4nl_bytes((w[2 * (i % 2) + 1] >> sh) & 0x0F0F0F0Fu), d);
+    }
+  } else if constexpr (T == kIQ4_XS && N > 1) {  // the group's scale and its 16 code bytes once
+    static_assert(N == 2 || N == 4, "a run within one group");
+    const int g = k / 4;
+    const int ls = ((b[4 + g / 2] >> (4 * (g % 2))) & 0x0F) | ((ld16(b + 2) >> (2 * g)) & 0x03) << 4;
+    const float dl = mul(f16(ld16(b)), (float) (ls - 32));
+    const uint4 q = *(const uint4*) (b + 8 + 16 * g);
+    const uint32_t w[4] = {q.x, q.y, q.z, q.w};
+#pragma unroll
+    for (int i = 0; i < N; i++) {  // k even: chunk k + i's bytes w[2 (i % 2)] on, its nibble ((k + i) % 4) / 2's
+      const uint32_t sh = 4 * (uint32_t) (((k + i) % 4) / 2);
+      out[i] = scaled_bytes_h(iq4nl_bytes((w[2 * (i % 2)] >> sh) & 0x0F0F0F0Fu),
+                              iq4nl_bytes((w[2 * (i % 2) + 1] >> sh) & 0x0F0F0F0Fu), dl);
+    }
+  } else {
+    #pragma unroll
+    for (int i = 0; i < N; i++) out[i] = decode_h<T>(b, k + i);
+  }
+}
+
 
 template <> __device__ inline h8 decode_h<kIQ2_XXS>(const uint8_t* b, int k) {
   const uint8_t* q = b + 2 + (k / 4) * 8;

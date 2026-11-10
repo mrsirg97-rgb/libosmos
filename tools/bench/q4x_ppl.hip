@@ -46,6 +46,8 @@ int main(int argc, char** argv) {
   const uint32_t V = (uint32_t) w->geo.n_vocab;
   std::vector<float> lg((size_t) step * V);
   double nll = 0;
+  FILE* dump = getenv("Q4X_PPL_DUMP") ? std::fopen(getenv("Q4X_PPL_DUMP"), "wb") : nullptr;
+  if (getenv("Q4X_PPL_DUMP") && !dump) return std::fprintf(stderr, "q4x_ppl: Q4X_PPL_DUMP not writable\n"), 2;
   for (uint32_t at = 0; at < n; at += step) {
     const uint32_t k = n - at < step ? n - at : step;
     if (!q4x_batch(fw, s, ids.data() + at, k, 0, ferr)) return std::fprintf(stderr, "q4x_ppl: %s\n", ferr), 1;
@@ -53,13 +55,21 @@ int main(int argc, char** argv) {
     for (uint32_t r = 0; r < k && at + r + 1 < n; r++) {
       const float* l = &lg[(size_t) r * V];
       double m = l[0], sum = 0;
-      for (uint32_t i = 1; i < V; i++) m = l[i] > m ? l[i] : m;
+      int32_t top = 0;
+      for (uint32_t i = 1; i < V; i++)
+        if (l[i] > m) m = l[i], top = (int32_t) i;
       for (uint32_t i = 0; i < V; i++) sum += std::exp(l[i] - m);
-      nll -= l[ids[at + r + 1]] - m - std::log(sum);
+      const double lp = l[ids[at + r + 1]] - m - std::log(sum);
+      nll -= lp;
+      if (dump) {  // Q4X_PPL_DUMP: a token's log-probability of the next and its greatest id - two runs compared
+        const float f = (float) lp;
+        std::fwrite(&f, 4, 1, dump), std::fwrite(&top, 4, 1, dump);
+      }
     }
   }
   std::printf("q4x_ppl: perplexity %.4f over %u tokens (mean log-probability %.6f)\n", std::exp(nll / (n - 1)), n - 1,
               -nll / (n - 1));
+  if (dump && std::fclose(dump)) return std::fprintf(stderr, "q4x_ppl: Q4X_PPL_DUMP not written\n"), 1;
   q4x_seq_destroy(s);
   q4x_forward_destroy(fw);
   q4x_weights_destroy(w);

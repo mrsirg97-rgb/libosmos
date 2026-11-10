@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.6.0]: Qwen's prompts faster, every bit the same
+
+At AMD's `performance` profile against 0.5.12 (two interleaved rounds, every output's hash the same): UD-IQ3_XXS's
+prompts +9-14% (2K 862-863 -> 956-987 tok/s, 8K 788-822 -> 899), UD-Q4_K_XL's +30-35% (2K 624-633 -> 813-850, 8K
+649-652 -> 865-869); decode +1.5-2.5% plain, +3-4% drafted by the MTP head; DeepSeek the same (its speed the
+SSD's). Every change below keeps the bits: each has a test against the kernel it replaced, mutation-checked.
+
+
+- **The experts' prompt-sized matmuls faster, every bit the same.** A step's expert with 17-64 tokens runs 2 row tiles
+  a wave (each activation fragment feeding two matrix-core ops, not one), 65-128 tokens as the dense gemm's 64 x 128
+  blocks - each in the same sums' order as before (test_mm_gpu: mm_group at 24 / 37 / 64 / 100 / 128 tokens, mm_run's
+  bits, every expert type). By type, measured on real experts (low-power): Q4_K +17-42%, Q5_1 +6-42%, IQ4_XS +6-9%,
+  IQ4_NL and Q2_0 +16% / +60% at 128 tokens. UD-Q4_K_XL's 512-token prompt 507 -> 566 tok/s, UD-IQ3_XXS's 2K
+  780-795 -> 802-804; every ids hash the same. DeepSeek's types measured too: the gemm blocks for its IQ3_XXS
+  (+41%), Q2_K (+35%), IQ2_S (+16%) and IQ1_S (+6-10%) experts at 65-128 tokens, Q2_K's 2 row tiles (+7-30%); the
+  codebook types' 2 row tiles slower (not taken). Its 2K prompt unchanged (the SSD's, its experts' ~32 tokens a step
+  the old kernel's); its answer's hash the same.
+- **Q4_K's prompt decode cheaper, every bit the same.** A lane decodes a whole 32-value group of a row (its 6-bit
+  scales unpacked once, not once an 8-value chunk), the codes masked 4 at a time, and (d sc) q - dmin m one fma
+  ((d sc) q exact in F32: 21 bits, so the fma rounds as the product then the difference did); the 65-128-token
+  gemm stages 64 values a barrier, not 32. test_decode_run_gpu: the new decodes decode<Q4_K>'s bits on 2^20 random
+  blocks (subnormal and largest scales among them), mutation-checked. Q4_K experts (low-power): 32 tokens -29%,
+  64 -19%, 128 -8%, 8-16 -10%; UD-Q4_K_XL's 2K prompt 719-727 -> 737-738 tok/s; both packs' ids hashes the same.
+- **The IQ3 pack's expert decodes cheaper, every bit the same.** IQ4_NL / IQ4_XS's 16 values by v_perm_b32 (4 codes
+  an instruction pair, not a load a value); IQ3_XXS a group's scale word and d once a lane (decode_hn's runs, the
+  token-tile and 128-token kernels giving a lane a whole group); test_decode_run_gpu covers them, mutation-checked.
+  IQ3_XXS gate / up -16% at 8-16 tokens, IQ4_NL down -2 .. -8%; UD-IQ3_XXS's 2K prompt 754-789 -> 796-800 tok/s;
+  both packs' ids hashes the same.
+- **The experts' f16 gather 2.3x faster, every bit the same.** mm_x16_rows (each step's tokens copied into their
+  experts' slots as f16) a thread 8 adjacent columns - two 16-byte loads, one 16-byte store, each value x16_put's
+  rounding - not a value a thread, its 2-byte stores scattered; a stride that breaks the rows' 16-byte alignment
+  refused. test_x16_rows_gpu: a host reference's bytes (padding slots, wider strides, every rounding edge, the
+  overflow flag), mutation-checked. A 2048-token step on the IQ3 pack 2.51 -> 1.09 ms a layer (a 4096-token
+  prompt's 245 -> 112 ms); both Qwen packs' and DeepSeek's (UD-IQ1_M) hashes the same.
+- **The mixers' gated mean in their up's launch, every bit the same.** mm_run_gated_mean: the hyper-connection
+  mixer's up computes a 16-row tile of each of the 4 streams in turn (tile's own sums) and keeps sum += xn
+  sigmoid(up) in stream order - q4x_hc_gated_mean's expression and order - writing the mean and its f16; the up's
+  F32 (10,240 values a token: 84 MB written and read back a mixer at a 2K step) no longer stored, one launch fewer
+  a mixer. test_gated_mean_gpu: the two calls' bytes (F32, f16, overflow) at 1-2,048 tokens, mutation-checked.
+  A 4096-token prompt's up + gated mean 366 -> 281 ms. With the gather above, at serve's 2048-token steps
+  (low-power, three interleaved runs each): UD-IQ3_XXS's 4K prompt 751-756 -> 768-782 tok/s, UD-Q4_K_XL's 681-701
+  -> 737-745; decode the same or ~1% up; every ids hash the same.
+- **DeltaNet's conv and the MoE's sum faster, every bit the same.** q4x_conv at 4 taps, dilation 1: a thread a
+  channel over 8 tokens, x read once into a register window and the weights once (not 4 loads a token); q4x_moe_sum
+  4 values a thread, a pick's row one 16-byte load (a width not 4s, or a misaligned row: the old kernel). Each
+  value the same products in the same order. test_q4x_conv_sum_gpu: the old kernels' bytes, mutation-checked. A
+  4096-token prompt at 2048-token steps (low-power): conv 131 -> 57 ms, moe_sum 166 -> 114 ms, the GPU's time
+  5.47 -> 5.27 s; every ids hash the same.
+- **F32 matrices' prompt tiles, every bit the same.** A prompt's F32 matvec (Qwen3.8's router, gates, the mixers'
+  inject; DeepSeek UD-IQ1_M's router) at 3 rows a wave x 12 tokens a block, not 4 x 8 (the router 1.52 -> 1.27-1.34
+  ms at 2,048 tokens), and a matrix of at most 4 rows on a narrow tile - a wave all the rows of its own tokens, not 8
+  waves of which 7 summed rows past the end (the inject 520 -> 456 us, the shared expert's gate 68 -> 30). A tile is
+  rows' and tokens' own sums: test_mv_f32_wide_gpu, the 4 x 8 tile's bits, mutation-checked. A 4096-token prompt's
+  F32 matvecs 406 -> 349 ms; Qwen's and DeepSeek's hashes the same.
+- **The mixers' inject in their norm's launch, every bit the same.** q4x_hc_norm_inject: a block a token, its 4
+  streams in turn - each combine_norm's (or hc_norm's) update, norm and f16 as before - the normed values kept in
+  LDS, and the inject's 4 rows a wave each, lane l's 8-value chunks in order as each stream is done, then mv's tree:
+  mv_strided's bits without reading xn back (84 MB a mixer at a 2K step) or the inject's launch. A prompt's step
+  alone (past 16 tokens): a small step keeps the inject beside on the second stream (one block a token would be
+  decode's 27.4 -> 25.6 tok/s). test_hc_norm_inject_gpu: the two calls' bytes, the inject in place and apart,
+  mutation-checked. A 4096-token prompt's norms and injects 479 -> 361 ms; every ids hash the same.
+- **The delta rule a head over 4 blocks, every bit the same.** q4x_delta's 48 value heads a block each left 8 of the
+  40 CUs two; a head's 128 state columns now over 4 blocks (a column's sums its own, whatever the block).
+  test_q4x_delta_split_gpu: the one-block-a-head kernel's outputs and states, mutation-checked. A 2048-token step
+  4.2 -> 3.9 ms; a 4096-token prompt's 355 -> 306 ms; decode the same.
+- Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
+  copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
+  activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%); IQ2_S's decode through
+  v_perm_b32 (its grid's 3 values a scale; a prompt-sized bench -10%, the model none: its 1-16-token experts read
+  at DRAM's rate) and a cheaper Q6_K matvec (decode's Q6_K runs on mm, not mv); the attention's K and V two blocks
+  ahead (no change: its time the score chain, the softmax and the barriers a 16-key block, its 128-key chunks and
+  their order fixed by the bits).
+
 ## [0.5.12]: the larger Qwen, DFlash2 as an option, a race in the MoE fixed
 
 - **Qwen3.8's UD-Q4_K_XL runs** (unsloth's, 111.3 GB): its expert types Q4_K and Q5_1 read (each bit for bit
