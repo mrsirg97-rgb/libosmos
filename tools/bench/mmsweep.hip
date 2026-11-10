@@ -123,10 +123,18 @@ int main(int argc, char** argv) {
     SHAPES(group, quant::kQ5_K, "Q5_K", 640, 2560);
   } else if (experts) {
     SHAPES(group, quant::kIQ4_NL, "IQ4_NL", 2560, 640);
+    SHAPES32(group, quant::kIQ4_NL, "IQ4_NL", 2560, 640);
+    group<quant::kIQ4_NL, 32, 16, 2>("IQ4_NL", 2560, 640);
     SHAPES(group, quant::kIQ3_XXS, "IQ3_XXS", 640, 2560);
+    SHAPES32(group, quant::kIQ3_XXS, "IQ3_XXS", 640, 2560);
+    SHAPES16(group, quant::kIQ3_XXS, "IQ3_XXS", 640, 2560);
     SHAPES(group, quant::kIQ2_S, "IQ2_S", 640, 2560);
+    SHAPES16(group, quant::kIQ2_S, "IQ2_S", 640, 2560);
     SHAPES(group, quant::kIQ4_XS, "IQ4_XS", 2560, 640);
+    SHAPES32(group, quant::kIQ4_XS, "IQ4_XS", 2560, 640);
+    group<quant::kIQ4_XS, 32, 16, 2>("IQ4_XS", 2560, 640);
     SHAPES(group, quant::kQ2_0, "Q2_0", 640, 2560);
+    SHAPES16(group, quant::kQ2_0, "Q2_0", 640, 2560);
   } else {
     SHAPES(dense, quant::kQ6_K, "Q6_K", 10240, 2560);
     SHAPES(dense, quant::kQ6_K, "Q6_K", 2560, 6144);
