@@ -68,7 +68,10 @@ static const Shape kQwenShapes[] = {
     {"blk.0.hc_attn_down.weight", -1}, {"blk.0.hc_attn_up.weight", -1},
     // UD-IQ3_XXS's expert types: IQ3_XXS gate, IQ4_NL / Q2_0 down, IQ4_XS gate
     {"blk.0.ffn_gate_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 7}, {"blk.8.ffn_down_exps.weight", 7},
-    {"blk.47.ffn_gate_exps.weight", 7}};
+    {"blk.47.ffn_gate_exps.weight", 7}, {"blk.14.ffn_gate_exps.weight", 7}};
+// DeepSeek UD-IQ2_XXS's expert types UD-IQ1_M lacks: Q2_K and IQ3_XXS downs
+constexpr const char* kUdX2 = "%s/Models/ds1017/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf";
+static const Shape kUdX2Shapes[] = {{"blk.0.ffn_down_exps.weight", 7}, {"blk.20.ffn_down_exps.weight", 7}};
 constexpr const char* kQwenFirst = "%s/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
 // UD-Q4_K_XL's expert types (Q4_K gate / up, Q5_1 down), from several layers
 static const Shape kQwenQ4Shapes[] = {
@@ -395,6 +398,13 @@ int main() {
     gguf_destroy(q);
   } else {
     std::printf("  Qwen3.8 UD-Q4_K_XL's shapes skipped: no %s\n", qpath);
+  }
+  std::snprintf(qpath, sizeof qpath, kUdX2, std::getenv("HOME") ? std::getenv("HOME") : "");
+  if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_create(qpath, err)) {
+    for (const Shape& sh : kUdX2Shapes) shape(q, sh);
+    gguf_destroy(q);
+  } else {
+    std::printf("  DeepSeek UD-IQ2_XXS's shapes skipped: no %s\n", qpath);
   }
   std::printf("[test_mm_gpu] ok: every token the same bits alone, among 16, among 16 reversed, and among 33, 64 and "
               "%d (at its place and at another); a pair in one launch each its own bits; Q5_K repacked its bits\n",

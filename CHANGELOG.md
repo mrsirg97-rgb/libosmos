@@ -7,7 +7,10 @@
   blocks - each in the same sums' order as before (test_mm_gpu: mm_group at 24 / 37 / 64 / 100 / 128 tokens, mm_run's
   bits, every expert type). By type, measured on real experts (low-power): Q4_K +17-42%, Q5_1 +6-42%, IQ4_XS +6-9%,
   IQ4_NL and Q2_0 +16% / +60% at 128 tokens. UD-Q4_K_XL's 512-token prompt 507 -> 566 tok/s, UD-IQ3_XXS's 2K
-  780-795 -> 802-804; every ids hash the same.
+  780-795 -> 802-804; every ids hash the same. DeepSeek's types measured too: the gemm blocks for its IQ3_XXS
+  (+41%), Q2_K (+35%), IQ2_S (+16%) and IQ1_S (+6-10%) experts at 65-128 tokens, Q2_K's 2 row tiles (+7-30%); the
+  codebook types' 2 row tiles slower (not taken). Its 2K prompt unchanged (the SSD's, its experts' ~32 tokens a step
+  the old kernel's); its answer's hash the same.
 
 ## [0.5.12]: the larger Qwen, DFlash2 as an option, a race in the MoE fixed
 
