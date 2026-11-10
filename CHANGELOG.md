@@ -22,6 +22,12 @@
   token-tile and 128-token kernels giving a lane a whole group); test_decode_run_gpu covers them, mutation-checked.
   IQ3_XXS gate / up -16% at 8-16 tokens, IQ4_NL down -2 .. -8%; UD-IQ3_XXS's 2K prompt 754-789 -> 796-800 tok/s;
   both packs' ids hashes the same.
+- **The experts' f16 gather 2.3x faster, every bit the same.** mm_x16_rows (each step's tokens copied into their
+  experts' slots as f16) a thread 8 adjacent columns - two 16-byte loads, one 16-byte store, each value x16_put's
+  rounding - not a value a thread, its 2-byte stores scattered; a stride that breaks the rows' 16-byte alignment
+  refused. test_x16_rows_gpu: a host reference's bytes (padding slots, wider strides, every rounding edge, the
+  overflow flag), mutation-checked. A 2048-token step on the IQ3 pack 2.51 -> 1.09 ms a layer (a 4096-token
+  prompt's 245 -> 112 ms); both Qwen packs' and DeepSeek's (UD-IQ1_M) hashes the same.
 - Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
   copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
   activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%).

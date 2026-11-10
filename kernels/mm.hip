@@ -102,15 +102,31 @@ __global__ void x16_attn_kernel(const float* x, uint32_t xs, uint32_t n, uint32_
   x16[mm::x16_at(t, c, cols)] = (_Float16) v;
 }
 
-// slot s: row idx[s] of x (-1: zero), to f16
+// slot s: row idx[s] of x (-1: zero), to f16 - a thread 8 adjacent columns of a slot (half a fragment's row: 16
+// bytes, x16_at's contiguous run), threads in the tiled order so a wave's stores fill whole lines; each value
+// x16_put's rounding and flag, so the same bytes as a value a thread (its 2-byte stores scattered: a 2048-token
+// step on the IQ3 pack 2.51 -> 1.09 ms a layer, low-power, 2026-11-10)
+constexpr uint32_t kRun = 8;
 __global__ void x16_rows_kernel(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols,
                                 _Float16* x16, int32_t* overflow) {
-  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= (uint64_t) slots * cols) return;
-  const int32_t r = idx[i / cols];
-  const float v = r >= 0 ? x[(uint64_t) r * xs + i % cols] : 0.0f;
-  if (!(fabsf(v) <= kF16Max)) atomicOr(overflow, 1);
-  x16[mm::x16_at((uint32_t) (i / cols), (uint32_t) (i % cols), cols)] = (_Float16) v;
+  const uint64_t o = ((uint64_t) blockIdx.x * kThreads + threadIdx.x) * kRun;  // the run's first half, tiled
+  const uint64_t tile = (uint64_t) mm::kTile * cols;
+  const uint32_t in = (uint32_t) (o % tile), frag = in % mm::kFrag;
+  const uint32_t t = (uint32_t) (o / tile) * mm::kTile + frag / mm::kTile;
+  if (t >= slots) return;
+  const uint32_t c = in / mm::kFrag * mm::kTile + frag % mm::kTile;
+  const int32_t r = idx[t];
+  float v[kRun] = {};
+  if (r >= 0) {
+    const float4* p = (const float4*) (x + (uint64_t) r * xs + c);
+    const float4 a = p[0], b = p[1];
+    v[0] = a.x, v[1] = a.y, v[2] = a.z, v[3] = a.w, v[4] = b.x, v[5] = b.y, v[6] = b.z, v[7] = b.w;
+  }
+  bool over = false;
+  _Float16 h[kRun];
+  for (uint32_t j = 0; j < kRun; j++) over |= !(fabsf(v[j]) <= mm::kF16Max), h[j] = (_Float16) v[j];
+  if (over) atomicOr(overflow, 1);
+  __builtin_memcpy(x16 + o, h, sizeof h);
 }
 
 // the column tiles a block takes (a weight slab decoded once for CT WMMAs): as many as the tokens need, up to the
@@ -407,9 +423,10 @@ extern "C" bool mm_run2(uint32_t type, const void* w0, uint32_t rows0, float* y0
 
 extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,
                             int32_t* overflow, void* stream) {
-  if (!slots || !cols || cols % mm::kTile || xs < cols) return false;
-  const uint64_t work = (uint64_t) slots * cols;
-  x16_rows_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+  // a run's two float4 loads: x's rows 16-byte aligned (hipMalloc's, a stride of 4s)
+  if (!slots || !cols || cols % mm::kTile || xs < cols || xs % 4 || (uintptr_t) x % 16) return false;
+  const uint64_t runs = (uint64_t) (slots + mm::kTile - 1) / mm::kTile * mm::kTile * cols / kRun;
+  x16_rows_kernel<<<(unsigned) ((runs + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
       x, xs, idx, slots, cols, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
 }
