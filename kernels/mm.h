@@ -61,10 +61,12 @@ constexpr bool kPipe = CT > 1 && G <= 2;
 // 193 -> 204, wo_a 191 -> 207), Q8_0 +13% (Qwen's hc mixers 156 / 147 -> 178 / 166), IQ4_NL +7% (142 -> 151),
 // IQ4_XS +5%; Q6_K's short rows (64-value slabs: DeepSeek's q_b, 1,280 columns) -7%, IQ2_S -10%, IQ3_XXS and Q2_0
 // level - those keep the LDS's. a token's dense reads Qwen 23.2 -> 20.7 ms, DeepSeek 34.2 -> 33.1 (Q5_K: m1.hip's
-// q_b 181 -> 143 us, its first)
+// q_b 181 -> 143 us, its first). UD-Q4_K_XL's expert types (mmsweep q4, a token's 10 experts cold, low-power,
+// 2026-11-09, two runs): Q4_K at its 128 x 8 x 8 103-107 -> 78-80 us, Q5_1 111 -> 72-75; a 512-token prompt 247 ->
+// 409 tok/s, its ids' hash the same
 template <quant::Type T>
 constexpr bool kRegA = T == quant::kQ5_K || T == quant::kQ5_KR || T == quant::kQ6_K || T == quant::kQ8_0 ||
-                       T == quant::kIQ4_NL || T == quant::kIQ4_XS;
+                       T == quant::kIQ4_NL || T == quant::kIQ4_XS || T == quant::kQ4_K || T == quant::kQ5_1;
 template <quant::Type T, class S>
 constexpr bool kRegAShape = kRegA<T> && !(T == quant::kQ6_K && S::kSlab < 128);
 __device__ inline h8 lane_other_half(h8 v) {  // lane l ^ 16's 8 halves
