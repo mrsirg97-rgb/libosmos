@@ -409,6 +409,52 @@ extern "C" bool mm_run_silu(uint32_t type, const void* w, uint32_t rows, uint32_
   }
 }
 
+// mm_run_gated_mean's launch: the shape launch_ct takes for the up's rows (the same sums), a matrix the gemm would take
+// refused (the caller's mm_run and q4x_hc_gated_mean then)
+template <quant::Type T, int CT, typename S>
+bool gm_shape(const void* w, uint32_t cols, const void* x16, uint32_t n, const mm::GatedMean& gm, hipStream_t s) {
+  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::kernel_gated_mean<T, S, CT><<<dim3(gm.dim / mm::kTile, 1, z), mm::kWave * S::kWaves, 0, s>>>(
+      (const uint8_t*) w, cols, (const _Float16*) x16, n, gm);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T, int CT>
+bool gm_ct(const void* w, uint32_t cols, const void* x16, uint32_t n, const mm::GatedMean& gm, hipStream_t s) {
+  const uint32_t rows = gm.hc * gm.dim;
+  const Mats m = {{w, nullptr}, {rows, 0}, {nullptr, nullptr}, {rows, 0}};
+  if constexpr (kGemm<T>)
+    if (gemm_takes<T>(m, cols, n)) return false;
+  if (odd<T>(cols)) return gm_shape<T, CT, typename Odd<T>::S>(w, cols, x16, n, gm, s);
+  return cols < kShortCols ? gm_shape<T, CT, typename Short<T>::S>(w, cols, x16, n, gm, s)
+                           : gm_shape<T, CT, typename Tuned<T>::S>(w, cols, x16, n, gm, s);
+}
+
+template <quant::Type T>
+bool gm_launch(const void* w, uint32_t cols, const void* x16, uint32_t n, const mm::GatedMean& gm, hipStream_t s) {
+  const int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  if (cols % quant::Block<T>::values || cols % slab) return false;
+  switch (col_tiles<T>(n)) {
+    case 1: return gm_ct<T, 1>(w, cols, x16, n, gm, s);
+    case 2: return gm_ct<T, 2>(w, cols, x16, n, gm, s);
+    case 4: return gm_ct<T, 4>(w, cols, x16, n, gm, s);
+    default: return gm_ct<T, Tuned<T>::kMaxCt>(w, cols, x16, n, gm, s);
+  }
+}
+
+extern "C" bool mm_run_gated_mean(uint32_t type, const void* w, uint32_t hc, uint32_t dim, uint32_t cols,
+                                  const void* x16, uint32_t n, const float* xn, float* out, void* out16, uint32_t row0,
+                                  int32_t* overflow, void* stream) {
+  if (!w || !x16 || !xn || !out || out16 == x16 || (out16 && !overflow) || !n || n > MM_MAX_TOKENS || !hc ||
+      hc > MM_GATED_MEAN_MAX_HC || !dim || dim % mm::kTile)
+    return false;
+  const mm::GatedMean gm = {xn, out, (_Float16*) out16, overflow, row0, hc, dim};
+  switch (type) {
+    case quant::kQ8_0: return gm_launch<quant::kQ8_0>(w, cols, x16, n, gm, (hipStream_t) stream);
+    default: return false;  /* the mixers' up's type alone, so far */
+  }
+}
+
 extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
                        float* y, uint32_t ys, void* stream) {
   return run(type, Mats{{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}}, cols, x16, n, (hipStream_t) stream);

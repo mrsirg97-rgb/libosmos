@@ -21,6 +21,10 @@ bool mm_run2(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t 
 #define MM_SILU_MAX_TOKENS 64 /* mm_run_silu's most tokens (past them, the gemm's counts) */
 bool mm_run_silu(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const void *x16, uint32_t n, float *y,
                  uint32_t ys, float scale, void *x16_out, int32_t *overflow, void *stream);
+#define MM_GATED_MEAN_MAX_HC 8 /* mm_run_gated_mean's most streams */
+bool mm_run_gated_mean(uint32_t type, const void *w, uint32_t hc, uint32_t dim, uint32_t cols, const void *x16,
+                       uint32_t n, const float *xn, float *out, void *out16, uint32_t row0, int32_t *overflow,
+                       void *stream);
 bool mm_x16_rows(const float *x, uint32_t xs, const int32_t *idx, uint32_t slots, uint32_t cols, void *x16,
                  int32_t *overflow, void *stream);
 bool mm_group(uint32_t type, const void *const *w, const int32_t *cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
@@ -83,6 +87,13 @@ mm_run_silu
   activations in the same launch. x16_out must not be x16 (other blocks still read it). false - nothing launched, the
   caller's mm_run and q4x_scale_silu then - for a step the gemm would take (more than 64 tokens of a gemm type) or a
   type it has no epilogue for (Q8_0 alone: the mixers' down).
+
+mm_run_gated_mean
+  the hyper-connection mixer's up (hc dim rows: hc streams of dim) with q4x_hc_gated_mean as its epilogue: out[t][d]
+  = (sum over s in order of xn[t][s][d] sigmoid(up_t[s dim + d])) / hc - mm_run then q4x_hc_gated_mean, the same
+  bits - and its f16 into out16 (dim wide, token t at row row0 + t; NULL: none) for the next matmul; up's F32 output
+  never stored. out16 must not be x16 (other blocks still read it). false - nothing launched, the caller's two calls
+  then - for a matrix the gemm would take or a type it has no epilogue for (Q8_0 alone: the mixers' up).
 
 mm_group
   n_mat matrices of one type and shape at once: matrix m (w[m]) over the tiled x16 from x16 + xoff[m] (halves; rows

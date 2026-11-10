@@ -3,6 +3,7 @@
 // (f32 <- f16, 16 x 16 x 16) accumulating against the tokens' f16 activations. a column's results are the same bits
 // whatever the other columns hold (measured: test_mm_gpu), so a token's are whatever it is batched with.
 #pragma once
+#include "block.h"
 #include "quant.h"
 
 namespace mm {
@@ -105,12 +106,15 @@ constexpr int run_chunks() {
   return !kRuns<T> ? 1 : CPR % RUN_MAX == 0 && CH % RUN_MAX == 0 ? RUN_MAX : CPR % 2 == 0 && CH % 2 == 0 ? 2 : 1;
 }
 
-template <quant::Type T, class S, int CT, bool E = false>
+// the store tile ends with (y's row r of token t); an epilogue's own instead: take(ct, j, t, s) for each of wave 0's
+// sums - its tile ct, its rows 2 j + half, token t (t >= n among them: the epilogue's to skip)
+struct StoreY {};
+template <quant::Type T, class S, int CT, bool E = false, class Take = StoreY>
 __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __restrict__ w, uint32_t row0,
                                                            uint32_t cols, const _Float16* __restrict__ x16,
                                                            uint32_t xts, uint32_t c0, uint32_t n,
                                                            float* __restrict__ y, uint32_t ys, _Float16* lds_all,
-                                                           Silu ep = {}) {
+                                                           Silu ep = {}, Take take = {}) {
   constexpr int SL = S::kSlab, G = SL / kTile;
   const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
   _Float16* lds = lds_all + wave * kTile * S::kRowLds;
@@ -204,7 +208,11 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
           s = u / (1.0f + expf(-u));
           if (t < n) x16_put(ep.x16, t, row0 + 2 * j + half, ep.cols, s, ep.overflow);
         }
-        if (t < n) y[(uint64_t) t * ys + row0 + 2 * j + half] = s;
+        if constexpr (__is_same(Take, StoreY)) {
+          if (t < n) y[(uint64_t) t * ys + row0 + 2 * j + half] = s;
+        } else {
+          take(ct, j, t, s);
+        }
       }
     }
   }
@@ -591,6 +599,45 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel_silu(const uint8_t* _
   const uint32_t row0 = blockIdx.x * kTile;
   if (row0 >= rows) return;
   tile<T, S, CT, true>(w, row0, cols, x16, cols, blockIdx.z * kTile * CT, n, y, ys, lds, ep);
+}
+
+// the hyper-connection mixer's up with q4x_hc_gated_mean's mean as its epilogue: up's rows hc streams of dim, a
+// block one 16-row tile of each stream in turn (tile's own sums, the same bits as mm_run's), wave 0 keeping
+// sum += xn sigmoid(up) in stream order - the gated mean's expression and order - then out = sum / hc and its f16 for
+// the next matmul; up's own F32 (hc dim a token) never written nor read back
+struct GatedMean {
+  const float* xn;  // [token][hc][dim]
+  float* out;       // [token][dim]
+  _Float16* x16;    // out's f16 (dim wide, its tokens from row0), or nullptr
+  int32_t* overflow;
+  uint32_t row0, hc, dim;
+};
+template <quant::Type T, class S, int CT>
+__global__ __launch_bounds__(kWave* S::kWaves) void kernel_gated_mean(const uint8_t* __restrict__ w, uint32_t cols,
+                                                                      const _Float16* __restrict__ x16, uint32_t n,
+                                                                      GatedMean gm) {
+  __shared__ __attribute__((aligned(32))) _Float16 lds[S::kLdsHalves];
+  const uint32_t d0 = blockIdx.x * kTile, c0 = blockIdx.z * kTile * CT;
+  const int lane = threadIdx.x % kWave, half = lane / kTile;
+  float sum[CT][8] = {};
+  for (uint32_t s = 0; s < gm.hc; s++) {
+    tile<T, S, CT, false>(w, s * gm.dim + d0, cols, x16, cols, c0, n, nullptr, 0, lds, {},
+                          [&](int ct, int j, uint32_t t, float g) {
+                            if (t < n)
+                              sum[ct][j] += gm.xn[((uint64_t) t * gm.hc + s) * gm.dim + d0 + 2 * j + half] * sigmoid(g);
+                          });
+    __syncthreads();  // wave 0 done with the sums' LDS before the next stream's slabs
+  }
+  if (threadIdx.x >= kWave) return;
+#pragma unroll
+  for (int ct = 0; ct < CT; ct++)
+    for (int j = 0; j < 8; j++) {
+      const uint32_t t = c0 + ct * kTile + lane % kTile, d = d0 + 2 * j + half;
+      if (t >= n) continue;
+      const float v = sum[ct][j] / (float) gm.hc;
+      gm.out[(uint64_t) t * gm.dim + d] = v;
+      if (gm.x16) x16_put(gm.x16, gm.row0 + t, d, gm.dim, v, gm.overflow);
+    }
 }
 
 // n matrices at once (blockIdx.y the matrix m): its w from the table, its x the tiled x16 from x16 + xoff[m] (rows xts

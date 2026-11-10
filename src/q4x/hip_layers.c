@@ -117,20 +117,39 @@ static bool inject_of(Q4xForward *f, const GgufTensor *inject, uint32_t n, uint3
   return ok && hipEventRecord(f->e_inj, f->s2) == hipSuccess && (f->inj_side = true);
 }
 
-/* the mixer's down, silu, up: a small step's down and silu one launch (mm_run_silu: its f16 into b.x16b, which the
-   up reads - b.x16 the down's own input meanwhile), the same bits as the three; otherwise those three */
-static bool down_up(Q4xForward *f, const GgufTensor *down, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t hd,
+/* the mixer's up and gated mean (b.mixed, its f16 beside): mm_run_gated_mean - the mean the up's epilogue, the up's
+   F32 (b.gate, hc n_embd a token) neither written nor read back: at a 2K step 168 MB a mixer fewer (a 4K prompt's
+   up and mean 366 -> 281 ms, low-power) - from the silu's f16 in b.x16b (x16b true), else the two calls (the up from
+   b.lo). the same bits either way (test_gated_mean_gpu) */
+static bool up_mean(Q4xForward *f, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t D, uint32_t r, bool x16b)
+{
+  Q4xBuf *b = &f->b;
+  const uint32_t hd = hc * D;
+  Q4xX16 sd;
+  const Q4xX16 *ms = side(f, n, D, &sd);
+  if (x16b && mm_takes(up, hd, r, r, hd) &&
+      mm_run_gated_mean(TY(up), q4x_dev(f, up), hc, D, r, b->x16b, n, b->xn, b->mixed, ms ? ms->x16 : NULL,
+                        ms ? ms->row0 : 0, b->overflow, f->st))
+    return true;
+  return (x16b && mm_takes(up, hd, r, r, hd) ? mm_run(TY(up), q4x_dev(f, up), hd, r, b->x16b, n, b->gate, hd, f->st)
+                                             : q4x_mat(f, up, hd, r, b->lo, r, n, b->gate, hd, false)) &&
+         q4x_hc_gated_mean(b->xn, b->gate, n, hc, D, b->mixed, ms, NULL);
+}
+
+/* the mixer's down, silu, then up_mean: a small step's down and silu one launch (mm_run_silu: its f16 into b.x16b -
+   b.x16 the down's own input meanwhile), the same bits as the two; otherwise the two, the silu's f16 into b.x16b */
+static bool down_up(Q4xForward *f, const GgufTensor *down, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t D,
                     uint32_t r, bool ready)
 {
   Q4xBuf *b = &f->b;
+  const uint32_t hd = hc * D;
   const float scale = 1.0f / (float)hc;
   if (ready && n <= MM_SILU_MAX_TOKENS && mm_takes(down, r, hd, hd, r) && mm_takes(up, hd, r, r, hd) &&
       mm_run_silu(TY(down), q4x_dev(f, down), r, hd, b->x16, n, b->lo, r, scale, b->x16b, b->overflow, f->st))
-    return mm_run(TY(up), q4x_dev(f, up), hd, r, b->x16b, n, b->gate, hd, f->st);
-  Q4xX16 sd;
+    return up_mean(f, up, n, hc, D, r, true);
+  const Q4xX16 sx = {b->x16b, b->overflow, r, 0}; /* the silu's f16 for up_mean: b.x16 the mixer's input meanwhile */
   return q4x_mat(f, down, r, hd, b->xn, hd, n, b->lo, r, ready) &&
-         q4x_scale_silu(b->lo, (uint64_t)n * r, scale, side(f, n, r, &sd), NULL) &&
-         q4x_mat(f, up, hd, r, b->lo, r, n, b->gate, hd, ready);
+         q4x_scale_silu(b->lo, (uint64_t)n * r, scale, ready ? &sx : NULL, NULL) && up_mean(f, up, n, hc, D, r, ready);
 }
 
 bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, const GgufTensor *up,
@@ -146,8 +165,7 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
          (combine ? q4x_hc_combine_norm(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, fv(f, norm), g->rms_eps,
                                         b->xn, side(f, n, hd, &sd), NULL)
                   : q4x_hc_norm(b->h, fv(f, norm), n, hc, D, g->rms_eps, b->xn, side(f, n, hd, &sd), NULL)) &&
-         (!inject || inject_of(f, inject, n, hc, hd)) && down_up(f, down, up, n, hc, hd, r, ready) &&
-         q4x_hc_gated_mean(b->xn, b->gate, n, hc, D, b->mixed, side(f, n, D, &sd), NULL);
+         (!inject || inject_of(f, inject, n, hc, hd)) && down_up(f, down, up, n, hc, D, r, ready);
 }
 
 /* a step's side copy at a run's rows (t0 its first) */

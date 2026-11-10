@@ -28,9 +28,19 @@
   refused. test_x16_rows_gpu: a host reference's bytes (padding slots, wider strides, every rounding edge, the
   overflow flag), mutation-checked. A 2048-token step on the IQ3 pack 2.51 -> 1.09 ms a layer (a 4096-token
   prompt's 245 -> 112 ms); both Qwen packs' and DeepSeek's (UD-IQ1_M) hashes the same.
+- **The mixers' gated mean in their up's launch, every bit the same.** mm_run_gated_mean: the hyper-connection
+  mixer's up computes a 16-row tile of each of the 4 streams in turn (tile's own sums) and keeps sum += xn
+  sigmoid(up) in stream order - q4x_hc_gated_mean's expression and order - writing the mean and its f16; the up's
+  F32 (10,240 values a token: 84 MB written and read back a mixer at a 2K step) no longer stored, one launch fewer
+  a mixer. test_gated_mean_gpu: the two calls' bytes (F32, f16, overflow) at 1-2,048 tokens, mutation-checked.
+  A 4096-token prompt's up + gated mean 366 -> 281 ms. With the gather above, at serve's 2048-token steps
+  (low-power, three interleaved runs each): UD-IQ3_XXS's 4K prompt 751-756 -> 768-782 tok/s, UD-Q4_K_XL's 681-701
+  -> 737-745; decode the same or ~1% up; every ids hash the same.
 - Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
   copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
-  activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%).
+  activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%); IQ2_S's decode through
+  v_perm_b32 (its grid's 3 values a scale; a prompt-sized bench -10%, the model none: its 1-16-token experts read
+  at DRAM's rate) and a cheaper Q6_K matvec (decode's Q6_K runs on mm, not mv).
 
 ## [0.5.12]: the larger Qwen, DFlash2 as an option, a race in the MoE fixed
 
