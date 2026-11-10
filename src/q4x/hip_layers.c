@@ -120,25 +120,29 @@ static bool inject_of(Q4xForward *f, const GgufTensor *inject, uint32_t n, uint3
 
 /* the mixer's up and gated mean (b.mixed, its f16 beside): mm_run_gated_mean - the mean the up's epilogue, the up's
    F32 (b.gate, hc n_embd a token) neither written nor read back: at a 2K step 168 MB a mixer fewer (a 4K prompt's
-   up and mean 366 -> 281 ms, low-power) - from the silu's f16 in b.x16b (x16b true), else the two calls (the up from
-   b.lo). the same bits either way (test_gated_mean_gpu) */
-static bool up_mean(Q4xForward *f, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t D, uint32_t r, bool x16b)
+   up and mean 366 -> 281 ms, low-power) - from the silu's f16 at x16 (NULL: the two calls, the up from b.lo). the same
+   bits either way (test_gated_mean_gpu) */
+static bool up_mean(Q4xForward *f, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t D, uint32_t r,
+                    const void *x16)
 {
   Q4xBuf *b = &f->b;
   const uint32_t hd = hc * D;
   Q4xX16 sd;
   const Q4xX16 *ms = side(f, n, D, &sd);
-  if (x16b && mm_takes(up, hd, r, r, hd) &&
-      mm_run_gated_mean(TY(up), q4x_dev(f, up), hc, D, r, b->x16b, n, b->xn, b->mixed, ms ? ms->x16 : NULL,
+  if (x16 && mm_takes(up, hd, r, r, hd) &&
+      mm_run_gated_mean(TY(up), q4x_dev(f, up), hc, D, r, x16, n, b->xn, b->mixed, ms ? ms->x16 : NULL,
                         ms ? ms->row0 : 0, b->overflow, f->st))
     return true;
-  return (x16b && mm_takes(up, hd, r, r, hd) ? mm_run(TY(up), q4x_dev(f, up), hd, r, b->x16b, n, b->gate, hd, f->st)
+  return (x16 && mm_takes(up, hd, r, r, hd) ? mm_run(TY(up), q4x_dev(f, up), hd, r, x16, n, b->gate, hd, f->st)
                                              : q4x_mat(f, up, hd, r, b->lo, r, n, b->gate, hd, false)) &&
          q4x_hc_gated_mean(b->xn, b->gate, n, hc, D, b->mixed, ms, NULL);
 }
 
 /* the mixer's down, silu, then up_mean: a small step's down and silu one launch (mm_run_silu: its f16 into b.x16b -
-   b.x16 the down's own input meanwhile), the same bits as the two; otherwise the two, the silu's f16 into b.x16b */
+   b.x16 the down's own input meanwhile), the same bits as the two; otherwise the two, the silu's f16 into b.xe16 -
+   the routed experts' f16, theirs only after the mixer in the stream's order (a step past Q4X_SIDE_STEP is one
+   stream's), so no memory more: a 2K step's own buffer for it tipped UD-Q4_K_XL's 8K prompt in 4K steps past the
+   GPU's memory (a kernel's code then not loaded: HSA_STATUS_ERROR_OUT_OF_RESOURCES, the runtime's segfault) */
 static bool down_up(Q4xForward *f, const GgufTensor *down, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t D,
                     uint32_t r, bool ready)
 {
@@ -147,10 +151,11 @@ static bool down_up(Q4xForward *f, const GgufTensor *down, const GgufTensor *up,
   const float scale = 1.0f / (float)hc;
   if (ready && n <= MM_SILU_MAX_TOKENS && mm_takes(down, r, hd, hd, r) && mm_takes(up, hd, r, r, hd) &&
       mm_run_silu(TY(down), q4x_dev(f, down), r, hd, b->x16, n, b->lo, r, scale, b->x16b, b->overflow, f->st))
-    return up_mean(f, up, n, hc, D, r, true);
-  const Q4xX16 sx = {b->x16b, b->overflow, r, 0}; /* the silu's f16 for up_mean: b.x16 the mixer's input meanwhile */
+    return up_mean(f, up, n, hc, D, r, b->x16b);
+  const Q4xX16 sx = {b->xe16, b->overflow, r, 0}; /* the silu's f16 for up_mean: b.x16 the mixer's input meanwhile */
   return q4x_mat(f, down, r, hd, b->xn, hd, n, b->lo, r, ready) &&
-         q4x_scale_silu(b->lo, (uint64_t)n * r, scale, ready ? &sx : NULL, NULL) && up_mean(f, up, n, hc, D, r, ready);
+         q4x_scale_silu(b->lo, (uint64_t)n * r, scale, ready ? &sx : NULL, NULL) &&
+         up_mean(f, up, n, hc, D, r, ready ? b->xe16 : NULL);
 }
 
 bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, const GgufTensor *up,
