@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
   if (!block || block > OSMOS_MAX_BLOCK) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_BLOCK 1 .. 8\n"), 2;
   const double t1 = now(), e2 = epoch();
   uint64_t h = FNV_SEED;
+  std::vector<int32_t> decoded;  // Q4X_BENCH_IDS: the decoded ids written there (two runs' tokens compared)
   double worst = 0;
   uint32_t out = 0, rounds = 0, drafted = 0, accepted = 0;
   const bool trace = getenv("Q4X_BENCH_TRACE");  // each round's drafts and their probabilities, exact (%a): two runs diffed
@@ -124,7 +125,7 @@ int main(int argc, char** argv) {
       for (int i = 0; i < k; i++) std::printf(" %d %a", toks[i + 1], conf[i]);
       std::printf("\n");
     }
-    for (int i = 0; i < keep && out < nd; i++, out++) h = fnv(&toks[i], sizeof toks[i], h);
+    for (int i = 0; i < keep && out < nd; i++, out++) h = fnv(&toks[i], sizeof toks[i], h), decoded.push_back(toks[i]);
     y = picks[keep - 1];
     if (drafting && !q4x_seq_rollback(s, (uint32_t) (k + 1 - keep)))
       return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
@@ -141,6 +142,11 @@ int main(int argc, char** argv) {
     std::printf("; %u rounds, %.0f%% of %u drafts accepted, %.2f tokens a round", rounds,
                 drafted ? 100.0 * accepted / drafted : 0.0, drafted, (double) nd / rounds);
   std::printf("); ids %016llx\n", (unsigned long long) h);
+  if (const char* path = getenv("Q4X_BENCH_IDS")) {
+    FILE* o = std::fopen(path, "w");
+    for (size_t i = 0; o && i < decoded.size(); i++) std::fprintf(o, "%d%s", decoded[i], i + 1 < decoded.size() ? "," : "\n");
+    if (!o || std::fclose(o)) return std::fprintf(stderr, "q4x_bench: %s not written\n", path), 1;
+  }
   q4x_seq_destroy(s);
   q4x_forward_destroy(fw);
   q4x_mtp_destroy(mtp);
