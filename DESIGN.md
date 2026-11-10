@@ -2744,6 +2744,22 @@ text: the quants', not osmos's. osmos lower than llama.cpp on both (its matmuls'
 0.6% on UD-Q4_K_XL, 0.2% on UD-IQ3_XXS. llama.cpp's 4,096-token run on UD-Q4_K_XL took the machine to 4 GiB available
 (the operator's leave for a reference run under a 3 GiB watchdog; 8,192 was refused by the 8 GiB one). UD-Q4_K_XL's
 case for a pack: unsloth's KLD against BF16 and other text, and its cost - ~1.5x the bytes a token.
+
+**Its matmul's shapes, and the others' looked at again (2026-11-09, low-power).** mmsweep q4 / experts, a token's 10
+experts cold, two runs. Q4_K and Q5_1 on mm's register-A path (each lane decoding its row of WMMA's A operand straight
+into registers, the same bits): Q4_K's gate / up 103-107 -> 78-80 us, Q5_1's down 111 -> 72-75. Then the shapes: the
+64-value slabs' fastest (64 x 8 x 4, 64 x 4 x 4, through LDS) moved the perplexity up at every length (2K +0.5%, 8K
++1.3%) - not taken. 16 waves a block (never swept before; a 128-value slab's 68 KB of LDS past the 64): Q4_K's
+2,560-column rows at 32 x 16 x 2 58-60 us (80 slabs of 32 for 16 waves: the decode's latency hidden), Q5_1's 640 at
+32 x 8 x 2 63-64 (16 waves too many for 20 slabs) - the matmul's error 2.0-2.5 -> 1.0-1.3 u|wx|, the perplexity
+within the default order's scatter (2K 6.9661 against 6.9754, 8K 2.7434 against 2.7354): taken. UD-Q4_K_XL's
+512-token prompt 247 -> 409 (register-A) -> 507 tok/s, decode 20.6 -> 23.2. UD-IQ3_XXS's types through the same
+sweep: their shapes within 2% of their best but IQ3_XXS (32 x 16 x 2, -10% at a token); register-A slower at their
+shapes for IQ3_XXS, IQ2_S and Q2_0 (+2%, +14%, +6%, as when it was added) and no faster at their best. IQ3_XXS's
+shape on the model: a 2,048-token prompt 733.7 -> 733.2 tok/s, decode 26.15 -> 26.14 - nothing, so its bits kept
+(the prompt's steps many tiles, the decode the experts' bytes'). Q4_K's gain was its one-tile path's, which started
+slow.
+
 ### 0.5.11: the release run (2026-11-09, low-power)
 
 **The scripts and logs:** ~/bench/h2h-0511 - `suite.sh` (0.5.9's suite: a clean build, CPU, API and installer
