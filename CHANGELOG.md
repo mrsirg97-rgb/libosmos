@@ -48,6 +48,13 @@
   waves of which 7 summed rows past the end (the inject 520 -> 456 us, the shared expert's gate 68 -> 30). A tile is
   rows' and tokens' own sums: test_mv_f32_wide_gpu, the 4 x 8 tile's bits, mutation-checked. A 4096-token prompt's
   F32 matvecs 406 -> 349 ms; Qwen's and DeepSeek's hashes the same.
+- **The mixers' inject in their norm's launch, every bit the same.** q4x_hc_norm_inject: a block a token, its 4
+  streams in turn - each combine_norm's (or hc_norm's) update, norm and f16 as before - the normed values kept in
+  LDS, and the inject's 4 rows a wave each, lane l's 8-value chunks in order as each stream is done, then mv's tree:
+  mv_strided's bits without reading xn back (84 MB a mixer at a 2K step) or the inject's launch. A prompt's step
+  alone (past 16 tokens): a small step keeps the inject beside on the second stream (one block a token would be
+  decode's 27.4 -> 25.6 tok/s). test_hc_norm_inject_gpu: the two calls' bytes, the inject in place and apart,
+  mutation-checked. A 4096-token prompt's norms and injects 479 -> 361 ms; every ids hash the same.
 - Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
   copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
   activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%); IQ2_S's decode through

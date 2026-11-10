@@ -54,6 +54,59 @@ __global__ void combine_norm_kernel(float* h, const float* out, const float* inj
   }
 }
 
+// a block a token: its hc streams in turn, each combine_norm_kernel's update (COMBINE) or hc_norm_kernel's alone, its
+// norm and its f16 - their expressions, their trees, so their bits - its normed values kept in LDS; then the inject
+// (an F32 hc x hc dim matrix: inj[t][q] = row q . the token's normed hc dim values) wave q's row q: lane l its 8-value
+// chunks l, l + 32, ... of the token's row in order, 8 fmaf a chunk, the stream's chunks as each stream is done, then
+// the tree - mv's sums (mv.h: any tile), so mv_strided's bits - without reading xn back (hc dim F32 a token)
+template <bool COMBINE>
+__global__ void hc_norm_inject_kernel(float* h, const float* out, const float* inject, uint32_t hc, uint32_t dim,
+                                      float inject_scale, const float* w, float eps, float* xn, Q4xX16 side,
+                                      const float* winj, float* inj) {
+  extern __shared__ float ys[];  // a stream's normed values
+  __shared__ float lds[kThreads];
+  constexpr uint32_t kLanes = 32, kChunk = 8;
+  const uint32_t t = blockIdx.x, wave = threadIdx.x / kLanes, lane = threadIdx.x % kLanes, cpd = dim / kChunk;
+  const uint64_t hd = (uint64_t) hc * dim;
+  float acc = 0;  // wave q < hc: row q's lane partial
+  for (uint32_t s = 0; s < hc; s++) {
+    float* x = h + ((uint64_t) t * hc + s) * dim;
+    float* y = xn + ((uint64_t) t * hc + s) * dim;
+    float ss = 0;
+    if constexpr (COMBINE) {
+      const float g = 2.0f * sigmoid(inject[(uint64_t) t * hc + s] * inject_scale);
+      for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
+        x[d] += g * out[(uint64_t) t * dim + d];
+        ss += x[d] * x[d];
+      }
+    } else {
+      for (uint32_t d = threadIdx.x; d < dim; d += kThreads) ss += x[d] * x[d];
+    }
+    const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) dim + eps);
+    for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
+      y[d] = x[d] * r * w[(uint64_t) s * dim + d];
+      ys[d] = y[d];
+      x16_side(side, ((uint64_t) t * hc + s) * dim + d, y[d]);
+    }
+    __syncthreads();  // the stream's values in LDS
+    if (wave < hc) {
+      const float* wr = winj + wave * hd;
+      const uint32_t c0 = s * cpd, first = c0 + (lane + kLanes - c0 % kLanes) % kLanes;  // this lane's first in it
+      for (uint32_t c = first; c < c0 + cpd; c += kLanes) {
+        const float* vv = wr + (uint64_t) c * kChunk;
+        const float* a = ys + (c - c0) * kChunk;
+        acc = fmaf(vv[0], a[0], acc), acc = fmaf(vv[1], a[1], acc), acc = fmaf(vv[2], a[2], acc);
+        acc = fmaf(vv[3], a[3], acc), acc = fmaf(vv[4], a[4], acc), acc = fmaf(vv[5], a[5], acc);
+        acc = fmaf(vv[6], a[6], acc), acc = fmaf(vv[7], a[7], acc);
+      }
+    }
+    __syncthreads();  // LDS free for the next stream; every thread past this stream's inject read
+  }
+  if (wave >= hc) return;
+  for (uint32_t o = kLanes / 2; o > 0; o >>= 1) acc += __shfl_xor(acc, o, kLanes);
+  if (lane == 0) inj[(uint64_t) t * hc + wave] = acc;
+}
+
 __global__ void scale_silu_kernel(float* x, uint64_t n, float scale, Q4xX16 side) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) x[i] = silu(x[i] * scale), x16_side(side, i, x[i]);
@@ -128,6 +181,23 @@ extern "C" bool q4x_hc_combine_norm(float* h, const float* out, const float* inj
   if (!shape(n_tok, hc, dim) || !h || !out || !inject || !w || !xn) return false;
   combine_norm_kernel<<<dim3(hc, n_tok), kThreads, 0, st(stream)>>>(h, out, inject, hc, dim, inject_scale, w, eps,
                                                                     xn, side_of(side));
+  return ok();
+}
+
+extern "C" bool q4x_hc_norm_inject(float* h, const float* out, const float* inject, uint32_t n_tok, uint32_t hc,
+                                   uint32_t dim, float inject_scale, const float* w, float eps, float* xn,
+                                   const Q4xX16* side, const float* winj, float* inj, bool combine, void* stream) {
+  constexpr uint32_t kChunk = 8, kWaves = kThreads / 32, kMaxLds = 48 * 1024;
+  if (!shape(n_tok, hc, dim) || hc > kWaves || dim % kChunk || dim * 4 > kMaxLds || !h || !w || !xn || !winj || !inj ||
+      (combine && (!out || !inject)))
+    return false;
+  const size_t lds = (size_t) dim * 4;
+  if (combine)
+    hc_norm_inject_kernel<true><<<n_tok, kThreads, lds, st(stream)>>>(h, out, inject, hc, dim, inject_scale, w, eps, xn,
+                                                                     side_of(side), winj, inj);
+  else
+    hc_norm_inject_kernel<false><<<n_tok, kThreads, lds, st(stream)>>>(h, out, inject, hc, dim, inject_scale, w, eps, xn,
+                                                                      side_of(side), winj, inj);
   return ok();
 }
 

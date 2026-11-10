@@ -1,4 +1,5 @@
 #include "osmos/gpu/mm.h"
+#include "osmos/model/qtype.h"
 #include "q4x_impl.h"
 
 /* a layer's blocks, each as its test holds it to llama.cpp's (tests/gpu/test_q4x_*_gpu): the mixer into b.mixed and
@@ -161,8 +162,16 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
   Q4xX16 sd;
   /* each op's output its f16 too (side): the matmul after it ready; b.x16 then the mixed input's, for the block's */
   const bool ready = n <= MM_MAX_TOKENS;
-  return q4x_inj_wait(f) && /* the last inject done: b.inj read here, b.xn written */
-         (combine ? q4x_hc_combine_norm(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, fv(f, norm), g->rms_eps,
+  if (!q4x_inj_wait(f)) /* the last inject done: b.inj read here, b.xn written */
+    return false;
+  /* a prompt's step: the norm and its inject one launch (q4x_hc_norm_inject: xn not read back, mv's bits) where the
+     inject is F32 - a 4K prompt's norms and injects 479 -> 361 ms, low-power. a small step keeps the two, the inject
+     beside on s2: a block a token there would be the one block (decode 27.4 -> 25.6 tok/s) */
+  if (n > Q4X_SIDE_STEP && inject && TY(inject) == QTYPE_F32 && inject->dims[0] == hd && inject->dims[1] == hc &&
+      q4x_hc_norm_inject(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, fv(f, norm), g->rms_eps, b->xn,
+                         side(f, n, hd, &sd), fv(f, inject), b->inj, combine, NULL))
+    return down_up(f, down, up, n, hc, D, r, ready);
+  return (combine ? q4x_hc_combine_norm(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, fv(f, norm), g->rms_eps,
                                         b->xn, side(f, n, hd, &sd), NULL)
                   : q4x_hc_norm(b->h, fv(f, norm), n, hc, D, g->rms_eps, b->xn, side(f, n, hd, &sd), NULL)) &&
          (!inject || inject_of(f, inject, n, hc, hd)) && down_up(f, down, up, n, hc, D, r, ready);
