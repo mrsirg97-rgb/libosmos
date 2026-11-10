@@ -2770,6 +2770,18 @@ not the bound, is the bar. U alone changes no bit (128 x 8 x 8 against 128 x 8 x
 the head's own rows, 1 and 16 tokens: the same; W is the sums' order), and 128 x 8 x 4 is within the noise of
 128 x 8 x 8. So the decode's remaining time is elsewhere: the launches (1,886 a Qwen token, 0.5.1).
 
+**UD-Q4_K_XL against UD-IQ3_XXS on real agent work (2026-11-09, low-power).** The rig replay's 16 points (q4x_bench,
+MTP-drafted, 256 decoded a point, each quant as its pack runs it: UD-IQ3_XXS's n-gram table held, UD-Q4_K_XL's
+streamed), round 1 whole and 9 points of round 2 (stopped there: the rounds agreeing): prompts 684.5 against 574.5
+tok/s (-16%; round 2 -18%), 0.101 against 0.121 J a token; decode 46.1 against 41.5 tok/s (-10%; -11%), 1.661 against
+1.831 J; UD-Q4_K_XL ahead on decode at 1 point of 16. Every round-2 run's tokens its round-1 run's. The two quants'
+tokens part at the 8th (median): different paths, not a measure of either. Why: a token reads every dense weight and
+10 of 512 experts - the dense 80% of UD-IQ3_XXS's bytes a token (4.0 GB of Q6_K / Q8_0) and 76% of UD-Q4_K_XL's (4.83
+GB, all Q8_0): its dense alone 0.83 GB more a token, its experts 0.52 GB. So the larger quant's cost is its dense
+weights' bytes, and its perplexity no better here. It ships as a pack for whoever wants it (qwen38-ud-q4_k_xl), the
+default UD-IQ3_XXS. 0.6.0's idea from this: the dense weights' bits spent better, not added - a Q8_0 / Q5_K mix at
+Q6_K's bits a weight, by per-tensor sensitivity (DeepSeek's dense first, as an overlay; its experts untouched).
+
 ### 0.5.11: the release run (2026-11-09, low-power)
 
 **The scripts and logs:** ~/bench/h2h-0511 - `suite.sh` (0.5.9's suite: a clean build, CPU, API and installer

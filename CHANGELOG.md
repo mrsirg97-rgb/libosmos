@@ -11,7 +11,7 @@
   this calibration text UD-IQ3_XXS is a little ahead past 2K tokens on both engines (4K: osmos 6.7522 against 6.7730,
   llama.cpp 6.7683 against 6.8126). **A pack: `qwen38-ud-q4_k_xl`** (rig `qwen3.8-flash-next-l`, alias `qwen-l`), its
   n-gram table streamed - for whoever wants the larger quant: on 16 points of real agent work (rig replay, MTP-drafted,
-  low-power) 10% slower decode and 16% slower prompts than UD-IQ3_XXS, 10-19% more energy a token (its dense weights
+  low-power) 10-11% slower decode and 16-18% slower prompts than UD-IQ3_XXS, 11-24% more energy a token (its dense weights
   all Q8_0: 0.8 GB more read a token). No abliteration overlay for it yet.
 - **Qwen's decode: fewer launches, a faster router.** The router's top-k picks by one wave's shuffles instead of a
   block-wide argmax a pick (19.3 -> 13.9 us a token's layer); the mixers' down matmul applies its silu and writes the
