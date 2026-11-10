@@ -55,11 +55,17 @@
   alone (past 16 tokens): a small step keeps the inject beside on the second stream (one block a token would be
   decode's 27.4 -> 25.6 tok/s). test_hc_norm_inject_gpu: the two calls' bytes, the inject in place and apart,
   mutation-checked. A 4096-token prompt's norms and injects 479 -> 361 ms; every ids hash the same.
+- **The delta rule a head over 4 blocks, every bit the same.** q4x_delta's 48 value heads a block each left 8 of the
+  40 CUs two; a head's 128 state columns now over 4 blocks (a column's sums its own, whatever the block).
+  test_q4x_delta_split_gpu: the one-block-a-head kernel's outputs and states, mutation-checked. A 2048-token step
+  4.2 -> 3.9 ms; a 4096-token prompt's 355 -> 306 ms; decode the same.
 - Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
   copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
   activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%); IQ2_S's decode through
   v_perm_b32 (its grid's 3 values a scale; a prompt-sized bench -10%, the model none: its 1-16-token experts read
-  at DRAM's rate) and a cheaper Q6_K matvec (decode's Q6_K runs on mm, not mv).
+  at DRAM's rate) and a cheaper Q6_K matvec (decode's Q6_K runs on mm, not mv); the attention's K and V two blocks
+  ahead (no change: its time the score chain, the softmax and the barriers a 16-key block, its 128-key chunks and
+  their order fixed by the bits).
 
 ## [0.5.12]: the larger Qwen, DFlash2 as an option, a race in the MoE fixed
 

@@ -111,13 +111,20 @@ constexpr int kHalfRows = kHead / 2;
 // the q / k rows in LDS: the high half a float on (a lane reads its half's row, its pair the other's - 64 floats apart
 // they were one bank, a 2-way conflict each read; one apart each half a broadcast)
 constexpr int kQkLds = kHead + 1;
+// a head's columns over kDeltaSplit blocks: 48 heads a block each left 8 of the 40 CUs two, the launch theirs (a
+// 2048-token step 4.2-4.3 -> 3.8-3.9 ms, low-power; 2 blocks 4.1, 8 4.6: a token's loads shared by fewer columns)
+constexpr int kDeltaSplit = 4;
 __device__ inline uint32_t qk_at(uint32_t i) { return i + (i >= (uint32_t) kHalfRows); }
-__global__ __launch_bounds__(2 * kHead) void delta_kernel(const float* qkv, const float* qk, const float* g,
-                                                          const float* b, uint32_t n_tok, uint32_t k_heads,
-                                                          uint32_t v_heads, float* ring, uint32_t slots, uint32_t cur,
-                                                          uint32_t keep, float* out) {
+// SPLIT blocks a head (blockIdx.y its share of the columns): a column's sums its own, whatever the block - the same
+// bits at any SPLIT; a thread SPLIT of the token's q and k loads into LDS (the block's columns read all its rows)
+template <int SPLIT>
+__global__ __launch_bounds__(2 * kHead / SPLIT) void delta_kernel(const float* qkv, const float* qk, const float* g,
+                                                                  const float* b, uint32_t n_tok, uint32_t k_heads,
+                                                                  uint32_t v_heads, float* ring, uint32_t slots,
+                                                                  uint32_t cur, uint32_t keep, float* out) {
+  constexpr uint32_t kCols = kHead / SPLIT, kThreadsHere = 2 * kCols;
   __shared__ float qs[2][kQkLds], ks[2][kQkLds];
-  const uint32_t h = blockIdx.x, j = threadIdx.x >> 1, half = threadIdx.x & 1, kg = h % k_heads;
+  const uint32_t h = blockIdx.x, j = blockIdx.y * kCols + (threadIdx.x >> 1), half = threadIdx.x & 1, kg = h % k_heads;
   const uint32_t r0 = half * kHalfRows, l0 = qk_at(r0);
   const uint64_t ch = 2ull * k_heads * kHead + (uint64_t) v_heads * kHead, qkr = 2ull * k_heads * kHead;
   const uint64_t slot = (uint64_t) v_heads * kHead * kHead, col = ((uint64_t) h * kHead + j) * kHead + r0;
@@ -125,19 +132,28 @@ __global__ __launch_bounds__(2 * kHead) void delta_kernel(const float* qkv, cons
 #pragma unroll
   for (int i = 0; i < kHalfRows; i++) s[i] = ring[cur * slot + col + i];
   const float scale = 1.0f / sqrtf((float) kHead);
-  // a thread's share of the token's loads: its column's q (the low half's thread) or k (the high's); v both
+  // a thread's share of the token's loads: SPLIT of q's and k's rows (load i: row (threadIdx.x + i 2 kCols) / 2 of q, or
+  // of k at an odd index), its column's v
   auto load = [&](uint32_t t, float* x, float* v, float* gg, float* bb) {
-    *x = qk[t * qkr + (uint64_t) (half ? k_heads + kg : kg) * kHead + j];
+#pragma unroll
+    for (int i = 0; i < SPLIT; i++) {
+      const uint32_t at = threadIdx.x + i * kThreadsHere, r = at >> 1;
+      x[i] = qk[t * qkr + (uint64_t) ((at & 1) ? k_heads + kg : kg) * kHead + r];
+    }
     *v = qkv[t * ch + 2ull * k_heads * kHead + (uint64_t) h * kHead + j];
     *gg = g[(uint64_t) t * v_heads + h], *bb = b[(uint64_t) t * v_heads + h];
   };
-  float nx, nv, ng, nb;
-  load(0, &nx, &nv, &ng, &nb);
+  float nx[SPLIT], nv, ng, nb;
+  load(0, nx, &nv, &ng, &nb);
   for (uint32_t t = 0; t < n_tok; t++) {
     const int buf = t & 1;
-    (half ? ks : qs)[buf][qk_at(j)] = nx;
+#pragma unroll
+    for (int i = 0; i < SPLIT; i++) {
+      const uint32_t at = threadIdx.x + i * kThreadsHere;
+      ((at & 1) ? ks : qs)[buf][qk_at(at >> 1)] = nx[i];
+    }
     const float v = nv, decay = expf(ng), beta = nb;
-    if (t + 1 < n_tok) load(t + 1, &nx, &nv, &ng, &nb);
+    if (t + 1 < n_tok) load(t + 1, nx, &nv, &ng, &nb);
     __syncthreads();  // this token's q, k in; the buffer before it read by every thread (it was, before the last)
     const float *qb = qs[buf] + l0, *kb = ks[buf] + l0;
     float part = 0;
@@ -209,8 +225,8 @@ extern "C" bool q4x_delta(const float* qkv, const float* g, const float* b, uint
     return false;
   qk_norm_kernel<<<dim3(2 * k_heads, n_tok), kHead, 0, st(stream)>>>(qkv, k_heads, v_heads, eps, qk);
   if (!ok()) return false;
-  delta_kernel<<<v_heads, 2 * kHead, 0, st(stream)>>>(qkv, qk, g, b, n_tok, k_heads, v_heads, ring, slots, cur,
-                                                  kept(n_tok, slots), out);
+  delta_kernel<kDeltaSplit><<<dim3(v_heads, kDeltaSplit), 2 * kHead / kDeltaSplit, 0, st(stream)>>>(
+      qkv, qk, g, b, n_tok, k_heads, v_heads, ring, slots, cur, kept(n_tok, slots), out);
   return ok();
 }
 
