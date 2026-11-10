@@ -2,6 +2,26 @@
 
 ## [0.5.12]: (in progress)
 
+- **Qwen3.8's UD-Q4_K_XL runs** (unsloth's, 111.3 GB): its expert types Q4_K and Q5_1 read (each bit for bit
+  gguf-py's), Q5_K on the experts' matvec too; its weights resident (~82 GB of GPU memory) with the n-gram table
+  streamed from the SSD. Its perplexity is llama.cpp's on the same file (the first 512 tokens 6.4340 against 6.4331).
+  Its matmul tuned: Q4_K and Q5_1 on the register-A path (each lane decoding its row of the weights straight into
+  registers: the same bits, 25-33% faster) and their own shapes (Q4_K's long rows at 32 x 16 x 2 - 16 waves a block,
+  never swept before - Q5_1 at 32 x 8 x 2); a 512-token prompt 247 -> 507 tok/s, decode 20.6 -> 23.2 (low-power). On
+  this calibration text UD-IQ3_XXS is a little ahead past 2K tokens on both engines (4K: osmos 6.7522 against 6.7730,
+  llama.cpp 6.7683 against 6.8126).
+- **Qwen's decode: fewer launches, a faster router.** The router's top-k picks by one wave's shuffles instead of a
+  block-wide argmax a pick (19.3 -> 13.9 us a token's layer); the mixers' down matmul applies its silu and writes the
+  up's activations itself (1,744 -> 1,647 launches a token). Every bit the same (the ids hash of 512 + 128 tokens,
+  plain and MTP-drafted). Plain decode 26.88 -> 27.01 tok/s at low-power: a launch here costs ~2 us however little it
+  does (measured), so the rest of a token's launches are 0.6.0's to cut.
+- **The installer finds the GPU by its PCI ids** (sysfs: AMD's 1002, Strix Halo's Radeon 1586), not by running
+  rocminfo - which hung on a box without system ROCm (issue #25's report, @ucotman's suggestion: thank you). Anything
+  else is refused, the AMD devices it did find named.
+- **Measured, and left as they were** (DESIGN.md): every other matmul shape - the dense Q6_K / Q8_0 of both models and
+  UD-IQ3_XXS's experts at 16 waves and 32-value slabs (no gain on the model; Qwen's head at 4 waves +0.7% of a decode
+  token, but its rounding error doubled: not taken); HIP graphs for a decode token's launches (1.86 against 2.05 us a
+  launch: not worth a captured, updated graph).
 - **DFlash2 as Qwen's drafter, an option** (incoai's Qwen3.8-Flash-Next-DFlash2, Apache-2.0; tools/convert/
   dflash2_gguf.py makes its 0.64 GB Q8_0 GGUF). A pack whose `drafter` is that file drafts with it: a block of 7 drafts
   from one drafter pass, fed the target's own layers 5-45. Its drafts are the reference implementation's (511 of 511,

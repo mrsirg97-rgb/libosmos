@@ -488,6 +488,36 @@ class Host(unittest.TestCase):
         self.assertTrue(host.tools(False, False, which, lambda p: False)[0])  # --no-build: no build tools
 
 
+class Gpu(unittest.TestCase):
+    """the GPU found by its PCI ids in sysfs (no ROCm needed: issue #25 - rocminfo's probe hung on a box without one)"""
+
+    def tree(self, devices):
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "bus", "pci", "devices"))
+        for i, (vendor, device) in enumerate(devices):
+            d = os.path.join(root, "bus", "pci", "devices", f"0000:c{i}:00.0")
+            os.mkdir(d)
+            for name, v in (("vendor", vendor), ("device", device)):
+                with open(os.path.join(d, name), "w") as f:
+                    f.write(v + "\n")
+        return root
+
+    def test_found(self):
+        ok, why = host.gpu(self.tree([("0x8086", "0x1234"), ("0x1002", "0x1586")]))
+        self.assertTrue(ok, why)
+        self.assertIn("gfx1151", why)
+
+    def test_refused(self):
+        for devices, needle in (([("0x1002", "0x744c")], "1002:744c"),  # a discrete Radeon: named, refused
+                                ([("0x10de", "0x2684")], "no AMD GPU"), ([], "no AMD GPU")):
+            ok, why = host.gpu(self.tree(devices))
+            self.assertFalse(ok, why)
+            self.assertIn(needle, why)
+        ok, why = host.gpu("/nonexistent")
+        self.assertFalse(ok)
+        self.assertIn("sysfs", why)
+
+
 class Rig(unittest.TestCase):
     CFG = {"pack": "ud-iq1_s", "model": "/m/ud-iq1_s/M-00001-of-00005.gguf", "max_context": 1048576}
     PACKS = manifest.load(REAL)["packs"]

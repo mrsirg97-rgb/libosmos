@@ -1,10 +1,9 @@
-"""the machine checked before anything is fetched: a gfx1151 (rocminfo), the GPU memory the kernel lets the GPU map
+"""the machine checked before anything is fetched: a gfx1151 (its PCI ids in sysfs), the GPU memory the kernel lets the GPU map
 (ttm's pages_limit - reported; raising it is a system setting, the user's), the tools the build and the download run,
 free disk for what is missing. each check
 a line; a failure says why and what would fix it."""
 import os
 import shutil
-import subprocess
 
 GFX = "gfx1151"
 PAGE = 4096
@@ -13,15 +12,33 @@ PAGE = 4096
 GPU_GIB_NEEDED = 113
 
 
-def gpu():
-    exe = shutil.which("rocminfo") or "/opt/rocm/bin/rocminfo"
+AMD = 0x1002
+STRIX_HALO = {0x1586}  # the Radeon 8060S / 8050S's PCI device: a gfx1151
+
+
+def gpu(sys_root="/sys"):
+    """the GPU by its PCI ids in sysfs - no ROCm needed to ask (issue #25: rocminfo's probe hung where none was)"""
+    base = os.path.join(sys_root, "bus", "pci", "devices")
     try:
-        out = subprocess.run([exe], capture_output=True, text=True, timeout=60).stdout
-    except (OSError, subprocess.SubprocessError):
-        return False, "rocminfo did not run: ROCm 7.x is needed (https://rocm.docs.amd.com)"
-    if GFX not in out:
-        return False, f"no {GFX} (Ryzen AI MAX+ 395) found by rocminfo: osmos runs on Strix Halo"
-    return True, f"{GFX} found"
+        names = sorted(os.listdir(base))
+    except OSError:
+        return False, f"{base} unreadable: sysfs is how the GPU is found (is this Linux?)"
+    amd = []
+    for name in names:
+        try:
+            with open(os.path.join(base, name, "vendor")) as f:
+                vendor = int(f.read(), 16)
+            with open(os.path.join(base, name, "device")) as f:
+                device = int(f.read(), 16)
+        except (OSError, ValueError):
+            continue
+        if vendor == AMD:
+            if device in STRIX_HALO:
+                return True, f"{GFX} found (PCI {vendor:04x}:{device:04x} at {name})"
+            amd.append(f"{vendor:04x}:{device:04x}")
+    if not amd:
+        return False, f"no AMD GPU in {base}: osmos runs on Strix Halo ({GFX}, Ryzen AI MAX+)"
+    return False, f"no {GFX} (Ryzen AI MAX+'s Radeon, PCI 1002:1586): AMD devices {', '.join(amd)} - osmos runs on Strix Halo"
 
 
 def gpu_memory():
