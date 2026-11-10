@@ -54,7 +54,10 @@ template <> struct Tuned<quant::kIQ4_NL> { using S = mm::Shape<64, 4, 4>; static
 template <> struct Tuned<quant::kIQ4_XS> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ2_0> { using S = mm::Shape<64, 8, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ2_K> : Tuned<quant::kQ2_0> {};  // not measured: Q2_0's (its shape its bits: fixed before a pack)
-// UD-Q4_K_XL's expert types (Q4_K gate / up, Q5_1 down): the default shape until mmsweep measures theirs
+// UD-Q4_K_XL's expert types (Q4_K gate / up, Q5_1 down): the default shape. faster ones measured (mmsweep q4, a
+// token's 10 experts cold: Q4_K 103.6 -> 82.6 us at 64 x 8 x 4, Q5_1 110.9 -> 74.8 at 64 x 4 x 4; a 512-token prompt
+// 247 -> 532 tok/s) and not taken: every other K order measured moved the perplexity 0.2-1.3% (DESIGN.md, "UD-Q4_K_XL")
+// - which order is the nearer, not yet known
 using mm::kF16Max;
 
 // a thread a value: to f16 (the rows past n zero)

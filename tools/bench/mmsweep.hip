@@ -1,4 +1,4 @@
-// mmsweep [experts|dense]: mm's tile shapes (kernels/mm.h's Shape: SL values a slab, W waves a block, U chunks in
+// mmsweep [experts|dense|q4]: mm's tile shapes (kernels/mm.h's Shape: SL values a slab, W waves a block, U chunks in
 // flight a lane) timed at one token on Qwen3.8-Flash-Next's shapes - each expert type's gate / up (640 x 2560) and
 // down (2560 x 640), 10 experts a launch (mm_group), and the dense Q6_K / Q8_0 - every call reading cold memory (its
 // matrices rotated through 1 GiB). a shape is a K split, so it is the sums' order: a type's for every token count
@@ -88,7 +88,7 @@ static void dense(const char* type, uint32_t rows, uint32_t cols) {
       F<T, 128, 8, 4>(name, rows, cols), F<T, 128, 8, 8>(name, rows, cols), F<T, 256, 4, 8>(name, rows, cols)
 
 int main(int argc, char** argv) {
-  const bool experts = argc < 2 || !std::strcmp(argv[1], "experts");
+  const bool experts = argc < 2 || !std::strcmp(argv[1], "experts"), q4 = argc > 1 && !std::strcmp(argv[1], "q4");
   HIP(hipMalloc(&pool, kPool));
   HIP(hipMalloc(&x16, (size_t) mm::kTile * 10240 * 2));
   HIP(hipMalloc(&y, (size_t) 16 * 262144 * 4));
@@ -105,7 +105,11 @@ int main(int argc, char** argv) {
   HIP(hipMemcpy(xoff, zero.data(), kExperts * 4, hipMemcpyHostToDevice));
   HIP(hipMemcpy(yoff, ys.data(), kExperts * 4, hipMemcpyHostToDevice));
   HIP(hipDeviceSynchronize());
-  if (experts) {
+  if (q4) {  // UD-Q4_K_XL's expert types: Q4_K gate / up, Q5_1 down, a few layers' Q5_K gates
+    SHAPES(group, quant::kQ4_K, "Q4_K", 640, 2560);
+    SHAPES(group, quant::kQ5_1, "Q5_1", 2560, 640);
+    SHAPES(group, quant::kQ5_K, "Q5_K", 640, 2560);
+  } else if (experts) {
     SHAPES(group, quant::kIQ4_NL, "IQ4_NL", 2560, 640);
     SHAPES(group, quant::kIQ3_XXS, "IQ3_XXS", 640, 2560);
     SHAPES(group, quant::kIQ2_S, "IQ2_S", 640, 2560);
