@@ -59,6 +59,7 @@ bool server_spec(const Server *sv, const Gen *g);
 bool conv_create(Conv *c, const Server *sv);
 void conv_destroy(Conv *c);
 bool conv_restart(Conv *c, const Server *sv);
+void conv_failed(Conv *c, const Server *sv);
 void conv_set_aside(Conv *c, const Server *sv);
 uint32_t conv_reach(const Conv *c, const int32_t *p, uint32_t n);
 bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n);

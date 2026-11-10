@@ -1,7 +1,7 @@
 // mm_x16_rows (the experts' gather into their f16 slots) against a host reference: slot s row idx[s] of x (-1: zero),
 // each value f16-nearest at x16_at's place, every byte past the slots untouched; the overflow flag set by a value past
-// f16's range or a NaN and only then; rows wider than the columns read; a stride that breaks the rows' alignment
-// refused. needs a GPU; skipped (77) without one.
+// f16's range or a NaN and only then; rows wider than the columns read; a stride or a base that breaks the rows'
+// 16-byte alignment refused. needs a GPU; skipped (77) without one.
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -110,10 +110,11 @@ int main() {
     CHECK(hipMemset(idx, 0, 16 * 4) == hipSuccess);
     CHECK(!mm_x16_rows(x, 2562, idx, 16, 2560, x16, ovf, nullptr));
     CHECK(!mm_x16_rows(x, 64, idx, 16, 40, x16, ovf, nullptr));
+    CHECK(!mm_x16_rows(x + 1, 2560, idx, 1, 2560, x16, ovf, nullptr));  // x not 16-byte aligned
     CHECK(hipDeviceSynchronize() == hipSuccess && hipFree(x) == hipSuccess && hipFree(x16) == hipSuccess);
     CHECK(hipFree(idx) == hipSuccess && hipFree(ovf) == hipSuccess);
   }
-  std::printf("  refusals: a stride not a multiple of 4, columns not 16s\n");
+  std::printf("  refusals: a stride not a multiple of 4, columns not 16s, x not 16-byte aligned\n");
   std::printf("[test_x16_rows_gpu] ok\n");
   return 0;
 }

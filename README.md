@@ -231,6 +231,8 @@ python3 tools/bench/rig_replay.py ~/.rig out/ --shard $Q --gguf-py <llama.cpp>/g
 bin/q4x_ppl $Q ids.txt 8192 2048                                                              # perplexity
 # 0.6.0's table: powerprofilesctl set performance, then each version's q4x_bench at 2048 128, 8192 1 and
 # 512 128 with the MTP head, and dbench auto 512 256 warmup.txt q1.txt p2048.txt p8192.txt, interleaved
+# (UD-Q4_K_XL's rows had its n-gram table resident; from 0.6.1 at an 8K context that leaves the GPU under its
+# margin and is refused: Q4X_BENCH_STREAM=1, the pack's own setting, streams it - its 8K prompt then 892-913 tok/s)
 ```
 
 The bench tools are built with `hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/<tool>.hip -Llib -losmos_hip

@@ -113,7 +113,7 @@ static void line(Engine *e, char *l)
   Run *r = sscanf(l, "%7s %lld", what, &rid) == 2 ? find(e, rid) : NULL;
   if (r)
     run_line(r, what, l);
-  else if (!strncmp(l, "ERR ", 4))
+  else if (!strncmp(l, "ERR ", 4) || !strncmp(l, "FATAL ", 6)) /* FATAL: the engine exits next (its runs then ended) */
     fprintf(stderr, "osmos-api: engine: %s\n", l);
   pthread_mutex_unlock(&e->mu);
 }

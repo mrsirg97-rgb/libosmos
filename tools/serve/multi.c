@@ -44,7 +44,7 @@ void lane_fail(Multi *m, Lane *ln)
   out("ERR %lld %s\n", ln->g.rid, ln->c.err);
   free(ln->g.ids);
   ln->g.ids = NULL, ln->st = IDLE;
-  conv_restart(&ln->c, m->sv);
+  conv_failed(&ln->c, m->sv);
 }
 
 /* the idle lane a request takes: the one whose conversation it continues furthest, else the least recently used

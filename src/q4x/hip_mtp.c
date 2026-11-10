@@ -51,6 +51,8 @@ bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q
 {
   if (!f || !s || s->f != f || !f->mtp)
     return q4x_fail(err, "no forward with an MTP head, or a sequence of another forward");
+  if (s->broken)
+    return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   if (!s->step_n || from < s->step_pos0 || from >= to || to > s->step_pos0 + (int32_t)s->step_n || to > s->pos)
     return q4x_fail(err, "positions not of the sequence's last step");
   const Q4xGeometry *g = &f->w->geo;
@@ -115,6 +117,8 @@ bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32
     return q4x_fail(err, "no forward with an MTP head, no sequences or room, or not 1 .. Q4X_MAX_RUNS of them");
   for (uint32_t i = 0; i < n; i++)
   {
+    if (s[i] && s[i]->broken)
+      return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
     if (!s[i] || s[i]->f != f)
       return q4x_fail(err, "a sequence of another forward");
     for (uint32_t j = 0; j < i; j++)

@@ -29,6 +29,8 @@ bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char er
 {
   if (!f || !s || s->f != f || !f->df)
     return q4x_fail(err, "no forward with a drafter, or a sequence of another forward");
+  if (s->broken)
+    return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   if (from >= to || !s->step_n || from < s->step_pos0 || to > s->step_pos0 + (int32_t)s->step_n || to > s->pos)
     return q4x_fail(err, "positions not of the sequence's last step, or past its position");
   const int32_t p0 = from;
@@ -93,6 +95,8 @@ int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float co
 {
   if (!f || !s || s->f != f || !f->df || (max && (!drafts || !conf)))
     return q4x_fail(err, "no forward with a drafter, a sequence of another forward, or no room"), -1;
+  if (s->broken)
+    return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another"), -1;
   const Q4xDflash *df = f->df;
   const Q4xDflashGeometry *g = &df->geo;
   if (y < 0 || y >= g->n_vocab)

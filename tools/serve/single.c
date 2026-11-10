@@ -179,7 +179,7 @@ static int step_greedy(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, Ctl
 static void fail(Server *sv, Conv *c)
 {
   out("ERR %s\n", c->err);
-  conv_restart(c, sv);
+  conv_failed(c, sv);
 }
 
 /* one request: the prompt's rest a step at a time (PP), the answer (T), DONE */

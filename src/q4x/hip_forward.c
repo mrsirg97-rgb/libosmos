@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "osmos/gpu/mm.h"
+#include "osmos/run/fit.h"
 #include "q4x_impl.h"
 
 /* the forward built: every tensor's bytes on the device (read through a pinned piece), a step's buffers; a sequence's
@@ -42,6 +43,24 @@ void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint
 
 static bool alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
 
+/* the GPU's memory left after a build (the forward's, a sequence's) at least FIT_HEADROOM: the runtime loads a kernel's
+   code at its first launch and takes the memory then - with none left it segfaulted in hipLaunchKernel (UD-Q4_K_XL, its
+   n-gram table resident, an 8K context in 4096-token steps: 0.02 GiB left after its sequence). false with why */
+static bool room_left(const char *after, char *err)
+{
+  size_t free_b = 0, total = 0;
+  if (hipMemGetInfo(&free_b, &total) != hipSuccess)
+    return q4x_fail(err, "a GPU call failed (the memory left)");
+  if (free_b >= FIT_HEADROOM)
+    return true;
+  if (err)
+    snprintf(err, Q4X_FWD_ERR,
+             "GPU memory: %.2f GiB left after %s, under the %.0f GiB its kernels need loaded as they first run: stream "
+             "the n-gram table, or a smaller max_tokens or max_context",
+             (double)free_b / (1ull << 30), after, (double)FIT_HEADROOM / (1ull << 30));
+  return false;
+}
+
 /* every tensor of g read into GPU memory through a pinned piece: *dev its table - but those `shadow` has a tensor of
    the name of (an overlay's stand-ins: their bytes never read), and `skip` (a table read from its file: stream_ngram) */
 static bool upload(const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
@@ -56,17 +75,19 @@ static bool upload(const Gguf *g, const Gguf *shadow, const GgufTensor *skip, vo
     if ((shadow && gguf_tensor(shadow, t->name)) || t == skip)
       continue;
     const int fd = open(g->paths[t->file], O_RDONLY);
-    ok = fd >= 0 && alloc(&(*dev)[i], t->bytes);
+    const char *why = fd < 0 ? "its file not opened" : NULL; /* which of the three failed, for the message */
+    ok = fd >= 0 && (alloc(&(*dev)[i], t->bytes) || (why = "GPU memory refused", false));
     for (uint64_t at = 0; ok && at < t->bytes; at += READ_PIECE)
     {
       const size_t n = t->bytes - at < READ_PIECE ? (size_t)(t->bytes - at) : READ_PIECE;
-      ok = pread(fd, pin, n, (off_t)(t->offset + at)) == (ssize_t)n &&
-           hipMemcpy((uint8_t *)(*dev)[i] + at, pin, n, hipMemcpyHostToDevice) == hipSuccess;
+      ok = (pread(fd, pin, n, (off_t)(t->offset + at)) == (ssize_t)n || (why = "its file's read failed", false)) &&
+           (hipMemcpy((uint8_t *)(*dev)[i] + at, pin, n, hipMemcpyHostToDevice) == hipSuccess ||
+            (why = "the copy to GPU memory failed", false));
     }
     if (fd >= 0)
       close(fd);
-    if (!ok)
-      snprintf(err, Q4X_FWD_ERR, "%s: not read into GPU memory", t->name);
+    if (!ok && err)
+      snprintf(err, Q4X_FWD_ERR, "%s: not read into GPU memory (%s)", t->name, why);
   }
   hipHostFree(pin);
   return ok;
@@ -193,6 +214,9 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->tok, n * 4, 1},             {&b->top_part, q4x_argmax_scratch((uint32_t)n), 0},
       {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
   };
+  /* b.xe16 also holds a mixer's up's f16 input (hip_layers.c down_up: a step's tokens x hc_rank, whole tiles) */
+  if (xe16 < (n + MM_TILE - 1) / MM_TILE * MM_TILE * (uint64_t)g->hc_rank * 2)
+    return q4x_fail(err, "the experts' f16 buffer smaller than a mixer's up's input (hc_rank past the experts' dims)");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
     if (!alloc(want[i].p, want[i].bytes))
       return q4x_fail(err, "GPU memory refused (a step's buffers)");
@@ -323,7 +347,8 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
       (w->overlay && !upload(w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
       (f->stream_ngram && !ple_stream(f, err)) ||
       (mtp && (!upload(mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))) ||
-      (f->df && (!upload(f->df->model, NULL, NULL, &f->df_dev, err) || !df_buffers(f, err))))
+      (f->df && (!upload(f->df->model, NULL, NULL, &f->df_dev, err) || !df_buffers(f, err))) ||
+      !room_left("the forward", err))
     return q4x_forward_destroy(f), NULL;
   return f;
 }
@@ -388,6 +413,8 @@ Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR])
     ok = alloc(&s->dk[l], ring) && alloc(&s->dv[l], ring);
   if (!ok || !q4x_seq_reset(s))
     return q4x_seq_destroy(s), q4x_fail(err, "GPU memory refused (a sequence's state)"), NULL;
+  if (!room_left("the sequence", err))
+    return q4x_seq_destroy(s), NULL;
   return s;
 }
 

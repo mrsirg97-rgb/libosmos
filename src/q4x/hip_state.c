@@ -95,6 +95,7 @@ bool q4x_seq_reset(Q4xSeq *s)
   memset(s->last, 0, sizeof s->last);
   s->pend_pos = -1, s->step_n = 0; /* the head: nothing pending, no step to seed from */
   s->df_lo = s->df_pos = 0;         /* the drafter: no context */
+  s->broken = !ok;                  /* a reset that failed leaves it refused */
   return ok;
 }
 
@@ -134,6 +135,8 @@ bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FW
 {
   if (!s || !sink)
     return q4x_fail(err, "no sequence or sink");
+  if (s->broken)
+    return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   if (hipDeviceSynchronize() != hipSuccess) /* every stream's writes of its state done (the side stream's too) */
     return q4x_fail(err, "a GPU call failed (before the state's save)");
   Header h;
@@ -194,14 +197,21 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
   s->pend_pos = -1, s->step_n = 0; /* the head's cache not saved: its seeding starts over (drafts weaker, no bit moved) */
   s->df_lo = s->df_pos = s->pos;    /* the drafter's rings neither: its context starts here */
   memcpy(s->last, h.last, sizeof h.last);
+  s->broken = false;
   return true;
 }
 
 uint32_t q4x_seq_reach(const Q4xSeq *s) { return s ? s->back : 0; }
 
+void q4x_seq_fail(Q4xSeq *s)
+{
+  if (s)
+    s->broken = true;
+}
+
 bool q4x_seq_rollback(Q4xSeq *s, uint32_t n)
 {
-  if (!s || n > s->back)
+  if (!s || s->broken || n > s->back)
     return false;
   const int keep = (int)(sizeof s->last / sizeof *s->last);
   memmove(s->last, s->last + n, (size_t)(keep - (int)n) * sizeof *s->last);
