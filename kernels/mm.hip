@@ -54,6 +54,15 @@ template <> struct Tuned<quant::kIQ4_NL> { using S = mm::Shape<64, 4, 4>; static
 template <> struct Tuned<quant::kIQ4_XS> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ2_0> { using S = mm::Shape<64, 8, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ2_K> : Tuned<quant::kQ2_0> {};  // not measured: Q2_0's (its shape its bits: fixed before a pack)
+// UD-Q4_K_XL's expert types, on the register-A path (mm.h's kRegA), a token's 10 experts cold (mmsweep q4, low-power,
+// 2026-11-09, two runs): Q4_K's 2,560-column gate / up 78-80 us at 128 x 8 x 8 -> 58-60 at 32 x 16 x 2 (80 slabs of
+// 32 for 16 waves to share: the decode's latency hidden; a 32-value slab's lane holds 2 chunks, so U 2 at most), Q5_1's
+// 640-column down 72-75 -> 63-64 at 32 x 8 x 2 (16 waves slower: 20 slabs too few). a 512-token prompt 409 -> 507
+// tok/s, decode 22.0 -> 23.2. the perplexity the default order's within its scatter (2K 6.9661 against 6.9754, 8K
+// 2.7434 against 2.7354); the 64-value slabs' 64 x 8 x 4 / 64 x 4 x 4 (through LDS) moved it up at every length
+// (+0.5%, +1.3%) and were not taken (DESIGN.md, "UD-Q4_K_XL")
+template <> struct Tuned<quant::kQ4_K> { using S = mm::Shape<32, 16, 2>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kQ5_1> { using S = mm::Shape<32, 8, 2>; static constexpr int kMaxCt = 8; };
 using mm::kF16Max;
 
 // a thread a value: to f16 (the rows past n zero)
@@ -209,6 +218,41 @@ bool launch(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream
   }
 }
 
+template <quant::Type T, int CT, typename S>
+bool silu_shape(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
+                mm::Silu ep, hipStream_t s) {
+  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::kernel_silu<T, S, CT><<<dim3(rows / mm::kTile, 1, z), mm::kWave * S::kWaves, 0, s>>>(
+      (const uint8_t*) w, rows, cols, (const _Float16*) x16, n, y, ys, ep);
+  return hipGetLastError() == hipSuccess;
+}
+
+// mm_run's launch with the silu epilogue: the shape launch_ct takes (the same sums), a matrix the gemm would take
+// refused (its caller's two launches instead)
+template <quant::Type T, int CT>
+bool silu_ct(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
+             mm::Silu ep, hipStream_t s) {
+  const Mats m = {{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}};
+  if constexpr (kGemm<T>)
+    if (gemm_takes<T>(m, cols, n)) return false;
+  if (odd<T>(cols)) return silu_shape<T, CT, typename Odd<T>::S>(w, rows, cols, x16, n, y, ys, ep, s);
+  return cols < kShortCols ? silu_shape<T, CT, typename Short<T>::S>(w, rows, cols, x16, n, y, ys, ep, s)
+                           : silu_shape<T, CT, typename Tuned<T>::S>(w, rows, cols, x16, n, y, ys, ep, s);
+}
+
+template <quant::Type T>
+bool silu_launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
+                 mm::Silu ep, hipStream_t s) {
+  const int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  if (rows % mm::kTile || (n > 1 && ys < rows) || cols % quant::Block<T>::values || cols % slab) return false;
+  switch (col_tiles<T>(n)) {
+    case 1: return silu_ct<T, 1>(w, rows, cols, x16, n, y, ys, ep, s);
+    case 2: return silu_ct<T, 2>(w, rows, cols, x16, n, y, ys, ep, s);
+    case 4: return silu_ct<T, 4>(w, rows, cols, x16, n, y, ys, ep, s);
+    default: return silu_ct<T, Tuned<T>::kMaxCt>(w, rows, cols, x16, n, y, ys, ep, s);
+  }
+}
+
 bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   if (!n || n > MM_MAX_TOKENS || !m.rows[0] || (m.w[1] && !m.rows[1])) return false;
   switch (type) {
@@ -226,6 +270,8 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
     case quant::kIQ4_NL: return launch<quant::kIQ4_NL>(m, cols, x16, n, s);
     case quant::kIQ4_XS: return launch<quant::kIQ4_XS>(m, cols, x16, n, s);
     case quant::kQ2_0: return launch<quant::kQ2_0>(m, cols, x16, n, s);
+    case quant::kQ4_K: return launch<quant::kQ4_K>(m, cols, x16, n, s);
+    case quant::kQ5_1: return launch<quant::kQ5_1>(m, cols, x16, n, s);
     default: return false;
   }
 }
@@ -246,7 +292,7 @@ extern "C" bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols) {
 #define FITS(t) \
   case quant::t: return fits<quant::t>(rows, cols);
     FITS(kQ8_0) FITS(kQ5_K) FITS(kQ5_KR) FITS(kQ6_K) FITS(kIQ1_M) FITS(kIQ2_XXS) FITS(kIQ2_XS) FITS(kIQ1_S)
-    FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K)
+    FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K) FITS(kQ4_K) FITS(kQ5_1)
 #undef FITS
     default: return false;
   }
@@ -257,7 +303,7 @@ extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
 #define TILES(t) \
   case quant::t: return col_tiles<quant::t>(n);
     TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS) TILES(kIQ1_S)
-    TILES(kIQ2_S) TILES(kIQ3_XXS) TILES(kIQ4_NL) TILES(kIQ4_XS) TILES(kQ2_0) TILES(kQ2_K)
+    TILES(kIQ2_S) TILES(kIQ3_XXS) TILES(kIQ4_NL) TILES(kIQ4_XS) TILES(kQ2_0) TILES(kQ2_K) TILES(kQ4_K) TILES(kQ5_1)
 #undef TILES
     default: return 0;
   }
@@ -283,6 +329,16 @@ extern "C" bool mm_x16_attn(const float* x, uint32_t xs, uint32_t n, uint32_t co
   x16_attn_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
       x, xs, n, cols, head_dim, rope_dim, freqs, pos, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
+}
+
+extern "C" bool mm_run_silu(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
+                            float* y, uint32_t ys, float scale, void* x16_out, int32_t* overflow, void* stream) {
+  if (!w || !x16 || !y || !x16_out || x16_out == x16 || !overflow || !n || n > MM_SILU_MAX_TOKENS || !rows) return false;
+  const mm::Silu ep = {scale, (_Float16*) x16_out, overflow, rows};
+  switch (type) {
+    case quant::kQ8_0: return silu_launch<quant::kQ8_0>(w, rows, cols, x16, n, y, ys, ep, (hipStream_t) stream);
+    default: return false;  /* the mixers' down's type alone, so far */
+  }
 }
 
 extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
@@ -316,7 +372,7 @@ extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt
   case quant::t:                                                                                                     \
     return group_launch<quant::t>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS) GROUP(kIQ1_S)
-    GROUP(kIQ2_S) GROUP(kIQ3_XXS) GROUP(kIQ4_NL) GROUP(kIQ4_XS) GROUP(kQ2_0) GROUP(kQ2_K)
+    GROUP(kIQ2_S) GROUP(kIQ3_XXS) GROUP(kIQ4_NL) GROUP(kIQ4_XS) GROUP(kQ2_0) GROUP(kQ2_K) GROUP(kQ4_K) GROUP(kQ5_1)
 #undef GROUP
     default: return false;
   }

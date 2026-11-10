@@ -103,6 +103,11 @@ int main(int argc, char** argv) {
   llama_backend_init();
   llama_model_params mp = llama_model_default_params();
   mp.n_gpu_layers = 999;
+  /* QWEN_DUMP_CPU: a pattern of tensor names held in CPU memory (the mmapped file: page cache the system can take
+     back) - UD-Q4_K_XL's n-gram table, so the GPU's share stays under the machine's (osmos streams the same table) */
+  llama_model_tensor_buft_override cpu[2] = {{nullptr, nullptr}, {nullptr, nullptr}};
+  if (const char* pat = std::getenv("QWEN_DUMP_CPU"))
+    cpu[0] = {pat, ggml_backend_cpu_buffer_type()}, mp.tensor_buft_overrides = cpu;
   llama_model* model = llama_model_load_from_file(argv[1], mp);
   if (!model) return std::fprintf(stderr, "qwen_dump: the model did not load\n"), 1;
   const llama_vocab* vocab = llama_model_get_vocab(model);

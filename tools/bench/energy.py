@@ -22,8 +22,17 @@ def samples(path):
 
 
 def window(smp, a, b):
-    """the samples' mean watts in [a, b] and the joules over it - fail closed with none in it"""
+    """the samples' mean watts in [a, b] and the joules over it. a window shorter than the samples' spacing (a
+    43-token prompt's quarter second) between two of them: those two's mean. else none in it fails closed (the csv is
+    not this run's)"""
     w = [x for t, x in smp if a <= t <= b]
+    if not w:
+        before = [(t, x) for t, x in smp if t < a]
+        after = [(t, x) for t, x in smp if t > b]
+        gaps = sorted(smp[i + 1][0] - smp[i][0] for i in range(len(smp) - 1))
+        spacing = gaps[len(gaps) // 2] if gaps else 0
+        if before and after and after[0][0] - before[-1][0] <= 2 * spacing:
+            w = [before[-1][1], after[0][1]]
     if not w:
         sys.exit(f"no power samples in the window {a:.3f} - {b:.3f}: the csv is not this run's")
     mean = sum(w) / len(w)

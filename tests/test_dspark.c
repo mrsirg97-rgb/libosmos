@@ -37,7 +37,7 @@ static void test_malformed(void)
 {
   assert(mkdtemp(dir));
   write("dspark.bin", NULL, 4096);
-  refused("{\"tensors\": [[\"a\", \"Q4_K\", 0, 144, [256]]]}", "a type it does not know");
+  refused("{\"tensors\": [[\"a\", \"Q3_K\", 0, 110, [256]]]}", "a type it does not know");
   refused("{\"tensors\": [[\"a\", \"Q8_0\", 0, 35, [32]]]}", "bytes not the type's for the dims");
   refused("{\"tensors\": [[\"a\", \"IQ2_XS\", 0, 75, [256]]]}", "bytes not an IQ2_XS block's");
   refused("{\"tensors\": [[\"a\", \"F32\", 4000, 400, [100]]]}", "past the end of the bin");

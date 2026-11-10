@@ -61,10 +61,12 @@ constexpr bool kPipe = CT > 1 && G <= 2;
 // 193 -> 204, wo_a 191 -> 207), Q8_0 +13% (Qwen's hc mixers 156 / 147 -> 178 / 166), IQ4_NL +7% (142 -> 151),
 // IQ4_XS +5%; Q6_K's short rows (64-value slabs: DeepSeek's q_b, 1,280 columns) -7%, IQ2_S -10%, IQ3_XXS and Q2_0
 // level - those keep the LDS's. a token's dense reads Qwen 23.2 -> 20.7 ms, DeepSeek 34.2 -> 33.1 (Q5_K: m1.hip's
-// q_b 181 -> 143 us, its first)
+// q_b 181 -> 143 us, its first). UD-Q4_K_XL's expert types (mmsweep q4, a token's 10 experts cold, low-power,
+// 2026-11-09, two runs): Q4_K at its 128 x 8 x 8 103-107 -> 78-80 us, Q5_1 111 -> 72-75; a 512-token prompt 247 ->
+// 409 tok/s, its ids' hash the same
 template <quant::Type T>
 constexpr bool kRegA = T == quant::kQ5_K || T == quant::kQ5_KR || T == quant::kQ6_K || T == quant::kQ8_0 ||
-                       T == quant::kIQ4_NL || T == quant::kIQ4_XS;
+                       T == quant::kIQ4_NL || T == quant::kIQ4_XS || T == quant::kQ4_K || T == quant::kQ5_1;
 template <quant::Type T, class S>
 constexpr bool kRegAShape = kRegA<T> && !(T == quant::kQ6_K && S::kSlab < 128);
 __device__ inline h8 lane_other_half(h8 v) {  // lane l ^ 16's 8 halves
@@ -82,11 +84,21 @@ __device__ inline h8 lane_other_half(h8 v) {  // lane l ^ 16's 8 halves
 // time its steps' x loaded together and its WMMAs in step order. the waves' tiles summed in w's order, through the
 // same LDS. the split is the shape's and a column's sums are its own: a token's bits are the same whatever the batch,
 // its place in it, or CT
-template <quant::Type T, class S, int CT>
+// an epilogue's: y = silu(y scale) - q4x_scale_silu's expression - and its f16 into x16 (cols wide), for the next
+// matmul (the mixers' down, then up: one launch fewer a mixer)
+struct Silu {
+  float scale;
+  _Float16* x16;
+  int32_t* overflow;
+  uint32_t cols;
+};
+
+template <quant::Type T, class S, int CT, bool E = false>
 __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __restrict__ w, uint32_t row0,
                                                            uint32_t cols, const _Float16* __restrict__ x16,
                                                            uint32_t xts, uint32_t c0, uint32_t n,
-                                                           float* __restrict__ y, uint32_t ys, _Float16* lds_all) {
+                                                           float* __restrict__ y, uint32_t ys, _Float16* lds_all,
+                                                           Silu ep = {}) {
   constexpr int SL = S::kSlab, G = SL / kTile;
   const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
   _Float16* lds = lds_all + wave * kTile * S::kRowLds;
@@ -159,6 +171,11 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
       for (int j = 0; j < 8; j++) {
         float s = part[j * kWave + lane];
         for (int v = 1; v < S::kWaves; v++) s += part[(v * 8 + j) * kWave + lane];
+        if constexpr (E) {
+          const float u = s * ep.scale;
+          s = u / (1.0f + expf(-u));
+          if (t < n) x16_put(ep.x16, t, row0 + 2 * j + half, ep.cols, s, ep.overflow);
+        }
         if (t < n) y[(uint64_t) t * ys + row0 + 2 * j + half] = s;
       }
     }
@@ -282,6 +299,18 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel(const uint8_t* __rest
   if (row0 >= (blockIdx.y ? rows1 : rows0)) return;  // the whole block
   tile<T, S, CT>(blockIdx.y ? w1 : w0, row0, cols, x16, cols, blockIdx.z * kTile * CT, n, blockIdx.y ? y1 : y0,
                  blockIdx.y ? ys1 : ys0, lds);
+}
+
+// one matrix with the silu epilogue (mm_run_silu)
+template <quant::Type T, class S, int CT>
+__global__ __launch_bounds__(kWave* S::kWaves) void kernel_silu(const uint8_t* __restrict__ w, uint32_t rows,
+                                                                 uint32_t cols, const _Float16* __restrict__ x16,
+                                                                 uint32_t n, float* __restrict__ y, uint32_t ys,
+                                                                 Silu ep) {
+  __shared__ __attribute__((aligned(32))) _Float16 lds[S::kLdsHalves];
+  const uint32_t row0 = blockIdx.x * kTile;
+  if (row0 >= rows) return;
+  tile<T, S, CT, true>(w, row0, cols, x16, cols, blockIdx.z * kTile * CT, n, y, ys, lds, ep);
 }
 
 // n matrices at once (blockIdx.y the matrix m): its w from the table, its x the tiled x16 from x16 + xoff[m] (rows xts

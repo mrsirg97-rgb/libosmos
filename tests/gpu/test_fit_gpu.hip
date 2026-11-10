@@ -69,6 +69,24 @@ int main() {
   CHECK(left >= FIT_HEADROOM && left <= FIT_HEADROOM + FIT_SLACK + kSlack + kStep);
   CHECK(fit_ram_available() >= FIT_RAM_FREE); /* the operator's rule: the system's RAM left free */
   forward_destroy(b.f);
+
+  /* --fill (ForwardOptions' fill): the room a build reports by the RAM it keeps free - the default's FIT_RAM_FREE, 0
+     every byte past the headroom, more than there is none. at the floor (the dense weights alone), a build each */
+  auto room_at = [&](bool set, uint64_t fill) {
+    ForwardOptions o = b.o;
+    o.budget = 0, o.fill_set = set, o.fill = fill;
+    char ferr[FORWARD_ERR] = "";
+    Forward* f = forward_create_with(w, &o, ferr);
+    uint64_t r = 0;
+    CHECK(f && forward_room(f, &r));
+    forward_destroy(f);
+    return r;
+  };
+  const uint64_t r_def = room_at(false, 0), r_zero = room_at(true, 0), r_huge = room_at(true, 1000ull << 30);
+  std::printf("  the dense build's room: %.2f GiB (8 GiB kept free), %.2f (--fill 0), %.2f (--fill 1000)\n",
+              r_def / kGiB, r_zero / kGiB, r_huge / kGiB);
+  CHECK(r_huge == 0);
+  CHECK(r_zero + FIT_SLACK >= r_def); /* (the RAM free moves a little between builds: the slack's room) */
   weights_destroy(w);
   gguf_destroy(g);
   gguf_destroy(eg);

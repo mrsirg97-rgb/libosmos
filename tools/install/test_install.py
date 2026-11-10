@@ -62,7 +62,11 @@ class Manifest(unittest.TestCase):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
-                                           "qwen38-ud-iq3_xxs-1m"})
+                                           "qwen38-ud-iq3_xxs-1m", "qwen38-ud-q4_k_xl"})
+        q4 = m["packs"]["qwen38-ud-q4_k_xl"]  # the larger Qwen: its n-gram table streamed to fit, no overlay for it
+        self.assertTrue(q4["settings"]["stream_ngram"])
+        self.assertIsNone(q4["overlay"])
+        self.assertEqual(q4["drafter"], m["packs"]["qwen38-ud-iq3_xxs"]["drafter"])
         q1m = m["packs"]["qwen38-ud-iq3_xxs-1m"]                              # YaRN's: the same files, 4x the context
         self.assertEqual((q1m["shards"], q1m["drafter"]), (m["packs"]["qwen38-ud-iq3_xxs"]["shards"],
                                                            m["packs"]["qwen38-ud-iq3_xxs"]["drafter"]))
@@ -488,6 +492,36 @@ class Host(unittest.TestCase):
         self.assertTrue(host.tools(False, False, which, lambda p: False)[0])  # --no-build: no build tools
 
 
+class Gpu(unittest.TestCase):
+    """the GPU found by its PCI ids in sysfs (no ROCm needed: issue #25 - rocminfo's probe hung on a box without one)"""
+
+    def tree(self, devices):
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "bus", "pci", "devices"))
+        for i, (vendor, device) in enumerate(devices):
+            d = os.path.join(root, "bus", "pci", "devices", f"0000:c{i}:00.0")
+            os.mkdir(d)
+            for name, v in (("vendor", vendor), ("device", device)):
+                with open(os.path.join(d, name), "w") as f:
+                    f.write(v + "\n")
+        return root
+
+    def test_found(self):
+        ok, why = host.gpu(self.tree([("0x8086", "0x1234"), ("0x1002", "0x1586")]))
+        self.assertTrue(ok, why)
+        self.assertIn("gfx1151", why)
+
+    def test_refused(self):
+        for devices, needle in (([("0x1002", "0x744c")], "1002:744c"),  # a discrete Radeon: named, refused
+                                ([("0x10de", "0x2684")], "no AMD GPU"), ([], "no AMD GPU")):
+            ok, why = host.gpu(self.tree(devices))
+            self.assertFalse(ok, why)
+            self.assertIn(needle, why)
+        ok, why = host.gpu("/nonexistent")
+        self.assertFalse(ok)
+        self.assertIn("sysfs", why)
+
+
 class Rig(unittest.TestCase):
     CFG = {"pack": "ud-iq1_s", "model": "/m/ud-iq1_s/M-00001-of-00005.gguf", "max_context": 1048576}
     PACKS = manifest.load(REAL)["packs"]
@@ -586,7 +620,7 @@ class Rig(unittest.TestCase):
         ids = {pid: p["rig"]["id"] for pid, p in self.PACKS.items()}
         self.assertEqual(ids, {"ud-iq1_s": "deepseek-1017-ud-s", "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
-                               "qwen38-ud-iq3_xxs-1m": "qwen3.8-flash-next-1m"})
+                               "qwen38-ud-iq3_xxs-1m": "qwen3.8-flash-next-1m", "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
         self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
 

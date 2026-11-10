@@ -7,6 +7,8 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/mem/rowread.h"
+#include "osmos/q4x/dflash.h"
 #include "osmos/q4x/forward.h"
 
 /* a step's buffers, for max_tokens tokens */
@@ -23,9 +25,13 @@ typedef struct Q4xBuf
   uint32_t *xg, *yg, *xd, *yd;
   const void **ptr;                                /* Q4X_GROUP_TENSORS tables of entries */
   void *x16, *xe16;                                /* mm's f16 activations: a matrix's, the experts' tiles */
+  void *x16b; /* a mixer's down's silu as f16 for its up (mm_run_silu: x16 still read), MM_SILU_MAX_TOKENS rows */
   int32_t *overflow;                               /* an activation past f16's: the step refused */
   float *emb, *key, *val, *kn, *qn, *pg, *gated, *nrm, *conv;         /* the n-gram layer's */
   int32_t *ple_rows, *tok;                                            /* device: its rows, the step's tokens */
+  uint8_t *ple_sbuf; /* device: a streamed n-gram table's step rows, a token's ple_heads (stream_ngram) */
+  int32_t *ple_iota; /* their places 0 .. : q4x_rows' row indices over ple_sbuf */
+  float *taps;       /* device: the step's taps, [token][n_taps][n_embd] (Q4xOptions' tap_layers; NULL: none) */
   void *top_part;                                                     /* q4x_greedy's slices' bests (q4x_argmax) */
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
@@ -46,13 +52,32 @@ typedef struct Q4xMtpBuf
   float *pin_p;
 } Q4xMtpBuf;
 
+/* the DFlash2 drafter's buffers (with a drafter): a seed's context rows, then a block's */
+typedef struct Q4xDfBuf
+{
+  float *th;            /* [max_tokens][n_embd]: the context's taps through fc, then its hidden norm */
+  float *k, *v;         /* [max(max_tokens, block)][kv]: a layer's keys and values (the context's, the block's) */
+  float *h, *x, *xc, *dyn, *q, *att, *a, *gate, *up, *hn; /* the block's: residual, normed, convolved, .. its out */
+  float *logits, *hp, *val; /* the head's at the block's drafts' places, the selector's projection, the top-k */
+  float *top_p;             /* each place's greatest token's probability (q4x_top: a draft's confidence's) */
+  int32_t *idx, *path, *top_id;
+  int32_t *tok, *iota; /* device: the block's tokens (y, then masks); 0 .. max_ctx + block (a run's positions) */
+  int32_t *pin_tok, *pin_path, *pin_idx; /* pinned: the block's anchor in; its path, the top-k's ids, values, p out */
+  float *pin_val, *pin_p;
+} Q4xDfBuf;
+
 #define Q4X_SIDE_STEP MM_TILE /* a step this small or smaller: the second stream (decode, a draft's verify) */
 #define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_forward.c's table) */
+#define Q4X_ROW_THREADS 64 /* stream_ngram's readers: DeepSeek's Engram measure (832,000 random rows/s; 128 no more) */
 
 struct Q4xForward
 {
   const Q4xWeights *w;
   const Q4xMtp *mtp; /* or NULL */
+  const Q4xDflash *df; /* or NULL */
+  void **df_dev;       /* its tensors' bytes on the device (its file's table) */
+  uint32_t df_ring;    /* a sequence's drafter rings' rows: the drafter's window (max_ctx at most) */
+  Q4xDfBuf d;
   void **dev, **mtp_dev, **ov_dev; /* a tensor's bytes on the device, by its index in its file's table (the model's -
                                       none where the overlay stands in for it -, the MTP head's, the overlay's) */
   uint32_t max_ctx, max_tokens;
@@ -72,6 +97,17 @@ struct Q4xForward
   hipEvent_t e_ix;         /* a small step's QSA indexer on s2 (its keys and picks): done */
   bool inj_side;           /* an inject on s2 not yet waited for (q4x_inj_wait) */
   hipEvent_t pin_free; /* the pinned buffers' last copy to the GPU done (q4x_pin_wait, q4x_pin_sent) */
+  /* stream_ngram: the n-gram table's file and readers, a step's rows read into ple_stage (pinned) at its embed, copied
+     to b.ple_sbuf at the n-gram layer; ple_copied that copy's end (the next step's reads wait for it) */
+  int32_t tap_layer[Q4X_MAX_TAPS]; /* Q4xOptions' tap_layers, ascending; n_taps of them */
+  uint32_t n_taps;
+  bool stream_ngram, ple_pending;
+  int ple_fd;
+  Rowread *ple_read;
+  uint8_t *ple_stage;
+  uint64_t *ple_off;
+  uint32_t ple_n;
+  hipEvent_t ple_copied;
   uint32_t side_spin; /* q4x_forward_side_spin: a test's delay before the shared expert, on s2 (0: none) */
   /* a step past MM_MAX_TOKENS (hip_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
      sub-batch's rows; and its runs' sequences at a sub-batch's start (their rings' cur and positions moved on) */
@@ -102,7 +138,11 @@ struct Q4xSeq
   float *mixk, *mixr; /* the head's indexer's */
   float *pend;
   int32_t pend_pos, step_pos0;
-  uint32_t step_row0, step_n;
+  uint32_t step_row0, step_n, step_t0; /* step_t0: its first token's place in the step (its taps' row) */
+  /* with a drafter: each layer's key and value rings (df_ring rows of kv floats, position p at p % df_ring), the
+     context positions they hold (df_lo .. df_pos - 1: seeded since the last gap - a load, a seed past its end) */
+  float *dk[Q4X_DFLASH_MAX_LAYERS], *dv[Q4X_DFLASH_MAX_LAYERS];
+  int32_t df_lo, df_pos;
   int32_t *step_tok; /* [max_tokens], host */
 };
 
@@ -169,3 +209,4 @@ bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint3
 bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n); /* b.sh, b.sl: before q4x_moe, which reads them */
 bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n);
 bool q4x_ple(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n);
+bool q4x_ple_issue(Q4xForward *f, uint32_t n); /* stream_ngram: the step's n tokens' rows begun (b.pin_rows') */

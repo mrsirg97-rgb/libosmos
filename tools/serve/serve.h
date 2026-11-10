@@ -25,6 +25,7 @@ typedef struct Server
   uint32_t max_tokens, max_ctx;
   uint32_t round_tokens; /* a decode step's most tokens: (experts - 1) / experts a token; more, a prompt's step */
   uint32_t window;       /* a drafter seed's window: the positions it reads back from a prompt's end */
+  uint64_t ram_kept;     /* the system's RAM kept free (--fill; FIT_RAM_FREE by default): the build's and the slots' */
   int32_t eos[SERVE_MAX_EOS];
   int n_eos;
   AnswerRule answer; /* --answer-after's: no end before a turn's answer has begun (blank NULL: off) */

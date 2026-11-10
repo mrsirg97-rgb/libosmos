@@ -38,7 +38,9 @@ int main(int argc, char** argv) {
   /* Q4X_PPL_CTX: the forward's context (past the native 262,144: YaRN, q4x_rope) - the text n tokens of it */
   const uint32_t ctx = getenv("Q4X_PPL_CTX") ? (uint32_t) atoi(getenv("Q4X_PPL_CTX")) : n;
   if (ctx < n) return std::fprintf(stderr, "q4x_ppl: Q4X_PPL_CTX below the text's %u tokens\n", n), 2;
-  Q4xForward* fw = q4x_forward_create(w, nullptr, ctx, step, ferr);
+  /* Q4X_PPL_STREAM: the n-gram table read from its file (stream_ngram: the same bits; UD-Q4_K_XL's 28.8 GB left out) */
+  const Q4xOptions qo = {ctx, step, getenv("Q4X_PPL_STREAM") != nullptr, nullptr, 0, nullptr};
+  Q4xForward* fw = q4x_forward_create_with(w, nullptr, &qo, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_ppl: %s\n", ferr), 1;
   const uint32_t V = (uint32_t) w->geo.n_vocab;

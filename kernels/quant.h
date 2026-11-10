@@ -20,7 +20,7 @@ enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
   kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8, kIQ3_XXS = QTYPE_IQ3_XXS, kIQ4_XS = QTYPE_IQ4_XS,
-  kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K,
+  kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
@@ -35,7 +35,7 @@ template <Type T> struct Block;
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
 QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S) QUANT_BLOCK(IQ3_XXS)
-QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K)
+QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -47,7 +47,8 @@ static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && 
                   Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
                   Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
                   Block<kIQ2_S>::values == kQK && Block<kIQ3_XXS>::values == kQK &&
-                  Block<kIQ4_XS>::values == kQK && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK,
+                  Block<kIQ4_XS>::values == kQK && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK &&
+                  Block<kQ4_K>::values == kQK && Block<kQ5_1>::values == kQ32,
               "the decoders' block lengths");
 
 // every block's size is even (34, 18, 66, 74, 210 ... bytes; MXFP4's and MXFP8's odd: byte loads only) and every row
@@ -80,6 +81,32 @@ template <> __device__ inline void decode<kQ5_K>(const uint8_t* b, int k, float*
   for (int j = 0; j < kChunk; j++) {
     const int q = (int) ((qs >> (8 * j + 4 * (g % 2))) & 0x0F) | (int) (((qh >> (8 * j + g)) & 1) << 4);
     v[j] = __fsub_rn(mul(d, (float) q), dm);
+  }
+}
+
+// (d * sc) * q - (dmin * m); Q5_K's scales and layout without the fifth bit: 8 groups of 32, q the low (even group)
+// or high (odd) nibbles of qs's 32 bytes a pair of groups. 144 bytes a block, every one 16-aligned: wide loads
+template <> __device__ inline void decode<kQ4_K>(const uint8_t* b, int k, float* v) {
+  const int g = k / 4, l0 = (k % 4) * kChunk;
+  const uint32_t dd = *(const uint32_t*) b;
+  const uint32_t s0 = *(const uint32_t*) (b + 4), s1 = *(const uint32_t*) (b + 8), s2 = *(const uint32_t*) (b + 12);
+  auto byte = [&](int i) { return (int) (((i < 4 ? s0 : i < 8 ? s1 : s2) >> (8 * (i % 4))) & 0xFF); };
+  const int s = g < 4 ? byte(g) & 0x3F : (byte(g + 4) & 0x0F) | ((byte(g - 4) >> 2) & 0x30);
+  const int m = g < 4 ? byte(g + 4) & 0x3F : (byte(g + 4) >> 4) | ((byte(g) >> 2) & 0x30);
+  const float d = mul(f16(dd & 0xFFFF), (float) s), dm = mul(f16(dd >> 16), (float) m);
+  const uint64_t qs = *(const uint64_t*) (b + 16 + (g / 2) * 32 + l0);
+  for (int j = 0; j < kChunk; j++) v[j] = __fsub_rn(mul(d, (float) ((qs >> (8 * j + 4 * (g % 2))) & 0x0F)), dm);
+}
+
+// d * q + m; 32 values, q the low (values 0 .. 15) or high (16 .. 31) nibbles of qs's 16 bytes and a fifth bit,
+// value i's bit i of qh. 24 bytes a block, every one 8-aligned
+template <> __device__ inline void decode<kQ5_1>(const uint8_t* b, int k, float* v) {
+  const float d = f16(ld16(b)), m = f16(ld16(b + 2));
+  const uint32_t qh = ld32(b + 4) >> (k * kChunk);
+  const uint64_t qs = *(const uint64_t*) (b + 8 + (k % 2) * kChunk);
+  for (int j = 0; j < kChunk; j++) {
+    const int q = (int) ((qs >> (8 * j + 4 * (k / 2))) & 0x0F) | (int) (((qh >> j) & 1) << 4);
+    v[j] = __fadd_rn(mul(d, (float) q), m);
   }
 }
 

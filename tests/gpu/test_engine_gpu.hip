@@ -181,7 +181,7 @@ int main() {
   }
 
   // the same through the engine
-  OsmosOptions o = {kCtx, 0, kBudget, nullptr, true, "/nonexistent-drafter"};
+  OsmosOptions o = {kCtx, 0, kBudget, nullptr, true, "/nonexistent-drafter", false, 0, false};
   CHECK(!osmos_create(m, &o, err) && err[0]);  // a drafter that is not there: refused, not built without
   o.drafter = ddir.c_str();
   Osmos* e = osmos_create(m, &o, err);

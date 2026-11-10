@@ -25,10 +25,10 @@ The installer builds the engine, downloads the pack's files at pinned commits, c
 pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on port 8091 (`/v1/chat/completions`
 streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 
-- `--abliterated` adds huihui-ai's abliteration as an overlay (DeepSeek and Qwen alike; the stock files stay as they are).
+- `--abliterated` adds huihui-ai's abliteration as an overlay (DeepSeek and Qwen alike, not yet UD-Q4_K_XL; the stock files stay as they are).
 - `--have <dir>` uses files you already have.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
-  `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next` (`-1m`).
+  `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next` (`-1m`, `-l`).
 
 ## The packs
 
@@ -39,11 +39,12 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the best perplexity, the slowest decode |
 | `qwen38-ud-iq3_xxs` | 78 GB + 3 GB MTP head | 262K | Qwen, fully in GPU memory |
 | `qwen38-ud-iq3_xxs-1m` | the same files | 1M (YaRN) | long documents: recalls a fact 355K tokens back, 0.4% worse on short text |
+| `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 262K | the larger quant, if you want it: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
 
 The DeepSeek packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) with the
 lossless MXFP8 Engram table, plus our 4.7 GB DSpark drafter and expert pick profile
 ([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)). Qwen is
-[unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) and its MTP head. The abliteration
+[unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (or UD-Q4_K_XL) and its MTP head. The abliteration
 costs 0.2-0.5% perplexity (UD-IQ1_M 2.458 → 2.470, Qwen 2.714 → 2.723) at the same speed.
 
 ## Performance
@@ -51,7 +52,8 @@ costs 0.2-0.5% perplexity (UD-IQ1_M 2.458 → 2.470, Qwen 2.714 → 2.723) at th
 Everything below was measured in one session (2026-11-09) on one machine at AMD's `low-power` profile (~70 W cap),
 with nothing else running and greedy decoding. Each engine runs in a fresh process, in interleaved rounds with the
 engines' order swapped from round to round, and each is set up the way its own setup does it. The scripts and logs
-are listed in `DESIGN.md` ("0.5.11").
+are listed in `DESIGN.md` ("0.5.11"). 0.5.12 changed none of these by more than a couple of percent (Qwen's decode
++1-2% from fewer launches; DeepSeek's paths untouched), so its tables stay 0.5.11's.
 
 **Low-power is the profile for work that runs a while.** Against 0.5.9's run at `performance`, the agents bench below
 took 20% longer and used half the energy per answer token (3.42 J against 7.03 J; mean package power 56 W against
@@ -96,7 +98,9 @@ It ran on UD-IQ1_M at 131K context with drafting on. Power is the APU package's 
 | RAM left free, lowest | **8.2 GiB** | 2.2 GiB | |
 
 osmos sizes itself to leave 8 GiB of RAM to the rest of the system: room for an editor, a browser, language servers
-and the agent harness beside the model.
+and the agent harness beside the model. A box with less beside it can give the cache more: `"fill_gib": 4` in the
+pack's `osmos.json` (osmos-serve `--fill 4`) keeps 4 GiB free instead, 0 keeps none. The output is the same at every
+value; only how much of the model stays in memory changes.
 
 ### Qwen3.8 against llama.cpp
 
@@ -143,7 +147,10 @@ varied up to 7% for osmos, up to 18% for llama.cpp. Both run Qwen's sparse atten
   depend on its batch.
 - **The cache** is Q8_0: 3.4 GB for 262K tokens.
 - **QSA**, Qwen's sparse attention, attends to a token's top 512 blocks of 4 keys.
-- **The MTP head** drafts up to 5 tokens.
+- **The MTP head** drafts up to 5 tokens. A pack can name DFlash2 instead (a block of 7 drafts from one pass of a
+  small drafter fed the model's own layers): ahead on chat, behind on real agent work, so an option.
+- **The n-gram table** (29 GB) can stay on the SSD, a step's rows read as it runs: the same bits, and how
+  UD-Q4_K_XL fits.
 - **Rollback.** The 36 Gated DeltaNet layers keep 8 steps of state, so a rejected draft rolls back.
 - **The abliteration** is an overlay: 96 tensors loaded in place of the model's own.
 
@@ -189,7 +196,9 @@ python tools/power.py --csv agents.csv -- python tools/serve/agent_bench.py --on
 # Qwen (token ids from its tokenizer: oracle/qwen_dump.cpp; llama.cpp's perplexity: qwen_dump -ppl)
 export Q=~/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf Q4X_BENCH_STEP=4096
 bin/q4x_bench $Q ids.txt 16384 64                                                             # prompt, then decode
-bin/q4x_bench $Q ids.txt 512 128 ~/Models/qwen38/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf   # drafted
+bin/q4x_bench $Q ids.txt 512 128 ~/Models/qwen38/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf   # drafted (or a DFlash2 GGUF)
+python3 tools/bench/rig_replay.py ~/.rig out/ --shard $Q --gguf-py <llama.cpp>/gguf-py \
+  --tokenize <llama.cpp>/build-hip/bin/llama-tokenize                                          # prompts from your rig sessions
 bin/q4x_ppl $Q ids.txt 8192 2048                                                              # perplexity
 ```
 

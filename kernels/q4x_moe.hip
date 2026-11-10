@@ -27,36 +27,45 @@ inline bool ok() { return hipGetLastError() == hipSuccess; }
 
 __device__ inline float silu(float x) { return x / (1.0f + expf(-x)); }
 
-// a block a token: its softmax (ggml's: exp(x - max), times 1 / their sum), then the k greatest one at a time, each
-// the block's argmax of the experts not yet taken (the lowest id among equals)
+// a block a token: its softmax (ggml's: exp(x - max), times 1 / their sum, the block's trees), then the k greatest by
+// its first wave alone - each lane its kRouteLane probabilities in registers (expert lane + 32 i), a pick the wave's
+// argmax of those not yet taken by shuffles (the lowest id among equals), no barrier between picks: the same picks in
+// the same order as a block-wide argmax a pick (0.5.11's, 8 barriers each), the same sum and weights. Qwen3.8's 512
+// experts: 19.3 -> 13.9 us median a decode token (rocprofv3, low-power, 2026-11-09); every ids hash the same
+constexpr uint32_t kRouteLane = kMaxExperts / 32; /* a lane's experts at most (n_exp <= kMaxExperts) */
 __global__ void route_kernel(const float* logits, uint32_t n_exp, uint32_t k, int32_t* ids, float* w, int32_t* rows) {
   __shared__ float p[kMaxExperts], lds[kThreads];
-  __shared__ int ldi[kThreads];
-  __shared__ bool taken[kMaxExperts];
   const uint32_t t = blockIdx.x;
   const float* l = logits + (uint64_t) t * n_exp;
   float m = -INFINITY;
   for (uint32_t i = threadIdx.x; i < n_exp; i += kThreads) m = fmaxf(m, l[i]);
   m = block_max<kThreads>(m, lds);
   float sum = 0;
-  for (uint32_t i = threadIdx.x; i < n_exp; i += kThreads) sum += (p[i] = expf(l[i] - m)), taken[i] = false;
+  for (uint32_t i = threadIdx.x; i < n_exp; i += kThreads) sum += (p[i] = expf(l[i] - m));
   const float inv = 1.0f / block_sum<kThreads>(sum, lds);
   for (uint32_t i = threadIdx.x; i < n_exp; i += kThreads) p[i] *= inv;
   __syncthreads();
+  if (threadIdx.x >= 32) return;
+  const uint32_t lane = threadIdx.x;
+  float v[kRouteLane];
+  for (uint32_t r = 0; r < kRouteLane; r++) v[r] = lane + 32 * r < n_exp ? p[lane + 32 * r] : -INFINITY;
+  uint32_t taken = 0; /* a lane's experts taken, bit r: expert lane + 32 r */
   float pick[kMaxK], total = 0;
   for (uint32_t j = 0; j < k; j++) {
     float bv = -INFINITY;
     int bi = INT_MAX;
-    for (uint32_t i = threadIdx.x; i < n_exp; i += kThreads)
-      if (!taken[i] && (p[i] > bv || (p[i] == bv && (int) i < bi))) bv = p[i], bi = (int) i;
-    const int best = block_argmax<kThreads>(&bv, bi, lds, ldi);
-    if (!threadIdx.x) {
-      taken[best] = true, pick[j] = bv, total += bv;
-      ids[t * k + j] = best, rows[t * k + j] = (int32_t) t;
+    for (uint32_t r = 0; r < kRouteLane; r++) /* ascending ids: a strict > keeps the lowest among equals */
+      if (!(taken >> r & 1) && lane + 32 * r < n_exp && v[r] > bv) bv = v[r], bi = (int) (lane + 32 * r);
+    for (int o = 16; o > 0; o >>= 1) {
+      const float ov = __shfl_xor(bv, o, 32);
+      const int oi = __shfl_xor(bi, o, 32);
+      if (ov > bv || (ov == bv && oi < bi)) bv = ov, bi = oi;
     }
-    __syncthreads();
+    if ((uint32_t) bi % 32 == lane) taken |= 1u << ((uint32_t) bi / 32);
+    pick[j] = bv, total += bv;
+    if (!lane) ids[t * k + j] = bi, rows[t * k + j] = (int32_t) t;
   }
-  if (threadIdx.x) return;
+  if (lane) return;
   const float div = fmaxf(total, kSumFloor);
   for (uint32_t j = 0; j < k; j++) w[t * k + j] = pick[j] / div;
 }
@@ -100,6 +109,7 @@ __global__ __launch_bounds__(kGroupThreads) void tiles_kernel(const int32_t* ids
     __syncthreads();
   }
   if (threadIdx.x < A) live[threadIdx.x] = sc[threadIdx.x][n_exp - 1];
+  __syncthreads();  // the totals read before the last expert's thread makes its own exclusive below
   for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads)
     for (int a = 0; a < A; a++) sc[a][e] -= own(e, a);
   __syncthreads();

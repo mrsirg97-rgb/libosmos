@@ -72,6 +72,13 @@ static const Shape kQwenShapes[] = {
   {"output.weight", -1},
 };
 
+// Qwen3.8-Flash-Next's UD-Q4_K_XL: its expert types (Q4_K gate / up, Q5_1 down; a few layers' gate Q5_K)
+constexpr const char* kQwenQ4 = "%s/Models/qwen38/q4kxl-dl/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf";
+static const Shape kQwenQ4Shapes[] = {
+  {"blk.0.ffn_gate_exps.weight", 7}, {"blk.30.ffn_gate_exps.weight", 300}, {"blk.47.ffn_up_exps.weight", 11},
+  {"blk.0.ffn_down_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 300}, {"blk.2.ffn_gate_exps.weight", 7},
+};
+
 static uint32_t rng = 1017;
 static int tok_shapes = 0;
 static float uniform() {
@@ -145,7 +152,7 @@ static void shape(const Gguf* g, const Shape& s) {
 
   // matrices each over their own tokens (mv_group_tok): the same matrix as 8 entries of 1 .. 8 tokens (a verify's
   // experts), each row the bits its token takes alone
-  if (t->type != 0 && t->type != 30 && t->type != 13 && t->type != 14) {  // (the experts' types and Q8_0)
+  if (t->type != 0 && t->type != 30 && t->type != 14) {  // (the experts' types: Q5_K UD-Q4_K_XL's too, and Q8_0)
     constexpr int kEntries = 8;
     std::vector<int32_t> cnt(kEntries), xrow(kEntries);
     int rows_n = 0;
@@ -254,6 +261,14 @@ int main() {
     gguf_destroy(g);
   } else {
     std::printf("  Qwen3.8-Flash-Next: not on this machine, its shapes not checked\n");
+  }
+  std::snprintf(qwen, sizeof qwen, kQwenQ4, std::getenv("HOME") ? std::getenv("HOME") : "");
+  if ((g = gguf_create(qwen, err))) {
+    std::printf("  Qwen3.8-Flash-Next UD-Q4_K_XL:\n");
+    for (const Shape& s : kQwenQ4Shapes) shape(g, s);
+    gguf_destroy(g);
+  } else {
+    std::printf("  Qwen3.8-Flash-Next UD-Q4_K_XL: not on this machine, its shapes not checked\n");
   }
   std::printf("  every shape: %d tokens at once (the wide tiles) the bits of each alone\n", kWideNt);
   CHECK(tok_shapes > 0);

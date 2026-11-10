@@ -19,14 +19,27 @@
    acceptance the same (q4x_bench, 192 tokens; 32,768: 39.3, 100,000: 38.5). a draft is a proposal: the answer's bits
    are the verify step's, whatever the drafts */
 #define Q4X_MTP_VOCAB 65536
+#define Q4X_MAX_TAPS 8 /* Q4xOptions' tap layers at most (DFlash2's 5) */
 
 typedef struct Q4xForward Q4xForward;
 typedef struct Q4xSeq Q4xSeq;
+typedef struct Q4xDflash Q4xDflash; /* osmos/q4x/dflash.h */
 
 typedef void (*q4x_probe_fn)(const char *step, int layer, float *dev, uint64_t n, void *arg);
 
+typedef struct Q4xOptions
+{
+  uint32_t max_ctx;    /* a sequence's most positions */
+  uint32_t max_tokens; /* a step's most tokens */
+  bool stream_ngram;   /* the n-gram table read from its file a step's rows at a time, not held in GPU memory */
+  const int32_t *tap_layers; /* layers whose output a step keeps (q4x_taps: a drafter's features), ascending */
+  uint32_t n_taps;           /* how many (Q4X_MAX_TAPS at most); 0: none */
+  const Q4xDflash *dflash;   /* a DFlash2 drafter (q4x_dflash_*), its taps the step's; NULL: none */
+} Q4xOptions;
+
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[Q4X_FWD_ERR]);
+Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, const Q4xOptions *o, char err[Q4X_FWD_ERR]);
 void q4x_forward_destroy(Q4xForward *f);
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
 void q4x_forward_side_spin(Q4xForward *f, uint32_t us);
@@ -46,6 +59,7 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
               uint32_t row0, char err[Q4X_FWD_ERR]);
 bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[Q4X_FWD_ERR]);
 const float *q4x_logits(const Q4xForward *f);
+const float *q4x_taps(const Q4xForward *f);
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR]);
 
 bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR]);
@@ -54,6 +68,10 @@ int q4x_mtp_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_
 bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32_t n, uint32_t max, float conf_min,
                        float cum_min, int32_t *drafts, float *conf, uint32_t stride, int *counts,
                        char err[Q4X_FWD_ERR]);
+
+bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR]);
+int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
+                     float *conf, char err[Q4X_FWD_ERR]);
 
 #endif
 
@@ -64,9 +82,21 @@ Q4xForward
   below OPS_Q4X_MAX_KEYS (llama.cpp's QSA keeps every token below its 2,048-token budget, a selection past it: dense
   past it measured its equal - 2.7136 over 8,192 tokens, QSA's 2.7193 - the selection not built).
 
-q4x_forward_create
+q4x_forward_create, q4x_forward_create_with
   the weights uploaded and the step's buffers for max_tokens tokens; NULL with why where the GPU's memory or a read
-  refuses. max_ctx: a sequence's most positions (at most OPS_Q4X_MAX_KEYS).
+  refuses. max_ctx: a sequence's most positions (at most OPS_Q4X_MAX_KEYS). create is create_with's held table
+  (stream_ngram false). stream_ngram: the n-gram layer's table (per_layer_token_embd, 28.8 GB of UD-IQ3_XXS) stays in
+  its file - a step's rows (its tokens' ple_heads each, ~1.4 KB a token) read at its start by rowread's workers into a
+  pinned stage while the GPU runs the layers before the n-gram layer, copied in and gathered as the held table's: the
+  same bits; its bytes of GPU memory left to the system. tap_layers: each layer's output (its residual's hc streams'
+  mean, q4x_tap) kept for every token of a step (q4x_taps); NULL with why for a layer past the model's, out of order,
+  or more than Q4X_MAX_TAPS. taking them changes no bit of the step's logits. dflash: the drafter's buffers, its
+  weights uploaded (~0.6 GB at Q8_0), each sequence its rings; its taps the step's (tap_layers then NULL, or the
+  drafter's own); NULL with why for a drafter not of these weights (q4x_dflash_create's) or its codebooks not Q8_0.
+
+q4x_taps
+  the last step's taps on the device, [token][n_taps][n_embd] F32 (the step's tokens in its order); NULL for a forward
+  made with none.
 
 q4x_forward_side_spin
   a test's: each small step's shared expert (the second stream's: q4x_moe_shared) after ~us of that stream's time -
@@ -128,4 +158,19 @@ q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head; DESIGN.md, "Qwen'
   own state. draft_all: n sequences' (1 .. min(max_tokens, Q4X_MAX_RUNS), each once), y[i] sequence i's, its drafts
   and confidences at row i (stride apart), its count counts[i] - each the bits of its q4x_mtp_draft: a draft's depth
   one head step for the sequences still drafting (the head's weights read once for all). false with why.
+
+q4x_dflash_seed, q4x_dflash_draft (a forward built with Q4xOptions' dflash; DESIGN.md, "DFlash2: a block drafter
+  for Qwen")
+  seed: the drafter's context at positions from .. to - 1 from the sequence's last step's taps (its rows of that
+  step, below the sequence's position: a rollback's dropped tokens refused) - each through the drafter's fc and hidden
+  norm, then each layer's k (normed, rotated) and v into the sequence's rings (the window's rows, position p at
+  p % rows). the context is the positions seeded since the last gap: a seed past where the context reaches starts it
+  over at from (a prompt's window, a load - which keeps none - or a rollback below it), one before it seeds those
+  positions again and the context ends at to. draft: a block at the sequence's position - y (the token there) and the
+  mask token after it - through the drafter's layers (attention over the context within its window, and the block's
+  own, not causal), Qwen's output head at the block's places after y, the selector's greedy path from y: up to
+  min(max, block - 1) drafts, each kept while its confidence (the head's probability of it there) is at least
+  conf_min and their product at least cum_min - the count, or -1 with why. the context must reach the sequence's
+  position. neither moves a bit of the sequence's own state; a draft is a proposal (the verify step's bits are the
+  answer's).
 */

@@ -53,12 +53,19 @@ static void unbuild(void *ctx)
 int main(void)
 {
   printf("[test_fit] start\n");
-  /* fit_room: the GPU's free memory or the RAM past FIT_RAM_FREE (the headroom added back), the less */
-  assert(fit_room(50 * GIB, 100 * GIB) == 50 * GIB);                             /* the GPU's the bound */
-  assert(fit_room(50 * GIB, 20 * GIB) == 20 * GIB - FIT_RAM_FREE + FIT_HEADROOM); /* the RAM's */
-  assert(fit_room(50 * GIB, FIT_RAM_FREE) == FIT_HEADROOM);                      /* the RAM's floor: just the headroom */
-  assert(fit_room(50 * GIB, FIT_RAM_FREE - GIB / 2) == FIT_HEADROOM - GIB / 2);  /* short: under the headroom */
-  assert(fit_room(50 * GIB, FIT_RAM_FREE - FIT_HEADROOM) == 0 && fit_room(50 * GIB, 0) == 0);
+  /* fit_room: the GPU's free memory or the RAM past the RAM kept free (FIT_RAM_FREE, the default; the headroom added
+     back), the less */
+  const uint64_t K = FIT_RAM_FREE;
+  assert(fit_room(50 * GIB, 100 * GIB, K) == 50 * GIB);                  /* the GPU's the bound */
+  assert(fit_room(50 * GIB, 20 * GIB, K) == 20 * GIB - K + FIT_HEADROOM); /* the RAM's */
+  assert(fit_room(50 * GIB, K, K) == FIT_HEADROOM);                      /* the RAM's floor: just the headroom */
+  assert(fit_room(50 * GIB, K - GIB / 2, K) == FIT_HEADROOM - GIB / 2);  /* short: under the headroom */
+  assert(fit_room(50 * GIB, K - FIT_HEADROOM, K) == 0 && fit_room(50 * GIB, 0, K) == 0);
+  /* --fill: another amount kept free - 0 the RAM's every byte (the headroom still), past what there is none */
+  assert(fit_room(50 * GIB, 20 * GIB, 0) == 20 * GIB + FIT_HEADROOM);
+  assert(fit_room(50 * GIB, 20 * GIB, 4 * GIB) == 16 * GIB + FIT_HEADROOM);
+  assert(fit_room(50 * GIB, 20 * GIB, 1000 * GIB) == 0);
+  assert(fit_room(50 * GIB, 20 * GIB, UINT64_MAX) == 0); /* no wrap */
   assert(fit_ram_available() > 0); /* this machine's /proc/meminfo */
   assert(fit_budget(12 * GIB, 95 * GIB, GIB) == 106 * GIB);
   assert(fit_budget(12 * GIB, GIB, GIB) == 12 * GIB);

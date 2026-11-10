@@ -79,6 +79,18 @@
     "qwen38-iq3xxs-4": {"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "d96201194f103c906994f283f504209dc8d2a10c",
                        "path": "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00004-of-00004.gguf", "bytes": 28800138432,
                        "sha256": "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36"},
+    "qwen38-q4kxl-1": {"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "084c631ac221016019d6e0a863afe92d90edd3b0",
+                       "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf", "bytes": 10946618,
+                       "sha256": "acc44040f74d0e55fb89c3967056cce5dbda1bcc52e909c3ba6fc72b5e9c0858"},
+    "qwen38-q4kxl-2": {"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "084c631ac221016019d6e0a863afe92d90edd3b0",
+                       "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf", "bytes": 49720539552,
+                       "sha256": "45792ae869072d8229384c51c7c73dd959e191505252b41dd71852d9746f5ce4"},
+    "qwen38-q4kxl-3": {"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "084c631ac221016019d6e0a863afe92d90edd3b0",
+                       "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf", "bytes": 32803030176,
+                       "sha256": "8c76e79d444b16a663d9c8db54e585ed3b1da13eebd2619c37b0c355da803c82"},
+    "qwen38-q4kxl-4": {"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "084c631ac221016019d6e0a863afe92d90edd3b0",
+                       "path": "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf", "bytes": 28800138432,
+                       "sha256": "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36"},
     "qwen38-mtp": {"repo": "unsloth/Qwen3.8-Flash-Next-GGUF", "revision": "d96201194f103c906994f283f504209dc8d2a10c",
                   "path": "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf", "bytes": 2786568256,
                   "sha256": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6"},
@@ -138,6 +150,14 @@
       "rig": {"id": "qwen3.8-flash-next-1m", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
               "aliases": ["qwen-1m"]},
       "settings": {"max_context": 1048576}
+    },
+    "qwen38-ud-q4_k_xl": {
+      "title": "Qwen3.8-Flash-Next UD-Q4_K_XL (the larger quant; slower, no better on our text): 23 tok/s plain, 41 drafted, 262K context",
+      "shards": ["qwen38-q4kxl-1", "qwen38-q4kxl-2", "qwen38-q4kxl-3", "qwen38-q4kxl-4"],
+      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": null,
+      "rig": {"id": "qwen3.8-flash-next-l", "max_tokens": 65536, "reserve": 65536, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
+              "aliases": ["qwen-l"]},
+      "settings": {"max_context": 262144, "max_tokens": 4096, "stream_ngram": true}
     }
   }
 }

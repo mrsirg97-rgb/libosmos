@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.5.12]: the larger Qwen, DFlash2 as an option, a race in the MoE fixed
+
+- **Qwen3.8's UD-Q4_K_XL runs** (unsloth's, 111.3 GB): its expert types Q4_K and Q5_1 read (each bit for bit
+  gguf-py's), Q5_K on the experts' matvec too; its weights resident (~82 GB of GPU memory) with the n-gram table
+  streamed from the SSD. Its perplexity is llama.cpp's on the same file (the first 512 tokens 6.4340 against 6.4331).
+  Its matmul tuned: Q4_K and Q5_1 on the register-A path (each lane decoding its row of the weights straight into
+  registers: the same bits, 25-33% faster) and their own shapes (Q4_K's long rows at 32 x 16 x 2 - 16 waves a block,
+  never swept before - Q5_1 at 32 x 8 x 2); a 512-token prompt 247 -> 507 tok/s, decode 20.6 -> 23.2 (low-power). On
+  this calibration text UD-IQ3_XXS is a little ahead past 2K tokens on both engines (4K: osmos 6.7522 against 6.7730,
+  llama.cpp 6.7683 against 6.8126). **A pack: `qwen38-ud-q4_k_xl`** (rig `qwen3.8-flash-next-l`, alias `qwen-l`), its
+  n-gram table streamed - for whoever wants the larger quant: on 16 points of real agent work (rig replay, MTP-drafted,
+  low-power) 10-11% slower decode and 16-18% slower prompts than UD-IQ3_XXS, 11-24% more energy a token (its dense weights
+  all Q8_0: 0.8 GB more read a token). No abliteration overlay for it yet.
+- **Qwen's decode: fewer launches, a faster router.** The router's top-k picks by one wave's shuffles instead of a
+  block-wide argmax a pick (19.3 -> 13.9 us a token's layer); the mixers' down matmul applies its silu and writes the
+  up's activations itself (1,744 -> 1,647 launches a token). Every bit the same (the ids hash of 512 + 128 tokens,
+  plain and MTP-drafted). Plain decode 26.88 -> 27.01 tok/s at low-power: a launch here costs ~2 us however little it
+  does (measured), so the rest of a token's launches are 0.6.0's to cut.
+- **The installer finds the GPU by its PCI ids** (sysfs: AMD's 1002, Strix Halo's Radeon 1586), not by running
+  rocminfo - which hung on a box without system ROCm (issue #25's report, @ucotman's suggestion: thank you). Anything
+  else is refused, the AMD devices it did find named.
+- **Measured, and left as they were** (DESIGN.md): every other matmul shape - the dense Q6_K / Q8_0 of both models and
+  UD-IQ3_XXS's experts at 16 waves and 32-value slabs (no gain on the model; Qwen's head at 4 waves +0.7% of a decode
+  token, but its rounding error doubled: not taken); HIP graphs for a decode token's launches (1.86 against 2.05 us a
+  launch: not worth a captured, updated graph).
+- **DFlash2 as Qwen's drafter, an option** (incoai's Qwen3.8-Flash-Next-DFlash2, Apache-2.0; tools/convert/
+  dflash2_gguf.py makes its 0.64 GB Q8_0 GGUF). A pack whose `drafter` is that file drafts with it: a block of 7 drafts
+  from one drafter pass, fed the target's own layers 5-45. Its drafts are the reference implementation's (511 of 511,
+  test_q4x_dflash_gpu) and the answer's bits are the target's whatever drafts. The MTP head stays the default - on real
+  agent work it wins. Measured at low-power, 256 tokens decoded each, two rounds: on a chat prompt DFlash2 54.9 tok/s
+  and 1.29 J a token against MTP's 45.4 and 1.57 (+21%); on prose 39.4 / 1.97 against 44.0 / 1.73 (-10%); on 16
+  points of real rig sessions (tools/bench/rig_replay.py: an agent's turn, its tool calls and results, Qwen's chat
+  template) 41.7 / 1.83 against 45.8 / 1.67 (-9%, ahead on 3 of 16).
+- **Fixed: Qwen's steps of 9 to 16 tokens were not always the same bits.** The MoE's expert tables (one kernel's
+  block) read each scan's total from the last expert's place while that expert's own thread made it exclusive - no
+  barrier between. Read after, the totals came up short, and the last expert's slots and entries were cleared as past
+  the live ones: the tokens that picked expert 511 got its stale output. It happened at random, a few times in a pass
+  of such steps, beside the shared expert on the second stream. Steps of 4, 6 and 8 tokens (decode's and MTP's
+  sizes) and prompt-sized steps were not seen to in the runs made, but the race was in the kernel for any step.
+  Since 0.5.10. A barrier (`test_q4x_forward_gpu`: the 256 tokens as steps of 9, each one's rows the
+  one batch's bits - 3 of 3 runs failed without it). Found building DFlash2's rollback test.
+- **tools/bench/energy.py takes a window shorter than the power samples' spacing** (a 43-token prompt's quarter
+  second): the two samples around it, when they are one spacing apart. A window with none near it is still refused
+  (the csv not the run's).
+- **Qwen's n-gram table can stay on the SSD** (osmos-serve `--stream-ngram`, `"stream_ngram": true` in osmos.json),
+  as DeepSeek's Engram does. The table (`per_layer_token_embd`, 26.8 GiB of UD-IQ3_XXS) is read a step's rows at a time
+  (16 rows of 90 bytes a token) by 64 readers while the GPU runs the layer before the one that needs them, then
+  gathered as the held table's: the same bits (`test_q4x_ngram_gpu`: a 3,000-token prompt and 8 decode steps). The
+  GPU memory it took is left to the system: 86.3 -> 59.4 GiB for UD-IQ3_XXS. Measured at low-power (two rounds):
+  prompts the same (2K 731-768 tok/s against 748 held, 16K 695-699 against 677), decode 0.5-2.5% slower (26.2-26.3
+  against 26.5; after a 2K prompt 25.8-25.9 against 26.4; MTP-drafted 44.5-45.2 against 45.2), the page cache warm or
+  cold alike. Off by default for UD-IQ3_XXS; the larger Qwen quant's pack will need it.
+- **`--fill`: the RAM osmos keeps free is the user's to set.** 8 GiB by default, as before (room for an editor, a
+  browser, language servers and the agent harness beside the model); osmos-serve `--fill GiB`, or `"fill_gib"` in a
+  pack's `osmos.json`, sets another, 0 or more. Past what the machine can keep free, the smallest build runs (the
+  dense weights, every expert streamed) and a NOTE says so. The saved conversations' RAM stops at the same line.
+  Measured on UD-IQ1_M: `--fill 4` sized the cache 4.2-4.6 GiB larger. The output's bits are the same at any value.
+- **Measured, and left as they were** (DESIGN.md "0.5.12"): a decode token's memory traffic by kernel (the dense
+  weights read exactly once a token, once a round drafted); the expert cache registered coarse-grained (7.5% fewer
+  requests into the memory fabric, ~1% faster at best, reverted: not worth a coherence hazard); a verify's rejected
+  drafts' experts demoted in the cache (4.5% slower: they are the next round's experts); the drafting floors on
+  UD-IQ2_XXS (0.1 and 5 a round still the best).
+
 ## [0.5.11]: nothing out of the format reaches a client; measured at low-power
 
 The first outside report (#25): an agent's tool call that DeepSeek's own parser takes was refused, and osmos-api

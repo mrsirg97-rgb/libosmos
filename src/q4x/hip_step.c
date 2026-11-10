@@ -36,6 +36,8 @@ static bool embed(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t *
       q4x_ple_rows(g, tok[t], prev, np, &b->pin_rows[(uint64_t)(r[i].t0 + t) * g->ple_heads]);
     }
   memcpy(b->pin_tok, tokens, n * sizeof *tokens);
+  if (f->stream_ngram && !q4x_ple_issue(f, n)) /* the rows read while the GPU embeds and runs the layers before */
+    return false;
   return hipMemcpyAsync(b->tok, b->pin_tok, n * 4, hipMemcpyHostToDevice, NULL) == hipSuccess &&
          hipMemcpyAsync(b->ple_rows, b->pin_rows, (uint64_t)n * g->ple_heads * 4, hipMemcpyHostToDevice, NULL) ==
              hipSuccess &&
@@ -122,6 +124,13 @@ static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t
   *pending = true;
   if (ok && f->probe) /* the layer's residual whole for the probe (l_last) */
     ok = q4x_inj_wait(f) && q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
+  for (uint32_t k = 0; ok && k < f->n_taps; k++) /* a tap: the layer's residual whole, its streams' mean */
+    if (f->tap_layer[k] == l)
+    {
+      if (*pending)
+        ok = q4x_inj_wait(f) && q4x_hc_combine(b->h, b->out, b->inj, n, hc, D, inv, NULL), *pending = false;
+      ok = ok && q4x_tap(b->h, n, hc, D, b->taps + (uint64_t)k * D, f->n_taps * D, NULL);
+    }
   return ok;
 }
 
@@ -152,10 +161,9 @@ static void advance(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t
     const int32_t *tok = tokens + r[i].t0;
     const uint32_t n = r[i].n;
     if (f->mtp)
-    {
       memcpy(s->step_tok, tok, n * sizeof *tok);
-      s->step_pos0 = s->pos, s->step_row0 = row0 + r[i].t0, s->step_n = n;
-    }
+    if (f->mtp || f->df) /* the step's place: the head's seed reads its rows, the drafter's feed its taps */
+      s->step_pos0 = s->pos, s->step_row0 = row0 + r[i].t0, s->step_n = n, s->step_t0 = r[i].t0;
     const int keep = (int)(sizeof s->last / sizeof *s->last);
     for (uint32_t t = 0; t < n; t++) /* the latest first */
     {
@@ -214,6 +222,7 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
 }
 
 const float *q4x_logits(const Q4xForward *f) { return f ? f->b.logits : NULL; }
+const float *q4x_taps(const Q4xForward *f) { return f && f->n_taps ? f->b.taps : NULL; }
 
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR])
 {

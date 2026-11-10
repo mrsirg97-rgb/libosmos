@@ -1,6 +1,6 @@
-// q4x_bench <first shard> <ids> [prompt] [decode] [mtp head]: Qwen3.8-Flash-Next's speed - a prompt (its first
-// `prompt` ids, 512 by default, steps of 256) then `decode` greedy tokens (128): a step each, or with the MTP head
-// drafted rounds (the server's: drafts after y under the engine's floors, [y, drafts] one step, the agreeing prefix
+// q4x_bench <first shard> <ids> [prompt] [decode] [drafter]: Qwen3.8-Flash-Next's speed - a prompt (its first
+// `prompt` ids, 512 by default, steps of 256) then `decode` greedy tokens (128): a step each, or with a drafter (the
+// MTP head, or DFlash2: its GGUF's architecture dflash2) drafted rounds (the server's: drafts after y under the engine's floors, [y, drafts] one step, the agreeing prefix
 // kept, the rest rolled back, the kept seeded). prints prompt tok/s, decode tok/s (and its slowest step or round, the
 // acceptance), and an FNV-1a of the decoded ids: plain and drafted the same (DESIGN.md, "Qwen's speed").
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/q4x_bench.hip -Llib -losmos_hip -losmos
@@ -10,11 +10,13 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 extern "C" {
 #include "osmos/model/fnv.h"
 #include "osmos/model/gguf.h"
+#include "osmos/q4x/dflash.h"
 #include "osmos/q4x/forward.h"
 #include "osmos/q4x/weights.h"
 #include "osmos/run/engine.h"
@@ -33,7 +35,7 @@ static double epoch() {
 }
 
 int main(int argc, char** argv) {
-  if (argc < 3) return std::fprintf(stderr, "usage: q4x_bench <first shard> <ids> [prompt] [decode] [mtp head]\n"), 2;
+  if (argc < 3) return std::fprintf(stderr, "usage: q4x_bench <first shard> <ids> [prompt] [decode] [drafter]\n"), 2;
   if (!gpu_sleep_on_waits()) return std::fprintf(stderr, "q4x_bench: the GPU's wait mode not set\n"), 1;
   const uint32_t kStep = getenv("Q4X_BENCH_STEP") ? (uint32_t) atoi(getenv("Q4X_BENCH_STEP")) : kStepDefault;
   const uint32_t np = argc > 3 ? (uint32_t) std::atoi(argv[3]) : 512, nd = argc > 4 ? (uint32_t) std::atoi(argv[4]) : 128;
@@ -50,19 +52,25 @@ int main(int argc, char** argv) {
   Q4xWeights* w = g ? q4x_weights_create(g, ov, werr) : nullptr;
   if (!w) return std::fprintf(stderr, "q4x_bench: %s%s\n", gerr, werr), 1;
   Gguf* mg = argc > 5 ? gguf_create(argv[5], gerr) : nullptr;
-  Q4xMtp* mtp = mg ? q4x_mtp_create(mg, w, werr) : nullptr;
-  if (argc > 5 && !mtp) return std::fprintf(stderr, "q4x_bench: %s%s\n", gerr, werr), 1;
+  const GgufKv* arch = mg ? gguf_kv(mg, "general.architecture") : nullptr;
+  const bool is_df = arch && arch->type == GGUF_STRING && !std::strcmp(arch->v.s, "dflash2");
+  Q4xMtp* mtp = mg && !is_df ? q4x_mtp_create(mg, w, werr) : nullptr;
+  Q4xDflash* df = mg && is_df ? q4x_dflash_create(mg, w, werr) : nullptr;
+  const bool drafting = mtp || df;
+  if (argc > 5 && !drafting) return std::fprintf(stderr, "q4x_bench: %s%s\n", gerr, werr), 1;
   /* Q4X_BENCH_CTX: the forward's context (past the native 262,144: YaRN, q4x_rope), else the run's */
   const uint32_t run = np + nd + OSMOS_MAX_BLOCK,
                  ctx = getenv("Q4X_BENCH_CTX") ? (uint32_t) atoi(getenv("Q4X_BENCH_CTX")) : run;
   if (ctx < run) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_CTX below the run's %u\n", run), 2;
-  Q4xForward* fw = q4x_forward_create(w, mtp, ctx, ctx < kStep ? ctx : kStep, ferr);
+  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr, nullptr, 0, df};
+  Q4xForward* fw = q4x_forward_create_with(w, mtp, &qo, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
   const double t0 = now(), e0 = epoch();
   for (uint32_t at = 0; at < np; at += kStep) {
     const uint32_t k = np - at < kStep ? np - at : kStep;
-    if (!q4x_batch(fw, s, ids.data() + at, k, 0, ferr) || (mtp && !q4x_mtp_seed(fw, s, (int32_t) at, (int32_t) (at + k), ferr)))
+    if (!q4x_batch(fw, s, ids.data() + at, k, 0, ferr) || (mtp && !q4x_mtp_seed(fw, s, (int32_t) at, (int32_t) (at + k), ferr)) ||
+        (df && !q4x_dflash_seed(fw, s, (int32_t) at, (int32_t) (at + k), ferr)))
       return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
   }
   int32_t y = -1;
@@ -82,10 +90,12 @@ int main(int argc, char** argv) {
   /* the drafts' floors: the engine's (engine.h), or Q4X_BENCH_CONF / Q4X_BENCH_CUM - a sweep's */
   const float conf_min = getenv("Q4X_BENCH_CONF") ? (float) atof(getenv("Q4X_BENCH_CONF")) : OSMOS_DRAFT_CONF_MIN;
   const float cum_min = getenv("Q4X_BENCH_CUM") ? (float) atof(getenv("Q4X_BENCH_CUM")) : OSMOS_DRAFT_CUM_MIN;
-  const uint32_t block = getenv("Q4X_BENCH_BLOCK") ? (uint32_t) atoi(getenv("Q4X_BENCH_BLOCK")) : Q4X_MTP_BLOCK;
+  const uint32_t most = df ? (uint32_t) df->geo.block - 1 : Q4X_MTP_BLOCK;
+  const uint32_t block = getenv("Q4X_BENCH_BLOCK") ? (uint32_t) atoi(getenv("Q4X_BENCH_BLOCK")) : most;
   if (!block || block > OSMOS_MAX_BLOCK) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_BLOCK 1 .. 8\n"), 2;
   const double t1 = now(), e2 = epoch();
   uint64_t h = FNV_SEED;
+  std::vector<int32_t> decoded;  // Q4X_BENCH_IDS: the decoded ids written there (two runs' tokens compared)
   double worst = 0;
   uint32_t out = 0, rounds = 0, drafted = 0, accepted = 0;
   const bool trace = getenv("Q4X_BENCH_TRACE");  // each round's drafts and their probabilities, exact (%a): two runs diffed
@@ -93,7 +103,9 @@ int main(int argc, char** argv) {
     const double a = now();
     int32_t toks[OSMOS_MAX_BLOCK + 1] = {y}, picks[OSMOS_MAX_BLOCK + 1];
     float conf[OSMOS_MAX_BLOCK];
-    const int k = mtp ? q4x_mtp_draft(fw, s, y, block, conf_min, cum_min, toks + 1, conf, ferr) : 0;
+    const int k = mtp  ? q4x_mtp_draft(fw, s, y, block, conf_min, cum_min, toks + 1, conf, ferr)
+                  : df ? q4x_dflash_draft(fw, s, y, block, conf_min, cum_min, toks + 1, conf, ferr)
+                       : 0;
     const int32_t pos = q4x_seq_position(s);
     if (k < 0 || !q4x_batch(fw, s, toks, (uint32_t) k + 1, 0, ferr) || !q4x_greedy(fw, 0, (uint32_t) k + 1, picks, ferr))
       return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
@@ -113,9 +125,11 @@ int main(int argc, char** argv) {
       for (int i = 0; i < k; i++) std::printf(" %d %a", toks[i + 1], conf[i]);
       std::printf("\n");
     }
-    for (int i = 0; i < keep && out < nd; i++, out++) h = fnv(&toks[i], sizeof toks[i], h);
+    for (int i = 0; i < keep && out < nd; i++, out++) h = fnv(&toks[i], sizeof toks[i], h), decoded.push_back(toks[i]);
     y = picks[keep - 1];
-    if (mtp && (!q4x_seq_rollback(s, (uint32_t) (k + 1 - keep)) || !q4x_mtp_seed(fw, s, pos, pos + keep, ferr)))
+    if (drafting && !q4x_seq_rollback(s, (uint32_t) (k + 1 - keep)))
+      return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
+    if ((mtp && !q4x_mtp_seed(fw, s, pos, pos + keep, ferr)) || (df && !q4x_dflash_seed(fw, s, pos, pos + keep, ferr)))
       return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
     rounds++, drafted += (uint32_t) k, accepted += (uint32_t) keep - 1;
     worst = now() - a > worst ? now() - a : worst;
@@ -123,14 +137,20 @@ int main(int argc, char** argv) {
   const double t2 = now(), e3 = epoch();
   std::printf("window prompt %.3f %.3f %u\nwindow decode %.3f %.3f %u\n", e0, e1, np, e2, e3, nd);
   std::printf("q4x_bench: prompt %u at %.1f tok/s; decode %u at %.2f tok/s (slowest %s %.1f ms", np, np / (t1 - t0), nd,
-              nd / (t2 - t1), mtp ? "round" : "step", worst * 1e3);
-  if (mtp)
+              nd / (t2 - t1), drafting ? "round" : "step", worst * 1e3);
+  if (drafting)
     std::printf("; %u rounds, %.0f%% of %u drafts accepted, %.2f tokens a round", rounds,
                 drafted ? 100.0 * accepted / drafted : 0.0, drafted, (double) nd / rounds);
   std::printf("); ids %016llx\n", (unsigned long long) h);
+  if (const char* path = getenv("Q4X_BENCH_IDS")) {
+    FILE* o = std::fopen(path, "w");
+    for (size_t i = 0; o && i < decoded.size(); i++) std::fprintf(o, "%d%s", decoded[i], i + 1 < decoded.size() ? "," : "\n");
+    if (!o || std::fclose(o)) return std::fprintf(stderr, "q4x_bench: %s not written\n", path), 1;
+  }
   q4x_seq_destroy(s);
   q4x_forward_destroy(fw);
   q4x_mtp_destroy(mtp);
+  q4x_dflash_destroy(df);
   gguf_destroy(mg);
   q4x_weights_destroy(w);
   gguf_destroy(g);

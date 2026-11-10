@@ -1,4 +1,4 @@
-// mmsweep [experts|dense]: mm's tile shapes (kernels/mm.h's Shape: SL values a slab, W waves a block, U chunks in
+// mmsweep [experts|dense|q4]: mm's tile shapes (kernels/mm.h's Shape: SL values a slab, W waves a block, U chunks in
 // flight a lane) timed at one token on Qwen3.8-Flash-Next's shapes - each expert type's gate / up (640 x 2560) and
 // down (2560 x 640), 10 experts a launch (mm_group), and the dense Q6_K / Q8_0 - every call reading cold memory (its
 // matrices rotated through 1 GiB). a shape is a K split, so it is the sums' order: a type's for every token count
@@ -82,13 +82,39 @@ static void dense(const char* type, uint32_t rows, uint32_t cols) {
   std::printf("  %-8s %6u x %-5u SL %3d W %d U %d  %7.1f us  %6.1f GB/s\n", type, rows, cols, SL, W, U, us, mat / us / 1e3);
 }
 
+// the 32-value slabs (Q5_K's 32 x 8 x 2 among them): the K-quants' sweep
+#define SHAPES32(F, T, name, rows, cols)                                                                       \
+  F<T, 32, 8, 2>(name, rows, cols), F<T, 32, 8, 1>(name, rows, cols), F<T, 32, 4, 2>(name, rows, cols),        \
+      F<T, 32, 4, 1>(name, rows, cols) /* a 32-value slab: 2 chunks a lane, U 1 or 2 */
+// 16 waves a block (512 threads; a long row's K split 16 ways)
+#define SHAPES16(F, T, name, rows, cols)                                                                       \
+  F<T, 64, 16, 4>(name, rows, cols), F<T, 64, 16, 2>(name, rows, cols), F<T, 32, 16, 2>(name, rows, cols),     \
+      F<T, 32, 16, 1>(name, rows, cols) /* (128 x 16: 68 KB of LDS, past the 64) */
 #define SHAPES(F, T, name, rows, cols)                                                                       \
   F<T, 64, 4, 2>(name, rows, cols), F<T, 64, 4, 4>(name, rows, cols), F<T, 64, 8, 2>(name, rows, cols),      \
       F<T, 64, 8, 4>(name, rows, cols), F<T, 128, 4, 4>(name, rows, cols), F<T, 128, 4, 8>(name, rows, cols), \
       F<T, 128, 8, 4>(name, rows, cols), F<T, 128, 8, 8>(name, rows, cols), F<T, 256, 4, 8>(name, rows, cols)
 
+// the tall matrices (the heads, the MTP head's shortlist of the head): their shape against the type's
+#define TALL(T, name, rows, cols)                                                                             \
+  dense<T, 128, 8, 8>(name, rows, cols), dense<T, 128, 4, 8>(name, rows, cols), dense<T, 128, 4, 4>(name, rows, cols), \
+      dense<T, 128, 8, 4>(name, rows, cols), dense<T, 128, 2, 8>(name, rows, cols)
+
 int main(int argc, char** argv) {
-  const bool experts = argc < 2 || !std::strcmp(argv[1], "experts");
+  if (argc > 1 && !std::strcmp(argv[1], "tall")) {
+    HIP(hipMalloc(&pool, kPool));
+    HIP(hipMalloc(&x16, (size_t) mm::kTile * 10240 * 2));
+    HIP(hipMalloc(&y, (size_t) 16 * 262144 * 4));
+    fill<<<4096, 256>>>((uint32_t*) pool, kPool / 4);
+    HIP(hipMemset(x16, 0, (size_t) mm::kTile * 10240 * 2));
+    HIP(hipDeviceSynchronize());
+    TALL(quant::kQ6_K, "Q6_K", 248320, 2560);
+    TALL(quant::kQ6_K, "Q6_K", 65536, 2560);
+    TALL(quant::kQ6_K, "Q6_K", 129280, 5120);
+    TALL(quant::kQ6_K, "Q6_K", 32768, 2560);
+    return 0;
+  }
+  const bool experts = argc < 2 || !std::strcmp(argv[1], "experts"), q4 = argc > 1 && !std::strcmp(argv[1], "q4");
   HIP(hipMalloc(&pool, kPool));
   HIP(hipMalloc(&x16, (size_t) mm::kTile * 10240 * 2));
   HIP(hipMalloc(&y, (size_t) 16 * 262144 * 4));
@@ -105,16 +131,40 @@ int main(int argc, char** argv) {
   HIP(hipMemcpy(xoff, zero.data(), kExperts * 4, hipMemcpyHostToDevice));
   HIP(hipMemcpy(yoff, ys.data(), kExperts * 4, hipMemcpyHostToDevice));
   HIP(hipDeviceSynchronize());
-  if (experts) {
+  if (q4) {  // UD-Q4_K_XL's expert types: Q4_K gate / up, Q5_1 down, a few layers' Q5_K gates
+    SHAPES(group, quant::kQ4_K, "Q4_K", 640, 2560);
+    SHAPES32(group, quant::kQ4_K, "Q4_K", 640, 2560);
+    SHAPES16(group, quant::kQ4_K, "Q4_K", 640, 2560);
+    SHAPES(group, quant::kQ5_1, "Q5_1", 2560, 640);
+    SHAPES32(group, quant::kQ5_1, "Q5_1", 2560, 640);
+    group<quant::kQ5_1, 32, 16, 2>("Q5_1", 2560, 640), group<quant::kQ5_1, 32, 16, 1>("Q5_1", 2560, 640);
+    SHAPES(group, quant::kQ5_K, "Q5_K", 640, 2560);
+  } else if (experts) {
     SHAPES(group, quant::kIQ4_NL, "IQ4_NL", 2560, 640);
+    SHAPES32(group, quant::kIQ4_NL, "IQ4_NL", 2560, 640);
+    group<quant::kIQ4_NL, 32, 16, 2>("IQ4_NL", 2560, 640);
     SHAPES(group, quant::kIQ3_XXS, "IQ3_XXS", 640, 2560);
+    SHAPES32(group, quant::kIQ3_XXS, "IQ3_XXS", 640, 2560);
+    SHAPES16(group, quant::kIQ3_XXS, "IQ3_XXS", 640, 2560);
     SHAPES(group, quant::kIQ2_S, "IQ2_S", 640, 2560);
+    SHAPES16(group, quant::kIQ2_S, "IQ2_S", 640, 2560);
     SHAPES(group, quant::kIQ4_XS, "IQ4_XS", 2560, 640);
+    SHAPES32(group, quant::kIQ4_XS, "IQ4_XS", 2560, 640);
+    group<quant::kIQ4_XS, 32, 16, 2>("IQ4_XS", 2560, 640);
     SHAPES(group, quant::kQ2_0, "Q2_0", 640, 2560);
+    SHAPES16(group, quant::kQ2_0, "Q2_0", 640, 2560);
   } else {
-    SHAPES(dense, quant::kQ6_K, "Q6_K", 10240, 2560);
-    SHAPES(dense, quant::kQ6_K, "Q6_K", 2560, 6144);
-    SHAPES(dense, quant::kQ6_K, "Q6_K", 248320, 2560);
+#define DENSE_ALL(T, name, rows, cols) \
+  SHAPES(dense, T, name, rows, cols); SHAPES32(dense, T, name, rows, cols); SHAPES16(dense, T, name, rows, cols)
+    // Qwen3.8's: the DeltaNet's qkv, its out, the head; DeepSeek's: q_a, q_b (short rows), wo_b
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 10240, 2560);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 2560, 6144);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 248320, 2560);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 1280, 5120);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 32768, 1280);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 5120, 8192);
+    DENSE_ALL(quant::kQ8_0, "Q8_0", 10240, 2560);
+    DENSE_ALL(quant::kQ8_0, "Q8_0", 5120, 8192);
     SHAPES(dense, quant::kQ8_0, "Q8_0", 320, 10240);
     // 320 columns: 64-value slabs alone
     dense<quant::kQ8_0, 64, 4, 2>("Q8_0", 10240, 320), dense<quant::kQ8_0, 64, 4, 4>("Q8_0", 10240, 320);
