@@ -284,6 +284,200 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
   }
 }
 
+// RM row tiles a wave, a multi-tile step (the experts' prompt-sized matmul): tile's partition a wave (slabs w, w + W,
+// ...), its slab decoded for 16 RM rows into the wave's LDS, each x fragment then feeding RM WMMAs - tile loads a
+// fragment a WMMA. every output's sums in tile's order (its partition's slabs in turn, each its 16-value steps; the
+// partitions summed in w's order): tile's bits (test_mm_gpu, mm_group at 37 / 64 / 128 tokens). x double-buffered as
+// tile's kPipe. LDS: the slabs' 16 RM rows a wave, or the partial sums RM times tile's
+template <class S, int RM>
+struct RmLds {
+  static constexpr int kSlab = S::kWaves * RM * kTile * S::kRowLds, kPart = S::kWaves * RM * 8 * kWave * 2;
+  static constexpr int kHalves = kSlab > kPart ? kSlab : kPart;
+};
+template <quant::Type T, class S, int CT, int RM, bool PIPE = false>
+__device__ __attribute__((always_inline)) inline void tile_rm(const uint8_t* __restrict__ w, uint32_t row0,
+                                                              uint32_t cols, const _Float16* __restrict__ x16,
+                                                              uint32_t xts, uint32_t c0, uint32_t n,
+                                                              float* __restrict__ y, uint32_t ys, _Float16* lds_all) {
+  static_assert(CT > 1 && RM > 1, "tile's own for a column tile or a row tile");
+  constexpr int SL = S::kSlab, G = SL / kTile, CPR = SL / quant::kChunk, CH = RM * S::kLane;
+  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  _Float16* lds = lds_all + wave * RM * kTile * S::kRowLds;
+  const int tiles = (int) ((n - c0 + kTile - 1) / kTile) < CT ? (int) ((n - c0 + kTile - 1) / kTile) : CT;
+  const _Float16* xb[CT];
+  for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
+  f8 acc[RM][CT] = {};
+  for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
+#pragma unroll
+    for (int i = 0; i < CH; i++) {  /* the whole slab's chunks in flight: RM times tile's */
+      const int d = lane + kWave * i, r = d / CPR, c = d % CPR;
+      int kk;
+      const h8 hv = quant::decode_h<T>(quant::at<T>(w, row0 + r, cols, k0 / quant::kChunk + c, &kk), kk);
+      *(h8*) (lds + r * S::kRowLds + c * quant::kChunk) = hv;
+    }
+    __builtin_amdgcn_wave_barrier();
+    h16 a[RM][G];
+    for (int rm = 0; rm < RM; rm++)
+      for (int g = 0; g < G; g++) a[rm][g] = *(const h16*) (lds + (rm * kTile + col) * S::kRowLds + g * kTile);
+    __builtin_amdgcn_wave_barrier();
+    if (PIPE && kPipe<G, CT> && tiles == CT) {  // every tile real: the next tile's x loaded under this one's WMMAs
+      h16 bc[G], bn[G];
+      for (int g = 0; g < G; g++) bc[g] = *(const h16*) (xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
+#pragma unroll
+      for (int ct = 0; ct < CT; ct++) {
+        if (ct + 1 < CT)
+          for (int g = 0; g < G; g++) bn[g] = *(const h16*) (xb[ct + 1] + (uint64_t) (k0 / kTile + g) * kFrag);
+        for (int rm = 0; rm < RM; rm++)
+          for (int g = 0; g < G; g++) acc[rm][ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[rm][g], bc[g], acc[rm][ct]);
+        if (ct + 1 < CT)
+          for (int g = 0; g < G; g++) bc[g] = bn[g];
+      }
+    } else
+#pragma unroll
+      for (int ct = 0; ct < CT; ct++)
+        if (ct < tiles) {
+          h16 bx[G];
+          for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
+          for (int rm = 0; rm < RM; rm++)
+            for (int g = 0; g < G; g++) acc[rm][ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[rm][g], bx[g], acc[rm][ct]);
+        }
+  }
+  float* part = (float*) lds_all;
+#pragma unroll
+  for (int ct = 0; ct < CT; ct++) {
+    if (ct >= tiles) break;  // the block's: every wave the same tiles
+    __syncthreads();         // the LDS free: the slabs done, or the tile before summed
+    for (int rm = 0; rm < RM; rm++)
+      for (int j = 0; j < 8; j++) part[((wave * RM + rm) * 8 + j) * kWave + lane] = acc[rm][ct][j];
+    __syncthreads();
+    if (wave == 0) {
+      const uint32_t t = c0 + ct * kTile + col;
+      for (int rm = 0; rm < RM; rm++)
+        for (int j = 0; j < 8; j++) {
+          float s = part[(rm * 8 + j) * kWave + lane];
+          for (int v = 1; v < S::kWaves; v++) s += part[((v * RM + rm) * 8 + j) * kWave + lane];
+          if (t < n) y[(uint64_t) t * ys + row0 + rm * kTile + 2 * j + half] = s;
+        }
+    }
+  }
+}
+
+// group_kernel with RM row tiles a wave (tile_rm): its grid's rows RM times fewer
+template <quant::Type T, class S, int CT, int RM, bool PIPE = false>
+__global__ __launch_bounds__(kWave* S::kWaves) void group_rm_kernel(const uint8_t* const* __restrict__ w,
+                                                                     const int32_t* __restrict__ cnt, uint32_t cols,
+                                                                     const _Float16* __restrict__ x16,
+                                                                     const uint32_t* __restrict__ xoff, uint32_t xts,
+                                                                     float* __restrict__ y,
+                                                                     const uint32_t* __restrict__ yoff, uint32_t ys) {
+  __shared__ __attribute__((aligned(32))) _Float16 lds[RmLds<S, RM>::kHalves];
+  const uint32_t m = blockIdx.y, c0 = blockIdx.z * kTile * CT;
+  if (c0 >= (uint32_t) cnt[m]) return;  // a block past its matrix's tokens: nothing
+  tile_rm<T, S, CT, RM, PIPE>(w[m], blockIdx.x * kTile * RM, cols, x16 + xoff[m], xts, c0, (uint32_t) cnt[m], y + yoff[m],
+                        ys, lds);
+}
+
+// the experts' prompt-sized matmul as gemm_kernel's blocks: n matrices of one shape (blockIdx.y the matrix m: its
+// weights wt[m], its first cnt[m] tokens, its x the tiled x16 from x16a + xoff[m] with rows xts long, its y at
+// ya + yoff[m] + t * ys) - group_kernel's addressing on gemm_kernel's body, so its tiles' sums in tile's order: the
+// same bits as group_kernel at every count (a block past the matrix's tokens nothing)
+template <quant::Type T, class S, int RM, int RN, int WR, int WC>
+__global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* __restrict__ wt, const int32_t* __restrict__ cnt,
+                                                          uint32_t rows, uint32_t cols, const _Float16* __restrict__ x16a,
+                                                          const uint32_t* __restrict__ xoff, uint32_t xts,
+                                                          float* __restrict__ ya, const uint32_t* __restrict__ yoff,
+                                                          uint32_t ys) {
+  static_assert(WR * WC * kWave == 256, "8 waves");
+  constexpr int SL = S::kSlab, G = SL / kTile, W = S::kWaves, BM = kTile * RM * WR, BN = kTile * RN * WC;
+  constexpr int RL = SL + kPad, CPR = SL / quant::kChunk, CH = BM * CPR / 256;  // a thread's chunks a slab
+  static_assert((BM * CPR) % 256 == 0, "a slab's chunks whole");
+  __shared__ __attribute__((aligned(32))) _Float16 lds2[2][BM * RL];
+  const uint32_t m = blockIdx.y, n = (uint32_t) cnt[m];
+  const uint8_t* w = wt[m];
+  const _Float16* x16 = x16a + xoff[m];
+  float* y = ya + yoff[m];
+  const uint32_t row0 = blockIdx.x * BM, c0 = blockIdx.z * BN;
+  if (row0 >= rows || c0 >= n) return;  // the whole block: past the matrix's rows or its tokens
+  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  const int wr = wave / WC, wc = wave % WC;
+  const _Float16* xb[RN];
+  bool live[RN];
+  for (int j = 0; j < RN; j++) {
+    const uint32_t t0 = c0 + (wc * RN + j) * kTile;
+    live[j] = t0 < n, xb[j] = x16 + x16_at(t0 + col, 0, xts);
+  }
+  f8 run[RM][RN], acc[RM][RN];
+  const uint32_t slabs = cols / SL;  // >= W (the launch's): every partition a slab at least
+  auto decode = [&](uint32_t k0, h8* out) {
+#pragma unroll
+    for (int c = 0; c < CH; c++) {
+      const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
+      const uint32_t row = row0 + r < rows ? row0 + r : rows - 1;
+      int kk;
+      out[c] = quant::decode_h<T>(quant::at<T>(w, row, cols, k0 / quant::kChunk + ck, &kk), kk);
+    }
+  };
+  auto put = [&](_Float16* buf, const h8* v) {
+#pragma unroll
+    for (int c = 0; c < CH; c++) {
+      const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
+      *(h8*) (buf + r * RL + ck * quant::kChunk) = v[c];
+    }
+  };
+  for (int i = 0; i < RM; i++)
+    for (int j = 0; j < RN; j++) acc[i][j] = f8{};
+  {
+    h8 v[CH];
+    decode(0, v);
+    put(lds2[0], v);
+  }
+  __syncthreads();
+  int p = 0, cur = 0;
+  uint32_t sl = 0;
+  for (;;) {
+    const uint32_t k0 = sl * SL;
+    // the slab after this one in the order: the partition's next, else the next partition's first
+    const bool more_p = sl + W < slabs;
+    const int np = more_p ? p : p + 1;
+    const uint32_t nsl = more_p ? sl + W : (uint32_t) np;
+    const bool next = np < W;
+    h8 v[CH];
+    if (next) decode(nsl * SL, v);
+    const _Float16* lds = lds2[cur];
+#pragma unroll
+    for (int g = 0; g < G; g++) {
+      h16 a[RM], b[RN];
+      for (int i = 0; i < RM; i++) a[i] = *(const h16*) (lds + ((wr * RM + i) * kTile + col) * RL + g * kTile);
+      for (int j = 0; j < RN; j++) b[j] = *(const h16*) (xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
+      for (int j = 0; j < RN; j++)
+        if (live[j])
+          for (int i = 0; i < RM; i++) acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[i], b[j], acc[i][j]);
+    }
+    if (!more_p) {  // the partition's sum done: into the running sum, the next from zero
+      for (int i = 0; i < RM; i++)
+        for (int j = 0; j < RN; j++) {
+          if (p == 0) run[i][j] = acc[i][j];
+          else
+            for (int e = 0; e < 8; e++) run[i][j][e] += acc[i][j][e];
+          acc[i][j] = f8{};
+        }
+    }
+    if (!next) break;
+    put(lds2[cur ^ 1], v);  // the other buffer: read last before the barrier ending the slab before
+    __syncthreads();
+    cur ^= 1, p = np, sl = nsl;
+  }
+  for (int j = 0; j < RN; j++) {
+    const uint32_t t = c0 + (wc * RN + j) * kTile + col;
+    if (t >= n) continue;
+    for (int i = 0; i < RM; i++) {
+      const uint32_t r = row0 + (wr * RM + i) * kTile;
+      if (r >= rows) continue;
+      for (int e = 0; e < 8; e++) y[(uint64_t) t * ys + r + 2 * e + half] = run[i][j][e];
+    }
+  }
+}
+
 // one matrix, or two of one type on the same x16 (blockIdx.y the matrix: a pair's blocks in one launch - the shared
 // expert's gate and up, q_a and kv), each tile as alone; the grid's rows the larger's, a block past its matrix's
 // rows nothing

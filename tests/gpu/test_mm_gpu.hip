@@ -64,7 +64,11 @@ static const Shape kUdShapes[] = {
 
 // Qwen3.8's (when its first shard is here): the mixers' down - Q8_0 320 x 10240, its K split across blocks (mm.hip's
 // split_parts) - and up (320 columns: the odd width's shape)
-static const Shape kQwenShapes[] = {{"blk.0.hc_attn_down.weight", -1}, {"blk.0.hc_attn_up.weight", -1}};
+static const Shape kQwenShapes[] = {
+    {"blk.0.hc_attn_down.weight", -1}, {"blk.0.hc_attn_up.weight", -1},
+    // UD-IQ3_XXS's expert types: IQ3_XXS gate, IQ4_NL / Q2_0 down, IQ4_XS gate
+    {"blk.0.ffn_gate_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 7}, {"blk.8.ffn_down_exps.weight", 7},
+    {"blk.47.ffn_gate_exps.weight", 7}};
 constexpr const char* kQwenFirst = "%s/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
 // UD-Q4_K_XL's expert types (Q4_K gate / up, Q5_1 down), from several layers
 static const Shape kQwenQ4Shapes[] = {
@@ -154,6 +158,31 @@ static void shape(const Gguf* g, const Shape& s) {
       CHECK(hipMemcpy(yh.data(), yb, yh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
       CHECK(std::memcmp(yh.data(), a.data(), (size_t) kT * rows * 4) == 0);
       CHECK(std::memcmp(&yh[(size_t) 200 * rows], &a[(size_t) 3 * rows], rows * 4) == 0);
+    }
+    if (s.expert >= 0) {  // the experts' launch (mm_group: one matrix, its multi-tile plans - mm.hip's GroupPlan): the
+                          // first n tokens' rows mm_run's bits at 1 .. 8 column tiles, a partial tile and a partial block
+      std::vector<float> yr((size_t) 201 * rows);  // x16b and yb: the last pass's 201 tokens, mm_run's
+      CHECK(hipMemcpy(yr.data(), yb, yr.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      const void** dw;
+      int32_t* dc;
+      uint32_t *dx, *dy;
+      float* yg;
+      CHECK(hipMalloc(&dw, sizeof(void*)) == hipSuccess && hipMalloc(&dc, 4) == hipSuccess &&
+            hipMalloc(&dx, 4) == hipSuccess && hipMalloc(&dy, 4) == hipSuccess &&
+            hipMalloc(&yg, (size_t) 128 * rows * 4) == hipSuccess);
+      const void* wp = w;
+      const uint32_t zero = 0;
+      CHECK(hipMemcpy(dw, &wp, sizeof wp, hipMemcpyHostToDevice) == hipSuccess &&
+            hipMemcpy(dx, &zero, 4, hipMemcpyHostToDevice) == hipSuccess &&
+            hipMemcpy(dy, &zero, 4, hipMemcpyHostToDevice) == hipSuccess);
+      for (int32_t n : {24, 37, 64, 100, 128}) {
+        CHECK(hipMemcpy(dc, &n, 4, hipMemcpyHostToDevice) == hipSuccess && hipMemset(yg, 0xff, (size_t) 128 * rows * 4) == hipSuccess);
+        CHECK(mm_group(t->type, dw, dc, 1, (uint32_t) n, rows, cols, x16b, dx, cols, yg, dy, rows, nullptr));
+        CHECK(host_of(yg, (size_t) n * rows) == std::vector<float>(yr.begin(), yr.begin() + (size_t) n * rows));
+      }
+      CHECK(hipFree(dw) == hipSuccess && hipFree(dc) == hipSuccess && hipFree(dx) == hipSuccess &&
+            hipFree(dy) == hipSuccess && hipFree(yg) == hipSuccess);
+      std::printf("  %s: mm_group at 24 / 37 / 64 / 100 / 128 tokens, mm_run's bits\n", s.tensor);
     }
     CHECK(hipFree(xb) == hipSuccess && hipFree(yb) == hipSuccess && hipFree(x16b) == hipSuccess);
   }

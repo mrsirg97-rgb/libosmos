@@ -2726,6 +2726,26 @@ steps). A kernel test of the tables alone never raced in 12,000 launches (the fo
 the forward's: the 256 tokens as steps of 9, each one's rows the one batch's (3 of 3 failed without the barrier).
 
 
+### 0.6.0: the experts' prompt matmuls, measured first (2026-11-09, low-power)
+
+**The matrix cores (a microbenchmark, chains of independent WMMAs, every CU busy):** f16 48.6-50.1 TOPS, iu8 50.3-50.9,
+iu4 100.9-101.2. iu8 no faster than f16 here, so int8 activations as two iu4 passes buy no rate.
+
+**Where a Q4_K expert matmul's prompt step goes** (group_kernel, 32 x 16 x 2, 160 experts, cold weights): 13-15
+TFLOP/s; its decode replaced by the raw bytes 12-28% faster, its weights not read at all 34-38% - and then still only
+20-24 TFLOP/s against the cores' ~50 (the dense gemm 27-29). The kernel's shape, not the decode or the rate, was the
+bound: a wave's 16 rows a slab, an x fragment a WMMA, the 16-way sum. So the order: the matmul first, integer WMMA after.
+
+**The restructure, bits kept.** Two ways that keep tile's sums (a partition's slabs in turn, its 16-value steps; the
+partitions in w's order): gemm_kernel's blocks for a group (group_gemm_kernel, 64 x 128: +13% Q4_K, +42% Q5_1, +16%
+IQ4_NL, +60% Q2_0 at 128 tokens; worse below - Q4_K's 16 partitions of 32-value slabs leave a block 8 WMMAs a barrier),
+and 2 row tiles a wave (tile_rm: an x fragment two WMMAs; Q4_K +22 / +42 / +17% at 24 / 37 / 64 tokens, Q5_1 +6 /
++28 / +8%, IQ4_XS +6-9%, IQ4_NL and Q2_0 level). The decode fully unrolled (tile's partial unroll and its x double
+buffer cost RM 2 13-16%: registers). IQ3_XXS's 128 x 8 shape: 70 KB of LDS at RM 2, so not. mm.hip's GroupPlan takes
+each where measured; test_mm_gpu holds mm_group to mm_run's bits at 24 / 37 / 64 / 100 / 128 tokens for every expert
+shape it reads (a reversed partition sum caught). The model: UD-Q4_K_XL's 512-token prompt 507 -> 566 tok/s,
+UD-IQ3_XXS's 2K 780-795 -> 802-804 (its gate / up IQ3_XXS's, untouched), the ids hashes the same.
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate

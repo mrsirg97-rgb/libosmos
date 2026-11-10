@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0]: (in progress)
+
+- **The experts' prompt-sized matmuls faster, every bit the same.** A step's expert with 17-64 tokens runs 2 row tiles
+  a wave (each activation fragment feeding two matrix-core ops, not one), 65-128 tokens as the dense gemm's 64 x 128
+  blocks - each in the same sums' order as before (test_mm_gpu: mm_group at 24 / 37 / 64 / 100 / 128 tokens, mm_run's
+  bits, every expert type). By type, measured on real experts (low-power): Q4_K +17-42%, Q5_1 +6-42%, IQ4_XS +6-9%,
+  IQ4_NL and Q2_0 +16% / +60% at 128 tokens. UD-Q4_K_XL's 512-token prompt 507 -> 566 tok/s, UD-IQ3_XXS's 2K
+  780-795 -> 802-804; every ids hash the same.
+
 ## [0.5.12]: the larger Qwen, DFlash2 as an option, a race in the MoE fixed
 
 - **Qwen3.8's UD-Q4_K_XL runs** (unsloth's, 111.3 GB): its expert types Q4_K and Q5_1 read (each bit for bit

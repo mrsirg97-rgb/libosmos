@@ -132,6 +132,42 @@ bool group_ct(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t
   return hipGetLastError() == hipSuccess;
 }
 
+// the experts' multi-tile steps by type, each the bits of group_ct's (the sums in tile's order: test_mm_gpu's mm_group
+// at 24 / 37 / 64 / 100 / 128 tokens against mm_run): 2-4 column tiles with 2 row tiles a wave (tile_rm: an x fragment
+// two WMMAs), 8 as gemm_kernel's 64 x 128 blocks - measured a type at a time (tools/bench/mmsweep's experts, real
+// blocks, 160 experts cold, low-power, 2026-11-09): Q4_K +22 / +42 / +17% at 24 / 37 / 64 tokens, +13% at 128; Q5_1
+// +6 / +28 / +8%, +42%; IQ4_XS +7 / +6 / +9% (its 128s level: group_ct's); IQ4_NL and Q2_0 level at 24-64, +16% and
+// +60% at 128. IQ3_XXS's 128 x 8 shape takes no 2 row tiles (70 KB of LDS); the other types not measured: group_ct's
+template <quant::Type T>
+struct GroupPlan {
+  static constexpr bool kRm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_XS;
+  static constexpr bool kGemm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_NL || T == quant::kQ2_0;
+};
+constexpr int kGroupRm = 2, kGroupGemmRm = 2, kGroupGemmRn = 2, kGroupGemmWr = 2, kGroupGemmWc = 4;
+
+template <quant::Type T, int CT>
+bool group_rm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
+              uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
+              uint32_t ys, hipStream_t s) {
+  using S = typename Tuned<T>::S;
+  const uint32_t z = (max_cnt + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::group_rm_kernel<T, S, CT, kGroupRm><<<dim3(rows / (mm::kTile * kGroupRm), n_mat, z), mm::kWave * S::kWaves, 0, s>>>(
+      (const uint8_t* const*) w, cnt, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T>
+bool group_gemm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
+                uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
+                uint32_t ys, hipStream_t s) {
+  using S = typename Tuned<T>::S;
+  constexpr uint32_t BM = mm::kTile * kGroupGemmRm * kGroupGemmWr, BN = mm::kTile * kGroupGemmRn * kGroupGemmWc;
+  mm::group_gemm_kernel<T, S, kGroupGemmRm, kGroupGemmRn, kGroupGemmWr, kGroupGemmWc>
+      <<<dim3(rows / BM, n_mat, (max_cnt + BN - 1) / BN), 256, 0, s>>>((const uint8_t* const*) w, cnt, rows, cols,
+                                                                      (const _Float16*) x16, xoff, xts, y, yoff, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
 template <quant::Type T>
 bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
                   uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
@@ -140,11 +176,23 @@ bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint
   if (rows % mm::kTile || cols % quant::Block<T>::values || cols % S::kSlab || xts < cols || xts % mm::kTile ||
       !max_cnt || max_cnt > MM_MAX_TOKENS)
     return false;
+  constexpr uint32_t gemm_rows = mm::kTile * kGroupGemmRm * kGroupGemmWr;
+  const bool rm = GroupPlan<T>::kRm && rows % (mm::kTile * kGroupRm) == 0;
+  const bool gemm = GroupPlan<T>::kGemm && rows % gemm_rows == 0 && cols / S::kSlab >= (uint32_t) S::kWaves;
   switch (col_tiles<T>(max_cnt)) {
     case 1: return group_ct<T, 1>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    case 2: return group_ct<T, 2>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    case 4: return group_ct<T, 4>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
-    default: return group_ct<T, Tuned<T>::kMaxCt>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    case 2:
+      if constexpr (GroupPlan<T>::kRm)
+        if (rm) return group_rm<T, 2>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+      return group_ct<T, 2>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    case 4:
+      if constexpr (GroupPlan<T>::kRm)
+        if (rm) return group_rm<T, 4>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+      return group_ct<T, 4>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    default:
+      if constexpr (GroupPlan<T>::kGemm)
+        if (gemm) return group_gemm<T>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+      return group_ct<T, Tuned<T>::kMaxCt>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
   }
 }
 
