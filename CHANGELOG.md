@@ -36,6 +36,12 @@
   A 4096-token prompt's up + gated mean 366 -> 281 ms. With the gather above, at serve's 2048-token steps
   (low-power, three interleaved runs each): UD-IQ3_XXS's 4K prompt 751-756 -> 768-782 tok/s, UD-Q4_K_XL's 681-701
   -> 737-745; decode the same or ~1% up; every ids hash the same.
+- **DeltaNet's conv and the MoE's sum faster, every bit the same.** q4x_conv at 4 taps, dilation 1: a thread a
+  channel over 8 tokens, x read once into a register window and the weights once (not 4 loads a token); q4x_moe_sum
+  4 values a thread, a pick's row one 16-byte load (a width not 4s, or a misaligned row: the old kernel). Each
+  value the same products in the same order. test_q4x_conv_sum_gpu: the old kernels' bytes, mutation-checked. A
+  4096-token prompt at 2048-token steps (low-power): conv 131 -> 57 ms, moe_sum 166 -> 114 ms, the GPU's time
+  5.47 -> 5.27 s; every ids hash the same.
 - Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
   copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
   activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%); IQ2_S's decode through

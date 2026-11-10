@@ -35,6 +35,35 @@ __global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_
   y[i] = silu(sum);
 }
 
+// conv_kernel's for TAPS taps, dilation 1 (DeltaNet's): a thread a channel over kConvRun consecutive tokens, x' read
+// once into a window of registers (not taps loads a token) and the channel's weights once - each token's sum the
+// same products in the same order, so conv_kernel's bits (a 2048-token step's 10,240 channels: ~100 GB/s, its loads
+// a token's taps apart)
+constexpr uint32_t kConvRun = 8;
+template <int TAPS>
+__global__ void conv_run_kernel(const float* x, uint32_t n_tok, uint32_t ch, const float* w, const float* hist,
+                                float* y) {
+  const uint32_t c = blockIdx.x * kThreads + threadIdx.x, t0 = blockIdx.y * kConvRun;
+  if (c >= ch) return;
+  constexpr uint32_t h = TAPS - 1;
+  float wk[TAPS], win[kConvRun + h];
+#pragma unroll
+  for (int k = 0; k < TAPS; k++) wk[k] = w[(uint64_t) c * TAPS + k];
+#pragma unroll
+  for (uint32_t i = 0; i < kConvRun + h; i++) {  // x' rows t0 .. t0 + run + h - 1
+    const uint32_t at = t0 + i;
+    win[i] = at < h ? hist[(uint64_t) at * ch + c] : at - h < n_tok ? x[(uint64_t) (at - h) * ch + c] : 0.0f;
+  }
+#pragma unroll
+  for (uint32_t r = 0; r < kConvRun; r++) {
+    if (t0 + r >= n_tok) break;
+    float sum = 0;
+#pragma unroll
+    for (int k = 0; k < TAPS; k++) sum += win[r + k] * wk[k];
+    y[(uint64_t) (t0 + r) * ch + c] = silu(sum);
+  }
+}
+
 // after each of the step's last `keep` tokens, the last h of x' up to it into its ring slot, a channel a thread: the
 // slot read (cur) first, whole, into registers - a later token's slot may be it
 __global__ void conv_hist_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t h, float* ring, uint32_t slots,
@@ -154,8 +183,12 @@ extern "C" bool q4x_conv(const float* x, uint32_t n_tok, uint32_t ch, uint32_t t
       !slots || cur >= slots)
     return false;
   const uint32_t h = (taps - 1) * dilation;
-  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, dilation, w,
-                                                                        ring + (uint64_t) cur * h * ch, y);
+  if (taps == 4 && dilation == 1)
+    conv_run_kernel<4><<<dim3(grid(ch), (n_tok + kConvRun - 1) / kConvRun), kThreads, 0, st(stream)>>>(
+        x, n_tok, ch, w, ring + (uint64_t) cur * h * ch, y);
+  else
+    conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, dilation, w,
+                                                                          ring + (uint64_t) cur * h * ch, y);
   if (!ok()) return false;
   conv_hist_kernel<<<grid(ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, h, ring, slots, cur, kept(n_tok, slots));
   return ok();
