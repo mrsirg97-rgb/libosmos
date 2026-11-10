@@ -1117,7 +1117,9 @@ HTTP API, and the reference is measured through the same harness:
 - started as `<exe> <args> --serve`; ready when it prints `READY ... multi=<N>`.
 - in: `GEN <max_new> rid=<r> spec=<0|1> <id,id,...>`, `STOP <rid>`, `QUIT`.
 - out: `T <rid> <token>` per token, `PP <rid> ...` (prompt progress), `DONE <rid> <generated> <prompt> <ms> <ms>
-  <finish> ... <reused>` (field 9), `ERR <rid> <reason>`; `STAT` / `NOTE` / `INFO` / `VRAM` lines.
+  <finish> ... <reused>` (field 9), `ERR <rid> <reason>`; `STAT` / `NOTE` / `INFO` / `VRAM` lines; `FATAL <reason>`
+  and an exit when a failure left the GPU unusable or no new sequence could be made (0.6.1: before, every request
+  after a kernel's fault answered `ERR` while the process stayed up).
 - the exact field list is taken from maya's `ds4_main.cpp` at schema time.
 
 ## UD-IQ1_M: the repack (inventory, 2026-11-02)

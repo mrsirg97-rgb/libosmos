@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "osmos/run/gpu.h"
 #include "serve.h"
 
 double now_ms(void)
@@ -114,6 +115,18 @@ bool conv_restart(Conv *c, const Server *sv)
   oseq_destroy(c->s);
   c->held.n = 0;
   return (c->s = oseq_create(sv->e, c->err)) != NULL;
+}
+
+/* after a request's failure (its ERR written): a new sequence for the conversation, or - the GPU's state lost (a
+   kernel's fault: every call after it fails the same) or no sequence to be had - FATAL and exit, so osmos-api's
+   "the engine exited" ends every request instead of each one answering ERR forever */
+void conv_failed(Conv *c, const Server *sv)
+{
+  const bool alive = gpu_alive();
+  if (alive && conv_restart(c, sv))
+    return;
+  out("FATAL %s\n", alive ? c->err : "the GPU's state lost after an error: the engine cannot continue");
+  exit(1);
 }
 
 /* the conversation's state given to the store's sink, or taken from its source (slots.h's save / load) */

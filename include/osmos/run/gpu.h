@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 bool gpu_sleep_on_waits(void);
+bool gpu_alive(void);
 
 #endif
 
@@ -16,4 +17,9 @@ gpu_sleep_on_waits
   ROCm 7.15 - the device's is). a process calls it first, before its first kernel: it takes after an allocation, not
   after a kernel has run (measured) - the forward's creation runs kernels, so osmos-serve and dbench call it at the
   top of main. false: the runtime refused.
+
+gpu_alive
+  the GPU still usable after a failed call: every stream's work done, the device reporting no error - false after a
+  sticky one (a kernel's fault: every later call fails the same way, so the process can only exit). not
+  hipGetLastError's, whose last error may be a refused launch the caller has already reported.
 */
