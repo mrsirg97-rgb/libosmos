@@ -218,6 +218,19 @@ static bool begin(Forward *f, char *err)
   return true;
 }
 
+/* a step that failed once its layers began: its experts' units still held (the next step's first layer releases a
+   last layer's, but not its own - a failure in layer 0 left them held and its next visit added to them, no bound on
+   held[]). the GPU and the CPU lane done with them first (their errors this step's, already reported), then each
+   released as a finished step releases it */
+static bool fail_held(Forward *f)
+{
+  (void)hipDeviceSynchronize();
+  if (f->cpu)
+    (void)cpu_lane_wait(f->cpu);
+  fwd_release_held(f);
+  return false;
+}
+
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
 {
   const Geometry *g = f->g;
@@ -273,13 +286,13 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     leave(f, k);
   }
   if (!ok)
-    return false;
+    return fail_held(f);
   /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
   if (hipMemcpyAsync(&f->pin->overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       !fwd_settle(f))
-    return fwd_fail(err, "a GPU call failed (the step)");
+    return fwd_fail(err, "a GPU call failed (the step)"), fail_held(f);
   if (f->cpu && !cpu_lane_wait(f->cpu))
-    return fwd_fail(err, "the CPU lane's experts failed");
+    return fwd_fail(err, "the CPU lane's experts failed"), fail_held(f);
   fwd_release_held(f);
   if (f->pin->overflow)
     return fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
