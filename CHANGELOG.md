@@ -9,7 +9,10 @@
   registers: the same bits, 25-33% faster) and their own shapes (Q4_K's long rows at 32 x 16 x 2 - 16 waves a block,
   never swept before - Q5_1 at 32 x 8 x 2); a 512-token prompt 247 -> 507 tok/s, decode 20.6 -> 23.2 (low-power). On
   this calibration text UD-IQ3_XXS is a little ahead past 2K tokens on both engines (4K: osmos 6.7522 against 6.7730,
-  llama.cpp 6.7683 against 6.8126).
+  llama.cpp 6.7683 against 6.8126). **A pack: `qwen38-ud-q4_k_xl`** (rig `qwen3.8-flash-next-l`, alias `qwen-l`), its
+  n-gram table streamed - for whoever wants the larger quant: on 16 points of real agent work (rig replay, MTP-drafted,
+  low-power) 10% slower decode and 16% slower prompts than UD-IQ3_XXS, 10-19% more energy a token (its dense weights
+  all Q8_0: 0.8 GB more read a token). No abliteration overlay for it yet.
 - **Qwen's decode: fewer launches, a faster router.** The router's top-k picks by one wave's shuffles instead of a
   block-wide argmax a pick (19.3 -> 13.9 us a token's layer); the mixers' down matmul applies its silu and writes the
   up's activations itself (1,744 -> 1,647 launches a token). Every bit the same (the ids hash of 512 + 128 tokens,

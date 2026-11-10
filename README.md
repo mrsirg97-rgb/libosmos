@@ -25,10 +25,10 @@ The installer builds the engine, downloads the pack's files at pinned commits, c
 pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on port 8091 (`/v1/chat/completions`
 streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 
-- `--abliterated` adds huihui-ai's abliteration as an overlay (DeepSeek and Qwen alike; the stock files stay as they are).
+- `--abliterated` adds huihui-ai's abliteration as an overlay (DeepSeek and Qwen alike, not yet UD-Q4_K_XL; the stock files stay as they are).
 - `--have <dir>` uses files you already have.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
-  `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next` (`-1m`).
+  `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next` (`-1m`, `-l`).
 
 ## The packs
 
@@ -39,11 +39,12 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the best perplexity, the slowest decode |
 | `qwen38-ud-iq3_xxs` | 78 GB + 3 GB MTP head | 262K | Qwen, fully in GPU memory |
 | `qwen38-ud-iq3_xxs-1m` | the same files | 1M (YaRN) | long documents: recalls a fact 355K tokens back, 0.4% worse on short text |
+| `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 262K | the larger quant, if you want it: 10-16% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
 
 The DeepSeek packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) with the
 lossless MXFP8 Engram table, plus our 4.7 GB DSpark drafter and expert pick profile
 ([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)). Qwen is
-[unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) and its MTP head. The abliteration
+[unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (or UD-Q4_K_XL) and its MTP head. The abliteration
 costs 0.2-0.5% perplexity (UD-IQ1_M 2.458 → 2.470, Qwen 2.714 → 2.723) at the same speed.
 
 ## Performance

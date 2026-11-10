@@ -62,7 +62,11 @@ class Manifest(unittest.TestCase):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
-                                           "qwen38-ud-iq3_xxs-1m"})
+                                           "qwen38-ud-iq3_xxs-1m", "qwen38-ud-q4_k_xl"})
+        q4 = m["packs"]["qwen38-ud-q4_k_xl"]  # the larger Qwen: its n-gram table streamed to fit, no overlay for it
+        self.assertTrue(q4["settings"]["stream_ngram"])
+        self.assertIsNone(q4["overlay"])
+        self.assertEqual(q4["drafter"], m["packs"]["qwen38-ud-iq3_xxs"]["drafter"])
         q1m = m["packs"]["qwen38-ud-iq3_xxs-1m"]                              # YaRN's: the same files, 4x the context
         self.assertEqual((q1m["shards"], q1m["drafter"]), (m["packs"]["qwen38-ud-iq3_xxs"]["shards"],
                                                            m["packs"]["qwen38-ud-iq3_xxs"]["drafter"]))
@@ -616,7 +620,7 @@ class Rig(unittest.TestCase):
         ids = {pid: p["rig"]["id"] for pid, p in self.PACKS.items()}
         self.assertEqual(ids, {"ud-iq1_s": "deepseek-1017-ud-s", "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
-                               "qwen38-ud-iq3_xxs-1m": "qwen3.8-flash-next-1m"})
+                               "qwen38-ud-iq3_xxs-1m": "qwen3.8-flash-next-1m", "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
         self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
 
