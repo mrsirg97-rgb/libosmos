@@ -18,6 +18,9 @@ bool mm_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const vo
             uint32_t ys, void *stream);
 bool mm_run2(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
              float *y1, uint32_t ys1, uint32_t cols, const void *x16, uint32_t n, void *stream);
+#define MM_SILU_MAX_TOKENS 64 /* mm_run_silu's most tokens (past them, the gemm's counts) */
+bool mm_run_silu(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const void *x16, uint32_t n, float *y,
+                 uint32_t ys, float scale, void *x16_out, int32_t *overflow, void *stream);
 bool mm_x16_rows(const float *x, uint32_t xs, const int32_t *idx, uint32_t slots, uint32_t cols, void *x16,
                  int32_t *overflow, void *stream);
 bool mm_group(uint32_t type, const void *const *w, const int32_t *cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
@@ -73,6 +76,13 @@ mm_x16_rows
   slots rows of activations: slot s is row idx[s] of x (row r at x + r * xs; -1: zero) as f16, into x16 (slots rows of
   cols, tiled) - each distinct expert's tokens gathered into slots of its own (whole tiles of MM_TILE). *overflow as
   mm_x16.
+
+mm_run_silu
+  mm_run, then each output y = silu(y scale) - q4x_scale_silu's expression, the same bits - written to y and as f16
+  into x16_out (tiled as mm_x16 lays it, rows columns wide; the overflow flag set past f16's range): the next matmul's
+  activations in the same launch. x16_out must not be x16 (other blocks still read it). false - nothing launched, the
+  caller's mm_run and q4x_scale_silu then - for a step the gemm would take (more than 64 tokens of a gemm type) or a
+  type it has no epilogue for (Q8_0 alone: the mixers' down).
 
 mm_group
   n_mat matrices of one type and shape at once: matrix m (w[m]) over the tiled x16 from x16 + xoff[m] (halves; rows

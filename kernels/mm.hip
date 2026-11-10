@@ -218,6 +218,41 @@ bool launch(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream
   }
 }
 
+template <quant::Type T, int CT, typename S>
+bool silu_shape(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
+                mm::Silu ep, hipStream_t s) {
+  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::kernel_silu<T, S, CT><<<dim3(rows / mm::kTile, 1, z), mm::kWave * S::kWaves, 0, s>>>(
+      (const uint8_t*) w, rows, cols, (const _Float16*) x16, n, y, ys, ep);
+  return hipGetLastError() == hipSuccess;
+}
+
+// mm_run's launch with the silu epilogue: the shape launch_ct takes (the same sums), a matrix the gemm would take
+// refused (its caller's two launches instead)
+template <quant::Type T, int CT>
+bool silu_ct(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
+             mm::Silu ep, hipStream_t s) {
+  const Mats m = {{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}};
+  if constexpr (kGemm<T>)
+    if (gemm_takes<T>(m, cols, n)) return false;
+  if (odd<T>(cols)) return silu_shape<T, CT, typename Odd<T>::S>(w, rows, cols, x16, n, y, ys, ep, s);
+  return cols < kShortCols ? silu_shape<T, CT, typename Short<T>::S>(w, rows, cols, x16, n, y, ys, ep, s)
+                           : silu_shape<T, CT, typename Tuned<T>::S>(w, rows, cols, x16, n, y, ys, ep, s);
+}
+
+template <quant::Type T>
+bool silu_launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
+                 mm::Silu ep, hipStream_t s) {
+  const int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  if (rows % mm::kTile || (n > 1 && ys < rows) || cols % quant::Block<T>::values || cols % slab) return false;
+  switch (col_tiles<T>(n)) {
+    case 1: return silu_ct<T, 1>(w, rows, cols, x16, n, y, ys, ep, s);
+    case 2: return silu_ct<T, 2>(w, rows, cols, x16, n, y, ys, ep, s);
+    case 4: return silu_ct<T, 4>(w, rows, cols, x16, n, y, ys, ep, s);
+    default: return silu_ct<T, Tuned<T>::kMaxCt>(w, rows, cols, x16, n, y, ys, ep, s);
+  }
+}
+
 bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   if (!n || n > MM_MAX_TOKENS || !m.rows[0] || (m.w[1] && !m.rows[1])) return false;
   switch (type) {
@@ -294,6 +329,16 @@ extern "C" bool mm_x16_attn(const float* x, uint32_t xs, uint32_t n, uint32_t co
   x16_attn_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
       x, xs, n, cols, head_dim, rope_dim, freqs, pos, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
+}
+
+extern "C" bool mm_run_silu(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
+                            float* y, uint32_t ys, float scale, void* x16_out, int32_t* overflow, void* stream) {
+  if (!w || !x16 || !y || !x16_out || x16_out == x16 || !overflow || !n || n > MM_SILU_MAX_TOKENS || !rows) return false;
+  const mm::Silu ep = {scale, (_Float16*) x16_out, overflow, rows};
+  switch (type) {
+    case quant::kQ8_0: return silu_launch<quant::kQ8_0>(w, rows, cols, x16, n, y, ys, ep, (hipStream_t) stream);
+    default: return false;  /* the mixers' down's type alone, so far */
+  }
 }
 
 extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,

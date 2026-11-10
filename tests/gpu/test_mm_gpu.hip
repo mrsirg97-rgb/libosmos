@@ -21,6 +21,7 @@
 
 extern "C" {
 #include "osmos/gpu/mm.h"
+#include "osmos/gpu/q4x_ops.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/quant.h"
@@ -71,6 +72,11 @@ static const Shape kQwenQ4Shapes[] = {
     {"blk.0.ffn_down_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 300}, {"blk.2.ffn_gate_exps.weight", 7}};
 constexpr const char* kQwenQ4 = "%s/Models/qwen38/q4kxl-dl/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf";
 
+static std::vector<float> host_of(const float* d, size_t n) {
+  std::vector<float> h(n);
+  CHECK(hipMemcpy(h.data(), d, n * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  return h;
+}
 static uint32_t rng = 1017;
 static float uniform() {
   rng = rng * 1664525u + 1013904223u;
@@ -165,6 +171,39 @@ static void shape(const Gguf* g, const Shape& s) {
     for (int tk = 0; tk < kT; tk++) {
       CHECK(std::memcmp(&p0[(size_t) tk * rows], &a[(size_t) tk * rows], r0 * 4) == 0);
       CHECK(std::memcmp(&p1[(size_t) tk * r1], &a[(size_t) tk * rows + 2 * MM_TILE], r1 * 4) == 0);
+    }
+    if (t->type == 8) {  // mm_run_silu: mm_run then q4x_scale_silu's bits, y and the f16 written, at 1, 16 and 64 tokens
+      constexpr float kScale = 0.25f;
+      float *ys1, *ys2;
+      void *xo1, *xo2;
+      void* x16w;
+      CHECK(hipMalloc(&ys1, (size_t) 64 * rows * 4) == hipSuccess && hipMalloc(&ys2, (size_t) 64 * rows * 4) == hipSuccess);
+      CHECK(hipMalloc(&xo1, (size_t) 64 * rows * 2) == hipSuccess && hipMalloc(&xo2, (size_t) 64 * rows * 2) == hipSuccess);
+      CHECK(hipMalloc(&x16w, (size_t) 64 * cols * 2) == hipSuccess);
+      std::vector<float> xw((size_t) 64 * cols);
+      for (float& v : xw) v = uniform();
+      float* xd;
+      CHECK(hipMalloc(&xd, xw.size() * 4) == hipSuccess &&
+            hipMemcpy(xd, xw.data(), xw.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+      for (uint32_t nt : {1u, 16u, 64u}) {
+        CHECK(mm_x16(xd, cols, nt, cols, x16w, over, nullptr));
+        CHECK(hipMemset(xo1, 0, (size_t) 64 * rows * 2) == hipSuccess && hipMemset(xo2, 0, (size_t) 64 * rows * 2) == hipSuccess);
+        CHECK(mm_run_silu(t->type, w, rows, cols, x16w, nt, ys1, rows, kScale, xo1, over, nullptr));
+        const Q4xX16 side = {xo2, over, rows, 0};
+        CHECK(mm_run(t->type, w, rows, cols, x16w, nt, ys2, rows, nullptr) &&
+              q4x_scale_silu(ys2, (uint64_t) nt * rows, kScale, &side, nullptr));
+        CHECK(host_of(ys1, (size_t) nt * rows) == host_of(ys2, (size_t) nt * rows));
+        std::vector<uint16_t> h1((size_t) 64 * rows), h2(h1.size());
+        CHECK(hipMemcpy(h1.data(), xo1, h1.size() * 2, hipMemcpyDeviceToHost) == hipSuccess &&
+              hipMemcpy(h2.data(), xo2, h2.size() * 2, hipMemcpyDeviceToHost) == hipSuccess);
+        CHECK(h1 == h2);
+      }
+      CHECK(!mm_run_silu(t->type, w, rows, cols, x16w, 65, ys1, rows, kScale, xo1, over, nullptr));    // past 64
+      CHECK(!mm_run_silu(t->type, w, rows, cols, x16w, 1, ys1, rows, kScale, x16w, over, nullptr));    // its own x16
+      CHECK(!mm_run_silu(14, w, rows, cols, x16w, 1, ys1, rows, kScale, xo1, over, nullptr));           // no epilogue
+      CHECK(hipFree(ys1) == hipSuccess && hipFree(ys2) == hipSuccess && hipFree(xo1) == hipSuccess &&
+            hipFree(xo2) == hipSuccess && hipFree(x16w) == hipSuccess && hipFree(xd) == hipSuccess);
+      std::printf("  %s: mm_run_silu the bits of mm_run then q4x_scale_silu (y and its f16), 1 / 16 / 64 tokens\n", s.tensor);
     }
     CHECK(!mm_run2(t->type, w, r0, y, rows, nullptr, r1, y2, r1, cols, x16, kT, nullptr));
     CHECK(!mm_run2(t->type, w, r0, y, rows, w1, r1, y2, r1 - 1, cols, x16, kT, nullptr));  // y1's rows too short

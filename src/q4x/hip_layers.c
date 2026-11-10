@@ -117,6 +117,22 @@ static bool inject_of(Q4xForward *f, const GgufTensor *inject, uint32_t n, uint3
   return ok && hipEventRecord(f->e_inj, f->s2) == hipSuccess && (f->inj_side = true);
 }
 
+/* the mixer's down, silu, up: a small step's down and silu one launch (mm_run_silu: its f16 into b.x16b, which the
+   up reads - b.x16 the down's own input meanwhile), the same bits as the three; otherwise those three */
+static bool down_up(Q4xForward *f, const GgufTensor *down, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t hd,
+                    uint32_t r, bool ready)
+{
+  Q4xBuf *b = &f->b;
+  const float scale = 1.0f / (float)hc;
+  if (ready && n <= MM_SILU_MAX_TOKENS && mm_takes(down, r, hd, hd, r) && mm_takes(up, hd, r, r, hd) &&
+      mm_run_silu(TY(down), q4x_dev(f, down), r, hd, b->x16, n, b->lo, r, scale, b->x16b, b->overflow, f->st))
+    return mm_run(TY(up), q4x_dev(f, up), hd, r, b->x16b, n, b->gate, hd, f->st);
+  Q4xX16 sd;
+  return q4x_mat(f, down, r, hd, b->xn, hd, n, b->lo, r, ready) &&
+         q4x_scale_silu(b->lo, (uint64_t)n * r, scale, side(f, n, r, &sd), NULL) &&
+         q4x_mat(f, up, hd, r, b->lo, r, n, b->gate, hd, ready);
+}
+
 bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, const GgufTensor *up,
              const GgufTensor *inject, uint32_t n, bool combine)
 {
@@ -130,10 +146,7 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
          (combine ? q4x_hc_combine_norm(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, fv(f, norm), g->rms_eps,
                                         b->xn, side(f, n, hd, &sd), NULL)
                   : q4x_hc_norm(b->h, fv(f, norm), n, hc, D, g->rms_eps, b->xn, side(f, n, hd, &sd), NULL)) &&
-         (!inject || inject_of(f, inject, n, hc, hd)) &&
-         q4x_mat(f, down, r, hd, b->xn, hd, n, b->lo, r, ready) &&
-         q4x_scale_silu(b->lo, (uint64_t)n * r, 1.0f / (float)hc, side(f, n, r, &sd), NULL) &&
-         q4x_mat(f, up, hd, r, b->lo, r, n, b->gate, hd, ready) &&
+         (!inject || inject_of(f, inject, n, hc, hd)) && down_up(f, down, up, n, hc, hd, r, ready) &&
          q4x_hc_gated_mean(b->xn, b->gate, n, hc, D, b->mixed, side(f, n, D, &sd), NULL);
 }
 
