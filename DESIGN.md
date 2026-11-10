@@ -2760,6 +2760,16 @@ shape on the model: a 2,048-token prompt 733.7 -> 733.2 tok/s, decode 26.15 -> 2
 (the prompt's steps many tiles, the decode the experts' bytes'). Q4_K's gain was its one-tile path's, which started
 slow.
 
+**The dense matrices' shapes, both models (mmsweep dense / tall, a token, low-power, two runs).** Q6_K and Q8_0 at
+16 waves and 32-value slabs: no gain anywhere (bandwidth-bound reads stream best in long runs a wave; Q6_K's decode
+and its register-A path want 128-value slabs - 32 x 16 x 2 30% slower on the head). Most within 2% of their best at
+190-225 GB/s against the matvec's ~230. The one gain, Qwen's head (248,320 x 2,560) and its MTP shortlist at 4 waves
+(128 x 4 x 4: 2.47-2.62 -> 2.30-2.40 ms, ~0.7% of a decode token): its error 2.2 -> 4.3 u|wx| (4 waves, each a run
+twice as long), as DeepSeek's q_b's 1.4 -> 2.9 that 0.5.x turned down - not taken, the operator's call: the error,
+not the bound, is the bar. U alone changes no bit (128 x 8 x 8 against 128 x 8 x 4, 128 x 4 x 8 against 128 x 4 x 4 on
+the head's own rows, 1 and 16 tokens: the same; W is the sums' order), and 128 x 8 x 4 is within the noise of
+128 x 8 x 8. So the decode's remaining time is elsewhere: the launches (1,886 a Qwen token, 0.5.1).
+
 ### 0.5.11: the release run (2026-11-09, low-power)
 
 **The scripts and logs:** ~/bench/h2h-0511 - `suite.sh` (0.5.9's suite: a clean build, CPU, API and installer

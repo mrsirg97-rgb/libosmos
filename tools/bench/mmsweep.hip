@@ -95,7 +95,25 @@ static void dense(const char* type, uint32_t rows, uint32_t cols) {
       F<T, 64, 8, 4>(name, rows, cols), F<T, 128, 4, 4>(name, rows, cols), F<T, 128, 4, 8>(name, rows, cols), \
       F<T, 128, 8, 4>(name, rows, cols), F<T, 128, 8, 8>(name, rows, cols), F<T, 256, 4, 8>(name, rows, cols)
 
+// the tall matrices (the heads, the MTP head's shortlist of the head): their shape against the type's
+#define TALL(T, name, rows, cols)                                                                             \
+  dense<T, 128, 8, 8>(name, rows, cols), dense<T, 128, 4, 8>(name, rows, cols), dense<T, 128, 4, 4>(name, rows, cols), \
+      dense<T, 128, 8, 4>(name, rows, cols), dense<T, 128, 2, 8>(name, rows, cols)
+
 int main(int argc, char** argv) {
+  if (argc > 1 && !std::strcmp(argv[1], "tall")) {
+    HIP(hipMalloc(&pool, kPool));
+    HIP(hipMalloc(&x16, (size_t) mm::kTile * 10240 * 2));
+    HIP(hipMalloc(&y, (size_t) 16 * 262144 * 4));
+    fill<<<4096, 256>>>((uint32_t*) pool, kPool / 4);
+    HIP(hipMemset(x16, 0, (size_t) mm::kTile * 10240 * 2));
+    HIP(hipDeviceSynchronize());
+    TALL(quant::kQ6_K, "Q6_K", 248320, 2560);
+    TALL(quant::kQ6_K, "Q6_K", 65536, 2560);
+    TALL(quant::kQ6_K, "Q6_K", 129280, 5120);
+    TALL(quant::kQ6_K, "Q6_K", 32768, 2560);
+    return 0;
+  }
   const bool experts = argc < 2 || !std::strcmp(argv[1], "experts"), q4 = argc > 1 && !std::strcmp(argv[1], "q4");
   HIP(hipMalloc(&pool, kPool));
   HIP(hipMalloc(&x16, (size_t) mm::kTile * 10240 * 2));
@@ -136,9 +154,17 @@ int main(int argc, char** argv) {
     SHAPES(group, quant::kQ2_0, "Q2_0", 640, 2560);
     SHAPES16(group, quant::kQ2_0, "Q2_0", 640, 2560);
   } else {
-    SHAPES(dense, quant::kQ6_K, "Q6_K", 10240, 2560);
-    SHAPES(dense, quant::kQ6_K, "Q6_K", 2560, 6144);
-    SHAPES(dense, quant::kQ6_K, "Q6_K", 248320, 2560);
+#define DENSE_ALL(T, name, rows, cols) \
+  SHAPES(dense, T, name, rows, cols); SHAPES32(dense, T, name, rows, cols); SHAPES16(dense, T, name, rows, cols)
+    // Qwen3.8's: the DeltaNet's qkv, its out, the head; DeepSeek's: q_a, q_b (short rows), wo_b
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 10240, 2560);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 2560, 6144);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 248320, 2560);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 1280, 5120);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 32768, 1280);
+    DENSE_ALL(quant::kQ6_K, "Q6_K", 5120, 8192);
+    DENSE_ALL(quant::kQ8_0, "Q8_0", 10240, 2560);
+    DENSE_ALL(quant::kQ8_0, "Q8_0", 5120, 8192);
     SHAPES(dense, quant::kQ8_0, "Q8_0", 320, 10240);
     // 320 columns: 64-value slabs alone
     dense<quant::kQ8_0, 64, 4, 2>("Q8_0", 10240, 320), dense<quant::kQ8_0, 64, 4, 4>("Q8_0", 10240, 320);
