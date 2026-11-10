@@ -2746,6 +2746,16 @@ each where measured; test_mm_gpu holds mm_group to mm_run's bits at 24 / 37 / 64
 shape it reads (a reversed partition sum caught). The model: UD-Q4_K_XL's 512-token prompt 507 -> 566 tok/s,
 UD-IQ3_XXS's 2K 780-795 -> 802-804 (its gate / up IQ3_XXS's, untouched), the ids hashes the same.
 
+**Int8 activations for the experts, simulated first (2026-11-09).** Before an iu8 kernel: the experts' f16 inputs
+rounded to int8 a 32-value group (max |x| / 127) and back - every batch size, as a kernel would - on UD-Q4_K_XL. The
+perplexity scatters with any numeric change (8K: f16 2.7434; int8 gate / up 2.7308, int8 down 2.7288, int8 all
+2.7219; f16 with Q5_1's shape another, a pure order of sums, 2.7193) - too coarse. Per token (q4x_ppl's
+Q4X_PPL_DUMP: a token's log-probability and greatest id, 8,191 tokens), each against f16: the order of sums alone
+|dlp| mean 0.0549, p99 0.625, the greatest token another at 2.83%; int8 gate / up 0.0545, 0.636, 2.78%; int8 all
+0.0572, 0.628, 2.98%. The model's divergence from any perturbation dominates: int8 on the gate / up indistinguishable
+from a reordering, on the down too a hint over it (+5%). So the iu8 kernel goes to the gate / up first, the down kept
+f16. (The distance from f16, not from BF16: none here to hold it to.)
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate
