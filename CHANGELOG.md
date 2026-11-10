@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.12]: (in progress)
+## [0.5.12]: the larger Qwen, DFlash2 as an option, a race in the MoE fixed
 
 - **Qwen3.8's UD-Q4_K_XL runs** (unsloth's, 111.3 GB): its expert types Q4_K and Q5_1 read (each bit for bit
   gguf-py's), Q5_K on the experts' matvec too; its weights resident (~82 GB of GPU memory) with the n-gram table
