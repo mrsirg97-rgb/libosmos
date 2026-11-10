@@ -2725,6 +2725,25 @@ experts, then their tables, then gidx); a counter in the kernel (the totals wron
 steps). A kernel test of the tables alone never raced in 12,000 launches (the forward's timing needed), so the test is
 the forward's: the 256 tokens as steps of 9, each one's rows the one batch's (3 of 3 failed without the barrier).
 
+
+### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
+
+unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate
+and up, 44.4 GB: Q5_K's scales and layout without the fifth bit) and Q5_1 (the down, 27.1 GB: d * q + m); a few
+layers' gates are Q5_K, which now takes the experts' matvec too. Everything else is a type already read (Q8_0 its
+dense matrices, IQ4_NL its n-gram table). Each decoder bit for bit gguf-py's (test_quant_gpu), each on the matvec and
+the matmul within the rounding bound of a double sum over the exact weights (test_mv_gpu, test_mm_gpu). Its weights
+resident with the n-gram table streamed: ~82 GB of GPU memory; a 512-token prompt 247 tok/s, decode 20.6 tok/s (the
+shapes the defaults, unswept).
+
+Perplexity over the calibration text (q4x_ppl; llama.cpp 7d7f028's through oracle/qwen_dump with QWEN_DUMP_CPU: the
+n-gram table in CPU memory, the file's pages - its whole load otherwise past the machine's): the first 512 tokens
+UD-Q4_K_XL 6.4340 (llama.cpp 6.4331), UD-IQ3_XXS 6.5976 (6.5914); 2,048 6.9754 / 6.9765 (osmos); 4,096 6.7730 /
+6.7522 (llama.cpp 6.8126 / 6.7683); 8,192 2.7354 / 2.7143 (osmos). Both engines put UD-IQ3_XXS ahead past 2K on this
+text: the quants', not osmos's. osmos lower than llama.cpp on both (its matmuls' activations f16, llama.cpp's 8-bit),
+0.6% on UD-Q4_K_XL, 0.2% on UD-IQ3_XXS. llama.cpp's 4,096-token run on UD-Q4_K_XL took the machine to 4 GiB available
+(the operator's leave for a reference run under a 3 GiB watchdog; 8,192 was refused by the 8 GiB one). UD-Q4_K_XL's
+case for a pack: unsloth's KLD against BF16 and other text, and its cost - ~1.5x the bytes a token.
 ### 0.5.11: the release run (2026-11-09, low-power)
 
 **The scripts and logs:** ~/bench/h2h-0511 - `suite.sh` (0.5.9's suite: a clean build, CPU, API and installer
