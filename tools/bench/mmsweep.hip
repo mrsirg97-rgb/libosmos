@@ -86,6 +86,10 @@ static void dense(const char* type, uint32_t rows, uint32_t cols) {
 #define SHAPES32(F, T, name, rows, cols)                                                                       \
   F<T, 32, 8, 2>(name, rows, cols), F<T, 32, 8, 1>(name, rows, cols), F<T, 32, 4, 2>(name, rows, cols),        \
       F<T, 32, 4, 1>(name, rows, cols) /* a 32-value slab: 2 chunks a lane, U 1 or 2 */
+// 16 waves a block (512 threads; a long row's K split 16 ways)
+#define SHAPES16(F, T, name, rows, cols)                                                                       \
+  F<T, 64, 16, 4>(name, rows, cols), F<T, 64, 16, 2>(name, rows, cols), F<T, 32, 16, 2>(name, rows, cols),     \
+      F<T, 32, 16, 1>(name, rows, cols) /* (128 x 16: 68 KB of LDS, past the 64) */
 #define SHAPES(F, T, name, rows, cols)                                                                       \
   F<T, 64, 4, 2>(name, rows, cols), F<T, 64, 4, 4>(name, rows, cols), F<T, 64, 8, 2>(name, rows, cols),      \
       F<T, 64, 8, 4>(name, rows, cols), F<T, 128, 4, 4>(name, rows, cols), F<T, 128, 4, 8>(name, rows, cols), \
@@ -112,8 +116,10 @@ int main(int argc, char** argv) {
   if (q4) {  // UD-Q4_K_XL's expert types: Q4_K gate / up, Q5_1 down, a few layers' Q5_K gates
     SHAPES(group, quant::kQ4_K, "Q4_K", 640, 2560);
     SHAPES32(group, quant::kQ4_K, "Q4_K", 640, 2560);
+    SHAPES16(group, quant::kQ4_K, "Q4_K", 640, 2560);
     SHAPES(group, quant::kQ5_1, "Q5_1", 2560, 640);
     SHAPES32(group, quant::kQ5_1, "Q5_1", 2560, 640);
+    group<quant::kQ5_1, 32, 16, 2>("Q5_1", 2560, 640), group<quant::kQ5_1, 32, 16, 1>("Q5_1", 2560, 640);
     SHAPES(group, quant::kQ5_K, "Q5_K", 640, 2560);
   } else if (experts) {
     SHAPES(group, quant::kIQ4_NL, "IQ4_NL", 2560, 640);

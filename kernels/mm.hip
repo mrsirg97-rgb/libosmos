@@ -54,10 +54,15 @@ template <> struct Tuned<quant::kIQ4_NL> { using S = mm::Shape<64, 4, 4>; static
 template <> struct Tuned<quant::kIQ4_XS> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ2_0> { using S = mm::Shape<64, 8, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ2_K> : Tuned<quant::kQ2_0> {};  // not measured: Q2_0's (its shape its bits: fixed before a pack)
-// UD-Q4_K_XL's expert types (Q4_K gate / up, Q5_1 down): the default shape. faster ones measured (mmsweep q4, a
-// token's 10 experts cold: Q4_K 103.6 -> 82.6 us at 64 x 8 x 4, Q5_1 110.9 -> 74.8 at 64 x 4 x 4; a 512-token prompt
-// 247 -> 532 tok/s) and not taken: every other K order measured moved the perplexity 0.2-1.3% (DESIGN.md, "UD-Q4_K_XL")
-// - which order is the nearer, not yet known
+// UD-Q4_K_XL's expert types, on the register-A path (mm.h's kRegA), a token's 10 experts cold (mmsweep q4, low-power,
+// 2026-11-09, two runs): Q4_K's 2,560-column gate / up 78-80 us at 128 x 8 x 8 -> 58-60 at 32 x 16 x 2 (80 slabs of
+// 32 for 16 waves to share: the decode's latency hidden; a 32-value slab's lane holds 2 chunks, so U 2 at most), Q5_1's
+// 640-column down 72-75 -> 63-64 at 32 x 8 x 2 (16 waves slower: 20 slabs too few). a 512-token prompt 409 -> 507
+// tok/s, decode 22.0 -> 23.2. the perplexity the default order's within its scatter (2K 6.9661 against 6.9754, 8K
+// 2.7434 against 2.7354); the 64-value slabs' 64 x 8 x 4 / 64 x 4 x 4 (through LDS) moved it up at every length
+// (+0.5%, +1.3%) and were not taken (DESIGN.md, "UD-Q4_K_XL")
+template <> struct Tuned<quant::kQ4_K> { using S = mm::Shape<32, 16, 2>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kQ5_1> { using S = mm::Shape<32, 8, 2>; static constexpr int kMaxCt = 8; };
 using mm::kF16Max;
 
 // a thread a value: to f16 (the rows past n zero)
