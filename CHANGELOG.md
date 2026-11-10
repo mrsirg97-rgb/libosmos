@@ -42,6 +42,12 @@
   value the same products in the same order. test_q4x_conv_sum_gpu: the old kernels' bytes, mutation-checked. A
   4096-token prompt at 2048-token steps (low-power): conv 131 -> 57 ms, moe_sum 166 -> 114 ms, the GPU's time
   5.47 -> 5.27 s; every ids hash the same.
+- **F32 matrices' prompt tiles, every bit the same.** A prompt's F32 matvec (Qwen3.8's router, gates, the mixers'
+  inject; DeepSeek UD-IQ1_M's router) at 3 rows a wave x 12 tokens a block, not 4 x 8 (the router 1.52 -> 1.27-1.34
+  ms at 2,048 tokens), and a matrix of at most 4 rows on a narrow tile - a wave all the rows of its own tokens, not 8
+  waves of which 7 summed rows past the end (the inject 520 -> 456 us, the shared expert's gate 68 -> 30). A tile is
+  rows' and tokens' own sums: test_mv_f32_wide_gpu, the 4 x 8 tile's bits, mutation-checked. A 4096-token prompt's
+  F32 matvecs 406 -> 349 ms; Qwen's and DeepSeek's hashes the same.
 - Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
   copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
   activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%); IQ2_S's decode through
