@@ -93,6 +93,18 @@ struct Silu {
   uint32_t cols;
 };
 
+// the chunks a lane decodes together (quant::decode_hn): Q4_K's 2 of a group (its scales once), else 1 - when a
+// slab's row (CPR chunks) and a lane's share (CH) both hold whole runs
+#ifndef RUN_MAX
+#define RUN_MAX 4
+#endif
+template <quant::Type T>
+constexpr bool kRuns = T == quant::kQ4_K || T == quant::kIQ3_XXS || T == quant::kIQ4_NL || T == quant::kIQ4_XS;
+template <quant::Type T, int CPR, int CH>
+constexpr int run_chunks() {
+  return !kRuns<T> ? 1 : CPR % RUN_MAX == 0 && CH % RUN_MAX == 0 ? RUN_MAX : CPR % 2 == 0 && CH % 2 == 0 ? 2 : 1;
+}
+
 template <quant::Type T, class S, int CT, bool E = false>
 __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __restrict__ w, uint32_t row0,
                                                            uint32_t cols, const _Float16* __restrict__ x16,
@@ -123,6 +135,22 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
     }
   } else
   for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
+    constexpr int CPR = SL / quant::kChunk, NR = run_chunks<T, CPR, S::kLane>();
+    if constexpr (NR > 1) {  // a lane NR of a row's chunks a run (decode_hn: a group's scales once), U chunks in flight
+      static_assert(S::kUnroll % NR == 0 || NR % S::kUnroll == 0, "runs whole in the unroll");
+      constexpr int RU = S::kUnroll > NR ? S::kUnroll / NR : 1;
+#pragma unroll 1
+      for (int i0 = 0; i0 < S::kLane / NR; i0 += RU) {
+#pragma unroll
+        for (int i = i0; i < i0 + RU; i++) {
+          const int d = lane + kWave * i, r = d / (CPR / NR), c = (d % (CPR / NR)) * NR;
+          int kk;
+          h8 hv[NR];
+          quant::decode_hn<T, NR>(quant::at<T>(w, row0 + r, cols, k0 / quant::kChunk + c, &kk), kk, hv);
+          for (int u = 0; u < NR; u++) *(h8*) (lds + r * S::kRowLds + (c + u) * quant::kChunk) = hv[u];
+        }
+      }
+    } else
 #pragma unroll 1
     for (int i0 = 0; i0 < S::kLane; i0 += S::kUnroll) {
 #pragma unroll
@@ -289,16 +317,6 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
 // fragment a WMMA. every output's sums in tile's order (its partition's slabs in turn, each its 16-value steps; the
 // partitions summed in w's order): tile's bits (test_mm_gpu, mm_group at 37 / 64 / 128 tokens). x double-buffered as
 // tile's kPipe. LDS: the slabs' 16 RM rows a wave, or the partial sums RM times tile's
-// the chunks a lane decodes together (quant::decode_hn): Q4_K's 2 of a group (its scales once), else 1 - when a
-// slab's row (CPR chunks) and a lane's share (CH) both hold whole runs
-#ifndef RUN_MAX
-#define RUN_MAX 4
-#endif
-template <quant::Type T, int CPR, int CH>
-constexpr int run_chunks() {
-  return T != quant::kQ4_K ? 1 : CPR % RUN_MAX == 0 && CH % RUN_MAX == 0 ? RUN_MAX : CPR % 2 == 0 && CH % 2 == 0 ? 2 : 1;
-}
-
 template <class S, int RM>
 struct RmLds {
   static constexpr int kSlab = S::kWaves * RM * kTile * S::kRowLds, kPart = S::kWaves * RM * 8 * kWave * 2;
@@ -432,7 +450,8 @@ __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* _
   auto in_part = [&](int p) { return (int) ((slabs - (uint32_t) p + W - 1) / W); };  // partition p's slabs
   // a stage: partition p's slabs q .. q + ns - 1 (slab p + i W)
   // Q4_K: a thread NR chunks of one row's slab (quant::decode_hn, the group's scales once) - the stage's same chunks
-  constexpr int NR = T == quant::kQ4_K && CPR % 2 == 0 && (BM * SP * CPR / 2) % 256 == 0 ? 2 : 1;
+  constexpr int NR = !kRuns<T> ? 1 : CPR % 4 == 0 && (BM * SP * CPR / 4) % 256 == 0 && T != quant::kQ4_K ? 4
+                    : CPR % 2 == 0 && (BM * SP * CPR / 2) % 256 == 0 ? 2 : 1;
   constexpr int RUNS = BM * SP * CPR / NR / 256;  // a thread's runs a stage
   auto decode_runs = [&](int p, int q, int ns, h8 (*out)[NR]) {
 #pragma unroll

@@ -17,6 +17,11 @@
   gemm stages 64 values a barrier, not 32. test_decode_run_gpu: the new decodes decode<Q4_K>'s bits on 2^20 random
   blocks (subnormal and largest scales among them), mutation-checked. Q4_K experts (low-power): 32 tokens -29%,
   64 -19%, 128 -8%, 8-16 -10%; UD-Q4_K_XL's 2K prompt 719-727 -> 737-738 tok/s; both packs' ids hashes the same.
+- **The IQ3 pack's expert decodes cheaper, every bit the same.** IQ4_NL / IQ4_XS's 16 values by v_perm_b32 (4 codes
+  an instruction pair, not a load a value); IQ3_XXS a group's scale word and d once a lane (decode_hn's runs, the
+  token-tile and 128-token kernels giving a lane a whole group); test_decode_run_gpu covers them, mutation-checked.
+  IQ3_XXS gate / up -16% at 8-16 tokens, IQ4_NL down -2 .. -8%; UD-IQ3_XXS's 2K prompt 754-789 -> 796-800 tok/s;
+  both packs' ids hashes the same.
 - Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
   copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
   activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%).
