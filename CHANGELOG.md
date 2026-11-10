@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.6.1]: fail closed - a failed step, a full GPU, a lost GPU
+
+An audit of 0.6.0 (its diff, and the engine's error paths). No output changes: every ids hash the same (UD-IQ3_XXS,
+UD-Q4_K_XL, DeepSeek UD-IQ1_M), a 4096-token prompt's kernels within 1% of 0.6.0's.
+
+- **A Qwen sequence after a failed step is refused, not read on.** A step that failed once its GPU work began (a
+  GPU call, or the f16 overflow check after the whole step) had already written its DeltaNet and n-gram rings - a
+  step of 9 tokens or more every slot - but left the sequence usable: another step, a rollback or a save gave wrong
+  logits or a wrong state, silently. Now such a sequence is refused (steps, rollback, save, the drafters) until a
+  state is loaded into it or another is made; `q4x_seq_fail` does the same for a caller's batch that failed past it
+  (the engine's batches of more than 64 sequences). osmos-serve was not exposed: it makes a new sequence after any
+  failure. test_q4x_overflow_gpu.
+- **Qwen refuses a build that leaves the GPU under 1 GiB.** The runtime loads a kernel's code at its first launch;
+  with no memory left it segfaulted inside hipLaunchKernel (UD-Q4_K_XL with its n-gram table resident, an 8K context
+  in 4096-token steps: 0.02 GiB left after its sequence). A forward or sequence that would leave under FIT_HEADROOM
+  is now refused with the GiB left and the levers: stream the n-gram table (the pack does: 26.8 GiB left), or a
+  smaller max_tokens or max_context. test_q4x_headroom_gpu.
+- **osmos-serve exits when a failure left the GPU unusable** (`FATAL <reason>`): after a kernel's fault every call
+  fails the same way, and it had stayed up answering ERR to every request. osmos-api then ends each run as "the
+  engine exited".
+- **DeepSeek releases a failed step's expert units.** A failure in layer 0 had left them held, the next visit adding
+  to a list with no bound.
+- **Smaller:** DeepSeek's expert-gemm input buffer has the 8-tile tail Qwen's has (a block reads its every tile's
+  input: up to ~0.7 MB past the last expert's, discarded, a page fault at worst; guarding the loads instead cost the
+  gemms 11-31%); IQ4_XS's run decode in aligned 8-byte loads; mm_x16_rows's refusals documented and tested; a buffer
+  reuse's size checked, not assumed; upload errors name what failed; out of memory reported with a reason.
+
 ## [0.6.0]: Qwen's prompts faster, every bit the same
 
 At AMD's `performance` profile against 0.5.12 (two interleaved rounds, every output's hash the same): UD-IQ3_XXS's
