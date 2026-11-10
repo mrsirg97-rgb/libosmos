@@ -144,7 +144,11 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
       run[runs] = oseq_impl(seqs[at + k]), len[runs] = m, k += m;
     }
     if (!q4x_step(e->f, run, len, runs, tokens + at, at, err))
+    {
+      for (uint32_t i = 0; i < at; i++) /* the steps before it advanced theirs: their tokens never fed again */
+        q4x_seq_fail(oseq_impl(seqs[i]));
       return false;
+    }
     at += k;
   }
   e->n = n;

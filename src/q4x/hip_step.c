@@ -173,6 +173,7 @@ static void advance(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t
     s->pos += (int32_t)n;
     s->cur = (s->cur + n) % Q4X_SLOTS; /* the rings' latest: the step's last token's (q4x_ops.h) */
     s->back = s->back + n < Q4X_MAX_BACK ? s->back + n : Q4X_MAX_BACK;
+    s->broken = false;
   }
 }
 
@@ -182,6 +183,9 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
   Q4xRun r[Q4X_MAX_RUNS];
   if (!f || !seqs || !lens || !tokens || !runs || runs > Q4X_MAX_RUNS)
     return q4x_fail(err, "no forward, sequences or tokens, or runs not 1 .. Q4X_MAX_RUNS");
+  for (uint32_t i = 0; i < runs; i++)
+    if (seqs[i] && seqs[i]->broken)
+      return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   const uint32_t n = runs_of(f, seqs, lens, runs, r);
   if (!n || (uint64_t)row0 + n > f->max_tokens)
     return q4x_fail(err, "a run of no tokens, a sequence twice, of another forward or past its context, or the rows "
@@ -189,6 +193,8 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint64_t hd = (uint64_t)g->hc * g->n_embd;
+  for (uint32_t i = 0; i < runs; i++) /* from here a failure leaves the rings part written: advance clears it */
+    r[i].s->broken = true;
   if (!embed(f, r, runs, tokens, n))
     return q4x_fail(err, "a GPU call failed (the embedding)");
   bool pending = false;

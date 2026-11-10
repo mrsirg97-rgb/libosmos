@@ -1,13 +1,16 @@
 // a step whose activations pass f16's range (mm's inputs are f16: the overflow flag) gives no token: its results are
 // refused where they are read (q4x_greedy), never a pick from them. the overflow made: an overlay of the first layer's
 // shared expert's down (Q8_0) with every block's scale f16's largest - its output added into the residual past f16.
-// then a clean forward of the same model the same tokens as before (the flag not left set). needs a gfx1151 and
+// the refused step ran (its DeltaNet rings written): its sequence is refused after it - another step, a rollback, a
+// save - never read on from a half-written state; another sequence of the same forward refused only for its own. then a clean forward of the same model the same
+// tokens as before (the flag not left set). needs a gfx1151 and
 // ~/Models/qwen38/UD-IQ3_XXS; skipped (77) without them.
 #include <hip/hip_runtime.h>
 
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -63,7 +66,11 @@ struct Out {
   bool ok;
   int32_t t;
   std::string err;
+  std::string after;  // a refused step's sequence: another step's refusal (empty: the step was not refused)
 };
+
+static bool sink_none(void*, const void*, uint64_t) { return true; }
+static int32_t last_after = -1;  // after_steps's token, against the clean run's
 
 static Out run(const Gguf* g, const Gguf* ov, const std::vector<int32_t>& p) {
   char err[Q4X_FWD_ERR] = "", werr[Q4X_ERR] = "";
@@ -76,10 +83,76 @@ static Out run(const Gguf* g, const Gguf* ov, const std::vector<int32_t>& p) {
   Out o{false, -1, ""};
   o.ok = q4x_batch(f, s, p.data(), kPrompt, 0, err) && q4x_greedy(f, kPrompt - 1, 1, &o.t, err);
   o.err = err;
+  if (!o.ok) {  // the refused step's sequence: refused until reset
+    char e2[Q4X_FWD_ERR] = "";
+    CHECK(!q4x_batch(f, s, p.data(), 1, 0, e2));
+    o.after = e2;
+    CHECK(!q4x_seq_rollback(s, 1));
+    CHECK(!q4x_seq_save_to(s, sink_none, nullptr, e2) && std::strstr(e2, "a failed step"));
+    q4x_seq_destroy(s);  // another sequence: refused only for its own step's overflow
+    s = q4x_seq_create(f, e2);
+    CHECK(s && !q4x_batch(f, s, p.data(), kPrompt, 0, e2) && std::strstr(e2, "f16"));
+  }
   q4x_seq_destroy(s);
   q4x_forward_destroy(f);
   q4x_weights_destroy(w);
   return o;
+}
+
+// a probe that makes the step's residual NaN after its first layer (no norm brings it back): the step then refused
+// for f16 with its work begun - a sequence with steps behind it (one to roll back to)
+static void blow_up(const char* step, int layer, float* dev, uint64_t n, void*) {
+  if (std::strcmp(step, "l_last") || layer != 0) return;
+  std::vector<float> big(n, NAN);
+  CHECK(hipMemcpy(dev, big.data(), n * sizeof(float), hipMemcpyHostToDevice) == hipSuccess);
+}
+
+// a clean step, then one refused part way: the sequence (a step behind it) refused - another step, a rollback even
+// within its reach, a save - and a load of the state saved before the refusal makes it usable again, its next token
+// the clean run's
+static void after_steps(const Gguf* g, const std::vector<int32_t>& p) {
+  char err[Q4X_FWD_ERR] = "", werr[Q4X_ERR] = "";
+  Q4xWeights* w = q4x_weights_create(g, nullptr, werr);
+  CHECK(w);
+  Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
+  CHECK(f);
+  Q4xSeq* s = q4x_seq_create(f, err);
+  CHECK(s && q4x_batch(f, s, p.data(), kPrompt / 2, 0, err) && q4x_seq_reach(s) > 0);
+  std::vector<uint8_t> saved;
+  const auto sink = [](void* ctx, const void* b, uint64_t n) {
+    auto* v = (std::vector<uint8_t>*) ctx;
+    v->insert(v->end(), (const uint8_t*) b, (const uint8_t*) b + n);
+    return true;
+  };
+  CHECK(q4x_seq_save_to(s, sink, &saved, err));
+  q4x_forward_probe(f, blow_up, nullptr);
+  CHECK(!q4x_batch(f, s, p.data() + kPrompt / 2, kPrompt / 2, 0, err) && std::strstr(err, "f16"));
+  q4x_forward_probe(f, nullptr, nullptr);
+  CHECK(!q4x_batch(f, s, p.data() + kPrompt / 2, 1, 0, err) && std::strstr(err, "a failed step"));
+  CHECK(!q4x_seq_rollback(s, 1));  // within its reach: refused for the failure alone
+  CHECK(!q4x_seq_save_to(s, sink_none, nullptr, err) && std::strstr(err, "a failed step"));
+  size_t at = 0;
+  const auto src = [](void* ctx, void* b, uint64_t n) {
+    auto* v = (std::pair<std::vector<uint8_t>*, size_t*>*) ctx;
+    if (*v->second + n > v->first->size()) return false;
+    std::memcpy(b, v->first->data() + *v->second, n), *v->second += n;
+    return true;
+  };
+  std::pair<std::vector<uint8_t>*, size_t*> in{&saved, &at};
+  CHECK(q4x_seq_load_from(s, saved.size(), src, &in, err));
+  int32_t t = -1;
+  CHECK(q4x_batch(f, s, p.data() + kPrompt / 2, kPrompt / 2, 0, err) && q4x_greedy(f, kPrompt / 2 - 1, 1, &t, err));
+  std::printf("  a step refused part way after a clean one: another step, a rollback, a save refused; the saved state "
+              "loaded, token %d\n", t);
+  q4x_seq_fail(s);  // a caller's batch failed past it: refused the same way, a load clears it
+  CHECK(!q4x_batch(f, s, p.data(), 1, 0, err) && std::strstr(err, "a failed step") && !q4x_seq_rollback(s, 1));
+  at = 0;
+  CHECK(q4x_seq_load_from(s, saved.size(), src, &in, err) && q4x_batch(f, s, p.data() + kPrompt / 2, 1, 0, err));
+  std::printf("  q4x_seq_fail: refused the same way, a load clears it\n");
+  q4x_seq_destroy(s);
+  q4x_forward_destroy(f);
+  q4x_weights_destroy(w);
+  last_after = t;
 }
 
 int main() {
@@ -110,6 +183,11 @@ int main() {
   const Out over = run(g, og, p);
   std::printf("  the overflowing step: %s (%s)\n", over.ok ? "a token picked" : "refused", over.err.c_str());
   CHECK(!over.ok && std::strstr(over.err.c_str(), "f16"));
+  std::printf("  its sequence after it: refused (%s); a rollback, a save refused; a new one, its own refusal\n",
+              over.after.c_str());
+  CHECK(std::strstr(over.after.c_str(), "a failed step"));
+  after_steps(g, p);
+  CHECK(last_after == clean.t);
   const Out again = run(g, nullptr, p);
   std::printf("  a clean forward after it: token %d (the first clean one's %d)\n", again.t, clean.t);
   CHECK(again.ok && again.t == clean.t);

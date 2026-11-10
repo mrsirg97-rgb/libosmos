@@ -144,6 +144,9 @@ struct Q4xSeq
   float *dk[Q4X_DFLASH_MAX_LAYERS], *dv[Q4X_DFLASH_MAX_LAYERS];
   int32_t df_lo, df_pos;
   int32_t *step_tok; /* [max_tokens], host */
+  /* a step failed after its GPU work began (q4x_step): its DeltaNet and n-gram rings part written - refused by every
+     step, rollback, save and draft until a load (q4x_seq_reset: refuse() and a new sequence clear it) */
+  bool broken;
 };
 
 /* a sequence's buffers' bytes: a DeltaNet layer's state and conv history, an attention cache's row, the n-gram

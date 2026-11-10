@@ -49,6 +49,7 @@ void q4x_seq_destroy(Q4xSeq *s);
 int32_t q4x_seq_position(const Q4xSeq *s);
 uint32_t q4x_seq_reach(const Q4xSeq *s);
 bool q4x_seq_rollback(Q4xSeq *s, uint32_t n);
+void q4x_seq_fail(Q4xSeq *s);
 uint64_t q4x_identity(const Q4xForward *f);
 uint64_t q4x_seq_state_bytes(const Q4xSeq *s);
 bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FWD_ERR]);
@@ -112,6 +113,11 @@ q4x_seq_create .. q4x_seq_position
   a sequence: its DeltaNet states and conv histories, the n-gram layer's conv history, its attention caches (max_ctx
   rows, Q8_0: q4x_kv_put), its last tokens; its position the tokens it holds.
 
+q4x_seq_fail
+  the sequence refused as after a failed step (q4x_step) - every step, rollback, save and draft until a load: for a
+  caller whose batch failed past the sequence's own step (the engine's batch of more than Q4X_MAX_RUNS sequences, run
+  as several steps), so its tokens are never fed twice.
+
 q4x_seq_reach, q4x_seq_rollback
   how many of its last tokens a sequence can drop (its states kept behind: Q4X_MAX_BACK at most, 0 when new or just
   loaded) - and the drop: its last n tokens gone, every state as it was before them (the bits of never having run
@@ -136,6 +142,9 @@ q4x_step
   alone), the logits at rows row0 .. in the tokens' order. each sequence as a q4x_batch of its tokens: the same bits,
   however the sequences share the step. false with why - every sequence then unchanged in position - for no runs, a
   run of no tokens, a sequence twice or of another forward, the tokens past max_tokens or a sequence past max_ctx.
+  false after its work began (a GPU call failed, an activation past f16's range): its sequences' DeltaNet and n-gram
+  rings part written, so each is refused from then on - every step, rollback, save and draft - until a state is
+  loaded into it (or another sequence is made), never read on from a half-written state.
 
 q4x_batch
   q4x_step of one sequence: n tokens (1 .. max_tokens) of it at its next positions; the logits of every one of them after it, rows
