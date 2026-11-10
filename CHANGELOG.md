@@ -1,6 +1,12 @@
 # Changelog
 
-## [0.6.0]: (in progress)
+## [0.6.0]: Qwen's prompts faster, every bit the same
+
+At AMD's `performance` profile against 0.5.12 (two interleaved rounds, every output's hash the same): UD-IQ3_XXS's
+prompts +9-14% (2K 862-863 -> 956-987 tok/s, 8K 788-822 -> 899), UD-Q4_K_XL's +30-35% (2K 624-633 -> 813-850, 8K
+649-652 -> 865-869); decode +1.5-2.5% plain, +3-4% drafted by the MTP head; DeepSeek the same (its speed the
+SSD's). Every change below keeps the bits: each has a test against the kernel it replaced, mutation-checked.
+
 
 - **The experts' prompt-sized matmuls faster, every bit the same.** A step's expert with 17-64 tokens runs 2 row tiles
   a wave (each activation fragment feeding two matrix-core ops, not one), 65-128 tokens as the dense gemm's 64 x 128

@@ -49,18 +49,47 @@ costs 0.2-0.5% perplexity (UD-IQ1_M 2.458 → 2.470, Qwen 2.714 → 2.723) at th
 
 ## Performance
 
+### 0.6.0 at `performance`
+
+0.6.0 against 0.5.12 on the same box at AMD's `performance` profile (2026-11-10): greedy decoding, nothing else
+running, each run a fresh process, two interleaved rounds with the order swapped. Qwen reads prompts in 4,096-token
+steps; DeepSeek runs at 64K context. Every run's output hashed the same on both versions. Tokens a second:
+
+| | 0.5.12 | 0.6.0 | |
+| --- | ---: | ---: | ---: |
+| **Qwen UD-IQ3_XXS** prompt, 512 tokens | 675-677 | **748-749** | +11% |
+| prompt, 2,048 tokens | 862-863 | **956-987** | +11-14% |
+| prompt, 8,192 tokens | 788-822 | **899** | +9-14% |
+| decode, plain | 27.6 | **28.2-28.3** | +2.5% |
+| decode, drafted by the MTP head | 47.8-48.0 | **50.0-50.1** | +4% |
+| **Qwen UD-Q4_K_XL** prompt, 512 tokens | 539-559 | **645-703** | +15-27% |
+| prompt, 2,048 tokens | 624-633 | **813-850** | +30-35% |
+| prompt, 8,192 tokens | 649-652 | **865-869** | +33% |
+| decode, plain | 24.4 | **24.8-24.9** | +1.5% |
+| decode, drafted by the MTP head | 41.3-41.5 | **42.6** | +3% |
+| **DeepSeek UD-IQ1_M** prompt, 2,048 / 8,192 tokens | 222-224 / 317-319 | 223-224 / 319 | the same |
+| decode, plain | 16.5-17.8 | 16.5-17.7 | the same |
+
+The gains are in Qwen's prompts: the experts' matmuls at prompt sizes (UD-Q4_K_XL's Q4_K and Q5_1 experts most),
+cheaper weight decodes, and fewer bytes moved between the hyper-connection mixer's kernels. Decode was already near
+the memory's bandwidth. DeepSeek's speed is its SSD's, so it holds where it was. `CHANGELOG.md` has each change and
+its measurement.
+
+### Against Maya and llama.cpp (0.5.11, `low-power`)
+
 Everything below was measured in one session (2026-11-09) on one machine at AMD's `low-power` profile (~70 W cap),
 with nothing else running and greedy decoding. Each engine runs in a fresh process, in interleaved rounds with the
 engines' order swapped from round to round, and each is set up the way its own setup does it. The scripts and logs
 are listed in `DESIGN.md` ("0.5.11"). 0.5.12 changed none of these by more than a couple of percent (Qwen's decode
-+1-2% from fewer launches; DeepSeek's paths untouched), so its tables stay 0.5.11's.
++1-2% from fewer launches; DeepSeek's paths untouched), so its tables stay 0.5.11's. 0.6.0's Qwen prompts are
+faster (above); these comparisons have not been rerun with it.
 
 **Low-power is the profile for work that runs a while.** Against 0.5.9's run at `performance`, the agents bench below
 took 20% longer and used half the energy per answer token (3.42 J against 7.03 J; mean package power 56 W against
 104 W). Qwen's decode is the same at both (plain 26.5 against 27.1 tok/s, drafted 45.5 against 45.6): it is bound
 by memory bandwidth, which the power cap doesn't lower.
 
-### DeepSeek against Maya
+#### DeepSeek against Maya
 
 [Project Maya](https://github.com/mw00/project-maya) 1.1.57 (build 0065548):
 - rebuilt
@@ -102,7 +131,7 @@ and the agent harness beside the model. A box with less beside it can give the c
 pack's `osmos.json` (osmos-serve `--fill 4`) keeps 4 GiB free instead, 0 keeps none. The output is the same at every
 value; only how much of the model stays in memory changes.
 
-### Qwen3.8 against llama.cpp
+#### Qwen3.8 against llama.cpp
 
 llama.cpp 7d7f028, with HIP, all layers on the GPU and flash attention, at its faster batch for each length (2,048
 or 4,096). osmos reads prompts in 4,096-token steps, the way its pack does. Three rounds.
@@ -200,6 +229,8 @@ bin/q4x_bench $Q ids.txt 512 128 ~/Models/qwen38/MTP/mtp-Qwen3.8-Flash-Next-shar
 python3 tools/bench/rig_replay.py ~/.rig out/ --shard $Q --gguf-py <llama.cpp>/gguf-py \
   --tokenize <llama.cpp>/build-hip/bin/llama-tokenize                                          # prompts from your rig sessions
 bin/q4x_ppl $Q ids.txt 8192 2048                                                              # perplexity
+# 0.6.0's table: powerprofilesctl set performance, then each version's q4x_bench at 2048 128, 8192 1 and
+# 512 128 with the MTP head, and dbench auto 512 256 warmup.txt q1.txt p2048.txt p8192.txt, interleaved
 ```
 
 The bench tools are built with `hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/<tool>.hip -Llib -losmos_hip
