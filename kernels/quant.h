@@ -336,6 +336,60 @@ __device__ inline h8 decode_h(const uint8_t* b, int k) {
   return h;
 }
 
+// Q4_K as f16, decode<kQ4_K>'s bits with fewer operations: (d sc) q exact in F32 (an f16's 11 bits times a 6-bit
+// scale times a 4-bit code: 21 bits), so one fma rounds as the product then the difference did; a chunk's 8 codes
+// masked 4 at a time (each a byte, converted as one); the 6-bit scales from 3 words shifted by the group's byte
+template <> __device__ inline h8 decode_h<kQ4_K>(const uint8_t* b, int k) {
+  const int g = k / 4, l0 = (k % 4) * kChunk, h = 8 * (g % 4);
+  const uint32_t dd = *(const uint32_t*) b;
+  const uint32_t a0 = *(const uint32_t*) (b + 4) >> h, a1 = *(const uint32_t*) (b + 8) >> h,
+                 a2 = *(const uint32_t*) (b + 12) >> h;
+  const uint32_t s = g < 4 ? a0 & 0x3F : (a2 & 0x0F) | ((a0 >> 2) & 0x30);
+  const uint32_t m = g < 4 ? a1 & 0x3F : ((a2 >> 4) & 0x0F) | ((a1 >> 2) & 0x30);
+  const float d = mul(f16(dd & 0xFFFF), (float) s), ndm = -mul(f16(dd >> 16), (float) m);
+  const uint64_t qs = *(const uint64_t*) (b + 16 + (g / 2) * 32 + l0);
+  const uint32_t sh = 4 * (g % 2);
+  const uint32_t q[2] = {((uint32_t) qs >> sh) & 0x0F0F0F0Fu, ((uint32_t) (qs >> 32) >> sh) & 0x0F0F0F0Fu};
+  h8 r;
+  for (int j = 0; j < kChunk; j++) {
+    float v = __fmaf_rn(d, (float) ((q[j / 4] >> (8 * (j % 4))) & 0xFF), ndm);
+    asm("" : "+v"(v));  // decode_h's: F32, then f16 - not one fused v_fma_mixlo_f16
+    r[j] = (_Float16) v;
+  }
+  return r;
+}
+
+// N chunks k .. k + N - 1 of one block as f16 (decode_h's each): one at a time, but Q4_K's group's scales once
+// (N chunks of one 32-value group: k % 4 + N <= 4)
+template <Type T, int N>
+__device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
+  if constexpr (T == kQ4_K && N > 1) {
+    static_assert(N == 2 || N == 4, "a run within one group");
+    const int g = k / 4, l0 = (k % 4) * kChunk, h = 8 * (g % 4);
+    const uint32_t dd = *(const uint32_t*) b;
+    const uint32_t a0 = *(const uint32_t*) (b + 4) >> h, a1 = *(const uint32_t*) (b + 8) >> h,
+                   a2 = *(const uint32_t*) (b + 12) >> h;
+    const uint32_t s = g < 4 ? a0 & 0x3F : (a2 & 0x0F) | ((a0 >> 2) & 0x30);
+    const uint32_t m = g < 4 ? a1 & 0x3F : ((a2 >> 4) & 0x0F) | ((a1 >> 2) & 0x30);
+    const float d = mul(f16(dd & 0xFFFF), (float) s), ndm = -mul(f16(dd >> 16), (float) m);
+    const uint32_t sh = 4 * (g % 2);
+    uint32_t q[2 * N];
+    for (int i = 0; i < N / 2; i++) {
+      const uint4 w = *(const uint4*) (b + 16 + (g / 2) * 32 + l0 + 16 * i);
+      q[4 * i] = (w.x >> sh) & 0x0F0F0F0Fu, q[4 * i + 1] = (w.y >> sh) & 0x0F0F0F0Fu;
+      q[4 * i + 2] = (w.z >> sh) & 0x0F0F0F0Fu, q[4 * i + 3] = (w.w >> sh) & 0x0F0F0F0Fu;
+    }
+    for (int i = 0; i < N; i++)
+      for (int j = 0; j < kChunk; j++) {
+        float v = __fmaf_rn(d, (float) ((q[2 * i + j / 4] >> (8 * (j % 4))) & 0xFF), ndm);
+        asm("" : "+v"(v));  // decode_h's: F32, then f16
+        out[i][j] = (_Float16) v;
+      }
+  } else {
+    for (int i = 0; i < N; i++) out[i] = decode_h<T>(b, k + i);
+  }
+}
+
 // kKsigns' 128 patterns as f16 sign bits: pattern i's value j negative - bit 15 of half j. kKsigns[i] is i with an
 // eighth bit that makes its ones even (built here from that rule; test_quant_gpu checks every value against gguf-py)
 struct SignMasks {

@@ -289,6 +289,16 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
 // fragment a WMMA. every output's sums in tile's order (its partition's slabs in turn, each its 16-value steps; the
 // partitions summed in w's order): tile's bits (test_mm_gpu, mm_group at 37 / 64 / 128 tokens). x double-buffered as
 // tile's kPipe. LDS: the slabs' 16 RM rows a wave, or the partial sums RM times tile's
+// the chunks a lane decodes together (quant::decode_hn): Q4_K's 2 of a group (its scales once), else 1 - when a
+// slab's row (CPR chunks) and a lane's share (CH) both hold whole runs
+#ifndef RUN_MAX
+#define RUN_MAX 4
+#endif
+template <quant::Type T, int CPR, int CH>
+constexpr int run_chunks() {
+  return T != quant::kQ4_K ? 1 : CPR % RUN_MAX == 0 && CH % RUN_MAX == 0 ? RUN_MAX : CPR % 2 == 0 && CH % 2 == 0 ? 2 : 1;
+}
+
 template <class S, int RM>
 struct RmLds {
   static constexpr int kSlab = S::kWaves * RM * kTile * S::kRowLds, kPart = S::kWaves * RM * 8 * kWave * 2;
@@ -301,6 +311,7 @@ __device__ __attribute__((always_inline)) inline void tile_rm(const uint8_t* __r
                                                               float* __restrict__ y, uint32_t ys, _Float16* lds_all) {
   static_assert(CT > 1 && RM > 1, "tile's own for a column tile or a row tile");
   constexpr int SL = S::kSlab, G = SL / kTile, CPR = SL / quant::kChunk, CH = RM * S::kLane;
+  constexpr int RN_ = run_chunks<T, CPR, CH>();
   const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
   _Float16* lds = lds_all + wave * RM * kTile * S::kRowLds;
   const int tiles = (int) ((n - c0 + kTile - 1) / kTile) < CT ? (int) ((n - c0 + kTile - 1) / kTile) : CT;
@@ -309,11 +320,12 @@ __device__ __attribute__((always_inline)) inline void tile_rm(const uint8_t* __r
   f8 acc[RM][CT] = {};
   for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
 #pragma unroll
-    for (int i = 0; i < CH; i++) {  /* the whole slab's chunks in flight: RM times tile's */
-      const int d = lane + kWave * i, r = d / CPR, c = d % CPR;
+    for (int i = 0; i < CH / RN_; i++) {  /* the whole slab's chunks in flight: RM times tile's; a lane RN_ of a row's */
+      const int d = lane + kWave * i, r = d / (CPR / RN_), c = (d % (CPR / RN_)) * RN_;
       int kk;
-      const h8 hv = quant::decode_h<T>(quant::at<T>(w, row0 + r, cols, k0 / quant::kChunk + c, &kk), kk);
-      *(h8*) (lds + r * S::kRowLds + c * quant::kChunk) = hv;
+      h8 hv[RN_];
+      quant::decode_hn<T, RN_>(quant::at<T>(w, row0 + r, cols, k0 / quant::kChunk + c, &kk), kk, hv);
+      for (int u = 0; u < RN_; u++) *(h8*) (lds + r * S::kRowLds + (c + u) * quant::kChunk) = hv[u];
     }
     __builtin_amdgcn_wave_barrier();
     h16 a[RM][G];
@@ -381,6 +393,14 @@ __global__ __launch_bounds__(kWave* S::kWaves) void group_rm_kernel(const uint8_
 // weights wt[m], its first cnt[m] tokens, its x the tiled x16 from x16a + xoff[m] with rows xts long, its y at
 // ya + yoff[m] + t * ys) - group_kernel's addressing on gemm_kernel's body, so its tiles' sums in tile's order: the
 // same bits as group_kernel at every count (a block past the matrix's tokens nothing)
+// a stage: up to kStageValues of one partition's slabs in its order (partition p's slabs p, p + W, ...) - a slab of
+// 32 values alone would be a barrier every 8 WMMAs; the sums' order the partition's either way
+constexpr int kStageValues = 64;
+template <class S>
+constexpr int stage_slabs() {
+  return S::kSlab >= kStageValues ? 1 : kStageValues / S::kSlab;
+}
+
 template <quant::Type T, class S, int RM, int RN, int WR, int WC>
 __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* __restrict__ wt, const int32_t* __restrict__ cnt,
                                                           uint32_t rows, uint32_t cols, const _Float16* __restrict__ x16a,
@@ -389,7 +409,8 @@ __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* _
                                                           uint32_t ys) {
   static_assert(WR * WC * kWave == 256, "8 waves");
   constexpr int SL = S::kSlab, G = SL / kTile, W = S::kWaves, BM = kTile * RM * WR, BN = kTile * RN * WC;
-  constexpr int RL = SL + kPad, CPR = SL / quant::kChunk, CH = BM * CPR / 256;  // a thread's chunks a slab
+  constexpr int SP = stage_slabs<S>();
+  constexpr int RL = SP * SL + kPad, CPR = SL / quant::kChunk, CH = BM * CPR / 256;  // a thread's chunks a slab
   static_assert((BM * CPR) % 256 == 0, "a slab's chunks whole");
   __shared__ __attribute__((aligned(32))) _Float16 lds2[2][BM * RL];
   const uint32_t m = blockIdx.y, n = (uint32_t) cnt[m];
@@ -408,51 +429,96 @@ __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* _
   }
   f8 run[RM][RN], acc[RM][RN];
   const uint32_t slabs = cols / SL;  // >= W (the launch's): every partition a slab at least
-  auto decode = [&](uint32_t k0, h8* out) {
+  auto in_part = [&](int p) { return (int) ((slabs - (uint32_t) p + W - 1) / W); };  // partition p's slabs
+  // a stage: partition p's slabs q .. q + ns - 1 (slab p + i W)
+  // Q4_K: a thread NR chunks of one row's slab (quant::decode_hn, the group's scales once) - the stage's same chunks
+  constexpr int NR = T == quant::kQ4_K && CPR % 2 == 0 && (BM * SP * CPR / 2) % 256 == 0 ? 2 : 1;
+  constexpr int RUNS = BM * SP * CPR / NR / 256;  // a thread's runs a stage
+  auto decode_runs = [&](int p, int q, int ns, h8 (*out)[NR]) {
 #pragma unroll
-    for (int c = 0; c < CH; c++) {
-      const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
-      const uint32_t row = row0 + r < rows ? row0 + r : rows - 1;
-      int kk;
-      out[c] = quant::decode_h<T>(quant::at<T>(w, row, cols, k0 / quant::kChunk + ck, &kk), kk);
+    for (int c = 0; c < RUNS; c++) {
+      const int u = threadIdx.x + 256 * c, r = u / (SP * CPR / NR), e = u % (SP * CPR / NR), i = e / (CPR / NR);
+      const int ck = (e % (CPR / NR)) * NR;
+      if (i < ns) {
+        const uint32_t k0 = ((uint32_t) p + (uint32_t) (q + i) * W) * SL;
+        const uint32_t row = row0 + r < rows ? row0 + r : rows - 1;
+        int kk;
+        quant::decode_hn<T, NR>(quant::at<T>(w, row, cols, k0 / quant::kChunk + ck, &kk), kk, out[c]);
+      }
     }
   };
-  auto put = [&](_Float16* buf, const h8* v) {
+  auto put_runs = [&](_Float16* buf, int ns, h8 (*v)[NR]) {
 #pragma unroll
-    for (int c = 0; c < CH; c++) {
-      const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
-      *(h8*) (buf + r * RL + ck * quant::kChunk) = v[c];
+    for (int c = 0; c < RUNS; c++) {
+      const int u = threadIdx.x + 256 * c, r = u / (SP * CPR / NR), e = u % (SP * CPR / NR), i = e / (CPR / NR);
+      const int ck = (e % (CPR / NR)) * NR;
+      if (i < ns)
+        for (int x = 0; x < NR; x++) *(h8*) (buf + r * RL + i * SL + (ck + x) * quant::kChunk) = v[c][x];
     }
+  };
+  auto decode = [&](int p, int q, int ns, h8 (*out)[CH]) {
+#pragma unroll
+    for (int i = 0; i < SP; i++)
+      if (i < ns) {
+        const uint32_t k0 = ((uint32_t) p + (uint32_t) (q + i) * W) * SL;
+#pragma unroll
+        for (int c = 0; c < CH; c++) {
+          const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
+          const uint32_t row = row0 + r < rows ? row0 + r : rows - 1;
+          int kk;
+          out[i][c] = quant::decode_h<T>(quant::at<T>(w, row, cols, k0 / quant::kChunk + ck, &kk), kk);
+        }
+      }
+  };
+  auto put = [&](_Float16* buf, int ns, h8 (*v)[CH]) {
+#pragma unroll
+    for (int i = 0; i < SP; i++)
+      if (i < ns)
+#pragma unroll
+        for (int c = 0; c < CH; c++) {
+          const int d = threadIdx.x + 256 * c, r = d / CPR, ck = d % CPR;
+          *(h8*) (buf + r * RL + i * SL + ck * quant::kChunk) = v[i][c];
+        }
   };
   for (int i = 0; i < RM; i++)
     for (int j = 0; j < RN; j++) acc[i][j] = f8{};
-  {
-    h8 v[CH];
-    decode(0, v);
-    put(lds2[0], v);
+  int p = 0, q = 0, ns = in_part(0) < SP ? in_part(0) : SP, cur = 0;
+  if constexpr (NR > 1) {
+    h8 v[RUNS][NR];
+    decode_runs(p, q, ns, v);
+    put_runs(lds2[0], ns, v);
+  } else {
+    h8 v[SP][CH];
+    decode(p, q, ns, v);
+    put(lds2[0], ns, v);
   }
   __syncthreads();
-  int p = 0, cur = 0;
-  uint32_t sl = 0;
   for (;;) {
-    const uint32_t k0 = sl * SL;
-    // the slab after this one in the order: the partition's next, else the next partition's first
-    const bool more_p = sl + W < slabs;
-    const int np = more_p ? p : p + 1;
-    const uint32_t nsl = more_p ? sl + W : (uint32_t) np;
+    // the stage after this one: the partition's next slabs, else the next partition's first
+    const bool more_p = q + ns < in_part(p);
+    const int np = more_p ? p : p + 1, nq = more_p ? q + ns : 0;
     const bool next = np < W;
-    h8 v[CH];
-    if (next) decode(nsl * SL, v);
+    const int left = next ? in_part(np) - nq : 0, nns = left < SP ? left : SP;
+    h8 v[NR > 1 ? RUNS : SP][NR > 1 ? NR : CH];
+    if (next) {
+      if constexpr (NR > 1) decode_runs(np, nq, nns, v);
+      else decode(np, nq, nns, v);
+    }
     const _Float16* lds = lds2[cur];
 #pragma unroll
-    for (int g = 0; g < G; g++) {
-      h16 a[RM], b[RN];
-      for (int i = 0; i < RM; i++) a[i] = *(const h16*) (lds + ((wr * RM + i) * kTile + col) * RL + g * kTile);
-      for (int j = 0; j < RN; j++) b[j] = *(const h16*) (xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
-      for (int j = 0; j < RN; j++)
-        if (live[j])
-          for (int i = 0; i < RM; i++) acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[i], b[j], acc[i][j]);
-    }
+    for (int i = 0; i < SP; i++)
+      if (i < ns) {
+        const uint32_t k0 = ((uint32_t) p + (uint32_t) (q + i) * W) * SL;
+#pragma unroll
+        for (int g = 0; g < G; g++) {
+          h16 a[RM], b[RN];
+          for (int r = 0; r < RM; r++) a[r] = *(const h16*) (lds + ((wr * RM + r) * kTile + col) * RL + i * SL + g * kTile);
+          for (int j = 0; j < RN; j++) b[j] = *(const h16*) (xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
+          for (int j = 0; j < RN; j++)
+            if (live[j])
+              for (int r = 0; r < RM; r++) acc[r][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[r], b[j], acc[r][j]);
+        }
+      }
     if (!more_p) {  // the partition's sum done: into the running sum, the next from zero
       for (int i = 0; i < RM; i++)
         for (int j = 0; j < RN; j++) {
@@ -463,9 +529,10 @@ __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* _
         }
     }
     if (!next) break;
-    put(lds2[cur ^ 1], v);  // the other buffer: read last before the barrier ending the slab before
+    if constexpr (NR > 1) put_runs(lds2[cur ^ 1], nns, v);  // the other buffer: read last before the barrier ending
+    else put(lds2[cur ^ 1], nns, v);                         // the stage before
     __syncthreads();
-    cur ^= 1, p = np, sl = nsl;
+    cur ^= 1, p = np, q = nq, ns = nns;
   }
   for (int j = 0; j < RN; j++) {
     const uint32_t t = c0 + (wc * RN + j) * kTile + col;

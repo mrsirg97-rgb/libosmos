@@ -11,6 +11,15 @@
   (+41%), Q2_K (+35%), IQ2_S (+16%) and IQ1_S (+6-10%) experts at 65-128 tokens, Q2_K's 2 row tiles (+7-30%); the
   codebook types' 2 row tiles slower (not taken). Its 2K prompt unchanged (the SSD's, its experts' ~32 tokens a step
   the old kernel's); its answer's hash the same.
+- **Q4_K's prompt decode cheaper, every bit the same.** A lane decodes a whole 32-value group of a row (its 6-bit
+  scales unpacked once, not once an 8-value chunk), the codes masked 4 at a time, and (d sc) q - dmin m one fma
+  ((d sc) q exact in F32: 21 bits, so the fma rounds as the product then the difference did); the 65-128-token
+  gemm stages 64 values a barrier, not 32. test_decode_run_gpu: the new decodes decode<Q4_K>'s bits on 2^20 random
+  blocks (subnormal and largest scales among them), mutation-checked. Q4_K experts (low-power): 32 tokens -29%,
+  64 -19%, 128 -8%, 8-16 -10%; UD-Q4_K_XL's 2K prompt 719-727 -> 737-738 tok/s; both packs' ids hashes the same.
+- Tried, not taken: the experts on the int8 matrix cores (kernels/mmq.hip, test_mmq_gpu - bit-exact against a host
+  copy, but iu8's rate is f16's on gfx1151: even at <= 32 tokens, 64-128 tokens 0.87x / 0.68x) and int4 gate / up
+  activations (simulated: twice the noise's per-token error, top-1 5.4% against 2.8%).
 
 ## [0.5.12]: the larger Qwen, DFlash2 as an option, a race in the MoE fixed
 
