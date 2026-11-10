@@ -204,7 +204,7 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   }
   for (uint32_t i = 0; i < len; i++)
     if (!ids_push(&c->held, p[i]))
-      return false;
+      return snprintf(c->err, sizeof c->err, "out of memory (a kept conversation's tokens)"), false;
   return true;
 }
 

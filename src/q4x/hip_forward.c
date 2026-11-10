@@ -75,17 +75,19 @@ static bool upload(const Gguf *g, const Gguf *shadow, const GgufTensor *skip, vo
     if ((shadow && gguf_tensor(shadow, t->name)) || t == skip)
       continue;
     const int fd = open(g->paths[t->file], O_RDONLY);
-    ok = fd >= 0 && alloc(&(*dev)[i], t->bytes);
+    const char *why = fd < 0 ? "its file not opened" : NULL; /* which of the three failed, for the message */
+    ok = fd >= 0 && (alloc(&(*dev)[i], t->bytes) || (why = "GPU memory refused", false));
     for (uint64_t at = 0; ok && at < t->bytes; at += READ_PIECE)
     {
       const size_t n = t->bytes - at < READ_PIECE ? (size_t)(t->bytes - at) : READ_PIECE;
-      ok = pread(fd, pin, n, (off_t)(t->offset + at)) == (ssize_t)n &&
-           hipMemcpy((uint8_t *)(*dev)[i] + at, pin, n, hipMemcpyHostToDevice) == hipSuccess;
+      ok = (pread(fd, pin, n, (off_t)(t->offset + at)) == (ssize_t)n || (why = "its file's read failed", false)) &&
+           (hipMemcpy((uint8_t *)(*dev)[i] + at, pin, n, hipMemcpyHostToDevice) == hipSuccess ||
+            (why = "the copy to GPU memory failed", false));
     }
     if (fd >= 0)
       close(fd);
-    if (!ok)
-      snprintf(err, Q4X_FWD_ERR, "%s: not read into GPU memory", t->name);
+    if (!ok && err)
+      snprintf(err, Q4X_FWD_ERR, "%s: not read into GPU memory (%s)", t->name, why);
   }
   hipHostFree(pin);
   return ok;
