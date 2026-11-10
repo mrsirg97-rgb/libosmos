@@ -534,8 +534,9 @@ __device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
     const int g = k / 4;
     const int ls = ((b[4 + g / 2] >> (4 * (g % 2))) & 0x0F) | ((ld16(b + 2) >> (2 * g)) & 0x03) << 4;
     const float dl = mul(f16(ld16(b)), (float) (ls - 32));
-    const uint4 q = *(const uint4*) (b + 8 + 16 * g);
-    const uint32_t w[4] = {q.x, q.y, q.z, q.w};
+    // two 8-byte loads: a block is 136 bytes, so its codes are 8-byte aligned, a 16-byte load every other block not
+    const uint2 lo = *(const uint2*) (b + 8 + 16 * g), hi = *(const uint2*) (b + 16 + 16 * g);
+    const uint32_t w[4] = {lo.x, lo.y, hi.x, hi.y};
 #pragma unroll
     for (int i = 0; i < N; i++) {  // k even: chunk k + i's bytes w[2 (i % 2)] on, its nibble ((k + i) % 4) / 2's
       const uint32_t sh = 4 * (uint32_t) (((k + i) % 4) / 2);

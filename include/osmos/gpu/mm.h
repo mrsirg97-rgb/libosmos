@@ -21,7 +21,7 @@ bool mm_run2(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t 
 #define MM_SILU_MAX_TOKENS 64 /* mm_run_silu's most tokens (past them, the gemm's counts) */
 bool mm_run_silu(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const void *x16, uint32_t n, float *y,
                  uint32_t ys, float scale, void *x16_out, int32_t *overflow, void *stream);
-#define MM_GATED_MEAN_MAX_HC 8 /* mm_run_gated_mean's most streams */
+#define MM_GATED_MEAN_MAX_HC 8 /* mm_run_gated_mean's most streams: the hyper-connections' most (Q4X_MAX_HC) */
 bool mm_run_gated_mean(uint32_t type, const void *w, uint32_t hc, uint32_t dim, uint32_t cols, const void *x16,
                        uint32_t n, const float *xn, float *out, void *out16, uint32_t row0, int32_t *overflow,
                        void *stream);
@@ -79,7 +79,8 @@ mm_col_tiles
 mm_x16_rows
   slots rows of activations: slot s is row idx[s] of x (row r at x + r * xs; -1: zero) as f16, into x16 (slots rows of
   cols, tiled) - each distinct expert's tokens gathered into slots of its own (whole tiles of MM_TILE). *overflow as
-  mm_x16.
+  mm_x16. false - nothing launched - for no slots, cols not a multiple of MM_TILE, xs under cols or not a multiple of
+  4, or x not 16-byte aligned (a thread's two 16-byte loads).
 
 mm_run_silu
   mm_run, then each output y = silu(y scale) - q4x_scale_silu's expression, the same bits - written to y and as f16

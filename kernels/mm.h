@@ -94,8 +94,9 @@ struct Silu {
   uint32_t cols;
 };
 
-// the chunks a lane decodes together (quant::decode_hn): Q4_K's 2 of a group (its scales once), else 1 - when a
-// slab's row (CPR chunks) and a lane's share (CH) both hold whole runs
+// the chunks a lane decodes together (quant::decode_hn, a group's scales or codes once) for the kRuns types: RUN_MAX of
+// a group where a slab's row (CPR chunks) and a lane's share (CH) hold whole runs of it, else 2, else 1 (the prompt
+// gemm's own choice: group_gemm_kernel's NR)
 #ifndef RUN_MAX
 #define RUN_MAX 4
 #endif
