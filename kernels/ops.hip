@@ -427,44 +427,33 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, u
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) hk[d] = hk[d] + gate * value[d];
 }
 
-// k passes of a block argmax over score + bias (the larger, ties to the lower expert: the serial scan's picks)
+// a block a token: its scores (sqrt(softplus)), the block's threads; then the k greatest of score + bias by its first
+// wave alone (block.h's wave_pick: the larger, ties to the lower expert - the serial scan's picks, which a block-wide
+// argmax a pick, 8 barriers each, gave before: test_router_gpu holds this to that kernel's bits), their weights
+constexpr uint32_t kRouterLane = OPS_MAX_EXPERTS / 32;  // a lane's experts at most
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                               int32_t* idx, float* w) {
-  __shared__ float sc[OPS_MAX_EXPERTS], key[OPS_MAX_EXPERTS];
-  __shared__ bool taken[OPS_MAX_EXPERTS];
-  __shared__ float bk[kThreads];
-  __shared__ uint32_t bi[kThreads];
-  __shared__ int32_t pick[OPS_MAX_TOPK];
-  const uint32_t t = blockIdx.x, none = n_exp;
+  __shared__ float sc[OPS_MAX_EXPERTS], keys[OPS_MAX_EXPERTS];
+  const uint32_t t = blockIdx.x;
   for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads) {
     const float l = logits[(uint64_t) t * n_exp + e];
     sc[e] = sqrtf(l > kSoftplusLinear ? l : log1pf(expf(l)));
-    key[e] = sc[e] + bias[e];
-    taken[e] = false;
+    keys[e] = pick_key(sc[e] + bias[e]);
   }
   __syncthreads();
+  if (threadIdx.x >= (uint32_t) kWave) return;
+  const uint32_t lane = threadIdx.x;
+  float key[kRouterLane];
+  for (uint32_t r = 0; r < kRouterLane; r++) key[r] = lane + 32 * r < n_exp ? keys[lane + 32 * r] : 0.0f;
+  uint32_t taken = 0;
+  int32_t pick[OPS_MAX_TOPK];
   for (uint32_t s = 0; s < k; s++) {
-    float best = 0;
-    uint32_t at = none;
-    for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads)
-      if (!taken[e] && (at == none || key[e] > best)) best = key[e], at = e;
-    bk[threadIdx.x] = best, bi[threadIdx.x] = at;
-    __syncthreads();
-    for (uint32_t h = kThreads / 2; h > 0; h >>= 1) {
-      if (threadIdx.x < h) {
-        const uint32_t o = threadIdx.x + h;
-        const bool take = bi[o] != none && (bi[threadIdx.x] == none || bk[o] > bk[threadIdx.x] ||
-                                            (bk[o] == bk[threadIdx.x] && bi[o] < bi[threadIdx.x]));
-        if (take) bk[threadIdx.x] = bk[o], bi[threadIdx.x] = bi[o];
-      }
-      __syncthreads();
-    }
-    if (threadIdx.x == 0) pick[s] = (int32_t) bi[0], taken[bi[0]] = true;
-    __syncthreads();
+    float best;
+    pick[s] = wave_pick<kRouterLane>(key, n_exp, &taken, &best);
   }
-  if (threadIdx.x != 0) return;
+  if (lane) return;
   float wt[OPS_MAX_TOPK], sum = 0;
-  for (uint32_t s = 0; s < k; s++) sum += (wt[s] = sc[pick[s]]);
+  for (uint32_t s = 0; s < k; s++) sum += (wt[s] = (uint32_t) pick[s] < n_exp ? sc[pick[s]] : 0.0f);
   for (uint32_t s = 0; s < k; s++) {
     idx[t * k + s] = pick[s];
     w[t * k + s] = wt[s] / (sum + kRouteEps) * scale;

@@ -49,20 +49,12 @@ __global__ void route_kernel(const float* logits, uint32_t n_exp, uint32_t k, in
   if (threadIdx.x >= 32) return;
   const uint32_t lane = threadIdx.x;
   float v[kRouteLane];
-  for (uint32_t r = 0; r < kRouteLane; r++) v[r] = lane + 32 * r < n_exp ? p[lane + 32 * r] : -INFINITY;
+  for (uint32_t r = 0; r < kRouteLane; r++) v[r] = lane + 32 * r < n_exp ? pick_key(p[lane + 32 * r]) : 0.0f;
   uint32_t taken = 0; /* a lane's experts taken, bit r: expert lane + 32 r */
   float pick[kMaxK], total = 0;
   for (uint32_t j = 0; j < k; j++) {
-    float bv = -INFINITY;
-    int bi = INT_MAX;
-    for (uint32_t r = 0; r < kRouteLane; r++) /* ascending ids: a strict > keeps the lowest among equals */
-      if (!(taken >> r & 1) && lane + 32 * r < n_exp && v[r] > bv) bv = v[r], bi = (int) (lane + 32 * r);
-    for (int o = 16; o > 0; o >>= 1) {
-      const float ov = __shfl_xor(bv, o, 32);
-      const int oi = __shfl_xor(bi, o, 32);
-      if (ov > bv || (ov == bv && oi < bi)) bv = ov, bi = oi;
-    }
-    if ((uint32_t) bi % 32 == lane) taken |= 1u << ((uint32_t) bi / 32);
+    float bv;
+    const int bi = wave_pick<kRouteLane>(v, n_exp, &taken, &bv);
     pick[j] = bv, total += bv;
     if (!lane) ids[t * k + j] = bi, rows[t * k + j] = (int32_t) t;
   }

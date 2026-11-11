@@ -12,6 +12,7 @@
 
 extern "C" {
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/q4x_ops.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -106,6 +107,40 @@ void check(uint32_t n, uint32_t e, uint32_t k, int kind) {
     CHECK(hipFree(p) == hipSuccess);
 }
 
+// logits no pick is right for - NaNs, every one -inf, +inf among them: the picks are garbage (the step is refused
+// elsewhere: its activations' f16 flag) but every id is an expert's - what reads them next indexes by them (Qwen's
+// tiles on the GPU, with no host between). both routers (block.h's wave_pick)
+void hostile(uint32_t e, uint32_t k) {
+  constexpr uint32_t kTok = 6;
+  std::vector<float> l((size_t) kTok * e), b(e, 0.0f);
+  for (float& v : l) v = uniform() * 8;
+  for (uint32_t i = 0; i < e; i++) l[0 * e + i] = NAN;                // every logit a NaN
+  for (uint32_t i = 0; i < e; i += 3) l[1 * e + i] = NAN;             // NaNs among them
+  for (uint32_t i = 0; i < e; i++) l[2 * e + i] = -INFINITY;          // none greater than another
+  l[3 * e + e / 2] = INFINITY, l[3 * e + e - 1] = INFINITY;           // +inf (a softmax's inf - inf: NaNs)
+  l[4 * e + 0] = NAN;                                                 // one NaN, the first
+  float *dl, *db, *w;
+  int32_t *ids, *rows;
+  CHECK(hipMalloc(&dl, l.size() * 4) == hipSuccess && hipMalloc(&db, e * 4) == hipSuccess &&
+        hipMalloc(&w, kTok * k * 4) == hipSuccess && hipMalloc(&ids, kTok * k * 4) == hipSuccess &&
+        hipMalloc(&rows, kTok * k * 4) == hipSuccess);
+  CHECK(hipMemcpy(dl, l.data(), l.size() * 4, hipMemcpyHostToDevice) == hipSuccess &&
+        hipMemcpy(db, b.data(), e * 4, hipMemcpyHostToDevice) == hipSuccess);
+  std::vector<int32_t> got(kTok * k);
+  for (int which = 0; which < 2; which++) {
+    CHECK(hipMemset(ids, 0xFF, kTok * k * 4) == hipSuccess);
+    CHECK(which ? q4x_route(dl, kTok, e, k, ids, w, rows, nullptr) : ops_router(dl, db, e, k, 1.5f, kTok, ids, w, nullptr));
+    CHECK(hipMemcpy(got.data(), ids, kTok * k * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    for (uint32_t i = 0; i < kTok * k; i++) {
+      if (got[i] < 0 || (uint32_t) got[i] >= e)
+        std::fprintf(stderr, "  %s, %u experts, k %u: token %u's pick %u is %d\n", which ? "q4x_route" : "ops_router", e,
+                     k, i / k, i % k, got[i]);
+      CHECK(got[i] >= 0 && (uint32_t) got[i] < e);
+    }
+  }
+  for (void* p : {(void*) dl, (void*) db, (void*) w, (void*) ids, (void*) rows}) CHECK(hipFree(p) == hipSuccess);
+}
+
 }  // namespace
 
 int main() {
@@ -121,6 +156,9 @@ int main() {
       for (int kind = 0; kind < 3; kind++) check(kind ? 5 : 64, e, k, kind), cases++;
   std::printf("  %u cases (experts 7 .. 384, k 1 .. %d, random / tied / all equal logits): the picks and weights the"
               " reference's bits\n", cases, OPS_MAX_TOPK);
+  for (uint32_t e : {512u, 384u, 33u})
+    for (uint32_t k : {1u, 6u, 10u}) hostile(e, k);
+  std::printf("  NaN, -inf and +inf logits, both routers: every pick an expert's id\n");
   std::printf("[test_router_gpu] ok\n");
   return 0;
 }

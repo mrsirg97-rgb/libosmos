@@ -2888,6 +2888,22 @@ another reference's (ref.py's, llama.cpp's), and the bits are the product.
   the row, each row alone). DeepSeek's pick one launch more (part, merge) for ~70 us less a token; both models'
   hashes held (below's runs again: Qwen 78687b02a7b4d036, 28.1 / 44.4 tok/s; DeepSeek's six, 17.1 / 16.3 / 17.4
   and 31.9 / 19.4 / 29.3) - the gain under what a run shows.
+- **the routers' pick, built** (block.h's wave_pick: q4x_route's shuffles, one definition; ops's router_kernel on
+  it - its scores and score + bias by the block's threads into LDS, the k picks by the first wave, the weights as
+  before). test_router_gpu holds ops_router to the block-wide kernel's bits (213 cases: experts 7 .. 384, k 1 .. 16,
+  random, tied and all-equal logits). two things on the way:
+  - **a hazard closed.** q4x_route on NaN logits (a softmax of NaN: no key "greater than -inf") wrote the pick
+    2147483647 - and q4x_expert_tiles indexes its LDS by the pick, on the GPU, no host between. now a lane with no
+    id offers kPickNone, which any id beats, and the keys pass pick_key (a NaN the least: NaNs compare false both
+    ways, and lanes that disagreed each took - and used up - their own id: the first build still ran out of ids at
+    33 experts, k 6). the k picks are k ids below n whatever the logits (test_router_gpu's hostile rows - NaN, -inf,
+    +inf - on both routers: failed first on q4x_route's 2147483647). the step is refused elsewhere (the f16 flag);
+    this is memory safety.
+  - **measured, not assumed** (rocprofv3, UD-IQ1_M, 128 decode tokens, performance): the first build - the keys
+    formed by the wave from sc and bias, 32 registers scanned a pick - was slower than the kernel it replaced, 9.26
+    -> 10.62 us a call; the keys formed by the block's threads and the scan stopped at the token's last id, 6.97 us
+    (79 calls a token with the guess: ~0.18 ms, ~0.3%). the greedy pick in the same traces 79.6 -> 7.7 us (6.1 + 1.6).
+  both models' hashes held; tok/s as before (Qwen 28.3 / 44.4; DeepSeek 17.6 / 16.1 / 17.4 and 32.2 / 19.4 / 29.2).
 - **measured** (performance, the box quiet): Qwen UD-IQ3_XXS a 4K prompt in 2K steps + 96 tokens, plain and MTP -
   ids 78687b02a7b4d036 before and after, 921 / 921 tok/s the prompt, 28.3 / 28.2 plain, 44.2 / 44.6 drafted;
   DeepSeek UD-IQ1_M the membrane's oracle - the six hashes the same, 17.6 / 16.3 / 17.4 plain, 32.2 / 19.4 / 29.2
