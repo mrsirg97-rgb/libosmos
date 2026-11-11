@@ -3203,6 +3203,43 @@ level where an answer follows each prompt (an agent's turns), a gain only for lo
 **What 0.6.4's study leaves.** the membrane's rule, its reads, its prompts and the guess off are each at or near
 what this box allows; a GiB of room is 2.7% of the misses, and the logits' rows are one, free.
 
+### 0.6.4: Qwen on the membrane (design, 2026-11-11)
+
+Qwen's every weight is resident today: UD-IQ3_XXS is 82.6 GB - its n-gram table 28.8 (streamed already where a pack
+asks), its experts ~49 (48 layers x 512, three tensors a layer), the rest under 5. on the membrane its experts are
+units like DeepSeek's: on this box a membrane with room for all of them and nothing left to read; on a 64 GB box
+the same quant with part of them streamed. two requirements (the operator's): fully resident it gives the same
+bits and is no slower; and the membrane takes no Qwen mode - what it needs is general.
+
+**what differs from DeepSeek.** DeepSeek's routing comes to the host every layer (the routing event): the host
+holds the picks, waits for the reading ones, hands their pointers down. Qwen never comes to the host inside a
+token: q4x_expert_tiles makes the pointers on the GPU from the router's picks - a tensor's base + expert x an
+expert's bytes - and a token's ~1,560 launches are queued with no wait. so:
+
+- **a table of pointers on the GPU**, [layer][expert][gate, up, down]: q4x_expert_tiles reads an expert's
+  addresses from it (a load where it multiplied). the experts no longer need to lie in a tensor's order.
+- **fully resident: the table written once.** the membrane made with room for every unit, every unit warm, none
+  ever evicted; the forward fills the table after the warm start and a step never asks the membrane anything -
+  no visit, no hold, no host wait: a token's launches as they are now. `membrane_whole(m)`: every unit pinned in
+  the membrane's pool and its room every unit's - nothing can be evicted, so a caller may keep their pointers.
+- **streamed: the host a layer.** the routing brought to the host (as DeepSeek's), the visit's units held, the
+  missing read and waited for, their table entries written before the experts' kernels are launched. only a build
+  whose room is less than its experts pays it. a prompt's step: passing visits, its misses into the stream.
+- which memory an expert lies in changes no bit.
+
+**stages.**
+1. `q4x_weights_experts`: the experts as PoolUnits (unit = layer x experts + expert; its slice of exp_gate, exp_up,
+   exp_down). CPU, test_q4x_weights.
+2. the fully resident build: the experts' tensors no longer uploaded whole - the membrane's units (its Slots the
+   forward's choice: device memory where everything fits), the table, q4x_expert_tiles by it. the same hashes; the
+   decode and the prompts measured against 0.6.3 (the bar: within the scatter).
+3. the streamed build: decode's small steps first, then a prompt's, then the drafters' rounds; measured on this box
+   under a room that leaves what a 64 GB box would.
+
+not in 0.6.4's first commits: the n-gram table on the membrane (it has its own row reads), an overlay's expert
+tensors (q4x_weights_experts refuses a model whose experts an overlay stands in for: none does today).
+
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate

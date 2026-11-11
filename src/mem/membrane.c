@@ -29,6 +29,7 @@ struct Membrane
   uint32_t *failed;  /* promotions whose copy failed: pinned in the membrane's pool, their bytes never written -
                         every call refused until membrane_end drops them */
   uint32_t n_failed;
+  uint64_t room, all_bytes; /* the membrane's pool's room, and every unit's bytes in it (membrane_whole) */
   uint64_t ahead_limit, ahead_now; /* the option's bound, and the readers' now (none while a visit is passing) */
   MembraneStats stats;
 };
@@ -93,6 +94,9 @@ Membrane *membrane_create(const MembraneOptions *o, char err[MEMBRANE_ERR])
   if (!ok)
     return membrane_destroy(m), fail(err, "out of memory"), NULL;
   memcpy(m->units, o->units, n * sizeof *m->units);
+  m->room = o->room;
+  for (uint64_t u = 0; u < n; u++)
+    m->all_bytes += pool_unit_bytes(&m->units[u], o->read_align);
   if (o->n_warm)
     memcpy(m->warm, o->warm, o->n_warm * sizeof *m->warm);
   if (!(m->reads = reads_create(m->n_units, o->readers, perr)) ||
@@ -266,6 +270,16 @@ bool membrane_wait(Membrane *m, uint32_t unit, const void *dev[POOL_PARTS], char
     m->stats.waits[k]++, m->stats.wait_ns[k] += now_ns() - t0;
   }
   return (p && pool_dev(p, unit, dev)) || fail(err, "an expert's read from its file failed");
+}
+
+bool membrane_whole(const Membrane *m)
+{
+  if (!m || m->n_failed || m->all_bytes > m->room)
+    return false;
+  for (uint32_t u = 0; u < m->n_units; u++)
+    if (pool_state(m->pool, u) != POOL_PINNED)
+      return false;
+  return true;
 }
 
 bool membrane_in_memory(const Membrane *m, uint32_t unit)

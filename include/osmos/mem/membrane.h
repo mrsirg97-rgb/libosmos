@@ -48,6 +48,7 @@ bool membrane_ready(const Membrane *m, uint32_t unit, const void *dev[POOL_PARTS
 bool membrane_wait(Membrane *m, uint32_t unit, const void *dev[POOL_PARTS], char err[MEMBRANE_ERR]);
 void membrane_end(Membrane *m);
 
+bool membrane_whole(const Membrane *m);
 bool membrane_in_memory(const Membrane *m, uint32_t unit);
 bool membrane_begin(Membrane *m, uint32_t unit);
 void membrane_settle(Membrane *m);
@@ -121,6 +122,12 @@ membrane_end
   pool - passed. a step's end, or its failure (the caller first past every kernel that reads them - and, after a
   hold whose copy failed, past the copies queued before it: they write the unit's memory). a failed promotion's
   unit is then dropped (pool_drop): cold, read from its file when next picked, the stream's copy where it was.
+
+membrane_whole (DESIGN.md, "0.6.4: Qwen on the membrane")
+  every unit in the membrane's pool now, and its room every unit's: nothing is left to read and nothing can be
+  evicted, so a unit's pointers (membrane_ready) hold for the membrane's life - a caller may keep them and never
+  visit, hold or wait (a model wholly in memory: a table of its experts written once). false before the warm start
+  has read them, for a room short of a unit, or after a promotion's copy failed.
 
 membrane_in_memory, membrane_begin, membrane_settle
   for a caller that computes a unit elsewhere while it reads (DeepSeek's CPU lane). in_memory: pinned in either pool.
