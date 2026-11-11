@@ -1,5 +1,6 @@
 // Qwen3.8-Flash-Next's Gated DeltaNet (include/osmos/gpu/q4x_ops.h): its conv, gates, delta rule and gated norm, F32
 #include "block.h"
+#include "launch.h"
 #include "x16side.h"
 
 extern "C" {
@@ -8,17 +9,17 @@ extern "C" {
 
 namespace {
 
-constexpr int kThreads = 256;
+using launches::kThreads;
+using launches::grid;
+using launches::st;
+using launches::ok;
+
 constexpr int kHead = Q4X_SSM_STATE;      // a head's dim: the delta rule's block, a column of its state a thread
 constexpr uint32_t kMaxTaps = Q4X_CONV_TAPS_MAX; /* a conv's taps, and its dilation, at most */
 constexpr uint32_t kMaxHist = (kMaxTaps - 1) * kMaxTaps; /* a conv state's rows at most */
 constexpr float kSoftplusLinear = 20.0f;  // ggml's softplus: above it, x
 
-inline unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 
-__device__ inline float silu(float x) { return x / (1.0f + expf(-x)); }
 
 // x' = hist (h = (taps - 1) dil rows) then x: token t's taps x'[t + k dil], the oldest first
 __global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t dil, const float* w,

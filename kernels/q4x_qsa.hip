@@ -1,6 +1,7 @@
 // QSA's indexer (include/osmos/gpu/q4x_ops.h, q4x_ix_*; DESIGN.md, "QSA"): its query's norm and rotation, the keys'
 // blocks pooled, a token's scores against them and its top blocks - llama.cpp's build_qsa_sel in its order mode
 #include "block.h"
+#include "launch.h"
 #include "rope.h"
 
 extern "C" {
@@ -9,14 +10,15 @@ extern "C" {
 
 namespace {
 
+using launches::st;
+using launches::ok;
+
 constexpr int kDim = Q4X_IX_DIM;  // a head's dim: a block's threads, a value a thread
 constexpr int kMaxHeads = Q4X_IX_HEADS_MAX; // the score tile's query rows (attention.indexer.head_count)
 constexpr int kTT = 16, kTB = 32; // the score tile: tokens x blocks
 constexpr int kPick = 256;        // the pick's threads: a token's
 constexpr uint64_t kScoreBudget = 4u << 20;  // the scratch's scores at least: a piece's tokens x their blocks
 
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 
 // a block of kDim threads, x its value d: x normed (its L2 over the block) times w, then its first rope.dim rotated in
 // pairs (i, i + dim / 2) at position pos - q4x_qk's rotation (rope_cs: the running product, YaRN's where it has it)

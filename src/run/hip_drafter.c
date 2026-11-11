@@ -117,6 +117,7 @@ static bool scratch(Drafter *d)
       {&d->kvs_p, (uint64_t)FWD_MAX_BATCH * kv_row_bytes(KV_FP8, hd)},
       {&d->ridx, P * 4}, {&d->sel, T * OPS_MAX_SELECT * 4}, {&d->n_sel, T * 4}, {&d->pos_q, T * 4},
       {&d->pos_a, T * 4}, {&d->ids, T * 4}, {&d->pair, P * 4}, {&d->tap_pos, FWD_MAX_BATCH * 4}, {&d->best, 4},
+      {&d->best_part, ops_argmax_scratch(1)},
       {&d->tab, 3 * P * sizeof(void *)},
   };
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
@@ -226,6 +227,7 @@ void drafter_destroy(Drafter *d)
   for (size_t i = 0; i < sizeof ibufs / sizeof *ibufs; i++)
     hipFree(*ibufs[i]);
   hipFree(d->tab);
+  hipFree(d->best_part);
   hipHostFree(d->pin);
   resident_destroy(d->res);
   if (d->fd >= 0)
@@ -338,7 +340,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     }
     float *row = d->vocab + (uint64_t)n * V;
     if (!mv_strided(DRAFTER_BF16, d->mk_head, V, d->rank, d->cat + D, d->rank, 1, d->mk, V, NULL) ||
-        !ops_add(row, d->mk, V, NULL) || !ops_argmax(row, V, 1, V, d->best, NULL) ||
+        !ops_add(row, d->mk, V, NULL) || !ops_argmax(row, V, 1, V, d->best, d->best_part, NULL) ||
         hipMemcpyAsync(&d->pin->best, d->best, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
         !fwd_settle(d->f))
       return fail(err, "a GPU call failed (the drafter's markov step)"), -1;

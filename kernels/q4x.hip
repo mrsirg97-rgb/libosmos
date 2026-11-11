@@ -1,5 +1,6 @@
 // Qwen3.8-Flash-Next's own steps (include/osmos/gpu/q4x_ops.h), F32
 #include "block.h"
+#include "launch.h"
 #include "x16side.h"
 
 extern "C" {
@@ -8,14 +9,14 @@ extern "C" {
 
 namespace {
 
-constexpr int kThreads = 256;
+using launches::kThreads;
+using launches::grid;
+using launches::st;
+using launches::ok;
+
 constexpr uint32_t kMaxHc = 8;
 
-inline unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 
-__device__ inline float silu(float x) { return x / (1.0f + expf(-x)); }
 
 // a block a (stream, token): its sum of squares by block_sum's tree, then each value normed and weighted
 __global__ void hc_norm_kernel(const float* h, const float* w, uint32_t hc, uint32_t dim, float eps, float* xn,

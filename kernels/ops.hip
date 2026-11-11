@@ -2,6 +2,7 @@
 #include <cmath>
 
 #include "block.h"
+#include "launch.h"
 #include "quant.h"
 #include "round.h"
 #include "lane.h"
@@ -15,7 +16,11 @@ extern "C" {
 
 namespace {
 
-constexpr int kThreads = 256;
+using launches::kThreads;
+using launches::grid;
+using launches::st;
+using launches::ok;
+
 constexpr int kWave = 32;
 constexpr float kSoftplusLinear = 20.0f;  // F.softplus's threshold: above it, x
 constexpr float kRouteEps = 1e-20f;
@@ -212,9 +217,11 @@ __global__ void hc_mix_kernel(const float* partial, const float* scale, const fl
 
 // x16 (when not NULL): the result as mm_x16 would put it, rows n .. a whole tile zero (a block each, past n). block
 // t's: token t's, a kWide block's
+// q8 (when not NULL): x as q8_round would put it (lane.h's int8 contract: a block of 32 its wave - a kWide block's
+// thread d % kWide holds value d, so a wave a block, lane i its value i, as q8.h's round_kernel), q8d its scales
 __device__ void hc_pre_rms_token(uint32_t t, const float* h, const float* pre, uint32_t hc, uint32_t dim,
                                  const float* w, float eps, float* x, uint32_t n_tok, _Float16* x16,
-                                 int32_t* overflow, float* lds) {
+                                 int32_t* overflow, float* lds, int8_t* q8 = nullptr, float* q8d = nullptr) {
   if (t >= n_tok) {  // a pad row of x16's last tile
     for (uint32_t d = threadIdx.x; d < dim; d += kWide) mm::x16_put(x16, t, d, dim, 0.0f, overflow);
     return;
@@ -233,6 +240,12 @@ __device__ void hc_pre_rms_token(uint32_t t, const float* h, const float* pre, u
     const float v = (xt[d] * r) * w[d];
     xt[d] = v;
     if (x16) mm::x16_put(x16, t, d, dim, v, overflow);
+    if (q8) {
+      float a = fabsf(v);
+      for (int o = kWave / 2; o > 0; o >>= 1) a = fmaxf(a, __shfl_xor(a, o, kWave));
+      q8[(uint64_t) t * dim + d] = (int8_t) lane_q8_round(v, lane_q8_inv(a));
+      if (d % LANE_Q8_VALUES == 0) q8d[(uint64_t) t * (dim / LANE_Q8_VALUES) + d / LANE_Q8_VALUES] = lane_q8_scale(a);
+    }
   }
 }
 
@@ -252,13 +265,14 @@ __global__ __launch_bounds__(kWide) void hc_mix_pre_rms_kernel(const float* part
                                                                 uint32_t iters, float* mpre, float* post, float* comb,
                                                                 const float* h, const float* pre, uint32_t dim,
                                                                 const float* w, float* x, uint32_t n_tok,
-                                                                _Float16* x16, int32_t* overflow) {
+                                                                _Float16* x16, int32_t* overflow, int8_t* q8,
+                                                                float* q8d) {
   __shared__ float rows[(2 + OPS_MAX_HC) * OPS_MAX_HC + 1];
   __shared__ float lds[kWide];
   const uint32_t t = blockIdx.x;
   if (t < n_tok) hc_mix_token<hc>(t, partial, scale, base, dim, eps, hc_eps, iters, mpre, post, comb, rows);
   __syncthreads();
-  hc_pre_rms_token(t, h, pre, hc, dim, w, eps, x, n_tok, x16, overflow, lds);
+  hc_pre_rms_token(t, h, pre, hc, dim, w, eps, x, n_tok, x16, overflow, lds, t < n_tok ? q8 : nullptr, q8d);
 }
 
 __global__ void hc_pre_kernel(const float* h, const float* pre, uint32_t hc, uint32_t dim, uint32_t n_tok, float* x) {
@@ -422,44 +436,33 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, u
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) hk[d] = hk[d] + gate * value[d];
 }
 
-// k passes of a block argmax over score + bias (the larger, ties to the lower expert: the serial scan's picks)
+// a block a token: its scores (sqrt(softplus)), the block's threads; then the k greatest of score + bias by its first
+// wave alone (block.h's wave_pick: the larger, ties to the lower expert - the serial scan's picks, which a block-wide
+// argmax a pick, 8 barriers each, gave before: test_router_gpu holds this to that kernel's bits), their weights
+constexpr uint32_t kRouterLane = OPS_MAX_EXPERTS / 32;  // a lane's experts at most
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                               int32_t* idx, float* w) {
-  __shared__ float sc[OPS_MAX_EXPERTS], key[OPS_MAX_EXPERTS];
-  __shared__ bool taken[OPS_MAX_EXPERTS];
-  __shared__ float bk[kThreads];
-  __shared__ uint32_t bi[kThreads];
-  __shared__ int32_t pick[OPS_MAX_TOPK];
-  const uint32_t t = blockIdx.x, none = n_exp;
+  __shared__ float sc[OPS_MAX_EXPERTS], keys[OPS_MAX_EXPERTS];
+  const uint32_t t = blockIdx.x;
   for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads) {
     const float l = logits[(uint64_t) t * n_exp + e];
     sc[e] = sqrtf(l > kSoftplusLinear ? l : log1pf(expf(l)));
-    key[e] = sc[e] + bias[e];
-    taken[e] = false;
+    keys[e] = pick_key(sc[e] + bias[e]);
   }
   __syncthreads();
+  if (threadIdx.x >= (uint32_t) kWave) return;
+  const uint32_t lane = threadIdx.x;
+  float key[kRouterLane];
+  for (uint32_t r = 0; r < kRouterLane; r++) key[r] = lane + 32 * r < n_exp ? keys[lane + 32 * r] : 0.0f;
+  uint32_t taken = 0;
+  int32_t pick[OPS_MAX_TOPK];
   for (uint32_t s = 0; s < k; s++) {
-    float best = 0;
-    uint32_t at = none;
-    for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads)
-      if (!taken[e] && (at == none || key[e] > best)) best = key[e], at = e;
-    bk[threadIdx.x] = best, bi[threadIdx.x] = at;
-    __syncthreads();
-    for (uint32_t h = kThreads / 2; h > 0; h >>= 1) {
-      if (threadIdx.x < h) {
-        const uint32_t o = threadIdx.x + h;
-        const bool take = bi[o] != none && (bi[threadIdx.x] == none || bk[o] > bk[threadIdx.x] ||
-                                            (bk[o] == bk[threadIdx.x] && bi[o] < bi[threadIdx.x]));
-        if (take) bk[threadIdx.x] = bk[o], bi[threadIdx.x] = bi[o];
-      }
-      __syncthreads();
-    }
-    if (threadIdx.x == 0) pick[s] = (int32_t) bi[0], taken[bi[0]] = true;
-    __syncthreads();
+    float best;
+    pick[s] = wave_pick<kRouterLane>(key, n_exp, &taken, &best);
   }
-  if (threadIdx.x != 0) return;
+  if (lane) return;
   float wt[OPS_MAX_TOPK], sum = 0;
-  for (uint32_t s = 0; s < k; s++) sum += (wt[s] = sc[pick[s]]);
+  for (uint32_t s = 0; s < k; s++) sum += (wt[s] = (uint32_t) pick[s] < n_exp ? sc[pick[s]] : 0.0f);
   for (uint32_t s = 0; s < k; s++) {
     idx[t * k + s] = pick[s];
     w[t * k + s] = wt[s] / (sum + kRouteEps) * scale;
@@ -542,35 +545,38 @@ __global__ void copy_rows_kernel(float* dst, const float* src, const int32_t* id
   dst[at] = src[at];
 }
 
-// a block a row: its greatest value's index, the lowest among equals (an order-free choice: any reduction the same);
-// -1 for a row with a NaN
-__global__ __launch_bounds__(kWide) void argmax_kernel(const float* x, uint32_t n, uint32_t stride, int32_t* out) {
-  __shared__ float bv[kWide];
-  __shared__ uint32_t bi[kWide];
-  __shared__ int nan;
+// a row's greatest value's index, the lowest among equals (an order-free choice: any reduction the same), -1 for a
+// row with a NaN - the row split in kArgSplit slices, a block each (a vocabulary in one block: ~160 us of one
+// block's loads; split, ~10): a thread's values strided, the first of its own kept among equals; a thread that met
+// a NaN offers (+inf, -1), which block_argmax's rule - the greater, the lower index among equals - carries to the top
+constexpr int kArgSplit = 64, kArgThreads = 256;
+constexpr int kArgNone = INT32_MAX;  // a thread, or a slice, with no value: after every index among equals
+__global__ __launch_bounds__(kArgThreads) void argmax_part_kernel(const float* x, uint32_t n, uint32_t stride,
+                                                                  float* pv, int* pi) {
+  __shared__ float lds[kArgThreads];
+  __shared__ int ldi[kArgThreads];
   const float* row = x + (uint64_t) blockIdx.x * stride;
-  if (threadIdx.x == 0) nan = 0;
-  __syncthreads();
-  float v = -INFINITY;
-  uint32_t at = UINT32_MAX;
-  for (uint32_t i = threadIdx.x; i < n; i += kWide) {
+  const uint32_t per = (n + kArgSplit - 1) / kArgSplit, lo = blockIdx.y * per, hi = lo + per < n ? lo + per : n;
+  float bv = -INFINITY;
+  int bi = kArgNone;
+  bool nan = false;
+  for (uint32_t i = lo + threadIdx.x; i < hi; i += kArgThreads) {
     const float c = row[i];
-    if (c != c) nan = 1;
-    else if (at == UINT32_MAX || c > v) v = c, at = i;  // (i ascends a thread: equals keep the lower)
+    if (c != c) nan = true;
+    else if (bi == kArgNone || c > bv) bv = c, bi = (int) i;  // (i ascends a thread: equals keep the lower)
   }
-  bv[threadIdx.x] = v, bi[threadIdx.x] = at;
-  __syncthreads();
-  for (uint32_t h = kWide / 2; h > 0; h >>= 1) {
-    if (threadIdx.x < h) {
-      const float ov = bv[threadIdx.x + h];
-      const uint32_t oi = bi[threadIdx.x + h];
-      if (oi != UINT32_MAX && (bi[threadIdx.x] == UINT32_MAX || ov > bv[threadIdx.x] ||
-                               (ov == bv[threadIdx.x] && oi < bi[threadIdx.x])))
-        bv[threadIdx.x] = ov, bi[threadIdx.x] = oi;
-    }
-    __syncthreads();
-  }
-  if (threadIdx.x == 0) out[blockIdx.x] = nan ? -1 : (int32_t) bi[0];
+  if (nan) bv = INFINITY, bi = -1;
+  const int best = block_argmax<kArgThreads>(&bv, bi, lds, ldi);
+  if (!threadIdx.x) pv[blockIdx.x * kArgSplit + blockIdx.y] = bv, pi[blockIdx.x * kArgSplit + blockIdx.y] = best;
+}
+
+// a row's slices' bests merged by the same rule: its index (a slice's -1 the row's)
+__global__ __launch_bounds__(kArgSplit) void argmax_merge_kernel(const float* pv, const int* pi, int32_t* out) {
+  __shared__ float lds[kArgSplit];
+  __shared__ int ldi[kArgSplit];
+  float v = pv[blockIdx.x * kArgSplit + threadIdx.x];
+  const int best = block_argmax<kArgSplit>(&v, pi[blockIdx.x * kArgSplit + threadIdx.x], lds, ldi);
+  if (!threadIdx.x) out[blockIdx.x] = best;
 }
 
 __global__ void add_kernel(float* y, const float* a, uint64_t n) {
@@ -578,9 +584,6 @@ __global__ void add_kernel(float* y, const float* a, uint64_t n) {
   if (i < n) y[i] += a[i];
 }
 
-unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
-bool ok() { return hipGetLastError() == hipSuccess; }
-hipStream_t st(void* s) { return (hipStream_t) s; }
 
 }  // namespace
 
@@ -839,16 +842,17 @@ extern "C" bool ops_hc_post_dot(const float* y, const float* res, const float* p
 extern "C" bool ops_hc_mix_pre_rms(const float* partial, const float* scale, const float* base, uint32_t hc,
                                    uint32_t dim, float eps, float hc_eps, uint32_t iters, uint32_t n_tok, float* mpre,
                                    float* post, float* comb, const float* h, const float* pre, const float* w,
-                                   float* x, void* x16, int32_t* overflow, void* stream) {
+                                   float* x, void* x16, int32_t* overflow, int8_t* q8, float* q8d, void* stream) {
   if (!hc || hc > OPS_MAX_HC || !dim || !iters || !n_tok || !pre || !w || !x || (!x16) != (!overflow)) return false;
   if (x16 && (dim % mm::kTile || n_tok > MM_MAX_TOKENS)) return false;
+  if ((!q8) != (!q8d) || (q8 && dim % LANE_Q8_VALUES)) return false;  // a wave a block of the int8 contract
   const hipStream_t s = st(stream);
   const uint32_t blocks = x16 ? tiles(n_tok) : n_tok;
   switch (hc) {
 #define HC_MIX_PRE(n)                                                                                              \
   case n:                                                                                                          \
     hc_mix_pre_rms_kernel<n><<<blocks, kWide, 0, s>>>(partial, scale, base, eps, hc_eps, iters, mpre, post, comb, h, \
-                                                      pre, dim, w, x, n_tok, (_Float16*) x16, overflow);           \
+                                                      pre, dim, w, x, n_tok, (_Float16*) x16, overflow, q8, q8d);  \
     break;
     HC_MIX_PRE(1) HC_MIX_PRE(2) HC_MIX_PRE(3) HC_MIX_PRE(4) HC_MIX_PRE(5) HC_MIX_PRE(6) HC_MIX_PRE(7) HC_MIX_PRE(8)
 #undef HC_MIX_PRE
@@ -856,8 +860,17 @@ extern "C" bool ops_hc_mix_pre_rms(const float* partial, const float* scale, con
   return ok();
 }
 
-extern "C" bool ops_argmax(const float* x, uint32_t n, uint32_t rows, uint32_t stride, int32_t* out, void* stream) {
-  if (!x || !out || !n || n > (uint32_t) INT32_MAX || !rows || stride < n) return false;
-  argmax_kernel<<<rows, kWide, 0, st(stream)>>>(x, n, stride, out);
+extern "C" uint64_t ops_argmax_scratch(uint32_t rows) {
+  return (uint64_t) rows * kArgSplit * (sizeof(float) + sizeof(int));
+}
+
+extern "C" bool ops_argmax(const float* x, uint32_t n, uint32_t rows, uint32_t stride, int32_t* out, void* scratch,
+                           void* stream) {
+  if (!x || !out || !scratch || !n || n >= (uint32_t) kArgNone || !rows || stride < n) return false;
+  float* pv = (float*) scratch;
+  int* pi = (int*) (pv + (uint64_t) rows * kArgSplit);
+  argmax_part_kernel<<<dim3(rows, kArgSplit), kArgThreads, 0, st(stream)>>>(x, n, stride, pv, pi);
+  if (!ok()) return false;
+  argmax_merge_kernel<<<rows, kArgSplit, 0, st(stream)>>>(pv, pi, out);
   return ok();
 }

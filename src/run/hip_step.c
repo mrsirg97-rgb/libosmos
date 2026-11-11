@@ -4,6 +4,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
+#include "lane.h"
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -84,7 +85,7 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   bool ok = (done || ops_hc_dot(fv(f, L->hc_attn_fn), b->h, hc, D, n, b->hcp, NULL)) &&
             ops_hc_mix_pre_rms(b->hcp, fv(f, L->hc_attn_scale), fv(f, L->hc_attn_base), hc, D, g->rms_eps, g->hc_eps,
                                g->sinkhorn_iters, n, b->a_pre, b->a_post, b->a_comb, b->h, pre, fv(f, L->attn_norm),
-                               b->x, f->probe ? NULL : b->x16, f->probe ? NULL : b->overflow, NULL);
+                               b->x, f->probe ? NULL : b->x16, f->probe ? NULL : b->overflow, NULL, NULL, NULL);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the attention's mixes)");
   fwd_probe(f, "a_pre", l, p, b->a_pre, n * hc, false);
@@ -96,10 +97,14 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   /* the FFN's input's x16 beside it for the shared expert (shared(): its rows the step's when one sub-batch is all of
      them; not with a probe, which may stand the oracle's in) */
   f->xf_x16 = f->n_sub == 1 && !f->probe;
+  /* and, a lane's small step over int8 experts: its int8 too (the lane's q8_round of xf, in this launch) */
+  f->xf_q8 = f->xf_x16 && f->lane && n * (uint32_t)g->n_used < (uint32_t)g->n_experts && D % LANE_Q8_VALUES == 0 &&
+             lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type);
   ok = ops_hc_post_dot(b->y, b->h, b->a_post, b->a_comb, hc, D, n, b->mid, fv(f, L->hc_ffn_fn), b->hcp, NULL) &&
        ops_hc_mix_pre_rms(b->hcp, fv(f, L->hc_ffn_scale), fv(f, L->hc_ffn_base), hc, D, g->rms_eps, g->hc_eps,
                           g->sinkhorn_iters, n, b->f_pre, b->f_post, b->f_comb, b->mid, b->a_pre, fv(f, L->ffn_norm),
-                          b->xf, f->xf_x16 ? b->x16 : NULL, f->xf_x16 ? b->overflow : NULL, NULL);
+                          b->xf, f->xf_x16 ? b->x16 : NULL, f->xf_x16 ? b->overflow : NULL,
+                          f->xf_q8 ? f->lane_xq : NULL, f->xf_q8 ? f->lane_xqd : NULL, NULL);
   if (!ok)
     return fwd_fail(err, "a GPU call failed (the FFN's mixes)");
   fwd_probe(f, "h_mid", l, p, b->mid, n * hc * D, false);
@@ -227,7 +232,8 @@ static bool fail_held(Forward *f)
   (void)hipDeviceSynchronize();
   if (f->cpu)
     (void)cpu_lane_wait(f->cpu);
-  fwd_release_held(f);
+  (void)hipMemset(f->b.overflow, 0, 4); /* what the failed step may have set: not the next step's to answer for */
+  membrane_end(f->mem);
   return false;
 }
 
@@ -236,14 +242,12 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
   const Geometry *g = f->g;
   if (!n || n > f->max_tokens)
     return fwd_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
-  if (f->n_warm && !fwd_warm(f, err))
+  if (!membrane_warm(f->mem, err)) /* the budget's experts, at the first step (nothing to do after it) */
     return false;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
   if (!place(f, seqs, tokens, n, err) || !fwd_engram_issue(f, err))
     return false;
-  if (hipMemsetAsync(f->b.overflow, 0, 4, NULL) != hipSuccess)
-    return fwd_fail(err, "a GPU call failed (the step)");
   f->hcp_next = false;
   bool ok = true;
   for (uint32_t k = 0; ok && k < f->n_sub; k++)
@@ -293,9 +297,10 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return fwd_fail(err, "a GPU call failed (the step)"), fail_held(f);
   if (f->cpu && !cpu_lane_wait(f->cpu))
     return fwd_fail(err, "the CPU lane's experts failed"), fail_held(f);
-  fwd_release_held(f);
-  if (f->pin->overflow)
-    return fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
+  membrane_end(f->mem);
+  if (f->pin->overflow) /* the flag cleared here and after a failed step (fail_held), not every step: a launch a step */
+    return (void)hipMemset(f->b.overflow, 0, 4),
+           fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   for (uint32_t i = 0; i < n; i++)
     seqs[i]->pos++;
   return true;

@@ -2758,6 +2758,260 @@ Q4X_PPL_DUMP: a token's log-probability and greatest id, 8,191 tokens), each aga
 from a reordering, on the down too a hint over it (+5%). So the iu8 kernel goes to the gate / up first, the down kept
 f16. (The distance from f16, not from BF16: none here to hold it to.)
 
+### 0.6.2: the membrane a module of its own (design, 2026-11-10)
+
+**Why.** the experts' cache (0.5.8) is the part of osmos that carries to any streamed MoE, and it lives inside
+DeepSeek's Forward: two pools, their reads and host slots, the holds, the clock, promotion, the warm start, the
+guess's wants and score - fields of Forward and code in hip_ffn.c, hip_held.c, hip_guess.c, hip_forward.c, read by
+hip_lane.c and hip_cpu_lane.c. Qwen can use none of it. this change moves it behind one interface, DeepSeek its first
+caller, **no behaviour changed**: the same pins, wants, releases and waits in the same order.
+
+**What is the membrane's, and what stays the model's.**
+- the membrane's: the units (a layer's experts, unit = layer x per_layer + expert), where each is (the membrane's
+  pool, the stream's, its file), the visit clock (a layer comes round n_layers visits on), a visit's holds and their
+  end (released, or passed for a prompt's step), promotion (the copy injected: the GPU's, queued on its stream),
+  the warm start, a want a visit ahead (a decode's guess into the membrane, marked for the score; a prompt's read
+  ahead into the stream), the waits and their counters.
+- the model's: which units a step picks and which it names ahead (its router, its guess: ahead_union stays the
+  caller's), the kernels that read the pointers, the budget (choose, fit), the files' O_DIRECT twins and the host
+  slots (the Slots injected, as the pool's). the CPU lane stays DeepSeek's: it begins a unit's read without waiting
+  (membrane_begin) and asks whether one is in memory.
+- found on the way: Forward.rix is -1 for every expert since 0.5.8 (units(): the budget's experts became the warm
+  start), so every `rix >= 0` branch - resident_dev for an expert in hip_ffn.c, hip_lane.c, hip_guess.c,
+  hip_cpu_lane.c - is dead. deleted with the move (a pure deletion).
+
+**The interface** (include/osmos/mem/membrane.h; src/mem/membrane.c - no HIP in it: Slots and the copy are the
+caller's, so it runs in a CPU test on real files and real readers):
+- `membrane_create(MembraneOptions)`: units, n_layers, per_layer, the two rooms and their Slots, read_align, readers,
+  the warm list, the copy. constructed whole; refused with why.
+- `membrane_warm`: the warm list read in and released the other way round (the first step's, as fwd_warm).
+- `membrane_visit(layer, passing)`: the finished reads handed in; a new layer ends the last one's holds and moves the
+  clock (the same layer again - a sub-batch - only drains). passing: a prompt's step.
+- `membrane_score(unit)`, `membrane_guess(unit)`, `membrane_ahead(unit)`: a pick scored against the last visit's
+  guess; a decode's guessed unit wanted in the membrane at the next visit; a prompt's named unit wanted in the stream.
+- `membrane_hold(unit)`: held for the visit - promoted, or pinned where it is, or its read begun (into the stream when
+  passing, else the membrane); a full pool waited on while reads are under way, refused loudly when none is.
+- `membrane_ready(unit, dev)` / `membrane_wait(unit, dev)`: its pointers if in memory now; or waited for (the lane
+  launches the ready ones first).
+- `membrane_begin(unit)`, `membrane_settle()`, `membrane_in_memory(unit)`: the CPU lane's.
+- `membrane_end()`: the step's end or its failure - every hold ended.
+- `membrane_stats`: waits and their time (guessed or not), streamed picks, guessed, the guess's reads.
+the order a caller keeps (fwd_moe's today): visit, score each pick, guess, hold each distinct unit, ahead.
+
+**The tests first.**
+- `test_membrane` (CPU; temp files, malloc Slots, a memcpy copy; fails on the stub's create): a held unit's bytes its
+  file's; a decode's units still in memory a round on with no wait; a prompt's step passing through - its misses in
+  the stream, the membrane's units all still there; promotion - the copy made, the unit kept when later prompts flush
+  the stream; the guess - read begun a visit ahead, scored a hit, an unguessed pick a miss; the warm start - in
+  memory with no hold, the first named the last to go; more held in a visit than the room - refused with why, the
+  next visit sound; the refusals; a random walk of visits and holds - every pointer's bytes right.
+- unchanged and still green: test_pool, test_reads, test_membrane_gpu, test_guess_gpu, test_warm_gpu, test_lane_gpu,
+  test_cpu_lane_gpu, test_forward_gpu, test_engine_gpu.
+- the oracle for "no behaviour changed": dbench on UD-IQ1_M (512-token steps, 128 new, q1 / a 2K prompt / q2, plain
+  and DSpark-drafted, the guess on) before and after - every ids hash held; the counters reported against 0.6.1's own
+  run-to-run spread (two runs: which reads have ended when a pick is scored is the SSD's timing).
+
+**Built and measured** (2026-11-10, performance, the box quiet). test_membrane failed on the stub's create, passes
+on the module. the forward moved: hip_held.c gone, hold / promote / the warm start / the clock / the counters out of
+hip_ffn.c, hip_forward.c, hip_guess.c, hip_cpu_lane.c (Forward 21 fields fewer), the dead rix branches deleted. one
+thing not a pure move: a promotion's hold in the membrane's pool is recorded before its copy, so a copy that fails
+leaves it to membrane_end (it was dropped unrecorded: a hold never released - the failure path only). and what
+0.6.1 had beside that leak: the failed copy's unit stays PINNED in the membrane's pool (pool_place pins before the
+bytes are written; a release leaves it pinned), so a later step that picked it would have read memory never
+written - reachable where the copy's launch fails and the GPU still answers (conv_failed's restart keeps the forward).
+closed here (the operator's choice: the pool's fix, not a membrane refused for good): pool_drop - an unheld pinned
+unit back to cold, its memory spare (test_pool's drop, failed first on a stub) - and the membrane refuses every call
+from the failed copy until membrane_end, which ends the holds and drops the unit; the forward's fail_held is past the
+GPU (hipDeviceSynchronize: the copies queued before the failed one write that memory) before it calls it. the unit
+is then promoted again from the stream's copy or read from its file (test_membrane: a copy that fails, twice, then
+works; it failed first on a visit that went through).
+- GPU tests green on it: test_membrane_gpu, test_guess_gpu, test_warm_gpu, test_lane_gpu, test_cpu_lane_gpu,
+  test_pool_gpu, test_engine_gpu, test_drafter_gpu, test_seqstate_gpu; the 27 CPU tests.
+- the oracle (0.6.1 twice, then this):
+
+  | | 0.6.1 run 1 | 0.6.1 run 2 | the module |
+  | --- | ---: | ---: | ---: |
+  | hashes, q1 / 2K / q2, plain and drafted | d7b31752 3489efd3 6b10ecda | the same | the same |
+  | plain: the guess's reads (after each answer) | 1394 / 2361 / 3276 | 1394 / 2361 / 3276 | 1394 / 2361 / 3276 |
+  | drafted: the guess's reads | 2086 / 3788 / 5102 | 2086 / 3796 / 5108 | 2086 / 3796 / 5108 |
+  | plain: reads waited for, in all | 2190 | 2177 | 2194 |
+  | drafted: reads waited for, in all | 2803 | 2782 | 2794 |
+  | plain: streamed picks, in all | 2167 | 2145 | 2185 |
+  | plain tok/s | 17.5 / 16.3 / 17.4 | 16.6 / 16.4 / 17.4 | 17.6 / 16.4 / 17.4 |
+  | drafted tok/s | 32.0 / 19.3 / 29.2 | 32.8 / 19.4 / 29.3 | 32.4 / 19.4 / 29.2 |
+
+  with pool_drop in (two more runs): every hash the same; the guess's reads 1394 / 2361 / 3277 and 1394 / 2369 / 3286
+  plain, 2087 / 3797 / 5109 and 2086 / 3796 / 5108 drafted - the counter moves a few reads run to run on one build
+  (room for a want depends on which reads have ended), so it is reported, not held; tok/s 17.7 / 16.4 / 17.4 plain,
+  32.4 / 19.3 / 29.2 drafted. the 27 CPU tests and the seven DeepSeek GPU tests above green on it.
+
+**Not in this change.** Qwen on the membrane: its experts are slices of three tensors a layer (units as DeepSeek's),
+but its routing never leaves the GPU today (tiles_kernel builds the pointers there) - it needs the picks on the host
+a layer (a routing event, as DeepSeek's) and its tables from the host. its own design, with its budget rule.
+
+### 0.6.2: what the two families share, and what they cannot (2026-11-10)
+
+**Read**: every kernel file and both host matmul layers, for what is written twice. the heavy kernels are one
+already - mm (the dense and the experts' matmuls, the f16), mv, quant, block.h's trees: ~85% of a decode token's GPU
+time in both families' traces. most of the rest that looks alike is not the same arithmetic: each family repeats
+another reference's (ref.py's, llama.cpp's), and the bits are the product.
+
+- **the same, made one (this commit: no arithmetic, no launch order - every hash held)**:
+  - the launch helpers (grid, st, ok, the elementwise block's 256 threads) were defined in 13 kernel files, silu in
+    three: kernels/launch.h, block.h's silu.
+  - q4x_gather: ops_gather_rows's expression, no caller since the experts' tiles - deleted.
+  - the dispatch of a matrix over a step's tokens (MM_MAX_TOKENS a time through the one x16, the conversion skipped
+    when an op wrote the f16 beside its output): fwd_mat / fwd_mat2 / fwd_mat_ready's three loops and q4x's mm_on
+    were one loop four times - mm_tokens (mm.h). each family keeps its own rule for mm or the matvec (DeepSeek: the
+    type; Qwen: the type and the shape).
+- **the same result by another kernel (next, each with its bit test)**: the greedy pick - three argmaxes (ops's a
+  block a row, q4x_top's, q4x's split in 64 slices: 248,320 logits ~160 us against ~10), the answer order-free (the
+  greatest, the lowest id among equals): one, the split one, with DeepSeek's rule for a NaN (-1, the pick refused)
+  for both - Qwen's skipped NaNs, the operator's choice it should not. the routers' top k: DeepSeek's a block-wide
+  argmax a pick (8 barriers each), Qwen's wave shuffles (0.5.11: 19.3 -> 13.9 us) - the pick shared, each family's
+  scores before it and weights after it its own.
+- **alike, not the same - left**: the rotations (three conventions: the pair's layout, how the angle is formed); the
+  attention and its keys' formats (FP8 / FP4 and three kernels; Q8_0 and WMMA chunks); the experts' activation
+  (DeepSeek's clamps and scales; equal to Qwen's at an infinite clamp but for a NaN); the hyper-connections (Sinkhorn
+  mixes; low-rank mixers); the embedding (rounded to BF16 and replicated in one launch; decoded then replicated in
+  two); the experts' sum (unweighted; weighted, with the gated shared expert); rms with weights (ops_rms and
+  q4x_hc_norm the same tree and order, their weights' indexing and f16 side differ - a candidate, with the f16 side
+  itself: an (x16, overflow) pair in ops, Q4xX16 in q4x, one concept); a sequence's state through a bounce buffer
+  (move_part twice).
+- **the greedy pick, built** (ops_argmax, ops_argmax_scratch: q4x's split, in ops.hip; q4x_argmax and ops's one-block
+  kernel gone): a thread that meets a NaN offers (+inf, -1), which block_argmax's rule carries through both trees -
+  the row's -1; a thread or slice with no value offers the index after every other, so a row all -inf is 0 (q4x's
+  gave INT_MAX there: no value was "greater than -inf"). q4x_greedy refuses a row with a NaN, with why. the tests:
+  test_q4x_overflow_gpu's NaN row (a NaN written into a kept row of logits: failed first - 0.6.1 picked the
+  greatest of the rest), test_argmax_gpu against a scan at both vocabularies and 40 values (ties far apart and
+  across a slice's seam, -0 and +0, all one value, all -inf, NaNs alone and under a greater value, a stride past
+  the row, each row alone). DeepSeek's pick one launch more (part, merge) for ~70 us less a token; both models'
+  hashes held (below's runs again: Qwen 78687b02a7b4d036, 28.1 / 44.4 tok/s; DeepSeek's six, 17.1 / 16.3 / 17.4
+  and 31.9 / 19.4 / 29.3) - the gain under what a run shows.
+- **the routers' pick, built** (block.h's wave_pick: q4x_route's shuffles, one definition; ops's router_kernel on
+  it - its scores and score + bias by the block's threads into LDS, the k picks by the first wave, the weights as
+  before). test_router_gpu holds ops_router to the block-wide kernel's bits (213 cases: experts 7 .. 384, k 1 .. 16,
+  random, tied and all-equal logits). two things on the way:
+  - **a hazard closed.** q4x_route on NaN logits (a softmax of NaN: no key "greater than -inf") wrote the pick
+    2147483647 - and q4x_expert_tiles indexes its LDS by the pick, on the GPU, no host between. now a lane with no
+    id offers kPickNone, which any id beats, and the keys pass pick_key (a NaN the least: NaNs compare false both
+    ways, and lanes that disagreed each took - and used up - their own id: the first build still ran out of ids at
+    33 experts, k 6). the k picks are k ids below n whatever the logits (test_router_gpu's hostile rows - NaN, -inf,
+    +inf - on both routers: failed first on q4x_route's 2147483647). the step is refused elsewhere (the f16 flag);
+    this is memory safety.
+  - **measured, not assumed** (rocprofv3, UD-IQ1_M, 128 decode tokens, performance): the first build - the keys
+    formed by the wave from sc and bias, 32 registers scanned a pick - was slower than the kernel it replaced, 9.26
+    -> 10.62 us a call; the keys formed by the block's threads and the scan stopped at the token's last id, 6.97 us
+    (79 calls a token with the guess: ~0.18 ms, ~0.3%). the greedy pick in the same traces 79.6 -> 7.7 us (6.1 + 1.6).
+  both models' hashes held; tok/s as before (Qwen 28.3 / 44.4; DeepSeek 17.6 / 16.1 / 17.4 and 32.2 / 19.4 / 29.2).
+- **measured** (performance, the box quiet): Qwen UD-IQ3_XXS a 4K prompt in 2K steps + 96 tokens, plain and MTP -
+  ids 78687b02a7b4d036 before and after, 921 / 921 tok/s the prompt, 28.3 / 28.2 plain, 44.2 / 44.6 drafted;
+  DeepSeek UD-IQ1_M the membrane's oracle - the six hashes the same, 17.6 / 16.3 / 17.4 plain, 32.2 / 19.4 / 29.2
+  drafted.
+
+### 0.6.2: DeepSeek's decode, traced again - two launches a layer gone, two ideas measured away (2026-11-10)
+
+**A token now** (UD-IQ1_M, plain, the guess on, performance; rocprofv3, 59 tokens): 58 ms - the Q6_K dense 19.5 (34%),
+the routed experts' int8 lane 11.4, wo_a's groups 5.4, the shared expert 6.6, the routing and its guess ~3.6, the
+hyper-connections 2.2; idle: the reads waited for ~2.6 ms (two a token, ~1.2 ms each), the launches' gaps ~2.5 (1,263
+of them). **a drafted round** (128 tokens in 33 rounds, 3.9 a round): 122 ms - the drafter 13.2 (its head by mv 3.2,
+its experts 4.9, the markov head 1.5), the verify 109: kernels 89.6, **the reads waited for 15.7 ms - eight a round,
+~1.9 ms each, 13% of the round** - the launches' gaps 3.0. drafted, the misses are the idle: the membrane's policy
+and room, and the guess (54% of the streamed picks named a layer ahead), not the kernels.
+
+- **kept: the lane's int8 input in the FFN's mix** (ops_hc_mix_pre_rms's q8, q8d: the mix's block is 1,024 threads,
+  thread d % 1024 value d - a wave a block of 32, lane i its value i, q8.h's round_kernel's layout; its max by the
+  wave's shuffles, lane.h's own round and scale: q8_round's bits, test_fuse_gpu against q8_round at 1, 5 and 9
+  tokens, both buffers garbage first). the lane's q8_round of xf skipped (Forward.xf_q8). **and the overflow flag
+  cleared where it is found set, and after a failed step (fail_held), not by a launch every step.** 1,263 -> 1,222
+  launches a token; kernels + launch gaps, three traces against two: 54,727 +- 20 -> 54,625 +- 40 us a token (-0.18%;
+  the mix +0.8 us a call, the round's 2.0 us and its gap gone). every hash held (DeepSeek's six, Qwen's).
+- **not kept: wo_a's outputs as f16 from mm_group's own stores** (mm_group_x16: tile's store hook writing y and
+  x16_put, wo_b on it with no mm_x16 - 40 launches a token; y mm_group's bits, the f16 and flag mm_x16's,
+  test_mm_gpu's case). the launch went and wo_b got slower by more: 165.7 -> 172.3 us a call in three traces of
+  each, the same with the f16 in the experts' buffer or one of its own (zeroed, a tile of tokens: 173.1) - every
+  other matmul's time unchanged. kernels + gaps 54,727 -> 54,845 with it, 54,625 without. the conversion kernel was
+  3 us and left its 262 KB in the cache for wo_b's first loads; written over 130 us under wo_a's 27 MB of weights
+  they are not there. reverted whole.
+- **not built: a wait for an expert's gate and up alone** (the down's read under the gate-and-up kernel). measured
+  first on the model's files through fetchq itself (12 readers, 1 MiB chunks, O_DIRECT, 200 cold experts a run,
+  the GPU suite on the same SSD: the absolute times noisy, the order not): every chunk given at once - the engine's
+  way - gate and up are there a median 0.0 - 0.1 ms before the whole unit (the parts end together: a lone unit is
+  ten requests in flight, bound by a request's latency, not the SSD's rate); gate and up first, then the down, the
+  whole read is longer (1.54 -> 1.64 ms in the quiet run), ~0.07 ms saved a read at best. a pool that knows parts
+  for that: no.
+- **looked at, left**: the attention's softmax into its neighbours (a values block would redo it eight times); the
+  shared expert's activation as its matmul's epilogue (gate and up are different blocks); the int8 round after gate
+  and up (0.3.x: tried). the int8 lane, the attention's three kernels and the grouped matmul read as tuned; the
+  big ones move ~200 GB/s, the F32 router ~150 (BF16 would halve it and move bits: the operator's call).
+
+### 0.6.2: DeepSeek's misses, looked at one by one (2026-11-10, performance)
+
+**A correction first.** the membrane's oracle and the traces above ran with the guess on (dbench's default); every
+DeepSeek pack ships `no_guess` (0.5.7). as shipped, a drafted round of UD-IQ1_M (128 tokens, 33 rounds) is the drafter
+13 ms and a verify of 102.7: kernels 86.6, **the reads waited for 12.6 (12.2 stalls a round, 1.03 ms each)**, the
+gaps 3.5 - 33.5-34.0 tok/s against the guess's 31.8-32.8.
+
+**The study** (a build that wrote every small step's picks with each unit's state, and the next layer's guess; not
+kept): 148 steps of 40 layers, 105,832 distinct (layer, expert) picks.
+- 2.4% of the picks miss (the guess on; 3.3% off): 17 a step, a quarter of the layers stalled each step.
+- **96.5% of the misses are an expert's first pick of the run** (2,420 of 2,508); 88 were held before and evicted,
+  ~100 steps earlier - by the 2K prompt between the questions. the membrane's rule keeps what was used; what stalls is
+  what was never used. more misses early in an answer (22 a step in the run's first third, 13 in the middle): a long
+  session loads its own working set.
+- the guess (the next layer's router on this layer's input, 6 a token) names 37% of the misses - and every one it
+  names is still reading when its layer comes (a layer's lead, ~2.5 ms, against a read's ~1.5 behind others). a
+  named miss's rank among its token's 6 is flat (133 / 176 / 152 / 173 / 128 / 131): the look-ahead does not order
+  the rare experts, so widening it buys recall slowly and reads fast.
+- **the guess's width, measured** (the three drafted answers, tok/s):
+
+  | names a token | 0 (shipped) | 3 | 4 | 6 | 12 | 16 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | q1 / after a 2K prompt / q2 | 34.0 / 19.9 / 30.1 | 33.7 / 20.0 / 30.1 | 32.5 / 19.3 / 29.2 | 31.8 / 19.5 / 29.5 | 25.0 / 14.8 / 21.4 | 20.2 / 12.3 / 18.0 |
+  | the misses named | - | 8% | 16% | 37% | 73% | 80% |
+  | reads the guess began (the run) | 0 | 1,562 | 2,815 | 5,086 | 16,587 | 24,010 |
+
+  off is right, again: each named miss costs several reads of experts never picked, on the one SSD the stalls wait
+  for.
+- **a read's own time** (a lone 9.1 MiB expert, the fetcher's way, the box quiet): 1.52 ms, the preads 1.52 of it
+  (6 GiB/s, the drive's ceiling 6.4); the first reader's wake 7-10 us, the waiter's 3-15. readers that never slept
+  ended a read ~0.14 ms sooner (the other eleven's wakes, one after another): ~9% of a stall, the one overhead found -
+  an io path with no thread to wake (io_uring, the forward's thread submitting) would have it; not built.
+so: the cache's rule is not it, the guess is not it, the waits are the drive's rate times the bytes of experts a
+session has not used yet. what moves that is the bytes an expert is (the quant), the share resident (the RAM kept
+free), and the session's length.
+
+**The overflow flag's move, tested** (test_overflow_gpu: a probe's 1e30 in a layer's attention input - the step
+refused; the next step accepted and its token a clean forward's, twice; single-token steps after one). with the
+clearing deleted the step after an overflow is refused: the test's mutant, seen. not tested: fail_held's clearing (a
+step that fails another way after setting the flag - no fault to inject).
+
+### 0.6.2: Qwen's waits - a bubble that was the profiler's (2026-11-10, performance)
+
+**The claim.** every kernel trace of a decode shows the GPU idle 260-440 us between a step's last copy and the greedy
+pick's argmax (0.5.9's trace: 261 us a token; 0.6.0's list carried it as "the token-boundary bubble, ~1.4%"). read as a
+sleeping wait's late wake, it promised 0.7% of a plain token and 2-3% of a drafted round (a wait a draft depth). the
+design: a wait asleep to a mark queued before the head's matmul, polled from there (GpuWait) - built, with its tests.
+
+**What was measured.**
+- the wait did what it was built to (in the engine, a decode step: asleep 28.8 ms to the mark, polled 2.32 ms - the
+  head's own time - and back at the end), and the bench did not move: plain 28.18 / 28.22 tok/s before / after, MTP
+  44.38 / 44.46 (three rounds each, interleaved, ids 78687b02a7b4d036 throughout). the greedy pick through pinned
+  memory and a polled event instead of a blocking copy, alone: 28.23 / 28.17 and 44.52 / 44.63 (four rounds). nothing.
+- **the idle is rocprofv3's.** a marker kernel launched the moment the step's wait returns: the launch call itself
+  takes 250-340 us on the host under rocprofv3 and **2.2-2.5 us without it**. the profiler does its own work at the
+  first launch after a wait (its dispatches' records, ~1,650 a step), the GPU idle meanwhile; the trace then shows that
+  idle between the step and the pick. the same gap in DeepSeek's traces (48 + 95 us a token) is the same thing.
+- a sleeping wait's wake is late in a test of its own (a one-thread busy kernel, then hipStreamSynchronize: the GPU
+  idle 340-730 us by the device's clock, 17 polled) - and not in the engine, where removing it buys nothing. why the
+  two differ is not known; the engine's number is the one that counts.
+
+**So**: nothing kept - GpuWait, q4x_forward_waits and their two tests removed (the patch in the session's scratch), a
+core polled 2.3 ms a token would have cost joules for no time. and a rule for the traces: **a kernel trace's gaps
+after a host wait are the profiler's until a run without it says otherwise** - the launches' gaps (~2 us each, the
+GPU's own between dependent dispatches) and the reads' stalls (the engine's own counters agree) stand; the token
+boundary does not. 0.6.0's "token kept on the GPU, the n-gram hashing on the GPU" has no bubble to remove.
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate

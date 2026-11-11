@@ -139,7 +139,7 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
       continue;
     }
     const uint32_t u = (uint32_t)l * E + (uint32_t)rows[r][0];
-    if ((on_cpu = f->cpu && f->on_cpu[u] == f->visits))
+    if ((on_cpu = f->cpu && f->on_cpu[u] == membrane_clock(f->mem)))
     {
       const void *part[POOL_PARTS];
       if (!fwd_cpu_parts(f, u, part))
@@ -148,11 +148,9 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
       t->cpu_row[n_cpu++] = (int32_t)r;
       continue;
     }
-    /* in GPU memory now (resident, or read into the pool): its pointers; else still reading - waited for after the
-       ready ones are launched */
+    /* in GPU memory now: its pointers; else still reading - waited for after the ready ones are launched */
     const void *ex[POOL_PARTS] = {NULL, NULL, NULL};
-    Pool *in = fwd_pool_in(f, u);
-    const bool ready = f->rix[u] >= 0 ? resident_dev(f->res, (size_t)f->rix[u], ex) : in && pool_dev(in, u, ex);
+    const bool ready = membrane_ready(f->mem, u, ex);
     t->w[0][ne] = ex[0], t->w[1][ne] = ex[1], t->w[2][ne] = ex[2];
     unit_of[ne] = ready ? UINT32_MAX : u;
     t->cnt[ne] = 1, t->xrow[ne] = (int32_t)r, ne++;
@@ -198,14 +196,14 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
      activation alone. the F32 matvec reads its rows gathered */
   const bool q8 = lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type);
   const bool fused = q8 && L->exp_gate->type == L->exp_up->type;
-  bool ok = (q8 ? q8_round(b->xf, n, D, D, f->lane_xq, f->lane_xqd, NULL)
+  bool ok = (q8 ? f->xf_q8 || q8_round(b->xf, n, D, D, f->lane_xq, f->lane_xqd, NULL)
                 : ops_gather_rows(f->lane_x, b->xf, d->tok, picks, D, NULL)) &&
        (fused || ops_gather_rows(f->lane_w, b->rw, d->pair, picks, 1, NULL));
   ok = ok && entries(f, l, picks, 0, nr, q8); /* the ready ones, then the reading ones as their reads end */
   for (uint32_t k = nr; ok && k < ne; k++)
   {
     const void *ex[POOL_PARTS];
-    if (!fwd_pinned(f, unit_of[k], ex, err)) /* (its err set) */
+    if (!membrane_wait(f->mem, unit_of[k], ex, err)) /* (its err set) */
       return false;
     t->w[0][k] = ex[0], t->w[1][k] = ex[1], t->w[2][k] = ex[2];
   }

@@ -55,6 +55,7 @@ struct Drafter
       *cval, *main_x, *kvs;
   uint8_t *kvs_p; /* those rows packed as the ring keeps them (kvfmt.h's KV_FP8) */
   int32_t *ridx, *sel, *n_sel, *pos_q, *pos_a, *ids, *pair, *tap_pos, *best;
+  void *best_part; /* ops_argmax's scratch, a row */
   const void **tab; /* [w1, w3, w2][pair]: a round's picks' pointers (gathered on the device) */
   DPin *pin;
 };

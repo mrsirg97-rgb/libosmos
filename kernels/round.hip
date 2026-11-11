@@ -1,6 +1,7 @@
 // ops (include/osmos/gpu/ops.h): the reference kernels' activation roundings - act_quant's FP8, fp4_act_quant's
 // FP4 - and BF16, each value as ref.py rounds it
 #include <cmath>
+#include "launch.h"
 
 #include "kvload.h"
 #include "round.h"
@@ -11,19 +12,20 @@ extern "C" {
 
 namespace {
 
+using launches::kThreads;
+using launches::grid;
+using launches::st;
+using launches::ok;
+
 using namespace rnd;
 
-constexpr int kThreads = 256;
 constexpr int kWave = 32;
 constexpr int kWaves = kThreads / kWave;
 constexpr float kFp4Max = 6.0f;          // E2M1's largest
 constexpr int kE4m3ScaleFloorExp = -9;   // fp4_act_quant's E4M3-scale amax floor: 6 * 2^-9
 constexpr int kPow2ScaleFloorExp = -126; // and its power-of-two one: 6 * 2^-126
 
-unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
 unsigned wave_grid(uint64_t blocks) { return (unsigned) ((blocks + kWaves - 1) / kWaves); }
-bool ok() { return hipGetLastError() == hipSuccess; }
-hipStream_t st(void* s) { return (hipStream_t) s; }
 
 // a wave a block, a lane a value (fp4's longer blocks: lanes strided): the loads coalesced, the max round.h's xor tree
 // packed (or NULL): rows of dim as kvfmt.h's KV_FP8 - a value's code at its place, a block's scale after the row's codes

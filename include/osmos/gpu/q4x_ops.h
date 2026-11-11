@@ -44,9 +44,6 @@ bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_t
                     float eps, float *y, const Q4xX16 *side, void *stream);
 
 bool q4x_top(const float *logits, uint32_t n, uint32_t rows, uint32_t stride, int32_t *id, float *p, void *stream);
-uint64_t q4x_argmax_scratch(uint32_t rows);
-bool q4x_argmax(const float *logits, uint32_t n, uint32_t rows, uint32_t stride, int32_t *id, void *scratch,
-                void *stream);
 bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out, void *stream);
 
 /* a rotation (q4x_rope): its dims (a head's first), its angles' step, and YaRN's - none: ext_factor 0, freq_scale and
@@ -123,7 +120,6 @@ typedef struct Q4xExpertBounds
 void q4x_expert_bounds(uint32_t n, uint32_t n_exp, Q4xExpertBounds *b);
 bool q4x_expert_tiles(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t dim, uint32_t ff,
                       const Q4xExpertTiles *t, void *stream);
-bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
 bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, const Q4xX16 *side, void *stream);
 bool q4x_spin(uint32_t us, void *stream); /* a test's: at least ~us of the stream's time, nothing computed */
 bool q4x_swiglu_rows(const float *g, const float *u, uint32_t ff, const int32_t *idx, uint32_t slots, void *x16,
@@ -255,15 +251,10 @@ q4x_gated_norm
 the MTP head's:
 
 q4x_top
-  rows rows of n logits (stride floats apart): id[r] row r's greatest (the lowest among equals, as ops_argmax), p[r]
+  rows rows of n logits (stride floats apart): id[r] row r's greatest (the lowest among equals; a NaN never taken - a
+  draft is a proposal, the greedy pick is ops_argmax's, which refuses the row), p[r]
   its softmax probability - 1 / sum over i of exp(logits[i] - max), the sum in a fixed order (a draft's confidence;
   p NULL: not wanted - a greedy pick's).
-
-q4x_argmax, q4x_argmax_scratch
-  q4x_top's id alone (p not wanted: the greedy pick), the row split across blocks - each its slice's greatest, the
-  lowest among equals, then the slices' the same way: the same id as q4x_top's on every row (ties, NaNs never taken, a
-  row of -inf). scratch: q4x_argmax_scratch(rows) bytes of device memory, the slices' bests. a row in one block
-  scanned 248,320 logits in ~160 us; split, ~10.
 
 q4x_join
   out[t][s] = [e[t] ; h[t][s]] (2 dim floats a stream): a token's normed embedding beside each stream's normed state,
@@ -342,9 +333,6 @@ q4x_expert_bounds, q4x_expert_tiles
   (q4x_expert_bounds: min(n, n_exp), min(n / 17, n_exp), min(n / 33, n_exp), n / 65), the slots past the live ones
   -1, to n + 15 min(n, n_exp) - the launches' and the tables'. a launch a run (mm_group, max_cnt 16 << r): a part's
   slab decoded once for its tiles. which picks share a part changes no bit: mm's tokens are their own.
-
-q4x_gather
-  dst[e][] = src[rows[e]][] for e < n, len floats a row: an entry's own copy of its token's input.
 
 q4x_swiglu
   y[i] = silu(g[i]) u[i].

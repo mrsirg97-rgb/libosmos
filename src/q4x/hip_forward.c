@@ -211,7 +211,7 @@ static bool buffers(Q4xForward *f, char *err)
       {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},       {&b->ple_rows, n * g->ple_heads * 4, 1},
       {&b->ple_sbuf, n * g->ple_heads * ple_row_bytes(f), 1},          {&b->ple_iota, n * g->ple_heads * 4, 0},
       {&b->taps, n * f->n_taps * D * F, 0},
-      {&b->tok, n * 4, 1},             {&b->top_part, q4x_argmax_scratch((uint32_t)n), 0},
+      {&b->tok, n * 4, 1},             {&b->top_part, ops_argmax_scratch((uint32_t)n), 0},
       {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
   };
   /* b.xe16 also holds a mixer's up's f16 input (hip_layers.c down_up: a step's tokens x hc_rank, whole tiles) */

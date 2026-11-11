@@ -369,6 +369,16 @@ PoolPin pool_place(Pool *p, uint32_t unit, const void *dev[POOL_PARTS])
   return POOL_OK;
 }
 
+bool pool_drop(Pool *p, uint32_t unit)
+{
+  if (!p || unit >= p->n || p->s[unit].state != POOL_PINNED || p->s[unit].holds)
+    return false;
+  Slot *s = &p->s[unit];
+  const uint64_t size = s->size;
+  keep_spare(p, unpin(p, s), size);
+  return true;
+}
+
 void pool_ready(Pool *p, uint32_t unit, bool ok)
 {
   if (!p || unit >= p->n || p->s[unit].state != POOL_READING)

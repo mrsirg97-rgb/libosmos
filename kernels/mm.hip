@@ -467,6 +467,20 @@ extern "C" bool mm_run2(uint32_t type, const void* w0, uint32_t rows0, float* y0
          run(type, Mats{{w0, w1}, {rows0, rows1}, {y0, y1}, {ys0, ys1}}, cols, x16, n, (hipStream_t) stream);
 }
 
+extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
+                          uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const float* x, uint32_t xs,
+                          uint32_t n, void* x16, int32_t* overflow, bool ready, void* stream) {
+  bool ok = true;
+  for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS) {
+    const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
+    ok = ((ready && n <= MM_MAX_TOKENS) || mm_x16(x + (uint64_t) k0 * xs, xs, m, cols, x16, overflow, stream)) &&
+         (w1 ? mm_run2(type, w0, rows0, y0 + (uint64_t) k0 * ys0, ys0, w1, rows1, y1 + (uint64_t) k0 * ys1, ys1, cols,
+                       x16, m, stream)
+             : mm_run(type, w0, rows0, cols, x16, m, y0 + (uint64_t) k0 * ys0, ys0, stream));
+  }
+  return ok;
+}
+
 extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,
                             int32_t* overflow, void* stream) {
   // a run's two float4 loads: x's rows 16-byte aligned (hipMalloc's, a stride of 4s)

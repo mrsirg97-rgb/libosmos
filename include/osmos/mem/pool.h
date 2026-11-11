@@ -78,6 +78,7 @@ void pool_destroy(Pool *p);
 
 PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
 PoolPin pool_place(Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
+bool pool_drop(Pool *p, uint32_t unit);
 void pool_want(Pool *p, uint32_t unit, uint64_t next);
 void pool_ready(Pool *p, uint32_t unit, bool ok);
 bool pool_dev(const Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);
@@ -139,6 +140,12 @@ pool_place
   before anything reads them - a copy of the unit held elsewhere (the forward's: an expert a decode takes from the
   stream's memory into the membrane's, DESIGN.md "0.5.8"). POOL_OK, `dev` its parts' memory (a PIN event); POOL_FULL
   when no room can be made, or the unit is not cold - nothing changed.
+
+pool_drop
+  a pinned unit with no hold made cold, its memory kept spare (an UNPIN event): for a pool_place whose bytes the
+  caller could not write - nothing must read them as the unit's. the caller's part: its hold released first, and
+  the GPU past everything that reads or writes the unit's memory. false, nothing changed, for a unit held, reading
+  or cold.
 
 pool_want
   the unit, no hold on it, is wanted at `next` (pool_release's clock): a cold one's read begins (its memory taken: a

@@ -54,7 +54,7 @@ bool fwd_guess_queue(Forward *f, int l)
 }
 
 /* after the routing event: the guessed experts of the next layer not resident, wanted at the next visit (the next
-   layer's: f->visits + 1 once its routing comes), each marked for the score */
+   layer's), each marked for the score (membrane_guess) */
 void fwd_guess_want(Forward *f, int l)
 {
   if (!small(f, l))
@@ -63,28 +63,7 @@ void fwd_guess_want(Forward *f, int l)
   for (uint32_t m = 0; m < f->n * FWD_GUESS_K; m++)
   {
     const int32_t e = f->r_guess[m];
-    if (e < 0 || (uint32_t)e >= E || f->rix[next + (uint32_t)e] >= 0)
-      continue;
-    f->guessed[next + (uint32_t)e] = f->visits + 1;
-    if (fwd_pool_in(f, next + (uint32_t)e) == f->stream)
-      continue; /* in the stream's memory already */
-    const bool cold = pool_state(f->pool, next + (uint32_t)e) == POOL_COLD;
-    pool_want(f->pool, next + (uint32_t)e, f->visits + 1); /* the next layer's visit */
-    f->g_read += cold && pool_state(f->pool, next + (uint32_t)e) != POOL_COLD;
-  }
-}
-
-/* a small step's streamed picks of this layer, and those its last layer guessed */
-void fwd_guess_score(Forward *f, int l, const int32_t *ids, uint32_t picks)
-{
-  const uint32_t E = (uint32_t)f->g->n_experts;
-  if (!l || picks >= E)
-    return;
-  for (uint32_t m = 0; m < picks; m++)
-  {
-    const uint32_t u = (uint32_t)l * E + (uint32_t)ids[m];
-    const Pool *in = (uint32_t)ids[m] < E ? fwd_pool_in(f, u) : NULL;
-    if ((uint32_t)ids[m] < E && f->rix[u] < 0 && !(in && pool_state(in, u) == POOL_PINNED)) /* not in memory */
-      f->g_need++, f->g_hit += f->guessed[u] == f->visits;
+    if (e >= 0 && (uint32_t)e < E)
+      membrane_guess(f->mem, next + (uint32_t)e); /* wanted at the next layer's visit */
   }
 }

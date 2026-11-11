@@ -92,8 +92,9 @@ static uint64_t largest_unit(const Forward *f, const PoolUnit *all)
 }
 
 /* the resident set: every tensor the layers use but the routed experts, then experts while the budget lasts - expert
-   0 of each layer, then 1, ..: an equal share of each layer, so every layer's streaming is alike. f->rix: an
-   expert unit's place in the set, -1 for one the pool streams. the units past n_res are the experts chosen */
+   0 of each layer, then 1, ..: an equal share of each layer, so every layer's streaming is alike. rix: an
+   expert unit's place in the set, -1 for one the pool streams. the units past n_res are the experts chosen (units():
+   the membrane's warm start since 0.5.8 - rix its scratch, no expert resident) */
 typedef struct Layout
 {
   uint64_t total, used, cap; /* the arenas' bytes; the last one's fill and size */
@@ -123,7 +124,7 @@ static int rank_cmp(const void *a, const void *b)
 /* the resident experts: a rank at a time, each layer's expert of that rank while the budget holds it - by the
    picks counted on calibration text (forward_create_ranked's, most first), else by id. so each layer's share is
    about equal and its most-picked first */
-static size_t choose(Forward *f, const PoolUnit *ex, PoolUnit *res, size_t n_res, uint64_t budget,
+static size_t choose(Forward *f, int32_t *rix, const PoolUnit *ex, PoolUnit *res, size_t n_res, uint64_t budget,
                      const uint64_t *picks, char *err)
 {
   const uint32_t E = (uint32_t)f->g->n_experts;
@@ -147,20 +148,20 @@ static size_t choose(Forward *f, const PoolUnit *ex, PoolUnit *res, size_t n_res
   }
   size_t n = n_res;
   for (uint32_t i = 0; i < f->n_expert_units; i++)
-    f->rix[i] = -1;
+    rix[i] = -1;
   for (uint32_t r = 0; r < E; r++)
     for (int l = 0; l < f->n_layers; l++)
     {
       const uint32_t i = (uint32_t)l * E + order[(size_t)l * E + r];
       if (with(a, unit_bytes(&ex[i])) <= budget)
-        f->rix[i] = (int32_t)n, res[n++] = ex[i], add(&a, unit_bytes(&ex[i]));
+        rix[i] = (int32_t)n, res[n++] = ex[i], add(&a, unit_bytes(&ex[i]));
     }
   free(order);
   return n;
 }
 
 /* the pool's room: two layers' streamed experts (the one the GPU is in, the next one's reads) */
-static uint64_t stream_budget(const Forward *f, const PoolUnit *ex)
+static uint64_t stream_budget(const Forward *f, const int32_t *rix, const PoolUnit *ex)
 {
   const uint32_t E = (uint32_t)f->g->n_experts;
   uint64_t most = 0, unit = 0;
@@ -171,7 +172,7 @@ static uint64_t stream_budget(const Forward *f, const PoolUnit *ex)
     {
       const uint64_t b = unit_bytes(&ex[l * E + e]);
       unit = b > unit ? b : unit;
-      layer += f->rix[l * E + e] < 0 ? b : 0;
+      layer += rix[l * E + e] < 0 ? b : 0;
     }
     most = layer > most ? layer : most;
   }
@@ -221,33 +222,11 @@ static bool repack_all(Forward *f, const GgufTensor *const *t_res, size_t n_t)
   return ok;
 }
 
-/* the budget's experts read into the pool at the first step, in choose's order (each layer's most picked first), then
-   released the other way round - the most picked the most recent: the last to go. at the first step, not at create:
-   fit.h's sizing builds several forwards before the one it keeps, and each would read them (UD-IQ2_XXS: ~600 GB) */
-static bool warm_start(Forward *f, const uint32_t *warm, size_t n, char *err)
+/* a promotion's copy (membrane.h): on the forward's stream, after the kernels that read the stream's copy before */
+static bool copy_on_stream(void *dst, const void *src, uint64_t bytes, void *ctx)
 {
-  for (size_t k = 0; k < n; k++)
-    if (pool_pin(f->pool, warm[k], (const void *[POOL_PARTS]){0}) == POOL_FULL)
-      return fwd_fail(err, "an expert the budget holds the pool could not");
-  while (pool_reading(f->pool))
-    if (!fwd_wait_read(f, err))
-      return false;
-  for (size_t k = 0; k < n; k++)
-    if (pool_state(f->pool, warm[k]) != POOL_PINNED)
-      return fwd_fail(err, "an expert's read from its file failed");
-  for (size_t k = n; k-- > 0;)
-    pool_release(f->pool, warm[k], 0);
-  return true;
-}
-
-bool fwd_warm(Forward *f, char *err)
-{
-  uint32_t *warm = f->warm;
-  const size_t n = f->n_warm;
-  f->warm = NULL, f->n_warm = 0; /* once, read or refused */
-  const bool ok = warm_start(f, warm, n, err);
-  free(warm);
-  return ok;
+  (void)ctx;
+  return ops_copy(dst, src, bytes, NULL);
 }
 
 /* the units: each layer's experts (the pool's, every one: the budget's read in first), then every other tensor the
@@ -263,14 +242,12 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   const GgufTensor **t_res = calloc(n_res_max, sizeof *t_res);
   f->tdev = calloc(weights_tensors(w), sizeof *f->tdev);
   f->ttype = calloc(weights_tensors(w), sizeof *f->ttype);
-  f->rix = calloc(f->n_expert_units, sizeof *f->rix);
-  f->is_held = calloc(f->n_expert_units, sizeof *f->is_held);
-  f->held_layer = -1;
-  bool ok = all && res && t_res && f->tdev && f->ttype && f->rix && f->is_held &&
+  int32_t *rix = calloc(f->n_expert_units, sizeof *rix);
+  bool ok = all && res && t_res && f->tdev && f->ttype && rix &&
             weights_experts(w, f->fds, all, (size_t)w->geo.n_layers * E) == (size_t)w->geo.n_layers * E;
   if (!ok)
   {
-    free(all), free(res), free(t_res);
+    free(all), free(res), free(t_res), free(rix);
     return fwd_fail(err, "out of memory, or the experts' units");
   }
   size_t n_t = 0;
@@ -293,7 +270,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   }
   /* the budget's experts (choose's) the pool's first: the pool holds every expert - its room theirs and the stream's
      (DESIGN.md, "0.5.8: the membrane"); the resident set the dense weights alone */
-  const size_t n_res = choose(f, all, res, n_t, budget, picks, err);
+  const size_t n_res = choose(f, rix, all, res, n_t, budget, picks, err);
   const size_t n_warm = n_res > n_t ? n_res - n_t : 0;
   uint32_t *warm = n_warm ? malloc(n_warm * sizeof *warm) : NULL;
   char perr[POOL_ERR] = "";
@@ -302,29 +279,28 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   uint64_t stream_room = 0;
   if (ok)
   {
-    stream_room = stream_budget(f, all), f->pool_room = 0;
+    stream_room = stream_budget(f, rix, all), f->pool_room = 0;
     for (uint32_t i = 0; i < f->n_expert_units; i++)
-      if (f->rix[i] >= 0)
-        warm[(size_t)f->rix[i] - n_t] = i, f->pool_room += pool_unit_bytes(&all[i], ARENA_GRAIN), f->rix[i] = -1;
+      if (rix[i] >= 0)
+        warm[(size_t)rix[i] - n_t] = i, f->pool_room += pool_unit_bytes(&all[i], ARENA_GRAIN);
   }
+  free(rix);
   if (!ok)
     ;
   else if (!(f->res = resident_create(res, n_t, hip_slots(), FWD_FETCH_THREADS, perr)))
     ok = fwd_fail(err, perr);
-  else if (!(f->reads = reads_create((uint32_t)f->n_expert_units, FWD_FETCH_THREADS, perr)))
-    ok = fwd_fail(err, perr);
   else if (!direct_units(f, all) || !f->pool_room ||
            !(f->hs = host_slots_create(f->pool_room + 2 * largest_unit(f, all), perr)) ||
-           !(f->pool = pool_create(all, f->n_expert_units, f->pool_room, host_slots(f->hs), reads_fetcher(f->reads, 0),
-                                   ARENA_GRAIN, NULL, NULL, perr)) ||
-           !(f->hs_stream = host_slots_create(stream_room + 2 * largest_unit(f, all), perr)) ||
-           !(f->stream = pool_create(all, f->n_expert_units, stream_room, host_slots(f->hs_stream),
-                                     reads_fetcher(f->reads, 1), ARENA_GRAIN, NULL, NULL, perr)))
+           !(f->hs_stream = host_slots_create(stream_room + 2 * largest_unit(f, all), perr)))
     ok = fwd_fail(err, perr[0] ? perr : "out of memory (the pools' units), or a budget with no experts");
-  if (ok)
-    f->warm = warm, f->n_warm = n_warm; /* read at the first step (fwd_warm) */
-  else
-    free(warm);
+  else /* the budget's experts its warm start: read at the first step (membrane_warm), not here - fit.h's builds */
+  {
+    const MembraneOptions mo = {all,       (uint32_t)f->n_layers,    E,           f->pool_room,      stream_room,
+                                host_slots(f->hs), host_slots(f->hs_stream), ARENA_GRAIN, FWD_FETCH_THREADS, warm,
+                                n_warm,    copy_on_stream,           NULL};
+    ok = (f->mem = membrane_create(&mo, err)) != NULL;
+  }
+  free(warm);
   for (size_t i = 0; ok && i < n_t; i++)
   {
     const void *dev[POOL_PARTS];
@@ -517,13 +493,12 @@ static bool scratch(Forward *f)
   for (int l = 0; l < g->n_layers; l++)
     n_eg += g->engram[l];
   f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
-  return fwd_put(b->pre0, pre0, B * hc * F) &&
+  return fwd_put(b->pre0, pre0, B * hc * F) && fwd_alloc(&f->argmax_part, ops_argmax_scratch((uint32_t)B)) &&
          hipHostMalloc((void **)&f->r_ids, P * 4, hipHostMallocMapped | hipHostMallocCoherent) == hipSuccess &&
          hipHostGetDevicePointer((void **)&f->r_ids_dev, f->r_ids, 0) == hipSuccess &&
          hipHostMalloc((void **)&f->r_guess, S * FWD_GUESS_K * 4, hipHostMallocMapped | hipHostMallocCoherent) ==
              hipSuccess &&
          hipHostGetDevicePointer((void **)&f->r_guess_dev, f->r_guess, 0) == hipSuccess &&
-         (f->guessed = calloc(f->n_expert_units, sizeof *f->guessed)) &&
          hipHostMalloc((void **)&f->r_up, FWD_UP_BYTES(P), 0) == hipSuccess &&
          (f->m_by = malloc(P * 4)) && (f->m_row = malloc(P * 4)) && (f->m_base = malloc(P * 4)) &&
          (f->m_slot0 = malloc(P * 4)) &&
@@ -669,12 +644,9 @@ void forward_destroy(Forward *f)
   if (!f)
     return;
   (void)hipDeviceSynchronize(); /* a failed step's kernels done: what is freed or unlocked, the GPU is past */
-  reads_destroy(f->reads);      /* its readers stopped before the pool they feed goes */
-  pool_destroy(f->pool), pool_destroy(f->stream);
-  host_slots_destroy(f->hs), host_slots_destroy(f->hs_stream); /* after the pools: no unit still in them */
+  membrane_destroy(f->mem);
+  host_slots_destroy(f->hs), host_slots_destroy(f->hs_stream); /* after the membrane: no unit still in them */
   resident_destroy(f->res);
-  free(f->rix), free(f->warm);
-  free(f->is_held);
   rowread_destroy(f->eg_read);
   free(f->eg_off);
   free(f->tdev);
@@ -686,7 +658,6 @@ void forward_destroy(Forward *f)
     f->b.xf = f->xf0, f->b.moe = f->moe0, f->b.mid = f->mid0, f->b.f_post = f->f_post0, f->b.f_comb = f->f_comb0;
   hipHostFree(f->r_ids);
   hipHostFree(f->r_guess);
-  free(f->guessed);
   hipHostFree(f->r_up);
   free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0);
   free(f->picks), free(f->units);
@@ -695,6 +666,7 @@ void forward_destroy(Forward *f)
   hipFree(f->lane_x), hipFree(f->lane_w), hipFree(f->lane_q), hipFree(f->lane_qd),
       hipFree(f->lane_xq), hipFree(f->lane_xqd);
   hipFree(f->taps);
+  hipFree(f->argmax_part);
   if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
   {
     const Sub *s = &f->sub[0];
@@ -745,13 +717,17 @@ const float *forward_stream(const Forward *f) { return f->b.h; }
 const uint64_t *forward_picks(const Forward *f) { return f->picks; }
 void forward_guesses(const Forward *f, uint64_t *streamed, uint64_t *guessed, uint64_t *read)
 {
-  *streamed = f->g_need, *guessed = f->g_hit;
+  MembraneStats s;
+  membrane_stats(f->mem, &s);
+  *streamed = s.streamed, *guessed = s.guessed;
   if (read)
-    *read = f->g_read;
+    *read = s.guess_read;
 }
 void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2])
 {
-  n[0] = f->w_n[0], n[1] = f->w_n[1], ns[0] = f->w_ns[0], ns[1] = f->w_ns[1];
+  MembraneStats s;
+  membrane_stats(f->mem, &s);
+  n[0] = s.waits[0], n[1] = s.waits[1], ns[0] = s.wait_ns[0], ns[1] = s.wait_ns[1];
 }
 const float *forward_logits(const Forward *f) { return f->b.vocab; }
 
@@ -761,7 +737,7 @@ bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char
     return fwd_fail(err, "rows the last step's head did not compute");
   const uint32_t V = (uint32_t)f->g->n_vocab;
   /* b->ids free between steps (the next one's tokens written at its start) */
-  if (!ops_argmax(f->b.vocab + (uint64_t)row0 * V, V, rows, V, f->b.ids, NULL) ||
+  if (!ops_argmax(f->b.vocab + (uint64_t)row0 * V, V, rows, V, f->b.ids, f->argmax_part, NULL) ||
       hipMemcpyAsync(f->pin->greedy, f->b.ids, rows * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       !fwd_settle(f))
     return fwd_fail(err, "a GPU call failed (the greedy picks)");

@@ -1,5 +1,6 @@
 // Qwen3.8-Flash-Next's n-gram table (include/osmos/gpu/q4x_ops.h): its rows decoded, the gate, the residual's add
 #include "block.h"
+#include "launch.h"
 #include "quant.h"
 
 extern "C" {
@@ -8,13 +9,14 @@ extern "C" {
 
 namespace {
 
-constexpr int kThreads = 256;
+using launches::kThreads;
+using launches::grid;
+using launches::st;
+using launches::ok;
+
 constexpr float kDotFloor = 1e-6f; /* the gate's |dot| floor before its square root (llama.cpp's clamp) */
 constexpr uint32_t kMaxHc = 8;
 
-inline unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 
 // a thread a chunk (8 values) of a row: row i's chunk k decoded from its block
 template <quant::Type T>
