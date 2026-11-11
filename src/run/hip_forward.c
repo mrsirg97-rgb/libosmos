@@ -493,7 +493,7 @@ static bool scratch(Forward *f)
   for (int l = 0; l < g->n_layers; l++)
     n_eg += g->engram[l];
   f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
-  return fwd_put(b->pre0, pre0, B * hc * F) &&
+  return fwd_put(b->pre0, pre0, B * hc * F) && fwd_alloc(&f->argmax_part, ops_argmax_scratch((uint32_t)B)) &&
          hipHostMalloc((void **)&f->r_ids, P * 4, hipHostMallocMapped | hipHostMallocCoherent) == hipSuccess &&
          hipHostGetDevicePointer((void **)&f->r_ids_dev, f->r_ids, 0) == hipSuccess &&
          hipHostMalloc((void **)&f->r_guess, S * FWD_GUESS_K * 4, hipHostMallocMapped | hipHostMallocCoherent) ==
@@ -666,6 +666,7 @@ void forward_destroy(Forward *f)
   hipFree(f->lane_x), hipFree(f->lane_w), hipFree(f->lane_q), hipFree(f->lane_qd),
       hipFree(f->lane_xq), hipFree(f->lane_xqd);
   hipFree(f->taps);
+  hipFree(f->argmax_part);
   if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
   {
     const Sub *s = &f->sub[0];
@@ -736,7 +737,7 @@ bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char
     return fwd_fail(err, "rows the last step's head did not compute");
   const uint32_t V = (uint32_t)f->g->n_vocab;
   /* b->ids free between steps (the next one's tokens written at its start) */
-  if (!ops_argmax(f->b.vocab + (uint64_t)row0 * V, V, rows, V, f->b.ids, NULL) ||
+  if (!ops_argmax(f->b.vocab + (uint64_t)row0 * V, V, rows, V, f->b.ids, f->argmax_part, NULL) ||
       hipMemcpyAsync(f->pin->greedy, f->b.ids, rows * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       !fwd_settle(f))
     return fwd_fail(err, "a GPU call failed (the greedy picks)");

@@ -2878,6 +2878,16 @@ another reference's (ref.py's, llama.cpp's), and the bits are the product.
   q4x_hc_norm the same tree and order, their weights' indexing and f16 side differ - a candidate, with the f16 side
   itself: an (x16, overflow) pair in ops, Q4xX16 in q4x, one concept); a sequence's state through a bounce buffer
   (move_part twice).
+- **the greedy pick, built** (ops_argmax, ops_argmax_scratch: q4x's split, in ops.hip; q4x_argmax and ops's one-block
+  kernel gone): a thread that meets a NaN offers (+inf, -1), which block_argmax's rule carries through both trees -
+  the row's -1; a thread or slice with no value offers the index after every other, so a row all -inf is 0 (q4x's
+  gave INT_MAX there: no value was "greater than -inf"). q4x_greedy refuses a row with a NaN, with why. the tests:
+  test_q4x_overflow_gpu's NaN row (a NaN written into a kept row of logits: failed first - 0.6.1 picked the
+  greatest of the rest), test_argmax_gpu against a scan at both vocabularies and 40 values (ties far apart and
+  across a slice's seam, -0 and +0, all one value, all -inf, NaNs alone and under a greater value, a stride past
+  the row, each row alone). DeepSeek's pick one launch more (part, merge) for ~70 us less a token; both models'
+  hashes held (below's runs again: Qwen 78687b02a7b4d036, 28.1 / 44.4 tok/s; DeepSeek's six, 17.1 / 16.3 / 17.4
+  and 31.9 / 19.4 / 29.3) - the gain under what a run shows.
 - **measured** (performance, the box quiet): Qwen UD-IQ3_XXS a 4K prompt in 2K steps + 96 tokens, plain and MTP -
   ids 78687b02a7b4d036 before and after, 921 / 921 tok/s the prompt, 28.3 / 28.2 plain, 44.2 / 44.6 drafted;
   DeepSeek UD-IQ1_M the membrane's oracle - the six hashes the same, 17.6 / 16.3 / 17.4 plain, 32.2 / 19.4 / 29.2

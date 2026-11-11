@@ -32,7 +32,7 @@ typedef struct Q4xBuf
   uint8_t *ple_sbuf; /* device: a streamed n-gram table's step rows, a token's ple_heads (stream_ngram) */
   int32_t *ple_iota; /* their places 0 .. : q4x_rows' row indices over ple_sbuf */
   float *taps;       /* device: the step's taps, [token][n_taps][n_embd] (Q4xOptions' tap_layers; NULL: none) */
-  void *top_part;                                                     /* q4x_greedy's slices' bests (q4x_argmax) */
+  void *top_part;                                                     /* q4x_greedy's slices' bests (ops_argmax) */
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
 } Q4xBuf;

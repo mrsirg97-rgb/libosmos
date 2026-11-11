@@ -187,6 +187,7 @@ struct Forward
   /* DSpark's taps (fwd_taps_on, the drafter's): the streams' mean entering each target layer, [row][tap][D], for the
      last sub-batch's rows of the step (a sequence's last ones: the drafter's ring holds 128); their positions and
      sequences. NULL: none taken. tapped: the target layers the drafter gave */
+  void *argmax_part; /* forward_greedy's slices' bests (ops_argmax_scratch of a step's rows) */
   float *taps;
   int n_tap, tap_of[WEIGHTS_MAX_LAYERS];
   bool tapped[WEIGHTS_MAX_LAYERS];

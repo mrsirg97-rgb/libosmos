@@ -155,6 +155,33 @@ static void after_steps(const Gguf* g, const std::vector<int32_t>& p) {
   last_after = t;
 }
 
+// a row of logits with a NaN gives no token (the greedy pick's: ops_argmax's -1, DeepSeek's rule): refused with
+// why, the rows beside it picked as before - never the greatest of what is left of the row
+static void nan_row(const Gguf* g, const std::vector<int32_t>& p, uint32_t vocab) {
+  constexpr uint32_t kRows = 4, kBad = 2;
+  char err[Q4X_FWD_ERR] = "", werr[Q4X_ERR] = "";
+  Q4xWeights* w = q4x_weights_create(g, nullptr, werr);
+  CHECK(w);
+  Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
+  CHECK(f);
+  Q4xSeq* s = q4x_seq_create(f, err);
+  CHECK(s && q4x_batch(f, s, p.data(), kRows, 0, err));
+  int32_t clean[kRows], got[kRows];
+  CHECK(q4x_greedy(f, 0, kRows, clean, err));
+  const float nan = NAN;
+  float* row = const_cast<float*>(q4x_logits(f)) + (uint64_t) kBad * vocab;
+  CHECK(hipMemcpy(row + (uint32_t) clean[kBad] / 2, &nan, 4, hipMemcpyHostToDevice) == hipSuccess);
+  err[0] = '\0';
+  CHECK(!q4x_greedy(f, 0, kRows, got, err) && std::strstr(err, "NaN"));
+  CHECK(!q4x_greedy(f, kBad, 1, got, err));
+  CHECK(q4x_greedy(f, 0, kBad, got, err) && got[0] == clean[0] && got[1] == clean[1]);
+  CHECK(q4x_greedy(f, kBad + 1, 1, got, err) && got[0] == clean[kBad + 1]);
+  std::printf("  a NaN in a row's logits: its pick refused (%s), the other rows' as before\n", err);
+  q4x_seq_destroy(s);
+  q4x_forward_destroy(f);
+  q4x_weights_destroy(w);
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("[test_q4x_overflow_gpu] start\n");
@@ -188,6 +215,7 @@ int main() {
   CHECK(std::strstr(over.after.c_str(), "a failed step"));
   after_steps(g, p);
   CHECK(last_after == clean.t);
+  nan_row(g, p, vocab);
   const Out again = run(g, nullptr, p);
   std::printf("  a clean forward after it: token %d (the first clean one's %d)\n", again.t, clean.t);
   CHECK(again.ok && again.t == clean.t);

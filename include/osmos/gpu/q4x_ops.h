@@ -44,9 +44,6 @@ bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_t
                     float eps, float *y, const Q4xX16 *side, void *stream);
 
 bool q4x_top(const float *logits, uint32_t n, uint32_t rows, uint32_t stride, int32_t *id, float *p, void *stream);
-uint64_t q4x_argmax_scratch(uint32_t rows);
-bool q4x_argmax(const float *logits, uint32_t n, uint32_t rows, uint32_t stride, int32_t *id, void *scratch,
-                void *stream);
 bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out, void *stream);
 
 /* a rotation (q4x_rope): its dims (a head's first), its angles' step, and YaRN's - none: ext_factor 0, freq_scale and
@@ -254,15 +251,10 @@ q4x_gated_norm
 the MTP head's:
 
 q4x_top
-  rows rows of n logits (stride floats apart): id[r] row r's greatest (the lowest among equals, as ops_argmax), p[r]
+  rows rows of n logits (stride floats apart): id[r] row r's greatest (the lowest among equals; a NaN never taken - a
+  draft is a proposal, the greedy pick is ops_argmax's, which refuses the row), p[r]
   its softmax probability - 1 / sum over i of exp(logits[i] - max), the sum in a fixed order (a draft's confidence;
   p NULL: not wanted - a greedy pick's).
-
-q4x_argmax, q4x_argmax_scratch
-  q4x_top's id alone (p not wanted: the greedy pick), the row split across blocks - each its slice's greatest, the
-  lowest among equals, then the slices' the same way: the same id as q4x_top's on every row (ties, NaNs never taken, a
-  row of -inf). scratch: q4x_argmax_scratch(rows) bytes of device memory, the slices' bests. a row in one block
-  scanned 248,320 logits in ~160 us; split, ~10.
 
 q4x_join
   out[t][s] = [e[t] ; h[t][s]] (2 dim floats a stream): a token's normed embedding beside each stream's normed state,

@@ -547,35 +547,38 @@ __global__ void copy_rows_kernel(float* dst, const float* src, const int32_t* id
   dst[at] = src[at];
 }
 
-// a block a row: its greatest value's index, the lowest among equals (an order-free choice: any reduction the same);
-// -1 for a row with a NaN
-__global__ __launch_bounds__(kWide) void argmax_kernel(const float* x, uint32_t n, uint32_t stride, int32_t* out) {
-  __shared__ float bv[kWide];
-  __shared__ uint32_t bi[kWide];
-  __shared__ int nan;
+// a row's greatest value's index, the lowest among equals (an order-free choice: any reduction the same), -1 for a
+// row with a NaN - the row split in kArgSplit slices, a block each (a vocabulary in one block: ~160 us of one
+// block's loads; split, ~10): a thread's values strided, the first of its own kept among equals; a thread that met
+// a NaN offers (+inf, -1), which block_argmax's rule - the greater, the lower index among equals - carries to the top
+constexpr int kArgSplit = 64, kArgThreads = 256;
+constexpr int kArgNone = INT32_MAX;  // a thread, or a slice, with no value: after every index among equals
+__global__ __launch_bounds__(kArgThreads) void argmax_part_kernel(const float* x, uint32_t n, uint32_t stride,
+                                                                  float* pv, int* pi) {
+  __shared__ float lds[kArgThreads];
+  __shared__ int ldi[kArgThreads];
   const float* row = x + (uint64_t) blockIdx.x * stride;
-  if (threadIdx.x == 0) nan = 0;
-  __syncthreads();
-  float v = -INFINITY;
-  uint32_t at = UINT32_MAX;
-  for (uint32_t i = threadIdx.x; i < n; i += kWide) {
+  const uint32_t per = (n + kArgSplit - 1) / kArgSplit, lo = blockIdx.y * per, hi = lo + per < n ? lo + per : n;
+  float bv = -INFINITY;
+  int bi = kArgNone;
+  bool nan = false;
+  for (uint32_t i = lo + threadIdx.x; i < hi; i += kArgThreads) {
     const float c = row[i];
-    if (c != c) nan = 1;
-    else if (at == UINT32_MAX || c > v) v = c, at = i;  // (i ascends a thread: equals keep the lower)
+    if (c != c) nan = true;
+    else if (bi == kArgNone || c > bv) bv = c, bi = (int) i;  // (i ascends a thread: equals keep the lower)
   }
-  bv[threadIdx.x] = v, bi[threadIdx.x] = at;
-  __syncthreads();
-  for (uint32_t h = kWide / 2; h > 0; h >>= 1) {
-    if (threadIdx.x < h) {
-      const float ov = bv[threadIdx.x + h];
-      const uint32_t oi = bi[threadIdx.x + h];
-      if (oi != UINT32_MAX && (bi[threadIdx.x] == UINT32_MAX || ov > bv[threadIdx.x] ||
-                               (ov == bv[threadIdx.x] && oi < bi[threadIdx.x])))
-        bv[threadIdx.x] = ov, bi[threadIdx.x] = oi;
-    }
-    __syncthreads();
-  }
-  if (threadIdx.x == 0) out[blockIdx.x] = nan ? -1 : (int32_t) bi[0];
+  if (nan) bv = INFINITY, bi = -1;
+  const int best = block_argmax<kArgThreads>(&bv, bi, lds, ldi);
+  if (!threadIdx.x) pv[blockIdx.x * kArgSplit + blockIdx.y] = bv, pi[blockIdx.x * kArgSplit + blockIdx.y] = best;
+}
+
+// a row's slices' bests merged by the same rule: its index (a slice's -1 the row's)
+__global__ __launch_bounds__(kArgSplit) void argmax_merge_kernel(const float* pv, const int* pi, int32_t* out) {
+  __shared__ float lds[kArgSplit];
+  __shared__ int ldi[kArgSplit];
+  float v = pv[blockIdx.x * kArgSplit + threadIdx.x];
+  const int best = block_argmax<kArgSplit>(&v, pi[blockIdx.x * kArgSplit + threadIdx.x], lds, ldi);
+  if (!threadIdx.x) out[blockIdx.x] = best;
 }
 
 __global__ void add_kernel(float* y, const float* a, uint64_t n) {
@@ -858,8 +861,17 @@ extern "C" bool ops_hc_mix_pre_rms(const float* partial, const float* scale, con
   return ok();
 }
 
-extern "C" bool ops_argmax(const float* x, uint32_t n, uint32_t rows, uint32_t stride, int32_t* out, void* stream) {
-  if (!x || !out || !n || n > (uint32_t) INT32_MAX || !rows || stride < n) return false;
-  argmax_kernel<<<rows, kWide, 0, st(stream)>>>(x, n, stride, out);
+extern "C" uint64_t ops_argmax_scratch(uint32_t rows) {
+  return (uint64_t) rows * kArgSplit * (sizeof(float) + sizeof(int));
+}
+
+extern "C" bool ops_argmax(const float* x, uint32_t n, uint32_t rows, uint32_t stride, int32_t* out, void* scratch,
+                           void* stream) {
+  if (!x || !out || !scratch || !n || n >= (uint32_t) kArgNone || !rows || stride < n) return false;
+  float* pv = (float*) scratch;
+  int* pi = (int*) (pv + (uint64_t) rows * kArgSplit);
+  argmax_part_kernel<<<dim3(rows, kArgSplit), kArgThreads, 0, st(stream)>>>(x, n, stride, pv, pi);
+  if (!ok()) return false;
+  argmax_merge_kernel<<<rows, kArgSplit, 0, st(stream)>>>(pv, pi, out);
   return ok();
 }

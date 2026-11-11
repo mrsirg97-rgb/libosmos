@@ -87,7 +87,8 @@ bool ops_gather_sum_add(float *y, const float *src, const int32_t *idx, uint32_t
 bool ops_scale(float *x, uint64_t n, float s, void *stream);
 bool ops_add(float *y, const float *a, uint64_t n, void *stream);
 bool ops_copy(void *dst, const void *src, uint64_t bytes, void *stream);
-bool ops_argmax(const float *x, uint32_t n, uint32_t rows, uint32_t stride, int32_t *out, void *stream);
+uint64_t ops_argmax_scratch(uint32_t rows);
+bool ops_argmax(const float *x, uint32_t n, uint32_t rows, uint32_t stride, int32_t *out, void *scratch, void *stream);
 bool ops_wait(const uint32_t *flag, uint32_t value, void *stream);
 bool ops_copy_rows(float *dst, const float *src, const int32_t *idx, uint32_t n, uint32_t len, void *stream);
 
@@ -255,9 +256,12 @@ ops_copy
   not (hipMemcpyAsync takes memory it did not allocate - the pool's, hip_slots' - for the host's, and copies it on
   the copy engine, outside the stream's kernels). dst and src 16-byte aligned; false for either not, or no bytes.
 
-ops_argmax
+ops_argmax, ops_argmax_scratch
   out[r] = the index of row r's greatest value (rows of n, stride floats apart), the lowest index among equals - the
-  first maximum a scan in order finds (-0 and +0 equal); -1 for a row with a NaN.
+  first maximum a scan in order finds (-0 and +0 equal; a row all -inf: 0); -1 for a row with a NaN - a pick the
+  caller refuses, never the greatest of what is left. both families' greedy pick (DESIGN.md, "0.6.2: what the two
+  families share"). scratch: ops_argmax_scratch(rows) bytes of device memory (the row's slices' bests: two launches).
+  false for no x, out or scratch, n 0 or past 2^31 - 2, no rows, or a stride under n.
 
 ops_wait
   the stream held until *flag - host memory the GPU maps (hipHostMalloc's) - holds value, or value with its top bit

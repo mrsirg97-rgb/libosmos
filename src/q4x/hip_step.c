@@ -236,7 +236,11 @@ bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char 
     return q4x_fail(err, "no forward or ids, or rows past a step's");
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   int32_t *d = f->b.cnt; /* the MoE's table, free between steps */
-  return (q4x_argmax(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, f->b.top_part, NULL) &&
-          hipMemcpy(ids, d, rows * 4, hipMemcpyDeviceToHost) == hipSuccess) ||
-         q4x_fail(err, "a GPU call failed (the greedy pick)");
+  if (!ops_argmax(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, f->b.top_part, NULL) ||
+      hipMemcpy(ids, d, rows * 4, hipMemcpyDeviceToHost) != hipSuccess)
+    return q4x_fail(err, "a GPU call failed (the greedy pick)");
+  for (uint32_t r = 0; r < rows; r++)
+    if (ids[r] < 0)
+      return q4x_fail(err, "a NaN in a row's logits");
+  return true;
 }
