@@ -177,6 +177,35 @@ static void advance(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t
   }
 }
 
+/* a run's first tokens whose logits its sequence reads none of: those before its prompt's end - 1 (q4x_seq_prompt) */
+static uint32_t unwanted(const Q4xRun *r)
+{
+  const int64_t skip = (int64_t)r->s->prompt_end - 1 - r->s->pos;
+  return skip <= 0 ? 0 : skip < (int64_t)r->n ? (uint32_t)skip : r->n;
+}
+
+/* the output head over the step's mixed rows: every row in one call, or - a run with tokens before its prompt's
+   end - each run's wanted tail alone into its rows (a token's sums its own: the same bits) */
+static bool head(Q4xForward *f, const Q4xRun *r, uint32_t runs, uint32_t n, uint32_t row0)
+{
+  const Q4xGeometry *g = &f->w->geo;
+  Q4xBuf *b = &f->b;
+  const uint32_t V = (uint32_t)g->n_vocab, D = (uint32_t)g->n_embd;
+  bool all = true;
+  for (uint32_t i = 0; i < runs; i++)
+    all = all && !unwanted(&r[i]);
+  if (all)
+    return q4x_mat(f, f->w->output, V, D, b->mixed, D, n, b->logits + (uint64_t)row0 * V, V, n <= MM_MAX_TOKENS);
+  for (uint32_t i = 0; i < runs; i++)
+  {
+    const uint32_t t = r[i].t0 + unwanted(&r[i]), k = r[i].n - unwanted(&r[i]);
+    if (k && !q4x_mat(f, f->w->output, V, D, b->mixed + (uint64_t)t * D, D, k, b->logits + (uint64_t)(row0 + t) * V, V,
+                      false))
+      return false;
+  }
+  return true;
+}
+
 bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
               uint32_t row0, char err[Q4X_FWD_ERR])
 {
@@ -195,6 +224,7 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
   const uint64_t hd = (uint64_t)g->hc * g->n_embd;
   for (uint32_t i = 0; i < runs; i++) /* from here a failure leaves the rings part written: advance clears it */
     r[i].s->broken = true;
+  memset(b->kept + row0, 0, n * sizeof *b->kept); /* the step's rows: kept once it is whole */
   if (!embed(f, r, runs, tokens, n))
     return q4x_fail(err, "a GPU call failed (the embedding)");
   bool pending = false;
@@ -212,12 +242,13 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
                                hipMemcpyDeviceToDevice, NULL) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the MTP head's rows)");
   q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
-  if (!q4x_mat(f, w->output, (uint32_t)g->n_vocab, (uint32_t)g->n_embd, b->mixed, (uint32_t)g->n_embd, n,
-               b->logits + (uint64_t)row0 * g->n_vocab, (uint32_t)g->n_vocab, n <= MM_MAX_TOKENS) ||
-      !q4x_overflow_read(f) || hipStreamSynchronize(NULL) != hipSuccess)
+  if (!head(f, r, runs, n, row0) || !q4x_overflow_read(f) || hipStreamSynchronize(NULL) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the logits)");
   if (!q4x_overflow_ok(f, err))
     return false;
+  for (uint32_t i = 0; i < runs; i++)
+    for (uint32_t t = 0; t < r[i].n; t++)
+      b->kept[row0 + r[i].t0 + t] = t >= unwanted(&r[i]);
   advance(f, r, runs, tokens, row0);
   return true;
 }
@@ -228,12 +259,24 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
 }
 
 const float *q4x_logits(const Q4xForward *f) { return f ? f->b.logits : NULL; }
+bool q4x_kept(const Q4xForward *f, uint32_t row) { return f && row < f->max_tokens && f->b.kept[row]; }
+
+bool q4x_seq_prompt(Q4xSeq *s, uint32_t end)
+{
+  if (!s || end > s->f->max_ctx)
+    return false;
+  s->prompt_end = (int32_t)end;
+  return true;
+}
 const float *q4x_taps(const Q4xForward *f) { return f && f->n_taps ? f->b.taps : NULL; }
 
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR])
 {
   if (!f || !ids || !rows || row0 + rows > f->max_tokens)
     return q4x_fail(err, "no forward or ids, or rows past a step's");
+  for (uint32_t r = 0; r < rows; r++)
+    if (!f->b.kept[row0 + r])
+      return q4x_fail(err, "a row the last step kept no logits of");
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   int32_t *d = f->b.cnt; /* the MoE's table, free between steps */
   if (!ops_argmax(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, f->b.top_part, NULL) ||

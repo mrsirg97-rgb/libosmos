@@ -3012,6 +3012,84 @@ after a host wait are the profiler's until a run without it says otherwise** - t
 GPU's own between dependent dispatches) and the reads' stalls (the engine's own counters agree) stand; the token
 boundary does not. 0.6.0's "token kept on the GPU, the n-gram hashing on the GPU" has no bubble to remove.
 
+### 0.6.3: every kernel against its ceiling, and Qwen's prompt logits (design, 2026-11-11, low-power)
+
+**The table.** One rocprofv3 kernel trace a case on 0.6.2 (durations only: a gap after a host wait is the
+profiler's), each launch's weights' bytes from the GGUF's shapes, against two ceilings measured on the box. a read:
+a kernel that only loads the same bytes (16-byte loads, xor) from one 12 GiB pool, every launch a fresh range -
+220-239 GB/s from 40 blocks up (1.7 MB to 521 MB), 75% of it at 20 blocks, 7.5 GB/s at one; an upper bound (a
+kernel that decodes a quant cannot reach it). the matrix cores: WMMA f16's 47-49 TFLOP/s. kernels that run at once
+(Qwen's two streams) share the bandwidth: their bytes together against their union's time.
+
+- Qwen's decode (38.0 ms a token under the profiler, the GPU busy 34.2): ~8.5 ms over the read ceiling. IQ2_S gate /
+  up 58.8 us against 22.3 (38%), IQ3_XXS 52.8 / 27.3, the mixer's up 24.6 / 15.8, IQ4_NL down 57.6 / 39.2, ssm_out
+  and attn_output 70.0 / 54.9, qkv + gate 169.9 / 144.3, the head 2,394 / 2,221 (93%). launches that cannot fill 40
+  CUs: the mixer's down 20 blocks, the inject's matvec 1, combine_norm 4 (11.8 us, 95 a token). the shared expert's
+  gate / up pair is not slow: its 65 GB/s was the router's kernel beside it (together 79% of the ceiling).
+- Qwen's 4,096-token prompt (2,048 steps; 5,118 ms): the experts 1,316 ms at 14.7 TFLOP/s, the full attention 851,
+  the dense Q6_K 783 at 29, the mixers' norm + inject 328, DeltaNet 288, the mixers' up 274 at 9.5 and down 122 at
+  21, **the output head 186 ms: every one of a step's 2,048 rows**.
+- DeepSeek's drafted round (122.3 ms, kernels 105.3): the lane's experts ~39 ms at 147-193 GB/s, the three dense
+  Q6_K 71-83%; the head read twice a round by two kernels (mv 3.44 ms, mm 2.65). its 2,048-token prompt in one step
+  (6,408 ms): ~190 experts a layer picked by one token, 621 ms at ~56 GB/s.
+
+**Qwen's prompt logits.** A server reads one row of a prompt's logits, its last. The engine's interface says so
+already: oseq_prompt (the prompt ends at end: no logits read before end - 1), and osmos_batch may keep a step's last
+rows only. DeepSeek's sequence takes it (seq_prompt: fwd_plan's want); Qwen's s_prompt was an empty stub, and
+q4x_step ran the head for every row - 3.6% of a prompt.
+
+- `q4x_seq_prompt(s, end)`: the sequence's prompt ends at position end (0: none, as created). its tokens at
+  positions before end - 1 get no logits from then on; a token at end - 1 or later does. nothing of the sequence's
+  state reads it (the head is the model's last matmul), so it is not saved, a reset or load clears it, and it may be
+  lowered: the caller's own promise of what it reads. the kept rows' bits are the whole run's (a token's sums its
+  own: mm_tokens).
+- a step: each run's wanted tokens are its last (positions ascend). all wanted - one head call, as before. else the
+  head runs once for each run's wanted tail (its rows of b.mixed into its rows of the logits), the other rows left
+  as they were.
+- `q4x_kept(f, row)`: whether the row's logits are of the step that last wrote the row's place. q4x_greedy refuses
+  a row not kept; the engine's e_logits gives NULL for one (osmos_batch's words).
+- the end mixer and the MTP head's h still run for every row (the head's seed reads h back from the prompt's end).
+- an activation past f16 in a row not wanted: in a step of at most MM_MAX_TOKENS still found where it was (the end
+  mixer writes every row's f16). in a longer step the head's own conversion found it, and for a row not wanted no
+  longer runs: that row's mixed output is read by nothing else, so no token can come of it - the step is no longer
+  refused for it.
+
+tests (test_q4x_prompt_gpu): a prompt with its end told against the same prompt without - the last row's logits the
+same bits, the rows before it not kept (q4x_kept false, q4x_greedy refused, their floats untouched); the next
+tokens' logits the same bits; the prompt in two steps; two sequences a step, one told and one not; the end lowered.
+
+**Built (2026-11-11, low-power).** Three interleaved pairs, a 4,096-token prompt, UD-IQ3_XXS, the end told against
+not (Q4X_BENCH_ALL_ROWS=1): 2,048-token steps 822-832 -> 859-860 tok/s, 4,096-token steps (the pack's) 853-866 ->
+896-901; the decode and the ids the same (4K + 96: 78687b02a7b4d036, plain and MTP). test_q4x_prompt_gpu fails
+before the change and with the tails' rows of b.mixed misplaced (a mutant); test_engine_q4x_gpu the same through
+the engine (a told prompt's rows NULL and no pick). the host tests and the q4x GPU tests touched pass (engine, mtp,
+mtp_seed, forward, overflow, taps, ngram, overlay). not tested: osmos-serve's own path on the GPU (its prompt rows
+read as before: the last piece's last row).
+
+**The norms' loops (2026-11-11, low-power).** combine_norm_kernel moves 2,560 values a block and took 11.8 us in the
+trace, 95 a token. its buffers __restrict__, its loops unrolled (a thread's ten loads issued together), the f16
+side's place by one division a thread, not a 64-bit one a value: cn.hip (warm, back to back) 5.67 -> 4.27 us, the
+same xn and x16 bits; hc_norm_kernel the same. the model's decode, three interleaved pairs: 27.23-27.36 ->
+27.40-27.46 tok/s (+0.4%), the same ids. the guess was a block waiting on DRAM once a value: wrong - the gain in the
+model is the warm one's, ~1.5 us a launch, and the trace's 11.8 us is not all the kernel's to give back. the block
+sum's last five levels by wave shuffles (the same pairs): 0.09 us, not taken.
+
+**The mixers' epilogues, every wave's (2026-11-11, low-power).** tile's epilogue - the silu (mm_run_silu), the gated
+mean's take (mm_run_gated_mean) - was wave 0's for all eight of a tile's row pairs while the block's other waves
+waited. now wave v takes pairs v, v + waves ..: each sum the same waves' parts in the same order, the same bits.
+traces before and after: the mixer's up at a token 24.8 -> 23.9 us, its down 24.2 -> 23.1, the up at a prompt's
+step 1,461 -> 1,434; decode, three interleaved pairs, 27.02-27.11 -> 27.18-27.20 tok/s (+0.4%), prompts within
+their scatter. the guess had been an epilogue the matmul's size: wrong. the up at a prompt's step with parts
+knocked out (throwaway builds): whole 1,434 us, no sigmoid 1,376, no xn load 1,134, neither 1,072 - the xn load is
+21% and at the read ceiling already (84 MB), the sigmoid 4%, the 320-column matmul itself 75% at ~12.5 TFLOP/s. not
+built: one wave keeping both waves' partial sums in registers (the same order, no LDS between them).
+
+**What the table's other rows came to.** the mixer's down at a token (20 blocks) and up have no lever at their bits:
+a block is a 16-row tile whose waves split the columns, so more blocks is another shape - another order of sums. the
+inject's one-block matvec runs under the mixer's down on the second stream and ends first: nothing to gain alone. so
+the decode's ~8.5 ms over the read ceiling is mostly not there to take at these bits; taken so far ~0.3 ms.
+
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate

@@ -236,7 +236,8 @@ static bool buffers(Q4xForward *f, char *err)
     return q4x_fail(err, "a GPU call failed (the n-gram rows' places)");
   return (hipHostMalloc((void **)&b->pin_rows, n * g->ple_heads * 4, 0) == hipSuccess &&
           hipHostMalloc((void **)&b->pin_tok, n * 4, 0) == hipSuccess &&
-          hipHostMalloc((void **)&b->pin_overflow, 4, 0) == hipSuccess && !(*b->pin_overflow = 0)) ||
+          hipHostMalloc((void **)&b->pin_overflow, 4, 0) == hipSuccess && !(*b->pin_overflow = 0) &&
+          (b->kept = calloc(n, sizeof *b->kept))) ||
          q4x_fail(err, "pinned memory refused (a step's tokens)");
 }
 
@@ -264,6 +265,7 @@ void q4x_forward_destroy(Q4xForward *f)
   for (size_t i = 0; i < offsetof(Q4xBuf, pin_rows) / sizeof(void *); i++)
     hipFree(bufs[i]);
   hipHostFree(f->b.pin_rows), hipHostFree(f->b.pin_tok), hipHostFree(f->b.pin_overflow), hipFree(f->b.logits);
+  free(f->b.kept);
   if (f->s2)
     (void)hipStreamDestroy(f->s2);
   if (f->e_in)

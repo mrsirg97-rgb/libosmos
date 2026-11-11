@@ -107,8 +107,9 @@ constexpr int run_chunks() {
   return !kRuns<T> ? 1 : CPR % RUN_MAX == 0 && CH % RUN_MAX == 0 ? RUN_MAX : CPR % 2 == 0 && CH % 2 == 0 ? 2 : 1;
 }
 
-// the store tile ends with (y's row r of token t); an epilogue's own instead: take(ct, j, t, s) for each of wave 0's
-// sums - its tile ct, its rows 2 j + half, token t (t >= n among them: the epilogue's to skip)
+// the store tile ends with (y's row r of token t); an epilogue's own instead: take(ct, j, t, s) for each of the
+// sums - its tile ct, its rows 2 j + half, token t (t >= n among them: the epilogue's to skip) - by the thread
+// of wave j % waves (a thread's own j every call, so it may keep state for them)
 struct StoreY {};
 template <quant::Type T, class S, int CT, bool E = false, class Take = StoreY>
 __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __restrict__ w, uint32_t row0,
@@ -117,6 +118,9 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
                                                            float* __restrict__ y, uint32_t ys, _Float16* lds_all,
                                                            Silu ep = {}, Take take = {}) {
   constexpr int SL = S::kSlab, G = SL / kTile;
+  // an epilogue with work of its own (the silu, a take): each wave its share of the sums' rows (wave v: rows j = v,
+  // v + waves ..), not wave 0 all eight while the others wait - every sum the same waves' parts in the same order
+  constexpr bool kSpread = E || !__is_same(Take, StoreY);
   const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
   _Float16* lds = lds_all + wave * kTile * S::kRowLds;
   const int tiles = (int) ((n - c0 + kTile - 1) / kTile) < CT ? (int) ((n - c0 + kTile - 1) / kTile) : CT;
@@ -198,10 +202,10 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
     __syncthreads();  // the LDS free: the slabs done, or the tile before summed
     for (int j = 0; j < 8; j++) part[(wave * 8 + j) * kWave + lane] = acc[ct][j];
     __syncthreads();
-    if (CT == 1 && wave != 0) return;
-    if (wave == 0) {
+    if (CT == 1 && wave != 0 && !kSpread) return;
+    if (wave == 0 || kSpread) {
       const uint32_t t = c0 + ct * kTile + col;
-      for (int j = 0; j < 8; j++) {
+      for (int j = kSpread ? wave : 0; j < 8; j += kSpread ? S::kWaves : 1) {
         float s = part[j * kWave + lane];
         for (int v = 1; v < S::kWaves; v++) s += part[(v * 8 + j) * kWave + lane];
         if constexpr (E) {
@@ -603,7 +607,7 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel_silu(const uint8_t* _
 }
 
 // the hyper-connection mixer's up with q4x_hc_gated_mean's mean as its epilogue: up's rows hc streams of dim, a
-// block one 16-row tile of each stream in turn (tile's own sums, the same bits as mm_run's), wave 0 keeping
+// block one 16-row tile of each stream in turn (tile's own sums, the same bits as mm_run's), each wave keeping its rows'
 // sum += xn sigmoid(up) in stream order - the gated mean's expression and order - then out = sum / hc and its f16 for
 // the next matmul; up's own F32 (hc dim a token) never written nor read back
 struct GatedMean {
@@ -629,10 +633,9 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel_gated_mean(const uint
                           });
     __syncthreads();  // wave 0 done with the sums' LDS before the next stream's slabs
   }
-  if (threadIdx.x >= kWave) return;
 #pragma unroll
   for (int ct = 0; ct < CT; ct++)
-    for (int j = 0; j < 8; j++) {
+    for (int j = threadIdx.x / kWave; j < 8; j += S::kWaves) {  // the rows this wave took (tile's kSpread)
       const uint32_t t = c0 + ct * kTile + lane % kTile, d = d0 + 2 * j + half;
       if (t >= n) continue;
       const float v = sum[ct][j] / (float) gm.hc;

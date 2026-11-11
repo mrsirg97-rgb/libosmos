@@ -104,6 +104,22 @@ int main() {
   CHECK(!osmos_logits(e, kA + kB) && !osmos_greedy(e, kA + kB - 1, 2, picks.data(), err));
   std::printf("  two sequences in one batch: each one's logits the bits of it alone, greedy their greatest\n");
 
+  // a sequence told its prompt's end (oseq_prompt): the rows before end - 1 not kept - no logits, no greedy pick -
+  // its last row the bits of it alone
+  {
+    OsmosSeq* t = oseq_create(e, err);
+    CHECK(t && oseq_prompt(t, kA));
+    std::vector<OsmosSeq*> st(kA, t);
+    CHECK(osmos_batch(e, st.data(), ids.data(), kA, err));
+    int32_t pick;
+    for (uint32_t r = 0; r + 1 < kA; r++) CHECK(!osmos_logits(e, r) && !osmos_greedy(e, r, 1, &pick, err));
+    const float* l = &alone_a[(size_t) (kA - 1) * V];
+    CHECK(rows(e, kA - 1, 1, V) == std::vector<float>(l, l + V));
+    CHECK(osmos_greedy(e, kA - 1, 1, &pick, err) && pick == (int32_t) (std::max_element(l, l + V) - l));
+    oseq_destroy(t);
+    std::printf("  a prompt's end told: its last row alone kept, the bits of it alone\n");
+  }
+
   // a sequence's tokens not consecutive: refused, no sequence moved
   OsmosSeq* split[3] = {a, b, a};
   CHECK(!osmos_batch(e, split, ids.data(), 3, err) && err[0]);
