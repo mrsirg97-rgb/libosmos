@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.6.4]: a special token's text the model says is text, and the API's answer the stream's
+
+osmos-api correctness, no engine change: every ids hash the same. Issue #34 (reported by @ucotman with a repro, a
+control and the source lines - thank you), then an audit of every path a request and an answer take.
+
+- **`</think>` the model writes in its answer is text** (#34). Asked about osmos-serve's `--answer-after </think>`,
+  DeepSeek wrote the flag's argument in plain pieces (` </` `think` `>`, as a client's text reaches it - measured on
+  UD-IQ2_XXS), and the parse refused it as the token: a 500, and greedy, every retry the same. The stream and the
+  parse now read markers in a shape of the answer where a special token's text spelled in plain pieces is defused;
+  what goes out is the text. The token itself where the format has none is still refused, as DeepSeek's reference
+  refuses it. Qwen the same.
+- **A refused completion goes with its error** (#34): the 500's body and a stream's error event carry `completion`,
+  the text the parse refused (the EOS dropped), so a client can show the model what it wrote - a duplicated
+  parameter too. Never the answer: no content, no [DONE]. The message names what failed (the model's tool call, or
+  its answer).
+- **The stream is the answer's text.** DeepSeek's stream trimmed whitespace its parse keeps (before `</think>`, the
+  EOS, all of it before a calls block where the parse drops one blank line): a client's history differed from the
+  model's - so the prompt cache's reuse broke there each turn. Qwen's trimmed ASCII where its parse strips Python's
+  whitespace (U+00A0, U+3000, ...). A run cut by max_tokens in its reasoning streamed the rest as content.
+- **A character cut by max_tokens** (an emoji's first byte token) was a 500 "out of memory" - and, streaming, an
+  HTTP status line written into the open event stream. JSON strings now write an invalid UTF-8 sequence as U+FFFD
+  (Python's "replace"), and an error after the stream opens is an error event.
+- **Qwen's tool arguments typed by `anyOf` / `oneOf`** (pydantic's `Optional[str]`): a schema with no `type` let a
+  string argument become a number, a boolean, null or an object. Its types are read from `type`, `anyOf` and
+  `oneOf`; a parameter with none - or no schema - is a string, as vLLM's Qwen parser reads it.
+- **Text parts can't forge a turn.** Qwen joins a message's text parts with nothing between, so `</thi` + `nk>` in
+  two parts was the token; parts are defused as one text now.
+- **`response_format`**: DeepSeek tells the model the schema as its encoding does (`json_schema`'s schema, `json_object`
+  any object), on the first system message; it was ignored. Qwen's template has none: refused by name.
+- `max_tokens: 0` is refused (it meant no limit).
+
 ## [0.6.3]: Qwen's prompts 4% faster, every bit the same
 
 Every kernel set against a ceiling measured on the box (a pure read of its weights' bytes: 220-239 GB/s; WMMA's
