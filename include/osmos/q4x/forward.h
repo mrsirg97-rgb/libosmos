@@ -49,6 +49,7 @@ void q4x_seq_destroy(Q4xSeq *s);
 int32_t q4x_seq_position(const Q4xSeq *s);
 uint32_t q4x_seq_reach(const Q4xSeq *s);
 bool q4x_seq_rollback(Q4xSeq *s, uint32_t n);
+bool q4x_seq_prompt(Q4xSeq *s, uint32_t end);
 void q4x_seq_fail(Q4xSeq *s);
 uint64_t q4x_identity(const Q4xForward *f);
 uint64_t q4x_seq_state_bytes(const Q4xSeq *s);
@@ -60,6 +61,7 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
               uint32_t row0, char err[Q4X_FWD_ERR]);
 bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[Q4X_FWD_ERR]);
 const float *q4x_logits(const Q4xForward *f);
+bool q4x_kept(const Q4xForward *f, uint32_t row);
 const float *q4x_taps(const Q4xForward *f);
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR]);
 
@@ -139,7 +141,8 @@ q4x_step
   runs sequences' tokens in one step (seqs[i] the next lens[i] tokens, consecutive; each sequence once, runs 1 ..
   Q4X_MAX_RUNS): every weight read once for all of them (the matmuls and the experts on the step's tokens; each
   sequence's own - its n-gram history, conv histories, DeltaNet state, rotation, cache and attention - on its tokens
-  alone), the logits at rows row0 .. in the tokens' order. each sequence as a q4x_batch of its tokens: the same bits,
+  alone), the logits at rows row0 .. in the tokens' order (a sequence told its prompt's end: q4x_seq_prompt's rows
+  alone). each sequence as a q4x_batch of its tokens: the same bits,
   however the sequences share the step. false with why - every sequence then unchanged in position - for no runs, a
   run of no tokens, a sequence twice or of another forward, the tokens past max_tokens or a sequence past max_ctx.
   false after its work began (a GPU call failed, an activation past f16's range): its sequences' DeltaNet and n-gram
@@ -153,8 +156,19 @@ q4x_batch
   however its sequence's tokens are split into batches. false with why for n out of range or past max_ctx; the
   sequence then unchanged in position (its state not to be read on: a refusal before any step runs).
 
+q4x_seq_prompt, q4x_kept
+  q4x_seq_prompt: the sequence's prompt ends at position end (its last token end - 1; 0, a new sequence's: none).
+  the caller reads no logits before end - 1: from then on a step leaves its tokens' rows at positions before end - 1
+  as they were (the output head not run for them - a server reads a prompt's last row alone), and writes those at
+  end - 1 and later, the bits of a run never told (DESIGN.md, "0.6.3"). nothing of the sequence's state reads it: any
+  end up to max_ctx is taken, lower than the last too; not saved, cleared by a load or a refused one. false for no
+  sequence or an end past max_ctx.
+  q4x_kept: whether row's logits are its last step's - false for a row whose token was before its prompt's end - 1
+  (or past max_tokens, or of no step yet).
+
 q4x_greedy
-  rows row0 .. row0 + rows - 1's greatest token each (ops_argmax's: the lowest among equals).
+  rows row0 .. row0 + rows - 1's greatest token each (ops_argmax's: the lowest among equals). false for a row not
+  kept (q4x_kept).
 
 q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head; DESIGN.md, "Qwen's MTP head")
   seed: the head's cache at positions from .. to - 1, of the sequence's last step (its rows, read before another

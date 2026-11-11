@@ -35,6 +35,7 @@ typedef struct Q4xBuf
   void *top_part;                                                     /* q4x_greedy's slices' bests (ops_argmax) */
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
+  bool *kept; /* host, [max_tokens]: a row's logits its last step's (q4x_kept) */
 } Q4xBuf;
 
 /* the MTP head's buffers (with a head): a step's hidden rows, a draft's inputs and logits */
@@ -126,6 +127,7 @@ struct Q4xSeq
 {
   Q4xForward *f;
   int32_t pos;
+  int32_t prompt_end; /* q4x_seq_prompt's: no logits for its tokens before prompt_end - 1 (0: none) */
   float *ssm[Q4X_MAX_LAYERS], *conv[Q4X_MAX_LAYERS]; /* a DeltaNet layer's S and conv history, Q4X_SLOTS each */
   uint8_t *kc[Q4X_MAX_LAYERS], *vc[Q4X_MAX_LAYERS];  /* an attention layer's cache (Q8_0 rows: q4x_kv_put) */
   float *ixk[Q4X_MAX_LAYERS], *ixr[Q4X_MAX_LAYERS];  /* its indexer's pooled keys (a block's), raw keys' ring */

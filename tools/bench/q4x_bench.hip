@@ -66,6 +66,8 @@ int main(int argc, char** argv) {
   Q4xForward* fw = q4x_forward_create_with(w, mtp, &qo, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
+  // the prompt's end told, as osmos-serve tells it (oseq_prompt): its last row's logits alone. Q4X_BENCH_ALL_ROWS: not told
+  if (!getenv("Q4X_BENCH_ALL_ROWS") && !q4x_seq_prompt(s, np)) return std::fprintf(stderr, "q4x_bench: the prompt's end refused\n"), 1;
   const double t0 = now(), e0 = epoch();
   for (uint32_t at = 0; at < np; at += kStep) {
     const uint32_t k = np - at < kStep ? np - at : kStep;

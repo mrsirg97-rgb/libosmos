@@ -91,7 +91,7 @@ bool q4x_seq_reset(Q4xSeq *s)
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = !g->recurrent[l] ||
          (hipMemset(s->ssm[l], 0, sb.ssm) == hipSuccess && hipMemset(s->conv[l], 0, sb.conv) == hipSuccess);
-  s->pos = 0, s->n_last = 0;
+  s->pos = 0, s->n_last = 0, s->prompt_end = 0;
   memset(s->last, 0, sizeof s->last);
   s->pend_pos = -1, s->step_n = 0; /* the head: nothing pending, no step to seed from */
   s->df_lo = s->df_pos = 0;         /* the drafter: no context */
@@ -167,6 +167,7 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
     return q4x_fail(err, "no sequence or source");
   Header h;
   uint64_t sum = 0;
+  s->prompt_end = 0; /* the loaded conversation's prompt: told again (q4x_seq_prompt) */
   memset(s->last, 0, sizeof s->last);
   if (bytes < sizeof h + sizeof sum)
     return refuse(s, err, "a state shorter than its header");

@@ -13,7 +13,8 @@
 /* Qwen3.8-Flash-Next behind the engine: every weight resident (no budget, no picks, nothing streamed); its drafter
    o->drafter's GGUF - DFlash2 (general.architecture dflash2: q4x_dflash_*) or the MTP head (q4x_mtp_*). a batch one
    step for its sequences (q4x_step: every weight read once for all of them; Q4X_MAX_RUNS sequences a step), each
-   run's logits at its own rows - every row kept. a rollback steps its states' rings back (q4x_seq_rollback) */
+   run's logits at its own rows - every row kept but a told prompt's before its end - 1 (s_prompt: q4x_seq_prompt).
+   a rollback steps its states' rings back (q4x_seq_rollback) */
 
 _Static_assert(Q4X_MTP_BLOCK <= OSMOS_MAX_BLOCK, "the head's drafts within the engine's");
 _Static_assert(Q4X_DFLASH_BLOCK_MAX - 1 <= OSMOS_MAX_BLOCK, "a DFlash block's drafts within the engine's");
@@ -158,7 +159,7 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
 static const float *e_logits(const void *p, uint32_t row)
 {
   const Eng *e = p;
-  return row < e->n ? q4x_logits(e->f) + (uint64_t)row * e->vocab : NULL;
+  return row < e->n && q4x_kept(e->f, row) ? q4x_logits(e->f) + (uint64_t)row * e->vocab : NULL;
 }
 
 static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
@@ -177,7 +178,7 @@ static uint32_t e_block(const void *p)
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return q4x_seq_create(((Eng *)p)->f, err); }
 static void s_destroy(void *s) { q4x_seq_destroy(s); }
-static bool s_prompt(void *s, uint32_t end) { return (void)s, (void)end, true; }
+static bool s_prompt(void *s, uint32_t end) { return q4x_seq_prompt(s, end); }
 static bool s_rollback(void *s, uint32_t n) { return q4x_seq_rollback(s, n); }
 static uint32_t s_reach(const void *s) { return q4x_seq_reach(s); }
 static int32_t s_position(const void *s) { return q4x_seq_position(s); }
