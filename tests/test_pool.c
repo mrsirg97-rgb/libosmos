@@ -694,6 +694,38 @@ static void test_place(int fd)
   printf("  place: a cold unit pinned with no read, its memory the caller's; not cold or no room FULL\n");
 }
 
+/* a placed unit whose bytes were never written (the caller's copy failed) taken back: cold, its memory spare for the
+   next unit of its size; a held, reading or cold one is not dropped */
+static void test_drop(int fd)
+{
+  char err[POOL_ERR] = "";
+  PoolUnit u[3];
+  for (int i = 0; i < 3; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
+  const uint64_t budget = 8 * KB; /* two units */
+  Pool *p = make(u, 3, budget, err);
+  assert(p);
+  const void *dev[POOL_PARTS] = {0};
+  assert(!pool_drop(NULL, 0) && !pool_drop(p, 3) && !pool_drop(p, 0)); /* no pool, no such unit, cold */
+  assert(pool_place(p, 0, dev) == POOL_OK);
+  const void *placed = dev[0];
+  assert(!pool_drop(p, 0) && pool_state(p, 0) == POOL_PINNED); /* held: the caller's hold first */
+  pool_release(p, 0, 5);
+  assert(pool_drop(p, 0) && pool_state(p, 0) == POOL_COLD && !pool_dev(p, 0, dev));
+  assert(count(&events, POOL_EV_UNPIN, 0) == 1 && !pool_drop(p, 0));
+  assert(pool_pin(p, 1, dev) == POOL_WAIT);
+  assert(reads.r[find_read(1)].dst[0] == placed); /* the memory it left: the next unit of its size's */
+  assert(!pool_drop(p, 1)); /* reading */
+  finish(p, find_read(1), true);
+  assert(pool_pin(p, 0, dev) == POOL_WAIT); /* read again from its file */
+  finish(p, find_read(0), true);
+  check(p, u, 3, budget);
+  pool_release(p, 0, 1), pool_release(p, 1, 2);
+  pool_destroy(p);
+  assert(mem.n == 0);
+  printf("  drop: an unheld pinned unit back to cold, its memory reused; held, reading or cold refused\n");
+}
+
 /* units held in turn, a round after round (the forward's layers), each released as the next is held, wanted again a
    round on: the one released longest ago is the one wanted soonest */
 static int cycle(int fd, bool ahead)
@@ -956,6 +988,7 @@ int main(void)
   test_want_fresh(a);
   test_unit_bytes(a);
   test_place(a);
+  test_drop(a);
   test_cycle(a);
   test_random(a, b);
   test_read_align(a);

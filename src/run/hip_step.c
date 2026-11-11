@@ -227,7 +227,7 @@ static bool fail_held(Forward *f)
   (void)hipDeviceSynchronize();
   if (f->cpu)
     (void)cpu_lane_wait(f->cpu);
-  fwd_release_held(f);
+  membrane_end(f->mem);
   return false;
 }
 
@@ -236,7 +236,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
   const Geometry *g = f->g;
   if (!n || n > f->max_tokens)
     return fwd_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
-  if (f->n_warm && !fwd_warm(f, err))
+  if (!membrane_warm(f->mem, err)) /* the budget's experts, at the first step (nothing to do after it) */
     return false;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
@@ -293,7 +293,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return fwd_fail(err, "a GPU call failed (the step)"), fail_held(f);
   if (f->cpu && !cpu_lane_wait(f->cpu))
     return fwd_fail(err, "the CPU lane's experts failed"), fail_held(f);
-  fwd_release_held(f);
+  membrane_end(f->mem);
   if (f->pin->overflow)
     return fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   for (uint32_t i = 0; i < n; i++)

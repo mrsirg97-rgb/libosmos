@@ -2758,6 +2758,97 @@ Q4X_PPL_DUMP: a token's log-probability and greatest id, 8,191 tokens), each aga
 from a reordering, on the down too a hint over it (+5%). So the iu8 kernel goes to the gate / up first, the down kept
 f16. (The distance from f16, not from BF16: none here to hold it to.)
 
+### 0.6.2: the membrane a module of its own (design, 2026-11-10)
+
+**Why.** the experts' cache (0.5.8) is the part of osmos that carries to any streamed MoE, and it lives inside
+DeepSeek's Forward: two pools, their reads and host slots, the holds, the clock, promotion, the warm start, the
+guess's wants and score - fields of Forward and code in hip_ffn.c, hip_held.c, hip_guess.c, hip_forward.c, read by
+hip_lane.c and hip_cpu_lane.c. Qwen can use none of it. this change moves it behind one interface, DeepSeek its first
+caller, **no behaviour changed**: the same pins, wants, releases and waits in the same order.
+
+**What is the membrane's, and what stays the model's.**
+- the membrane's: the units (a layer's experts, unit = layer x per_layer + expert), where each is (the membrane's
+  pool, the stream's, its file), the visit clock (a layer comes round n_layers visits on), a visit's holds and their
+  end (released, or passed for a prompt's step), promotion (the copy injected: the GPU's, queued on its stream),
+  the warm start, a want a visit ahead (a decode's guess into the membrane, marked for the score; a prompt's read
+  ahead into the stream), the waits and their counters.
+- the model's: which units a step picks and which it names ahead (its router, its guess: ahead_union stays the
+  caller's), the kernels that read the pointers, the budget (choose, fit), the files' O_DIRECT twins and the host
+  slots (the Slots injected, as the pool's). the CPU lane stays DeepSeek's: it begins a unit's read without waiting
+  (membrane_begin) and asks whether one is in memory.
+- found on the way: Forward.rix is -1 for every expert since 0.5.8 (units(): the budget's experts became the warm
+  start), so every `rix >= 0` branch - resident_dev for an expert in hip_ffn.c, hip_lane.c, hip_guess.c,
+  hip_cpu_lane.c - is dead. deleted with the move (a pure deletion).
+
+**The interface** (include/osmos/mem/membrane.h; src/mem/membrane.c - no HIP in it: Slots and the copy are the
+caller's, so it runs in a CPU test on real files and real readers):
+- `membrane_create(MembraneOptions)`: units, n_layers, per_layer, the two rooms and their Slots, read_align, readers,
+  the warm list, the copy. constructed whole; refused with why.
+- `membrane_warm`: the warm list read in and released the other way round (the first step's, as fwd_warm).
+- `membrane_visit(layer, passing)`: the finished reads handed in; a new layer ends the last one's holds and moves the
+  clock (the same layer again - a sub-batch - only drains). passing: a prompt's step.
+- `membrane_score(unit)`, `membrane_guess(unit)`, `membrane_ahead(unit)`: a pick scored against the last visit's
+  guess; a decode's guessed unit wanted in the membrane at the next visit; a prompt's named unit wanted in the stream.
+- `membrane_hold(unit)`: held for the visit - promoted, or pinned where it is, or its read begun (into the stream when
+  passing, else the membrane); a full pool waited on while reads are under way, refused loudly when none is.
+- `membrane_ready(unit, dev)` / `membrane_wait(unit, dev)`: its pointers if in memory now; or waited for (the lane
+  launches the ready ones first).
+- `membrane_begin(unit)`, `membrane_settle()`, `membrane_in_memory(unit)`: the CPU lane's.
+- `membrane_end()`: the step's end or its failure - every hold ended.
+- `membrane_stats`: waits and their time (guessed or not), streamed picks, guessed, the guess's reads.
+the order a caller keeps (fwd_moe's today): visit, score each pick, guess, hold each distinct unit, ahead.
+
+**The tests first.**
+- `test_membrane` (CPU; temp files, malloc Slots, a memcpy copy; fails on the stub's create): a held unit's bytes its
+  file's; a decode's units still in memory a round on with no wait; a prompt's step passing through - its misses in
+  the stream, the membrane's units all still there; promotion - the copy made, the unit kept when later prompts flush
+  the stream; the guess - read begun a visit ahead, scored a hit, an unguessed pick a miss; the warm start - in
+  memory with no hold, the first named the last to go; more held in a visit than the room - refused with why, the
+  next visit sound; the refusals; a random walk of visits and holds - every pointer's bytes right.
+- unchanged and still green: test_pool, test_reads, test_membrane_gpu, test_guess_gpu, test_warm_gpu, test_lane_gpu,
+  test_cpu_lane_gpu, test_forward_gpu, test_engine_gpu.
+- the oracle for "no behaviour changed": dbench on UD-IQ1_M (512-token steps, 128 new, q1 / a 2K prompt / q2, plain
+  and DSpark-drafted, the guess on) before and after - every ids hash held; the counters reported against 0.6.1's own
+  run-to-run spread (two runs: which reads have ended when a pick is scored is the SSD's timing).
+
+**Built and measured** (2026-11-10, performance, the box quiet). test_membrane failed on the stub's create, passes
+on the module. the forward moved: hip_held.c gone, hold / promote / the warm start / the clock / the counters out of
+hip_ffn.c, hip_forward.c, hip_guess.c, hip_cpu_lane.c (Forward 21 fields fewer), the dead rix branches deleted. one
+thing not a pure move: a promotion's hold in the membrane's pool is recorded before its copy, so a copy that fails
+leaves it to membrane_end (it was dropped unrecorded: a hold never released - the failure path only). and what
+0.6.1 had beside that leak: the failed copy's unit stays PINNED in the membrane's pool (pool_place pins before the
+bytes are written; a release leaves it pinned), so a later step that picked it would have read memory never
+written - reachable where the copy's launch fails and the GPU still answers (conv_failed's restart keeps the forward).
+closed here (the operator's choice: the pool's fix, not a membrane refused for good): pool_drop - an unheld pinned
+unit back to cold, its memory spare (test_pool's drop, failed first on a stub) - and the membrane refuses every call
+from the failed copy until membrane_end, which ends the holds and drops the unit; the forward's fail_held is past the
+GPU (hipDeviceSynchronize: the copies queued before the failed one write that memory) before it calls it. the unit
+is then promoted again from the stream's copy or read from its file (test_membrane: a copy that fails, twice, then
+works; it failed first on a visit that went through).
+- GPU tests green on it: test_membrane_gpu, test_guess_gpu, test_warm_gpu, test_lane_gpu, test_cpu_lane_gpu,
+  test_pool_gpu, test_engine_gpu, test_drafter_gpu, test_seqstate_gpu; the 27 CPU tests.
+- the oracle (0.6.1 twice, then this):
+
+  | | 0.6.1 run 1 | 0.6.1 run 2 | the module |
+  | --- | ---: | ---: | ---: |
+  | hashes, q1 / 2K / q2, plain and drafted | d7b31752 3489efd3 6b10ecda | the same | the same |
+  | plain: the guess's reads (after each answer) | 1394 / 2361 / 3276 | 1394 / 2361 / 3276 | 1394 / 2361 / 3276 |
+  | drafted: the guess's reads | 2086 / 3788 / 5102 | 2086 / 3796 / 5108 | 2086 / 3796 / 5108 |
+  | plain: reads waited for, in all | 2190 | 2177 | 2194 |
+  | drafted: reads waited for, in all | 2803 | 2782 | 2794 |
+  | plain: streamed picks, in all | 2167 | 2145 | 2185 |
+  | plain tok/s | 17.5 / 16.3 / 17.4 | 16.6 / 16.4 / 17.4 | 17.6 / 16.4 / 17.4 |
+  | drafted tok/s | 32.0 / 19.3 / 29.2 | 32.8 / 19.4 / 29.3 | 32.4 / 19.4 / 29.2 |
+
+  with pool_drop in (two more runs): every hash the same; the guess's reads 1394 / 2361 / 3277 and 1394 / 2369 / 3286
+  plain, 2087 / 3797 / 5109 and 2086 / 3796 / 5108 drafted - the counter moves a few reads run to run on one build
+  (room for a want depends on which reads have ended), so it is reported, not held; tok/s 17.7 / 16.4 / 17.4 plain,
+  32.4 / 19.3 / 29.2 drafted. the 27 CPU tests and the seven DeepSeek GPU tests above green on it.
+
+**Not in this change.** Qwen on the membrane: its experts are slices of three tensors a layer (units as DeepSeek's),
+but its routing never leaves the GPU today (tiles_kernel builds the pointers there) - it needs the picks on the host
+a layer (a routing event, as DeepSeek's) and its tables from the host. its own design, with its budget rule.
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate
