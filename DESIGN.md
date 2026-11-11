@@ -3066,6 +3066,14 @@ the engine (a told prompt's rows NULL and no pick). the host tests and the q4x G
 mtp_seed, forward, overflow, taps, ngram, overlay). not tested: osmos-serve's own path on the GPU (its prompt rows
 read as before: the last piece's last row).
 
+**The norms' loops (2026-11-11, low-power).** combine_norm_kernel moves 2,560 values a block and took 11.8 us in the
+trace, 95 a token. its buffers __restrict__, its loops unrolled (a thread's ten loads issued together), the f16
+side's place by one division a thread, not a 64-bit one a value: cn.hip (warm, back to back) 5.67 -> 4.27 us, the
+same xn and x16 bits; hc_norm_kernel the same. the model's decode, three interleaved pairs: 27.23-27.36 ->
+27.40-27.46 tok/s (+0.4%), the same ids. the guess was a block waiting on DRAM once a value: wrong - the gain in the
+model is the warm one's, ~1.5 us a launch, and the trace's 11.8 us is not all the kernel's to give back. the block
+sum's last five levels by wave shuffles (the same pairs): 0.09 us, not taken.
+
 
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 

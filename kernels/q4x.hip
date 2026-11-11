@@ -18,40 +18,71 @@ constexpr uint32_t kMaxHc = 8;
 
 
 
+// an output's elements base .. base + dim - 1 in the side's x16 (x16_side's places): the row and column of base by
+// one division a thread, not one an element
+struct SideAt {
+  uint32_t row, col;
+};
+__device__ inline SideAt side_at(const Q4xX16& side, uint64_t base) {
+  return side.x16 ? SideAt{side.row0 + (uint32_t) (base / side.cols), (uint32_t) (base % side.cols)} : SideAt{0, 0};
+}
+__device__ inline void side_put(const Q4xX16& side, SideAt at, uint32_t d, float v) {
+  if (!side.x16) return;
+  uint32_t c = at.col + d, r = at.row;
+  while (c >= side.cols) c -= side.cols, r++;
+  mm::x16_put((_Float16*) side.x16, r, c, side.cols, v, side.overflow);
+}
+
+// the norms' loops: a thread's values dim / kThreads apart, their loads issued together (the buffers apart:
+// __restrict__) - a decode step's block waits on DRAM once, not once a value (cn.hip: 5.7 -> 4.3 us warm)
+constexpr int kNormUnroll = 10;
+
 // a block a (stream, token): its sum of squares by block_sum's tree, then each value normed and weighted
-__global__ void hc_norm_kernel(const float* h, const float* w, uint32_t hc, uint32_t dim, float eps, float* xn,
-                               Q4xX16 side) {
+__global__ void hc_norm_kernel(const float* __restrict__ h, const float* __restrict__ w, uint32_t hc, uint32_t dim,
+                               float eps, float* __restrict__ xn, Q4xX16 side) {
   __shared__ float lds[kThreads];
   const uint32_t s = blockIdx.x, t = blockIdx.y;
   const float* x = h + ((uint64_t) t * hc + s) * dim;
+  const float* ws = w + (uint64_t) s * dim;
   float* y = xn + ((uint64_t) t * hc + s) * dim;
+  const SideAt at = side_at(side, ((uint64_t) t * hc + s) * dim);
   float ss = 0;
+#pragma unroll kNormUnroll
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) ss += x[d] * x[d];
   const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) dim + eps);
+#pragma unroll kNormUnroll
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
-    y[d] = x[d] * r * w[(uint64_t) s * dim + d];
-    x16_side(side, ((uint64_t) t * hc + s) * dim + d, y[d]);
+    const float v = x[d] * r * ws[d];
+    y[d] = v;
+    side_put(side, at, d, v);
   }
 }
 
 // a block a (stream, token): combine_kernel's update of its values, then hc_norm_kernel's norm of them (each value
 // the update's, its square summed in hc_norm_kernel's order)
-__global__ void combine_norm_kernel(float* h, const float* out, const float* inject, uint32_t hc, uint32_t dim,
-                                    float inject_scale, const float* w, float eps, float* xn, Q4xX16 side) {
+__global__ void combine_norm_kernel(float* __restrict__ h, const float* __restrict__ out,
+                                    const float* __restrict__ inject, uint32_t hc, uint32_t dim, float inject_scale,
+                                    const float* __restrict__ w, float eps, float* __restrict__ xn, Q4xX16 side) {
   __shared__ float lds[kThreads];
   const uint32_t s = blockIdx.x, t = blockIdx.y;
   float* x = h + ((uint64_t) t * hc + s) * dim;
+  const float* o = out + (uint64_t) t * dim;
+  const float* ws = w + (uint64_t) s * dim;
   float* y = xn + ((uint64_t) t * hc + s) * dim;
+  const SideAt at = side_at(side, ((uint64_t) t * hc + s) * dim);
   const float g = 2.0f * sigmoid(inject[(uint64_t) t * hc + s] * inject_scale);
   float ss = 0;
+#pragma unroll kNormUnroll
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
-    x[d] += g * out[(uint64_t) t * dim + d];
+    x[d] += g * o[d];
     ss += x[d] * x[d];
   }
   const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) dim + eps);
+#pragma unroll kNormUnroll
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
-    y[d] = x[d] * r * w[(uint64_t) s * dim + d];
-    x16_side(side, ((uint64_t) t * hc + s) * dim + d, y[d]);
+    const float v = x[d] * r * ws[d];
+    y[d] = v;
+    side_put(side, at, d, v);
   }
 }
 
