@@ -3074,6 +3074,21 @@ same xn and x16 bits; hc_norm_kernel the same. the model's decode, three interle
 model is the warm one's, ~1.5 us a launch, and the trace's 11.8 us is not all the kernel's to give back. the block
 sum's last five levels by wave shuffles (the same pairs): 0.09 us, not taken.
 
+**The mixers' epilogues, every wave's (2026-11-11, low-power).** tile's epilogue - the silu (mm_run_silu), the gated
+mean's take (mm_run_gated_mean) - was wave 0's for all eight of a tile's row pairs while the block's other waves
+waited. now wave v takes pairs v, v + waves ..: each sum the same waves' parts in the same order, the same bits.
+traces before and after: the mixer's up at a token 24.8 -> 23.9 us, its down 24.2 -> 23.1, the up at a prompt's
+step 1,461 -> 1,434; decode, three interleaved pairs, 27.02-27.11 -> 27.18-27.20 tok/s (+0.4%), prompts within
+their scatter. the guess had been an epilogue the matmul's size: wrong. the up at a prompt's step with parts
+knocked out (throwaway builds): whole 1,434 us, no sigmoid 1,376, no xn load 1,134, neither 1,072 - the xn load is
+21% and at the read ceiling already (84 MB), the sigmoid 4%, the 320-column matmul itself 75% at ~12.5 TFLOP/s. not
+built: one wave keeping both waves' partial sums in registers (the same order, no LDS between them).
+
+**What the table's other rows came to.** the mixer's down at a token (20 blocks) and up have no lever at their bits:
+a block is a 16-row tile whose waves split the columns, so more blocks is another shape - another order of sums. the
+inject's one-block matvec runs under the mixer's down on the second stream and ends first: nothing to gain alone. so
+the decode's ~8.5 ms over the read ceiling is mostly not there to take at these bits; taken so far ~0.3 ms.
+
 
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
