@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.3]: Qwen's prompts 4% faster, every bit the same
+
+Every kernel set against a ceiling measured on the box (a pure read of its weights' bytes: 220-239 GB/s; WMMA's
+47-49 TFLOP/s), then the cheapest of what that showed. At low-power, UD-IQ3_XXS, interleaved runs; no output
+changes: every ids hash the same. DeepSeek untouched.
+
+- **Qwen runs the output head for a prompt's last row alone.** osmos-serve tells a sequence where its prompt ends and
+  reads one row of its logits; Qwen had ignored that and computed all of a step's rows (2,048 or 4,096 of them). A
+  4,096-token prompt: 822-832 -> 859-860 tok/s at 2,048-token steps, 853-866 -> 896-901 at 4,096 (the pack's).
+  `q4x_seq_prompt`, `q4x_kept`; a row not kept gives no logits and no pick. test_q4x_prompt_gpu, test_engine_q4x_gpu.
+  One difference: in a step of more than 2,048 tokens, an activation past f16's range in a skipped row's last mixer
+  output is no longer found - nothing reads that value, so no token can come of it, but the step is no longer refused.
+- **Decode +0.8%** (27.2-27.4 -> 27.4-27.6 tok/s): the norm kernels' loads issued together (buffers `__restrict__`,
+  loops unrolled, one division a thread for the f16 copy's place), and the mixer matmuls' silu and gated-mean
+  epilogues shared by a block's waves, where one wave had done them all.
+- **Measured, written down** (DESIGN.md, "0.6.3"): the table of both models' kernels against their ceilings; the
+  mixer's up at a prompt's step taken apart (its gate input's load 21% and already at the read ceiling, the
+  320-column matmul 75%); what has no lever at these bits (the mixers' block counts are their shapes').
+- q4x_bench tells the prompt's end as the server does (`Q4X_BENCH_ALL_ROWS=1`: as before).
+
 ## [0.6.2]: the membrane a module, kernels both families share
 
 Structure, and a first pass over DeepSeek's decode. No output changes: every ids hash the same (DeepSeek UD-IQ1_M,
