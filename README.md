@@ -89,6 +89,29 @@ is the slow pack: it reads seven to ten times what UD-IQ1_S does for each token.
 drafted): 32 of 32 turns in 473.5 s, first token p50 / p95 5.3 / 64.6 s, turn done 44.9 / 107.6 s, package power
 116.7 W, 7.30 J an answer token, at least 8.3 GiB of RAM left free throughout.
 
+### DeepSeek on 0.6.2 at `low-power`
+
+The same runs at AMD's `low-power` profile (~70 W cap, 2026-11-11), against 0.5.11's at the same profile (the Maya
+comparison below). Tokens a second:
+
+| | UD-IQ1_M 0.5.11 | 0.6.2 | UD-IQ1_S 0.5.11 | 0.6.2 | UD-IQ2_XXS 0.5.11 | 0.6.2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Prompt, 2,048 tokens | 318 | 321-327 | 322 | 323 | 281 | 281-282 |
+| Prompt, 8,192 tokens | 438 | 439-443 | 451 | 453-454 | 383 | 381 |
+| Decode, drafted | 32.7 | 32.0-32.2 | 39.5 | 39.1-39.2 | 24.8 | 23.4-24.0 |
+| Decode, plain | 16.4 | 16.2-16.3 | 18.3 | 18.3 | 13.5 | 13.4 |
+| SSD read a token, plain / drafted | | 0.028-0.031 / 0.045 GB | | 0.007 / 0.012-0.013 GB | 0.064 / 0.082 GB | 0.072-0.073 / 0.105-0.106 GB |
+
+Agents (UD-IQ1_M at 131K, drafted), 0.5.11 against 0.6.2: wall time 485 against 482.8 s, first token p50 / p95 7.0 /
+73.0 against 6.5 / 77.1 s, turn done 48.3 / 105.9 against 46.6 / 105.7 s, package power 56.4 against 57.7 W, energy
+3.42 against 3.69 J an answer token, RAM left free at least 8.2 against 8.4 GiB.
+
+At `low-power` 0.6.2 runs DeepSeek about as 0.5.11 did: the prompts the same or up to 3% faster, plain decode the
+same. Two numbers came out worse, and we are looking into them rather than explaining them away: UD-IQ2_XXS reads
+more from the SSD for each token than 0.5.11's run measured (0.105 against 0.082 GB drafted) and its drafted decode
+is 3-6% lower, and the agents bench used 8% more energy an answer token at nearly the same wall time. The output is
+unchanged: every perplexity is 0.5.11's to the last digit.
+
 ### 0.6.0 at `performance`
 
 0.6.0 against 0.5.12 on the same box at AMD's `performance` profile (2026-11-10): greedy decoding, nothing else
@@ -122,7 +145,8 @@ with nothing else running and greedy decoding. Each engine runs in a fresh proce
 engines' order swapped from round to round, and each is set up the way its own setup does it. The scripts and logs
 are listed in `DESIGN.md` ("0.5.11"). 0.5.12 changed none of these by more than a couple of percent (Qwen's decode
 +1-2% from fewer launches; DeepSeek's paths untouched), so its tables stay 0.5.11's. 0.6.0's Qwen prompts are
-faster (above); these comparisons have not been rerun with it.
+faster (above); these comparisons have not been rerun with it. 0.6.2's own DeepSeek numbers at `low-power` are
+above.
 
 **Low-power is the profile for work that runs a while.** Against 0.5.9's run at `performance`, the agents bench below
 took 20% longer and used half the energy per answer token (3.42 J against 7.03 J; mean package power 56 W against
