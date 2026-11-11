@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,6 +31,9 @@ static int until(const char *t, size_t len, size_t *i, const char *const *stops,
   *i = hit < 0 ? len : best + strlen(stops[hit]);
   return hit;
 }
+
+/* a span of the shape as the text's own bytes (the same offsets: the shape is the text defused) */
+static Span real(Span s, ptrdiff_t off) { return s.n ? (Span){s.p + off, s.n} : s; }
 
 static bool is(Span s, const char *lit) { return s.n == strlen(lit) && memcmp(s.p, lit, s.n) == 0; }
 
@@ -75,8 +79,9 @@ static bool param(Span s, Param *p)
 }
 
 /* one DSML call into out (OpenAI's form): {"type": "function", "function": {"name", "arguments"}[, "namespace"]} */
-static bool call(JsonBuf *out, Span name, const Param *ps, size_t np, char *err)
+static bool call(JsonBuf *out, Span name, const Param *ps, size_t np, ptrdiff_t off, char *err)
 {
+  name = real(name, off);
   char *nm = strndup(name.p, name.n);
   if (!nm)
     return chat_fail(err, "a tool call", "out of memory");
@@ -91,11 +96,12 @@ static bool call(JsonBuf *out, Span name, const Param *ps, size_t np, char *err)
   for (size_t i = 0; i < np; i++)
   {
     json_puts(&args, i ? ", " : "");
-    json_dump_string(&args, ps[i].name.p, ps[i].name.n), json_puts(&args, ": ");
+    const Span pn = real(ps[i].name, off), pv = real(ps[i].value, off);
+    json_dump_string(&args, pn.p, pn.n), json_puts(&args, ": ");
     if (ps[i].string)
-      json_dump_string(&args, ps[i].value.p, ps[i].value.n);
+      json_dump_string(&args, pv.p, pv.n);
     else
-      json_put(&args, ps[i].value.p, ps[i].value.n); /* as written (decode_dsml_to_arguments) */
+      json_put(&args, pv.p, pv.n); /* as written (decode_dsml_to_arguments) */
   }
   json_puts(&args, "}");
   json_puts(out, "{\"type\": \"function\", \"function\": {\"name\": ");
@@ -111,7 +117,7 @@ static bool call(JsonBuf *out, Span name, const Param *ps, size_t np, char *err)
   return true;
 }
 
-static bool calls(const char *t, size_t len, size_t *i, int *last, JsonBuf *out, char *err)
+static bool calls(const char *t, size_t len, size_t *i, int *last, JsonBuf *out, ptrdiff_t off, char *err)
 {
   const char *outer[] = {CHAT_INVOKE_OPEN, CHAT_CALLS_CLOSE}, *inner[] = {CHAT_PARAM_OPEN, CHAT_INVOKE_CLOSE};
   const char *pend[] = {"/" CHAT_DSML " parameter"};
@@ -154,7 +160,7 @@ static bool calls(const char *t, size_t len, size_t *i, int *last, JsonBuf *out,
         return chat_fail(err, "a tool call", "not '>\\n' after a parameter");
     }
     json_puts(out, k ? ", " : "");
-    if (!call(out, name, ps, np, err))
+    if (!call(out, name, ps, np, off, err))
       return false;
     *last = at < 0 ? -1 : 2;
   }
@@ -167,8 +173,16 @@ const char *const chat_refused[] = {CHAT_BOS, CHAT_EOS, CHAT_THINK, CHAT_THINK_E
 
 bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[CHAT_ERR])
 {
+  return chat_parse_shaped(text, text, len, mode, out, err);
+}
+
+bool chat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, JsonBuf *out,
+                       char err[CHAT_ERR])
+{
   err[0] = 0;
-  const char *start = "\n\n" "<" CHAT_DSML " calls";
+  const ptrdiff_t off = text - shape; /* the parse reads the shape; what it gives is the text's */
+  text = shape;
+  const char *start = CHAT_CALLS_START;
   const char *think_stops[] = {CHAT_THINK_END, start}, *body_stops[] = {CHAT_EOS, start}, *eos[] = {CHAT_EOS};
   Span reasoning = {"", 0}, content, rest;
   size_t i = 0;
@@ -179,7 +193,7 @@ bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char 
   int last = stop;
   if (stop == 1)
   {
-    if (!calls(text, len, &i, &last, &tc, err))
+    if (!calls(text, len, &i, &last, &tc, off, err))
       return free(tc.p), false;
     last = until(text, len, &i, eos, 1, &rest);
     if (rest.n)
@@ -192,6 +206,7 @@ bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char 
   for (int k = 0; chat_refused[k]; k++)
     if (has(content, chat_refused[k]) || has(reasoning, chat_refused[k]))
       return free(tc.p), chat_fail(err, "the completion", "a special token in its text");
+  content = real(content, off), reasoning = real(reasoning, off);
   json_puts(out, "{\"role\": \"assistant\", \"content\": "), json_dump_string(out, content.p, content.n);
   json_puts(out, ", \"reasoning_content\": "), json_dump_string(out, reasoning.p, reasoning.n);
   json_puts(out, ", \"tool_calls\": ");

@@ -12,12 +12,13 @@ typedef struct Dialect
   const char *arch;       /* general.architecture */
   const char *eos;        /* the end of turn's token text (osmos-serve's --eos) */
   const char *think_end;  /* the reasoning's end */
-  const char *calls_open; /* a tool calls block's start */
+  const char *calls_open; /* a tool calls block's start, as the parse cuts the content there */
   bool trims;             /* its parse trims the reasoning and the content: their streams start past whitespace */
   const char *const *refused; /* special tokens' text its parse refuses in a completion: never streamed */
   bool (*read)(const Json *body, Request *r, char err[API_ERR]);
   bool (*render)(const Request *r, JsonBuf *out, char err[CHAT_ERR]);
-  bool (*parse)(const Request *r, const char *text, size_t n, JsonBuf *out, char err[CHAT_ERR]);
+  bool (*parse)(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
+                char err[CHAT_ERR]); /* markers read from shape (the said special tokens' text defused) */
 } Dialect;
 
 /* the dialect of a model family, or NULL (one naming more than DIALECT_REFUSED_MAX refused texts too) */

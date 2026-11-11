@@ -26,3 +26,4 @@ void request_free(Request *r);
 const Json *request_effort(const Json *body);
 bool request_fail(char *err, const char *what);
 Json *request_tools(const Json *body);
+bool request_format(const Json *body, JsonBuf *out, char err[API_ERR]);

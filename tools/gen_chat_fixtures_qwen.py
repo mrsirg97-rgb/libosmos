@@ -56,9 +56,14 @@ def no_constant(s):
 
 def value_of(name, raw, schema):
     """the template writes a string raw and anything else as its JSON: the text read as JSON when that is a value
-    other than a string, of a type the parameter's schema allows (any, without one) - else the text itself"""
-    t = schema.get(name, {}).get("type")
-    allowed = None if t is None else set(t if isinstance(t, list) else [t])
+    other than a string, of a type the parameter's schema allows (its "type", or an anyOf / oneOf's: pydantic's
+    Optional[T]) - else the text itself. no tool, parameter or type: a string, as vLLM's qwen3coder parser reads it"""
+    s = schema.get(name) if isinstance(schema.get(name), dict) else {}
+    alts = [a for k in ("anyOf", "oneOf") if isinstance(s.get(k), list) for a in s[k] if isinstance(a, dict)]
+    allowed = set()
+    for t in [s.get("type")] + [a.get("type") for a in alts]:
+        allowed.update(x for x in (t if isinstance(t, list) else [t]) if isinstance(x, str))
+    allowed = allowed or {"string"}
     try:
         v = json.loads(raw, parse_constant=no_constant)
     except ValueError:
@@ -66,7 +71,7 @@ def value_of(name, raw, schema):
     kind = ("boolean" if isinstance(v, bool) else "null" if v is None else "integer" if isinstance(v, int)
             else "number" if isinstance(v, float) else "object" if isinstance(v, dict)
             else "array" if isinstance(v, list) else "string")
-    ok = kind != "string" and (allowed is None or kind in allowed or (kind == "integer" and "number" in allowed))
+    ok = kind != "string" and (kind in allowed or (kind == "integer" and "number" in allowed))
     return v if ok else raw
 
 
@@ -237,6 +242,11 @@ PARSE = [
      "<parameter=args>\n[1, \"a\"]\n</parameter>\n<parameter=extra>\n{\"k\": 1}\n</parameter>\n"
      "<parameter=x>\nnot json\n</parameter>\n</function>\n</tool_call>" + EOS, False, TOOLS),
     ("<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>" + EOS, False, None),
+    ("<tool_call>\n<function=save>\n<parameter=text>\n{\"a\": 1}\n</parameter>\n<parameter=n>\n5\n</parameter>\n"
+     "<parameter=tag>\nnull\n</parameter>\n<parameter=raw>\ntrue\n</parameter>\n</function>\n</tool_call>" + EOS, False,
+     [{"type": "function", "function": {"name": "save", "parameters": {"type": "object", "properties": {
+         "text": {"anyOf": [{"type": "string"}, {"type": "null"}]}, "n": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+         "tag": {"oneOf": [{"type": "string"}, {"type": "null"}]}, "raw": {"description": "no type"}}}}}]),
     ("<tool_call>\n<function=f>\n</function>\n</tool_call>\ntrailing" + EOS, False, None),
     ("<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n<parameter=a>\n2\n</parameter>\n</function>\n"
      "</tool_call>" + EOS, False, None),

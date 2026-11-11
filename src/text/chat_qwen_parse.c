@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,10 +43,13 @@ static bool upto(Span *rest, const char *stop, Span *before)
   return true;
 }
 
+/* a span of the shape as the text's own bytes (chat_parse_shaped's) */
+static Span real(Span s, ptrdiff_t off) { return s.n ? (Span){s.p + off, s.n} : s; }
+
 static bool name_ok(Span s) { return s.n && !memchr(s.p, '\n', s.n) && !memchr(s.p, '<', s.n); }
 
-/* the type names the schema allows a function's parameter (its "type": one, or a list), or NULL: any */
-static const Json *types_of(const Json *tools, Span fn, Span param)
+/* a function's parameter's schema, or NULL (no such tool or parameter) */
+static const Json *schema_of(const Json *tools, Span fn, Span param)
 {
   const Json *props = NULL;
   for (size_t i = 0; tools && i < tools->n; i++)
@@ -57,20 +61,36 @@ static const Json *types_of(const Json *tools, Span fn, Span param)
   }
   for (size_t i = 0; props && props->type == JSON_OBJECT && i < props->n; i++)
     if (props->klen[i] == param.n && !memcmp(props->key[i], param.p, param.n))
-      return json_get(props->item[i], "type");
+      return props->item[i];
   return NULL;
 }
 
-static bool allows(const Json *types, const char *kind)
+/* kind among a "type" (one, or a list); *named whether it names any */
+static bool listed(const Json *types, const char *kind, bool *named)
 {
-  if (!types)
-    return true;
-  if (types->type == JSON_STRING)
-    return !strcmp(types->s, kind);
-  for (size_t i = 0; types->type == JSON_ARRAY && i < types->n; i++)
-    if (types->item[i]->type == JSON_STRING && !strcmp(types->item[i]->s, kind))
+  if (types && types->type == JSON_STRING)
+    return *named = true, !strcmp(types->s, kind);
+  for (size_t i = 0; types && types->type == JSON_ARRAY && i < types->n; i++)
+    if (types->item[i]->type == JSON_STRING && (*named = true) && !strcmp(types->item[i]->s, kind))
       return true;
   return false;
+}
+
+/* the schema allows kind: its "type", or an anyOf / oneOf's (pydantic's Optional[str]: anyOf string, null). a
+   schema that names no type - or none - a string's alone, as vLLM's qwen3coder parser takes it */
+static bool allows(const Json *schema, const char *kind)
+{
+  bool named = false;
+  if (listed(json_get(schema, "type"), kind, &named))
+    return true;
+  for (int a = 0; a < 2; a++)
+  {
+    const Json *alts = json_get(schema, a ? "oneOf" : "anyOf");
+    for (size_t i = 0; alts && alts->type == JSON_ARRAY && i < alts->n; i++)
+      if (listed(json_get(alts->item[i], "type"), kind, &named))
+        return true;
+  }
+  return !named && !strcmp(kind, "string");
 }
 
 static const char *kind_of(const Json *v)
@@ -96,13 +116,13 @@ static const char *kind_of(const Json *v)
 }
 
 /* a parameter's value into args: its JSON where that is no string and of a type allowed, else its text */
-static void value(JsonBuf *args, Span raw, const Json *types)
+static void value(JsonBuf *args, Span raw, const Json *schema)
 {
   char jerr[JSON_ERR];
   Json *v = json_parse(raw.p, raw.n, jerr);
   const char *kind = v ? kind_of(v) : "string";
   const bool typed = v && strcmp(kind, "string") &&
-                     (allows(types, kind) || (!strcmp(kind, "integer") && allows(types, "number")));
+                     (allows(schema, kind) || (!strcmp(kind, "integer") && allows(schema, "number")));
   if (typed)
     json_dump(args, v);
   else
@@ -111,11 +131,12 @@ static void value(JsonBuf *args, Span raw, const Json *types)
 }
 
 /* one <tool_call> block from rest: its call's JSON into calls */
-static bool call(Span *rest, const Json *tools, JsonBuf *calls, char *err)
+static bool call(Span *rest, const Json *tools, JsonBuf *calls, ptrdiff_t off, char *err)
 {
   Span fn, names[MAX_PARAMS];
   if (!take(rest, QCHAT_CALL_OPEN) || !take(rest, "<function=") || !upto(rest, ">", &fn) || !name_ok(fn))
     return qchat_fail(err, "a tool call's <tool_call><function=name> malformed");
+  fn = real(fn, off);
   JsonBuf args = {0};
   size_t n = 0;
   json_puts(&args, "{");
@@ -124,6 +145,8 @@ static bool call(Span *rest, const Json *tools, JsonBuf *calls, char *err)
     Span name, raw;
     *rest = (Span){r.p + strlen("<parameter="), r.n - strlen("<parameter=")};
     bool ok = upto(rest, ">", &name) && name_ok(name) && upto(rest, "</parameter>", &raw) && n < MAX_PARAMS;
+    if (ok)
+      name = real(name, off), raw = real(raw, off);
     for (size_t i = 0; ok && i < n; i++)
       ok = !(names[i].n == name.n && !memcmp(names[i].p, name.p, name.n));
     if (!ok)
@@ -133,7 +156,7 @@ static bool call(Span *rest, const Json *tools, JsonBuf *calls, char *err)
     if (raw.n && raw.p[raw.n - 1] == '\n')
       raw.n--;
     json_puts(&args, n ? ", " : ""), json_dump_string(&args, name.p, name.n), json_puts(&args, ": ");
-    value(&args, raw, types_of(tools, fn, name));
+    value(&args, raw, schema_of(tools, fn, name));
     names[n++] = name;
   }
   json_puts(&args, "}");
@@ -148,6 +171,14 @@ static bool call(Span *rest, const Json *tools, JsonBuf *calls, char *err)
 
 bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR])
 {
+  return qchat_parse_shaped(text, text, len, mode, tools, out, err);
+}
+
+bool qchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
+                        JsonBuf *out, char err[CHAT_ERR])
+{
+  const ptrdiff_t off = text - shape; /* the parse reads the shape; what it gives is the text's */
+  text = shape;
   const size_t en = strlen(QCHAT_EOS);
   if (!text || len < en || memcmp(text + len - en, QCHAT_EOS, en))
     return qchat_fail(err, "no end of turn (" QCHAT_EOS ")");
@@ -160,13 +191,13 @@ bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools,
   const char *at = memmem(body.p, body.n, QCHAT_CALL_OPEN, strlen(QCHAT_CALL_OPEN));
   Span content = {body.p, at ? (size_t)(at - body.p) : body.n};
   Span rest = {content.p + content.n, body.n - content.n};
-  content = qchat_trim(content), reasoning = qchat_trim(reasoning);
+  content = real(qchat_trim(content), off), reasoning = real(qchat_trim(reasoning), off);
   JsonBuf calls = {0};
   json_puts(&calls, "[");
   for (size_t k = 0; lstrip(rest).n; k++)
   {
     json_puts(&calls, k ? ", " : "");
-    if (!call(&rest, tools && tools->type == JSON_ARRAY ? tools : NULL, &calls, err))
+    if (!call(&rest, tools && tools->type == JSON_ARRAY ? tools : NULL, &calls, off, err))
       return free(calls.p), false;
   }
   json_puts(&calls, "]");

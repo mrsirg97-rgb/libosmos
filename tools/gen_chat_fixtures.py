@@ -27,8 +27,12 @@ def call(cid, name, args):
 
 
 SYS_TOOLS = {"role": "system", "content": "You are helpful.", "tools": [WEATHER, SEARCH]}
+RF = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
 RENDER = [
     ([{"role": "user", "content": "Hello"}], "chat", None),
+    ([{"role": "system", "content": "Be brief.", "response_format": RF}, {"role": "user", "content": "Hi"}], "chat",
+     None),
+    ([dict(SYS_TOOLS, response_format=RF), {"role": "user", "content": "Hi"}], "thinking", None),
     ([{"role": "user", "content": "Hello"}], "thinking", None),
     ([{"role": "user", "content": "Hello"}], "thinking", "low"),
     ([{"role": "user", "content": "Hello"}], "thinking", 30),

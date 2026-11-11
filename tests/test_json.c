@@ -66,6 +66,41 @@ int main(void)
   assert(!json_parse("\"\xff\"", 3, err));   /* invalid UTF-8 */
   assert(!json_parse("NaN", 3, err));           /* Python reads it; JSON has none */
   assert(!json_parse("\"a\0b\"", 5, err));   /* a raw control character in a string */
+  /* a model's bytes as a JSON string: each invalid sequence's maximal subpart U+FFFD, as Python's
+     bytes.decode("utf-8", "replace") (its verdicts), valid UTF-8 as it is */
+  const char *const bytes[][2] = {
+      {"ok \xf0\x9f\x98", "ok \xef\xbf\xbd"},                     /* a character cut by max_tokens */
+      {"\xed\xa0\x80", "\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd"},     /* a surrogate */
+      {"\xc0\xaf", "\xef\xbf\xbd\xef\xbf\xbd"},                     /* overlong */
+      {"a\xe2\x82" "b", "a\xef\xbf\xbd" "b"},
+      {"\xf4\x90\x80\x80", "\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd"}, /* past U+10FFFF */
+      {"\xff\xfe", "\xef\xbf\xbd\xef\xbf\xbd"},
+      {"\xe0\x80\x80", "\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd"},
+      {"caf\xc3\xa9 \xf0\x9f\x98\x80", "caf\xc3\xa9 \xf0\x9f\x98\x80"},
+      {"\xf0\x9f\x98\x80\xf0", "\xf0\x9f\x98\x80\xef\xbf\xbd"}};
+  for (size_t i = 0; i < sizeof bytes / sizeof *bytes; i++)
+  {
+    JsonBuf b = {0};
+    json_dump_string(&b, bytes[i][0], strlen(bytes[i][0]));
+    Json *j = json_parse(b.p, b.n, err);
+    assert(j && j->type == JSON_STRING && j->len == strlen(bytes[i][1]) && !memcmp(j->s, bytes[i][1], j->len));
+    json_free(j), free(b.p);
+  }
+  unsigned seed = 34;
+  for (int t = 0; t < 20000; t++) /* any bytes: JSON json_parse reads back */
+  {
+    char r[16];
+    const size_t n = (size_t)(t % 16);
+    for (size_t i = 0; i < n; i++)
+      seed = seed * 1103515245u + 12345u, r[i] = (char)(seed >> 16);
+    JsonBuf b = {0};
+    json_dump_string(&b, r, n);
+    Json *j = json_parse(b.p, b.n, err);
+    assert(j && j->type == JSON_STRING);
+    json_free(j), free(b.p);
+  }
+  printf("  invalid UTF-8 written as Python's replace reads it (%zu cases, 20000 random byte strings read back)\n",
+         sizeof bytes / sizeof *bytes);
   printf("  %d inputs written back as python writes them, %d refused as it refuses them\n", good, bad);
   printf("[test_json] ok\n");
   return 0;

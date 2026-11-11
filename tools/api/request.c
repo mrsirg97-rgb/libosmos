@@ -42,6 +42,25 @@ Json *request_tools(const Json *body)
   return t;
 }
 
+/* the body's response_format as the schema a template is told to answer by, its JSON into out: nothing for none
+   (absent, null, text), json_schema's schema, json_object's any object ({"type": "object"}); false for anything else
+   (refused by name, never ignored) */
+bool request_format(const Json *body, JsonBuf *out, char err[API_ERR])
+{
+  const Json *rf = json_get(body, "response_format");
+  const char *type = json_str(rf, "type");
+  if (!rf || rf->type == JSON_NULL || (type && !strcmp(type, "text")))
+    return true;
+  if (type && !strcmp(type, "json_object"))
+    return json_puts(out, "{\"type\": \"object\"}"), true;
+  const Json *schema = type && !strcmp(type, "json_schema") ? json_get(json_get(rf, "json_schema"), "schema") : NULL;
+  if (!schema || schema->type != JSON_OBJECT)
+    return request_fail(err, type && !strcmp(type, "json_schema") ? "response_format: json_schema needs its schema (an "
+                                                                    "object)"
+                                                                  : "response_format: text, json_object or json_schema");
+  return json_dump(out, schema), true;
+}
+
 void request_free(Request *r)
 {
   json_free(r->messages), json_free(r->tools);
@@ -87,7 +106,7 @@ bool request_read(const Json *body, const Dialect *d, Request *r, char err[API_E
   const Json *mt = json_get(body, "max_completion_tokens");
   if (!mt || mt->type == JSON_NULL)
     mt = json_get(body, "max_tokens");
-  if (mt && mt->type == JSON_INT && mt->s[0] != '-' && mt->len <= 9)
+  if (mt && mt->type == JSON_INT && mt->s[0] != '-' && mt->len <= 9 && atol(mt->s) > 0)
     r->max_tokens = (unsigned)atol(mt->s);
   else if (mt && mt->type != JSON_NULL)
     return request_free(r), request_fail(err, "max_tokens: a positive integer");

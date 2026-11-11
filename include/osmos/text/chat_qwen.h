@@ -14,6 +14,10 @@
 bool qchat_render(const Json *messages, const Json *tools, ChatMode mode, const char *effort, bool preserve,
                   JsonBuf *out, char err[CHAT_ERR]);
 bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR]);
+bool qchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
+                        JsonBuf *out, char err[CHAT_ERR]);
+size_t qchat_space_lead(const char *p, size_t n);
+size_t qchat_space_trail(const char *p, size_t n);
 extern const char *const qchat_refused[]; /* special tokens' text a completion can't hold (NULL-terminated) */
 
 #endif
@@ -40,8 +44,16 @@ qchat_parse
   message, JSON into out: {"role": "assistant", "content", "reasoning_content", "tool_calls": [{"type": "function",
   "function": {"name", "arguments": a JSON string}}]} - the reasoning before </think> when thinking, both trimmed;
   each <tool_call> block's parameters: the text the template wrote (the newline it puts on each side dropped), read
-  as JSON where that is a value other than a string of a type the tool's schema allows for it (any, without one) -
-  else the text itself, as the template writes a string. false with why for a completion out of the format: no end
+  as JSON where that is a value other than a string of a type the tool's schema allows for it (its "type", or an
+  anyOf / oneOf's) - else the text itself, as the template writes a string (no tool, parameter or type: a string,
+  as vLLM's qwen3coder parser reads it). false with why for a completion out of the format: no end
   of turn, no </think> when thinking, a special token in the text, a malformed or repeated parameter, text after the
   calls.
+
+qchat_space_lead / qchat_space_trail
+  the bytes of whitespace Python's str.strip takes off p's start / end (str.isspace's code points): the parse's trim,
+  and what osmos-api's stream holds or passes over so its text is the parse's.
+
+qchat_parse_shaped
+  qchat_parse with its markers read from shape and what it gives the text's, as chat_parse_shaped (#34).
 */

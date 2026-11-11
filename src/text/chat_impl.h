@@ -17,6 +17,7 @@
 #define CHAT_REMINDER "<｜latest_reminder｜>"
 #define CHAT_IMAGE "<｜deepseek_image｜>"
 #define CHAT_CALLS_OPEN "<" CHAT_DSML " calls>"
+#define CHAT_CALLS_START "\n\n<" CHAT_DSML " calls" /* where the parse cuts the content (encoding.py's) */
 #define CHAT_CALLS_CLOSE "</" CHAT_DSML " calls>"
 #define CHAT_INVOKE_OPEN "<" CHAT_DSML " invoke"
 #define CHAT_INVOKE_CLOSE "</" CHAT_DSML " invoke"

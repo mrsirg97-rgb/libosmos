@@ -73,8 +73,7 @@ static size_t put_utf8(char *o, uint32_t c)
   return 4;
 }
 
-/* a valid UTF-8 sequence's length at p (shortest form, no surrogate, at most U+10FFFF), or 0 */
-static size_t utf8_valid(const unsigned char *p, size_t left)
+size_t json_utf8_len(const unsigned char *p, size_t left)
 {
   const unsigned char b = p[0];
   const size_t n = b < 0x80 ? 1 : (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 0;
@@ -105,7 +104,7 @@ static char *string(Cur *c, size_t *len)
       return free(o), fail(c, "a control character in a string"), NULL;
     if (b != '\\')
     {
-      const size_t k = utf8_valid((const unsigned char *)c->p, (size_t)(c->end - c->p));
+      const size_t k = json_utf8_len((const unsigned char *)c->p, (size_t)(c->end - c->p));
       if (!k)
         return free(o), fail(c, "invalid UTF-8"), NULL;
       memcpy(o + n, c->p, k), n += k, c->p += k;

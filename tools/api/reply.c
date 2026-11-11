@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "answer.h"
+#include "osmos/text/chat_qwen.h"
 
 /* POST /v1/chat/completions: the request rendered (the chat encoding), tokenized, run on the engine; its tokens
    streamed as they land (answer.c) or answered whole; at DONE the completion parsed for its tool calls, then the
@@ -47,13 +48,9 @@ static bool more(Api *a, Run *r, size_t *seen, Answer *s)
   pthread_mutex_unlock(&r->mu);
   if (to > from && !tok)
     return s->gone = true, false; /* out of memory: given up as a client gone */
-  char piece[TOKENIZER_PIECE_MAX];
   for (size_t i = 0; i < to - from; i++)
-  {
-    const int k = tokenizer_piece(a->tok, tok[i], true, piece);
-    if (k > 0)
-      json_put(&s->text, piece, (size_t)k);
-  }
+    if (!answer_take(s, a->tok, tok[i]))
+      return free(tok), s->gone = true, false; /* out of memory: given up as a client gone */
   free(tok);
   *seen = to;
   return !done;
@@ -66,7 +63,7 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
   char jerr[JSON_ERR];
   JsonBuf b = {0};
   const ChatMode mode = rq->mode;
-  if ((*parsed = s->d->parse(rq, s->text.p, s->text.n, &b, err)))
+  if ((*parsed = s->d->parse(rq, s->text.p, s->shape.p, s->text.n, &b, err)))
   {
     Json *m = json_parse(b.p, b.n, jerr);
     free(b.p);
@@ -93,35 +90,50 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
   }
   free(b.p);
   /* out of the format: reasoning before </think>, the content after (the EOS dropped) */
-  const char *p = s->text.p ? s->text.p : "";
+  const char *p = s->text.p ? s->text.p : "", *sh = s->shape.p ? s->shape.p : "";
   size_t n = s->text.n;
   const char *eos_text = s->d->eos, *think_end = s->d->think_end;
   const size_t eos = strlen(eos_text);
   if (n >= eos && !memcmp(p + n - eos, eos_text, eos))
     n -= eos;
-  const char *end = mode == CHAT_THINKING ? memmem(p, n, think_end, strlen(think_end)) : NULL;
-  const size_t rn = mode != CHAT_THINKING ? 0 : end ? (size_t)(end - p) : n;
-  const size_t c0 = mode != CHAT_THINKING ? 0 : end ? rn + strlen(think_end) : n;
+  const char *end = mode == CHAT_THINKING ? memmem(sh, n, think_end, strlen(think_end)) : NULL;
+  const size_t rn = mode != CHAT_THINKING ? 0 : end ? (size_t)(end - sh) : n;
+  size_t c0 = mode != CHAT_THINKING ? 0 : end ? rn + strlen(think_end) : n, r0 = 0;
+  if (s->d->trims) /* as the stream passed it over: a phase's leading whitespace */
+    r0 = qchat_space_lead(sh, rn), c0 += qchat_space_lead(sh + c0, n - c0);
   json_puts(&b, "{\"role\": \"assistant\", \"content\": "), json_dump_string(&b, p + c0, n - c0);
-  json_puts(&b, ", \"reasoning_content\": "), json_dump_string(&b, p, rn), json_puts(&b, ", \"tool_calls\": []}");
+  json_puts(&b, ", \"reasoning_content\": "), json_dump_string(&b, p + r0, rn - r0);
+  json_puts(&b, ", \"tool_calls\": []}");
   Json *m = b.oom ? NULL : json_parse(b.p, b.n, jerr);
   free(b.p);
   return m;
 }
 
-/* a run that gives no answer: a streamed one's error event (no [DONE]), or a 500 */
-static void fail(int fd, bool stream, const char *why)
+/* a run that gives no answer: a streamed one's error event (no [DONE]), or a 500. a completion its parse refused
+   goes with it as its text (the EOS dropped): greedy, the same messages again are the same completion, so a client
+   can only get past one by showing the model what it wrote (#34) - sent back, a client's text is defused as any */
+static void fail(int fd, bool stream, const char *why, const JsonBuf *completion, const char *eos)
 {
-  if (!stream)
-  {
-    http_error(fd, 500, why);
-    return;
-  }
   JsonBuf e = {0};
   json_puts(&e, "{\"error\": {\"message\": "), json_dump_string(&e, why, strlen(why));
-  json_puts(&e, ", \"type\": \"server_error\"}}");
-  if (!e.oom)
+  json_puts(&e, ", \"type\": \"server_error\"");
+  if (completion)
+  {
+    size_t n = completion->n;
+    if (n >= strlen(eos) && !memcmp(completion->p + n - strlen(eos), eos, strlen(eos)))
+      n -= strlen(eos);
+    json_puts(&e, ", \"completion\": "), json_dump_string(&e, n ? completion->p : "", n);
+  }
+  json_puts(&e, "}}");
+  if (e.oom)
+  {
+    if (!stream) /* an open stream takes no status line: its end without [DONE] the error */
+      http_error(fd, 500, why);
+  }
+  else if (stream)
     http_stream_event(fd, e.p, e.n);
+  else
+    http_send(fd, 500, "application/json", e.p, e.n);
   free(e.p);
 }
 
@@ -235,12 +247,41 @@ static Json *copy(const Json *j, bool *oom)
   return c;
 }
 
+/* an array's text parts' strings as one (a template joins them: Qwen's with nothing between), defused, the bytes
+   written back: a special token's text cut across two parts is text too. a part's own the string's defuse finds */
+static size_t defuse_parts(Json *arr, const Tokenizer *t)
+{
+  JsonBuf all = {0};
+  size_t parts = 0, changed = 0;
+  for (size_t i = 0; i < arr->n; i++)
+  {
+    const Json *x = json_get(arr->item[i], "text");
+    if (x && x->type == JSON_STRING)
+      json_put(&all, x->s, x->len), parts++;
+  }
+  if (parts > 1 && !all.oom)
+  {
+    changed = tokenizer_defuse(t, all.p, all.n);
+    size_t at = 0;
+    for (size_t i = 0; i < arr->n; i++)
+    {
+      Json *x = (Json *)json_get(arr->item[i], "text");
+      if (x && x->type == JSON_STRING)
+        memcpy(x->s, all.p + at, x->len), at += x->len;
+    }
+  }
+  free(all.p);
+  return changed;
+}
+
 /* j's strings and keys defused in place (tokenizer_defuse), the bytes changed. a call's
    "arguments" as a JSON string the template reads as its object (chat_tools.c's arguments(): decoded twice at most):
    an escaped special token's text in it is that text once decoded - so its object, decoded and defused, in its place */
 static size_t defuse(Json *j, const Tokenizer *t)
 {
   size_t changed = j->type == JSON_STRING ? tokenizer_defuse(t, j->s, j->len) : 0;
+  if (j->type == JSON_ARRAY)
+    changed += defuse_parts(j, t);
   for (size_t i = 0; i < j->n; i++)
   {
     Json *v = j->item[i];
@@ -354,7 +395,7 @@ void api_chat(Api *a, Http *h)
       ;
   }
   else if (!strcmp(r->finish, "error"))
-    fail(h->fd, rq.stream, r->err);
+    fail(h->fd, rq.stream, r->err, NULL, NULL);
   else
   {
     answer_advance(&s);
@@ -364,11 +405,12 @@ void api_chat(Api *a, Http *h)
     if (m && !parsed && !strcmp(r->finish, "stop"))
     { /* the turn ended out of the format (a calls block, a special token's text, no </think>): an error, never its
          text as the answer (#25). cut by max_tokens ("length"), its text goes as it is */
-      snprintf(err, sizeof err, "the model's tool call did not parse (%s)", perr);
-      fail(h->fd, rq.stream, err);
+      const bool called = memmem(s.shape.p, s.shape.n, a->d->calls_open, strlen(a->d->calls_open)) != NULL;
+      snprintf(err, sizeof err, "the model's %s did not parse (%s)", called ? "tool call" : "answer", perr);
+      fail(h->fd, rq.stream, err, &s.text, a->d->eos);
     }
     else if (!m)
-      http_error(h->fd, 500, "out of memory");
+      fail(h->fd, rq.stream, "out of memory", NULL, NULL); /* a stream's open: its error event, not a status line */
     else if (rq.stream)
     {
       if (!parsed)
@@ -379,7 +421,7 @@ void api_chat(Api *a, Http *h)
       whole(&s, r, m, n);
     json_free(m);
   }
-  free(s.text.p);
+  free(s.text.p), free(s.shape.p);
   request_free(&rq);
   engine_release(&a->engine, r);
 }

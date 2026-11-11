@@ -4,8 +4,9 @@
 
 #include "dialect.h"
 
-/* DeepSeek's reader (maya's frontend.py for DeepSeek): tools onto the first system message, an empty one put first if
-   none; the reasoning effort as the encoding's budget (DESIGN.md, "osmos-api: the mapping") */
+/* DeepSeek's reader (maya's frontend.py for DeepSeek): tools and the response format's schema (the encoding's
+   response_format) onto the first system message, an empty one put first if none; the reasoning effort as the
+   encoding's budget (DESIGN.md, "osmos-api: the mapping") */
 
 static int effort_of(const Json *v, char *err)
 {
@@ -25,8 +26,9 @@ static int effort_of(const Json *v, char *err)
   return e;
 }
 
-/* a message written back with its role DeepSeek's (developer: system) and `reasoning` as reasoning_content */
-static void message(JsonBuf *b, const Json *m, const Json *tools)
+/* a message written back with its role DeepSeek's (developer: system) and `reasoning` as reasoning_content; tools
+   and a response format's schema (JSON text, rf) given in place of its own */
+static void message(JsonBuf *b, const Json *m, const Json *tools, const JsonBuf *rf)
 {
   const char *role = json_str(m, "role");
   const bool has_rc = json_get(m, "reasoning_content") != NULL;
@@ -37,7 +39,8 @@ static void message(JsonBuf *b, const Json *m, const Json *tools)
   for (size_t i = 0; i < m->n; i++)
   {
     const char *k = m->key[i];
-    if (!strcmp(k, "role") || (!strcmp(k, "reasoning") && has_rc) || (tools && !strcmp(k, "tools")))
+    if (!strcmp(k, "role") || (!strcmp(k, "reasoning") && has_rc) || (tools && !strcmp(k, "tools")) ||
+        (rf && !strcmp(k, "response_format")))
       continue;
     json_puts(b, ", ");
     if (!strcmp(k, "reasoning"))
@@ -48,6 +51,8 @@ static void message(JsonBuf *b, const Json *m, const Json *tools)
   }
   if (tools)
     json_puts(b, ", \"tools\": "), json_dump(b, tools);
+  if (rf)
+    json_puts(b, ", \"response_format\": "), json_put(b, rf->p, rf->n);
   json_puts(b, "}");
 }
 
@@ -60,20 +65,33 @@ static bool system_role(const Json *m)
 bool request_ds(const Json *body, Request *r, char err[API_ERR])
 {
   const Json *msgs = json_get(body, "messages");
+  JsonBuf rf = {0};
+  if (!request_format(body, &rf, err))
+    return free(rf.p), false;
   Json *tl = request_tools(body);
-  const bool has_tools = tl != NULL;
+  const bool has_rf = rf.n > 0, head = tl || has_rf, first = head && system_role(msgs->item[0]);
   JsonBuf b = {0};
   char jerr[JSON_ERR];
   json_puts(&b, "[");
-  if (has_tools && !system_role(msgs->item[0]))
-    json_puts(&b, "{\"role\": \"system\", \"content\": \"\", \"tools\": "), json_dump(&b, tl), json_puts(&b, "}, ");
+  if (head && !first)
+  {
+    json_puts(&b, "{\"role\": \"system\", \"content\": \"\"");
+    if (tl)
+      json_puts(&b, ", \"tools\": "), json_dump(&b, tl);
+    if (has_rf)
+      json_puts(&b, ", \"response_format\": "), json_put(&b, rf.p, rf.n);
+    json_puts(&b, "}, ");
+  }
   for (size_t i = 0; i < msgs->n; i++)
   {
     json_puts(&b, i ? ", " : "");
-    message(&b, msgs->item[i], i == 0 && has_tools && system_role(msgs->item[0]) ? tl : NULL);
+    message(&b, msgs->item[i], i == 0 && first ? tl : NULL, i == 0 && first && has_rf ? &rf : NULL);
   }
   json_puts(&b, "]");
   json_free(tl);
+  if (rf.oom)
+    b.oom = true;
+  free(rf.p);
   r->messages = b.oom ? NULL : json_parse(b.p, b.n, jerr);
   free(b.p);
   if (!r->messages)

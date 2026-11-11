@@ -31,6 +31,19 @@ void json_put(JsonBuf *b, const char *s, size_t len)
 
 void json_puts(JsonBuf *b, const char *s) { json_put(b, s, strlen(s)); }
 
+/* the bytes at p of an invalid sequence's maximal subpart: its lead and the continuations a valid sequence could
+   have gone on with (E0's second byte A0..BF, ED's 80..9F, F0's 90..BF, F4's 80..8F), one at least */
+static size_t subpart(const unsigned char *p, size_t left)
+{
+  const unsigned char b = p[0];
+  const size_t n = b >= 0xC2 && b <= 0xDF ? 2 : b >= 0xE0 && b <= 0xEF ? 3 : b >= 0xF0 && b <= 0xF4 ? 4 : 1;
+  const unsigned char lo = b == 0xE0 ? 0xA0 : b == 0xF0 ? 0x90 : 0x80, hi = b == 0xED ? 0x9F : b == 0xF4 ? 0x8F : 0xBF;
+  size_t k = 1;
+  while (k < n && k < left && p[k] >= (k == 1 ? lo : 0x80) && p[k] <= (k == 1 ? hi : 0xBF))
+    k++;
+  return k;
+}
+
 void json_dump_string(JsonBuf *b, const char *s, size_t len)
 {
   json_put(b, "\"", 1);
@@ -38,6 +51,19 @@ void json_dump_string(JsonBuf *b, const char *s, size_t len)
   for (size_t i = 0; i < len; i++)
   {
     const unsigned char c = (unsigned char)s[i];
+    if (c >= 0x80)
+    {
+      const size_t k = json_utf8_len((const unsigned char *)s + i, len - i);
+      if (k)
+      {
+        run += k, i += k - 1;
+        continue;
+      }
+      json_put(b, s + i - run, run), run = 0;
+      json_puts(b, "\xEF\xBF\xBD"); /* U+FFFD */
+      i += subpart((const unsigned char *)s + i, len - i) - 1;
+      continue;
+    }
     const char *e = c == '"' ? "\\\"" : c == '\\' ? "\\\\" : c == '\n' ? "\\n" : c == '\r' ? "\\r" : c == '\t' ? "\\t"
                   : c == '\b' ? "\\b" : c == '\f' ? "\\f" : NULL;
     if (!e && c >= 0x20)
