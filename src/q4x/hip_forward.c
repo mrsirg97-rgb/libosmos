@@ -359,6 +359,11 @@ void q4x_forward_side_spin(Q4xForward *f, uint32_t us)
     f->side_spin = us;
 }
 
+void q4x_forward_waits(const Q4xForward *f, uint64_t *marked, uint64_t *plain)
+{
+  *marked = f ? f->w_marked : 0, *plain = f ? f->w_plain : 0;
+}
+
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg)
 {
   if (f)

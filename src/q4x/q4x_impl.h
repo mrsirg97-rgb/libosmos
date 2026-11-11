@@ -108,6 +108,7 @@ struct Q4xForward
   uint64_t *ple_off;
   uint32_t ple_n;
   hipEvent_t ple_copied;
+  uint64_t w_marked, w_plain; /* q4x_forward_waits: its waits after a mark, and asleep to the end */
   uint32_t side_spin; /* q4x_forward_side_spin: a test's delay before the shared expert, on s2 (0: none) */
   /* a step past MM_MAX_TOKENS (hip_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
      sub-batch's rows; and its runs' sequences at a sub-batch's start (their rings' cur and positions moved on) */
