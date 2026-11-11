@@ -2986,61 +2986,31 @@ refused; the next step accepted and its token a clean forward's, twice; single-t
 clearing deleted the step after an overflow is refused: the test's mutant, seen. not tested: fail_held's clearing (a
 step that fails another way after setting the flag - no fault to inject).
 
-### 0.6.2: Qwen's waits - asleep to a mark, awake for the tail (design, 2026-11-10)
+### 0.6.2: Qwen's waits - a bubble that was the profiler's (2026-11-10, performance)
 
-**Measured** (the 0.5.9 plain decode's kernel trace, q4x_bench under gpu_sleep_on_waits, low-power, 59 tokens; the
-code at these places is 0.6.1's still): a token 38.6 ms, the GPU idle 3.35 ms of it - 3.04 ms the ~2 us between
-dependent launches (1,743 of them), and **261 us (mean; 283 at the one printed) between the step's last copy and the
-greedy pick's argmax**: q4x_step's hipStreamSynchronize sleeps (the device's blocking sync) and the wake comes that
-long after the head's matmul ended - 0.5.x's "a wake ~0.2 ms" (0.3.0, target 2), here once a step. DeepSeek's decode
-does not pay it: fwd_wait spins a decode-sized step (its waits 40 a step). Qwen's waits are few and long, so they
-sleep - a plain token one, **a drafted round one a draft depth (q4x_mtp's step, up to Q4X_MTP_BLOCK) and its
-verify's**: not traced yet, by the code ~4-6 wakes a round, ~1.1-1.7 ms of a ~55-60 ms round (~2-3%), against 0.7% of
-a plain token. to measure before anything is kept: a plain and an MTP trace on HEAD.
+**The claim.** every kernel trace of a decode shows the GPU idle 260-440 us between a step's last copy and the greedy
+pick's argmax (0.5.9's trace: 261 us a token; 0.6.0's list carried it as "the token-boundary bubble, ~1.4%"). read as a
+sleeping wait's late wake, it promised 0.7% of a plain token and 2-3% of a drafted round (a wait a draft depth). the
+design: a wait asleep to a mark queued before the head's matmul, polled from there (GpuWait) - built, with its tests.
 
-**What does not help.** the argmax queued before the step's wait (the greedy pick then no GPU call): the wake moves
-behind the argmax, the idle the same - the bubble is the wake, not the round trip. the greedy pick's own blocking copy
-came back in ~10 us in the trace: left as it is. chaining the head's depths on the GPU (DeepSeek's 0.5.6 try, +0.2%):
-rows past a cut computed for nothing, and the waits still one a round.
+**What was measured.**
+- the wait did what it was built to (in the engine, a decode step: asleep 28.8 ms to the mark, polled 2.32 ms - the
+  head's own time - and back at the end), and the bench did not move: plain 28.18 / 28.22 tok/s before / after, MTP
+  44.38 / 44.46 (three rounds each, interleaved, ids 78687b02a7b4d036 throughout). the greedy pick through pinned
+  memory and a polled event instead of a blocking copy, alone: 28.23 / 28.17 and 44.52 / 44.63 (four rounds). nothing.
+- **the idle is rocprofv3's.** a marker kernel launched the moment the step's wait returns: the launch call itself
+  takes 250-340 us on the host under rocprofv3 and **2.2-2.5 us without it**. the profiler does its own work at the
+  first launch after a wait (its dispatches' records, ~1,650 a step), the GPU idle meanwhile; the trace then shows that
+  idle between the step and the pick. the same gap in DeepSeek's traces (48 + 95 us a token) is the same thing.
+- a sleeping wait's wake is late in a test of its own (a one-thread busy kernel, then hipStreamSynchronize: the GPU
+  idle 340-730 us by the device's clock, 17 polled) - and not in the engine, where removing it buys nothing. why the
+  two differ is not known; the engine's number is the one that counts.
 
-**The design: one wait, two events.** the forward's thread sleeps until a mark queued before the step's last matmul,
-then spins until everything queued is done - the wake's latency under the GPU's own work, the spin the rest of the
-tail.
-- `GpuWait` (osmos/run/gpu.h; src/run/hip_gpu.c): `gpu_wait_mark` records the mark on the null stream;
-  `gpu_wait_settle` records the end, sleeps on the mark (hipEventSynchronize: the device's blocking sync, as every
-  sleep here), then polls the end (hipEventQuery, fwd_wait's spin). no mark since the last settle: the sleep alone,
-  to the end - today's wait. a mark the GPU passed long ago, or a wake after the end: the poll returns at once. the
-  wait is never short: it returns only once the end's event has passed.
-- the mark's place is structural, not a time: **before the head's matmul** - a step's logits (248,320 x 2,560 Q6_K,
-  2.3-2.6 ms: "the dense matrices' shapes", above), a draft depth's shortlist (137 MB, ~0.7 ms at the dense's ~200
-  GB/s; DFlash2's block head likewise). both longer than the wake; were one shorter, the idle is what is left of the
-  wake, never more than today's.
-- who marks: a step of at most Q4X_SIDE_STEP tokens (the small step the second stream already names: decode, a
-  draft's verify), every MTP depth, a DFlash2 block. a prompt's step does not (one wake in seconds; its head's tail
-  would spin a core for the whole of a 2K-row matmul).
-- the price: the thread awake for (tail - wake) a wait: ~2 ms of a 38 ms plain token (~5% of one core), ~0.4 ms a
-  draft depth. DeepSeek's decode spins 86% of a core and won on joules (0.3.0); this is to be judged the same way -
-  **J a token down at low-power, nothing slower at performance, every ids hash the same** (no kernel changes, no
-  order changes: the bits cannot move).
-- `q4x_forward_waits` (osmos/q4x/forward.h): the forward's waits counted, marked and plain - a test's window, as
-  forward_waits is the reads'.
-
-**The tests first** (both fail on the schema's stubs - a settle that is today's hipStreamSynchronize, counters
-never moved):
-- `test_settle_gpu` (no model): a busy kernel (the body), the mark, a busy kernel (the tail), a kernel that stamps the
-  device's wall clock; the wait; a second stamp launched the moment it returns. the stamps' distance is the GPU's
-  idle. three waits measured in one process under gpu_sleep_on_waits: the stream's sleep (today's), an event polled
-  (the floor), GpuWait's. held to: the sleep's idle above the poll's (the premise - a runtime that wakes at once
-  makes this design moot, and the test says so); GpuWait's idle nearer the poll's than the sleep's (under their
-  midpoint); its thread's CPU under the tails' time (it slept the bodies: spinning everything is the mutant).
-- `test_q4x_wait_gpu` (UD-IQ3_XXS and its MTP head): a 200-token step one plain wait; a 1-token step and a 6-token
-  step one marked wait each; a draft of Q4X_MTP_BLOCK depths one marked wait a depth.
-- the bits: the existing forward, MTP and engine tests, and the release's ids hashes.
-
-**Not in this change.** fwd_wait onto GpuWait (DeepSeek's routing waits are before the layer's experts: the same
-shape would fit its step's end and its greedy pick, ~50 us a token there - later, measured); the launches (the
-DeltaNet's conv and its history, route and tiles, the one-row sh_gate_inp: ~170 a token), and the experts' padded
-slots at a token (x16_rows 433 us a token in the trace).
+**So**: nothing kept - GpuWait, q4x_forward_waits and their two tests removed (the patch in the session's scratch), a
+core polled 2.3 ms a token would have cost joules for no time. and a rule for the traces: **a kernel trace's gaps
+after a host wait are the profiler's until a run without it says otherwise** - the launches' gaps (~2 us each, the
+GPU's own between dependent dispatches) and the reads' stalls (the engine's own counters agree) stand; the token
+boundary does not. 0.6.0's "token kept on the GPU, the n-gram hashing on the GPU" has no bubble to remove.
 
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
