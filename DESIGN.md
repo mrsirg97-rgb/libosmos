@@ -2945,6 +2945,47 @@ and room, and the guess (54% of the streamed picks named a layer ahead), not the
   and up (0.3.x: tried). the int8 lane, the attention's three kernels and the grouped matmul read as tuned; the
   big ones move ~200 GB/s, the F32 router ~150 (BF16 would halve it and move bits: the operator's call).
 
+### 0.6.2: DeepSeek's misses, looked at one by one (2026-11-10, performance)
+
+**A correction first.** the membrane's oracle and the traces above ran with the guess on (dbench's default); every
+DeepSeek pack ships `no_guess` (0.5.7). as shipped, a drafted round of UD-IQ1_M (128 tokens, 33 rounds) is the drafter
+13 ms and a verify of 102.7: kernels 86.6, **the reads waited for 12.6 (12.2 stalls a round, 1.03 ms each)**, the
+gaps 3.5 - 33.5-34.0 tok/s against the guess's 31.8-32.8.
+
+**The study** (a build that wrote every small step's picks with each unit's state, and the next layer's guess; not
+kept): 148 steps of 40 layers, 105,832 distinct (layer, expert) picks.
+- 2.4% of the picks miss (the guess on; 3.3% off): 17 a step, a quarter of the layers stalled each step.
+- **96.5% of the misses are an expert's first pick of the run** (2,420 of 2,508); 88 were held before and evicted,
+  ~100 steps earlier - by the 2K prompt between the questions. the membrane's rule keeps what was used; what stalls is
+  what was never used. more misses early in an answer (22 a step in the run's first third, 13 in the middle): a long
+  session loads its own working set.
+- the guess (the next layer's router on this layer's input, 6 a token) names 37% of the misses - and every one it
+  names is still reading when its layer comes (a layer's lead, ~2.5 ms, against a read's ~1.5 behind others). a
+  named miss's rank among its token's 6 is flat (133 / 176 / 152 / 173 / 128 / 131): the look-ahead does not order
+  the rare experts, so widening it buys recall slowly and reads fast.
+- **the guess's width, measured** (the three drafted answers, tok/s):
+
+  | names a token | 0 (shipped) | 3 | 4 | 6 | 12 | 16 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | q1 / after a 2K prompt / q2 | 34.0 / 19.9 / 30.1 | 33.7 / 20.0 / 30.1 | 32.5 / 19.3 / 29.2 | 31.8 / 19.5 / 29.5 | 25.0 / 14.8 / 21.4 | 20.2 / 12.3 / 18.0 |
+  | the misses named | - | 8% | 16% | 37% | 73% | 80% |
+  | reads the guess began (the run) | 0 | 1,562 | 2,815 | 5,086 | 16,587 | 24,010 |
+
+  off is right, again: each named miss costs several reads of experts never picked, on the one SSD the stalls wait
+  for.
+- **a read's own time** (a lone 9.1 MiB expert, the fetcher's way, the box quiet): 1.52 ms, the preads 1.52 of it
+  (6 GiB/s, the drive's ceiling 6.4); the first reader's wake 7-10 us, the waiter's 3-15. readers that never slept
+  ended a read ~0.14 ms sooner (the other eleven's wakes, one after another): ~9% of a stall, the one overhead found -
+  an io path with no thread to wake (io_uring, the forward's thread submitting) would have it; not built.
+so: the cache's rule is not it, the guess is not it, the waits are the drive's rate times the bytes of experts a
+session has not used yet. what moves that is the bytes an expert is (the quant), the share resident (the RAM kept
+free), and the session's length.
+
+**The overflow flag's move, tested** (test_overflow_gpu: a probe's 1e30 in a layer's attention input - the step
+refused; the next step accepted and its token a clean forward's, twice; single-token steps after one). with the
+clearing deleted the step after an overflow is refused: the test's mutant, seen. not tested: fail_held's clearing (a
+step that fails another way after setting the flag - no fault to inject).
+
 ### 0.6.2: Qwen's waits - asleep to a mark, awake for the tail (design, 2026-11-10)
 
 **Measured** (the 0.5.9 plain decode's kernel trace, q4x_bench under gpu_sleep_on_waits, low-power, 59 tokens; the
