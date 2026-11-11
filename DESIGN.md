@@ -3252,6 +3252,60 @@ to 0xED, the surrogates' range) where a continuation byte stays one.
 bytes it held back before it (whitespace, a marker's start) as sent, so a run cut by max_tokens past that point lost
 them from its flushed text: its stream's content no longer the whole answer's. now only what went out is counted.
 
+### 0.6.4: a special token's text the model says is text; a refused completion goes with its error; the stream the answer's (#34, 2026-11-11)
+
+**The report** (issue #34, 0.6.3, UD-IQ2_XXS, greedy): asked which osmos-serve flag takes `</think>`, the model
+answered `--answer-after </think>`, and the parse refused it ("a special token in its text") - a 500 with the reason
+alone. Greedy, the same messages again are the same completion: the agent retried three times, the same 500. A
+duplicated parameter (`a parameter twice`) the same.
+
+**The rule is the reference's** (encoding.py asserts no BOS, EOS, `<think>`, `</think>` or `｜DSML｜` in the content
+or the reasoning, and refuses a parameter twice), so neither is loosened. What the port lost is which bytes are
+tokens: the parse read the decoded text, so `</think>` the model spelled in plain pieces (` </` `think` `>`: as a
+client's text reaches it - the prompt's shape, 0.5.11) was the token. osmos-api now keeps, beside the text, its
+shape: each token's piece appended, a special token's as it is, the plain pieces' run defused (`tokenizer_defuse`)
+again from where a special token's text could still end in the new bytes (a token's longest text,
+TOKENIZER_PIECE_MAX, back). The stream's markers and the parse (`chat_parse_shaped`, `qchat_parse_shaped`) read the
+shape; what goes out is the text's bytes at the same offsets. A special token's text said in plain pieces is text -
+the answer, a stream, a call's argument; the token itself where the format has none is refused as before.
+
+**A refused completion goes with its error** (a 500's body, a stream's error event): `"completion"`, its text (the
+EOS dropped) beside `message` and `type`. A client can show the model what it wrote and ask again - the prompt
+changed, so is the completion - and nothing in it can forge a turn: a client's text is defused as any. Never sent as
+the answer (no content, no [DONE]): the refusal stays an error. The engine's errors carry none.
+
+**Measured** (UD-IQ2_XXS, the issue's request, greedy): the answer's `</think>` was ` </` `think` `>` (2728, 37947,
+32), the pieces the prompt held it as - a 200 now, the text in its content; quoting its own command line from a system
+message, streamed, the same pieces and [DONE]. The token `</think>` itself (128822) in an answer is still refused.
+
+**The audit after it** (every path a request and an answer take, read against the parse and the reference):
+- *the stream was not the answer's text.* DeepSeek's stream cut a calls block at `<｜DSML｜ calls>` and trimmed
+  whitespace before every marker - its parse keeps all of it but the block's own `\n\n` (CHAT_CALLS_START, the parse's
+  marker, is the stream's now). A trimming dialect (Qwen) trims as its parse does: `qchat_space_lead` /
+  `qchat_space_trail`, Python's str.strip, where the stream had trimmed ASCII. A run cut by max_tokens after a
+  refused token in its reasoning flushes the rest into the fields the whole answer has it in (`cut`: the phase DONE
+  came in). A client's history is what the model wrote, so the next prompt reuses the cache past it.
+- *a character cut by max_tokens* is bytes no JSON string holds: json_parse refused the message, and osmos-api answered
+  "out of memory" - streaming, with an HTTP status line inside the open event stream. json_dump_string writes each
+  invalid sequence's maximal subpart as U+FFFD (Python's errors="replace", its verdicts the test's); an error after
+  the stream opened is its error event.
+- *Qwen's arguments typed by a schema that names no type.* `allows(NULL, ..)` took any kind, so pydantic's
+  `Optional[str]` (`anyOf` string, null) made `123` an integer. Types are read from `type`, `anyOf` and `oneOf`; none
+  named - or no tool, or no parameter - a string (vLLM's qwen3coder parser: its tests take anyOf so). The fixtures'
+  Python port the same rule (two parse cases a string now; pydantic's schemas a case).
+- *text parts joined with nothing* (Qwen's template): each part was defused alone, so a special token's text cut
+  across two was the token in the prompt. An array's text parts are defused as one text, the bytes written back
+  (DeepSeek's join, a blank line, holds no token's text: the same pass, nothing found).
+- *a body's `response_format`* was ignored. DeepSeek's encoding renders a system message's (`## Response Format`);
+  the body's schema goes there as tools do (json_schema's schema, json_object `{"type": "object"}`, text none) - the
+  reference's renders of it now in test_chat's fixtures. Qwen's template has none: a 400 by name.
+- `max_tokens: 0` meant no limit; refused (rig omits an unset one).
+
+**Tests** (tests/api): `</think>` said in plain pieces an answer's content, streamed the same (and 1,000 bytes into
+a run: the window), and in a call's argument; Qwen's `<|im_start|>` the same; a special token in the answer and a
+parameter twice each a 500 and a stream's error with the completion. The window cut to the new bytes alone fails
+the long case.
+
 ### 0.5.11: Qwen's small steps, less idle (2026-11-09, low-power)
 
 **Where a decode token's time goes** (rocprofv3, plain, 64 tokens): 1,751 dispatches; the kernels' union 42.4 of 46.6

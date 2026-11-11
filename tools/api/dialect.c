@@ -11,9 +11,9 @@ static bool ds_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
   return chat_render(r->messages, r->mode, r->effort, out, err);
 }
 
-static bool ds_parse(const Request *r, const char *text, size_t n, JsonBuf *out, char err[CHAT_ERR])
+static bool ds_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out, char err[CHAT_ERR])
 {
-  return chat_parse(text, n, r->mode, out, err);
+  return chat_parse_shaped(text, shape, n, r->mode, out, err);
 }
 
 static bool qwen_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
@@ -21,13 +21,14 @@ static bool qwen_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
   return qchat_render(r->messages, r->tools, r->mode, r->level[0] ? r->level : NULL, r->preserve, out, err);
 }
 
-static bool qwen_parse(const Request *r, const char *text, size_t n, JsonBuf *out, char err[CHAT_ERR])
+static bool qwen_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
+                       char err[CHAT_ERR])
 {
-  return qchat_parse(text, n, r->mode, r->tools, out, err);
+  return qchat_parse_shaped(text, shape, n, r->mode, r->tools, out, err);
 }
 
 static const Dialect kDialects[] = {
-    {"deepseek41", CHAT_EOS, CHAT_THINK_END, CHAT_CALLS_OPEN, false, chat_refused, request_ds, ds_render, ds_parse},
+    {"deepseek41", CHAT_EOS, CHAT_THINK_END, CHAT_CALLS_START, false, chat_refused, request_ds, ds_render, ds_parse},
     {"qwen4exp", QCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, qchat_refused, request_qwen, qwen_render, qwen_parse},
 };
 

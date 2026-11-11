@@ -37,20 +37,34 @@ static bool py_space(uint32_t c)
          (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
 }
 
+size_t qchat_space_lead(const char *p, size_t n)
+{
+  size_t at = 0, used;
+  while (at < n && py_space(pretok_utf8((const unsigned char *)p + at, n - at, &used)))
+    at += used;
+  return at;
+}
+
+size_t qchat_space_trail(const char *p, size_t n)
+{
+  size_t end = n, used;
+  while (end)
+  {
+    size_t k = end - 1;
+    while (k && ((unsigned char)p[k] & 0xC0) == 0x80)
+      k--;
+    if (!py_space(pretok_utf8((const unsigned char *)p + k, end - k, &used)) || k + used != end)
+      break;
+    end = k;
+  }
+  return n - end;
+}
+
 Span qchat_trim(Span s)
 {
-  size_t used;
-  while (s.n && py_space(pretok_utf8((const unsigned char *)s.p, s.n, &used)))
-    s.p += used, s.n -= used;
-  while (s.n)
-  {
-    size_t k = s.n - 1;
-    while (k && ((unsigned char)s.p[k] & 0xC0) == 0x80)
-      k--;
-    if (!py_space(pretok_utf8((const unsigned char *)s.p + k, s.n - k, &used)))
-      break;
-    s.n = k;
-  }
+  const size_t lead = qchat_space_lead(s.p, s.n);
+  s.p += lead, s.n -= lead;
+  s.n -= qchat_space_trail(s.p, s.n);
   return s;
 }
 

@@ -17,6 +17,8 @@ typedef enum ChatMode
 int chat_effort(const Json *effort, char err[CHAT_ERR]);
 bool chat_render(const Json *messages, ChatMode mode, int effort, JsonBuf *out, char err[CHAT_ERR]);
 bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[CHAT_ERR]);
+bool chat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, JsonBuf *out,
+                       char err[CHAT_ERR]);
 extern const char *const chat_refused[]; /* special tokens' text a completion's reasoning or content can't hold */
 
 #endif
@@ -45,4 +47,10 @@ chat_parse
   qualified]} - the reasoning before </think> in thinking mode, DSML tool calls decoded (a string="true" parameter
   as a JSON string, a "false" one as written). false with why for a completion out of the format (no </think>, no
   EOS, a malformed call, a special token in the text) - the caller decides what to answer then.
+
+chat_parse_shaped
+  chat_parse with its markers read from shape - the text with every special token's text the model wrote in plain
+  pieces defused (tokenizer_defuse over the pieces between its special tokens), the same length - and what it gives
+  the text's own bytes: a special token's text the model said is text, the token itself still the format's (#34).
+  chat_parse is shape the text.
 */

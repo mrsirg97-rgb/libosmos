@@ -4,15 +4,35 @@
 #include <string.h>
 
 #include "answer.h"
+#include "osmos/text/chat_qwen.h"
 
 /* the streamed answer (DESIGN.md, "osmos-api: the answer"): reasoning_content deltas until </think>, content after,
    nothing from a calls block, the EOS or a special token's text the parse refuses on (the parse at DONE says the
    rest: an error, never that text). what could still turn out to be one of those markers - a marker's start,
-   whitespace before it (the parse trims it), a UTF-8 character's first bytes - is held until it cannot */
+   whitespace before it a trimming dialect's parse trims (Qwen's: Python's str.strip; DeepSeek's parse keeps it), a
+   UTF-8 character's first bytes - is held until it cannot */
 
-static bool space(char c)
+/* a token's piece onto text and shape: a special token's as it is, a plain one's run defused again from where a
+   special token's text could still end in the new bytes (TOKENIZER_PIECE_MAX: no token's text is longer). false
+   out of memory (text and shape no longer the same length: the answer given up) */
+bool answer_take(Answer *s, const Tokenizer *t, int32_t id)
 {
-  return c == ' ' || c == '\n' || c == '\r' || c == '\t';
+  char piece[TOKENIZER_PIECE_MAX];
+  const int k = tokenizer_piece(t, id, true, piece);
+  if (k <= 0)
+    return true;
+  const size_t was = s->shape.n;
+  json_put(&s->text, piece, (size_t)k), json_put(&s->shape, piece, (size_t)k);
+  if (s->text.oom || s->shape.oom)
+    return false;
+  if (tokenizer_special(t, id))
+    s->run = s->shape.n;
+  else
+  {
+    const size_t from = was > s->run + TOKENIZER_PIECE_MAX - 1 ? was - (TOKENIZER_PIECE_MAX - 1) : s->run;
+    tokenizer_defuse(t, s->shape.p + from, s->shape.n - from);
+  }
+  return true;
 }
 
 /* a chunk: its delta (a JSON object's text), its finish_reason (NULL: null), more top-level fields (", ..." or "") */
@@ -50,8 +70,9 @@ static void delta(Answer *s, const char *p, size_t n)
   free(b.p);
 }
 
-/* the bytes at p's end that could still begin a marker, or end inside a character, and the whitespace before them */
-static size_t held(const char *p, size_t n, const char *const *marks, int nm)
+/* the bytes at p's end that could still begin a marker, or end inside a character, and the whitespace before them
+   (trims) */
+static size_t held(const char *p, size_t n, const char *const *marks, int nm, bool trims)
 {
   size_t keep = 0;
   for (int m = 0; m < nm; m++)
@@ -71,18 +92,16 @@ static size_t held(const char *p, size_t n, const char *const *marks, int nm)
     if (n - (j - 1) < need && n - (j - 1) > keep)
       keep = n - (j - 1);
   }
-  while (keep < n && space(p[n - keep - 1]))
-    keep++;
-  return keep;
+  return trims ? keep + qchat_space_trail(p, n - keep) : keep;
 }
 
 void answer_advance(Answer *s)
 {
   while (s->phase != PHASE_DONE)
   {
-    while (s->d->trims && !s->begun && s->sent < s->text.n && space(s->text.p[s->sent]))
-      s->sent++;
-    const char *p = s->text.p + s->sent;
+    if (s->d->trims && !s->begun)
+      s->sent += qchat_space_lead(s->shape.p + s->sent, s->text.n - s->sent);
+    const char *p = s->shape.p + s->sent, *said = s->text.p + s->sent; /* markers read in p, said what goes out */
     const size_t n = s->text.n - s->sent;
     const char *marks[2 + DIALECT_REFUSED_MAX] = {s->phase == PHASE_REASONING ? s->d->think_end : s->d->calls_open,
                                                   s->d->eos}; /* the phase's own end first: it wins a tie */
@@ -100,25 +119,27 @@ void answer_advance(Answer *s)
     }
     if (!at)
     {
-      const size_t out = n - held(p, n, marks, nm);
-      delta(s, p, out);
+      const size_t out = n - held(p, n, marks, nm, s->d->trims);
+      delta(s, said, out);
       s->sent += out;
       return;
     }
     size_t e = (size_t)(at - p);
     if (which >= 2) /* a refused text: what before it could still begin a marker never streams either */
-      e -= held(p, e, marks, nm);
-    while (e && space(p[e - 1]))
-      e--;
-    delta(s, p, e);
+      e -= held(p, e, marks, nm, false);
+    if (s->d->trims)
+      e -= qchat_space_trail(p, e);
+    delta(s, said, e);
     if (which == 0 && s->phase == PHASE_REASONING)
       s->phase = PHASE_CONTENT, s->begun = false, s->sent += (size_t)(at - p) + strlen(s->d->think_end);
     else
-      s->phase = PHASE_DONE, s->sent += e; /* what was held stays unsent: a flush (length) sends it */
+      s->cut = s->phase, s->phase = PHASE_DONE, s->sent += e; /* what was held stays unsent: a flush (length) sends
+                                                                 it */
   }
 }
 
-/* a completion out of the format: what was held back goes out as it is (but the EOS) */
+/* a completion out of the format: what was held back goes out as it is (but the EOS) - in the field the whole
+   answer's text has it (reply.c's message: the reasoning to the first </think>, the content after) */
 void answer_flush(Answer *s)
 {
   size_t n = s->text.n - s->sent;
@@ -126,7 +147,16 @@ void answer_flush(Answer *s)
   if (n >= eos && !memcmp(s->text.p + s->text.n - eos, s->d->eos, eos))
     n -= eos;
   if (s->phase == PHASE_DONE)
-    s->phase = PHASE_CONTENT;
+    s->phase = s->cut;
+  if (s->phase == PHASE_REASONING)
+  {
+    const char *end = memmem(s->shape.p + s->sent, n, s->d->think_end, strlen(s->d->think_end));
+    const size_t r = end ? (size_t)(end - (s->shape.p + s->sent)) : n;
+    delta(s, s->text.p + s->sent, r);
+    s->phase = PHASE_CONTENT, s->sent += r, n -= r;
+    const size_t skip = end ? strlen(s->d->think_end) : 0;
+    s->sent += skip, n -= skip;
+  }
   delta(s, s->text.p + s->sent, n);
   s->sent += n;
 }

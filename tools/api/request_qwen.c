@@ -94,6 +94,13 @@ bool request_qwen(const Json *body, Request *r, char err[API_ERR])
 {
   const Json *msgs = json_get(body, "messages"), *eff = request_effort(body);
   const Json *pt = json_get(json_get(body, "chat_template_kwargs"), "preserve_thinking");
+  JsonBuf rf = {0};
+  const bool rf_ok = request_format(body, &rf, err), formatted = rf.n > 0;
+  free(rf.p);
+  if (!rf_ok)
+    return false;
+  if (formatted)
+    return request_fail(err, "response_format: Qwen's template has no response format (text only)");
   if (eff && eff->type != JSON_NULL && (eff->type != JSON_STRING || eff->len >= sizeof r->level))
     return request_fail(err, "reasoning_effort: low, medium, high, xhigh or none");
   if (pt && pt->type != JSON_TRUE && pt->type != JSON_FALSE && pt->type != JSON_NULL)
