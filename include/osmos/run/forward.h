@@ -33,6 +33,7 @@ typedef struct ForwardOptions
   bool no_guess;         /* no experts guessed a layer ahead (forward_guesses): for a model whose misses are few */
   bool fill_set;         /* fill given (osmos-serve's --fill); else the RAM kept free is FIT_RAM_FREE */
   uint64_t fill;         /* the system's RAM a build leaves free, bytes: forward_room's (0: every byte past the headroom) */
+  uint64_t ahead_limit;  /* the membrane's: the most bytes of reads ahead read at once (0: no bound) */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);

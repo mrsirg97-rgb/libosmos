@@ -8,7 +8,7 @@
 // osmos-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
 // PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
-// a layer ahead: ForwardOptions' no_guess), OVERLAY=file (tensors standing in for the model's: weights_create_with).
+// a layer ahead: ForwardOptions' no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), OVERLAY=file (tensors standing in for the model's: weights_create_with).
 // prints "window prompt|decode <start> <end> <tokens>" (epoch seconds) for each prompt read and answer: energy by
 // tools/power.py's samples in them (tools/bench/energy.py).
 // ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
@@ -194,6 +194,7 @@ int main(int argc, char** argv) {
   ForwardOptions o = {};
   o.n_layers = (int) w->geo.n_layers;
   o.no_guess = std::getenv("NO_GUESS") != nullptr;
+  o.ahead_limit = std::getenv("AHEAD_LIMIT") ? std::strtoull(std::getenv("AHEAD_LIMIT"), nullptr, 10) : 0;  // bytes
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
   o.budget = budget;
   o.max_tokens = max_tokens;

@@ -25,6 +25,7 @@ typedef struct MembraneOptions
   size_t n_warm;
   membrane_copy_fn copy; /* a promotion's bytes, stream's memory to the membrane's */
   void *copy_ctx;
+  uint64_t ahead_limit; /* the most bytes of reads ahead (guesses, a prompt's) read at once: reads.h's; 0: no bound */
 } MembraneOptions;
 
 typedef struct MembraneStats
@@ -67,7 +68,10 @@ Membrane (DESIGN.md, "0.5.8: the membrane", "0.6.2: the membrane a module of its
 membrane_create
   the two pools (room, stream_room; each over its Slots, read_align both), their reads (`readers` threads), the
   units copied. NULL with why for no units, layers or copy, a warm unit out of range, or what pool_create and
-  reads_create refuse (a unit larger than a room among them). no read is made: membrane_warm's.
+  reads_create refuse (a unit larger than a room among them). no read is made: membrane_warm's. ahead_limit: the
+  readers' bound on reads ahead in flight (reads_ahead_limit) - a miss waited on then finds readers free and at
+  most that many bytes ahead of it; a warm start's reads and a hold's are waited reads, never bound, and a passing
+  visit lifts it until the next visit that is not (a prompt's reads ahead are its reads: the SSD's whole).
 
 membrane_destroy
   the readers stopped, then the pools. the caller's part: the GPU past every unit. NULL is nothing to do.

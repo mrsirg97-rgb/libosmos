@@ -29,6 +29,7 @@ struct Membrane
   uint32_t *failed;  /* promotions whose copy failed: pinned in the membrane's pool, their bytes never written -
                         every call refused until membrane_end drops them */
   uint32_t n_failed;
+  uint64_t ahead_limit, ahead_now; /* the option's bound, and the readers' now (none while a visit is passing) */
   MembraneStats stats;
 };
 
@@ -100,6 +101,8 @@ Membrane *membrane_create(const MembraneOptions *o, char err[MEMBRANE_ERR])
       !(m->stream = pool_create(m->units, m->n_units, o->stream_room, o->stream_slots, reads_fetcher(m->reads, 1),
                                 o->read_align, NULL, NULL, perr)))
     return membrane_destroy(m), fail(err, perr[0] ? perr : "the membrane's pools refused"), NULL;
+  m->ahead_limit = o->ahead_limit, m->ahead_now = o->ahead_limit;
+  reads_ahead_limit(m->reads, o->ahead_limit);
   return m;
 }
 
@@ -170,6 +173,9 @@ bool membrane_visit(Membrane *m, uint32_t layer, bool passing, char err[MEMBRANE
     return true;
   end_holds(m);
   m->visits++, m->layer = layer, m->passing = passing;
+  const uint64_t bound = passing ? 0 : m->ahead_limit; /* a prompt's reads ahead are its reads: the SSD's whole */
+  if (bound != m->ahead_now)
+    reads_ahead_limit(m->reads, m->ahead_now = bound);
   pool_now(m->pool, m->visits), pool_now(m->stream, m->visits);
   return true;
 }

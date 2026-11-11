@@ -20,6 +20,15 @@ bool fetchq_read(Fetchq *q, uint32_t unit, const PoolRange *parts, int n, void *
                  uint64_t need);
 void fetchq_need(Fetchq *q, uint32_t unit, uint64_t need);
 
+typedef struct FetchqStats
+{
+  uint64_t ahead_peak; /* the most bytes of reads ahead being read at once */
+  uint64_t ahead_held; /* the times a worker left a read ahead queued for the bound */
+} FetchqStats;
+
+void fetchq_ahead_limit(Fetchq *q, uint64_t bytes);
+void fetchq_stats(Fetchq *q, FetchqStats *s);
+
 #endif
 
 /*
@@ -56,4 +65,12 @@ fetchq_read
 fetchq_need
   the unit's jobs not yet begun moved to `need` (their order among themselves kept); a unit with none queued (read,
   being read, never asked) is nothing to do.
+
+fetchq_ahead_limit, fetchq_stats (DESIGN.md, "0.6.4: ... reads ahead in the background")
+  the most bytes of reads ahead - jobs at a need past 0 - being read at once; 0 (as created): no bound. a worker
+  leaves the queue's first job where it is while it is a read ahead and the reads ahead in flight plus its bytes
+  would pass the bound, and takes it once one ends; with none in flight a read ahead always goes (a job larger than
+  the bound is read alone, never starved). a waited job (need 0, or moved there by fetchq_need before a worker took
+  it) is never held back and counts nothing: a miss finds workers free and at most the bound's bytes ahead of it on
+  the SSD. set before the reads it is to bound (a job a worker holds stays as it was counted). stats: since create.
 */

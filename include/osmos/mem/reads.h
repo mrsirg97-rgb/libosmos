@@ -18,6 +18,7 @@ Fetcher reads_fetcher(Reads *r, int pool);
 bool reads_pump(Reads *r, Pool *const pools[READS_POOLS], bool wait, char err[READS_ERR]);
 int reads_out(const Reads *r);
 uint64_t reads_split(const Reads *r);
+void reads_ahead_limit(Reads *r, uint64_t bytes);
 
 #endif
 
@@ -60,4 +61,8 @@ reads_pump
 
 reads_out / reads_split
   the reads out now (given to the readers, their ends not yet pumped); those given out split, so far.
+
+reads_ahead_limit
+  fetchq_ahead_limit of the readers: the most bytes of reads ahead (a pool's wants, not its pins) being read at
+  once; 0: no bound. NULL is nothing to do.
 */

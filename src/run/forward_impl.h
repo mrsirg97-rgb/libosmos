@@ -156,6 +156,7 @@ struct Forward
   uint32_t *m_by, *m_row, *m_base, *m_slot0;
   /* forward_lane's: on, its CPU threads (0: every expert on the GPU, in the order the CPU would sum it), and a small
      step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in ascending expert id */
+  uint64_t ahead_limit; /* ForwardOptions': the membrane's bound on reads ahead in flight */
   bool lane;
   int lane_threads;
   uint8_t *lane_up;

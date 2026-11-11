@@ -66,11 +66,13 @@ static void make_units(int fd)
   }
 }
 
+static uint64_t ahead_limit; /* the readers' bound on reads ahead (main runs every test without one, then under one) */
+
 static MembraneOptions options(uint32_t room_units, uint32_t stream_units, const uint32_t *warm, size_t n_warm)
 {
   const uint64_t ub = pool_unit_bytes(&units[0], 0);
   return (MembraneOptions){units, L, E, room_units * ub, stream_units * ub, {fake_alloc, fake_free, NULL},
-                           {fake_alloc, fake_free, NULL}, 0, 4, warm, n_warm, fake_copy, &copies};
+                           {fake_alloc, fake_free, NULL}, 0, 4, warm, n_warm, fake_copy, &copies, ahead_limit};
 }
 
 static Membrane *make(uint32_t room_units, uint32_t stream_units, const uint32_t *warm, size_t n_warm)
@@ -364,15 +366,20 @@ int main(void)
   const int fd = file();
   make_units(fd);
   assert(pool_unit_bytes(&units[0], 0) == UNIT);
-  test_refusals();
-  test_decode_keeps();
-  test_prompt_passes();
-  test_promotion();
-  test_copy_fails();
-  test_guess();
-  test_warm();
-  test_full();
-  test_walk();
+  for (int bound = 0; bound < 2; bound++) /* reads ahead a job at a time: which units are where, and when, the same */
+  {
+    ahead_limit = bound ? 1 : 0;
+    printf(bound ? " under a bound on reads ahead (a job at a time):\n" : " no bound on reads ahead:\n");
+    test_refusals();
+    test_decode_keeps();
+    test_prompt_passes();
+    test_promotion();
+    test_copy_fails();
+    test_guess();
+    test_warm();
+    test_full();
+    test_walk();
+  }
   close(fd);
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);

@@ -232,6 +232,101 @@ static void test_order(int fd)
   printf("  order: queued behind a held read, taken by need (0 first), ties as given, a moved need the need then\n");
 }
 
+/* reads ahead under a bound: their bytes in flight never past it (one job may always go), every byte read; a
+   waited read behind them, and a read ahead moved to need 0, end among the first - never held back */
+static atomic_int n_done_order;
+static _Atomic uint32_t done_order[512];
+static void done_in_order(uint32_t unit, bool ok, void *arg)
+{
+  (void)arg;
+  assert(ok);
+  done_order[atomic_fetch_add(&n_done_order, 1)] = unit;
+}
+
+static int ended_at(uint32_t unit, int n)
+{
+  for (int i = 0; i < n; i++)
+    if (done_order[i] == unit)
+      return i;
+  return -1;
+}
+
+static void wait_done(int n)
+{
+  while (atomic_load(&n_done_order) < n)
+    usleep(200);
+}
+
+static void test_ahead_limit(int big)
+{
+  enum { READS = 64, WORKERS = 8, BEHIND = 100 };
+  const uint64_t job = FETCHQ_CHUNK; /* a read ahead here: one part of a chunk's bytes, a job */
+  uint8_t *buf = malloc((size_t)(BEHIND + 1) * job);
+  assert(buf);
+  FetchqStats st;
+  fetchq_stats(NULL, &st), fetchq_ahead_limit(NULL, 1); /* nothing to do */
+
+  /* a bound of two jobs' bytes: 64 reads ahead through 8 workers */
+  atomic_store(&n_done_order, 0);
+  Fetchq *q = fetchq_create(WORKERS, 512, done_in_order, NULL);
+  assert(q);
+  fetchq_ahead_limit(q, 2 * job);
+  memset(buf, 0, (size_t)READS * job);
+  for (uint32_t u = 0; u < READS; u++)
+  {
+    const PoolRange part = {big, (u % 8) * job, job};
+    assert(fetchq_read(q, u, &part, 1, (void *const[POOL_PARTS]){buf + (size_t)u * job}, false, 1 + u));
+  }
+  wait_done(READS);
+  fetchq_stats(q, &st);
+  for (uint32_t u = 0; u < READS; u++)
+    assert(buf[(size_t)u * job] == (uint8_t)((u % 8) * job) && buf[(size_t)u * job + job - 1] == 255);
+  printf("  reads ahead under a bound of 2 jobs: %d read, the most in flight %llu bytes, left queued %llu times\n",
+         READS, (unsigned long long)st.ahead_peak, (unsigned long long)st.ahead_held);
+  assert(st.ahead_peak >= job && st.ahead_peak <= 2 * job);
+  fetchq_destroy(q);
+
+  /* a bound smaller than any job: one at a time, none starved; a waited read given behind them is not held back */
+  atomic_store(&n_done_order, 0);
+  q = fetchq_create(WORKERS, 512, done_in_order, NULL);
+  assert(q);
+  fetchq_ahead_limit(q, 1);
+  for (uint32_t u = 0; u < BEHIND; u++)
+  {
+    const PoolRange part = {big, (u % 8) * job, job};
+    assert(fetchq_read(q, u, &part, 1, (void *const[POOL_PARTS]){buf + (size_t)u * job}, false, 1 + u));
+  }
+  const PoolRange waited = {big, 0, job};
+  assert(fetchq_read(q, BEHIND, &waited, 1, (void *const[POOL_PARTS]){buf + (size_t)BEHIND * job}, false, 0));
+  fetchq_need(q, BEHIND - 1, 0); /* the last read ahead now waited on: its job not yet begun goes first, unbound */
+  wait_done(BEHIND + 1);
+  fetchq_stats(q, &st);
+  const int w = ended_at(BEHIND, BEHIND + 1), m = ended_at(BEHIND - 1, BEHIND + 1);
+  printf("  a bound of one byte: the most in flight %llu bytes (a job's); a waited read behind %d ended %d%s, a "
+         "read ahead moved to need 0 %d%s\n",
+         (unsigned long long)st.ahead_peak, BEHIND, w + 1, w == 0 ? "st" : "th", m + 1, m == 0 ? "st" : "th");
+  assert(st.ahead_peak == job && st.ahead_held > 0);
+  assert(w >= 0 && w < 10 && m >= 0 && m < 12);
+  fetchq_destroy(q);
+
+  /* no bound (as created): every read ahead read */
+  atomic_store(&n_done_order, 0);
+  q = fetchq_create(WORKERS, 512, done_in_order, NULL);
+  assert(q);
+  for (uint32_t u = 0; u < READS; u++)
+  {
+    const PoolRange part = {big, (u % 8) * job, job};
+    assert(fetchq_read(q, u, &part, 1, (void *const[POOL_PARTS]){buf + (size_t)u * job}, false, 1 + u));
+  }
+  wait_done(READS);
+  fetchq_stats(q, &st);
+  printf("  no bound: %d read, the most in flight %llu bytes, none left queued\n", READS,
+         (unsigned long long)st.ahead_peak);
+  assert(st.ahead_held == 0);
+  fetchq_destroy(q);
+  free(buf);
+}
+
 int main(void)
 {
   printf("[test_fetchq] start\n");
@@ -241,6 +336,7 @@ int main(void)
   test_once(fd);
   const int big = file("big.bin", CHUNKED_FILE);
   test_chunks(big);
+  test_ahead_limit(big);
   close(big);
   test_failure(fd);
   test_destroy_busy(fd);

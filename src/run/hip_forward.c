@@ -297,7 +297,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   {
     const MembraneOptions mo = {all,       (uint32_t)f->n_layers,    E,           f->pool_room,      stream_room,
                                 host_slots(f->hs), host_slots(f->hs_stream), ARENA_GRAIN, FWD_FETCH_THREADS, warm,
-                                n_warm,    copy_on_stream,           NULL};
+                                n_warm,    copy_on_stream,           NULL,        f->ahead_limit};
     ok = (f->mem = membrane_create(&mo, err)) != NULL;
   }
   free(warm);
@@ -552,7 +552,7 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
                                const uint64_t *picks, char err[FORWARD_ERR])
 {
-  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0};
+  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0};
   return forward_create_with(w, &o, err);
 }
 
@@ -570,6 +570,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
   f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->no_guess = o->no_guess, f->budget = budget;
+  f->ahead_limit = o->ahead_limit;
   f->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
   if (max_tokens < FWD_MAX_BATCH) /* a small step's server: every buffer of a step at its size (DESIGN.md) */
     f->n_subs = 1, f->max_tokens = max_tokens, f->step = (max_tokens + MM_TILE - 1) / MM_TILE * MM_TILE;

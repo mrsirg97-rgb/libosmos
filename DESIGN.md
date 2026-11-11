@@ -3090,6 +3090,77 @@ inject's one-block matvec runs under the mixer's down on the second stream and e
 the decode's ~8.5 ms over the read ceiling is mostly not there to take at these bits; taken so far ~0.3 ms.
 
 
+### 0.6.4: the membrane on the largest quant - what is already right, and reads ahead in the background (design, 2026-11-11, low-power)
+
+UD-IQ2_XXS (146 GiB of experts, 9.7 MiB each; the budget sized: 8,868 of 15,360 resident, 84.3 GiB), the packs'
+settings (no guess), dbench auto 2048 128. plain 13.7 / 11.5 / 12.9 tok/s (q1, after a 2K prompt, q2), drafted 24.2 /
+13.1 / 20.5; a 2K prompt 273-286 tok/s. what follows is a drafted session's every hold and wait (a scratch trace in
+the membrane, not kept), 153 small steps.
+
+- **the misses.** 7,971 of 108,407 decode holds (7.4%), 58% of the visits with one at least. used before and evicted
+  since 50%, never resident 33%, warm and evicted before its first use 17% (UD-IQ1_M: 96.5% first uses).
+- **the reads cannot be faster.** over the stalls the SSD gives 5.4-6.8 GiB/s, a lone expert 1.75 ms; a read DMAs
+  into memory the GPU reads in place - no copy to take out.
+- **the cache's rule cannot be better without the future.** an ideal cache of the same room (the farthest next use
+  evicted) would miss 3,049. simulated over the same holds: LRU, the second-last use, the session's counts, the
+  profile's counts (evicting by them, or admitting a miss only past its victim's - 3.5x the misses: 5,028 of the
+  session's 13,320 experts were not in the warm set), a miss admitted on its second use with a side area - every
+  one within 8% of the membrane's own or far worse.
+- **room is what buys misses**: ~2.7% fewer for a GiB more (10 GiB: -28%).
+- **the guess as it is loses here too**: 21.3 / 12.4 / 19.2 tok/s. it names 61% of the misses, 48% of what it reads
+  is used; the reads waited on fall 2,836 -> 1,802 but each takes 1.83 -> 3.25 ms.
+- **the GPU and the SSD take turns.** a kernel trace of q1: the GPU idle 26% of the decode (1,363 of 5,151 ms; 1,196
+  in gaps of 0.2 ms and more), the SSD at ~2.6 GiB/s over it against its ~6.5. inside a layer the overlap is there
+  already (the experts in memory launched first, the reading ones as they end: hip_lane.c). past it only a read
+  begun before its layer runs overlaps anything - the guess.
+
+**Reads ahead in the background.** why the guess costs: a waited read's jobs go first in the queue, but a job a
+worker has begun is not taken back. a small step's guesses are a few units of three parts each, a part a job read
+whole: every one of the 12 readers can be inside a guessed part (3 MiB) when a miss arrives, which then waits for
+a reader and shares the SSD with up to 36 MiB already begun.
+
+- `fetchq_ahead_limit(q, bytes)`: the most bytes of reads ahead (jobs at a need past 0) being read at once; 0, as
+  created: no bound. a worker leaves the heap's first job where it is while it is a read ahead and the bytes of
+  reads ahead in flight plus its own would pass the bound - unless none is in flight (one job may always go: a job
+  larger than the bound is read alone, never starved) - and takes it when one ends. a waited job (need 0, or moved
+  there: fetchq_need) is never held back and counts nothing. so a miss finds readers free and at most the bound's
+  bytes ahead of it on the SSD; the reads ahead still go whenever nothing is waited on.
+- `fetchq_stats`: the most bytes of reads ahead in flight at once, and the times a worker left one queued.
+- `reads_ahead_limit(r, bytes)`, `MembraneOptions.ahead_limit`: the same number handed down; 0 keeps today's order.
+- which reads are begun, and when they end, changes no bit: the experts' bytes are the file's.
+- general: the queue knows needs, not models - any streamed model's reads ahead (a prompt's, a guess's) take it.
+
+tests (test_fetchq, CPU, real files): 64 reads ahead through 8 workers under a 2 MiB bound - the peak in flight
+within it, every byte in place; a bound of one byte - one job at a time, all read; a waited read given behind 100
+reads ahead ends among the first; a read ahead moved to need 0 the same. test_membrane: guesses under a bound end
+and are held as without one.
+
+then measured: UD-IQ2_XXS drafted, the guess on under bounds of 1, 3 and 6 MiB against the guess off - tok/s, the
+waits, the reads the guess began - at the sized budget; and whether a guessed read at that rate ends in time.
+
+
+**Built and measured (2026-11-11, low-power; one run each, every answer's hash the same).** test_fetchq's new
+tests fail before the bound is kept (the peak past it) and pass five runs of five; test_membrane's every test
+passes with no bound and under a bound of a job at a time. a passing visit lifts the bound (a prompt's reads ahead
+are its reads): prompts 275-278 tok/s in every run. UD-IQ2_XXS drafted, q1 / after a 2K prompt / q2 tok/s:
+
+| | q1 | after 2K | q2 |
+|---|---|---|---|
+| the guess off (the packs') | 24.3 | 13.3 | 20.7 |
+| 6 names, no bound | 21.2 | 12.4 | 19.1 |
+| 6 names, 1 MiB | 23.4 | 12.8 | 20.1 |
+| 6 names, 3 MiB | 23.4 | 13.0 | 20.2 |
+| 6 names, 6 MiB | 23.3 | 12.9 | 20.1 |
+| 2 names, 3 MiB | 24.6 | 13.7 | 20.8 |
+| 1 name, 3 MiB | 24.1 | 13.5 | 20.5 |
+
+(two runs of the guess off: within 0.5%.) so the queue was the guess's cost - the bound gives most of it back,
+whatever its size from 1 to 6 MiB - and what is left is the SSD's own time: at 6 names ~10,300 experts read, half
+never used. at 2 names 1,380 of 1,923 read are used and the guessed ones are there in time (224 waits, ~1 ms), but
+they are 17% of the misses. the predictor (the next router on this layer's input) is the wall: the bound stays an
+option, off by default, the guess's width a constant, no pack changed. not run: an interleaved A/B of 2-3 names
+against none (the 1-3% is one run's).
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate
