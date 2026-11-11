@@ -34,6 +34,7 @@ typedef struct ForwardOptions
   bool fill_set;         /* fill given (osmos-serve's --fill); else the RAM kept free is FIT_RAM_FREE */
   uint64_t fill;         /* the system's RAM a build leaves free, bytes: forward_room's (0: every byte past the headroom) */
   uint64_t ahead_limit;  /* the membrane's: the most bytes of reads ahead read at once (0: no bound) */
+  uint32_t logit_rows;   /* a step's last rows whose logits are kept (forward_logit_rows); 0: its every row */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);
@@ -59,6 +60,7 @@ bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
 const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
+uint32_t forward_logit_rows(const Forward *f);
 bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR]);
 const uint64_t *forward_picks(const Forward *f);
 uint64_t forward_budget(const Forward *f);
@@ -228,7 +230,13 @@ forward_stream
 forward_logits
   the device buffer of the last step's logits ([n][n_vocab] F32) - the last sub-batch's rows, for a batch past
   MM_MAX_TOKENS: the head over the stream, when n_layers is all of the model's (else not computed); a token before its
-  sequence's prompt end - 1 (seq_prompt): its row not computed.
+  sequence's prompt end - 1 (seq_prompt): its row not computed. with ForwardOptions' logit_rows, a sub-batch of
+  more rows keeps its last logit_rows alone: row r at slot r - (rows - logit_rows), the rows before them not
+  computed, the buffer logit_rows rows (DESIGN.md, "0.6.4": the logits' rows).
+
+forward_logit_rows
+  the slots of forward_logits the last step filled: its last sub-batch's rows, logit_rows at most where that is
+  set; 0 for none (no forward, no step, no head).
 
 forward_greedy
   the greedy picks of the last step's logits rows row0 .. row0 + rows on the GPU (ops_argmax: the greatest, the lowest

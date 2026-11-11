@@ -3161,6 +3161,48 @@ they are 17% of the misses. the predictor (the next router on this layer's input
 option, off by default, the guess's width a constant, no pack changed. not run: an interleaved A/B of 2-3 names
 against none (the 1-3% is one run's).
 
+**What the memory is, and the logits' rows (design, 2026-11-11).** room is what buys misses, so what is not experts
+was itemised (UD-IQ2_XXS, the drafter beside it, a budget of 93.93 GiB; every allocation noted in a scratch build;
+105.7 GiB in all): the experts' pool 84.5 GiB, the dense weights 9.5, a step's buffers 4.2 (sized for 2,048 tokens),
+the stream's pool 3.7, ~3.2 not itemised (the drafter's weights mostly), the sequences' state and taps ~0.5. of the
+step's buffers the largest is the logits': 2,048 rows x 129,280 x F32 = 1,010 MiB - for a head that already runs for
+the wanted rows alone (hip_skip.c), and a server that reads a prompt's last row and a decode step's few.
+
+- `ForwardOptions.logit_rows` (0: a step's every row, as before): the forward keeps the logits of a step's last
+  logit_rows rows - of its last sub-batch - and its buffer is that many rows. a step of n rows, n past it: its rows
+  before the last logit_rows get no logits (the head not run for them, wanted or not), and row r is slot
+  r - (n - logit_rows) of forward_logits; a step within it: row r slot r, as before. the kept rows' bits are the
+  same (a token's sums its own).
+- `forward_logit_rows(f)`: the slots the last step filled (0: none) - a caller's row arithmetic.
+- the engine (hip_engine_ds4.c) asks for round_tokens rows - (experts - 1) / used, 63: a decode step's most tokens;
+  a longer step is a prompt's, read at its last row - and its kept rows are the last sub-batch's last 63.
+  1,010 -> 31 MiB. dbench asks the same (ALL_ROWS=1: every row).
+- not changed: forward_create and forward_create_ranked (every row), so the tests and ppl.hip that read a step's
+  every row.
+
+tests (test_logit_rows_gpu): a forward that keeps 8 rows against one that keeps all - a 20-token step's last 8 the
+same bits at slots 0 .. 7, forward_logit_rows 8, a greedy pick of slot 7 the same token, of slot 8 refused; a
+5-token step's 5 rows the same at slots 0 .. 4. test_engine_gpu: a 2,100-token step's last 52 rows served as before.
+
+
+**Built and measured (2026-11-11, low-power).** test_logit_rows_gpu fails before (the stub keeps every row) and
+passes; DeepSeek's GPU tests touched pass (engine - a 2,100-token step's last 52 rows served as before - batch,
+drafter, guess, cand, overflow, skip, membrane, seqstate); UD-IQ1_M's hashes the same, plain and drafted. UD-IQ2_XXS
+drafted, every row kept against the last 63, two interleaved rounds: the sized budget 94.9-95.0 -> 95.95-95.97 GiB,
+the reads waited on 6,901-6,910 -> 6,711-6,726 (-2.7%: a GiB's, as simulated), their time 13.2 -> 12.8 s; tok/s
+level (24.0 / 13.2 / 20.55 -> 24.0 / 13.3 / 20.6), the hashes the same.
+
+**A session with prompts in it, and the stream's room (2026-11-11).** nine prompts and answers (2K and 8K prompts
+among them), every hold traced. the answer after a long prompt is the slow one (12.5-17.7 tok/s against 20-28), and
+not for what the prompt took: of its first ten steps' misses 63-72% are experts the prompt never picked, 25-31% ones
+the prompt read (not resident before it), 3-7% ones resident when the prompt held them. a prompt costs the decode
+almost none of its residents: the new context wants other experts (and, after p2048, fewer drafts hold). so the
+stream's 3.7 GiB lent to the decode: ~10% fewer misses while lent, ~390 experts given back at every prompt -
+level where an answer follows each prompt (an agent's turns), a gain only for long decodes between. not built.
+
+**What 0.6.4's study leaves.** the membrane's rule, its reads, its prompts and the guess off are each at or near
+what this box allows; a GiB of room is 2.7% of the misses, and the logits' rows are one, free.
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate

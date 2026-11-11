@@ -29,6 +29,7 @@ typedef struct Eng
   Seq **seqs;      /* a batch's sequences, FORWARD_MAX_TOKENS of them */
   uint32_t vocab;   /* a logits row */
   uint32_t n, kept; /* the last batch's rows, and its last rows the forward keeps logits of */
+  uint32_t rows;    /* the forward's logit_rows: a decode step's most tokens (the facts' round_tokens) */
 } Eng;
 
 static bool fail(char err[OSMOS_ERR], const char *what)
@@ -106,8 +107,9 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->picks && !(e->picks = read_picks(o->picks, &m->w->geo, err)))
     return e_destroy(e), NULL;
+  e->rows = (uint32_t)((m->w->geo.n_experts - 1) / m->w->geo.n_used); /* m_open's round_tokens */
   const ForwardOptions fo = {m->w->geo.n_layers, o->max_ctx,  o->budget,     e->picks,
-                             o->max_tokens,      o->no_guess, o->fill_set, o->fill, 0};
+                             o->max_tokens,      o->no_guess, o->fill_set, o->fill, 0, e->rows};
   if (!(e->f = forward_create_with(m->w, &fo, err)) || !forward_lane(e->f, 0, NULL, err) ||
       (o->drafter && !(e->d = drafter_create(e->f, o->drafter, err))))
     return e_destroy(e), NULL;
@@ -135,7 +137,7 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
   e->n = e->kept = 0;
   if (!forward_batch(e->f, e->seqs, tokens, n, err))
     return false;
-  e->n = n, e->kept = n - (n - 1) / MM_MAX_TOKENS * MM_MAX_TOKENS; /* the last sub-batch's (forward_batch) */
+  e->n = n, e->kept = forward_logit_rows(e->f); /* the last sub-batch's last rows (ForwardOptions' logit_rows) */
   return true;
 }
 
