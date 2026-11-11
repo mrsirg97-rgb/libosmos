@@ -49,6 +49,69 @@ costs 0.2-0.5% perplexity (UD-IQ1_M 2.458 → 2.470, Qwen 2.714 → 2.723) at th
 
 ## Performance
 
+### The machine
+
+Every number here comes from one box:
+
+| | |
+| --- | --- |
+| System | AMD Ryzen AI Halo (RAH-001), BIOS 04.01 |
+| APU | Ryzen AI MAX+ 395: 16 Zen 5 cores, Radeon 8060S (gfx1151, 40 CUs) |
+| Memory | 128 GB LPDDR5X, shared by CPU and GPU; GPU memory raised to ~113 GiB (`ttm pages_limit=29637703`) |
+| SSD | Micron 4600 2 TB (MTFDLBA2T0THJ, firmware PBMA002): a PCIe 5.0 drive, linked at PCIe 4.0 x4 here; btrfs |
+| Software | Linux 7.2.7, ROCm with HIP 7.15, gcc 14.2 |
+
+DeepSeek streams its experts from the SSD, so the drive is part of DeepSeek's numbers. A prompt reads at about
+7.1 GB/s here, near the ceiling of the PCIe 4.0 x4 link, so a good Gen4 NVMe should come close on prompts. Decode
+reads experts as the router picks them, a few MB at a time (`O_DIRECT`): there the drive's random-read latency
+counts, and a slower or DRAM-less drive shows first. The "SSD read a token" rows are the device's own counter over
+each run's decode.
+
+### DeepSeek on 0.6.2 at `performance`
+
+0.6.2 at AMD's `performance` profile (2026-11-11), with the method of the tables below: 64K context, Maya's three
+questions at 256 tokens each (the mean of the three), its 2K and 8K prompts read in 2,048-token steps as osmos-serve
+reads them, greedy decoding, nothing else running, each run a fresh process, two rounds with the order swapped. The
+range is the two rounds'. Tokens a second:
+
+| | UD-IQ1_M | UD-IQ1_S | UD-IQ2_XXS |
+| --- | ---: | ---: | ---: |
+| Prompt, 2,048 tokens | 373-374 | 372-377 | 299-301 |
+| Prompt, 8,192 tokens | 513-514 | 531-533 | 416-417 |
+| Decode, drafted | 34.3-34.6 | 42.2 | 25.2 |
+| Decode, plain | 17.3-17.4 | 19.4-19.5 | 14.1 |
+| Perplexity, 8,191 tokens | 2.4579 | 2.5006 | 2.4492 |
+| SSD read a token, plain / drafted | 0.030 / 0.044 GB | 0.007 / 0.014 GB | 0.074 / 0.095 GB |
+
+The 0.6.0 table below read DeepSeek's prompts in 512-token steps, so its prompt rows are lower than these. The
+perplexities are 0.5.11's to the last digit: 0.6.x changed no DeepSeek arithmetic. The SSD row is why UD-IQ2_XXS
+is the slow pack: it reads seven to ten times what UD-IQ1_S does for each token. Agents (Maya's bench below, UD-IQ1_M at 131K,
+drafted): 32 of 32 turns in 473.5 s, first token p50 / p95 5.3 / 64.6 s, turn done 44.9 / 107.6 s, package power
+116.7 W, 7.30 J an answer token, at least 8.3 GiB of RAM left free throughout.
+
+### DeepSeek on 0.6.2 at `low-power`
+
+The same runs at AMD's `low-power` profile (~70 W cap, 2026-11-11), against 0.5.11's at the same profile (the Maya
+comparison below). Tokens a second:
+
+| | UD-IQ1_M 0.5.11 | 0.6.2 | UD-IQ1_S 0.5.11 | 0.6.2 | UD-IQ2_XXS 0.5.11 | 0.6.2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Prompt, 2,048 tokens | 318 | 321-327 | 322 | 323 | 281 | 281-282 |
+| Prompt, 8,192 tokens | 438 | 439-443 | 451 | 453-454 | 383 | 381 |
+| Decode, drafted | 32.7 | 32.0-32.2 | 39.5 | 39.1-39.2 | 24.8 | 23.4-24.0 |
+| Decode, plain | 16.4 | 16.2-16.3 | 18.3 | 18.3 | 13.5 | 13.4 |
+| SSD read a token, plain / drafted | | 0.028-0.031 / 0.045 GB | | 0.007 / 0.012-0.013 GB | 0.064 / 0.082 GB | 0.072-0.073 / 0.105-0.106 GB |
+
+Agents (UD-IQ1_M at 131K, drafted), 0.5.11 against 0.6.2: wall time 485 against 482.8 s, first token p50 / p95 7.0 /
+73.0 against 6.5 / 77.1 s, turn done 48.3 / 105.9 against 46.6 / 105.7 s, package power 56.4 against 57.7 W, energy
+3.42 against 3.69 J an answer token, RAM left free at least 8.2 against 8.4 GiB.
+
+At `low-power` 0.6.2 runs DeepSeek about as 0.5.11 did: the prompts the same or up to 3% faster, plain decode the
+same. Two numbers came out worse, and we are looking into them rather than explaining them away: UD-IQ2_XXS reads
+more from the SSD for each token than 0.5.11's run measured (0.105 against 0.082 GB drafted) and its drafted decode
+is 3-6% lower, and the agents bench used 8% more energy an answer token at nearly the same wall time. The output is
+unchanged: every perplexity is 0.5.11's to the last digit.
+
 ### 0.6.0 at `performance`
 
 0.6.0 against 0.5.12 on the same box at AMD's `performance` profile (2026-11-10): greedy decoding, nothing else
@@ -82,7 +145,8 @@ with nothing else running and greedy decoding. Each engine runs in a fresh proce
 engines' order swapped from round to round, and each is set up the way its own setup does it. The scripts and logs
 are listed in `DESIGN.md` ("0.5.11"). 0.5.12 changed none of these by more than a couple of percent (Qwen's decode
 +1-2% from fewer launches; DeepSeek's paths untouched), so its tables stay 0.5.11's. 0.6.0's Qwen prompts are
-faster (above); these comparisons have not been rerun with it.
+faster (above); these comparisons have not been rerun with it. 0.6.2's own DeepSeek numbers at `low-power` are
+above.
 
 **Low-power is the profile for work that runs a while.** Against 0.5.9's run at `performance`, the agents bench below
 took 20% longer and used half the energy per answer token (3.42 J against 7.03 J; mean package power 56 W against
@@ -192,7 +256,8 @@ varied up to 7% for osmos, up to 18% for llama.cpp. Both run Qwen's sparse atten
 - GPU memory raised to ~113 GiB: `options ttm pages_limit=29637703` in `/etc/modprobe.d/ttm.conf`. This is a system
   setting, so it's yours to make.
 - The model on an NVMe SSD, on a filesystem that takes `O_DIRECT` reads (ext4, btrfs and xfs do; osmos refuses one that
-  doesn't, and names it). The faster the SSD's random reads, the faster DeepSeek decodes.
+  doesn't, and names it). The faster the SSD's random reads, the faster DeepSeek decodes. The numbers here are from a
+  Micron 4600 on a PCIe 4.0 x4 link ("The machine", above).
 
 ## Build and test
 
@@ -229,6 +294,8 @@ bin/q4x_bench $Q ids.txt 512 128 ~/Models/qwen38/MTP/mtp-Qwen3.8-Flash-Next-shar
 python3 tools/bench/rig_replay.py ~/.rig out/ --shard $Q --gguf-py <llama.cpp>/gguf-py \
   --tokenize <llama.cpp>/build-hip/bin/llama-tokenize                                          # prompts from your rig sessions
 bin/q4x_ppl $Q ids.txt 8192 2048                                                              # perplexity
+# 0.6.2's DeepSeek tables: the three DeepSeek lines above for each pack, two rounds, the packs' order swapped in
+# round 2; SSD bytes from /proc/diskstats over dbench's "window decode" lines; ppl 100 512 8192 calib16k.txt
 # 0.6.0's table: powerprofilesctl set performance, then each version's q4x_bench at 2048 128, 8192 1 and
 # 512 128 with the MTP head, and dbench auto 512 256 warmup.txt q1.txt p2048.txt p8192.txt, interleaved
 # (UD-Q4_K_XL's rows had its n-gram table resident; from 0.6.1 at an 8K context that leaves the GPU under its
