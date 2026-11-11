@@ -217,9 +217,11 @@ __global__ void hc_mix_kernel(const float* partial, const float* scale, const fl
 
 // x16 (when not NULL): the result as mm_x16 would put it, rows n .. a whole tile zero (a block each, past n). block
 // t's: token t's, a kWide block's
+// q8 (when not NULL): x as q8_round would put it (lane.h's int8 contract: a block of 32 its wave - a kWide block's
+// thread d % kWide holds value d, so a wave a block, lane i its value i, as q8.h's round_kernel), q8d its scales
 __device__ void hc_pre_rms_token(uint32_t t, const float* h, const float* pre, uint32_t hc, uint32_t dim,
                                  const float* w, float eps, float* x, uint32_t n_tok, _Float16* x16,
-                                 int32_t* overflow, float* lds) {
+                                 int32_t* overflow, float* lds, int8_t* q8 = nullptr, float* q8d = nullptr) {
   if (t >= n_tok) {  // a pad row of x16's last tile
     for (uint32_t d = threadIdx.x; d < dim; d += kWide) mm::x16_put(x16, t, d, dim, 0.0f, overflow);
     return;
@@ -238,6 +240,12 @@ __device__ void hc_pre_rms_token(uint32_t t, const float* h, const float* pre, u
     const float v = (xt[d] * r) * w[d];
     xt[d] = v;
     if (x16) mm::x16_put(x16, t, d, dim, v, overflow);
+    if (q8) {
+      float a = fabsf(v);
+      for (int o = kWave / 2; o > 0; o >>= 1) a = fmaxf(a, __shfl_xor(a, o, kWave));
+      q8[(uint64_t) t * dim + d] = (int8_t) lane_q8_round(v, lane_q8_inv(a));
+      if (d % LANE_Q8_VALUES == 0) q8d[(uint64_t) t * (dim / LANE_Q8_VALUES) + d / LANE_Q8_VALUES] = lane_q8_scale(a);
+    }
   }
 }
 
@@ -257,13 +265,14 @@ __global__ __launch_bounds__(kWide) void hc_mix_pre_rms_kernel(const float* part
                                                                 uint32_t iters, float* mpre, float* post, float* comb,
                                                                 const float* h, const float* pre, uint32_t dim,
                                                                 const float* w, float* x, uint32_t n_tok,
-                                                                _Float16* x16, int32_t* overflow) {
+                                                                _Float16* x16, int32_t* overflow, int8_t* q8,
+                                                                float* q8d) {
   __shared__ float rows[(2 + OPS_MAX_HC) * OPS_MAX_HC + 1];
   __shared__ float lds[kWide];
   const uint32_t t = blockIdx.x;
   if (t < n_tok) hc_mix_token<hc>(t, partial, scale, base, dim, eps, hc_eps, iters, mpre, post, comb, rows);
   __syncthreads();
-  hc_pre_rms_token(t, h, pre, hc, dim, w, eps, x, n_tok, x16, overflow, lds);
+  hc_pre_rms_token(t, h, pre, hc, dim, w, eps, x, n_tok, x16, overflow, lds, t < n_tok ? q8 : nullptr, q8d);
 }
 
 __global__ void hc_pre_kernel(const float* h, const float* pre, uint32_t hc, uint32_t dim, uint32_t n_tok, float* x) {
@@ -833,16 +842,17 @@ extern "C" bool ops_hc_post_dot(const float* y, const float* res, const float* p
 extern "C" bool ops_hc_mix_pre_rms(const float* partial, const float* scale, const float* base, uint32_t hc,
                                    uint32_t dim, float eps, float hc_eps, uint32_t iters, uint32_t n_tok, float* mpre,
                                    float* post, float* comb, const float* h, const float* pre, const float* w,
-                                   float* x, void* x16, int32_t* overflow, void* stream) {
+                                   float* x, void* x16, int32_t* overflow, int8_t* q8, float* q8d, void* stream) {
   if (!hc || hc > OPS_MAX_HC || !dim || !iters || !n_tok || !pre || !w || !x || (!x16) != (!overflow)) return false;
   if (x16 && (dim % mm::kTile || n_tok > MM_MAX_TOKENS)) return false;
+  if ((!q8) != (!q8d) || (q8 && dim % LANE_Q8_VALUES)) return false;  // a wave a block of the int8 contract
   const hipStream_t s = st(stream);
   const uint32_t blocks = x16 ? tiles(n_tok) : n_tok;
   switch (hc) {
 #define HC_MIX_PRE(n)                                                                                              \
   case n:                                                                                                          \
     hc_mix_pre_rms_kernel<n><<<blocks, kWide, 0, s>>>(partial, scale, base, eps, hc_eps, iters, mpre, post, comb, h, \
-                                                      pre, dim, w, x, n_tok, (_Float16*) x16, overflow);           \
+                                                      pre, dim, w, x, n_tok, (_Float16*) x16, overflow, q8, q8d);  \
     break;
     HC_MIX_PRE(1) HC_MIX_PRE(2) HC_MIX_PRE(3) HC_MIX_PRE(4) HC_MIX_PRE(5) HC_MIX_PRE(6) HC_MIX_PRE(7) HC_MIX_PRE(8)
 #undef HC_MIX_PRE

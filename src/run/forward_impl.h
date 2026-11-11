@@ -205,6 +205,7 @@ struct Forward
                                        per-token device buffer's rows */
   uint32_t n_sub;
   bool xf_x16; /* the layer's FFN input's x16 in b.x16 (layer_in's mix wrote it: a one-sub-batch step) */
+  bool xf_q8;  /* and its int8 in lane_xq / lane_xqd (the same launch: the lane's q8_round of it skipped) */
   bool hcp_next; /* the next layer's attention hc_dot partial in b.hcp (layer_out's ops_hc_post_dot wrote it) */
   int64_t *rows;  /* each token's Engram rows, every Engram layer's: [token][layer][col] */
   uint32_t n;                    /* the step's tokens */

@@ -196,7 +196,7 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
      activation alone. the F32 matvec reads its rows gathered */
   const bool q8 = lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type);
   const bool fused = q8 && L->exp_gate->type == L->exp_up->type;
-  bool ok = (q8 ? q8_round(b->xf, n, D, D, f->lane_xq, f->lane_xqd, NULL)
+  bool ok = (q8 ? f->xf_q8 || q8_round(b->xf, n, D, D, f->lane_xq, f->lane_xqd, NULL)
                 : ops_gather_rows(f->lane_x, b->xf, d->tok, picks, D, NULL)) &&
        (fused || ops_gather_rows(f->lane_w, b->rw, d->pair, picks, 1, NULL));
   ok = ok && entries(f, l, picks, 0, nr, q8); /* the ready ones, then the reading ones as their reads end */

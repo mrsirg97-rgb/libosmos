@@ -2909,6 +2909,42 @@ another reference's (ref.py's, llama.cpp's), and the bits are the product.
   DeepSeek UD-IQ1_M the membrane's oracle - the six hashes the same, 17.6 / 16.3 / 17.4 plain, 32.2 / 19.4 / 29.2
   drafted.
 
+### 0.6.2: DeepSeek's decode, traced again - two launches a layer gone, two ideas measured away (2026-11-10)
+
+**A token now** (UD-IQ1_M, plain, the guess on, performance; rocprofv3, 59 tokens): 58 ms - the Q6_K dense 19.5 (34%),
+the routed experts' int8 lane 11.4, wo_a's groups 5.4, the shared expert 6.6, the routing and its guess ~3.6, the
+hyper-connections 2.2; idle: the reads waited for ~2.6 ms (two a token, ~1.2 ms each), the launches' gaps ~2.5 (1,263
+of them). **a drafted round** (128 tokens in 33 rounds, 3.9 a round): 122 ms - the drafter 13.2 (its head by mv 3.2,
+its experts 4.9, the markov head 1.5), the verify 109: kernels 89.6, **the reads waited for 15.7 ms - eight a round,
+~1.9 ms each, 13% of the round** - the launches' gaps 3.0. drafted, the misses are the idle: the membrane's policy
+and room, and the guess (54% of the streamed picks named a layer ahead), not the kernels.
+
+- **kept: the lane's int8 input in the FFN's mix** (ops_hc_mix_pre_rms's q8, q8d: the mix's block is 1,024 threads,
+  thread d % 1024 value d - a wave a block of 32, lane i its value i, q8.h's round_kernel's layout; its max by the
+  wave's shuffles, lane.h's own round and scale: q8_round's bits, test_fuse_gpu against q8_round at 1, 5 and 9
+  tokens, both buffers garbage first). the lane's q8_round of xf skipped (Forward.xf_q8). **and the overflow flag
+  cleared where it is found set, and after a failed step (fail_held), not by a launch every step.** 1,263 -> 1,222
+  launches a token; kernels + launch gaps, three traces against two: 54,727 +- 20 -> 54,625 +- 40 us a token (-0.18%;
+  the mix +0.8 us a call, the round's 2.0 us and its gap gone). every hash held (DeepSeek's six, Qwen's).
+- **not kept: wo_a's outputs as f16 from mm_group's own stores** (mm_group_x16: tile's store hook writing y and
+  x16_put, wo_b on it with no mm_x16 - 40 launches a token; y mm_group's bits, the f16 and flag mm_x16's,
+  test_mm_gpu's case). the launch went and wo_b got slower by more: 165.7 -> 172.3 us a call in three traces of
+  each, the same with the f16 in the experts' buffer or one of its own (zeroed, a tile of tokens: 173.1) - every
+  other matmul's time unchanged. kernels + gaps 54,727 -> 54,845 with it, 54,625 without. the conversion kernel was
+  3 us and left its 262 KB in the cache for wo_b's first loads; written over 130 us under wo_a's 27 MB of weights
+  they are not there. reverted whole.
+- **not built: a wait for an expert's gate and up alone** (the down's read under the gate-and-up kernel). measured
+  first on the model's files through fetchq itself (12 readers, 1 MiB chunks, O_DIRECT, 200 cold experts a run,
+  the GPU suite on the same SSD: the absolute times noisy, the order not): every chunk given at once - the engine's
+  way - gate and up are there a median 0.0 - 0.1 ms before the whole unit (the parts end together: a lone unit is
+  ten requests in flight, bound by a request's latency, not the SSD's rate); gate and up first, then the down, the
+  whole read is longer (1.54 -> 1.64 ms in the quiet run), ~0.07 ms saved a read at best. a pool that knows parts
+  for that: no.
+- **looked at, left**: the attention's softmax into its neighbours (a values block would redo it eight times); the
+  shared expert's activation as its matmul's epilogue (gate and up are different blocks); the int8 round after gate
+  and up (0.3.x: tried). the int8 lane, the attention's three kernels and the grouped matmul read as tuned; the
+  big ones move ~200 GB/s, the F32 router ~150 (BF16 would halve it and move bits: the operator's call).
+
 ### 0.6.2: Qwen's waits - asleep to a mark, awake for the tail (design, 2026-11-10)
 
 **Measured** (the 0.5.9 plain decode's kernel trace, q4x_bench under gpu_sleep_on_waits, low-power, 59 tokens; the

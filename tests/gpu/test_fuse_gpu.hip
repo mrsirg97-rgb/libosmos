@@ -17,6 +17,7 @@ extern "C" {
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/q8.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -219,9 +220,25 @@ static void hc_mix_pre_rms(uint32_t n, bool x16, bool own) {
   CHECK(ops_hc_mix(part, ds, db, kHc, kHcDim, eps, hc_eps, kIters, n, m[0][0], m[0][1], m[0][2], nullptr) &&
         (x16 ? ops_hc_pre_rms_x16(dh, p0, kHc, kHcDim, dw, eps, n, xo[0], x16o[0], ov[0], nullptr)
              : ops_hc_pre_rms(dh, p0, kHc, kHcDim, dw, eps, n, xo[0], nullptr)));
+  // its int8 too (the lane's q8_round of x, in the launch): against q8_round of the plain x, both filled with garbage
+  int8_t* q8[2];
+  float* q8d[2];
+  const size_t nblk = (size_t) n * (kHcDim / 32);
+  for (int k = 0; k < 2; k++)
+    CHECK(hipMalloc(&q8[k], (size_t) n * kHcDim) == hipSuccess && hipMalloc(&q8d[k], nblk * 4) == hipSuccess &&
+          hipMemset(q8[k], 0x55, (size_t) n * kHcDim) == hipSuccess && hipMemset(q8d[k], 0x55, nblk * 4) == hipSuccess);
+  CHECK(q8_round(xo[0], n, kHcDim, kHcDim, q8[0], q8d[0], nullptr));
   CHECK(ops_hc_mix_pre_rms(part, ds, db, kHc, kHcDim, eps, hc_eps, kIters, n, m[1][0], m[1][1], m[1][2], dh, p1, dw,
-                           xo[1], x16o[1], ov[1], nullptr) &&
+                           xo[1], x16o[1], ov[1], q8[1], q8d[1], nullptr) &&
         hipDeviceSynchronize() == hipSuccess);
+  CHECK(host((const uint8_t*) q8[0], (size_t) n * kHcDim) == host((const uint8_t*) q8[1], (size_t) n * kHcDim));
+  {
+    const std::vector<float> da = host(q8d[0], nblk), db2 = host(q8d[1], nblk);
+    CHECK(std::memcmp(da.data(), db2.data(), nblk * 4) == 0);
+  }
+  CHECK(!ops_hc_mix_pre_rms(part, ds, db, kHc, kHcDim, eps, hc_eps, kIters, n, m[1][0], m[1][1], m[1][2], dh, p1, dw,
+                            xo[1], x16o[1], ov[1], q8[1], nullptr, nullptr));  // one of the pair alone
+  for (int k = 0; k < 2; k++) CHECK(hipFree(q8[k]) == hipSuccess && hipFree(q8d[k]) == hipSuccess);
   CHECK(host(m[0][0], n * kHc) == host(m[1][0], n * kHc) && host(m[0][1], n * kHc) == host(m[1][1], n * kHc) &&
         host(m[0][2], n * kHc * kHc) == host(m[1][2], n * kHc * kHc));
   const std::vector<float> xa = host(xo[0], (size_t) n * kHcDim), xb = host(xo[1], (size_t) n * kHcDim);
