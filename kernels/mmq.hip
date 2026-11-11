@@ -2,6 +2,7 @@
 // group, Q4_K's 4-bit codes the A operand as they are, the scales a float epilogue a group
 #pragma clang fp contract(off) /* each product and sum its own rounding: the host reference's */
 #include <hip/hip_fp16.h>
+#include "launch.h"
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -13,6 +14,9 @@ extern "C" {
 
 namespace {
 
+using launches::st;
+using launches::ok;
+
 constexpr int kThreads = 256, kWave = 32, kTile = 16;
 constexpr int kWaves = 4;                    // the K split: a wave's 256-value blocks p, p + 4, ...
 constexpr int kBlockValues = 256, kBlockBytes = 144, kGroups = kBlockValues / MMQ_GROUP;  // Q4_K's
@@ -22,8 +26,6 @@ typedef int i4v __attribute__((ext_vector_type(4)));
 typedef uint32_t u4 __attribute__((ext_vector_type(4)));
 static_assert(MMQ_GROUP == 32, "a group a wave's lanes (mmq_x8_rows' reductions)");
 
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 __device__ inline float f16(uint32_t bits) { return __half2float(__ushort_as_half((unsigned short) bits)); }
 
 // a thread a value, a group a wave's 32 lanes: its max |x| and the sum of its codes by shuffles

@@ -2,6 +2,7 @@
 #include <cmath>
 
 #include "block.h"
+#include "launch.h"
 #include "quant.h"
 #include "round.h"
 #include "lane.h"
@@ -15,7 +16,11 @@ extern "C" {
 
 namespace {
 
-constexpr int kThreads = 256;
+using launches::kThreads;
+using launches::grid;
+using launches::st;
+using launches::ok;
+
 constexpr int kWave = 32;
 constexpr float kSoftplusLinear = 20.0f;  // F.softplus's threshold: above it, x
 constexpr float kRouteEps = 1e-20f;
@@ -578,9 +583,6 @@ __global__ void add_kernel(float* y, const float* a, uint64_t n) {
   if (i < n) y[i] += a[i];
 }
 
-unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
-bool ok() { return hipGetLastError() == hipSuccess; }
-hipStream_t st(void* s) { return (hipStream_t) s; }
 
 }  // namespace
 

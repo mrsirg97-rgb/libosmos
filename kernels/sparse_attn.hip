@@ -3,6 +3,7 @@
 // register-tiled F32 matmul over the token's own keys. every output a sum in one order - over d ascending, over the
 // keys in theirs - whatever the tile, the batch, or the token's place in it
 #include <cmath>
+#include "launch.h"
 #include <cstdint>
 
 #include <hip/hip_runtime.h>
@@ -15,6 +16,9 @@ extern "C" {
 }
 
 namespace {
+
+using launches::st;
+using launches::ok;
 
 constexpr int kWave = 32;
 constexpr int kHeads = 64;  // a block's heads (both products)
@@ -37,8 +41,6 @@ constexpr float kNegHuge = -1e30f;
 
 typedef float f4 __attribute__((ext_vector_type(4)));
 
-hipStream_t st(void* s) { return (hipStream_t) s; }
-bool ok() { return hipGetLastError() == hipSuccess; }
 
 // a token's keys: the window's (positions pos - window + 1 .. pos, ring rows in ring_fmt) then its selected rows
 // (ckv's, in ckv_fmt) - each read four values at a time as kvload.h reads them, the F32 their rounding gave

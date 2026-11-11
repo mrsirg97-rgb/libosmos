@@ -16,6 +16,9 @@ bool mm_x16_attn(const float *x, uint32_t xs, uint32_t n, uint32_t cols, uint32_
                  const float *freqs, const int32_t *pos, void *x16, int32_t *overflow, void *stream);
 bool mm_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const void *x16, uint32_t n, float *y,
             uint32_t ys, void *stream);
+bool mm_tokens(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
+               float *y1, uint32_t ys1, uint32_t cols, const float *x, uint32_t xs, uint32_t n, void *x16,
+               int32_t *overflow, bool ready, void *stream);
 bool mm_run2(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
              float *y1, uint32_t ys1, uint32_t cols, const void *x16, uint32_t n, void *stream);
 #define MM_SILU_MAX_TOKENS 64 /* mm_run_silu's most tokens (past them, the gemm's counts) */
@@ -70,6 +73,13 @@ mm_run2
   two matrices of one type and cols on the same x16, in one launch: y0 (rows0, row length ys0) from w0, y1 from w1,
   each the bits mm_run gives it alone (the same tiles; the pair's blocks side by side - more blocks to fill the GPU at
   one token: the shared expert's gate and up, q_a and kv). false as mm_run's for either, or a matrix NULL.
+
+mm_tokens
+  a matrix (w1 NULL), or two of one type (mm_run2's pair), over any n tokens of F32 x (row t at x + t * xs): MM_MAX_TOKENS
+  a time through the one x16 - mm_x16 of the chunk, then mm_run or mm_run2 into its rows (y + t * ys) - each token's
+  sums its own, so the bits of one call whatever the chunks. `ready`: x16 holds this x's f16 already (an op wrote it
+  beside x) - taken as it is when n is within one x16, the conversion skipped. both families' dispatch (fwd_mat,
+  q4x_mat). false as its calls'.
 
 mm_col_tiles
   the column tiles a block of `type` takes for n tokens (mm_run's, and mm_group's for its max_cnt): a slab decoded

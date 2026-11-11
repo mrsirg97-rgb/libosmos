@@ -1,6 +1,7 @@
 // ops (include/osmos/gpu/ops.h): the attention's keys - the compressor, the indexer's scores and its top k
 // (sparse_attn.hip the attention itself) - each as ref.py computes it, in F32, reductions in a fixed order
 #include <cmath>
+#include "launch.h"
 #include <cstdint>
 
 #include <hip/hip_runtime.h>
@@ -14,14 +15,15 @@ extern "C" {
 
 namespace {
 
+using launches::st;
+using launches::ok;
+
 constexpr int kThreads = 256;
 constexpr int kWave = 32;
 constexpr int kSelectThreads = 1024;
 constexpr int kRadixBits = 8;
 constexpr int kBins = 1 << kRadixBits;
 
-hipStream_t st(void* s) { return (hipStream_t) s; }
-bool ok() { return hipGetLastError() == hipSuccess; }
 
 // a token that completes a compressed row (its position + 1 a multiple of ratio): the row from the ratio positions
 // ending at it (ring row position % slots of kvc and sc), out[t] = sum over them of kvc * softmax(sc), the softmax a

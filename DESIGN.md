@@ -2849,6 +2849,40 @@ works; it failed first on a visit that went through).
 but its routing never leaves the GPU today (tiles_kernel builds the pointers there) - it needs the picks on the host
 a layer (a routing event, as DeepSeek's) and its tables from the host. its own design, with its budget rule.
 
+### 0.6.2: what the two families share, and what they cannot (2026-11-10)
+
+**Read**: every kernel file and both host matmul layers, for what is written twice. the heavy kernels are one
+already - mm (the dense and the experts' matmuls, the f16), mv, quant, block.h's trees: ~85% of a decode token's GPU
+time in both families' traces. most of the rest that looks alike is not the same arithmetic: each family repeats
+another reference's (ref.py's, llama.cpp's), and the bits are the product.
+
+- **the same, made one (this commit: no arithmetic, no launch order - every hash held)**:
+  - the launch helpers (grid, st, ok, the elementwise block's 256 threads) were defined in 13 kernel files, silu in
+    three: kernels/launch.h, block.h's silu.
+  - q4x_gather: ops_gather_rows's expression, no caller since the experts' tiles - deleted.
+  - the dispatch of a matrix over a step's tokens (MM_MAX_TOKENS a time through the one x16, the conversion skipped
+    when an op wrote the f16 beside its output): fwd_mat / fwd_mat2 / fwd_mat_ready's three loops and q4x's mm_on
+    were one loop four times - mm_tokens (mm.h). each family keeps its own rule for mm or the matvec (DeepSeek: the
+    type; Qwen: the type and the shape).
+- **the same result by another kernel (next, each with its bit test)**: the greedy pick - three argmaxes (ops's a
+  block a row, q4x_top's, q4x's split in 64 slices: 248,320 logits ~160 us against ~10), the answer order-free (the
+  greatest, the lowest id among equals): one, the split one, with DeepSeek's rule for a NaN (-1, the pick refused)
+  for both - Qwen's skipped NaNs, the operator's choice it should not. the routers' top k: DeepSeek's a block-wide
+  argmax a pick (8 barriers each), Qwen's wave shuffles (0.5.11: 19.3 -> 13.9 us) - the pick shared, each family's
+  scores before it and weights after it its own.
+- **alike, not the same - left**: the rotations (three conventions: the pair's layout, how the angle is formed); the
+  attention and its keys' formats (FP8 / FP4 and three kernels; Q8_0 and WMMA chunks); the experts' activation
+  (DeepSeek's clamps and scales; equal to Qwen's at an infinite clamp but for a NaN); the hyper-connections (Sinkhorn
+  mixes; low-rank mixers); the embedding (rounded to BF16 and replicated in one launch; decoded then replicated in
+  two); the experts' sum (unweighted; weighted, with the gated shared expert); rms with weights (ops_rms and
+  q4x_hc_norm the same tree and order, their weights' indexing and f16 side differ - a candidate, with the f16 side
+  itself: an (x16, overflow) pair in ops, Q4xX16 in q4x, one concept); a sequence's state through a bounce buffer
+  (move_part twice).
+- **measured** (performance, the box quiet): Qwen UD-IQ3_XXS a 4K prompt in 2K steps + 96 tokens, plain and MTP -
+  ids 78687b02a7b4d036 before and after, 921 / 921 tok/s the prompt, 28.3 / 28.2 plain, 44.2 / 44.6 drafted;
+  DeepSeek UD-IQ1_M the membrane's oracle - the six hashes the same, 17.6 / 16.3 / 17.4 plain, 32.2 / 19.4 / 29.2
+  drafted.
+
 ### 0.6.2: Qwen's waits - asleep to a mark, awake for the tail (design, 2026-11-10)
 
 **Measured** (the 0.5.9 plain decode's kernel trace, q4x_bench under gpu_sleep_on_waits, low-power, 59 tokens; the

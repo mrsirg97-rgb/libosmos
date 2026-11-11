@@ -3,6 +3,7 @@
 #include <climits>
 
 #include "block.h"
+#include "launch.h"
 #include "x16side.h"
 
 extern "C" {
@@ -15,17 +16,17 @@ static_assert(Q4X_FF_TILE == mm::kTile, "the loader's expert-width rule (q4x_ops
 
 namespace {
 
-constexpr int kThreads = 256;
+using launches::kThreads;
+using launches::grid;
+using launches::st;
+using launches::ok;
+
 constexpr int kGroupThreads = 512; /* a step's grouping: a thread an expert (512 of them) */
 constexpr uint32_t kMaxExperts = 1024; /* a token's probabilities in LDS */
 constexpr uint32_t kMaxK = 32;
 constexpr float kSumFloor = 6.103515625e-5f; /* llama.cpp's clamp of the picked weights' sum: f16's least normal */
 
-inline unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 
-__device__ inline float silu(float x) { return x / (1.0f + expf(-x)); }
 
 // a block a token: its softmax (ggml's: exp(x - max), times 1 / their sum, the block's trees), then the k greatest by
 // its first wave alone - each lane its kRouteLane probabilities in registers (expert lane + 32 i), a pick the wave's
@@ -169,12 +170,6 @@ __global__ __launch_bounds__(kThreads) void place_kernel(const int32_t* ids, uin
   }
 }
 
-__global__ void gather_kernel(const float* src, const int32_t* rows, uint32_t n, uint32_t len, float* dst) {
-  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= (uint64_t) n * len) return;
-  dst[i] = src[(uint64_t) rows[i / len] * len + i % len];
-}
-
 __global__ void swiglu_kernel(const float* g, const float* u, uint64_t n, float* y, Q4xX16 side) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) y[i] = silu(g[i]) * u[i], x16_side(side, i, y[i]);
@@ -240,12 +235,6 @@ extern "C" bool q4x_expert_tiles(const int32_t* ids, uint32_t n, uint32_t k, uin
   tiles_kernel<<<1, kGroupThreads, 0, st(stream)>>>(ids, n, k, n_exp, dim, ff, *t, bd);
   if (!ok()) return false;
   if (n > kPlaceInline) place_kernel<<<n_exp, kThreads, 0, st(stream)>>>(ids, n, k, n_exp, *t);  // an expert a block
-  return ok();
-}
-
-extern "C" bool q4x_gather(const float* src, const int32_t* rows, uint32_t n, uint32_t len, float* dst, void* stream) {
-  if (!src || !rows || !dst || !n || !len) return false;
-  gather_kernel<<<grid((uint64_t) n * len), kThreads, 0, st(stream)>>>(src, rows, n, len, dst);
   return ok();
 }
 

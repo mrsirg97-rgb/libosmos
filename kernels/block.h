@@ -53,3 +53,4 @@ __device__ inline int block_argmax(float* v, int i, float* lds, int* ldi) {
 }
 
 __device__ inline float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
+__device__ inline float silu(float x) { return x / (1.0f + expf(-x)); }

@@ -1,6 +1,7 @@
 // Qwen3.8-Flash-Next's attention (include/osmos/gpu/q4x_ops.h): q's and k's norm and rotation, and the gated
 // attention over the cache - each token's keys its key list: every position, or QSA's picks (q4x_qsa.hip)
 #include "block.h"
+#include "launch.h"
 #include "rope.h"
 #include "x16side.h"
 
@@ -10,10 +11,11 @@ extern "C" {
 
 namespace {
 
+using launches::st;
+using launches::ok;
+
 constexpr int kHead = Q4X_HEAD_DIM;  // a head's dim: a block's threads, a value a thread
 
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 
 // a block a (head, token): blockIdx.x < heads a q head (its gate copied out), past them a KV head. the norm, then
 // the first rope_dim rotated in pairs (i, i + rope_dim / 2), theta_i a running product as ggml's rope cache builds it

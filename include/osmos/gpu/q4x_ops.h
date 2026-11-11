@@ -123,7 +123,6 @@ typedef struct Q4xExpertBounds
 void q4x_expert_bounds(uint32_t n, uint32_t n_exp, Q4xExpertBounds *b);
 bool q4x_expert_tiles(const int32_t *ids, uint32_t n, uint32_t k, uint32_t n_exp, uint32_t dim, uint32_t ff,
                       const Q4xExpertTiles *t, void *stream);
-bool q4x_gather(const float *src, const int32_t *rows, uint32_t n, uint32_t len, float *dst, void *stream);
 bool q4x_swiglu(const float *g, const float *u, uint64_t n, float *y, const Q4xX16 *side, void *stream);
 bool q4x_spin(uint32_t us, void *stream); /* a test's: at least ~us of the stream's time, nothing computed */
 bool q4x_swiglu_rows(const float *g, const float *u, uint32_t ff, const int32_t *idx, uint32_t slots, void *x16,
@@ -342,9 +341,6 @@ q4x_expert_bounds, q4x_expert_tiles
   (q4x_expert_bounds: min(n, n_exp), min(n / 17, n_exp), min(n / 33, n_exp), n / 65), the slots past the live ones
   -1, to n + 15 min(n, n_exp) - the launches' and the tables'. a launch a run (mm_group, max_cnt 16 << r): a part's
   slab decoded once for its tiles. which picks share a part changes no bit: mm's tokens are their own.
-
-q4x_gather
-  dst[e][] = src[rows[e]][] for e < n, len floats a row: an entry's own copy of its token's input.
 
 q4x_swiglu
   y[i] = silu(g[i]) u[i].

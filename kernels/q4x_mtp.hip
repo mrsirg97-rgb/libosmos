@@ -3,6 +3,7 @@
 #include <climits>
 
 #include "block.h"
+#include "launch.h"
 
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
@@ -10,11 +11,12 @@ extern "C" {
 
 namespace {
 
+using launches::st;
+using launches::ok;
+
 constexpr int kTopThreads = 1024;  // one block a row: 248,320 logits, ~243 a thread
 constexpr int kThreads = 256;
 
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 
 // a thread's logits strided: the greatest (the lowest id among equals), the block's; then exp(x - max) summed a
 // thread, then the block's tree

@@ -4,6 +4,7 @@
 #include <hip/hip_fp16.h>
 
 #include "block.h"
+#include "launch.h"
 
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
@@ -11,13 +12,14 @@ extern "C" {
 
 namespace {
 
-constexpr int kThreads = 256;
+using launches::kThreads;
+using launches::grid;
+using launches::st;
+using launches::ok;
+
 constexpr uint32_t kHalf = Q4X_DF_HEAD / 2;
 constexpr uint32_t kQ8Block = 32, kQ8Bytes = 34; /* ggml's Q8_0: an f16 scale, then 32 int8 */
 
-inline unsigned grid(uint64_t n) { return (unsigned) ((n + kThreads - 1) / kThreads); }
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
 
 __global__ void rope_kernel(float* x, uint32_t n_tok, uint32_t heads, uint32_t stride, const int32_t* pos, float base) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;

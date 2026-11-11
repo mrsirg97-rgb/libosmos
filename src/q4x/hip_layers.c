@@ -7,24 +7,6 @@
 
 #define TY(t) ((t)->type)
 
-/* mm on n tokens of x: its f16 (b.x16) made here, or `ready` - the previous call's, of this same x (n within one
-   chunk) */
-static bool mm_on(Q4xForward *f, uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1,
-                  uint32_t rows1, float *y1, uint32_t ys1, uint32_t cols, const float *x, uint32_t xs, uint32_t n,
-                  bool ready)
-{
-  bool ok = true;
-  for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS)
-  {
-    const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
-    ok = ((ready && n <= MM_MAX_TOKENS) || mm_x16(x + (uint64_t)k0 * xs, xs, m, cols, f->b.x16, f->b.overflow, f->st)) &&
-         (w1 ? mm_run2(type, w0, rows0, y0 + (uint64_t)k0 * ys0, ys0, w1, rows1, y1 + (uint64_t)k0 * ys1, ys1, cols,
-                       f->b.x16, m, f->st)
-             : mm_run(type, w0, rows0, cols, f->b.x16, m, y0 + (uint64_t)k0 * ys0, ys0, f->st));
-  }
-  return ok;
-}
-
 static bool mm_takes(const GgufTensor *t, uint32_t rows, uint32_t cols, uint32_t xs, uint32_t ys)
 {
   return mm_known(TY(t)) && mm_fits(TY(t), rows, cols) && xs >= cols && ys >= rows;
@@ -57,7 +39,8 @@ bool q4x_mat(Q4xForward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
 {
   if (!mm_takes(t, rows, cols, xs, ys))
     return mv_strided(TY(t), q4x_dev(f, t), rows, cols, x, xs, n, y, ys, f->st);
-  return mm_on(f, TY(t), q4x_dev(f, t), rows, y, ys, NULL, 0, NULL, 0, cols, x, xs, n, ready);
+  return mm_tokens(TY(t), q4x_dev(f, t), rows, y, ys, NULL, 0, NULL, 0, cols, x, xs, n, f->b.x16, f->b.overflow, ready,
+                   f->st);
 }
 
 bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, uint32_t ys0, const GgufTensor *t1,
@@ -67,7 +50,8 @@ bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, ui
   if (!mm_takes(t0, rows0, cols, xs, ys0) || !mm_takes(t1, rows1, cols, xs, ys1) || TY(t0) != TY(t1))
     return q4x_mat(f, t0, rows0, cols, x, xs, n, y0, ys0, ready) &&
            q4x_mat(f, t1, rows1, cols, x, xs, n, y1, ys1, ready || mm_takes(t0, rows0, cols, xs, ys0));
-  return mm_on(f, TY(t0), q4x_dev(f, t0), rows0, y0, ys0, q4x_dev(f, t1), rows1, y1, ys1, cols, x, xs, n, ready);
+  return mm_tokens(TY(t0), q4x_dev(f, t0), rows0, y0, ys0, q4x_dev(f, t1), rows1, y1, ys1, cols, x, xs, n, f->b.x16,
+                   f->b.overflow, ready, f->st);
 }
 
 /* an op's output also as mm's f16 (b.x16), for the matmul after it - a step within one x16's tokens; else NULL (the
