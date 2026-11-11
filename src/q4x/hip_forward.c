@@ -1,3 +1,4 @@
+#define _GNU_SOURCE /* O_DIRECT */
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5,6 +6,9 @@
 #include <unistd.h>
 
 #include "osmos/gpu/mm.h"
+#include "osmos/mem/arena.h"
+#include "osmos/mem/host_slots.h"
+#include "osmos/mem/membrane.h"
 #include "osmos/run/fit.h"
 #include "q4x_impl.h"
 
@@ -43,27 +47,116 @@ void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint
 
 static bool alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
 
-/* the GPU's memory left after a build (the forward's, a sequence's) at least FIT_HEADROOM: the runtime loads a kernel's
-   code at its first launch and takes the memory then - with none left it segfaulted in hipLaunchKernel (UD-Q4_K_XL, its
-   n-gram table resident, an 8K context in 4096-token steps: 0.02 GiB left after its sequence). false with why */
-static bool room_left(const char *after, char *err)
+/* the memory a build can still take (fit.h's fit_room): the GPU's free, or the system's RAM available past what a
+   build leaves the system (FIT_RAM_FREE, the headroom added back) where that is less - the experts lie in host memory
+   the GPU reads in place (the membrane's), which the GPU's own count does not hold, and on this machine the GPU's
+   memory is the system's. so FIT_HEADROOM of it left is the GPU's headroom and the system's RAM both */
+static bool mem_left(uint64_t *left)
 {
   size_t free_b = 0, total = 0;
   if (hipMemGetInfo(&free_b, &total) != hipSuccess)
+    return false;
+  *left = fit_room((uint64_t)free_b, fit_ram_available(), FIT_RAM_FREE);
+  return true;
+}
+
+/* the memory left after a build (the forward's, a sequence's) at least FIT_HEADROOM: the runtime loads a kernel's
+   code at its first launch and takes the memory then - with none left it segfaulted in hipLaunchKernel (UD-Q4_K_XL, its
+   n-gram table resident, an 8K context in 4096-token steps: 0.02 GiB left after its sequence) - and a system with no
+   RAM left kills the process. `more`: bytes about to be taken (0: the build done) - refused before they are, so a
+   build that cannot fit takes none of it. false with why */
+static bool room_left_past(uint64_t more, const char *after, char *err)
+{
+  uint64_t left = 0;
+  if (!mem_left(&left))
     return q4x_fail(err, "a GPU call failed (the memory left)");
-  if (free_b >= FIT_HEADROOM)
+  if (left >= more && left - more >= FIT_HEADROOM)
     return true;
   if (err)
     snprintf(err, Q4X_FWD_ERR,
-             "GPU memory: %.2f GiB left after %s, under the %.0f GiB its kernels need loaded as they first run: stream "
-             "the n-gram table, or a smaller max_tokens or max_context",
-             (double)free_b / (1ull << 30), after, (double)FIT_HEADROOM / (1ull << 30));
+             "GPU memory: %.2f GiB left after %s, under the %.0f GiB its kernels need loaded as they first run (the "
+             "GPU's memory, or the system's RAM past the 8 GiB a build leaves it): stream the n-gram table, or a smaller max_tokens "
+             "or max_context",
+             left >= more ? (double)(left - more) / (1ull << 30) : -(double)(more - left) / (1ull << 30), after,
+             (double)FIT_HEADROOM / (1ull << 30));
   return false;
 }
 
+static bool room_left(const char *after, char *err) { return room_left_past(0, after, err); }
+
 /* every tensor of g read into GPU memory through a pinned piece: *dev its table - but those `shadow` has a tensor of
    the name of (an overlay's stand-ins: their bytes never read), and `skip` (a table read from its file: stream_ngram) */
-static bool upload(const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
+/* a tensor the experts' membrane reads (the forward's mem): a layer's exp_gate, exp_up or exp_down - not uploaded */
+static bool on_membrane(const Q4xForward *f, const GgufTensor *t)
+{
+  for (int l = 0; f && f->mem && l < f->w->geo.n_layers; l++)
+    if (t == f->w->layer[l].exp_gate || t == f->w->layer[l].exp_up || t == f->w->layer[l].exp_down)
+      return true;
+  return false;
+}
+
+static bool no_copy(void *dst, const void *src, uint64_t bytes, void *ctx)
+{
+  return (void)dst, (void)src, (void)bytes, (void)ctx, false; /* a whole membrane promotes nothing */
+}
+
+/* the experts as a membrane's units, whole: room for every one, all read at once (their files O_DIRECT, into memory
+   the GPU reads in place), then the device table of their addresses. true with f->mem NULL where the experts are
+   not units (q4x_weights_experts: an overlay's expert tensor) - they are then uploaded with the rest */
+static bool experts_whole(Q4xForward *f, char *err)
+{
+  const Q4xWeights *w = f->w;
+  const Gguf *m = w->model;
+  const uint32_t E = (uint32_t)w->geo.n_experts, L = (uint32_t)w->geo.n_layers;
+  const size_t n = q4x_weights_experts(w, NULL, NULL, 0);
+  if (!n)
+    return true;
+  PoolUnit *units = calloc(n, sizeof *units);
+  uint32_t *warm = malloc(n * sizeof *warm);
+  const void **tab = malloc(n * Q4X_GROUP_TENSORS * sizeof *tab);
+  bool ok = units && warm && tab && (f->exp_fds = malloc((size_t)m->n_files * sizeof *f->exp_fds));
+  for (int i = 0; ok && i < m->n_files; i++)
+    f->exp_fds[i] = -1;
+  for (int i = 0; ok && i < m->n_files; i++)
+    ok = (f->exp_fds[i] = open(m->paths[i], O_RDONLY | O_DIRECT)) >= 0;
+  if (!ok)
+    q4x_fail(err, "out of memory, or a model file not opened O_DIRECT (the experts' reads)");
+  uint64_t room = 0, largest = 0;
+  if (ok && (ok = q4x_weights_experts(w, f->exp_fds, units, n) == n))
+    for (size_t u = 0; u < n; u++)
+    {
+      const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
+      room += b, largest = b > largest ? b : largest, warm[u] = (uint32_t)u;
+    }
+  char perr[POOL_ERR] = "", merr[MEMBRANE_ERR] = "";
+  if (ok && !((f->exp_slots = host_slots_create(room + 2 * largest, perr)) &&
+              (f->exp_stream = host_slots_create(3 * largest, perr))))
+    ok = q4x_fail(err, perr[0] ? perr : "the experts' memory refused");
+  if (ok)
+  {
+    const MembraneOptions mo = {units, L, E, room, largest, host_slots(f->exp_slots), host_slots(f->exp_stream),
+                                ARENA_GRAIN, Q4X_EXPERT_READERS, warm, n, no_copy, NULL, 0};
+    ok = (f->mem = membrane_create(&mo, merr)) && membrane_warm(f->mem, merr);
+    if (!ok)
+      q4x_fail(err, merr[0] ? merr : "the experts' membrane refused");
+    else if (!(ok = membrane_whole(f->mem)))
+      q4x_fail(err, "the experts not whole in memory after their read");
+  }
+  for (size_t u = 0; ok && u < n; u++) /* [layer][tensor][expert]: a layer's tensor's E addresses side by side */
+  {
+    const void *dev[POOL_PARTS];
+    ok = membrane_ready(f->mem, (uint32_t)u, dev) || q4x_fail(err, "an expert not in memory");
+    for (int k = 0; ok && k < Q4X_GROUP_TENSORS; k++)
+      tab[((u / E) * Q4X_GROUP_TENSORS + (size_t)k) * E + u % E] = dev[k];
+  }
+  ok = ok && ((alloc(&f->exp_tab, n * Q4X_GROUP_TENSORS * sizeof *tab) &&
+               hipMemcpy(f->exp_tab, tab, n * Q4X_GROUP_TENSORS * sizeof *tab, hipMemcpyHostToDevice) == hipSuccess) ||
+              q4x_fail(err, "GPU memory refused (the experts' table)"));
+  free(units), free(warm), free(tab);
+  return ok;
+}
+
+static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
 {
   void *pin = NULL;
   if (!(*dev = calloc(g->n_tensors, sizeof **dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
@@ -72,7 +165,7 @@ static bool upload(const Gguf *g, const Gguf *shadow, const GgufTensor *skip, vo
   for (size_t i = 0; ok && i < g->n_tensors; i++)
   {
     const GgufTensor *t = &g->tensors[i];
-    if ((shadow && gguf_tensor(shadow, t->name)) || t == skip)
+    if ((shadow && gguf_tensor(shadow, t->name)) || t == skip || on_membrane(f, t))
       continue;
     const int fd = open(g->paths[t->file], O_RDONLY);
     const char *why = fd < 0 ? "its file not opened" : NULL; /* which of the three failed, for the message */
@@ -245,6 +338,12 @@ void q4x_forward_destroy(Q4xForward *f)
 {
   if (!f)
     return;
+  membrane_destroy(f->mem); /* its readers stopped, then its memory: the GPU is past every expert (the caller's) */
+  host_slots_destroy(f->exp_slots), host_slots_destroy(f->exp_stream);
+  for (int i = 0; f->exp_fds && i < f->w->model->n_files; i++)
+    if (f->exp_fds[i] >= 0)
+      close(f->exp_fds[i]);
+  free(f->exp_fds), hipFree(f->exp_tab);
   free_table(f->w->model, f->dev);
   if (f->w->overlay)
     free_table(f->w->overlay, f->ov_dev);
@@ -345,15 +444,29 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
     return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), free(f->sub_seq),
            free(f), NULL;
   const GgufTensor *skip = f->stream_ngram ? w->ple_table : NULL;
-  if (!upload(w->model, w->overlay, skip, &f->dev, err) ||
-      (w->overlay && !upload(w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
+  /* the weights' bytes - every file's tensors (but an overlay's stand-ins' and a streamed table) - against the
+     memory left, before any is read: a forward that cannot fit takes nothing */
+  uint64_t weights = 0;
+  for (size_t i = 0; i < w->model->n_tensors; i++)
+    if (&w->model->tensors[i] != skip && !(w->overlay && gguf_tensor(w->overlay, w->model->tensors[i].name)))
+      weights += w->model->tensors[i].bytes;
+  const Gguf *more[] = {w->overlay, mtp ? mtp->model : NULL, f->df ? f->df->model : NULL};
+  for (size_t k = 0; k < sizeof more / sizeof *more; k++)
+    for (size_t i = 0; more[k] && i < more[k]->n_tensors; i++)
+      weights += more[k]->tensors[i].bytes;
+  if (!room_left_past(weights, "the forward", err))
+    return q4x_forward_destroy(f), NULL;
+  if (!experts_whole(f, err) || !upload(f, w->model, w->overlay, skip, &f->dev, err) ||
+      (w->overlay && !upload(NULL, w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
       (f->stream_ngram && !ple_stream(f, err)) ||
-      (mtp && (!upload(mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))) ||
-      (f->df && (!upload(f->df->model, NULL, NULL, &f->df_dev, err) || !df_buffers(f, err))) ||
+      (mtp && (!upload(NULL, mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))) ||
+      (f->df && (!upload(NULL, f->df->model, NULL, NULL, &f->df_dev, err) || !df_buffers(f, err))) ||
       !room_left("the forward", err))
     return q4x_forward_destroy(f), NULL;
   return f;
 }
+
+bool q4x_forward_whole(const Q4xForward *f) { return f && f->mem && membrane_whole(f->mem); }
 
 void q4x_forward_side_spin(Q4xForward *f, uint32_t us)
 {

@@ -232,7 +232,7 @@ forward_logits
   MM_MAX_TOKENS: the head over the stream, when n_layers is all of the model's (else not computed); a token before its
   sequence's prompt end - 1 (seq_prompt): its row not computed. with ForwardOptions' logit_rows, a sub-batch of
   more rows keeps its last logit_rows alone: row r at slot r - (rows - logit_rows), the rows before them not
-  computed, the buffer logit_rows rows (DESIGN.md, "0.6.4": the logits' rows).
+  computed, the buffer logit_rows rows (DESIGN.md, "0.6.5": the logits' rows).
 
 forward_logit_rows
   the slots of forward_logits the last step filled: its last sub-batch's rows, logit_rows at most where that is

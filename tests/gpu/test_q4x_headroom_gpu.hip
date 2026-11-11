@@ -31,7 +31,30 @@ extern "C" {
 constexpr uint32_t kCtx = 4096, kMaxTokens = 512;
 constexpr uint64_t kGiB = 1ull << 30, kUnder = kGiB / 2;  // left past a build: under FIT_HEADROOM
 
+// the memory a build can still take, the forward's own measure (fit_room): the GPU's free, or the system's RAM past
+// what a build leaves it where that is less (the experts lie in host memory the GPU reads in place)
 static uint64_t gpu_free() {
+  size_t f = 0, t = 0;
+  CHECK(hipMemGetInfo(&f, &t) == hipSuccess);
+  return fit_room(f, fit_ram_available(), FIT_RAM_FREE);
+}
+
+// the measure once it stands still: the system counts unmapped memory free a moment after (tens of GiB: seconds), so
+// an edge set by a reading taken too soon is not where it was meant - read until two readings 0.3 s apart agree
+static uint64_t settled() {
+  uint64_t a = gpu_free();
+  for (int i = 0, same = 0; i < 200 && same < 2; i++) {
+    usleep(300000);
+    const uint64_t b = gpu_free();
+    same = (a > b ? a - b : b - a) < (1ull << 26) ? same + 1 : 0;
+    a = b;
+  }
+  return a;
+}
+
+// the GPU's own count of its free memory: exact, and what a refused build's device memory is given back to (the
+// system's count of RAM is not - the runtime keeps freed blocks, the page cache what the weights' reads left)
+static uint64_t device_free() {
   size_t f = 0, t = 0;
   CHECK(hipMemGetInfo(&f, &t) == hipSuccess);
   return f;
@@ -65,21 +88,21 @@ int main() {
   Q4xWeights* w = q4x_weights_create(g, nullptr, werr);
   CHECK(w);
   // what a forward and a sequence take
-  const uint64_t f0 = gpu_free();
+  const uint64_t f0 = settled();
   Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
   CHECK(f);
-  const uint64_t f1 = gpu_free();
+  const uint64_t f1 = settled();
   Q4xSeq* s = q4x_seq_create(f, err);
   CHECK(s);
-  const uint64_t f2 = gpu_free(), fwd = f0 - f1, seq = f1 - f2;
+  const uint64_t f2 = settled(), fwd = f0 - f1, seq = f1 - f2;
   std::printf("  a forward takes %.2f GiB, a sequence %.2f\n", (double) fwd / kGiB, (double) seq / kGiB);
   q4x_seq_destroy(s);
   // a sequence that would leave half a GiB: refused, its memory given back
   {
     Hog hog(seq + kUnder);
-    const uint64_t before = gpu_free();
+    const uint64_t before = settled(), dev = device_free();
     CHECK(!q4x_seq_create(f, err) && std::strstr(err, "GPU memory") && std::strstr(err, "the sequence"));
-    CHECK(gpu_free() + (1ull << 20) >= before);  // the refused sequence's memory freed (within the pool's MiB)
+    CHECK(device_free() + (1ull << 20) >= dev);  // the refused sequence's memory freed (within the pool's MiB)
     std::printf("  a sequence leaving %.2f GiB: refused (%s)\n", (double) (before - seq) / kGiB, err);
   }
   s = q4x_seq_create(f, err);
@@ -89,10 +112,10 @@ int main() {
   // a forward that would leave half a GiB: refused, its memory given back
   {
     Hog hog(fwd + kUnder);
-    const uint64_t before = gpu_free();
+    const uint64_t before = settled(), dev = device_free();
     CHECK(!q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err) && std::strstr(err, "GPU memory") &&
           std::strstr(err, "the forward"));
-    CHECK(gpu_free() + (1ull << 20) >= before);
+    CHECK(device_free() + (1ull << 20) >= dev);
     std::printf("  a forward leaving %.2f GiB: refused (%s)\n", (double) (before - fwd) / kGiB, err);
   }
   f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);

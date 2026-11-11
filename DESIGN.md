@@ -3090,7 +3090,7 @@ inject's one-block matvec runs under the mixer's down on the second stream and e
 the decode's ~8.5 ms over the read ceiling is mostly not there to take at these bits; taken so far ~0.3 ms.
 
 
-### 0.6.4: the membrane on the largest quant - what is already right, and reads ahead in the background (design, 2026-11-11, low-power)
+### 0.6.5: the membrane on the largest quant - what is already right, and reads ahead in the background (design, 2026-11-11, low-power)
 
 UD-IQ2_XXS (146 GiB of experts, 9.7 MiB each; the budget sized: 8,868 of 15,360 resident, 84.3 GiB), the packs'
 settings (no guess), dbench auto 2048 128. plain 13.7 / 11.5 / 12.9 tok/s (q1, after a 2K prompt, q2), drafted 24.2 /
@@ -3200,10 +3200,10 @@ almost none of its residents: the new context wants other experts (and, after p2
 stream's 3.7 GiB lent to the decode: ~10% fewer misses while lent, ~390 experts given back at every prompt -
 level where an answer follows each prompt (an agent's turns), a gain only for long decodes between. not built.
 
-**What 0.6.4's study leaves.** the membrane's rule, its reads, its prompts and the guess off are each at or near
+**What 0.6.5's study leaves.** the membrane's rule, its reads, its prompts and the guess off are each at or near
 what this box allows; a GiB of room is 2.7% of the misses, and the logits' rows are one, free.
 
-### 0.6.4: Qwen on the membrane (design, 2026-11-11)
+### 0.6.5: Qwen on the membrane (design, 2026-11-11)
 
 Qwen's every weight is resident today: UD-IQ3_XXS is 82.6 GB - its n-gram table 28.8 (streamed already where a pack
 asks), its experts ~49 (48 layers x 512, three tensors a layer), the rest under 5. on the membrane its experts are
@@ -3236,8 +3236,45 @@ expert's bytes - and a token's ~1,560 launches are queued with no wait. so:
 3. the streamed build: decode's small steps first, then a prompt's, then the drafters' rounds; measured on this box
    under a room that leaves what a 64 GB box would.
 
-not in 0.6.4's first commits: the n-gram table on the membrane (it has its own row reads), an overlay's expert
+not in 0.6.5's first commits: the n-gram table on the membrane (it has its own row reads), an overlay's expert
 tensors (q4x_weights_experts refuses a model whose experts an overlay stands in for: none does today).
+
+**Stage 2 built (2026-11-11, low-power).** the forward's experts are a membrane's, whole (q4x_forward_whole): their
+three tensors a layer no longer uploaded; 24,576 units read O_DIRECT by 12 readers into registered host memory the
+GPU reads in place (host_slots), every unit warm, room for all; then a device table [layer][gate, up, down][expert]
+of their addresses, written once - q4x_expert_tiles makes its entries from it (`tab`; test_q4x_moe_gpu: a table
+that moves every expert, the entries the table's). a step asks the membrane nothing: a token's launches as before.
+the MTP head's layer, and a model an overlay's expert tensor stands in for, keep their tensors' base.
+
+against 0.6.3's build, interleaved, UD-IQ3_XXS: the ids the same (4K + 96: 78687b02a7b4d036, plain and MTP);
+decode, 192 tokens, three rounds 27.25-27.49 -> 27.30-27.46 tok/s; an 8K prompt, five rounds, 788-811 (mean 801.5)
+-> 794-809 (801.4); a whole bench run with its load 30.3-31.3 -> 25.5-25.9 s (the experts' direct reads). a first
+4K prompt, three rounds, had read 1.6% slower: the scatter's. registered host memory against the device's: nothing
+to see in the model.
+
+two things the build met, both the membrane's and general:
+
+- **a part at its file's end.** an expert that ends a shard whose size is not whole 4 KiB: its aligned read passes
+  the file's end, and the pool refused the unit. now the pool keeps the aligned range (the part itself within the
+  file, as checked) and a reader ends a read at the file's end, whole (fetchq.h). test_pool, test_fetchq: fail
+  before.
+- **the memory left is the system's too.** the forward's headroom was the GPU's free memory alone; the experts in
+  host memory are not in that count, so nothing kept a build from the system's last RAM - test_q4x_headroom_gpu's
+  own filler took the box to 0.2 GiB available (a watchdog killed it; the kernel's OOM killer would have). the
+  headroom is now fit_room's: the GPU's free, or the RAM available past FIT_RAM_FREE (8 GiB, DeepSeek's rule) where
+  that is less; and a forward adds up its weights and is refused before it takes any of them. the test sets its
+  edges by the same measure, read once it stands still (freed memory is counted free seconds later: an edge set
+  too soon let a forward fit that was meant not to), and checks a refused build's memory given back by the GPU's
+  own exact count (the system's RAM does not return to the byte: the runtime keeps freed blocks); four runs of
+  four pass, its lowest ~6.7 GiB available (it sits at the edge by design). a Qwen build that left the system under 8 GiB is now refused (this
+  box's UD-IQ3_XXS leaves ~32; UD-Q4_K_XL not run).
+
+after the rebase onto 0.6.4: the host tests, 29 GPU tests (every q4x one, the engines', batch, membrane, logit
+rows) pass; Qwen's hash the same plain and MTP, DeepSeek UD-IQ1_M's drafted d7b31752c2265435 / 3489efd3b43602e8 /
+6b10ecda4ad86eb7.
+
+not tested: osmos-serve on it; UD-Q4_K_XL; the performance profile. written out of order: the forward before
+its test (test_q4x_forward_gpu's check, shown to fail with the accessor false afterwards).
 
 
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)

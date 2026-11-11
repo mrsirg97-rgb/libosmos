@@ -87,7 +87,7 @@ size_t q4x_weights_experts(const Q4xWeights *w, const int *model_fds, PoolUnit *
 #endif
 
 /*
-q4x_weights_experts (DESIGN.md, "0.6.4: Qwen on the membrane")
+q4x_weights_experts (DESIGN.md, "0.6.5: Qwen on the membrane")
   the routed experts as the pool's units, unit = layer * n_experts + expert, each three parts - the expert's slice of
   the layer's exp_gate, exp_up and exp_down (gate, up, down), a tensor's bytes / n_experts each - in the model's files,
   `model_fds[file]` the caller's open descriptors of the model's paths. writes at most `cap` units; returns how many

@@ -52,7 +52,7 @@ static Routed routed(const Experts& e, const float* x, const int32_t* ids, uint3
   Q4xExpertBounds bd;
   q4x_expert_bounds(picks, kExp, &bd);
   const uint32_t ne = bd.entries, slots = bd.slots;
-  Q4xExpertTiles t;
+  Q4xExpertTiles t{};
   const void** ptr = dev_alloc<const void*>((size_t) Q4X_GROUP_TENSORS * ne);
   t.base[0] = e.gate, t.base[1] = e.up, t.base[2] = e.down, t.bytes[0] = e.bg, t.bytes[1] = e.bu, t.bytes[2] = e.bd;
   for (int i = 0; i < Q4X_GROUP_TENSORS; i++) t.ptr[i] = ptr + (size_t) i * ne;
@@ -80,6 +80,36 @@ static Routed routed(const Experts& e, const float* x, const int32_t* ids, uint3
       const int e = h[i], q = place[e] + seen[e]++, sl = slot[e] + q - place[e];
       CHECK(wh[i] == q && gi[sl] == (int32_t) (i / kK) && hi[sl] == q);
     }
+  }
+  {  // the experts' addresses from a table (tab): each live entry's matrix the table's for its expert - a table that
+     // puts expert e where 7 e + 3 lay shows the table read, not the base - then the base's again for what follows
+    std::vector<const void*> p0((size_t) Q4X_GROUP_TENSORS * ne), p1(p0.size());
+    std::vector<int32_t> cnt(ne);
+    CHECK(hipMemcpy(p0.data(), ptr, p0.size() * sizeof(void*), hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(cnt.data(), t.cnt, ne * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    const void** tab = dev_alloc<const void*>((size_t) Q4X_GROUP_TENSORS * kExp);
+    std::vector<const void*> ht((size_t) Q4X_GROUP_TENSORS * kExp);
+    for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
+      for (uint32_t x = 0; x < kExp; x++)
+        ht[(size_t) i * kExp + x] = (const uint8_t*) t.base[i] + (uint64_t) ((x * 7 + 3) % kExp) * t.bytes[i];
+    CHECK(hipMemcpy(tab, ht.data(), ht.size() * sizeof(void*), hipMemcpyHostToDevice) == hipSuccess);
+    Q4xExpertTiles tt = t;
+    for (int i = 0; i < Q4X_GROUP_TENSORS; i++) tt.tab[i] = tab + (size_t) i * kExp, tt.base[i] = nullptr, tt.bytes[i] = 0;
+    CHECK(q4x_expert_tiles(ids, picks, kK, kExp, kDim, kFf, &tt, nullptr));
+    CHECK(hipMemcpy(p1.data(), ptr, p1.size() * sizeof(void*), hipMemcpyDeviceToHost) == hipSuccess);
+    uint32_t live = 0;
+    for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
+      for (uint32_t en = 0; en < ne; en++) {
+        if (!cnt[en]) continue;
+        const uint64_t x = (uint64_t) ((const uint8_t*) p0[(size_t) i * ne + en] - (const uint8_t*) t.base[i]) / t.bytes[i];
+        CHECK(x < kExp && p1[(size_t) i * ne + en] == ht[(size_t) i * kExp + x]);
+        live++;
+      }
+    CHECK(live > 0);
+    CHECK(q4x_expert_tiles(ids, picks, kK, kExp, kDim, kFf, &t, nullptr));  // the base's tables again
+    CHECK(hipMemcpy(p1.data(), ptr, p1.size() * sizeof(void*), hipMemcpyDeviceToHost) == hipSuccess);
+    for (uint32_t en = 0; en < ne; en++)
+      if (cnt[en]) CHECK(p1[en] == p0[en]);
   }
   CHECK(mm_x16_rows(x, kDim, t.gidx, slots, kDim, x16, over, nullptr));
   runs(e.tg, t.ptr[0], t.cnt, bd, kFf, kDim, x16, t.xg, ga, t.yg);

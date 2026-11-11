@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "libevt/runtime/context.h"
@@ -74,7 +75,12 @@ static bool read_part(const PoolRange *r, uint8_t *dst)
   while (got < r->bytes)
   {
     const ssize_t n = pread(r->fd, dst + got, (size_t)(r->bytes - got), (off_t)(r->offset + got));
-    if (n <= 0)
+    if (n == 0) /* the file's end inside the range (a direct read's aligned range around a file's last bytes): whole */
+    {
+      struct stat st;
+      return fstat(r->fd, &st) == 0 && r->offset + got == (uint64_t)st.st_size;
+    }
+    if (n < 0)
       return false;
     got += (uint64_t)n;
   }

@@ -186,6 +186,7 @@ int main() {
   CHECK(w);
   const uint32_t vocab = (uint32_t) w->geo.n_vocab;
   Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kTok, ferr);
+  CHECK(f && q4x_forward_whole(f) && !q4x_forward_whole(nullptr));  // its experts a membrane's units, all in memory
   if (!f) std::fprintf(stderr, "  %s\n", ferr);
   CHECK(f);
   CHECK(!q4x_forward_create(w, nullptr, OPS_Q4X_MAX_KEYS + 1, kTok, ferr));  // past the dense attention's reach

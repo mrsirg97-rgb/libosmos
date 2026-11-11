@@ -239,12 +239,8 @@ static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
     }
     uint64_t head, mem;
     const PoolRange rd = part_read(r, align, &head, &mem);
-    if (align && rd.offset + rd.bytes > (uint64_t)st.st_size)
-    {
-      snprintf(err, POOL_ERR, "unit %zu part %d: its %llu-aligned range passes its file's end", i, k,
-               (unsigned long long)align);
-      return false;
-    }
+    /* an aligned range may pass its file's end (a part that ends the file, the file not whole alignments): the part
+       itself lies within it (checked above), and the readers end such a read at the end (fetchq.h) */
     s->read[k] = rd;
     s->head[k] = head;
     s->off[k] = s->size;

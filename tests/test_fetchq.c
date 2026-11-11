@@ -232,6 +232,32 @@ static void test_order(int fd)
   printf("  order: queued behind a held read, taken by need (0 first), ties as given, a moved need the need then\n");
 }
 
+/* a job whose range passes its file's end (a direct read's aligned range around a file's last bytes) ends there: read
+   whole, its bytes up to the end in place */
+static void test_file_end(void)
+{
+  enum { SIZE = (1 << 20) + 100, AL = 4096 };
+  reset();
+  const int odd = file("odd.bin", SIZE);
+  Fetchq *q = fetchq_create(2, N, done, NULL);
+  assert(q);
+  uint8_t *buf = calloc(3, AL);
+  assert(buf);
+  const PoolRange tail = {odd, 1 << 20, AL}, whole = {odd, (1 << 20) - AL, 2 * AL}; /* both past the end */
+  assert(fetchq_read(q, 0, &tail, 1, (void *const[POOL_PARTS]){buf}, false, 0));
+  assert(fetchq_read(q, 1, &whole, 1, (void *const[POOL_PARTS]){buf + AL}, false, 0));
+  while (atomic_load(&n_ok) + atomic_load(&n_bad) < 2)
+    usleep(200);
+  assert(atomic_load(&n_ok) == 2 && atomic_load(&n_bad) == 0);
+  for (int i = 0; i < 100; i++)
+    assert(buf[i] == (uint8_t)((1 << 20) + i) && buf[AL + AL + i] == (uint8_t)((1 << 20) + i));
+  assert(buf[AL] == (uint8_t)((1 << 20) - AL) && buf[100] == 0);
+  fetchq_destroy(q);
+  free(buf);
+  close(odd);
+  printf("  a range past its file's end: read to the end, whole\n");
+}
+
 /* reads ahead under a bound: their bytes in flight never past it (one job may always go), every byte read; a
    waited read behind them, and a read ahead moved to need 0, end among the first - never held back */
 static atomic_int n_done_order;
@@ -339,6 +365,7 @@ int main(void)
   test_ahead_limit(big);
   close(big);
   test_failure(fd);
+  test_file_end();
   test_destroy_busy(fd);
   test_order(fd);
   close(fd);

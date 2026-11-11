@@ -43,6 +43,10 @@ Fetchq
   (libevt's queue_update) - the order is where the workers take, never a second queue. the queue is the only state
   the giver and the workers share; nothing else locks.
 
+a range past its file's end
+  a job whose range passes its file's end is read to the end and is whole: a direct read's aligned range around a
+  file's last bytes (pool.h's read_align) - the caller's part, that what it wants of the range lies in the file.
+
 fetchq_create
   `threads` workers (1 to 64), started now; `n_units`: the units a read may name (0 .. n_units - 1). `done(unit, ok,
   arg)` runs on a worker once a unit's parts are read - ok false if a read failed; the binary's: reads.h posts the end
@@ -66,7 +70,7 @@ fetchq_need
   the unit's jobs not yet begun moved to `need` (their order among themselves kept); a unit with none queued (read,
   being read, never asked) is nothing to do.
 
-fetchq_ahead_limit, fetchq_stats (DESIGN.md, "0.6.4: ... reads ahead in the background")
+fetchq_ahead_limit, fetchq_stats (DESIGN.md, "0.6.5: ... reads ahead in the background")
   the most bytes of reads ahead - jobs at a need past 0 - being read at once; 0 (as created): no bound. a worker
   leaves the queue's first job where it is while it is a read ahead and the reads ahead in flight plus its bytes
   would pass the bound, and takes it once one ends; with none in flight a read ahead always goes (a job larger than
