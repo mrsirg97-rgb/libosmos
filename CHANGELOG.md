@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.6.2]: the membrane a module, kernels both families share
+
+Structure, and a first pass over DeepSeek's decode. No output changes: every ids hash the same (DeepSeek UD-IQ1_M,
+plain and drafted; Qwen UD-IQ3_XXS).
+
+- **The membrane is a module of its own** (`mem/membrane`, no HIP inside): the two pools, the reads, the holds and
+  the visit clock, promotion, the warm start and the guess behind one interface. DeepSeek's forward is its first
+  caller, with the same reads. test_membrane (CPU, real files and readers).
+- **A failed promotion's unit goes back to cold.** A copy that failed had left the unit pinned with unwritten bytes
+  (also so in 0.6.1). Now the membrane refuses every call until the step ends, and `pool_drop` returns the unit.
+  test_pool.
+- **Kernels both families share.** The launch helpers are one header (`kernels/launch.h`); `mm_tokens` is behind
+  both matmul dispatches; `ops_argmax` is both greedy picks; `wave_pick` is both routers' top k (ops_router
+  9.3 -> 7.0 us). q4x_gather and q4x_argmax are gone.
+- **Qwen's greedy pick refuses a NaN row**, as DeepSeek's does (it had returned an id). **A router's pick is always
+  an expert's id**: q4x_route gave 2147483647 on NaN logits. test_argmax_gpu, test_router_gpu,
+  test_q4x_overflow_gpu.
+- **DeepSeek's decode: 1,263 -> 1,222 launches a token**, -0.18% kernel + gap time. The lane's int8 input is written
+  in the FFN's mix (q8_round's bits), and the overflow flag is cleared where found set, not every step.
+  test_overflow_gpu: the step after an overflow is accepted, the same token as a clean forward.
+- **Measured, nothing to build** (DESIGN.md): DeepSeek's misses are an expert's first pick of the run (96.5%), not
+  the cache's rule, and the guess off is right. The token boundary's idle in the kernel traces is rocprofv3's own
+  (a launch after a host wait 250-340 us under it, 2.3 us without): a wait that slept to a mark was built, gained
+  nothing (Qwen plain 28.18 -> 28.22 tok/s) and was removed.
+
 ## [0.6.1]: fail closed - a failed step, a full GPU, a lost GPU
 
 An audit of 0.6.0 (its diff, and the engine's error paths). No output changes: every ids hash the same (UD-IQ3_XXS,
