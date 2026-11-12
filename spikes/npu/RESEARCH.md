@@ -234,6 +234,13 @@ normalized by their leading bit (__builtin_clz, a rare branch), a power-of-two f
 63,488 finite fp16 values (its logic mirrored on the host: none wrong); every decoder routed through it, the array's
 two kernels re-checked (corr unchanged).
 
+## Qwen: IQ2_S (spikes/npu/iq2s, 2026-11-12)
+82 bytes a 256 (d, qs[32] the indices' low bytes, signs[32] - an octet's byte, explicit -, qh[8] two high index bits
+an octet, scales[8] 4 bits a 16); a 1,024-row grid of 8 magnitudes as bf16 (16 KB), an octet one row load; a group's
+4 sign bytes one 32-bit word - its mask, no lookup, no parity; its two 16-value scales one vector. Qwen's own gate
+bytes: **1.14 Gvalues/s a core, worst 5.4e-3** - the first build. with IQ4_NL (1.65) and IQ3_XXS (0.90), Qwen
+UD-IQ3_XXS's three expert formats all decode on the NPU (left: IQ4_XS's one layer, Q2_0's three downs).
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
