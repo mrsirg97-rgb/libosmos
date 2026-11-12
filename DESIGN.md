@@ -3487,6 +3487,23 @@ halves disagree on is not acted on).
 5. a release's quality line is the dev rows' and the hold-out's KL with their standard errors, beside the size.
 6. the reference's own floor (its Q8_0 tensors against BF16 ones where they fit) is reported once, beside them.
 
+### 0.6.6: osmos doctor (2026-11-11)
+
+`osmos_install.py --doctor` (tools/install/doctor.py): host.py's checks (the GPU, the memory it may map, the tools),
+then the ones that cost speed or memory without failing anything - each found the hard way on this box:
+- **the power profile**: a boot with the monitor off leaves the Halo in balanced, slower than the low-power and
+  performance profiles the packs are measured at (a note, the command that changes it);
+- **/tmp as RAM**: tmpfs's bytes are memory the GPU cannot have - big scratch there and a build is refused ("GPU
+  memory refused"); past 4 GiB, a note;
+- **direct reads**: osmos reads its experts O_DIRECT (DeepSeek's since 0.3.0, Qwen's since 0.6.5) with no fallback -
+  asked of the models' folder by a probe file, a FAIL where refused; the filesystem named (btrfs and XFS share a
+  table between packs by a clone);
+- **an SSD**: the experts stream a token from the models' disk - a spinning one (sysfs's rotational) a FAIL;
+- **the download's link**: a pack is 120-200 GB, hours over Wi-Fi (this box's ~30 MB/s) - a note;
+- the RAM (the packs measured on 128 GB), the driver, the kernel, ROCm (its rocm_version.h).
+three levels - ok (as measured), note (works, not as measured), FAIL (osmos will refuse) - each line what to change;
+the exit status 1 for a FAIL. every check's paths are parameters: test_install's fake machines.
+
 ### 0.6.4: a special token's text the model says is text; a refused completion goes with its error; the stream the answer's (#34, 2026-11-11)
 
 **The report** (issue #34, 0.6.3, UD-IQ2_XXS, greedy): asked which osmos-serve flag takes `</think>`, the model

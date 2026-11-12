@@ -10,8 +10,10 @@ import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import doctor  # noqa: E402
 import layout  # noqa: E402
 import overlay_q4x  # noqa: E402
 import osmos_install  # noqa: E402
@@ -520,6 +522,93 @@ class Gpu(unittest.TestCase):
         ok, why = host.gpu("/nonexistent")
         self.assertFalse(ok)
         self.assertIn("sysfs", why)
+
+
+class Doctor(unittest.TestCase):
+    """--doctor's checks on fake machines: each level and what it names"""
+
+    def file(self, root, rel, text):
+        p = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(text)
+        return p
+
+    def test_power(self):
+        root = tempfile.mkdtemp()
+        self.assertEqual(doctor.power(root)[0], doctor.NOTE)  # no profile to read
+        self.file(root, "firmware/acpi/platform_profile_choices", "low-power balanced performance\n")
+        for now, level in (("balanced", doctor.NOTE), ("performance", doctor.OK), ("low-power", doctor.OK)):
+            self.file(root, "firmware/acpi/platform_profile", now + "\n")
+            level_now, why = doctor.power(root)
+            self.assertEqual(level_now, level, why)
+        self.file(root, "firmware/acpi/platform_profile", "balanced\n")
+        self.assertIn("performance", doctor.power(root)[1])
+
+    def test_tmp(self):
+        root = tempfile.mkdtemp()
+        mounts = self.file(root, "mounts", "/dev/nvme0n1p2 / btrfs rw 0 0\ntmpfs /tmp tmpfs rw 0 0\n")
+        self.assertEqual(doctor.tmp("/tmp", mounts, used=1 << 30)[0], doctor.OK)
+        level, why = doctor.tmp("/tmp", mounts, used=20 << 30)
+        self.assertEqual(level, doctor.NOTE)
+        self.assertIn("20.0 GiB", why)
+        disk = self.file(root, "mounts2", "/dev/nvme0n1p2 / ext4 rw 0 0\n")
+        self.assertEqual(doctor.tmp("/tmp", disk, used=20 << 30)[0], doctor.OK)  # on disk: not RAM
+
+    def test_memory(self):
+        root = tempfile.mkdtemp()
+        big = self.file(root, "a", "MemTotal:       131072000 kB\nMemAvailable:   120000000 kB\n")
+        small = self.file(root, "b", "MemTotal:       65536000 kB\nMemAvailable:   60000000 kB\n")
+        self.assertEqual(doctor.memory(big)[0], doctor.OK)
+        self.assertEqual(doctor.memory(small)[0], doctor.NOTE)
+        self.assertEqual(doctor.memory(os.path.join(root, "none"))[0], doctor.NOTE)
+
+    def test_network(self):
+        root = tempfile.mkdtemp()
+        head = "Iface\tDestination\tGateway\n"
+        wifi = self.file(root, "a", head + "wlp192s0\t00000000\t0100A8C0\n")
+        wire = self.file(root, "b", head + "enp191s0\t00000000\t0100A8C0\nwlp192s0\t0000A8C0\t00000000\n")
+        none = self.file(root, "c", head)
+        self.assertEqual(doctor.network(wifi)[0], doctor.NOTE)
+        self.assertIn("wlp192s0", doctor.network(wifi)[1])
+        self.assertEqual(doctor.network(wire)[0], doctor.OK)
+        self.assertIn("no default route", doctor.network(none)[1])
+
+    def test_ssd(self):
+        root = tempfile.mkdtemp()
+        mounts = self.file(root, "mounts", "/dev/sda1 / ext4 rw 0 0\n")
+        sysr = os.path.join(root, "sys")
+        os.makedirs(os.path.join(sysr, "block", "sda", "sda1"))
+        os.makedirs(os.path.join(sysr, "class", "block"))
+        os.symlink(os.path.join(sysr, "block", "sda", "sda1"), os.path.join(sysr, "class", "block", "sda1"))
+        for rot, level in (("1", doctor.FAIL), ("0", doctor.OK)):
+            self.file(sysr, "block/sda/queue/rotational", rot + "\n")
+            level_now, why = doctor.ssd("/", mounts, sysr)
+            self.assertEqual(level_now, level, why)
+
+    def test_direct(self):
+        d = tempfile.mkdtemp()
+        level, why = doctor.direct(d)
+        self.assertIn(level, (doctor.OK, doctor.FAIL), why)  # the test machine's filesystem: whichever it is
+        self.assertEqual(os.listdir(d), [])  # the probe removed
+        self.assertEqual(doctor.direct(os.path.join(d, "missing"))[0], doctor.NOTE)
+        real = os.open
+        def refuse(p, flags, *a):  # noqa: E306
+            if flags & getattr(os, "O_DIRECT", 0):
+                raise OSError(22, "Invalid argument")
+            return real(p, flags, *a)
+        with mock.patch("os.open", refuse):
+            level, why = doctor.direct(d)
+        self.assertEqual(level, doctor.FAIL)
+        self.assertIn("O_DIRECT", why)
+        self.assertEqual(os.listdir(d), [])
+
+    def test_rocm(self):
+        root = tempfile.mkdtemp()
+        h = self.file(root, "rocm_version.h", "#define ROCM_VERSION_MAJOR   7\n#define ROCM_VERSION_MINOR   2\n"
+                                              "#define ROCM_VERSION_PATCH   1\n")
+        self.assertEqual(doctor.rocm_version(h), "7.2.1")
+        self.assertIsNone(doctor.rocm_version(os.path.join(root, "none")))
 
 
 class Rig(unittest.TestCase):

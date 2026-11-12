@@ -27,6 +27,9 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 
 - `--abliterated` adds huihui-ai's abliteration as an overlay (DeepSeek and Qwen alike, not yet UD-Q4_K_XL; the stock files stay as they are).
 - `--have <dir>` uses files you already have.
+- `--doctor` checks the machine as osmos will run on it, and says what to change: the GPU and the memory it may
+  map, the driver and ROCm, the power profile (balanced is slower than the profiles osmos is measured at), the RAM,
+  `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
   `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next` (`-1m`, `-l`).
 
