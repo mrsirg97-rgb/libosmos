@@ -41,6 +41,17 @@ so 32 cores ~32 Gvalues/s from ~10 GB/s of Q2_K; beside a bf16 GEMM on the same 
 decode takes ~2/3 of a core - the NPU ~5 TFLOP/s of experts, against the GPU's ~15 (Qwen, 0.6.3). next: the scales
 f32, the GEMM fed (mm_bfp's block float), the codebook formats (IQ2_XXS, IQ1).
 
+## IQ2_XXS decoded on one AIE2P core (spikes/npu/iq2xxs, 2026-11-12)
+UD-IQ1_M's own bytes (blk.5.ffn_down_exps, IQ2_XXS: its expert downs; gate and up are IQ1_S), 1M values to bf16:
+| version | one core | max err / max |
+| --- | --- | --- |
+| grid bytes (2 KB) unpacked to int16, converted, f32 product; lanes built by 8 inserts a group | 0.33 Gvalues/s | 4.06e-3 |
+| **the grid stored as bf16 (4 KB: 8, 25, 43 exact), a group 4 row loads concatenated, signs by integer XOR, one native bf16 product** | **1.11** | 8.73e-3 (the scale rounded to bf16) |
+codebook lookups are no obstacle: the grid lives in the core's 64 KB, a row one 16-byte load. as fast as Q2_K's
+arithmetic decode. (Peano lowers no bf16 vector negate: sign flips go through int16. an fp16 scale guard that zeroed
+d below 2^-11 hid the whole output once: these tensors' d run ~3e-4.) next: IQ1_S (gate, up): a 2,048-row grid -
+16 KB as bytes, 32 KB as bf16, beside the core's buffers.
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
