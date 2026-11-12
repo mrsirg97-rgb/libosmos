@@ -99,6 +99,20 @@ together 19.9 us: 0.105 TFLOP/s a core at M = 64. the decode a weight's fixed co
 DeepSeek's ~128 rows an expert in 8K steps ~6.6 TFLOP/s for the array (M = 512: ~22). half of a layer's experts on
 the NPU beside the GPU: a prompt step ~20-40% faster on a rough model (to profile: the experts' share of a step).
 
+## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
+14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
+| | s | share |
+| --- | --- | --- |
+| routed experts (grouped matmuls: IQ1_S 2.93, IQ2_XXS 1.63, IQ2_XS 0.32, IQ2_S 0.28) | 5.16 | 35.2% |
+| dense matmuls (attention, shared expert, head: Q6_K / Q8_0) | 3.98 | 27.2% |
+| attention (sparse, compressed, indexer) | 3.97 | 27.1% |
+| hyper-connections | 1.05 | 7.2% |
+| other | 0.49 | 3.3% |
+the routed experts' work ~139 TFLOP a step (8,192 x 6 x 40 x ~35M x 2): the GPU at ~27 TFLOP/s on them - far past
+Qwen's 14.7 (0.6.3). so with the NPU at ~6.6: ~20% of them its, the step ~7% faster; at ~20 (decode 3x faster) ~15%;
+the routed experts' ceiling 35%; the dense matmuls (27%: Q6_K, Q8_0 - simpler decodes) would raise it. the energy
+is the steadier case: what moves runs at ~2 W, not ~60. (rocprofv3's --memory-copy-trace failed silently here.)
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
