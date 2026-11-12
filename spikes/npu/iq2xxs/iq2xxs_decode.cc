@@ -6,6 +6,9 @@
 #include <stdint.h>
 
 #include "iq2xxs_tables.h"
+#if IQ_VEC == 3
+#include "iq2xxs_lut.h"
+#endif
 
 #ifndef NB
 #define NB 16
@@ -46,7 +49,28 @@ static inline void block(const uint8_t *blk, bfloat16 *y) {
     s16[g] = (int16)(2 * (a1[g] >> 28) + 1);
   }
   const aie::vector<float, 16> dbv = aie::mul(aie::to_float(s16, 0), aie::broadcast<float, 16>(d8)).to_vector<float>();
-#if IQ_VEC == 2
+#if IQ_VEC == 3
+  // the grid through the parallel lookup: a group's 32 lanes index row * 8 + j (its 4 index bytes each over 8 lanes)
+  using lut_t = aie::lut<4, bfloat16, bfloat16>;
+  const lut_t gl(2048, grid_lut_ab, grid_lut_cd);
+  aie::parallel_lookup<uint16, lut_t, aie::lut_oor_policy::truncate> pl(gl, 0);
+  alignas(64) static const int16_t lane8[32] = {0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7};
+  const aie::vector<int16, 32> lo = aie::load_v<32>(lane8);
+  for (int g = 0; g < 8; g++) {
+    uint32_t sg = 0;
+    for (int l = 0; l < 4; l++) sg |= (uint32_t)ksigns_iq2xs[(a1[g] >> (7 * l)) & 127] << (8 * l);
+    const aie::vector<int16, 32> rows = aie::concat(aie::broadcast<int16, 8>((int16)(a0[g] & 255)), aie::broadcast<int16, 8>((int16)((a0[g] >> 8) & 255)),
+                                                    aie::broadcast<int16, 8>((int16)((a0[g] >> 16) & 255)), aie::broadcast<int16, 8>((int16)(a0[g] >> 24)));
+    const aie::vector<uint16, 32> ix = aie::add(aie::upshift(rows, 3), lo).cast_to<uint16>();
+    const aie::vector<bfloat16, 32> v = aie::concat(pl.fetch(ix.extract<16>(0)), pl.fetch(ix.extract<16>(1)));
+    const aie::vector<int16, 32> vi = v.cast_to<int16>();
+    const aie::vector<bfloat16, 32> sv =
+        aie::select(vi, aie::bit_xor(vi, aie::broadcast<int16, 32>((int16)0x8000)), aie::mask<32>::from_uint32(sg)).cast_to<bfloat16>();
+    const aie::accum<accfloat, 32> acc = aie::mul(sv, aie::broadcast<bfloat16, 32>((bfloat16)dbv[g]));
+    aie::store_v(y, acc.to_vector<bfloat16>());
+    y += 32;
+  }
+#elif IQ_VEC == 2
   for (int g = 0; g < 8; g++) {
     uint32_t sg = 0;
     for (int l = 0; l < 4; l++) sg |= (uint32_t)ksigns_iq2xs[(a1[g] >> (7 * l)) & 127] << (8 * l);

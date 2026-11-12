@@ -216,6 +216,12 @@ Q5_1. IQ4_NL (18 bytes a 32: d, then 16 bytes of 4-bit indices into ggml's kvalu
 raw byte twice - two 256-entry tables, a byte to its low / high nibble's value (4 KB): no bit ops (Peano lowers none
 at 128 bits), no scalar work a value. a block: one 16-byte load, two fetches, a concat, a multiply by d. Qwen's own
 bytes: **1.65 Gvalues/s a core**, every sign right, worst 9e-3 (d bf16) - the first build, the fastest decoder yet.
+the same lookup for a grid (measured away): IQ2_XXS's 256 x 8 as a 2,048-entry table (16 KB), a group's 32 lanes
+indexing row * 8 + j (its 4 index bytes broadcast over 8 lanes each), two fetches: 0.57 Gvalues/s against the bf16
+rows' 1.11 (interleaved, steady): a row is 8 contiguous values one 16-byte load fetches; the lookup fetches a lane at
+a time and still needs the index vector built from broadcasts. so: grid formats (IQ1_S, IQ2_XXS, IQ2_S, IQ3_XXS) rows
+loaded by row; small codebooks (IQ4_NL, IQ4_XS likely) the hardware lookup on raw bytes; plain blocks (Q2_K, Q4_K, Q5_1)
+vector arithmetic.
 
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
