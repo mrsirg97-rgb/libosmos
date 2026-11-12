@@ -88,6 +88,17 @@ reference as the core would round it (aie.utils.bfp.quantize):
 the conversion costs ~nothing (bf16 out: 0.99 / 1.11 / 0.93). the 1-2 LSB: the scales rounded to bf16 before their
 product - f32 scales next. so the pipeline's operand is ready: decode to bfp16 beside the 1.39 TFLOP/s matmul.
 
+## an expert matmul fused on one core (spikes/npu/fused, 2026-11-12)
+fused_iq2xxs.cc: a 64-row x 256 IQ2_XXS weight tile (UD-IQ1_M's bytes, a block a row) decoded straight into the native
+bfp16 matmul's operand order - 8 rows' grid rows at one 8-value K octet make a 64-lane vector, each 8-lane slice its
+row's group scale, converted and pushed: the sub-tiles in raster order, no shuffle pass - then C = A x W^T
+(matmul_vectorized_2x2_bfp16, A 64 x 256 the host's encode + shuffle). C against Aq x Wq^T on the host: corr 0.999956,
+max err 1.5e-2 (C's own bfp16 rounding). a tile: decode 19.8 us (0.83 Gvalues/s; 117 us when its 64-lane vectors were
+built by inserts, not concats), matmul 1.0 us (C zeroed by vector stores - a scalar byte loop had cost ~20 us),
+together 19.9 us: 0.105 TFLOP/s a core at M = 64. the decode a weight's fixed cost, the matmul the rows': at
+DeepSeek's ~128 rows an expert in 8K steps ~6.6 TFLOP/s for the array (M = 512: ~22). half of a layer's experts on
+the NPU beside the GPU: a prompt step ~20-40% faster on a rough model (to profile: the experts' share of a step).
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
