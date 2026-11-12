@@ -124,7 +124,11 @@
     "abl-qwen38-ud-iq3_xxs": {"derive": {"with": "overlay_q4x", "patch": "qwen38-abl-patch", "key": "qwen38-abl-key",
       "model": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"], "mode": 2},
       "path": "qwen38-ud-iq3_xxs-abliterated-overlay.gguf", "bytes": 702879904,
-      "sha256": "501d94ef942aca834f8eb2854fd1ee2c7735fe2d1f8e01463772175ba301d71a"}
+      "sha256": "501d94ef942aca834f8eb2854fd1ee2c7735fe2d1f8e01463772175ba301d71a"},
+    "abl-qwen38-ud-q4_k_xl": {"derive": {"with": "overlay_q4x", "patch": "qwen38-abl-patch", "key": "qwen38-abl-key",
+      "model": ["qwen38-q4kxl-1", "qwen38-q4kxl-2", "qwen38-q4kxl-3", "qwen38-q4kxl-4"], "mode": 2},
+      "path": "qwen38-ud-q4_k_xl-abliterated-overlay.gguf", "bytes": 885725344,
+      "sha256": "615be90af566d3563255feec4c81b5393390366d2b8857c300156b7460639c2c"}
   },
   "packs": {
     "osmos-evo-a": {
@@ -182,7 +186,7 @@
     "qwen38-ud-q4_k_xl": {
       "title": "Qwen3.8-Flash-Next UD-Q4_K_XL (the larger quant; slower, no better on our text): 23 tok/s plain, 41 drafted, 262K context",
       "shards": ["qwen38-q4kxl-1", "qwen38-q4kxl-2", "qwen38-q4kxl-3", "qwen38-q4kxl-4"],
-      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": null,
+      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-q4_k_xl",
       "rig": {"id": "qwen3.8-flash-next-l", "max_tokens": 65536, "reserve": 65536, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
               "aliases": ["qwen-l"]},
       "settings": {"max_context": 262144, "max_tokens": 4096, "stream_ngram": true}

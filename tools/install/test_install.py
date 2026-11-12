@@ -70,9 +70,12 @@ class Manifest(unittest.TestCase):
         self.assertEqual({tuple(m["files"][f]["derive"]["base"]) for f in evo["shards"]},
                          {tuple(m["packs"]["ud-iq1_m"]["shards"])})
         self.assertEqual((evo["table"], evo["overlay"]), (m["packs"]["ud-iq1_m"]["table"], m["packs"]["ud-iq1_m"]["overlay"]))
-        q4 = m["packs"]["qwen38-ud-q4_k_xl"]  # the larger Qwen: its n-gram table streamed to fit, no overlay for it
+        q4 = m["packs"]["qwen38-ud-q4_k_xl"]  # the larger Qwen: its n-gram table streamed to fit, huihui's overlay its own
         self.assertTrue(q4["settings"]["stream_ngram"])
-        self.assertIsNone(q4["overlay"])
+        self.assertEqual(q4["overlay"], "abl-qwen38-ud-q4_k_xl")
+        d = m["files"]["abl-qwen38-ud-q4_k_xl"]["derive"]  # the same patch and key, made from Q4_K_XL's own shards
+        self.assertEqual((d["with"], d["patch"], d["key"], d["model"], d["mode"]),
+                         ("overlay_q4x", "qwen38-abl-patch", "qwen38-abl-key", q4["shards"], 2))
         self.assertEqual(q4["drafter"], m["packs"]["qwen38-ud-iq3_xxs"]["drafter"])
         q1m = m["packs"]["qwen38-ud-iq3_xxs-1m"]                              # YaRN's: the same files, 4x the context
         self.assertEqual((q1m["shards"], q1m["drafter"]), (m["packs"]["qwen38-ud-iq3_xxs"]["shards"],
