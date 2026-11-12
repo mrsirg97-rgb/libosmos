@@ -209,6 +209,14 @@ Qwen's 14.7 (0.6.3). so with the NPU at ~6.6: ~20% of them its, the step ~7% fas
 the routed experts' ceiling 35%; the dense matmuls (27%: Q6_K, Q8_0 - simpler decodes) would raise it. the energy
 is the steadier case: what moves runs at ~2 W, not ~60. (rocprofv3's --memory-copy-trace failed silently here.)
 
+## Qwen: IQ4_NL through the core's parallel lookup (spikes/npu/iq4nl, 2026-11-12)
+Qwen UD-IQ3_XXS's experts: down IQ4_NL (45 of 48 layers), gate/up IQ2_S (26) and IQ3_XXS (21); UD-Q4_K_XL's Q4_K and
+Q5_1. IQ4_NL (18 bytes a 32: d, then 16 bytes of 4-bit indices into ggml's kvalues_iq4nl): AIE2P's aie::parallel_lookup
+(lut<4, bf16>: 16 entries a fetch, the table twice in two banks - mlir-aie's exp and hue kernels use it), indexed by the
+raw byte twice - two 256-entry tables, a byte to its low / high nibble's value (4 KB): no bit ops (Peano lowers none
+at 128 bits), no scalar work a value. a block: one 16-byte load, two fetches, a concat, a multiply by d. Qwen's own
+bytes: **1.65 Gvalues/s a core**, every sign right, worst 9e-3 (d bf16) - the first build, the fastest decoder yet.
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
