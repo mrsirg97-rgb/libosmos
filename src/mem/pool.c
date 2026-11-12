@@ -31,7 +31,8 @@ struct Pool
   size_t n;
   Spare *spare;
   size_t n_spare, cap_spare;
-  uint64_t budget, bytes; /* bytes: every allocation held, units' and spares' */
+  uint64_t budget, bytes; /* bytes: every allocation held, units' and spares' and lent */
+  uint64_t lent;          /* pool_lend's blocks out now: in bytes, never room */
   Slots slots;
   Fetcher fetcher;
   pool_event_fn on_event;
@@ -129,7 +130,7 @@ static Slot *furthest(Pool *p, Reach r, uint64_t size)
 /* the bytes no room can be made from: units reading, or pinned and out of room's reach */
 static uint64_t kept(const Pool *p, Reach r)
 {
-  uint64_t k = 0;
+  uint64_t k = p->lent;
   for (size_t i = 0; i < p->n; i++)
   {
     const Slot *c = &p->s[i];
@@ -151,7 +152,7 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
   Slot *same = furthest(p, r, s->size); /* its memory reused as it is: no hole to find */
   if (same)
     return unpin(p, same);
-  if (p->bytes + s->size > p->budget && s->size > p->budget - kept(p, r))
+  if (p->bytes + s->size > p->budget && (kept(p, r) >= p->budget || s->size > p->budget - kept(p, r)))
     return NULL;
   while (p->bytes + s->size > p->budget)
   {
@@ -431,3 +432,43 @@ PoolState pool_state(const Pool *p, uint32_t unit)
 
 uint64_t pool_bytes(const Pool *p) { return p ? p->bytes : 0; }
 size_t pool_reading(const Pool *p) { return p ? p->reading : 0; }
+
+void *pool_lend(Pool *p, uint64_t bytes)
+{
+  if (!p || !bytes || !p->slots.tail || !p->slots.take)
+    return NULL;
+  uint8_t *lo = p->slots.tail(bytes, p->slots.ctx);
+  if (!lo)
+    return NULL;
+  for (size_t i = 0; i < p->n; i++) /* the window's units: none held or reading, or nothing changes */
+  {
+    const Slot *c = &p->s[i];
+    if (c->dev && c->dev + c->size > lo && (c->state == POOL_READING || c->holds))
+      return NULL;
+  }
+  for (size_t i = 0; i < p->n; i++)
+  {
+    Slot *c = &p->s[i];
+    if (c->state == POOL_PINNED && c->dev + c->size > lo)
+      release_memory(p, unpin(p, c), c->size);
+  }
+  for (size_t i = p->n_spare; i-- > 0;)
+    if (p->spare[i].dev + p->spare[i].size > lo)
+    {
+      const Spare x = p->spare[i];
+      p->spare[i] = p->spare[--p->n_spare];
+      release_memory(p, x.dev, x.size);
+    }
+  void *mem = p->slots.take(lo, bytes, p->slots.ctx);
+  if (mem)
+    p->bytes += bytes, p->lent += bytes;
+  return mem;
+}
+
+void pool_unlend(Pool *p, void *mem, uint64_t bytes)
+{
+  if (!p || !mem || bytes > p->lent)
+    return;
+  p->lent -= bytes;
+  release_memory(p, mem, bytes);
+}
