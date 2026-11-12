@@ -118,7 +118,11 @@ static void decode_tile2(const uint8_t *__restrict w) {
     AIE_LOOP_UNROLL_FULL
     for (int l = 0; l < 4; l++) {
       const int sh = 8 * l, ss = 7 * l;
+#if FUSED_V >= 6
+#define ROW(r) aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[ib[BB * (r) + l]])
+#else
 #define ROW(r) aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[(w0[r] >> sh) & 255])
+#endif
 #define SGN(r) ((uint32_t)ksigns_iq2xs[(w1[r] >> ss) & 127])
       const aie::vector<bfloat16, 64> v =
           aie::concat(aie::concat(ROW(0), ROW(1), ROW(2), ROW(3)), aie::concat(ROW(4), ROW(5), ROW(6), ROW(7)));
@@ -172,8 +176,15 @@ static void decode_tile3(const uint8_t *__restrict w) {
     AIE_LOOP_MIN_ITERATION_COUNT(4)
     for (int g = (KHALF ? 4 * kh : 0); g < (KHALF ? 4 * kh + 4 : 8); g++) {
       uint32_t w0[8], w1[8];
+#if FUSED_V >= 6
+      const uint8_t *ib = band + 2 + 8 * g; // row r's 4 index bytes at ib[BB r + l]: read as bytes, no word assembled
+      AIE_LOOP_UNROLL_FULL
+      for (int r = 0; r < 8; r++) w1[r] = u32_at(band + BB * r + 6 + 8 * g);
+      (void)w0;
+#else
       AIE_LOOP_UNROLL_FULL
       for (int r = 0; r < 8; r++) w0[r] = u32_at(band + BB * r + 2 + 8 * g), w1[r] = u32_at(band + BB * r + 6 + 8 * g);
+#endif
 #define K(r) aie::broadcast<bfloat16, 8>(kb[w1[r] >> 28])
       const aie::vector<bfloat16, 64> kv = aie::concat(aie::concat(K(0), K(1), K(2), K(3)), aie::concat(K(4), K(5), K(6), K(7)));
 #undef K
@@ -196,7 +207,7 @@ static void decode_tile3(const uint8_t *__restrict w) {
       p = aie::bit_xor(p, aie::downshift(p, 1));
       const aie::vector<int32, 32> sb = aie::bit_or(t, aie::upshift(aie::bit_and(p, aie::broadcast<int32, 32>(1)), 7));
       const aie::vector<int16, 32> sb16 = aie::filter_even(sb.cast_to<int16>(), 1); // [l][r], each < 256
-#if FUSED_V == 5
+#if FUSED_V >= 5
       // narrowed to bytes [l][r]: an octet's 8 sign bytes end to end are its 64-lane mask - two 32-bit lanes
       const aie::vector<uint32, 8> sw = aie::filter_even(sb16.cast_to<uint8>(), 1).cast_to<uint32>();
 #else
@@ -206,11 +217,15 @@ static void decode_tile3(const uint8_t *__restrict w) {
       AIE_LOOP_UNROLL_FULL
       for (int l = 0; l < 4; l++) {
         const int sh = 8 * l, ss = 7 * l;
+#if FUSED_V >= 6
+#define ROW(r) aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[ib[BB * (r) + l]])
+#else
 #define ROW(r) aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[(w0[r] >> sh) & 255])
+#endif
 #define SGN(r) ((uint32_t)ksigns_iq2xs[(w1[r] >> ss) & 127])
         const aie::vector<bfloat16, 64> v =
             aie::concat(aie::concat(ROW(0), ROW(1), ROW(2), ROW(3)), aie::concat(ROW(4), ROW(5), ROW(6), ROW(7)));
-#if FUSED_V == 5
+#if FUSED_V >= 5
         (void)ss;
         const aie::mask<64> neg = aie::mask<64>::from_uint32(sw[2 * l], sw[2 * l + 1]);
 #elif FUSED_V == 4

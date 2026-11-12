@@ -179,6 +179,11 @@ through column 2): every core alike - a K-step's half 0 (decode + matmul) ~12,20
 starved buffer), memory stalls 1% of kernel time, the vector unit busy only 34% of kernel time**. so not waits: the
 cores are scalar-bound inside the decode (index extraction, row addresses, sign words - no vector gather on AIE2P);
 the matmul ~12% of a K-step. next: the decode's scalar path; a K-step's two halves one call (half the handoffs).
+**v6: the grid indices read as bytes from the block** (ib[66 r + l]: no 32-bit word assembled from two halves, no shift
+and mask an octet - a byte load, a shift, an add, the row's load): one core, back to back, decode 11.65 -> 9.42 us
+(-19%), corr unchanged. the array (3 runs each, interleaved, the download running: +-10% a run): v6 167 us mean
+(~6.4 TFLOP/s), v5 180 (~5.9) - ~7% (the handoffs and the noise dilute it). the scalar ops a value ~1 cycle: the
+op count is the decode's time.
 
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):

@@ -41,7 +41,7 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int], trace_size: Compile
     ct = np.ndarray[(CT,), cdt]
     step = ExternalFunction({0: "fused_step", 1: "fused_step_f32", 2: "fused_step_f32x2"}[F32], source_file=os.path.join(HERE, "fused_iq2xxs.cc"),
                             arg_types=[wt, at, at, ct, np.int32, np.int32] if F32 == 2 else [wt, at, ct, np.int32, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
-                            compile_flags=["-DFUSED_V=5", "-DMULTI_F32" if F32 else "-DMULTI", f"-DHALVES={H}", f"-DKHALF={Q}",
+                            compile_flags=[f"-DFUSED_V={os.environ.get('FV', '5')}", "-DMULTI_F32" if F32 else "-DMULTI", f"-DHALVES={H}", f"-DKHALF={Q}",
                                            f"-DNROWS={NR}"])
     a_l3, w_l3, c_l3, workers = [], [], [], []
     for col in range(cols):
