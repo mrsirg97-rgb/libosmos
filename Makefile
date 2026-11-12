@@ -34,6 +34,9 @@ KERNEL_HDRS := $(wildcard $(KERNEL_DIR)/*.h)
 GPU_TESTS := $(patsubst $(TEST_DIR)/gpu/%.hip, $(BIN_DIR)/gpu/%, $(wildcard $(TEST_DIR)/gpu/*.hip))
 ROCM ?= /opt/rocm
 HIPCC := $(ROCM)/bin/hipcc
+# the HIP binaries find ROCm's libraries where they were built against (a RUNPATH: LD_LIBRARY_PATH still wins) - a
+# ROCm outside the system's library path (a vendored SDK, ROCM=...) runs as built, not only /opt/rocm's in ld.so.conf
+HIP_RUNPATH := -Wl,-rpath,$(ROCM)/lib -Wl,--enable-new-dtags
 HIP_ARCH ?= gfx1151
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
 TESTS := $(patsubst $(TEST_DIR)/%.c, $(BIN_DIR)/%, $(wildcard $(TEST_DIR)/*.c))
@@ -76,7 +79,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
 	@mkdir -p $(OBJ_DIR)/tests/gpu
-	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -o $@
+	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 $(HIP_RUNPATH) -o $@
 
 # the server (tools/serve): the engine over stdin / stdout, maya's serve protocol; --parallel's loop libevt's (in
 # libosmos.a, as above)
@@ -87,7 +90,7 @@ $(OBJ_DIR)/tools/serve/%.o: tools/serve/%.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 $(SERVE): $(SERVE_OBJS) $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
-	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -lpthread -o $@
+	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -lpthread $(HIP_RUNPATH) -o $@
 serve: $(SERVE)
 
 # osmos-api (tools/api): the engine as an OpenAI-compatible server - osmos-serve its child; host C only

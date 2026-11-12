@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.7]: osmos starts where ROCm is not on the system's library path
+
+No engine change: every output the same as 0.6.6's.
+
+- **osmos-serve and the GPU tests find ROCm's libraries where they were built against.** They linked
+  `libhsa-runtime64` with no search path, so they started only where ROCm's lib directory is in the system's
+  library path (`/opt/rocm` in ld.so.conf). With a vendored ROCm SDK (`ROCM=...`) they built and then failed to
+  start: osmos-api's engine tests exited 127 (reported by @ucotman in #34's follow-up - thank you). The binaries now
+  carry `$(ROCM)/lib` as their RUNPATH; `LD_LIBRARY_PATH` still overrides it.
+
 ## [0.6.6]: a pack scored against the model itself
 
 No engine output changes: the DeepSeek and Qwen paths are as 0.6.5's. What changes is how a quant is judged.
