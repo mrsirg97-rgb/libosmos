@@ -5,6 +5,8 @@
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
+#include "../common/fp16.h"
+
 #include "iq1s_tables.h"
 
 #ifndef NB
@@ -17,13 +19,7 @@
 #define IQ_BFP 0 /* 1: two groups a 64-lane accumulator, written as bfp16ebs8 */
 #endif
 
-static inline float half_bits(uint16_t h) { // fp16 to f32 by its bits; 0 for a zero or subnormal d
-  const uint32_t e = (h >> 10) & 0x1f;
-  const uint32_t b = e ? ((uint32_t)(h & 0x8000) << 16) | ((e + 112) << 23) | ((uint32_t)(h & 0x3ff) << 13) : 0;
-  float f;
-  __builtin_memcpy(&f, &b, 4);
-  return f;
-}
+static inline float half_bits(uint16_t h) { return fp16_to_f32_shift(h, 0); } // subnormals too (common/fp16.h)
 
 // a group's 32 values: its four grid rows, dl * grid + dl * delta
 static inline aie::accum<accfloat, 32> group_acc(const uint8_t *qs, const uint32_t h, const int g, const float dl,

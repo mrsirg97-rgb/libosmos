@@ -12,6 +12,7 @@
 #include "linalg/mm_bfp.cc"
 
 #include "aie_kernel_utils.h"
+#include "../common/fp16.h"
 #include "iq1s_grid2.h"
 #if IQ1_V == 3
 #include "iq1s_grid8.h"
@@ -40,13 +41,7 @@ alignas(64) static uint8_t Bm[NR * KV * 9 / 8];
 alignas(64) static const uint16_t kodd8_bf16[8] = {0x3f80, 0x4040, 0x40a0, 0x40e0, 0x4110, 0x4130, 0x4150, 0x4170}; // 1 3 .. 15
 alignas(64) static const uint16_t kdelta_bf16[2] = {0x3e00, 0xbe00};                                                 // +-0.125
 
-static inline float half_bits(uint16_t h) {
-  const uint32_t e = (h >> 10) & 0x1f;
-  const uint32_t b = e ? ((uint32_t)(h & 0x8000) << 16) | ((e + 112) << 23) | ((uint32_t)(h & 0x3ff) << 13) : 0;
-  float f;
-  __builtin_memcpy(&f, &b, 4);
-  return f;
-}
+static inline float half_bits(uint16_t h) { return fp16_to_f32_shift(h, 0); } // subnormals too (common/fp16.h)
 
 // a lane's 2-bit field, and the codes 0 and 2 (-1 and +1) at it: lane 8r + j holds value j of its row
 alignas(64) static const int16_t kfield[64] = {

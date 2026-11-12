@@ -10,6 +10,7 @@
 
 #include "iq2xxs_tables.h"
 #include "aie_kernel_utils.h"
+#include "../common/fp16.h"
 
 #ifndef FUSED_V
 #define FUSED_V 2 /* 1: row-major index words, nested loops; 2: group-major (a band's rows contiguous), one counted loop */
@@ -32,13 +33,7 @@ constexpr int NR = NROWS, KV = 256, BB = 66;
 
 alignas(64) static uint8_t Bm[NR * KV * 9 / 8]; // the decoded weights, sub-tile order
 
-static inline float half_bits_div8(uint16_t h) {
-  const uint32_t e = (h >> 10) & 0x1f;
-  const uint32_t b = e ? ((uint32_t)(h & 0x8000) << 16) | ((e + 109) << 23) | ((uint32_t)(h & 0x3ff) << 13) : 0;
-  float f;
-  __builtin_memcpy(&f, &b, 4);
-  return f;
-}
+static inline float half_bits_div8(uint16_t h) { return fp16_to_f32_shift(h, 3); } // subnormals too (common/fp16.h)
 
 static inline uint32_t u32_at(const uint8_t *p) {
   const uint16_t *h = (const uint16_t *)p;

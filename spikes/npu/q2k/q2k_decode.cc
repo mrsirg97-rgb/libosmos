@@ -4,6 +4,8 @@
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
+#include "../common/fp16.h"
+
 #ifndef NB
 #define NB 16
 #endif
@@ -162,13 +164,7 @@ static inline void block_bf(const uint8_t *blk, bfloat16 *y) {
 // no scalar float (the AIE's scalar unit has none: every float op on it is software): fp16 to f32 by its bits (integer
 // ops; a zero or subnormal scale taken as 0 - ggml's Q2_K writes normal ones), a block's 16 scales and mins as two
 // 16-lane vector products, then a row's two sub-blocks' as broadcasts of their lanes; the row itself as in Q2K_VEC 3
-static inline float half_bits(uint16_t h) {
-  const uint32_t e = (h >> 10) & 0x1f;
-  const uint32_t b = e ? ((uint32_t)(h & 0x8000) << 16) | ((e + 112) << 23) | ((uint32_t)(h & 0x3ff) << 13) : 0;
-  float f;
-  __builtin_memcpy(&f, &b, 4);
-  return f;
-}
+static inline float half_bits(uint16_t h) { return fp16_to_f32_shift(h, 0); } // subnormals too (common/fp16.h)
 
 static inline void block_v4(const uint8_t *blk, bfloat16 *y) {
   const float d = half_bits((uint16_t)(blk[80] | blk[81] << 8));

@@ -223,6 +223,17 @@ a time and still needs the index vector built from broadcasts. so: grid formats 
 loaded by row; small codebooks (IQ4_NL, IQ4_XS likely) the hardware lookup on raw bytes; plain blocks (Q2_K, Q4_K, Q5_1)
 vector arithmetic.
 
+## Qwen: IQ3_XXS (spikes/npu/iq3xxs, 2026-11-12) - and subnormal scales
+98 bytes a 256 (d, qs[64]: two grid indices an octet, 8 words of four 7-bit sign indices and a 4-bit scale); a
+256-entry grid of 4 magnitudes. AIE vectors are 16 bytes at least, so the grid twice as bf16 (iq3_lo: a row's values
+in lanes 0-3, iq3_hi: in 4-7, zeros elsewhere; 8 KB): an octet one aligned load from each, or'd (at 512 bits - 4 octets'
+lows, then their highs: Peano lowers no 128-bit or). Qwen's own gate bytes: **0.90 Gvalues/s a core, worst 6.7e-3**.
+its first run was 99.7% right: **13 of 4,096 blocks have a subnormal fp16 d** - every decoder here had mapped a zero
+exponent to 0 (the earlier formats' samples held none). common/fp16.h: the conversion by the bits, subnormals
+normalized by their leading bit (__builtin_clz, a rare branch), a power-of-two factor folded in; checked over all
+63,488 finite fp16 values (its logic mirrored on the host: none wrong); every decoder routed through it, the array's
+two kernels re-checked (corr unchanged).
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509

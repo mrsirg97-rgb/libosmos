@@ -21,7 +21,7 @@ def q2k(inp: In, out: Out, *, vec: CompileTime[int], reps: CompileTime[int], nos
     out_t = np.ndarray[(NB * 288,), np.dtype[np.uint8]] if bfp else np.ndarray[(NB * 256,), np.dtype[bfloat16]]
     of_in, of_out = ObjectFifo(in_t, name="qin"), ObjectFifo(out_t, name="vout")
     k = ExternalFunction("q2k_decode", source_file=os.path.join(HERE, "q2k_decode.cc"), arg_types=[in_t, out_t],
-                         include_dirs=[cxx_header_path()], compile_flags=[f"-DNB={NB}", f"-DREPS={reps}", f"-DQ2K_VEC={vec}", f"-DQ2K_NOSCALE={noscale}", f"-DQ2K_BFP={bfp}"])
+                         include_dirs=[cxx_header_path(), HERE], compile_flags=[f"-DNB={NB}", f"-DREPS={reps}", f"-DQ2K_VEC={vec}", f"-DQ2K_NOSCALE={noscale}", f"-DQ2K_BFP={bfp}"])
     def body(of_in, of_out, k):
         for _ in range_(BLOCKS // NB):
             a, b = of_in.acquire(1), of_out.acquire(1)

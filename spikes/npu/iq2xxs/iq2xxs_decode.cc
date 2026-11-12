@@ -5,6 +5,8 @@
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
+#include "../common/fp16.h"
+
 #include "iq2xxs_tables.h"
 #if IQ_VEC == 3
 #include "iq2xxs_lut.h"
@@ -26,13 +28,7 @@
 
 // fp16 to f32 by its bits, scaled by 2^-3 (the format's 1/4 and the 2s + 1's halving): integer ops alone; 0 for a
 // zero or subnormal d
-static inline float half_bits_div8(uint16_t h) {
-  const uint32_t e = (h >> 10) & 0x1f;
-  const uint32_t b = e ? ((uint32_t)(h & 0x8000) << 16) | ((e + 112 - 3) << 23) | ((uint32_t)(h & 0x3ff) << 13) : 0;
-  float f;
-  __builtin_memcpy(&f, &b, 4);
-  return f;
-}
+static inline float half_bits_div8(uint16_t h) { return fp16_to_f32_shift(h, 3); } // subnormals too (common/fp16.h)
 
 static inline uint32_t u32_at(const uint8_t *p) { // 2-byte aligned: two halves
   const uint16_t *h = (const uint16_t *)p;

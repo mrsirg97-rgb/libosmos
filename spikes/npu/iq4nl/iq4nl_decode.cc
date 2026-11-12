@@ -5,6 +5,8 @@
 #include <aie_api/aie.hpp>
 #include <stdint.h>
 
+#include "../common/fp16.h"
+
 #include "iq4nl_lut.h"
 
 #ifndef NB
@@ -14,13 +16,7 @@
 #define REPS 1
 #endif
 
-static inline float half_bits(uint16_t h) {
-  const uint32_t e = (h >> 10) & 0x1f;
-  const uint32_t b = e ? ((uint32_t)(h & 0x8000) << 16) | ((e + 112) << 23) | ((uint32_t)(h & 0x3ff) << 13) : 0;
-  float f;
-  __builtin_memcpy(&f, &b, 4);
-  return f;
-}
+static inline float half_bits(uint16_t h) { return fp16_to_f32_shift(h, 0); } // subnormals too (common/fp16.h)
 
 extern "C" {
 void iq4nl_decode(const uint8_t *__restrict in, bfloat16 *__restrict out) {
