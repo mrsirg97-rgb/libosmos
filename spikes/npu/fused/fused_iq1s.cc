@@ -28,7 +28,13 @@
                    vectors (-1 + delta, delta, 1 + delta) x the scale, an octet choosing among them */
 #endif
 
-constexpr int NR = 64, KV = 256, BB = 50;
+#ifndef NROWS
+#define NROWS 64
+#endif
+#ifndef KHALF
+#define KHALF 0 /* 1: Bm as two K halves ([kh][j][i]), each a contiguous NR x 128 operand */
+#endif
+constexpr int NR = NROWS, KV = 256, BB = 50;
 
 alignas(64) static uint8_t Bm[NR * KV * 9 / 8];
 alignas(64) static const uint16_t kodd8_bf16[8] = {0x3f80, 0x4040, 0x40a0, 0x40e0, 0x4110, 0x4130, 0x4150, 0x4170}; // 1 3 .. 15
@@ -105,14 +111,15 @@ static void decode_tile(const uint8_t *__restrict w) {
   const aie::vector<bfloat16, 64> one = aie::broadcast<bfloat16, 64>((bfloat16)1.0f), mone = aie::broadcast<bfloat16, 64>((bfloat16)-1.0f);
   const aie::vector<bfloat16, 64> bzero = aie::zeros<bfloat16, 64>();
   aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
-  AIE_LOOP_MIN_ITERATION_COUNT(8)
+  for (int kh = 0; kh < (KHALF ? 2 : 1); kh++)
+  AIE_LOOP_MIN_ITERATION_COUNT(4)
   for (int j = 0; j < NR / 8; j++) {
     const uint8_t *band = w + BB * 8 * j;
     const aie::vector<bfloat16, 64> dv = aie::concat(
         aie::concat(aie::broadcast<bfloat16, 8>(d[8 * j]), aie::broadcast<bfloat16, 8>(d[8 * j + 1]), aie::broadcast<bfloat16, 8>(d[8 * j + 2]), aie::broadcast<bfloat16, 8>(d[8 * j + 3])),
         aie::concat(aie::broadcast<bfloat16, 8>(d[8 * j + 4]), aie::broadcast<bfloat16, 8>(d[8 * j + 5]), aie::broadcast<bfloat16, 8>(d[8 * j + 6]), aie::broadcast<bfloat16, 8>(d[8 * j + 7])));
-    AIE_LOOP_MIN_ITERATION_COUNT(8)
-    for (int g = 0; g < 8; g++) {
+    AIE_LOOP_MIN_ITERATION_COUNT(4)
+    for (int g = (KHALF ? 4 * kh : 0); g < (KHALF ? 4 * kh + 4 : 8); g++) {
       uint32_t h[8];
       AIE_LOOP_UNROLL_FULL
       for (int r = 0; r < 8; r++) h[r] = ((const uint16_t *)(band + BB * r + 34))[g];
@@ -173,6 +180,7 @@ static void decode_tile(const uint8_t *__restrict w) {
   }
 }
 
+#if !defined(MULTI_F32)
 extern "C" {
 void fused_iq1s(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *__restrict c) {
   event0();
@@ -197,3 +205,47 @@ void fused_iq1s(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *__r
   event1();
 }
 }
+#endif
+
+#ifdef MULTI_F32
+// the 32-core design's step (fused32.py, FMT=iq1s): as fused_iq2xxs.cc's fused_step_f32 - a quarter of a K-step's A
+// (piece 2 half + kh), the NR-row W tile decoded at piece 0 (as two K halves), C (2 halves of 64 x NR) kept in f32
+template <unsigned rowA, unsigned colA, unsigned colB>
+static inline void mm_f32acc(const bfp16ebs8 *__restrict pA, const bfp16ebs8 *__restrict pB, float *__restrict pC) {
+  using acc_t = aie::accum<accfloat, 64>;
+  for (unsigned z = 0; z < rowA; z += 2)
+    for (unsigned j = 0; j < colB; j += 2) {
+      float *c00 = pC + (z * colB + j) * 64, *c01 = c00 + 64, *c10 = pC + ((z + 1) * colB + j) * 64, *c11 = c10 + 64;
+      acc_t a00, a01, a10, a11;
+      a00.from_vector(aie::load_v<64>(c00)), a01.from_vector(aie::load_v<64>(c01));
+      a10.from_vector(aie::load_v<64>(c10)), a11.from_vector(aie::load_v<64>(c11));
+      aie::block_vector_input_buffer_stream<bfp16ebs8, 64> pAIn(pA);
+      pAIn.seek(z * colA);
+      aie::block_vector_input_buffer_stream<bfp16ebs8, 64> pBIn(pB);
+      pBIn.seek(j * colA);
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned i = 0; i < colA; ++i) {
+        auto A0 = pAIn.pop_seek(colA - 1);
+        auto A1 = pAIn.pop_seek(-(int)colA);
+        auto B0 = pBIn.pop_seek(colA - 1);
+        auto B1 = pBIn.pop_seek(-(int)colA);
+        a00 = mac_8x8_8x8T(A0, B0, a00);
+        a01 = mac_8x8_8x8T(A0, B1, a01);
+        a10 = mac_8x8_8x8T(A1, B0, a10);
+        a11 = mac_8x8_8x8T(A1, B1, a11);
+      }
+      aie::store_v(c00, a00.to_vector<float>()), aie::store_v(c01, a01.to_vector<float>());
+      aie::store_v(c10, a10.to_vector<float>()), aie::store_v(c11, a11.to_vector<float>());
+    }
+}
+
+extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict a, float *__restrict c, int32_t kstep,
+                               int32_t piece) {
+  const int half = piece >> 1, kh = piece & 1;
+  float *ch = c + half * (64 * NR);
+  if (kstep == 0 && kh == 0)
+    for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
+  if (piece == 0) decode_tile(w);
+  mm_f32acc<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)(Bm + kh * (NR * 128 * 9 / 8)), ch);
+}
+#endif

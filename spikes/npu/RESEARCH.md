@@ -189,6 +189,12 @@ short even body for the software pipeliner: decode 10.17 / 9.52 us against v6's 
 (the arrays' round trip as dear as the overlap it bought). v6 stays: ~9.2 us a 64 x 256 tile, ~1.8 Gvalues/s a core.
 single-core runs scatter ~5%, the array's ~10%, the download writing beside them.
 
+**IQ1_S on the array** (fused32.py, FMT=iq1s: fused_iq1s.cc's fused_step_f32 - its v5 decode, two K halves, 32 rows
+a core, C f32; the single pass does not fit beside its 4 KB packed grid and 2 KB index scratch): UD-IQ1_M's gate bytes,
+C 128 x 1024, K 4096: **5.70 TFLOP/s, corr 0.999976, worst 9.1e-3** - the first build. IQ2_XXS in the same mode 5.63
+(its single pass + v6: ~6.4). so DeepSeek's two expert formats both ~5.7-6.4 TFLOP/s on the NPU: against the GPU's
+~27 on its routed experts, ~18% of them the NPU's - an 8K step ~6% faster, the GPU busy throughout, ~2 W for it.
+
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
 | | s | share |
