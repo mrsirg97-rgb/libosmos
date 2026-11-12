@@ -62,6 +62,16 @@ so every format of UD-IQ1_M's and evo-A's experts decodes on one core at ~1 Gval
 IQ1_S 0.94): 32 cores ~30 Gvalues/s. what is left: the decode feeding a GEMM on the core (the effective rate at a
 prompt's ~128 rows an expert), the scales kept f32 (error to bf16's 4e-3), and the numerics against the KLD protocol.
 
+## one core's matmul (spikes/npu/mm, 2026-11-12)
+64x64x64 bf16 tiles in the core's memory, back to back (mlir-aie's matmul_vectorized; the run at REPS 257 against 1):
+native bf16 4x8x8 5.61 us a tile, **0.09 TFLOP/s** a core (~3 for the array); bfp16-emulated 8x8x8
+(-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16: both operands converted to bfp16ebs8 a call) 1.01 us, **0.52** (~16.6:
+the literature's ~15). so the float path is block float: an 8-bit mantissa, an exponent shared by 8 values - the
+activations too (finer than the int8-a-32 0.6.x simulated on Qwen's experts, +1.3% perplexity: still the KLD's to
+judge). at ~128 rows an expert a weight's GEMM is 256 flops, ~0.49 ns of a core, against ~1 ns of decode: ~1.5 ns a
+weight, the array ~5.5 TFLOP/s of experts. next: the decode written as bfp16 (no conversion in the GEMM; mlir-aie's
+q4nx_dequant does so), the native bfp16 GEMM (mm_bfp.cc: the block-float peak ~118 TOPS, far past the emulation's).
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
