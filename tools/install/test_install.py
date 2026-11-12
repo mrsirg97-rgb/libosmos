@@ -63,8 +63,13 @@ class Manifest(unittest.TestCase):
     def test_real(self):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
-        self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
+        self.assertEqual(set(m["packs"]), {"osmos-evo-a", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
                                            "qwen38-ud-iq3_xxs-1m", "qwen38-ud-q4_k_xl"})
+        evo = m["packs"]["osmos-evo-a"]  # osmos's own: UD-IQ1_M's shards with its delta in, made where installed
+        self.assertEqual({m["files"][f]["derive"]["with"] for f in evo["shards"]}, {"gguf_assemble"})
+        self.assertEqual({tuple(m["files"][f]["derive"]["base"]) for f in evo["shards"]},
+                         {tuple(m["packs"]["ud-iq1_m"]["shards"])})
+        self.assertEqual((evo["table"], evo["overlay"]), (m["packs"]["ud-iq1_m"]["table"], m["packs"]["ud-iq1_m"]["overlay"]))
         q4 = m["packs"]["qwen38-ud-q4_k_xl"]  # the larger Qwen: its n-gram table streamed to fit, no overlay for it
         self.assertTrue(q4["settings"]["stream_ngram"])
         self.assertIsNone(q4["overlay"])
@@ -825,7 +830,8 @@ class Rig(unittest.TestCase):
 
     def test_each_packs_id(self):                        # rig's names: the model, its date, the quant's size
         ids = {pid: p["rig"]["id"] for pid, p in self.PACKS.items()}
-        self.assertEqual(ids, {"ud-iq1_s": "deepseek-1017-ud-s", "ud-iq1_m": "deepseek-1017-ud-m",
+        self.assertEqual(ids, {"osmos-evo-a": "deepseek-1017-evo-a", "ud-iq1_s": "deepseek-1017-ud-s",
+                               "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
                                "qwen38-ud-iq3_xxs-1m": "qwen3.8-flash-next-1m", "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]

@@ -17,7 +17,7 @@ C, HIP and a little C++. No Python at runtime.
 ## Quick start
 
 ```sh
-python3 tools/install/osmos_install.py ud-iq1_s --serve            # DeepSeek; or ud-iq1_m, ud-iq2_xxs
+python3 tools/install/osmos_install.py osmos-evo-a --serve         # DeepSeek; or ud-iq1_s, ud-iq1_m, ud-iq2_xxs
 python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve   # Qwen; or qwen38-ud-iq3_xxs-1m
 ```
 
@@ -31,12 +31,14 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
   map, the driver and ROCm, the power profile (balanced is slower than the profiles osmos is measured at), the RAM,
   `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
-  `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next` (`-1m`, `-l`).
+  `deepseek-1017-evo-a`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next`
+  (`-1m`, `-l`).
 
 ## The packs
 
 | Pack | Files | Context | Pick it for |
 | --- | --- | --- | --- |
+| `osmos-evo-a` | 141 GB (UD-IQ1_M's files + a 34 GB delta, made where you install it) + 203 GB Engram table | 1M | **the default**: UD-IQ1_M's quality at about UD-IQ1_S's speed |
 | `ud-iq1_s` | 122 GB + 203 GB Engram table | 1M | speed |
 | `ud-iq1_m` | 140 GB + 203 GB Engram table | 1M | quality (unsloth's benchmarks 85.55 against 83.53) |
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the closest to the model, the slowest decode |
@@ -52,6 +54,7 @@ SSD (DESIGN.md, "0.6.6"):
 | Pack | Wiki text (8,191 tokens) | Agent traces (27,459 assistant tokens) | Top-1 agreement (Wiki) |
 | --- | --- | --- | --- |
 | `ud-iq2_xxs` | 0.126 ± 0.005 | 0.036 ± 0.001 | 92.4% |
+| `osmos-evo-a` | 0.175 ± 0.006 | 0.048 ± 0.001 | 90.5% |
 | `ud-iq1_m` | 0.190 ± 0.007 | 0.048 ± 0.001 | 90.3% |
 | `ud-iq1_s` | 0.259 ± 0.008 | 0.066 ± 0.001 | 88.1% |
 
@@ -59,7 +62,20 @@ The agent traces are rig sessions of our own (local, never published), the assis
 does not rank these packs reliably: on those traces UD-IQ1_M's (2.477) is below UD-IQ2_XXS's (2.503), though it is
 further from the model. `osmos_install.py --list` shows each pack's numbers.
 
-The DeepSeek packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) with the
+**osmos-evo-A, the default DeepSeek pack.** osmos's own, built on UD-IQ1_M: the routed experts' down projections of
+layers 20-39 requantized to Q2_K from DeepSeek's MXFP4 originals (with unsloth's imatrix), and the attention and the
+head requantized to Q5_K by GPTQ (from UD-IQ1_M's own values, its Hessians from our agent sessions); every other
+tensor UD-IQ1_M's as it is. Against UD-IQ1_M it is level on agent traces (0.0485 against 0.0479,
++0.0005 ± 0.0003), closer on Wiki text (0.175 against 0.190, -0.014 ± 0.004), and it decodes 8% faster plain and 15%
+faster drafted, within 2-6% of UD-IQ1_S (`low-power`, interleaved: 17.9 / 29.7 tok/s against UD-IQ1_S's 18.3 / 31.7
+and UD-IQ1_M's 16.6 / 25.8). At 64K of context it decodes 16.4 tok/s, the fastest of the three. Its prompts are 5-9%
+slower than the UD packs' (the larger dense). It ships as a 34 GB delta on unsloth's UD-IQ1_M
+([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)): the installer makes the pack from UD-IQ1_M's
+files and the delta (`tools/convert/gguf_assemble.py`), every byte they share cloned on btrfs or XFS - so it adds 34
+GB to the download and almost nothing to the disk beside UD-IQ1_M - and checks each shard's SHA-256. The abliteration
+is huihui-ai's UD-IQ1_M patch, which replaces the same 18 attention tensors in evo-A.
+
+The UD packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) with the
 lossless MXFP8 Engram table, plus our 4.7 GB DSpark drafter and expert pick profile
 ([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)). Qwen is
 [unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (or UD-Q4_K_XL) and its MTP head. The abliteration
