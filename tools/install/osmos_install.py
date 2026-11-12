@@ -4,6 +4,7 @@
     tools/install/osmos_install.py --list
     tools/install/osmos_install.py ud-iq1_s [ud-iq1_m] [--models DIR] [--have DIR ...] [--trust-size]
                                    [--abliterated] [--rig [--rig-default yes|no|ask]] [--serve] [--no-build] [--dry-run]
+    tools/install/osmos_install.py --doctor [--models DIR]
 
 the packs and their files: packs.json beside this (every file pinned to a commit and its SHA-256). each file taken
 from the user's own (--have: any file of its bytes and hash under those directories, renamed or not) or downloaded
@@ -22,6 +23,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import doctor  # noqa: E402
 import fetch  # noqa: E402
 import host  # noqa: E402
 import layout  # noqa: E402
@@ -112,11 +114,25 @@ def main():
     ap.add_argument("--serve", action="store_true", help="start osmos-api on the (first) pack")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="the checks and the plan, nothing written")
+    ap.add_argument("--doctor", action="store_true",
+                    help="the machine as osmos will run on it: every check, what to change (doctor.py)")
     a = ap.parse_args()
+    if a.doctor:
+        checks = doctor.run(a.models)
+        for level, why in checks:
+            print(f"  {level:4s} {why}")
+        fails = sum(level == doctor.FAIL for level, _ in checks)
+        notes = sum(level == doctor.NOTE for level, _ in checks)
+        print(f"{fails} to fix, {notes} to look at" if fails or notes else "as osmos was measured")
+        return 1 if fails else 0
     m = manifest.load(a.manifest)
     if a.list or not a.packs:
         for pid, p in m["packs"].items():
             print(f"{pid:12s} {p['title']}")
+            if p.get("quality"):  # 0.6.6's reference (DESIGN.md): the distance from the model's own weights
+                qd = p["quality"]
+                print(f"{'':12s} quality: KL {qd.get('wiki_kld', '-')} on Wiki text, {qd.get('agent_kld', '-')} on agent "
+                      f"traces (0 the model's own weights; lower is closer)")
         return 0
     for pid in a.packs:
         if pid not in m["packs"]:

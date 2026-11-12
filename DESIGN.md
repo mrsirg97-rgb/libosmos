@@ -3439,6 +3439,123 @@ to 0xED, the surrogates' range) where a continuation byte stays one.
 bytes it held back before it (whitespace, a marker's start) as sent, so a run cut by max_tokens past that point lost
 them from its flushed text: its stream's content no longer the whole answer's. now only what went out is counted.
 
+### 0.6.6: the reference, and how a quant is scored (design, 2026-11-11)
+
+until now a quant was scored against another quant: perplexity on four texts and the log-probability a token against
+evo-a's (scratch compare.py), the candidates chosen on the texts they were then reported on. a distance from the model
+itself was the oracle's 32 positions (maya's), too few to rank packs that differ by 0.01. from Local Code's notes
+(drawthingsai/local-code-community, Apps/LocalCode/DDDoc/RoutedExpertGainCorrection.md: their 2-bit quant's experts
+shrink ~11%, a gain a layer fixes 0.463 -> 0.390 KLD) three things are taken: a reference that is the model's own
+weights, the KL divergence over the whole vocabulary as the measure, and a protocol that keeps choosing and
+reporting apart.
+
+**the reference.** a DeepSeek GGUF (evo's gguf-a: its F32 and BF16 tensors already the originals') with an overlay of
+the originals (~/Models/ds1017/ref-bf16, nine shards; 6 + 9 files, under WEIGHTS_MAX_FILES):
+- the routed experts as deepseek-ai stores them: E2M1 codes two to a byte, an E8M0 scale every 32 inputs - MXFP4 as
+  ggml lays it (tools/convert/ds4_experts_mxfp4.py), no value changed (on a real expert, gguf-py's decode and the
+  FP4 table bit-identical). 296 GB, by range from the repo. MXFP4 is now a GGUF file's type and the prompt matmul's
+  (decode_h's generic F16: every value exact while 2^(e - 128) x 12 is a normal f16 - the experts' e 119-123);
+- the dense weights BF16 (tools/convert/ds4_ref_dense.py): each FP8 original (E4M3 x a 32 x 32 block's UE8M0) exactly,
+  the head and the embedding as stored; the attention's wo_a Q8_0 (attn_output_a: mm_group alone, no BF16 path) - the
+  reference's one approximation. a first reference had every dense tensor Q8_0: 0.0081 KLD from this one (top-1
+  98.1%), 3-6% of the packs' - so not it;
+- the arithmetic osmos's: the prompt's path (F16 activations into the matmuls, F32 sums), the same step for every
+  run. deepseek's own inference quantizes activations to FP8 a 128; the reference does not - its distance is the
+  weights' alone, as every candidate's run shares the rest.
+
+**the measure.** tools/bench/kld: the reference's run writes each scored row's log-probabilities (F32, the whole
+vocabulary: 10,240 rows 5.3 GB); a candidate's run reads them and scores KL(reference || candidate) a row in double,
+its top-1 agreement (argmax, the lowest id among equals) and its next-token NLL; DUMP keeps a record a row.
+tools/bench/kld_compare.py: runs paired against a baseline - the mean KL and its standard error, median, p99, top-1,
+perplexity, and the paired difference a row with its standard error and the two halves' means (a difference the
+halves disagree on is not acted on).
+
+**the texts.**
+- **wiki10k** (~/bench/osmos-eval/wiki10k.txt): BOS then the first 10,239 tokens of WikiText-2 test (the old
+  wiki2_eval's text: the same tokens after the BOS), five steps of 2,048.
+- **rig hold-out** (~/bench/osmos-eval/private: the operator's sessions, scrubbed as calib_rig.py scrubs, local only,
+  never committed or uploaded): four whole sessions of 16,384 tokens - none of the 78 sessions calib_rig.py took
+  (counted: its eval the first 4 by hash, its calibration through index 77) - each with a mask, 1 for the assistant's
+  tokens (after <｜Assistant｜>, through its <｜end▁of▁sentence｜>): 27,459 scored. the rendering is the last turn's
+  view (earlier turns' reasoning dropped, as the template does).
+
+**the protocol** (the rules that make a number worth acting on):
+1. wiki10k's rows 2,048 .. 10,239 are the **working rows**: every choice is made on them (a format, a gain, a plan).
+2. its rows 0 .. 2,047 are the **dev rows**: scored once per final candidate, never searched over.
+3. the **hold-out** runs once, on the finalists of a release, never to choose between variants.
+4. anything fitted (a gain, a rounding's Hessian) is fitted on calibration text disjoint from all three, and each
+   checkpoint gets its own fit: a requantized bank invalidates a gain.
+5. a release's quality line is the dev rows' and the hold-out's KL with their standard errors, beside the size.
+6. the reference's own floor is reported once, beside them: run twice it is the same bits (KLD 0, top-1 100%); its one
+   approximation, wo_a's Q8_0, is not measured apart (no BF16 path); a reference with every dense tensor Q8_0 sat
+   0.0081 from it.
+
+**measured (2026-11-12, the reference above; working rows 2,048 .. 10,239 of wiki10k; the hold-out's 27,459 rows).**
+the reference's passes: wiki10k 166 s (ppl 1.7429 - 296 GB of experts a step, the GPU's 80 GiB and the page cache
+holding most, ~190 GB a step from the SSD at its ~6 GB/s), each 16,384-token session 269-285 s; its log-probabilities
+5.3 GB and 14.2 GB on disk. a candidate's run 54-91 s.
+
+| pack | wiki KLD | +- | median | p99 | top-1 | ppl | hold-out KLD | +- | top-1 | ppl |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| UD-IQ2_XXS | 0.1255 | 0.0048 | 0.0014 | 2.24 | 92.38% | 1.8905 | 0.0361 | 0.0012 | 93.17% | 2.5029 |
+| UD-IQ1_M | 0.1895 | 0.0070 | 0.0038 | 3.27 | 90.32% | 1.9395 | 0.0479 | 0.0011 | 91.88% | 2.4770 |
+| UD-IQ1_S | 0.2592 | 0.0082 | 0.0073 | 3.96 | 88.07% | 2.0577 | 0.0664 | 0.0011 | 90.47% | 2.4918 |
+| evo-a (UD-IQ1_M's experts, its dense Q8_0 from the FP8) | 0.1741 | 0.0065 | 0.0031 | 2.75 | 90.62% | 1.9118 | | | | |
+| evo-a + GPTQ dense A (attention, head Q5_K) | 0.1752 | 0.0064 | 0.0035 | 2.63 | 90.54% | 1.9145 | | | | |
+| evo-a + B (A, the shared expert Q6_K) | 0.1766 | 0.0064 | 0.0033 | 2.76 | 90.43% | 1.9143 | | | | |
+| evo-a + C (A, the shared expert Q5_K) | 0.1802 | 0.0067 | 0.0033 | 2.83 | 90.42% | 1.9234 | | | | |
+
+paired, a row at a time: UD-IQ1_M - UD-IQ2_XXS +0.064 +- 0.006 (wiki), +0.0118 +- 0.0006 (hold-out); evo-a -
+UD-IQ1_M -0.0154 +- 0.0045, evo-A -0.0143 +- 0.0045 (the halves -0.019 / -0.009); against evo-a, A +0.0009 +-
+0.0015, B +0.0025 +- 0.0016, C +0.0058 +- 0.0017 (the halves +0.0067 / +0.0050). the dev rows, once: UD-IQ2_XXS
+0.145, UD-IQ1_M 0.210, UD-IQ1_S 0.265 - the working rows' order and gaps. what they say:
+- **perplexity misranks.** on the hold-out UD-IQ1_M's (2.477) is below UD-IQ2_XXS's (2.503), its KLD +0.012 above
+  (20 standard errors); and the down gain below lowered UD-IQ2_XXS's perplexity (1.891 -> 1.880) with its KLD the
+  same and its top-1 down. a choice by perplexity would have taken both wrong ones.
+- **evo's dense is measurable now.** the old comparison (log-prob against evo-a) scored A, B and C a tie; against the
+  reference C's faster shared expert costs 0.006, A nothing. 0.6.7's default candidate is evo-A: closer than
+  UD-IQ1_M (-0.014) at about UD-IQ1_S's decode (eval2: 19.0 tok/s, UD-IQ1_S's title 19.5, UD-IQ1_M's 17.6 - to be
+  measured interleaved before it is claimed).
+- **the agent traces are easier**: a third of wiki's KLD for every pack (the quants lose what the model knows by
+  heart first: UD-IQ2_XXS's worst wiki rows are where the reference recalls the text itself - a poem's next line, a
+  quotation's next word, a set phrase - tools/bench/kld_tokens.py). Local Code's conversation-trace KLD for
+  UD-IQ2_XXS is 0.0344, ours 0.0361: another reference, other traces, the same number.
+- **the mean is the tail's**: the median is 1-3% of the mean; UD-IQ2_XXS's worst 1% of rows hold 28% of its KL,
+  its worst 5% 65%, its worst 10% 82%.
+
+**the routed experts' gain (Local Code's lgain), measured on UD's banks.** captures (calib.hip: 8,192 tokens of the
+public calibration text through UD-IQ2_XXS, every layer) against the original banks, each layer's 32 most picked:
+- gate and up: no bias - the quant's output regressed on the original's 0.978-0.984 (Local Code's own 2-bit 0.887),
+  the hidden error's best c_gu 0.992-1.006 (layers 0-4), the error moved under 0.5%. UD's imatrix scales fit.
+- down: UD's IQ2 downs overshoot - c_d 0.930-0.958 (IQ2_XXS / IQ2_XS / IQ2_S), IQ3_XXS 0.973-0.982, Q2_K 0.989, the
+  experts' spread 0.002-0.008; the down's own error -6% at its c_d. baked into UD-IQ2_XXS's downs' f16 scales (39
+  tensors, every other byte the quant's; layer 21, whose down error is 3e-5 at its most picked experts, left out):
+  wiki +0.0007 +- 0.0018 - nothing. Local Code's warning measured: the down's overshoot answers the gate and up's
+  2-4% smaller hidden; fitted on the reference's hidden it corrects what the model does not see. a fit on the quant's
+  own hidden is 0.6.7's, inside evo's build, where the quantizer is ours.
+
+the tools: tools/convert/ds4_experts_mxfp4.py and ds4_ref_dense.py (the overlay from deepseek-ai's files: the dense
+shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token), kld.hip, kld_compare.py,
+kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
+out), local only.
+
+### 0.6.6: osmos doctor (2026-11-11)
+
+`osmos_install.py --doctor` (tools/install/doctor.py): host.py's checks (the GPU, the memory it may map, the tools),
+then the ones that cost speed or memory without failing anything - each found the hard way on this box:
+- **the power profile**: a boot with the monitor off leaves the Halo in balanced, slower than the low-power and
+  performance profiles the packs are measured at (a note, the command that changes it);
+- **/tmp as RAM**: tmpfs's bytes are memory the GPU cannot have - big scratch there and a build is refused ("GPU
+  memory refused"); past 4 GiB, a note;
+- **direct reads**: osmos reads its experts O_DIRECT (DeepSeek's since 0.3.0, Qwen's since 0.6.5) with no fallback -
+  asked of the models' folder by a probe file, a FAIL where refused; the filesystem named (btrfs and XFS share a
+  table between packs by a clone);
+- **an SSD**: the experts stream a token from the models' disk - a spinning one (sysfs's rotational) a FAIL;
+- **the download's link**: a pack is 120-200 GB, hours over Wi-Fi (this box's ~30 MB/s) - a note;
+- the RAM (the packs measured on 128 GB), the driver, the kernel, ROCm (its rocm_version.h).
+three levels - ok (as measured), note (works, not as measured), FAIL (osmos will refuse) - each line what to change;
+the exit status 1 for a FAIL. every check's paths are parameters: test_install's fake machines.
+
 ### 0.6.4: a special token's text the model says is text; a refused completion goes with its error; the stream the answer's (#34, 2026-11-11)
 
 **The report** (issue #34, 0.6.3, UD-IQ2_XXS, greedy): asked which osmos-serve flag takes `</think>`, the model
