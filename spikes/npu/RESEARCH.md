@@ -69,8 +69,12 @@ native bf16 4x8x8 5.61 us a tile, **0.09 TFLOP/s** a core (~3 for the array); bf
 the literature's ~15). so the float path is block float: an 8-bit mantissa, an exponent shared by 8 values - the
 activations too (finer than the int8-a-32 0.6.x simulated on Qwen's experts, +1.3% perplexity: still the KLD's to
 judge). at ~128 rows an expert a weight's GEMM is 256 flops, ~0.49 ns of a core, against ~1 ns of decode: ~1.5 ns a
-weight, the array ~5.5 TFLOP/s of experts. next: the decode written as bfp16 (no conversion in the GEMM; mlir-aie's
-q4nx_dequant does so), the native bfp16 GEMM (mm_bfp.cc: the block-float peak ~118 TOPS, far past the emulation's).
+weight, the array ~5.5 TFLOP/s of experts. native bfp16 (mm_bfp.cc's matmul_vectorized_bfp16, the operands
+already bfp16ebs8): 64x64x64 0.80 TFLOP/s a core, 64x128x64 1.06, **64x256x64 1.39 (~44 for the array: the GPU's
+f16 ceiling is 47-49, its Qwen experts 14.7)**. K = 256 is a quant block's 256 values. the balance turns: a weight's
+GEMM 0.18 ns at ~128 rows against ~1 ns of decode - the decode 85%, the array ~7 TFLOP/s. the lever now: the decode
+faster (1.45 Gvalues/s with Q2_K's scales removed - the rest overhead), written straight as bfp16 (8 int8 mantissas,
+a shared exponent: an IQ grid row is 8 small integers under one scale).
 
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
