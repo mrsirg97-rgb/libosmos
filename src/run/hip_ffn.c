@@ -165,53 +165,28 @@ static void prefetch(Forward *f, int l, uint32_t picks)
       membrane_ahead(f->mem, next + e);
 }
 
-/* the routed experts: each distinct one resident or held in the pool (their reads at once) and read once for
-   all the tokens routed to it - gate, up, swiglu (each pair its weight, before the down projection, as ref.py) and
-   down, a launch each (mm_group); each token's summed in ascending expert id (ref.py's index_add order), the shared
-   expert last. nothing here waits for the GPU but the routing event; the experts are held for the layer's every
-   sub-batch and released at the next layer's routing event (or the step's end), when the stream is past them */
-bool fwd_moe(Forward *f, int l, char *err)
+/* the routed experts of the step's rows r0 .. r0 + n (ids: theirs, K a row) through their tables and launches:
+   hold - the step whole (r0 0): its picks counted and its experts held here, a small step's lane taken (*lane_done);
+   else a chunk of a large step (fwd_moe held them all once). each row's sums its own (mm_group's: a token's bits
+   whatever else is in the launch), so a step chunked gives the bits of the step whole */
+static bool routed(Forward *f, int l, const int32_t *ids, uint32_t r0, uint32_t n, bool hold, Carve *c, bool *lane_done,
+                   char *err)
 {
   const Geometry *g = f->g;
   const LayerWeights *L = &f->w->layer[l];
   Scratch *b = &f->b;
-  const uint32_t D = g->n_embd, FF = g->expert_ff, E = g->n_experts, K = g->n_used, n = f->n, P = n * K;
-  bool ok = fwd_mat(f, L->router, fwd_dev(f, L->router), E, D, b->xf, D, n, b->logits, E);
-  if (ok)
-    fwd_probe(f, "router_logits", l, f->at, b->logits, (uint64_t)n * E, false);
-  /* the picks to the host and marked, then the shared expert queued: the GPU runs it while the host waits. the router
-     writes them into the host's mapped r_ids (the routing event covers the kernel); a probe's into ridx, copied */
-  ok = ok && ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, n,
-                        f->probe ? b->ridx : f->r_ids_dev, b->rw, NULL) &&
-       (!f->probe ||
-        hipMemcpyAsync(f->r_ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess) &&
-       (!f->cpu || !f->lane || P >= E || /* the CPU lane's: the step's FFN inputs and weights, with the picks */
-        (hipMemcpyAsync(f->cpu_xf, b->xf, (uint64_t)n * D * sizeof(float), hipMemcpyDeviceToHost, NULL) ==
-             hipSuccess &&
-         hipMemcpyAsync(f->cpu_rw, b->rw, P * sizeof(float), hipMemcpyDeviceToHost, NULL) == hipSuccess)) &&
-       fwd_guess_queue(f, l) && hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) &&
-       fwd_wait(f, f->routed);
-  if (!ok)
-    return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
-  /* the stream is past the last layer's experts (the router came after them): the visit ends their holds */
-  if (!membrane_visit(f->mem, (uint32_t)l, P >= E, err))
-    return false;
-  const int32_t *ids = f->r_ids;
-  for (uint32_t m = 0; l && P < E && m < P; m++) /* a small step's picks scored against its last layer's guess */
-    if (ids[m] >= 0 && (uint32_t)ids[m] < E)
-      membrane_score(f->mem, (uint32_t)l * E + (uint32_t)ids[m]);
-  fwd_guess_want(f, l);
-  fwd_probe(f, "route_idx", l, f->at, b->ridx, P, true);
-  fwd_probe(f, "route_w", l, f->at, b->rw, P, false);
+  const uint32_t D = g->n_embd, FF = g->expert_ff, E = g->n_experts, K = g->n_used, P = n * K;
+  bool ok = true;
   /* the distinct experts in ascending id, each with its pairs (in token order: at most one a token): an expert's
      rows base .. base + cnt, its slots those tokens; one launch of mm_group reads each once for all of its tokens */
   uint32_t nd = 0, *by = f->m_by, at[OPS_MAX_EXPERTS + 1] = {0};
   for (uint32_t m = 0; m < P; m++)
   {
-    if (ids[m] < 0 || (uint32_t)ids[m] >= E)
+    if (hold && (ids[m] < 0 || (uint32_t)ids[m] >= E))
       return fwd_fail(err, "the router picked an expert the model does not have");
     at[ids[m] + 1]++;
-    f->picks[(uint32_t)l * E + (uint32_t)ids[m]]++;
+    if (hold)
+      f->picks[(uint32_t)l * E + (uint32_t)ids[m]]++;
   }
   for (uint32_t e = 0; e < E; e++) /* by expert, then pair: a counting sort, each expert's pairs in pair order */
     at[e + 1] += at[e];
@@ -224,13 +199,13 @@ bool fwd_moe(Forward *f, int l, char *err)
     nd += first, run = first ? 1 : run + 1;
     ne += run % MM_MAX_TOKENS == 1 || MM_MAX_TOKENS == 1;
   }
-  /* the layer's tables, carved from one pinned region and sent in one copy */
-  Carve c = {f->r_up, (uint8_t *)b->up, 0};
+  /* the rows' tables, carved from one pinned region (a chunk's after the chunks' before it) and sent in one copy */
+  const uint64_t c0 = (c->used + 15) & ~(uint64_t)15;
   const void **tab, **dtab;
   int32_t *cnt, *order, *gidx, *hidx, *pidx, *dcnt, *dorder, *dgidx, *dhidx, *dpidx;
   uint32_t *xg, *yg, *xd, *yd, *dxg, *dyg, *dxd, *dyd;
-  tab = carve(&c, 3 * ne * sizeof *tab, (void **)&dtab), cnt = carve(&c, ne * 4, (void **)&dcnt);
-  order = carve(&c, P * 4, (void **)&dorder), pidx = carve(&c, P * 4, (void **)&dpidx);
+  tab = carve(c, 3 * ne * sizeof *tab, (void **)&dtab), cnt = carve(c, ne * 4, (void **)&dcnt);
+  order = carve(c, P * 4, (void **)&dorder), pidx = carve(c, P * 4, (void **)&dpidx);
   /* an expert's slots: its tokens, padded to whole tiles - at most P + (MM_TILE - 1) an expert */
   uint32_t slots = 0;
   for (uint32_t r = 0, c_ = 0; r < P; r++)
@@ -240,9 +215,9 @@ bool fwd_moe(Forward *f, int l, char *err)
     if (last)
       slots += (c_ + MM_TILE - 1) / MM_TILE * MM_TILE;
   }
-  gidx = carve(&c, slots * 4, (void **)&dgidx), hidx = carve(&c, slots * 4, (void **)&dhidx);
-  xg = carve(&c, ne * 4, (void **)&dxg), yg = carve(&c, ne * 4, (void **)&dyg);
-  xd = carve(&c, ne * 4, (void **)&dxd), yd = carve(&c, ne * 4, (void **)&dyd);
+  gidx = carve(c, slots * 4, (void **)&dgidx), hidx = carve(c, slots * 4, (void **)&dhidx);
+  xg = carve(c, ne * 4, (void **)&dxg), yg = carve(c, ne * 4, (void **)&dyg);
+  xd = carve(c, ne * 4, (void **)&dxd), yd = carve(c, ne * 4, (void **)&dyd);
   for (uint32_t s = 0; s < slots; s++)
     gidx[s] = -1, hidx[s] = -1;
   uint32_t *row_of = f->m_row, *base = f->m_base, *slot0 = f->m_slot0, unit_of[OPS_MAX_EXPERTS];
@@ -256,8 +231,10 @@ bool fwd_moe(Forward *f, int l, char *err)
       base[j] = r, cnt[j] = 0, slot0[j] = next_slot;
       const uint32_t unit = (uint32_t)l * E + (uint32_t)ids[m];
       unit_of[j] = unit;
-      if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the membrane
-                                        begun and held, not waited for (in memory at a later visit) */
+      if (!hold) /* a chunk's: held for the step already (fwd_moe) */
+        ;
+      else if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the
+                                             membrane begun and held, not waited for (in memory at a later visit) */
         f->on_cpu[unit] = membrane_clock(f->mem), (void)membrane_begin(f->mem, unit);
       else if (!membrane_hold(f->mem, unit, err)) /* once for the sub-batches */
         return false;
@@ -266,13 +243,14 @@ bool fwd_moe(Forward *f, int l, char *err)
     gidx[slot] = (int32_t)(m / K), hidx[slot] = (int32_t)r;
     pidx[r] = (int32_t)m, row_of[m] = r;
   }
-  prefetch(f, l, P);
-  if (f->lane && P < E) /* the lane's small step: every expert in the matvec's order (hip_lane.c) */
+  if (hold)
+    prefetch(f, l, P);
+  if (hold && f->lane && P < E) /* the lane's small step: every expert in the matvec's order (hip_lane.c) */
   {
     if (!fwd_lane_experts(f, l, ids, P, err))
       return false;
     membrane_settle(f->mem);
-    fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
+    *lane_done = true;
     return true;
   }
   /* the entries (an expert's parts of MM_MAX_TOKENS: its slots and rows from part q's first) in ascending count,
@@ -305,16 +283,85 @@ bool fwd_moe(Forward *f, int l, char *err)
     for (uint32_t k = 0; k < K; k++)
       order[i * K + k] = ord[k][1];
   }
-  ok = ok && fwd_put_async(b->up, f->r_up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
-       mm_x16_rows(b->xf, D, dgidx, slots, D, b->xe16, b->overflow, NULL) &&
+  ok = ok && fwd_put_async((uint8_t *)b->up + c0, f->r_up + c0, c->used - c0) &&
+       ops_gather_rows(b->rwp, b->rw + (uint64_t)r0 * K, dpidx, P, 1, NULL) &&
+       mm_x16_rows(b->xf + (uint64_t)r0 * D, D, dgidx, slots, D, b->xe16, b->overflow, NULL) &&
        group(L->exp_gate->type, dtab, cnt, dcnt, ne, FF, D, b->xe16, dxg, b->ga, dyg, FF) &&
        group(L->exp_up->type, dtab + ne, cnt, dcnt, ne, FF, D, b->xe16, dxg, b->upr, dyg, FF) &&
        ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
        mm_x16_rows(b->hh, FF, dhidx, slots, FF, b->xe16, b->overflow, NULL) &&
        group(L->exp_down->type, dtab + 2 * ne, cnt, dcnt, ne, D, FF, b->xe16, dxd, b->ye, dyd, D) &&
-       ops_gather_sum_add(b->moe, b->ye, dorder, K, n, D, b->sye, NULL);
+       ops_gather_sum_add(b->moe + (uint64_t)r0 * D, b->ye, dorder, K, n, D, b->sye + (uint64_t)r0 * D, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");
+  return true;
+}
+
+/* the routed experts: each distinct one resident or held in the pool (their reads at once) and read once for
+   all the tokens routed to it - gate, up, swiglu (each pair its weight, before the down projection, as ref.py) and
+   down, a launch each (mm_group); each token's summed in ascending expert id (ref.py's index_add order), the shared
+   expert last. nothing here waits for the GPU but the routing event; the experts are held for the layer's every
+   sub-batch and released at the next layer's routing event (or the step's end), when the stream is past them */
+bool fwd_moe(Forward *f, int l, char *err)
+{
+  const Geometry *g = f->g;
+  const LayerWeights *L = &f->w->layer[l];
+  Scratch *b = &f->b;
+  const uint32_t D = g->n_embd, E = g->n_experts, K = g->n_used, n = f->n, P = n * K;
+  bool ok = fwd_mat(f, L->router, fwd_dev(f, L->router), E, D, b->xf, D, n, b->logits, E);
+  if (ok)
+    fwd_probe(f, "router_logits", l, f->at, b->logits, (uint64_t)n * E, false);
+  /* the picks to the host and marked, then the shared expert queued: the GPU runs it while the host waits. the router
+     writes them into the host's mapped r_ids (the routing event covers the kernel); a probe's into ridx, copied */
+  ok = ok && ops_router(b->logits, (const float *)fwd_dev(f, L->router_bias), E, K, g->expert_scale, n,
+                        f->probe ? b->ridx : f->r_ids_dev, b->rw, NULL) &&
+       (!f->probe ||
+        hipMemcpyAsync(f->r_ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess) &&
+       (!f->cpu || !f->lane || P >= E || /* the CPU lane's: the step's FFN inputs and weights, with the picks */
+        (hipMemcpyAsync(f->cpu_xf, b->xf, (uint64_t)n * D * sizeof(float), hipMemcpyDeviceToHost, NULL) ==
+             hipSuccess &&
+         hipMemcpyAsync(f->cpu_rw, b->rw, P * sizeof(float), hipMemcpyDeviceToHost, NULL) == hipSuccess)) &&
+       fwd_guess_queue(f, l) && hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) &&
+       fwd_wait(f, f->routed);
+  if (!ok)
+    return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
+  /* the stream is past the last layer's experts (the router came after them): the visit ends their holds */
+  if (!membrane_visit(f->mem, (uint32_t)l, P >= E, err))
+    return false;
+  const int32_t *ids = f->r_ids;
+  for (uint32_t m = 0; l && P < E && m < P; m++) /* a small step's picks scored against its last layer's guess */
+    if (ids[m] >= 0 && (uint32_t)ids[m] < E)
+      membrane_score(f->mem, (uint32_t)l * E + (uint32_t)ids[m]);
+  fwd_guess_want(f, l);
+  fwd_probe(f, "route_idx", l, f->at, b->ridx, P, true);
+  fwd_probe(f, "route_w", l, f->at, b->rw, P, false);
+  /* the routed experts: the step whole, or in chunks of moe_rows (a large step's: its buffers a chunk's, its experts
+     read and held once for the step) */
+  const uint32_t C = f->moe_rows && f->moe_rows < n && P >= E ? f->moe_rows : n;
+  Carve c = {f->r_up, (uint8_t *)b->up, 0};
+  bool lane_done = false;
+  if (C == n)
+  {
+    if (!routed(f, l, ids, 0, n, true, &c, &lane_done, err))
+      return false;
+  }
+  else
+  {
+    bool held[OPS_MAX_EXPERTS] = {false};
+    for (uint32_t m = 0; m < P; m++)
+    {
+      if (ids[m] < 0 || (uint32_t)ids[m] >= E)
+        return fwd_fail(err, "the router picked an expert the model does not have");
+      f->picks[(uint32_t)l * E + (uint32_t)ids[m]]++;
+      if (!held[ids[m]] && !membrane_hold(f->mem, (uint32_t)l * E + (uint32_t)ids[m], err))
+        return false;
+      held[ids[m]] = true;
+    }
+    prefetch(f, l, P);
+    for (uint32_t r0 = 0; r0 < n; r0 += C)
+      if (!routed(f, l, ids + (uint64_t)r0 * K, r0, n - r0 < C ? n - r0 : C, false, &c, &lane_done, err))
+        return false;
+  }
   fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
   return true;
 }

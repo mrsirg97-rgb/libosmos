@@ -444,6 +444,10 @@ static bool scratch(Forward *f)
   const uint64_t ih = g->ix_head_dim, nh = g->ix_heads, egv = cols * (uint64_t)g->engram_head_dim;
   const uint64_t B = f->step, Fs = OPS_MAX_SELECT, NS = f->n_subs;
   const uint64_t S = f->max_tokens, P = S * K; /* the experts': a layer's sub-batches at once (forward's max_tokens) */
+  /* the routed experts' own buffers: a chunk's rows' pairs (moe_rows), the step's without; their tables the step's,
+     a chunk's carve and its 16-byte alignments after the chunks' before it */
+  const uint64_t PC = (f->moe_rows && f->moe_rows < S ? f->moe_rows : S) * K;
+  const uint64_t UP = FWD_UP_BYTES(P) + (S / (PC / K) + 1) * 10 * 16;
   uint64_t widest = (uint64_t)g->o_groups * g->o_lora > D ? (uint64_t)g->o_groups * g->o_lora : D;
   widest = HQ > widest ? HQ : widest; /* the attention's output: wo_a's groups read it whole */
   const struct
@@ -458,10 +462,10 @@ static bool scratch(Forward *f)
       {&b->kv, B * hd * F},       {&b->o, B * HQ * F},  {&b->oa, B * (uint64_t)g->o_groups * g->o_lora * F},
       {&b->y, B * D * F},         {&b->mid, NS * B * hc * D * F},   {&b->xf, S * D * F},
       {&b->logits, S * (uint64_t)g->n_experts * F}, {&b->vocab, (f->logit_rows && f->logit_rows < B ? f->logit_rows : B) * (uint64_t)g->n_vocab * F},
-      {&b->rw, S * K * F},        {&b->ga, P * FF * F},             {&b->upr, P * FF * F},
-      {&b->hh, P * FF * F},       {&b->ye, P * D * F},              {&b->moe, S * D * F},
+      {&b->rw, S * K * F},        {&b->ga, PC * FF * F},            {&b->upr, PC * FF * F},
+      {&b->hh, PC * FF * F},      {&b->ye, PC * D * F},              {&b->moe, S * D * F},
       {&b->sga, S * FF * F},      {&b->sup, S * FF * F},            {&b->shh, S * FF * F},
-      {&b->sye, S * D * F},       {&b->up, FWD_UP_BYTES(P)}, {&b->lat, B * hd * F},
+      {&b->sye, S * D * F},       {&b->up, UP}, {&b->lat, B * hd * F},
       {&b->kvc, B * hd * F},      {&b->scg, B * hd * F},            {&b->ikr, B * ih * F},
       {&b->qix, B * nh * ih * F}, {&b->wix, B * nh * F},
       {&b->kv_p, B * kv_row_bytes(KV_FP8, (uint32_t)hd)}, {&b->lat_p, B * kv_row_bytes(KV_FP4_E4M3, (uint32_t)hd)},
@@ -474,10 +478,10 @@ static bool scratch(Forward *f)
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
       {&b->ridx, S * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
       {&b->cand, B * f->cand_words * 4},
-      {&b->rwp, P * F},                 {&b->x16, B * (widest > egv ? widest : egv) * 2},
+      {&b->rwp, PC * F},                 {&b->x16, B * (widest > egv ? widest : egv) * 2},
       /* past the last slot, a part's tiles read whole: group_gemm_kernel loads a block's every column tile's x (the
          WMMAs past an expert's tokens skipped), up to 8 tiles past its own - as Qwen's (src/q4x/hip_forward.c) */
-      {&b->xe16, (FWD_MAX_SLOTS(P, g->n_experts) + 8 * MM_TILE) * (D > FF ? D : FF) * 2},
+      {&b->xe16, (FWD_MAX_SLOTS(PC, g->n_experts) + 8 * MM_TILE) * (D > FF ? D : FF) * 2},
       {&b->overflow, 4},          {&b->oa_cnt, FWD_MAX_GROUPS * 4},
       {&b->keep, B * 4},          {&b->back, B * 4},
       {&b->gw, S * FWD_GUESS_K * F}, /* a layer's tokens: a prompt's read ahead guesses them all (ahead.h) */
@@ -499,7 +503,7 @@ static bool scratch(Forward *f)
          hipHostMalloc((void **)&f->r_guess, S * FWD_GUESS_K * 4, hipHostMallocMapped | hipHostMallocCoherent) ==
              hipSuccess &&
          hipHostGetDevicePointer((void **)&f->r_guess_dev, f->r_guess, 0) == hipSuccess &&
-         hipHostMalloc((void **)&f->r_up, FWD_UP_BYTES(P), 0) == hipSuccess &&
+         hipHostMalloc((void **)&f->r_up, UP, 0) == hipSuccess &&
          (f->m_by = malloc(P * 4)) && (f->m_row = malloc(P * 4)) && (f->m_base = malloc(P * 4)) &&
          (f->m_slot0 = malloc(P * 4)) &&
          hipHostMalloc((void **)&f->stage, NS * B * (uint64_t)(f->n_eg = n_eg ? n_eg : 1) * cols * row, 0) ==
@@ -552,7 +556,7 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
                                const uint64_t *picks, char err[FORWARD_ERR])
 {
-  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0};
+  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0, 0};
   return forward_create_with(w, &o, err);
 }
 
@@ -570,7 +574,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
   f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->no_guess = o->no_guess, f->budget = budget;
-  f->ahead_limit = o->ahead_limit, f->logit_rows = o->logit_rows;
+  f->ahead_limit = o->ahead_limit, f->logit_rows = o->logit_rows, f->moe_rows = o->moe_rows;
   f->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
   if (max_tokens < FWD_MAX_BATCH) /* a small step's server: every buffer of a step at its size (DESIGN.md) */
     f->n_subs = 1, f->max_tokens = max_tokens, f->step = (max_tokens + MM_TILE - 1) / MM_TILE * MM_TILE;
