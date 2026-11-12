@@ -21,6 +21,7 @@ H = int(sys.argv[2]) if len(sys.argv) > 2 else 1  # A's 64-row halves: M = 64 H,
 Q = int(sys.argv[3]) if len(sys.argv) > 3 else 0  # 1: A a quarter at a time (64 x 128), double-buffered
 F32 = int(sys.argv[4]) if len(sys.argv) > 4 else 0  # 1: C accumulated in f32 (32 rows a core; with Q); 2: and a half's two quarters one pass
 if F32: Q = 1
+TRACE = int(os.environ.get('TRACE', '0'))  # bytes of trace buffer: column 0's cores traced
 NR = 32 if F32 else 64  # a core's output rows
 N = COLS * ROWS * NR
 WT, AT, CT1 = NR * 66 // 4, M * KT * 9 // 8 // 4 // (2 if Q else 1), M * NR * 9 // 8 // 4
@@ -30,8 +31,10 @@ def tap(total, off, n):  # n words from off, as rows of at most 1024
     inner = 1024 if n % 1024 == 0 else next(d for d in range(1024, 0, -1) if n % d == 0)
     return TensorAccessPattern((total,), off, [1, 1, n // inner, inner], [0, 0, inner, 1])
 
-@iron.jit
-def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int]):
+from aie.utils.trace.config import TraceConfig
+_TR = int(os.environ.get('TRACE', '0'))
+@iron.jit(**({"trace_config": TraceConfig(trace_size=_TR)} if _TR else {}))
+def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int], trace_size: CompileTime[int] = 0):
     i32 = np.dtype[np.int32]
     cdt = np.dtype[np.float32] if F32 else i32
     wt, at = (np.ndarray[(n,), i32] for n in (WT, AT))
@@ -69,7 +72,8 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int]):
                             ai.release(1)
                     wi.release(1)
                 co.release(1)
-            workers.append(Worker(body, fn_args=[a2.cons(), w2[r].cons(), c2[r].prod(), step], tile=Tile(col, 2 + r), stack_size=0x1100 if F32 else 0xD00))
+            workers.append(Worker(body, fn_args=[a2.cons(), w2[r].cons(), c2[r].prod(), step], tile=Tile(col, 2 + r), stack_size=0x1100 if F32 else 0xD00,
+                                  trace=1 if (TRACE and col == 0) else None))
     TW, TA, TC = cols * KS * ROWS * WT, KS * H * (2 if Q else 1) * AT, cols * ROWS * CT
     def seq(W, A, C, *hs):
         ap, wp, cc = hs[:cols], hs[cols:2 * cols], hs[2 * cols:]
@@ -80,7 +84,10 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int]):
             cc[col].drain(C, tap=tap(TC, col * ROWS * CT, ROWS * CT), wait=True)
     rt = Runtime(seq, [np.ndarray[(TW,), i32], np.ndarray[(TA,), i32], np.ndarray[(TC,), cdt]]
                  + [f.prod() for f in a_l3] + [f.prod() for f in w_l3] + [f.cons() for f in c_l3])
-    return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
+    prog = Program(iron.get_current_device(), rt, workers=workers)
+    if TRACE:
+        prog.enable_trace(TRACE, workers=[w for w in workers[:ROWS]], egress_shim_col=int(os.environ.get("TRACE_COL", "0")))
+    return prog.resolve_program()
 
 def main():
     sys.path.insert(0, os.path.expanduser('~/Projects/llama.cpp/gguf-py'))
@@ -109,7 +116,11 @@ def main():
     wt_ = iron.tensor(w.reshape(-1).view(np.int32), dtype=np.int32, device="npu")
     at_ = iron.tensor(a.view(np.int32), dtype=np.int32, device="npu")
     ct_ = iron.zeros(COLS * ROWS * CT, dtype=np.float32 if F32 else np.int32, device="npu")
-    bench = run_iters(fused32, wt_, at_, ct_, cols=COLS, warmup=1, iters=5)
+    if TRACE:  # the runtime supplies the trace buffer and writes trace.txt
+        bench = run_iters(fused32, wt_, at_, ct_, cols=COLS, warmup=0, iters=1)
+        print("trace.txt", os.path.exists("trace.txt"))
+    else:
+        bench = run_iters(fused32, wt_, at_, ct_, cols=COLS, warmup=1, iters=5)
     if F32:  # a core's C: [half][z][j][8 m + n], f32
         cf = ct_.numpy().reshape(COLS * ROWS, H, M // 8, NR // 8, 8, 8)
         got = np.concatenate([cf[i].transpose(0, 1, 3, 2, 4).reshape(H * M, NR) for i in range(COLS * ROWS)], axis=1)

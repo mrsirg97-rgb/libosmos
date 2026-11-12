@@ -363,11 +363,13 @@ static inline void mm_f32acc2(const bfp16ebs8 *__restrict pA0, const bfp16ebs8 *
 
 extern "C" void fused_step_f32x2(const uint8_t *__restrict w, uint8_t *__restrict a0, uint8_t *__restrict a1,
                                  float *__restrict c, int32_t kstep, int32_t half) {
+  event0();
   float *ch = c + half * (64 * NR);
   if (kstep == 0)
     for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
   if (half == 0) decode_tile3(w);
   mm_f32acc2<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a0, (bfp16ebs8 *)a1, (bfp16ebs8 *)Bm, ch);
+  event1();
 }
 
 // a quarter of a K-step's A: piece p = 2 * half + kh; the W tile (NR rows) decoded at piece 0; C (2 halves of 64 x NR

@@ -172,6 +172,13 @@ W 2 x 2.1, C 16), stack 4.3 - ~57 KB. the single pass's third A buffer fits with
 K-step): **5.89 TFLOP/s (+4.6%)**, the same 9.0e-3 - less than the ~15% hoped: C's traffic was not the cost. a core's
 K-step ~11.4 us: decode ~6 (32 rows x 256), two matmuls ~1.2, ~4 unaccounted - waits on A and W (a column's 4 cores
 in lockstep on one A broadcast). next: trace a core's stalls (mlir-aie's event trace) before changing more.
+**traced** (fused32.py, TRACE=bytes: @iron.jit(trace_config=TraceConfig(...)) - the runtime then supplies and writes
+the buffer; parse.py + get_trace_summary; the full 8 columns leave no channel for trace packets, so 1 column, egress
+through column 2): every core alike - a K-step's half 0 (decode + matmul) ~12,200-12,580 cycles, half 1 (matmul)
+1,747-1,803; **86% of the span in kernels, 14% lock stalls (a constant ~1,175 cycles before each call - handoff, not a
+starved buffer), memory stalls 1% of kernel time, the vector unit busy only 34% of kernel time**. so not waits: the
+cores are scalar-bound inside the decode (index extraction, row addresses, sign words - no vector gather on AIE2P);
+the matmul ~12% of a K-step. next: the decode's scalar path; a K-step's two halves one call (half the handoffs).
 
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
