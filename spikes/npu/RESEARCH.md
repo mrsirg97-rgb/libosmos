@@ -160,6 +160,13 @@ bfp16 at every partial sum (32 an output now, 16 before; 8-bit mantissas, an exp
 precision, apart from A's: C in f32 - 32 KB at 128 x 64, past the budget; at 32 rows a core 16 KB (~51 KB in all), a
 core's efficiency the same (the decode a weight, the rows an expert unchanged). next: a matmul keeping C f32 (mm_bfp's
 8x8 block MACs, accumulated into f32), N 32 a core.
+**C in f32** (fused_iq2xxs.cc's mm_f32acc: a C sub-tile's partial sums loaded from f32 memory into the accumulator, the
+same mac_8x8_8x8T loop, stored back f32; 32 rows a core, ~52 KB): **corr 0.999971, worst 9.0e-3** (from 1.3e-1: 14x;
+what is left bfp16's operand rounding), **5.63-5.65 TFLOP/s** (0.176 a core; -24%: C's f32 traffic a quarter, the
+fixed costs a call against 32 rows). a half's two quarters in one pass (C loaded and stored once) does not fit: two
+quarters held at once and IRON sizes A's fifo for a third (27 KB), ~1 KB past 64. so f32 is the baseline (the NPU's
+results feed the model: 13% worst-case accumulation error is what the KLD protocol would refuse) and speed is won back
+inside it: the kernel's 4.3 KB stack, the single pass, the per-core decode.
 
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
