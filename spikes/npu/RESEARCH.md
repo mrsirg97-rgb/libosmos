@@ -132,6 +132,22 @@ vectors are 128 bits at least (no 8-byte vector). the indices pre-assembled (an 
 octet order - **9.95 us** (corr 0.999949; the scalar reference overwritten by it each decode), + matmul 11.9:
 ~10 TFLOP/s for the array at 128 rows. DeepSeek's mix ~9.6: ~26% of the routed experts, a step ~9% faster.
 
+## the whole array: one IQ2_XXS expert matmul on 32 cores (spikes/npu/fused/fused32.py, 2026-11-12)
+C (64 x 2048) = A (64 x 4096) x W^T, W UD-IQ1_M's IQ2_XXS bytes: core (row r, column c) owns 64 output rows, all 16
+K-steps of 256 through it (fused_iq2xxs.cc's fused_step, v5 decode). a K-step's A tile (18 KB bfp16) from each
+column's shim through its memtile, broadcast (forward, 4 consumers); a column's W stream split at its memtile (4
+cores, double-buffered); C in the core over the K-steps, joined at the memtile. corr 0.9995 against Aq x Wq^T (max
+7e-2: C re-rounded to bfp16 at each of the 16 K-steps - accumulate f32 next).
+| columns x 4 | us | TFLOP/s | a core | of one core alone (0.163) |
+| --- | --- | --- | --- | --- |
+| 1 | 323 | 0.42 | 0.104 | 64% |
+| 2 | 256 | 1.05 | 0.131 | 80% |
+| 4 | 279 | 1.92 | 0.120 | 74% |
+| 8 | 271 | **3.96** | 0.124 | 76% |
+linear in columns: DRAM and the memtiles keep 32 cores fed (~20 GB/s of W and A). a core's ~24% loss: the A tile
+single-buffered (memory: 54 of 64 KB) - a K-step waits for its 18 KB. next: M = 128 with one decode (two A halves in
+turn: the decode's cost a FLOP halved, the halves' fetch overlapped), f32 accumulation.
+
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
 | | s | share |
