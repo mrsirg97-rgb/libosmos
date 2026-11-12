@@ -167,6 +167,11 @@ fixed costs a call against 32 rows). a half's two quarters in one pass (C loaded
 quarters held at once and IRON sizes A's fifo for a third (27 KB), ~1 KB past 64. so f32 is the baseline (the NPU's
 results feed the model: 13% worst-case accumulation error is what the KLD protocol would refuse) and speed is won back
 inside it: the kernel's 4.3 KB stack, the single pass, the per-core decode.
+a core's memory (llvm-size on its elf): .data 4.3 KB (the bf16 grid, kodd, krow32), .bss 9.3 (Bm), fifos ~39 (A 2 x 9,
+W 2 x 2.1, C 16), stack 4.3 - ~57 KB. the single pass's third A buffer fits with W single-buffered (a 2 KB tile once a
+K-step): **5.89 TFLOP/s (+4.6%)**, the same 9.0e-3 - less than the ~15% hoped: C's traffic was not the cost. a core's
+K-step ~11.4 us: decode ~6 (32 rows x 256), two matmuls ~1.2, ~4 unaccounted - waits on A and W (a column's 4 cores
+in lockstep on one A broadcast). next: trace a core's stalls (mlir-aie's event trace) before changing more.
 
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):

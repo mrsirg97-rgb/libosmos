@@ -44,9 +44,10 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int]):
     for col in range(cols):
         a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=2 if Q else 1)
         a2 = a3.cons().forward(obj_type=at, name=f"A2_{col}", depth=2 if Q else 1)
-        w3 = ObjectFifo(np.ndarray[(ROWS * WT,), i32], name=f"W3_{col}", depth=2)
+        wd = 1 if F32 == 2 else 2  # the single pass: one W buffer (its third A buffer needs the room)
+        w3 = ObjectFifo(np.ndarray[(ROWS * WT,), i32], name=f"W3_{col}", depth=wd)
         w2 = w3.cons().split([WT * r for r in range(ROWS)], obj_types=[wt] * ROWS,
-                             names=[f"W2_{col}_{r}" for r in range(ROWS)], depths=[2] * ROWS)
+                             names=[f"W2_{col}_{r}" for r in range(ROWS)], depths=[wd] * ROWS)
         c3 = ObjectFifo(np.ndarray[(ROWS * CT,), cdt], name=f"C3_{col}", depth=1)
         c2 = c3.prod().join([CT * r for r in range(ROWS)], obj_types=[ct] * ROWS,
                             names=[f"C2_{col}_{r}" for r in range(ROWS)], depths=[1] * ROWS)
