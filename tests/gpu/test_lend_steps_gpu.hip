@@ -1,6 +1,6 @@
 // a long step in the expert cache's memory (0.6.9: its buffers lent - ForwardOptions' fixed_steps off) against the
 // same step in buffers of its own (fixed_steps), and against a cache too small to lend them (the step a sub-batch at a
-// time): a long step over sub-batches, a short one, a second long one, a short one - every step's kept logits the
+// time): two long steps over sub-batches (the block kept between them), a short one (it given back), a long one, a short one - every step's kept logits the
 // same bits each way. needs a gfx1151 and a model (test_model.h); skipped (77) without.
 #include <hip/hip_runtime.h>
 
@@ -27,7 +27,7 @@ extern "C" {
 #include "test_model.h"
 
 constexpr uint32_t kCtx = 16384, kMaxTokens = 8192;
-constexpr uint32_t kSteps[] = {6000, 5, 3000, 5};  // long (three sub-batches), short, long (two), short
+constexpr uint32_t kSteps[] = {6000, 3000, 5, 3000, 5};  // long (three sub-batches), long (two: the block kept), short (given back), long, short
 constexpr uint64_t kBudget = 24ull << 30;          // one forward at a time: a small pool, the rest streamed
 
 struct Run {
@@ -89,9 +89,9 @@ int main() {
   std::printf("  fixed steps: every buffer the forward's own, %zu steps\n", own.rows.size());
 
   const Run lent = run(w, false, kBudget, ids);
-  CHECK(lent.bytes > 0 && lent.lent == 2 && lent.split == 0);
+  CHECK(lent.bytes > 0 && lent.lent == 3 && lent.split == 0);
   for (size_t i = 0; i < own.rows.size(); i++) CHECK(lent.rows[i] == own.rows[i]);
-  std::printf("  lent: the long steps' %.2f GiB from the expert cache, twice - every step's kept rows the same bits\n",
+  std::printf("  lent: the long steps' %.2f GiB from the expert cache, borrowed twice (kept over two long steps) - every step's kept rows the same bits\n",
               lent.bytes / double(1ull << 30));
 
   // a cache smaller than the block: the dense weights' build and a little more (forward_budget at 0)
@@ -102,7 +102,7 @@ int main() {
   const uint64_t dense = forward_budget(f0);
   forward_destroy(f0);
   const Run split = run(w, false, dense + (lent.bytes / 2), ids);
-  CHECK(split.lent == 0 && split.split == 2);
+  CHECK(split.lent == 0 && split.split == 3);
   for (size_t i = 0; i < own.rows.size(); i++) CHECK(split.rows[i] == own.rows[i]);
   std::printf("  a cache too small to lend it: the long steps a sub-batch at a time - the same bits\n");
   std::printf("[test_lend_steps_gpu] ok\n");

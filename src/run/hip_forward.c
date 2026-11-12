@@ -231,6 +231,8 @@ static bool copy_on_stream(void *dst, const void *src, uint64_t bytes, void *ctx
 
 /* the units: each layer's experts (the pool's, every one: the budget's read in first), then every other tensor the
    layers use - all of them resident (resident.h). Engram's tables are read a row at a time and are not units */
+static uint64_t lend_tail(const Forward *f, uint64_t cache);
+
 static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
 {
   const Weights *w = f->w;
@@ -290,8 +292,8 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   else if (!(f->res = resident_create(res, n_t, hip_slots(), FWD_FETCH_THREADS, perr)))
     ok = fwd_fail(err, perr);
   else if (!direct_units(f, all) || !f->pool_room ||
-           !(f->hs = host_slots_create(f->pool_room + 2 * largest_unit(f, all), perr)) ||
-           !(f->hs_stream = host_slots_create(stream_room + 2 * largest_unit(f, all), perr)))
+           !(f->hs = host_slots_create(f->pool_room + 2 * largest_unit(f, all), lend_tail(f, f->pool_room + 2 * largest_unit(f, all)), perr)) ||
+           !(f->hs_stream = host_slots_create(stream_room + 2 * largest_unit(f, all), 0, perr)))
     ok = fwd_fail(err, perr[0] ? perr : "out of memory (the pools' units), or a budget with no experts");
   else /* the budget's experts its warm start: read at the first step (membrane_warm), not here - fit.h's builds */
   {
@@ -484,6 +486,28 @@ static void buffers(Forward *f, uint64_t S, uint64_t NS, FwdBuf out[FWD_BUFS])
   memcpy(out, want, sizeof want);
 }
 
+/* the lent block's layout (lend_steps): the buffers whose size is the step's, not a sub-batch's, one after another
+   from FWD_LEND_ALIGN boundaries, the block whole 2 MiB steps (the expert cache's tail: host_slots_create) */
+static void lend_layout(Forward *f)
+{
+  FwdBuf whole[FWD_BUFS], own[FWD_BUFS];
+  buffers(f, f->max_tokens, f->n_subs, whole);
+  buffers(f, f->step, 1, own);
+  f->n_lend = 0, f->lend_bytes = 0;
+  for (size_t i = 0; f->lend_steps && i < FWD_BUFS; i++)
+    if (own[i].bytes != whole[i].bytes)
+      f->lend_field[f->n_lend] = own[i].field, f->lend_off[f->n_lend++] = f->lend_bytes,
+      f->lend_bytes += (whole[i].bytes + FWD_LEND_ALIGN - 1) / FWD_LEND_ALIGN * FWD_LEND_ALIGN;
+  f->lend_bytes = (f->lend_bytes + (2u << 20) - 1) / (2u << 20) * (2u << 20);
+}
+
+/* the expert cache's tail its own registration for the block (host_slots_create): the block, when the cache is
+   larger than it by a unit at least; else none (a long step then a sub-batch at a time) */
+static uint64_t lend_tail(const Forward *f, uint64_t cache)
+{
+  return f->lend_steps && f->lend_bytes + (64u << 20) < cache ? f->lend_bytes : 0;
+}
+
 /* the buffers: a step's of more than one sub-batch (those of its size, not a sub-batch's) lent by the expert cache
    while it runs, when they are (lend_steps: DESIGN.md, "0.6.9") - each its own of a sub-batch's size the rest of the
    time, the lent block's layout kept (lend_field, lend_off) */
@@ -495,21 +519,11 @@ static bool scratch(Forward *f)
   const uint64_t row = gguf_bytes(f->w->layer[0].eg_embd ? f->w->layer[0].eg_embd->type : 0, g->engram_head_dim);
   const uint64_t cols = g->engram_cols, B = f->step, NS = f->n_subs;
   const uint64_t S = f->max_tokens, P = S * K;
-  FwdBuf whole[FWD_BUFS], own[FWD_BUFS];
-  buffers(f, S, NS, whole);
-  if (f->lend_steps)
-    buffers(f, B, 1, own);
-  else
-    memcpy(own, whole, sizeof whole);
-  f->n_lend = 0, f->lend_bytes = 0;
+  FwdBuf own[FWD_BUFS];
+  buffers(f, f->lend_steps ? B : S, f->lend_steps ? 1 : NS, own);
   for (size_t i = 0; i < FWD_BUFS; i++)
-  {
     if (!fwd_alloc(own[i].field, own[i].bytes))
       return false;
-    if (own[i].bytes != whole[i].bytes)
-      f->lend_field[f->n_lend] = own[i].field, f->lend_off[f->n_lend++] = f->lend_bytes,
-      f->lend_bytes += (whole[i].bytes + FWD_LEND_ALIGN - 1) / FWD_LEND_ALIGN * FWD_LEND_ALIGN;
-  }
   float pre0[FWD_MAX_BATCH * OPS_MAX_HC] = {0}; /* the first block's pre, a token: stream 0 */
   for (uint64_t i = 0; i < B; i++)
     pre0[i * hc] = 1.0f;
@@ -641,6 +655,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   else if (!(f->eg_read = rowread_create(FWD_ROW_THREADS)))
     ok = fwd_fail(err, "Engram's readers could not start");
   const size_t nu = (size_t)n_layers * w->geo.n_experts;
+  lend_layout(f);
   ok = ok && units(f, budget, picks, err) && oa_tables(f, err) &&
        ((f->picks = calloc(nu, sizeof *f->picks)) ||
         fwd_fail(err, "out of memory"));
@@ -670,6 +685,7 @@ void forward_destroy(Forward *f)
   if (!f)
     return;
   (void)hipDeviceSynchronize(); /* a failed step's kernels done: what is freed or unlocked, the GPU is past */
+  fwd_give_back(f);             /* the Scratch views its own again (their buffers freed below) */
   membrane_destroy(f->mem);
   host_slots_destroy(f->hs), host_slots_destroy(f->hs_stream); /* after the membrane: no unit still in them */
   resident_destroy(f->res);
