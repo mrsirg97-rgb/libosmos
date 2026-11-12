@@ -99,6 +99,17 @@ together 19.9 us: 0.105 TFLOP/s a core at M = 64. the decode a weight's fixed co
 DeepSeek's ~128 rows an expert in 8K steps ~6.6 TFLOP/s for the array (M = 512: ~22). half of a layer's experts on
 the NPU beside the GPU: a prompt step ~20-40% faster on a rough model (to profile: the experts' share of a step).
 
+## the fused decode, faster (2026-11-12)
+| fused IQ2_XXS, one 64 x 256 tile | decode | + matmul | at M = 64 |
+| --- | --- | --- | --- |
+| v1 nested loops, row-major words | 19.8 us | 19.9 | 0.105 TFLOP/s |
+| v2 group-major words, one counted loop | 17.9 | 19.9 | 0.106 |
+| **v3 no setup pass: words read in place, d/8 a row, (2s + 1) from a 16-entry bf16 table, the scale a vector product a band-group** | **12.0** | **13.4** | **0.157** |
+the setup pass (rows' words unpacked, 8 lane inserts and an emulated f32 product a row) had been 7.5 of v2's 18 us.
+v3: 1.36 Gvalues/s, corr 0.99994 (d/8 and its product rounded to bf16: worst 1.8e-2). at ~128 rows an expert ~9.1
+TFLOP/s for the array: ~25% of DeepSeek's routed experts, a step ~9% faster. what is left a 64 values: 8 grid rows'
+index extracts and loads, 8 sign lookups into a mask, the words as 16-bit halves (66-byte blocks: 2-byte aligned).
+
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
 | | s | share |
