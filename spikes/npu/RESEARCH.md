@@ -12,7 +12,10 @@
   the same array at the same clock: no Halo-only headroom.
 - latency: 56.0 us a launch end to end, average (the literature's 72).
 - throughput: 71,765 ops/s - ~14 us a launch when they queue: dispatch pipelines; a dependent chain pays ~56.
-- no bandwidth test in this xrt-smi (2.21.75): the DRAM read rate still to be measured with a kernel of our own.
+- no bandwidth test in this xrt-smi (2.21.75); mlir-aie 1.4.5's getting_started/00_memcpy (every shim DMA in-out
+  pair, 8 columns x 2 channels, a passthrough kernel; ~/npu-venv, llvm-aie 22.0.0.2026111001): 64 MiB in and 64 out
+  in 1,628 us on the NPU (1,734 dispatched, 2,022 end to end, 5 runs, MAD 11 us) - **82.4 GB/s read + write together**,
+  ~41 each way: above the literature's ~50 (Krackan, DDR5-5600). a read-only rate, and the GPU's loss beside it, next.
 - zero copy (spikes/npu/share.hip; libxrt-dev, a uuid.h shim for its headers):
   - host pages registered with HIP (host_slots' kind: the expert cache) as a userptr BO, flags host_only: accepted;
     its map the same pages, the GPU's bytes seen, its device address the process's own (SVA: the NPU's PASID in the
