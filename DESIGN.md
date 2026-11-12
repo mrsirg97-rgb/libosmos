@@ -3539,6 +3539,45 @@ shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token)
 kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
 out), local only.
 
+### 0.6.9: a long prompt's steps in memory the expert cache lends (2026-11-12, low-power)
+
+**why large steps.** a prompt step's routed experts are held for the step; each is read and decoded once for all of
+the step's tokens that picked it. at 2,048 tokens a step (the packs' since 0.5.x) an expert of 384 sees ~32 rows; at
+8,192, ~128 - the matmuls amortized four times over (not the SSD's reads: the prompt reads most experts either way).
+measured (UD-IQ1_M, dbench auto, 8K and 64K prompts, two rounds): 2,048 462-473 / 471-508 tok/s; 8,192 in buffers of
+its own 552-566 / 546-569 - but its 4 GiB of buffers (the pairs' ga, upr, hh, ye, xe16; the tokens' xf, moe, the
+shared expert's; mid, f_post, f_comb a sub-batch each) cost the cache 4.3 GiB of budget (102.9 against 107.3), and
+0.5.x had measured drafted decode 6-10% slower for it.
+
+**measured away first: chunks.** the routed experts of an 8,192-token step run 2,048 rows at a time (moe_rows): the
+buffers a chunk's. the same bits, but 492-497 tok/s - the gain was the rows a launch, and a chunk gives it back.
+
+**lent.** the forward keeps a sub-batch's buffers of its own (hip_forward.c's buffers(): the ones whose size is the
+step's, laid out in one block - 4.05 GiB at 8,192). a step of more than one sub-batch borrows the block from the
+expert cache: pool_lend evicts the units in one window at the end of the cache's arena (arena_tail / arena_take: one
+block, not the holes first fit leaves) and counts it in the pool's bytes - room for units made elsewhere while it is
+out. the first version ran the step in those registered pages: 484-511 tok/s, half the gain. registered pages are
+coherent - the GPU does not keep its writes there in its cache (a 2 MiB set written and read again: 825 GB/s, against
+hipMalloc's 1,448; reads alike, a 256-byte gather on 4 KiB pages 70 against 101, huge pages - THP is "always" here -
+101). so the cache's tail is its own registration (host_slots_create's tail): a long step unregisters it and drops
+its pages (MADV_DONTNEED: the RAM back, 7-150 ms), allocates the buffers with hipMalloc (270-530 ms) and zeroes them
+(20-140); the first step of a sub-batch or less (a decode's) frees them and populates and registers the tail again.
+the block is kept over consecutive long steps: a 64K prompt borrows once. a cache that cannot lend it (smaller than
+the block, a held unit there) runs the step a sub-batch at a time: a token's bits are its own (mm's), so the same.
+
+**measured** (low-power, UD-IQ1_M, two rounds interleaved, every stream the same in all):
+
+| steps | budget | 8K / 64K prompt | decode after 8K / at 64K | drafted after 2K / 8K |
+| --- | --- | --- | --- | --- |
+| 2,048 | 106.9 GiB | 468-473 / 472-508 | 15.7 / 15.0-15.9 | 19.9-20.1 / 21.7-21.8 |
+| 8,192 fixed | 102.8-103.0 | 552-562 / 546-568 | 15.1-15.3 / 14.9 | |
+| 8,192 lent | 105.7-105.9 | 484-503 / 553-586 | 15.4 / 14.9-15.4 | 19.5-19.9 / 21.0 |
+
+an 8K prompt is one step: it pays the borrow (0.45-0.7 s, hipMalloc most of it) alone - allocating it alongside the
+step's first layers would take most of that back (not done). the decode just after a long prompt reads back the
+experts the block evicted. Qwen gains less from larger steps (UD-IQ3_XXS, a 16K prompt: 2,048 736-763 tok/s, 4,096
+803-805, 8,192 830-831) and holds every expert resident - no cache to lend from; its packs stay at 4,096.
+
 ### 0.6.8: osmos-evo-A, the default DeepSeek pack (2026-11-12, low-power)
 
 **what it is.** UD-IQ1_M with two of osmos's changes, each scored against 0.6.6's reference before it was kept:

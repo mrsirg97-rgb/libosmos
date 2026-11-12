@@ -64,7 +64,7 @@ static void test_refusals(int fd)
 {
   Mem m = {0};
   char err[POOL_ERR];
-  const Slots s = {fake_alloc, fake_free, &m};
+  const Slots s = {fake_alloc, fake_free, &m, NULL, NULL};
   const PoolUnit bad[] = {{.n_parts = 0}, {.n_parts = 4}, {.part = {{fd, 0, 0}}, .n_parts = 1},
                           {.part = {{fd, FILE_BYTES - 1, 2}}, .n_parts = 1}, {.part = {{9999, 0, 1}}, .n_parts = 1}};
   for (int i = 0; i < 5; i++)
@@ -130,7 +130,7 @@ static void test_layout(int fd)
   u[7] = (PoolUnit){.part = {{fd, 3, RESIDENT_ARENA / 512}}, .n_parts = 1}; /* small enough for the file */
   Mem m = {0};
   char err[POOL_ERR] = "";
-  Resident *r = resident_create(u, N, (Slots){fake_alloc, fake_free, &m}, 4, err);
+  Resident *r = resident_create(u, N, (Slots){fake_alloc, fake_free, &m, NULL, NULL}, 4, err);
   if (!r)
     fprintf(stderr, "  %s\n", err);
   assert(r);
@@ -141,7 +141,7 @@ static void test_layout(int fd)
   resident_destroy(r);
   assert(m.n == 0);
   /* none: an empty set */
-  r = resident_create(u, 0, (Slots){fake_alloc, fake_free, &m}, 4, err);
+  r = resident_create(u, 0, (Slots){fake_alloc, fake_free, &m, NULL, NULL}, 4, err);
   assert(r && resident_bytes(r) == 0 && !resident_dev(r, 0, dev));
   resident_destroy(r);
   /* past an arena: units of the whole file, the second arena begun where the first cannot hold the next */
@@ -149,7 +149,7 @@ static void test_layout(int fd)
   static PoolUnit big[BIG];
   for (int i = 0; i < BIG; i++)
     big[i] = (PoolUnit){.part = {{fd, 0, FILE_BYTES}}, .n_parts = 1};
-  r = resident_create(big, BIG, (Slots){fake_alloc, fake_free, &m}, 4, err);
+  r = resident_create(big, BIG, (Slots){fake_alloc, fake_free, &m, NULL, NULL}, 4, err);
   assert(r && m.n == 2 && resident_bytes(r) == 2 * RESIDENT_ARENA);
   verify(r, big, BIG, &m);
   resident_destroy(r);
@@ -175,7 +175,7 @@ static void test_room(int fd)
                          {.part = {{-1, 0, 64}}, .n_parts = 1}};
   Mem m = {0};
   char err[POOL_ERR] = "";
-  Resident *r = resident_create(u, 2, (Slots){alloc_ab, fake_free, &m}, 4, err);
+  Resident *r = resident_create(u, 2, (Slots){alloc_ab, fake_free, &m, NULL, NULL}, 4, err);
   assert(r);
   const void *dev[POOL_PARTS];
   assert(resident_dev(r, 0, dev));
@@ -189,7 +189,7 @@ static void test_room(int fd)
   resident_destroy(r);
   assert(m.n == 0);
   const PoolUnit bad = {.part = {{-1, 8, 64}}, .n_parts = 1};
-  assert(!resident_create(&bad, 1, (Slots){alloc_ab, fake_free, &m}, 4, err) && m.n == 0);
+  assert(!resident_create(&bad, 1, (Slots){alloc_ab, fake_free, &m, NULL, NULL}, 4, err) && m.n == 0);
   printf("  room: a part of no file laid out after the file's, not read; with an offset refused\n");
 }
 

@@ -134,7 +134,7 @@
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m",
       "rig": {"id": "deepseek-1017-evo-a", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-evo"]},
-      "settings": {"no_guess": true, "max_context": 1048576}
+      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 8192}
     },
     "ud-iq1_s": {
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_S (speed): 19.5 tok/s plain, 42.7 drafted, 1M context", "quality": {"wiki_kld": 0.2592, "agent_kld": 0.0664},
@@ -143,7 +143,7 @@
       "picks": "picks-ud-iq1_s", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_s",
       "rig": {"id": "deepseek-1017-ud-s", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-s"]},
-      "settings": {"no_guess": true, "max_context": 1048576}
+      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 8192}
     },
     "ud-iq1_m": {
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality): 17.6 tok/s plain, 35.1 drafted, 1M context", "quality": {"wiki_kld": 0.1895, "agent_kld": 0.0479},
@@ -152,7 +152,7 @@
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m",
       "rig": {"id": "deepseek-1017-ud-m", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-m"]},
-      "settings": {"no_guess": true, "max_context": 1048576}
+      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 8192}
     },
     "ud-iq2_xxs": {
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ2_XXS (slow, the closest to the model): 14.3 tok/s plain, 26.0 drafted, 1M context", "quality": {"wiki_kld": 0.1255, "agent_kld": 0.0361},
@@ -161,7 +161,7 @@
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq2_xxs",
       "rig": {"id": "deepseek-1017-ud-l", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-l"]},
-      "settings": {"no_guess": true, "max_context": 1048576}
+      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 8192}
     },
     "qwen38-ud-iq3_xxs": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS: 27 tok/s plain, 46 drafted (its MTP head), 262K context",

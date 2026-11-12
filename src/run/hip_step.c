@@ -4,6 +4,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
+#include "osmos/mem/host_slots.h"
 #include "lane.h"
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/gpu/mv.h"
@@ -237,13 +238,108 @@ static bool fail_held(Forward *f)
   return false;
 }
 
+/* Scratch's views of xf .. f_comb at their whole buffers; and the whole buffers' record (Forward's xf0 ..) theirs */
+static void views_whole(Forward *f)
+{
+  f->b.xf = f->xf0, f->b.moe = f->moe0, f->b.mid = f->mid0, f->b.f_post = f->f_post0, f->b.f_comb = f->f_comb0;
+}
+
+static void views_record(Forward *f)
+{
+  f->xf0 = f->b.xf, f->moe0 = f->b.moe, f->mid0 = f->b.mid, f->f_post0 = f->b.f_post, f->f_comb0 = f->b.f_comb;
+}
+
+/* 0.6.9: a step of more than one sub-batch in memory the expert cache gives up for it (DESIGN.md, "0.6.9"): the
+   cache's tail emptied (membrane_lend: its units gone, the block counted) and its pages given back to the system
+   (host_slots_drop_tail), the buffers of the step's size in GPU memory of their own in their place (registered pages
+   are coherent: the GPU does not cache its writes there - a step's buffers in them ran 10% slower), zeroed as
+   fwd_alloc's are; the forward's own (a sub-batch's) put aside. false, nothing changed, when it cannot be had (the
+   step then a sub-batch at a time) */
+static bool borrow(Forward *f)
+{
+  char merr[MEMBRANE_ERR];
+  uint8_t *blk = membrane_lend(f->mem, f->lend_bytes, merr);
+  if (!blk)
+    return false;
+  void *buf = NULL;
+  if (!host_slots_drop_tail(f->hs))
+    return membrane_unlend(f->mem, blk, f->lend_bytes), false;
+  if (hipMalloc(&buf, f->lend_bytes) != hipSuccess || hipMemsetAsync(buf, 0, f->lend_bytes, NULL) != hipSuccess)
+  {
+    (void)hipFree(buf);
+    if (host_slots_keep_tail(f->hs))
+      membrane_unlend(f->mem, blk, f->lend_bytes);
+    else /* the tail's pages not had back: the block the cache's no more, no step lent again */
+      f->lend_lost = true;
+    return false;
+  }
+  views_whole(f);
+  for (uint32_t i = 0; i < f->n_lend; i++)
+    f->lend_own[i] = *f->lend_field[i], *f->lend_field[i] = (uint8_t *)buf + f->lend_off[i];
+  views_record(f);
+  f->lent = buf, f->lent_blk = blk;
+  return true;
+}
+
+/* the buffers freed, the tail's pages had back and registered, the block the cache's again; the forward's own
+   buffers its again. the GPU waited for first */
+void fwd_give_back(Forward *f)
+{
+  if (!f->lent)
+    return;
+  (void)hipDeviceSynchronize();
+  views_whole(f);
+  for (uint32_t i = 0; i < f->n_lend; i++)
+    *f->lend_field[i] = f->lend_own[i];
+  views_record(f);
+  (void)hipFree(f->lent);
+  if (host_slots_keep_tail(f->hs))
+    membrane_unlend(f->mem, f->lent_blk, f->lend_bytes);
+  else
+    f->lend_lost = true; /* the pages not had back: the block stays out of the cache, no step lent again */
+  f->lent = NULL, f->lent_blk = NULL;
+}
+
+static bool step(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
+
+/* a long step borrows the block and keeps it for the long steps after it (a long prompt's: one borrow); the first
+   step of a sub-batch or less (a decode's) gives it back */
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
 {
-  const Geometry *g = f->g;
   if (!n || n > f->max_tokens)
     return fwd_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
   if (!membrane_warm(f->mem, err)) /* the budget's experts, at the first step (nothing to do after it) */
     return false;
+  if (!f->lend_steps || n <= f->step)
+  {
+    fwd_give_back(f);
+    return step(f, seqs, tokens, n, err);
+  }
+  if (!f->lent && (f->lend_lost || !borrow(f))) /* no block to be had: a sub-batch at a time - a token's bits the same */
+  {
+    f->n_split++;
+    for (uint32_t at = 0; at < n; at += f->step)
+      if (!step(f, seqs + at, tokens + at, n - at < f->step ? n - at : f->step, err))
+        return false;
+    return true;
+  }
+  f->n_lent++;
+  return step(f, seqs, tokens, n, err);
+}
+
+void forward_lends(const Forward *f, uint64_t *bytes, uint64_t *lent, uint64_t *split)
+{
+  if (bytes)
+    *bytes = f && f->lend_steps ? f->lend_bytes : 0;
+  if (lent)
+    *lent = f ? f->n_lent : 0;
+  if (split)
+    *split = f ? f->n_split : 0;
+}
+
+static bool step(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
+{
+  const Geometry *g = f->g;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
   if (!place(f, seqs, tokens, n, err) || !fwd_engram_issue(f, err))

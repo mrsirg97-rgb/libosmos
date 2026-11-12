@@ -158,7 +158,7 @@ static Pool *make(const PoolUnit *u, size_t n, uint64_t budget, char *err)
   memset(&mem, 0, sizeof mem);
   memset(&reads, 0, sizeof reads);
   memset(&events, 0, sizeof events);
-  return pool_create(u, n, budget, (Slots){fake_alloc, fake_free, &mem}, (Fetcher){fake_fetch, &reads, fake_need}, 0,
+  return pool_create(u, n, budget, (Slots){fake_alloc, fake_free, &mem, NULL, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, 0,
                      on_event, &events, err);
 }
 
@@ -645,7 +645,7 @@ static void test_unit_bytes(int fd)
     for (int k = 0; k < mem.n; k++)
       free(mem.at[k]);
     memset(&mem, 0, sizeof mem), memset(&reads, 0, sizeof reads), memset(&events, 0, sizeof events);
-    Pool *p = pool_create(u, 3, 1 << 20, (Slots){fake_alloc, fake_free, &mem}, (Fetcher){fake_fetch, &reads, fake_need},
+    Pool *p = pool_create(u, 3, 1 << 20, (Slots){fake_alloc, fake_free, &mem, NULL, NULL}, (Fetcher){fake_fetch, &reads, fake_need},
                           align, on_event, &events, err);
     assert(p);
     const void *dev[POOL_PARTS];
@@ -865,7 +865,7 @@ static void test_read_align(int fd)
                          {.part = {{odd, (1 << 20) + 50, 40}}, .n_parts = 1}}; /* 1: its aligned range past the end */
   memset(&reads, 0, sizeof reads);
   { /* a part whose aligned range passes its file's end: taken, its read the aligned range (the readers end at the end) */
-    Pool *q = pool_create(u, 2, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need},
+    Pool *q = pool_create(u, 2, 1 << 20, (Slots){al_alloc, al_free, NULL, NULL, NULL}, (Fetcher){fake_fetch, &reads, fake_need},
                           AL, NULL, NULL, err);
     assert(q);
     const void *d[POOL_PARTS];
@@ -876,9 +876,9 @@ static void test_read_align(int fd)
     pool_destroy(q);
     memset(&reads, 0, sizeof reads);
   }
-  assert(!pool_create(u, 1, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, 3000,
+  assert(!pool_create(u, 1, 1 << 20, (Slots){al_alloc, al_free, NULL, NULL, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, 3000,
                       NULL, NULL, err) && err[0]);
-  Pool *p = pool_create(u, 1, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, AL,
+  Pool *p = pool_create(u, 1, 1 << 20, (Slots){al_alloc, al_free, NULL, NULL, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, AL,
                         NULL, NULL, err);
   assert(p);
   const void *dev[POOL_PARTS];
@@ -917,6 +917,8 @@ static void test_read_align(int fd)
    bytes the pool counts the arena's */
 static void *ar_alloc(uint64_t bytes, void *ctx) { return arena_alloc(ctx, bytes); }
 static void ar_free(void *dev, void *ctx) { assert(arena_free(ctx, dev)); }
+static void *ar_tail(uint64_t bytes, void *ctx) { return arena_tail(ctx, bytes); }
+static void *ar_take(void *at, uint64_t bytes, void *ctx) { return arena_take(ctx, at, bytes); }
 
 static void test_arena_room(int fd)
 {
@@ -931,7 +933,7 @@ static void test_arena_room(int fd)
   assert(m && ar);
   char err[POOL_ERR];
   memset(&reads, 0, sizeof reads);
-  Pool *p = pool_create(u, U, budget, (Slots){ar_alloc, ar_free, ar}, (Fetcher){fake_fetch, &reads, fake_need},
+  Pool *p = pool_create(u, U, budget, (Slots){ar_alloc, ar_free, ar, NULL, NULL}, (Fetcher){fake_fetch, &reads, fake_need},
                         ARENA_GRAIN, NULL, NULL, err);
   assert(p);
   int holds[U] = {0}, full = 0, pins = 0;
@@ -981,6 +983,62 @@ static void test_arena_room(int fd)
          pins, full);
 }
 
+/* a block lent from the arena's end: refused while a unit there is held or reading, nothing changed; then the units
+   there gone (and no others), the block counted in the pool's bytes and room made elsewhere while it is out; given
+   back, its room the units' again */
+static void test_lend(int fd)
+{
+  enum { U = 12 };
+  const uint64_t UB = 4 * 4096, budget = U * UB, bytes = budget; /* every unit fits: the arena exactly the budget */
+  PoolUnit u[U];
+  for (int i = 0; i < U; i++)
+    u[i] = (PoolUnit){.part = {{fd, (uint64_t)i * UB, UB}}, .n_parts = 1};
+  uint8_t *m = aligned_alloc(ARENA_GRAIN, bytes);
+  Arena *ar = arena_create(m, bytes);
+  char err[POOL_ERR];
+  memset(&reads, 0, sizeof reads);
+  Log *log = calloc(1, sizeof *log);
+  Pool *p = pool_create(u, U, budget, (Slots){ar_alloc, ar_free, ar, ar_tail, ar_take},
+                        (Fetcher){fake_fetch, &reads, fake_need}, ARENA_GRAIN, on_event, log, err);
+  assert(p && log);
+  const void *dev[POOL_PARTS];
+  for (int i = 0; i < U; i++) /* first fit: unit i at [i * UB, (i + 1) * UB) */
+    assert(pool_pin(p, (uint32_t)i, dev) == POOL_WAIT);
+  assert(!pool_lend(p, 3 * UB)); /* units 9 .. 11 reading */
+  while (reads.n)
+    finish(p, 0, true);
+  assert(!pool_lend(p, 3 * UB)); /* held */
+  for (int i = 0; i < U; i++)
+    pool_release(p, (uint32_t)i, (uint64_t)i);
+  assert(pool_dev(p, U - 1, dev) && dev[0] == m + (U - 1) * UB);
+  const int unpins = log->n;
+  void *b = pool_lend(p, 3 * UB);
+  assert(b == m + (U - 3) * UB && pool_bytes(p) == budget && arena_used(ar) == budget);
+  for (int i = 0; i < U; i++) /* the window's units gone, the others where they were */
+    assert(pool_state(p, (uint32_t)i) == (i >= U - 3 ? POOL_COLD : POOL_PINNED));
+  assert(log->n - unpins == 3 && count(log, POOL_EV_UNPIN, U - 1) == 1);
+  assert(pool_pin(p, U - 1, dev) == POOL_WAIT && pool_state(p, U - 4) == POOL_COLD); /* room: the furthest went */
+  finish(p, 0, true);
+  pool_release(p, U - 1, 100);
+  assert(pool_bytes(p) == budget && arena_used(ar) == budget);
+  pool_unlend(p, b, 3 * UB);
+  assert(pool_bytes(p) == budget - 3 * UB && arena_used(ar) == pool_bytes(p));
+  assert(pool_pin(p, U - 2, dev) == POOL_WAIT); /* the lent room the units' again: nothing need go */
+  finish(p, 0, true);
+  pool_release(p, U - 2, 100);
+  assert(pool_state(p, 1) == POOL_PINNED && pool_bytes(p) == budget - 2 * UB);
+  assert(!pool_lend(p, bytes + 4096)); /* more than the arena */
+  Pool *q = pool_create(u, U, budget, (Slots){ar_alloc, ar_free, ar, NULL, NULL}, (Fetcher){fake_fetch, &reads, fake_need},
+                        ARENA_GRAIN, NULL, NULL, err);
+  assert(q && !pool_lend(q, UB)); /* slots with no tail: no lending */
+  pool_destroy(q);
+  pool_destroy(p);
+  assert(arena_used(ar) == 0);
+  arena_destroy(ar);
+  free(m), free(log);
+  printf("  lend: refused over a held or reading unit; the window's units gone, the block counted, room made elsewhere; given back\n");
+}
+
 int main(void)
 {
   printf("[test_pool] start\n");
@@ -1004,6 +1062,7 @@ int main(void)
   test_random(a, b);
   test_read_align(a);
   test_arena_room(a);
+  test_lend(a);
   close(a);
   close(b);
   char cmd[600];

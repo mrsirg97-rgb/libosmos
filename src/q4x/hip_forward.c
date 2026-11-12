@@ -129,8 +129,8 @@ static bool experts_whole(Q4xForward *f, char *err)
       room += b, largest = b > largest ? b : largest, warm[u] = (uint32_t)u;
     }
   char perr[POOL_ERR] = "", merr[MEMBRANE_ERR] = "";
-  if (ok && !((f->exp_slots = host_slots_create(room + 2 * largest, perr)) &&
-              (f->exp_stream = host_slots_create(3 * largest, perr))))
+  if (ok && !((f->exp_slots = host_slots_create(room + 2 * largest, 0, perr)) &&
+              (f->exp_stream = host_slots_create(3 * largest, 0, perr))))
     ok = q4x_fail(err, perr[0] ? perr : "the experts' memory refused");
   if (ok)
   {

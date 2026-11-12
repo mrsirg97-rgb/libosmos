@@ -66,5 +66,5 @@ Slots hip_slots(void)
   /* the runtime up (HSA under it), then the pool and the CPU once: without them every alloc is refused */
   if (!where.has_pool && hipInit(0) == hipSuccess)
     (void)hsa_iterate_agents(agent, &where);
-  return (Slots){alloc, release, &where};
+  return (Slots){alloc, release, &where, NULL, NULL};
 }
