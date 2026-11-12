@@ -25,6 +25,28 @@
   so either kind of osmos's memory reaches the NPU with no copy - its kernel reading them still to be shown (the AIE
   compiler).
 
+## Q2_K decoded on one AIE2P core (spikes/npu/q2k, 2026-11-12)
+real evo-A bytes (blk.20.ffn_down_exps, Q2_K), 4,096 blocks (1M values) to bf16, checked against gguf-py's dequantize:
+| version | one core | max err / max |
+| --- | --- | --- |
+| scalar (ggml's loop) | 0.010 Gvalues/s | 4.1e-3 (bf16's rounding) |
+| vector, f32 multiply-add, scales in scalar float | 0.078 | 4.1e-3 |
+| vector, 4 values a sub-block chosen by selects | 0.041 | 4.1e-3 |
+| vector, bf16 multiply-add, scales in scalar float | 0.085 | 1.07e-2 |
+| **vector, bf16, the 16 scales and mins as two vector products, no scalar float** | **0.99** | 1.07e-2 |
+| (timing alone: the scales' math removed) | 1.45 | - |
+the AIE's scalar unit has no FPU - each scalar float op is software: Q2_K's per-row scale math was 92% of the time.
+the 1.07e-2: the scales rounded to bf16 before the product (keep them f32). linear in REPS: the core's, not the DMA's.
+so 32 cores ~32 Gvalues/s from ~10 GB/s of Q2_K; beside a bf16 GEMM on the same cores at ~128 rows an expert the
+decode takes ~2/3 of a core - the NPU ~5 TFLOP/s of experts, against the GPU's ~15 (Qwen, 0.6.3). next: the scales
+f32, the GEMM fed (mm_bfp's block float), the codebook formats (IQ2_XXS, IQ1).
+
+## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
+alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
+with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
+against 511: no prompt loss. decode 15.0 -> 13.2 (-12%, bandwidth-bound - the literature's -14%). the NPU's work is
+the prompt's, never the decode's.
+
 ## the literature (Strix Point / Krackan unless said; Halo's own numbers unmeasured)
 - array: 8 x 4 compute tiles (64 KiB data + 16 KiB program each), 8 memory tiles (512 KiB), shim row; 16 hardware
   contexts. ~1.8 GHz. int8 512 MAC/tile/cycle: 59 TOPS peak, 56.3 by hand, 51.0 xrt-smi gemm (destevez.net/?p=23380);
