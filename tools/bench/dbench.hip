@@ -8,7 +8,7 @@
 // osmos-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
 // PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
-// a layer ahead: ForwardOptions' no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), MOE_ROWS=n (a large step's routed experts in chunks of n rows: its moe_rows), OVERLAY=file (tensors standing in for the model's: weights_create_with).
+// a layer ahead: ForwardOptions' no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), OVERLAY=file (tensors standing in for the model's: weights_create_with).
 // prints "window prompt|decode <start> <end> <tokens>" (epoch seconds) for each prompt read and answer: energy by
 // tools/power.py's samples in them (tools/bench/energy.py).
 // ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
@@ -196,7 +196,6 @@ int main(int argc, char** argv) {
   // the logits kept as the engine keeps them: a decode step's most rows (hip_engine_ds4.c); ALL_ROWS=1: every row
   o.logit_rows = std::getenv("ALL_ROWS") ? 0 : (uint32_t) ((w->geo.n_experts - 1) / w->geo.n_used);
   o.ahead_limit = std::getenv("AHEAD_LIMIT") ? std::strtoull(std::getenv("AHEAD_LIMIT"), nullptr, 10) : 0;  // bytes
-  o.moe_rows = std::getenv("MOE_ROWS") ? (uint32_t) std::atoi(std::getenv("MOE_ROWS")) : 0;  // a large step's chunks
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
   o.budget = budget;
   o.max_tokens = max_tokens;

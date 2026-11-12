@@ -35,8 +35,6 @@ typedef struct ForwardOptions
   uint64_t fill;         /* the system's RAM a build leaves free, bytes: forward_room's (0: every byte past the headroom) */
   uint64_t ahead_limit;  /* the membrane's: the most bytes of reads ahead read at once (0: no bound) */
   uint32_t logit_rows;   /* a step's last rows whose logits are kept (forward_logit_rows); 0: its every row */
-  uint32_t moe_rows;     /* a large step's routed experts in chunks of this many rows (0: the step whole): their
-                            buffers a chunk's, the experts held once for the step - the same bits (DESIGN.md, 0.6.9) */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);

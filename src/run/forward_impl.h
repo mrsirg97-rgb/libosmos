@@ -158,7 +158,6 @@ struct Forward
      step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in ascending expert id */
   uint64_t ahead_limit; /* ForwardOptions': the membrane's bound on reads ahead in flight */
   uint32_t logit_rows;  /* ForwardOptions': a step's last rows whose logits are kept (0: every row) */
-  uint32_t moe_rows;    /* ForwardOptions': a large step's routed experts in chunks of this many rows (0: whole) */
   bool lane;
   int lane_threads;
   uint8_t *lane_up;
