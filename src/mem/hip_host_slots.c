@@ -59,5 +59,8 @@ void host_slots_destroy(HostSlots *h)
   free(h);
 }
 
-Slots host_slots(HostSlots *h) { return (Slots){alloc, release, h}; }
+static void *tail(uint64_t bytes, void *ctx) { return arena_tail(((HostSlots *)ctx)->arena, bytes); }
+static void *take(void *at, uint64_t bytes, void *ctx) { return arena_take(((HostSlots *)ctx)->arena, at, bytes); }
+
+Slots host_slots(HostSlots *h) { return (Slots){alloc, release, h, tail, take}; }
 uint64_t host_slots_bytes(const HostSlots *h) { return h ? h->bytes : 0; }

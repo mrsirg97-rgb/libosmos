@@ -55,6 +55,8 @@ void membrane_settle(Membrane *m);
 
 uint64_t membrane_clock(const Membrane *m);
 void membrane_stats(const Membrane *m, MembraneStats *s);
+void *membrane_lend(Membrane *m, uint64_t bytes, char err[MEMBRANE_ERR]);
+void membrane_unlend(Membrane *m, void *mem, uint64_t bytes);
 
 #endif
 
@@ -137,4 +139,11 @@ membrane_in_memory, membrane_begin, membrane_settle
 
 membrane_clock, membrane_stats
   the visits so far (a caller's mark of "this visit"); the counters since create.
+
+membrane_lend / membrane_unlend
+  the expert cache's memory lent for a while and given back (pool_lend, pool_unlend on its pool, not the stream's):
+  a long prompt's step buffers (DESIGN.md, "0.6.9"). lend waits for the pool's reads, where one is in the way, and
+  asks again; NULL (why in err) when the reads failed, or the cache cannot lend it - a held unit there, or the pool's
+  slots with no lending. the caller's part, between steps (no hold: membrane_end) with the GPU past them, and past the
+  block before it is given back.
 */

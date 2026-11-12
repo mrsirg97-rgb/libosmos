@@ -34,6 +34,8 @@ typedef struct Slots
   void *(*alloc)(uint64_t bytes, void *ctx);
   void (*free)(void *dev, void *ctx);
   void *ctx;
+  void *(*tail)(uint64_t bytes, void *ctx);           /* where its last `bytes` begin; NULL: no lending (pool_lend) */
+  void *(*take)(void *at, uint64_t bytes, void *ctx); /* [at, at + bytes) given, or NULL (any of it given) */
 } Slots;
 
 typedef struct Fetcher
@@ -90,6 +92,8 @@ uint64_t pool_unit_bytes(const PoolUnit *u, uint64_t read_align);
 PoolState pool_state(const Pool *p, uint32_t unit);
 uint64_t pool_bytes(const Pool *p);
 size_t pool_reading(const Pool *p);
+void *pool_lend(Pool *p, uint64_t bytes);
+void pool_unlend(Pool *p, void *mem, uint64_t bytes);
 
 #endif
 
@@ -192,4 +196,14 @@ pool_state / pool_bytes / pool_reading
   a unit's state; the bytes of GPU memory held now (units' and spares'); the units reading now. a pin refused FULL
   while units read is not the pool's last word: a reading unit's memory is made room of once its read ends and it is
   unheld - the caller waits for a read (pool_ready) and pins again.
+
+pool_lend / pool_unlend
+  memory of the pool's lent out for a while (0.6.9: a long prompt's step buffers, the expert cache's room while it
+  runs; DESIGN.md, "0.6.9"). pool_lend: one block of `bytes` from the end of the slots' memory (Slots' tail and take)
+  - every pinned unit and spare there gone first (UNPIN events), so one window is made room of, not every hole -
+  counted in pool_bytes as a unit's memory is, so room for units is made elsewhere while it is out. NULL, nothing
+  changed, when the slots cannot lend, bytes is 0, or a unit there is held or reading (the caller waits for its reads
+  and asks again); NULL too when the slots refuse the window (units may have gone). pool_unlend: the block given
+  back (the slots' free), its bytes the pool's room again. the caller's part: the GPU is past every unit there
+  (pool_release's rule), and past the block before it is given back.
 */

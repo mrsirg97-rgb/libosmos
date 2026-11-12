@@ -237,13 +237,85 @@ static bool fail_held(Forward *f)
   return false;
 }
 
+/* Scratch's views of xf .. f_comb at their whole buffers; and the whole buffers' record (Forward's xf0 ..) theirs */
+static void views_whole(Forward *f)
+{
+  f->b.xf = f->xf0, f->b.moe = f->moe0, f->b.mid = f->mid0, f->b.f_post = f->f_post0, f->b.f_comb = f->f_comb0;
+}
+
+static void views_record(Forward *f)
+{
+  f->xf0 = f->b.xf, f->moe0 = f->b.moe, f->mid0 = f->b.mid, f->f_post0 = f->b.f_post, f->f_comb0 = f->b.f_comb;
+}
+
+/* 0.6.9: a step of more than one sub-batch in the expert cache's memory (DESIGN.md, "0.6.9"): the buffers of its
+   size there for it, zeroed as fwd_alloc's are, the forward's own (a sub-batch's) put aside. false, nothing changed,
+   when the cache cannot lend the block (the step then a sub-batch at a time) */
+static bool borrow(Forward *f)
+{
+  char merr[MEMBRANE_ERR];
+  uint8_t *blk = membrane_lend(f->mem, f->lend_bytes, merr);
+  if (!blk)
+    return false;
+  if (hipMemsetAsync(blk, 0, f->lend_bytes, NULL) != hipSuccess)
+    return membrane_unlend(f->mem, blk, f->lend_bytes), false;
+  views_whole(f);
+  for (uint32_t i = 0; i < f->n_lend; i++)
+    f->lend_own[i] = *f->lend_field[i], *f->lend_field[i] = blk + f->lend_off[i];
+  views_record(f);
+  f->lent = blk;
+  return true;
+}
+
+/* the block back to the cache, the GPU past it; the forward's own buffers its again */
+static void give_back(Forward *f)
+{
+  (void)hipDeviceSynchronize();
+  views_whole(f);
+  for (uint32_t i = 0; i < f->n_lend; i++)
+    *f->lend_field[i] = f->lend_own[i];
+  views_record(f);
+  membrane_unlend(f->mem, f->lent, f->lend_bytes);
+  f->lent = NULL;
+}
+
+static bool step(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
+
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
 {
-  const Geometry *g = f->g;
   if (!n || n > f->max_tokens)
     return fwd_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
   if (!membrane_warm(f->mem, err)) /* the budget's experts, at the first step (nothing to do after it) */
     return false;
+  if (!f->lend_steps || n <= f->step)
+    return step(f, seqs, tokens, n, err);
+  if (!borrow(f)) /* no block to be had: the step a sub-batch at a time - a token's bits the same (mm's) */
+  {
+    f->n_split++;
+    for (uint32_t at = 0; at < n; at += f->step)
+      if (!step(f, seqs + at, tokens + at, n - at < f->step ? n - at : f->step, err))
+        return false;
+    return true;
+  }
+  f->n_lent++;
+  const bool ok = step(f, seqs, tokens, n, err);
+  give_back(f);
+  return ok;
+}
+
+void forward_lends(const Forward *f, uint64_t *bytes, uint64_t *lent, uint64_t *split)
+{
+  if (bytes)
+    *bytes = f && f->lend_steps ? f->lend_bytes : 0;
+  if (lent)
+    *lent = f ? f->n_lent : 0;
+  if (split)
+    *split = f ? f->n_split : 0;
+}
+
+static bool step(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
+{
+  const Geometry *g = f->g;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
   if (!place(f, seqs, tokens, n, err) || !fwd_engram_issue(f, err))
