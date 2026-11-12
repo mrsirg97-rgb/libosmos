@@ -7,7 +7,8 @@ with this overlay, so a quant's distance from it is its experts' and dense weigh
     python3 tools/convert/ds4_experts_mxfp4.py <headers.json> <out dir> [--local dir] [--shards 8] [--only k,...]
 
 headers.json: every shard's safetensors header, {shard: {tensor: {dtype, shape, data_offsets}, "__base__": n}}
-(the header's 8-byte length + the JSON: the data's first byte). the bytes come from the repo by HTTP range requests
+(the header's 8-byte length + the JSON: the data's first byte; fetched and written there when missing). the bytes
+come from the repo by HTTP range requests
 (HF_TOKEN, or `hf auth token`), or from a shard already in --local. out: <out>/ds41-experts-mxfp4-0000k-of-0000N.gguf,
 each written as .part and renamed when whole (a shard there is skipped: a stopped run goes on where it was); its last
 shard (N = shards + 1) is the dense one, written by another tool - the count is fixed here, for every header.
@@ -40,6 +41,30 @@ def token():
     if t:
         return t
     return subprocess.run(["hf", "auth", "token"], capture_output=True, text=True, check=True).stdout.strip().splitlines()[-1]
+
+
+def headers(path, tok):
+    """every shard's safetensors header ({shard: {tensor: {dtype, shape, data_offsets}, "__base__": n}}), read from
+    path, or fetched from the repo by range (the index, then each shard's 8-byte length and JSON) and saved there"""
+    if os.path.exists(path):
+        return json.load(open(path))
+    url = f"https://huggingface.co/{REPO}/resolve/main/"
+    get = lambda name, a=None, b=None: urllib.request.urlopen(urllib.request.Request(  # noqa: E731
+        url + name, headers=dict({"Authorization": f"Bearer {tok}", "User-Agent": "osmos-ref"},
+                                 **({"Range": f"bytes={a}-{b}"} if a is not None else {}))), timeout=120).read()
+    shards = sorted(set(json.loads(get("model.safetensors.index.json"))["weight_map"].values()))
+
+    def one(shard):
+        n = struct.unpack("<Q", get(shard, 0, 7))[0]
+        h = json.loads(get(shard, 8, 8 + n - 1))
+        h["__base__"] = 8 + n
+        return shard, h
+    with concurrent.futures.ThreadPoolExecutor(8) as ex:
+        hs = dict(ex.map(one, shards))
+    with open(path + ".part", "w") as f:
+        json.dump(hs, f)
+    os.rename(path + ".part", path)
+    return hs
 
 
 def fetch(shard, a, b, tok, local):
@@ -135,7 +160,6 @@ def main():
     args = sys.argv[1:]
     if len(args) < 2:
         raise SystemExit(__doc__)
-    hs = json.load(open(args[0]))
     out_dir, local, shards, only = args[1], None, 8, None
     for i, a in enumerate(args):
         if a == "--local":
@@ -146,6 +170,7 @@ def main():
             only = {int(x) for x in args[i + 1].split(",")}
     os.makedirs(out_dir, exist_ok=True)
     tok, per, count = token(), LAYERS // shards, shards + 1
+    hs = headers(args[0], tok)
     for k in range(shards):
         path = os.path.join(out_dir, f"ds41-experts-mxfp4-{k + 1:05d}-of-{count:05d}.gguf")
         if os.path.exists(path) or (only and k + 1 not in only):
