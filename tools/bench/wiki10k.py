@@ -3,7 +3,10 @@ how a quant is scored") as token ids, comma separated - BOS, then the first 10,2
 (Salesforce/wikitext, wikitext-2-raw-v1: its rows from Hugging Face's dataset viewer, joined as they come), tokenized
 with maya's tokenizer as tools/bench/prompts.py's. rows 2,048 .. 10,239 are the working rows, 0 .. 2,047 the dev rows.
 
-run: python tools/bench/wiki10k.py ~/maya ~/models/ds1017/maya-ds4/tokenizer bench-eval/wiki10k.txt"""
+run: python tools/bench/wiki10k.py ~/maya ~/models/ds1017/maya-ds4/tokenizer bench-eval/wiki10k.txt
+Qwen's (0.6.9: its reference, DESIGN.md): the same text by its own tokenizer through llama.cpp's llama-tokenize, no
+BOS (Qwen's GGUF adds none) - the first 10,240 tokens, the same rows the working and dev rows:
+     python tools/bench/wiki10k.py --qwen <llama-tokenize> <Qwen first shard> bench-eval/wiki10k_qwen.txt"""
 import json
 import os
 import sys
@@ -37,7 +40,27 @@ def rows(chars):
     return text[:chars]
 
 
+def qwen(tokenize, shard, out):
+    import json
+    import subprocess
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as t:
+        t.write(rows(CHARS))
+    try:
+        p = subprocess.run([tokenize, "-m", shard, "--ids", "--log-disable", "--no-bos", "-f", t.name],
+                           capture_output=True, check=True)
+    finally:
+        os.remove(t.name)
+    ids = json.loads(p.stdout.decode().strip().splitlines()[-1])
+    assert len(ids) >= N, len(ids)
+    with open(out, "w") as f:
+        f.write(",".join(map(str, ids[:N])))
+    print(f"{out}: {N} tokens")
+
+
 def main():
+    if sys.argv[1] == "--qwen":
+        return qwen(*sys.argv[2:5])
     root, tok_dir, out = sys.argv[1:4]
     sys.path.insert(0, os.path.join(root, "tools"))
     import strata_tokenizer as ST  # noqa: E402
