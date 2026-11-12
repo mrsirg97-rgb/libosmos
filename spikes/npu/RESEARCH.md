@@ -76,6 +76,18 @@ GEMM 0.18 ns at ~128 rows against ~1 ns of decode - the decode 85%, the array ~7
 faster (1.45 Gvalues/s with Q2_K's scales removed - the rest overhead), written straight as bfp16 (8 int8 mantissas,
 a shared exponent: an IQ grid row is 8 small integers under one scale).
 
+## the decoders written as bfp16 (2026-11-12)
+each decoder's rows two to a 64-lane accumulator, converted by the core (acc.to_vector<bfp16ebs8>(), floor) and
+pushed as 72-byte block vectors - the native bfp16 matmul's operand. checked with mlir-aie's host codec against the
+reference as the core would round it (aie.utils.bfp.quantize):
+| decoder -> bfp16 | one core | exact | worst |
+| --- | --- | --- | --- |
+| Q2_K | 0.95 Gvalues/s | 71.4% | 2 LSB (its scale and min each bf16) |
+| IQ2_XXS | 1.13 | 86.9% | 1 LSB |
+| IQ1_S | 0.91 (0.59 until its group loop carried no accumulator across a branch) | 88.7% | 1 LSB |
+the conversion costs ~nothing (bf16 out: 0.99 / 1.11 / 0.93). the 1-2 LSB: the scales rounded to bf16 before their
+product - f32 scales next. so the pipeline's operand is ready: decode to bfp16 beside the 1.39 TFLOP/s matmul.
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509

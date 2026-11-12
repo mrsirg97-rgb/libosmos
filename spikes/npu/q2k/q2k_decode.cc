@@ -13,6 +13,9 @@
 #ifndef Q2K_VEC
 #define Q2K_VEC 1
 #endif
+#ifndef Q2K_BFP
+#define Q2K_BFP 0 /* 1: Q2K_VEC 4's rows written as bfp16ebs8, two a 64-lane accumulator (the native bfp16 matmul's) */
+#endif
 #ifndef Q2K_NOSCALE
 #define Q2K_NOSCALE 0 /* timing alone: the scales' scalar float math replaced by constants (wrong values) */
 #endif
@@ -197,7 +200,48 @@ static inline void block_v4(const uint8_t *blk, bfloat16 *y) {
 }
 #endif
 
+#if Q2K_BFP
+static inline void block_v4_bfp(const uint8_t *blk, aie::block_vector_output_buffer_stream<bfp16ebs8, 64> &out) {
+  const float d = half_bits((uint16_t)(blk[80] | blk[81] << 8));
+  const float dm = half_bits((uint16_t)(blk[82] | blk[83] << 8));
+  const aie::vector<int16, 16> s16 = aie::unpack(aie::load_unaligned_v<16>(blk)).cast_to<int16>();
+  const aie::vector<float, 16> sl = aie::to_float(aie::bit_and(s16, aie::broadcast<int16, 16>(15)), 0);
+  const aie::vector<float, 16> sh = aie::to_float(aie::downshift(s16, 4), 0);
+  const aie::vector<bfloat16, 16> dlv = aie::mul(sl, aie::broadcast<float, 16>(d)).to_vector<bfloat16>();
+  const aie::vector<bfloat16, 16> mlv = aie::mul(sh, aie::broadcast<float, 16>(-dm)).to_vector<bfloat16>();
+  const aie::vector<int16, 32> one = aie::broadcast<int16, 32>(1), three = aie::broadcast<int16, 32>(3);
+  for (int half = 0; half < 2; half++) {
+    const aie::vector<int16, 32> q16 = aie::unpack(aie::load_unaligned_v<32>(blk + 16 + 32 * half)).cast_to<int16>();
+    aie::accum<accfloat, 32> rows[4];
+    for (int r = 0; r < 4; r++) {
+      const aie::vector<int16, 32> q = aie::bit_and(aie::downshift(q16, 2 * r), three);
+      const aie::vector<int16, 32> hi = aie::downshift(q, 1), lo = aie::bit_and(q, one);
+      aie::vector<int16, 32> bits = aie::add(aie::add(aie::broadcast<int16, 32>(0x3f80), aie::upshift(hi, 7)),
+                                             aie::upshift(aie::bit_and(lo, hi), 6));
+      bits = aie::select(bits, aie::zeros<int16, 32>(), aie::eq(q, aie::zeros<int16, 32>()));
+      const int j = 8 * half + 2 * r;
+      const aie::vector<bfloat16, 32> dl = aie::concat(aie::broadcast<bfloat16, 16>(dlv[j]), aie::broadcast<bfloat16, 16>(dlv[j + 1]));
+      const aie::vector<bfloat16, 32> nml = aie::concat(aie::broadcast<bfloat16, 16>(mlv[j]), aie::broadcast<bfloat16, 16>(mlv[j + 1]));
+      rows[r].from_vector(nml);
+      rows[r] = aie::mac(rows[r], bits.cast_to<bfloat16>(), dl);
+    }
+    out.push(aie::concat(rows[0], rows[1]).to_vector<bfp16ebs8>());
+    out.push(aie::concat(rows[2], rows[3]).to_vector<bfp16ebs8>());
+  }
+}
+#endif
+
 extern "C" {
+#if Q2K_BFP
+void q2k_decode(const uint8_t *__restrict in, uint8_t *__restrict out) {
+  event0();
+  for (int rep = 0; rep < REPS; rep++) {
+    aie::block_vector_output_buffer_stream<bfp16ebs8, 64> s((bfp16ebs8 *)out);
+    for (int b = 0; b < NB; b++) block_v4_bfp(in + 84 * b, s);
+  }
+  event1();
+}
+#else
 void q2k_decode(const uint8_t *__restrict in, bfloat16 *__restrict out) {
   event0();
   for (int rep = 0; rep < REPS; rep++)
@@ -216,4 +260,5 @@ void q2k_decode(const uint8_t *__restrict in, bfloat16 *__restrict out) {
     }
   event1();
 }
+#endif
 }

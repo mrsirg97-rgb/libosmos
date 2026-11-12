@@ -16,6 +16,10 @@
 #ifndef IQ_VEC
 #define IQ_VEC 2 /* 1: bytes unpacked and converted, f32 product; 2: the grid as bf16, one native product */
 #endif
+#ifndef IQ_BFP
+#define IQ_BFP 0 /* 1: the output bfp16ebs8 (8 values a block: [exponent, 8 mantissas]) by the core's own conversion, two
+                    groups a 64-lane accumulator - what the native bfp16 matmul reads; else bf16 */
+#endif
 
 // fp16 to f32 by its bits, scaled by 2^-3 (the format's 1/4 and the 2s + 1's halving): integer ops alone; 0 for a
 // zero or subnormal d
@@ -75,11 +79,52 @@ static inline void block(const uint8_t *blk, bfloat16 *y) {
 #endif
 }
 
+#if IQ_BFP
+static inline aie::accum<accfloat, 32> group_acc(const uint32_t a0, const uint32_t a1, const float db) {
+  uint32_t sg = 0;
+  for (int l = 0; l < 4; l++) sg |= (uint32_t)ksigns_iq2xs[(a1 >> (7 * l)) & 127] << (8 * l);
+  const aie::vector<bfloat16, 32> v = aie::concat(
+      aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[a0 & 255]), aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[(a0 >> 8) & 255]),
+      aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[(a0 >> 16) & 255]), aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[a0 >> 24]));
+  const aie::vector<int16, 32> vi = v.cast_to<int16>();
+  const aie::vector<bfloat16, 32> sv =
+      aie::select(vi, aie::bit_xor(vi, aie::broadcast<int16, 32>((int16)0x8000)), aie::mask<32>::from_uint32(sg)).cast_to<bfloat16>();
+  return aie::mul(sv, aie::broadcast<bfloat16, 32>((bfloat16)db));
+}
+
+static inline void block_bfp(const uint8_t *blk, aie::block_vector_output_buffer_stream<bfp16ebs8, 64> &out) {
+  const float d8 = half_bits_div8((uint16_t)(blk[0] | blk[1] << 8));
+  const uint8_t *qs = blk + 2;
+  uint32_t a0[8], a1[8];
+  aie::vector<int16, 16> s16 = aie::zeros<int16, 16>();
+  for (int g = 0; g < 8; g++) {
+    a0[g] = u32_at(qs + 8 * g), a1[g] = u32_at(qs + 8 * g + 4);
+    s16[g] = (int16)(2 * (a1[g] >> 28) + 1);
+  }
+  const aie::vector<float, 16> dbv = aie::mul(aie::to_float(s16, 0), aie::broadcast<float, 16>(d8)).to_vector<float>();
+  for (int g = 0; g < 8; g += 2) {
+    const aie::accum<accfloat, 64> acc = aie::concat(group_acc(a0[g], a1[g], dbv[g]), group_acc(a0[g + 1], a1[g + 1], dbv[g + 1]));
+    out.push(acc.to_vector<bfp16ebs8>());
+  }
+}
+#endif
+
 extern "C" {
+#if IQ_BFP
+void iq2xxs_decode(const uint8_t *__restrict in, uint8_t *__restrict out) {
+  event0();
+  for (int rep = 0; rep < REPS; rep++) {
+    aie::block_vector_output_buffer_stream<bfp16ebs8, 64> s((bfp16ebs8 *)out);
+    for (int b = 0; b < NB; b++) block_bfp(in + 66 * b, s);
+  }
+  event1();
+}
+#else
 void iq2xxs_decode(const uint8_t *__restrict in, bfloat16 *__restrict out) {
   event0();
   for (int rep = 0; rep < REPS; rep++)
     for (int b = 0; b < NB; b++) block(in + 66 * b, out + 256 * b);
   event1();
 }
+#endif
 }
