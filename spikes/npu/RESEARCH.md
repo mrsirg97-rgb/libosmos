@@ -241,6 +241,20 @@ an octet, scales[8] 4 bits a 16); a 1,024-row grid of 8 magnitudes as bf16 (16 K
 bytes: **1.14 Gvalues/s a core, worst 5.4e-3** - the first build. with IQ4_NL (1.65) and IQ3_XXS (0.90), Qwen
 UD-IQ3_XXS's three expert formats all decode on the NPU (left: IQ4_XS's one layer, Q2_0's three downs).
 
+## Qwen's formats on the array (fused_qwen.cc, fused32.py FMT=iq4nl | iq3xxs | iq2s, 2026-11-12)
+each decoded straight into the matmul's sub-tile order as two K halves, C in f32 (common/mm_f32.h, shared now):
+IQ4_NL two fetches a row-block (an octet an 8-lane slice); IQ3_XXS a band's 8 rows' lo rows or'd with their hi rows at
+64 lanes; IQ2_S 8 rows' grid rows, its sign bytes as they are, two scale vectors a group (16 rows a core: its 16 KB
+grid). Qwen's own bytes as a 4096-wide matrix (its expert shapes are smaller - K 2560 / N 640 for gate and up, the
+down's K 640 not a 256 multiple: their tiling later), C 128 x N:
+| format | TFLOP/s | corr | worst |
+| --- | --- | --- | --- |
+| IQ4_NL | 3.39 | 0.999979 | 9.6e-3 |
+| IQ3_XXS | 3.62 | 0.999970 | 9.1e-3 |
+| IQ2_S (16 rows a core) | 2.85 | 0.999968 | 8.9e-3 |
+all right the first build; half DeepSeek's (first versions): IQ4_NL's scale every 32 values - 8 fp16 -> bf16 a row a
+K-step, the last rounding to bf16 scalar soft float. against the GPU's 14.7 TFLOP/s on Qwen's experts, ~3.5 is a fifth.
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
