@@ -116,6 +116,15 @@ two selects), + delta in bf16, x the band-group's scale vector: corr 0.999949 (w
 (0.99 Gvalues/s), + matmul 18.2. at ~128 rows an expert ~6.9 TFLOP/s for the array (IQ2_XXS ~9.1); DeepSeek's mix
 (IQ1_S 57% of its routed time, IQ2_XXS 32%) ~7.7: ~22% of the routed experts the NPU's, a step ~8% faster.
 
+IQ1_S's decode taken apart (fused_iq1s.cc, a tile): full 17.4 us; its codes constant (the vector work alone) 5.7;
+the index computed but no table load 15.2 - so ~2/3 is the scalar index path: 5 ops a row-octet to join qs's byte
+and qh's 3 bits into the 11-bit index, then a broadcast. the grid as int8 rows would drop the broadcasts, but AIE
+vectors are 128 bits at least (no 8-byte vector). the indices pre-assembled (an NPU layout's stand-in): 8.7 us.
+**v5: the same indices by vector ops a row inside the decode** - its 32 qs bytes one load, qh's 8 words over 32 lanes
+(Peano lowers no 128-bit AND: everything 512-bit), the shifts 0/3/6/9 merged by row selects, aie::transpose to the
+octet order - **9.95 us** (corr 0.999949; the scalar reference overwritten by it each decode), + matmul 11.9:
+~10 TFLOP/s for the array at 128 rows. DeepSeek's mix ~9.6: ~26% of the routed experts, a step ~9% faster.
+
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
 | | s | share |

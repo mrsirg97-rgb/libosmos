@@ -18,7 +18,7 @@ def fused1(w: In, a: In, c: Out, *, reps: CompileTime[int], decode_only: Compile
     wt, at, ct = (np.ndarray[(n,), np.dtype[np.uint8]] for n in (WB, AB, CB))
     ow, oa, oc = ObjectFifo(wt, name="gw", depth=1), ObjectFifo(at, name="ga", depth=1), ObjectFifo(ct, name="gc", depth=1)
     k = ExternalFunction("fused_iq1s", source_file=os.path.join(HERE, "fused_iq1s.cc"), arg_types=[wt, at, ct],
-                         include_dirs=[cxx_header_path(), KD, HERE], compile_flags=[f"-DREPS={reps}", f"-DDECODE_ONLY={decode_only}"])
+                         include_dirs=[cxx_header_path(), KD, HERE], compile_flags=[f"-DREPS={reps}", f"-DDECODE_ONLY={decode_only}", f"-DIQ1_V={v}"] + ([f"-D{os.environ['XDEF']}"] if os.environ.get("XDEF") else []))
     def body(ow, oa, oc, k):
         x, y, z = ow.acquire(1), oa.acquire(1), oc.acquire(1); k(x, y, z); ow.release(1); oa.release(1); oc.release(1)
     wk = Worker(body, fn_args=[ow.cons(), oa.cons(), oc.prod(), k])
@@ -46,8 +46,6 @@ def main():
     print(f"C against Aq x Wq^T: max |err| / max |C| {rel:.2e} (C's own bfp16 rounding ~1e-2); corr {np.corrcoef(got.ravel(), Cref.ravel())[0, 1]:.6f}")
     flop = 2 * M * K * N
     print(f'version {V}')
-    us = {n: run_iters(fused1, w, a, c, reps=n, decode_only=1, v=V, setup=1, warmup=1, iters=5).npu.avg_us for n in (1, 65)}
-    print(f"setup pass alone: {(us[65] - us[1]) / 64:.2f} us a tile")
     for do in (0, 1):
         us = {n: run_iters(fused1, w, a, c, reps=n, decode_only=do, v=V, warmup=1, iters=5).npu.avg_us for n in (1, 65)}
         per = (us[65] - us[1]) / 64
