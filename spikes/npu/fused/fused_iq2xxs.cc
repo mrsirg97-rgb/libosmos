@@ -156,14 +156,18 @@ static void decode_tile3(const uint8_t *__restrict w) {
   for (int n = 0; n < NR; n++) d8[n] = (bfloat16)half_bits_div8((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
   const bfloat16 *kb = (const bfloat16 *)kodd_bf16;
   aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
+#ifndef KHALF
+#define KHALF 0 /* 1: Bm as two K halves, each a contiguous 64 x 128 operand ([kh][j][i]) - A then a quarter at a time */
+#endif
+  for (int kh = 0; kh < (KHALF ? 2 : 1); kh++)
   AIE_LOOP_MIN_ITERATION_COUNT(8)
   for (int j = 0; j < NR / 8; j++) {
     const uint8_t *band = w + BB * 8 * j;
     const aie::vector<bfloat16, 64> dv = aie::concat(
         aie::concat(aie::broadcast<bfloat16, 8>(d8[8 * j]), aie::broadcast<bfloat16, 8>(d8[8 * j + 1]), aie::broadcast<bfloat16, 8>(d8[8 * j + 2]), aie::broadcast<bfloat16, 8>(d8[8 * j + 3])),
         aie::concat(aie::broadcast<bfloat16, 8>(d8[8 * j + 4]), aie::broadcast<bfloat16, 8>(d8[8 * j + 5]), aie::broadcast<bfloat16, 8>(d8[8 * j + 6]), aie::broadcast<bfloat16, 8>(d8[8 * j + 7])));
-    AIE_LOOP_MIN_ITERATION_COUNT(8)
-    for (int g = 0; g < 8; g++) {
+    AIE_LOOP_MIN_ITERATION_COUNT(4)
+    for (int g = (KHALF ? 4 * kh : 0); g < (KHALF ? 4 * kh + 4 : 8); g++) {
       uint32_t w0[8], w1[8];
       AIE_LOOP_UNROLL_FULL
       for (int r = 0; r < 8; r++) w0[r] = u32_at(band + BB * r + 2 + 8 * g), w1[r] = u32_at(band + BB * r + 6 + 8 * g);
@@ -261,6 +265,19 @@ void fused_iq2xxs(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *_
 #ifndef HALVES
 #define HALVES 1 /* A's 64-row halves a K-step (M = 64 HALVES): the W tile decoded at half 0, multiplied with each */
 #endif
+#if KHALF
+// a quarter of a K-step's A (64 rows x 128): piece p = 2 * half + kh; the W tile decoded at piece 0
+extern "C" void fused_step(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *__restrict c, int32_t kstep,
+                           int32_t piece) {
+  const int half = piece >> 1, kh = piece & 1;
+  uint8_t *ch = c + half * (64 * 64 * 9 / 8);
+  if (kstep == 0 && kh == 0)
+    for (int i = 0; i < 64 * 64 * 9 / 8; i += 64) aie::store_v(ch + i, aie::zeros<uint8, 64>());
+  if (piece == 0) decode_tile3(w);
+  matmul_vectorized_2x2_bfp16<64 / 8, 128 / 8, 64 / 8, 8, 8, 8>((bfp16ebs8 *)a, (bfp16ebs8 *)(Bm + kh * (64 * 128 * 9 / 8)),
+                                                               (bfp16ebs8 *)ch);
+}
+#else
 extern "C" void fused_step(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *__restrict c, int32_t kstep,
                            int32_t half) {
   uint8_t *ch = c + half * (64 * 64 * 9 / 8);
@@ -269,4 +286,5 @@ extern "C" void fused_step(const uint8_t *__restrict w, uint8_t *__restrict a, u
   if (half == 0) decode_tile3(w);
   matmul_vectorized_2x2_bfp16<DIM_M / 8, DIM_K / 8, DIM_N / 8, 8, 8, 8>((bfp16ebs8 *)a, (bfp16ebs8 *)Bm, (bfp16ebs8 *)ch);
 }
+#endif
 #endif

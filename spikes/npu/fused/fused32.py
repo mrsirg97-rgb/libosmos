@@ -18,8 +18,9 @@ M, KT, NR, ROWS = 64, 256, 64, 4          # A rows, a K-step, a core's output ro
 KS = 16                                    # K-steps: K = 4096
 COLS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 H = int(sys.argv[2]) if len(sys.argv) > 2 else 1  # A's 64-row halves: M = 64 H, one decode for them all
+Q = int(sys.argv[3]) if len(sys.argv) > 3 else 0  # 1: A a quarter at a time (64 x 128), double-buffered
 N = COLS * ROWS * NR
-WT, AT, CT1 = NR * 66 // 4, M * KT * 9 // 8 // 4, M * NR * 9 // 8 // 4
+WT, AT, CT1 = NR * 66 // 4, M * KT * 9 // 8 // 4 // (2 if Q else 1), M * NR * 9 // 8 // 4
 CT = CT1 * H  # a core's C: H stacked 64-row tiles   # words: a core's W tile, an A tile, a C tile
 
 def tap(total, off, n):  # n words from off, as rows of at most 1024
@@ -32,11 +33,11 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int]):
     wt, at, ct = (np.ndarray[(n,), i32] for n in (WT, AT, CT))
     step = ExternalFunction("fused_step", source_file=os.path.join(HERE, "fused_iq2xxs.cc"),
                             arg_types=[wt, at, ct, np.int32, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
-                            compile_flags=["-DFUSED_V=5", "-DMULTI", f"-DHALVES={H}"])
+                            compile_flags=["-DFUSED_V=5", "-DMULTI", f"-DHALVES={H}", f"-DKHALF={Q}"])
     a_l3, w_l3, c_l3, workers = [], [], [], []
     for col in range(cols):
-        a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=1)
-        a2 = a3.cons().forward(obj_type=at, name=f"A2_{col}", depth=1)
+        a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=2 if Q else 1)
+        a2 = a3.cons().forward(obj_type=at, name=f"A2_{col}", depth=2 if Q else 1)
         w3 = ObjectFifo(np.ndarray[(ROWS * WT,), i32], name=f"W3_{col}", depth=2)
         w2 = w3.cons().split([WT * r for r in range(ROWS)], obj_types=[wt] * ROWS,
                              names=[f"W2_{col}_{r}" for r in range(ROWS)], depths=[2] * ROWS)
@@ -49,14 +50,14 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int]):
                 cc = co.acquire(1)
                 for s in range_(KS):
                     x = wi.acquire(1)
-                    for h in range(H):
+                    for h in range(H * (2 if Q else 1)):
                         y = ai.acquire(1)
                         k(x, y, cc, s, h)
                         ai.release(1)
                     wi.release(1)
                 co.release(1)
             workers.append(Worker(body, fn_args=[a2.cons(), w2[r].cons(), c2[r].prod(), step], tile=Tile(col, 2 + r), stack_size=0xD00))
-    TW, TA, TC = cols * KS * ROWS * WT, KS * H * AT, cols * ROWS * CT
+    TW, TA, TC = cols * KS * ROWS * WT, KS * H * (2 if Q else 1) * AT, cols * ROWS * CT
     def seq(W, A, C, *hs):
         ap, wp, cc = hs[:cols], hs[cols:2 * cols], hs[2 * cols:]
         for col in range(cols):
@@ -84,8 +85,12 @@ def main():
             w[col, :, r_] = raw[band:band + NR].transpose(1, 0, 2)
     rng = np.random.default_rng(1017)
     A = rng.standard_normal((M * H, KS * KT)).astype(np.float32)
-    a = np.concatenate([B.shuffle(B.encode(A[h * M:(h + 1) * M, s * KT:(s + 1) * KT]), KT, M, KT, M).reshape(-1)
-                        for s in range(KS) for h in range(H)])
+    if Q:  # a K-step's pieces: [half][K half], each 64 x 128
+        a = np.concatenate([B.shuffle(B.encode(A[h * M:(h + 1) * M, s * KT + q * 128:s * KT + (q + 1) * 128]), 128, M, 128, M).reshape(-1)
+                            for s in range(KS) for h in range(H) for q in range(2)])
+    else:
+        a = np.concatenate([B.shuffle(B.encode(A[h * M:(h + 1) * M, s * KT:(s + 1) * KT]), KT, M, KT, M).reshape(-1)
+                            for s in range(KS) for h in range(H)])
     Cref = B.quantize(A).astype(np.float64) @ np.concatenate(
         [B.quantize(Wf[:, s * KT:(s + 1) * KT]) for s in range(KS)], axis=1).astype(np.float64).T
     wt_ = iron.tensor(w.reshape(-1).view(np.int32), dtype=np.int32, device="npu")

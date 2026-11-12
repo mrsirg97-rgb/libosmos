@@ -153,6 +153,13 @@ core), corr 0.999487** - DeepSeek's ~128 rows an expert in 8K steps, measured: 7
 against the GPU's ~27 TFLOP/s on DeepSeek's routed experts: ~21% of them the NPU's, an 8K step ~7% faster. memory caps
 M at 128 (192: C and the single-buffered A past 64 KB). next: A's fetch overlapped (~28% lost), C in f32 (its memory
 against that), the single-core decode gains (each the array's).
+**A's fetch overlapped**: a K-step's A as four 9 KB quarters (two 64-row halves x two 128 K halves), double-buffered (18
+KB, as the one full buffer was), Bm decoded as two contiguous K halves (64 x 128 x 64 matmuls): back to back at M = 128,
+**342 -> 288 us, 6.28 -> 7.46 TFLOP/s (+19%)** - but corr 0.99949 -> 0.99839, worst 7e-2 -> 1.3e-1: C re-rounded to
+bfp16 at every partial sum (32 an output now, 16 before; 8-bit mantissas, an exponent shared by 8). the accumulator's
+precision, apart from A's: C in f32 - 32 KB at 128 x 64, past the budget; at 32 rows a core 16 KB (~51 KB in all), a
+core's efficiency the same (the decode a weight, the rows an expert unchanged). next: a matmul keeping C f32 (mm_bfp's
+8x8 block MACs, accumulated into f32), N 32 a core.
 
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
