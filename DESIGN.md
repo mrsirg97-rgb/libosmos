@@ -3439,6 +3439,54 @@ to 0xED, the surrogates' range) where a continuation byte stays one.
 bytes it held back before it (whitespace, a marker's start) as sent, so a run cut by max_tokens past that point lost
 them from its flushed text: its stream's content no longer the whole answer's. now only what went out is counted.
 
+### 0.6.6: the reference, and how a quant is scored (design, 2026-11-11)
+
+until now a quant was scored against another quant: perplexity on four texts and the log-probability a token against
+evo-a's (scratch compare.py), the candidates chosen on the texts they were then reported on. a distance from the model
+itself was the oracle's 32 positions (maya's), too few to rank packs that differ by 0.01. from Local Code's notes
+(drawthingsai/local-code-community, Apps/LocalCode/DDDoc/RoutedExpertGainCorrection.md: their 2-bit quant's experts
+shrink ~11%, a gain a layer fixes 0.463 -> 0.390 KLD) three things are taken: a reference that is the model's own
+weights, the KL divergence over the whole vocabulary as the measure, and a protocol that keeps choosing and
+reporting apart.
+
+**the reference.** a DeepSeek GGUF (evo's gguf-a: its F32 and BF16 tensors already the originals') with an overlay of
+the originals (~/Models/ds1017/ref, nine shards; 6 + 9 files, under WEIGHTS_MAX_FILES):
+- the routed experts as deepseek-ai stores them: E2M1 codes two to a byte, an E8M0 scale every 32 inputs - MXFP4 as
+  ggml lays it (tools/convert/ds4_experts_mxfp4.py), no value changed (on a real expert, gguf-py's decode and the
+  FP4 table bit-identical). 296 GB, by range from the repo. MXFP4 is now a GGUF file's type and the prompt matmul's
+  (decode_h's generic F16: every value exact while 2^(e - 128) x 12 is a normal f16 - the experts' e 119-123);
+- the embedding BF16 as stored; the attention, the head, the shared experts and the Engram's wkv Q8_0 from their FP8
+  (32 x 32 UE8M0 blocks) - not bit-exact: the reference's own floor, measured against itself with them BF16 where a
+  role takes it (next);
+- the arithmetic osmos's: the prompt's path (F16 activations into the matmuls, F32 sums), the same step for every
+  run. deepseek's own inference quantizes activations to FP8 a 128; the reference does not - its distance is the
+  weights' alone, as every candidate's run shares the rest.
+
+**the measure.** tools/bench/kld: the reference's run writes each scored row's log-probabilities (F32, the whole
+vocabulary: 10,240 rows 5.3 GB); a candidate's run reads them and scores KL(reference || candidate) a row in double,
+its top-1 agreement (argmax, the lowest id among equals) and its next-token NLL; DUMP keeps a record a row.
+tools/bench/kld_compare.py: runs paired against a baseline - the mean KL and its standard error, median, p99, top-1,
+perplexity, and the paired difference a row with its standard error and the two halves' means (a difference the
+halves disagree on is not acted on).
+
+**the texts.**
+- **wiki10k** (~/bench/osmos-eval/wiki10k.txt): BOS then the first 10,239 tokens of WikiText-2 test (the old
+  wiki2_eval's text: the same tokens after the BOS), five steps of 2,048.
+- **rig hold-out** (~/bench/osmos-eval/private: the operator's sessions, scrubbed as calib_rig.py scrubs, local only,
+  never committed or uploaded): four whole sessions of 16,384 tokens - none of the 78 sessions calib_rig.py took
+  (counted: its eval the first 4 by hash, its calibration through index 77) - each with a mask, 1 for the assistant's
+  tokens (after <｜Assistant｜>, through its <｜end▁of▁sentence｜>): 27,459 scored. the rendering is the last turn's
+  view (earlier turns' reasoning dropped, as the template does).
+
+**the protocol** (the rules that make a number worth acting on):
+1. wiki10k's rows 2,048 .. 10,239 are the **working rows**: every choice is made on them (a format, a gain, a plan).
+2. its rows 0 .. 2,047 are the **dev rows**: scored once per final candidate, never searched over.
+3. the **hold-out** runs once, on the finalists of a release, never to choose between variants.
+4. anything fitted (a gain, a rounding's Hessian) is fitted on calibration text disjoint from all three, and each
+   checkpoint gets its own fit: a requantized bank invalidates a gain.
+5. a release's quality line is the dev rows' and the hold-out's KL with their standard errors, beside the size.
+6. the reference's own floor (its Q8_0 tensors against BF16 ones where they fit) is reported once, beside them.
+
 ### 0.6.4: a special token's text the model says is text; a refused completion goes with its error; the stream the answer's (#34, 2026-11-11)
 
 **The report** (issue #34, 0.6.3, UD-IQ2_XXS, greedy): asked which osmos-serve flag takes `</think>`, the model
