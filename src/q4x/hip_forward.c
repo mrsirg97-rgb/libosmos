@@ -338,7 +338,8 @@ void q4x_forward_destroy(Q4xForward *f)
 {
   if (!f)
     return;
-  membrane_destroy(f->mem); /* its readers stopped, then its memory: the GPU is past every expert (the caller's) */
+  (void)hipDeviceSynchronize(); /* a failed step's kernels done: the experts' host memory is unmapped below */
+  membrane_destroy(f->mem); /* its readers stopped, then its memory */
   host_slots_destroy(f->exp_slots), host_slots_destroy(f->exp_stream);
   for (int i = 0; f->exp_fds && i < f->w->model->n_files; i++)
     if (f->exp_fds[i] >= 0)
