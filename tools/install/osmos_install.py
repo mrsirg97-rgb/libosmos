@@ -129,6 +129,10 @@ def main():
     if a.list or not a.packs:
         for pid, p in m["packs"].items():
             print(f"{pid:12s} {p['title']}")
+            if p.get("quality"):  # 0.6.6's reference (DESIGN.md): the distance from the model's own weights
+                qd = p["quality"]
+                print(f"{'':12s} quality: KL {qd.get('wiki_kld', '-')} on Wiki text, {qd.get('agent_kld', '-')} on agent "
+                      f"traces (0 the model's own weights; lower is closer)")
         return 0
     for pid in a.packs:
         if pid not in m["packs"]:

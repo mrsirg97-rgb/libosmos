@@ -3450,14 +3450,15 @@ weights, the KL divergence over the whole vocabulary as the measure, and a proto
 reporting apart.
 
 **the reference.** a DeepSeek GGUF (evo's gguf-a: its F32 and BF16 tensors already the originals') with an overlay of
-the originals (~/Models/ds1017/ref, nine shards; 6 + 9 files, under WEIGHTS_MAX_FILES):
+the originals (~/Models/ds1017/ref-bf16, nine shards; 6 + 9 files, under WEIGHTS_MAX_FILES):
 - the routed experts as deepseek-ai stores them: E2M1 codes two to a byte, an E8M0 scale every 32 inputs - MXFP4 as
   ggml lays it (tools/convert/ds4_experts_mxfp4.py), no value changed (on a real expert, gguf-py's decode and the
   FP4 table bit-identical). 296 GB, by range from the repo. MXFP4 is now a GGUF file's type and the prompt matmul's
   (decode_h's generic F16: every value exact while 2^(e - 128) x 12 is a normal f16 - the experts' e 119-123);
-- the embedding BF16 as stored; the attention, the head, the shared experts and the Engram's wkv Q8_0 from their FP8
-  (32 x 32 UE8M0 blocks) - not bit-exact: the reference's own floor, measured against itself with them BF16 where a
-  role takes it (next);
+- the dense weights BF16 (tools/convert/ds4_ref_dense.py): each FP8 original (E4M3 x a 32 x 32 block's UE8M0) exactly,
+  the head and the embedding as stored; the attention's wo_a Q8_0 (attn_output_a: mm_group alone, no BF16 path) - the
+  reference's one approximation. a first reference had every dense tensor Q8_0: 0.0081 KLD from this one (top-1
+  98.1%), 3-6% of the packs' - so not it;
 - the arithmetic osmos's: the prompt's path (F16 activations into the matmuls, F32 sums), the same step for every
   run. deepseek's own inference quantizes activations to FP8 a 128; the reference does not - its distance is the
   weights' alone, as every candidate's run shares the rest.
@@ -3485,7 +3486,58 @@ halves disagree on is not acted on).
 4. anything fitted (a gain, a rounding's Hessian) is fitted on calibration text disjoint from all three, and each
    checkpoint gets its own fit: a requantized bank invalidates a gain.
 5. a release's quality line is the dev rows' and the hold-out's KL with their standard errors, beside the size.
-6. the reference's own floor (its Q8_0 tensors against BF16 ones where they fit) is reported once, beside them.
+6. the reference's own floor is reported once, beside them: run twice it is the same bits (KLD 0, top-1 100%); its one
+   approximation, wo_a's Q8_0, is not measured apart (no BF16 path); a reference with every dense tensor Q8_0 sat
+   0.0081 from it.
+
+**measured (2026-11-12, the reference above; working rows 2,048 .. 10,239 of wiki10k; the hold-out's 27,459 rows).**
+the reference's passes: wiki10k 166 s (ppl 1.7429 - 296 GB of experts a step, the GPU's 80 GiB and the page cache
+holding most, ~190 GB a step from the SSD at its ~6 GB/s), each 16,384-token session 269-285 s; its log-probabilities
+5.3 GB and 14.2 GB on disk. a candidate's run 54-91 s.
+
+| pack | wiki KLD | +- | median | p99 | top-1 | ppl | hold-out KLD | +- | top-1 | ppl |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| UD-IQ2_XXS | 0.1255 | 0.0048 | 0.0014 | 2.24 | 92.38% | 1.8905 | 0.0361 | 0.0012 | 93.17% | 2.5029 |
+| UD-IQ1_M | 0.1895 | 0.0070 | 0.0038 | 3.27 | 90.32% | 1.9395 | 0.0479 | 0.0011 | 91.88% | 2.4770 |
+| UD-IQ1_S | 0.2592 | 0.0082 | 0.0073 | 3.96 | 88.07% | 2.0577 | 0.0664 | 0.0011 | 90.47% | 2.4918 |
+| evo-a (UD-IQ1_M's experts, its dense Q8_0 from the FP8) | 0.1741 | 0.0065 | 0.0031 | 2.75 | 90.62% | 1.9118 | | | | |
+| evo-a + GPTQ dense A (attention, head Q5_K) | 0.1752 | 0.0064 | 0.0035 | 2.63 | 90.54% | 1.9145 | | | | |
+| evo-a + B (A, the shared expert Q6_K) | 0.1766 | 0.0064 | 0.0033 | 2.76 | 90.43% | 1.9143 | | | | |
+| evo-a + C (A, the shared expert Q5_K) | 0.1802 | 0.0067 | 0.0033 | 2.83 | 90.42% | 1.9234 | | | | |
+
+paired, a row at a time: UD-IQ1_M - UD-IQ2_XXS +0.064 +- 0.006 (wiki), +0.0118 +- 0.0006 (hold-out); evo-a -
+UD-IQ1_M -0.0154 +- 0.0045, evo-A -0.0143 +- 0.0045 (the halves -0.019 / -0.009); against evo-a, A +0.0009 +-
+0.0015, B +0.0025 +- 0.0016, C +0.0058 +- 0.0017 (the halves +0.0067 / +0.0050). the dev rows, once: UD-IQ2_XXS
+0.145, UD-IQ1_M 0.210, UD-IQ1_S 0.265 - the working rows' order and gaps. what they say:
+- **perplexity misranks.** on the hold-out UD-IQ1_M's (2.477) is below UD-IQ2_XXS's (2.503), its KLD +0.012 above
+  (20 standard errors); and the down gain below lowered UD-IQ2_XXS's perplexity (1.891 -> 1.880) with its KLD the
+  same and its top-1 down. a choice by perplexity would have taken both wrong ones.
+- **evo's dense is measurable now.** the old comparison (log-prob against evo-a) scored A, B and C a tie; against the
+  reference C's faster shared expert costs 0.006, A nothing. 0.6.7's default candidate is evo-A: closer than
+  UD-IQ1_M (-0.014) at about UD-IQ1_S's decode (eval2: 19.0 tok/s, UD-IQ1_S's title 19.5, UD-IQ1_M's 17.6 - to be
+  measured interleaved before it is claimed).
+- **the agent traces are easier**: a third of wiki's KLD for every pack (the quants lose what the model knows by
+  heart first: UD-IQ2_XXS's worst wiki rows are where the reference recalls the text itself - a poem's next line, a
+  quotation's next word, a set phrase - tools/bench/kld_tokens.py). Local Code's conversation-trace KLD for
+  UD-IQ2_XXS is 0.0344, ours 0.0361: another reference, other traces, the same number.
+- **the mean is the tail's**: the median is 1-3% of the mean; UD-IQ2_XXS's worst 1% of rows hold 28% of its KL,
+  its worst 5% 65%, its worst 10% 82%.
+
+**the routed experts' gain (Local Code's lgain), measured on UD's banks.** captures (calib.hip: 8,192 tokens of the
+public calibration text through UD-IQ2_XXS, every layer) against the original banks, each layer's 32 most picked:
+- gate and up: no bias - the quant's output regressed on the original's 0.978-0.984 (Local Code's own 2-bit 0.887),
+  the hidden error's best c_gu 0.992-1.006 (layers 0-4), the error moved under 0.5%. UD's imatrix scales fit.
+- down: UD's IQ2 downs overshoot - c_d 0.930-0.958 (IQ2_XXS / IQ2_XS / IQ2_S), IQ3_XXS 0.973-0.982, Q2_K 0.989, the
+  experts' spread 0.002-0.008; the down's own error -6% at its c_d. baked into UD-IQ2_XXS's downs' f16 scales (39
+  tensors, every other byte the quant's; layer 21, whose down error is 3e-5 at its most picked experts, left out):
+  wiki +0.0007 +- 0.0018 - nothing. Local Code's warning measured: the down's overshoot answers the gate and up's
+  2-4% smaller hidden; fitted on the reference's hidden it corrects what the model does not see. a fit on the quant's
+  own hidden is 0.6.7's, inside evo's build, where the quantizer is ours.
+
+the tools: tools/convert/ds4_experts_mxfp4.py and ds4_ref_dense.py (the overlay from deepseek-ai's files: the dense
+shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token), kld.hip, kld_compare.py,
+kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
+out), local only.
 
 ### 0.6.6: osmos doctor (2026-11-11)
 

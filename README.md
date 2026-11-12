@@ -39,10 +39,25 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 | --- | --- | --- | --- |
 | `ud-iq1_s` | 122 GB + 203 GB Engram table | 1M | speed |
 | `ud-iq1_m` | 140 GB + 203 GB Engram table | 1M | quality (unsloth's benchmarks 85.55 against 83.53) |
-| `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the best perplexity, the slowest decode |
+| `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the closest to the model, the slowest decode |
 | `qwen38-ud-iq3_xxs` | 78 GB + 3 GB MTP head | 262K | Qwen, fully in GPU memory |
 | `qwen38-ud-iq3_xxs-1m` | the same files | 1M (YaRN) | long documents: recalls a fact 355K tokens back, 0.4% worse on short text |
 | `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 262K | the larger quant, if you want it: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
+
+**How close each DeepSeek pack is to the model itself.** The KL divergence from DeepSeek's own weights (the experts
+as deepseek-ai stores them, MXFP4; the dense layers BF16), over the whole vocabulary, a token at a time: lower is
+closer, 0 is the model. Measured on this box against a reference that runs the original 296 GB of experts from the
+SSD (DESIGN.md, "0.6.6"):
+
+| Pack | Wiki text (8,191 tokens) | Agent traces (27,459 assistant tokens) | Top-1 agreement (Wiki) |
+| --- | --- | --- | --- |
+| `ud-iq2_xxs` | 0.126 ± 0.005 | 0.036 ± 0.001 | 92.4% |
+| `ud-iq1_m` | 0.190 ± 0.007 | 0.048 ± 0.001 | 90.3% |
+| `ud-iq1_s` | 0.259 ± 0.008 | 0.066 ± 0.001 | 88.1% |
+
+The agent traces are rig sessions of our own (local, never published), the assistant's tokens alone. Perplexity
+does not rank these packs reliably: on those traces UD-IQ1_M's (2.477) is below UD-IQ2_XXS's (2.503), though it is
+further from the model. `osmos_install.py --list` shows each pack's numbers.
 
 The DeepSeek packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) with the
 lossless MXFP8 Engram table, plus our 4.7 GB DSpark drafter and expert pick profile

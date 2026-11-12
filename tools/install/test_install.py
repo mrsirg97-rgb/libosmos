@@ -524,6 +524,22 @@ class Gpu(unittest.TestCase):
         self.assertIn("sysfs", why)
 
 
+class Quality(unittest.TestCase):
+    """a pack's quality (0.6.6's KL against the reference): optional, two non-negative numbers when given"""
+
+    def test_quality(self):
+        m = manifest.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs.json"))
+        self.assertIn("wiki_kld", m["packs"]["ud-iq2_xxs"]["quality"])
+        for bad in ({"wiki_kld": -1}, {"wiki_kld": "x"}, {"perplexity": 2.0}, [0.1], {"agent_kld": True}):
+            m2 = json.loads(json.dumps(m))
+            m2["packs"]["ud-iq2_xxs"]["quality"] = bad
+            with self.assertRaises(manifest.ManifestError):
+                manifest.check(m2)
+        m2 = json.loads(json.dumps(m))
+        del m2["packs"]["ud-iq2_xxs"]["quality"]
+        manifest.check(m2)  # optional
+
+
 class Doctor(unittest.TestCase):
     """--doctor's checks on fake machines: each level and what it names"""
 

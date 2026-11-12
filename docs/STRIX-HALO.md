@@ -100,6 +100,10 @@ first, in rig's own process.
 
 - **A frontier model on one APU.** One 128 GB APU runs a 768B-parameter model for real agent work. Unified memory
   lets the GPU hold 113 GiB of it, and the rest is read from an NVMe SSD as needed.
+- **The unquantized model as its own yardstick.** The same box runs DeepSeek's original weights - 296 GB of experts
+  as deepseek-ai ships them, streamed from one NVMe SSD - at about 60 prompt tokens a second: 10,240 tokens in 166 s.
+  Every pack is scored against that, token by token over the whole vocabulary (KL divergence), not by perplexity:
+  UD-IQ2_XXS 0.036 on agent traces, matching an independent measurement made on other hardware (0.034).
 - **A 1M-token context in under 1 GiB.** It fits in about 0.85 GiB, because the attention state stays in the model's
   own FP8 and FP4 formats.
 - **Stock settings.** It installs in one command, with only the kernel's GPU-memory limit raised. It sizes itself

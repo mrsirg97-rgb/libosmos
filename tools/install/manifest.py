@@ -102,6 +102,10 @@ def check(m):
     for i in {i for i in ids if ids.count(i) > 1}:
         raise ManifestError(f"rig id {i!r}: two packs' (rig keys a row by it)")
     for pid, p in m["packs"].items():
+        qd = p.get("quality")
+        if qd is not None and not (isinstance(qd, dict) and set(qd) <= {"wiki_kld", "agent_kld"} and all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for v in qd.values())):
+            raise ManifestError(f"pack {pid}: quality is not {{wiki_kld, agent_kld}} (KL divergences, 0 or more)")
         if not isinstance(p.get("shards"), list) or not p["shards"]:
             raise ManifestError(f"pack {pid}: no shards")
         for fid in p["shards"]:

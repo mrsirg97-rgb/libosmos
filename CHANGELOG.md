@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.6]: a pack scored against the model itself
+
+No engine output changes: the DeepSeek and Qwen paths are as 0.6.5's. What changes is how a quant is judged.
+
+- **The reference: DeepSeek's own weights, run on this box.** The routed experts as deepseek-ai stores them (FP4
+  codes, an E8M0 scale every 32: 296 GB, MXFP4 in GGUF, no value changed) and the dense layers BF16 (exactly the
+  FP8 originals; the attention's wo_a Q8_0, its one approximation), an overlay on any DeepSeek GGUF. osmos now
+  reads MXFP4 from a GGUF file and runs it in the prompt's matmul. A reference pass streams the experts from the
+  SSD: 10,240 tokens in 166 s. Built with `tools/convert/ds4_experts_mxfp4.py` and `ds4_ref_dense.py` from the
+  repo's files (the dense shard rebuilt byte for byte).
+- **The measure: KL divergence over the whole vocabulary, a token at a time** (`tools/bench/kld`), with top-1
+  agreement; runs paired against a baseline with standard errors and both halves of the text
+  (`kld_compare.py`); where a run's divergence lies, by token kind and chat span (`kld_tokens.py`). An agent
+  trace is scored on its assistant tokens alone.
+- **The protocol** (DESIGN.md, "0.6.6"): choices on a Wiki text's working rows, its first 2,048 rows scored once
+  per final candidate, the agent hold-out only for a release's finalists, anything fitted on calibration text
+  apart from all three.
+- **The packs' numbers** (README, and `osmos_install.py --list`): KLD on Wiki text / agent traces - UD-IQ2_XXS
+  0.126 / 0.036, UD-IQ1_M 0.190 / 0.048, UD-IQ1_S 0.259 / 0.066. UD-IQ2_XXS's agent-trace number matches an
+  independent measurement made elsewhere (0.034). Perplexity misranks these packs: on the agent traces UD-IQ1_M's
+  is below UD-IQ2_XXS's.
+- **Tried, measured, not kept:** a per-layer gain on the routed experts (Local Code's correction for their own
+  2-bit quant). Unsloth's gate and up show no bias; their IQ2 downs overshoot 4-7%, but scaling them back changes
+  nothing end to end (+0.0007 +- 0.0018) - the overshoot answers a smaller hidden upstream.
+- **`osmos_install.py --doctor`**: the machine as osmos will run on it - the GPU and its memory limit, the driver
+  and ROCm, the power profile (balanced is slower than the profiles osmos is measured at), the RAM, `/tmp` as RAM,
+  direct reads on the models' folder, an SSD under it, a wireless download - each line what to change.
+
 ## [0.6.5]: Qwen's experts on the membrane; the membrane on the largest quant, measured
 
 No output changes: every ids hash the same (Qwen UD-IQ3_XXS plain and MTP; DeepSeek UD-IQ1_M and UD-IQ2_XXS
