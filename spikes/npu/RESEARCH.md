@@ -147,6 +147,12 @@ cores, double-buffered); C in the core over the K-steps, joined at the memtile. 
 linear in columns: DRAM and the memtiles keep 32 cores fed (~20 GB/s of W and A). a core's ~24% loss: the A tile
 single-buffered (memory: 54 of 64 KB) - a K-step waits for its 18 KB. next: M = 128 with one decode (two A halves in
 turn: the decode's cost a FLOP halved, the halves' fetch overlapped), f32 accumulation.
+**M = 128, one decode for both 64-row halves of A (fused_step's half): 306 us, 7.03 TFLOP/s for the array (0.220 a
+core), corr 0.999487** - DeepSeek's ~128 rows an expert in 8K steps, measured: 72% of the 32 x one-core projection
+(~9.7). (M = 64 again beside it: 351 us, 3.06 - the box busy with the BF16 download; +-15% between runs until quiet.)
+against the GPU's ~27 TFLOP/s on DeepSeek's routed experts: ~21% of them the NPU's, an 8K step ~7% faster. memory caps
+M at 128 (192: C and the single-buffered A past 64 KB). next: A's fetch overlapped (~28% lost), C in f32 (its memory
+against that), the single-core decode gains (each the array's).
 
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):

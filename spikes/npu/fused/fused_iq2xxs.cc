@@ -258,10 +258,15 @@ void fused_iq2xxs(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *_
 #ifdef MULTI
 // the 32-core design's step (fused32.py): one 256 K-step of a core's 64-row band - its W tile decoded, C += A x W^T;
 // kstep 0: C zeroed before (the band's first K-step)
-extern "C" void fused_step(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *__restrict c, int32_t kstep) {
+#ifndef HALVES
+#define HALVES 1 /* A's 64-row halves a K-step (M = 64 HALVES): the W tile decoded at half 0, multiplied with each */
+#endif
+extern "C" void fused_step(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *__restrict c, int32_t kstep,
+                           int32_t half) {
+  uint8_t *ch = c + half * (64 * 64 * 9 / 8);
   if (kstep == 0)
-    for (int i = 0; i < 64 * 64 * 9 / 8; i += 64) aie::store_v(c + i, aie::zeros<uint8, 64>());
-  decode_tile3(w);
-  matmul_vectorized_2x2_bfp16<DIM_M / 8, DIM_K / 8, DIM_N / 8, 8, 8, 8>((bfp16ebs8 *)a, (bfp16ebs8 *)Bm, (bfp16ebs8 *)c);
+    for (int i = 0; i < 64 * 64 * 9 / 8; i += 64) aie::store_v(ch + i, aie::zeros<uint8, 64>());
+  if (half == 0) decode_tile3(w);
+  matmul_vectorized_2x2_bfp16<DIM_M / 8, DIM_K / 8, DIM_N / 8, 8, 8, 8>((bfp16ebs8 *)a, (bfp16ebs8 *)Bm, (bfp16ebs8 *)ch);
 }
 #endif

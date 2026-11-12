@@ -17,8 +17,10 @@ HERE = os.path.dirname(os.path.abspath(__file__)); KD = os.path.expanduser('~/Pr
 M, KT, NR, ROWS = 64, 256, 64, 4          # A rows, a K-step, a core's output rows, cores a column
 KS = 16                                    # K-steps: K = 4096
 COLS = int(sys.argv[1]) if len(sys.argv) > 1 else 8
+H = int(sys.argv[2]) if len(sys.argv) > 2 else 1  # A's 64-row halves: M = 64 H, one decode for them all
 N = COLS * ROWS * NR
-WT, AT, CT = NR * 66 // 4, M * KT * 9 // 8 // 4, M * NR * 9 // 8 // 4   # words: a core's W tile, an A tile, a C tile
+WT, AT, CT1 = NR * 66 // 4, M * KT * 9 // 8 // 4, M * NR * 9 // 8 // 4
+CT = CT1 * H  # a core's C: H stacked 64-row tiles   # words: a core's W tile, an A tile, a C tile
 
 def tap(total, off, n):  # n words from off, as rows of at most 1024
     inner = 1024 if n % 1024 == 0 else next(d for d in range(1024, 0, -1) if n % d == 0)
@@ -29,8 +31,8 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int]):
     i32 = np.dtype[np.int32]
     wt, at, ct = (np.ndarray[(n,), i32] for n in (WT, AT, CT))
     step = ExternalFunction("fused_step", source_file=os.path.join(HERE, "fused_iq2xxs.cc"),
-                            arg_types=[wt, at, ct, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
-                            compile_flags=["-DFUSED_V=5", "-DMULTI"])
+                            arg_types=[wt, at, ct, np.int32, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
+                            compile_flags=["-DFUSED_V=5", "-DMULTI", f"-DHALVES={H}"])
     a_l3, w_l3, c_l3, workers = [], [], [], []
     for col in range(cols):
         a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=1)
@@ -46,12 +48,15 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int]):
             def body(ai, wi, co, k):
                 cc = co.acquire(1)
                 for s in range_(KS):
-                    x, y = wi.acquire(1), ai.acquire(1)
-                    k(x, y, cc, s)
-                    wi.release(1); ai.release(1)
+                    x = wi.acquire(1)
+                    for h in range(H):
+                        y = ai.acquire(1)
+                        k(x, y, cc, s, h)
+                        ai.release(1)
+                    wi.release(1)
                 co.release(1)
             workers.append(Worker(body, fn_args=[a2.cons(), w2[r].cons(), c2[r].prod(), step], tile=Tile(col, 2 + r), stack_size=0xD00))
-    TW, TA, TC = cols * KS * ROWS * WT, KS * AT, cols * ROWS * CT
+    TW, TA, TC = cols * KS * ROWS * WT, KS * H * AT, cols * ROWS * CT
     def seq(W, A, C, *hs):
         ap, wp, cc = hs[:cols], hs[cols:2 * cols], hs[2 * cols:]
         for col in range(cols):
@@ -78,21 +83,23 @@ def main():
             band = (col * ROWS + r_) * NR
             w[col, :, r_] = raw[band:band + NR].transpose(1, 0, 2)
     rng = np.random.default_rng(1017)
-    A = rng.standard_normal((M, KS * KT)).astype(np.float32)
-    a = np.concatenate([B.shuffle(B.encode(A[:, s * KT:(s + 1) * KT]), KT, M, KT, M).reshape(-1) for s in range(KS)])
+    A = rng.standard_normal((M * H, KS * KT)).astype(np.float32)
+    a = np.concatenate([B.shuffle(B.encode(A[h * M:(h + 1) * M, s * KT:(s + 1) * KT]), KT, M, KT, M).reshape(-1)
+                        for s in range(KS) for h in range(H)])
     Cref = B.quantize(A).astype(np.float64) @ np.concatenate(
         [B.quantize(Wf[:, s * KT:(s + 1) * KT]) for s in range(KS)], axis=1).astype(np.float64).T
     wt_ = iron.tensor(w.reshape(-1).view(np.int32), dtype=np.int32, device="npu")
     at_ = iron.tensor(a.view(np.int32), dtype=np.int32, device="npu")
     ct_ = iron.zeros(COLS * ROWS * CT, dtype=np.int32, device="npu")
     bench = run_iters(fused32, wt_, at_, ct_, cols=COLS, warmup=1, iters=5)
-    cb = ct_.numpy().view(np.uint8).reshape(COLS * ROWS, M * NR * 9 // 8)
-    got = np.concatenate([B.decode(B.shuffle(cb[i], NR, M, NR, M, unshuffle=True)).reshape(M, NR) for i in range(COLS * ROWS)], axis=1)
+    cb = ct_.numpy().view(np.uint8).reshape(COLS * ROWS, H, M * NR * 9 // 8)
+    got = np.concatenate([np.concatenate([B.decode(B.shuffle(cb[i, h], NR, M, NR, M, unshuffle=True)).reshape(M, NR)
+                                          for h in range(H)], axis=0) for i in range(COLS * ROWS)], axis=1)
     rel = np.abs(got - Cref).max() / np.abs(Cref).max()
     us = bench.npu.avg_us
-    flop = 2 * M * KS * KT * N
-    print(f"{COLS} columns x {ROWS} cores: C {M} x {N}, K {KS * KT}: corr {np.corrcoef(got.ravel(), Cref.ravel())[0, 1]:.6f}, "
-          f"max err / max |C| {rel:.2e}; {us:.0f} us on the NPU -> {flop / us / 1e6:.2f} TFLOP/s at M = {M} "
+    flop = 2 * M * H * KS * KT * N
+    print(f"{COLS} columns x {ROWS} cores: C {M * H} x {N}, K {KS * KT}: corr {np.corrcoef(got.ravel(), Cref.ravel())[0, 1]:.6f}, "
+          f"max err / max |C| {rel:.2e}; {us:.0f} us on the NPU -> {flop / us / 1e6:.2f} TFLOP/s at M = {M * H} "
           f"({flop / us / 1e6 / (COLS * ROWS):.3f} a core; one core alone 0.163)")
 
 if __name__ == "__main__":
