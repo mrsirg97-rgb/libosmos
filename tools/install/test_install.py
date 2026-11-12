@@ -63,8 +63,13 @@ class Manifest(unittest.TestCase):
     def test_real(self):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
-        self.assertEqual(set(m["packs"]), {"ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
+        self.assertEqual(set(m["packs"]), {"osmos-evo-a", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
                                            "qwen38-ud-iq3_xxs-1m", "qwen38-ud-q4_k_xl"})
+        evo = m["packs"]["osmos-evo-a"]  # osmos's own: UD-IQ1_M's shards with its delta in, made where installed
+        self.assertEqual({m["files"][f]["derive"]["with"] for f in evo["shards"]}, {"gguf_assemble"})
+        self.assertEqual({tuple(m["files"][f]["derive"]["base"]) for f in evo["shards"]},
+                         {tuple(m["packs"]["ud-iq1_m"]["shards"])})
+        self.assertEqual((evo["table"], evo["overlay"]), (m["packs"]["ud-iq1_m"]["table"], m["packs"]["ud-iq1_m"]["overlay"]))
         q4 = m["packs"]["qwen38-ud-q4_k_xl"]  # the larger Qwen: its n-gram table streamed to fit, no overlay for it
         self.assertTrue(q4["settings"]["stream_ngram"])
         self.assertIsNone(q4["overlay"])
@@ -476,6 +481,61 @@ class Derived(unittest.TestCase):
                 manifest.check(mm)
 
 
+class DerivedSet(unittest.TestCase):
+    """a pack's shards made from a published base set and a delta (gguf_assemble), each pinned by its SHA-256"""
+
+    def setup(self, d):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "convert"))
+        import gguf_assemble as A
+        import gguf_delta as D
+        have, models = os.path.join(d, "have"), os.path.join(d, "models")
+        os.makedirs(have)
+        mk = Assemble().gguf
+        a, c = os.urandom(256), os.urandom(4096 * 2 + 64)
+        mk(f"{have}/b-00001-of-00002.gguf", [("a", [64], 0, a)])
+        mk(f"{have}/b-00002-of-00002.gguf", [("c", [len(c) // 4], 0, c)])
+        os.makedirs(f"{d}/t")  # the target: c changed, its own name
+        name = struct.pack("<Q", 12) + b"general.name" + struct.pack("<IQ", 8, 3) + b"evo"
+        mk(f"{d}/t/t-00001-of-00002.gguf", [("a", [64], 0, a)], extra_kv=name, n_extra=1)
+        mk(f"{d}/t/t-00002-of-00002.gguf", [("c", [len(c) // 4], 0, os.urandom(len(c)))])
+        delta = f"{have}/delta.gguf"
+        D.main.__globals__["sys"].argv = ["x", f"{d}/t/t-00001-of-00002.gguf", f"{have}/b-00001-of-00002.gguf", delta]
+        D.main()
+        os.makedirs(f"{d}/made")
+        made = A.assemble([f"{have}/b-00001-of-00002.gguf", f"{have}/b-00002-of-00002.gguf"],
+                          [f"{d}/made/e-00001-of-00002.gguf", f"{d}/made/e-00002-of-00002.gguf"], [delta], log=lambda m: None)
+        derived = lambda k, p: {"derive": {"with": "gguf_assemble", "base": ["b1", "b2"], "delta": "delta", "shard": k},  # noqa: E731
+                                "path": os.path.basename(p), "bytes": os.path.getsize(p), "sha256": sha(p)}
+        m = {"version": 1, "rig": RIG_PIN,
+             "files": {"b1": entry(f"{have}/b-00001-of-00002.gguf"), "b2": entry(f"{have}/b-00002-of-00002.gguf"),
+                       "delta": entry(delta, repo="o/evo"), "e1": derived(1, made[0]), "e2": derived(2, made[1])},
+             "packs": {"e": {"title": "t", "shards": ["e1", "e2"], "table": None, "picks": None, "drafter": [],
+                             "overlay": None, "rig": ROW, "settings": {}}}}
+        return have, models, m, made
+
+    def test_laid(self):
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            manifest.check(m)
+            self.assertEqual(osmos_install.needed(m, ["e"], False), ["b1", "b2", "delta"])  # the inputs, never the made
+            cfg = layout.read_config(layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None))
+            self.assertEqual(sha(cfg["model"]), sha(made[0]))
+            self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
+
+    def test_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, _ = self.setup(d)
+            m["files"]["e2"]["sha256"] = "0" * 64  # one file of the set not as pinned: refused, none of the set left
+            with self.assertRaises(layout.LayoutError):
+                layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)
+            self.assertEqual(os.listdir(os.path.join(models, "derived")), [])
+            for k, v in (("shard", 3), ("shard", 0), ("delta", "e1"), ("base", ["b1", "nope"]), ("base", [])):
+                mm = json.loads(json.dumps(m))
+                mm["files"]["e1"]["derive"][k] = v
+                with self.assertRaises(manifest.ManifestError, msg=f"derive {k} {v!r}"):
+                    manifest.check(mm)
+
+
 class Host(unittest.TestCase):
     def test_tools_named_before_anything_runs(self):
         have = {"git", "make", "gcc", "hipcc", "hf"}
@@ -522,6 +582,53 @@ class Gpu(unittest.TestCase):
         ok, why = host.gpu("/nonexistent")
         self.assertFalse(ok)
         self.assertIn("sysfs", why)
+
+
+class Assemble(unittest.TestCase):
+    """tools/convert/gguf_assemble.py: a GGUF set with tensors replaced - the others' bytes and their offset modulo a
+    block kept (clones where the filesystem has them), a shard with nothing replaced linked"""
+
+    def gguf(self, path, tensors, extra_kv=b"", n_extra=0):
+        def s(x):
+            b = x.encode()
+            return struct.pack("<Q", len(b)) + b
+        kv = s("general.alignment") + struct.pack("<II", 4, 32) + extra_kv
+        info, data, off = b"", b"", 0
+        for name, dims, ty, raw in tensors:
+            info += s(name) + struct.pack("<I", len(dims)) + struct.pack(f"<{len(dims)}Q", *dims) + struct.pack("<IQ", ty, off)
+            data += raw + b"\0" * ((-len(raw)) % 32)
+            off += len(raw) + (-len(raw)) % 32
+        hd = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), 1 + n_extra) + kv + info
+        with open(path, "wb") as f:
+            f.write(hd + b"\0" * ((-len(hd)) % 32) + data)
+
+    def test_assemble(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "convert"))
+        import gguf_assemble as A
+        d = tempfile.mkdtemp()
+        big = os.urandom(3 * 4096 + 100)  # F32 [(3 * 4096 + 100) / 4]: whole blocks and edges
+        a = os.urandom(64 * 4)
+        self.gguf(f"{d}/m-00001-of-00002.gguf", [("a", [64], 0, a), ("big", [len(big) // 4], 0, big)])
+        self.gguf(f"{d}/m-00002-of-00002.gguf", [("c", [64], 0, os.urandom(256))])
+        self.gguf(f"{d}/r.gguf", [("a", [64], 8, os.urandom(34 * 2))])  # a as Q8_0: 2 blocks
+        out = os.path.join(d, "out")
+        A.main.__globals__["sys"].argv = ["x", f"{d}/m-00001-of-00002.gguf", out, f"{d}/r.gguf"]
+        A.main()
+        _, _, _, _, got = A.read_shard(f"{out}/m-00001-of-00002.gguf")
+        names = {t[0]: t for t in got}
+        self.assertEqual(names["a"][2], 8)  # the replacement's type
+        with open(f"{out}/m-00001-of-00002.gguf", "rb") as f:
+            f.seek(names["big"][3]); self.assertEqual(f.read(len(big)), big)
+        _, _, _, _, base = A.read_shard(f"{d}/m-00001-of-00002.gguf")
+        self.assertEqual(names["big"][3] % 4096, {t[0]: t for t in base}["big"][3] % 4096)  # cloneable
+        self.assertTrue(os.path.islink(f"{out}/m-00002-of-00002.gguf"))  # nothing replaced: linked
+        with self.assertRaises(SystemExit):  # dims the base's or refused
+            self.gguf(f"{d}/bad.gguf", [("a", [32], 0, os.urandom(128))])
+            A.main.__globals__["sys"].argv = ["x", f"{d}/m-00001-of-00002.gguf", os.path.join(d, "out2"), f"{d}/bad.gguf"]
+            try:
+                A.main()
+            except AssertionError as e:
+                raise SystemExit(str(e))
 
 
 class Quality(unittest.TestCase):
@@ -723,7 +830,8 @@ class Rig(unittest.TestCase):
 
     def test_each_packs_id(self):                        # rig's names: the model, its date, the quant's size
         ids = {pid: p["rig"]["id"] for pid, p in self.PACKS.items()}
-        self.assertEqual(ids, {"ud-iq1_s": "deepseek-1017-ud-s", "ud-iq1_m": "deepseek-1017-ud-m",
+        self.assertEqual(ids, {"osmos-evo-a": "deepseek-1017-evo-a", "ud-iq1_s": "deepseek-1017-ud-s",
+                               "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
                                "qwen38-ud-iq3_xxs-1m": "qwen3.8-flash-next-1m", "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]

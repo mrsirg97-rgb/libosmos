@@ -3500,7 +3500,7 @@ holding most, ~190 GB a step from the SSD at its ~6 GB/s), each 16,384-token ses
 | UD-IQ2_XXS | 0.1255 | 0.0048 | 0.0014 | 2.24 | 92.38% | 1.8905 | 0.0361 | 0.0012 | 93.17% | 2.5029 |
 | UD-IQ1_M | 0.1895 | 0.0070 | 0.0038 | 3.27 | 90.32% | 1.9395 | 0.0479 | 0.0011 | 91.88% | 2.4770 |
 | UD-IQ1_S | 0.2592 | 0.0082 | 0.0073 | 3.96 | 88.07% | 2.0577 | 0.0664 | 0.0011 | 90.47% | 2.4918 |
-| evo-a (UD-IQ1_M's experts, its dense Q8_0 from the FP8) | 0.1741 | 0.0065 | 0.0031 | 2.75 | 90.62% | 1.9118 | | | | |
+| evo-a (UD-IQ1_M, its expert downs of layers 20-39 Q2_K from the originals) | 0.1741 | 0.0065 | 0.0031 | 2.75 | 90.62% | 1.9118 | | | | |
 | evo-a + GPTQ dense A (attention, head Q5_K) | 0.1752 | 0.0064 | 0.0035 | 2.63 | 90.54% | 1.9145 | | | | |
 | evo-a + B (A, the shared expert Q6_K) | 0.1766 | 0.0064 | 0.0033 | 2.76 | 90.43% | 1.9143 | | | | |
 | evo-a + C (A, the shared expert Q5_K) | 0.1802 | 0.0067 | 0.0033 | 2.83 | 90.42% | 1.9234 | | | | |
@@ -3538,6 +3538,41 @@ the tools: tools/convert/ds4_experts_mxfp4.py and ds4_ref_dense.py (the overlay 
 shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token), kld.hip, kld_compare.py,
 kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
 out), local only.
+
+### 0.6.8: osmos-evo-A, the default DeepSeek pack (2026-11-12, low-power)
+
+**what it is.** UD-IQ1_M with two of osmos's changes, each scored against 0.6.6's reference before it was kept:
+- the routed experts' down projections of layers 20-39 requantized to Q2_K from deepseek-ai's MXFP4 (unsloth's
+  imatrix) - evo-a (`osmos.recipe` in its metadata);
+- the attention (kv, q_a, q_b, output_a, output_b) and the head requantized to Q5_K by GPTQ from UD-IQ1_M's own values,
+  the Hessians from the operator's rig sessions (overlay A; B and C took the shared expert to Q6_K / Q5_K as well).
+every other tensor UD-IQ1_M's, byte for byte (107.5 of its 141.2 GB).
+
+**the choice** (working rows; low-power, interleaved, dbench in 512-token steps, two rounds, every stream the same in
+both): evo-a 0.1741 KLD, 16.3 / 26.6 tok/s plain / drafted; A 0.1752, 17.9 / 29.7; B 0.1766; C 0.1802, 18.3 / 29.9 -
+against UD-IQ1_M 0.1895, 16.6 / 25.8 and UD-IQ1_S 0.2592, 18.3 / 31.7. A against evo-a +0.0009 +- 0.0015 for +10% /
++12%; C against A +0.005 for +2% / +1%: A. its hold-out, scored once as the finalist: 0.0485 against UD-IQ1_M's 0.0479
+(+0.0005 +- 0.0003, the halves +0.0008 / +0.0003) - level on agent work; on Wiki -0.014 +- 0.004. so the pack is
+UD-IQ1_M's quality at about UD-IQ1_S's speed. at 2,048-token steps (the packs'): 8K / 64K prompts 442-449 / 453
+tok/s (UD-IQ1_M 462-465 / 468-476, UD-IQ1_S 465-480 / 463-500), decode short / at 64K 16.8 / 16.4 (15.7 / 15.2,
+17.6 / 16.2) - the least loss at depth of the three, the prompts 5-9% slower (the larger dense; 0.6.9's large steps).
+
+**measured away.** pruning, for a pack wholly in memory: the least-picked 10% of each layer's experts never picked
+(the router's selection bias -1e30: no engine change; the pick profile's 0.1% of its picks) - KLD 0.177 -> 0.327, top-1
+90.7 -> 86.2%. an expert rarely picked still decides the tokens it is picked for. (0% through the same overlay: evo-A's
+bits, the plumbing's check.)
+
+**how it ships: a delta.** tools/convert/gguf_delta.py: the tensors (and metadata) evo-A has that UD-IQ1_M does not -
+221 tensors, 33.7 GB, the Engram slot skipped (the table is the pack's, the installer's); gguf_assemble.py: the base's
+shards with them in, each tensor at its source's offset modulo 4096 so its blocks are cloned (FICLONERANGE) - UD-IQ1_M
++ the delta, 141.2 GB, 10 MB of new disk on btrfs; elsewhere copied. the installer's derive `gguf_assemble` (base,
+delta, shard): the set made once under <models>/derived, every shard against its pinned SHA-256, all removed on a
+mismatch. checked: UD-IQ1_M + the delta scores evo-A's per-token dump byte for byte (KLD 0.176995); a real install from
+the files by hash makes the pack and answers with evo-A's stream (18676dc3dce0e7fb). the upload is 34 GB, not 141;
+anyone with UD-IQ1_M downloads 34. the delta's metadata (general.name, quantized_by, osmos.recipe) goes on the first
+shard - only a file marked osmos.delta carries metadata, never the architecture (an overlay written by gguf-py would
+name its own). the abliteration: huihui-ai's UD-IQ1_M patch, the same 18 attn_output_b tensors (Q6_K), loads on evo-A
+and changes its answer.
 
 ### 0.6.6: osmos doctor (2026-11-11)
 

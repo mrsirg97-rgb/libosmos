@@ -8,10 +8,13 @@ import json
 import os
 import re
 import subprocess
+import sys
 
-import overlay_q4x
-import stamp
-import userfiles
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "convert"))
+import gguf_assemble  # noqa: E402  (tools/convert: a delta's set, made where it is installed)
+import overlay_q4x  # noqa: E402
+import stamp  # noqa: E402
+import userfiles  # noqa: E402
 
 _SHARD = re.compile(r"-(\d{5})-of-(\d{5})")
 
@@ -34,6 +37,37 @@ def _resolve(m, fid, have, trust_size, fetch, found=None):
     return fetch(e), True
 
 
+def _assemble(m, fid, models, have, trust_size, fetch, found):
+    """a gguf_assemble set (tools/convert/gguf_assemble.py: a base's shards with a delta in, its shared bytes cloned
+    where the filesystem has clones) made at once, every file of it under <models>/derived/ and checked against its own
+    pinned SHA-256 - or refused with none of it left; fid's path"""
+    d = m["files"][fid]["derive"]
+    sibs = {f["derive"]["shard"]: k for k, f in m["files"].items()
+            if f.get("derive", {}).get("with") == "gguf_assemble" and f["derive"]["base"] == d["base"]
+            and f["derive"]["delta"] == d["delta"]}
+    if sorted(sibs) != list(range(1, len(d["base"]) + 1)):
+        raise LayoutError(f"{fid}: the set's files are not one for each of its base's shards")
+    base = [_resolve(m, b, have, trust_size, fetch, found)[0] for b in d["base"]]
+    delta, _ = _resolve(m, d["delta"], have, trust_size, fetch, found)
+    outs = [os.path.join(models, "derived", m["files"][sibs[i]]["path"]) for i in range(1, len(base) + 1)]
+    print(f"  making {', '.join(sibs[i] for i in sorted(sibs))} from {len(base)} shards and {d['delta']}", flush=True)
+    try:
+        gguf_assemble.assemble(base, outs, [delta], log=lambda msg: print(f"    {msg}", flush=True))
+    except (SystemExit, AssertionError, OSError) as x:
+        for o in outs:
+            if os.path.lexists(o):
+                os.remove(o)
+        raise LayoutError(f"{fid}: {x}")
+    for i, o in zip(range(1, len(base) + 1), outs):
+        if not userfiles.matches(o, m["files"][sibs[i]]):
+            for o2 in outs:
+                if os.path.lexists(o2):
+                    os.remove(o2)
+            raise LayoutError(f"{sibs[i]} ({m['files'][sibs[i]]['path']}): made, but not the pinned bytes and SHA-256 - "
+                              "refused")
+    return outs[d["shard"] - 1]
+
+
 def _derive(m, fid, models, have, trust_size, fetch, found):
     """a derived file's path: the user's if they have it, else made from its inputs under <models>/derived/ - its
     bytes and SHA-256 the pinned ones, or refused with nothing of it left"""
@@ -46,6 +80,8 @@ def _derive(m, fid, models, have, trust_size, fetch, found):
     if os.path.exists(out) and userfiles.matches(out, e):
         return out
     os.makedirs(os.path.dirname(out), exist_ok=True)
+    if d["with"] == "gguf_assemble":
+        return _assemble(m, fid, models, have, trust_size, fetch, found)
     patch, _ = _resolve(m, d["patch"], have, trust_size, fetch, found)
     key, _ = _resolve(m, d["key"], have, trust_size, fetch, found)
     shards = [_resolve(m, s, have, trust_size, fetch, found)[0] for s in d["model"]]
@@ -93,8 +129,9 @@ def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None):
     out = os.path.join(models, pid)
     os.makedirs(out, exist_ok=True)
     names = []
-    for fid in pack["shards"]:
-        src, _ = _resolve(m, fid, have, trust_size, fetch, found)
+    for fid in pack["shards"]:  # a shard downloaded, the user's, or derived (made from its inputs)
+        src = (_derive(m, fid, models, have, trust_size, fetch, found) if "derive" in m["files"][fid]
+               else _resolve(m, fid, have, trust_size, fetch, found)[0])
         names.append(os.path.basename(m["files"][fid]["path"]))
         _link(src, os.path.join(out, names[-1]))
     cfg = {"pack": pid, "title": pack.get("title", pid), "model": os.path.join(out, names[0])}

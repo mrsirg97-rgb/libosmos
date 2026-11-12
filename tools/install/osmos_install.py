@@ -53,16 +53,27 @@ def run_sh(script, env):
     subprocess.run(["sh", "-s"], input=script, env=env, check=True)
 
 
+def inputs(m, fid):
+    """the published files a file takes: itself, or a derived one's inputs (the layout makes it from them)"""
+    d = m["files"][fid].get("derive")
+    if not d:
+        return [fid]
+    if d["with"] == "gguf_assemble":
+        return d["base"] + [d["delta"]]
+    return [d["patch"], d["key"]] + d["model"]
+
+
 def needed(m, pids, abliterated):
     ids = []
     for pid in pids:
         p = m["packs"][pid]
-        ids += p["shards"] + ([p["table"]["file"]] if p.get("table") else [])
+        for fid in p["shards"]:
+            ids += inputs(m, fid)
+        ids += [p["table"]["file"]] if p.get("table") else []
         ids += [p["picks"]] if p.get("picks") else []
         ids += p.get("drafter") or []
-        if abliterated and p.get("overlay"):  # a derived one: its inputs (the layout makes it)
-            d = m["files"][p["overlay"]].get("derive")
-            ids += [d["patch"], d["key"]] + d["model"] if d else [p["overlay"]]
+        if abliterated and p.get("overlay"):
+            ids += inputs(m, p["overlay"])
     return list(dict.fromkeys(ids))
 
 

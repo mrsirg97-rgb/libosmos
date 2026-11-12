@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.8]: osmos-evo-A, osmos's own DeepSeek pack, is the default
+
+- **`osmos-evo-a`: UD-IQ1_M's quality at about UD-IQ1_S's speed.** UD-IQ1_M with the routed experts' down
+  projections of layers 20-39 requantized to Q2_K from DeepSeek's MXFP4 originals, and the attention and head
+  requantized to Q5_K by GPTQ; every other tensor UD-IQ1_M's. Against the model's own weights (0.6.6's reference) it is
+  level with UD-IQ1_M on agent traces (KL 0.0485 against 0.0479) and closer on Wiki text (0.175 against 0.190); at
+  `low-power` it decodes 8% faster than UD-IQ1_M plain and 15% faster drafted (17.9 / 29.7 tok/s), within 2-6% of
+  UD-IQ1_S (18.3 / 31.7), and at 64K of context the fastest of the three (16.4 tok/s). Prompts are 5-9% slower than the
+  UD packs'. `--abliterated` takes huihui-ai's UD-IQ1_M patch.
+- **It ships as a 34 GB delta on UD-IQ1_M** ([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)).
+  The installer makes the pack from UD-IQ1_M's files and the delta and checks each shard's SHA-256; on btrfs or XFS
+  every byte the two share is cloned, so beside UD-IQ1_M it takes almost no disk. `tools/convert/gguf_delta.py` and
+  `gguf_assemble.py` make and apply such deltas for any GGUF set.
+- **Measured, not kept:** dropping the least-picked 10% of each layer's experts (for a pack wholly in memory) nearly
+  doubles the distance from the model (KL 0.177 -> 0.327).
+
 ## [0.6.7]: osmos starts where ROCm is not on the system's library path
 
 No engine change: every output the same as 0.6.6's.
