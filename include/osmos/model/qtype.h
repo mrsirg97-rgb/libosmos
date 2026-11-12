@@ -38,7 +38,7 @@
   X(I64, 27, 1, 8, QTYPE_FILE)                                                                     \
   X(IQ1_M, 29, 256, 56, QTYPE_IQ)                                                                  \
   X(BF16, 30, 1, 2, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_EMBED)                            \
-  X(MXFP4, 39, 32, 17, QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK)                                     \
+  X(MXFP4, 39, 32, 17, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
   X(Q2_0, 42, 64, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                           \
   X(MXFP8, 43, 32, 33, QTYPE_FILE | QTYPE_DECODE)
 
