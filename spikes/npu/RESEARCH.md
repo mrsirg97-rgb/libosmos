@@ -110,6 +110,12 @@ v3: 1.36 Gvalues/s, corr 0.99994 (d/8 and its product rounded to bf16: worst 1.8
 TFLOP/s for the array: ~25% of DeepSeek's routed experts, a step ~9% faster. what is left a 64 values: 8 grid rows'
 index extracts and loads, 8 sign lookups into a mask, the words as 16-bit halves (66-byte blocks: 2-byte aligned).
 
+IQ1_S fused (fused_iq1s.cc): its 2,048-row grid packed as 2-bit codes (4 KB; as bf16 its 32 KB would not fit beside
+A and the decoded tile), expanded in registers (a row's code over its 8 lanes, a lane's field masked, two compares,
+two selects), + delta in bf16, x the band-group's scale vector: corr 0.999949 (worst 2.0e-2), decode 16.6 us a tile
+(0.99 Gvalues/s), + matmul 18.2. at ~128 rows an expert ~6.9 TFLOP/s for the array (IQ2_XXS ~9.1); DeepSeek's mix
+(IQ1_S 57% of its routed time, IQ2_XXS 32%) ~7.7: ~22% of the routed experts the NPU's, a step ~8% faster.
+
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
 | | s | share |
