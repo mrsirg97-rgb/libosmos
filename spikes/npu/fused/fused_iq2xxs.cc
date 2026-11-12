@@ -22,6 +22,9 @@
 #define DECODE_ONLY 0 /* 1: the decode alone (the matmul skipped); 2: the matmul alone (the decode skipped) */
 #endif
 
+#ifndef KHALF
+#define KHALF 0 /* 1: Bm as two K halves, each a contiguous 64 x 128 operand ([kh][j][i]) - A then a quarter at a time */
+#endif
 #ifndef NROWS
 #define NROWS 64 /* a core's output rows (the W tile's) */
 #endif
@@ -158,14 +161,73 @@ alignas(64) static const int16_t kbit64[64] = {
 };
 #endif
 
+#if FUSED_V >= 7
+// v7: a band's 8 groups' scale vectors and sign masks first (scs, sgm), then one flat 32-octet loop whose short, even
+// body the software pipeliner can overlap (its loads' latency the cost of v6's mixed body)
+static void decode_tile7(const uint8_t *__restrict w) {
+  alignas(64) static bfloat16 d8[NR];
+  alignas(64) static bfloat16 scs[8][64];
+  alignas(64) static uint32_t sgm[32][2];
+  for (int n = 0; n < NR; n++) d8[n] = (bfloat16)half_bits_div8((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
+  const bfloat16 *kb = (const bfloat16 *)kodd_bf16;
+  const aie::vector<int32, 32> rowv = aie::load_v<32>(krow32);
+  aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
+  for (int kh = 0; kh < (KHALF ? 2 : 1); kh++)
+  AIE_LOOP_MIN_ITERATION_COUNT(4)
+  for (int j = 0; j < NR / 8; j++) {
+    const uint8_t *band = w + BB * 8 * j;
+    const aie::vector<bfloat16, 64> dv = aie::concat(
+        aie::concat(aie::broadcast<bfloat16, 8>(d8[8 * j]), aie::broadcast<bfloat16, 8>(d8[8 * j + 1]), aie::broadcast<bfloat16, 8>(d8[8 * j + 2]), aie::broadcast<bfloat16, 8>(d8[8 * j + 3])),
+        aie::concat(aie::broadcast<bfloat16, 8>(d8[8 * j + 4]), aie::broadcast<bfloat16, 8>(d8[8 * j + 5]), aie::broadcast<bfloat16, 8>(d8[8 * j + 6]), aie::broadcast<bfloat16, 8>(d8[8 * j + 7])));
+    const int g0 = KHALF ? 4 * kh : 0, g1 = KHALF ? 4 * kh + 4 : 8;
+    AIE_LOOP_MIN_ITERATION_COUNT(4)
+    for (int g = g0; g < g1; g++) { // the group's scale (64 lanes) and its 4 octets' sign masks
+      uint32_t w1[8];
+      AIE_LOOP_UNROLL_FULL
+      for (int r = 0; r < 8; r++) w1[r] = u32_at(band + BB * r + 6 + 8 * g);
+#define K(r) aie::broadcast<bfloat16, 8>(kb[w1[r] >> 28])
+      const aie::vector<bfloat16, 64> kv = aie::concat(aie::concat(K(0), K(1), K(2), K(3)), aie::concat(K(4), K(5), K(6), K(7)));
+#undef K
+      aie::store_v(scs[g], aie::mul(dv, kv).to_vector<bfloat16>());
+      aie::vector<int32, 8> b8;
+      AIE_LOOP_UNROLL_FULL
+      for (int r = 0; r < 8; r++) b8[r] = (int32)w1[r];
+      const aie::vector<int32, 32> x = aie::concat(b8, b8, b8, b8);
+      aie::vector<int32, 32> t = x;
+      t = aie::select(t, aie::downshift(x, 7), aie::eq(rowv, aie::broadcast<int32, 32>(1)));
+      t = aie::select(t, aie::downshift(x, 14), aie::eq(rowv, aie::broadcast<int32, 32>(2)));
+      t = aie::select(t, aie::downshift(x, 21), aie::eq(rowv, aie::broadcast<int32, 32>(3)));
+      t = aie::bit_and(t, aie::broadcast<int32, 32>(127));
+      aie::vector<int32, 32> p = aie::bit_xor(t, aie::downshift(t, 4));
+      p = aie::bit_xor(p, aie::downshift(p, 2));
+      p = aie::bit_xor(p, aie::downshift(p, 1));
+      const aie::vector<int32, 32> sb = aie::bit_or(t, aie::upshift(aie::bit_and(p, aie::broadcast<int32, 32>(1)), 7));
+      const aie::vector<uint32, 8> sw = aie::filter_even(aie::filter_even(sb.cast_to<int16>(), 1).cast_to<uint8>(), 1).cast_to<uint32>();
+      aie::store_v(&sgm[4 * g][0], sw);
+    }
+    const uint8_t *ibase = band + 2;
+    AIE_LOOP_MIN_ITERATION_COUNT(16)
+    for (int o = 4 * g0; o < 4 * g1; o++) { // octet o = 4 g + l: its index bytes at ibase[66 r + 8 g + l]
+      const uint8_t *ib = ibase + 8 * (o >> 2) + (o & 3);
+#define ROW(r) aie::load_v<8>((const bfloat16 *)iq2xxs_grid_bf16[ib[BB * (r)]])
+      const aie::vector<bfloat16, 64> v =
+          aie::concat(aie::concat(ROW(0), ROW(1), ROW(2), ROW(3)), aie::concat(ROW(4), ROW(5), ROW(6), ROW(7)));
+#undef ROW
+      const aie::vector<int16, 64> vi = v.cast_to<int16>();
+      const aie::vector<bfloat16, 64> sv =
+          aie::select(vi, aie::bit_xor(vi, aie::broadcast<int16, 64>((int16)0x8000)), aie::mask<64>::from_uint32(sgm[o][0], sgm[o][1]))
+              .cast_to<bfloat16>();
+      out.push(aie::mul(sv, aie::load_v<64>(scs[o >> 2])).to_vector<bfp16ebs8>());
+    }
+  }
+}
+#endif
+
 static void decode_tile3(const uint8_t *__restrict w) {
   alignas(64) static bfloat16 d8[NR]; // a row's d / 8: its one setup
   for (int n = 0; n < NR; n++) d8[n] = (bfloat16)half_bits_div8((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
   const bfloat16 *kb = (const bfloat16 *)kodd_bf16;
   aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
-#ifndef KHALF
-#define KHALF 0 /* 1: Bm as two K halves, each a contiguous 64 x 128 operand ([kh][j][i]) - A then a quarter at a time */
-#endif
   for (int kh = 0; kh < (KHALF ? 2 : 1); kh++)
   AIE_LOOP_MIN_ITERATION_COUNT(8)
   for (int j = 0; j < NR / 8; j++) {
@@ -256,7 +318,9 @@ void fused_iq2xxs(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *_
   event0();
   for (int rep = 0; rep < REPS; rep++) {
 #if DECODE_ONLY != 2
-#if FUSED_V >= 3
+#if FUSED_V >= 7
+    decode_tile7(w);
+#elif FUSED_V >= 3
     decode_tile3(w);
 #elif FUSED_V == 2
     decode_tile2(w);
@@ -382,7 +446,11 @@ extern "C" void fused_step_f32x2(const uint8_t *__restrict w, uint8_t *__restric
   float *ch = c + half * (64 * NR);
   if (kstep == 0)
     for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
+#if FUSED_V >= 7
+  if (half == 0) decode_tile7(w);
+#else
   if (half == 0) decode_tile3(w);
+#endif
   mm_f32acc2<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a0, (bfp16ebs8 *)a1, (bfp16ebs8 *)Bm, ch);
   event1();
 }

@@ -184,6 +184,10 @@ and mask an octet - a byte load, a shift, an add, the row's load): one core, bac
 (-19%), corr unchanged. the array (3 runs each, interleaved, the download running: +-10% a run): v6 167 us mean
 (~6.4 TFLOP/s), v5 180 (~5.9) - ~7% (the handoffs and the noise dilute it). the scalar ops a value ~1 cycle: the
 op count is the decode's time.
+v7 (measured away): a band's 8 scale vectors and sign masks first into small arrays, then one flat 32-octet loop with a
+short even body for the software pipeliner: decode 10.17 / 9.52 us against v6's 8.87 / 9.79 back to back - no gain
+(the arrays' round trip as dear as the overlap it bought). v6 stays: ~9.2 us a 64 x 256 tile, ~1.8 Gvalues/s a core.
+single-core runs scatter ~5%, the array's ~10%, the download writing beside them.
 
 ## where a DeepSeek prompt step's time goes (2026-11-12, low-power, rocprofv3, UD-IQ1_M 0.6.9, an 8K step)
 14.91 s, the GPU busy 98.2% (538 tok/s under the profiler, 560 without):
