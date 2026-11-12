@@ -234,6 +234,32 @@ steadier: its decode varied 0.2-0.4% from round to round, llama.cpp's 1.7% (plai
 varied up to 7% for osmos, up to 18% for llama.cpp. Both run Qwen's sparse attention and pick the same key blocks
 (`test_q4x_qsa_gpu`). osmos keeps its cache in Q8_0; its perplexity is within 0.2% of llama.cpp's with either cache.
 
+#### Qwen3.8 against Strata (0.6.6, `performance`)
+
+[Strata](https://github.com/Niko1221/Strata) 0.2.13.1 with its signed engine 0.1.59 for this chip
+(`linux-x86_64-hip-halo`, installed by `strata update`), launched with its own defaults (`strata launch --model
+ud-iq3_xxs --vision off`), against osmos 0.6.6 - measured on 2026-11-12, both on the same file, Unsloth's
+UD-IQ3_XXS. The same requests go to each server's OpenAI API: greedy, thinking off, prompts of ~2K / 4K / 16K tokens
+asked for a summary, and three questions answered in 256 tokens, two rounds. Prompt rates are the first round's
+(cold), answers both rounds' mean. Energy is the APU package's for the whole run.
+
+| | Prompt 2K | 4K | 16K | Code answer | Explanation | Web page | Energy |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| osmos, no drafter | **877** | **910** | **890** | 29.1 | 29.1 | 29.1 | **4.23 Wh** |
+| Strata, no drafter | 520 | 671 | 743 | **29.5** | **29.3** | **31.2** | 4.89 Wh |
+| osmos, DFlash2 | **888** | **894** | **878** | **81.1** | **66.9** | **70.7** | **2.96 Wh** |
+| Strata, DFlash2 (its default) | 518 | 668 | 737 | 69.7 | 54.2 | 59.5 | 3.72 Wh |
+| osmos, MTP head (its default) | 891 | 891 | 878 | 69.6 | 59.5 | 68.9 | 2.97 Wh |
+
+Tokens per second, but the energy. osmos reads prompts 19-69% faster (the gap is widest on short prompts); without
+a drafter the answers are level, Strata 1-7% ahead; with the same drafter on both, osmos's answers are 16-24% faster;
+and the same work takes about 20% less energy (131 W against 139 W on average, and less time). The two set up
+differently: Strata sizes its expert cache from the RAM free when it starts (about 21 GiB here) and streams the rest,
+osmos holds this quant whole in memory; Strata packs the DFlash2 drafter as Q4_0, osmos as Q8_0. Strata's opt-in fast
+set, documented as changing the output's bits, was not used: these are both engines' defaults. Strata's MTP head was
+not selectable in this version (`--drafting mtp` started without it). Strata's DeepSeek engine is not shipped for
+Strix Halo on Linux, and its published DeepSeek sets are other quants, so there is no same-file DeepSeek comparison.
+
 ## How it works
 
 **DeepSeek in 128 GB.** The dense weights live in GPU memory, and the routed experts share one cache (the membrane):
