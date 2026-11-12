@@ -322,9 +322,14 @@ static void test_ahead_limit(int big)
     const PoolRange part = {big, (u % 8) * job, job};
     assert(fetchq_read(q, u, &part, 1, (void *const[POOL_PARTS]){buf + (size_t)u * job}, false, 1 + u));
   }
+  /* the workers run while this thread queues (on a runner's 2 cores they may end many reads first), so a read's
+     place is counted from the reads ended once it is given */
   const PoolRange waited = {big, 0, job};
+  const int before_w = atomic_load(&n_done_order);
   assert(fetchq_read(q, BEHIND, &waited, 1, (void *const[POOL_PARTS]){buf + (size_t)BEHIND * job}, false, 0));
+  const int at_w = atomic_load(&n_done_order);
   fetchq_need(q, BEHIND - 1, 0); /* the last read ahead now waited on: its job not yet begun goes first, unbound */
+  const int at_m = atomic_load(&n_done_order);
   wait_done(BEHIND + 1);
   fetchq_stats(q, &st);
   const int w = ended_at(BEHIND, BEHIND + 1), m = ended_at(BEHIND - 1, BEHIND + 1);
@@ -332,7 +337,10 @@ static void test_ahead_limit(int big)
          "read ahead moved to need 0 %d%s\n",
          (unsigned long long)st.ahead_peak, BEHIND, w + 1, w == 0 ? "st" : "th", m + 1, m == 0 ? "st" : "th");
   assert(st.ahead_peak == job && st.ahead_held > 0);
-  assert(w >= 0 && w < 10 && m >= 0 && m < 12);
+  /* within a third of the 100 behind it: not queued after them (its worker may lose the CPU meanwhile, a 2-core
+     runner's 9 threads, while others end reads from the page cache: 13 seen) */
+  assert(w >= before_w && w < at_w + BEHIND / 3);
+  assert(m >= 0 && m < at_m + BEHIND / 3); /* ended before it was moved, or soon after */
   fetchq_destroy(q);
 
   /* no bound (as created): every read ahead read */
