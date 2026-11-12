@@ -144,6 +144,15 @@ def main():
     if len(a) < 3:
         raise SystemExit(__doc__)
     first, out_dir, repl_paths = a[0], a[1], a[2:]
+    shards = sorted(glob.glob(first.replace("-00001-of-", "-0000?-of-")))
+    os.makedirs(out_dir, exist_ok=True)
+    assemble(shards, [os.path.join(out_dir, os.path.basename(sp)) for sp in shards], repl_paths)
+
+
+def assemble(shards, outs, repl_paths, log=print):
+    """the base's shards (paths, in order: the first holds the set's metadata) into outs (a path each, the same order)
+    with repl_paths' tensors (and a delta's metadata) in; a shard nothing of which changes linked to the base's file.
+    SystemExit for a replacement the base has no tensor for, or of other dims"""
     repl, meta = {}, {}
     for p in repl_paths:
         for name, dims, ty, off, nb in read_shard(p)[4]:
@@ -153,11 +162,8 @@ def main():
             for key, raw in kvs:                  # never its layout, its own marker or the architecture
                 if not key.startswith(LAYOUT_KEYS) and key not in (DELTA_KEY, "general.architecture"):
                     meta[key] = raw
-    shards = sorted(glob.glob(first.replace("-00001-of-", "-0000?-of-")))
-    os.makedirs(out_dir, exist_ok=True)
     used, total_clone, total = set(), 0, 0
-    for sp in shards:
-        out = os.path.join(out_dir, os.path.basename(sp))
+    for sp, out in zip(shards, outs):
         ver, nkv, kv, align, tens = read_shard(sp)
         if sp == shards[0] and meta:  # the replacements' metadata: the base's keys of those names replaced, the others added
             entries = read_kv(sp)
@@ -168,7 +174,7 @@ def main():
             if os.path.lexists(out):
                 os.remove(out)
             os.symlink(os.path.realpath(sp), out)
-            print(f"{os.path.basename(out)}: no tensor replaced - a link to the base's", flush=True)
+            log(f"{os.path.basename(out)}: no tensor replaced - a link to the base's")
             continue
         new = []  # name, dims, type, source path, source offset, bytes
         for name, dims, ty, off, nb in tens:
@@ -216,11 +222,12 @@ def main():
                         if src.read(m) != g.read(m):
                             raise SystemExit(f"{n}: its bytes differ from the source's")
         os.rename(out + ".part", out)
-        print(f"{os.path.basename(out)}: {len(new)} tensors, {sum(1 for x in new if x[3] != sp)} replaced", flush=True)
+        log(f"{os.path.basename(out)}: {len(new)} tensors, {sum(1 for x in new if x[3] != sp)} replaced")
     missing = set(repl) - used
     if missing:
         raise SystemExit(f"replacement tensors the base does not have: {sorted(missing)[:5]}")
-    print(f"{total / 1e9:.1f} GB of tensors, {total_clone / 1e9:.1f} GB of it cloned (shared with the base)")
+    log(f"{total / 1e9:.1f} GB of tensors, {total_clone / 1e9:.1f} GB of it cloned (shared with the base)")
+    return outs
 
 
 if __name__ == "__main__":

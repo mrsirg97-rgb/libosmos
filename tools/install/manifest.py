@@ -8,7 +8,9 @@ efforts, effort - one of them - and aliases), settings.
 
 a derived file: made, not downloaded - derive {with: the converter, its inputs (file ids of published files), mode},
 path, bytes and sha256 (its result's, pinned as a download's is), no repo nor revision. overlay_q4x's: patch, key
-(huihui-ai's abliteration and its key), model (the shards it stands in for), mode (overlay_q4x.MODES)."""
+(huihui-ai's abliteration and its key), model (the shards it stands in for), mode (overlay_q4x.MODES). gguf_assemble's
+(tools/convert/gguf_assemble.py): base (a set's shards, in order), delta (gguf_delta.py's file), shard (which of the
+base's this file is, from 1) - every file of one base and delta made at once, each checked against its own sha256."""
 import json
 import re
 
@@ -39,19 +41,28 @@ def _file(fid, f):
         raise ManifestError(f"file {fid}: stamp {f['stamp']!r} is not [no, count]")
 
 
+CONVERTERS = ("overlay_q4x", "gguf_assemble")
+
+
 def _derived(m, fid, f):
     d = f.get("derive")
-    if not isinstance(d, dict) or d.get("with") != "overlay_q4x":
+    if not isinstance(d, dict) or d.get("with") not in CONVERTERS:
         raise ManifestError(f"file {fid}: derive.with {d.get('with') if isinstance(d, dict) else None!r} is not a "
-                            "converter this installer runs (overlay_q4x)")
+                            f"converter this installer runs ({', '.join(CONVERTERS)})")
     if "repo" in f or "revision" in f:
         raise ManifestError(f"file {fid}: derived, not downloaded - no repo nor revision")
-    ins = [d.get("patch"), d.get("key")] + (d.get("model") if isinstance(d.get("model"), list) else [None])
+    if d["with"] == "overlay_q4x":
+        ins = [d.get("patch"), d.get("key")] + (d.get("model") if isinstance(d.get("model"), list) else [None])
+        if d.get("mode") not in overlay_q4x.MODES:
+            raise ManifestError(f"file {fid}: mode {d.get('mode')!r} is not one of {sorted(overlay_q4x.MODES)}")
+    else:  # gguf_assemble: base's shards with a delta in, this file the output of base's shard `shard` (from 1)
+        base = d.get("base") if isinstance(d.get("base"), list) and d.get("base") else [None]
+        ins = base + [d.get("delta")]
+        if not (isinstance(d.get("shard"), int) and 1 <= d["shard"] <= len(base)):
+            raise ManifestError(f"file {fid}: shard {d.get('shard')!r} is not one of the base's (1 .. {len(base)})")
     for i in ins:
         if i not in m["files"] or "derive" in m["files"][i]:
             raise ManifestError(f"file {fid}: input {i!r} is not a published file of the manifest")
-    if d.get("mode") not in overlay_q4x.MODES:
-        raise ManifestError(f"file {fid}: mode {d.get('mode')!r} is not one of {sorted(overlay_q4x.MODES)}")
     if not isinstance(f.get("path"), str) or not f["path"] or "/" in f["path"]:
         raise ManifestError(f"file {fid}: no path (a file name)")
     if not isinstance(f.get("bytes"), int) or f["bytes"] < 0:

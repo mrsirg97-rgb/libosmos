@@ -476,6 +476,61 @@ class Derived(unittest.TestCase):
                 manifest.check(mm)
 
 
+class DerivedSet(unittest.TestCase):
+    """a pack's shards made from a published base set and a delta (gguf_assemble), each pinned by its SHA-256"""
+
+    def setup(self, d):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "convert"))
+        import gguf_assemble as A
+        import gguf_delta as D
+        have, models = os.path.join(d, "have"), os.path.join(d, "models")
+        os.makedirs(have)
+        mk = Assemble().gguf
+        a, c = os.urandom(256), os.urandom(4096 * 2 + 64)
+        mk(f"{have}/b-00001-of-00002.gguf", [("a", [64], 0, a)])
+        mk(f"{have}/b-00002-of-00002.gguf", [("c", [len(c) // 4], 0, c)])
+        os.makedirs(f"{d}/t")  # the target: c changed, its own name
+        name = struct.pack("<Q", 12) + b"general.name" + struct.pack("<IQ", 8, 3) + b"evo"
+        mk(f"{d}/t/t-00001-of-00002.gguf", [("a", [64], 0, a)], extra_kv=name, n_extra=1)
+        mk(f"{d}/t/t-00002-of-00002.gguf", [("c", [len(c) // 4], 0, os.urandom(len(c)))])
+        delta = f"{have}/delta.gguf"
+        D.main.__globals__["sys"].argv = ["x", f"{d}/t/t-00001-of-00002.gguf", f"{have}/b-00001-of-00002.gguf", delta]
+        D.main()
+        os.makedirs(f"{d}/made")
+        made = A.assemble([f"{have}/b-00001-of-00002.gguf", f"{have}/b-00002-of-00002.gguf"],
+                          [f"{d}/made/e-00001-of-00002.gguf", f"{d}/made/e-00002-of-00002.gguf"], [delta], log=lambda m: None)
+        derived = lambda k, p: {"derive": {"with": "gguf_assemble", "base": ["b1", "b2"], "delta": "delta", "shard": k},  # noqa: E731
+                                "path": os.path.basename(p), "bytes": os.path.getsize(p), "sha256": sha(p)}
+        m = {"version": 1, "rig": RIG_PIN,
+             "files": {"b1": entry(f"{have}/b-00001-of-00002.gguf"), "b2": entry(f"{have}/b-00002-of-00002.gguf"),
+                       "delta": entry(delta, repo="o/evo"), "e1": derived(1, made[0]), "e2": derived(2, made[1])},
+             "packs": {"e": {"title": "t", "shards": ["e1", "e2"], "table": None, "picks": None, "drafter": [],
+                             "overlay": None, "rig": ROW, "settings": {}}}}
+        return have, models, m, made
+
+    def test_laid(self):
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            manifest.check(m)
+            self.assertEqual(osmos_install.needed(m, ["e"], False), ["b1", "b2", "delta"])  # the inputs, never the made
+            cfg = layout.read_config(layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None))
+            self.assertEqual(sha(cfg["model"]), sha(made[0]))
+            self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
+
+    def test_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, _ = self.setup(d)
+            m["files"]["e2"]["sha256"] = "0" * 64  # one file of the set not as pinned: refused, none of the set left
+            with self.assertRaises(layout.LayoutError):
+                layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)
+            self.assertEqual(os.listdir(os.path.join(models, "derived")), [])
+            for k, v in (("shard", 3), ("shard", 0), ("delta", "e1"), ("base", ["b1", "nope"]), ("base", [])):
+                mm = json.loads(json.dumps(m))
+                mm["files"]["e1"]["derive"][k] = v
+                with self.assertRaises(manifest.ManifestError, msg=f"derive {k} {v!r}"):
+                    manifest.check(mm)
+
+
 class Host(unittest.TestCase):
     def test_tools_named_before_anything_runs(self):
         have = {"git", "make", "gcc", "hipcc", "hf"}
