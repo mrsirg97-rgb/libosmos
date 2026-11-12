@@ -102,6 +102,7 @@ typedef struct Q4xExpertTiles
 {
   const void *base[Q4X_GROUP_TENSORS]; /* each tensor's bytes: its experts one after another */
   uint64_t bytes[Q4X_GROUP_TENSORS];   /* an expert's */
+  const void *const *tab[Q4X_GROUP_TENSORS]; /* or each tensor's experts' addresses, [n_exp] on the device (NULL: base's) */
   const void **ptr[Q4X_GROUP_TENSORS]; /* out: each tensor's entries' matrices */
   int32_t *cnt;                        /* out: an entry's tokens (0: past the live ones) */
   int32_t *gidx, *hidx;                /* out: a slot's token (the gate's and up's rows), its place (down's); -1 pad */
@@ -329,7 +330,8 @@ q4x_expert_bounds, q4x_expert_tiles
   past them); its places in parts of at most 128, an entry each, in the run of its tiles (1 to 16 tokens: run 0, to
   32: 1, to 64: 2, to 128: 3), each run's entries in expert order from bounds.first[r]: cnt[e] its tokens, xg / xd its
   first slot times dim / ff (halves: its tiles of the x16), yg / yd its first place times ff / dim (y's rows in place
-  order), each tensor's matrix base[i] + expert bytes[i]. a run's entries past its live ones cnt 0, to its bound
+  order), each tensor's matrix base[i] + expert bytes[i] - or, tab[i] given, tab[i][expert]: the experts wherever a
+  membrane put them (DESIGN.md, "0.6.5: Qwen on the membrane"), base[i] and bytes[i] then not read. a run's entries past its live ones cnt 0, to its bound
   (q4x_expert_bounds: min(n, n_exp), min(n / 17, n_exp), min(n / 33, n_exp), n / 65), the slots past the live ones
   -1, to n + 15 min(n, n_exp) - the launches' and the tables'. a launch a run (mm_group, max_cnt 16 << r): a part's
   slab decoded once for its tiles. which picks share a part changes no bit: mm's tokens are their own.

@@ -71,6 +71,8 @@ typedef struct Q4xDfBuf
 #define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_forward.c's table) */
 #define Q4X_ROW_THREADS 64 /* stream_ngram's readers: DeepSeek's Engram measure (832,000 random rows/s; 128 no more) */
 
+#define Q4X_EXPERT_READERS 12 /* the experts' membrane's readers: DeepSeek's (FWD_FETCH_THREADS: DESIGN.md, the fetcher) */
+
 struct Q4xForward
 {
   const Q4xWeights *w;
@@ -104,6 +106,12 @@ struct Q4xForward
   uint32_t n_taps;
   bool stream_ngram, ple_pending;
   int ple_fd;
+  /* the experts on a membrane (q4x_forward_whole): its memory, the model's files opened O_DIRECT, the device table
+     [layer][gate, up, down][expert] of their addresses; mem NULL: the experts their tensors', uploaded whole */
+  struct Membrane *mem;
+  struct HostSlots *exp_slots, *exp_stream;
+  int *exp_fds;
+  const void **exp_tab;
   Rowread *ple_read;
   uint8_t *ple_stage;
   uint64_t *ple_off;

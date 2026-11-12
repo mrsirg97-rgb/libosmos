@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.5]: Qwen's experts on the membrane; the membrane on the largest quant, measured
+
+No output changes: every ids hash the same (Qwen UD-IQ3_XXS plain and MTP; DeepSeek UD-IQ1_M and UD-IQ2_XXS
+drafted), at low-power and at `performance`.
+
+- **Qwen's experts are a membrane's units.** They had been uploaded as three whole tensors a layer; now 24,576
+  units are read with direct I/O into memory the GPU reads in place, and a table of their addresses is written to
+  the GPU once - a step asks the membrane nothing. On a machine that holds them all (this one) that is the same
+  path as before: decode and prompts level with 0.6.4 (low-power: decode 27.3-27.5 tok/s both, an 8K prompt 801
+  both; `performance`: decode 28.6 -> 28.8, MTP 50.4 -> 50.2, a 2K prompt ~1,000 both), and a load about 5 s
+  shorter. It is the first half of running the same quant on a 64 GB machine with part of its experts streamed;
+  the streamed half is not in this release. `q4x_weights_experts`, `membrane_whole`, `q4x_forward_whole`.
+- **A Qwen build now counts the system's RAM, not only the GPU's memory.** With the experts in host memory the old
+  check (1 GiB of GPU memory left) no longer bounded RAM. The headroom is now the GPU's free memory or the RAM
+  past the 8 GiB a build leaves the system, whichever is less (DeepSeek's rule), and a forward that cannot fit is
+  refused before it takes any memory. A build that left the system under 8 GiB is now refused.
+- **A weight at the very end of a file is read.** An expert that ends a shard whose size is not a multiple of 4 KiB
+  was refused by the pool (its aligned read passed the file's end); such a read now ends at the file's end.
+- **DeepSeek keeps a decode step's logits, not a prompt step's.** The engine's buffer held 2,048 rows of 129,280
+  (1 GiB) though a server reads a prompt's last row and a decode step's few; it now holds 63. The gigabyte goes
+  to resident experts: on UD-IQ2_XXS 2.8% fewer reads waited on, the answers after a prompt about 1% faster
+  (13.8 -> 14.0, 21.4 -> 21.5 tok/s at `performance`); UD-IQ1_M level. `ForwardOptions.logit_rows`.
+- **Reads ahead can be bounded** (`ahead_limit`, off by default): at most that many bytes of speculative reads in
+  flight, so a read that is waited on never queues behind them. With it DeepSeek's routing guess stops costing
+  12% on UD-IQ2_XXS (21.2 -> 23.4 tok/s against 24.3 with no guess); a 2-name guess read 1-3% ahead in single
+  runs. No pack's settings change: the guess stays off.
+- **Measured, written down** (DESIGN.md, "0.6.5"): on UD-IQ2_XXS the cache's rule is within 8% of every online
+  policy simulated, the reads are at the SSD's ceiling with no copy, a prompt takes 3-7% of the next answer's
+  misses from the residents, and a GiB of room is 2.7% of the misses - the membrane is at or near what this box
+  allows, and room is the lever.
+
+Not tested in this release: osmos-serve's own paths on the GPU; UD-Q4_K_XL.
+
 ## [0.6.4]: a special token's text the model says is text, and the API's answer the stream's
 
 osmos-api correctness, no engine change: every ids hash the same. Issue #34 (reported by @ucotman with a repro, a

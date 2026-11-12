@@ -114,7 +114,8 @@ pool_create
   moved - pinned (0), or a want's `next` corrected - so the reads' order follows it. `read_align`: 0, a part read as
   its range is, laid out from a POOL_ALIGN boundary; a power of two (a direct read's 4 KiB: DESIGN.md, "0.3.0", target
   1), a part read as the aligned range around it - its offset rounded down, its end up - into memory at that alignment
-  (`slots` must give it), the part's pointer the slice inside it; a unit whose range would pass its file's end refused. `on_event`: every state
+  (`slots` must give it), the part's pointer the slice inside it; a part at its file's end keeps the aligned range past it - the
+  readers end such a read at the file's end (fetchq.h), the part itself within the file. `on_event`: every state
   change as a PoolEvent, in order (the event log), or NULL.
   refuses (NULL, the reason in `err`) a unit with no parts or more than POOL_PARTS, a range of 0 bytes or past its
   file, or a unit larger than the budget.

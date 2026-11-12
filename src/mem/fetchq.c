@@ -2,6 +2,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "libevt/runtime/context.h"
@@ -55,6 +56,8 @@ struct Fetchq
   void *done_arg;
   Worker w[FETCH_MAX_THREADS];
   int n_workers;
+  uint64_t ahead_limit, ahead_out; /* the bound, and the reads ahead's bytes in flight (fetchq_ahead_limit) */
+  FetchqStats stats;
 };
 
 /* the heap pops the highest: need 0 at the top, need n below it by n (clamped at 0) */
@@ -72,7 +75,12 @@ static bool read_part(const PoolRange *r, uint8_t *dst)
   while (got < r->bytes)
   {
     const ssize_t n = pread(r->fd, dst + got, (size_t)(r->bytes - got), (off_t)(r->offset + got));
-    if (n <= 0)
+    if (n == 0) /* the file's end inside the range (a direct read's aligned range around a file's last bytes): whole */
+    {
+      struct stat st;
+      return fstat(r->fd, &st) == 0 && r->offset + got == (uint64_t)st.st_size;
+    }
+    if (n < 0)
       return false;
     got += (uint64_t)n;
   }
@@ -90,6 +98,16 @@ static Job *take(Fetchq *q, Event *ev)
   return j;
 }
 
+/* the queue's first job a read ahead the bound keeps queued (the lock held): reads ahead are in flight and its bytes
+   would pass the bound. a waited job is the heap's first whenever one is queued, so it is never behind this */
+static bool bound(const Fetchq *q)
+{
+  const Event *ev = queue_peek(q->jobs);
+  if (!q->ahead_limit || !q->ahead_out || !ev || ev->priority == INT_MAX)
+    return false;
+  return q->ahead_out + ((const Job *)ev->ctx->scope)->r.bytes > q->ahead_limit;
+}
+
 static void *work(void *arg)
 {
   Worker *w = arg;
@@ -97,8 +115,11 @@ static void *work(void *arg)
   for (;;)
   {
     pthread_mutex_lock(&q->mu);
-    while (!q->stop && !q->jobs->len)
+    for (bool counted = false; !q->stop && (!q->jobs->len || bound(q)); counted = q->jobs->len != 0)
+    {
+      q->stats.ahead_held += q->jobs->len && !counted; /* once a stay, not once a wake */
       pthread_cond_wait(&q->cv, &q->mu);
+    }
     if (q->stop)
     {
       pthread_mutex_unlock(&q->mu);
@@ -106,11 +127,24 @@ static void *work(void *arg)
     }
     Event *ev = NULL;
     queue_pop(q->jobs, &ev);
+    const bool ahead = ev->priority != INT_MAX; /* a read ahead: its bytes in flight until it is read */
     Job *j = take(q, ev);
+    if (ahead)
+    {
+      q->ahead_out += j->r.bytes;
+      q->stats.ahead_peak = q->ahead_out > q->stats.ahead_peak ? q->ahead_out : q->stats.ahead_peak;
+    }
     pthread_mutex_unlock(&q->mu);
     Unit *u = j->u;
     if (!read_part(&j->r, j->dst))
       atomic_store(&u->bad, true);
+    if (ahead)
+    {
+      pthread_mutex_lock(&q->mu);
+      q->ahead_out -= j->r.bytes;
+      pthread_cond_broadcast(&q->cv); /* a worker that left a read ahead for the bound may take it now */
+      pthread_mutex_unlock(&q->mu);
+    }
     if (atomic_fetch_sub(&u->left, 1) == 1) /* the unit's last job */
     {
       const uint32_t unit = u->unit;
@@ -244,6 +278,25 @@ bool fetchq_read(Fetchq *q, uint32_t unit, const PoolRange *parts, int n, void *
   return true;
 }
 
+void fetchq_ahead_limit(Fetchq *q, uint64_t bytes)
+{
+  if (!q)
+    return;
+  pthread_mutex_lock(&q->mu);
+  q->ahead_limit = bytes;
+  pthread_cond_broadcast(&q->cv); /* a wider bound: the workers that left a read ahead look again */
+  pthread_mutex_unlock(&q->mu);
+}
+
+void fetchq_stats(Fetchq *q, FetchqStats *s)
+{
+  if (!q || !s)
+    return;
+  pthread_mutex_lock(&q->mu);
+  *s = q->stats;
+  pthread_mutex_unlock(&q->mu);
+}
+
 void fetchq_need(Fetchq *q, uint32_t unit, uint64_t need)
 {
   if (!q || unit >= q->n_units)
@@ -254,5 +307,6 @@ void fetchq_need(Fetchq *q, uint32_t unit, uint64_t need)
   for (int i = 0; u && i < u->n_jobs; i++)
     if (u->jobs[i].ev)
       queue_update(q->jobs, u->jobs[i].ev, prio);
+  pthread_cond_broadcast(&q->cv); /* a job the bound kept queued may be a waited one now */
   pthread_mutex_unlock(&q->mu);
 }

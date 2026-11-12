@@ -104,9 +104,11 @@ bool fwd_head(Forward *f, char *err)
   if (f->n_layers == g->n_layers)
   {
     ok = ops_hc_pre_rms(b->h, b->f_pre, hc, D, fv(f, f->w->output_norm), g->rms_eps, n, b->x, NULL);
+    /* the rows kept: the step's last logit_rows (every row without it), row r at slot r - base */
+    const uint32_t base = f->logit_rows && f->n_all > f->logit_rows ? f->n_all - f->logit_rows : 0;
     for (uint32_t k = 0; ok && k < n;)
     {
-      if (!f->want[k])
+      if (!f->want[k] || (uint32_t)f->row[k] < base)
       {
         k++;
         continue;
@@ -115,13 +117,13 @@ bool fwd_head(Forward *f, char *err)
       while (e < n && f->want[e] && f->row[e] == f->row[e - 1] + 1)
         e++;
       ok = fwd_mat(f, f->w->output, fwd_dev(f, f->w->output), V, D, b->x + (uint64_t)k * D, D, e - k,
-                   b->vocab + (uint64_t)f->row[k] * V, V);
+                   b->vocab + (uint64_t)((uint32_t)f->row[k] - base) * V, V);
       k = e;
     }
     if (!ok)
       return fwd_fail(err, "a GPU call failed (the head)");
-    fwd_probe(f, "logits", -1, f->pin->pos[0], b->vocab, (uint64_t)f->n_all * V, false);
-    f->vocab_rows = f->n_all;
+    fwd_probe(f, "logits", -1, f->pin->pos[0], b->vocab, (uint64_t)(f->n_all - base) * V, false);
+    f->vocab_rows = f->n_all - base;
   }
   if (n == f->n_all)
     return true;

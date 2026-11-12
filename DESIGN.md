@@ -3090,6 +3090,193 @@ inject's one-block matvec runs under the mixer's down on the second stream and e
 the decode's ~8.5 ms over the read ceiling is mostly not there to take at these bits; taken so far ~0.3 ms.
 
 
+### 0.6.5: the membrane on the largest quant - what is already right, and reads ahead in the background (design, 2026-11-11, low-power)
+
+UD-IQ2_XXS (146 GiB of experts, 9.7 MiB each; the budget sized: 8,868 of 15,360 resident, 84.3 GiB), the packs'
+settings (no guess), dbench auto 2048 128. plain 13.7 / 11.5 / 12.9 tok/s (q1, after a 2K prompt, q2), drafted 24.2 /
+13.1 / 20.5; a 2K prompt 273-286 tok/s. what follows is a drafted session's every hold and wait (a scratch trace in
+the membrane, not kept), 153 small steps.
+
+- **the misses.** 7,971 of 108,407 decode holds (7.4%), 58% of the visits with one at least. used before and evicted
+  since 50%, never resident 33%, warm and evicted before its first use 17% (UD-IQ1_M: 96.5% first uses).
+- **the reads cannot be faster.** over the stalls the SSD gives 5.4-6.8 GiB/s, a lone expert 1.75 ms; a read DMAs
+  into memory the GPU reads in place - no copy to take out.
+- **the cache's rule cannot be better without the future.** an ideal cache of the same room (the farthest next use
+  evicted) would miss 3,049. simulated over the same holds: LRU, the second-last use, the session's counts, the
+  profile's counts (evicting by them, or admitting a miss only past its victim's - 3.5x the misses: 5,028 of the
+  session's 13,320 experts were not in the warm set), a miss admitted on its second use with a side area - every
+  one within 8% of the membrane's own or far worse.
+- **room is what buys misses**: ~2.7% fewer for a GiB more (10 GiB: -28%).
+- **the guess as it is loses here too**: 21.3 / 12.4 / 19.2 tok/s. it names 61% of the misses, 48% of what it reads
+  is used; the reads waited on fall 2,836 -> 1,802 but each takes 1.83 -> 3.25 ms.
+- **the GPU and the SSD take turns.** a kernel trace of q1: the GPU idle 26% of the decode (1,363 of 5,151 ms; 1,196
+  in gaps of 0.2 ms and more), the SSD at ~2.6 GiB/s over it against its ~6.5. inside a layer the overlap is there
+  already (the experts in memory launched first, the reading ones as they end: hip_lane.c). past it only a read
+  begun before its layer runs overlaps anything - the guess.
+
+**Reads ahead in the background.** why the guess costs: a waited read's jobs go first in the queue, but a job a
+worker has begun is not taken back. a small step's guesses are a few units of three parts each, a part a job read
+whole: every one of the 12 readers can be inside a guessed part (3 MiB) when a miss arrives, which then waits for
+a reader and shares the SSD with up to 36 MiB already begun.
+
+- `fetchq_ahead_limit(q, bytes)`: the most bytes of reads ahead (jobs at a need past 0) being read at once; 0, as
+  created: no bound. a worker leaves the heap's first job where it is while it is a read ahead and the bytes of
+  reads ahead in flight plus its own would pass the bound - unless none is in flight (one job may always go: a job
+  larger than the bound is read alone, never starved) - and takes it when one ends. a waited job (need 0, or moved
+  there: fetchq_need) is never held back and counts nothing. so a miss finds readers free and at most the bound's
+  bytes ahead of it on the SSD; the reads ahead still go whenever nothing is waited on.
+- `fetchq_stats`: the most bytes of reads ahead in flight at once, and the times a worker left one queued.
+- `reads_ahead_limit(r, bytes)`, `MembraneOptions.ahead_limit`: the same number handed down; 0 keeps today's order.
+- which reads are begun, and when they end, changes no bit: the experts' bytes are the file's.
+- general: the queue knows needs, not models - any streamed model's reads ahead (a prompt's, a guess's) take it.
+
+tests (test_fetchq, CPU, real files): 64 reads ahead through 8 workers under a 2 MiB bound - the peak in flight
+within it, every byte in place; a bound of one byte - one job at a time, all read; a waited read given behind 100
+reads ahead ends among the first; a read ahead moved to need 0 the same. test_membrane: guesses under a bound end
+and are held as without one.
+
+then measured: UD-IQ2_XXS drafted, the guess on under bounds of 1, 3 and 6 MiB against the guess off - tok/s, the
+waits, the reads the guess began - at the sized budget; and whether a guessed read at that rate ends in time.
+
+
+**Built and measured (2026-11-11, low-power; one run each, every answer's hash the same).** test_fetchq's new
+tests fail before the bound is kept (the peak past it) and pass five runs of five; test_membrane's every test
+passes with no bound and under a bound of a job at a time. a passing visit lifts the bound (a prompt's reads ahead
+are its reads): prompts 275-278 tok/s in every run. UD-IQ2_XXS drafted, q1 / after a 2K prompt / q2 tok/s:
+
+| | q1 | after 2K | q2 |
+|---|---|---|---|
+| the guess off (the packs') | 24.3 | 13.3 | 20.7 |
+| 6 names, no bound | 21.2 | 12.4 | 19.1 |
+| 6 names, 1 MiB | 23.4 | 12.8 | 20.1 |
+| 6 names, 3 MiB | 23.4 | 13.0 | 20.2 |
+| 6 names, 6 MiB | 23.3 | 12.9 | 20.1 |
+| 2 names, 3 MiB | 24.6 | 13.7 | 20.8 |
+| 1 name, 3 MiB | 24.1 | 13.5 | 20.5 |
+
+(two runs of the guess off: within 0.5%.) so the queue was the guess's cost - the bound gives most of it back,
+whatever its size from 1 to 6 MiB - and what is left is the SSD's own time: at 6 names ~10,300 experts read, half
+never used. at 2 names 1,380 of 1,923 read are used and the guessed ones are there in time (224 waits, ~1 ms), but
+they are 17% of the misses. the predictor (the next router on this layer's input) is the wall: the bound stays an
+option, off by default, the guess's width a constant, no pack changed. not run: an interleaved A/B of 2-3 names
+against none (the 1-3% is one run's).
+
+**What the memory is, and the logits' rows (design, 2026-11-11).** room is what buys misses, so what is not experts
+was itemised (UD-IQ2_XXS, the drafter beside it, a budget of 93.93 GiB; every allocation noted in a scratch build;
+105.7 GiB in all): the experts' pool 84.5 GiB, the dense weights 9.5, a step's buffers 4.2 (sized for 2,048 tokens),
+the stream's pool 3.7, ~3.2 not itemised (the drafter's weights mostly), the sequences' state and taps ~0.5. of the
+step's buffers the largest is the logits': 2,048 rows x 129,280 x F32 = 1,010 MiB - for a head that already runs for
+the wanted rows alone (hip_skip.c), and a server that reads a prompt's last row and a decode step's few.
+
+- `ForwardOptions.logit_rows` (0: a step's every row, as before): the forward keeps the logits of a step's last
+  logit_rows rows - of its last sub-batch - and its buffer is that many rows. a step of n rows, n past it: its rows
+  before the last logit_rows get no logits (the head not run for them, wanted or not), and row r is slot
+  r - (n - logit_rows) of forward_logits; a step within it: row r slot r, as before. the kept rows' bits are the
+  same (a token's sums its own).
+- `forward_logit_rows(f)`: the slots the last step filled (0: none) - a caller's row arithmetic.
+- the engine (hip_engine_ds4.c) asks for round_tokens rows - (experts - 1) / used, 63: a decode step's most tokens;
+  a longer step is a prompt's, read at its last row - and its kept rows are the last sub-batch's last 63.
+  1,010 -> 31 MiB. dbench asks the same (ALL_ROWS=1: every row).
+- not changed: forward_create and forward_create_ranked (every row), so the tests and ppl.hip that read a step's
+  every row.
+
+tests (test_logit_rows_gpu): a forward that keeps 8 rows against one that keeps all - a 20-token step's last 8 the
+same bits at slots 0 .. 7, forward_logit_rows 8, a greedy pick of slot 7 the same token, of slot 8 refused; a
+5-token step's 5 rows the same at slots 0 .. 4. test_engine_gpu: a 2,100-token step's last 52 rows served as before.
+
+
+**Built and measured (2026-11-11, low-power).** test_logit_rows_gpu fails before (the stub keeps every row) and
+passes; DeepSeek's GPU tests touched pass (engine - a 2,100-token step's last 52 rows served as before - batch,
+drafter, guess, cand, overflow, skip, membrane, seqstate); UD-IQ1_M's hashes the same, plain and drafted. UD-IQ2_XXS
+drafted, every row kept against the last 63, two interleaved rounds: the sized budget 94.9-95.0 -> 95.95-95.97 GiB,
+the reads waited on 6,901-6,910 -> 6,711-6,726 (-2.7%: a GiB's, as simulated), their time 13.2 -> 12.8 s; tok/s
+level (24.0 / 13.2 / 20.55 -> 24.0 / 13.3 / 20.6), the hashes the same.
+
+**A session with prompts in it, and the stream's room (2026-11-11).** nine prompts and answers (2K and 8K prompts
+among them), every hold traced. the answer after a long prompt is the slow one (12.5-17.7 tok/s against 20-28), and
+not for what the prompt took: of its first ten steps' misses 63-72% are experts the prompt never picked, 25-31% ones
+the prompt read (not resident before it), 3-7% ones resident when the prompt held them. a prompt costs the decode
+almost none of its residents: the new context wants other experts (and, after p2048, fewer drafts hold). so the
+stream's 3.7 GiB lent to the decode: ~10% fewer misses while lent, ~390 experts given back at every prompt -
+level where an answer follows each prompt (an agent's turns), a gain only for long decodes between. not built.
+
+**What 0.6.5's study leaves.** the membrane's rule, its reads, its prompts and the guess off are each at or near
+what this box allows; a GiB of room is 2.7% of the misses, and the logits' rows are one, free.
+
+### 0.6.5: Qwen on the membrane (design, 2026-11-11)
+
+Qwen's every weight is resident today: UD-IQ3_XXS is 82.6 GB - its n-gram table 28.8 (streamed already where a pack
+asks), its experts ~49 (48 layers x 512, three tensors a layer), the rest under 5. on the membrane its experts are
+units like DeepSeek's: on this box a membrane with room for all of them and nothing left to read; on a 64 GB box
+the same quant with part of them streamed. two requirements (the operator's): fully resident it gives the same
+bits and is no slower; and the membrane takes no Qwen mode - what it needs is general.
+
+**what differs from DeepSeek.** DeepSeek's routing comes to the host every layer (the routing event): the host
+holds the picks, waits for the reading ones, hands their pointers down. Qwen never comes to the host inside a
+token: q4x_expert_tiles makes the pointers on the GPU from the router's picks - a tensor's base + expert x an
+expert's bytes - and a token's ~1,560 launches are queued with no wait. so:
+
+- **a table of pointers on the GPU**, [layer][expert][gate, up, down]: q4x_expert_tiles reads an expert's
+  addresses from it (a load where it multiplied). the experts no longer need to lie in a tensor's order.
+- **fully resident: the table written once.** the membrane made with room for every unit, every unit warm, none
+  ever evicted; the forward fills the table after the warm start and a step never asks the membrane anything -
+  no visit, no hold, no host wait: a token's launches as they are now. `membrane_whole(m)`: every unit pinned in
+  the membrane's pool and its room every unit's - nothing can be evicted, so a caller may keep their pointers.
+- **streamed: the host a layer.** the routing brought to the host (as DeepSeek's), the visit's units held, the
+  missing read and waited for, their table entries written before the experts' kernels are launched. only a build
+  whose room is less than its experts pays it. a prompt's step: passing visits, its misses into the stream.
+- which memory an expert lies in changes no bit.
+
+**stages.**
+1. `q4x_weights_experts`: the experts as PoolUnits (unit = layer x experts + expert; its slice of exp_gate, exp_up,
+   exp_down). CPU, test_q4x_weights.
+2. the fully resident build: the experts' tensors no longer uploaded whole - the membrane's units (its Slots the
+   forward's choice: device memory where everything fits), the table, q4x_expert_tiles by it. the same hashes; the
+   decode and the prompts measured against 0.6.3 (the bar: within the scatter).
+3. the streamed build: decode's small steps first, then a prompt's, then the drafters' rounds; measured on this box
+   under a room that leaves what a 64 GB box would.
+
+not in 0.6.5's first commits: the n-gram table on the membrane (it has its own row reads), an overlay's expert
+tensors (q4x_weights_experts refuses a model whose experts an overlay stands in for: none does today).
+
+**Stage 2 built (2026-11-11, low-power).** the forward's experts are a membrane's, whole (q4x_forward_whole): their
+three tensors a layer no longer uploaded; 24,576 units read O_DIRECT by 12 readers into registered host memory the
+GPU reads in place (host_slots), every unit warm, room for all; then a device table [layer][gate, up, down][expert]
+of their addresses, written once - q4x_expert_tiles makes its entries from it (`tab`; test_q4x_moe_gpu: a table
+that moves every expert, the entries the table's). a step asks the membrane nothing: a token's launches as before.
+the MTP head's layer, and a model an overlay's expert tensor stands in for, keep their tensors' base.
+
+against 0.6.3's build, interleaved, UD-IQ3_XXS: the ids the same (4K + 96: 78687b02a7b4d036, plain and MTP);
+decode, 192 tokens, three rounds 27.25-27.49 -> 27.30-27.46 tok/s; an 8K prompt, five rounds, 788-811 (mean 801.5)
+-> 794-809 (801.4); a whole bench run with its load 30.3-31.3 -> 25.5-25.9 s (the experts' direct reads). a first
+4K prompt, three rounds, had read 1.6% slower: the scatter's. registered host memory against the device's: nothing
+to see in the model.
+
+two things the build met, both the membrane's and general:
+
+- **a part at its file's end.** an expert that ends a shard whose size is not whole 4 KiB: its aligned read passes
+  the file's end, and the pool refused the unit. now the pool keeps the aligned range (the part itself within the
+  file, as checked) and a reader ends a read at the file's end, whole (fetchq.h). test_pool, test_fetchq: fail
+  before.
+- **the memory left is the system's too.** the forward's headroom was the GPU's free memory alone; the experts in
+  host memory are not in that count, so nothing kept a build from the system's last RAM - test_q4x_headroom_gpu's
+  own filler took the box to 0.2 GiB available (a watchdog killed it; the kernel's OOM killer would have). the
+  headroom is now fit_room's: the GPU's free, or the RAM available past FIT_RAM_FREE (8 GiB, DeepSeek's rule) where
+  that is less; and a forward adds up its weights and is refused before it takes any of them. the test sets its
+  edges by the same measure, read once it stands still (freed memory is counted free seconds later: an edge set
+  too soon let a forward fit that was meant not to), and checks a refused build's memory given back by the GPU's
+  own exact count (the system's RAM does not return to the byte: the runtime keeps freed blocks); four runs of
+  four pass, its lowest ~6.7 GiB available (it sits at the edge by design). a Qwen build that left the system under 8 GiB is now refused (this
+  box's UD-IQ3_XXS leaves ~32; UD-Q4_K_XL not run).
+
+after the rebase onto 0.6.4: the host tests, 29 GPU tests (every q4x one, the engines', batch, membrane, logit
+rows) pass; Qwen's hash the same plain and MTP, DeepSeek UD-IQ1_M's drafted d7b31752c2265435 / 3489efd3b43602e8 /
+6b10ecda4ad86eb7.
+
+not tested: osmos-serve on it; UD-Q4_K_XL; the performance profile. written out of order: the forward before
+its test (test_q4x_forward_gpu's check, shown to fail with the accessor false afterwards).
+
+
 ### UD-Q4_K_XL: its types, and its perplexity against UD-IQ3_XXS (2026-11-09)
 
 unsloth's UD-Q4_K_XL (111.3 GB) holds two types this build did not read, both its routed experts': Q4_K (the gate

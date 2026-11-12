@@ -130,10 +130,11 @@ osmos_stats
 
 osmos_batch
   one step: token i fed to seqs[i] at its next position (a sequence's tokens in order, consecutive), the logits of
-  every row after it - or of its last rows only: a family may keep a long step's last part (DeepSeek: its last
-  sub-batch of MM_MAX_TOKENS), always the batch's last row. rows are the batch's own numbers: osmos_logits(row) its
-  vocab floats (device memory), NULL for a row not kept; osmos_greedy: rows row0 .. row0 + rows - 1's greatest token
-  each, the lowest id among equals, false for a row not kept.
+  every row after it - or of its last rows only: a family may keep a step's last part (DeepSeek: the last
+  round_tokens rows of its last sub-batch of MM_MAX_TOKENS - a decode round's most), always the batch's last row. rows
+  are the batch's own numbers: osmos_logits(row) its vocab floats (device memory), NULL for a row not kept;
+  osmos_greedy: rows row0 .. row0 + rows - 1's greatest token each, the lowest id among equals, false for a row not
+  kept.
 
 osmos_greedy_except
   row's greatest token among those not in `except` (osmos/text/answer.h's answer_best: ties to the lower id, NaNs

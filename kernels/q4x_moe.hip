@@ -125,7 +125,8 @@ __global__ __launch_bounds__(kGroupThreads) void tiles_kernel(const int32_t* ids
       t.cnt[en] = m;
       t.xg[en] = (uint32_t) slot * dim, t.xd[en] = (uint32_t) slot * ff;
       t.yg[en] = (uint32_t) place * ff, t.yd[en] = (uint32_t) place * dim;
-      for (int j = 0; j < Q4X_GROUP_TENSORS; j++) t.ptr[j][en] = (const uint8_t*) t.base[j] + (uint64_t) e * t.bytes[j];
+      for (int j = 0; j < Q4X_GROUP_TENSORS; j++)  // the table's address of the expert, or its place in the tensor
+        t.ptr[j][en] = t.tab[j] ? t.tab[j][e] : (const uint8_t*) t.base[j] + (uint64_t) e * t.bytes[j];
     }
   }
   for (int r = 0; r < Q4X_TILE_RUNS; r++)
@@ -221,7 +222,7 @@ extern "C" bool q4x_expert_tiles(const int32_t* ids, uint32_t n, uint32_t k, uin
       !t->hidx || !t->xg || !t->yg || !t->xd || !t->yd || !t->where || !t->off)
     return false;
   for (int j = 0; j < Q4X_GROUP_TENSORS; j++)
-    if (!t->base[j] || !t->bytes[j] || !t->ptr[j]) return false;
+    if ((!t->tab[j] && (!t->base[j] || !t->bytes[j])) || !t->ptr[j]) return false;
   Q4xExpertBounds bd;
   q4x_expert_bounds(n, n_exp, &bd);
   tiles_kernel<<<1, kGroupThreads, 0, st(stream)>>>(ids, n, k, n_exp, dim, ff, *t, bd);

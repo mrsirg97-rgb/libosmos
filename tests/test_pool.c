@@ -845,7 +845,8 @@ static void test_random(int fd_a, int fd_b)
 
 /* a read alignment (a direct read's: 4 KiB): every read the aligned range around its part, into memory at that
    alignment; the part's pointer the slice inside it (its offset's remainder in); the slack under two alignments a part;
-   a range that would pass its file's end, an alignment not a power of two, refused */
+   a part at its file's end keeps its aligned range (read to the end: fetchq.h); an alignment not a power of two
+   refused */
 #define AL 4096u
 static void *al_alloc(uint64_t bytes, void *ctx)
 {
@@ -863,8 +864,18 @@ static void test_read_align(int fd)
   const PoolUnit u[2] = {{.part = {{fd, 4096 * 3 + 2048, 10000}, {fd, 7, 4096}, {fd, 8192, 4096}}, .n_parts = 3},
                          {.part = {{odd, (1 << 20) + 50, 40}}, .n_parts = 1}}; /* 1: its aligned range past the end */
   memset(&reads, 0, sizeof reads);
-  assert(!pool_create(u, 2, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, AL,
-                      NULL, NULL, err) && err[0]);
+  { /* a part whose aligned range passes its file's end: taken, its read the aligned range (the readers end at the end) */
+    Pool *q = pool_create(u, 2, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need},
+                          AL, NULL, NULL, err);
+    assert(q);
+    const void *d[POOL_PARTS];
+    assert(pool_pin(q, 1, d) == POOL_WAIT && reads.n == 1);
+    const PoolRange want = u[1].part[0], got = reads.r[0].part[0];
+    assert(got.offset % AL == 0 && got.bytes % AL == 0 && got.offset <= want.offset &&
+           got.offset + got.bytes >= want.offset + want.bytes && got.offset + got.bytes > (1 << 20) + 100);
+    pool_destroy(q);
+    memset(&reads, 0, sizeof reads);
+  }
   assert(!pool_create(u, 1, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, 3000,
                       NULL, NULL, err) && err[0]);
   Pool *p = pool_create(u, 1, 1 << 20, (Slots){al_alloc, al_free, NULL}, (Fetcher){fake_fetch, &reads, fake_need}, AL,
@@ -896,7 +907,7 @@ static void test_read_align(int fd)
   pool_destroy(p);
   close(odd);
   printf("  read alignment: aligned ranges into aligned memory, the slice at the part's pointer, %llu bytes of slack for "
-         "3 parts; past the file's end or not a power of two refused\n", (unsigned long long)slack);
+         "3 parts; a part at its file's end taken, not a power of two refused\n", (unsigned long long)slack);
 }
 
 /* the pool over an arena (host_slots' allocator): memory in pieces, a unit's alloc refused though the budget has room -

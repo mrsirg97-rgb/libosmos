@@ -161,3 +161,9 @@ bool reads_pump(Reads *r, Pool *const pools[READS_POOLS], bool wait, char err[RE
 
 int reads_out(const Reads *r) { return r ? r->out : 0; }
 uint64_t reads_split(const Reads *r) { return r ? r->split : 0; }
+
+void reads_ahead_limit(Reads *r, uint64_t bytes)
+{
+  if (r)
+    fetchq_ahead_limit(r->q, bytes);
+}

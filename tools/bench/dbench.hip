@@ -8,7 +8,7 @@
 // osmos-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
 // PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
-// a layer ahead: ForwardOptions' no_guess), OVERLAY=file (tensors standing in for the model's: weights_create_with).
+// a layer ahead: ForwardOptions' no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), OVERLAY=file (tensors standing in for the model's: weights_create_with).
 // prints "window prompt|decode <start> <end> <tokens>" (epoch seconds) for each prompt read and answer: energy by
 // tools/power.py's samples in them (tools/bench/energy.py).
 // ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
@@ -107,9 +107,8 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
   if (P > 256)
     std::printf("prompt %u tokens in %.0f ms (%.0f tok/s)\nwindow prompt %.3f %.3f %u\n", P, ps * 1e3, P / ps, pe0, epoch(), P);
   std::vector<float> lg(V);
-  // the last step's row: a step past MM_MAX_TOKENS keeps its last sub-batch's rows (forward_logits)
-  const uint32_t last = P - (P - 1) / g_max_tokens * g_max_tokens;
-  int32_t t = pick(f, lg, V, (last - 1) % MM_MAX_TOKENS);
+  // the last step's last row: the last slot the forward kept (forward_logit_rows)
+  int32_t t = pick(f, lg, V, forward_logit_rows(f) - 1);
   const auto t0 = std::chrono::steady_clock::now();
   const double te0 = epoch();
   if (g_draft) {
@@ -194,6 +193,9 @@ int main(int argc, char** argv) {
   ForwardOptions o = {};
   o.n_layers = (int) w->geo.n_layers;
   o.no_guess = std::getenv("NO_GUESS") != nullptr;
+  // the logits kept as the engine keeps them: a decode step's most rows (hip_engine_ds4.c); ALL_ROWS=1: every row
+  o.logit_rows = std::getenv("ALL_ROWS") ? 0 : (uint32_t) ((w->geo.n_experts - 1) / w->geo.n_used);
+  o.ahead_limit = std::getenv("AHEAD_LIMIT") ? std::strtoull(std::getenv("AHEAD_LIMIT"), nullptr, 10) : 0;  // bytes
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
   o.budget = budget;
   o.max_tokens = max_tokens;

@@ -66,11 +66,13 @@ static void make_units(int fd)
   }
 }
 
+static uint64_t ahead_limit; /* the readers' bound on reads ahead (main runs every test without one, then under one) */
+
 static MembraneOptions options(uint32_t room_units, uint32_t stream_units, const uint32_t *warm, size_t n_warm)
 {
   const uint64_t ub = pool_unit_bytes(&units[0], 0);
   return (MembraneOptions){units, L, E, room_units * ub, stream_units * ub, {fake_alloc, fake_free, NULL},
-                           {fake_alloc, fake_free, NULL}, 0, 4, warm, n_warm, fake_copy, &copies};
+                           {fake_alloc, fake_free, NULL}, 0, 4, warm, n_warm, fake_copy, &copies, ahead_limit};
 }
 
 static Membrane *make(uint32_t room_units, uint32_t stream_units, const uint32_t *warm, size_t n_warm)
@@ -308,6 +310,42 @@ static void test_warm(void)
   printf("  the warm start: read in before the first visit, the first named the last to go\n");
 }
 
+/* a membrane with room for every unit, all of them warm: whole - every unit's pointers there, the same ones after
+   visits that hold them; a room one unit short, or the warm start not yet read: not whole */
+static void test_whole(void)
+{
+  enum { N = L * E };
+  uint32_t all[N];
+  for (uint32_t u = 0; u < N; u++)
+    all[u] = u;
+  char err[MEMBRANE_ERR] = "";
+  Membrane *m = make(N, 2, all, N);
+  assert(!membrane_whole(m)); /* nothing read yet */
+  assert(membrane_warm(m, err) && membrane_whole(m));
+  const void *before[N][POOL_PARTS], *after[POOL_PARTS];
+  for (uint32_t u = 0; u < N; u++)
+    assert(membrane_ready(m, u, before[u]));
+  for (uint32_t l = 0; l < L; l++) /* a round of visits holding every unit: nothing read, nothing moved */
+  {
+    visit(m, l, l & 1);
+    for (uint32_t e = 0; e < E; e++)
+      take(m, l * E + e);
+  }
+  membrane_end(m);
+  MembraneStats st;
+  membrane_stats(m, &st);
+  assert(membrane_whole(m) && st.streamed == 0 && st.waits[0] == 0);
+  for (uint32_t u = 0; u < N; u++)
+    assert(membrane_ready(m, u, after) && !memcmp(after, before[u], sizeof after));
+  membrane_destroy(m);
+  m = make(N - 1, 2, all, N - 1); /* a unit short: its room not every unit's */
+  assert(membrane_warm(m, err) && !membrane_whole(m));
+  membrane_destroy(m);
+  assert(!membrane_whole(NULL));
+  printf("  whole: room for every unit and all warm - their pointers the same after a round of visits; a unit short, "
+         "or not yet read: not whole\n");
+}
+
 /* more held in a visit than the room: refused with why, and the next visit sound */
 static void test_full(void)
 {
@@ -364,15 +402,21 @@ int main(void)
   const int fd = file();
   make_units(fd);
   assert(pool_unit_bytes(&units[0], 0) == UNIT);
-  test_refusals();
-  test_decode_keeps();
-  test_prompt_passes();
-  test_promotion();
-  test_copy_fails();
-  test_guess();
-  test_warm();
-  test_full();
-  test_walk();
+  for (int bound = 0; bound < 2; bound++) /* reads ahead a job at a time: which units are where, and when, the same */
+  {
+    ahead_limit = bound ? 1 : 0;
+    printf(bound ? " under a bound on reads ahead (a job at a time):\n" : " no bound on reads ahead:\n");
+    test_refusals();
+    test_decode_keeps();
+    test_prompt_passes();
+    test_promotion();
+    test_copy_fails();
+    test_guess();
+    test_warm();
+    test_whole();
+    test_full();
+    test_walk();
+  }
   close(fd);
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);

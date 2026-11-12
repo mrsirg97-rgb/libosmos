@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/mem/pool.h"
 #include "osmos/model/gguf.h"
 
 #define Q4X_ERR 256
@@ -81,10 +82,19 @@ Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[
 void q4x_weights_destroy(Q4xWeights *w);
 Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[Q4X_ERR]);
 void q4x_mtp_destroy(Q4xMtp *m);
+size_t q4x_weights_experts(const Q4xWeights *w, const int *model_fds, PoolUnit *units, size_t cap);
 
 #endif
 
 /*
+q4x_weights_experts (DESIGN.md, "0.6.5: Qwen on the membrane")
+  the routed experts as the pool's units, unit = layer * n_experts + expert, each three parts - the expert's slice of
+  the layer's exp_gate, exp_up and exp_down (gate, up, down), a tensor's bytes / n_experts each - in the model's files,
+  `model_fds[file]` the caller's open descriptors of the model's paths. writes at most `cap` units; returns how many
+  there are (n_layers * n_experts) - 0, nothing written, for no weights, a tensor whose bytes are not n_experts equal
+  slices, or an expert tensor an overlay stands in for (its file is not the model's: such a model's experts are not
+  units).
+
 q4x_mtp_create
   the MTP head of w's model: its metadata w's geometry (the same architecture, widths, heads, experts; one nextn layer
   after w's; its embedding and output borrowed from w - nextn_shared_target_tensors), its layer's tensors an attention

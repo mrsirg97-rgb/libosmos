@@ -42,6 +42,7 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
 Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, const Q4xOptions *o, char err[Q4X_FWD_ERR]);
 void q4x_forward_destroy(Q4xForward *f);
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
+bool q4x_forward_whole(const Q4xForward *f);
 void q4x_forward_side_spin(Q4xForward *f, uint32_t us);
 
 Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR]);
@@ -155,6 +156,12 @@ q4x_batch
   sequences' steps one after another fill one table, row0 + n at most max_tokens). a token's results are the same bits
   however its sequence's tokens are split into batches. false with why for n out of range or past max_ctx; the
   sequence then unchanged in position (its state not to be read on: a refusal before any step runs).
+
+q4x_forward_whole (DESIGN.md, "0.6.5: Qwen on the membrane")
+  the forward's experts are a membrane's units, every one in memory and none to be evicted (membrane_whole): read
+  from the model's files O_DIRECT into memory the GPU reads in place, their addresses a table on the device the MoE's
+  entries are made from (q4x_expert_tiles' tab) - written once, a step asks the membrane nothing. false for a
+  forward whose experts lie in their tensors as uploaded: a model an overlay's expert tensor stands in for.
 
 q4x_seq_prompt, q4x_kept
   q4x_seq_prompt: the sequence's prompt ends at position end (its last token end - 1; 0, a new sequence's: none).

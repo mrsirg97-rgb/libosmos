@@ -297,7 +297,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   {
     const MembraneOptions mo = {all,       (uint32_t)f->n_layers,    E,           f->pool_room,      stream_room,
                                 host_slots(f->hs), host_slots(f->hs_stream), ARENA_GRAIN, FWD_FETCH_THREADS, warm,
-                                n_warm,    copy_on_stream,           NULL};
+                                n_warm,    copy_on_stream,           NULL,        f->ahead_limit};
     ok = (f->mem = membrane_create(&mo, err)) != NULL;
   }
   free(warm);
@@ -457,7 +457,7 @@ static bool scratch(Forward *f)
       {&b->x, B * D * F},         {&b->qa, B * (uint64_t)g->q_lora * F}, {&b->q, B * HQ * F},
       {&b->kv, B * hd * F},       {&b->o, B * HQ * F},  {&b->oa, B * (uint64_t)g->o_groups * g->o_lora * F},
       {&b->y, B * D * F},         {&b->mid, NS * B * hc * D * F},   {&b->xf, S * D * F},
-      {&b->logits, S * (uint64_t)g->n_experts * F}, {&b->vocab, B * (uint64_t)g->n_vocab * F},
+      {&b->logits, S * (uint64_t)g->n_experts * F}, {&b->vocab, (f->logit_rows && f->logit_rows < B ? f->logit_rows : B) * (uint64_t)g->n_vocab * F},
       {&b->rw, S * K * F},        {&b->ga, P * FF * F},             {&b->upr, P * FF * F},
       {&b->hh, P * FF * F},       {&b->ye, P * D * F},              {&b->moe, S * D * F},
       {&b->sga, S * FF * F},      {&b->sup, S * FF * F},            {&b->shh, S * FF * F},
@@ -552,7 +552,7 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
                                const uint64_t *picks, char err[FORWARD_ERR])
 {
-  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0};
+  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0};
   return forward_create_with(w, &o, err);
 }
 
@@ -570,6 +570,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   if (!f)
     return fwd_fail(err, "out of memory"), NULL;
   f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->no_guess = o->no_guess, f->budget = budget;
+  f->ahead_limit = o->ahead_limit, f->logit_rows = o->logit_rows;
   f->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
   if (max_tokens < FWD_MAX_BATCH) /* a small step's server: every buffer of a step at its size (DESIGN.md) */
     f->n_subs = 1, f->max_tokens = max_tokens, f->step = (max_tokens + MM_TILE - 1) / MM_TILE * MM_TILE;
@@ -730,6 +731,7 @@ void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2])
   n[0] = s.waits[0], n[1] = s.waits[1], ns[0] = s.wait_ns[0], ns[1] = s.wait_ns[1];
 }
 const float *forward_logits(const Forward *f) { return f->b.vocab; }
+uint32_t forward_logit_rows(const Forward *f) { return f ? f->vocab_rows : 0; }
 
 bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR])
 {

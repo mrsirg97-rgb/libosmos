@@ -67,6 +67,45 @@ static void refused(const char *what, const char *needle)
   printf("    %-46s -> %s\n", what, err);
 }
 
+/* the experts as the pool's units: an expert's slice of its layer's three tensors, by the model's files */
+static void test_experts(const Q4xWeights *w)
+{
+  enum { E = 512, L = 48 };
+  int fds[64];
+  assert(model->n_files <= 64);
+  for (int i = 0; i < model->n_files; i++)
+    fds[i] = 100 + i; /* the caller's descriptors: any, the units carry them */
+  assert(q4x_weights_experts(NULL, fds, NULL, 0) == 0);
+  assert(q4x_weights_experts(w, fds, NULL, 0) == (size_t)L * E); /* how many, nothing written */
+  PoolUnit *u = calloc((size_t)L * E + 1, sizeof *u);
+  assert(u);
+  u[7].n_parts = -1;
+  assert(q4x_weights_experts(w, fds, u, 7) == (size_t)L * E && u[6].n_parts == POOL_PARTS && u[7].n_parts == -1);
+  u[(size_t)L * E].n_parts = -1;
+  assert(q4x_weights_experts(w, fds, u, (size_t)L * E) == (size_t)L * E && u[(size_t)L * E].n_parts == -1);
+  uint64_t total = 0;
+  for (int l = 0; l < L; l++)
+  {
+    const GgufTensor *t[POOL_PARTS] = {w->layer[l].exp_gate, w->layer[l].exp_up, w->layer[l].exp_down};
+    for (int e = 0; e < E; e += 73) /* a few of each layer, and its last */
+      for (int k = 0; k < POOL_PARTS; k++)
+      {
+        const PoolRange *r = &u[(size_t)l * E + e].part[k];
+        const uint64_t slice = t[k]->bytes / E;
+        assert(u[(size_t)l * E + e].n_parts == POOL_PARTS && t[k]->bytes % E == 0);
+        assert(r->fd == fds[t[k]->file] && r->bytes == slice && r->offset == t[k]->offset + (uint64_t)e * slice);
+      }
+    const PoolRange *last = &u[(size_t)l * E + E - 1].part[2];
+    assert(last->offset + last->bytes == t[2]->offset + t[2]->bytes); /* the last expert ends its tensor */
+    for (int e = 0; e < E; e++)
+      for (int k = 0; k < POOL_PARTS; k++)
+        total += u[(size_t)l * E + e].part[k].bytes;
+  }
+  printf("  experts: %d units of three parts, %.1f GiB, each its slice of its layer's gate, up and down\n", L * E,
+         (double)total / (1ull << 30));
+  free(u);
+}
+
 static void test_real(void)
 {
   char err[Q4X_ERR] = "";
@@ -99,6 +138,7 @@ static void test_real(void)
   for (int l = 0; l < g->n_layers; l++)
     assert(w->layer[l].router && w->layer[l].exp_down && w->layer[l].sh_gate_inp && w->layer[l].hc_ffn_inject);
   printf("  real: 48 layers (36 Gated DeltaNet, 12 sparse attention), every tensor in its role\n");
+  test_experts(w);
   q4x_weights_destroy(w);
 }
 

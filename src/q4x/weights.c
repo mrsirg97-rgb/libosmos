@@ -244,6 +244,38 @@ Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[
   return w;
 }
 
+/* a tensor of the model's own (not an overlay's standing in for it): its file one of the model's */
+static bool models(const Q4xWeights *w, const GgufTensor *t)
+{
+  return t >= w->model->tensors && t < w->model->tensors + w->model->n_tensors;
+}
+
+size_t q4x_weights_experts(const Q4xWeights *w, const int *model_fds, PoolUnit *units, size_t cap)
+{
+  if (!w)
+    return 0;
+  const size_t E = (size_t)w->geo.n_experts, n = (size_t)w->geo.n_layers * E;
+  for (int l = 0; l < w->geo.n_layers; l++) /* every layer's three first: nothing written for a model refused */
+  {
+    const GgufTensor *t[POOL_PARTS] = {w->layer[l].exp_gate, w->layer[l].exp_up, w->layer[l].exp_down};
+    for (int k = 0; k < POOL_PARTS; k++)
+      if (!t[k] || !models(w, t[k]) || t[k]->bytes % E)
+        return 0;
+  }
+  for (size_t i = 0; units && model_fds && i < n && i < cap; i++)
+  {
+    const Q4xLayer *l = &w->layer[i / E];
+    const GgufTensor *t[POOL_PARTS] = {l->exp_gate, l->exp_up, l->exp_down};
+    units[i] = (PoolUnit){.n_parts = POOL_PARTS};
+    for (int k = 0; k < POOL_PARTS; k++)
+    {
+      const uint64_t slice = t[k]->bytes / E;
+      units[i].part[k] = (PoolRange){model_fds[t[k]->file], t[k]->offset + (i % E) * slice, slice};
+    }
+  }
+  return n;
+}
+
 void q4x_mtp_destroy(Q4xMtp *m) { free(m); }
 
 /* the head's metadata against the model's geometry: its keys the model's widths, its one layer after the model's */
