@@ -524,6 +524,53 @@ class Gpu(unittest.TestCase):
         self.assertIn("sysfs", why)
 
 
+class Assemble(unittest.TestCase):
+    """tools/convert/gguf_assemble.py: a GGUF set with tensors replaced - the others' bytes and their offset modulo a
+    block kept (clones where the filesystem has them), a shard with nothing replaced linked"""
+
+    def gguf(self, path, tensors, extra_kv=b"", n_extra=0):
+        def s(x):
+            b = x.encode()
+            return struct.pack("<Q", len(b)) + b
+        kv = s("general.alignment") + struct.pack("<II", 4, 32) + extra_kv
+        info, data, off = b"", b"", 0
+        for name, dims, ty, raw in tensors:
+            info += s(name) + struct.pack("<I", len(dims)) + struct.pack(f"<{len(dims)}Q", *dims) + struct.pack("<IQ", ty, off)
+            data += raw + b"\0" * ((-len(raw)) % 32)
+            off += len(raw) + (-len(raw)) % 32
+        hd = b"GGUF" + struct.pack("<IQQ", 3, len(tensors), 1 + n_extra) + kv + info
+        with open(path, "wb") as f:
+            f.write(hd + b"\0" * ((-len(hd)) % 32) + data)
+
+    def test_assemble(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "convert"))
+        import gguf_assemble as A
+        d = tempfile.mkdtemp()
+        big = os.urandom(3 * 4096 + 100)  # F32 [(3 * 4096 + 100) / 4]: whole blocks and edges
+        a = os.urandom(64 * 4)
+        self.gguf(f"{d}/m-00001-of-00002.gguf", [("a", [64], 0, a), ("big", [len(big) // 4], 0, big)])
+        self.gguf(f"{d}/m-00002-of-00002.gguf", [("c", [64], 0, os.urandom(256))])
+        self.gguf(f"{d}/r.gguf", [("a", [64], 8, os.urandom(34 * 2))])  # a as Q8_0: 2 blocks
+        out = os.path.join(d, "out")
+        A.main.__globals__["sys"].argv = ["x", f"{d}/m-00001-of-00002.gguf", out, f"{d}/r.gguf"]
+        A.main()
+        _, _, _, _, got = A.read_shard(f"{out}/m-00001-of-00002.gguf")
+        names = {t[0]: t for t in got}
+        self.assertEqual(names["a"][2], 8)  # the replacement's type
+        with open(f"{out}/m-00001-of-00002.gguf", "rb") as f:
+            f.seek(names["big"][3]); self.assertEqual(f.read(len(big)), big)
+        _, _, _, _, base = A.read_shard(f"{d}/m-00001-of-00002.gguf")
+        self.assertEqual(names["big"][3] % 4096, {t[0]: t for t in base}["big"][3] % 4096)  # cloneable
+        self.assertTrue(os.path.islink(f"{out}/m-00002-of-00002.gguf"))  # nothing replaced: linked
+        with self.assertRaises(SystemExit):  # dims the base's or refused
+            self.gguf(f"{d}/bad.gguf", [("a", [32], 0, os.urandom(128))])
+            A.main.__globals__["sys"].argv = ["x", f"{d}/m-00001-of-00002.gguf", os.path.join(d, "out2"), f"{d}/bad.gguf"]
+            try:
+                A.main()
+            except AssertionError as e:
+                raise SystemExit(str(e))
+
+
 class Quality(unittest.TestCase):
     """a pack's quality (0.6.6's KL against the reference): optional, two non-negative numbers when given"""
 
