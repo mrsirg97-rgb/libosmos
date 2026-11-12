@@ -254,6 +254,10 @@ down's K 640 not a 256 multiple: their tiling later), C 128 x N:
 | IQ2_S (16 rows a core) | 2.85 | 0.999968 | 8.9e-3 |
 all right the first build; half DeepSeek's (first versions): IQ4_NL's scale every 32 values - 8 fp16 -> bf16 a row a
 K-step, the last rounding to bf16 scalar soft float. against the GPU's 14.7 TFLOP/s on Qwen's experts, ~3.5 is a fifth.
+**fp16 -> bf16 by the bits** (common/fp16.h's fp16_to_bf16_shift: the f32 bits, rounded nearest-even by integer ops -
+checked against ml_dtypes on all 190,464 cases, shifts 0/2/3): IQ4_NL 3.39 -> **4.60** (+36%, worst 9.6e-3 -> 5.2e-3),
+IQ3_XXS 3.62 -> **5.01** (+38%), IQ2_S 2.85 -> 2.87 (its scales rarer); DeepSeek's two the same speed (IQ2_XXS 6.18,
+IQ1_S 5.2-6.2 over three runs) and closer (worst 9.0e-3 -> 7.0e-3, 9.1e-3 -> 6.9e-3). no scalar float left in a decode.
 
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two

@@ -13,6 +13,8 @@
 
 #include "aie_kernel_utils.h"
 #include "../common/fp16.h"
+static inline bfloat16 fp16_to_bf16_shift_8(uint16_t h) { return fp16_to_bf16_shift(h, 3); }
+static inline bfloat16 fp16_to_bf16_shift_0(uint16_t h) { return fp16_to_bf16_shift(h, 0); }
 #include "iq1s_grid2.h"
 #if IQ1_V == 3
 #include "iq1s_grid8.h"
@@ -99,7 +101,7 @@ static void decode_tile(const uint8_t *__restrict w) {
   make_idx_vec(w);
 #endif
   alignas(64) static bfloat16 d[NR];
-  for (int n = 0; n < NR; n++) d[n] = (bfloat16)half_bits((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
+  for (int n = 0; n < NR; n++) d[n] = fp16_to_bf16_shift_0((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
   const bfloat16 *ko = (const bfloat16 *)kodd8_bf16, *kd = (const bfloat16 *)kdelta_bf16;
   const aie::vector<int16, 64> field = aie::load_v<64>(kfield), two = aie::load_v<64>(ktwo);
   const aie::vector<int16, 64> zero = aie::zeros<int16, 64>();

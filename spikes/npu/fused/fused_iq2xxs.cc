@@ -11,6 +11,8 @@
 #include "iq2xxs_tables.h"
 #include "aie_kernel_utils.h"
 #include "../common/fp16.h"
+static inline bfloat16 fp16_to_bf16_shift_8(uint16_t h) { return fp16_to_bf16_shift(h, 3); }
+static inline bfloat16 fp16_to_bf16_shift_0(uint16_t h) { return fp16_to_bf16_shift(h, 0); }
 
 #ifndef FUSED_V
 #define FUSED_V 2 /* 1: row-major index words, nested loops; 2: group-major (a band's rows contiguous), one counted loop */
@@ -163,7 +165,7 @@ static void decode_tile7(const uint8_t *__restrict w) {
   alignas(64) static bfloat16 d8[NR];
   alignas(64) static bfloat16 scs[8][64];
   alignas(64) static uint32_t sgm[32][2];
-  for (int n = 0; n < NR; n++) d8[n] = (bfloat16)half_bits_div8((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
+  for (int n = 0; n < NR; n++) d8[n] = fp16_to_bf16_shift_8((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
   const bfloat16 *kb = (const bfloat16 *)kodd_bf16;
   const aie::vector<int32, 32> rowv = aie::load_v<32>(krow32);
   aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
@@ -220,7 +222,7 @@ static void decode_tile7(const uint8_t *__restrict w) {
 
 static void decode_tile3(const uint8_t *__restrict w) {
   alignas(64) static bfloat16 d8[NR]; // a row's d / 8: its one setup
-  for (int n = 0; n < NR; n++) d8[n] = (bfloat16)half_bits_div8((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
+  for (int n = 0; n < NR; n++) d8[n] = fp16_to_bf16_shift_8((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
   const bfloat16 *kb = (const bfloat16 *)kodd_bf16;
   aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
   for (int kh = 0; kh < (KHALF ? 2 : 1); kh++)

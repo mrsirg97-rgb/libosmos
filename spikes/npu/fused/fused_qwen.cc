@@ -56,7 +56,7 @@ static void decode_tile(const uint8_t *__restrict w) {
         AIE_LOOP_UNROLL_FULL
         for (int r = 0; r < 8; r++) {
           const uint8_t *blk = w + RB * (8 * j + r) + 18 * b;
-          d[r] = (bfloat16)fp16_to_f32_shift((uint16_t)(blk[0] | blk[1] << 8), 0);
+          d[r] = fp16_to_bf16_shift((uint16_t)(blk[0] | blk[1] << 8), 0);
           const aie::vector<uint8, 16> qs = aie::load_unaligned_v<16>(blk + 2);
           v[r] = aie::concat(plo.fetch(qs), phi.fetch(qs));
         }
@@ -82,7 +82,7 @@ static void decode_tile(const uint8_t *__restrict w) {
   for (int kh = 0; kh < 2; kh++)
     for (int j = 0; j < NR / 8; j++) {
       const uint8_t *band = w + RB * 8 * j;
-#define D(r) aie::broadcast<bfloat16, 8>((bfloat16)fp16_to_f32_shift((uint16_t)(band[RB * (r)] | band[RB * (r) + 1] << 8), 2))
+#define D(r) aie::broadcast<bfloat16, 8>(fp16_to_bf16_shift((uint16_t)(band[RB * (r)] | band[RB * (r) + 1] << 8), 2))
       const aie::vector<bfloat16, 64> dv = BCAST8(D);
 #undef D
       for (int g = 4 * kh; g < 4 * kh + 4; g++) {
@@ -121,7 +121,7 @@ static void decode_tile(const uint8_t *__restrict w) {
   for (int kh = 0; kh < 2; kh++)
     for (int j = 0; j < NR / 8; j++) {
       const uint8_t *band = w + RB * 8 * j;
-#define D(r) aie::broadcast<bfloat16, 8>((bfloat16)fp16_to_f32_shift((uint16_t)(band[RB * (r)] | band[RB * (r) + 1] << 8), 3))
+#define D(r) aie::broadcast<bfloat16, 8>(fp16_to_bf16_shift((uint16_t)(band[RB * (r)] | band[RB * (r) + 1] << 8), 3))
       const aie::vector<bfloat16, 64> dv = BCAST8(D);
 #undef D
       for (int g = 4 * kh; g < 4 * kh + 4; g++) {
