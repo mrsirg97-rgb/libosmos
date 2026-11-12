@@ -15,7 +15,7 @@
     "ud-iq1_m-4": {"repo": "unsloth/DeepSeek-V4.1-Flash-1017-GGUF", "revision": "2688c0c3c2c3b052ec4f6d10a8417b0ef7ee4eba",
                    "path": "UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00004-of-00005.gguf", "bytes": 40803165856,
                    "sha256": "323a7f59a2938879eaac82b37c443c85151e518071ad44c79b1e4580c91d0ed7"},
-    "evo-a-delta": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": null,
+    "evo-a-delta": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": "b7393f97a7ca7c2ea4b835b39f0d8e21127f5ff9",
                     "path": "evo-A/DeepSeek-V4.1-Flash-1017-osmos-evo-A-delta.gguf", "bytes": 33664472480,
                     "sha256": "4b0ae2aa7c7e47ce8d3bf377d20d1f170a3c52b384fa6d6a0dc24264245e3990"},
     "evo-a-1": {"derive": {"with": "gguf_assemble", "base": ["ud-iq1_m-1", "ud-iq1_m-2", "ud-iq1_m-3", "ud-iq1_m-4"],
