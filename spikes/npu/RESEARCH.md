@@ -52,6 +52,16 @@ arithmetic decode. (Peano lowers no bf16 vector negate: sign flips go through in
 d below 2^-11 hid the whole output once: these tensors' d run ~3e-4.) next: IQ1_S (gate, up): a 2,048-row grid -
 16 KB as bytes, 32 KB as bf16, beside the core's buffers.
 
+## IQ1_S decoded on one AIE2P core (spikes/npu/iq1s, 2026-11-12)
+UD-IQ1_M's own bytes (blk.0.ffn_gate_exps, IQ1_S: its gate and up experts - most of its expert bytes): the 2,048-row
+grid of {-1, 0, 1} as bf16 (32 KB of the core's 64; 8 blocks a buffer beside it), a group four row loads, one bf16
+multiply-add (dl * grid + dl * delta; the 8 scales and shifts a block two vector products): **0.94 Gvalues/s**, error
+7.2e-3 (the scales rounded to bf16), every sign right - the first build.
+
+so every format of UD-IQ1_M's and evo-A's experts decodes on one core at ~1 Gvalues/s (Q2_K 0.99, IQ2_XXS 1.11,
+IQ1_S 0.94): 32 cores ~30 Gvalues/s. what is left: the decode feeding a GEMM on the core (the effective rate at a
+prompt's ~128 rows an expert), the scales kept f32 (error to bf16's 4e-3), and the numerics against the KLD protocol.
+
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
 with the cache squeezed (100.9-104.9 GiB: the BF16 download's Xet RAM growth), the same budget (106.8 / 107.3 GiB) 509
