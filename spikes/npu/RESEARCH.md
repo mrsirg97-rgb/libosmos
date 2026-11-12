@@ -116,6 +116,13 @@ two selects), + delta in bf16, x the band-group's scale vector: corr 0.999949 (w
 (0.99 Gvalues/s), + matmul 18.2. at ~128 rows an expert ~6.9 TFLOP/s for the array (IQ2_XXS ~9.1); DeepSeek's mix
 (IQ1_S 57% of its routed time, IQ2_XXS 32%) ~7.7: ~22% of the routed experts the NPU's, a step ~8% faster.
 
+IQ2_XXS's signs (fused_iq2xxs.cc): ggml's ksigns_iq2xs[k] is k with even parity in bit 7 - computed, not looked up.
+v4: a band-group's 8 rows x 4 octets in 32 int32 lanes (shifts 0/7/14/21 by row selects, & 127, parity by xor folds),
+an octet's 8 bytes over 64 lanes by an 8 x 8 transpose, each lane's bit tested: 15.0 us - slower than v3's scalar
+lookups (12.0): the transpose an octet cost more than its 40 scalar ops. **v5: the same bytes narrowed to uint8 [l][r] -
+an octet's 8 sign bytes end to end are its 64-lane mask, two 32-bit lanes: 10.97 us** (corr 0.999945), + matmul
+12.9: ~9.7 TFLOP/s for the array at 128 rows. DeepSeek's mix ~9.9: ~27% of its routed experts, a step ~9.5% faster.
+
 IQ1_S's decode taken apart (fused_iq1s.cc, a tile): full 17.4 us; its codes constant (the vector work alone) 5.7;
 the index computed but no table load 15.2 - so ~2/3 is the scalar index path: 5 ops a row-octet to join qs's byte
 and qh's 3 bits into the 11-bit index, then a broadcast. the grid as int8 rows would drop the broadcasts, but AIE
