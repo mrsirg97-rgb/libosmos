@@ -12,6 +12,9 @@
   the pack's `osmos.json`, puts a placeholder result ("[tool result dropped from the conversation's history - run the
   call again if its result is needed]") after each orphaned call, and the answer says so (`orphans_filled`). By
   default the prompt stays the template's render of what was sent: osmos does not rewrite a client's history.
+- **`kld`'s `BIG`** (tools/bench): `BIG=8192` reads a text's unscored stretches in batches of up to 8,192 tokens (the
+  server's own: four sub-batches, each layer's experts read once for them), the scored rows at `step` - the same
+  bits (a 24,576-token check: its dumps byte-identical), a long text with few scored windows ~1.7x faster to read.
 
 ## [0.7.2]: IQ1_S's prompt decode, faster
 

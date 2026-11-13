@@ -102,7 +102,12 @@ int main(int argc, char** argv) {
   if (dump) CHECK((dp = std::fopen(dump, "wb")));
 
   ForwardOptions o = {};
-  o.n_layers = (int) w->geo.n_layers, o.max_ctx = n, o.budget = budget, o.max_tokens = step;
+  // BIG (a step past MM_MAX_TOKENS, up to FORWARD_MAX_TOKENS: the server's own): a batch none of whose rows the mask
+  // scores read BIG tokens at once (its logits not read; a batch's sub-batches the same bits as a step each,
+  // forward.h), the rest `step` - a long text's few scored windows without the unscored rows' 4x expert reads
+  const uint32_t big = std::getenv("BIG") ? (uint32_t) std::atoi(std::getenv("BIG")) : 0;
+  CHECK(!big || (big >= step && big <= FORWARD_MAX_TOKENS));
+  o.n_layers = (int) w->geo.n_layers, o.max_ctx = n, o.budget = budget, o.max_tokens = big ? big : step;
   std::vector<uint64_t> picks;
   if (const char* pp = std::getenv("PICKS")) {
     FILE* pf = std::fopen(pp, "rb");
@@ -120,14 +125,27 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "forward_npu: %s\n", ferr), std::_Exit(1);
   Seq* s = seq_create(f, ferr);
   CHECK(s);
-  std::vector<Seq*> ss(step, s);
+  std::vector<Seq*> ss(big ? big : step, s);
   std::vector<float> lg((size_t) step * V), rl(V);
   std::vector<double> lp(V);
   std::vector<float> kls;
   double nll = 0;
   uint32_t scored = 0, agree = 0;
-  for (uint32_t at = 0; at < n; at += step) {
-    const uint32_t k = n - at < step ? n - at : step;
+  for (uint32_t at = 0, k; at < n; at += k) {
+    if (big) {  // a big batch when none of its rows is scored (row r predicts token at + r + 1)
+      const uint32_t kb = n - at < big ? n - at : big;
+      bool any = false;
+      for (uint32_t r = 0; r < kb && at + r + 1 < n && !any; r++) any = mask[at + r + 1] != 0;
+      if (!any) {
+        if (!forward_batch(f, ss.data(), ids.data() + at, kb, ferr))
+          std::fprintf(stderr, "step at %u: %s\n", at, ferr), std::_Exit(1);
+        k = kb;
+        std::printf("  %u of %u tokens, %u scored\n", at + k, n, scored);
+        std::fflush(stdout);
+        continue;
+      }
+    }
+    k = n - at < step ? n - at : step;
     if (!forward_batch(f, ss.data(), ids.data() + at, k, ferr))
       std::fprintf(stderr, "step at %u: %s\n", at, ferr), std::_Exit(1);
     CHECK(forward_logit_rows(f) == k);  // every row of the step kept
