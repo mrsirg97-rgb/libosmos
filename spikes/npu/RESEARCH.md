@@ -325,3 +325,11 @@ mm_f32.h now has the odd sub-tile tail (both kernels' NR 24). with IQ2_XXS: gate
 array) - accepted. a launch alone 923 / 942 us; alternating every launch 3,588 / 3,621 (a switch ~2.7 ms); in layers
 of 20 launches each, alternating 1,068 a launch. the engine switches at most once a layer (~50 parts, ~50 ms): ~5%.
 one xclbin with both decoders (a format argument) would take that away - later.
+
+## DeepSeek's down on the NPU (2026-11-12; fused_ds.py KIND=down, the kernels' WHOLEK)
+K 2304 -> N 5120: a row's 9 blocks are no whole 4-byte words (IQ2_XXS 594 bytes, IQ1_S 450), a core's 16 rows are -
+so a core's W tile is its 16 rows whole, read once a pass (the column's 64 rows contiguous), block s decoded at K-step
+s; 10 passes of 32 x 16 rows. IQ2_XXS blk.5 expert 0: **549 us, 5.50 TFLOP/s**, corr 0.999978, worst 8.2e-3; IQ1_S
+blk.0: **560 us, 5.39**, corr 0.999983, worst 7.1e-3. A is read again each pass (10 x 332 KB a column); held in the
+memtile it would not be - later. UD-IQ1_M on the NPU now: gate/up 38 of 40 layers, down 20 of 40 (IQ2_XS's 10 and
+IQ2_S's 10 left, and IQ2_XS's two gate/up).

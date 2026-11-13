@@ -483,7 +483,11 @@ extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict 
   float *ch = c + half * (64 * NR);
   if (kstep == 0 && kh == 0)
     for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
+#ifdef WHOLEK
+  if (piece == 0) decode_tile3(w + 66 * kstep); // the rows whole (fused_ds.py KIND=down): K-step s their block s
+#else
   if (piece == 0) decode_tile3(w + (BB == 132 ? 66 * (kstep & 1) : 0)); // a pair tile: odd K-steps its second block
+#endif
   mm_f32acc<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)(Bm + kh * (NR * 128 * 9 / 8)), ch);
 }
 #endif
