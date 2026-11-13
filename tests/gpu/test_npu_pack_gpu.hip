@@ -1,8 +1,9 @@
 // the NPU's GPU side (kernels/npu_pack.hip) against host references written from npu_pack.h's contract: the A stream's
 // bytes for random rows and the cases its rounding turns on (zeros, -0, subnormals, a mantissa that rounds to 128 -
-// the exponent raised, -128, a block 32 binades wide, pad rows), parts of two kinds (gate + up's K 5120, the down's
-// 2304); and the unpack for both kernels' C layouts (gate + up: two matrices, 24 rows a core a pass; the down: one, 16)
-// - every value where its part's rows say, every other row untouched. needs a GPU; skipped (77) without one.
+// the exponent raised, -128, a block 32 binades wide, pad rows), parts of DeepSeek's kinds (gate + up's K 5120, the
+// down's 2304) from f32, and Qwen's down's (K 640 in K halves) from f16 rows; and Qwen's part selection (its tables'
+// whole 128-token entries, in order, their counts zeroed, each's weights, offsets, rows and slots). needs a GPU;
+// skipped (77) without one.
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -62,7 +63,8 @@ static void block_ref(const float* v, uint8_t out[9]) {
 
 // part p's A stream, as npu_pack.h lays it: [K-step][64-row half][K half] pieces of 64 x 128, each 8 x 8 sub-tiles in
 // raster order, a sub-tile's 8 rows of one block
-static std::vector<uint8_t> pack_ref(const std::vector<float>& x, uint32_t K, const std::vector<int32_t>& tok, uint32_t parts) {
+static std::vector<uint8_t> pack_ref(const std::vector<float>& x, uint32_t K, const std::vector<int32_t>& tok, uint32_t parts,
+                                     bool halves = false) {
   std::vector<uint8_t> a(parts * npu_a_bytes(K));
   const uint64_t piece = 64 * 128 * 9 / 8;
   for (uint32_t p = 0; p < parts; p++)
@@ -72,7 +74,8 @@ static std::vector<uint8_t> pack_ref(const std::vector<float>& x, uint32_t K, co
         const int32_t row = tok[p * NPU_TOKENS + m];
         for (int j = 0; j < 8; j++) v[j] = row < 0 ? 0.0f : x[(uint64_t) row * K + kb * 8 + j];
         const uint32_t s = kb / 32, kq = kb % 32 / 16, sx = kb % 16, h = m / 64, sy = m % 64 / 8, i = m % 8;
-        block_ref(v, &a[p * npu_a_bytes(K) + ((s * 2 + h) * 2 + kq) * piece + ((sy * 16 + sx) * 8 + i) * 9]);
+        const uint32_t pc = halves ? (kb / 16) * 2 + h : (s * 2 + h) * 2 + kq;
+        block_ref(v, &a[p * npu_a_bytes(K) + pc * piece + ((sy * 16 + sx) * 8 + i) * 9]);
       }
   return a;
 }
@@ -108,46 +111,67 @@ static void pack_case(uint32_t K, uint32_t rows, uint32_t parts) {
   (void) hipFree(dx), (void) hipFree(dt), (void) hipFree(da);
 }
 
-// C as the kernels write it: [matrix][pass][core][half][row octet][column octet][8 m + n], f32, nr rows a core a pass
-static uint64_t c_index(uint32_t N, uint32_t nr, uint32_t mats, uint32_t p, uint32_t mat, uint32_t m, uint32_t n) {
-  const uint32_t P = N / (NPU_CORES * nr), ps = n / (NPU_CORES * nr), core = n % (NPU_CORES * nr) / nr, nn = n % nr;
-  return (uint64_t) p * npu_c_floats(N, mats) +
-         ((((((uint64_t) mat * P + ps) * NPU_CORES + core) * 2 + m / 64) * 8 + m % 64 / 8) * (nr / 8) + nn / 8) * 64 +
-         m % 8 * 8 + nn % 8;
+// Qwen's down's input: f16 rows (the swiglu's x16 slots), packed in K halves - against the same reference, its values
+// the f16's
+static void pack16_case(uint32_t K, uint32_t rows, uint32_t parts) {
+  std::vector<_Float16> x16((size_t) rows * K);
+  std::vector<float> x((size_t) rows * K);
+  for (size_t i = 0; i < x.size(); i++) x16[i] = (_Float16) (rnd() * 4), x[i] = (float) x16[i];
+  std::vector<int32_t> slot(parts * NPU_TOKENS);
+  for (uint32_t t = 0; t < slot.size(); t++) slot[t] = (int32_t) (next() % rows);
+  _Float16* dx = dev_of(x16);
+  int32_t* ds = dev_of(slot);
+  uint8_t* da;
+  CHECK(hipMalloc(&da, parts * npu_a_bytes(K)) == hipSuccess);
+  CHECK(npu_pack_a_x16(dx, K, ds, parts, true, da, nullptr) && hipDeviceSynchronize() == hipSuccess);
+  const std::vector<uint8_t> got = host_of(da, parts * npu_a_bytes(K)), want = pack_ref(x, K, slot, parts, true);
+  size_t diff = 0;
+  for (size_t i = 0; i < got.size(); i++) diff += got[i] != want[i];
+  std::printf("pack f16 K %u in halves, %u parts: %zu of %zu bytes differ\n", K, parts, diff, got.size());
+  CHECK(diff == 0);
+  (void) hipFree(dx), (void) hipFree(ds), (void) hipFree(da);
 }
 
-static void unpack_case(uint32_t N, uint32_t nr, uint32_t mats, uint32_t parts) {
-  const uint64_t cf = npu_c_floats(N, mats);
-  std::vector<float> c(parts * cf);
-  for (auto& v : c) v = rnd();
-  std::vector<uint32_t> row0(parts);
-  const uint32_t rows = (parts + 2) * NPU_TOKENS;
-  for (uint32_t p = 0; p < parts; p++) row0[p] = (parts - 1 - p) * NPU_TOKENS + 64;  // apart, out of order
-  const float sentinel = -7.25f;
-  std::vector<float> y0((size_t) rows * N, sentinel), y1 = y0;
-  float *dc = dev_of(c), *dy0 = dev_of(y0), *dy1 = dev_of(y1);
-  uint32_t* dr = dev_of(row0);
-  CHECK(npu_unpack_c(dc, N, nr, mats, parts, dr, dy0, mats > 1 ? dy1 : nullptr, nullptr) && hipDeviceSynchronize() == hipSuccess);
-  const std::vector<float> g0 = host_of(dy0, y0.size()), g1 = host_of(dy1, y1.size());
-  std::vector<bool> theirs(rows, false);
-  size_t bad = 0;
-  for (uint32_t p = 0; p < parts; p++)
-    for (uint32_t m = 0; m < NPU_TOKENS; m++) {
-      theirs[row0[p] + m] = true;
-      for (uint32_t mat = 0; mat < mats; mat++)
-        for (uint32_t n = 0; n < N; n++)
-          bad += (mat ? g1 : g0)[(uint64_t) (row0[p] + m) * N + n] != c[c_index(N, nr, mats, p, mat, m, n)];
-    }
-  size_t touched = 0;
-  for (uint32_t r = 0; r < rows; r++)
-    if (!theirs[r])
-      for (uint32_t n = 0; n < N; n++) touched += g0[(uint64_t) r * N + n] != sentinel || g1[(uint64_t) r * N + n] != sentinel;
-  if (mats == 1)
-    for (float v : g1) touched += v != sentinel;
-  std::printf("unpack N %u, %u rows a core, %u matrices, %u parts: %zu values wrong, %zu outside the parts touched\n", N,
-              nr, mats, parts, bad, touched);
-  CHECK(bad == 0 && touched == 0);
-  (void) hipFree(dc), (void) hipFree(dy0), (void) hipFree(dy1), (void) hipFree(dr);
+// Qwen's selection over a table of entries whose 128-token run is [first, first + count)
+static void select_case() {
+  const uint32_t entries = 40, first = 25, count = 12, D = 64, ff = 32, want = 3;
+  std::vector<int32_t> cnt(entries, 16);
+  const int32_t run[12] = {128, 90, 128, 128, 0, 128, 128, 64, 128, 1, 128, 128};  // whole: 25, 27, 28, 30, ..
+  for (uint32_t i = 0; i < count; i++) cnt[first + i] = run[i];
+  cnt[3] = 128;                                                                    // whole, but not in the run
+  std::vector<uintptr_t> ptr(3 * entries);
+  std::vector<uint32_t> xg(entries), yg(entries), xd(entries), yd(entries);
+  for (uint32_t e = 0; e < entries; e++) {
+    for (uint32_t k = 0; k < 3; k++) ptr[k * entries + e] = 0x1000 * (k + 1) + e;
+    xg[e] = e * 128 * D, yg[e] = e * 128 * ff + 7, xd[e] = e * 128 * ff, yd[e] = e * 128 * D + 3;
+  }
+  std::vector<int32_t> gidx(entries * 128);
+  for (size_t i = 0; i < gidx.size(); i++) gidx[i] = (int32_t) (i * 7 % 1000);
+  int32_t *dc = dev_of(cnt), *dg = dev_of(gidx), *dt, *ds;
+  uintptr_t* dp = dev_of(ptr);
+  uint32_t *dxg = dev_of(xg), *dyg = dev_of(yg), *dxd = dev_of(xd), *dyd = dev_of(yd), *dn;
+  NpuPart* dsel;
+  CHECK(hipMalloc(&dt, want * 128 * 4) == hipSuccess && hipMalloc(&ds, want * 128 * 4) == hipSuccess &&
+        hipMalloc(&dsel, NPU_SELECT_MAX * sizeof(NpuPart)) == hipSuccess && hipMalloc(&dn, 4) == hipSuccess);
+  CHECK(npu_select_q4x(dc, first, count, want, (const void* const*) dp, entries, dxg, dyg, dxd, dyd, dg, D, ff, dsel, dn,
+                       dt, ds, nullptr) && hipDeviceSynchronize() == hipSuccess);
+  const std::vector<int32_t> c2 = host_of(dc, entries), t2 = host_of(dt, want * 128), s2 = host_of(ds, want * 128);
+  const std::vector<NpuPart> sel = host_of(dsel, want);
+  const std::vector<uint32_t> n = host_of(dn, 1);
+  const uint32_t taken[3] = {25, 27, 28};
+  CHECK(n[0] == 3);
+  for (uint32_t p = 0; p < 3; p++) {
+    const uint32_t e = taken[p];
+    CHECK(c2[e] == 0 && (uintptr_t) sel[p].gate == 0x1000 + e && (uintptr_t) sel[p].up == 0x2000 + e &&
+          (uintptr_t) sel[p].down == 0x3000 + e && sel[p].yg == yg[e] && sel[p].yd == yd[e]);
+    for (uint32_t t = 0; t < 128; t++)
+      CHECK(t2[p * 128 + t] == gidx[e * 128 + t] && s2[p * 128 + t] == (int32_t) (e * 128 + t));
+  }
+  for (uint32_t e = 0; e < entries; e++)  // every other entry's count as it was
+    CHECK(e == 25 || e == 27 || e == 28 || c2[e] == cnt[e]);
+  std::printf("select: entries 25, 27, 28 of the run's whole ones (in order, %u wanted), their counts zeroed alone\n", want);
+  (void) hipFree(dc), (void) hipFree(dg), (void) hipFree(dt), (void) hipFree(ds), (void) hipFree(dp), (void) hipFree(dsel);
+  (void) hipFree(dxg), (void) hipFree(dyg), (void) hipFree(dxd), (void) hipFree(dyd), (void) hipFree(dn);
 }
 
 int main() {
@@ -155,12 +179,12 @@ int main() {
   if (hipGetDeviceCount(&n) != hipSuccess || n == 0) return std::printf("no GPU: skipped\n"), 77;
   pack_case(5120, 300, 3);  // gate + up's input
   pack_case(2304, 300, 2);  // the down's
-  unpack_case(2304, 24, 2, 3);  // gate + up
-  unpack_case(5120, 16, 1, 2);  // the down
-  // what the kernels refuse: a K not whole K-steps, an N not whole passes
-  CHECK(!npu_pack_a(nullptr, 5000, nullptr, 1, nullptr, nullptr));
-  CHECK(!npu_unpack_c(nullptr, 2300, 24, 2, 1, nullptr, nullptr, nullptr, nullptr));
-  CHECK(!npu_unpack_c(nullptr, 5120, 12, 1, 1, nullptr, nullptr, nullptr, nullptr));
+  pack16_case(640, 300, 2);  // Qwen's down's, in K halves
+  select_case();
+  CHECK(!npu_pack_a(nullptr, 5000, nullptr, 1, nullptr, nullptr));     // a K not whole K-steps
+  CHECK(!npu_pack_a_x16(nullptr, 600, nullptr, 1, true, nullptr, nullptr));
+  CHECK(!npu_select_q4x(nullptr, 0, 0, NPU_SELECT_MAX + 1, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, 1, 1,
+                        nullptr, nullptr, nullptr, nullptr, nullptr));  // more parts than the most
   std::printf("ok\n");
   return 0;
 }
