@@ -32,7 +32,8 @@ typedef struct NpuStats
 
 bool npu_built(void);
 
-/* the kernels from dir, a subdirectory a format and kind (iq2xxs/, iq1s/ gate + up; iq2xxs-down/, iq1s-down/: each
+/* the kernels from dir, a subdirectory a format and kind (iq2xxs/, iq1s/, iq2xs/ gate + up; iq2xxs-down/, iq1s-down/,
+   iq2xs-down/, iq2s-down/: each
    final.xclbin, insts.bin - its own hardware context, all live at once; going from one to another ~2.7 ms), for an
    expert of D -> FF -> D; A and C for at most max_parts parts of either kind (hipMalloc'd, their dma-bufs the NPU's).
    none found: NULL */

@@ -22,7 +22,9 @@ HERE = os.path.dirname(os.path.abspath(__file__)); KD = os.path.expanduser('~/Pr
 COLS, ROWS, H = 8, 4, 2                   # columns, cores a column, A's 64-row halves
 FMT = os.environ.get('FMT', 'iq2xxs')     # the experts' format: IQ2_XXS (66-byte blocks) or IQ1_S (50)
 QT, BB, SRC, FLAGS = {'iq2xxs': ('IQ2_XXS', 66, 'fused_iq2xxs.cc', ['-DFUSED_V=6']),
-                      'iq1s': ('IQ1_S', 50, 'fused_iq1s.cc', ['-DIQ1_V=5'])}[FMT]
+                      'iq1s': ('IQ1_S', 50, 'fused_iq1s.cc', ['-DIQ1_V=5']),
+                      'iq2xs': ('IQ2_XS', 74, 'fused_iq2xs.cc', []),
+                      'iq2s': ('IQ2_S', 82, 'fused_qwen.cc', ['-DQFMT=3'])}[FMT]  # its grid packed (2 KB)
 # gateup: gate and up (K 5120 -> N 2304), a W tile a K-step pair (two blocks a row: 4-byte words) for 24 rows, 3
 # passes. down: K 2304 -> N 5120 - a row's 9 blocks are no whole words (594 bytes), a core's 16 rows are: its W tile
 # those rows whole, once a pass, a block decoded a K-step; 10 passes

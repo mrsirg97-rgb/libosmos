@@ -25,16 +25,21 @@ constexpr int NR = NROWS;
 #endif
 #if QFMT == 0
 #include "iq4nl_lut.h"
-constexpr int RB = 8 * 18; // a row's K-step: 8 blocks of 32
+constexpr int BLK = 8 * 18; // a K-step's bytes a row: 8 blocks of 32
 #elif QFMT == 1
 #include "iq3xxs_tables.h"
-constexpr int RB = 98;
+constexpr int BLK = 98;
 #elif QFMT == 2
 #include "iq2s_tables.h"
-constexpr int RB = 82;
+constexpr int BLK = 82;
 #else
 #include "iq2s_grid2.h" // QFMT 3 / 4: IQ2_S with its grid packed (2 KB)
-constexpr int RB = 82;
+constexpr int BLK = 82;
+#endif
+#ifdef ROWSTRIDE /* a W tile row's bytes (fused_ds.py): a K-step pair 2 BLK, or a row whole (WHOLEK) */
+constexpr int RB = ROWSTRIDE;
+#else
+constexpr int RB = BLK;
 #endif
 
 alignas(64) static uint8_t Bm[NR * 256 * 9 / 8];
@@ -308,6 +313,10 @@ extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict 
   float *ch = c + half * (64 * NR);
   if (kstep == 0 && kh == 0)
     for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
-  if (piece == 0) decode_tile(w);
+#ifdef WHOLEK
+  if (piece == 0) decode_tile(w + BLK * kstep); // the rows whole (fused_ds.py KIND=down): K-step s their block s
+#else
+  if (piece == 0) decode_tile(w + (RB == 2 * BLK ? BLK * (kstep & 1) : 0)); // a pair tile: odd K-steps its second
+#endif
   mm_f32acc<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)(Bm + kh * (NR * 128 * 9 / 8)), ch);
 }

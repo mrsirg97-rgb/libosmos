@@ -79,8 +79,10 @@ static const struct {
   const char* sub;
   NpuKind kind;
   uint32_t qtype;
-} kFormats[] = {{"iq2xxs", NPU_GATE_UP, 16}, {"iq1s", NPU_GATE_UP, 19},  // GGUF's IQ2_XXS, IQ1_S
-                {"iq2xxs-down", NPU_DOWN, 16}, {"iq1s-down", NPU_DOWN, 19}};
+} kFormats[] = {  // GGUF's IQ2_XXS 16, IQ2_XS 17, IQ1_S 19, IQ2_S 22 (UD-IQ1_M's experts, every one)
+    {"iq2xxs", NPU_GATE_UP, 16},      {"iq1s", NPU_GATE_UP, 19},      {"iq2xs", NPU_GATE_UP, 17},
+    {"iq2xxs-down", NPU_DOWN, 16},    {"iq1s-down", NPU_DOWN, 19},    {"iq2xs-down", NPU_DOWN, 17},
+    {"iq2s-down", NPU_DOWN, 22}};
 
 extern "C" Npu* npu_open(const char* dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[NPU_ERR]) {
   Npu* n = nullptr;

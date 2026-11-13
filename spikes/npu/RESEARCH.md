@@ -333,3 +333,17 @@ s; 10 passes of 32 x 16 rows. IQ2_XXS blk.5 expert 0: **549 us, 5.50 TFLOP/s**, 
 blk.0: **560 us, 5.39**, corr 0.999983, worst 7.1e-3. A is read again each pass (10 x 332 KB a column); held in the
 memtile it would not be - later. UD-IQ1_M on the NPU now: gate/up 38 of 40 layers, down 20 of 40 (IQ2_XS's 10 and
 IQ2_S's 10 left, and IQ2_XS's two gate/up).
+
+## every UD-IQ1_M expert matrix on the NPU (2026-11-12, fused_ds.py)
+| format, kind | us a part | TFLOP/s | corr | worst |
+| --- | --- | --- | --- | --- |
+| IQ2_XXS gate + up | 860-901 | 6.70-7.02 | 0.999977 | 7.8e-3 |
+| IQ1_S gate + up | 914 | 6.61 | 0.999982 | 7.8e-3 |
+| IQ2_XS gate + up (fused_iq2xs.cc, new) | 1,330 | 4.54 | 0.999979 | 8.6e-3 |
+| IQ2_XXS down | 549 | 5.50 | 0.999978 | 8.2e-3 |
+| IQ1_S down | 560 | 5.39 | 0.999983 | 7.1e-3 |
+| IQ2_XS down | 655 | 4.61 | 0.999979 | 8.1e-3 |
+| IQ2_S down (fused_qwen.cc QFMT 3, its grid packed) | 1,042 | 2.90 | 0.999979 | 7.9e-3 |
+fused_iq2xs.cc: as IQ2_XXS's v6 - the grid as bf16 (512 rows, 8 KB), the 7-bit sign fields (bits 9, 25 of a group's
+two words a row) to sign bytes by parity in vectors, a group's two scales two vectors; right on its first build.
+fused_qwen.cc takes ROWSTRIDE / WHOLEK (its per-format BLK). gate/up 40 of 40 layers, down 40 of 40.
