@@ -122,7 +122,7 @@ bool fwd_npu_run(Forward *f, int l, uint32_t parts, hipEvent_t packed, char *err
 
 bool fwd_npu_unpack(Forward *f, uint32_t parts)
 {
-  return npu_unpack_c(npu_c(f->npu), f->g->expert_ff, parts, f->npu_row, f->b.ga, f->b.upr, NULL);
+  return npu_unpack_c(npu_c(f->npu), f->g->expert_ff, NPU_GATE_UP_ROWS, 2, parts, f->npu_row, f->b.ga, f->b.upr, NULL);
 }
 
 void forward_npu_stats(const Forward *f, uint64_t *layers, uint64_t *parts, double *wait_us)

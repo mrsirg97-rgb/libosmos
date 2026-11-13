@@ -51,16 +51,18 @@ __global__ void pack_kernel(const float* x, uint32_t K, const int32_t* tok, uint
 }
 
 // a thread a value: part p, matrix mat, token m, column n
-__global__ void unpack_kernel(const float* c, uint32_t N, uint32_t parts, const uint32_t* row0, float* g, float* u) {
+__global__ void unpack_kernel(const float* c, uint32_t N, uint32_t nr, uint32_t mats, uint32_t parts,
+                              const uint32_t* row0, float* y0, float* y1) {
   const uint64_t id = blockIdx.x * (uint64_t) kThreads + threadIdx.x;
-  if (id >= (uint64_t) parts * 2 * NPU_TOKENS * N) return;
-  const uint32_t n = (uint32_t) (id % N), m = (uint32_t) (id / N % NPU_TOKENS), mat = (uint32_t) (id / N / NPU_TOKENS % 2),
-                 p = (uint32_t) (id / N / NPU_TOKENS / 2);
-  const uint32_t P = N / (NPU_CORES * NPU_ROWS), ps = n / (NPU_CORES * NPU_ROWS), core = n % (NPU_CORES * NPU_ROWS) / NPU_ROWS,
-                 nn = n % NPU_ROWS, j = nn / 8, nl = nn % 8, half = m / 64, z = m % 64 / 8, ml = m % 8;
-  const float v = c[(uint64_t) p * 2 * NPU_TOKENS * N +
-                    ((((((uint64_t) mat * P + ps) * NPU_CORES + core) * 2 + half) * 8 + z) * (NPU_ROWS / 8) + j) * 64 + ml * 8 + nl];
-  (mat ? u : g)[((uint64_t) row0[p] + m) * N + n] = v;
+  if (id >= (uint64_t) parts * mats * NPU_TOKENS * N) return;
+  const uint32_t n = (uint32_t) (id % N), m = (uint32_t) (id / N % NPU_TOKENS),
+                 mat = (uint32_t) (id / N / NPU_TOKENS % mats), p = (uint32_t) (id / N / NPU_TOKENS / mats);
+  const uint32_t P = N / (NPU_CORES * nr), ps = n / (NPU_CORES * nr), core = n % (NPU_CORES * nr) / nr, nn = n % nr,
+                 half = m / 64, z = m % 64 / 8;
+  const float v = c[(uint64_t) p * mats * NPU_TOKENS * N +  /* npu_c_floats(N, mats) a part */
+                    ((((((uint64_t) mat * P + ps) * NPU_CORES + core) * 2 + half) * 8 + z) * (nr / 8) + nn / 8) * 64 +
+                    m % 8 * 8 + nn % 8];
+  (mat ? y1 : y0)[((uint64_t) row0[p] + m) * N + n] = v;
 }
 
 }  // namespace
@@ -71,9 +73,11 @@ extern "C" bool npu_pack_a(const float* x, uint32_t K, const int32_t* tok, uint3
   return ok();
 }
 
-extern "C" bool npu_unpack_c(const float* c, uint32_t N, uint32_t parts, const uint32_t* row0, float* g, float* u,
-                             void* stream) {
-  if (!parts || !N || N % (NPU_CORES * NPU_ROWS)) return false;
-  unpack_kernel<<<grid((uint64_t) parts * 2 * NPU_TOKENS * N), kThreads, 0, st(stream)>>>(c, N, parts, row0, g, u);
+extern "C" bool npu_unpack_c(const float* c, uint32_t N, uint32_t nr, uint32_t mats, uint32_t parts,
+                             const uint32_t* row0, float* y0, float* y1, void* stream) {
+  if (!parts || !nr || nr % 8 || !N || N % (NPU_CORES * nr) || (mats != 1 && mats != 2) || (mats == 2 && !y1))
+    return false;
+  unpack_kernel<<<grid((uint64_t) parts * mats * NPU_TOKENS * N), kThreads, 0, st(stream)>>>(c, N, nr, mats, parts,
+                                                                                               row0, y0, y1);
   return ok();
 }

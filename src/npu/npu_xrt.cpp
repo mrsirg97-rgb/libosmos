@@ -99,7 +99,7 @@ extern "C" Npu* npu_open(const char* dir, uint32_t K, uint32_t N, uint32_t max_p
       n->kern.push_back(std::move(kn));
     }
     if (n->kern.empty()) throw std::runtime_error(std::string("no kernel in ") + dir + " (iq2xxs/, iq1s/)");
-    n->max_parts = max_parts, n->a_bytes = npu_a_bytes(K), n->c_bytes = npu_c_floats(N) * 4;
+    n->max_parts = max_parts, n->a_bytes = npu_a_bytes(K), n->c_bytes = npu_c_floats(N, 2) * 4; /* gate + up's C a part (K -> N, two matrices) */
     if (!dma(n, n->a, max_parts * n->a_bytes, err) || !dma(n, n->c, max_parts * n->c_bytes, err)) return npu_close(n), nullptr;
     n->runs.reserve(max_parts);
     return n;

@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
     xrt::bo whole(dev, m, region, xrt::bo::flags::host_only, k.group_id(3));
     xrt::bo bg(whole, wg.size(), 0), bu(whole, wu.size(), slot);
 
-    const uint64_t ab = npu_a_bytes(K), cf = npu_c_floats(N);
+    const uint64_t ab = npu_a_bytes(K), cf = npu_c_floats(N, 2);
     DmaBo A(dev, ab), C(dev, cf * 4);
     float *dx = nullptr, *dg = nullptr, *du = nullptr;
     int32_t* dtok = nullptr;
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
     // (2) the unpack: Python's floor A through the NPU, unpacked, against the Python run's gate and up
     HIP(hipMemcpy(A.d, afloor.data(), ab, hipMemcpyHostToDevice));
     run();
-    if (!npu_unpack_c((const float*)C.d, N, 1, drow, dg, du, nullptr)) throw std::runtime_error("npu_unpack_c");
+    if (!npu_unpack_c((const float*)C.d, N, 24, 2, 1, drow, dg, du, nullptr)) throw std::runtime_error("npu_unpack_c");
     std::vector<float> g((size_t)T * N), u((size_t)T * N);
     HIP(hipMemcpy(g.data(), dg, g.size() * 4, hipMemcpyDeviceToHost)), HIP(hipMemcpy(u.data(), du, u.size() * 4, hipMemcpyDeviceToHost));
     const float* gw = (const float*)got.data();
@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
       const double t1 = now_us();
       run();
       const double t2 = now_us();
-      if (!npu_unpack_c((const float*)C.d, N, 1, drow, dg, du, nullptr)) throw std::runtime_error("npu_unpack_c");
+      if (!npu_unpack_c((const float*)C.d, N, 24, 2, 1, drow, dg, du, nullptr)) throw std::runtime_error("npu_unpack_c");
       HIP(hipDeviceSynchronize());
       if (i >= 2) t.push_back(t1 - t0), t.push_back(t2 - t1), t.push_back(now_us() - t2);
     }

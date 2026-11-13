@@ -10,6 +10,8 @@
 #include <stdint.h>
 
 #define NPU_ERR 256
+#define NPU_GATE_UP_ROWS 24u /* the gate + up kernel's rows a core a pass: 2304 = 3 passes x 32 cores x 24 */
+#define NPU_DOWN_ROWS 16u    /* the down's: 5120 = 10 x 32 x 16 (its 16 rows whole, a core's tile) */
 
 typedef struct Npu Npu;
 
