@@ -3588,6 +3588,10 @@ bench's ids matched (decode is the GPU's). a check mode (the NPU's rows into scr
 layer) found it in one run: gate / up 0.99994, the down 0.01. the pack test had encoded the same wrong layout; it now
 packs mm's own. a speed A/B is no check of a prompt's bits: the KL is.
 
+**the release's numbers** (README, at performance): ~/bench/rel-070/run.sh - 0.6.10's suite (dbench, Maya's
+--bench, agent_bench.py, q4x_bench, llama-bench, apibench.py against Strata), each prompt run GPU-alone and with the
+NPU interleaved twice, and the agents and osmos-api with it once; its logs beside it.
+
 **measured away:** a packed IQ2_S grid and a vectorized index path (no gain); the token-split tiling (above); batching
 launches into one (they overlap queued); one xclbin for both kinds (a core's program 11.5-13 KB of 16, the kinds' row
 counts 24 and 16).
