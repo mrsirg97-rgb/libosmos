@@ -116,9 +116,9 @@ range is the two rounds'. Tokens a second:
 | Perplexity, 8,191 tokens | 2.4579 | 2.5006 | 2.4492 |
 | SSD read a token, plain / drafted | 0.030 / 0.044 GB | 0.007 / 0.014 GB | 0.074 / 0.095 GB |
 
-Since 0.6.9 the DeepSeek packs read prompts in 8,192-token steps, the step's buffers lent by the expert cache while
-the prompt runs (DESIGN.md, "0.6.9"): at `low-power` on UD-IQ1_M, a 64K prompt 553-586 tok/s against 471-508 in
-2,048-token steps, an 8K prompt 484-521 against 459-473, decode within 1-3%. The table above is 2,048-token steps.
+Since 0.6.10 the DeepSeek packs read prompts in 4,096-token steps in buffers of their own (DESIGN.md, "0.6.10"):
+at `low-power` on UD-IQ1_M, auto-sized, an 8K prompt 548 tok/s run after run, decode 15.0-15.1. The table above is
+2,048-token steps; this release's numbers at `performance` come with 0.7.0.
 
 The 0.6.0 table below read DeepSeek's prompts in 512-token steps, so its prompt rows are lower than these. The
 perplexities are 0.5.11's to the last digit: 0.6.x changed no DeepSeek arithmetic. The SSD row is why UD-IQ2_XXS

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.6.10]: steady DeepSeek prompts, one Qwen context, a smaller README
+## [0.6.10]: steady DeepSeek prompts, one Qwen context
 
 - **DeepSeek's prompt speed no longer swings.** On the same build, an 8K prompt ran anywhere from 420 to 559 tok/s,
   run to run. The cause was 0.6.9's lent steps: giving the expert cache's tail back to the system and allocating a
@@ -14,8 +14,6 @@
   digits measured). The separate 1M pack is gone. If you installed `qwen38-ud-iq3_xxs-1m`, install `qwen38-ud-iq3_xxs`.
 - **`qwen38-ud-q4_k_xl --abliterated`:** huihui-ai's patch made into an overlay for Q4_K_XL's own shards, as the
   UD-IQ3_XXS pack has had.
-- **The README is smaller:** the speeds of this release only, measured at AMD's `performance` profile against the
-  current Maya, Strata and llama.cpp. Earlier releases' numbers stay in this file and in `DESIGN.md`.
 - **Tools:** `tools/bench/hostbw.hip` (the GPU's bandwidth on each kind of host memory it can map),
   `q4x_layercmp.hip` (Qwen's residual a layer against llama.cpp's), `ref_vs_ref.py` (one engine's log-probabilities
   scored against another's). `llama_ref` maps its model's weights rather than copying them into pinned memory, which
