@@ -129,8 +129,28 @@ def main():
     bench = run_iters(fused_ds, wg_, wu_, at_, ct_, warmup=1, iters=5)
     if os.environ.get('DUMP'):  # the host harness's inputs and this run's output (host/ds_npu.hip: bit-identical)
         d = os.environ['DUMP']; os.makedirs(d, exist_ok=True)
-        for name, arr in (('wg', g), ('wu', u), ('a', a), ('c', ct_.numpy())):
+        for name, arr in (('wg', g), ('wu', u), ('a', a), ('c', ct_.numpy()), ('x', A)):
             np.ascontiguousarray(arr).tofile(os.path.join(d, name + '.bin'))
+        # the engine's encoding (kernels/npu_pack.hip): nearest-even, the exponent raised on a carry - its bytes,
+        # and the reference it should reach
+        def enc_even(X):
+            bl = X.reshape(X.shape[0], -1, 8)
+            e = ((bl.view(np.uint32) >> 23) & 0xFF).max(-1, keepdims=True).astype(np.int64)
+            q = np.rint(np.ldexp(bl.astype(np.float64), (133 - e)))
+            cy = (q > 127).any(-1, keepdims=True)
+            e = e + cy
+            q = np.clip(np.rint(np.ldexp(bl.astype(np.float64), (133 - e))), -128, 127).astype(np.int8)
+            out = np.empty(bl.shape[:2] + (9,), np.uint8)
+            out[..., 0] = e[..., 0].astype(np.uint8); out[..., 1:] = q.view(np.uint8)
+            return out.reshape(X.shape[0], -1)
+        ae = np.concatenate([B.shuffle(enc_even(A[h * 64:(h + 1) * 64, s * KT + q * 128:s * KT + (q + 1) * 128]), 128, 64, 128, 64).reshape(-1)
+                             for s in range(KS) for h in range(H) for q in range(2)])
+        ae.tofile(os.path.join(d, 'a_even.bin'))
+        Ae = B.quantize(A, rounding='conv_even').astype(np.float64)
+        re = np.stack([Ae @ np.concatenate([B.quantize(dequantize(raw, tt).astype(np.float32).reshape(N, K)[:, s * KT:(s + 1) * KT])
+                                            for s in range(KS)], axis=1).astype(np.float64).T for raw in (g, u)]).astype(np.float32)
+        re.tofile(os.path.join(d, 'ref_even.bin'))
+        GOT = []
     # C: [mat][pass][core i][half][z][j][8 m + n]; core i's rows of pass p: (32 p + i) 24 ..
     cf = ct_.numpy().reshape(MATS, PASSES, COLS * ROWS, H, 8, NR // 8, 8, 8)
     worst, corr = 0.0, 1.0
@@ -151,8 +171,10 @@ def main():
             print('  bad columns (n) with any:', (bad.sum(0) > 0).sum(), 'of', N, '; col counts max', bad.sum(0).max())
             worst, corr = np.inf, np.nan
             continue
+        if os.environ.get('DUMP'): GOT.append(got.copy())
         worst = max(worst, np.abs(got - refs[m]).max() / np.abs(refs[m]).max())
         corr = min(corr, np.corrcoef(got.ravel(), refs[m].ravel())[0, 1])
+    if os.environ.get('DUMP') and len(GOT) == 2: np.stack(GOT).astype(np.float32).tofile(os.path.join(os.environ['DUMP'], 'got.bin'))
     us = bench.npu.avg_us
     flop = 2 * MATS * M * K * N
     print(f"blk.{layer} expert {e}: gate + up, {M} x {K} -> {N}: corr {corr:.6f}, max err / max |C| {worst:.2e}; "
