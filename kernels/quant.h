@@ -550,6 +550,38 @@ __device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
 }
 
 
+// IQ1's values as f16: a value is dl (g + delta), g of {-1, 0, 1}, so a chunk holds three values alone - each the
+// exact F32 product (g + delta: k/8, 4 bits; dl: an f16 times an odd 1..15, 15 bits) rounded once, as decode<T> rounds
+// it. the three made once, then each value's f16 bits copied by byte permutes: a grid byte c (0x00, 0x01, 0xFF) gives
+// its half's byte offset (c << 1) & 6 - 0: g 0 (s1's low half), 2: g 1 (s1's high), 6: g -1 (s0's high) - a pair's
+// selector one permute and an or, its halves a second permute. decode<T>'s bits (test_quant_gpu), fewer VALU a value
+// (0.8.1: IQ1_S, the slowest decoder a value - 60 GB/s against IQ2_XXS's 115 - took decode_h's generic F32 path).
+// IQ1_M the same math, but no model here holds it (test_quant_gpu: no reference): it keeps the generic path until one
+// is checked
+__device__ inline h8 iq1_h(uint64_t grid, float dl, float delta) {
+  float z = mul(dl, 0.0f + delta), p = mul(dl, 1.0f + delta), m = mul(dl, -1.0f + delta);
+  asm("" : "+v"(z), "+v"(p), "+v"(m));  // decode_h's: each product, then f16 - not a fused v_fma_mixlo_f16
+  const _Float16 hz = (_Float16) z, hp = (_Float16) p, hm = (_Float16) m;
+  const uint32_t s1 = (uint32_t) __builtin_bit_cast(uint16_t, hz) | (uint32_t) __builtin_bit_cast(uint16_t, hp) << 16;
+  const uint32_t s0 = (uint32_t) __builtin_bit_cast(uint16_t, hm) << 16;
+  u4 out;
+  for (int w = 0; w < 2; w++) {
+    const uint32_t base = ((uint32_t) (grid >> (32 * w)) << 1) & 0x06060606u; /* the 4 values' byte offsets */
+    /* a pair's selector: its two offsets each twice (bytes 0, 0, 1, 1 of base), the high byte of each half +1 */
+    const uint32_t sel0 = __builtin_amdgcn_perm(0, base, 0x01010000u) | 0x01000100u;
+    const uint32_t sel1 = __builtin_amdgcn_perm(0, base, 0x03030202u) | 0x01000100u;
+    out[2 * w] = __builtin_amdgcn_perm(s0, s1, sel0), out[2 * w + 1] = __builtin_amdgcn_perm(s0, s1, sel1);
+  }
+  return __builtin_bit_cast(h8, out);
+}
+
+template <> __device__ inline h8 decode_h<kIQ1_S>(const uint8_t* b, int k) {
+  const uint32_t h = ld16(b + 34 + 2 * (k / 4));
+  const float dl = mul(f16(ld16(b)), (float) (2 * ((h >> 12) & 0x07) + 1));
+  const float delta = h & 0x8000 ? -kIq1Delta : kIq1Delta;
+  return iq1_h(kIq1sGrid[b[2 + k] | ((h >> (3 * (k % 4))) & 0x07) << 8], dl, delta);
+}
+
 template <> __device__ inline h8 decode_h<kIQ2_XXS>(const uint8_t* b, int k) {
   const uint8_t* q = b + 2 + (k / 4) * 8;
   const uint32_t aux = ld32(q + 4);
