@@ -324,16 +324,3 @@ void membrane_settle(Membrane *m)
 uint64_t membrane_clock(const Membrane *m) { return m->visits; }
 
 void membrane_stats(const Membrane *m, MembraneStats *s) { *s = m->stats; }
-
-void *membrane_lend(Membrane *m, uint64_t bytes, char err[MEMBRANE_ERR])
-{
-  void *b;
-  while (!(b = pool_lend(m->pool, bytes)) && pool_reading(m->pool))
-    if (!pump(m, true, err))
-      return NULL;
-  if (!b)
-    fail(err, "the expert cache cannot lend it: a held unit at its end, or slots that do not lend");
-  return b;
-}
-
-void membrane_unlend(Membrane *m, void *mem, uint64_t bytes) { pool_unlend(m->pool, mem, bytes); }

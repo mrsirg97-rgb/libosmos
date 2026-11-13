@@ -9,7 +9,6 @@
 // CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
 // PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
 // a layer ahead: ForwardOptions' no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), OVERLAY=file (tensors standing in for the model's: weights_create_with).
-// LENT_STEPS=1 (0.6.9's lent long steps; else fixed in buffers of their own, the engine's since 0.6.10).
 // prints "window prompt|decode <start> <end> <tokens>" (epoch seconds) for each prompt read and answer: energy by
 // tools/power.py's samples in them (tools/bench/energy.py).
 // ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
@@ -200,7 +199,6 @@ int main(int argc, char** argv) {
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
   o.budget = budget;
   o.max_tokens = max_tokens;
-  o.fixed_steps = std::getenv("LENT_STEPS") == nullptr;  // the engine's (0.6.10): a long step's buffers its own; LENT_STEPS=1 0.6.9's
   g_max_tokens = max_tokens;
   std::vector<uint64_t> picks;
   if (const char* pp = std::getenv("PICKS")) {  // forward_create_ranked's counts ([layer][expert] uint64)

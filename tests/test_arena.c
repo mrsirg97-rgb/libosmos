@@ -93,34 +93,12 @@ static void test_random(void)
          STEPS, ok, refused);
 }
 
-/* a block at a chosen place: the tail's window, taken only where one free extent holds it, freed as any block */
-static void test_tail_take(void)
-{
-  uint8_t *m = mem(16 * G);
-  Arena *a = arena_create(m, 16 * G);
-  assert(arena_tail(a, 3 * G) == m + 13 * G && arena_tail(a, 2 * G + 1) == m + 13 * G && !arena_tail(a, 17 * G) &&
-         !arena_tail(a, 0));
-  uint8_t *x = arena_alloc(a, 4 * G), *y = arena_alloc(a, 4 * G); /* [0, 4) [4, 8) given */
-  assert(!arena_take(a, m + 6 * G, 3 * G) && !arena_take(a, m + 8 * G + 1, G) && !arena_take(a, m + 16 * G, G));
-  assert(!arena_take(a, m + 14 * G, 3 * G)); /* past the end */
-  uint8_t *t = arena_take(a, m + 13 * G, 3 * G); /* the extent's end: [8, 13) left free */
-  assert(t == m + 13 * G && arena_used(a) == 11 * G && arena_largest(a) == 5 * G && !arena_take(a, t, G));
-  uint8_t *u = arena_take(a, m + 10 * G, G); /* its middle: [8, 10) and [11, 13) free */
-  assert(u == m + 10 * G && arena_largest(a) == 2 * G && arena_alloc(a, 2 * G) == m + 8 * G);
-  assert(arena_free(a, m + 8 * G) && arena_free(a, u) && arena_free(a, t) && arena_free(a, x) && arena_free(a, y));
-  assert(arena_used(a) == 0 && arena_largest(a) == 16 * G && arena_take(a, m, 16 * G) == m && arena_free(a, m));
-  arena_destroy(a);
-  free(m);
-  printf("  tail and take: the last bytes' place; a block taken at its start, its end or its middle, never over a given one\n");
-}
-
 int main(void)
 {
   printf("[test_arena] start\n");
   test_refusals();
   test_fit_and_join();
   test_random();
-  test_tail_take();
   printf("[test_arena] ok\n");
   return 0;
 }

@@ -95,15 +95,6 @@ typedef struct Scratch
   float *gw;            /* the next layer's guessed experts' weights (hip_guess.c: the router's, unread) */
 } Scratch;
 
-/* a buffer of Scratch and its bytes (hip_forward.c's buffers) */
-typedef struct FwdBuf
-{
-  void *field;
-  uint64_t bytes;
-} FwdBuf;
-#define FWD_BUFS (sizeof(Scratch) / sizeof(void *))
-#define FWD_LEND_ALIGN 4096u /* each lent buffer's start in the block: an arena grain */
-
 /* host memory the GPU copies to and from on the stream (pinned: the copies are asynchronous). each is written only
    after the stream has passed the copy that read it last (the next routing event, or the step's end) */
 typedef struct Pinned
@@ -154,17 +145,6 @@ struct Forward
   float *freqs_win, *freqs_comp;
   Scratch b;
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
-  /* 0.6.9: a step of more than one sub-batch in the expert cache's memory (DESIGN.md, "0.6.9"): the buffers of its
-     size (not a sub-batch's) one block lent for the step (membrane_lend), the forward's own a sub-batch's */
-  bool lend_steps;                /* ForwardOptions' fixed_steps off, and more than one sub-batch a step */
-  bool lend_lost;                 /* the cache's tail not had back once: long steps a sub-batch at a time since */
-  uint32_t n_lend;                /* the buffers lent: Scratch's fields, their places in the block */
-  void **lend_field[FWD_BUFS];
-  uint64_t lend_off[FWD_BUFS], lend_bytes;
-  void *lend_own[FWD_BUFS]; /* the forward's own while the block is out */
-  void *lent;               /* the step's buffers in GPU memory of their own, while long steps have them */
-  uint8_t *lent_blk;        /* the cache's block they stand in for (its tail's pages given back) */
-  uint64_t n_lent, n_split; /* forward_lends' counts */
   /* the experts' routing, a layer's every sub-batch at once: pinned, the picks [token][slot] and the tables
      (hip_ffn.c's carve, one copy to Scratch's up); on the host, the pairs' by-expert order and places */
   int32_t *r_ids;         /* mapped and coherent: the router writes the picks here (r_ids_dev) - no copy kernel */
@@ -314,9 +294,6 @@ bool fwd_prompt_ahead(const Forward *f, int l); /* a prompt's step: its read ahe
 void fwd_guess_want(Forward *f, int l);
 /* hip_lane.c: a small step's routed experts in the matvec's order (forward_lane), into b->moe (the shared one added) */
 bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, char *err);
-/* hip_step.c: a long step's buffers given back to the cache (0.6.9) - at the next short step, and before destroy */
-void fwd_give_back(Forward *f);
-
 /* hip_cpu_lane.c: the CPU half's pool, maps and buffers (forward_lane), their end; whether a small step's unit goes to
    the CPU (not in GPU memory: neither resident nor read into the pool); a unit's parts in the mapped files */
 bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err);

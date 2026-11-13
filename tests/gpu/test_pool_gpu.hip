@@ -185,7 +185,7 @@ int main() {
     for (int e = 0; e < E; e++)
       for (int k = 0; k < 3; k++) du[e].part[k].fd = dfds[t[k]->file];
     const uint64_t room = unit_bytes * (uint64_t) E + (64u << 20);
-    HostSlots* hs = host_slots_create(room + (64u << 20), 0, err);
+    HostSlots* hs = host_slots_create(room + (64u << 20), err);
     if (!hs) std::fprintf(stderr, "host_slots_create: %s\n", err);
     CHECK(hs);
     CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
