@@ -5,3 +5,5 @@ lib/
 *.a
 .oracle-venv/
 __pycache__/
+# raw NPU event traces (fused32.py TRACE=bytes): regenerable, 10+ MB; RESEARCH.md keeps the findings
+spikes/**/trace/
