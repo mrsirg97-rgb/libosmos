@@ -49,7 +49,11 @@ typedef struct OsmosOptions
   uint64_t fill;        /* the system's RAM a sizing leaves free, bytes (osmos-serve's --fill; 0: all of it the cache's) */
   bool stream_ngram;    /* Qwen's n-gram table read from its file a step at a time, not held in GPU memory (DeepSeek's
                            Engram always is) */
+  const char *npu;      /* 0.7.0: the NPU's kernels' directory (forward_npu), or NULL: the GPU alone */
+  float npu_share;      /* its share of a prompt step's layer's pairs: 0 the default (OSMOS_NPU_SHARE) */
 } OsmosOptions;
+
+#define OSMOS_NPU_SHARE 0.15f /* the NPU's default share: its best measured (DESIGN.md, "0.7.0") */
 
 /* the counters a bench and the server's stats read: zeros where a family has none */
 typedef struct OsmosStats
