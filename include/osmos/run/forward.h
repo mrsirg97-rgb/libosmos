@@ -3,7 +3,8 @@
 
 #include <stdbool.h>
 
-#define SEQ_STATE_VERSION 1 /* seq_save's format: raised when it changes (forward_identity has it) */
+#define SEQ_STATE_VERSION 2 /* seq_save's format or meaning: raised when it changes (forward_identity has it). 2 (0.7.1):
+                               a kept state is a prompt's alone - 1's held decoded answers, not taken back */
 #include <stdint.h>
 
 #include "osmos/gpu/mm.h"
@@ -55,6 +56,7 @@ uint64_t seq_state_bytes(const Seq *s);
 bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR]);
 bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[FORWARD_ERR]);
 bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FORWARD_ERR]);
+void forward_reading(Forward *f, bool on);
 bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]);
 void forward_npu_stats(const Forward *f, uint64_t *calls, uint64_t *parts, double *wait_us, double *gpu_idle_ms,
                        uint64_t *gpu_outlasted);
@@ -187,6 +189,11 @@ forward_npu
   forward_npu_stats: its calls (a layer's gate + up or down each), launches and the host's time waiting on them so
   far; the GPU's time idle waiting for the NPU (all but the last call's), and the calls the GPU's own rows outlasted
   the NPU's (zeros when off).
+
+forward_reading
+  on: the steps after it a prompt's read - each the large steps' math at any size (mm's routed experts, not the
+  lane's int8 ones), so a prompt read in pieces from any point is the bits of one read whole; off: a step under
+  n_experts / n_used tokens the lane's again (decode, a draft's verify). osmos_read sets it around its batch.
 
 forward_lane
   a decode's mode: a step that picks fewer experts than a layer has (a decode's, a verify's) takes its routed experts

@@ -177,6 +177,7 @@ struct Forward
   uint64_t ahead_limit; /* ForwardOptions': the membrane's bound on reads ahead in flight */
   uint32_t logit_rows;  /* ForwardOptions': a step's last rows whose logits are kept (0: every row) */
   bool lane;
+  bool reading; /* forward_reading: a prompt's read - its steps the large steps' math whatever their size (0.7.1) */
   int lane_threads;
   uint8_t *lane_up;
   void *lane_dev; /* lane_up's device address (mapped: the kernels read the tables where the host wrote them) */
@@ -256,6 +257,14 @@ struct Seq
   float *pend_kvc[WEIGHTS_MAX_LAYERS], *pend_sc[WEIGHTS_MAX_LAYERS];
   uint8_t *dring; /* a drafter's rings, [block][window] KV_FP8 rows (drafter_seed's; NULL until then) */
 };
+
+/* a small step's routed experts the lane's (int8, the matvec's order): a step of `picks` under n_experts, the lane
+   set, and not a prompt's read - which takes the large steps' (mm's) math at any size, so a prompt's bits are its
+   own however it is split and wherever its read began (0.7.1: a short read after a reused prefix took the lane's) */
+static inline bool fwd_small(const Forward *f, uint32_t picks)
+{
+  return f->lane && !f->reading && picks < (uint32_t)f->g->n_experts;
+}
 
 /* a resident tensor's bytes as the GPU reads them (its copy in the resident set) */
 static inline const uint8_t *fwd_dev(const Forward *f, const GgufTensor *t)

@@ -35,6 +35,12 @@ typedef struct Conv
 {
   OsmosSeq *s;
   Ids held; /* the tokens the sequence holds: oseq_position(s) of them */
+  /* a family that reads apart (osmos_reads_apart: DeepSeek): the state at its last prompt's end, held.v's first
+     snap_n tokens - a turn's earlier answer (decoded, not a prompt's bits) read again from it, never continued on, so
+     a turn's answer the bits of its prompt read whole (0.7.1). snap_n 0: none */
+  void *snap;
+  uint64_t snap_bytes, snap_cap;
+  uint32_t snap_n;
   char err[OSMOS_ERR];
 } Conv;
 
@@ -61,7 +67,7 @@ void conv_destroy(Conv *c);
 bool conv_restart(Conv *c, const Server *sv);
 void conv_failed(Conv *c, const Server *sv);
 void conv_set_aside(Conv *c, const Server *sv);
-uint32_t conv_reach(const Conv *c, const int32_t *p, uint32_t n);
+uint32_t conv_reach(const Conv *c, const Server *sv, const int32_t *p, uint32_t n);
 bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n);
 bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t n, bool seed);
 
@@ -73,14 +79,19 @@ int serve_multi(Server *sv, Conv *lanes, int n);
 /*
 conv_reach
   what the conversation would reuse of prompt p (n tokens, one left to read): its tokens when they are a prefix of
-  p[0 .. n - 1), or their common part when the rest is within the sequence's rollback reach (oseq_reach); else 0.
+  p[0 .. n - 1), or their common part when the rest is within the sequence's rollback reach (oseq_reach); else 0. a
+  family that reads apart (osmos_reads_apart) counts its tokens to its last prompt's end alone (the snapshot's).
 
 conv_continue
   the conversation made a prefix of p: continued, rolled back to the common part, or set aside and the longest kept
-  conversation p continues taken back (else emptied). held.n: the tokens reused.
+  conversation p continues taken back (else emptied). held.n: the tokens reused. a family that reads apart first goes
+  back to its last prompt's end (its snapshot, or nothing): a turn's earlier answer read again as the prompt's, so
+  the answer is the bits of its prompt read whole, whatever came before it (0.7.1). conv_set_aside the same: what
+  the slots keep a prompt's state, never a decoded answer's.
 
 conv_read
-  k tokens of p (from held.n) through one osmos_batch, into the sequence and held: the step's logits theirs; with
+  k tokens of p (from held.n) through one osmos_read, into the sequence and held: the step's logits theirs; at the
+  prompt's end (held.n == n) the state kept as the conversation's snapshot (a family that reads apart); with
   seed, the drafter's rings seeded from the step - the piece's part of the prompt's last window (n - window .. n - 1,
   n the prompt's tokens): the positions a step taps past the decoder's compaction are those near the prompt's end,
   and a later piece's step would not hold an earlier piece's.

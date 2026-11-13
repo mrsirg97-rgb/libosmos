@@ -34,6 +34,8 @@ typedef struct OsmosFamily
   bool (*draft_all)(void *eng, OsmosSeq *const *seqs, const int32_t *y, uint32_t n, float conf_min, float cum_min,
                     int32_t (*drafts)[OSMOS_MAX_BLOCK], float (*conf)[OSMOS_MAX_BLOCK], int *counts,
                     char err[OSMOS_ERR]);
+  /* a prompt's read (osmos_read), or NULL: the family's batch, its prompt and decode steps one math (Qwen's) */
+  bool (*read)(void *eng, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
 } OsmosFamily;
 
 /* a sequence's family half (a family's batch reads its sequences' through it) */

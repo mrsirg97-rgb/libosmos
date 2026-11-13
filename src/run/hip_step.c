@@ -98,7 +98,7 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
      them; not with a probe, which may stand the oracle's in) */
   f->xf_x16 = f->n_sub == 1 && !f->probe;
   /* and, a lane's small step over int8 experts: its int8 too (the lane's q8_round of xf, in this launch) */
-  f->xf_q8 = f->xf_x16 && f->lane && n * (uint32_t)g->n_used < (uint32_t)g->n_experts && D % LANE_Q8_VALUES == 0 &&
+  f->xf_q8 = f->xf_x16 && fwd_small(f, n * (uint32_t)g->n_used) && D % LANE_Q8_VALUES == 0 &&
              lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type);
   ok = ops_hc_post_dot(b->y, b->h, b->a_post, b->a_comb, hc, D, n, b->mid, fv(f, L->hc_ffn_fn), b->hcp, NULL) &&
        ops_hc_mix_pre_rms(b->hcp, fv(f, L->hc_ffn_scale), fv(f, L->hc_ffn_base), hc, D, g->rms_eps, g->hc_eps,

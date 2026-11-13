@@ -225,7 +225,7 @@ bool fwd_moe(Forward *f, int l, char *err)
                         f->probe ? b->ridx : f->r_ids_dev, b->rw, NULL) &&
        (!f->probe ||
         hipMemcpyAsync(f->r_ids, b->ridx, P * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) == hipSuccess) &&
-       (!f->cpu || !f->lane || P >= E || /* the CPU lane's: the step's FFN inputs and weights, with the picks */
+       (!f->cpu || !fwd_small(f, P) || /* the CPU lane's: the step's FFN inputs and weights, with the picks */
         (hipMemcpyAsync(f->cpu_xf, b->xf, (uint64_t)n * D * sizeof(float), hipMemcpyDeviceToHost, NULL) ==
              hipSuccess &&
          hipMemcpyAsync(f->cpu_rw, b->rw, P * sizeof(float), hipMemcpyDeviceToHost, NULL) == hipSuccess)) &&
@@ -307,7 +307,7 @@ bool fwd_moe(Forward *f, int l, char *err)
     pidx[r] = (int32_t)m, row_of[m] = r;
   }
   prefetch(f, l, P);
-  if (f->lane && P < E) /* the lane's small step: every expert in the matvec's order (hip_lane.c) */
+  if (fwd_small(f, P)) /* the lane's small step: every expert in the matvec's order (hip_lane.c) */
   {
     if (!fwd_lane_experts(f, l, ids, P, err))
       return false;

@@ -142,6 +142,17 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
   return true;
 }
 
+/* a prompt's read: osmos_batch with the forward reading (forward_reading) - its bits a prompt's, not a decode's, at
+   any step size, so a turn continued after a reused prefix reads its rest as a fresh read reads it (0.7.1) */
+static bool e_read(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+{
+  Eng *e = p;
+  forward_reading(e->f, true);
+  const bool ok = e_batch(p, seqs, tokens, n, err);
+  forward_reading(e->f, false);
+  return ok;
+}
+
 /* the batch's row r among the rows the forward keeps (the last kept of n), or -1 */
 static int64_t kept_row(const Eng *e, uint32_t r)
 {
@@ -199,4 +210,5 @@ const OsmosFamily osmos_ds4 = {
     "deepseek41", m_open,   m_close,   e_create, e_destroy,  e_identity,    e_room,  e_stats,
     e_batch,      e_logits, e_greedy,  e_block,  s_create,   s_destroy,     s_prompt, s_rollback,
     s_reach,      s_position, s_state_bytes, s_save_to, s_load_from, s_seed,        s_draft,  NULL, /* its drafts one sequence at a time */
+    e_read, /* a prompt's read: the large steps' math at any size (forward_reading) */
 };
