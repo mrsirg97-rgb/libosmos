@@ -12,6 +12,10 @@
   the pack's `osmos.json`, puts a placeholder result ("[tool result dropped from the conversation's history - run the
   call again if its result is needed]") after each orphaned call, and the answer says so (`orphans_filled`). By
   default the prompt stays the template's render of what was sent: osmos does not rewrite a client's history.
+- **Long prompts faster past ~100K (DeepSeek)**: the indexer's candidate layers (24/28/32/36) score only the 16,384
+  rows of their candidate blocks, not every row a token sees - the scores they read the same bits, so the same
+  selections and answers. At 1M a token's indexer work 6.5M rows to 2.6M; a read to 264K 15.7 min, from 18.3. Found
+  reading #47's 1M-token trace, where osmos fell behind maya past ~300K.
 - **`kld`'s `BIG`** (tools/bench): `BIG=8192` reads a text's unscored stretches in batches of up to 8,192 tokens (the
   server's own: four sub-batches, each layer's experts read once for them), the scored rows at `step` - the same
   bits (a 24,576-token check: its dumps byte-identical), a long text with few scored windows ~1.7x faster to read.

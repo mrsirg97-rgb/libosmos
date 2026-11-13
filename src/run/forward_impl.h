@@ -92,7 +92,9 @@ typedef struct Scratch
   float *erow_f, *ekv;
   uint8_t *erow;
   int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;
-  uint32_t *cand; /* the running sub-batch's candidate bits (Sub's) */
+  uint32_t *cand;  /* the running sub-batch's candidate bits (Sub's) */
+  uint32_t *clist; /* a scored chunk's tokens' candidate blocks, listed (ops_cand_list: score_rows x cand_blocks) */
+  uint32_t *clist_n;
   int32_t *keep, *back; /* the decoder's tokens (hip_skip.c): kept, compacted; then each back at its row */
   float *gw;            /* the next layer's guessed experts' weights (hip_guess.c: the router's, unread) */
 } Scratch;

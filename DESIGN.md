@@ -1822,6 +1822,30 @@ tests (each seen to fail first, or by a mutation):
   1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
   repeated text are not the mask's test; the probes above are.
 
+## 0.7.3: the candidate layers score only their candidates (2026-11-13)
+
+issue #47's trace read a 1M-token conversation on both engines: osmos even with maya to ~300K, then slower - at 535K
+104 tok/s against maya's 163, the gap growing with the context. the indexer's work a token at position p: layers
+2/8/14 (ratio 2) p/2 rows each, layer 20 p, and the candidate layers 24/28/32/36 p each - scored whole, then masked
+to their 16,384 candidates (above: ops_topk reads a masked row's key as -inf, never its score). 6.5p rows a token, 4p
+of them thrown away; maya scores the candidate layers' candidates alone (ds4_model.cu's `uses_cand` path: the
+candidate list, cand_topk x cand_blk rows). at 1M: 6.5M rows a token against 2.6M.
+
+here: ops_cand_list turns a token's bits into its kept blocks' ids (ascending, a block a token: popcounts' prefix),
+and ops_index_score_rows is ops_index_score's kernel over them - one template, `GATHER`, a tile a token (TOK 1: a
+token's rows its own), its 64 rows 8 kept blocks', each score written at its row. a (token, head, row)'s sums are the
+plain tile's (d ascending, a multiply then an add, relu x w, the heads' 32-lane xor tree): every kept row's score the
+bits the whole scoring gives it, the rest unwritten - ops_topk reads none of them - so the selection is the same, and
+every bit after it. select_rows: a masked layer lists its chunk's tokens' blocks (from the bits as they are there,
+after the decoder's compaction gathered them) and scores those.
+
+tests: test_attn_gpu's `gathered` (a ratio-1 source of 40,000 rows, 7 tokens keeping a random 2,048 of their blocks,
+their own last always; 32 and 24 heads): the list the bits' blocks; 114,667 kept scores the whole scoring's bits,
+165,312 other rows untouched; ops_topk under the mask the same rows from either. test_cand_gpu (the forward's masks,
+aligned past the compaction) passes. end to end: the plain 1M stream to 264K, its 65K and 262K windows (4,000 rows)
+the old build's NLL and argmax bit for bit; the read 15.7 min against 18.3 (the gain the deeper the read: the
+candidate layers 16x less scoring at 262K, 64x at 1M).
+
 ## the MXFP8 Engram pack (design, 2026-11-04)
 
 the operator's: UD-IQ1_M's weights with unsloth's **MXFP8** Engram table in place of its IQ4_NL one - the table as the

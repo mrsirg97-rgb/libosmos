@@ -66,6 +66,12 @@ bool ops_index_score(const float *q, const void *keys, uint32_t keys_fmt, const 
                      uint32_t ratio,
                      uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score, uint32_t stride,
                      void *stream);
+bool ops_index_score_rows(const float *q, const void *keys, uint32_t keys_fmt, const float *w, const int32_t *pos,
+                          uint32_t ratio, const uint32_t *list, const uint32_t *n_list, uint32_t list_stride,
+                          uint32_t block, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score,
+                          uint32_t stride, void *stream);
+bool ops_cand_list(const uint32_t *bits, uint32_t words, uint32_t n_tok, uint32_t *list, uint32_t list_stride,
+                   uint32_t *n_list, void *stream);
 bool ops_topk(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t k, const uint32_t *keep,
               uint32_t block, uint32_t keep_words, uint32_t n_tok, int32_t *sel, uint32_t sel_stride, int32_t *n_sel,
               void *stream);
@@ -213,6 +219,16 @@ ops_index_score
   for each token t (its q at q + t heads head_dim, its w at w + t heads) and its visible rows c < (pos[t] + 1) / ratio
   of keys (format keys_fmt: the indexer's KV_FP4_POW2, or KV_F32): score[t stride + c] = sum over heads h of relu(q_h . keys_c) * w_h (heads at most 32, head_dim a multiple of
   16; the heads summed as a 32-lane xor tree sums them). max_n bounds the visible rows (at most stride).
+
+ops_index_score_rows (0.7.3)
+  ops_index_score over only a token's listed blocks' rows (list + t list_stride: n_list[t] block ids, each `block`
+  rows; ops_cand_list's): score[t stride + c] for each visible row c of them, the bits ops_index_score gives that row;
+  every other row's score left as it was. the candidate layers' scores (ops_topk under the same blocks' mask reads no
+  other row): 16,384 rows a token, not all it sees.
+
+ops_cand_list (0.7.3)
+  each token t's set bits of bits + t words, their indices ascending into list + t list_stride, how many into n_list[t]
+  (at most list_stride: the rest dropped - ops_cand_blocks sets topk_blocks at most).
 
 ops_topk
   for each token t: the k highest of score[t stride + 0 .. n) (n its visible rows, as ops_index_score's) - ties to
