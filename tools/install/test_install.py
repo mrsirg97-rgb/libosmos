@@ -8,6 +8,7 @@ import json
 import os
 import struct
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -552,6 +553,108 @@ class Host(unittest.TestCase):
         self.assertIn("hipcc", why)
         self.assertTrue(host.tools(False, True, which, lambda p: p == "/opt/rocm/bin/hipcc")[0])  # ROCm's own path
         self.assertTrue(host.tools(False, False, which, lambda p: False)[0])  # --no-build: no build tools
+
+
+def npu_tar(path, members=None):
+    """a kernels tarball as the release ships one: a directory a format and kind, each final.xclbin and insts.bin"""
+    with tarfile.open(path, "w") as t:
+        for name, data in (members or [("iq2xxs/final.xclbin", b"x" * 100), ("iq2xxs/insts.bin", b"i" * 40),
+                                       ("iq2xxs-down/final.xclbin", b"y" * 90), ("iq2xxs-down/insts.bin", b"j" * 30)]):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            t.addfile(info, __import__("io").BytesIO(data))
+
+
+def release(path, tag="v0.7.0"):
+    return {"release": tag, "path": os.path.basename(path), "bytes": os.path.getsize(path), "sha256": sha(path)}
+
+
+class Npu(unittest.TestCase):
+    """0.7.0's NPU: its kernels a release asset (a tag of osmos's own, pinned by bytes and SHA-256), a pack's npu the
+    tarball's id; --npu unpacks them into the pack's npu/ and osmos.json names it; the host's NPU found by its device,
+    XRT's library and its headers"""
+
+    def pack(self, d, members=None):
+        have = os.path.join(d, "have")
+        os.makedirs(have, exist_ok=True)
+        s1 = os.path.join(have, "M-00001-of-00001.gguf")
+        gguf(s1, 1, 1, b"w" * 500)
+        tar = os.path.join(have, "osmos-npu.tar")
+        npu_tar(tar, members)
+        m = {"version": 1, "rig": RIG_PIN, "files": {"s1": entry(s1), "k": release(tar)},
+             "packs": {"p": {"title": "t", "shards": ["s1"], "table": None, "picks": None, "drafter": [],
+                             "overlay": None, "npu": "k", "rig": ROW, "settings": {}},
+                       "q": {"title": "t", "shards": ["s1"], "table": None, "picks": None, "drafter": [],
+                             "overlay": None, "rig": dict(ROW, id="t2"), "settings": {}}}}
+        return m, have
+
+    def test_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            m, _ = self.pack(d)
+            manifest.check(m)
+            for change, needle in ((lambda m: m["files"]["k"].update(release="main"), "release"),  # a tag, not a branch
+                                   (lambda m: m["files"]["k"].update(repo="r/a"), "release"),     # one source, not two
+                                   (lambda m: m["packs"]["p"].update(npu="s1"), "npu"),           # a release asset
+                                   (lambda m: m["packs"]["p"].update(npu="nope"), "npu")):
+                bad = json.loads(json.dumps(m))
+                change(bad)
+                with self.assertRaises(manifest.ManifestError) as e:
+                    manifest.check(bad)
+                self.assertIn(needle, str(e.exception))
+
+    def test_laid(self):
+        with tempfile.TemporaryDirectory() as d:
+            m, have = self.pack(d)
+            models = os.path.join(d, "models")
+            out = layout.lay(m, "p", models, [have], trust_size=False, abliterated=False, fetch=None, npu=True)
+            cfg = layout.read_config(out)
+            self.assertEqual(cfg["npu"], os.path.join(models, "p", "npu"))
+            for k in ("iq2xxs", "iq2xxs-down"):
+                for f in ("final.xclbin", "insts.bin"):
+                    self.assertTrue(os.path.isfile(os.path.join(cfg["npu"], k, f)))
+            cfg = layout.read_config(layout.lay(m, "p", models, [have], trust_size=False, abliterated=False, fetch=None))
+            self.assertNotIn("npu", cfg)                                         # not asked: the GPU alone
+
+    def test_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            m, have = self.pack(d)
+            with self.assertRaises(layout.LayoutError) as e:                       # a pack without kernels
+                layout.lay(m, "q", os.path.join(d, "models"), [have], False, False, None, npu=True)
+            self.assertIn("npu", str(e.exception))
+        for members in ([("../escape", b"x")], [("/abs/x", b"x")], [("iq2xxs/../../x", b"x")]):
+            with tempfile.TemporaryDirectory() as d:
+                m, have = self.pack(d, members)
+                with self.assertRaises(layout.LayoutError):
+                    layout.lay(m, "p", os.path.join(d, "models"), [have], False, False, None, npu=True)
+                self.assertFalse(os.path.exists(os.path.join(d, "escape")))
+        with tempfile.TemporaryDirectory() as d:                                  # a link in it: refused
+            have = os.path.join(d, "have")
+            os.makedirs(have)
+            tar = os.path.join(have, "osmos-npu.tar")
+            with tarfile.open(tar, "w") as t:
+                info = tarfile.TarInfo("iq2xxs/final.xclbin")
+                info.type, info.linkname = tarfile.SYMTYPE, "/etc/passwd"
+                t.addfile(info)
+            s1 = os.path.join(have, "M-00001-of-00001.gguf")
+            gguf(s1, 1, 1, b"w" * 500)
+            m = {"version": 1, "rig": RIG_PIN, "files": {"s1": entry(s1), "k": release(tar)},
+                 "packs": {"p": {"title": "t", "shards": ["s1"], "table": None, "picks": None, "drafter": [],
+                                 "overlay": None, "npu": "k", "rig": ROW, "settings": {}}}}
+            with self.assertRaises(layout.LayoutError):
+                layout.lay(m, "p", os.path.join(d, "models"), [have], False, False, None, npu=True)
+
+    def test_host(self):
+        root = tempfile.mkdtemp()
+        accel, lib, hdr = os.path.join(root, "accel0"), os.path.join(root, "libxrt_coreutil.so.2"), os.path.join(root, "xrt_kernel.h")
+        for p in (accel, lib, hdr):
+            put(p, b"")
+        ok, why = host.npu([accel], [lib], hdr)
+        self.assertTrue(ok, why)
+        for devs, libs, h, needle in (([], [lib], hdr, "NPU"), ([accel], [], hdr, "XRT"),
+                                      ([accel], [lib], os.path.join(root, "none.h"), "libxrt-dev")):
+            ok, why = host.npu(devs, libs, h)
+            self.assertFalse(ok, why)
+            self.assertIn(needle, why)
 
 
 class Gpu(unittest.TestCase):

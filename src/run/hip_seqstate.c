@@ -48,6 +48,12 @@ uint64_t forward_identity(const Forward *f)
     h = fnv(base, strlen(base), h);
     h = fnv_u64(stat(p, &st) == 0 ? (uint64_t)st.st_size : 0, h);
   }
+  if (f->npu) /* the NPU's sums its own, its parts by its share (forward_npu): another's states */
+  {
+    uint32_t share;
+    memcpy(&share, &f->npu_share, sizeof share);
+    h = fnv_u64(0x4e50550000000000ull | share, h);
+  }
   return h;
 }
 

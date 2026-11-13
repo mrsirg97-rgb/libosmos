@@ -128,14 +128,18 @@
     "abl-qwen38-ud-q4_k_xl": {"derive": {"with": "overlay_q4x", "patch": "qwen38-abl-patch", "key": "qwen38-abl-key",
       "model": ["qwen38-q4kxl-1", "qwen38-q4kxl-2", "qwen38-q4kxl-3", "qwen38-q4kxl-4"], "mode": 2},
       "path": "qwen38-ud-q4_k_xl-abliterated-overlay.gguf", "bytes": 885725344,
-      "sha256": "615be90af566d3563255feec4c81b5393390366d2b8857c300156b7460639c2c"}
+      "sha256": "615be90af566d3563255feec4c81b5393390366d2b8857c300156b7460639c2c"},
+    "npu-ds": {"release": "v0.7.0", "path": "osmos-npu-ds-0.7.0.tar.gz", "bytes": 228814,
+                "sha256": "354efbd9a176bf66120ddeb25e5b19e95b9ed5f3bf34c2f16e5ddd7a67cf6a79"},
+    "npu-qwen": {"release": "v0.7.0", "path": "osmos-npu-qwen-0.7.0.tar.gz", "bytes": 56637,
+                "sha256": "fc5ed01443adee9b5f4579a2ddc15948af0bbf3fde48fa941cb7fc906fd48e21"}
   },
   "packs": {
     "osmos-evo-a": {
       "title": "DeepSeek-V4.1-Flash-1017 osmos-evo-A (the default): UD-IQ1_M's quality at about UD-IQ1_S's speed, 1M context", "quality": {"wiki_kld": 0.1752, "agent_kld": 0.0485},
       "shards": ["evo-a-1", "evo-a-2", "evo-a-3", "evo-a-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
-      "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m",
+      "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-evo-a", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-evo"]},
       "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
@@ -144,7 +148,7 @@
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_S (speed): 19.5 tok/s plain, 42.7 drafted, 1M context", "quality": {"wiki_kld": 0.2592, "agent_kld": 0.0664},
       "shards": ["ud-iq1_s-1", "ud-iq1_s-2", "ud-iq1_s-3", "ud-iq1_s-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
-      "picks": "picks-ud-iq1_s", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_s",
+      "picks": "picks-ud-iq1_s", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_s", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-ud-s", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-s"]},
       "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
@@ -153,7 +157,7 @@
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality): 17.6 tok/s plain, 35.1 drafted, 1M context", "quality": {"wiki_kld": 0.1895, "agent_kld": 0.0479},
       "shards": ["ud-iq1_m-1", "ud-iq1_m-2", "ud-iq1_m-3", "ud-iq1_m-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
-      "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m",
+      "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-ud-m", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-m"]},
       "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
@@ -162,7 +166,7 @@
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ2_XXS (slow, the closest to the model): 14.3 tok/s plain, 26.0 drafted, 1M context", "quality": {"wiki_kld": 0.1255, "agent_kld": 0.0361},
       "shards": ["ud-iq2_xxs-1", "ud-iq2_xxs-2", "ud-iq2_xxs-3", "ud-iq2_xxs-4", "ud-iq2_xxs-5"],
       "table": {"file": "engram-mxfp8", "slot": [6, 6]},
-      "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq2_xxs",
+      "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq2_xxs", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-ud-l", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-l"]},
       "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
@@ -170,7 +174,7 @@
     "qwen38-ud-iq3_xxs": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS: 27 tok/s plain, 46 drafted (its MTP head), 512K context",
       "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"],
-      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-iq3_xxs",
+      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-iq3_xxs", "npu": "npu-qwen",
       "rig": {"id": "qwen3.8-flash-next", "max_tokens": 65536, "reserve": 65536, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
               "aliases": ["qwen"]},
       "settings": {"max_context": 524288, "max_tokens": 4096}

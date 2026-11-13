@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.0]: the NPU beside the GPU in long prompts
+
+- **The NPU now helps with prompts, as an opt-in.** Strix Halo's NPU takes a fixed share of a prompt step's
+  routed-expert work while the GPU runs the rest: about 2.5% faster prompts on both models (8K prompt at
+  `performance`: DeepSeek UD-IQ1_M 626 -> 642.5 tok/s, Qwen UD-IQ3_XXS 930 -> 955). Decode doesn't use it. Every
+  run's output is the same, bit for bit, but NPU mode's numbers are its own: its sums round differently than the
+  GPU's. Its distance from the model, measured: DeepSeek's KL against GPU-only within the noise on wiki and the
+  agent hold-outs (UD-IQ1_M and osmos-evo-A); Qwen's KL against its own GPU run 0.002-0.004 on the hold-outs.
+- **How to turn it on:** `osmos_install.py --npu` (it checks for the NPU, XRT and its headers, builds with `NPU=1`,
+  and fetches the pack's kernels, a release asset of this tag), or `npu` / `npu_share` in osmos.json, or
+  `osmos-serve --npu <dir> [--npu-share F]`. The defaults are each model's best measured share: 0.15 for DeepSeek,
+  0.05 for Qwen. Packs: the four DeepSeek packs and `qwen38-ud-iq3_xxs`; `qwen38-ud-q4_k_xl` has no kernels yet.
+- **The kernels** decode the GGUF's own IQ1_S / IQ2_XXS / IQ2_XS / IQ2_S / IQ3_XXS / IQ4_NL blocks on the NPU's
+  cores and read the weights and activations in place (no copies between the GPU and the NPU). `tools/npu/build.sh`
+  compiles them with mlir-aie's IRON, checks each against the model's own weights, and makes the release tarballs.
+- **Tools:** `NPU=` / `NPU_SHARE=` for dbench, ppl, kld, q4x_bench, q4x_ppl and q4x_kld.
+
 ## [0.6.10]: steady DeepSeek prompts, one Qwen context
 
 - **DeepSeek's prompt speed no longer swings.** On the same build, an 8K prompt ran anywhere from 420 to 559 tok/s,

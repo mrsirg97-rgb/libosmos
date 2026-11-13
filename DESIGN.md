@@ -3539,6 +3539,63 @@ shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token)
 kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
 out), local only.
 
+### 0.7.0: the NPU beside the GPU in a prompt's routed experts (2026-11-13, performance)
+
+**what it does.** Strix Halo's NPU (XDNA2: 8 x 4 AIE2P cores) takes a fixed share of a prompt step's routed-expert
+parts - an expert's gate, up and down for 128 of the step's tokens that picked it - while the GPU runs the rest of
+the layer's. decode is the GPU's alone: bandwidth-bound, and the NPU beside a decode costs it ~12% (the memory
+shared). opt-in: `--npu <dir>` (osmos-serve), `npu` in osmos.json, `--npu` at install (the kernels a release asset a
+model: osmos-npu-ds-<ver>.tar.gz, osmos-npu-qwen-<ver>.tar.gz). the full record: spikes/npu/RESEARCH.md.
+
+**the kernels** (spikes/npu/fused/fused_ds.py; tools/npu/build.sh compiles and checks each against its model's own
+weights): the GGUF's blocks read as laid out, decoded on the cores into bf16, A (the tokens' rows) as bfp16 (blocks of
+8, a shared exponent - the engine packs it on the GPU, npu_pack_a), sums in f32. gate and up one launch; the down its
+own. formats: DeepSeek IQ2_XXS, IQ1_S, IQ2_XS gate / up; IQ2_XXS, IQ1_S, IQ2_XS, IQ2_S down. Qwen IQ3_XXS, IQ2_S gate /
+up; IQ4_NL down (its K 640 in 128-value halves). each correlates 0.99997-0.99999 with its exact product. a part costs
+0.5-1.6 ms on the NPU at DeepSeek's shapes (4-7 TFLOP/s against the GPU's ~27 on them), 0.13-0.71 at Qwen's (a
+Qwen part ~60 us on the GPU): a share past the two's balance puts the NPU on the step's critical path. what bounds the kernels:
+the A stream into each core (a no-work run as slow as a full one) - a broadcast A cut DRAM's reads; a token-split
+tiling (A once a matrix) traded it for a 4x decode and lost (2.8 ms).
+
+**zero copy.** XRT buffer objects over memory the GPU already has: the expert cache's host pages (HIP-registered,
+userptr BOs - a sub-BO a launch, 0.12 us), hipMalloc'd A and outputs (dma-buf exported, imported). the NPU writes
+its rows where the GPU reads them: ga / up before the swiglu, the down's rows before the sum. each kind's parts packed
+on the stream, an event; the host waits for that event alone, launches the NPU's parts (queued: 902 us a launch
+against 1,463 one at a time) and waits for them while the GPU runs its own; then queues what reads the NPU's rows.
+
+**which parts** - by the routing alone, so a prompt's bits are the same each run, and its own identity
+(forward / q4x identity hash the share: another share's states another forward's). DeepSeek: floor(share x pairs /
+128) parts, the experts with the most rows left first (fwd_npu_pick). Qwen's tables are built on the GPU
+(q4x_expert_tiles): npu_select_q4x takes the first whole 128-token entries of the 128-token run in table order,
+zeroes their counts (mm_group skips them) and writes the parts for the host; an IQ2_S layer's share scaled by its
+cost (742 / 420 us a part: flat, 0.10 ran 925 tok/s against 958 scaled).
+
+**measured** (8K prompt, performance, interleaved rounds, evictions checked - 0.6.10's lesson):
+
+| | GPU | share | NPU | |
+| --- | --- | --- | --- | --- |
+| DeepSeek UD-IQ1_M (dbench, 106 GiB) | 626 | 0.10 / 0.15 / 0.20 | 641 / 642.5 / 635.5 | +2.6% at 0.15 |
+| Qwen UD-IQ3_XXS (q4x_bench, 4K steps) | 929.9 | 0.05 / 0.10 / 0.15 | 954.8 / 947.1 / 919 | +2.7% at 0.05 |
+
+the defaults those (OSMOS_NPU_SHARE_DS 0.15, OSMOS_NPU_SHARE_QWEN 0.05). the distance: DeepSeek's NPU KL against its
+GPU-only run, paired (0.6.6's protocol), UD-IQ1_M wiki -0.0095 +- 0.0021, hold-outs -0.0008 .. +0.0005, osmos-evo-A
++0.0001 +- 0.0013 and -0.0001 .. +0.0011 - within the noise of another rounding. Qwen's against its own GPU run (0.6.9's
+262K references): wiki 0.0120, hold-outs 0.0024-0.0043 - a third of 0.6.9's 512K against 262K.
+
+**the bug that a bench could not see.** Qwen's down reads the swiglu's x16 - mm's tiled f16 (16 x 16 fragments,
+mm::x16_at), not rows. packed as rows, the NPU's down took the wrong values: wiki ppl 2.34 against 2.04 - while every
+bench's ids matched (decode is the GPU's). a check mode (the NPU's rows into scratch beside the GPU's, compared a
+layer) found it in one run: gate / up 0.99994, the down 0.01. the pack test had encoded the same wrong layout; it now
+packs mm's own. a speed A/B is no check of a prompt's bits: the KL is.
+
+**the release's numbers** (README, at performance): ~/bench/rel-070/run.sh - 0.6.10's suite (dbench, Maya's
+--bench, agent_bench.py, q4x_bench, llama-bench, apibench.py against Strata), each prompt run GPU-alone and with the
+NPU interleaved twice, and the agents and osmos-api with it once; its logs beside it.
+
+**measured away:** a packed IQ2_S grid and a vectorized index path (no gain); the token-split tiling (above); batching
+launches into one (they overlap queued); one xclbin for both kinds (a core's program 11.5-13 KB of 16, the kinds' row
+counts 24 and 16).
+
 ### 0.6.10: the GPU's queues evicted - why 0.6.9's lend went (2026-11-12, low-power)
 
 **the symptom.** the same build's 8K prompt (UD-IQ1_M, dbench, 106 GiB) ran 553-558 tok/s in some runs and 420-498

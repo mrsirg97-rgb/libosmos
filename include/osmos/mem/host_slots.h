@@ -11,6 +11,7 @@ HostSlots *host_slots_create(uint64_t bytes, char err[POOL_ERR]);
 void host_slots_destroy(HostSlots *h);
 Slots host_slots(HostSlots *h);
 uint64_t host_slots_bytes(const HostSlots *h);
+void *host_slots_base(const HostSlots *h);
 
 #endif
 
@@ -37,4 +38,7 @@ host_slots
 
 host_slots_bytes
   the arena's size.
+
+host_slots_base
+  the arena's first byte (host and GPU address alike: registered, mapped) - the NPU's region (npu_region).
 */

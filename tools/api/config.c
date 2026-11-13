@@ -62,6 +62,13 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "no_guess"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->no_guess = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
+  if (!strcmp(k, "npu")) /* 0.7.0: the NPU beside the GPU (forward_npu) */
+    return str(v, c->npu, sizeof c->npu, k, err);
+  if (!strcmp(k, "npu_share"))
+    return (v->type == JSON_INT || v->type == JSON_FLOAT) && (c->npu_share = v->type == JSON_INT ? atof(v->s) : v->f) > 0 &&
+                   c->npu_share < 1
+               ? true
+               : fail(err, "a share between 0 and 1", k);
   if (!strcmp(k, "stream_ngram"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->stream_ngram = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
@@ -97,6 +104,8 @@ bool config_read(const char *path, Config *c, char err[API_ERR])
   json_free(j);
   if (ok && (!c->pack[0] || !c->model[0] || !c->max_context))
     return fail(err, "pack, model and max_context are needed", NULL);
+  if (ok && c->npu_share > 0 && !c->npu[0])
+    return fail(err, "is nothing without npu (its kernels' directory)", "npu_share");
   return ok;
 }
 
@@ -131,6 +140,13 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
     argv[n++] = "--no-guess";
   if (c->stream_ngram)
     argv[n++] = "--stream-ngram";
+  if (c->npu[0])
+    argv[n++] = "--npu", argv[n++] = c->npu;
+  if (c->npu[0] && c->npu_share > 0)
+  {
+    snprintf(c->num[6], sizeof c->num[6], "%g", c->npu_share);
+    argv[n++] = "--npu-share", argv[n++] = c->num[6];
+  }
   if (c->fill_set)
   {
     snprintf(c->num[5], sizeof c->num[5], "%g", c->fill_gib);

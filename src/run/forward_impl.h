@@ -19,8 +19,10 @@
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/gpu/mv.h"
+#include "osmos/gpu/npu_pack.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/model/engram.h"
+#include "osmos/npu/npu.h"
 #include "osmos/run/forward.h"
 
 #define FWD_MAX_FILES WEIGHTS_MAX_FILES
@@ -44,7 +46,7 @@
 /* a layer's routing tables at most for `pairs` pairs: 3 matrix pointers, 4 offsets, a count an entry (an expert, or
    a part of MM_MAX_TOKENS of one: at most pairs entries); an order and a pair a pair; 2 x 16 slots an expert - with
    each table's alignment (16) */
-#define FWD_UP_BYTES(pairs) ((uint64_t)(pairs) * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4) + 10 * 16)
+#define FWD_UP_BYTES(pairs) ((uint64_t)(pairs) * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4 + 2 * 8 + 3 * 4) + 14 * 16)
 /* the experts' slots at most: each its tokens padded to whole tiles - the pairs and a tile's padding an expert */
 #define FWD_MAX_SLOTS(pairs, experts) ((pairs) + (uint64_t)(experts) * (MM_TILE - 1))
 
@@ -156,6 +158,22 @@ struct Forward
   uint32_t *m_by, *m_row, *m_base, *m_slot0;
   /* forward_lane's: on, its CPU threads (0: every expert on the GPU, in the order the CPU would sum it), and a small
      step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in ascending expert id */
+  /* 0.7.0: the NPU beside the GPU (npu.h; forward_npu): a prompt step's hottest experts' gate and up, a fixed
+     share of an eligible layer's pairs in whole NPU_TOKENS parts (hip_ffn.c's npu_pick) - by routing alone, so the
+     same prompt the same bits; on, another forward_identity */
+  Npu *npu;
+  float npu_share;   /* the share of a layer's pairs the NPU takes */
+  uint32_t npu_max;  /* its buffers' parts */
+  int32_t *npu_tok;  /* mapped and coherent: the parts' tokens' rows of xf ([part][NPU_TOKENS]), then their first
+                        rows of ga / upr / ye - written by the host, read by npu_pack_a and fwd_npu_run */
+  uint32_t *npu_row;
+  const void **npu_wg, **npu_wu; /* the parts' weights: gate (or the down's) and up */
+  void **npu_c0, **npu_c1;       /* where their rows go: ga's and upr's, or ye's */
+  hipEvent_t npu_packed;         /* the layer's parts packed: the NPU may read them */
+  hipEvent_t npu_gpu_done, npu_resumed; /* timed: the stream past the GPU's own rows, and the work after the NPU's
+                                           queued - between them the GPU idle on the NPU (read at the next call) */
+  bool npu_timed;                        /* a pair recorded, not yet read */
+  double npu_idle_ms, npu_gpu_ahead_ms;  /* the GPU's idle on the NPU, summed; and its work left when the NPU began */
   uint64_t ahead_limit; /* ForwardOptions': the membrane's bound on reads ahead in flight */
   uint32_t logit_rows;  /* ForwardOptions': a step's last rows whose logits are kept (0: every row) */
   bool lane;
@@ -298,6 +316,13 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
    the CPU (not in GPU memory: neither resident nor read into the pool); a unit's parts in the mapped files */
 bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err);
 void fwd_cpu_destroy(Forward *f);
+/* the NPU's (hip_fwd_npu.c) */
+void fwd_npu_destroy(Forward *f);
+uint32_t fwd_npu_layer(const Forward *f, int l, uint32_t pairs);
+uint32_t fwd_npu_pick(const Forward *f, uint32_t pairs, const int32_t *cnt, uint32_t nd, uint32_t *nq);
+bool fwd_npu_pack(Forward *f, NpuKind kind, uint32_t parts, const uint32_t *nq, uint32_t nd, const uint32_t *base,
+                  const uint32_t *slot0, const int32_t *gidx, const void *const *w0, const void *const *w1);
+bool fwd_npu_run(Forward *f, NpuKind kind, int l, uint32_t parts, char *err);
 bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks);
 bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]);
 /* the layer's CPU experts (cpu_e, cpu_unit: nc of them, their rows among the step's picks rows by expert, row r's

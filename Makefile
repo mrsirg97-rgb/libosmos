@@ -24,6 +24,14 @@ EVT_SRCS := $(shell find $(LIBEVT)/src -name '*.c')
 EVT_OBJS := $(patsubst $(LIBEVT)/src/%.c,$(OBJ_DIR)/libevt/%.o,$(EVT_SRCS))
 override CFLAGS += -I$(LIBEVT)/include
 HIP_SRCS := $(shell find $(SRC_DIR) -name 'hip_*.c')
+# the NPU (0.7.0, include/osmos/npu/npu.h): NPU=1 builds src/npu/npu_xrt.cpp (XRT, libxrt-dev) into the HIP
+# library and links XRT into its binaries; else its stub (hip_npu_none.c), and no XRT anywhere
+NPU ?= 0
+ifeq ($(NPU),1)
+HIP_SRCS := $(filter-out $(SRC_DIR)/npu/hip_npu_none.c,$(HIP_SRCS))
+NPU_OBJS := $(OBJ_DIR)/npu/npu_xrt.o
+NPU_LIBS := -lxrt_coreutil
+endif
 HIP_OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(HIP_SRCS))
 # the kernels (HIP C++, gfx1151 only) behind their C interfaces, into the HIP library; no contraction but the fmaf
 # a kernel writes, so a sum's rounding is the source's and the same in every instantiation
@@ -53,8 +61,20 @@ $(OBJ_DIR)/libevt/%.o: $(LIBEVT)/src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-$(HIP_LIB): $(HIP_OBJS) $(KERNEL_OBJS) | $(LIB_DIR)
+# made afresh: ar adds and replaces members, never drops one - an NPU=1 build's npu_xrt.o beside the stub after
+# NPU=0 (or the stub beside it) would be a duplicate symbol. NPU's value recorded: a change rebuilds the archive
+$(HIP_LIB): $(HIP_OBJS) $(KERNEL_OBJS) $(NPU_OBJS) $(OBJ_DIR)/npu.$(NPU) | $(LIB_DIR)
+	rm -f $@
 	$(AR) $(ARFLAGS) $@ $(filter %.o,$^)
+
+$(OBJ_DIR)/npu.$(NPU):
+	@mkdir -p $(OBJ_DIR)
+	rm -f $(OBJ_DIR)/npu.0 $(OBJ_DIR)/npu.1
+	touch $@
+
+$(OBJ_DIR)/npu/npu_xrt.o: $(SRC_DIR)/npu/npu_xrt.cpp
+	@mkdir -p $(dir $@)
+	$(HIPCC) -O2 -Wall -Werror $(DEPFLAGS) -Iinclude -I$(SRC_DIR)/npu/include -c $< -o $@
 
 # the CPU lane (src/cpu): the GPU's sums repeated bit for bit - no contraction but the fmaf it writes (as the
 # kernels'), the FMA and f16 conversion in hardware, and the kernels' shared headers (quant_grids.h, lane.h)
@@ -79,7 +99,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
 	@mkdir -p $(OBJ_DIR)/tests/gpu
-	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 $(HIP_RUNPATH) -o $@
+	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 $(NPU_LIBS) $(HIP_RUNPATH) -o $@
 
 # the server (tools/serve): the engine over stdin / stdout, maya's serve protocol; --parallel's loop libevt's (in
 # libosmos.a, as above)
@@ -90,7 +110,7 @@ $(OBJ_DIR)/tools/serve/%.o: tools/serve/%.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 $(SERVE): $(SERVE_OBJS) $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
-	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 -lpthread $(HIP_RUNPATH) -o $@
+	$(HIPCC) $(SERVE_OBJS) -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 $(NPU_LIBS) -lpthread $(HIP_RUNPATH) -o $@
 serve: $(SERVE)
 
 # osmos-api (tools/api): the engine as an OpenAI-compatible server - osmos-serve its child; host C only

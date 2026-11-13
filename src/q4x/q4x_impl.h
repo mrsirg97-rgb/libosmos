@@ -5,9 +5,11 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/mv.h"
+#include "osmos/gpu/npu_pack.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/mem/rowread.h"
+#include "osmos/npu/npu.h"
 #include "osmos/q4x/dflash.h"
 #include "osmos/q4x/forward.h"
 
@@ -127,6 +129,19 @@ struct Q4xForward
   } rows[Q4X_ROW_BUFS];
   uint32_t n_rows;
   Q4xSeq *sub_seq; /* Q4X_MAX_RUNS of them */
+  /* 0.7.0: the NPU beside the GPU (q4x_forward_npu, hip_npu.c): a prompt step's first whole 128-token entries of an
+     eligible layer's - their gate, up and down the NPU's, the GPU's mm_group skipping them (their counts zeroed) */
+  Npu *npu;
+  float npu_share;                 /* the share of a layer's picks the NPU takes (a format's cost scaling it) */
+  bool npu_layer[Q4X_MAX_LAYERS];  /* a kernel for each of its experts' formats */
+  float npu_cost[Q4X_MAX_LAYERS];  /* its share's scale: a part's NPU time, IQ3_XXS's 1 (q4x_npu_want) */
+  NpuPart *npu_sel;                /* mapped: the parts taken (npu_select_q4x) */
+  uint32_t *npu_nsel, npu_want;    /* mapped: their count; the layer's wanted (packed) */
+  int32_t *npu_tok, *npu_slot;     /* device: the parts' rows of b.mixed and of b.xe16 */
+  hipEvent_t npu_packed;           /* the parts packed: the NPU may read them */
+  const void **npu_w0, **npu_w1;
+  void **npu_c0, **npu_c1;
+  uint64_t npu_wanted, npu_taken;  /* summed: the parts wanted, and those whole entries gave */
 };
 
 #define Q4X_SLOTS (Q4X_MAX_BACK + 1) /* a ring's states: the latest and those behind it */
@@ -196,6 +211,13 @@ bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, ui
 bool q4x_overflow_read(Q4xForward *f);
 bool q4x_overflow_ok(Q4xForward *f, char *err);
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);
+/* the NPU's (hip_npu.c): a layer's share of n tokens' picks taken from its tables and packed (0: none); its gate and
+   up, then its down, once the GPU's of each are queued */
+uint32_t q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff);
+bool q4x_npu_gate_up(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);
+bool q4x_npu_pack_down(Q4xForward *f, uint32_t ff);
+bool q4x_npu_down(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);
+void q4x_npu_destroy(Q4xForward *f);
 void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint64_t n);
 
 /* hip_layers.c: a layer's blocks on n tokens of b.h (the residual), its output into b.h */

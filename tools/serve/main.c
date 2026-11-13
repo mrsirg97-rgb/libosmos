@@ -130,7 +130,7 @@ int main(int argc, char **argv)
   if (!model)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
                "[--max-context N] [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] "
-               "[--no-guess] [--stream-ngram] "
+               "[--no-guess] [--stream-ngram] [--npu <dir> [--npu-share F]] "
                "[--overlay <gguf>] [--serve]");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
@@ -162,9 +162,16 @@ int main(int argc, char **argv)
   const OsmosFacts fx = osmos_facts(m);
   sv.round_tokens = fx.round_tokens;
   sv.window = fx.seed_window;
-  const OsmosOptions o = {sv.max_ctx, sv.max_tokens, (uint64_t)(budget * (double)(1ull << 30)),
+  const char *share_arg = opt(argc, argv, "--npu-share", NULL);
+  const float npu_share = share_arg ? (float)atof(share_arg) : 0;
+  if (share_arg && !(npu_share > 0 && npu_share < 1))
+    return die("--npu-share takes a share between 0 and 1");
+  if (share_arg && !opt(argc, argv, "--npu", NULL))
+    return die("--npu-share is nothing without --npu (the NPU's kernels' directory)");
+  const OsmosOptions o = {sv.max_ctx,     sv.max_tokens,     (uint64_t)(budget * (double)(1ull << 30)),
                           opt(argc, argv, "--picks", NULL), has(argc, argv, "--no-guess"),
-                          opt(argc, argv, "--dspark", NULL), true, sv.ram_kept, has(argc, argv, "--stream-ngram")};
+                          opt(argc, argv, "--dspark", NULL), true, sv.ram_kept, has(argc, argv, "--stream-ngram"),
+                          opt(argc, argv, "--npu", NULL), npu_share};
   Conv *conv = calloc((size_t)lanes, sizeof *conv);
   if (!conv)
     return die("out of memory");

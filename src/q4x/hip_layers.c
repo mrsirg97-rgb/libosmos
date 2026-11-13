@@ -350,13 +350,18 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
       et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E;
   }
   /* each expert read once for up to 128 of the step's tokens that picked it (q4x_expert_tiles, mm_group) */
-  return mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) && q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) &&
-         q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL) &&
-         mm_x16_rows(b->mixed, D, b->gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
+  if (!mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) || !q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) ||
+      !q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL))
+    return false;
+  /* 0.7.0: the NPU's share of a prompt step's whole entries, taken from the tables (hip_npu.c): each kind's packed
+     before the GPU's matmuls of it are queued, run beside them, its rows where theirs go */
+  const bool npu = q4x_npu_take(f, L, n, &bd, D, ff) > 0;
+  return mm_x16_rows(b->mixed, D, b->gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
          experts(t[0], et.ptr[0], b, &bd, ff, D, b->xg, b->ga, b->yg) &&
-         experts(t[1], et.ptr[1], b, &bd, ff, D, b->xg, b->up, b->yg) &&
+         experts(t[1], et.ptr[1], b, &bd, ff, D, b->xg, b->up, b->yg) && (!npu || q4x_npu_gate_up(f, L, D, ff)) &&
          q4x_swiglu_rows(b->ga, b->up, ff, b->hidx, bd.slots, b->xe16, b->overflow, NULL) &&
-         experts(t[2], et.ptr[2], b, &bd, D, ff, b->xd, b->y, b->yd) &&
+         (!npu || q4x_npu_pack_down(f, ff)) && experts(t[2], et.ptr[2], b, &bd, D, ff, b->xd, b->y, b->yd) &&
+         (!npu || q4x_npu_down(f, L, D, ff)) &&
          (n > Q4X_SIDE_STEP || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
          q4x_moe_sum(b->y, b->where, b->w, n, k, D, b->sh, b->sl, b->out, NULL);
 }

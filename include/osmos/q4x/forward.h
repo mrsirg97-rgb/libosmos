@@ -44,6 +44,13 @@ void q4x_forward_destroy(Q4xForward *f);
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
 bool q4x_forward_whole(const Q4xForward *f);
 void q4x_forward_side_spin(Q4xForward *f, uint32_t us);
+/* 0.7.0: the NPU beside the GPU (src/q4x/hip_npu.c): dir its kernels (npu_open's: iq3xxs/, iq2s/, iq4nl-down/), share
+   the part of an eligible layer's prompt picks it takes (whole 128-token entries; an IQ2_S layer's scaled by its
+   cost). another forward's bits: q4x_identity tells them apart */
+bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[Q4X_FWD_ERR]);
+/* npu_run's calls, launches and the host's time in them; the parts wanted, and those the tables' whole entries gave */
+void q4x_forward_npu_stats(const Q4xForward *f, uint64_t *calls, uint64_t *parts, double *wait_us, uint64_t *wanted,
+                           uint64_t *taken);
 
 Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR]);
 void q4x_seq_destroy(Q4xSeq *s);

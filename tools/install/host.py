@@ -2,6 +2,7 @@
 (ttm's pages_limit - reported; raising it is a system setting, the user's), the tools the build and the download run,
 free disk for what is missing. each check
 a line; a failure says why and what would fix it."""
+import glob
 import os
 import shutil
 
@@ -76,3 +77,19 @@ def tools(download, build=True, which=shutil.which, exists=os.path.exists):
     if missing:
         return False, "missing: " + "; ".join(f"{n} ({FIX[n]})" for n in missing)
     return True, "the tools: " + (", ".join(need) or "none needed")
+
+
+def npu(devices=None, libs=None, header="/usr/include/xrt/xrt_kernel.h"):
+    """(ok, why): an AMD NPU osmos can use (0.7.0's --npu) - its device (the amdxdna driver's /dev/accel/accel*),
+    XRT's runtime library and its headers (libxrt-dev: osmos builds against them)"""
+    devices = glob.glob("/dev/accel/accel*") if devices is None else devices
+    libs = (glob.glob("/usr/lib/x86_64-linux-gnu/libxrt_coreutil.so*") + glob.glob("/opt/xilinx/xrt/lib/libxrt_coreutil.so*")
+            if libs is None else libs)
+    if not devices:
+        return False, "no NPU (/dev/accel/accel*: the amdxdna driver's) - the GPU alone runs the packs"
+    if not libs:
+        return False, "no XRT runtime (libxrt_coreutil): install xrt / libxrt2"
+    if not os.path.exists(header):
+        return False, f"no XRT headers ({header}): install libxrt-dev"
+    return True, f"an NPU ({devices[0]}) and XRT"
+

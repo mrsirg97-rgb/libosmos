@@ -111,6 +111,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   const ForwardOptions fo = {m->w->geo.n_layers, o->max_ctx,  o->budget,     e->picks,
                              o->max_tokens,      o->no_guess, o->fill_set, o->fill, 0, e->rows};
   if (!(e->f = forward_create_with(m->w, &fo, err)) || !forward_lane(e->f, 0, NULL, err) ||
+      (o->npu && !forward_npu(e->f, o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_DS, err)) ||
       (o->drafter && !(e->d = drafter_create(e->f, o->drafter, err))))
     return e_destroy(e), NULL;
   return e;

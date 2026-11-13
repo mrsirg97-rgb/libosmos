@@ -502,6 +502,35 @@ class StreamNgram(Served, unittest.TestCase):
         self.assertIn("stream_ngram", r.stderr)
 
 
+class Npu(Served, unittest.TestCase):
+    """osmos.json's npu (the NPU's kernels' directory) and npu_share: osmos-serve's --npu and --npu-share (0.7.0:
+    forward_npu); a share in (0, 1) alone, the directory a string, the share nothing without it"""
+    model = MODEL
+    settings = {"npu": "/opt/osmos/npu", "npu_share": 0.15}
+
+    def test_0_passed_on(self):
+        self.ready()
+        argv = self.log()[0].split()
+        self.assertEqual(argv[argv.index("--npu") + 1], "/opt/osmos/npu")
+        self.assertEqual(float(argv[argv.index("--npu-share") + 1]), 0.15)
+
+    def refused(self, settings, key):
+        d = tempfile.mkdtemp()
+        cfg = os.path.join(d, "osmos.json")
+        with open(cfg, "w") as f:
+            json.dump({"pack": "test", "model": MODEL, "max_context": 4096, **settings}, f)
+        r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                           capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(key, r.stderr)
+
+    def test_1_refused(self):
+        self.refused({"npu": "/opt/osmos/npu", "npu_share": 1.5}, "npu_share")
+        self.refused({"npu": "/opt/osmos/npu", "npu_share": 0}, "npu_share")
+        self.refused({"npu": 7}, "npu")
+        self.refused({"npu_share": 0.15}, "npu_share")
+
+
 class FillZero(Fill):
     settings = {"fill_gib": 0}
 

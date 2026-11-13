@@ -61,3 +61,5 @@ void host_slots_destroy(HostSlots *h)
 
 Slots host_slots(HostSlots *h) { return (Slots){alloc, release, h}; }
 uint64_t host_slots_bytes(const HostSlots *h) { return h ? h->bytes : 0; }
+/* the pages' first byte: host and GPU address alike (registered, mapped) - the NPU's region (npu_region) */
+void *host_slots_base(const HostSlots *h) { return h ? h->base : NULL; }

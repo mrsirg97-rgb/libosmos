@@ -13,7 +13,7 @@
 // tools/power.py's samples in them (tools/bench/energy.py).
 // ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
 // then n int32 expert ids - a sub-batch's tokens' picks, K a token; the probe waits for the GPU: slower, not timed).
-// build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos
+// build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/dbench.hip -Llib -losmos_hip -losmos (NPU=1's: -lxrt_coreutil)
 //        -lhsa-runtime64 -o bin/dbench   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
 
@@ -241,6 +241,8 @@ int main(int argc, char** argv) {
     char ferr[FORWARD_ERR] = "";
     z->o.budget = budget;
     bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, z->cpu_pin, ferr);
+    if (ok && std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu): NPU=<its kernel's dir>, NPU_SHARE
+      ok = forward_npu(z->f, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr);
     if (ok && std::getenv("DRAFT")) ok = (g_draft = drafter_create(z->f, std::getenv("DRAFT"), ferr)) != nullptr;
     Seq* s = ok ? seq_create(z->f, ferr) : nullptr;  // an answer's sequence counted, then let go
     ok = ok && s && forward_room(z->f, room);
@@ -290,6 +292,14 @@ int main(int argc, char** argv) {
                 "drafted %d accepted %d in %d rounds (%.0f ms drafting, %.0f verifying)\n",
                 tps, n_new, (unsigned long long) h, (unsigned long long) gs, (unsigned long long) gg,
                 (unsigned long long) forward_cpu_picks(f), g_drafted, g_accepted, g_rounds, g_draft_ms, g_verify_ms);
+    if (std::getenv("NPU")) {
+      uint64_t nl, np, no;
+      double nw, ni;
+      forward_npu_stats(f, &nl, &np, &nw, &ni, &no);
+      std::printf("  so far the NPU: %llu calls, %llu parts, %.0f ms the host waited on them; the GPU idle on it %.0f ms, "
+                  "busy past it %llu calls\n", (unsigned long long) nl, (unsigned long long) np, nw / 1e3, ni,
+                  (unsigned long long) no);
+    }
     uint64_t wn[2], wns[2];
     forward_waits(f, wn, wns);
     std::printf("  so far waited on %llu reads not guessed (%.0f ms), %llu guessed (%.0f ms); the guess read %llu\n",

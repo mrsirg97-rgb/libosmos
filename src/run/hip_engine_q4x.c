@@ -103,7 +103,8 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (e->mg && (dflash ? !(e->df = q4x_dflash_create(e->mg, m->w, err)) : !(e->mtp = q4x_mtp_create(e->mg, m->w, err))))
     return e_destroy(e), NULL;
   const Q4xOptions qo = {o->max_ctx, o->max_tokens ? o->max_tokens : o->max_ctx, o->stream_ngram, NULL, 0, e->df};
-  if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)))
+  if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)) ||
+      (o->npu && !q4x_forward_npu(e->f, o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_QWEN, err)))
     return e_destroy(e), NULL;
   return e;
 }

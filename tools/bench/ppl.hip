@@ -3,7 +3,8 @@
 // every row's logits), each row's next token scored by log-softmax in double on the host. prints the perplexity and
 // the mean log-probability, and every 1,024 tokens the running perplexity. a check of a pack's quality beside the
 // oracle's KL (32 positions): two packs on the same text and steps, the same arithmetic.
-// environment: MODEL (a first shard), PICKS (forward_create_ranked's profile), OVERLAY (weights_create_with's).
+// environment: MODEL (a first shard), PICKS (forward_create_ranked's profile), OVERLAY (weights_create_with's),
+// NPU=<its kernels' dir> and NPU_SHARE (forward_npu; NPU=1 builds: -lxrt_coreutil).
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/ppl.hip -Llib -losmos_hip -losmos
 //        -lhsa-runtime64 -o bin/ppl   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
@@ -18,6 +19,7 @@ extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/run/forward.h"
+#include "osmos/run/engine.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -65,6 +67,9 @@ int main(int argc, char** argv) {
   Forward* f = forward_create_with(w, &o, ferr);
   if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
   CHECK(forward_lane(f, 0, NULL, ferr));
+  if (const char* nd = std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu), NPU_SHARE of a layer's pairs
+    if (!forward_npu(f, nd, std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr))
+      std::fprintf(stderr, "forward_npu: %s\n", ferr), std::_Exit(1);
   Seq* s = seq_create(f, ferr);
   CHECK(s);
   const size_t V = (size_t) w->geo.n_vocab;
@@ -89,6 +94,12 @@ int main(int argc, char** argv) {
   }
   std::printf("ppl %.4f over %u tokens (mean log-prob %.5f), steps of %u\n", std::exp(nll / scored), scored,
               -nll / scored, step);
+  if (std::getenv("NPU")) {
+    uint64_t nc, np, no;
+    double nw, ni;
+    forward_npu_stats(f, &nc, &np, &nw, &ni, &no);
+    std::printf("the NPU: %llu calls, %llu parts\n", (unsigned long long) nc, (unsigned long long) np);
+  }
   seq_destroy(s);
   forward_destroy(f);
   weights_destroy(w);

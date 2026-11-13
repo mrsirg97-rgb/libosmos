@@ -16,9 +16,11 @@ typedef struct Config
   double fill_gib;
   bool no_guess;
   bool stream_ngram; /* osmos-serve's --stream-ngram */
+  char npu[PATH_MAX]; /* the NPU's kernels' directory (osmos-serve's --npu): "" none */
+  double npu_share;   /* its share of a layer's pairs (--npu-share): 0 osmos-serve's own */
   unsigned max_context, parallel;
   unsigned max_tokens; /* a prompt step's tokens (osmos-serve's --max-tokens); 0: osmos-serve's own */
-  char num[6][32]; /* config_argv's numbers as text */
+  char num[7][32]; /* config_argv's numbers as text */
   char eng[PATH_MAX];
 } Config;
 
