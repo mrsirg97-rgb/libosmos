@@ -145,6 +145,14 @@ static void fail(int fd, bool stream, const char *why, const JsonBuf *completion
   free(e.p);
 }
 
+/* the x-osmos-loop header line (loop.h's value, "\r\n" ended) */
+static void loop_head(char *out, size_t cap, const Loop *l)
+{
+  char v[400];
+  loop_header(v, sizeof v, l);
+  snprintf(out, cap, "x-osmos-loop: %s\r\n", v);
+}
+
 /* usage and timings, as fields after a response's choices (", ...") */
 static void usage(JsonBuf *b, const Run *r, size_t prompt_n)
 {
@@ -194,6 +202,7 @@ static void stream_end(Answer *s, const Request *rq, const Run *r, const Json *m
   JsonBuf u = {0};
   if (rq->usage)
     usage(&u, r, prompt_n);
+  loop_json(&u, &rq->loop); /* the history's loop signals, every stream's last chunk (0.7.3) */
   answer_chunk(s, "{}", finish_of(r, m), u.p ? u.p : "");
   free(u.p);
   if (!s->gone)
@@ -219,11 +228,14 @@ static void whole(Answer *s, const Run *r, const Json *m, size_t prompt_n)
   json_puts(&b, "}, \"finish_reason\": "), json_dump_string(&b, finish_of(r, m), strlen(finish_of(r, m)));
   json_puts(&b, "}]");
   usage(&b, r, prompt_n);
+  loop_json(&b, s->loop);
   json_puts(&b, "}");
+  char head[512];
+  loop_head(head, sizeof head, s->loop);
   if (b.oom)
     http_error(s->fd, 500, "out of memory");
   else
-    http_send(s->fd, 200, "application/json", b.p, b.n);
+    http_send_h(s->fd, 200, "application/json", b.p, b.n, head);
   free(b.p);
 }
 
@@ -366,7 +378,7 @@ void api_chat(Api *a, Http *h)
     return;
   }
   Request rq;
-  const bool ok = request_read(body, a->d, &rq, err);
+  const bool ok = request_read(body, a->d, a->fill_orphans, &rq, err);
   json_free(body);
   if (!ok)
   {
@@ -389,9 +401,11 @@ void api_chat(Api *a, Http *h)
     return;
   }
   Answer s = {.fd = h->fd, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
-              .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT};
+              .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT, .loop = &rq.loop};
   snprintf(s.id, sizeof s.id, "chatcmpl-osmos-%lld", r->rid);
-  if (rq.stream && !http_stream_open(h->fd))
+  char head[512];
+  loop_head(head, sizeof head, &rq.loop);
+  if (rq.stream && !http_stream_open_h(h->fd, head))
     s.gone = true;
   answer_chunk(&s, "{\"role\": \"assistant\", \"content\": \"\"}", NULL, "");
   size_t seen = 0;

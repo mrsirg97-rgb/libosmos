@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.3]: loop signals for agent harnesses (#47)
+
+- **What a request's history says about the agent sending it**, beside every answer: an `osmos.loop` object (beside
+  `usage`, in whole answers and a stream's last chunk) and an `x-osmos-loop` header - assistant turns since the last
+  tool call, the most repeated recent call (its name and arguments), orphaned tool calls (no result before the next
+  assistant turn) and orphaned results (no call), and `stuck` (three turns without a call, or three of one call). A
+  pure function of the request's messages: no model, no state kept, the same for DeepSeek and Qwen, nothing the model
+  reads changed. From ucotman's report of agent loops past 600K under history compaction (#47).
+- **Orphaned calls repaired only when asked**: `"osmos": {"fill_orphans": true}` in a request, or `fill_orphans` in
+  the pack's `osmos.json`, puts a placeholder result ("[tool result dropped from the conversation's history - run the
+  call again if its result is needed]") after each orphaned call, and the answer says so (`orphans_filled`). By
+  default the prompt stays the template's render of what was sent: osmos does not rewrite a client's history.
+
 ## [0.7.2]: IQ1_S's prompt decode, faster
 
 - **IQ1_S's experts decode 6-10% faster in prompt steps**, the same bits. IQ1_S was the slowest expert type a value

@@ -167,6 +167,7 @@ int main(int argc, char **argv)
   Config c;
   if (!config_read(cfg_path, &c, err))
     return die(err);
+  api.fill_orphans = c.fill_orphans;
   snprintf(api.model, sizeof api.model, "osmos-%s", c.pack);
   Gguf *g = gguf_header(c.model, err); /* the tokenizer and the family alone: osmos-serve opens the model */
   const GgufKv *arch = g ? gguf_kv(g, "general.architecture") : NULL;

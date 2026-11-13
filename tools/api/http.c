@@ -106,18 +106,30 @@ int http_read(Http *h, char err[API_ERR])
 
 bool http_send(int fd, int status, const char *type, const char *body, size_t n)
 {
-  char head[256];
-  const int k = snprintf(head, sizeof head,
-                         "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
-                         status, reason(status), type, n);
-  return send_all(fd, head, (size_t)k) && send_all(fd, body, n);
+  return http_send_h(fd, status, type, body, n, NULL);
+}
+
+/* with head: more header lines ("Name: value\r\n" each) before the blank line */
+bool http_send_h(int fd, int status, const char *type, const char *body, size_t n, const char *head)
+{
+  char h[1024];
+  const int k = snprintf(h, sizeof h,
+                         "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n%s\r\n",
+                         status, reason(status), type, n, head ? head : "");
+  return k > 0 && (size_t)k < sizeof h && send_all(fd, h, (size_t)k) && send_all(fd, body, n);
 }
 
 bool http_stream_open(int fd)
 {
-  static const char head[] = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
-                             "Connection: close\r\n\r\n";
-  return send_all(fd, head, sizeof head - 1);
+  return http_stream_open_h(fd, NULL);
+}
+
+bool http_stream_open_h(int fd, const char *head)
+{
+  char h[1024];
+  const int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
+                                      "Connection: close\r\n%s\r\n", head ? head : "");
+  return k > 0 && (size_t)k < sizeof h && send_all(fd, h, (size_t)k);
 }
 
 bool http_stream_event(int fd, const char *data, size_t n)

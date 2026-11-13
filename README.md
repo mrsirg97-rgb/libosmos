@@ -37,6 +37,14 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
   `deepseek-1017-evo-a`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next`
   (`-l`: UD-Q4_K_XL).
 
+**Loop signals for agent harnesses** (#47). Every answer reports what its request's history says about the agent
+sending it, computed from the messages alone: an `osmos.loop` object beside `usage` (whole answers and a stream's
+last chunk) and an `x-osmos-loop` header - assistant turns since its last tool call, its most repeated recent call,
+tool calls with no result and results with no call (a client's history compaction can drop one side), and `stuck`
+past three turns without a call or three of one call. Nothing the model reads changes. An orphaned call's result is
+left out as the client sent it unless asked: `"osmos": {"fill_orphans": true}` in a request (or `"fill_orphans": true`
+in the pack's `osmos.json`) puts a placeholder saying the result was dropped in its place.
+
 ## The packs
 
 | Pack | Files | Context | Pick it for |
