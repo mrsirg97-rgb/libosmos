@@ -105,7 +105,7 @@ static void pack_case(uint32_t K, uint32_t rows, uint32_t parts) {
   for (size_t i = 0; i < got.size(); i++) diff += got[i] != want[i];
   std::printf("pack K %u, %u parts: %zu of %zu bytes differ\n", K, parts, diff, got.size());
   CHECK(diff == 0);
-  hipFree(dx), hipFree(dt), hipFree(da);
+  (void) hipFree(dx), (void) hipFree(dt), (void) hipFree(da);
 }
 
 // C as the kernels write it: [matrix][pass][core][half][row octet][column octet][8 m + n], f32, nr rows a core a pass
@@ -147,7 +147,7 @@ static void unpack_case(uint32_t N, uint32_t nr, uint32_t mats, uint32_t parts) 
   std::printf("unpack N %u, %u rows a core, %u matrices, %u parts: %zu values wrong, %zu outside the parts touched\n", N,
               nr, mats, parts, bad, touched);
   CHECK(bad == 0 && touched == 0);
-  hipFree(dc), hipFree(dy0), hipFree(dy1), hipFree(dr);
+  (void) hipFree(dc), (void) hipFree(dy0), (void) hipFree(dy1), (void) hipFree(dr);
 }
 
 int main() {

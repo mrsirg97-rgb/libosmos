@@ -126,6 +126,46 @@ static bool group(uint32_t type, const void *const *dtab, const int32_t *cnt, co
   return ok;
 }
 
+/* a matrix's GPU entries past each distinct expert's first nq[j] x NPU_TOKENS rows (the NPU's: forward_npu), in parts
+   of MM_MAX_TOKENS sorted as the layer's (count, expert, part); nmat matrices' tables a part (gate and up share their
+   rows), x at its slots' xs, y at its rows' ys. the host's count (group()'s tiles) and the device's tables */
+typedef struct Rest
+{
+  const void **dtab;
+  int32_t *cnt, *dcnt;
+  uint32_t n, *dx, *dy;
+} Rest;
+
+static Rest rest_entries(Carve *c, uint32_t nd, const int32_t *cnt_j, const uint32_t *nq, const void *const *w0,
+                         const void *const *w1, uint32_t nmat, const uint32_t *slot0, const uint32_t *base, uint32_t xs,
+                         uint32_t ys)
+{
+  uint64_t key[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS];
+  Rest r = {0};
+  for (uint32_t j = 0; j < nd; j++)
+    for (uint32_t q = 0, from = nq[j] * NPU_TOKENS; from + q * MM_MAX_TOKENS < (uint32_t)cnt_j[j]; q++)
+    {
+      const uint32_t left = (uint32_t)cnt_j[j] - from - q * MM_MAX_TOKENS;
+      key[r.n++] = (uint64_t)(left < MM_MAX_TOKENS ? left : MM_MAX_TOKENS) << 40 | (uint64_t)j << 16 | q;
+    }
+  qsort(key, r.n, sizeof *key, cmp_u64);
+  const uint32_t room = r.n ? r.n : 1;
+  const void **tab = carve(c, nmat * room * sizeof *tab, (void **)&r.dtab);
+  uint32_t *x, *y;
+  r.cnt = carve(c, room * 4, (void **)&r.dcnt);
+  x = carve(c, room * 4, (void **)&r.dx), y = carve(c, room * 4, (void **)&r.dy);
+  for (uint32_t p = 0; p < r.n; p++)
+  {
+    const uint32_t j = (uint32_t)(key[p] >> 16 & 0xFFFFFF), q = (uint32_t)(key[p] & 0xFFFF);
+    const uint32_t at = nq[j] * NPU_TOKENS + q * MM_MAX_TOKENS;
+    tab[p] = w0[j], r.cnt[p] = (int32_t)(key[p] >> 40);
+    if (nmat > 1)
+      tab[r.n + p] = w1[j];
+    x[p] = (slot0[j] + at) * xs, y[p] = (base[j] + at) * ys;
+  }
+  return r;
+}
+
 /* the shared expert, batched, into its own buffers: queued before the router's result is read, so the GPU has it to
    do while the host pins the routed ones */
 static bool shared(Forward *f, int l)
@@ -279,9 +319,12 @@ bool fwd_moe(Forward *f, int l, char *err)
      then expert, then part: group()'s runs of the same column tiles contiguous */
   int32_t cnt_j[OPS_MAX_EXPERTS];
   memcpy(cnt_j, cnt, nd * sizeof *cnt);
-  /* 0.7.0: the NPU's parts (forward_npu): an expert's first nq[j] x NPU_TOKENS rows' gate and up its, the rest's
-     the GPU's in entries of their own (gate and up's; the down's every row as before) */
-  uint32_t nq[OPS_MAX_EXPERTS], parts = fwd_npu_layer(f, l, P) ? fwd_npu_pick(f, P, cnt_j, nd, nq) : 0;
+  /* 0.7.0: the NPU's parts (forward_npu): an expert's first nq[j] x NPU_TOKENS rows - their gate and up the NPU's
+     where it has the layer's kernel (npu_gu), their down where it has that one (npu_dn); the rest's the GPU's in
+     entries of their own */
+  const uint32_t takes = fwd_npu_layer(f, l, P);
+  const bool npu_gu = takes & 1, npu_dn = takes & 2;
+  uint32_t nq[OPS_MAX_EXPERTS], parts = takes ? fwd_npu_pick(f, P, cnt_j, nd, nq) : 0;
   uint64_t key[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS]; /* part's count, expert, part */
   for (uint32_t j = 0, e = 0; j < nd; j++)
     for (uint32_t q = 0; q * MM_MAX_TOKENS < (uint32_t)cnt_j[j]; q++, e++)
@@ -290,14 +333,14 @@ bool fwd_moe(Forward *f, int l, char *err)
       key[e] = (uint64_t)(left < MM_MAX_TOKENS ? left : MM_MAX_TOKENS) << 40 | (uint64_t)j << 16 | q;
     }
   qsort(key, ne, sizeof *key, cmp_u64);
-  const void *ex_g[OPS_MAX_EXPERTS], *ex_u[OPS_MAX_EXPERTS];
+  const void *ex_g[OPS_MAX_EXPERTS], *ex_u[OPS_MAX_EXPERTS], *ex_d[OPS_MAX_EXPERTS];
   for (uint32_t p = 0; ok && p < ne; p++)
   {
     const uint32_t j = (uint32_t)(key[p] >> 16 & 0xFFFFFF), q = (uint32_t)(key[p] & 0xFFFF);
     const uint32_t s0 = slot0[j] + q * MM_MAX_TOKENS, r0 = base[j] + q * MM_MAX_TOKENS;
     const void *ex[POOL_PARTS];
     ok = membrane_wait(f->mem, unit_of[j], ex, err);
-    ex_g[j] = ex[0], ex_u[j] = ex[1];
+    ex_g[j] = ex[0], ex_u[j] = ex[1], ex_d[j] = ex[2];
     tab[p] = ex[0], tab[ne + p] = ex[1], tab[2 * ne + p] = ex[2], cnt[p] = (int32_t)(key[p] >> 40);
     xg[p] = s0 * D, yg[p] = r0 * FF, xd[p] = s0 * FF, yd[p] = r0 * D;
   }
@@ -310,44 +353,24 @@ bool fwd_moe(Forward *f, int l, char *err)
     for (uint32_t k = 0; k < K; k++)
       order[i * K + k] = ord[k][1];
   }
-  /* the gate and up's entries: the down's, or with NPU parts their rows past them (as the down's, sorted by count) */
-  const void **gtab = dtab;
-  int32_t *gcnt = cnt, *dgcnt = dcnt;
-  uint32_t ng = ne, *dgx = dxg, *dgy = dyg;
-  if (ok && parts)
-  {
-    uint64_t gkey[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS];
-    ng = 0;
-    for (uint32_t j = 0; j < nd; j++)
-      for (uint32_t q = 0, from = nq[j] * NPU_TOKENS; from + q * MM_MAX_TOKENS < (uint32_t)cnt_j[j]; q++)
-      {
-        const uint32_t left = (uint32_t)cnt_j[j] - from - q * MM_MAX_TOKENS;
-        gkey[ng++] = (uint64_t)(left < MM_MAX_TOKENS ? left : MM_MAX_TOKENS) << 40 | (uint64_t)j << 16 | q;
-      }
-    qsort(gkey, ng, sizeof *gkey, cmp_u64);
-    const void **gt = carve(&c, 2 * (ng ? ng : 1) * sizeof *gt, (void **)&gtab);
-    uint32_t *gx, *gy;
-    gcnt = carve(&c, (ng ? ng : 1) * 4, (void **)&dgcnt);
-    gx = carve(&c, (ng ? ng : 1) * 4, (void **)&dgx), gy = carve(&c, (ng ? ng : 1) * 4, (void **)&dgy);
-    for (uint32_t p = 0; p < ng; p++)
-    {
-      const uint32_t j = (uint32_t)(gkey[p] >> 16 & 0xFFFFFF), q = (uint32_t)(gkey[p] & 0xFFFF);
-      const uint32_t at = nq[j] * NPU_TOKENS + q * MM_MAX_TOKENS;
-      gt[p] = ex_g[j], gt[ng + p] = ex_u[j], gcnt[p] = (int32_t)(gkey[p] >> 40);
-      gx[p] = (slot0[j] + at) * D, gy[p] = (base[j] + at) * FF;
-    }
-    ok = fwd_npu_pack(f, parts, nq, nd, base, slot0, gidx, ex_g, ex_u) ||
-         fwd_fail(err, "the NPU's parts (their packing)");
-  }
+  /* the GPU's entries: the layer's, or with NPU parts the rows past them for each matrix the NPU takes */
+  Rest gu = {dtab, cnt, dcnt, ne, dxg, dyg}, dn = {dtab + 2 * ne, cnt, dcnt, ne, dxd, dyd};
+  if (ok && parts && npu_gu)
+    gu = rest_entries(&c, nd, cnt_j, nq, ex_g, ex_u, 2, slot0, base, D, FF);
+  if (ok && parts && npu_dn)
+    dn = rest_entries(&c, nd, cnt_j, nq, ex_d, NULL, 1, slot0, base, FF, D);
+  const bool gu_on = parts && npu_gu, dn_on = parts && npu_dn;
   ok = ok && fwd_put_async(b->up, f->r_up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
        mm_x16_rows(b->xf, D, dgidx, slots, D, b->xe16, b->overflow, NULL) &&
-       (!parts || hipEventRecord(f->npu_packed, NULL) == hipSuccess) &&
-       group(L->exp_gate->type, gtab, gcnt, dgcnt, ng, FF, D, b->xe16, dgx, b->ga, dgy, FF) &&
-       group(L->exp_up->type, gtab + ng, gcnt, dgcnt, ng, FF, D, b->xe16, dgx, b->upr, dgy, FF) &&
-       (!parts || (fwd_npu_run(f, l, parts, f->npu_packed, err) && fwd_npu_unpack(f, parts))) &&
+       (!gu_on || fwd_npu_pack(f, NPU_GATE_UP, parts, nq, nd, base, slot0, gidx, ex_g, ex_u)) &&
+       group(L->exp_gate->type, gu.dtab, gu.cnt, gu.dcnt, gu.n, FF, D, b->xe16, gu.dx, b->ga, gu.dy, FF) &&
+       group(L->exp_up->type, gu.dtab + gu.n, gu.cnt, gu.dcnt, gu.n, FF, D, b->xe16, gu.dx, b->upr, gu.dy, FF) &&
+       (!gu_on || (fwd_npu_run(f, NPU_GATE_UP, l, parts, err) && fwd_npu_unpack(f, NPU_GATE_UP, parts))) &&
        ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
+       (!dn_on || fwd_npu_pack(f, NPU_DOWN, parts, nq, nd, base, slot0, gidx, ex_d, NULL)) &&
        mm_x16_rows(b->hh, FF, dhidx, slots, FF, b->xe16, b->overflow, NULL) &&
-       group(L->exp_down->type, dtab + 2 * ne, cnt, dcnt, ne, D, FF, b->xe16, dxd, b->ye, dyd, D) &&
+       group(L->exp_down->type, dn.dtab, dn.cnt, dn.dcnt, dn.n, D, FF, b->xe16, dn.dx, b->ye, dn.dy, D) &&
+       (!dn_on || (fwd_npu_run(f, NPU_DOWN, l, parts, err) && fwd_npu_unpack(f, NPU_DOWN, parts))) &&
        ops_gather_sum_add(b->moe, b->ye, dorder, K, n, D, b->sye, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");

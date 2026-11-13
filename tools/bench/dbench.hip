@@ -297,7 +297,7 @@ int main(int argc, char** argv) {
       uint64_t nl, np;
       double nw;
       forward_npu_stats(f, &nl, &np, &nw);
-      std::printf("  so far the NPU: %llu layers, %llu parts, %.0f ms the host waited on them\n", (unsigned long long) nl,
+      std::printf("  so far the NPU: %llu calls, %llu parts, %.0f ms the host waited on them\n", (unsigned long long) nl,
                   (unsigned long long) np, nw / 1e3);
     }
     uint64_t wn[2], wns[2];

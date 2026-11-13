@@ -5,9 +5,9 @@
 
 bool npu_built(void) { return false; }
 
-Npu *npu_open(const char *dir, uint32_t K, uint32_t N, uint32_t max_parts, char err[NPU_ERR])
+Npu *npu_open(const char *dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[NPU_ERR])
 {
-  (void)dir, (void)K, (void)N, (void)max_parts;
+  (void)dir, (void)D, (void)FF, (void)max_parts;
   snprintf(err, NPU_ERR, "npu: osmos was built without it (make NPU=1)");
   return NULL;
 }
@@ -24,12 +24,12 @@ bool npu_region(Npu *n, void *base, uint64_t bytes, char err[NPU_ERR])
 void *npu_a(const Npu *n) { return (void)n, NULL; }
 void *npu_c(const Npu *n) { return (void)n, NULL; }
 
-bool npu_has(const Npu *n, uint32_t qtype) { return (void)n, (void)qtype, false; }
+bool npu_has(const Npu *n, NpuKind kind, uint32_t qtype) { return (void)n, (void)kind, (void)qtype, false; }
 
-bool npu_gate_up(Npu *n, uint32_t qtype, uint32_t parts, const void *const *wg, const void *const *wu,
-                 uint64_t w_bytes, char err[NPU_ERR])
+bool npu_run(Npu *n, NpuKind kind, uint32_t qtype, uint32_t parts, const void *const *w0, const void *const *w1,
+             uint64_t w_bytes, char err[NPU_ERR])
 {
-  (void)n, (void)qtype, (void)parts, (void)wg, (void)wu, (void)w_bytes;
+  (void)n, (void)kind, (void)qtype, (void)parts, (void)w0, (void)w1, (void)w_bytes;
   snprintf(err, NPU_ERR, "npu: not built");
   return false;
 }

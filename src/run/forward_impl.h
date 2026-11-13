@@ -187,7 +187,7 @@ struct Forward
   int32_t *npu_tok;  /* mapped and coherent: the parts' tokens' rows of xf ([part][NPU_TOKENS]), then their first
                         rows of ga / upr - written by the host, read by npu_pack_a / npu_unpack_c */
   uint32_t *npu_row;
-  const void **npu_wg, **npu_wu; /* the parts' gate and up weights */
+  const void **npu_wg, **npu_wu; /* the parts' weights: gate (or the down's) and up */
   hipEvent_t npu_packed;         /* the layer's parts packed: the NPU may read them */
   uint64_t ahead_limit; /* ForwardOptions': the membrane's bound on reads ahead in flight */
   uint32_t logit_rows;  /* ForwardOptions': a step's last rows whose logits are kept (0: every row) */
@@ -336,12 +336,12 @@ bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err);
 void fwd_cpu_destroy(Forward *f);
 /* the NPU's (hip_fwd_npu.c) */
 void fwd_npu_destroy(Forward *f);
-bool fwd_npu_layer(const Forward *f, int l, uint32_t pairs);
+uint32_t fwd_npu_layer(const Forward *f, int l, uint32_t pairs);
 uint32_t fwd_npu_pick(const Forward *f, uint32_t pairs, const int32_t *cnt, uint32_t nd, uint32_t *nq);
-bool fwd_npu_pack(Forward *f, uint32_t parts, const uint32_t *nq, uint32_t nd, const uint32_t *base,
-                  const uint32_t *slot0, const int32_t *gidx, const void *const *ex_gate, const void *const *ex_up);
-bool fwd_npu_run(Forward *f, int l, uint32_t parts, hipEvent_t packed, char *err);
-bool fwd_npu_unpack(Forward *f, uint32_t parts);
+bool fwd_npu_pack(Forward *f, NpuKind kind, uint32_t parts, const uint32_t *nq, uint32_t nd, const uint32_t *base,
+                  const uint32_t *slot0, const int32_t *gidx, const void *const *w0, const void *const *w1);
+bool fwd_npu_run(Forward *f, NpuKind kind, int l, uint32_t parts, char *err);
+bool fwd_npu_unpack(Forward *f, NpuKind kind, uint32_t parts);
 bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks);
 bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]);
 /* the layer's CPU experts (cpu_e, cpu_unit: nc of them, their rows among the step's picks rows by expert, row r's

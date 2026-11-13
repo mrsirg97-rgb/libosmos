@@ -2,6 +2,7 @@
 #include <hip/hip_runtime.h>
 #include <hsa/hsa_ext_amd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -43,7 +44,8 @@ void say(char* err, const char* what, const char* why) { std::snprintf(err, NPU_
 
 }  // namespace
 
-struct Kern {  // a format's kernel: its own hardware context
+struct Kern {  // a format and kind's kernel: its own hardware context
+  NpuKind kind;
   uint32_t qtype;
   xrt::hw_context ctx;
   xrt::kernel k;
@@ -55,7 +57,7 @@ struct Npu {
   xrt::device dev;
   std::vector<Kern> kern;
   uint32_t max_parts = 0;
-  uint64_t a_bytes = 0, c_bytes = 0;
+  uint64_t a_bytes[NPU_KINDS] = {}, c_bytes[NPU_KINDS] = {};  // a part's, by kind
   Dma a, c;
   std::vector<Region> regions;
   std::vector<xrt::run> runs;
@@ -75,10 +77,12 @@ extern "C" bool npu_built(void) { return true; }
 
 static const struct {
   const char* sub;
+  NpuKind kind;
   uint32_t qtype;
-} kFormats[] = {{"iq2xxs", 16}, {"iq1s", 19}};  // GGUF's IQ2_XXS, IQ1_S
+} kFormats[] = {{"iq2xxs", NPU_GATE_UP, 16}, {"iq1s", NPU_GATE_UP, 19},  // GGUF's IQ2_XXS, IQ1_S
+                {"iq2xxs-down", NPU_DOWN, 16}, {"iq1s-down", NPU_DOWN, 19}};
 
-extern "C" Npu* npu_open(const char* dir, uint32_t K, uint32_t N, uint32_t max_parts, char err[NPU_ERR]) {
+extern "C" Npu* npu_open(const char* dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[NPU_ERR]) {
   Npu* n = nullptr;
   try {
     n = new Npu();
@@ -90,7 +94,7 @@ extern "C" Npu* npu_open(const char* dir, uint32_t K, uint32_t N, uint32_t max_p
       const std::vector<char> ins((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
       xrt::xclbin xb(d + "/final.xclbin");
       n->dev.register_xclbin(xb);
-      Kern kn{fm.qtype, xrt::hw_context(n->dev, xb.get_uuid()), {}, {}, {}, (uint32_t) (ins.size() / 4)};
+      Kern kn{fm.kind, fm.qtype, xrt::hw_context(n->dev, xb.get_uuid()), {}, {}, {}, (uint32_t) (ins.size() / 4)};
       kn.k = xrt::kernel(kn.ctx, "MLIR_AIE");
       kn.instr = xrt::bo(n->dev, ins.size(), xrt::bo::flags::cacheable, kn.k.group_id(1));
       std::memcpy(kn.instr.map<char*>(), ins.data(), ins.size());
@@ -98,9 +102,12 @@ extern "C" Npu* npu_open(const char* dir, uint32_t K, uint32_t N, uint32_t max_p
       kn.spare = xrt::bo(n->dev, 4096, xrt::bo::flags::host_only, kn.k.group_id(7));
       n->kern.push_back(std::move(kn));
     }
-    if (n->kern.empty()) throw std::runtime_error(std::string("no kernel in ") + dir + " (iq2xxs/, iq1s/)");
-    n->max_parts = max_parts, n->a_bytes = npu_a_bytes(K), n->c_bytes = npu_c_floats(N, 2) * 4; /* gate + up's C a part (K -> N, two matrices) */
-    if (!dma(n, n->a, max_parts * n->a_bytes, err) || !dma(n, n->c, max_parts * n->c_bytes, err)) return npu_close(n), nullptr;
+    if (n->kern.empty()) throw std::runtime_error(std::string("no kernel in ") + dir + " (iq2xxs/, iq1s/, ...-down/)");
+    n->max_parts = max_parts;
+    n->a_bytes[NPU_GATE_UP] = npu_a_bytes(D), n->c_bytes[NPU_GATE_UP] = npu_c_floats(FF, 2) * 4;
+    n->a_bytes[NPU_DOWN] = npu_a_bytes(FF), n->c_bytes[NPU_DOWN] = npu_c_floats(D, 1) * 4;
+    const uint64_t a = std::max(n->a_bytes[0], n->a_bytes[1]), c = std::max(n->c_bytes[0], n->c_bytes[1]);
+    if (!dma(n, n->a, max_parts * a, err) || !dma(n, n->c, max_parts * c, err)) return npu_close(n), nullptr;
     n->runs.reserve(max_parts);
     return n;
   } catch (const std::exception& e) {
@@ -110,13 +117,13 @@ extern "C" Npu* npu_open(const char* dir, uint32_t K, uint32_t N, uint32_t max_p
   }
 }
 
-static Kern* kern(Npu* n, uint32_t qtype) {
+static Kern* kern(Npu* n, NpuKind kind, uint32_t qtype) {
   for (Kern& k : n->kern)
-    if (k.qtype == qtype) return &k;
+    if (k.kind == kind && k.qtype == qtype) return &k;
   return nullptr;
 }
 
-extern "C" bool npu_has(const Npu* n, uint32_t qtype) { return n && kern((Npu*) n, qtype); }
+extern "C" bool npu_has(const Npu* n, NpuKind kind, uint32_t qtype) { return n && kern((Npu*) n, kind, qtype); }
 
 extern "C" void npu_close(Npu* n) {
   if (!n) return;
@@ -150,26 +157,28 @@ static bool view(Npu* n, const void* w, uint64_t bytes, xrt::bo& out) {
   return false;
 }
 
-extern "C" bool npu_gate_up(Npu* n, uint32_t qtype, uint32_t parts, const void* const* wg, const void* const* wu,
-                            uint64_t w_bytes, char err[NPU_ERR]) {
+extern "C" bool npu_run(Npu* n, NpuKind kind, uint32_t qtype, uint32_t parts, const void* const* w0,
+                        const void* const* w1, uint64_t w_bytes, char err[NPU_ERR]) {
   if (parts > n->max_parts) return say(err, "more parts than its buffers", nullptr), false;
-  Kern* kn = kern(n, qtype);
-  if (!kn) return say(err, "no kernel for the format", nullptr), false;
+  Kern* kn = kern(n, kind, qtype);
+  if (!kn) return say(err, "no kernel for the kind and format", nullptr), false;
   const double t0 = now_us();
+  const uint64_t ab = n->a_bytes[kind], cb = n->c_bytes[kind];
   try {
     n->runs.clear();
     for (uint32_t p = 0; p < parts; p++) {
-      xrt::bo g, u;
-      if (!view(n, wg[p], w_bytes, g) || !view(n, wu[p], w_bytes, u))
+      xrt::bo x, y;
+      if (!view(n, w0[p], w_bytes, x) || (kind == NPU_GATE_UP && !view(n, w1[p], w_bytes, y)))
         return say(err, "an expert outside its regions", nullptr), false;
-      xrt::bo a(n->a.bo, n->a_bytes, p * n->a_bytes), c(n->c.bo, n->c_bytes, p * n->c_bytes);
-      n->runs.push_back(kn->k(3u, kn->instr, kn->ninstr, g, u, a, c, kn->spare));
+      if (kind == NPU_DOWN) y = x;  // the down kernel's second weight argument is unread
+      xrt::bo a(n->a.bo, ab, p * ab), c(n->c.bo, cb, p * cb);
+      n->runs.push_back(kn->k(3u, kn->instr, kn->ninstr, x, y, a, c, kn->spare));
     }
     for (xrt::run& r : n->runs)
       if (r.wait() != ERT_CMD_STATE_COMPLETED) return say(err, "a launch did not complete", nullptr), false;
   } catch (const std::exception& e) {
     return say(err, "a launch", e.what()), false;
   }
-  n->st.layers++, n->st.parts += parts, n->st.wait_us += now_us() - t0;
+  n->st.calls++, n->st.parts += parts, n->st.wait_us += now_us() - t0;
   return true;
 }
