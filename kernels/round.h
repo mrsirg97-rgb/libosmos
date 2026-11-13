@@ -91,6 +91,11 @@ __device__ inline float e4m3_value(uint32_t c) {
     return __uint_as_float(sign | ((mag << (23 - kFp8Mant)) + kE4m3Rebias));
   return __uint_as_float(sign | __float_as_uint((float) mag * 0.001953125f));  // m 2^-9
 }
+// an unsigned E4M3 scale's value as ggml reads one (ggml_ue4m3_to_fp32, before its 0.5): the sign bit not read, the
+// code 0x7F zero (E4M3's NaN; 0xFF, read without its sign, is 0x7F's finite neighbour's 480 - as ggml)
+__device__ inline float ue4m3_value(uint32_t c) {
+  return c == kE4m3Nan ? 0.0f : e4m3_value_finite(c & 0x7F);
+}
 __device__ inline uint32_t e2m1_code(float q) {
   const float a = fabsf(q);
   const uint32_t i = a == 0.0f ? 0 : a == 0.5f ? 1 : a == 1.0f ? 2 : a == 1.5f ? 3 : a == 2.0f ? 4 : a == 3.0f ? 5

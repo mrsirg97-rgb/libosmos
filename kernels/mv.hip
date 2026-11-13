@@ -40,6 +40,7 @@ constexpr Tune tune(quant::Type t, int nt) {
     case quant::kIQ4_NL:
     case quant::kQ2_0:
     case quant::kQ2_K:  // not measured: Q2_0's
+    case quant::kNVFP4:  // not measured: Q2_0's (a 64-value block too)
     case quant::kIQ3_XXS:
     case quant::kIQ4_XS: return {2, 2}; /* 4 for IQ3_XXS and IQ4_XS at 4 tokens, but a group shares one R */
     default: return {1, 1};
@@ -120,7 +121,8 @@ constexpr Tune tune_group1(quant::Type t, bool short_row) {
     case quant::kIQ3_XXS:
     case quant::kIQ4_XS:
     case quant::kQ2_0:
-    case quant::kQ2_K: return {2, 2};  // (Q2_K not measured: Q2_0's)
+    case quant::kNVFP4:
+    case quant::kQ2_K: return {2, 2};  // (Q2_K and NVFP4 not measured: Q2_0's)
     default: return tune(t, 1);
   }
 }
@@ -173,6 +175,7 @@ extern "C" bool mv_group_tok(uint32_t type, const void* const* w, const int32_t*
     case quant::kIQ1_S: return group_tok<quant::kIQ1_S>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kIQ2_S: return group_tok<quant::kIQ2_S>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kMXFP4: return group_tok<quant::kMXFP4>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kMXFP8: return group_tok<quant::kMXFP8>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kIQ4_NL: return group_tok<quant::kIQ4_NL>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kIQ3_XXS: return group_tok<quant::kIQ3_XXS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ2_K: return group_tok<quant::kQ2_K>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
@@ -181,6 +184,7 @@ extern "C" bool mv_group_tok(uint32_t type, const void* const* w, const int32_t*
     case quant::kQ5_K: return group_tok<quant::kQ5_K>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ5_1: return group_tok<quant::kQ5_1>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ2_0: return group_tok<quant::kQ2_0>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kNVFP4: return group_tok<quant::kNVFP4>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     default: return false;
   }
 }
@@ -202,12 +206,14 @@ extern "C" bool mv_group(uint32_t type, const void* const* w, uint32_t n, uint32
     case quant::kIQ2_S: return group<quant::kIQ2_S>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kBF16: return group<quant::kBF16>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kMXFP4: return group<quant::kMXFP4>(w, n, rows, cols, x, x_mat, x_div, y, s);
+    case quant::kMXFP8: return group<quant::kMXFP8>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kIQ3_XXS: return group<quant::kIQ3_XXS>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kQ2_K: return group<quant::kQ2_K>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kIQ4_XS: return group<quant::kIQ4_XS>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kQ4_K: return group<quant::kQ4_K>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kQ5_1: return group<quant::kQ5_1>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kQ2_0: return group<quant::kQ2_0>(w, n, rows, cols, x, x_mat, x_div, y, s);
+    case quant::kNVFP4: return group<quant::kNVFP4>(w, n, rows, cols, x, x_mat, x_div, y, s);
     default: return false;
   }
 }
@@ -235,12 +241,14 @@ extern "C" bool mv_strided(uint32_t type, const void* w, uint32_t rows, uint32_t
     case quant::kIQ2_S: return by_tokens<quant::kIQ2_S>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kBF16: return by_tokens<quant::kBF16>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kMXFP4: return by_tokens<quant::kMXFP4>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kMXFP8: return by_tokens<quant::kMXFP8>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kIQ3_XXS: return by_tokens<quant::kIQ3_XXS>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ2_K: return by_tokens<quant::kQ2_K>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kIQ4_XS: return by_tokens<quant::kIQ4_XS>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ4_K: return by_tokens<quant::kQ4_K>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ5_1: return by_tokens<quant::kQ5_1>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ2_0: return by_tokens<quant::kQ2_0>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kNVFP4: return by_tokens<quant::kNVFP4>(w, rows, cols, x, xs, n_tok, y, ys, s);
     default: return false;
   }
 }

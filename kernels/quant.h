@@ -20,14 +20,14 @@ enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
   kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8, kIQ3_XXS = QTYPE_IQ3_XXS, kIQ4_XS = QTYPE_IQ4_XS,
-  kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1,
+  kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1, kNVFP4 = QTYPE_NVFP4,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
 constexpr int kChunk = 8;
 constexpr int kQK = 256;  // a K-quant's or an IQ type's values a block
 constexpr int kQ32 = 32;  // Q8_0's and IQ4_NL's
-constexpr int kQ64 = 64;  // Q2_0's
+constexpr int kQ64 = 64;  // Q2_0's and NVFP4's
 constexpr float kIq1Delta = 0.125f;
 
 template <Type T> struct Block;
@@ -35,7 +35,7 @@ template <Type T> struct Block;
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
 QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S) QUANT_BLOCK(IQ3_XXS)
-QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1)
+QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1) QUANT_BLOCK(NVFP4)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -48,7 +48,7 @@ static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && 
                   Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
                   Block<kIQ2_S>::values == kQK && Block<kIQ3_XXS>::values == kQK &&
                   Block<kIQ4_XS>::values == kQK && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK &&
-                  Block<kQ4_K>::values == kQK && Block<kQ5_1>::values == kQ32,
+                  Block<kQ4_K>::values == kQK && Block<kQ5_1>::values == kQ32 && Block<kNVFP4>::values == kQ64,
               "the decoders' block lengths");
 
 // every block's size is even (34, 18, 66, 74, 210 ... bytes; MXFP4's and MXFP8's odd: byte loads only) and every row
@@ -260,6 +260,17 @@ template <> __device__ inline void decode<kMXFP4>(const uint8_t* b, int k, float
   const float d = ldexpf(1.0f, (int) b[0] - 128);
   const uint8_t* qs = b + 1 + (k % 2) * kChunk;
   for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) kMxfp4Values[(qs[j] >> (4 * (k / 2))) & 0x0F]);
+}
+
+// NVFP4 (ggml 40): 4 UE4M3 scales (sub-block s: values 16s .. 16s + 15), then 32 bytes - sub-block s's value j in byte
+// 4 + 8s + j's low nibble, value j + 8 its high one; ggml's dequantize_row_nvfp4: E2M1 doubled (kMxfp4Values) times
+// half the scale, the scale's sign bit not read and the code 0x7F zero (rnd::ue4m3_value). every product exact (an
+// E2M1 code's 2 bits by a scale's 4: 6 significant bits). a tensor's own scale is not the block's: applied by the role
+// that reads it (one a tensor, or one an expert)
+template <> __device__ inline void decode<kNVFP4>(const uint8_t* b, int k, float* v) {
+  const float d = mul(rnd::ue4m3_value(b[k / 2]), 0.5f);
+  const uint8_t* qs = b + 4 + (k / 2) * kChunk;
+  for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) kMxfp4Values[(qs[j] >> (4 * (k % 2))) & 0x0F]);
 }
 
 // unsloth's Engram tables: an E8M0 scale e (2^(e - 127)), then 32 E4M3 codes, value j byte 1 + j (a code 0x7F / 0xFF
