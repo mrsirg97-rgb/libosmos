@@ -3539,6 +3539,52 @@ shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token)
 kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
 out), local only.
 
+### 0.6.10: the GPU's queues evicted - why 0.6.9's lend went (2026-11-12, low-power)
+
+**the symptom.** the same build's 8K prompt (UD-IQ1_M, dbench, 106 GiB) ran 553-558 tok/s in some runs and 420-498
+in others, the slow ones in no order. rocprofv3, a slow run against a fast one: every kernel's median the same, but a
+few launches of any kind 100-900 ms long (a group_kernel of median 3.9 ms took 2,192 ms) spread over the step - the
+whole GPU stopped, not one kernel slow. the KFD counts such stops a process: `/sys/class/kfd/kfd/proc/<pid>/stats_*/
+evicted_ms` (its queues evicted - stopped while the driver revalidates the process's GPU mappings). sampled every
+0.25 s, the change inside dbench's prompt window, four runs: 468 / 1,400 / 2,312 / 3,732 ms evicted at 556 / 531 /
+505 / 463 tok/s - the slow mode. pages migrated in each run (/proc/vmstat pgmigrate_success) 150K-400K: the kernel
+compacting.
+
+**what set it off.** the lent step: the cache's tail unregistered and dropped (MADV_DONTNEED), a 4 GiB block
+hipMalloc'd, and both put back at the next short step. measured (106 GiB, three runs each, ms evicted in the prompt):
+
+| | tok/s | evicted |
+| --- | --- | --- |
+| 0.6.9's lent steps, THP on (the box's "always") | 419-559 | 240-5,192 |
+| lent, THP off for the process (prctl PR_SET_THP_DISABLE) | 541-544 | 620-680 |
+| lent in place (the step's buffers the cache's own registered pages: nothing given back) | 517-519 | 60-104 |
+| fixed (buffers of its own), THP on | 563-571 | 0-212 |
+
+so the churn - not THP, not the cache's pages - is what evicts; in place it stops, but there the step runs ~9% slower
+(0.6.9's finding about registered memory holds for a real step, though tools/bench/hostbw.hip's streams - write,
+read, read-write over 4 MiB-1 GiB windows - run as fast on registered, hipHostMalloc'd non-coherent and coarse-grained
+locked memory as on hipMalloc's: what a step does to its buffers is not a stream). measured away: pinning the cache's
+pages long-term (io_uring's registered buffers, which compaction skips) - the evictions the same, so the migrated
+pages were not the cache's; THP off - steady, but the lend's own invalidation then costs ~650 ms a prompt.
+
+**the choice** (auto-sized, an 8K prompt + 128 tokens, two rounds, every stream the same):
+
+| steps | budget | 8K prompt | decode | evicted |
+| --- | --- | --- | --- | --- |
+| 8,192 lent (0.6.9) | 106.99 GiB | 517 / 550 | 14.9 / 15.0 | 1,544 / 488 ms |
+| 8,192 fixed | 103.87-103.89 | 574 / 575 | 14.6 / 14.6 | 12 / 0 |
+| 4,096 fixed | 106.71-106.80 | 548 / 548 | 15.0 / 15.1 | 8 / 8 |
+
+4,096 fixed: lent's best prompt, steady, decode level, 0.2 GiB of budget. the lend's code is gone (each change 0.6.9
+made to arena, pool, membrane, host_slots and the forward its own: back to 0.6.8's). the NPU A/B that found this (0.7.0)
+had read the slow mode as the NPU's cost: no A/B of a few percent means anything while the queues are evicted - read
+evicted_ms before trusting one.
+
+**Qwen's context.** one, 512K (YaRN, factor 2), for both Qwen packs: 0.6.10's perplexity at 512K the native 262K's.
+the BF16 reference (0.6.6's protocol for Qwen) did not run: llama.cpp maps the 330 GB with mmap forced (#28160 turns
+it off on iGPUs; llama_ref now forces it) but then computes on one CPU thread (a 2,048-token step >15 min); copied,
+it needs the RAM. it waits for osmos's own Qwen streaming (0.6.11).
+
 ### 0.6.9: a long prompt's steps in memory the expert cache lends (2026-11-12, low-power)
 
 **why large steps.** a prompt step's routed experts are held for the step; each is read and decoded once for all of

@@ -47,6 +47,9 @@ int main(int argc, char** argv) {
   llama_backend_init();
   llama_model_params mp = llama_model_default_params();
   mp.n_gpu_layers = std::getenv("NGL") ? std::atoi(std::getenv("NGL")) : 0;
+  if (!mp.n_gpu_layers) /* the weights left in the mapped files: llama.cpp's AUTO load turns mmap off on an iGPU
+                           (#28160) and its ROCm host buffer would copy them into pinned memory - BF16's 338 GB */
+    mp.load_mode = LLAMA_LOAD_MODE_MMAP, mp.no_host = true;
   llama_model* model = llama_model_load_from_file(argv[1], mp);
   if (!model) return std::fprintf(stderr, "llama_ref: the model did not load\n"), 1;
   const llama_vocab* vocab = llama_model_get_vocab(model);

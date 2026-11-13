@@ -35,8 +35,6 @@ typedef struct ForwardOptions
   uint64_t fill;         /* the system's RAM a build leaves free, bytes: forward_room's (0: every byte past the headroom) */
   uint64_t ahead_limit;  /* the membrane's: the most bytes of reads ahead read at once (0: no bound) */
   uint32_t logit_rows;   /* a step's last rows whose logits are kept (forward_logit_rows); 0: its every row */
-  bool fixed_steps;      /* a step of more than one sub-batch in buffers of its own (0.6.8's); else in the expert
-                            cache's memory, lent while it runs (DESIGN.md, "0.6.9") */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);
@@ -45,7 +43,6 @@ Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx,
 Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err[FORWARD_ERR]);
 void forward_destroy(Forward *f);
 void forward_probe(Forward *f, forward_probe_fn fn, void *arg);
-void forward_lends(const Forward *f, uint64_t *bytes, uint64_t *lent, uint64_t *split);
 
 Seq *seq_create(Forward *f, char err[FORWARD_ERR]);
 void seq_destroy(Seq *s);
@@ -126,11 +123,6 @@ forward_probe
   position (or the row), the device buffer and its length. a float step's buffer is what the forward reads next: a
   probe may overwrite it (a test's teacher forcing: each step then runs on the oracle's input). the GPU is waited for
   before each call, so a probe slows the forward; NULL (the default) none.
-
-forward_lends
-  0.6.9's lent steps (DESIGN.md, "0.6.9"): `bytes`, the block a step of more than one sub-batch borrows from the expert
-  cache (0: none - ForwardOptions' fixed_steps, or a sub-batch the most a step takes); `lent`, the steps that ran in
-  it; `split`, the steps the cache could not lend for, run a sub-batch at a time. any of them NULL is not asked.
 
 Seq
   one sequence's state: its position, its last tokens (Engram's hash), each layer's window of keys (a ring of window +

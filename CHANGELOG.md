@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.10]: steady DeepSeek prompts, one Qwen context
+
+- **DeepSeek's prompt speed no longer swings.** On the same build, an 8K prompt ran anywhere from 420 to 559 tok/s,
+  run to run. The cause was 0.6.9's lent steps: giving the expert cache's tail back to the system and allocating a
+  4 GiB block for each long prompt set the kernel compacting memory under the GPU's mappings, and the driver
+  stopped the GPU's queues for 0.2-5 s a prompt while it caught up (`/sys/class/kfd/kfd/proc/<pid>/stats_*/
+  evicted_ms`). The packs now read prompts 4,096 tokens a step in buffers of their own, as 0.6.8 did at 2,048: at
+  `low-power` on UD-IQ1_M, auto-sized, an 8K prompt 548 / 548 tok/s (lent steps: 517 / 550), decode 15.0 / 15.1
+  (14.9 / 15.0), 0.2 GiB less expert cache, the GPU stopped for 8 ms a prompt. The lent-step code is gone. Every
+  output the same, bit for bit.
+- **Qwen ships one context, 512K**, for both of its packs (YaRN, factor 2: its perplexity the native 262K's to the
+  digits measured). The separate 1M pack is gone. If you installed `qwen38-ud-iq3_xxs-1m`, install `qwen38-ud-iq3_xxs`.
+- **`qwen38-ud-q4_k_xl --abliterated`:** huihui-ai's patch made into an overlay for Q4_K_XL's own shards, as the
+  UD-IQ3_XXS pack has had.
+- **Tools:** `tools/bench/hostbw.hip` (the GPU's bandwidth on each kind of host memory it can map),
+  `q4x_layercmp.hip` (Qwen's residual a layer against llama.cpp's), `ref_vs_ref.py` (one engine's log-probabilities
+  scored against another's). `llama_ref` maps its model's weights rather than copying them into pinned memory, which
+  a model larger than RAM can't survive (llama.cpp turns mmap off on iGPUs by default since #28160).
+- **Not in this release:** scoring Qwen against its BF16 weights. llama.cpp can't run the 330 GB reference on this
+  machine at a usable speed (mapped, it computes on one CPU thread; copied, it runs out of memory). It waits for osmos
+  to stream Qwen's experts itself (0.6.11).
+
 ## [0.6.9]: DeepSeek's long prompts in 8,192-token steps, their memory lent by the expert cache
 
 - **Long prompts 15-20% faster on DeepSeek, decode as fast as before.** The packs now take a prompt 8,192 tokens a

@@ -199,7 +199,6 @@ int main(int argc, char** argv) {
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
   o.budget = budget;
   o.max_tokens = max_tokens;
-  o.fixed_steps = std::getenv("FIXED_STEPS") != nullptr;  // 0.6.8's: a long step's buffers the forward's own
   g_max_tokens = max_tokens;
   std::vector<uint64_t> picks;
   if (const char* pp = std::getenv("PICKS")) {  // forward_create_ranked's counts ([layer][expert] uint64)
