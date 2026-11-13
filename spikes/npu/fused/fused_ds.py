@@ -19,29 +19,42 @@ from aie.utils import bfp as B
 
 sys.path.insert(0, os.path.expanduser('~/Projects/llama.cpp/gguf-py'))
 HERE = os.path.dirname(os.path.abspath(__file__)); KD = os.path.expanduser('~/Projects/mlir-aie/aie_kernels')
-COLS, ROWS, H = 8, 4, 2                   # columns, cores a column, A's 64-row halves
-FMT = os.environ.get('FMT', 'iq2xxs')     # the experts' format: IQ2_XXS (66-byte blocks) or IQ1_S (50)
+ROWS, H = 4, 2                            # cores a column, A's 64-row halves
+MODEL = os.environ.get('MODEL', 'ds')     # ds: DeepSeek-V4.1-Flash's experts; qwen: Qwen3.8-Flash-Next's
+FMT = os.environ.get('FMT', 'iq2xxs' if MODEL == 'ds' else 'iq3xxs')
+# a format: its GGUF type, a 256 K-step's bytes a row, the kernel's source and flags
 QT, BB, SRC, FLAGS = {'iq2xxs': ('IQ2_XXS', 66, 'fused_iq2xxs.cc', ['-DFUSED_V=6']),
                       'iq1s': ('IQ1_S', 50, 'fused_iq1s.cc', ['-DIQ1_V=5']),
                       'iq2xs': ('IQ2_XS', 74, 'fused_iq2xs.cc', []),
-                      'iq2s': ('IQ2_S', 82, 'fused_qwen.cc', ['-DQFMT=3'])}[FMT]  # its grid packed (2 KB)
-# gateup: gate and up (K 5120 -> N 2304), a W tile a K-step pair (two blocks a row: 4-byte words) for 24 rows, 3
-# passes. down: K 2304 -> N 5120 - a row's 9 blocks are no whole words (594 bytes), a core's 16 rows are: its W tile
-# those rows whole, once a pass, a block decoded a K-step; 10 passes
+                      'iq2s': ('IQ2_S', 82, 'fused_qwen.cc', ['-DQFMT=3']),     # its grid packed (2 KB)
+                      'iq3xxs': ('IQ3_XXS', 98, 'fused_qwen.cc', ['-DQFMT=1']),
+                      'iq4nl': ('IQ4_NL', 144, 'fused_qwen.cc', ['-DQFMT=0'])}[FMT]  # 8 blocks of 32 a 256
+# DeepSeek - gateup: K 5120 -> N 2304, a W tile a K-step pair (two blocks a row: 4-byte words) for 24 rows, 3 passes;
+# down: K 2304 -> N 5120, a row's 9 blocks no whole words (594 bytes) - a core's 16 rows are: its W tile those rows
+# whole, once a pass, a block decoded a K-step; 10 passes.
+# Qwen - gateup: K 2560 -> N 640 = 20 cores x 32 rows, one pass (5 columns: 640 is no 32 x a whole 8-row tile), A
+# streamed once; down: K 640 -> N 2560, K not a whole 256 - its rows whole (20 blocks of 32), in 128-value K halves
+# (HSTEP: the kernel's fused_step_h), 16 rows x 5 passes
 KIND = os.environ.get('KIND', 'gateup')
 ROWMAJ = int(os.environ.get('ROWMAJOR', '1'))  # C to rows where the GPU reads (else sub-tile order, contiguous: timing only)
 DOWN = KIND == 'down'
-M, KT = 64 * H, 256                       # tokens, a K-step
-K, N = (2304, 5120) if DOWN else (5120, 2304)
-NR = 16 if DOWN else 24                   # a core's rows a pass
+M = 64 * H                                # tokens
+K, N = {('ds', 0): (5120, 2304), ('ds', 1): (2304, 5120), ('qwen', 0): (2560, 640), ('qwen', 1): (640, 2560)}[MODEL, DOWN]
+COLS = 5 if (MODEL, DOWN) == ('qwen', False) else 8
+NR = 16 if DOWN else 32 if MODEL == 'qwen' else 24  # a core's rows a pass
+HSTEP = MODEL == 'qwen' and DOWN          # K-steps of 128 (a K half) - K 640 not a multiple of 256
+KT = 128 if HSTEP else 256                # a K-step
 MATS = 1 if DOWN else 2                   # down; gate, up
 KS, KP = K // KT, K // KT // 2            # K-steps, K-step pairs
-PASSES = N // (COLS * ROWS * NR)          # 10; 3
-RB = K // KT * BB                         # a row's bytes (594 IQ2_XXS down: not a whole word count)
+PASSES = N // (COLS * ROWS * NR)
+RB = K // 256 * BB if not HSTEP else K // 32 * (BB // 8)  # a row's bytes (IQ4_NL: 18 a block of 32)
 WT = (NR * RB if DOWN else NR * 2 * BB) // 4  # a core's W tile, words
-AT = 64 * KT * 9 // 8 // 4 // 2           # an A quarter (64 x 128 bfp16): 2304 words
+AT = 64 * 128 * 9 // 8 // 4               # an A quarter (64 x 128 bfp16): 2304 words
 CT = M * NR                               # a core's C tile a pass (f32)
-assert N == PASSES * COLS * ROWS * NR and (NR * RB) % 4 == 0
+PIECES = H if HSTEP else 2 * H            # A's pieces a K-step (HSTEP: a K half, its two token halves)
+assert N == PASSES * COLS * ROWS * NR and (NR * RB) % 4 == 0 and K % KT == 0
+
+FILES = '~/Models/ds1017/UD-IQ1_M/*.gguf' if MODEL == 'ds' else '~/Models/qwen38/UD-IQ3_XXS/*.gguf'
 
 def tap(total, off, sizes, strides):
     return TensorAccessPattern((total,), off, sizes, strides)
@@ -50,10 +63,10 @@ def tap(total, off, sizes, strides):
 def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down's) rows, c2: up's (the down: unwritten)
     i32, f32 = np.dtype[np.int32], np.dtype[np.float32]
     wt, at, ct = np.ndarray[(WT,), i32], np.ndarray[(AT,), i32], np.ndarray[(CT,), f32]
-    step = ExternalFunction("fused_step_f32", source_file=os.path.join(HERE, SRC),
+    step = ExternalFunction("fused_step_h" if HSTEP else "fused_step_f32", source_file=os.path.join(HERE, SRC),
                             arg_types=[wt, at, ct, np.int32, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
                             compile_flags=FLAGS + ["-DMULTI_F32", f"-DHALVES={H}", "-DKHALF=1", f"-DNROWS={NR}",
-                                                   f"-DROWSTRIDE={RB if DOWN else 2 * BB}", f"-DSPLIT={os.environ.get('SPLIT', '0')}"] + ([f"-DROWMAJOR={KS}"] if ROWMAJ else []) + (["-DWHOLEK"] if DOWN else []))
+                                                   f"-DROWSTRIDE={RB if DOWN else 2 * BB}", f"-DSPLIT={os.environ.get('SPLIT', '0')}"] + ([f"-DROWMAJOR={KS}"] if ROWMAJ else []) + (["-DWHOLEK"] if DOWN else []) + (["-DHSTEP"] if HSTEP else []))
     a_l3, w_l3, c_l3, workers = [], [], [], []
     # A: one stream from one shim, through one memtile, to all 32 cores (ABCAST, the default): every core multiplies
     # the same A tiles, so a column's own copy was 8 x the DRAM reads; ABCAST=0 a stream a column, as before
@@ -68,9 +81,10 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
         else:
             a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=2)
             a2 = a3.cons().forward(obj_type=at, name=f"A2_{col}", depth=2)
+        WD = 1 if (MODEL, FMT) == ('qwen', 'iq3xxs') else 2  # IQ3_XXS: its two grid halves (8 KB) - one W tile's room
         w3 = ObjectFifo(np.ndarray[(ROWS * WT,), i32], name=f"W3_{col}", depth=2)
         w2 = w3.cons().split([WT * r for r in range(ROWS)], obj_types=[wt] * ROWS,
-                             names=[f"W2_{col}_{r}" for r in range(ROWS)], depths=[2] * ROWS)
+                             names=[f"W2_{col}_{r}" for r in range(ROWS)], depths=[WD] * ROWS)
         c3 = ObjectFifo(np.ndarray[(ROWS * CT,), f32], name=f"C3_{col}", depth=1)
         c2 = c3.prod().join([CT * r for r in range(ROWS)], obj_types=[ct] * ROWS,
                             names=[f"C2_{col}_{r}" for r in range(ROWS)], depths=[1] * ROWS)
@@ -84,7 +98,7 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
                     if DOWN:  # the rows whole: one tile a pass, a block a K-step
                         x = wi.acquire(1)
                         for s in range_(KS):
-                            for piece in range(2 * H):
+                            for piece in range(PIECES):
                                 y = ai.acquire(1)
                                 k(x, y, cc, s, piece)
                                 ai.release(1)
@@ -101,7 +115,7 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
                     co.release(1)
             workers.append(Worker(body, fn_args=[a2.cons(), w2[r].cons(), c2[r].prod(), step], tile=Tile(col, 2 + r),
                                   stack_size=0x1100))
-    TW, TA, TC = N * RB // 4, KS * 2 * H * AT, M * N  # C: a matrix's rows, M x N f32, row-major
+    TW, TA, TC = N * RB // 4, KS * PIECES * AT, M * N  # C: a matrix's rows, M x N f32, row-major
 
     def seq(WG, WU, A, C, C2, *hs):  # (down: WG its matrix, WU unread, C2 unwritten)
         na = len(a_l3)
@@ -109,7 +123,8 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
         for col in range(COLS):
             # A: the whole stream once a (matrix, pass)
             if col < na:
-                ap[col].fill(A, tap=tap(TA, 0, [MATS * PASSES, TA // 1024, 1024], [0, 1024, 1]))
+                inner = next(d for d in range(1024, 0, -1) if TA % d == 0)
+                ap[col].fill(A, tap=tap(TA, 0, [MATS * PASSES, TA // inner, inner], [0, inner, 1]))
             if DOWN:  # W: pass p, the column's 64 rows whole (its 4 cores' 16, in order): contiguous
                 base, n = col * ROWS * WT, ROWS * WT
                 inner = next(d for d in range(1024, 0, -1) if n % d == 0)
@@ -138,7 +153,7 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
 def expert_bytes(layer, kind, e):
     sys.path.insert(0, os.path.expanduser('~/Projects/llama.cpp/gguf-py'))
     from gguf import GGUFReader
-    for p in sorted(glob.glob(os.path.expanduser('~/Models/ds1017/UD-IQ1_M/*.gguf'))):
+    for p in sorted(glob.glob(os.path.expanduser(FILES))):
         for t in GGUFReader(p).tensors:
             if t.name == f"blk.{layer}.{kind}.weight":
                 assert t.tensor_type.name == QT, (t.name, t.tensor_type.name)
@@ -154,7 +169,7 @@ def main():
         sys.path.insert(0, os.path.expanduser('~/Projects/llama.cpp/gguf-py'))
         from gguf import GGUFReader
         ty = {}
-        for p in sorted(glob.glob(os.path.expanduser('~/Models/ds1017/UD-IQ1_M/*.gguf'))):
+        for p in sorted(glob.glob(os.path.expanduser(FILES))):
             for t in GGUFReader(p).tensors:
                 if '_exps' in t.name: ty[t.name] = t.tensor_type.name
         layer = next(l for l in range(64) if (ty.get(f"blk.{l}.ffn_down_exps.weight") == QT if DOWN else
@@ -166,13 +181,17 @@ def main():
         (g, tt), (u, _) = expert_bytes(layer, 'ffn_gate_exps', e), expert_bytes(layer, 'ffn_up_exps', e)
     rng = np.random.default_rng(1017)
     A = rng.standard_normal((M, K)).astype(np.float32)
-    a = np.concatenate([B.shuffle(B.encode(A[h * 64:(h + 1) * 64, s * KT + q * 128:s * KT + (q + 1) * 128]), 128, 64, 128, 64).reshape(-1)
-                        for s in range(KS) for h in range(H) for q in range(2)])
+    if HSTEP:  # [K half][token half]
+        a = np.concatenate([B.shuffle(B.encode(A[h * 64:(h + 1) * 64, s * 128:(s + 1) * 128]), 128, 64, 128, 64).reshape(-1)
+                            for s in range(KS) for h in range(H)])
+    else:
+        a = np.concatenate([B.shuffle(B.encode(A[h * 64:(h + 1) * 64, s * KT + q * 128:s * KT + (q + 1) * 128]), 128, 64, 128, 64).reshape(-1)
+                            for s in range(KS) for h in range(H) for q in range(2)])
     Aq = B.quantize(A).astype(np.float64)
     refs = []
     for raw in (g, u):
         Wf = dequantize(raw, tt).astype(np.float32).reshape(N, K)
-        refs.append(Aq @ np.concatenate([B.quantize(Wf[:, s * KT:(s + 1) * KT]) for s in range(KS)], axis=1).astype(np.float64).T)
+        refs.append(Aq @ np.concatenate([B.quantize(Wf[:, s * 128:(s + 1) * 128]) for s in range(K // 128)], axis=1).astype(np.float64).T)
     wg_ = iron.tensor(g.view(np.int32), dtype=np.int32, device="npu")
     wu_ = iron.tensor(u.view(np.int32), dtype=np.int32, device="npu")
     at_ = iron.tensor(a.view(np.int32), dtype=np.int32, device="npu")
@@ -224,7 +243,7 @@ def main():
     if os.environ.get('DUMP') and len(GOT) == 2: np.stack(GOT).astype(np.float32).tofile(os.path.join(os.environ['DUMP'], 'got.bin'))
     us = bench.npu.avg_us
     flop = 2 * MATS * M * K * N
-    print(f"{FMT} blk.{layer} expert {e}: {'down' if DOWN else 'gate + up'}, {M} x {K} -> {N}: corr {corr:.6f}, max err / max |C| {worst:.2e}; "
+    print(f"{MODEL} {FMT} blk.{layer} expert {e}: {'down' if DOWN else 'gate + up'}, {M} x {K} -> {N}: corr {corr:.6f}, max err / max |C| {worst:.2e}; "
           f"{us:.0f} us on the NPU -> {flop / us / 1e6:.2f} TFLOP/s ({flop / 1e9:.2f} GFLOP)")
 
 if __name__ == "__main__":

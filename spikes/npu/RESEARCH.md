@@ -389,3 +389,9 @@ design for both does not fit (a core's program 11.5-13 KB of 16, the two kinds' 
 the NPU writing its rows in place (no unpack) 10% 637; with A broadcast 10% 641 (+2.4%), **15% 642.5 (+2.6%)**, 20%
 635.5 - there the GPU waits ~305 ms on the NPU: its time is the critical path past 15%. UD-IQ1_M ppl (8,191 tokens,
 2,048-token steps) 2.4623 with the NPU at 15% against 2.4591 alone (+0.13%: its bfp16 A).
+
+## 0.7.0: NPU mode's KL (DeepSeek, share 0.15, 0.6.6's protocol, paired against GPU-only)
+
+d KLD (NPU - GPU, +- its standard error): UD-IQ1_M wiki -0.0095 +-0.0021, hold0..3 +0.0002 -0.0008 -0.0004 +0.0005;
+osmos-evo-A wiki +0.0001 +-0.0013, hold0..3 +0.0005 +0.0001 +0.0011 +0.0005 (each +-0.0003..0.0007). within the noise
+of a different rounding (the NPU's bfp16 A, bf16 W) - no cost to the model's distance.

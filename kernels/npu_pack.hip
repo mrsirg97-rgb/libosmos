@@ -75,6 +75,8 @@ __global__ void select_kernel(int32_t* cnt, uint32_t first, uint32_t count, uint
     if (threadIdx.x == 0)
       sel[p] = NpuPart{ptr[e], ptr[entries + e], ptr[2 * entries + e], yg[e], yd[e]};
   }
+  // the parts past those taken, to `want`: zero rows (-1) - packed with the rest, the count n_sel's to the host
+  for (uint32_t i = n * NPU_TOKENS + threadIdx.x; i < want * NPU_TOKENS; i += blockDim.x) tok[i] = slot[i] = -1;
   __syncthreads();
   if (threadIdx.x == 0)
     for (uint32_t p = 0; p < n; p++) cnt[take[p]] = 0;

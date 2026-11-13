@@ -60,7 +60,7 @@ struct Npu {
   uint64_t a_bytes[NPU_KINDS] = {}, c_bytes[NPU_KINDS] = {};  // a part's A, and its rows' bytes, by kind
   Dma a;
   std::vector<Region> regions;  // the weights' host pages
-  std::vector<Dma> outputs;      // the GPU's buffers the rows go to (their dma-bufs)
+  std::vector<Dma> devs;         // GPU memory imported (dma-bufs): Qwen's weights, every engine's outputs
   std::vector<xrt::run> runs;
   NpuStats st{};
 };
@@ -83,7 +83,9 @@ static const struct {
 } kFormats[] = {  // GGUF's IQ2_XXS 16, IQ2_XS 17, IQ1_S 19, IQ2_S 22 (UD-IQ1_M's experts, every one)
     {"iq2xxs", NPU_GATE_UP, 16},      {"iq1s", NPU_GATE_UP, 19},      {"iq2xs", NPU_GATE_UP, 17},
     {"iq2xxs-down", NPU_DOWN, 16},    {"iq1s-down", NPU_DOWN, 19},    {"iq2xs-down", NPU_DOWN, 17},
-    {"iq2s-down", NPU_DOWN, 22}};
+    {"iq2s-down", NPU_DOWN, 22},
+    // Qwen's (its own shapes: a pack's npu/ names one model's set): IQ3_XXS 18, IQ2_S 22 gate + up, IQ4_NL 20 down
+    {"iq3xxs", NPU_GATE_UP, 18},      {"iq2s", NPU_GATE_UP, 22},      {"iq4nl-down", NPU_DOWN, 20}};
 
 extern "C" Npu* npu_open(const char* dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[NPU_ERR]) {
   Npu* n = nullptr;
@@ -132,25 +134,25 @@ extern "C" void npu_close(Npu* n) {
   n->a.bo = xrt::bo();
   if (n->a.fd >= 0) (void) hsa_amd_portable_close_dmabuf(n->a.fd);
   if (n->a.d) (void) hipFree(n->a.d);
-  for (Dma& o : n->outputs) {  // the GPU's buffers: imported, not the NPU's to free
+  for (Dma& o : n->devs) {  // the GPU's buffers: imported, not the NPU's to free
     o.bo = xrt::bo();
     if (o.fd >= 0) (void) hsa_amd_portable_close_dmabuf(o.fd);
   }
   delete n;
 }
 
-extern "C" bool npu_output(Npu* n, void* dev, uint64_t bytes, char err[NPU_ERR]) {
+extern "C" bool npu_device(Npu* n, void* dev, uint64_t bytes, char err[NPU_ERR]) {
   Dma o;
   uint64_t off = 0;
   if (hsa_amd_portable_export_dmabuf(dev, bytes, &o.fd, &off) != HSA_STATUS_SUCCESS || off)
-    return say(err, "an output's dma-buf export (not a whole hipMalloc)", nullptr), false;
+    return say(err, "GPU memory's dma-buf export (not a whole hipMalloc)", nullptr), false;
   try {
     o.d = dev, o.bo = xrt::bo(n->dev, (xrt::bo::export_handle) o.fd);
   } catch (const std::exception& e) {
     (void) hsa_amd_portable_close_dmabuf(o.fd);
-    return say(err, "an output's import", e.what()), false;
+    return say(err, "GPU memory's import", e.what()), false;
   }
-  n->outputs.push_back(std::move(o));
+  n->devs.push_back(std::move(o));
   return true;
 }
 
@@ -166,22 +168,22 @@ extern "C" bool npu_region(Npu* n, void* base, uint64_t bytes, char err[NPU_ERR]
 extern "C" void* npu_a(const Npu* n) { return n->a.d; }
 extern "C" NpuStats npu_stats(const Npu* n) { return n ? n->st : NpuStats{}; }
 
-// w's view in the region that holds all of its bytes
-static bool view(Npu* n, const void* w, uint64_t bytes, xrt::bo& out) {
-  const uint8_t* p = (const uint8_t*) w;
-  for (Region& r : n->regions)
-    if (p >= r.base && p + bytes <= r.base + r.bytes) return out = xrt::bo(r.bo, bytes, (size_t) (p - r.base)), true;
-  return false;
-}
-
-// c's view in the output that holds all of its bytes
-static bool out_view(Npu* n, const void* c, uint64_t bytes, xrt::bo& out) {
-  const uint8_t* p = (const uint8_t*) c;
-  for (Dma& o : n->outputs) {
+// x's view in the GPU memory imported that holds all of its bytes
+static bool dev_view(Npu* n, const void* x, uint64_t bytes, xrt::bo& out) {
+  const uint8_t* p = (const uint8_t*) x;
+  for (Dma& o : n->devs) {
     const uint8_t* b = (const uint8_t*) o.d;
     if (p >= b && p + bytes <= b + o.bo.size()) return out = xrt::bo(o.bo, bytes, (size_t) (p - b)), true;
   }
   return false;
+}
+
+// w's view: in the host region that holds all of its bytes, else in GPU memory imported
+static bool view(Npu* n, const void* w, uint64_t bytes, xrt::bo& out) {
+  const uint8_t* p = (const uint8_t*) w;
+  for (Region& r : n->regions)
+    if (p >= r.base && p + bytes <= r.base + r.bytes) return out = xrt::bo(r.bo, bytes, (size_t) (p - r.base)), true;
+  return dev_view(n, w, bytes, out);
 }
 
 extern "C" bool npu_run(Npu* n, NpuKind kind, uint32_t qtype, uint32_t parts, const void* const* w0,
@@ -199,7 +201,7 @@ extern "C" bool npu_run(Npu* n, NpuKind kind, uint32_t qtype, uint32_t parts, co
         return say(err, "an expert outside its regions", nullptr), false;
       if (kind == NPU_DOWN) y = x;  // the down kernel's second weight argument is unread
       xrt::bo a(n->a.bo, ab, p * ab), c, d;
-      if (!out_view(n, c0[p], cb, c) || (kind == NPU_GATE_UP && !out_view(n, c1[p], cb, d)))
+      if (!dev_view(n, c0[p], cb, c) || (kind == NPU_GATE_UP && !dev_view(n, c1[p], cb, d)))
         return say(err, "a part's rows outside the outputs", nullptr), false;
       if (kind == NPU_DOWN) d = c;  // the down kernel's second output is unwritten
       n->runs.push_back(kn->k(3u, kn->instr, kn->ninstr, x, y, a, c, d));

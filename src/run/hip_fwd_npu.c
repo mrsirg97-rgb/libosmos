@@ -44,9 +44,9 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]
       !npu_region(f->npu, hb, host_slots_bytes(f->hs), nerr) ||
       !npu_region(f->npu, sb, host_slots_bytes(f->hs_stream), nerr) ||
       /* where its rows go: the step's gate, up and down outputs (their sizes hip_forward.c's buffers()') */
-      !npu_output(f->npu, f->b.ga, pairs * g->expert_ff * sizeof(float), nerr) ||
-      !npu_output(f->npu, f->b.upr, pairs * g->expert_ff * sizeof(float), nerr) ||
-      !npu_output(f->npu, f->b.ye, pairs * g->n_embd * sizeof(float), nerr))
+      !npu_device(f->npu, f->b.ga, pairs * g->expert_ff * sizeof(float), nerr) ||
+      !npu_device(f->npu, f->b.upr, pairs * g->expert_ff * sizeof(float), nerr) ||
+      !npu_device(f->npu, f->b.ye, pairs * g->n_embd * sizeof(float), nerr))
   {
     npu_free(f);
     return fwd_fail(err, nerr);

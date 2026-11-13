@@ -50,10 +50,13 @@ typedef struct OsmosOptions
   bool stream_ngram;    /* Qwen's n-gram table read from its file a step at a time, not held in GPU memory (DeepSeek's
                            Engram always is) */
   const char *npu;      /* 0.7.0: the NPU's kernels' directory (forward_npu), or NULL: the GPU alone */
-  float npu_share;      /* its share of a prompt step's layer's pairs: 0 the default (OSMOS_NPU_SHARE) */
+  float npu_share;      /* its share of a prompt step's layer's pairs: 0 the model's default (OSMOS_NPU_SHARE_*) */
 } OsmosOptions;
 
-#define OSMOS_NPU_SHARE 0.15f /* the NPU's default share: its best measured (DESIGN.md, "0.7.0") */
+/* the NPU's default shares: each model's best measured, 8K prompts at performance (DESIGN.md, "0.7.0") - DeepSeek's
+   0.10 / 0.15 / 0.20: 641 / 642.5 / 635.5 tok/s (GPU 626); Qwen's 0.05 / 0.10 / 0.15: 962 / 966 / 924 (GPU 938) */
+#define OSMOS_NPU_SHARE_DS 0.15f
+#define OSMOS_NPU_SHARE_QWEN 0.10f
 
 /* the counters a bench and the server's stats read: zeros where a family has none */
 typedef struct OsmosStats

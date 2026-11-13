@@ -35,7 +35,8 @@ typedef struct NpuPart
 /* the first `want` whole (NPU_TOKENS) entries of the tables' 128-token run [first, first + count), in table order: their
    counts zeroed (mm_group skips them), each's weights and offsets to sel (the host's), their count to n_sel, their
    tokens' rows (gidx, the gate's and up's input) to tok and their slots (the down's input, x16's) to slot - each
-   [part][NPU_TOKENS]. ptr the tables' weights ([gate, up, down][entries]); D, ff the tokens' and slots' widths */
+   [part][NPU_TOKENS], the parts past them to want -1 (zero rows: a pack of want parts, before the host knows n_sel).
+   ptr the tables' weights ([gate, up, down][entries]); D, ff the tokens' and slots' widths */
 bool npu_select_q4x(int32_t *cnt, uint32_t first, uint32_t count, uint32_t want, const void *const *ptr,
                     uint32_t entries, const uint32_t *xg, const uint32_t *yg, const uint32_t *xd, const uint32_t *yd,
                     const int32_t *gidx, uint32_t D, uint32_t ff, NpuPart *sel, uint32_t *n_sel, int32_t *tok,

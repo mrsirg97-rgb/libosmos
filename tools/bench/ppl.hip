@@ -19,6 +19,7 @@ extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/run/forward.h"
+#include "osmos/run/engine.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -67,7 +68,7 @@ int main(int argc, char** argv) {
   if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
   CHECK(forward_lane(f, 0, NULL, ferr));
   if (const char* nd = std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu), NPU_SHARE of a layer's pairs
-    if (!forward_npu(f, nd, std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : 0.15f, ferr))
+    if (!forward_npu(f, nd, std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr))
       std::fprintf(stderr, "forward_npu: %s\n", ferr), std::_Exit(1);
   Seq* s = seq_create(f, ferr);
   CHECK(s);

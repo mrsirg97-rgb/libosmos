@@ -339,6 +339,7 @@ void q4x_forward_destroy(Q4xForward *f)
   if (!f)
     return;
   (void)hipDeviceSynchronize(); /* a failed step's kernels done: the experts' host memory is unmapped below */
+  q4x_npu_destroy(f);            /* its imports of the buffers and weights first: freed below */
   membrane_destroy(f->mem); /* its readers stopped, then its memory */
   host_slots_destroy(f->exp_slots), host_slots_destroy(f->exp_stream);
   for (int i = 0; f->exp_fds && i < f->w->model->n_files; i++)

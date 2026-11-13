@@ -242,7 +242,7 @@ int main(int argc, char** argv) {
     z->o.budget = budget;
     bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, z->cpu_pin, ferr);
     if (ok && std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu): NPU=<its kernel's dir>, NPU_SHARE
-      ok = forward_npu(z->f, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : 0.15f, ferr);
+      ok = forward_npu(z->f, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr);
     if (ok && std::getenv("DRAFT")) ok = (g_draft = drafter_create(z->f, std::getenv("DRAFT"), ferr)) != nullptr;
     Seq* s = ok ? seq_create(z->f, ferr) : nullptr;  // an answer's sequence counted, then let go
     ok = ok && s && forward_room(z->f, room);

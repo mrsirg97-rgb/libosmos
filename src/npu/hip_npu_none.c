@@ -22,7 +22,7 @@ bool npu_region(Npu *n, void *base, uint64_t bytes, char err[NPU_ERR])
 }
 
 void *npu_a(const Npu *n) { return (void)n, NULL; }
-bool npu_output(Npu *n, void *dev, uint64_t bytes, char err[NPU_ERR])
+bool npu_device(Npu *n, void *dev, uint64_t bytes, char err[NPU_ERR])
 {
   (void)n, (void)dev, (void)bytes;
   snprintf(err, NPU_ERR, "npu: not built");

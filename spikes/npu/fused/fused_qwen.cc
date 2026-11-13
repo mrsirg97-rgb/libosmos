@@ -58,12 +58,12 @@ static inline uint32_t u32_at(const uint8_t *p) {
 #if QFMT == 0
 // IQ4_NL: block b (of 8) of a K-step holds octets 4b .. 4b + 3: its 16 bytes' low nibbles (values 0-15) then high
 // (16-31); a row's two fetches give both, an octet one 8-lane slice of them
-static void decode_tile(const uint8_t *__restrict w) {
+static void decode_tile(const uint8_t *__restrict w, int kh_lo = 0, int kh_hi = 2) {
   using lut_t = aie::lut<4, bfloat16, bfloat16>;
   const lut_t llo(256, lut_lo_ab, lut_lo_cd), lhi(256, lut_hi_ab, lut_hi_cd);
   aie::parallel_lookup<uint8, lut_t, aie::lut_oor_policy::truncate> plo(llo, 0), phi(lhi, 0);
   aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
-  for (int kh = 0; kh < 2; kh++)
+  for (int kh = kh_lo; kh < kh_hi; kh++)
     for (int j = 0; j < NR / 8; j++)
       for (int b = 4 * kh; b < 4 * kh + 4; b++) {
         aie::vector<bfloat16, 32> v[8];
@@ -308,6 +308,26 @@ static void decode_tile(const uint8_t *__restrict w) {
         }
       }
     }
+}
+#endif
+
+#ifdef HSTEP
+#if QFMT != 0
+#error "HSTEP: IQ4_NL's (QFMT 0) alone"
+#endif
+// a K half a step (fused_ds.py HSTEP: Qwen's down, K 640 - no whole 256): its NR rows' blocks of it decoded at the first
+// token half (decode_tile's one half, Bm's first), C (2 halves of 64 x NR f32) zeroed at the first; ROWMAJOR the steps
+extern "C" void fused_step_h(const uint8_t *__restrict w, uint8_t *__restrict a, float *__restrict c, int32_t hstep,
+                             int32_t mhalf) {
+  float *ch = c + mhalf * (64 * NR);
+  if (hstep == 0)
+    for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
+  if (mhalf == 0) decode_tile(w + BLK / 2 * hstep, 0, 1);
+  mm_f32acc<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)Bm, ch);
+#ifdef ROWMAJOR
+  if (hstep == ROWMAJOR - 1 && mhalf == 1)
+    for (int h = 0; h < 2; h++) c_rows<NR>(c + h * (64 * NR), (float *)Bm);
+#endif
 }
 #endif
 

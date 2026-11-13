@@ -23,6 +23,7 @@
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/q4x/forward.h"
+#include "osmos/run/engine.h"
 #include "osmos/q4x/weights.h"
 #include "osmos/run/gpu.h"
 }
@@ -98,6 +99,10 @@ int main(int argc, char** argv) {
 
   const Q4xOptions qo = {ctx, step, std::getenv("STREAM") != nullptr, nullptr, 0, nullptr};
   Q4xForward* fw = q4x_forward_create_with(w, nullptr, &qo, ferr);
+  // 0.7.0: the NPU beside the GPU (q4x_forward_npu): NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
+  if (fw && std::getenv("NPU") &&
+      !q4x_forward_npu(fw, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN, ferr))
+    q4x_forward_destroy(fw), fw = nullptr;
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) std::fprintf(stderr, "q4x forward: %s\n", ferr), std::_Exit(1);
   std::vector<float> lg((size_t) step * V), rl(V);

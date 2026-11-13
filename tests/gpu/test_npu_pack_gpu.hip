@@ -133,8 +133,8 @@ static void pack16_case(uint32_t K, uint32_t rows, uint32_t parts) {
 }
 
 // Qwen's selection over a table of entries whose 128-token run is [first, first + count)
-static void select_case() {
-  const uint32_t entries = 40, first = 25, count = 12, D = 64, ff = 32, want = 3;
+static void select_case(uint32_t want) {
+  const uint32_t entries = 40, first = 25, count = 12, D = 64, ff = 32;
   std::vector<int32_t> cnt(entries, 16);
   const int32_t run[12] = {128, 90, 128, 128, 0, 128, 128, 64, 128, 1, 128, 128};  // whole: 25, 27, 28, 30, ..
   for (uint32_t i = 0; i < count; i++) cnt[first + i] = run[i];
@@ -158,18 +158,22 @@ static void select_case() {
   const std::vector<int32_t> c2 = host_of(dc, entries), t2 = host_of(dt, want * 128), s2 = host_of(ds, want * 128);
   const std::vector<NpuPart> sel = host_of(dsel, want);
   const std::vector<uint32_t> n = host_of(dn, 1);
-  const uint32_t taken[3] = {25, 27, 28};
-  CHECK(n[0] == 3);
-  for (uint32_t p = 0; p < 3; p++) {
+  const uint32_t whole[8] = {25, 27, 28, 30, 31, 33, 35, 36}, got = want < 8 ? want : 8;
+  const uint32_t* taken = whole;
+  CHECK(n[0] == got);
+  for (uint32_t p = 0; p < got; p++) {
     const uint32_t e = taken[p];
     CHECK(c2[e] == 0 && (uintptr_t) sel[p].gate == 0x1000 + e && (uintptr_t) sel[p].up == 0x2000 + e &&
           (uintptr_t) sel[p].down == 0x3000 + e && sel[p].yg == yg[e] && sel[p].yd == yd[e]);
     for (uint32_t t = 0; t < 128; t++)
       CHECK(t2[p * 128 + t] == gidx[e * 128 + t] && s2[p * 128 + t] == (int32_t) (e * 128 + t));
   }
+  for (uint32_t i = got * 128; i < want * 128; i++)  // the parts past those taken: zero rows
+    CHECK(t2[i] == -1 && s2[i] == -1);
   for (uint32_t e = 0; e < entries; e++)  // every other entry's count as it was
-    CHECK(e == 25 || e == 27 || e == 28 || c2[e] == cnt[e]);
-  std::printf("select: entries 25, 27, 28 of the run's whole ones (in order, %u wanted), their counts zeroed alone\n", want);
+    CHECK((e >= first && e < first + count && cnt[e] == 128 && e <= whole[got - 1]) ? c2[e] == 0 : c2[e] == cnt[e]);
+  std::printf("select: the run's first %u whole entries (in order, %u wanted), their counts zeroed alone, the rest "
+              "zero rows\n", got, want);
   (void) hipFree(dc), (void) hipFree(dg), (void) hipFree(dt), (void) hipFree(ds), (void) hipFree(dp), (void) hipFree(dsel);
   (void) hipFree(dxg), (void) hipFree(dyg), (void) hipFree(dxd), (void) hipFree(dyd), (void) hipFree(dn);
 }
@@ -180,7 +184,8 @@ int main() {
   pack_case(5120, 300, 3);  // gate + up's input
   pack_case(2304, 300, 2);  // the down's
   pack16_case(640, 300, 2);  // Qwen's down's, in K halves
-  select_case();
+  select_case(3);
+  select_case(10);  // more wanted than whole: 8 taken, 2 parts of zero rows
   CHECK(!npu_pack_a(nullptr, 5000, nullptr, 1, nullptr, nullptr));     // a K not whole K-steps
   CHECK(!npu_pack_a_x16(nullptr, 600, nullptr, 1, true, nullptr, nullptr));
   CHECK(!npu_select_q4x(nullptr, 0, 0, NPU_SELECT_MAX + 1, nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, 1, 1,

@@ -69,6 +69,12 @@ uint64_t q4x_identity(const Q4xForward *f)
   for (int l = 0; l < g->n_layers; l++)
     h = fnv_u64(g->recurrent[l], h);
   h = fnv(&f->rope, sizeof f->rope, h); /* YaRN's or the plain rotation: another context's numbers another model's */
+  if (f->npu) /* the NPU's sums its own, its parts by its share (q4x_forward_npu): another's states */
+  {
+    uint32_t share;
+    memcpy(&share, &f->npu_share, sizeof share);
+    h = fnv_u64(0x4e50550000000000ull | share, h);
+  }
   const Gguf *files[2] = {f->w->model, f->w->overlay}; /* with an overlay or without: another model's states */
   for (int k = 0; k < 2 && files[k]; k++)
     for (int i = 0; i < files[k]->n_files; i++) /* each file's name and size */
