@@ -3540,6 +3540,31 @@ shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token)
 kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
 out), local only.
 
+### 0.7.2: IQ1_S's f16 decode (2026-11-13)
+
+**why IQ1_S.** the expert decoders at 1-16 tokens an expert are decode-bound (the kernel pass, 0.6.x): IQ1_S ~60 GB/s
+through mm_group against IQ2_XXS's ~115 - the slowest a value (~307 Gvalues/s against ~446). decode_h<kIQ1_S> took the
+generic path: a value decoded in F32 (a signed byte, + delta, x dl), then f16. **the fast path** (kernels/quant.h
+iq1_h): a value is dl (g + delta), g of {-1, 0, 1}; g + delta is k/8 (k of 1, 7, 9: 4 bits) and dl an f16 times an odd
+1..15 (15 bits), so each product is exact in F32 and rounded once - a chunk's 8 values are three f16 values, made
+once, each value's bits copied by v_perm (a grid byte c's half offset (c << 1) & 6). decode<T>'s bits
+(test_quant_gpu, 3,670,016 IQ1_S values); mm_group's IQ1_S +6-10% (ds_small, interleaved, low-power); IQ1_M has the
+same math but no model here holds it (no reference): its generic path kept.
+
+**what holds IQ1_S, still** (rocprofv3 counters, mm_group, the same shapes): after the fast path IQ1_S executes
+IQ2_XXS's VALU (9.79e10 against 9.55e10) yet takes 58% longer - its VALU busy ~29% against ~45%, L0 misses 17%
+against 12%. **measured away again: the grid at 2 bits a value** (4 KB, not 16: a field sign-extended is the value, its
+f16 offset the field doubled) - no gain on mm (57 against the fast path's 60) or mv (the same): the table's size is
+not it. the next look is per-instruction stalls (a thread trace); the suspect is IQ1_S's sub-word loads (a byte and an
+unaligned u16 a chunk from a 50-byte block).
+
+**the NPU at low-power** (spikes: ~/bench/npu-072): Qwen UD-IQ3_XXS's 8K prompt, two rounds - GPU 859 / 855 tok/s,
+0.05 860 / 859 (0.085 against 0.087 J a token), 0.10 neutral, 0.15 -5%, 0.35 -17%: the package's ~74 W shared, the
+NPU's watts the GPU's. UD-IQ1_M (100 GiB, 16K): 0.10 +1.5%, 0.15 0 to +2.5%, 0.25 -5% (the GPU idle 1.3 s on the
+NPU). osmos-evo-A (auto, 64K): 0.15 +2.8% at 8K (535-536 against 519-523), the GPU never idle on it - its Q2_K-down
+layers 20-39 have no NPU kernels, so the NPU's work is less. the NPU's own power mode (xrt-smi --pmode performance)
+changed nothing (the host's wait 3,838 ms against 3,808): the package bounds it, not the NPU's clock.
+
 ### 0.7.1: an audit of the runtime (2026-11-13)
 
 **how.** five reviews of the code, a layer each (osmos-api; the text layer; serve, slots and the protocol; memory and

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.2]: IQ1_S's prompt decode, faster
+
+- **IQ1_S's experts decode 6-10% faster in prompt steps**, the same bits. IQ1_S was the slowest expert type a value
+  (60 GB/s through mm_group against IQ2_XXS's 115): it took the generic path, a value at a time in F32. A value is
+  dl (g + delta) with g of -1, 0 or 1, so a chunk's 8 values are three exact products rounded once - made once, each
+  value's bits then copied by a byte permute. In DeepSeek's UD packs and osmos-evo-A (their gate / up). osmos-evo-A
+  at `performance`: prompts 373-380 -> 384-385 tok/s at 2K and 604-607 -> 620 at 8K on the GPU (with the NPU 630-635
+  -> 644-647); decode unchanged (19.0 / 35.3 tok/s against 18.9 / 35.6 plain / drafted) - it reads the experts
+  through other decoders. The README's osmos-evo-A table has these; its others stay 0.7.0's.
+- **Measured, not changed**: the NPU at low-power. On Qwen it no longer pays past a 0.05 share; on osmos-evo-A the
+  default 0.15 still gives +2.8% on an 8K prompt for the same power. The NPU's own power mode (`xrt-smi --pmode`)
+  changes nothing: the package's power, shared by the CPU, GPU and NPU, is what bounds it. A 2-bit IQ1_S grid (4 KB,
+  not 16) was tried again beside the new decode and gave nothing: the table is not what holds IQ1_S.
+
 ## [0.7.1]: an audit of the runtime - the protocol's edges, the state between requests, the shared facts
 
 - **DeepSeek's answer no longer depends on what came before it.** A turn read whole and the same turn continued after
