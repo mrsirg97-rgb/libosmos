@@ -126,18 +126,22 @@ bool membrane_warm(Membrane *m, char err[MEMBRANE_ERR])
     return fail(err, kBroken);
   const size_t n = m->n_warm;
   m->n_warm = 0; /* once, read or refused */
-  for (size_t k = 0; k < n; k++)
-    if (pool_pin(m->pool, m->warm[k], (const void *[POOL_PARTS]){0}) == POOL_FULL)
-      return fail(err, "an expert the budget holds the pool could not");
-  while (n && pool_reading(m->pool))
-    if (!pump(m, true, err))
-      return false;
-  for (size_t k = 0; k < n; k++)
+  size_t pinned = 0;
+  bool ok = true;
+  for (; ok && pinned < n; pinned++)
+    if (pool_pin(m->pool, m->warm[pinned], (const void *[POOL_PARTS]){0}) == POOL_FULL)
+      ok = fail(err, "an expert the budget holds the pool could not");
+  if (!ok)
+    pinned--; /* the one refused holds nothing */
+  while (ok && n && pool_reading(m->pool))
+    ok = pump(m, true, err);
+  for (size_t k = 0; ok && k < n; k++)
     if (pool_state(m->pool, m->warm[k]) != POOL_PINNED)
-      return fail(err, "an expert's read from its file failed");
-  for (size_t k = n; k-- > 0;)
+      ok = fail(err, "an expert's read from its file failed");
+  for (size_t k = pinned; k-- > 0;) /* every hold the warm start took ended, refused or not (0.7.1: a refusal kept
+                                       them, the room held for good) */
     pool_release(m->pool, m->warm[k], 0);
-  return true;
+  return ok;
 }
 
 /* the visit's holds ended */

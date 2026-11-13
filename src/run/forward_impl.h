@@ -250,6 +250,7 @@ struct Seq
   int32_t dec_from;   /* the first position whose decoder state is kept: every one from it to pos */
   int32_t last[ENGRAM_MAX_NGRAM + SEQ_MAX_BACK]; /* last[0] the newest: the n-gram's, and seq_rollback's depth */
   int n_last;
+  bool broken; /* a step that failed once placed: last[] its tokens, pos not - refused until reset or loaded (0.7.1) */
   uint8_t *ring[WEIGHTS_MAX_LAYERS];                             /* KV_FP8 rows (kvfmt.h) */
   uint8_t *ckv[WEIGHTS_MAX_LAYERS], *ik[WEIGHTS_MAX_LAYERS];     /* KV_FP4_E4M3, KV_FP4_POW2 rows */
   float *pend_kvc[WEIGHTS_MAX_LAYERS], *pend_sc[WEIGHTS_MAX_LAYERS];

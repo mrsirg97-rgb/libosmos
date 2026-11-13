@@ -310,6 +310,35 @@ static void test_warm(void)
   printf("  the warm start: read in before the first visit, the first named the last to go\n");
 }
 
+/* a warm start whose read fails (its file cut short after create): refused, and the units it did read held no longer
+   - the room whole for the next request's visits (0.7.1: the pins it took stayed, every later step refused) */
+static void test_warm_failed(void)
+{
+  char path[512], err[MEMBRANE_ERR] = "";
+  snprintf(path, sizeof path, "%s/short.bin", dir);
+  FILE *f = fopen(path, "wb");
+  assert(f);
+  for (uint64_t i = 0; i < 2 * UNIT; i++)
+    fputc(byte_at(i), f);
+  fclose(f);
+  const int fd = open(path, O_RDWR);
+  assert(fd >= 0);
+  const uint32_t warm[] = {E + 5, 2 * E + 1, 3 * E + 2};
+  const PoolUnit kept = units[warm[2]];
+  for (int k = 0; k < PARTS; k++)
+    units[warm[2]].part[k] = (PoolRange){fd, part_offset(0, k), part_bytes[k]};
+  Membrane *m = make(3, 4, warm, 3);
+  assert(ftruncate(fd, 1) == 0); /* the read of warm[2] fails */
+  assert(!membrane_warm(m, err) && strstr(err, "read"));
+  units[warm[2]] = kept;
+  visit(m, 0, false); /* the whole room held by one visit: none of it still the warm start's */
+  take(m, 0), take(m, 1), take(m, 2);
+  membrane_end(m);
+  membrane_destroy(m);
+  close(fd);
+  printf("  a warm start's failed read: refused, the room whole again for the next visit\n");
+}
+
 /* a membrane with room for every unit, all of them warm: whole - every unit's pointers there, the same ones after
    visits that hold them; a room one unit short, or the warm start not yet read: not whole */
 static void test_whole(void)
@@ -413,6 +442,7 @@ int main(void)
     test_copy_fails();
     test_guess();
     test_warm();
+    test_warm_failed();
     test_whole();
     test_full();
     test_walk();

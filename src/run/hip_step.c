@@ -237,7 +237,23 @@ static bool fail_held(Forward *f)
   return false;
 }
 
+static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[FORWARD_ERR]);
+
+/* a step; one that fails once its tokens are placed leaves each sequence's n-gram history (last[]) past its position:
+   the sequence broken - refused until it is reset or loaded - not stepped again on a phantom history (0.7.1) */
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
+{
+  for (uint32_t i = 0; i < n; i++)
+    if (seqs[i] && seqs[i]->broken)
+      return fwd_fail(err, "a sequence a failed step left (its history past its position): reset or load it");
+  bool placed = false;
+  const bool ok = batch(f, seqs, tokens, n, &placed, err);
+  for (uint32_t i = 0; !ok && placed && i < n; i++)
+    seqs[i]->broken = true;
+  return ok;
+}
+
+static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[FORWARD_ERR])
 {
   const Geometry *g = f->g;
   if (!n || n > f->max_tokens)
@@ -246,6 +262,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return false;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
+  *placed = true; /* (place may fail part-way through its histories: placed either way) */
   if (!place(f, seqs, tokens, n, err) || !fwd_engram_issue(f, err))
     return false;
   f->hcp_next = false;
@@ -336,7 +353,7 @@ uint32_t seq_reach(const Seq *s)
 
 bool seq_rollback(Seq *s, uint32_t n)
 {
-  if (!s || n > SEQ_MAX_BACK || (int)n > s->n_last || (int64_t)s->pos - n < (int64_t)s->prompt_end)
+  if (!s || s->broken || n > SEQ_MAX_BACK || (int)n > s->n_last || (int64_t)s->pos - n < (int64_t)s->prompt_end)
     return false;
   const int cap = ENGRAM_MAX_NGRAM + SEQ_MAX_BACK;
   memmove(s->last, s->last + n, (size_t)(cap - (int)n) * sizeof *s->last);

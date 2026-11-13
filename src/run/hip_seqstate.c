@@ -183,7 +183,7 @@ bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
    state written by its step) */
 static void reset(Seq *s)
 {
-  s->pos = 0, s->prompt_end = 0, s->staged = 0, s->dec_from = 0, s->n_last = 0;
+  s->pos = 0, s->prompt_end = 0, s->staged = 0, s->dec_from = 0, s->n_last = 0, s->broken = false;
   memset(s->last, 0, sizeof s->last);
 }
 
@@ -243,5 +243,6 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
     return refuse(s, err, "a damaged state (its checksum)");
   s->prompt_end = h.prompt_end, s->dec_from = h.dec_from, s->n_last = h.n_last, s->staged = 0;
   memcpy(s->last, h.last, sizeof s->last);
+  s->broken = false;
   return true;
 }

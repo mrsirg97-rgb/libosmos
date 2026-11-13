@@ -434,17 +434,17 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
       hipEventCreateWithFlags(&f->e_inj, hipEventDisableTiming) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_gates, hipEventDisableTiming) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_ix, hipEventDisableTiming) != hipSuccess)
-    return q4x_fail(err, "a stream or event refused"), free(f), NULL;
+    return q4x_fail(err, "a stream or event refused"), q4x_forward_destroy(f), NULL; /* (0.7.1: free(f) leaked them) */
   if (!df_ok)
     return q4x_fail(err, "a drafter not of these weights, its codebooks not Q8_0, or its taps not tap_layers"),
            q4x_forward_destroy(f), NULL;
   if (!taps_ok)
     return q4x_fail(err, "tap layers past the model's, out of order, or more than Q4X_MAX_TAPS"), q4x_forward_destroy(f), NULL;
   if (!(f->sub_seq = calloc(Q4X_MAX_RUNS, sizeof *f->sub_seq)))
-    return q4x_fail(err, "out of memory"), free(f), NULL;
+    return q4x_fail(err, "out of memory"), q4x_forward_destroy(f), NULL;
   if (!q4x_rope((uint32_t)w->geo.rope_dim, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))
-    return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), free(f->sub_seq),
-           free(f), NULL;
+    return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), q4x_forward_destroy(f),
+           NULL;
   const GgufTensor *skip = f->stream_ngram ? w->ple_table : NULL;
   /* the weights' bytes - every file's tensors (but an overlay's stand-ins' and a streamed table) - against the
      memory left, before any is read: a forward that cannot fit takes nothing */
