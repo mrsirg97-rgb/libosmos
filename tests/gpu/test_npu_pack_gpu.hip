@@ -13,6 +13,8 @@
 #include <cstring>
 #include <vector>
 
+#include "mm.h"  // kernels/: mm::x16_at, the experts' f16 layout
+
 extern "C" {
 #include "osmos/gpu/npu_pack.h"
 }
@@ -27,7 +29,7 @@ extern "C" {
 
 static uint32_t seed = 1017;
 static uint32_t next() { return seed = seed * 1664525u + 1013904223u; }
-static float rnd() { return (float) ((next() >> 8) & 0xFFFF) / 32768.0f - 1.0f; }
+static float uniform() { return (float) ((next() >> 8) & 0xFFFF) / 32768.0f - 1.0f; }
 
 template <typename T>
 static T* dev_of(const std::vector<T>& h) {
@@ -82,7 +84,7 @@ static std::vector<uint8_t> pack_ref(const std::vector<float>& x, uint32_t K, co
 
 static void pack_case(uint32_t K, uint32_t rows, uint32_t parts) {
   std::vector<float> x((size_t) rows * K);
-  for (auto& v : x) v = rnd() * std::ldexp(1.0f, (int) (next() % 40) - 20);
+  for (auto& v : x) v = uniform() * std::ldexp(1.0f, (int) (next() % 40) - 20);
   // the cases the rounding turns on, in the first rows' first blocks
   const float cases[][8] = {
       {0, 0, 0, 0, 0, 0, 0, 0},                                 // a zero block
@@ -111,12 +113,16 @@ static void pack_case(uint32_t K, uint32_t rows, uint32_t parts) {
   (void) hipFree(dx), (void) hipFree(dt), (void) hipFree(da);
 }
 
-// Qwen's down's input: f16 rows (the swiglu's x16 slots), packed in K halves - against the same reference, its values
-// the f16's
+// Qwen's down's input: the swiglu's x16 slots - mm's tiled f16 activations (mm::x16_at: 16 x 16 fragments, as WMMA
+// reads them), not rows - packed in K halves, against the same reference, its values the f16's
 static void pack16_case(uint32_t K, uint32_t rows, uint32_t parts) {
   std::vector<_Float16> x16((size_t) rows * K);
   std::vector<float> x((size_t) rows * K);
-  for (size_t i = 0; i < x.size(); i++) x16[i] = (_Float16) (rnd() * 4), x[i] = (float) x16[i];
+  for (uint32_t r = 0; r < rows; r++)
+    for (uint32_t c = 0; c < K; c++) {
+      const _Float16 v = (_Float16) (uniform() * 4);
+      x16[mm::x16_at(r, c, K)] = v, x[(size_t) r * K + c] = (float) v;
+    }
   std::vector<int32_t> slot(parts * NPU_TOKENS);
   for (uint32_t t = 0; t < slot.size(); t++) slot[t] = (int32_t) (next() % rows);
   _Float16* dx = dev_of(x16);
@@ -183,7 +189,7 @@ int main() {
   if (hipGetDeviceCount(&n) != hipSuccess || n == 0) return std::printf("no GPU: skipped\n"), 77;
   pack_case(5120, 300, 3);  // gate + up's input
   pack_case(2304, 300, 2);  // the down's
-  pack16_case(640, 300, 2);  // Qwen's down's, in K halves
+  pack16_case(640, 304, 2);  // whole 16-row tiles, as the slots are  // Qwen's down's, in K halves
   select_case(3);
   select_case(10);  // more wanted than whole: 8 taken, 2 parts of zero rows
   CHECK(!npu_pack_a(nullptr, 5000, nullptr, 1, nullptr, nullptr));     // a K not whole K-steps

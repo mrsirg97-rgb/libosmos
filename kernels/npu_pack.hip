@@ -4,6 +4,7 @@
 #include <hip/hip_runtime.h>
 
 #include "launch.h"
+#include "mm.h"
 
 extern "C" {
 #include "osmos/gpu/npu_pack.h"
@@ -18,8 +19,14 @@ using launches::st;
 
 constexpr uint32_t kPiece = 64 * 128 * 9 / 8; // a 64 x 128 piece's bytes
 
-// a thread a block of 8 values: part p, token row m, block kb along K. x f32 or f16 rows, rows[p * NPU_TOKENS + m] the
-// part's token m's (-1 a zero row); halves: the pieces [K half][token half] (Qwen's down: K no whole 256), else
+// x's value (row, column): f32 rows, or mm's tiled f16 activations (mm::x16_at - the experts' x16, as WMMA reads it)
+__device__ inline float at(const float* x, int32_t row, uint32_t c, uint32_t K) { return x[(uint64_t) row * K + c]; }
+__device__ inline float at(const _Float16* x, int32_t row, uint32_t c, uint32_t K) {
+  return (float) x[mm::x16_at((uint32_t) row, c, K)];
+}
+
+// a thread a block of 8 values: part p, token row m, block kb along K. rows[p * NPU_TOKENS + m] the part's token m's
+// row of x (-1 a zero row); halves: the pieces [K half][token half] (Qwen's down: K no whole 256), else
 // [K-step][token half][K half]
 template <typename T>
 __global__ void pack_kernel(const T* x, uint32_t K, const int32_t* rows, uint32_t parts, bool halves, uint8_t* dst) {
@@ -31,7 +38,7 @@ __global__ void pack_kernel(const T* x, uint32_t K, const int32_t* rows, uint32_
   float v[8];
   uint32_t e = 0;
   for (int j = 0; j < 8; j++) {
-    v[j] = row < 0 ? 0.0f : (float) x[(uint64_t) row * K + kb * 8 + j];
+    v[j] = row < 0 ? 0.0f : at(x, row, kb * 8 + j, K);
     const uint32_t ej = (__float_as_uint(v[j]) >> 23) & 0xFF;
     e = ej > e ? ej : e;
   }

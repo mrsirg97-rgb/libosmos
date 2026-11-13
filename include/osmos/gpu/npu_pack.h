@@ -18,8 +18,8 @@ static inline uint64_t npu_a_bytes(uint32_t K) { return (uint64_t)NPU_TOKENS * K
    one where a mantissa would round past 127 (as the core converts) */
 bool npu_pack_a(const float *x, uint32_t K, const int32_t *tok, uint32_t parts, uint8_t *dst, void *stream);
 
-/* parts' A from f16 rows (Qwen's swiglu output, its down's input: x16 slots, rows[] each part's), halves: the pieces in
-   128-value K halves ([K half][token half]: its down's K 640 no whole 256), else as npu_pack_a's */
+/* parts' A from mm's f16 activations (tiled as WMMA reads them, mm.h's x16_at: Qwen's swiglu output, its down's
+   input - x16 slots, rows[] each part's), halves: the pieces in 128-value K halves ([K half][token half]: its down's K 640 no whole 256), else as npu_pack_a's */
 bool npu_pack_a_x16(const void *x16, uint32_t K, const int32_t *rows, uint32_t parts, bool halves, uint8_t *dst,
                     void *stream);
 
