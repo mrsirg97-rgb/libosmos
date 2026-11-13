@@ -5,6 +5,8 @@ fetched at its pinned commit (`fetch(entry) -> path`); ours not yet published an
 a table's stamp: one the installer fetched is stamped in place; a user's of another stamp than the slot is copied
 (a reflink where the filesystem has them) under <models>/engram/ and the copy stamped - never a user's file written."""
 import json
+import shutil
+import tarfile
 import os
 import re
 import subprocess
@@ -30,7 +32,7 @@ def _resolve(m, fid, have, trust_size, fetch, found=None):
     p = (found or {}).get(fid) or (userfiles.find(e, have, trust_size) if have else None)
     if p:
         return p, False
-    if e["revision"] is None:
+    if e.get("revision", "") is None:
         raise LayoutError(f"{fid} ({e['path']}): not published yet and not among your files")
     if fetch is None:
         raise LayoutError(f"{fid} ({e['path']}): not among your files, and fetching is off")
@@ -123,8 +125,31 @@ def _table(m, pack, models, have, trust_size, fetch, first, found):
     return src, _SHARD.sub(f"-{no:05d}-of-{count:05d}", first)
 
 
-def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None):
-    """the pack's folder made; the path of its osmos.json"""
+def _npu(tar, out):
+    """the kernels' tarball unpacked into out (a directory a format and kind): its members plain files and directories
+    under it, or refused with none of it written - no link, no absolute path, no .. """
+    with tarfile.open(tar) as t:
+        members = t.getmembers()
+        for x in members:
+            parts = x.name.split("/")
+            if not (x.isfile() or x.isdir()) or x.name.startswith("/") or ".." in parts:
+                raise LayoutError(f"{os.path.basename(tar)}: {x.name!r} is not a plain file under it - not unpacked")
+        tmp = out + ".new"
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
+        for x in members:
+            if x.isdir():
+                os.makedirs(os.path.join(tmp, x.name), exist_ok=True)
+                continue
+            os.makedirs(os.path.dirname(os.path.join(tmp, x.name)), exist_ok=True)
+            with t.extractfile(x) as src, open(os.path.join(tmp, x.name), "wb") as dst:
+                shutil.copyfileobj(src, dst)
+    shutil.rmtree(out, ignore_errors=True)
+    os.rename(tmp, out)
+
+
+def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None, npu=False):
+    """the pack's folder made; the path of its osmos.json. npu: its NPU kernels unpacked and named (0.7.0)"""
     pack = m["packs"][pid]
     out = os.path.join(models, pid)
     os.makedirs(out, exist_ok=True)
@@ -162,6 +187,12 @@ def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None):
                else _resolve(m, oid, have, trust_size, fetch, found)[0])
         cfg["overlay"] = os.path.join(out, os.path.basename(m["files"][oid]["path"]))
         _link(src, cfg["overlay"])
+    if npu:
+        if not pack.get("npu"):
+            raise LayoutError(f"pack {pid} has no NPU kernels (npu): the GPU alone runs it")
+        src, _ = _resolve(m, pack["npu"], have, trust_size, fetch, found)
+        cfg["npu"] = os.path.join(out, "npu")
+        _npu(src, cfg["npu"])
     cfg.update(pack["settings"])
     path = os.path.join(out, "osmos.json")
     with open(path, "w", encoding="utf-8") as f:

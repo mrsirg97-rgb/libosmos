@@ -86,11 +86,12 @@ def plan(m, ids, have, trust_size):
         if p:
             found[fid] = p
             print(f"  have   {fid:16s} {p}")
-        elif e["revision"] is None:
+        elif e.get("revision", "") is None:
             raise SystemExit(f"{fid} ({e['path']}): not published yet and not among your files (--have)")
         else:
             fetch_ids.append(fid)
-            print(f"  fetch  {fid:16s} {e['repo']}/{e['path']} ({e['bytes'] / 1e9:.1f} GB)")
+            where = f"release {e['release']}" if "release" in e else e["repo"]
+            print(f"  fetch  {fid:16s} {where}/{e['path']} ({e['bytes'] / 1e9:.1f} GB)")
     return found, fetch_ids
 
 
@@ -119,6 +120,8 @@ def main():
     ap.add_argument("--trust-size", action="store_true",
                     help="take your large files by bytes alone (small ones are hashed still)")
     ap.add_argument("--abliterated", action="store_true", help="the abliteration overlay (huihui-ai), opt-in")
+    ap.add_argument("--npu", action="store_true",
+                    help="the NPU beside the GPU for prompts (0.7.0, opt-in): its kernels fetched, osmos built with it")
     ap.add_argument("--rig", action="store_true", help="register each pack in rig (~/.rig/models.json)")
     ap.add_argument("--rig-home", default=os.environ.get("RIG_HOME", os.path.expanduser("~/.rig")))
     ap.add_argument("--rig-default", choices=("yes", "no", "ask"), default="ask")
@@ -151,8 +154,14 @@ def main():
     print("the machine:")
     if not (check(host.gpu()) & check(host.gpu_memory())):
         raise SystemExit("not a machine osmos runs on as it is: the lines above say why")
+    if a.npu:
+        if not check(host.npu()):
+            raise SystemExit("--npu: no NPU osmos can use here - the line above says why (without --npu the GPU runs it)")
+        for pid in a.packs:
+            if not m["packs"][pid].get("npu"):
+                raise SystemExit(f"--npu: pack {pid} has no NPU kernels (the GPU alone runs it)")
     print("the files:")
-    ids = needed(m, a.packs, a.abliterated)
+    ids = list(dict.fromkeys(needed(m, a.packs, a.abliterated) + ([m["packs"][p]["npu"] for p in a.packs] if a.npu else [])))
     found, fetch_ids = plan(m, ids, a.have, a.trust_size)
     if not check(host.disk(a.models, sum(m["files"][f]["bytes"] for f in fetch_ids))):
         raise SystemExit("not enough disk")
@@ -162,13 +171,13 @@ def main():
         return 0
     if not a.no_build:
         print("the engine:")
-        for cmd in BUILD:
-            subprocess.run(cmd, cwd=ROOT, check=True)
+        for cmd in BUILD:  # --npu: the HIP library and its binaries with XRT (NPU=1)
+            subprocess.run(cmd + (["NPU=1"] if a.npu and cmd[0] == "make" else []), cwd=ROOT, check=True)
     get = fetch.fetcher(a.models)
     cfgs = []
     for pid in a.packs:
         print(f"the pack {pid}:")
-        cfgs.append(layout.lay(m, pid, a.models, a.have, a.trust_size, a.abliterated, get, found))
+        cfgs.append(layout.lay(m, pid, a.models, a.have, a.trust_size, a.abliterated, get, found, npu=a.npu))
         print(f"  {cfgs[-1]}")
     if a.rig:
         print("rig:")

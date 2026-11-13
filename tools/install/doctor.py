@@ -161,4 +161,6 @@ def run(models):
     checks += [driver(), power(), memory(), tmp(), direct(models), ssd(models), network()]
     tl = host.tools(True, True)
     checks.append((OK if tl[0] else NOTE, tl[1]))
+    nu = host.npu()  # optional (0.7.0's --npu): none is a note, not a fault
+    checks.append((OK if nu[0] else NOTE, nu[1]))
     return checks
