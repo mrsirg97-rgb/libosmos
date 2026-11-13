@@ -71,8 +71,8 @@ static uint64_t ahead_limit; /* the readers' bound on reads ahead (main runs eve
 static MembraneOptions options(uint32_t room_units, uint32_t stream_units, const uint32_t *warm, size_t n_warm)
 {
   const uint64_t ub = pool_unit_bytes(&units[0], 0);
-  return (MembraneOptions){units, L, E, room_units * ub, stream_units * ub, {fake_alloc, fake_free, NULL, NULL, NULL},
-                           {fake_alloc, fake_free, NULL, NULL, NULL}, 0, 4, warm, n_warm, fake_copy, &copies, ahead_limit};
+  return (MembraneOptions){units, L, E, room_units * ub, stream_units * ub, {fake_alloc, fake_free, NULL},
+                           {fake_alloc, fake_free, NULL}, 0, 4, warm, n_warm, fake_copy, &copies, ahead_limit};
 }
 
 static Membrane *make(uint32_t room_units, uint32_t stream_units, const uint32_t *warm, size_t n_warm)

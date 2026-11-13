@@ -39,9 +39,8 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]
   char nerr[NPU_ERR] = "";
   void *hb = host_slots_base(f->hs), *sb = host_slots_base(f->hs_stream);
   if (!(f->npu = npu_open(dir, g->n_embd, g->expert_ff, max, nerr)) ||
-      /* the cache's pages before its tail (always registered), and the stream's: every expert a prompt step holds
-         while the tail is lent (npu_run refuses one outside them) */
-      !npu_region(f->npu, hb, host_slots_bytes(f->hs) - host_slots_tail(f->hs), nerr) ||
+      /* the cache's pages and the stream's: every expert a step holds (npu_run refuses one outside them) */
+      !npu_region(f->npu, hb, host_slots_bytes(f->hs), nerr) ||
       !npu_region(f->npu, sb, host_slots_bytes(f->hs_stream), nerr))
   {
     npu_free(f);

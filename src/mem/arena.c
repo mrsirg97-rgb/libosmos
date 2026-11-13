@@ -152,36 +152,3 @@ uint64_t arena_largest(const Arena *a)
     most = a->free.e[i].n > most ? a->free.e[i].n : most;
   return most * ARENA_GRAIN;
 }
-
-void *arena_tail(const Arena *a, uint64_t bytes)
-{
-  const uint64_t n = (bytes + ARENA_GRAIN - 1) / ARENA_GRAIN;
-  return a && bytes && n <= a->grains ? a->base + (a->grains - n) * ARENA_GRAIN : NULL;
-}
-
-void *arena_take(Arena *a, void *p, uint64_t bytes)
-{
-  if (!a || !p || !bytes || (uint8_t *)p < a->base || (uint64_t)((uint8_t *)p - a->base) % ARENA_GRAIN)
-    return NULL;
-  const uint64_t at = (uint64_t)((uint8_t *)p - a->base) / ARENA_GRAIN, n = (bytes + ARENA_GRAIN - 1) / ARENA_GRAIN;
-  size_t i = find(&a->free, at + 1); /* the extent that holds `at`: the last starting at or before it */
-  if (i == 0)
-    return NULL;
-  Ext *f = &a->free.e[--i];
-  if (f->at > at || f->at + f->n < at + n)
-    return NULL;
-  if (!grow(&a->given) || !grow(&a->free)) /* the bookkeeping first: nothing changed if it cannot grow */
-    return NULL;
-  const Ext before = {f->at, at - f->at}, after = {at + n, f->at + f->n - (at + n)};
-  insert(&a->given, find(&a->given, at), (Ext){at, n});
-  if (before.n && after.n)
-    a->free.e[i] = before, insert(&a->free, i + 1, after);
-  else if (before.n)
-    a->free.e[i] = before;
-  else if (after.n)
-    a->free.e[i] = after;
-  else
-    erase(&a->free, i);
-  a->used += n * ARENA_GRAIN;
-  return p;
-}

@@ -199,7 +199,6 @@ int main(int argc, char** argv) {
   o.max_ctx = std::getenv("MAX_CTX") ? (uint32_t) std::atoi(std::getenv("MAX_CTX")) : 4096;
   o.budget = budget;
   o.max_tokens = max_tokens;
-  o.fixed_steps = std::getenv("FIXED_STEPS") != nullptr;  // 0.6.8's: a long step's buffers the forward's own
   g_max_tokens = max_tokens;
   std::vector<uint64_t> picks;
   if (const char* pp = std::getenv("PICKS")) {  // forward_create_ranked's counts ([layer][expert] uint64)
@@ -300,12 +299,6 @@ int main(int argc, char** argv) {
       std::printf("  so far the NPU: %llu calls, %llu parts, %.0f ms the host waited on them; the GPU idle on it %.0f ms, "
                   "busy past it %llu calls\n", (unsigned long long) nl, (unsigned long long) np, nw / 1e3, ni,
                   (unsigned long long) no);
-    }
-    {
-      uint64_t lb, ln, ls;  // 0.6.9's lent steps: the block, and the steps that ran in it / split back to sub-batches
-      forward_lends(f, &lb, &ln, &ls);
-      std::printf("  so far lent steps %llu, split %llu (a block of %.2f GiB)\n", (unsigned long long) ln,
-                  (unsigned long long) ls, lb / (double) (1ull << 30));
     }
     uint64_t wn[2], wns[2];
     forward_waits(f, wn, wns);

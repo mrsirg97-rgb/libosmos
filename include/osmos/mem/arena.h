@@ -14,8 +14,6 @@ void *arena_alloc(Arena *a, uint64_t bytes);
 bool arena_free(Arena *a, void *p);
 uint64_t arena_used(const Arena *a);
 uint64_t arena_largest(const Arena *a);
-void *arena_tail(const Arena *a, uint64_t bytes);
-void *arena_take(Arena *a, void *p, uint64_t bytes);
 
 #endif
 
@@ -39,11 +37,4 @@ arena_free
 
 arena_used / arena_largest
   the bytes handed out now; the largest free extent (the largest alloc that would succeed).
-
-arena_tail / arena_take
-  a block at a place of the caller's choosing - a large one made room for in one window rather than in the holes
-  first fit leaves (pool_lend: a long prompt's step buffers in the experts' memory). arena_tail: where the arena's
-  last `bytes` (rounded up to grains) begin; NULL for 0 or more than the arena. arena_take: [p, p + bytes) given as a
-  block, as arena_alloc's (arena_free gives it back), when one free extent holds all of it; NULL otherwise (nothing
-  changed): any of it given, p not a grain of the arena, or bytes 0.
 */

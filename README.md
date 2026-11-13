@@ -18,21 +18,21 @@ C, HIP and a little C++. No Python at runtime.
 
 ```sh
 python3 tools/install/osmos_install.py osmos-evo-a --serve         # DeepSeek; or ud-iq1_s, ud-iq1_m, ud-iq2_xxs
-python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve   # Qwen; or qwen38-ud-iq3_xxs-1m
+python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve   # Qwen; or qwen38-ud-q4_k_xl
 ```
 
 The installer builds the engine, downloads the pack's files at pinned commits, checks every SHA-256, writes the
 pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on port 8091 (`/v1/chat/completions`
 streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 
-- `--abliterated` adds huihui-ai's abliteration as an overlay (DeepSeek and Qwen alike, not yet UD-Q4_K_XL; the stock files stay as they are).
+- `--abliterated` adds huihui-ai's abliteration as an overlay (every pack; the stock files stay as they are).
 - `--have <dir>` uses files you already have.
 - `--doctor` checks the machine as osmos will run on it, and says what to change: the GPU and the memory it may
   map, the driver and ROCm, the power profile (balanced is slower than the profiles osmos is measured at), the RAM,
   `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
   `deepseek-1017-evo-a`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next`
-  (`-1m`, `-l`).
+  (`-l`: UD-Q4_K_XL).
 
 ## The packs
 
@@ -42,9 +42,8 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 | `ud-iq1_s` | 122 GB + 203 GB Engram table | 1M | speed |
 | `ud-iq1_m` | 140 GB + 203 GB Engram table | 1M | quality (unsloth's benchmarks 85.55 against 83.53) |
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the closest to the model, the slowest decode |
-| `qwen38-ud-iq3_xxs` | 78 GB + 3 GB MTP head | 262K | Qwen, fully in GPU memory |
-| `qwen38-ud-iq3_xxs-1m` | the same files | 1M (YaRN) | long documents: recalls a fact 355K tokens back, 0.4% worse on short text |
-| `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 262K | the larger quant, if you want it: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
+| `qwen38-ud-iq3_xxs` | 78 GB + 3 GB MTP head | 512K | Qwen, fully in GPU memory |
+| `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant, if you want it: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
 
 **How close each DeepSeek pack is to the model itself.** The KL divergence from DeepSeek's own weights (the experts
 as deepseek-ai stores them, MXFP4; the dense layers BF16), over the whole vocabulary, a token at a time: lower is
@@ -117,9 +116,9 @@ range is the two rounds'. Tokens a second:
 | Perplexity, 8,191 tokens | 2.4579 | 2.5006 | 2.4492 |
 | SSD read a token, plain / drafted | 0.030 / 0.044 GB | 0.007 / 0.014 GB | 0.074 / 0.095 GB |
 
-Since 0.6.9 the DeepSeek packs read prompts in 8,192-token steps, the step's buffers lent by the expert cache while
-the prompt runs (DESIGN.md, "0.6.9"): at `low-power` on UD-IQ1_M, a 64K prompt 553-586 tok/s against 471-508 in
-2,048-token steps, an 8K prompt 484-521 against 459-473, decode within 1-3%. The table above is 2,048-token steps.
+Since 0.6.10 the DeepSeek packs read prompts in 4,096-token steps in buffers of their own (DESIGN.md, "0.6.10"):
+at `low-power` on UD-IQ1_M, auto-sized, an 8K prompt 548 tok/s run after run, decode 15.0-15.1. The table above is
+2,048-token steps; this release's numbers at `performance` come with 0.7.0.
 
 The 0.6.0 table below read DeepSeek's prompts in 512-token steps, so its prompt rows are lower than these. The
 perplexities are 0.5.11's to the last digit: 0.6.x changed no DeepSeek arithmetic. The SSD row is why UD-IQ2_XXS
@@ -302,7 +301,7 @@ Strix Halo on Linux, and its published DeepSeek sets are other quants, so there 
 **Qwen** is fully resident:
 - **Matmuls** run on the matrix cores, with f16 activations and F32 sums at every batch size, so a token's bits don't
   depend on its batch.
-- **The cache** is Q8_0: 3.4 GB for 262K tokens.
+- **The cache** is Q8_0: 6.8 GB for 512K tokens.
 - **QSA**, Qwen's sparse attention, attends to a token's top 512 blocks of 4 keys.
 - **The MTP head** drafts up to 5 tokens. A pack can name DFlash2 instead (a block of 7 drafts from one pass of a
   small drafter fed the model's own layers): ahead on chat, behind on real agent work, so an option.
