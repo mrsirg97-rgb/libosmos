@@ -54,16 +54,28 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
                             compile_flags=FLAGS + ["-DMULTI_F32", f"-DHALVES={H}", "-DKHALF=1", f"-DNROWS={NR}",
                                                    f"-DROWSTRIDE={RB if DOWN else 2 * BB}", f"-DROWMAJOR={KS}"] + (["-DWHOLEK"] if DOWN else []))
     a_l3, w_l3, c_l3, workers = [], [], [], []
+    # A: one stream from one shim, through one memtile, to all 32 cores (ABCAST, the default): every core multiplies
+    # the same A tiles, so a column's own copy was 8 x the DRAM reads; ABCAST=0 a stream a column, as before
+    ABC = int(os.environ.get('ABCAST', '1'))
+    if ABC:
+        a3b = ObjectFifo(np.ndarray[(AT,), i32], name="A3", depth=2)
+        a2b = a3b.cons().forward(obj_type=at, name="A2", depth=2)
+        a_l3.append(a3b)
     for col in range(COLS):
-        a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=2)
-        a2 = a3.cons().forward(obj_type=at, name=f"A2_{col}", depth=2)
+        if ABC:
+            a2 = a2b
+        else:
+            a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=2)
+            a2 = a3.cons().forward(obj_type=at, name=f"A2_{col}", depth=2)
         w3 = ObjectFifo(np.ndarray[(ROWS * WT,), i32], name=f"W3_{col}", depth=2)
         w2 = w3.cons().split([WT * r for r in range(ROWS)], obj_types=[wt] * ROWS,
                              names=[f"W2_{col}_{r}" for r in range(ROWS)], depths=[2] * ROWS)
         c3 = ObjectFifo(np.ndarray[(ROWS * CT,), f32], name=f"C3_{col}", depth=1)
         c2 = c3.prod().join([CT * r for r in range(ROWS)], obj_types=[ct] * ROWS,
                             names=[f"C2_{col}_{r}" for r in range(ROWS)], depths=[1] * ROWS)
-        a_l3.append(a3); w_l3.append(w3); c_l3.append(c3)
+        if not ABC:
+            a_l3.append(a3)
+        w_l3.append(w3); c_l3.append(c3)
         for r in range(ROWS):
             def body(ai, wi, co, k):
                 for _ in range_(MATS * PASSES):
@@ -91,10 +103,12 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
     TW, TA, TC = N * RB // 4, KS * 2 * H * AT, M * N  # C: a matrix's rows, M x N f32, row-major
 
     def seq(WG, WU, A, C, C2, *hs):  # (down: WG its matrix, WU unread, C2 unwritten)
-        ap, wp, cp = hs[:COLS], hs[COLS:2 * COLS], hs[2 * COLS:]
+        na = len(a_l3)
+        ap, wp, cp = hs[:na], hs[na:na + COLS], hs[na + COLS:]
         for col in range(COLS):
             # A: the whole stream once a (matrix, pass)
-            ap[col].fill(A, tap=tap(TA, 0, [MATS * PASSES, TA // 1024, 1024], [0, 1024, 1]))
+            if col < na:
+                ap[col].fill(A, tap=tap(TA, 0, [MATS * PASSES, TA // 1024, 1024], [0, 1024, 1]))
             if DOWN:  # W: pass p, the column's 64 rows whole (its 4 cores' 16, in order): contiguous
                 base, n = col * ROWS * WT, ROWS * WT
                 inner = next(d for d in range(1024, 0, -1) if n % d == 0)
