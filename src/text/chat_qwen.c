@@ -189,12 +189,16 @@ static bool calls(JsonBuf *b, const Json *list, Span text, char *err)
     const Json *name = json_get(tc, "name");
     if (!name || name->type != JSON_STRING)
       return qchat_fail(err, "Tool call is missing a function name.");
+    if (!qchat_name_ok(name->s, name->len))
+      return qchat_fail(err, "a tool call's function name holds a newline or '<' (the format's own markup)");
     json_puts(b, k ? "\n<tool_call>\n<function=" : text.n ? "\n\n<tool_call>\n<function=" : "<tool_call>\n<function=");
     json_put(b, name->s, name->len), json_puts(b, ">\n");
     const Json *args = json_get(tc, "arguments");
     if (args && args->type == JSON_OBJECT)
       for (size_t i = 0; i < args->n; i++)
       {
+        if (!qchat_name_ok(args->key[i], args->klen[i]))
+          return qchat_fail(err, "a tool call's argument name holds a newline or '<' (the format's own markup)");
         json_puts(b, "<parameter="), json_put(b, args->key[i], args->klen[i]), json_puts(b, ">\n");
         const Json *v = args->item[i];
         if (v->type == JSON_STRING)
@@ -256,8 +260,8 @@ static bool message(JsonBuf *b, const Json *ms, size_t i, size_t last, bool pres
   return qchat_fail(err, "Unexpected message role.");
 }
 
-static bool render(const Json *ms, const Json *tools, ChatMode mode, const char *effort, bool preserve, JsonBuf *b,
-                   JsonBuf *buf, char *err)
+static bool render(const Json *ms, const Json *branch, const Json *tools, ChatMode mode, const char *effort,
+                   bool preserve, JsonBuf *b, JsonBuf *buf, char *err)
 {
   JsonBuf sys = {0};
   size_t n_sys = 0;
@@ -275,7 +279,7 @@ static bool render(const Json *ms, const Json *tools, ChatMode mode, const char 
   if (ok)
     header(b, tools, (Span){sys.p ? sys.p : "", sys.n}, line);
   free(sys.p);
-  ok = ok && last_query(ms, &last, buf, err);
+  ok = ok && last_query(branch, &last, buf, err); /* on the branch's text: the template's choice the text's */
   for (size_t i = n_sys; ok && i < ms->n; i++)
     ok = message(b, ms, i, last, preserve, buf, err);
   if (ok)
@@ -286,6 +290,14 @@ static bool render(const Json *ms, const Json *tools, ChatMode mode, const char 
 bool qchat_render(const Json *messages, const Json *tools, ChatMode mode, const char *effort, bool preserve,
                   JsonBuf *out, char err[CHAT_ERR])
 {
+  return qchat_render_with(messages, messages, tools, mode, effort, preserve, out, err);
+}
+
+bool qchat_render_with(const Json *messages, const Json *branch, const Json *tools, ChatMode mode, const char *effort,
+                       bool preserve, JsonBuf *out, char err[CHAT_ERR])
+{
+  if (!branch || branch->type != JSON_ARRAY || !messages || messages->type != JSON_ARRAY || branch->n != messages->n)
+    return qchat_fail(err, "a branch's messages not the messages' count");
   if (!messages || messages->type != JSON_ARRAY || !messages->n)
     return qchat_fail(err, "No messages provided.");
   for (size_t i = 0; i < messages->n; i++)
@@ -294,7 +306,7 @@ bool qchat_render(const Json *messages, const Json *tools, ChatMode mode, const 
   if (tools && tools->type != JSON_ARRAY && tools->type != JSON_NULL)
     return qchat_fail(err, "tools: a list of function tools");
   JsonBuf buf = {0};
-  const bool ok = render(messages, tools && tools->type == JSON_ARRAY && tools->n ? tools : NULL, mode, effort,
+  const bool ok = render(messages, branch, tools && tools->type == JSON_ARRAY && tools->n ? tools : NULL, mode, effort,
                          preserve, out, &buf, err);
   free(buf.p);
   if (ok && (out->oom || buf.oom))

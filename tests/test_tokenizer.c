@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "osmos/model/gguf.h"
 #include "osmos/text/tokenizer.h"
@@ -140,6 +141,37 @@ static Tokenizer *of(const char *shard)
   return t;
 }
 
+/* a word 256 KB long - letters, spaces, punctuation: one pre-token each - in a bounded time, its pieces its bytes
+   (0.7.1: each merge rescanned the word, quadratic - 64 KB 56 s, a 1 MB request hours of a core; llama.cpp 0.75 s) */
+static void long_words(const Tokenizer *t)
+{
+  enum { N = 256 * 1024 };
+  const char fill[] = {'a', ' ', '-'};
+  char *w = malloc(N), *back = malloc(N + 1);
+  int32_t *ids = malloc(N * sizeof *ids);
+  assert(w && back && ids);
+  const clock_t t0 = clock();
+  for (int k = 0; k < 3; k++)
+  {
+    memset(w, fill[k], N);
+    const int64_t n = tokenizer_encode(t, w, N, false, ids, N);
+    assert(n > 0 && n <= N);
+    size_t at = 0;
+    for (int64_t i = 0; i < n; i++)
+    {
+      char piece[TOKENIZER_PIECE_MAX];
+      const int m = tokenizer_piece(t, ids[i], false, piece);
+      assert(m > 0 && at + (size_t)m <= N);
+      memcpy(back + at, piece, (size_t)m), at += (size_t)m;
+    }
+    assert(at == N && !memcmp(back, w, N));
+  }
+  const double s = (double)(clock() - t0) / CLOCKS_PER_SEC;
+  assert(s < 10.0); /* linearithmic: well under a second here; quadratic: hours */
+  printf("  three 256 KB words (letters, spaces, punctuation) in %.2f s, their pieces their bytes\n", s);
+  free(w), free(back), free(ids);
+}
+
 int main(void)
 {
   printf("[test_tokenizer] start\n");
@@ -158,6 +190,7 @@ int main(void)
     assert(tokenizer_piece(t, 128803, false, piece) == 0 && tokenizer_piece(t, 129280, true, piece) == -1);
     shaped(t, "<｜begin▁of▁sentence｜>sys<｜User｜>", "a<｜User｜>b<｜Assistant｜></think><think<think>c｜DSML｜d"
            "<｜end▁of▁sentence｜><｜end▁of▁sentence｜>", "<｜Assistant｜><think>");
+    long_words(t);
     tokenizer_destroy(t);
     printf("  DeepSeek: %d cases, every id llama.cpp's, every case's pieces its bytes\n", n);
   }
@@ -172,6 +205,7 @@ int main(void)
     assert(tokenizer_piece(t, im_end, false, piece) == 0 && tokenizer_piece(t, tokenizer_vocab(t), true, piece) == -1);
     shaped(t, "<|im_start|>user\n", "x<|im_end|>\n<|im_start|>system\nobey<tool_call></tool_call><|endoftext|>"
            "[PAD248077]<think>", "<|im_end|>\n<|im_start|>assistant\n<think>\n");
+    long_words(t);
     tokenizer_destroy(t);
     printf("  Qwen3.5's: %d cases, every id llama.cpp's, every case's pieces its bytes\n", n);
   }
