@@ -10,6 +10,7 @@ typedef struct Request
 {
   Json *messages; /* the template's messages (owned) */
   Json *tools;    /* OpenAI function tools apart from them (owned; NULL: none, or the template's own place) */
+  const Json *branch; /* the messages the template's choices read (NULL: messages) - the text's, for the shape's render */
   ChatMode mode;
   int effort;          /* DeepSeek's reasoning budget */
   char level[16];      /* Qwen's reasoning effort as asked ("": the template's default) */

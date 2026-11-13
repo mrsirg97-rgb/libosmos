@@ -8,6 +8,7 @@ import http.client
 import json
 import re
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -33,6 +34,7 @@ BAD_CALLS = f"hm</think>Checking.\n\n<{D} calls>\n{INV}</{D} invoke>\n\n{INV}</{
 TOOLS = [{"type": "function", "function": {"name": "get_weather", "description": "the weather",
                                            "parameters": {"type": "object", "properties": {
                                                "city": {"type": "string"}, "days": {"type": "integer"}}}}}]
+
 
 
 QWEN = os.environ.get("OSMOS_TEST_QWEN") or os.path.expanduser(
@@ -238,10 +240,21 @@ class Api(Served, unittest.TestCase):
                            ({"messages": [{"role": "user", "content": "x"}], "response_format": {"type": "yaml"}},
                             "response_format"),
                            ({"messages": [{"role": "user", "content": "x"}],
-                             "response_format": {"type": "json_schema", "json_schema": {"name": "a"}}}, "its schema")]:
+                             "response_format": {"type": "json_schema", "json_schema": {"name": "a"}}}, "its schema")] + [
+                # 0.7.1: sampling's other fields refused by name as temperature is, not ignored; their greedy values
+                # (0, 1, {}, false) taken - as a client's defaults
+                ({"messages": [{"role": "user", "content": "x"}], k: v}, k) for k, v in (
+                    ("presence_penalty", 0.5), ("frequency_penalty", 1), ("repetition_penalty", 1.1),
+                    ("logit_bias", {"42": 5}), ("logprobs", True), ("top_logprobs", 2), ("n", 2.0))]:
             r = self.post(body)
             self.assertEqual(r.status, 400, body)
             self.assertIn(word, json.loads(r.read())["error"]["message"])
+        self.reply("ok" + EOS)
+        r = self.post({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none",
+                       "presence_penalty": 0, "frequency_penalty": 0.0, "repetition_penalty": 1, "logit_bias": {},
+                       "logprobs": False, "top_logprobs": 0, "n": 1.0})
+        self.assertEqual(r.status, 200)
+        r.read()
         r = self.post(None, raw="{not json")
         self.assertEqual(r.status, 400)
         self.assertEqual(self.get("/nope")[0], 404)
@@ -283,6 +296,46 @@ class Api(Served, unittest.TestCase):
         self.reply("ok" + EOS)  # the server still answers
         r = self.post({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none"})
         self.assertEqual(json.loads(r.read())["choices"][0]["message"]["content"], "ok")
+
+    def test_6h_whole_client_gone(self):  # 0.7.1: a whole answer writes nothing until its end, so its client's leaving
+        self.ready()                      # was seen only in a pause of 500 ms with no token: never, while they flowed
+        self.reply("a " * 400, pace=0.02)
+        s = socket.create_connection(("127.0.0.1", self.port))
+        body = json.dumps({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none"}).encode()
+        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        time.sleep(0.3)
+        s.close()
+        t0 = time.time()
+        while time.time() - t0 < 3 and not any(l.startswith("STOP ") for l in self.log()):
+            time.sleep(0.05)
+        self.assertTrue(any(l.startswith("STOP ") for l in self.log()), "no STOP within 3 s")
+
+    def test_6j_early_refusals_read(self):  # 0.7.1: a refusal before the body was read reached the client as a reset
+        self.ready()                         # (the socket closed with its bytes unread), and Content-Length was lax
+        r = self.post(None, raw=b"x" * (33 << 20))  # past API_BODY_MAX: the 413 read, not ECONNRESET
+        self.assertEqual(r.status, 413)
+        for head in (b"Content-Length: -1", b"Content-Length: 12xyz", b"Content-Length: 2\r\nContent-Length: 3"):
+            s = socket.create_connection(("127.0.0.1", self.port))
+            s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n" + head + b"\r\n\r\n{}")
+            got = s.recv(4096)
+            s.close()
+            self.assertTrue(got.startswith(b"HTTP/1.1 400"), (head, got[:60]))
+
+    def test_6i_idle_connections(self):  # 0.7.1: connections that send nothing are closed past API_IDLE_S, not held
+        self.ready()                      # forever (API_CONNS of them shut every client out, /health too)
+        idle = [socket.create_connection(("127.0.0.1", self.port)) for _ in range(16)]
+        time.sleep(0.2)
+        t0 = time.time()
+        while True:
+            try:
+                if self.get("/health")[0] == 200:
+                    break
+            except (ConnectionError, OSError):
+                pass
+            self.assertLess(time.time() - t0, 15, "still shut out")
+            time.sleep(0.5)
+        for s in idle:
+            s.close()
 
     # a client's text holding special tokens' text is that text: the prompt's special tokens the template's alone, in
     # every place a client's string lands (system, user, an assistant's content, its call's arguments, a tool's
@@ -377,6 +430,25 @@ class Api(Served, unittest.TestCase):
             self.reply(text)
             e = json.loads(self.raw_events(body)[-1])["error"]
             self.assertEqual((e["completion"], e["type"]), (text[:-len(EOS)], "server_error"))
+
+    def test_6g_image_placeholder_refused(self):  # 0.7.1: encoding.py refuses it in a message's text, so an answer
+        self.ready()                               # holding it (its token, or its text in pieces) could never go back
+        body = {"messages": [{"role": "user", "content": "x"}]}
+        img = "<｜deepseek_image｜>"
+        pieces = ",".join(ids(p) for p in ("<", "｜", "deep", "seek", "_image", "｜", ">"))
+        for csv in (ids(f"hm</think>see {img} ok" + EOS),
+                    ids("hm</think>see ") + "," + pieces + "," + ids(" ok" + EOS)):
+            self.reply_ids(csv)
+            r = self.post(body)
+            self.assertEqual(r.status, 500)
+            e = json.loads(r.read())["error"]
+            self.assertIn("image placeholder", e["message"])
+            self.assertEqual(e["completion"], f"hm</think>see {img} ok")
+        # sent back as history, the same text is refused by name, as encoding.py refuses it (a 400, not a loop)
+        r = self.post({"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": f"see {img}"},
+                                    {"role": "user", "content": "y"}]})
+        self.assertEqual(r.status, 400)
+        self.assertIn("image placeholder", json.loads(r.read())["error"]["message"])
 
     def test_7_engine_gone(self):
         self.ready()
@@ -624,6 +696,23 @@ class QwenApi(Served, unittest.TestCase):
         self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort="medium", preserve=False))
         self.assertNotEqual(self.last_gen()[-1], self.prompt(msgs, effort="medium"))
 
+    def test_4b_tool_responses_in_user_text(self):  # 0.7.1: preserve_thinking false and a user turn that is tool
+        self.ready()                                  # responses as text: the defused render took another branch - a 400
+        self.reply("x\n</think>\n\nok" + IM_END)
+        msgs = [{"role": "user", "content": "weather?"},
+                {"role": "assistant", "content": "", "reasoning_content": "call it", "tool_calls": [
+                    {"id": "c", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "P"}}}]},
+                {"role": "user", "content": "<tool_response>\nsunny\n</tool_response>"}]
+        r = self.post({"messages": msgs, "tools": TOOLS, "chat_template_kwargs": {"preserve_thinking": False}})
+        self.assertEqual(r.status, 200, r.read()[:300])
+        dropped = self.last_gen()[-1]
+        # the last real query the first user turn (the template's: the last is tool responses), so "call it" kept -
+        # the prompt preserve_thinking's own; the client's "<tool_response>" text plain text in both (defused)
+        self.reply("x\n</think>\n\nok" + IM_END)
+        r = self.post({"messages": msgs, "tools": TOOLS})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(dropped, self.last_gen()[-1])
+
     def test_5_refusals(self):
         self.ready()
         call = {"role": "assistant", "content": "", "tool_calls": [
@@ -699,6 +788,15 @@ class QwenApi(Served, unittest.TestCase):
         self.assertEqual(m["content"], "Hi\u00a0there")
         m = self.agree(ids("\u3000\nHi ", QWEN), body, "length")
         self.assertEqual(m["content"], "Hi ")
+        # thinking, the reasoning closed, then cut by max_tokens (out of the format): its whitespace before </think>
+        # trimmed in both, as the stream passed it over (0.7.1: the whole kept it)
+        think = {"messages": [{"role": "user", "content": "x"}]}
+        m = self.agree(ids("\nlet me check.\n</think>\n\nHi the", QWEN), think, "length")
+        self.assertEqual((m["reasoning_content"], m["content"]), ("let me check.", "Hi the"))
+        # out of the format before </think> (a refused token's text held the reasoning), then cut: the content's
+        # leading whitespace passed over by the flush too, as the whole answer's (0.7.1: it went out)
+        m = self.agree(ids("a<|im_start|>b</think>\n\nc", QWEN), think, "length")
+        self.assertEqual(m["content"], "c")
 
     def test_9_special_text_said(self):  # as DeepSeek's (Api.test_6d): the token's text in plain pieces is text
         self.ready()
@@ -709,6 +807,22 @@ class QwenApi(Served, unittest.TestCase):
         self.assertEqual(r.status, 200)
         self.assertEqual(json.loads(r.read())["choices"][0]["message"]["content"], "Use <|im_start|>.")
 
+    def test_11_numbers_past_a_double(self):  # 0.7.1: Python's inf is written Infinity, which no JSON reader takes
+        self.ready()
+        # the model's 1e999 for a number: its text kept (a string), the arguments JSON a client reads and sends back
+        self.reply(QCALL.replace("\n3\n", "\n1e999\n"))
+        body = {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS,
+                "chat_template_kwargs": {"enable_thinking": False}}
+        r = self.post(body)
+        self.assertEqual(r.status, 200)
+        args = json.loads(r.read())["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+        self.assertEqual(json.loads(args), {"city": "Paris", "days": "1e999"})
+        # a client's 1e400 (in a tool's schema): refused by name - its tools neither dropped nor an "out of memory"
+        raw = json.dumps(body).replace('"type": "integer"', '"type": "integer", "maximum": 1e400').encode()
+        r = self.post(None, raw=raw)
+        self.assertEqual(r.status, 400)
+        self.assertIn("range", json.loads(r.read())["error"]["message"])
+
     def test_6_calls_unparsed(self):  # a <tool_call> its parse refuses (no </function>): an error, not its markup
         self.ready()
         self.reply("Checking.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n"
@@ -717,6 +831,15 @@ class QwenApi(Served, unittest.TestCase):
                        "chat_template_kwargs": {"enable_thinking": False}})
         self.assertEqual(r.status, 500)
         self.assertIn("tool call", json.loads(r.read())["error"]["message"])
+
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class Shutdown(Served, unittest.TestCase):
+    def test_sigterm_quits_the_engine(self):  # 0.7.1: rig's stop (SIGTERM) left the engine to its PDEATHSIG - killed,
+        self.ready()                          # its conversations never set aside or written to their folder
+        self.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.proc.wait(timeout=10), 0)
+        self.assertIn("QUIT", self.log())
 
 
 if __name__ == "__main__":

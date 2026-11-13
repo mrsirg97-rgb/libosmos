@@ -18,7 +18,8 @@ static bool ds_parse(const Request *r, const char *text, const char *shape, size
 
 static bool qwen_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
 {
-  return qchat_render(r->messages, r->tools, r->mode, r->level[0] ? r->level : NULL, r->preserve, out, err);
+  return qchat_render_with(r->messages, r->branch ? r->branch : r->messages, r->tools, r->mode,
+                           r->level[0] ? r->level : NULL, r->preserve, out, err);
 }
 
 static bool qwen_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,

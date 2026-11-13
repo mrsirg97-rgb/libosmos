@@ -207,6 +207,11 @@ bool chat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode
     if (has(content, chat_refused[k]) || has(reasoning, chat_refused[k]))
       return free(tc.p), chat_fail(err, "the completion", "a special token in its text");
   content = real(content, off), reasoning = real(reasoning, off);
+  /* the image placeholder's text (its token, or its text in plain pieces): encoding.py refuses it in a message's
+     content and reasoning (chat_read's check, as its), so an answer holding it could never be sent back - refused
+     here, the completion with the error (0.7.1) */
+  if (has(content, CHAT_IMAGE) || has(reasoning, CHAT_IMAGE))
+    return free(tc.p), chat_fail(err, "the completion", "the image placeholder in its text");
   json_puts(out, "{\"role\": \"assistant\", \"content\": "), json_dump_string(out, content.p, content.n);
   json_puts(out, ", \"reasoning_content\": "), json_dump_string(out, reasoning.p, reasoning.n);
   json_puts(out, ", \"tool_calls\": ");

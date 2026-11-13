@@ -53,6 +53,9 @@ static bool more(Api *a, Run *r, size_t *seen, Answer *s)
       return free(tok), s->gone = true, false; /* out of memory: given up as a client gone */
   free(tok);
   *seen = to;
+  if (!done && !s->stream && !s->gone && closed(s->fd))
+    s->gone = true; /* a whole answer writes nothing until its end: its client's leaving looked for as tokens land too,
+                       not only in a pause (0.7.1) */
   return !done;
 }
 
@@ -97,10 +100,15 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
   if (n >= eos && !memcmp(p + n - eos, eos_text, eos))
     n -= eos;
   const char *end = mode == CHAT_THINKING ? memmem(sh, n, think_end, strlen(think_end)) : NULL;
-  const size_t rn = mode != CHAT_THINKING ? 0 : end ? (size_t)(end - sh) : n;
+  size_t rn = mode != CHAT_THINKING ? 0 : end ? (size_t)(end - sh) : n;
   size_t c0 = mode != CHAT_THINKING ? 0 : end ? rn + strlen(think_end) : n, r0 = 0;
-  if (s->d->trims) /* as the stream passed it over: a phase's leading whitespace */
+  if (s->d->trims) /* as the stream passed it over: a phase's leading whitespace, and a closed reasoning's trailing
+                      (held before </think>, never sent) */
+  {
     r0 = qchat_space_lead(sh, rn), c0 += qchat_space_lead(sh + c0, n - c0);
+    if (end)
+      rn -= qchat_space_trail(sh + r0, rn - r0);
+  }
   json_puts(&b, "{\"role\": \"assistant\", \"content\": "), json_dump_string(&b, p + c0, n - c0);
   json_puts(&b, ", \"reasoning_content\": "), json_dump_string(&b, p + r0, rn - r0);
   json_puts(&b, ", \"tool_calls\": []}");
@@ -324,6 +332,7 @@ static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[API_ER
   bool oom = text.oom;
   Request sh = *rq;
   sh.messages = copy(rq->messages, &oom), sh.tools = copy(rq->tools, &oom);
+  sh.branch = rq->messages; /* the template's choices the text's (a defused string reads otherwise) */
   if (sh.messages)
     changed += defuse(sh.messages, a->tok);
   if (sh.tools)

@@ -4,6 +4,8 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "api.h"
 
@@ -66,11 +68,17 @@ int http_read(Http *h, char err[API_ERR])
   for (char *l = strstr(head, "\r\n") + 2; l < end; l = strstr(l, "\r\n") + 2)
   {
     if (!strncasecmp(l, "Content-Length:", 15))
-    {
+    { /* digits alone, then the line's end (RFC 9110: 1*DIGIT; 0.7.1: "-1" read as huge - a 413 - and "12xyz" as 12);
+         a second one that says otherwise refused, not the last taken */
+      const char *d = l + 15;
+      while (*d == ' ' || *d == '\t')
+        d++;
       char *e;
-      const unsigned long long v = strtoull(l + 15, &e, 10);
-      if (e == l + 15 || v > API_BODY_MAX)
-        return free(head), snprintf(err, API_ERR, "a body past %u bytes, or no length", API_BODY_MAX), 413;
+      const unsigned long long v = *d >= '0' && *d <= '9' ? strtoull(d, &e, 10) : 0;
+      if (*d < '0' || *d > '9' || (strspn(e, " \t") + e)[0] != '\r' || (has_length && v != length))
+        return free(head), snprintf(err, API_ERR, "a Content-Length not one number of bytes"), 400;
+      if (v > API_BODY_MAX)
+        return free(head), snprintf(err, API_ERR, "a body past %u bytes", API_BODY_MAX), 413;
       length = (size_t)v, has_length = true;
     }
     else if (!strncasecmp(l, "Transfer-Encoding:", 18))
@@ -126,4 +134,33 @@ bool http_error(int fd, int status, const char *message)
   const bool ok = !b.oom && http_send(fd, status, "application/json", b.p, b.n);
   free(b.p);
   return ok;
+}
+
+/* an answer sent before the request was read whole (a refusal: 413, 400, 503): this end's writing shut, the rest of
+   the client's bytes read and dropped - API_LINGER_MS at most - then the close. a close with bytes unread is a reset,
+   and a client still sending sees that, never the status (0.7.1) */
+void http_linger(int fd, bool wait)
+{
+  (void)shutdown(fd, SHUT_WR);
+  if (!wait) /* the accept loop's own refusal (503): what came already drained, nothing waited for - it holds no thread
+                of its own to wait in */
+  {
+    char sink[16384];
+    while (recv(fd, sink, sizeof sink, MSG_DONTWAIT) > 0)
+      ;
+    return;
+  }
+  const struct timeval t = {0, API_LINGER_MS * 1000};
+  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof t);
+  char sink[16384];
+  struct timespec a, b;
+  clock_gettime(CLOCK_MONOTONIC, &a);
+  for (;;)
+  {
+    if (recv(fd, sink, sizeof sink, 0) <= 0)
+      return;
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    if ((b.tv_sec - a.tv_sec) * 1000 + (b.tv_nsec - a.tv_nsec) / 1000000 > API_LINGER_MS)
+      return;
+  }
 }

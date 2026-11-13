@@ -65,6 +65,14 @@ int main(void)
   assert(!json_parse(deep, 2 * JSON_MAX_DEPTH + 2, err) && strstr(err, "deep"));
   assert(!json_parse("\"\xff\"", 3, err));   /* invalid UTF-8 */
   assert(!json_parse("NaN", 3, err));           /* Python reads it; JSON has none */
+  /* past a double's range: Python reads inf and writes Infinity, which no JSON reader (ours either) takes back - a
+     client's 1e400 refused by name, not its tools dropped or its message "out of memory" (0.7.1) */
+  assert(!json_parse("1e400", 5, err) && strstr(err, "range"));
+  assert(!json_parse("[-1.5e999]", 10, err) && strstr(err, "range"));
+  Json *edge = json_parse("[1e308, 1e-400, 123456789012345678901234567890]", 47, err);
+  assert(edge && edge->n == 3 && edge->item[0]->f == 1e308 && edge->item[1]->f == 0.0 &&
+         edge->item[2]->type == JSON_INT); /* the largest double, an underflow to 0 (Python's), an int any length */
+  json_free(edge);
   assert(!json_parse("\"a\0b\"", 5, err));   /* a raw control character in a string */
   /* a model's bytes as a JSON string: each invalid sequence's maximal subpart U+FFFD, as Python's
      bytes.decode("utf-8", "replace") (its verdicts), valid UTF-8 as it is */

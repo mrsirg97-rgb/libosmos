@@ -12,6 +12,7 @@
 #include "osmos/text/json.h"
 #include "osmos/text/tokenizer.h"
 
+#define API_LINGER_MS 2000 /* a refused request's bytes drained this long at most (http_linger) */
 #define API_ERR 256
 #define API_BODY_MAX (32u << 20) /* a request's body: a 64K-token context's text is ~0.3 MB; tools and history more */
 #define API_HEAD_MAX (64u << 10) /* its request line and headers */
@@ -52,6 +53,7 @@ Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, char 
 void engine_stop(Engine *e, Run *r);
 void engine_release(Engine *e, Run *r);
 bool engine_ready(Engine *e);
+bool engine_quit(Engine *e, int wait_s);
 
 /* a connection's request: its method, path, body */
 typedef struct Http
@@ -68,6 +70,7 @@ bool http_send(int fd, int status, const char *type, const char *body, size_t n)
 bool http_stream_open(int fd);
 bool http_stream_event(int fd, const char *data, size_t n);
 bool http_error(int fd, int status, const char *message);
+void http_linger(int fd, bool wait);
 
 /* the server: what a request needs */
 typedef struct Api
