@@ -33,27 +33,6 @@ from transformers.models.inkling2 import modeling_inkling2 as M  # noqa: E402
 REAL = os.path.expanduser(args.real)
 OUT = args.out or tempfile.mkdtemp(prefix="ink2_tiny_")
 torch.manual_seed(0)
-E2M1 = torch.tensor(O.E2M1[:8])
-
-
-def nvfp4(W):
-    """W [R, K] fp32 -> (codes packed [R, K/2] u8, scales [R, K/16] e4m3, amax): the usual NVFP4 recipe"""
-    amax = W.abs().max()
-    outer = amax / 2688.0
-    blk = W.reshape(W.shape[0], -1, 16)
-    s = (blk.abs().amax(-1) / 6.0 / outer).clamp(min=2 ** -9).to(torch.float8_e4m3fn)
-    x = blk / (s.float()[..., None] * outer)
-    idx = (x.abs()[..., None] - E2M1).abs().argmin(-1)
-    code = (idx | ((x < 0).long() << 3)).reshape(W.shape[0], -1)
-    packed = (code[:, 0::2] | (code[:, 1::2] << 4)).to(torch.uint8)
-    return packed, s, amax
-
-
-def mxfp8(W):
-    blk = W.reshape(W.shape[0], -1, 32)
-    e = torch.ceil(torch.log2(blk.abs().amax(-1).clamp(min=1e-30) / 448.0)).clamp(-127, 127)
-    v = (blk / torch.exp2(e)[..., None]).to(torch.float8_e4m3fn).reshape(W.shape)
-    return v, (e + 127).to(torch.uint8)
 
 
 def main():
@@ -97,13 +76,13 @@ def main():
             w13 = torch.stack([gu[:, :I], gu[:, I:]], 2).reshape(gu.shape)   # (gate row i at 2i, up at 2i + 1)
             for proj, W, tgt in (("w13", w13, "gate_up"), ("w2", dn, "down")):
                 if L < 10:
-                    parts = [nvfp4(W[e]) for e in range(W.shape[0])]
+                    parts = [O.nvfp4(W[e]) for e in range(W.shape[0])]
                     sd[p + proj + "_weight"] = torch.stack([x[0] for x in parts])
                     sd[p + proj + "_weight_scale"] = torch.stack([x[1] for x in parts])
                     sd[p + proj + "_weight_amax"] = torch.stack([x[2] for x in parts]).float()
                     sd[p + proj + "_weight_outer_scale_denominator"] = torch.tensor([2688.0])
                 else:
-                    parts = [mxfp8(W[e]) for e in range(W.shape[0])]
+                    parts = [O.mxfp8(W[e]) for e in range(W.shape[0])]
                     sd[p + proj + "_weight"] = torch.stack([x[0] for x in parts])
                     sd[p + proj + "_weight_scale"] = torch.stack([x[1] for x in parts])
             # the transformers model gets the decoded values (deinterleaved), the dense weights their bf16 values

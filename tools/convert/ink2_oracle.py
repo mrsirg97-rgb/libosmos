@@ -53,6 +53,28 @@ from transformers.models.inkling2 import modeling_inkling2 as M  # noqa: E402
 # (code 8, E2M1's -0, as +0: ggml's and gguf-py's table is integers)
 E2M1 = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
 
+
+# the encoders (the test model's experts, ink2_cases.py's): the checkpoint's formats from fp32
+def nvfp4(W):
+    """W [R, K] fp32 -> (codes packed [R, K/2] u8, scales [R, K/16] e4m3, amax): the usual NVFP4 recipe"""
+    amax = W.abs().max()
+    outer = amax / 2688.0
+    blk = W.reshape(W.shape[0], -1, 16)
+    s = (blk.abs().amax(-1) / 6.0 / outer).clamp(min=2 ** -9).to(torch.float8_e4m3fn)
+    x = blk / (s.float()[..., None] * outer)
+    idx = (x.abs()[..., None] - torch.tensor(E2M1[:8])).abs().argmin(-1)
+    code = (idx | ((x < 0).long() << 3)).reshape(W.shape[0], -1)
+    packed = (code[:, 0::2] | (code[:, 1::2] << 4)).to(torch.uint8)
+    return packed, s, amax
+
+
+def mxfp8(W):
+    blk = W.reshape(W.shape[0], -1, 32)
+    e = torch.ceil(torch.log2(blk.abs().amax(-1).clamp(min=1e-30) / 448.0)).clamp(-127, 127)
+    v = (blk / torch.exp2(e)[..., None]).to(torch.float8_e4m3fn).reshape(W.shape)
+    return v, (e + 127).to(torch.uint8)
+
+
 # the checkpoint's names -> transformers' text model's (conversion_mapping.py "inkling2_text", in order)
 RENAMES = [
     (r"model\.llm\.unembed\.weight", "lm_head.weight"),

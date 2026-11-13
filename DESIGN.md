@@ -3561,6 +3561,16 @@ a small random Inkling2 (test_oracle.py): max |dlogp| 8.6e-6, top-1 100%.
   not measured (Q2_0's; MXFP4's).
 - osmos/ink2/weights.h: the geometry and every tensor's role (src/ink2/geo.c, weights.c), an NVFP4 expert tensor's
   scale claimed by its type; test_ink2_weights on the small reference (OSMOS_TEST_INK2).
+- the kernels' cases (tools/convert/ink2_cases.py, ~/osmos-oracle/ink2-cases, 0.8 GB): each new op through
+  transformers' own module at the real sizes, its inputs, stages and output as QDMP files (q4x_ref.h's ref_read) -
+  layer 0's attention and layer 5's at positions 0 and 300,000 (1,088 tokens: past the window and the extent; from
+  the projections' rows to before o_proj), the post-attention conv, attn_res (1 and 3 queries over 1 and 8 blocks),
+  the router, the SwiGLU, the logits' softcap, 16 NVFP4 experts as a GGUF of the converter's bytes. seeded, scaled to
+  put 37-52% of q, k and rel past their clips; every 8th row past 1,024 flat (q, rel zero) so the window's edge is
+  seen. tools/convert/test_cases.py: the formulas again in float64 from the files alone, every case within 8.3e-7 of
+  transformers - and each of these breaks caught: either conv's taps reversed, the sink dropped, tau dropped, an
+  expert's scale dropped, the bias in the weights, the window or the extent off by one, causality off by one.
+  the conventions (test_cases.py's docstring): a static conv's tap taps-1 the current token, a dynamic conv's tap 0.
 
 **the forward, op by op** (transformers' modeling_inkling2.py the definition; what exists, what is new):
 
