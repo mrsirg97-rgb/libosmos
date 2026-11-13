@@ -20,6 +20,9 @@
 #endif
 constexpr int NR = NROWS;
 
+#ifndef ABL
+#define ABL 0 /* ablations, timing only: 1 no qh, 2 one sign byte, 4 no group scales */
+#endif
 #if QFMT == 0
 #include "iq4nl_lut.h"
 constexpr int RB = 8 * 18; // a row's K-step: 8 blocks of 32
@@ -30,7 +33,7 @@ constexpr int RB = 98;
 #include "iq2s_tables.h"
 constexpr int RB = 82;
 #else
-#include "iq2s_grid2.h" // QFMT 3: IQ2_S with its grid packed (2 KB)
+#include "iq2s_grid2.h" // QFMT 3 / 4: IQ2_S with its grid packed (2 KB)
 constexpr int RB = 82;
 #endif
 
@@ -143,18 +146,30 @@ static void decode_tile(const uint8_t *__restrict w) {
       for (int g = 4 * kh; g < 4 * kh + 4; g++) {
 #define KL(r) aie::broadcast<bfloat16, 8>(kb[band[RB * (r) + 74 + g] & 15])
 #define KH(r) aie::broadcast<bfloat16, 8>(kb[band[RB * (r) + 74 + g] >> 4])
+#if ABL & 4
+        const aie::vector<bfloat16, 64> scl = dv, sch = dv;
+#else
         const aie::vector<bfloat16, 64> scl = aie::mul(dv, BCAST8(KL)).to_vector<bfloat16>();
         const aie::vector<bfloat16, 64> sch = aie::mul(dv, BCAST8(KH)).to_vector<bfloat16>();
+#endif
 #undef KL
 #undef KH
         AIE_LOOP_UNROLL_FULL
         for (int l = 0; l < 4; l++) {
+#if ABL & 1
+#define C(r) aie::broadcast<int16, 8>((int16)iq2s_grid2[band[RB * (r) + 2 + 4 * g + l]])
+#else
 #define C(r) aie::broadcast<int16, 8>((int16)iq2s_grid2[band[RB * (r) + 2 + 4 * g + l] | ((band[RB * (r) + 66 + g] >> (2 * l)) & 3) << 8])
+#endif
           const aie::vector<int16, 64> t = aie::bit_and(BCAST8(C), field);
 #undef C
           const aie::vector<int16, 64> vi = aie::select(aie::select(v43, v25, aie::eq(t, one)), v8, aie::eq(t, zero));
 #define S(r) ((uint32_t)band[RB * (r) + 34 + 4 * g + l])
+#if ABL & 2
+          const uint32_t lo = S(0) * 0x01010101u, hi = lo;
+#else
           const uint32_t lo = S(0) | S(1) << 8 | S(2) << 16 | S(3) << 24, hi = S(4) | S(5) << 8 | S(6) << 16 | S(7) << 24;
+#endif
 #undef S
           const aie::vector<bfloat16, 64> sv =
               aie::select(vi, aie::bit_xor(vi, aie::broadcast<int16, 64>((int16)0x8000)), aie::mask<64>::from_uint32(lo, hi)).cast_to<bfloat16>();
@@ -162,6 +177,92 @@ static void decode_tile(const uint8_t *__restrict w) {
         }
       }
     }
+}
+#elif QFMT == 4
+// IQ2_S, its grid packed, its index and sign path in vectors (as IQ2_XXS's v5/v6): a group's 8 rows' 4 index bytes,
+// high bits and 4 sign bytes read as words, then the 32 indices [l][r] (lane 8 l + r) and the 4 octets' 64-bit sign
+// masks by shifts and selects at 32 lanes; the octet loop then one load a row and one mask
+alignas(64) static const uint16_t kodd_bf16[16] = {0x3f80, 0x4040, 0x40a0, 0x40e0, 0x4110, 0x4130, 0x4150, 0x4170,
+                                                   0x4188, 0x4198, 0x41a8, 0x41b8, 0x41c8, 0x41d8, 0x41e8, 0x41f8};
+alignas(64) static const int16_t kfield[64] = {
+#define F8 3, 12, 48, 192, 768, 3072, 12288, -16384
+    F8, F8, F8, F8, F8, F8, F8, F8
+#undef F8
+};
+alignas(64) static const int16_t kone[64] = {
+#define O8 1, 4, 16, 64, 256, 1024, 4096, 16384
+    O8, O8, O8, O8, O8, O8, O8, O8
+#undef O8
+};
+alignas(64) static const int32_t krow32[32] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+                                               2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3};
+static inline uint32_t u32_at2(const uint8_t *p) { const uint16_t *h = (const uint16_t *)p; return (uint32_t)h[0] | (uint32_t)h[1] << 16; }
+static void decode_tile(const uint8_t *__restrict w) {
+  alignas(64) static int32_t ix[32];
+  alignas(64) static uint32_t swm[8];
+  alignas(64) static int32_t wq[32];
+  const bfloat16 *kb = (const bfloat16 *)kodd_bf16;
+  const aie::vector<int16, 64> field = aie::load_v<64>(kfield), one = aie::load_v<64>(kone), zero = aie::zeros<int16, 64>();
+  const aie::vector<int16, 64> v8 = aie::broadcast<int16, 64>((int16)0x4100), v25 = aie::broadcast<int16, 64>((int16)0x41c8),
+                               v43 = aie::broadcast<int16, 64>((int16)0x422c);
+  const aie::vector<int32, 32> rowv = aie::load_v<32>(krow32);
+#define m1 aie::eq(rowv, aie::broadcast<int32, 32>(1))
+#define m2 aie::eq(rowv, aie::broadcast<int32, 32>(2))
+#define m3 aie::eq(rowv, aie::broadcast<int32, 32>(3))
+  const aie::vector<int32, 32> b255 = aie::broadcast<int32, 32>(255), b3 = aie::broadcast<int32, 32>(0x300);
+  aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
+  for (int kh = 0; kh < 2; kh++)
+    AIE_LOOP_MIN_ITERATION_COUNT(4)
+    for (int j = 0; j < NR / 8; j++) {
+      const uint8_t *band = w + RB * 8 * j;
+#define D(r) aie::broadcast<bfloat16, 8>(fp16_to_bf16_shift((uint16_t)(band[RB * (r)] | band[RB * (r) + 1] << 8), 3))
+      const aie::vector<bfloat16, 64> dv = BCAST8(D);
+#undef D
+      AIE_LOOP_MIN_ITERATION_COUNT(4)
+      for (int g = 4 * kh; g < 4 * kh + 4; g++) {
+#define KL(r) aie::broadcast<bfloat16, 8>(kb[band[RB * (r) + 74 + g] & 15])
+#define KH(r) aie::broadcast<bfloat16, 8>(kb[band[RB * (r) + 74 + g] >> 4])
+        const aie::vector<bfloat16, 64> scl = aie::mul(dv, BCAST8(KL)).to_vector<bfloat16>();
+        const aie::vector<bfloat16, 64> sch = aie::mul(dv, BCAST8(KH)).to_vector<bfloat16>();
+#undef KL
+#undef KH
+        AIE_LOOP_UNROLL_FULL
+        for (int r = 0; r < 8; r++) {
+          wq[r] = (int32)u32_at2(band + RB * r + 2 + 4 * g);
+          wq[8 + r] = (int32)u32_at2(band + RB * r + 34 + 4 * g);
+          wq[16 + r] = (int32)band[RB * r + 66 + g] << 8;
+        }
+        const aie::vector<int32, 8> q8 = aie::load_v<8>(wq), s8 = aie::load_v<8>(wq + 8), h8 = aie::load_v<8>(wq + 16);
+        // lane 8 l + r: row r's byte l, its two high bits l
+        const aie::vector<int32, 32> q = aie::concat(q8, q8, q8, q8), h = aie::concat(h8, h8, h8, h8), sg = aie::concat(s8, s8, s8, s8);
+        aie::vector<int32, 32> qb = aie::select(q, aie::downshift(q, 8), m1);
+        qb = aie::select(qb, aie::downshift(q, 16), m2);
+        qb = aie::select(qb, aie::downshift(q, 24), m3);
+        aie::vector<int32, 32> hb = aie::select(h, aie::downshift(h, 2), m1);
+        hb = aie::select(hb, aie::downshift(h, 4), m2);
+        hb = aie::select(hb, aie::downshift(h, 6), m3);
+                aie::store_v(ix, aie::bit_or(aie::bit_and(qb, b255), aie::bit_and(hb, b3)));
+        const volatile int32_t *ixv = ix; // read back from memory: Peano's lane-to-scalar copy of a forwarded store fails
+        aie::vector<int32, 32> sb = aie::select(sg, aie::downshift(sg, 8), m1);
+        sb = aie::select(sb, aie::downshift(sg, 16), m2);
+        sb = aie::select(sb, aie::downshift(sg, 24), m3);
+        sb = aie::bit_and(sb, b255);
+        aie::store_v(swm, aie::filter_even(aie::filter_even(sb.cast_to<int16>(), 1).cast_to<uint8>(), 1).cast_to<uint32>());
+        AIE_LOOP_UNROLL_FULL
+        for (int l = 0; l < 4; l++) {
+#define C(r) aie::broadcast<int16, 8>((int16)iq2s_grid2[ixv[8 * l + (r)]])
+          const aie::vector<int16, 64> t = aie::bit_and(BCAST8(C), field);
+#undef C
+          const aie::vector<int16, 64> vi = aie::select(aie::select(v43, v25, aie::eq(t, one)), v8, aie::eq(t, zero));
+          const aie::vector<bfloat16, 64> sv =
+              aie::select(vi, aie::bit_xor(vi, aie::broadcast<int16, 64>((int16)0x8000)), aie::mask<64>::from_uint32(swm[2 * l], swm[2 * l + 1])).cast_to<bfloat16>();
+          out.push(aie::mul(sv, l < 2 ? scl : sch).to_vector<bfp16ebs8>());
+        }
+      }
+    }
+#undef m1
+#undef m2
+#undef m3
 }
 #else
 // IQ2_S: octet o = 4 g + l of a row: index qs[4 g + l] | ((qh[g] >> 2 l) & 3) << 8, sign byte signs[4 g + l], scale

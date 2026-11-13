@@ -264,6 +264,14 @@ two compares and two selects to bf16 (as IQ1_S's). 32 rows a core again: **2.83 
 at 16 rows the same run, the same corr 0.999977 / worst 7.5e-3. so the grid's memory was not what held IQ2_S: the
 scalar work a value is (an index from two bytes, a sign byte, the scale nibbles - per 16 values, twice IQ2_XXS's). kept
 (14 KB freed for buffers); the next lever is that scalar path, not the rows.
+**what holds IQ2_S** (same session, 32 rows a core, TFLOP/s): ablations (ABL=, timing only, wrong values): the packed
+build 2.80; its index without the high bits 2.92; one sign byte, not 8, 2.74; no group scales 2.19; all three 1.62 -
+less work, slower: the cost is the compiler's schedule of this loop, not its op count. **the index and sign path in
+vectors** (QFMT 4, FMT=iq2s3: a group's 8 rows' index, high-bit and sign words, the 32 indices and 4 sign masks by
+shifts and selects at 32 lanes, as IQ2_XXS's v5): right (corr 0.999977) but **2.26-2.34** against 2.90 - Peano cannot
+copy a stored vector's lanes back to scalars (copyPhysReg x0 -> r: a crash), and the only form it takes, reading the
+indices back through a volatile pointer, stalls the loop. inline asm is not supported (no barrier). kept the packed
+build (QFMT 3); the next look is the loop's own asm (the pipeliner's II), not more rewrites by guess.
 
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two
