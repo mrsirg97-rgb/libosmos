@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.9]: DeepSeek's long prompts in 8,192-token steps, their memory lent by the expert cache
+
+- **Long prompts 15-20% faster on DeepSeek, decode as fast as before.** The packs now take a prompt 8,192 tokens a
+  step, not 2,048: each expert does four times the work a launch. A step that large needs 4 GiB of buffers a decode
+  never touches, and holding them always cost the expert cache 4 GiB and drafted decode 6-10%. Now the cache lends
+  them while a long prompt runs: it gives up the experts at its end, hands their pages back to the system, and takes
+  them back when the answer starts. At `low-power` on UD-IQ1_M: a 64K prompt 553-586 tok/s (471-508 before), an 8K
+  prompt 484-521 (459-473), decode within 1-3% of before (the evicted experts read back over the answer's first
+  tokens). Every output the same as 0.6.8's, bit for bit.
+- **Qwen scored as DeepSeek is:** `tools/bench/q4x_kld` (0.6.6's KL protocol for Qwen) and `tools/bench/llama_ref`
+  (a reference's log-probabilities from llama.cpp, for a model too large for osmos's own reference path).
+
 ## [0.6.8]: osmos-evo-A, osmos's own DeepSeek pack, is the default
 
 - **`osmos-evo-a`: UD-IQ1_M's quality at about UD-IQ1_S's speed.** UD-IQ1_M with the routed experts' down

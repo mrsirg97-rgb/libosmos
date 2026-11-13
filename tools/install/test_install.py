@@ -80,12 +80,12 @@ class Manifest(unittest.TestCase):
         self.assertEqual(q1m["settings"], {"max_context": 1048576})
         self.assertEqual(m["packs"]["ud-iq1_s"]["table"]["slot"], [5, 5])
         for ds in ("ud-iq1_s", "ud-iq1_m"):  # osmos-serve's 2K steps: 4K's +10-18% prompts cost 1-2% drafted, 8K's 6-10%
-            self.assertEqual(m["packs"][ds]["settings"], {"no_guess": True, "max_context": 1048576})
+            self.assertEqual(m["packs"][ds]["settings"], {"no_guess": True, "max_context": 1048576, "max_tokens": 8192})
         x = m["packs"]["ud-iq2_xxs"]  # six files: its own Q5_K Engram (the sixth) not fetched, the MXFP8 table 6 of 6
         self.assertEqual(x["table"]["slot"], [6, 6])
         self.assertEqual([m["files"][f]["bytes"] for f in x["shards"]],
                          [5780923, 49955895008, 49950675200, 48971469632, 16419622240])
-        self.assertEqual(x["settings"], {"no_guess": True, "max_context": 1048576})  # 0.5.7: off is fastest (DESIGN.md)
+        self.assertEqual(x["settings"], {"no_guess": True, "max_context": 1048576, "max_tokens": 8192})  # 0.5.7: off is fastest (DESIGN.md)
         self.assertEqual((x["overlay"], x["drafter"]), ("abl-ud-iq2_xxs", ["drafter-bin", "drafter-json"]))
         q = m["packs"]["qwen38-ud-iq3_xxs"]
         self.assertEqual(q["drafter_kind"], "mtp")                            # its MTP head: one GGUF
