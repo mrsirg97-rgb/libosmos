@@ -29,6 +29,7 @@ QT, BB, SRC, FLAGS = {'iq2xxs': ('IQ2_XXS', 66, 'fused_iq2xxs.cc', ['-DFUSED_V=6
 # passes. down: K 2304 -> N 5120 - a row's 9 blocks are no whole words (594 bytes), a core's 16 rows are: its W tile
 # those rows whole, once a pass, a block decoded a K-step; 10 passes
 KIND = os.environ.get('KIND', 'gateup')
+ROWMAJ = int(os.environ.get('ROWMAJOR', '1'))  # C to rows where the GPU reads (else sub-tile order, contiguous: timing only)
 DOWN = KIND == 'down'
 M, KT = 64 * H, 256                       # tokens, a K-step
 K, N = (2304, 5120) if DOWN else (5120, 2304)
@@ -52,7 +53,7 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
     step = ExternalFunction("fused_step_f32", source_file=os.path.join(HERE, SRC),
                             arg_types=[wt, at, ct, np.int32, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
                             compile_flags=FLAGS + ["-DMULTI_F32", f"-DHALVES={H}", "-DKHALF=1", f"-DNROWS={NR}",
-                                                   f"-DROWSTRIDE={RB if DOWN else 2 * BB}", f"-DROWMAJOR={KS}"] + (["-DWHOLEK"] if DOWN else []))
+                                                   f"-DROWSTRIDE={RB if DOWN else 2 * BB}", f"-DSPLIT={os.environ.get('SPLIT', '0')}"] + ([f"-DROWMAJOR={KS}"] if ROWMAJ else []) + (["-DWHOLEK"] if DOWN else []))
     a_l3, w_l3, c_l3, workers = [], [], [], []
     # A: one stream from one shim, through one memtile, to all 32 cores (ABCAST, the default): every core multiplies
     # the same A tiles, so a column's own copy was 8 x the DRAM reads; ABCAST=0 a stream a column, as before
@@ -124,8 +125,12 @@ def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down'
             # row m, its NR columns at (32 p + 4 col + r) NR; gate to C, up to C2 (the down: C, its passes alone)
             for Cm in ((C,) if DOWN else (C, C2)):
                 # (a core's NR-word rows a burst each: the NPU's time, off the GPU's path - its rows outlast these)
-                cp[col].drain(Cm, tap=tap(TC, col * ROWS * NR, [PASSES, ROWS, M, NR], [COLS * ROWS * NR, NR, N, 1]),
-                              wait=True)
+                if ROWMAJ:
+                    cp[col].drain(Cm, tap=tap(TC, col * ROWS * NR, [PASSES, ROWS, M, NR], [COLS * ROWS * NR, NR, N, 1]),
+                                  wait=True)
+                else:  # timing only: each core's tile contiguous ([pass][column][core][tile]), the values unchecked
+                    cp[col].drain(Cm, tap=tap(TC, col * ROWS * CT, [PASSES, ROWS * CT // 1024, 1024],
+                                              [COLS * ROWS * CT, 1024, 1]), wait=True)
     rt = Runtime(seq, [np.ndarray[(TW,), i32], np.ndarray[(TW,), i32], np.ndarray[(TA,), i32], np.ndarray[(TC,), f32], np.ndarray[(TC,), f32]]
                  + [f.prod() for f in a_l3] + [f.prod() for f in w_l3] + [f.cons() for f in c_l3])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()

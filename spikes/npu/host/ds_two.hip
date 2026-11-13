@@ -39,8 +39,8 @@ struct K {
     std::memcpy(instr.map<char*>(), ins.data(), ins.size()), instr.sync(XCL_BO_SYNC_BO_TO_DEVICE);
     w = xrt::bo(dev, 3041280, xrt::bo::flags::host_only, k.group_id(3));
     a = xrt::bo(dev, 737280, xrt::bo::flags::host_only, k.group_id(5));
-    c = xrt::bo(dev, 2359296, xrt::bo::flags::host_only, k.group_id(6));
-    spare = xrt::bo(dev, 4096, xrt::bo::flags::host_only, k.group_id(7));
+    c = xrt::bo(dev, 4u << 20, xrt::bo::flags::host_only, k.group_id(6));  // a matrix's rows: gate / up 1.2 MB, the down 2.6
+    spare = xrt::bo(dev, 4u << 20, xrt::bo::flags::host_only, k.group_id(7));  // the second output (up's)
     std::memset(w.map<char*>(), 0, w.size()), std::memset(a.map<char*>(), 0, a.size());
     w.sync(XCL_BO_SYNC_BO_TO_DEVICE), a.sync(XCL_BO_SYNC_BO_TO_DEVICE);
   }
@@ -78,6 +78,14 @@ int main(int argc, char** argv) {
       blk.push_back((now_us() - t0) / 40);
     }
     std::printf("layers of 20 each, alternating: %.0f us a launch\n", median(blk));
+    // queued: 40 launches started back to back, then waited (the engine's way) - against one at a time
+    for (int r = 0; r < 3; r++) {
+      const double t0 = now_us();
+      std::vector<xrt::run> q;
+      for (int i = 0; i < 40; i++) q.push_back(a.k(3u, a.instr, a.n, a.w, a.w, a.a, a.c, a.spare));
+      for (auto& x : q) x.wait();
+      std::printf("40 queued: %.0f us a launch\n", (now_us() - t0) / 40);
+    }
   } catch (const std::exception& e) {
     return std::printf("failed: %s\n", e.what()), 1;
   }

@@ -12,6 +12,9 @@
 #include "aie_kernel_utils.h"
 #include "../common/fp16.h"
 #include "../common/c_rows.h"
+#ifndef SPLIT
+#define SPLIT 0 /* timing only (fused_ds.py SPLIT=): 1 the decode once a pass, 2 no matmul */
+#endif
 static inline bfloat16 fp16_to_bf16_shift_8(uint16_t h) { return fp16_to_bf16_shift(h, 3); }
 static inline bfloat16 fp16_to_bf16_shift_0(uint16_t h) { return fp16_to_bf16_shift(h, 0); }
 
@@ -37,7 +40,11 @@ static inline bfloat16 fp16_to_bf16_shift_0(uint16_t h) { return fp16_to_bf16_sh
 #endif
 constexpr int NR = NROWS, KV = 256, BB = ROWSTRIDE;
 
+#ifdef MSPLIT
+alignas(64) static uint8_t Bm[NR * 128 * 9 / 8]; // the decoded weights of one K half (fused_ds2.py: a call a half)
+#else
 alignas(64) static uint8_t Bm[NR * KV * 9 / 8]; // the decoded weights, sub-tile order
+#endif
 
 static inline float half_bits_div8(uint16_t h) { return fp16_to_f32_shift(h, 3); } // subnormals too (common/fp16.h)
 
@@ -224,12 +231,12 @@ static void decode_tile7(const uint8_t *__restrict w) {
 }
 #endif
 
-static void decode_tile3(const uint8_t *__restrict w) {
+static void decode_tile3(const uint8_t *__restrict w, int kh_lo = 0, int kh_hi = KHALF ? 2 : 1) {
   alignas(64) static bfloat16 d8[NR]; // a row's d / 8: its one setup
   for (int n = 0; n < NR; n++) d8[n] = fp16_to_bf16_shift_8((uint16_t)(w[BB * n] | w[BB * n + 1] << 8));
   const bfloat16 *kb = (const bfloat16 *)kodd_bf16;
   aie::block_vector_output_buffer_stream<bfp16ebs8, 64> out((bfp16ebs8 *)Bm);
-  for (int kh = 0; kh < (KHALF ? 2 : 1); kh++)
+  for (int kh = kh_lo; kh < kh_hi; kh++)
   AIE_LOOP_MIN_ITERATION_COUNT(8)
   for (int j = 0; j < NR / 8; j++) {
     const uint8_t *band = w + BB * 8 * j;
@@ -476,6 +483,29 @@ extern "C" void fused_step_f32x2(const uint8_t *__restrict w, uint8_t *__restric
   event1();
 }
 
+#ifdef MSPLIT
+// fused_ds2.py's step: C a tile of MSPLIT tokens x NR rows (all the core's rows), A a K half of those tokens (MSPLIT x
+// 128 bfp16) - the core's rows decoded a K half at a time into Bm (its tokens' passes decode them again: the price of
+// A streamed once a matrix, not once a pass of rows); ROWMAJOR as fused_step_f32's
+extern "C" void fused_step_ms(const uint8_t *__restrict w, uint8_t *__restrict a, float *__restrict c, int32_t kstep,
+                              int32_t kh) {
+  if (kstep == 0 && kh == 0)
+    for (int i = 0; i < MSPLIT * NR; i += 16) aie::store_v(c + i, aie::zeros<float, 16>());
+#if SPLIT == 3
+  return; /* timing only: the streams alone */
+#endif
+#if SPLIT != 1
+  decode_tile3(w + (BB == 132 ? 66 * (kstep & 1) : 0), kh, kh + 1);
+#endif
+#if SPLIT != 2
+  mm_f32acc<MSPLIT / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)Bm, c);
+#endif
+#ifdef ROWMAJOR
+  if (kstep == ROWMAJOR - 1 && kh == 1) c_rows<NR, MSPLIT / 8>(c, (float *)Bm);
+#endif
+}
+#endif
+
 // a quarter of a K-step's A: piece p = 2 * half + kh; the W tile (NR rows) decoded at piece 0; C (2 halves of 64 x NR
 // f32) zeroed at the first K-step's
 extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict a, float *__restrict c, int32_t kstep,
@@ -484,12 +514,22 @@ extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict 
   float *ch = c + half * (64 * NR);
   if (kstep == 0 && kh == 0)
     for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
+#if SPLIT == 1
+  if (kstep != 0) goto mm; /* timing only: the decode once */
+#elif SPLIT == 3
+  return; /* timing only: no work - the streams alone */
+#endif
 #ifdef WHOLEK
   if (piece == 0) decode_tile3(w + 66 * kstep); // the rows whole (fused_ds.py KIND=down): K-step s their block s
 #else
   if (piece == 0) decode_tile3(w + (BB == 132 ? 66 * (kstep & 1) : 0)); // a pair tile: odd K-steps its second block
 #endif
+#if SPLIT == 1
+mm:
+#endif
+#if SPLIT != 2
   mm_f32acc<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)(Bm + kh * (NR * 128 * 9 / 8)), ch);
+#endif
 #ifdef ROWMAJOR
   if (kstep == ROWMAJOR - 1 && piece == 3) // the step's last piece (ROWMAJOR: the K-steps): both halves' sums done,
     for (int h = 0; h < 2; h++) c_rows<NR>(c + h * (64 * NR), (float *)Bm); // and Bm free - to rows

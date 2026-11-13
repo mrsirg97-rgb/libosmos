@@ -4,9 +4,9 @@
 // scratch of one octet. so the C tile leaves the core in rows, and a DMA of 4 dimensions puts it where the GPU reads
 // (fused_ds.py ROWMAJOR)
 // t: a scratch of 8 NRc floats, 64-byte aligned - the kernel's decoded tile (Bm), free once the last matmul has read it
-template <unsigned NRc>
+template <unsigned NRc, unsigned ZO = 8> // ZO: the tile's row octets (64 rows: 8; fused_ds2.py's 32: 4)
 static inline void c_rows(float *__restrict ch, float *__restrict t) {
-  for (unsigned z = 0; z < 8; z++) {
+  for (unsigned z = 0; z < ZO; z++) {
     float *b = ch + z * 8 * NRc;
     for (unsigned i = 0; i < 8 * NRc; i += 16) aie::store_v(t + i, aie::load_v<16>(b + i));
     for (unsigned j = 0; j < NRc / 8; j++)

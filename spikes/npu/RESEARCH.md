@@ -368,3 +368,24 @@ power is not it: package 62.7 W with the NPU against 69.6 alone (a sampled pair)
 so the ~7% the NPU's share would save is about what its traffic and translations cost the GPU - next: A once a part
 (broadcast across the columns from one shim, or held in the memtiles: the down's 332 KB fits), the cache in 2 MiB
 pages (the NPU's walks), the unpack coalesced; and the slow mode's cause (both runs) before any A/B claims a number.
+
+## what bounds the fused kernels at DeepSeek's shape (2026-11-13, performance)
+fused_ds.py with timing-only switches (the kernels' SPLIT: 1 the decode once a pass, 2 no matmul, 3 no work at all):
+IQ2_XXS gate + up 1,119 us whole, **1,168 with no work at all**; the down 523 / 564 - the cores wait on their streams.
+each core's A is the whole A again each pass (gate + up 6 x 737 KB = 4.4 MB a core a part, the down 10 x 332 KB): at a
+core's stream port (~4-5 GB/s) that is the kernel's time; the broadcast (one A stream for 32 cores) cut DRAM's reads,
+not what each core receives. the decode (~0.5 ms a core's rows once) hides behind it.
+**measured away: tokens split, not rows** (fused_ds2.py, fused_iq2xxs.cc MSPLIT: a core holds all its 72 rows for 32
+tokens at a time, 4 token passes a matrix, A once a matrix - 1.5 MB a core - its rows decoded a K half at a time, 4
+times a part): right (corr 0.999977), but **2,769 us**: streams alone 666 (W now 4 x a column's rows, ~3 MB a column
+channel), no decode 733 - the decode 4 x ~0.5 ms is the time. the rows tiling sits near the balance (streams ~1.1 ms,
+decode ~0.5 behind them); faster needs both less A a core and a faster decode at once (64-token passes - not in a
+core's 64 KB as laid out - and a 2x decode). kept: fused_ds.py's tiling.
+**batching launches: measured away.** queued (the engine's way) a launch costs 902 us against 1,463 one at a time -
+XRT overlaps a queued launch's setup; what is left is a call's first (~60 ms a prompt). the cost that is there: a
+layer's gate + up and down are two kernels, two hardware contexts - a switch ~2.5 ms, ~244 a prompt (~0.3 s). one
+design for both does not fit (a core's program 11.5-13 KB of 16, the two kinds' row counts 24 and 16).
+**the engine** (an 8K prompt, 106 GiB, performance, two to three rounds interleaved, evictions ~0): GPU alone 626 tok/s;
+the NPU writing its rows in place (no unpack) 10% 637; with A broadcast 10% 641 (+2.4%), **15% 642.5 (+2.6%)**, 20%
+635.5 - there the GPU waits ~305 ms on the NPU: its time is the critical path past 15%. UD-IQ1_M ppl (8,191 tokens,
+2,048-token steps) 2.4623 with the NPU at 15% against 2.4591 alone (+0.13%: its bfp16 A).
