@@ -35,8 +35,8 @@ bool npu_built(void);
 /* the kernels from dir, a subdirectory a format and kind (iq2xxs/, iq1s/, iq2xs/ gate + up; iq2xxs-down/, iq1s-down/,
    iq2xs-down/, iq2s-down/: each
    final.xclbin, insts.bin - its own hardware context, all live at once; going from one to another ~2.7 ms), for an
-   expert of D -> FF -> D; A and C for at most max_parts parts of either kind (hipMalloc'd, their dma-bufs the NPU's).
-   none found: NULL */
+   expert of D -> FF -> D; A for at most max_parts parts of either kind (hipMalloc'd, its dma-buf the NPU's). none
+   found: NULL */
 Npu *npu_open(const char *dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[NPU_ERR]);
 bool npu_has(const Npu *n, NpuKind kind, uint32_t qtype); /* a kernel for a GGUF type id */
 void npu_close(Npu *n);
@@ -45,13 +45,18 @@ void npu_close(Npu *n);
    npu_run names must lie in one */
 bool npu_region(Npu *n, void *base, uint64_t bytes, char err[NPU_ERR]);
 
+/* a GPU buffer the kernels write their rows into (hipMalloc'd: its dma-buf imported); every output an npu_run names
+   must lie in one */
+bool npu_output(Npu *n, void *dev, uint64_t bytes, char err[NPU_ERR]);
+
 void *npu_a(const Npu *n); /* the parts' A streams (device memory; npu_pack_a's dst: K D or FF by the kind) */
-void *npu_c(const Npu *n); /* their C (npu_unpack_c's c) */
 
 /* parts launches of the kind's qtype kernel - part p's weights w0[p] (gate, or the down) and w1[p] (up; unread by the
-   down), w_bytes each, in a region; its A and C the p-th of the kind's size. returns when all are done */
+   down), w_bytes each, in a region; its A the p-th of the kind's size; its rows (NPU_TOKENS of them, row-major, FF wide
+   for gate and up, D for the down) written at c0[p] (gate's, or the down's) and c1[p] (up's; the down: unread), each
+   in an output. returns when all are done */
 bool npu_run(Npu *n, NpuKind kind, uint32_t qtype, uint32_t parts, const void *const *w0, const void *const *w1,
-             uint64_t w_bytes, char err[NPU_ERR]);
+             uint64_t w_bytes, void *const *c0, void *const *c1, char err[NPU_ERR]);
 
 NpuStats npu_stats(const Npu *n);
 

@@ -22,14 +22,19 @@ bool npu_region(Npu *n, void *base, uint64_t bytes, char err[NPU_ERR])
 }
 
 void *npu_a(const Npu *n) { return (void)n, NULL; }
-void *npu_c(const Npu *n) { return (void)n, NULL; }
+bool npu_output(Npu *n, void *dev, uint64_t bytes, char err[NPU_ERR])
+{
+  (void)n, (void)dev, (void)bytes;
+  snprintf(err, NPU_ERR, "npu: not built");
+  return false;
+}
 
 bool npu_has(const Npu *n, NpuKind kind, uint32_t qtype) { return (void)n, (void)kind, (void)qtype, false; }
 
 bool npu_run(Npu *n, NpuKind kind, uint32_t qtype, uint32_t parts, const void *const *w0, const void *const *w1,
-             uint64_t w_bytes, char err[NPU_ERR])
+             uint64_t w_bytes, void *const *c0, void *const *c1, char err[NPU_ERR])
 {
-  (void)n, (void)kind, (void)qtype, (void)parts, (void)w0, (void)w1, (void)w_bytes;
+  (void)n, (void)kind, (void)qtype, (void)parts, (void)w0, (void)w1, (void)w_bytes, (void)c0, (void)c1;
   snprintf(err, NPU_ERR, "npu: not built");
   return false;
 }

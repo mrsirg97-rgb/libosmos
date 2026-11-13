@@ -165,9 +165,10 @@ struct Forward
   float npu_share;   /* the share of a layer's pairs the NPU takes */
   uint32_t npu_max;  /* its buffers' parts */
   int32_t *npu_tok;  /* mapped and coherent: the parts' tokens' rows of xf ([part][NPU_TOKENS]), then their first
-                        rows of ga / upr - written by the host, read by npu_pack_a / npu_unpack_c */
+                        rows of ga / upr / ye - written by the host, read by npu_pack_a and fwd_npu_run */
   uint32_t *npu_row;
   const void **npu_wg, **npu_wu; /* the parts' weights: gate (or the down's) and up */
+  void **npu_c0, **npu_c1;       /* where their rows go: ga's and upr's, or ye's */
   hipEvent_t npu_packed;         /* the layer's parts packed: the NPU may read them */
   hipEvent_t npu_gpu_done, npu_resumed; /* timed: the stream past the GPU's own rows, and the work after the NPU's
                                            queued - between them the GPU idle on the NPU (read at the next call) */
@@ -322,7 +323,6 @@ uint32_t fwd_npu_pick(const Forward *f, uint32_t pairs, const int32_t *cnt, uint
 bool fwd_npu_pack(Forward *f, NpuKind kind, uint32_t parts, const uint32_t *nq, uint32_t nd, const uint32_t *base,
                   const uint32_t *slot0, const int32_t *gidx, const void *const *w0, const void *const *w1);
 bool fwd_npu_run(Forward *f, NpuKind kind, int l, uint32_t parts, char *err);
-bool fwd_npu_unpack(Forward *f, NpuKind kind, uint32_t parts);
 bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks);
 bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]);
 /* the layer's CPU experts (cpu_e, cpu_unit: nc of them, their rows among the step's picks rows by expert, row r's

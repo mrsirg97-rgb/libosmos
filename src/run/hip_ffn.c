@@ -365,12 +365,12 @@ bool fwd_moe(Forward *f, int l, char *err)
        (!gu_on || fwd_npu_pack(f, NPU_GATE_UP, parts, nq, nd, base, slot0, gidx, ex_g, ex_u)) &&
        group(L->exp_gate->type, gu.dtab, gu.cnt, gu.dcnt, gu.n, FF, D, b->xe16, gu.dx, b->ga, gu.dy, FF) &&
        group(L->exp_up->type, gu.dtab + gu.n, gu.cnt, gu.dcnt, gu.n, FF, D, b->xe16, gu.dx, b->upr, gu.dy, FF) &&
-       (!gu_on || (fwd_npu_run(f, NPU_GATE_UP, l, parts, err) && fwd_npu_unpack(f, NPU_GATE_UP, parts))) &&
+       (!gu_on || fwd_npu_run(f, NPU_GATE_UP, l, parts, err)) &&
        ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
        (!dn_on || fwd_npu_pack(f, NPU_DOWN, parts, nq, nd, base, slot0, gidx, ex_d, NULL)) &&
        mm_x16_rows(b->hh, FF, dhidx, slots, FF, b->xe16, b->overflow, NULL) &&
        group(L->exp_down->type, dn.dtab, dn.cnt, dn.dcnt, dn.n, D, FF, b->xe16, dn.dx, b->ye, dn.dy, D) &&
-       (!dn_on || (fwd_npu_run(f, NPU_DOWN, l, parts, err) && fwd_npu_unpack(f, NPU_DOWN, parts))) &&
+       (!dn_on || fwd_npu_run(f, NPU_DOWN, l, parts, err)) &&
        ops_gather_sum_add(b->moe, b->ye, dorder, K, n, D, b->sye, NULL);
   if (!ok)
     return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");

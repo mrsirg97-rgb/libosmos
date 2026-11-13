@@ -46,13 +46,13 @@ def tap(total, off, sizes, strides):
     return TensorAccessPattern((total,), off, sizes, strides)
 
 @iron.jit
-def fused_ds(wg: In, wu: In, a: In, c: Out):
+def fused_ds(wg: In, wu: In, a: In, c: Out, c2: Out):  # c: gate's (or the down's) rows, c2: up's (the down: unwritten)
     i32, f32 = np.dtype[np.int32], np.dtype[np.float32]
     wt, at, ct = np.ndarray[(WT,), i32], np.ndarray[(AT,), i32], np.ndarray[(CT,), f32]
     step = ExternalFunction("fused_step_f32", source_file=os.path.join(HERE, SRC),
                             arg_types=[wt, at, ct, np.int32, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
                             compile_flags=FLAGS + ["-DMULTI_F32", f"-DHALVES={H}", "-DKHALF=1", f"-DNROWS={NR}",
-                                                   f"-DROWSTRIDE={RB if DOWN else 2 * BB}"] + (["-DWHOLEK"] if DOWN else []))
+                                                   f"-DROWSTRIDE={RB if DOWN else 2 * BB}", f"-DROWMAJOR={KS}"] + (["-DWHOLEK"] if DOWN else []))
     a_l3, w_l3, c_l3, workers = [], [], [], []
     for col in range(COLS):
         a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=2)
@@ -88,9 +88,9 @@ def fused_ds(wg: In, wu: In, a: In, c: Out):
                     co.release(1)
             workers.append(Worker(body, fn_args=[a2.cons(), w2[r].cons(), c2[r].prod(), step], tile=Tile(col, 2 + r),
                                   stack_size=0x1100))
-    TW, TA, TC = N * RB // 4, KS * 2 * H * AT, MATS * N * M
+    TW, TA, TC = N * RB // 4, KS * 2 * H * AT, M * N  # C: a matrix's rows, M x N f32, row-major
 
-    def seq(WG, WU, A, C, *hs):  # (down: WG its matrix, WU unread)
+    def seq(WG, WU, A, C, C2, *hs):  # (down: WG its matrix, WU unread, C2 unwritten)
         ap, wp, cp = hs[:COLS], hs[COLS:2 * COLS], hs[2 * COLS:]
         for col in range(COLS):
             # A: the whole stream once a (matrix, pass)
@@ -106,10 +106,13 @@ def fused_ds(wg: In, wu: In, a: In, c: Out):
                     wp[col].fill(Wm, tap=tap(TW, base, [PASSES, KP, ROWS * NR, 2 * BB // 4],
                                              [COLS * ROWS * NR * RW, 2 * BB // 4, RW, 1]))
         for col in range(COLS):
-            # C: [matrix][pass][column][core][128 x 24 f32, sub-tile order]
-            cp[col].drain(C, tap=tap(TC, col * ROWS * CT, [MATS * PASSES, ROWS * CT // 1024, 1024],
-                                     [COLS * ROWS * CT, 1024, 1]), wait=True)  # [matrix][pass][column][core][C tile]
-    rt = Runtime(seq, [np.ndarray[(TW,), i32], np.ndarray[(TW,), i32], np.ndarray[(TA,), i32], np.ndarray[(TC,), f32]]
+            # C: a pass's core tiles (in rows: the kernels' c_rows) where their rows go - pass p, the column's core r,
+            # row m, its NR columns at (32 p + 4 col + r) NR; gate to C, up to C2 (the down: C, its passes alone)
+            for Cm in ((C,) if DOWN else (C, C2)):
+                # (a core's NR-word rows a burst each: the NPU's time, off the GPU's path - its rows outlast these)
+                cp[col].drain(Cm, tap=tap(TC, col * ROWS * NR, [PASSES, ROWS, M, NR], [COLS * ROWS * NR, NR, N, 1]),
+                              wait=True)
+    rt = Runtime(seq, [np.ndarray[(TW,), i32], np.ndarray[(TW,), i32], np.ndarray[(TA,), i32], np.ndarray[(TC,), f32], np.ndarray[(TC,), f32]]
                  + [f.prod() for f in a_l3] + [f.prod() for f in w_l3] + [f.cons() for f in c_l3])
     return Program(iron.get_current_device(), rt, workers=workers).resolve_program()
 
@@ -154,11 +157,12 @@ def main():
     wg_ = iron.tensor(g.view(np.int32), dtype=np.int32, device="npu")
     wu_ = iron.tensor(u.view(np.int32), dtype=np.int32, device="npu")
     at_ = iron.tensor(a.view(np.int32), dtype=np.int32, device="npu")
-    ct_ = iron.zeros(MATS * N * M, dtype=np.float32, device="npu")
-    bench = run_iters(fused_ds, wg_, wu_, at_, ct_, warmup=1, iters=5)
+    ct_ = iron.zeros(M * N, dtype=np.float32, device="npu")
+    ct2_ = iron.zeros(M * N, dtype=np.float32, device="npu")
+    bench = run_iters(fused_ds, wg_, wu_, at_, ct_, ct2_, warmup=1, iters=5)
     if os.environ.get('DUMP'):  # the host harness's inputs and this run's output (host/ds_npu.hip: bit-identical)
         d = os.environ['DUMP']; os.makedirs(d, exist_ok=True)
-        for name, arr in (('wg', g), ('wu', u), ('a', a), ('c', ct_.numpy()), ('x', A)):
+        for name, arr in (('wg', g), ('wu', u), ('a', a), ('c', np.concatenate([ct_.numpy(), ct2_.numpy()])), ('x', A)):
             np.ascontiguousarray(arr).tofile(os.path.join(d, name + '.bin'))
         # the engine's encoding (kernels/npu_pack.hip): nearest-even, the exponent raised on a carry - its bytes,
         # and the reference it should reach
@@ -181,15 +185,10 @@ def main():
         re.tofile(os.path.join(d, 'ref_even.bin'))
         GOT = []
     # C: [mat][pass][core i][half][z][j][8 m + n]; core i's rows of pass p: (32 p + i) 24 ..
-    cf = ct_.numpy().reshape(MATS, PASSES, COLS * ROWS, H, 8, NR // 8, 8, 8)
+    outs = [ct_.numpy().reshape(M, N), ct2_.numpy().reshape(M, N)]  # in rows, where the GPU reads them
     worst, corr = 0.0, 1.0
     for m in range(MATS):
-        got = np.empty((M, N), np.float32)
-        for p in range(PASSES):
-            for i in range(COLS * ROWS):
-                n0 = (32 * p + i) * NR
-                got[:, n0:n0 + NR] = cf[m, p, i].transpose(0, 1, 3, 2, 4).reshape(M, NR)
-        print(f'  mat {m}: |got| max {np.abs(got).max():.4g} mean {np.abs(got).mean():.4g}, |ref| max {np.abs(refs[m]).max():.4g}, max diff {np.abs(got - refs[m]).max():.3g}, nonzero {np.count_nonzero(got)}/{got.size}')
+        got = outs[m].astype(np.float32)
         bad = ~np.isfinite(got)
         if bad.any():
             nb = bad.reshape(M, PASSES, COLS * ROWS, NR).transpose(1, 2, 0, 3).reshape(PASSES, COLS * ROWS, -1).sum(-1)

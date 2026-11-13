@@ -2,8 +2,8 @@
    gate and up share a format the NPU has a kernel for, or whose down has one, gives the NPU a fixed share of its pairs
    in whole NPU_TOKENS parts of its hottest experts - chosen from the routing alone (fwd_npu_pick), so a prompt's bits
    are the same each run. for each matrix it takes the GPU packs the parts' rows (npu_pack_a: of xf for gate and up,
-   of hh for the down), the NPU runs them while the GPU runs the layer's other rows, and the GPU unpacks theirs (into
-   ga / upr before the swiglu, into ye before the sum) */
+   of hh for the down), and the NPU runs them while the GPU runs the layer's other rows - writing theirs where the GPU
+   reads them, a part's 128 rows of ga / upr (before the swiglu) or ye (before the sum): no copy back */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +20,7 @@ static void npu_free(Forward *f)
     hipEventDestroy(f->npu_gpu_done), hipEventDestroy(f->npu_resumed), f->npu_gpu_done = f->npu_resumed = NULL;
   hipHostFree(f->npu_tok), hipHostFree(f->npu_row), f->npu_tok = NULL, f->npu_row = NULL;
   free(f->npu_wg), free(f->npu_wu), f->npu_wg = f->npu_wu = NULL;
+  free(f->npu_c0), free(f->npu_c1), f->npu_c0 = f->npu_c1 = NULL;
 }
 
 void fwd_npu_destroy(Forward *f) { npu_free(f); }
@@ -41,7 +42,11 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]
   if (!(f->npu = npu_open(dir, g->n_embd, g->expert_ff, max, nerr)) ||
       /* the cache's pages and the stream's: every expert a step holds (npu_run refuses one outside them) */
       !npu_region(f->npu, hb, host_slots_bytes(f->hs), nerr) ||
-      !npu_region(f->npu, sb, host_slots_bytes(f->hs_stream), nerr))
+      !npu_region(f->npu, sb, host_slots_bytes(f->hs_stream), nerr) ||
+      /* where its rows go: the step's gate, up and down outputs (their sizes hip_forward.c's buffers()') */
+      !npu_output(f->npu, f->b.ga, pairs * g->expert_ff * sizeof(float), nerr) ||
+      !npu_output(f->npu, f->b.upr, pairs * g->expert_ff * sizeof(float), nerr) ||
+      !npu_output(f->npu, f->b.ye, pairs * g->n_embd * sizeof(float), nerr))
   {
     npu_free(f);
     return fwd_fail(err, nerr);
@@ -50,6 +55,7 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]
   if (hipHostMalloc((void **)&f->npu_tok, (size_t)max * NPU_TOKENS * 4, mapped) != hipSuccess ||
       hipHostMalloc((void **)&f->npu_row, (size_t)max * 4, mapped) != hipSuccess ||
       !(f->npu_wg = malloc(max * sizeof *f->npu_wg)) || !(f->npu_wu = malloc(max * sizeof *f->npu_wu)) ||
+      !(f->npu_c0 = malloc(max * sizeof *f->npu_c0)) || !(f->npu_c1 = malloc(max * sizeof *f->npu_c1)) ||
       hipEventCreateWithFlags(&f->npu_packed, hipEventDisableTiming) != hipSuccess ||
       hipEventCreate(&f->npu_gpu_done) != hipSuccess || hipEventCreate(&f->npu_resumed) != hipSuccess)
   {
@@ -136,22 +142,20 @@ bool fwd_npu_run(Forward *f, NpuKind kind, int l, uint32_t parts, char *err)
   if (!qi || hipEventRecord(f->npu_gpu_done, NULL) != hipSuccess || hipEventSynchronize(f->npu_packed) != hipSuccess)
     return fwd_fail(err, "the NPU's packing failed");
   const uint64_t w_bytes = (uint64_t)g->expert_ff * g->n_embd / qi->values * qi->bytes; /* either matrix: D x FF */
+  for (uint32_t p = 0; p < parts; p++) /* a part's rows where the GPU reads them: from its first row's */
+    if (kind == NPU_GATE_UP)
+      f->npu_c0[p] = f->b.ga + (uint64_t)f->npu_row[p] * g->expert_ff,
+      f->npu_c1[p] = f->b.upr + (uint64_t)f->npu_row[p] * g->expert_ff;
+    else
+      f->npu_c0[p] = f->npu_c1[p] = f->b.ye + (uint64_t)f->npu_row[p] * g->n_embd;
   const bool ahead = hipEventQuery(f->npu_gpu_done) == hipErrorNotReady; /* the GPU still busy as the NPU begins */
-  if (!npu_run(f->npu, kind, qt, parts, f->npu_wg, f->npu_wu, w_bytes, nerr))
+  if (!npu_run(f->npu, kind, qt, parts, f->npu_wg, f->npu_wu, w_bytes, f->npu_c0, f->npu_c1, nerr))
     return fwd_fail(err, nerr);
   f->npu_gpu_ahead_ms += ahead && hipEventQuery(f->npu_gpu_done) == hipErrorNotReady; /* still busy as it ends: a count */
   if (hipEventRecord(f->npu_resumed, NULL) != hipSuccess)
     return fwd_fail(err, "the NPU's resume event");
   f->npu_timed = true;
   return true;
-}
-
-bool fwd_npu_unpack(Forward *f, NpuKind kind, uint32_t parts)
-{
-  const Geometry *g = f->g;
-  return kind == NPU_GATE_UP
-             ? npu_unpack_c(npu_c(f->npu), g->expert_ff, NPU_GATE_UP_ROWS, 2, parts, f->npu_row, f->b.ga, f->b.upr, NULL)
-             : npu_unpack_c(npu_c(f->npu), g->n_embd, NPU_DOWN_ROWS, 1, parts, f->npu_row, f->b.ye, NULL, NULL);
 }
 
 void forward_npu_stats(const Forward *f, uint64_t *calls, uint64_t *parts, double *wait_us, double *gpu_idle_ms,

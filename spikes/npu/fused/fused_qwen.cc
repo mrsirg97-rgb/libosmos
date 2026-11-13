@@ -10,6 +10,7 @@
 
 #include "aie_kernel_utils.h"
 #include "../common/fp16.h"
+#include "../common/c_rows.h"
 #include "../common/mm_f32.h"
 
 #ifndef QFMT
@@ -319,4 +320,8 @@ extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict 
   if (piece == 0) decode_tile(w + (RB == 2 * BLK ? BLK * (kstep & 1) : 0)); // a pair tile: odd K-steps its second
 #endif
   mm_f32acc<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)(Bm + kh * (NR * 128 * 9 / 8)), ch);
+#ifdef ROWMAJOR
+  if (kstep == ROWMAJOR - 1 && piece == 3) // the step's last piece (ROWMAJOR: the K-steps): both halves' sums done,
+    for (int h = 0; h < 2; h++) c_rows<NR>(c + h * (64 * NR), (float *)Bm); // and Bm free - to rows
+#endif
 }
