@@ -31,7 +31,10 @@ static inline bfloat16 fp16_to_bf16_shift_0(uint16_t h) { return fp16_to_bf16_sh
 #ifndef NROWS
 #define NROWS 64 /* a core's output rows (the W tile's) */
 #endif
-constexpr int NR = NROWS, KV = 256, BB = 66;
+#ifndef ROWSTRIDE
+#define ROWSTRIDE 66 /* a W tile row's bytes: 66 one block a row; 132 two (fused_ds.py: GGUF's own rows, a K-step pair) */
+#endif
+constexpr int NR = NROWS, KV = 256, BB = ROWSTRIDE;
 
 alignas(64) static uint8_t Bm[NR * KV * 9 / 8]; // the decoded weights, sub-tile order
 
@@ -378,7 +381,7 @@ template <unsigned rowA, unsigned colA, unsigned colB>
 static inline void mm_f32acc(const bfp16ebs8 *__restrict pA, const bfp16ebs8 *__restrict pB, float *__restrict pC) {
   using acc_t = aie::accum<accfloat, 64>;
   for (unsigned z = 0; z < rowA; z += 2)
-    for (unsigned j = 0; j < colB; j += 2) {
+    for (unsigned j = 0; j + 1 < colB; j += 2) {
       float *c00 = pC + (z * colB + j) * 64, *c01 = c00 + 64, *c10 = pC + ((z + 1) * colB + j) * 64, *c11 = c10 + 64;
       acc_t a00, a01, a10, a11;
       a00.from_vector(aie::load_v<64>(c00)), a01.from_vector(aie::load_v<64>(c01));
@@ -400,6 +403,26 @@ static inline void mm_f32acc(const bfp16ebs8 *__restrict pA, const bfp16ebs8 *__
       }
       aie::store_v(c00, a00.to_vector<float>()), aie::store_v(c01, a01.to_vector<float>());
       aie::store_v(c10, a10.to_vector<float>()), aie::store_v(c11, a11.to_vector<float>());
+    }
+  if constexpr (colB % 2) // an odd count of 8-column sub-tiles (NR 24: DeepSeek's 2304 = 32 cores x 3 x 24): the last
+    for (unsigned z = 0; z < rowA; z += 2) { // one, two row sub-tiles at a time
+      constexpr unsigned j = colB - 1;
+      float *c00 = pC + (z * colB + j) * 64, *c10 = pC + ((z + 1) * colB + j) * 64;
+      acc_t a00, a10;
+      a00.from_vector(aie::load_v<64>(c00)), a10.from_vector(aie::load_v<64>(c10));
+      aie::block_vector_input_buffer_stream<bfp16ebs8, 64> pAIn(pA);
+      pAIn.seek(z * colA);
+      aie::block_vector_input_buffer_stream<bfp16ebs8, 64> pBIn(pB);
+      pBIn.seek(j * colA);
+      AIE_LOOP_UNROLL_FULL
+      for (unsigned i = 0; i < colA; ++i) {
+        auto A0 = pAIn.pop_seek(colA - 1);
+        auto A1 = pAIn.pop_seek(-(int)colA);
+        auto B0 = pBIn.pop();
+        a00 = mac_8x8_8x8T(A0, B0, a00);
+        a10 = mac_8x8_8x8T(A1, B0, a10);
+      }
+      aie::store_v(c00, a00.to_vector<float>()), aie::store_v(c10, a10.to_vector<float>());
     }
 }
 
@@ -460,7 +483,7 @@ extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict 
   float *ch = c + half * (64 * NR);
   if (kstep == 0 && kh == 0)
     for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
-  if (piece == 0) decode_tile3(w);
+  if (piece == 0) decode_tile3(w + (BB == 132 ? 66 * (kstep & 1) : 0)); // a pair tile: odd K-steps its second block
   mm_f32acc<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)(Bm + kh * (NR * 128 * 9 / 8)), ch);
 }
 #endif
