@@ -168,28 +168,20 @@
       "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
     },
     "qwen38-ud-iq3_xxs": {
-      "title": "Qwen3.8-Flash-Next UD-IQ3_XXS: 27 tok/s plain, 46 drafted (its MTP head), 262K context",
+      "title": "Qwen3.8-Flash-Next UD-IQ3_XXS: 27 tok/s plain, 46 drafted (its MTP head), 512K context",
       "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"],
       "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-iq3_xxs",
       "rig": {"id": "qwen3.8-flash-next", "max_tokens": 65536, "reserve": 65536, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
               "aliases": ["qwen"]},
-      "settings": {"max_context": 262144, "max_tokens": 4096}
-    },
-    "qwen38-ud-iq3_xxs-1m": {
-      "title": "Qwen3.8-Flash-Next UD-IQ3_XXS at 1M context (YaRN, factor 4: the model card's; slightly weaker on short text)",
-      "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"],
-      "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-iq3_xxs",
-      "rig": {"id": "qwen3.8-flash-next-1m", "max_tokens": 262144, "reserve": 262144, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
-              "aliases": ["qwen-1m"]},
-      "settings": {"max_context": 1048576}
+      "settings": {"max_context": 524288, "max_tokens": 4096}
     },
     "qwen38-ud-q4_k_xl": {
-      "title": "Qwen3.8-Flash-Next UD-Q4_K_XL (the larger quant; slower, no better on our text): 23 tok/s plain, 41 drafted, 262K context",
+      "title": "Qwen3.8-Flash-Next UD-Q4_K_XL (the larger quant; slower, no better on our text): 23 tok/s plain, 41 drafted, 512K context",
       "shards": ["qwen38-q4kxl-1", "qwen38-q4kxl-2", "qwen38-q4kxl-3", "qwen38-q4kxl-4"],
       "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-q4_k_xl",
       "rig": {"id": "qwen3.8-flash-next-l", "max_tokens": 65536, "reserve": 65536, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
               "aliases": ["qwen-l"]},
-      "settings": {"max_context": 262144, "max_tokens": 4096, "stream_ngram": true}
+      "settings": {"max_context": 524288, "max_tokens": 4096, "stream_ngram": true}
     }
   }
 }
