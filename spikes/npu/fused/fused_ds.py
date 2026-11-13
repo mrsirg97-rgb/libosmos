@@ -127,6 +127,10 @@ def main():
     at_ = iron.tensor(a.view(np.int32), dtype=np.int32, device="npu")
     ct_ = iron.zeros(MATS * N * M, dtype=np.float32, device="npu")
     bench = run_iters(fused_ds, wg_, wu_, at_, ct_, warmup=1, iters=5)
+    if os.environ.get('DUMP'):  # the host harness's inputs and this run's output (host/ds_npu.hip: bit-identical)
+        d = os.environ['DUMP']; os.makedirs(d, exist_ok=True)
+        for name, arr in (('wg', g), ('wu', u), ('a', a), ('c', ct_.numpy())):
+            np.ascontiguousarray(arr).tofile(os.path.join(d, name + '.bin'))
     # C: [mat][pass][core i][half][z][j][8 m + n]; core i's rows of pass p: (32 p + i) 24 ..
     cf = ct_.numpy().reshape(MATS, PASSES, COLS * ROWS, H, 8, NR // 8, 8, 8)
     worst, corr = 0.0, 1.0

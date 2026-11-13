@@ -301,3 +301,18 @@ the prompt's, never the decode's.
    DeepSeek's originals are MXFP4: does AIE2P take MX4?
 4. where it pays: work the GPU does far under its ceiling - prompt experts at 14.7 TFLOP/s (Qwen, 0.6.3) - beside the
    GPU, not instead of it; never bandwidth-bound decode.
+
+## DeepSeek's experts through the engine's path (2026-11-12): gate + up at the real shape, from C++, zero copy
+**the kernel** (fused/fused_ds.py, fused_iq2xxs.cc ROWSTRIDE 132): an expert's ffn_gate_exps and ffn_up_exps
+(IQ2_XXS, 2304 rows of K 5120) for 128 tokens in one launch, the weights read as GGUF lays them (1,320-byte rows; a
+W tile a K-step pair - two 66-byte blocks, the DMA's 4-byte words - for 24 rows; core i rows (32 p + i) 24 for passes
+p 0-2: 2304 = 3 x 32 x 24); no host relayout. mm_f32acc's 2 x 2 sub-tile loop assumed an even NR / 8 (24 rows: 3 -
+its last step wrote over the next token block's sums, NaN in tokens 8-127): an odd tail added. blk.20 expert 0 and
+blk.37 expert 311: corr 0.999977 / 0.999978, worst 7.8e-3 / 7.7e-3; **893-901 us on the NPU, 6.70-6.76 TFLOP/s** (6.04
+GFLOP) - above the 4096-square tests.
+**from C++** (host/ds_npu.hip: final.xclbin + insts.bin, xrt::kernel MLIR_AIE, opcode 3), each bit-identical to the
+Python run's C: XRT's own buffers 1,019 us a launch end to end; the weights in HIP-registered host pages (the expert
+cache's kind) as a userptr BO 1,018; and A, C hipMalloc'd (the step's buffers) imported as dma-bufs, C read back by
+the GPU, 970-978 (6.2 TFLOP/s end to end). a userptr BO over an expert costs 87 us to make; a sub-BO of one BO over
+the whole region 0.12 us (and bit-identical): the engine wraps each region once and carves an expert's view a launch.
+against the GPU's ~27 TFLOP/s on these experts: the NPU's launch is ~4 of the GPU's expert matmuls in time.
