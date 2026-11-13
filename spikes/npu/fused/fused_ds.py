@@ -20,7 +20,10 @@ from aie.utils import bfp as B
 sys.path.insert(0, os.path.expanduser('~/Projects/llama.cpp/gguf-py'))
 HERE = os.path.dirname(os.path.abspath(__file__)); KD = os.path.expanduser('~/Projects/mlir-aie/aie_kernels')
 COLS, ROWS, NR, H = 8, 4, 24, 2           # columns, cores a column, a core's rows a pass, A's 64-row halves
-M, KT, BB = 64 * H, 256, 66               # tokens, a K-step, an IQ2_XXS block's bytes
+FMT = os.environ.get('FMT', 'iq2xxs')     # the experts' format: IQ2_XXS (66-byte blocks) or IQ1_S (50)
+QT, BB, SRC, FLAGS = {'iq2xxs': ('IQ2_XXS', 66, 'fused_iq2xxs.cc', ['-DFUSED_V=6']),
+                      'iq1s': ('IQ1_S', 50, 'fused_iq1s.cc', ['-DIQ1_V=5'])}[FMT]
+M, KT = 64 * H, 256                       # tokens, a K-step
 K, N = 5120, 2304                         # DeepSeek's hidden and expert width (gate / up: K -> N)
 KS, KP = K // KT, K // KT // 2            # K-steps, K-step pairs
 PASSES = N // (COLS * ROWS * NR)          # 3
@@ -38,10 +41,10 @@ def tap(total, off, sizes, strides):
 def fused_ds(wg: In, wu: In, a: In, c: Out):
     i32, f32 = np.dtype[np.int32], np.dtype[np.float32]
     wt, at, ct = np.ndarray[(WT,), i32], np.ndarray[(AT,), i32], np.ndarray[(CT,), f32]
-    step = ExternalFunction("fused_step_f32", source_file=os.path.join(HERE, "fused_iq2xxs.cc"),
+    step = ExternalFunction("fused_step_f32", source_file=os.path.join(HERE, SRC),
                             arg_types=[wt, at, ct, np.int32, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
-                            compile_flags=["-DFUSED_V=6", "-DMULTI_F32", f"-DHALVES={H}", "-DKHALF=1", f"-DNROWS={NR}",
-                                           "-DROWSTRIDE=132"])
+                            compile_flags=FLAGS + ["-DMULTI_F32", f"-DHALVES={H}", "-DKHALF=1", f"-DNROWS={NR}",
+                                                   f"-DROWSTRIDE={2 * BB}"])
     a_l3, w_l3, c_l3, workers = [], [], [], []
     for col in range(COLS):
         a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=2)
@@ -94,7 +97,7 @@ def expert_bytes(layer, kind, e):
     for p in sorted(glob.glob(os.path.expanduser('~/Models/ds1017/UD-IQ1_M/*.gguf'))):
         for t in GGUFReader(p).tensors:
             if t.name == f"blk.{layer}.{kind}.weight":
-                assert t.tensor_type.name == 'IQ2_XXS', (t.name, t.tensor_type.name)
+                assert t.tensor_type.name == QT, (t.name, t.tensor_type.name)
                 raw = np.asarray(t.data).reshape(-1).view(np.uint8)
                 return raw[e * N * RW * 4:(e + 1) * N * RW * 4].copy(), t.tensor_type
     raise SystemExit(f"no blk.{layer}.{kind}")
@@ -110,8 +113,8 @@ def main():
         for p in sorted(glob.glob(os.path.expanduser('~/Models/ds1017/UD-IQ1_M/*.gguf'))):
             for t in GGUFReader(p).tensors:
                 if '_exps' in t.name: ty[t.name] = t.tensor_type.name
-        layer = next(l for l in range(64) if ty.get(f"blk.{l}.ffn_gate_exps.weight") == 'IQ2_XXS'
-                     and ty.get(f"blk.{l}.ffn_up_exps.weight") == 'IQ2_XXS')
+        layer = next(l for l in range(64) if ty.get(f"blk.{l}.ffn_gate_exps.weight") == QT
+                     and ty.get(f"blk.{l}.ffn_up_exps.weight") == QT)
     (g, tt), (u, _) = expert_bytes(layer, 'ffn_gate_exps', e), expert_bytes(layer, 'ffn_up_exps', e)
     rng = np.random.default_rng(1017)
     A = rng.standard_normal((M, K)).astype(np.float32)
@@ -177,7 +180,7 @@ def main():
     if os.environ.get('DUMP') and len(GOT) == 2: np.stack(GOT).astype(np.float32).tofile(os.path.join(os.environ['DUMP'], 'got.bin'))
     us = bench.npu.avg_us
     flop = 2 * MATS * M * K * N
-    print(f"blk.{layer} expert {e}: gate + up, {M} x {K} -> {N}: corr {corr:.6f}, max err / max |C| {worst:.2e}; "
+    print(f"{FMT} blk.{layer} expert {e}: gate + up, {M} x {K} -> {N}: corr {corr:.6f}, max err / max |C| {worst:.2e}; "
           f"{us:.0f} us on the NPU -> {flop / us / 1e6:.2f} TFLOP/s ({flop / 1e9:.2f} GFLOP)")
 
 if __name__ == "__main__":

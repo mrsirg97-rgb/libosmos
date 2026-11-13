@@ -1,5 +1,5 @@
 /* 0.7.0: the NPU beside the GPU in a prompt step's routed experts (forward.h's forward_npu; npu.h). an eligible
-   layer (gate and up IQ2_XXS at the kernel's shape) gives the NPU a fixed share of its pairs in whole NPU_TOKENS
+   layer (gate and up one format the NPU has a kernel for: IQ2_XXS, IQ1_S) gives the NPU a fixed share of its pairs in whole NPU_TOKENS
    parts of its hottest experts - chosen from the routing alone (npu_pick), so a prompt's bits are the same each run;
    the GPU packs their tokens' rows (npu_pack_a), the NPU runs them while the GPU runs the layer's other gate and up
    rows, and the GPU unpacks theirs into ga / upr before the swiglu (fwd_npu_run, fwd_npu_unpack) */
@@ -59,8 +59,8 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]
 bool fwd_npu_layer(const Forward *f, int l, uint32_t pairs)
 {
   const LayerWeights *L = &f->w->layer[l];
-  return f->npu && pairs >= (uint32_t)f->g->n_experts && L->exp_gate->type == QTYPE_IQ2_XXS &&
-         L->exp_up->type == QTYPE_IQ2_XXS;
+  return f->npu && pairs >= (uint32_t)f->g->n_experts && L->exp_gate->type == L->exp_up->type &&
+         npu_has(f->npu, L->exp_gate->type);
 }
 
 /* the layer's NPU parts: floor(share x pairs / NPU_TOKENS) at most, from its experts with a whole part, the most
@@ -107,14 +107,15 @@ bool fwd_npu_pack(Forward *f, uint32_t parts, const uint32_t *nq, uint32_t nd, c
 }
 
 /* the NPU's launches, once the packing is done (the GPU going on with what was queued after it) */
-bool fwd_npu_run(Forward *f, uint32_t parts, hipEvent_t packed, char *err)
+bool fwd_npu_run(Forward *f, int l, uint32_t parts, hipEvent_t packed, char *err)
 {
   const Geometry *g = f->g;
+  const uint32_t qt = f->w->layer[l].exp_gate->type;
   char nerr[NPU_ERR] = "";
   if (hipEventSynchronize(packed) != hipSuccess)
     return fwd_fail(err, "the NPU's packing failed");
-  if (!npu_gate_up(f->npu, parts, f->npu_wg, f->npu_wu, (uint64_t)g->expert_ff * (g->n_embd / 256) * QTYPE_IQ2_XXS_BYTES,
-                   nerr))
+  const uint64_t blk = qt == QTYPE_IQ2_XXS ? QTYPE_IQ2_XXS_BYTES : QTYPE_IQ1_S_BYTES; /* npu_has's formats */
+  if (!npu_gate_up(f->npu, qt, parts, f->npu_wg, f->npu_wu, (uint64_t)g->expert_ff * (g->n_embd / 256) * blk, nerr))
     return fwd_fail(err, nerr);
   return true;
 }

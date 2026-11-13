@@ -340,7 +340,7 @@ bool fwd_npu_layer(const Forward *f, int l, uint32_t pairs);
 uint32_t fwd_npu_pick(const Forward *f, uint32_t pairs, const int32_t *cnt, uint32_t nd, uint32_t *nq);
 bool fwd_npu_pack(Forward *f, uint32_t parts, const uint32_t *nq, uint32_t nd, const uint32_t *base,
                   const uint32_t *slot0, const int32_t *gidx, const void *const *ex_gate, const void *const *ex_up);
-bool fwd_npu_run(Forward *f, uint32_t parts, hipEvent_t packed, char *err);
+bool fwd_npu_run(Forward *f, int l, uint32_t parts, hipEvent_t packed, char *err);
 bool fwd_npu_unpack(Forward *f, uint32_t parts);
 bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks);
 bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]);

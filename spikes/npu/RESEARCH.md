@@ -316,3 +316,12 @@ cache's kind) as a userptr BO 1,018; and A, C hipMalloc'd (the step's buffers) i
 the GPU, 970-978 (6.2 TFLOP/s end to end). a userptr BO over an expert costs 87 us to make; a sub-BO of one BO over
 the whole region 0.12 us (and bit-identical): the engine wraps each region once and carves an expert's view a launch.
 against the GPU's ~27 TFLOP/s on these experts: the NPU's launch is ~4 of the GPU's expert matmuls in time.
+
+## both DeepSeek gate/up formats (2026-11-12)
+**IQ1_S** through fused_ds.py (FMT=iq1s; fused_iq1s.cc ROWSTRIDE 100: a K-step pair 100 bytes a row, 1,000 a row of
+5120): blk.0 expert 0, **914 us, 6.61 TFLOP/s**, corr 0.999982, worst 7.8e-3 (IQ2_XXS's rerun 860 us, 7.02). common/
+mm_f32.h now has the odd sub-tile tail (both kernels' NR 24). with IQ2_XXS: gate and up in 38 of UD-IQ1_M's 40 layers.
+**two formats live at once** (host/ds_two.hip): both xclbins registered, a hardware context each (each the whole
+array) - accepted. a launch alone 923 / 942 us; alternating every launch 3,588 / 3,621 (a switch ~2.7 ms); in layers
+of 20 launches each, alternating 1,068 a launch. the engine switches at most once a layer (~50 parts, ~50 ms): ~5%.
+one xclbin with both decoders (a format argument) would take that away - later.

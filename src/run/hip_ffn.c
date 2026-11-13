@@ -344,7 +344,7 @@ bool fwd_moe(Forward *f, int l, char *err)
        (!parts || hipEventRecord(f->npu_packed, NULL) == hipSuccess) &&
        group(L->exp_gate->type, gtab, gcnt, dgcnt, ng, FF, D, b->xe16, dgx, b->ga, dgy, FF) &&
        group(L->exp_up->type, gtab + ng, gcnt, dgcnt, ng, FF, D, b->xe16, dgx, b->upr, dgy, FF) &&
-       (!parts || (fwd_npu_run(f, parts, f->npu_packed, err) && fwd_npu_unpack(f, parts))) &&
+       (!parts || (fwd_npu_run(f, l, parts, f->npu_packed, err) && fwd_npu_unpack(f, parts))) &&
        ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
        mm_x16_rows(b->hh, FF, dhidx, slots, FF, b->xe16, b->overflow, NULL) &&
        group(L->exp_down->type, dtab + 2 * ne, cnt, dcnt, ne, D, FF, b->xe16, dxd, b->ye, dyd, D) &&

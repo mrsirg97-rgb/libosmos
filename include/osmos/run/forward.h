@@ -187,7 +187,7 @@ seq_state_bytes / seq_save_to / seq_load_from
 
 forward_npu
   0.7.0: the NPU (npu.h; built with NPU=1) beside the GPU in a prompt step's routed experts - dir its kernel's
-  xclbin and instruction stream; share the part of an eligible layer's pairs (gate and up IQ2_XXS) it takes, in whole
+  xclbin and instruction stream; share the part of an eligible layer's pairs (gate and up one format it has a kernel for: IQ2_XXS, IQ1_S) it takes, in whole
   parts of 128 tokens of the layer's most-picked experts, chosen from the routing alone. its sums are not the GPU's
   (bfp16 inputs, f32 sums): on, another forward_identity; the same prompt the same bits. false with why: not built, no
   NPU, another model's shape. forward_npu_stats: its layers, launches and the host's time waiting on them so far

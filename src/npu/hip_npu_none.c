@@ -24,10 +24,12 @@ bool npu_region(Npu *n, void *base, uint64_t bytes, char err[NPU_ERR])
 void *npu_a(const Npu *n) { return (void)n, NULL; }
 void *npu_c(const Npu *n) { return (void)n, NULL; }
 
-bool npu_gate_up(Npu *n, uint32_t parts, const void *const *wg, const void *const *wu, uint64_t w_bytes,
-                 char err[NPU_ERR])
+bool npu_has(const Npu *n, uint32_t qtype) { return (void)n, (void)qtype, false; }
+
+bool npu_gate_up(Npu *n, uint32_t qtype, uint32_t parts, const void *const *wg, const void *const *wu,
+                 uint64_t w_bytes, char err[NPU_ERR])
 {
-  (void)n, (void)parts, (void)wg, (void)wu, (void)w_bytes;
+  (void)n, (void)qtype, (void)parts, (void)wg, (void)wu, (void)w_bytes;
   snprintf(err, NPU_ERR, "npu: not built");
   return false;
 }

@@ -22,9 +22,11 @@ typedef struct NpuStats
 
 bool npu_built(void);
 
-/* the kernel from dir (final.xclbin, insts.bin), for parts of K -> N gate + up; A and C for at most max_parts parts
-   (hipMalloc'd, their dma-bufs the NPU's) */
+/* the kernels from dir, a subdirectory a format (iq2xxs/, iq1s/: final.xclbin, insts.bin - each its own hardware
+   context, all live at once; going from one to another ~2.7 ms), for parts of K -> N gate + up; A and C for at most
+   max_parts parts (hipMalloc'd, their dma-bufs the NPU's). none found: NULL */
 Npu *npu_open(const char *dir, uint32_t K, uint32_t N, uint32_t max_parts, char err[NPU_ERR]);
+bool npu_has(const Npu *n, uint32_t qtype); /* a kernel for a GGUF type id */
 void npu_close(Npu *n);
 
 /* a host region the weights are read from: registered with HIP (its device address its own); every expert an
@@ -34,10 +36,10 @@ bool npu_region(Npu *n, void *base, uint64_t bytes, char err[NPU_ERR]);
 void *npu_a(const Npu *n); /* the parts' A streams (device memory; npu_pack_a's dst) */
 void *npu_c(const Npu *n); /* their C (npu_unpack_c's c) */
 
-/* parts launches, part p's gate and up weights at wg[p] and wu[p] (w_bytes each, in a region), its A and C the p-th;
+/* parts launches of qtype's kernel, part p's gate and up weights at wg[p] and wu[p] (w_bytes each, in a region), its A and C the p-th;
    returns when all are done */
-bool npu_gate_up(Npu *n, uint32_t parts, const void *const *wg, const void *const *wu, uint64_t w_bytes,
-                 char err[NPU_ERR]);
+bool npu_gate_up(Npu *n, uint32_t qtype, uint32_t parts, const void *const *wg, const void *const *wu,
+                 uint64_t w_bytes, char err[NPU_ERR]);
 
 NpuStats npu_stats(const Npu *n);
 

@@ -37,7 +37,10 @@ static inline bfloat16 fp16_to_bf16_shift_0(uint16_t h) { return fp16_to_bf16_sh
 #ifndef KHALF
 #define KHALF 0 /* 1: Bm as two K halves ([kh][j][i]), each a contiguous NR x 128 operand */
 #endif
-constexpr int NR = NROWS, KV = 256, BB = 50;
+#ifndef ROWSTRIDE
+#define ROWSTRIDE 50 /* a W tile row's bytes: 50 one block a row; 100 two (fused_ds.py: GGUF's own rows, a K-step pair) */
+#endif
+constexpr int NR = NROWS, KV = 256, BB = ROWSTRIDE;
 
 alignas(64) static uint8_t Bm[NR * KV * 9 / 8];
 alignas(64) static const uint16_t kodd8_bf16[8] = {0x3f80, 0x4040, 0x40a0, 0x40e0, 0x4110, 0x4130, 0x4150, 0x4170}; // 1 3 .. 15
@@ -207,34 +210,7 @@ void fused_iq1s(const uint8_t *__restrict w, uint8_t *__restrict a, uint8_t *__r
 #ifdef MULTI_F32
 // the 32-core design's step (fused32.py, FMT=iq1s): as fused_iq2xxs.cc's fused_step_f32 - a quarter of a K-step's A
 // (piece 2 half + kh), the NR-row W tile decoded at piece 0 (as two K halves), C (2 halves of 64 x NR) kept in f32
-template <unsigned rowA, unsigned colA, unsigned colB>
-static inline void mm_f32acc(const bfp16ebs8 *__restrict pA, const bfp16ebs8 *__restrict pB, float *__restrict pC) {
-  using acc_t = aie::accum<accfloat, 64>;
-  for (unsigned z = 0; z < rowA; z += 2)
-    for (unsigned j = 0; j < colB; j += 2) {
-      float *c00 = pC + (z * colB + j) * 64, *c01 = c00 + 64, *c10 = pC + ((z + 1) * colB + j) * 64, *c11 = c10 + 64;
-      acc_t a00, a01, a10, a11;
-      a00.from_vector(aie::load_v<64>(c00)), a01.from_vector(aie::load_v<64>(c01));
-      a10.from_vector(aie::load_v<64>(c10)), a11.from_vector(aie::load_v<64>(c11));
-      aie::block_vector_input_buffer_stream<bfp16ebs8, 64> pAIn(pA);
-      pAIn.seek(z * colA);
-      aie::block_vector_input_buffer_stream<bfp16ebs8, 64> pBIn(pB);
-      pBIn.seek(j * colA);
-      AIE_LOOP_UNROLL_FULL
-      for (unsigned i = 0; i < colA; ++i) {
-        auto A0 = pAIn.pop_seek(colA - 1);
-        auto A1 = pAIn.pop_seek(-(int)colA);
-        auto B0 = pBIn.pop_seek(colA - 1);
-        auto B1 = pBIn.pop_seek(-(int)colA);
-        a00 = mac_8x8_8x8T(A0, B0, a00);
-        a01 = mac_8x8_8x8T(A0, B1, a01);
-        a10 = mac_8x8_8x8T(A1, B0, a10);
-        a11 = mac_8x8_8x8T(A1, B1, a11);
-      }
-      aie::store_v(c00, a00.to_vector<float>()), aie::store_v(c01, a01.to_vector<float>());
-      aie::store_v(c10, a10.to_vector<float>()), aie::store_v(c11, a11.to_vector<float>());
-    }
-}
+#include "../common/mm_f32.h" // its odd sub-tile tail: NR 24 (fused_ds.py)
 
 extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict a, float *__restrict c, int32_t kstep,
                                int32_t piece) {
@@ -242,7 +218,7 @@ extern "C" void fused_step_f32(const uint8_t *__restrict w, uint8_t *__restrict 
   float *ch = c + half * (64 * NR);
   if (kstep == 0 && kh == 0)
     for (int i = 0; i < 64 * NR; i += 16) aie::store_v(ch + i, aie::zeros<float, 16>());
-  if (piece == 0) decode_tile(w);
+  if (piece == 0) decode_tile(w + (BB == 100 ? 50 * (kstep & 1) : 0)); // a pair tile: odd K-steps its second block
   mm_f32acc<64 / 8, 128 / 8, NR / 8>((bfp16ebs8 *)a, (bfp16ebs8 *)(Bm + kh * (NR * 128 * 9 / 8)), ch);
 }
 #endif
