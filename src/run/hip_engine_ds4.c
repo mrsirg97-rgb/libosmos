@@ -108,8 +108,11 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (o->picks && !(e->picks = read_picks(o->picks, &m->w->geo, err)))
     return e_destroy(e), NULL;
   e->rows = (uint32_t)((m->w->geo.n_experts - 1) / m->w->geo.n_used); /* m_open's round_tokens */
+  /* fixed_steps: a long step in buffers of its own - 0.6.9's lent steps (the cache's tail given back, the block
+     hipMalloc'd, a step) set the kernel compacting under the GPU's mappings, its queues evicted 0.2-5 s a prompt
+     (DESIGN.md, "0.6.10") */
   const ForwardOptions fo = {m->w->geo.n_layers, o->max_ctx,  o->budget,     e->picks,
-                             o->max_tokens,      o->no_guess, o->fill_set, o->fill, 0, e->rows, false};
+                             o->max_tokens,      o->no_guess, o->fill_set, o->fill, 0, e->rows, true};
   if (!(e->f = forward_create_with(m->w, &fo, err)) || !forward_lane(e->f, 0, NULL, err) ||
       (o->drafter && !(e->d = drafter_create(e->f, o->drafter, err))))
     return e_destroy(e), NULL;
