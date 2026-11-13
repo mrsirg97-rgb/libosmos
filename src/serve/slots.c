@@ -361,6 +361,8 @@ static bool same(const Entry *e, const int32_t *t, uint32_t n)
   return e->n == n && !memcmp(e->tokens, t, (uint64_t)n * sizeof *t);
 }
 
+bool slots_keeps(const Slots *s, uint32_t n) { return s && n >= s->o.min_tokens; }
+
 bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_t bytes, bool *kept,
                char err[SLOTS_ERR])
 {

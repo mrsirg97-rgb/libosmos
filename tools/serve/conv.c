@@ -146,8 +146,8 @@ static bool conv_load(void *ctx, uint64_t bytes, StateSource src, void *src_ctx)
    whole in RAM past the room the operator's 8 GiB leaves */
 void conv_set_aside(Conv *c, const Server *sv)
 {
-  if (!sv->slots || !c->held.n)
-    return;
+  if (!sv->slots || !c->held.n || !slots_keeps(sv->slots, c->held.n))
+    return; /* not kept: nothing saved, no room made (0.7.1: kept ones moved for it, then it was refused) */
   const uint64_t bytes = oseq_state_bytes(c->s);
   char serr[SLOTS_ERR] = "";
   bool kept = false, ok;

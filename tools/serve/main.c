@@ -135,6 +135,8 @@ int main(int argc, char **argv)
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
   sv.max_tokens = (uint32_t)atol(opt(argc, argv, "--max-tokens", "2048"));
+  if (atol(opt(argc, argv, "--max-tokens", "2048")) < 1) /* 0: a prompt read 0 tokens a step, forever (0.7.1) */
+    return die("--max-tokens takes a step of 1 token or more");
   const char *budget_arg = opt(argc, argv, "--budget", "auto");
   const double budget = strcmp(budget_arg, "auto") ? atof(budget_arg) : 0; /* 0: sized to this GPU (build.c) */
   if (strcmp(budget_arg, "auto") && budget <= 0)
