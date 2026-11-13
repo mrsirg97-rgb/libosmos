@@ -258,6 +258,12 @@ K-step, the last rounding to bf16 scalar soft float. against the GPU's 14.7 TFLO
 checked against ml_dtypes on all 190,464 cases, shifts 0/2/3): IQ4_NL 3.39 -> **4.60** (+36%, worst 9.6e-3 -> 5.2e-3),
 IQ3_XXS 3.62 -> **5.01** (+38%), IQ2_S 2.85 -> 2.87 (its scales rarer); DeepSeek's two the same speed (IQ2_XXS 6.18,
 IQ1_S 5.2-6.2 over three runs) and closer (worst 9.0e-3 -> 7.0e-3, 9.1e-3 -> 6.9e-3). no scalar float left in a decode.
+**IQ2_S's grid packed** (fused_qwen.cc QFMT 3, FMT=iq2s2; iq2s_grid2.h): its magnitudes are 8 / 25 / 43 alone, so a
+row is 8 two-bit codes in 16 bits - 2 KB for the grid, not 16 KB; a row's code over its 8 lanes, a lane's field masked,
+two compares and two selects to bf16 (as IQ1_S's). 32 rows a core again: **2.83 TFLOP/s** (0.088 a core) against 2.76
+at 16 rows the same run, the same corr 0.999977 / worst 7.5e-3. so the grid's memory was not what held IQ2_S: the
+scalar work a value is (an index from two bytes, a sign byte, the scale nibbles - per 16 values, twice IQ2_XXS's). kept
+(14 KB freed for buffers); the next lever is that scalar path, not the rows.
 
 ## the GPU beside the NPU (2026-11-12, low-power, DeepSeek UD-IQ1_M, 0.6.9, an 8K prompt + 128 tokens)
 alone 507 / 509 tok/s prompt; beside the NPU's memcpy loop (60-64 GB/s read + write) 489 / 498 / 511 - the low two

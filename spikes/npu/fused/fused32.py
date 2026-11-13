@@ -24,9 +24,9 @@ if F32: Q = 1
 TRACE = int(os.environ.get('TRACE', '0'))  # bytes of trace buffer: column 0's cores traced
 NR = 32 if F32 else 64  # a core's output rows
 if os.environ.get('FMT') == 'iq2s': NR = 16  # its 16 KB grid: C and the tile for 16 rows
-FMT = os.environ.get('FMT', 'iq2xxs')  # the weights' format: DeepSeek's iq2xxs / iq1s, Qwen's iq4nl / iq3xxs / iq2s
-BB = {'iq2xxs': 66, 'iq1s': 50, 'iq4nl': 144, 'iq3xxs': 98, 'iq2s': 82}[FMT]  # a row's bytes a 256 K-step
-QWEN = FMT in ('iq4nl', 'iq3xxs', 'iq2s')
+FMT = os.environ.get('FMT', 'iq2xxs')  # the weights' format: DeepSeek's iq2xxs / iq1s, Qwen's iq4nl / iq3xxs / iq2s / iq2s2 (its grid packed)
+BB = {'iq2xxs': 66, 'iq1s': 50, 'iq4nl': 144, 'iq3xxs': 98, 'iq2s': 82, 'iq2s2': 82}[FMT]  # a row's bytes a 256 K-step
+QWEN = FMT in ('iq4nl', 'iq3xxs', 'iq2s', 'iq2s2')
 N = COLS * ROWS * NR
 WT, AT, CT1 = NR * BB // 4, M * KT * 9 // 8 // 4 // (2 if Q else 1), M * NR * 9 // 8 // 4
 CT = (H * M * NR) if F32 else CT1 * H  # a core's C: f32 values, or H stacked 64-row bfp16 tiles (words)   # words: a core's W tile, an A tile, a C tile
@@ -46,7 +46,7 @@ def fused32(w: In, a: In, c: Out, *, cols: CompileTime[int], trace_size: Compile
     step = ExternalFunction({0: "fused_step", 1: "fused_step_f32", 2: "fused_step_f32x2"}[F32], source_file=os.path.join(HERE, "fused_qwen.cc" if QWEN else f"fused_{FMT}.cc"),
                             arg_types=[wt, at, at, ct, np.int32, np.int32] if F32 == 2 else [wt, at, ct, np.int32, np.int32], include_dirs=[cxx_header_path(), KD, HERE],
                             compile_flags=[f"-DFUSED_V={os.environ.get('FV', '6')}", f"-DIQ1_V={os.environ.get('IQ1V', '5')}", "-DMULTI_F32" if F32 else "-DMULTI", f"-DHALVES={H}", f"-DKHALF={Q}",
-                                           f"-DNROWS={NR}"] + ([f"-DQFMT={['iq4nl', 'iq3xxs', 'iq2s'].index(FMT)}"] if QWEN else []))
+                                           f"-DNROWS={NR}"] + ([f"-DQFMT={['iq4nl', 'iq3xxs', 'iq2s', 'iq2s2'].index(FMT)}"] if QWEN else []))
     a_l3, w_l3, c_l3, workers = [], [], [], []
     for col in range(cols):
         a3 = ObjectFifo(np.ndarray[(AT,), i32], name=f"A3_{col}", depth=2 if Q else 1)
@@ -99,7 +99,7 @@ def main():
     from gguf.quants import dequantize
     r = GGUFReader(os.path.expanduser('~/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00002-of-00005.gguf'))
     want = {'iq2xxs': ('ffn_down_exps.weight', 'IQ2_XXS'), 'iq1s': ('ffn_gate_exps.weight', 'IQ1_S'), 'iq4nl': ('ffn_down_exps.weight', 'IQ4_NL'),
-            'iq3xxs': ('ffn_gate_exps.weight', 'IQ3_XXS'), 'iq2s': ('ffn_gate_exps.weight', 'IQ2_S')}[FMT]
+            'iq3xxs': ('ffn_gate_exps.weight', 'IQ3_XXS'), 'iq2s': ('ffn_gate_exps.weight', 'IQ2_S'), 'iq2s2': ('ffn_gate_exps.weight', 'IQ2_S')}[FMT]
     if QWEN:  # its bytes a 4096-wide matrix (Qwen's own expert shapes are smaller: a measurement, not its tiling)
         import glob
         t = next(t for p in sorted(glob.glob(os.path.expanduser('~/Models/qwen38/UD-IQ3_XXS/*.gguf'))) for t in GGUFReader(p).tensors
