@@ -87,7 +87,7 @@ static double epoch() {  // seconds since the epoch: tools/power.py's samples ar
   return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& ids, int n, uint64_t* h) {
+static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& ids, int n, uint64_t* h, bool windows = true) {
   char err[FORWARD_ERR] = "";
   Seq* s = seq_create(f, err);
   CHECK(s);
@@ -105,7 +105,8 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
   CHECK(hipDeviceSynchronize() == hipSuccess);
   const double ps = std::chrono::duration<double>(std::chrono::steady_clock::now() - p0).count();
   if (P > 256)
-    std::printf("prompt %u tokens in %.0f ms (%.0f tok/s)\nwindow prompt %.3f %.3f %u\n", P, ps * 1e3, P / ps, pe0, epoch(), P);
+    std::printf("prompt %u tokens in %.0f ms (%.0f tok/s)\n", P, ps * 1e3, P / ps);
+    if (windows) std::printf("window prompt %.3f %.3f %u\n", pe0, epoch(), P);
   std::vector<float> lg(V);
   // the last step's last row: the last slot the forward kept (forward_logit_rows)
   int32_t t = pick(f, lg, V, forward_logit_rows(f) - 1);
@@ -155,7 +156,7 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
     t = pick(f, lg, V, 0);
   }
   const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  std::printf("window decode %.3f %.3f %d\n", te0, epoch(), n);
+  if (windows) std::printf("window decode %.3f %.3f %d\n", te0, epoch(), n);
   if (g_ids) std::fprintf(g_ids, "\n"), std::fflush(g_ids);
   seq_destroy(s);
   return n / sec;
@@ -281,7 +282,8 @@ int main(int argc, char** argv) {
   if (const char* ip = std::getenv("IDS")) CHECK((g_ids = std::fopen(ip, "w")));
   std::printf("loaded %.0fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - l0).count());
   uint64_t h = 1469598103934665603ull;
-  answer(f, w, read_ids(argv[4]), 64, &h);  // the warm-up, as maya's bench
+  answer(f, w, read_ids(argv[4]), 64, &h, false);  // the warm-up, as maya's bench: no energy windows (0.7.1: energy.py
+                                                   // summed it into the questions', where q4x_bench has none)
   for (int i = 5; i < argc; i++) {
     h = 1469598103934665603ull;
     g_drafted = g_accepted = g_rounds = 0, g_draft_ms = g_verify_ms = 0;

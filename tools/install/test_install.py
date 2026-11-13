@@ -541,17 +541,19 @@ class Host(unittest.TestCase):
     def test_tools_named_before_anything_runs(self):
         have = {"git", "make", "gcc", "hipcc", "hf"}
         which = lambda n: f"/usr/bin/{n}" if n in have else None          # noqa: E731
-        self.assertTrue(host.tools(True, True, which, lambda p: False)[0])
+        rocm = lambda p: p == "/opt/rocm/bin/hipcc"                       # noqa: E731
+        self.assertTrue(host.tools(True, True, which, rocm)[0])
         have.discard("hf")
-        ok, why = host.tools(True, True, which, lambda p: False)
+        ok, why = host.tools(True, True, which, rocm)
         self.assertFalse(ok)
         self.assertIn("hf", why)                                         # a download needs it: named first
-        self.assertTrue(host.tools(False, True, which, lambda p: False)[0])    # every file the user's: not needed
-        have.discard("hipcc")
+        self.assertTrue(host.tools(False, True, which, rocm)[0])         # every file the user's: not needed
+        # hipcc where the Makefile runs it ($ROCM/bin/hipcc, ROCM /opt/rocm by default) - not anywhere on PATH
+        # (0.7.1: PATH's passed the check, then make ran /opt/rocm's and failed)
         ok, why = host.tools(False, True, which, lambda p: False)
         self.assertFalse(ok)
         self.assertIn("hipcc", why)
-        self.assertTrue(host.tools(False, True, which, lambda p: p == "/opt/rocm/bin/hipcc")[0])  # ROCm's own path
+        self.assertTrue(host.tools(False, True, which, lambda p: p == "/x/rocm/bin/hipcc", rocm_dir="/x/rocm")[0])
         self.assertTrue(host.tools(False, False, which, lambda p: False)[0])  # --no-build: no build tools
 
 

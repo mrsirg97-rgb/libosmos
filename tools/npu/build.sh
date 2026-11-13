@@ -9,7 +9,9 @@ set -euo pipefail
 OUT=$(realpath -m "$1"); shift
 SETS=("${@:-ds qwen}"); SETS=(${SETS[@]})
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
-VER=$(sed -n 's/.*OSMOS_VERSION "\(.*\)".*/\1/p' "$HERE/include/osmos/version.h" 2>/dev/null || echo dev)
+VER=$(sed -n 's/.*OSMOS_VERSION "\(.*\)".*/\1/p' "$HERE/include/osmos/version.h")
+[ -n "$VER" ] || { echo "build.sh: no OSMOS_VERSION in include/osmos/version.h" >&2; exit 1; } # (0.7.1: sed exits 0 on no
+                                                                                            # match: an empty VER)
 # shellcheck disable=SC1090
 set +u; source ~/npu-venv/bin/activate && source ~/Projects/mlir-aie/utils/env_setup.sh >/dev/null; set -u
 declare -A KERNELS=(

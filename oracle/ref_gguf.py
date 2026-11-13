@@ -92,19 +92,22 @@ def dequant(p: Pack, name: str, dev) -> torch.Tensor:
 
 def gq_values(raw: np.ndarray, dt: str, name: str) -> np.ndarray:
     """ggml blocks of type dt as F32 (flat) through gguf-py's dequantisers - the installed package, else a llama.cpp
-    checkout's ($GGUF_PY, ~/llama.cpp/gguf-py)."""
+    checkout's ($OSMOS_GGUF_PY - the name every osmos tool reads - or the older $GGUF_PY, then
+    ~/Projects/llama.cpp/gguf-py, the tools' default; 0.7.1: ~/llama.cpp/gguf-py alone, which the box has not)."""
     try:
         try:
             import gguf
         except ImportError:
-            for d in (os.environ.get("GGUF_PY", ""), os.path.expanduser("~/llama.cpp/gguf-py")):
+            for d in (os.environ.get("OSMOS_GGUF_PY", ""), os.environ.get("GGUF_PY", ""),
+                      os.path.expanduser("~/Projects/llama.cpp/gguf-py"), os.path.expanduser("~/llama.cpp/gguf-py")):
                 if d and os.path.isdir(d):
-                    sys.path.insert(0, d)
+                    sys.path.insert(0, d)  # the first found: the variable over the defaults
+                    break
             import gguf
         from gguf.quants import dequantize as gq_dequant
         qt = gguf.GGMLQuantizationType[dt]
     except (ImportError, KeyError):
-        raise SystemExit("%s: dtype %s (no gguf-py with a dequantiser for it: GGUF_PY=<llama.cpp>/gguf-py)" % (name, dt))
+        raise SystemExit("%s: dtype %s (no gguf-py with a dequantiser for it: OSMOS_GGUF_PY=<llama.cpp>/gguf-py)" % (name, dt))
     return np.ascontiguousarray(gq_dequant(raw, qt), dtype=np.float32).reshape(-1)
 
 

@@ -64,16 +64,19 @@ def disk(path, need_bytes):
 
 
 # the build's tools (the submodule's git, make, gcc, ROCm's hipcc) and the download's (huggingface_hub's CLI); a tool
-# found on PATH or at its usual place
-TOOLS = {"git": None, "make": None, "gcc": None, "hipcc": "/opt/rocm/bin/hipcc"}
+# found on PATH - but hipcc, found where the Makefile runs it: $ROCM/bin/hipcc, ROCM (the environment's, as make reads
+# it) /opt/rocm by default (0.7.1: one on PATH passed, then make ran /opt/rocm's and failed)
+ROCM = os.environ.get("ROCM") or "/opt/rocm"
+TOOLS = {"git": None, "make": None, "gcc": None, "hipcc": "bin/hipcc"}
 HF = {"hf": None}
 FIX = {"git": "your distribution's git", "make": "your distribution's make", "gcc": "your distribution's gcc",
-       "hipcc": "ROCm 7.x (https://rocm.docs.amd.com)", "hf": "pip install -U huggingface_hub"}
+       "hipcc": "ROCm 7.x (https://rocm.docs.amd.com) at /opt/rocm, or ROCM=<its root> in the environment", "hf": "pip install -U huggingface_hub"}
 
 
-def tools(download, build=True, which=shutil.which, exists=os.path.exists):
+def tools(download, build=True, which=shutil.which, exists=os.path.exists, rocm_dir=None):
     need = dict(TOOLS if build else {}, **(HF if download else {}))
-    missing = [n for n, at in need.items() if not which(n) and not (at and exists(at))]
+    rocm = rocm_dir or ROCM
+    missing = [n for n, at in need.items() if not (exists(os.path.join(rocm, at)) if at else which(n))]
     if missing:
         return False, "missing: " + "; ".join(f"{n} ({FIX[n]})" for n in missing)
     return True, "the tools: " + (", ".join(need) or "none needed")

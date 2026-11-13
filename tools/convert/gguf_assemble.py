@@ -18,11 +18,13 @@ import os
 import struct
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qtypes  # noqa: E402
+
 BLOCK = 4096
 FICLONERANGE = 0x4020940D
-TYPES = {0: (1, 4), 1: (1, 2), 8: (32, 34), 10: (256, 84), 12: (256, 144), 13: (256, 176), 14: (256, 210),
-         16: (256, 66), 17: (256, 74), 18: (256, 98), 19: (256, 50), 20: (32, 18), 22: (256, 82), 23: (256, 136),
-         26: (1, 4), 27: (1, 8), 29: (256, 56), 30: (1, 2), 39: (32, 17), 43: (32, 33)}  # values, bytes a block
+# a type's values and bytes a block: qtype.h's table (qtypes.py reads it), and F16 - carried as bytes, not read by osmos
+TYPES = {**qtypes.SIZES, 1: (1, 2)}
 
 
 def rd(f, fmt):

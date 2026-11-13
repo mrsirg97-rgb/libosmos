@@ -40,6 +40,7 @@ KERNEL_SRCS := $(wildcard $(KERNEL_DIR)/*.hip)
 KERNEL_OBJS := $(patsubst $(KERNEL_DIR)/%.hip,$(OBJ_DIR)/kernels/%.o,$(KERNEL_SRCS))
 KERNEL_HDRS := $(wildcard $(KERNEL_DIR)/*.h)
 GPU_TESTS := $(patsubst $(TEST_DIR)/gpu/%.hip, $(BIN_DIR)/gpu/%, $(wildcard $(TEST_DIR)/gpu/*.hip))
+BENCH := $(patsubst tools/bench/%.hip, $(BIN_DIR)/bench/%, $(wildcard tools/bench/*.hip))
 ROCM ?= /opt/rocm
 HIPCC := $(ROCM)/bin/hipcc
 # the HIP binaries find ROCm's libraries where they were built against (a RUNPATH: LD_LIBRARY_PATH still wins) - a
@@ -101,6 +102,15 @@ $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(OBJ_DIR)/tests/gpu
 	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 $(NPU_LIBS) $(HIP_RUNPATH) -o $@
 
+# the bench tools (tools/bench/*.hip): built with the GPU's tests, so a change to what they call fails the build, not a
+# bench run weeks later (0.7.1: nothing built them)
+$(BIN_DIR)/bench/%: tools/bench/%.hip tools/bench/bench_common.h $(LIB) $(HIP_LIB)
+	@mkdir -p $(dir $@)
+	@mkdir -p $(OBJ_DIR)/tools/bench
+	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tools/bench/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 $(NPU_LIBS) -lpthread $(HIP_RUNPATH) -o $@
+
+bench: $(BENCH)
+
 # the server (tools/serve): the engine over stdin / stdout, maya's serve protocol; --parallel's loop libevt's (in
 # libosmos.a, as above)
 SERVE := $(BIN_DIR)/osmos-serve
@@ -138,7 +148,7 @@ $(REQUANT): tools/requant/requant_dspark.c $(LIB) $(GGML)/build-ggml/ggml/src/li
 requant: $(REQUANT)
 
 # the GPU's tests built, not run (CI: no gfx1151 there)
-gpu-build: $(GPU_TESTS) $(SERVE)
+gpu-build: $(GPU_TESTS) $(BENCH) $(SERVE)
 
 # the GPU's tests (a gfx1151 and the model): exit 77 is a skip
 gpu-tests: $(GPU_TESTS)

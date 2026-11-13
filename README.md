@@ -45,7 +45,7 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 | `ud-iq1_s` | 122 GB + 203 GB Engram table | 1M | speed |
 | `ud-iq1_m` | 140 GB + 203 GB Engram table | 1M | quality (unsloth's benchmarks 85.55 against 83.53) |
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the closest to the model, the slowest decode |
-| `qwen38-ud-iq3_xxs` | 78 GB + 3 GB MTP head | 512K | Qwen, fully in GPU memory |
+| `qwen38-ud-iq3_xxs` | 84 GB + 3 GB MTP head | 512K | Qwen, fully in GPU memory |
 | `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant, if you want it: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
 
 **How close each DeepSeek pack is to the model itself.** The KL divergence from DeepSeek's own weights (the experts
@@ -93,7 +93,7 @@ Every number here comes from one box:
 | --- | --- |
 | System | AMD Ryzen AI Halo (RAH-001), BIOS 04.01 |
 | APU | Ryzen AI MAX+ 395: 16 Zen 5 cores, Radeon 8060S (gfx1151, 40 CUs) |
-| Memory | 128 GB LPDDR5X, shared by CPU and GPU; GPU memory raised to ~113 GiB (`ttm pages_limit=29637703`) |
+| Memory | 128 GB LPDDR5X, shared by CPU and GPU; GPU memory raised to ~113 GiB (`ttm pages_limit=29637704`) |
 | SSD | Micron 4600 2 TB (MTFDLBA2T0THJ, firmware PBMA002): a PCIe 5.0 drive, linked at PCIe 4.0 x4 here; btrfs |
 | Software | Linux 7.2.7, ROCm with HIP 7.15, gcc 14.2 |
 
@@ -249,7 +249,7 @@ comparison.
 
 - A Ryzen AI MAX+ 395 (gfx1151) with 128 GB, and Linux with ROCm 7.x (developed on HIP 7.15, kernel 7.2, gcc 14).
   The optional CPU lane needs AVX-512 VNNI and VBMI.
-- GPU memory raised to ~113 GiB: `options ttm pages_limit=29637703` in `/etc/modprobe.d/ttm.conf`. This is a system
+- GPU memory raised to ~113 GiB: `options ttm pages_limit=29637704` in `/etc/modprobe.d/ttm.conf`. This is a system
   setting, so it's yours to make.
 - The model on an NVMe SSD, on a filesystem that takes `O_DIRECT` reads (ext4, btrfs and xfs do; osmos refuses one that
   doesn't, and names it). The faster the SSD's random reads, the faster DeepSeek decodes. The numbers here are from a

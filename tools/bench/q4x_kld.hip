@@ -20,6 +20,8 @@
 #include <cstring>
 #include <vector>
 
+#include "bench_common.h"
+
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/q4x/forward.h"
@@ -157,10 +159,10 @@ int main(int argc, char** argv) {
     double m = 0;
     for (float v : kls) m += v;
     m /= (double) kls.size();
-    std::vector<float> sorted = kls;
+    std::vector<double> sorted(kls.begin(), kls.end());
     std::sort(sorted.begin(), sorted.end());
-    std::printf("kld mean %.6f median %.6f p99 %.6f, top-1 agreement %.2f%%\n", m, sorted[sorted.size() / 2],
-                sorted[std::min(sorted.size() - 1, (size_t) ((double) sorted.size() * 0.99))],
+    std::printf("kld mean %.6f median %.6f p99 %.6f, top-1 agreement %.2f%%\n", m, bench_quantile(sorted, 0.5),
+                bench_quantile(sorted, 0.99),
                 100.0 * agree / (double) kls.size());
   }
   if (ro) std::fclose(ro);
