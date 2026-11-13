@@ -395,3 +395,22 @@ the NPU writing its rows in place (no unpack) 10% 637; with A broadcast 10% 641 
 d KLD (NPU - GPU, +- its standard error): UD-IQ1_M wiki -0.0095 +-0.0021, hold0..3 +0.0002 -0.0008 -0.0004 +0.0005;
 osmos-evo-A wiki +0.0001 +-0.0013, hold0..3 +0.0005 +0.0001 +0.0011 +0.0005 (each +-0.0003..0.0007). within the noise
 of a different rounding (the NPU's bfp16 A, bf16 W) - no cost to the model's distance.
+
+## 0.7.0: Qwen's NPU mode (src/q4x/hip_npu.c), and the down's layout bug
+
+the down's input is the swiglu's x16 - mm's tiled f16 (16 x 16 fragments, mm::x16_at), not rows. the first build
+packed it as rows: the NPU's down rows against the GPU's corr 0.01, wiki KL against Qwen's own GPU run 0.32 (ppl 2.34
+against 2.04) - while every bench's ids matched (decode is the GPU's; 32 greedy tokens are no check of a prompt's
+bits). found by a check mode: the NPU's rows into scratch, the GPU's kept, compared a layer (gate / up 0.99994, the
+down 0.01); the down's inputs dumped and scored in numpy - the NPU right for the rows it was given. fixed (pack
+through x16_at): the down 0.9999. the pack test had encoded the same wrong layout; it now packs mm's own.
+
+the fixed build, 0.10, against Qwen's own GPU run at 262K (0.6.9's references; q4x_kld, steps of 4,096): wiki KL
+0.0120 (ppl 2.0602 / 2.0361), hold0..3 0.0040 / 0.0036 / 0.0024 / 0.0043 (ppl within -0.08 .. +0.19%). for scale,
+0.6.9's 512K against 262K: 0.0212, 0.0125 / 0.0106 / 0.0086 / 0.0138 - NPU mode a third of that.
+
+speed, the fixed build (8K prompt in 4K steps, performance, five rounds interleaved, evictions 28-400 ms a run): GPU
+929.9 tok/s, 0.05 954.8 (+2.7%), 0.075 948 (three rounds), 0.10 947.1, 0.15 919, 0.20 859, 0.25 838 - the NPU past
+0.10 the step's critical path. Qwen's default 0.05 (OSMOS_NPU_SHARE_QWEN). the first build's numbers (+3% at 0.10)
+were its wrong down's; the IQ2_S cost scaling's A/B (flat 925 against scaled 958 at 0.10) ran on it too - the bug
+changed the down's values read, not any launch's work, so the timing holds. decode the GPU's alone: ids the same.

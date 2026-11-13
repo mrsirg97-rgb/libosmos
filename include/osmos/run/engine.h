@@ -54,9 +54,10 @@ typedef struct OsmosOptions
 } OsmosOptions;
 
 /* the NPU's default shares: each model's best measured, 8K prompts at performance (DESIGN.md, "0.7.0") - DeepSeek's
-   0.10 / 0.15 / 0.20: 641 / 642.5 / 635.5 tok/s (GPU 626); Qwen's 0.05 / 0.10 / 0.15: 962 / 966 / 924 (GPU 938) */
+   0.10 / 0.15 / 0.20: 641 / 642.5 / 635.5 tok/s (GPU 626); Qwen UD-IQ3_XXS's 0.05 / 0.10 / 0.15: 954.8 / 947.1 / 919
+   (GPU 929.9; means of 5, 5 and 2 rounds) */
 #define OSMOS_NPU_SHARE_DS 0.15f
-#define OSMOS_NPU_SHARE_QWEN 0.10f
+#define OSMOS_NPU_SHARE_QWEN 0.05f
 
 /* the counters a bench and the server's stats read: zeros where a family has none */
 typedef struct OsmosStats
