@@ -354,6 +354,27 @@ static void test_mxfp8(void)
   printf("  type 43: MXFP8's blocks read; a byte a value (upstream's F8_E4M3) refused, before a tensor or alone\n");
 }
 
+/* type 40: NVFP4 (36 bytes a 64 values: 4 UE4M3 scales, 32 bytes of codes) read, as Inkling-2's experts are written
+   (ink2_ref_gguf.py: [experts, rows, columns], an F32 scale a expert beside it); a row not whole blocks refused */
+static void test_nvfp4(void)
+{
+  const uint64_t vals = 256 * 16 * 4; /* (columns 256: four blocks a row; 16 rows; 4 experts) */
+  const Spec nv[] = {{"blk.0.ffn_up_exps.weight", 40, 3, {256, 16, 4}, vals / 64 * 36},
+                     {"blk.0.ffn_up_exps.scale", 0, 1, {4}, 4 * 4}};
+  const Spec odd[] = {{"e.nvfp4", 40, 2, {96, 16}, 96 * 16 / 64 * 36}};
+  char err[GGUF_ERR] = "";
+  Buf w = model(nv, 2, 0, 0, 0, NULL, 0);
+  Gguf *g = gguf_create(write_file("nvfp4.gguf", &w), err);
+  assert(g && g->tensors[0].bytes == vals / 64 * 36 && g->tensors[1].bytes == 16);
+  check_whole(g);
+  gguf_destroy(g);
+  free(w.b);
+  w = model(odd, 1, 0, 0, 0, NULL, 0);
+  assert(!gguf_create(write_file("nvfp4odd.gguf", &w), err));
+  free(w.b);
+  printf("  type 40: NVFP4's blocks read, an expert tensor and its scale; a row of 96 values (1.5 blocks) refused\n");
+}
+
 /* property: random byte changes never crash it; what it returns always holds (every tensor in its file) */
 static void test_mutations(void)
 {
@@ -426,6 +447,7 @@ int main(void)
   test_truncated();
   test_corrupt();
   test_mxfp8();
+  test_nvfp4();
   test_mutations();
   test_ds1017();
   char cmd[600];

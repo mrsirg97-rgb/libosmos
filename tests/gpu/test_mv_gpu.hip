@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include "test_model.h"
@@ -78,6 +79,17 @@ static const Shape kQwenQ4Shapes[] = {
   {"blk.0.ffn_gate_exps.weight", 7}, {"blk.30.ffn_gate_exps.weight", 300}, {"blk.47.ffn_up_exps.weight", 11},
   {"blk.0.ffn_down_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 300}, {"blk.2.ffn_gate_exps.weight", 7},
 };
+
+// Inkling-2-Small's reference (the original weights: /mnt/data/ink2/tools/ink2_ref_gguf.py), a shard alone: the first
+// its dense matrices (BF16) and the NVFP4 experts of layers 0-4, the last the MXFP8 experts of 46-47 - each block's
+// values (a tensor's own scale is its role's, not the matvec's)
+constexpr const char* kInk1 = "%s/Models/inkling2/ref/ink2-ref-00001-of-00009.gguf";
+static const Shape kInk1Shapes[] = {
+  {"blk.0.ffn_gate_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 7}, {"blk.4.ffn_up_exps.weight", 300},
+  {"blk.5.attn_q.weight", -1},       {"blk.0.attn_gate.weight", -1},    {"output.weight", -1},
+};
+constexpr const char* kInk9 = "%s/Models/inkling2/ref/ink2-ref-00009-of-00009.gguf";
+static const Shape kInk9Shapes[] = {{"blk.46.ffn_gate_exps.weight", 7}, {"blk.47.ffn_down_exps.weight", 300}};
 
 static uint32_t rng = 1017;
 static int tok_shapes = 0;
@@ -269,6 +281,18 @@ int main() {
     gguf_destroy(g);
   } else {
     std::printf("  Qwen3.8-Flash-Next UD-Q4_K_XL: not on this machine, its shapes not checked\n");
+  }
+  for (const auto& m : {std::make_pair(kInk1, std::make_pair(kInk1Shapes, sizeof kInk1Shapes / sizeof *kInk1Shapes)),
+                        std::make_pair(kInk9, std::make_pair(kInk9Shapes, sizeof kInk9Shapes / sizeof *kInk9Shapes))}) {
+    std::snprintf(qwen, sizeof qwen, m.first, std::getenv("HOME") ? std::getenv("HOME") : "");
+    if ((g = gguf_create(qwen, err))) {
+      std::printf("  Inkling-2-Small's reference, %s:\n", std::strrchr(qwen, '/') + 1);
+      for (size_t i = 0; i < m.second.second; i++) shape(g, m.second.first[i]);
+      gguf_destroy(g);
+    } else {
+      std::printf("  Inkling-2-Small's reference (%s): not on this machine, its shapes not checked\n",
+                  std::strrchr(qwen, '/') + 1);
+    }
   }
   std::printf("  every shape: %d tokens at once (the wide tiles) the bits of each alone\n", kWideNt);
   CHECK(tok_shapes > 0);

@@ -17,6 +17,9 @@
 #define QTYPE_IQ (QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8 | QTYPE_CPU_MV | QTYPE_CPU_Q8)
 
 /* each type this build reads, once: X(name, ggml id, a block's values, a block's bytes, paths) */
+/* (40: NVFP4 as ggml lays it - 64 values: 4 UE4M3 scales, one a 16, then 32 bytes of E2M1 codes; a tensor's own
+   scale (one, or one an expert) is a tensor beside it, not the block's: Inkling-2's experts, as their checkpoint holds
+   them) */
 /* (43: unsloth's MXFP8 - an E8M0 scale, then 32 E4M3 codes - its GGUFs' Engram tables; upstream llama.cpp's 43 is
    F8_E4M3, one byte a value and no scales: a file of that is refused by its size, gguf.c) */
 #define QTYPES(X)                                                                                  \
@@ -39,8 +42,9 @@
   X(IQ1_M, 29, 256, 56, QTYPE_IQ)                                                                  \
   X(BF16, 30, 1, 2, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_EMBED)                            \
   X(MXFP4, 39, 32, 17, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
+  X(NVFP4, 40, 64, 36, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
   X(Q2_0, 42, 64, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                           \
-  X(MXFP8, 43, 32, 33, QTYPE_FILE | QTYPE_DECODE)
+  X(MXFP8, 43, 32, 33, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)
 
 #define QTYPE_ID(name, id, values, bytes, paths) QTYPE_##name = id,
 enum QType { QTYPES(QTYPE_ID) };
