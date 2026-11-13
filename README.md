@@ -116,12 +116,14 @@ round differently from the GPU's; the same bits every run).
 
 ### osmos-evo-A, the default DeepSeek pack
 
+0.7.2's numbers (its faster IQ1_S prompt decode), the same way, 2026-11-13; the other tables are 0.7.0's.
+
 | | GPU | with the NPU |
 | --- | ---: | ---: |
-| Prompt, 2,048 tokens | 373-380 | **385-386** |
-| Prompt, 8,192 tokens | 604-607 | **630-635** |
-| Decode, drafted | 35.3 | |
-| Decode, plain | 19.0 | |
+| Prompt, 2,048 tokens | 384-385 | **386-389** |
+| Prompt, 8,192 tokens | 620 | **644-647** |
+| Decode, drafted | 35.6 | |
+| Decode, plain | 18.9 | |
 
 ### DeepSeek against Maya
 
