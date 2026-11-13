@@ -66,7 +66,7 @@ __global__ void route_kernel(const float* logits, uint32_t n_exp, uint32_t k, in
 // a step's picks as mm_group's tables (q4x_expert_tiles): each expert's count, then scans of its places, its slots
 // and its entries in each run, then a thread an expert lays its picks out in pick order and writes its parts - the
 // same layout however it runs
-constexpr int kPart = 128;  // an entry's most tokens: 8 tiles
+constexpr int kPart = MM_TILE << (Q4X_TILE_RUNS - 1);  // an entry's most tokens: the last run's 8 tiles (128)
 // a step's picks at most this many: each expert's thread places its own picks itself (a scan of the step's picks, cheap
 // when they are few: a decode token's 10, a draft's tens), not place_kernel - one launch, not two (decode 23.5 -> 23.8
 // tok/s). the same tables either way (test_q4x_moe_gpu: a step of 30 picks and one of 2,560 against a stable sort)

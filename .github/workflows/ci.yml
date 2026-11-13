@@ -17,20 +17,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      # the model's first shard is its metadata and tokenizer (5.8 MB): the tokenizer, chat and osmos-api tests read
-      # it. fetched at the manifest's pinned commit and checked against its SHA-256, so the tests never skip here
-      - name: the tokenizer's shard
-        run: |
-          set -eu
-          read -r repo rev path sha < <(python3 -c 'import json; e = json.load(open("tools/install/packs.json"))["files"]["ud-iq1_m-1"]; print(e["repo"], e["revision"], e["path"], e["sha256"])')
-          dst="$HOME/Models/ds1017/UD-IQ1_M/$(basename "$path")"
-          mkdir -p "$(dirname "$dst")"
-          curl -fsSL -o "$dst" "https://huggingface.co/$repo/resolve/$rev/$path"
-          echo "$sha  $dst" | sha256sum -c
+      # the models' first shards (their metadata and tokenizers: DeepSeek's and Qwen's), pinned and SHA-checked, and
+      # the Qwen template's renderer (jinja2, gguf-py) - so the tests that read them never skip here
+      - name: the tokenizers' shards
+        run: tools/ci/fetch_shards.sh
+      - name: the Qwen template's renderer
+        run: python3 -m pip install --quiet --break-system-packages jinja2==3.1.4 gguf==0.17.1
       - name: tests
         run: make -j tests
       - name: osmos-api
-        run: make -j api && python3 tests/api/test_api.py
+        run: |
+          export OSMOS_GGUF_PY="$(python3 -c 'import gguf, os; print(os.path.dirname(os.path.dirname(gguf.__file__)))')"
+          make -j api && python3 tests/api/test_api.py
       - name: the installer
         run: python3 tools/install/test_install.py
 
@@ -40,6 +38,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true # libevt: built into libosmos.a, so under the sanitizers too
+      - name: the tokenizers' shards # the tests that read them run under the sanitizers too (0.7.1: none fetched)
+        run: tools/ci/fetch_shards.sh
       - name: AddressSanitizer + UndefinedBehaviorSanitizer
         run: make asan
       - name: ThreadSanitizer

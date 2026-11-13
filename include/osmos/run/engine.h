@@ -78,6 +78,8 @@ bool osmos_room(const Osmos *e, uint64_t *bytes);
 void osmos_stats(const Osmos *e, OsmosStats *s);
 
 bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
+bool osmos_read(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
+bool osmos_reads_apart(const Osmos *e);
 const float *osmos_logits(const Osmos *e, uint32_t row);
 bool osmos_greedy(Osmos *e, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t n, int32_t *id, char err[OSMOS_ERR]);
@@ -143,6 +145,14 @@ osmos_batch
   are the batch's own numbers: osmos_logits(row) its vocab floats (device memory), NULL for a row not kept;
   osmos_greedy: rows row0 .. row0 + rows - 1's greatest token each, the lowest id among equals, false for a row not
   kept.
+
+osmos_read
+  osmos_batch for a prompt's tokens: a family whose small steps compute otherwise than its large ones (DeepSeek: the
+  lane's int8 experts under n_experts / n_used tokens) reads them with its large steps' math at any size, so a
+  prompt read in pieces - from a reused prefix, a conversation taken back - is the bits of one read whole.
+  osmos_reads_apart: whether the family does (its decoded tokens' state then not a prompt's: osmos-serve keeps each
+  conversation's state at its prompt's end and reads a turn's earlier answer again, never continues on it). false:
+  one math for both (Qwen's), osmos_read osmos_batch.
 
 osmos_greedy_except
   row's greatest token among those not in `except` (osmos/text/answer.h's answer_best: ties to the lower id, NaNs

@@ -66,6 +66,14 @@ int main(void)
       expect(what, b.p, b.n, want->s, want->len);
       renders++;
     }
+    else if (strcmp(json_str(c, "kind"), "render_refuse") == 0) /* the reference's encoding raises on the chat */
+    {
+      const int effort = chat_effort(json_get(c, "effort"), cerr);
+      if (chat_render(json_get(c, "messages"), mode, effort, &b, cerr))
+        printf("  render refusal %d rendered: %.*s\n", refusals, (int)b.n, b.p), exit(1);
+      printf("  refused as the reference's encoding does: %s\n", cerr);
+      refusals++;
+    }
     else if (strcmp(json_str(c, "kind"), "refuse") == 0) /* the reference raises on it: so must the port */
     {
       const Json *text = json_get(c, "text");
@@ -103,6 +111,27 @@ int main(void)
     printf("  refused: %s\n", cerr);
     free(b.p), json_free(m);
   }
+  /* a string's text whole past a NUL (\u0000), as encoding.py keeps it - in every place a client's text lands: a user's
+     string and its parts, a system's parts, a tool's result parts, an assistant's reasoning (0.7.1: cut at the NUL) */
+  const char nul[] = "[{\"role\": \"system\", \"content\": [{\"type\": \"text\", \"text\": \"s1\\u0000t1\"}]},"
+                     "{\"role\": \"user\", \"content\": \"u2\\u0000v2\"},"
+                     "{\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": \"u3\\u0000v3\"}]},"
+                     "{\"role\": \"tool\", \"tool_call_id\": \"c\", \"content\": [{\"type\": \"text\", \"text\": "
+                     "\"r4\\u0000s4\"}]},"
+                     "{\"role\": \"assistant\", \"content\": \"ok\", \"reasoning_content\": \"p5\\u0000q5\"}]";
+  Json *nm = json_parse(nul, strlen(nul), err);
+  JsonBuf nb = {0};
+  assert(nm && chat_render(nm, CHAT_THINKING, 75, &nb, cerr));
+  for (int k = 1; k <= 5; k++)
+  {
+    const char *const ab[] = {"s1", "u2", "u3", "r4", "p5"}, *const cd[] = {"t1", "v2", "v3", "s4", "q5"};
+    char want[8];
+    const size_t wn = (size_t)snprintf(want, sizeof want, "%s#%s", ab[k - 1], cd[k - 1]);
+    want[2] = 0; /* the NUL between */
+    assert(memmem(nb.p, nb.n, want, wn));
+  }
+  free(nb.p), json_free(nm);
+  printf("  a string's text whole past a NUL: system and user parts, a user's string, a tool's parts, reasoning\n");
   Json *e = json_parse("101", 3, err);
   assert(chat_effort(e, cerr) == -1), json_free(e);
   JsonBuf b = {0};

@@ -28,6 +28,8 @@ void slots_destroy(Slots *s);
 /* room in RAM for a state of `bytes` about to be saved (and put): RAM's least recently used to the folder (or dropped
    without one) until it fits under ram_bytes; false past ram_bytes alone (nothing moved), or a write that failed */
 bool slots_room(Slots *s, uint64_t bytes, char err[SLOTS_ERR]);
+/* whether a conversation of n tokens would be kept (min_tokens): asked before slots_room, which moves others for it */
+bool slots_keeps(const Slots *s, uint32_t n);
 /* state: malloc'd, the store's from the call (kept, or freed: not kept or a failure) */
 bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_t bytes, bool *kept,
                char err[SLOTS_ERR]);

@@ -43,6 +43,11 @@ static void test_malformed(void)
   refused("{\"tensors\": [[\"a\", \"F32\", 4000, 400, [100]]]}", "past the end of the bin");
   refused("{\"tensors\": [[\"a\", \"F32\", 0, 400, [100]]", "truncated");
   refused("{\"other\": 1}", "no tensors");
+  /* dims whose product wraps 64 bits, a dim of 0, a number past 64 bits: refused (0.7.1: [256, 2^56 + 1] as F32 read
+     as 1,024 bytes - 256 values - and the drafter's reads went past the tensor's place) */
+  refused("{\"tensors\": [[\"a\", \"F32\", 0, 1024, [256, 72057594037927937]]]}", "dims wrapping 64 bits");
+  refused("{\"tensors\": [[\"a\", \"F32\", 0, 0, [0, 4]]]}", "a dim of 0");
+  refused("{\"tensors\": [[\"a\", \"F32\", 0, 4, [18446744073709551617]]]}", "a number past 64 bits");
   write("dspark.json", "{\"tensors\": [[\"a.w\", \"MXFP4\", 17, 34, [2, 32]], [\"b\", \"BF16\", 64, 8, [4]]]}", 0);
   char err[DSPARK_ERR] = "";
   DsparkIndex *x = dspark_index(dir, err);

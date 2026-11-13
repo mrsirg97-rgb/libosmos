@@ -98,7 +98,7 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
      them; not with a probe, which may stand the oracle's in) */
   f->xf_x16 = f->n_sub == 1 && !f->probe;
   /* and, a lane's small step over int8 experts: its int8 too (the lane's q8_round of xf, in this launch) */
-  f->xf_q8 = f->xf_x16 && f->lane && n * (uint32_t)g->n_used < (uint32_t)g->n_experts && D % LANE_Q8_VALUES == 0 &&
+  f->xf_q8 = f->xf_x16 && fwd_small(f, n * (uint32_t)g->n_used) && D % LANE_Q8_VALUES == 0 &&
              lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type);
   ok = ops_hc_post_dot(b->y, b->h, b->a_post, b->a_comb, hc, D, n, b->mid, fv(f, L->hc_ffn_fn), b->hcp, NULL) &&
        ops_hc_mix_pre_rms(b->hcp, fv(f, L->hc_ffn_scale), fv(f, L->hc_ffn_base), hc, D, g->rms_eps, g->hc_eps,
@@ -237,7 +237,23 @@ static bool fail_held(Forward *f)
   return false;
 }
 
+static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[FORWARD_ERR]);
+
+/* a step; one that fails once its tokens are placed leaves each sequence's n-gram history (last[]) past its position:
+   the sequence broken - refused until it is reset or loaded - not stepped again on a phantom history (0.7.1) */
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
+{
+  for (uint32_t i = 0; i < n; i++)
+    if (seqs[i] && seqs[i]->broken)
+      return fwd_fail(err, "a sequence a failed step left (its history past its position): reset or load it");
+  bool placed = false;
+  const bool ok = batch(f, seqs, tokens, n, &placed, err);
+  for (uint32_t i = 0; !ok && placed && i < n; i++)
+    seqs[i]->broken = true;
+  return ok;
+}
+
+static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[FORWARD_ERR])
 {
   const Geometry *g = f->g;
   if (!n || n > f->max_tokens)
@@ -246,6 +262,7 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
     return false;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
+  *placed = true; /* (place may fail part-way through its histories: placed either way) */
   if (!place(f, seqs, tokens, n, err) || !fwd_engram_issue(f, err))
     return false;
   f->hcp_next = false;
@@ -336,7 +353,7 @@ uint32_t seq_reach(const Seq *s)
 
 bool seq_rollback(Seq *s, uint32_t n)
 {
-  if (!s || n > SEQ_MAX_BACK || (int)n > s->n_last || (int64_t)s->pos - n < (int64_t)s->prompt_end)
+  if (!s || s->broken || n > SEQ_MAX_BACK || (int)n > s->n_last || (int64_t)s->pos - n < (int64_t)s->prompt_end)
     return false;
   const int cap = ENGRAM_MAX_NGRAM + SEQ_MAX_BACK;
   memmove(s->last, s->last + n, (size_t)(cap - (int)n) * sizeof *s->last);

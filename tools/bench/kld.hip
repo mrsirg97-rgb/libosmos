@@ -22,6 +22,8 @@
 #include <cstring>
 #include <vector>
 
+#include "bench_common.h"
+
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
@@ -112,6 +114,7 @@ int main(int argc, char** argv) {
   }
   Forward* f = forward_create_with(w, &o, ferr);
   if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
+  CHECK(forward_lane(f, 0, NULL, ferr));  // as the engine and ppl.hip: a step under n_experts / n_used rows the engine's
   if (const char* nd = std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu), NPU_SHARE of a layer's pairs
     if (!forward_npu(f, nd, std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr))
       std::fprintf(stderr, "forward_npu: %s\n", ferr), std::_Exit(1);
@@ -172,10 +175,10 @@ int main(int argc, char** argv) {
     double m = 0;
     for (float v : kls) m += v;
     m /= (double) kls.size();
-    std::vector<float> sorted = kls;
+    std::vector<double> sorted(kls.begin(), kls.end());
     std::sort(sorted.begin(), sorted.end());
-    std::printf("kld mean %.6f median %.6f p99 %.6f, top-1 agreement %.2f%%\n", m, sorted[sorted.size() / 2],
-                sorted[std::min(sorted.size() - 1, (size_t) ((double) sorted.size() * 0.99))],
+    std::printf("kld mean %.6f median %.6f p99 %.6f, top-1 agreement %.2f%%\n", m, bench_quantile(sorted, 0.5),
+                bench_quantile(sorted, 0.99),
                 100.0 * agree / (double) kls.size());
   }
   if (ro) std::fclose(ro);

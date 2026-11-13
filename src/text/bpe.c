@@ -129,40 +129,95 @@ static size_t put_cp(char *out, uint16_t c) /* a stand-in's UTF-8: one byte belo
   return 2;
 }
 
+/* a pair of adjacent symbols that is a merge: its rank, its left symbol, both symbols' sizes when it was queued (a
+   pair whose either side has since grown is stale: skipped when it comes up) */
+typedef struct Pair
+{
+  int32_t rank;
+  long left, right;
+  size_t lsize, rsize;
+} Pair;
+
+static bool before(const Pair *a, const Pair *b) /* the lowest rank first, the leftmost among equals */
+{
+  return a->rank != b->rank ? a->rank < b->rank : a->left < b->left;
+}
+
+static void heap_push(Pair *h, size_t *n, Pair p)
+{
+  size_t i = (*n)++;
+  for (; i && before(&p, &h[(i - 1) / 2]); i = (i - 1) / 2)
+    h[i] = h[(i - 1) / 2];
+  h[i] = p;
+}
+
+static Pair heap_pop(Pair *h, size_t *n)
+{
+  const Pair top = h[0], last = h[--*n];
+  size_t i = 0;
+  for (;;)
+  {
+    size_t c = 2 * i + 1;
+    if (c >= *n)
+      break;
+    if (c + 1 < *n && before(&h[c + 1], &h[c]))
+      c++;
+    if (!before(&h[c], &last))
+      break;
+    h[i] = h[c], i = c;
+  }
+  if (*n)
+    h[i] = last;
+  return top;
+}
+
+/* the pair (i, j) queued if it is a merge */
+static void queue(const Bpe *b, const char *buf, const size_t *start, const size_t *size, char *key, long i, long j,
+                  Pair *h, size_t *n)
+{
+  if (i < 0 || j < 0)
+    return;
+  memcpy(key, buf + start[i], size[i]);
+  key[size[i]] = ' ';
+  memcpy(key + size[i] + 1, buf + start[j], size[j]);
+  const int32_t r = map_get(&b->merge, key, size[i] + 1 + size[j]);
+  if (r >= 0)
+    heap_push(h, n, (Pair){r, i, j, size[i], size[j]});
+}
+
 size_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *ids, size_t cap)
 {
   char *buf = malloc(2 * len + 1), *key = malloc(4 * len + 2);
   size_t *start = malloc(len * sizeof *start), *size = malloc(len * sizeof *size);
-  long *next = malloc(len * sizeof *next);
-  if (!buf || !key || !start || !size || !next)
+  long *next = malloc(len * sizeof *next), *prev = malloc(len * sizeof *prev);
+  /* a merge queues at most two pairs, the bytes len - 1 at the start: 3 len bounds the queue */
+  Pair *heap = malloc((3 * len + 1) * sizeof *heap);
+  if (!buf || !key || !start || !size || !next || !prev || !heap)
   {
-    free(buf), free(key), free(start), free(size), free(next);
+    free(buf), free(key), free(start), free(size), free(next), free(prev), free(heap);
     return 0;
   }
-  size_t at = 0;
+  size_t at = 0, nh = 0;
   for (size_t i = 0; i < len; i++) /* a symbol a byte: its stand-in's UTF-8, the symbols adjacent in buf */
   {
     start[i] = at, size[i] = put_cp(buf + at, byte_cp[word[i]]), at += size[i];
-    next[i] = i + 1 < len ? (long)(i + 1) : -1;
+    next[i] = i + 1 < len ? (long)(i + 1) : -1, prev[i] = (long)i - 1;
   }
-  for (;;) /* the lowest-ranked pair merged, the leftmost among equals, until no pair is a merge */
+  for (size_t i = 0; i + 1 < len; i++)
+    queue(b, buf, start, size, key, (long)i, (long)i + 1, heap, &nh);
+  /* the lowest-ranked pair merged, the leftmost among equals, until no pair is a merge - llama.cpp's queue: each
+     merge's new pairs queued, a stale one skipped (0.7.1: the word rescanned each merge, quadratic in its length) */
+  while (nh)
   {
-    long best = -1;
-    int32_t best_rank = INT32_MAX;
-    for (long i = 0; i >= 0 && next[i] >= 0; i = next[i])
-    {
-      const long j = next[i];
-      memcpy(key, buf + start[i], size[i]);
-      key[size[i]] = ' ';
-      memcpy(key + size[i] + 1, buf + start[j], size[j]);
-      const int32_t r = map_get(&b->merge, key, size[i] + 1 + size[j]);
-      if (r >= 0 && r < best_rank)
-        best_rank = r, best = i;
-    }
-    if (best < 0)
-      break;
-    const long j = next[best];
-    size[best] += size[j], next[best] = next[j];
+    const Pair p = heap_pop(heap, &nh);
+    if (size[p.left] != p.lsize || next[p.left] != p.right || size[p.right] != p.rsize)
+      continue; /* a side merged since: not this pair any more */
+    size[p.left] += size[p.right], next[p.left] = next[p.right];
+    if (next[p.right] >= 0)
+      prev[next[p.right]] = p.left;
+    size[p.right] = 0; /* gone: a pair still queued with it on either side is stale */
+    queue(b, buf, start, size, key, prev[p.left], p.left, heap, &nh);
+    queue(b, buf, start, size, key, p.left, next[p.left], heap, &nh);
   }
   size_t n = 0;
   for (long i = 0; i >= 0; i = next[i])
@@ -186,7 +241,7 @@ size_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *id
       }
     }
   }
-  free(buf), free(key), free(start), free(size), free(next);
+  free(buf), free(key), free(start), free(size), free(next), free(prev), free(heap);
   return n;
 }
 

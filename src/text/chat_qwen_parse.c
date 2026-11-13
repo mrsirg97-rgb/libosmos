@@ -46,7 +46,7 @@ static bool upto(Span *rest, const char *stop, Span *before)
 /* a span of the shape as the text's own bytes (chat_parse_shaped's) */
 static Span real(Span s, ptrdiff_t off) { return s.n ? (Span){s.p + off, s.n} : s; }
 
-static bool name_ok(Span s) { return s.n && !memchr(s.p, '\n', s.n) && !memchr(s.p, '<', s.n); }
+static bool name_ok(Span s) { return qchat_name_ok(s.p, s.n); }
 
 /* a function's parameter's schema, or NULL (no such tool or parameter) */
 static const Json *schema_of(const Json *tools, Span fn, Span param)

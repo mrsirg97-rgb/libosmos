@@ -86,10 +86,15 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
     }
     if (strcmp(k->key, "general.alignment") == 0)
       align = k->type == GGUF_UINT32 ? k->v.u : 0;
-    else if (strcmp(k->key, "split.count") == 0)
-      *split_count = k->v.u;
-    else if (strcmp(k->key, "split.no") == 0)
-      *split_no = k->v.u;
+    else if (strcmp(k->key, "split.count") == 0 || strcmp(k->key, "split.no") == 0)
+    { /* an unsigned integer (gguf-split's u16): another type refused by name (0.7.1: a string's pointer bits read) */
+      if (k->type != GGUF_UINT16 && k->type != GGUF_UINT32 && k->type != GGUF_UINT64)
+      {
+        ok = gguf_fail(r, "split.count or split.no not an unsigned integer");
+        break;
+      }
+      *(strcmp(k->key, "split.count") == 0 ? split_count : split_no) = k->v.u;
+    }
   }
   if (ok && (align == 0 || (align & (align - 1))))
     ok = gguf_fail(r, "an alignment that is not a power of two");
@@ -163,19 +168,20 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
   return true;
 }
 
-/* a split model's shard `no` (1-based) of `count`: the first shard's path with its -NNNNN-of- number replaced */
+/* a split model's shard `no` (1-based) of `count`: the first shard's path with its -00001-of-NNNNN replaced (NNNNN the
+   header's count, as llama.cpp's gguf-split writes it); NULL for a first shard named otherwise (0.7.1: its name's tail
+   was written past when shorter, and a count spelt otherwise opened siblings of another name) */
 static char *shard_path(const char *first, int no, int count)
 {
-  const char *at = strstr(first, "-00001-of-");
-  if (!at)
-    return NULL;
-  char *p = malloc(strlen(first) + 1);
-  if (!p)
-    return NULL;
-  memcpy(p, first, strlen(first) + 1);
-  char num[32];
+  char want[32], num[32];
+  snprintf(want, sizeof want, "-00001-of-%05d", count);
   snprintf(num, sizeof num, "-%05d-of-%05d", no, count);
-  memcpy(p + (at - first), num, strlen(num));
+  const char *at = strstr(first, want);
+  if (!at || strlen(num) != strlen(want))
+    return NULL;
+  char *p = strdup(first);
+  if (p)
+    memcpy(p + (at - first), num, strlen(num));
   return p;
 }
 
@@ -241,6 +247,8 @@ static Gguf *create(const char *path, bool siblings, char err[GGUF_ERR])
       g->paths[i] = shard_path(path, i + 1, (int)count);
       if (!g->paths[i])
       {
+        if (err)
+          snprintf(err, GGUF_ERR, "%s: a split model's first shard is named -00001-of-%05d", path, (int)count);
         gguf_destroy(g);
         return NULL;
       }

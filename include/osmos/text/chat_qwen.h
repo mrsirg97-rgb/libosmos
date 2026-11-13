@@ -13,6 +13,8 @@
 
 bool qchat_render(const Json *messages, const Json *tools, ChatMode mode, const char *effort, bool preserve,
                   JsonBuf *out, char err[CHAT_ERR]);
+bool qchat_render_with(const Json *messages, const Json *branch, const Json *tools, ChatMode mode, const char *effort,
+                       bool preserve, JsonBuf *out, char err[CHAT_ERR]);
 bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR]);
 bool qchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
                         JsonBuf *out, char err[CHAT_ERR]);
@@ -37,7 +39,14 @@ qchat_render
   <think>\n - or an empty think block when not thinking - after the assistant header. every string trimmed as
   Python's str.strip trims. false with why: the template's refusals (no messages, a system message after the start,
   an unknown role or content, an effort it does not name, a call without a name, arguments a non-empty string or
-  not an object).
+  not an object) - and a call's name or argument key holding a newline or '<' (osmos's: the template's '>' after it
+  could complete a special token's text, a turn forged).
+
+qchat_render_with
+  qchat_render, but the template's choices that read a message's text (the last real user query, for preserve false)
+  made on branch's messages - the same count - not on messages': a render of the request's strings defused (osmos-api's
+  shape) takes the text's branches, its bytes then the text's but for those defused (0.7.1: a user turn of tool
+  responses as text, defused, stopped looking like one - the renders differed, a 400).
 
 qchat_parse
   a completion - the model's text after the rendered prompt, through its end of turn (QCHAT_EOS) - as the assistant

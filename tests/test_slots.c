@@ -286,6 +286,9 @@ int main(void)
   assert(slots_room(s, STATE, err) && slots_in_ram(s) == 1 && slots_in_dir(s) == 1);
   assert(slots_room(s, STATE, err) && slots_in_ram(s) == 1); /* there already */
   assert(!slots_room(s, 3 * STATE, err) && slots_in_ram(s) == 1); /* past the cap: refused, nothing moved */
+  /* a conversation under min_tokens is not kept: asked first (conv.c), so its set-aside moves nothing (0.7.1: room
+     was made for it - a kept one pushed to the folder, one there dropped - and then it was refused) */
+  assert(slots_keeps(s, 1024) && !slots_keeps(s, 1023) && !slots_keeps(NULL, 1 << 20));
   take_back(s, 1, N, STATE);
   ram = opts(NULL, 8, 0, 0, 7), ram.ram_bytes = 2 * STATE;
   ram.ram_bytes = 0; /* none in RAM, no folder: nothing kept */

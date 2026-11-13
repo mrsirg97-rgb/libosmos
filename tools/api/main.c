@@ -11,10 +11,12 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include "api.h"
@@ -26,6 +28,9 @@
 #define API_PORT 8091  /* the installer's first (tools/install/rig.py PORT_BASE) */
 #define API_CONNS 16   /* connections at once: past it a 503 (a local client's handful; the engine runs few) */
 #define API_POLL_MS 1000
+#define API_IDLE_S 10  /* a request's bytes awaited this long at most: an idle connection closed, not held (0.7.1) */
+#define API_STALL_S 60
+#define API_QUIT_S 120 /* the engine's end awaited this long on a stop: its conversations written to their folder */ /* a reply's send blocked this long: its client taken as gone (a stream's run STOPped) */
 
 static const char *opt(int argc, char **argv, const char *name, const char *dflt)
 {
@@ -60,6 +65,7 @@ static void answer(Http *h)
   if (status)
   {
     http_error(h->fd, status, err);
+    http_linger(h->fd, true); /* its bytes unread: drained, so the client reads the status, not a reset */
     return;
   }
   char *q = strchr(h->path, '?');
@@ -90,9 +96,16 @@ static void answer(Http *h)
     http_error(h->fd, 404, "not found (POST /v1/chat/completions, GET /v1/models, GET /health)");
 }
 
+static volatile sig_atomic_t stopping; /* SIGTERM / SIGINT: the engine QUIT, then this server's end */
+
+static void on_stop(int sig) { (void)sig, stopping = 1; }
+
 static void *connection(void *arg)
 {
   Http h = {.fd = (int)(intptr_t)arg};
+  const struct timeval idle = {API_IDLE_S, 0}, stall = {API_STALL_S, 0};
+  (void)setsockopt(h.fd, SOL_SOCKET, SO_RCVTIMEO, &idle, sizeof idle); /* http_read's recv: a timeout an error */
+  (void)setsockopt(h.fd, SOL_SOCKET, SO_SNDTIMEO, &stall, sizeof stall); /* send_all's send: a timeout a failure */
   answer(&h);
   free(h.body);
   close(h.fd);
@@ -170,7 +183,9 @@ int main(int argc, char **argv)
   char *args[CONFIG_ARGS_MAX]; /* osmos-serve's rule: no end before an answer past the dialect's think_end */
   if (!config_argv(&c, opt(argc, argv, "--engine", engine), api.eos, api.d->think_end, args, err))
     return die(err);
-  const int port = atoi(opt(argc, argv, "--port", "8091"));
+  char dport[16];
+  snprintf(dport, sizeof dport, "%d", API_PORT);
+  const int port = atoi(opt(argc, argv, "--port", dport));
   const int lfd = listen_on(opt(argc, argv, "--host", "127.0.0.1"), port);
   if (lfd < 0)
     return die("could not listen there (--host, --port)");
@@ -178,8 +193,19 @@ int main(int argc, char **argv)
     return die(err);
   fprintf(stderr, "osmos-api: %s on %s:%d (the engine loading)\n", api.model, opt(argc, argv, "--host", "127.0.0.1"),
           port);
+  struct sigaction sa = {.sa_handler = on_stop}; /* no SA_RESTART: poll wakes */
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGTERM, &sa, NULL), sigaction(SIGINT, &sa, NULL);
   for (;;)
   {
+    if (stopping)
+    {
+      close(lfd); /* no new connections; the engine's conversations set aside and written before the end */
+      fprintf(stderr, "osmos-api: stopping: the engine's conversations set aside\n");
+      const bool clean = engine_quit(&api.engine, API_QUIT_S);
+      fprintf(stderr, "osmos-api: %s\n", clean ? "the engine ended" : "the engine killed (it did not end in time)");
+      return clean ? 0 : 1;
+    }
     struct pollfd p = {.fd = lfd, .events = POLLIN};
     if (poll(&p, 1, API_POLL_MS) > 0)
     {
@@ -192,7 +218,7 @@ int main(int argc, char **argv)
       pthread_mutex_unlock(&conns_mu);
       pthread_t t;
       if (!room)
-        http_error(fd, 503, "too many connections"), close(fd);
+        http_error(fd, 503, "too many connections"), http_linger(fd, false), close(fd);
       else if (pthread_create(&t, NULL, connection, (void *)(intptr_t)fd))
         http_error(fd, 503, "no thread for it"), close(fd), pthread_mutex_lock(&conns_mu), conns--,
             pthread_mutex_unlock(&conns_mu);

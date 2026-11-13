@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.7.1]: an audit of the runtime - the protocol's edges, the state between requests, the shared facts
+
+- **DeepSeek's answer no longer depends on what came before it.** A turn read whole and the same turn continued after
+  its earlier answer gave different answers (in 0.7.0's replay of 12 real agent turns, 4 alike): the earlier answer's
+  tokens had been decoded - a decode step computes the routed experts otherwise than a prompt step (the lane's int8
+  against mm's f16), and a small prompt step (under 64 tokens) took the decode's math too. Now every prompt step
+  takes the prompt's math at any size (`osmos_read`), and osmos-serve keeps each conversation's state at its prompt's
+  end: a later turn reads the earlier answer again as part of its prompt instead of continuing on its decoded state,
+  and the slot folder keeps prompts' states alone. The cost: a turn re-reads the previous answer (prompt speed, ~600
+  tok/s at `performance`). Qwen's decode and prompt steps were already one math - unchanged. States kept by 0.7.0
+  are not taken back (their state version raised).
+- **Answers a client can always send back.** A DeepSeek answer holding the image placeholder's text (its token, or
+  its text in plain pieces) is now refused with its completion attached (#34's path), where before it came back as a
+  200 that every later request refused as history. A Qwen tool argument of `1e999` comes back as its text, valid JSON,
+  not `Infinity`; and any number past a double's range in a request is a 400 by name - before, `1e400` in a tool's
+  schema dropped every tool silently, and in a message read as "out of memory".
+- **The stream and the whole answer agree** in two more cases cut by `max_tokens` on Qwen (the whitespace before
+  `</think>` and after it).
+- **The connection.** A request that sends nothing is closed after 10 s and a stream nobody reads after 60 s, so
+  sixteen idle connections no longer lock every client out (`/health` too). A non-streamed request whose client
+  leaves is now stopped as tokens land, not only in a half-second pause - before, it ran to its end and the next
+  request waited behind it. A refusal sent before the body was read (413, 400, the connection limit's 503) now reaches
+  the client instead of a reset. `Content-Length` is one number or a 400. Sampling's other fields (penalties,
+  `logit_bias`, `logprobs`, `top_logprobs`, `n` as a float) are refused by name as `temperature` is, their greedy
+  values taken.
+- **A stop keeps the conversations.** SIGTERM or SIGINT to osmos-api (rig's stop) now QUITs osmos-serve, which sets
+  every conversation aside and writes RAM's to the slot folder, then exits; before, the engine was killed and the
+  conversations held in RAM were lost on every restart. A conversation too short to keep no longer evicts kept ones
+  on its way to being refused.
+- **Forged structure.** A Qwen tool call's name or argument key holding `<` or a newline is refused: the template's
+  own `>` after `f<|im_end|` made a real `<|im_end|>` - a turn forged. With `preserve_thinking: false`, a user turn of
+  tool responses as text is no longer a 400.
+- **Text kept whole.** DeepSeek's user text, text parts, tool results and reasoning were cut at a `\u0000`; they are
+  rendered whole, as the reference encoder keeps them. Against the reference, also: a tool result after an empty user
+  turn is one user turn, a falsy `response_format` renders no section, a numeric tool result is its number, and the
+  image placeholder in text parts or tool content is refused as the reference refuses it.
+- **The tokenizer** merges in linear-logarithmic time: a 256 KB word took minutes (a 1 MB one, hours of a core: one
+  request could pin it), now 0.2-0.3 s - the same ids, checked against llama.cpp on 20,000 fuzzed cases a vocabulary.
+- **The runtime.** A warm start whose read fails no longer leaves its experts pinned for good (every later decode
+  refused until a reload). A failed DeepSeek step marks its sequence broken instead of leaving its n-gram history
+  past its position. A split model's first shard named otherwise than `-00001-of-NNNNN` is refused by name (a short
+  name overran a buffer). `dspark.json` dims that wrap 64 bits are refused, and the drafter checks its vectors'
+  lengths. Leaks on Qwen's create failures, a 2 GiB offset's int, `split.count`'s type.
+- **One source for shared facts.** CI now fetches Qwen's tokenizer shard and the template's renderer, so the Qwen
+  tests run there (they all skipped). The bench tools build with `gpu-build`; the KLD tools share numpy's quantile
+  (`bench_common.h`) and `kld` reads small steps as the engine does; `q4x_bench`'s prompt time ends at the prompt;
+  `dbench`'s warm-up is out of the energy windows. Python reads the ggml types from `qtype.h` (`tools/convert/qtypes.py`;
+  the assembler's copy lacked Q5_1 and Q2_0). The NPU's 128-token part is asserted to be the tables' last run. The
+  installer looks for hipcc where make runs it. Pack titles no longer carry speeds (the README's are the numbers).
+
 ## [0.7.0]: the NPU beside the GPU in long prompts
 
 - **The NPU now helps with prompts, as an opt-in.** Strix Halo's NPU takes a fixed share of a prompt step's

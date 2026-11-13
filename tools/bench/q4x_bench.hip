@@ -83,7 +83,8 @@ int main(int argc, char** argv) {
   const uint32_t last = (np - 1) % kStep;
   if (!q4x_greedy(fw, last, 1, &y, ferr))
     return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
-  const double e1 = epoch();
+  const double tp = now(), e1 = epoch(); /* the prompt's end: its time and its energy's window the same (0.7.1: the time
+                                           ran on through the step sweep) */
   if (getenv("Q4X_STEP_SWEEP")) /* a step's time by its tokens: 1 .. 8, each step rolled back */
     for (uint32_t n = 1; n <= OSMOS_MAX_BLOCK; n++) {
       const int reps = 12;
@@ -142,7 +143,7 @@ int main(int argc, char** argv) {
   }
   const double t2 = now(), e3 = epoch();
   std::printf("window prompt %.3f %.3f %u\nwindow decode %.3f %.3f %u\n", e0, e1, np, e2, e3, nd);
-  std::printf("q4x_bench: prompt %u at %.1f tok/s; decode %u at %.2f tok/s (slowest %s %.1f ms", np, np / (t1 - t0), nd,
+  std::printf("q4x_bench: prompt %u at %.1f tok/s; decode %u at %.2f tok/s (slowest %s %.1f ms", np, np / (tp - t0), nd,
               nd / (t2 - t1), drafting ? "round" : "step", worst * 1e3);
   if (drafting)
     std::printf("; %u rounds, %.0f%% of %u drafts accepted, %.2f tokens a round", rounds,

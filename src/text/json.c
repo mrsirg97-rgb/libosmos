@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -185,7 +186,11 @@ static Json *number(Cur *c)
     return free(j), fail(c, "out of memory");
   memcpy(text, s, n), text[n] = 0;
   if (flt)
+  {
     j->f = strtod(text, NULL), free(text);
+    if (isinf(j->f)) /* Python's inf, written back as Infinity: JSON no reader takes (json.h) */
+      return free(j), fail(c, "a number past a double's range");
+  }
   else if (strcmp(text, "-0") == 0) /* Python's int: no negative zero */
     j->s = (free(text), strdup("0")), j->len = 1;
   else

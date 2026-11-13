@@ -14,6 +14,10 @@
 #include "osmos/model/qtype.h"
 #include "q4x_impl.h"
 
+/* the NPU's part is the tables' 128-token run - npu_select_q4x takes that run's entries whole: one size, three names
+   (npu_pack.h, q4x_ops.h's runs, q4x_moe.hip's kPart), held together here (0.7.1) */
+_Static_assert(NPU_TOKENS == (unsigned)MM_TILE << (Q4X_TILE_RUNS - 1), "the NPU's part not the tables' last run");
+
 /* a part's NPU time by its gate / up format, against IQ3_XXS's (spikes/npu/RESEARCH.md: gate + up, then the down -
    IQ3_XXS 281 + 139 us, IQ2_S 603 + 139): the share of an IQ2_S layer scaled down, the NPU no longer on either */
 static float cost(uint32_t gate_type)

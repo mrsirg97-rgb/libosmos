@@ -56,7 +56,8 @@ void json_puts(JsonBuf *b, const char *s);
 json_parse
   RFC 8259 JSON (UTF-8 in, every escape, \u pairs joined), read as Python's json.loads reads it: an int its digits
   (any length), a number with a fraction or an exponent a double, an object's later duplicate key's value in the
-  first's place. NULL with why for anything else - NaN and Infinity too (Python reads them; JSON has none), a lone
+  first's place. NULL with why for anything else - NaN and Infinity too (Python reads them; JSON has none), a number past a double's range (Python's inf: its
+  dump Infinity), a lone
   surrogate, invalid UTF-8, nesting past JSON_MAX_DEPTH.
 
 json_free

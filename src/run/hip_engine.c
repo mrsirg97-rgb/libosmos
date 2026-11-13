@@ -123,6 +123,20 @@ void osmos_stats(const Osmos *e, OsmosStats *s)
     e->fam->stats(e->impl, s);
 }
 
+bool osmos_read(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+{
+  if (!e || !e->fam->read)
+    return osmos_batch(e, seqs, tokens, n, err);
+  if (!seqs || !tokens || !n)
+    return fail(err, "a batch of no tokens");
+  for (uint32_t i = 0; i < n; i++)
+    if (!seqs[i] || seqs[i]->e != e)
+      return fail(err, "a batch's sequence not this engine's");
+  return e->fam->read(e->impl, seqs, tokens, n, err);
+}
+
+bool osmos_reads_apart(const Osmos *e) { return e && e->fam->read; }
+
 bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {
   if (!e || !seqs || !tokens || !n)

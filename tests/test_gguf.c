@@ -246,10 +246,20 @@ static void test_split(void)
   Gguf *h = gguf_header(p1, err);
   assert(h && h->n_files == 1 && h->n_tensors == 2 && gguf_kv(h, "split.count") && !gguf_tensor(h, "c.iq1_m"));
   gguf_destroy(h);
+  /* a first shard named otherwise than -00001-of-NNNNN (NNNNN its header's count): refused by name - not its siblings'
+     names written past its own (0.7.1: "-00001-of-2" took 15 bytes into a 12-byte tail), nor another file opened */
+  for (int k = 0; k < 2; k++)
+  {
+    const char *odd = write_file(k ? "m-00001-of-2" : "m-00001-of-00003.gguf", &a);
+    char po[512];
+    snprintf(po, sizeof po, "%s", odd);
+    err[0] = 0;
+    assert(gguf_create(po, err) == NULL && strstr(err, "-00001-of-00002"));
+  }
   free(a.b);
   free(b.b);
-  printf("  split: two shards as one model; a missing shard refused (\"%s\"); the first one's header alone read\n",
-         refused);
+  printf("  split: two shards as one model; a missing shard refused (\"%s\"); the first one's header alone read; a "
+         "first shard's name not its count's refused\n", refused);
 }
 
 /* a valid file cut at every length short of whole: refused - with a reason, nothing leaked - exactly when the cut takes

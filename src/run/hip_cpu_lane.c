@@ -60,7 +60,7 @@ void fwd_cpu_destroy(Forward *f)
 
 bool fwd_cpu_takes(const Forward *f, uint32_t unit, uint32_t picks)
 {
-  if (!f->cpu || !f->lane || picks >= (uint32_t)f->g->n_experts || membrane_in_memory(f->mem, unit))
+  if (!f->cpu || !fwd_small(f, picks) || membrane_in_memory(f->mem, unit))
     return false;
   const LayerWeights *L = &f->w->layer[unit / (uint32_t)f->g->n_experts]; /* the contract's types (cpu_lane's) */
   return lane_q8_types(L->exp_gate->type, L->exp_up->type, L->exp_down->type) && L->exp_gate->type == L->exp_up->type;

@@ -152,10 +152,17 @@ void answer_flush(Answer *s)
   {
     const char *end = memmem(s->shape.p + s->sent, n, s->d->think_end, strlen(s->d->think_end));
     const size_t r = end ? (size_t)(end - (s->shape.p + s->sent)) : n;
-    delta(s, s->text.p + s->sent, r);
+    /* a trimming dialect's closed reasoning: its trailing whitespace dropped, as reply.c's message drops it */
+    const size_t trail = end && s->d->trims ? qchat_space_trail(s->shape.p + s->sent, r) : 0;
+    delta(s, s->text.p + s->sent, r - trail);
     s->phase = PHASE_CONTENT, s->sent += r, n -= r;
     const size_t skip = end ? strlen(s->d->think_end) : 0;
     s->sent += skip, n -= skip;
+    if (end && s->d->trims) /* and the content's leading whitespace (0.7.1: the flush sent it) */
+    {
+      const size_t lead = qchat_space_lead(s->shape.p + s->sent, n);
+      s->sent += lead, n -= lead;
+    }
   }
   delta(s, s->text.p + s->sent, n);
   s->sent += n;

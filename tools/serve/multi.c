@@ -58,7 +58,7 @@ static int pick_lane(const Multi *m, const Gen *g)
     const Lane *ln = &m->lane[i];
     if (ln->st != IDLE)
       continue;
-    const uint32_t r = conv_reach(&ln->c, g->ids, g->n);
+    const uint32_t r = conv_reach(&ln->c, m->sv, g->ids, g->n);
     if (r > reach)
       reach = r, best = i;
     if (lru < 0 || ln->used < m->lane[lru].used)

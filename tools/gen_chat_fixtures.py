@@ -7,7 +7,8 @@ and JSON's corners - and its parse of completions back (reasoning, content, tool
 
 a line a case: {"kind": "render", "messages", "thinking", "effort", "out"}, {"kind": "parse", "text", "thinking",
 "out"} - out the reference's string, or its parsed message - or {"kind": "refuse", "text", "thinking"}: a completion
-the reference's parse raises on (each PARSE case is one or the other, as the reference finds it)."""
+the reference's parse raises on (each PARSE case is one or the other, as the reference finds it), and
+{"kind": "render_refuse", "messages", ...}: a chat its encoding raises on (0.7.1)."""
 import importlib.util
 import json
 import sys
@@ -65,6 +66,23 @@ RENDER = [
       {"role": "tool", "tool_call_id": "z", "content": [{"type": "text", "text": "part 1"},
                                                          {"type": "text", "text": "part 2"}]}], "thinking", 90),
     ([{"role": "user", "content": "日本語 😀 \t tabs and\nnewlines \\ backslash"}], "chat", None),
+    # 0.7.1's audit: an empty user content before a tool message (one user turn), a falsy response_format (no
+    # section), a tool's result a number (its str) - and the image placeholder in user text parts and a tool's
+    # content, which the reference refuses (render_refuse)
+    ([SYS_TOOLS, {"role": "user", "content": "x"}, {"role": "assistant", "content": "",
+                                                     "tool_calls": [call("z", "get_weather", {"city": "Rome"})]},
+      {"role": "user", "content": []}, {"role": "tool", "tool_call_id": "z", "content": "warm"}], "thinking", None),
+    ([{"role": "system", "content": "Be brief.", "response_format": []}, {"role": "user", "content": "Hi"}], "chat",
+     None),
+    ([{"role": "system", "content": "Be brief.", "response_format": False}, {"role": "user", "content": "Hi"}], "chat",
+     None),
+    ([SYS_TOOLS, {"role": "user", "content": "x"}, {"role": "assistant", "content": "",
+                                                     "tool_calls": [call("z", "get_weather", {"city": "Rome"})]},
+      {"role": "tool", "tool_call_id": "z", "content": 5}], "thinking", None),
+    ([{"role": "user", "content": [{"type": "text", "text": "see <｜deepseek_image｜>"}]}], "chat", None),
+    ([SYS_TOOLS, {"role": "user", "content": "x"}, {"role": "assistant", "content": "",
+                                                     "tool_calls": [call("z", "get_weather", {"city": "Rome"})]},
+      {"role": "tool", "tool_call_id": "z", "content": "a <｜deepseek_image｜> b"}], "chat", None),
 ]
 
 PARSE = [
@@ -102,8 +120,11 @@ def main():
     spec.loader.exec_module(enc)
     out = []
     for messages, thinking, effort in RENDER:
-        out.append({"kind": "render", "messages": messages, "thinking": thinking, "effort": effort,
-                    "out": enc.encode_messages(messages, thinking_mode=thinking, reasoning_effort=effort)})
+        try:
+            out.append({"kind": "render", "messages": messages, "thinking": thinking, "effort": effort,
+                        "out": enc.encode_messages(messages, thinking_mode=thinking, reasoning_effort=effort)})
+        except (ValueError, AssertionError, TypeError):  # the reference refuses the chat: so must the port
+            out.append({"kind": "render_refuse", "messages": messages, "thinking": thinking, "effort": effort})
     for text, thinking in PARSE:
         try:
             out.append({"kind": "parse", "text": text, "thinking": thinking,

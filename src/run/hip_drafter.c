@@ -17,7 +17,11 @@
 static bool fail(char *err, const char *why) { return fwd_fail(err, why); }
 
 /* a tensor's device bytes, by name (b >= 0: "mtp.b." + name); NULL if it has none */
-static const void *dev(Drafter *d, int b, const char *name, uint32_t *type)
+static const void *dev_of(Drafter *d, int b, const char *name, uint32_t *type, uint64_t *values);
+
+static const void *dev(Drafter *d, int b, const char *name, uint32_t *type) { return dev_of(d, b, name, type, NULL); }
+
+static const void *dev_of(Drafter *d, int b, const char *name, uint32_t *type, uint64_t *values)
 {
   char full[DSPARK_NAME_MAX];
   if (b >= 0)
@@ -30,6 +34,12 @@ static const void *dev(Drafter *d, int b, const char *name, uint32_t *type)
     return NULL;
   if (type)
     *type = t->type;
+  if (values)
+  {
+    *values = 1;
+    for (uint32_t k = 0; k < t->n_dims; k++)
+      *values *= t->dims[k]; /* (dspark_index: their product checked against its bytes, not past 64 bits) */
+  }
   return p[0];
 }
 
@@ -37,9 +47,10 @@ static const void *dev(Drafter *d, int b, const char *name, uint32_t *type)
 static float *widen(Drafter *d, int b, const char *name, uint64_t n)
 {
   uint32_t type = 0;
-  const void *src = dev(d, b, name, &type);
+  uint64_t values = 0;
+  const void *src = dev_of(d, b, name, &type, &values);
   float *out = NULL;
-  if (!src || !fwd_alloc(&out, n * sizeof(float)))
+  if (!src || values != n || !fwd_alloc(&out, n * sizeof(float))) /* its n values, no fewer (0.7.1: read past it) */
     return NULL;
   const bool ok = type == 0 ? fwd_copy(out, src, n * sizeof(float)) : quant_dequant(type, src, n, out, NULL);
   if (!ok)

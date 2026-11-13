@@ -99,6 +99,31 @@ static long last_user(const Msg *ms, size_t n)
   return -1;
 }
 
+/* a value as Python's `if value:` reads it (encoding.py's tests): null, false, 0, 0.0, "" and an empty list or object
+   false (0.7.1: a falsy response_format - [], false - rendered its section) */
+static bool truthy(const Json *v)
+{
+  if (!v)
+    return false;
+  switch (v->type)
+  {
+  case JSON_NULL:
+  case JSON_FALSE:
+    return false;
+  case JSON_INT:
+    return strcmp(v->s, "0") != 0;
+  case JSON_FLOAT:
+    return v->f != 0;
+  case JSON_STRING:
+    return v->len != 0;
+  case JSON_ARRAY:
+  case JSON_OBJECT:
+    return v->n != 0;
+  default:
+    return true;
+  }
+}
+
 static void put_blocks(JsonBuf *b, const Msg *m)
 {
   for (size_t k = 0; k < m->nb; k++)
@@ -106,7 +131,10 @@ static void put_blocks(JsonBuf *b, const Msg *m)
     const Block *x = &m->blocks[k];
     json_puts(b, k ? "\n\n" : "");
     if (x->kind == BLK_TEXT)
-      json_puts(b, x->v && x->v->type == JSON_STRING ? x->v->s : "");
+    {
+      if (x->v && x->v->type == JSON_STRING) /* by its length: a NUL (\u0000) in it kept, as encoding.py keeps it */
+        json_put(b, x->v->s, x->v->len);
+    }
     else if (x->kind == BLK_OTHER)
       json_puts(b, "[Unsupported "), json_puts(b, json_str(x->v, "type") ? json_str(x->v, "type") : "None"),
           json_puts(b, "]");
@@ -116,15 +144,21 @@ static void put_blocks(JsonBuf *b, const Msg *m)
       if (x->v && x->v->type == JSON_ARRAY)
         for (size_t i = 0; i < x->v->n; i++)
         {
-          const char *t = json_str(x->v->item[i], "type"), *s = json_str(x->v->item[i], "text");
+          const char *t = json_str(x->v->item[i], "type");
+          const Json *s = json_get(x->v->item[i], "text");
           json_puts(b, i ? "\n\n" : "");
           if (t && strcmp(t, "text") == 0)
-            json_puts(b, s ? s : "");
+            json_put(b, s && s->type == JSON_STRING ? s->s : "", s && s->type == JSON_STRING ? s->len : 0);
           else
             json_puts(b, "[Unsupported "), json_puts(b, t ? t : "None"), json_puts(b, "]");
         }
       else if (x->v && x->v->type == JSON_STRING)
         json_put(b, x->v->s, x->v->len);
+      else if (x->v && (x->v->type == JSON_INT || x->v->type == JSON_FLOAT)) /* str(): Python's repr of a float, its
+                                                                                  digits of an int (0.7.1: empty) */
+        json_dump(b, x->v);
+      else if (x->v && (x->v->type == JSON_TRUE || x->v->type == JSON_FALSE))
+        json_puts(b, x->v->type == JSON_TRUE ? "True" : "False");
       json_puts(b, "</tool_result>");
     }
   }
@@ -151,7 +185,7 @@ static bool render(JsonBuf *b, const Msg *ms, size_t n, size_t i, ChatMode mode,
     json_put(b, m->content ? m->content : "", m->content ? m->clen : 0);
     if (tools && tools->type == JSON_ARRAY && tools->n && (json_puts(b, "\n\n"), !chat_tools(b, tools, err)))
       return false;
-    if (rf && rf->type != JSON_NULL && !(rf->type == JSON_OBJECT && !rf->n))
+    if (truthy(rf))
       json_puts(b, "\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n"),
           json_dump(b, rf);
   }
@@ -163,7 +197,7 @@ static bool render(JsonBuf *b, const Msg *ms, size_t n, size_t i, ChatMode mode,
   {
     const Json *tc = json_get(m->src, "tool_calls"), *wo = json_get(m->src, "wo_eos");
     if (think && (!drop || (long)i > lu))
-      json_puts(b, m->reasoning ? m->reasoning : ""), json_puts(b, CHAT_THINK_END);
+      json_put(b, m->reasoning ? m->reasoning : "", m->reasoning ? m->rlen : 0), json_puts(b, CHAT_THINK_END);
     json_put(b, m->content ? m->content : "", m->content ? m->clen : 0);
     if (tc && tc->type == JSON_ARRAY && tc->n && !chat_calls(b, tc, err))
       return false;

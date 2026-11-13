@@ -44,7 +44,8 @@ typedef struct Msg
   const char *content; /* NULL: none */
   size_t clen;
   char *joined; /* (owned: a list content's text parts joined) */
-  const char *reasoning;
+  const char *reasoning; /* NULL: none */
+  size_t rlen;
   Block *blocks;
   size_t nb, cap;
 } Msg;

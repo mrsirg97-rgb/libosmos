@@ -47,6 +47,12 @@ bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FO
   return true;
 }
 
+void forward_reading(Forward *f, bool on)
+{
+  if (f)
+    f->reading = on;
+}
+
 static int cmp_row(const void *a, const void *b)
 {
   const int32_t *x = a, *y = b; /* (expert, pair): by expert, then pair */

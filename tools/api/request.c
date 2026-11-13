@@ -91,8 +91,22 @@ bool request_read(const Json *body, const Dialect *d, Request *r, char err[API_E
   const Json *stop = json_get(body, "stop"), *n = json_get(body, "n"), *choice = json_get(body, "tool_choice");
   if (stop && stop->type != JSON_NULL && !(stop->type == JSON_ARRAY && !stop->n))
     return request_fail(err, "stop: stop strings are not built (the model's own end of turn ends it)");
-  if (n && n->type == JSON_INT && strcmp(n->s, "1"))
+  if (n && n->type != JSON_NULL && sampled(n, 1)) /* (0.7.1: 2.0, a float, was taken as one) */
     return request_fail(err, "n: one choice a request");
+  /* sampling's other fields: their greedy values taken (a client's defaults), any other refused by name (0.7.1:
+     ignored, against this file's rule) */
+  const char *const zero[] = {"presence_penalty", "frequency_penalty", "top_logprobs"};
+  for (size_t k = 0; k < sizeof zero / sizeof *zero; k++)
+    if (sampled(json_get(body, zero[k]), 0))
+      return snprintf(err, API_ERR, "%s: osmos decodes greedily - penalties and log-probabilities are not built",
+                      zero[k]), false;
+  if (sampled(json_get(body, "repetition_penalty"), 1))
+    return request_fail(err, "repetition_penalty: osmos decodes greedily - penalties are not built");
+  const Json *bias = json_get(body, "logit_bias"), *lp = json_get(body, "logprobs");
+  if (bias && bias->type != JSON_NULL && !(bias->type == JSON_OBJECT && !bias->n))
+    return request_fail(err, "logit_bias: osmos decodes greedily - a bias is not built");
+  if (lp && lp->type != JSON_NULL && lp->type != JSON_FALSE)
+    return request_fail(err, "logprobs: log-probabilities are not built");
   if (choice && !(choice->type == JSON_STRING && !strcmp(choice->s, "auto")) && choice->type != JSON_NULL)
     return request_fail(err, "tool_choice: auto only (a forced or a disabled call is not built)");
   const Json *th = json_get(body, "thinking"), *eff = request_effort(body);

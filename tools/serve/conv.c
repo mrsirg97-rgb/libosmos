@@ -106,15 +106,53 @@ bool conv_create(Conv *c, const Server *sv)
 void conv_destroy(Conv *c)
 {
   oseq_destroy(c->s);
-  free(c->held.v);
+  free(c->held.v), free(c->snap);
   memset(c, 0, sizeof *c);
 }
 
 bool conv_restart(Conv *c, const Server *sv)
 {
   oseq_destroy(c->s);
-  c->held.n = 0;
+  c->held.n = 0, c->snap_n = 0; /* (the snapshot's memory kept for the next) */
   return (c->s = oseq_create(sv->e, c->err)) != NULL;
+}
+
+/* the state at the prompt's end kept (a family that reads apart): what a later turn starts from */
+static void snapshot(Conv *c, const Server *sv)
+{
+  c->snap_n = 0;
+  if (!osmos_reads_apart(sv->e))
+    return;
+  const uint64_t bytes = oseq_state_bytes(c->s);
+  if (bytes > c->snap_cap)
+  {
+    void *p = realloc(c->snap, bytes);
+    if (!p)
+    { /* none: the next turn continues on the decoded state (back_to_prompt) - its bits then not a whole read's */
+      out("NOTE a conversation's prompt state (%.2f GiB) not kept: no memory for it\n", bytes / (double)(1ull << 30));
+      return;
+    }
+    c->snap = p, c->snap_cap = bytes;
+  }
+  if (oseq_save(c->s, c->snap, bytes, c->err))
+    c->snap_bytes = bytes, c->snap_n = c->held.n;
+}
+
+/* a conversation past its prompt's end on decoded tokens (a family that reads apart): back to the state its prompt
+   left - the snapshot. with none (its memory refused at the prompt's end) the decoded state kept, as 0.7.0 kept it:
+   that turn's answer then a continued one's bits, not a whole read's - never the whole conversation read again for
+   it (a 128K prompt's minutes). a load that fails: a fresh sequence (the state on the GPU no longer known) */
+static bool back_to_prompt(Conv *c, const Server *sv)
+{
+  if (!osmos_reads_apart(sv->e) || c->held.n <= c->snap_n || !c->snap_n)
+    return true;
+  if (oseq_load(c->s, c->snap, c->snap_bytes, c->err))
+  {
+    c->held.n = c->snap_n;
+    return true;
+  }
+  out("NOTE a conversation's prompt state not loaded back (%s): read again from its start\n", c->err);
+  return conv_restart(c, sv);
 }
 
 /* after a request's failure (its ERR written): a new sequence for the conversation, or - the GPU's state lost (a
@@ -146,8 +184,8 @@ static bool conv_load(void *ctx, uint64_t bytes, StateSource src, void *src_ctx)
    whole in RAM past the room the operator's 8 GiB leaves */
 void conv_set_aside(Conv *c, const Server *sv)
 {
-  if (!sv->slots || !c->held.n)
-    return;
+  if (!sv->slots || !c->held.n || !back_to_prompt(c, sv) || !c->held.n || !slots_keeps(sv->slots, c->held.n))
+    return; /* (kept as its prompt left it: a decoded answer's state never kept) */ /* not kept: nothing saved, no room made (0.7.1: kept ones moved for it, then it was refused) */
   const uint64_t bytes = oseq_state_bytes(c->s);
   char serr[SLOTS_ERR] = "";
   bool kept = false, ok;
@@ -172,14 +210,18 @@ static uint32_t common(const Ids *a, const int32_t *p, uint32_t n)
   return k;
 }
 
-uint32_t conv_reach(const Conv *c, const int32_t *p, uint32_t n)
+uint32_t conv_reach(const Conv *c, const Server *sv, const int32_t *p, uint32_t n)
 {
-  const uint32_t k = common(&c->held, p, n - 1); /* (one token left to read: its logits the answer's first) */
-  return k == c->held.n || c->held.n - k <= oseq_reach(c->s) ? k : 0;
+  /* a family that reads apart reuses no decoded token: its reach the prompt's end at most */
+  const Ids held = {c->held.v, osmos_reads_apart(sv->e) && c->held.n > c->snap_n ? c->snap_n : c->held.n, 0};
+  const uint32_t k = common(&held, p, n - 1); /* (one token left to read: its logits the answer's first) */
+  return k == held.n || held.n - k <= oseq_reach(c->s) ? k : 0;
 }
 
 bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
 {
+  if (!back_to_prompt(c, sv)) /* a decoded answer read again, never continued on (0.7.1) */
+    return false;
   const uint32_t k = common(&c->held, p, n - 1);
   if (k == c->held.n && k)
     return true;
@@ -218,11 +260,13 @@ bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t
   for (uint32_t i = 0; i < k; i++)
     seqs[i] = c->s;
   const uint32_t at = c->held.n;
-  const bool ok = osmos_batch(sv->e, seqs, p + at, k, c->err);
+  const bool ok = osmos_read(sv->e, seqs, p + at, k, c->err); /* a prompt's: its large steps' math at any size */
   free(seqs);
   for (uint32_t i = 0; ok && i < k; i++)
     if (!ids_push(&c->held, p[at + i]))
       return snprintf(c->err, sizeof c->err, "out of memory"), false;
+  if (ok && at + k == n)
+    snapshot(c, sv); /* the prompt's end: the state a later turn starts from */
   /* the piece's part of the prompt's last window, from its own step (serve.h) */
   const uint32_t lo = n > sv->window && n - sv->window > at ? n - sv->window : at;
   return ok && (!seed || lo >= at + k || oseq_seed(c->s, (int32_t)lo, (int32_t)(at + k), c->err));

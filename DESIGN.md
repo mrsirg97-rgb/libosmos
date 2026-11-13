@@ -1717,7 +1717,8 @@ caller's, no server. this ports both, as one binary that speaks maya's line prot
   routed experts are mm's (WMMA, f16 inputs), where decoded they were the lane's (int8, forward_lane). each is
   deterministic and batch-invariant within its kind (a decode alone or verified; a prompt however it is split - the
   model test's fingerprints); not across them. maya's restore and re-read differ too (its PR: chunk boundaries). so the
-  slot test's reference is the conversation never set aside, not a re-read.
+  slot test's reference is the conversation never set aside, not a re-read. (0.7.1: served turns no longer
+  continue on a decoded answer - osmos_read and the prompt's-end snapshot; "### 0.7.1".)
 
 **done (2026-11-03): step 3.** `osmos-serve --parallel N` (tools/serve/multi.c on libevt; the server split
 into serve.h / conv.c - a conversation, both modes' - / single.c / multi.c / main.c, each under 300 lines): a reader
@@ -3538,6 +3539,44 @@ the tools: tools/convert/ds4_experts_mxfp4.py and ds4_ref_dense.py (the overlay 
 shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token), kld.hip, kld_compare.py,
 kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
 out), local only.
+
+### 0.7.1: an audit of the runtime (2026-11-13)
+
+**how.** five reviews of the code, a layer each (osmos-api; the text layer; serve, slots and the protocol; memory and
+the runtime; facts kept in two places), every finding a concrete input and reproduced before it was fixed - each fix
+its test first, the test failing on 0.7.0. beside them, the real server driven with replayed rig sessions
+(`~/bench/audit071/drive.py`, local: the sessions are the operator's): a point a session cut at one of its assistant
+turns, the tools rebuilt from the calls it made, and every check an invariance - the same request twice, streamed
+against whole, a client cut mid-stream then the request again, max_tokens 23 a prefix of the whole, two at once each
+its solo answer, and the next turn on the model's own answer warm, after a restart on the same slot folder, on an
+empty one, and past the RAM's cap (evicted, taken back).
+
+**what the replay showed.** Qwen: every check, every path, the same bits (12 points: the turn reusing 2,116 of 2,314
+tokens, the same turn taken back from the folder, the same turn read from token 0 - one answer). DeepSeek: every
+check within a path; across paths the documented split (0.5.x, "a prompt step and a decode step are two
+computations") - a turn read whole answers alike every time (fresh = evicted, 12 of 12), a turn continued after its
+earlier answer was decoded answers otherwise (warm = fresh on 4 of 12, restored on 5). each path deterministic; which
+one a request takes depended on what came before it.
+
+**the fix (the operator's choice of three: document it, make decode a prompt's math, or read a decoded answer
+again).** two halves. (1) a prompt's steps take the large steps' math at any size: osmos_read sets the forward's
+`reading` (fwd_small: the lane's int8 experts only for a decode or a verify under n_experts / n_used tokens) - a
+short read after a reused prefix had taken the lane's, so a prompt read in pieces from a reused point was not the
+bits of one read whole. test_batch_gpu's two kinds stand: small steps (1-16) alike among themselves, large ones
+alike among themselves, never across. (2) osmos-serve keeps each conversation's state at its prompt's end (conv.c's
+snapshot, ~2.5 KB a DeepSeek token, in RAM); a later turn goes back to it and reads the earlier answer again as part
+of its prompt, never continues on its decoded state; the slots keep prompt states alone (SEQ_STATE_VERSION 2: 1's
+held decoded answers, not taken back). its cost a turn: the earlier answer's text and calls read again (the template
+drops earlier reasoning without tools) - 22 tokens on each of the replay's turns, cached 14,440 of 14,650 against
+14,462. a snapshot refused for memory: that turn continues on its decoded state (a NOTE) - never the whole
+conversation read again. after: warm = restored = fresh = evicted on 12 of 12. Qwen: no read hook (its small and
+large steps one math), unchanged.
+
+**the classes found** (CHANGELOG.md has each): an answer the server gives that a client can never send back (the
+image placeholder; `Infinity`), refusals that reach a client as a reset, a client gone that is never seen, state lost
+on a stop, structure a client's string can forge (Qwen's `>` after a name), text cut at a NUL, a quadratic merge, a
+failed warm start that held its pins, a heap overrun on a short shard name, and facts kept twice that had drifted
+(CI never ran the Qwen tests; a Python type table short two types; two quantiles; a timer through a sweep).
 
 ### 0.7.0: the NPU beside the GPU in a prompt's routed experts (2026-11-13, performance)
 

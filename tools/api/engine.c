@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "api.h"
@@ -239,4 +240,24 @@ void engine_release(Engine *e, Run *r)
   free(r->tok);
   pthread_mutex_destroy(&r->mu), pthread_cond_destroy(&r->cv);
   free(r);
+}
+
+/* the end: QUIT sent (osmos-serve sets every conversation aside and writes its RAM's to their folder) and the engine's
+   exit awaited, wait_s at most - then killed. true when it exited by itself (0.7.1: a stop killed it, by PDEATHSIG) */
+bool engine_quit(Engine *e, int wait_s)
+{
+  pthread_mutex_lock(&e->wmu);
+  const bool sent = !e->dead && write(e->in_fd, "QUIT\n", 5) == 5;
+  pthread_mutex_unlock(&e->wmu);
+  close(e->in_fd); /* its stdin's end: a QUIT too, should the line not have gone */
+  for (int i = 0; sent && i < wait_s * 10; i++)
+  {
+    int st;
+    if (waitpid(e->pid, &st, WNOHANG) == e->pid)
+      return true;
+    usleep(100 * 1000);
+  }
+  kill(e->pid, SIGKILL);
+  waitpid(e->pid, NULL, 0);
+  return false;
 }
