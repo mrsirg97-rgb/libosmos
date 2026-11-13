@@ -3539,6 +3539,47 @@ shard rebuilt byte for byte), tools/bench/wiki10k.py (the text, token for token)
 kld_tokens.py. the hold-out's sessions are the operator's: built from his rig sessions (the 78 calib_rig.py took left
 out), local only.
 
+### in progress: Inkling-2-Small, the third family (branch nvfp4, 2026-11-12)
+
+thinkingmachines/Inkling-2-Small (Apache 2.0, public 2026-11-12): 594B total, 17B active, 48 layers, every one MoE
+(384 experts, 8 a token, no shared expert), 40 sliding (a window of 1,024) and 8 full (5, 11, .. 47), GQA 48 / 8 of
+128, no RoPE. trained in NVFP4; its experts shipped NVFP4 (layers 0-39) and MXFP8 (40-47), everything else BF16.
+the aim: a pack of evo-A's shape - friendly expert types (IQ1_M gate / up, Q2_0 / Q2_K down; 40-47 more bits),
+GPTQ'd dense at Q6_K / Q5_K - ~2.0 bpw, 140-150 GB, scored against the reference as 0.6.6 scores DeepSeek's.
+
+**the reference** (tools/convert/ink2_ref_gguf.py): the checkpoint as a GGUF, no value changed - 1,344 tensors, 393
+GB in 9 shards. the experts NVFP4 (ggml 40) with a scale an expert beside them (amax / 2688: each expert's decoded max
+its amax), or MXFP8; gate and up split from w13 (gate rows even); keys llama.cpp's way under inkling2.* (geo.c). what
+the code implements is asserted, not written (the sliding layers' heads the full ones', no q / o bias, the value norm
+unweighted, the router's bias for the pick alone). **the oracle** (ink2_oracle.py): transformers' own inkling2 layers
+(its main from 109a7d19bf), a layer at a time, only the experts decoded by us - against transformers' whole forward on
+a small random Inkling2 (test_oracle.py): max |dlogp| 8.6e-6, top-1 100%.
+
+**done** (host-tested; the kernels' first build is the Halo's):
+- the types: NVFP4 decode / mv / mv_tok / mm (decode<kNVFP4>: ggml's - E2M1 doubled under half the UE4M3 scale;
+  exact in f16), MXFP8's mv / mv_tok / mm (Inkling's values exact in f16: checked an expert at conversion). tuning
+  not measured (Q2_0's; MXFP4's).
+- osmos/ink2/weights.h: the geometry and every tensor's role (src/ink2/geo.c, weights.c), an NVFP4 expert tensor's
+  scale claimed by its type; test_ink2_weights on the small reference (OSMOS_TEST_INK2).
+
+**the forward, op by op** (transformers' modeling_inkling2.py the definition; what exists, what is new):
+
+| op | osmos | new |
+| --- | --- | --- |
+| dense matrices | mv / mm | - |
+| experts | q4x_expert_bounds / tiles, mm_group | NVFP4's scale: gate and up's outputs by scale[e] before the activation, down's weight w x scale[e] in the sum |
+| embedding + its norm; v's norm; attn_res's norm | ops_embed; ops_rms (no weight: unweighted) | - |
+| router: sigmoid, the bias for the pick alone, normalized x 8 | ops_router (sqrt softplus) | its sigmoid |
+| softcapped SwiGLU: 4 tanh(g / 4) sigmoid(g) 25 tanh(u / 25) | q4x_swiglu | a kernel |
+| attention: GQA 6:1, sigmoid gate on its output | q4x_attn (the gate, GQA) | the relative bias (a head's 16 states . proj[d] at distance d < extent), a sink logit a head a token, the window, q's scaled L2 clip and k's, the full layers' log scaling of q and r (1 + 0.1 ln max(1, (pos + 1) / 128000)) |
+| short convs (k, v, after the attention, after the MoE) | q4x_conv (silu, no residual) | no silu, (conv + x) / sqrt(taps + 1); the full layers' k / v conv dynamic - taps static + a projection a KV head a token, / sqrt(2 taps + 1) |
+| attn_res: a learned query over the block states (normalized: keys and values) | - | a kernel (<= 9 states a token; a full layer's 3 queries) |
+| logits: 30 tanh(l / 30), the 200,058 real tokens | - | small |
+
+a sequence's state: the KV cache (the sliding layers' last 1,024; the full layers' all), four convs' last 3 inputs a
+layer, nothing of attn_res's (a token's block states its own). the drafter (mtp.*: DSpark, 5 layers, 7 tokens a step)
+after the main model.
+
 ### 0.6.9: a long prompt's steps in memory the expert cache lends (2026-11-12, low-power)
 
 **why large steps.** a prompt step's routed experts are held for the step; each is read and decoded once for all of

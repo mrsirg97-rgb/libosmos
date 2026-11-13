@@ -226,6 +226,44 @@ def check(src, L, rows=8):
                       "expert0_amax": amax, "expert0_decoded_max": dec}))
 
 
+def meta(w, tc):
+    """the text model's shape as llama.cpp-style keys (src/ink2/geo.c reads them). what this build implements is
+    asserted, not written: the sliding layers' heads the full ones', no q / o bias, no pre-affine norms, the value norm
+    unweighted, attn_res's values normalized, the router's bias for selection, no shared experts"""
+    same = [("swa_num_attention_heads", "num_attention_heads"), ("swa_num_key_value_heads", "num_key_value_heads"),
+            ("swa_head_dim", "head_dim")]
+    for x, y in same:
+        assert tc[x] == tc[y], f"{x} {tc[x]} != {y} {tc[y]}: the sliding layers' attention another shape"
+    want = {"q_bias": False, "o_bias": False, "pre_norm_pre_affine": False, "final_norm_pre_affine": False,
+            "use_value_norm_no_gamma": True, "attn_res_normalize_values": True, "use_gate_bias": True,
+            "n_shared_experts": 0}
+    for k, v in want.items():
+        assert tc.get(k, v) == v, f"{k} = {tc.get(k)}: not what the code implements ({v})"
+    A, L = "inkling2", tc["num_hidden_layers"]
+    local = tc.get("local_layer_ids") or [i for i in range(L) if (i + 1) % 6 != 0]
+    u32 = {"block_count": L, "embedding_length": tc["hidden_size"], "context_length": tc["model_max_length"],
+           "vocab_size": tc["unpadded_vocab_size"], "attention.head_count": tc["num_attention_heads"],
+           "attention.head_count_kv": tc["num_key_value_heads"], "attention.key_length": tc["head_dim"],
+           "attention.value_length": tc["head_dim"], "attention.sliding_window": tc["sliding_window_size"],
+           "attention.relative_dim": tc["d_rel"], "attention.relative_extent": tc["rel_extent"],
+           "attention.log_scaling_floor": tc["log_scaling_n_floor"], "conv_kernel": tc["sconv_kernel_size"],
+           "attn_res.block_size": tc["n_layers_per_attn_res_block"], "expert_count": tc["n_routed_experts"],
+           "expert_used_count": tc["num_experts_per_tok"], "expert_feed_forward_length": tc["intermediate_size"],
+           "expert_gating_func": 2}   # (2: sigmoid, llama.cpp's LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID)
+    f32 = {"attention.layer_norm_rms_epsilon": tc["rms_norm_eps"], "attention.log_scaling_alpha": tc["log_scaling_alpha"],
+           "attention.q_clip": tc["qk_l2_clip_threshold"], "attention.k_clip": tc["qk_l2_clip_threshold"],
+           "attention.relative_clip": tc["rel_l2_clip_threshold"], "expert_weights_scale": tc["route_scale"],
+           "expert_gate_softcap": tc["mlp_gate_softcap"], "expert_up_softcap": tc["mlp_up_softcap"],
+           "final_logit_softcapping": tc["final_logit_softcapping"]}
+    for k, v in u32.items():
+        w.add_uint32(f"{A}.{k}", int(v))
+    for k, v in f32.items():
+        w.add_float32(f"{A}.{k}", float(v))
+    w.add_bool(f"{A}.expert_weights_norm", True)
+    w.add_array(f"{A}.attention.sliding_layers", [int(x) for x in local])
+    w.add_string(f"{A}.text_config.json", json.dumps(tc))   # (provenance: the checkpoint's own config, whole)
+
+
 def main():
     src = Src(a.src)
     if a.check:
@@ -248,17 +286,7 @@ def main():
     w = gguf.GGUFWriter(a.out + ".gguf" if a.out else None, "inkling2", split_max_size=int(a.split_gb * 1e9))
     w.add_name("Inkling-2-Small (reference: the original weights)")
     w.add_string("general.quantized_by", "osmos ink2_ref_gguf.py: no value changed")
-    for kk, v in tc.items():   # (the text config whole, under inkling2.*)
-        if isinstance(v, bool):
-            w.add_bool(f"inkling2.{kk}", v)
-        elif isinstance(v, int):
-            w.add_int64(f"inkling2.{kk}", v)
-        elif isinstance(v, float):
-            w.add_float64(f"inkling2.{kk}", v)
-        elif isinstance(v, list) and all(isinstance(x, int) for x in v):
-            w.add_array(f"inkling2.{kk}", v)
-        elif isinstance(v, (dict, list, str)) and v is not None:
-            w.add_string(f"inkling2.{kk}.json", json.dumps(v))
+    meta(w, tc)
     w.add_string("inkling2.mtp_config.json", json.dumps(src.cfg.get("mtp_config", {})))
     for key, f in (("tokenizer.huggingface.json", "tokenizer.json"), ("tokenizer.chat_template", "chat_template.jinja")):
         if os.path.exists(os.path.join(a.src, f)):
