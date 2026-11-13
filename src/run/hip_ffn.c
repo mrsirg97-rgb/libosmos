@@ -279,6 +279,9 @@ bool fwd_moe(Forward *f, int l, char *err)
      then expert, then part: group()'s runs of the same column tiles contiguous */
   int32_t cnt_j[OPS_MAX_EXPERTS];
   memcpy(cnt_j, cnt, nd * sizeof *cnt);
+  /* 0.7.0: the NPU's parts (forward_npu): an expert's first nq[j] x NPU_TOKENS rows' gate and up its, the rest's
+     the GPU's in entries of their own (gate and up's; the down's every row as before) */
+  uint32_t nq[OPS_MAX_EXPERTS], parts = fwd_npu_layer(f, l, P) ? fwd_npu_pick(f, P, cnt_j, nd, nq) : 0;
   uint64_t key[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS]; /* part's count, expert, part */
   for (uint32_t j = 0, e = 0; j < nd; j++)
     for (uint32_t q = 0; q * MM_MAX_TOKENS < (uint32_t)cnt_j[j]; q++, e++)
@@ -287,12 +290,14 @@ bool fwd_moe(Forward *f, int l, char *err)
       key[e] = (uint64_t)(left < MM_MAX_TOKENS ? left : MM_MAX_TOKENS) << 40 | (uint64_t)j << 16 | q;
     }
   qsort(key, ne, sizeof *key, cmp_u64);
+  const void *ex_g[OPS_MAX_EXPERTS], *ex_u[OPS_MAX_EXPERTS];
   for (uint32_t p = 0; ok && p < ne; p++)
   {
     const uint32_t j = (uint32_t)(key[p] >> 16 & 0xFFFFFF), q = (uint32_t)(key[p] & 0xFFFF);
     const uint32_t s0 = slot0[j] + q * MM_MAX_TOKENS, r0 = base[j] + q * MM_MAX_TOKENS;
     const void *ex[POOL_PARTS];
     ok = membrane_wait(f->mem, unit_of[j], ex, err);
+    ex_g[j] = ex[0], ex_u[j] = ex[1];
     tab[p] = ex[0], tab[ne + p] = ex[1], tab[2 * ne + p] = ex[2], cnt[p] = (int32_t)(key[p] >> 40);
     xg[p] = s0 * D, yg[p] = r0 * FF, xd[p] = s0 * FF, yd[p] = r0 * D;
   }
@@ -305,10 +310,41 @@ bool fwd_moe(Forward *f, int l, char *err)
     for (uint32_t k = 0; k < K; k++)
       order[i * K + k] = ord[k][1];
   }
+  /* the gate and up's entries: the down's, or with NPU parts their rows past them (as the down's, sorted by count) */
+  const void **gtab = dtab;
+  int32_t *gcnt = cnt, *dgcnt = dcnt;
+  uint32_t ng = ne, *dgx = dxg, *dgy = dyg;
+  if (ok && parts)
+  {
+    uint64_t gkey[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS];
+    ng = 0;
+    for (uint32_t j = 0; j < nd; j++)
+      for (uint32_t q = 0, from = nq[j] * NPU_TOKENS; from + q * MM_MAX_TOKENS < (uint32_t)cnt_j[j]; q++)
+      {
+        const uint32_t left = (uint32_t)cnt_j[j] - from - q * MM_MAX_TOKENS;
+        gkey[ng++] = (uint64_t)(left < MM_MAX_TOKENS ? left : MM_MAX_TOKENS) << 40 | (uint64_t)j << 16 | q;
+      }
+    qsort(gkey, ng, sizeof *gkey, cmp_u64);
+    const void **gt = carve(&c, 2 * (ng ? ng : 1) * sizeof *gt, (void **)&gtab);
+    uint32_t *gx, *gy;
+    gcnt = carve(&c, (ng ? ng : 1) * 4, (void **)&dgcnt);
+    gx = carve(&c, (ng ? ng : 1) * 4, (void **)&dgx), gy = carve(&c, (ng ? ng : 1) * 4, (void **)&dgy);
+    for (uint32_t p = 0; p < ng; p++)
+    {
+      const uint32_t j = (uint32_t)(gkey[p] >> 16 & 0xFFFFFF), q = (uint32_t)(gkey[p] & 0xFFFF);
+      const uint32_t at = nq[j] * NPU_TOKENS + q * MM_MAX_TOKENS;
+      gt[p] = ex_g[j], gt[ng + p] = ex_u[j], gcnt[p] = (int32_t)(gkey[p] >> 40);
+      gx[p] = (slot0[j] + at) * D, gy[p] = (base[j] + at) * FF;
+    }
+    ok = fwd_npu_pack(f, parts, nq, nd, base, slot0, gidx, ex_g, ex_u) ||
+         fwd_fail(err, "the NPU's parts (their packing)");
+  }
   ok = ok && fwd_put_async(b->up, f->r_up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
        mm_x16_rows(b->xf, D, dgidx, slots, D, b->xe16, b->overflow, NULL) &&
-       group(L->exp_gate->type, dtab, cnt, dcnt, ne, FF, D, b->xe16, dxg, b->ga, dyg, FF) &&
-       group(L->exp_up->type, dtab + ne, cnt, dcnt, ne, FF, D, b->xe16, dxg, b->upr, dyg, FF) &&
+       (!parts || hipEventRecord(f->npu_packed, NULL) == hipSuccess) &&
+       group(L->exp_gate->type, gtab, gcnt, dgcnt, ng, FF, D, b->xe16, dgx, b->ga, dgy, FF) &&
+       group(L->exp_up->type, gtab + ng, gcnt, dgcnt, ng, FF, D, b->xe16, dgx, b->upr, dgy, FF) &&
+       (!parts || (fwd_npu_run(f, parts, f->npu_packed, err) && fwd_npu_unpack(f, parts))) &&
        ops_swiglu(b->ga, b->upr, FF, g->clamp_exp[l], b->rwp, P, b->hh, NULL) &&
        mm_x16_rows(b->hh, FF, dhidx, slots, FF, b->xe16, b->overflow, NULL) &&
        group(L->exp_down->type, dtab + 2 * ne, cnt, dcnt, ne, D, FF, b->xe16, dxd, b->ye, dyd, D) &&

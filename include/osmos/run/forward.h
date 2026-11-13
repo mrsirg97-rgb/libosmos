@@ -58,6 +58,8 @@ uint64_t seq_state_bytes(const Seq *s);
 bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR]);
 bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[FORWARD_ERR]);
 bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FORWARD_ERR]);
+bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]);
+void forward_npu_stats(const Forward *f, uint64_t *layers, uint64_t *parts, double *wait_us);
 
 bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
@@ -182,6 +184,14 @@ seq_state_bytes / seq_save_to / seq_load_from
   last - the rows go to the GPU as they come) - and the sequence then reset to position 0, never left part one
   conversation and part another. the format: little-endian, a header (magic, version,
   identity, the fields above), the rows, a trailing 64-bit FNV-1a of everything before it.
+
+forward_npu
+  0.7.0: the NPU (npu.h; built with NPU=1) beside the GPU in a prompt step's routed experts - dir its kernel's
+  xclbin and instruction stream; share the part of an eligible layer's pairs (gate and up IQ2_XXS) it takes, in whole
+  parts of 128 tokens of the layer's most-picked experts, chosen from the routing alone. its sums are not the GPU's
+  (bfp16 inputs, f32 sums): on, another forward_identity; the same prompt the same bits. false with why: not built, no
+  NPU, another model's shape. forward_npu_stats: its layers, launches and the host's time waiting on them so far
+  (zeros when off).
 
 forward_lane
   a decode's mode: a step that picks fewer experts than a layer has (a decode's, a verify's) takes its routed experts

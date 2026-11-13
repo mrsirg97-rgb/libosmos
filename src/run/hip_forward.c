@@ -704,6 +704,7 @@ void forward_destroy(Forward *f)
   free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0);
   free(f->picks), free(f->units);
   fwd_cpu_destroy(f);
+  fwd_npu_destroy(f);
   hipHostFree(f->lane_up);
   hipFree(f->lane_x), hipFree(f->lane_w), hipFree(f->lane_q), hipFree(f->lane_qd),
       hipFree(f->lane_xq), hipFree(f->lane_xqd);

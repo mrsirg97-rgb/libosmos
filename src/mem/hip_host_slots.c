@@ -79,6 +79,9 @@ static void *take(void *at, uint64_t bytes, void *ctx) { return arena_take(((Hos
 
 Slots host_slots(HostSlots *h) { return (Slots){alloc, release, h, tail, take}; }
 uint64_t host_slots_bytes(const HostSlots *h) { return h ? h->bytes : 0; }
+/* the pages' first byte, and the tail's bytes (the last of them; lent and given back: host_slots_drop_tail) */
+void *host_slots_base(const HostSlots *h) { return h ? h->base : NULL; }
+uint64_t host_slots_tail(const HostSlots *h) { return h ? h->tail : 0; }
 
 #ifndef MADV_POPULATE_WRITE
 #define MADV_POPULATE_WRITE 23

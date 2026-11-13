@@ -13,6 +13,8 @@ bool host_slots_keep_tail(HostSlots *h);
 void host_slots_destroy(HostSlots *h);
 Slots host_slots(HostSlots *h);
 uint64_t host_slots_bytes(const HostSlots *h);
+void *host_slots_base(const HostSlots *h);
+uint64_t host_slots_tail(const HostSlots *h);
 
 #endif
 
@@ -40,6 +42,10 @@ host_slots
 
 host_slots_bytes
   the arena's size.
+
+host_slots_base / host_slots_tail
+  the arena's first byte (host and GPU address alike: registered, mapped), and its tail's bytes - the NPU's regions
+  (npu_region): the pages before the tail always registered; the tail's only while kept.
 
 host_slots_drop_tail / host_slots_keep_tail
   0.6.9 (DESIGN.md, "0.6.9"): the tail's pages given back to the system while a long step's buffers take their place
