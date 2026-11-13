@@ -59,7 +59,8 @@ bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
 bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[FORWARD_ERR]);
 bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FORWARD_ERR]);
 bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]);
-void forward_npu_stats(const Forward *f, uint64_t *calls, uint64_t *parts, double *wait_us);
+void forward_npu_stats(const Forward *f, uint64_t *calls, uint64_t *parts, double *wait_us, double *gpu_idle_ms,
+                       uint64_t *gpu_outlasted);
 
 bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
@@ -192,7 +193,8 @@ forward_npu
   (bfp16 inputs, f32 sums): on, another forward_identity; the same prompt the same bits. false with why: not built, no
   NPU, another model's shape. a layer's down goes to the NPU too where it has the down's format's kernel.
   forward_npu_stats: its calls (a layer's gate + up or down each), launches and the host's time waiting on them so
-  far (zeros when off).
+  far; the GPU's time idle waiting for the NPU (all but the last call's), and the calls the GPU's own rows outlasted
+  the NPU's (zeros when off).
 
 forward_lane
   a decode's mode: a step that picks fewer experts than a layer has (a decode's, a verify's) takes its routed experts

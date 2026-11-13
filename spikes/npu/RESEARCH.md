@@ -347,3 +347,24 @@ IQ2_S's 10 left, and IQ2_XS's two gate/up).
 fused_iq2xs.cc: as IQ2_XXS's v6 - the grid as bf16 (512 rows, 8 KB), the 7-bit sign fields (bits 9, 25 of a group's
 two words a row) to sign bytes by parity in vectors, a group's two scales two vectors; right on its first build.
 fused_qwen.cc takes ROWSTRIDE / WHOLEK (its per-format BLK). gate/up 40 of 40 layers, down 40 of 40.
+
+## the engine's first A/B (2026-11-12, low-power, DeepSeek UD-IQ1_M, an 8K prompt + 32, 106 GiB; spikes/npu/bench)
+forward_npu at share 0.15 runs end to end: 80 calls a step (gate + up and down in all 40 layers), 3,002 parts, the
+host waiting ~3.4-3.8 s on the NPU; the same answer every NPU run (stream b7ae38986f422c97), the GPU's its own
+(7c3658b65fae8e5e; at 0.05 the NPU's sums move no token: the GPU's hash). the GPU idle on the NPU 60-130 ms a step -
+its own rows outlast the NPU's in ~60-70 of 80 calls: the orchestration is not what costs.
+prompt tok/s, each run its own process: GPU alone 553 555 556 556 553 558 | 498 (a sysfs sampler) 420 (rocprofv3) 487;
+NPU 0.15: 552 532 552 | 437 409 432 (sampler) 458 (rocprofv3) 432. both bimodal - ~555 or ~430-490 - the slow mode
+in both (the NPU's more often: 5 of 8, the GPU's 3 of 9). no gain to measure at this noise.
+**the noise** (rocprofv3, a slow GPU run against a fast NPU run): attention and hyper-connection kernels the NPU never
+touches swing a second between runs - scores_kernel 1.40 / 0.92 s, hc_post 0.75 / 0.36, index_score 0.26 / 0.56;
+the lent step taken in every run (no split). the NPU's own effect in the trace: the routed experts' matmuls -1.1 s
+(group -0.56, group_gemm -0.28, gemm -0.31), unpack +0.22 s (its reads in sub-tile order, uncoalesced), pack +0.04.
+**the GPU beside a busy NPU** (contend.sh: the gate + up kernel looped through a GPU-alone prompt, 90 GiB, twice
+each, identical): alone 556 / 11.4 decode; the NPU's weights in its own XRT buffer 532 (-4%) / 10.6; in a 12 GiB HIP-
+registered region through user pointers (the cache's kind, SVA) 511 (-8%) / 10.6 - the NPU's traffic ~4% (A read
+again by every column every pass: ~35 MB a gate + up part, 26 a down), the IOMMU's walks over 4 KiB pages ~4% more.
+power is not it: package 62.7 W with the NPU against 69.6 alone (a sampled pair), the GPU's clock near the same.
+so the ~7% the NPU's share would save is about what its traffic and translations cost the GPU - next: A once a part
+(broadcast across the columns from one shim, or held in the memtiles: the down's 332 KB fits), the cache in 2 MiB
+pages (the NPU's walks), the unpack coalesced; and the slow mode's cause (both runs) before any A/B claims a number.

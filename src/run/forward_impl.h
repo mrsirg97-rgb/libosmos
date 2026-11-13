@@ -189,6 +189,10 @@ struct Forward
   uint32_t *npu_row;
   const void **npu_wg, **npu_wu; /* the parts' weights: gate (or the down's) and up */
   hipEvent_t npu_packed;         /* the layer's parts packed: the NPU may read them */
+  hipEvent_t npu_gpu_done, npu_resumed; /* timed: the stream past the GPU's own rows, and the work after the NPU's
+                                           queued - between them the GPU idle on the NPU (read at the next call) */
+  bool npu_timed;                        /* a pair recorded, not yet read */
+  double npu_idle_ms, npu_gpu_ahead_ms;  /* the GPU's idle on the NPU, summed; and its work left when the NPU began */
   uint64_t ahead_limit; /* ForwardOptions': the membrane's bound on reads ahead in flight */
   uint32_t logit_rows;  /* ForwardOptions': a step's last rows whose logits are kept (0: every row) */
   bool lane;

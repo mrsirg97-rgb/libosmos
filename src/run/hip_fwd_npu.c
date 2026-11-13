@@ -16,6 +16,8 @@ static void npu_free(Forward *f)
   npu_close(f->npu), f->npu = NULL;
   if (f->npu_packed)
     hipEventDestroy(f->npu_packed), f->npu_packed = NULL;
+  if (f->npu_gpu_done)
+    hipEventDestroy(f->npu_gpu_done), hipEventDestroy(f->npu_resumed), f->npu_gpu_done = f->npu_resumed = NULL;
   hipHostFree(f->npu_tok), hipHostFree(f->npu_row), f->npu_tok = NULL, f->npu_row = NULL;
   free(f->npu_wg), free(f->npu_wu), f->npu_wg = f->npu_wu = NULL;
 }
@@ -49,7 +51,8 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]
   if (hipHostMalloc((void **)&f->npu_tok, (size_t)max * NPU_TOKENS * 4, mapped) != hipSuccess ||
       hipHostMalloc((void **)&f->npu_row, (size_t)max * 4, mapped) != hipSuccess ||
       !(f->npu_wg = malloc(max * sizeof *f->npu_wg)) || !(f->npu_wu = malloc(max * sizeof *f->npu_wu)) ||
-      hipEventCreateWithFlags(&f->npu_packed, hipEventDisableTiming) != hipSuccess)
+      hipEventCreateWithFlags(&f->npu_packed, hipEventDisableTiming) != hipSuccess ||
+      hipEventCreate(&f->npu_gpu_done) != hipSuccess || hipEventCreate(&f->npu_resumed) != hipSuccess)
   {
     npu_free(f);
     return fwd_fail(err, "forward_npu: out of memory");
@@ -124,11 +127,23 @@ bool fwd_npu_run(Forward *f, NpuKind kind, int l, uint32_t parts, char *err)
   const uint32_t qt = kind == NPU_GATE_UP ? L->exp_gate->type : L->exp_down->type;
   const QTypeInfo *qi = qtype_info(qt);
   char nerr[NPU_ERR] = "";
-  if (!qi || hipEventSynchronize(f->npu_packed) != hipSuccess)
+  if (f->npu_timed) /* the last call's pair, long past: the GPU's idle between them */
+  {
+    float ms = 0;
+    if (hipEventElapsedTime(&ms, f->npu_gpu_done, f->npu_resumed) == hipSuccess)
+      f->npu_idle_ms += ms;
+    f->npu_timed = false;
+  }
+  if (!qi || hipEventRecord(f->npu_gpu_done, NULL) != hipSuccess || hipEventSynchronize(f->npu_packed) != hipSuccess)
     return fwd_fail(err, "the NPU's packing failed");
   const uint64_t w_bytes = (uint64_t)g->expert_ff * g->n_embd / qi->values * qi->bytes; /* either matrix: D x FF */
+  const bool ahead = hipEventQuery(f->npu_gpu_done) == hipErrorNotReady; /* the GPU still busy as the NPU begins */
   if (!npu_run(f->npu, kind, qt, parts, f->npu_wg, f->npu_wu, w_bytes, nerr))
     return fwd_fail(err, nerr);
+  f->npu_gpu_ahead_ms += ahead && hipEventQuery(f->npu_gpu_done) == hipErrorNotReady; /* still busy as it ends: a count */
+  if (hipEventRecord(f->npu_resumed, NULL) != hipSuccess)
+    return fwd_fail(err, "the NPU's resume event");
+  f->npu_timed = true;
   return true;
 }
 
@@ -140,8 +155,10 @@ bool fwd_npu_unpack(Forward *f, NpuKind kind, uint32_t parts)
              : npu_unpack_c(npu_c(f->npu), g->n_embd, NPU_DOWN_ROWS, 1, parts, f->npu_row, f->b.ye, NULL, NULL);
 }
 
-void forward_npu_stats(const Forward *f, uint64_t *calls, uint64_t *parts, double *wait_us)
+void forward_npu_stats(const Forward *f, uint64_t *calls, uint64_t *parts, double *wait_us, double *gpu_idle_ms,
+                       uint64_t *gpu_outlasted)
 {
   const NpuStats st = npu_stats(f ? f->npu : NULL);
   *calls = st.calls, *parts = st.parts, *wait_us = st.wait_us;
+  *gpu_idle_ms = f ? f->npu_idle_ms : 0, *gpu_outlasted = f ? (uint64_t)f->npu_gpu_ahead_ms : 0;
 }

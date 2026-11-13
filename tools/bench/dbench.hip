@@ -294,11 +294,18 @@ int main(int argc, char** argv) {
                 tps, n_new, (unsigned long long) h, (unsigned long long) gs, (unsigned long long) gg,
                 (unsigned long long) forward_cpu_picks(f), g_drafted, g_accepted, g_rounds, g_draft_ms, g_verify_ms);
     if (std::getenv("NPU")) {
-      uint64_t nl, np;
-      double nw;
-      forward_npu_stats(f, &nl, &np, &nw);
-      std::printf("  so far the NPU: %llu calls, %llu parts, %.0f ms the host waited on them\n", (unsigned long long) nl,
-                  (unsigned long long) np, nw / 1e3);
+      uint64_t nl, np, no;
+      double nw, ni;
+      forward_npu_stats(f, &nl, &np, &nw, &ni, &no);
+      std::printf("  so far the NPU: %llu calls, %llu parts, %.0f ms the host waited on them; the GPU idle on it %.0f ms, "
+                  "busy past it %llu calls\n", (unsigned long long) nl, (unsigned long long) np, nw / 1e3, ni,
+                  (unsigned long long) no);
+    }
+    {
+      uint64_t lb, ln, ls;  // 0.6.9's lent steps: the block, and the steps that ran in it / split back to sub-batches
+      forward_lends(f, &lb, &ln, &ls);
+      std::printf("  so far lent steps %llu, split %llu (a block of %.2f GiB)\n", (unsigned long long) ln,
+                  (unsigned long long) ls, lb / (double) (1ull << 30));
     }
     uint64_t wn[2], wns[2];
     forward_waits(f, wn, wns);
