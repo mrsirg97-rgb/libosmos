@@ -119,6 +119,15 @@ int main() {
     CHECK(hipMemcpy(fb2.data(), sb, fb2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
     std::printf("  %7u rows: score int8 dots (dot4) %8.2f ms (%.2fx plain, %.2fx fused; %llu bits differ, %u fallbacks)\n",
                 R, d4, plain / d4, fma / d4, differ(), nfb);
+    if (T == 1) {  // 0.7.4: the one-token tile against the 4-token tile at one token
+      ops_index_score_dot4_four(true);
+      const double d4f = time_ms([&] {
+        CHECK(ops_index_score_dot4(q, kp, w, pos, 1, R, H, HD, T, sb, R, nullptr, nullptr));
+      });
+      ops_index_score_dot4_four(false);
+      std::printf("  %7u rows: score int8 dots, the 4-token tile %8.2f ms (the 1-token tile %.2fx)\n", R, d4f,
+                  d4f / d4);
+    }
     // the mask: KEEP random blocks a token (its last always), the list from the bits
     const uint32_t nb = R / BLOCK, wr = (nb + 31) / 32;
     std::vector<uint32_t> bh((size_t) T * wr, 0);
@@ -157,8 +166,14 @@ int main() {
     const double tkp = time_ms([&] {
       CHECK(ops_topk(sa, R, pos, 1, K, nullptr, BLOCK, wr, T, sel, OPS_MAX_SELECT, n_sel, nullptr));
     });
-    std::printf("  %7u rows: top-k plain %6.2f  masked %6.2f  over the list %6.2f (+ the list %.2f) ms\n", R, tkp, tk, tkr,
-                lst);
+    std::vector<int32_t> sh((size_t) T * OPS_MAX_SELECT);  // (0.7.4) the picks' FNV-1a: OSMOS_SELECT_ONE=1's the same
+    CHECK(hipMemcpy(sh.data(), sel, sh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    uint64_t hs = 1469598103934665603ull, hb = hs;
+    for (uint32_t t = 0; t < T; t++)
+      for (uint32_t i = 0; i < K; i++) hs = (hs ^ (uint32_t) sh[(size_t) t * OPS_MAX_SELECT + i]) * 1099511628211ull;
+    for (uint32_t v : c2) hb = (hb ^ v) * 1099511628211ull;
+    std::printf("  %7u rows: top-k plain %6.2f  masked %6.2f  over the list %6.2f (+ the list %.2f) ms; rows %016llx,"
+                " blocks %016llx\n", R, tkp, tk, tkr, lst, (unsigned long long) hs, (unsigned long long) hb);
   }
   return 0;
 }

@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.7.4]: decode at depth
+
+- **Decode no longer slows with the context (DeepSeek), and slows far less (Qwen)** - measured for the first time
+  past 64K: 64 greedy tokens after 65K, 262K and 523K-token prompts (DeepSeek, evo-A at 1M) and 65K, 261K, 457K (Qwen,
+  UD-IQ3_XXS at 512K), `low-power`. Every answer's tokens the same as 0.7.3's (each stream's hash):
+
+  | | 65K | 262K | 523K |
+  | --- | ---: | ---: | ---: |
+  | DeepSeek evo-A, 0.7.3 | 15.3 | 14.9 | 14.7 tok/s |
+  | DeepSeek evo-A, 0.7.4 | 15.3 | **15.4** | **15.9** |
+  | Qwen3.8 UD-IQ3_XXS, 0.7.3 (65K / 261K / 457K) | 22.3 | 17.4 | 14.2 |
+  | Qwen3.8 UD-IQ3_XXS, 0.7.4 | **23.9** | **21.3** | **20.2** (+42%) |
+
+  A decode step's indexer ran its top k on one workgroup and its scores on tiles sized for prompts:
+  - **the top k (and Qwen's block pick) on many workgroups for a small step**: a token's items cut into 32 chunks,
+    each chunk's k highest (key, then the lower item) taken on its own block, then the k highest of those - exactly
+    the one-block selection's items, in its order (every one of the whole's top k is in its chunk's). DeepSeek at 1M
+    rows, a token: 2.53 -> 0.21 ms, masked 2.13 -> 0.36. `OSMOS_SELECT_ONE=1` keeps the one-block selection;
+  - **one selection for both models** (`kernels/select.h`): Qwen's pick now DeepSeek's radix select (its later passes
+    in LDS, one coalesced output pass) - the same blocks;
+  - **DeepSeek's int8 scores on a one-token tile** (a block 256 rows of one token; the 4-token tile left 3/4 of
+    itself idle): 2.41 -> 0.78 ms at 1M rows. A verify's 5 or 6 tokens: a tile's waves past the step's tokens skip
+    their sums, 5.16 -> 4.22 ms (an 8-token tile reading the keys once measured 1.0x: the kernel is ALU-bound);
+  - **Qwen's QSA scores for a step of up to 8 tokens** on a kernel of their own (a thread a head x a block, the heads
+    folded in order: the plain kernel's bits; that kernel's tile used 16 of its 256 threads at one token). With the
+    pick: 2.86 -> 0.88 ms a token a layer at 511K.
+- Tools: `tools/ci/podman.sh` (CI's host and sanitizer jobs in a clean ubuntu:24.04, on a commit), `tools/bench/selprobe`
+  (an index layer's picks at one position of a long text), the oracle's long-text reference (`ref_gguf.py --mask
+  --ref-out`: kld's REF for the masked rows, the head over them only); `ixbench` and `qxbench` print their picks'
+  hashes and the new tiles against the old.
+- Checked: `test_select_gpu` (a small step over 65,536 rows: the chunked path, plain and masked, ties everywhere),
+  `test_attn_gpu` (steps of 1, 5, 6 tokens on each tile, the plain kernel's bits, the adversarial cases),
+  `test_cand_gpu`, `test_q4x_qsa_gpu` (one token at a time); end to end, the six streams' tokens above.
+
 ## [0.7.3]: loop signals for agent harnesses, and long prompts faster at depth (#47)
 
 - **What a request's history says about the agent sending it**, beside every answer: an `osmos.loop` object (beside

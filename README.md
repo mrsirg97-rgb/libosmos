@@ -61,6 +61,7 @@ The default DeepSeek pack, on one Strix Halo (the `performance` profile, nothing
 | | |
 | --- | ---: |
 | Decode, drafted / plain (64K context; 0.7.2) | **35.6** / 18.9 tok/s |
+| Decode, plain, at 65K / 262K / 523K of context (`low-power`; 0.7.4) | 15.3 / 15.4 / **15.9** tok/s - flat with depth (0.7.3: 15.3 / 14.9 / 14.7) |
 | Prompt, 2,048 / 8,192 tokens (0.7.2) | 384 / **620** tok/s (386-389 / 644-647 with the NPU) |
 | A 1,038,695-token prompt read whole (0.7.3) | **67.7 min** - 341 tok/s at 128K, 266 at 512K, 212 at 992K |
 | Facts recalled from up to 985K tokens back (0.7.3) | **11 of 11**, every token the model's first choice |
@@ -81,7 +82,8 @@ in **13.4 min** (0.7.2: 18.3), the scored rows' bits the same.
 
 **Qwen3.8 UD-IQ3_XXS at its 512K** (YaRN past its native 262K; the same sessions in its own template, 457,506 tokens):
 the whole read in **12.3 min** (0.7.2: 16.5) - 751 tok/s at 128K, 649 at 256K, 512 at 416K (0.7.2: 614, 478, 341).
-Recalled the same way, the facts 10K-418K back in its 512K (all 11, every token its first choice; never planted
+Decoding after it (`low-power`, 0.7.4): **23.9** tok/s at 65K, **21.3** at 261K, **20.2** at 457K (0.7.3: 22.3, 17.4,
+14.2). Recalled the same way, the facts 10K-418K back in its 512K (all 11, every token its first choice; never planted
 0.0000):
 
 | Distance back | 418K | 375K | 344K | 298K | 255K | 210K | 159K | 110K | 60K | 20K | 10K | never planted |

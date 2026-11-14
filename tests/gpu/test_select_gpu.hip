@@ -35,8 +35,8 @@ static uint32_t next() { return rng = rng * 1664525u + 1013904223u; }
 static uint32_t visible(int32_t pos) { return (uint32_t) (pos + 1) / kRatio; }
 
 // ref.py's candidates for one token's n rows: the kept blocks' bits
-static std::vector<uint32_t> host_cand(const float* s, uint32_t n) {
-  std::vector<uint32_t> bits(kWords, 0);
+static std::vector<uint32_t> host_cand(const float* s, uint32_t n, uint32_t words = kWords) {
+  std::vector<uint32_t> bits(words, 0);
   const uint32_t nb = (n + kBlock - 1) / kBlock;
   std::vector<std::pair<float, uint32_t>> key(nb);
   for (uint32_t j = 0; j < nb; j++) {
@@ -130,6 +130,58 @@ int main() {
     std::printf("  top %u %s: every token's rows the host's (ties to the lower row)\n", kK,
                 with ? "under the candidate blocks' mask" : "plain");
   }
+  // 0.7.4: a small step over many rows (decode's shape) - the chunked selection (kChunks blocks a token, then their
+  // candidates merged): the candidate bits and the top k, plain and masked, the host's. ties everywhere, a token with
+  // no rows, one with fewer than k, one whose rows end mid-chunk, the whole stride
+  {
+    constexpr uint32_t T = 6, S = 65536, W = (S / kBlock + 31) / 32;
+    const int32_t p2[T] = {0, 200, 4 * 20000 + 1, 4 * 40003 + 2, (int32_t) (4 * S - 1), (int32_t) (next() % (4 * S))};
+    std::vector<float> s2((size_t) T * S);
+    for (auto& v : s2) v = (float) ((int) (next() % 23) - 7) * 0.5f;
+    float* d2;
+    int32_t *dp2, *ds2, *dn2;
+    uint32_t* dk2;
+    CHECK(hipMalloc(&d2, s2.size() * 4) == hipSuccess && hipMalloc(&dp2, T * 4) == hipSuccess &&
+          hipMalloc(&ds2, (size_t) T * OPS_MAX_SELECT * 4) == hipSuccess && hipMalloc(&dn2, T * 4) == hipSuccess &&
+          hipMalloc(&dk2, (size_t) T * W * 4) == hipSuccess);
+    CHECK(hipMemcpy(d2, s2.data(), s2.size() * 4, hipMemcpyHostToDevice) == hipSuccess &&
+          hipMemcpy(dp2, p2, T * 4, hipMemcpyHostToDevice) == hipSuccess &&
+          hipMemset(dk2, 0xA5, (size_t) T * W * 4) == hipSuccess);
+    CHECK(ops_cand_blocks(d2, S, dp2, kRatio, kBlock, kKeepBlocks, T, dk2, W, nullptr));
+    std::vector<uint32_t> k2((size_t) T * W);
+    CHECK(hipDeviceSynchronize() == hipSuccess &&
+          hipMemcpy(k2.data(), dk2, k2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    for (uint32_t t = 0; t < T; t++) {
+      const std::vector<uint32_t> want = host_cand(&s2[(size_t) t * S], visible(p2[t]), W);
+      if (std::memcmp(want.data(), &k2[(size_t) t * W], W * 4)) {
+        std::printf("  chunked: token %u (%u rows): the kept blocks differ\n", t, visible(p2[t]));
+        CHECK(false);
+      }
+    }
+    for (int with = 0; with < 2; with++) {
+      CHECK(hipMemset(ds2, 0xFF, (size_t) T * OPS_MAX_SELECT * 4) == hipSuccess);
+      CHECK(ops_topk(d2, S, dp2, kRatio, kK, with ? dk2 : nullptr, kBlock, W, T, ds2, OPS_MAX_SELECT, dn2, nullptr));
+      std::vector<int32_t> sel((size_t) T * OPS_MAX_SELECT), n_sel(T);
+      CHECK(hipDeviceSynchronize() == hipSuccess &&
+            hipMemcpy(sel.data(), ds2, sel.size() * 4, hipMemcpyDeviceToHost) == hipSuccess &&
+            hipMemcpy(n_sel.data(), dn2, T * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      for (uint32_t t = 0; t < T; t++) {
+        const std::vector<int32_t> want =
+            host_topk(&s2[(size_t) t * S], visible(p2[t]), with ? &k2[(size_t) t * W] : nullptr);
+        CHECK(n_sel[t] == (int32_t) want.size());
+        if (std::memcmp(want.data(), &sel[(size_t) t * OPS_MAX_SELECT], want.size() * 4)) {
+          std::printf("  chunked: token %u (%u rows, %s): the selected rows differ\n", t, visible(p2[t]),
+                      with ? "masked" : "plain");
+          CHECK(false);
+        }
+      }
+    }
+    CHECK(hipFree(d2) == hipSuccess && hipFree(dp2) == hipSuccess && hipFree(ds2) == hipSuccess &&
+          hipFree(dn2) == hipSuccess && hipFree(dk2) == hipSuccess);
+    std::printf("  a small step over %u rows (chunked): the candidate bits and the top %u, plain and masked, the host's\n",
+                S, kK);
+  }
+
   // 0.7.3: the blocks' keys folded once (ops_cand_blocks_max) - the bits ops_cand_blocks folds - on these scores with
   // half their zeros made -0 (a +0 and a -0 in one block: fmaxf met in the same order in both)
   {
