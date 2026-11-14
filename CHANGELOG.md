@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.7.3]: loop signals for agent harnesses (#47)
+## [0.7.3]: loop signals for agent harnesses, and long prompts faster at depth (#47)
 
 - **What a request's history says about the agent sending it**, beside every answer: an `osmos.loop` object (beside
   `usage`, in whole answers and a stream's last chunk) and an `x-osmos-loop` header - assistant turns since the last
@@ -12,13 +12,36 @@
   the pack's `osmos.json`, puts a placeholder result ("[tool result dropped from the conversation's history - run the
   call again if its result is needed]") after each orphaned call, and the answer says so (`orphans_filled`). By
   default the prompt stays the template's render of what was sent: osmos does not rewrite a client's history.
-- **Long prompts faster past ~100K (DeepSeek)**: the indexer's candidate layers (24/28/32/36) score only the 16,384
-  rows of their candidate blocks, not every row a token sees - the scores they read the same bits, so the same
-  selections and answers. At 1M a token's indexer work 6.5M rows to 2.6M; a read to 264K 15.7 min, from 18.3. Found
-  reading #47's 1M-token trace, where osmos fell behind maya past ~300K.
+- **Long prompts faster at depth (DeepSeek)**: a 1M-token read (evo-A, budget auto) **89.5 minutes**, from 141.5 with
+  the first change below alone (UD-IQ2_XXS; 0.7.2 slower again: ~93 tok/s by 600K); at 896K **157
+  tok/s**, from 68. Every change the same bits (each checked end to end:
+  a 1M stream's scored rows, NLL and argmax, against the old engine's), so the same answers. Found reading #47's
+  1M-token trace, where osmos fell behind maya past ~300K:
+  - the indexer's candidate layers (24/28/32/36) score only their candidate blocks' 16,384 rows, not every row a
+    token sees (at 1M: a token's indexer work 6.5M rows to 2.6M), and take their top k over those rows alone;
+  - the top k in one coalesced pass for its counts and its rows (its threads had read runs of a token's scores 4 KB
+    apart: 13x at 1M rows), its later radix passes over its first pass's bin in LDS (1.4-1.8x);
+  - the candidate source's block keys folded once, not in each selection pass (1.5-3.9x on that step);
+  - the indexer's sums fused (`fma`) for its FP4 q and keys - each product exact, so the bits of a multiply then an
+    add; a guard where a product could leave the normal range - at 4 tokens a tile (1.1-1.2x).
+- **Long prompts faster at depth (Qwen)**: QSA's indexer scores register-blocked (a thread 4 tokens x 4 blocks x its 4
+  heads; the old kernel's bits, kept as the reference) and their scratch room for 128 tokens' rows (67 MB at 512K):
+  a 457K-token read on UD-IQ3_XXS **12.3 minutes** from 16.5, 512 tok/s at 416K from 341, the scored rows byte for
+  byte the old kernel's.
+- **1M stays the DeepSeek packs' context; `--ctx` for another** (4,096 to 1M: `N`, `Nk`, `Nm`): the installer's
+  writes the pack's `osmos.json` (rig's row takes its window from it), `osmos-api --ctx` overrides it for a run. Qwen's
+  packs stay 512K (past its native 262K Qwen runs YaRN, slightly weaker on short text: `--ctx 1m` when wanted).
+- **Rig's rows: 128K kept for a reply** on DeepSeek's packs (was 256K: ~896K of history at 1M before a compaction)
+  and Qwen's (was 64K, its reply cap 128K with it).
+- **Recall to the window's edge, measured**: 11 codes planted in a 1M-token agent conversation (the operator's rig
+  sessions), asked at its end - every one recalled, every token the model's first choice, from 12K to **985K** back,
+  on UD-IQ2_XXS and evo-A (a code never planted: probability ~0). Qwen IQ3_XXS at 512K: README.
 - **`kld`'s `BIG`** (tools/bench): `BIG=8192` reads a text's unscored stretches in batches of up to 8,192 tokens (the
   server's own: four sub-batches, each layer's experts read once for them), the scored rows at `step` - the same
   bits (a 24,576-token check: its dumps byte-identical), a long text with few scored windows ~1.7x faster to read.
+- **`kld auto`** (tools/bench): the budget sized as osmos-serve sizes it (`fit_sized`), `FILL` the RAM it keeps free
+  (osmos-serve's `--fill`, the tool's own buffers counted in); `tools/bench/ixbench` times the indexer's kernels at a
+  long context's shapes.
 
 ## [0.7.2]: IQ1_S's prompt decode, faster
 

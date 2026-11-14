@@ -133,6 +133,54 @@ round differently from the GPU's; the same bits every run).
 | Decode, drafted | 35.6 | |
 | Decode, plain | 18.9 | |
 
+### Long context: recall and prompt speed at 1M
+
+0.7.3, 2026-11-13 (DESIGN.md, "0.7.3: the indexer at depth"). An agent conversation built from our own rig sessions
+(1,038,695 tokens, DeepSeek's chat template), with 11 facts planted in user turns ("the access code for the red
+locker is RW-6315-KD") and a question for each at the end, plus one about a locker never mentioned. Each answer is
+scored token by token (teacher-forced): the probability of the whole code, and whether every token was the model's
+first choice.
+
+| Distance back | UD-IQ2_XXS | osmos-evo-A |
+| ---: | ---: | ---: |
+| 985K | 0.998 | 0.984 |
+| 881K | 0.998 | 0.996 |
+| 787K | 0.999 | 0.997 |
+| 687K | 1.000 | 0.997 |
+| 587K | 0.999 | 0.997 |
+| 487K | 0.999 | 0.995 |
+| 388K | 0.999 | 0.996 |
+| 267K | 0.999 | 0.997 |
+| 188K | 0.983 | 0.469 * |
+| 78K | 0.999 | 0.999 |
+| 12K | 0.998 | 0.995 |
+| never planted | 0.0000 | 0.0000 |
+
+Every code is recalled with every token the model's first choice, at every distance, on both packs. \* evo-A wavers
+over whether to answer with the bare code or a sentence ("I ..." 0.44 against the code's first token 0.47); every
+token after it is 0.999+.
+
+Reading the whole conversation (osmos-evo-A, budget auto, the pack's 4,096-token steps; each token's state built as a
+fresh prompt read would build it):
+
+| Depth | 128K | 256K | 512K | 768K | 896K | 992K | the whole 1M |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.7.3 (tok/s) | 322 | 266 | 205 | 164 | 157 | 136 | **89.5 min** |
+| 0.7.3's first change alone, UD-IQ2_XXS | 319 | 273 | 164 | 96 | 68 | 55 | 141.5 min |
+
+0.7.2 itself was slower again (UD-IQ2_XXS: ~93 tok/s by 600K). A session rarely reads all of it at once: with the
+prompt cached, a turn reads only what it adds, and a full read comes after a client's compaction.
+
+**Qwen3.8 UD-IQ3_XXS at its 512K.** The same sessions in Qwen's own chat template, 457,506 tokens, the context at
+512K as the pack serves it (YaRN past Qwen's native 262K), 4,096-token steps:
+
+| Depth | 64K | 128K | 256K | 384K | 416K | the whole 457K |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.7.3 (tok/s) | 751 | 751 | 649 | 546 | 512 | **12.3 min** |
+| 0.7.2 | 751 | 614 | 478 | 375 | 341 | 16.5 min |
+
+QWEN_RECALL
+
 ### DeepSeek against Maya
 
 [Project Maya](https://github.com/mw00/project-maya) 1.1.61, rebuilt, run with its own pack, its own 8 GB DSpark,
