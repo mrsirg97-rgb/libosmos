@@ -10,38 +10,42 @@
 
 #define STATE_MAGIC 0x32474e494b4e49ull /* "INKLNG2" */
 #define MARK_MAGIC 0x4b52414d324b4e49ull
-#define STATE_VERSION 1u
+#define STATE_VERSION 2u /* 2: the keys and values f16 */
+
+void *ink2_tail_row(const Ink2Tail *t, uint32_t r) { return (uint8_t *)t->d + (uint64_t)r * t->row * t->esize; }
 
 bool ink2_tail_room(Ink2Tail *t, uint32_t n)
 {
   if (t->held + n <= t->cap)
     return true;
   /* held > 2 keep here (cap 2 keep + a step's most): the last keep rows and the front apart */
-  const float *src = t->d + (uint64_t)(t->held - t->keep) * t->row;
-  if (hipMemcpyAsync(t->d, src, (uint64_t)t->keep * t->row * 4, hipMemcpyDeviceToDevice, NULL) != hipSuccess)
+  if (hipMemcpyAsync(t->d, ink2_tail_row(t, t->held - t->keep), (uint64_t)t->keep * t->row * t->esize,
+                     hipMemcpyDeviceToDevice, NULL) != hipSuccess)
     return false;
   t->held = t->keep;
   return true;
 }
 
-const float *ink2_tail_last(const Ink2Tail *t, uint32_t k) { return t->d + (uint64_t)(t->held - k) * t->row; }
+const void *ink2_tail_last(const Ink2Tail *t, uint32_t k) { return ink2_tail_row(t, t->held - k); }
 
 bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n)
 {
   if (t->held + n > t->cap)
     return false;
-  if (hipMemcpyAsync(t->d + (uint64_t)t->held * t->row, x, (uint64_t)n * t->row * 4, hipMemcpyDeviceToDevice,
-                     NULL) != hipSuccess)
+  void *at = ink2_tail_row(t, t->held);
+  const uint64_t vals = (uint64_t)n * t->row;
+  if (t->esize == 2 ? !ink2_to_f16(x, vals, at, NULL)
+                    : hipMemcpyAsync(at, x, vals * 4, hipMemcpyDeviceToDevice, NULL) != hipSuccess)
     return false;
   t->held += n;
   return true;
 }
 
-static bool tail_make(Ink2Tail *t, uint32_t row, uint32_t keep, uint32_t cap, uint32_t zeros)
+static bool tail_make(Ink2Tail *t, uint32_t row, uint32_t esize, uint32_t keep, uint32_t cap, uint32_t zeros)
 {
-  *t = (Ink2Tail){NULL, row, keep, cap, zeros};
-  return hipMalloc((void **)&t->d, (uint64_t)cap * row * 4) == hipSuccess &&
-         hipMemset(t->d, 0, (uint64_t)cap * row * 4) == hipSuccess;
+  *t = (Ink2Tail){NULL, row, esize, keep, cap, zeros};
+  return hipMalloc(&t->d, (uint64_t)cap * row * esize) == hipSuccess &&
+         hipMemset(t->d, 0, (uint64_t)cap * row * esize) == hipSuccess;
 }
 
 /* what a sequence's next token reads of each kind: the conv's taps - 1, a window's window - 1 and the keys before
@@ -74,11 +78,12 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
   for (int l = 0; ok && l < g->n_layers; l++)
   {
     for (int c = 0; ok && c < INK2_CONVS; c++)
-      ok = tail_make(&s->conv[l][c], conv_row(f, c), ck, 2 * ck + T, conv_need(f));
+      ok = tail_make(&s->conv[l][c], conv_row(f, c), 4, ck, 2 * ck + T, conv_need(f));
     if (ok && g->sliding[l])
-      ok = tail_make(&s->kw[l], kd, wk, 2 * wk + T, 0) && tail_make(&s->vw[l], kd, wk, 2 * wk + T, 0);
+      ok = tail_make(&s->kw[l], kd, 2, wk, 2 * wk + T, 0) && tail_make(&s->vw[l], kd, 2, wk, 2 * wk + T, 0);
     else if (ok)
-      ok = tail_make(&s->kw[l], kd, f->max_ctx, f->max_ctx, 0) && tail_make(&s->vw[l], kd, f->max_ctx, f->max_ctx, 0);
+      ok = tail_make(&s->kw[l], kd, 2, f->max_ctx, f->max_ctx, 0) &&
+           tail_make(&s->vw[l], kd, 2, f->max_ctx, f->max_ctx, 0);
   }
   if (!ok)
     return ink2_fail(err, "inkling2: GPU memory refused (a sequence's caches)"), ink2_seq_destroy(s), NULL;
@@ -166,7 +171,7 @@ typedef struct Head
    each full layer's rows (mark: no full layer's) */
 typedef struct Part
 {
-  float *d; /* the tail's rows to read or write: its first */
+  void *d; /* the tail's rows to read or write: its first */
   uint64_t bytes;
 } Part;
 
@@ -184,18 +189,18 @@ static int parts(const Ink2Seq *s, int32_t pos, bool mark, bool load, Part *p)
     {
       const Ink2Tail *t = &s->conv[l][c];
       /* a save the last cn rows; a load into the front (held then cn) */
-      p[n++] = (Part){load ? t->d : (float *)ink2_tail_last(t, cn), (uint64_t)cn * t->row * 4};
+      p[n++] = (Part){load ? t->d : (void *)ink2_tail_last(t, cn), (uint64_t)cn * t->row * t->esize};
     }
     const Ink2Tail *k = &s->kw[l], *v = &s->vw[l];
     if (g->sliding[l])
     {
-      p[n++] = (Part){load ? k->d : (float *)ink2_tail_last(k, wn), (uint64_t)wn * k->row * 4};
-      p[n++] = (Part){load ? v->d : (float *)ink2_tail_last(v, wn), (uint64_t)wn * v->row * 4};
+      p[n++] = (Part){load ? k->d : (void *)ink2_tail_last(k, wn), (uint64_t)wn * k->row * k->esize};
+      p[n++] = (Part){load ? v->d : (void *)ink2_tail_last(v, wn), (uint64_t)wn * v->row * v->esize};
     }
     else if (!mark)
     {
-      p[n++] = (Part){k->d, (uint64_t)pos * k->row * 4};
-      p[n++] = (Part){v->d, (uint64_t)pos * v->row * 4};
+      p[n++] = (Part){k->d, (uint64_t)pos * k->row * k->esize};
+      p[n++] = (Part){v->d, (uint64_t)pos * v->row * v->esize};
     }
   }
   return n;

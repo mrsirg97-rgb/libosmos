@@ -50,6 +50,10 @@ bool ink2_attn(const Ink2Attn *a, const float *q, const float *rel, const float 
                void *stream);
 bool ink2_fa(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate, uint32_t n_tok,
              const float *k, const float *v, uint32_t n_keys, const float *rel_proj, float *out, void *stream);
+bool ink2_fa16(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
+               uint32_t n_tok, const uint16_t *k, const uint16_t *v, uint32_t n_keys, const float *rel_proj, float *out,
+               void *stream);
+bool ink2_to_f16(const float *x, uint64_t n, uint16_t *y, void *stream);
 
 #endif
 
@@ -114,4 +118,8 @@ ink2_fa
   first tile at a multiple of INK2_FA_TILE: a query's keys always the same tiles (the rounding of p to f16 against
   the running max is a tile's), so its bits are the same in any block - and in any step, given keys whose index mod
   INK2_FA_TILE is their position's (a sequence's window handed in from such a position).
+
+ink2_fa16, ink2_to_f16
+  ink2_fa over keys and values stored as f16 (a cache's: ink2_to_f16 of the F32 rows, IEEE half bits in uint16_t) -
+  the values ink2_fa rounds them to as it loads them, so the same bits; half the memory and the reads.
 */

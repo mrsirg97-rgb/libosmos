@@ -178,6 +178,15 @@ int main() {
         splits++;
       }
       std::printf("  %s: flash attention's rows the same bits in %d steps (chunks, decodes) as in the prompt\n", c, splits);
+      {  // the keys and values stored f16 (a cache's): ink2_fa's bits
+        const size_t kvn = (size_t) n * KV * D;
+        uint16_t *k16 = dev_alloc<uint16_t>(kvn), *v16 = dev_alloc<uint16_t>(kvn);
+        CHECK(ink2_to_f16(dk, kvn, k16, nullptr) && ink2_to_f16(dv, kvn, v16, nullptr));
+        CHECK(ink2_fa16(&at, dq, dr, ds, dg, n, k16, v16, n, drp, dpart, nullptr));
+        CHECK(host_of(dpart, qr.v.size()) == whole || (std::printf("  %s: f16 keys not ink2_fa's bits\n", c), false));
+        std::printf("  %s: keys and values stored f16, the same bits\n", c);
+        hipFree(k16), hipFree(v16);
+      }
       hipFree(dpart);
     }
     for (float* d : {dq, dqw, dr, drw, dk, dv, drp, ds, dg, dout}) hipFree(d);

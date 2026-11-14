@@ -519,15 +519,12 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     const Ink2Attn at = {H, KV, D, R, full ? (uint32_t)g->rel_extent : (uint32_t)g->window,
                          full ? 0u : (uint32_t)g->window, 1.0f / sqrtf((float)D)};
     Ink2Tail *tk = &s->kw[l], *tv = &s->vw[l];
-    const float *keys, *vals;
+    const void *keys, *vals;
     uint32_t n_keys;
     if (full)
     {
-      GPU(hipMemcpyAsync(tk->d + (uint64_t)pos * kd, f->kc, (uint64_t)n * kd * 4, hipMemcpyDeviceToDevice, NULL) ==
-              hipSuccess &&
-          hipMemcpyAsync(tv->d + (uint64_t)pos * kd, f->vc, (uint64_t)n * kd * 4, hipMemcpyDeviceToDevice, NULL) ==
-              hipSuccess);
-      tk->held = tv->held = pos + n;
+      tk->held = tv->held = pos; /* the rows to its position, then these */
+      GPU(ink2_tail_put(tk, f->kc, n) && ink2_tail_put(tv, f->vc, n));
       keys = tk->d, vals = tv->d, n_keys = pos + n;
     }
     else
@@ -539,7 +536,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       GPU(ink2_tail_put(tk, f->kc, n) && ink2_tail_put(tv, f->vc, n));
       keys = ink2_tail_last(tk, back + n), vals = ink2_tail_last(tv, back + n), n_keys = back + n;
     }
-    GPU(ink2_fa(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, d->rel_proj, f->att, NULL));
+    GPU(ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, d->rel_proj, f->att, NULL));
     GPU(mat(L->out, d->out, f->att, n, f->o));
     Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];
     GPU(ink2_conv(f->o, n, C, taps, d->out_conv, ink2_tail_last(co, taps - 1), conv_res, conv_scale, f->r, NULL));

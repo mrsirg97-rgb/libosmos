@@ -217,10 +217,11 @@ __device__ inline float fa_row_sum(float v) {
 
 // G waves; Q's A fragments in registers (a lane its row's 8 x 16 halves), the next tile's K and V prefetched into
 // registers while this one's WMMAs run - LDS ~16 KB a block (K, V^T, P), several blocks a CU
-template <int G, int RT>
+// KV: the keys' and values' type in memory - F32 (rounded to f16 as loaded) or f16 (a cache's: the same values)
+template <int G, int RT, class KV>
 __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float* q, const float* rel, const float* sink,
-                                                     const float* gate, uint32_t n_tok, const float* k,
-                                                     const float* v, uint32_t n_keys, const float* rel_proj,
+                                                     const float* gate, uint32_t n_tok, const KV* k,
+                                                     const KV* v, uint32_t n_keys, const float* rel_proj,
                                                      float* out) {
   constexpr int kNth = G * RT * 32, kItems = (kFaTile * kFaHead + kNth - 1) / kNth;
   __shared__ __attribute__((aligned(32))) _Float16 ks[kFaTile * kFaRow], vt[kFaHead * kFaKey];
@@ -255,7 +256,7 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
       const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead, key = kb + r;
       const bool in = i < kFaTile * kFaHead && key < n_keys;
       const uint64_t at = ((uint64_t) key * a.kv_heads + kvh) * kFaHead + d;
-      kr[it] = in ? k[at] : 0.0f, vr[it] = in ? v[at] : 0.0f;
+      kr[it] = in ? (float) k[at] : 0.0f, vr[it] = in ? (float) v[at] : 0.0f;
     }
   };
   fetch(klo);
@@ -328,9 +329,10 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
 
 }  // namespace
 
-extern "C" bool ink2_fa(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
-                        uint32_t n_tok, const float* k, const float* v, uint32_t n_keys, const float* rel_proj,
-                        float* out, void* stream) {
+template <class KV>
+static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
+                      uint32_t n_tok, const KV* k, const KV* v, uint32_t n_keys, const float* rel_proj, float* out,
+                      void* stream) {
   if (!a || !q || !rel || !sink || !k || !v || !rel_proj || !out || !n_tok || n_tok > n_keys ||
       a->head_dim != INK2_MAX_HEAD || !a->kv_heads || a->heads % a->kv_heads ||
       a->heads / a->kv_heads > INK2_FA_MAX_GROUP || !a->d_rel || a->d_rel > INK2_MAX_REL || !a->extent ||
@@ -341,13 +343,38 @@ extern "C" bool ink2_fa(const Ink2Attn* a, const float* q, const float* rel, con
   const dim3 grid_fa((n_tok + kFaTile * R - 1) / (kFaTile * R), a->kv_heads);
 #define FA(g, r)                                                                                                    \
   if (G == g && R == r) {                                                                                           \
-    fa_kernel<g, r><<<grid_fa, g * r * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj, out); \
+    fa_kernel<g, r, KV><<<grid_fa, g * r * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj, \
+                                                                out);                                               \
     return ok();                                                                                                    \
   }
   FA(1, 1) FA(2, 1) FA(4, 1) FA(6, 1) FA(8, 1) FA(1, 2) FA(2, 2) FA(4, 2) FA(6, 2) FA(8, 2) FA(1, 4) FA(2, 4) FA(4, 4)
   FA(6, 4)
 #undef FA
   return false;
+}
+
+extern "C" bool ink2_fa(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
+                        uint32_t n_tok, const float* k, const float* v, uint32_t n_keys, const float* rel_proj,
+                        float* out, void* stream) {
+  return fa_launch<float>(a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj, out, stream);
+}
+
+extern "C" bool ink2_fa16(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
+                          uint32_t n_tok, const uint16_t* k, const uint16_t* v, uint32_t n_keys, const float* rel_proj,
+                          float* out, void* stream) {
+  return fa_launch<_Float16>(a, q, rel, sink, gate, n_tok, (const _Float16*) k, (const _Float16*) v, n_keys, rel_proj,
+                             out, stream);
+}
+
+__global__ void to_f16_kernel(const float* x, uint64_t n, _Float16* y) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i < n) y[i] = (_Float16) x[i];
+}
+
+extern "C" bool ink2_to_f16(const float* x, uint64_t n, uint16_t* y, void* stream) {
+  if (!x || !y || !n) return false;
+  to_f16_kernel<<<grid(n), kThreads, 0, st(stream)>>>(x, n, (_Float16*) y);
+  return ok();
 }
 
 extern "C" bool ink2_clip_rows(float* x, uint32_t n_tok, uint32_t per_tok, uint32_t dim, const float* w, float clip,

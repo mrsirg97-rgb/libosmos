@@ -25,8 +25,8 @@ typedef struct Ink2Dev
    source and target apart) */
 typedef struct Ink2Tail
 {
-  float *d;
-  uint32_t row; /* floats a row */
+  void *d;
+  uint32_t row, esize; /* elements a row; bytes an element (a conv's inputs F32, a window's keys and values f16) */
   uint32_t keep, cap, held;
 } Ink2Tail;
 
@@ -46,7 +46,7 @@ struct Ink2Seq
   uint32_t reach, prompt_end;
   bool failed;
   Ink2Tail conv[INK2_MAX_LAYERS][INK2_CONVS]; /* each layer's short convs' inputs */
-  Ink2Tail kw[INK2_MAX_LAYERS], vw[INK2_MAX_LAYERS]; /* a sliding layer's window (a full layer's d: max_ctx rows) */
+  Ink2Tail kw[INK2_MAX_LAYERS], vw[INK2_MAX_LAYERS]; /* a sliding layer's window (a full layer's d: max_ctx rows), f16 */
 };
 
 struct Ink2Forward
@@ -77,7 +77,9 @@ struct Ink2Forward
 };
 
 bool ink2_fail(char *err, const char *why);
-/* the tails: room for n more rows (the move), the last k rows, n rows appended (queued on the null stream) */
+/* the tails: room for n more rows (the move), the last k rows, n F32 rows appended (an f16 tail's converted; queued
+   on the null stream); a tail's row r */
 bool ink2_tail_room(Ink2Tail *t, uint32_t n);
-const float *ink2_tail_last(const Ink2Tail *t, uint32_t k);
+const void *ink2_tail_last(const Ink2Tail *t, uint32_t k);
 bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n);
+void *ink2_tail_row(const Ink2Tail *t, uint32_t r);
