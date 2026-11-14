@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.6]: osmos-evo
+
+- **The default DeepSeek pack is now `osmos-evo`**: evo-A with the routed experts' gate and up of layers 10-19 at
+  IQ2_XXS (unsloth UD-IQ2_XXS's tensors). Closer to the model on every measure - KL against DeepSeek's own weights on
+  agent traces 0.0485 -> 0.0422 (-0.0062 +- 0.0003), Wiki 0.175 -> 0.158, top-1 90.5% -> 91.2% - and the one fact
+  evo-A wavered on in the 1M recall stream (188K back) 0.469 -> 0.955, every answer token the model's first choice.
+  The cost: +5.8 GB of pack and about 5% of decode (`performance`, 64K context: 32.8 / 17.7 tok/s drafted / plain
+  against evo-A's 35.6 / 18.9); still faster than UD-IQ2_XXS (26.0 / 14.2), about halfway to its quality.
+- **It installs as a patch.** A 23 GB delta on evo-A's shards
+  ([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017), `evo-A2/`): an install that has evo-A fetches
+  the patch alone. The installer now derives a set from a derived one, each shard still SHA-256 pinned.
+  `osmos-evo-a` is an alias of `osmos-evo`; rig's row is `deepseek-1017-evo` (the old id an alias, its row replaced in
+  place, its port and a default on it kept).
+- **The method, as tools** (`tools/evo`, DESIGN.md "0.7.6"): `recall_probe.py` reproduces a long-context recall loss
+  in minutes (a stream's tail after a window of its body, the fact planted at any distance); `overlay.py` swaps another
+  pack's tensors in by layer and kind (cloned: no disk), for `kld` and `dbench` (`OVERLAY=`). The bisection that found
+  layers 10-19's gate and up, its confirmation on the KL protocol's text, dev rows and hold-out, and its price are
+  written down step by step.
+
 ## [0.7.5]: a turn reuses its prompt
 
 - **DeepSeek in thinking mode without tools read every turn whole** (`cached_tokens` 0 each turn, the conversation

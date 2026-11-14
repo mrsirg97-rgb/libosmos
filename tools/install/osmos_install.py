@@ -53,22 +53,26 @@ def run_sh(script, env):
     subprocess.run(["sh", "-s"], input=script, env=env, check=True)
 
 
-def inputs(m, fid):
-    """the published files a file takes: itself, or a derived one's inputs (the layout makes it from them)"""
+def inputs(m, fid, made=lambda fid: False):
+    """the published files a file takes: itself, or a derived one's inputs (the layout makes it from them) - a derived
+    base's own in turn (0.8.0: evo-A's patch on evo-A's shards), none for one already made (made(fid): an install
+    that has evo-A fetches the patch alone)"""
     d = m["files"][fid].get("derive")
     if not d:
         return [fid]
+    if made(fid):
+        return []
     if d["with"] == "gguf_assemble":
-        return d["base"] + [d["delta"]]
+        return [i for b in d["base"] for i in inputs(m, b, made)] + [d["delta"]]
     return [d["patch"], d["key"]] + d["model"]
 
 
-def needed(m, pids, abliterated):
+def needed(m, pids, abliterated, made=lambda fid: False):
     ids = []
     for pid in pids:
         p = m["packs"][pid]
         for fid in p["shards"]:
-            ids += inputs(m, fid)
+            ids += inputs(m, fid, made)
         ids += [p["table"]["file"]] if p.get("table") else []
         ids += [p["picks"]] if p.get("picks") else []
         ids += p.get("drafter") or []
@@ -158,6 +162,9 @@ def main():
         print(f"{fails} to fix, {notes} to look at" if fails or notes else "as osmos was measured")
         return 1 if fails else 0
     m = manifest.load(a.manifest)
+    for old in [p for p in a.packs if manifest.pack_id(m, p) != p]:
+        print(f"  {old}: now {manifest.pack_id(m, old)}")
+    a.packs = list(dict.fromkeys(manifest.pack_id(m, p) for p in a.packs))
     if a.list or not a.packs:
         for pid, p in m["packs"].items():
             print(f"{pid:12s} {p['title']}")
@@ -179,7 +186,9 @@ def main():
             if not m["packs"][pid].get("npu"):
                 raise SystemExit(f"--npu: pack {pid} has no NPU kernels (the GPU alone runs it)")
     print("the files:")
-    ids = list(dict.fromkeys(needed(m, a.packs, a.abliterated) + ([m["packs"][p]["npu"] for p in a.packs] if a.npu else [])))
+    made = lambda fid: layout.made(m, fid, a.models, a.have)  # noqa: E731
+    ids = list(dict.fromkeys(needed(m, a.packs, a.abliterated, made) +
+                             ([m["packs"][p]["npu"] for p in a.packs] if a.npu else [])))
     found, fetch_ids = plan(m, ids, a.have, a.trust_size)
     if not check(host.disk(a.models, sum(m["files"][f]["bytes"] for f in fetch_ids))):
         raise SystemExit("not enough disk")
