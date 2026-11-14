@@ -15,9 +15,9 @@ bool ink2_softcap(float *x, uint64_t n, float cap, void *stream);
 bool ink2_swiglu(const float *g, const float *u, uint32_t n, float gcap, float ucap, uint32_t n_tok, float *h,
                  void *stream);
 bool ink2_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float *w, const float *hist,
-               float scale, float *y, void *stream);
+               float res, float scale, float *y, void *stream);
 bool ink2_conv_dyn(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
-                   const float *dyn, const float *hist, float scale, float *y, void *stream);
+                   const float *dyn, const float *hist, float res, float scale, float *y, void *stream);
 bool ink2_attn_res(const float *query, uint32_t queries, const float *blocks, uint32_t n_blocks, uint32_t b_stride,
                    const float *partial, uint32_t n_tok, uint32_t dim, float eps, float scale, float *out, void *stream);
 bool ink2_scale(float *x, uint64_t n, float s, void *stream);
@@ -56,14 +56,16 @@ ink2_swiglu
   25) - sigmoid of the raw gate, not the capped one.
 
 ink2_conv
-  the static short conv: y[t] = (sum_j w[c, j] x'[t + j] + x[t]) scale over channels c (rows of ch), x' the taps - 1
+  the static short conv: y[t] = (sum_j w[c, j] x'[t + j] + res x[t]) scale over channels c (rows of ch), x' the taps - 1
   rows of hist (the sequence's last inputs, the oldest first; zeros for a new one) then x - tap taps - 1 the current
-  token. scale 1 / sqrt(taps + 1). w [ch][taps] (GGUF ne taps, ch).
+  token. the checkpoint's weights: res 1, scale 1 / sqrt(taps + 1); llama.cpp's (unsloth's GGUFs) fold both into them -
+  (w + 1 at the current tap) / sqrt(taps + 1) - res 0, scale 1. w [ch][taps] (GGUF ne taps, ch).
 
 ink2_conv_dyn
-  a full layer's k / v conv: y[t] = (sum_j (w[j, c] + dyn[t, h(c) taps + j]) x'[t + taps - 1 - j] + x[t]) scale - tap 0
+  a full layer's k / v conv: y[t] = (sum_j (w[j, c] + dyn[t, h(c) taps + j]) x'[t + taps - 1 - j] + res x[t]) scale - tap 0
   the current token, w [taps][ch] (ne ch, taps), dyn [n_tok][heads taps] (a head's taps a token, h(c) = c / (ch /
-  heads)). scale 1 / sqrt(2 taps + 1).
+  heads)). the checkpoint's: res 1, scale 1 / sqrt(2 taps + 1); llama.cpp's fold them into the static weights ((w + 1
+  at tap 0) / 3, stored [ch][taps] with tap 0 last) and the per-token ones (dyn / 3): res 0, scale 1.
 
 ink2_attn_res
   the attention residual: a token's states (n_blocks rows of blocks [n_tok][b_stride][dim], then partial [n_tok][dim])

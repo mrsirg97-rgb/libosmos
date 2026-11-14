@@ -33,17 +33,17 @@ __device__ inline float tap(const float* x, const float* hist, uint32_t at, uint
 }
 
 __global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float* w,
-                            const float* hist, float scale, float* y) {
+                            const float* hist, float res, float scale, float* y) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= (uint64_t) n_tok * ch) return;
   const uint32_t c = (uint32_t) (i % ch), t = (uint32_t) (i / ch), h = taps - 1;
   float sum = 0;
   for (uint32_t j = 0; j < taps; j++) sum += w[(uint64_t) c * taps + j] * tap(x, hist, t + j, h, ch, c);
-  y[i] = (sum + x[i]) * scale;
+  y[i] = (sum + res * x[i]) * scale;
 }
 
 __global__ void conv_dyn_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads,
-                                const float* w, const float* dyn, const float* hist, float scale, float* y) {
+                                const float* w, const float* dyn, const float* hist, float res, float scale, float* y) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= (uint64_t) n_tok * ch) return;
   const uint32_t c = (uint32_t) (i % ch), t = (uint32_t) (i / ch), h = taps - 1, head = c / (ch / heads);
@@ -51,7 +51,7 @@ __global__ void conv_dyn_kernel(const float* x, uint32_t n_tok, uint32_t ch, uin
   float sum = 0;
   for (uint32_t j = 0; j < taps; j++)  // tap j: j tokens back
     sum += (w[(uint64_t) j * ch + c] + d[j]) * tap(x, hist, t + h - j, h, ch, c);
-  y[i] = (sum + x[i]) * scale;
+  y[i] = (sum + res * x[i]) * scale;
 }
 
 // a block a token: its states' inverse RMS, each query's scores and softmax, then the weighted sum
@@ -329,19 +329,19 @@ extern "C" bool ink2_swiglu(const float* g, const float* u, uint32_t n, float gc
 }
 
 extern "C" bool ink2_conv(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float* w,
-                          const float* hist, float scale, float* y, void* stream) {
+                          const float* hist, float res, float scale, float* y, void* stream) {
   if (!x || !w || !y || !n_tok || !ch || taps < 2 || taps > INK2_MAX_TAPS) return false;
-  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, w, hist, scale, y);
+  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, w, hist, res, scale, y);
   return ok();
 }
 
 extern "C" bool ink2_conv_dyn(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads,
-                              const float* w, const float* dyn, const float* hist, float scale, float* y,
+                              const float* w, const float* dyn, const float* hist, float res, float scale, float* y,
                               void* stream) {
   if (!x || !w || !dyn || !y || !n_tok || !ch || taps < 2 || taps > INK2_MAX_TAPS || !heads || ch % heads)
     return false;
   conv_dyn_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, heads, w, dyn, hist,
-                                                                             scale, y);
+                                                                             res, scale, y);
   return ok();
 }
 

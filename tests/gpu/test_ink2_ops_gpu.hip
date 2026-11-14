@@ -14,10 +14,16 @@ static const char* kCases = "%s/osmos-oracle/ink2-cases";
 
 static Ref in(const char* c, const char* a) { return ref(std::string(c) + "/" + a, kCases); }
 
-static std::vector<float> run_conv(const Ref& x, const Ref& w, uint32_t taps, float scale) {
+// res 1, scale the model's: the checkpoint's weights; res 0, scale 1: llama.cpp's (unsloth's GGUFs) - the residual and
+// the scale folded into the weights, (w + 1 at the current tap) * scale
+static std::vector<float> run_conv(const Ref& x, const Ref& w, uint32_t taps, float scale, bool folded = false) {
   const uint32_t ch = (uint32_t) x.ne[0], n = (uint32_t) x.ne[1];
-  float *dx = dev_from(x.v), *dw = dev_from(w.v), *dy = dev_alloc<float>(x.v.size());
-  CHECK(ink2_conv(dx, n, ch, taps, dw, nullptr, scale, dy, nullptr));
+  std::vector<float> wv = w.v;
+  if (folded)
+    for (uint32_t c = 0; c < ch; c++)
+      for (uint32_t j = 0; j < taps; j++) wv[c * taps + j] = (wv[c * taps + j] + (j == taps - 1 ? 1.0f : 0.0f)) * scale;
+  float *dx = dev_from(x.v), *dw = dev_from(wv), *dy = dev_alloc<float>(x.v.size());
+  CHECK(ink2_conv(dx, n, ch, taps, dw, nullptr, folded ? 0.0f : 1.0f, folded ? 1.0f : scale, dy, nullptr));
   auto y = host_of(dy, x.v.size());
   hipFree(dx), hipFree(dw), hipFree(dy);
   return y;
@@ -53,15 +59,26 @@ int main() {
        in("sliding", "k_conv_out"), 1.0, kExactRel);
   held("conv (sliding layer 0's v)", run_conv(in("sliding", "v_raw"), in("sliding", "v_conv"), 4, 1.0f / std::sqrt(5.0f)),
        in("sliding", "v_conv_out"), 1.0, kExactRel);
+  held("conv, folded (llama.cpp's weights)", run_conv(in("conv", "x"), in("conv", "w"), 4, 1.0f / std::sqrt(5.0f), true),
+       in("conv", "out"), 1.0, kExactRel);
   for (const char* kv : {"k", "v"}) {  // a full layer's dynamic conv: static taps + a head's own a token
     const std::string raw = std::string(kv) + "_raw", st = std::string(kv) + "_conv_static",
                       dy = std::string(kv) + "_conv_dyn", out = std::string(kv) + "_conv_out";
     Ref x = in("full_p0", raw.c_str()), w = in("full_p0", st.c_str()), d = in("full_p0", dy.c_str());
     const uint32_t ch = (uint32_t) x.ne[0], n = (uint32_t) x.ne[1], heads = (uint32_t) d.ne[0] / 4;
     float *dx = dev_from(x.v), *dw = dev_from(w.v), *dd = dev_from(d.v), *dout = dev_alloc<float>(x.v.size());
-    CHECK(ink2_conv_dyn(dx, n, ch, 4, heads, dw, dd, nullptr, 1.0f / 3.0f, dout, nullptr));
+    CHECK(ink2_conv_dyn(dx, n, ch, 4, heads, dw, dd, nullptr, 1.0f, 1.0f / 3.0f, dout, nullptr));
     held(("conv_dyn (full layer 5's " + std::string(kv) + ")").c_str(), host_of(dout, x.v.size()),
          in("full_p0", out.c_str()), 1.0, kExactRel);
+    std::vector<float> wf = w.v, df = d.v;  // folded: (static + 1 at tap 0) / 3, dyn / 3, no residual
+    for (uint32_t c = 0; c < ch; c++) wf[c] = (wf[c] + 1.0f) / 3.0f;
+    for (size_t i = ch; i < wf.size(); i++) wf[i] /= 3.0f;
+    for (float& x2 : df) x2 /= 3.0f;
+    float *dwf = dev_from(wf), *ddf = dev_from(df);
+    CHECK(ink2_conv_dyn(dx, n, ch, 4, heads, dwf, ddf, nullptr, 0.0f, 1.0f, dout, nullptr));
+    held(("conv_dyn, folded (full layer 5's " + std::string(kv) + ")").c_str(), host_of(dout, x.v.size()),
+         in("full_p0", out.c_str()), 1.0, kExactRel);
+    hipFree(dwf), hipFree(ddf);
     hipFree(dx), hipFree(dw), hipFree(dd), hipFree(dout);
   }
   for (const char* c : {"res1_nb1", "res1_nb8", "res3_nb1", "res3_nb8"}) {  // attn_res
