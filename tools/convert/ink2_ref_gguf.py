@@ -19,6 +19,9 @@
 - the output: <out>-0000k-of-0000N.gguf, the first every tensor not a layer's and the metadata, then whole layers to
   about --split-gb a shard; each written as .part and renamed when whole (0.8.0), a shard there skipped - a stopped run
   goes on where it was, and only the source shards its layers live in are read.
+- --delete-source (0.8.0: a disk that holds the checkpoint or the reference, not both): each source shard removed once
+  every tensor it holds is in a finished output shard; the plan written first (<out>.plan.json), so a resumed run
+  needs no header of a removed file. the whole model only (not --layers or --check).
 - names: GGUF style where one fits (blk.N.attn_q ...), Inkling's own words where none does; the map is NAMES below.
 """
 from __future__ import annotations
@@ -46,6 +49,9 @@ ap.add_argument("--out", default="", help="the output's path prefix: <prefix>-00
 ap.add_argument("--layers", default="", help="only these layers (a test), comma-separated")
 ap.add_argument("--split-gb", type=float, default=48.0)
 ap.add_argument("--check", default="", help="layers whose experts to check, decoded both ways")
+ap.add_argument("--delete-source", action="store_true",
+                help="remove each source shard once every tensor it holds is in a finished output shard (a disk "
+                     "that cannot hold both; the whole model only: the plan kept as <out>.plan.json for a resume)")
 a = ap.parse_args()
 
 # (checkpoint pattern, GGUF name); N the layer
@@ -274,6 +280,13 @@ def main():
             check(src, L)
         return
     tc = src.cfg["text_config"]
+    if a.delete_source and a.layers:
+        sys.exit("--delete-source converts the whole model only (a test's --layers would leave the rest unread)")
+    plan_path = a.out + ".plan.json"
+    if a.delete_source and os.path.exists(plan_path):   # (a resume: the source's removed shards' headers gone)
+        shards = [[tuple(e[:4]) + (gguf.GGMLQuantizationType(e[4]),) for e in plan] for plan in json.load(open(plan_path))]
+        write(src, tc, shards)
+        return
     layers = list(map(int, a.layers.split(","))) if a.layers else list(range(tc["num_hidden_layers"]))
     keys = []
     for k in src.where:
@@ -308,9 +321,6 @@ def main():
             for nm in ("gate", "up", "down"):
                 per_layer[L].append(("expert", L, f"blk.{L}.ffn_{nm}_exps.scale", [n_exp], gguf.GGMLQuantizationType.F32))
 
-    def nbytes(e):
-        bs, ts = SIZES[e[4]]
-        return int(np.prod(e[3])) // bs * ts
     shards, cur, size = [glob], [], 0
     for L in layers:
         lb = sum(map(nbytes, per_layer[L]))
@@ -321,13 +331,40 @@ def main():
         size += lb
     if cur:
         shards.append(cur)
+    if a.delete_source:
+        with open(plan_path + ".part", "w") as f:
+            json.dump([[list(e[:4]) + [int(e[4])] for e in plan] for plan in shards], f)
+        os.rename(plan_path + ".part", plan_path)
+    write(src, tc, shards)
+
+
+def nbytes(e):
+    bs, ts = SIZES[e[4]]
+    return int(np.prod(e[3])) // bs * ts
+
+
+def sources(src, plan):
+    """the source files a shard's tensors are read from: a plain tensor's own, a layer's experts' all"""
+    files = set()
+    for kind, k, *_ in plan:
+        if kind == "plain":
+            files.add(src.where[k])
+        else:
+            p = f"model.llm.layers.{k}.mlp.experts."
+            files |= {f for name, f in src.where.items() if name.startswith(p)}
+    return files
+
+
+def write(src, tc, shards):
     count = len(shards)
+    need = [sources(src, plan) for plan in shards]   # (from the index alone: no file opened)
     # pass 2: each shard a GGUF of its own, written as .part and renamed when whole - a shard already there skipped,
     # so a stopped run goes on where it was (the plan the same: the shards the same)
     for no, plan in enumerate(shards):
         path = f"{a.out}-{no + 1:05d}-of-{count:05d}.gguf"
         if os.path.exists(path):
             print(f"shard {no + 1} of {count}: there, skipped", file=sys.stderr, flush=True)
+            drop_sources(src, need, no)
             continue
         w = gguf.GGUFWriter(path + ".part", "inkling2")
         w.add_uint16("split.no", no)
@@ -365,6 +402,20 @@ def main():
         pending = {}
         os.rename(path + ".part", path)
         print(f"shard {no + 1} of {count}: {len(plan)} tensors", file=sys.stderr, flush=True)
+        drop_sources(src, need, no)
+
+
+def drop_sources(src, need, no):
+    """--delete-source: the source files no shard after `no` reads, removed (their handles closed first)"""
+    if not a.delete_source:
+        return
+    later = set().union(*need[no + 1:]) if no + 1 < len(need) else set()
+    for f in sorted(need[no] - later):
+        path = os.path.join(src.path, f)
+        if os.path.exists(path):
+            src.files.pop(f, None)
+            os.remove(path)
+            print(f"removed the source's {f} (every tensor it holds written)", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
