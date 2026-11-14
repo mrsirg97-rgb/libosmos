@@ -143,7 +143,15 @@ static void dump_float(JsonBuf *b, double f)
   json_put(b, out, o);
 }
 
-void json_dump(JsonBuf *b, const Json *j)
+/* an object's keys in code point order (their UTF-8's bytes: the same order), the shorter first on a tie */
+static int key_cmp(const Json *j, size_t a, size_t b)
+{
+  const size_t n = j->klen[a] < j->klen[b] ? j->klen[a] : j->klen[b];
+  const int c = memcmp(j->key[a], j->key[b], n);
+  return c ? c : (j->klen[a] > j->klen[b]) - (j->klen[a] < j->klen[b]);
+}
+
+void json_dump_with(JsonBuf *b, const Json *j, JsonStyle style)
 {
   switch (j->type)
   {
@@ -161,15 +169,34 @@ void json_dump(JsonBuf *b, const Json *j)
     return json_dump_string(b, j->s, j->len);
   case JSON_ARRAY:
   case JSON_OBJECT:
-    json_puts(b, j->type == JSON_ARRAY ? "[" : "{");
-    for (size_t i = 0; i < j->n; i++)
-    {
-      if (i)
-        json_puts(b, ", ");
-      if (j->type == JSON_OBJECT)
-        json_dump_string(b, j->key[i], j->klen[i]), json_puts(b, ": ");
-      json_dump(b, j->item[i]);
-    }
-    json_puts(b, j->type == JSON_ARRAY ? "]" : "}");
+    break;
   }
+  size_t stack[64], *order = j->n <= 64 ? stack : malloc(j->n * sizeof *order);
+  if (!order)
+  {
+    b->oom = true;
+    return;
+  }
+  for (size_t i = 0; i < j->n; i++) /* an insertion sort: stable, as Python's sorted */
+  {
+    size_t k = i;
+    for (; style.sort_keys && j->type == JSON_OBJECT && k > 0 && key_cmp(j, order[k - 1], i) > 0; k--)
+      order[k] = order[k - 1];
+    order[k] = i;
+  }
+  json_puts(b, j->type == JSON_ARRAY ? "[" : "{");
+  for (size_t k = 0; k < j->n; k++)
+  {
+    const size_t i = order[k];
+    if (k)
+      json_puts(b, style.compact ? "," : ", ");
+    if (j->type == JSON_OBJECT)
+      json_dump_string(b, j->key[i], j->klen[i]), json_puts(b, style.compact ? ":" : ": ");
+    json_dump_with(b, j->item[i], style);
+  }
+  json_puts(b, j->type == JSON_ARRAY ? "]" : "}");
+  if (order != stack)
+    free(order);
 }
+
+void json_dump(JsonBuf *b, const Json *j) { json_dump_with(b, j, (JsonStyle){false, false}); }

@@ -44,7 +44,14 @@ void json_free(Json *j);
 const Json *json_get(const Json *obj, const char *key);
 const char *json_str(const Json *obj, const char *key);
 
+/* json.dumps' separators and sort_keys: (",", ":") for compact, (", ", ": ") else */
+typedef struct JsonStyle
+{
+  bool compact, sort_keys;
+} JsonStyle;
+
 void json_dump(JsonBuf *b, const Json *j);
+void json_dump_with(JsonBuf *b, const Json *j, JsonStyle style);
 void json_dump_string(JsonBuf *b, const char *s, size_t len);
 size_t json_utf8_len(const unsigned char *p, size_t left);
 void json_put(JsonBuf *b, const char *s, size_t len);
@@ -71,6 +78,10 @@ json_dump
   float's shortest round-trip digits (repr: fixed from 1e-4 below 1e16, else d.dde+XX; ".0" on a whole one), an int
   its digits, a string's ", \, control characters escaped (\n \r \t \b \f, else \u00xx) and the rest raw. (DeepSeek's
   chat encoding writes tool schemas and arguments so: the prompt's bytes depend on it.)
+
+json_dump_with
+  json_dump with json.dumps' separators=(",", ":") (compact) and sort_keys (each object's keys in code point order,
+  at every depth): Inkling-2's template writes its tool declarations so.
 
 json_dump_string
   len bytes of UTF-8 as a JSON string, json_dump's escapes; each invalid sequence's maximal subpart (Unicode's, as
