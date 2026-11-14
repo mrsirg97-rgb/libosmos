@@ -3,6 +3,7 @@
 #include "block.h"
 #include "launch.h"
 #include "rope.h"
+#include "select.h"
 
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
@@ -16,7 +17,6 @@ using launches::ok;
 constexpr int kDim = Q4X_IX_DIM;  // a head's dim: a block's threads, a value a thread
 constexpr int kMaxHeads = Q4X_IX_HEADS_MAX; // the score tile's query rows (attention.indexer.head_count)
 constexpr int kTT = 16, kTB = 32; // the score tile: tokens x blocks
-constexpr int kPick = 256;        // the pick's threads: a token's
 constexpr uint64_t kScoreBudget = 4u << 20;  // the scratch's scores at least: a piece's tokens x their blocks
 constexpr uint64_t kScoreTokens = 128;       // (0.7.3) and room for this many tokens' rows (q4x_ix_scratch)
 // (0.7.3) the blocked scores from a step of this many tokens: below it its 64-token tile mostly empty - 1 token 0.8x
@@ -163,69 +163,91 @@ __global__ __launch_bounds__(kBThreads) void ix_score_blocked_kernel(const float
 }
 bool g_score_naive = false;  // (tests, qxbench: ix_score_kernel itself - q4x_ix_score_naive)
 
-// an exclusive prefix sum over the block's kPick threads, and its total
-__device__ uint32_t scan_ex(uint32_t v, uint32_t* lds, uint32_t* total) {
-  const uint32_t i = threadIdx.x;
-  lds[i] = v;
-  __syncthreads();
-  for (uint32_t o = 1; o < kPick; o <<= 1) {
-    const uint32_t a = i >= o ? lds[i - o] : 0;
-    __syncthreads();
-    lds[i] += a;
-    __syncthreads();
+// (0.7.4) a small step's scores (decode's, a verify's: up to kOneTok tokens): a block kOB pooled keys, a thread a
+// (head, key) pair - every token's dot of it, d ascending, a multiply then an add (ix_score_kernel's) - then a thread
+// a (token, key) folding the heads in order, s += relu(dot) / sqrt(kDim): ix_score_kernel's bits, all 256 threads busy
+// (that tile's at one token 16 of them)
+constexpr uint32_t kOneTok = 8, kOB = 256 / kMaxHeads;
+__global__ __launch_bounds__(256) void ix_score_small_kernel(const float* q, const float* pooled, uint32_t m,
+                                                             uint32_t heads, int32_t p0, uint32_t ratio,
+                                                             uint32_t stride, float* score) {
+  __shared__ float qs[kOneTok * kMaxHeads * kDim], ks[kOB][kDim + 1], dd[kOneTok][kMaxHeads][kOB];
+  const uint32_t tb = blockIdx.x * kOB, nv_last = (uint32_t) (p0 + (int32_t) m) / ratio;
+  if (tb >= nv_last) return;
+  const uint32_t qw = heads * kDim;
+  for (uint32_t i = threadIdx.x; i < m * qw; i += 256) qs[i] = q[i];
+  for (uint32_t i = threadIdx.x; i < kOB * kDim; i += 256) {
+    const uint32_t r = i / kDim, d = i % kDim;
+    ks[r][d] = tb + r < nv_last ? pooled[(uint64_t) (tb + r) * kDim + d] : 0.0f;
   }
-  const uint32_t inc = lds[i];
-  *total = lds[kPick - 1];
   __syncthreads();
-  return inc - v;
+  const uint32_t jl = threadIdx.x % kOB, h = threadIdx.x / kOB;
+  if (h < heads)
+    for (uint32_t t = 0; t < m; t++) {
+      float dot = 0.0f;
+      for (int d = 0; d < kDim; d++) dot += qs[t * qw + h * kDim + d] * ks[jl][d];
+      dd[t][h][jl] = dot;
+    }
+  __syncthreads();
+  const float scale = 1.0f / sqrtf((float) kDim);
+  for (uint32_t i = threadIdx.x; i < m * kOB; i += 256) {
+    const uint32_t t = i / kOB, l = i % kOB, j = tb + l;
+    if (j >= (uint32_t) (p0 + (int32_t) t + 1) / ratio) continue;
+    float s = 0.0f;
+    for (uint32_t x = 0; x < heads; x++) s += fmaxf(dd[t][x][l], 0.0f) * scale;
+    score[(uint64_t) t * stride + j] = s;
+  }
 }
 
-// a block a token: with more visible blocks than `blocks`, its top `blocks` by score (a radix select on the scores'
-// bits, non-negative floats ordered as their bits; the lower block among equals) written in block order
-__global__ __launch_bounds__(kPick) void ix_pick_kernel(const float* score, int32_t p0, uint32_t ratio,
-                                                        uint32_t blocks, uint32_t stride, int32_t* sel,
-                                                        int32_t* npick) {
-  __shared__ uint32_t hist[256], scan[kPick], found[2];
+// a block a token: with more visible blocks than `blocks`, its top `blocks` by score (non-negative floats ordered as
+// their bits; the lower block among equals) written in block order - (0.7.4) sel::select_core, DeepSeek's selection
+__global__ __launch_bounds__(sel::kSelectThreads) void ix_pick_kernel(const float* score, int32_t p0, uint32_t ratio,
+                                                                      uint32_t blocks, uint32_t stride, int32_t* out,
+                                                                      int32_t* npick) {
   const uint32_t t = blockIdx.x, nv = (uint32_t) (p0 + (int32_t) t + 1) / ratio;
   if (nv <= blocks) {
     if (threadIdx.x == 0) npick[t] = (int32_t) nv;
     return;
   }
   const uint32_t* key = (const uint32_t*) (score + (uint64_t) t * stride);
-  uint32_t prefix = 0, mask = 0, remaining = blocks;  // the keys above prefix taken; remaining still to take
-  for (int shift = 24; shift >= 0; shift -= 8) {
-    hist[threadIdx.x] = 0;
-    __syncthreads();
-    for (uint32_t j = threadIdx.x; j < nv; j += kPick)
-      if ((key[j] & mask) == prefix) atomicAdd(&hist[(key[j] >> shift) & 255], 1u);
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      uint32_t above = 0;
-      for (int b = 255; b >= 0; b--) {
-        if (above + hist[b] >= remaining) {
-          found[0] = prefix | ((uint32_t) b << shift), found[1] = remaining - above;
-          break;
-        }
-        above += hist[b];
-      }
-    }
-    __syncthreads();
-    prefix = found[0], remaining = found[1], mask |= 255u << shift;
-    __syncthreads();
+  int32_t* row = out + (uint64_t) t * blocks;
+  sel::select_core(nv, blocks, [&](uint32_t j) { return key[j]; }, [&](uint32_t j, uint32_t slot) { row[slot] = (int32_t) j; });
+  if (threadIdx.x == 0) npick[t] = (int32_t) blocks;
+}
+
+// (0.7.4) a small step's pick on many blocks: each of sel::kChunks chunks' top `blocks` (ix_chunk_kernel), then the
+// top `blocks` of those (ix_merge_kernel) - the same blocks, in the same order (attn.hip's chunk_kernel)
+__global__ __launch_bounds__(sel::kSelectThreads) void ix_chunk_kernel(const float* score, int32_t p0, uint32_t ratio,
+                                                                       uint32_t blocks, uint32_t stride) {
+  const uint32_t m = blockIdx.x, t = blockIdx.y, nv = (uint32_t) (p0 + (int32_t) t + 1) / ratio;
+  if (nv <= blocks) return;  // ix_merge_kernel's: every block
+  const uint32_t per = (nv + sel::kChunks - 1) / sel::kChunks, lo = min(nv, m * per), hi = min(nv, lo + per);
+  const uint32_t* key = (const uint32_t*) (score + (uint64_t) t * stride);
+  uint32_t* ck = sel::g_ckey + ((uint64_t) t * sel::kChunks + m) * sel::kChunkK;
+  uint32_t* ci = sel::g_citem + ((uint64_t) t * sel::kChunks + m) * sel::kChunkK;
+  const uint32_t got = sel::select_core(hi - lo, blocks, [&](uint32_t c) { return key[lo + c]; },
+                                        [&](uint32_t c, uint32_t slot) { ck[slot] = key[lo + c], ci[slot] = lo + c; });
+  if (threadIdx.x == 0) sel::g_ccount[t * sel::kChunks + m] = got;
+}
+
+__global__ __launch_bounds__(sel::kSelectThreads) void ix_merge_kernel(int32_t p0, uint32_t ratio, uint32_t blocks,
+                                                                       int32_t* out, int32_t* npick) {
+  __shared__ uint32_t off[sel::kChunks + 1];
+  const uint32_t t = blockIdx.x, nv = (uint32_t) (p0 + (int32_t) t + 1) / ratio;
+  if (nv <= blocks) {
+    if (threadIdx.x == 0) npick[t] = (int32_t) nv;
+    return;
   }
-  // prefix: the blocks-th greatest key; every key above it taken, and the first `remaining` equal to it
-  uint32_t out = 0, eq_seen = 0;
-  int32_t* row = sel + (uint64_t) t * blocks;
-  for (uint32_t base = 0; base < nv; base += kPick) {
-    const uint32_t j = base + threadIdx.x, k = j < nv ? key[j] : 0;
-    const uint32_t gt = j < nv && k > prefix, eq = j < nv && k == prefix;
-    uint32_t n_eq, n_take;
-    const uint32_t eq_before = scan_ex(eq, scan, &n_eq);
-    const uint32_t take = gt || (eq && eq_seen + eq_before < remaining);
-    const uint32_t at = scan_ex(take, scan, &n_take);
-    if (take) row[out + at] = (int32_t) j;
-    out += n_take, eq_seen += n_eq;
+  if (threadIdx.x == 0) {
+    off[0] = 0;
+    for (uint32_t m = 0; m < sel::kChunks; m++) off[m + 1] = off[m] + sel::g_ccount[t * sel::kChunks + m];
   }
+  __syncthreads();
+  const uint32_t* ck = sel::g_ckey + (uint64_t) t * sel::kChunks * sel::kChunkK;
+  const uint32_t* ci = sel::g_citem + (uint64_t) t * sel::kChunks * sel::kChunkK;
+  int32_t* row = out + (uint64_t) t * blocks;
+  sel::select_core(off[sel::kChunks], blocks, [&](uint32_t i) { return ck[sel::chunk_slot(off, i)]; },
+                   [&](uint32_t i, uint32_t slot) { row[slot] = (int32_t) ci[sel::chunk_slot(off, i)]; });
   if (threadIdx.x == 0) npick[t] = (int32_t) blocks;
 }
 
@@ -273,7 +295,7 @@ extern "C" bool q4x_ix_pick(const float* q, const float* pooled, uint32_t n_tok,
     return false;
   const uint32_t nv_max = (uint32_t) (pos0 + (int32_t) n_tok) / ratio;  // the step's last token's
   if (nv_max <= blocks) {  // every token's every block: no score
-    ix_pick_kernel<<<n_tok, kPick, 0, st(stream)>>>(scratch, pos0, ratio, blocks, 0, sel, npick);
+    ix_pick_kernel<<<n_tok, sel::kSelectThreads, 0, st(stream)>>>(scratch, pos0, ratio, blocks, 0, sel, npick);
     return ok();
   }
   if (scratch_floats < nv_max) return false;
@@ -283,7 +305,10 @@ extern "C" bool q4x_ix_pick(const float* q, const float* pooled, uint32_t n_tok,
     const int32_t p0 = pos0 + (int32_t) t0;
     const uint32_t nv = (uint32_t) (p0 + (int32_t) n) / ratio;
     if (nv > blocks) {
-      if (g_score_naive || n < kBlockedFrom)  // a small step (decode, a verify) the plain kernel's: faster there
+      if (!g_score_naive && n <= kOneTok)  // (0.7.4) decode's, a verify's: the small step's kernel
+        ix_score_small_kernel<<<(nv + kOB - 1) / kOB, 256, 0, st(stream)>>>(q + (uint64_t) t0 * heads * kDim, pooled,
+                                                                          n, heads, p0, ratio, nv, scratch);
+      else if (g_score_naive || n < kBlockedFrom)  // a small step the plain kernel's: faster there than the blocked
         ix_score_kernel<<<dim3((nv + kTB - 1) / kTB, (n + kTT - 1) / kTT), 256, 0, st(stream)>>>(
             q + (uint64_t) t0 * heads * kDim, pooled, n, heads, p0, ratio, nv, scratch);
       else
@@ -291,8 +316,15 @@ extern "C" bool q4x_ix_pick(const float* q, const float* pooled, uint32_t n_tok,
             q + (uint64_t) t0 * heads * kDim, pooled, n, heads, p0, ratio, nv, scratch);
       if (!ok()) return false;
     }
-    ix_pick_kernel<<<n, kPick, 0, st(stream)>>>(scratch, p0, ratio, blocks, nv, sel + (uint64_t) t0 * blocks,
-                                                npick + t0);
+    if (sel::chunked(n, nv, blocks)) {
+      ix_chunk_kernel<<<dim3(sel::kChunks, n), sel::kSelectThreads, 0, st(stream)>>>(scratch, p0, ratio, blocks, nv);
+      if (!ok()) return false;
+      ix_merge_kernel<<<n, sel::kSelectThreads, 0, st(stream)>>>(p0, ratio, blocks, sel + (uint64_t) t0 * blocks,
+                                                                  npick + t0);
+    } else {
+      ix_pick_kernel<<<n, sel::kSelectThreads, 0, st(stream)>>>(scratch, p0, ratio, blocks, nv,
+                                                                 sel + (uint64_t) t0 * blocks, npick + t0);
+    }
     if (!ok()) return false;
   }
   return true;

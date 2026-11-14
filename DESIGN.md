@@ -1822,6 +1822,36 @@ tests (each seen to fail first, or by a mutation):
   1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
   repeated text are not the mask's test; the probes above are.
 
+## 0.7.4: decode at depth - the small step's selection and scores (2026-11-14)
+
+Decode had never been measured past 64K. The baseline (`low-power`, 64 greedy tokens after one prompt each; evo-A at
+1M, Qwen UD-IQ3_XXS at 512K): DeepSeek 15.3 / 14.9 / 14.7 tok/s at 65K / 262K / 523K, Qwen 22.3 / 17.4 / 14.2 at 65K /
+261K / 457K. DeepSeek's step is mostly its experts' reads, so depth cost it 4%; Qwen's indexer scores and picks every
+block at every QSA layer, so 36%. At one token the indexer's kernels idled most of the GPU:
+
+- the top k ran one workgroup a token (2.5 ms at 1M rows, ixbench IX_T=1). now `kernels/select.h`: select_core (the
+  radix passes, the LDS gather, the coalesced output pass - 0.7.3's body, a key and an emit callable), and for a step
+  of up to 16 tokens over at least 4 x 32 x k items, 32 chunks a token each taking its k highest (key, then the lower
+  item) with their keys in item order, then one block's k highest of those. exact: an item of the whole's top k has
+  fewer than k items ahead of it in the whole, so fewer in its chunk; the candidates in item order, so the output
+  order the one block's. the chunks' scratch one per library (static `__device__`): a chunked selection's two kernels
+  on one stream, never two at once (DeepSeek's selections in a layer's order; Qwen's pick on the side stream joined
+  before the next layer). 1M rows: 2.53 -> 0.21 ms plain, 2.13 -> 0.36 masked; the picks' hashes the one block's
+  (OSMOS_SELECT_ONE=1). candidate blocks (2,048 of a 1M-row token's 131K) stay one block: under the threshold.
+- Qwen's pick on select_core (its 256-thread pick had no LDS gather and two scans a tile): the same blocks.
+- dot4's 4-token tile at one token: 3/4 idle. a one-token tile, 256 rows a block (a thread's two groups rows g * 128
+  + tp * 64 + tx * 4 where the 4-token tile has its 2 tokens), every element the same sum: 2.41 -> 0.78 ms at 1M.
+  NT 2 for it (512 rows a block). a verify (5-6 tokens): an 8-token tile of 512 threads (the keys read once) measured
+  1.0x two 4-token blocks - ALU-bound, removed; the second block's waves past n_tok skipping their sums: 5.16 -> 4.22.
+- Qwen's scores at a small step (up to 8 tokens): ix_score_kernel's tile 16 tokens x 32 blocks, 16 of 256 threads at
+  one token. ix_score_small_kernel: 64 blocks a block, a thread a (head, block) - each token's dot d ascending, a
+  multiply then an add (-ffp-contract=off: the same rounding) - then a thread a (token, block) folding the heads in
+  order: 0 bits differ (qxbench). with the pick: 2.86 -> 0.88 ms a token a layer at 511K.
+
+End to end, the six streams' token hashes 0.7.3's; DeepSeek 15.3 / 15.4 / 15.9, Qwen 23.9 / 21.3 / 20.2. (DeepSeek's
+523K faster than its 65K: the same order in both runs - a later point's expert cache warmer, the indexer no longer
+growing with depth.)
+
 ## 0.7.3: the candidate layers score only their candidates (2026-11-13)
 
 issue #47's trace read a 1M-token conversation on both engines: osmos even with maya to ~300K, then slower - at 535K

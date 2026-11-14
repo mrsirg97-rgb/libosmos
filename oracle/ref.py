@@ -365,6 +365,8 @@ class Ref:
                 dump.append(h.cpu().numpy())
             self.timing[li] = time.time() - t0
         x = rms(self.hc_pre(h, pre), self.V("norm.weight"), self.eps)
+        if getattr(self, "head_rows", None) is not None:              # osmos: the head over some rows only (long texts)
+            x = x[self.head_rows]
         head = self.W("head")
         return x @ head.T                                                  # [T, vocab]
 

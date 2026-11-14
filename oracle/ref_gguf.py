@@ -282,9 +282,33 @@ def main() -> int:
     ap.add_argument("--dump", help="write the per-layer residual streams, the logits and the ids (.npz)")
     ap.add_argument("--no-hs", action="store_true", help="--dump without the per-layer residual streams")
     ap.add_argument("--dev", default="cuda:0")
+    # osmos: a long text's scored rows as tools/bench/kld's reference (RefHead, then each row's log-probabilities) -
+    # the rows r with mask[r + 1], the head over them only; --ids @file reads the ids from a file (comma separated)
+    ap.add_argument("--mask", help="kld's MASK file (with --ref-out)")
+    ap.add_argument("--ref-out", help="the masked rows' log-probs, kld's REF format (and <ref-out>.maya: nll, argmax)")
     a = ap.parse_args()
-    ids = [int(x) for x in a.ids.split(",")]
-    r = RefGguf(pathlib.Path(a.pack).expanduser(), a.dev)
+    src = pathlib.Path(a.ids[1:]).read_text() if a.ids.startswith("@") else a.ids
+    ids = [int(x) for x in src.replace("\n", "").split(",") if x.strip()]
+    r = RefGguf(pathlib.Path(a.pack).expanduser(), a.dev, max(8192, len(ids)))
+    if a.ref_out:
+        import struct
+        mask = [int(x) for x in pathlib.Path(a.mask).read_text().split(",") if x.strip()][:len(ids)]
+        rows = [i for i in range(len(ids) - 1) if mask[i + 1]]
+        r.head_rows = torch.tensor(rows, device=a.dev)
+        t0 = time.time()
+        logits = r.forward(ids, None)
+        print("forward %.1fs (%d tokens, %d rows)" % (time.time() - t0, len(ids), len(rows)), flush=True)
+        with open(a.ref_out, "wb") as f, open(a.ref_out + ".maya", "wb") as m:
+            V = logits.shape[1]
+            f.write(b"osmosref" + struct.pack("<4I", V, len(ids), 0, len(rows)))
+            nll = 0.0
+            for k, i in enumerate(rows):
+                lp = torch.log_softmax(logits[k].double(), -1)
+                f.write(lp.float().cpu().numpy().tobytes())
+                m.write(struct.pack("<fi", float(-lp[ids[i + 1]]), int(lp.argmax())))
+                nll -= float(lp[ids[i + 1]])
+        print("ppl over %d rows: %.4f" % (len(rows), math.exp(nll / len(rows))))
+        return 0
     print("tokens:", len(ids), ids[:32], flush=True)
     dump = [] if a.dump and not a.no_hs else None
     t0 = time.time()

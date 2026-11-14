@@ -390,12 +390,42 @@ static void dot4(uint32_t heads, int wild) {
   if (bad) std::printf("  dot4: %llu of %llu scores differ\n", (unsigned long long) bad, (unsigned long long) n);
   CHECK(!bad);
   CHECK(wild ? nfb > 0 : nfb == 0);
+  // 0.7.4: a one-token step (decode's) on its own tile, a verify's 5 and 6 (its second tile's dead waves skipping) - a
+  // few windows of tokens alone, the plain kernel's bits; and the 4-token tile's at one token (ops_index_score_dot4_four)
+  uint64_t one = 0;
+  for (int four = 0; four < 2; four++) {
+    ops_index_score_dot4_four(four);
+    for (uint32_t width : {1u, 5u, 6u})
+      for (uint32_t t : {0u, kIxTok / 2, kIxTok - width}) {
+        CHECK(hipMemset(sb, 0x7F, scb) == hipSuccess);
+        CHECK(ops_index_score_dot4(q + (size_t) t * heads * kIxHd, kp, w + (size_t) t * heads, pos + t, kIxRatio, rows,
+                                   heads, kIxHd, width, sb, stride, nullptr, nullptr));
+        CHECK(hipMemcpy(b.data(), sb, (size_t) width * stride * 4, hipMemcpyDeviceToHost) == hipSuccess);
+        for (uint32_t i = 0; i < width; i++) {
+          const size_t vis = (size_t) (ph[t + i] + 1) / kIxRatio;
+          if (std::memcmp(&a[(size_t) (t + i) * stride], &b[(size_t) i * stride], vis * 4)) {
+            std::printf("  dot4: tokens %u .. %u (%s tile): token %u's scores differ\n", t, t + width - 1,
+                        four ? "4-token" : "its own", t + i);
+            CHECK(false);
+          }
+          for (size_t c = vis; c < stride; c++) {  // past its rows unwritten
+            uint32_t u;
+            std::memcpy(&u, &b[(size_t) i * stride + c], 4);
+            CHECK(u == 0x7F7F7F7Fu);
+          }
+          one += vis;
+        }
+      }
+  }
+  ops_index_score_dot4_four(false);
   for (void* p : {(void*) q, (void*) k, (void*) kp, (void*) w, (void*) sa, (void*) sb, (void*) pos, (void*) fb})
     CHECK(hipFree(p) == hipSuccess);
   std::printf("  the indexer on int8 dots (FP4 q and keys), %u heads%s: %llu scores the plain kernel's bits (%u of %llu"
               " head sums the sequential fallback's)\n",
               heads, wild == 1 ? ", q blocks 2^20 apart" : wild == 2 ? ", E's past +-55" : wild == 3 ? ", products past the normal range" : "", (unsigned long long) n,
               nfb, (unsigned long long) n * heads);
+  std::printf("    and a step of 1, 5, 6 tokens (their own tiles and the 4-token tile): %llu scores the same\n",
+              (unsigned long long) one);
 }
 
 int main() {
