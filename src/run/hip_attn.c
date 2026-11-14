@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stdlib.h>
 
 #include <hip/hip_runtime_api.h>
 
@@ -132,21 +133,38 @@ static bool select_rows(Forward *f, int l, int src, char *err)
   {
     const uint32_t cn = n - c0 < f->score_rows ? n - c0 : f->score_rows;
     uint32_t *cand = W ? b->cand + (uint64_t)c0 * W : NULL; /* this chunk's bits (none: max_ctx under the blocks) */
+    /* a masked layer: only the kept blocks' rows scored (0.7.3; ops_topk reads no other row's score) - the chunk's
+       tokens' blocks listed from their bits, each kept row's score the bits the full scoring gives it */
+    const uint32_t CB = (uint32_t)g->cand_blocks, blk = (uint32_t)g->cand_block;
+    ok = ok && (!masked || ops_cand_list(cand, W, cn, b->clist, CB, b->clist_n, NULL));
     for (uint32_t i = c0, run; ok && i < c0 + cn; i += run) /* a launch a run of one sequence's tokens */
     {
       for (run = 1; i + run < c0 + cn && f->bs[i + run] == f->bs[i]; run++)
         ;
       const uint32_t max_n = (uint32_t)(f->pin->pos[i + run - 1] + 1) / ratio; /* a run's positions ascend */
-      ok = !max_n || ops_index_score(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], KV_FP4_POW2,
-                                     b->wix + (uint64_t)i * nh, b->pos + i, ratio, max_n, nh, ih, run,
-                                     b->score + (uint64_t)(i - c0) * f->score_stride, f->score_stride, NULL);
+      float *sc = b->score + (uint64_t)(i - c0) * f->score_stride;
+      ok = !max_n ||
+           (masked ? ops_index_score_rows(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], KV_FP4_POW2,
+                                          b->wix + (uint64_t)i * nh, b->pos + i, ratio,
+                                          b->clist + (uint64_t)(i - c0) * CB, b->clist_n + (i - c0), CB, blk, nh, ih,
+                                          run, sc, f->score_stride, NULL)
+                   : ih == 128 /* (0.7.4) the int8 dots' (ops_index_score_dot4): the same bits, 2.4x the speed */
+                   ? ops_index_score_dot4(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh,
+                                          b->pos + i, ratio, max_n, nh, ih, run, sc, f->score_stride, NULL, NULL)
+                   : ops_index_score_fp4(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh,
+                                         b->pos + i, ratio, max_n, nh, ih, run, sc, f->score_stride, NULL, NULL));
     }
     ok = ok && (l != g->cand_source || !need ||
-                ops_cand_blocks(b->score, f->score_stride, b->pos + c0, ratio, (uint32_t)g->cand_block,
-                                (uint32_t)g->cand_blocks, cn, cand, W, NULL));
-    ok = ok && ops_topk(b->score, f->score_stride, b->pos + c0, ratio, (uint32_t)g->ix_topk,
-                        masked ? cand : NULL, (uint32_t)g->cand_block, W, cn,
-                        b->sel + (uint64_t)c0 * OPS_MAX_SELECT, OPS_MAX_SELECT, b->n_sel + c0, NULL);
+                ops_cand_blocks_max(b->score, f->score_stride, b->pos + c0, ratio, (uint32_t)g->cand_block,
+                                    (uint32_t)g->cand_blocks, cn, cand, W, b->bmax,
+                                    (f->score_stride + blk - 1) / blk, NULL));
+    /* a masked layer's top k over its listed rows (ops_topk_rows: the rows ops_topk takes under the bits) */
+    ok = ok && (masked ? ops_topk_rows(b->score, f->score_stride, b->pos + c0, ratio, (uint32_t)g->ix_topk, b->clist,
+                                       b->clist_n, CB, blk, cn, b->sel + (uint64_t)c0 * OPS_MAX_SELECT,
+                                       OPS_MAX_SELECT, b->n_sel + c0, NULL)
+                       : ops_topk(b->score, f->score_stride, b->pos + c0, ratio, (uint32_t)g->ix_topk, NULL,
+                                  (uint32_t)g->cand_block, W, cn, b->sel + (uint64_t)c0 * OPS_MAX_SELECT,
+                                  OPS_MAX_SELECT, b->n_sel + c0, NULL));
   }
   if (ok && l == g->cand_source && need)
     fwd_probe(f, "cand", l, f->at, b->cand, (uint64_t)n * f->cand_words, true);

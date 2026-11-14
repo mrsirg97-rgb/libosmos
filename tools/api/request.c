@@ -76,7 +76,7 @@ static bool sampled(const Json *v, double greedy)
   return x != greedy;
 }
 
-bool request_read(const Json *body, const Dialect *d, Request *r, char err[API_ERR])
+bool request_read(const Json *body, const Dialect *d, bool fill_orphans, Request *r, char err[API_ERR])
 {
   memset(r, 0, sizeof *r);
   r->preserve = true;
@@ -115,7 +115,29 @@ bool request_read(const Json *body, const Dialect *d, Request *r, char err[API_E
   if ((et && et->type == JSON_FALSE) || (eff && eff->type == JSON_STRING && !strcmp(eff->s, "none")) ||
       (th && json_str(th, "type") && !strcmp(json_str(th, "type"), "disabled")))
     r->mode = CHAT_PLAIN;
-  if (!d->read(body, r, err))
+  /* 0.7.3 (#47): the history's loop signals; its orphaned calls given a placeholder result only when asked (the
+     request's osmos.fill_orphans, else the pack's) - else the prompt is the template's of what was sent */
+  loop_read(msgs, &r->loop);
+  const Json *os = json_get(body, "osmos"), *fo = json_get(os, "fill_orphans");
+  if (os && os->type != JSON_OBJECT && os->type != JSON_NULL)
+    return request_fail(err, "osmos: an object (its fill_orphans)");
+  if (fo && fo->type != JSON_TRUE && fo->type != JSON_FALSE && fo->type != JSON_NULL)
+    return request_fail(err, "osmos.fill_orphans: true or false");
+  const bool fill = fo && fo->type != JSON_NULL ? fo->type == JSON_TRUE : fill_orphans;
+  Json *filled = NULL;
+  if (fill && r->loop.n_orphan_calls)
+  {
+    char jerr[JSON_ERR];
+    JsonBuf b = {0};
+    filled = loop_fill(body, &b) ? json_parse(b.p, b.n, jerr) : NULL;
+    free(b.p);
+    if (!filled)
+      return request_fail(err, "out of memory (the orphans' results)");
+    r->loop.filled = true;
+  }
+  const bool read = d->read(filled ? filled : body, r, err);
+  json_free(filled);
+  if (!read)
     return request_free(r), false;
   const Json *mt = json_get(body, "max_completion_tokens");
   if (!mt || mt->type == JSON_NULL)

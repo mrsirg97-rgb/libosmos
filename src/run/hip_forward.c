@@ -474,6 +474,9 @@ static bool scratch(Forward *f)
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
       {&b->ridx, S * K * 4},      {&b->sel, B * Fs * 4},            {&b->n_sel, B * 4},
       {&b->cand, B * f->cand_words * 4},
+      {&b->clist, f->cand_words ? (uint64_t)f->score_rows * (uint64_t)g->cand_blocks * 4 : 0},
+      {&b->clist_n, f->cand_words ? (uint64_t)f->score_rows * 4 : 0},
+      {&b->bmax, f->cand_words ? (uint64_t)f->score_rows * ((f->score_stride + g->cand_block - 1) / g->cand_block) * F : 0},
       {&b->rwp, P * F},                 {&b->x16, B * (widest > egv ? widest : egv) * 2},
       /* past the last slot, a part's tiles read whole: group_gemm_kernel loads a block's every column tile's x (the
          WMMAs past an expert's tokens skipped), up to 8 tiles past its own - as Qwen's (src/q4x/hip_forward.c) */

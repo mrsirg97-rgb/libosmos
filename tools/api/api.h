@@ -67,7 +67,9 @@ typedef struct Http
 
 int http_read(Http *h, char err[API_ERR]);
 bool http_send(int fd, int status, const char *type, const char *body, size_t n);
+bool http_send_h(int fd, int status, const char *type, const char *body, size_t n, const char *head);
 bool http_stream_open(int fd);
+bool http_stream_open_h(int fd, const char *head);
 bool http_stream_event(int fd, const char *data, size_t n);
 bool http_error(int fd, int status, const char *message);
 void http_linger(int fd, bool wait);
@@ -80,6 +82,7 @@ typedef struct Api
   const struct Dialect *d; /* the model family's chat */
   char model[128];
   int32_t eos;
+  bool fill_orphans; /* the pack's fill_orphans: a request's osmos.fill_orphans unset, this */
 } Api;
 
 void api_chat(Api *a, Http *h);

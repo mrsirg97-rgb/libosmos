@@ -1822,6 +1822,121 @@ tests (each seen to fail first, or by a mutation):
   1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
   repeated text are not the mask's test; the probes above are.
 
+## 0.7.3: the candidate layers score only their candidates (2026-11-13)
+
+issue #47's trace read a 1M-token conversation on both engines: osmos even with maya to ~300K, then slower - at 535K
+104 tok/s against maya's 163, the gap growing with the context. the indexer's work a token at position p: layers
+2/8/14 (ratio 2) p/2 rows each, layer 20 p, and the candidate layers 24/28/32/36 p each - scored whole, then masked
+to their 16,384 candidates (above: ops_topk reads a masked row's key as -inf, never its score). 6.5p rows a token, 4p
+of them thrown away; maya scores the candidate layers' candidates alone (ds4_model.cu's `uses_cand` path: the
+candidate list, cand_topk x cand_blk rows). at 1M: 6.5M rows a token against 2.6M.
+
+here: ops_cand_list turns a token's bits into its kept blocks' ids (ascending, a block a token: popcounts' prefix),
+and ops_index_score_rows is ops_index_score's kernel over them - one template, `GATHER`, a tile a token (TOK 1: a
+token's rows its own), its 64 rows 8 kept blocks', each score written at its row. a (token, head, row)'s sums are the
+plain tile's (d ascending, a multiply then an add, relu x w, the heads' 32-lane xor tree): every kept row's score the
+bits the whole scoring gives it, the rest unwritten - ops_topk reads none of them - so the selection is the same, and
+every bit after it. select_rows: a masked layer lists its chunk's tokens' blocks (from the bits as they are there,
+after the decoder's compaction gathered them) and scores those.
+
+tests: test_attn_gpu's `gathered` (a ratio-1 source of 40,000 rows, 7 tokens keeping a random 2,048 of their blocks,
+their own last always; 32 and 24 heads): the list the bits' blocks; 114,667 kept scores the whole scoring's bits,
+165,312 other rows untouched; ops_topk under the mask the same rows from either. test_cand_gpu (the forward's masks,
+aligned past the compaction) passes. end to end: the plain 1M stream to 264K, its 65K and 262K windows (4,000 rows)
+the old build's NLL and argmax bit for bit; the read 15.7 min against 18.3 (the gain the deeper the read: the
+candidate layers 16x less scoring at 262K, 64x at 1M).
+
+## 0.7.3: the indexer at depth - the top k, the block keys, the fused sums (2026-11-13)
+
+after the candidate layers (above), a 1M read on the first fix still fell from ~300 tok/s to 68 at 896K: what was
+left grows with the context - layers 2/8/14/20 score every row, and every index layer selects over them.
+tools/bench/ixbench timed the kernels at 1M's shapes (128 tokens a call: FWD_SCORE_BYTES over a 1M row's 4 MB):
+
+- **the top k's loads**: its counting and output passes gave a thread a run of ~1,000 of a token's scores, so a
+  wave's lanes read 32 lines 4 KB apart - past the cache (4 MB a token, many in flight) superlinear: 15, 50, 376 ms
+  at 256K, 512K, 1M rows. now one pass in index order, a tile of 1,024 items (item base + tid: coalesced), each item's
+  higher and equal ones before it from its wave's ballots and the waves' prefix: taken when higher, or equal with
+  fewer than `need` before it, into slot (higher before) + min(equal before, need) - the rows and their order the
+  per-thread runs gave. 376 -> 28 ms at 1M. then its radix passes 2-4 over the first pass's bin, gathered into LDS
+  (8,192 keys; past them the full scans): the same items counted, 28 -> 20 ms.
+- **the candidate layers' top k** over their listed rows (ops_topk_rows: the rows ops_topk takes under the same
+  blocks' bits - a masked row is -inf, never taken while the kept rows hold k): 17 -> 0.9 ms at 1M.
+- **the block keys**: layer 20's candidate selection folded a block's 8 scores for its key in each of its passes;
+  ops_cand_blocks_max folds them once (from -inf, fmaxf in row order - a +0 and a -0 met in the same order, though
+  on gfx1151 the order measured not to matter) into p / 8 keys the selection reads. 16 -> 11 ms at 1M.
+- **the fused sums**: q (ops_fp4_round, a power of two a 32) and the keys are FP4 values - 2 bits of mantissa each -
+  so a product is exact, and fma(q, k, a) rounds as round(q k) + a does. ops_index_score_fp4 fuses them: the same
+  bits; a (slot, row) whose products could leave the normal range (its smallest nonzero |q| x |k| under 2^-126, its
+  largest at 2^127: tracked as the values are staged) summed the multiply-then-add way. at 4 tokens a tile (of 1, 2,
+  4) 1.10-1.18x - not the 2x half the instructions promised: the kernel is held by its LDS reads (12 values a thread
+  for 32 products), not its arithmetic. 8 x 8 and 16 x 4 values a thread spilled their accumulators: 15x slower.
+- **not kept**: the scores on the WMMAs (each 32-block's dot an iu8 WMMA's exact integer, scaled, the sequential sum's
+  bits where the blocks' scales are within 9 powers, a guard's fallback otherwise - bit-identical, mutation-tested)
+  measured 3-6x slower as written: each 64-row tile re-staged and re-converted its queries. on branch ix2-073-wmma,
+  for a redesign that converts q once and streams the keys.
+
+each checked: test_attn_gpu (the fused sums against the plain kernel's bits, typical and with products past the
+normal range - the guard off, the bits differ), test_select_gpu (the coalesced top k, the list's and the folded
+keys' against the host's, ties everywhere; -0s among the zeros), and end to end: the plain 1M stream to 264K on
+UD-IQ2_XXS, its 4,000 scored rows' NLL and argmax the old engine's bit for bit (15.0 min, from 18.3; with the int8
+dots below 13.4). the 1M read (the recall stream, evo-A, budget auto, steps of 4,096): 89.5 min with these, from
+141.5 on the first fix (UD-IQ2_XXS) - 322, 205, 164, 157, 136 tok/s at 128K, 512K, 768K, 896K, 992K; with the int8
+dots below 67.7 min - 341, 266, 232, 218, 212 - its 84 scored rows the 89.5-minute run's byte for byte.
+
+## 0.7.3: Qwen's QSA indexer at depth (2026-11-13)
+
+Qwen's long reads slowed the same way (751 tok/s at 64K, 341 at 416K): its indexer (QSA: blocks of 4 positions, a
+token's top 512, 4 heads x 128) scores every block a token sees - 128K at 512K, on each of its 12 QSA layers -
+~0.18 ms a token a layer there (tools/bench/qxbench), the whole of the slowdown. ix_score_kernel gave each thread a
+whole dot product, two LDS reads a product (~0.37 TFLOPS). now ix_score_blocked_kernel: a tile of 64 tokens x 64
+blocks, 256 threads, a thread 4 tokens x 4 blocks x the 4 heads (64 sums in registers), d staged 16 at a time - 20
+LDS reads for 64 products; each dot over d ascending, a multiply then an add, the heads folded in order (a head
+past `heads` adds 0): ix_score_kernel's bits, kept as the reference (q4x_ix_score_naive, for tests and qxbench). and
+the scores' scratch: its 4M-float floor gave 32-token pieces at 512K, the new tile half empty and a step's scores in
+8 launches - room for 128 tokens' rows (67 MB at 512K, 134 at 1M): 31.6 -> 15.9 ms a 256-token step at 511K (32 /
+64 / 128 / 256 tokens: 31.6, 17.6, 15.9, 15.6). together 44.2 -> 15.9 ms there, 0 of ~3.4M scores differing, the
+picks the same; test_q4x_qsa_gpu (llama.cpp's tensors and the double's picks, exactly) ok. end to end, the 457K
+recall stream: its 98 scored rows byte for byte the old kernel's; 12.3 min from 16.5 (751, 751, 649, 546, 512 tok/s
+at 64K, 128K, 256K, 384K, 416K - from 751, 614, 478, 375, 341).
+
+the blocked scores only from a step of 32 tokens: a decode or a verify step (1 .. 9 tokens) fills one 64-token tile
+with 1 .. 9 - measured (qxbench QX_N) the plain kernel's 0.8x the time at 1 token, 0.9x at 16, then the blocked
+1.4x at 32 and 2.1x at 64 (511K; the same at 64K and 256K). so q4x_ix_pick takes ix_score_kernel below 32 tokens a
+piece, ix_score_blocked_kernel from 32 (kBlockedFrom) - the bits the same either way; the prompt's pieces (128
+tokens at 512K) the blocked kernel's. found by a read of the decode path before release (decode at 512K would have
+been ~8 ms a token slower: 12 layers x ~0.7 ms).
+## 0.7.3: the indexer's scores on int8 dots (2026-11-13)
+
+ops_index_score_fp4 (the fused kernel) is bound by its LDS reads: a thread reads 12 staged floats for 32 fmas, and
+the fma itself bought only 1.04-1.18x; a larger thread block (8 x 8, 16 x 4) spills. at 1M it is ~3.6 ms of a ~7.4 ms
+token. both its operands are FP4 under a power of two a 32: a value I 2^E, I an integer of -12 .. 12 - so a head's
+32-value block dot is an integer (|sum| <= 32 x 144) times 2^(Eq + Ek), 8 v_dot4_i32_iu8 of 4 int8 codes a word.
+ops_index_score_dot4 keeps the fused kernel's tile (4 tokens x 32 heads by 64 rows, 8 x 4 a thread) but stages the
+codes (q's from its F32 values: E the block's largest |value|'s exponent - 3, each value checked I 2^E with |I| <= 12;
+the keys' through two byte permutes, a table a sign) and a 2^E a (slot or row, block): a quarter of the LDS reads a
+product, the 4 blocks' integers then added in F32 (an exact fma each). the heads' tree is laid in the thread: a thread
+holds a token's heads j, j + 8, j + 16, j + 24 (j its lane's low 3 bits), so the tree's +16 and +8 are its own adds,
++4 +2 +1 lane shuffles - no [slot][row] sums in LDS, so q stays staged over 8 row tiles (512 rows) a block.
+
+exactness: the plain kernel's sum (d ascending, F32) is exact when the blocks where both q and key hold a nonzero
+code have Eq + Ek within 9 of each other (every partial sum under 2^24 of the smallest one's unit: 4 x 4608 x 2^9
+< 2^24) and every E within +-55 (no product or sum leaves the normal range); then the block path is exact too, so the
+same bits. a thread tests its slots' spreads plus its rows' against 9 (q's once, a tile's keys each tile); past it,
+each element's own blocks; one outside (or a q block off the grid, a NaN scale even on an all-zero block) is summed
+the plain way from global memory, counted into fallbacks. the guard is the dropped WMMA attempt's (ix2-073-wmma
+2a83b4a), the bound the same. v_dot4_i32_iu8 is half rate on gfx1151 (3.46 T lane-ops/s against the fma's 6.96,
+scratch rate.hip): the dots alone 40 ms at 1M, the kernel 66.8 - the rest the staging, the block sums, the guard and
+the tree (the block sums' removed, as a hack: -3 ms; the keys' decode by permutes, the q spans hoisted: -6).
+
+tests: test_attn_gpu's `dot4` against ops_index_score bit for bit, 13 tokens x ~3,006 rows, 32 and 24 heads: typical
+data 0 fallbacks; q blocks 2^20 apart with zeroed q and key blocks (445,055 of 1,249,344 head sums fallen back, 32
+heads), fp4's wild (q blocks 2^-120 / 2^60, keys 2^70: 773,451) and whole heads and keys scaled out of the normal
+range (751,037) - every score the bits. mutations: the guard off, 30,346 of 39,042 scores differ (the spread case);
+the E bounds +-126, 4,379 differ (the range case). ixbench (128 tokens, performance profile): 262K rows 41.2 -> 16.2
+ms, 524K 81.9 -> 33.0, 1M 163.5 -> 66.8 (2.45x the fused, 2.70x the plain; 0 bits differ, 0 fallbacks). a block's
+row tiles: 1 94 ms, 2 82, 4 71, 8 66, 16 66 at 1M. select_rows scores the unmasked index layers with it (head_dim
+128; else the fused kernel); the candidate layers' gathered tiles (TOK 1) stay on ops_index_score_rows.
+
 ## the MXFP8 Engram pack (design, 2026-11-04)
 
 the operator's: UD-IQ1_M's weights with unsloth's **MXFP8** Engram table in place of its IQ4_NL one - the table as the

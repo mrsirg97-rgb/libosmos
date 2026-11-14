@@ -1,6 +1,6 @@
 /* osmos-api: the engine as an OpenAI-compatible server (DESIGN.md, "osmos-api").
 
-     osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>]
+     osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>] [--ctx N|Nk|Nm]
      osmos-api --tokenize --model <first shard>     (stdin's text as the prompt's ids, one line: for tests)
 
    POST /v1/chat/completions, GET /v1/models, GET /health (503 while the engine loads). osmos-serve - beside this
@@ -149,6 +149,19 @@ static int tokenize(const char *model)
   return n < 0;
 }
 
+/* --ctx (0.7.3): a context length as N, Nk (x 1,024) or Nm (x 1,048,576); 0 when it is not one, or outside API_CTX */
+#define API_CTX_MIN 4096u
+#define API_CTX_MAX 1048576u /* the largest any pack's model reads (DeepSeek-V4.1's 1M; Qwen's YaRN to it) */
+static unsigned ctx_of(const char *s)
+{
+  char *end = NULL;
+  const unsigned long long v = strtoull(s, &end, 10);
+  const unsigned long long m = !*end ? 1 : (*end == 'k' || *end == 'K') && !end[1] ? 1024
+                               : (*end == 'm' || *end == 'M') && !end[1] ? 1048576 : 0;
+  const unsigned long long n = v * m;
+  return end != s && m && n >= API_CTX_MIN && n <= API_CTX_MAX ? (unsigned)n : 0;
+}
+
 int main(int argc, char **argv)
 {
   if (argc == 2 && !strcmp(argv[1], "--version"))
@@ -158,7 +171,8 @@ int main(int argc, char **argv)
                                             : die("usage: osmos-api --tokenize --model <first shard>");
   const char *cfg_path = opt(argc, argv, "--config", NULL);
   if (!cfg_path)
-    return die("usage: osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>]");
+    return die("usage: osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>] "
+               "[--ctx N|Nk|Nm]");
   char err[API_ERR], self[PATH_MAX], engine[PATH_MAX];
   const ssize_t sn = readlink("/proc/self/exe", self, sizeof self - 1);
   self[sn > 0 ? sn : 0] = 0;
@@ -167,6 +181,15 @@ int main(int argc, char **argv)
   Config c;
   if (!config_read(cfg_path, &c, err))
     return die(err);
+  api.fill_orphans = c.fill_orphans;
+  if (opt(argc, argv, "--ctx", NULL)) /* the pack's max_context, overridden: a shorter context (less memory) or 1M */
+  {
+    const unsigned ctx = ctx_of(opt(argc, argv, "--ctx", NULL));
+    if (!ctx)
+      return die("--ctx takes a length from 4096 to 1048576: N, Nk or Nm (524288, 512k, 1m)");
+    fprintf(stderr, "osmos-api: context %u (--ctx; the pack's %u)\n", ctx, c.max_context);
+    c.max_context = ctx;
+  }
   snprintf(api.model, sizeof api.model, "osmos-%s", c.pack);
   Gguf *g = gguf_header(c.model, err); /* the tokenizer and the family alone: osmos-serve opens the model */
   const GgufKv *arch = g ? gguf_kv(g, "general.architecture") : NULL;

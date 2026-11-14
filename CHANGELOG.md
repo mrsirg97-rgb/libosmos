@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.7.3]: loop signals for agent harnesses, and long prompts faster at depth (#47)
+
+- **What a request's history says about the agent sending it**, beside every answer: an `osmos.loop` object (beside
+  `usage`, in whole answers and a stream's last chunk) and an `x-osmos-loop` header - assistant turns since the last
+  tool call, the most repeated recent call (its name and arguments), orphaned tool calls (no result before the next
+  assistant turn) and orphaned results (no call), and `stuck` (three turns without a call, or three of one call). A
+  pure function of the request's messages: no model, no state kept, the same for DeepSeek and Qwen, nothing the model
+  reads changed. From ucotman's report of agent loops past 600K under history compaction (#47).
+- **Orphaned calls repaired only when asked**: `"osmos": {"fill_orphans": true}` in a request, or `fill_orphans` in
+  the pack's `osmos.json`, puts a placeholder result ("[tool result dropped from the conversation's history - run the
+  call again if its result is needed]") after each orphaned call, and the answer says so (`orphans_filled`). By
+  default the prompt stays the template's render of what was sent: osmos does not rewrite a client's history.
+- **Long prompts faster at depth (DeepSeek)**: a 1M-token read (evo-A, budget auto) **67.7 minutes**, from 141.5 with
+  the first change below alone (UD-IQ2_XXS; 0.7.2 slower again: ~93 tok/s by 600K); at 896K **218 tok/s**, from 68;
+  UD-IQ2_XXS's first 264K 13.4 minutes from 0.7.2's 18.3. Every change the same bits (each checked end to end:
+  a 1M stream's scored rows, NLL and argmax, against the old engine's), so the same answers. Found reading #47's
+  1M-token trace, where osmos fell behind maya past ~300K:
+  - the indexer's candidate layers (24/28/32/36) score only their candidate blocks' 16,384 rows, not every row a
+    token sees (at 1M: a token's indexer work 6.5M rows to 2.6M), and take their top k over those rows alone;
+  - the top k in one coalesced pass for its counts and its rows (its threads had read runs of a token's scores 4 KB
+    apart: 13x at 1M rows), its later radix passes over its first pass's bin in LDS (1.4-1.8x);
+  - the candidate source's block keys folded once, not in each selection pass (1.5-3.9x on that step);
+  - the indexer's sums fused (`fma`) for its FP4 q and keys - each product exact, so the bits of a multiply then an
+    add; a guard where a product could leave the normal range - at 4 tokens a tile (1.1-1.2x).
+  - the unmasked index layers' scores on the packed int8 dot (`v_dot4_i32_iu8`): FP4 q and keys as integer codes 4 a
+    word, a 32-value block's dot an exact integer, the 4 blocks added in F32 under their powers of two - the plain
+    kernel's bits (an element whose sequential F32 sum would not be exact - its blocks' scales more than 9 powers
+    apart, a scale past 2^+-55 - summed the plain kernel's way): 2.45x the fused kernel at 1M rows (163.5 -> 66.8 ms
+    a 128-token call).
+- **Long prompts faster at depth (Qwen)**: QSA's indexer scores register-blocked (a thread 4 tokens x 4 blocks x its 4
+  heads; the old kernel's bits, kept as the reference) and their scratch room for 128 tokens' rows (67 MB at 512K):
+  a 457K-token read on UD-IQ3_XXS **12.3 minutes** from 16.5, 512 tok/s at 416K from 341, the scored rows byte for
+  byte the old kernel's. The blocked kernel from a step of 32 tokens only: a decode step (1 token) keeps the plain kernel, faster
+  there (0.8x the time at 511K) - the same bits.
+- **1M stays the DeepSeek packs' context; `--ctx` for another** (4,096 to 1M: `N`, `Nk`, `Nm`): the installer's
+  writes the pack's `osmos.json` (rig's row takes its window from it), `osmos-api --ctx` overrides it for a run. Qwen's
+  packs stay 512K (past its native 262K Qwen runs YaRN, slightly weaker on short text: `--ctx 1m` when wanted).
+- **Rig's rows: 128K kept for a reply** on DeepSeek's packs (was 256K: ~896K of history at 1M before a compaction)
+  and Qwen's (was 64K, its reply cap 128K with it).
+- **Recall to the window's edge, measured**: 11 codes planted in a 1M-token agent conversation (the operator's rig
+  sessions), asked at its end - every one recalled, every token the model's first choice, from 12K to **985K** back,
+  on UD-IQ2_XXS and evo-A (a code never planted: probability ~0); Qwen3.8 UD-IQ3_XXS the same in its 512K, from 10K
+  to 418K back.
+- **`kld`'s `BIG`** (tools/bench): `BIG=8192` reads a text's unscored stretches in batches of up to 8,192 tokens (the
+  server's own: four sub-batches, each layer's experts read once for them), the scored rows at `step` - the same
+  bits (a 24,576-token check: its dumps byte-identical), a long text with few scored windows ~1.7x faster to read.
+- **`kld auto`** (tools/bench): the budget sized as osmos-serve sizes it (`fit_sized`), `FILL` the RAM it keeps free
+  (osmos-serve's `--fill`, the tool's own buffers counted in); `tools/bench/ixbench` times the indexer's kernels at a
+  long context's shapes.
+
 ## [0.7.2]: IQ1_S's prompt decode, faster
 
 - **IQ1_S's experts decode 6-10% faster in prompt steps**, the same bits. IQ1_S was the slowest expert type a value

@@ -1,6 +1,7 @@
 #pragma once
 #include "api.h"
 #include "dialect.h"
+#include "loop.h"
 #include "osmos/text/tokenizer.h"
 
 /* an answer as it streams (answer.c): the completion's text, how much of it went out, and in which field */
@@ -27,6 +28,7 @@ typedef struct Answer
   Phase cut;  /* the phase DONE was reached in (a flush sends what was held in its field) */
   bool begun; /* the phase has streamed text (until then a trimming dialect's whitespace is passed over) */
   bool gone; /* the client stopped reading */
+  const Loop *loop; /* the request's loop signals: beside the answer's usage, its header (0.7.3) */
 } Answer;
 
 bool answer_take(Answer *s, const Tokenizer *t, int32_t id);

@@ -110,6 +110,22 @@ def ask_default(choice, rid):
     return input(f"  make {rid} rig's default model? [y/N] ").strip().lower() in ("y", "yes")
 
 
+CTX_MIN, CTX_MAX = 4096, 1 << 20  # osmos-api's --ctx bounds (tools/api/main.c)
+
+
+def ctx_length(v):
+    """--ctx's length: N, Nk (x 1,024) or Nm (x 1,048,576), within CTX_MIN .. CTX_MAX"""
+    s = v.strip().lower()
+    mul = 1024 if s.endswith("k") else 1 << 20 if s.endswith("m") else 1
+    try:
+        n = int(s[:-1] if mul > 1 else s) * mul
+    except ValueError:
+        n = 0
+    if not CTX_MIN <= n <= CTX_MAX:
+        raise argparse.ArgumentTypeError(f"{v}: a length from {CTX_MIN} to {CTX_MAX} (N, Nk or Nm: 524288, 512k, 1m)")
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser(description="osmos-install: a pack from a stock Strix Halo, or from files you have")
     ap.add_argument("packs", nargs="*")
@@ -122,6 +138,8 @@ def main():
     ap.add_argument("--abliterated", action="store_true", help="the abliteration overlay (huihui-ai), opt-in")
     ap.add_argument("--npu", action="store_true",
                     help="the NPU beside the GPU for prompts (0.7.0, opt-in): its kernels fetched, osmos built with it")
+    ap.add_argument("--ctx", type=ctx_length, default=None,
+                    help="the context length, 4096 to 1M: N, Nk or Nm (the pack's own by default: DeepSeek's 1M, Qwen's 512K)")
     ap.add_argument("--rig", action="store_true", help="register each pack in rig (~/.rig/models.json)")
     ap.add_argument("--rig-home", default=os.environ.get("RIG_HOME", os.path.expanduser("~/.rig")))
     ap.add_argument("--rig-default", choices=("yes", "no", "ask"), default="ask")
@@ -177,7 +195,7 @@ def main():
     cfgs = []
     for pid in a.packs:
         print(f"the pack {pid}:")
-        cfgs.append(layout.lay(m, pid, a.models, a.have, a.trust_size, a.abliterated, get, found, npu=a.npu))
+        cfgs.append(layout.lay(m, pid, a.models, a.have, a.trust_size, a.abliterated, get, found, npu=a.npu, ctx=a.ctx))
         print(f"  {cfgs[-1]}")
     if a.rig:
         print("rig:")

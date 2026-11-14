@@ -15,6 +15,7 @@ typedef struct Config
   bool fill_set;  /* fill_gib given: osmos-serve's --fill (the RAM kept free); else its own 8 GiB */
   double fill_gib;
   bool no_guess;
+  bool fill_orphans; /* 0.7.3 (#47): an orphaned tool call given LOOP_ORPHAN_TEXT as its result (loop.h); else flagged */
   bool stream_ngram; /* osmos-serve's --stream-ngram */
   char npu[PATH_MAX]; /* the NPU's kernels' directory (osmos-serve's --npu): "" none */
   double npu_share;   /* its share of a layer's pairs (--npu-share): 0 osmos-serve's own */

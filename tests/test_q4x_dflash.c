@@ -78,6 +78,7 @@ int main(void)
   draft = model ? gguf_create(path, gerr) : NULL;
   if (!model || !draft)
   {
+    gguf_destroy(model); /* (the model whole but no drafter: its shards freed - 0.7.3, a leak under ASan) */
     printf("  Qwen3.8 UD-IQ3_XXS or the converted DFlash2: not on this machine, skipped (%s)\n", gerr);
     printf("[test_q4x_dflash] ok\n");
     return 0;

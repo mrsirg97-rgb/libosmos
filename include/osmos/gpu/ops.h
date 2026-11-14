@@ -66,11 +66,29 @@ bool ops_index_score(const float *q, const void *keys, uint32_t keys_fmt, const 
                      uint32_t ratio,
                      uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score, uint32_t stride,
                      void *stream);
+bool ops_index_score_fp4(const float *q, const void *keys, const float *w, const int32_t *pos, uint32_t ratio,
+                         uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score,
+                         uint32_t stride, uint32_t *fallbacks, void *stream);
+bool ops_index_score_dot4(const float *q, const void *keys, const float *w, const int32_t *pos, uint32_t ratio,
+                          uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score,
+                          uint32_t stride, uint32_t *fallbacks, void *stream);
+bool ops_index_score_rows(const float *q, const void *keys, uint32_t keys_fmt, const float *w, const int32_t *pos,
+                          uint32_t ratio, const uint32_t *list, const uint32_t *n_list, uint32_t list_stride,
+                          uint32_t block, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score,
+                          uint32_t stride, void *stream);
+bool ops_cand_list(const uint32_t *bits, uint32_t words, uint32_t n_tok, uint32_t *list, uint32_t list_stride,
+                   uint32_t *n_list, void *stream);
 bool ops_topk(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t k, const uint32_t *keep,
               uint32_t block, uint32_t keep_words, uint32_t n_tok, int32_t *sel, uint32_t sel_stride, int32_t *n_sel,
               void *stream);
+bool ops_topk_rows(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t k,
+                   const uint32_t *list, const uint32_t *n_list, uint32_t list_stride, uint32_t block, uint32_t n_tok,
+                   int32_t *sel, uint32_t sel_stride, int32_t *n_sel, void *stream);
 bool ops_cand_blocks(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t block,
                      uint32_t topk_blocks, uint32_t n_tok, uint32_t *keep, uint32_t keep_words, void *stream);
+bool ops_cand_blocks_max(const float *score, uint32_t stride, const int32_t *pos, uint32_t ratio, uint32_t block,
+                         uint32_t topk_blocks, uint32_t n_tok, uint32_t *keep, uint32_t keep_words, float *bmax,
+                         uint32_t bstride, void *stream);
 bool ops_router(const float *logits, const float *bias, uint32_t n_exp, uint32_t k, float scale, uint32_t n_tok,
                 int32_t *idx, float *w, void *stream);
 bool ops_swiglu(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok, float *h,
@@ -214,6 +232,31 @@ ops_index_score
   of keys (format keys_fmt: the indexer's KV_FP4_POW2, or KV_F32): score[t stride + c] = sum over heads h of relu(q_h . keys_c) * w_h (heads at most 32, head_dim a multiple of
   16; the heads summed as a 32-lane xor tree sums them). max_n bounds the visible rows (at most stride).
 
+ops_index_score_fp4 (0.7.3)
+  ops_index_score's scores (its bits) for q FP4-rounded (ops_fp4_round, a power of two a 32: the forward's) and keys
+  KV_FP4_POW2: each product exact, so the sums fused (fma) - half the instructions. an element whose products could
+  leave the normal range (its slot's smallest nonzero |q| x its row's smallest |k| under 2^-126, or its largest at
+  2^127) summed as ops_index_score sums it (counted into fallbacks, when not NULL). ops_index_score_rows the same.
+
+ops_index_score_dot4 (0.7.4)
+  ops_index_score_fp4's scores (ops_index_score's bits; q FP4-rounded, keys KV_FP4_POW2, head_dim 128) on packed
+  int8 dots: a 32-value block's values I 2^E (I -12 .. 12; a key's E its scale's - 1, q's checked on the grid), its
+  dot an integer (v_dot4_i32_iu8, 4 codes a word: a quarter of the LDS reads a product) times 2^(Eq + Ek), the 4
+  blocks added in F32 - exact, so the sequential sum's bits, when the blocks both q and key code have Eq + Ek within
+  9 of each other and every E within +-55. an element outside (a spread past 9, a scale past the bounds or NaN's, a
+  q block off the grid) summed as ops_index_score sums it (counted into fallbacks, when not NULL). select_rows' scoring
+  of the unmasked index layers: 2.45x the fused kernel's speed at 1M rows (ixbench).
+
+ops_index_score_rows (0.7.3)
+  ops_index_score_fp4 over only a token's listed blocks' rows (q FP4-rounded, as there) (list + t list_stride: n_list[t] block ids, each `block`
+  rows; ops_cand_list's): score[t stride + c] for each visible row c of them, the bits ops_index_score gives that row;
+  every other row's score left as it was. the candidate layers' scores (ops_topk under the same blocks' mask reads no
+  other row): 16,384 rows a token, not all it sees.
+
+ops_cand_list (0.7.3)
+  each token t's set bits of bits + t words, their indices ascending into list + t list_stride, how many into n_list[t]
+  (at most list_stride: the rest dropped - ops_cand_blocks sets topk_blocks at most).
+
 ops_topk
   for each token t: the k highest of score[t stride + 0 .. n) (n its visible rows, as ops_index_score's) - ties to
   the lower row - their rows ascending into sel + t sel_stride and how many into n_sel[t] (all n when n <= k; 0 for
@@ -221,11 +264,22 @@ ops_topk
   j / 32) scores -inf - the candidate blocks' mask (ops_cand_blocks; the caller's kept rows at least k). deterministic:
   integer counts, a compaction in row order.
 
+ops_topk_rows (0.7.3)
+  ops_topk under a mask, over the kept blocks' rows alone: list + t list_stride its n_list[t] blocks (ascending,
+  ops_cand_list's), their visible rows the items - the rows ops_topk takes under those blocks' bits, in the same order
+  (its masked rows -inf, never taken while the kept rows hold k: the candidate blocks' 16,384), without reading the
+  rest (16,384 rows a token, not all it sees).
+
 ops_cand_blocks
   the indexer's candidate blocks (ref.py's `candidates`) for each token t: its n visible rows in blocks of `block`, a
   block's key its rows' highest score, the last block (its own, partial or whole) highest of all; the topk_blocks
   highest blocks (ties to the lower block; all when there are no more) as bits into keep + t keep_words (bit j of word
   j / 32; the rest zero). keep_words at least the blocks of stride rows / 32, rounded up.
+
+ops_cand_blocks_max (0.7.3)
+  ops_cand_blocks (its bits), its blocks' keys - each block's highest score - folded once into bmax (bmax + t bstride:
+  a block's, bstride at least the stride's blocks) before the selection reads them, not again in each of its passes
+  (NULL bmax: ops_cand_blocks itself).
 
 ops_router
   scores = sqrt(softplus(logits)); the k experts of the highest score + bias (ties to the lower expert), in that

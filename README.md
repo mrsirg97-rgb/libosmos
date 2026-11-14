@@ -37,6 +37,12 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
   `deepseek-1017-evo-a`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next`
   (`-l`: UD-Q4_K_XL).
 
+**Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
+header - turns since the last tool call, the most repeated recent call, orphaned calls and results (a client's
+history compaction can drop one side), and `stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
+true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K), or
+`--ctx` (installer or osmos-api: `512k`, `1m`, ...).
+
 ## The packs
 
 | Pack | Files | Context | Pick it for |
@@ -46,12 +52,45 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 | `ud-iq1_m` | 140 GB + 203 GB Engram table | 1M | quality (unsloth's benchmarks 85.55 against 83.53) |
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the closest to the model, the slowest decode |
 | `qwen38-ud-iq3_xxs` | 84 GB + 3 GB MTP head | 512K | Qwen, fully in GPU memory |
-| `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant, if you want it: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
+| `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
 
-**How close each DeepSeek pack is to the model itself.** The KL divergence from DeepSeek's own weights (the experts
-as deepseek-ai stores them, MXFP4; the dense layers BF16), over the whole vocabulary, a token at a time: lower is
-closer, 0 is the model. Measured on this box against a reference that runs the original 296 GB of experts from the
-SSD (DESIGN.md, "0.6.6"):
+## osmos-evo-A in numbers
+
+The default DeepSeek pack, on one Strix Halo (the `performance` profile, nothing else running):
+
+| | |
+| --- | ---: |
+| Decode, drafted / plain (64K context; 0.7.2) | **35.6** / 18.9 tok/s |
+| Prompt, 2,048 / 8,192 tokens (0.7.2) | 384 / **620** tok/s (386-389 / 644-647 with the NPU) |
+| A 1,038,695-token prompt read whole (0.7.3) | **67.7 min** - 341 tok/s at 128K, 266 at 512K, 212 at 992K |
+| Facts recalled from up to 985K tokens back (0.7.3) | **11 of 11**, every token the model's first choice |
+
+**Recall to the window's edge.** An agent conversation built from our own rig sessions (1,038,695 tokens) with 11 facts
+planted in user turns ("the access code for the red locker is RW-6315-KD"), each asked for at the end, plus a locker
+never mentioned. Each answer scored teacher-forced - the probability of the whole code:
+
+| Distance back | 985K | 881K | 787K | 687K | 587K | 487K | 388K | 267K | 188K | 78K | 12K | never planted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| osmos-evo-A | 0.984 | 0.996 | 0.997 | 0.997 | 0.997 | 0.995 | 0.996 | 0.997 | 0.469 * | 0.999 | 0.995 | 0.0000 |
+| UD-IQ2_XXS | 0.998 | 0.998 | 0.999 | 1.000 | 0.999 | 0.999 | 0.999 | 0.999 | 0.983 | 0.999 | 0.998 | 0.0000 |
+
+\* evo-A wavers whether to answer with the bare code or a sentence (its first token 0.47 against "I" 0.44); every
+token after it is 0.999+. A session rarely reads 1M at once - a cached prompt reads only what a turn adds; a full read
+follows a client's compaction. The same file before and after 0.7.3's indexer work: UD-IQ2_XXS reads the first 264K
+in **13.4 min** (0.7.2: 18.3), the scored rows' bits the same.
+
+**Qwen3.8 UD-IQ3_XXS at its 512K** (YaRN past its native 262K; the same sessions in its own template, 457,506 tokens):
+the whole read in **12.3 min** (0.7.2: 16.5) - 751 tok/s at 128K, 649 at 256K, 512 at 416K (0.7.2: 614, 478, 341).
+Recalled the same way, the facts 10K-418K back in its 512K (all 11, every token its first choice; never planted
+0.0000):
+
+| Distance back | 418K | 375K | 344K | 298K | 255K | 210K | 159K | 110K | 60K | 20K | 10K | never planted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.8 UD-IQ3_XXS | 0.988 | 0.991 | 0.998 | 0.995 | 0.995 | 0.994 | 0.964 | 0.994 | 0.982 | 0.997 | 0.993 | 0.0000 |
+
+**How close each DeepSeek pack is to the model itself** - the KL divergence from DeepSeek's own weights (MXFP4
+experts, BF16 dense) over the whole vocabulary, against a reference that runs the original 296 GB of experts
+(DESIGN.md, "0.6.6"); lower is closer:
 
 | Pack | Wiki text (8,191 tokens) | Agent traces (27,459 assistant tokens) | Top-1 agreement (Wiki) |
 | --- | --- | --- | --- |
@@ -60,34 +99,21 @@ SSD (DESIGN.md, "0.6.6"):
 | `ud-iq1_m` | 0.190 ± 0.007 | 0.048 ± 0.001 | 90.3% |
 | `ud-iq1_s` | 0.259 ± 0.008 | 0.066 ± 0.001 | 88.1% |
 
-The agent traces are rig sessions of our own (local, never published), the assistant's tokens alone. Perplexity
-does not rank these packs reliably: on those traces UD-IQ1_M's (2.477) is below UD-IQ2_XXS's (2.503), though it is
-further from the model. `osmos_install.py --list` shows each pack's numbers.
+**What evo-A is.** UD-IQ1_M with the routed experts' down projections of layers 20-39 requantized to Q2_K from
+DeepSeek's MXFP4 originals (unsloth's imatrix), and the attention and the head requantized to Q5_K by GPTQ (Hessians
+from our agent sessions). Level with UD-IQ1_M on agent traces, closer on Wiki text, 8% faster decode plain and 15%
+drafted (`low-power`: 17.9 / 29.7 tok/s against UD-IQ1_M's 16.6 / 25.8). It ships as a 34 GB delta on UD-IQ1_M
+([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)), assembled at install with every shared byte
+cloned on btrfs or XFS, each shard SHA-256 checked.
 
-**osmos-evo-A, the default DeepSeek pack.** osmos's own, built on UD-IQ1_M: the routed experts' down projections of
-layers 20-39 requantized to Q2_K from DeepSeek's MXFP4 originals (with unsloth's imatrix), and the attention and the
-head requantized to Q5_K by GPTQ (from UD-IQ1_M's own values, its Hessians from our agent sessions); every other
-tensor UD-IQ1_M's as it is. Against UD-IQ1_M it is level on agent traces (0.0485 against 0.0479,
-+0.0005 ± 0.0003), closer on Wiki text (0.175 against 0.190, -0.014 ± 0.004), and it decodes 8% faster plain and 15%
-faster drafted, within 2-6% of UD-IQ1_S (`low-power`, interleaved: 17.9 / 29.7 tok/s against UD-IQ1_S's 18.3 / 31.7
-and UD-IQ1_M's 16.6 / 25.8). At 64K of context it decodes 16.4 tok/s, the fastest of the three. Its prompts are 5-9%
-slower than the UD packs' (the larger dense). It ships as a 34 GB delta on unsloth's UD-IQ1_M
-([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)): the installer makes the pack from UD-IQ1_M's
-files and the delta (`tools/convert/gguf_assemble.py`), every byte they share cloned on btrfs or XFS - so it adds 34
-GB to the download and almost nothing to the disk beside UD-IQ1_M - and checks each shard's SHA-256. The abliteration
-is huihui-ai's UD-IQ1_M patch, which replaces the same 18 attention tensors in evo-A.
-
-The UD packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) with the
-lossless MXFP8 Engram table, plus our 4.7 GB DSpark drafter and expert pick profile
-([osmos-evo-1017](https://huggingface.co/mrsirg97-rgb/osmos-evo-1017)). Qwen is
-[unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (or UD-Q4_K_XL) and its MTP head. The abliteration
-costs 0.2-0.5% perplexity (UD-IQ1_M 2.458 → 2.470, Qwen 2.714 → 2.723) at the same speed.
+The UD packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) with the lossless
+MXFP8 Engram table, our 4.7 GB DSpark drafter and expert pick profile. Qwen is
+[unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (or UD-Q4_K_XL) and its MTP head. The
+abliteration (huihui-ai's) costs 0.2-0.5% perplexity at the same speed.
 
 ## Performance
 
 ### The machine
-
-Every number here comes from one box:
 
 | | |
 | --- | --- |
@@ -97,33 +123,12 @@ Every number here comes from one box:
 | SSD | Micron 4600 2 TB (MTFDLBA2T0THJ, firmware PBMA002): a PCIe 5.0 drive, linked at PCIe 4.0 x4 here; btrfs |
 | Software | Linux 7.2.7, ROCm with HIP 7.15, gcc 14.2 |
 
-DeepSeek streams its experts from the SSD, so the drive is part of DeepSeek's numbers. A prompt reads at about
-7.1 GB/s here, near the ceiling of the PCIe 4.0 x4 link, so a good Gen4 NVMe should come close on prompts. Decode
-reads experts as the router picks them, a few MB at a time (`O_DIRECT`): there the drive's random-read latency
-counts, and a slower or DRAM-less drive shows first. The "SSD read a token" rows are the device's own counter over
-each run's decode.
+DeepSeek streams its experts from the SSD, so the drive is part of its numbers: a prompt reads at ~7.1 GB/s (near
+the PCIe 4.0 x4 ceiling); decode reads experts a few MB at a time (`O_DIRECT`), where random-read latency counts.
 
-### How these were measured
-
-0.7.0 at AMD's `performance` profile, 2026-11-13, nothing else running, every run a fresh process, greedy decoding.
-DeepSeek runs at 64K context, Maya's three questions at 256 tokens each (the mean of the three) and its 2K and 8K
-prompts, in the packs' 4,096-token steps. Prompts were run twice, GPU alone and with the NPU interleaved; the ranges
-are the two runs'. Tokens a second. The scripts and logs are listed in `DESIGN.md` ("0.7.0").
-
-**The NPU column** is osmos with `--npu` (0.7.0, opt-in): Strix Halo's NPU takes a share of each prompt step's expert
-work beside the GPU. It only touches prompts - decode is the GPU's either way - and its output is its own (its sums
-round differently from the GPU's; the same bits every run).
-
-### osmos-evo-A, the default DeepSeek pack
-
-0.7.2's numbers (its faster IQ1_S prompt decode), the same way, 2026-11-13; the other tables are 0.7.0's.
-
-| | GPU | with the NPU |
-| --- | ---: | ---: |
-| Prompt, 2,048 tokens | 384-385 | **386-389** |
-| Prompt, 8,192 tokens | 620 | **644-647** |
-| Decode, drafted | 35.6 | |
-| Decode, plain | 18.9 | |
+The comparisons below are 0.7.0's, at the `performance` profile, every run a fresh process, greedy, DeepSeek at 64K
+context in the packs' 4,096-token steps; ranges are two runs, GPU alone and with the NPU (`--npu`, opt-in: prompts
+only, its sums its own, the same bits every run). Scripts and logs: `DESIGN.md` ("0.7.0").
 
 ### DeepSeek against Maya
 
@@ -138,9 +143,8 @@ context, Maya's own `--bench`.
 | Decode, drafted | **35.1** | | 27.9 | **26.0** | | 13.4 |
 | Decode, plain | **17.6** | | 16.5 | **14.2** | | 11.1 |
 
-osmos reads 8K prompts 36% (UD-IQ1_M) and 18% (UD-IQ2_XXS) faster than Maya - the NPU adds 1-2% more at 8K, nothing
-at 2K - and decodes 7% and 28% faster plain, 26% and 1.9x drafted. The bigger the quant, the wider the gap: that's
-IO - osmos's one cache keeps the experts decode comes back to, so it reads fewer SSD bytes a token.
+osmos reads 8K prompts 36% (UD-IQ1_M) and 18% (UD-IQ2_XXS) faster than Maya and decodes 7% and 28% faster plain,
+26% and 1.9x drafted - the wider the bigger the quant: osmos's one cache keeps the experts decode comes back to.
 
 **Agents.** Maya's agent bench: 4 agents at once, 8 turns each, about 99K new prompt tokens against 8K answer tokens,
 UD-IQ1_M at 131K context with drafting on. Power is the APU package's (CPU + GPU + NPU, not the wall).
@@ -153,14 +157,9 @@ UD-IQ1_M at 131K context with drafting on. Power is the APU package's (CPU + GPU
 | Package power, mean | **118.8 W** | 120.9 W | 122.4 W |
 | Energy per answer token | 6.27 J | **6.25 J** | 8.26 J |
 
-osmos finishes the same 32 turns in 24% less time than Maya and 24% less energy per answer token. The NPU doesn't help
-here: an agent's turns are mostly short additions to a long conversation, where its share is small (one run; its
-answers came out 1.6% longer, its rounding its own).
-
-osmos sizes itself to leave 8 GiB of RAM to the rest of the system: room for an editor, a browser, language servers
-and the agent harness beside the model. A box with less beside it can give the cache more: `"fill_gib": 4` in the
-pack's `osmos.json` (osmos-serve `--fill 4`) keeps 4 GiB free instead, 0 keeps none. The output is the same at every
-value; only how much of the model stays in memory changes.
+osmos finishes the same 32 turns in 24% less time than Maya and 24% less energy per answer token; the NPU doesn't
+help agents (short additions to a long conversation). osmos sizes itself to leave 8 GiB of RAM free beside the model
+(`"fill_gib"` in `osmos.json`, osmos-serve `--fill`: the output the same at any value).
 
 ### Qwen3.8 against llama.cpp
 
@@ -204,15 +203,12 @@ summary, and three questions answered in 256 tokens, one round. Energy is the AP
 | Strata, DFlash2 | 255 | 279 | 439 | 42.8 | 40.9 | 40.9 | 2.88 Wh |
 | osmos, MTP head (its default) | 807 | 850 | 848 | 56.1 | 49.6 | 54.2 | 1.60 Wh |
 
-On UD-IQ3_XXS osmos reads prompts 16-80% faster (the gap widest on short prompts); without a drafter the answers are
-level, Strata 0-7% ahead; with DFlash2 on both, osmos's answers are 16-27% faster, and the same work takes about 20%
-less energy. On UD-Q4_K_XL osmos reads prompts 1.9-4x as fast and answers 21-25% faster without a drafter, 30-68%
-with DFlash2. The two set up differently: Strata sizes its expert cache from the RAM free when it starts and streams
-the rest, osmos holds UD-IQ3_XXS whole in memory (UD-Q4_K_XL all but its 29 GB n-gram table, read from the SSD);
-Strata packs the DFlash2 drafter as Q4_0, osmos as Q8_0. Strata's opt-in fast set, documented as changing the
-output's bits, was not used. Strata's `--drafting mtp` ran at its no-drafter speed in this version, so its MTP rows
-are left out. Strata's DeepSeek engine is not shipped for Strix Halo on Linux, so there is no same-file DeepSeek
-comparison.
+On UD-IQ3_XXS osmos reads prompts 16-80% faster; without a drafter the answers are level (Strata 0-7% ahead), with
+DFlash2 on both osmos answers 16-27% faster on ~20% less energy. On UD-Q4_K_XL osmos reads prompts 1.9-4x as fast and
+answers 21-25% faster without a drafter, 30-68% with DFlash2. Setups differ: Strata streams experts past the RAM free
+at its start (osmos holds UD-IQ3_XXS whole) and packs DFlash2 as Q4_0 (osmos Q8_0); its opt-in fast set (documented
+as changing the output's bits) was not used, its `--drafting mtp` ran at no-drafter speed here, and its DeepSeek
+engine is not shipped for Strix Halo on Linux.
 
 ## How it works
 

@@ -92,6 +92,7 @@ bool q4x_ix_q(const float *x, uint32_t n_tok, uint32_t heads, const Q4xRope *rop
 bool q4x_ix_pool(const float *raw, uint32_t n_tok, int32_t pos0, uint32_t ratio, float *ring, uint32_t ring_rows,
                  const Q4xRope *rope, const float *norm, float eps, float *pooled, void *stream);
 uint64_t q4x_ix_scratch(uint32_t max_ctx, uint32_t ratio);
+void q4x_ix_score_naive(bool on); /* (tests, qxbench) q4x_ix_pick's scores on the plain kernel: the reference */
 bool q4x_ix_pick(const float *q, const float *pooled, uint32_t n_tok, uint32_t heads, int32_t pos0, uint32_t ratio,
                  uint32_t blocks, float *scratch, uint64_t scratch_floats, int32_t *sel, int32_t *npick, void *stream);
 

@@ -2,6 +2,7 @@
 #include <stdbool.h>
 
 #include "api.h"
+#include "loop.h"
 
 struct Dialect;
 
@@ -17,9 +18,10 @@ typedef struct Request
   bool preserve;       /* Qwen's preserve_thinking (its default: true) */
   unsigned max_tokens; /* 0: as many as the context leaves */
   bool stream, usage;
+  Loop loop; /* the history's loop signals (loop.h): reported beside the answer */
 } Request;
 
-bool request_read(const Json *body, const struct Dialect *d, Request *r, char err[API_ERR]);
+bool request_read(const Json *body, const struct Dialect *d, bool fill_orphans, Request *r, char err[API_ERR]);
 void request_free(Request *r);
 
 /* shared by the readers: the effort asked (reasoning_effort, else chat_template_kwargs'), a failure, the tools as

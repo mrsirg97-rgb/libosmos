@@ -31,6 +31,7 @@ INV = f'<{D} invoke name="mcp">\n'
 BLANK_CALLS = (f"\n\n<{D} calls>\n{INV}\n</{D} invoke>\n{INV}"
                f'<{D} parameter name="search" string="true">fl</{D} parameter>\n</{D} invoke>\n</{D} calls>' + EOS)
 BAD_CALLS = f"hm</think>Checking.\n\n<{D} calls>\n{INV}</{D} invoke>\n\n{INV}</{D} invoke>\n</{D} calls>" + EOS
+ORPHAN = "[tool result dropped from the conversation's history - run the call again if its result is needed]"
 TOOLS = [{"type": "function", "function": {"name": "get_weather", "description": "the weather",
                                            "parameters": {"type": "object", "properties": {
                                                "city": {"type": "string"}, "days": {"type": "integer"}}}}}]
@@ -450,6 +451,84 @@ class Api(Served, unittest.TestCase):
         self.assertEqual(r.status, 400)
         self.assertIn("image placeholder", json.loads(r.read())["error"]["message"])
 
+    # 0.7.3 (#47): the loop signals - a pure function of the request's history (no model, no state), in the answer's
+    # `osmos` field and the x-osmos-loop header: assistant turns since the last call, the most repeated call, orphans
+    def loop_of(self, body):
+        self.reply("ok" + EOS)
+        r = self.post(dict(body, reasoning_effort="none"))
+        self.assertEqual(r.status, 200)
+        head = r.getheader("x-osmos-loop")
+        j = json.loads(r.read())
+        self.assertIn("usage", j)
+        return j["osmos"]["loop"], head
+
+    def call(self, cid, name="get_weather", args='{"city": "Paris"}'):
+        return {"role": "assistant", "content": "", "tool_calls": [
+            {"id": cid, "type": "function", "function": {"name": name, "arguments": args}}]}
+
+    def test_6k_loop_turns_without_a_call(self):
+        self.ready()
+        msgs = [{"role": "user", "content": "go"}, self.call("c1"), {"role": "tool", "tool_call_id": "c1", "content": "sun"}]
+        for k in range(4):  # loop 1's shape: "Let me try." and nothing else, turn after turn
+            msgs += [{"role": "assistant", "content": "Let me try."}, {"role": "user", "content": "continue"}]
+        loop, head = self.loop_of({"messages": msgs, "tools": TOOLS})
+        self.assertEqual(loop["turns_without_call"], 4)
+        self.assertTrue(loop["stuck"])
+        self.assertIn("turns-without-call=4", head)
+        loop, head = self.loop_of({"messages": [{"role": "user", "content": "hi"}]})  # a fresh chat: nothing
+        self.assertEqual((loop["turns_without_call"], loop["repeated_call"]["count"], loop["stuck"]), (0, 0, False))
+        self.assertIn("stuck=0", head)
+
+    def test_6l_loop_repeated_calls(self):
+        self.ready()
+        msgs = [{"role": "user", "content": "measure it"}]
+        for i in range(3):  # loop 2's shape: the same call again and again
+            msgs += [self.call(f"c{i}", "get_weather", '{"city": "Oslo", "days": 2}'),
+                     {"role": "tool", "tool_call_id": f"c{i}", "content": "rain"}]
+        msgs += [self.call("c9", "get_weather", '{"city": "Rome"}'), {"role": "tool", "tool_call_id": "c9", "content": "sun"}]
+        loop, head = self.loop_of({"messages": msgs, "tools": TOOLS})
+        self.assertEqual((loop["repeated_call"]["name"], loop["repeated_call"]["count"]), ("get_weather", 3))
+        self.assertTrue(loop["stuck"])
+        self.assertIn("repeated-call=3 get_weather", head)
+
+    def test_6m_orphans_flagged_not_filled(self):  # a compaction's lost pair: reported; the prompt the client's own
+        self.ready()
+        msgs = [{"role": "user", "content": "go"}, self.call("c1"), {"role": "user", "content": "and?"}]
+        loop, head = self.loop_of({"messages": msgs, "tools": TOOLS})
+        self.assertEqual((loop["orphan_calls"], loop["orphan_results"], loop["orphans_filled"]), (["c1"], [], False))
+        self.assertIn("orphan-calls=1", head)
+        bare = self.last_gen()[-1]
+        msgs2 = [{"role": "user", "content": "go"}, {"role": "tool", "tool_call_id": "zz", "content": "late"},
+                 {"role": "user", "content": "and?"}]
+        loop, _ = self.loop_of({"messages": msgs2, "tools": TOOLS})
+        self.assertEqual((loop["orphan_calls"], loop["orphan_results"]), ([], ["zz"]))
+        # unfilled, the prompt is the template's of what was sent: the same ids as osmos 0.7.2 rendered
+        self.loop_of({"messages": msgs, "tools": TOOLS})
+        self.assertEqual(self.last_gen()[-1], bare)
+
+    def test_6n_orphans_filled_on_request(self):  # osmos.fill_orphans: the placeholder in the gap - the prompt the
+        self.ready()                              # same as the client's own placeholder there, and said so
+        msgs = [{"role": "user", "content": "go"}, self.call("c1"), {"role": "user", "content": "and?"}]
+        loop, head = self.loop_of({"messages": msgs, "tools": TOOLS, "osmos": {"fill_orphans": True}})
+        self.assertEqual((loop["orphan_calls"], loop["orphans_filled"]), (["c1"], True))
+        self.assertIn("orphans-filled=1", head)
+        filled = self.last_gen()[-1]
+        own = msgs[:2] + [{"role": "tool", "tool_call_id": "c1", "content": ORPHAN}] + msgs[2:]
+        self.loop_of({"messages": own, "tools": TOOLS})
+        self.assertEqual(self.last_gen()[-1], filled)
+        r = self.post({"messages": msgs, "osmos": {"fill_orphans": "yes"}})
+        self.assertEqual(r.status, 400)
+        self.assertIn("fill_orphans", json.loads(r.read())["error"]["message"])
+
+    def test_6o_loop_in_the_stream(self):  # the stream's last chunk carries it (beside usage), and the header
+        self.ready()
+        self.reply("ok" + EOS)
+        msgs = [{"role": "user", "content": "go"}, self.call("c1"), {"role": "user", "content": "and?"}]
+        r = self.post({"messages": msgs, "tools": TOOLS, "reasoning_effort": "none", "stream": True})
+        self.assertIn("orphan-calls=1", r.getheader("x-osmos-loop"))
+        ev = [json.loads(e[len("data: "):]) for e in r.read().decode().split("\n\n") if e and e != "data: [DONE]"]
+        self.assertEqual(ev[-1]["osmos"]["loop"]["orphan_calls"], ["c1"])
+
     def test_7_engine_gone(self):
         self.ready()
         self.reply("a b c d e f g h", finish="exit")
@@ -823,6 +902,19 @@ class QwenApi(Served, unittest.TestCase):
         self.assertEqual(r.status, 400)
         self.assertIn("range", json.loads(r.read())["error"]["message"])
 
+    def test_12_orphans_filled(self):  # the loop's fill dialect-free (0.7.3): Qwen's prompt the client's own placeholder's
+        self.ready()
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]}
+        msgs = [{"role": "user", "content": "go"}, call, {"role": "user", "content": "and?"}]
+        body = {"messages": msgs, "tools": TOOLS, "chat_template_kwargs": {"enable_thinking": False}}
+        self.reply("ok" + IM_END)
+        r = self.post(dict(body, osmos={"fill_orphans": True}))
+        self.assertEqual(json.loads(r.read())["osmos"]["loop"]["orphan_calls"], ["c1"])
+        filled = self.last_gen()[-1]
+        own = msgs[:2] + [{"role": "tool", "tool_call_id": "c1", "content": ORPHAN}] + msgs[2:]
+        self.assertEqual(filled, self.prompt(own, TOOLS, thinking=False))
+
     def test_6_calls_unparsed(self):  # a <tool_call> its parse refuses (no </function>): an error, not its markup
         self.ready()
         self.reply("Checking.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n"
@@ -841,6 +933,24 @@ class Shutdown(Served, unittest.TestCase):
         self.assertEqual(self.proc.wait(timeout=10), 0)
         self.assertIn("QUIT", self.log())
 
+
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class FillOrphans(Served, unittest.TestCase):
+    """the pack's fill_orphans (0.7.3, #47): an orphaned call's placeholder by default; a request's osmos.fill_orphans
+    false keeps its history as sent"""
+    settings = {"fill_orphans": True}
+
+    def test_pack_default(self):
+        self.ready()
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}]}
+        msgs = [{"role": "user", "content": "go"}, call, {"role": "user", "content": "and?"}]
+        for want, extra in ((True, {}), (False, {"osmos": {"fill_orphans": False}})):
+            self.reply("ok" + EOS)
+            r = self.post(dict({"messages": msgs, "tools": TOOLS, "reasoning_effort": "none"}, **extra))
+            self.assertEqual(r.status, 200)
+            self.assertEqual(json.loads(r.read())["osmos"]["loop"]["orphans_filled"], want)
 
 if __name__ == "__main__":
     sys.exit(not unittest.main(exit=False, verbosity=2).result.wasSuccessful())

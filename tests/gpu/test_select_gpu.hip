@@ -130,6 +130,55 @@ int main() {
     std::printf("  top %u %s: every token's rows the host's (ties to the lower row)\n", kK,
                 with ? "under the candidate blocks' mask" : "plain");
   }
+  // 0.7.3: the blocks' keys folded once (ops_cand_blocks_max) - the bits ops_cand_blocks folds - on these scores with
+  // half their zeros made -0 (a +0 and a -0 in one block: fmaxf met in the same order in both)
+  {
+    std::vector<float> sz = score;
+    uint32_t negz = 0;
+    for (auto& v : sz)
+      if (v == 0.0f && (next() & 1)) v = -0.0f, negz++;
+    float *dz, *dbm;
+    uint32_t *k1, *k2;
+    const uint32_t bstride = (kStride + kBlock - 1) / kBlock;
+    CHECK(hipMalloc(&dz, sz.size() * 4) == hipSuccess && hipMalloc(&dbm, (size_t) kTok * bstride * 4) == hipSuccess);
+    CHECK(hipMalloc(&k1, (size_t) kTok * kWords * 4) == hipSuccess && hipMalloc(&k2, (size_t) kTok * kWords * 4) == hipSuccess);
+    CHECK(hipMemcpy(dz, sz.data(), sz.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(ops_cand_blocks(dz, kStride, dpos, kRatio, kBlock, kKeepBlocks, kTok, k1, kWords, nullptr));
+    CHECK(ops_cand_blocks_max(dz, kStride, dpos, kRatio, kBlock, kKeepBlocks, kTok, k2, kWords, dbm, bstride, nullptr));
+    std::vector<uint32_t> b1((size_t) kTok * kWords), b2(b1.size());
+    CHECK(hipDeviceSynchronize() == hipSuccess &&
+          hipMemcpy(b1.data(), k1, b1.size() * 4, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(b2.data(), k2, b2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(b1 == b2 && negz > 0);
+    CHECK(!ops_cand_blocks_max(dz, kStride, dpos, kRatio, kBlock, kKeepBlocks, kTok, k2, kWords, dbm, bstride - 1, nullptr));
+    for (void* p : {(void*) dz, (void*) dbm, (void*) k1, (void*) k2}) CHECK(hipFree(p) == hipSuccess);
+    std::printf("  candidate blocks, their keys folded once: the bits of the fold in the selection (%u -0s among the"
+                " zeros), a block stride short refused\n", negz);
+  }
+  // 0.7.3: the masked top k over the kept blocks listed (ops_cand_list, ops_topk_rows): the host's masked rows
+  {
+    uint32_t *dlist, *dnl;
+    CHECK(hipMalloc(&dlist, (size_t) kTok * kKeepBlocks * 4) == hipSuccess && hipMalloc(&dnl, kTok * 4) == hipSuccess);
+    CHECK(ops_cand_list(dkeep, kWords, kTok, dlist, kKeepBlocks, dnl, nullptr));
+    CHECK(hipMemset(dsel, 0xFF, (size_t) kTok * OPS_MAX_SELECT * 4) == hipSuccess);
+    CHECK(ops_topk_rows(ds, kStride, dpos, kRatio, kK, dlist, dnl, kKeepBlocks, kBlock, kTok, dsel, OPS_MAX_SELECT, dn,
+                        nullptr));
+    std::vector<int32_t> sel((size_t) kTok * OPS_MAX_SELECT), n_sel(kTok);
+    CHECK(hipDeviceSynchronize() == hipSuccess &&
+          hipMemcpy(sel.data(), dsel, sel.size() * 4, hipMemcpyDeviceToHost) == hipSuccess &&
+          hipMemcpy(n_sel.data(), dn, kTok * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    for (uint32_t t = 0; t < kTok; t++) {
+      const std::vector<int32_t> want = host_topk(&score[(size_t) t * kStride], visible(pos[t]), &keep[(size_t) t * kWords]);
+      CHECK(n_sel[t] == (int32_t) want.size());
+      if (std::memcmp(want.data(), &sel[(size_t) t * OPS_MAX_SELECT], want.size() * 4)) {
+        std::printf("  token %u (%u rows, listed): the selected rows differ\n", t, visible(pos[t]));
+        CHECK(false);
+      }
+    }
+    CHECK(hipFree(dlist) == hipSuccess && hipFree(dnl) == hipSuccess);
+    std::printf("  top %u over the kept blocks listed: every token's rows the host's masked ones (ties to the lower row)\n",
+                kK);
+  }
   // refusals
   CHECK(!ops_cand_blocks(ds, kStride, dpos, kRatio, 0, kKeepBlocks, kTok, dkeep, kWords, nullptr) &&
         !ops_cand_blocks(ds, kStride, dpos, kRatio, kBlock, kKeepBlocks, kTok, dkeep, kWords - 1, nullptr) &&
