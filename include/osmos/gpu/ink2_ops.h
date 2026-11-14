@@ -14,6 +14,10 @@
 bool ink2_softcap(float *x, uint64_t n, float cap, void *stream);
 bool ink2_swiglu(const float *g, const float *u, uint32_t n, float gcap, float ucap, uint32_t n_tok, float *h,
                  void *stream);
+bool ink2_swiglu_rows(const float *g, const float *u, const float *sg, const float *su, uint32_t n, float gcap,
+                      float ucap, uint32_t rows, float *h, void *stream);
+bool ink2_moe_sum(float *y, const float *x, const float *a, const int32_t *row, uint32_t k, uint32_t n_tok,
+                  uint32_t dim, void *stream);
 bool ink2_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float *w, const float *hist,
                float res, float scale, float *y, void *stream);
 bool ink2_conv_dyn(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
@@ -26,6 +30,7 @@ bool ink2_axpy(float *y, const float *x, uint64_t n, float a, void *stream);
 #define INK2_MAX_EXTENT 1024 /* the relative bias's extent at most (Inkling's 1,024) */
 #define INK2_MAX_REL 32      /* a head's relative states at most (Inkling's 16) */
 #define INK2_FA_MAX_GROUP 8  /* ink2_fa's query heads a KV head at most (Inkling's 6): its waves */
+#define INK2_FA_TILE 16      /* ink2_fa's keys a tile (WMMA's 16): a window's keys handed in from a multiple of it */
 typedef struct Ink2Tau
 {
   uint32_t pos0;     /* the step's first token's position */
@@ -54,6 +59,14 @@ ink2_softcap
 ink2_swiglu
   h = gcap tanh(g / gcap) sigmoid(g) . ucap tanh(u / ucap) for n_tok rows of n (the experts' softcapped SwiGLU: 4 and
   25) - sigmoid of the raw gate, not the capped one.
+
+ink2_swiglu_rows
+  ink2_swiglu over rows of n with row r's gate times sg[r] and its up times su[r] first (each pick's expert's scales:
+  ink2_scale then ink2_swiglu, the same bits).
+
+ink2_moe_sum
+  y[t] = the sum of a[t k + s] x[row[t k + s]] over a token's k slots in order, from zero - ink2_axpy after a zeroed
+  y, slot after slot: the same bits.
 
 ink2_conv
   the static short conv: y[t] = (sum_j w[c, j] x'[t + j] + res x[t]) scale over channels c (rows of ch), x' the taps - 1
@@ -93,5 +106,8 @@ ink2_attn
 ink2_fa
   ink2_attn for a prompt (the same arguments and result): a block a (16-token tile, KV head), a wave a query head of
   its group (heads / kv_heads <= INK2_FA_MAX_GROUP), each tile of 16 keys loaded into LDS once for the group's waves -
-  q . k and p . v on WMMA (f16 in, f32 sums), the relative bias, mask, sink and online softmax in f32.
+  q . k and p . v on WMMA (f16 in, f32 sums), the relative bias, mask, sink and online softmax in f32. a window's
+  first tile at a multiple of INK2_FA_TILE: a query's keys always the same tiles (the rounding of p to f16 against
+  the running max is a tile's), so its bits are the same in any block - and in any step, given keys whose index mod
+  INK2_FA_TILE is their position's (a sequence's window handed in from such a position).
 */

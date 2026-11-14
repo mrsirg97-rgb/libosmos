@@ -27,6 +27,27 @@ __global__ void swiglu_kernel(const float* g, const float* u, uint64_t n, float 
   h[i] = gcap * tanhf(gv / gcap) * sigmoid(gv) * (ucap * tanhf(u[i] / ucap));
 }
 
+// the same with each row's gate and up scaled first (an NVFP4 expert's scale: ink2_scale then ink2_swiglu's bits)
+__global__ void swiglu_rows_kernel(const float* g, const float* u, const float* sg, const float* su, uint32_t n,
+                                   uint64_t all, float gcap, float ucap, float* h) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= all) return;
+  const uint64_t r = i / n;
+  const float gv = g[i] * sg[r], uv = u[i] * su[r];
+  h[i] = gcap * tanhf(gv / gcap) * sigmoid(gv) * (ucap * tanhf(uv / ucap));
+}
+
+// a token's experts summed in its slot order from zero: ink2_axpy's sum, one after another
+__global__ void moe_sum_kernel(float* y, const float* x, const float* a, const int32_t* row, uint32_t k, uint64_t all,
+                               uint32_t dim) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= all) return;
+  const uint64_t t = i / dim, c = i % dim;
+  float v = 0.0f;
+  for (uint32_t s = 0; s < k; s++) v += a[t * k + s] * x[(uint64_t) row[t * k + s] * dim + c];
+  y[i] = v;
+}
+
 // x' = hist (taps - 1 rows) then x: token t's taps x'[t .. t + taps - 1], the current last
 __device__ inline float tap(const float* x, const float* hist, uint32_t at, uint32_t h, uint32_t ch, uint32_t c) {
   return at < h ? (hist ? hist[(uint64_t) at * ch + c] : 0.0f) : x[(uint64_t) (at - h) * ch + c];
@@ -159,7 +180,7 @@ __global__ void attn_kernel(Ink2Attn a, const float* q, const float* rel, const 
 // the prompt's attention on WMMA (16 x 16 x 16, f16 in, f32 sums): a block a 16-token tile and KV head, a wave a
 // query head of its group; each 16-key tile's K and V^T in LDS once for the group. a lane holds rows 2 j + half
 // (j < 8) at column lane % 16 of a tile's scores and of each 16-dim slice of O (q4x_attn.hip's layout)
-constexpr int kFaTile = 16;
+constexpr int kFaTile = INK2_FA_TILE;
 constexpr int kFaHead = INK2_MAX_HEAD;
 constexpr int kFaRow = kFaHead + 8;  // f16s a row in LDS, then a pad
 constexpr int kFaKey = kFaTile + 8;
@@ -206,12 +227,15 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
   // the block's key range (its first row tile's lowest to its last's highest); a wave's own rows masked within it
   const uint32_t last = tb + kFaTile * RT - 1 < n_tok - 1 ? tb + kFaTile * RT - 1 : n_tok - 1;
   const uint32_t qlo = base + tb, qhi = base + last;
-  const uint32_t klo = a.window && qlo + 1 > a.window ? qlo + 1 - a.window : 0;
+  // the first key tile at a multiple of kFaTile: a query's keys cut into the same tiles whatever block it is in
+  // (the tiles before its window wholly masked: no-ops), so its bits are its own - given keys whose index is their
+  // position mod kFaTile (INK2_FA_TILE: the engine's windows start so)
+  const uint32_t klo = a.window && qlo + 1 > a.window ? (qlo + 1 - a.window) / kFaTile * kFaTile : 0;
   float kr[kItems], vr[kItems];
-  auto fetch = [&](uint32_t kb) {  // a tile's K and V, this thread's items (keys past qhi zero)
+  auto fetch = [&](uint32_t kb) {  // a tile's K and V, this thread's items (keys past the last zero)
     for (int it = 0; it < kItems; it++) {
       const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead, key = kb + r;
-      const bool in = i < kFaTile * kFaHead && key <= qhi;
+      const bool in = i < kFaTile * kFaHead && key < n_keys;
       const uint64_t at = ((uint64_t) key * a.kv_heads + kvh) * kFaHead + d;
       kr[it] = in ? k[at] : 0.0f, vr[it] = in ? v[at] : 0.0f;
     }
@@ -254,10 +278,23 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
     }
     __builtin_amdgcn_wave_barrier();
     const fa_h16 pa = *(const fa_h16*) (ps[wave] + col * kFaKey);
+    // a row whose own key is in this tile (not its last): its p . v over the tile's values up to its own alone - the
+    // WMMA's sum moves with a value whose p is 0, and the keys past a query are the prompt's next tokens in one
+    // step, none in a step that ends at it (a decode's). cut c: the rows at key kb + c (the wave's rows the valid)
+    const int64_t c_lo = (int64_t) (base + t0) - kb, c_last = c_lo + (int64_t) (n_tok - 1 - t0 < 15 ? n_tok - 1 - t0 : 15);
+    const int cmin = c_lo > 0 ? (int) c_lo : 0, cmax = c_last < kFaTile - 2 ? (int) c_last : kFaTile - 2;
     for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
       for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
       const fa_h16 bv = *(const fa_h16*) (vt + (nt * kFaTile + col) * kFaKey);
-      o[nt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bv, o[nt]);
+      const fa_f8 prev = o[nt];
+      o[nt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bv, prev);
+      for (int c = cmin; c <= cmax; c++) {
+        fa_h16 bc = bv;
+        for (int e = c + 1; e < kFaTile; e++) bc[e] = (_Float16) 0.0f;
+        const fa_f8 d = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bc, prev);
+        for (int j = 0; j < 8; j++)
+          if ((int64_t) (base + t0 + 2 * j + half) == (int64_t) kb + c) o[nt][j] = d[j];
+      }
     }
     __builtin_amdgcn_wave_barrier();
   }
@@ -325,6 +362,22 @@ extern "C" bool ink2_swiglu(const float* g, const float* u, uint32_t n, float gc
   if (!g || !u || !h || !n || !n_tok || !(gcap > 0) || !(ucap > 0)) return false;
   const uint64_t all = (uint64_t) n * n_tok;
   swiglu_kernel<<<grid(all), kThreads, 0, st(stream)>>>(g, u, all, gcap, ucap, h);
+  return ok();
+}
+
+extern "C" bool ink2_swiglu_rows(const float* g, const float* u, const float* sg, const float* su, uint32_t n,
+                                 float gcap, float ucap, uint32_t rows, float* h, void* stream) {
+  if (!g || !u || !sg || !su || !h || !n || !rows || !(gcap > 0) || !(ucap > 0)) return false;
+  const uint64_t all = (uint64_t) n * rows;
+  swiglu_rows_kernel<<<grid(all), kThreads, 0, st(stream)>>>(g, u, sg, su, n, all, gcap, ucap, h);
+  return ok();
+}
+
+extern "C" bool ink2_moe_sum(float* y, const float* x, const float* a, const int32_t* row, uint32_t k, uint32_t n_tok,
+                             uint32_t dim, void* stream) {
+  if (!y || !x || !a || !row || !k || !n_tok || !dim) return false;
+  const uint64_t all = (uint64_t) n_tok * dim;
+  moe_sum_kernel<<<grid(all), kThreads, 0, st(stream)>>>(y, x, a, row, k, all, dim);
   return ok();
 }
 

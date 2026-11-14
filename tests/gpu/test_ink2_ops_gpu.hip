@@ -2,6 +2,7 @@
 // modules at the model's sizes (tools/convert/ink2_cases.py's files, ~/osmos-oracle/ink2-cases: each case's inputs
 // and output; tools/convert/test_cases.py holds the files to the formulas in float64). F32 against F32: kExactRel
 #include <algorithm>
+#include <cstring>
 
 #include "q4x_ref.h"
 
@@ -154,6 +155,31 @@ int main() {
     held((w + "flash attention, ungated").c_str(), host_of(dout, qr.v.size()), in(c, "ungated"), 1.0, kF16Rel);
     CHECK(ink2_fa(&at, dq, dr, ds, dg, n, dk, dv, n, drp, dout, nullptr));
     held((w + "flash attention, gated").c_str(), host_of(dout, qr.v.size()), in(c, "out"), 1.0, kF16Rel);
+    {  // a step's rows the prompt's bits: queries s .. e - 1 over the keys to e, a window's from a tile's start - a
+       // prompt's later chunk, one ending inside it, a decode's single token
+      const std::vector<float> whole = host_of(dout, qr.v.size());
+      float* dpart = dev_alloc<float>(qr.v.size());
+      const std::pair<uint32_t, uint32_t> steps[] = {{1, n},          {7, n},       {17, n},     {100, n},
+                                                     {n / 2 + 3, n}, {n - 1, n},   {0, 1},      {0, 37},
+                                                     {5, 6},         {100, 164},   {547, 548},  {n / 2, n / 2 + 1},
+                                                     {1030, 1031},   {1029, 1100}, {0, n - 1}};
+      int splits = 0;
+      for (auto [s, e] : steps) {
+        if (e > n || s >= e) continue;
+        const uint32_t want = full ? s : (s < at.window - 1 ? s : at.window - 1);
+        const uint32_t k0 = full ? 0 : s - (want + (s - want) % INK2_FA_TILE), m = e - s;
+        const uint64_t kd = (uint64_t) KV * D;
+        CHECK(ink2_fa(&at, dq + (uint64_t) s * H * D, dr + (uint64_t) s * H * R, ds + (uint64_t) s * H,
+                      dg + (uint64_t) s * H * D, m, dk + k0 * kd, dv + k0 * kd, e - k0, drp, dpart, nullptr));
+        const std::vector<float> part = host_of(dpart, (size_t) m * H * D);
+        uint32_t bad = 0;
+        for (size_t i = 0; i < part.size(); i++) bad += part[i] != whole[(size_t) s * H * D + i];
+        CHECK(bad == 0 || (std::printf("  %s: the step %u .. %u: %u values not the prompt's bits\n", c, s, e, bad), false));
+        splits++;
+      }
+      std::printf("  %s: flash attention's rows the same bits in %d steps (chunks, decodes) as in the prompt\n", c, splits);
+      hipFree(dpart);
+    }
     for (float* d : {dq, dqw, dr, drw, dk, dv, drp, ds, dg, dout}) hipFree(d);
   }
   std::printf("[test_ink2_ops_gpu] ok\n");
