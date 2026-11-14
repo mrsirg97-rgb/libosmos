@@ -95,6 +95,7 @@ typedef struct Scratch
   uint32_t *cand;  /* the running sub-batch's candidate bits (Sub's) */
   uint32_t *clist; /* a scored chunk's tokens' candidate blocks, listed (ops_cand_list: score_rows x cand_blocks) */
   uint32_t *clist_n;
+  float *bmax;    /* the candidate source's blocks' highest scores (ops_cand_blocks_max: score_rows x blocks) */
   int32_t *keep, *back; /* the decoder's tokens (hip_skip.c): kept, compacted; then each back at its row */
   float *gw;            /* the next layer's guessed experts' weights (hip_guess.c: the router's, unread) */
 } Scratch;

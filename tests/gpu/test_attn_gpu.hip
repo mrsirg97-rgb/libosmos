@@ -199,6 +199,7 @@ static void gathered(uint32_t heads) {
   CHECK(hipMemcpy(pos, ph.data(), kGTok * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(db, bits.data(), bits.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(ops_fp4_round(k, kh.size(), KV_FP4_POW2_BLOCK, false, kp, kIxHd, nullptr));
+  CHECK(ops_fp4_round(q, qh.size(), KV_FP4_POW2_BLOCK, false, nullptr, 0, nullptr));  // q as the forward rounds it
   // the list: each token's set bits ascending
   CHECK(ops_cand_list(db, words, kGTok, list, kGKeep, n_list, nullptr));
   std::vector<uint32_t> lh((size_t) kGTok * kGKeep), nh(kGTok);
@@ -242,12 +243,84 @@ static void gathered(uint32_t heads) {
     CHECK(hipMemcpy((pass ? n2 : n1).data(), n_sel, kGTok * 4, hipMemcpyDeviceToHost) == hipSuccess);
   }
   CHECK(n1 == n2 && s1 == s2 && n1[0] == (int32_t) kSel);
+  // ops_topk_rows over the list (the gathered scores, the rest never read): the masked top k's rows, in its order
+  std::vector<int32_t> s3(s1.size()), n3(kGTok);
+  CHECK(hipMemset(sel, 0xFF, s1.size() * 4) == hipSuccess);
+  CHECK(ops_topk_rows(part, stride, pos, ratio, kSel, list, n_list, kGKeep, kGBlock, kGTok, sel, OPS_MAX_SELECT, n_sel,
+                      nullptr));
+  CHECK(hipMemcpy(s3.data(), sel, s1.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(n3.data(), n_sel, kGTok * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(n3 == n1);
+  for (uint32_t t = 0; t < kGTok; t++)
+    CHECK(std::memcmp(&s3[(size_t) t * OPS_MAX_SELECT], &s1[(size_t) t * OPS_MAX_SELECT], (size_t) n1[t] * 4) == 0);
   for (void* p : {(void*) q, (void*) k, (void*) kp, (void*) w, (void*) full, (void*) part, (void*) pos, (void*) db,
                   (void*) list, (void*) n_list, (void*) sel, (void*) n_sel})
     CHECK(hipFree(p) == hipSuccess);
   std::printf("  the indexer gathered, %u heads, %u tokens x %u rows keeping %u of %u blocks: the list the bits' blocks,"
-              " %u kept scores the full scoring's bits, %u others untouched, the masked top %u the same rows\n",
+              " %u kept scores the full scoring's bits, %u others untouched, the masked top %u the same rows (and over the list)\n",
               heads, kGTok, kGRows, kGKeep, nb, same, left, kSel);
+}
+
+// ops_index_score_fp4 (0.7.3): the fused sums against ops_index_score's, every bit, q and keys FP4-rounded; `wild`
+// scales some q blocks by 2^-120 (products past the normal range's bottom) and others by 2^60 (and the keys by 2^70:
+// products past its top) - the guard's fallback seen taken, the bits the same
+static void fp4(uint32_t heads, bool wild) {
+  const uint32_t rows = (uint32_t) (kPos0 + kIxTok) / kIxRatio, stride = rows;
+  std::vector<float> qh((size_t) kIxTok * heads * kIxHd), kh((size_t) rows * kIxHd), wh((size_t) kIxTok * heads);
+  for (float& v : qh) v = uniform();
+  for (float& v : kh) v = uniform();
+  for (float& v : wh) v = uniform();
+  if (wild) {
+    for (size_t r = 0; r < (size_t) kIxTok * heads; r++)
+      for (uint32_t b = 0; b < kIxHd / 32; b++) {
+        const uint32_t x = (uint32_t) (r * 5 + b) % 9;
+        for (uint32_t d = 0; d < 32; d++) qh[r * kIxHd + b * 32 + d] *= x == 0 ? 0x1p-120f : x == 1 ? 0x1p60f : 1.0f;
+      }
+    for (size_t r = 0; r < rows; r += 7)
+      for (uint32_t d = 0; d < kIxHd; d++) kh[r * kIxHd + d] *= 0x1p70f;
+  }
+  std::vector<int32_t> ph(kIxTok);
+  for (uint32_t t = 0; t < kIxTok; t++) ph[t] = kPos0 + (int32_t) t;
+  float *q, *k, *w, *sa, *sb;
+  int32_t* pos;
+  uint8_t* kp;
+  uint32_t* fb;
+  const size_t scb = (size_t) kIxTok * stride * 4;
+  CHECK(hipMalloc(&q, qh.size() * 4) == hipSuccess && hipMalloc(&k, kh.size() * 4) == hipSuccess);
+  CHECK(hipMalloc(&w, wh.size() * 4) == hipSuccess && hipMalloc(&sa, scb) == hipSuccess && hipMalloc(&sb, scb) == hipSuccess);
+  CHECK(hipMalloc(&pos, kIxTok * 4) == hipSuccess && hipMalloc(&fb, 4) == hipSuccess);
+  CHECK(hipMalloc(&kp, rows * kv_row_bytes(KV_FP4_POW2, kIxHd)) == hipSuccess);
+  CHECK(hipMemcpy(q, qh.data(), qh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(k, kh.data(), kh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(w, wh.data(), wh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(pos, ph.data(), kIxTok * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(ops_fp4_round(k, kh.size(), KV_FP4_POW2_BLOCK, false, kp, kIxHd, nullptr));
+  CHECK(ops_fp4_round(q, qh.size(), KV_FP4_POW2_BLOCK, false, nullptr, 0, nullptr));
+  CHECK(hipMemset(sa, 0x7F, scb) == hipSuccess && hipMemset(sb, 0x7F, scb) == hipSuccess && hipMemset(fb, 0, 4) == hipSuccess);
+  CHECK(ops_index_score(q, kp, KV_FP4_POW2, w, pos, kIxRatio, rows, heads, kIxHd, kIxTok, sa, stride, nullptr));
+  CHECK(ops_index_score_fp4(q, kp, w, pos, kIxRatio, rows, heads, kIxHd, kIxTok, sb, stride, fb, nullptr));
+  std::vector<float> a(scb / 4), b(scb / 4);
+  uint32_t nfb = 0;
+  CHECK(hipMemcpy(a.data(), sa, scb, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(b.data(), sb, scb, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(&nfb, fb, 4, hipMemcpyDeviceToHost) == hipSuccess);
+  uint64_t n = 0;
+  for (uint32_t t = 0; t < kIxTok; t++) {
+    const size_t vis = (size_t) (ph[t] + 1) / kIxRatio;
+    for (size_t c = 0; c < vis; c++)
+      if (std::memcmp(&a[(size_t) t * stride + c], &b[(size_t) t * stride + c], 4)) {
+        std::printf("  fp4: token %u row %zu: %a, the plain kernel's %a\n", t, c, b[(size_t) t * stride + c],
+                    a[(size_t) t * stride + c]);
+        CHECK(false);
+      }
+    n += vis;
+  }
+  CHECK(wild ? nfb > 0 : nfb == 0);
+  for (void* p : {(void*) q, (void*) k, (void*) kp, (void*) w, (void*) sa, (void*) sb, (void*) pos, (void*) fb})
+    CHECK(hipFree(p) == hipSuccess);
+  std::printf("  the indexer fused (FP4 q and keys), %u heads%s: %llu scores the plain kernel's bits (%u head sums the"
+              " multiply-then-add fallback's)\n",
+              heads, wild ? ", products past the normal range" : "", (unsigned long long) n, nfb);
 }
 
 int main() {
@@ -351,6 +424,10 @@ int main() {
   indexer(24);
   gathered(32);
   gathered(24);
+  fp4(32, false);
+  fp4(24, false);
+  fp4(32, true);
+  fp4(24, true);
   std::printf("[test_attn_gpu] ok\n");
   return 0;
 }

@@ -1,6 +1,8 @@
 // ops (include/osmos/gpu/ops.h): the attention's keys - the compressor, the indexer's scores and its top k
 // (sparse_attn.hip the attention itself) - each as ref.py computes it, in F32, reductions in a fixed order
 #include <cmath>
+#include <cstdlib>
+#include <type_traits>
 #include "launch.h"
 #include <cstdint>
 
@@ -75,20 +77,27 @@ __device__ inline uint32_t visible(const int32_t* pos, uint32_t t, uint32_t rati
 // bits of a wave a row, a lane a head. the best of 1-4 tokens, 64-128 rows, 4-16 x 4-8 measured on gfx1151 (2,048
 // tokens x 4,096 rows, 32 heads x 128: 47 ms a wave a row, 10.1 here; scratch ixb.hip)
 constexpr int kIxHeads = 32, kIxTok = 2, kIxRows = 64, kIxR = 8, kIxC = 4, kIxStep = 16;
+constexpr int kIxRcFp4 = 84;  // its thread's block (slots x rows): 8 x 4 (8 x 8 and 16 x 4: 15x slower, spilled)
+constexpr int kIxTokFp4 = 4;  // ops_index_score_fp4's tile's tokens: 4 the fastest of 1, 2, 4 (ixbench)
 typedef float f4 __attribute__((ext_vector_type(4)));
 // GATHER (0.7.3, the candidate layers past 16K: ops_index_score_rows): a tile's rows a token's kept blocks' (list:
 // block ids, n_list of them), not its first max_n - a token a tile (TOK 1), each (token, head, row) the same order of
 // sums as the plain tile's, so a kept row's score the same bits; the rest unwritten (ops_topk masks them unread)
-template <int TOK, bool GATHER>
-__global__ __launch_bounds__((kIxHeads * TOK / kIxR) * (kIxRows / kIxC)) void index_score_kernel(
+// FMA (0.7.3, ops_index_score_fp4): the sums' a + q x k one fused step - q and the keys FP4 values (E2M1 times a
+// power of two: 2 bits of mantissa each), so q x k is exact and fma(q, k, a) rounds as round(q x k) + a does: the
+// same bits in half the instructions. exact but where a product leaves the normal range: each (slot, row)'s
+// smallest nonzero |q| x |k| under 2^-126 (a product under- or subnormal-rounded) or its largest at 2^127 (an fma's
+// finite past a product's inf), its sum taken again the multiply-then-add way (counted into fallbacks)
+template <int TOK, bool GATHER, bool FMA = false, int RR = kIxR, int CC = kIxC>
+__global__ __launch_bounds__((kIxHeads * TOK / RR) * (kIxRows / CC)) void index_score_kernel(
     const float* __restrict__ q, const uint8_t* __restrict__ keys, uint32_t kfmt, const float* __restrict__ w,
     const int32_t* __restrict__ pos, uint32_t ratio, uint32_t heads, uint32_t hd, uint32_t n_tok,
     float* __restrict__ score, uint32_t stride, const uint32_t* __restrict__ list, const uint32_t* __restrict__ n_list,
-    uint32_t list_stride, uint32_t block) {
-  constexpr int kIxM = kIxHeads * TOK, kIxThreads = (kIxM / kIxR) * (kIxRows / kIxC);
-  constexpr int TX = kIxRows / kIxC, G = kIxC / 4, KS = kIxStep;
+    uint32_t list_stride, uint32_t block, uint32_t* __restrict__ fallbacks = nullptr) {
+  constexpr int kIxM = kIxHeads * TOK, kIxThreads = (kIxM / RR) * (kIxRows / CC);
+  constexpr int TX = kIxRows / CC, G = CC / 4, KS = kIxStep;
   constexpr int QL = kIxM * KS / 4 / kIxThreads, KL = kIxRows * KS / 4 / kIxThreads;  // a thread's float4s
-  static_assert(QL >= 1 && KL >= 1 && kIxR % 4 == 0 && kIxHeads == kWave, "whole float4s; a lane a head");
+  static_assert(QL >= 1 && KL >= 1 && RR % 4 == 0 && kIxHeads == kWave, "whole float4s; a lane a head");
   static_assert(!GATHER || TOK == 1, "a gathered tile one token's rows");
   constexpr int kStage = KS * (kIxM + 4) + KS * (kIxRows + 4), kSums = kIxM * (kIxRows + 1);
   __shared__ __attribute__((aligned(16))) float lds[kStage > kSums ? kStage : kSums];
@@ -130,14 +139,34 @@ __global__ __launch_bounds__((kIxHeads * TOK / kIxR) * (kIxRows / kIxC)) void in
   kv::Raw kn[KL];  // the keys' bytes in flight, decoded when staged
   for (int j = 0; j < QL; j++) qn[j] = qp[j] ? *(const f4*) qp[j] : f4{};
   for (int j = 0; j < KL; j++) kn[j] = kp[j] ? kv::fetch4(kfmt, kp[j], hd, kd[j]) : kv::Raw{};
-  f4 acc[kIxR][G] = {};
+  f4 acc[RR][G] = {};
+  // (FMA) the guard's bounds: each slot's and row's smallest nonzero |value| and largest, as uint bits (positive
+  // floats order as their bits)
+  __shared__ uint32_t q_lo[FMA ? kIxM : 1], q_hi[FMA ? kIxM : 1], k_lo[FMA ? kIxRows : 1], k_hi[FMA ? kIxRows : 1];
+  float qlo[QL], qhi[QL], klo[KL], khi[KL];
+  if constexpr (FMA) {
+    for (uint32_t i = threadIdx.x; i < (uint32_t) kIxM; i += kIxThreads) q_lo[i] = 0x7F800000u, q_hi[i] = 0;
+    for (uint32_t i = threadIdx.x; i < (uint32_t) kIxRows; i += kIxThreads) k_lo[i] = 0x7F800000u, k_hi[i] = 0;
+    for (int j = 0; j < QL; j++) qlo[j] = INFINITY, qhi[j] = 0.0f;
+    for (int j = 0; j < KL; j++) klo[j] = INFINITY, khi[j] = 0.0f;
+  }
+  const auto bound = [](float& lo, float& hi, float v) {
+    const float a = fabsf(v);
+    lo = a > 0.0f ? fminf(lo, a) : lo, hi = fmaxf(hi, a);  // (a NaN: fmaxf keeps hi; its sum NaN either way)
+  };
   for (uint32_t d0 = 0; d0 < hd; d0 += KS) {
     __syncthreads();
     for (int j = 0; j < QL; j++)
-      for (int e = 0; e < 4; e++) qs[qd[j] + e][qi[j]] = qn[j][e];
+      for (int e = 0; e < 4; e++) {
+        qs[qd[j] + e][qi[j]] = qn[j][e];
+        if constexpr (FMA) bound(qlo[j], qhi[j], qn[j][e]);
+      }
     for (int j = 0; j < KL; j++) {
       const f4 kj = kp[j] ? kv::decode4(kfmt, kn[j]) : f4{};
-      for (int e = 0; e < 4; e++) ks[kd[j] + e][ki[j]] = kj[e];
+      for (int e = 0; e < 4; e++) {
+        ks[kd[j] + e][ki[j]] = kj[e];
+        if constexpr (FMA) bound(klo[j], khi[j], kj[e]);
+      }
     }
     __syncthreads();
     if (d0 + KS < hd) {
@@ -146,24 +175,55 @@ __global__ __launch_bounds__((kIxHeads * TOK / kIxR) * (kIxRows / kIxC)) void in
     }
 #pragma unroll
     for (int d = 0; d < KS; d++) {
-      f4 a[kIxR / 4], b[G];
-      for (int i = 0; i < kIxR / 4; i++) a[i] = *(const f4*) &qs[d][ty * 4 + i * (kIxM / (kIxR / 4))];
+      f4 a[RR / 4], b[G];
+      for (int i = 0; i < RR / 4; i++) a[i] = *(const f4*) &qs[d][ty * 4 + i * (kIxM / (RR / 4))];
       for (int g = 0; g < G; g++) b[g] = *(const f4*) &ks[d][tx * 4 + g * (kIxRows / G)];
-      for (int i = 0; i < kIxR; i++) {
+      for (int i = 0; i < RR; i++) {
         const float av = a[i / 4][i % 4];
-        for (int g = 0; g < G; g++) acc[i][g] = acc[i][g] + f4{av, av, av, av} * b[g];
+        if constexpr (FMA) {
+          for (int g = 0; g < G; g++)
+            for (int e = 0; e < 4; e++) acc[i][g][e] = __fmaf_rn(av, b[g][e], acc[i][g][e]);
+        } else {
+          for (int g = 0; g < G; g++) acc[i][g] = acc[i][g] + f4{av, av, av, av} * b[g];
+        }
       }
     }
   }
+  if constexpr (FMA) {
+    for (int j = 0; j < QL; j++)
+      atomicMin(&q_lo[qi[j]], __float_as_uint(qlo[j])), atomicMax(&q_hi[qi[j]], __float_as_uint(qhi[j]));
+    for (int j = 0; j < KL; j++)
+      atomicMin(&k_lo[ki[j]], __float_as_uint(klo[j])), atomicMax(&k_hi[ki[j]], __float_as_uint(khi[j]));
+  }
   __syncthreads();
   float(*vs)[kIxRows + 1] = (float(*)[kIxRows + 1]) lds;  // [slot][row]: relu(s) * w, in the staging's room
-  for (int i = 0; i < kIxR; i++) {
-    const int m = ty * 4 + (i / 4) * (kIxM / (kIxR / 4)) + i % 4;
+  for (int i = 0; i < RR; i++) {
+    const int m = ty * 4 + (i / 4) * (kIxM / (RR / 4)) + i % 4;
     const uint32_t t = t0 + m / kIxHeads, h = m % kIxHeads;
     const bool real = t < n_tok && h < heads;  // an empty slot: 0, as a lane past the heads
     const float wv = real ? w[(uint64_t) t * heads + h] : 0.0f;
     for (int g = 0; g < G; g++)
-      for (int e = 0; e < 4; e++) vs[m][tx * 4 + g * (kIxRows / G) + e] = real ? fmaxf(acc[i][g][e], 0.0f) * wv : 0.0f;
+      for (int e = 0; e < 4; e++) {
+        const int c = tx * 4 + g * (kIxRows / G) + e;
+        float sdot = acc[i][g][e];
+        if constexpr (FMA) {
+          const float lo = __uint_as_float(q_lo[m]) * __uint_as_float(k_lo[c]);
+          const float hi = __uint_as_float(q_hi[m]) * __uint_as_float(k_hi[c]);
+          const uint32_t r = row_of((uint32_t) c);
+          if (real && r != UINT32_MAX && (lo < 0x1p-126f || hi >= 0x1p127f)) {  // the multiply-then-add sum
+            const float* qr = q + ((uint64_t) t * heads + h) * hd;
+            const uint8_t* kr = keys + (uint64_t) r * kv_row_bytes((KvFmt) kfmt, hd);
+            float sum = 0.0f;
+            for (uint32_t d = 0; d < hd; d += 4) {
+              const f4 kv4 = kv::load4(kfmt, kr, hd, d);
+              for (int x = 0; x < 4; x++) sum = __fadd_rn(sum, __fmul_rn(qr[d + x], kv4[x]));
+            }
+            sdot = sum;
+            if (fallbacks) atomicAdd(fallbacks, 1u);
+          }
+        }
+        vs[m][c] = real ? fmaxf(sdot, 0.0f) * wv : 0.0f;
+      }
   }
   __syncthreads();
   for (int o = threadIdx.x; o < TOK * kIxRows; o += kIxThreads) {
@@ -191,10 +251,24 @@ struct Pick {
   uint32_t n;             // the rows visible
   const uint32_t* keep;   // the kept blocks' bits (rows; NULL: none masked)
   uint32_t block;
-  template <bool BLOCKS> __device__ uint32_t count() const { return BLOCKS ? (n + block - 1) / block : n; }
+  const uint32_t* list;   // (0.7.3, ops_topk_rows) the kept blocks listed, ascending: the items their visible rows
+  uint32_t n_list;
+  const float* bmax;      // (0.7.3, ops_cand_blocks) each block's highest score, ops_block_max's (NULL: folded here)
+  // the list's items: its blocks' rows below n - ascending rows, so only its last block can be partial
+  __device__ uint32_t listed() const {
+    if (!n_list) return 0;
+    const uint32_t last = list[n_list - 1] * block;
+    return (n_list - 1) * block + (n > last ? min(block, n - last) : 0);
+  }
+  __device__ uint32_t row(uint32_t i) const { return list ? list[i / block] * block + i % block : i; }
+  template <bool BLOCKS> __device__ uint32_t count() const {
+    return BLOCKS ? (n + block - 1) / block : list ? listed() : n;
+  }
   template <bool BLOCKS> __device__ uint32_t key(uint32_t i) const {
+    if (!BLOCKS && list) return order(score[row(i)]);  // a listed row: kept
     if constexpr (BLOCKS) {
       if (i + 1 == count<true>()) return order(INFINITY);
+      if (bmax) return order(bmax[i]);  // (0.7.3) ops_block_max's: the same fold, once
       float m = -INFINITY;
       for (uint32_t c = i * block, e = c + block < n ? c + block : n; c < e; c++) m = fmaxf(m, score[c]);
       return order(m);
@@ -211,13 +285,15 @@ struct Pick {
 template <bool BLOCKS>
 __global__ void select_kernel(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t k,
                               const uint32_t* keep, uint32_t block, uint32_t keep_words, int32_t* sel,
-                              uint32_t sel_stride, int32_t* n_sel, uint32_t* bits) {
+                              uint32_t sel_stride, int32_t* n_sel, uint32_t* bits, const uint32_t* list = nullptr,
+                              const uint32_t* n_list = nullptr, uint32_t list_stride = 0, const float* bmax = nullptr,
+                              uint32_t bstride = 0) {
   __shared__ uint32_t hist[kBins];
   __shared__ uint32_t prefix, mask, need;
-  __shared__ uint32_t cnt_hi[kSelectThreads], cnt_eq[kSelectThreads];
   const uint32_t tid = threadIdx.x, t = blockIdx.x;
   const Pick p = {score + (uint64_t) t * stride, visible(pos, t, ratio), keep ? keep + (uint64_t) t * keep_words : nullptr,
-                  block};
+                  block, list ? list + (uint64_t) t * list_stride : nullptr, list ? n_list[t] : 0,
+                  bmax ? bmax + (uint64_t) t * bstride : nullptr};
   const uint32_t n = p.count<BLOCKS>();
   if constexpr (BLOCKS) {
     bits += (uint64_t) t * keep_words;
@@ -228,7 +304,7 @@ __global__ void select_kernel(const float* score, uint32_t stride, const int32_t
   }
   const auto take = [&](uint32_t i) {
     if constexpr (BLOCKS) atomicOr(&bits[i / 32], 1u << (i % 32));
-    else sel[i] = (int32_t) i;
+    else sel[i] = (int32_t) p.row(i);
   };
   if (n <= k) {  // every one
     for (uint32_t c = tid; c < n; c += kSelectThreads) take(c);
@@ -237,12 +313,26 @@ __global__ void select_kernel(const float* score, uint32_t stride, const int32_t
   }
   if (tid == 0) prefix = 0, mask = 0, need = k;
   __syncthreads();
+  // 0.7.3: after the first pass, the keys of its bin (the k-th's: every later pass's candidates) gathered into LDS,
+  // the later passes over them alone - their histograms the same counts - when they fit (past kCandCap: the full
+  // scans, as before)
+  constexpr uint32_t kCandCap = 8192;
+  __shared__ uint32_t cand[kCandCap];
+  __shared__ uint32_t n_cand;
+  bool listed = false;
   for (int shift = 32 - kRadixBits; shift >= 0; shift -= kRadixBits) {
     for (uint32_t b = tid; b < kBins; b += kSelectThreads) hist[b] = 0;
     __syncthreads();
-    for (uint32_t c = tid; c < n; c += kSelectThreads) {
-      const uint32_t u = p.key<BLOCKS>(c);
-      if ((u & mask) == prefix) atomicAdd(&hist[(u >> shift) & (kBins - 1)], 1u);
+    if (listed) {
+      for (uint32_t i = tid; i < n_cand; i += kSelectThreads) {
+        const uint32_t u = cand[i];
+        if ((u & mask) == prefix) atomicAdd(&hist[(u >> shift) & (kBins - 1)], 1u);
+      }
+    } else {
+      for (uint32_t c = tid; c < n; c += kSelectThreads) {
+        const uint32_t u = p.key<BLOCKS>(c);
+        if ((u & mask) == prefix) atomicAdd(&hist[(u >> shift) & (kBins - 1)], 1u);
+      }
     }
     __syncthreads();
     if (tid == 0) {  // the bin the need-th highest of the candidates falls in, from the top
@@ -258,35 +348,49 @@ __global__ void select_kernel(const float* score, uint32_t stride, const int32_t
       }
     }
     __syncthreads();
+    if (shift == 32 - kRadixBits && shift > 0) {  // the first pass done: its bin's keys gathered
+      if (tid == 0) n_cand = 0;
+      __syncthreads();
+      for (uint32_t c = tid; c < n; c += kSelectThreads) {
+        const uint32_t u = p.key<BLOCKS>(c);
+        if ((u & mask) == prefix) {
+          const uint32_t at = atomicAdd(&n_cand, 1u);
+          if (at < kCandCap) cand[at] = u;
+        }
+      }
+      __syncthreads();
+      listed = n_cand <= kCandCap;
+    }
   }
   const uint32_t kth = prefix;  // the k-th highest key; `need` of the ones equal to it to take
-  const uint32_t per = (n + kSelectThreads - 1) / kSelectThreads, lo = tid * per, hi = lo + per < n ? lo + per : n;
-  uint32_t h_ = 0, e_ = 0;
-  for (uint32_t c = lo; c < hi; c++) {
-    const uint32_t u = p.key<BLOCKS>(c);
-    h_ += u > kth, e_ += u == kth;
-  }
-  cnt_hi[tid] = h_, cnt_eq[tid] = e_;
-  __syncthreads();
-  if (tid == 0) {  // exclusive prefixes, in index order: the equal ones taken lowest first
-    uint32_t ah = 0, ae = 0;
-    for (uint32_t i = 0; i < kSelectThreads; i++) {
-      const uint32_t th = cnt_hi[i], te = cnt_eq[i];
-      cnt_hi[i] = ah, cnt_eq[i] = ae;
-      ah += th, ae += te;
+  if (!BLOCKS && tid == 0) *n_sel = (int32_t) k;
+  // 0.7.3: one pass in index order, a tile of kSelectThreads items at a time (item base + tid: the loads coalesced) -
+  // an item's higher and equal ones before it counted by its wave's ballots and the waves' prefix, the tiles' running
+  // totals carried: taken when higher, or equal with fewer than `need` equal before it, into slot (higher before) +
+  // min(equal before, need) - the rows (and ties) the per-thread runs took, in the same order
+  constexpr int kSelWaves = kSelectThreads / kWave;
+  __shared__ uint32_t w_hi[kSelWaves], w_eq[kSelWaves];
+  const uint32_t lane = tid % kWave, wv = tid / kWave, below = (1u << lane) - 1u;
+  uint32_t base_hi = 0, base_eq = 0;
+  for (uint32_t base = 0; base < n; base += kSelectThreads) {
+    const uint32_t c = base + tid;
+    const uint32_t u = c < n ? p.key<BLOCKS>(c) : 0;
+    const bool hi_ = c < n && u > kth, eq_ = c < n && u == kth;
+    const uint32_t bh = (uint32_t) __ballot(hi_), be = (uint32_t) __ballot(eq_);
+    if (lane == 0) w_hi[wv] = __popc(bh), w_eq[wv] = __popc(be);
+    __syncthreads();
+    uint32_t ph = base_hi + __popc(bh & below), pe = base_eq + __popc(be & below), th = 0, te = 0;
+    for (uint32_t x = 0; x < (uint32_t) kSelWaves; x++) {
+      if (x < wv) ph += w_hi[x], pe += w_eq[x];
+      th += w_hi[x], te += w_eq[x];
     }
-    if (!BLOCKS) *n_sel = (int32_t) k;
-  }
-  __syncthreads();
-  uint32_t out = cnt_hi[tid] + (cnt_eq[tid] < need ? cnt_eq[tid] : need), eq = cnt_eq[tid];
-  for (uint32_t c = lo; c < hi; c++) {
-    const uint32_t u = p.key<BLOCKS>(c);
-    if (u > kth || (u == kth && eq++ < need)) {
+    if (hi_ || (eq_ && pe < need)) {
       if constexpr (BLOCKS) atomicOr(&bits[c / 32], 1u << (c % 32));
-      else sel[out++] = (int32_t) c;
+      else sel[ph + (pe < need ? pe : need)] = (int32_t) p.row(c);
     }
+    base_hi += th, base_eq += te;
+    __syncthreads();  // the waves' counts read before the next tile's
   }
-  (void) out;
 }
 
 }  // namespace
@@ -322,6 +426,29 @@ extern "C" bool ops_index_score(const float* q, const void* keys, uint32_t keys_
   return ok();
 }
 
+extern "C" bool ops_index_score_fp4(const float* q, const void* keys, const float* w, const int32_t* pos,
+                                    uint32_t ratio, uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok,
+                                    float* score, uint32_t stride, uint32_t* fallbacks, void* stream) {
+  if (!ratio || !max_n || max_n > stride || !heads || heads > (uint32_t) kWave || !head_dim || !n_tok) return false;
+  if (head_dim % kIxStep || head_dim % kv_block(KV_FP4_POW2)) return false;
+  constexpr int tok = kIxTokFp4;  // the tile's tokens: 4 the fastest of 1, 2, 4 (ixbench)
+  // the thread's block: 8 slots x 4 rows (8 x 8 and 16 x 4 measured 15x slower - their accumulators spilled; ixbench)
+  constexpr int rc = kIxRcFp4;
+  const auto launch = [&](auto T, auto R, auto C) {
+    constexpr int TK = decltype(T)::value, RK = decltype(R)::value, CK = decltype(C)::value;
+    constexpr int threads = (kIxHeads * TK / RK) * (kIxRows / CK);
+    index_score_kernel<TK, false, true, RK, CK><<<dim3((max_n + kIxRows - 1) / kIxRows, (n_tok + TK - 1) / TK),
+                                                  threads, 0, st(stream)>>>(q, (const uint8_t*) keys, KV_FP4_POW2, w,
+                                                                            pos, ratio, heads, head_dim, n_tok, score,
+                                                                            stride, nullptr, nullptr, 0, 1, fallbacks);
+  };
+  using std::integral_constant;
+  static_assert(rc == 84, "the thread's block: 8 x 4");
+  const auto with_rc = [&](auto T) { launch(T, integral_constant<int, 8>{}, integral_constant<int, 4>{}); };
+  with_rc(integral_constant<int, tok>{});
+  return ok();
+}
+
 extern "C" bool ops_index_score_rows(const float* q, const void* keys, uint32_t keys_fmt, const float* w,
                                      const int32_t* pos, uint32_t ratio, const uint32_t* list, const uint32_t* n_list,
                                      uint32_t list_stride, uint32_t block, uint32_t heads, uint32_t head_dim,
@@ -332,7 +459,7 @@ extern "C" bool ops_index_score_rows(const float* q, const void* keys, uint32_t 
   if (head_dim % kIxStep || keys_fmt > KV_FP4_POW2 || head_dim % kv_block((KvFmt) keys_fmt)) return false;
   constexpr int threads = (kIxHeads * 1 / kIxR) * (kIxRows / kIxC);
   const uint32_t tiles = (uint32_t) (((uint64_t) list_stride * block + kIxRows - 1) / kIxRows);
-  index_score_kernel<1, true><<<dim3(tiles, n_tok), threads, 0, st(stream)>>>(
+  index_score_kernel<1, true, true><<<dim3(tiles, n_tok), threads, 0, st(stream)>>>(
       q, (const uint8_t*) keys, keys_fmt, w, pos, ratio, heads, head_dim, n_tok, score, stride, list, n_list,
       list_stride, block);
   return ok();
@@ -385,11 +512,46 @@ extern "C" bool ops_topk(const float* score, uint32_t stride, const int32_t* pos
   return ok();
 }
 
+extern "C" bool ops_topk_rows(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t k,
+                              const uint32_t* list, const uint32_t* n_list, uint32_t list_stride, uint32_t block,
+                              uint32_t n_tok, int32_t* sel, uint32_t sel_stride, int32_t* n_sel, void* stream) {
+  if (!ratio || !k || k > OPS_MAX_SELECT || k > sel_stride || !n_tok || !list || !n_list || !list_stride || !block)
+    return false;
+  select_kernel<false><<<n_tok, kSelectThreads, 0, st(stream)>>>(score, stride, pos, ratio, k, nullptr, block, 0, sel,
+                                                                  sel_stride, n_sel, nullptr, list, n_list,
+                                                                  list_stride);
+  return ok();
+}
+
 extern "C" bool ops_cand_blocks(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio, uint32_t block,
                                 uint32_t topk_blocks, uint32_t n_tok, uint32_t* keep, uint32_t keep_words, void* stream) {
+  return ops_cand_blocks_max(score, stride, pos, ratio, block, topk_blocks, n_tok, keep, keep_words, nullptr, 0,
+                             stream);
+}
+
+// (0.7.3) a token's blocks' highest scores: each block's visible rows folded as Pick's key folds them (from -inf,
+// fmaxf in row order: a +0 and a -0 met in the same order), a thread a block
+__global__ void block_max_kernel(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio,
+                                 uint32_t block, float* bmax, uint32_t bstride) {
+  const uint32_t t = blockIdx.y, n = visible(pos, t, ratio), nb = (n + block - 1) / block;
+  const float* sc = score + (uint64_t) t * stride;
+  for (uint32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < nb; i += gridDim.x * blockDim.x) {
+    float m = -INFINITY;
+    for (uint32_t c = i * block, e = c + block < n ? c + block : n; c < e; c++) m = fmaxf(m, sc[c]);
+    bmax[(uint64_t) t * bstride + i] = m;
+  }
+}
+
+extern "C" bool ops_cand_blocks_max(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio,
+                                    uint32_t block, uint32_t topk_blocks, uint32_t n_tok, uint32_t* keep,
+                                    uint32_t keep_words, float* bmax, uint32_t bstride, void* stream) {
   if (!ratio || !block || !topk_blocks || !n_tok || !keep || keep_words < ((stride + block - 1) / block + 31) / 32)
     return false;
+  if (bmax && bstride < (stride + block - 1) / block) return false;
+  if (bmax)
+    block_max_kernel<<<dim3(64, n_tok), kThreads, 0, st(stream)>>>(score, stride, pos, ratio, block, bmax, bstride);
   select_kernel<true><<<n_tok, kSelectThreads, 0, st(stream)>>>(score, stride, pos, ratio, topk_blocks, nullptr, block,
-                                                                 keep_words, nullptr, 0, nullptr, keep);
+                                                                 keep_words, nullptr, 0, nullptr, keep, nullptr,
+                                                                 nullptr, 0, bmax, bstride);
   return ok();
 }
