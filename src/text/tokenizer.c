@@ -51,16 +51,17 @@ Tokenizer *tokenizer_create(const Gguf *g, char err[TOKENIZER_ERR])
   if (!model || model->type != GGUF_STRING || strcmp(model->v.s, "gpt2"))
     return fail(err, "not a byte-level BPE (tokenizer.ggml.model gpt2)"), NULL;
   const bool qwen = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "qwen35");
+  const bool o200k = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "inkling");
   if (!pre || pre->type != GGUF_STRING ||
-      (strcmp(pre->v.s, "deepseek-v3") && strcmp(pre->v.s, "joyai-llm") && !qwen))
-    return fail(err, "a pre-tokenizer this build does not split by (deepseek-v3, joyai-llm, qwen35)"), NULL;
+      (strcmp(pre->v.s, "deepseek-v3") && strcmp(pre->v.s, "joyai-llm") && !qwen && !o200k))
+    return fail(err, "a pre-tokenizer this build does not split by (deepseek-v3, joyai-llm, qwen35, inkling)"), NULL;
   if (!tok || !mer || !typ || typ->type != GGUF_ARRAY || typ->n != tok->n || tok->n > INT32_MAX)
     return fail(err, "no tokens, token types or merges, or of unequal lengths"), NULL;
   Tokenizer *t = calloc(1, sizeof *t);
   bool ok = t != NULL;
   if (ok)
   {
-    t->split = qwen ? pretok_split_qwen35 : pretok_split;
+    t->split = qwen ? pretok_split_qwen35 : o200k ? pretok_split_o200k : pretok_split;
     t->n = (int32_t)tok->n;
     ok = (t->type = calloc(tok->n, 1)) && (t->text = calloc(tok->n, sizeof *t->text)) &&
          (t->special = malloc(tok->n * sizeof *t->special));

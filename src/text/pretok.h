@@ -16,6 +16,9 @@ size_t pretok_split(const uint32_t *cp, size_t n, size_t *cuts);
    code point none of them takes, a piece of its own */
 size_t pretok_split_qwen35(const uint32_t *cp, size_t n, size_t *cuts);
 
+/* the same, by o200k's expression (Inkling-2's tokenizer.json: GPT-4o's) - pretok_o200k.c names its branches */
+size_t pretok_split_o200k(const uint32_t *cp, size_t n, size_t *cuts);
+
 /* a code point's flags (unicode_data.h's UC_*: llama.cpp's unicode_cpt_flags, whitespace aside), and whether it is
    whitespace (its \s) */
 uint16_t pretok_flags(uint32_t c);

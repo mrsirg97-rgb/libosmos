@@ -5,6 +5,10 @@ case, single digits, marks in a letter run, a lone mark, punctuation runs into n
 newlines, text that ends in spaces, Unicode spaces and symbols, the family's special tokens - each with special tokens
 parsed and not. the C tokenizer's test reads them (tests/test_tokenizer.c). run:
 python3 tools/gen_tok_fixtures.py <llama-tokenize> <first shard> [qwen35] > tests/fixtures/tokenizer[_qwen35].txt
+Inkling-2's (o200k's expression: an upper run before lowers, title case, marks and other letters in both runs, digits
+in threes, a punctuation run into slashes and newlines) from its own tokenizer.json (Hugging Face's tokenizers - the
+model's reference; llama.cpp's inkling pre-tokenizer is not in this tree):
+python3 tools/gen_tok_fixtures.py --hf <tokenizer.json> inkling > tests/fixtures/tokenizer_inkling.txt
 
 the file: a case a block - `S 0|1` (special tokens parsed), `T <the text's UTF-8 bytes in hex>`, `I <ids>`."""
 import subprocess
@@ -34,6 +38,13 @@ SPECIALS = {
                '-\u0301', '1\u0301', '12,345.67', '½x', 'a\x00b\x01', '\ufffd', '\U0010FFFD \U000E0001',
                "'Day", "'Time", "'Model", "x'Very", "'Return", "'Llama", 'end.\n\nNext', '{\n}\n', '});\n\n', 'a:\n  b', '"\u0301', '.\u0301\u0301',
                ' \u093e', '(\u0301)', 'x \u0301\u0301y'],
+    'inkling': ['<|message_user|><|content_text|>hi<|end_message|><|message_model|>', 'a<|end_message|>b',
+                '<|content_thinking|>x<|content_invoke_tool_json|>{"a":1}', "I'M HE'S WE'RE THEY'VE YOU'LL I'D 'T",
+                'HTTPServer XMLHttpRequest ABCdef aBC AbC', '\u01c5ungla \u01c4UNGLA \u01c6ungla', 'MacDonald McDONALD',
+                'a\u0301b \u0301x \u0301 x\u0301\u0302 X\u0301Y', 'ʰello ʰELLO ˈstress', '中文abc 日本語ABC', 'ﬁne ﬀ',
+                'a//b\n', ' ...//\r\n', '?!/\n\nx', '12,345.67 1234567', '½x ²3', 'नमस्ते दुनिया', 'ภาษาไทย',
+                'a\x00b\x01', '\ufffd', '\U0010FFFD \U000E0001', "x'Very 'Return 's'", 'end.\n\nNext', '});\n\n',
+                '"\u0301', '.\u0301\u0301', '-\u0301', '1\u0301', 'ǅ', 'ᾈᾉ', 'ΣΑΣ σας', 'İstanbul ı'],
 }
 
 
@@ -46,10 +57,25 @@ def ids(exe, model, text, special):
     return [int(x) for x in line.strip("[]").split(",") if x.strip()]
 
 
+def hf_ids(path):
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(path)
+
+    def ids(_exe, _model, text, special):
+        tok.encode_special_tokens = not special
+        return tok.encode(text, add_special_tokens=False).ids
+    return ids
+
+
 def main():
+    global ids
+    if sys.argv[1] == "--hf":
+        ids = hf_ids(sys.argv[2])
+        sys.argv[1:3] = ["hf", sys.argv[2]]
     exe, model = sys.argv[1], sys.argv[2]
     family = sys.argv[3] if len(sys.argv) > 3 else 'deepseek'
-    out = ["# llama.cpp's llama-tokenize over " + model.rsplit("/", 1)[-1] + " (tools/gen_tok_fixtures.py)"]
+    who = "Hugging Face's tokenizers over " if exe == "hf" else "llama.cpp's llama-tokenize over "
+    out = ["# " + who + model.rsplit("/", 1)[-1] + " (tools/gen_tok_fixtures.py)"]
     for text in CASES + SPECIALS[family]:
         for special in (0, 1):
             out += [f"S {special}", "T " + text.encode("utf-8").hex(),

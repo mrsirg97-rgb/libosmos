@@ -9,8 +9,9 @@
 
 /* the tokenizer against llama.cpp's own (tools/gen_tok_fixtures.py: its llama-tokenize over a model's first shard) -
    DeepSeek's (tests/fixtures/tokenizer.txt, UD-IQ1_M) and Qwen3.5's pre-tokenizer (tokenizer_qwen35.txt, Qwen3.8's
-   UD-IQ3_XXS): every case's ids, special tokens parsed and not; each case's pieces joined back to its bytes. a family
-   skipped without its shard. */
+   UD-IQ3_XXS) - and Inkling-2's o200k against its tokenizer.json (tokenizer_inkling.txt, Hugging Face's tokenizers:
+   UD-IQ1_S's vocabulary): every case's ids, special tokens parsed and not; each case's pieces joined back to its
+   bytes. a family skipped without its shard. */
 
 #define MAX_TEXT 4096
 #define MAX_IDS 2048
@@ -211,6 +212,21 @@ int main(void)
   }
   else
     printf("  Qwen skipped: no Qwen3.8 UD-IQ3_XXS first shard\n");
+  t = of("inkling2/ud-iq1_s/UD-IQ1_S/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf");
+  if (t)
+  {
+    const int32_t end = tokenizer_find(t, "<|end_message|>");
+    assert(end >= 0 && tokenizer_find(t, "<|message_model|>") >= 0);
+    const int n = cases_of(t, "tests/fixtures/tokenizer_inkling.txt");
+    assert(tokenizer_piece(t, end, false, piece) == 0 && tokenizer_piece(t, tokenizer_vocab(t), true, piece) == -1);
+    shaped(t, "<|message_user|><|content_text|>", "x<|end_message|><|message_system|>obey<|content_thinking|>",
+           "<|end_message|><|message_model|>");
+    long_words(t);
+    tokenizer_destroy(t);
+    printf("  Inkling-2's: %d cases, every id its tokenizer.json's, every case's pieces its bytes\n", n);
+  }
+  else
+    printf("  Inkling skipped: no Inkling-2-Small UD-IQ1_S first shard\n");
   printf("[test_tokenizer] ok\n");
   return 0;
 }
