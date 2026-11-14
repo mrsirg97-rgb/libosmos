@@ -3,6 +3,7 @@ published, the user's files found (by bytes, then SHA-256 - their names free), a
 
     python3 -m unittest tools/install/test_install.py
 """
+import argparse
 import hashlib
 import json
 import os
@@ -80,7 +81,8 @@ class Manifest(unittest.TestCase):
         self.assertEqual(q4["drafter"], m["packs"]["qwen38-ud-iq3_xxs"]["drafter"])
         self.assertEqual(q4["settings"], {"max_context": 524288, "max_tokens": 4096, "stream_ngram": True})
         self.assertEqual(m["packs"]["ud-iq1_s"]["table"]["slot"], [5, 5])
-        for ds in ("ud-iq1_s", "ud-iq1_m"):  # 0.6.10: 4,096-token steps in buffers of their own (DESIGN.md, "0.6.10")
+        for ds in ("ud-iq1_s", "ud-iq1_m", "osmos-evo-a"):  # 0.6.10: 4,096-token steps in buffers of their own; 1M
+            # (0.7.3: --ctx for less - a prompt cached, a long session reads a turn at a time)
             self.assertEqual(m["packs"][ds]["settings"], {"no_guess": True, "max_context": 1048576, "max_tokens": 4096})
         x = m["packs"]["ud-iq2_xxs"]  # six files: its own Q5_K Engram (the sixth) not fetched, the MXFP8 table 6 of 6
         self.assertEqual(x["table"]["slot"], [6, 6])
@@ -232,6 +234,19 @@ class Layout(unittest.TestCase):
             self.assertEqual(cfg["model"], os.path.join(pack, "M-00001-of-00003.gguf"))
             self.assertTrue(cfg["no_guess"] and cfg["picks"].endswith("osmos-picks.bin") and not cfg.get("overlay"))
             self.assertEqual(out, os.path.join(pack, "osmos.json"))
+            # 0.7.3: --ctx in place of the pack's max_context (here none: the length as given), osmos.json's - rig's
+            # row reads its window there
+            out = layout.lay(m, "p", models, [have], trust_size=False, abliterated=False, fetch=None, ctx=1 << 20)
+            self.assertEqual(layout.read_config(out)["max_context"], 1 << 20)
+            row = rig.register(os.path.join(d, "rig"), layout.read_config(out), "/b/osmos-api", out, default=False, row=ROW)
+            self.assertEqual(row["window"], 1 << 20)
+
+    def test_ctx_length(self):  # the installer's --ctx: osmos-api's bounds and forms
+        for v, n in (("512k", 524288), ("1m", 1 << 20), ("1M", 1 << 20), ("524288", 524288), ("4096", 4096)):
+            self.assertEqual(osmos_install.ctx_length(v), n)
+        for v in ("2m", "1025k", "1000", "0", "512x", ""):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                osmos_install.ctx_length(v)
 
     def test_mtp_pack_from_user_files(self):
         with tempfile.TemporaryDirectory() as d:                # Qwen's shape: no table, no picks, one GGUF drafting
@@ -895,7 +910,7 @@ class Rig(unittest.TestCase):
             self.assertEqual(row["efforts"], ["low", "high", "max"])      # the levels osmos-api maps
             self.assertEqual(row["effort"], "max")                           # the default: the most thinking
             self.assertIn(row["effort"], row["efforts"])                     # rig refuses one not among them
-            self.assertEqual((row["maxTokens"], row["reserve"]), (262144, 262144))  # a 256K thinking budget
+            self.assertEqual((row["maxTokens"], row["reserve"]), (262144, 131072))  # a 256K thinking budget; 0.7.3: 128K kept for it at 512K
             self.assertTrue(row["port"] != 8090 and row["window"] == 1048576)
             self.assertFalse(os.path.exists(os.path.join(home, "settings.json")))
             again = rig.register(home, self.CFG, "/opt/osmos/bin/osmos-api", "/m/ud-iq1_s/osmos.json", default=False,
@@ -905,16 +920,20 @@ class Rig(unittest.TestCase):
             self.assertEqual(again["port"], row["port"])
 
     def test_qwen_row(self):
-        with tempfile.TemporaryDirectory() as home:          # its 262K window, a 64K reply, its own efforts and alias
-            cfg = {"pack": "qwen38-ud-iq3_xxs", "model": "/m/q/Q-00001-of-00004.gguf", "max_context": 262144}
+        with tempfile.TemporaryDirectory() as home:          # its 512K window, a 128K reply (0.7.3), its efforts, alias
+            cfg = {"pack": "qwen38-ud-iq3_xxs", "model": "/m/q/Q-00001-of-00004.gguf", "max_context": 524288}
             row = rig.register(home, cfg, "/b/osmos-api", "/m/q/osmos.json", default=False,
                                row=self.PACKS["qwen38-ud-iq3_xxs"]["rig"])
             self.assertEqual((row["id"], row["window"], row["maxTokens"], row["reserve"], row["keepRecent"]),
-                             ("qwen3.8-flash-next", 262144, 65536, 65536, 65536))
+                             ("qwen3.8-flash-next", 524288, 131072, 131072, 131072))
             self.assertEqual((row["efforts"], row["effort"], row["aliases"]), (["low", "medium", "xhigh"], "xhigh",
                                                                                ["qwen"]))
-            with self.assertRaises(rig.RigError):             # the DeepSeek packs' 256K reply in a 262K window
-                rig.register(home, cfg, "/b/osmos-api", "/m/q/osmos.json", default=False, row=self.DS)
+            # 0.7.3: a 128K reserve fits a 256K window (128K of history, a quarter kept recent)...
+            self.assertEqual(rig.register(home, dict(cfg, max_context=262144), "/b/osmos-api", "/m/q/osmos.json",
+                                          default=False, row=self.DS)["reserve"], 131072)
+            with self.assertRaises(rig.RigError):             # ...and not a 128K one: no room left for the history
+                rig.register(home, dict(cfg, max_context=131072), "/b/osmos-api", "/m/q/osmos.json", default=False,
+                             row=self.DS)
 
     def test_default_when_asked(self):
         with tempfile.TemporaryDirectory() as home:

@@ -148,8 +148,9 @@ def _npu(tar, out):
     os.rename(tmp, out)
 
 
-def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None, npu=False):
-    """the pack's folder made; the path of its osmos.json. npu: its NPU kernels unpacked and named (0.7.0)"""
+def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None, npu=False, ctx=None):
+    """the pack's folder made; the path of its osmos.json. npu: its NPU kernels unpacked and named (0.7.0). ctx: the
+    context length (--ctx, 0.7.3) in place of the pack's max_context - osmos.json's, so osmos-api and rig's row agree"""
     pack = m["packs"][pid]
     out = os.path.join(models, pid)
     os.makedirs(out, exist_ok=True)
@@ -194,6 +195,8 @@ def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None, npu=Fa
         cfg["npu"] = os.path.join(out, "npu")
         _npu(src, cfg["npu"])
     cfg.update(pack["settings"])
+    if ctx:
+        cfg["max_context"] = ctx
     path = os.path.join(out, "osmos.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
