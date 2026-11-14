@@ -33,3 +33,4 @@ bool meta_text_is(GgufMeta *m, const char *key, const char *want);
 bool meta_ints(GgufMeta *m, const char *key, size_t min, size_t cap, int64_t *out, size_t *n);
 /* a list of layers, each below n_layers and once, as flags (count: how many, or NULL) */
 bool meta_layers(GgufMeta *m, const char *key, int n_layers, bool *set, int *count);
+bool meta_flags(GgufMeta *m, const char *key, size_t n, bool *out); /* an array of exactly n bools */

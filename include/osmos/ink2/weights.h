@@ -34,6 +34,9 @@ typedef struct Ink2Geometry
   int n_experts, n_used, ff_exp;
   float route_scale, gate_softcap, up_softcap;
   float logit_softcap;
+  /* the file's names and keys llama.cpp's inkling2 (unsloth's GGUFs) - not ink2_ref_gguf.py's: some tensors named
+     otherwise, a full layer's static conv taps innermost ([ch][taps], ours [taps][ch]) */
+  bool llama_names;
 } Ink2Geometry;
 
 /* a layer's tensors; NULL where its kind has none */

@@ -120,20 +120,17 @@ int main(int argc, char** argv) {
   std::fprintf(stderr, "ink2_run: %u tokens, %d layers (a block every %d), %u experts (%u a token)\n", T, G.n_layers,
                G.res_block, E, K);
 
-  // the normed embedding: the tokens' rows of a BF16 table
-  std::vector<float> emb((size_t) T * C);
+  // the normed embedding: the tokens' rows of the table, its type the file's (ops_embed)
+  float* h = dev<float>((size_t) T * C);
   {
-    const GgufTensor* t = W->embed;
-    CHECK(t->type == kBF16);
-    FILE* f = std::fopen(model->paths[t->file], "rb");
-    std::vector<uint16_t> row(C);
-    for (uint32_t i = 0; i < T; i++) {
-      CHECK(pread(fileno(f), row.data(), C * 2, (off_t) (t->offset + (uint64_t) ids[i] * C * 2)) == (ssize_t) (C * 2));
-      for (uint32_t c = 0; c < C; c++) emb[(size_t) i * C + c] = bf16(row[c]);
-    }
-    std::fclose(f);
+    void* tb = dev_raw(W->embed);
+    int32_t* di = dev<int32_t>(T);
+    CHECK(hipMemcpy(di, ids.data(), T * 4, hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(ops_embed(W->embed->type, tb, C, di, T, 1, h, nullptr));
+    CHECK(hipDeviceSynchronize() == hipSuccess);
+    hipFree(tb), hipFree(di);
   }
-  float *h = dev_f(emb), *blocks = dev<float>((size_t) T * maxb * C), *a3 = dev<float>((size_t) 3 * T * C);
+  float *blocks = dev<float>((size_t) T * maxb * C), *a3 = dev<float>((size_t) 3 * T * C);
   float *xn = dev<float>((size_t) T * C), *kn = dev<float>((size_t) T * C), *vn = dev<float>((size_t) T * C);
   float *q = dev<float>((size_t) T * H * D), *k = dev<float>((size_t) T * KV * D), *v = dev<float>((size_t) T * KV * D);
   float *kc = dev<float>((size_t) T * KV * D), *vc = dev<float>((size_t) T * KV * D), *rel = dev<float>((size_t) T * H * R);
@@ -185,7 +182,15 @@ int main(int argc, char** argv) {
       for (int z = 0; z < 2; z++) {
         const GgufTensor *st = z ? L.v_conv_static : L.k_conv_static, *pr = z ? L.v_conv_proj : L.k_conv_proj;
         matt(pr, z ? xv : xk, T, dyn);
-        float* dw = dev_tf(st);
+        std::vector<float> sw = f32_of(st);
+        if (G.llama_names) {  // (llama.cpp's layout: [ch][taps] - the kernel's [taps][ch])
+          std::vector<float> tw(sw.size());
+          const size_t ch = KV * D;
+          for (size_t c = 0; c < ch; c++)
+            for (uint32_t j = 0; j < taps; j++) tw[(size_t) j * ch + c] = sw[c * taps + j];
+          sw.swap(tw);
+        }
+        float* dw = dev_f(sw);
         CHECK(ink2_conv_dyn(z ? v : k, T, KV * D, taps, KV, dw, dyn, nullptr, 1.0f / std::sqrt(2.0f * taps + 1),
                             z ? vc : kc, nullptr));
         CHECK(hipDeviceSynchronize() == hipSuccess);
@@ -277,10 +282,8 @@ int main(int argc, char** argv) {
     for (float x : l) z += std::exp((double) x - m);
     const double lz = m + std::log(z);
     size_t best = 0;
-    for (size_t i = 0; i < l.size(); i++) {
-      if (l[i] > l[best]) best = i;
-      l[i] = (float) (l[i] - lz);
-    }
+    for (size_t i = 0; i < l.size(); i++) best = l[i] > l[best] ? i : best;
+    for (float& x : l) x = (float) (x - lz);
     std::printf("ink2_run: the last token's top %zu (log-prob %.4f)\n", best, l[best]);
     if (argc > 3) {
       FILE* f = std::fopen(argv[3], "wb");

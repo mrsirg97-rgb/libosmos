@@ -593,6 +593,7 @@ extern "C" bool ops_embed(uint32_t type, const void* table, uint32_t dim, const 
   if (!n_tok || !hc || dim % quant::kQK) return false;
   const uint8_t* tb = (const uint8_t*) table;
   switch (type) {
+    case quant::kQ4_K: embed_kernel<quant::kQ4_K><<<n_tok, kThreads, 0, st(stream)>>>(tb, dim, ids, hc, h); break;
     case quant::kQ5_K: embed_kernel<quant::kQ5_K><<<n_tok, kThreads, 0, st(stream)>>>(tb, dim, ids, hc, h); break;
     case quant::kQ6_K: embed_kernel<quant::kQ6_K><<<n_tok, kThreads, 0, st(stream)>>>(tb, dim, ids, hc, h); break;
     case quant::kQ8_0: embed_kernel<quant::kQ8_0><<<n_tok, kThreads, 0, st(stream)>>>(tb, dim, ids, hc, h); break;
