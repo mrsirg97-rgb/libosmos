@@ -282,6 +282,7 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->ed, T * K * C * 4}, {(void **)&f->xs, T * K * C * 4}, {&f->m_dev, table_bytes(T * K, E)},
       {(void **)&f->head, MV_MAX_TOKENS * VR * 4}, {(void **)&f->logits, T * f->vocab * 4},
       {(void **)&f->gid, T * 4}, {&f->amax, ops_argmax_scratch((uint32_t)T)},
+      {(void **)&f->fa_part, ink2_fa_scratch((uint32_t)H, f->max_ctx)},
   };
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     if (!dalloc(f, b[i].p, b[i].bytes))
@@ -325,7 +326,7 @@ void ink2_forward_destroy(Ink2Forward *f)
   void *dev[] = {f->embed, f->output, f->embed_norm, f->out_res_q, f->out_norm, f->ids_d, f->h, f->blocks, f->a3,
                  f->xn, f->kn, f->vn, f->q, f->k, f->v, f->kc, f->vc, f->rel, f->gate, f->sink, f->att, f->dyn,
                  f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->pw, f->eg, f->eu, f->eh, f->ed, f->head,
-                 f->logits, f->gid, f->amax, f->xs, f->m_dev};
+                 f->logits, f->gid, f->amax, f->xs, f->m_dev, f->fa_part};
   for (size_t i = 0; i < sizeof dev / sizeof *dev; i++)
     if (dev[i])
       hipFree(dev[i]);
@@ -536,7 +537,10 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       GPU(ink2_tail_put(tk, f->kc, n) && ink2_tail_put(tv, f->vc, n));
       keys = ink2_tail_last(tk, back + n), vals = ink2_tail_last(tv, back + n), n_keys = back + n;
     }
-    GPU(ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, d->rel_proj, f->att, NULL));
+    /* key 0's position: a full layer's 0, a window's its first's (a tile's start); a decode's units split */
+    const uint32_t pos0 = full ? 0 : pos + n - n_keys;
+    GPU(ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att, f->fa_part,
+                  NULL));
     GPU(mat(L->out, d->out, f->att, n, f->o));
     Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];
     GPU(ink2_conv(f->o, n, C, taps, d->out_conv, ink2_tail_last(co, taps - 1), conv_res, conv_scale, f->r, NULL));

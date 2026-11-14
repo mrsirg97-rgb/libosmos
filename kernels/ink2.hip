@@ -202,7 +202,8 @@ constexpr int kFaTile = INK2_FA_TILE;
 constexpr int kFaHead = INK2_MAX_HEAD;
 constexpr int kFaRow = kFaHead + 8;  // f16s a row in LDS, then a pad
 constexpr int kFaKey = kFaTile + 8;
-constexpr int kFaRowTiles = 4;  // a block's row tiles (INK2_FA_RT 1 / 2 / 4 for a sweep; 16K full: 756 / 716 / 638 ms)
+constexpr int kFaRowTiles = 4;
+constexpr uint32_t kFaUnit = INK2_FA_UNIT;  // a block's row tiles (INK2_FA_RT 1 / 2 / 4 for a sweep; 16K full: 756 / 716 / 638 ms)
 typedef _Float16 fa_h16 __attribute__((ext_vector_type(16)));
 typedef float fa_f8 __attribute__((ext_vector_type(8)));
 
@@ -215,14 +216,25 @@ __device__ inline float fa_row_sum(float v) {
   return v;
 }
 
+// a unit's online softmax folded into the running one (the sink's start): M the max, each side scaled to it - the
+// prompt's kernel and a split decode's fold the same units in the same order with this, so the same bits
+__device__ inline void fa_fold_coef(float& gm, float& gl, float m, float l, float& a, float& b) {
+  const float M = fmaxf(gm, m);
+  a = expf(gm - M), b = m == -INFINITY ? 0.0f : expf(m - M);
+  gl = gl * a + l * b, gm = M;
+}
+
 // G waves; Q's A fragments in registers (a lane its row's 8 x 16 halves), the next tile's K and V prefetched into
 // registers while this one's WMMAs run - LDS ~16 KB a block (K, V^T, P), several blocks a CU
-// KV: the keys' and values' type in memory - F32 (rounded to f16 as loaded) or f16 (a cache's: the same values)
-template <int G, int RT, class KV>
+// KV: the keys' and values' type in memory - F32 (rounded to f16 as loaded) or f16 (a cache's: the same values).
+// a query's keys in units of kFaUnit at absolute positions (pos0 key 0's): each unit's online softmax from nothing,
+// folded into the running one in order. SPLIT: a block a unit (blockIdx.z, from unit u0), its partial (m, l, o)
+// written to part for ink2_fa_fold - a decode's units in parallel, the prompt's fold's bits
+template <int G, int RT, class KV, bool SPLIT>
 __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float* q, const float* rel, const float* sink,
                                                      const float* gate, uint32_t n_tok, const KV* k,
-                                                     const KV* v, uint32_t n_keys, const float* rel_proj,
-                                                     float* out) {
+                                                     const KV* v, uint32_t n_keys, uint32_t pos0,
+                                                     const float* rel_proj, float* out, uint32_t u0, float* part) {
   constexpr int kNth = G * RT * 32, kItems = (kFaTile * kFaHead + kNth - 1) / kNth;
   __shared__ __attribute__((aligned(32))) _Float16 ks[kFaTile * kFaRow], vt[kFaHead * kFaKey];
   __shared__ __attribute__((aligned(32))) _Float16 ps[G * RT][kFaTile * kFaKey];
@@ -237,11 +249,12 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
     for (int g = 0; g < kFaHead / kFaTile; g++)
       for (int e = 0; e < kFaTile; e++) qa[g][e] = (_Float16) (t < n_tok ? qr[g * kFaTile + e] : 0.0f);
   }
-  float m[8], l[8];
-  fa_f8 o[kFaHead / kFaTile] = {};
-  for (int j = 0; j < 8; j++) {  // the sink: a logit of its own, its value zero - the running max's and sum's start
+  // the running softmax: the sink a logit of its own, its value zero (gm, gl, go); the unit's from nothing (m, l, o)
+  float m[8], l[8], gm[8], gl[8];
+  fa_f8 o[kFaHead / kFaTile] = {}, go[SPLIT ? 1 : kFaHead / kFaTile] = {};
+  for (int j = 0; j < 8; j++) {
     const uint32_t t = t0 + 2 * j + half;
-    m[j] = t < n_tok ? sink[(uint64_t) t * H + h] : 0.0f, l[j] = 1.0f;
+    gm[j] = t < n_tok ? sink[(uint64_t) t * H + h] : 0.0f, gl[j] = 1.0f, m[j] = -INFINITY, l[j] = 0.0f;
   }
   // the block's key range (its first row tile's lowest to its last's highest); a wave's own rows masked within it
   const uint32_t last = tb + kFaTile * RT - 1 < n_tok - 1 ? tb + kFaTile * RT - 1 : n_tok - 1;
@@ -249,7 +262,12 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
   // the first key tile at a multiple of kFaTile: a query's keys cut into the same tiles whatever block it is in
   // (the tiles before its window wholly masked: no-ops), so its bits are its own - given keys whose index is their
   // position mod kFaTile (INK2_FA_TILE: the engine's windows start so)
-  const uint32_t klo = a.window && qlo + 1 > a.window ? (qlo + 1 - a.window) / kFaTile * kFaTile : 0;
+  uint32_t klo = a.window && qlo + 1 > a.window ? (qlo + 1 - a.window) / kFaTile * kFaTile : 0, khi = qhi;
+  if constexpr (SPLIT) {  // this block's unit alone
+    const uint32_t u = u0 + blockIdx.z, ua = u * kFaUnit;  // the unit's keys as indices (it may start before key 0)
+    const uint32_t us = ua > pos0 ? ua - pos0 : 0, ue = ua + kFaUnit - 1 - pos0;
+    klo = klo > us ? klo : us, khi = khi < ue ? khi : ue;
+  }
   float kr[kItems], vr[kItems];
   auto fetch = [&](uint32_t kb) {  // a tile's K and V, this thread's items (keys past the last zero)
     for (int it = 0; it < kItems; it++) {
@@ -259,15 +277,15 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
       kr[it] = in ? (float) k[at] : 0.0f, vr[it] = in ? (float) v[at] : 0.0f;
     }
   };
-  fetch(klo);
-  for (uint32_t kb = klo; kb <= qhi; kb += kFaTile) {
+  if (klo <= khi) fetch(klo);
+  for (uint32_t kb = klo; kb <= khi; kb += kFaTile) {
     __syncthreads();  // the last tile's K, V read by every wave
     for (int it = 0; it < kItems; it++) {
       const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead;
       if (i < kFaTile * kFaHead) ks[r * kFaRow + d] = (_Float16) kr[it], vt[d * kFaKey + r] = (_Float16) vr[it];
     }
     __syncthreads();
-    if (kb + kFaTile <= qhi) fetch(kb + kFaTile);  // the next tile's, in flight under this one's WMMAs
+    if (kb + kFaTile <= khi) fetch(kb + kFaTile);  // the next tile's, in flight under this one's WMMAs
     fa_f8 sacc = {};
     for (int g = 0; g < kFaHead / kFaTile; g++) {
       const fa_h16 kb16 = *(const fa_h16*) (ks + col * kFaRow + g * kFaTile);
@@ -291,7 +309,7 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
       }
       const float mn = fmaxf(m[j], fa_row_max(s));
       const float pv = s == -INFINITY ? 0.0f : expf(s - mn);
-      alpha[j] = expf(m[j] - mn);
+      alpha[j] = m[j] == mn ? 1.0f : expf(m[j] - mn);  // (a unit's start: -inf both, nothing held)
       l[j] = l[j] * alpha[j] + fa_row_sum(pv), m[j] = mn;
       ps[wave][(2 * j + half) * kFaKey + col] = (_Float16) pv;
     }
@@ -316,35 +334,82 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
       }
     }
     __builtin_amdgcn_wave_barrier();
+    if constexpr (!SPLIT)
+      if ((pos0 + kb + kFaTile) % kFaUnit == 0 || kb + kFaTile > khi) {  // a unit's end: folded, the next from nothing
+        for (int j = 0; j < 8; j++) {
+          float ca, cb;
+          fa_fold_coef(gm[j], gl[j], m[j], l[j], ca, cb);
+          for (int nt = 0; nt < kFaHead / kFaTile; nt++) go[nt][j] = go[nt][j] * ca + o[nt][j] * cb, o[nt][j] = 0.0f;
+          m[j] = -INFINITY, l[j] = 0.0f;
+        }
+      }
   }
   for (int j = 0; j < 8; j++) {
     const uint32_t t = t0 + 2 * j + half;
     if (t >= n_tok) continue;
-    for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
-      const uint64_t i = ((uint64_t) t * H + h) * kFaHead + nt * kFaTile + col;
-      out[i] = o[nt][j] / l[j] * (gate ? sigmoid(gate[i]) : 1.0f);
-    }
+    if constexpr (SPLIT) {  // the unit's partial: m, l, then o (ink2_fa_fold's)
+      float* pp = part + (((uint64_t) blockIdx.z * n_tok + t) * H + h) * (kFaHead + 2);
+      if (col == 0) pp[0] = m[j], pp[1] = l[j];
+      for (int nt = 0; nt < kFaHead / kFaTile; nt++) pp[2 + nt * kFaTile + col] = o[nt][j];
+    } else
+      for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
+        const uint64_t i = ((uint64_t) t * H + h) * kFaHead + nt * kFaTile + col;
+        out[i] = go[nt][j] / gl[j] * (gate ? sigmoid(gate[i]) : 1.0f);
+      }
   }
+}
+
+// a split decode's units folded in order into the sink's start (fa_kernel's fold): a block a (token, head), a
+// thread a value dim
+__global__ void fa_fold_kernel(const float* part, uint32_t units, uint32_t n_tok, uint32_t H, const float* sink,
+                               const float* gate, float* out) {
+  const uint32_t t = blockIdx.x / H, h = blockIdx.x % H, d = threadIdx.x;
+  float gm = sink[(uint64_t) t * H + h], gl = 1.0f, go = 0.0f;
+  for (uint32_t u = 0; u < units; u++) {
+    const float* pp = part + (((uint64_t) u * n_tok + t) * H + h) * (kFaHead + 2);
+    float ca, cb;
+    fa_fold_coef(gm, gl, pp[0], pp[1], ca, cb);
+    go = go * ca + pp[2 + d] * cb;
+  }
+  const uint64_t i = ((uint64_t) t * H + h) * kFaHead + d;
+  out[i] = go / gl * (gate ? sigmoid(gate[i]) : 1.0f);
 }
 
 }  // namespace
 
 template <class KV>
 static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
-                      uint32_t n_tok, const KV* k, const KV* v, uint32_t n_keys, const float* rel_proj, float* out,
-                      void* stream) {
+                      uint32_t n_tok, const KV* k, const KV* v, uint32_t n_keys, uint32_t pos0, const float* rel_proj,
+                      float* out, float* scratch, void* stream) {
   if (!a || !q || !rel || !sink || !k || !v || !rel_proj || !out || !n_tok || n_tok > n_keys ||
       a->head_dim != INK2_MAX_HEAD || !a->kv_heads || a->heads % a->kv_heads ||
       a->heads / a->kv_heads > INK2_FA_MAX_GROUP || !a->d_rel || a->d_rel > INK2_MAX_REL || !a->extent ||
-      a->extent > INK2_MAX_EXTENT)
+      a->extent > INK2_MAX_EXTENT || pos0 % kFaTile)
     return false;
+  const uint32_t G = a->heads / a->kv_heads;
+  if (scratch && n_tok <= (uint32_t) kFaTile) {  // a decode's: a block a unit and KV head, then the fold
+    const uint32_t qlo = n_keys - n_tok, qhi = n_keys - 1;
+    const uint32_t klo = a->window && qlo + 1 > a->window ? (qlo + 1 - a->window) / kFaTile * kFaTile : 0;
+    const uint32_t u0 = (pos0 + klo) / kFaUnit, units = (pos0 + qhi) / kFaUnit - u0 + 1;
+    const dim3 grid(1, a->kv_heads, units);
+#define FS(g)                                                                                                        \
+  if (G == g) {                                                                                                      \
+    fa_kernel<g, 1, KV, true><<<grid, g * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, pos0,     \
+                                                               rel_proj, out, u0, scratch);                          \
+    fa_fold_kernel<<<n_tok * a->heads, kFaHead, 0, st(stream)>>>(scratch, units, n_tok, a->heads, sink, gate, out);   \
+    return ok();                                                                                                     \
+  }
+    FS(1) FS(2) FS(4) FS(6) FS(8)
+#undef FS
+    return false;
+  }
   static const int rt = std::getenv("INK2_FA_RT") ? std::atoi(std::getenv("INK2_FA_RT")) : kFaRowTiles;
-  const uint32_t G = a->heads / a->kv_heads, R = rt == 1 || rt == 2 || rt == 4 ? (uint32_t) rt : kFaRowTiles;
+  const uint32_t R = rt == 1 || rt == 2 || rt == 4 ? (uint32_t) rt : kFaRowTiles;
   const dim3 grid_fa((n_tok + kFaTile * R - 1) / (kFaTile * R), a->kv_heads);
 #define FA(g, r)                                                                                                    \
   if (G == g && R == r) {                                                                                           \
-    fa_kernel<g, r, KV><<<grid_fa, g * r * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj, \
-                                                                out);                                               \
+    fa_kernel<g, r, KV, false><<<grid_fa, g * r * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys,  \
+                                                                       pos0, rel_proj, out, 0, nullptr);            \
     return ok();                                                                                                    \
   }
   FA(1, 1) FA(2, 1) FA(4, 1) FA(6, 1) FA(8, 1) FA(1, 2) FA(2, 2) FA(4, 2) FA(6, 2) FA(8, 2) FA(1, 4) FA(2, 4) FA(4, 4)
@@ -353,17 +418,21 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
   return false;
 }
 
+extern "C" uint64_t ink2_fa_scratch(uint32_t heads, uint32_t max_keys) {
+  return ((uint64_t) max_keys / kFaUnit + 2) * kFaTile * heads * (kFaHead + 2) * sizeof(float);
+}
+
 extern "C" bool ink2_fa(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
-                        uint32_t n_tok, const float* k, const float* v, uint32_t n_keys, const float* rel_proj,
-                        float* out, void* stream) {
-  return fa_launch<float>(a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj, out, stream);
+                        uint32_t n_tok, const float* k, const float* v, uint32_t n_keys, uint32_t pos0,
+                        const float* rel_proj, float* out, float* scratch, void* stream) {
+  return fa_launch<float>(a, q, rel, sink, gate, n_tok, k, v, n_keys, pos0, rel_proj, out, scratch, stream);
 }
 
 extern "C" bool ink2_fa16(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
-                          uint32_t n_tok, const uint16_t* k, const uint16_t* v, uint32_t n_keys, const float* rel_proj,
-                          float* out, void* stream) {
-  return fa_launch<_Float16>(a, q, rel, sink, gate, n_tok, (const _Float16*) k, (const _Float16*) v, n_keys, rel_proj,
-                             out, stream);
+                          uint32_t n_tok, const uint16_t* k, const uint16_t* v, uint32_t n_keys, uint32_t pos0,
+                          const float* rel_proj, float* out, float* scratch, void* stream) {
+  return fa_launch<_Float16>(a, q, rel, sink, gate, n_tok, (const _Float16*) k, (const _Float16*) v, n_keys, pos0,
+                             rel_proj, out, scratch, stream);
 }
 
 __global__ void to_f16_kernel(const float* x, uint64_t n, _Float16* y) {

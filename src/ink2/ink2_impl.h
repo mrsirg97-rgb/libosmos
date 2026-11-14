@@ -67,6 +67,7 @@ struct Ink2Forward
       *tmp, *pw, *eg, *eu, *eh, *ed, *head, *logits;
   int32_t *pick, *hpick, *gid;
   float *hw, *xs; /* xs: the pairs' inputs in expert order */
+  float *fa_part; /* a split decode's attention units (ink2_fa_scratch) */
   /* moe's tables: the counting sort's, the region built on the host and its device copy */
   uint32_t *m_at, *m_by;
   uint8_t *m_host;

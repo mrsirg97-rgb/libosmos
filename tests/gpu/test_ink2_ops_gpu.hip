@@ -151,14 +151,15 @@ int main() {
     CHECK(ink2_attn(&at, dq, dr, ds, dg, n, dk, dv, n, drp, dout, nullptr));
     held((w + "attention, gated").c_str(), host_of(dout, qr.v.size()), in(c, "out"), 1.0, kExactRel);
     // the prompt's attention (ink2_fa: WMMA tiles, q / k / v / p in f16): f16's rounding of the same thing
-    CHECK(ink2_fa(&at, dq, dr, ds, nullptr, n, dk, dv, n, drp, dout, nullptr));
+    CHECK(ink2_fa(&at, dq, dr, ds, nullptr, n, dk, dv, n, 0, drp, dout, nullptr, nullptr));
     held((w + "flash attention, ungated").c_str(), host_of(dout, qr.v.size()), in(c, "ungated"), 1.0, kF16Rel);
-    CHECK(ink2_fa(&at, dq, dr, ds, dg, n, dk, dv, n, drp, dout, nullptr));
+    CHECK(ink2_fa(&at, dq, dr, ds, dg, n, dk, dv, n, 0, drp, dout, nullptr, nullptr));
     held((w + "flash attention, gated").c_str(), host_of(dout, qr.v.size()), in(c, "out"), 1.0, kF16Rel);
     {  // a step's rows the prompt's bits: queries s .. e - 1 over the keys to e, a window's from a tile's start - a
        // prompt's later chunk, one ending inside it, a decode's single token
       const std::vector<float> whole = host_of(dout, qr.v.size());
       float* dpart = dev_alloc<float>(qr.v.size());
+      float* fa_scr = (float*) dev_alloc<uint8_t>(ink2_fa_scratch(H, n));
       const std::pair<uint32_t, uint32_t> steps[] = {{1, n},          {7, n},       {17, n},     {100, n},
                                                      {n / 2 + 3, n}, {n - 1, n},   {0, 1},      {0, 37},
                                                      {5, 6},         {100, 164},   {547, 548},  {n / 2, n / 2 + 1},
@@ -169,24 +170,31 @@ int main() {
         const uint32_t want = full ? s : (s < at.window - 1 ? s : at.window - 1);
         const uint32_t k0 = full ? 0 : s - (want + (s - want) % INK2_FA_TILE), m = e - s;
         const uint64_t kd = (uint64_t) KV * D;
+        // a step of a decode's size also split (a block a unit, then the fold): the same bits
+        for (int split = 0; split < (m <= INK2_FA_TILE ? 2 : 1); split++) {
         CHECK(ink2_fa(&at, dq + (uint64_t) s * H * D, dr + (uint64_t) s * H * R, ds + (uint64_t) s * H,
-                      dg + (uint64_t) s * H * D, m, dk + k0 * kd, dv + k0 * kd, e - k0, drp, dpart, nullptr));
+                      dg + (uint64_t) s * H * D, m, dk + k0 * kd, dv + k0 * kd, e - k0, k0, drp, dpart,
+                      split ? fa_scr : nullptr, nullptr));
         const std::vector<float> part = host_of(dpart, (size_t) m * H * D);
         uint32_t bad = 0;
         for (size_t i = 0; i < part.size(); i++) bad += part[i] != whole[(size_t) s * H * D + i];
-        CHECK(bad == 0 || (std::printf("  %s: the step %u .. %u: %u values not the prompt's bits\n", c, s, e, bad), false));
+        CHECK(bad == 0 || (std::printf("  %s: the step %u .. %u%s: %u values not the prompt's bits\n", c, s, e,
+                                       split ? " (split)" : "", bad), false));
         splits++;
+        }
       }
-      std::printf("  %s: flash attention's rows the same bits in %d steps (chunks, decodes) as in the prompt\n", c, splits);
+      std::printf("  %s: flash attention's rows the same bits in %d steps (chunks, decodes, split decodes) as in the prompt\n",
+                  c, splits);
       {  // the keys and values stored f16 (a cache's): ink2_fa's bits
         const size_t kvn = (size_t) n * KV * D;
         uint16_t *k16 = dev_alloc<uint16_t>(kvn), *v16 = dev_alloc<uint16_t>(kvn);
         CHECK(ink2_to_f16(dk, kvn, k16, nullptr) && ink2_to_f16(dv, kvn, v16, nullptr));
-        CHECK(ink2_fa16(&at, dq, dr, ds, dg, n, k16, v16, n, drp, dpart, nullptr));
+        CHECK(ink2_fa16(&at, dq, dr, ds, dg, n, k16, v16, n, 0, drp, dpart, nullptr, nullptr));
         CHECK(host_of(dpart, qr.v.size()) == whole || (std::printf("  %s: f16 keys not ink2_fa's bits\n", c), false));
         std::printf("  %s: keys and values stored f16, the same bits\n", c);
         hipFree(k16), hipFree(v16);
       }
+      hipFree(fa_scr);
       hipFree(dpart);
     }
     for (float* d : {dq, dqw, dr, drw, dk, dv, drp, ds, dg, dout}) hipFree(d);

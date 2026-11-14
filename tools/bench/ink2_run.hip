@@ -264,7 +264,7 @@ int main(int argc, char** argv) {
       const Ink2Attn at = {H, KV, D, R, full ? (uint32_t) G.rel_extent : (uint32_t) G.window,
                            full ? 0u : (uint32_t) G.window, 1.0f / std::sqrt((float) D)};
       static const bool fa = std::getenv("ATTN") && !std::strcmp(std::getenv("ATTN"), "fa");
-      CHECK(fa ? ink2_fa(&at, q, rel, sink, gate, T, kc, vc, T, rp, att, nullptr)
+      CHECK(fa ? ink2_fa(&at, q, rel, sink, gate, T, kc, vc, T, 0, rp, att, nullptr, nullptr)
                : ink2_attn(&at, q, rel, sink, gate, T, kc, vc, T, rp, att, nullptr));
       CHECK(hipDeviceSynchronize() == hipSuccess);
       hipFree(qw), hipFree(rw), hipFree(rp);

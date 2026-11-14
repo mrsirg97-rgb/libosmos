@@ -32,6 +32,7 @@ bool ink2_axpy(float *y, const float *x, uint64_t n, float a, void *stream);
 #define INK2_MAX_REL 32      /* a head's relative states at most (Inkling's 16) */
 #define INK2_FA_MAX_GROUP 8  /* ink2_fa's query heads a KV head at most (Inkling's 6): its waves */
 #define INK2_FA_TILE 16      /* ink2_fa's keys a tile (WMMA's 16): a window's keys handed in from a multiple of it */
+#define INK2_FA_UNIT 256     /* its keys a unit (absolute): each its own softmax, folded in order - a decode's in parallel */
 typedef struct Ink2Tau
 {
   uint32_t pos0;     /* the step's first token's position */
@@ -49,10 +50,12 @@ bool ink2_attn(const Ink2Attn *a, const float *q, const float *rel, const float 
                uint32_t n_tok, const float *k, const float *v, uint32_t n_keys, const float *rel_proj, float *out,
                void *stream);
 bool ink2_fa(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate, uint32_t n_tok,
-             const float *k, const float *v, uint32_t n_keys, const float *rel_proj, float *out, void *stream);
+             const float *k, const float *v, uint32_t n_keys, uint32_t pos0, const float *rel_proj, float *out,
+             float *scratch, void *stream);
 bool ink2_fa16(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
-               uint32_t n_tok, const uint16_t *k, const uint16_t *v, uint32_t n_keys, const float *rel_proj, float *out,
-               void *stream);
+               uint32_t n_tok, const uint16_t *k, const uint16_t *v, uint32_t n_keys, uint32_t pos0,
+               const float *rel_proj, float *out, float *scratch, void *stream);
+uint64_t ink2_fa_scratch(uint32_t heads, uint32_t max_keys);
 bool ink2_to_f16(const float *x, uint64_t n, uint16_t *y, void *stream);
 
 #endif
@@ -118,6 +121,11 @@ ink2_fa
   first tile at a multiple of INK2_FA_TILE: a query's keys always the same tiles (the rounding of p to f16 against
   the running max is a tile's), so its bits are the same in any block - and in any step, given keys whose index mod
   INK2_FA_TILE is their position's (a sequence's window handed in from such a position).
+
+units: a query's keys cut at absolute multiples of INK2_FA_UNIT (pos0: key 0's position, a multiple of
+  INK2_FA_TILE), each unit's online softmax from nothing, folded into the sink's start in order. given scratch
+  (ink2_fa_scratch(heads, the most keys) bytes) and at most INK2_FA_TILE tokens - a decode's, a draft block's - a block
+  a unit and KV head, then a fold kernel: the units in parallel, the prompt's bits (the same units, the same fold).
 
 ink2_fa16, ink2_to_f16
   ink2_fa over keys and values stored as f16 (a cache's: ink2_to_f16 of the F32 rows, IEEE half bits in uint16_t) -

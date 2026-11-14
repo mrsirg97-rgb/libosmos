@@ -1,6 +1,7 @@
 // ink2_fabench: the prompt attention's time - ink2_fa (WMMA) against ink2_attn (F32, a block a token and head) on
 // random q, k, v at Inkling's shapes, a full layer (causal over all) and a sliding one (window 1,024), T tokens.
 //   ink2_fabench [T ...]   (default 4096 16384)
+//   DECODE=1: a decode's attention instead - one query over T keys stored f16 (ink2_fa16, the engine's), 20 calls
 #include <hip/hip_runtime.h>
 
 #include <cstdio>
@@ -29,6 +30,40 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; i++) Ts.push_back((uint32_t) std::atoi(argv[i]));
   if (Ts.empty()) Ts = {4096, 16384};
   const uint32_t H = 48, KV = 8, D = 128, R = 16, E = 1024;
+  if (std::getenv("DECODE")) {
+    for (uint32_t T : Ts)
+      for (int full = 1; full >= 0; full--) {
+        const uint32_t keys = full ? T : 1039;  // a sliding layer's window: 1,023 + a tile's 15 + the query
+        float *q = rnd((size_t) H * D, 2.0f), *k = rnd((size_t) keys * KV * D, 2.0f), *v = rnd((size_t) keys * KV * D, 2.0f);
+        float *rel = rnd((size_t) H * R, 1.0f), *sink = rnd(H, 1.0f), *rp = rnd((size_t) R * E, 0.1f), *out;
+        uint16_t *k16, *v16;
+        CHECK(hipMalloc(&out, (size_t) H * D * 4) == hipSuccess && hipMalloc(&k16, (size_t) keys * KV * D * 2) == hipSuccess &&
+              hipMalloc(&v16, (size_t) keys * KV * D * 2) == hipSuccess);
+        CHECK(ink2_to_f16(k, (uint64_t) keys * KV * D, k16, nullptr) && ink2_to_f16(v, (uint64_t) keys * KV * D, v16, nullptr));
+        const Ink2Attn at = {H, KV, D, R, E, full ? 0u : 1024u, 0.0883883f};
+        float* scr;
+        CHECK(hipMalloc(&scr, ink2_fa_scratch(H, keys)) == hipSuccess);
+        for (int split = 0; split < 2; split++) {  // one block a KV head, then a block a unit and KV head
+          float* sp = split ? scr : nullptr;
+          CHECK(ink2_fa16(&at, q, rel, sink, nullptr, 1, k16, v16, keys, 0, rp, out, sp, nullptr));
+          hipEvent_t a, b;
+          hipEventCreate(&a), hipEventCreate(&b);
+          hipEventRecord(a);
+          for (int i = 0; i < 20; i++) CHECK(ink2_fa16(&at, q, rel, sink, nullptr, 1, k16, v16, keys, 0, rp, out, sp, nullptr));
+          hipEventRecord(b), hipEventSynchronize(b);
+          float ms;
+          hipEventElapsedTime(&ms, a, b);
+          const double gb = 2.0 * keys * KV * D * 2 / 1e9;
+          std::printf("decode %7u keys %-7s %-6s %8.3f ms a call   %6.1f GB/s of keys and values\n", keys,
+                      full ? "full" : "sliding", split ? "split" : "whole", ms / 20, gb / (ms / 20 / 1e3));
+        }
+        CHECK(hipFree(scr) == hipSuccess);
+        for (void* p : {(void*) q, (void*) k, (void*) v, (void*) rel, (void*) sink, (void*) rp, (void*) out, (void*) k16, (void*) v16})
+          CHECK(hipFree(p) == hipSuccess);
+        if (!full) break;
+      }
+    return 0;
+  }
   for (uint32_t T : Ts)
     for (int full = 1; full >= 0; full--) {
       float *q = rnd((size_t) T * H * D, 2.0f), *k = rnd((size_t) T * KV * D, 2.0f), *v = rnd((size_t) T * KV * D, 2.0f);
@@ -43,7 +78,7 @@ int main(int argc, char** argv) {
         if (w == 1 && full && T > 16384) { ms[1] = -1; continue; }
         hipEventRecord(a);
         CHECK(w ? ink2_attn(&at, q, rel, sink, nullptr, T, k, v, T, rp, out, nullptr)
-                : ink2_fa(&at, q, rel, sink, nullptr, T, k, v, T, rp, out, nullptr));
+                : ink2_fa(&at, q, rel, sink, nullptr, T, k, v, T, 0, rp, out, nullptr, nullptr));
         hipEventRecord(b), hipEventSynchronize(b);
         hipEventElapsedTime(&ms[w], a, b);
       }
