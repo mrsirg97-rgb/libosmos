@@ -162,6 +162,9 @@ def main():
         print(f"{fails} to fix, {notes} to look at" if fails or notes else "as osmos was measured")
         return 1 if fails else 0
     m = manifest.load(a.manifest)
+    for old in [p for p in a.packs if manifest.pack_id(m, p) != p]:
+        print(f"  {old}: now {manifest.pack_id(m, old)}")
+    a.packs = list(dict.fromkeys(manifest.pack_id(m, p) for p in a.packs))
     if a.list or not a.packs:
         for pid, p in m["packs"].items():
             print(f"{pid:12s} {p['title']}")

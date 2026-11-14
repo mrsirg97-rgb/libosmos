@@ -3,7 +3,8 @@ merged by id into <rig home>/models.json - the provider half and the child half 
 substituted by rig; `port`; `aliases`; `stopGrace`; `places`) - and, asked, the default model in settings.json.
 no other row or key touched; a file replaced whole (written aside, then renamed); a file rig would refuse refused
 here first, unwritten. the row's id is the pack's (packs.json: deepseek-1017-ud-s, qwen3.8-flash-next, ...); one
-under 0.5.8's id (osmos-<pack>) is replaced, its port kept, and a default on it moved to the new id."""
+under 0.5.8's id (osmos-<pack>), or under an id the row now keeps as an alias (0.7.6's osmos-evo: deepseek-1017-evo-a),
+is replaced, its port kept, and a default on it moved to the new id."""
 import hashlib
 import json
 import os
@@ -78,7 +79,10 @@ def register(home, cfg, api, cfg_path, default, row):
     mpath, spath = os.path.join(home, "models.json"), os.path.join(home, "settings.json")
     rows = _read(mpath, [])
     settings = _read(spath, {}) if default else None
-    rid, old = row["id"], f"osmos-{cfg['pack']}"  # old: 0.5.8's id for the pack, its row replaced by this one
+    # the pack's earlier rows, replaced by this one: 0.5.8's id (osmos-<pack>), and an id the row now keeps as an alias
+    # (0.7.6: deepseek-1017-evo-a, osmos-evo's) - the first found lends its port, a default on any moves to this row
+    rid, olds = row["id"], [f"osmos-{cfg['pack']}"] + [a for a in row["aliases"] if a != row["id"]]
+    old = next((o for o in olds if any(r.get("id") == o for r in rows)), olds[0])
     window, reserve = cfg["max_context"], row["reserve"]
     if reserve >= window or window // KEEP_RECENT_SHARE >= window - reserve:
         raise RigError(f"a {window}-token context leaves no room for a {reserve}-token reply (rig would refuse the row)")
@@ -86,11 +90,11 @@ def register(home, cfg, api, cfg_path, default, row):
            "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive", "efforts": list(row["efforts"]),
            "effort": row["effort"], "command": f"{api} --config {cfg_path} --port ${{PORT}}", "port": _port(rows, rid if any(r.get("id") == rid for r in rows) else old),
            "aliases": list(row["aliases"]), "stopGrace": STOP_GRACE, "places": 1}
-    rows = [r for r in rows if r.get("id") not in (rid, old)] + [out]
+    rows = [r for r in rows if r.get("id") != rid and r.get("id") not in olds] + [out]
     _write(mpath, rows)
     if not default and os.path.exists(spath):  # a default left on the old row: moved with it (rig would find none)
         settings = _read(spath, {})
-        default = settings.get("model") == old
+        default = settings.get("model") in olds
     if default:
         settings["model"] = rid
         _write(spath, settings)

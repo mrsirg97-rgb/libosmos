@@ -6,7 +6,8 @@ NPU kernels): release (its tag, vX.Y.Z), path (the asset's name), bytes, sha256 
 (null, or {file, slot: [no, count]}), picks, drafter (file ids), drafter_kind (dspark: a directory of its files - the
 default; mtp: one GGUF, the model's MTP head), overlay (a file id or null), npu (optional: a release asset's id,
 a tarball of the NPU's kernels - a directory a format and kind), rig (its row's: max_tokens, reserve, efforts, effort -
-one of them - and aliases), settings.
+one of them - and aliases), settings. aliases (optional): {an old pack id: the pack it names now} - osmos-evo-a,
+osmos-evo since 0.7.6.
 
 a derived file: made, not downloaded - derive {with: the converter, its inputs (file ids of published files), mode},
 path, bytes and sha256 (its result's, pinned as a download's is), no repo nor revision. overlay_q4x's: patch, key
@@ -26,6 +27,11 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 class ManifestError(Exception):
     pass
+
+
+def pack_id(m, pid):
+    """a pack's id as asked: its own, or the pack an old id (aliases) names now"""
+    return m.get("aliases", {}).get(pid, pid)
 
 
 def _release(fid, f):
@@ -138,6 +144,12 @@ def check(m):
         raise ManifestError("rig: not {repo, version (a release tag vX.Y.Z), install_sha256 (its install.sh's)}")
     for fid, f in m["files"].items():
         _derived(m, fid, f) if "derive" in f else _release(fid, f) if "release" in f else _file(fid, f)
+    al = m.get("aliases", {})
+    if not isinstance(al, dict):
+        raise ManifestError("aliases: not {an old pack id: a pack's}")
+    for old, new in al.items():
+        if old in m["packs"] or new not in m["packs"]:
+            raise ManifestError(f"alias {old!r} -> {new!r}: an old id must name no pack, and its target a pack")
     ids = [p.get("rig", {}).get("id") for p in m["packs"].values() if isinstance(p.get("rig"), dict)]
     for i in {i for i in ids if ids.count(i) > 1}:
         raise ManifestError(f"rig id {i!r}: two packs' (rig keys a row by it)")
