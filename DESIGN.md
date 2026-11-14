@@ -1822,6 +1822,47 @@ tests (each seen to fail first, or by a mutation):
   1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
   repeated text are not the mask's test; the probes above are.
 
+## 0.7.6: finding the layers that cost a pack its recall - osmos-evo (2026-11-14)
+
+evo-A recalled every fact of the 1M recall stream but one: the ivory code, 188K back, its first answer token 0.47
+(UD-IQ2_XXS: 0.983). the method that found why, and the pack it made (osmos-evo: evo-A2), each step a measurement:
+
+1. **a probe, not the whole read.** tools/evo/recall_probe.py cuts the stream to its tail (the questions and their
+   answers) after the last W tokens of its body, the fact planted D back - minutes a probe where the whole read takes
+   68. the first answer token's P, kld's DUMP (MASK= the probe's): W 15K / D 12K 0.993, D 0.9K 0.997; W 128K / D 11K
+   0.961; W 256K / D 11K 0.966, D 188K 0.793; 1M / 188K 0.47. a recall of distance and length, not of the text.
+2. **what it is not.** the indexer's picks (selprobe, both packs, the probe at 262K) hold the note's rows as often in
+   evo-A as in UD-IQ2_XXS (more, past layer 24): the keys reach the attention; what reads them is the difference.
+3. **bisect by overlay.** tools/evo/overlay.py clones another pack's tensors (UD-IQ2_XXS's routed experts) for a set
+   of layers and kinds into one GGUF (btrfs: no space); kld's and dbench's OVERLAY= run the base with them. at W
+   256K / D 188K: layers 0-9 0.888, 10-19 0.970, 20-29 0.885, 30-39 0.794 (none); 10-14 0.954, 15-19 0.924; 10-19's
+   down alone 0.877, its gate and up alone **0.982** (UD-IQ2_XXS 0.995). evo-A holds those at IQ1_S (1.56 bpw),
+   UD-IQ2_XXS at IQ2_XXS (2.06).
+4. **confirm on everything else**, the 0.6.6 protocol's rules: wiki10k's working rows 0.1752 -> 0.1578 (-0.0174 +-
+   0.0032, the halves -0.0185 / -0.0162); its dev rows once -0.0098 +- 0.0065; the hold-out (27,459 assistant rows)
+   0.0485 -> 0.0422 (-0.0062 +- 0.0003, 18 standard errors; evo-A had sat 0.0006 above UD-IQ1_M there); the 1M
+   stream's ivory 0.47 -> 0.96, its other answers unchanged.
+5. **price it.** +5.8 GB of pack, ~91 MB a token more (6 of 384 experts a layer, ~1.5 MB each, 10 layers; 2.1 GB of
+   expert bytes a token). low-power, the same build: decode at 65K level (15.2 / 15.5), 262K 15.4 -> 14.7, 523K 15.9
+   -> 13.7 (the larger pack's experts less resident beside the deeper KV). at performance (0.7.2's suite: 64K
+   context, three questions x 256): plain 19.1 / 18.8 / 18.7 -> 18.1 / 17.6 / 17.3, drafted 38.3 / 29.8 / 38.8 ->
+   32.7 / 28.9 / 36.9 (acceptance the same: 195 / 172 / 205 against 196 / 173 / 203); against UD-IQ2_XXS's 14.7 /
+   14.4 / 13.6 and 28.6 / 22.0 / 27.3. drafted after 65K 31.1, plain at 65K / 262K 16.6 / 17.4. (two low-power
+   drafted runs at depth read +16% / +25%: the packs answered differently, so the drafter drafted other text - the
+   same-text suite is the comparison.)
+6. **bake and ship it as a patch.** gguf_assemble with the overlay gives evo-A2's shards (shards 1 and 4 evo-A's,
+   byte for byte); gguf_delta against evo-A the patch (20 tensors, 23.36 GB, cloned); evo-A + the patch assembled
+   again gives every evo-A2 shard's SHA-256. the installer derives a set from a derived one (inputs() follows a
+   derived base to its published files; an install that has evo-A fetches the patch alone). the pack is osmos-evo
+   (osmos-evo-a an alias; rig's row deepseek-1017-evo, the old id an alias - a row under it replaced, its port and a
+   default kept).
+
+the method in short, for any pack: a symptom (a recall that wavers, a KL tail) -> a probe that reproduces it in
+minutes -> rule out the paths that are not the weights -> bisect the weights by overlaying a stronger pack's, by layer
+group, then by kind -> keep the smallest overlay that recovers it -> confirm on the protocol's text, dev rows and
+hold-out -> price it in bytes a token and measured speed -> bake, delta, verify, ship. osmos-evo takes further
+patches the same way (each one's own replacement tensors on evo-A2's shards, pinned by its inputs).
+
 ## 0.7.5: a turn reuses its prompt wherever the client leaves it (2026-11-14)
 
 A user saw no cached tokens on DeepSeek across turns. Measured through osmos-api (probe: three-turn chats,
