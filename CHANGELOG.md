@@ -32,7 +32,8 @@
 - **Long prompts faster at depth (Qwen)**: QSA's indexer scores register-blocked (a thread 4 tokens x 4 blocks x its 4
   heads; the old kernel's bits, kept as the reference) and their scratch room for 128 tokens' rows (67 MB at 512K):
   a 457K-token read on UD-IQ3_XXS **12.3 minutes** from 16.5, 512 tok/s at 416K from 341, the scored rows byte for
-  byte the old kernel's.
+  byte the old kernel's. The blocked kernel from a step of 32 tokens only: a decode step (1 token) keeps the plain kernel, faster
+  there (0.8x the time at 511K) - the same bits.
 - **1M stays the DeepSeek packs' context; `--ctx` for another** (4,096 to 1M: `N`, `Nk`, `Nm`): the installer's
   writes the pack's `osmos.json` (rig's row takes its window from it), `osmos-api --ctx` overrides it for a run. Qwen's
   packs stay 512K (past its native 262K Qwen runs YaRN, slightly weaker on short text: `--ctx 1m` when wanted).

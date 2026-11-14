@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -50,7 +51,8 @@ static double time_ms(F f) {
 }
 
 int main() {
-  constexpr uint32_t T = 128, H = 32, HD = 128, BLOCK = 8, KEEP = 2048, K = 512;
+  constexpr uint32_t H = 32, HD = 128, BLOCK = 8, KEEP = 2048, K = 512;
+  const uint32_t T = getenv("IX_T") ? (uint32_t) atoi(getenv("IX_T")) : 128;  // a call's tokens (1, 5: decode, a verify)
   const uint32_t sizes[] = {262144, 524288, 1048576};
   const uint32_t RMAX = sizes[2], rb = (uint32_t) kv_row_bytes(KV_FP4_POW2, HD);
   std::vector<float> qh((size_t) T * H * HD), wh((size_t) T * H);

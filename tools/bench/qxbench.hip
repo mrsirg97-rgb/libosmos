@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -29,7 +30,8 @@ static float uniform() {
 }
 
 int main() {
-  constexpr uint32_t H = 4, D = Q4X_IX_DIM, R = 4, T = 512, N = 256, MAXCTX = 524288;
+  constexpr uint32_t H = 4, D = Q4X_IX_DIM, R = 4, T = 512, MAXCTX = 524288;
+  const uint32_t N = getenv("QX_N") ? (uint32_t) atoi(getenv("QX_N")) : 256;  // a step's tokens (1, 6: decode, a verify)
   const uint32_t nb_max = MAXCTX / R;
   std::vector<float> qh((size_t) N * H * D), ph((size_t) nb_max * D);
   for (float& v : qh) v = uniform();
@@ -73,7 +75,7 @@ int main() {
     const double blocked = timed();
     CHECK(hipMemcpy(s1.data(), sel, s1.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
     // the scores bit for bit: 16 tokens, one piece (their scores whole in the scratch)
-    constexpr uint32_t NS = 16;
+    const uint32_t NS = N < 16 ? N : 16;  // (no more tokens than the q buffer holds)
     const int32_t ps = (int32_t) (P - NS);
     const uint32_t nv = P / R;
     std::vector<float> c0((size_t) NS * nv), c1(c0.size());

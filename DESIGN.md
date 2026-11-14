@@ -1897,6 +1897,13 @@ the scores' scratch: its 4M-float floor gave 32-token pieces at 512K, the new ti
 picks the same; test_q4x_qsa_gpu (llama.cpp's tensors and the double's picks, exactly) ok. end to end, the 457K
 recall stream: its 98 scored rows byte for byte the old kernel's; 12.3 min from 16.5 (751, 751, 649, 546, 512 tok/s
 at 64K, 128K, 256K, 384K, 416K - from 751, 614, 478, 375, 341).
+
+the blocked scores only from a step of 32 tokens: a decode or a verify step (1 .. 9 tokens) fills one 64-token tile
+with 1 .. 9 - measured (qxbench QX_N) the plain kernel's 0.8x the time at 1 token, 0.9x at 16, then the blocked
+1.4x at 32 and 2.1x at 64 (511K; the same at 64K and 256K). so q4x_ix_pick takes ix_score_kernel below 32 tokens a
+piece, ix_score_blocked_kernel from 32 (kBlockedFrom) - the bits the same either way; the prompt's pieces (128
+tokens at 512K) the blocked kernel's. found by a read of the decode path before release (decode at 512K would have
+been ~8 ms a token slower: 12 layers x ~0.7 ms).
 ## 0.7.3: the indexer's scores on int8 dots (2026-11-13)
 
 ops_index_score_fp4 (the fused kernel) is bound by its LDS reads: a thread reads 12 staged floats for 32 fmas, and

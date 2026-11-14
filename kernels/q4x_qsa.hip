@@ -19,6 +19,9 @@ constexpr int kTT = 16, kTB = 32; // the score tile: tokens x blocks
 constexpr int kPick = 256;        // the pick's threads: a token's
 constexpr uint64_t kScoreBudget = 4u << 20;  // the scratch's scores at least: a piece's tokens x their blocks
 constexpr uint64_t kScoreTokens = 128;       // (0.7.3) and room for this many tokens' rows (q4x_ix_scratch)
+// (0.7.3) the blocked scores from a step of this many tokens: below it its 64-token tile mostly empty - 1 token 0.8x
+// the plain kernel's time at 511K, 16 0.9x, 32 1.4x, 64 2.1x (qxbench QX_N); the same bits either way
+constexpr uint32_t kBlockedFrom = 32;
 
 
 // a block of kDim threads, x its value d: x normed (its L2 over the block) times w, then its first rope.dim rotated in
@@ -280,7 +283,7 @@ extern "C" bool q4x_ix_pick(const float* q, const float* pooled, uint32_t n_tok,
     const int32_t p0 = pos0 + (int32_t) t0;
     const uint32_t nv = (uint32_t) (p0 + (int32_t) n) / ratio;
     if (nv > blocks) {
-      if (g_score_naive)
+      if (g_score_naive || n < kBlockedFrom)  // a small step (decode, a verify) the plain kernel's: faster there
         ix_score_kernel<<<dim3((nv + kTB - 1) / kTB, (n + kTT - 1) / kTT), 256, 0, st(stream)>>>(
             q + (uint64_t) t0 * heads * kDim, pooled, n, heads, p0, ratio, nv, scratch);
       else
