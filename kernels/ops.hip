@@ -440,13 +440,14 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, u
 // wave alone (block.h's wave_pick: the larger, ties to the lower expert - the serial scan's picks, which a block-wide
 // argmax a pick, 8 barriers each, gave before: test_router_gpu holds this to that kernel's bits), their weights
 constexpr uint32_t kRouterLane = OPS_MAX_EXPERTS / 32;  // a lane's experts at most
+template <int Score>
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                               int32_t* idx, float* w) {
   __shared__ float sc[OPS_MAX_EXPERTS], keys[OPS_MAX_EXPERTS];
   const uint32_t t = blockIdx.x;
   for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads) {
     const float l = logits[(uint64_t) t * n_exp + e];
-    sc[e] = sqrtf(l > kSoftplusLinear ? l : log1pf(expf(l)));
+    sc[e] = Score == OPS_SCORE_SIGMOID ? sigmoid(l) : sqrtf(l > kSoftplusLinear ? l : log1pf(expf(l)));
     keys[e] = pick_key(sc[e] + bias[e]);
   }
   __syncthreads();
@@ -731,11 +732,21 @@ extern "C" bool ops_engram_gate(float* h, const float* kv, const float* gate, ui
   return ok();
 }
 
+extern "C" bool ops_router_scored(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
+                                  OpsScore score, uint32_t n_tok, int32_t* idx, float* w, void* stream) {
+  if (!n_exp || n_exp > OPS_MAX_EXPERTS || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok) return false;
+  if (score == OPS_SCORE_SIGMOID)
+    router_kernel<OPS_SCORE_SIGMOID><<<n_tok, kThreads, 0, st(stream)>>>(logits, bias, n_exp, k, scale, idx, w);
+  else if (score == OPS_SCORE_SQRT_SOFTPLUS)
+    router_kernel<OPS_SCORE_SQRT_SOFTPLUS><<<n_tok, kThreads, 0, st(stream)>>>(logits, bias, n_exp, k, scale, idx, w);
+  else
+    return false;
+  return ok();
+}
+
 extern "C" bool ops_router(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                            uint32_t n_tok, int32_t* idx, float* w, void* stream) {
-  if (!n_exp || n_exp > OPS_MAX_EXPERTS || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok) return false;
-  router_kernel<<<n_tok, kThreads, 0, st(stream)>>>(logits, bias, n_exp, k, scale, idx, w);
-  return ok();
+  return ops_router_scored(logits, bias, n_exp, k, scale, OPS_SCORE_SQRT_SOFTPLUS, n_tok, idx, w, stream);
 }
 
 extern "C" bool ops_swiglu_lane(const float* g, const float* u, uint32_t n, float lim, const float* scale,

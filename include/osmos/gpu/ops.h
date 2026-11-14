@@ -92,6 +92,13 @@ bool ops_cand_blocks_max(const float *score, uint32_t stride, const int32_t *pos
                          uint32_t bstride, void *stream);
 bool ops_router(const float *logits, const float *bias, uint32_t n_exp, uint32_t k, float scale, uint32_t n_tok,
                 int32_t *idx, float *w, void *stream);
+typedef enum OpsScore
+{
+  OPS_SCORE_SQRT_SOFTPLUS, /* DeepSeek-V4.1's */
+  OPS_SCORE_SIGMOID,       /* Inkling-2's */
+} OpsScore;
+bool ops_router_scored(const float *logits, const float *bias, uint32_t n_exp, uint32_t k, float scale, OpsScore score,
+                       uint32_t n_tok, int32_t *idx, float *w, void *stream);
 bool ops_swiglu(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok, float *h,
                 void *stream);
 bool ops_swiglu_x16(const float *g, const float *u, uint32_t n, float lim, const float *scale, uint32_t n_tok,
@@ -288,6 +295,9 @@ ops_cand_blocks_max (0.7.3)
 ops_router
   scores = sqrt(softplus(logits)); the k experts of the highest score + bias (ties to the lower expert), in that
   order, into idx; w = their scores / (their sum + 1e-20) * scale.
+
+ops_router_scored
+  ops_router with the scores another family's: sqrt(softplus) (ops_router's), or sigmoid (Inkling-2's).
 
 ops_swiglu
   h = silu(min(g, lim)) * clamp(u, -lim, lim), times scale[t] if scale is not NULL (a routed expert's weight: applied
