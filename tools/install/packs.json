@@ -34,7 +34,7 @@
                              "delta": "evo-a-delta", "shard": 4},
                   "path": "DeepSeek-V4.1-Flash-1017-osmos-evo-A-00004-of-00005.gguf", "bytes": 42404521612,
                   "sha256": "859252b3908844a1270d4a4116e9ed10100d6f57075ac1f74875a82b1edfd7c4"},
-    "evo-a2-patch": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": null,
+    "evo-a2-patch": {"repo": "mrsirg97-rgb/osmos-evo-1017", "revision": "b5cd0b98558b5744fdea0e2d240bd710cceafe33",
                      "path": "evo-A2/DeepSeek-V4.1-Flash-1017-osmos-evo-A2-patch.gguf", "bytes": 23357055232,
                      "sha256": "bfc4dc583f99ee9327d39f72fe6e4072ca874a0fecb0bec0908cb4d5be50866f"},
     "evo-a2-1": {"derive": {"with": "gguf_assemble", "base": ["evo-a-1", "evo-a-2", "evo-a-3", "evo-a-4"],
