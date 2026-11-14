@@ -428,7 +428,9 @@ void api_chat(Api *a, Http *h)
   size_t n = 0;
   int32_t *ids = prompt_ids(a, &rq, &n, err);
   const unsigned ctx = a->engine.max_ctx;
-  if (ids && n >= ctx)
+  if (ids && !engine_ready(&a->engine)) /* loading: no context known yet (its 503 below, said as it is) */
+    snprintf(err, sizeof err, "the engine is not ready"), free(ids), ids = NULL;
+  else if (ids && n >= ctx)
     snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL;
   if (ids && rq.max_tokens && n + rq.max_tokens > ctx)
     rq.max_tokens = (unsigned)(ctx - n); /* past the context: as many as it leaves (finish "length") */
