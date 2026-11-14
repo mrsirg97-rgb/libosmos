@@ -154,7 +154,122 @@ __global__ void attn_kernel(Ink2Attn a, const float* q, const float* rel, const 
   out[o] = acc / z * (gate ? sigmoid(gate[o]) : 1.0f);
 }
 
+// the prompt's attention on WMMA (16 x 16 x 16, f16 in, f32 sums): a block a 16-token tile and KV head, a wave a
+// query head of its group; each 16-key tile's K and V^T in LDS once for the group. a lane holds rows 2 j + half
+// (j < 8) at column lane % 16 of a tile's scores and of each 16-dim slice of O (q4x_attn.hip's layout)
+constexpr int kFaTile = 16;
+constexpr int kFaHead = INK2_MAX_HEAD;
+constexpr int kFaRow = kFaHead + 8;  // f16s a row in LDS, then a pad
+constexpr int kFaKey = kFaTile + 8;
+typedef _Float16 fa_h16 __attribute__((ext_vector_type(16)));
+typedef float fa_f8 __attribute__((ext_vector_type(8)));
+
+__device__ inline float fa_row_max(float v) {
+  for (int o = 1; o < kFaTile; o <<= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
+  return v;
+}
+__device__ inline float fa_row_sum(float v) {
+  for (int o = 1; o < kFaTile; o <<= 1) v += __shfl_xor(v, o, 32);
+  return v;
+}
+
+__global__ __launch_bounds__(INK2_FA_MAX_GROUP * 32) void fa_kernel(Ink2Attn a, const float* q, const float* rel,
+                                                                    const float* sink, const float* gate,
+                                                                    uint32_t n_tok, const float* k, const float* v,
+                                                                    uint32_t n_keys, const float* rel_proj,
+                                                                    float* out) {
+  __shared__ __attribute__((aligned(32))) _Float16 qs[INK2_FA_MAX_GROUP][kFaTile * kFaRow];
+  __shared__ __attribute__((aligned(32))) _Float16 ks[kFaTile * kFaRow], vt[kFaHead * kFaKey];
+  __shared__ __attribute__((aligned(32))) _Float16 ps[INK2_FA_MAX_GROUP][kFaTile * kFaKey];
+  const uint32_t G = a.heads / a.kv_heads, t0 = blockIdx.x * kFaTile, kvh = blockIdx.y, H = a.heads;
+  const uint32_t wave = threadIdx.x / 32, lane = threadIdx.x % 32, half = lane >> 4, col = lane % kFaTile;
+  const uint32_t h = kvh * G + wave, nth = blockDim.x, base = n_keys - n_tok;  // token t is key base + t
+  for (uint32_t i = threadIdx.x; i < G * kFaTile * kFaHead; i += nth) {
+    const uint32_t g = i / (kFaTile * kFaHead), r = i / kFaHead % kFaTile, d = i % kFaHead, t = t0 + r;
+    qs[g][r * kFaRow + d] = (_Float16) (t < n_tok ? q[((uint64_t) t * H + kvh * G + g) * kFaHead + d] : 0.0f);
+  }
+  float m[8], l[8];
+  fa_f8 o[kFaHead / kFaTile] = {};
+  for (int j = 0; j < 8; j++) {  // the sink: a logit of its own, its value zero - the running max's and sum's start
+    const uint32_t t = t0 + 2 * j + half;
+    m[j] = t < n_tok ? sink[(uint64_t) t * H + h] : 0.0f, l[j] = 1.0f;
+  }
+  const uint32_t last = t0 + kFaTile - 1 < n_tok - 1 ? t0 + kFaTile - 1 : n_tok - 1;
+  const uint32_t qlo = base + t0, qhi = base + last;
+  const uint32_t klo = a.window && qlo + 1 > a.window ? qlo + 1 - a.window : 0;
+  for (uint32_t kb = klo; kb <= qhi; kb += kFaTile) {
+    __syncthreads();  // the last tile's K, V read by every wave
+    for (uint32_t i = threadIdx.x; i < kFaTile * kFaHead; i += nth) {  // K and V^T, f16 (keys past the tile's zero)
+      const uint32_t r = i / kFaHead, d = i % kFaHead, key = kb + r;
+      const bool in = key <= qhi;
+      const uint64_t at = ((uint64_t) key * a.kv_heads + kvh) * kFaHead + d;
+      ks[r * kFaRow + d] = (_Float16) (in ? k[at] : 0.0f);
+      vt[d * kFaKey + r] = (_Float16) (in ? v[at] : 0.0f);
+    }
+    __syncthreads();
+    if (wave >= G) continue;
+    fa_f8 sacc = {};
+    for (int g = 0; g < kFaHead / kFaTile; g++) {
+      const fa_h16 qa = *(const fa_h16*) (qs[wave] + col * kFaRow + g * kFaTile);
+      const fa_h16 kb16 = *(const fa_h16*) (ks + col * kFaRow + g * kFaTile);
+      sacc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(qa, kb16, sacc);
+    }
+    const uint32_t key = kb + col;
+    float alpha[8];
+    for (int j = 0; j < 8; j++) {
+      const uint32_t t = t0 + 2 * j + half, qi = base + t;
+      const bool valid = t < n_tok && key <= qi && (!a.window || qi - key < a.window);
+      float s = -INFINITY;
+      if (valid) {
+        const uint32_t dist = qi - key;
+        s = sacc[j] * a.scaling;
+        if (dist < a.extent) {
+          const float* rr = rel + ((uint64_t) t * H + h) * a.d_rel;
+          float b = 0;
+          for (uint32_t r = 0; r < a.d_rel; r++) b += rr[r] * rel_proj[(uint64_t) r * a.extent + dist];
+          s += b;
+        }
+      }
+      const float mn = fmaxf(m[j], fa_row_max(s));
+      const float pv = s == -INFINITY ? 0.0f : expf(s - mn);
+      alpha[j] = expf(m[j] - mn);
+      l[j] = l[j] * alpha[j] + fa_row_sum(pv), m[j] = mn;
+      ps[wave][(2 * j + half) * kFaKey + col] = (_Float16) pv;
+    }
+    __builtin_amdgcn_wave_barrier();
+    const fa_h16 pa = *(const fa_h16*) (ps[wave] + col * kFaKey);
+    for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
+      for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
+      const fa_h16 bv = *(const fa_h16*) (vt + (nt * kFaTile + col) * kFaKey);
+      o[nt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bv, o[nt]);
+    }
+    __builtin_amdgcn_wave_barrier();
+  }
+  if (wave >= G) return;
+  for (int j = 0; j < 8; j++) {
+    const uint32_t t = t0 + 2 * j + half;
+    if (t >= n_tok) continue;
+    for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
+      const uint64_t i = ((uint64_t) t * H + h) * kFaHead + nt * kFaTile + col;
+      out[i] = o[nt][j] / l[j] * (gate ? sigmoid(gate[i]) : 1.0f);
+    }
+  }
+}
+
 }  // namespace
+
+extern "C" bool ink2_fa(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
+                        uint32_t n_tok, const float* k, const float* v, uint32_t n_keys, const float* rel_proj,
+                        float* out, void* stream) {
+  if (!a || !q || !rel || !sink || !k || !v || !rel_proj || !out || !n_tok || n_tok > n_keys ||
+      a->head_dim != INK2_MAX_HEAD || !a->kv_heads || a->heads % a->kv_heads ||
+      a->heads / a->kv_heads > INK2_FA_MAX_GROUP || !a->d_rel || a->d_rel > INK2_MAX_REL || !a->extent ||
+      a->extent > INK2_MAX_EXTENT)
+    return false;
+  fa_kernel<<<dim3((n_tok + kFaTile - 1) / kFaTile, a->kv_heads), a->heads / a->kv_heads * 32, 0, st(stream)>>>(
+      *a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj, out);
+  return ok();
+}
 
 extern "C" bool ink2_clip_rows(float* x, uint32_t n_tok, uint32_t per_tok, uint32_t dim, const float* w, float clip,
                                Ink2Tau tau, void* stream) {

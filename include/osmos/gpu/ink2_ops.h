@@ -25,6 +25,7 @@ bool ink2_axpy(float *y, const float *x, uint64_t n, float a, void *stream);
 #define INK2_MAX_HEAD 128   /* attention's head dim at most (Inkling's 128) */
 #define INK2_MAX_EXTENT 1024 /* the relative bias's extent at most (Inkling's 1,024) */
 #define INK2_MAX_REL 32      /* a head's relative states at most (Inkling's 16) */
+#define INK2_FA_MAX_GROUP 8  /* ink2_fa's query heads a KV head at most (Inkling's 6): its waves */
 typedef struct Ink2Tau
 {
   uint32_t pos0;     /* the step's first token's position */
@@ -41,6 +42,8 @@ typedef struct Ink2Attn
 bool ink2_attn(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
                uint32_t n_tok, const float *k, const float *v, uint32_t n_keys, const float *rel_proj, float *out,
                void *stream);
+bool ink2_fa(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate, uint32_t n_tok,
+             const float *k, const float *v, uint32_t n_keys, const float *rel_proj, float *out, void *stream);
 
 #endif
 
@@ -84,4 +87,9 @@ ink2_attn
   (window 0: all). logits q . k scaling + (rel . rel_proj[:, d] at distance d < extent, else 0), a sink logit of
   its own (value 0), softmax; out [n_tok][heads head_dim] the values' sum, times sigmoid(gate) (gate NULL: ungated).
   rel_proj [d_rel][extent].
+
+ink2_fa
+  ink2_attn for a prompt (the same arguments and result): a block a (16-token tile, KV head), a wave a query head of
+  its group (heads / kv_heads <= INK2_FA_MAX_GROUP), each tile of 16 keys loaded into LDS once for the group's waves -
+  q . k and p . v on WMMA (f16 in, f32 sums), the relative bias, mask, sink and online softmax in f32.
 */

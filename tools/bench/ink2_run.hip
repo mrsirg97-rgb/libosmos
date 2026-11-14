@@ -14,6 +14,7 @@
 //   DUMP=path     a record a scored row: kl F32, nll F32, top I32, ref_top I32 (-1 without REF) - kld's, so
 //                 tools/bench/kld_compare.py pairs runs
 //   MASK=path     0 / 1 a token (as ids): row r scored only when token r + 1 is 1 (an agent trace's assistant tokens)
+//   ATTN=fa       the attention on WMMA (ink2_fa: f16 in) - long prompts; default ink2_attn (F32: the reference's)
 #include <hip/hip_runtime.h>
 #include <unistd.h>
 
@@ -229,7 +230,9 @@ int main(int argc, char** argv) {
       CHECK(ops_rms(vc, D, D, nullptr, G.rms_eps, T * KV, vc, D, nullptr));
       const Ink2Attn at = {H, KV, D, R, full ? (uint32_t) G.rel_extent : (uint32_t) G.window,
                            full ? 0u : (uint32_t) G.window, 1.0f / std::sqrt((float) D)};
-      CHECK(ink2_attn(&at, q, rel, sink, gate, T, kc, vc, T, rp, att, nullptr));
+      static const bool fa = std::getenv("ATTN") && !std::strcmp(std::getenv("ATTN"), "fa");
+      CHECK(fa ? ink2_fa(&at, q, rel, sink, gate, T, kc, vc, T, rp, att, nullptr)
+               : ink2_attn(&at, q, rel, sink, gate, T, kc, vc, T, rp, att, nullptr));
       CHECK(hipDeviceSynchronize() == hipSuccess);
       hipFree(qw), hipFree(rw), hipFree(rp);
     }

@@ -132,6 +132,11 @@ int main() {
     held((w + "attention, ungated").c_str(), host_of(dout, qr.v.size()), in(c, "ungated"), 1.0, kExactRel);
     CHECK(ink2_attn(&at, dq, dr, ds, dg, n, dk, dv, n, drp, dout, nullptr));
     held((w + "attention, gated").c_str(), host_of(dout, qr.v.size()), in(c, "out"), 1.0, kExactRel);
+    // the prompt's attention (ink2_fa: WMMA tiles, q / k / v / p in f16): f16's rounding of the same thing
+    CHECK(ink2_fa(&at, dq, dr, ds, nullptr, n, dk, dv, n, drp, dout, nullptr));
+    held((w + "flash attention, ungated").c_str(), host_of(dout, qr.v.size()), in(c, "ungated"), 1.0, kF16Rel);
+    CHECK(ink2_fa(&at, dq, dr, ds, dg, n, dk, dv, n, drp, dout, nullptr));
+    held((w + "flash attention, gated").c_str(), host_of(dout, qr.v.size()), in(c, "out"), 1.0, kF16Rel);
     for (float* d : {dq, dqw, dr, drw, dk, dv, drp, ds, dg, dout}) hipFree(d);
   }
   std::printf("[test_ink2_ops_gpu] ok\n");
