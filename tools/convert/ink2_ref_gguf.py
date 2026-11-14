@@ -1,7 +1,7 @@
 """ink2_ref_gguf.py - thinkingmachines/Inkling-2-Small as a reference GGUF: every weight the original's, no value changed.
 
     PYTHONPATH=<llama.cpp>/gguf-py python tools/convert/ink2_ref_gguf.py --src ~/Models/inkling2/Inkling-2-Small \
-        --out ~/Models/inkling2/ref/ink2-ref [--layers 0,1]       (9 shards of 48 GB, 393 GB)
+        --out ~/Models/inkling2/ref/ink2-ref [--layers 0,1]       (shards of whole layers, ~48 GB, 393 GB)
     ... --check 0,40          (decode sampled expert rows both ways, compare the bits)
 
 - the routed experts of layers 0-39: NVFP4 (ggml type 40). The checkpoint's E2M1 codes two to a byte (the even column
@@ -16,6 +16,9 @@
   here two tensors, ffn_gate_exps and ffn_up_exps.
 - everything else as stored: BF16 or F32. The vision tower is left out (a text pack); the drafter (mtp.safetensors)
   is in, under mtp.*.
+- the output: <out>-0000k-of-0000N.gguf, the first every tensor not a layer's and the metadata, then whole layers to
+  about --split-gb a shard; each written as .part and renamed when whole (0.8.0), a shard there skipped - a stopped run
+  goes on where it was, and only the source shards its layers live in are read.
 - names: GGUF style where one fits (blk.N.attn_q ...), Inkling's own words where none does; the map is NAMES below.
 """
 from __future__ import annotations
@@ -283,21 +286,16 @@ def main():
         if m and int(m[2]) + (m[1] == "attn") not in layers:
             continue
         keys.append(k)
-    w = gguf.GGUFWriter(a.out + ".gguf" if a.out else None, "inkling2", split_max_size=int(a.split_gb * 1e9))
-    w.add_name("Inkling-2-Small (reference: the original weights)")
-    w.add_string("general.quantized_by", "osmos ink2_ref_gguf.py: no value changed")
-    meta(w, tc)
-    w.add_string("inkling2.mtp_config.json", json.dumps(src.cfg.get("mtp_config", {})))
-    for key, f in (("tokenizer.huggingface.json", "tokenizer.json"), ("tokenizer.chat_template", "chat_template.jinja")):
-        if os.path.exists(os.path.join(a.src, f)):
-            w.add_string(key, open(os.path.join(a.src, f), encoding="utf-8").read())
-    # pass 1: every tensor's info (shapes from the headers; the experts' from their shapes)
-    plan = []
+    # pass 1: every tensor's info (shapes from the headers; the experts' from their shapes), grouped into shards:
+    # the first every tensor not a layer's (the embedding, the head, attn_res's queries, the drafter) and the
+    # metadata, then whole layers to about --split-gb a shard (their dense tensors, then their experts)
+    glob, per_layer = [], {L: [] for L in layers}
     for k in keys:
         dt, sh = src.meta(k)
         sh = [sh[0], sh[2]] if len(sh) == 3 and sh[1] == 1 else list(sh)
         t = gguf.GGMLQuantizationType.BF16 if dt == "BF16" else gguf.GGMLQuantizationType.F32
-        plan.append(("plain", k, gguf_name(k), sh, t))
+        m = re.match(r"model\.llm\.layers\.(\d+)\.", k)
+        (per_layer[int(m[1])] if m else glob).append(("plain", k, gguf_name(k), sh, t))
     for L in layers:
         p = f"model.llm.layers.{L}.mlp.experts."
         dt, (n_exp, R, Kb) = src.meta(p + "w13_weight")
@@ -305,34 +303,68 @@ def main():
         for nm, rows, kb in (("gate", R // 2, Kb), ("up", R // 2, Kb), ("down",) + tuple(src.meta(p + "w2_weight")[1][1:])):
             K = kb * 2 if nv else kb
             t = NVFP4 if nv else MXFP8
-            plan.append(("expert", L, f"blk.{L}.ffn_{nm}_exps.weight", [n_exp, rows, K], t))
+            per_layer[L].append(("expert", L, f"blk.{L}.ffn_{nm}_exps.weight", [n_exp, rows, K], t))
         if nv:
             for nm in ("gate", "up", "down"):
-                plan.append(("expert", L, f"blk.{L}.ffn_{nm}_exps.scale", [n_exp], gguf.GGMLQuantizationType.F32))
-    for kind, k, name, sh, t in plan:
-        bs, ts = SIZES[t]
-        nbytes = int(np.prod(sh)) // bs * ts
-        # (the shape in values, as written: a dtype other than uint8 keeps gguf-py from reading it as bytes through
-        # its own size table - which has no MXFP8)
-        dt = {gguf.GGMLQuantizationType.F32: np.float32, gguf.GGMLQuantizationType.BF16: np.int16}.get(t, np.int8)
-        w.add_tensor_info(name, sh, np.dtype(dt), nbytes, raw_dtype=t)
-    w.write_header_to_file()
-    w.write_kv_data_to_file()
-    w.write_ti_data_to_file()
-    # pass 2: the data, in the same order
-    done_layers, pending = set(), {}
-    for kind, k, name, sh, t in plan:
-        if kind == "plain":
-            _, _, data = plain(src, k)
-            w.write_tensor_data(data.view(np.int8) if data.dtype == np.uint8 else data)
-        else:
-            if k not in done_layers:
-                pending = {n: d for n, _, _, d in experts(src, k)}
-                done_layers.add(k)
-            d = pending.pop(name)
-            w.write_tensor_data(d.view(np.int8) if d.dtype == np.uint8 else d)
-        print(f"wrote {name} {sh} {t.name}", file=sys.stderr, flush=True)
-    w.close()
+                per_layer[L].append(("expert", L, f"blk.{L}.ffn_{nm}_exps.scale", [n_exp], gguf.GGMLQuantizationType.F32))
+
+    def nbytes(e):
+        bs, ts = SIZES[e[4]]
+        return int(np.prod(e[3])) // bs * ts
+    shards, cur, size = [glob], [], 0
+    for L in layers:
+        lb = sum(map(nbytes, per_layer[L]))
+        if cur and size + lb > a.split_gb * 1e9:
+            shards.append(cur)
+            cur, size = [], 0
+        cur += per_layer[L]
+        size += lb
+    if cur:
+        shards.append(cur)
+    count = len(shards)
+    # pass 2: each shard a GGUF of its own, written as .part and renamed when whole - a shard already there skipped,
+    # so a stopped run goes on where it was (the plan the same: the shards the same)
+    for no, plan in enumerate(shards):
+        path = f"{a.out}-{no + 1:05d}-of-{count:05d}.gguf"
+        if os.path.exists(path):
+            print(f"shard {no + 1} of {count}: there, skipped", file=sys.stderr, flush=True)
+            continue
+        w = gguf.GGUFWriter(path + ".part", "inkling2")
+        w.add_uint16("split.no", no)
+        w.add_uint16("split.count", count)
+        w.add_int32("split.tensors.count", sum(map(len, shards)))
+        if no == 0:
+            w.add_name("Inkling-2-Small (reference: the original weights)")
+            w.add_string("general.quantized_by", "osmos ink2_ref_gguf.py: no value changed")
+            meta(w, tc)
+            w.add_string("inkling2.mtp_config.json", json.dumps(src.cfg.get("mtp_config", {})))
+            for key, f in (("tokenizer.huggingface.json", "tokenizer.json"), ("tokenizer.chat_template", "chat_template.jinja")):
+                if os.path.exists(os.path.join(a.src, f)):
+                    w.add_string(key, open(os.path.join(a.src, f), encoding="utf-8").read())
+        for e in plan:
+            # (the shape in values, as written: a dtype other than uint8 keeps gguf-py from reading it as bytes
+            # through its own size table - which has no MXFP8)
+            dt = {gguf.GGMLQuantizationType.F32: np.float32, gguf.GGMLQuantizationType.BF16: np.int16}.get(e[4], np.int8)
+            w.add_tensor_info(e[2], e[3], np.dtype(dt), nbytes(e), raw_dtype=e[4])
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_ti_data_to_file()
+        done_layers, pending = set(), {}
+        for kind, k, name, sh, t in plan:
+            if kind == "plain":
+                _, _, data = plain(src, k)
+                w.write_tensor_data(data.view(np.int8) if data.dtype == np.uint8 else data)
+            else:
+                if k not in done_layers:
+                    pending = {n: d for n, _, _, d in experts(src, k)}
+                    done_layers.add(k)
+                d = pending.pop(name)
+                w.write_tensor_data(d.view(np.int8) if d.dtype == np.uint8 else d)
+            print(f"wrote {name} {sh} {t.name}", file=sys.stderr, flush=True)
+        w.close()
+        pending = {}
+        os.rename(path + ".part", path)
+        print(f"shard {no + 1} of {count}: {len(plan)} tensors", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

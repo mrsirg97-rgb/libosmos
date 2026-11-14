@@ -178,7 +178,7 @@ def mask(cache, L, q_pos, sliding, window, device, dtype):
 
 
 def main():
-    dev = torch.device(f"cuda:{a.gpu}")
+    dev = torch.device(f"cuda:{a.gpu}") if a.gpu >= 0 and torch.cuda.is_available() else torch.device("cpu")  # (no CUDA: the CPU)
     dtype = getattr(torch, a.dtype)
     cfg = AutoConfig.from_pretrained(a.src).text_config
     cfg._attn_implementation = "eager"
