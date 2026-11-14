@@ -8,7 +8,8 @@
 
 /* Inkling-2's chat template against its own (tests/fixtures/chat_ink2.jsonl: transformers' apply_chat_template over
    the checkpoint's tokenizer - tools/gen_chat_fixtures_ink2.py): each chat's prompt byte for byte or its refusal (an
-   image refused here too: this build reads text alone) */
+   image refused here too: this build reads text alone); each completion's parse the same message (its JSON as Python
+   writes it) or its refusal - the template's assistant turns read back to the messages they render */
 
 static char *slurp_line(FILE *f, size_t *n)
 {
@@ -46,7 +47,7 @@ int main(void)
   FILE *f = fopen("tests/fixtures/chat_ink2.jsonl", "r");
   assert(f);
   char err[JSON_ERR], cerr[CHAT_ERR];
-  int renders = 0, refused = 0, i = 0;
+  int renders = 0, refused = 0, parses = 0, parse_refused = 0, i = 0;
   size_t n;
   for (char *line; (line = slurp_line(f, &n)); i++)
   {
@@ -56,6 +57,27 @@ int main(void)
     const Json *tools = json_get(c, "tools"), *want = json_get(c, "out"), *wrong = json_get(c, "error");
     JsonBuf b = {0};
     cerr[0] = 0;
+    if (!strcmp(json_str(c, "kind"), "parse"))
+    {
+      const Json *text = json_get(c, "text");
+      const bool ok = ichat_parse(text->s, text->len, &b, cerr);
+      if (want)
+      {
+        JsonBuf w = {0};
+        json_dump(&w, want);
+        if (!ok)
+          printf("  parse %d: refused (%s), Python reads it\n", i, cerr), exit(1);
+        if (b.n != w.n || memcmp(b.p, w.p, w.n))
+          printf("  parse %d:\n   ours: %.*s\n   want: %.*s\n", i, (int)b.n, b.p, (int)w.n, w.p), exit(1);
+        free(w.p), parses++;
+      }
+      else if (ok)
+        printf("  parse %d: read, Python refuses it (%s)\n", i, wrong ? wrong->s : "?"), exit(1);
+      else
+        parse_refused++;
+      free(b.p), json_free(c);
+      continue;
+    }
     const bool ok = ichat_render(json_get(c, "messages"), tools && tools->type != JSON_NULL ? tools : NULL,
                                  json_get(c, "effort"), &b, cerr);
     if (want)
@@ -77,6 +99,8 @@ int main(void)
   }
   fclose(f);
   printf("  %d chats rendered the template's bytes, %d refused as it refuses them\n", renders, refused);
+  printf("  %d completions read as Python reads them (the template's assistant turns among them), %d refused\n",
+         parses, parse_refused);
   printf("[test_chat_ink2] ok\n");
   return 0;
 }

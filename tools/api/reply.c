@@ -92,6 +92,14 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
     return m;
   }
   free(b.p);
+  if (s->d->loose) /* a block-shaped turn out of the format: its open blocks' text (the stream's) */
+  {
+    JsonBuf l = {0};
+    s->d->loose(s->text.p ? s->text.p : "", s->shape.p ? s->shape.p : "", s->text.n, &l);
+    Json *m = l.oom ? NULL : json_parse(l.p, l.n, jerr);
+    free(l.p);
+    return m;
+  }
   /* out of the format: reasoning before </think>, the content after (the EOS dropped) */
   const char *p = s->text.p ? s->text.p : "", *sh = s->shape.p ? s->shape.p : "";
   size_t n = s->text.n;
@@ -433,7 +441,8 @@ void api_chat(Api *a, Http *h)
     return;
   }
   Answer s = {.fd = h->fd, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
-              .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT, .loop = &rq.loop};
+              .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT, .loop = &rq.loop,
+              .boundary = a->d->header != NULL};
   snprintf(s.id, sizeof s.id, "chatcmpl-osmos-%lld", r->rid);
   char head[512];
   loop_head(head, sizeof head, &rq.loop);

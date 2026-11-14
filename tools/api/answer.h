@@ -27,6 +27,7 @@ typedef struct Answer
   Phase phase;
   Phase cut;  /* the phase DONE was reached in (a flush sends what was held in its field) */
   bool begun; /* the phase has streamed text (until then a trimming dialect's whitespace is passed over) */
+  bool boundary; /* a block-shaped dialect's: the next bytes a block's header (its field theirs to say) */
   bool gone; /* the client stopped reading */
   const Loop *loop; /* the request's loop signals: beside the answer's usage, its header (0.7.3) */
 } Answer;

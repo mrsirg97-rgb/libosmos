@@ -8,8 +8,12 @@ arguments' top keys sorted, values compact and unsorted), the end of every model
 the C port's test reads it (tests/test_chat_ink2.c). run:
 python3 tools/gen_chat_fixtures_ink2.py <Inkling-2-Small checkpoint dir> > tests/fixtures/chat_ink2.jsonl
 
+then completions parsed back: each assistant turn the template renders after a user message, read back to its message
+(reasoning, content, calls - their arguments as Python's json.dumps writes what the model wrote), and completions out
+of the format (refused).
+
 a line a case: {"kind": "render", "messages", "tools", "effort", "out" | "error"} - effort absent: the template's
-default (0.9)."""
+default (0.9) - or {"kind": "parse", "text", "out" | "error"}."""
 import json
 import sys
 
@@ -120,6 +124,81 @@ RENDER = [
 ]
 
 
+EOS, END, MODEL = "<|content_model_end_sampling|>", "<|end_message|>", "<|message_model|>"
+KINDS = {"<|content_thinking|>": "thinking", "<|content_text|>": "text", "<|content_invoke_tool_json|>": "call"}
+SPECIALS = [EOS, END, MODEL, "<|message_user|>", "<|message_system|>", "<|message_tool|>", "<|content_xml|>",
+            "<|content_tool_error|>", "<|content_image|>"] + list(KINDS)
+
+
+def no_constant(x):
+    raise ValueError("a non-finite number")
+
+
+def parse(text):
+    """a completion (the model's turn, through its end) as the assistant message: its blocks in turn - a thinking
+    block's body the reasoning, a text block's the content (each kind's joined), a call block's {"name", "args"} a
+    tool call (its header the name; args an object) - and nothing after the end of turn"""
+    if not text.endswith(EOS):
+        raise ValueError("no end of turn")
+    rest, reasoning, content, calls = text[:-len(EOS)], "", "", []
+    while rest:
+        if not rest.startswith(MODEL):
+            raise ValueError("a block without its header")
+        rest = rest[len(MODEL):]
+        k = rest.find("<|content_")
+        if k < 0:
+            raise ValueError("a block without its kind")
+        name, rest = rest[:k], rest[k:]
+        kind = next((v for t, v in KINDS.items() if rest.startswith(t)), None)
+        if kind is None:
+            raise ValueError("a block of a kind the model does not write")
+        rest = rest[len(next(t for t, v in KINDS.items() if v == kind)):]
+        e = rest.find(END)
+        if e < 0:
+            raise ValueError("a block without its end")
+        body, rest = rest[:e], rest[e + len(END):]
+        if any(sp in body or sp in name for sp in SPECIALS):
+            raise ValueError("a special token in the text")
+        if (kind == "call") != bool(name):
+            raise ValueError("a call's header names it; no other block's does")
+        if kind == "thinking":
+            reasoning += body
+        elif kind == "text":
+            content += body
+        else:
+            v = json.loads(body, parse_constant=no_constant)
+            if not isinstance(v, dict) or set(v) != {"name", "args"} or v["name"] != name or not isinstance(v["args"], dict):
+                raise ValueError("a call's JSON not {name, args} of its header's name")
+            calls.append({"type": "function", "function": {"name": name, "arguments": json.dumps(v["args"], ensure_ascii=False)}})
+    return {"role": "assistant", "content": content, "reasoning_content": reasoning, "tool_calls": calls}
+
+
+C = '<|message_model|>get_weather<|content_invoke_tool_json|>{"name":"get_weather","args":{"city":"Paris"}}' + END
+PARSE = [
+    MODEL + "<|content_thinking|>think<|end_message|><|message_model|><|content_text|>The answer.<|end_message|>" + EOS,
+    MODEL + "<|content_text|>Just text.<|end_message|>" + EOS,
+    MODEL + "<|content_thinking|>t<|end_message|>" + C + C.replace("Paris", "Tōkyō") + EOS,
+    MODEL + "<|content_text|>a<|end_message|>" + MODEL + "<|content_text|> b<|end_message|>" + EOS,
+    MODEL + "<|content_text|><|end_message|>" + EOS,
+    EOS,
+    MODEL + "<|content_text|>no end of turn<|end_message|>",
+    MODEL + "<|content_text|>no block end" + EOS,
+    "plain text" + EOS,
+    MODEL + "<|content_text|>a<|message_user|>b<|end_message|>" + EOS,
+    MODEL + "<|content_xml|>x<|end_message|>" + EOS,
+    MODEL + "named<|content_text|>x<|end_message|>" + EOS,
+    MODEL + "<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{}}<|end_message|>" + EOS,
+    MODEL + "f<|content_invoke_tool_json|>{\"name\":\"g\",\"args\":{}}<|end_message|>" + EOS,
+    MODEL + "f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":[1]}<|end_message|>" + EOS,
+    MODEL + "f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{},\"x\":1}<|end_message|>" + EOS,
+    MODEL + "f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"n\":NaN}}<|end_message|>" + EOS,
+    MODEL + "f<|content_invoke_tool_json|>not json<|end_message|>" + EOS,
+    MODEL + "f<|content_invoke_tool_json|>{\"name\":\"f\",\"args\":{\"b\":{\"z\":1,\"a\":2.50,\"u\":\"\\u00e9\"}}}<|end_message|>"
+    + EOS,
+    MODEL + "<|content_text|>x<|end_message|>" + EOS + "after",
+]
+
+
 def main():
     tok = AutoTokenizer.from_pretrained(sys.argv[1])
     for messages, tools, effort in RENDER:
@@ -130,6 +209,24 @@ def main():
             case["out"] = render(tok, messages, tools, effort)
         except Exception as e:  # the template's refusal (raise_exception, or jinja's own on a missing field)
             case["error"] = type(e).__name__ + ": " + str(e)
+        sys.stdout.write(json.dumps(case, ensure_ascii=False) + "\n")
+        # an assistant turn after a user message: the render's bytes past the conversation before it, parsed back
+        for i, m in enumerate(messages):
+            if "out" not in case or i == 0 or m.get("role") != "assistant" or messages[0].get("role") != "user":
+                continue
+            before, upto = render(tok, messages[:i], tools, effort), render(tok, messages[:i + 1], tools, effort)
+            assert upto.startswith(before)
+            PARSE.append(upto[len(before):])
+    seen = set()
+    for text in PARSE:
+        if text in seen:
+            continue
+        seen.add(text)
+        case = {"kind": "parse", "text": text}
+        try:
+            case["out"] = parse(text)
+        except ValueError as e:
+            case["error"] = str(e)
         sys.stdout.write(json.dumps(case, ensure_ascii=False) + "\n")
 
 

@@ -132,7 +132,8 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
   argv[n++] = "--max-context", argv[n++] = c->num[0];
   argv[n++] = "--budget", argv[n++] = c->num[1];
   argv[n++] = "--eos", argv[n++] = c->num[2];
-  argv[n++] = "--answer-after", argv[n++] = (char *)answer_after;
+  if (answer_after)
+    argv[n++] = "--answer-after", argv[n++] = (char *)answer_after;
   argv[n++] = "--parallel", argv[n++] = c->num[3];
   if (c->max_tokens)
   {

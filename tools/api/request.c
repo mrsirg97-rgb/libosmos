@@ -63,8 +63,8 @@ bool request_format(const Json *body, JsonBuf *out, char err[API_ERR])
 
 void request_free(Request *r)
 {
-  json_free(r->messages), json_free(r->tools);
-  r->messages = r->tools = NULL;
+  json_free(r->messages), json_free(r->tools), json_free(r->effort_value);
+  r->messages = r->tools = r->effort_value = NULL;
 }
 
 /* a field present and not the value greedy decoding means */

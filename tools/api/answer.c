@@ -99,12 +99,27 @@ void answer_advance(Answer *s)
 {
   while (s->phase != PHASE_DONE)
   {
+    if (s->d->header && s->boundary) /* a block's header: its field, or the stream's end (a call, the EOS) */
+    {
+      DialectField field;
+      const long h = s->d->header(s->shape.p + s->sent, s->text.n - s->sent, &field);
+      if (h < 0)
+        return;
+      if (field == DIALECT_DONE)
+      {
+        s->cut = s->phase, s->phase = PHASE_DONE;
+        return;
+      }
+      const Phase next = field == DIALECT_REASONING ? PHASE_REASONING : PHASE_CONTENT;
+      s->begun = s->begun && next == s->phase, s->phase = next, s->sent += (size_t)h, s->boundary = false;
+      continue;
+    }
     if (s->d->trims && !s->begun)
       s->sent += qchat_space_lead(s->shape.p + s->sent, s->text.n - s->sent);
     const char *p = s->shape.p + s->sent, *said = s->text.p + s->sent; /* markers read in p, said what goes out */
     const size_t n = s->text.n - s->sent;
-    const char *marks[2 + DIALECT_REFUSED_MAX] = {s->phase == PHASE_REASONING ? s->d->think_end : s->d->calls_open,
-                                                  s->d->eos}; /* the phase's own end first: it wins a tie */
+    const char *own = s->phase == PHASE_REASONING ? s->d->think_end : s->d->block_end ? s->d->block_end : s->d->calls_open;
+    const char *marks[2 + DIALECT_REFUSED_MAX] = {own, s->d->eos}; /* the phase's own end first: it wins a tie */
     int nm = 2;
     for (int k = 0; s->d->refused[k]; k++)
       if (strcmp(s->d->refused[k], marks[0]) && strcmp(s->d->refused[k], marks[1]))
@@ -130,7 +145,9 @@ void answer_advance(Answer *s)
     if (s->d->trims)
       e -= qchat_space_trail(p, e);
     delta(s, said, e);
-    if (which == 0 && s->phase == PHASE_REASONING)
+    if (which == 0 && s->d->header) /* a block's end: the next is a header */
+      s->sent += (size_t)(at - p) + strlen(own), s->boundary = true;
+    else if (which == 0 && s->phase == PHASE_REASONING)
       s->phase = PHASE_CONTENT, s->begun = false, s->sent += (size_t)(at - p) + strlen(s->d->think_end);
     else
       s->cut = s->phase, s->phase = PHASE_DONE, s->sent += e; /* what was held stays unsent: a flush (length) sends
@@ -148,6 +165,17 @@ void answer_flush(Answer *s)
     n -= eos;
   if (s->phase == PHASE_DONE)
     s->phase = s->cut;
+  if (s->d->header) /* a block-shaped turn: the open block's rest, in its field (the loose message's) */
+  {
+    if (!s->boundary)
+    {
+      const char *e = memmem(s->shape.p + s->sent, n, s->d->block_end, strlen(s->d->block_end));
+      const size_t r = e ? (size_t)(e - (s->shape.p + s->sent)) : n;
+      delta(s, s->text.p + s->sent, r);
+      s->sent += r;
+    }
+    return;
+  }
   if (s->phase == PHASE_REASONING)
   {
     const char *end = memmem(s->shape.p + s->sent, n, s->d->think_end, strlen(s->d->think_end));
