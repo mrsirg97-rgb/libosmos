@@ -7,10 +7,17 @@
 // every op F32 on the GPU (include/osmos/gpu/ink2_ops.h, ops.h's rms and router, mv_run's matrices), one prompt
 // read whole (no cache: its keys are its own tokens).
 //
-//   ink2_run <first shard> <ids> [out.f32]   ids: comma-separated token ids; out: the last token's log-probabilities
+//   ink2_run <first shard> <ids> [out.f32]   ids: comma-separated token ids, or a file of them; out: the last
+//                                             token's log-probabilities
+//   REF_OUT=path  every scored row's log-probabilities written (F32, [rows][n_vocab]): the run is the reference
+//   REF=path      each scored row's KL(reference || run) over the vocabulary (the reference's rows read in turn)
+//   DUMP=path     a record a scored row: kl F32, nll F32, top I32, ref_top I32 (-1 without REF) - kld's, so
+//                 tools/bench/kld_compare.py pairs runs
+//   MASK=path     0 / 1 a token (as ids): row r scored only when token r + 1 is 1 (an agent trace's assistant tokens)
 #include <hip/hip_runtime.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -91,9 +98,13 @@ static void* dev_raw(const GgufTensor* t) {  // a matrix's bytes as stored (mv_r
 }
 static float* dev_tf(const GgufTensor* t) { return dev_f(f32_of(t)); }
 
-// y [n][rows] = W x for n tokens of x [n][cols]
+// y [n][rows] = W x for n tokens of x [n][cols], MV_MAX_TOKENS at a time (a token's bits its own: mv_run's)
 static void mat(const GgufTensor* t, const void* w, const float* x, uint32_t n, float* y) {
-  CHECK(mv_run(t->type, w, (uint32_t) t->dims[1], (uint32_t) t->dims[0], x, n, y, nullptr));
+  const uint32_t rows = (uint32_t) t->dims[1], cols = (uint32_t) t->dims[0];
+  for (uint32_t at = 0; at < n; at += MV_MAX_TOKENS) {
+    const uint32_t k = n - at < MV_MAX_TOKENS ? n - at : MV_MAX_TOKENS;
+    CHECK(mv_run(t->type, w, rows, cols, x + (size_t) at * cols, k, y + (size_t) at * rows, nullptr));
+  }
 }
 static void matt(const GgufTensor* t, const float* x, uint32_t n, float* y) {  // uploaded, run, freed
   void* w = dev_raw(t);
@@ -111,8 +122,19 @@ int main(int argc, char** argv) {
   Ink2Weights* W = ink2_weights_create(model, err);
   CHECK(W || (std::fprintf(stderr, "%s\n", err), false));
   const Ink2Geometry& G = W->geo;
-  std::vector<int32_t> ids;
-  for (char* s = std::strtok(argv[2], ","); s; s = std::strtok(nullptr, ",")) ids.push_back(std::atoi(s));
+  auto read_ints = [](const char* arg) {  // a list "1,2,3", or a file of one
+    std::string text = arg;
+    if (FILE* f = std::fopen(arg, "rb")) {
+      text.clear();
+      for (int c; (c = std::fgetc(f)) != EOF;) text.push_back(c == '\n' ? ',' : (char) c);
+      std::fclose(f);
+    }
+    std::vector<int32_t> v;
+    for (char* s = std::strtok(text.data(), ","); s; s = std::strtok(nullptr, ","))
+      if (*s && *s != '\r') v.push_back(std::atoi(s));
+    return v;
+  };
+  std::vector<int32_t> ids = read_ints(argv[2]);
   const uint32_t T = (uint32_t) ids.size(), C = (uint32_t) G.n_embd, H = (uint32_t) G.n_heads,
                  KV = (uint32_t) G.n_kv_heads, D = (uint32_t) G.head_dim, R = (uint32_t) G.d_rel,
                  taps = (uint32_t) G.conv, E = (uint32_t) G.n_experts, K = (uint32_t) G.n_used,
@@ -264,30 +286,85 @@ int main(int argc, char** argv) {
     CHECK(hipMemcpy(h, r, (size_t) T * C * 4, hipMemcpyDeviceToDevice) == hipSuccess);
     std::fprintf(stderr, "  layer %2d %s%s\n", l, full ? "full" : "sliding", boundary ? ", a block starts" : "");
   }
-  {  // the head: the last token's final residual, norm, logits, softcap, log-softmax
+  {  // the head: every row's final residual, norm, logits, softcap, log-softmax in double; scored as kld scores
     float* dq = dev_tf(W->output_res_query);
     CHECK(ink2_attn_res(dq, 1, blocks, nb, maxb, h, T, C, G.rms_eps, res_scale, tmp, nullptr));
     CHECK(hipDeviceSynchronize() == hipSuccess);
     hipFree(dq);
     rms(W->output_norm, tmp, xn);
-    const uint32_t V = (uint32_t) W->output->dims[1];
-    float* lg = dev<float>(V);
-    matt(W->output, xn + (size_t) (T - 1) * C, 1, lg);
-    CHECK(ink2_softcap(lg, V, G.logit_softcap, nullptr));
-    std::vector<float> l(V);
-    CHECK(hipMemcpy(l.data(), lg, V * 4, hipMemcpyDeviceToHost) == hipSuccess);
-    l.resize((size_t) G.n_vocab);  // (the real tokens: the rest padding)
-    double m = -INFINITY, z = 0;
-    for (float x : l) m = x > m ? x : m;
-    for (float x : l) z += std::exp((double) x - m);
-    const double lz = m + std::log(z);
+    const uint32_t VR = (uint32_t) W->output->dims[1], V = (uint32_t) G.n_vocab, chunk = 64;
+    void* head = dev_raw(W->output);
+    float* lg = dev<float>((size_t) chunk * VR);
+    const char *ro_p = std::getenv("REF_OUT"), *ri_p = std::getenv("REF"), *dp_p = std::getenv("DUMP"),
+               *mk_p = std::getenv("MASK");
+    std::vector<int32_t> mask = mk_p ? read_ints(mk_p) : std::vector<int32_t>(T, 1);
+    CHECK(mask.size() == T);
+    FILE *ro = ro_p ? std::fopen(ro_p, "wb") : nullptr, *ri = ri_p ? std::fopen(ri_p, "rb") : nullptr,
+         *dp = dp_p ? std::fopen(dp_p, "wb") : nullptr;
+    CHECK((!ro_p || ro) && (!ri_p || ri) && (!dp_p || dp));
+    struct Rec {
+      float kl, nll;
+      int32_t top, ref_top;
+    };
+    std::vector<float> host((size_t) chunk * VR), rl(V), last(V);
+    std::vector<double> lp(V), kls;
+    double nll = 0;
+    uint32_t scored = 0, agree = 0;
+    for (uint32_t c0 = 0; c0 < T; c0 += chunk) {
+      const uint32_t k = T - c0 < chunk ? T - c0 : chunk;
+      mat(W->output, head, xn + (size_t) c0 * C, k, lg);
+      CHECK(ink2_softcap(lg, (uint64_t) k * VR, G.logit_softcap, nullptr));
+      CHECK(hipMemcpy(host.data(), lg, (size_t) k * VR * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      for (uint32_t r = 0; r < k; r++) {
+        const uint32_t row = c0 + r;
+        const float* x = &host[(size_t) r * VR];
+        int32_t top = 0;
+        for (uint32_t v = 1; v < V; v++) top = x[v] > x[top] ? (int32_t) v : top;
+        double sum = 0;
+        for (uint32_t v = 0; v < V; v++) sum += std::exp((double) x[v] - x[top]);
+        const double lse = x[top] + std::log(sum);
+        for (uint32_t v = 0; v < V; v++) lp[v] = (double) x[v] - lse;
+        if (row + 1 == T)
+          for (uint32_t v = 0; v < V; v++) last[v] = (float) lp[v];
+        if (row + 1 >= T || !mask[row + 1]) continue;
+        Rec rec = {0.0f, (float) -lp[ids[row + 1]], top, -1};
+        nll += rec.nll;
+        if (ro) {
+          for (uint32_t v = 0; v < V; v++) rl[v] = (float) lp[v];
+          CHECK(std::fwrite(rl.data(), 4, V, ro) == V);
+        }
+        if (ri) {
+          CHECK(std::fread(rl.data(), 4, V, ri) == V);
+          double kl = 0;
+          int32_t rt = 0;
+          for (uint32_t v = 0; v < V; v++) {
+            rt = rl[v] > rl[rt] ? (int32_t) v : rt;
+            const double p = std::exp((double) rl[v]);
+            if (p > 0) kl += p * ((double) rl[v] - lp[v]);
+          }
+          rec.kl = (float) std::max(kl, 0.0), rec.ref_top = rt;
+          agree += rt == top;
+          kls.push_back(rec.kl);
+        }
+        if (dp) CHECK(std::fwrite(&rec, sizeof rec, 1, dp) == 1);
+        scored++;
+      }
+    }
+    hipFree(head), hipFree(lg);
+    for (FILE* f : {ro, ri, dp})
+      if (f) std::fclose(f);
     size_t best = 0;
-    for (size_t i = 0; i < l.size(); i++) best = l[i] > l[best] ? i : best;
-    for (float& x : l) x = (float) (x - lz);
-    std::printf("ink2_run: the last token's top %zu (log-prob %.4f)\n", best, l[best]);
+    for (size_t i = 0; i < V; i++) best = last[i] > last[best] ? i : best;
+    std::printf("ink2_run: the last token's top %zu (log-prob %.4f)\n", best, last[best]);
+    if (scored) std::printf("ppl %.4f over %u scored rows\n", std::exp(nll / scored), scored);
+    if (!kls.empty()) {
+      double m = 0;
+      for (double v : kls) m += v;
+      std::printf("kld mean %.6f, top-1 agreement %.2f%%\n", m / (double) kls.size(), 100.0 * agree / (double) kls.size());
+    }
     if (argc > 3) {
       FILE* f = std::fopen(argv[3], "wb");
-      CHECK(f && std::fwrite(l.data(), 4, l.size(), f) == l.size());
+      CHECK(f && std::fwrite(last.data(), 4, V, f) == V);
       std::fclose(f);
     }
   }
