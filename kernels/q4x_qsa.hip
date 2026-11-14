@@ -18,6 +18,7 @@ constexpr int kMaxHeads = Q4X_IX_HEADS_MAX; // the score tile's query rows (atte
 constexpr int kTT = 16, kTB = 32; // the score tile: tokens x blocks
 constexpr int kPick = 256;        // the pick's threads: a token's
 constexpr uint64_t kScoreBudget = 4u << 20;  // the scratch's scores at least: a piece's tokens x their blocks
+constexpr uint64_t kScoreTokens = 128;       // (0.7.3) and room for this many tokens' rows (q4x_ix_scratch)
 
 
 // a block of kDim threads, x its value d: x normed (its L2 over the block) times w, then its first rope.dim rotated in
@@ -103,6 +104,61 @@ __global__ __launch_bounds__(256) void ix_score_kernel(const float* q, const flo
     score[(uint64_t) t * stride + j] = s;
   }
 }
+
+// 0.7.3: the scores register-blocked - a tile of 64 tokens x 64 blocks, 256 threads, a thread 4 tokens x 4 blocks x
+// the 4 heads' dot products (64 sums in registers), d staged 16 at a time: 20 LDS reads a thread for 64 products
+// (ix_score_kernel's 2 for 1). each (token, head, block) dot over d ascending, a multiply then an add; the heads
+// folded in order, s += relu(dot) / sqrt(kDim) (a head past `heads` 0: s + 0) - ix_score_kernel's bits
+constexpr int kBT = 64, kBB = 64, kBS = 16, kBThreads = 256;
+__global__ __launch_bounds__(kBThreads) void ix_score_blocked_kernel(const float* __restrict__ q,
+                                                                     const float* __restrict__ pooled, uint32_t m,
+                                                                     uint32_t heads, int32_t p0, uint32_t ratio,
+                                                                     uint32_t stride, float* __restrict__ score) {
+  static_assert(kMaxHeads == 4 && kDim % kBS == 0, "4 head slots; whole stages");
+  __shared__ float qs[kBS][kBT * kMaxHeads + 4], ks[kBS][kBB + 4];
+  const uint32_t tt = blockIdx.y * kBT, tb = blockIdx.x * kBB;
+  const uint32_t t_last = tt + kBT - 1 < m ? tt + kBT - 1 : m - 1;
+  const uint32_t nv_last = (uint32_t) (p0 + (int32_t) t_last + 1) / ratio;
+  if (tb >= nv_last) return;
+  const uint32_t tid = threadIdx.x, tx = tid % 16, ty = tid / 16;  // blocks tx + 16 j, tokens ty + 16 i
+  float acc[4][4][kMaxHeads] = {};
+  for (uint32_t d0 = 0; d0 < (uint32_t) kDim; d0 += kBS) {
+    for (uint32_t i = tid; i < (uint32_t) (kBT * kMaxHeads * kBS); i += kBThreads) {
+      const uint32_t r = i / kBS, dd = i % kBS, t = tt + r / kMaxHeads, h = r % kMaxHeads;
+      qs[dd][r] = t < m && h < heads ? q[((uint64_t) t * heads + h) * kDim + d0 + dd] : 0.0f;
+    }
+    for (uint32_t i = tid; i < (uint32_t) (kBB * kBS); i += kBThreads) {
+      const uint32_t r = i / kBS, dd = i % kBS;
+      ks[dd][r] = tb + r < nv_last ? pooled[(uint64_t) (tb + r) * kDim + d0 + dd] : 0.0f;
+    }
+    __syncthreads();
+#pragma unroll 4
+    for (int dd = 0; dd < kBS; dd++) {
+      float kv[4];
+      for (int j = 0; j < 4; j++) kv[j] = ks[dd][tx + 16 * j];
+      for (int i = 0; i < 4; i++)
+        for (int h = 0; h < kMaxHeads; h++) {
+          const float qv = qs[dd][(ty + 16 * i) * kMaxHeads + h];
+          for (int j = 0; j < 4; j++) acc[i][j][h] = acc[i][j][h] + qv * kv[j];
+        }
+    }
+    __syncthreads();
+  }
+  const float scale = 1.0f / sqrtf((float) kDim);
+  for (int i = 0; i < 4; i++) {
+    const uint32_t t = tt + ty + 16 * i;
+    if (t >= m) continue;
+    const uint32_t nv = (uint32_t) (p0 + (int32_t) t + 1) / ratio;
+    for (int j = 0; j < 4; j++) {
+      const uint32_t b = tb + tx + 16 * j;
+      if (b >= nv) continue;
+      float s = 0.0f;
+      for (uint32_t h = 0; h < heads; h++) s += fmaxf(acc[i][j][h], 0.0f) * scale;
+      score[(uint64_t) t * stride + b] = s;
+    }
+  }
+}
+bool g_score_naive = false;  // (tests, qxbench: ix_score_kernel itself - q4x_ix_score_naive)
 
 // an exclusive prefix sum over the block's kPick threads, and its total
 __device__ uint32_t scan_ex(uint32_t v, uint32_t* lds, uint32_t* total) {
@@ -198,9 +254,13 @@ extern "C" bool q4x_ix_pool(const float* raw, uint32_t n_tok, int32_t pos0, uint
 }
 
 extern "C" uint64_t q4x_ix_scratch(uint32_t max_ctx, uint32_t ratio) {
-  const uint64_t row = ratio ? max_ctx / ratio : 0;
-  return row > kScoreBudget ? row : kScoreBudget;
+  // 0.7.3: room for kScoreTokens tokens' rows - a piece the blocked scores' tiles whole (32 tokens at 512K, from the
+  // old floor, left its 64-token tile half empty: 31.6 ms a 256-token step at 511K; 128 tokens 15.9, 67 MB there)
+  const uint64_t row = ratio ? max_ctx / ratio : 0, want = row * kScoreTokens;
+  return want > kScoreBudget ? want : kScoreBudget;
 }
+
+extern "C" void q4x_ix_score_naive(bool on) { g_score_naive = on; }
 
 extern "C" bool q4x_ix_pick(const float* q, const float* pooled, uint32_t n_tok, uint32_t heads, int32_t pos0,
                             uint32_t ratio, uint32_t blocks, float* scratch, uint64_t scratch_floats, int32_t* sel,
@@ -220,8 +280,12 @@ extern "C" bool q4x_ix_pick(const float* q, const float* pooled, uint32_t n_tok,
     const int32_t p0 = pos0 + (int32_t) t0;
     const uint32_t nv = (uint32_t) (p0 + (int32_t) n) / ratio;
     if (nv > blocks) {
-      ix_score_kernel<<<dim3((nv + kTB - 1) / kTB, (n + kTT - 1) / kTT), 256, 0, st(stream)>>>(
-          q + (uint64_t) t0 * heads * kDim, pooled, n, heads, p0, ratio, nv, scratch);
+      if (g_score_naive)
+        ix_score_kernel<<<dim3((nv + kTB - 1) / kTB, (n + kTT - 1) / kTT), 256, 0, st(stream)>>>(
+            q + (uint64_t) t0 * heads * kDim, pooled, n, heads, p0, ratio, nv, scratch);
+      else
+        ix_score_blocked_kernel<<<dim3((nv + kBB - 1) / kBB, (n + kBT - 1) / kBT), kBThreads, 0, st(stream)>>>(
+            q + (uint64_t) t0 * heads * kDim, pooled, n, heads, p0, ratio, nv, scratch);
       if (!ok()) return false;
     }
     ix_pick_kernel<<<n, kPick, 0, st(stream)>>>(scratch, p0, ratio, blocks, nv, sel + (uint64_t) t0 * blocks,
