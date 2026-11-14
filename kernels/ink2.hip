@@ -268,22 +268,44 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
     const uint32_t us = ua > pos0 ? ua - pos0 : 0, ue = ua + kFaUnit - 1 - pos0;
     klo = klo > us ? klo : us, khi = khi < ue ? khi : ue;
   }
-  float kr[kItems], vr[kItems];
-  auto fetch = [&](uint32_t kb) {  // a tile's K and V, this thread's items (keys past the last zero)
-    for (int it = 0; it < kItems; it++) {
-      const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead, key = kb + r;
-      const bool in = i < kFaTile * kFaHead && key < n_keys;
-      const uint64_t at = ((uint64_t) key * a.kv_heads + kvh) * kFaHead + d;
-      kr[it] = in ? (float) k[at] : 0.0f, vr[it] = in ? (float) v[at] : 0.0f;
-    }
+  // a tile's K and V into registers (keys past the last zero): F32 a value a thread at a time; f16 (a cache's) 8
+  // halves a 16-byte load - the same values either way
+  constexpr bool kHalf = sizeof(KV) == 2;
+  constexpr int kVec = 8, kVecs = kFaTile * kFaHead / kVec, kVItems = (kVecs + kNth - 1) / kNth;
+  typedef _Float16 fa_h8 __attribute__((ext_vector_type(8)));
+  float kr[kHalf ? 1 : kItems], vr[kHalf ? 1 : kItems];
+  fa_h8 kh[kHalf ? kVItems : 1], vh[kHalf ? kVItems : 1];
+  auto fetch = [&](uint32_t kb) {
+    if constexpr (kHalf)
+      for (int it = 0; it < kVItems; it++) {
+        const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
+        const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
+        const uint64_t at = ((uint64_t) (kb + r) * a.kv_heads + kvh) * kFaHead + d;
+        kh[it] = in ? *(const fa_h8*) (k + at) : fa_h8{}, vh[it] = in ? *(const fa_h8*) (v + at) : fa_h8{};
+      }
+    else
+      for (int it = 0; it < kItems; it++) {
+        const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead, key = kb + r;
+        const bool in = i < kFaTile * kFaHead && key < n_keys;
+        const uint64_t at = ((uint64_t) key * a.kv_heads + kvh) * kFaHead + d;
+        kr[it] = in ? (float) k[at] : 0.0f, vr[it] = in ? (float) v[at] : 0.0f;
+      }
   };
   if (klo <= khi) fetch(klo);
   for (uint32_t kb = klo; kb <= khi; kb += kFaTile) {
     __syncthreads();  // the last tile's K, V read by every wave
-    for (int it = 0; it < kItems; it++) {
-      const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead;
-      if (i < kFaTile * kFaHead) ks[r * kFaRow + d] = (_Float16) kr[it], vt[d * kFaKey + r] = (_Float16) vr[it];
-    }
+    if constexpr (kHalf)
+      for (int it = 0; it < kVItems; it++) {
+        const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
+        if (i >= (uint32_t) kVecs) continue;
+        *(fa_h8*) (ks + r * kFaRow + d) = kh[it];
+        for (int e = 0; e < kVec; e++) vt[(d + e) * kFaKey + r] = vh[it][e];
+      }
+    else
+      for (int it = 0; it < kItems; it++) {
+        const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead;
+        if (i < kFaTile * kFaHead) ks[r * kFaRow + d] = (_Float16) kr[it], vt[d * kFaKey + r] = (_Float16) vr[it];
+      }
     __syncthreads();
     if (kb + kFaTile <= khi) fetch(kb + kFaTile);  // the next tile's, in flight under this one's WMMAs
     fa_f8 sacc = {};
