@@ -182,6 +182,26 @@ int main() {
     }
     for (float* d : {dq, dqw, dr, drw, dk, dv, drp, ds, dg, dout}) hipFree(d);
   }
+  {  // ink2_gram: X^T X against float64 on the host, sizes past whole tiles, added onto what h held
+    const uint32_t n = 37, dim = 45;
+    std::vector<float> x((size_t) n * dim), h0((size_t) dim * dim);
+    uint32_t r = 12345;
+    for (float& v : x) r = r * 1664525u + 1013904223u, v = (float) (r >> 8) / (1 << 24) - 0.5f;
+    for (float& v : h0) r = r * 1664525u + 1013904223u, v = (float) (r >> 8) / (1 << 24);
+    float *dx = dev_from(x), *dh = dev_from(h0);
+    CHECK(ink2_gram(dx, n, dim, dh, nullptr));
+    const std::vector<float> h = host_of(dh, h0.size());
+    double worst = 0;
+    for (uint32_t i = 0; i < dim; i++)
+      for (uint32_t j = 0; j < dim; j++) {
+        double want = h0[(size_t) i * dim + j];
+        for (uint32_t t = 0; t < n; t++) want += (double) x[(size_t) t * dim + i] * x[(size_t) t * dim + j];
+        worst = std::max(worst, std::fabs(want - h[(size_t) i * dim + j]));
+      }
+    CHECK(worst < 1e-5);
+    std::printf("  gram: X^T X of 37 x 45 added onto h, max |err| %.2e\n", worst);
+    hipFree(dx), hipFree(dh);
+  }
   std::printf("[test_ink2_ops_gpu] ok\n");
   return 0;
 }

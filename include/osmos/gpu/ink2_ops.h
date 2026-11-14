@@ -18,6 +18,7 @@ bool ink2_swiglu_rows(const float *g, const float *u, const float *sg, const flo
                       float ucap, uint32_t rows, float *h, void *stream);
 bool ink2_moe_sum(float *y, const float *x, const float *a, const int32_t *row, uint32_t k, uint32_t n_tok,
                   uint32_t dim, void *stream);
+bool ink2_gram(const float *x, uint32_t n_tok, uint32_t dim, float *h, void *stream);
 bool ink2_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float *w, const float *hist,
                float res, float scale, float *y, void *stream);
 bool ink2_conv_dyn(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
@@ -67,6 +68,9 @@ ink2_swiglu_rows
 ink2_moe_sum
   y[t] = the sum of a[t k + s] x[row[t k + s]] over a token's k slots in order, from zero - ink2_axpy after a zeroed
   y, slot after slot: the same bits.
+
+ink2_gram
+  h [dim][dim] += x^T x over n_tok rows of x [n_tok][dim]: a calibration's sums for GPTQ (ink2_run's HESS=).
 
 ink2_conv
   the static short conv: y[t] = (sum_j w[c, j] x'[t + j] + res x[t]) scale over channels c (rows of ch), x' the taps - 1

@@ -48,6 +48,24 @@ __global__ void moe_sum_kernel(float* y, const float* x, const float* a, const i
   y[i] = v;
 }
 
+// h[i][j] += sum over t of x[t][i] x[t][j] (a calibration's X^T X, F32): a 16 x 16 tile of h a block, the tokens in
+// chunks of 16 through LDS
+constexpr int kGram = 16;
+__global__ void gram_kernel(const float* x, uint32_t n_tok, uint32_t dim, float* h) {
+  __shared__ float a[kGram][kGram + 1], b[kGram][kGram + 1];
+  const uint32_t i = blockIdx.y * kGram + threadIdx.y, j = blockIdx.x * kGram + threadIdx.x;
+  float acc = 0.0f;
+  for (uint32_t t0 = 0; t0 < n_tok; t0 += kGram) {
+    const uint32_t t = t0 + threadIdx.y, ci = blockIdx.y * kGram + threadIdx.x, cj = blockIdx.x * kGram + threadIdx.x;
+    a[threadIdx.y][threadIdx.x] = t < n_tok && ci < dim ? x[(uint64_t) t * dim + ci] : 0.0f;
+    b[threadIdx.y][threadIdx.x] = t < n_tok && cj < dim ? x[(uint64_t) t * dim + cj] : 0.0f;
+    __syncthreads();
+    for (int k = 0; k < kGram; k++) acc = fmaf(a[k][threadIdx.y], b[k][threadIdx.x], acc);
+    __syncthreads();
+  }
+  if (i < dim && j < dim) h[(uint64_t) i * dim + j] += acc;
+}
+
 // x' = hist (taps - 1 rows) then x: token t's taps x'[t .. t + taps - 1], the current last
 __device__ inline float tap(const float* x, const float* hist, uint32_t at, uint32_t h, uint32_t ch, uint32_t c) {
   return at < h ? (hist ? hist[(uint64_t) at * ch + c] : 0.0f) : x[(uint64_t) (at - h) * ch + c];
@@ -378,6 +396,13 @@ extern "C" bool ink2_moe_sum(float* y, const float* x, const float* a, const int
   if (!y || !x || !a || !row || !k || !n_tok || !dim) return false;
   const uint64_t all = (uint64_t) n_tok * dim;
   moe_sum_kernel<<<grid(all), kThreads, 0, st(stream)>>>(y, x, a, row, k, all, dim);
+  return ok();
+}
+
+extern "C" bool ink2_gram(const float* x, uint32_t n_tok, uint32_t dim, float* h, void* stream) {
+  if (!x || !h || !n_tok || !dim) return false;
+  const dim3 g((dim + kGram - 1) / kGram, (dim + kGram - 1) / kGram), b(kGram, kGram);
+  gram_kernel<<<g, b, 0, st(stream)>>>(x, n_tok, dim, h);
   return ok();
 }
 

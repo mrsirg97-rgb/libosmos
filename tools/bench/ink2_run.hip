@@ -15,6 +15,10 @@
 //                 tools/bench/kld_compare.py pairs runs
 //   MASK=path     0 / 1 a token (as ids): row r scored only when token r + 1 is 1 (an agent trace's assistant tokens)
 //   ATTN=fa       the attention on WMMA (ink2_fa: f16 in) - long prompts; default ink2_attn (F32: the reference's)
+//   HESS=dir      GPTQ's sums: each dense matrix's input's X^T X added into dir/<name>.f64 (float64, [dim][dim]:
+//                 runs add up) - blk.L.attn_x (a sliding layer's q, k, v, rel, gate, sink), blk.L.attn_q_x /
+//                 attn_k_x / attn_v_x (a full layer's: q, rel, gate, sink / k / v), blk.L.attn_out_x (the output's),
+//                 output (the head's); dir/tokens the rows summed
 #include <hip/hip_runtime.h>
 #include <unistd.h>
 
@@ -107,6 +111,29 @@ static void mat(const GgufTensor* t, const void* w, const float* x, uint32_t n, 
     CHECK(mv_run(t->type, w, rows, cols, x + (size_t) at * cols, k, y + (size_t) at * rows, nullptr));
   }
 }
+// x [n][dim]'s X^T X added into HESS's dir/<name>.f64 (made at zero)
+static void hess(const char* name, const float* x, uint32_t n, uint32_t dim) {
+  static const char* dir = std::getenv("HESS");
+  if (!dir) return;
+  const size_t nn = (size_t) dim * dim;
+  float* dh = nullptr;
+  CHECK(hipMalloc(&dh, nn * 4) == hipSuccess && hipMemset(dh, 0, nn * 4) == hipSuccess);
+  CHECK(ink2_gram(x, n, dim, dh, nullptr) && hipDeviceSynchronize() == hipSuccess);
+  std::vector<float> h(nn);
+  CHECK(hipMemcpy(h.data(), dh, nn * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  hipFree(dh);
+  const std::string path = std::string(dir) + "/" + name + ".f64";
+  std::vector<double> sum(nn, 0.0);
+  if (FILE* f = std::fopen(path.c_str(), "rb")) {
+    CHECK(std::fread(sum.data(), 8, nn, f) == nn);
+    std::fclose(f);
+  }
+  for (size_t i = 0; i < nn; i++) sum[i] += h[i];
+  FILE* f = std::fopen((path + ".part").c_str(), "wb");
+  CHECK(f && std::fwrite(sum.data(), 8, nn, f) == nn && std::fclose(f) == 0);
+  CHECK(std::rename((path + ".part").c_str(), path.c_str()) == 0);
+}
+
 static void matt(const GgufTensor* t, const float* x, uint32_t n, float* y) {  // uploaded, run, freed
   void* w = dev_raw(t);
   mat(t, w, x, n, y);
@@ -201,6 +228,10 @@ int main(int argc, char** argv) {
     rms(full ? L.q_norm : L.attn_norm, aq, xn);
     if (full) rms(L.k_norm, ak, kn), rms(L.v_norm, av, vn);
     const float *xk = full ? kn : xn, *xv = full ? vn : xn;
+    char hn[64];
+    std::snprintf(hn, sizeof hn, full ? "blk.%d.attn_q_x" : "blk.%d.attn_x", l), hess(hn, xn, T, C);
+    if (full) std::snprintf(hn, sizeof hn, "blk.%d.attn_k_x", l), hess(hn, kn, T, C);
+    if (full) std::snprintf(hn, sizeof hn, "blk.%d.attn_v_x", l), hess(hn, vn, T, C);
     matt(L.q, xn, T, q), matt(L.k, xk, T, k), matt(L.v, xv, T, v);
     matt(L.rel, xn, T, rel), matt(L.gate, xn, T, gate), matt(L.sink, xn, T, sink);
     if (full) {
@@ -238,6 +269,7 @@ int main(int argc, char** argv) {
       CHECK(hipDeviceSynchronize() == hipSuccess);
       hipFree(qw), hipFree(rw), hipFree(rp);
     }
+    std::snprintf(hn, sizeof hn, "blk.%d.attn_out_x", l), hess(hn, att, T, H * D);
     matt(L.out, att, T, o);
     conv(L.out_conv, o, C, r);  // r: the attention's output after its conv
     if (boundary) {             // a new block: the layer's input joins the blocks, the attention's output its start
@@ -299,6 +331,17 @@ int main(int argc, char** argv) {
     CHECK(hipDeviceSynchronize() == hipSuccess);
     hipFree(dq);
     rms(W->output_norm, tmp, xn);
+    hess("output", xn, T, C);
+    if (const char* dir = std::getenv("HESS")) {  // the rows summed, runs added
+      const std::string path = std::string(dir) + "/tokens";
+      long long had = 0;
+      if (FILE* f = std::fopen(path.c_str(), "r")) {
+        CHECK(std::fscanf(f, "%lld", &had) == 1);
+        std::fclose(f);
+      }
+      FILE* f = std::fopen(path.c_str(), "w");
+      CHECK(f && std::fprintf(f, "%lld\n", had + T) > 0 && std::fclose(f) == 0);
+    }
     const uint32_t VR = (uint32_t) W->output->dims[1], V = (uint32_t) G.n_vocab, chunk = 64;
     void* head = dev_raw(W->output);
     float* lg = dev<float>((size_t) chunk * VR);
