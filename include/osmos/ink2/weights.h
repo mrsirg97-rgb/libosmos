@@ -53,7 +53,8 @@ typedef struct Ink2Layer
   const GgufTensor *k_conv, *v_conv, *k_conv_static, *v_conv_static, *k_conv_proj, *v_conv_proj;
   const GgufTensor *out_conv, *ffn_out_conv; /* after the attention and after the MoE */
   /* the MoE: its norm, router and the router's bias, the experts, and each expert's own scale (NVFP4's: one an
-     expert, gate and up the same; NULL for a type whose blocks are its whole values - MXFP8's) */
+     expert, gate and up the same; NULL for a type whose blocks are its whole values - MXFP8's; in llama.cpp's layout
+     the checkpoint's NVFP4 scale beside a requantized expert too) */
   const GgufTensor *ffn_norm, *router, *router_bias;
   const GgufTensor *exp_gate, *exp_up, *exp_down, *exp_gate_scale, *exp_up_scale, *exp_down_scale;
 } Ink2Layer;

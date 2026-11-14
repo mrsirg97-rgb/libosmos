@@ -265,7 +265,9 @@ int main(int argc, char** argv) {
     uint8_t *wg = (uint8_t*) dev_raw(L.exp_gate), *wu = (uint8_t*) dev_raw(L.exp_up), *wd = (uint8_t*) dev_raw(L.exp_down);
     const uint64_t sg = L.exp_gate->bytes / E, su = L.exp_up->bytes / E, sd = L.exp_down->bytes / E;
     std::vector<float> scg(E, 1.0f), scu(E, 1.0f), scd(E, 1.0f);
-    if (L.exp_gate->type == kNVFP4) scg = f32_of(L.exp_gate_scale), scu = f32_of(L.exp_up_scale), scd = f32_of(L.exp_down_scale);
+    if (L.exp_gate_scale) scg = f32_of(L.exp_gate_scale);  // (NVFP4's own, or the checkpoint's beside a requantized one)
+    if (L.exp_up_scale) scu = f32_of(L.exp_up_scale);
+    if (L.exp_down_scale) scd = f32_of(L.exp_down_scale);
     CHECK(hipMemset(moe, 0, (size_t) T * C * 4) == hipSuccess);
     for (uint32_t t = 0; t < T; t++)
       for (uint32_t s = 0; s < K; s++) {

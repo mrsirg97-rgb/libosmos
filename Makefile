@@ -145,7 +145,11 @@ REQUANT := $(BIN_DIR)/requant_dspark
 $(REQUANT): tools/requant/requant_dspark.c $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(GGML)/ggml/include $< $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a -lstdc++ -lm -lpthread -o $@
-requant: $(REQUANT)
+REQUANT_INK2 := $(BIN_DIR)/requant_ink2
+$(REQUANT_INK2): tools/requant/requant_ink2.c $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(GGML)/ggml/include $< $(LIB) $(GGML)/build-ggml/ggml/src/libggml-base.a -lstdc++ -lm -lpthread -o $@
+requant: $(REQUANT) $(REQUANT_INK2)
 
 # the GPU's tests built, not run (CI: no gfx1151 there)
 gpu-build: $(GPU_TESTS) $(BENCH) $(SERVE)

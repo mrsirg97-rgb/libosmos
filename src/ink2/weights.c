@@ -173,7 +173,9 @@ static const GgufTensor *claim(const Gguf *model, bool *taken, const Ink2Geometr
 }
 
 /* an expert tensor's scale: NVFP4's blocks are not its whole values (their scale one an expert, beside it), every
-   other expert type's are - a scale beside one of those is refused, not ignored */
+   other expert type's are - a scale beside one of those is refused, not ignored. llama.cpp's layout (unsloth's) keeps
+   the checkpoint's NVFP4 outer scale beside its requantized experts too (layers 0-39: their values quantized without
+   it): there a scale is taken wherever it is, any type - applied after the expert's matrix, as NVFP4's */
 static bool expert_scales(const Gguf *model, bool *taken, const Ink2Geometry *g, int l, Ink2Layer *L, char *err)
 {
   char name[NAME_MAX_LEN];
@@ -181,6 +183,13 @@ static bool expert_scales(const Gguf *model, bool *taken, const Ink2Geometry *g,
   {
     const GgufTensor *e = *(const GgufTensor **)((char *)L + scales[i].exp);
     snprintf(name, sizeof name, "blk.%d.%s", l, scales[i].name);
+    if (g->llama_names && e->type != QTYPE_NVFP4)
+    {
+      if (gguf_tensor(model, name) &&
+          !(*(const GgufTensor **)((char *)L + scales[i].scale) = claim(model, taken, g, &scale_role, name, err)))
+        return false;
+      continue;
+    }
     if (e->type != QTYPE_NVFP4)
     {
       if (gguf_tensor(model, name))
