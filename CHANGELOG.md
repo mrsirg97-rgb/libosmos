@@ -12,9 +12,9 @@
   the pack's `osmos.json`, puts a placeholder result ("[tool result dropped from the conversation's history - run the
   call again if its result is needed]") after each orphaned call, and the answer says so (`orphans_filled`). By
   default the prompt stays the template's render of what was sent: osmos does not rewrite a client's history.
-- **Long prompts faster at depth (DeepSeek)**: a 1M-token read (evo-A, budget auto) **89.5 minutes**, from 141.5 with
-  the first change below alone (UD-IQ2_XXS; 0.7.2 slower again: ~93 tok/s by 600K); at 896K **157
-  tok/s**, from 68. Every change the same bits (each checked end to end:
+- **Long prompts faster at depth (DeepSeek)**: a 1M-token read (evo-A, budget auto) **67.7 minutes**, from 141.5 with
+  the first change below alone (UD-IQ2_XXS; 0.7.2 slower again: ~93 tok/s by 600K); at 896K **218 tok/s**, from 68;
+  UD-IQ2_XXS's first 264K 13.4 minutes from 0.7.2's 18.3. Every change the same bits (each checked end to end:
   a 1M stream's scored rows, NLL and argmax, against the old engine's), so the same answers. Found reading #47's
   1M-token trace, where osmos fell behind maya past ~300K:
   - the indexer's candidate layers (24/28/32/36) score only their candidate blocks' 16,384 rows, not every row a
@@ -41,7 +41,8 @@
   and Qwen's (was 64K, its reply cap 128K with it).
 - **Recall to the window's edge, measured**: 11 codes planted in a 1M-token agent conversation (the operator's rig
   sessions), asked at its end - every one recalled, every token the model's first choice, from 12K to **985K** back,
-  on UD-IQ2_XXS and evo-A (a code never planted: probability ~0). Qwen IQ3_XXS at 512K: README.
+  on UD-IQ2_XXS and evo-A (a code never planted: probability ~0); Qwen3.8 UD-IQ3_XXS the same in its 512K, from 10K
+  to 418K back.
 - **`kld`'s `BIG`** (tools/bench): `BIG=8192` reads a text's unscored stretches in batches of up to 8,192 tokens (the
   server's own: four sub-batches, each layer's experts read once for them), the scored rows at `step` - the same
   bits (a 24,576-token check: its dumps byte-identical), a long text with few scored windows ~1.7x faster to read.

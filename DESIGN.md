@@ -1878,9 +1878,10 @@ tools/bench/ixbench timed the kernels at 1M's shapes (128 tokens a call: FWD_SCO
 each checked: test_attn_gpu (the fused sums against the plain kernel's bits, typical and with products past the
 normal range - the guard off, the bits differ), test_select_gpu (the coalesced top k, the list's and the folded
 keys' against the host's, ties everywhere; -0s among the zeros), and end to end: the plain 1M stream to 264K on
-UD-IQ2_XXS, its 4,000 scored rows' NLL and argmax the old engine's bit for bit (15.0 min, from 18.3). the 1M read
-(the recall stream, evo-A, budget auto, steps of 4,096): 89.5 min, from 141.5 on the first fix (UD-IQ2_XXS); 322, 205,
-164, 157, 136 tok/s at 128K, 512K, 768K, 896K, 992K.
+UD-IQ2_XXS, its 4,000 scored rows' NLL and argmax the old engine's bit for bit (15.0 min, from 18.3; with the int8
+dots below 13.4). the 1M read (the recall stream, evo-A, budget auto, steps of 4,096): 89.5 min with these, from
+141.5 on the first fix (UD-IQ2_XXS) - 322, 205, 164, 157, 136 tok/s at 128K, 512K, 768K, 896K, 992K; with the int8
+dots below 67.7 min - 341, 266, 232, 218, 212 - its 84 scored rows the 89.5-minute run's byte for byte.
 
 ## 0.7.3: Qwen's QSA indexer at depth (2026-11-13)
 
