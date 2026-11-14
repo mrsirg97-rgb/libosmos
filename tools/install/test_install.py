@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import struct
 import sys
 import tarfile
@@ -548,6 +549,55 @@ class DerivedSet(unittest.TestCase):
             for k, v in (("shard", 3), ("shard", 0), ("delta", "e1"), ("base", ["b1", "nope"]), ("base", [])):
                 mm = json.loads(json.dumps(m))
                 mm["files"]["e1"]["derive"][k] = v
+                with self.assertRaises(manifest.ManifestError, msg=f"derive {k} {v!r}"):
+                    manifest.check(mm)
+
+
+class DerivedChain(unittest.TestCase):
+    """a patch on a derived set (0.8.0: evo-A's layers 10-19 gate / up on evo-A's shards): made from the made set and
+    its own delta; an install that has the made set fetches the patch alone"""
+
+    def setup(self, d):
+        import gguf_assemble as A
+        import gguf_delta as D
+        have, models, m, made = DerivedSet().setup(d)
+        os.makedirs(f"{d}/t2")  # the patched target: a changed again
+        mk = Assemble().gguf
+        mk(f"{d}/t2/t2-00001-of-00002.gguf", [("a", [64], 0, os.urandom(256))])
+        shutil.copy(made[1], f"{d}/t2/t2-00002-of-00002.gguf")
+        patch = f"{have}/patch.gguf"
+        D.main.__globals__["sys"].argv = ["x", f"{d}/t2/t2-00001-of-00002.gguf", made[0], patch]
+        D.main()
+        os.makedirs(f"{d}/made2")
+        made2 = A.assemble(made, [f"{d}/made2/f-00001-of-00002.gguf", f"{d}/made2/f-00002-of-00002.gguf"], [patch],
+                           log=lambda m: None)
+        for k, p in ((1, made2[0]), (2, made2[1])):
+            m["files"][f"f{k}"] = {"derive": {"with": "gguf_assemble", "base": ["e1", "e2"], "delta": "patch", "shard": k},
+                                   "path": os.path.basename(p), "bytes": os.path.getsize(p), "sha256": sha(p)}
+        m["files"]["patch"] = entry(patch, repo="o/evo")
+        m["packs"]["f"] = dict(m["packs"]["e"], shards=["f1", "f2"], rig=dict(m["packs"]["e"]["rig"], id="f"))
+        return have, models, m, made, made2
+
+    def test_laid(self):
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made, made2 = self.setup(d)
+            manifest.check(m)
+            self.assertEqual(osmos_install.needed(m, ["f"], False), ["b1", "b2", "delta", "patch"])  # a fresh install
+            cfg = layout.read_config(layout.lay(m, "f", models, [have], trust_size=False, abliterated=False, fetch=None))
+            self.assertEqual(sha(cfg["model"]), sha(made2[0]))
+            self.assertEqual(sha(os.path.join(models, "f", "f-00002-of-00002.gguf")), sha(made2[1]))
+            mk = lambda fid: layout.made(m, fid, models, [])  # noqa: E731  (evo-A made: the patch alone fetched)
+            self.assertEqual(osmos_install.needed(m, ["f"], False, mk), [])
+            os.remove(os.path.join(models, "derived", m["files"]["f1"]["path"]))
+            os.remove(os.path.join(models, "derived", m["files"]["f2"]["path"]))
+            self.assertEqual(osmos_install.needed(m, ["f"], False, mk), ["patch"])
+
+    def test_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, _, m, _, _ = self.setup(d)
+            for k, v in (("delta", "e1"), ("base", ["f1", "e2"]), ("base", ["e1", "nope"])):
+                mm = json.loads(json.dumps(m))
+                mm["files"]["f1"]["derive"][k] = v  # a derived delta, itself as a base, an unknown base: refused
                 with self.assertRaises(manifest.ManifestError, msg=f"derive {k} {v!r}"):
                     manifest.check(mm)
 

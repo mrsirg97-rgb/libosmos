@@ -59,6 +59,16 @@ def _file(fid, f):
 CONVERTERS = ("overlay_q4x", "gguf_assemble")
 
 
+def _acyclic(m, fid, seen=()):
+    """a derived file's bases, down to published ones, never through itself"""
+    if fid in seen:
+        raise ManifestError(f"file {fid}: derived from itself ({' <- '.join(seen + (fid,))})")
+    d = m["files"].get(fid, {}).get("derive")
+    for b in (d or {}).get("base") or []:
+        if b in m["files"] and "derive" in m["files"][b]:
+            _acyclic(m, b, seen + (fid,))
+
+
 def _derived(m, fid, f):
     d = f.get("derive")
     if not isinstance(d, dict) or d.get("with") not in CONVERTERS:
@@ -72,7 +82,11 @@ def _derived(m, fid, f):
             raise ManifestError(f"file {fid}: mode {d.get('mode')!r} is not one of {sorted(overlay_q4x.MODES)}")
     else:  # gguf_assemble: base's shards with a delta in, this file the output of base's shard `shard` (from 1)
         base = d.get("base") if isinstance(d.get("base"), list) and d.get("base") else [None]
-        ins = base + [d.get("delta")]
+        ins = [d.get("delta")]   # (the base's shards published, or made by another gguf_assemble set: a patch's)
+        for b in base:
+            if b not in m["files"] or ("derive" in m["files"][b] and m["files"][b]["derive"].get("with") != "gguf_assemble"):
+                raise ManifestError(f"file {fid}: base {b!r} is neither a published file nor a gguf_assemble file")
+        _acyclic(m, fid)
         if not (isinstance(d.get("shard"), int) and 1 <= d["shard"] <= len(base)):
             raise ManifestError(f"file {fid}: shard {d.get('shard')!r} is not one of the base's (1 .. {len(base)})")
     for i in ins:

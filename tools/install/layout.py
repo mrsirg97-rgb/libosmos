@@ -39,6 +39,21 @@ def _resolve(m, fid, have, trust_size, fetch, found=None):
     return fetch(e), True
 
 
+def made(m, fid, models, have):
+    """a derived file already made: under <models>/derived/, or among the user's files - by its bytes (the layout
+    checks its SHA-256 before using it, and makes it again if not the pinned one)"""
+    e = m["files"][fid]
+    p = os.path.join(models, "derived", e["path"])
+    return (os.path.exists(p) and os.path.getsize(p) == e["bytes"]) or bool(have and userfiles.find(e, have, True))
+
+
+def _input(m, fid, models, have, trust_size, fetch, found):
+    """an input's path: a published file's (the user's or fetched), a derived one's made (0.8.0: a patch's base)"""
+    if "derive" in m["files"][fid]:
+        return _derive(m, fid, models, have, trust_size, fetch, found)
+    return _resolve(m, fid, have, trust_size, fetch, found)[0]
+
+
 def _assemble(m, fid, models, have, trust_size, fetch, found):
     """a gguf_assemble set (tools/convert/gguf_assemble.py: a base's shards with a delta in, its shared bytes cloned
     where the filesystem has clones) made at once, every file of it under <models>/derived/ and checked against its own
@@ -49,7 +64,7 @@ def _assemble(m, fid, models, have, trust_size, fetch, found):
             and f["derive"]["delta"] == d["delta"]}
     if sorted(sibs) != list(range(1, len(d["base"]) + 1)):
         raise LayoutError(f"{fid}: the set's files are not one for each of its base's shards")
-    base = [_resolve(m, b, have, trust_size, fetch, found)[0] for b in d["base"]]
+    base = [_input(m, b, models, have, trust_size, fetch, found) for b in d["base"]]
     delta, _ = _resolve(m, d["delta"], have, trust_size, fetch, found)
     outs = [os.path.join(models, "derived", m["files"][sibs[i]]["path"]) for i in range(1, len(base) + 1)]
     print(f"  making {', '.join(sibs[i] for i in sorted(sibs))} from {len(base)} shards and {d['delta']}", flush=True)
