@@ -204,7 +204,7 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
     return;
   }
   const uint32_t reused = c->held.n;
-  if (!oseq_prompt(c->s, n))
+  if (!oseq_prompt(c->s, conv_prompt_end(c, n, g->mark)))
   {
     snprintf(c->err, sizeof c->err, "the prompt's end not past the conversation's");
     fail(sv, c);
@@ -214,12 +214,11 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
   while (c->held.n < n)
   {
     const uint32_t k = n - c->held.n < sv->max_tokens ? n - c->held.n : sv->max_tokens;
-    if (!conv_read(c, sv, g->ids, k, n, spec))
+    if (!conv_read(c, sv, g->ids, k, n, g->mark, spec, &row))
     {
       fail(sv, c);
       return;
     }
-    row = k - 1;
     const double ms = now_ms() - t0;
     out("PP %u %u %.1f %.1f %u\n", c->held.n, n, ms, (c->held.n - reused) / (ms / 1e3), reused);
     pump(l, ctl);

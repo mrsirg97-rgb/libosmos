@@ -367,6 +367,38 @@ static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[API_ER
   return ids;
 }
 
+/* where a turn after a new user message leaves this prompt, when the template then drops its latest reasoning
+   (Dialect.drops): the tokens this prompt shares with its next turn rendered (one more user message) - a point
+   osmos-serve keeps (GEN mark=, 0.7.5). 0: none, or no shorter than the prompt's own point (n - 1) */
+static unsigned next_mark(Api *a, const Request *rq, const int32_t *ids, size_t n)
+{
+  if (!a->d->drops || !a->d->drops(rq))
+    return 0;
+  JsonBuf b = {0};
+  json_dump(&b, rq->messages);
+  char jerr[JSON_ERR], err[API_ERR];
+  Json *next = NULL;
+  if (!b.oom && b.n > 1 && b.p[b.n - 1] == ']')
+  {
+    b.n--;
+    json_puts(&b, ", {\"role\": \"user\", \"content\": \"next\"}]");
+    next = b.oom ? NULL : json_parse(b.p, b.n, jerr);
+  }
+  free(b.p);
+  if (!next)
+    return 0;
+  Request nx = *rq;
+  nx.messages = next, nx.branch = NULL;
+  size_t m = 0;
+  int32_t *nid = prompt_ids(a, &nx, &m, err);
+  json_free(next);
+  size_t k = 0;
+  while (nid && k < m && k < n && nid[k] == ids[k])
+    k++;
+  free(nid);
+  return k + 1 < n ? (unsigned)k : 0;
+}
+
 void api_chat(Api *a, Http *h)
 {
   char err[API_ERR], jerr[JSON_ERR];
@@ -392,7 +424,7 @@ void api_chat(Api *a, Http *h)
     snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL;
   if (ids && rq.max_tokens && n + rq.max_tokens > ctx)
     rq.max_tokens = (unsigned)(ctx - n); /* past the context: as many as it leaves (finish "length") */
-  Run *r = ids ? engine_run(&a->engine, ids, n, rq.max_tokens, err) : NULL;
+  Run *r = ids ? engine_run(&a->engine, ids, n, rq.max_tokens, next_mark(a, &rq, ids, n), err) : NULL;
   free(ids);
   if (!r)
   {

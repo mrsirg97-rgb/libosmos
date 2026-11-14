@@ -40,6 +40,60 @@ static void expect(const char *what, const char *got, size_t gn, const char *wan
   exit(1);
 }
 
+/* a turn's next turn repeats its prompt but the generation prompt's last token (0.7.5: what the server keeps a
+   conversation at): for every shape - thinking or not, tools or not, the answer with or without reasoning, a user's or
+   a tool's turn next - the next render starts with this one less its final <think> / </think>; with tools (reasoning
+   kept) with all of it */
+static void next_turn_prefix(void)
+{
+  char err[JSON_ERR], cerr[CHAT_ERR];
+  const char *tools = ", \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"read_file\", "
+                      "\"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}}}]";
+  const char *answers[] = {
+      "{\"role\": \"assistant\", \"content\": \"two\", \"reasoning_content\": \"one plus one\"}",
+      "{\"role\": \"assistant\", \"content\": \"two\"}",
+      "{\"role\": \"assistant\", \"content\": \"\", \"reasoning_content\": \"look\", \"tool_calls\": [{\"id\": \"c1\", "
+      "\"type\": \"function\", \"function\": {\"name\": \"read_file\", \"arguments\": \"{\\\"path\\\": \\\"a\\\"}\"}}]}"};
+  int shapes = 0;
+  for (int think = 0; think < 2; think++)
+    for (int tl = 0; tl < 2; tl++)
+      for (int an = 0; an < 3; an++)
+        for (int loop = 0; loop < 2; loop++) /* the history before: a plain turn, or a tool call and its result */
+        {
+          if (an == 2 && !tl)
+            continue;
+          char before[2048], after[4096];
+          snprintf(before, sizeof before,
+                   "[{\"role\": \"system\", \"content\": \"be brief\"%s}, {\"role\": \"user\", \"content\": \"q1\"}%s]",
+                   tl ? tools : "", loop ? (", {\"role\": \"assistant\", \"content\": \"\", \"reasoning_content\": \"r0\", "
+                                            "\"tool_calls\": [{\"id\": \"c0\", \"type\": \"function\", \"function\": {\"name\": "
+                                            "\"read_file\", \"arguments\": \"{}\"}}]}, {\"role\": \"tool\", \"tool_call_id\": \"c0\", "
+                                            "\"content\": \"r\"}") : "");
+          snprintf(after, sizeof after, "%.*s, %s, %s]", (int)strlen(before) - 1, before, answers[an],
+                   an == 2 ? "{\"role\": \"tool\", \"tool_call_id\": \"c1\", \"content\": \"file a\"}"
+                           : "{\"role\": \"user\", \"content\": \"q2\"}");
+          Json *m0 = json_parse(before, strlen(before), err), *m1 = json_parse(after, strlen(after), err);
+          JsonBuf b0 = {0}, b1 = {0};
+          const ChatMode mode = think ? CHAT_THINKING : CHAT_PLAIN;
+          assert(m0 && m1 && chat_render(m0, mode, 75, &b0, cerr) && chat_render(m1, mode, 75, &b1, cerr));
+          const size_t tail = b0.n >= 8 && !memcmp(b0.p + b0.n - 8, "</think>", 8) ? 8
+                              : b0.n >= 7 && !memcmp(b0.p + b0.n - 7, "<think>", 7) ? 7 : 0;
+          assert(tail); /* the generation prompt's last token */
+          /* thinking without tools over an answer after the last user (a tool loop's): a new user turn drops that
+             reasoning (_drop_thinking_messages), so the next prompt repeats this one to the last user's text alone */
+          const bool dropped = think && !tl && loop && an != 2;
+          const char *q1 = memmem(b0.p, b0.n, "q1", 2);
+          const size_t keep = dropped ? (size_t)(q1 - b0.p) + 2 : b0.n - tail;
+          if (b1.n < keep || memcmp(b0.p, b1.p, keep) || (dropped && !memcmp(b0.p, b1.p, b0.n - tail)))
+            printf("  think %d tools %d answer %d loop %d: the next turn leaves this one's prompt\n", think, tl, an, loop),
+                exit(1);
+          shapes++;
+          free(b0.p), free(b1.p), json_free(m0), json_free(m1);
+        }
+  printf("  %d shapes: a turn's next turn repeats its prompt but the generation prompt's last token (thinking without "
+         "tools over a tool loop: to the last user's text)\n", shapes);
+}
+
 int main(void)
 {
   printf("[test_chat] start\n");
@@ -140,6 +194,7 @@ int main(void)
   free(b.p);
   printf("  %d chats rendered, %d completions parsed and %d refused as DeepSeek's encoding does\n", renders, parses,
          refusals);
+  next_turn_prefix();
   printf("[test_chat] ok\n");
   return 0;
 }

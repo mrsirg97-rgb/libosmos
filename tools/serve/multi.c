@@ -79,7 +79,7 @@ static void admit(Multi *m, int i, Gen *g)
     return;
   }
   ln->reused = ln->c.held.n;
-  if (!oseq_prompt(ln->c.s, g->n))
+  if (!oseq_prompt(ln->c.s, conv_prompt_end(&ln->c, g->n, g->mark)))
   {
     snprintf(ln->c.err, sizeof ln->c.err, "the prompt's end not past the conversation's");
     lane_fail(m, ln);
@@ -200,7 +200,8 @@ static void piece(Multi *m)
     return;
   Lane *ln = &m->lane[pick];
   const uint32_t n = ln->g.n, k = n - ln->c.held.n < sv->max_tokens ? n - ln->c.held.n : sv->max_tokens;
-  if (!conv_read(&ln->c, sv, ln->g.ids, k, n, ln->g.spec))
+  uint32_t row = 0;
+  if (!conv_read(&ln->c, sv, ln->g.ids, k, n, ln->g.mark, ln->g.spec, &row))
   {
     lane_fail(m, ln);
     return;
@@ -210,7 +211,7 @@ static void piece(Multi *m)
       ln->reused);
   if (ln->c.held.n < n)
     return;
-  if (!osmos_greedy(sv->e, k - 1, 1, &ln->t, ln->c.err) || !server_answer(sv, &ln->c.held, NULL, 0, k - 1, &ln->t,
+  if (!osmos_greedy(sv->e, row, 1, &ln->t, ln->c.err) || !server_answer(sv, &ln->c.held, NULL, 0, row, &ln->t,
                                                                           ln->c.err))
   {
     lane_fail(m, ln);

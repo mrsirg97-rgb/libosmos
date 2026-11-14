@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.7.5]: a turn reuses its prompt
+
+- **DeepSeek in thinking mode without tools read every turn whole** (`cached_tokens` 0 each turn, the conversation
+  written to the slots for nothing): the prompt's state was kept at its very end, `<think>`, which the next turn
+  renders `</think>` once its reasoning is dropped. A retry or regenerate of the same prompt read whole too. Agent
+  harnesses that send `tools` (rig among them) were not affected.
+- **Qwen read every request whole, tool loops included, for clients that do not send reasoning back** (Continue,
+  Open WebUI, Roo Code's generic provider, LangChain, the OpenAI Agents SDK; reasoning put in `<think>` tags in the
+  content): it continued on decoded tokens the history no longer held.
+- **A new user message after a tool loop whose reasoning the template drops** (DeepSeek when a client leaves `tools`
+  out; Qwen with `preserve_thinking: false`) read the loop's whole turn again.
+- The fix: osmos-serve keeps points to go back to - the prompt's, one token short of its end, and the last user
+  turn's (osmos-api sends it as `mark=` when the template drops reasoning there) - and each request goes back to the
+  furthest its prompt continues. Qwen's point is ~118 MB (its recurrent states and rings, at any context), DeepSeek's
+  its whole state as before. Every answer is the bits of the same prompt read whole (tools/serve/turn_test.py, both
+  families). A conversation set aside keeps its prompt, not its answer (Qwen now too), so a client that rewrites the
+  answer takes it back.
+- Measured through osmos-api (three-turn chats, real answers; `cached_tokens` of the previous request's prompt):
+  DeepSeek thinking without tools 0 -> all but one token every turn (644 of 645, 662 of 663); Qwen without
+  reasoning sent back 0 -> 1,888 of 1,889 in a tool loop and 2,003 of 2,004 at a new user message (the same with the
+  reasoning in `<think>` tags); DeepSeek's tool loop without `tools`, at the next user message, 0 -> 1,620 of 1,771
+  (the loop's dropped reasoning read again, the rest kept). Shapes that already hit (tools sent, reasoning sent back,
+  arguments re-serialized, a title request between turns) still do.
+
 ## [0.7.4]: decode at depth
 
 - **Decode no longer slows with the context (DeepSeek), and slows far less (Qwen)** - measured for the first time

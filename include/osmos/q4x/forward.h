@@ -63,6 +63,9 @@ uint64_t q4x_identity(const Q4xForward *f);
 uint64_t q4x_seq_state_bytes(const Q4xSeq *s);
 bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FWD_ERR]);
 bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[Q4X_FWD_ERR]);
+uint64_t q4x_seq_mark_bytes(const Q4xSeq *s);
+bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR]);
+bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ERR]);
 
 #define Q4X_MAX_RUNS 64 /* a step's sequences at most (q4x_step) */
 bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
@@ -144,6 +147,14 @@ q4x_seq_state_bytes .. q4x_seq_load_from
   state_io.h), load (from a source, the same). load refuses another identity or format, a size not the state's of
   its position, a position past max_ctx, a damaged state (the checksum read last, the parts sent as they come): the
   sequence then empty, position 0 (never part one state and part another).
+
+q4x_seq_mark_bytes .. q4x_seq_mark_load
+  a point the sequence goes back to (0.7.5: a conversation's prompt end, osmos-serve's): what a later token changes -
+  the position and last tokens, the n-gram conv history, each DeltaNet layer's state and conv history, each attention
+  layer's raw keys' ring - not the attention rows and pooled keys below the position, which only grow. so a mark is
+  the sequence's own while it holds the same tokens below the mark's position (no load, reset or rollback under it
+  since): load refuses a mark past the position or of another sequence's size, a broken sequence; the caller keeps
+  the tokens. ~118 MB for Qwen3.8-Flash-Next, whatever the position (a whole state: 2.9 GB at 190K).
 
 q4x_step
   runs sequences' tokens in one step (seqs[i] the next lens[i] tokens, consecutive; each sequence once, runs 1 ..

@@ -229,3 +229,89 @@ bool q4x_seq_rollback(Q4xSeq *s, uint32_t n)
   s->cur = (s->cur + Q4X_SLOTS - n) % Q4X_SLOTS;
   return true;
 }
+
+/* a mark (forward.h): a header, then the parts a later token changes - the n-gram conv history, each DeltaNet's state
+   and conv history, each attention layer's raw keys' ring - in parts()'s order */
+#define MARK_MAGIC 0x4b4d3451u /* "Q4MK" */
+
+typedef struct MarkHeader
+{
+  uint32_t magic;
+  int32_t pos, n_last;
+  int32_t last[Q4X_MAX_NGRAM];
+} MarkHeader;
+
+static int mark_parts(const Q4xSeq *s, Part *p)
+{
+  const Q4xGeometry *g = &s->f->w->geo;
+  const Q4xSeqBytes sb = q4x_seq_bytes(g);
+  int n = 0;
+  p[n++] = (Part){(uint8_t *)s->ple_hist + s->cur * sb.ple, sb.ple};
+  for (int l = 0; l < g->n_layers; l++)
+    if (g->recurrent[l])
+      p[n++] = (Part){(uint8_t *)s->ssm[l] + s->cur * sb.ssm, sb.ssm},
+      p[n++] = (Part){(uint8_t *)s->conv[l] + s->cur * sb.conv, sb.conv};
+    else
+      p[n++] = (Part){s->ixr[l], sb.ix_ring};
+  return n;
+}
+
+uint64_t q4x_seq_mark_bytes(const Q4xSeq *s)
+{
+  if (!s)
+    return 0;
+  Part p[MAX_PARTS];
+  uint64_t b = sizeof(MarkHeader);
+  for (int i = 0, n = mark_parts(s, p); i < n; i++)
+    b += p[i].bytes;
+  return b;
+}
+
+bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR])
+{
+  if (!s || !out || bytes != q4x_seq_mark_bytes(s))
+    return q4x_fail(err, "no sequence, or a mark's room not its size");
+  if (s->broken)
+    return q4x_fail(err, "a sequence after a failed step (its states part written): no mark of it");
+  if (hipDeviceSynchronize() != hipSuccess)
+    return q4x_fail(err, "a GPU call failed (before the mark's save)");
+  MarkHeader h;
+  memset(&h, 0, sizeof h);
+  h.magic = MARK_MAGIC, h.pos = s->pos, h.n_last = s->n_last < Q4X_MAX_NGRAM ? s->n_last : Q4X_MAX_NGRAM;
+  memcpy(h.last, s->last, sizeof h.last);
+  memcpy(out, &h, sizeof h);
+  uint8_t *at = (uint8_t *)out + sizeof h;
+  Part p[MAX_PARTS];
+  for (int i = 0, n = mark_parts(s, p); i < n; at += p[i].bytes, i++)
+    if (hipMemcpy(at, p[i].dev, p[i].bytes, hipMemcpyDeviceToHost) != hipSuccess)
+      return q4x_fail(err, "a GPU copy failed (the mark's save)");
+  return true;
+}
+
+bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ERR])
+{
+  if (!s || !in || bytes != q4x_seq_mark_bytes(s))
+    return q4x_fail(err, "no sequence, or a mark not its size");
+  MarkHeader h;
+  memcpy(&h, in, sizeof h);
+  if (h.magic != MARK_MAGIC || h.pos < 0 || h.pos > s->pos || h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM)
+    return q4x_fail(err, "not a mark, or one past the sequence's position");
+  if (s->broken)
+    return q4x_fail(err, "a sequence after a failed step: its rows below the mark not known (load a state)");
+  if (hipDeviceSynchronize() != hipSuccess) /* its states not still being read */
+    return q4x_fail(err, "a GPU call failed (before the mark's load)");
+  s->cur = 0, s->back = 0; /* into slot 0, nothing behind it (as a load) */
+  const uint8_t *at = (const uint8_t *)in + sizeof h;
+  Part p[MAX_PARTS];
+  for (int i = 0, n = mark_parts(s, p); i < n; at += p[i].bytes, i++)
+    if (hipMemcpy(p[i].dev, at, p[i].bytes, hipMemcpyHostToDevice) != hipSuccess)
+    {
+      q4x_seq_reset(s);
+      return q4x_fail(err, "a GPU copy failed (the mark's load): the sequence emptied");
+    }
+  s->pos = h.pos, s->n_last = h.n_last, s->prompt_end = 0;
+  memcpy(s->last, h.last, sizeof h.last);
+  s->pend_pos = -1, s->step_n = 0; /* the head's and the drafter's context start here (drafts weaker, no bit moved) */
+  s->df_lo = s->df_pos = s->pos;
+  return true;
+}

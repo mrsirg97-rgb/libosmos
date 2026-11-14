@@ -211,4 +211,5 @@ const OsmosFamily osmos_ds4 = {
     e_batch,      e_logits, e_greedy,  e_block,  s_create,   s_destroy,     s_prompt, s_rollback,
     s_reach,      s_position, s_state_bytes, s_save_to, s_load_from, s_seed,        s_draft,  NULL, /* its drafts one sequence at a time */
     e_read, /* a prompt's read: the large steps' math at any size (forward_reading) */
+    NULL,   NULL, NULL, /* a mark its whole state */
 };

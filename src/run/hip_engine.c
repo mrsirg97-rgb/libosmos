@@ -248,6 +248,25 @@ bool oseq_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
   return s && in ? oseq_load_from(s, bytes, mem_source, &m, err) : fail(err, "no sequence or state");
 }
 
+uint64_t oseq_mark_bytes(const OsmosSeq *s)
+{
+  return !s ? 0 : s->e->fam->mark_bytes ? s->e->fam->mark_bytes(s->impl) : oseq_state_bytes(s);
+}
+
+bool oseq_mark_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
+{
+  if (!s || !out)
+    return fail(err, "no sequence or buffer");
+  return s->e->fam->mark_save ? s->e->fam->mark_save(s->impl, out, bytes, err) : oseq_save(s, out, bytes, err);
+}
+
+bool oseq_mark_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
+{
+  if (!s || !in)
+    return fail(err, "no sequence or mark");
+  return s->e->fam->mark_load ? s->e->fam->mark_load(s->impl, in, bytes, err) : oseq_load(s, in, bytes, err);
+}
+
 bool oseq_seed(OsmosSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
   if (!s || !osmos_block(s->e))
