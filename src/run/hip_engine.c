@@ -9,7 +9,7 @@
 
 /* the dispatch: a model's family by its file's general.architecture, then every call that family's */
 
-static const OsmosFamily *const families[] = {&osmos_ds4, &osmos_q4x};
+static const OsmosFamily *const families[] = {&osmos_ds4, &osmos_q4x, &osmos_ink2};
 
 struct OsmosModel
 {
@@ -61,7 +61,7 @@ OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR])
   if (!fam)
   {
     if (err)
-      snprintf(err, OSMOS_ERR, "the architecture %s: no family here runs it (deepseek41, qwen4exp)", arch[0] ? arch : "(none)");
+      snprintf(err, OSMOS_ERR, "the architecture %s: no family here runs it (deepseek41, qwen4exp, inkling2)", arch[0] ? arch : "(none)");
     return NULL;
   }
   OsmosModel *m = calloc(1, sizeof *m);
