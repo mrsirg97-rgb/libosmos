@@ -17,7 +17,7 @@ C, HIP and a little C++. No Python at runtime.
 ## Quick start
 
 ```sh
-python3 tools/install/osmos_install.py osmos-evo-a --serve         # DeepSeek; or ud-iq1_s, ud-iq1_m, ud-iq2_xxs
+python3 tools/install/osmos_install.py osmos-evo --serve           # DeepSeek; or ud-iq1_s, ud-iq1_m, ud-iq2_xxs
 python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve   # Qwen; or qwen38-ud-q4_k_xl
 ```
 
@@ -34,7 +34,7 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
   map, the driver and ROCm, the power profile (balanced is slower than the profiles osmos is measured at), the RAM,
   `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
-  `deepseek-1017-evo-a`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next`
+  `deepseek-1017-evo`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next`
   (`-l`: UD-Q4_K_XL).
 
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
@@ -47,24 +47,24 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 
 | Pack | Files | Context | Pick it for |
 | --- | --- | --- | --- |
-| `osmos-evo-a` | 141 GB (UD-IQ1_M's files + a 34 GB delta, made where you install it) + 203 GB Engram table | 1M | **the default**: UD-IQ1_M's quality at about UD-IQ1_S's speed |
+| `osmos-evo` | 147 GB (UD-IQ1_M's files + a 34 GB delta + a 23 GB patch, made where you install it) + 203 GB Engram table | 1M | **the default**: about halfway from UD-IQ1_M's quality to UD-IQ2_XXS's, faster than either (`osmos-evo-a` still installs it) |
 | `ud-iq1_s` | 122 GB + 203 GB Engram table | 1M | speed |
 | `ud-iq1_m` | 140 GB + 203 GB Engram table | 1M | quality (unsloth's benchmarks 85.55 against 83.53) |
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the closest to the model, the slowest decode |
 | `qwen38-ud-iq3_xxs` | 84 GB + 3 GB MTP head | 512K | Qwen, fully in GPU memory |
 | `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
 
-## osmos-evo-A in numbers
+## osmos-evo in numbers
 
-The default DeepSeek pack, on one Strix Halo (the `performance` profile, nothing else running):
+The default DeepSeek pack, on one Strix Halo (the `performance` profile, nothing else running; 0.7.6):
 
 | | |
 | --- | ---: |
-| Decode, drafted / plain (64K context; 0.7.2) | **35.6** / 18.9 tok/s |
-| Decode, plain, at 65K / 262K / 523K of context (`low-power`; 0.7.4) | 15.3 / 15.4 / **15.9** tok/s - flat with depth (0.7.3: 15.3 / 14.9 / 14.7) |
-| Prompt, 2,048 / 8,192 tokens (0.7.2) | 384 / **620** tok/s (386-389 / 644-647 with the NPU) |
-| A 1,038,695-token prompt read whole (0.7.3) | **67.7 min** - 341 tok/s at 128K, 266 at 512K, 212 at 992K |
-| Facts recalled from up to 985K tokens back (0.7.3) | **11 of 11**, every token the model's first choice |
+| Decode, drafted / plain (64K context) | **32.8** / 17.7 tok/s (UD-IQ2_XXS, 0.7.0: 26.0 / 14.2) |
+| Decode after a 65K / 262K prompt | drafted **31.1** at 65K; plain 16.6 / 17.4 - no slower at 262K |
+| Prompt, 2,048 / 8,192 tokens | 364 / **599** tok/s |
+| A 1,038,695-token prompt read whole (evo-A, 0.7.3) | **67.7 min** - 341 tok/s at 128K, 266 at 512K, 212 at 992K |
+| Facts recalled from up to 985K tokens back | **11 of 11**, every token the model's first choice (188K back: 0.955, evo-A's 0.469) |
 
 **Recall to the window's edge.** An agent conversation built from our own rig sessions (1,038,695 tokens) with 11 facts
 planted in user turns ("the access code for the red locker is RW-6315-KD"), each asked for at the end, plus a locker
@@ -72,11 +72,12 @@ never mentioned. Each answer scored teacher-forced - the probability of the whol
 
 | Distance back | 985K | 881K | 787K | 687K | 587K | 487K | 388K | 267K | 188K | 78K | 12K | never planted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| osmos-evo-A | 0.984 | 0.996 | 0.997 | 0.997 | 0.997 | 0.995 | 0.996 | 0.997 | 0.469 * | 0.999 | 0.995 | 0.0000 |
+| osmos-evo | 0.986 | 0.992 | 0.995 | 0.993 | 0.998 | 0.996 | 0.998 | 0.994 | **0.955** | 0.995 | 0.996 | 0.0000 |
+| osmos-evo-A (0.7.3) | 0.984 | 0.996 | 0.997 | 0.997 | 0.997 | 0.995 | 0.996 | 0.997 | 0.469 * | 0.999 | 0.995 | 0.0000 |
 | UD-IQ2_XXS | 0.998 | 0.998 | 0.999 | 1.000 | 0.999 | 0.999 | 0.999 | 0.999 | 0.983 | 0.999 | 0.998 | 0.0000 |
 
-\* evo-A wavers whether to answer with the bare code or a sentence (its first token 0.47 against "I" 0.44); every
-token after it is 0.999+. A session rarely reads 1M at once - a cached prompt reads only what a turn adds; a full read
+\* evo-A wavered whether to answer with the bare code or a sentence (its first token 0.47 against "I" 0.44). The cause
+was the routed experts' gate and up of layers 10-19 (IQ1_S): osmos-evo carries UD-IQ2_XXS's there, and answers 0.955. A session rarely reads 1M at once - a cached prompt reads only what a turn adds; a full read
 follows a client's compaction. The same file before and after 0.7.3's indexer work: UD-IQ2_XXS reads the first 264K
 in **13.4 min** (0.7.2: 18.3), the scored rows' bits the same.
 
@@ -97,9 +98,16 @@ experts, BF16 dense) over the whole vocabulary, against a reference that runs th
 | Pack | Wiki text (8,191 tokens) | Agent traces (27,459 assistant tokens) | Top-1 agreement (Wiki) |
 | --- | --- | --- | --- |
 | `ud-iq2_xxs` | 0.126 ± 0.005 | 0.036 ± 0.001 | 92.4% |
-| `osmos-evo-a` | 0.175 ± 0.006 | 0.048 ± 0.001 | 90.5% |
+| `osmos-evo` | 0.158 ± 0.006 | 0.042 ± 0.001 | 91.2% |
+| `osmos-evo-a` (0.7.5) | 0.175 ± 0.006 | 0.048 ± 0.001 | 90.5% |
 | `ud-iq1_m` | 0.190 ± 0.007 | 0.048 ± 0.001 | 90.3% |
 | `ud-iq1_s` | 0.259 ± 0.008 | 0.066 ± 0.001 | 88.1% |
+
+**What osmos-evo is.** evo-A (below) with the routed experts' gate and up of layers 10-19 at IQ2_XXS (UD-IQ2_XXS's
+tensors), found by probing the one fact evo-A wavered on and bisecting its layers by overlay (DESIGN.md, "0.7.6";
+`tools/evo`). Closer to the model on every measure: agent-trace KL 0.0485 -> 0.0422 (18 standard errors), Wiki 0.175 ->
+0.158; about 5% slower decode than evo-A, and 14-35% faster than UD-IQ2_XXS drafted. It ships as a 23 GB patch on
+evo-A's shards - an install that has evo-A fetches the patch alone.
 
 **What evo-A is.** UD-IQ1_M with the routed experts' down projections of layers 20-39 requantized to Q2_K from
 DeepSeek's MXFP4 originals (unsloth's imatrix), and the attention and the head requantized to Q5_K by GPTQ (Hessians
