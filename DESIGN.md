@@ -3995,6 +3995,52 @@ a sequence's state: the KV cache (the sliding layers' last 1,024; the full layer
 layer, nothing of attn_res's (a token's block states its own). the drafter (mtp.*: DSpark, 5 layers, 7 tokens a step)
 after the main model.
 
+**the engine** (2026-11-14; osmos/ink2/forward.h, src/ink2/hip_forward.c, hip_seq.c). ink2_run's math a step at a
+time: the dense weights resident (~6 GB), the routed experts the membrane's units (warmed an expert of every layer
+at a time, the room the budget's), each distinct pick read once for its tokens (mv_group_tok; ink2_swiglu_rows,
+ink2_moe_sum: the bits of a pick at a time). a sequence's rows are tails - each full layer's keys and values to its
+position, each sliding layer's last window - 1 + 15 (its keys handed in from a tile's start), each layer's four convs'
+last 3 inputs - each kept INK2_MAX_BACK rows past what the next token reads and moved to the front when full (cap 2
+keep + a step's: the move's halves apart). nothing is recurrent, so a rollback is the bits of never having run the
+tokens, a mark the windows and convs (~330 MB), a save the full layers' rows too.
+
+held to ink2_run (ATTN=fa) on UD-IQ1_S, 2,600 wiki tokens in steps of 200, 64, 7 and 1 (the tails moved at ~2,300):
+every row its bits, 11 rollbacks and a save and load the same bits. the first run was not: KLD 1.2e-3, top-1 99.35%.
+two causes, both the flash attention's. a sliding window's first tile began at its block's first query's window -
+a query's keys cut into other tiles in another block (p's f16 rounding is against a tile's running max); the tiles
+now start at a multiple of 16. and **WMMA's sum moves with a value whose p is 0**: a query's own tile holds the keys
+past it - the prompt's next tokens in a whole prompt, none in a step that ends at it (a decode's) - and with them
+real, not zero, one ulp of the output moved (1,652 of 6.7M values; zeroing K past the query changed nothing, a p row
+of zeros left the sum exact). so a row's own tile's p . v is over the values to its key alone (a WMMA a cut, at most
+15 a wave a tile; a decode's one). test_ink2_ops_gpu holds 14 steps - chunks, a prompt's tail, single decodes - to
+the prompt's bits for each layer kind. a kernel that sums a tile in hardware must not let a masked lane's operand in.
+
+**the dialect** (osmos-api). the tokenizer: o200k's expression (pretok_o200k.c; the letter classes' case from
+unicode_case.h), 242 cases and DESIGN.md's 167K tokens the same ids as the checkpoint's tokenizer.json. the template:
+the checkpoint's own (unsloth's GGUF carries a longer reconstruction of a reference server's renderer), 54 chats
+transformers' bytes, 15 refused as it refuses. the turn the model writes (read off UD-IQ1_S): blocks under
+<|message_model|> - thinking (none at all at effort 0), text, a call's (its name the header, {name, args} the body) -
+then <|content_model_end_sampling|>. a block-shaped dialect's header hook says each block's field at a boundary; no
+answer-after (a block's end is every block's: the rule would refuse an answer's end of turn). through osmos-api and
+osmos-serve on UD-IQ1_S: a streamed call, its result, the answer - the second turn's prompt 155 of 175 tokens cached
+(the parsed turn renders to the tokens the model wrote). 3.0 tok/s decode at a 24 GiB room: the speed is next.
+
+**where candidate A's loss is** (its downs IQ2_S in 0-39, IQ3_XXS in 40-47; UD-IQ1_S's IQ3_XXS / IQ4_XS restored a
+group at a time, wiki10k rows 2048 .. 6142 against the reference: A 0.31968, UD 0.28536):
+
+| layers | KLD | recovered | GiB | per GiB |
+| --- | --- | --- | --- | --- |
+| 0-9 | 0.31962 | 0.0001 | 2.7 | ~0 |
+| 10-19 | 0.31393 | 0.0058 | 2.7 | 0.0021 |
+| 20-29 | 0.31197 | 0.0077 | 2.7 | 0.0029 |
+| 30-39 | 0.30755 | 0.0121 | 2.7 | 0.0045 |
+| 30-34 | 0.31091 | 0.0088 | 1.3 | 0.0066 |
+| 35-39 | 0.31572 | 0.0040 | 1.3 | 0.0030 |
+| 40-47 | 0.31335 | 0.0063 | 4.5 | 0.0014 |
+
+the groups add (the five 0.0320 of 0.0343; the halves 0.0128 of 0.0121). the loss is in the middle-late layers, the
+first ten none of it.
+
 ### 0.6.9: a long prompt's steps in memory the expert cache lends (2026-11-12, low-power)
 
 **why large steps.** a prompt step's routed experts are held for the step; each is read and decoded once for all of
