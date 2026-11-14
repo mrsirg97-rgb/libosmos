@@ -69,6 +69,9 @@ bool ops_index_score(const float *q, const void *keys, uint32_t keys_fmt, const 
 bool ops_index_score_fp4(const float *q, const void *keys, const float *w, const int32_t *pos, uint32_t ratio,
                          uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score,
                          uint32_t stride, uint32_t *fallbacks, void *stream);
+bool ops_index_score_dot4(const float *q, const void *keys, const float *w, const int32_t *pos, uint32_t ratio,
+                          uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score,
+                          uint32_t stride, uint32_t *fallbacks, void *stream);
 bool ops_index_score_rows(const float *q, const void *keys, uint32_t keys_fmt, const float *w, const int32_t *pos,
                           uint32_t ratio, const uint32_t *list, const uint32_t *n_list, uint32_t list_stride,
                           uint32_t block, uint32_t heads, uint32_t head_dim, uint32_t n_tok, float *score,
@@ -234,6 +237,15 @@ ops_index_score_fp4 (0.7.3)
   KV_FP4_POW2: each product exact, so the sums fused (fma) - half the instructions. an element whose products could
   leave the normal range (its slot's smallest nonzero |q| x its row's smallest |k| under 2^-126, or its largest at
   2^127) summed as ops_index_score sums it (counted into fallbacks, when not NULL). ops_index_score_rows the same.
+
+ops_index_score_dot4 (0.7.4)
+  ops_index_score_fp4's scores (ops_index_score's bits; q FP4-rounded, keys KV_FP4_POW2, head_dim 128) on packed
+  int8 dots: a 32-value block's values I 2^E (I -12 .. 12; a key's E its scale's - 1, q's checked on the grid), its
+  dot an integer (v_dot4_i32_iu8, 4 codes a word: a quarter of the LDS reads a product) times 2^(Eq + Ek), the 4
+  blocks added in F32 - exact, so the sequential sum's bits, when the blocks both q and key code have Eq + Ek within
+  9 of each other and every E within +-55. an element outside (a spread past 9, a scale past the bounds or NaN's, a
+  q block off the grid) summed as ops_index_score sums it (counted into fallbacks, when not NULL). select_rows' scoring
+  of the unmasked index layers: 2.45x the fused kernel's speed at 1M rows (ixbench).
 
 ops_index_score_rows (0.7.3)
   ops_index_score_fp4 over only a token's listed blocks' rows (q FP4-rounded, as there) (list + t list_stride: n_list[t] block ids, each `block`

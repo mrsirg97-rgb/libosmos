@@ -148,6 +148,9 @@ static bool select_rows(Forward *f, int l, int src, char *err)
                                           b->wix + (uint64_t)i * nh, b->pos + i, ratio,
                                           b->clist + (uint64_t)(i - c0) * CB, b->clist_n + (i - c0), CB, blk, nh, ih,
                                           run, sc, f->score_stride, NULL)
+                   : ih == 128 /* (0.7.4) the int8 dots' (ops_index_score_dot4): the same bits, 2.4x the speed */
+                   ? ops_index_score_dot4(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh,
+                                          b->pos + i, ratio, max_n, nh, ih, run, sc, f->score_stride, NULL, NULL)
                    : ops_index_score_fp4(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh,
                                          b->pos + i, ratio, max_n, nh, ih, run, sc, f->score_stride, NULL, NULL));
     }

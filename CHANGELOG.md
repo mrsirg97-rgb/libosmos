@@ -24,6 +24,11 @@
   - the candidate source's block keys folded once, not in each selection pass (1.5-3.9x on that step);
   - the indexer's sums fused (`fma`) for its FP4 q and keys - each product exact, so the bits of a multiply then an
     add; a guard where a product could leave the normal range - at 4 tokens a tile (1.1-1.2x).
+  - the unmasked index layers' scores on the packed int8 dot (`v_dot4_i32_iu8`): FP4 q and keys as integer codes 4 a
+    word, a 32-value block's dot an exact integer, the 4 blocks added in F32 under their powers of two - the plain
+    kernel's bits (an element whose sequential F32 sum would not be exact - its blocks' scales more than 9 powers
+    apart, a scale past 2^+-55 - summed the plain kernel's way): 2.45x the fused kernel at 1M rows (163.5 -> 66.8 ms
+    a 128-token call).
 - **Long prompts faster at depth (Qwen)**: QSA's indexer scores register-blocked (a thread 4 tokens x 4 blocks x its 4
   heads; the old kernel's bits, kept as the reference) and their scratch room for 128 tokens' rows (67 MB at 512K):
   a 457K-token read on UD-IQ3_XXS **12.3 minutes** from 16.5, 512 tok/s at 416K from 341, the scored rows byte for

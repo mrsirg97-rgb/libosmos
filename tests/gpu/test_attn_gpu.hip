@@ -323,6 +323,81 @@ static void fp4(uint32_t heads, bool wild) {
               heads, wild ? ", products past the normal range" : "", (unsigned long long) n, nfb);
 }
 
+// ops_index_score_dot4 (0.7.4): the int8 dots' scores against ops_index_score's, every bit, q and keys FP4-rounded.
+// wild 1 scales some q blocks by 2^20 (their E's 20 from the rest: the sequential sum inexact, the fallback's) and
+// zeroes some blocks of q and of the keys (no nonzero code: not counted against the spread); wild 2 is fp4's (q
+// blocks by 2^-120 and 2^60, keys by 2^70: E's past +-55); wild 3 whole q heads by 2^-100 or 2^80 and whole keys by
+// 2^-40 or 2^60 (no spread, the products under or over the normal range). the fallbacks counted, so each path is seen
+// taken
+static void dot4(uint32_t heads, int wild) {
+  const uint32_t rows = (uint32_t) (kPos0 + kIxTok) / kIxRatio, stride = rows;
+  std::vector<float> qh((size_t) kIxTok * heads * kIxHd), kh((size_t) rows * kIxHd), wh((size_t) kIxTok * heads);
+  for (float& v : qh) v = uniform();
+  for (float& v : kh) v = uniform();
+  for (float& v : wh) v = uniform();
+  for (size_t r = 0; wild && r < (size_t) kIxTok * heads; r++)
+    for (uint32_t b = 0; b < kIxHd / 32; b++) {
+      const uint32_t x = wild == 1 ? (uint32_t) (r * 7 + b * 3) % 11 : (uint32_t) (r * 5 + b) % 9;
+      const uint32_t y = (uint32_t) r % 5;  // (wild 3: the head's, every block)
+      const float f = wild == 1   ? (x == 0 ? 0x1p20f : x == 1 ? 0.0f : 1.0f)
+                      : wild == 2 ? (x == 0 ? 0x1p-120f : x == 1 ? 0x1p60f : 1.0f)
+                                  : (y == 0 ? 0x1p-100f : y == 1 ? 0x1p80f : 1.0f);
+      for (uint32_t d = 0; d < 32; d++) qh[r * kIxHd + b * 32 + d] *= f;
+    }
+  for (size_t r = 0; wild && r < rows; r++) {
+    if (wild == 1 && r % 13 == 0)
+      for (uint32_t d = 32; d < 64; d++) kh[r * kIxHd + d] = 0.0f;
+    if (wild == 2 && r % 7 == 0)
+      for (uint32_t d = 0; d < kIxHd; d++) kh[r * kIxHd + d] *= 0x1p70f;
+    if (wild == 3 && r % 3 != 2)
+      for (uint32_t d = 0; d < kIxHd; d++) kh[r * kIxHd + d] *= r % 3 ? 0x1p60f : 0x1p-40f;
+  }
+  std::vector<int32_t> ph(kIxTok);
+  for (uint32_t t = 0; t < kIxTok; t++) ph[t] = kPos0 + (int32_t) t;
+  float *q, *k, *w, *sa, *sb;
+  int32_t* pos;
+  uint8_t* kp;
+  uint32_t* fb;
+  const size_t scb = (size_t) kIxTok * stride * 4;
+  CHECK(hipMalloc(&q, qh.size() * 4) == hipSuccess && hipMalloc(&k, kh.size() * 4) == hipSuccess);
+  CHECK(hipMalloc(&w, wh.size() * 4) == hipSuccess && hipMalloc(&sa, scb) == hipSuccess && hipMalloc(&sb, scb) == hipSuccess);
+  CHECK(hipMalloc(&pos, kIxTok * 4) == hipSuccess && hipMalloc(&fb, 4) == hipSuccess);
+  CHECK(hipMalloc(&kp, rows * kv_row_bytes(KV_FP4_POW2, kIxHd)) == hipSuccess);
+  CHECK(hipMemcpy(q, qh.data(), qh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(k, kh.data(), kh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(w, wh.data(), wh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(pos, ph.data(), kIxTok * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(ops_fp4_round(k, kh.size(), KV_FP4_POW2_BLOCK, false, kp, kIxHd, nullptr));
+  CHECK(ops_fp4_round(q, qh.size(), KV_FP4_POW2_BLOCK, false, nullptr, 0, nullptr));
+  CHECK(hipMemset(sa, 0x7F, scb) == hipSuccess && hipMemset(sb, 0x7F, scb) == hipSuccess && hipMemset(fb, 0, 4) == hipSuccess);
+  CHECK(ops_index_score(q, kp, KV_FP4_POW2, w, pos, kIxRatio, rows, heads, kIxHd, kIxTok, sa, stride, nullptr));
+  CHECK(ops_index_score_dot4(q, kp, w, pos, kIxRatio, rows, heads, kIxHd, kIxTok, sb, stride, fb, nullptr));
+  std::vector<float> a(scb / 4), b(scb / 4);
+  uint32_t nfb = 0;
+  CHECK(hipMemcpy(a.data(), sa, scb, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(b.data(), sb, scb, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(&nfb, fb, 4, hipMemcpyDeviceToHost) == hipSuccess);
+  uint64_t n = 0, bad = 0;
+  for (uint32_t t = 0; t < kIxTok; t++) {
+    const size_t vis = (size_t) (ph[t] + 1) / kIxRatio;
+    for (size_t c = 0; c < vis; c++)
+      if (std::memcmp(&a[(size_t) t * stride + c], &b[(size_t) t * stride + c], 4) && bad++ < 4)
+        std::printf("  dot4: token %u row %zu: %a, the plain kernel's %a\n", t, c, b[(size_t) t * stride + c],
+                    a[(size_t) t * stride + c]);
+    n += vis;
+    CHECK(std::memcmp(&a[(size_t) t * stride + vis], &b[(size_t) t * stride + vis], (stride - vis) * 4) == 0);  // unwritten
+  }
+  if (bad) std::printf("  dot4: %llu of %llu scores differ\n", (unsigned long long) bad, (unsigned long long) n);
+  CHECK(!bad);
+  CHECK(wild ? nfb > 0 : nfb == 0);
+  for (void* p : {(void*) q, (void*) k, (void*) kp, (void*) w, (void*) sa, (void*) sb, (void*) pos, (void*) fb})
+    CHECK(hipFree(p) == hipSuccess);
+  std::printf("  the indexer on int8 dots (FP4 q and keys), %u heads%s: %llu scores the plain kernel's bits (%u of %llu"
+              " head sums the sequential fallback's)\n",
+              heads, wild == 1 ? ", q blocks 2^20 apart" : wild == 2 ? ", E's past +-55" : wild == 3 ? ", products past the normal range" : "", (unsigned long long) n,
+              nfb, (unsigned long long) n * heads);
+}
+
 int main() {
   std::printf("[test_attn_gpu] start\n");
   int ndev = 0;
@@ -428,6 +503,7 @@ int main() {
   fp4(24, false);
   fp4(32, true);
   fp4(24, true);
+  for (int wild = 0; wild < 4; wild++) dot4(32, wild), dot4(24, wild);
   std::printf("[test_attn_gpu] ok\n");
   return 0;
 }

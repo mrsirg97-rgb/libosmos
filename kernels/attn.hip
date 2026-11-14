@@ -238,6 +238,218 @@ __global__ __launch_bounds__((kIxHeads * TOK / RR) * (kIxRows / CC)) void index_
   }
 }
 
+// 0.7.4: the indexer's scores on the packed int8 dots (ops_index_score_dot4), ops_index_score's bits. q and the keys
+// FP4 (a key E2M1 codes under a UE8M0 power of two a 32; q ops_fp4_round's F32 on that grid): a block's 32 values
+// each I 2^E, I an integer of -12 .. 12 (a key's E its scale's - 1; q's the block's largest |value|'s exponent - 3,
+// every value checked to be I 2^E), so a head's block dot an integer (|sum| <= 32 x 144: 8 v_dot4_i32_iu8 of 4 int8
+// codes a word) times 2^(Eq + Ek) - a quarter of the fused kernel's LDS reads a product. index_score_kernel's own
+// sum (d ascending, a multiply then an add in F32) is exact when the blocks whose q and key both hold a nonzero code
+// have Eq + Ek within 9 of each other (a partial sum under 2^24 of the smallest one's unit) and every E within +-55
+// (no product or sum leaves the normal range): then this sum, the blocks' integers times their powers added in F32
+// (exact too), is its bits. an element outside those (a q block off the grid, a NaN scale, the spread past 9: rare,
+// the keys RMS-normed) is summed index_score_kernel's way (counted into fallbacks). then relu x w and the heads'
+// 32-lane xor tree, as there. a block 4 tokens x 32 heads by NT tiles of 64 rows, q staged once; a thread 2 tokens x
+// heads j, j + 8, j + 16, j + 24 by 4 rows - the tree's first two levels its own adds, the last three lane shuffles
+// (j a lane's low 3 bits)
+constexpr int kDHd = 128, kDB = kDHd / 32, kDW = kDHd / 4, kDTok = 4, kDM = kDTok * kIxHeads, kDRows = 64;
+constexpr int kDThreads = 256, kDSpread = 9, kDEmin = -55, kDEmax = 55;
+constexpr int kDTiles = 8;  // a block's row tiles: 8 (512 rows) 66 ms at 1M, 4 71, 2 82, 1 94, 16 66 (scratch d4b)
+typedef int i4 __attribute__((ext_vector_type(4)));
+// 4 E2M1 codes (a byte each, low nibbles) as int8 2 x their values (0 1 2 3 4 6 8 12, signed): two byte permutes, a
+// table each sign
+__device__ inline uint32_t e2m1_int4(uint32_t x) {
+  const uint32_t sel = x & 0x07070707u, neg = ((x >> 3) & 0x01010101u) * 0xFFu;
+  const uint32_t p = __builtin_amdgcn_perm(0x0C080604u, 0x03020100u, sel);
+  const uint32_t n = __builtin_amdgcn_perm(0xF4F8FAFCu, 0xFDFEFF00u, sel);
+  return (p & ~neg) | (n & neg);
+}
+__device__ inline float pow2(int e) { return __uint_as_float((uint32_t) (e + 127) << 23); }  // e within +-126
+// an element's exact-sum test: no bad scale, its both-coded blocks' Eq + Ek within kDSpread (g: 4 int8 E's a word,
+// INT8_MIN a block with no nonzero code)
+__device__ inline bool dot4_exact(uint32_t gq, uint32_t gk) {
+  int lo = INT32_MAX, hi = INT32_MIN;
+  for (int b = 0; b < kDB; b++) {
+    const int eq = (int8_t) (gq >> (8 * b)), ek = (int8_t) (gk >> (8 * b));
+    if (eq != INT8_MIN && ek != INT8_MIN) lo = min(lo, eq + ek), hi = max(hi, eq + ek);
+  }
+  return lo > hi || hi - lo <= kDSpread;
+}
+__device__ inline int dot4_span(uint32_t g) {  // a slot's (row's) coded blocks' E's spread
+  int lo = INT32_MAX, hi = INT32_MIN;
+  for (int b = 0; b < kDB; b++) {
+    const int e = (int8_t) (g >> (8 * b));
+    if (e != INT8_MIN) lo = min(lo, e), hi = max(hi, e);
+  }
+  return lo > hi ? 0 : hi - lo;
+}
+template <int NT>
+__global__ __launch_bounds__(kDThreads) void index_score_dot4_kernel(
+    const float* __restrict__ q, const uint8_t* __restrict__ keys, const float* __restrict__ w,
+    const int32_t* __restrict__ pos, uint32_t ratio, uint32_t heads, uint32_t n_tok, float* __restrict__ score,
+    uint32_t stride, uint32_t* __restrict__ fallbacks) {
+  constexpr int kRowBytes = kDHd / 2 + kDB;  // 68
+  // the codes 4 a word, word 2i the values 8i, 8i + 2, 8i + 4, 8i + 6 and word 2i + 1 the odd ones (a key byte's
+  // low nibbles, its high: any order of d the same integer): q's word x of slot (token tt, head h) at
+  // [x][(tt * 8 + h % 8) * 4 + h / 8] - a thread's 4 heads of a token one int4; the keys' at [x][row]
+  __shared__ __attribute__((aligned(16))) int32_t qs[kDW][kDM];
+  __shared__ __attribute__((aligned(16))) int32_t ks[kDW][kDRows];
+  __shared__ __attribute__((aligned(16))) float sq[kDB][kDM], sk[kDB][kDRows];  // 2^E (a block with no code: 1)
+  __shared__ uint32_t gq[kDM];                                                  // the E's (dot4_exact's)
+  __shared__ __attribute__((aligned(4))) int8_t gk[kDRows][kDB];
+  __shared__ uint8_t bq[kDM];
+  __shared__ __attribute__((aligned(4))) uint8_t bk[kDRows][kDB];  // a scale outside the bounds (NaN's, any block)
+  const uint32_t tid = threadIdx.x, t0 = blockIdx.y * kDTok;
+  uint32_t n_hi = 0;  // the most rows a token of the tile sees
+  for (uint32_t t = t0; t < t0 + kDTok && t < n_tok; t++) n_hi = max(n_hi, visible(pos, t, ratio));
+  const uint32_t r00 = blockIdx.x * NT * kDRows;
+  if (r00 >= n_hi) return;
+  // the keys' staging: thread tid row tid % 64's block tid / 64 - its 16 bytes of codes and its scale
+  const uint32_t sr = tid % kDRows, sb = tid / kDRows;
+  uint32_t kraw[4], kscale = 0;
+  const auto fetch = [&](uint32_t r0) {
+    const uint32_t r = r0 + sr;
+    if (r < n_hi) {
+      const uint32_t* p = (const uint32_t*) (keys + (uint64_t) r * kRowBytes + sb * 16);
+      for (int i = 0; i < 4; i++) kraw[i] = p[i];
+      kscale = keys[(uint64_t) r * kRowBytes + kDHd / 2 + sb];
+    } else {
+      for (int i = 0; i < 4; i++) kraw[i] = 0;
+      kscale = 127;
+    }
+  };
+  fetch(r00);
+  if (tid < (uint32_t) kDM) bq[tid] = 0;
+  __syncthreads();
+  // q's: two (slot, block)s a thread - 32 values, their largest |value| the exponent, each value checked I 2^E
+  for (uint32_t p = tid; p < (uint32_t) (kDM * kDB); p += kDThreads) {
+    const uint32_t s = p % kDM, b = p / kDM, tt = s / kIxHeads, h = s % kIxHeads, t = t0 + tt;
+    const uint32_t at = (tt * 8 + h % 8) * 4 + h / 8;
+    f4 v[8];
+    if (t < n_tok && h < heads) {
+      const f4* src = (const f4*) (q + ((uint64_t) t * heads + h) * kDHd + b * 32);
+      for (int i = 0; i < 8; i++) v[i] = src[i];
+    } else {
+      for (int i = 0; i < 8; i++) v[i] = f4{};
+    }
+    float m = 0.0f;
+    for (int i = 0; i < 8; i++)
+      for (int e = 0; e < 4; e++) m = fmaxf(m, fabsf(v[i][e]));  // (a NaN: fmaxf drops it; the check below finds it)
+    const uint32_t mx = (__float_as_uint(m) >> 23) & 0xFF;
+    const int E = (int) mx - 127 - 3;
+    bool bad = m != 0.0f && (mx == 0 || mx == 0xFF || E < kDEmin || E > kDEmax);
+    const bool coded = m != 0.0f && !bad;
+    const float inv = coded ? pow2(-E) : 0.0f, sc = coded ? pow2(E) : 1.0f;
+    int32_t word[8] = {};
+    for (int d = 0; d < 32; d++) {
+      const float x = v[d / 4][d % 4], y = x * inv;
+      const int I = (int) y;
+      bad |= coded && ((float) I * sc != x || I > 12 || I < -12);
+      bad |= !coded && x != x;  // (a NaN past an all-zero m)
+      word[d / 8 * 2 + d % 2] |= (int32_t) ((uint32_t) (I & 0xFF) << (8 * (d % 8 / 2)));
+    }
+    for (int i = 0; i < 8; i++) qs[b * 8 + i][at] = bad ? 0 : word[i];
+    sq[b][at] = bad ? 1.0f : sc;
+    reinterpret_cast<int8_t*>(&gq[at])[b] = coded && !bad ? (int8_t) E : (int8_t) INT8_MIN;
+    if (bad) bq[at] = 1;
+  }
+  const int lane = (int) (tid % kWave), wave = (int) (tid / kWave), j = lane % 8;
+  const int tp = wave / 4, tx = (wave % 4) * 4 + lane / 8;  // tokens 2 tp, 2 tp + 1; rows tx * 4 ..
+  const int qa = (2 * tp * 8 + j) * 4, qb = ((2 * tp + 1) * 8 + j) * 4;  // the thread's two int4s of q
+  int qsp = 0;  // the thread's slots' spread (and a bad scale), the tiles' own
+  bool q_bad = false;
+  __syncthreads();
+  for (int tt = 0; tt < 2; tt++)
+    for (int a = 0; a < 4; a++) {
+      const int at = (tt ? qb : qa) + a;
+      qsp = max(qsp, dot4_span(gq[at])), q_bad |= bq[at] != 0;
+    }
+  for (int n = 0; n < NT; n++) {
+    const uint32_t r0 = r00 + n * kDRows;
+    if (r0 >= n_hi) break;
+    if (n) __syncthreads();  // the last tile's reads done
+    {  // the keys' codes and E
+      bool any = false;
+      for (int i = 0; i < 4; i++) any |= (kraw[i] & 0x77777777u) != 0;
+      const int E = (int) kscale - 127 - 1;
+      for (int i = 0; i < 4; i++) {
+        ks[sb * 8 + 2 * i][sr] = (int32_t) e2m1_int4(kraw[i] & 0x0F0F0F0Fu);
+        ks[sb * 8 + 2 * i + 1][sr] = (int32_t) e2m1_int4((kraw[i] >> 4) & 0x0F0F0F0Fu);
+      }
+      const bool bad = kscale == 0xFF || (any && (E < kDEmin || E > kDEmax));
+      sk[sb][sr] = any && !bad ? pow2(E) : 1.0f;
+      gk[sr][sb] = any && !bad ? (int8_t) E : (int8_t) INT8_MIN;
+      bk[sr][sb] = bad;
+    }
+    __syncthreads();
+    if (n + 1 < NT) fetch(r0 + kDRows);  // the next tile's keys in flight
+    float acc[2][4][4] = {};  // [token][head j + 8a][row]
+#pragma unroll
+    for (int b = 0; b < kDB; b++) {
+      int ia[2][4][4] = {};
+#pragma unroll
+      for (int x = 0; x < 8; x++) {
+        const int wd = b * 8 + x;
+        const i4 a0 = *(const i4*) &qs[wd][qa], a1 = *(const i4*) &qs[wd][qb], kb = *(const i4*) &ks[wd][tx * 4];
+        for (int a = 0; a < 4; a++)
+          for (int c = 0; c < 4; c++) {
+            ia[0][a][c] = __builtin_amdgcn_sudot4(true, a0[a], true, kb[c], ia[0][a][c], false);
+            ia[1][a][c] = __builtin_amdgcn_sudot4(true, a1[a], true, kb[c], ia[1][a][c], false);
+          }
+      }
+      const f4 s0 = *(const f4*) &sq[b][qa], s1 = *(const f4*) &sq[b][qb], sc = *(const f4*) &sk[b][tx * 4];
+      for (int a = 0; a < 4; a++)
+        for (int c = 0; c < 4; c++) {  // an exact product, so the fma the multiply-then-add's bits
+          acc[0][a][c] = __fmaf_rn((float) ia[0][a][c], s0[a] * sc[c], acc[0][a][c]);
+          acc[1][a][c] = __fmaf_rn((float) ia[1][a][c], s1[a] * sc[c], acc[1][a][c]);
+        }
+    }
+    // the guard: the thread's slots' and rows' spreads summed under kDSpread, else each element's own test
+    int ksp = 0;
+    bool any_bad = q_bad;
+    for (int c = 0; c < 4; c++)
+      ksp = max(ksp, dot4_span(*(const uint32_t*) gk[tx * 4 + c])), any_bad |= *(const uint32_t*) bk[tx * 4 + c] != 0;
+    if (any_bad || qsp + ksp > kDSpread) {
+      for (int tt = 0; tt < 2; tt++)
+        for (int a = 0; a < 4; a++)
+          for (int c = 0; c < 4; c++) {
+            const int at = (tt ? qb : qa) + a, rc = tx * 4 + c;
+            const uint32_t t = t0 + 2 * tp + tt, h = j + 8 * a, r = r0 + rc;
+            if (t >= n_tok || h >= heads || r >= n_hi) continue;
+            if (!bq[at] && !*(const uint32_t*) bk[rc] && dot4_exact(gq[at], *(const uint32_t*) gk[rc])) continue;
+            const float* qr = q + ((uint64_t) t * heads + h) * kDHd;  // index_score_kernel's sum
+            const uint8_t* kr = keys + (uint64_t) r * kRowBytes;
+            float sum = 0.0f;
+            for (uint32_t d = 0; d < (uint32_t) kDHd; d += 4) {
+              const f4 kv4 = kv::load4(KV_FP4_POW2, kr, kDHd, d);
+              for (int x = 0; x < 4; x++) sum = __fadd_rn(sum, __fmul_rn(qr[d + x], kv4[x]));
+            }
+            acc[tt][a][c] = sum;
+            if (fallbacks) atomicAdd(fallbacks, 1u);
+          }
+    }
+    // relu x w, then the heads' tree: + 16 and + 8 here (heads j + 8a), + 4, + 2, + 1 across the lanes
+    for (int tt = 0; tt < 2; tt++) {
+      const uint32_t t = t0 + 2 * tp + tt;
+      float wv[4];
+      for (int a = 0; a < 4; a++) {
+        const uint32_t h = j + 8 * a;
+        wv[a] = t < n_tok && h < heads ? w[(uint64_t) t * heads + h] : 0.0f;
+      }
+      for (int c = 0; c < 4; c++) {
+        float v[4];
+        for (int a = 0; a < 4; a++) {
+          const uint32_t h = j + 8 * a;
+          v[a] = t < n_tok && h < heads ? fmaxf(acc[tt][a][c], 0.0f) * wv[a] : 0.0f;
+        }
+        float z = (v[0] + v[2]) + (v[1] + v[3]);
+        for (int off = 4; off > 0; off >>= 1) z = z + __shfl_xor(z, off, kWave);
+        const uint32_t r = r0 + tx * 4 + c;
+        if (j == 0 && t < n_tok && r < visible(pos, t, ratio)) score[(uint64_t) t * stride + r] = z;
+      }
+    }
+  }
+}
+
 // a float's order as an unsigned's
 __device__ inline uint32_t order(float f) {
   const uint32_t u = __float_as_uint(f);
@@ -446,6 +658,19 @@ extern "C" bool ops_index_score_fp4(const float* q, const void* keys, const floa
   static_assert(rc == 84, "the thread's block: 8 x 4");
   const auto with_rc = [&](auto T) { launch(T, integral_constant<int, 8>{}, integral_constant<int, 4>{}); };
   with_rc(integral_constant<int, tok>{});
+  return ok();
+}
+
+extern "C" bool ops_index_score_dot4(const float* q, const void* keys, const float* w, const int32_t* pos,
+                                     uint32_t ratio, uint32_t max_n, uint32_t heads, uint32_t head_dim, uint32_t n_tok,
+                                     float* score, uint32_t stride, uint32_t* fallbacks, void* stream) {
+  if (!ratio || !max_n || max_n > stride || !heads || heads > (uint32_t) kWave || head_dim != (uint32_t) kDHd ||
+      !n_tok)
+    return false;
+  constexpr int span = kDTiles * kDRows;
+  index_score_dot4_kernel<kDTiles><<<dim3((max_n + span - 1) / span, (n_tok + kDTok - 1) / kDTok), kDThreads, 0,
+                                     st(stream)>>>(q, (const uint8_t*) keys, w, pos, ratio, heads, n_tok, score,
+                                                   stride, fallbacks);
   return ok();
 }
 

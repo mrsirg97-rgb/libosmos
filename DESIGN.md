@@ -1897,6 +1897,37 @@ the scores' scratch: its 4M-float floor gave 32-token pieces at 512K, the new ti
 picks the same; test_q4x_qsa_gpu (llama.cpp's tensors and the double's picks, exactly) ok. end to end, the 457K
 recall stream: its 98 scored rows byte for byte the old kernel's; 12.3 min from 16.5 (751, 751, 649, 546, 512 tok/s
 at 64K, 128K, 256K, 384K, 416K - from 751, 614, 478, 375, 341).
+## 0.7.3: the indexer's scores on int8 dots (2026-11-13)
+
+ops_index_score_fp4 (the fused kernel) is bound by its LDS reads: a thread reads 12 staged floats for 32 fmas, and
+the fma itself bought only 1.04-1.18x; a larger thread block (8 x 8, 16 x 4) spills. at 1M it is ~3.6 ms of a ~7.4 ms
+token. both its operands are FP4 under a power of two a 32: a value I 2^E, I an integer of -12 .. 12 - so a head's
+32-value block dot is an integer (|sum| <= 32 x 144) times 2^(Eq + Ek), 8 v_dot4_i32_iu8 of 4 int8 codes a word.
+ops_index_score_dot4 keeps the fused kernel's tile (4 tokens x 32 heads by 64 rows, 8 x 4 a thread) but stages the
+codes (q's from its F32 values: E the block's largest |value|'s exponent - 3, each value checked I 2^E with |I| <= 12;
+the keys' through two byte permutes, a table a sign) and a 2^E a (slot or row, block): a quarter of the LDS reads a
+product, the 4 blocks' integers then added in F32 (an exact fma each). the heads' tree is laid in the thread: a thread
+holds a token's heads j, j + 8, j + 16, j + 24 (j its lane's low 3 bits), so the tree's +16 and +8 are its own adds,
++4 +2 +1 lane shuffles - no [slot][row] sums in LDS, so q stays staged over 8 row tiles (512 rows) a block.
+
+exactness: the plain kernel's sum (d ascending, F32) is exact when the blocks where both q and key hold a nonzero
+code have Eq + Ek within 9 of each other (every partial sum under 2^24 of the smallest one's unit: 4 x 4608 x 2^9
+< 2^24) and every E within +-55 (no product or sum leaves the normal range); then the block path is exact too, so the
+same bits. a thread tests its slots' spreads plus its rows' against 9 (q's once, a tile's keys each tile); past it,
+each element's own blocks; one outside (or a q block off the grid, a NaN scale even on an all-zero block) is summed
+the plain way from global memory, counted into fallbacks. the guard is the dropped WMMA attempt's (ix2-073-wmma
+2a83b4a), the bound the same. v_dot4_i32_iu8 is half rate on gfx1151 (3.46 T lane-ops/s against the fma's 6.96,
+scratch rate.hip): the dots alone 40 ms at 1M, the kernel 66.8 - the rest the staging, the block sums, the guard and
+the tree (the block sums' removed, as a hack: -3 ms; the keys' decode by permutes, the q spans hoisted: -6).
+
+tests: test_attn_gpu's `dot4` against ops_index_score bit for bit, 13 tokens x ~3,006 rows, 32 and 24 heads: typical
+data 0 fallbacks; q blocks 2^20 apart with zeroed q and key blocks (445,055 of 1,249,344 head sums fallen back, 32
+heads), fp4's wild (q blocks 2^-120 / 2^60, keys 2^70: 773,451) and whole heads and keys scaled out of the normal
+range (751,037) - every score the bits. mutations: the guard off, 30,346 of 39,042 scores differ (the spread case);
+the E bounds +-126, 4,379 differ (the range case). ixbench (128 tokens, performance profile): 262K rows 41.2 -> 16.2
+ms, 524K 81.9 -> 33.0, 1M 163.5 -> 66.8 (2.45x the fused, 2.70x the plain; 0 bits differ, 0 fallbacks). a block's
+row tiles: 1 94 ms, 2 82, 4 71, 8 66, 16 66 at 1M. select_rows scores the unmasked index layers with it (head_dim
+128; else the fused kernel); the candidate layers' gathered tiles (TOK 1) stay on ops_index_score_rows.
 
 ## the MXFP8 Engram pack (design, 2026-11-04)
 
