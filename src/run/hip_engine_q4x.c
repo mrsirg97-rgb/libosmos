@@ -234,9 +234,20 @@ static bool s_draft_all(void *p, OsmosSeq *const *seqs, const int32_t *y, uint32
   return true;
 }
 
+static uint64_t s_mark_bytes(const void *s) { return q4x_seq_mark_bytes(s); }
+static bool s_mark_save(const void *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
+{
+  return q4x_seq_mark_save(s, out, bytes, err);
+}
+static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
+{
+  return q4x_seq_mark_load(s, in, bytes, err);
+}
+
 const OsmosFamily osmos_q4x = {
     "qwen4exp", m_open,     m_close,       e_create, e_destroy, e_identity, e_room,     e_stats,
     e_batch,    e_logits,   e_greedy,      e_block,  s_create,  s_destroy,  s_prompt,   s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft,    s_draft_all,
     NULL, /* a prompt's read its batch: its small and large steps one math (0.7.1's replay: the same bits on every path) */
+    s_mark_bytes, s_mark_save, s_mark_load, /* a mark the states a later token changes (q4x_seq_mark_save) */
 };

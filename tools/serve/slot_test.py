@@ -10,8 +10,8 @@ then go through a prompt step's experts (WMMA), not the decode's (the lane) - th
   reference A, its next turn in place, B, the turn again  slots off: the turn continues A in place (the bits a
                                                         conversation never set aside answers with); after B, the
                                                         turn reads from token 0
-  in-run   A, B, A's next turn, one process             the turn reuses A and its answer (all but the answer's last
-                                                        token), and answers the reference's bits
+  in-run   A, B, A's next turn, one process             the turn reuses A's point (all but A's last token: a kept
+                                                        conversation its prompt's, 0.7.5), the reference's bits
   kept     A, B, then QUIT                              the folder keeps both (2 .bin + 2 .meta) under its default cap
   restart  A's next turn alone, a new process           the same reuse, from the folder; the same bits (greedy and,
                                                         with --dspark, drafted)
@@ -83,7 +83,12 @@ def main():
         e = engine(False, f"{tmp}/none")
         ra = e.gen(A, 32)
         turn = A + ra["tokens"] + new
-        held = len(A) + len(ra["tokens"]) - 1  # A and its answer, all but its last token (printed, never fed)
+        # in place: Qwen continues on A and its answer, all but its last token (printed, never fed); a family that
+        # reads apart (DeepSeek) from A's point. kept (set aside, every family since 0.7.5): A's point, one token
+        # short of its end - a decoded answer is what a client writes back otherwise
+        apart = b"deepseek41" in open(a.model, "rb").read(1 << 20)
+        held = len(A) - 1 if apart else len(A) + len(ra["tokens"]) - 1
+        point = len(A) - 1
         rt = e.gen(turn, 32)
         rb = e.gen(B, 32)
         r0 = e.gen(turn, 32)
@@ -103,8 +108,8 @@ def main():
         r1t = e.gen(turn, 32)
         check(f"in-run: A and B answer as the reference", hash_tokens(r1a["tokens"]) == ref_a and
               hash_tokens(r1b["tokens"]) == ref_b)
-        check(f"in-run: the turn reuses A and its answer ({r1t['reused']} of {held}), in {r1t['s']:.1f} s against "
-              f"{r0['s']:.1f} read from token 0", r1t["reused"] == held)
+        check(f"in-run: the turn reuses A's point ({r1t['reused']} of {point}), in {r1t['s']:.1f} s against "
+              f"{r0['s']:.1f} read from token 0", r1t["reused"] == point)
         check(f"in-run: the turn's answer the reference's bits ({hash_tokens(r1t['tokens']):016x})",
               hash_tokens(r1t["tokens"]) == ref_t)
         e.quit()
@@ -127,15 +132,15 @@ def main():
         note = next((n for n in e.notes if n.startswith("NOTE slots:")), "")
         r2 = e.gen(turn, 32)
         check(f"restart: {note[11:]}", "2 conversations" in note)
-        check(f"restart: the turn reuses A from the folder ({r2['reused']} of {held}), in {r2['s']:.1f} s",
-              r2["reused"] == held)
+        check(f"restart: the turn reuses A from the folder ({r2['reused']} of {point}), in {r2['s']:.1f} s",
+              r2["reused"] == point)
         check("restart: the turn's answer the reference's bits", hash_tokens(r2["tokens"]) == ref_t)
         e.quit()
         if a.dspark:
             e = engine(True, kept_d)
             r3 = e.gen(turn, 32, spec=1)
             check(f"restart, drafted: the turn reuses A ({r3['reused']}), its answer the reference's bits",
-                  r3["reused"] == held and hash_tokens(r3["tokens"]) == ref_t)
+                  r3["reused"] == point and hash_tokens(r3["tokens"]) == ref_t)
             e.quit()
 
         print("evict: A, B, C into a folder capped at A+B's bytes", flush=True)
@@ -149,7 +154,7 @@ def main():
         ra2 = e.gen(turn, 8)                    # folder when RAM has no room - where it would push B out first)
         e.quit()
         check(f"evict: A gone (its turn reused {ra2['reused']}), B kept (its turn reused {rb2['reused']})",
-              ra2["reused"] == 0 and rb2["reused"] == len(B) + len(rb["tokens"]) - 1)
+              ra2["reused"] == 0 and rb2["reused"] == len(B) - 1)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"{'every check passed' if not failed else f'{len(failed)} failed'}", flush=True)

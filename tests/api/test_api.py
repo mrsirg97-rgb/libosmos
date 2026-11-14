@@ -216,6 +216,33 @@ class Api(Served, unittest.TestCase):
         gen = [l for l in self.log() if l.startswith("GEN ")][-1].split()
         self.assertTrue(gen[-1].endswith(ids("<｜Assistant｜></think>")))
 
+    def test_3m_mark(self):  # 0.7.5: where the next user turn leaves the prompt, when reasoning is dropped there
+        self.ready()
+        self.reply("done</think>ok" + EOS)
+        call = {"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{}"}}
+        loop = [{"role": "system", "content": "be brief"}, {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "", "reasoning_content": "look", "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": "c1", "content": "r"}]
+        tools = [{"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}]
+
+        def gen(body):
+            r = self.post(dict(body, temperature=0))
+            self.assertEqual(r.status, 200, r.read()[:300])
+            g = self.last_gen()
+            keys = dict(k.split("=", 1) for k in g[2:-1])
+            return keys, g[-1].split(",")
+
+        keys, p = gen({"messages": loop})  # thinking, no tools, past the user: its reasoning dropped next turn
+        self.assertIn("mark", keys)
+        m = int(keys["mark"])
+        upto = ids("<｜begin▁of▁sentence｜>")  # (the prompt's opening, then the system, then q1's turn)
+        self.assertEqual(",".join(p[m - 1:m + 1]), ids("<｜Assistant｜><think>"))  # q1's answer opener, at its <think>
+        self.assertTrue(",".join(p[:m]).endswith(ids("q1<｜Assistant｜>")) and p[0] == upto.split(",")[0])
+        self.assertNotIn("mark", gen({"messages": loop, "tools": tools})[0])  # tools: the reasoning kept
+        self.assertNotIn("mark", gen({"messages": loop[:2]})[0])  # the last message a user's: nothing dropped
+        self.reply("ok" + EOS)
+        self.assertNotIn("mark", gen({"messages": loop, "chat_template_kwargs": {"enable_thinking": False}})[0])
+
     def test_4_length(self):
         self.ready()
         self.reply("no end in sight   ", finish="length")

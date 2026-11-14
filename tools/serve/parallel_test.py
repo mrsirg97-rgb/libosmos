@@ -115,7 +115,10 @@ def main():
         e.send(2, turn, NEW)
         rt = e.wait(2)
         e.quit()
-        held = len(prompts[0]) + len(ra["tokens"]) - 1
+        # its lane: Qwen continues on A and its answer; a family that reads apart (DeepSeek) from A's point, one token
+        # short of its end (0.7.5)
+        apart = b"deepseek41" in open(a.model, "rb").read(1 << 20)
+        held = len(prompts[0]) - 1 if apart else len(prompts[0]) + len(ra["tokens"]) - 1
         check(f"slots: A's next turn reuses A from its lane ({rt.get('reused')} of {held})", rt.get("reused") == held)
 
         print("reading: a long prompt, then a short one, --parallel 2", flush=True)

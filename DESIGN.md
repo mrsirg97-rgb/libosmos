@@ -1822,6 +1822,58 @@ tests (each seen to fail first, or by a mutation):
   1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
   repeated text are not the mask's test; the probes above are.
 
+## 0.7.5: a turn reuses its prompt wherever the client leaves it (2026-11-14)
+
+A user saw no cached tokens on DeepSeek across turns. Measured through osmos-api (probe: three-turn chats,
+real answers, `cached_tokens` against the previous request's `prompt_tokens`), then against the shapes other
+harnesses send (a survey of opencode, Kilo, Cline, Roo, Continue, Aider, Qwen Code, Goose, Zed, Open WebUI,
+LibreChat, SillyTavern, the OpenAI Agents SDK and LangChain: how each writes an answer back) - three misses:
+
+- **DeepSeek, thinking without tools: every turn read whole.** its generation prompt ends `<｜Assistant｜><think>`;
+  the next turn renders that place `</think>` (earlier reasoning dropped, `_drop_thinking_messages`). the state kept
+  at the prompt's very end (0.7.1's snapshot) was never a prefix of the next prompt, and a family that reads apart
+  cannot roll back into a prompt. a retry of the same prompt (one token is always left to read) read whole too.
+- **Qwen, a client that does not send reasoning back: every request read whole, tool loops too.** Qwen continued on
+  its decoded tokens (rollback reach 8); a history that writes the answer otherwise (no `reasoning_content`: Continue,
+  Open WebUI, Roo's generic provider, LangChain, the Agents SDK for Qwen; the reasoning in `<think>` tags in the
+  content) leaves them at the answer's first token, and a kept conversation (slots) held its answer too, so it never
+  matched either. re-serialized arguments (compact, or LangChain's spaced) and `content: " "` did not miss: Qwen's
+  parse writes them as the model did.
+- **a new user message after a tool loop, the reasoning dropped there** (DeepSeek without tools - a client dropping
+  them between turns; Qwen with `preserve_thinking: false`): the prompt left at the first answer after the last user
+  message - llama.cpp's same miss (ggml-org/llama.cpp#20225, fixed by a checkpoint there, #22929); maya keeps restore
+  points for it (MAYA_DS4_RESTORE_POINTS).
+
+**the points** (tools/serve: Conv.prompt, Conv.user). a conversation keeps up to two places it goes back to, and a
+request goes back to the furthest its prompt continues:
+- the prompt's, one token short of its end: the generation prompt's last token (`<think>`, Qwen's newline after it)
+  is the one a later turn renders otherwise. the read stops there, the point is kept, the last token read alone - a
+  prompt in pieces is the bits of one read whole. a retry, a regenerate, an edited answer: back to it.
+- the last user turn's (GEN `mark=`): osmos-api renders the request again as its next turn (one more user message)
+  when the dialect says the template drops the latest reasoning then (Dialect.drops: DeepSeek thinking without
+  tools, Qwen thinking without preserve_thinking, the last message not a user's), and sends the tokens the two share.
+  a tool loop's first request ends there, so its prompt's point becomes the user turn's (kept through the loop's
+  rounds); a prompt read whole stops at the mark too.
+- a point is the sequence's **mark** (`oseq_mark_save`): DeepSeek's whole state, as 0.7.1's snapshot; Qwen's the
+  part a later token changes - the n-gram conv history, each DeltaNet's state and conv history, each attention
+  layer's raw keys' ring, the position and last tokens, ~118 MB at any position (its whole state is 2.9 GB at 190K).
+  the attention rows and pooled keys below the position only grow, so a mark is the sequence's own while it holds the
+  same tokens below it (no load, reset or rollback under it: serve drops the points past any of them).
+- DeepSeek's decoder skip runs its last layers only for the tokens within reach of the prompt's end (254+ tokens):
+  a state saved part-way through a longer prompt would lack them for a later prompt ending near it. so a prompt
+  whose mark lies ahead reads to the mark with its end there (conv_prompt_end), then on to its own; a state saved
+  part-way loads with its prompt's end at its position (hip_seqstate.c: the next prompt's end told again).
+- a conversation set aside goes back to its prompt's point first, every family (0.7.1 did it for DeepSeek): what a
+  client writes back in place of a decoded answer is no prefix of it. so a kept Qwen conversation holds its prompt,
+  not its answer (slot_test: 11,999 of A's 12,000 + 32 now) - an answer's tokens less for a client that echoes it
+  exactly, a hit at all for one that does not.
+
+tests: tools/serve/turn_test.py (both families: the next turn, a retry, a mark, a tool loop's mark kept, each
+answer the bits of the same prompt read whole; 0.7.4: 0 reused in every case, the same answers), test_chat's
+next-turn property (20 shapes: the next render repeats the prompt but its last token - to the last user's text
+when a tool loop's reasoning is dropped), test_api's GEN mark= (sent where the reasoning is dropped, not with tools,
+a user's last message or thinking off), slot_test's kept point.
+
 ## 0.7.4: decode at depth - the small step's selection and scores (2026-11-14)
 
 Decode had never been measured past 64K. The baseline (`low-power`, 64 greedy tokens after one prompt each; evo-A at

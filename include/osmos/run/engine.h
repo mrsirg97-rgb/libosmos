@@ -94,6 +94,9 @@ uint64_t oseq_state_bytes(const OsmosSeq *s);
 bool oseq_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
 bool oseq_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 bool oseq_save_to(const OsmosSeq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
+uint64_t oseq_mark_bytes(const OsmosSeq *s);
+bool oseq_mark_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
+bool oseq_mark_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 bool oseq_load_from(OsmosSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
 
 uint32_t osmos_block(const Osmos *e);
@@ -167,6 +170,13 @@ oseq_create .. oseq_load
   position 0, never part one conversation and part another). oseq_save_to / oseq_load_from: the same bytes in
   pieces of at most STATE_CHUNK (osmos/model/state_io.h) - a state of any size through that much host memory;
   oseq_save / oseq_load are them over one buffer.
+
+oseq_mark_bytes .. oseq_mark_load
+  a point the sequence goes back to (0.7.5: osmos-serve's prompt ends): the sequence as oseq_load would leave it, for
+  as long as it holds the same tokens below the mark's position - no load, reset or rollback under it since; the
+  caller keeps the tokens. a family's mark is its whole state (DeepSeek's), or the part a later token changes (Qwen's:
+  its recurrent layers' states and rings, ~118 MB at any position - q4x_seq_mark_save). load refuses a mark past
+  the position or not its size.
 
 osmos_block, oseq_seed, oseq_draft, oseq_draft_all
   the drafter, when the engine has one (osmos_block 0 when not: oseq_seed and oseq_draft then refuse). oseq_seed:

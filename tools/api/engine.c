@@ -181,7 +181,7 @@ bool engine_ready(Engine *e)
   return ok;
 }
 
-Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, char err[API_ERR])
+Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsigned mark, char err[API_ERR])
 {
   Run *r = calloc(1, sizeof *r);
   size_t cap = 64 + 12 * n;
@@ -200,6 +200,8 @@ Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, char 
   r->next = e->runs, e->runs = r; /* registered before its GEN: no line of it comes unclaimed */
   pthread_mutex_unlock(&e->mu);
   size_t w = (size_t)snprintf(msg, cap, "GEN %u rid=%lld spec=%d ", max_new, r->rid, e->spec ? 1 : 0);
+  if (mark) /* a point osmos-serve keeps besides the prompt's (its last user turn's) */
+    w += (size_t)snprintf(msg + w, cap - w, "mark=%u ", mark);
   for (size_t i = 0; i < n; i++)
     w += (size_t)snprintf(msg + w, cap - w, i ? ",%d" : "%d", ids[i]);
   msg[w++] = '\n';

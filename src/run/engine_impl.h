@@ -36,6 +36,10 @@ typedef struct OsmosFamily
                     char err[OSMOS_ERR]);
   /* a prompt's read (osmos_read), or NULL: the family's batch, its prompt and decode steps one math (Qwen's) */
   bool (*read)(void *eng, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
+  /* a mark (oseq_mark_save), or NULL: the whole state */
+  uint64_t (*mark_bytes)(const void *seq);
+  bool (*mark_save)(const void *seq, void *out, uint64_t bytes, char err[OSMOS_ERR]);
+  bool (*mark_load)(void *seq, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 } OsmosFamily;
 
 /* a sequence's family half (a family's batch reads its sequences' through it) */

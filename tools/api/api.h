@@ -49,7 +49,7 @@ typedef struct Engine
 } Engine;
 
 bool engine_start(Engine *e, char *const argv[], bool spec, char err[API_ERR]);
-Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, char err[API_ERR]);
+Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsigned mark, char err[API_ERR]);
 void engine_stop(Engine *e, Run *r);
 void engine_release(Engine *e, Run *r);
 bool engine_ready(Engine *e);

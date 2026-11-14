@@ -208,7 +208,7 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
     return refuse(s, err, "not a sequence's state, or another version's");
   if (h.identity != forward_identity(f))
     return refuse(s, err, "a state of another model or geometry (its identity)");
-  if (h.pos < 0 || (uint32_t)h.pos > f->max_ctx || h.prompt_end < 0 || h.prompt_end > h.pos || h.dec_from < 0 ||
+  if (h.pos < 0 || (uint32_t)h.pos > f->max_ctx || h.prompt_end < 0 || (uint32_t)h.prompt_end > f->max_ctx || h.dec_from < 0 ||
       h.n_last < 0 || h.n_last > STATE_LAST || h.has_dring > 1)
     return refuse(s, err, "a state's position past this forward's context, or its fields out of range");
   /* the parts as the state laid them out: the sequence at its position (and a drafter's rings to fill) */
@@ -241,7 +241,10 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
     return refuse(s, err, "a GPU copy or the source failed (the load)");
   if (got != sum) /* (its rows already on the GPU: the reset makes them a fresh sequence's, rewritten before read) */
     return refuse(s, err, "a damaged state (its checksum)");
-  s->prompt_end = h.prompt_end, s->dec_from = h.dec_from, s->n_last = h.n_last, s->staged = 0;
+  /* a state saved part-way through its prompt (osmos-serve's points, 0.7.5) loads with its prompt's end at its
+     position: the next prompt's end told again (seq_prompt), nothing behind it to roll back into */
+  s->prompt_end = h.prompt_end < h.pos ? h.prompt_end : h.pos;
+  s->dec_from = h.dec_from, s->n_last = h.n_last, s->staged = 0;
   memcpy(s->last, h.last, sizeof s->last);
   s->broken = false;
   return true;

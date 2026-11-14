@@ -19,6 +19,8 @@ typedef struct Dialect
   bool (*render)(const Request *r, JsonBuf *out, char err[CHAT_ERR]);
   bool (*parse)(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
                 char err[CHAT_ERR]); /* markers read from shape (the said special tokens' text defused) */
+  /* the template drops this prompt's latest reasoning when a user message follows (0.7.5: a point kept before it) */
+  bool (*drops)(const Request *r);
 } Dialect;
 
 /* the dialect of a model family, or NULL (one naming more than DIALECT_REFUSED_MAX refused texts too) */
