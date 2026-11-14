@@ -68,7 +68,7 @@ int main() {
     Ref q = in(c, "query"), b = in(c, "blocks"), p = in(c, "partial");
     const uint32_t dim = (uint32_t) q.ne[0], nq = (uint32_t) q.ne[1], nb = (uint32_t) b.ne[1], n = (uint32_t) p.ne[1];
     float *dq = dev_from(q.v), *db = dev_from(b.v), *dp = dev_from(p.v), *dout = dev_alloc<float>((size_t) nq * n * dim);
-    CHECK(ink2_attn_res(dq, nq, db, nb, dp, n, dim, 1e-6f, 1.0f / std::sqrt((float) dim), dout, nullptr));
+    CHECK(ink2_attn_res(dq, nq, db, nb, nb, dp, n, dim, 1e-6f, 1.0f / std::sqrt((float) dim), dout, nullptr));
     auto o = host_of(dout, (size_t) nq * n * dim);
     for (uint32_t i = 0; i < nq; i++) {
       char what[64], name[16];

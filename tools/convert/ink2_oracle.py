@@ -31,10 +31,13 @@ import re
 import sys
 import time
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 from torch import nn
+
+import gguf
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--src", required=True)
@@ -44,6 +47,8 @@ ap.add_argument("--gpu", type=int, default=0)
 ap.add_argument("--chunk", type=int, default=2048)
 ap.add_argument("--dtype", default="float32", choices=("float32", "bfloat16"))
 ap.add_argument("--layers", type=int, default=0, help="only the first N layers (a test); 0: all")
+ap.add_argument("--gguf", default="", help="the weights from the reference GGUF (ink2_ref_gguf.py's: its first shard, "
+                "its .plan.json beside) instead of --src's checkpoint - --src then its config.json alone")
 a = ap.parse_args()
 
 from transformers import AutoConfig  # noqa: E402
@@ -131,6 +136,78 @@ class Src:
         return ks
 
 
+class GgufSrc:
+    """the checkpoint's tensors by its names, read from the reference GGUF ink2_ref_gguf.py wrote of it (0.8.0: a
+    disk that kept the reference, not the checkpoint): its plan (<prefix>.plan.json) names each plain tensor's GGUF
+    name and the checkpoint's key; the values the same (BF16 or F32 as stored; a depthwise conv's (C, 1, k) back)"""
+
+    def __init__(self, first):
+        import glob
+        from gguf import GGUFReader
+        prefix = first.rsplit("-00001-of-", 1)[0]
+        plan = json.load(open(prefix + ".plan.json"))
+        self.key = {e[1]: e[2] for shard in plan for e in shard if e[0] == "plain"}   # checkpoint key -> GGUF name
+        self.t = {}
+        self.reader = {}
+        for fn in sorted(glob.glob(prefix + "-*-of-*.gguf")):
+            r = GGUFReader(fn)
+            for t in r.tensors:
+                self.t[t.name], self.reader[t.name] = t, r
+        self.where = self.key
+
+    def get(self, k):
+        t = self.t[self.key[k]]
+        v = torch.from_numpy(np.array(t.data))
+        if t.tensor_type == gguf.GGMLQuantizationType.BF16:
+            v = v.view(torch.bfloat16)
+        if re.search(r"(convolution|sconv)\.weight$", k) and v.dim() == 2:
+            v = v[:, None, :]
+        return v
+
+    layer_keys = Src.layer_keys
+
+
+class GgufExperts(nn.Module):
+    """Inkling2Experts' forward over the reference GGUF's experts, each decoded when a token picks it: NVFP4 by
+    gguf-py's dequantize times the expert's scale (blk.L.ffn_*_exps.scale), MXFP8 from its blocks (an E8M0 scale,
+    then 32 E4M3 codes) - every value exact in fp32, gate and up their own tensors"""
+
+    def __init__(self, src, L, device, dtype, act_fn):
+        super().__init__()
+        from gguf import quants
+        self.q, self.dev, self.dtype, self.act_fn = quants, device, dtype, act_fn
+        self.w = {nm: src.t[f"blk.{L}.ffn_{nm}_exps.weight"] for nm in ("gate", "up", "down")}
+        self.r = {nm: src.reader[f"blk.{L}.ffn_{nm}_exps.weight"] for nm in ("gate", "up", "down")}
+        self.s = {nm: src.t.get(f"blk.{L}.ffn_{nm}_exps.scale") for nm in ("gate", "up", "down")}
+        self.num_experts = int(self.w["gate"].shape[-1])
+
+    def weight(self, nm, e):
+        t = self.w[nm]
+        rows, cols = int(t.shape[1]), int(t.shape[0])   # (ne: cols, rows, experts)
+        nv = t.tensor_type == gguf.GGMLQuantizationType.NVFP4
+        per = rows * cols // 64 * 36 if nv else rows * cols // 32 * 33   # (an expert's bytes: gguf-py has 43 a byte)
+        at = int(t.data_offset) + e * per
+        b = np.asarray(self.r[nm].data[at:at + per]).view(np.uint8)
+        if nv:
+            w = self.q.dequantize(b.reshape(1, -1), gguf.GGMLQuantizationType.NVFP4).reshape(rows, cols)
+            w = torch.from_numpy(np.ascontiguousarray(w)).float() * float(np.asarray(self.s[nm].data).reshape(-1)[e])
+        else:
+            blk = torch.from_numpy(b.reshape(-1, 33).copy())
+            vals = blk[:, 1:].contiguous().view(torch.float8_e4m3fn).float() * torch.exp2(blk[:, :1].float() - 127)
+            w = vals.reshape(rows, cols)
+        return w.to(self.dev, self.dtype)
+
+    def forward(self, hidden_states, top_k_index, top_k_weights):
+        final = torch.zeros_like(hidden_states, dtype=torch.float32)
+        for e in torch.unique(top_k_index).tolist():
+            tok, pos = torch.where(top_k_index == e)
+            x = hidden_states[tok]
+            h = self.act_fn(F.linear(x, self.weight("gate", e)), F.linear(x, self.weight("up", e)))
+            y = F.linear(h, self.weight("down", e)) * top_k_weights[tok, pos, None]
+            final.index_add_(0, tok, y.to(torch.float32))
+        return final.to(hidden_states.dtype)
+
+
 class StreamExperts(nn.Module):
     """Inkling2Experts' forward over the checkpoint's own expert bytes, each expert decoded when a token picks it"""
 
@@ -182,7 +259,7 @@ def main():
     dtype = getattr(torch, a.dtype)
     cfg = AutoConfig.from_pretrained(a.src).text_config
     cfg._attn_implementation = "eager"
-    src = Src(a.src)
+    src = GgufSrc(a.gguf) if a.gguf else Src(a.src)
     ids = torch.tensor(json.load(open(a.tokens)), device=dev)
     T, t0 = len(ids), time.time()
     torch.set_grad_enabled(False)
@@ -208,7 +285,7 @@ def main():
         layer = (M.Inkling2FullDecoderLayer if full else M.Inkling2SlidingDecoderLayer)(cfg, L)
         layer = layer.to(dev, dtype).eval()
         load(layer, src.layer_keys(L), f"model.layers.{L}.")
-        layer.mlp.experts = StreamExperts(src, L, dev, dtype, layer.mlp.experts.act_fn)
+        layer.mlp.experts = (GgufExperts if a.gguf else StreamExperts)(src, L, dev, dtype, layer.mlp.experts.act_fn)
         cache = DynamicCache(config=cfg)
         out = torch.empty_like(hidden)
         for c0 in range(0, T, a.chunk):

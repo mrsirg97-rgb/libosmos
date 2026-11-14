@@ -54,13 +54,13 @@ __global__ void conv_dyn_kernel(const float* x, uint32_t n_tok, uint32_t ch, uin
 
 // a block a token: its states' inverse RMS, each query's scores and softmax, then the weighted sum
 __global__ void attn_res_kernel(const float* query, uint32_t queries, const float* blocks, uint32_t nb,
-                                const float* partial, uint32_t dim, float eps, float scale, uint32_t n_tok,
-                                float* out) {
+                                uint32_t bs, const float* partial, uint32_t dim, float eps, float scale,
+                                uint32_t n_tok, float* out) {
   __shared__ float lds[kThreads];
   __shared__ float inv[INK2_MAX_RES], p[INK2_MAX_QUERIES][INK2_MAX_RES];
   const uint32_t t = blockIdx.x, ns = nb + 1;
   auto state = [&](uint32_t s) {
-    return s < nb ? blocks + ((uint64_t) t * nb + s) * dim : partial + (uint64_t) t * dim;
+    return s < nb ? blocks + ((uint64_t) t * bs + s) * dim : partial + (uint64_t) t * dim;
   };
   for (uint32_t s = 0; s < ns; s++) {
     const float* v = state(s);
@@ -207,12 +207,34 @@ extern "C" bool ink2_conv_dyn(const float* x, uint32_t n_tok, uint32_t ch, uint3
 }
 
 extern "C" bool ink2_attn_res(const float* query, uint32_t queries, const float* blocks, uint32_t n_blocks,
-                              const float* partial, uint32_t n_tok, uint32_t dim, float eps, float scale, float* out,
-                              void* stream) {
+                              uint32_t b_stride, const float* partial, uint32_t n_tok, uint32_t dim, float eps,
+                              float scale, float* out, void* stream) {
   if (!query || !partial || !out || (n_blocks && !blocks) || !queries || queries > INK2_MAX_QUERIES ||
-      n_blocks + 1 > INK2_MAX_RES || !n_tok || !dim)
+      n_blocks + 1 > INK2_MAX_RES || n_blocks > b_stride || !n_tok || !dim)
     return false;
-  attn_res_kernel<<<n_tok, kThreads, 0, st(stream)>>>(query, queries, blocks, n_blocks, partial, dim, eps, scale,
-                                                      n_tok, out);
+  attn_res_kernel<<<n_tok, kThreads, 0, st(stream)>>>(query, queries, blocks, n_blocks, b_stride, partial, dim, eps,
+                                                      scale, n_tok, out);
+  return ok();
+}
+
+__global__ void ink2_scale_kernel(float* x, uint64_t n, float s) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i < n) x[i] *= s;
+}
+
+__global__ void ink2_axpy_kernel(float* y, const float* x, uint64_t n, float a) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i < n) y[i] += a * x[i];
+}
+
+extern "C" bool ink2_scale(float* x, uint64_t n, float s, void* stream) {
+  if (!x || !n) return false;
+  ink2_scale_kernel<<<grid(n), kThreads, 0, st(stream)>>>(x, n, s);
+  return ok();
+}
+
+extern "C" bool ink2_axpy(float* y, const float* x, uint64_t n, float a, void* stream) {
+  if (!y || !x || !n) return false;
+  ink2_axpy_kernel<<<grid(n), kThreads, 0, st(stream)>>>(y, x, n, a);
   return ok();
 }

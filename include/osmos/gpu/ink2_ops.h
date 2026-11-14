@@ -18,8 +18,10 @@ bool ink2_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const
                float scale, float *y, void *stream);
 bool ink2_conv_dyn(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
                    const float *dyn, const float *hist, float scale, float *y, void *stream);
-bool ink2_attn_res(const float *query, uint32_t queries, const float *blocks, uint32_t n_blocks, const float *partial,
-                   uint32_t n_tok, uint32_t dim, float eps, float scale, float *out, void *stream);
+bool ink2_attn_res(const float *query, uint32_t queries, const float *blocks, uint32_t n_blocks, uint32_t b_stride,
+                   const float *partial, uint32_t n_tok, uint32_t dim, float eps, float scale, float *out, void *stream);
+bool ink2_scale(float *x, uint64_t n, float s, void *stream);
+bool ink2_axpy(float *y, const float *x, uint64_t n, float a, void *stream);
 #define INK2_MAX_HEAD 128   /* attention's head dim at most (Inkling's 128) */
 #define INK2_MAX_EXTENT 1024 /* the relative bias's extent at most (Inkling's 1,024) */
 #define INK2_MAX_REL 32      /* a head's relative states at most (Inkling's 16) */
@@ -61,9 +63,13 @@ ink2_conv_dyn
   heads)). scale 1 / sqrt(2 taps + 1).
 
 ink2_attn_res
-  the attention residual: a token's states (n_blocks rows of blocks [n_tok][n_blocks][dim], then partial [n_tok][dim])
+  the attention residual: a token's states (n_blocks rows of blocks [n_tok][b_stride][dim], then partial [n_tok][dim])
   each RMS-normalized (no weight, eps); query q (query [queries][dim]) weights them softmax(q . s scale) and out[q][t]
-  = their weighted sum ([queries][n_tok][dim]). n_blocks + 1 <= INK2_MAX_RES, queries <= INK2_MAX_QUERIES.
+  = their weighted sum ([queries][n_tok][dim]). n_blocks + 1 <= INK2_MAX_RES, queries <= INK2_MAX_QUERIES, n_blocks <=
+  b_stride (the buffer's blocks a token: the block states so far, its room for more).
+
+ink2_scale, ink2_axpy
+  x *= s; y += a x - an NVFP4 expert's scale on its gate and up rows, a routed expert's weighted sum.
 
 ink2_clip_rows
   attention's rows before it, in place: n_tok tokens of per_tok rows of dim (row j of a token its head j's) - each
