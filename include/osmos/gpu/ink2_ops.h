@@ -25,6 +25,11 @@ bool ink2_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const
                float res, float scale, float *y, void *stream);
 bool ink2_conv_dyn(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
                    const float *dyn, const float *hist, float res, float scale, float *y, void *stream);
+bool ink2_conv_keep(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float *w, const float *hist,
+                    float res, float scale, float *y, float *keep, void *stream);
+bool ink2_conv_dyn_keep(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
+                        const float *dyn, const float *hist, float res, float scale, float *y, float *keep,
+                        void *stream);
 bool ink2_attn_res(const float *query, uint32_t queries, const float *blocks, uint32_t n_blocks, uint32_t b_stride,
                    const float *partial, uint32_t n_tok, uint32_t dim, float eps, float scale, float *out, float *scratch,
                    void *stream);
@@ -110,6 +115,10 @@ ink2_conv_dyn
   the current token, w [taps][ch] (ne ch, taps), dyn [n_tok][heads taps] (a head's taps a token, h(c) = c / (ch /
   heads)). the checkpoint's: res 1, scale 1 / sqrt(2 taps + 1); llama.cpp's fold them into the static weights ((w + 1
   at tap 0) / 3, stored [ch][taps] with tap 0 last) and the per-token ones (dyn / 3): res 0, scale 1.
+
+ink2_conv_keep, ink2_conv_dyn_keep
+  ink2_conv's and ink2_conv_dyn's y, and x's n_tok rows copied to keep as they are read (a tail's next rows: not
+  hist's; NULL none) - the copy's launch saved.
 
 ink2_attn_res
   the attention residual: a token's states (n_blocks rows of blocks [n_tok][b_stride][dim], then partial [n_tok][dim])

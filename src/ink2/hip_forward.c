@@ -722,6 +722,18 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   return true;
 }
 
+/* a conv on tail t's history (its last taps - 1 rows), x's n rows then the tail's: written by the conv as it reads
+   them when they fit (ink2_tail_claim), else ink2_tail_put after it - the same rows either way */
+static bool conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint32_t taps, const float *w,
+                     uint32_t heads, const float *dyn, float res, float scale, float *y)
+{
+  const float *hist = ink2_tail_last(t, taps - 1);
+  float *keep = ink2_tail_claim(t, n);
+  const bool ok = dyn ? ink2_conv_dyn_keep(x, n, ch, taps, heads, w, dyn, hist, res, scale, y, keep, NULL)
+                      : ink2_conv_keep(x, n, ch, taps, w, hist, res, scale, y, keep, NULL);
+  return ok && (keep || ink2_tail_put(t, x, n));
+}
+
 /* a run: n tokens of s at its next positions through the model, their logits at rows row0 .. (those before the
    prompt's end - 1 not) */
 static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint32_t row0, char *err)
@@ -788,18 +800,15 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     if (full)
     {
       GPU(mat(f, L->k_conv_proj, d->k_conv_proj, xk, n, f->dyn));
-      GPU(ink2_conv_dyn(f->k, n, kd, taps, KV, d->k_conv, f->dyn, ink2_tail_last(ck, taps - 1), conv_res, dyn_scale,
-                        f->kc, NULL));
+      GPU(conv_put(ck, f->k, n, kd, taps, d->k_conv, KV, f->dyn, conv_res, dyn_scale, f->kc));
       GPU(mat(f, L->v_conv_proj, d->v_conv_proj, xv, n, f->dyn));
-      GPU(ink2_conv_dyn(f->v, n, kd, taps, KV, d->v_conv, f->dyn, ink2_tail_last(cv, taps - 1), conv_res, dyn_scale,
-                        f->vc, NULL));
+      GPU(conv_put(cv, f->v, n, kd, taps, d->v_conv, KV, f->dyn, conv_res, dyn_scale, f->vc));
     }
     else
     {
-      GPU(ink2_conv(f->k, n, kd, taps, d->k_conv, ink2_tail_last(ck, taps - 1), conv_res, conv_scale, f->kc, NULL));
-      GPU(ink2_conv(f->v, n, kd, taps, d->v_conv, ink2_tail_last(cv, taps - 1), conv_res, conv_scale, f->vc, NULL));
+      GPU(conv_put(ck, f->k, n, kd, taps, d->k_conv, 0, NULL, conv_res, conv_scale, f->kc));
+      GPU(conv_put(cv, f->v, n, kd, taps, d->v_conv, 0, NULL, conv_res, conv_scale, f->vc));
     }
-    GPU(ink2_tail_put(ck, f->k, n) && ink2_tail_put(cv, f->v, n));
     const Ink2Tau none = {0, 0, 0}, tau = {pos, full ? g->log_alpha : 0.0f, (float)g->log_floor};
     GPU(ink2_clip_rows(f->q, n, H, D, d->q_clip, g->q_clip, tau, NULL));
     GPU(ink2_clip_rows(f->rel, n, H, R, d->rel_clip, g->rel_clip, tau, NULL));
@@ -834,8 +843,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     pf(PF_ATTN);
     GPU(mat(f, L->out, d->out, f->att, n, f->o));
     Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];
-    GPU(ink2_conv(f->o, n, C, taps, d->out_conv, ink2_tail_last(co, taps - 1), conv_res, conv_scale, f->r, NULL));
-    GPU(ink2_tail_put(co, f->o, n));
+    GPU(conv_put(co, f->o, n, C, taps, d->out_conv, 0, NULL, conv_res, conv_scale, f->r));
     if (boundary)
     {
       if (nb >= maxb)
@@ -853,9 +861,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     if (!moe(f, l, n, err))
       return false;
     pf(PF_MOE);
-    GPU(ink2_conv(f->moe, n, C, taps, d->ffn_out_conv, ink2_tail_last(cf, taps - 1), conv_res, conv_scale, f->tmp,
-                  NULL));
-    GPU(ink2_tail_put(cf, f->moe, n));
+    GPU(conv_put(cf, f->moe, n, C, taps, d->ffn_out_conv, 0, NULL, conv_res, conv_scale, f->tmp));
     GPU(ink2_axpy(f->r, f->tmp, (uint64_t)n * C, 1.0f, NULL));
     GPU(hipMemcpyAsync(f->h, f->r, (uint64_t)n * C * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess);
   }

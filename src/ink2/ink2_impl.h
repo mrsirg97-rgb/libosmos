@@ -133,6 +133,8 @@ uint32_t ink2_type(const GgufTensor *t); /* the type a resident matrix's bytes a
 bool ink2_tail_room(Ink2Tail *t, uint32_t n);
 const void *ink2_tail_last(const Ink2Tail *t, uint32_t k);
 bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n);
+/* an F32 tail's next n rows, held (a kernel writes them) - NULL past its room: ink2_tail_put's then */
+float *ink2_tail_claim(Ink2Tail *t, uint32_t n);
 /* hip_mtp.c: the drafter's weights and buffers (its fold made), freed; a sequence's rings; a step's taps kept */
 bool ink2_mtp_up(Ink2Forward *f, char *err);
 void ink2_mtp_down(Ink2Forward *f);
