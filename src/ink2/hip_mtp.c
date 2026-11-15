@@ -19,8 +19,9 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 
-#define T_BF16 30u
 #define T_F32 0u
+#define T_Q8_0 8u
+#define Q8_0_BYTES(n) ((uint64_t)(n) / 32 * 34)
 
 static bool fail(char *err, const char *why) { return ink2_fail(err, why); }
 
@@ -108,7 +109,8 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
     free(sp), free(hf);
   }
   /* the fold: the target's head through hidden_out - its rank columns as tokens (the head's own quantized values,
-     the base logits' head), transposed to [rows][rank] BF16 for the matvec; and the bias's */
+     the base logits' head), transposed to [rows][rank] Q8_0 for the matvec (a step reads it whole: 55 MB, BF16's
+     103); and the bias's */
   ok = ok && (hw = ink2_host_f32(g, m->m_hidden_w, &n)) != NULL && (hb = ink2_host_f32(g, m->m_hidden_b, &n)) != NULL;
   float *cols = NULL, *dcols = NULL, *dt = NULL, *db = NULL;
   if (ok)
@@ -122,8 +124,8 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
          hipMemcpy(dcols, cols, (size_t)R * C * 4, hipMemcpyHostToDevice) == hipSuccess &&
          hipMalloc((void **)&dt, (size_t)R * VR * 4) == hipSuccess && hipMalloc((void **)&db, (size_t)C * 4) == hipSuccess &&
          hipMemcpy(db, hb, (size_t)C * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         ink2_mv(f->w->output, f->output, dcols, R, dt) && ink2_dalloc(f, &d->fold, (uint64_t)VR * R * 2) &&
-         ink2_transpose_bf16(dt, R, VR, d->fold, NULL) && ink2_dalloc(f, (void **)&d->fold_b, (uint64_t)VR * 4) &&
+         ink2_mv(f->w->output, f->output, dcols, R, dt) && ink2_dalloc(f, &d->fold, Q8_0_BYTES((uint64_t)VR * R)) &&
+         ink2_transpose_q8_0(dt, R, VR, d->fold, NULL) && ink2_dalloc(f, (void **)&d->fold_b, (uint64_t)VR * 4) &&
          ink2_mv(f->w->output, f->output, db, 1, d->fold_b) && hipDeviceSynchronize() == hipSuccess;
   }
   free(fw), free(rnn), free(hw), free(hb), free(cols);
@@ -352,7 +354,7 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
     ok = ink2_mtp_markov_in(d->state, d->w1, prev, R, d->vec, NULL) &&
          mv_run(T_F32, d->w_sp, 3 * R, 2 * R, d->vec, 1, d->p, NULL) &&
          ink2_mtp_markov_gru(d->p, d->inv + (uint64_t)st * 3 * R, d->rnn_b, R, d->state, d->latent, NULL) &&
-         mv_run(T_BF16, d->fold, VR, R, d->latent, 1, d->corr, NULL) &&
+         mv_run(T_Q8_0, d->fold, VR, R, d->latent, 1, d->corr, NULL) &&
          ink2_mtp_markov_logits(d->base + (uint64_t)st * VR, d->corr, d->fold_b, f->w->geo.logit_softcap, V, d->lg,
                                 NULL) &&
          q4x_top(d->lg, V, 1, V, d->ids + st, d->probs + st, NULL);

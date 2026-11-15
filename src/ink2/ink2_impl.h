@@ -47,7 +47,7 @@ typedef struct Ink2MtpDev
       *q_norm[INK2_MTP_MAX_LAYERS], *k_norm[INK2_MTP_MAX_LAYERS], *k_norm_ctx[INK2_MTP_MAX_LAYERS];
   float *alpha; /* [n_layers + 1][n_taps]: softmax(fuse_weight), a layer's mixture, the Markov head's last */
   float *mask, *norm, *m_dflare, *w_sp, *w_hf, *rnn_b, *fold_b;
-  void *w1, *fold; /* BF16 [the head's rows][rank]: markov_w1's, and lm_head . hidden_out */
+  void *w1, *fold; /* [the head's rows][rank]: markov_w1's BF16, and lm_head . hidden_out Q8_0 */
   float *taps;     /* the step's taps [max_tokens][n_taps][n_embd] */
   float *mix, *kctx, *vctx, *x, *res, *nrm, *q, *kb, *vb, *att, *ob, *g, *u, *hf, *inv, *vec, *p, *state, *latent,
       *corr, *base, *lg, *probs, *scr, *f_rnn;

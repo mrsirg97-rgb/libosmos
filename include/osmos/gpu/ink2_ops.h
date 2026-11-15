@@ -118,7 +118,7 @@ bool ink2_mtp_markov_gru(const float *p, const float *inv, const float *bias, ui
                          float *latent, void *stream);
 bool ink2_mtp_markov_logits(const float *base, const float *corr, const float *fold_b, float cap, uint32_t n, float *out,
                             void *stream);
-bool ink2_transpose_bf16(const float *in, uint32_t rows, uint32_t cols, uint16_t *out, void *stream);
+bool ink2_transpose_q8_0(const float *in, uint32_t rows, uint32_t cols, void *out, void *stream);
 
 #endif
 
@@ -249,6 +249,7 @@ ink2_mtp_markov_in, _gru, _logits
   cap tanh((base + corr + fold_b) / cap) - the target head's logits, the fold's correction (lm_head . hidden_out:
   corr = fold . latent) and bias, softcapped.
 
-ink2_transpose_bf16
-  out [cols][rows] = in [rows][cols] rounded to BF16 (nearest, ties to even): the fold's layout for the matvec.
+ink2_transpose_q8_0
+  out [cols][rows] = in [rows][cols] as Q8_0 (ggml's reference quantizer: a block of 32's d = amax / 127 as f16, each
+  value round(x / d)): the fold's layout for the matvec, half BF16's bytes. false for rows not whole blocks.
 */

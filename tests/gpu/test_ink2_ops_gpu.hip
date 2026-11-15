@@ -132,6 +132,21 @@ static std::vector<uint8_t> kv8_records(const std::vector<float>& x) {
   return out;
 }
 
+// Q8_0 as ggml lays it: a 32's f16 d, then its int8s - d = amax / 127, q = round(x / d) as x * (1 / d)
+static std::vector<uint8_t> q8_0_blocks(const std::vector<float>& x) {
+  std::vector<uint8_t> out(x.size() / 32 * 34);
+  for (size_t b = 0; b < x.size() / 32; b++) {
+    const float* xb = x.data() + b * 32;
+    float amax = 0;
+    for (int i = 0; i < 32; i++) amax = std::max(amax, std::fabs(xb[i]));
+    const float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+    const _Float16 h = (_Float16) d;
+    std::memcpy(out.data() + b * 34, &h, 2);
+    for (int i = 0; i < 32; i++) out[b * 34 + 2 + i] = (uint8_t) (int8_t) std::roundf(xb[i] * id);
+  }
+  return out;
+}
+
 // the records' values as the kernel takes them: q times the block's f16 scale, rounded to f16
 static std::vector<_Float16> kv8_values(const std::vector<uint8_t>& rec) {
   const size_t rows = rec.size() / INK2_KV8_RECORD;
@@ -548,6 +563,26 @@ int main() {
     CHECK(worst < 1e-5);
     std::printf("  gram: X^T X of 37 x 45 added onto h, max |err| %.2e\n", worst);
     hipFree(dx), hipFree(dh);
+  }
+  {  // ink2_transpose_q8_0: the fold's layout, the host's Q8_0 of the transpose byte for byte (a zero block's d 0)
+    const uint32_t rows = 96, cols = 37;
+    std::vector<float> x((size_t) rows * cols);
+    uint32_t r = 777;
+    for (float& v : x) r = r * 1664525u + 1013904223u, v = ((float) (r >> 8) / (1 << 24) - 0.5f) * 9.0f;
+    for (uint32_t k = 0; k < 32; k++) x[(size_t) (32 + k) * cols + 5] = 0.0f;
+    std::vector<float> t((size_t) cols * rows);
+    for (uint32_t i = 0; i < rows; i++)
+      for (uint32_t c = 0; c < cols; c++) t[(size_t) c * rows + i] = x[(size_t) i * cols + c];
+    const std::vector<uint8_t> want = q8_0_blocks(t);
+    float* dx = dev_from(x);
+    uint8_t* dq = dev_alloc<uint8_t>(want.size());
+    CHECK(ink2_transpose_q8_0(dx, rows, cols, dq, nullptr));
+    CHECK(!ink2_transpose_q8_0(dx, rows + 1, cols, dq, nullptr));
+    std::vector<uint8_t> got(want.size());
+    CHECK(hipMemcpy(got.data(), dq, got.size(), hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(got == want || (std::printf("  transpose_q8_0: not the host's Q8_0 blocks\n"), false));
+    std::printf("  transpose_q8_0: [96][37] as [37][96] Q8_0, the host's bytes\n");
+    hipFree(dx), hipFree(dq);
   }
   std::printf("[test_ink2_ops_gpu] ok\n");
   return 0;

@@ -137,14 +137,20 @@ __global__ void markov_logits_kernel(const float* base, const float* corr, const
   out[i] = cap * tanhf(x / cap);
 }
 
-__global__ void transpose_bf16_kernel(const float* in, uint32_t rows, uint32_t cols, uint16_t* out) {
-  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= (uint64_t) rows * cols) return;
-  const uint32_t r = (uint32_t) (i / cols), c = (uint32_t) (i % cols);
-  uint32_t u;
-  __builtin_memcpy(&u, &in[i], 4);
-  const uint32_t rounded = u + 0x7FFFu + ((u >> 16) & 1u);  // nearest, ties to even
-  out[(uint64_t) c * rows + r] = (uint16_t) (rounded >> 16);
+// an output row's block of 32 (row c, values r0 .. r0 + 31 of in's column c) as ggml's Q8_0 reference quantizes it:
+// d = amax / 127 (f16), q = round(x / d) (half away from zero)
+constexpr uint32_t kQ8 = 32, kQ8Bytes = 34;
+__global__ void transpose_q8_0_kernel(const float* in, uint32_t rows, uint32_t cols, uint8_t* out) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x, blocks = rows / kQ8;
+  if (i >= blocks * cols) return;
+  const uint32_t c = (uint32_t) (i / blocks), r0 = (uint32_t) (i % blocks) * kQ8;
+  float v[kQ8], amax = 0.0f;
+  for (uint32_t k = 0; k < kQ8; k++) v[k] = in[(uint64_t) (r0 + k) * cols + c], amax = fmaxf(amax, fabsf(v[k]));
+  const float d = amax / 127.0f, id = d ? 1.0f / d : 0.0f;
+  uint8_t* b = out + i * kQ8Bytes;
+  const _Float16 dh = (_Float16) d;
+  __builtin_memcpy(b, &dh, 2);
+  for (uint32_t k = 0; k < kQ8; k++) b[2 + k] = (uint8_t) (int8_t) roundf(v[k] * id);
 }
 
 }  // namespace
@@ -200,7 +206,8 @@ extern "C" bool ink2_mtp_markov_logits(const float* base, const float* corr, con
   return ok();
 }
 
-extern "C" bool ink2_transpose_bf16(const float* in, uint32_t rows, uint32_t cols, uint16_t* out, void* stream) {
-  transpose_bf16_kernel<<<grid((uint64_t) rows * cols), kThreads, 0, st(stream)>>>(in, rows, cols, out);
+extern "C" bool ink2_transpose_q8_0(const float* in, uint32_t rows, uint32_t cols, void* out, void* stream) {
+  if (!in || !out || !rows || rows % kQ8 || !cols) return false;
+  transpose_q8_0_kernel<<<grid((uint64_t) rows / kQ8 * cols), kThreads, 0, st(stream)>>>(in, rows, cols, (uint8_t*) out);
   return ok();
 }
