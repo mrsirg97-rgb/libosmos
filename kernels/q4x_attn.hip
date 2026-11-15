@@ -72,15 +72,6 @@ constexpr int kKeyLds = kTile + 8;
 typedef _Float16 h16 __attribute__((ext_vector_type(16)));
 typedef float f8 __attribute__((ext_vector_type(8)));
 
-__device__ inline float row_max(float v) {  // the 16 lanes of a half: one row's 16 columns
-  for (int o = 1; o < kTile; o <<= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
-  return v;
-}
-__device__ inline float row_sum(float v) {
-  for (int o = 1; o < kTile; o <<= 1) v += __shfl_xor(v, o, 32);
-  return v;
-}
-
 // a token's key list (q4x_ops.h's Q4xPick; none: every position to its own): its length, and entry i's position -
 // its picked blocks' positions in block order, then its tail. every block picked, entry i is position i
 struct Keys {
@@ -176,7 +167,7 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
   __shared__ __attribute__((aligned(32))) _Float16 qs[kTile * kRowLds], ks[kTile * kRowLds], vt[kHead * kKeyLds];
   __shared__ __attribute__((aligned(32))) _Float16 ps[kWaves][kTile * kKeyLds];
   const uint32_t G = heads / kv_heads, t = blockIdx.x, kvh = blockIdx.y, chunk = blockIdx.z;
-  const uint32_t wave = threadIdx.x / 32, lane = threadIdx.x % 32, half = lane >> 4;
+  const uint32_t wave = threadIdx.x / 32;
   const uint64_t row = (uint64_t) kv_heads * kHead / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;  // a position's bytes
   const Keys keys = keys_of(pk, t, pos0 + t);  // the token's key list: its entries in chunks
   const uint32_t k0 = chunk * kChunk;
@@ -186,11 +177,13 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
     const uint32_t r = i / kHead, d = i % kHead;
     qs[r * kRowLds + d] = (_Float16) (r < G ? q[((uint64_t) t * heads + kvh * G + r) * kHead + d] : 0.0f);
   }
-  int32_t lim[8];  // this lane's rows (2 j + half): the token's last entry, or none past G
-  for (int j = 0; j < 8; j++) lim[j] = (uint32_t) (2 * j + half) < G ? (int32_t) keys.len - 1 : -1;
-  float m[8], l[8];
+  // this lane's rows, a slot each (port.h: its D elements' rows): the token's last entry, or none past G; their
+  // running max and sum
+  int32_t lim[osmos_slots];
+  float m[osmos_slots], l[osmos_slots];
+  for (int r = 0; r < osmos_slots; r++)
+    lim[r] = (uint32_t) osmos_slot_row(r) < G ? (int32_t) keys.len - 1 : -1, m[r] = -INFINITY, l[r] = 0.0f;
   f8 o[kHead / kTile / kWaves] = {};
-  for (int j = 0; j < 8; j++) m[j] = -INFINITY, l[j] = 0.0f;
   Raw raw;
   raw_fetch(raw, kc, vc, row, kvh, keys, k0, k1);
   for (uint32_t kb = k0; kb < k1; kb += kTile) {
@@ -199,40 +192,55 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
     __syncthreads();
     if (kb + kTile < k1) raw_fetch(raw, kc, vc, row, kvh, keys, kb + kTile, k1);  // the next block's, in flight
     f8 sacc = {};
-    for (int g = 0; g < kHead / kTile; g++) {
-      const h16 a = *(const h16*) (qs + (lane % kTile) * kRowLds + g * kTile);
-      const h16 bk = *(const h16*) (ks + (lane % kTile) * kRowLds + g * kTile);
-      sacc = osmos_wmma_f16(a, bk, sacc);
-    }
-    // each row: its scores scaled and masked, the running max and sum, P to f16
-    const int32_t key = (int32_t) (kb + lane % kTile);
-    float alpha[8];
+    for (int g = 0; g < kHead / kTile; g++)
+      sacc = osmos_mma(osmos_load_a(qs + g * kTile, kRowLds), osmos_load_b_s(ks + g * kTile, kRowLds), sacc);
+    // each row: its scores scaled and masked, the running max and sum, P to f16 at (its row, its key)
+    float sv[8], alpha[osmos_slots];
+#pragma unroll
     for (int j = 0; j < 8; j++) {
-      const float sv = key <= lim[j] ? sacc[j] * (1.0f / 16.0f) : -INFINITY;  // 1 / sqrt(256)
-      const float mn = fmaxf(m[j], row_max(sv));
-      const float pv = mn == -INFINITY ? 0.0f : expf(sv - mn);
-      alpha[j] = mn == -INFINITY ? 1.0f : expf(m[j] - mn);
-      l[j] = l[j] * alpha[j] + row_sum(pv), m[j] = mn;
-      ps[wave][(2 * j + half) * kKeyLds + lane % kTile] = (_Float16) pv;
+      const int32_t key = (int32_t) (kb + osmos_acc_col(j));
+      sv[j] = key <= lim[osmos_slot(j)] ? sacc[j] * (1.0f / 16.0f) : -INFINITY;  // 1 / sqrt(256)
+    }
+#pragma unroll
+    for (int r = 0; r < osmos_slots; r++) {
+      float mx = -INFINITY;
+#pragma unroll
+      for (int j = 0; j < 8; j++)
+        if (osmos_slot(j) == r) mx = fmaxf(mx, sv[j]);
+      const float mn = fmaxf(m[r], osmos_row_max(mx));
+      float sum = 0.0f;
+#pragma unroll
+      for (int j = 0; j < 8; j++)
+        if (osmos_slot(j) == r) {
+          const float pv = mn == -INFINITY ? 0.0f : expf(sv[j] - mn);
+          sum += pv;
+          ps[wave][osmos_acc_row(j) * kKeyLds + osmos_acc_col(j)] = (_Float16) pv;
+        }
+      alpha[r] = mn == -INFINITY ? 1.0f : expf(m[r] - mn);
+      l[r] = l[r] * alpha[r] + osmos_row_sum(sum), m[r] = mn;
     }
     osmos_wave_barrier();
-    const h16 pa = *(const h16*) (ps[wave] + (lane % kTile) * kKeyLds);
+    const osmos_fa pa = osmos_load_a(ps[wave], kKeyLds);
+#pragma unroll
     for (int nt = 0; nt < kHead / kTile / kWaves; nt++) {
-      for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
-      const uint32_t col = (wave * (kHead / kTile / kWaves) + nt) * kTile + lane % kTile;
-      const h16 bv = *(const h16*) (vt + col * kKeyLds);
-      o[nt] = osmos_wmma_f16(pa, bv, o[nt]);
+#pragma unroll
+      for (int j = 0; j < 8; j++) o[nt][j] *= alpha[osmos_slot(j)];
+      const uint32_t col0 = (wave * (kHead / kTile / kWaves) + nt) * kTile;
+      o[nt] = osmos_mma(pa, osmos_load_b_s(vt + col0 * kKeyLds, kKeyLds), o[nt]);
     }
     osmos_wave_barrier();
   }
   // the chunk's partials: (max, sum) a row, O a row's dims - row R = t G + r of KV head kvh, at [chunk][kvh][R]
   const uint64_t base = ((uint64_t) chunk * kv_heads + kvh) * n_tok * G;
+#pragma unroll
   for (int j = 0; j < 8; j++) {
-    const uint32_t r = 2 * j + half, R = t * G + r;
+    const uint32_t r = osmos_acc_row(j), R = t * G + r;
     if (r >= G) continue;
-    if (wave == 0 && lane % kTile == 0) ml[(base + R) * 2] = m[j], ml[(base + R) * 2 + 1] = l[j];
+    if (wave == 0 && osmos_acc_col(j) == 0)  // (a row's one element at column 0: its state written once)
+      ml[(base + R) * 2] = m[osmos_slot(j)], ml[(base + R) * 2 + 1] = l[osmos_slot(j)];
+#pragma unroll
     for (int nt = 0; nt < kHead / kTile / kWaves; nt++)
-      po[(base + R) * kHead + (wave * (kHead / kTile / kWaves) + nt) * kTile + lane % kTile] = o[nt][j];
+      po[(base + R) * kHead + (wave * (kHead / kTile / kWaves) + nt) * kTile + osmos_acc_col(j)] = o[nt][j];
   }
 }
 

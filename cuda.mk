@@ -30,7 +30,7 @@ CUDA_KERNEL_OBJS := $(patsubst $(KERNEL_DIR)/%.hip,$(CUDA_OBJ)/kernels/%.o,$(CUD
 CUDA_LIB := $(LIB_DIR)/libosmos_cuda.a
 CUDA_TESTS ?= test_kvfmt_gpu test_mv_gpu test_mv_f32_wide_gpu test_mm_gpu test_mmq_gpu test_q8_gpu test_quant_gpu \
 	test_attn_gpu test_select_gpu test_argmax_gpu test_fuse_gpu test_copy_gpu test_gated_mean_gpu \
-	test_wait_gpu test_q4x_attn_gpu test_q4x_deltanet_gpu test_q4x_conv_sum_gpu test_q35_gpu test_q35_lsa_gpu test_lsa_gpu
+	test_wait_gpu test_q4x_attn_gpu test_q4x_deltanet_gpu test_q4x_conv_sum_gpu test_q35_gpu test_q35_lsa_gpu test_lsa_gpu test_q35_attn_gpu
 CUDA_TEST_BINS := $(patsubst %,$(BIN_DIR)/cuda/%,$(CUDA_TESTS))
 
 $(CUDA_VIEW)/.made: tools/cuda/fatbinary
