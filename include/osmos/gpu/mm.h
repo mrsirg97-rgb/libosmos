@@ -45,6 +45,10 @@ bool mm_fp4_ok(void);
 bool mm_fp4_act(const float *x, uint32_t xs, uint32_t n, uint32_t cols, float gs, void *q, void *sc, void *stream);
 bool mm_fp4(const void *w, uint32_t rows, uint32_t cols, const void *q, const void *sc, uint32_t n, float scale,
             float *y, uint32_t ys, void *stream);
+/* the same over ModelOpt's layout (packed [rows, cols/2] in k order, the low nibble first; E4M3 scales [rows, cols/16]
+   at wscale): the training engine's (incarnate train/fp4.py) */
+bool mm_fp4_mo(const void *packed, const void *wscale, uint32_t rows, uint32_t cols, const void *q, const void *sc,
+               uint32_t n, float scale, float *y, uint32_t ys, void *stream);
 #ifdef __cplusplus
 }
 #endif
