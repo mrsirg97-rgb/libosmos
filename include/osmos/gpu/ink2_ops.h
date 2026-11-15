@@ -108,7 +108,7 @@ bool ink2_mtp_mix(const float *taps, uint32_t n_taps, const float *alpha, uint32
                   void *stream);
 bool ink2_mtp_kv_put(uint16_t *ring, uint32_t ring_rows, const float *x, uint32_t n, uint32_t row, int32_t pos0,
                      void *stream);
-uint64_t ink2_mtp_attn_scratch(uint32_t n_q, uint32_t heads, uint32_t max_keys);
+uint64_t ink2_mtp_attn_scratch(uint32_t n_q, uint32_t heads, uint32_t kv_heads);
 bool ink2_mtp_attn(const float *q, uint32_t n_q, int32_t pos0, const float *kb, const float *vb, const uint16_t *kr,
                    const uint16_t *vr, uint32_t ring_rows, int32_t ctx_from, uint32_t heads, uint32_t kv_heads,
                    uint32_t window, float *scratch, float *out, void *stream);
@@ -240,8 +240,9 @@ ink2_mtp_attn
   the drafter's attention for a block of n_q queries at positions pos0 .. (q [n_q][heads][128], RoPE'd), against the
   context's keys and values in the ring for positions ctx_from .. pos0 - 1 and the block's own (kb, vb [n_q][kv_heads]
   [128] F32): a context key visible to query i when within `window` of it back (0: every one), every block key
-  visible (not causal). scores q.k / sqrt(128), each chunk of 256 keys its softmax's partial (scratch:
-  ink2_mtp_attn_scratch), merged in order. out [n_q][heads][128].
+  visible (not causal). scores q.k / sqrt(128); a KV head's queries and heads together (n_q times heads / kv_heads
+  rows, 48 at most), each key read once for them; the keys in spans, a span's softmax partial a row (scratch:
+  ink2_mtp_attn_scratch - a bound by the GPU's blocks, not the context), merged in order. out [n_q][heads][128].
 
 ink2_mtp_markov_in, _gru, _pick
   the Markov head's step (TokenSpeed's sample_block): vec = [state | markov_w1[*prev]] (w1 BF16 [V][rank]); with p =

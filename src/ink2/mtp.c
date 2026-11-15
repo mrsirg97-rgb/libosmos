@@ -69,6 +69,8 @@ Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[INK2
     ok = fail(err, ARCH ".embedding_length", "not the target's width");
   else if (heads_dim != INK2_MTP_HEAD || m->n_heads % m->n_kv_heads)
     ok = fail(err, ARCH ".attention.key_length", "heads not of 128 (the kernels'), or not a KV heads' multiple");
+  else if (m->block * (m->n_heads / m->n_kv_heads) > INK2_MTP_ATTN_ROWS)
+    ok = fail(err, ARCH ".block_size", "a block's queries times a KV head's heads past the attention's 48 rows");
   else if (m->rank != INK2_MTP_RANK)
     ok = fail(err, ARCH ".markov_rank", "not 256 (the kernels')");
   m->n_taps = (int)n_taps;

@@ -12,6 +12,8 @@
 #define INK2_MTP_HEAD 128     /* its heads' dim: the kernels' */
 #define INK2_MTP_BLOCK 8      /* a round's block at most: the anchor and its drafts (Inkling-2's 8) */
 #define INK2_MTP_RANK 256     /* the Markov head's rank: the kernels' (Inkling-2's 256) */
+#define INK2_MTP_ATTN_ROWS 48 /* a block's queries times the heads a KV head serves, at most: the attention's (Inkling-2's
+                                 8 x 6) */
 
 typedef struct Ink2MtpLayer
 {

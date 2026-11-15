@@ -151,7 +151,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
       {(void **)&d->inv, (uint64_t)B * 3 * R * 4}, {(void **)&d->vec, 2 * R * 4}, {(void **)&d->p, 3 * R * 4},
       {(void **)&d->state, R * 4}, {(void **)&d->latent, R * 4}, {(void **)&d->corr, (uint64_t)VR * 4},
       {(void **)&d->base, (uint64_t)B * VR * 4}, {(void **)&d->lg, ink2_mtp_pick_scratch()}, {(void **)&d->probs, B * 4},
-      {(void **)&d->scr, ink2_mtp_attn_scratch(B, (uint32_t)m->n_heads, f->max_ctx)}, {(void **)&d->f_rnn, C * 4},
+      {(void **)&d->scr, ink2_mtp_attn_scratch(B, (uint32_t)m->n_heads, (uint32_t)m->n_kv_heads)}, {(void **)&d->f_rnn, C * 4},
       {(void **)&d->pos, B * 4}, {(void **)&d->prev, 4}, {(void **)&d->ids, B * 4},
       {&d->x16, (uint64_t)MM_TILE * wide * 2}, {(void **)&d->overflow, 4},
   };

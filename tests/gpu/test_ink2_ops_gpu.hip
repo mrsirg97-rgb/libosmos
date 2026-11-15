@@ -626,6 +626,72 @@ int main() {
                   "same bits again\n", n);
     }
   }
+  {  // ink2_mtp_attn: the drafter's block against float64 on the host - Inkling-2's 48 heads on 8 KV heads, 8 queries:
+     // every context position (one span, and past a span's), a local layer's window over a ring that wraps
+    const uint32_t nq = 8, H = 48, KH = 8, D = 128, row = KH * D;
+    struct Case {
+      int32_t pos0, from;
+      uint32_t ring, window;
+    } cases[] = {{700, 0, 1024, 0}, {20000, 37, 20480, 0}, {3000, 1960, 1040, 1031}};
+    for (const Case& c : cases) {
+      std::vector<float> q((size_t) nq * H * D), kb((size_t) nq * row), vb((size_t) nq * row);
+      std::vector<_Float16> kr((size_t) c.ring * row), vr((size_t) c.ring * row);
+      uint32_t r = 99 + (uint32_t) c.pos0;
+      auto rnd = [&r](float s) { return r = r * 1664525u + 1013904223u, ((float) (r >> 8) / (1 << 24) - 0.5f) * s; };
+      for (float& v : q) v = rnd(4.0f);
+      for (float& v : kb) v = rnd(2.0f);
+      for (float& v : vb) v = rnd(2.0f);
+      for (auto& v : kr) v = (_Float16) rnd(2.0f);
+      for (auto& v : vr) v = (_Float16) rnd(2.0f);
+      std::vector<float> want((size_t) nq * H * D);
+      for (uint32_t i = 0; i < nq; i++)
+        for (uint32_t h = 0; h < H; h++) {
+          const uint32_t g = h / (H / KH);
+          const int32_t qp = c.pos0 + (int32_t) i;
+          const int32_t lo = c.window && qp - (int32_t) c.window + 1 > c.from ? qp - (int32_t) c.window + 1 : c.from;
+          std::vector<double> s, o(D, 0.0);
+          std::vector<const _Float16*> kc, vc;
+          for (int32_t p = lo; p < c.pos0; p++) {
+            const _Float16* k = &kr[(size_t) ((uint32_t) p % c.ring) * row + g * D];
+            double a = 0;
+            for (uint32_t d = 0; d < D; d++) a += (double) q[((size_t) i * H + h) * D + d] * (double) (float) k[d];
+            s.push_back(a / std::sqrt((double) D)), vc.push_back(&vr[(size_t) ((uint32_t) p % c.ring) * row + g * D]);
+          }
+          const size_t nctx = s.size();
+          for (uint32_t b = 0; b < nq; b++) {
+            double a = 0;
+            for (uint32_t d = 0; d < D; d++) a += (double) q[((size_t) i * H + h) * D + d] * kb[(size_t) b * row + g * D + d];
+            s.push_back(a / std::sqrt((double) D));
+          }
+          const double mx = *std::max_element(s.begin(), s.end());
+          double l = 0;
+          for (size_t j = 0; j < s.size(); j++) {
+            const double w = std::exp(s[j] - mx);
+            l += w;
+            for (uint32_t d = 0; d < D; d++)
+              o[d] += w * (j < nctx ? (double) (float) vc[j][d] : (double) vb[(j - nctx) * row + g * D + d]);
+          }
+          for (uint32_t d = 0; d < D; d++) want[((size_t) i * H + h) * D + d] = (float) (o[d] / l);
+        }
+      float *dq = dev_from(q), *dkb = dev_from(kb), *dvb = dev_from(vb), *dout = dev_alloc<float>(want.size()),
+            *dscr = dev_alloc<float>(ink2_mtp_attn_scratch(nq, H, KH) / 4);
+      uint16_t *dkr = dev_alloc<uint16_t>(kr.size()), *dvr = dev_alloc<uint16_t>(vr.size());
+      CHECK(hipMemcpy(dkr, kr.data(), kr.size() * 2, hipMemcpyHostToDevice) == hipSuccess);
+      CHECK(hipMemcpy(dvr, vr.data(), vr.size() * 2, hipMemcpyHostToDevice) == hipSuccess);
+      CHECK(ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      const std::vector<float> got = host_of(dout, want.size());
+      CHECK(ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      const std::vector<float> again = host_of(dout, want.size());
+      CHECK(std::memcmp(got.data(), again.data(), got.size() * 4) == 0);
+      CHECK(!ink2_mtp_attn(dq, nq + 1, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      double worst = 0;
+      for (size_t i = 0; i < got.size(); i++) worst = std::max(worst, (double) std::fabs(got[i] - want[i]));
+      CHECK(worst < 1e-5 || (std::printf("  mtp_attn: %d keys back: max |err| %.2e\n", c.pos0 - c.from, worst), false));
+      std::printf("  mtp_attn: from %d to %d (ring %u, window %u): max |err| %.2e against float64, the same bits again\n",
+                  c.from, c.pos0, c.ring, c.window, worst);
+      for (void* d : {(void*) dq, (void*) dkb, (void*) dvb, (void*) dout, (void*) dscr, (void*) dkr, (void*) dvr}) hipFree(d);
+    }
+  }
   std::printf("[test_ink2_ops_gpu] ok\n");
   return 0;
 }
