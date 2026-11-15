@@ -793,8 +793,8 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
       group(L->exp_up->type, du, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eu, dyg, F) &&
       ink2_swiglu_x16(f->eg, f->eu, dsg, dsu, F, g->gate_softcap, g->up_softcap, dhidx, slots, f->xe16,
                       f->overflow, NULL) &&
-      group(L->exp_down->type, dd, cnt, dcnt, ne, C, F, f->xe16, dxd, f->ed, dyd, C) &&
-      ink2_moe_sum(f->moe, f->ed, da, drow, K, n, C, NULL);
+      group(L->exp_down->type, dd, cnt, dcnt, ne, C, F, f->xe16, dxd, f->ed, dyd, C);
+  f->m_a = da, f->m_row = drow;
   if (!ok)
     return ink2_fail(err, "inkling2: a GPU call failed (the experts)");
   if (pf_on())
@@ -954,8 +954,19 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     if (!moe(f, l, n, err))
       return false;
     pf(PF_MOE);
-    /* the layer's output, r + the MoE's conv: the next layer's h */
-    GPU(conv_put(cf, f->moe, n, C, taps, d->ffn_out_conv, 0, NULL, conv_res, conv_scale, f->r, f->h));
+    /* the layer's output, r + the MoE's conv: the next layer's h - the experts' sums in the conv's launch, or
+       (its tail past its room) summed first, the tail's rows */
+    {
+      const uint32_t K = (uint32_t)g->n_used;
+      const float *hist = ink2_tail_last(cf, taps - 1);
+      float *keep = ink2_tail_claim(cf, n);
+      if (keep)
+        GPU(ink2_moe_conv(f->ed, f->m_a, f->m_row, K, n, C, taps, d->ffn_out_conv, hist, conv_res, conv_scale, f->r,
+                          f->h, keep, NULL));
+      else
+        GPU(ink2_moe_sum(f->moe, f->ed, f->m_a, f->m_row, K, n, C, NULL) &&
+            conv_put(cf, f->moe, n, C, taps, d->ffn_out_conv, 0, NULL, conv_res, conv_scale, f->r, f->h));
+    }
   }
   pf(PF_MID);
   /* the head: the rows from the prompt's end - 1 on */

@@ -66,16 +66,20 @@ __global__ void swiglu_x16_kernel(const float* g, const float* u, const float* s
   __builtin_memcpy(x16 + o, h, sizeof h);
 }
 
-// a token's experts summed in its slot order from zero: ink2_axpy's sum, one after another
+// token t's experts at c summed in its slot order from zero: ink2_axpy's sum, one after another
+__device__ inline float moe_at(const float* x, const float* a, const int32_t* row, uint32_t k, uint64_t t, uint32_t c,
+                               uint32_t dim) {
+  float v = 0.0f;
+#pragma unroll 8
+  for (uint32_t s = 0; s < k; s++) v += a[t * k + s] * x[(uint64_t) row[t * k + s] * dim + c];
+  return v;
+}
+
 __global__ void moe_sum_kernel(float* y, const float* x, const float* a, const int32_t* row, uint32_t k, uint64_t all,
                                uint32_t dim) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= all) return;
-  const uint64_t t = i / dim, c = i % dim;
-  float v = 0.0f;
-#pragma unroll 8
-  for (uint32_t s = 0; s < k; s++) v += a[t * k + s] * x[(uint64_t) row[t * k + s] * dim + c];
-  y[i] = v;
+  y[i] = moe_at(x, a, row, k, i / dim, (uint32_t) (i % dim), dim);
 }
 
 // h[i][j] += sum over t of x[t][i] x[t][j] (a calibration's X^T X, F32): a 16 x 16 tile of h a block, the tokens in
@@ -129,6 +133,26 @@ __global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_
   if (i >= (uint64_t) n_tok * ch) return;
   if (keep) keep[i] = x[i];
   const float out = conv_at(x, (uint32_t) (i / ch), (uint32_t) (i % ch), ch, taps, w, hist, res, scale);
+  y[i] = add ? add[i] + out : out;
+}
+
+// conv_kernel on the experts' sums, each tap's value moe_at's where it reads one (the step's tokens): ink2_moe_sum
+// then ink2_conv_keep's bits
+__global__ void moe_conv_kernel(const float* x, const float* a, const int32_t* row, uint32_t k, uint32_t n_tok,
+                                uint32_t ch, uint32_t taps, const float* w, const float* hist, float res, float scale,
+                                const float* add, float* y, float* keep) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= (uint64_t) n_tok * ch) return;
+  const uint32_t c = (uint32_t) (i % ch), t = (uint32_t) (i / ch), h = taps - 1;
+  float sum = 0, xt = 0;
+  for (uint32_t j = 0; j < taps; j++) {
+    const uint32_t at = t + j;
+    const float v = at < h ? (hist ? hist[(uint64_t) at * ch + c] : 0.0f) : moe_at(x, a, row, k, at - h, c, ch);
+    sum += w[(uint64_t) c * taps + j] * v;
+    xt = v;  // (the last tap: token t's own)
+  }
+  if (keep) keep[i] = xt;
+  const float out = (sum + res * xt) * scale;
   y[i] = add ? add[i] + out : out;
 }
 
@@ -822,6 +846,15 @@ extern "C" bool ink2_conv_keep(const float* x, uint32_t n_tok, uint32_t ch, uint
   if (!x || !w || !y || !n_tok || !ch || taps < 2 || taps > INK2_MAX_TAPS) return false;
   conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, w, hist, res, scale, add,
                                                                          y, keep);
+  return ok();
+}
+
+extern "C" bool ink2_moe_conv(const float* x, const float* a, const int32_t* row, uint32_t k, uint32_t n_tok,
+                              uint32_t ch, uint32_t taps, const float* w, const float* hist, float res, float scale,
+                              const float* add, float* y, float* keep, void* stream) {
+  if (!x || !a || !row || !k || !w || !y || !n_tok || !ch || taps < 2 || taps > INK2_MAX_TAPS) return false;
+  moe_conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, a, row, k, n_tok, ch, taps, w, hist,
+                                                                             res, scale, add, y, keep);
   return ok();
 }
 

@@ -241,6 +241,32 @@ int main() {
     for (void* d : {(void*) dg, (void*) du, (void*) dsg, (void*) dsu, (void*) dh, (void*) di, (void*) dov, x0, x1})
       hipFree(d);
   }
+  for (uint32_t n : {1u, 5u})  // the experts' sums in the conv: ink2_moe_sum then ink2_conv_keep's bytes
+    for (bool hist : {false, true}) {
+      const uint32_t ch = 512, k = 8, taps = 4, P = n * k;
+      const auto x = normals((size_t) P * ch, 41 + n, 1.0f), a = normals(P, 42 + n, 0.3f);
+      const auto w = normals((size_t) ch * taps, 43, 0.4f), hv = normals((size_t) (taps - 1) * ch, 44, 1.0f);
+      const auto add = normals((size_t) n * ch, 45, 1.0f);
+      std::vector<int32_t> row(P);
+      for (uint32_t m = 0; m < P; m++) row[m] = (int32_t) ((m * 13) % P);
+      float *dx = dev_from(x), *da = dev_from(a), *dw = dev_from(w), *dh = hist ? dev_from(hv) : nullptr;
+      float *dadd = dev_from(add), *dm = dev_alloc<float>((size_t) n * ch), *y0 = dev_alloc<float>((size_t) n * ch);
+      float *y1 = dev_alloc<float>((size_t) n * ch), *k0 = dev_alloc<float>((size_t) n * ch);
+      float* k1 = dev_alloc<float>((size_t) n * ch);
+      int32_t* dr = dev_alloc<int32_t>(P);
+      CHECK(hipMemcpy(dr, row.data(), P * 4, hipMemcpyHostToDevice) == hipSuccess);
+      const float scale = 1.0f / std::sqrt(5.0f);
+      CHECK(ink2_moe_sum(dm, dx, da, dr, k, n, ch, nullptr) &&
+            ink2_conv_keep(dm, n, ch, taps, dw, dh, 1.0f, scale, dadd, y0, k0, nullptr));
+      CHECK(ink2_moe_conv(dx, da, dr, k, n, ch, taps, dw, dh, 1.0f, scale, dadd, y1, k1, nullptr));
+      const size_t m = (size_t) n * ch;
+      CHECK(same_bits(host_of(y1, m), host_of(y0, m)) && same_bits(host_of(k1, m), host_of(k0, m)));
+      std::printf("  moe_conv (%u token%s, %s): ink2_moe_sum then ink2_conv_keep's bits\n", n, n > 1 ? "s" : "",
+                  hist ? "a history" : "none");
+      for (void* d : {(void*) dx, (void*) da, (void*) dw, (void*) dh, (void*) dadd, (void*) dm, (void*) y0, (void*) y1,
+                      (void*) k0, (void*) k1, (void*) dr})
+        if (d) hipFree(d);
+    }
   // the static convs: the post-attention one, and a sliding layer's k and v
   held("conv (post-attention, 4 taps)", run_conv(in("conv", "x"), in("conv", "w"), 4, 1.0f / std::sqrt(5.0f)),
        in("conv", "out"), 1.0, kExactRel);

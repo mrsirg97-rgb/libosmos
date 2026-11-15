@@ -104,6 +104,8 @@ struct Ink2Forward
   /* the picks, their weights after them (pick + the step's pairs); the next layer's guessed (gw their weights) */
   int32_t *pick, *hpick, *gid, *gpick, *hgpick;
   float *gw;
+  const float *m_a;     /* the layer's experts' weights a pick and the picks' rows (in m_dev): their sum's */
+  const int32_t *m_row;
   void *x16, *xe16; /* mm's f16 activations: a dense matrix's input (MM_MAX_TOKENS rows), the experts' slots */
   int32_t *overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
   uint32_t head_rows; /* the head's rows a launch (f->head's) */
