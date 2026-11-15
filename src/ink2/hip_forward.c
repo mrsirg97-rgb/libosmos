@@ -408,6 +408,10 @@ static bool buffers(Ink2Forward *f)
                  X16 = ((T < MM_MAX_TOKENS ? T : MM_MAX_TOKENS) + MM_TILE - 1) / MM_TILE * MM_TILE;
   const uint32_t head = ink2_type(f->w->output);
   f->head_rows = mm_takes(head, (uint32_t)VR, (uint32_t)C) ? MM_TILE * mm_col_tiles(head, MM_MAX_TOKENS) : MV_MAX_TOKENS;
+  /* the experts' down rows and a decode's split attention share one buffer: the attention's partials are dead before
+     the layer's MoE writes the down rows, and those are summed before the next layer's attention */
+  const uint64_t fa_bytes = ink2_fa_scratch((uint32_t)H, f->max_ctx), down_bytes = T * K * C * 4,
+                 ed_bytes = fa_bytes > down_bytes ? fa_bytes : down_bytes;
   struct
   {
     void **p;
@@ -422,13 +426,11 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->r, T * C * 4}, {(void **)&f->moe, T * C * 4}, {(void **)&f->logit, T * E * 4},
       {(void **)&f->tmp, T * C * 4}, {(void **)&f->pick, T * K * 4}, {(void **)&f->pw, T * K * 4},
       {(void **)&f->gpick, T * K * 4}, {(void **)&f->gw, T * K * 4},
-      {(void **)&f->eg, T * K * F * 4}, {(void **)&f->eu, T * K * F * 4}, {(void **)&f->eh, T * K * F * 4},
-      {(void **)&f->ed, T * K * C * 4}, {&f->m_dev, table_bytes(T * K, E)}, {&f->x16, X16 * CH * 2},
+      {(void **)&f->eg, T * K * F * 4}, {(void **)&f->eu, T * K * F * 4}, {(void **)&f->ed, ed_bytes}, {&f->m_dev, table_bytes(T * K, E)}, {&f->x16, X16 * CH * 2},
       {&f->xe16, table_slots(T * K, E) * C * 2}, {(void **)&f->overflow, 4},
       {(void **)&f->head, f->head_rows * VR * 4}, {(void **)&f->logits, (uint64_t)f->logit_rows * f->vocab * 4},
       {(void **)&f->gid, T * 4}, {&f->amax, ops_argmax_scratch((uint32_t)T)},
       {(void **)&f->res_sc, INK2_RES_SCRATCH * 4},
-      {(void **)&f->fa_part, ink2_fa_scratch((uint32_t)H, f->max_ctx)},
   };
   uint64_t sum = 0;
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
@@ -441,6 +443,8 @@ static bool buffers(Ink2Forward *f)
   }
   if (mem_on())
     fprintf(stderr, "ink2 mem:   step buffers, all %zu: %.3f GiB\n", sizeof b / sizeof *b, sum / 1073741824.0);
+  f->eh = f->eg;                /* the swiglu over its gate rows in place: each value its own index's */
+  f->fa_part = (float *)f->ed; /* (the down rows' buffer: ed_bytes) */
   if (hipMemset(f->overflow, 0, 4) != hipSuccess)
     return false;
   /* the router's picks and weights and the experts' tables through pinned host memory: copies queued on the stream,
@@ -543,8 +547,8 @@ void ink2_forward_destroy(Ink2Forward *f)
   free(f->fds);
   void *dev[] = {f->embed, f->output, f->embed_norm, f->out_res_q, f->out_norm, f->ids_d, f->h, f->blocks, f->a3,
                  f->xn, f->kn, f->vn, f->q, f->k, f->v, f->kc, f->vc, f->rel, f->gate, f->sink, f->att, f->dyn,
-                 f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->pw, f->eg, f->eu, f->eh, f->ed, f->head,
-                 f->logits, f->gid, f->amax, f->m_dev, f->fa_part, f->gpick, f->gw, f->x16, f->xe16, f->overflow,
+                 f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->pw, f->eg, f->eu, f->ed, f->head,
+                 f->logits, f->gid, f->amax, f->m_dev, f->gpick, f->gw, f->x16, f->xe16, f->overflow,
                  f->res_sc};
   for (size_t i = 0; i < sizeof dev / sizeof *dev; i++)
     if (dev[i])

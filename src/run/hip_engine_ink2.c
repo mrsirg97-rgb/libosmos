@@ -74,7 +74,7 @@ _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens withi
 
 /* the logits' rows a step keeps at most: a prompt's last row, a decode's or a drafted round's every row, each
    --parallel lane's - 1,024 x the vocabulary's 201,024 F32 0.77 GiB (a step's every row at 8,192: 6.1 GiB) */
-#define INK2_LOGIT_ROWS 1024
+#define INK2_LOGIT_ROWS (OSMOS_MAX_LANES * (OSMOS_MAX_BLOCK + 1)) /* a round's most kept rows: each lane's drafts and its token */
 #define INK2_DRAFT_CUM_MIN 0.7f
 
 /* INK2_PROFILE's round accounting (a measurement's): the steps' time by their tokens (1 .. 16, then more), the
