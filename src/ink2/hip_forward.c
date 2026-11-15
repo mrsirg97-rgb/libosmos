@@ -257,7 +257,7 @@ static bool copy_host(void *dst, const void *src, uint64_t bytes, void *ctx)
 }
 
 /* the experts as the membrane's units: room's worth warmed, an expert of every layer at a time (expert 0 of each
-   layer, then 1, ...); room 0 every one */
+   layer, then 1, ...); room 0 (or a budget short of the rest) the least: a layer's */
 static const uint64_t *g_rank; /* by_picks's counts (qsort takes no context) */
 static int by_picks(const void *a, const void *b)
 {
@@ -266,7 +266,7 @@ static int by_picks(const void *a, const void *b)
   return px != py ? (px < py) - (px > py) : (x > y) - (x < y);
 }
 
-static bool experts(Ink2Forward *f, uint64_t room, const uint64_t *picks, char *err)
+static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64_t *picks, char *err)
 {
   const Ink2Weights *w = f->w;
   const Gguf *m = w->model;
@@ -290,9 +290,16 @@ static bool experts(Ink2Forward *f, uint64_t room, const uint64_t *picks, char *
     const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
     all += b, largest = b > largest ? b : largest;
   }
-  if (!room || room > all)
+  const uint64_t stream_room = 2 * (uint64_t)E * largest;
+  if (budget) /* osmos's budget the whole build: the experts' slots what the rest leaves (their 2 units' slack too) */
+  {
+    const uint64_t rest = f->fixed_bytes + stream_room + 4 * largest;
+    room = budget > rest ? budget - rest : 0;
+  }
+  if (room > all)
     room = all;
-  if (room < (uint64_t)E * largest) /* a decode's holds and a passing visit's in the stream: a layer's at most */
+  if (room < (uint64_t)E * largest) /* a decode's holds and a passing visit's in the stream: a layer's at most - and
+                                       room 0's, the smallest build (osmos's budget 0: auto-sizing's first build) */
     room = (uint64_t)E * largest;
   /* the warm set, the most wanted first: by picks counted on calibration text (most first, then the lower unit), else
      an expert of every layer at a time (expert 0 of each layer, then 1, ...) - as many as the room holds */
@@ -314,7 +321,6 @@ static bool experts(Ink2Forward *f, uint64_t room, const uint64_t *picks, char *
   char perr[POOL_ERR] = "", merr[MEMBRANE_ERR] = "";
   /* the stream two layers: a prompt step's holds of one and its read ahead of the next (one alone: the next one's reads
      wait for this one's holds to end - the SSD idle under the layer's kernels) */
-  const uint64_t stream_room = 2 * (uint64_t)E * largest;
   if (ok && !((f->slots = host_slots_create(room + 2 * largest, perr)) &&
               (f->stream = host_slots_create(stream_room + 2 * largest, perr))))
     ok = ink2_fail(err, perr[0] ? perr : "inkling2: the experts' memory refused");
@@ -410,6 +416,9 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
       return ink2_fail(err, "inkling2: an expert tensor of a type or shape mm has no kernel for"),
              ink2_forward_destroy(f), NULL;
   }
+  size_t free0 = 0, free1 = 0, total = 0;
+  if (hipMemGetInfo(&free0, &total) != hipSuccess)
+    return ink2_fail(err, "inkling2: the GPU's free memory not read"), ink2_forward_destroy(f), NULL;
   if (!upload(f))
     return ink2_fail(err, "inkling2: a dense tensor not read or uploaded (GPU memory, or its file)"),
            ink2_forward_destroy(f), NULL;
@@ -420,7 +429,10 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
     return ink2_forward_destroy(f), NULL;
   if (!(f->picks = calloc((size_t)w->geo.n_layers * w->geo.n_experts, sizeof *f->picks)))
     return ink2_fail(err, "out of memory"), ink2_forward_destroy(f), NULL;
-  if (!experts(f, o->room, o->picks, err))
+  if (hipMemGetInfo(&free1, &total) != hipSuccess)
+    return ink2_fail(err, "inkling2: the GPU's free memory not read"), ink2_forward_destroy(f), NULL;
+  f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : f->dense_bytes;
+  if (!experts(f, o->room, o->budget, o->picks, err))
     return ink2_forward_destroy(f), NULL;
   return f;
 }
@@ -490,7 +502,7 @@ void ink2_forward_destroy(Ink2Forward *f)
   free(f);
 }
 
-uint64_t ink2_forward_bytes(const Ink2Forward *f) { return f ? f->dense_bytes + f->pinned_bytes : 0; }
+uint64_t ink2_forward_bytes(const Ink2Forward *f) { return f ? f->fixed_bytes + f->pinned_bytes : 0; }
 
 const uint64_t *ink2_forward_picks(const Ink2Forward *f) { return f ? f->picks : NULL; }
 

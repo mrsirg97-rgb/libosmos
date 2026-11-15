@@ -85,6 +85,7 @@ struct Ink2Forward
   void *embed, *output;
   float *embed_norm, *out_res_q, *out_norm;
   uint64_t dense_bytes, pinned_bytes;
+  uint64_t fixed_bytes; /* the GPU memory the dense weights, buffers and drafter took (create's measure) */
   uint64_t *picks; /* each unit's picks so far (ink2_forward_picks) */
   /* the experts */
   int *fds;

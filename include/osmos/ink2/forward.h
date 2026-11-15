@@ -22,9 +22,11 @@ typedef struct Ink2Options
 {
   uint32_t max_ctx;    /* a sequence's most positions */
   uint32_t max_tokens; /* a step's most tokens */
-  uint64_t room;       /* the experts' cache (the membrane's pool), bytes; 0: every expert */
+  uint64_t room;       /* the experts' cache (the membrane's pool), bytes; 0: the least (a layer's) */
   const uint64_t *picks; /* a picks profile ([layer][expert] counts): the warm set the most picked; NULL: uniform */
   const Ink2Mtp *mtp;    /* the drafter (osmos/ink2/mtp.h), or NULL: none */
+  uint64_t budget;       /* the whole build's bytes (osmos's budget): the experts' room what the dense weights, the
+                            step's buffers, the drafter and the stream leave of it (room then unread); 0: room's */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR]);

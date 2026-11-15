@@ -13,6 +13,7 @@
 #include "osmos/ink2/forward.h"
 #include "osmos/ink2/weights.h"
 #include "osmos/model/gguf.h"
+#include "osmos/run/fit.h"
 
 typedef struct Model
 {
@@ -76,6 +77,7 @@ typedef struct Eng
   Gguf *mg;        /* the drafter's file, or NULL */
   Ink2Mtp *mtp;    /* the drafter, or NULL */
   uint64_t *picks; /* the picks file's counts, or NULL */
+  uint64_t ram_kept; /* the system's RAM kept free (--fill, else FIT_RAM_FREE): the room's other bound */
   uint32_t vocab, n;
 } Eng;
 
@@ -100,6 +102,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (!e)
     return fail(err, "out of memory"), NULL;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
+  e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
   if (o->picks) /* a picks file: the router's picks [layer][expert] as uint64, nothing after (DeepSeek's layout) */
   {
     const size_t n = (size_t)m->w->geo.n_layers * m->w->geo.n_experts;
@@ -127,7 +130,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
       return snprintf(err, OSMOS_ERR, "%s", ierr), e_destroy(e), NULL;
   }
   const uint32_t T = o->max_tokens ? o->max_tokens : INK2_STEP_TOKENS;
-  const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, o->budget, e->picks, e->mtp};
+  const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, 0, e->picks, e->mtp, o->budget};
   if (!(e->f = ink2_forward_create(m->w, &io, err)))
     return e_destroy(e), NULL;
   return e;
@@ -135,13 +138,14 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 
 static uint64_t e_identity(const void *p) { return ink2_identity(((const Eng *)p)->f); }
 
+/* the room a build left: the GPU's free memory, or the RAM past ram_kept - the experts' pinned host slots in RAM, not
+   in the GPU's free count (DeepSeek's forward_room) */
 static bool e_room(const void *p, uint64_t *bytes)
 {
-  (void)p;
   size_t free_b = 0, total = 0;
   if (hipMemGetInfo(&free_b, &total) != hipSuccess)
     return false;
-  *bytes = free_b;
+  *bytes = fit_room((uint64_t)free_b, fit_ram_available(), ((const Eng *)p)->ram_kept);
   return true;
 }
 
