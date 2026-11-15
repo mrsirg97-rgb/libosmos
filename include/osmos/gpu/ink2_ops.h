@@ -71,6 +71,12 @@ bool ink2_fa8(const Ink2Attn *a, const float *q, const float *rel, const float *
               uint32_t n_tok, const uint8_t *k, const uint8_t *v, uint32_t n_keys, uint32_t pos0, const float *rel_proj,
               float *out, float *scratch, void *stream);
 bool ink2_to_kv8(const float *x, uint64_t rows, uint8_t *y, void *stream);
+#define INK2_KV5_RECORD (INK2_MAX_HEAD / 2 + INK2_MAX_HEAD / 8 + INK2_MAX_HEAD / INK2_KV8_BLOCK * 2) /* nibbles, fifth
+                                                                                                    bits, scales */
+bool ink2_fa85(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
+               uint32_t n_tok, const uint8_t *k, const uint8_t *v, uint32_t n_keys, uint32_t pos0,
+               const float *rel_proj, float *out, float *scratch, void *stream);
+bool ink2_to_kv5(const float *x, uint64_t rows, uint8_t *y, void *stream);
 
 /* the drafter's (kernels/ink2_mtp.hip; src/ink2/hip_mtp.c) */
 bool ink2_mtp_mix(const float *taps, uint32_t n_taps, const float *alpha, uint32_t n, uint32_t dim, float *out,
@@ -172,6 +178,12 @@ ink2_fa8, ink2_to_kv8
   (a key's KV heads), each its INK2_MAX_HEAD int8s then a f16 scale an INK2_KV8_BLOCK of them (Q8_0's: d = amax /
   127, q = round(x / d)). a value loaded is q d rounded to f16 - ink2_fa16's bits on those values; 0.53 of f16's
   memory and reads. not f16's values: a cache of them its own bits.
+
+ink2_fa85, ink2_to_kv5
+  ink2_fa8's keys, its values Q5 records (ink2_to_kv5): a row's low nibbles (value i at byte i / 2, odd i the high
+  one), its fifth bits (byte INK2_MAX_HEAD / 2 + i / 8, bit i % 8), a f16 scale an INK2_KV8_BLOCK - d = amax / 15, q
+  = round(x / d) stored q + 16. a value loaded (q - 16) d rounded to f16 - ink2_fa16's bits on those values; values
+  0.65 of Q8's memory.
 
 ink2_mtp_mix
   out[t] = sum over k of alpha[k] taps[t][k] (taps [n][n_taps][dim]): a drafter layer's mixture of the target's taps

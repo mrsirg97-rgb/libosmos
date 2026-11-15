@@ -63,6 +63,48 @@ static std::vector<_Float16> kv8_values(const std::vector<uint8_t>& rec) {
   return out;
 }
 
+// Q5 records (ink2_ops.h's INK2_KV5_RECORD): a row of INK2_MAX_HEAD values its low nibbles (value i at byte i / 2,
+// the high nibble the odd one), its fifth bits (value i at byte i / 8, bit i % 8), then a block's f16 scale each -
+// d = amax / 15, q = round(x / d) as x * (1 / d), stored q + 16
+static std::vector<uint8_t> kv5_records(const std::vector<float>& x) {
+  constexpr int H = INK2_MAX_HEAD;
+  const size_t rows = x.size() / H;
+  std::vector<uint8_t> out(rows * INK2_KV5_RECORD, 0);
+  for (size_t r = 0; r < rows; r++) {
+    uint8_t* rec = out.data() + r * INK2_KV5_RECORD;
+    for (int b = 0; b < H / INK2_KV8_BLOCK; b++) {
+      const float* xb = x.data() + r * H + b * INK2_KV8_BLOCK;
+      float amax = 0;
+      for (int i = 0; i < INK2_KV8_BLOCK; i++) amax = std::max(amax, std::fabs(xb[i]));
+      const float d = amax / 15.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+      for (int i = 0; i < INK2_KV8_BLOCK; i++) {
+        const int v = b * INK2_KV8_BLOCK + i, q = (int) std::roundf(xb[i] * id) + 16;
+        rec[v / 2] |= (uint8_t) ((q & 15) << (v % 2 * 4));
+        rec[H / 2 + v / 8] |= (uint8_t) ((q >> 4 & 1) << (v % 8));
+      }
+      const _Float16 h = (_Float16) d;
+      std::memcpy(rec + H / 2 + H / 8 + 2 * b, &h, 2);
+    }
+  }
+  return out;
+}
+
+static std::vector<_Float16> kv5_values(const std::vector<uint8_t>& rec) {
+  constexpr int H = INK2_MAX_HEAD;
+  const size_t rows = rec.size() / INK2_KV5_RECORD;
+  std::vector<_Float16> out(rows * H);
+  for (size_t r = 0; r < rows; r++) {
+    const uint8_t* p = rec.data() + r * INK2_KV5_RECORD;
+    for (int v = 0; v < H; v++) {
+      const int q = (p[v / 2] >> (v % 2 * 4) & 15) | (p[H / 2 + v / 8] >> (v % 8) & 1) << 4;
+      _Float16 d;
+      std::memcpy(&d, p + H / 2 + H / 8 + 2 * (v / INK2_KV8_BLOCK), 2);
+      out[r * H + v] = (_Float16) ((float) (q - 16) * (float) d);
+    }
+  }
+  return out;
+}
+
 int main() {
   std::printf("[test_ink2_ops_gpu] start\n");
   int ndev = 0;
@@ -272,6 +314,39 @@ int main() {
         std::printf("  %s: keys and values stored Q8: the host's records, f16's bits on their values (against f16 "
                     "keys: max |err| %.2e of the output's rms %.2e)\n", c, worst, std::sqrt(sq / got8.size()));
         hipFree(k8), hipFree(v8), hipFree(k16), hipFree(v16);
+      }
+      {  // keys Q8, values Q5 (ink2_fa85): the host's Q5 records; f16's bits on both records' values; a split decode's
+         // row the prompt's
+        const size_t rows = (size_t) n * KV;
+        uint8_t *k8 = dev_alloc<uint8_t>(rows * INK2_KV8_RECORD), *v5 = dev_alloc<uint8_t>(rows * INK2_KV5_RECORD);
+        CHECK(ink2_to_kv8(dk, rows, k8, nullptr) && ink2_to_kv5(dv, rows, v5, nullptr));
+        std::vector<uint8_t> gk(rows * INK2_KV8_RECORD), gv(rows * INK2_KV5_RECORD);
+        CHECK(hipMemcpy(gk.data(), k8, gk.size(), hipMemcpyDeviceToHost) == hipSuccess &&
+              hipMemcpy(gv.data(), v5, gv.size(), hipMemcpyDeviceToHost) == hipSuccess);
+        CHECK(gv == kv5_records(host_of(dv, rows * D)) || (std::printf("  %s: Q5 records not the host's\n", c), false));
+        const std::vector<_Float16> hk = kv8_values(gk), hv = kv5_values(gv);
+        uint16_t *k16 = dev_alloc<uint16_t>(rows * D), *v16 = dev_alloc<uint16_t>(rows * D);
+        CHECK(hipMemcpy(k16, hk.data(), rows * D * 2, hipMemcpyHostToDevice) == hipSuccess &&
+              hipMemcpy(v16, hv.data(), rows * D * 2, hipMemcpyHostToDevice) == hipSuccess);
+        CHECK(ink2_fa16(&at, dq, dr, ds, dg, n, k16, v16, n, 0, drp, dpart, nullptr, nullptr));
+        const std::vector<float> want16 = host_of(dpart, qr.v.size());
+        CHECK(ink2_fa85(&at, dq, dr, ds, dg, n, k8, v5, n, 0, drp, dpart, nullptr, nullptr));
+        const std::vector<float> got = host_of(dpart, qr.v.size());
+        CHECK(got == want16 || (std::printf("  %s: Q8 / Q5 not f16's bits on their values\n", c), false));
+        if (full) {
+          const uint32_t s = n - 1;
+          CHECK(ink2_fa85(&at, dq + (uint64_t) s * H * D, dr + (uint64_t) s * H * R, ds + (uint64_t) s * H,
+                          dg + (uint64_t) s * H * D, 1, k8, v5, n, 0, drp, dpart, fa_scr, nullptr));
+          const std::vector<float> row = host_of(dpart, (size_t) H * D);
+          CHECK(std::equal(row.begin(), row.end(), got.begin() + (size_t) s * H * D) ||
+                (std::printf("  %s: a Q8 / Q5 split decode not the prompt's bits\n", c), false));
+        }
+        double worst = 0, sq = 0;
+        for (size_t i = 0; i < got.size(); i++)
+          worst = std::max(worst, (double) std::fabs(got[i] - whole[i])), sq += (double) whole[i] * whole[i];
+        std::printf("  %s: keys Q8, values Q5: the host's records, f16's bits on their values (against f16: max |err| "
+                    "%.2e of the output's rms %.2e)\n", c, worst, std::sqrt(sq / got.size()));
+        hipFree(k8), hipFree(v5), hipFree(k16), hipFree(v16);
       }
       hipFree(fa_scr);
       hipFree(dpart);
