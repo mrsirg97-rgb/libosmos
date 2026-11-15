@@ -14,6 +14,7 @@ typedef cudaEvent_t hipEvent_t;
 #define hipGetLastError cudaGetLastError
 
 #define hipMalloc cudaMalloc
+#define hipGetDevice cudaGetDevice
 #define hipFree cudaFree
 #define hipMemset cudaMemset
 #define hipMemsetAsync cudaMemsetAsync
@@ -60,11 +61,20 @@ typedef cudaEvent_t hipEvent_t;
 #define hipInit(flags) cudaFree(0) /* (the runtime's context made: CUDA starts it on first use) */
 
 /* the device clock's rate: port.h's osmos_wall_clock is %globaltimer, nanoseconds - 1,000,000 kHz */
-typedef enum { hipDeviceAttributeWallClockRate } hipDeviceAttribute_t;
-static inline hipError_t hipDeviceGetAttribute(int *v, hipDeviceAttribute_t a, int dev)
+typedef enum
 {
-  (void) dev;
+  hipDeviceAttributeWallClockRate,
+  hipDeviceAttributeComputeCapabilityMajor,
+  hipDeviceAttributeComputeCapabilityMinor
+} hipDeviceAttribute_t;
+static inline hipError_t hipDeviceGetAttribute(int *v, hipDeviceAttribute_t a, int dev)
+{ /* the wall clock: %globaltimer, ns (1,000,000 kHz); a compute capability CUDA's own */
+  if (a == hipDeviceAttributeComputeCapabilityMajor)
+    return cudaDeviceGetAttribute(v, cudaDevAttrComputeCapabilityMajor, dev);
+  if (a == hipDeviceAttributeComputeCapabilityMinor)
+    return cudaDeviceGetAttribute(v, cudaDevAttrComputeCapabilityMinor, dev);
   if (a != hipDeviceAttributeWallClockRate) return cudaErrorInvalidValue;
+  (void)dev;
   *v = 1000000;
   return cudaSuccess;
 }
