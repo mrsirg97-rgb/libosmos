@@ -116,7 +116,8 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
     {
       for (int c = 0; c < INK2_CONVS; c++)
         conv += (uint64_t)s->conv[l][c].cap * s->conv[l][c].row * s->conv[l][c].esize;
-      const uint64_t kv = 2 * (uint64_t)s->kw[l].cap * s->kw[l].row * s->kw[l].esize;
+      const uint64_t kv = (uint64_t)s->kw[l].cap * s->kw[l].row * s->kw[l].esize +
+                          (uint64_t)s->vw[l].cap * s->vw[l].row * s->vw[l].esize; /* (keys Q8, values Q5: apart) */
       *(g->sliding[l] ? &win : &full) += kv;
     }
     fprintf(stderr, "ink2 mem: a sequence: full layers' keys and values %.3f GiB, windows' %.3f GiB, conv tails %.3f GiB\n",
