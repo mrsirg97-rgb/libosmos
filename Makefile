@@ -14,8 +14,8 @@ BIN_DIR  := bin
 LIB_DIR  := lib
 
 # the host library is pure C; hip_*.c (the HIP runtime's C API) go into a library of their own, so no host test or
-# sanitizer run links HIP
-SRCS := $(shell find $(SRC_DIR) -name '*.c' ! -name 'hip_*.c')
+# sanitizer run links HIP (and cuda_*.c into the CUDA build's: cuda.mk)
+SRCS := $(shell find $(SRC_DIR) -name '*.c' ! -name 'hip_*.c' ! -name 'cuda_*.c')
 # libevt (the operator's, C, MIT): the forward's reads and osmos-serve's loop - its sources built into libosmos.a with
 # this library's flags, so every test and sanitizer run covers it too. the submodule third_party/libevt (git submodule
 # update --init; LIBEVT=<dir> builds against another checkout)
@@ -175,6 +175,9 @@ $(TESTS): | $(OBJ_DIR)/tests
 
 $(OBJ_DIR)/tests:
 	mkdir -p $@
+
+# the CUDA build: its own targets (make cuda, make cuda-tests), the same sources
+include cuda.mk
 
 -include $(shell find $(OBJ_DIR) -name '*.d' 2>/dev/null)
 

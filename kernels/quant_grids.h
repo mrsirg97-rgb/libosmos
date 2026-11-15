@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 // the GPU's constant memory under HIP; plain constants in C (src/cpu: the CPU lane's decode)
-#if defined(__HIPCC__)
+#if defined(__HIPCC__) || defined(__CUDACC__)
 #define QUANT_GRID __constant__
 #else
 #define QUANT_GRID const

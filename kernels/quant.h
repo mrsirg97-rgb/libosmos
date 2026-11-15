@@ -5,6 +5,7 @@
 // __fmul_rn / __fsub_rn all the same, so no contraction into an FMA changes that when a decoder changes.
 #pragma once
 #include <hip/hip_fp16.h>
+#include "port.h"
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
@@ -341,7 +342,7 @@ __device__ inline h8 decode_h(const uint8_t* b, int k) {
   decode<T>(b, k, v);
   h8 h;
   for (int j = 0; j < kChunk; j++) {
-    asm("" : "+v"(v[j]));
+    osmos_keep(v[j]);
     h[j] = (_Float16) v[j];
   }
   return h;
@@ -364,7 +365,7 @@ template <> __device__ inline h8 decode_h<kQ4_K>(const uint8_t* b, int k) {
   h8 r;
   for (int j = 0; j < kChunk; j++) {
     float v = __fmaf_rn(d, (float) ((q[j / 4] >> (8 * (j % 4))) & 0xFF), ndm);
-    asm("" : "+v"(v));  // decode_h's: F32, then f16 - not one fused v_fma_mixlo_f16
+    osmos_keep(v);  // decode_h's: F32, then f16 - not one fused v_fma_mixlo_f16
     r[j] = (_Float16) v;
   }
   return r;
@@ -379,8 +380,8 @@ constexpr uint32_t iq4nl_word(int w) {
 }
 __device__ inline uint32_t iq4nl_bytes(uint32_t n) {  // n: 4 codes 0 .. 15, a byte each
   const uint32_t sel = n & 0x07070707u, hi = ((n >> 3) & 0x01010101u) * 0xFFu;
-  const uint32_t lo8 = __builtin_amdgcn_perm(iq4nl_word(1), iq4nl_word(0), sel);
-  const uint32_t hi8 = __builtin_amdgcn_perm(iq4nl_word(3), iq4nl_word(2), sel);
+  const uint32_t lo8 = osmos_perm(iq4nl_word(1), iq4nl_word(0), sel);
+  const uint32_t hi8 = osmos_perm(iq4nl_word(3), iq4nl_word(2), sel);
   return (lo8 & ~hi) | (hi8 & hi);
 }
 // 8 values d * a signed byte each (2 words of them), as decode_h rounds them: the product, then f16
@@ -388,7 +389,7 @@ __device__ inline h8 scaled_bytes_h(uint32_t w0, uint32_t w1, float d) {
   h8 h;
   for (int j = 0; j < kChunk; j++) {
     float x = mul(d, (float) (int8_t) (((j < 4 ? w0 : w1) >> (8 * (j % 4))) & 0xFF));
-    asm("" : "+v"(x));
+    osmos_keep(x);
     h[j] = (_Float16) x;
   }
   return h;
@@ -463,7 +464,7 @@ __device__ inline h8 grid_h(uint64_t grid, float db, const uint32_t* mask) {
   h8 h;
   for (int j = 0; j < kChunk; j++) {
     float x = mul(db, (float) (uint8_t) (grid >> (8 * j)));
-    asm("" : "+v"(x));  // decode_h's: the product, then f16 - not one fused v_fma_mixlo_f16 (a -0's +0)
+    osmos_keep(x);  // decode_h's: the product, then f16 - not one fused v_fma_mixlo_f16 (a -0's +0)
     h[j] = (_Float16) x;
   }
   return __builtin_bit_cast(h8, __builtin_bit_cast(u4, h) ^ *(const u4*) mask);
@@ -511,7 +512,7 @@ __device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
       #pragma unroll
       for (int j = 0; j < kChunk; j++) {
         float v = __fmaf_rn(d, (float) ((q[2 * i + j / 4] >> (8 * (j % 4))) & 0xFF), ndm);
-        asm("" : "+v"(v));  // decode_h's: F32, then f16
+        osmos_keep(v);  // decode_h's: F32, then f16
         out[i][j] = (_Float16) v;
       }
   } else if constexpr (T == kIQ3_XXS && N > 1) {  // a group's scale word and its block's d once
@@ -574,7 +575,7 @@ struct Iq1Halves {
 };
 __device__ inline Iq1Halves iq1_halves(float dl, float delta) {
   float z = mul(dl, 0.0f + delta), p = mul(dl, 1.0f + delta), m = mul(dl, -1.0f + delta);
-  asm("" : "+v"(z), "+v"(p), "+v"(m));  // decode_h's: each product, then f16 - not a fused v_fma_mixlo_f16
+  osmos_keep3(z, p, m);  // decode_h's: each product, then f16 - not a fused v_fma_mixlo_f16
   const _Float16 hz = (_Float16) z, hp = (_Float16) p, hm = (_Float16) m;
   return {(uint32_t) __builtin_bit_cast(uint16_t, hm) << 16,
           (uint32_t) __builtin_bit_cast(uint16_t, hz) | (uint32_t) __builtin_bit_cast(uint16_t, hp) << 16};
@@ -584,9 +585,9 @@ __device__ inline h8 iq1_pick(uint64_t grid, Iq1Halves v) {
   for (int w = 0; w < 2; w++) {
     const uint32_t base = ((uint32_t) (grid >> (32 * w)) << 1) & 0x06060606u; /* the 4 values' byte offsets */
     /* a pair's selector: its two offsets each twice (bytes 0, 0, 1, 1 of base), the high byte of each half +1 */
-    const uint32_t sel0 = __builtin_amdgcn_perm(0, base, 0x01010000u) | 0x01000100u;
-    const uint32_t sel1 = __builtin_amdgcn_perm(0, base, 0x03030202u) | 0x01000100u;
-    out[2 * w] = __builtin_amdgcn_perm(v.s0, v.s1, sel0), out[2 * w + 1] = __builtin_amdgcn_perm(v.s0, v.s1, sel1);
+    const uint32_t sel0 = osmos_perm(0, base, 0x01010000u) | 0x01000100u;
+    const uint32_t sel1 = osmos_perm(0, base, 0x03030202u) | 0x01000100u;
+    out[2 * w] = osmos_perm(v.s0, v.s1, sel0), out[2 * w + 1] = osmos_perm(v.s0, v.s1, sel1);
   }
   return __builtin_bit_cast(h8, out);
 }

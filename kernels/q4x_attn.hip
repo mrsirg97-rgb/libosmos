@@ -1,6 +1,7 @@
 // Qwen3.8-Flash-Next's attention (include/osmos/gpu/q4x_ops.h): q's and k's norm and rotation, and the gated
 // attention over the cache - each token's keys its key list: every position, or QSA's picks (q4x_qsa.hip)
 #include "block.h"
+#include "port.h"
 #include "launch.h"
 #include "rope.h"
 #include "x16side.h"
@@ -201,7 +202,7 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
     for (int g = 0; g < kHead / kTile; g++) {
       const h16 a = *(const h16*) (qs + (lane % kTile) * kRowLds + g * kTile);
       const h16 bk = *(const h16*) (ks + (lane % kTile) * kRowLds + g * kTile);
-      sacc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, bk, sacc);
+      sacc = osmos_wmma_f16(a, bk, sacc);
     }
     // each row: its scores scaled and masked, the running max and sum, P to f16
     const int32_t key = (int32_t) (kb + lane % kTile);
@@ -214,15 +215,15 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
       l[j] = l[j] * alpha[j] + row_sum(pv), m[j] = mn;
       ps[wave][(2 * j + half) * kKeyLds + lane % kTile] = (_Float16) pv;
     }
-    __builtin_amdgcn_wave_barrier();
+    osmos_wave_barrier();
     const h16 pa = *(const h16*) (ps[wave] + (lane % kTile) * kKeyLds);
     for (int nt = 0; nt < kHead / kTile / kWaves; nt++) {
       for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
       const uint32_t col = (wave * (kHead / kTile / kWaves) + nt) * kTile + lane % kTile;
       const h16 bv = *(const h16*) (vt + col * kKeyLds);
-      o[nt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bv, o[nt]);
+      o[nt] = osmos_wmma_f16(pa, bv, o[nt]);
     }
-    __builtin_amdgcn_wave_barrier();
+    osmos_wave_barrier();
   }
   // the chunk's partials: (max, sum) a row, O a row's dims - row R = t G + r of KV head kvh, at [chunk][kvh][R]
   const uint64_t base = ((uint64_t) chunk * kv_heads + kvh) * n_tok * G;

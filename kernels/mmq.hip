@@ -4,6 +4,7 @@
 #include <hip/hip_fp16.h>
 #include "launch.h"
 #include <hip/hip_runtime.h>
+#include "port.h"
 
 #include <cstdint>
 
@@ -90,9 +91,8 @@ __global__ __launch_bounds__(kWave* kWaves) void q4k_kernel(const uint8_t* const
       const int r = i / kRowChunks, k = i % kRowChunks;
       *(u4*) (lr + r * kBlockBytes + k * 16) = *(const u4*) (w + r * row_bytes + (uint64_t) b * kBlockBytes + k * 16);
     }
-    __builtin_amdgcn_wave_barrier();
-    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup");
-    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup");
+    osmos_wave_barrier();
+    osmos_wave_fence();
     {  // lane: row col's groups half * 4 .. + 4 - Q4_K's 6-bit (sc, m), times d and dmin
       const uint8_t* blk = lr + col * kBlockBytes;
       const float d = f16(blk[0] | blk[1] << 8), dmin = f16(blk[2] | blk[3] << 8);
@@ -105,9 +105,8 @@ __global__ __launch_bounds__(kWave* kWaves) void q4k_kernel(const uint8_t* const
         scl[wave][g][1][col] = __fmul_rn(dmin, (float) mn);
       }
     }
-    __builtin_amdgcn_wave_barrier();
-    __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup");
-    __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup");
+    osmos_wave_barrier();
+    osmos_wave_fence();
     const uint8_t* qa = lr + col * kBlockBytes + 16;
     for (int gp = 0; gp < kGroups / 2; gp++) {
       const u4 raw0 = *(const u4*) (qa + gp * 32), raw1 = *(const u4*) (qa + gp * 32 + 16);
@@ -120,10 +119,8 @@ __global__ __launch_bounds__(kWave* kWaves) void q4k_kernel(const uint8_t* const
           if (ct < tiles) {
             const int8_t* xg = xb[ct] + (uint64_t) gg * (kTile * MMQ_GROUP);
             const u4 b0 = *(const u4*) xg, b1 = *(const u4*) (xg + 16);
-            i8v ia = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(false, __builtin_bit_cast(i4v, a0), true,
-                                                                __builtin_bit_cast(i4v, b0), i8v{}, false);
-            ia = __builtin_amdgcn_wmma_i32_16x16x16_iu8_w32(false, __builtin_bit_cast(i4v, a1), true,
-                                                            __builtin_bit_cast(i4v, b1), ia, false);
+            i8v ia = osmos_wmma_u8s8(__builtin_bit_cast(i4v, a0), __builtin_bit_cast(i4v, b0), i8v{});
+            ia = osmos_wmma_u8s8(__builtin_bit_cast(i4v, a1), __builtin_bit_cast(i4v, b1), ia);
             const float dxt = dxb[ct][gg * kTile], nsx = -sxb[ct][gg * kTile];
             for (int j = 0; j < 8; j++) {
               const int r = 2 * j + half;
@@ -134,7 +131,7 @@ __global__ __launch_bounds__(kWave* kWaves) void q4k_kernel(const uint8_t* const
           }
       }
     }
-    __builtin_amdgcn_wave_barrier();  // the block read before the next one's written
+    osmos_wave_barrier();  // the block read before the next one's written
   }
   __syncthreads();  // every wave's blocks read before the sums take their place
   for (int ct = 0; ct < CT; ct++)

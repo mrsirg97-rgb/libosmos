@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#if defined(__HIPCC__)
+#if defined(__HIPCC__) || defined(__CUDACC__)
 #define KVFMT_FN __host__ __device__ static inline /* the kernels read rows by these too */
 #else
 #define KVFMT_FN static inline

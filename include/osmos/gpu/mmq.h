@@ -8,7 +8,7 @@
 #define MMQ_MAX_TILES 4  /* mmq_group's column tiles a block at most (16 tokens each) */
 #define MMQ_SLOTS 16     /* the layouts' slot tile: x8 / dx / sx hold whole tiles of slots */
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__CUDACC__)
 #define MMQ_HD __host__ __device__
 #else
 #define MMQ_HD
