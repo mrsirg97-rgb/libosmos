@@ -359,11 +359,18 @@ struct Kv8 {
 };
 typedef _Float16 fa_h8 __attribute__((ext_vector_type(8)));
 
-// a record's 8 values from d: q times its block's f16 scale, rounded to f16 (ink2_fa8's values)
-__device__ inline fa_h8 kv8_load(const uint8_t* rec, uint32_t d) {
-  const uint2 raw = *(const uint2*) (rec + d);
-  const float scale = (float) *(const _Float16*) (rec + INK2_MAX_HEAD + d / INK2_KV8_BLOCK * 2);
-  const int8_t* q = (const int8_t*) &raw;
+// a record's 8 values from d as loaded (its int8s, its block's f16 scale), then as values: q times the scale, rounded
+// to f16 (ink2_fa8's values) - loaded and turned into values apart, so a tile's loads are in flight under the last's work
+struct Kv8Raw {
+  uint2 q;
+  _Float16 s;
+};
+__device__ inline Kv8Raw kv8_raw(const uint8_t* rec, uint32_t d) {
+  return {*(const uint2*) (rec + d), *(const _Float16*) (rec + INK2_MAX_HEAD + d / INK2_KV8_BLOCK * 2)};
+}
+__device__ inline fa_h8 kv8_vals(const Kv8Raw& r) {
+  const float scale = (float) r.s;
+  const int8_t* q = (const int8_t*) &r.q;
   fa_h8 out;
   for (int e = 0; e < 8; e++) out[e] = (_Float16) ((float) q[e] * scale);
   return out;
@@ -374,14 +381,22 @@ struct Kv85 {
   uint8_t b;
 };
 
-// a Q5 record's 8 values from d (a multiple of 8): (q - 16) times its block's f16 scale, rounded to f16
-__device__ inline fa_h8 kv5_load(const uint8_t* rec, uint32_t d) {
+// a Q5 record's 8 values from d (a multiple of 8) as loaded (nibbles, fifth bits, scale), then as values: (q - 16)
+// times its block's f16 scale, rounded to f16
+struct Kv5Raw {
+  uint32_t nib, hi;
+  _Float16 s;
+};
+__device__ inline Kv5Raw kv5_raw(const uint8_t* rec, uint32_t d) {
   constexpr uint32_t H = INK2_MAX_HEAD;
-  const uint32_t nib = *(const uint32_t*) (rec + d / 2), hi = rec[H / 2 + d / 8];
-  const float scale = (float) *(const _Float16*) (rec + H / 2 + H / 8 + d / INK2_KV8_BLOCK * 2);
+  return {*(const uint32_t*) (rec + d / 2), rec[H / 2 + d / 8],
+          *(const _Float16*) (rec + H / 2 + H / 8 + d / INK2_KV8_BLOCK * 2)};
+}
+__device__ inline fa_h8 kv5_vals(const Kv5Raw& r) {
+  const float scale = (float) r.s;
   fa_h8 out;
   for (int e = 0; e < 8; e++) {
-    const int q = (int) ((nib >> (4 * e) & 15u) | (hi >> e & 1u) << 4);
+    const int q = (int) ((r.nib >> (4 * e) & 15u) | (r.hi >> e & 1u) << 4);
     out[e] = (_Float16) ((float) (q - 16) * scale);
   }
   return out;
@@ -447,18 +462,20 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   constexpr uint32_t kVRec = kV5 ? INK2_KV5_RECORD : INK2_KV8_RECORD;
   constexpr int kVec = 8, kVecs = kFaTile * kFaHead / kVec, kVItems = (kVecs + kNth - 1) / kNth;
   float kr[kHalf ? 1 : kItems], vr[kHalf ? 1 : kItems];
-  fa_h8 kh[kHalf ? kVItems : 1], vh[kHalf ? kVItems : 1];
+  fa_h8 kh[kHalf && !kQ8 ? kVItems : 1], vh[kHalf && !kQ8 ? kVItems : 1];
+  Kv8Raw k8[kQ8 ? kVItems : 1], v8[kQ8 && !kV5 ? kVItems : 1];  // (a Q8 / Q5 tile as loaded: its values at the store)
+  Kv5Raw v5[kV5 ? kVItems : 1];
   auto fetch = [&](uint32_t kb) {
     if constexpr (kQ8)
       for (int it = 0; it < kVItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
         const uint64_t at = (uint64_t) (kb + r) * a.kv_heads + kvh;
-        kh[it] = in ? kv8_load((const uint8_t*) k + at * INK2_KV8_RECORD, d) : fa_h8{};
+        k8[it] = in ? kv8_raw((const uint8_t*) k + at * INK2_KV8_RECORD, d) : Kv8Raw{};
         if constexpr (kV5)
-          vh[it] = in ? kv5_load((const uint8_t*) v + at * kVRec, d) : fa_h8{};
+          v5[it] = in ? kv5_raw((const uint8_t*) v + at * kVRec, d) : Kv5Raw{};
         else
-          vh[it] = in ? kv8_load((const uint8_t*) v + at * kVRec, d) : fa_h8{};
+          v8[it] = in ? kv8_raw((const uint8_t*) v + at * kVRec, d) : Kv8Raw{};
       }
     else if constexpr (kHalf)
       for (int it = 0; it < kVItems; it++) {
@@ -482,8 +499,17 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       for (int it = 0; it < kVItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
         if (i >= (uint32_t) kVecs) continue;
-        *(fa_h8*) (ks + r * kFaRow + d) = kh[it];
-        for (int e = 0; e < kVec; e++) vt[(d + e) * kFaKey + r] = vh[it][e];
+        fa_h8 kv, vv;  // a Q8 / Q5 tile's values now (a missing key's raw zeros: 0 x 0, f16's +0 as before)
+        if constexpr (kQ8) {
+          kv = kv8_vals(k8[it]);
+          if constexpr (kV5)
+            vv = kv5_vals(v5[it]);
+          else
+            vv = kv8_vals(v8[it]);
+        } else
+          kv = kh[it], vv = vh[it];
+        *(fa_h8*) (ks + r * kFaRow + d) = kv;
+        for (int e = 0; e < kVec; e++) vt[(d + e) * kFaKey + r] = vv[e];
       }
     else
       for (int it = 0; it < kItems; it++) {
