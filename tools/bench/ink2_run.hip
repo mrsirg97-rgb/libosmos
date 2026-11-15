@@ -5,7 +5,7 @@
 // first layer's input), the attention (sliding or full), its conv, the residual or a new block, the MoE's residual,
 // the MoE (sigmoid router, NVFP4 / MXFP8 experts with their scales), its conv; the final residual, norm, head, softcap.
 // every op F32 on the GPU (include/osmos/gpu/ink2_ops.h, ops.h's rms and router, mv_run's matrices), one prompt
-// read whole (no cache: its keys are its own tokens).
+// read whole (no cache: its keys are its own tokens); MAT=mm and ATTN=fa the engine's WMMA in their place.
 //
 //   ink2_run <first shard> <ids> [out.f32]   ids: comma-separated token ids, or a file of them; out: the last
 //                                             token's log-probabilities
@@ -15,6 +15,8 @@
 //                 tools/bench/kld_compare.py pairs runs
 //   MASK=path     0 / 1 a token (as ids): row r scored only when token r + 1 is 1 (an agent trace's assistant tokens)
 //   ATTN=fa       the attention on WMMA (ink2_fa: f16 in) - long prompts; default ink2_attn (F32: the reference's)
+//   MAT=mm        the matrices on WMMA where mm has their type (mm.h: f16 in), the rest the matvec's - the engine's
+//                 kernels (its bits with ATTN=fa); default every matrix the matvec's (F32 in)
 //   HESS=dir      GPTQ's sums: each dense matrix's input's X^T X added into dir/<name>.f64 (float64, [dim][dim]:
 //                 runs add up) - blk.L.attn_x (a sliding layer's q, k, v, rel, gate, sink), blk.L.attn_q_x /
 //                 attn_k_x / attn_v_x (a full layer's: q, rel, gate, sink / k / v), blk.L.attn_out_x (the output's),
@@ -35,6 +37,7 @@
 
 extern "C" {
 #include "osmos/gpu/ink2_ops.h"
+#include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/ink2/weights.h"
@@ -106,9 +109,22 @@ static void* dev_raw(const GgufTensor* t) {  // a matrix's bytes as stored (mv_r
 }
 static float* dev_tf(const GgufTensor* t) { return dev_f(f32_of(t)); }
 
-// y [n][rows] = W x for n tokens of x [n][cols], MV_MAX_TOKENS at a time (a token's bits its own: mv_run's)
+static const bool g_mm = std::getenv("MAT") && !std::strcmp(std::getenv("MAT"), "mm");
+static void* g_x16;         // MAT=mm's f16 activations (MM_MAX_TOKENS rows of the widest input)
+static int32_t* g_overflow;  // an activation past f16's range (read at the end: a refusal)
+static bool mm_takes(uint32_t type, uint32_t rows, uint32_t cols) {
+  return g_mm && mm_known(type) && mm_fits(type, rows, cols);
+}
+
+// y [n][rows] = W x for n tokens of x [n][cols]: mm's (MAT=mm, its type's), else MV_MAX_TOKENS at a time (a token's
+// bits its own: mv_run's)
 static void mat(const GgufTensor* t, const void* w, const float* x, uint32_t n, float* y) {
   const uint32_t rows = (uint32_t) t->dims[1], cols = (uint32_t) t->dims[0];
+  if (mm_takes(t->type, rows, cols)) {
+    CHECK(mm_tokens(t->type, w, rows, y, rows, nullptr, 0, nullptr, 0, cols, x, cols, n, g_x16, g_overflow, false,
+                    nullptr));
+    return;
+  }
   for (uint32_t at = 0; at < n; at += MV_MAX_TOKENS) {
     const uint32_t k = n - at < MV_MAX_TOKENS ? n - at : MV_MAX_TOKENS;
     CHECK(mv_run(t->type, w, rows, cols, x + (size_t) at * cols, k, y + (size_t) at * rows, nullptr));
@@ -135,6 +151,17 @@ static void hess(const char* name, const float* x, uint32_t n, uint32_t dim) {
   FILE* f = std::fopen((path + ".part").c_str(), "wb");
   CHECK(f && std::fwrite(sum.data(), 8, nn, f) == nn && std::fclose(f) == 0);
   CHECK(std::rename((path + ".part").c_str(), path.c_str()) == 0);
+}
+
+// an expert's y [rows] = W x for one token (W a slice of the layer's tensor of `type`): mm's at one token (MAT=mm),
+// else mv_run's
+static void xmat(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const float* x, float* y) {
+  if (g_mm) {
+    CHECK(mm_takes(type, rows, cols));
+    CHECK(mm_x16(x, cols, 1, cols, g_x16, g_overflow, nullptr) && mm_run(type, w, rows, cols, g_x16, 1, y, rows, nullptr));
+    return;
+  }
+  CHECK(mv_run(type, w, rows, cols, x, 1, y, nullptr));
 }
 
 static void matt(const GgufTensor* t, const float* x, uint32_t n, float* y) {  // uploaded, run, freed
@@ -172,6 +199,11 @@ int main(int argc, char** argv) {
                  F = (uint32_t) G.ff_exp, maxb = (uint32_t) ((G.n_layers + G.res_block - 1) / G.res_block);
   std::fprintf(stderr, "ink2_run: %u tokens, %d layers (a block every %d), %u experts (%u a token)\n", T, G.n_layers,
                G.res_block, E, K);
+  if (g_mm) {
+    const size_t x16 = (size_t) MM_MAX_TOKENS * std::max(C, H * D) * 2;
+    CHECK(hipMalloc(&g_x16, x16) == hipSuccess && hipMalloc(&g_overflow, 4) == hipSuccess &&
+          hipMemset(g_overflow, 0, 4) == hipSuccess);
+  }
 
   // the normed embedding: the tokens' rows of the table, its type the file's (ops_embed)
   float* h = dev<float>((size_t) T * C);
@@ -324,12 +356,12 @@ int main(int argc, char** argv) {
       for (uint32_t s = 0; s < K; s++) {
         const uint32_t e = (uint32_t) hp[(size_t) t * K + s];
         const float* x = xn + (size_t) t * C;
-        CHECK(mv_run(L.exp_gate->type, wg + e * sg, F, C, x, 1, eg, nullptr));
-        CHECK(mv_run(L.exp_up->type, wu + e * su, F, C, x, 1, eu, nullptr));
+        xmat(L.exp_gate->type, wg + e * sg, F, C, x, eg);
+        xmat(L.exp_up->type, wu + e * su, F, C, x, eu);
         if (scg[e] != 1.0f) CHECK(ink2_scale(eg, F, scg[e], nullptr));
         if (scu[e] != 1.0f) CHECK(ink2_scale(eu, F, scu[e], nullptr));
         CHECK(ink2_swiglu(eg, eu, F, G.gate_softcap, G.up_softcap, 1, eh, nullptr));
-        CHECK(mv_run(L.exp_down->type, wd + e * sd, C, F, eh, 1, ed, nullptr));
+        xmat(L.exp_down->type, wd + e * sd, C, F, eh, ed);
         CHECK(ink2_axpy(moe + (size_t) t * C, ed, C, hw[(size_t) t * K + s] * scd[e], nullptr));
       }
     CHECK(hipDeviceSynchronize() == hipSuccess);
@@ -420,6 +452,11 @@ int main(int argc, char** argv) {
       }
     }
     hipFree(head), hipFree(lg);
+    if (g_mm) {
+      int32_t overflow = 0;
+      CHECK(hipMemcpy(&overflow, g_overflow, 4, hipMemcpyDeviceToHost) == hipSuccess);
+      CHECK(!overflow);  // an activation past f16's range: the run's rows not to be trusted
+    }
     for (FILE* f : {ro, ri, dp})
       if (f) std::fclose(f);
     size_t best = 0;

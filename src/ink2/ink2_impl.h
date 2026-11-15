@@ -95,12 +95,14 @@ struct Ink2Forward
   float *h, *blocks, *a3, *xn, *kn, *vn, *q, *k, *v, *kc, *vc, *rel, *gate, *sink, *att, *dyn, *o, *r, *moe, *logit,
       *tmp, *pw, *eg, *eu, *eh, *ed, *head, *logits;
   int32_t *pick, *hpick, *gid, *gpick, *hgpick; /* gpick: the next layer's guessed picks (and gw their weights) */
-  float *hw, *xs, *gw; /* xs: the pairs' inputs in expert order */
+  float *hw, *gw;
+  void *x16, *xe16; /* mm's f16 activations: a dense matrix's input (MM_MAX_TOKENS rows), the experts' slots */
+  int32_t *overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
+  uint32_t head_rows; /* the head's rows a launch (f->head's) */
   float *fa_part; /* a split decode's attention units (ink2_fa_scratch) */
-  /* moe's tables: the counting sort's, the region built on the host and its device copy */
-  uint32_t *m_at, *m_by, *m_ord; /* m_ord, m_pt, m_pi: the entries' order by count, its staging */
-  const void **m_pt;
-  int32_t *m_pi;
+  /* moe's tables: the counting sort's, the entries' keys, the region built on the host and its device copy */
+  uint32_t *m_at, *m_by;
+  uint64_t *m_key;
   uint8_t *m_host, *m_build;
   void *m_dev;
   void *amax;
@@ -110,14 +112,14 @@ struct Ink2Forward
 
 bool ink2_fail(char *err, const char *why);
 /* hip_forward.c's: device memory counted in the forward's bytes; a tensor's bytes from g's file, its F32 values on the
-   host (F32 / F16 / BF16), uploaded; y [n][rows] = W x a token's bits its own (mv_run, MV_MAX_TOKENS a launch) */
+   host (F32 / F16 / BF16), uploaded; the drafter's y [n][rows] = W x (mv_run, MV_MAX_TOKENS a launch) */
 bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes);
 bool ink2_read_tensor(const Gguf *g, const GgufTensor *t, void *out);
 float *ink2_host_f32(const Gguf *g, const GgufTensor *t, uint64_t *n);
 bool ink2_up_host(Ink2Forward *f, const float *v, uint64_t n, float **out);
 bool ink2_up_f32_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, float **out);
 bool ink2_up_raw_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, void **out);
-bool ink2_mat(const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y);
+bool ink2_mv(const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y);
 uint32_t ink2_type(const GgufTensor *t); /* the type a resident matrix's bytes are (a Q5_K one's repacked: Q5_KR) */
 /* the tails: room for n more rows (the move), the last k rows, n F32 rows appended (an f16 tail's converted; queued
    on the null stream); a tail's row r */

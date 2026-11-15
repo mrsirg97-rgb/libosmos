@@ -102,9 +102,9 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
          hipMemcpy(dcols, cols, (size_t)R * C * 4, hipMemcpyHostToDevice) == hipSuccess &&
          hipMalloc((void **)&dt, (size_t)R * VR * 4) == hipSuccess && hipMalloc((void **)&db, (size_t)C * 4) == hipSuccess &&
          hipMemcpy(db, hb, (size_t)C * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         ink2_mat(f->w->output, f->output, dcols, R, dt) && ink2_dalloc(f, &d->fold, (uint64_t)VR * R * 2) &&
+         ink2_mv(f->w->output, f->output, dcols, R, dt) && ink2_dalloc(f, &d->fold, (uint64_t)VR * R * 2) &&
          ink2_transpose_bf16(dt, R, VR, d->fold, NULL) && ink2_dalloc(f, (void **)&d->fold_b, (uint64_t)VR * 4) &&
-         ink2_mat(f->w->output, f->output, db, 1, d->fold_b) && hipDeviceSynchronize() == hipSuccess;
+         ink2_mv(f->w->output, f->output, db, 1, d->fold_b) && hipDeviceSynchronize() == hipSuccess;
   }
   free(fw), free(rnn), free(hw), free(hb), free(cols);
   if (dcols)
@@ -229,7 +229,7 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
       const Ink2MtpLayer *L = &m->layer[l];
       ok = ink2_mtp_mix(taps + (uint64_t)at * K * C, K, d->alpha + (size_t)l * K, k, C, d->mix, NULL) &&
            ops_rms(d->mix, C, C, d->dflare[l], m->eps, k, d->mix, C, NULL) &&
-           ink2_mat(L->k_ctx, d->wkc[l], d->mix, k, d->kctx) && ink2_mat(L->v_ctx, d->wvc[l], d->mix, k, d->vctx) &&
+           ink2_mv(L->k_ctx, d->wkc[l], d->mix, k, d->kctx) && ink2_mv(L->v_ctx, d->wvc[l], d->mix, k, d->vctx) &&
            ops_rms(d->kctx, INK2_MTP_HEAD, INK2_MTP_HEAD, d->k_norm_ctx[l], m->eps, k * (uint32_t)m->n_kv_heads,
                    d->kctx, INK2_MTP_HEAD, NULL) &&
            q4x_df_rope(d->kctx, k, (uint32_t)m->n_kv_heads, KV, d->pos, m->rope_base, NULL) &&
@@ -264,18 +264,18 @@ static bool layer(Ink2Forward *f, const Ink2Seq *s, int l, uint32_t B, int32_t p
     from = pos - (int32_t)s->mrows[l];
   const uint32_t window = m->local[l] ? (uint32_t)(m->window + m->block - 1) : 0;
   return ok && ops_rms(d->res, C, C, d->in_norm[l], m->eps, B, d->nrm, C, NULL) &&
-         ink2_mat(L->q, d->wq[l], d->nrm, B, d->q) && ink2_mat(L->k, d->wk[l], d->nrm, B, d->kb) &&
-         ink2_mat(L->v, d->wv[l], d->nrm, B, d->vb) &&
+         ink2_mv(L->q, d->wq[l], d->nrm, B, d->q) && ink2_mv(L->k, d->wk[l], d->nrm, B, d->kb) &&
+         ink2_mv(L->v, d->wv[l], d->nrm, B, d->vb) &&
          ops_rms(d->q, INK2_MTP_HEAD, INK2_MTP_HEAD, d->q_norm[l], m->eps, B * H, d->q, INK2_MTP_HEAD, NULL) &&
          ops_rms(d->kb, INK2_MTP_HEAD, INK2_MTP_HEAD, d->k_norm[l], m->eps, B * KH, d->kb, INK2_MTP_HEAD, NULL) &&
          q4x_df_rope(d->q, B, H, Q, d->pos, m->rope_base, NULL) &&
          q4x_df_rope(d->kb, B, KH, KV, d->pos, m->rope_base, NULL) &&
          ink2_mtp_attn(d->q, B, pos, d->kb, d->vb, s->mk[l], s->mv[l], s->mrows[l], from, H, KH, window, d->scr, d->att,
                        NULL) &&
-         ink2_mat(L->o, d->wo[l], d->att, B, d->ob) && ink2_axpy(d->res, d->ob, (uint64_t)B * C, 1.0f, NULL) &&
+         ink2_mv(L->o, d->wo[l], d->att, B, d->ob) && ink2_axpy(d->res, d->ob, (uint64_t)B * C, 1.0f, NULL) &&
          ops_rms(d->res, C, C, d->post_norm[l], m->eps, B, d->nrm, C, NULL) &&
-         ink2_mat(L->gate, d->wgate[l], d->nrm, B, d->g) && ink2_mat(L->up, d->wup[l], d->nrm, B, d->u) &&
-         q4x_swiglu(d->g, d->u, (uint64_t)B * F, d->g, NULL, NULL) && ink2_mat(L->down, d->wdown[l], d->g, B, d->ob);
+         ink2_mv(L->gate, d->wgate[l], d->nrm, B, d->g) && ink2_mv(L->up, d->wup[l], d->nrm, B, d->u) &&
+         q4x_swiglu(d->g, d->u, (uint64_t)B * F, d->g, NULL, NULL) && ink2_mv(L->down, d->wdown[l], d->g, B, d->ob);
 }
 
 int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
@@ -306,7 +306,7 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
   /* the final norm, the head on rows 1 .. (uncapped), the features: the last context position's taps mixed */
   ok = ok && ink2_axpy(d->res, d->ob, (uint64_t)B * C, 1.0f, NULL) &&
        ops_rms(d->res, C, C, d->norm, m->eps, B, d->nrm, C, NULL) &&
-       ink2_mat(f->w->output, f->output, d->nrm + C, B - 1, d->base) &&
+       ink2_mv(f->w->output, f->output, d->nrm + C, B - 1, d->base) &&
        ink2_mtp_mix(s->mlast, K, d->alpha + (size_t)m->n_layers * K, 1, C, d->f_rnn, NULL) &&
        ops_rms(d->f_rnn, C, C, d->m_dflare, m->eps, 1, d->f_rnn, C, NULL);
   /* the steps' invariant: rnn_proj's [hidden | features] columns on each row's (bias added in the step) */

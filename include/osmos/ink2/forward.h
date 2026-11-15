@@ -64,9 +64,10 @@ Ink2Forward (DESIGN.md, "0.8.0: Inkling's engine")
   Inkling-2-Small's forward with a cache: tools/bench/ink2_run's math (transformers' modeling_inkling2.py, held to its
   oracle) a step's tokens at a time - every weight but the routed experts resident (the attention's, the router's, the
   convs', the embedding and head: ~6 GB), the experts a membrane's units (osmos/mem/membrane.h) read from the model's
-  files O_DIRECT into pinned host memory the GPU reads in place, `room` of them kept. the attention ink2_fa's (WMMA).
-  a token's bits are the same however its sequence's tokens are split into steps, and ink2_run's (ATTN=fa) for the
-  same tokens.
+  files O_DIRECT into pinned host memory the GPU reads in place, `room` of them kept. the attention ink2_fa's, the
+  matrices mm's where it has their type (WMMA, f16 in: the experts and the quantized dense) and the matvec's for the
+  rest (F32, BF16) - at every step size, so a token's bits are the same however its sequence's tokens are split into
+  steps, and ink2_run's (ATTN=fa MAT=mm) for the same tokens. a step's activation past f16's range refuses it.
 
 ink2_forward_create
   the dense weights uploaded, the membrane made and warmed (room's units: given picks the most picked first, else an
