@@ -417,7 +417,10 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   // without rows still holds its registers, so a decode's token runs one wave, not G (more blocks resident)
   static_assert(SPLIT || W == G * RT, "the prompt's waves its row tiles' heads");
   constexpr int kNth = W * 32, kItems = (kFaTile * kFaHead + kNth - 1) / kNth;
-  __shared__ __attribute__((aligned(32))) _Float16 ks[kFaTile * kFaRow], vt[kFaHead * kFaKey];
+  // a one-wave decode over a full layer's Q8 records: its keys straight from each lane's own record into the scores'
+  // B fragments (a lane its key's, as LDS would hand them) - no K tile in LDS, so more blocks resident
+  constexpr bool kKD = sizeof(KV) == 1 && SPLIT && W == 1;
+  __shared__ __attribute__((aligned(32))) _Float16 ks[kKD ? 8 : kFaTile * kFaRow], vt[kFaHead * kFaKey];
   __shared__ __attribute__((aligned(32))) _Float16 ps[W][kFaTile * kFaKey];
   // a block RT row tiles of 16 tokens; a wave (row tile, query head) - every K / V tile shared by the block's waves
   const uint32_t wave = threadIdx.x / 32, lane = threadIdx.x % 32, half = lane >> 4, col = lane % kFaTile;
@@ -465,13 +468,23 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   fa_h8 kh[kHalf && !kQ8 ? kVItems : 1], vh[kHalf && !kQ8 ? kVItems : 1];
   Kv8Raw k8[kQ8 ? kVItems : 1], v8[kQ8 && !kV5 ? kVItems : 1];  // (a Q8 / Q5 tile as loaded: its values at the store)
   Kv5Raw v5[kV5 ? kVItems : 1];
+  uint2 kq[kKD ? kFaHead / kVec : 1];  // (K-direct: the lane's key's record - its int8s 8 a piece, a scale a block)
+  _Float16 ksc[kKD ? kFaHead / INK2_KV8_BLOCK : 1];
+  // K-direct: the lane's key's record, loaded after this tile's scores (its only reader), in flight under the rest
+  auto fetch_k = [&](uint32_t kb) {
+    const bool in = kb + col < n_keys;
+    const uint8_t* rec = (const uint8_t*) k + ((uint64_t) (kb + col) * a.kv_heads + kvh) * INK2_KV8_RECORD;
+    for (int i = 0; i < kFaHead / kVec; i++) kq[i] = in ? *(const uint2*) (rec + i * kVec) : uint2{0, 0};
+    for (int b = 0; b < kFaHead / INK2_KV8_BLOCK; b++)
+      ksc[b] = in ? *(const _Float16*) (rec + INK2_MAX_HEAD + 2 * b) : (_Float16) 0.0f;
+  };
   auto fetch = [&](uint32_t kb) {
     if constexpr (kQ8)
       for (int it = 0; it < kVItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
         const uint64_t at = (uint64_t) (kb + r) * a.kv_heads + kvh;
-        k8[it] = in ? kv8_raw((const uint8_t*) k + at * INK2_KV8_RECORD, d) : Kv8Raw{};
+        if constexpr (!kKD) k8[it] = in ? kv8_raw((const uint8_t*) k + at * INK2_KV8_RECORD, d) : Kv8Raw{};
         if constexpr (kV5)
           v5[it] = in ? kv5_raw((const uint8_t*) v + at * kVRec, d) : Kv5Raw{};
         else
@@ -492,7 +505,10 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         kr[it] = in ? (float) k[at] : 0.0f, vr[it] = in ? (float) v[at] : 0.0f;
       }
   };
-  if (klo <= khi) fetch(klo);
+  if (klo <= khi) {
+    fetch(klo);
+    if constexpr (kKD) fetch_k(klo);
+  }
   for (uint32_t kb = klo; kb <= khi; kb += kFaTile) {
     __syncthreads();  // the last tile's K, V read by every wave
     if constexpr (kHalf)
@@ -501,16 +517,17 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         if (i >= (uint32_t) kVecs) continue;
         fa_h8 kv, vv;  // a Q8 / Q5 tile's values now (a missing key's raw zeros: 0 x 0, f16's +0 as before)
         if constexpr (kQ8) {
-          kv = kv8_vals(k8[it]);
+          if constexpr (!kKD) kv = kv8_vals(k8[it]);
           if constexpr (kV5)
             vv = kv5_vals(v5[it]);
           else
             vv = kv8_vals(v8[it]);
         } else
           kv = kh[it], vv = vh[it];
-        *(fa_h8*) (ks + r * kFaRow + d) = kv;
+        if constexpr (!kKD) *(fa_h8*) (ks + r * kFaRow + d) = kv;
         for (int e = 0; e < kVec; e++) vt[(d + e) * kFaKey + r] = vv[e];
       }
+
     else
       for (int it = 0; it < kItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead;
@@ -521,9 +538,17 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     if (!active) continue;                         // (its loads done: no row of its own)
     fa_f8 sacc = {};
     for (int g = 0; g < kFaHead / kFaTile; g++) {
-      const fa_h16 kb16 = *(const fa_h16*) (ks + col * kFaRow + g * kFaTile);
+      fa_h16 kb16;
+      if constexpr (kKD) {  // the lane's key's B fragment: dims g 16 .. g 16 + 15, kv8_vals' values
+        constexpr int kPer = INK2_KV8_BLOCK / kVec;  // (pieces a scale)
+        const fa_h8 lo = kv8_vals({kq[2 * g], ksc[2 * g / kPer]}), hi = kv8_vals({kq[2 * g + 1], ksc[(2 * g + 1) / kPer]});
+        for (int e = 0; e < kVec; e++) kb16[e] = lo[e], kb16[kVec + e] = hi[e];
+      } else
+        kb16 = *(const fa_h16*) (ks + col * kFaRow + g * kFaTile);
       sacc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(qa[g], kb16, sacc);
     }
+    if constexpr (kKD)
+      if (kb + kFaTile <= khi) fetch_k(kb + kFaTile);
     const uint32_t key = kb + col;
     float alpha[8];
     for (int j = 0; j < 8; j++) {
