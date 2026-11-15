@@ -621,6 +621,18 @@ static bool mat2(Ink2Forward *f, const GgufTensor *t0, const void *w0, float *y0
                    NULL);
 }
 
+/* y = x's rows RMS-normed (times w), and for t on mm in one launch (n <= MM_MAX_TOKENS) f->x16 their f16 too -
+   ops_rms_x16's, mm_x16's bytes: *ready, mat2's for t on y */
+static bool rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const float *w, uint32_t n, float *y,
+                    bool *ready)
+{
+  const uint32_t C = (uint32_t)f->w->geo.n_embd;
+  const float eps = f->w->geo.rms_eps;
+  *ready = n <= MM_MAX_TOKENS && mm_takes(ink2_type(t), (uint32_t)t->dims[1], (uint32_t)t->dims[0]);
+  return *ready ? ops_rms_x16(x, C, C, w, eps, n, y, C, f->x16, f->overflow, NULL)
+                : ops_rms(x, C, C, w, eps, n, y, C, NULL);
+}
+
 /* one role's experts (their entries in ascending count): a launch a run of the same column tiles (mm_col_tiles), so
    a one-tile expert is not run in a hot one's many-tile kernel (hip_ffn.c's group). each expert's rows its own: the
    launches' order changes no bit */
@@ -851,19 +863,20 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                         f->res_sc, NULL));
       aq = f->a3, ak = full ? f->a3 + (uint64_t)n * C : f->a3, av = full ? f->a3 + (uint64_t)2 * n * C : f->a3;
     }
-    GPU(ops_rms(aq, C, C, full ? d->q_norm : d->attn_norm, g->rms_eps, n, f->xn, C, NULL));
-    if (full)
-    {
-      GPU(ops_rms(ak, C, C, d->k_norm, g->rms_eps, n, f->kn, C, NULL));
-      GPU(ops_rms(av, C, C, d->v_norm, g->rms_eps, n, f->vn, C, NULL));
-    }
+    bool ready;
+    GPU(rms_for(f, L->q, aq, full ? d->q_norm : d->attn_norm, n, f->xn, &ready));
     const float *xk = full ? f->kn : f->xn, *xv = full ? f->vn : f->xn;
-    /* the projections on xn in pairs through its one f16 (a sliding layer's k and v too: xn theirs), then a full
-       layer's k on kn and v on vn - each matrix's bits its own launch's */
-    GPU(mat2(f, L->q, d->q, f->q, L->gate, d->gate, f->gate, f->xn, n, false) &&
+    /* the projections on xn in pairs through its one f16 (the norm's; a sliding layer's k and v too: xn theirs),
+       then a full layer's k on kn and v on vn, each its norm's f16 - each matrix's bits its own launch's */
+    GPU(mat2(f, L->q, d->q, f->q, L->gate, d->gate, f->gate, f->xn, n, ready) &&
         mat2(f, L->rel, d->rel, f->rel, NULL, NULL, NULL, f->xn, n, true));
     if (full)
-      GPU(mat(f, L->k, d->k, xk, n, f->k) && mat(f, L->v, d->v, xv, n, f->v));
+    {
+      GPU(rms_for(f, L->k, ak, d->k_norm, n, f->kn, &ready) &&
+          mat2(f, L->k, d->k, f->k, NULL, NULL, NULL, xk, n, ready));
+      GPU(rms_for(f, L->v, av, d->v_norm, n, f->vn, &ready) &&
+          mat2(f, L->v, d->v, f->v, NULL, NULL, NULL, xv, n, ready));
+    }
     else
       GPU(mat2(f, L->k, d->k, f->k, L->v, d->v, f->v, f->xn, n, true));
     GPU(mat(f, L->sink, d->sink, f->xn, n, f->sink));
