@@ -59,10 +59,21 @@ constexpr Wide kWide = {4, 8};
 // its own tokens. a tile's sums are its rows' and tokens' own: any of them the same bits
 constexpr Wide kWideF32 = {3, 12}, kNarrow = {4, 1};
 
+// the device's CUs (0: not read)
+static uint32_t cus() {
+  static int n = -1;
+  if (n < 0 && hipDeviceGetAttribute(&n, hipDeviceAttributeMultiprocessorCount, 0) != hipSuccess) n = 0;
+  return (uint32_t) n;
+}
+
+// an F32 matrix too short for a block of 8 waves on every CU (Inkling's sink, 48 x 6144, 6 blocks on 40 CUs): a wave
+// a block, its waves over the CUs - each row's sums rows_of's whatever its block, so the same bits
 template <quant::Type T, int NT>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
             hipStream_t s) {
   constexpr Tune k = tune(T, NT);
+  if constexpr (T == quant::kF32)
+    if (rows < (uint64_t) cus() * mv::kWavesPerBlock * k.r) return mv::launch<T, NT, k.r, k.u, 1>(w, rows, cols, x, xs, y, ys, s);
   return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, xs, y, ys, s);
 }
 

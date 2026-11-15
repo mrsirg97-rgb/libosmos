@@ -41,10 +41,11 @@ __device__ inline void step(const uint8_t* const* base, const uint32_t* rid, uin
     }
 }
 
-template <quant::Type T, int NT, int R, int U>
+// WPB: a block's waves (each its own R rows)
+template <quant::Type T, int NT, int R, int U, int WPB = kWavesPerBlock>
 __device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols, const float* __restrict__ x,
                                uint32_t xs, float* __restrict__ y, uint32_t ys, uint32_t live = NT) {
-  const uint32_t row0 = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * R;
+  const uint32_t row0 = (blockIdx.x * WPB + threadIdx.x / kWave) * R;
   const int lane = threadIdx.x % kWave;
   if (row0 >= rows) return;  // the whole wave: no lane of it is left to a shuffle
   const uint8_t* base[R];
@@ -68,11 +69,11 @@ __device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uin
     }
 }
 
-template <quant::Type T, int NT, int R, int U>
-__global__ __launch_bounds__(kWave* kWavesPerBlock) void kernel(const uint8_t* __restrict__ w, uint32_t rows,
-                                                                 uint32_t cols, const float* __restrict__ x,
-                                                                 uint32_t xs, float* __restrict__ y, uint32_t ys) {
-  rows_of<T, NT, R, U>(w, rows, cols, x, xs, y, ys);
+template <quant::Type T, int NT, int R, int U, int WPB = kWavesPerBlock>
+__global__ __launch_bounds__(kWave* WPB) void kernel(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols,
+                                                      const float* __restrict__ x, uint32_t xs, float* __restrict__ y,
+                                                      uint32_t ys) {
+  rows_of<T, NT, R, U, WPB>(w, rows, cols, x, xs, y, ys);
 }
 
 // many tokens at once (a prompt's): a wave R rows of NW tokens, the block's 8 waves 8 R rows of the same NW tokens,
@@ -227,12 +228,12 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const 
   rows_of<T, NT, R, U>(w[m], rows, cols, x + r0 * xs, xs, y + r0 * ys, ys, (uint32_t) cnt[m]);
 }
 
-template <quant::Type T, int NT, int R, int U>
+template <quant::Type T, int NT, int R, int U, int WPB = kWavesPerBlock>
 bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys,
             hipStream_t s) {
-  const uint32_t per_block = kWavesPerBlock * R;
-  kernel<T, NT, R, U><<<(rows + per_block - 1) / per_block, kWave * kWavesPerBlock, 0, s>>>(
-      (const uint8_t*) w, rows, cols, x, xs, y, ys);
+  const uint32_t per_block = WPB * R;
+  kernel<T, NT, R, U, WPB><<<(rows + per_block - 1) / per_block, kWave * WPB, 0, s>>>((const uint8_t*) w, rows, cols,
+                                                                                    x, xs, y, ys);
   return hipGetLastError() == hipSuccess;
 }
 
