@@ -92,12 +92,13 @@ def _derive(m, fid, models, have, trust_size, fetch, found):
     """a derived file's path: the user's if they have it, else made from its inputs under <models>/derived/ - its
     bytes and SHA-256 the pinned ones, or refused with nothing of it left"""
     e = m["files"][fid]
-    p = (found or {}).get(fid) or (userfiles.find(e, have, False) if have else None)
+    p = (found or {}).get(fid) or (userfiles.find(e, have, trust_size) if have else None)
     if p:
         return p
     d = e["derive"]
     out = os.path.join(models, "derived", e["path"])
-    if os.path.exists(out) and userfiles.matches(out, e):
+    # --trust-size: one made before was checked against its SHA-256 when made; its bytes alone take it again
+    if os.path.exists(out) and userfiles.matches(out, e, trust_size):
         return out
     os.makedirs(os.path.dirname(out), exist_ok=True)
     if d["with"] == "gguf_assemble":
