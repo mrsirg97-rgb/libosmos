@@ -1,5 +1,5 @@
 // ink2_engine - Inkling's forward with a cache (osmos/ink2/forward.h) held to ink2_run's: one prompt's tokens in steps
-// of the sizes given, every row's log-probabilities against ink2_run's (REF_OUT of the same ids, ATTN=fa), and the
+// of the sizes given, every row's log-probabilities against ink2_run's (REF_OUT of the same ids, ATTN=fa MAT=mm), and the
 // sequence's own checks - a rollback and the same tokens again the same bits, a save and load the same bits on.
 //
 //   ink2_engine <first shard> <ids> <steps> [ref.f32]   steps: "200,64*30,1*10" - a step's tokens, *k for k of them
@@ -10,6 +10,8 @@
 //                 (the token after the step's, no floors) printed beside the text's - its acceptance
 //   CHECK=1       at each 1-token step: roll back, run it again, the logits the same bits; and once a save, a load
 //                 into a new sequence and its next step the same bits
+//   PROMPT=1      the ids a prompt (ink2_seq_prompt at their end): the head on the last row alone, a server's prompt
+//                 steps - a prefill's time (no reference, no CHECK)
 #include <hip/hip_runtime.h>
 
 #include <chrono>
@@ -90,6 +92,7 @@ int main(int argc, char** argv) {
   for (uint32_t n : steps) maxs = n > maxs ? n : maxs;
   const double room = std::getenv("ROOM") ? std::atof(std::getenv("ROOM")) : 32.0;
   const bool check = std::getenv("CHECK") && std::atoi(std::getenv("CHECK"));
+  const bool prompt = std::getenv("PROMPT") && std::atoi(std::getenv("PROMPT"));
   std::vector<uint64_t> picks;
   if (const char* pp = std::getenv("PICKS")) {
     picks.resize((size_t) W->geo.n_layers * W->geo.n_experts);
@@ -119,6 +122,8 @@ int main(int argc, char** argv) {
   const uint32_t V = (uint32_t) W->geo.n_vocab;
   FILE* ref = argc > 4 ? std::fopen(argv[4], "rb") : nullptr;
   CHECK(argc <= 4 || ref);
+  CHECK(!prompt || (!ref && !check && !mtp) || (std::snprintf(err, sizeof err, "PROMPT=1 alone"), false));
+  CHECK(!prompt || ink2_seq_prompt(s, T));
   std::vector<float> lg((size_t) maxs * V), again((size_t) V), rl(V);
   double kl_sum = 0, kl_max = 0;
   uint32_t rows = 0, agree = 0, checked = 0, saved = 0, same = 0;
@@ -131,6 +136,10 @@ int main(int argc, char** argv) {
     auto ts = std::chrono::steady_clock::now();
     CHECK(ink2_step(f, one, &n, 1, ids.data() + at, err));
     (n == 1 ? t_dec : t_prompt) += secs(ts), n_dec += n == 1;
+    if (prompt && at + n < T) {  // a prompt's rows before its last: no logits
+      at += n;
+      continue;
+    }
     CHECK(hipMemcpy(lg.data(), ink2_logits(f), (size_t) n * V * 4, hipMemcpyDeviceToHost) == hipSuccess);
     if (check && n == 1 && ink2_seq_reach(s) >= 1) {  // rolled back and run again: the same bits
       CHECK(ink2_seq_rollback(s, 1));
@@ -201,8 +210,8 @@ int main(int argc, char** argv) {
   if (rows)
     std::printf(", kld mean %.3g max %.3g against the reference, top-1 %.2f%%, %u rows its bits", kl_sum / rows, kl_max,
                 100.0 * agree / rows, same);
-  std::printf("; %u rollbacks the same bits; prompt steps %.1f s, %u decode steps %.2f tok/s\n", checked, t_prompt,
-              n_dec, n_dec ? n_dec / t_dec : 0.0);
+  std::printf("; %u rollbacks the same bits; prompt steps %.1f s (%.1f tok/s), %u decode steps %.2f tok/s\n", checked,
+              t_prompt, (T - n_dec) / t_prompt, n_dec, n_dec ? n_dec / t_dec : 0.0);
   if (const char* po = std::getenv("PICKS_OUT")) {
     FILE* pf = std::fopen(po, "wb");
     CHECK(pf && std::fwrite(ink2_forward_picks(f), 8, (size_t) W->geo.n_layers * W->geo.n_experts, pf) ==
