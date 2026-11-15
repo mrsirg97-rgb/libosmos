@@ -45,6 +45,7 @@ __global__ void moe_sum_kernel(float* y, const float* x, const float* a, const i
   if (i >= all) return;
   const uint64_t t = i / dim, c = i % dim;
   float v = 0.0f;
+#pragma unroll 8
   for (uint32_t s = 0; s < k; s++) v += a[t * k + s] * x[(uint64_t) row[t * k + s] * dim + c];
   y[i] = v;
 }
@@ -158,15 +159,18 @@ __global__ void attn_res_kernel(const float* query, uint32_t queries, const floa
 // attn_res split for a few tokens (one block a token is one CU's serial reductions): a block each state's square
 // sum and each query's dot with it - attn_res_kernel's own sums - into scratch [n_tok][1 + queries][ns], then the
 // softmax and the weighted sum a block a kThreads of dim, each value's arithmetic attn_res_kernel's: the same bits
+constexpr uint32_t kResRun = 8;  // a 6144-wide state's 24 values a thread in 3 runs
 __global__ void attn_res_dots_kernel(const float* query, uint32_t queries, const float* blocks, uint32_t nb,
                                      uint32_t bs, const float* partial, uint32_t dim, float* scratch) {
   __shared__ float lds[kThreads];
   const uint32_t s = blockIdx.x, y = blockIdx.y, t = blockIdx.z, ns = nb + 1;
   const float* v = s < nb ? blocks + ((uint64_t) t * bs + s) * dim : partial + (uint64_t) t * dim;
-  float d = 0;
+  float d = 0;  // (unrolled: a thread's loads in flight together, its adds in order)
   if (!y)
+#pragma unroll kResRun
     for (uint32_t c = threadIdx.x; c < dim; c += kThreads) d += v[c] * v[c];
   else
+#pragma unroll kResRun
     for (uint32_t c = threadIdx.x; c < dim; c += kThreads) d += query[(uint64_t) (y - 1) * dim + c] * v[c];
   d = block_sum<kThreads>(d, lds);
   if (!threadIdx.x) scratch[((uint64_t) t * (1 + queries) + y) * ns + s] = d;
@@ -197,6 +201,7 @@ __global__ void attn_res_mix_kernel(uint32_t queries, const float* blocks, uint3
   if (c >= dim) return;
   for (uint32_t q = 0; q < queries; q++) {
     float o = 0;
+#pragma unroll kResRun
     for (uint32_t s = 0; s < ns; s++)
       o += p[q][s] * (s < nb ? blocks + ((uint64_t) t * bs + s) * dim : partial + (uint64_t) t * dim)[c];
     out[((uint64_t) q * n_tok + t) * dim + c] = o;

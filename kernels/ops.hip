@@ -47,6 +47,7 @@ __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* 
 }
 
 // x16 (when not NULL): y as mm_x16 would put it, rows past `rows` (a block each) zero to a whole tile
+constexpr uint32_t kRmsRun = 8;  // a 6144-wide row's 24 values a thread in 3 runs
 __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
                            uint32_t rows, _Float16* x16, int32_t* overflow) {
   __shared__ float lds[kThreads];
@@ -56,13 +57,25 @@ __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float*
   }
   const float* xr = x + (uint64_t) blockIdx.x * xs;
   float* yr = y + (uint64_t) blockIdx.x * ys;
+  // a thread's values kRmsRun at a time, their loads in flight together (a block a row: its latency), each sum's
+  // adds and each value's ops in rms_kernel's order as ever - y may be x, so a run's loads before its stores
   float ss = 0;
+#pragma unroll kRmsRun
   for (uint32_t i = threadIdx.x; i < n; i += kThreads) ss += xr[i] * xr[i];
   const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) n + eps);
-  for (uint32_t i = threadIdx.x; i < n; i += kThreads) {
-    const float v = w ? (xr[i] * r) * w[i] : xr[i] * r;
-    yr[i] = v;
-    if (x16) mm::x16_put(x16, blockIdx.x, i, n, v, overflow);
+  for (uint32_t i0 = threadIdx.x; i0 < n; i0 += kRmsRun * kThreads) {
+    float v[kRmsRun], g[kRmsRun];
+    for (uint32_t u = 0; u < kRmsRun; u++) {
+      const uint32_t i = i0 + u * kThreads;
+      v[u] = i < n ? xr[i] : 0.0f, g[u] = w && i < n ? w[i] : 0.0f;
+    }
+    for (uint32_t u = 0; u < kRmsRun; u++) {
+      const uint32_t i = i0 + u * kThreads;
+      if (i >= n) break;
+      const float o = w ? (v[u] * r) * g[u] : v[u] * r;
+      yr[i] = o;
+      if (x16) mm::x16_put(x16, blockIdx.x, i, n, o, overflow);
+    }
   }
 }
 
