@@ -393,22 +393,31 @@ __device__ inline fa_h8 kv5_load(const uint8_t* rec, uint32_t d) {
 // a query's keys in units of kFaUnit at absolute positions (pos0 key 0's): each unit's online softmax from nothing,
 // folded into the running one in order. SPLIT: a block a unit (blockIdx.z, from unit u0), its partial (m, l, o)
 // written to part for ink2_fa_fold - a decode's units in parallel, the prompt's fold's bits
-template <int G, int RT, class KV, bool SPLIT>
-__global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float* q, const float* rel, const float* sink,
+template <int G, int RT, class KV, bool SPLIT, int W = G * RT>
+__global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, const float* rel, const float* sink,
                                                      const float* gate, uint32_t n_tok, const KV* k,
                                                      const KV* v, uint32_t n_keys, uint32_t pos0,
                                                      const float* rel_proj, float* out, uint32_t u0, float* part) {
-  constexpr int kNth = G * RT * 32, kItems = (kFaTile * kFaHead + kNth - 1) / kNth;
+  // W waves: the prompt's G RT (a row tile's heads); a split decode's as many as its (token, head) rows fill - a wave
+  // without rows still holds its registers, so a decode's token runs one wave, not G (more blocks resident)
+  static_assert(SPLIT || W == G * RT, "the prompt's waves its row tiles' heads");
+  constexpr int kNth = W * 32, kItems = (kFaTile * kFaHead + kNth - 1) / kNth;
   __shared__ __attribute__((aligned(32))) _Float16 ks[kFaTile * kFaRow], vt[kFaHead * kFaKey];
-  __shared__ __attribute__((aligned(32))) _Float16 ps[G * RT][kFaTile * kFaKey];
+  __shared__ __attribute__((aligned(32))) _Float16 ps[W][kFaTile * kFaKey];
   // a block RT row tiles of 16 tokens; a wave (row tile, query head) - every K / V tile shared by the block's waves
   const uint32_t wave = threadIdx.x / 32, lane = threadIdx.x % 32, half = lane >> 4, col = lane % kFaTile;
   const uint32_t tb = blockIdx.x * kFaTile * RT, t0 = tb + wave / G * kFaTile, kvh = blockIdx.y, H = a.heads;
   const uint32_t h = kvh * G + wave % G, base = n_keys - n_tok;  // token t is key base + t
+  // a row's token and query head: the prompt's a wave's head, its rows 16 tokens; a split decode's rows (token, head)
+  // pairs, wave w's the w * 16th on (a token's G heads in G rows: one wave for a decode's token, not G of one row each)
+  // - each row's sums its own, so the same bits either way; a wave past the pairs only loads the tiles
+  auto rtok = [&](uint32_t r) -> uint32_t { return SPLIT ? (wave * kFaTile + r) / G : t0 + r; };
+  auto rhead = [&](uint32_t r) -> uint32_t { return SPLIT ? kvh * G + (wave * kFaTile + r) % G : h; };
+  const bool active = !SPLIT || wave * kFaTile < n_tok * G;
   fa_h16 qa[kFaHead / kFaTile];
   {
-    const uint32_t t = t0 + col;
-    const float* qr = q + ((uint64_t) t * H + h) * kFaHead;
+    const uint32_t t = rtok(col);
+    const float* qr = q + ((uint64_t) t * H + rhead(col)) * kFaHead;
     for (int g = 0; g < kFaHead / kFaTile; g++)
       for (int e = 0; e < kFaTile; e++) qa[g][e] = (_Float16) (t < n_tok ? qr[g * kFaTile + e] : 0.0f);
   }
@@ -416,8 +425,8 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
   float m[8], l[8], gm[8], gl[8];
   fa_f8 o[kFaHead / kFaTile] = {}, go[SPLIT ? 1 : kFaHead / kFaTile] = {};
   for (int j = 0; j < 8; j++) {
-    const uint32_t t = t0 + 2 * j + half;
-    gm[j] = t < n_tok ? sink[(uint64_t) t * H + h] : 0.0f, gl[j] = 1.0f, m[j] = -INFINITY, l[j] = 0.0f;
+    const uint32_t t = rtok(2 * j + half);
+    gm[j] = t < n_tok ? sink[(uint64_t) t * H + rhead(2 * j + half)] : 0.0f, gl[j] = 1.0f, m[j] = -INFINITY, l[j] = 0.0f;
   }
   // the block's key range (its first row tile's lowest to its last's highest); a wave's own rows masked within it
   const uint32_t last = tb + kFaTile * RT - 1 < n_tok - 1 ? tb + kFaTile * RT - 1 : n_tok - 1;
@@ -483,6 +492,7 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
       }
     __syncthreads();
     if (kb + kFaTile <= khi) fetch(kb + kFaTile);  // the next tile's, in flight under this one's WMMAs
+    if (!active) continue;                         // (its loads done: no row of its own)
     fa_f8 sacc = {};
     for (int g = 0; g < kFaHead / kFaTile; g++) {
       const fa_h16 kb16 = *(const fa_h16*) (ks + col * kFaRow + g * kFaTile);
@@ -491,14 +501,14 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
     const uint32_t key = kb + col;
     float alpha[8];
     for (int j = 0; j < 8; j++) {
-      const uint32_t t = t0 + 2 * j + half, qi = base + t;
+      const uint32_t t = rtok(2 * j + half), qi = base + t;
       const bool valid = t < n_tok && key <= qi && (!a.window || qi - key < a.window);
       float s = -INFINITY;
       if (valid) {
         const uint32_t dist = qi - key;
         s = sacc[j] * a.scaling;
         if (dist < a.extent) {
-          const float* rr = rel + ((uint64_t) t * H + h) * a.d_rel;
+          const float* rr = rel + ((uint64_t) t * H + rhead(2 * j + half)) * a.d_rel;
           float b = 0;
           for (uint32_t r = 0; r < a.d_rel; r++) b += rr[r] * rel_proj[(uint64_t) r * a.extent + dist];
           s += b;
@@ -515,7 +525,8 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
     // a row whose own key is in this tile (not its last): its p . v over the tile's values up to its own alone - the
     // WMMA's sum moves with a value whose p is 0, and the keys past a query are the prompt's next tokens in one
     // step, none in a step that ends at it (a decode's). cut c: the rows at key kb + c (the wave's rows the valid)
-    const int64_t c_lo = (int64_t) (base + t0) - kb, c_last = c_lo + (int64_t) (n_tok - 1 - t0 < 15 ? n_tok - 1 - t0 : 15);
+    const uint32_t tlo = rtok(0), thi = rtok(kFaTile - 1) < n_tok - 1 ? rtok(kFaTile - 1) : n_tok - 1;
+    const int64_t c_lo = (int64_t) (base + tlo) - kb, c_last = (int64_t) (base + thi) - kb;
     const int cmin = c_lo > 0 ? (int) c_lo : 0, cmax = c_last < kFaTile - 2 ? (int) c_last : kFaTile - 2;
     for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
       for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
@@ -527,7 +538,7 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
         for (int e = c + 1; e < kFaTile; e++) bc[e] = (_Float16) 0.0f;
         const fa_f8 d = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bc, prev);
         for (int j = 0; j < 8; j++)
-          if ((int64_t) (base + t0 + 2 * j + half) == (int64_t) kb + c) o[nt][j] = d[j];
+          if ((int64_t) (base + rtok(2 * j + half)) == (int64_t) kb + c) o[nt][j] = d[j];
       }
     }
     __builtin_amdgcn_wave_barrier();
@@ -541,11 +552,11 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
         }
       }
   }
-  for (int j = 0; j < 8; j++) {
-    const uint32_t t = t0 + 2 * j + half;
+  for (int j = 0; j < 8 && active; j++) {
+    const uint32_t t = rtok(2 * j + half);
     if (t >= n_tok) continue;
     if constexpr (SPLIT) {  // the unit's partial: m, l, then o (ink2_fa_fold's)
-      float* pp = part + (((uint64_t) blockIdx.z * n_tok + t) * H + h) * (kFaHead + 2);
+      float* pp = part + (((uint64_t) blockIdx.z * n_tok + t) * H + rhead(2 * j + half)) * (kFaHead + 2);
       if (col == 0) pp[0] = m[j], pp[1] = l[j];
       for (int nt = 0; nt < kFaHead / kFaTile; nt++) pp[2 + nt * kFaTile + col] = o[nt][j];
     } else
@@ -594,16 +605,20 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
     const uint32_t u0 = (pos0 + klo) / kFaUnit, units = (pos0 + qhi) / kFaUnit - u0 + 1;
     const dim3 grid(1, a->kv_heads, units);
     const uint32_t rows = a->x16 ? (n_tok + mm::kTile - 1) / mm::kTile * mm::kTile : n_tok;  // x16's: a whole tile
-#define FS(g)                                                                                                        \
-  if (G == g) {                                                                                                      \
-    fa_kernel<g, 1, KV, true><<<grid, g * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, pos0,     \
-                                                               rel_proj, out, u0, scratch);                          \
+    // the waves the (token, head) rows fill: n_tok G of them, 16 a wave, the fewest of 1 / 2 / 4 / 8
+    const uint32_t need = (n_tok * G + kFaTile - 1) / kFaTile, W = need <= 1 ? 1 : need <= 2 ? 2 : need <= 4 ? 4 : 8;
+#define FSW(g, w)                                                                                                    \
+  if (G == g && W == w) {                                                                                            \
+    fa_kernel<g, 1, KV, true, w><<<grid, w * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, pos0,  \
+                                                                  rel_proj, out, u0, scratch);                       \
     fa_fold_kernel<<<rows * a->heads, kFaHead, 0, st(stream)>>>(scratch, units, n_tok, a->heads, sink, gate, out,    \
                                                                (_Float16*) a->x16, a->overflow);                    \
     return ok();                                                                                                     \
   }
+#define FS(g) FSW(g, 1) FSW(g, 2) FSW(g, 4) FSW(g, 8)
     FS(1) FS(2) FS(4) FS(6) FS(8)
 #undef FS
+#undef FSW
     return false;
   }
   static const int rt = std::getenv("INK2_FA_RT") ? std::atoi(std::getenv("INK2_FA_RT")) : kFaRowTiles;

@@ -43,6 +43,24 @@ int main(int argc, char** argv) {
         const Ink2Attn at = {H, KV, D, R, E, full ? 0u : 1024u, 0.0883883f};
         float* scr;
         CHECK(hipMalloc(&scr, ink2_fa_scratch(H, keys)) == hipSuccess);
+        if (full) {  // a full layer's cache as the engine keeps it: keys Q8, values Q5 records (ink2_fa85), split
+          uint8_t *k8, *v5;
+          CHECK(hipMalloc(&k8, (size_t) keys * KV * INK2_KV8_RECORD) == hipSuccess &&
+                hipMalloc(&v5, (size_t) keys * KV * INK2_KV5_RECORD) == hipSuccess);
+          CHECK(ink2_to_kv8(k, (uint64_t) keys * KV, k8, nullptr) && ink2_to_kv5(v, (uint64_t) keys * KV, v5, nullptr));
+          CHECK(ink2_fa85(&at, q, rel, sink, nullptr, 1, k8, v5, keys, 0, rp, out, scr, nullptr));
+          hipEvent_t a, b;
+          hipEventCreate(&a), hipEventCreate(&b);
+          hipEventRecord(a);
+          for (int i = 0; i < 20; i++) CHECK(ink2_fa85(&at, q, rel, sink, nullptr, 1, k8, v5, keys, 0, rp, out, scr, nullptr));
+          hipEventRecord(b), hipEventSynchronize(b);
+          float ms;
+          hipEventElapsedTime(&ms, a, b);
+          const double gb = (double) keys * KV * (INK2_KV8_RECORD + INK2_KV5_RECORD) / 1e9;
+          std::printf("decode %7u keys %-7s %-6s %8.3f ms a call   %6.1f GB/s of keys and values (Q8 / Q5)\n", keys,
+                      "full", "q8q5", ms / 20, gb / (ms / 20 / 1e3));
+          CHECK(hipFree(k8) == hipSuccess && hipFree(v5) == hipSuccess);
+        }
         for (int split = 0; split < 2; split++) {  // one block a KV head, then a block a unit and KV head
           float* sp = split ? scr : nullptr;
           CHECK(ink2_fa16(&at, q, rel, sink, nullptr, 1, k16, v16, keys, 0, rp, out, sp, nullptr));
