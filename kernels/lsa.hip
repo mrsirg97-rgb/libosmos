@@ -1,7 +1,8 @@
 // latent sparse attention's read on the GPU (osmos/gpu/lsa_ops.h): src/lsa's lsa_read, list for list. a bucket's
 // score its 64 dims in order in double, each product and sum rounded on its own (no fused step: the host's x86 sums
 // are unfused) - the host's bits. the top LSA_TOP_P: a radix select over the scores' ordered bits (8 passes of 8, a
-// histogram each, read back), the threshold's ties the lowest buckets (one block, in bucket order), the picks sorted
+// histogram each, its bin chosen on the device: the read never waits for the host), the threshold's ties the
+// lowest buckets (one block, in bucket order), the picks sorted
 // by score then bucket (a bitonic sort in LDS); their keys gathered in pick order (a block-wide scan), cut at
 // LSA_TOP_K; the window and the sinks after
 #include <hip/hip_runtime.h>
@@ -24,19 +25,48 @@ __device__ inline uint64_t ordered(double v) {
   return u >> 63 ? ~u : u | (1ull << 63);
 }
 
-__global__ void scores_kernel(const float* __restrict__ cent, const float* __restrict__ iq, uint32_t nb,
-                              uint64_t* __restrict__ key) {
-  const uint32_t b = blockIdx.x * blockDim.x + threadIdx.x;
-  if (b >= nb) return;
-  const float* c = cent + (uint64_t) b * LSA_DIM;
+// a block 64 buckets, a thread one: their rows read coalesced into LDS (a thread a dim of each row), then each its own
+// row's dot, its dims in order
+__global__ __launch_bounds__(LSA_DIM) void scores_kernel(const float* __restrict__ cent, const float* __restrict__ iq,
+                                                         uint32_t nb, uint64_t* __restrict__ key) {
+  __shared__ float tile[LSA_DIM][LSA_DIM + 1];
+  const uint32_t t = threadIdx.x, b0 = blockIdx.x * LSA_DIM;
+  for (uint32_t i = 0; i < LSA_DIM; i++)
+    tile[i][t] = b0 + i < nb ? cent[(uint64_t) (b0 + i) * LSA_DIM + t] : 0.0f;
+  __syncthreads();
+  if (b0 + t >= nb) return;
   double s = 0.0;
-  for (int d = 0; d < LSA_DIM; d++) s = __dadd_rn(s, __dmul_rn((double) c[d], (double) iq[d]));
-  key[b] = ordered(s);
+  for (int d = 0; d < LSA_DIM; d++) s = __dadd_rn(s, __dmul_rn((double) tile[t][d], (double) iq[d]));
+  key[b0 + t] = ordered(s);
 }
 
 // the histogram of byte `shift` of the keys under the prefix (the bits above it chosen so far)
-__global__ void hist_kernel(const uint64_t* __restrict__ key, uint32_t nb, uint64_t prefix, uint64_t mask, int shift,
+// the select's state: the bits chosen so far (prefix under mask), the keys still wanted among those under it
+struct Sel {
+  uint64_t prefix, mask;
+  uint32_t want;
+};
+
+__global__ void sel_init_kernel(Sel* sel) { *sel = Sel{0, 0, LSA_TOP_P}; }
+
+// a pass's bin: the highest whose keys, with those above it, reach the keys wanted; the histogram cleared for the next
+__global__ void choose_kernel(uint32_t* __restrict__ hist, Sel* __restrict__ sel, int shift) {
+  __shared__ uint32_t h[256];
+  const uint32_t t = threadIdx.x;
+  h[t] = hist[t];
+  hist[t] = 0;
+  __syncthreads();
+  if (t) return;
+  uint32_t above = 0;
+  int bin = 255;
+  for (; bin > 0 && above + h[bin] < sel->want; bin--) above += h[bin];
+  sel->want -= above;
+  sel->prefix |= (uint64_t) bin << shift, sel->mask |= 255ull << shift;
+}
+
+__global__ void hist_kernel(const uint64_t* __restrict__ key, uint32_t nb, const Sel* __restrict__ sel, int shift,
                             uint32_t* __restrict__ hist) {
+  const uint64_t prefix = sel->prefix, mask = sel->mask;
   __shared__ uint32_t h[256];
   for (int i = threadIdx.x; i < 256; i += blockDim.x) h[i] = 0;
   __syncthreads();
@@ -66,42 +96,90 @@ __device__ uint32_t block_scan(uint32_t v, uint32_t* lds, uint32_t* total) {
   return incl - v;
 }
 
-// the picks in bucket order: every key above the threshold, and the first `ties` equal to it; then sorted by key
-// descending, then bucket ascending (bitonic, kThreads slots, an empty slot last)
-__global__ __launch_bounds__(kThreads) void pick_kernel(const uint64_t* __restrict__ key, uint32_t nb, uint64_t thr,
-                                                        uint32_t ties, bool all, uint32_t* __restrict__ picks) {
+// the picks, in three passes over the scores and a sort: a chunk a block (kChunk keys, kPer a thread, contiguous),
+// its keys above the threshold and its ties counted; the chunks' offsets (one block's scan); each chunk's picks
+// written at its offsets in bucket order (a tie taken while the ties before it, every chunk's, are fewer than the
+// select's) - every key above the threshold and the lowest `ties` equal to it, LSA_TOP_P in all; then sorted
+constexpr int kPer = 16, kChunkThreads = 256, kChunk = kPer * kChunkThreads, kMaxChunks = kThreads;
+
+__global__ __launch_bounds__(kChunkThreads) void count_kernel(const uint64_t* __restrict__ key, uint32_t nb,
+                                                              const Sel* __restrict__ sel, uint32_t* __restrict__ gt,
+                                                              uint32_t* __restrict__ eq) {
+  __shared__ uint32_t ng, ne;
+  const uint64_t thr = sel->prefix;
+  if (threadIdx.x == 0) ng = 0, ne = 0;
+  __syncthreads();
+  uint32_t g = 0, e = 0;
+  for (int i = 0; i < kPer; i++) {
+    const uint32_t b = blockIdx.x * kChunk + threadIdx.x * kPer + i;
+    if (b < nb) g += key[b] > thr, e += key[b] == thr;
+  }
+  atomicAdd(&ng, g), atomicAdd(&ne, e);
+  __syncthreads();
+  if (threadIdx.x == 0) gt[blockIdx.x] = ng, eq[blockIdx.x] = ne;
+}
+
+__global__ __launch_bounds__(kThreads) void offsets_kernel(uint32_t* __restrict__ gt, uint32_t* __restrict__ eq,
+                                                           uint32_t chunks) {
   __shared__ uint32_t lds[kThreads];
+  uint32_t total;
+  const uint32_t t = threadIdx.x;
+  const uint32_t g = t < chunks ? gt[t] : 0, e = t < chunks ? eq[t] : 0;
+  const uint32_t og = block_scan(g, lds, &total), oe = block_scan(e, lds, &total);
+  if (t < chunks) gt[t] = og, eq[t] = oe;
+}
+
+__global__ __launch_bounds__(kChunkThreads) void write_kernel(const uint64_t* __restrict__ key, uint32_t nb,
+                                                              const Sel* __restrict__ sel,
+                                                              const uint32_t* __restrict__ gt0,
+                                                              const uint32_t* __restrict__ eq0,
+                                                              uint32_t* __restrict__ picks) {
+  __shared__ uint32_t sg[kChunkThreads], se[kChunkThreads];
+  const uint64_t thr = sel->prefix;
+  const uint32_t ties = sel->want, above = LSA_TOP_P - ties, t = threadIdx.x;
+  uint32_t g = 0, e = 0;
+  for (int i = 0; i < kPer; i++) {
+    const uint32_t b = blockIdx.x * kChunk + t * kPer + i;
+    if (b < nb) g += key[b] > thr, e += key[b] == thr;
+  }
+  sg[t] = g, se[t] = e;  // the block's inclusive scans of both (a thread's keys contiguous: bucket order)
+  __syncthreads();
+  for (uint32_t o = 1; o < kChunkThreads; o <<= 1) {
+    const uint32_t xg = t >= o ? sg[t - o] : 0, xe = t >= o ? se[t - o] : 0;
+    __syncthreads();
+    sg[t] += xg, se[t] += xe;
+    __syncthreads();
+  }
+  uint32_t ag = gt0[blockIdx.x] + sg[t] - g, ae = eq0[blockIdx.x] + se[t] - e;
+  for (int i = 0; i < kPer; i++) {
+    const uint32_t b = blockIdx.x * kChunk + t * kPer + i;
+    if (b >= nb) break;
+    if (key[b] > thr) picks[ag++] = b;
+    else if (key[b] == thr && ae < ties) picks[above + ae++] = b;
+    else if (key[b] == thr) ae++;
+  }
+}
+
+// the picks (LSA_TOP_P, or all `nb` when no more) by key descending, bucket ascending (bitonic in LDS, empties last)
+__global__ __launch_bounds__(kThreads) void sort_kernel(const uint64_t* __restrict__ key, uint32_t nb, bool all,
+                                                        uint32_t* __restrict__ picks) {
   __shared__ uint64_t sk[kThreads];
   __shared__ uint32_t sb[kThreads];
   const uint32_t t = threadIdx.x;
-  sk[t] = 0, sb[t] = UINT32_MAX;
-  uint32_t base = 0, eq_base = 0;
+  const uint32_t b = all ? (t < nb ? t : UINT32_MAX) : picks[t];
+  sb[t] = b, sk[t] = b != UINT32_MAX ? key[b] : 0;
   __syncthreads();
-  for (uint32_t c0 = 0; c0 < nb; c0 += kThreads) {
-    const uint32_t b = c0 + t;
-    const uint64_t k = b < nb ? key[b] : 0;
-    const bool eq = b < nb && !all && k == thr;
-    uint32_t n_eq;
-    const uint32_t before_eq = block_scan(eq ? 1u : 0u, lds, &n_eq);
-    const bool take = b < nb && (all || k > thr || (eq && eq_base + before_eq < ties));
-    uint32_t n_take;
-    const uint32_t at = block_scan(take ? 1u : 0u, lds, &n_take);
-    if (take && base + at < kThreads) sk[base + at] = k, sb[base + at] = b;
-    base += n_take, eq_base += n_eq;
-    __syncthreads();
-  }
-  for (uint32_t size = 2; size <= kThreads; size <<= 1)  // bitonic: key descending, bucket ascending, empties last
+  for (uint32_t size = 2; size <= kThreads; size <<= 1)
     for (uint32_t j = size >> 1; j > 0; j >>= 1) {
       const uint32_t o = t ^ j;
       if (o > t) {
         const bool up = (t & size) == 0;
         const bool empty_t = sb[t] == UINT32_MAX, empty_o = sb[o] == UINT32_MAX;
-        // "t before o" in the final order
         const bool first = !empty_t && (empty_o || sk[t] > sk[o] || (sk[t] == sk[o] && sb[t] < sb[o]));
         if (first != up) {
           const uint64_t k = sk[t];
-          const uint32_t b = sb[t];
-          sk[t] = sk[o], sb[t] = sb[o], sk[o] = k, sb[o] = b;
+          const uint32_t x = sb[t];
+          sk[t] = sk[o], sb[t] = sb[o], sk[o] = k, sb[o] = x;
         }
       }
       __syncthreads();
@@ -187,8 +265,8 @@ extern "C" bool lsa_index_gpu(const float* src, uint32_t n, uint32_t row_stride,
 struct LsaScratch {
   uint32_t max;
   uint64_t* key;
-  uint32_t *hist, *picks, *count;
-  uint32_t* pin;  // the histogram and the count read back
+  uint32_t *hist, *picks, *gt, *eq; /* gt, eq: a chunk's counts, then its offsets */
+  Sel* sel;
 };
 
 extern "C" LsaScratch* lsa_scratch_create(uint32_t max_buckets) {
@@ -197,7 +275,9 @@ extern "C" LsaScratch* lsa_scratch_create(uint32_t max_buckets) {
   s->max = max_buckets;
   if (hipMalloc((void**) &s->key, (max_buckets ? max_buckets : 1) * 8ull) != hipSuccess ||
       hipMalloc((void**) &s->hist, 256 * 4) != hipSuccess || hipMalloc((void**) &s->picks, kThreads * 4) != hipSuccess ||
-      hipMalloc((void**) &s->count, 4) != hipSuccess || hipHostMalloc((void**) &s->pin, 257 * 4, 0) != hipSuccess) {
+      hipMalloc((void**) &s->sel, sizeof(Sel)) != hipSuccess || hipMemset(s->hist, 0, 256 * 4) != hipSuccess ||
+      (max_buckets + kChunk - 1) / kChunk > kMaxChunks || hipMalloc((void**) &s->gt, kMaxChunks * 4) != hipSuccess ||
+      hipMalloc((void**) &s->eq, kMaxChunks * 4) != hipSuccess) {
     lsa_scratch_destroy(s);
     return nullptr;
   }
@@ -206,7 +286,7 @@ extern "C" LsaScratch* lsa_scratch_create(uint32_t max_buckets) {
 
 extern "C" void lsa_scratch_destroy(LsaScratch* s) {
   if (!s) return;
-  hipFree(s->key), hipFree(s->hist), hipFree(s->picks), hipFree(s->count), hipHostFree(s->pin);
+  hipFree(s->key), hipFree(s->hist), hipFree(s->picks), hipFree(s->sel), hipFree(s->gt), hipFree(s->eq);
   free(s);
 }
 
@@ -217,38 +297,32 @@ extern "C" bool lsa_read_gpu(const float* iq, uint32_t p, const float* cent, con
   uint32_t nb = p / LSA_WINDOW * LSA_BUCKETS;
   nb = nb < blocks * LSA_BUCKETS ? nb : blocks * LSA_BUCKETS;
   if (!s || nb > s->max || !out || !n) return false;
-  uint64_t thr = 0;
-  uint32_t ties = 0;
   const bool all = nb <= LSA_TOP_P;
   if (nb) {
-    scores_kernel<<<(nb + 255) / 256, 256, 0, st>>>(cent, iq, nb, s->key);
+    scores_kernel<<<(nb + LSA_DIM - 1) / LSA_DIM, LSA_DIM, 0, st>>>(cent, iq, nb, s->key);
     if (!launches::ok()) return false;
   }
-  if (nb && !all) {  // the K-th largest key, a byte at a time from the top
-    uint64_t prefix = 0, mask = 0;
-    uint32_t want = LSA_TOP_P;
+  if (nb && !all) {  // the K-th largest key, a byte at a time from the top, every step on the device
     const uint32_t grid = (nb + 255) / 256 < 512 ? (nb + 255) / 256 : 512;
+    sel_init_kernel<<<1, 1, 0, st>>>(s->sel);
     for (int shift = 56; shift >= 0; shift -= 8) {
-      if (hipMemsetAsync(s->hist, 0, 256 * 4, st) != hipSuccess) return false;
-      hist_kernel<<<grid, 256, 0, st>>>(s->key, nb, prefix, mask, shift, s->hist);
-      if (!launches::ok() || hipMemcpyAsync(s->pin, s->hist, 256 * 4, hipMemcpyDeviceToHost, st) != hipSuccess ||
-          hipStreamSynchronize(st) != hipSuccess)
-        return false;
-      uint32_t above = 0;
-      int bin = 255;
-      for (; bin > 0 && above + s->pin[bin] < want; bin--) above += s->pin[bin];
-      want -= above;  // of the bin's keys, the ones still wanted
-      prefix |= (uint64_t) bin << shift, mask |= 255ull << shift;
+      hist_kernel<<<grid, 256, 0, st>>>(s->key, nb, s->sel, shift, s->hist);
+      choose_kernel<<<1, 256, 0, st>>>(s->hist, s->sel, shift);
     }
-    thr = prefix, ties = want;
+    if (!launches::ok()) return false;
+  }
+  if (nb && !all) {
+    const uint32_t chunks = (nb + kChunk - 1) / kChunk;
+    count_kernel<<<chunks, kChunkThreads, 0, st>>>(s->key, nb, s->sel, s->gt, s->eq);
+    offsets_kernel<<<1, kThreads, 0, st>>>(s->gt, s->eq, chunks);
+    write_kernel<<<chunks, kChunkThreads, 0, st>>>(s->key, nb, s->sel, s->gt, s->eq, s->picks);
   }
   if (nb) {
-    pick_kernel<<<1, kThreads, 0, st>>>(s->key, nb, thr, ties, all, s->picks);
+    sort_kernel<<<1, kThreads, 0, st>>>(s->key, nb, all, s->picks);
   } else if (hipMemsetAsync(s->picks, 0xFF, kThreads * 4, st) != hipSuccess) {
     return false;
   }
   if (!launches::ok()) return false;
-  gather_kernel<<<1, kThreads, 0, st>>>(s->picks, members, p, win0, out, s->count);
-  return launches::ok() && hipMemcpyAsync(s->pin + 256, s->count, 4, hipMemcpyDeviceToHost, st) == hipSuccess &&
-         hipStreamSynchronize(st) == hipSuccess && (*n = s->pin[256], true);
+  gather_kernel<<<1, kThreads, 0, st>>>(s->picks, members, p, win0, out, n);
+  return launches::ok();
 }

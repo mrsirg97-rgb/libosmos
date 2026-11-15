@@ -20,8 +20,8 @@ LsaScratch *lsa_scratch_create(uint32_t max_buckets);
 void lsa_scratch_destroy(LsaScratch *s);
 
 /* the read at position p over the first `blocks` closed blocks' buckets (device cent [blocks*64 x 64] F32, members
-   [blocks*64 x 16]): its positions into out (device, LSA_READ_MAX), their count into *n (the host's). waits for the
-   stream (the radix passes read their histograms back) */
+   [blocks*64 x 16]): its positions into out (device, LSA_READ_MAX), their count into *n (device) - queued on the
+   stream, never waited for (the radix's choices made on the device) */
 bool lsa_read_gpu(const float *iq, uint32_t p, const float *cent, const int32_t *members, uint32_t blocks,
                   LsaScratch *s, uint32_t *out, uint32_t *n, void *stream);
 

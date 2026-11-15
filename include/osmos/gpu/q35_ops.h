@@ -17,11 +17,11 @@ extern "C" {
 uint64_t q35_attn_decode_scratch(uint32_t heads, uint32_t max_tokens); /* floats */
 bool q35_attn_decode(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
                      uint32_t pos0, const float *gate, float *scratch, float *out, void *stream);
-/* one token's attention over its read alone (osmos/lsa.h's lsa_read, a device list of list_len positions): the same
-   kernels, the keys the list's */
+/* one token's attention over its read alone (osmos/lsa.h's lsa_read: a device list, its count *list_len the device's,
+   at most list_max): the same kernels, the keys the list's - nothing read back */
 bool q35_attn_read(const float *q, const void *kc, const void *vc, uint32_t heads, uint32_t kv_heads,
-                   const uint32_t *list, uint32_t list_len, const float *gate, float *scratch, float *out,
-                   void *stream);
+                   const uint32_t *list, const uint32_t *list_len, uint32_t list_max, const float *gate, float *scratch,
+                   float *out, void *stream);
 
 #ifdef __cplusplus
 }

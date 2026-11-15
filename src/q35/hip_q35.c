@@ -45,7 +45,7 @@ struct Q35Forward
   float *wq[Q35_MAX_LAYERS], *wk[Q35_MAX_LAYERS];
   LsaScratch *lsa_s;
   float *iq;
-  uint32_t *list;
+  uint32_t *list, *list_n; /* a read and its count (device) */
   float *h_ik, *h_cent;
   int32_t *h_mem;
 };
@@ -139,12 +139,11 @@ static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t n, bool *don
     return close_blocks(f, s, l, (P + n) / LSA_WINDOW);
   for (uint32_t t = 0; t < n; t++)
   {
-    uint32_t len = 0;
     if (!close_blocks(f, s, l, (P + t) / LSA_WINDOW) ||
         !lsa_index_gpu(f->q + (uint64_t)t * q, 1, q, kvh, heads / kvh, hd, rot, f->wq[l], false, f->iq, NULL) ||
-        !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], s->closed[l], f->lsa_s, f->list, &len, NULL) ||
-        !q35_attn_read(f->q + (uint64_t)t * q, s->kc[l], s->vc[l], heads, kvh, f->list, len, f->gt + (uint64_t)t * q,
-                       f->da, f->ao + (uint64_t)t * q, NULL))
+        !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], s->closed[l], f->lsa_s, f->list, f->list_n, NULL) ||
+        !q35_attn_read(f->q + (uint64_t)t * q, s->kc[l], s->vc[l], heads, kvh, f->list, f->list_n, LSA_READ_MAX,
+                       f->gt + (uint64_t)t * q, f->da, f->ao + (uint64_t)t * q, NULL))
       return false;
   }
   *done = true;
@@ -270,7 +269,7 @@ void q35_forward_destroy(Q35Forward *f)
   for (int l = 0; l < Q35_MAX_LAYERS; l++)
     hipFree(f->wq[l]), hipFree(f->wk[l]);
   lsa_scratch_destroy(f->lsa_s);
-  hipFree(f->iq), hipFree(f->list);
+  hipFree(f->iq), hipFree(f->list), hipFree(f->list_n);
   free(f->h_ik), free(f->h_cent), free(f->h_mem);
   free(f);
 }
@@ -316,7 +315,7 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_E
   if (!q4x_rope((uint32_t)g->rope_dim, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), &f->rope))
     return fail(err, "the maps' YaRN rotation refused");
   ok = (f->lsa_s = lsa_scratch_create(f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && alloc(&f->iq, LSA_DIM * F) &&
-       alloc(&f->list, LSA_READ_MAX * 4) && (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) &&
+       alloc(&f->list, LSA_READ_MAX * 4) && alloc(&f->list_n, 4) && (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) &&
        (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) && (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
   if (!ok)
     return fail(err, "out of memory (the read's scratch)");

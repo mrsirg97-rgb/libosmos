@@ -36,10 +36,11 @@ template <int G>
 __global__ __launch_bounds__(32 * kWarps) void decode_kernel(const float* q, const uint8_t* kc, const uint8_t* vc,
                                                              uint32_t heads, uint32_t kv_heads, uint32_t pos0,
                                                              uint32_t per, uint32_t parts, const uint32_t* list,
-                                                             uint32_t list_len, float* ml, float* po) {
+                                                             const uint32_t* list_len, float* ml, float* po) {
   const uint32_t lane = threadIdx.x % 32, kvh = blockIdx.x, t = blockIdx.z;
-  // a token's keys: positions 0 .. its own, or (list: one token) the read's positions, entry k list[k]
-  const uint32_t part = blockIdx.y * kWarps + threadIdx.x / 32, len = list ? list_len : pos0 + t + 1;
+  // a token's keys: positions 0 .. its own, or (list: one token) the read's positions, entry k list[k], their count
+  // the device's (*list_len: the read's own; the launch sized for the longest a read can be)
+  const uint32_t part = blockIdx.y * kWarps + threadIdx.x / 32, len = list ? *list_len : pos0 + t + 1;
   const uint32_t k0 = part * per, k1 = k0 + per < len ? k0 + per : len;
   const uint64_t row = (uint64_t) kv_heads * kHead / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
   const uint32_t c = kvh * kHead + lane * kLane;
@@ -105,12 +106,13 @@ extern "C" uint64_t q35_attn_decode_scratch(uint32_t heads, uint32_t max_tokens)
 }
 
 static bool run(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-                uint32_t pos0, const uint32_t* list, uint32_t list_len, const float* gate, float* scratch, float* out,
-                void* stream) {
+                uint32_t pos0, const uint32_t* list, const uint32_t* list_len, uint32_t list_max, const float* gate,
+                float* scratch, float* out, void* stream) {
   if (!q || !kc || !vc || !gate || !scratch || !out || !n_tok || n_tok > Q35_ATTN_DECODE_MAX || !kv_heads ||
-      heads % kv_heads || heads / kv_heads > kGMax || heads / kv_heads == 0 || (list && (n_tok != 1 || !list_len)))
+      heads % kv_heads || heads / kv_heads > kGMax || heads / kv_heads == 0 ||
+      (list && (n_tok != 1 || !list_len || !list_max)))
     return false;
-  const uint32_t len = list ? list_len : pos0 + n_tok;  // the longest list: the last token's
+  const uint32_t len = list ? list_max : pos0 + n_tok;  // the longest list: the last token's, or a read's bound
   // keys a warp: at least 16, the parts at most Q35_ATTN_PARTS a (token, head)
   uint32_t per = (len + Q35_ATTN_PARTS - 1) / Q35_ATTN_PARTS;
   per = per < 16 ? 16 : per;
@@ -138,11 +140,11 @@ static bool run(const float* q, const void* kc, const void* vc, uint32_t n_tok, 
 extern "C" bool q35_attn_decode(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
                                 uint32_t kv_heads, uint32_t pos0, const float* gate, float* scratch, float* out,
                                 void* stream) {
-  return run(q, kc, vc, n_tok, heads, kv_heads, pos0, nullptr, 0, gate, scratch, out, stream);
+  return run(q, kc, vc, n_tok, heads, kv_heads, pos0, nullptr, nullptr, 0, gate, scratch, out, stream);
 }
 
 extern "C" bool q35_attn_read(const float* q, const void* kc, const void* vc, uint32_t heads, uint32_t kv_heads,
-                              const uint32_t* list, uint32_t list_len, const float* gate, float* scratch, float* out,
-                              void* stream) {
-  return run(q, kc, vc, 1, heads, kv_heads, 0, list, list_len, gate, scratch, out, stream);
+                              const uint32_t* list, const uint32_t* list_len, uint32_t list_max, const float* gate,
+                              float* scratch, float* out, void* stream) {
+  return run(q, kc, vc, 1, heads, kv_heads, 0, list, list_len, list_max, gate, scratch, out, stream);
 }
