@@ -35,7 +35,7 @@ static float uniform() {
 struct Dev {
   float *cent = nullptr, *iq = nullptr;
   int32_t* mem = nullptr;
-  uint32_t* out = nullptr;
+  uint32_t *out = nullptr, *n = nullptr;
 };
 
 // every query of qs (position, index vector) read on both, the lists compared; the GPU's mean time a read
@@ -43,7 +43,8 @@ static double compare(const std::vector<float>& cent, const std::vector<int32_t>
                       const std::vector<std::pair<uint32_t, std::vector<float>>>& qs, const char* what) {
   Dev d;
   CHECK(hipMalloc((void**) &d.cent, cent.size() * 4) == hipSuccess && hipMalloc((void**) &d.mem, mem.size() * 4) == hipSuccess);
-  CHECK(hipMalloc((void**) &d.iq, LSA_DIM * 4) == hipSuccess && hipMalloc((void**) &d.out, LSA_READ_MAX * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &d.iq, LSA_DIM * 4) == hipSuccess && hipMalloc((void**) &d.out, LSA_READ_MAX * 4) == hipSuccess &&
+        hipMalloc((void**) &d.n, 4) == hipSuccess);
   CHECK(hipMemcpy(d.cent, cent.data(), cent.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(d.mem, mem.data(), mem.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   LsaScratch* s = lsa_scratch_create(blocks * LSA_BUCKETS);
@@ -55,8 +56,10 @@ static double compare(const std::vector<float>& cent, const std::vector<int32_t>
     CHECK(hipMemcpy(d.iq, q.second.data(), LSA_DIM * 4, hipMemcpyHostToDevice) == hipSuccess);
     uint32_t ng = 0;
     const auto t0 = std::chrono::steady_clock::now();
-    CHECK(lsa_read_gpu(d.iq, q.first, d.cent, d.mem, blocks, s, d.out, &ng, nullptr));
+    CHECK(lsa_read_gpu(d.iq, q.first, d.cent, d.mem, blocks, s, d.out, d.n, nullptr) &&
+          hipDeviceSynchronize() == hipSuccess);
     ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(hipMemcpy(&ng, d.n, 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(hipMemcpy(gpu.data(), d.out, ng * 4, hipMemcpyDeviceToHost) == hipSuccess);
     if (ng != nh || std::memcmp(gpu.data(), host.data(), nh * 4)) {
       uint32_t i = 0;
@@ -67,7 +70,7 @@ static double compare(const std::vector<float>& cent, const std::vector<int32_t>
     }
   }
   lsa_scratch_destroy(s);
-  hipFree(d.cent), hipFree(d.mem), hipFree(d.iq), hipFree(d.out);
+  hipFree(d.cent), hipFree(d.mem), hipFree(d.iq), hipFree(d.out), hipFree(d.n);
   return ms / qs.size();
 }
 
