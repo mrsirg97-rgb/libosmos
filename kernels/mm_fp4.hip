@@ -53,14 +53,38 @@ __device__ inline uint32_t e2m1_code(float x) {
   return i ? (x < 0.0f ? 8u : 0u) | i : 0u;
 }
 
-// a block a token, a thread a 16: its scale, its codes packed two a byte
-__global__ void act_kernel(const float* __restrict__ x, uint32_t xs, uint32_t cols, float gs,
-                           uint8_t* __restrict__ q, uint8_t* __restrict__ sc) {
+__device__ inline float load(const float* x, uint64_t i) { return x[i]; }
+__device__ inline float load(const uint16_t* x, uint64_t i) { return __uint_as_float((uint32_t) x[i] << 16); }
+
+// a uniform in [0, 1) of (seed, i): murmur3's finalizer
+__device__ inline float uniform01(uint32_t seed, uint64_t i) {
+  uint32_t h = (uint32_t) i * 0x9E3779B1u ^ (uint32_t) (i >> 32) * 0x85EBCA77u ^ seed;
+  h ^= h >> 16, h *= 0x85EBCA6Bu, h ^= h >> 13, h *= 0xC2B2AE35u, h ^= h >> 16;
+  return (float) (h >> 8) * (1.0f / 16777216.0f);
+}
+
+// E2M1's code of x (|x| <= 6) rounded stochastically: up to the grid point above with probability its distance from
+// the one below over the step (an unbiased rounding: a gradient's, NVIDIA's NVFP4 training recipe)
+__device__ inline uint32_t e2m1_code_sr(float x, float u) {
+  constexpr float kGrid[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+  const float a = fabsf(x);
+  uint32_t i = 0;
+  while (i < 7 && a >= kGrid[i + 1]) i++;
+  if (i < 7 && u < (a - kGrid[i]) / (kGrid[i + 1] - kGrid[i])) i++;
+  return i ? (x < 0.0f ? 8u : 0u) | i : 0u;
+}
+
+// a block a token, a thread a 16: its scale, its codes packed two a byte (sr: stochastic, seeded)
+template <typename T>
+__global__ void act_kernel(const T* __restrict__ x, uint32_t xs, uint32_t cols, float gs_host,
+                           const float* __restrict__ gs_dev, uint32_t sr, uint8_t* __restrict__ q,
+                           uint8_t* __restrict__ sc) {
   const uint32_t t = blockIdx.x;
+  const float gs = gs_dev ? *gs_dev : gs_host;
   for (uint32_t b = threadIdx.x; b < cols / 16; b += blockDim.x) {
-    const float* v = x + (uint64_t) t * xs + b * 16;
-    float amax = 0.0f;
-    for (int j = 0; j < 16; j++) amax = fmaxf(amax, fabsf(v[j]));
+    const uint64_t at = (uint64_t) t * xs + b * 16;
+    float v[16], amax = 0.0f;
+    for (int j = 0; j < 16; j++) v[j] = load(x, at + j), amax = fmaxf(amax, fabsf(v[j]));
     const uint32_t s = e4m3_bits(amax / 6.0f / gs);
     const float sf = rnd::e4m3_value(s) * gs;
     sc[(uint64_t) t * (cols / 16) + b] = (uint8_t) s;
@@ -68,9 +92,24 @@ __global__ void act_kernel(const float* __restrict__ x, uint32_t xs, uint32_t co
     for (int j = 0; j < 16; j += 2) {
       const float a = sf > 0.0f ? fminf(fmaxf(v[j] / sf, -6.0f), 6.0f) : 0.0f;
       const float c = sf > 0.0f ? fminf(fmaxf(v[j + 1] / sf, -6.0f), 6.0f) : 0.0f;
-      o[j / 2] = (uint8_t) (e2m1_code(a) | e2m1_code(c) << 4);
+      const uint64_t k = (uint64_t) t * cols + b * 16 + j;
+      o[j / 2] = (uint8_t) (sr ? e2m1_code_sr(a, uniform01(sr, k)) | e2m1_code_sr(c, uniform01(sr, k + 1)) << 4
+                               : e2m1_code(a) | e2m1_code(c) << 4);
     }
   }
+}
+
+// a tensor's scale from its amax (amax / 6 / 448: its largest 16 at E4M3's top), on the device
+__global__ void amax_kernel(const uint16_t* __restrict__ x, uint64_t n, uint32_t* __restrict__ bits) {
+  float m = 0.0f;
+  for (uint64_t i = (uint64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (uint64_t) gridDim.x * blockDim.x)
+    m = fmaxf(m, fabsf(load(x, i)));
+  for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor(m, o));
+  if (threadIdx.x % 32 == 0) atomicMax(bits, __float_as_uint(m));  // (non-negative floats order as their bits)
+}
+__global__ void gs_kernel(const uint32_t* __restrict__ bits, float* __restrict__ gs) {
+  const float m = __uint_as_float(*bits);
+  *gs = m > 0.0f ? m / (6.0f * 448.0f) : 1.0f;
 }
 
 // 4 bytes' low (hi false) or high nibbles, in order, into 16 bits
@@ -92,8 +131,10 @@ template <bool GGML>
 __global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ ws,
                                                           uint32_t rows, uint32_t cols,
                                                           const uint8_t* __restrict__ aq,
-                                                          const uint8_t* __restrict__ as, uint32_t n, float scale,
-                                                          float* __restrict__ y, uint32_t ys) {
+                                                          const uint8_t* __restrict__ as, uint32_t n, float scale_host,
+                                                          const float* __restrict__ scale_dev, bool bf16,
+                                                          void* __restrict__ y, uint32_t ys) {
+  const float scale = scale_dev ? scale_host * *scale_dev : scale_host;
   __shared__ uint32_t sa[kBM * kRow], sb[kBN * kRow];
   const uint32_t tid = threadIdx.x, lane = tid % 32, warp = tid / 32, g = lane / 4, q = lane % 4;
   const uint32_t wm = warp % 4, wn = warp / 4;  // the warp's 32 tokens, its 64 rows
@@ -161,7 +202,15 @@ __global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restr
 #pragma unroll
       for (int e = 0; e < 4; e++) {
         const uint32_t t = t0 + wm * 32 + mt * 16 + g + 8 * (e / 2), row = r0 + wn * 64 + nt * 8 + 2 * q + e % 2;
-        if (t < n && row < rows) y[(uint64_t) t * ys + row] = d[mt][nt][e] * scale;
+        if (t < n && row < rows) {
+          const float v = d[mt][nt][e] * scale;
+          if (bf16) {
+            const uint32_t u = __float_as_uint(v);  // to nearest, ties to even (a finite sum)
+            ((uint16_t*) y)[(uint64_t) t * ys + row] = (uint16_t) ((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+          } else {
+            ((float*) y)[(uint64_t) t * ys + row] = v;
+          }
+        }
       }
 }
 
@@ -179,10 +228,29 @@ extern "C" bool mm_fp4_ok(void) {
 #endif
 }
 
+extern "C" bool mm_fp4_quant(const void* x, uint32_t bf16, uint32_t xs, uint32_t n, uint32_t cols, float gs,
+                             const float* gs_dev, uint32_t sr_seed, void* q, void* sc, void* stream) {
+  if (!mm_fp4_ok() || !x || !q || !sc || !n || cols % 64 || (!gs_dev && !(gs > 0.0f))) return false;
+  const hipStream_t st = launches::st(stream);
+  if (bf16)
+    act_kernel<uint16_t><<<n, 128, 0, st>>>((const uint16_t*) x, xs, cols, gs, gs_dev, sr_seed, (uint8_t*) q, (uint8_t*) sc);
+  else
+    act_kernel<float><<<n, 128, 0, st>>>((const float*) x, xs, cols, gs, gs_dev, sr_seed, (uint8_t*) q, (uint8_t*) sc);
+  return launches::ok();
+}
+
 extern "C" bool mm_fp4_act(const float* x, uint32_t xs, uint32_t n, uint32_t cols, float gs, void* q, void* sc,
                            void* stream) {
-  if (!mm_fp4_ok() || !x || !q || !sc || !n || cols % 64 || !(gs > 0.0f)) return false;
-  act_kernel<<<n, 128, 0, launches::st(stream)>>>(x, xs, cols, gs, (uint8_t*) q, (uint8_t*) sc);
+  return mm_fp4_quant(x, 0, xs, n, cols, gs, nullptr, 0, q, sc, stream);
+}
+
+extern "C" bool mm_fp4_amax(const void* x_bf16, uint64_t n, uint32_t* bits, float* gs, void* stream) {
+  if (!mm_fp4_ok() || !x_bf16 || !n || !bits || !gs) return false;
+  const hipStream_t st = launches::st(stream);
+  if (hipMemsetAsync(bits, 0, 4, st) != hipSuccess) return false;
+  const uint64_t blocks = (n + 255) / 256;
+  amax_kernel<<<blocks < 1024 ? blocks : 1024, 256, 0, st>>>((const uint16_t*) x_bf16, n, bits);
+  gs_kernel<<<1, 1, 0, st>>>(bits, gs);
   return launches::ok();
 }
 
@@ -191,17 +259,18 @@ extern "C" bool mm_fp4(const void* w, uint32_t rows, uint32_t cols, const void* 
   if (!mm_fp4_ok() || !w || !q || !sc || !y || !n || cols % 64 || rows % 8) return false;
   const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM);
   mm_kernel<true><<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) w, nullptr, rows, cols,
-                                                                   (const uint8_t*) q, (const uint8_t*) sc, n, scale, y,
-                                                                   ys);
+                                                                   (const uint8_t*) q, (const uint8_t*) sc, n, scale,
+                                                                   nullptr, false, y, ys);
   return launches::ok();
 }
 
 extern "C" bool mm_fp4_mo(const void* packed, const void* wscale, uint32_t rows, uint32_t cols, const void* q,
-                          const void* sc, uint32_t n, float scale, float* y, uint32_t ys, void* stream) {
+                          const void* sc, uint32_t n, float scale, const float* scale_dev, uint32_t bf16, void* y,
+                          uint32_t ys, void* stream) {
   if (!mm_fp4_ok() || !packed || !wscale || !q || !sc || !y || !n || cols % 64 || rows % 8) return false;
   const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM);
   mm_kernel<false><<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) packed, (const uint8_t*) wscale,
                                                                     rows, cols, (const uint8_t*) q, (const uint8_t*) sc,
-                                                                    n, scale, y, ys);
+                                                                    n, scale, scale_dev, bf16 != 0, y, ys);
   return launches::ok();
 }

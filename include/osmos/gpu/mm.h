@@ -46,9 +46,16 @@ bool mm_fp4_act(const float *x, uint32_t xs, uint32_t n, uint32_t cols, float gs
 bool mm_fp4(const void *w, uint32_t rows, uint32_t cols, const void *q, const void *sc, uint32_t n, float scale,
             float *y, uint32_t ys, void *stream);
 /* the same over ModelOpt's layout (packed [rows, cols/2] in k order, the low nibble first; E4M3 scales [rows, cols/16]
-   at wscale): the training engine's (incarnate train/fp4.py) */
+   at wscale): the training engine's (incarnate train/fp4.py). the sums times scale (and *scale_dev, a device scale,
+   when not NULL); y F32, or (bf16) BF16 rounded to nearest */
 bool mm_fp4_mo(const void *packed, const void *wscale, uint32_t rows, uint32_t cols, const void *q, const void *sc,
-               uint32_t n, float scale, float *y, uint32_t ys, void *stream);
+               uint32_t n, float scale, const float *scale_dev, uint32_t bf16, void *y, uint32_t ys, void *stream);
+/* mm_fp4_act's quantization of F32 or (bf16) BF16 rows, the tensor scale gs or the device's *gs_dev; sr_seed 0
+   nearest, else stochastic (a gradient's: unbiased), seeded */
+bool mm_fp4_quant(const void *x, uint32_t bf16, uint32_t xs, uint32_t n, uint32_t cols, float gs, const float *gs_dev,
+                  uint32_t sr_seed, void *q, void *sc, void *stream);
+/* a BF16 tensor's NVFP4 tensor scale (amax / 6 / 448) into *gs on the device (bits: a word of scratch) */
+bool mm_fp4_amax(const void *x_bf16, uint64_t n, uint32_t *bits, float *gs, void *stream);
 #ifdef __cplusplus
 }
 #endif
