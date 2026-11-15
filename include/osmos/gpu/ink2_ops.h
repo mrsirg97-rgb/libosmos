@@ -116,8 +116,9 @@ bool ink2_mtp_markov_in(const float *state, const uint16_t *w1, const int32_t *p
                         void *stream);
 bool ink2_mtp_markov_gru(const float *p, const float *inv, const float *bias, uint32_t rank, float *state,
                          float *latent, void *stream);
-bool ink2_mtp_markov_logits(const float *base, const float *corr, const float *fold_b, float cap, uint32_t n, float *out,
-                            void *stream);
+uint64_t ink2_mtp_pick_scratch(void);
+bool ink2_mtp_markov_pick(const float *base, const float *corr, const float *fold_b, float cap, uint32_t n,
+                          float *scratch, int32_t *id, float *p, void *stream);
 bool ink2_transpose_q8_0(const float *in, uint32_t rows, uint32_t cols, void *out, void *stream);
 
 #endif
@@ -242,12 +243,14 @@ ink2_mtp_attn
   visible (not causal). scores q.k / sqrt(128), each chunk of 256 keys its softmax's partial (scratch:
   ink2_mtp_attn_scratch), merged in order. out [n_q][heads][128].
 
-ink2_mtp_markov_in, _gru, _logits
+ink2_mtp_markov_in, _gru, _pick
   the Markov head's step (TokenSpeed's sample_block): vec = [state | markov_w1[*prev]] (w1 BF16 [V][rank]); with p =
   rnn_proj's [state | prev] columns . vec and inv its [hidden | features] columns' product (the step's own row): g =
-  sigmoid(p + inv + b), state = g state + (1 - g) tanh(.), latent = tanh(.) (gate, candidate, output thirds); out =
-  cap tanh((base + corr + fold_b) / cap) - the target head's logits, the fold's correction (lm_head . hidden_out:
-  corr = fold . latent) and bias, softcapped.
+  sigmoid(p + inv + b), state = g state + (1 - g) tanh(.), latent = tanh(.) (gate, candidate, output thirds); the
+  step's logits x = cap tanh((base + corr + fold_b) / cap) - the target head's, the fold's correction (lm_head .
+  hidden_out: corr = fold . latent) and bias, softcapped - never stored: *id their greatest (the lowest id among
+  equals), *p its probability 1 / sum exp(x - max), by slices a block each (scratch: ink2_mtp_pick_scratch's bytes)
+  merged in order - the same bits every run.
 
 ink2_transpose_q8_0
   out [cols][rows] = in [rows][cols] as Q8_0 (ggml's reference quantizer: a block of 32's d = amax / 127 as f16, each

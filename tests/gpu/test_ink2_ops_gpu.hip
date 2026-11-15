@@ -584,6 +584,48 @@ int main() {
     std::printf("  transpose_q8_0: [96][37] as [37][96] Q8_0, the host's bytes\n");
     hipFree(dx), hipFree(dq);
   }
+  {  // ink2_mtp_markov_pick: a Markov step's greatest and its probability against float64 on the host - past the
+     // blocks' slices (79: fewer values than blocks), the greatest in the last slice, a tie (the lowest id)
+    for (const uint32_t n : {201024u, 1000u, 79u}) {
+      std::vector<float> b(n), c(n), fb(n);
+      uint32_t r = 4242 + n;
+      for (uint32_t i = 0; i < n; i++) {
+        r = r * 1664525u + 1013904223u, b[i] = ((float) (r >> 8) / (1 << 24) - 0.5f) * 40.0f;
+        r = r * 1664525u + 1013904223u, c[i] = ((float) (r >> 8) / (1 << 24) - 0.5f) * 4.0f;
+        fb[i] = 0.25f;
+      }
+      for (int pass = 0; pass < 3; pass++) {
+        if (pass == 1) b[n - 1] = 400.0f, c[n - 1] = 0.0f;  // the last id's
+        if (pass == 2) b[n / 3] = b[n - 1], c[n / 3] = 0.0f;  // a tie: the lower id
+        float *db = dev_from(b), *dc = dev_from(c), *dfb = dev_from(fb), *dscr = dev_alloc<float>(ink2_mtp_pick_scratch() / 4);
+        int32_t* did = dev_alloc<int32_t>(1);
+        float* dp = dev_alloc<float>(1);
+        CHECK(ink2_mtp_markov_pick(db, dc, dfb, 30.0f, n, dscr, did, dp, nullptr));
+        int32_t id = -1;
+        float p = 0, p2 = 0;
+        CHECK(hipMemcpy(&id, did, 4, hipMemcpyDeviceToHost) == hipSuccess);
+        CHECK(hipMemcpy(&p, dp, 4, hipMemcpyDeviceToHost) == hipSuccess);
+        CHECK(ink2_mtp_markov_pick(db, dc, dfb, 30.0f, n, dscr, did, dp, nullptr));
+        CHECK(hipMemcpy(&p2, dp, 4, hipMemcpyDeviceToHost) == hipSuccess);
+        std::vector<double> x(n);
+        uint32_t best = 0;
+        for (uint32_t i = 0; i < n; i++) {
+          x[i] = 30.0 * std::tanh(((double) b[i] + c[i] + fb[i]) / 30.0);
+          best = x[i] > x[best] ? i : best;
+        }
+        double sum = 0;
+        for (uint32_t i = 0; i < n; i++) sum += std::exp(x[i] - x[best]);
+        const double rel = std::fabs(p - 1.0 / sum) * sum;
+        CHECK((uint32_t) id == best || (std::printf("  pick: %u values: id %d, not %u\n", n, id, best), false));
+        CHECK(rel < 1e-5 || (std::printf("  pick: %u values: p %.9g, not %.9g\n", n, p, 1.0 / sum), false));
+        CHECK(std::memcmp(&p, &p2, 4) == 0);
+        if (pass == 2) CHECK(id == (int32_t) (n / 3));
+        hipFree(db), hipFree(dc), hipFree(dfb), hipFree(dscr), hipFree(did), hipFree(dp);
+      }
+      std::printf("  markov_pick: %u values: the greatest's id (ties the lowest), p against float64 within 1e-5, the "
+                  "same bits again\n", n);
+    }
+  }
   std::printf("[test_ink2_ops_gpu] ok\n");
   return 0;
 }

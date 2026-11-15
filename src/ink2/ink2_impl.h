@@ -50,7 +50,7 @@ typedef struct Ink2MtpDev
   void *w1, *fold; /* [the head's rows][rank]: markov_w1's BF16, and lm_head . hidden_out Q8_0 */
   float *taps;     /* the step's taps [max_tokens][n_taps][n_embd] */
   float *mix, *kctx, *vctx, *x, *res, *nrm, *q, *kb, *vb, *att, *ob, *g, *u, *hf, *inv, *vec, *p, *state, *latent,
-      *corr, *base, *lg, *probs, *scr, *f_rnn;
+      *corr, *base, *lg, *probs, *scr, *f_rnn; /* lg: a Markov step's pick's scratch */
   int32_t *pos, *prev, *ids;
   void *x16;         /* the block's activations as mm reads them: a tile of its widest input */
   int32_t *overflow; /* an x16 value past f16's range (the draft's refusal, not the step's) */

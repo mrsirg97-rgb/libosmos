@@ -2,7 +2,10 @@
 // mixtures, its context caches (f16), its attention over a context and a block, its Markov steps. F32 math.
 #include <hip/hip_runtime.h>
 
+#include <climits>
 #include <cmath>
+
+#include "block.h"
 
 extern "C" {
 #include "osmos/gpu/ink2_ops.h"
@@ -129,13 +132,47 @@ __global__ void markov_gru_kernel(const float* p, const float* inv, const float*
   latent[i] = tanhf(o);
 }
 
-__global__ void markov_logits_kernel(const float* base, const float* corr, const float* fold_b, float cap, uint32_t n,
-                                     float* out) {
-  const uint32_t i = threadIdx.x + blockIdx.x * kThreads;
-  if (i >= n) return;
-  const float x = base[i] + corr[i] + fold_b[i];
-  out[i] = cap * tanhf(x / cap);
+// a block's slice of the step's logits (cap tanh((base + corr + fold_b) / cap)): its greatest (the lowest id among
+// equals), and the sum of exp(x - that) - each thread's running (its max, its sum rescaled as the max grows), then the
+// block's - into part[block] = {max, id's bits, sum}
+__global__ void pick_part_kernel(const float* base, const float* corr, const float* fold_b, float cap, uint32_t n,
+                                 float* part) {
+  __shared__ float lds[kThreads];
+  __shared__ int ldi[kThreads];
+  const uint32_t per = (n + gridDim.x - 1) / gridDim.x, lo = blockIdx.x * per, hi = lo + per < n ? lo + per : n;
+  float m = -INFINITY, sum = 0.0f;
+  int id = INT_MAX;
+  for (uint32_t i = lo + threadIdx.x; i < hi; i += kThreads) {
+    const float x = cap * tanhf((base[i] + corr[i] + fold_b[i]) / cap);
+    if (x > m)
+      sum = sum * expf(m - x) + 1.0f, m = x, id = (int) i;
+    else
+      sum += expf(x - m);
+  }
+  float bm = m;
+  const int bid = block_argmax<kThreads>(&bm, id, lds, ldi);
+  sum = block_sum<kThreads>(m == -INFINITY ? 0.0f : sum * expf(m - bm), lds);
+  if (!threadIdx.x) {
+    part[3 * blockIdx.x] = bm, part[3 * blockIdx.x + 2] = sum;
+    __builtin_memcpy(&part[3 * blockIdx.x + 1], &bid, 4);
+  }
 }
+
+// the blocks' parts merged: the greatest (the lowest id among equals) and its probability, 1 / sum exp(x - max)
+constexpr uint32_t kPickBlocks = 80;  // gfx1151's 40 CUs, two blocks each: every CU's bandwidth on the logits
+__global__ void pick_merge_kernel(const float* part, uint32_t blocks, int32_t* id, float* p) {
+  __shared__ float lds[kThreads];
+  __shared__ int ldi[kThreads];
+  const uint32_t b = threadIdx.x;
+  float m = b < blocks ? part[3 * b] : -INFINITY, s = b < blocks ? part[3 * b + 2] : 0.0f;
+  int i = INT_MAX;
+  if (b < blocks) __builtin_memcpy(&i, &part[3 * b + 1], 4);
+  float bm = m;
+  const int best = block_argmax<kThreads>(&bm, i, lds, ldi);
+  const float sum = block_sum<kThreads>(m == -INFINITY ? 0.0f : s * expf(m - bm), lds);
+  if (!threadIdx.x) *id = best, *p = 1.0f / sum;
+}
+static_assert(kPickBlocks <= kThreads, "a merge thread a block");
 
 // an output row's block of 32 (row c, values r0 .. r0 + 31 of in's column c) as ggml's Q8_0 reference quantizes it:
 // d = amax / 127 (f16), q = round(x / d) (half away from zero)
@@ -200,9 +237,13 @@ extern "C" bool ink2_mtp_markov_gru(const float* p, const float* inv, const floa
   return ok();
 }
 
-extern "C" bool ink2_mtp_markov_logits(const float* base, const float* corr, const float* fold_b, float cap, uint32_t n,
-                                       float* out, void* stream) {
-  markov_logits_kernel<<<grid(n), kThreads, 0, st(stream)>>>(base, corr, fold_b, cap, n, out);
+extern "C" uint64_t ink2_mtp_pick_scratch(void) { return 3ull * kPickBlocks * sizeof(float); }
+
+extern "C" bool ink2_mtp_markov_pick(const float* base, const float* corr, const float* fold_b, float cap, uint32_t n,
+                                     float* scratch, int32_t* id, float* p, void* stream) {
+  if (!base || !corr || !fold_b || !scratch || !id || !p || !n || n > (uint32_t) INT_MAX || !(cap > 0)) return false;
+  pick_part_kernel<<<kPickBlocks, kThreads, 0, st(stream)>>>(base, corr, fold_b, cap, n, scratch);
+  pick_merge_kernel<<<1, kThreads, 0, st(stream)>>>(scratch, kPickBlocks, id, p);
   return ok();
 }
 

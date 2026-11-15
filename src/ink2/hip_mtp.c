@@ -150,7 +150,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
       {(void **)&d->u, (uint64_t)B * F * 4}, {(void **)&d->hf, (uint64_t)B * 2 * C * 4},
       {(void **)&d->inv, (uint64_t)B * 3 * R * 4}, {(void **)&d->vec, 2 * R * 4}, {(void **)&d->p, 3 * R * 4},
       {(void **)&d->state, R * 4}, {(void **)&d->latent, R * 4}, {(void **)&d->corr, (uint64_t)VR * 4},
-      {(void **)&d->base, (uint64_t)B * VR * 4}, {(void **)&d->lg, (uint64_t)VR * 4}, {(void **)&d->probs, B * 4},
+      {(void **)&d->base, (uint64_t)B * VR * 4}, {(void **)&d->lg, ink2_mtp_pick_scratch()}, {(void **)&d->probs, B * 4},
       {(void **)&d->scr, ink2_mtp_attn_scratch(B, (uint32_t)m->n_heads, f->max_ctx)}, {(void **)&d->f_rnn, C * 4},
       {(void **)&d->pos, B * 4}, {(void **)&d->prev, 4}, {(void **)&d->ids, B * 4},
       {&d->x16, (uint64_t)MM_TILE * wide * 2}, {(void **)&d->overflow, 4},
@@ -355,9 +355,8 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
          mv_run(T_F32, d->w_sp, 3 * R, 2 * R, d->vec, 1, d->p, NULL) &&
          ink2_mtp_markov_gru(d->p, d->inv + (uint64_t)st * 3 * R, d->rnn_b, R, d->state, d->latent, NULL) &&
          mv_run(T_Q8_0, d->fold, VR, R, d->latent, 1, d->corr, NULL) &&
-         ink2_mtp_markov_logits(d->base + (uint64_t)st * VR, d->corr, d->fold_b, f->w->geo.logit_softcap, V, d->lg,
-                                NULL) &&
-         q4x_top(d->lg, V, 1, V, d->ids + st, d->probs + st, NULL);
+         ink2_mtp_markov_pick(d->base + (uint64_t)st * VR, d->corr, d->fold_b, f->w->geo.logit_softcap, V, d->lg,
+                              d->ids + st, d->probs + st, NULL);
   }
   int32_t ids[INK2_MTP_BLOCK], overflow = 0;
   float p[INK2_MTP_BLOCK];
