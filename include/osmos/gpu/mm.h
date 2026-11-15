@@ -34,6 +34,21 @@ bool mm_group(uint32_t type, const void *const *w, const int32_t *cnt, uint32_t 
               uint32_t cols, const void *x16, const uint32_t *xoff, uint32_t xts, float *y, const uint32_t *yoff,
               uint32_t ys, void *stream);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* W4A4 on the FP4 matrix cores (kernels/mm_fp4.hip, sm_120a only - mm_fp4_ok false elsewhere): x's n rows (stride
+   xs) quantized as ModelOpt's activations under the input scale gs (an E4M3 scale a 16, E2M1) into q (n x cols/2
+   bytes) and sc (n x cols/16); then y[t * ys + r] = scale * sum_c W[r, c] xq[t, c], W ggml 40's rows (an NVFP4
+   matrix, its tensor scale and the input's in `scale`). cols whole 64s, rows whole 8s */
+bool mm_fp4_ok(void);
+bool mm_fp4_act(const float *x, uint32_t xs, uint32_t n, uint32_t cols, float gs, void *q, void *sc, void *stream);
+bool mm_fp4(const void *w, uint32_t rows, uint32_t cols, const void *q, const void *sc, uint32_t n, float scale,
+            float *y, uint32_t ys, void *stream);
+#ifdef __cplusplus
+}
+#endif
+
 #endif
 
 /*
