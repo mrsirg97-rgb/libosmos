@@ -312,7 +312,9 @@ static bool experts(Ink2Forward *f, uint64_t room, const uint64_t *picks, char *
     took += b;
   }
   char perr[POOL_ERR] = "", merr[MEMBRANE_ERR] = "";
-  const uint64_t stream_room = (uint64_t)E * largest;
+  /* the stream two layers: a prompt step's holds of one and its read ahead of the next (one alone: the next one's reads
+     wait for this one's holds to end - the SSD idle under the layer's kernels) */
+  const uint64_t stream_room = 2 * (uint64_t)E * largest;
   if (ok && !((f->slots = host_slots_create(room + 2 * largest, perr)) &&
               (f->stream = host_slots_create(stream_room + 2 * largest, perr))))
     ok = ink2_fail(err, perr[0] ? perr : "inkling2: the experts' memory refused");
@@ -582,12 +584,6 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
     return false;
   for (uint32_t m = 0; P < E && m < P; m++) /* a decode's picks counted: in memory or not (the stats') */
     membrane_score(f->mem, (uint32_t)l * E + (uint32_t)f->hpick[m]);
-  for (uint32_t m = 0; next && m < P; m++)
-    if (f->hgpick[m] >= 0 && (uint32_t)f->hgpick[m] < E)
-    {
-      const uint32_t unit = (uint32_t)(l + 1) * E + (uint32_t)f->hgpick[m];
-      membrane_ahead(f->mem, unit);
-    }
   /* the pairs by expert, then pair order (a counting sort): sorted row r is pair by[r] */
   uint32_t *at = f->m_at, *by = f->m_by;
   memset(at, 0, (E + 1) * sizeof *at);
@@ -606,6 +602,13 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
     if ((r == 0 || f->hpick[by[r]] != f->hpick[by[r - 1]]) &&
         !membrane_hold(f->mem, (uint32_t)l * E + (uint32_t)f->hpick[by[r]], err))
       return false;
+  /* then the next layer's named: this layer's reads queued first, the stream's room theirs before the guess's */
+  for (uint32_t m = 0; next && m < P; m++)
+    if (f->hgpick[m] >= 0 && (uint32_t)f->hgpick[m] < E)
+    {
+      const uint32_t unit = (uint32_t)(l + 1) * E + (uint32_t)f->hgpick[m];
+      membrane_ahead(f->mem, unit);
+    }
   /* the tables, one region sent in one copy, each table's place fixed by the step's most pairs: the entries' gate, up
      and down pointers, counts, their slots' and rows' offsets (gate and up's x and y, down's); each slot's token and
      sorted row (-1: a tile's padding); each pair's sorted row and weight, each sorted row's scales */
