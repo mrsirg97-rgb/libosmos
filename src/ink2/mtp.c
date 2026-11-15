@@ -4,12 +4,12 @@
 
 #include "gguf_meta.h"
 #include "osmos/ink2/mtp.h"
+#include "osmos/model/qtype.h"
 
 /* the drafter's geometry and tensors (osmos/ink2/mtp.h), each checked */
 
 #define ARCH "inkling2_mtp"
 #define T_F32 0u
-#define T_Q8_0 8u
 #define T_BF16 30u
 
 static bool fail(char *err, const char *what, const char *why)
@@ -18,7 +18,12 @@ static bool fail(char *err, const char *what, const char *why)
   return false;
 }
 
-static bool is_mat(uint32_t t) { return t == T_BF16 || t == T_Q8_0 || t == T_F32; }
+/* a type the matvec reads (qtype.h's QTYPE_MV), its rows whole blocks */
+static bool is_mat(const GgufTensor *t)
+{
+  const QTypeInfo *q = qtype_info(t->type);
+  return q && (q->paths & QTYPE_MV) && t->dims[0] % q->values == 0;
+}
 
 /* a tensor of name, dims (ne, innermost first) and a type the role reads */
 static const GgufTensor *want(const Gguf *g, const char *name, uint64_t d0, uint64_t d1, bool mat, char *err)
@@ -32,7 +37,7 @@ static const GgufTensor *want(const Gguf *g, const char *name, uint64_t d0, uint
   const bool dims = t->dims[0] == d0 && (d1 ? t->n_dims == 2 && t->dims[1] == d1 : t->n_dims == 1);
   if (!dims)
     return fail(err, name, "not the geometry's shape"), NULL;
-  if (mat ? !is_mat(t->type) : t->type != T_F32)
+  if (mat ? !is_mat(t) : t->type != T_F32)
     return fail(err, name, mat ? "a type the matvec does not read" : "not F32"), NULL;
   return t;
 }
