@@ -545,6 +545,18 @@ class DerivedSet(unittest.TestCase):
             self.assertEqual(sha(cfg["model"]), sha(made[0]))
             self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
 
+    def test_trust_size_takes_made_set_by_bytes(self):
+        """a set made before: --trust-size takes it again by its bytes, as it does a downloaded shard - not hashed"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)  # makes it
+            with mock.patch.object(userfiles, "TRUST_FROM", 0), \
+                    mock.patch.object(userfiles, "_sha256", side_effect=AssertionError("hashed")):
+                cfg = layout.read_config(layout.lay(m, "e", models, [have], trust_size=True, abliterated=False, fetch=None))
+                with self.assertRaises(AssertionError):  # without the flag: hashed, as before
+                    layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)
+            self.assertEqual(sha(cfg["model"]), sha(made[0]))
+
     def test_refused(self):
         with tempfile.TemporaryDirectory() as d:
             have, models, m, _ = self.setup(d)
