@@ -1,0 +1,131 @@
+// NVFP4's matvec for a few tokens (mv_fp4): ggml 40's 36-byte blocks (quant.h: 4 UE4M3 scales, a 16 each, then 32
+// bytes of E2M1 - sub-block s's value j at byte 4 + 8s + j's low nibble, j + 8 its high one), R rows a warp. a warp's
+// 32 blocks of a row (1,152 bytes, 16-byte aligned: a row whole blocks of 4) read as 72 uint4s into its LDS, then each
+// lane its own block from there (a lane's 9 words: stride 9, every bank once) - a lane reading its block itself takes
+// one 36-byte stride a load, a ninth of each line used, measured 290 GB/s on a 5090 against this kernel's. x read once
+// a block for all R rows, the tensor's own scale on the sum. its sums are not mv_strided's order (a lane's
+// blocks, then the warp's tree): its own bits, every token's alone (q35's decode: DESIGN.md, "a second GPU")
+#include <hip/hip_runtime.h>
+
+#include <cstdint>
+
+#include "launch.h"
+#include "port.h"
+#include "round.h"
+
+namespace {
+
+constexpr int kBlock = 64, kBlockWords = 9, kWarps = 8;
+// E2M1's values doubled (ggml's kvalues_mxfp4), the block scale halved: every product exact. looked up from LDS,
+// not __constant__: a warp's 32 codes differ, and CUDA's constant cache serves one address at a time (the lookup
+// serialized up to 32 ways); 16 floats in 16 banks, any mix of codes one read
+constexpr float kHalfE2m1[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+
+template <int R, int NT>
+__global__ __launch_bounds__(32 * kWarps) void fp4_kernel(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols,
+                                                          const float* __restrict__ x, uint32_t xs, float* __restrict__ y,
+                                                          uint32_t ys, float scale) {
+  __shared__ float tab[16];
+  if (threadIdx.x < 16) tab[threadIdx.x] = kHalfE2m1[threadIdx.x];
+  __syncthreads();
+  const uint32_t lane = threadIdx.x % 32, r0 = (blockIdx.x * kWarps + threadIdx.x / 32) * R;
+  if (r0 >= rows) return;
+  const uint32_t nb = cols / kBlock;
+  const uint64_t row_bytes = (uint64_t) nb * kBlockWords * 4;
+  float acc[R][NT] = {};
+  // a chunk of 32 blocks a row: 72 uint4s, 3 a lane at most. the next chunk's loads issued into registers before this
+  // chunk's sums (each lane's slots unrolled: constant indices, the registers' own), staged through LDS after them
+  constexpr int kQuads = 32 * kBlockWords / 4, kPer = (kQuads + 31) / 32;
+  __shared__ uint4 stage[kWarps][R][kQuads];
+  uint4(*my)[kQuads] = stage[threadIdx.x / 32];
+  uint4 nx[R][kPer];
+#define FP4_FETCH(c0)                                                                                                  \
+  {                                                                                                                    \
+    const uint32_t quads = (nb - (c0) < 32 ? nb - (c0) : 32) * kBlockWords / 4;                                      \
+    _Pragma("unroll") for (int r = 0; r < R; r++) {                                                                  \
+      const uint4* p = (const uint4*) (w + (uint64_t) (r0 + r < rows ? r0 + r : r0) * row_bytes +                     \
+                                       (uint64_t) (c0) * kBlockWords * 4);                                            \
+      _Pragma("unroll") for (int k = 0; k < kPer; k++) if (lane + 32u * k < quads) nx[r][k] = p[lane + 32 * k];      \
+    }                                                                                                                  \
+  }
+  FP4_FETCH(0u);
+  for (uint32_t b0 = 0; b0 < nb; b0 += 32) {
+    const uint32_t b = b0 + lane, quads = (nb - b0 < 32 ? nb - b0 : 32) * kBlockWords / 4;
+#pragma unroll
+    for (int r = 0; r < R; r++)
+#pragma unroll
+      for (int k = 0; k < kPer; k++)
+        if (lane + 32u * k < quads) my[r][lane + 32 * k] = nx[r][k];
+    osmos_wave_barrier();
+    if (b0 + 32 < nb) FP4_FETCH(b0 + 32);
+    uint32_t q[R][kBlockWords];
+#pragma unroll
+    for (int r = 0; r < R; r++) {
+      const uint32_t* sw = (const uint32_t*) my[r] + (b < nb ? lane : 0) * kBlockWords;
+#pragma unroll
+      for (int k = 0; k < kBlockWords; k++) q[r][k] = sw[k];
+    }
+    osmos_wave_barrier();
+    if (b >= nb) continue;
+#pragma unroll
+    for (int s = 0; s < 4; s++) {  // sub-block s: values 16 s .. 16 s + 15 of the block
+      float xv[NT][16];
+#pragma unroll
+      for (int t = 0; t < NT; t++) {
+        const float4* xp = (const float4*) (x + (uint64_t) t * xs + (uint64_t) b * kBlock + 16 * s);
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+          const float4 v = xp[k];
+          xv[t][4 * k] = v.x, xv[t][4 * k + 1] = v.y, xv[t][4 * k + 2] = v.z, xv[t][4 * k + 3] = v.w;
+        }
+      }
+#pragma unroll
+      for (int r = 0; r < R; r++) {
+        const float d = rnd::ue4m3_value(q[r][0] >> (8 * s) & 0xFFu) * 0.5f;
+        const uint32_t lo = q[r][1 + 2 * s], hi = q[r][2 + 2 * s];  // bytes 4 + 8s .. 4 + 8s + 7
+        float part[NT] = {};
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+          const uint32_t byte = (j < 4 ? lo >> (8 * j) : hi >> (8 * (j - 4))) & 0xFFu;
+          const float a = tab[byte & 0xF], c = tab[byte >> 4];
+#pragma unroll
+          for (int t = 0; t < NT; t++) part[t] = __fmaf_rn(a, xv[t][j], __fmaf_rn(c, xv[t][j + 8], part[t]));
+        }
+#pragma unroll
+        for (int t = 0; t < NT; t++) acc[r][t] = __fmaf_rn(d, part[t], acc[r][t]);
+      }
+    }
+  }
+#pragma unroll
+  for (int r = 0; r < R; r++)
+#pragma unroll
+    for (int t = 0; t < NT; t++) {
+      float v = acc[r][t];
+#pragma unroll
+      for (int o = 16; o > 0; o >>= 1) v += __shfl_xor(v, o);
+      if (lane == 0 && r0 + r < rows) y[(uint64_t) t * ys + r0 + r] = v * scale;
+    }
+}
+
+template <int R, int NT>
+bool run(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, float scale,
+         void* stream) {
+  const uint32_t warps = (rows + R - 1) / R;
+  fp4_kernel<R, NT><<<(warps + kWarps - 1) / kWarps, 32 * kWarps, 0, (hipStream_t) stream>>>(
+      (const uint8_t*) w, rows, cols, x, xs, y, ys, scale);
+  return hipGetLastError() == hipSuccess;
+}
+
+}  // namespace
+
+// y[t * ys + r] = scale * sum_c W[r, c] x[t * xs + c], n 1 .. 4 tokens; cols whole 64-value blocks, x 16-byte aligned
+extern "C" bool mv_fp4(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, uint32_t n, float* y,
+                       uint32_t ys, float scale, void* stream) {
+  if (!w || !x || !y || !rows || !cols || cols % kBlock || xs % 4 || n < 1 || n > 4) return false;
+  switch (n) {
+    case 1: return run<4, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
+    case 2: return run<2, 2>(w, rows, cols, x, xs, y, ys, scale, stream);
+    case 3: return run<1, 3>(w, rows, cols, x, xs, y, ys, scale, stream);
+    default: return run<1, 4>(w, rows, cols, x, xs, y, ys, scale, stream);
+  }
+}
