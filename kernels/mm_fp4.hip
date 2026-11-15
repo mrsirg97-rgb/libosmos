@@ -81,6 +81,10 @@ __global__ void act_kernel(const T* __restrict__ x, uint32_t xs, uint32_t cols, 
                            uint8_t* __restrict__ sc) {
   const uint32_t t = blockIdx.x;
   const float gs = gs_dev ? *gs_dev : gs_host;
+  // the stream salted with the scale when the device made it (a gradient's amax): each call its own stream, a
+  // function of its values, not of the order the calls ran in (a pipelined backward's two threads); never 0, which
+  // means nearest
+  sr = sr && gs_dev ? (sr ^ __float_as_uint(gs) * 0x9E3779B1u) | 1u : sr;
   for (uint32_t b = threadIdx.x; b < cols / 16; b += blockDim.x) {
     const uint64_t at = (uint64_t) t * xs + b * 16;
     float v[16], amax = 0.0f;
