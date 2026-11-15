@@ -75,6 +75,7 @@ _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens withi
 /* the logits' rows a step keeps at most: a prompt's last row, a decode's or a drafted round's every row, each
    --parallel lane's - 1,024 x the vocabulary's 201,024 F32 0.77 GiB (a step's every row at 8,192: 6.1 GiB) */
 #define INK2_LOGIT_ROWS 1024
+#define INK2_DRAFT_CUM_MIN 0.7f
 
 /* INK2_PROFILE's round accounting (a measurement's): the steps' time by their tokens (1 .. 16, then more), the
    drafter's seeds and drafts and the drafts they gave, printed at e_destroy */
@@ -262,8 +263,12 @@ static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ER
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                    char err[OSMOS_ERR])
 {
-  const char *cap = getenv("INK2_DRAFT_MAX"); /* (a measurement's: the drafts a round at most) */
-  const uint32_t most = cap && atoi(cap) > 0 && (uint32_t)atoi(cap) < e_block(p) ? (uint32_t)atoi(cap) : e_block(p);
+  /* a verified token reads its own experts (~0.4-0.6 of a step's), not the engine's ~free one: a round ends at
+     a higher product of confidences than the engine's floor - 0.7 measured best (p2 11.3 -> 13.1 tok/s, plain
+     7.5; p1 10.2 -> 11.4-11.9, plain 9.2; 0.5 and 0.8 below it) */
+  if (cum_min < INK2_DRAFT_CUM_MIN)
+    cum_min = INK2_DRAFT_CUM_MIN;
+  const uint32_t most = e_block(p);
   const double t0 = rp_on() ? now_s() : 0;
   const int got = ink2_seq_draft(((Eng *)p)->f, s, y, most, conf_min, cum_min, drafts, conf, err);
   if (rp_on())
