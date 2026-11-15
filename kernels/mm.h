@@ -715,6 +715,7 @@ __global__ __launch_bounds__(kWave* W) void group_tile_kernel(const uint8_t* con
   const uint32_t per = rows / kTile, total = per * n_mat, rb = cols / B::values * B::bytes;
   for (uint32_t t = blockIdx.x; t < total; t += gridDim.x) {
     const uint32_t m = t / per, row0 = (t % per) * kTile, n = (uint32_t) cnt[m];
+    if (!n) continue;  // an entry of no tokens: its weights never read (a caller's table may hold none: NULL)
     const __amdgpu_buffer_rsrc_t rs =
         __builtin_amdgcn_make_buffer_rsrc((void*) (w[m] + (uint64_t) row0 * rb), 0, (int) (kTile * rb), kBufWord3);
     const _Float16* xb = x16 + xoff[m] + x16_at(col, 0, xts);

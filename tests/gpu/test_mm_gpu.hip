@@ -201,9 +201,32 @@ static void shape(const Gguf* g, const Shape& s) {
         CHECK(mm_group(t->type, dw, dc, 1, (uint32_t) n, rows, cols, x16b, dx, cols, yg, dy, rows, nullptr));
         CHECK(host_of(yg, (size_t) n * rows) == std::vector<float>(yr.begin(), yr.begin() + (size_t) n * rows));
       }
+      {  // an entry of no tokens (a caller's table: NULL weights) beside the matrix: never read, the matrix's bits
+        const void** dw2;
+        int32_t* dc2;
+        uint32_t *dx2, *dy2;
+        CHECK(hipMalloc(&dw2, 2 * sizeof(void*)) == hipSuccess && hipMalloc(&dc2, 8) == hipSuccess &&
+              hipMalloc(&dx2, 8) == hipSuccess && hipMalloc(&dy2, 8) == hipSuccess);
+        const void* wp2[2] = {nullptr, w};
+        const uint32_t zeros[2] = {0, 0};
+        CHECK(hipMemcpy(dw2, wp2, sizeof wp2, hipMemcpyHostToDevice) == hipSuccess &&
+              hipMemcpy(dx2, zeros, 8, hipMemcpyHostToDevice) == hipSuccess &&
+              hipMemcpy(dy2, zeros, 8, hipMemcpyHostToDevice) == hipSuccess);
+        for (int32_t n : {1, 5}) {
+          const int32_t c2[2] = {0, n};
+          CHECK(hipMemcpy(dc2, c2, 8, hipMemcpyHostToDevice) == hipSuccess &&
+                hipMemset(yg, 0xff, (size_t) 128 * rows * 4) == hipSuccess);
+          CHECK(mm_group(t->type, dw2, dc2, 2, (uint32_t) n, rows, cols, x16b, dx2, cols, yg, dy2, rows, nullptr));
+          CHECK(hipDeviceSynchronize() == hipSuccess);
+          CHECK(host_of(yg, (size_t) n * rows) == std::vector<float>(yr.begin(), yr.begin() + (size_t) n * rows));
+        }
+        CHECK(hipFree(dw2) == hipSuccess && hipFree(dc2) == hipSuccess && hipFree(dx2) == hipSuccess &&
+              hipFree(dy2) == hipSuccess);
+      }
       CHECK(hipFree(dw) == hipSuccess && hipFree(dc) == hipSuccess && hipFree(dx) == hipSuccess &&
             hipFree(dy) == hipSuccess && hipFree(yg) == hipSuccess);
-      std::printf("  %s: mm_group at 1 / 2 / 5 / 16 / 24 / 37 / 64 / 100 / 128 tokens, mm_run's bits\n", s.tensor);
+      std::printf("  %s: mm_group at 1 / 2 / 5 / 16 / 24 / 37 / 64 / 100 / 128 tokens, mm_run's bits; an empty NULL "
+                  "entry beside it never read\n", s.tensor);
     }
     CHECK(hipFree(xb) == hipSuccess && hipFree(yb) == hipSuccess && hipFree(x16b) == hipSuccess);
   }
