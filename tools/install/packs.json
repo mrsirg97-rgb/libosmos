@@ -153,10 +153,10 @@
     "npu-qwen": {"release": "v0.7.0", "path": "osmos-npu-qwen-0.7.0.tar.gz", "bytes": 56637,
                 "sha256": "fc5ed01443adee9b5f4579a2ddc15948af0bbf3fde48fa941cb7fc906fd48e21"}
   },
-  "aliases": {"osmos-evo-a": "osmos-evo"},
+  "aliases": {"osmos-evo": "osmos-evo-1017", "osmos-evo-a": "osmos-evo-1017"},
   "packs": {
-    "osmos-evo": {
-      "title": "DeepSeek-V4.1-Flash-1017 osmos-evo (the default): halfway from UD-IQ1_M's quality to UD-IQ2_XXS's, faster than either, 1M context (shorter: --ctx 512k)", "quality": {"wiki_kld": 0.1578, "agent_kld": 0.0422},
+    "osmos-evo-1017": {
+      "title": "DeepSeek-V4.1-Flash-1017 osmos-evo-1017 (the default): halfway from UD-IQ1_M's quality to UD-IQ2_XXS's, faster than either, 1M context (shorter: --ctx 512k)", "quality": {"wiki_kld": 0.1578, "agent_kld": 0.0422},
       "shards": ["evo-a2-1", "evo-a2-2", "evo-a2-3", "evo-a2-4"],
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m", "npu": "npu-ds",

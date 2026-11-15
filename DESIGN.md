@@ -4041,6 +4041,46 @@ group at a time, wiki10k rows 2048 .. 6142 against the reference: A 0.31968, UD 
 the groups add (the five 0.0320 of 0.0343; the halves 0.0128 of 0.0121). the loss is in the middle-late layers, the
 first ten none of it.
 
+**the recipe, scored** (wiki10k's working rows; the halves: the sweep's rows, then the ones it never saw): A
++0.0222 (+0.0343 / +0.0100); A with 30-34's downs UD-IQ1_S's again +0.0177 (+0.0256 / **+0.0098**) - the gain all on
+the sweep's own rows, fitted to them; with 25-34's +0.0138 (+0.0194 / **+0.0082**, top-1 84.96%), 159.2 GB: real on
+the unseen half. its attention and head to Q5_K by GPTQ (32,768 tokens of the operator's sessions through it,
+sessions 4-23 of calib_rig.py's 78 - the hold-out none of them; the pack's own values the target, Q6_K / Q8_0):
++0.0152 (+0.0220 / +0.0085), top-1 85.09%, 158.2 GB, ~1 GB less read a token - the finalist, osmos-evo-inkling.
+
+**a decode's attention** (osmos/gpu/ink2_ops.h ink2_fa). one query left a full layer's 8 KV heads 8 blocks, each
+every key tile in turn: 51 ms at 64K, 479 at 512K (ink2_fabench DECODE=1). a query's keys are now cut at absolute
+multiples of 256 (pos0: key 0's position), each unit its own online softmax folded in order by one fold
+(fa_fold_coef): a prompt folds unit by unit in registers, a decode runs a block a unit and KV head and the fold kernel
+after - the same units and fold, so the same bits, the split speed alone. with 16-byte f16 loads: 3.6 ms at 64K, 33
+at 512K, a sliding layer 0.1 (a token's attention ~33 ms at 64K, ~6 at 4K). the keys and values are cached f16 -
+the values ink2_fa rounds them to as it loads - so half the memory (8.6 GB a sequence at 512K) and the same bits.
+
+**the drafter** (src/ink2/hip_mtp.c). the checkpoint's mtp.safetensors, beside its shards' index (neither our
+reference nor unsloth's GGUF carried it): DSpark, 5 dense layers (4 sliding), blocks of 8, a rank-256 RNN Markov
+head, fed the target's taps - h entering layers 5, 11 .. 41 and the final normed hidden. transformers has no forward
+for it; TokenSpeed's inkling2_mtp.py does, held in PyTorch by ink2_mtp_oracle.py; its conventions probed (the
+context before the anchor, the block not causal: 2.80 accepted of 7 on 20 anchors against 2.20 causal and 2.40 with
+the anchor's own taps). the GPU's drafts are the oracle's at every anchor compared; through osmos-serve, three chats
+drafted and plain the same tokens, 65-74% of drafts accepted on the model's own answers (the wiki text's spacing
+drafts poorly: 1.33 of 7).
+
+**why drafting barely paid, and what changed it.** a verify step's tokens each bring their experts: 7 tokens ~5x a
+token's distinct experts, so ~5x its expert bytes and misses - and Inkling's token is ~75% experts (no shared expert;
+DeepSeek's dense share is larger, read once for all of a verify's tokens). measured on our pack (a 90 GiB room, the
+Q8_0 drafter): a plain step 106 ms, a verify step 530 - break-even at every block length (1 .. 7 drafts). two fixes:
+- **the experts a launch a token count**: rows_of computes NT sums for every entry, storing the live, so in a launch
+  of 4 an entry of 1 paid 4 (mvsweep ink2: IQ1_S 214 / 430 / 545 us at 1 / 4 / 8 tokens, 10 experts). entries
+  grouped by count, a launch each: a verify's expert kernels 304 -> 174 ms.
+- **the routing's copies through pinned memory**, queued, one wait a layer (four synchronous round trips before).
+drafted 105 tokens: 11.8 -> 8.7 -> 7.9 s against 10.6 plain (13.3 against 9.9 tok/s), the same tokens.
+
+**where a plain token goes** (106 ms; rocprofv3 over 40 steps): the GPU busy 74 ms of a 125 ms traced step - the
+rest the host's routing (~0.5 ms a layer) and the SSD's misses (~19 ms: ~150 GB of experts, a 90 GiB room). the
+experts' kernels are bound by values decoded (~500 G values/s at one token whatever the type: IQ1_S 97 GB/s, IQ4_XS
+217), ~12 G values a token; the dense 2.3 GB read at ~200 GB/s but in ~2,000 launches a token. the dense Q5_K
+repacked at upload (Q5_KR, DeepSeek's: 5-25% at Inkling's shapes, the same bits).
+
 ### 0.6.9: a long prompt's steps in memory the expert cache lends (2026-11-12, low-power)
 
 **why large steps.** a prompt step's routed experts are held for the step; each is read and decoded once for all of
