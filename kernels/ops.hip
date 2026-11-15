@@ -1,5 +1,6 @@
 // ops (include/osmos/gpu/ops.h): the forward's small steps, each as ref.py computes it, in F32
 #include <cmath>
+#include "port.h"
 
 #include "block.h"
 #include "launch.h"
@@ -531,9 +532,9 @@ __global__ void wait_kernel(const uint32_t* flag, uint32_t value) {
   constexpr uint32_t kFailed = 0x80000000u;
   constexpr int kNap = 2;  // s_sleep's units (64 clocks each) between looks
   for (;;) {
-    const uint32_t v = __hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
+    const uint32_t v = osmos_load_acquire_system(flag);
     if ((v & ~kFailed) == value) break;
-    __builtin_amdgcn_s_sleep(kNap);
+    osmos_sleep(kNap);
   }
 }
 

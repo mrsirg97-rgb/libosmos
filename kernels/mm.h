@@ -3,6 +3,7 @@
 // (f32 <- f16, 16 x 16 x 16) accumulating against the tokens' f16 activations. a column's results are the same bits
 // whatever the other columns hold (measured: test_mm_gpu), so a token's are whatever it is batched with.
 #pragma once
+#include "port.h"
 #include "block.h"
 #include "quant.h"
 
@@ -66,8 +67,8 @@ constexpr bool kPipe = CT > 1 && G <= 2;
 // 2026-11-09, two runs): Q4_K at its 128 x 8 x 8 103-107 -> 78-80 us, Q5_1 111 -> 72-75; a 512-token prompt 247 ->
 // 409 tok/s, its ids' hash the same
 template <quant::Type T>
-constexpr bool kRegA = T == quant::kQ5_K || T == quant::kQ5_KR || T == quant::kQ6_K || T == quant::kQ8_0 ||
-                       T == quant::kIQ4_NL || T == quant::kIQ4_XS || T == quant::kQ4_K || T == quant::kQ5_1;
+constexpr bool kRegA = !osmos_cuda && (T == quant::kQ5_K || T == quant::kQ5_KR || T == quant::kQ6_K || T == quant::kQ8_0 ||
+                       T == quant::kIQ4_NL || T == quant::kIQ4_XS || T == quant::kQ4_K || T == quant::kQ5_1);
 template <quant::Type T, class S>
 constexpr bool kRegAShape = kRegA<T> && !(T == quant::kQ6_K && S::kSlab < 128);
 __device__ inline h8 lane_other_half(h8 v) {  // lane l ^ 16's 8 halves
@@ -124,12 +125,13 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
   const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
   _Float16* lds = lds_all + wave * kTile * S::kRowLds;
   const int tiles = (int) ((n - c0 + kTile - 1) / kTile) < CT ? (int) ((n - c0 + kTile - 1) / kTile) : CT;
-  const _Float16* xb[CT];  // each tile's fragments of this lane: its column, a step kFrag on
-  for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
+  const _Float16* xb[CT];  // each tile's fragments: a step kFrag on (the lane's column osmos_load_b's)
+  for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile, 0, xts);
   f8 acc[CT] = {};
   if constexpr (CT == 1 && kRegAShape<T, S>) {  // the A operand straight from the decode (kRegA)
     for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
-      h16 a[G], bx[G];
+      h16 a[G];
+      osmos_fb bx[G];
 #pragma unroll
       for (int g = 0; g < G; g++) {
         const uint32_t k = k0 / quant::kChunk + 2 * g + half;  // this lane's chunk of the step: the even, or the odd
@@ -139,8 +141,8 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
         for (int j = 0; j < quant::kChunk; j++)
           a[g][j] = half ? theirs[j] : mine[j], a[g][quant::kChunk + j] = half ? mine[j] : theirs[j];
       }
-      for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
-      for (int g = 0; g < G; g++) acc[0] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bx[g], acc[0]);
+      for (int g = 0; g < G; g++) bx[g] = osmos_load_b(xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
+      for (int g = 0; g < G; g++) acc[0] = osmos_mma(a[g], bx[g], acc[0]);
     }
   } else
   for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
@@ -171,18 +173,18 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
         *(h8*) (lds + r * S::kRowLds + c * quant::kChunk) = hv;  // 16 bytes, aligned: kRowLds * 2 a multiple of 16
       }
     }
-    __builtin_amdgcn_wave_barrier();  // the wave's LDS in order: its writes, then its reads
-    h16 a[G];
-    for (int g = 0; g < G; g++) a[g] = *(const h16*) (lds + col * S::kRowLds + g * kTile);
-    __builtin_amdgcn_wave_barrier();
+    osmos_wave_barrier();  // the wave's LDS in order: its writes, then its reads
+    osmos_fa a[G];
+    for (int g = 0; g < G; g++) a[g] = osmos_load_a(lds + g * kTile, S::kRowLds);
+    osmos_wave_barrier();
     if (kPipe<G, CT> && tiles == CT) {  // every tile real: the next tile's x loaded under this one's WMMAs
-      h16 bc[G], bn[G];
-      for (int g = 0; g < G; g++) bc[g] = *(const h16*) (xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
+      osmos_fb bc[G], bn[G];
+      for (int g = 0; g < G; g++) bc[g] = osmos_load_b(xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
 #pragma unroll
       for (int ct = 0; ct < CT; ct++) {
         if (ct + 1 < CT)
-          for (int g = 0; g < G; g++) bn[g] = *(const h16*) (xb[ct + 1] + (uint64_t) (k0 / kTile + g) * kFrag);
-        for (int g = 0; g < G; g++) acc[ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bc[g], acc[ct]);
+          for (int g = 0; g < G; g++) bn[g] = osmos_load_b(xb[ct + 1] + (uint64_t) (k0 / kTile + g) * kFrag);
+        for (int g = 0; g < G; g++) acc[ct] = osmos_mma(a[g], bc[g], acc[ct]);
         if (ct + 1 < CT)
           for (int g = 0; g < G; g++) bc[g] = bn[g];
       }
@@ -190,9 +192,9 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
 #pragma unroll
       for (int ct = 0; ct < CT; ct++)
         if (CT == 1 || ct < tiles) {  // the whole wave: past the tokens, nothing
-          h16 bx[G];
-          for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
-          for (int g = 0; g < G; g++) acc[ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bx[g], acc[ct]);
+          osmos_fb bx[G];
+          for (int g = 0; g < G; g++) bx[g] = osmos_load_b(xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
+          for (int g = 0; g < G; g++) acc[ct] = osmos_mma(a[g], bx[g], acc[ct]);
         }
   }
   float* part = (float*) lds_all;
@@ -204,17 +206,17 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
     __syncthreads();
     if (CT == 1 && wave != 0 && !kSpread) return;
     if (wave == 0 || kSpread) {
-      const uint32_t t = c0 + ct * kTile + col;
       for (int j = kSpread ? wave : 0; j < 8; j += kSpread ? S::kWaves : 1) {
+        const uint32_t t = c0 + ct * kTile + osmos_acc_col(j);
         float s = part[j * kWave + lane];
         for (int v = 1; v < S::kWaves; v++) s += part[(v * 8 + j) * kWave + lane];
         if constexpr (E) {
           const float u = s * ep.scale;
           s = u / (1.0f + expf(-u));
-          if (t < n) x16_put(ep.x16, t, row0 + 2 * j + half, ep.cols, s, ep.overflow);
+          if (t < n) x16_put(ep.x16, t, row0 + osmos_acc_row(j), ep.cols, s, ep.overflow);
         }
         if constexpr (__is_same(Take, StoreY)) {
-          if (t < n) y[(uint64_t) t * ys + row0 + 2 * j + half] = s;
+          if (t < n) y[(uint64_t) t * ys + row0 + osmos_acc_row(j)] = s;
         } else {
           take(ct, j, t, s);
         }
@@ -245,13 +247,13 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
   float* y = blockIdx.y ? y1 : y0;
   const uint32_t row0 = blockIdx.x * BM, c0 = blockIdx.z * BN;
   if (row0 >= rows) return;  // the whole block
-  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  const int wave = threadIdx.x / kWave;
   const int wr = wave / WC, wc = wave % WC;
   const _Float16* xb[RN];
   bool live[RN];
   for (int j = 0; j < RN; j++) {
     const uint32_t t0 = c0 + (wc * RN + j) * kTile;
-    live[j] = t0 < n, xb[j] = x16 + x16_at(t0 + col, 0, cols);
+    live[j] = t0 < n, xb[j] = x16 + x16_at(t0, 0, cols);
   }
   f8 run[RM][RN], acc[RM][RN];
   const uint32_t slabs = cols / SL;  // >= W (the launch's): every partition a slab at least
@@ -293,12 +295,13 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
     const _Float16* lds = lds2[cur];
 #pragma unroll
     for (int g = 0; g < G; g++) {
-      h16 a[RM], b[RN];
-      for (int i = 0; i < RM; i++) a[i] = *(const h16*) (lds + ((wr * RM + i) * kTile + col) * RL + g * kTile);
-      for (int j = 0; j < RN; j++) b[j] = *(const h16*) (xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
+      osmos_fa a[RM];
+      osmos_fb b[RN];
+      for (int i = 0; i < RM; i++) a[i] = osmos_load_a(lds + (wr * RM + i) * kTile * RL + g * kTile, RL);
+      for (int j = 0; j < RN; j++) b[j] = osmos_load_b(xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
       for (int j = 0; j < RN; j++)
         if (live[j])
-          for (int i = 0; i < RM; i++) acc[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[i], b[j], acc[i][j]);
+          for (int i = 0; i < RM; i++) acc[i][j] = osmos_mma(a[i], b[j], acc[i][j]);
     }
     if (!more_p) {  // the partition's sum done: into the running sum, the next from zero
       for (int i = 0; i < RM; i++)
@@ -314,15 +317,15 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
     __syncthreads();
     cur ^= 1, p = np, sl = nsl;
   }
-  for (int j = 0; j < RN; j++) {
-    const uint32_t t = c0 + (wc * RN + j) * kTile + col;
-    if (t >= n) continue;
+  for (int j = 0; j < RN; j++)
     for (int i = 0; i < RM; i++) {
       const uint32_t r = row0 + (wr * RM + i) * kTile;
       if (r >= rows) continue;
-      for (int e = 0; e < 8; e++) y[(uint64_t) t * ys + r + 2 * e + half] = run[i][j][e];
+      for (int e = 0; e < 8; e++) {
+        const uint32_t t = c0 + (wc * RN + j) * kTile + osmos_acc_col(e);
+        if (t < n) y[(uint64_t) t * ys + r + osmos_acc_row(e)] = run[i][j][e];
+      }
     }
-  }
 }
 
 // RM row tiles a wave, a multi-tile step (the experts' prompt-sized matmul): tile's partition a wave (slabs w, w + W,
@@ -343,11 +346,11 @@ __device__ __attribute__((always_inline)) inline void tile_rm(const uint8_t* __r
   static_assert(CT > 1 && RM > 1, "tile's own for a column tile or a row tile");
   constexpr int SL = S::kSlab, G = SL / kTile, CPR = SL / quant::kChunk, CH = RM * S::kLane;
   constexpr int RN_ = run_chunks<T, CPR, CH>();
-  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave;
   _Float16* lds = lds_all + wave * RM * kTile * S::kRowLds;
   const int tiles = (int) ((n - c0 + kTile - 1) / kTile) < CT ? (int) ((n - c0 + kTile - 1) / kTile) : CT;
   const _Float16* xb[CT];
-  for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile + col, 0, xts);
+  for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile, 0, xts);
   f8 acc[RM][CT] = {};
   for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
 #pragma unroll
@@ -358,20 +361,20 @@ __device__ __attribute__((always_inline)) inline void tile_rm(const uint8_t* __r
       quant::decode_hn<T, RN_>(quant::at<T>(w, row0 + r, cols, k0 / quant::kChunk + c, &kk), kk, hv);
       for (int u = 0; u < RN_; u++) *(h8*) (lds + r * S::kRowLds + (c + u) * quant::kChunk) = hv[u];
     }
-    __builtin_amdgcn_wave_barrier();
-    h16 a[RM][G];
+    osmos_wave_barrier();
+    osmos_fa a[RM][G];
     for (int rm = 0; rm < RM; rm++)
-      for (int g = 0; g < G; g++) a[rm][g] = *(const h16*) (lds + (rm * kTile + col) * S::kRowLds + g * kTile);
-    __builtin_amdgcn_wave_barrier();
+      for (int g = 0; g < G; g++) a[rm][g] = osmos_load_a(lds + rm * kTile * S::kRowLds + g * kTile, S::kRowLds);
+    osmos_wave_barrier();
     if (PIPE && kPipe<G, CT> && tiles == CT) {  // every tile real: the next tile's x loaded under this one's WMMAs
-      h16 bc[G], bn[G];
-      for (int g = 0; g < G; g++) bc[g] = *(const h16*) (xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
+      osmos_fb bc[G], bn[G];
+      for (int g = 0; g < G; g++) bc[g] = osmos_load_b(xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
 #pragma unroll
       for (int ct = 0; ct < CT; ct++) {
         if (ct + 1 < CT)
-          for (int g = 0; g < G; g++) bn[g] = *(const h16*) (xb[ct + 1] + (uint64_t) (k0 / kTile + g) * kFrag);
+          for (int g = 0; g < G; g++) bn[g] = osmos_load_b(xb[ct + 1] + (uint64_t) (k0 / kTile + g) * kFrag);
         for (int rm = 0; rm < RM; rm++)
-          for (int g = 0; g < G; g++) acc[rm][ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[rm][g], bc[g], acc[rm][ct]);
+          for (int g = 0; g < G; g++) acc[rm][ct] = osmos_mma(a[rm][g], bc[g], acc[rm][ct]);
         if (ct + 1 < CT)
           for (int g = 0; g < G; g++) bc[g] = bn[g];
       }
@@ -379,10 +382,10 @@ __device__ __attribute__((always_inline)) inline void tile_rm(const uint8_t* __r
 #pragma unroll
       for (int ct = 0; ct < CT; ct++)
         if (ct < tiles) {
-          h16 bx[G];
-          for (int g = 0; g < G; g++) bx[g] = *(const h16*) (xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
+          osmos_fb bx[G];
+          for (int g = 0; g < G; g++) bx[g] = osmos_load_b(xb[ct] + (uint64_t) (k0 / kTile + g) * kFrag);
           for (int rm = 0; rm < RM; rm++)
-            for (int g = 0; g < G; g++) acc[rm][ct] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[rm][g], bx[g], acc[rm][ct]);
+            for (int g = 0; g < G; g++) acc[rm][ct] = osmos_mma(a[rm][g], bx[g], acc[rm][ct]);
         }
   }
   float* part = (float*) lds_all;
@@ -394,12 +397,12 @@ __device__ __attribute__((always_inline)) inline void tile_rm(const uint8_t* __r
       for (int j = 0; j < 8; j++) part[((wave * RM + rm) * 8 + j) * kWave + lane] = acc[rm][ct][j];
     __syncthreads();
     if (wave == 0) {
-      const uint32_t t = c0 + ct * kTile + col;
       for (int rm = 0; rm < RM; rm++)
         for (int j = 0; j < 8; j++) {
+          const uint32_t t = c0 + ct * kTile + osmos_acc_col(j);
           float s = part[(rm * 8 + j) * kWave + lane];
           for (int v = 1; v < S::kWaves; v++) s += part[((v * RM + rm) * 8 + j) * kWave + lane];
-          if (t < n) y[(uint64_t) t * ys + row0 + rm * kTile + 2 * j + half] = s;
+          if (t < n) y[(uint64_t) t * ys + row0 + rm * kTile + osmos_acc_row(j)] = s;
         }
     }
   }
@@ -450,13 +453,13 @@ __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* _
   float* y = ya + yoff[m];
   const uint32_t row0 = blockIdx.x * BM, c0 = blockIdx.z * BN;
   if (row0 >= rows || c0 >= n) return;  // the whole block: past the matrix's rows or its tokens
-  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  const int wave = threadIdx.x / kWave;
   const int wr = wave / WC, wc = wave % WC;
   const _Float16* xb[RN];
   bool live[RN];
   for (int j = 0; j < RN; j++) {
     const uint32_t t0 = c0 + (wc * RN + j) * kTile;
-    live[j] = t0 < n, xb[j] = x16 + x16_at(t0 + col, 0, xts);
+    live[j] = t0 < n, xb[j] = x16 + x16_at(t0, 0, xts);
   }
   f8 run[RM][RN], acc[RM][RN];
   const uint32_t slabs = cols / SL;  // >= W (the launch's): every partition a slab at least
@@ -543,12 +546,13 @@ __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* _
         const uint32_t k0 = ((uint32_t) p + (uint32_t) (q + i) * W) * SL;
 #pragma unroll
         for (int g = 0; g < G; g++) {
-          h16 a[RM], b[RN];
-          for (int r = 0; r < RM; r++) a[r] = *(const h16*) (lds + ((wr * RM + r) * kTile + col) * RL + i * SL + g * kTile);
-          for (int j = 0; j < RN; j++) b[j] = *(const h16*) (xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
+          osmos_fa a[RM];
+          osmos_fb b[RN];
+          for (int r = 0; r < RM; r++) a[r] = osmos_load_a(lds + (wr * RM + r) * kTile * RL + i * SL + g * kTile, RL);
+          for (int j = 0; j < RN; j++) b[j] = osmos_load_b(xb[j] + (uint64_t) (k0 / kTile + g) * kFrag);
           for (int j = 0; j < RN; j++)
             if (live[j])
-              for (int r = 0; r < RM; r++) acc[r][j] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[r], b[j], acc[r][j]);
+              for (int r = 0; r < RM; r++) acc[r][j] = osmos_mma(a[r], b[j], acc[r][j]);
         }
       }
     if (!more_p) {  // the partition's sum done: into the running sum, the next from zero
@@ -566,15 +570,15 @@ __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* _
     __syncthreads();
     cur ^= 1, p = np, q = nq, ns = nns;
   }
-  for (int j = 0; j < RN; j++) {
-    const uint32_t t = c0 + (wc * RN + j) * kTile + col;
-    if (t >= n) continue;
+  for (int j = 0; j < RN; j++)
     for (int i = 0; i < RM; i++) {
       const uint32_t r = row0 + (wr * RM + i) * kTile;
       if (r >= rows) continue;
-      for (int e = 0; e < 8; e++) y[(uint64_t) t * ys + r + 2 * e + half] = run[i][j][e];
+      for (int e = 0; e < 8; e++) {
+        const uint32_t t = c0 + (wc * RN + j) * kTile + osmos_acc_col(e);
+        if (t < n) y[(uint64_t) t * ys + r + osmos_acc_row(e)] = run[i][j][e];
+      }
     }
-  }
 }
 
 // one matrix, or two of one type on the same x16 (blockIdx.y the matrix: a pair's blocks in one launch - the shared
@@ -623,20 +627,20 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel_gated_mean(const uint
                                                                       GatedMean gm) {
   __shared__ __attribute__((aligned(32))) _Float16 lds[S::kLdsHalves];
   const uint32_t d0 = blockIdx.x * kTile, c0 = blockIdx.z * kTile * CT;
-  const int lane = threadIdx.x % kWave, half = lane / kTile;
+
   float sum[CT][8] = {};
   for (uint32_t s = 0; s < gm.hc; s++) {
     tile<T, S, CT, false>(w, s * gm.dim + d0, cols, x16, cols, c0, n, nullptr, 0, lds, {},
                           [&](int ct, int j, uint32_t t, float g) {
                             if (t < n)
-                              sum[ct][j] += gm.xn[((uint64_t) t * gm.hc + s) * gm.dim + d0 + 2 * j + half] * sigmoid(g);
+                              sum[ct][j] += gm.xn[((uint64_t) t * gm.hc + s) * gm.dim + d0 + osmos_acc_row(j)] * sigmoid(g);
                           });
     __syncthreads();  // wave 0 done with the sums' LDS before the next stream's slabs
   }
 #pragma unroll
   for (int ct = 0; ct < CT; ct++)
     for (int j = threadIdx.x / kWave; j < 8; j += S::kWaves) {  // the rows this wave took (tile's kSpread)
-      const uint32_t t = c0 + ct * kTile + lane % kTile, d = d0 + 2 * j + half;
+      const uint32_t t = c0 + ct * kTile + osmos_acc_col(j), d = d0 + osmos_acc_row(j);
       if (t >= n) continue;
       const float v = sum[ct][j] / (float) gm.hc;
       gm.out[(uint64_t) t * gm.dim + d] = v;
