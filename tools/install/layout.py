@@ -85,6 +85,8 @@ def _assemble(m, fid, models, have, trust_size, fetch, found):
                     os.remove(o2)
             raise LayoutError(f"{sibs[i]} ({m['files'][sibs[i]]['path']}): made, but not the pinned bytes and SHA-256 - "
                               "refused")
+    for i, o in zip(range(1, len(base) + 1), outs):
+        userfiles.stamp_made(o, m["files"][sibs[i]])
     return outs[d["shard"] - 1]
 
 
@@ -92,13 +94,14 @@ def _derive(m, fid, models, have, trust_size, fetch, found):
     """a derived file's path: the user's if they have it, else made from its inputs under <models>/derived/ - its
     bytes and SHA-256 the pinned ones, or refused with nothing of it left"""
     e = m["files"][fid]
-    p = (found or {}).get(fid) or (userfiles.find(e, have, trust_size) if have else None)
+    p = (found or {}).get(fid) or (userfiles.find(e, have, False) if have else None)  # (never checked here: hashed)
     if p:
         return p
     d = e["derive"]
     out = os.path.join(models, "derived", e["path"])
-    # --trust-size: one made before was checked against its SHA-256 when made; its bytes alone take it again
-    if os.path.exists(out) and userfiles.matches(out, e, trust_size):
+    # --trust-size: one made before was checked against its SHA-256 when made, and stamped; its bytes and a stamp of
+    # the pinned SHA-256 take it again (a stale recipe's stamp, or none: hashed)
+    if os.path.exists(out) and userfiles.made_matches(out, e, trust_size):
         return out
     os.makedirs(os.path.dirname(out), exist_ok=True)
     if d["with"] == "gguf_assemble":
@@ -113,6 +116,7 @@ def _derive(m, fid, models, have, trust_size, fetch, found):
     if not userfiles.matches(out, e):
         os.remove(out)
         raise LayoutError(f"{fid} ({e['path']}): made, but not the pinned bytes and SHA-256 - refused")
+    userfiles.stamp_made(out, e)
     return out
 
 

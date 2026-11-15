@@ -590,16 +590,53 @@ class DerivedSet(unittest.TestCase):
             self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
 
     def test_trust_size_takes_made_set_by_bytes(self):
-        """a set made before: --trust-size takes it again by its bytes, as it does a downloaded shard - not hashed"""
+        """a set made before: --trust-size takes it again by its bytes and its stamp (the pinned SHA-256 it was made
+        against), as it does a downloaded shard - not hashed. (no --have dirs: a file of its size there is hashed -
+        test_trust_size_hashes_have_dirs)"""
         with tempfile.TemporaryDirectory() as d:
             have, models, m, made = self.setup(d)
             layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)  # makes it
             with mock.patch.object(userfiles, "TRUST_FROM", 0), \
                     mock.patch.object(userfiles, "_sha256", side_effect=AssertionError("hashed")):
-                cfg = layout.read_config(layout.lay(m, "e", models, [have], trust_size=True, abliterated=False, fetch=None))
+                cfg = layout.read_config(layout.lay(m, "e", models, [], trust_size=True, abliterated=False, fetch=None))
                 with self.assertRaises(AssertionError):  # without the flag: hashed, as before
-                    layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)
+                    layout.lay(m, "e", models, [], trust_size=False, abliterated=False, fetch=None)
             self.assertEqual(sha(cfg["model"]), sha(made[0]))
+
+    def test_trust_size_refuses_a_stale_made_set(self):
+        """a made file whose stamp is not the pack's pinned SHA-256 (made by an older recipe of the same size): hashed
+        under --trust-size too, not taken by its bytes"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)  # makes it, stamped
+            for k in ("e1", "e2"):
+                with open(os.path.join(models, "derived", m["files"][k]["path"]) + userfiles.MADE_STAMP, "w") as f:
+                    f.write("0" * 64)
+            with mock.patch.object(userfiles, "TRUST_FROM", 0), \
+                    mock.patch.object(userfiles, "_sha256", side_effect=AssertionError("hashed")):
+                with self.assertRaises(AssertionError):
+                    layout.lay(m, "e", models, [have], trust_size=True, abliterated=False, fetch=None)
+
+    def test_trust_size_never_lays_a_same_size_base(self):
+        """a --have dir holding the base set, a base shard the size of the made one (only its values changed):
+        --trust-size lays the made shard, never the base's by its bytes"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            self.assertEqual(os.path.getsize(os.path.join(have, "b-00002-of-00002.gguf")), os.path.getsize(made[1]))
+            with mock.patch.object(userfiles, "TRUST_FROM", 0):  # (the files large enough to be taken by bytes)
+                layout.lay(m, "e", models, [have], trust_size=True, abliterated=False, fetch=None)
+            self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
+
+    def test_trust_size_hashes_have_dirs(self):
+        """a file of a made file's size in a --have dir: hashed under --trust-size (never checked by this installer)"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            for p in made:
+                shutil.copy(p, os.path.join(have, os.path.basename(p)))
+            with mock.patch.object(userfiles, "TRUST_FROM", 0), \
+                    mock.patch.object(userfiles, "_sha256", side_effect=AssertionError("hashed")):
+                with self.assertRaises(AssertionError):
+                    layout.lay(m, "e", models, [have], trust_size=True, abliterated=False, fetch=None)
 
     def test_refused(self):
         with tempfile.TemporaryDirectory() as d:
