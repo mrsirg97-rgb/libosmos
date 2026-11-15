@@ -17,7 +17,7 @@
 
 namespace {
 
-constexpr int kBlockBytes = 36, kWarps = 4, kNTiles = 4;  // a warp 16 tokens x 32 rows (4 n tiles of 8)
+constexpr int kBlockBytes = 36;
 
 // a 16's E4M3 scale (amax / 6 / gs, to nearest, saturating at 448), as nvfp4.py's act_quant
 __device__ inline uint32_t e4m3_bits(float v) {
@@ -80,56 +80,80 @@ __device__ inline uint32_t nibbles(uint32_t w, bool hi) {
   return (x | x >> 8) & 0xFFFFu;
 }
 
-__global__ __launch_bounds__(32 * kWarps) void mm_kernel(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols,
-                                                         const uint8_t* __restrict__ aq, const uint8_t* __restrict__ as,
-                                                         uint32_t n, float scale, float* __restrict__ y, uint32_t ys) {
-  const uint32_t lane = threadIdx.x % 32, g = lane / 4, q = lane % 4;
-  const uint32_t t0 = blockIdx.y * 16, r0 = (blockIdx.x * kWarps + threadIdx.x / 32) * 8 * kNTiles;
-  if (r0 >= rows) return;
-  const uint32_t nb = cols / 64;
-  float d[kNTiles][4] = {};
-  // A's rows: tokens t0 + g, t0 + g + 8 (a token past n reads token n - 1, its sums not stored)
-  const uint32_t ta = t0 + g < n ? t0 + g : n - 1, tb = t0 + g + 8 < n ? t0 + g + 8 : n - 1;
-  const uint32_t* a_lo = (const uint32_t*) (aq + (uint64_t) ta * (cols / 2));
-  const uint32_t* a_hi = (const uint32_t*) (aq + (uint64_t) tb * (cols / 2));
-  const uint32_t* s_row = (const uint32_t*) (as + (uint64_t) (q == 0 ? ta : tb) * (cols / 16));
+// a block 128 tokens x 128 rows of W, a K block (64) at a time through LDS; 8 warps 4 x 2, a warp 32 tokens (2 m
+// tiles) x 64 rows (8 n tiles): 16 mma a K block. a staged row (a token's or W's) 9 words: its 64 values in k order (a
+// byte two, the low nibble first: W's repacked from ggml's sub-block order as staged), then the K block's 4 scales -
+// a fragment's loads 9 words apart, every bank once
+constexpr int kBM = 128, kBN = 128, kRow = 9, kTileThreads = 256;
+
+__global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols,
+                                                          const uint8_t* __restrict__ aq,
+                                                          const uint8_t* __restrict__ as, uint32_t n, float scale,
+                                                          float* __restrict__ y, uint32_t ys) {
+  __shared__ uint32_t sa[kBM * kRow], sb[kBN * kRow];
+  const uint32_t tid = threadIdx.x, lane = tid % 32, warp = tid / 32, g = lane / 4, q = lane % 4;
+  const uint32_t wm = warp % 4, wn = warp / 4;  // the warp's 32 tokens, its 64 rows
+  const uint32_t t0 = blockIdx.y * kBM, r0 = blockIdx.x * kBN, nb = cols / 64;
   const uint64_t row_bytes = (uint64_t) nb * kBlockBytes;
+  float d[2][8][4] = {};
   for (uint32_t kb = 0; kb < nb; kb++) {
-    // A: register r = k 32 (r / 2) + 8q .. +7 of row (r % 2 ? tb : ta): 4 bytes at byte 16 (r / 2) + 4q of the 64
-    uint32_t a[4];
-    a[0] = a_lo[kb * 8 + q], a[1] = a_hi[kb * 8 + q], a[2] = a_lo[kb * 8 + 4 + q], a[3] = a_hi[kb * 8 + 4 + q];
-    const uint32_t sa = q < 2 ? s_row[kb] : 0u;  // (lanes q 0 / 1 the rows' 4 block scales; the rest unread)
+    // stage A: a token's 32 bytes of the K block (8 words) and its 4 scales; B: a row's 4 sub-blocks repacked
+    for (uint32_t i = tid; i < kBM * 8; i += kTileThreads) {
+      const uint32_t r = i / 8, c = i % 8, t = t0 + r < n ? t0 + r : n - 1;
+      sa[r * kRow + c] = *(const uint32_t*) (aq + (uint64_t) t * (cols / 2) + (uint64_t) kb * 32 + 4 * c);
+    }
+    for (uint32_t r = tid; r < kBM; r += kTileThreads) {
+      const uint32_t t = t0 + r < n ? t0 + r : n - 1;
+      sa[r * kRow + 8] = *(const uint32_t*) (as + (uint64_t) t * (cols / 16) + (uint64_t) kb * 4);
+    }
+    for (uint32_t i = tid; i < kBN * 4; i += kTileThreads) {
+      const uint32_t r = i / 4, sub = i % 4, row = r0 + r < rows ? r0 + r : rows - 1;
+      const uint8_t* blk = w + (uint64_t) row * row_bytes + (uint64_t) kb * kBlockBytes;
+      const uint32_t* p = (const uint32_t*) (blk + 4 + 8 * sub);
+      const uint32_t w0 = p[0], w1 = p[1];
+      sb[r * kRow + 2 * sub] = nibbles(w0, false) | nibbles(w1, false) << 16;     // values 16 sub + 0 .. 7
+      sb[r * kRow + 2 * sub + 1] = nibbles(w0, true) | nibbles(w1, true) << 16;   // 16 sub + 8 .. 15
+      if (sub == 0) sb[r * kRow + 8] = *(const uint32_t*) blk;
+    }
+    __syncthreads();
+    uint32_t a[2][4], scale_a[2];
 #pragma unroll
-    for (int nt = 0; nt < kNTiles; nt++) {
-      const uint32_t row = r0 + nt * 8 + g;
-      const uint8_t* blk = w + (uint64_t) (row < rows ? row : rows - 1) * row_bytes + (uint64_t) kb * kBlockBytes;
-      // B's register r: k 32 r + 8q .. +7 = sub-block s = 2r + q / 2, its values (q odd) 8 .. 15 or 0 .. 7: the high
-      // or low nibbles of its 8 bytes at 4 + 8 s
-      uint32_t b[2];
+    for (int mt = 0; mt < 2; mt++) {
+      const uint32_t ra = wm * 32 + mt * 16 + g;  // rows g and g + 8 of the m tile
+      // register r: row ra + 8 (r % 2), words 4 (r / 2) + q (k 32 (r / 2) + 8q ..)
+      a[mt][0] = sa[ra * kRow + q], a[mt][1] = sa[(ra + 8) * kRow + q];
+      a[mt][2] = sa[ra * kRow + 4 + q], a[mt][3] = sa[(ra + 8) * kRow + 4 + q];
+      scale_a[mt] = q == 0 ? sa[ra * kRow + 8] : q == 1 ? sa[(ra + 8) * kRow + 8] : 0u;
+    }
 #pragma unroll
-      for (int r = 0; r < 2; r++) {
-        const uint32_t s = 2 * r + q / 2;
-        const uint32_t* p = (const uint32_t*) (blk + 4 + 8 * s);
-        b[r] = nibbles(p[0], q & 1) | nibbles(p[1], q & 1) << 16;
-      }
-      const uint32_t sb = q == 0 ? *(const uint32_t*) blk : 0u;
+    for (int nt = 0; nt < 8; nt++) {
+      const uint32_t rb = wn * 64 + nt * 8 + g;
+      const uint32_t b0 = sb[rb * kRow + q], b1 = sb[rb * kRow + 4 + q];  // k 8q .., 32 + 8q ..
+      const uint32_t scale_b = q == 0 ? sb[rb * kRow + 8] : 0u;
+#pragma unroll
+      for (int mt = 0; mt < 2; mt++) {
 #if defined(__CUDACC__)
-      asm volatile(
-          "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
-          "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3}, %10, {0, 0}, %11, {0, 0};"
-          : "+f"(d[nt][0]), "+f"(d[nt][1]), "+f"(d[nt][2]), "+f"(d[nt][3])
-          : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]), "r"(sa), "r"(sb));
+        asm volatile(
+            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
+            "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3}, %10, {0, 0}, %11, {0, 0};"
+            : "+f"(d[mt][nt][0]), "+f"(d[mt][nt][1]), "+f"(d[mt][nt][2]), "+f"(d[mt][nt][3])
+            : "r"(a[mt][0]), "r"(a[mt][1]), "r"(a[mt][2]), "r"(a[mt][3]), "r"(b0), "r"(b1), "r"(scale_a[mt]),
+              "r"(scale_b));
 #endif
+      }
     }
+    __syncthreads();
   }
-  // D: element e row (token) g + 8 (e / 2), column (row of W) 2q + e % 2
+  // D: element e token (m tile's) g + 8 (e / 2), row (n tile's) 2q + e % 2
 #pragma unroll
-  for (int nt = 0; nt < kNTiles; nt++)
+  for (int mt = 0; mt < 2; mt++)
 #pragma unroll
-    for (int e = 0; e < 4; e++) {
-      const uint32_t t = t0 + g + 8 * (e / 2), row = r0 + nt * 8 + 2 * q + e % 2;
-      if (t < n && row < rows) y[(uint64_t) t * ys + row] = d[nt][e] * scale;
-    }
+    for (int nt = 0; nt < 8; nt++)
+#pragma unroll
+      for (int e = 0; e < 4; e++) {
+        const uint32_t t = t0 + wm * 32 + mt * 16 + g + 8 * (e / 2), row = r0 + wn * 64 + nt * 8 + 2 * q + e % 2;
+        if (t < n && row < rows) y[(uint64_t) t * ys + row] = d[mt][nt][e] * scale;
+      }
 }
 
 }  // namespace
@@ -156,8 +180,8 @@ extern "C" bool mm_fp4_act(const float* x, uint32_t xs, uint32_t n, uint32_t col
 extern "C" bool mm_fp4(const void* w, uint32_t rows, uint32_t cols, const void* q, const void* sc, uint32_t n,
                        float scale, float* y, uint32_t ys, void* stream) {
   if (!mm_fp4_ok() || !w || !q || !sc || !y || !n || cols % 64 || rows % 8) return false;
-  const dim3 grid((rows + 8 * kNTiles * kWarps - 1) / (8 * kNTiles * kWarps), (n + 15) / 16);
-  mm_kernel<<<grid, 32 * kWarps, 0, launches::st(stream)>>>((const uint8_t*) w, rows, cols, (const uint8_t*) q,
-                                                            (const uint8_t*) sc, n, scale, y, ys);
+  const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM);
+  mm_kernel<<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) w, rows, cols, (const uint8_t*) q,
+                                                             (const uint8_t*) sc, n, scale, y, ys);
   return launches::ok();
 }
