@@ -51,6 +51,23 @@ __device__ inline osmos_fb osmos_load_b(const _Float16* frag) { return *(const o
 __device__ inline osmos_f8 osmos_mma(osmos_fa a, osmos_fb b, osmos_f8 c) { return osmos_wmma_f16(a, b, c); }
 __device__ inline int osmos_acc_row(int j) { return 2 * j + threadIdx.x % 32 / 16; }
 __device__ inline int osmos_acc_col(int) { return threadIdx.x % 32 % 16; }
+// B's columns `stride` apart (a column's 16 of K contiguous): column c at frag + c stride
+__device__ inline osmos_fb osmos_load_b_s(const _Float16* frag, int stride) {
+  return *(const osmos_h16*) (frag + threadIdx.x % 32 % 16 * stride);
+}
+// a lane's rows: its D elements' rows, each a slot (a row's running state a slot's); element j in slot osmos_slot(j),
+// the slot's row osmos_slot_row(s) - here a lane 8 rows, one element each; a row's 16 columns on the 16 lanes of a half
+constexpr int osmos_slots = 8;
+__device__ constexpr int osmos_slot(int j) { return j; }
+__device__ inline int osmos_slot_row(int s) { return 2 * s + threadIdx.x % 32 / 16; }
+__device__ inline float osmos_row_max(float v) {  // over the lanes holding the row's other columns
+  for (int o = 1; o < 16; o <<= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
+  return v;
+}
+__device__ inline float osmos_row_sum(float v) {
+  for (int o = 1; o < 16; o <<= 1) v += __shfl_xor(v, o, 32);
+  return v;
+}
 
 #else  // CUDA
 
@@ -158,5 +175,23 @@ __device__ inline osmos_f8 osmos_mma(osmos_fa a, osmos_fb b, osmos_f8 c) {
 }
 __device__ inline int osmos_acc_row(int j) { return threadIdx.x % 32 / 4 + 8 * (j % 4 / 2); }
 __device__ inline int osmos_acc_col(int j) { return j / 4 * 8 + 2 * (threadIdx.x % 4) + j % 2; }
+__device__ inline osmos_fb osmos_load_b_s(const _Float16* frag, int stride) {
+  const int g = threadIdx.x % 32 / 4, q = threadIdx.x % 4;
+  return {{osmos_pair(frag + g * stride + 2 * q), osmos_pair(frag + g * stride + 2 * q + 8),
+           osmos_pair(frag + (8 + g) * stride + 2 * q), osmos_pair(frag + (8 + g) * stride + 2 * q + 8)}};
+}
+// a lane 2 rows (g, g + 8), 4 elements each (elements 0, 1, 4, 5 row g; 2, 3, 6, 7 row g + 8); a row's 16 columns on
+// the 4 lanes of a quad, 4 each
+constexpr int osmos_slots = 2;
+__device__ constexpr int osmos_slot(int j) { return j % 4 / 2; }
+__device__ inline int osmos_slot_row(int s) { return threadIdx.x % 32 / 4 + 8 * s; }
+__device__ inline float osmos_row_max(float v) {
+  for (int o = 1; o < 4; o <<= 1) v = fmaxf(v, __shfl_xor_sync(0xFFFFFFFFu, v, o));
+  return v;
+}
+__device__ inline float osmos_row_sum(float v) {
+  for (int o = 1; o < 4; o <<= 1) v += __shfl_xor_sync(0xFFFFFFFFu, v, o);
+  return v;
+}
 
 #endif
