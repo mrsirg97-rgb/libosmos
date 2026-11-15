@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/ink2/mtp.h"
 #include "osmos/ink2/weights.h"
 #include "osmos/model/state_io.h"
 
@@ -23,6 +24,7 @@ typedef struct Ink2Options
   uint32_t max_tokens; /* a step's most tokens */
   uint64_t room;       /* the experts' cache (the membrane's pool), bytes; 0: every expert */
   const uint64_t *picks; /* a picks profile ([layer][expert] counts): the warm set the most picked; NULL: uniform */
+  const Ink2Mtp *mtp;    /* the drafter (osmos/ink2/mtp.h), or NULL: none */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR]);
@@ -50,6 +52,10 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
 const float *ink2_logits(const Ink2Forward *f);
 bool ink2_kept(const Ink2Forward *f, uint32_t row);
 bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[INK2_FWD_ERR]);
+
+bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char err[INK2_FWD_ERR]);
+int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
+                   float *conf, char err[INK2_FWD_ERR]);
 
 #endif
 
@@ -108,4 +114,14 @@ ink2_step
 
 ink2_greedy
   rows row0 .. row0 + rows - 1's greatest token (the lowest among equals). false for a row not kept.
+
+ink2_seq_seed, ink2_seq_draft (a forward built with a drafter: DSpark with the RNN Markov head, src/ink2/hip_mtp.c)
+  seed: the drafter's context at positions from .. to - 1 from the sequence's last step's taps (its rows of that
+  step) - each drafter layer's mixture of them normed, its ctx keys and values into the sequence's rings. the
+  context is the positions seeded since the last gap (a seed past where it reaches starts it over; a load or a
+  rollback below it, its end). draft: a block at the sequence's position - y (the token there, its normed embedding)
+  and mask rows - through the drafter, the target's head on its rows after y, the Markov steps' picks: up to max
+  (block - 1 at most) drafts, each kept while its probability is at least conf_min and their product cum_min - the
+  count, or -1 with why. the context must reach the sequence's position. neither moves a bit of the sequence's own
+  state; a draft is a proposal (the verify step's bits are the answer's).
 */

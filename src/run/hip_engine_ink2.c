@@ -1,7 +1,8 @@
 /* Inkling-2-Small, the third family (0.8.0): its model opened and every tensor checked (osmos/ink2/weights.h: the
    reference's names or llama.cpp's, unsloth's packs), its engine osmos/ink2/forward.h's - the dense weights resident,
    the experts streamed through the membrane at the budget's room, a sequence's caches and tails, a step a run at a
-   time. no drafter yet (DSpark's head: mtp.*, to come): block 0, so the server drafts none */
+   time; the drafter (--dspark: the checkpoint's mtp.safetensors as ink2_mtp_gguf.py's GGUF, DSpark with the RNN
+   Markov head) its seed and draft, block - 1 drafts a round */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,7 +56,8 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   const Ink2Geometry *geo = &m->w->geo;
   /* a decode round's most tokens below every expert's read (a step past it reads them all, as a prompt's) */
   *facts = (OsmosFacts){"inkling2", (uint32_t)geo->n_vocab, geo->native_ctx,
-                        (uint32_t)((geo->n_experts - 1) / geo->n_used), 0, true};
+                        (uint32_t)((geo->n_experts - 1) / geo->n_used), geo->native_ctx, true};
+  /* (seed_window: a drafter's context every position - its full layer's attention reads them all) */
   return m;
 }
 
@@ -67,6 +69,8 @@ _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens withi
 typedef struct Eng
 {
   Ink2Forward *f;
+  Gguf *mg;        /* the drafter's file, or NULL */
+  Ink2Mtp *mtp;    /* the drafter, or NULL */
   uint64_t *picks; /* the picks file's counts, or NULL */
   uint32_t vocab, n;
 } Eng;
@@ -77,6 +81,8 @@ static void e_destroy(void *p)
   if (!e)
     return;
   ink2_forward_destroy(e->f);
+  ink2_mtp_destroy(e->mtp);
+  gguf_destroy(e->mg);
   free(e->picks);
   free(e);
 }
@@ -84,8 +90,6 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->drafter)
-    return fail(err, "no drafter for this family yet (DSpark's head: 0.8.0 in progress)"), NULL;
   if (o->npu)
     return fail(err, "no NPU kernels for this family"), NULL;
   Eng *e = calloc(1, sizeof *e);
@@ -103,8 +107,23 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
     if (!ok)
       return fail(err, "the picks file could not be read, or is not this model's"), e_destroy(e), NULL;
   }
+  /* the drafter: its GGUF (tools/convert/ink2_mtp_gguf.py's) - a directory holding one, or the file */
+  if (o->drafter)
+  {
+    char path[4096], ierr[INK2_ERR] = "";
+    snprintf(path, sizeof path, "%s/ink2-mtp.gguf", o->drafter);
+    FILE *probe = fopen(path, "rb");
+    if (probe)
+      fclose(probe);
+    else
+      snprintf(path, sizeof path, "%s", o->drafter);
+    if (!(e->mg = gguf_create(path, err)))
+      return e_destroy(e), NULL;
+    if (!(e->mtp = ink2_mtp_create(e->mg, m->w, ierr)))
+      return snprintf(err, OSMOS_ERR, "%s", ierr), e_destroy(e), NULL;
+  }
   const uint32_t T = o->max_tokens ? o->max_tokens : INK2_STEP_TOKENS;
-  const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, o->budget, e->picks};
+  const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, o->budget, e->picks, e->mtp};
   if (!(e->f = ink2_forward_create(m->w, &io, err)))
     return e_destroy(e), NULL;
   return e;
@@ -165,7 +184,22 @@ static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char e
   return ink2_greedy(e->f, row0, rows, ids, err);
 }
 
-static uint32_t e_block(const void *p) { return (void)p, 0; }
+static uint32_t e_block(const void *p)
+{
+  const Eng *e = p;
+  return e->mtp ? (uint32_t)e->mtp->block - 1 : 0;
+}
+
+static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ERR])
+{
+  return ink2_seq_seed(((Eng *)p)->f, s, from, to, err);
+}
+
+static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
+                   char err[OSMOS_ERR])
+{
+  return ink2_seq_draft(((Eng *)p)->f, s, y, e_block(p), conf_min, cum_min, drafts, conf, err);
+}
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return ink2_seq_create(((Eng *)p)->f, err); }
 static void s_destroy(void *s) { ink2_seq_destroy(s); }
@@ -198,7 +232,7 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 const OsmosFamily osmos_ink2 = {
     "inkling2", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_room, e_stats,
     e_batch,    e_logits,   e_greedy,      e_block,   s_create,    s_destroy,  s_prompt, s_rollback,
-    s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, NULL,       NULL,   NULL,
+    s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     NULL, /* a prompt's read its batch: one math for every step */
     s_mark_bytes, s_mark_save, s_mark_load, /* a mark the conv tails and windows (ink2_seq_mark_save) */
 };

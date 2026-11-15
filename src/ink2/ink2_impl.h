@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "osmos/ink2/forward.h"
+#include "osmos/ink2/mtp.h"
 #include "osmos/mem/host_slots.h"
 #include "osmos/mem/membrane.h"
 
@@ -30,6 +31,23 @@ typedef struct Ink2Tail
   uint32_t keep, cap, held;
 } Ink2Tail;
 
+/* the drafter's resident tensors and its step's buffers (hip_mtp.c) */
+typedef struct Ink2MtpDev
+{
+  void *wq[INK2_MTP_MAX_LAYERS], *wk[INK2_MTP_MAX_LAYERS], *wv[INK2_MTP_MAX_LAYERS], *wkc[INK2_MTP_MAX_LAYERS],
+      *wvc[INK2_MTP_MAX_LAYERS], *wo[INK2_MTP_MAX_LAYERS], *wgate[INK2_MTP_MAX_LAYERS], *wup[INK2_MTP_MAX_LAYERS],
+      *wdown[INK2_MTP_MAX_LAYERS];
+  float *in_norm[INK2_MTP_MAX_LAYERS], *post_norm[INK2_MTP_MAX_LAYERS], *dflare[INK2_MTP_MAX_LAYERS],
+      *q_norm[INK2_MTP_MAX_LAYERS], *k_norm[INK2_MTP_MAX_LAYERS], *k_norm_ctx[INK2_MTP_MAX_LAYERS];
+  float *alpha; /* [n_layers + 1][n_taps]: softmax(fuse_weight), a layer's mixture, the Markov head's last */
+  float *mask, *norm, *m_dflare, *w_sp, *w_hf, *rnn_b, *fold_b;
+  void *w1, *fold; /* BF16 [the head's rows][rank]: markov_w1's, and lm_head . hidden_out */
+  float *taps;     /* the step's taps [max_tokens][n_taps][n_embd] */
+  float *mix, *kctx, *vctx, *x, *res, *nrm, *q, *kb, *vb, *att, *ob, *g, *u, *hf, *inv, *vec, *p, *state, *latent,
+      *corr, *base, *lg, *probs, *scr, *f_rnn;
+  int32_t *pos, *prev, *ids;
+} Ink2MtpDev;
+
 enum
 {
   INK2_CONV_K,
@@ -47,11 +65,21 @@ struct Ink2Seq
   bool failed;
   Ink2Tail conv[INK2_MAX_LAYERS][INK2_CONVS]; /* each layer's short convs' inputs */
   Ink2Tail kw[INK2_MAX_LAYERS], vw[INK2_MAX_LAYERS]; /* a sliding layer's window (a full layer's d: max_ctx rows), f16 */
+  /* the drafter's: each layer's context keys and values (f16 rings of mrows: a local layer's window and a block, a
+     full one's max_ctx), the last seeded position's taps (the Markov head's features), the context seeded mfrom ..
+     mend - 1; the last step's taps' first row and its position */
+  uint16_t *mk[INK2_MTP_MAX_LAYERS], *mv[INK2_MTP_MAX_LAYERS];
+  uint32_t mrows[INK2_MTP_MAX_LAYERS];
+  float *mlast;
+  int32_t mfrom, mend, tap_pos0;
+  uint32_t tap_row0;
 };
 
 struct Ink2Forward
 {
   const Ink2Weights *w;
+  const Ink2Mtp *mtp; /* the drafter, or NULL */
+  Ink2MtpDev md;
   uint32_t max_ctx, max_tokens, maxb, vocab;
   Ink2Dev L[INK2_MAX_LAYERS];
   void *embed, *output;
@@ -79,9 +107,24 @@ struct Ink2Forward
 };
 
 bool ink2_fail(char *err, const char *why);
+/* hip_forward.c's: device memory counted in the forward's bytes; a tensor's bytes from g's file, its F32 values on the
+   host (F32 / F16 / BF16), uploaded; y [n][rows] = W x a token's bits its own (mv_run, MV_MAX_TOKENS a launch) */
+bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes);
+bool ink2_read_tensor(const Gguf *g, const GgufTensor *t, void *out);
+float *ink2_host_f32(const Gguf *g, const GgufTensor *t, uint64_t *n);
+bool ink2_up_host(Ink2Forward *f, const float *v, uint64_t n, float **out);
+bool ink2_up_f32_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, float **out);
+bool ink2_up_raw_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, void **out);
+bool ink2_mat(const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y);
 /* the tails: room for n more rows (the move), the last k rows, n F32 rows appended (an f16 tail's converted; queued
    on the null stream); a tail's row r */
 bool ink2_tail_room(Ink2Tail *t, uint32_t n);
 const void *ink2_tail_last(const Ink2Tail *t, uint32_t k);
 bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n);
+/* hip_mtp.c: the drafter's weights and buffers (its fold made), freed; a sequence's rings; a step's taps kept */
+bool ink2_mtp_up(Ink2Forward *f, char *err);
+void ink2_mtp_down(Ink2Forward *f);
+bool ink2_mtp_seq_make(Ink2Seq *s);
+void ink2_mtp_seq_free(Ink2Seq *s);
+bool ink2_mtp_tap(Ink2Forward *f, int slot, const float *x, uint32_t n, uint32_t row0);
 void *ink2_tail_row(const Ink2Tail *t, uint32_t r);

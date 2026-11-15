@@ -58,6 +58,23 @@ bool ink2_fa16(const Ink2Attn *a, const float *q, const float *rel, const float 
 uint64_t ink2_fa_scratch(uint32_t heads, uint32_t max_keys);
 bool ink2_to_f16(const float *x, uint64_t n, uint16_t *y, void *stream);
 
+/* the drafter's (kernels/ink2_mtp.hip; src/ink2/hip_mtp.c) */
+bool ink2_mtp_mix(const float *taps, uint32_t n_taps, const float *alpha, uint32_t n, uint32_t dim, float *out,
+                  void *stream);
+bool ink2_mtp_kv_put(uint16_t *ring, uint32_t ring_rows, const float *x, uint32_t n, uint32_t row, int32_t pos0,
+                     void *stream);
+uint64_t ink2_mtp_attn_scratch(uint32_t n_q, uint32_t heads, uint32_t max_keys);
+bool ink2_mtp_attn(const float *q, uint32_t n_q, int32_t pos0, const float *kb, const float *vb, const uint16_t *kr,
+                   const uint16_t *vr, uint32_t ring_rows, int32_t ctx_from, uint32_t heads, uint32_t kv_heads,
+                   uint32_t window, float *scratch, float *out, void *stream);
+bool ink2_mtp_markov_in(const float *state, const uint16_t *w1, const int32_t *prev, uint32_t rank, float *vec,
+                        void *stream);
+bool ink2_mtp_markov_gru(const float *p, const float *inv, const float *bias, uint32_t rank, float *state,
+                         float *latent, void *stream);
+bool ink2_mtp_markov_logits(const float *base, const float *corr, const float *fold_b, float cap, uint32_t n, float *out,
+                            void *stream);
+bool ink2_transpose_bf16(const float *in, uint32_t rows, uint32_t cols, uint16_t *out, void *stream);
+
 #endif
 
 /*
@@ -130,4 +147,28 @@ units: a query's keys cut at absolute multiples of INK2_FA_UNIT (pos0: key 0's p
 ink2_fa16, ink2_to_f16
   ink2_fa over keys and values stored as f16 (a cache's: ink2_to_f16 of the F32 rows, IEEE half bits in uint16_t) -
   the values ink2_fa rounds them to as it loads them, so the same bits; half the memory and the reads.
+
+ink2_mtp_mix
+  out[t] = sum over k of alpha[k] taps[t][k] (taps [n][n_taps][dim]): a drafter layer's mixture of the target's taps
+  (softmax(fuse_weight)'s row), before its dflare norm.
+
+ink2_mtp_kv_put
+  n rows of x (row values each, F32) into an f16 ring of ring_rows: x's row t at (pos0 + t) % ring_rows.
+
+ink2_mtp_attn
+  the drafter's attention for a block of n_q queries at positions pos0 .. (q [n_q][heads][128], RoPE'd), against the
+  context's keys and values in the ring for positions ctx_from .. pos0 - 1 and the block's own (kb, vb [n_q][kv_heads]
+  [128] F32): a context key visible to query i when within `window` of it back (0: every one), every block key
+  visible (not causal). scores q.k / sqrt(128), each chunk of 256 keys its softmax's partial (scratch:
+  ink2_mtp_attn_scratch), merged in order. out [n_q][heads][128].
+
+ink2_mtp_markov_in, _gru, _logits
+  the Markov head's step (TokenSpeed's sample_block): vec = [state | markov_w1[*prev]] (w1 BF16 [V][rank]); with p =
+  rnn_proj's [state | prev] columns . vec and inv its [hidden | features] columns' product (the step's own row): g =
+  sigmoid(p + inv + b), state = g state + (1 - g) tanh(.), latent = tanh(.) (gate, candidate, output thirds); out =
+  cap tanh((base + corr + fold_b) / cap) - the target head's logits, the fold's correction (lm_head . hidden_out:
+  corr = fold . latent) and bias, softcapped.
+
+ink2_transpose_bf16
+  out [cols][rows] = in [rows][cols] rounded to BF16 (nearest, ties to even): the fold's layout for the matvec.
 */

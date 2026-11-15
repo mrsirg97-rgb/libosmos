@@ -6,6 +6,8 @@
 //                                                     (the last one repeated to the ids' end)
 //   ROOM=GiB      the experts' cache (default 32)
 //   PICKS=path    a picks profile to warm by (the most picked experts first); PICKS_OUT=path: this run's written
+//   DRAFT=gguf    the drafter (ink2_mtp_gguf.py's): after each step its context seeded, a draft at the next anchor
+//                 (the token after the step's, no floors) printed beside the text's - its acceptance
 //   CHECK=1       at each 1-token step: roll back, run it again, the logits the same bits; and once a save, a load
 //                 into a new sequence and its next step the same bits
 #include <hip/hip_runtime.h>
@@ -20,6 +22,7 @@
 
 extern "C" {
 #include "osmos/ink2/forward.h"
+#include "osmos/ink2/mtp.h"
 #include "osmos/ink2/weights.h"
 #include "osmos/model/gguf.h"
 }
@@ -94,7 +97,17 @@ int main(int argc, char** argv) {
     CHECK(pf && std::fread(picks.data(), 8, picks.size(), pf) == picks.size());
     std::fclose(pf);
   }
-  const Ink2Options o = {T + 16, maxs, (uint64_t) (room * (double) (1ull << 30)), picks.empty() ? nullptr : picks.data()};
+  Gguf* dg = nullptr;
+  Ink2Mtp* mtp = nullptr;
+  if (const char* dp = std::getenv("DRAFT")) {
+    dg = gguf_create(dp, err);
+    CHECK(dg);
+    mtp = ink2_mtp_create(dg, W, err);
+    CHECK(mtp);
+  }
+  const Ink2Options o = {T + 16, maxs, (uint64_t) (room * (double) (1ull << 30)), picks.empty() ? nullptr : picks.data(),
+                         mtp};
+  uint32_t drafted = 0, accepted = 0, rounds = 0;
   auto t0 = std::chrono::steady_clock::now();
   Ink2Forward* f = ink2_forward_create(W, &o, err);
   CHECK(f);
@@ -146,6 +159,19 @@ int main(int argc, char** argv) {
       saved = 1;
       std::fprintf(stderr, "  save and load at %u: %.1f MB, the next step the same bits\n", at + 1, b.b.size() / 1e6);
     }
+    if (mtp && at + n + 1 < T) {  // the drafter seeded with this step's positions, then a draft at the next anchor
+      CHECK(ink2_seq_seed(f, s, (int32_t) at, (int32_t) (at + n), err));
+      int32_t dr[8];
+      float cf[8];
+      const int k = ink2_seq_draft(f, s, ids[at + n], 7, 0.0f, 0.0f, dr, cf, err);
+      CHECK(k >= 0);
+      uint32_t acc = 0;
+      while (acc < (uint32_t) k && at + n + 1 + acc < T && dr[acc] == ids[at + n + 1 + acc]) acc++;
+      drafted += (uint32_t) k, accepted += acc, rounds++;
+      std::printf("p %u: %u accepted  drafts [", at + n, acc);
+      for (int i = 0; i < k; i++) std::printf("%s%d", i ? ", " : "", dr[i]);
+      std::printf("]\n");
+    }
     for (uint32_t r = 0; r < n && at + r + 1 < T; r++) {
       const float* x = &lg[(size_t) r * V];
       int32_t top = 0;
@@ -183,8 +209,11 @@ int main(int argc, char** argv) {
                     (size_t) W->geo.n_layers * W->geo.n_experts);
     std::fclose(pf);
   }
+  if (rounds) std::printf("ink2_engine: drafts %u rounds, %.2f accepted a round\n", rounds, (double) accepted / rounds);
   ink2_seq_destroy(s);
   ink2_forward_destroy(f);
+  ink2_mtp_destroy(mtp);
+  gguf_destroy(dg);
   ink2_weights_destroy(W);
   gguf_destroy(model);
   return 0;

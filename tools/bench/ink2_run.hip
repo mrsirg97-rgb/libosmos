@@ -19,6 +19,9 @@
 //                 runs add up) - blk.L.attn_x (a sliding layer's q, k, v, rel, gate, sink), blk.L.attn_q_x /
 //                 attn_k_x / attn_v_x (a full layer's: q, rel, gate, sink / k / v), blk.L.attn_out_x (the output's),
 //                 output (the head's); dir/tokens the rows summed
+//   TAPS=path     the drafter's taps, F32 [token][8][n_embd]: h at the entry of layers 5, 11, .., 41 (the attention
+//                 residual's running partial) and the final normed hidden (the head's input) - mtp_config's
+//                 target_layer_ids, TokenSpeed's capture
 #include <hip/hip_runtime.h>
 #include <unistd.h>
 
@@ -212,8 +215,19 @@ int main(int argc, char** argv) {
     CHECK(hipDeviceSynchronize() == hipSuccess);
     hipFree(dw);
   };
+  static const int kTapLayers[7] = {5, 11, 17, 23, 29, 35, 41};
+  const char* taps_p = std::getenv("TAPS");
+  std::vector<float> tapbuf(taps_p ? (size_t) T * 8 * C : 0);
+  auto tap = [&](int slot, const float* x) {  // x [T][C] into slot of every token's 8
+    std::vector<float> hx((size_t) T * C);
+    CHECK(hipMemcpy(hx.data(), x, hx.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    for (uint32_t t = 0; t < T; t++)
+      std::memcpy(&tapbuf[((size_t) t * 8 + slot) * C], &hx[(size_t) t * C], C * 4);
+  };
   for (int l = 0; l < G.n_layers; l++) {
     const Ink2Layer& L = W->layer[l];
+    for (int k = 0; taps_p && k < 7; k++)
+      if (kTapLayers[k] == l) tap(k, h);
     const bool full = !G.sliding[l], boundary = l % G.res_block == 0;
     // the attention's inputs: the residual over the blocks (a full layer's three: q, k, v), or the layer's input
     const float *aq = h, *ak = h, *av = h;
@@ -332,6 +346,11 @@ int main(int argc, char** argv) {
     hipFree(dq);
     rms(W->output_norm, tmp, xn);
     hess("output", xn, T, C);
+    if (taps_p) {
+      tap(7, xn);
+      FILE* f = std::fopen(taps_p, "wb");
+      CHECK(f && std::fwrite(tapbuf.data(), 4, tapbuf.size(), f) == tapbuf.size() && std::fclose(f) == 0);
+    }
     if (const char* dir = std::getenv("HESS")) {  // the rows summed, runs added
       const std::string path = std::string(dir) + "/tokens";
       long long had = 0;

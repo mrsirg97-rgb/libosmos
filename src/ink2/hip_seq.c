@@ -85,6 +85,8 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
       ok = tail_make(&s->kw[l], kd, 2, f->max_ctx, f->max_ctx, 0) &&
            tail_make(&s->vw[l], kd, 2, f->max_ctx, f->max_ctx, 0);
   }
+  if (ok && f->mtp)
+    ok = ink2_mtp_seq_make(s);
   if (!ok)
     return ink2_fail(err, "inkling2: GPU memory refused (a sequence's caches)"), ink2_seq_destroy(s), NULL;
   return s;
@@ -105,6 +107,7 @@ void ink2_seq_destroy(Ink2Seq *s)
     if (s->vw[l].d)
       hipFree(s->vw[l].d);
   }
+  ink2_mtp_seq_free(s);
   free(s);
 }
 
@@ -136,6 +139,8 @@ bool ink2_seq_rollback(Ink2Seq *s, uint32_t n)
     s->kw[l].held -= n, s->vw[l].held -= n;
   }
   s->pos -= (int32_t)n, s->reach -= n;
+  if (s->mend > s->pos) /* the drafter's context ends with the sequence */
+    s->mend = s->pos;
   return true;
 }
 
@@ -229,6 +234,7 @@ static void settle(Ink2Seq *s, int32_t pos, bool mark)
       s->kw[l].held = s->vw[l].held = (uint32_t)pos;
   }
   s->pos = pos, s->reach = 0, s->prompt_end = 0, s->failed = false;
+  s->mfrom = s->mend = 0; /* the drafter's context not saved: seeded again from here */
 }
 
 uint64_t ink2_seq_state_bytes(const Ink2Seq *s) { return s ? bytes_at(s, s->pos, false) : 0; }

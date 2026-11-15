@@ -68,7 +68,7 @@ bool ink2_fail(char *err, const char *why)
   return false;
 }
 
-static bool dalloc(Ink2Forward *f, void **p, uint64_t bytes)
+bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes)
 {
   if (hipMalloc(p, bytes + 16) != hipSuccess)
     return *p = NULL, false;
@@ -77,7 +77,7 @@ static bool dalloc(Ink2Forward *f, void **p, uint64_t bytes)
 }
 
 /* a tensor's bytes from its file */
-static bool read_tensor(const Gguf *g, const GgufTensor *t, void *out)
+bool ink2_read_tensor(const Gguf *g, const GgufTensor *t, void *out)
 {
   const int fd = open(g->paths[t->file], O_RDONLY);
   if (fd < 0)
@@ -110,7 +110,7 @@ static float half_f(uint16_t h)
 }
 
 /* a small tensor's values as F32 on the host (F32, F16 or BF16 in the file); NULL where it is another type */
-static float *host_f32(const Gguf *g, const GgufTensor *t, uint64_t *n)
+float *ink2_host_f32(const Gguf *g, const GgufTensor *t, uint64_t *n)
 {
   const uint32_t es = t->type == T_F32 ? 4 : t->type == T_F16 || t->type == T_BF16 ? 2 : 0;
   if (!es)
@@ -118,7 +118,7 @@ static float *host_f32(const Gguf *g, const GgufTensor *t, uint64_t *n)
   *n = t->bytes / es;
   uint8_t *b = malloc(t->bytes);
   float *v = malloc(*n * 4 + 4);
-  if (!b || !v || !read_tensor(g, t, b))
+  if (!b || !v || !ink2_read_tensor(g, t, b))
     return free(b), free(v), NULL;
   for (uint64_t i = 0; i < *n; i++)
   {
@@ -138,42 +138,45 @@ static float *host_f32(const Gguf *g, const GgufTensor *t, uint64_t *n)
   return v;
 }
 
-static bool up_host(Ink2Forward *f, const float *v, uint64_t n, float **out)
+bool ink2_up_host(Ink2Forward *f, const float *v, uint64_t n, float **out)
 {
-  return dalloc(f, (void **)out, n * 4) && hipMemcpy(*out, v, n * 4, hipMemcpyHostToDevice) == hipSuccess;
+  return ink2_dalloc(f, (void **)out, n * 4) && hipMemcpy(*out, v, n * 4, hipMemcpyHostToDevice) == hipSuccess;
 }
 
-/* a vector's F32 on the device; NULL tensor: nothing (true) */
-static bool up_f32(Ink2Forward *f, const GgufTensor *t, float **out)
+/* a vector's F32 on the device, from g's file; NULL tensor: nothing (true) */
+bool ink2_up_f32_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, float **out)
 {
   *out = NULL;
   if (!t)
     return true;
   uint64_t n = 0;
-  float *v = host_f32(f->w->model, t, &n);
-  const bool ok = v && up_host(f, v, n, out);
+  float *v = ink2_host_f32(g, t, &n);
+  const bool ok = v && ink2_up_host(f, v, n, out);
   free(v);
   return ok;
 }
 
-/* a matrix's bytes as stored */
-static bool up_raw(Ink2Forward *f, const GgufTensor *t, void **out)
+/* a matrix's bytes as stored, from g's file */
+bool ink2_up_raw_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, void **out)
 {
   *out = NULL;
   if (!t)
     return true;
   void *b = malloc(t->bytes);
-  const bool ok = b && read_tensor(f->w->model, t, b) && dalloc(f, out, t->bytes) &&
+  const bool ok = b && ink2_read_tensor(g, t, b) && ink2_dalloc(f, out, t->bytes) &&
                   hipMemcpy(*out, b, t->bytes, hipMemcpyHostToDevice) == hipSuccess;
   free(b);
   return ok;
 }
 
+static bool up_f32(Ink2Forward *f, const GgufTensor *t, float **out) { return ink2_up_f32_of(f, f->w->model, t, out); }
+static bool up_raw(Ink2Forward *f, const GgufTensor *t, void **out) { return ink2_up_raw_of(f, f->w->model, t, out); }
+
 /* a full layer's static conv as the kernel's [taps][ch], tap 0 first (llama.cpp's [ch][taps], tap 0 last) */
 static bool up_conv_static(Ink2Forward *f, const GgufTensor *t, float **out)
 {
   uint64_t n = 0;
-  float *v = host_f32(f->w->model, t, &n);
+  float *v = ink2_host_f32(f->w->model, t, &n);
   if (!v)
     return false;
   const uint32_t taps = (uint32_t)f->w->geo.conv;
@@ -188,7 +191,7 @@ static bool up_conv_static(Ink2Forward *f, const GgufTensor *t, float **out)
         tw[(uint64_t)j * ch + c] = v[c * taps + (taps - 1 - j)];
     free(v), v = tw;
   }
-  const bool ok = up_host(f, v, n, out);
+  const bool ok = ink2_up_host(f, v, n, out);
   free(v);
   return ok;
 }
@@ -222,7 +225,7 @@ static bool upload(Ink2Forward *f)
     for (int k = 0; ok && k < 3; k++)
     {
       uint64_t n = E;
-      d->scale[k] = sc[k] ? host_f32(w->model, sc[k], &n) : malloc(E * sizeof(float));
+      d->scale[k] = sc[k] ? ink2_host_f32(w->model, sc[k], &n) : malloc(E * sizeof(float));
       ok = d->scale[k] && n == E;
       for (uint32_t e = 0; ok && !sc[k] && e < E; e++)
         d->scale[k][e] = 1.0f;
@@ -343,7 +346,7 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->fa_part, ink2_fa_scratch((uint32_t)H, f->max_ctx)},
   };
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
-    if (!dalloc(f, b[i].p, b[i].bytes))
+    if (!ink2_dalloc(f, b[i].p, b[i].bytes))
       return false;
   f->hpick = malloc(T * K * 4), f->hw = malloc(T * K * 4), f->kept = calloc(T, 1), f->hgpick = malloc(T * K * 4);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
@@ -365,6 +368,9 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
            ink2_forward_destroy(f), NULL;
   if (!buffers(f))
     return ink2_fail(err, "inkling2: GPU memory refused (the step's buffers)"), ink2_forward_destroy(f), NULL;
+  f->mtp = o->mtp;
+  if (f->mtp && !ink2_mtp_up(f, err))
+    return ink2_forward_destroy(f), NULL;
   if (!(f->picks = calloc((size_t)w->geo.n_layers * w->geo.n_experts, sizeof *f->picks)))
     return ink2_fail(err, "out of memory"), ink2_forward_destroy(f), NULL;
   if (!experts(f, o->room, o->picks, err))
@@ -395,6 +401,8 @@ void ink2_forward_destroy(Ink2Forward *f)
             ms.wait_ns[1] * 1e-9);
   }
   hipDeviceSynchronize();
+  if (f->mtp)
+    ink2_mtp_down(f);
   membrane_destroy(f->mem);
   host_slots_destroy(f->slots), host_slots_destroy(f->stream);
   for (int i = 0; f->fds && i < f->w->model->n_files; i++)
@@ -430,7 +438,7 @@ uint64_t ink2_forward_bytes(const Ink2Forward *f) { return f ? f->dense_bytes + 
 const uint64_t *ink2_forward_picks(const Ink2Forward *f) { return f ? f->picks : NULL; }
 
 /* y [n][rows] = W x, MV_MAX_TOKENS tokens a launch (a token's bits its own) */
-static bool mat(const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y)
+bool ink2_mat(const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y)
 {
   const uint32_t rows = (uint32_t)t->dims[1], cols = (uint32_t)t->dims[0];
   for (uint32_t at = 0; at < n; at += MV_MAX_TOKENS)
@@ -461,10 +469,10 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
      this one's - their reads the misses' bandwidth (4.25 against 4.6 tok/s). which are read ahead changes no bit */
   const bool next = l + 1 < g->n_layers && P >= E;
   const Ink2Layer *L1 = next ? &f->w->layer[l + 1] : NULL;
-  if (!mat(L->router, d->router, f->xn, n, f->logit) ||
+  if (!ink2_mat(L->router, d->router, f->xn, n, f->logit) ||
       !ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, f->pw,
                          NULL) ||
-      (next && (!mat(L1->router, f->L[l + 1].router, f->xn, n, f->logit) ||
+      (next && (!ink2_mat(L1->router, f->L[l + 1].router, f->xn, n, f->logit) ||
                 !ops_router_scored(f->logit, f->L[l + 1].router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n,
                                    f->gpick, f->gw, NULL) ||
                 hipMemcpy(f->hgpick, f->gpick, P * 4, hipMemcpyDeviceToHost) != hipSuccess)) ||
@@ -584,11 +592,17 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       GPU(ink2_tail_room(&s->conv[l][c], n));
   uint32_t nb = 0;
   pf(PF_HEAD);
+  if (f->mtp) /* the drafter's taps: this run's rows of the step's */
+    s->tap_row0 = row0, s->tap_pos0 = (int32_t)pos;
   for (int l = 0; l < g->n_layers; l++)
   {
     const Ink2Layer *L = &W->layer[l];
     const Ink2Dev *d = &f->L[l];
     const bool full = !g->sliding[l], boundary = l % g->res_block == 0;
+    for (int k = 0; f->mtp && k + 1 < f->mtp->n_taps; k++) /* h entering a target layer: the attention residual's
+                                                              running partial */
+      if (f->mtp->targets[k] == l)
+        GPU(ink2_mtp_tap(f, k, f->h, n, row0));
     const float *aq = f->h, *ak = f->h, *av = f->h;
     if (d->attn_res_q)
     {
@@ -603,16 +617,16 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       GPU(ops_rms(av, C, C, d->v_norm, g->rms_eps, n, f->vn, C, NULL));
     }
     const float *xk = full ? f->kn : f->xn, *xv = full ? f->vn : f->xn;
-    GPU(mat(L->q, d->q, f->xn, n, f->q) && mat(L->k, d->k, xk, n, f->k) && mat(L->v, d->v, xv, n, f->v));
-    GPU(mat(L->rel, d->rel, f->xn, n, f->rel) && mat(L->gate, d->gate, f->xn, n, f->gate) &&
-        mat(L->sink, d->sink, f->xn, n, f->sink));
+    GPU(ink2_mat(L->q, d->q, f->xn, n, f->q) && ink2_mat(L->k, d->k, xk, n, f->k) && ink2_mat(L->v, d->v, xv, n, f->v));
+    GPU(ink2_mat(L->rel, d->rel, f->xn, n, f->rel) && ink2_mat(L->gate, d->gate, f->xn, n, f->gate) &&
+        ink2_mat(L->sink, d->sink, f->xn, n, f->sink));
     Ink2Tail *ck = &s->conv[l][INK2_CONV_K], *cv = &s->conv[l][INK2_CONV_V];
     if (full)
     {
-      GPU(mat(L->k_conv_proj, d->k_conv_proj, xk, n, f->dyn));
+      GPU(ink2_mat(L->k_conv_proj, d->k_conv_proj, xk, n, f->dyn));
       GPU(ink2_conv_dyn(f->k, n, kd, taps, KV, d->k_conv, f->dyn, ink2_tail_last(ck, taps - 1), conv_res, dyn_scale,
                         f->kc, NULL));
-      GPU(mat(L->v_conv_proj, d->v_conv_proj, xv, n, f->dyn));
+      GPU(ink2_mat(L->v_conv_proj, d->v_conv_proj, xv, n, f->dyn));
       GPU(ink2_conv_dyn(f->v, n, kd, taps, KV, d->v_conv, f->dyn, ink2_tail_last(cv, taps - 1), conv_res, dyn_scale,
                         f->vc, NULL));
     }
@@ -654,7 +668,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     GPU(ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att, f->fa_part,
                   NULL));
     pf(PF_ATTN);
-    GPU(mat(L->out, d->out, f->att, n, f->o));
+    GPU(ink2_mat(L->out, d->out, f->att, n, f->o));
     Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];
     GPU(ink2_conv(f->o, n, C, taps, d->out_conv, ink2_tail_last(co, taps - 1), conv_res, conv_scale, f->r, NULL));
     GPU(ink2_tail_put(co, f->o, n));
@@ -684,6 +698,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   /* the head: the rows from the prompt's end - 1 on */
   GPU(ink2_attn_res(f->out_res_q, 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->tmp, NULL));
   GPU(ops_rms(f->tmp, C, C, f->out_norm, g->rms_eps, n, f->xn, C, NULL));
+  if (f->mtp) /* the final normed hidden: the last tap */
+    GPU(ink2_mtp_tap(f, f->mtp->n_taps - 1, f->xn, n, row0));
   const uint32_t VR = (uint32_t)W->output->dims[1], V = f->vocab;
   uint32_t first = 0;
   if (s->prompt_end && s->prompt_end - 1 > pos)
