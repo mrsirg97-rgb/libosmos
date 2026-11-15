@@ -3996,13 +3996,13 @@ layer, nothing of attn_res's (a token's block states its own). the drafter (mtp.
 after the main model.
 
 **the engine** (2026-11-14; osmos/ink2/forward.h, src/ink2/hip_forward.c, hip_seq.c). ink2_run's math a step at a
-time: the dense weights resident (~6 GB), the routed experts the membrane's units (warmed an expert of every layer
-at a time, the room the budget's), each distinct pick read once for its tokens (mv_group_tok; ink2_swiglu_rows,
-ink2_moe_sum: the bits of a pick at a time). a sequence's rows are tails - each full layer's keys and values to its
-position, each sliding layer's last window - 1 + 15 (its keys handed in from a tile's start), each layer's four convs'
-last 3 inputs - each kept INK2_MAX_BACK rows past what the next token reads and moved to the front when full (cap 2
-keep + a step's: the move's halves apart). nothing is recurrent, so a rollback is the bits of never having run the
-tokens, a mark the windows and convs (~330 MB), a save the full layers' rows too.
+time: the dense weights resident (~6 GB), the routed experts the membrane's units (warmed an expert of every layer at
+a time, the room the budget's), each distinct pick read once for its tokens (mv_group_tok, mm_group since "a prompt's
+steps on mm" below; ink2_swiglu_rows, ink2_moe_sum: the bits of a pick at a time). a sequence's rows are tails - each
+full layer's keys and values to its position, each sliding layer's last window - 1 + 15 (its keys handed in from a
+tile's start), each layer's four convs' last 3 inputs - each kept INK2_MAX_BACK rows past what the next token reads
+and moved to the front when full (cap 2 keep + a step's: the move's halves apart). nothing is recurrent, so a rollback
+is the bits of never having run the tokens, a mark the windows and convs (~330 MB), a save the full layers' rows too.
 
 held to ink2_run (ATTN=fa) on UD-IQ1_S, 2,600 wiki tokens in steps of 200, 64, 7 and 1 (the tails moved at ~2,300):
 every row its bits, 11 rollbacks and a save and load the same bits. the first run was not: KLD 1.2e-3, top-1 99.35%.
@@ -4014,6 +4014,37 @@ real, not zero, one ulp of the output moved (1,652 of 6.7M values; zeroing K pas
 of zeros left the sum exact). so a row's own tile's p . v is over the values to its key alone (a WMMA a cut, at most
 15 a wave a tile; a decode's one). test_ink2_ops_gpu holds 14 steps - chunks, a prompt's tail, single decodes - to
 the prompt's bits for each layer kind. a kernel that sums a tile in hardware must not let a masked lane's operand in.
+
+**a prompt's steps on mm** (2026-11-14). the prompt ran on the decode's kernels - the dense matrices mv_run 8 tokens a
+launch (each weight read again every 8 tokens), the experts mv_group_tok's entries of 8 - an 8K prompt (ours, ROOM=40,
+PROMPT=1) 32.9 tok/s in steps of 512, 43.1 in steps of 2,048. WMMA's sums are no order a VALU repeats (0.5.5's probe),
+so a prompt on mm beside a decode on mv would part a token's bits by its step. the rule is Qwen's: **the kernel is the
+matrix's, never the step's** - mm (mm_tokens) for every matrix whose type and shape it takes (the experts, the Q5_KR /
+Q6_K / Q8_0 dense, the head), the matvec (mv_strided: mv_run's bits, wide tiles past 8) for the F32 router and conv
+projections and the BF16 sink; the experts mm_group's at every step (an entry an expert's part of MM_MAX_TOKENS rows,
+a launch a run of the same column tiles - hip_ffn.c's tables), ink2_moe_sum their sum in slot order as before. mm's
+x16 refuses a value past f16: the step fails, its sequences with it. the drafter keeps the matvec (ink2_mv: a draft is
+a proposal). ink2_run MAT=mm runs the same kernels (its experts mm_run at one token) and is the oracle.
+- **held** (ink2_engine CHECK=1 against ink2_run ATTN=fa MAT=mm): UD-IQ1_S, 2,600 wiki tokens in steps 1,024, 200,
+  64, 7, 1, 2-8 and 512, and in one step of 2,600 (dense past MM_MAX_TOKENS: two x16 chunks); ours (Q5_KR dense),
+  1,447 in steps 640 .. 1 and in one - every row its bits, 11 rollbacks and a save and load the same bits. the matvec
+  engine against the mm reference: 0 rows its bits, kld 3.9e-3 (the check sees the kernels).
+- **what f16 activations cost**: against the reference's wiki10k rows (ink2_run, ours, ATTN F32) kld 0.195613 ->
+  0.195863, top-1 85.70 -> 85.54%, ppl 3.6706 -> 3.6713; on the engine's own texts ppl UD 2.6681 -> 2.6682, ours
+  2.4763 -> 2.4905.
+- **the stream two layers**: an 8K step on mm 194 tok/s, the SSD at 4.5 GB/s and the GPU ~50% busy (7.2 GB/s at the
+  warm start) - one layer's stream holds the layer's cold experts until its visit ends, so the next layer's reads
+  ahead waited under its kernels. two layers (+3.4 GiB pinned): the GPU ~90% busy, 321-333 tok/s. the read ahead
+  named after the layer's holds (DeepSeek's order) 321-333 against 311 before them.
+- **the step's size**: a prompt step reads each cold expert once (~100 GB at a 40 GiB room), so its count is the
+  prompt's speed - an 8K prompt 115 / 238 / 321-333 tok/s at 2,048 / 4,096 / 8,192, the forward 54.8 / 58.0 / 64.5
+  GiB with the room (of 8,192's, the logits' [max_tokens][n_vocab] 6.6 GB, every row kept or not). INK2_STEP_TOKENS
+  8,192; osmos-serve's --max-tokens (2,048 by default) still names it.
+- **the decode's price**: plain decode (ours, ROOM=40, after a 2,048 step) 5.43 / 5.42 -> 4.75 / 4.76 tok/s. profiled
+  (a step's ms, decode steps of 1 and 8): the dense on mm faster (inputs 27.4 -> 23.0, mid 11.8 -> 9.9), the experts'
+  kernels slower (121.8 -> 155.5: mm_group at a few tokens an expert against mv_group_tok; IQ1_S's and IQ2_S's mm
+  shapes their siblings', never measured), the reads' waits the same (279 / 274). the lever is mm's small-count
+  expert tiles (each shape its bits: a pack's references made again).
 
 **the dialect** (osmos-api). the tokenizer: o200k's expression (pretok_o200k.c; the letter classes' case from
 unicode_case.h), 242 cases and DESIGN.md's 167K tokens the same ids as the checkpoint's tokenizer.json. the template:
