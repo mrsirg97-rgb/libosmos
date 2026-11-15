@@ -1,4 +1,5 @@
-// mvsweep [experts|dense|f32] [tokens]: the matvec kernel's shapes (kernels/mv.h: R rows a wave, U chunks in flight a
+// mvsweep [experts|dense|f32|ink2] [tokens]: (ink2: Inkling-2's expert types at its shapes - gate / up 2304 x 4608,
+// down 4608 x 2304 - at 1, 2, 4 or 8 tokens) the matvec kernel's shapes (kernels/mv.h: R rows a wave, U chunks in flight a
 // lane) timed on Qwen3.8-Flash-Next's shapes at 1, 2, 3 or 4 tokens (an expert read for that many) - each expert type's gate / up (640 x 2560) and down (2560 x 640), 10 experts
 // a call, and the dense matrices' - every call reading cold memory (its matrices rotated through 1 GiB). R and U
 // change no bit (mv.h: a lane's chunks summed in the same order); what this picks is time.
@@ -126,6 +127,25 @@ static void sweep(bool experts) {
   }
 }
 
+template <int NT>
+static void sweep_ink2_dense() {  // Inkling-2's attention at Q5_K (GPTQ'd): q / gate 6144 x 4608, o 4608 x 6144, k 1024 x 4608
+  SWEEP_D(quant::kQ5_K, NT, "Q5_K", 6144, 4608);
+  SWEEP_D(quant::kQ5_K, NT, "Q5_K", 4608, 6144);
+  SWEEP_D(quant::kQ5_K, NT, "Q5_K", 1024, 4608);
+  SWEEP_D(quant::kQ5_KR, NT, "Q5_KR", 6144, 4608);
+  SWEEP_D(quant::kQ5_KR, NT, "Q5_KR", 4608, 6144);
+  SWEEP_D(quant::kQ5_KR, NT, "Q5_KR", 1024, 4608);
+}
+
+template <int NT>
+static void sweep_ink2() {
+  SWEEP_G(quant::kIQ1_S, NT, "IQ1_S", 2304, 4608);
+  SWEEP_G(quant::kIQ2_XXS, NT, "IQ2_XXS", 2304, 4608);
+  SWEEP_G(quant::kIQ2_S, NT, "IQ2_S", 4608, 2304);
+  SWEEP_G(quant::kIQ3_XXS, NT, "IQ3_XXS", 4608, 2304);
+  SWEEP_G(quant::kIQ4_XS, NT, "IQ4_XS", 4608, 2304);
+}
+
 int main(int argc, char** argv) {
   const char* which = argc > 1 ? argv[1] : "experts";
   HIP(hipMalloc(&pool, kPool));
@@ -142,6 +162,25 @@ int main(int argc, char** argv) {
   HIP(hipMemcpy(xrow, zeros.data(), kExperts * 4, hipMemcpyHostToDevice));
   HIP(hipDeviceSynchronize());
   const bool ex = !std::strcmp(which, "experts");
+  if (!std::strcmp(which, "ink2dense")) {
+    switch (nt) {
+      case 1: sweep_ink2_dense<1>(); break;
+      case 4: sweep_ink2_dense<4>(); break;
+      case 8: sweep_ink2_dense<8>(); break;
+      default: return std::printf("ink2dense tokens: 1, 4, 8\n"), 2;
+    }
+    return 0;
+  }
+  if (!std::strcmp(which, "ink2")) {
+    switch (nt) {
+      case 1: sweep_ink2<1>(); break;
+      case 2: sweep_ink2<2>(); break;
+      case 4: sweep_ink2<4>(); break;
+      case 8: sweep_ink2<8>(); break;
+      default: return std::printf("ink2 tokens: 1, 2, 4, 8\n"), 2;
+    }
+    return 0;
+  }
   if (!std::strcmp(which, "f32")) {
     switch (nt) {
       case 1: sweep_f32<1>(); break;

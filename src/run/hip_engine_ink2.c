@@ -198,7 +198,9 @@ static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ER
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                    char err[OSMOS_ERR])
 {
-  return ink2_seq_draft(((Eng *)p)->f, s, y, e_block(p), conf_min, cum_min, drafts, conf, err);
+  const char *cap = getenv("INK2_DRAFT_MAX"); /* (a measurement's: the drafts a round at most) */
+  const uint32_t most = cap && atoi(cap) > 0 && (uint32_t)atoi(cap) < e_block(p) ? (uint32_t)atoi(cap) : e_block(p);
+  return ink2_seq_draft(((Eng *)p)->f, s, y, most, conf_min, cum_min, drafts, conf, err);
 }
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return ink2_seq_create(((Eng *)p)->f, err); }

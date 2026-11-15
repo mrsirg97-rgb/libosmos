@@ -98,7 +98,9 @@ struct Ink2Forward
   float *hw, *xs, *gw; /* xs: the pairs' inputs in expert order */
   float *fa_part; /* a split decode's attention units (ink2_fa_scratch) */
   /* moe's tables: the counting sort's, the region built on the host and its device copy */
-  uint32_t *m_at, *m_by;
+  uint32_t *m_at, *m_by, *m_ord; /* m_ord, m_pt, m_pi: the entries' order by count, its staging */
+  const void **m_pt;
+  int32_t *m_pi;
   uint8_t *m_host;
   void *m_dev;
   void *amax;
@@ -116,6 +118,7 @@ bool ink2_up_host(Ink2Forward *f, const float *v, uint64_t n, float **out);
 bool ink2_up_f32_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, float **out);
 bool ink2_up_raw_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, void **out);
 bool ink2_mat(const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y);
+uint32_t ink2_type(const GgufTensor *t); /* the type a resident matrix's bytes are (a Q5_K one's repacked: Q5_KR) */
 /* the tails: room for n more rows (the move), the last k rows, n F32 rows appended (an f16 tail's converted; queued
    on the null stream); a tail's row r */
 bool ink2_tail_room(Ink2Tail *t, uint32_t n);

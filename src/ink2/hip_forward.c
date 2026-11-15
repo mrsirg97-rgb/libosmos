@@ -14,6 +14,7 @@
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/quant.h"
 #include "osmos/mem/arena.h"
 
 /* INK2_PROFILE=1: a step's sections timed, each after a synchronize (the bits the same), totals at destroy */
@@ -156,15 +157,27 @@ bool ink2_up_f32_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, float **
   return ok;
 }
 
-/* a matrix's bytes as stored, from g's file */
+/* a matrix's bytes as stored, from g's file - a Q5_K one repacked (quant_repack_q5k: 16-row tiles, the matvec's
+   loads one run a wave; the same values, so the same bits): every resident Q5_K the forward's Q5_KR (ink2_mat's
+   type), one whose rows are not whole tiles refused */
 bool ink2_up_raw_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, void **out)
 {
   *out = NULL;
   if (!t)
     return true;
-  void *b = malloc(t->bytes);
-  const bool ok = b && ink2_read_tensor(g, t, b) && ink2_dalloc(f, out, t->bytes) &&
-                  hipMemcpy(*out, b, t->bytes, hipMemcpyHostToDevice) == hipSuccess;
+  const bool q5 = t->type == QUANT_Q5_K;
+  if (q5 && (t->n_dims != 2 || t->dims[1] % 16))
+    return false;
+  void *b = malloc(t->bytes), *stage = NULL;
+  const uint64_t rows = t->n_dims == 2 ? t->dims[1] : 1, packed = q5 ? t->bytes / 176 * 180 : t->bytes;
+  bool ok = b && ink2_read_tensor(g, t, b) && ink2_dalloc(f, out, packed);
+  if (ok && q5)
+    ok = hipMalloc(&stage, t->bytes) == hipSuccess && hipMemcpy(stage, b, t->bytes, hipMemcpyHostToDevice) == hipSuccess &&
+         quant_repack_q5k(stage, (uint32_t)rows, (uint32_t)t->dims[0], *out, NULL) && hipDeviceSynchronize() == hipSuccess;
+  else if (ok)
+    ok = hipMemcpy(*out, b, t->bytes, hipMemcpyHostToDevice) == hipSuccess;
+  if (stage)
+    hipFree(stage);
   free(b);
   return ok;
 }
@@ -350,8 +363,10 @@ static bool buffers(Ink2Forward *f)
       return false;
   f->hpick = malloc(T * K * 4), f->hw = malloc(T * K * 4), f->kept = calloc(T, 1), f->hgpick = malloc(T * K * 4);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
+  f->m_ord = malloc((T * K + E) * sizeof *f->m_ord), f->m_pt = malloc(3 * (T * K + E) * sizeof *f->m_pt);
+  f->m_pi = malloc(2 * (T * K + E) * sizeof *f->m_pi);
   f->m_host = malloc(table_bytes(T * K, E));
-  return f->hpick && f->hw && f->kept && f->hgpick && f->m_at && f->m_by && f->m_host;
+  return f->hpick && f->hw && f->kept && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_ord && f->m_pt && f->m_pi;
 }
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR])
@@ -430,6 +445,7 @@ void ink2_forward_destroy(Ink2Forward *f)
       free(d->scale[k]);
   }
   free(f->picks), free(f->hpick), free(f->hw), free(f->kept), free(f->hgpick), free(f->m_at), free(f->m_by), free(f->m_host);
+  free(f->m_ord), free(f->m_pt), free(f->m_pi);
   free(f);
 }
 
@@ -438,13 +454,16 @@ uint64_t ink2_forward_bytes(const Ink2Forward *f) { return f ? f->dense_bytes + 
 const uint64_t *ink2_forward_picks(const Ink2Forward *f) { return f ? f->picks : NULL; }
 
 /* y [n][rows] = W x, MV_MAX_TOKENS tokens a launch (a token's bits its own) */
+uint32_t ink2_type(const GgufTensor *t) { return t->type == QUANT_Q5_K ? QUANT_Q5_KR : t->type; }
+
 bool ink2_mat(const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y)
 {
   const uint32_t rows = (uint32_t)t->dims[1], cols = (uint32_t)t->dims[0];
+  const uint32_t type = ink2_type(t);
   for (uint32_t at = 0; at < n; at += MV_MAX_TOKENS)
   {
     const uint32_t k = n - at < MV_MAX_TOKENS ? n - at : MV_MAX_TOKENS;
-    if (!mv_run(t->type, w, rows, cols, x + (uint64_t)at * cols, k, y + (uint64_t)at * rows, NULL))
+    if (!mv_run(type, w, rows, cols, x + (uint64_t)at * cols, k, y + (uint64_t)at * rows, NULL))
       return false;
   }
   return true;
@@ -544,6 +563,29 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
     }
     r = end;
   }
+  /* the entries by their tokens' count (a counting sort, each count's in order): a launch a count at its own width -
+     an entry's sums its tokens' own whatever the launch, and an entry of 1 in a launch of 4 computed 4 (rows_of's NT
+     sums, stored the live): a verify's entries mostly 1 or 2 */
+  uint32_t first[MV_MAX_TOKENS + 2] = {0}, *ord = f->m_ord;
+  for (uint32_t i = 0; i < ne; i++)
+    first[cnt[i] + 1]++;
+  for (uint32_t c = 1; c <= MV_MAX_TOKENS; c++)
+    first[c + 1] += first[c];
+  for (uint32_t i = 0; i < ne; i++)
+    ord[first[cnt[i]]++] = i;
+  for (uint32_t c = MV_MAX_TOKENS; c >= 1; c--) /* first[c]: each count's start again */
+    first[c] = first[c - 1];
+  first[0] = first[1] = 0;
+  {
+    const void **pt = f->m_pt;
+    int32_t *pi = f->m_pi;
+    for (uint32_t k = 0; k < ne; k++)
+      pt[k] = tg[ord[k]], pt[ne + k] = tu[ord[k]], pt[2 * ne + k] = td[ord[k]], pi[k] = cnt[ord[k]],
+      pi[ne + k] = xrow[ord[k]];
+    for (uint32_t k = 0; k < ne; k++)
+      tg[k] = pt[k], tu[k] = pt[ne + k], td[k] = pt[2 * ne + k], cnt[k] = pi[k], xrow[k] = pi[ne + k];
+  }
+  (void)maxc;
   /* the pointer tables at cap apart: every table's place fixed by the step's most pairs */
   const uint64_t bytes = (uint64_t)((uint8_t *)(su + P) - h);
   uint8_t *dv = f->m_dev;
@@ -551,13 +593,20 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   const int32_t *dcnt = (const int32_t *)(dd + cap), *dxrow = dcnt + cap, *dgidx = dxrow + cap, *drow = dgidx + P;
   const float *da = (const float *)(drow + P), *dsg = da + P, *dsu = dsg + P;
   const double x0 = pf_on() ? pf_now() : 0;
-  if (hipMemcpy(dv, h, bytes, hipMemcpyHostToDevice) != hipSuccess ||
-      !ops_gather_rows(f->xs, f->xn, dgidx, P, C, NULL) ||
-      !mv_group_tok(L->exp_gate->type, dg, dcnt, dxrow, ne, maxc, F, C, f->xs, C, f->eg, F, NULL) ||
-      !mv_group_tok(L->exp_up->type, du, dcnt, dxrow, ne, maxc, F, C, f->xs, C, f->eu, F, NULL) ||
-      !ink2_swiglu_rows(f->eg, f->eu, dsg, dsu, F, g->gate_softcap, g->up_softcap, P, f->eh, NULL) ||
-      !mv_group_tok(L->exp_down->type, dd, dcnt, dxrow, ne, maxc, C, F, f->eh, F, f->ed, C, NULL) ||
-      !ink2_moe_sum(f->moe, f->ed, da, drow, K, n, C, NULL))
+  bool ok = hipMemcpy(dv, h, bytes, hipMemcpyHostToDevice) == hipSuccess && ops_gather_rows(f->xs, f->xn, dgidx, P, C, NULL);
+  for (uint32_t c = 1; ok && c <= MV_MAX_TOKENS; c++) /* gate and up, a count's entries a launch */
+  {
+    const uint32_t o = first[c], k = (c < MV_MAX_TOKENS ? first[c + 1] : ne) - o;
+    ok = !k || (mv_group_tok(L->exp_gate->type, dg + o, dcnt + o, dxrow + o, k, c, F, C, f->xs, C, f->eg, F, NULL) &&
+                mv_group_tok(L->exp_up->type, du + o, dcnt + o, dxrow + o, k, c, F, C, f->xs, C, f->eu, F, NULL));
+  }
+  ok = ok && ink2_swiglu_rows(f->eg, f->eu, dsg, dsu, F, g->gate_softcap, g->up_softcap, P, f->eh, NULL);
+  for (uint32_t c = 1; ok && c <= MV_MAX_TOKENS; c++)
+  {
+    const uint32_t o = first[c], k = (c < MV_MAX_TOKENS ? first[c + 1] : ne) - o;
+    ok = !k || mv_group_tok(L->exp_down->type, dd + o, dcnt + o, dxrow + o, k, c, C, F, f->eh, F, f->ed, C, NULL);
+  }
+  if (!ok || !ink2_moe_sum(f->moe, f->ed, da, drow, K, n, C, NULL))
     return ink2_fail(err, "inkling2: a GPU call failed (the experts)");
   if (pf_on())
     hipDeviceSynchronize(), g_step[PF_XK] += pf_now() - x0;
@@ -709,7 +758,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   for (uint32_t at = first; at < n; at += MV_MAX_TOKENS)
   {
     const uint32_t k = n - at < MV_MAX_TOKENS ? n - at : MV_MAX_TOKENS;
-    GPU(mv_run(W->output->type, f->output, VR, C, f->xn + (uint64_t)at * C, k, f->head, NULL));
+    GPU(mv_run(ink2_type(W->output), f->output, VR, C, f->xn + (uint64_t)at * C, k, f->head, NULL));
     GPU(hipMemcpy2DAsync(f->logits + (uint64_t)(row0 + at) * V, (uint64_t)V * 4, f->head, (uint64_t)VR * 4,
                          (uint64_t)V * 4, k, hipMemcpyDeviceToDevice, NULL) == hipSuccess);
   }
