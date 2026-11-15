@@ -18,6 +18,8 @@ bool ink2_swiglu(const float *g, const float *u, uint32_t n, float gcap, float u
                  void *stream);
 bool ink2_swiglu_rows(const float *g, const float *u, const float *sg, const float *su, uint32_t n, float gcap,
                       float ucap, uint32_t rows, float *h, void *stream);
+bool ink2_swiglu_x16(const float *g, const float *u, const float *sg, const float *su, uint32_t n, float gcap,
+                     float ucap, const int32_t *idx, uint32_t slots, void *x16, int32_t *overflow, void *stream);
 bool ink2_moe_sum(float *y, const float *x, const float *a, const int32_t *row, uint32_t k, uint32_t n_tok,
                   uint32_t dim, void *stream);
 bool ink2_gram(const float *x, uint32_t n_tok, uint32_t dim, float *h, void *stream);
@@ -126,6 +128,10 @@ ink2_swiglu
 ink2_swiglu_rows
   ink2_swiglu over rows of n with row r's gate times sg[r] and its up times su[r] first (each pick's expert's scales:
   ink2_scale then ink2_swiglu, the same bits).
+
+ink2_swiglu_x16
+  ink2_swiglu_rows's values straight to f16 as mm_x16_rows puts them: slot s the row idx[s] (-1: zeros) of the rows
+  of n (n a multiple of MM_TILE), its values past f16 flagged in overflow - the two launches' bytes in one.
 
 ink2_moe_sum
   y[t] = the sum of a[t k + s] x[row[t k + s]] over a token's k slots in order, from zero - ink2_axpy after a zeroed

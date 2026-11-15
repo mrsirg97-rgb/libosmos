@@ -443,7 +443,6 @@ static bool buffers(Ink2Forward *f)
   }
   if (mem_on())
     fprintf(stderr, "ink2 mem:   step buffers, all %zu: %.3f GiB\n", sizeof b / sizeof *b, sum / 1073741824.0);
-  f->eh = f->eg;                /* the swiglu over its gate rows in place: each value its own index's */
   f->fa_part = (float *)f->ed; /* (the down rows' buffer: ed_bytes) */
   if (hipMemset(f->overflow, 0, 4) != hipSuccess)
     return false;
@@ -793,8 +792,8 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
       mm_x16_rows(f->xn, C, dgidx, slots, C, f->xe16, f->overflow, NULL) &&
       group(L->exp_gate->type, dg, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eg, dyg, F) &&
       group(L->exp_up->type, du, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eu, dyg, F) &&
-      ink2_swiglu_rows(f->eg, f->eu, dsg, dsu, F, g->gate_softcap, g->up_softcap, P, f->eh, NULL) &&
-      mm_x16_rows(f->eh, F, dhidx, slots, F, f->xe16, f->overflow, NULL) &&
+      ink2_swiglu_x16(f->eg, f->eu, dsg, dsu, F, g->gate_softcap, g->up_softcap, dhidx, slots, f->xe16,
+                      f->overflow, NULL) &&
       group(L->exp_down->type, dd, cnt, dcnt, ne, C, F, f->xe16, dxd, f->ed, dyd, C) &&
       ink2_moe_sum(f->moe, f->ed, da, drow, K, n, C, NULL);
   if (!ok)

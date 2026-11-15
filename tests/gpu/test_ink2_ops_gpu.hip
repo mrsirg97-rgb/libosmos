@@ -8,6 +8,7 @@
 
 extern "C" {
 #include "osmos/gpu/ink2_ops.h"
+#include "osmos/gpu/mm.h"
 #include "osmos/gpu/ops.h"
 }
 
@@ -208,6 +209,37 @@ int main() {
     CHECK(ink2_swiglu(dg, du, n, 4.0f, 25.0f, t, dh, nullptr));
     held("swiglu (softcaps 4, 25)", host_of(dh, g.v.size()), in("swiglu", "out"), 1.0, kExactRel);
     hipFree(dg), hipFree(du), hipFree(dh);
+  }
+  {  // the swiglu straight to the down's f16: ink2_swiglu_rows then mm_x16_rows' bytes (padded slots, a value past f16)
+    const uint32_t n = 256, rows = 21, slots = 48;
+    auto g = normals((size_t) n * rows, 31, 3.0f), u = normals((size_t) n * rows, 32, 20.0f);
+    const auto sg = normals(rows, 33, 0.5f, 1.0f), su = normals(rows, 34, 0.5f, 1.0f);
+    std::vector<int32_t> idx(slots, -1);
+    for (uint32_t s = 0; s < rows; s++) idx[(s * 7) % slots] = (int32_t) s;
+    float *dg = dev_from(g), *du = dev_from(u), *dsg = dev_from(sg), *dsu = dev_from(su);
+    float* dh = dev_alloc<float>((size_t) n * rows);
+    int32_t *di = dev_alloc<int32_t>(slots), *dov = dev_alloc<int32_t>(2);
+    void *x0 = dev_alloc<uint16_t>((size_t) slots * n), *x1 = dev_alloc<uint16_t>((size_t) slots * n);
+    CHECK(hipMemcpy(di, idx.data(), slots * 4, hipMemcpyHostToDevice) == hipSuccess &&
+          hipMemset(dov, 0, 8) == hipSuccess);
+    CHECK(ink2_swiglu_rows(dg, du, dsg, dsu, n, 4.0f, 25.0f, rows, dh, nullptr) &&
+          mm_x16_rows(dh, n, di, slots, n, x0, dov, nullptr));
+    CHECK(ink2_swiglu_x16(dg, du, dsg, dsu, n, 4.0f, 25.0f, di, slots, x1, dov + 1, nullptr));
+    CHECK(same_bits(bytes_of(x1, (size_t) slots * n * 2), bytes_of(x0, (size_t) slots * n * 2)));
+    int32_t ov[2];
+    CHECK(hipMemcpy(ov, dov, 8, hipMemcpyDeviceToHost) == hipSuccess && ov[0] == 0 && ov[1] == 0);
+    g[5] = 1e30f, u[5] = 1e30f;  // a value past f16: both flag it
+    CHECK(hipMemcpy(dg, g.data(), g.size() * 4, hipMemcpyHostToDevice) == hipSuccess &&
+          hipMemcpy(du, u.data(), u.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+    hipFree(dsu), dsu = dev_from(std::vector<float>(rows, 1e30f));
+    CHECK(ink2_swiglu_rows(dg, du, dsg, dsu, n, 4.0f, 1e30f, rows, dh, nullptr) &&
+          mm_x16_rows(dh, n, di, slots, n, x0, dov, nullptr) &&
+          ink2_swiglu_x16(dg, du, dsg, dsu, n, 4.0f, 1e30f, di, slots, x1, dov + 1, nullptr));
+    CHECK(same_bits(bytes_of(x1, (size_t) slots * n * 2), bytes_of(x0, (size_t) slots * n * 2)));
+    CHECK(hipMemcpy(ov, dov, 8, hipMemcpyDeviceToHost) == hipSuccess && ov[0] == 1 && ov[1] == 1);
+    std::printf("  swiglu to f16: ink2_swiglu_rows then mm_x16_rows' bytes, and its flag\n");
+    for (void* d : {(void*) dg, (void*) du, (void*) dsg, (void*) dsu, (void*) dh, (void*) di, (void*) dov, x0, x1})
+      hipFree(d);
   }
   // the static convs: the post-attention one, and a sliding layer's k and v
   held("conv (post-attention, 4 taps)", run_conv(in("conv", "x"), in("conv", "w"), 4, 1.0f / std::sqrt(5.0f)),

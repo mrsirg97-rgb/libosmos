@@ -4,6 +4,7 @@
 
 #include "block.h"
 #include "launch.h"
+#include "mm.h"
 
 extern "C" {
 #include "osmos/gpu/ink2_ops.h"
@@ -21,11 +22,14 @@ __global__ void softcap_kernel(float* x, uint64_t n, float cap) {
   if (i < n) x[i] = cap * tanhf(x[i] / cap);
 }
 
+__device__ inline float swiglu_of(float gv, float uv, float gcap, float ucap) {
+  return gcap * tanhf(gv / gcap) * sigmoid(gv) * (ucap * tanhf(uv / ucap));
+}
+
 __global__ void swiglu_kernel(const float* g, const float* u, uint64_t n, float gcap, float ucap, float* h) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= n) return;
-  const float gv = g[i];
-  h[i] = gcap * tanhf(gv / gcap) * sigmoid(gv) * (ucap * tanhf(u[i] / ucap));
+  h[i] = swiglu_of(g[i], u[i], gcap, ucap);
 }
 
 // the same with each row's gate and up scaled first (an NVFP4 expert's scale: ink2_scale then ink2_swiglu's bits)
@@ -34,8 +38,32 @@ __global__ void swiglu_rows_kernel(const float* g, const float* u, const float* 
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= all) return;
   const uint64_t r = i / n;
-  const float gv = g[i] * sg[r], uv = u[i] * su[r];
-  h[i] = gcap * tanhf(gv / gcap) * sigmoid(gv) * (ucap * tanhf(uv / ucap));
+  h[i] = swiglu_of(g[i] * sg[r], u[i] * su[r], gcap, ucap);
+}
+
+// the same straight into the down's f16 (mm_x16_rows of its rows): slot t row idx[t]'s (-1: zero) - a thread
+// kX16Run adjacent columns of a slot in x16_rows_kernel's tiled order, each value swiglu_rows_kernel's, then x16_put's
+// rounding and flag
+constexpr uint32_t kX16Run = 8;
+__global__ void swiglu_x16_kernel(const float* g, const float* u, const float* sg, const float* su, uint32_t n,
+                                  float gcap, float ucap, const int32_t* idx, uint32_t slots, _Float16* x16,
+                                  int32_t* overflow) {
+  const uint64_t o = ((uint64_t) blockIdx.x * kThreads + threadIdx.x) * kX16Run;
+  const uint64_t tile = (uint64_t) mm::kTile * n;
+  const uint32_t in = (uint32_t) (o % tile), frag = in % mm::kFrag;
+  const uint32_t t = (uint32_t) (o / tile) * mm::kTile + frag / mm::kTile;
+  if (t >= slots) return;
+  const uint32_t c = in / mm::kFrag * mm::kTile + frag % mm::kTile;
+  const int32_t r = idx[t];
+  bool over = false;
+  _Float16 h[kX16Run];
+  for (uint32_t j = 0; j < kX16Run; j++) {
+    const uint64_t i = (uint64_t) r * n + c + j;
+    const float v = r >= 0 ? swiglu_of(g[i] * sg[r], u[i] * su[r], gcap, ucap) : 0.0f;
+    over |= !(fabsf(v) <= mm::kF16Max), h[j] = (_Float16) v;
+  }
+  if (over) atomicOr(overflow, 1);
+  __builtin_memcpy(x16 + o, h, sizeof h);
 }
 
 // a token's experts summed in its slot order from zero: ink2_axpy's sum, one after another
@@ -752,6 +780,18 @@ extern "C" bool ink2_swiglu_rows(const float* g, const float* u, const float* sg
   if (!g || !u || !sg || !su || !h || !n || !rows || !(gcap > 0) || !(ucap > 0)) return false;
   const uint64_t all = (uint64_t) n * rows;
   swiglu_rows_kernel<<<grid(all), kThreads, 0, st(stream)>>>(g, u, sg, su, n, all, gcap, ucap, h);
+  return ok();
+}
+
+extern "C" bool ink2_swiglu_x16(const float* g, const float* u, const float* sg, const float* su, uint32_t n,
+                                float gcap, float ucap, const int32_t* idx, uint32_t slots, void* x16,
+                                int32_t* overflow, void* stream) {
+  if (!g || !u || !sg || !su || !idx || !x16 || !overflow || !n || n % mm::kTile || !slots || !(gcap > 0) ||
+      !(ucap > 0))
+    return false;
+  const uint64_t runs = (uint64_t) (slots + mm::kTile - 1) / mm::kTile * mm::kTile * n / kX16Run;
+  swiglu_x16_kernel<<<grid(runs), kThreads, 0, st(stream)>>>(g, u, sg, su, n, gcap, ucap, idx, slots,
+                                                             (_Float16*) x16, overflow);
   return ok();
 }
 
