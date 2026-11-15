@@ -61,6 +61,12 @@ typedef struct Q35Seq Q35Seq;
 
 Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_t max_ctx, char err[Q35_ERR]);
 void q35_forward_destroy(Q35Forward *f);
+/* latent sparse attention (osmos/lsa.h): the maps file (tools/convert/lsa_maps.py's: W_Q and W_K an attention layer),
+   before any sequence; from then every attention layer's keys indexed and each closed block bucketed (a prompt's
+   steps and a decode's), a decode step's (n <= Q35_ATTN_DECODE_MAX) attention its read's alone, a prompt's dense (as
+   lsa.py's quality: the read's cost measured on what follows a prompt). the rotation YaRN's at yarn x native, the
+   maps' own (-vibes': 40). maps NULL: the rotation alone, the read off (the dense model it is measured against) */
+bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_ERR]);
 Q35Seq *q35_seq_create(Q35Forward *f, char err[Q35_ERR]);
 void q35_seq_destroy(Q35Seq *s);
 int32_t q35_seq_position(const Q35Seq *s);

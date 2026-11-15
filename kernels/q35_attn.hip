@@ -35,9 +35,11 @@ __device__ inline void row8(const uint8_t* cache, uint64_t row, uint64_t pos, ui
 template <int G>
 __global__ __launch_bounds__(32 * kWarps) void decode_kernel(const float* q, const uint8_t* kc, const uint8_t* vc,
                                                              uint32_t heads, uint32_t kv_heads, uint32_t pos0,
-                                                             uint32_t per, uint32_t parts, float* ml, float* po) {
+                                                             uint32_t per, uint32_t parts, const uint32_t* list,
+                                                             uint32_t list_len, float* ml, float* po) {
   const uint32_t lane = threadIdx.x % 32, kvh = blockIdx.x, t = blockIdx.z;
-  const uint32_t part = blockIdx.y * kWarps + threadIdx.x / 32, len = pos0 + t + 1;
+  // a token's keys: positions 0 .. its own, or (list: one token) the read's positions, entry k list[k]
+  const uint32_t part = blockIdx.y * kWarps + threadIdx.x / 32, len = list ? list_len : pos0 + t + 1;
   const uint32_t k0 = part * per, k1 = k0 + per < len ? k0 + per : len;
   const uint64_t row = (uint64_t) kv_heads * kHead / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
   const uint32_t c = kvh * kHead + lane * kLane;
@@ -51,8 +53,9 @@ __global__ __launch_bounds__(32 * kWarps) void decode_kernel(const float* q, con
   }
   for (uint32_t k = k0; k < k1; k++) {
     float kv[kLane], vv[kLane];
-    row8(kc, row, k, c, kv);
-    row8(vc, row, k, c, vv);
+    const uint64_t at = list ? list[k] : k;
+    row8(kc, row, at, c, kv);
+    row8(vc, row, at, c, vv);
 #pragma unroll
     for (int h = 0; h < G; h++) {
       float s = 0.0f;
@@ -101,13 +104,13 @@ extern "C" uint64_t q35_attn_decode_scratch(uint32_t heads, uint32_t max_tokens)
   return (uint64_t) max_tokens * heads * Q35_ATTN_PARTS * (kHead + 2);
 }
 
-extern "C" bool q35_attn_decode(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
-                                uint32_t kv_heads, uint32_t pos0, const float* gate, float* scratch, float* out,
-                                void* stream) {
+static bool run(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
+                uint32_t pos0, const uint32_t* list, uint32_t list_len, const float* gate, float* scratch, float* out,
+                void* stream) {
   if (!q || !kc || !vc || !gate || !scratch || !out || !n_tok || n_tok > Q35_ATTN_DECODE_MAX || !kv_heads ||
-      heads % kv_heads || heads / kv_heads > kGMax || heads / kv_heads == 0)
+      heads % kv_heads || heads / kv_heads > kGMax || heads / kv_heads == 0 || (list && (n_tok != 1 || !list_len)))
     return false;
-  const uint32_t len = pos0 + n_tok;  // the longest list: the last token's
+  const uint32_t len = list ? list_len : pos0 + n_tok;  // the longest list: the last token's
   // keys a warp: at least 16, the parts at most Q35_ATTN_PARTS a (token, head)
   uint32_t per = (len + Q35_ATTN_PARTS - 1) / Q35_ATTN_PARTS;
   per = per < 16 ? 16 : per;
@@ -117,15 +120,29 @@ extern "C" bool q35_attn_decode(const float* q, const void* kc, const void* vc, 
   const dim3 grid(kv_heads, blocks, n_tok);
   const hipStream_t s = launches::st(stream);
   const uint8_t *k8 = (const uint8_t*) kc, *v8 = (const uint8_t*) vc;
+#define Q35_DECODE(G) decode_kernel<G><<<grid, 32 * kWarps, 0, s>>>(q, k8, v8, heads, kv_heads, pos0, per, parts, list, list_len, ml, po)
   switch (heads / kv_heads) {
-    case 1: decode_kernel<1><<<grid, 32 * kWarps, 0, s>>>(q, k8, v8, heads, kv_heads, pos0, per, parts, ml, po); break;
-    case 2: decode_kernel<2><<<grid, 32 * kWarps, 0, s>>>(q, k8, v8, heads, kv_heads, pos0, per, parts, ml, po); break;
-    case 4: decode_kernel<4><<<grid, 32 * kWarps, 0, s>>>(q, k8, v8, heads, kv_heads, pos0, per, parts, ml, po); break;
-    case 6: decode_kernel<6><<<grid, 32 * kWarps, 0, s>>>(q, k8, v8, heads, kv_heads, pos0, per, parts, ml, po); break;
-    case 8: decode_kernel<8><<<grid, 32 * kWarps, 0, s>>>(q, k8, v8, heads, kv_heads, pos0, per, parts, ml, po); break;
+    case 1: Q35_DECODE(1); break;
+    case 2: Q35_DECODE(2); break;
+    case 4: Q35_DECODE(4); break;
+    case 6: Q35_DECODE(6); break;
+    case 8: Q35_DECODE(8); break;
     default: return false;
   }
+#undef Q35_DECODE
   if (!launches::ok()) return false;
   merge_kernel<<<n_tok * heads, kHead, 0, s>>>(ml, po, gate, heads, parts, out);
   return launches::ok();
+}
+
+extern "C" bool q35_attn_decode(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
+                                uint32_t kv_heads, uint32_t pos0, const float* gate, float* scratch, float* out,
+                                void* stream) {
+  return run(q, kc, vc, n_tok, heads, kv_heads, pos0, nullptr, 0, gate, scratch, out, stream);
+}
+
+extern "C" bool q35_attn_read(const float* q, const void* kc, const void* vc, uint32_t heads, uint32_t kv_heads,
+                              const uint32_t* list, uint32_t list_len, const float* gate, float* scratch, float* out,
+                              void* stream) {
+  return run(q, kc, vc, 1, heads, kv_heads, 0, list, list_len, gate, scratch, out, stream);
 }
