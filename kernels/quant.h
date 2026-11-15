@@ -569,21 +569,36 @@ __device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
 // (0.8.1: IQ1_S, the slowest decoder a value - 60 GB/s against IQ2_XXS's 115 - took decode_h's generic F32 path).
 // IQ1_M the same math, but no model here holds it (test_quant_gpu: no reference): it keeps the generic path until one
 // is checked
-__device__ inline h8 iq1_h(uint64_t grid, float dl, float delta) {
+struct Iq1Halves {
+  uint32_t s0, s1;  // the permutes' sources: s0 = hm << 16, s1 = hz | hp << 16
+};
+__device__ inline Iq1Halves iq1_halves(float dl, float delta) {
   float z = mul(dl, 0.0f + delta), p = mul(dl, 1.0f + delta), m = mul(dl, -1.0f + delta);
   asm("" : "+v"(z), "+v"(p), "+v"(m));  // decode_h's: each product, then f16 - not a fused v_fma_mixlo_f16
   const _Float16 hz = (_Float16) z, hp = (_Float16) p, hm = (_Float16) m;
-  const uint32_t s1 = (uint32_t) __builtin_bit_cast(uint16_t, hz) | (uint32_t) __builtin_bit_cast(uint16_t, hp) << 16;
-  const uint32_t s0 = (uint32_t) __builtin_bit_cast(uint16_t, hm) << 16;
+  return {(uint32_t) __builtin_bit_cast(uint16_t, hm) << 16,
+          (uint32_t) __builtin_bit_cast(uint16_t, hz) | (uint32_t) __builtin_bit_cast(uint16_t, hp) << 16};
+}
+__device__ inline h8 iq1_pick(uint64_t grid, Iq1Halves v) {
   u4 out;
   for (int w = 0; w < 2; w++) {
     const uint32_t base = ((uint32_t) (grid >> (32 * w)) << 1) & 0x06060606u; /* the 4 values' byte offsets */
     /* a pair's selector: its two offsets each twice (bytes 0, 0, 1, 1 of base), the high byte of each half +1 */
     const uint32_t sel0 = __builtin_amdgcn_perm(0, base, 0x01010000u) | 0x01000100u;
     const uint32_t sel1 = __builtin_amdgcn_perm(0, base, 0x03030202u) | 0x01000100u;
-    out[2 * w] = __builtin_amdgcn_perm(s0, s1, sel0), out[2 * w + 1] = __builtin_amdgcn_perm(s0, s1, sel1);
+    out[2 * w] = __builtin_amdgcn_perm(v.s0, v.s1, sel0), out[2 * w + 1] = __builtin_amdgcn_perm(v.s0, v.s1, sel1);
   }
   return __builtin_bit_cast(h8, out);
+}
+__device__ inline h8 iq1_h(uint64_t grid, float dl, float delta) { return iq1_pick(grid, iq1_halves(dl, delta)); }
+
+// IQ1_S's 32-value group (4 chunks) from its fields - the block's d, the group's qh word h, its 4 qs bytes - each
+// chunk decode_h's, the group's three f16s made once (mm.h's one-tile kernel, its fields read by wide loads)
+__device__ inline void iq1s_group_h(uint32_t d, uint32_t h, uint32_t qs, h8* out) {
+  const float dl = mul(f16(d & 0xFFFF), (float) (2 * ((h >> 12) & 0x07) + 1));
+  const Iq1Halves v = iq1_halves(dl, h & 0x8000 ? -kIq1Delta : kIq1Delta);
+#pragma unroll
+  for (int j = 0; j < 4; j++) out[j] = iq1_pick(kIq1sGrid[((qs >> (8 * j)) & 0xFF) | ((h >> (3 * j)) & 0x07) << 8], v);
 }
 
 template <> __device__ inline h8 decode_h<kIQ1_S>(const uint8_t* b, int k) {

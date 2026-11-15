@@ -661,4 +661,76 @@ __global__ __launch_bounds__(kWave* S::kWaves) void group_kernel(const uint8_t* 
   tile<T, S, CT>(w[m], blockIdx.x * kTile, cols, x16 + xoff[m], xts, c0, (uint32_t) cnt[m], y + yoff[m], ys, lds);
 }
 
+// group_kernel's one column tile (1 .. 16 tokens a matrix) for IQ1_S at 128-value slabs: tile's sums in tile's order
+// (partition w its slabs w, w + W, ... each in its 16-value steps, the partitions summed in w's order), the same f16
+// A - so group_kernel's bits - with less work a value. a block a 16-row tile at a time, the n_mat x rows / 16 tiles
+// blockIdx.x, + gridDim.x, ... (the launch's grid its resident blocks); a slab a lane two 32-value groups of a row
+// (dq, dq + 2: each half slab's one), their bytes by 4 buffer loads (unaligned dwords: the hardware's), each group's
+// f16s quant::iq1s_group_h's (its three values once); a half slab (64 values) at a time through the wave's LDS, its 4
+// WMMAs; x read for the matrix's tokens alone (its other columns the WMMA's zero: no column's sums read another's).
+// a token's 8 experts' gate (2,304 x 4,608, low-power, mmsweep ink2): 285 -> 188 us
+constexpr int kIq1Half = 64 + kPad;  // a half slab's row in LDS
+// gfx11's raw buffer descriptor word 3 (32-bit data format, no swizzle: LLVM's and composable_kernel's for gfx11)
+constexpr int kBufWord3 = 0x31004000;
+template <int W>
+__global__ __launch_bounds__(kWave* W) void iq1s_tile_kernel(const uint8_t* const* __restrict__ w,
+                                                              const int32_t* __restrict__ cnt, uint32_t n_mat,
+                                                              uint32_t rows, uint32_t cols,
+                                                              const _Float16* __restrict__ x16,
+                                                              const uint32_t* __restrict__ xoff, uint32_t xts,
+                                                              float* __restrict__ y, const uint32_t* __restrict__ yoff,
+                                                              uint32_t ys) {
+  using B = quant::Block<quant::kIQ1_S>;
+  constexpr int SL = 128, kSlabHalves = W * kTile * kIq1Half, kPartHalves = W * 8 * kWave * 2;
+  __shared__ __attribute__((aligned(32))) _Float16 lds_all[kSlabHalves > kPartHalves ? kSlabHalves : kPartHalves];
+  const int lane = threadIdx.x % kWave, wave = threadIdx.x / kWave, half = lane / kTile, col = lane % kTile;
+  const int dr = lane >> 1, dq = lane & 1;  // the decode's row of the tile, its group of each half slab
+  _Float16* lds = lds_all + wave * kTile * kIq1Half;
+  const uint32_t per = rows / kTile, total = per * n_mat, rb = cols / B::values * B::bytes;
+  for (uint32_t t = blockIdx.x; t < total; t += gridDim.x) {
+    const uint32_t m = t / per, row0 = (t % per) * kTile, n = (uint32_t) cnt[m];
+    const __amdgpu_buffer_rsrc_t rs =
+        __builtin_amdgcn_make_buffer_rsrc((void*) (w[m] + (uint64_t) row0 * rb), 0, (int) (kTile * rb), kBufWord3);
+    const _Float16* xb = x16 + xoff[m] + x16_at(col, 0, xts);
+    const bool live = (uint32_t) col < n;
+    f8 acc = {};
+    for (uint32_t k0 = wave * SL; k0 < cols; k0 += W * SL) {
+      const int g0 = (int) (k0 % B::values) / 32 + dq;  // the lane's groups g0, g0 + 2 of its block
+      const int off = (int) (dr * rb + k0 / B::values * B::bytes);
+      const uint32_t d = __builtin_amdgcn_raw_buffer_load_b16(rs, off, 0, 0);
+      const uint32_t h0 = __builtin_amdgcn_raw_buffer_load_b16(rs, off + 34 + 2 * g0, 0, 0);
+      const uint32_t h1 = __builtin_amdgcn_raw_buffer_load_b16(rs, off + 38 + 2 * g0, 0, 0);
+      const auto q3 = __builtin_amdgcn_raw_buffer_load_b96(rs, off + 2 + 4 * g0, 0, 0);
+#pragma unroll
+      for (int hs = 0; hs < 2; hs++) {
+        quant::h8 hv[4];
+        quant::iq1s_group_h(d, hs ? h1 : h0, hs ? q3[2] : q3[0], hv);
+        for (int c = 0; c < 4; c++) *(quant::h8*) (lds + dr * kIq1Half + dq * 32 + c * quant::kChunk) = hv[c];
+        __builtin_amdgcn_wave_barrier();  // the wave's LDS in order: its writes, then its reads
+        h16 a[4], bx[4];
+        for (int g = 0; g < 4; g++) a[g] = *(const h16*) (lds + col * kIq1Half + g * kTile);
+        __builtin_amdgcn_wave_barrier();
+        for (int g = 0; g < 4; g++) {
+          bx[g] = h16{};
+          if (live) bx[g] = *(const h16*) (xb + (uint64_t) (k0 / kTile + hs * 4 + g) * kFrag);
+        }
+        for (int g = 0; g < 4; g++) acc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a[g], bx[g], acc);
+      }
+    }
+    float* part = (float*) lds_all;
+    __syncthreads();  // the slabs' LDS free
+    for (int j = 0; j < 8; j++) part[(wave * 8 + j) * kWave + lane] = acc[j];
+    __syncthreads();
+    if (wave == 0) {
+      float* ym = y + yoff[m];
+      for (int j = 0; j < 8; j++) {
+        float s = part[j * kWave + lane];
+        for (int v = 1; v < W; v++) s += part[(v * 8 + j) * kWave + lane];
+        if (live) ym[(uint64_t) col * ys + row0 + 2 * j + half] = s;
+      }
+    }
+    __syncthreads();  // wave 0 done with the sums before the next tile's slabs
+  }
+}
+
 }  // namespace mm

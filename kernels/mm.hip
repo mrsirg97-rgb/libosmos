@@ -194,6 +194,43 @@ bool group_gemm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32
   return hipGetLastError() == hipSuccess;
 }
 
+// IQ1_S's one-tile steps on mm.h's iq1s_tile_kernel (group_ct<IQ1_S, 1>'s bits): as many blocks as the GPU holds at
+// once, each taking tiles until none are left (a block a tile: 204 against 188 us; mmsweep ink2). what a WGP holds:
+// its VGPRs' blocks or its LDS's, the fewer - the LDS both CUs' (WGP mode; the runtime's figure, and its occupancy
+// call, one CU's 64 KB: 7 blocks a WGP, 211 us, against the 12 the VGPRs allow, 190 us)
+template <int W>
+uint32_t resident_blocks() {
+  static const uint32_t n = [] {
+    int dev = 0;
+    hipDeviceProp_t p;
+    hipFuncAttributes a;
+    if (hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&p, dev) != hipSuccess ||
+        hipFuncGetAttributes(&a, (const void*) mm::iq1s_tile_kernel<W>) != hipSuccess || a.numRegs < 1)
+      return 0u;
+    const uint64_t regs = (uint64_t) (a.numRegs + 7) / 8 * 8 * mm::kWave * W;  // VGPRs come in 8s a lane
+    const uint64_t by_regs = (uint64_t) p.regsPerMultiprocessor / regs;
+    const uint64_t by_lds = a.sharedSizeBytes ? 2 * (uint64_t) p.maxSharedMemoryPerMultiProcessor / a.sharedSizeBytes
+                                              : by_regs;
+    const uint64_t by_waves = (uint64_t) p.maxThreadsPerMultiProcessor / (mm::kWave * W);
+    uint64_t per = by_regs < by_lds ? by_regs : by_lds;
+    per = per < by_waves ? per : by_waves;
+    return (uint32_t) (per * (uint64_t) p.multiProcessorCount);
+  }();
+  return n;
+}
+
+bool group_iq1s(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t rows, uint32_t cols,
+                const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff, uint32_t ys,
+                hipStream_t s) {
+  using S = Tuned<quant::kIQ1_S>::S;
+  static_assert(S::kSlab == 128, "iq1s_tile_kernel's slab");
+  const uint32_t tiles = rows / mm::kTile * n_mat, held = resident_blocks<S::kWaves>();
+  if (!held) return false;
+  mm::iq1s_tile_kernel<S::kWaves><<<tiles < held ? tiles : held, mm::kWave * S::kWaves, 0, s>>>(
+      (const uint8_t* const*) w, cnt, n_mat, rows, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
+  return hipGetLastError() == hipSuccess;
+}
+
 template <quant::Type T>
 bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
                   uint32_t cols, const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff,
@@ -206,7 +243,9 @@ bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint
   const bool rm = GroupPlan<T>::kRm && rows % (mm::kTile * kGroupRm) == 0;
   const bool gemm = GroupPlan<T>::kGemm && rows % gemm_rows == 0 && cols / S::kSlab >= (uint32_t) S::kWaves;
   switch (col_tiles<T>(max_cnt)) {
-    case 1: return group_ct<T, 1>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+    case 1:
+      if constexpr (T == quant::kIQ1_S) return group_iq1s(w, cnt, n_mat, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+      return group_ct<T, 1>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     case 2:
       if constexpr (GroupPlan<T>::kRm)
         if (rm) return group_rm<T, 2>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);

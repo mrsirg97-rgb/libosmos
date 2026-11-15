@@ -180,7 +180,8 @@ static void shape(const Gguf* g, const Shape& s) {
       CHECK(std::memcmp(&yh[(size_t) 200 * rows], &a[(size_t) 3 * rows], rows * 4) == 0);
     }
     if (s.expert >= 0) {  // the experts' launch (mm_group: one matrix, its multi-tile plans - mm.hip's GroupPlan): the
-                          // first n tokens' rows mm_run's bits at 1 .. 8 column tiles, a partial tile and a partial block
+                          // first n tokens' rows mm_run's bits at 1 .. 8 column tiles (1 - 16 tokens: IQ1_S's
+                          // iq1s_tile_kernel among them), a partial tile and a partial block
       std::vector<float> yr((size_t) 201 * rows);  // x16b and yb: the last pass's 201 tokens, mm_run's
       CHECK(hipMemcpy(yr.data(), yb, yr.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
       const void** dw;
@@ -195,14 +196,14 @@ static void shape(const Gguf* g, const Shape& s) {
       CHECK(hipMemcpy(dw, &wp, sizeof wp, hipMemcpyHostToDevice) == hipSuccess &&
             hipMemcpy(dx, &zero, 4, hipMemcpyHostToDevice) == hipSuccess &&
             hipMemcpy(dy, &zero, 4, hipMemcpyHostToDevice) == hipSuccess);
-      for (int32_t n : {24, 37, 64, 100, 128}) {
+      for (int32_t n : {1, 2, 5, 16, 24, 37, 64, 100, 128}) {
         CHECK(hipMemcpy(dc, &n, 4, hipMemcpyHostToDevice) == hipSuccess && hipMemset(yg, 0xff, (size_t) 128 * rows * 4) == hipSuccess);
         CHECK(mm_group(t->type, dw, dc, 1, (uint32_t) n, rows, cols, x16b, dx, cols, yg, dy, rows, nullptr));
         CHECK(host_of(yg, (size_t) n * rows) == std::vector<float>(yr.begin(), yr.begin() + (size_t) n * rows));
       }
       CHECK(hipFree(dw) == hipSuccess && hipFree(dc) == hipSuccess && hipFree(dx) == hipSuccess &&
             hipFree(dy) == hipSuccess && hipFree(yg) == hipSuccess);
-      std::printf("  %s: mm_group at 24 / 37 / 64 / 100 / 128 tokens, mm_run's bits\n", s.tensor);
+      std::printf("  %s: mm_group at 1 / 2 / 5 / 16 / 24 / 37 / 64 / 100 / 128 tokens, mm_run's bits\n", s.tensor);
     }
     CHECK(hipFree(xb) == hipSuccess && hipFree(yb) == hipSuccess && hipFree(x16b) == hipSuccess);
   }
