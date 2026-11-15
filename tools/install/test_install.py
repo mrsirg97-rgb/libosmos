@@ -67,7 +67,7 @@ class Manifest(unittest.TestCase):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertEqual(set(m["packs"]), {"osmos-evo-1017", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
-                                           "qwen38-ud-q4_k_xl"})  # 0.6.10: one Qwen context, 512K - no 1M pack
+                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling"})  # 0.6.10: one Qwen context, 512K - no 1M pack
         self.assertEqual(manifest.pack_id(m, "osmos-evo-a"), "osmos-evo-1017")  # 0.7.6's old name, and 0.7.6's own
         self.assertEqual(manifest.pack_id(m, "osmos-evo"), "osmos-evo-1017")    # (0.8.0: osmos-evo-<model>)
         evo = m["packs"]["osmos-evo-1017"]  # osmos's own: evo-A's shards with evo-A2's patch in, evo-A UD-IQ1_M's + its delta
@@ -536,6 +536,49 @@ class DerivedSet(unittest.TestCase):
              "packs": {"e": {"title": "t", "shards": ["e1", "e2"], "table": None, "picks": None, "drafter": [],
                              "overlay": None, "rig": ROW, "settings": {}}}}
         return have, models, m, made
+
+    def test_delta_in_parts(self):
+        """a delta published in parts (a file past the hub's size, split): its parts' tensors and metadata together
+        make the set the whole delta makes, byte for byte"""
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "convert"))
+        import gguf_assemble as A
+        import gguf_delta as D
+        with tempfile.TemporaryDirectory() as d:
+            have, models = os.path.join(d, "have"), os.path.join(d, "models")
+            os.makedirs(have)
+            mk = Assemble().gguf
+            a, c = os.urandom(256), os.urandom(4096 * 2 + 64)
+            a2, c2 = os.urandom(len(a)), os.urandom(len(c))
+            mk(f"{have}/b-00001-of-00002.gguf", [("a", [64], 0, a)])
+            mk(f"{have}/b-00002-of-00002.gguf", [("c", [len(c) // 4], 0, c)])
+            name = struct.pack("<Q", 12) + b"general.name" + struct.pack("<IQ", 8, 3) + b"evo"
+
+            def delta(tag, ta, tc):  # the target's shards with these values, its delta on the base
+                os.makedirs(f"{d}/{tag}")
+                mk(f"{d}/{tag}/t-00001-of-00002.gguf", [("a", [64], 0, ta)], extra_kv=name, n_extra=1)
+                mk(f"{d}/{tag}/t-00002-of-00002.gguf", [("c", [len(c) // 4], 0, tc)])
+                D.main.__globals__["sys"].argv = ["x", f"{d}/{tag}/t-00001-of-00002.gguf",
+                                                  f"{have}/b-00001-of-00002.gguf", f"{have}/{tag}.gguf"]
+                D.main()
+                return f"{have}/{tag}.gguf"
+            whole, p1, p2 = delta("whole", a2, c2), delta("p1", a2, c), delta("p2", a, c2)
+            base = [f"{have}/b-00001-of-00002.gguf", f"{have}/b-00002-of-00002.gguf"]
+            os.makedirs(f"{d}/made")
+            made = A.assemble(base, [f"{d}/made/e-00001-of-00002.gguf", f"{d}/made/e-00002-of-00002.gguf"], [whole],
+                              log=lambda m: None)
+            derived = lambda k, p: {"derive": {"with": "gguf_assemble", "base": ["b1", "b2"],  # noqa: E731
+                                               "delta": ["d1", "d2"], "shard": k},
+                                    "path": os.path.basename(p), "bytes": os.path.getsize(p), "sha256": sha(p)}
+            m = {"version": 1, "rig": RIG_PIN,
+                 "files": {"b1": entry(base[0]), "b2": entry(base[1]), "d1": entry(p1, repo="o/evo"),
+                           "d2": entry(p2, repo="o/evo"), "e1": derived(1, made[0]), "e2": derived(2, made[1])},
+                 "packs": {"e": {"title": "t", "shards": ["e1", "e2"], "table": None, "picks": None, "drafter": [],
+                                 "overlay": None, "rig": ROW, "settings": {}}}}
+            manifest.check(m)
+            self.assertEqual(osmos_install.needed(m, ["e"], False), ["b1", "b2", "d1", "d2"])
+            cfg = layout.read_config(layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None))
+            self.assertEqual(sha(cfg["model"]), sha(made[0]))
+            self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
 
     def test_laid(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1006,7 +1049,8 @@ class Rig(unittest.TestCase):
         self.assertEqual(ids, {"osmos-evo-1017": "deepseek-1017-evo", "ud-iq1_s": "deepseek-1017-ud-s",
                                "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
-                               "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l"})
+                               "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l",
+                           "osmos-evo-inkling": "inkling-2-small-evo"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
         self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
 

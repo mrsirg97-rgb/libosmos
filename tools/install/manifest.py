@@ -12,7 +12,7 @@ osmos-evo since 0.7.6.
 a derived file: made, not downloaded - derive {with: the converter, its inputs (file ids of published files), mode},
 path, bytes and sha256 (its result's, pinned as a download's is), no repo nor revision. overlay_q4x's: patch, key
 (huihui-ai's abliteration and its key), model (the shards it stands in for), mode (overlay_q4x.MODES). gguf_assemble's
-(tools/convert/gguf_assemble.py): base (a set's shards, in order), delta (gguf_delta.py's file), shard (which of the
+(tools/convert/gguf_assemble.py): base (a set's shards, in order), delta (gguf_delta.py's file, or a list of its parts), shard (which of the
 base's this file is, from 1) - every file of one base and delta made at once, each checked against its own sha256."""
 import json
 import re
@@ -28,6 +28,13 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 class ManifestError(Exception):
     pass
 
+
+
+def deltas(d):
+    """a gguf_assemble file's delta as a list of file ids: one file, or its parts (a delta past the hub's 50 GB a file,
+    split - its parts' tensors and metadata together the whole one's); [None] for none, which check refuses"""
+    v = d.get("delta")
+    return list(v) if isinstance(v, list) and v else [v if isinstance(v, str) else None]
 
 def pack_id(m, pid):
     """a pack's id as asked: its own, or the pack an old id (aliases) names now"""
@@ -88,7 +95,7 @@ def _derived(m, fid, f):
             raise ManifestError(f"file {fid}: mode {d.get('mode')!r} is not one of {sorted(overlay_q4x.MODES)}")
     else:  # gguf_assemble: base's shards with a delta in, this file the output of base's shard `shard` (from 1)
         base = d.get("base") if isinstance(d.get("base"), list) and d.get("base") else [None]
-        ins = [d.get("delta")]   # (the base's shards published, or made by another gguf_assemble set: a patch's)
+        ins = deltas(d)   # (the base's shards published, or made by another gguf_assemble set: a patch's)
         for b in base:
             if b not in m["files"] or ("derive" in m["files"][b] and m["files"][b]["derive"].get("with") != "gguf_assemble"):
                 raise ManifestError(f"file {fid}: base {b!r} is neither a published file nor a gguf_assemble file")

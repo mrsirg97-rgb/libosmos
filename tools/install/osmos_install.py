@@ -63,7 +63,7 @@ def inputs(m, fid, made=lambda fid: False):
     if made(fid):
         return []
     if d["with"] == "gguf_assemble":
-        return [i for b in d["base"] for i in inputs(m, b, made)] + [d["delta"]]
+        return [i for b in d["base"] for i in inputs(m, b, made)] + manifest.deltas(d)
     return [d["patch"], d["key"]] + d["model"]
 
 
