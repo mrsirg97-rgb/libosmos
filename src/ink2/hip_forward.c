@@ -290,19 +290,8 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
     const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
     all += b, largest = b > largest ? b : largest;
   }
-  const uint64_t stream_room = 2 * (uint64_t)E * largest;
-  if (budget) /* osmos's budget the whole build: the experts' slots what the rest leaves (their 2 units' slack too) */
-  {
-    const uint64_t rest = f->fixed_bytes + stream_room + 4 * largest;
-    room = budget > rest ? budget - rest : 0;
-  }
-  if (room > all)
-    room = all;
-  if (room < (uint64_t)E * largest) /* a decode's holds and a passing visit's in the stream: a layer's at most - and
-                                       room 0's, the smallest build (osmos's budget 0: auto-sizing's first build) */
-    room = (uint64_t)E * largest;
   /* the warm set, the most wanted first: by picks counted on calibration text (most first, then the lower unit), else
-     an expert of every layer at a time (expert 0 of each layer, then 1, ...) - as many as the room holds */
+     an expert of every layer at a time (expert 0 of each layer, then 1, ...) */
   for (size_t u = 0; u < n; u++)
     warm[u] = picks ? (uint32_t)u : (uint32_t)((u % L) * E + u / L);
   if (picks)
@@ -310,13 +299,55 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
     g_rank = picks;
     qsort(warm, n, sizeof *warm, by_picks);
   }
+  /* the stream (hip_forward.c's stream_budget): two of a layer's experts not warm - a prompt step's holds of one and
+     its read ahead of the next - and never under a whole layer's, so a layer promotion left cold still fits. under a
+     budget, room and stream settle together: more room, fewer cold, a smaller stream - each pass's stream at most the
+     one its room was sized by, so the build stays in the budget */
+  uint64_t stream_room = 2 * (uint64_t)E * largest;
+  const uint64_t given = room;
   size_t n_warm = 0;
-  for (uint64_t took = 0; ok && n_warm < n; n_warm++)
+  for (int pass = 0; ok && pass < INK2_STREAM_PASSES; pass++)
   {
-    const uint64_t b = pool_unit_bytes(&units[warm[n_warm]], ARENA_GRAIN);
-    if (took + b > room)
+    room = given;
+    if (budget) /* osmos's budget the whole build: the experts' slots what the rest leaves (their 2 units' slack too) */
+    {
+      const uint64_t rest = f->fixed_bytes + stream_room + 4 * largest;
+      room = budget > rest ? budget - rest : 0;
+    }
+    if (room > all)
+      room = all;
+    if (room < (uint64_t)E * largest) /* a decode's holds and a passing visit's in the stream: a layer's at most - and
+                                         room 0's, the smallest build (osmos's budget 0: auto-sizing's first build) */
+      room = (uint64_t)E * largest;
+    n_warm = 0;
+    for (uint64_t took = 0; n_warm < n; n_warm++)
+    {
+      const uint64_t b = pool_unit_bytes(&units[warm[n_warm]], ARENA_GRAIN);
+      if (took + b > room)
+        break;
+      took += b;
+    }
+    uint64_t *cold = calloc(L, sizeof *cold), *layer = calloc(L, sizeof *layer);
+    if (!(ok = cold && layer))
+    {
+      free(cold), free(layer);
       break;
-    took += b;
+    }
+    for (size_t r = 0; r < n; r++)
+    {
+      const uint32_t u = warm[r], l = u / E;
+      const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
+      layer[l] += b, cold[l] += r < n_warm ? 0 : b;
+    }
+    uint64_t worst = 0, whole = 0;
+    for (uint32_t l = 0; l < L; l++)
+      worst = cold[l] > worst ? cold[l] : worst, whole = layer[l] > whole ? layer[l] : whole;
+    free(cold), free(layer);
+    const uint64_t want = 2 * worst > whole ? 2 * worst : whole;
+    const bool settled = want >= stream_room;
+    stream_room = want < stream_room ? want : stream_room;
+    if (settled || !budget)
+      break;
   }
   char perr[POOL_ERR] = "", merr[MEMBRANE_ERR] = "";
   /* the stream two layers: a prompt step's holds of one and its read ahead of the next (one alone: the next one's reads
@@ -348,6 +379,24 @@ static uint64_t table_bytes(uint64_t P, uint64_t E)
 }
 
 static bool mm_takes(uint32_t type, uint32_t rows, uint32_t cols) { return mm_known(type) && mm_fits(type, rows, cols); }
+
+/* INK2_MEM: what the build takes, a stage at a time (the GPU's free memory before and after) */
+static bool mem_on(void)
+{
+  static int on = -1;
+  if (on < 0)
+    on = getenv("INK2_MEM") && atoi(getenv("INK2_MEM")) ? 1 : 0;
+  return on;
+}
+static void mem_note(const char *what, size_t *last)
+{
+  size_t fr = 0, tot = 0;
+  if (!mem_on() || hipMemGetInfo(&fr, &tot) != hipSuccess)
+    return;
+  fprintf(stderr, "ink2 mem: %-22s %8.3f GiB (GPU free %.2f GiB)\n", what, *last > fr ? (*last - fr) / 1073741824.0 : 0.0,
+          fr / 1073741824.0);
+  *last = fr;
+}
 
 static bool buffers(Ink2Forward *f)
 {
@@ -381,9 +430,17 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->res_sc, INK2_RES_SCRATCH * 4},
       {(void **)&f->fa_part, ink2_fa_scratch((uint32_t)H, f->max_ctx)},
   };
+  uint64_t sum = 0;
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
+  {
     if (!ink2_dalloc(f, b[i].p, b[i].bytes))
       return false;
+    sum += b[i].bytes;
+    if (mem_on() && b[i].bytes >= (256ull << 20))
+      fprintf(stderr, "ink2 mem:   step buffer %2zu %8.3f GiB\n", i, b[i].bytes / 1073741824.0);
+  }
+  if (mem_on())
+    fprintf(stderr, "ink2 mem:   step buffers, all %zu: %.3f GiB\n", sizeof b / sizeof *b, sum / 1073741824.0);
   if (hipMemset(f->overflow, 0, 4) != hipSuccess)
     return false;
   /* the router's picks and weights and the experts' tables through pinned host memory: copies queued on the stream,
@@ -421,14 +478,18 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   size_t free0 = 0, free1 = 0, total = 0;
   if (hipMemGetInfo(&free0, &total) != hipSuccess)
     return ink2_fail(err, "inkling2: the GPU's free memory not read"), ink2_forward_destroy(f), NULL;
+  size_t at = free0;
   if (!upload(f))
     return ink2_fail(err, "inkling2: a dense tensor not read or uploaded (GPU memory, or its file)"),
            ink2_forward_destroy(f), NULL;
+  mem_note("dense weights", &at);
   if (!buffers(f))
     return ink2_fail(err, "inkling2: GPU memory refused (the step's buffers)"), ink2_forward_destroy(f), NULL;
+  mem_note("step buffers + pinned", &at);
   f->mtp = o->mtp;
   if (f->mtp && !ink2_mtp_up(f, err))
     return ink2_forward_destroy(f), NULL;
+  mem_note("drafter", &at);
   if (!(f->picks = calloc((size_t)w->geo.n_layers * w->geo.n_experts, sizeof *f->picks)))
     return ink2_fail(err, "out of memory"), ink2_forward_destroy(f), NULL;
   if (hipMemGetInfo(&free1, &total) != hipSuccess)
@@ -436,6 +497,11 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : f->dense_bytes;
   if (!experts(f, o->room, o->budget, o->picks, err))
     return ink2_forward_destroy(f), NULL;
+  mem_note("experts' slots", &at);
+  if (mem_on())
+    fprintf(stderr, "ink2 mem:   experts' room %.3f GiB, the stream's %.3f GiB (pinned, all %.3f GiB)\n",
+            host_slots_bytes(f->slots) / 1073741824.0, host_slots_bytes(f->stream) / 1073741824.0,
+            f->pinned_bytes / 1073741824.0);
   return f;
 }
 

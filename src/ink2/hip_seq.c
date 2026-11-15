@@ -107,6 +107,19 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
     ok = ink2_mtp_seq_make(s);
   if (!ok)
     return ink2_fail(err, "inkling2: GPU memory refused (a sequence's caches)"), ink2_seq_destroy(s), NULL;
+  if (getenv("INK2_MEM") && atoi(getenv("INK2_MEM")))
+  {
+    uint64_t conv = 0, win = 0, full = 0;
+    for (int l = 0; l < g->n_layers; l++)
+    {
+      for (int c = 0; c < INK2_CONVS; c++)
+        conv += (uint64_t)s->conv[l][c].cap * s->conv[l][c].row * s->conv[l][c].esize;
+      const uint64_t kv = 2 * (uint64_t)s->kw[l].cap * s->kw[l].row * s->kw[l].esize;
+      *(g->sliding[l] ? &win : &full) += kv;
+    }
+    fprintf(stderr, "ink2 mem: a sequence: full layers' keys and values %.3f GiB, windows' %.3f GiB, conv tails %.3f GiB\n",
+            full / 1073741824.0, win / 1073741824.0, conv / 1073741824.0);
+  }
   return s;
 }
 
