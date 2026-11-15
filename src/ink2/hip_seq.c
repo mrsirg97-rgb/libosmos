@@ -16,7 +16,7 @@ void *ink2_tail_row(const Ink2Tail *t, uint32_t r) { return (uint8_t *)t->d + (u
 
 bool ink2_tail_room(Ink2Tail *t, uint32_t n)
 {
-  if (t->held + n <= t->cap)
+  if (t->held + n <= t->cap || n > t->cap - 2 * t->keep) /* (a step past the tail's: ink2_tail_put keeps its last) */
     return true;
   /* held > 2 keep here (cap 2 keep + a step's most): the last keep rows and the front apart */
   if (hipMemcpyAsync(t->d, ink2_tail_row(t, t->held - t->keep), (uint64_t)t->keep * t->row * t->esize,
@@ -30,6 +30,15 @@ const void *ink2_tail_last(const Ink2Tail *t, uint32_t k) { return ink2_tail_row
 
 bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n)
 {
+  if (t->held + n > t->cap && n >= t->keep && t->esize == 4) /* a step past an F32 tail's room: its last keep rows
+                                                                 alone, all a later step or a rollback reads */
+  {
+    if (hipMemcpyAsync(t->d, x + (uint64_t)(n - t->keep) * t->row, (uint64_t)t->keep * t->row * 4,
+                       hipMemcpyDeviceToDevice, NULL) != hipSuccess)
+      return false;
+    t->held = t->keep;
+    return true;
+  }
   if (t->held + n > t->cap)
     return false;
   void *at = ink2_tail_row(t, t->held);
@@ -78,7 +87,7 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
   for (int l = 0; ok && l < g->n_layers; l++)
   {
     for (int c = 0; ok && c < INK2_CONVS; c++)
-      ok = tail_make(&s->conv[l][c], conv_row(f, c), 4, ck, 2 * ck + T, conv_need(f));
+      ok = tail_make(&s->conv[l][c], conv_row(f, c), 4, ck, 2 * ck + INK2_TAIL_STEP, conv_need(f));
     if (ok && g->sliding[l])
       ok = tail_make(&s->kw[l], kd, 2, wk, 2 * wk + T, 0) && tail_make(&s->vw[l], kd, 2, wk, 2 * wk + T, 0);
     else if (ok)

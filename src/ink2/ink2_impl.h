@@ -10,6 +10,10 @@
 #include "osmos/mem/host_slots.h"
 #include "osmos/mem/membrane.h"
 
+/* a conv tail's rows past its 2 keep: a step of at most these appended in place (a decode's, a drafted round's); a
+   larger step's inputs read from the step's buffer, the tail keeping their last keep rows (ink2_tail_put) */
+#define INK2_TAIL_STEP 64
+
 /* a layer's resident tensors on the device: its vectors as F32 (the norms, clips, convs, queries, the router's
    bias), its matrices as stored (mv_run reads their type) */
 typedef struct Ink2Dev
