@@ -441,7 +441,14 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   }
   // the running softmax: the sink a logit of its own, its value zero (gm, gl, go); the unit's from nothing (m, l, o)
   float m[8], l[8], gm[8], gl[8];
-  fa_f8 o[kFaHead / kFaTile] = {}, go[SPLIT ? 1 : kFaHead / kFaTile] = {};
+  // the unit's (m, l, o) in registers; the prompt's running fold's o in its out rows (each lane its own elements: zero
+  // first, a unit's end its read and write, the end its division) - not 64 more registers a wave, so fewer spills
+  fa_f8 o[kFaHead / kFaTile] = {};
+  auto out_at = [&](uint32_t t, int nt) -> uint64_t { return ((uint64_t) t * H + h) * kFaHead + nt * kFaTile + col; };
+  if constexpr (!SPLIT)
+    for (int j = 0; j < 8; j++)
+      if (rtok(2 * j + half) < n_tok)
+        for (int nt = 0; nt < kFaHead / kFaTile; nt++) out[out_at(rtok(2 * j + half), nt)] = 0.0f;
   for (int j = 0; j < 8; j++) {
     const uint32_t t = rtok(2 * j + half);
     gm[j] = t < n_tok ? sink[(uint64_t) t * H + rhead(2 * j + half)] : 0.0f, gl[j] = 1.0f, m[j] = -INFINITY, l[j] = 0.0f;
@@ -598,7 +605,11 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         for (int j = 0; j < 8; j++) {
           float ca, cb;
           fa_fold_coef(gm[j], gl[j], m[j], l[j], ca, cb);
-          for (int nt = 0; nt < kFaHead / kFaTile; nt++) go[nt][j] = go[nt][j] * ca + o[nt][j] * cb, o[nt][j] = 0.0f;
+          const uint32_t t = rtok(2 * j + half);
+          for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
+            if (t < n_tok) out[out_at(t, nt)] = out[out_at(t, nt)] * ca + o[nt][j] * cb;
+            o[nt][j] = 0.0f;
+          }
           m[j] = -INFINITY, l[j] = 0.0f;
         }
       }
@@ -612,8 +623,8 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       for (int nt = 0; nt < kFaHead / kFaTile; nt++) pp[2 + nt * kFaTile + col] = o[nt][j];
     } else
       for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
-        const uint64_t i = ((uint64_t) t * H + h) * kFaHead + nt * kFaTile + col;
-        out[i] = go[nt][j] / gl[j] * (gate ? sigmoid(gate[i]) : 1.0f);
+        const uint64_t i = out_at(t, nt);
+        out[i] = out[i] / gl[j] * (gate ? sigmoid(gate[i]) : 1.0f);
       }
   }
 }
