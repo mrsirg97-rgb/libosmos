@@ -537,6 +537,20 @@ static bool mat(Ink2Forward *f, const GgufTensor *t, const void *w, const float 
   return mm_tokens(type, w, rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow, false, NULL);
 }
 
+/* two matrices on one x (mm_run2: each the bits mm_run gives it alone), or one with w1 NULL; `ready`: f->x16 holds
+   this x's f16 already (a matrix before it on the same x) - otherwise each as mat() */
+static bool mat2(Ink2Forward *f, const GgufTensor *t0, const void *w0, float *y0, const GgufTensor *t1, const void *w1,
+                 float *y1, const float *x, uint32_t n, bool ready)
+{
+  const uint32_t cols = (uint32_t)t0->dims[0], type = ink2_type(t0), r0 = (uint32_t)t0->dims[1],
+                 r1 = t1 ? (uint32_t)t1->dims[1] : 0;
+  if (!mm_takes(type, r0, cols) || (t1 && (ink2_type(t1) != type || (uint32_t)t1->dims[0] != cols ||
+                                           !mm_takes(type, r1, cols))))
+    return mat(f, t0, w0, x, n, y0) && (!t1 || mat(f, t1, w1, x, n, y1));
+  return mm_tokens(type, w0, r0, y0, r0, t1 ? w1 : NULL, r1, y1, r1, cols, x, cols, n, f->x16, f->overflow, ready,
+                   NULL);
+}
+
 /* one role's experts (their entries in ascending count): a launch a run of the same column tiles (mm_col_tiles), so
    a one-tile expert is not run in a hot one's many-tile kernel (hip_ffn.c's group). each expert's rows its own: the
    launches' order changes no bit */
@@ -761,9 +775,15 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       GPU(ops_rms(av, C, C, d->v_norm, g->rms_eps, n, f->vn, C, NULL));
     }
     const float *xk = full ? f->kn : f->xn, *xv = full ? f->vn : f->xn;
-    GPU(mat(f, L->q, d->q, f->xn, n, f->q) && mat(f, L->k, d->k, xk, n, f->k) && mat(f, L->v, d->v, xv, n, f->v));
-    GPU(mat(f, L->rel, d->rel, f->xn, n, f->rel) && mat(f, L->gate, d->gate, f->xn, n, f->gate) &&
-        mat(f, L->sink, d->sink, f->xn, n, f->sink));
+    /* the projections on xn in pairs through its one f16 (a sliding layer's k and v too: xn theirs), then a full
+       layer's k on kn and v on vn - each matrix's bits its own launch's */
+    GPU(mat2(f, L->q, d->q, f->q, L->gate, d->gate, f->gate, f->xn, n, false) &&
+        mat2(f, L->rel, d->rel, f->rel, NULL, NULL, NULL, f->xn, n, true));
+    if (full)
+      GPU(mat(f, L->k, d->k, xk, n, f->k) && mat(f, L->v, d->v, xv, n, f->v));
+    else
+      GPU(mat2(f, L->k, d->k, f->k, L->v, d->v, f->v, f->xn, n, true));
+    GPU(mat(f, L->sink, d->sink, f->xn, n, f->sink));
     Ink2Tail *ck = &s->conv[l][INK2_CONV_K], *cv = &s->conv[l][INK2_CONV_V];
     if (full)
     {
