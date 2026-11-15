@@ -64,7 +64,11 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
 _Static_assert(OSMOS_ERR >= INK2_FWD_ERR, "one error buffer for the engine and the family's calls");
 _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 
-#define INK2_STEP_TOKENS 512 /* a step's most tokens when the server names none: a prompt's chunk */
+/* a step's most tokens when the server names none: a prompt's chunk. a prompt step reads every expert not in memory
+   once, so its count is the prompt's speed: an 8K prompt (ours, a 40 GiB room) 115 / 238 / 321-333 tok/s at 2,048 /
+   4,096 / 8,192, the forward 54.8 / 58.0 / 64.5 GiB with the room (the logits' [max_tokens][n_vocab] 6.6 GB of
+   8,192's) */
+#define INK2_STEP_TOKENS 8192
 
 typedef struct Eng
 {
