@@ -46,7 +46,7 @@ mm
 
 mm_known
   whether `type` has an mm kernel: Q8_0, Q5_K, Q6_K, IQ1_M, IQ1_S, IQ2_XXS, IQ2_XS, IQ2_S; Qwen3.8's IQ3_XXS, IQ4_NL,
-  IQ4_XS, Q2_0.
+  IQ4_XS, Q2_0; Inkling-2's NVFP4 (its blocks: a tensor's own scale applied by its role) and MXFP8.
 
 mm_fits
   whether a rows x cols matrix of `type` tiles: rows a multiple of MM_TILE, cols whole blocks and whole slabs (the

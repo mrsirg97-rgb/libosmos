@@ -4,7 +4,8 @@ again), each with gguf-py's values. one file a type: b"SUBQ", u32 version, u32 t
 the values (f32). run: PYTHONPATH=<llama.cpp>/gguf-py ../.oracle-venv/bin/python dequant_ref.py --out DIR [--model DIR] [--dspark DIR]
 [--mxfp8 FILE]. MXFP8 (unsloth's Engram tables, ggml type 43 in their GGUFs - upstream's 43 is F8_E4M3, which gguf-py
 reads it as) is not gguf-py's: its blocks found by this file's own header walk and decoded by torch's float8_e4m3fn
-times 2^(e - 127), as the OCP MX spec writes them."""
+times 2^(e - 127), as the OCP MX spec writes them. NVFP4 (ggml type 40) is gguf-py's: --random NVFP4, or --model a
+folder of Inkling-2's reference GGUF (tools: ink2_ref_gguf.py) for its experts' real blocks."""
 import argparse
 import glob
 import os
