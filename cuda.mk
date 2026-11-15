@@ -71,3 +71,10 @@ cuda-tests: $(CUDA_TEST_BINS)
 
 # the FP4 matrix cores' instructions are sm_120a's (the arch-specific target), not sm_120's: that file alone
 $(CUDA_OBJ)/kernels/mm_fp4.o: CUDA_ARCH = sm_120a
+
+# the FP4 matmul alone as a shared library, for Python (incarnate's train/fp4.py, ctypes): `make fp4-so`
+FP4_SO := $(LIB_DIR)/libosmos_fp4.so
+$(FP4_SO): $(KERNEL_DIR)/mm_fp4.hip $(KERNEL_HDRS) $(CUDA_VIEW)/.made | $(LIB_DIR)
+	$(CLANG_CUDA) $(filter-out --cuda-gpu-arch=%,$(CUDA_GPUFLAGS)) --cuda-gpu-arch=sm_120a -fPIC -shared $< -o $@ $(CUDA_LINK)
+fp4-so: $(FP4_SO)
+.PHONY: fp4-so

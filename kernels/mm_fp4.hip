@@ -86,7 +86,11 @@ __device__ inline uint32_t nibbles(uint32_t w, bool hi) {
 // a fragment's loads 9 words apart, every bank once
 constexpr int kBM = 128, kBN = 128, kRow = 9, kTileThreads = 256;
 
-__global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols,
+// W ggml 40's blocks (GGML: the GGUF's), or ModelOpt's (packed [rows, cols/2] in k order, its E4M3 scales [rows,
+// cols/16] at ws: the training engine's train/fp4.py)
+template <bool GGML>
+__global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ ws,
+                                                          uint32_t rows, uint32_t cols,
                                                           const uint8_t* __restrict__ aq,
                                                           const uint8_t* __restrict__ as, uint32_t n, float scale,
                                                           float* __restrict__ y, uint32_t ys) {
@@ -106,7 +110,12 @@ __global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restr
       const uint32_t t = t0 + r < n ? t0 + r : n - 1;
       sa[r * kRow + 8] = *(const uint32_t*) (as + (uint64_t) t * (cols / 16) + (uint64_t) kb * 4);
     }
-    for (uint32_t i = tid; i < kBN * 4; i += kTileThreads) {
+    for (uint32_t i = tid; !GGML && i < kBN * 8; i += kTileThreads) {
+      const uint32_t r = i / 8, c = i % 8, row = r0 + r < rows ? r0 + r : rows - 1;
+      sb[r * kRow + c] = *(const uint32_t*) (w + (uint64_t) row * (cols / 2) + (uint64_t) kb * 32 + 4 * c);
+      if (c == 0) sb[r * kRow + 8] = *(const uint32_t*) (ws + (uint64_t) row * (cols / 16) + (uint64_t) kb * 4);
+    }
+    for (uint32_t i = tid; GGML && i < kBN * 4; i += kTileThreads) {
       const uint32_t r = i / 4, sub = i % 4, row = r0 + r < rows ? r0 + r : rows - 1;
       const uint8_t* blk = w + (uint64_t) row * row_bytes + (uint64_t) kb * kBlockBytes;
       const uint32_t* p = (const uint32_t*) (blk + 4 + 8 * sub);
@@ -181,7 +190,18 @@ extern "C" bool mm_fp4(const void* w, uint32_t rows, uint32_t cols, const void* 
                        float scale, float* y, uint32_t ys, void* stream) {
   if (!mm_fp4_ok() || !w || !q || !sc || !y || !n || cols % 64 || rows % 8) return false;
   const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM);
-  mm_kernel<<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) w, rows, cols, (const uint8_t*) q,
-                                                             (const uint8_t*) sc, n, scale, y, ys);
+  mm_kernel<true><<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) w, nullptr, rows, cols,
+                                                                   (const uint8_t*) q, (const uint8_t*) sc, n, scale, y,
+                                                                   ys);
+  return launches::ok();
+}
+
+extern "C" bool mm_fp4_mo(const void* packed, const void* wscale, uint32_t rows, uint32_t cols, const void* q,
+                          const void* sc, uint32_t n, float scale, float* y, uint32_t ys, void* stream) {
+  if (!mm_fp4_ok() || !packed || !wscale || !q || !sc || !y || !n || cols % 64 || rows % 8) return false;
+  const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM);
+  mm_kernel<false><<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) packed, (const uint8_t*) wscale,
+                                                                    rows, cols, (const uint8_t*) q, (const uint8_t*) sc,
+                                                                    n, scale, y, ys);
   return launches::ok();
 }
