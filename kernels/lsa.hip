@@ -136,7 +136,53 @@ __global__ __launch_bounds__(kThreads) void gather_kernel(const uint32_t* __rest
   if (t == 0) *count = n + win + sinks;
 }
 
+__device__ inline float bf16_round(float v) {  // to nearest, ties to even (src/lsa's)
+  uint32_t u = __float_as_uint(v);
+  if ((u & 0x7F800000u) != 0x7F800000u) u += 0x7FFFu + ((u >> 16) & 1u);
+  return __uint_as_float(u & 0xFFFF0000u);
+}
+
+// a block a token, a thread a dim of the index: the input gathered (and a query's heads summed) into LDS, the dot in
+// double over the input in order, the norm thread 0's (the dims in order), as lsa_index
+__global__ __launch_bounds__(LSA_DIM) void index_kernel(const float* __restrict__ src, uint32_t row_stride,
+                                                        uint32_t kv_heads, uint32_t group, uint32_t head_dim,
+                                                        uint32_t rot, const float* __restrict__ W, bool bf16,
+                                                        float* __restrict__ out) {
+  __shared__ float x[LSA_IN];
+  __shared__ double y[LSA_DIM];
+  __shared__ double norm;
+  const uint32_t t = blockIdx.x, d = threadIdx.x, free = head_dim - rot;
+  const float* row = src + (uint64_t) t * row_stride;
+  for (uint32_t i = d; i < LSA_IN; i += LSA_DIM) {
+    const uint32_t h = i / free, j = i % free;
+    float v = 0.0f;
+    for (uint32_t g = 0; g < group; g++) v += row[(h * group + g) * head_dim + rot + j];
+    x[i] = v;
+  }
+  __syncthreads();
+  double s = 0.0;
+  for (int i = 0; i < LSA_IN; i++) s = __dadd_rn(s, __dmul_rn((double) x[i], (double) W[(uint64_t) i * LSA_DIM + d]));
+  y[d] = s;
+  __syncthreads();
+  if (d == 0) {
+    double n = 0.0;
+    for (int k = 0; k < LSA_DIM; k++) n = __dadd_rn(n, __dmul_rn(y[k], y[k]));
+    n = sqrt(n);
+    norm = n > 1e-12 ? n : 1e-12;
+  }
+  __syncthreads();
+  const float v = (float) (y[d] / norm);
+  out[(uint64_t) t * LSA_DIM + d] = bf16 ? bf16_round(v) : v;
+}
+
 }  // namespace
+
+extern "C" bool lsa_index_gpu(const float* src, uint32_t n, uint32_t row_stride, uint32_t kv_heads, uint32_t group,
+                              uint32_t head_dim, uint32_t rot, const float* W, bool bf16, float* out, void* stream) {
+  if (!src || !W || !out || !n || !group || rot >= head_dim || kv_heads * (head_dim - rot) != LSA_IN) return false;
+  index_kernel<<<n, LSA_DIM, 0, launches::st(stream)>>>(src, row_stride, kv_heads, group, head_dim, rot, W, bf16, out);
+  return launches::ok();
+}
 
 struct LsaScratch {
   uint32_t max;

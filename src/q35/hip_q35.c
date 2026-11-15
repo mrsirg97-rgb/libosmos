@@ -11,11 +11,13 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/lsa.h"
 #include "osmos/model/qtype.h"
 #include "osmos/q35/forward.h"
 
@@ -37,6 +39,15 @@ struct Q35Forward
   void *x16;
   q35_tap_fn tap;
   void *tap_arg;
+  /* latent sparse attention (q35_forward_lsa): a layer's maps (device, LSA_IN x LSA_DIM: NULL off), the read's scratch,
+     a query's index vector, its read; the host's room for a closing block's Ward */
+  bool lsa;
+  float *wq[Q35_MAX_LAYERS], *wk[Q35_MAX_LAYERS];
+  LsaScratch *lsa_s;
+  float *iq;
+  uint32_t *list;
+  float *h_ik, *h_cent;
+  int32_t *h_mem;
 };
 
 struct Q35Seq
@@ -45,6 +56,10 @@ struct Q35Seq
   int32_t pos;
   float *conv[Q35_MAX_LAYERS], *ssm[Q35_MAX_LAYERS]; /* a DeltaNet's conv history and state (one slot: in place) */
   void *kc[Q35_MAX_LAYERS], *vc[Q35_MAX_LAYERS];      /* an attention's cache, Q8_0 rows (q4x_kv_put) */
+  /* with LSA: an attention layer's keys' index vectors (max_ctx x LSA_DIM), its closed blocks' buckets */
+  float *ik[Q35_MAX_LAYERS], *cent[Q35_MAX_LAYERS];
+  int32_t *mem[Q35_MAX_LAYERS];
+  uint32_t closed[Q35_MAX_LAYERS];
 };
 
 static bool fail(char *err, const char *why)
@@ -91,6 +106,51 @@ static bool deltanet(Q35Forward *f, Q35Seq *s, int l, uint32_t n)
          mat(f, L->ssm_out, L->s_ssm_out, D, in, f->fo, n, f->out);
 }
 
+/* the layer's blocks closed up to `want` (each its 512 keys indexed): its index vectors to the host, Ward there
+   (src/lsa's lsa_block), its buckets back */
+static bool close_blocks(Q35Forward *f, Q35Seq *s, int l, uint32_t want)
+{
+  for (; s->closed[l] < want; s->closed[l]++)
+  {
+    const uint32_t b = s->closed[l];
+    if (hipMemcpy(f->h_ik, s->ik[l] + (uint64_t)b * LSA_WINDOW * LSA_DIM, LSA_WINDOW * LSA_DIM * F,
+                  hipMemcpyDeviceToHost) != hipSuccess ||
+        !lsa_block(f->h_ik, b, f->h_cent, f->h_mem) ||
+        hipMemcpy(s->cent[l] + (uint64_t)b * LSA_BUCKETS * LSA_DIM, f->h_cent, LSA_BUCKETS * LSA_DIM * F,
+                  hipMemcpyHostToDevice) != hipSuccess ||
+        hipMemcpy(s->mem[l] + (uint64_t)b * LSA_BUCKETS * LSA_CAP, f->h_mem, LSA_BUCKETS * LSA_CAP * 4,
+                  hipMemcpyHostToDevice) != hipSuccess)
+      return false;
+  }
+  return true;
+}
+
+/* LSA in a step: the step's keys indexed, the blocks they close bucketed; a decode step's tokens each their read
+   (the blocks closed before its window), its attention over the read alone - a prompt's stays dense (lsa.py's) */
+static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t n, bool *done)
+{
+  const Q35Geometry *g = &f->w->geo;
+  const uint32_t heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim;
+  const uint32_t q = heads * hd, kv = kvh * hd, rot = (uint32_t)g->rope_dim, P = (uint32_t)s->pos;
+  *done = false;
+  if (!lsa_index_gpu(f->kq, n, kv, kvh, 1, hd, rot, f->wk[l], true, s->ik[l] + (uint64_t)P * LSA_DIM, NULL))
+    return false;
+  if (n > Q35_ATTN_DECODE_MAX)
+    return close_blocks(f, s, l, (P + n) / LSA_WINDOW);
+  for (uint32_t t = 0; t < n; t++)
+  {
+    uint32_t len = 0;
+    if (!close_blocks(f, s, l, (P + t) / LSA_WINDOW) ||
+        !lsa_index_gpu(f->q + (uint64_t)t * q, 1, q, kvh, heads / kvh, hd, rot, f->wq[l], false, f->iq, NULL) ||
+        !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], s->closed[l], f->lsa_s, f->list, &len, NULL) ||
+        !q35_attn_read(f->q + (uint64_t)t * q, s->kc[l], s->vc[l], heads, kvh, f->list, len, f->gt + (uint64_t)t * q,
+                       f->da, f->ao + (uint64_t)t * q, NULL))
+      return false;
+  }
+  *done = true;
+  return close_blocks(f, s, l, (P + n) / LSA_WINDOW);
+}
+
 static bool attention(Q35Forward *f, Q35Seq *s, int l, uint32_t n)
 {
   const Q35Geometry *g = &f->w->geo;
@@ -98,16 +158,18 @@ static bool attention(Q35Forward *f, Q35Seq *s, int l, uint32_t n)
   const uint32_t D = (uint32_t)g->n_embd, heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads;
   const uint32_t hd = (uint32_t)g->head_dim, q = heads * hd, kv = kvh * hd;
   const uint64_t row = q4x_kv_row_bytes(kv);
+  bool read = false; /* the step's attention done by its read (LSA's decode) */
   return mat(f, L->q, L->s_q, 2 * q, D, f->xn, n, f->qf) && mat(f, L->k, L->s_k, kv, D, f->xn, n, f->kr) &&
          mat(f, L->v, L->s_v, kv, D, f->xn, n, f->vr) &&
          q4x_qk(f->qf, f->kr, n, heads, kvh, hd, &f->rope, fv(f, L->q_norm), fv(f, L->k_norm), g->rms_eps, s->pos,
                 f->q, f->gt, f->kq, NULL) &&
          q4x_kv_put(f->kq, f->vr, n, kv, (uint8_t *)s->kc[l] + (uint64_t)s->pos * row,
                     (uint8_t *)s->vc[l] + (uint64_t)s->pos * row, NULL) &&
-         (n <= Q35_ATTN_DECODE_MAX ? q35_attn_decode(f->q, s->kc[l], s->vc[l], n, heads, kvh, (uint32_t)s->pos, f->gt,
-                                                     f->da, f->ao, NULL)
-                                   : q4x_attn(f->q, s->kc[l], s->vc[l], n, heads, kvh, hd, (uint32_t)s->pos, f->gt, NULL,
-                                              f->fa, f->ao, NULL, NULL)) &&
+         (!f->lsa || lsa_attention(f, s, l, n, &read)) &&
+         (read || (n <= Q35_ATTN_DECODE_MAX
+                       ? q35_attn_decode(f->q, s->kc[l], s->vc[l], n, heads, kvh, (uint32_t)s->pos, f->gt, f->da, f->ao, NULL)
+                       : q4x_attn(f->q, s->kc[l], s->vc[l], n, heads, kvh, hd, (uint32_t)s->pos, f->gt, NULL, f->fa,
+                                  f->ao, NULL, NULL))) &&
          mat(f, L->out, L->s_out, D, q, f->ao, n, f->out);
 }
 
@@ -205,7 +267,61 @@ void q35_forward_destroy(Q35Forward *f)
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     hipFree(b[i]);
   hipHostFree(f->pin_logits), hipHostFree(f->pin_tok);
+  for (int l = 0; l < Q35_MAX_LAYERS; l++)
+    hipFree(f->wq[l]), hipFree(f->wk[l]);
+  lsa_scratch_destroy(f->lsa_s);
+  hipFree(f->iq), hipFree(f->list);
+  free(f->h_ik), free(f->h_cent), free(f->h_mem);
   free(f);
+}
+
+bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_ERR])
+{
+  const Q35Geometry *g = &f->w->geo;
+  if (f->lsa)
+    return fail(err, "the read already on");
+  if (!maps) /* YaRN alone: the dense model under the maps' rotation (the read's comparison) */
+    return q4x_rope((uint32_t)g->rope_dim, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), &f->rope) ||
+           fail(err, "the YaRN rotation refused");
+  if ((uint32_t)g->n_kv_heads * (uint32_t)(g->head_dim - g->rope_dim) != LSA_IN)
+    return fail(err, "the model's free key dims are not the maps' input");
+  FILE *fp = fopen(maps, "rb");
+  uint32_t hdr[4] = {0};
+  if (!fp || fread(hdr, 4, 4, fp) != 4 || memcmp(hdr, "LSAM", 4) || hdr[2] != LSA_IN || hdr[3] != LSA_DIM)
+  {
+    if (fp)
+      fclose(fp);
+    return fail(err, "the maps file not read (tools/convert/lsa_maps.py's, LSA_IN x LSA_DIM)");
+  }
+  const size_t m = (size_t)LSA_IN * LSA_DIM;
+  float *buf = malloc(2 * m * F);
+  bool ok = buf != NULL;
+  uint32_t seen = 0;
+  for (uint32_t i = 0; ok && i < hdr[1]; i++)
+  {
+    uint32_t L = 0;
+    ok = fread(&L, 4, 1, fp) == 1 && fread(buf, F, 2 * m, fp) == 2 * m && L < (uint32_t)g->n_layers &&
+         !g->recurrent[L] && !f->wq[L] && alloc(&f->wq[L], m * F) && alloc(&f->wk[L], m * F) &&
+         hipMemcpy(f->wq[L], buf, m * F, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->wk[L], buf + m, m * F, hipMemcpyHostToDevice) == hipSuccess;
+    seen += ok;
+  }
+  fclose(fp);
+  free(buf);
+  for (int l = 0; ok && l < g->n_layers; l++)
+    ok = g->recurrent[l] || f->wq[l] || (fail(err, "an attention layer without its maps"), false);
+  if (!ok)
+    return err && !*err ? fail(err, "the maps not loaded") : false;
+  /* the maps' rotation: YaRN at yarn x native (their training's), whatever this forward's context */
+  if (!q4x_rope((uint32_t)g->rope_dim, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), &f->rope))
+    return fail(err, "the maps' YaRN rotation refused");
+  ok = (f->lsa_s = lsa_scratch_create(f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && alloc(&f->iq, LSA_DIM * F) &&
+       alloc(&f->list, LSA_READ_MAX * 4) && (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) &&
+       (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) && (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
+  if (!ok)
+    return fail(err, "out of memory (the read's scratch)");
+  f->lsa = seen > 0;
+  return true;
 }
 
 Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_t max_ctx, char err[Q35_ERR])
@@ -263,7 +379,10 @@ Q35Seq *q35_seq_create(Q35Forward *f, char err[Q35_ERR])
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = g->recurrent[l] ? alloc(&s->ssm[l], ssm) && alloc(&s->conv[l], conv) &&
                                hipMemset(s->ssm[l], 0, ssm) == hipSuccess && hipMemset(s->conv[l], 0, conv) == hipSuccess
-                         : alloc(&s->kc[l], f->max_ctx * row) && alloc(&s->vc[l], f->max_ctx * row);
+                         : alloc(&s->kc[l], f->max_ctx * row) && alloc(&s->vc[l], f->max_ctx * row) &&
+                               (!f->lsa || (alloc(&s->ik[l], (uint64_t)f->max_ctx * LSA_DIM * F) &&
+                                            alloc(&s->cent[l], (uint64_t)(f->max_ctx / LSA_WINDOW + 1) * LSA_BUCKETS * LSA_DIM * F) &&
+                                            alloc(&s->mem[l], (uint64_t)(f->max_ctx / LSA_WINDOW + 1) * LSA_BUCKETS * LSA_CAP * 4)));
   if (!ok)
     return q35_seq_destroy(s), fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
@@ -274,7 +393,8 @@ void q35_seq_destroy(Q35Seq *s)
   if (!s)
     return;
   for (int l = 0; l < Q35_MAX_LAYERS; l++)
-    hipFree(s->conv[l]), hipFree(s->ssm[l]), hipFree(s->kc[l]), hipFree(s->vc[l]);
+    hipFree(s->conv[l]), hipFree(s->ssm[l]), hipFree(s->kc[l]), hipFree(s->vc[l]), hipFree(s->ik[l]),
+        hipFree(s->cent[l]), hipFree(s->mem[l]);
   free(s);
 }
 
