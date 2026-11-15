@@ -101,7 +101,7 @@ struct Ink2Forward
   uint32_t *m_at, *m_by, *m_ord; /* m_ord, m_pt, m_pi: the entries' order by count, its staging */
   const void **m_pt;
   int32_t *m_pi;
-  uint8_t *m_host;
+  uint8_t *m_host, *m_build;
   void *m_dev;
   void *amax;
   bool *kept;

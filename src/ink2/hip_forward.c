@@ -361,12 +361,20 @@ static bool buffers(Ink2Forward *f)
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     if (!ink2_dalloc(f, b[i].p, b[i].bytes))
       return false;
-  f->hpick = malloc(T * K * 4), f->hw = malloc(T * K * 4), f->kept = calloc(T, 1), f->hgpick = malloc(T * K * 4);
+  /* the router's picks and weights and the experts' tables through pinned host memory: copies queued on the stream,
+     one synchronize a layer for the picks, none for the tables (the next layer's picks' wait is past them) */
+  if (hipHostMalloc((void **)&f->hpick, T * K * 4, 0) != hipSuccess ||
+      hipHostMalloc((void **)&f->hw, T * K * 4, 0) != hipSuccess ||
+      hipHostMalloc((void **)&f->hgpick, T * K * 4, 0) != hipSuccess ||
+      hipHostMalloc((void **)&f->m_host, table_bytes(T * K, E), 0) != hipSuccess)
+    return false;
+  f->kept = calloc(T, 1);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
   f->m_ord = malloc((T * K + E) * sizeof *f->m_ord), f->m_pt = malloc(3 * (T * K + E) * sizeof *f->m_pt);
   f->m_pi = malloc(2 * (T * K + E) * sizeof *f->m_pi);
-  f->m_host = malloc(table_bytes(T * K, E));
-  return f->hpick && f->hw && f->kept && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_ord && f->m_pt && f->m_pi;
+  f->m_build = malloc(table_bytes(T * K, E)); /* the tables built in cached memory, then one copy into the pinned */
+  return f->hpick && f->hw && f->kept && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_ord && f->m_pt && f->m_pi &&
+         f->m_build;
 }
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR])
@@ -444,8 +452,12 @@ void ink2_forward_destroy(Ink2Forward *f)
     for (int k = 0; k < 3; k++)
       free(d->scale[k]);
   }
-  free(f->picks), free(f->hpick), free(f->hw), free(f->kept), free(f->hgpick), free(f->m_at), free(f->m_by), free(f->m_host);
-  free(f->m_ord), free(f->m_pt), free(f->m_pi);
+  void *pinned[] = {f->hpick, f->hw, f->hgpick, f->m_host};
+  for (size_t i = 0; i < sizeof pinned / sizeof *pinned; i++)
+    if (pinned[i])
+      hipHostFree(pinned[i]);
+  free(f->picks), free(f->kept), free(f->m_at), free(f->m_by);
+  free(f->m_ord), free(f->m_pt), free(f->m_pi), free(f->m_build);
   free(f);
 }
 
@@ -494,9 +506,10 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
       (next && (!ink2_mat(L1->router, f->L[l + 1].router, f->xn, n, f->logit) ||
                 !ops_router_scored(f->logit, f->L[l + 1].router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n,
                                    f->gpick, f->gw, NULL) ||
-                hipMemcpy(f->hgpick, f->gpick, P * 4, hipMemcpyDeviceToHost) != hipSuccess)) ||
-      hipMemcpy(f->hpick, f->pick, P * 4, hipMemcpyDeviceToHost) != hipSuccess ||
-      hipMemcpy(f->hw, f->pw, P * 4, hipMemcpyDeviceToHost) != hipSuccess)
+                hipMemcpyAsync(f->hgpick, f->gpick, P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess)) ||
+      hipMemcpyAsync(f->hpick, f->pick, P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
+      hipMemcpyAsync(f->hw, f->pw, P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
+      hipStreamSynchronize(NULL) != hipSuccess)
     return ink2_fail(err, "inkling2: a GPU call failed (the router)");
   if (pf_on())
     g_step[PF_ROUTE] += pf_now() - r0;
@@ -528,7 +541,7 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   /* the tables, one region sent in one copy: the entries' gate, up and down pointers, counts and first rows; the
      sorted rows' tokens, scales; each pair's sorted row and weight */
   const uint32_t cap = P + E;
-  uint8_t *h = f->m_host;
+  uint8_t *h = f->m_build; /* (cached: the count pass reads it back; pinned host memory is the host's uncached) */
   const void **tg = (const void **)h, **tu = tg + cap, **td = tu + cap;
   int32_t *cnt = (int32_t *)(td + cap), *xrow = cnt + cap, *gidx = xrow + cap, *row = gidx + P;
   float *a = (float *)(row + P), *sg = a + P, *su = sg + P;
@@ -593,7 +606,9 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   const int32_t *dcnt = (const int32_t *)(dd + cap), *dxrow = dcnt + cap, *dgidx = dxrow + cap, *drow = dgidx + P;
   const float *da = (const float *)(drow + P), *dsg = da + P, *dsu = dsg + P;
   const double x0 = pf_on() ? pf_now() : 0;
-  bool ok = hipMemcpy(dv, h, bytes, hipMemcpyHostToDevice) == hipSuccess && ops_gather_rows(f->xs, f->xn, dgidx, P, C, NULL);
+  memcpy(f->m_host, h, bytes);
+  bool ok = hipMemcpyAsync(dv, f->m_host, bytes, hipMemcpyHostToDevice, NULL) == hipSuccess &&
+            ops_gather_rows(f->xs, f->xn, dgidx, P, C, NULL);
   for (uint32_t c = 1; ok && c <= MV_MAX_TOKENS; c++) /* gate and up, a count's entries a launch */
   {
     const uint32_t o = first[c], k = (c < MV_MAX_TOKENS ? first[c + 1] : ne) - o;
