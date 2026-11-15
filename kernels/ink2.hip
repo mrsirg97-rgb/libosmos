@@ -535,8 +535,9 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
 // a split decode's units folded in order into the sink's start (fa_kernel's fold): a block a (token, head), a
 // thread a value dim
 __global__ void fa_fold_kernel(const float* part, uint32_t units, uint32_t n_tok, uint32_t H, const float* sink,
-                               const float* gate, float* out) {
-  const uint32_t t = blockIdx.x / H, h = blockIdx.x % H, d = threadIdx.x;
+                               const float* gate, float* out, _Float16* x16, int32_t* overflow) {
+  const uint32_t t = blockIdx.x / H, h = blockIdx.x % H, d = threadIdx.x, cols = H * kFaHead;
+  if (t >= n_tok) return mm::x16_put(x16, t, h * kFaHead + d, cols, 0.0f, overflow);  // a pad row of x16's tile
   float gm = sink[(uint64_t) t * H + h], gl = 1.0f, go = 0.0f;
   for (uint32_t u = 0; u < units; u++) {
     const float* pp = part + (((uint64_t) u * n_tok + t) * H + h) * (kFaHead + 2);
@@ -545,7 +546,9 @@ __global__ void fa_fold_kernel(const float* part, uint32_t units, uint32_t n_tok
     go = go * ca + pp[2 + d] * cb;
   }
   const uint64_t i = ((uint64_t) t * H + h) * kFaHead + d;
-  out[i] = go / gl * (gate ? sigmoid(gate[i]) : 1.0f);
+  const float o = go / gl * (gate ? sigmoid(gate[i]) : 1.0f);
+  out[i] = o;
+  if (x16) mm::x16_put(x16, t, h * kFaHead + d, cols, o, overflow);
 }
 
 }  // namespace
@@ -560,16 +563,19 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
       a->extent > INK2_MAX_EXTENT || pos0 % kFaTile)
     return false;
   const uint32_t G = a->heads / a->kv_heads;
+  if (a->x16 && (!scratch || n_tok > (uint32_t) kFaTile || !a->overflow)) return false;  // a split decode's alone
   if (scratch && n_tok <= (uint32_t) kFaTile) {  // a decode's: a block a unit and KV head, then the fold
     const uint32_t qlo = n_keys - n_tok, qhi = n_keys - 1;
     const uint32_t klo = a->window && qlo + 1 > a->window ? (qlo + 1 - a->window) / kFaTile * kFaTile : 0;
     const uint32_t u0 = (pos0 + klo) / kFaUnit, units = (pos0 + qhi) / kFaUnit - u0 + 1;
     const dim3 grid(1, a->kv_heads, units);
+    const uint32_t rows = a->x16 ? (n_tok + mm::kTile - 1) / mm::kTile * mm::kTile : n_tok;  // x16's: a whole tile
 #define FS(g)                                                                                                        \
   if (G == g) {                                                                                                      \
     fa_kernel<g, 1, KV, true><<<grid, g * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, pos0,     \
                                                                rel_proj, out, u0, scratch);                          \
-    fa_fold_kernel<<<n_tok * a->heads, kFaHead, 0, st(stream)>>>(scratch, units, n_tok, a->heads, sink, gate, out);   \
+    fa_fold_kernel<<<rows * a->heads, kFaHead, 0, st(stream)>>>(scratch, units, n_tok, a->heads, sink, gate, out,    \
+                                                               (_Float16*) a->x16, a->overflow);                    \
     return ok();                                                                                                     \
   }
     FS(1) FS(2) FS(4) FS(6) FS(8)

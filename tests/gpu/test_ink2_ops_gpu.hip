@@ -398,10 +398,26 @@ int main() {
         for (size_t i = 0; i < part.size(); i++) bad += part[i] != whole[(size_t) s * H * D + i];
         CHECK(bad == 0 || (std::printf("  %s: the step %u .. %u%s: %u values not the prompt's bits\n", c, s, e,
                                        split ? " (split)" : "", bad), false));
+        if (split) {  // the fold's f16 of its rows too: mm_x16's bytes, the rows its own
+          const size_t xb = (size_t) (m + 15) / 16 * 16 * H * D * 2;
+          void *xa = dev_alloc<uint8_t>(xb), *xw = dev_alloc<uint8_t>(xb);
+          int32_t* ov = dev_alloc<int32_t>(1);
+          CHECK(hipMemset(ov, 0, 4) == hipSuccess && hipMemset(xa, 0x5A, xb) == hipSuccess);
+          Ink2Attn ax = at;
+          ax.x16 = xa, ax.overflow = ov;
+          CHECK(ink2_fa(&ax, dq + (uint64_t) s * H * D, dr + (uint64_t) s * H * R, ds + (uint64_t) s * H,
+                        dg + (uint64_t) s * H * D, m, dk + k0 * kd, dv + k0 * kd, e - k0, k0, drp, dpart, fa_scr,
+                        nullptr));
+          CHECK(same_bits(host_of(dpart, (size_t) m * H * D), part));
+          CHECK(mm_x16(dpart, H * D, m, H * D, xw, ov, nullptr));
+          CHECK(same_bits(bytes_of(xa, xb), bytes_of(xw, xb)));
+          hipFree(xa), hipFree(xw), hipFree(ov);
+        }
         splits++;
         }
       }
-      std::printf("  %s: flash attention's rows the same bits in %d steps (chunks, decodes, split decodes) as in the prompt\n",
+      std::printf("  %s: flash attention's rows the same bits in %d steps (chunks, decodes, split decodes) as in the prompt; "
+                  "a split decode's f16 mm_x16's\n",
                   c, splits);
       {  // the keys and values stored f16 (a cache's): ink2_fa's bits
         const size_t kvn = (size_t) n * KV * D;

@@ -100,9 +100,10 @@ struct Ink2Forward
   /* the step's buffers (max_tokens rows) */
   int32_t *ids_d;
   float *h, *blocks, *a3, *xn, *kn, *vn, *q, *k, *v, *kc, *vc, *rel, *gate, *sink, *att, *dyn, *o, *r, *moe, *logit,
-      *tmp, *res_sc, *pw, *eg, *eu, *ed, *head, *logits;
-  int32_t *pick, *hpick, *gid, *gpick, *hgpick; /* gpick: the next layer's guessed picks (and gw their weights) */
-  float *hw, *gw;
+      *tmp, *res_sc, *eg, *eu, *ed, *head, *logits;
+  /* the picks, their weights after them (pick + the step's pairs); the next layer's guessed (gw their weights) */
+  int32_t *pick, *hpick, *gid, *gpick, *hgpick;
+  float *gw;
   void *x16, *xe16; /* mm's f16 activations: a dense matrix's input (MM_MAX_TOKENS rows), the experts' slots */
   int32_t *overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
   uint32_t head_rows; /* the head's rows a launch (f->head's) */

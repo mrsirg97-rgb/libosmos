@@ -55,6 +55,8 @@ typedef struct Ink2Attn
   uint32_t heads, kv_heads, head_dim, d_rel, extent;
   uint32_t window; /* the keys a token sees, itself the last (0: every one before it) */
   float scaling;
+  void *x16;          /* a split decode's (ink2_fa's units): out also as mm_x16 puts it (NULL: not) */
+  int32_t *overflow;  /* x16's flag, mm_x16's */
 } Ink2Attn;
 bool ink2_attn(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
                uint32_t n_tok, const float *k, const float *v, uint32_t n_keys, const float *rel_proj, float *out,
@@ -193,6 +195,8 @@ units: a query's keys cut at absolute multiples of INK2_FA_UNIT (pos0: key 0's p
   INK2_FA_TILE), each unit's online softmax from nothing, folded into the sink's start in order. given scratch
   (ink2_fa_scratch(heads, the most keys) bytes) and at most INK2_FA_TILE tokens - a decode's, a draft block's - a block
   a unit and KV head, then a fold kernel: the units in parallel, the prompt's bits (the same units, the same fold).
+  Ink2Attn's x16 (a split decode's alone, else refused): the fold writes out's f16 as mm_x16 would, the out
+  matrix's input in its launch.
 
 ink2_fa16, ink2_to_f16
   ink2_fa over keys and values stored as f16 (a cache's: ink2_to_f16 of the F32 rows, IEEE half bits in uint16_t) -

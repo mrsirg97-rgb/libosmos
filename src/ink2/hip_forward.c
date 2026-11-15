@@ -424,7 +424,7 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->rel, T * H * R * 4}, {(void **)&f->gate, T * H * D * 4}, {(void **)&f->sink, T * H * 4},
       {(void **)&f->att, T * H * D * 4}, {(void **)&f->dyn, 2 * T * KV * taps * 4}, {(void **)&f->o, T * C * 4},
       {(void **)&f->r, T * C * 4}, {(void **)&f->moe, T * C * 4}, {(void **)&f->logit, T * E * 4},
-      {(void **)&f->tmp, T * C * 4}, {(void **)&f->pick, T * K * 4}, {(void **)&f->pw, T * K * 4},
+      {(void **)&f->tmp, T * C * 4}, {(void **)&f->pick, 2 * T * K * 4},
       {(void **)&f->gpick, T * K * 4}, {(void **)&f->gw, T * K * 4},
       {(void **)&f->eg, T * K * F * 4}, {(void **)&f->eu, T * K * F * 4}, {(void **)&f->ed, ed_bytes}, {&f->m_dev, table_bytes(T * K, E)}, {&f->x16, X16 * CH * 2},
       {&f->xe16, table_slots(T * K, E) * C * 2}, {(void **)&f->overflow, 4},
@@ -448,8 +448,7 @@ static bool buffers(Ink2Forward *f)
     return false;
   /* the router's picks and weights and the experts' tables through pinned host memory: copies queued on the stream,
      one synchronize a layer for the picks, none for the tables (the next layer's picks' wait is past them) */
-  if (hipHostMalloc((void **)&f->hpick, T * K * 4, 0) != hipSuccess ||
-      hipHostMalloc((void **)&f->hw, T * K * 4, 0) != hipSuccess ||
+  if (hipHostMalloc((void **)&f->hpick, 2 * T * K * 4, 0) != hipSuccess ||
       hipHostMalloc((void **)&f->hgpick, T * K * 4, 0) != hipSuccess ||
       hipHostMalloc((void **)&f->m_host, table_bytes(T * K, E), 0) != hipSuccess)
     return false;
@@ -457,7 +456,7 @@ static bool buffers(Ink2Forward *f)
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
   f->m_key = malloc(table_entries(T * K, E) * sizeof *f->m_key);
   f->m_build = malloc(table_bytes(T * K, E)); /* the tables built in cached memory, then one copy into the pinned */
-  return f->hpick && f->hw && f->kept && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build;
+  return f->hpick && f->kept && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build;
 }
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR])
@@ -546,7 +545,7 @@ void ink2_forward_destroy(Ink2Forward *f)
   free(f->fds);
   void *dev[] = {f->embed, f->output, f->embed_norm, f->out_res_q, f->out_norm, f->ids_d, f->h, f->blocks, f->a3,
                  f->xn, f->kn, f->vn, f->q, f->k, f->v, f->kc, f->vc, f->rel, f->gate, f->sink, f->att, f->dyn,
-                 f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->pw, f->eg, f->eu, f->ed, f->head,
+                 f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->eg, f->eu, f->ed, f->head,
                  f->logits, f->gid, f->amax, f->m_dev, f->gpick, f->gw, f->x16, f->xe16, f->overflow,
                  f->res_sc};
   for (size_t i = 0; i < sizeof dev / sizeof *dev; i++)
@@ -565,7 +564,7 @@ void ink2_forward_destroy(Ink2Forward *f)
     for (int k = 0; k < 3; k++)
       free(d->scale[k]);
   }
-  void *pinned[] = {f->hpick, f->hw, f->hgpick, f->m_host};
+  void *pinned[] = {f->hpick, f->hgpick, f->m_host};
   for (size_t i = 0; i < sizeof pinned / sizeof *pinned; i++)
     if (pinned[i])
       hipHostFree(pinned[i]);
@@ -676,15 +675,15 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
      this one's - their reads the misses' bandwidth (4.25 against 4.6 tok/s). which are read ahead changes no bit */
   const bool next = l + 1 < g->n_layers && P >= E;
   const Ink2Layer *L1 = next ? &f->w->layer[l + 1] : NULL;
+  /* the picks' weights after them (pick + P): the two in one copy to the host */
+  float *pw = (float *)(f->pick + P), *hw = (float *)(f->hpick + P);
   if (!mat(f, L->router, d->router, f->xn, n, f->logit) ||
-      !ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, f->pw,
-                         NULL) ||
+      !ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw, NULL) ||
       (next && (!mat(f, L1->router, f->L[l + 1].router, f->xn, n, f->logit) ||
                 !ops_router_scored(f->logit, f->L[l + 1].router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n,
                                    f->gpick, f->gw, NULL) ||
                 hipMemcpyAsync(f->hgpick, f->gpick, P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess)) ||
-      hipMemcpyAsync(f->hpick, f->pick, P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-      hipMemcpyAsync(f->hw, f->pw, P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
+      hipMemcpyAsync(f->hpick, f->pick, 2 * P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       hipStreamSynchronize(NULL) != hipSuccess)
     return ink2_fail(err, "inkling2: a GPU call failed (the router)");
   if (pf_on())
@@ -755,7 +754,7 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
     {
       const uint32_t m = by[q], s = slots + (q - r);
       gidx[s] = (int32_t)(m / K), hidx[s] = (int32_t)q, row[m] = (int32_t)q;
-      sg[q] = d->scale[0][e], su[q] = d->scale[1][e], a[m] = f->hw[m] * d->scale[2][e];
+      sg[q] = d->scale[0][e], su[q] = d->scale[1][e], a[m] = hw[m] * d->scale[2][e];
     }
     const uint32_t padded = (end - r + MM_TILE - 1) / MM_TILE * MM_TILE;
     for (uint32_t s = slots + (end - r); s < slots + padded; s++)
@@ -886,8 +885,18 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       GPU(mat(f, L->v_conv_proj, d->v_conv_proj, xv, n, dyn_v));
     }
     /* the keys: a full layer's every row to its position, a sliding layer's window (its last window - 1 and these) */
-    const Ink2Attn at = {H, KV, D, R, full ? (uint32_t)g->rel_extent : (uint32_t)g->window,
-                         full ? 0u : (uint32_t)g->window, 1.0f / sqrtf((float)D)};
+    /* a decode's split attention: its fold writes the out matrix's f16 too (an mm one's) */
+    const bool att16 = n <= INK2_FA_TILE && L->out->dims[0] == (uint64_t)H * D &&
+                       mm_takes(ink2_type(L->out), (uint32_t)L->out->dims[1], H * D);
+    const Ink2Attn at = {H,
+                         KV,
+                         D,
+                         R,
+                         full ? (uint32_t)g->rel_extent : (uint32_t)g->window,
+                         full ? 0u : (uint32_t)g->window,
+                         1.0f / sqrtf((float)D),
+                         att16 ? f->x16 : NULL,
+                         att16 ? f->overflow : NULL};
     Ink2Tail *tk = &s->kw[l], *tv = &s->vw[l];
     uint32_t n_keys = pos + n;
     if (full)
@@ -926,7 +935,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                          f->fa_part, NULL);
     GPU(attended);
     pf(PF_ATTN);
-    GPU(mat(f, L->out, d->out, f->att, n, f->o));
+    GPU(mat2(f, L->out, d->out, f->o, NULL, NULL, NULL, f->att, n, att16));
     Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];
     /* r: the output's conv, plus h within a block (a block's first layer's h a block state of its own) */
     if (boundary)
