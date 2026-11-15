@@ -1,11 +1,13 @@
 # libosmos
 
-An inference engine for two big mixture-of-experts models on one **AMD Strix Halo** (Ryzen AI MAX+ 395, Radeon
+An inference engine for three big mixture-of-experts models on one **AMD Strix Halo** (Ryzen AI MAX+ 395, Radeon
 8060S / gfx1151, 128 GB):
 
 - **DeepSeek-V4.1-Flash** (~768B parameters, ~250 GB quantized), more than fits in memory: the experts it needs are
   streamed from the SSD as it runs.
 - **Qwen3.8-Flash-Next** (~177B, 512 experts, the Qwen4 architecture's preview), fully resident in GPU memory.
+- **Inkling-2-Small** (Thinking Machines; 384 experts a layer, a 158 GB pack), its experts streamed from the SSD beside
+  the ~84 GB osmos keeps in memory, drafted by its own multi-token-prediction head.
 
 **The same input gives the same output, bit for bit**, however it runs: alone or batched with other conversations,
 at any memory budget, decoded one token at a time or drafted and verified, with an expert computed on the GPU or the
@@ -19,13 +21,15 @@ C, HIP and a little C++. No Python at runtime.
 ```sh
 python3 tools/install/osmos_install.py osmos-evo --serve           # DeepSeek; or ud-iq1_s, ud-iq1_m, ud-iq2_xxs
 python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve   # Qwen; or qwen38-ud-q4_k_xl
+python3 tools/install/osmos_install.py osmos-evo-inkling --serve   # Inkling-2-Small
 ```
 
 The installer builds the engine, downloads the pack's files at pinned commits, checks every SHA-256, writes the
 pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on port 8091 (`/v1/chat/completions`
 streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 
-- `--abliterated` adds huihui-ai's abliteration as an overlay (every pack; the stock files stay as they are).
+- `--abliterated` adds huihui-ai's abliteration as an overlay (the DeepSeek and Qwen packs; the stock files stay as
+  they are).
 - `--npu` puts the NPU to work beside the GPU on prompts (1-5% faster; decode the same): it checks for the NPU and
   XRT, builds with them, and fetches the pack's NPU kernels (the four DeepSeek packs and `qwen38-ud-iq3_xxs`).
   Opt-in: its output is its own, the same every run but not the GPU-only bits.
@@ -34,13 +38,13 @@ streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
   map, the driver and ROCm, the power profile (balanced is slower than the profiles osmos is measured at), the RAM,
   `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
-  `deepseek-1017-evo`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS) or `qwen3.8-flash-next`
-  (`-l`: UD-Q4_K_XL).
+  `deepseek-1017-evo`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS), `qwen3.8-flash-next`
+  (`-l`: UD-Q4_K_XL) or `inkling-2-small-evo`.
 
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
 header - turns since the last tool call, the most repeated recent call, orphaned calls and results (a client's
 history compaction can drop one side), and `stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
-true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K), or
+true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling 256K), or
 `--ctx` (installer or osmos-api: `512k`, `1m`, ...).
 
 ## The packs
@@ -53,6 +57,7 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the closest to the model, the slowest decode |
 | `qwen38-ud-iq3_xxs` | 84 GB + 3 GB MTP head | 512K | Qwen, fully in GPU memory |
 | `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
+| `osmos-evo-inkling` | 158 GB (unsloth's UD-IQ1_S files + a 55.5 GB delta in two parts, made where you install it) + 1.3 GB drafter | 256K | Inkling-2-Small: UD-IQ1_S with its experts' down projections IQ2_S / IQ3_XXS and its attention and head Q5_K |
 
 ## osmos-evo in numbers
 
@@ -120,6 +125,22 @@ The UD packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1
 MXFP8 Engram table, our 4.7 GB DSpark drafter and expert pick profile. Qwen is
 [unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (or UD-Q4_K_XL) and its MTP head. The
 abliteration (huihui-ai's) costs 0.2-0.5% perplexity at the same speed.
+
+## osmos-evo-inkling in numbers
+
+Inkling-2-Small on one Strix Halo (the `performance` profile, nothing else running; 0.8.0; osmos-serve at the pack's
+256K and 4,096-token steps, its Q5_K drafter):
+
+| | |
+| --- | ---: |
+| Decode, drafted / plain (three short questions) | **17.2** / 10.9, 16.3 / 14.1, 20.2 / 17.8 tok/s |
+| Decode after a 64K / 248K prompt | drafted **14.1** / 24.0 (a text its drafter predicts, 94% accepted); plain 9.2 / 7.9 |
+| Prompt, 8,192 / 65,536 / 253,952 tokens | **330** / 279 / 169 tok/s |
+| KL against Inkling-2-Small in BF16 (Wiki, 10,239 tokens) | 0.197, top-1 85.8% |
+
+Every token is the bits of the same tokens read as a prompt, drafted or not, at any steps. 87 GB of the 143 GB of
+experts (61%) stay in memory and the rest stream from the SSD; a full-attention layer's keys are cached Q8 and its
+values Q5 (KL +0.001 against f16), so a 256K context's cache is 3.5 GB.
 
 ## Performance
 
@@ -337,8 +358,12 @@ is the guarantee (the NPU's is its own).
   - the quant formats
   - the IQ grid tables (generated from its `gguf-py`)
   - `qwen4exp`, the reference Qwen's forward is held to
-- [DeepSeek](https://github.com/deepseek-ai) and [Qwen](https://huggingface.co/Qwen): the models.
-- [unsloth](https://huggingface.co/unsloth): the quantizations, the MXFP8 Engram table and Qwen's MTP head.
+- [DeepSeek](https://github.com/deepseek-ai), [Qwen](https://huggingface.co/Qwen) and
+  [Thinking Machines](https://huggingface.co/thinkingmachines) (Inkling-2-Small, Apache 2.0): the models.
+- [unsloth](https://huggingface.co/unsloth): the quantizations (Inkling's UD-IQ1_S and its importance matrix among
+  them), the MXFP8 Engram table and Qwen's MTP head.
+- [eaddario/imatrix-calibration](https://huggingface.co/datasets/eaddario/imatrix-calibration) (MIT): the text
+  Inkling's picks are counted on.
 - [huihui-ai](https://huggingface.co/huihui-ai): the abliteration patches.
 - [ISTA-DASLab](https://huggingface.co/ISTA-DASLab): GSQ-RCO, the quant this was first built on (still supported).
 

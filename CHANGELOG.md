@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.8.0]: Inkling-2-Small
+
+- **A third family: Thinking Machines' Inkling-2-Small** (`osmos-evo-inkling`, the new pack): 384 experts a layer, 8
+  a token, a 1,024-token sliding window on 40 of its 48 layers and full attention on 8, and its own
+  multi-token-prediction drafter. osmos-evo-inkling is unsloth's UD-IQ1_S with its routed experts' down projections
+  IQ2_S / IQ3_XXS and its attention and head Q5_K by GPTQ: 158.2 GB, KL against Inkling-2-Small in BF16 0.197 on Wiki
+  (top-1 85.8%). The experts that do not fit in memory stream from the SSD; 256K context by default (`--ctx 1m`).
+- **Its numbers** (`performance`, osmos-serve at the pack's 256K and 4,096-token steps): decode drafted / plain
+  17.2 / 10.9, 16.3 / 14.1 and 20.2 / 17.8 tok/s on three short questions; after a 64K prompt 14.1 / 9.2, after 248K
+  24.0 / 7.9 (a text its drafter predicts: 94% accepted); prompts 330 tok/s at 8K, 279 at 64K, 169 at 248K. Every token
+  the bits of the same tokens read as a prompt, drafted or not, whatever the steps.
+- **The memory goes to the experts.** A full layer's keys cached Q8 and values Q5 (3.5 GB at 256K, f16's 8.0; KL
+  +0.001), the prompt's stream sized by the experts a layer can miss (3.9 GB, not 6.8), the step's buffers shared
+  where they are dead apart (1.2 GB), the logits for a round's kept rows alone: 87 GB of the 143 GB of experts kept
+  (61%) at 256K, against ~60 GB at the start of 0.8.0's work. Decode gains about 1% a GB.
+- **Decode at depth: a full layer's attention 3x faster** (13.4 -> 4.4 ms a layer at 248K keys, 3.5 -> 1.2 at 64K):
+  a split decode's rows (token, head) pairs, its blocks only the waves that compute (a wave without rows holds its
+  registers), a Q8 / Q5 tile's records turned into values at the store not as loaded (the next tile's loads in flight),
+  a one-wave decode's keys straight from each lane's record into the scores' fragments. After a 64K prompt: plain
+  7.65 -> 9.62 tok/s, drafted 13.35 -> 15.51.
+- **The drafter**: its matrices on the WMMA kernels, its fold Q8_0, its attention reading each key once, its weights
+  Q5_K (`tools/requant/requant_ink2_mtp`, the same drafts as Q8_0 at 1.18 GiB): a round 31 -> 12 ms. A round stops at
+  a confidence product of 0.9 (each drafted token Inkling verifies reads its own experts: ~55 ms).
+- **Fewer launches a token**: 1,940 -> 1,212 (a layer's attention inputs in one launch, residuals in their convs, the
+  norms' and the swiglu's f16 written by them), the bits the same.
+- **Shared kernels**: the codebook types' one-token expert steps (IQ1_S, IQ2_XXS, IQ2_S) on a kernel of their own
+  (IQ1_S 58 -> 84 GB/s), DeepSeek's and Qwen's experts of those types too, the same bits; it skips an entry of no
+  tokens before its weights (a table's NULL: Qwen faulted on it before the release). DeepSeek's and Qwen's decode
+  unchanged (`performance`: osmos-evo 18.1 / 17.8 / 16.9 plain, 32.3 / 28.6 / 35.9 drafted; Qwen UD-IQ3_XXS the same
+  ids as 0.7.6, 28.0 / 42.6 tok/s plain / drafted at low-power against 0.7.6's 27.9 / 42.5).
+- **The installer** takes a delta in parts (a file past the hub's 50 GB, split; its parts together the whole delta's
+  set, byte for byte: `DerivedSet.test_delta_in_parts`).
+- **`--trust-size` no longer re-hashes a set the installer made** (#53, @aic0d3r): an osmos-evo re-lay with
+  `--trust-size` read ~147 GB to check files it had made and checked itself. A made file is now taken by its bytes
+  when the pinned SHA-256 it was checked against is stamped beside it (`<file>.sha256`); a stale recipe's stamp, or a
+  file of its size in a `--have` dir (a base shard can be the size of the shard made from it), is hashed.
+
 ## [0.7.6]: osmos-evo
 
 - **The default DeepSeek pack is now `osmos-evo`**: evo-A with the routed experts' gate and up of layers 10-19 at
