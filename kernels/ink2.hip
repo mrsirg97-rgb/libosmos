@@ -275,6 +275,22 @@ __device__ inline void fa_fold_coef(float& gm, float& gl, float m, float l, floa
   gl = gl * a + l * b, gm = M;
 }
 
+// a full layer's cache as Q8 records (ink2_ops.h's INK2_KV8_RECORD): the kernel's KV a byte of them
+struct Kv8 {
+  uint8_t b;
+};
+typedef _Float16 fa_h8 __attribute__((ext_vector_type(8)));
+
+// a record's 8 values from d: q times its block's f16 scale, rounded to f16 (ink2_fa8's values)
+__device__ inline fa_h8 kv8_load(const uint8_t* rec, uint32_t d) {
+  const uint2 raw = *(const uint2*) (rec + d);
+  const float scale = (float) *(const _Float16*) (rec + INK2_MAX_HEAD + d / INK2_KV8_BLOCK * 2);
+  const int8_t* q = (const int8_t*) &raw;
+  fa_h8 out;
+  for (int e = 0; e < 8; e++) out[e] = (_Float16) ((float) q[e] * scale);
+  return out;
+}
+
 // G waves; Q's A fragments in registers (a lane its row's 8 x 16 halves), the next tile's K and V prefetched into
 // registers while this one's WMMAs run - LDS ~16 KB a block (K, V^T, P), several blocks a CU
 // KV: the keys' and values' type in memory - F32 (rounded to f16 as loaded) or f16 (a cache's: the same values).
@@ -321,13 +337,20 @@ __global__ __launch_bounds__(G * RT * 32) void fa_kernel(Ink2Attn a, const float
   }
   // a tile's K and V into registers (keys past the last zero): F32 a value a thread at a time; f16 (a cache's) 8
   // halves a 16-byte load - the same values either way
-  constexpr bool kHalf = sizeof(KV) == 2;
+  constexpr bool kQ8 = sizeof(KV) == 1, kHalf = sizeof(KV) <= 2;  // (kHalf: 8 f16s a load - a Q8 record's too)
   constexpr int kVec = 8, kVecs = kFaTile * kFaHead / kVec, kVItems = (kVecs + kNth - 1) / kNth;
-  typedef _Float16 fa_h8 __attribute__((ext_vector_type(8)));
   float kr[kHalf ? 1 : kItems], vr[kHalf ? 1 : kItems];
   fa_h8 kh[kHalf ? kVItems : 1], vh[kHalf ? kVItems : 1];
   auto fetch = [&](uint32_t kb) {
-    if constexpr (kHalf)
+    if constexpr (kQ8)
+      for (int it = 0; it < kVItems; it++) {
+        const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
+        const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
+        const uint64_t at = ((uint64_t) (kb + r) * a.kv_heads + kvh) * INK2_KV8_RECORD;
+        kh[it] = in ? kv8_load((const uint8_t*) k + at, d) : fa_h8{};
+        vh[it] = in ? kv8_load((const uint8_t*) v + at, d) : fa_h8{};
+      }
+    else if constexpr (kHalf)
       for (int it = 0; it < kVItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
@@ -506,6 +529,36 @@ extern "C" bool ink2_fa16(const Ink2Attn* a, const float* q, const float* rel, c
                           const float* rel_proj, float* out, float* scratch, void* stream) {
   return fa_launch<_Float16>(a, q, rel, sink, gate, n_tok, (const _Float16*) k, (const _Float16*) v, n_keys, pos0,
                              rel_proj, out, scratch, stream);
+}
+
+extern "C" bool ink2_fa8(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
+                         uint32_t n_tok, const uint8_t* k, const uint8_t* v, uint32_t n_keys, uint32_t pos0,
+                         const float* rel_proj, float* out, float* scratch, void* stream) {
+  return fa_launch<Kv8>(a, q, rel, sink, gate, n_tok, (const Kv8*) k, (const Kv8*) v, n_keys, pos0, rel_proj, out,
+                        scratch, stream);
+}
+
+// a thread a block of a row: its amax, d = amax / 127, q = round(x / d) as x * (1 / d); d's f16 after the row's int8s
+__global__ void to_kv8_kernel(const float* x, uint64_t blocks, uint8_t* y) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= blocks) return;
+  constexpr uint32_t per = INK2_MAX_HEAD / INK2_KV8_BLOCK;
+  const uint64_t r = i / per;
+  const uint32_t b = (uint32_t) (i % per);
+  const float* xb = x + r * INK2_MAX_HEAD + b * INK2_KV8_BLOCK;
+  uint8_t* rec = y + r * INK2_KV8_RECORD;
+  float amax = 0;
+  for (int e = 0; e < INK2_KV8_BLOCK; e++) amax = fmaxf(amax, fabsf(xb[e]));
+  const float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
+  for (int e = 0; e < INK2_KV8_BLOCK; e++) rec[b * INK2_KV8_BLOCK + e] = (uint8_t) (int8_t) roundf(xb[e] * id);
+  *(_Float16*) (rec + INK2_MAX_HEAD + 2 * b) = (_Float16) d;
+}
+
+extern "C" bool ink2_to_kv8(const float* x, uint64_t rows, uint8_t* y, void* stream) {
+  if (!x || !y || !rows) return false;
+  const uint64_t blocks = rows * (INK2_MAX_HEAD / INK2_KV8_BLOCK);
+  to_kv8_kernel<<<grid(blocks), kThreads, 0, st(stream)>>>(x, blocks, y);
+  return ok();
 }
 
 __global__ void to_f16_kernel(const float* x, uint64_t n, _Float16* y) {

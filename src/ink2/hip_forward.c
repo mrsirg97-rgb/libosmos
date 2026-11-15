@@ -904,8 +904,11 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     /* key 0's position: a full layer's 0, a window's its first's (a tile's start); a decode's units split */
     const uint32_t pos0 = full ? 0 : pos + n - n_keys;
     pf(PF_IN);
-    GPU(ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att, f->fa_part,
-                  NULL));
+    /* a full layer's cache Q8 records (ink2_fa8), a window's f16 */
+    GPU(full ? ink2_fa8(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
+                        f->fa_part, NULL)
+             : ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
+                         f->fa_part, NULL));
     pf(PF_ATTN);
     GPU(mat(f, L->out, d->out, f->att, n, f->o));
     Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];

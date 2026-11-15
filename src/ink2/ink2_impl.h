@@ -32,7 +32,8 @@ typedef struct Ink2Dev
 typedef struct Ink2Tail
 {
   void *d;
-  uint32_t row, esize; /* elements a row; bytes an element (a conv's inputs F32, a window's keys and values f16) */
+  uint32_t row, esize; /* elements a row; bytes an element (a conv's inputs F32, a window's keys and values f16, a
+                          full layer's a key's KV heads each a Q8 record: INK2_KV8_RECORD) */
   uint32_t keep, cap, held;
 } Ink2Tail;
 
@@ -69,7 +70,7 @@ struct Ink2Seq
   uint32_t reach, prompt_end;
   bool failed;
   Ink2Tail conv[INK2_MAX_LAYERS][INK2_CONVS]; /* each layer's short convs' inputs */
-  Ink2Tail kw[INK2_MAX_LAYERS], vw[INK2_MAX_LAYERS]; /* a sliding layer's window (a full layer's d: max_ctx rows), f16 */
+  Ink2Tail kw[INK2_MAX_LAYERS], vw[INK2_MAX_LAYERS]; /* a sliding layer's window, f16; a full layer's max_ctx rows, Q8 */
   /* the drafter's: each layer's context keys and values (f16 rings of mrows: a local layer's window and a block, a
      full one's max_ctx), the last seeded position's taps (the Markov head's features), the context seeded mfrom ..
      mend - 1; the last step's taps' first row and its position */

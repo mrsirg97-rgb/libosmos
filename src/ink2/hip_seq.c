@@ -52,8 +52,9 @@ bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n)
     return false;
   void *at = ink2_tail_row(t, t->held);
   const uint64_t vals = (uint64_t)n * t->row;
-  if (t->esize == 2 ? !ink2_to_f16(x, vals, at, NULL)
-                    : hipMemcpyAsync(at, x, vals * 4, hipMemcpyDeviceToDevice, NULL) != hipSuccess)
+  if (t->esize == INK2_KV8_RECORD ? !ink2_to_kv8(x, vals, at, NULL)
+      : t->esize == 2             ? !ink2_to_f16(x, vals, at, NULL)
+                                  : hipMemcpyAsync(at, x, vals * 4, hipMemcpyDeviceToDevice, NULL) != hipSuccess)
     return false;
   t->held += n;
   return true;
@@ -89,7 +90,7 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
     return ink2_fail(err, "out of memory"), NULL;
   s->f = f;
   const Ink2Geometry *g = &f->w->geo;
-  const uint32_t kd = (uint32_t)(g->n_kv_heads * g->head_dim), T = f->max_tokens;
+  const uint32_t kd = (uint32_t)(g->n_kv_heads * g->head_dim), kv = (uint32_t)g->n_kv_heads, T = f->max_tokens;
   /* a window keeps window - 1 + INK2_FA_TILE - 1 (its keys handed in from a tile's start) and a rollback's */
   const uint32_t ck = conv_need(f) + INK2_MAX_BACK, wk = (uint32_t)g->window - 1 + INK2_FA_TILE - 1 + INK2_MAX_BACK;
   bool ok = true;
@@ -100,8 +101,8 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
     if (ok && g->sliding[l])
       ok = tail_make(&s->kw[l], kd, 2, wk, 2 * wk + T, 0) && tail_make(&s->vw[l], kd, 2, wk, 2 * wk + T, 0);
     else if (ok)
-      ok = tail_make(&s->kw[l], kd, 2, f->max_ctx, f->max_ctx, 0) &&
-           tail_make(&s->vw[l], kd, 2, f->max_ctx, f->max_ctx, 0);
+      ok = tail_make(&s->kw[l], kv, INK2_KV8_RECORD, f->max_ctx, f->max_ctx, 0) &&
+           tail_make(&s->vw[l], kv, INK2_KV8_RECORD, f->max_ctx, f->max_ctx, 0);
   }
   if (ok && f->mtp)
     ok = ink2_mtp_seq_make(s);

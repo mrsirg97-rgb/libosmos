@@ -10,6 +10,7 @@
 //                 (the token after the step's, no floors) printed beside the text's - its acceptance
 //   CHECK=1       at each 1-token step: roll back, run it again, the logits the same bits; and once a save, a load
 //                 into a new sequence and its next step the same bits
+//   DUMP=path     each row's logits' FNV-1a 64 (8 bytes a row): splits compared by their dumps' bytes
 //   PROMPT=1      the ids a prompt (ink2_seq_prompt at their end): the head on the last row alone, a server's prompt
 //                 steps - a prefill's time (no reference, no CHECK)
 #include <hip/hip_runtime.h>
@@ -93,6 +94,8 @@ int main(int argc, char** argv) {
   const double room = std::getenv("ROOM") ? std::atof(std::getenv("ROOM")) : 32.0;
   const bool check = std::getenv("CHECK") && std::atoi(std::getenv("CHECK"));
   const bool prompt = std::getenv("PROMPT") && std::atoi(std::getenv("PROMPT"));
+  FILE* dump = std::getenv("DUMP") ? std::fopen(std::getenv("DUMP"), "wb") : nullptr;  // a scored row's logits' hash
+  CHECK(!std::getenv("DUMP") || dump);
   std::vector<uint64_t> picks;
   if (const char* pp = std::getenv("PICKS")) {
     picks.resize((size_t) W->geo.n_layers * W->geo.n_experts);
@@ -189,6 +192,12 @@ int main(int argc, char** argv) {
       for (uint32_t v = 0; v < V; v++) sum += std::exp((double) x[v] - x[top]);
       const double lse = x[top] + std::log(sum);
       for (uint32_t v = 0; v < V; v++) lp[v] = (double) x[v] - lse;
+      if (dump) {  // the row's logits' FNV-1a 64: two splits' dumps the same bytes when their rows are the same bits
+        uint64_t h = 1469598103934665603ull;
+        const uint8_t* b = (const uint8_t*) x;
+        for (size_t i = 0; i < (size_t) V * 4; i++) h = (h ^ b[i]) * 1099511628211ull;
+        CHECK(std::fwrite(&h, 8, 1, dump) == 1);
+      }
       if (!ref) continue;
       CHECK(std::fread(rl.data(), 4, V, ref) == V);
       double kl = 0;
@@ -206,9 +215,10 @@ int main(int argc, char** argv) {
     }
     at += n;
   }
+  if (dump) std::fclose(dump);
   std::printf("ink2_engine: %u rows", rows);
   if (rows)
-    std::printf(", kld mean %.3g max %.3g against the reference, top-1 %.2f%%, %u rows its bits", kl_sum / rows, kl_max,
+    std::printf(", kld mean %.6f max %.3g against the reference, top-1 %.2f%%, %u rows its bits", kl_sum / rows, kl_max,
                 100.0 * agree / rows, same);
   std::printf("; %u rollbacks the same bits; prompt steps %.1f s (%.1f tok/s), %u decode steps %.2f tok/s\n", checked,
               t_prompt, (T - n_dec) / t_prompt, n_dec, n_dec ? n_dec / t_dec : 0.0);
