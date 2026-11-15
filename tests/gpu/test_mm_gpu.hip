@@ -180,8 +180,8 @@ static void shape(const Gguf* g, const Shape& s) {
       CHECK(std::memcmp(&yh[(size_t) 200 * rows], &a[(size_t) 3 * rows], rows * 4) == 0);
     }
     if (s.expert >= 0) {  // the experts' launch (mm_group: one matrix, its multi-tile plans - mm.hip's GroupPlan): the
-                          // first n tokens' rows mm_run's bits at 1 .. 8 column tiles (1 - 16 tokens: IQ1_S's
-                          // iq1s_tile_kernel among them), a partial tile and a partial block
+                          // first n tokens' rows mm_run's bits at 1 .. 8 column tiles (1 - 16 tokens: the codebook types'
+                          // group_tile_kernel among them), a partial tile and a partial block
       std::vector<float> yr((size_t) 201 * rows);  // x16b and yb: the last pass's 201 tokens, mm_run's
       CHECK(hipMemcpy(yr.data(), yb, yr.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
       const void** dw;

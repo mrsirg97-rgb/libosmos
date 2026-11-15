@@ -194,18 +194,18 @@ bool group_gemm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32
   return hipGetLastError() == hipSuccess;
 }
 
-// IQ1_S's one-tile steps on mm.h's iq1s_tile_kernel (group_ct<IQ1_S, 1>'s bits): as many blocks as the GPU holds at
-// once, each taking tiles until none are left (a block a tile: 204 against 188 us; mmsweep ink2). what a WGP holds:
-// its VGPRs' blocks or its LDS's, the fewer - the LDS both CUs' (WGP mode; the runtime's figure, and its occupancy
-// call, one CU's 64 KB: 7 blocks a WGP, 211 us, against the 12 the VGPRs allow, 190 us)
-template <int W>
+// the codebook types' one-tile steps on mm.h's group_tile_kernel (group_ct<T, 1>'s bits): as many blocks as the GPU
+// holds at once, each taking tiles until none are left (IQ1_S, a block a tile: 204 against 188 us; mmsweep ink2).
+// what a WGP holds: its VGPRs' blocks or its LDS's, the fewer - the LDS both CUs' (WGP mode; the runtime's figure,
+// and its occupancy call, one CU's 64 KB: 7 blocks a WGP, 211 us, against the 12 the VGPRs allow, 190 us)
+template <quant::Type T, int W>
 uint32_t resident_blocks() {
   static const uint32_t n = [] {
     int dev = 0;
     hipDeviceProp_t p;
     hipFuncAttributes a;
     if (hipGetDevice(&dev) != hipSuccess || hipGetDeviceProperties(&p, dev) != hipSuccess ||
-        hipFuncGetAttributes(&a, (const void*) mm::iq1s_tile_kernel<W>) != hipSuccess || a.numRegs < 1)
+        hipFuncGetAttributes(&a, (const void*) mm::group_tile_kernel<T, W>) != hipSuccess || a.numRegs < 1)
       return 0u;
     const uint64_t regs = (uint64_t) (a.numRegs + 7) / 8 * 8 * mm::kWave * W;  // VGPRs come in 8s a lane
     const uint64_t by_regs = (uint64_t) p.regsPerMultiprocessor / regs;
@@ -219,14 +219,15 @@ uint32_t resident_blocks() {
   return n;
 }
 
-bool group_iq1s(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t rows, uint32_t cols,
-                const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff, uint32_t ys,
-                hipStream_t s) {
-  using S = Tuned<quant::kIQ1_S>::S;
-  static_assert(S::kSlab == 128, "iq1s_tile_kernel's slab");
-  const uint32_t tiles = rows / mm::kTile * n_mat, held = resident_blocks<S::kWaves>();
+template <quant::Type T>
+bool group_one_tile(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t rows, uint32_t cols,
+                    const void* x16, const uint32_t* xoff, uint32_t xts, float* y, const uint32_t* yoff, uint32_t ys,
+                    hipStream_t s) {
+  using S = typename Tuned<T>::S;
+  static_assert(S::kSlab == 128, "group_tile_kernel's slab");
+  const uint32_t tiles = rows / mm::kTile * n_mat, held = resident_blocks<T, S::kWaves>();
   if (!held) return false;
-  mm::iq1s_tile_kernel<S::kWaves><<<tiles < held ? tiles : held, mm::kWave * S::kWaves, 0, s>>>(
+  mm::group_tile_kernel<T, S::kWaves><<<tiles < held ? tiles : held, mm::kWave * S::kWaves, 0, s>>>(
       (const uint8_t* const*) w, cnt, n_mat, rows, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
   return hipGetLastError() == hipSuccess;
 }
@@ -244,7 +245,7 @@ bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint
   const bool gemm = GroupPlan<T>::kGemm && rows % gemm_rows == 0 && cols / S::kSlab >= (uint32_t) S::kWaves;
   switch (col_tiles<T>(max_cnt)) {
     case 1:
-      if constexpr (T == quant::kIQ1_S) return group_iq1s(w, cnt, n_mat, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+      if constexpr (mm::kOneTile<T>) return group_one_tile<T>(w, cnt, n_mat, rows, cols, x16, xoff, xts, y, yoff, ys, s);
       return group_ct<T, 1>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     case 2:
       if constexpr (GroupPlan<T>::kRm)
