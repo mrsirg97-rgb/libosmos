@@ -67,6 +67,7 @@ _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens withi
 typedef struct Eng
 {
   Ink2Forward *f;
+  uint64_t *picks; /* the picks file's counts, or NULL */
   uint32_t vocab, n;
 } Eng;
 
@@ -76,14 +77,13 @@ static void e_destroy(void *p)
   if (!e)
     return;
   ink2_forward_destroy(e->f);
+  free(e->picks);
   free(e);
 }
 
 static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->picks)
-    return fail(err, "no picks file is read for this family yet"), NULL;
   if (o->drafter)
     return fail(err, "no drafter for this family yet (DSpark's head: 0.8.0 in progress)"), NULL;
   if (o->npu)
@@ -92,8 +92,19 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (!e)
     return fail(err, "out of memory"), NULL;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
+  if (o->picks) /* a picks file: the router's picks [layer][expert] as uint64, nothing after (DeepSeek's layout) */
+  {
+    const size_t n = (size_t)m->w->geo.n_layers * m->w->geo.n_experts;
+    FILE *pf = fopen(o->picks, "rb");
+    const bool ok = pf && (e->picks = malloc(n * sizeof *e->picks)) && fread(e->picks, sizeof *e->picks, n, pf) == n &&
+                    fgetc(pf) == EOF;
+    if (pf)
+      fclose(pf);
+    if (!ok)
+      return fail(err, "the picks file could not be read, or is not this model's"), e_destroy(e), NULL;
+  }
   const uint32_t T = o->max_tokens ? o->max_tokens : INK2_STEP_TOKENS;
-  const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, o->budget};
+  const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, o->budget, e->picks};
   if (!(e->f = ink2_forward_create(m->w, &io, err)))
     return e_destroy(e), NULL;
   return e;

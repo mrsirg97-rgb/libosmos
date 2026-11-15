@@ -22,11 +22,13 @@ typedef struct Ink2Options
   uint32_t max_ctx;    /* a sequence's most positions */
   uint32_t max_tokens; /* a step's most tokens */
   uint64_t room;       /* the experts' cache (the membrane's pool), bytes; 0: every expert */
+  const uint64_t *picks; /* a picks profile ([layer][expert] counts): the warm set the most picked; NULL: uniform */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR]);
 void ink2_forward_destroy(Ink2Forward *f);
 uint64_t ink2_forward_bytes(const Ink2Forward *f);
+const uint64_t *ink2_forward_picks(const Ink2Forward *f);
 uint64_t ink2_identity(const Ink2Forward *f);
 
 Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR]);
@@ -61,9 +63,10 @@ Ink2Forward (DESIGN.md, "0.8.0: Inkling's engine")
   same tokens.
 
 ink2_forward_create
-  the dense weights uploaded, the membrane made and warmed (room's units, each layer's experts in ascending id an
+  the dense weights uploaded, the membrane made and warmed (room's units: given picks the most picked first, else an
   expert of every layer at a time), the step's buffers for max_tokens. NULL with why where memory or a read refuses,
   or max_ctx / max_tokens is 0. ink2_forward_bytes: the GPU and pinned memory it took (the server's budget).
+  ink2_forward_picks: every unit's picks since create ([layer][expert], uint64: a picks file's layout).
 
 ink2_identity
   a 64-bit key of what a saved sequence depends on: the state's format, the geometry, max_ctx's place in it (none:

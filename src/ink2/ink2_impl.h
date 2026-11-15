@@ -57,6 +57,7 @@ struct Ink2Forward
   void *embed, *output;
   float *embed_norm, *out_res_q, *out_norm;
   uint64_t dense_bytes, pinned_bytes;
+  uint64_t *picks; /* each unit's picks so far (ink2_forward_picks) */
   /* the experts */
   int *fds;
   HostSlots *slots, *stream;
@@ -65,8 +66,8 @@ struct Ink2Forward
   int32_t *ids_d;
   float *h, *blocks, *a3, *xn, *kn, *vn, *q, *k, *v, *kc, *vc, *rel, *gate, *sink, *att, *dyn, *o, *r, *moe, *logit,
       *tmp, *pw, *eg, *eu, *eh, *ed, *head, *logits;
-  int32_t *pick, *hpick, *gid;
-  float *hw, *xs; /* xs: the pairs' inputs in expert order */
+  int32_t *pick, *hpick, *gid, *gpick, *hgpick; /* gpick: the next layer's guessed picks (and gw their weights) */
+  float *hw, *xs, *gw; /* xs: the pairs' inputs in expert order */
   float *fa_part; /* a split decode's attention units (ink2_fa_scratch) */
   /* moe's tables: the counting sort's, the region built on the host and its device copy */
   uint32_t *m_at, *m_by;

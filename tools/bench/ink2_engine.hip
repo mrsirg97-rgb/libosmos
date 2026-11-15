@@ -5,6 +5,7 @@
 //   ink2_engine <first shard> <ids> <steps> [ref.f32]   steps: "200,64*30,1*10" - a step's tokens, *k for k of them
 //                                                     (the last one repeated to the ids' end)
 //   ROOM=GiB      the experts' cache (default 32)
+//   PICKS=path    a picks profile to warm by (the most picked experts first); PICKS_OUT=path: this run's written
 //   CHECK=1       at each 1-token step: roll back, run it again, the logits the same bits; and once a save, a load
 //                 into a new sequence and its next step the same bits
 #include <hip/hip_runtime.h>
@@ -86,7 +87,14 @@ int main(int argc, char** argv) {
   for (uint32_t n : steps) maxs = n > maxs ? n : maxs;
   const double room = std::getenv("ROOM") ? std::atof(std::getenv("ROOM")) : 32.0;
   const bool check = std::getenv("CHECK") && std::atoi(std::getenv("CHECK"));
-  const Ink2Options o = {T + 16, maxs, (uint64_t) (room * (double) (1ull << 30))};
+  std::vector<uint64_t> picks;
+  if (const char* pp = std::getenv("PICKS")) {
+    picks.resize((size_t) W->geo.n_layers * W->geo.n_experts);
+    FILE* pf = std::fopen(pp, "rb");
+    CHECK(pf && std::fread(picks.data(), 8, picks.size(), pf) == picks.size());
+    std::fclose(pf);
+  }
+  const Ink2Options o = {T + 16, maxs, (uint64_t) (room * (double) (1ull << 30)), picks.empty() ? nullptr : picks.data()};
   auto t0 = std::chrono::steady_clock::now();
   Ink2Forward* f = ink2_forward_create(W, &o, err);
   CHECK(f);
@@ -169,6 +177,12 @@ int main(int argc, char** argv) {
                 100.0 * agree / rows, same);
   std::printf("; %u rollbacks the same bits; prompt steps %.1f s, %u decode steps %.2f tok/s\n", checked, t_prompt,
               n_dec, n_dec ? n_dec / t_dec : 0.0);
+  if (const char* po = std::getenv("PICKS_OUT")) {
+    FILE* pf = std::fopen(po, "wb");
+    CHECK(pf && std::fwrite(ink2_forward_picks(f), 8, (size_t) W->geo.n_layers * W->geo.n_experts, pf) ==
+                    (size_t) W->geo.n_layers * W->geo.n_experts);
+    std::fclose(pf);
+  }
   ink2_seq_destroy(s);
   ink2_forward_destroy(f);
   ink2_weights_destroy(W);
