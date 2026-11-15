@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <hip/hip_runtime_api.h>
 
@@ -71,6 +72,49 @@ _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens withi
    8,192's) */
 #define INK2_STEP_TOKENS 8192
 
+/* the logits' rows a step keeps at most: a prompt's last row, a decode's or a drafted round's every row, each
+   --parallel lane's - 1,024 x the vocabulary's 201,024 F32 0.77 GiB (a step's every row at 8,192: 6.1 GiB) */
+#define INK2_LOGIT_ROWS 1024
+
+/* INK2_PROFILE's round accounting (a measurement's): the steps' time by their tokens (1 .. 16, then more), the
+   drafter's seeds and drafts and the drafts they gave, printed at e_destroy */
+#define PROF_N 17
+static struct
+{
+  int on;
+  double step_s[PROF_N], seed_s, draft_s;
+  uint64_t steps[PROF_N], seeds, drafts, drafted;
+} g_rp;
+
+static double now_s(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+
+static int rp_on(void)
+{
+  if (!g_rp.on)
+    g_rp.on = getenv("INK2_PROFILE") && atoi(getenv("INK2_PROFILE")) ? 1 : -1;
+  return g_rp.on > 0;
+}
+
+static void rp_print(void)
+{
+  if (!rp_on())
+    return;
+  fprintf(stderr, "ink2 rounds: steps by tokens (count, ms each):");
+  for (int k = 1; k < PROF_N; k++)
+    if (g_rp.steps[k])
+      fprintf(stderr, " %d%s:%llu/%.1f", k, k == PROF_N - 1 ? "+" : "", (unsigned long long)g_rp.steps[k],
+              1e3 * g_rp.step_s[k] / (double)g_rp.steps[k]);
+  fprintf(stderr, "\nink2 rounds: %llu seeds %.2f ms each, %llu drafts %.2f ms each (%llu tokens drafted)\n",
+          (unsigned long long)g_rp.seeds, g_rp.seeds ? 1e3 * g_rp.seed_s / (double)g_rp.seeds : 0.0,
+          (unsigned long long)g_rp.drafts, g_rp.drafts ? 1e3 * g_rp.draft_s / (double)g_rp.drafts : 0.0,
+          (unsigned long long)g_rp.drafted);
+}
+
 typedef struct Eng
 {
   Ink2Forward *f;
@@ -86,6 +130,7 @@ static void e_destroy(void *p)
   Eng *e = p;
   if (!e)
     return;
+  rp_print();
   ink2_forward_destroy(e->f);
   ink2_mtp_destroy(e->mtp);
   gguf_destroy(e->mg);
@@ -130,7 +175,8 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
       return snprintf(err, OSMOS_ERR, "%s", ierr), e_destroy(e), NULL;
   }
   const uint32_t T = o->max_tokens ? o->max_tokens : INK2_STEP_TOKENS;
-  const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, 0, e->picks, e->mtp, o->budget};
+  const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, 0, e->picks, e->mtp, o->budget,
+                          INK2_LOGIT_ROWS};
   if (!(e->f = ink2_forward_create(m->w, &io, err)))
     return e_destroy(e), NULL;
   return e;
@@ -172,8 +218,14 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
       m++;
     run[runs] = oseq_impl(seqs[at]), len[runs] = m, at += m;
   }
+  const double t0 = rp_on() ? now_s() : 0;
   if (!n || !ink2_step(e->f, run, len, runs, tokens, err))
     return n ? false : fail(err, "an empty batch");
+  if (rp_on()) /* (ink2_step synchronizes: its time the step's) */
+  {
+    const int k = n < PROF_N - 1 ? (int)n : PROF_N - 1;
+    g_rp.step_s[k] += now_s() - t0, g_rp.steps[k]++;
+  }
   e->n = n;
   return true;
 }
@@ -181,7 +233,7 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
 static const float *e_logits(const void *p, uint32_t row)
 {
   const Eng *e = p;
-  return row < e->n && ink2_kept(e->f, row) ? ink2_logits(e->f) + (uint64_t)row * e->vocab : NULL;
+  return row < e->n ? ink2_row_logits(e->f, row) : NULL;
 }
 
 static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
@@ -200,7 +252,11 @@ static uint32_t e_block(const void *p)
 
 static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
-  return ink2_seq_seed(((Eng *)p)->f, s, from, to, err);
+  const double t0 = rp_on() ? now_s() : 0;
+  const bool ok = ink2_seq_seed(((Eng *)p)->f, s, from, to, err);
+  if (rp_on())
+    (void)hipDeviceSynchronize(), g_rp.seed_s += now_s() - t0, g_rp.seeds++;
+  return ok;
 }
 
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
@@ -208,7 +264,11 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 {
   const char *cap = getenv("INK2_DRAFT_MAX"); /* (a measurement's: the drafts a round at most) */
   const uint32_t most = cap && atoi(cap) > 0 && (uint32_t)atoi(cap) < e_block(p) ? (uint32_t)atoi(cap) : e_block(p);
-  return ink2_seq_draft(((Eng *)p)->f, s, y, most, conf_min, cum_min, drafts, conf, err);
+  const double t0 = rp_on() ? now_s() : 0;
+  const int got = ink2_seq_draft(((Eng *)p)->f, s, y, most, conf_min, cum_min, drafts, conf, err);
+  if (rp_on())
+    g_rp.draft_s += now_s() - t0, g_rp.drafts++, g_rp.drafted += got > 0 ? (uint64_t)got : 0;
+  return got;
 }
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return ink2_seq_create(((Eng *)p)->f, err); }

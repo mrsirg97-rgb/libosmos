@@ -112,6 +112,8 @@ struct Ink2Forward
   void *m_dev;
   void *amax;
   bool *kept;
+  int32_t *slot;       /* a step's row's logits slot, or -1 (none kept) */
+  uint32_t logit_rows, n_slots; /* the logits' slots, and the step's taken */
   uint32_t n; /* the last step's rows */
 };
 

@@ -27,6 +27,8 @@ typedef struct Ink2Options
   const Ink2Mtp *mtp;    /* the drafter (osmos/ink2/mtp.h), or NULL: none */
   uint64_t budget;       /* the whole build's bytes (osmos's budget): the experts' room what the dense weights, the
                             step's buffers, the drafter and the stream leave of it (room then unread); 0: room's */
+  uint32_t logit_rows;   /* the logits' rows a step keeps at most, slots in the order computed (a prompt's last row,
+                            a decode's or a drafted round's every row, each lane's); 0: max_tokens (every row) */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR]);
@@ -52,6 +54,7 @@ bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[INK
 bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                char err[INK2_FWD_ERR]);
 const float *ink2_logits(const Ink2Forward *f);
+const float *ink2_row_logits(const Ink2Forward *f, uint32_t row);
 bool ink2_kept(const Ink2Forward *f, uint32_t row);
 bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[INK2_FWD_ERR]);
 
@@ -111,12 +114,14 @@ ink2_seq_mark_bytes .. ink2_seq_mark_load
 
 ink2_step
   sequences' tokens (seqs[i] the next lens[i] tokens, each sequence once, 1 .. INK2_MAX_RUNS runs, their tokens at
-  most max_tokens), each run through the model in turn: its logits at its rows in the tokens' order (ink2_logits:
-  [max_tokens][n_vocab] on the device, softcapped). false with why - the sequences unchanged - for a sequence twice,
+  most max_tokens), each run through the model in turn: its kept rows' logits (a run's rows from its prompt's end - 1)
+  in slots in the order computed (ink2_row_logits: a row's, on the device, softcapped; ink2_logits the slots'
+  [logit_rows][n_vocab] - with logit_rows 0 and every row kept, row r's slot r). false with why - the sequences unchanged - for a sequence twice,
   of another forward or failed, or past max_ctx; false after work began: the step's sequences failed.
 
 ink2_greedy
-  rows row0 .. row0 + rows - 1's greatest token (the lowest among equals). false for a row not kept.
+  rows row0 .. row0 + rows - 1's greatest token (the lowest among equals). false for a row not kept, or rows not
+  one run's (their slots not consecutive).
 
 ink2_seq_seed, ink2_seq_draft (a forward built with a drafter: DSpark with the RNN Markov head, src/ink2/hip_mtp.c)
   seed: the drafter's context at positions from .. to - 1 from the sequence's last step's taps (its rows of that

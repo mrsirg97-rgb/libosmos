@@ -376,7 +376,7 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->eg, T * K * F * 4}, {(void **)&f->eu, T * K * F * 4}, {(void **)&f->eh, T * K * F * 4},
       {(void **)&f->ed, T * K * C * 4}, {&f->m_dev, table_bytes(T * K, E)}, {&f->x16, X16 * CH * 2},
       {&f->xe16, table_slots(T * K, E) * C * 2}, {(void **)&f->overflow, 4},
-      {(void **)&f->head, f->head_rows * VR * 4}, {(void **)&f->logits, T * f->vocab * 4},
+      {(void **)&f->head, f->head_rows * VR * 4}, {(void **)&f->logits, (uint64_t)f->logit_rows * f->vocab * 4},
       {(void **)&f->gid, T * 4}, {&f->amax, ops_argmax_scratch((uint32_t)T)},
       {(void **)&f->fa_part, ink2_fa_scratch((uint32_t)H, f->max_ctx)},
   };
@@ -392,11 +392,11 @@ static bool buffers(Ink2Forward *f)
       hipHostMalloc((void **)&f->hgpick, T * K * 4, 0) != hipSuccess ||
       hipHostMalloc((void **)&f->m_host, table_bytes(T * K, E), 0) != hipSuccess)
     return false;
-  f->kept = calloc(T, 1);
+  f->kept = calloc(T, 1), f->slot = malloc(T * sizeof *f->slot);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
   f->m_key = malloc(table_entries(T * K, E) * sizeof *f->m_key);
   f->m_build = malloc(table_bytes(T * K, E)); /* the tables built in cached memory, then one copy into the pinned */
-  return f->hpick && f->hw && f->kept && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build;
+  return f->hpick && f->hw && f->kept && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build;
 }
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR])
@@ -407,6 +407,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   if (!f)
     return ink2_fail(err, "out of memory"), NULL;
   f->w = w, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
+  f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
   f->maxb = (uint32_t)((w->geo.n_layers + w->geo.res_block - 1) / w->geo.res_block);
   const uint32_t C = (uint32_t)w->geo.n_embd, F = (uint32_t)w->geo.ff_exp;
   for (int l = 0; l < w->geo.n_layers; l++) /* the experts on mm at every step (moe) */
@@ -497,7 +498,7 @@ void ink2_forward_destroy(Ink2Forward *f)
   for (size_t i = 0; i < sizeof pinned / sizeof *pinned; i++)
     if (pinned[i])
       hipHostFree(pinned[i]);
-  free(f->picks), free(f->kept), free(f->m_at), free(f->m_by);
+  free(f->picks), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
   free(f->m_key), free(f->m_build);
   free(f);
 }
@@ -845,17 +846,21 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   uint32_t first = 0;
   if (s->prompt_end && s->prompt_end - 1 > pos)
     first = s->prompt_end - 1 - pos < n ? s->prompt_end - 1 - pos : n;
+  if (f->n_slots + (n - first) > f->logit_rows)
+    return ink2_fail(err, "inkling2: a step's kept rows past the logits' (Ink2Options' logit_rows)");
+  const uint32_t slot0 = f->n_slots; /* this run's kept rows the next slots, in order */
   for (uint32_t t = 0; t < n; t++)
-    f->kept[row0 + t] = t >= first;
+    f->kept[row0 + t] = t >= first, f->slot[row0 + t] = t >= first ? (int32_t)(slot0 + t - first) : -1;
+  f->n_slots += n - first;
   for (uint32_t at = first; at < n; at += f->head_rows)
   {
     const uint32_t k = n - at < f->head_rows ? n - at : f->head_rows;
     GPU(mat(f, W->output, f->output, f->xn + (uint64_t)at * C, k, f->head));
-    GPU(hipMemcpy2DAsync(f->logits + (uint64_t)(row0 + at) * V, (uint64_t)V * 4, f->head, (uint64_t)VR * 4,
+    GPU(hipMemcpy2DAsync(f->logits + (uint64_t)(slot0 + at - first) * V, (uint64_t)V * 4, f->head, (uint64_t)VR * 4,
                          (uint64_t)V * 4, k, hipMemcpyDeviceToDevice, NULL) == hipSuccess);
   }
   if (first < n)
-    GPU(ink2_softcap(f->logits + (uint64_t)(row0 + first) * V, (uint64_t)(n - first) * V, g->logit_softcap, NULL));
+    GPU(ink2_softcap(f->logits + (uint64_t)slot0 * V, (uint64_t)(n - first) * V, g->logit_softcap, NULL));
 #undef GPU
   pf(PF_HEAD);
   const int kind = n > MV_MAX_TOKENS;
@@ -889,6 +894,7 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
     return ink2_fail(err, "inkling2: a step's tokens past max_tokens");
   f->n = 0;
   memset(f->kept, 0, f->max_tokens);
+  f->n_slots = 0;
   bool ok = true;
   for (uint32_t i = 0, at = 0; ok && i < runs; at += lens[i++])
     ok = run(f, seqs[i], tokens + at, lens[i], at, err);
@@ -914,14 +920,19 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
 
 const float *ink2_logits(const Ink2Forward *f) { return f ? f->logits : NULL; }
 
+const float *ink2_row_logits(const Ink2Forward *f, uint32_t row)
+{
+  return ink2_kept(f, row) ? f->logits + (uint64_t)f->slot[row] * f->vocab : NULL;
+}
+
 bool ink2_kept(const Ink2Forward *f, uint32_t row) { return f && row < f->n && f->kept[row]; }
 
 bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[INK2_FWD_ERR])
 {
   for (uint32_t r = 0; r < rows; r++)
-    if (!ink2_kept(f, row0 + r))
-      return ink2_fail(err, "inkling2: a row the last step kept no logits of");
-  if (!rows || !ops_argmax(f->logits + (uint64_t)row0 * f->vocab, f->vocab, rows, f->vocab, f->gid, f->amax, NULL) ||
+    if (!ink2_kept(f, row0 + r) || f->slot[row0 + r] != f->slot[row0] + (int32_t)r)
+      return ink2_fail(err, "inkling2: a row the last step kept no logits of, or rows not one run's");
+  if (!rows || !ops_argmax(f->logits + (uint64_t)f->slot[row0] * f->vocab, f->vocab, rows, f->vocab, f->gid, f->amax, NULL) ||
       hipMemcpy(ids, f->gid, rows * 4, hipMemcpyDeviceToHost) != hipSuccess)
     return ink2_fail(err, "inkling2: a GPU call failed (greedy)");
   return true;
