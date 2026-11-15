@@ -98,7 +98,7 @@ struct Ink2Forward
   /* the step's buffers (max_tokens rows) */
   int32_t *ids_d;
   float *h, *blocks, *a3, *xn, *kn, *vn, *q, *k, *v, *kc, *vc, *rel, *gate, *sink, *att, *dyn, *o, *r, *moe, *logit,
-      *tmp, *pw, *eg, *eu, *eh, *ed, *head, *logits;
+      *tmp, *res_sc, *pw, *eg, *eu, *eh, *ed, *head, *logits;
   int32_t *pick, *hpick, *gid, *gpick, *hgpick; /* gpick: the next layer's guessed picks (and gw their weights) */
   float *hw, *gw;
   void *x16, *xe16; /* mm's f16 activations: a dense matrix's input (MM_MAX_TOKENS rows), the experts' slots */

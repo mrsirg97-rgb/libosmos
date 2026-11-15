@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
     if (L.attn_res_query) {
       float* dq = dev_tf(L.attn_res_query);
       const uint32_t nq = full ? 3 : 1;
-      CHECK(ink2_attn_res(dq, nq, blocks, nb, maxb, h, T, C, G.rms_eps, res_scale, a3, nullptr));
+      CHECK(ink2_attn_res(dq, nq, blocks, nb, maxb, h, T, C, G.rms_eps, res_scale, a3, nullptr, nullptr));
       CHECK(hipDeviceSynchronize() == hipSuccess);
       hipFree(dq);
       aq = a3, ak = full ? a3 + (size_t) T * C : a3, av = full ? a3 + (size_t) 2 * T * C : a3;
@@ -328,7 +328,7 @@ int main(int argc, char** argv) {
     }
     {  // the MoE's input: its residual over the blocks, normed
       float* dq = dev_tf(L.ffn_res_query);
-      CHECK(ink2_attn_res(dq, 1, blocks, nb, maxb, r, T, C, G.rms_eps, res_scale, tmp, nullptr));
+      CHECK(ink2_attn_res(dq, 1, blocks, nb, maxb, r, T, C, G.rms_eps, res_scale, tmp, nullptr, nullptr));
       CHECK(hipDeviceSynchronize() == hipSuccess);
       hipFree(dq);
     }
@@ -373,7 +373,7 @@ int main(int argc, char** argv) {
   }
   {  // the head: every row's final residual, norm, logits, softcap, log-softmax in double; scored as kld scores
     float* dq = dev_tf(W->output_res_query);
-    CHECK(ink2_attn_res(dq, 1, blocks, nb, maxb, h, T, C, G.rms_eps, res_scale, tmp, nullptr));
+    CHECK(ink2_attn_res(dq, 1, blocks, nb, maxb, h, T, C, G.rms_eps, res_scale, tmp, nullptr, nullptr));
     CHECK(hipDeviceSynchronize() == hipSuccess);
     hipFree(dq);
     rms(W->output_norm, tmp, xn);

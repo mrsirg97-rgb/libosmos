@@ -10,6 +10,8 @@
 #define INK2_MAX_TAPS 8   /* a short conv's taps at most (Inkling's 4) */
 #define INK2_MAX_RES 16   /* attn_res's states a token at most (its blocks, then the partial one: Inkling's <= 9) */
 #define INK2_MAX_QUERIES 3 /* attn_res's queries at once (a full layer's q, k, v) */
+#define INK2_RES_SPLIT_TOKENS 64 /* attn_res's steps of at most these split (its scratch's) */
+#define INK2_RES_SCRATCH (INK2_RES_SPLIT_TOKENS * (1 + INK2_MAX_QUERIES) * INK2_MAX_RES) /* its floats */
 
 bool ink2_softcap(float *x, uint64_t n, float cap, void *stream);
 bool ink2_swiglu(const float *g, const float *u, uint32_t n, float gcap, float ucap, uint32_t n_tok, float *h,
@@ -24,7 +26,8 @@ bool ink2_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const
 bool ink2_conv_dyn(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
                    const float *dyn, const float *hist, float res, float scale, float *y, void *stream);
 bool ink2_attn_res(const float *query, uint32_t queries, const float *blocks, uint32_t n_blocks, uint32_t b_stride,
-                   const float *partial, uint32_t n_tok, uint32_t dim, float eps, float scale, float *out, void *stream);
+                   const float *partial, uint32_t n_tok, uint32_t dim, float eps, float scale, float *out, float *scratch,
+                   void *stream);
 bool ink2_scale(float *x, uint64_t n, float s, void *stream);
 bool ink2_axpy(float *y, const float *x, uint64_t n, float a, void *stream);
 #define INK2_MAX_HEAD 128   /* attention's head dim at most (Inkling's 128) */
@@ -112,7 +115,8 @@ ink2_attn_res
   the attention residual: a token's states (n_blocks rows of blocks [n_tok][b_stride][dim], then partial [n_tok][dim])
   each RMS-normalized (no weight, eps); query q (query [queries][dim]) weights them softmax(q . s scale) and out[q][t]
   = their weighted sum ([queries][n_tok][dim]). n_blocks + 1 <= INK2_MAX_RES, queries <= INK2_MAX_QUERIES, n_blocks <=
-  b_stride (the buffer's blocks a token: the block states so far, its room for more).
+  b_stride (the buffer's blocks a token: the block states so far, its room for more). scratch (INK2_RES_SCRATCH floats, or NULL): a step of
+  at most INK2_RES_SPLIT_TOKENS a block a sum, not a block a token - the same bits.
 
 ink2_scale, ink2_axpy
   x *= s; y += a x - an NVFP4 expert's scale on its gate and up rows, a routed expert's weighted sum.

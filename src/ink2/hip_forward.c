@@ -378,6 +378,7 @@ static bool buffers(Ink2Forward *f)
       {&f->xe16, table_slots(T * K, E) * C * 2}, {(void **)&f->overflow, 4},
       {(void **)&f->head, f->head_rows * VR * 4}, {(void **)&f->logits, (uint64_t)f->logit_rows * f->vocab * 4},
       {(void **)&f->gid, T * 4}, {&f->amax, ops_argmax_scratch((uint32_t)T)},
+      {(void **)&f->res_sc, INK2_RES_SCRATCH * 4},
       {(void **)&f->fa_part, ink2_fa_scratch((uint32_t)H, f->max_ctx)},
   };
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
@@ -477,7 +478,8 @@ void ink2_forward_destroy(Ink2Forward *f)
   void *dev[] = {f->embed, f->output, f->embed_norm, f->out_res_q, f->out_norm, f->ids_d, f->h, f->blocks, f->a3,
                  f->xn, f->kn, f->vn, f->q, f->k, f->v, f->kc, f->vc, f->rel, f->gate, f->sink, f->att, f->dyn,
                  f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->pw, f->eg, f->eu, f->eh, f->ed, f->head,
-                 f->logits, f->gid, f->amax, f->m_dev, f->fa_part, f->gpick, f->gw, f->x16, f->xe16, f->overflow};
+                 f->logits, f->gid, f->amax, f->m_dev, f->fa_part, f->gpick, f->gw, f->x16, f->xe16, f->overflow,
+                 f->res_sc};
   for (size_t i = 0; i < sizeof dev / sizeof *dev; i++)
     if (dev[i])
       hipFree(dev[i]);
@@ -749,7 +751,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     if (d->attn_res_q)
     {
       GPU(ink2_attn_res(d->attn_res_q, full ? 3 : 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->a3,
-                        NULL));
+                        f->res_sc, NULL));
       aq = f->a3, ak = full ? f->a3 + (uint64_t)n * C : f->a3, av = full ? f->a3 + (uint64_t)2 * n * C : f->a3;
     }
     GPU(ops_rms(aq, C, C, full ? d->q_norm : d->attn_norm, g->rms_eps, n, f->xn, C, NULL));
@@ -824,7 +826,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     }
     else
       GPU(ink2_axpy(f->r, f->h, (uint64_t)n * C, 1.0f, NULL));
-    GPU(ink2_attn_res(d->ffn_res_q, 1, f->blocks, nb, maxb, f->r, n, C, g->rms_eps, res_scale, f->tmp, NULL));
+    GPU(ink2_attn_res(d->ffn_res_q, 1, f->blocks, nb, maxb, f->r, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
+                      NULL));
     GPU(ops_rms(f->tmp, C, C, d->ffn_norm, g->rms_eps, n, f->xn, C, NULL));
     pf(PF_MID);
     if (!moe(f, l, n, err))
@@ -838,7 +841,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   }
   pf(PF_MID);
   /* the head: the rows from the prompt's end - 1 on */
-  GPU(ink2_attn_res(f->out_res_q, 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->tmp, NULL));
+  GPU(ink2_attn_res(f->out_res_q, 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
+                    NULL));
   GPU(ops_rms(f->tmp, C, C, f->out_norm, g->rms_eps, n, f->xn, C, NULL));
   if (f->mtp) /* the final normed hidden: the last tap */
     GPU(ink2_mtp_tap(f, f->mtp->n_taps - 1, f->xn, n, row0));

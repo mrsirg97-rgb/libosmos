@@ -136,6 +136,54 @@ __global__ void attn_res_kernel(const float* query, uint32_t queries, const floa
     }
 }
 
+// attn_res split for a few tokens (one block a token is one CU's serial reductions): a block each state's square
+// sum and each query's dot with it - attn_res_kernel's own sums - into scratch [n_tok][1 + queries][ns], then the
+// softmax and the weighted sum a block a kThreads of dim, each value's arithmetic attn_res_kernel's: the same bits
+__global__ void attn_res_dots_kernel(const float* query, uint32_t queries, const float* blocks, uint32_t nb,
+                                     uint32_t bs, const float* partial, uint32_t dim, float* scratch) {
+  __shared__ float lds[kThreads];
+  const uint32_t s = blockIdx.x, y = blockIdx.y, t = blockIdx.z, ns = nb + 1;
+  const float* v = s < nb ? blocks + ((uint64_t) t * bs + s) * dim : partial + (uint64_t) t * dim;
+  float d = 0;
+  if (!y)
+    for (uint32_t c = threadIdx.x; c < dim; c += kThreads) d += v[c] * v[c];
+  else
+    for (uint32_t c = threadIdx.x; c < dim; c += kThreads) d += query[(uint64_t) (y - 1) * dim + c] * v[c];
+  d = block_sum<kThreads>(d, lds);
+  if (!threadIdx.x) scratch[((uint64_t) t * (1 + queries) + y) * ns + s] = d;
+}
+
+__global__ void attn_res_mix_kernel(uint32_t queries, const float* blocks, uint32_t nb, uint32_t bs,
+                                    const float* partial, uint32_t dim, float eps, float scale, uint32_t n_tok,
+                                    const float* scratch, float* out) {
+  __shared__ float inv[INK2_MAX_RES], p[INK2_MAX_QUERIES][INK2_MAX_RES];
+  const uint32_t t = blockIdx.y, ns = nb + 1;
+  const float* sc = scratch + (uint64_t) t * (1 + queries) * ns;
+  if (threadIdx.x < ns) inv[threadIdx.x] = rsqrtf(sc[threadIdx.x] / (float) dim + eps);
+  __syncthreads();
+  if (threadIdx.x < queries * ns) {
+    const uint32_t q = threadIdx.x / ns, s = threadIdx.x % ns;
+    p[q][s] = sc[(1 + q) * ns + s] * inv[s] * scale;
+  }
+  __syncthreads();
+  if (threadIdx.x < queries) {
+    float* r = p[threadIdx.x];
+    float m = r[0], z = 0;
+    for (uint32_t s = 1; s < ns; s++) m = fmaxf(m, r[s]);
+    for (uint32_t s = 0; s < ns; s++) z += (r[s] = expf(r[s] - m));
+    for (uint32_t s = 0; s < ns; s++) r[s] = r[s] / z * inv[s];
+  }
+  __syncthreads();
+  const uint32_t c = blockIdx.x * kThreads + threadIdx.x;
+  if (c >= dim) return;
+  for (uint32_t q = 0; q < queries; q++) {
+    float o = 0;
+    for (uint32_t s = 0; s < ns; s++)
+      o += p[q][s] * (s < nb ? blocks + ((uint64_t) t * bs + s) * dim : partial + (uint64_t) t * dim)[c];
+    out[((uint64_t) q * n_tok + t) * dim + c] = o;
+  }
+}
+
 // a block a row: times w, the L2 clip, tau
 __global__ void clip_rows_kernel(float* x, uint32_t per_tok, uint32_t dim, const float* w, float clip, Ink2Tau tau) {
   __shared__ float lds[kThreads];
@@ -543,10 +591,17 @@ extern "C" bool ink2_conv_dyn(const float* x, uint32_t n_tok, uint32_t ch, uint3
 
 extern "C" bool ink2_attn_res(const float* query, uint32_t queries, const float* blocks, uint32_t n_blocks,
                               uint32_t b_stride, const float* partial, uint32_t n_tok, uint32_t dim, float eps,
-                              float scale, float* out, void* stream) {
+                              float scale, float* out, float* scratch, void* stream) {
   if (!query || !partial || !out || (n_blocks && !blocks) || !queries || queries > INK2_MAX_QUERIES ||
       n_blocks + 1 > INK2_MAX_RES || n_blocks > b_stride || !n_tok || !dim)
     return false;
+  if (scratch && n_tok <= INK2_RES_SPLIT_TOKENS) {
+    attn_res_dots_kernel<<<dim3(n_blocks + 1, 1 + queries, n_tok), kThreads, 0, st(stream)>>>(
+        query, queries, blocks, n_blocks, b_stride, partial, dim, scratch);
+    attn_res_mix_kernel<<<dim3((dim + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(
+        queries, blocks, n_blocks, b_stride, partial, dim, eps, scale, n_tok, scratch, out);
+    return ok();
+  }
   attn_res_kernel<<<n_tok, kThreads, 0, st(stream)>>>(query, queries, blocks, n_blocks, b_stride, partial, dim, eps,
                                                       scale, n_tok, out);
   return ok();
