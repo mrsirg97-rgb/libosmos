@@ -72,15 +72,17 @@ __device__ inline float tap(const float* x, const float* hist, uint32_t at, uint
   return at < h ? (hist ? hist[(uint64_t) at * ch + c] : 0.0f) : x[(uint64_t) (at - h) * ch + c];
 }
 
+// add (not NULL): y the conv plus add's value (ink2_axpy's sum; add may be y)
 __global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float* w,
-                            const float* hist, float res, float scale, float* y, float* keep) {
+                            const float* hist, float res, float scale, const float* add, float* y, float* keep) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= (uint64_t) n_tok * ch) return;
   if (keep) keep[i] = x[i];
   const uint32_t c = (uint32_t) (i % ch), t = (uint32_t) (i / ch), h = taps - 1;
   float sum = 0;
   for (uint32_t j = 0; j < taps; j++) sum += w[(uint64_t) c * taps + j] * tap(x, hist, t + j, h, ch, c);
-  y[i] = (sum + res * x[i]) * scale;
+  const float out = (sum + res * x[i]) * scale;
+  y[i] = add ? add[i] + out : out;
 }
 
 __global__ void conv_dyn_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads,
@@ -691,16 +693,17 @@ extern "C" bool ink2_gram(const float* x, uint32_t n_tok, uint32_t dim, float* h
 }
 
 extern "C" bool ink2_conv_keep(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float* w,
-                               const float* hist, float res, float scale, float* y, float* keep, void* stream) {
+                               const float* hist, float res, float scale, const float* add, float* y, float* keep,
+                               void* stream) {
   if (!x || !w || !y || !n_tok || !ch || taps < 2 || taps > INK2_MAX_TAPS) return false;
-  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, w, hist, res, scale, y,
-                                                                         keep);
+  conv_kernel<<<grid((uint64_t) n_tok * ch), kThreads, 0, st(stream)>>>(x, n_tok, ch, taps, w, hist, res, scale, add,
+                                                                         y, keep);
   return ok();
 }
 
 extern "C" bool ink2_conv(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float* w,
                           const float* hist, float res, float scale, float* y, void* stream) {
-  return ink2_conv_keep(x, n_tok, ch, taps, w, hist, res, scale, y, nullptr, stream);
+  return ink2_conv_keep(x, n_tok, ch, taps, w, hist, res, scale, nullptr, y, nullptr, stream);
 }
 
 extern "C" bool ink2_conv_dyn_keep(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads,

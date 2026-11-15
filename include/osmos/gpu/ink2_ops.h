@@ -26,7 +26,7 @@ bool ink2_conv(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const
 bool ink2_conv_dyn(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
                    const float *dyn, const float *hist, float res, float scale, float *y, void *stream);
 bool ink2_conv_keep(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float *w, const float *hist,
-                    float res, float scale, float *y, float *keep, void *stream);
+                    float res, float scale, const float *add, float *y, float *keep, void *stream);
 bool ink2_conv_dyn_keep(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
                         const float *dyn, const float *hist, float res, float scale, float *y, float *keep,
                         void *stream);
@@ -130,7 +130,8 @@ ink2_conv_dyn
 
 ink2_conv_keep, ink2_conv_dyn_keep
   ink2_conv's and ink2_conv_dyn's y, and x's n_tok rows copied to keep as they are read (a tail's next rows: not
-  hist's; NULL none) - the copy's launch saved.
+  hist's; NULL none) - the copy's launch saved. ink2_conv_keep's add (NULL: none): y = add + the conv, ink2_axpy's
+  sum of the two (a residual's; add may be y) - the axpy's launch saved.
 
 ink2_attn_res
   the attention residual: a token's states (n_blocks rows of blocks [n_tok][b_stride][dim], then partial [n_tok][dim])

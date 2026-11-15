@@ -15,6 +15,11 @@ static const char* kCases = "%s/osmos-oracle/ink2-cases";
 
 static Ref in(const char* c, const char* a) { return ref(std::string(c) + "/" + a, kCases); }
 
+template <class T>
+static bool same_bits(const std::vector<T>& a, const std::vector<T>& b) {
+  return a.size() == b.size() && !std::memcmp(a.data(), b.data(), a.size() * sizeof(T));
+}
+
 // res 1, scale the model's: the checkpoint's weights; res 0, scale 1: llama.cpp's (unsloth's GGUFs) - the residual and
 // the scale folded into the weights, (w + 1 at the current tap) * scale
 static std::vector<float> run_conv(const Ref& x, const Ref& w, uint32_t taps, float scale, bool folded = false) {
@@ -137,6 +142,24 @@ int main() {
        in("sliding", "v_conv_out"), 1.0, kExactRel);
   held("conv, folded (llama.cpp's weights)", run_conv(in("conv", "x"), in("conv", "w"), 4, 1.0f / std::sqrt(5.0f), true),
        in("conv", "out"), 1.0, kExactRel);
+  {  // a residual's sum in the conv's launch: ink2_conv then ink2_axpy's bits, out of place and in place
+    Ref x = in("conv", "x"), w = in("conv", "w");
+    const uint32_t ch = (uint32_t) x.ne[0], n = (uint32_t) x.ne[1];
+    const float scale = 1.0f / std::sqrt(5.0f);
+    std::vector<float> res(x.v.size());
+    for (size_t i = 0; i < res.size(); i++) res[i] = x.v[(i * 7919) % x.v.size()] * 3.0f - 0.25f;
+    float *dx = dev_from(x.v), *dw = dev_from(w.v), *dr = dev_from(res), *dy = dev_alloc<float>(x.v.size());
+    float *dk = dev_alloc<float>(x.v.size()), *dz = dev_alloc<float>(x.v.size());
+    CHECK(ink2_conv(dx, n, ch, 4, dw, nullptr, 1.0f, scale, dy, nullptr) &&
+          ink2_axpy(dy, dr, x.v.size(), 1.0f, nullptr));
+    const auto want = host_of(dy, x.v.size());
+    CHECK(ink2_conv_keep(dx, n, ch, 4, dw, nullptr, 1.0f, scale, dr, dz, dk, nullptr));
+    CHECK(same_bits(host_of(dz, x.v.size()), want) && same_bits(host_of(dk, x.v.size()), x.v));
+    CHECK(ink2_conv_keep(dx, n, ch, 4, dw, nullptr, 1.0f, scale, dr, dr, nullptr, nullptr));
+    CHECK(same_bits(host_of(dr, x.v.size()), want));
+    std::printf("  conv + a residual: ink2_conv then ink2_axpy's bits (in place too)\n");
+    hipFree(dx), hipFree(dw), hipFree(dr), hipFree(dy), hipFree(dk), hipFree(dz);
+  }
   for (const char* kv : {"k", "v"}) {  // a full layer's dynamic conv: static taps + a head's own a token
     const std::string raw = std::string(kv) + "_raw", st = std::string(kv) + "_conv_static",
                       dy = std::string(kv) + "_conv_dyn", out = std::string(kv) + "_conv_out";
