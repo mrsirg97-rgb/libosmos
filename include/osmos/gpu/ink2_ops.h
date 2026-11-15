@@ -77,6 +77,24 @@ bool ink2_fa85(const Ink2Attn *a, const float *q, const float *rel, const float 
                uint32_t n_tok, const uint8_t *k, const uint8_t *v, uint32_t n_keys, uint32_t pos0,
                const float *rel_proj, float *out, float *scratch, void *stream);
 bool ink2_to_kv5(const float *x, uint64_t rows, uint8_t *y, void *stream);
+typedef struct Ink2PrepKv
+{
+  const float *x, *w, *dyn, *hist; /* the projection's rows, the conv's weights (dyn NULL: the static conv's), the
+                                      conv tail's last taps - 1 rows (NULL: zeros) */
+  float *y, *keep;                 /* the conv's rows clipped (k) or normed (v); x's rows copied (NULL: none) */
+  void *store;                     /* the cache's next n_tok rows */
+} Ink2PrepKv;
+typedef struct Ink2Prep
+{
+  uint32_t n_tok, heads, kv_heads, head_dim, d_rel, taps;
+  float *q, *rel;           /* clipped in place */
+  const float *q_w, *rel_w; /* their clips' weights */
+  float q_clip, rel_clip, k_clip, eps, conv_res, conv_scale;
+  Ink2Tau tau;  /* q's and rel's */
+  bool records; /* the stores keys Q8, values Q5 records (a full layer's); else f16 (a window's) */
+  Ink2PrepKv k, v;
+} Ink2Prep;
+bool ink2_attn_prep(const Ink2Prep *p, void *stream);
 
 /* the drafter's (kernels/ink2_mtp.hip; src/ink2/hip_mtp.c) */
 bool ink2_mtp_mix(const float *taps, uint32_t n_taps, const float *alpha, uint32_t n, uint32_t dim, float *out,
@@ -185,6 +203,13 @@ ink2_fa85, ink2_to_kv5
   one), its fifth bits (byte INK2_MAX_HEAD / 2 + i / 8, bit i % 8), a f16 scale an INK2_KV8_BLOCK - d = amax / 15, q
   = round(x / d) stored q + 16. a value loaded (q - 16) d rounded to f16 - ink2_fa16's bits on those values; values
   0.65 of Q8's memory.
+
+ink2_attn_prep
+  a layer's attention inputs from its projections, one launch: q's and rel's ink2_clip_rows (q_w, q_clip / rel_w,
+  rel_clip, tau); k's conv (ink2_conv_keep, or ink2_conv_dyn_keep given dyn: conv_res, conv_scale), its
+  ink2_clip_rows (k_clip, no weight, no tau) and its store; v's conv, ops_rms (no weight, eps) and its store - the
+  stores ink2_to_f16, or ink2_to_kv8 (k) and ink2_to_kv5 (v) when records. each value those ops' bits. head_dim
+  INK2_MAX_HEAD; q [n_tok][heads][head_dim], rel [n_tok][heads][d_rel], k and v [n_tok][kv_heads head_dim].
 
 ink2_mtp_mix
   out[t] = sum over k of alpha[k] taps[t][k] (taps [n][n_taps][dim]): a drafter layer's mixture of the target's taps

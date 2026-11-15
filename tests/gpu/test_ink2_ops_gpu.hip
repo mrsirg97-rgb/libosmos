@@ -20,6 +20,82 @@ static bool same_bits(const std::vector<T>& a, const std::vector<T>& b) {
   return a.size() == b.size() && !std::memcmp(a.data(), b.data(), a.size() * sizeof(T));
 }
 
+static std::vector<uint8_t> bytes_of(const void* p, size_t n) {
+  std::vector<uint8_t> b(n);
+  CHECK(hipMemcpy(b.data(), p, n, hipMemcpyDeviceToHost) == hipSuccess);
+  return b;
+}
+
+// values a layer's might be: a normal's around mean, of spread sd (a fixed seed's LCG, Box-Muller)
+static std::vector<float> normals(size_t n, uint32_t seed, float sd, float mean = 0.0f) {
+  std::vector<float> v(n);
+  uint32_t r = seed;
+  auto uni = [&] { return r = r * 1664525u + 1013904223u, ((float) (r >> 8) + 0.5f) / (1 << 24); };
+  for (float& x : v) x = mean + sd * std::sqrt(-2.0f * std::log(uni())) * std::cos(6.2831853f * uni());
+  return v;
+}
+
+// ink2_attn_prep against the ops it stands for, run one after another on copies: every output's bytes theirs -
+// a window's (the static convs, f16 stores) and a full layer's (the dynamic convs, Q8 / Q5 records, tau), a decode's
+// token and a short step's, a tail's history or none
+static void attn_prep_case(bool full, uint32_t n, bool hist) {
+  const uint32_t H = 48, KV = 8, D = INK2_MAX_HEAD, R = 16, taps = 4, ch = KV * D;
+  const float q_clip = 5.0f, rel_clip = 2.0f, k_clip = 6.0f, eps = 1e-6f;
+  const float res = 1.0f, scale = full ? 1.0f / std::sqrt(9.0f) : 1.0f / std::sqrt(5.0f);
+  const Ink2Tau tau = {1000, full ? 0.25f : 0.0f, 128.0f}, none = {0, 0, 0};
+  const uint32_t seed = (full ? 100 : 200) + n * 10 + hist;
+  const auto q = normals((size_t) n * H * D, seed + 1, 0.5f), rel = normals((size_t) n * H * R, seed + 2, 0.6f);
+  const auto qw = normals((size_t) H * D, seed + 3, 0.2f, 1.0f), rw = normals((size_t) H * R, seed + 4, 0.2f, 1.0f);
+  const auto k = normals((size_t) n * ch, seed + 5, 1.0f), v = normals((size_t) n * ch, seed + 6, 1.0f);
+  const auto wk = normals((size_t) ch * taps, seed + 7, 0.4f), wv = normals((size_t) ch * taps, seed + 8, 0.4f);
+  const auto dk = normals((size_t) n * KV * taps, seed + 9, 0.3f), dv = normals((size_t) n * KV * taps, seed + 10, 0.3f);
+  const auto hk = normals((size_t) (taps - 1) * ch, seed + 11, 1.0f), hv = normals((size_t) (taps - 1) * ch, seed + 12, 1.0f);
+  const size_t kb = full ? (size_t) n * KV * INK2_KV8_RECORD : (size_t) n * ch * 2;
+  const size_t vb = full ? (size_t) n * KV * INK2_KV5_RECORD : (size_t) n * ch * 2;
+  // the ops one after another
+  float *q0 = dev_from(q), *r0 = dev_from(rel), *dqw = dev_from(qw), *drw = dev_from(rw), *dkx = dev_from(k);
+  float *dvx = dev_from(v), *dwk = dev_from(wk), *dwv = dev_from(wv), *ddk = dev_from(dk), *ddv = dev_from(dv);
+  float *dhk = hist ? dev_from(hk) : nullptr, *dhv = hist ? dev_from(hv) : nullptr;
+  float *kc0 = dev_alloc<float>((size_t) n * ch), *vc0 = dev_alloc<float>((size_t) n * ch);
+  float *kk0 = dev_alloc<float>((size_t) n * ch), *kv0 = dev_alloc<float>((size_t) n * ch);
+  uint8_t *sk0 = dev_alloc<uint8_t>(kb), *sv0 = dev_alloc<uint8_t>(vb);
+  CHECK(ink2_clip_rows(q0, n, H, D, dqw, q_clip, tau, nullptr) && ink2_clip_rows(r0, n, H, R, drw, rel_clip, tau, nullptr));
+  if (full)
+    CHECK(ink2_conv_dyn_keep(dkx, n, ch, taps, KV, dwk, ddk, dhk, res, scale, kc0, kk0, nullptr) &&
+          ink2_conv_dyn_keep(dvx, n, ch, taps, KV, dwv, ddv, dhv, res, scale, vc0, kv0, nullptr));
+  else
+    CHECK(ink2_conv_keep(dkx, n, ch, taps, dwk, dhk, res, scale, nullptr, kc0, kk0, nullptr) &&
+          ink2_conv_keep(dvx, n, ch, taps, dwv, dhv, res, scale, nullptr, vc0, kv0, nullptr));
+  CHECK(ink2_clip_rows(kc0, n, KV, D, nullptr, k_clip, none, nullptr) &&
+        ops_rms(vc0, D, D, nullptr, eps, n * KV, vc0, D, nullptr));
+  if (full)
+    CHECK(ink2_to_kv8(kc0, (uint64_t) n * KV, sk0, nullptr) && ink2_to_kv5(vc0, (uint64_t) n * KV, sv0, nullptr));
+  else
+    CHECK(ink2_to_f16(kc0, (uint64_t) n * ch, (uint16_t*) sk0, nullptr) &&
+          ink2_to_f16(vc0, (uint64_t) n * ch, (uint16_t*) sv0, nullptr));
+  // the one launch
+  float *q1 = dev_from(q), *r1 = dev_from(rel), *kc1 = dev_alloc<float>((size_t) n * ch);
+  float *vc1 = dev_alloc<float>((size_t) n * ch), *kk1 = dev_alloc<float>((size_t) n * ch);
+  float *kv1 = dev_alloc<float>((size_t) n * ch);
+  uint8_t *sk1 = dev_alloc<uint8_t>(kb), *sv1 = dev_alloc<uint8_t>(vb);
+  const Ink2Prep p = {n, H, KV, D, R, taps, q1, r1, dqw, drw, q_clip, rel_clip, k_clip, eps, res, scale, tau, full,
+                      {dkx, dwk, full ? ddk : nullptr, dhk, kc1, kk1, sk1},
+                      {dvx, dwv, full ? ddv : nullptr, dhv, vc1, kv1, sv1}};
+  CHECK(ink2_attn_prep(&p, nullptr) && hipDeviceSynchronize() == hipSuccess);
+  const size_t nq = (size_t) n * H * D, nr = (size_t) n * H * R, nk = (size_t) n * ch;
+  CHECK(same_bits(host_of(q1, nq), host_of(q0, nq)) && same_bits(host_of(r1, nr), host_of(r0, nr)));
+  CHECK(same_bits(host_of(kc1, nk), host_of(kc0, nk)) && same_bits(host_of(vc1, nk), host_of(vc0, nk)));
+  CHECK(same_bits(host_of(kk1, nk), k) && same_bits(host_of(kv1, nk), v));
+  CHECK(same_bits(bytes_of(sk1, kb), bytes_of(sk0, kb)) && same_bits(bytes_of(sv1, vb), bytes_of(sv0, vb)));
+  std::printf("  attn_prep (%s, %u token%s, %s): the ops' bits\n", full ? "full: Q8 / Q5 records" : "window: f16", n,
+              n > 1 ? "s" : "", hist ? "a history" : "none");
+  for (void* d : {(void*) q0, (void*) r0, (void*) dqw, (void*) drw, (void*) dkx, (void*) dvx, (void*) dwk, (void*) dwv,
+                  (void*) ddk, (void*) ddv, (void*) dhk, (void*) dhv, (void*) kc0, (void*) vc0, (void*) kk0,
+                  (void*) kv0, (void*) sk0, (void*) sv0, (void*) q1, (void*) r1, (void*) kc1, (void*) vc1,
+                  (void*) kk1, (void*) kv1, (void*) sk1, (void*) sv1})
+    if (d) hipFree(d);
+}
+
 // res 1, scale the model's: the checkpoint's weights; res 0, scale 1: llama.cpp's (unsloth's GGUFs) - the residual and
 // the scale folded into the weights, (w + 1 at the current tap) * scale
 static std::vector<float> run_conv(const Ref& x, const Ref& w, uint32_t taps, float scale, bool folded = false) {
@@ -376,6 +452,9 @@ int main() {
     }
     for (float* d : {dq, dqw, dr, drw, dk, dv, drp, ds, dg, dout}) hipFree(d);
   }
+  for (bool full : {false, true})
+    for (uint32_t n : {1u, 5u})
+      for (bool hist : {false, true}) attn_prep_case(full, n, hist);
   {  // ink2_gram: X^T X against float64 on the host, sizes past whole tiles, added onto what h held
     const uint32_t n = 37, dim = 45;
     std::vector<float> x((size_t) n * dim), h0((size_t) dim * dim);

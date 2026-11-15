@@ -28,11 +28,11 @@ bool ink2_tail_room(Ink2Tail *t, uint32_t n)
 
 const void *ink2_tail_last(const Ink2Tail *t, uint32_t k) { return ink2_tail_row(t, t->held - k); }
 
-float *ink2_tail_claim(Ink2Tail *t, uint32_t n)
+void *ink2_tail_claim(Ink2Tail *t, uint32_t n)
 {
-  if (t->esize != 4 || t->held + n > t->cap)
+  if (t->held + n > t->cap)
     return NULL;
-  float *at = ink2_tail_row(t, t->held);
+  void *at = ink2_tail_row(t, t->held);
   t->held += n;
   return at;
 }

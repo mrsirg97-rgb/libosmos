@@ -72,16 +72,34 @@ __device__ inline float tap(const float* x, const float* hist, uint32_t at, uint
   return at < h ? (hist ? hist[(uint64_t) at * ch + c] : 0.0f) : x[(uint64_t) (at - h) * ch + c];
 }
 
+// the static conv's value at token t, channel c
+__device__ inline float conv_at(const float* x, uint32_t t, uint32_t c, uint32_t ch, uint32_t taps, const float* w,
+                                const float* hist, float res, float scale) {
+  const uint32_t h = taps - 1;
+  float sum = 0;
+  for (uint32_t j = 0; j < taps; j++) sum += w[(uint64_t) c * taps + j] * tap(x, hist, t + j, h, ch, c);
+  return (sum + res * x[(uint64_t) t * ch + c]) * scale;
+}
+
+// the dynamic conv's (a full layer's k / v)
+__device__ inline float conv_dyn_at(const float* x, uint32_t t, uint32_t c, uint32_t ch, uint32_t taps,
+                                    uint32_t heads, const float* w, const float* dyn, const float* hist, float res,
+                                    float scale) {
+  const uint32_t h = taps - 1, head = c / (ch / heads);
+  const float* d = dyn + (uint64_t) t * heads * taps + (uint64_t) head * taps;
+  float sum = 0;
+  for (uint32_t j = 0; j < taps; j++)  // tap j: j tokens back
+    sum += (w[(uint64_t) j * ch + c] + d[j]) * tap(x, hist, t + h - j, h, ch, c);
+  return (sum + res * x[(uint64_t) t * ch + c]) * scale;
+}
+
 // add (not NULL): y the conv plus add's value (ink2_axpy's sum; add may be y)
 __global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, const float* w,
                             const float* hist, float res, float scale, const float* add, float* y, float* keep) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= (uint64_t) n_tok * ch) return;
   if (keep) keep[i] = x[i];
-  const uint32_t c = (uint32_t) (i % ch), t = (uint32_t) (i / ch), h = taps - 1;
-  float sum = 0;
-  for (uint32_t j = 0; j < taps; j++) sum += w[(uint64_t) c * taps + j] * tap(x, hist, t + j, h, ch, c);
-  const float out = (sum + res * x[i]) * scale;
+  const float out = conv_at(x, (uint32_t) (i / ch), (uint32_t) (i % ch), ch, taps, w, hist, res, scale);
   y[i] = add ? add[i] + out : out;
 }
 
@@ -91,12 +109,7 @@ __global__ void conv_dyn_kernel(const float* x, uint32_t n_tok, uint32_t ch, uin
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i >= (uint64_t) n_tok * ch) return;
   if (keep) keep[i] = x[i];
-  const uint32_t c = (uint32_t) (i % ch), t = (uint32_t) (i / ch), h = taps - 1, head = c / (ch / heads);
-  const float* d = dyn + (uint64_t) t * heads * taps + (uint64_t) head * taps;
-  float sum = 0;
-  for (uint32_t j = 0; j < taps; j++)  // tap j: j tokens back
-    sum += (w[(uint64_t) j * ch + c] + d[j]) * tap(x, hist, t + h - j, h, ch, c);
-  y[i] = (sum + res * x[i]) * scale;
+  y[i] = conv_dyn_at(x, (uint32_t) (i / ch), (uint32_t) (i % ch), ch, taps, heads, w, dyn, hist, res, scale);
 }
 
 // a block a token: its states' inverse RMS, each query's scores and softmax, then the weighted sum
@@ -190,11 +203,9 @@ __global__ void attn_res_mix_kernel(uint32_t queries, const float* blocks, uint3
   }
 }
 
-// a block a row: times w, the L2 clip, tau
-__global__ void clip_rows_kernel(float* x, uint32_t per_tok, uint32_t dim, const float* w, float clip, Ink2Tau tau) {
-  __shared__ float lds[kThreads];
-  const uint32_t r = blockIdx.x, j = r % per_tok, t = r / per_tok;
-  float* row = x + (uint64_t) r * dim;
+// token t's row j, by a block: times w, the L2 clip, tau - a thread its values d = threadIdx.x + k kThreads
+__device__ inline void clip_row(float* row, uint32_t t, uint32_t j, uint32_t dim, const float* w, float clip,
+                                Ink2Tau tau, float* lds) {
   float sq = 0;
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) {
     const float v = w ? row[d] * w[(uint64_t) j * dim + d] : row[d];
@@ -204,6 +215,13 @@ __global__ void clip_rows_kernel(float* x, uint32_t per_tok, uint32_t dim, const
   if (clip > 0) f = fminf(1.0f, clip / (sqrtf(block_sum<kThreads>(sq, lds)) + 1e-6f));
   if (tau.alpha > 0) f *= 1.0f + tau.alpha * logf(fmaxf(1.0f, (float) (tau.pos0 + t + 1) / tau.floor));
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) row[d] *= f;
+}
+
+// a block a row
+__global__ void clip_rows_kernel(float* x, uint32_t per_tok, uint32_t dim, const float* w, float clip, Ink2Tau tau) {
+  __shared__ float lds[kThreads];
+  const uint32_t r = blockIdx.x;
+  clip_row(x + (uint64_t) r * dim, r / per_tok, r % per_tok, dim, w, clip, tau, lds);
 }
 
 constexpr uint32_t kChunk = INK2_MAX_HEAD;  // keys a pass: a thread a key, then a thread a value dim
@@ -573,14 +591,9 @@ extern "C" bool ink2_fa85(const Ink2Attn* a, const float* q, const float* rel, c
 
 // a thread a block of a row: its amax, d = amax / 15, q = round(x / d) as x * (1 / d), stored q + 16 - its nibbles'
 // 16 bytes, its fifth bits' 4 and its scale its own
-__global__ void to_kv5_kernel(const float* x, uint64_t blocks, uint8_t* y) {
-  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= blocks) return;
-  constexpr uint32_t H = INK2_MAX_HEAD, per = H / INK2_KV8_BLOCK;
-  const uint64_t r = i / per;
-  const uint32_t b = (uint32_t) (i % per);
-  const float* xb = x + r * H + b * INK2_KV8_BLOCK;
-  uint8_t* rec = y + r * INK2_KV5_RECORD;
+__device__ inline void kv5_block(const float* row, uint32_t b, uint8_t* rec) {
+  constexpr uint32_t H = INK2_MAX_HEAD;
+  const float* xb = row + b * INK2_KV8_BLOCK;
   float amax = 0;
   for (int e = 0; e < INK2_KV8_BLOCK; e++) amax = fmaxf(amax, fabsf(xb[e]));
   const float d = amax / 15.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
@@ -595,6 +608,14 @@ __global__ void to_kv5_kernel(const float* x, uint64_t blocks, uint8_t* y) {
   *(_Float16*) (rec + H / 2 + H / 8 + 2 * b) = (_Float16) d;
 }
 
+__global__ void to_kv5_kernel(const float* x, uint64_t blocks, uint8_t* y) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= blocks) return;
+  constexpr uint32_t per = INK2_MAX_HEAD / INK2_KV8_BLOCK;
+  const uint64_t r = i / per;
+  kv5_block(x + r * INK2_MAX_HEAD, (uint32_t) (i % per), y + r * INK2_KV5_RECORD);
+}
+
 extern "C" bool ink2_to_kv5(const float* x, uint64_t rows, uint8_t* y, void* stream) {
   if (!x || !y || !rows) return false;
   const uint64_t blocks = rows * (INK2_MAX_HEAD / INK2_KV8_BLOCK);
@@ -603,19 +624,21 @@ extern "C" bool ink2_to_kv5(const float* x, uint64_t rows, uint8_t* y, void* str
 }
 
 // a thread a block of a row: its amax, d = amax / 127, q = round(x / d) as x * (1 / d); d's f16 after the row's int8s
-__global__ void to_kv8_kernel(const float* x, uint64_t blocks, uint8_t* y) {
-  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
-  if (i >= blocks) return;
-  constexpr uint32_t per = INK2_MAX_HEAD / INK2_KV8_BLOCK;
-  const uint64_t r = i / per;
-  const uint32_t b = (uint32_t) (i % per);
-  const float* xb = x + r * INK2_MAX_HEAD + b * INK2_KV8_BLOCK;
-  uint8_t* rec = y + r * INK2_KV8_RECORD;
+__device__ inline void kv8_block(const float* row, uint32_t b, uint8_t* rec) {
+  const float* xb = row + b * INK2_KV8_BLOCK;
   float amax = 0;
   for (int e = 0; e < INK2_KV8_BLOCK; e++) amax = fmaxf(amax, fabsf(xb[e]));
   const float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
   for (int e = 0; e < INK2_KV8_BLOCK; e++) rec[b * INK2_KV8_BLOCK + e] = (uint8_t) (int8_t) roundf(xb[e] * id);
   *(_Float16*) (rec + INK2_MAX_HEAD + 2 * b) = (_Float16) d;
+}
+
+__global__ void to_kv8_kernel(const float* x, uint64_t blocks, uint8_t* y) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= blocks) return;
+  constexpr uint32_t per = INK2_MAX_HEAD / INK2_KV8_BLOCK;
+  const uint64_t r = i / per;
+  kv8_block(x + r * INK2_MAX_HEAD, (uint32_t) (i % per), y + r * INK2_KV8_RECORD);
 }
 
 extern "C" bool ink2_to_kv8(const float* x, uint64_t rows, uint8_t* y, void* stream) {
@@ -633,6 +656,56 @@ __global__ void to_f16_kernel(const float* x, uint64_t n, _Float16* y) {
 extern "C" bool ink2_to_f16(const float* x, uint64_t n, uint16_t* y, void* stream) {
   if (!x || !y || !n) return false;
   to_f16_kernel<<<grid(n), kThreads, 0, st(stream)>>>(x, n, (_Float16*) y);
+  return ok();
+}
+
+// a block a row of a token's (q's heads, rel's, then k's and v's KV heads): q and rel clipped; a key row its conv,
+// clip and store, a value row its conv, norm (rms_kernel's: its threads, its block_sum) and store - in LDS between
+constexpr uint32_t kPrepBlocks = INK2_MAX_HEAD / INK2_KV8_BLOCK;  // a record's scale blocks: a thread each
+__global__ void attn_prep_kernel(Ink2Prep p) {
+  __shared__ float lds[kThreads], row[INK2_MAX_HEAD];
+  const uint32_t H = p.heads, KV = p.kv_heads, D = INK2_MAX_HEAD, per = 2 * H + 2 * KV;
+  const uint32_t t = blockIdx.x / per, r = blockIdx.x % per;
+  if (r < H) return clip_row(p.q + ((uint64_t) t * H + r) * D, t, r, D, p.q_w, p.q_clip, p.tau, lds);
+  if (r < 2 * H) {
+    const uint32_t j = r - H;
+    return clip_row(p.rel + ((uint64_t) t * H + j) * p.d_rel, t, j, p.d_rel, p.rel_w, p.rel_clip, p.tau, lds);
+  }
+  const bool key = r < 2 * H + KV;
+  const uint32_t kvh = r - 2 * H - (key ? 0 : KV), ch = KV * D;
+  const Ink2PrepKv& s = key ? p.k : p.v;
+  for (uint32_t d = threadIdx.x; d < D; d += kThreads) {
+    const uint32_t c = kvh * D + d;
+    if (s.keep) s.keep[(uint64_t) t * ch + c] = s.x[(uint64_t) t * ch + c];
+    row[d] = s.dyn ? conv_dyn_at(s.x, t, c, ch, p.taps, KV, s.w, s.dyn, s.hist, p.conv_res, p.conv_scale)
+                   : conv_at(s.x, t, c, ch, p.taps, s.w, s.hist, p.conv_res, p.conv_scale);
+  }
+  if (key) {
+    clip_row(row, t, kvh, D, nullptr, p.k_clip, Ink2Tau{0, 0, 0}, lds);
+  } else {
+    float ss = 0;
+    for (uint32_t d = threadIdx.x; d < D; d += kThreads) ss += row[d] * row[d];
+    const float rr = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) D + p.eps);
+    for (uint32_t d = threadIdx.x; d < D; d += kThreads) row[d] = row[d] * rr;
+  }
+  __syncthreads();
+  const uint64_t at = (uint64_t) t * KV + kvh;
+  for (uint32_t d = threadIdx.x; d < D; d += kThreads) s.y[at * D + d] = row[d];
+  if (!p.records)
+    for (uint32_t d = threadIdx.x; d < D; d += kThreads) ((_Float16*) s.store)[at * D + d] = (_Float16) row[d];
+  else if (threadIdx.x < kPrepBlocks && key)
+    kv8_block(row, threadIdx.x, (uint8_t*) s.store + at * INK2_KV8_RECORD);
+  else if (threadIdx.x < kPrepBlocks)
+    kv5_block(row, threadIdx.x, (uint8_t*) s.store + at * INK2_KV5_RECORD);
+}
+
+extern "C" bool ink2_attn_prep(const Ink2Prep* p, void* stream) {
+  if (!p || !p->n_tok || !p->q || !p->rel || !p->heads || !p->kv_heads || p->head_dim != INK2_MAX_HEAD ||
+      !p->d_rel || p->taps < 2 || p->taps > INK2_MAX_TAPS || (p->tau.alpha > 0 && !(p->tau.floor > 0)))
+    return false;
+  for (const Ink2PrepKv* s : {&p->k, &p->v})
+    if (!s->x || !s->w || !s->y || !s->store) return false;
+  attn_prep_kernel<<<p->n_tok * (2 * p->heads + 2 * p->kv_heads), kThreads, 0, st(stream)>>>(*p);
   return ok();
 }
 

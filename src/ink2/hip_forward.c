@@ -422,7 +422,7 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->vn, T * C * 4}, {(void **)&f->q, T * H * D * 4}, {(void **)&f->k, T * KV * D * 4},
       {(void **)&f->v, T * KV * D * 4}, {(void **)&f->kc, T * KV * D * 4}, {(void **)&f->vc, T * KV * D * 4},
       {(void **)&f->rel, T * H * R * 4}, {(void **)&f->gate, T * H * D * 4}, {(void **)&f->sink, T * H * 4},
-      {(void **)&f->att, T * H * D * 4}, {(void **)&f->dyn, T * KV * taps * 4}, {(void **)&f->o, T * C * 4},
+      {(void **)&f->att, T * H * D * 4}, {(void **)&f->dyn, 2 * T * KV * taps * 4}, {(void **)&f->o, T * C * 4},
       {(void **)&f->r, T * C * 4}, {(void **)&f->moe, T * C * 4}, {(void **)&f->logit, T * E * 4},
       {(void **)&f->tmp, T * C * 4}, {(void **)&f->pick, T * K * 4}, {(void **)&f->pw, T * K * 4},
       {(void **)&f->gpick, T * K * 4}, {(void **)&f->gw, T * K * 4},
@@ -813,7 +813,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   const Ink2Geometry *g = &W->geo;
   const uint32_t C = (uint32_t)g->n_embd, H = (uint32_t)g->n_heads, KV = (uint32_t)g->n_kv_heads,
                  D = (uint32_t)g->head_dim, R = (uint32_t)g->d_rel, taps = (uint32_t)g->conv, maxb = f->maxb,
-                 kd = KV * D, pos = (uint32_t)s->pos;
+                 pos = (uint32_t)s->pos;
   const bool llama = g->llama_names;
   const float res_scale = 1.0f / sqrtf((float)C), conv_res = llama ? 0.0f : 1.0f,
               conv_scale = llama ? 1.0f : 1.0f / sqrtf((float)taps + 1),
@@ -867,53 +867,52 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     else
       GPU(mat2(f, L->k, d->k, f->k, L->v, d->v, f->v, f->xn, n, true));
     GPU(mat(f, L->sink, d->sink, f->xn, n, f->sink));
-    Ink2Tail *ck = &s->conv[l][INK2_CONV_K], *cv = &s->conv[l][INK2_CONV_V];
+    float *dyn_k = full ? f->dyn : NULL, *dyn_v = full ? f->dyn + (uint64_t)n * KV * taps : NULL;
     if (full)
     {
-      GPU(mat(f, L->k_conv_proj, d->k_conv_proj, xk, n, f->dyn));
-      GPU(conv_put(ck, f->k, n, kd, taps, d->k_conv, KV, f->dyn, conv_res, dyn_scale, NULL, f->kc));
-      GPU(mat(f, L->v_conv_proj, d->v_conv_proj, xv, n, f->dyn));
-      GPU(conv_put(cv, f->v, n, kd, taps, d->v_conv, KV, f->dyn, conv_res, dyn_scale, NULL, f->vc));
+      GPU(mat(f, L->k_conv_proj, d->k_conv_proj, xk, n, dyn_k));
+      GPU(mat(f, L->v_conv_proj, d->v_conv_proj, xv, n, dyn_v));
     }
-    else
-    {
-      GPU(conv_put(ck, f->k, n, kd, taps, d->k_conv, 0, NULL, conv_res, conv_scale, NULL, f->kc));
-      GPU(conv_put(cv, f->v, n, kd, taps, d->v_conv, 0, NULL, conv_res, conv_scale, NULL, f->vc));
-    }
-    const Ink2Tau none = {0, 0, 0}, tau = {pos, full ? g->log_alpha : 0.0f, (float)g->log_floor};
-    GPU(ink2_clip_rows(f->q, n, H, D, d->q_clip, g->q_clip, tau, NULL));
-    GPU(ink2_clip_rows(f->rel, n, H, R, d->rel_clip, g->rel_clip, tau, NULL));
-    GPU(ink2_clip_rows(f->kc, n, KV, D, NULL, g->k_clip, none, NULL));
-    GPU(ops_rms(f->vc, D, D, NULL, g->rms_eps, n * KV, f->vc, D, NULL));
     /* the keys: a full layer's every row to its position, a sliding layer's window (its last window - 1 and these) */
     const Ink2Attn at = {H, KV, D, R, full ? (uint32_t)g->rel_extent : (uint32_t)g->window,
                          full ? 0u : (uint32_t)g->window, 1.0f / sqrtf((float)D)};
     Ink2Tail *tk = &s->kw[l], *tv = &s->vw[l];
-    const void *keys, *vals;
-    uint32_t n_keys;
+    uint32_t n_keys = pos + n;
     if (full)
-    {
       tk->held = tv->held = pos; /* the rows to its position, then these */
-      GPU(ink2_tail_put(tk, f->kc, n) && ink2_tail_put(tv, f->vc, n));
-      keys = tk->d, vals = tv->d, n_keys = pos + n;
-    }
     else
     {
       GPU(ink2_tail_room(tk, n) && ink2_tail_room(tv, n));
       /* the window's keys from a position a multiple of INK2_FA_TILE: a query's tiles the same in every step */
       const uint32_t want = tk->held < (uint32_t)g->window - 1 ? tk->held : (uint32_t)g->window - 1;
-      const uint32_t back = want + (pos - want) % INK2_FA_TILE;
-      GPU(ink2_tail_put(tk, f->kc, n) && ink2_tail_put(tv, f->vc, n));
-      keys = ink2_tail_last(tk, back + n), vals = ink2_tail_last(tv, back + n), n_keys = back + n;
+      n_keys = want + (pos - want) % INK2_FA_TILE + n;
     }
+    /* the convs, clips, v's norm and the caches' rows in one launch (ink2_attn_prep); a conv tail past its room
+       takes its rows after (ink2_tail_put) */
+    Ink2Tail *ck = &s->conv[l][INK2_CONV_K], *cv = &s->conv[l][INK2_CONV_V];
+    const float *hk = ink2_tail_last(ck, taps - 1), *hv = ink2_tail_last(cv, taps - 1);
+    float *keep_k = ink2_tail_claim(ck, n), *keep_v = ink2_tail_claim(cv, n);
+    void *store_k = ink2_tail_claim(tk, n), *store_v = ink2_tail_claim(tv, n);
+    if (!store_k || !store_v)
+      return ink2_fail(err, "inkling2: a layer's keys past its cache's room");
+    const Ink2Prep prep = {n, H, KV, D, R, taps, f->q, f->rel, d->q_clip, d->rel_clip, g->q_clip, g->rel_clip,
+                           g->k_clip, g->rms_eps, conv_res, full ? dyn_scale : conv_scale,
+                           (Ink2Tau){pos, full ? g->log_alpha : 0.0f, (float)g->log_floor}, full,
+                           {f->k, d->k_conv, dyn_k, hk, f->kc, keep_k, store_k},
+                           {f->v, d->v_conv, dyn_v, hv, f->vc, keep_v, store_v}};
+    GPU(ink2_attn_prep(&prep, NULL));
+    GPU((keep_k || ink2_tail_put(ck, f->k, n)) && (keep_v || ink2_tail_put(cv, f->v, n)));
+    const void *keys = full ? tk->d : ink2_tail_last(tk, n_keys), *vals = full ? tv->d : ink2_tail_last(tv, n_keys);
     /* key 0's position: a full layer's 0, a window's its first's (a tile's start); a decode's units split */
     const uint32_t pos0 = full ? 0 : pos + n - n_keys;
     pf(PF_IN);
     /* a full layer's cache: keys Q8 records, values Q5 (ink2_fa85); a window's f16 */
-    GPU(full ? ink2_fa85(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
+    const bool attended =
+        full ? ink2_fa85(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
                          f->fa_part, NULL)
              : ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
-                         f->fa_part, NULL));
+                         f->fa_part, NULL);
+    GPU(attended);
     pf(PF_ATTN);
     GPU(mat(f, L->out, d->out, f->att, n, f->o));
     Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];
