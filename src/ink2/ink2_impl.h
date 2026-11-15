@@ -52,6 +52,8 @@ typedef struct Ink2MtpDev
   float *mix, *kctx, *vctx, *x, *res, *nrm, *q, *kb, *vb, *att, *ob, *g, *u, *hf, *inv, *vec, *p, *state, *latent,
       *corr, *base, *lg, *probs, *scr, *f_rnn;
   int32_t *pos, *prev, *ids;
+  void *x16;         /* the block's activations as mm reads them: a tile of its widest input */
+  int32_t *overflow; /* an x16 value past f16's range (the draft's refusal, not the step's) */
 } Ink2MtpDev;
 
 enum
