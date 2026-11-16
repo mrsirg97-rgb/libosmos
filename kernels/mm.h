@@ -3,6 +3,8 @@
 // (f32 <- f16, 16 x 16 x 16) accumulating against the tokens' f16 activations. a column's results are the same bits
 // whatever the other columns hold (measured: test_mm_gpu), so a token's are whatever it is batched with.
 #pragma once
+#include <type_traits>
+
 #include "port.h"
 #include "block.h"
 #include "quant.h"
@@ -144,24 +146,40 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
 #pragma unroll
       for (int i = 0; i < NW; i++) v[i] = b[i];
     };
-    uint32_t k0 = wave * SL;
-    if (k0 < cols) fetch(k0, cw);
-    for (; k0 < cols; k0 += S::kWaves * SL) {
-      const uint32_t k1 = k0 + S::kWaves * SL;
-      if (k1 < cols) fetch(k1, nw);
-      osmos_fb bx[G];
-      for (int g = 0; g < G; g++) bx[g] = osmos_load_b(xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
+    // long rows' waves in step (a barrier without the fence a slab step in kLockstep: the loads in flight across it) -
+    // a line's 3.5 blocks are 3 or 4 waves', and drifting apart over a long row a line was evicted before its last
+    // wave read it: down's (17,408 columns, 34 slabs a wave) DRAM reads 1.6 times its bytes, 156 -> 177 GB/s in step.
+    // rows of 10-12 slabs a wave lose 3-8% to the barriers (gate / up, qkv, ssm_out: fp4bench MM, performance), so
+    // past kLockstepSlabs a wave alone (between the two measured)
+    constexpr uint32_t kLockstep = 4, kLockstepSlabs = 16;
+    const uint32_t slabs = cols / SL;
+    // the loop compiled twice (a runtime barrier's branch in the one loop cost the others 5-8%)
+    auto run = [&](auto in_step) {
+      uint32_t k0 = wave * SL, it = 0;
+      if (k0 < cols) fetch(k0, cw);
+      for (; k0 < cols; k0 += S::kWaves * SL, it++) {
+        const uint32_t k1 = k0 + S::kWaves * SL;
+        if constexpr (decltype(in_step)::value)
+          if (it % kLockstep == 0) __builtin_amdgcn_s_barrier();
+        if (k1 < cols) fetch(k1, nw);
+        osmos_fb bx[G];
+        for (int g = 0; g < G; g++) bx[g] = osmos_load_b(xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
 #pragma unroll
-      for (int g = 0; g < G; g++) {
-        const uint32_t sb = cw[0] >> (8 * g) & 0xFF, q0 = cw[1 + 2 * g], q1 = cw[2 + 2 * g];
-        const h8 lo = quant::nvfp4_h(quant::Nvfp4Raw{sb, q0, q1, 2 * g}),
-                 hi = quant::nvfp4_h(quant::Nvfp4Raw{sb, q0, q1, 2 * g + 1});
-        h16 a;
-        for (int j = 0; j < quant::kChunk; j++) a[j] = lo[j], a[quant::kChunk + j] = hi[j];
-        acc[0] = osmos_mma(a, bx[g], acc[0]);
+        for (int g = 0; g < G; g++) {
+          const uint32_t sb = cw[0] >> (8 * g) & 0xFF, q0 = cw[1 + 2 * g], q1 = cw[2 + 2 * g];
+          const h8 lo = quant::nvfp4_h(quant::Nvfp4Raw{sb, q0, q1, 2 * g}),
+                   hi = quant::nvfp4_h(quant::Nvfp4Raw{sb, q0, q1, 2 * g + 1});
+          h16 a;
+          for (int j = 0; j < quant::kChunk; j++) a[j] = lo[j], a[quant::kChunk + j] = hi[j];
+          acc[0] = osmos_mma(a, bx[g], acc[0]);
+        }
+        for (int i = 0; i < NW; i++) cw[i] = nw[i];
       }
-      for (int i = 0; i < NW; i++) cw[i] = nw[i];
-    }
+    };
+    if (slabs % S::kWaves == 0 && slabs / S::kWaves > kLockstepSlabs)
+      run(std::true_type{});
+    else
+      run(std::false_type{});
   } else if constexpr (CT == 1 && kRegAShape<T, S>) {  // the A operand straight from the decode (kRegA)
     for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
       h16 a[G];
