@@ -11,6 +11,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/gpu/upload.h"
 #include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
@@ -236,18 +237,10 @@ static bool upload(Q35Forward *f, char *err)
     const GgufTensor *t = &g->tensors[i];
     if (strncmp(t->name, "blk.", 4) == 0 && atoi(t->name + 4) >= f->w->geo.n_layers)
       continue; /* the MTP head's layers: not this forward's */
-    const int fd = open(g->paths[t->file], O_RDONLY);
-    ok = fd >= 0 && alloc(&f->dev[i], t->bytes);
-    for (uint64_t at = 0; ok && at < t->bytes; at += READ_PIECE)
-    {
-      const size_t m = t->bytes - at < READ_PIECE ? (size_t)(t->bytes - at) : READ_PIECE;
-      ok = pread(fd, pin, m, (off_t)(t->offset + at)) == (ssize_t)m &&
-           hipMemcpy((uint8_t *)f->dev[i] + at, pin, m, hipMemcpyHostToDevice) == hipSuccess;
-    }
-    if (fd >= 0)
-      close(fd);
+    const char *why = gpu_read_tensor(g, t, pin, READ_PIECE, &f->dev[i]);
+    ok = !why;
     if (!ok && err)
-      snprintf(err, Q35_ERR, "%s: not read into GPU memory", t->name);
+      snprintf(err, Q35_ERR, "%s: not read into GPU memory (%s)", t->name, why);
   }
   hipHostFree(pin);
   return ok;

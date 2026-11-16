@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "osmos/gpu/upload.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/mem/arena.h"
 #include "osmos/mem/host_slots.h"
@@ -167,18 +168,8 @@ static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const
     const GgufTensor *t = &g->tensors[i];
     if ((shadow && gguf_tensor(shadow, t->name)) || t == skip || on_membrane(f, t))
       continue;
-    const int fd = open(g->paths[t->file], O_RDONLY);
-    const char *why = fd < 0 ? "its file not opened" : NULL; /* which of the three failed, for the message */
-    ok = fd >= 0 && (alloc(&(*dev)[i], t->bytes) || (why = "GPU memory refused", false));
-    for (uint64_t at = 0; ok && at < t->bytes; at += READ_PIECE)
-    {
-      const size_t n = t->bytes - at < READ_PIECE ? (size_t)(t->bytes - at) : READ_PIECE;
-      ok = (pread(fd, pin, n, (off_t)(t->offset + at)) == (ssize_t)n || (why = "its file's read failed", false)) &&
-           (hipMemcpy((uint8_t *)(*dev)[i] + at, pin, n, hipMemcpyHostToDevice) == hipSuccess ||
-            (why = "the copy to GPU memory failed", false));
-    }
-    if (fd >= 0)
-      close(fd);
+    const char *why = gpu_read_tensor(g, t, pin, READ_PIECE, &(*dev)[i]);
+    ok = !why;
     if (!ok && err)
       snprintf(err, Q4X_FWD_ERR, "%s: not read into GPU memory (%s)", t->name, why);
   }
