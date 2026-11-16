@@ -1,4 +1,5 @@
-// mv_strided's prompt tiles for F32 weights (R 3 NW 12; at most 4 rows the narrow tile, a wave all the rows of its
+// mv_run's and mv_strided's tiles for F32 weights: a decode's few rows a wave a block (against 8 waves a block), and the
+// prompt's (R 3 NW 12; at most 4 rows the narrow tile, a wave all the rows of its
 // own tokens) against the wide tile they replace (mv.h's wide_kernel at R 4 NW 8): every output the same bits - on
 // Qwen3.8's F32 shapes (the router 512 x 2560, the inject 4 x 10240, the shared gate 1 x 2560, DeltaNet's gates
 // 48 x 2560), token counts off the tiles' multiples, a stride wider than the row. needs a GPU; skipped (77) without one.
@@ -56,6 +57,25 @@ static void run(const char* name, uint32_t rows, uint32_t cols, uint32_t n, uint
   CHECK(hipFree(w) == hipSuccess && hipFree(x) == hipSuccess && hipFree(ya) == hipSuccess && hipFree(yb) == hipSuccess);
 }
 
+// a decode's (mv_run, 1 .. MV_MAX_TOKENS tokens) on a matrix short of a block of 8 waves on every CU: a wave a block -
+// against the 8-wave block (mv.h's launch at its default), every output the same bits
+template <int NT>
+static void run_few(const char* name, uint32_t rows, uint32_t cols) {
+  float *w = dev((size_t) rows * cols, 1.0f), *x = dev((size_t) NT * cols, 4.0f), *ya = nullptr, *yb = nullptr;
+  const size_t yn = (size_t) NT * rows;
+  CHECK(hipMalloc(&ya, yn * 4) == hipSuccess && hipMalloc(&yb, yn * 4) == hipSuccess);
+  CHECK(hipMemset(ya, 0x5A, yn * 4) == hipSuccess && hipMemset(yb, 0x5A, yn * 4) == hipSuccess);
+  constexpr int u = NT == 1 ? 4 : 2;  // mv.hip's F32 tune
+  CHECK((mv::launch<quant::kF32, NT, 1, u>(w, rows, cols, x, cols, yb, rows, nullptr)));
+  CHECK(mv_run(QTYPE_F32, w, rows, cols, x, NT, ya, nullptr) && hipDeviceSynchronize() == hipSuccess);
+  std::vector<uint32_t> a(yn), b(yn);
+  CHECK(hipMemcpy(a.data(), ya, yn * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(b.data(), yb, yn * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(!std::memcmp(a.data(), b.data(), yn * 4));
+  std::printf("  %-12s %3u x %5u, %u tokens: the 8-wave block's bits\n", name, rows, cols, NT);
+  CHECK(hipFree(w) == hipSuccess && hipFree(x) == hipSuccess && hipFree(ya) == hipSuccess && hipFree(yb) == hipSuccess);
+}
+
 int main() {
   std::printf("[test_mv_f32_wide_gpu] start\n");
   int ndev = 0;
@@ -69,6 +89,10 @@ int main() {
   run("gates", 48, 2560, 333, 2560);
   run("odd rows", 7, 2560, 100, 2600);   // past the narrow tile, rows not the tile's multiple, a wider stride
   run("three rows", 3, 512, 21, 520);    // the narrow tile with a row of its 4 past the end
+  run_few<1>("sink", 48, 6144);           // Inkling's: the sink, its convs' taps
+  run_few<1>("conv taps", 32, 6144);
+  run_few<3>("odd rows", 7, 2560);
+  run_few<8>("sink", 48, 6144);
   std::printf("[test_mv_f32_wide_gpu] ok\n");
   return 0;
 }

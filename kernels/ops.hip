@@ -47,6 +47,7 @@ __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* 
 }
 
 // x16 (when not NULL): y as mm_x16 would put it, rows past `rows` (a block each) zero to a whole tile
+constexpr uint32_t kRmsRun = 8;  // a 6144-wide row's 24 values a thread in 3 runs
 __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
                            uint32_t rows, _Float16* x16, int32_t* overflow) {
   __shared__ float lds[kThreads];
@@ -56,13 +57,25 @@ __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float*
   }
   const float* xr = x + (uint64_t) blockIdx.x * xs;
   float* yr = y + (uint64_t) blockIdx.x * ys;
+  // a thread's values kRmsRun at a time, their loads in flight together (a block a row: its latency), each sum's
+  // adds and each value's ops in rms_kernel's order as ever - y may be x, so a run's loads before its stores
   float ss = 0;
+#pragma unroll kRmsRun
   for (uint32_t i = threadIdx.x; i < n; i += kThreads) ss += xr[i] * xr[i];
   const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) n + eps);
-  for (uint32_t i = threadIdx.x; i < n; i += kThreads) {
-    const float v = w ? (xr[i] * r) * w[i] : xr[i] * r;
-    yr[i] = v;
-    if (x16) mm::x16_put(x16, blockIdx.x, i, n, v, overflow);
+  for (uint32_t i0 = threadIdx.x; i0 < n; i0 += kRmsRun * kThreads) {
+    float v[kRmsRun], g[kRmsRun];
+    for (uint32_t u = 0; u < kRmsRun; u++) {
+      const uint32_t i = i0 + u * kThreads;
+      v[u] = i < n ? xr[i] : 0.0f, g[u] = w && i < n ? w[i] : 0.0f;
+    }
+    for (uint32_t u = 0; u < kRmsRun; u++) {
+      const uint32_t i = i0 + u * kThreads;
+      if (i >= n) break;
+      const float o = w ? (v[u] * r) * g[u] : v[u] * r;
+      yr[i] = o;
+      if (x16) mm::x16_put(x16, blockIdx.x, i, n, o, overflow);
+    }
   }
 }
 
@@ -440,13 +453,14 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, u
 // wave alone (block.h's wave_pick: the larger, ties to the lower expert - the serial scan's picks, which a block-wide
 // argmax a pick, 8 barriers each, gave before: test_router_gpu holds this to that kernel's bits), their weights
 constexpr uint32_t kRouterLane = OPS_MAX_EXPERTS / 32;  // a lane's experts at most
+template <int Score>
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                               int32_t* idx, float* w) {
   __shared__ float sc[OPS_MAX_EXPERTS], keys[OPS_MAX_EXPERTS];
   const uint32_t t = blockIdx.x;
   for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads) {
     const float l = logits[(uint64_t) t * n_exp + e];
-    sc[e] = sqrtf(l > kSoftplusLinear ? l : log1pf(expf(l)));
+    sc[e] = Score == OPS_SCORE_SIGMOID ? sigmoid(l) : sqrtf(l > kSoftplusLinear ? l : log1pf(expf(l)));
     keys[e] = pick_key(sc[e] + bias[e]);
   }
   __syncthreads();
@@ -592,6 +606,7 @@ extern "C" bool ops_embed(uint32_t type, const void* table, uint32_t dim, const 
   if (!n_tok || !hc || dim % quant::kQK) return false;
   const uint8_t* tb = (const uint8_t*) table;
   switch (type) {
+    case quant::kQ4_K: embed_kernel<quant::kQ4_K><<<n_tok, kThreads, 0, st(stream)>>>(tb, dim, ids, hc, h); break;
     case quant::kQ5_K: embed_kernel<quant::kQ5_K><<<n_tok, kThreads, 0, st(stream)>>>(tb, dim, ids, hc, h); break;
     case quant::kQ6_K: embed_kernel<quant::kQ6_K><<<n_tok, kThreads, 0, st(stream)>>>(tb, dim, ids, hc, h); break;
     case quant::kQ8_0: embed_kernel<quant::kQ8_0><<<n_tok, kThreads, 0, st(stream)>>>(tb, dim, ids, hc, h); break;
@@ -731,11 +746,21 @@ extern "C" bool ops_engram_gate(float* h, const float* kv, const float* gate, ui
   return ok();
 }
 
+extern "C" bool ops_router_scored(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
+                                  OpsScore score, uint32_t n_tok, int32_t* idx, float* w, void* stream) {
+  if (!n_exp || n_exp > OPS_MAX_EXPERTS || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok) return false;
+  if (score == OPS_SCORE_SIGMOID)
+    router_kernel<OPS_SCORE_SIGMOID><<<n_tok, kThreads, 0, st(stream)>>>(logits, bias, n_exp, k, scale, idx, w);
+  else if (score == OPS_SCORE_SQRT_SOFTPLUS)
+    router_kernel<OPS_SCORE_SQRT_SOFTPLUS><<<n_tok, kThreads, 0, st(stream)>>>(logits, bias, n_exp, k, scale, idx, w);
+  else
+    return false;
+  return ok();
+}
+
 extern "C" bool ops_router(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                            uint32_t n_tok, int32_t* idx, float* w, void* stream) {
-  if (!n_exp || n_exp > OPS_MAX_EXPERTS || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok) return false;
-  router_kernel<<<n_tok, kThreads, 0, st(stream)>>>(logits, bias, n_exp, k, scale, idx, w);
-  return ok();
+  return ops_router_scored(logits, bias, n_exp, k, scale, OPS_SCORE_SQRT_SOFTPLUS, n_tok, idx, w, stream);
 }
 
 extern "C" bool ops_swiglu_lane(const float* g, const float* u, uint32_t n, float lim, const float* scale,

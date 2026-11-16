@@ -16,6 +16,7 @@ typedef struct Request
   int effort;          /* DeepSeek's reasoning budget */
   char level[16];      /* Qwen's reasoning effort as asked ("": the template's default) */
   bool preserve;       /* Qwen's preserve_thinking (its default: true) */
+  Json *effort_value;  /* Inkling's reasoning effort as asked - a name or a number (owned; NULL: the template's 0.9) */
   unsigned max_tokens; /* 0: as many as the context leaves */
   bool stream, usage;
   Loop loop; /* the history's loop signals (loop.h): reported beside the answer */
@@ -30,3 +31,6 @@ const Json *request_effort(const Json *body);
 bool request_fail(char *err, const char *what);
 Json *request_tools(const Json *body);
 bool request_format(const Json *body, JsonBuf *out, char err[API_ERR]);
+/* the messages as Qwen's and Inkling's templates take them (request_messages.c): `reasoning` as reasoning_content,
+   a call's arguments given as a JSON string parsed into an object - *out owned, NULL with why on a refusal */
+bool request_messages(const Json *msgs, Json **out, char err[API_ERR]);

@@ -66,15 +66,16 @@ class Manifest(unittest.TestCase):
     def test_real(self):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
-        self.assertEqual(set(m["packs"]), {"osmos-evo", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
-                                           "qwen38-ud-q4_k_xl"})  # 0.6.10: one Qwen context, 512K - no 1M pack
-        self.assertEqual(manifest.pack_id(m, "osmos-evo-a"), "osmos-evo")  # 0.7.6: the old name, the pack's now
-        evo = m["packs"]["osmos-evo"]  # osmos's own: evo-A's shards with evo-A2's patch in, evo-A UD-IQ1_M's + its delta
+        self.assertEqual(set(m["packs"]), {"osmos-evo-1017", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
+                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling"})  # 0.6.10: one Qwen context, 512K - no 1M pack
+        self.assertEqual(manifest.pack_id(m, "osmos-evo-a"), "osmos-evo-1017")  # 0.7.6's old name, and 0.7.6's own
+        self.assertEqual(manifest.pack_id(m, "osmos-evo"), "osmos-evo-1017")    # (0.8.0: osmos-evo-<model>)
+        evo = m["packs"]["osmos-evo-1017"]  # osmos's own: evo-A's shards with evo-A2's patch in, evo-A UD-IQ1_M's + its delta
         self.assertEqual({m["files"][f]["derive"]["with"] for f in evo["shards"]}, {"gguf_assemble"})
         a = [f"evo-a-{k}" for k in range(1, 5)]
         self.assertEqual({tuple(m["files"][f]["derive"]["base"]) for f in evo["shards"]}, {tuple(a)})
         self.assertEqual({tuple(m["files"][f]["derive"]["base"]) for f in a}, {tuple(m["packs"]["ud-iq1_m"]["shards"])})
-        self.assertEqual(osmos_install.needed(m, ["osmos-evo"], False)[:6],
+        self.assertEqual(osmos_install.needed(m, ["osmos-evo-1017"], False)[:6],
                          m["packs"]["ud-iq1_m"]["shards"] + ["evo-a-delta", "evo-a2-patch"])
         self.assertEqual((evo["table"], evo["overlay"]), (m["packs"]["ud-iq1_m"]["table"], m["packs"]["ud-iq1_m"]["overlay"]))
         q4 = m["packs"]["qwen38-ud-q4_k_xl"]  # the larger Qwen: its n-gram table streamed to fit, huihui's overlay its own
@@ -86,7 +87,7 @@ class Manifest(unittest.TestCase):
         self.assertEqual(q4["drafter"], m["packs"]["qwen38-ud-iq3_xxs"]["drafter"])
         self.assertEqual(q4["settings"], {"max_context": 524288, "max_tokens": 4096, "stream_ngram": True})
         self.assertEqual(m["packs"]["ud-iq1_s"]["table"]["slot"], [5, 5])
-        for ds in ("ud-iq1_s", "ud-iq1_m", "osmos-evo"):  # 0.6.10: 4,096-token steps in buffers of their own; 1M
+        for ds in ("ud-iq1_s", "ud-iq1_m", "osmos-evo-1017"):  # 0.6.10: 4,096-token steps in buffers of their own; 1M
             # (0.7.3: --ctx for less - a prompt cached, a long session reads a turn at a time)
             self.assertEqual(m["packs"][ds]["settings"], {"no_guess": True, "max_context": 1048576, "max_tokens": 4096})
         x = m["packs"]["ud-iq2_xxs"]  # six files: its own Q5_K Engram (the sixth) not fetched, the MXFP8 table 6 of 6
@@ -116,7 +117,7 @@ class Manifest(unittest.TestCase):
             manifest.check(m)
 
     def test_refusals(self):
-        self.refused(lambda m: m.update(aliases={"ud-iq1_s": "osmos-evo"}), "alias")    # an old id naming a pack
+        self.refused(lambda m: m.update(aliases={"ud-iq1_s": "osmos-evo-1017"}), "alias")    # an old id naming a pack
         self.refused(lambda m: m.update(aliases={"gone": "nope"}), "alias")             # a target no pack
         self.refused(lambda m: m["files"]["ud-iq1_s-2"].update(revision="main"), "pinned")
         self.refused(lambda m: m["files"]["ud-iq1_s-2"].update(sha256="abc"), "sha256")
@@ -536,6 +537,49 @@ class DerivedSet(unittest.TestCase):
                              "overlay": None, "rig": ROW, "settings": {}}}}
         return have, models, m, made
 
+    def test_delta_in_parts(self):
+        """a delta published in parts (a file past the hub's size, split): its parts' tensors and metadata together
+        make the set the whole delta makes, byte for byte"""
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "convert"))
+        import gguf_assemble as A
+        import gguf_delta as D
+        with tempfile.TemporaryDirectory() as d:
+            have, models = os.path.join(d, "have"), os.path.join(d, "models")
+            os.makedirs(have)
+            mk = Assemble().gguf
+            a, c = os.urandom(256), os.urandom(4096 * 2 + 64)
+            a2, c2 = os.urandom(len(a)), os.urandom(len(c))
+            mk(f"{have}/b-00001-of-00002.gguf", [("a", [64], 0, a)])
+            mk(f"{have}/b-00002-of-00002.gguf", [("c", [len(c) // 4], 0, c)])
+            name = struct.pack("<Q", 12) + b"general.name" + struct.pack("<IQ", 8, 3) + b"evo"
+
+            def delta(tag, ta, tc):  # the target's shards with these values, its delta on the base
+                os.makedirs(f"{d}/{tag}")
+                mk(f"{d}/{tag}/t-00001-of-00002.gguf", [("a", [64], 0, ta)], extra_kv=name, n_extra=1)
+                mk(f"{d}/{tag}/t-00002-of-00002.gguf", [("c", [len(c) // 4], 0, tc)])
+                D.main.__globals__["sys"].argv = ["x", f"{d}/{tag}/t-00001-of-00002.gguf",
+                                                  f"{have}/b-00001-of-00002.gguf", f"{have}/{tag}.gguf"]
+                D.main()
+                return f"{have}/{tag}.gguf"
+            whole, p1, p2 = delta("whole", a2, c2), delta("p1", a2, c), delta("p2", a, c2)
+            base = [f"{have}/b-00001-of-00002.gguf", f"{have}/b-00002-of-00002.gguf"]
+            os.makedirs(f"{d}/made")
+            made = A.assemble(base, [f"{d}/made/e-00001-of-00002.gguf", f"{d}/made/e-00002-of-00002.gguf"], [whole],
+                              log=lambda m: None)
+            derived = lambda k, p: {"derive": {"with": "gguf_assemble", "base": ["b1", "b2"],  # noqa: E731
+                                               "delta": ["d1", "d2"], "shard": k},
+                                    "path": os.path.basename(p), "bytes": os.path.getsize(p), "sha256": sha(p)}
+            m = {"version": 1, "rig": RIG_PIN,
+                 "files": {"b1": entry(base[0]), "b2": entry(base[1]), "d1": entry(p1, repo="o/evo"),
+                           "d2": entry(p2, repo="o/evo"), "e1": derived(1, made[0]), "e2": derived(2, made[1])},
+                 "packs": {"e": {"title": "t", "shards": ["e1", "e2"], "table": None, "picks": None, "drafter": [],
+                                 "overlay": None, "rig": ROW, "settings": {}}}}
+            manifest.check(m)
+            self.assertEqual(osmos_install.needed(m, ["e"], False), ["b1", "b2", "d1", "d2"])
+            cfg = layout.read_config(layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None))
+            self.assertEqual(sha(cfg["model"]), sha(made[0]))
+            self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
+
     def test_laid(self):
         with tempfile.TemporaryDirectory() as d:
             have, models, m, made = self.setup(d)
@@ -544,6 +588,55 @@ class DerivedSet(unittest.TestCase):
             cfg = layout.read_config(layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None))
             self.assertEqual(sha(cfg["model"]), sha(made[0]))
             self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
+
+    def test_trust_size_takes_made_set_by_bytes(self):
+        """a set made before: --trust-size takes it again by its bytes and its stamp (the pinned SHA-256 it was made
+        against), as it does a downloaded shard - not hashed. (no --have dirs: a file of its size there is hashed -
+        test_trust_size_hashes_have_dirs)"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)  # makes it
+            with mock.patch.object(userfiles, "TRUST_FROM", 0), \
+                    mock.patch.object(userfiles, "_sha256", side_effect=AssertionError("hashed")):
+                cfg = layout.read_config(layout.lay(m, "e", models, [], trust_size=True, abliterated=False, fetch=None))
+                with self.assertRaises(AssertionError):  # without the flag: hashed, as before
+                    layout.lay(m, "e", models, [], trust_size=False, abliterated=False, fetch=None)
+            self.assertEqual(sha(cfg["model"]), sha(made[0]))
+
+    def test_trust_size_refuses_a_stale_made_set(self):
+        """a made file whose stamp is not the pack's pinned SHA-256 (made by an older recipe of the same size): hashed
+        under --trust-size too, not taken by its bytes"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)  # makes it, stamped
+            for k in ("e1", "e2"):
+                with open(os.path.join(models, "derived", m["files"][k]["path"]) + userfiles.MADE_STAMP, "w") as f:
+                    f.write("0" * 64)
+            with mock.patch.object(userfiles, "TRUST_FROM", 0), \
+                    mock.patch.object(userfiles, "_sha256", side_effect=AssertionError("hashed")):
+                with self.assertRaises(AssertionError):
+                    layout.lay(m, "e", models, [have], trust_size=True, abliterated=False, fetch=None)
+
+    def test_trust_size_never_lays_a_same_size_base(self):
+        """a --have dir holding the base set, a base shard the size of the made one (only its values changed):
+        --trust-size lays the made shard, never the base's by its bytes"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            self.assertEqual(os.path.getsize(os.path.join(have, "b-00002-of-00002.gguf")), os.path.getsize(made[1]))
+            with mock.patch.object(userfiles, "TRUST_FROM", 0):  # (the files large enough to be taken by bytes)
+                layout.lay(m, "e", models, [have], trust_size=True, abliterated=False, fetch=None)
+            self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
+
+    def test_trust_size_hashes_have_dirs(self):
+        """a file of a made file's size in a --have dir: hashed under --trust-size (never checked by this installer)"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            for p in made:
+                shutil.copy(p, os.path.join(have, os.path.basename(p)))
+            with mock.patch.object(userfiles, "TRUST_FROM", 0), \
+                    mock.patch.object(userfiles, "_sha256", side_effect=AssertionError("hashed")):
+                with self.assertRaises(AssertionError):
+                    layout.lay(m, "e", models, [have], trust_size=True, abliterated=False, fetch=None)
 
     def test_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1002,10 +1095,11 @@ class Rig(unittest.TestCase):
 
     def test_each_packs_id(self):                        # rig's names: the model, its date, the quant's size
         ids = {pid: p["rig"]["id"] for pid, p in self.PACKS.items()}
-        self.assertEqual(ids, {"osmos-evo": "deepseek-1017-evo", "ud-iq1_s": "deepseek-1017-ud-s",
+        self.assertEqual(ids, {"osmos-evo-1017": "deepseek-1017-evo", "ud-iq1_s": "deepseek-1017-ud-s",
                                "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
-                               "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l"})
+                               "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l",
+                           "osmos-evo-inkling": "inkling-2-small-evo"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
         self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
 
@@ -1027,12 +1121,12 @@ class Rig(unittest.TestCase):
 
     def test_a_renamed_row_moved(self):                  # 0.7.6: deepseek-1017-evo-a, now osmos-evo's alias
         with tempfile.TemporaryDirectory() as home:
-            evo = self.PACKS["osmos-evo"]["rig"]
+            evo = self.PACKS["osmos-evo-1017"]["rig"]
             old = {"id": "deepseek-1017-evo-a", "window": 1048576, "maxTokens": 262144, "reserve": 131072,
                    "keepRecent": 262144, "command": "/old/osmos-api --config /m/old.json --port ${PORT}", "port": 8097}
             put(os.path.join(home, "models.json"), json.dumps([old]).encode())
             put(os.path.join(home, "settings.json"), json.dumps({"model": "deepseek-1017-evo-a"}).encode())
-            cfg = dict(self.CFG, pack="osmos-evo", max_context=1048576)
+            cfg = dict(self.CFG, pack="osmos-evo-1017", max_context=1048576)
             row = rig.register(home, cfg, "/b/osmos-api", "/m/osmos.json", default=False, row=evo)
             with open(os.path.join(home, "models.json")) as f:
                 self.assertEqual([r["id"] for r in json.load(f)], ["deepseek-1017-evo"])

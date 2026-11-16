@@ -52,6 +52,33 @@ def matches(path, entry, trust_size=False):
     return _sha256(path) == entry["sha256"]
 
 
+MADE_STAMP = ".sha256"  # a made file's stamp beside it: the pinned SHA-256 it was checked against when made
+
+
+def stamp_made(path, entry):
+    """a made file, checked against the entry's SHA-256: that SHA-256 written beside it (MADE_STAMP)"""
+    with open(path + MADE_STAMP, "w") as f:
+        f.write(entry["sha256"] + "\n")
+
+
+def made_matches(path, entry, trust_size=False):
+    """a file this installer made is the entry's: under trust_size its bytes alone when its stamp is the entry's pinned
+    SHA-256 (a stale recipe's, or none: hashed); otherwise, and on any doubt, matches() - stamped again when it does"""
+    if os.path.getsize(path) != entry["bytes"]:
+        return False
+    if trust_size and entry["bytes"] >= TRUST_FROM:
+        try:
+            with open(path + MADE_STAMP) as f:
+                if f.read().strip() == entry["sha256"]:
+                    return True
+        except OSError:
+            pass
+    if not matches(path, entry):
+        return False
+    stamp_made(path, entry)
+    return True
+
+
 def find(entry, dirs, trust_size=False):
     for p in candidates(dirs, entry["bytes"]):
         if matches(p, entry, trust_size):

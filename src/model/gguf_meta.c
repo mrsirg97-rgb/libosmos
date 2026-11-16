@@ -166,3 +166,18 @@ bool meta_layers(GgufMeta *m, const char *key, int n_layers, bool *set, int *cou
   return true;
 }
 
+
+/* an array of exactly n bools (a layer's flag each: llama.cpp's inkling2.attention.sliding_window_pattern) */
+bool meta_flags(GgufMeta *m, const char *key, size_t n, bool *out)
+{
+  const GgufKv *kv = meta_find(m, key, GGUF_ARRAY);
+  if (!kv)
+    return false;
+  if (kv->item != GGUF_BOOL)
+    return meta_fail(m, kv->key, "not of bools");
+  if (kv->n != n)
+    return meta_fail(m, kv->key, "not one a layer");
+  for (size_t i = 0; i < n; i++)
+    out[i] = ((const uint8_t *)kv->v.items)[i] != 0;
+  return true;
+}

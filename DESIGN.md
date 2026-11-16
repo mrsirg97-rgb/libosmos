@@ -3944,6 +3944,174 @@ the BF16 reference (0.6.6's protocol for Qwen) did not run: llama.cpp maps the 3
 it off on iGPUs; llama_ref now forces it) but then computes on one CPU thread (a 2,048-token step >15 min); copied,
 it needs the RAM. it waits for osmos's own Qwen streaming (0.6.11).
 
+### in progress: Inkling-2-Small, the third family (branch nvfp4, 2026-11-12)
+
+thinkingmachines/Inkling-2-Small (Apache 2.0, public 2026-11-12): 594B total, 17B active, 48 layers, every one MoE
+(384 experts, 8 a token, no shared expert), 40 sliding (a window of 1,024) and 8 full (5, 11, .. 47), GQA 48 / 8 of
+128, no RoPE. trained in NVFP4; its experts shipped NVFP4 (layers 0-39) and MXFP8 (40-47), everything else BF16.
+the aim: a pack of evo-A's shape - friendly expert types (IQ1_M gate / up, Q2_0 / Q2_K down; 40-47 more bits),
+GPTQ'd dense at Q6_K / Q5_K - ~2.0 bpw, 140-150 GB, scored against the reference as 0.6.6 scores DeepSeek's.
+
+**the reference** (tools/convert/ink2_ref_gguf.py): the checkpoint as a GGUF, no value changed - 1,344 tensors, 393
+GB in 9 shards. the experts NVFP4 (ggml 40) with a scale an expert beside them (amax / 2688: each expert's decoded max
+its amax), or MXFP8; gate and up split from w13 (gate rows even); keys llama.cpp's way under inkling2.* (geo.c). what
+the code implements is asserted, not written (the sliding layers' heads the full ones', no q / o bias, the value norm
+unweighted, the router's bias for the pick alone). **the oracle** (ink2_oracle.py): transformers' own inkling2 layers
+(its main from 109a7d19bf), a layer at a time, only the experts decoded by us - against transformers' whole forward on
+a small random Inkling2 (test_oracle.py): max |dlogp| 8.6e-6, top-1 100%.
+
+**done** (host-tested; the kernels' first build is the Halo's):
+- the types: NVFP4 decode / mv / mv_tok / mm (decode<kNVFP4>: ggml's - E2M1 doubled under half the UE4M3 scale;
+  exact in f16), MXFP8's mv / mv_tok / mm (Inkling's values exact in f16: checked an expert at conversion). tuning
+  not measured (Q2_0's; MXFP4's).
+- osmos/ink2/weights.h: the geometry and every tensor's role (src/ink2/geo.c, weights.c), an NVFP4 expert tensor's
+  scale claimed by its type; test_ink2_weights on the small reference (OSMOS_TEST_INK2).
+- the kernels' cases (tools/convert/ink2_cases.py, ~/osmos-oracle/ink2-cases, 0.8 GB): each new op through
+  transformers' own module at the real sizes, its inputs, stages and output as QDMP files (q4x_ref.h's ref_read) -
+  layer 0's attention and layer 5's at positions 0 and 300,000 (1,088 tokens: past the window and the extent; from
+  the projections' rows to before o_proj), the post-attention conv, attn_res (1 and 3 queries over 1 and 8 blocks),
+  the router, the SwiGLU, the logits' softcap, 16 NVFP4 experts as a GGUF of the converter's bytes. seeded, scaled to
+  put 37-52% of q, k and rel past their clips; every 8th row past 1,024 flat (q, rel zero) so the window's edge is
+  seen. tools/convert/test_cases.py: the formulas again in float64 from the files alone, every case within 8.3e-7 of
+  transformers - and each of these breaks caught: either conv's taps reversed, the sink dropped, tau dropped, an
+  expert's scale dropped, the bias in the weights, the window or the extent off by one, causality off by one.
+  the conventions (test_cases.py's docstring): a static conv's tap taps-1 the current token, a dynamic conv's tap 0.
+
+**the forward, op by op** (transformers' modeling_inkling2.py the definition; what exists, what is new):
+
+| op | osmos | new |
+| --- | --- | --- |
+| dense matrices | mv / mm | - |
+| experts | q4x_expert_bounds / tiles, mm_group | NVFP4's scale: gate and up's outputs by scale[e] before the activation, down's weight w x scale[e] in the sum |
+| embedding + its norm; v's norm; attn_res's norm | ops_embed; ops_rms (no weight: unweighted) | - |
+| router: sigmoid, the bias for the pick alone, normalized x 8 | ops_router (sqrt softplus) | its sigmoid |
+| softcapped SwiGLU: 4 tanh(g / 4) sigmoid(g) 25 tanh(u / 25) | q4x_swiglu | a kernel |
+| attention: GQA 6:1, sigmoid gate on its output | q4x_attn (the gate, GQA) | the relative bias (a head's 16 states . proj[d] at distance d < extent), a sink logit a head a token, the window, q's scaled L2 clip and k's, the full layers' log scaling of q and r (1 + 0.1 ln max(1, (pos + 1) / 128000)) |
+| short convs (k, v, after the attention, after the MoE) | q4x_conv (silu, no residual) | no silu, (conv + x) / sqrt(taps + 1); the full layers' k / v conv dynamic - taps static + a projection a KV head a token, / sqrt(2 taps + 1) |
+| attn_res: a learned query over the block states (normalized: keys and values) | - | a kernel (<= 9 states a token; a full layer's 3 queries) |
+| logits: 30 tanh(l / 30), the 200,058 real tokens | - | small |
+
+a sequence's state: the KV cache (the sliding layers' last 1,024; the full layers' all), four convs' last 3 inputs a
+layer, nothing of attn_res's (a token's block states its own). the drafter (mtp.*: DSpark, 5 layers, 7 tokens a step)
+after the main model.
+
+**the engine** (2026-11-14; osmos/ink2/forward.h, src/ink2/hip_forward.c, hip_seq.c). ink2_run's math a step at a
+time: the dense weights resident (~6 GB), the routed experts the membrane's units (warmed an expert of every layer at
+a time, the room the budget's), each distinct pick read once for its tokens (mv_group_tok, mm_group since "a prompt's
+steps on mm" below; ink2_swiglu_rows, ink2_moe_sum: the bits of a pick at a time). a sequence's rows are tails - each
+full layer's keys and values to its position, each sliding layer's last window - 1 + 15 (its keys handed in from a
+tile's start), each layer's four convs' last 3 inputs - each kept INK2_MAX_BACK rows past what the next token reads
+and moved to the front when full (cap 2 keep + a step's: the move's halves apart). nothing is recurrent, so a rollback
+is the bits of never having run the tokens, a mark the windows and convs (~330 MB), a save the full layers' rows too.
+
+held to ink2_run (ATTN=fa) on UD-IQ1_S, 2,600 wiki tokens in steps of 200, 64, 7 and 1 (the tails moved at ~2,300):
+every row its bits, 11 rollbacks and a save and load the same bits. the first run was not: KLD 1.2e-3, top-1 99.35%.
+two causes, both the flash attention's. a sliding window's first tile began at its block's first query's window -
+a query's keys cut into other tiles in another block (p's f16 rounding is against a tile's running max); the tiles
+now start at a multiple of 16. and **WMMA's sum moves with a value whose p is 0**: a query's own tile holds the keys
+past it - the prompt's next tokens in a whole prompt, none in a step that ends at it (a decode's) - and with them
+real, not zero, one ulp of the output moved (1,652 of 6.7M values; zeroing K past the query changed nothing, a p row
+of zeros left the sum exact). so a row's own tile's p . v is over the values to its key alone (a WMMA a cut, at most
+15 a wave a tile; a decode's one). test_ink2_ops_gpu holds 14 steps - chunks, a prompt's tail, single decodes - to
+the prompt's bits for each layer kind. a kernel that sums a tile in hardware must not let a masked lane's operand in.
+
+**a prompt's steps on mm** (2026-11-14). the prompt ran on the decode's kernels - the dense matrices mv_run 8 tokens a
+launch (each weight read again every 8 tokens), the experts mv_group_tok's entries of 8 - an 8K prompt (ours, ROOM=40,
+PROMPT=1) 32.9 tok/s in steps of 512, 43.1 in steps of 2,048. WMMA's sums are no order a VALU repeats (0.5.5's probe),
+so a prompt on mm beside a decode on mv would part a token's bits by its step. the rule is Qwen's: **the kernel is the
+matrix's, never the step's** - mm (mm_tokens) for every matrix whose type and shape it takes (the experts, the Q5_KR /
+Q6_K / Q8_0 dense, the head), the matvec (mv_strided: mv_run's bits, wide tiles past 8) for the F32 router and conv
+projections and the BF16 sink; the experts mm_group's at every step (an entry an expert's part of MM_MAX_TOKENS rows,
+a launch a run of the same column tiles - hip_ffn.c's tables), ink2_moe_sum their sum in slot order as before. mm's
+x16 refuses a value past f16: the step fails, its sequences with it. the drafter keeps the matvec (ink2_mv: a draft is
+a proposal). ink2_run MAT=mm runs the same kernels (its experts mm_run at one token) and is the oracle.
+- **held** (ink2_engine CHECK=1 against ink2_run ATTN=fa MAT=mm): UD-IQ1_S, 2,600 wiki tokens in steps 1,024, 200,
+  64, 7, 1, 2-8 and 512, and in one step of 2,600 (dense past MM_MAX_TOKENS: two x16 chunks); ours (Q5_KR dense),
+  1,447 in steps 640 .. 1 and in one - every row its bits, 11 rollbacks and a save and load the same bits. the matvec
+  engine against the mm reference: 0 rows its bits, kld 3.9e-3 (the check sees the kernels).
+- **what f16 activations cost**: against the reference's wiki10k rows (ink2_run, ours, ATTN F32) kld 0.195613 ->
+  0.195863, top-1 85.70 -> 85.54%, ppl 3.6706 -> 3.6713; on the engine's own texts ppl UD 2.6681 -> 2.6682, ours
+  2.4763 -> 2.4905.
+- **the stream two layers**: an 8K step on mm 194 tok/s, the SSD at 4.5 GB/s and the GPU ~50% busy (7.2 GB/s at the
+  warm start) - one layer's stream holds the layer's cold experts until its visit ends, so the next layer's reads
+  ahead waited under its kernels. two layers (+3.4 GiB pinned): the GPU ~90% busy, 321-333 tok/s. the read ahead
+  named after the layer's holds (DeepSeek's order) 321-333 against 311 before them.
+- **the step's size**: a prompt step reads each cold expert once (~100 GB at a 40 GiB room), so its count is the
+  prompt's speed - an 8K prompt 115 / 238 / 321-333 tok/s at 2,048 / 4,096 / 8,192, the forward 54.8 / 58.0 / 64.5
+  GiB with the room (of 8,192's, the logits' [max_tokens][n_vocab] 6.6 GB, every row kept or not). INK2_STEP_TOKENS
+  8,192; osmos-serve's --max-tokens (2,048 by default) still names it.
+- **the decode's price**: plain decode (ours, ROOM=40, after a 2,048 step) 5.43 / 5.42 -> 4.75 / 4.76 tok/s. profiled
+  (a step's ms, decode steps of 1 and 8): the dense on mm faster (inputs 27.4 -> 23.0, mid 11.8 -> 9.9), the experts'
+  kernels slower (121.8 -> 155.5: mm_group at a few tokens an expert against mv_group_tok; IQ1_S's and IQ2_S's mm
+  shapes their siblings', never measured), the reads' waits the same (279 / 274). the lever is mm's small-count
+  expert tiles (each shape its bits: a pack's references made again).
+
+**the dialect** (osmos-api). the tokenizer: o200k's expression (pretok_o200k.c; the letter classes' case from
+unicode_case.h), 242 cases and DESIGN.md's 167K tokens the same ids as the checkpoint's tokenizer.json. the template:
+the checkpoint's own (unsloth's GGUF carries a longer reconstruction of a reference server's renderer), 54 chats
+transformers' bytes, 15 refused as it refuses. the turn the model writes (read off UD-IQ1_S): blocks under
+<|message_model|> - thinking (none at all at effort 0), text, a call's (its name the header, {name, args} the body) -
+then <|content_model_end_sampling|>. a block-shaped dialect's header hook says each block's field at a boundary; no
+answer-after (a block's end is every block's: the rule would refuse an answer's end of turn). through osmos-api and
+osmos-serve on UD-IQ1_S: a streamed call, its result, the answer - the second turn's prompt 155 of 175 tokens cached
+(the parsed turn renders to the tokens the model wrote). 3.0 tok/s decode at a 24 GiB room: the speed is next.
+
+**where candidate A's loss is** (its downs IQ2_S in 0-39, IQ3_XXS in 40-47; UD-IQ1_S's IQ3_XXS / IQ4_XS restored a
+group at a time, wiki10k rows 2048 .. 6142 against the reference: A 0.31968, UD 0.28536):
+
+| layers | KLD | recovered | GiB | per GiB |
+| --- | --- | --- | --- | --- |
+| 0-9 | 0.31962 | 0.0001 | 2.7 | ~0 |
+| 10-19 | 0.31393 | 0.0058 | 2.7 | 0.0021 |
+| 20-29 | 0.31197 | 0.0077 | 2.7 | 0.0029 |
+| 30-39 | 0.30755 | 0.0121 | 2.7 | 0.0045 |
+| 30-34 | 0.31091 | 0.0088 | 1.3 | 0.0066 |
+| 35-39 | 0.31572 | 0.0040 | 1.3 | 0.0030 |
+| 40-47 | 0.31335 | 0.0063 | 4.5 | 0.0014 |
+
+the groups add (the five 0.0320 of 0.0343; the halves 0.0128 of 0.0121). the loss is in the middle-late layers, the
+first ten none of it.
+
+**the recipe, scored** (wiki10k's working rows; the halves: the sweep's rows, then the ones it never saw): A
++0.0222 (+0.0343 / +0.0100); A with 30-34's downs UD-IQ1_S's again +0.0177 (+0.0256 / **+0.0098**) - the gain all on
+the sweep's own rows, fitted to them; with 25-34's +0.0138 (+0.0194 / **+0.0082**, top-1 84.96%), 159.2 GB: real on
+the unseen half. its attention and head to Q5_K by GPTQ (32,768 tokens of the operator's sessions through it,
+sessions 4-23 of calib_rig.py's 78 - the hold-out none of them; the pack's own values the target, Q6_K / Q8_0):
++0.0152 (+0.0220 / +0.0085), top-1 85.09%, 158.2 GB, ~1 GB less read a token - the finalist, osmos-evo-inkling.
+
+**a decode's attention** (osmos/gpu/ink2_ops.h ink2_fa). one query left a full layer's 8 KV heads 8 blocks, each
+every key tile in turn: 51 ms at 64K, 479 at 512K (ink2_fabench DECODE=1). a query's keys are now cut at absolute
+multiples of 256 (pos0: key 0's position), each unit its own online softmax folded in order by one fold
+(fa_fold_coef): a prompt folds unit by unit in registers, a decode runs a block a unit and KV head and the fold kernel
+after - the same units and fold, so the same bits, the split speed alone. with 16-byte f16 loads: 3.6 ms at 64K, 33
+at 512K, a sliding layer 0.1 (a token's attention ~33 ms at 64K, ~6 at 4K). the keys and values are cached f16 -
+the values ink2_fa rounds them to as it loads - so half the memory (8.6 GB a sequence at 512K) and the same bits.
+
+**the drafter** (src/ink2/hip_mtp.c). the checkpoint's mtp.safetensors, beside its shards' index (neither our
+reference nor unsloth's GGUF carried it): DSpark, 5 dense layers (4 sliding), blocks of 8, a rank-256 RNN Markov
+head, fed the target's taps - h entering layers 5, 11 .. 41 and the final normed hidden. transformers has no forward
+for it; TokenSpeed's inkling2_mtp.py does, held in PyTorch by ink2_mtp_oracle.py; its conventions probed (the
+context before the anchor, the block not causal: 2.80 accepted of 7 on 20 anchors against 2.20 causal and 2.40 with
+the anchor's own taps). the GPU's drafts are the oracle's at every anchor compared; through osmos-serve, three chats
+drafted and plain the same tokens, 65-74% of drafts accepted on the model's own answers (the wiki text's spacing
+drafts poorly: 1.33 of 7).
+
+**why drafting barely paid, and what changed it.** a verify step's tokens each bring their experts: 7 tokens ~5x a
+token's distinct experts, so ~5x its expert bytes and misses - and Inkling's token is ~75% experts (no shared expert;
+DeepSeek's dense share is larger, read once for all of a verify's tokens). measured on our pack (a 90 GiB room, the
+Q8_0 drafter): a plain step 106 ms, a verify step 530 - break-even at every block length (1 .. 7 drafts). two fixes:
+- **the experts a launch a token count**: rows_of computes NT sums for every entry, storing the live, so in a launch
+  of 4 an entry of 1 paid 4 (mvsweep ink2: IQ1_S 214 / 430 / 545 us at 1 / 4 / 8 tokens, 10 experts). entries
+  grouped by count, a launch each: a verify's expert kernels 304 -> 174 ms.
+- **the routing's copies through pinned memory**, queued, one wait a layer (four synchronous round trips before).
+drafted 105 tokens: 11.8 -> 8.7 -> 7.9 s against 10.6 plain (13.3 against 9.9 tok/s), the same tokens.
+
+**where a plain token goes** (106 ms; rocprofv3 over 40 steps): the GPU busy 74 ms of a 125 ms traced step - the
+rest the host's routing (~0.5 ms a layer) and the SSD's misses (~19 ms: ~150 GB of experts, a 90 GiB room). the
+experts' kernels are bound by values decoded (~500 G values/s at one token whatever the type: IQ1_S 97 GB/s, IQ4_XS
+217), ~12 G values a token; the dense 2.3 GB read at ~200 GB/s but in ~2,000 launches a token. the dense Q5_K
+repacked at upload (Q5_KR, DeepSeek's: 5-25% at Inkling's shapes, the same bits).
+
 ### 0.6.9: a long prompt's steps in memory the expert cache lends (2026-11-12, low-power)
 
 **why large steps.** a prompt step's routed experts are held for the step; each is read and decoded once for all of

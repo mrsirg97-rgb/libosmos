@@ -20,14 +20,14 @@ enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
   kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8, kIQ3_XXS = QTYPE_IQ3_XXS, kIQ4_XS = QTYPE_IQ4_XS,
-  kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1,
+  kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1, kNVFP4 = QTYPE_NVFP4,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
 constexpr int kChunk = 8;
 constexpr int kQK = 256;  // a K-quant's or an IQ type's values a block
 constexpr int kQ32 = 32;  // Q8_0's and IQ4_NL's
-constexpr int kQ64 = 64;  // Q2_0's
+constexpr int kQ64 = 64;  // Q2_0's and NVFP4's
 constexpr float kIq1Delta = 0.125f;
 
 template <Type T> struct Block;
@@ -35,7 +35,7 @@ template <Type T> struct Block;
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
 QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S) QUANT_BLOCK(IQ3_XXS)
-QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1)
+QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1) QUANT_BLOCK(NVFP4)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -48,7 +48,7 @@ static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && 
                   Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
                   Block<kIQ2_S>::values == kQK && Block<kIQ3_XXS>::values == kQK &&
                   Block<kIQ4_XS>::values == kQK && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK &&
-                  Block<kQ4_K>::values == kQK && Block<kQ5_1>::values == kQ32,
+                  Block<kQ4_K>::values == kQK && Block<kQ5_1>::values == kQ32 && Block<kNVFP4>::values == kQ64,
               "the decoders' block lengths");
 
 // every block's size is even (34, 18, 66, 74, 210 ... bytes; MXFP4's and MXFP8's odd: byte loads only) and every row
@@ -260,6 +260,17 @@ template <> __device__ inline void decode<kMXFP4>(const uint8_t* b, int k, float
   const float d = ldexpf(1.0f, (int) b[0] - 128);
   const uint8_t* qs = b + 1 + (k % 2) * kChunk;
   for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) kMxfp4Values[(qs[j] >> (4 * (k / 2))) & 0x0F]);
+}
+
+// NVFP4 (ggml 40): 4 UE4M3 scales (sub-block s: values 16s .. 16s + 15), then 32 bytes - sub-block s's value j in byte
+// 4 + 8s + j's low nibble, value j + 8 its high one; ggml's dequantize_row_nvfp4: E2M1 doubled (kMxfp4Values) times
+// half the scale, the scale's sign bit not read and the code 0x7F zero (rnd::ue4m3_value). every product exact (an
+// E2M1 code's 2 bits by a scale's 4: 6 significant bits). a tensor's own scale is not the block's: applied by the role
+// that reads it (one a tensor, or one an expert)
+template <> __device__ inline void decode<kNVFP4>(const uint8_t* b, int k, float* v) {
+  const float d = mul(rnd::ue4m3_value(b[k / 2]), 0.5f);
+  const uint8_t* qs = b + 4 + (k / 2) * kChunk;
+  for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) kMxfp4Values[(qs[j] >> (4 * (k % 2))) & 0x0F]);
 }
 
 // unsloth's Engram tables: an E8M0 scale e (2^(e - 127)), then 32 E4M3 codes, value j byte 1 + j (a code 0x7F / 0xFF
@@ -558,22 +569,85 @@ __device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
 // (0.8.1: IQ1_S, the slowest decoder a value - 60 GB/s against IQ2_XXS's 115 - took decode_h's generic F32 path).
 // IQ1_M the same math, but no model here holds it (test_quant_gpu: no reference): it keeps the generic path until one
 // is checked
-__device__ inline h8 iq1_h(uint64_t grid, float dl, float delta) {
+struct Iq1Halves {
+  uint32_t s0, s1;  // the permutes' sources: s0 = hm << 16, s1 = hz | hp << 16
+};
+__device__ inline Iq1Halves iq1_halves(float dl, float delta) {
   float z = mul(dl, 0.0f + delta), p = mul(dl, 1.0f + delta), m = mul(dl, -1.0f + delta);
   asm("" : "+v"(z), "+v"(p), "+v"(m));  // decode_h's: each product, then f16 - not a fused v_fma_mixlo_f16
   const _Float16 hz = (_Float16) z, hp = (_Float16) p, hm = (_Float16) m;
-  const uint32_t s1 = (uint32_t) __builtin_bit_cast(uint16_t, hz) | (uint32_t) __builtin_bit_cast(uint16_t, hp) << 16;
-  const uint32_t s0 = (uint32_t) __builtin_bit_cast(uint16_t, hm) << 16;
+  return {(uint32_t) __builtin_bit_cast(uint16_t, hm) << 16,
+          (uint32_t) __builtin_bit_cast(uint16_t, hz) | (uint32_t) __builtin_bit_cast(uint16_t, hp) << 16};
+}
+__device__ inline h8 iq1_pick(uint64_t grid, Iq1Halves v) {
   u4 out;
   for (int w = 0; w < 2; w++) {
     const uint32_t base = ((uint32_t) (grid >> (32 * w)) << 1) & 0x06060606u; /* the 4 values' byte offsets */
     /* a pair's selector: its two offsets each twice (bytes 0, 0, 1, 1 of base), the high byte of each half +1 */
     const uint32_t sel0 = __builtin_amdgcn_perm(0, base, 0x01010000u) | 0x01000100u;
     const uint32_t sel1 = __builtin_amdgcn_perm(0, base, 0x03030202u) | 0x01000100u;
-    out[2 * w] = __builtin_amdgcn_perm(s0, s1, sel0), out[2 * w + 1] = __builtin_amdgcn_perm(s0, s1, sel1);
+    out[2 * w] = __builtin_amdgcn_perm(v.s0, v.s1, sel0), out[2 * w + 1] = __builtin_amdgcn_perm(v.s0, v.s1, sel1);
   }
   return __builtin_bit_cast(h8, out);
 }
+__device__ inline h8 iq1_h(uint64_t grid, float dl, float delta) { return iq1_pick(grid, iq1_halves(dl, delta)); }
+
+// IQ1_S's 32-value group (4 chunks) from its fields - the block's d, the group's qh word h, its 4 qs bytes - each
+// chunk decode_h's, the group's three f16s made once (mm.h's one-tile kernel, its fields read by wide loads)
+__device__ inline void iq1s_group_h(uint32_t d, uint32_t h, uint32_t qs, h8* out) {
+  const float dl = mul(f16(d & 0xFFFF), (float) (2 * ((h >> 12) & 0x07) + 1));
+  const Iq1Halves v = iq1_halves(dl, h & 0x8000 ? -kIq1Delta : kIq1Delta);
+#pragma unroll
+  for (int j = 0; j < 4; j++) out[j] = iq1_pick(kIq1sGrid[((qs >> (8 * j)) & 0xFF) | ((h >> (3 * j)) & 0x07) << 8], v);
+}
+
+// the IQ2 grids' |values| are 8, 25 and 43 alone: a scale's three f16 products made once, a chunk's halves picked by
+// permutes (iq1_pick's, a byte's offset (c >> 3) & 6: 0 for 8, 2 for 25, 4 for 43) - each value the product's f16,
+// grid_h's and iq2_h's bits (the product exact in F32: 16 bits by 6)
+__device__ inline Iq1Halves iq2_mags(float db) {
+  float x = mul(db, 8.0f), y = mul(db, 25.0f), z = mul(db, 43.0f);
+  asm("" : "+v"(x), "+v"(y), "+v"(z));  // grid_h's: the product, then f16 - not a fused v_fma_mixlo_f16 (a -0's +0)
+  const _Float16 a = (_Float16) x, b = (_Float16) y, c = (_Float16) z;
+  return {(uint32_t) __builtin_bit_cast(uint16_t, c),
+          (uint32_t) __builtin_bit_cast(uint16_t, a) | (uint32_t) __builtin_bit_cast(uint16_t, b) << 16};
+}
+__device__ inline u4 iq2_pick(uint64_t grid, Iq1Halves v) {
+  u4 out;
+  for (int w = 0; w < 2; w++) {
+    const uint32_t base = ((uint32_t) (grid >> (32 * w)) >> 3) & 0x06060606u;
+    const uint32_t sel0 = __builtin_amdgcn_perm(0, base, 0x01010000u) | 0x01000100u;
+    const uint32_t sel1 = __builtin_amdgcn_perm(0, base, 0x03030202u) | 0x01000100u;
+    out[2 * w] = __builtin_amdgcn_perm(v.s0, v.s1, sel0), out[2 * w + 1] = __builtin_amdgcn_perm(v.s0, v.s1, sel1);
+  }
+  return out;
+}
+
+// IQ2_XXS's group g from its fields - the block's d, the group's 8 bytes (4 grid indices, then aux: 4 7-bit signs
+// and the scale) - iq2_h's each chunk: |db|'s products, the signs' masks and db's sign one xor
+__device__ inline void iq2xxs_group_h(uint32_t d, uint32_t q, uint32_t aux, h8* out) {
+  const float db = mul(mul(f16(d & 0xFFFF), 0.5f + (float) (aux >> 28)), 0.25f);
+  const Iq1Halves v = iq2_mags(__builtin_fabsf(db));
+  const uint32_t ds = __float_as_uint(db) >> 31 ? 0x80008000u : 0u;
+#pragma unroll
+  for (int j = 0; j < 4; j++) {
+    const u4 m = *(const u4*) kSignMasks.m[(aux >> (7 * j)) & 0x7F] ^ (u4){ds, ds, ds, ds};
+    out[j] = __builtin_bit_cast(h8, iq2_pick(kIq2xxsGrid[(q >> (8 * j)) & 0xFF], v) ^ m);
+  }
+}
+
+// IQ2_S's group g from its fields - d, the group's 4 grid bytes, 4 sign bytes, its qh byte (2 high index bits a
+// chunk) and scale byte (a nibble each 16 values) - grid_h's each chunk
+__device__ inline void iq2s_group_h(uint32_t d, uint32_t qs, uint32_t signs, uint32_t qh, uint32_t sc, h8* out) {
+  const float d0 = f16(d & 0xFFFF);
+  const Iq1Halves v0 = iq2_mags(mul(mul(d0, 0.5f + (float) (sc & 0x0F)), 0.25f));
+  const Iq1Halves v1 = iq2_mags(mul(mul(d0, 0.5f + (float) ((sc >> 4) & 0x0F)), 0.25f));
+#pragma unroll
+  for (int j = 0; j < 4; j++) {
+    const uint64_t grid = kIq2sGrid[((qs >> (8 * j)) & 0xFF) | ((qh >> (2 * j)) & 0x03) << 8];
+    out[j] = __builtin_bit_cast(h8, iq2_pick(grid, j < 2 ? v0 : v1) ^ *(const u4*) kSignMasks8.m[(signs >> (8 * j)) & 0xFF]);
+  }
+}
+
 
 template <> __device__ inline h8 decode_h<kIQ1_S>(const uint8_t* b, int k) {
   const uint32_t h = ld16(b + 34 + 2 * (k / 4));

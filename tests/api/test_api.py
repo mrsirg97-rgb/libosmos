@@ -952,6 +952,148 @@ class QwenApi(Served, unittest.TestCase):
         self.assertIn("tool call", json.loads(r.read())["error"]["message"])
 
 
+INK2 = os.environ.get("OSMOS_TEST_INK2") or os.path.expanduser(
+    "~/Models/inkling2/ud-iq1_s/UD-IQ1_S/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf")
+INK2_DIR = os.environ.get("OSMOS_INK2_CHECKPOINT") or os.path.expanduser("~/Models/inkling2/Inkling-2-Small")
+INK2_PY = os.environ.get("OSMOS_INK2_PY") or os.path.expanduser("~/.venvs/ink2/bin/python")
+I_EOS, I_END, I_MODEL = "<|content_model_end_sampling|>", "<|end_message|>", "<|message_model|>"
+I_THINK, I_TEXT, I_CALL = I_MODEL + "<|content_thinking|>", I_MODEL + "<|content_text|>", "<|content_invoke_tool_json|>"
+
+
+def i_call(name, args):
+    return I_MODEL + name + I_CALL + json.dumps({"name": name, "args": args}, separators=(",", ":")) + I_END
+
+
+@unittest.skipUnless(os.path.exists(INK2) and os.path.isdir(INK2_DIR) and os.path.exists(INK2_PY),
+                     "no Inkling-2-Small UD-IQ1_S first shard, checkpoint (its template) or transformers")
+class InklingApi(Served, unittest.TestCase):
+    """Inkling's dialect: the prompt its checkpoint's template's (transformers' render), a turn of blocks streamed
+    field by field - the thinking optional, a call's block the stream's end"""
+    model = INK2
+
+    def prompt(self, messages, tools=None, effort=None):
+        kw = {"tokenize": False}
+        if tools:
+            kw["tools"] = tools
+        if effort is not None:
+            kw["reasoning_effort"] = effort
+        code = ("import json, sys\nfrom transformers import AutoTokenizer\n"
+                "t = AutoTokenizer.from_pretrained(sys.argv[1])\na = json.loads(sys.stdin.read())\n"
+                "sys.stdout.write(t.apply_chat_template(a['m'], **a['kw']))")
+        r = subprocess.run([INK2_PY, "-c", code, INK2_DIR], input=json.dumps({"m": messages, "kw": kw}).encode(),
+                           capture_output=True, check=True)
+        return ids(r.stdout.decode(), INK2)
+
+    def test_0_eos(self):
+        self.ready()
+        argv = self.log()[0].split()
+        self.assertEqual(argv[argv.index("--eos") + 1], ids(I_EOS, INK2))
+        self.assertNotIn("--answer-after", argv)  # a block's end is every block's: the rule would refuse an answer's end
+
+    def test_1_thinking_stream(self):
+        self.ready()
+        self.reply(I_THINK + "let me think " + I_END + I_TEXT + "The answer is 4, 🦀 é." + I_END + I_EOS)
+        msgs = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "2+2?"}]
+        ev = self.stream({"messages": msgs, "reasoning_effort": "low", "max_tokens": 100})
+        deltas = [e["choices"][0]["delta"] for e in ev if e["choices"]]
+        self.assertEqual("".join(d.get("reasoning_content", "") for d in deltas), "let me think ")
+        self.assertEqual("".join(d.get("content", "") for d in deltas), "The answer is 4, 🦀 é.")
+        fin = [e for e in ev if e["choices"] and e["choices"][0]["finish_reason"]]
+        self.assertEqual(fin[0]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort="low"))
+
+    def test_2_tool_calls_stream(self):
+        self.ready()
+        self.reply(I_THINK + "both" + I_END + i_call("get_weather", {"city": "Paris", "days": 2}) +
+                   i_call("get_weather", {"city": "Tōkyō"}) + I_EOS)
+        msgs = [{"role": "user", "content": "weather in Paris and Tōkyō?"}]
+        ev = self.stream({"messages": msgs, "tools": TOOLS})
+        deltas = [e["choices"][0]["delta"] for e in ev if e["choices"]]
+        self.assertEqual("".join(d.get("reasoning_content", "") for d in deltas), "both")
+        self.assertEqual("".join(d.get("content", "") for d in deltas), "")
+        calls = [c for d in deltas for c in d.get("tool_calls", [])]
+        self.assertEqual([json.loads(c["function"]["arguments"]) for c in calls],
+                         [{"city": "Paris", "days": 2}, {"city": "Tōkyō"}])
+        fin = [e for e in ev if e["choices"] and e["choices"][0]["finish_reason"]]
+        self.assertEqual(fin[0]["choices"][0]["finish_reason"], "tool_calls")
+        self.assertEqual(self.last_gen()[-1], self.prompt(msgs, TOOLS))
+
+    def test_3_no_thinking(self):  # effort none: the model writes no thinking block - its text the content
+        self.ready()
+        self.reply(I_TEXT + "Red, blue, yellow." + I_END + I_EOS)
+        msgs = [{"role": "user", "content": "three primary colors?"}]
+        r = self.post({"messages": msgs, "reasoning_effort": "none"})
+        m = json.loads(r.read())["choices"][0]["message"]
+        self.assertEqual(m["content"], "Red, blue, yellow.")
+        self.assertFalse(m.get("reasoning_content"))
+        self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort="none"))
+        self.reply(I_TEXT + "ok" + I_END + I_EOS)
+        self.post({"messages": msgs, "reasoning_effort": 0.35}).read()
+        self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort=0.35))
+
+    def test_4_history_whole(self):  # a client's arguments string the object the template asks for; reasoning kept
+        self.ready()
+        self.reply(I_TEXT + "Sunny." + I_END + I_EOS)
+        sent = [{"role": "user", "content": "weather in Paris?"},
+                {"role": "assistant", "content": "", "reasoning": "look it up",
+                 "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "get_weather", "arguments": "{\"days\": 1, \"city\": \"Paris\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "sun"}]
+        r = self.post({"messages": sent, "tools": TOOLS})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(json.loads(r.read())["choices"][0]["message"]["content"], "Sunny.")
+        want = [sent[0], {"role": "assistant", "content": "", "reasoning_content": "look it up",
+                          "tool_calls": [{"id": "c1", "type": "function", "function": {
+                              "name": "get_weather", "arguments": {"days": 1, "city": "Paris"}}}]}, sent[2]]
+        self.assertEqual(self.last_gen()[-1], self.prompt(want, TOOLS))
+
+    def test_5_refusals(self):
+        self.ready()
+        for body, word in [({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": 1.5}, "[0.0, 0.99]"),
+                           ({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "extreme"},
+                            "reasoning_effort"),
+                           ({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": True},
+                            "reasoning_effort"),
+                           ({"messages": [{"role": "user", "content": [
+                               {"type": "image_url", "image_url": {"url": "x"}}]}]}, "image"),
+                           ({"messages": [{"role": "critic", "content": "x"}]}, "role"),
+                           ({"messages": [{"role": "user", "content": "x"}],
+                             "response_format": {"type": "json_object"}}, "response_format")]:
+            r = self.post(body)
+            self.assertEqual(r.status, 400, body)
+            self.assertIn(word, json.loads(r.read())["error"]["message"])
+
+    def test_6_out_of_format(self):  # another role's token in the answer: an error, never streamed
+        self.ready()
+        body = {"messages": [{"role": "user", "content": "x"}]}
+        text = I_TEXT + "Sure.<|message_user|>more" + I_END + I_EOS
+        self.reply(text)
+        self.assertEqual(self.post(body).status, 500)
+        self.reply(text)
+        rs = self.post(dict(body, stream=True))
+        ev = [e[len("data: "):] for e in rs.read().decode("utf-8").split("\n\n") if e]
+        self.assertFalse(any("message_user" in e or "more" in e for e in ev[:-1]), ev)
+        self.assertIn("did not parse", json.loads(ev[-1])["error"]["message"])
+
+    def test_7_stream_is_the_answer(self):  # cut by max_tokens: the stream's fields the whole answer's
+        self.ready()
+        body = {"messages": [{"role": "user", "content": "x"}]}
+        m = self.agree(ids(I_THINK + "hmm" + I_END + I_TEXT + "Hi the", INK2), body, "length")
+        self.assertEqual((m["reasoning_content"], m["content"]), ("hmm", "Hi the"))
+        m = self.agree(ids(I_THINK + "still thinki", INK2), body, "length")
+        self.assertEqual((m["reasoning_content"], m["content"]), ("still thinki", ""))
+        m = self.agree(ids(I_THINK + "a" + I_END + I_TEXT + "b" + I_END + I_TEXT + " c" + I_END + I_EOS, INK2), body)
+        self.assertEqual((m["reasoning_content"], m["content"]), ("a", "b c"))
+
+    def test_8_special_text_said(self):  # a token's text in plain pieces is text: streamed, the answer's
+        self.ready()
+        said = ",".join(ids(p, INK2) for p in ("<|", "end", "_message", "|>"))
+        self.reply_ids(ids(I_TEXT + "Use", INK2) + "," + said + "," + ids("." + I_END + I_EOS, INK2))
+        r = self.post({"messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(json.loads(r.read())["choices"][0]["message"]["content"], "Use<|end_message|>.")
+
+
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
 class Shutdown(Served, unittest.TestCase):
     def test_sigterm_quits_the_engine(self):  # 0.7.1: rig's stop (SIGTERM) left the engine to its PDEATHSIG - killed,

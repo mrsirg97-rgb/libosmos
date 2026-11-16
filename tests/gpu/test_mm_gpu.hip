@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include "test_model.h"
@@ -83,6 +84,17 @@ static const Shape kQwenQ4Shapes[] = {
     {"blk.0.ffn_gate_exps.weight", 7}, {"blk.30.ffn_gate_exps.weight", 300}, {"blk.47.ffn_up_exps.weight", 11},
     {"blk.0.ffn_down_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 300}, {"blk.2.ffn_gate_exps.weight", 7}};
 constexpr const char* kQwenQ4 = "%s/Models/qwen38/q4kxl-dl/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf";
+
+// Inkling-2-Small's reference (the original weights: /mnt/data/ink2/tools/ink2_ref_gguf.py), a shard alone: the first
+// its dense matrices (BF16) and the NVFP4 experts of layers 0-4, the last the MXFP8 experts of 46-47 - each block's
+// values (a tensor's own scale is its role's, not the matvec's)
+constexpr const char* kInk1 = "%s/Models/inkling2/ref/ink2-ref-00001-of-00009.gguf";
+static const Shape kInk1Shapes[] = {
+  {"blk.0.ffn_gate_exps.weight", 7}, {"blk.0.ffn_down_exps.weight", 7}, {"blk.4.ffn_up_exps.weight", 300},
+  {"blk.5.attn_q.weight", -1},       {"blk.0.attn_gate.weight", -1},    {"output.weight", -1},
+};
+constexpr const char* kInk9 = "%s/Models/inkling2/ref/ink2-ref-00009-of-00009.gguf";
+static const Shape kInk9Shapes[] = {{"blk.46.ffn_gate_exps.weight", 7}, {"blk.47.ffn_down_exps.weight", 300}};
 
 static std::vector<float> host_of(const float* d, size_t n) {
   std::vector<float> h(n);
@@ -168,7 +180,8 @@ static void shape(const Gguf* g, const Shape& s) {
       CHECK(std::memcmp(&yh[(size_t) 200 * rows], &a[(size_t) 3 * rows], rows * 4) == 0);
     }
     if (s.expert >= 0) {  // the experts' launch (mm_group: one matrix, its multi-tile plans - mm.hip's GroupPlan): the
-                          // first n tokens' rows mm_run's bits at 1 .. 8 column tiles, a partial tile and a partial block
+                          // first n tokens' rows mm_run's bits at 1 .. 8 column tiles (1 - 16 tokens: the codebook types'
+                          // group_tile_kernel among them), a partial tile and a partial block
       std::vector<float> yr((size_t) 201 * rows);  // x16b and yb: the last pass's 201 tokens, mm_run's
       CHECK(hipMemcpy(yr.data(), yb, yr.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
       const void** dw;
@@ -183,14 +196,37 @@ static void shape(const Gguf* g, const Shape& s) {
       CHECK(hipMemcpy(dw, &wp, sizeof wp, hipMemcpyHostToDevice) == hipSuccess &&
             hipMemcpy(dx, &zero, 4, hipMemcpyHostToDevice) == hipSuccess &&
             hipMemcpy(dy, &zero, 4, hipMemcpyHostToDevice) == hipSuccess);
-      for (int32_t n : {24, 37, 64, 100, 128}) {
+      for (int32_t n : {1, 2, 5, 16, 24, 37, 64, 100, 128}) {
         CHECK(hipMemcpy(dc, &n, 4, hipMemcpyHostToDevice) == hipSuccess && hipMemset(yg, 0xff, (size_t) 128 * rows * 4) == hipSuccess);
         CHECK(mm_group(t->type, dw, dc, 1, (uint32_t) n, rows, cols, x16b, dx, cols, yg, dy, rows, nullptr));
         CHECK(host_of(yg, (size_t) n * rows) == std::vector<float>(yr.begin(), yr.begin() + (size_t) n * rows));
       }
+      {  // an entry of no tokens (a caller's table: NULL weights) beside the matrix: never read, the matrix's bits
+        const void** dw2;
+        int32_t* dc2;
+        uint32_t *dx2, *dy2;
+        CHECK(hipMalloc(&dw2, 2 * sizeof(void*)) == hipSuccess && hipMalloc(&dc2, 8) == hipSuccess &&
+              hipMalloc(&dx2, 8) == hipSuccess && hipMalloc(&dy2, 8) == hipSuccess);
+        const void* wp2[2] = {nullptr, w};
+        const uint32_t zeros[2] = {0, 0};
+        CHECK(hipMemcpy(dw2, wp2, sizeof wp2, hipMemcpyHostToDevice) == hipSuccess &&
+              hipMemcpy(dx2, zeros, 8, hipMemcpyHostToDevice) == hipSuccess &&
+              hipMemcpy(dy2, zeros, 8, hipMemcpyHostToDevice) == hipSuccess);
+        for (int32_t n : {1, 5}) {
+          const int32_t c2[2] = {0, n};
+          CHECK(hipMemcpy(dc2, c2, 8, hipMemcpyHostToDevice) == hipSuccess &&
+                hipMemset(yg, 0xff, (size_t) 128 * rows * 4) == hipSuccess);
+          CHECK(mm_group(t->type, dw2, dc2, 2, (uint32_t) n, rows, cols, x16b, dx2, cols, yg, dy2, rows, nullptr));
+          CHECK(hipDeviceSynchronize() == hipSuccess);
+          CHECK(host_of(yg, (size_t) n * rows) == std::vector<float>(yr.begin(), yr.begin() + (size_t) n * rows));
+        }
+        CHECK(hipFree(dw2) == hipSuccess && hipFree(dc2) == hipSuccess && hipFree(dx2) == hipSuccess &&
+              hipFree(dy2) == hipSuccess);
+      }
       CHECK(hipFree(dw) == hipSuccess && hipFree(dc) == hipSuccess && hipFree(dx) == hipSuccess &&
             hipFree(dy) == hipSuccess && hipFree(yg) == hipSuccess);
-      std::printf("  %s: mm_group at 24 / 37 / 64 / 100 / 128 tokens, mm_run's bits\n", s.tensor);
+      std::printf("  %s: mm_group at 1 / 2 / 5 / 16 / 24 / 37 / 64 / 100 / 128 tokens, mm_run's bits; an empty NULL "
+                  "entry beside it never read\n", s.tensor);
     }
     CHECK(hipFree(xb) == hipSuccess && hipFree(yb) == hipSuccess && hipFree(x16b) == hipSuccess);
   }
@@ -403,6 +439,18 @@ int main() {
     gguf_destroy(q);
   } else {
     std::printf("  Qwen3.8 UD-Q4_K_XL's shapes skipped: no %s\n", qpath);
+  }
+  for (const auto& m : {std::make_pair(kInk1, std::make_pair(kInk1Shapes, sizeof kInk1Shapes / sizeof *kInk1Shapes)),
+                        std::make_pair(kInk9, std::make_pair(kInk9Shapes, sizeof kInk9Shapes / sizeof *kInk9Shapes))}) {
+    std::snprintf(qpath, sizeof qpath, m.first, std::getenv("HOME") ? std::getenv("HOME") : "");
+    if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_create(qpath, err)) {
+      std::printf("  Inkling-2-Small's reference, %s:\n", std::strrchr(qpath, '/') + 1);
+      for (size_t i = 0; i < m.second.second; i++) shape(q, m.second.first[i]);
+      gguf_destroy(q);
+    } else {
+      std::printf("  Inkling-2-Small's reference (%s): not on this machine, its shapes not checked\n",
+                  std::strrchr(qpath, '/') + 1);
+    }
   }
   std::snprintf(qpath, sizeof qpath, kUdX2, std::getenv("HOME") ? std::getenv("HOME") : "");
   if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_create(qpath, err)) {

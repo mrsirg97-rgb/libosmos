@@ -4,7 +4,7 @@
 
 #include "multi.h"
 
-#define MAX_LANES 64
+#define MAX_LANES OSMOS_MAX_LANES
 
 typedef struct Entry
 {

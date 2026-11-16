@@ -2,9 +2,11 @@
 
 #include "chat_impl.h"
 #include "dialect.h"
+#include "osmos/text/chat_ink2.h"
 #include "osmos/text/chat_qwen.h"
 
-/* each family's chat: DeepSeek's encoding (osmos/text/chat.h), Qwen's template (osmos/text/chat_qwen.h) */
+/* each family's chat: DeepSeek's encoding (osmos/text/chat.h), Qwen's template (osmos/text/chat_qwen.h), Inkling's
+   (osmos/text/chat_ink2.h) */
 
 static bool ds_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
 {
@@ -52,11 +54,38 @@ static bool ds_drops(const Request *r)
 /* Qwen's template drops it unless preserve_thinking (the request's, on unless false) */
 static bool qwen_drops(const Request *r) { return r->mode == CHAT_THINKING && !r->preserve && past_user(r); }
 
+static bool ink2_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
+{
+  return ichat_render(r->messages, r->tools, r->effort_value, out, err);
+}
+
+static bool ink2_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
+                       char err[CHAT_ERR])
+{
+  (void)r;
+  return ichat_parse_shaped(text, shape, n, out, err);
+}
+
+/* Inkling's template keeps every turn's reasoning */
+static bool ink2_drops(const Request *r) { return (void)r, false; }
+
+static long ink2_header(const char *p, size_t n, DialectField *field)
+{
+  IchatBlock kind;
+  const long h = ichat_header(p, n, &kind);
+  *field = kind == ICHAT_BLOCK_THINKING ? DIALECT_REASONING : kind == ICHAT_BLOCK_TEXT ? DIALECT_CONTENT : DIALECT_DONE;
+  return h;
+}
+
 static const Dialect kDialects[] = {
     {"deepseek41", CHAT_EOS, CHAT_THINK_END, CHAT_CALLS_START, false, chat_refused, request_ds, ds_render, ds_parse,
-     ds_drops},
+     ds_drops, CHAT_THINK_END, NULL, NULL, NULL},
     {"qwen4exp", QCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, qchat_refused, request_qwen, qwen_render, qwen_parse,
-     qwen_drops},
+     qwen_drops, QCHAT_THINK_END, NULL, NULL, NULL},
+    /* Inkling's turn: blocks, the thinking optional (none at effort 0) - no answer-after (a block's end is every
+       block's: the rule would refuse a text block's end of turn) */
+    {"inkling2", ICHAT_EOS, ICHAT_END, ICHAT_CALL, false, ichat_refused, request_ink2, ink2_render, ink2_parse,
+     ink2_drops, NULL, ink2_header, ICHAT_END, ichat_loose},
 };
 
 const Dialect *dialect_of(const char *arch)

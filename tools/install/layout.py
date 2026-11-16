@@ -15,6 +15,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "convert"))
 import gguf_assemble  # noqa: E402  (tools/convert: a delta's set, made where it is installed)
 import overlay_q4x  # noqa: E402
+import manifest  # noqa: E402  (a derived file's delta parts: manifest.deltas)
 import stamp  # noqa: E402
 import userfiles  # noqa: E402
 
@@ -65,11 +66,13 @@ def _assemble(m, fid, models, have, trust_size, fetch, found):
     if sorted(sibs) != list(range(1, len(d["base"]) + 1)):
         raise LayoutError(f"{fid}: the set's files are not one for each of its base's shards")
     base = [_input(m, b, models, have, trust_size, fetch, found) for b in d["base"]]
-    delta, _ = _resolve(m, d["delta"], have, trust_size, fetch, found)
+    parts = manifest.deltas(d)
+    delta = [_resolve(m, p, have, trust_size, fetch, found)[0] for p in parts]
     outs = [os.path.join(models, "derived", m["files"][sibs[i]]["path"]) for i in range(1, len(base) + 1)]
-    print(f"  making {', '.join(sibs[i] for i in sorted(sibs))} from {len(base)} shards and {d['delta']}", flush=True)
+    print(f"  making {', '.join(sibs[i] for i in sorted(sibs))} from {len(base)} shards and {', '.join(parts)}",
+          flush=True)
     try:
-        gguf_assemble.assemble(base, outs, [delta], log=lambda msg: print(f"    {msg}", flush=True))
+        gguf_assemble.assemble(base, outs, delta, log=lambda msg: print(f"    {msg}", flush=True))
     except (SystemExit, AssertionError, OSError) as x:
         for o in outs:
             if os.path.lexists(o):
@@ -82,6 +85,8 @@ def _assemble(m, fid, models, have, trust_size, fetch, found):
                     os.remove(o2)
             raise LayoutError(f"{sibs[i]} ({m['files'][sibs[i]]['path']}): made, but not the pinned bytes and SHA-256 - "
                               "refused")
+    for i, o in zip(range(1, len(base) + 1), outs):
+        userfiles.stamp_made(o, m["files"][sibs[i]])
     return outs[d["shard"] - 1]
 
 
@@ -89,12 +94,14 @@ def _derive(m, fid, models, have, trust_size, fetch, found):
     """a derived file's path: the user's if they have it, else made from its inputs under <models>/derived/ - its
     bytes and SHA-256 the pinned ones, or refused with nothing of it left"""
     e = m["files"][fid]
-    p = (found or {}).get(fid) or (userfiles.find(e, have, False) if have else None)
+    p = (found or {}).get(fid) or (userfiles.find(e, have, False) if have else None)  # (never checked here: hashed)
     if p:
         return p
     d = e["derive"]
     out = os.path.join(models, "derived", e["path"])
-    if os.path.exists(out) and userfiles.matches(out, e):
+    # --trust-size: one made before was checked against its SHA-256 when made, and stamped; its bytes and a stamp of
+    # the pinned SHA-256 take it again (a stale recipe's stamp, or none: hashed)
+    if os.path.exists(out) and userfiles.made_matches(out, e, trust_size):
         return out
     os.makedirs(os.path.dirname(out), exist_ok=True)
     if d["with"] == "gguf_assemble":
@@ -109,6 +116,7 @@ def _derive(m, fid, models, have, trust_size, fetch, found):
     if not userfiles.matches(out, e):
         os.remove(out)
         raise LayoutError(f"{fid} ({e['path']}): made, but not the pinned bytes and SHA-256 - refused")
+    userfiles.stamp_made(out, e)
     return out
 
 

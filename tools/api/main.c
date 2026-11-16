@@ -196,7 +196,7 @@ int main(int argc, char **argv)
   api.d = arch && arch->type == GGUF_STRING ? dialect_of(arch->v.s) : NULL;
   api.tok = g && api.d ? tokenizer_create(g, err) : NULL;
   if (g && !api.d)
-    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp)", arch && arch->type == GGUF_STRING ? arch->v.s : "(none)");
+    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp, inkling2)", arch && arch->type == GGUF_STRING ? arch->v.s : "(none)");
   gguf_destroy(g);
   if (!api.tok)
     return die(err);
@@ -204,7 +204,7 @@ int main(int argc, char **argv)
   if (api.eos < 0)
     return snprintf(err, sizeof err, "the tokenizer has no %s", api.d->eos), die(err);
   char *args[CONFIG_ARGS_MAX]; /* osmos-serve's rule: no end before an answer past the dialect's think_end */
-  if (!config_argv(&c, opt(argc, argv, "--engine", engine), api.eos, api.d->think_end, args, err))
+  if (!config_argv(&c, opt(argc, argv, "--engine", engine), api.eos, api.d->answer_after, args, err))
     return die(err);
   char dport[16];
   snprintf(dport, sizeof dport, "%d", API_PORT);
