@@ -5,7 +5,9 @@
 // 48 DeltaNet, 16 attention, each its FFN), the matrices' share of the token's time at that rate. READ=1: a plain
 // read's GB/s on the same bytes (the ceiling: 244 at low-power); SWEEP=1 [SHAPE=i]: direct_kernel's R and U on shape i
 // against fp4_kernel's bits. measured, not kept: the blocks split at load (scales apart, the codes' 32-byte runs: two
-// uint4 loads a block) - 224 GB/s against 225 on gate / up, 205-211 against 210-213 on the long rows
+// uint4 loads a block) - 224 GB/s against 225 on gate / up, 205-211 against 210-213 on the long rows; x copied to the
+// workgroup's LDS once (every wave's reads from there) - 191-217 against 212-225 (its load and sync more than the L2
+// reads they save)
 // build: make fp4bench (or hipcc -O3 -Iinclude -Ikernels --offload-arch=gfx1151 tools/bench/fp4bench.hip)
 #include <hip/hip_runtime.h>
 
