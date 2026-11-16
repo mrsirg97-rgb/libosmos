@@ -18,6 +18,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/gpu/quant.h"
 #include "osmos/lsa.h"
 #include "osmos/model/qtype.h"
 #include "osmos/q35/forward.h"
@@ -30,7 +31,8 @@ struct Q35Forward
   const Q35Weights *w;
   uint32_t max_tokens, max_ctx;
   Q4xRope rope;
-  void **dev; /* the model's tensors, by index in its table */
+  void **dev;         /* the model's tensors, by index in its table */
+  uint32_t head_type; /* the LM head's type on the GPU: its file's, or Q8_0 (head_q8) */
   float *h, *xn, *out;
   float *qkv, *z, *al, *be, *g, *b, *cv, *qkn, *ro, *fo;
   float *qf, *kr, *vr, *q, *gt, *kq, *ao, *fa, *da; /* da: the decode attention's scratch */
@@ -79,16 +81,21 @@ static const void *dev(const Q35Forward *f, const GgufTensor *t)
 static const float *fv(const Q35Forward *f, const GgufTensor *t) { return (const float *)dev(f, t); }
 
 /* y = s W x over n tokens: the matmul where it tiles, else the matvec; the scale after (an NVFP4 matrix's own) */
+static bool mat_typed(Q35Forward *f, uint32_t type, const void *w, float s, uint32_t rows, uint32_t cols,
+                      const float *x, uint32_t n, float *y)
+{
+  if (type == QTYPE_NVFP4 && n <= 4 && cols % 64 == 0) /* a decode's: mv_fp4, the scale on its sums */
+    return mv_fp4(w, rows, cols, x, cols, n, y, rows, s, NULL);
+  const bool ok = mm_known(type) && mm_fits(type, rows, cols)
+                      ? mm_tokens(type, w, rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow,
+                                  false, NULL)
+                      : mv_strided(type, w, rows, cols, x, cols, n, y, rows, NULL);
+  return ok && (s == 1.0f || ops_scale(y, (uint64_t)n * rows, s, NULL));
+}
 static bool mat(Q35Forward *f, const GgufTensor *t, float s, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                 float *y)
 {
-  if (t->type == QTYPE_NVFP4 && n <= 4 && cols % 64 == 0) /* a decode's: mv_fp4, the scale on its sums */
-    return mv_fp4(dev(f, t), rows, cols, x, cols, n, y, rows, s, NULL);
-  const bool ok = mm_known(t->type) && mm_fits(t->type, rows, cols)
-                      ? mm_tokens(t->type, dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16,
-                                  f->overflow, false, NULL)
-                      : mv_strided(t->type, dev(f, t), rows, cols, x, cols, n, y, rows, NULL);
-  return ok && (s == 1.0f || ops_scale(y, (uint64_t)n * rows, s, NULL));
+  return mat_typed(f, t->type, dev(f, t), s, rows, cols, x, n, y);
 }
 
 static bool deltanet(Q35Forward *f, Q35Seq *s, int l, uint32_t n)
@@ -208,7 +215,7 @@ bool q35_step(Q35Forward *f, Q35Seq *s, const int32_t *tokens, uint32_t n, uint3
   }
   const float *last = f->h + (uint64_t)(n - rows) * D;
   ok = ok && ops_rms(last, D, D, fv(f, f->w->out_norm), g->rms_eps, rows, f->xn, D, NULL) &&
-       mat(f, f->w->output, f->w->s_output, V, D, f->xn, rows, f->logits) &&
+       mat_typed(f, f->head_type, dev(f, f->w->output), f->w->s_output, V, D, f->xn, rows, f->logits) &&
        hipMemcpyAsync(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost, NULL) == hipSuccess &&
        hipStreamSynchronize(NULL) == hipSuccess;
   int32_t over = 0;
@@ -316,6 +323,35 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_E
   return true;
 }
 
+/* the LM head (BF16 in the file: 2.54 GB a decode token reads) as Q8_0 on the GPU (ggml's quantizer, q4x_kv_put's:
+   a row's blocks of 32, d = amax / 127): 1.35 GB. Q35_HEAD=bf16 keeps the file's */
+static bool head_q8(Q35Forward *f, char *err)
+{
+  const GgufTensor *t = f->w->output;
+  const char *keep = getenv("Q35_HEAD");
+  if (t->type != QTYPE_BF16 || (keep && strcmp(keep, "bf16") == 0))
+    return true;
+  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd, chunk = 4096;
+  const uint64_t rb = q4x_kv_row_bytes(D);
+  void **slot = &f->dev[t - f->w->model->tensors];
+  void *q = NULL, *spare = NULL;
+  float *tmp = NULL;
+  bool ok = alloc(&q, (uint64_t)V * rb) && alloc(&spare, (uint64_t)chunk * rb) && alloc(&tmp, (uint64_t)chunk * D * F);
+  for (uint32_t r = 0; ok && r < V; r += chunk)
+  {
+    const uint32_t m = V - r < chunk ? V - r : chunk;
+    ok = quant_dequant(QTYPE_BF16, (const uint8_t *)*slot + (uint64_t)r * D * 2, (uint64_t)m * D, tmp, NULL) &&
+         q4x_kv_put(tmp, tmp, m, D, (uint8_t *)q + (uint64_t)r * rb, spare, NULL);
+  }
+  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  hipFree(spare), hipFree(tmp);
+  if (!ok)
+    return hipFree(q), fail(err, "the LM head's Q8_0 not made (GPU memory, or a launch)");
+  hipFree(*slot);
+  *slot = q, f->head_type = QTYPE_Q8_0;
+  return true;
+}
+
 Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_t max_ctx, char err[Q35_ERR])
 {
   if (!w || !max_tokens || max_tokens > max_ctx || max_ctx > OPS_Q4X_MAX_KEYS)
@@ -347,7 +383,8 @@ Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_
   bool ok = q4x_rope((uint32_t)g->rope_dim, g->rope_base, g->native_ctx, max_ctx, &f->rope) && upload(f, err);
   for (size_t i = 0; ok && i < sizeof want / sizeof *want; i++)
     ok = alloc(want[i].p, want[i].bytes) || fail(err, "GPU memory refused (a step's buffers)");
-  ok = ok && hipMemset(f->overflow, 0, 4) == hipSuccess &&
+  f->head_type = w->output->type;
+  ok = ok && head_q8(f, err) && hipMemset(f->overflow, 0, 4) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, n * g->n_vocab * F, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess;
   if (!ok)
