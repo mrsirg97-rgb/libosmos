@@ -1943,9 +1943,14 @@ attention's kernels (q4x_ops.h), which take a ring of states.
   DeltaNet / conv slots and the position (the attention rows below only grow), ~155 MB.
 
 **the step** (q35_step over runs): runs of several sequences, each its consecutive tokens; the matrices once for all
-runs' tokens (one matvec / matmul over the step's rows), each sequence's DeltaNet, conv, rotation, cache and
-attention on its own rows. a token's bits the same however the sequences share a step - the matrices' sums are a
-row's own (mv_fp4: a row's lanes, its warp's tree; mm: a token's column), the per-sequence ops a sequence's own.
+runs' tokens, each sequence's DeltaNet, conv, rotation, cache and attention on its own rows. two maths, as
+DeepSeek's (the engine's `read`): a prompt's matrices the matmul (WMMA over f16) at any size, a decode round's
+mv_fp4 in steps of 4 tokens at most - each a token's own bits however a step is split or shared (mv_fp4's sums a
+row's lanes and its warp's tree whatever its R / NT / U: fp4bench SWEEP=1's checks), so drafted rounds give plain
+decode's bits. measured (low-power, q35's NVFP4 shapes): mv_fp4 216 GB/s at a token; the matmul flat from 1 to 16
+tokens, 120-150 GB/s even with NVFP4's decode by permutes - decode on the matmul would be ~1.6x slower. the cost of
+mv_fp4: a drafted round of 9 tokens reads the weights 3 times (a multi-token mv_fp4, its bits the same, is the
+next kernel for drafting).
 
 **the engine** (hip_engine_q35.c, `qwen35` in families[]): q4x's adapter - every weight resident (no budget, picks or
 guess), batch / logits / greedy / prompt / rollback / reach / position / state / marks, identity. no drafter in this
