@@ -329,8 +329,8 @@ extern "C" bool mm_fp4_mo(const void* packed, const void* wscale, uint32_t rows,
 
 extern "C" bool mm_2b_grouped(const void* codes, const void* wscale, const float* gsw, uint32_t e, uint32_t lut,
                               uint32_t rows, uint32_t cols, const uint32_t* offsets, uint32_t* tile_start,
-                              const void* q, const void* sc, uint32_t n, float scale, uint32_t bf16, void* y,
-                              uint32_t ys, void* stream) {
+                              const void* q, const void* sc, uint32_t n, float scale, const float* scale_dev,
+                              uint32_t bf16, void* y, uint32_t ys, void* stream) {
   if (!mm_fp4_ok() || !codes || !wscale || !gsw || !e || !offsets || !tile_start || !q || !sc || !y || !n ||
       cols % 64 || rows % 8)
     return false;
@@ -339,7 +339,7 @@ extern "C" bool mm_2b_grouped(const void* codes, const void* wscale, const float
   // a grid of every tile there could be (each expert adds at most one partial tile): the ones past the list return
   const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM + e);
   mm_kernel<kTwoBit><<<grid, kTileThreads, 0, st>>>((const uint8_t*) codes, (const uint8_t*) wscale, rows, cols,
-                                                    (const uint8_t*) q, (const uint8_t*) sc, n, scale, nullptr,
+                                                    (const uint8_t*) q, (const uint8_t*) sc, n, scale, scale_dev,
                                                     bf16 != 0, y, ys, Experts{offsets, tile_start, gsw, e, lut});
   return launches::ok();
 }
