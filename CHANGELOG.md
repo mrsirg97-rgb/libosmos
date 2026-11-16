@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.9.0]: Qwen3.8-27B dense (vibes27b) - unreleased, in progress
+
+- **A fourth family: Qwen3.5 / 3.8's dense models** (`qwen35`: Huihui's Coder390, the operator's vibes27b): 64 layers -
+  48 Gated DeltaNet and 16 gated attention - each a dense SwiGLU, NVFP4 weights. served by osmos-serve (every weight
+  resident), checked against HF on the Halo: top-1 64 / 64 and KL 0.0011 at 64 tokens, 1990 / 2048 and KL 0.0176 at
+  2,048 (battlestation's 5090: the same).
+- **Its decode** (low-power; performance numbers to come): 3.1 -> 13.5 tok/s. NVFP4's matvec without its LDS stage and
+  E2M1 by permutes (42.6 -> 216 GB/s, 88-92% of the box's 244 GB/s read; every bit the old kernel's), the LM head Q8_0
+  on the GPU (2.54 GB a token read 1.35; KL +0.00003). measured and not kept: a fused residual add + norm (slower), a
+  fused gate / up / SwiGLU (no gain), x in LDS, the blocks split at load, an NVFP4 head (top-1 1989 -> 1940).
+- **Its sequence** for the engine: rollback (8 tokens), several sequences a step, state save / load and marks, the
+  kept rows' logits alone - each a token's bits however its step is split or shared (`test_q35_seq_gpu`). two maths,
+  as DeepSeek's: a prompt read on the matmul, a decode on the matvec.
+- **The prompt's matrices** 20% faster on any NVFP4 model: its f16 decode by permutes (`test_quant_gpu` now checks
+  NVFP4: gguf-py's values, bit for bit).
+- **The CUDA port** (battlestation's 5090, `make cuda`): rebased onto 0.8.0 and built for HIP; the codebook types'
+  one-tile kernel RDNA's alone (CUDA takes the general one), the IQ decoders on port.h's permutes. Inkling's prompt
+  attention is still RDNA's alone (to be ported: the CUDA build of it not checked here).
+- **Consolidation**: one shared Q8_0 block quantizer, sigmoid / silu / softplus once, the IQ1 / IQ2 decoders' picks
+  one function, the weights' upload one loop (q35 and Qwen), a saved sequence's mover one for Qwen, Inkling and q35
+  (their formats byte for byte as before). DeepSeek, Qwen and Inkling: every bit 0.8.0's (the GPU suite, Inkling's
+  rows both splits, Qwen's plain and MTP ids, DeepSeek's plain and drafted streams).
+
 ## [0.8.0]: Inkling-2-Small
 
 - **A third family: Thinking Machines' Inkling-2-Small** (`osmos-evo-inkling`, the new pack): 384 experts a layer, 8
