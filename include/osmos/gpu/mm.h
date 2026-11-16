@@ -19,6 +19,9 @@ bool mm_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const vo
 bool mm_tokens(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
                float *y1, uint32_t ys1, uint32_t cols, const float *x, uint32_t xs, uint32_t n, void *x16,
                int32_t *overflow, bool ready, void *stream);
+bool mm_tokens_scaled(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, float s0, const void *w1,
+                      uint32_t rows1, float *y1, uint32_t ys1, float s1, uint32_t cols, const float *x, uint32_t xs,
+                      uint32_t n, void *x16, int32_t *overflow, bool ready, void *stream);
 bool mm_run2(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
              float *y1, uint32_t ys1, uint32_t cols, const void *x16, uint32_t n, void *stream);
 #define MM_SILU_MAX_TOKENS 64 /* mm_run_silu's most tokens (past them, the gemm's counts) */
@@ -124,6 +127,9 @@ mm_tokens
   beside x) - taken as it is when n is within one x16, the conversion skipped. both families' dispatch (fwd_mat,
   q4x_mat). false as its calls'.
 
+mm_tokens_scaled
+  mm_tokens with each matrix's sums times its scale (s0, s1) as they are stored - a per-tensor scale (NVFP4's) without
+  a pass of its own: the bits of mm_tokens then ops_scale (one F32 multiply of the same sum); 1 the plain store.
 mm_col_tiles
   the column tiles a block of `type` takes for n tokens (mm_run's, and mm_group's for its max_cnt): a slab decoded
   once for that many tiles' WMMAs - more tiles, more registers and fewer waves to hide the decode. so a group's

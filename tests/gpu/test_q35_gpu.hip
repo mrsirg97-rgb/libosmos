@@ -91,11 +91,13 @@ int main() {
   const float* rl = (const float*) lb.data();
   double kl = 0, maxd = 0;
   uint32_t agree = 0;
+  FILE* dump = std::getenv("Q35_DUMP") ? std::fopen(std::getenv("Q35_DUMP"), "wb") : nullptr;  // the rows' bits, to compare
   for (uint32_t t0 = 0; t0 < T; t0 += chunk) {
     const uint32_t n = T - t0 < chunk ? T - t0 : chunk;
     t.row0 = t0;
     CHECK(q35_step(f, s, tok + t0, n, n, err) || (std::fprintf(stderr, "%s\n", err), false));
     const float* lo = q35_logits(f);
+    if (dump) CHECK(std::fwrite(lo, (size_t) V * 4, n, dump) == n);
     for (uint32_t i = 0; i < n; i++) {
       const float* a = rl + (size_t) (t0 + i) * V;
       const float* b = lo + (size_t) i * V;
@@ -116,6 +118,7 @@ int main() {
       kl += k, agree += ia == ib;
     }
   }
+  if (dump) std::fclose(dump);
   if (have_h)
     for (uint32_t l = 0; l < L; l += (l < 4 || l + 4 >= L) ? 1 : 8)
       std::printf("  layer %2u (%s): residual's relative error %.4f, cosine %.6f\n", l,

@@ -272,6 +272,7 @@ struct Mats {
   uint32_t rows[2];
   float* y[2];
   uint32_t ys[2];
+  float scale[2] = {1.0f, 1.0f};  // each matrix's sums times it (mm_tokens_scaled)
 };
 
 template <quant::Type T, int CT, typename S>
@@ -279,7 +280,7 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
   const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT), rows = m.rows[0] > m.rows[1] ? m.rows[0] : m.rows[1];
   mm::kernel<T, S, CT><<<dim3(rows / mm::kTile, m.w[1] ? 2 : 1, z), mm::kWave * S::kWaves, 0, s>>>(
       (const uint8_t*) m.w[0], (const uint8_t*) m.w[1], m.rows[0], m.rows[1], cols, (const _Float16*) x16, n, m.y[0],
-      m.y[1], m.ys[0], m.ys[1]);
+      m.y[1], m.ys[0], m.ys[1], m.scale[0], m.scale[1]);
   return hipGetLastError() == hipSuccess;
 }
 
@@ -289,7 +290,7 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
 // 2560 Q6_K at 2,048 tokens 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 (low-power; 64 x 128: 22.8, 32 x 256: 22.4,
 // 128 x 128: past the LDS; without the second slab's LDS 25.5)
 template <quant::Type T>
-constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0;
+constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4;
 constexpr int kGemmRm = 2, kGemmRn = 4, kGemmWr = 2, kGemmWc = 4;
 constexpr uint32_t kGemmMinTokens = 4 * mm::kTile;  // past it: CT 8's counts
 
@@ -308,7 +309,7 @@ bool launch_gemm(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipS
   mm::gemm_kernel<T, S, kGemmRm, kGemmRn, kGemmWr, kGemmWc>
       <<<dim3((rows + BM - 1) / BM, m.w[1] ? 2 : 1, (n + BN - 1) / BN), 256, 0, s>>>(
           (const uint8_t*) m.w[0], (const uint8_t*) m.w[1], m.rows[0], m.rows[1], cols, (const _Float16*) x16, n,
-          m.y[0], m.y[1], m.ys[0], m.ys[1]);
+          m.y[0], m.y[1], m.ys[0], m.ys[1], m.scale[0], m.scale[1]);
   return hipGetLastError() == hipSuccess;
 }
 
@@ -522,18 +523,28 @@ extern "C" bool mm_run2(uint32_t type, const void* w0, uint32_t rows0, float* y0
          run(type, Mats{{w0, w1}, {rows0, rows1}, {y0, y1}, {ys0, ys1}}, cols, x16, n, (hipStream_t) stream);
 }
 
-extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
-                          uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const float* x, uint32_t xs,
-                          uint32_t n, void* x16, int32_t* overflow, bool ready, void* stream) {
+extern "C" bool mm_tokens_scaled(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, float s0,
+                                 const void* w1, uint32_t rows1, float* y1, uint32_t ys1, float s1, uint32_t cols,
+                                 const float* x, uint32_t xs, uint32_t n, void* x16, int32_t* overflow, bool ready,
+                                 void* stream) {
+  if (!w0) return false;
   bool ok = true;
   for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS) {
     const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
+    Mats ms{{w0, w1}, {rows0, w1 ? rows1 : 0}, {y0 + (uint64_t) k0 * ys0, w1 ? y1 + (uint64_t) k0 * ys1 : nullptr},
+            {ys0, w1 ? ys1 : 0}};
+    ms.scale[0] = s0, ms.scale[1] = s1;
     ok = ((ready && n <= MM_MAX_TOKENS) || mm_x16(x + (uint64_t) k0 * xs, xs, m, cols, x16, overflow, stream)) &&
-         (w1 ? mm_run2(type, w0, rows0, y0 + (uint64_t) k0 * ys0, ys0, w1, rows1, y1 + (uint64_t) k0 * ys1, ys1, cols,
-                       x16, m, stream)
-             : mm_run(type, w0, rows0, cols, x16, m, y0 + (uint64_t) k0 * ys0, ys0, stream));
+         run(type, ms, cols, x16, m, (hipStream_t) stream);
   }
   return ok;
+}
+
+extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
+                          uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const float* x, uint32_t xs,
+                          uint32_t n, void* x16, int32_t* overflow, bool ready, void* stream) {
+  return mm_tokens_scaled(type, w0, rows0, y0, ys0, 1.0f, w1, rows1, y1, ys1, 1.0f, cols, x, xs, n, x16, overflow,
+                          ready, stream);
 }
 
 extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,

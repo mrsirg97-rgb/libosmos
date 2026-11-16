@@ -31,6 +31,7 @@ struct Q35Forward
   int32_t *ids, *argmax;    /* q35_greedy's ids (device, logit_rows) and its scratch */
   int32_t *tok, *pin_tok, *overflow;
   void *x16;
+  const float *x16_x; /* the activations x16 holds as f16 (the last matrix's, on the matmul), or NULL */
   q35_tap_fn tap;
   void *tap_arg;
   /* latent sparse attention (q35_forward_lsa): a layer's maps (device, LSA_IN x LSA_DIM: NULL off), the read's scratch,

@@ -111,7 +111,9 @@ constexpr int run_chunks() {
 // the store tile ends with (y's row r of token t); an epilogue's own instead: take(ct, j, t, s) for each of the
 // sums - its tile ct, its rows 2 j + half, token t (t >= n among them: the epilogue's to skip) - by the thread
 // of wave j % waves (a thread's own j every call, so it may keep state for them)
-struct StoreY {};
+struct StoreY {
+  float scale = 1.0f;  // y's sums times it (a tensor's own scale, NVFP4's: the multiply a separate pass's, its bits)
+};
 template <quant::Type T, class S, int CT, bool E = false, class Take = StoreY>
 __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __restrict__ w, uint32_t row0,
                                                            uint32_t cols, const _Float16* __restrict__ x16,
@@ -216,7 +218,7 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
           if (t < n) x16_put(ep.x16, t, row0 + osmos_acc_row(j), ep.cols, s, ep.overflow);
         }
         if constexpr (__is_same(Take, StoreY)) {
-          if (t < n) y[(uint64_t) t * ys + row0 + osmos_acc_row(j)] = s;
+          if (t < n) y[(uint64_t) t * ys + row0 + osmos_acc_row(j)] = s * take.scale;
         } else {
           take(ct, j, t, s);
         }
@@ -236,7 +238,7 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
                                                     uint32_t rows0, uint32_t rows1, uint32_t cols,
                                                     const _Float16* __restrict__ x16, uint32_t n,
                                                     float* __restrict__ y0, float* __restrict__ y1, uint32_t ys0,
-                                                    uint32_t ys1) {
+                                                    uint32_t ys1, float sc0, float sc1) {
   static_assert(WR * WC * kWave == 256, "8 waves");
   constexpr int SL = S::kSlab, G = SL / kTile, W = S::kWaves, BM = kTile * RM * WR, BN = kTile * RN * WC;
   constexpr int RL = SL + kPad, CPR = SL / quant::kChunk, CH = BM * CPR / 256;  // a thread's chunks a slab
@@ -245,6 +247,7 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
   const uint8_t* w = blockIdx.y ? w1 : w0;
   const uint32_t rows = blockIdx.y ? rows1 : rows0, ys = blockIdx.y ? ys1 : ys0;
   float* y = blockIdx.y ? y1 : y0;
+  const float sc = blockIdx.y ? sc1 : sc0;
   const uint32_t row0 = blockIdx.x * BM, c0 = blockIdx.z * BN;
   if (row0 >= rows) return;  // the whole block
   const int wave = threadIdx.x / kWave;
@@ -323,7 +326,7 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
       if (r >= rows) continue;
       for (int e = 0; e < 8; e++) {
         const uint32_t t = c0 + (wc * RN + j) * kTile + osmos_acc_col(e);
-        if (t < n) y[(uint64_t) t * ys + r + osmos_acc_row(e)] = run[i][j][e];
+        if (t < n) y[(uint64_t) t * ys + r + osmos_acc_row(e)] = run[i][j][e] * sc;
       }
     }
 }
@@ -590,12 +593,12 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel(const uint8_t* __rest
                                                             uint32_t rows1, uint32_t cols,
                                                             const _Float16* __restrict__ x16, uint32_t n,
                                                             float* __restrict__ y0, float* __restrict__ y1,
-                                                            uint32_t ys0, uint32_t ys1) {
+                                                            uint32_t ys0, uint32_t ys1, float sc0, float sc1) {
   __shared__ __attribute__((aligned(32))) _Float16 lds[S::kLdsHalves];
   const uint32_t row0 = blockIdx.x * kTile;
   if (row0 >= (blockIdx.y ? rows1 : rows0)) return;  // the whole block
   tile<T, S, CT>(blockIdx.y ? w1 : w0, row0, cols, x16, cols, blockIdx.z * kTile * CT, n, blockIdx.y ? y1 : y0,
-                 blockIdx.y ? ys1 : ys0, lds);
+                 blockIdx.y ? ys1 : ys0, lds, Silu{}, StoreY{blockIdx.y ? sc1 : sc0});
 }
 
 // one matrix with the silu epilogue (mm_run_silu)

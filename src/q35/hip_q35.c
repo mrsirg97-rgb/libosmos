@@ -48,9 +48,13 @@ typedef struct Run
 /* y = s W x over n tokens. read (a prompt's): the matmul where it tiles (any n), else the matvec; decode: an NVFP4
    matrix mv_fp4 in steps of Q35_MV_TOKENS tokens (its own sums: a token's bits whatever the step's size) */
 #define Q35_MV_TOKENS 4
+/* same: x the last matrix's x (an immediate neighbour reading the same activations) - its f16 in x16 already when
+   that matrix's went there (f->x16_x), the conversion skipped (mm_tokens' ready: the same bits) */
 static bool mat_typed(Q35Forward *f, uint32_t type, const void *w, float s, uint32_t rows, uint32_t cols,
-                      const float *x, uint32_t n, float *y, bool read)
+                      const float *x, uint32_t n, float *y, bool read, bool same)
 {
+  const bool ready = same && f->x16_x == x && n <= MM_MAX_TOKENS;
+  f->x16_x = NULL;
   if (!read && type == QTYPE_NVFP4 && cols % 64 == 0)
   {
     bool ok = true;
@@ -59,16 +63,23 @@ static bool mat_typed(Q35Forward *f, uint32_t type, const void *w, float s, uint
                   y + (uint64_t)t * rows, rows, s, NULL);
     return ok;
   }
-  const bool ok = mm_known(type) && mm_fits(type, rows, cols)
-                      ? mm_tokens(type, w, rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow,
-                                  false, NULL)
-                      : mv_strided(type, w, rows, cols, x, cols, n, y, rows, NULL);
-  return ok && (s == 1.0f || ops_scale(y, (uint64_t)n * rows, s, NULL));
+  if (mm_known(type) && mm_fits(type, rows, cols)) /* the scale in the store (mm_tokens_scaled: ops_scale's bits) */
+    return mm_tokens_scaled(type, w, rows, y, rows, s, NULL, 0, NULL, 0, 1.0f, cols, x, cols, n, f->x16, f->overflow,
+                            ready, NULL) &&
+           (f->x16_x = x, true);
+  return mv_strided(type, w, rows, cols, x, cols, n, y, rows, NULL) &&
+         (s == 1.0f || ops_scale(y, (uint64_t)n * rows, s, NULL));
 }
 static bool mat(Q35Forward *f, const GgufTensor *t, float s, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                 float *y, bool read)
 {
-  return mat_typed(f, t->type, dev(f, t), s, rows, cols, x, n, y, read);
+  return mat_typed(f, t->type, dev(f, t), s, rows, cols, x, n, y, read, false);
+}
+/* mat of the same x as the matrix before it */
+static bool mat_same(Q35Forward *f, const GgufTensor *t, float s, uint32_t rows, uint32_t cols, const float *x,
+                     uint32_t n, float *y, bool read)
+{
+  return mat_typed(f, t->type, dev(f, t), s, rows, cols, x, n, y, read, true);
 }
 
 static bool deltanet(Q35Forward *f, const Run *run, uint32_t runs, uint32_t n, int l, bool read)
@@ -80,7 +91,7 @@ static bool deltanet(Q35Forward *f, const Run *run, uint32_t runs, uint32_t n, i
   bool ok = mat(f, L->alpha, L->s_alpha, vh, D, f->xn, n, f->al, read) &&
             mat(f, L->beta, L->s_beta, vh, D, f->xn, n, f->be, read) &&
             q4x_ssm_gates(f->al, f->be, fv(f, L->dt), fv(f, L->a), n, vh, f->g, f->b, NULL) &&
-            mat(f, L->qkv, L->s_qkv, ch, D, f->xn, n, f->qkv, read) && mat(f, L->z, L->s_z, in, D, f->xn, n, f->z, read);
+            mat(f, L->qkv, L->s_qkv, ch, D, f->xn, n, f->qkv, read) && mat_same(f, L->z, L->s_z, in, D, f->xn, n, f->z, read);
   for (uint32_t r = 0; ok && r < runs; r++) /* a sequence's conv history and state its own, its tokens in order */
   {
     const uint64_t o = run[r].off;
@@ -168,8 +179,8 @@ static bool attention(Q35Forward *f, const Run *run, uint32_t runs, uint32_t n, 
   const uint32_t D = (uint32_t)g->n_embd, heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads;
   const uint32_t hd = (uint32_t)g->head_dim, q = heads * hd, kv = kvh * hd;
   const uint64_t row = q4x_kv_row_bytes(kv);
-  bool ok = mat(f, L->q, L->s_q, 2 * q, D, f->xn, n, f->qf, read) && mat(f, L->k, L->s_k, kv, D, f->xn, n, f->kr, read) &&
-            mat(f, L->v, L->s_v, kv, D, f->xn, n, f->vr, read);
+  bool ok = mat(f, L->q, L->s_q, 2 * q, D, f->xn, n, f->qf, read) && mat_same(f, L->k, L->s_k, kv, D, f->xn, n, f->kr, read) &&
+            mat_same(f, L->v, L->s_v, kv, D, f->xn, n, f->vr, read);
   for (uint32_t r = 0; ok && r < runs; r++) /* a sequence's rotation, cache and attention its own */
   {
     const uint64_t o = run[r].off;
@@ -192,7 +203,7 @@ static bool mlp(Q35Forward *f, int l, uint32_t n, bool read)
   const Q35Layer *L = &f->w->layer[l];
   const uint32_t D = (uint32_t)g->n_embd, ff = (uint32_t)g->n_ff;
   return mat(f, L->ffn_gate, L->s_ffn_gate, ff, D, f->xn, n, f->ga, read) &&
-         mat(f, L->ffn_up, L->s_ffn_up, ff, D, f->xn, n, f->up, read) &&
+         mat_same(f, L->ffn_up, L->s_ffn_up, ff, D, f->xn, n, f->up, read) &&
          ops_swiglu(f->ga, f->up, ff, INFINITY, NULL, n, f->y, NULL) &&
          mat(f, L->ffn_down, L->s_ffn_down, D, ff, f->y, n, f->out, read);
 }
@@ -259,7 +270,7 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
   }
   if (ok && kept)
     ok = ops_rms(f->hx, D, D, fv(f, f->w->out_norm), g->rms_eps, kept, f->xn, D, NULL) &&
-         mat_typed(f, f->head_type, dev(f, f->w->output), f->w->s_output, V, D, f->xn, kept, f->logits, read);
+         mat_typed(f, f->head_type, dev(f, f->w->output), f->w->s_output, V, D, f->xn, kept, f->logits, read, false);
   ok = ok && hipStreamSynchronize(NULL) == hipSuccess;
   int32_t over = 0;
   ok = ok && hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
