@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include "block.h"
 #include "launch.h"
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -17,8 +18,6 @@ namespace {
 
 constexpr int kHead = Q4X_HEAD_DIM, kLane = kHead / 32, kGMax = Q35_ATTN_GQA_MAX, kWarps = 4;
 static_assert(kLane == 8 && Q4X_KV_BLOCK % kLane == 0, "a lane's dims one load within one Q8_0 block");
-
-__device__ inline float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 
 // a lane's 8 values of a cache row's head kvh (c = kvh 256 + 8 lane): the block's scale times its int8s
 __device__ inline void row8(const uint8_t* cache, uint64_t row, uint64_t pos, uint32_t c, float* v) {

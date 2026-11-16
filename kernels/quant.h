@@ -394,14 +394,12 @@ __device__ inline h8 scaled_bytes_h(uint32_t w0, uint32_t w1, float d) {
   }
   return h;
 }
-// 2-aligned bytes as a word (IQ4_NL's 18-byte blocks: 16-bit loads alone)
-__device__ inline uint32_t ld32_2(const uint8_t* p) { return ld16(p) | ld16(p + 2) << 16; }
 
 template <> __device__ inline h8 decode_h<kIQ4_NL>(const uint8_t* b, int k) {
   const float d = f16(ld16(b));
   const uint8_t* qs = b + 2 + (k % 2) * kChunk;
   const uint32_t sh = 4 * (k / 2);
-  return scaled_bytes_h(iq4nl_bytes((ld32_2(qs) >> sh) & 0x0F0F0F0Fu), iq4nl_bytes((ld32_2(qs + 4) >> sh) & 0x0F0F0F0Fu), d);
+  return scaled_bytes_h(iq4nl_bytes((ld32(qs) >> sh) & 0x0F0F0F0Fu), iq4nl_bytes((ld32(qs + 4) >> sh) & 0x0F0F0F0Fu), d);
 }
 
 template <> __device__ inline h8 decode_h<kIQ4_XS>(const uint8_t* b, int k) {
@@ -534,7 +532,7 @@ __device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
     const float d = f16(ld16(b));
     uint32_t w[4];
     #pragma unroll
-    for (int i = 0; i < 4; i++) w[i] = ld32_2(b + 2 + 4 * i);
+    for (int i = 0; i < 4; i++) w[i] = ld32(b + 2 + 4 * i);
 #pragma unroll
     for (int i = 0; i < N; i++) {  // k even: chunk k + i's bytes w[2 (i % 2)] on, its nibble (k + i) / 2's
       const uint32_t sh = 4 * (uint32_t) ((k + i) / 2);
@@ -580,17 +578,21 @@ __device__ inline Iq1Halves iq1_halves(float dl, float delta) {
   return {(uint32_t) __builtin_bit_cast(uint16_t, hm) << 16,
           (uint32_t) __builtin_bit_cast(uint16_t, hz) | (uint32_t) __builtin_bit_cast(uint16_t, hp) << 16};
 }
-__device__ inline h8 iq1_pick(uint64_t grid, Iq1Halves v) {
+// a chunk's 8 f16s picked from the halves by permutes: each grid byte's value index as a byte offset 0, 2, 4 (IQ1's
+// grid bytes hold it in bits 0-1: << 1; IQ2's magnitude byte 8 / 25 / 43 in bits 4-5 after its sign: >> 3)
+template <bool IQ1> __device__ inline u4 grid_pick(uint64_t grid, Iq1Halves v) {
   u4 out;
   for (int w = 0; w < 2; w++) {
-    const uint32_t base = ((uint32_t) (grid >> (32 * w)) << 1) & 0x06060606u; /* the 4 values' byte offsets */
+    const uint32_t g = (uint32_t) (grid >> (32 * w));
+    const uint32_t base = (IQ1 ? g << 1 : g >> 3) & 0x06060606u; /* the 4 values' byte offsets */
     /* a pair's selector: its two offsets each twice (bytes 0, 0, 1, 1 of base), the high byte of each half +1 */
     const uint32_t sel0 = osmos_perm(0, base, 0x01010000u) | 0x01000100u;
     const uint32_t sel1 = osmos_perm(0, base, 0x03030202u) | 0x01000100u;
     out[2 * w] = osmos_perm(v.s0, v.s1, sel0), out[2 * w + 1] = osmos_perm(v.s0, v.s1, sel1);
   }
-  return __builtin_bit_cast(h8, out);
+  return out;
 }
+__device__ inline h8 iq1_pick(uint64_t grid, Iq1Halves v) { return __builtin_bit_cast(h8, grid_pick<true>(grid, v)); }
 __device__ inline h8 iq1_h(uint64_t grid, float dl, float delta) { return iq1_pick(grid, iq1_halves(dl, delta)); }
 
 // IQ1_S's 32-value group (4 chunks) from its fields - the block's d, the group's qh word h, its 4 qs bytes - each
@@ -603,25 +605,16 @@ __device__ inline void iq1s_group_h(uint32_t d, uint32_t h, uint32_t qs, h8* out
 }
 
 // the IQ2 grids' |values| are 8, 25 and 43 alone: a scale's three f16 products made once, a chunk's halves picked by
-// permutes (iq1_pick's, a byte's offset (c >> 3) & 6: 0 for 8, 2 for 25, 4 for 43) - each value the product's f16,
+// permutes (grid_pick's, a byte's offset (c >> 3) & 6: 0 for 8, 2 for 25, 4 for 43) - each value the product's f16,
 // grid_h's and iq2_h's bits (the product exact in F32: 16 bits by 6)
 __device__ inline Iq1Halves iq2_mags(float db) {
   float x = mul(db, 8.0f), y = mul(db, 25.0f), z = mul(db, 43.0f);
-  asm("" : "+v"(x), "+v"(y), "+v"(z));  // grid_h's: the product, then f16 - not a fused v_fma_mixlo_f16 (a -0's +0)
+  osmos_keep3(x, y, z);  // grid_h's: the product, then f16 - not a fused v_fma_mixlo_f16 (a -0's +0)
   const _Float16 a = (_Float16) x, b = (_Float16) y, c = (_Float16) z;
   return {(uint32_t) __builtin_bit_cast(uint16_t, c),
           (uint32_t) __builtin_bit_cast(uint16_t, a) | (uint32_t) __builtin_bit_cast(uint16_t, b) << 16};
 }
-__device__ inline u4 iq2_pick(uint64_t grid, Iq1Halves v) {
-  u4 out;
-  for (int w = 0; w < 2; w++) {
-    const uint32_t base = ((uint32_t) (grid >> (32 * w)) >> 3) & 0x06060606u;
-    const uint32_t sel0 = __builtin_amdgcn_perm(0, base, 0x01010000u) | 0x01000100u;
-    const uint32_t sel1 = __builtin_amdgcn_perm(0, base, 0x03030202u) | 0x01000100u;
-    out[2 * w] = __builtin_amdgcn_perm(v.s0, v.s1, sel0), out[2 * w + 1] = __builtin_amdgcn_perm(v.s0, v.s1, sel1);
-  }
-  return out;
-}
+__device__ inline u4 iq2_pick(uint64_t grid, Iq1Halves v) { return grid_pick<false>(grid, v); }
 
 // IQ2_XXS's group g from its fields - the block's d, the group's 8 bytes (4 grid indices, then aux: 4 7-bit signs
 // and the scale) - iq2_h's each chunk: |db|'s products, the signs' masks and db's sign one xor

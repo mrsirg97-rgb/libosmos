@@ -198,6 +198,7 @@ bool group_gemm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32
 // holds at once, each taking tiles until none are left (IQ1_S, a block a tile: 204 against 188 us; mmsweep ink2).
 // what a WGP holds: its VGPRs' blocks or its LDS's, the fewer - the LDS both CUs' (WGP mode; the runtime's figure,
 // and its occupancy call, one CU's 64 KB: 7 blocks a WGP, 211 us, against the 12 the VGPRs allow, 190 us)
+#if defined(__HIP__)  // mm.h's group_tile_kernel: RDNA's alone (kOneTile false on CUDA)
 template <quant::Type T, int W>
 uint32_t resident_blocks() {
   static const uint32_t n = [] {
@@ -231,6 +232,7 @@ bool group_one_tile(const void* const* w, const int32_t* cnt, uint32_t n_mat, ui
       (const uint8_t* const*) w, cnt, n_mat, rows, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
   return hipGetLastError() == hipSuccess;
 }
+#endif
 
 template <quant::Type T>
 bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
@@ -245,7 +247,9 @@ bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint
   const bool gemm = GroupPlan<T>::kGemm && rows % gemm_rows == 0 && cols / S::kSlab >= (uint32_t) S::kWaves;
   switch (col_tiles<T>(max_cnt)) {
     case 1:
+#if defined(__HIP__)
       if constexpr (mm::kOneTile<T>) return group_one_tile<T>(w, cnt, n_mat, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+#endif
       return group_ct<T, 1>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     case 2:
       if constexpr (GroupPlan<T>::kRm)

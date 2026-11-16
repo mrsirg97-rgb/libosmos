@@ -152,13 +152,8 @@ __device__ inline void raw_store(const Raw& w, _Float16* ks, _Float16* vt) {
 __global__ void kv_put_kernel(const float* x, uint32_t n_blocks, uint8_t* dst) {
   const uint32_t i = blockIdx.x * 256 + threadIdx.x;
   if (i >= n_blocks) return;
-  const float* v = x + (uint64_t) i * Q4X_KV_BLOCK;
-  float amax = 0.0f;
-  for (int j = 0; j < Q4X_KV_BLOCK; j++) amax = fmaxf(amax, fabsf(v[j]));
-  const float d = amax / 127.0f, id = d ? 1.0f / d : 0.0f;
   uint8_t* b = dst + (uint64_t) i * Q4X_KV_BLOCK_BYTES;
-  *(_Float16*) b = (_Float16) d;
-  for (int j = 0; j < Q4X_KV_BLOCK; j++) b[2 + j] = (uint8_t) (int8_t) roundf(v[j] * id);
+  *(_Float16*) b = (_Float16) q8_0_block<Q4X_KV_BLOCK>(x + (uint64_t) i * Q4X_KV_BLOCK, 1, b + 2);
 }
 
 __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const uint8_t* kc, const uint8_t* vc,

@@ -212,7 +212,7 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
         for (int v = 1; v < S::kWaves; v++) s += part[(v * 8 + j) * kWave + lane];
         if constexpr (E) {
           const float u = s * ep.scale;
-          s = u / (1.0f + expf(-u));
+          s = silu(u);
           if (t < n) x16_put(ep.x16, t, row0 + osmos_acc_row(j), ep.cols, s, ep.overflow);
         }
         if constexpr (__is_same(Take, StoreY)) {
@@ -675,8 +675,11 @@ __global__ __launch_bounds__(kWave* S::kWaves) void group_kernel(const uint8_t* 
 // column's sums read another's). a token's 8 experts (mmsweep ink2, low-power, Inkling-2's shapes): IQ1_S's gate 285
 // -> 190 us, IQ2_XXS's 222 -> 201, IQ2_S's down 251 -> 232-248; IQ3_XXS's down 250 -> 268-304 (its decode_hn runs of
 // a group already: not taken)
+// RDNA's alone (gfx11's buffer descriptors and WMMA's lane layout): on CUDA kOneTile is false and group_launch takes
+// group_ct's tiles
 template <quant::Type T>
-constexpr bool kOneTile = T == quant::kIQ1_S || T == quant::kIQ2_XXS || T == quant::kIQ2_S;
+constexpr bool kOneTile = !osmos_cuda && (T == quant::kIQ1_S || T == quant::kIQ2_XXS || T == quant::kIQ2_S);
+#if defined(__HIP__)
 constexpr int kHalfRow = 64 + kPad;  // a half slab's row in LDS
 // gfx11's raw buffer descriptor word 3 (32-bit data format, no swizzle: LLVM's and composable_kernel's for gfx11)
 constexpr int kBufWord3 = 0x31004000;
@@ -760,5 +763,6 @@ __global__ __launch_bounds__(kWave* W) void group_tile_kernel(const uint8_t* con
     __syncthreads();  // wave 0 done with the sums before the next tile's slabs
   }
 }
+#endif  // __HIP__
 
 }  // namespace mm
