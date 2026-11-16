@@ -129,20 +129,46 @@ __device__ inline uint32_t nibbles(uint32_t w, bool hi) {
 // a fragment's loads 9 words apart, every bank once
 constexpr int kBM = 128, kBN = 128, kRow = 9, kTileThreads = 256;
 
-// W ggml 40's blocks (GGML: the GGUF's), or ModelOpt's (packed [rows, cols/2] in k order, its E4M3 scales [rows,
-// cols/16] at ws: the training engine's train/fp4.py)
-template <bool GGML>
+// W's layouts: ggml 40's blocks (kGgml: the GGUF's); ModelOpt's (kModelOpt: packed [rows, cols/2] in k order, its E4M3
+// scales [rows, cols/16] at ws: the training engine's train/fp4.py); a MoE's routed experts at 2 bits (kTwoBit:
+// mm_2b_grouped's - codes [E, rows, cols/4], 4 a byte in k order, the lowest bits first, each one of the 4 values of
+// an E2M1-subset grid, expanded to its E2M1 nibble as staged; scales [E, rows, cols/16]; the tokens sorted by expert)
+enum WLayout { kGgml, kModelOpt, kTwoBit };
+
+// a MoE's grouping: E experts, expert e's tokens offsets[e] .. offsets[e + 1] (sorted by expert), the tile list's
+// starts (tile_start[e]: the token tiles of the experts before e; tile_start[E] all of them), a tensor scale an
+// expert (gsw), the grid (lut: code c's E2M1 nibble at bits 4c)
+struct Experts {
+  const uint32_t* offsets;
+  const uint32_t* tile_start;
+  const float* gsw;
+  uint32_t e, lut;
+};
+
+template <int W>
 __global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ ws,
                                                           uint32_t rows, uint32_t cols,
                                                           const uint8_t* __restrict__ aq,
                                                           const uint8_t* __restrict__ as, uint32_t n, float scale_host,
                                                           const float* __restrict__ scale_dev, bool bf16,
-                                                          void* __restrict__ y, uint32_t ys) {
-  const float scale = scale_dev ? scale_host * *scale_dev : scale_host;
+                                                          void* __restrict__ y, uint32_t ys, Experts ex) {
+  float scale = scale_dev ? scale_host * *scale_dev : scale_host;
   __shared__ uint32_t sa[kBM * kRow], sb[kBN * kRow];
   const uint32_t tid = threadIdx.x, lane = tid % 32, warp = tid / 32, g = lane / 4, q = lane % 4;
   const uint32_t wm = warp % 4, wn = warp / 4;  // the warp's 32 tokens, its 64 rows
-  const uint32_t t0 = blockIdx.y * kBM, r0 = blockIdx.x * kBN, nb = cols / 64;
+  const uint32_t r0 = blockIdx.x * kBN, nb = cols / 64;
+  uint32_t t0 = blockIdx.y * kBM;
+  if (W == kTwoBit) {   // this block's expert: the last whose tiles start at or before it (a tile past them all: none)
+    if (blockIdx.y >= ex.tile_start[ex.e]) return;
+    uint32_t lo = 0, hi = ex.e;
+    while (hi - lo > 1) {
+      const uint32_t mid = (lo + hi) / 2;
+      (ex.tile_start[mid] <= blockIdx.y ? lo : hi) = mid;
+    }
+    t0 = ex.offsets[lo] + (blockIdx.y - ex.tile_start[lo]) * kBM;
+    n = ex.offsets[lo + 1];   // (the expert's end: a token at or past it is another expert's)
+    w += (uint64_t) lo * rows * (cols / 4), ws += (uint64_t) lo * rows * (cols / 16), scale *= ex.gsw[lo];
+  }
   const uint64_t row_bytes = (uint64_t) nb * kBlockBytes;
   float d[2][8][4] = {};
   for (uint32_t kb = 0; kb < nb; kb++) {
@@ -155,12 +181,24 @@ __global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restr
       const uint32_t t = t0 + r < n ? t0 + r : n - 1;
       sa[r * kRow + 8] = *(const uint32_t*) (as + (uint64_t) t * (cols / 16) + (uint64_t) kb * 4);
     }
-    for (uint32_t i = tid; !GGML && i < kBN * 8; i += kTileThreads) {
+    for (uint32_t i = tid; W == kModelOpt && i < kBN * 8; i += kTileThreads) {
       const uint32_t r = i / 8, c = i % 8, row = r0 + r < rows ? r0 + r : rows - 1;
       sb[r * kRow + c] = *(const uint32_t*) (w + (uint64_t) row * (cols / 2) + (uint64_t) kb * 32 + 4 * c);
       if (c == 0) sb[r * kRow + 8] = *(const uint32_t*) (ws + (uint64_t) row * (cols / 16) + (uint64_t) kb * 4);
     }
-    for (uint32_t i = tid; GGML && i < kBN * 4; i += kTileThreads) {
+    for (uint32_t i = tid; W == kTwoBit && i < kBN * 4; i += kTileThreads) {   // a word of 16 codes: 2 of nibbles
+      const uint32_t r = i / 4, c = i % 4, row = r0 + r < rows ? r0 + r : rows - 1;
+      const uint32_t cw = *(const uint32_t*) (w + (uint64_t) row * (cols / 4) + (uint64_t) kb * 16 + 4 * c);
+      uint32_t lo = 0, hi = 0;
+#pragma unroll
+      for (int j = 0; j < 8; j++) {
+        lo |= (ex.lut >> (4 * ((cw >> (2 * j)) & 3u)) & 0xFu) << (4 * j);
+        hi |= (ex.lut >> (4 * ((cw >> (2 * j + 16)) & 3u)) & 0xFu) << (4 * j);
+      }
+      sb[r * kRow + 2 * c] = lo, sb[r * kRow + 2 * c + 1] = hi;
+      if (c == 0) sb[r * kRow + 8] = *(const uint32_t*) (ws + (uint64_t) row * (cols / 16) + (uint64_t) kb * 4);
+    }
+    for (uint32_t i = tid; W == kGgml && i < kBN * 4; i += kTileThreads) {
       const uint32_t r = i / 4, sub = i % 4, row = r0 + r < rows ? r0 + r : rows - 1;
       const uint8_t* blk = w + (uint64_t) row * row_bytes + (uint64_t) kb * kBlockBytes;
       const uint32_t* p = (const uint32_t*) (blk + 4 + 8 * sub);
@@ -218,6 +256,16 @@ __global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restr
       }
 }
 
+// the experts' token tiles, one thread: tile_start[e] the tiles before expert e, tile_start[E] all (kBM tokens a tile)
+__global__ void tiles_kernel(const uint32_t* __restrict__ offsets, uint32_t e, uint32_t* __restrict__ tile_start) {
+  uint32_t s = 0;
+  for (uint32_t i = 0; i < e; i++) {
+    tile_start[i] = s;
+    s += (offsets[i + 1] - offsets[i] + kBM - 1) / kBM;
+  }
+  tile_start[e] = s;
+}
+
 }  // namespace
 
 extern "C" bool mm_fp4_ok(void) {
@@ -262,9 +310,9 @@ extern "C" bool mm_fp4(const void* w, uint32_t rows, uint32_t cols, const void* 
                        float scale, float* y, uint32_t ys, void* stream) {
   if (!mm_fp4_ok() || !w || !q || !sc || !y || !n || cols % 64 || rows % 8) return false;
   const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM);
-  mm_kernel<true><<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) w, nullptr, rows, cols,
+  mm_kernel<kGgml><<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) w, nullptr, rows, cols,
                                                                    (const uint8_t*) q, (const uint8_t*) sc, n, scale,
-                                                                   nullptr, false, y, ys);
+                                                                   nullptr, false, y, ys, Experts{});
   return launches::ok();
 }
 
@@ -273,8 +321,25 @@ extern "C" bool mm_fp4_mo(const void* packed, const void* wscale, uint32_t rows,
                           uint32_t ys, void* stream) {
   if (!mm_fp4_ok() || !packed || !wscale || !q || !sc || !y || !n || cols % 64 || rows % 8) return false;
   const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM);
-  mm_kernel<false><<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) packed, (const uint8_t*) wscale,
+  mm_kernel<kModelOpt><<<grid, kTileThreads, 0, launches::st(stream)>>>((const uint8_t*) packed, (const uint8_t*) wscale,
                                                                     rows, cols, (const uint8_t*) q, (const uint8_t*) sc,
-                                                                    n, scale, scale_dev, bf16 != 0, y, ys);
+                                                                    n, scale, scale_dev, bf16 != 0, y, ys, Experts{});
+  return launches::ok();
+}
+
+extern "C" bool mm_2b_grouped(const void* codes, const void* wscale, const float* gsw, uint32_t e, uint32_t lut,
+                              uint32_t rows, uint32_t cols, const uint32_t* offsets, uint32_t* tile_start,
+                              const void* q, const void* sc, uint32_t n, float scale, uint32_t bf16, void* y,
+                              uint32_t ys, void* stream) {
+  if (!mm_fp4_ok() || !codes || !wscale || !gsw || !e || !offsets || !tile_start || !q || !sc || !y || !n ||
+      cols % 64 || rows % 8)
+    return false;
+  const hipStream_t st = launches::st(stream);
+  tiles_kernel<<<1, 1, 0, st>>>(offsets, e, tile_start);
+  // a grid of every tile there could be (each expert adds at most one partial tile): the ones past the list return
+  const dim3 grid((rows + kBN - 1) / kBN, (n + kBM - 1) / kBM + e);
+  mm_kernel<kTwoBit><<<grid, kTileThreads, 0, st>>>((const uint8_t*) codes, (const uint8_t*) wscale, rows, cols,
+                                                    (const uint8_t*) q, (const uint8_t*) sc, n, scale, nullptr,
+                                                    bf16 != 0, y, ys, Experts{offsets, tile_start, gsw, e, lut});
   return launches::ok();
 }
