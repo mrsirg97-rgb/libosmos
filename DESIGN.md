@@ -1912,6 +1912,51 @@ per full-attention layer, keys in blocks of 512 at their position; a block once 
   another sequence or a short file refused (the identity, as seq_load's).
 - the model: step 0's logits against HF's (Qwen3.8-27B, then -vibes); step 1's tail loss against night5's.
 
+## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
+
+the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,
+not for osmos-serve. what the engine's family table (src/run/engine_impl.h) asks of it, and how q35 answers -
+q4x's contracts (osmos/q4x/forward.h) wherever the shapes are the same, its code where it is not.
+
+**why not q4x's forward** (measured by reading it, 2026-11-16): q4x is not Qwen-Next's MoE on optional parts - its
+every layer and residual hyper-connected (hc streams: embed expands, mixers join, no plain RMSNorm + add), its
+attention always QSA's indexer, an n-gram (PLE) layer; its geometry and roles require all three, and its MTP head is
+hyper-connected too. q35 on it is ~800 lines of branches in the code whose Qwen-Next bits must not move, and none of
+its speed is q35's (hc, MoE). q35 keeps its forward; what both share is already shared - the DeltaNet's, conv's and
+attention's kernels (q4x_ops.h), which take a ring of states.
+
+**the sequence** (q35_seq_*): q4x's.
+- a ring of Q35_SLOTS = Q35_MAX_BACK + 1 states a DeltaNet layer (q4x_delta's and q4x_conv's `slots`, `cur`): a step of
+  n tokens leaves the state in slot (cur + n) % slots, the ones before it behind; `q35_seq_rollback(n)` a slot index
+  and the position back (the attention rows past it are never read again: a later step overwrites them). Q35_MAX_BACK
+  8, q4x's (a drafted round's tokens: OSMOS_MAX_BLOCK). a slot is 48 x 48 x 128^2 floats, 151 MB: 9 slots 1.36 GB a
+  sequence - a server's one or two sequences hold it; a reach of 0 after a load, as q4x's.
+- LSA: a block closes (its buckets made) as its 512th key lands; a rollback across a close would leave buckets of keys
+  no longer the sequence's. so the reach stops at the last close: `reach = min(back, position - 512 closed)` with LSA
+  on (a drafted round of 8 crosses a boundary once in 64 rounds; its rollback then refused, the server's re-read from
+  the mark - rare and correct).
+- `q35_seq_prompt(end)` / `q35_kept(row)`: the head run for rows at end - 1 and after (a prompt's last row a server
+  reads), q4x's rule; the head is 1.35 GB a row-set read, so a long prompt's step skips it.
+- save / load / mark: q4x's format (a header: format, identity, position, last tokens; the DeltaNet states and conv
+  histories of the current slot; the attention rows below the position; LSA's index vectors, centroids, buckets and
+  closed count; an FNV-1a of it all), its refusals (another identity, a short or damaged state). a mark: the current
+  DeltaNet / conv slots and the position (the attention rows below only grow), ~155 MB.
+
+**the step** (q35_step over runs): runs of several sequences, each its consecutive tokens; the matrices once for all
+runs' tokens (one matvec / matmul over the step's rows), each sequence's DeltaNet, conv, rotation, cache and
+attention on its own rows. a token's bits the same however the sequences share a step - the matrices' sums are a
+row's own (mv_fp4: a row's lanes, its warp's tree; mm: a token's column), the per-sequence ops a sequence's own.
+
+**the engine** (hip_engine_q35.c, `qwen35` in families[]): q4x's adapter - every weight resident (no budget, picks or
+guess), batch / logits / greedy / prompt / rollback / reach / position / state / marks, identity. no drafter in this
+step: `draft` NULL (osmos-serve then decodes plain). the MTP head (blk.64.nextn.*, dense, no hc - not q4x's) and the
+operator's DFlash drafter for q35 (DFlash2's protocol, q35's target geometry) are the next step.
+
+**tests first** (each seen to fail before its code): a sequence rolled back n <= reach then fed the same tokens gives
+every logit's bits again; save -> load into a new sequence -> the same next logits; two sequences in one step against
+each alone, the same bits; a rollback past the reach (and across an LSA close) refused, the sequence unchanged; a
+damaged or another model's state refused, the sequence empty.
+
 ## the tiers on battlestation: two 5090s, 96 GB, one NVMe (design, 2026-11-15)
 
 the 10M agent's first box is CUDA's, not the Halo's (above: one 110 GiB pool at ~256 GB/s). three memories, each a

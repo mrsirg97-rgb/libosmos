@@ -6,6 +6,7 @@
 
 #include "ink2_impl.h"
 #include "osmos/gpu/ink2_ops.h"
+#include "osmos/gpu/state_parts.h"
 #include "osmos/model/fnv.h"
 
 #define STATE_MAGIC 0x32474e494b4e49ull /* "INKLNG2" */
@@ -208,11 +209,7 @@ typedef struct Head
 
 /* a state's parts at position pos, in order: each layer's conv tails' last taps - 1, each sliding layer's window,
    each full layer's rows (mark: no full layer's) */
-typedef struct Part
-{
-  void *d; /* the tail's rows to read or write: its first */
-  uint64_t bytes;
-} Part;
+typedef StatePart Part; /* dev: the tail's rows to read or write, its first */
 
 #define MAX_PARTS (INK2_MAX_LAYERS * (INK2_CONVS + 2))
 
@@ -248,10 +245,7 @@ static int parts(const Ink2Seq *s, int32_t pos, bool mark, bool load, Part *p)
 static uint64_t bytes_at(const Ink2Seq *s, int32_t pos, bool mark)
 {
   Part p[MAX_PARTS];
-  uint64_t b = sizeof(Head) + sizeof(uint64_t);
-  for (int i = 0, n = parts(s, pos, mark, false, p); i < n; i++)
-    b += p[i].bytes;
-  return b;
+  return state_parts_bytes(sizeof(Head), p, parts(s, pos, mark, false, p));
 }
 
 /* after a load or mark at pos: every tail holds what it was given */
@@ -281,20 +275,9 @@ bool ink2_seq_save_to(const Ink2Seq *s, StateSink sink, void *ctx, char err[INK2
   if (hipDeviceSynchronize() != hipSuccess)
     return ink2_fail(err, "inkling2: a GPU call failed (the save)");
   const Head h = {STATE_MAGIC, ink2_identity(s->f), STATE_VERSION, s->pos};
-  uint8_t *bounce = malloc(STATE_CHUNK);
-  uint64_t sum = fnv(&h, sizeof h, FNV_SEED);
-  bool ok = bounce && sink(ctx, &h, sizeof h);
   Part p[MAX_PARTS];
-  for (int i = 0, n = parts(s, s->pos, false, false, p); ok && i < n; i++)
-    for (uint64_t at = 0; ok && at < p[i].bytes; at += STATE_CHUNK)
-    {
-      const uint64_t k = p[i].bytes - at < STATE_CHUNK ? p[i].bytes - at : STATE_CHUNK;
-      ok = hipMemcpy(bounce, (uint8_t *)p[i].d + at, k, hipMemcpyDeviceToHost) == hipSuccess && sink(ctx, bounce, k);
-      sum = fnv(bounce, k, sum);
-    }
-  ok = ok && sink(ctx, &sum, sizeof sum);
-  free(bounce);
-  return ok || ink2_fail(err, "inkling2: a GPU copy or the sink failed (the save)");
+  return !state_parts_save(&h, sizeof h, p, parts(s, s->pos, false, false, p), sink, ctx) ||
+         ink2_fail(err, "inkling2: a GPU copy or the sink failed (the save)");
 }
 
 bool ink2_seq_load_from(Ink2Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[INK2_FWD_ERR])
@@ -308,19 +291,8 @@ bool ink2_seq_load_from(Ink2Seq *s, uint64_t bytes, StateSource src, void *ctx, 
     return settle(s, 0, false), ink2_fail(err, "inkling2: a state of another format, model or build");
   if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || bytes != bytes_at(s, h.pos, false))
     return settle(s, 0, false), ink2_fail(err, "inkling2: a state past max_ctx, or not its position's size");
-  uint8_t *bounce = malloc(STATE_CHUNK);
-  uint64_t sum = fnv(&h, sizeof h, FNV_SEED), want = 0;
-  bool ok = bounce != NULL;
   Part p[MAX_PARTS];
-  for (int i = 0, n = parts(s, h.pos, false, true, p); ok && i < n; i++)
-    for (uint64_t at = 0; ok && at < p[i].bytes; at += STATE_CHUNK)
-    {
-      const uint64_t k = p[i].bytes - at < STATE_CHUNK ? p[i].bytes - at : STATE_CHUNK;
-      ok = src(ctx, bounce, k) && hipMemcpy((uint8_t *)p[i].d + at, bounce, k, hipMemcpyHostToDevice) == hipSuccess;
-      sum = fnv(bounce, k, sum);
-    }
-  ok = ok && src(ctx, &want, sizeof want) && want == sum;
-  free(bounce);
+  const bool ok = !state_parts_load(&h, sizeof h, p, parts(s, h.pos, false, true, p), src, ctx);
   settle(s, ok ? h.pos : 0, false);
   return ok || ink2_fail(err, "inkling2: a damaged state, or its source or a GPU copy failed (the load)");
 }
@@ -335,9 +307,11 @@ bool ink2_seq_mark_save(const Ink2Seq *s, void *out, uint64_t bytes, char err[IN
   uint8_t *o = out;
   memcpy(o, &h, sizeof h), o += sizeof h;
   Part p[MAX_PARTS];
-  for (int i = 0, n = parts(s, s->pos, true, false, p); i < n; o += p[i].bytes, i++)
-    if (p[i].bytes && hipMemcpy(o, p[i].d, p[i].bytes, hipMemcpyDeviceToHost) != hipSuccess)
-      return ink2_fail(err, "inkling2: a GPU copy failed (the mark)");
+  const int n = parts(s, s->pos, true, false, p);
+  if (state_parts_to_host(p, n, o))
+    return ink2_fail(err, "inkling2: a GPU copy failed (the mark)");
+  for (int i = 0; i < n; i++)
+    o += p[i].bytes;
   const uint64_t sum = fnv(out, (uint64_t)(o - (uint8_t *)out), FNV_SEED);
   memcpy(o, &sum, sizeof sum);
   return true;
@@ -360,11 +334,9 @@ bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[INK
     return ink2_fail(err, "inkling2: a damaged mark");
   if (hipDeviceSynchronize() != hipSuccess)
     return ink2_fail(err, "inkling2: a GPU call failed (the mark)");
-  const uint8_t *i8 = (const uint8_t *)in + sizeof h;
   Part p[MAX_PARTS];
-  for (int i = 0, n = parts(s, h.pos, true, true, p); i < n; i8 += p[i].bytes, i++)
-    if (p[i].bytes && hipMemcpy(p[i].d, i8, p[i].bytes, hipMemcpyHostToDevice) != hipSuccess)
-      return s->failed = true, ink2_fail(err, "inkling2: a GPU copy failed (the mark's load)");
+  if (state_parts_from_host(p, parts(s, h.pos, true, true, p), (const uint8_t *)in + sizeof h))
+    return s->failed = true, ink2_fail(err, "inkling2: a GPU copy failed (the mark's load)");
   /* a full layer's rows below the mark are the sequence's still: held the mark's position */
   const Ink2Geometry *g = &s->f->w->geo;
   for (int l = 0; l < g->n_layers; l++)
