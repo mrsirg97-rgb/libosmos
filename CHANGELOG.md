@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.1]: DeepSeek's drafted turns after a tool result
+
+- **A fix: a DeepSeek turn could fail with "forward: a position the last step did not tap".** A prompt read in more
+  than one sub-batch (pieces past 2,048 tokens) kept the drafter's taps of its last sub-batch alone; when that one was
+  shorter than the drafter's 128-token window - a piece of 2,049-2,175 tokens, 4,097-4,223, ... - seeding the drafter
+  asked for positions it did not hold, and the request failed. Agent loops met it most: a tool result continuing a
+  cached conversation (rig, osmos-evo-1017: a 2,125-token piece, sub-batches of 2,048 and 77). The taps now hold the
+  layer's last 2,048 rows, whichever sub-batches they are in. Present since sub-batched prompt reads met the drafter;
+  the answers' bits are untouched (the taps are a side read), and `test_drafter_gpu` checks a 2,125-token step seeded
+  across both sub-batches, its drafts the bits of the same prompt read as two steps.
+
 ## [0.9.0]: engine tuning
 
 - **The same models, the same bits.** DeepSeek, Qwen and Inkling give 0.8.0's every bit (the GPU suite, Inkling's
