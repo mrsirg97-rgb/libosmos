@@ -1950,7 +1950,9 @@ row's lanes and its warp's tree whatever its R / NT / U: fp4bench SWEEP=1's chec
 decode's bits. measured (low-power, q35's NVFP4 shapes): mv_fp4 216 GB/s at a token; the matmul flat from 1 to 16
 tokens, 120-150 GB/s even with NVFP4's decode by permutes - decode on the matmul would be ~1.6x slower. the cost of
 mv_fp4: a drafted round of 9 tokens reads the weights 3 times (a multi-token mv_fp4, its bits the same, is the
-next kernel for drafting).
+next kernel for drafting). since measured: a multi-token mv_fp4 does not scale (16 tokens 8x one's: x's traffic), and
+the matmul's one-tile NVFP4 path is now 156-206 GB/s at 1-16 tokens (below, "0.9.0: the kernels' tuning") - with a
+drafter, decode's rounds on the matmul alone (one math), a token ~1.18x the matvec's.
 
 **the engine** (hip_engine_q35.c, `qwen35` in families[]): q4x's adapter - every weight resident (no budget, picks or
 guess), batch / logits / greedy / prompt / rollback / reach / position / state / marks, identity. no drafter in this
@@ -1961,6 +1963,68 @@ operator's DFlash drafter for q35 (DFlash2's protocol, q35's target geometry) ar
 every logit's bits again; save -> load into a new sequence -> the same next logits; two sequences in one step against
 each alone, the same bits; a rollback past the reach (and across an LSA close) refused, the sequence unchanged; a
 damaged or another model's state refused, the sequence empty.
+
+## 0.9.0: the kernels' tuning (measured, 2026-11-16, performance unless marked)
+
+what the dense model taught, kept and not. every change below the same bits (q35's 2,048-token logits dumped at
+steps of 8, 16, 64, 100 and 2,048 and compared byte for byte; the gate: the GPU suite, Inkling's rows both splits,
+Qwen's and DeepSeek's ids and streams against 0.8.0's).
+
+**the tools.** rocprofv3's counters before any guess: SQ_WAIT_CNT_ANY / SQ_WAIT_INST_ANY / SQ_WAIT_BARRIER over
+SQ_WAVE_CYCLES (where a wave waits), GL2C_EA_RDREQ_DRAM against a matrix's bytes (a line fetched twice), and the
+compiler's -Rpass-analysis=kernel-resource-usage (VGPRs, spills, occupancy). the box's ceilings: a cold read 244 GB/s
+at both profiles (the profile moves compute clocks, not DRAM: decode's tok/s the same at low-power and performance),
+f16 WMMA 53 TFLOP/s at performance (8 independent chains a wave). two traps: __syncthreads() is a fence (it waits
+every load in flight - a prefetch across it is lost; __builtin_amdgcn_s_barrier() is the barrier alone), and a
+wave's memory waits are in order (a load used early waits on every load issued before it).
+
+**kept.**
+- NVFP4's matmul at one column tile (1-16 tokens: a drafter's verify rounds): a lane its row's 36-byte block whole
+  (a 64-value slab one block; the chunk at a time was a byte and four 16-bit loads a step, each waited), the next
+  slab's in flight: 155 -> 206 GB/s (gate / up), 145 -> 193 (qkv), 122 -> 164 (ssm_out), 143 -> 156 (down). down's
+  long rows (34 slabs a wave): a line's 3.5 blocks are 3-4 waves', the waves drift apart and a line is evicted before
+  its last reader (DRAM reads 1.6x its bytes) - its waves kept in step by a fence-free barrier every 4 slabs, past
+  16 slabs a wave: 156 -> 177 (the barrier on every row cost the rest 3-8%; the loop compiled twice, a runtime branch
+  in one cost 5-8%). a round of 8 tokens 127.6 -> 97 ms.
+- NVFP4's prompt matrices on gemm_kernel (Q6_K's and Q8_0's, the same bits as tile), the tensor's scale in the store
+  (mm_tokens_scaled: ops_scale's multiply of the same sum), q35's x16 shared by the matrices of one x. vibes27b's
+  2,048-token prompt 326 -> 446 tok/s at low-power, 515 at performance.
+- prompt attention (q4x_attn) without picks: a chunk whole for a group of 10 tokens read once for the group
+  (fa_whole_kernel, 8 waves, a wave a 16-row tile and half of O; 256 VGPRs and a 340-byte spill -> 230 and none),
+  each token's last chunk fa_kernel's: a 16K prompt 281 -> 343 tok/s at low-power, 400 at performance (QSA's picks,
+  Qwen, keep fa_kernel alone).
+
+**measured, not kept.**
+- the prompt gemm (35.5 TFLOP/s, 67% of WMMA's): bigger blocks (512 / 1,024 threads: -5-15%), other wave grids
+  (-14-45%), the weights touched two slabs ahead (level), x staged in LDS with the weights' loads apart from their
+  decode (-22%: the waits moved to LDS). without its decode at all it runs 43 (81%): a rewrite's ceiling ~+20%.
+- the one-tile NVFP4 path: two slabs in flight (level), 2 / 4 row tiles a wave sharing x (level / -15%: x's L2
+  traffic not the bound), its LDS sized to what it uses (-3-5%: more blocks a CU, more contention).
+- the codebook experts' one-tile kernel (IQ1_S / IQ2_XXS / IQ2_S, mmsweep ink2's 8 experts): the next slab's raw
+  words in flight (IQ1_S -7%: registers, so fewer blocks resident), IQ1_S's grid copied to LDS (-21%: LDS-bound
+  occupancy 7 -> 5 blocks a WGP). IQ2_S on group_kernel instead: +5-12% at performance, but the one-tile kernel won it
+  at low-power (its note) - left.
+
+**the families' dense parts** (each served pack's own types, fp4bench / qbench-style cold timings): Inkling's attention
+and head Q5_K, DeepSeek's attention Q5_K - both resident as Q5_KR (quant_repack_q5k: 16-row tiles a wave's loads
+contiguous), the matmul 196-231 GB/s, within ~5% of the matvec; DeepSeek's shared experts Q8_0 163-198. what is left
+there is small (attn_kv's 512 rows 76-97 GB/s, ~0.4 ms a token). the experts are the gap: Inkling's IQ1_S 94 GB/s,
+IQ2_XXS / IQ2_S 110-117, IQ3_XXS 140 at 1-8 tokens (~112 averaged by bytes: ~28 ms of an Inkling token, ~14 at the
+227 GB/s ceiling).
+
+**next: IQ1_SR, IQ1_S repacked for the one-tile step** (design). IQ1_S's slab is two memory trips in series - the
+weights' loads, then 8 grid lookups (global_load_b64) indexed by them - and its blocks are LDS-bound (7 a WGP against
+the VGPRs' 12: each lane decodes whole 32-value groups in a layout not WMMA's, so a half slab goes through LDS). a
+layout where a lane in WMMA's own layout (row l % 16, half l / 16: chunks 2g + half of a step) reads its slab's
+fields in one contiguous load - its 8 qs bytes, its 8 chunks' 3 grid bits, its 4 groups' scale and sign: 12 bytes a
+lane, and each row's d - is 400 bytes a tile's slab, IQ1_S's own size (pre-expanding the grid instead would remove
+the lookup at +40% bytes: refused). no LDS between decode and WMMA, occupancy the VGPRs' (the kernel's note: 7 ->
+12 blocks 211 -> 190 us). estimated (not measured) 94 -> 115-125 GB/s: ~2-2.5 ms an Inkling token, DeepSeek's 22 GB
+of IQ1_S experts too. unlike Q5_KR (dense, resident, repacked once at load) experts stream into the cache on demand
+and run on the CPU's path in the file's layout: the repack belongs to the fetch (a staged expert repacked on its way
+into the cache), the CPU path keeps the file's bytes, the cache's slot the repacked size (the same). tests first: a
+repacked expert's decode against IQ1_S's bit for bit (test_quant_gpu), mm_group on IQ1_SR against IQ1_S's at 1 / 2 /
+5 / 16 tokens, a streamed expert's bits against a resident one's.
 
 ## the tiers on battlestation: two 5090s, 96 GB, one NVMe (design, 2026-11-15)
 

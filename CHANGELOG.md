@@ -1,27 +1,29 @@
 # Changelog
 
-## [0.9.0]: Qwen3.8-27B dense (vibes27b) - unreleased, in progress
+## [0.9.0]: engine tuning
 
-- **A fourth family: Qwen3.5 / 3.8's dense models** (`qwen35`: Huihui's Coder390, the operator's vibes27b): 64 layers -
-  48 Gated DeltaNet and 16 gated attention - each a dense SwiGLU, NVFP4 weights. served by osmos-serve (every weight
-  resident), checked against HF on the Halo: top-1 64 / 64 and KL 0.0011 at 64 tokens, 1990 / 2048 and KL 0.0176 at
-  2,048 (battlestation's 5090: the same).
-- **Its decode** (low-power; performance numbers to come): 3.1 -> 13.5 tok/s. NVFP4's matvec without its LDS stage and
-  E2M1 by permutes (42.6 -> 216 GB/s, 88-92% of the box's 244 GB/s read; every bit the old kernel's), the LM head Q8_0
-  on the GPU (2.54 GB a token read 1.35; KL +0.00003). measured and not kept: a fused residual add + norm (slower), a
-  fused gate / up / SwiGLU (no gain), x in LDS, the blocks split at load, an NVFP4 head (top-1 1989 -> 1940).
-- **Its sequence** for the engine: rollback (8 tokens), several sequences a step, state save / load and marks, the
-  kept rows' logits alone - each a token's bits however its step is split or shared (`test_q35_seq_gpu`). two maths,
-  as DeepSeek's: a prompt read on the matmul, a decode on the matvec.
-- **The prompt's matrices** 20% faster on any NVFP4 model: its f16 decode by permutes (`test_quant_gpu` now checks
-  NVFP4: gguf-py's values, bit for bit).
-- **The CUDA port** (battlestation's 5090, `make cuda`): rebased onto 0.8.0 and built for HIP; the codebook types'
-  one-tile kernel RDNA's alone (CUDA takes the general one), the IQ decoders on port.h's permutes. Inkling's prompt
-  attention is still RDNA's alone (to be ported: the CUDA build of it not checked here).
-- **Consolidation**: one shared Q8_0 block quantizer, sigmoid / silu / softplus once, the IQ1 / IQ2 decoders' picks
-  one function, the weights' upload one loop (q35 and Qwen), a saved sequence's mover one for Qwen, Inkling and q35
-  (their formats byte for byte as before). DeepSeek, Qwen and Inkling: every bit 0.8.0's (the GPU suite, Inkling's
-  rows both splits, Qwen's plain and MTP ids, DeepSeek's plain and drafted streams).
+- **The same models, the same bits.** DeepSeek, Qwen and Inkling give 0.8.0's every bit (the GPU suite, Inkling's
+  rows both splits, Qwen's plain and MTP ids, DeepSeek's plain and drafted streams), and their speed is 0.8.0's
+  (`performance`: Qwen 613 / 29.2 / 41.1 tok/s prompt / plain / drafted against 604 / 28.9 / 40.9). 0.9.0's work is
+  the kernels and the code under them.
+- **NVFP4's kernels**: the matvec without its LDS stage and E2M1 by permutes (42.6 -> 216 GB/s, 88-92% of the box's
+  244 GB/s read), the matmul at 1-16 tokens a block's 36 bytes at once (120-155 -> 156-206 GB/s; long rows' waves
+  kept in step, so each line is read from DRAM once), the prompt's matrices on the gemm with the tensor's scale in
+  the store (+37%), and its f16 decode now checked against gguf-py bit for bit (`test_quant_gpu`).
+- **Prompt attention without picks** reads a chunk of keys once for a group of 10 tokens, not once a token (a 16K
+  prompt +22%); Qwen's QSA attention is unchanged.
+- **Consolidation**: one shared Q8_0 block quantizer, sigmoid / silu / softplus once, the IQ1 / IQ2 decoders' picks one
+  function, the weights' upload one loop, a saved sequence's mover one for Qwen, Inkling and the new family (each
+  format byte for byte as before), `mm_tokens_scaled` (a matrix's scale in its store).
+- **The CUDA port** (`make cuda`): built again on 0.8.0's code; the codebook types' one-tile kernel and Inkling's prompt
+  attention are RDNA's alone (CUDA takes the general kernels; Inkling's prompt attention on CUDA not yet checked).
+- **In the tree, not yet supported: Qwen3.5 / 3.8's dense models** (`qwen35`, NVFP4): a forward, its sequence
+  (rollback, several sequences a step, state and marks) and its engine adapter, checked against HF (KL 0.0011 at 64
+  tokens, 0.0176 at 2,048). No pack ships with 0.9.0; its numbers and its drafter come with its pack.
+- **Measured, not kept** (DESIGN.md, "0.9.0: the kernels' tuning"): rewrites of the prompt gemm (it runs at 67% of
+  the matrix cores' 53 TFLOP/s; the best of four structures slower), prefetch and LDS-resident codebooks for the
+  experts' one-token kernel (fewer blocks resident: slower). The experts' matmul (IQ1_S 94 GB/s) is the engine's
+  largest gap left; its repacked layout (IQ1_SR) is designed there for the next release.
 
 ## [0.8.0]: Inkling-2-Small
 
