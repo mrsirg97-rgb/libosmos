@@ -17,6 +17,9 @@
 #include <vector>
 
 #include "../../kernels/mv_fp4.hip"
+extern "C" {
+#include "osmos/gpu/mm.h"
+}
 
 constexpr uint64_t kPool = 2ull << 30;
 constexpr int kCalls = 100;
@@ -87,6 +90,34 @@ int main(int argc, char** argv) {
   }
   std::printf("a decode token's NVFP4 matrices: %.2f GB in %.1f ms (%.1f GB/s): %.1f tok/s on these alone\n",
               token_bytes / 1e9, token_us / 1e3, token_bytes / token_us / 1e3, 1e6 / token_us);
+  if (std::getenv("MM")) {  // the matmul (mm_tokens, WMMA over f16) on the same NVFP4 bytes: its time a step at n tokens
+    void* x16;
+    int32_t* over;
+    float* yy;
+    HIP(hipMalloc(&x16, (uint64_t) MM_MAX_TOKENS * 17408 * 2));
+    HIP(hipMalloc(&over, 4));
+    HIP(hipMalloc(&yy, 16ull * 17408 * 4));
+    float* xx;
+    HIP(hipMalloc(&xx, 16ull * 17408 * 4));
+    HIP(hipMemset(xx, 0, 16ull * 17408 * 4));
+    for (const Shape& s : {shapes[0], shapes[1], shapes[2], shapes[4]})
+      for (uint32_t nt : {1u, 2u, 4u, 8u, 16u}) {
+        const uint64_t bytes = (uint64_t) s.rows * (s.cols / 64) * 36, slots = kPool / bytes;
+        auto go = [&](uint8_t* w) {
+          return mm_tokens(40, w, s.rows, yy, s.rows, nullptr, 0, nullptr, 0, s.cols, xx, s.cols, nt, x16, over, false, nullptr);
+        };
+        if (!go(pool)) { std::printf("  mm refused %s at %u\n", s.name, nt); continue; }
+        for (int w = 0; w < 5; w++) go(pool + (w % slots) * bytes);
+        hipEventRecord(a);
+        for (int c = 0; c < kCalls; c++) go(pool + (uint64_t) (c % slots) * bytes);
+        hipEventRecord(b);
+        hipEventSynchronize(b);
+        float ms = 0;
+        hipEventElapsedTime(&ms, a, b);
+        const double us = 1000.0 * ms / kCalls;
+        std::printf("  mm %-12s %2u tokens %7.1f us  %6.1f GB/s\n", s.name, nt, us, bytes / us / 1e3);
+      }
+  }
   if (std::getenv("READ")) {  // the read's ceiling on one gate / up matrix's bytes, cold, at a few grid sizes
     const uint64_t bytes = 17408ull * 80 * 36, slots = kPool / bytes;
     for (uint32_t grid : {1024u, 2048u, 4096u, 8192u}) {
