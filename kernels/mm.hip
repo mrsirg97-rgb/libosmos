@@ -292,6 +292,11 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
 template <quant::Type T>
 constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4;
 constexpr int kGemmRm = 2, kGemmRn = 4, kGemmWr = 2, kGemmWc = 4;
+// a type's gemm blocks (kGemm*'s but where measured): its rows and tokens a wave in tiles, its waves' grid
+template <quant::Type T> struct GemmPlan { static constexpr int Rm = kGemmRm, Rn = kGemmRn, Wr = kGemmWr, Wc = kGemmWc; };
+#ifdef GEMM_NVFP4
+template <> struct GemmPlan<quant::kNVFP4> { static constexpr int Rm = GEMM_RM, Rn = GEMM_RN, Wr = GEMM_WR, Wc = GEMM_WC; };
+#endif
 constexpr uint32_t kGemmMinTokens = 4 * mm::kTile;  // past it: CT 8's counts
 
 template <quant::Type T>
@@ -304,9 +309,10 @@ bool gemm_takes(const Mats& m, uint32_t cols, uint32_t n) {
 template <quant::Type T>
 bool launch_gemm(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   using S = typename Tuned<T>::S;
-  constexpr uint32_t BM = mm::kTile * kGemmRm * kGemmWr, BN = mm::kTile * kGemmRn * kGemmWc;
+  using P = GemmPlan<T>;
+  constexpr uint32_t BM = mm::kTile * P::Rm * P::Wr, BN = mm::kTile * P::Rn * P::Wc;
   const uint32_t rows = m.rows[0] > m.rows[1] ? m.rows[0] : m.rows[1];
-  mm::gemm_kernel<T, S, kGemmRm, kGemmRn, kGemmWr, kGemmWc>
+  mm::gemm_kernel<T, S, P::Rm, P::Rn, P::Wr, P::Wc>
       <<<dim3((rows + BM - 1) / BM, m.w[1] ? 2 : 1, (n + BN - 1) / BN), 256, 0, s>>>(
           (const uint8_t*) m.w[0], (const uint8_t*) m.w[1], m.rows[0], m.rows[1], cols, (const _Float16*) x16, n,
           m.y[0], m.y[1], m.ys[0], m.ys[1], m.scale[0], m.scale[1]);
