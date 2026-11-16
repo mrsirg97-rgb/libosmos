@@ -56,6 +56,15 @@ bool mm_fp4_quant(const void *x, uint32_t bf16, uint32_t xs, uint32_t n, uint32_
                   uint32_t sr_seed, void *q, void *sc, void *stream);
 /* a BF16 tensor's NVFP4 tensor scale (amax / 6 / 448) into *gs on the device (bits: a word of scratch) */
 bool mm_fp4_amax(const void *x_bf16, uint64_t n, uint32_t *bits, float *gs, void *stream);
+/* a MoE's routed experts at 2 bits times NVFP4 activations (W2A4): expert e's codes [rows, cols/4] (4 a byte in k
+   order, the lowest bits first: one of the 4 values of an E2M1-subset grid, lut holding code c's E2M1 nibble at bits
+   4c), its UE4M3 scales [rows, cols/16] and tensor scale gsw[e] (the experts' back to back: codes [E, rows, cols/4],
+   wscale [E, rows, cols/16]); the n tokens sorted by expert, expert e's offsets[e] .. offsets[e + 1] (on the device:
+   no host sync), q / sc their mm_fp4_quant. y [n, ys] the sums times scale * gsw[e], F32 or (bf16) BF16. tile_start
+   E + 1 words of device scratch */
+bool mm_2b_grouped(const void *codes, const void *wscale, const float *gsw, uint32_t e, uint32_t lut, uint32_t rows,
+                   uint32_t cols, const uint32_t *offsets, uint32_t *tile_start, const void *q, const void *sc,
+                   uint32_t n, float scale, uint32_t bf16, void *y, uint32_t ys, void *stream);
 #ifdef __cplusplus
 }
 #endif
