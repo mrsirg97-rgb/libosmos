@@ -156,9 +156,15 @@ __global__ void kv_put_kernel(const float* x, uint32_t n_blocks, uint8_t* dst) {
   *(_Float16*) b = (_Float16) q8_0_block<Q4X_KV_BLOCK>(x + (uint64_t) i * Q4X_KV_BLOCK, 1, b + 2);
 }
 
+// whole-chunk groups (fa_whole_kernel): a group of tt consecutive tokens shares the chunks whole for its first - those
+// fa_whole_kernel's, the rest a token's own here (tt 0: every chunk here)
+__device__ inline uint32_t whole_chunks(uint32_t pos0, uint32_t t, uint32_t tt) {
+  return tt ? (pos0 + t / tt * tt + 1) / kChunk : 0;
+}
+
 __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const uint8_t* kc, const uint8_t* vc,
                                                          uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-                                                         uint32_t pos0, Q4xPick pk, float* ml, float* po) {
+                                                         uint32_t pos0, Q4xPick pk, uint32_t tt, float* ml, float* po) {
   __shared__ __attribute__((aligned(32))) _Float16 qs[kTile * kRowLds], ks[kTile * kRowLds], vt[kHead * kKeyLds];
   __shared__ __attribute__((aligned(32))) _Float16 ps[kWaves][kTile * kKeyLds];
   const uint32_t G = heads / kv_heads, t = blockIdx.x, kvh = blockIdx.y, chunk = blockIdx.z;
@@ -167,6 +173,7 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
   const Keys keys = keys_of(pk, t, pos0 + t);  // the token's key list: its entries in chunks
   const uint32_t k0 = chunk * kChunk;
   if (k0 >= keys.len) return;  // a chunk past the token's list: it reads no scratch of it
+  if (chunk < whole_chunks(pos0, t, tt)) return;  // its group's, fa_whole_kernel's
   const uint32_t k1 = k0 + kChunk < keys.len ? k0 + kChunk : keys.len;
   for (uint32_t i = threadIdx.x; i < kTile * kHead; i += kWaves * 32) {  // Q, f16 (rows past G zero)
     const uint32_t r = i / kHead, d = i % kHead;
@@ -236,6 +243,92 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
 #pragma unroll
     for (int nt = 0; nt < kHead / kTile / kWaves; nt++)
       po[(base + R) * kHead + (wave * (kHead / kTile / kWaves) + nt) * kTile + osmos_acc_col(j)] = o[nt][j];
+  }
+}
+
+// a chunk whole for every token of a group (dense keys: no picks) - tt consecutive tokens' rows (t G + r: up to
+// kWholeWaves x 16), a wave a 16-row tile and all of O's columns: the chunk's K and V read once for the group, not a
+// token at a time. each row's sums fa_kernel's: its keys all the chunk's (none masked, none zeroed), the same WMMAs
+// in the same order, the same softmax (a WMMA's row its own: the tile's other rows another token's, or zeros, change
+// none of its bits - test_q35_gpu's dump, steps of 64 against 2,048), its partials at the same (chunk, kvh, row)
+constexpr int kWholeWaves = 4;
+__global__ __launch_bounds__(kWholeWaves * 32) void fa_whole_kernel(const float* q, const uint8_t* kc,
+                                                                    const uint8_t* vc, uint32_t n_tok, uint32_t heads,
+                                                                    uint32_t kv_heads, uint32_t pos0, uint32_t tt,
+                                                                    float* ml, float* po) {
+  __shared__ __attribute__((aligned(32))) _Float16 qs[kWholeWaves * kTile * kRowLds], ks[kTile * kRowLds],
+      vt[kHead * kKeyLds];
+  __shared__ __attribute__((aligned(32))) _Float16 ps[kWholeWaves][kTile * kKeyLds];
+  const uint32_t G = heads / kv_heads, t0 = blockIdx.x * tt, kvh = blockIdx.y, chunk = blockIdx.z;
+  const uint32_t wave = threadIdx.x / 32, nt = n_tok - t0 < tt ? n_tok - t0 : tt;
+  if (chunk >= whole_chunks(pos0, t0, tt)) return;  // not whole for the group: its tokens' own (fa_kernel)
+  const uint64_t row = (uint64_t) kv_heads * kHead / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
+  const Keys keys{nullptr, 1, 0, 0, pos0 + t0 + 1};
+  const uint32_t k0 = chunk * kChunk, k1 = k0 + kChunk;
+  for (uint32_t i = threadIdx.x; i < kWholeWaves * kTile * kHead; i += kWholeWaves * 32) {
+    const uint32_t r = i / kHead, d = i % kHead, tl = r / G;
+    qs[r * kRowLds + d] = (_Float16) (tl < nt ? q[((uint64_t) (t0 + tl) * heads + kvh * G + r % G) * kHead + d] : 0.0f);
+  }
+  int32_t lim[osmos_slots];
+  float m[osmos_slots], l[osmos_slots];
+  for (int r = 0; r < osmos_slots; r++)
+    lim[r] = wave * kTile + (uint32_t) osmos_slot_row(r) < nt * G ? (int32_t) keys.len - 1 : -1, m[r] = -INFINITY,
+    l[r] = 0.0f;
+  f8 o[kHead / kTile] = {};
+  Raw raw;
+  raw_fetch(raw, kc, vc, row, kvh, keys, k0, k1);
+  const _Float16* qw = qs + wave * kTile * kRowLds;
+  for (uint32_t kb = k0; kb < k1; kb += kTile) {
+    __syncthreads();
+    raw_store(raw, ks, vt);
+    __syncthreads();
+    if (kb + kTile < k1) raw_fetch(raw, kc, vc, row, kvh, keys, kb + kTile, k1);
+    f8 sacc = {};
+    for (int g = 0; g < kHead / kTile; g++)
+      sacc = osmos_mma(osmos_load_a(qw + g * kTile, kRowLds), osmos_load_b_s(ks + g * kTile, kRowLds), sacc);
+    float sv[8], alpha[osmos_slots];
+#pragma unroll
+    for (int j = 0; j < 8; j++) {
+      const int32_t key = (int32_t) (kb + osmos_acc_col(j));
+      sv[j] = key <= lim[osmos_slot(j)] ? sacc[j] * (1.0f / 16.0f) : -INFINITY;
+    }
+#pragma unroll
+    for (int r = 0; r < osmos_slots; r++) {
+      float mx = -INFINITY;
+#pragma unroll
+      for (int j = 0; j < 8; j++)
+        if (osmos_slot(j) == r) mx = fmaxf(mx, sv[j]);
+      const float mn = fmaxf(m[r], osmos_row_max(mx));
+      float sum = 0.0f;
+#pragma unroll
+      for (int j = 0; j < 8; j++)
+        if (osmos_slot(j) == r) {
+          const float pv = mn == -INFINITY ? 0.0f : expf(sv[j] - mn);
+          sum += pv;
+          ps[wave][osmos_acc_row(j) * kKeyLds + osmos_acc_col(j)] = (_Float16) pv;
+        }
+      alpha[r] = mn == -INFINITY ? 1.0f : expf(m[r] - mn);
+      l[r] = l[r] * alpha[r] + osmos_row_sum(sum), m[r] = mn;
+    }
+    osmos_wave_barrier();
+    const osmos_fa pa = osmos_load_a(ps[wave], kKeyLds);
+#pragma unroll
+    for (int c = 0; c < kHead / kTile; c++) {
+#pragma unroll
+      for (int j = 0; j < 8; j++) o[c][j] *= alpha[osmos_slot(j)];
+      o[c] = osmos_mma(pa, osmos_load_b_s(vt + c * kTile * kKeyLds, kKeyLds), o[c]);
+    }
+    osmos_wave_barrier();
+  }
+  const uint64_t base = ((uint64_t) chunk * kv_heads + kvh) * n_tok * G;
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    const uint32_t r = wave * kTile + osmos_acc_row(j), R = t0 * G + r;
+    if (r >= nt * G) continue;
+    if (osmos_acc_col(j) == 0)
+      ml[(base + R) * 2] = m[osmos_slot(j)], ml[(base + R) * 2 + 1] = l[osmos_slot(j)];
+#pragma unroll
+    for (int c = 0; c < kHead / kTile; c++) po[(base + R) * kHead + c * kTile + osmos_acc_col(j)] = o[c][j];
   }
 }
 
@@ -332,8 +425,15 @@ extern "C" bool q4x_attn(const float* q, const void* kc, const void* vc, uint32_
     if (pick) ppk.sel = pk.sel + (uint64_t) t0 * pk.blocks, ppk.npick = pk.npick + t0;
     float *ml = scratch, *po = scratch + (uint64_t) 2 * chunks * kv_heads * rows;
     const uint64_t at = (uint64_t) t0 * heads * kHead;
+    // dense keys: the chunks whole for a group's first token the group's (fa_whole_kernel), its tokens' rest their own
+    const uint32_t tt = pick ? 0 : kWholeWaves * kTile / (heads / kv_heads);
+    if (tt && (p0 + n) / kChunk) {  // some group's first token past a whole chunk (fa_kernel skips them all the same)
+      fa_whole_kernel<<<dim3((n + tt - 1) / tt, kv_heads, (p0 + n) / kChunk), kWholeWaves * 32, 0, st(stream)>>>(
+          q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, tt, ml, po);
+      if (!ok()) return false;
+    }
     fa_kernel<<<dim3(n, kv_heads, chunks), kWaves * 32, 0, st(stream)>>>(
-        q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, ppk, ml, po);
+        q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, ppk, tt, ml, po);
     if (!ok()) return false;
     fa_merge_kernel<<<n * heads, kHead, 0, st(stream)>>>(ml, po, gate + at, n, heads, kv_heads, p0, ppk, t0,
                                                           out + at, side_of(side));
