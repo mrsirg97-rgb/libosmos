@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "block.h"
+#include "launch.h"
 
 extern "C" {
 #include "osmos/gpu/ink2_ops.h"
@@ -14,10 +15,10 @@ extern "C" {
 
 namespace {
 
-constexpr uint32_t kThreads = 256;
-inline uint32_t grid(uint64_t n) { return (uint32_t) ((n + kThreads - 1) / kThreads); }
-inline hipStream_t st(void* s) { return (hipStream_t) s; }
-inline bool ok() { return hipGetLastError() == hipSuccess; }
+using launches::grid;
+using launches::kThreads;
+using launches::ok;
+using launches::st;
 
 __global__ void mix_kernel(const float* taps, uint32_t n_taps, const float* alpha, uint64_t n, uint32_t dim, float* out) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
@@ -159,7 +160,7 @@ __global__ void markov_gru_kernel(const float* p, const float* inv, const float*
                                   float* latent) {
   const uint32_t i = threadIdx.x + blockIdx.x * kThreads;
   if (i >= rank) return;
-  const float g = 1.0f / (1.0f + expf(-(p[i] + inv[i] + bias[i])));
+  const float g = sigmoid(p[i] + inv[i] + bias[i]);
   const float c = p[rank + i] + inv[rank + i] + bias[rank + i], o = p[2 * rank + i] + inv[2 * rank + i] + bias[2 * rank + i];
   state[i] = g * state[i] + (1.0f - g) * tanhf(c);
   latent[i] = tanhf(o);
@@ -216,13 +217,9 @@ __global__ void transpose_q8_0_kernel(const float* in, uint32_t rows, uint32_t c
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x, blocks = rows / kQ8;
   if (i >= blocks * cols) return;
   const uint32_t c = (uint32_t) (i / blocks), r0 = (uint32_t) (i % blocks) * kQ8;
-  float v[kQ8], amax = 0.0f;
-  for (uint32_t k = 0; k < kQ8; k++) v[k] = in[(uint64_t) (r0 + k) * cols + c], amax = fmaxf(amax, fabsf(v[k]));
-  const float d = amax / 127.0f, id = d ? 1.0f / d : 0.0f;
   uint8_t* b = out + i * kQ8Bytes;
-  const _Float16 dh = (_Float16) d;
+  const _Float16 dh = (_Float16) q8_0_block<kQ8>(in + (uint64_t) r0 * cols + c, cols, b + 2);
   __builtin_memcpy(b, &dh, 2);
-  for (uint32_t k = 0; k < kQ8; k++) b[2 + k] = (uint8_t) (int8_t) roundf(v[k] * id);
 }
 
 }  // namespace

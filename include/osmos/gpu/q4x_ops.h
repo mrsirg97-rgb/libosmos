@@ -42,6 +42,8 @@ bool q4x_delta(const float *qkv, const float *g, const float *b, uint32_t n_tok,
                uint32_t dim, float eps, float *qk, float *ring, uint32_t slots, uint32_t cur, float *out, void *stream);
 bool q4x_gated_norm(const float *x, const float *w, const float *z, uint32_t n_tok, uint32_t heads, uint32_t dim,
                     float eps, float *y, const Q4xX16 *side, void *stream);
+bool q4x_gated_norm_silu(const float *x, const float *w, const float *z, uint32_t n_tok, uint32_t heads, uint32_t dim,
+                         float eps, float *y, const Q4xX16 *side, void *stream); /* Qwen3.5's gate: z sigmoid(z) */
 
 bool q4x_top(const float *logits, uint32_t n, uint32_t rows, uint32_t stride, int32_t *id, float *p, void *stream);
 bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint32_t dim, float *out, void *stream);

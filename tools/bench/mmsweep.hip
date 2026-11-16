@@ -84,7 +84,7 @@ static void dense(const char* type, uint32_t rows, uint32_t cols) {
   const uint64_t mat = row_bytes<T>(cols) * rows, n_mats = kPool / mat > 0 ? kPool / mat : 1;
   const double us = time_us([&](int c) {
     mm::kernel<T, S, 1><<<dim3(rows / mm::kTile, 1, 1), mm::kWave * S::kWaves>>>(
-        pool + (c % n_mats) * mat, nullptr, rows, 0, cols, x16, 1, y, nullptr, rows, 0);
+        pool + (c % n_mats) * mat, nullptr, rows, 0, cols, x16, 1, y, nullptr, rows, 0, 1.0f, 1.0f);
   });
   std::printf("  %-8s %6u x %-5u SL %3d W %d U %d  %7.1f us  %6.1f GB/s\n", type, rows, cols, SL, W, U, us, mat / us / 1e3);
 }

@@ -8,7 +8,7 @@
 
 #include "osmos/model/qtype.h"
 
-#if defined(__HIPCC__)
+#if defined(__HIPCC__) || defined(__CUDACC__)
 #define LANE_FN __host__ __device__ static inline
 #else
 #define LANE_FN static inline

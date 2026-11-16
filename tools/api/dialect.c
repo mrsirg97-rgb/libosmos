@@ -82,6 +82,10 @@ static const Dialect kDialects[] = {
      ds_drops, CHAT_THINK_END, NULL, NULL, NULL},
     {"qwen4exp", QCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, qchat_refused, request_qwen, qwen_render, qwen_parse,
      qwen_drops, QCHAT_THINK_END, NULL, NULL, NULL},
+    /* Qwen3.5 / 3.8's dense models (vibes27b): Qwen-Next's turn - their template the same but for several system
+       messages (the first one alone, not merged) and "high" effort (not raised to "xhigh") */
+    {"qwen35", QCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, qchat_refused, request_qwen, qwen_render, qwen_parse,
+     qwen_drops, QCHAT_THINK_END, NULL, NULL, NULL},
     /* Inkling's turn: blocks, the thinking optional (none at effort 0) - no answer-after (a block's end is every
        block's: the rule would refuse a text block's end of turn) */
     {"inkling2", ICHAT_EOS, ICHAT_END, ICHAT_CALL, false, ichat_refused, request_ink2, ink2_render, ink2_parse,

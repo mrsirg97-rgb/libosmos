@@ -1,6 +1,7 @@
 // Qwen3.8-Flash-Next's MoE (include/osmos/gpu/q4x_ops.h): its routing, the experts' tables and inputs, their
 // activation and their sum with the shared expert's, F32
 #include <climits>
+#include "port.h"
 
 #include "block.h"
 #include "launch.h"
@@ -258,8 +259,8 @@ extern "C" bool q4x_swiglu(const float* g, const float* u, uint64_t n, float* y,
 }
 
 __global__ void spin_kernel(uint64_t ticks) {  // wall_clock64: a constant rate (clock64 is the shader clock's)
-  const uint64_t t0 = wall_clock64();
-  while (wall_clock64() - t0 < ticks) __builtin_amdgcn_s_sleep(8);
+  const uint64_t t0 = osmos_wall_clock();
+  while (osmos_wall_clock() - t0 < ticks) osmos_sleep(8);
 }
 
 extern "C" bool q4x_spin(uint32_t us, void* stream) {

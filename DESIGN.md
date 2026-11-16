@@ -1822,6 +1822,332 @@ tests (each seen to fail first, or by a mutation):
   1.1.52's (prompt 518 tok/s against maya's 496). the same 24 with the mask not applied, too: greedy tokens on
   repeated text are not the mask's test; the probes above are.
 
+## the 10M agent: Qwen3.8-27B -vibes, LSA on a tiered KV (design, 2026-11-14)
+
+the operator's goal: the runtime's flagship - a 10M-context, code-first, conversational agent on one Halo; nothing
+like it exists. the model is incarnate's `osmos-evo-coder390-efficientthink-liberated420-vibes10m-nvfp4`: Qwen3.8-27B
+(huihui Coder390 abliterated) + a LoRA on the operator's rig sessions and repos + a voice LoRA, NVFP4, with a D-LSA
+indexer distilled on it (incarnate `qwen/lsa.py`, a port of Prefrontal-AI/latent-sparse-attention, arXiv 2610.42147,
+Apache 2.0; their repo read at d33b6ab, not run). the plan: tiering first, compression after (operator, 2026-11-14).
+
+### the model
+- qwen3_5 dense (the gguf's `qwen35`): 64 layers - 48 Gated DeltaNet (16 key heads, 48 value heads of 128) and 16
+  full attention, every fourth (3, 7, .. 63): 24 query heads on 4 KV heads of 256, the query's output gate (sigmoid),
+  q/k RMSNorm, rope on each head's first 64 dims (mrope 11/11/10, theta 1e7); a dense MLP (5120 -> 17408, SwiGLU); one
+  MTP layer; vocab 248,320; 262,144 native. no hyper-connections, no n-gram table, no MoE, no QSA: the Qwen-Next
+  family's DeltaNet, gated attention and MTP kernels, a plain residual and a dense MLP.
+- served under YaRN x40 (10,485,760 positions; mscale 0.1 ln 40 + 1 = 1.369 folded into cos/sin, HF's): the rotation
+  the indexer was distilled under. the cost at short context is night5's `quality` (native dense vs YaRN dense).
+- matrices 24.35B: NVFP4 (E2M1, an E4M3 scale a 16, a tensor's F32 scale) 13.7 GB; lm_head and embeddings BF16 2.54
+  GB each (the embedding a row a token). **open**: the gguf of a ModelOpt NVFP4 checkpoint - ggml's NVFP4 (type 40,
+  the nvfp4 branch's dequant tests) against ModelOpt's per-tensor weight_scale_2; the conversion proven bit-exact
+  against the safetensors' dequant before anything runs on it.
+
+### the read (LSA, flat): what a query attends to
+per full-attention layer, keys in blocks of 512 at their position; a block once closed (its 512th key written):
+- index keys `ik = normalize(k_free @ W_K)` - k_free the k_norm'd key's 192 unrotated dims, the 4 KV heads side by
+  side (768), W_K [768, 64] the layer's map; summed in pools of 4, Ward-merged to 64 buckets (a bucket at most 16
+  keys), a bucket's centroid its keys' sum normed.
+- a query: `iq = normalize(q_free_summed @ W_Q)` (each KV group's 6 query heads summed); its score against every
+  closed block's centroids before its own; the top 1024 buckets, their keys best first, cut at 4,096; plus the
+  window (its last 512 positions) and the 4 sinks. attention over those alone, the model's own softmax.
+- the window and sinks are a ring and a prefix; a query never reads an open block's keys outside its window.
+- the oracle: incarnate `lsa.py` (`buckets`, `served_read`), itself checked against their `core/reference.py` and
+  `core/ward.py` by the spec (lsa_spec.md); the model's tail loss under the read is night5's quality table.
+
+### the bytes, and where they live (a sequence; FP8 KV as kvfmt's: 528 B a 512 values)
+| | a token | 256K | 1M | 10M | lives |
+|---|---|---|---|---|---|
+| KV (K and V, 16 layers, FP8) | 33.8 KB | 8.9 GB | 35.4 GB | 354 GB | blocks: RAM, past the budget NVMe |
+| centroids (64 x BF16 a bucket, 8 keys a bucket) | 256 B | 0.07 GB | 0.27 GB | 2.7 GB | RAM, always |
+| a block's bucket table (64 starts) | ~4 B | - | - | 42 MB | RAM, always |
+| DeltaNet states | - | 151 MB | 151 MB | 151 MB | RAM |
+| window ring (512 x 16 layers) | - | 17 MB | 17 MB | 17 MB | RAM |
+
+- a closed block's keys and values are rewritten in **bucket order** (the block's 512 rows permuted by Ward's labels,
+  the table its 64 starts): a picked bucket is one contiguous read (~8 rows, ~17 KB a layer), on NVMe as in RAM.
+- the index keys are not kept: recomputed from K (its unrotated dims are the position-free part) if a block is ever
+  re-clustered; the centroids and the table are the index.
+- RAM: 110 GiB budget less the weights (~19 GB with the BF16 head) and the always-resident rows: ~85 GB of KV blocks
+  - every block of a sequence to ~2.4M tokens; past it a block cache (the least recently picked out), the rest on the
+  NVMe as one file a sequence. the file is the conversation: the slot store's state for a tiered sequence is its file
+  plus the RAM rows, so a 10M context survives a restart without a re-read.
+
+### a decode token at 10M (the bytes it reads)
+- weights: 13.7 GB of matrices + the head 2.54 = ~16.2 GB.
+- the index: every closed bucket's centroid, each layer: 1.31M x 128 B = 168 MB a layer, **2.7 GB a token** - a sixth
+  of the weights; FP8 centroids or int8 dots (0.7.3's) halve it. the paper's tree read cuts it further but loses
+  accuracy past 1M (their GLM: RULER 55.8 tree vs 66.8 flat at 10M).
+- the keys and values read: (4,096 + 516) x 2,112 B x 16 = **156 MB** - RAM in ~0.6 ms; cold from the NVMe (~7 GB/s,
+  0.1's measured reads) ~22 ms. the share that is cold is the hit rate of consecutive tokens' picks against the block
+  cache: **unmeasured** - night5's documents give it (the picks of a held document's last 32 positions, in order).
+- so ~19 GB a token: ~13 tok/s plain at the box's ~256 GB/s, before the MTP head's drafts and any NVMe misses.
+
+### a prompt's cost
+- the weights' FLOPs: 2 x 24.35B = 48.7 GFLOP a token; the attention under the read a constant ~4.6K keys a query.
+  the box's dense matmul rate on this model is **unmeasured**: at 20 TFLOPS effective a cold 10M read is ~7 h. an
+  agent does not read 10M at once - the context grows over a session, each turn's new tokens read once, the rest
+  kept (the tier file) - but a cold 10M prompt is an overnight job, and the README says so.
+- Ward at a block's close: 128 pools, ~6-10 rounds of a 128 x 128 product; in a prompt all of a step's closed blocks
+  at once (lsa.py batches them over blocks).
+
+### the order
+0. **the dense family** (q35): the gguf (bits against the safetensors), the forward against HF's on the Halo - logits
+   within the bound, then the fingerprint; MTP drafts. 262K native, dense attention. nothing new but the family.
+1. **the read, in RAM**: the maps and YaRN in the gguf (or a sidecar), ik/iq, Ward at block close, the centroid scan
+   and the pick, the read handed to the attention as an index list (sparse_attn's shape). the bits against the
+   oracle's read; the model's tail loss against night5's quality table; RULER-style recall to 2.4M (all RAM).
+2. **the tier**: blocks in bucket order, the block cache, the NVMe file a sequence through `reads`/`fetchq` (the
+   fetcher's 7 GB/s); the same bits as step 1 at every cache size (the cache changes where a row is read, never which).
+3. **10M**: a 10M conversation built over turns; recall and decode speed at 1M, 4M, 10M - the release's number.
+- later: the KV compressed (DeepSeek-V4's pooled rows, a small compressor distilled against the uncompressed model)
+  - the second half of the paper; FP8 centroids; the head quantized.
+
+### tests (each seen to fail first)
+- Ward and the pick (host C) against lsa.py's `buckets` / `served_read` on recorded blocks: the same labels, the
+  same read, every key (ties to the lower index, as theirs).
+- the block rewrite: a block's rows read back in position order equal the rows written (any permutation the labels
+  give); a corrupt table refused.
+- the tier: the read's rows the same bytes from RAM and from the file, the cache at 0, 1 block and all; a file of
+  another sequence or a short file refused (the identity, as seq_load's).
+- the model: step 0's logits against HF's (Qwen3.8-27B, then -vibes); step 1's tail loss against night5's.
+
+## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
+
+the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,
+not for osmos-serve. what the engine's family table (src/run/engine_impl.h) asks of it, and how q35 answers -
+q4x's contracts (osmos/q4x/forward.h) wherever the shapes are the same, its code where it is not.
+
+**why not q4x's forward** (measured by reading it, 2026-11-16): q4x is not Qwen-Next's MoE on optional parts - its
+every layer and residual hyper-connected (hc streams: embed expands, mixers join, no plain RMSNorm + add), its
+attention always QSA's indexer, an n-gram (PLE) layer; its geometry and roles require all three, and its MTP head is
+hyper-connected too. q35 on it is ~800 lines of branches in the code whose Qwen-Next bits must not move, and none of
+its speed is q35's (hc, MoE). q35 keeps its forward; what both share is already shared - the DeltaNet's, conv's and
+attention's kernels (q4x_ops.h), which take a ring of states.
+
+**the sequence** (q35_seq_*): q4x's.
+- a ring of Q35_SLOTS = Q35_MAX_BACK + 1 states a DeltaNet layer (q4x_delta's and q4x_conv's `slots`, `cur`): a step of
+  n tokens leaves the state in slot (cur + n) % slots, the ones before it behind; `q35_seq_rollback(n)` a slot index
+  and the position back (the attention rows past it are never read again: a later step overwrites them). Q35_MAX_BACK
+  8, q4x's (a drafted round's tokens: OSMOS_MAX_BLOCK). a slot is 48 x 48 x 128^2 floats, 151 MB: 9 slots 1.36 GB a
+  sequence - a server's one or two sequences hold it; a reach of 0 after a load, as q4x's.
+- LSA: a block closes (its buckets made) as its 512th key lands; a rollback across a close would leave buckets of keys
+  no longer the sequence's. so the reach stops at the last close: `reach = min(back, position - 512 closed)` with LSA
+  on (a drafted round of 8 crosses a boundary once in 64 rounds; its rollback then refused, the server's re-read from
+  the mark - rare and correct).
+- `q35_seq_prompt(end)` / `q35_kept(row)`: the head run for rows at end - 1 and after (a prompt's last row a server
+  reads), q4x's rule; the head is 1.35 GB a row-set read, so a long prompt's step skips it.
+- save / load / mark: q4x's format (a header: format, identity, position, last tokens; the DeltaNet states and conv
+  histories of the current slot; the attention rows below the position; LSA's index vectors, centroids, buckets and
+  closed count; an FNV-1a of it all), its refusals (another identity, a short or damaged state). a mark: the current
+  DeltaNet / conv slots and the position (the attention rows below only grow), ~155 MB.
+
+**the step** (q35_step over runs): runs of several sequences, each its consecutive tokens; the matrices once for all
+runs' tokens, each sequence's DeltaNet, conv, rotation, cache and attention on its own rows. two maths, as
+DeepSeek's (the engine's `read`): a prompt's matrices the matmul (WMMA over f16) at any size, a decode round's
+mv_fp4 in steps of 4 tokens at most - each a token's own bits however a step is split or shared (mv_fp4's sums a
+row's lanes and its warp's tree whatever its R / NT / U: fp4bench SWEEP=1's checks), so drafted rounds give plain
+decode's bits. measured (low-power, q35's NVFP4 shapes): mv_fp4 216 GB/s at a token; the matmul flat from 1 to 16
+tokens, 120-150 GB/s even with NVFP4's decode by permutes - decode on the matmul would be ~1.6x slower. the cost of
+mv_fp4: a drafted round of 9 tokens reads the weights 3 times (a multi-token mv_fp4, its bits the same, is the
+next kernel for drafting). since measured: a multi-token mv_fp4 does not scale (16 tokens 8x one's: x's traffic), and
+the matmul's one-tile NVFP4 path is now 156-206 GB/s at 1-16 tokens (below, "0.9.0: the kernels' tuning") - with a
+drafter, decode's rounds on the matmul alone (one math), a token ~1.18x the matvec's.
+
+**the engine** (hip_engine_q35.c, `qwen35` in families[]): q4x's adapter - every weight resident (no budget, picks or
+guess), batch / logits / greedy / prompt / rollback / reach / position / state / marks, identity. no drafter in this
+step: `draft` NULL (osmos-serve then decodes plain). the MTP head (blk.64.nextn.*, dense, no hc - not q4x's) and the
+operator's DFlash drafter for q35 (DFlash2's protocol, q35's target geometry) are the next step.
+
+**tests first** (each seen to fail before its code): a sequence rolled back n <= reach then fed the same tokens gives
+every logit's bits again; save -> load into a new sequence -> the same next logits; two sequences in one step against
+each alone, the same bits; a rollback past the reach (and across an LSA close) refused, the sequence unchanged; a
+damaged or another model's state refused, the sequence empty.
+
+## 0.9.0: the kernels' tuning (measured, 2026-11-16, performance unless marked)
+
+what the dense model taught, kept and not. every change below the same bits (q35's 2,048-token logits dumped at
+steps of 8, 16, 64, 100 and 2,048 and compared byte for byte; the gate: the GPU suite, Inkling's rows both splits,
+Qwen's and DeepSeek's ids and streams against 0.8.0's).
+
+**the tools.** rocprofv3's counters before any guess: SQ_WAIT_CNT_ANY / SQ_WAIT_INST_ANY / SQ_WAIT_BARRIER over
+SQ_WAVE_CYCLES (where a wave waits), GL2C_EA_RDREQ_DRAM against a matrix's bytes (a line fetched twice), and the
+compiler's -Rpass-analysis=kernel-resource-usage (VGPRs, spills, occupancy). the box's ceilings: a cold read 244 GB/s
+at both profiles (the profile moves compute clocks, not DRAM: decode's tok/s the same at low-power and performance),
+f16 WMMA 53 TFLOP/s at performance (8 independent chains a wave). two traps: __syncthreads() is a fence (it waits
+every load in flight - a prefetch across it is lost; __builtin_amdgcn_s_barrier() is the barrier alone), and a
+wave's memory waits are in order (a load used early waits on every load issued before it).
+
+**kept.**
+- NVFP4's matmul at one column tile (1-16 tokens: a drafter's verify rounds): a lane its row's 36-byte block whole
+  (a 64-value slab one block; the chunk at a time was a byte and four 16-bit loads a step, each waited), the next
+  slab's in flight: 155 -> 206 GB/s (gate / up), 145 -> 193 (qkv), 122 -> 164 (ssm_out), 143 -> 156 (down). down's
+  long rows (34 slabs a wave): a line's 3.5 blocks are 3-4 waves', the waves drift apart and a line is evicted before
+  its last reader (DRAM reads 1.6x its bytes) - its waves kept in step by a fence-free barrier every 4 slabs, past
+  16 slabs a wave: 156 -> 177 (the barrier on every row cost the rest 3-8%; the loop compiled twice, a runtime branch
+  in one cost 5-8%). a round of 8 tokens 127.6 -> 97 ms.
+- NVFP4's prompt matrices on gemm_kernel (Q6_K's and Q8_0's, the same bits as tile), the tensor's scale in the store
+  (mm_tokens_scaled: ops_scale's multiply of the same sum), q35's x16 shared by the matrices of one x. vibes27b's
+  2,048-token prompt 326 -> 446 tok/s at low-power, 515 at performance.
+- prompt attention (q4x_attn) without picks: a chunk whole for a group of 10 tokens read once for the group
+  (fa_whole_kernel, 8 waves, a wave a 16-row tile and half of O; 256 VGPRs and a 340-byte spill -> 230 and none),
+  each token's last chunk fa_kernel's: a 16K prompt 281 -> 343 tok/s at low-power, 400 at performance (QSA's picks,
+  Qwen, keep fa_kernel alone).
+
+**measured, not kept.**
+- the prompt gemm (35.5 TFLOP/s, 67% of WMMA's): bigger blocks (512 / 1,024 threads: -5-15%), other wave grids
+  (-14-45%), the weights touched two slabs ahead (level), x staged in LDS with the weights' loads apart from their
+  decode (-22%: the waits moved to LDS). without its decode at all it runs 43 (81%): a rewrite's ceiling ~+20%.
+- the one-tile NVFP4 path: two slabs in flight (level), 2 / 4 row tiles a wave sharing x (level / -15%: x's L2
+  traffic not the bound), its LDS sized to what it uses (-3-5%: more blocks a CU, more contention).
+- the codebook experts' one-tile kernel (IQ1_S / IQ2_XXS / IQ2_S, mmsweep ink2's 8 experts): the next slab's raw
+  words in flight (IQ1_S -7%: registers, so fewer blocks resident), IQ1_S's grid copied to LDS (-21%: LDS-bound
+  occupancy 7 -> 5 blocks a WGP). IQ2_S on group_kernel instead: +5-12% at performance, but the one-tile kernel won it
+  at low-power (its note) - left.
+
+**the families' dense parts** (each served pack's own types, fp4bench / qbench-style cold timings): Inkling's attention
+and head Q5_K, DeepSeek's attention Q5_K - both resident as Q5_KR (quant_repack_q5k: 16-row tiles a wave's loads
+contiguous), the matmul 196-231 GB/s, within ~5% of the matvec; DeepSeek's shared experts Q8_0 163-198. what is left
+there is small (attn_kv's 512 rows 76-97 GB/s, ~0.4 ms a token). the experts are the gap: Inkling's IQ1_S 94 GB/s,
+IQ2_XXS / IQ2_S 110-117, IQ3_XXS 140 at 1-8 tokens (~112 averaged by bytes: ~28 ms of an Inkling token, ~14 at the
+227 GB/s ceiling).
+
+**next: IQ1_SR, IQ1_S repacked for the one-tile step** (design). IQ1_S's slab is two memory trips in series - the
+weights' loads, then 8 grid lookups (global_load_b64) indexed by them - and its blocks are LDS-bound (7 a WGP against
+the VGPRs' 12: each lane decodes whole 32-value groups in a layout not WMMA's, so a half slab goes through LDS). a
+layout where a lane in WMMA's own layout (row l % 16, half l / 16: chunks 2g + half of a step) reads its slab's
+fields in one contiguous load - its 8 qs bytes, its 8 chunks' 3 grid bits, its 4 groups' scale and sign: 12 bytes a
+lane, and each row's d - is 400 bytes a tile's slab, IQ1_S's own size (pre-expanding the grid instead would remove
+the lookup at +40% bytes: refused). no LDS between decode and WMMA, occupancy the VGPRs' (the kernel's note: 7 ->
+12 blocks 211 -> 190 us). estimated (not measured) 94 -> 115-125 GB/s: ~2-2.5 ms an Inkling token, DeepSeek's 22 GB
+of IQ1_S experts too. unlike Q5_KR (dense, resident, repacked once at load) experts stream into the cache on demand
+and run on the CPU's path in the file's layout: the repack belongs to the fetch (a staged expert repacked on its way
+into the cache), the CPU path keeps the file's bytes, the cache's slot the repacked size (the same). tests first: a
+repacked expert's decode against IQ1_S's bit for bit (test_quant_gpu), mm_group on IQ1_SR against IQ1_S's at 1 / 2 /
+5 / 16 tokens, a streamed expert's bits against a resident one's.
+
+## the tiers on battlestation: two 5090s, 96 GB, one NVMe (design, 2026-11-15)
+
+the 10M agent's first box is CUDA's, not the Halo's (above: one 110 GiB pool at ~256 GB/s). three memories, each a
+cache of the one below; the NVMe file the sequence itself (write-through), so a 10M context survives a restart.
+
+### the inputs (measured unless marked)
+- the q35 forward on CUDA (src/q35, 2026-11-15): HF's tokens within KL 0.0011 / top-1 64 of 64 at 64 tokens, 0.017
+  / 97.2% at 2,048 (BF16-activation reference); the NVFP4 GGUF's blocks byte-identical to the ModelOpt export.
+- a 5090: 1,695 GB/s read (a streaming kernel). host to GPU: GPU 0 54.3 GB/s (x16), GPU 1 28.8 GB/s (x8, its lanes
+  shared with both NVMe). the 990 PRO 4 TB, O_DIRECT reads of stock shards (a Python harness, threads for depth):
+  1 MB sequential 7.05 GB/s, 1 MB random 7.09; 64 KB random 6.56 GB/s (100K/s); 32 KB 4.43 (135K/s); 16 KB 2.2-2.3
+  (137-142K/s at 32-128 deep) - 16 and 32 KB at one request rate: the harness's ceiling, not the drive's (io_uring
+  in C will say). a request of 64 KB or more is the drive's whole rate.
+- the read's host reference (src/lsa): Ward 1.3 ms a block on one core (320 blocks, test_lsa) - a 10M prompt's
+  327,680 block-layers ~7 min on one core, <20 s on the 7960X's 24: bucketing keeps up with any prefill.
+- where a read's picks fall (night5's 64K sessions, queries past 40K, ~4,000 picks each): <4K old 13-16%, 4-16K
+  35-36%, 16-32K 29-31%, >=32K 19-20%. picks spread over the whole context, not its tail: recency alone is not the
+  cache; a run of tokens' reuse of buckets is (**unmeasured**: consecutive positions' picks, next on the GPUs).
+
+### the bytes at 10M, two KV formats (kvfmt's: FP8 528 B a 512 values, FP4 E4M3/16 288 B)
+| | a token | 1M | 10M |
+|---|---|---|---|
+| KV, FP8 | 33.8 KB | 35.4 GB | 354 GB |
+| KV, FP4 (E4M3 a 16) | 18.4 KB | 19.3 GB | 193 GB |
+| centroids (BF16) + bucket tables | 260 B | 0.27 GB | 2.7 GB |
+| index keys while a block is open | 2 KB (the open block only) | - | - |
+
+FP4 KV's cost to the model is **unmeasured** (a teacher-forced run with K and V rounded, as nvfp4.py's W4A4); /mnt/data
+has 390 GB free: FP8 at 10M fits once, FP4 twice.
+
+### where a block lives (the model split 34 / 30 layers over the two GPUs, as training)
+| tier | per GPU / total | FP8 tokens | FP4 tokens | holds |
+|---|---|---|---|---|
+| VRAM | 32 GB less weights ~10, scratch ~2, its layers' centroids ~1.4, states 0.1: ~17 GB / ~34 GB | ~1.0M | ~1.85M | the window, sinks, every centroid and table, then the newest blocks, then the hottest buckets |
+| RAM (pinned) | ~64 GB of 96 | ~1.9M | ~3.5M | the next newest blocks, then hot buckets the NVMe served |
+| NVMe | 354 / 193 GB | all | all | every closed block in bucket order, appended at its close (the sequence's file) |
+
+so VRAM + RAM hold ~2.9M tokens of FP8 or ~5.3M of FP4; past them the misses go to the file. a bucket is one
+contiguous ~17 KB (FP8) a layer - under the 64 KB a request needs for the drive's rate: the file's unit a page of a
+block-layer's neighbouring buckets (~4 to 64 KB), a miss reading its page (the neighbours' bytes a prefetch, kept in
+RAM), or the whole block-layer (1.08 MB) when several of its buckets are picked.
+
+### a decode token at 10M (the GPUs in sequence: GPU 0's layers, then GPU 1's)
+- weights: ~19.7 GB, each GPU its half at ~1.7 TB/s: ~11.6 ms.
+- centroids: 2.7 GB, each GPU its layers': ~1.6 ms. (FP8 centroids or int8 dots halve it.)
+- picked KV: 4,612 keys x 2,112 B x 16 layers = 156 MB (FP8; FP4 85 MB). from VRAM ~0.1 ms; from RAM over PCIe a GPU's
+  half 1.4 ms (GPU 0) + 2.7 ms (GPU 1); from the NVMe, in 64 KB pages at 6.5 GB/s, ~24 ms if every pick missed (16 KB requests: ~70 ms).
+- so ~14-17 ms when the picks hit VRAM / RAM (~60-70 tok/s), up to ~35-40 ms all from the NVMe (~25 tok/s) - before
+  the MTP head's drafts. a layer's misses are known only once its query is (the pick is the query's): their reads
+  overlap the three DeltaNet layers before the next attention layer, ~3/64 of a token; the rest waits.
+- today's numbers to beat first: 46 tok/s (osmos) / 78 (llama.cpp) at 2K, dense.
+
+### a prompt at 10M
+- the read makes attention linear (~4.6K keys a query); the weights' matmuls are the cost: osmos's prefill today 292
+  tok/s (q4x's RDNA matmul and fa_kernel on emulated WMMA, untuned on CUDA) - a cold 10M read ~10 h; at llama.cpp's
+  class (~2-4K tok/s, **unmeasured** on this model) 45-90 min. an agent's context grows a turn at a time, each token
+  read once, the rest kept: the cold read is the benchmark's, not the session's.
+- each closed block: Ward (host, 1.3 ms; or the GPU's), the block rewritten in bucket order, appended to the file.
+
+### the order (from step 1 of the section above)
+1. the read in VRAM to the budget (1-2M): the GPU's centroid scan and pick, checked against src/lsa's read (the same
+   sets - the host reference agrees with lsa.py's on every block and read, test_lsa); quality to 1M against night5's
+   method, now in osmos (HF's teacher stops at 64K: extraction OOMs at 128K).
+2. RAM and the file: the block cache's policy measured on consecutive tokens' picks (the reuse number above), the
+   same read bits at every cache size; FP4 KV measured, then chosen.
+3. 10M over turns; the release's numbers: recall and decode at 1M, 4M, 10M.
+
+## a second GPU: CUDA, the flagship its first model (scope, 2026-11-14)
+
+the operator: the first model with CUDA support is the 10M flagship. the box: battlestation, 2 x RTX 5090 (sm_120,
+32 GB, ~1.8 TB/s each; CUDA 13.0 at /usr/local/cuda, driver 580), 96 GB RAM, the 990 Pro. the dense 27B NVFP4 (~16 GB)
+sits in one card; the safetensors, the oracle and the training pipeline are here, so the family is brought up here
+first and on the Halo second.
+
+### the reach, measured (main b52b805)
+- host: ~40 HIP runtime names (hipMalloc/Free/Memcpy[Async], streams, events, host-mapped memory, MemGetInfo) in 24
+  files - each a CUDA name one for one; hsa-runtime64 and the NPU (XRT) beside them.
+- kernels: 5,271 lines, 18 files. AMD's own: `__builtin_amdgcn_wmma_f32_16x16x16_f16_w32` (9), `_wmma_i32_16x16x16_iu8`
+  (2), `_wave_barrier` (9), `_perm` (8), `_fence` (4), `_sudot4` / `v_dot4` (4), `_s_sleep` (2), `__hip_atomic_load`
+  (1); `__shfl_xor` (25), `__ballot` (2) - the rest (88 __syncthreads, 45 __launch_bounds__, LDS) is CUDA's too.
+- the wave: gfx1151's 32 lanes are a warp's 32 - the kernels' lane arithmetic carries over as written.
+
+### one source
+- the kernels stay `.hip`; the CUDA build compiles them with `nvcc -x cu -arch=sm_120 --fmad=false` (the
+  `-ffp-contract=off` contract: no contraction the source did not write).
+- one port header (`include/osmos/gpu/rt.h`): the runtime's names, and each AMD intrinsic as an osmos function with
+  two bodies - wave_barrier `__syncwarp`, perm `__byte_perm`, sudot4 `__dp4a`, shfl_xor `__shfl_xor_sync` (all lanes),
+  ballot `__ballot_sync`, s_sleep `__nanosleep`, the WMMA tiles `mma.sync` (m16n8k16 f16 -> f32, two to a 16x16; the
+  int8 tile m16n8k32). no HIP-on-NVIDIA layer (no ROCm on this box, and it is another project's code in the build).
+- **decision (operator)**: one source and the header, or `.cu` files of their own. one source keeps one kernel a
+  concept (AGENTS: one shape per concept); the cost is the header's two bodies and `#if` at the WMMA tiles.
+
+### what the CUDA build holds
+- the dense family only, first: ops (norms, rope with YaRN, the KV formats), mv/mm (BF16, the K-quants it reads,
+  NVFP4), attention (dense, and LSA's sparse read through sparse_attn's index list), the DeltaNet, the MTP head.
+- not in it: the NPU, hsa, the membrane and the expert pool (MoE paths built on unified memory), DeepSeek and
+  Qwen-Next - each later, by its own ask.
+
+### memory on a discrete card
+- the Halo's "one pool, read in place" is unified memory: a host-mapped read on a 5090 crosses PCIe (GPU0 x16 Gen5
+  54.3 GB/s, GPU1 x8 28.8, measured 2026-11-06). so the tiers gain a level: VRAM (weights, DeltaNet states, centroids,
+  window, the hottest KV blocks) -> pinned host RAM (the block cache, copied in per token) -> the NVMe file.
+- VRAM: 32 GB less the weights and head 16.2, the states 0.15, the centroids (2.7 at 10M), a step's scratch (~2):
+  ~10 GB of KV blocks (~300K tokens); host ~75 GB (~2.2M more); the NVMe past that.
+- a decode's worst case from host RAM: 156 MB at ~54 GB/s ~3 ms.
+
+### the bits
+- osmos's contract (a token's bits independent of the batch and the step) holds a backend at a time. HIP's and
+  CUDA's bits differ (the WMMA tiles' accumulation, exp and rsqrt): each backend its own fingerprints, each against
+  the double oracle within the bound its test states; the schedule-invariance tests run on both unchanged.
+
+### NVFP4 native (CUDA's own, after the family runs)
+- decode: the matvec dequantizes (bandwidth-bound: ~16 GB a token at ~1.8 TB/s, ~110 tok/s ceiling plain).
+- prompts: sm_120's block-scaled FP4 MMA (E2M1 x E4M3 scales of 16, the format's own) - the matmul in the weights'
+  format, no dequant; a kernel only CUDA has.
+
+### the order
+0. the build and rt.h; the shared tests (tests/gpu: ops, kvfmt, round, quant, mv, mm, attn) passing on CUDA.
+1. the dense family on CUDA: forward against HF's on this box (Qwen3.8-27B, then -vibes; the safetensors here), the
+   MTP drafts, the fingerprint.
+2. LSA's read; 3. the tiers (VRAM, host, NVMe); 4. 10M - then the same family on the Halo, HIP, against the same oracle.
+
 ## 0.7.6: finding the layers that cost a pack its recall - osmos-evo (2026-11-14)
 
 evo-A recalled every fact of the 1M recall stream but one: the ivory code, 188K back, its first answer token 0.47

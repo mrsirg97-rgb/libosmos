@@ -1,0 +1,14 @@
+#!/bin/sh
+# clang 20 writes fatbinary's --image=profile=<sm_NN|compute_NN>,file=F; CUDA 13's fatbinary reads only
+# --image3=kind=<elf|ptx>,sm=NN,file=F - each such argument rewritten, the rest passed as they are (cuda.mk)
+real="$OSMOS_CUDA_REAL/bin/fatbinary"
+n=$#
+while [ $n -gt 0 ]; do
+  a=$1; shift; n=$((n - 1))
+  case $a in
+    --image=profile=sm_*,file=*)      p=${a#--image=profile=sm_}; set -- "$@" "--image3=kind=elf,sm=${p%%,*},file=${a#*,file=}" ;;
+    --image=profile=compute_*,file=*) p=${a#--image=profile=compute_}; set -- "$@" "--image3=kind=ptx,sm=${p%%,*},file=${a#*,file=}" ;;
+    *) set -- "$@" "$a" ;;
+  esac
+done
+exec "$real" "$@"

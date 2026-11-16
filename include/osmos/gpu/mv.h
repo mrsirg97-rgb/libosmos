@@ -16,6 +16,10 @@ bool mv_group_tok(uint32_t type, const void *const *w, const int32_t *cnt, const
                   void *stream);
 bool mv_strided(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t x_stride,
                 uint32_t n_tok, float *y, uint32_t y_stride, void *stream);
+/* NVFP4 (ggml 40) over 1 .. 4 tokens, the tensor's own scale on each sum (kernels/mv_fp4.hip): its own order of sums,
+   not mv_strided's. cols whole 64-value blocks, xs a multiple of 4 */
+bool mv_fp4(const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t xs, uint32_t n, float *y,
+            uint32_t ys, float scale, void *stream);
 
 #endif
 

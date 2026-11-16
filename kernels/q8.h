@@ -3,6 +3,7 @@
 // sums - then each half's lane_q8_part and the block's scale, in the contract's order
 #pragma once
 #include "lane.h"
+#include "port.h"
 #include "quant.h"
 
 namespace q8 {
@@ -20,7 +21,7 @@ template <quant::Type T> constexpr uint64_t row_bytes(uint32_t cols) {
 // 4 (q8bench, low-power; DESIGN.md "0.3.2"). the arithmetic and its order are the source's: no bit moves
 constexpr int kFullWaves = 16;
 
-__device__ inline int dot4(int a, int b, int c) { return __builtin_amdgcn_sudot4(true, a, true, b, c, false); }
+__device__ inline int dot4(int a, int b, int c) { return osmos_sudot4(a, b, c); }
 
 // a block's codes: w its 8 words (two a chunk); IQ1_M's chunk c a sign of its own (its grid + delta as 8 grid +- 1:
 // 8 (grid . x) +- the chunk's x summed); a half h's 2s + 1; the 256-value block's scale d

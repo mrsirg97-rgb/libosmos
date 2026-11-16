@@ -85,3 +85,15 @@ __device__ __attribute__((always_inline)) inline int wave_pick(const float* v, u
 
 __device__ inline float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 __device__ inline float silu(float x) { return x / (1.0f + expf(-x)); }
+// ggml's Q8_0 block (quantize_row_q8_0): N values v[0], v[stride], ...: amax, d = amax / 127, q = round(x * (1 / d))
+// (half away from zero) into q[0 .. N); d returned for the caller to store as f16 where its record keeps it
+template <int N> __device__ inline float q8_0_block(const float* v, uint64_t stride, uint8_t* q) {
+  float amax = 0.0f;
+  for (int j = 0; j < N; j++) amax = fmaxf(amax, fabsf(v[j * stride]));
+  const float d = amax / 127.0f, id = d ? 1.0f / d : 0.0f;
+  for (int j = 0; j < N; j++) q[j] = (uint8_t) (int8_t) roundf(v[j * stride] * id);
+  return d;
+}
+// F.softplus (and ggml's): above the threshold, x
+constexpr float kSoftplusLinear = 20.0f;
+__device__ inline float softplus(float x) { return x > kSoftplusLinear ? x : log1pf(expf(x)); }

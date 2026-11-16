@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include <hip/hip_runtime.h>
+#include "port.h"
 
 #include "kvload.h"
 #include "select.h"
@@ -197,12 +198,17 @@ __global__ __launch_bounds__((kIxHeads * TOK / RR) * (kIxRows / CC)) void index_
   }
   __syncthreads();
   float(*vs)[kIxRows + 1] = (float(*)[kIxRows + 1]) lds;  // [slot][row]: relu(s) * w, in the staging's room
+  // (unrolled whole: acc's every index a constant, so it stays in registers - clang 20's CUDA, left a loop, puts acc
+  // on the stack and reads it by a generic load of the stack's own address, a fault)
+#pragma unroll
   for (int i = 0; i < RR; i++) {
     const int m = ty * 4 + (i / 4) * (kIxM / (RR / 4)) + i % 4;
     const uint32_t t = t0 + m / kIxHeads, h = m % kIxHeads;
     const bool real = t < n_tok && h < heads;  // an empty slot: 0, as a lane past the heads
     const float wv = real ? w[(uint64_t) t * heads + h] : 0.0f;
+#pragma unroll
     for (int g = 0; g < G; g++)
+#pragma unroll
       for (int e = 0; e < 4; e++) {
         const int c = tx * 4 + g * (kIxRows / G) + e;
         float sdot = acc[i][g][e];
@@ -261,8 +267,8 @@ typedef int i4 __attribute__((ext_vector_type(4)));
 // table each sign
 __device__ inline uint32_t e2m1_int4(uint32_t x) {
   const uint32_t sel = x & 0x07070707u, neg = ((x >> 3) & 0x01010101u) * 0xFFu;
-  const uint32_t p = __builtin_amdgcn_perm(0x0C080604u, 0x03020100u, sel);
-  const uint32_t n = __builtin_amdgcn_perm(0xF4F8FAFCu, 0xFDFEFF00u, sel);
+  const uint32_t p = osmos_perm(0x0C080604u, 0x03020100u, sel);
+  const uint32_t n = osmos_perm(0xF4F8FAFCu, 0xFDFEFF00u, sel);
   return (p & ~neg) | (n & neg);
 }
 __device__ inline float pow2(int e) { return __uint_as_float((uint32_t) (e + 127) << 23); }  // e within +-126
@@ -410,8 +416,8 @@ __global__ __launch_bounds__(kDThreads) void index_score_dot4_kernel(
         const i4 kb1 = ONE ? *(const i4*) &ks[wd][rg[1]] : kb;
         for (int a = 0; a < 4; a++)
           for (int c = 0; c < 4; c++) {
-            ia[0][a][c] = __builtin_amdgcn_sudot4(true, a0[a], true, kb[c], ia[0][a][c], false);
-            ia[1][a][c] = __builtin_amdgcn_sudot4(true, a1[a], true, kb1[c], ia[1][a][c], false);
+            ia[0][a][c] = osmos_sudot4(a0[a], kb[c], ia[0][a][c]);
+            ia[1][a][c] = osmos_sudot4(a1[a], kb1[c], ia[1][a][c]);
           }
       }
       const f4 s0 = *(const f4*) &sq[b][qa], s1 = *(const f4*) &sq[b][qb], sc = *(const f4*) &sk[b][rg[0]];

@@ -19,6 +19,9 @@ bool mm_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const vo
 bool mm_tokens(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
                float *y1, uint32_t ys1, uint32_t cols, const float *x, uint32_t xs, uint32_t n, void *x16,
                int32_t *overflow, bool ready, void *stream);
+bool mm_tokens_scaled(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, float s0, const void *w1,
+                      uint32_t rows1, float *y1, uint32_t ys1, float s1, uint32_t cols, const float *x, uint32_t xs,
+                      uint32_t n, void *x16, int32_t *overflow, bool ready, void *stream);
 bool mm_run2(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
              float *y1, uint32_t ys1, uint32_t cols, const void *x16, uint32_t n, void *stream);
 #define MM_SILU_MAX_TOKENS 64 /* mm_run_silu's most tokens (past them, the gemm's counts) */
@@ -33,6 +36,49 @@ bool mm_x16_rows(const float *x, uint32_t xs, const int32_t *idx, uint32_t slots
 bool mm_group(uint32_t type, const void *const *w, const int32_t *cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
               uint32_t cols, const void *x16, const uint32_t *xoff, uint32_t xts, float *y, const uint32_t *yoff,
               uint32_t ys, void *stream);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* W4A4 on the FP4 matrix cores (kernels/mm_fp4.hip, sm_120a only - mm_fp4_ok false elsewhere): x's n rows (stride
+   xs) quantized as ModelOpt's activations under the input scale gs (an E4M3 scale a 16, E2M1) into q (n x cols/2
+   bytes) and sc (n x cols/16); then y[t * ys + r] = scale * sum_c W[r, c] xq[t, c], W ggml 40's rows (an NVFP4
+   matrix, its tensor scale and the input's in `scale`). cols whole 64s, rows whole 8s */
+bool mm_fp4_ok(void);
+bool mm_fp4_act(const float *x, uint32_t xs, uint32_t n, uint32_t cols, float gs, void *q, void *sc, void *stream);
+bool mm_fp4(const void *w, uint32_t rows, uint32_t cols, const void *q, const void *sc, uint32_t n, float scale,
+            float *y, uint32_t ys, void *stream);
+/* the same over ModelOpt's layout (packed [rows, cols/2] in k order, the low nibble first; E4M3 scales [rows, cols/16]
+   at wscale): the training engine's (incarnate train/fp4.py). the sums times scale (and *scale_dev, a device scale,
+   when not NULL); y F32, or (bf16) BF16 rounded to nearest */
+bool mm_fp4_mo(const void *packed, const void *wscale, uint32_t rows, uint32_t cols, const void *q, const void *sc,
+               uint32_t n, float scale, const float *scale_dev, uint32_t bf16, void *y, uint32_t ys, void *stream);
+/* mm_fp4_act's quantization of F32 or (bf16) BF16 rows, the tensor scale gs or the device's *gs_dev; sr_seed 0
+   nearest, else stochastic (a gradient's: unbiased), seeded */
+bool mm_fp4_quant(const void *x, uint32_t bf16, uint32_t xs, uint32_t n, uint32_t cols, float gs, const float *gs_dev,
+                  uint32_t sr_seed, void *q, void *sc, void *stream);
+/* a BF16 tensor's NVFP4 tensor scale (amax / 6 / 448) into *gs on the device (bits: a word of scratch) */
+bool mm_fp4_amax(const void *x_bf16, uint64_t n, uint32_t *bits, float *gs, void *stream);
+/* a MoE's routed experts at 2 bits times NVFP4 activations (W2A4): expert e's codes [rows, cols/4] (4 a byte in k
+   order, the lowest bits first: one of the 4 values of an E2M1-subset grid, lut holding code c's E2M1 nibble at bits
+   4c), its UE4M3 scales [rows, cols/16] and tensor scale gsw[e] (the experts' back to back: codes [E, rows, cols/4],
+   wscale [E, rows, cols/16]); the n tokens sorted by expert, expert e's offsets[e] .. offsets[e + 1] (on the device:
+   no host sync), q / sc their mm_fp4_quant. y [n, ys] the sums times scale * gsw[e] (and *scale_dev, the
+   activations' device scale, when not NULL), F32 or (bf16) BF16. tile_start E + 1 words of device scratch */
+bool mm_2b_grouped(const void *codes, const void *wscale, const float *gsw, uint32_t e, uint32_t lut, uint32_t rows,
+                   uint32_t cols, const uint32_t *offsets, uint32_t *tile_start, const void *q, const void *sc,
+                   uint32_t n, float scale, const float *scale_dev, uint32_t bf16, void *y, uint32_t ys,
+                   void *stream);
+/* W2A16: the same experts (codes, wscale, gsw, lut, the grouping) times BF16 activations x [n, xs] on the BF16 matrix
+   cores, each code decoded to its grid value times its block's scale (exact in BF16), gsw[e] on the sums. trans 0:
+   y [n, rows] = x [n, cols] W^T (the forward); trans 1: y [n, cols] = x [n, rows] W (the input's gradient). y F32 or
+   (bf16) BF16. the reduction a multiple of 64 */
+bool mm_w2a16_grouped(const void *codes, const void *wscale, const float *gsw, uint32_t e, uint32_t lut, uint32_t rows,
+                      uint32_t cols, uint32_t trans, const uint32_t *offsets, uint32_t *tile_start, const void *x,
+                      uint32_t xs, uint32_t n, uint32_t bf16, void *y, uint32_t ys, void *stream);
+#ifdef __cplusplus
+}
+#endif
 
 #endif
 
@@ -81,6 +127,9 @@ mm_tokens
   beside x) - taken as it is when n is within one x16, the conversion skipped. both families' dispatch (fwd_mat,
   q4x_mat). false as its calls'.
 
+mm_tokens_scaled
+  mm_tokens with each matrix's sums times its scale (s0, s1) as they are stored - a per-tensor scale (NVFP4's) without
+  a pass of its own: the bits of mm_tokens then ops_scale (one F32 multiply of the same sum); 1 the plain store.
 mm_col_tiles
   the column tiles a block of `type` takes for n tokens (mm_run's, and mm_group's for its max_cnt): a slab decoded
   once for that many tiles' WMMAs - more tiles, more registers and fewer waves to hide the decode. so a group's

@@ -1,5 +1,6 @@
 // ops (include/osmos/gpu/ops.h): the forward's small steps, each as ref.py computes it, in F32
 #include <cmath>
+#include "port.h"
 
 #include "block.h"
 #include "launch.h"
@@ -22,7 +23,6 @@ using launches::st;
 using launches::ok;
 
 constexpr int kWave = 32;
-constexpr float kSoftplusLinear = 20.0f;  // F.softplus's threshold: above it, x
 constexpr float kRouteEps = 1e-20f;
 constexpr float kEngramDotFloor = 1e-6f; // the gate's |dot| floor before the square root
 
@@ -460,7 +460,7 @@ __global__ void router_kernel(const float* logits, const float* bias, uint32_t n
   const uint32_t t = blockIdx.x;
   for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads) {
     const float l = logits[(uint64_t) t * n_exp + e];
-    sc[e] = Score == OPS_SCORE_SIGMOID ? sigmoid(l) : sqrtf(l > kSoftplusLinear ? l : log1pf(expf(l)));
+    sc[e] = Score == OPS_SCORE_SIGMOID ? sigmoid(l) : sqrtf(softplus(l));
     keys[e] = pick_key(sc[e] + bias[e]);
   }
   __syncthreads();
@@ -493,7 +493,7 @@ __global__ void swiglu_kernel(const float* g, const float* u, uint32_t n, float 
     return;
   }
   const float gv = fminf(g[i], lim), uv = fminf(fmaxf(u[i], -lim), lim);
-  const float v = gv / (1.0f + expf(-gv)) * uv, o = scale ? v * scale[i / n] : v;
+  const float v = silu(gv) * uv, o = scale ? v * scale[i / n] : v;
   h[i] = o;
   if (x16) mm::x16_put(x16, t, c, n, o, overflow);
 }
@@ -545,9 +545,9 @@ __global__ void wait_kernel(const uint32_t* flag, uint32_t value) {
   constexpr uint32_t kFailed = 0x80000000u;
   constexpr int kNap = 2;  // s_sleep's units (64 clocks each) between looks
   for (;;) {
-    const uint32_t v = __hip_atomic_load(flag, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
+    const uint32_t v = osmos_load_acquire_system(flag);
     if ((v & ~kFailed) == value) break;
-    __builtin_amdgcn_s_sleep(kNap);
+    osmos_sleep(kNap);
   }
 }
 

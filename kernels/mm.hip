@@ -198,6 +198,7 @@ bool group_gemm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32
 // holds at once, each taking tiles until none are left (IQ1_S, a block a tile: 204 against 188 us; mmsweep ink2).
 // what a WGP holds: its VGPRs' blocks or its LDS's, the fewer - the LDS both CUs' (WGP mode; the runtime's figure,
 // and its occupancy call, one CU's 64 KB: 7 blocks a WGP, 211 us, against the 12 the VGPRs allow, 190 us)
+#if defined(__HIP__)  // mm.h's group_tile_kernel: RDNA's alone (kOneTile false on CUDA)
 template <quant::Type T, int W>
 uint32_t resident_blocks() {
   static const uint32_t n = [] {
@@ -231,6 +232,7 @@ bool group_one_tile(const void* const* w, const int32_t* cnt, uint32_t n_mat, ui
       (const uint8_t* const*) w, cnt, n_mat, rows, cols, (const _Float16*) x16, xoff, xts, y, yoff, ys);
   return hipGetLastError() == hipSuccess;
 }
+#endif
 
 template <quant::Type T>
 bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
@@ -245,7 +247,9 @@ bool group_launch(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint
   const bool gemm = GroupPlan<T>::kGemm && rows % gemm_rows == 0 && cols / S::kSlab >= (uint32_t) S::kWaves;
   switch (col_tiles<T>(max_cnt)) {
     case 1:
+#if defined(__HIP__)
       if constexpr (mm::kOneTile<T>) return group_one_tile<T>(w, cnt, n_mat, rows, cols, x16, xoff, xts, y, yoff, ys, s);
+#endif
       return group_ct<T, 1>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     case 2:
       if constexpr (GroupPlan<T>::kRm)
@@ -268,6 +272,7 @@ struct Mats {
   uint32_t rows[2];
   float* y[2];
   uint32_t ys[2];
+  float scale[2] = {1.0f, 1.0f};  // each matrix's sums times it (mm_tokens_scaled)
 };
 
 template <quant::Type T, int CT, typename S>
@@ -275,7 +280,7 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
   const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT), rows = m.rows[0] > m.rows[1] ? m.rows[0] : m.rows[1];
   mm::kernel<T, S, CT><<<dim3(rows / mm::kTile, m.w[1] ? 2 : 1, z), mm::kWave * S::kWaves, 0, s>>>(
       (const uint8_t*) m.w[0], (const uint8_t*) m.w[1], m.rows[0], m.rows[1], cols, (const _Float16*) x16, n, m.y[0],
-      m.y[1], m.ys[0], m.ys[1]);
+      m.y[1], m.ys[0], m.ys[1], m.scale[0], m.scale[1]);
   return hipGetLastError() == hipSuccess;
 }
 
@@ -285,8 +290,13 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
 // 2560 Q6_K at 2,048 tokens 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 (low-power; 64 x 128: 22.8, 32 x 256: 22.4,
 // 128 x 128: past the LDS; without the second slab's LDS 25.5)
 template <quant::Type T>
-constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0;
+constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4;
 constexpr int kGemmRm = 2, kGemmRn = 4, kGemmWr = 2, kGemmWc = 4;
+// a type's gemm blocks (kGemm*'s but where measured): its rows and tokens a wave in tiles, its waves' grid
+template <quant::Type T> struct GemmPlan { static constexpr int Rm = kGemmRm, Rn = kGemmRn, Wr = kGemmWr, Wc = kGemmWc; };
+#ifdef GEMM_NVFP4
+template <> struct GemmPlan<quant::kNVFP4> { static constexpr int Rm = GEMM_RM, Rn = GEMM_RN, Wr = GEMM_WR, Wc = GEMM_WC; };
+#endif
 constexpr uint32_t kGemmMinTokens = 4 * mm::kTile;  // past it: CT 8's counts
 
 template <quant::Type T>
@@ -299,12 +309,13 @@ bool gemm_takes(const Mats& m, uint32_t cols, uint32_t n) {
 template <quant::Type T>
 bool launch_gemm(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   using S = typename Tuned<T>::S;
-  constexpr uint32_t BM = mm::kTile * kGemmRm * kGemmWr, BN = mm::kTile * kGemmRn * kGemmWc;
+  using P = GemmPlan<T>;
+  constexpr uint32_t BM = mm::kTile * P::Rm * P::Wr, BN = mm::kTile * P::Rn * P::Wc;
   const uint32_t rows = m.rows[0] > m.rows[1] ? m.rows[0] : m.rows[1];
-  mm::gemm_kernel<T, S, kGemmRm, kGemmRn, kGemmWr, kGemmWc>
+  mm::gemm_kernel<T, S, P::Rm, P::Rn, P::Wr, P::Wc>
       <<<dim3((rows + BM - 1) / BM, m.w[1] ? 2 : 1, (n + BN - 1) / BN), 256, 0, s>>>(
           (const uint8_t*) m.w[0], (const uint8_t*) m.w[1], m.rows[0], m.rows[1], cols, (const _Float16*) x16, n,
-          m.y[0], m.y[1], m.ys[0], m.ys[1]);
+          m.y[0], m.y[1], m.ys[0], m.ys[1], m.scale[0], m.scale[1]);
   return hipGetLastError() == hipSuccess;
 }
 
@@ -518,18 +529,28 @@ extern "C" bool mm_run2(uint32_t type, const void* w0, uint32_t rows0, float* y0
          run(type, Mats{{w0, w1}, {rows0, rows1}, {y0, y1}, {ys0, ys1}}, cols, x16, n, (hipStream_t) stream);
 }
 
-extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
-                          uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const float* x, uint32_t xs,
-                          uint32_t n, void* x16, int32_t* overflow, bool ready, void* stream) {
+extern "C" bool mm_tokens_scaled(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, float s0,
+                                 const void* w1, uint32_t rows1, float* y1, uint32_t ys1, float s1, uint32_t cols,
+                                 const float* x, uint32_t xs, uint32_t n, void* x16, int32_t* overflow, bool ready,
+                                 void* stream) {
+  if (!w0) return false;
   bool ok = true;
   for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS) {
     const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
+    Mats ms{{w0, w1}, {rows0, w1 ? rows1 : 0}, {y0 + (uint64_t) k0 * ys0, w1 ? y1 + (uint64_t) k0 * ys1 : nullptr},
+            {ys0, w1 ? ys1 : 0}};
+    ms.scale[0] = s0, ms.scale[1] = s1;
     ok = ((ready && n <= MM_MAX_TOKENS) || mm_x16(x + (uint64_t) k0 * xs, xs, m, cols, x16, overflow, stream)) &&
-         (w1 ? mm_run2(type, w0, rows0, y0 + (uint64_t) k0 * ys0, ys0, w1, rows1, y1 + (uint64_t) k0 * ys1, ys1, cols,
-                       x16, m, stream)
-             : mm_run(type, w0, rows0, cols, x16, m, y0 + (uint64_t) k0 * ys0, ys0, stream));
+         run(type, ms, cols, x16, m, (hipStream_t) stream);
   }
   return ok;
+}
+
+extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
+                          uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const float* x, uint32_t xs,
+                          uint32_t n, void* x16, int32_t* overflow, bool ready, void* stream) {
+  return mm_tokens_scaled(type, w0, rows0, y0, ys0, 1.0f, w1, rows1, y1, ys1, 1.0f, cols, x, xs, n, x16, overflow,
+                          ready, stream);
 }
 
 extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,

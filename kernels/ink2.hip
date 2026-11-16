@@ -765,11 +765,7 @@ extern "C" bool ink2_to_kv5(const float* x, uint64_t rows, uint8_t* y, void* str
 
 // a thread a block of a row: its amax, d = amax / 127, q = round(x / d) as x * (1 / d); d's f16 after the row's int8s
 __device__ inline void kv8_block(const float* row, uint32_t b, uint8_t* rec) {
-  const float* xb = row + b * INK2_KV8_BLOCK;
-  float amax = 0;
-  for (int e = 0; e < INK2_KV8_BLOCK; e++) amax = fmaxf(amax, fabsf(xb[e]));
-  const float d = amax / 127.0f, id = d != 0.0f ? 1.0f / d : 0.0f;
-  for (int e = 0; e < INK2_KV8_BLOCK; e++) rec[b * INK2_KV8_BLOCK + e] = (uint8_t) (int8_t) roundf(xb[e] * id);
+  const float d = q8_0_block<INK2_KV8_BLOCK>(row + b * INK2_KV8_BLOCK, 1, rec + b * INK2_KV8_BLOCK);
   *(_Float16*) (rec + INK2_MAX_HEAD + 2 * b) = (_Float16) d;
 }
 

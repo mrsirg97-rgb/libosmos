@@ -45,4 +45,4 @@ typedef struct OsmosFamily
 /* a sequence's family half (a family's batch reads its sequences' through it) */
 void *oseq_impl(const OsmosSeq *s);
 
-extern const OsmosFamily osmos_ds4, osmos_q4x, osmos_ink2;
+extern const OsmosFamily osmos_ds4, osmos_q4x, osmos_ink2, osmos_q35;
