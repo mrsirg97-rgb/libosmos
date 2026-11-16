@@ -121,9 +121,9 @@ pack's 256K and 4,096-token steps, its Q5_K drafter):
 
 | | |
 | --- | ---: |
-| Decode, drafted / plain (three short questions) | **16.8** / 10.3, 14.9 / 13.7, 18.4 / 17.8 tok/s |
+| Decode, drafted / plain (three short questions) | **16.6** / 10.6, 15.1 / 13.3, 18.3 / 17.9 tok/s |
 | Decode after a 64K / 248K prompt, drafted / plain | **18.1** / 9.2, **22.0** / 7.3 tok/s (the 248K text one its drafter predicts: 94% accepted) |
-| Prompt, 8,192 / 65,536 / 253,952 tokens | **357** / 302 / 185 tok/s |
+| Prompt, 8,192 / 65,536 / 253,952 tokens | **355** / 302 / 185 tok/s |
 | KL against Inkling-2-Small in BF16 (Wiki, 10,239 tokens) | 0.197, top-1 85.8% |
 
 Every token is the bits of the same tokens read as a prompt, drafted or not, at any steps. 87 GB of the 143 GB of
