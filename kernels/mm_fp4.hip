@@ -266,6 +266,130 @@ __global__ void tiles_kernel(const uint32_t* __restrict__ offsets, uint32_t e, u
   tile_start[e] = s;
 }
 
+// W2A16: a MoE's routed experts at 2 bits (mm_2b_grouped's codes, scales and grouping) times BF16 activations on the
+// BF16 matrix cores (mma m16n8k16, F32 sums). each code decoded as staged to its grid value times its block's UE4M3
+// scale - exact in BF16 (a grid value's 2 significant bits times E4M3's 4) - the expert's tensor scale on the sums.
+// TRANS false: y[t, r] = sum_k x[t, k] W[r, k] (the forward, x [n, cols]); TRANS true: y[t, k] = sum_r x[t, r] W[r, k]
+// (the input's gradient, x [n, rows]): W's blocks run along k, so the transposed product decodes each element under
+// its own block's scale, which BF16 can carry and a block-scaled FP4 operand cannot. a block 128 tokens x 128 outputs,
+// a K step 64 through LDS (rows 72 BF16 apart: a fragment's loads on distinct banks); 8 warps 4 x 2, a warp 32 x 64
+constexpr int kBK = 64, kLd = kBK + 8;
+
+__device__ inline uint16_t bf16_rn(float v) {
+  const uint32_t u = __float_as_uint(v);
+  return (uint16_t) ((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+}
+
+// E2M1's value of a nibble (sign bit 8): 0, .5, 1, 1.5, 2, 3, 4, 6 (no indexed array: clang spills those)
+__device__ inline float e2m1_value(uint32_t nib) {
+  const uint32_t m = nib & 7u, e = m >> 1;
+  const float v = e ? (1.0f + 0.5f * (float) (m & 1u)) * (float) (1u << (e - 1)) : 0.5f * (float) m;
+  return nib & 8u ? -v : v;
+}
+
+template <bool TRANS>
+__global__ __launch_bounds__(kTileThreads) void w2a16_kernel(const uint8_t* __restrict__ codes,
+                                                             const uint8_t* __restrict__ ws, uint32_t rows,
+                                                             uint32_t cols, const uint16_t* __restrict__ x,
+                                                             uint32_t xs, bool bf16, void* __restrict__ y,
+                                                             uint32_t ys, Experts ex) {
+  __shared__ uint16_t sa[kBM * kLd], sb[kBN * kLd];
+  const uint32_t tid = threadIdx.x, lane = tid % 32, warp = tid / 32, g = lane / 4, q = lane % 4;
+  const uint32_t wm = warp % 4, wn = warp / 4;
+  const uint32_t nout = TRANS ? cols : rows, kdim = TRANS ? rows : cols, n0 = blockIdx.x * kBN;
+  if (blockIdx.y >= ex.tile_start[ex.e]) return;
+  uint32_t lo = 0, hi = ex.e;
+  while (hi - lo > 1) {
+    const uint32_t mid = (lo + hi) / 2;
+    (ex.tile_start[mid] <= blockIdx.y ? lo : hi) = mid;
+  }
+  const uint32_t t0 = ex.offsets[lo] + (blockIdx.y - ex.tile_start[lo]) * kBM, tend = ex.offsets[lo + 1];
+  const uint8_t* wc = codes + (uint64_t) lo * rows * (cols / 4);
+  const uint8_t* wsc = ws + (uint64_t) lo * rows * (cols / 16);
+  const float gsw = ex.gsw[lo];
+  float gv[4];
+#pragma unroll
+  for (int c = 0; c < 4; c++) gv[c] = e2m1_value(ex.lut >> (4 * c) & 0xFu);
+  float d[2][8][4] = {};
+  for (uint32_t kb = 0; kb < kdim / kBK; kb++) {
+    for (uint32_t i = tid; i < kBM * (kBK / 8); i += kTileThreads) {   // A: 8 BF16 (16 bytes) a load
+      const uint32_t r = i / (kBK / 8), c8 = i % (kBK / 8), t = t0 + r < tend ? t0 + r : tend - 1;
+      *(uint4*) &sa[r * kLd + c8 * 8] = *(const uint4*) (x + (uint64_t) t * xs + (uint64_t) kb * kBK + c8 * 8);
+    }
+    if (!TRANS) {   // B[n][k]: W's row n0 + n, k kb*64 ..: a word of 16 codes and their block's scale an item
+      for (uint32_t i = tid; i < kBN * (kBK / 16); i += kTileThreads) {
+        const uint32_t n = i / (kBK / 16), c = i % (kBK / 16), row = n0 + n < rows ? n0 + n : rows - 1;
+        const uint32_t cw = *(const uint32_t*) (wc + (uint64_t) row * (cols / 4) + (uint64_t) kb * (kBK / 4) + 4 * c);
+        const float s = rnd::e4m3_value(wsc[(uint64_t) row * (cols / 16) + (uint64_t) kb * (kBK / 16) + c]);
+#pragma unroll
+        for (int j = 0; j < 16; j++) {
+          const uint32_t code = cw >> (2 * j) & 3u;
+          const float v = code == 0 ? gv[0] : code == 1 ? gv[1] : code == 2 ? gv[2] : gv[3];
+          sb[n * kLd + 16 * c + j] = bf16_rn(v * s);
+        }
+      }
+    } else {   // B[n][r]: W's column n0 + n, row kb*64 + r: a row's word of 16 codes (16 columns) an item
+      for (uint32_t i = tid; i < kBK * (kBN / 16); i += kTileThreads) {
+        const uint32_t r = i / (kBN / 16), c = i % (kBN / 16), row = kb * kBK + r;
+        const uint32_t col0 = n0 + 16 * c < cols ? n0 + 16 * c : cols - 16;
+        const uint32_t cw = *(const uint32_t*) (wc + (uint64_t) row * (cols / 4) + col0 / 4);
+        const float s = rnd::e4m3_value(wsc[(uint64_t) row * (cols / 16) + col0 / 16]);
+#pragma unroll
+        for (int j = 0; j < 16; j++) {
+          const uint32_t code = cw >> (2 * j) & 3u;
+          const float v = code == 0 ? gv[0] : code == 1 ? gv[1] : code == 2 ? gv[2] : gv[3];
+          sb[(16 * c + j) * kLd + r] = bf16_rn(v * s);
+        }
+      }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int kk = 0; kk < kBK / 16; kk++) {
+      uint32_t a[2][4];
+#pragma unroll
+      for (int mt = 0; mt < 2; mt++) {   // A: rows g, g + 8 of the m tile; k 2q (regs 0, 1) and 2q + 8 (2, 3)
+        const uint32_t ra = wm * 32 + mt * 16 + g, k = kk * 16 + 2 * q;
+        a[mt][0] = *(const uint32_t*) &sa[ra * kLd + k];
+        a[mt][1] = *(const uint32_t*) &sa[(ra + 8) * kLd + k];
+        a[mt][2] = *(const uint32_t*) &sa[ra * kLd + k + 8];
+        a[mt][3] = *(const uint32_t*) &sa[(ra + 8) * kLd + k + 8];
+      }
+#pragma unroll
+      for (int nt = 0; nt < 8; nt++) {   // B: column g of the n tile, k 2q and 2q + 8
+        const uint32_t rb = wn * 64 + nt * 8 + g, k = kk * 16 + 2 * q;
+        const uint32_t b0 = *(const uint32_t*) &sb[rb * kLd + k], b1 = *(const uint32_t*) &sb[rb * kLd + k + 8];
+#pragma unroll
+        for (int mt = 0; mt < 2; mt++) {
+#if defined(__CUDACC__)
+          asm volatile(
+              "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+              "{%0,%1,%2,%3};"
+              : "+f"(d[mt][nt][0]), "+f"(d[mt][nt][1]), "+f"(d[mt][nt][2]), "+f"(d[mt][nt][3])
+              : "r"(a[mt][0]), "r"(a[mt][1]), "r"(a[mt][2]), "r"(a[mt][3]), "r"(b0), "r"(b1));
+#endif
+        }
+      }
+    }
+    __syncthreads();
+  }
+  // D: element e row (token) g + 8 (e / 2) of the m tile, column 2q + e % 2 of the n tile
+#pragma unroll
+  for (int mt = 0; mt < 2; mt++)
+#pragma unroll
+    for (int nt = 0; nt < 8; nt++)
+#pragma unroll
+      for (int e = 0; e < 4; e++) {
+        const uint32_t t = t0 + wm * 32 + mt * 16 + g + 8 * (e / 2), o = n0 + wn * 64 + nt * 8 + 2 * q + e % 2;
+        if (t < tend && o < nout) {
+          const float v = d[mt][nt][e] * gsw;
+          if (bf16)
+            ((uint16_t*) y)[(uint64_t) t * ys + o] = bf16_rn(v);
+          else
+            ((float*) y)[(uint64_t) t * ys + o] = v;
+        }
+      }
+}
+
 }  // namespace
 
 extern "C" bool mm_fp4_ok(void) {
@@ -341,5 +465,26 @@ extern "C" bool mm_2b_grouped(const void* codes, const void* wscale, const float
   mm_kernel<kTwoBit><<<grid, kTileThreads, 0, st>>>((const uint8_t*) codes, (const uint8_t*) wscale, rows, cols,
                                                     (const uint8_t*) q, (const uint8_t*) sc, n, scale, scale_dev,
                                                     bf16 != 0, y, ys, Experts{offsets, tile_start, gsw, e, lut});
+  return launches::ok();
+}
+
+extern "C" bool mm_w2a16_grouped(const void* codes, const void* wscale, const float* gsw, uint32_t e, uint32_t lut,
+                                 uint32_t rows, uint32_t cols, uint32_t trans, const uint32_t* offsets,
+                                 uint32_t* tile_start, const void* x, uint32_t xs, uint32_t n, uint32_t bf16, void* y,
+                                 uint32_t ys, void* stream) {
+  const uint32_t kdim = trans ? rows : cols, nout = trans ? cols : rows;
+  if (!mm_fp4_ok() || !codes || !wscale || !gsw || !e || !offsets || !tile_start || !x || !y || !n || kdim % kBK ||
+      nout % 16 || cols % 16 || xs % 8)
+    return false;
+  const hipStream_t st = launches::st(stream);
+  tiles_kernel<<<1, 1, 0, st>>>(offsets, e, tile_start);
+  const dim3 grid((nout + kBN - 1) / kBN, (n + kBM - 1) / kBM + e);
+  const Experts ex{offsets, tile_start, gsw, e, lut};
+  if (trans)
+    w2a16_kernel<true><<<grid, kTileThreads, 0, st>>>((const uint8_t*) codes, (const uint8_t*) wscale, rows, cols,
+                                                      (const uint16_t*) x, xs, bf16 != 0, y, ys, ex);
+  else
+    w2a16_kernel<false><<<grid, kTileThreads, 0, st>>>((const uint8_t*) codes, (const uint8_t*) wscale, rows, cols,
+                                                       (const uint16_t*) x, xs, bf16 != 0, y, ys, ex);
   return launches::ok();
 }
