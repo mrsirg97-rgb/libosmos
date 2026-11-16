@@ -123,6 +123,7 @@ int main() {
   std::printf("  %u tokens (steps of %u): top-1 %u / %u, KL %.5f, largest logit gap %.3f\n", T, chunk, agree, T,
               kl / T, maxd);
   if (std::getenv("Q35_BENCH")) {  // the speeds: a fresh sequence, the reference's tokens as a prompt, then decode
+    q35_forward_tap(f, nullptr, nullptr);  // the residuals' tap off: its sync and copy a layer are the check's, not the forward's
     Q35Seq* b = q35_seq_create(f, err);
     CHECK(b);
     hipEvent_t e0, e1;

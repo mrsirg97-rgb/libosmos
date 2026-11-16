@@ -2,7 +2,10 @@
 // FFN's gate / up 17408 x 5120 and down 5120 x 17408, the DeltaNet's qkv 10240 x 5120, z 6144 x 5120 and out
 // 5120 x 6144, attention's q 12288 x 5120) at 1 .. 4 tokens, every call reading cold memory (its matrices rotated
 // through 2 GiB): microseconds a call and the weights' GB/s. a decode token's whole set in the last line (64 layers:
-// 48 DeltaNet, 16 attention, each its FFN), the matrices' share of the token's time at that rate.
+// 48 DeltaNet, 16 attention, each its FFN), the matrices' share of the token's time at that rate. READ=1: a plain
+// read's GB/s on the same bytes (the ceiling: 244 at low-power); SWEEP=1 [SHAPE=i]: direct_kernel's R and U on shape i
+// against fp4_kernel's bits. measured, not kept: the blocks split at load (scales apart, the codes' 32-byte runs: two
+// uint4 loads a block) - 224 GB/s against 225 on gate / up, 205-211 against 210-213 on the long rows
 // build: make fp4bench (or hipcc -O3 -Iinclude -Ikernels --offload-arch=gfx1151 tools/bench/fp4bench.hip)
 #include <hip/hip_runtime.h>
 
@@ -27,6 +30,17 @@ __global__ void fill(uint32_t* p, uint64_t n) {
     v ^= v >> 15, v *= 2246822519u, v ^= v >> 13;
     p[i] = v & 0x77777777u;  // UE4M3 scales kept under the NaN code, any E2M1 code
   }
+}
+
+// the ceiling: a plain read of the matrices' bytes (each lane uint4 loads summed, one write a block), the GB/s no
+// matvec of these bytes can pass
+__global__ void read_kernel(const uint4* p, uint64_t n, uint32_t* out) {
+  uint32_t acc = 0;
+  for (uint64_t i = blockIdx.x * 256ull + threadIdx.x; i < n; i += gridDim.x * 256ull) {
+    const uint4 v = p[i];
+    acc ^= v.x ^ v.y ^ v.z ^ v.w;
+  }
+  if (acc == 0x12345678u) out[blockIdx.x] = acc;
 }
 
 struct Shape {
@@ -71,8 +85,22 @@ int main(int argc, char** argv) {
   }
   std::printf("a decode token's NVFP4 matrices: %.2f GB in %.1f ms (%.1f GB/s): %.1f tok/s on these alone\n",
               token_bytes / 1e9, token_us / 1e3, token_bytes / token_us / 1e3, 1e6 / token_us);
+  if (std::getenv("READ")) {  // the read's ceiling on one gate / up matrix's bytes, cold, at a few grid sizes
+    const uint64_t bytes = 17408ull * 80 * 36, slots = kPool / bytes;
+    for (uint32_t grid : {1024u, 2048u, 4096u, 8192u}) {
+      for (int w = 0; w < 5; w++) read_kernel<<<grid, 256>>>((const uint4*) (pool + (w % slots) * bytes), bytes / 16, (uint32_t*) y);
+      hipEventRecord(a);
+      for (int c = 0; c < kCalls; c++)
+        read_kernel<<<grid, 256>>>((const uint4*) (pool + (uint64_t) (c % slots) * bytes), bytes / 16, (uint32_t*) y);
+      hipEventRecord(b);
+      hipEventSynchronize(b);
+      float ms = 0;
+      hipEventElapsedTime(&ms, a, b);
+      std::printf("  read %4u blocks: %7.1f us  %6.1f GB/s\n", grid, 1000.0 * ms / kCalls, bytes / (1000.0 * ms / kCalls) / 1e3);
+    }
+  }
   if (std::getenv("SWEEP")) {  // RDNA's direct_kernel at R rows a warp, U blocks in flight, against fp4_kernel's bits
-    const Shape& s = shapes[0];
+    const Shape& s = shapes[std::getenv("SHAPE") ? std::atoi(std::getenv("SHAPE")) : 0];  // SHAPE: shapes' index
     const uint64_t bytes = (uint64_t) s.rows * (s.cols / 64) * 36, slots = kPool / bytes;
     std::vector<float> h0(4ull * s.rows), h1(4ull * s.rows);
     std::vector<float> hx(4ull * s.cols);
@@ -112,7 +140,7 @@ int main(int argc, char** argv) {
     };                                                                                                             \
     time(fn, "R" #R " U" #U);                                                                                      \
   }
-    std::printf("direct_kernel at %u token(s), the FFN's gate / up:\n", n);
+    std::printf("direct_kernel at %u token(s), %s %u x %u:\n", n, s.name, s.rows, s.cols);
     TRY(1, 1) TRY(1, 2) TRY(2, 1) TRY(2, 2) TRY(4, 1) TRY(4, 2)
   }
   return 0;
