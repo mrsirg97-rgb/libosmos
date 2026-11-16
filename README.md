@@ -19,7 +19,7 @@ C, HIP and a little C++. No Python at runtime.
 ## Quick start
 
 ```sh
-python3 tools/install/osmos_install.py osmos-evo --serve           # DeepSeek; or ud-iq1_s, ud-iq1_m, ud-iq2_xxs
+python3 tools/install/osmos_install.py osmos-evo-1017 --serve      # DeepSeek; or ud-iq1_s, ud-iq1_m, ud-iq2_xxs
 python3 tools/install/osmos_install.py qwen38-ud-iq3_xxs --serve   # Qwen; or qwen38-ud-q4_k_xl
 python3 tools/install/osmos_install.py osmos-evo-inkling --serve   # Inkling-2-Small
 ```
@@ -51,7 +51,7 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 
 | Pack | Files | Context | Pick it for |
 | --- | --- | --- | --- |
-| `osmos-evo` | 147 GB (UD-IQ1_M's files + a 34 GB delta + a 23 GB patch, made where you install it) + 203 GB Engram table | 1M | **the default**: about halfway from UD-IQ1_M's quality to UD-IQ2_XXS's, faster than either (`osmos-evo-a` still installs it) |
+| `osmos-evo-1017` | 147 GB (UD-IQ1_M's files + a 34 GB delta + a 23 GB patch, made where you install it) + 203 GB Engram table | 1M | **the default**: about halfway from UD-IQ1_M's quality to UD-IQ2_XXS's, faster than either (`osmos-evo` and `osmos-evo-a` still install it) |
 | `ud-iq1_s` | 122 GB + 203 GB Engram table | 1M | speed |
 | `ud-iq1_m` | 140 GB + 203 GB Engram table | 1M | quality (unsloth's benchmarks 85.55 against 83.53) |
 | `ud-iq2_xxs` | 165 GB + 203 GB Engram table | 1M | the closest to the model, the slowest decode |
@@ -59,7 +59,7 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 | `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant: 10-18% slower than UD-IQ3_XXS on our agent replay, no better perplexity on our text |
 | `osmos-evo-inkling` | 158 GB (unsloth's UD-IQ1_S files + a 55.5 GB delta in two parts, made where you install it) + 1.3 GB drafter | 256K | Inkling-2-Small: UD-IQ1_S with its experts' down projections IQ2_S / IQ3_XXS and its attention and head Q5_K |
 
-## osmos-evo in numbers
+## osmos-evo-1017 in numbers
 
 The default DeepSeek pack, on one Strix Halo (the `performance` profile, nothing else running; 0.7.6):
 
@@ -77,7 +77,7 @@ never mentioned. Each answer scored teacher-forced - the probability of the whol
 
 | Distance back | 985K | 881K | 787K | 687K | 587K | 487K | 388K | 267K | 188K | 78K | 12K | never planted |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| osmos-evo | 0.986 | 0.992 | 0.995 | 0.993 | 0.998 | 0.996 | 0.998 | 0.994 | **0.955** | 0.995 | 0.996 | 0.0000 |
+| osmos-evo-1017 | 0.986 | 0.992 | 0.995 | 0.993 | 0.998 | 0.996 | 0.998 | 0.994 | **0.955** | 0.995 | 0.996 | 0.0000 |
 | osmos-evo-A (0.7.3) | 0.984 | 0.996 | 0.997 | 0.997 | 0.997 | 0.995 | 0.996 | 0.997 | 0.469 * | 0.999 | 0.995 | 0.0000 |
 | UD-IQ2_XXS | 0.998 | 0.998 | 0.999 | 1.000 | 0.999 | 0.999 | 0.999 | 0.999 | 0.983 | 0.999 | 0.998 | 0.0000 |
 
@@ -103,7 +103,7 @@ experts, BF16 dense) over the whole vocabulary, against a reference that runs th
 | Pack | Wiki text (8,191 tokens) | Agent traces (27,459 assistant tokens) | Top-1 agreement (Wiki) |
 | --- | --- | --- | --- |
 | `ud-iq2_xxs` | 0.126 ± 0.005 | 0.036 ± 0.001 | 92.4% |
-| `osmos-evo` | 0.158 ± 0.006 | 0.042 ± 0.001 | 91.2% |
+| `osmos-evo-1017` | 0.158 ± 0.006 | 0.042 ± 0.001 | 91.2% |
 | `osmos-evo-a` (0.7.5) | 0.175 ± 0.006 | 0.048 ± 0.001 | 90.5% |
 | `ud-iq1_m` | 0.190 ± 0.007 | 0.048 ± 0.001 | 90.3% |
 | `ud-iq1_s` | 0.259 ± 0.008 | 0.066 ± 0.001 | 88.1% |

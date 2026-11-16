@@ -31,8 +31,10 @@
 - **Shared kernels**: the codebook types' one-token expert steps (IQ1_S, IQ2_XXS, IQ2_S) on a kernel of their own
   (IQ1_S 58 -> 84 GB/s), DeepSeek's and Qwen's experts of those types too, the same bits; it skips an entry of no
   tokens before its weights (a table's NULL: Qwen faulted on it before the release). DeepSeek's and Qwen's decode
-  unchanged (`performance`: osmos-evo 18.1 / 17.8 / 16.9 plain, 32.3 / 28.6 / 35.9 drafted; Qwen UD-IQ3_XXS the same
+  unchanged (`performance`: osmos-evo-1017 18.1 / 17.8 / 16.9 plain, 32.3 / 28.6 / 35.9 drafted; Qwen UD-IQ3_XXS the same
   ids as 0.7.6, 28.0 / 42.6 tok/s plain / drafted at low-power against 0.7.6's 27.9 / 42.5).
+- **The DeepSeek pack is now `osmos-evo-1017`** (`osmos-evo-<model>`, beside `osmos-evo-inkling`); `osmos-evo` and
+  `osmos-evo-a` still install it, and rig's row is the same (`deepseek-1017-evo`).
 - **The installer** takes a delta in parts (a file past the hub's 50 GB, split; its parts together the whole delta's
   set, byte for byte: `DerivedSet.test_delta_in_parts`).
 - **`--trust-size` no longer re-hashes a set the installer made** (#53, @aic0d3r): an osmos-evo re-lay with
