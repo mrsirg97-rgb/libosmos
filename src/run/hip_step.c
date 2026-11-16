@@ -67,13 +67,23 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   Scratch *b = &f->b;
   const uint32_t hc = g->hc, D = g->n_embd, n = f->n;
   const int p = f->at;
-  if (f->taps && f->tapped[l] && f->cur + 1 == f->n_sub) /* a drafter's tap, the step's last rows */
+  /* a drafter's tap: the layer's last FWD_MAX_BATCH rows (f->taps' room), whichever sub-batches hold them - a seed
+     reads a sequence's last window of positions, which a short last sub-batch alone does not hold (a prompt piece of
+     2,125 tokens: sub-batches of 2,048 and 77). this sub-batch's rows from j0, at their place past the cut */
+  if (f->taps && f->tapped[l])
   {
-    if (!ops_hc_mean(b->h, hc, D, n, f->taps + (uint64_t)f->tap_of[l] * D, (uint32_t)f->n_tap * D, NULL))
-      return fwd_fail(err, "a GPU call failed (the drafter's tap)");
-    f->tap_n = n;
-    memcpy(f->tap_pos, f->pin->pos, n * sizeof *f->tap_pos);
-    memcpy(f->tap_bs, f->bs, n * sizeof *f->tap_bs);
+    const uint32_t r0 = f->sub[f->cur].xrow, cut = f->tap_rows > FWD_MAX_BATCH ? f->tap_rows - FWD_MAX_BATCH : 0;
+    const uint32_t j0 = cut > r0 ? cut - r0 : 0;
+    if (j0 < n)
+    {
+      const uint32_t at = r0 + j0 - cut, m = n - j0;
+      if (!ops_hc_mean(b->h + (uint64_t)j0 * hc * D, hc, D, m,
+                       f->taps + ((uint64_t)at * f->n_tap + f->tap_of[l]) * D, (uint32_t)f->n_tap * D, NULL))
+        return fwd_fail(err, "a GPU call failed (the drafter's tap)");
+      f->tap_n = at + m;
+      memcpy(f->tap_pos + at, f->pin->pos + j0, m * sizeof *f->tap_pos);
+      memcpy(f->tap_bs + at, f->bs + j0, m * sizeof *f->tap_bs);
+    }
   }
   if (g->engram[l] && !fwd_engram(f, l, (*nth)++, err))
     return false;
@@ -279,6 +289,9 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
   for (int l = 0, nth = 0; ok && l < f->n_layers; nth += g->engram[l], l++)
   {
     uint32_t rows = 0;
+    f->tap_rows = 0; /* the layer's rows, every sub-batch's (their counts final: past dec, compacted at its end) */
+    for (uint32_t k = 0; k < f->n_sub; k++)
+      f->tap_rows += f->sub[k].n;
     for (uint32_t k = 0; ok && k < f->n_sub; k++)
     {
       f->sub[k].xrow = rows;

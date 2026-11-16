@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -131,8 +132,48 @@ int main() {
     seq_destroy(s);
   };
   both("default", true);
+  // a prompt whose step's last sub-batch is shorter than the drafter's window (FWD_MAX_BATCH + 77 tokens: sub-batches
+  // of 2,048 and 77, the seed's 127 positions across both - a tool result continuing a cached conversation, rig's
+  // 2026-11-16 fault "a position the last step did not tap"): seeded, and its first drafts the bits of the same
+  // prompt read as two steps of one sub-batch each (1,995 + 130)
+  {
+    constexpr int kLong = 2048 + 77, kWin = 127;
+    std::vector<int32_t> lid(kLong);
+    FILE* lf = std::fopen((home + "/bench/osmos-prompts/calib16k.txt").c_str(), "r");
+    CHECK(lf);
+    for (auto& v : lid) CHECK(std::fscanf(lf, "%d,", &v) == 1);
+    std::fclose(lf);
+    const auto read = [&](Seq* s, int from, int n) {
+      std::vector<Seq*> ss(n, s);
+      const bool ok = forward_batch(f, ss.data(), lid.data() + from, (uint32_t) n, ferr);
+      if (!ok) std::fprintf(stderr, "  %s\n", ferr);
+      CHECK(ok);
+    };
+    int32_t dra[DRAFTER_BLOCK], drb[DRAFTER_BLOCK];
+    float cfa[DRAFTER_BLOCK], cfb[DRAFTER_BLOCK];
+    Seq* a1 = seq_create(f, ferr);
+    read(a1, 0, kLong);
+    const int ya = argmax_row(f, (int) forward_logit_rows(f) - 1);  // the step's last row: its last sub-batch's
+    const bool seeded = drafter_seed(d, a1, kLong - kWin, kLong, ferr);
+    if (!seeded) std::fprintf(stderr, "  one step of %d: %s\n", kLong, ferr);
+    CHECK(seeded);
+    const int na = drafter_draft(d, a1, ya, kConfMin, kCumMin, dra, cfa, ferr);
+    Seq* b1 = seq_create(f, ferr);
+    read(b1, 0, kLong - 130);
+    read(b1, kLong - 130, 130);
+    const int yb = argmax_row(f, (int) forward_logit_rows(f) - 1);
+    CHECK(drafter_seed(d, b1, kLong - kWin, kLong, ferr));
+    const int nb = drafter_draft(d, b1, yb, kConfMin, kCumMin, drb, cfb, ferr);
+    if (!(ya == yb && na == nb)) std::fprintf(stderr, "  one step: y %d, %d drafts (%d ..); two steps: y %d, %d drafts (%d ..)\n", ya, na, na > 0 ? dra[0] : -1, yb, nb, nb > 0 ? drb[0] : -1);
+    CHECK(ya == yb && na >= 0 && na == nb && std::memcmp(dra, drb, na * sizeof *dra) == 0 &&
+          std::memcmp(cfa, cfb, na * sizeof *cfa) == 0);
+    std::printf("  a %d-token step (sub-batches of 2,048 and 77): its last %d positions seeded; %d drafts the bits of "
+                "the same prompt in two steps\n", kLong, kWin, na);
+    seq_destroy(a1), seq_destroy(b1);
+  }
   CHECK(forward_lane(f, 0, NULL, ferr));
   both("the lane", false);
+
   drafter_destroy(d);
   forward_destroy(f);
   weights_destroy(w);

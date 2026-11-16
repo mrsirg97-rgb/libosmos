@@ -209,13 +209,14 @@ struct Forward
                      queued when the next one's rows are read (a layer's sub-batches run to its experts unwaited) */
   int n_eg;       /* the Engram layers (stage's) */
   /* DSpark's taps (fwd_taps_on, the drafter's): the streams' mean entering each target layer, [row][tap][D], for the
-     last sub-batch's rows of the step (a sequence's last ones: the drafter's ring holds 128); their positions and
-     sequences. NULL: none taken. tapped: the target layers the drafter gave */
+     layer's last FWD_MAX_BATCH rows of the step, whichever sub-batches hold them (a sequence's last ones: the
+     drafter's ring holds 128); their positions and sequences. NULL: none taken. tapped: the target layers the drafter
+     gave; tap_rows: the layer's rows, every sub-batch's (the cut's) */
   void *argmax_part; /* forward_greedy's slices' bests (ops_argmax_scratch of a step's rows) */
   float *taps;
   int n_tap, tap_of[WEIGHTS_MAX_LAYERS];
   bool tapped[WEIGHTS_MAX_LAYERS];
-  uint32_t tap_n;
+  uint32_t tap_n, tap_rows;
   int32_t tap_pos[FWD_MAX_BATCH];
   Seq *tap_bs[FWD_MAX_BATCH];
   uint32_t cur;   /* the running sub-batch (enter's) */
