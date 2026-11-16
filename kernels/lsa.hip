@@ -286,7 +286,8 @@ extern "C" LsaScratch* lsa_scratch_create(uint32_t max_buckets) {
 
 extern "C" void lsa_scratch_destroy(LsaScratch* s) {
   if (!s) return;
-  hipFree(s->key), hipFree(s->hist), hipFree(s->picks), hipFree(s->sel), hipFree(s->gt), hipFree(s->eq);
+  (void) hipFree(s->key), (void) hipFree(s->hist), (void) hipFree(s->picks), (void) hipFree(s->sel),
+      (void) hipFree(s->gt), (void) hipFree(s->eq);
   free(s);
 }
 

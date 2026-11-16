@@ -231,6 +231,8 @@ __global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restr
             : "+f"(d[mt][nt][0]), "+f"(d[mt][nt][1]), "+f"(d[mt][nt][2]), "+f"(d[mt][nt][3])
             : "r"(a[mt][0]), "r"(a[mt][1]), "r"(a[mt][2]), "r"(a[mt][3]), "r"(b0), "r"(b1), "r"(scale_a[mt]),
               "r"(scale_b));
+#else
+        (void) b0, (void) b1, (void) scale_b;  // the FP4 MMA is sm_120a's: on HIP mm_fp4_ok() refuses before a launch
 #endif
       }
     }
@@ -366,6 +368,8 @@ __global__ __launch_bounds__(kTileThreads) void w2a16_kernel(const uint8_t* __re
               "{%0,%1,%2,%3};"
               : "+f"(d[mt][nt][0]), "+f"(d[mt][nt][1]), "+f"(d[mt][nt][2]), "+f"(d[mt][nt][3])
               : "r"(a[mt][0]), "r"(a[mt][1]), "r"(a[mt][2]), "r"(a[mt][3]), "r"(b0), "r"(b1));
+#else
+          (void) b0, (void) b1;  // CUDA's BF16 MMA: on HIP mm_fp4_ok() refuses before a launch
 #endif
         }
       }
