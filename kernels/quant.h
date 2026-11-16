@@ -357,20 +357,29 @@ __device__ inline uint32_t nvfp4_high_bytes(uint32_t codes) {  // 4 bytes' low n
   const uint32_t mag = codes & 0x07070707u, nonzero = (mag + 0x7F7F7F7Fu) & 0x80808080u;
   return osmos_perm(kNvfp4HiHi, kNvfp4HiLo, mag) | ((codes & 0x08080808u) << 4 & nonzero);
 }
-template <> __device__ inline h8 decode_h<kNVFP4>(const uint8_t* b, int k) {
+// a chunk's raw words (its 16 values' scale byte, the two words of their 8 code bytes) and their decode apart: the
+// loads where the caller has them (mm's one-tile NVFP4: a block's words whole) - decode_h is the two in turn
+struct Nvfp4Raw {
+  uint32_t s, q0, q1;
+  int k;
+};
+__device__ inline h8 nvfp4_h(const Nvfp4Raw& r) {
   typedef _Float16 h2v __attribute__((ext_vector_type(2)));
-  const _Float16 d = (_Float16) mul(rnd::ue4m3_value(b[k / 2]), 0.5f);  // exact: a 4-bit scale's half
+  const _Float16 d = (_Float16) mul(rnd::ue4m3_value((uint8_t) r.s), 0.5f);  // exact: a 4-bit scale's half
   const h2v dd = {d, d};
-  const uint8_t* qs = b + 4 + (k / 2) * kChunk;
-  const uint32_t sh = 4 * (k % 2);
+  const uint32_t sh = 4 * (r.k % 2);
   u4 out;
   for (int w = 0; w < 2; w++) {
-    const uint32_t hb = nvfp4_high_bytes(ld32(qs + 4 * w) >> sh);
+    const uint32_t hb = nvfp4_high_bytes((w ? r.q1 : r.q0) >> sh);
     const uint32_t p01 = osmos_perm(0, hb, 0x010C000Cu), p23 = osmos_perm(0, hb, 0x030C020Cu);  // (0, hb_i) halves
     out[2 * w] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(h2v, p01) * dd);
     out[2 * w + 1] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(h2v, p23) * dd);
   }
   return __builtin_bit_cast(h8, out);
+}
+template <> __device__ inline h8 decode_h<kNVFP4>(const uint8_t* b, int k) {
+  const uint8_t* qs = b + 4 + (k / 2) * kChunk;
+  return nvfp4_h(Nvfp4Raw{b[k / 2], ld32(qs), ld32(qs + 4), k});
 }
 
 // Q4_K as f16, decode<kQ4_K>'s bits with fewer operations: (d sc) q exact in F32 (an f16's 11 bits times a 6-bit

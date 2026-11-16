@@ -130,7 +130,39 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
   const _Float16* xb[CT];  // each tile's fragments: a step kFrag on (the lane's column osmos_load_b's)
   for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile, 0, xts);
   f8 acc[CT] = {};
-  if constexpr (CT == 1 && kRegAShape<T, S>) {  // the A operand straight from the decode (kRegA)
+  if constexpr (CT == 1 && T == quant::kNVFP4 && SL == quant::Block<T>::values) {
+    // NVFP4 at one tile: a slab one block a row - a lane its row's 36 bytes whole (9 words, lanes l and l + 16 the
+    // same), the next slab's in flight under this one's WMMAs, both of a step's chunks decoded where they are
+    // (quant::nvfp4_h: decode_h's bits) - A's f16 in kRegA's places, the same sums. a chunk's loads apart (decode_h:
+    // a byte and two words each) waited at every step
+    constexpr int NW = quant::Block<T>::bytes / 4;
+    static_assert(quant::Block<T>::bytes % 4 == 0, "a block whole words");
+    uint32_t cw[NW], nw[NW];
+    auto fetch = [&](uint32_t k0, uint32_t* v) {
+      int kk;
+      const uint32_t* b = (const uint32_t*) quant::at<T>(w, row0 + col, cols, k0 / quant::kChunk, &kk);
+#pragma unroll
+      for (int i = 0; i < NW; i++) v[i] = b[i];
+    };
+    uint32_t k0 = wave * SL;
+    if (k0 < cols) fetch(k0, cw);
+    for (; k0 < cols; k0 += S::kWaves * SL) {
+      const uint32_t k1 = k0 + S::kWaves * SL;
+      if (k1 < cols) fetch(k1, nw);
+      osmos_fb bx[G];
+      for (int g = 0; g < G; g++) bx[g] = osmos_load_b(xb[0] + (uint64_t) (k0 / kTile + g) * kFrag);
+#pragma unroll
+      for (int g = 0; g < G; g++) {
+        const uint32_t sb = cw[0] >> (8 * g) & 0xFF, q0 = cw[1 + 2 * g], q1 = cw[2 + 2 * g];
+        const h8 lo = quant::nvfp4_h(quant::Nvfp4Raw{sb, q0, q1, 2 * g}),
+                 hi = quant::nvfp4_h(quant::Nvfp4Raw{sb, q0, q1, 2 * g + 1});
+        h16 a;
+        for (int j = 0; j < quant::kChunk; j++) a[j] = lo[j], a[quant::kChunk + j] = hi[j];
+        acc[0] = osmos_mma(a, bx[g], acc[0]);
+      }
+      for (int i = 0; i < NW; i++) cw[i] = nw[i];
+    }
+  } else if constexpr (CT == 1 && kRegAShape<T, S>) {  // the A operand straight from the decode (kRegA)
     for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
       h16 a[G];
       osmos_fb bx[G];
