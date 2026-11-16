@@ -134,8 +134,8 @@ Inkling-2-Small on one Strix Halo (the `performance` profile, nothing else runni
 | | |
 | --- | ---: |
 | Decode, drafted / plain (three short questions) | **17.2** / 10.9, 16.3 / 14.1, 20.2 / 17.8 tok/s |
-| Decode after a 64K / 248K prompt | drafted **14.1** / 24.0 (a text its drafter predicts, 94% accepted); plain 9.2 / 7.9 |
-| Prompt, 8,192 / 65,536 / 253,952 tokens | **330** / 279 / 169 tok/s |
+| Decode after a 64K / 248K prompt | drafted **15.3** / 23.2 (a text its drafter predicts, 94% accepted); plain 9.7 / 7.7 |
+| Prompt, 8,192 / 65,536 / 253,952 tokens | **312-330** / 295 / 183 tok/s |
 | KL against Inkling-2-Small in BF16 (Wiki, 10,239 tokens) | 0.197, top-1 85.8% |
 
 Every token is the bits of the same tokens read as a prompt, drafted or not, at any steps. 87 GB of the 143 GB of

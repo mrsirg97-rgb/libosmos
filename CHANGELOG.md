@@ -8,8 +8,9 @@
   IQ2_S / IQ3_XXS and its attention and head Q5_K by GPTQ: 158.2 GB, KL against Inkling-2-Small in BF16 0.197 on Wiki
   (top-1 85.8%). The experts that do not fit in memory stream from the SSD; 256K context by default (`--ctx 1m`).
 - **Its numbers** (`performance`, osmos-serve at the pack's 256K and 4,096-token steps): decode drafted / plain
-  17.2 / 10.9, 16.3 / 14.1 and 20.2 / 17.8 tok/s on three short questions; after a 64K prompt 14.1 / 9.2, after 248K
-  24.0 / 7.9 (a text its drafter predicts: 94% accepted); prompts 330 tok/s at 8K, 279 at 64K, 169 at 248K. Every token
+  17.2 / 10.9, 16.3 / 14.1 and 20.2 / 17.8 tok/s on three short questions; after a 64K prompt 15.3 / 9.7, after 248K
+  23.2 / 7.7 (a text its drafter predicts: 94% accepted); prompts 312-330 tok/s at 8K, 295 at 64K, 183 at 248K (runs
+  vary ~5%). Every token
   the bits of the same tokens read as a prompt, drafted or not, whatever the steps.
 - **The memory goes to the experts.** A full layer's keys cached Q8 and values Q5 (3.5 GB at 256K, f16's 8.0; KL
   +0.001), the prompt's stream sized by the experts a layer can miss (3.9 GB, not 6.8), the step's buffers shared
@@ -19,7 +20,9 @@
   a split decode's rows (token, head) pairs, its blocks only the waves that compute (a wave without rows holds its
   registers), a Q8 / Q5 tile's records turned into values at the store not as loaded (the next tile's loads in flight),
   a one-wave decode's keys straight from each lane's record into the scores' fragments. After a 64K prompt: plain
-  7.65 -> 9.62 tok/s, drafted 13.35 -> 15.51.
+  7.65 -> 9.62 tok/s, drafted 13.35 -> 15.51. A prompt step's running fold of its units kept in its output rows, not
+  64 more registers a wave: a full layer's 4,096-token step 18% faster (3.36 -> 2.73 s at 248K keys), a 248K prompt
+  169 -> 183 tok/s.
 - **The drafter**: its matrices on the WMMA kernels, its fold Q8_0, its attention reading each key once, its weights
   Q5_K (`tools/requant/requant_ink2_mtp`, the same drafts as Q8_0 at 1.18 GiB): a round 31 -> 12 ms. A round stops at
   a confidence product of 0.9 (each drafted token Inkling verifies reads its own experts: ~55 ms).
