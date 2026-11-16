@@ -66,6 +66,13 @@ bool mm_2b_grouped(const void *codes, const void *wscale, const float *gsw, uint
                    uint32_t cols, const uint32_t *offsets, uint32_t *tile_start, const void *q, const void *sc,
                    uint32_t n, float scale, const float *scale_dev, uint32_t bf16, void *y, uint32_t ys,
                    void *stream);
+/* W2A16: the same experts (codes, wscale, gsw, lut, the grouping) times BF16 activations x [n, xs] on the BF16 matrix
+   cores, each code decoded to its grid value times its block's scale (exact in BF16), gsw[e] on the sums. trans 0:
+   y [n, rows] = x [n, cols] W^T (the forward); trans 1: y [n, cols] = x [n, rows] W (the input's gradient). y F32 or
+   (bf16) BF16. the reduction a multiple of 64 */
+bool mm_w2a16_grouped(const void *codes, const void *wscale, const float *gsw, uint32_t e, uint32_t lut, uint32_t rows,
+                      uint32_t cols, uint32_t trans, const uint32_t *offsets, uint32_t *tile_start, const void *x,
+                      uint32_t xs, uint32_t n, uint32_t bf16, void *y, uint32_t ys, void *stream);
 #ifdef __cplusplus
 }
 #endif
