@@ -134,7 +134,7 @@ int main() {
     CHECK(hipEventRecord(e1, NULL) == hipSuccess && hipEventSynchronize(e1) == hipSuccess &&
           hipEventElapsedTime(&ms, e0, e1) == hipSuccess);
     std::printf("  prompt: %u tokens in %.1f ms, %.0f tokens/s\n", T, ms, T / (ms / 1e3));
-    const int steps = 64;
+    const int steps = std::getenv("Q35_STEPS") ? std::atoi(std::getenv("Q35_STEPS")) : 64;
     CHECK(hipEventRecord(e0, NULL) == hipSuccess);
     for (int i = 0; i < steps; i++) CHECK(q35_step(f, b, tok + (i % T), 1, 1, err));
     CHECK(hipEventRecord(e1, NULL) == hipSuccess && hipEventSynchronize(e1) == hipSuccess &&
