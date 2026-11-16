@@ -196,7 +196,7 @@ int main(int argc, char **argv)
   api.d = arch && arch->type == GGUF_STRING ? dialect_of(arch->v.s) : NULL;
   api.tok = g && api.d ? tokenizer_create(g, err) : NULL;
   if (g && !api.d)
-    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp, inkling2)", arch && arch->type == GGUF_STRING ? arch->v.s : "(none)");
+    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp, qwen35, inkling2)", arch && arch->type == GGUF_STRING ? arch->v.s : "(none)");
   gguf_destroy(g);
   if (!api.tok)
     return die(err);
