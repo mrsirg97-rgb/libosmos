@@ -156,7 +156,15 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
     if (!ids_push(&c->held, toks[i]))
       return -1;
   *t = picks[m];
-  return !end && (uint32_t)oseq_position(c->s) + 1 < sv->max_ctx;
+  if (!end && (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx) /* the context's last position: its pick printed, not
+                                                                    fed, as step_greedy's last (0.9.2: dropped) */
+  {
+    out("T %d\n", *t), a->produced++;
+    if (server_eos(sv, *t))
+      a->finish = "stop";
+    return 0;
+  }
+  return !end;
 }
 
 /* a greedy token: printed, then fed (the last printed never is: the next turn's prompt holds it) */
