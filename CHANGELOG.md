@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.9.2]: a correctness pass, osmos-api's edges, upgrades
+
+A sweep for edge cases like 0.9.1's - each candidate reproduced (a failing test, or a replay through osmos-api)
+before it was fixed, each fix's test seen to fail before it. The answers' bits are unchanged on every family's normal
+path (the GPU suite; Inkling both splits, Qwen plain and MTP, DeepSeek plain and drafted against 0.8.0's runs).
+
+- **Fixes that change what a client sees:**
+  - **A DeepSeek turn refused after long sessions** ("an expert the pool cannot hold"): the experts' stream held twice
+    a layer's cold experts as loaded, but decode moves the cache between layers, so a prompt step later needed more.
+    Its floor is now a whole layer (Inkling's rule).
+  - **osmos-api stopped mid-answer (rig stopping or restarting it) sent the cut answer as `finish_reason: "stop"`**:
+    a half-written tool call read as whole. It is now an error event (streamed) or a 503.
+  - **A cancel during a prompt's read (a client's timeout) threw the conversation's cache away**, so the retry read
+    it all again (and, slower than the timeout, again). It now goes back to the last point it holds (Qwen: 0 -> 8,325
+    tokens reused).
+  - **A conversation taken back from the slots lost its cache on its next turn** (two conversations sharing a lane:
+    every other turn read everything again). 0 -> 4,099 tokens reused (Qwen), 0 -> 3,936 (DeepSeek).
+  - **Kept conversations matched by a file's name and size only**: an overlay made again at the same size, or a pack's
+    shards patched in place, continued an old conversation's state under new weights. A file's inode and modification
+    time are now in the identity (kept conversations from earlier versions are read again once).
+  - **DeepSeek: two rollbacks with no step between** (a turn ending on its first token, then a request with no saved
+    point) went past the 16 the state keeps, and the next tokens were not their bits. A rollback's depth now counts
+    since the last step.
+  - **A drafted answer at the context's end was a token short of the plain one.**
+  - **Inkling: thinking off is its template's effort 0** (it was ignored), and a `developer` message is a system one
+    (it was refused).
+- **Drafts only** (verify gates every draft, so these were speed, never output): Qwen's MTP head saved with a
+  conversation (a restored one drafted from another's rows); Qwen DFlash's rings a window and 9 rows (a rollback
+  past the window left stale keys in it); DeepSeek's drafter after the user turn's mark (27 -> 37 of its drafts
+  accepted on a short tail). Guards for library callers: Inkling and Qwen DFlash refuse a seed whose taps another
+  step overwrote (they built rings from another sequence's), Inkling's seed within its drafter's block (an 8-byte
+  overrun for a block of 2 or 3), DeepSeek's multi-prompt seed limit documented.
+- **osmos-api:** a prompt past the context carries OpenAI's `context_length_exceeded` code (harnesses compact on it);
+  only "loading" is a 503 (a request's own fault is a 400 then too); `/v1/models` says whether the engine is ready
+  and its context length; a port in use says so.
+- **The installer:** `--upgrade [VERSION]`, `--rollback`, `--versions`, `--prune` - each osmos version built from its
+  tag beside the others, rig's rows moved by their command alone, each version's `osmos.<version>.json` frozen so a
+  rollback never meets a newer key. `--have` again adds a folder (it kept the last alone: a 430 GB plan for packs
+  already here), a missing one is refused, a made file is checked as the layout checks it, same-size files are told
+  apart under `--trust-size`, `--serve` takes a free port, and `--rig` keeps a row's own keys.
+
 ## [0.9.1]: DeepSeek's drafted turns after a tool result
 
 - **A fix: a DeepSeek turn could fail with "forward: a position the last step did not tap".** A prompt read in more
