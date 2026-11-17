@@ -1912,6 +1912,67 @@ per full-attention layer, keys in blocks of 512 at their position; a block once 
   another sequence or a short file refused (the identity, as seq_load's).
 - the model: step 0's logits against HF's (Qwen3.8-27B, then -vibes); step 1's tail loss against night5's.
 
+## vibes-flash: LFM3 (lfm3) (design, 2026-11-17)
+
+the operator's: vibes-flash - LiquidAI's LFM3-1.7B liberated (the refusal direction of layer 12 projected out of its
+writers through their post-norms) and trained on recipe v, on each grid it ships in: NVFP4 and Q4_0 (each its own
+in-quantizer run), and BF16 (the NVFP4 run's values). 10M context with LSA on its six full-attention layers. brought up
+here first (CUDA, battlestation: the oracle, the trainer and the files are here), the Halo after (the operator).
+step 1 of three: the model (this section); then the sequence and the engine; then LSA.
+
+- **references**: Liquid's modeling code (the checkpoint's own modeling_lfm3.py, LFM Open License v1.0) is the
+  oracle - its zero-tail rope is the model. llama.cpp's graph (src/models/lfm3.cpp, lfm-base.cpp: our build at
+  /mnt/data/rl/llama-lfm3, with the NVFP4 scales its upstream drops) matches it on identical tokens (log-probs within
+  0.08 past 100 tokens, BF16's noise); its intermediate tensors (llama-eval-callback) are the per-op reference.
+  transformers' built-in Lfm3 is not the model (v5.23 and main rotate all 64 pairs: KL 0.047 at 4K, growing with
+  position; huggingface/transformers #50853, Liquid's config fix pending) - never a reference here.
+- **the file** (`general.architecture` lfm3; 24 layers, D 2048, vocab 128,000 rows - 125,033 tokens -, eps 1e-5,
+  native context 262,144):
+  - layers 0, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23 (13): the short convolution - shortconv.in_proj [2048 ->
+    6144: B, C, x], shortconv.conv [7 taps x 2048] (depthwise, causal from a zero state), shortconv.out_proj
+    [2048 -> 2048]: y = out_proj(C * conv(B * x)); no activation. a sequence's state the last 6 rows of B * x.
+  - layers 2, 6, 10, 14, 18, 22 (6): full attention; 4, 8, 12, 16, 20 (5): sliding-window attention (256 keys). both:
+    attn_q [2048 -> 16 x 128], attn_k / attn_v [2048 -> 4 x 128], attn_q_norm / attn_k_norm [128] (RMS a head),
+    attn_gate [2048 -> 16] (a scalar a head: out_h *= sigmoid(gate_h)), attn_output [2048 -> 2048], scale 1 / sqrt(128).
+    the rope NEOX (pair i with i + 64): full attention base 1e6 with the zero tail - pairs 0 .. 31 at base^(-2i / 128),
+    pairs 32 .. 63 unrotated (the file's rope_freqs: factor 1e30 on them, applied to full attention alone); sliding
+    attention base 1e4, all 64 pairs, no factors.
+  - every layer: attn_norm -> the operator (conv or attention) -> post_attention_norm -> += residual; ffn_norm ->
+    SwiGLU (ffn_gate, ffn_up [2048 -> 7680], ffn_down) -> post_ffw_norm -> += residual (RMS norms, weight w not 1 + w).
+  - the head: output_norm, the embedding tied (token_embd BF16, never quantized).
+  - NVFP4 files: every matrix NVFP4 with its F32 .scale beside it (q35's reading: geo.c); Q4_0 files the same
+    matrices Q4_0; the norms, conv taps and rope_freqs F32 in both.
+- **a sequence's state**: the conv's 6 rows a layer (13 x 6 x 2048 F32, 0.6 MB); sliding attention a ring of 256 rows
+  a layer (5 x 256 x 4 x 128, K and V); full attention every row (6 x 4 x 128 x 2 values a token: 12 KB in BF16,
+  6 KB in the cache's Q8_0 - 10M tokens ~65 GB, LSA's tiers' business). rollback: q35's ring of slots for the conv
+  (q4x_conv's `slots`), the attention rows past a position never read again.
+- **the kernels**: reused - rms, embed (BF16), mv / mm (BF16; NVFP4 with its scale), q4x_conv (7 taps <=
+  Q4X_CONV_TAPS_MAX 8; its ring), SwiGLU, add, argmax / top. new or widened:
+  - **Q4_0** (ggml 2: 32 values, an f16 scale, 4-bit codes - 8): a type for quant.h and mv / mm, against ggml's
+    dequant bit for bit, as Q2_0 was.
+  - **the rope's zero tail**: q4x's NEOX rope (Q4xRope, YaRN's fields - the 10M stretch needs them) with a rotated
+    pair count below dim / 2 and the full dim's progression - one rope, not a second.
+  - **attention**: q35's decode attention is the shape (flash decoding over the Q8_0 cache, the gate on the merge),
+    fixed at head 256 (its 1 / 16), a gate a value; LFM3's head 128, a gate a head, and a 256-key window on five
+    layers. widened: the head dim, the gate's stride and a window as arguments (decisions below).
+  - B * x and C * y: an elementwise multiply of strided thirds (ops' family).
+- **the shape**: q35's - src/lfm3/ and include/osmos/lfm3/ (geometry, roles, forward), the shared parts shared; the
+  engine's family `lfm3` (hip_engine_lfm3.c) later, with the sequence.
+- **the order** (tests first, each seen to fail): Q4_0 against ggml's dequant, bit for bit; the geometry - every
+  tensor in a role, the layer types from the file (the per-layer head_count_kv: 0 for a conv layer), refusals (a
+  missing .scale beside an NVFP4 matrix, an unknown tensor, a conv not 7 taps); the zero-tail rope against Liquid's
+  inv_freq; the forward one sequence, one block at a time against llama.cpp's intermediate tensors, then the logits:
+  BF16 against the oracle on fixed ids (2K and 8K tokens: past the sliding window, where the built-in class drifts),
+  NVFP4 and Q4_0 against llama.cpp on the same files (KL, top-1).
+- **done when**: the forward's logits match the oracle (BF16) and llama.cpp (NVFP4, Q4_0) at 8K tokens within the
+  tolerances the tests state; the CUDA build passes them on battlestation.
+
+decisions (operator, 2026-11-17):
+- attention: q35's kernels widened - the head dim, a gate's stride (a value or a head) and a window as arguments; one
+  kernel for both families, q35's tests still its bits.
+- the first file brought up: BF16 (the oracle's own maths: a mismatch is the forward's, not a grid's), then NVFP4 and
+  Q4_0 (their types alone added, against llama.cpp on the same files).
+
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
 the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,
