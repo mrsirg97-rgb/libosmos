@@ -77,6 +77,7 @@ typedef struct Q4xDfBuf
 
 struct Q4xForward
 {
+  uint64_t steps; /* q4x_step's calls: b.taps the last one's (a batch past Q4X_MAX_RUNS is several: Q4xSeq.step_id) */
   const Q4xWeights *w;
   const Q4xMtp *mtp; /* or NULL */
   const Q4xDflash *df; /* or NULL */
@@ -164,6 +165,7 @@ struct Q4xSeq
   float *pend;
   int32_t pend_pos, step_pos0;
   uint32_t step_row0, step_n, step_t0; /* step_t0: its first token's place in the step (its taps' row) */
+  uint64_t step_id;                     /* the forward's step it was in (Q4xForward.steps): DFlash's taps its own */
   /* with a drafter: each layer's key and value rings (df_ring rows of kv floats, position p at p % df_ring), the
      context positions they hold (df_lo .. df_pos - 1: seeded since the last gap - a load, a seed past its end) */
   float *dk[Q4X_DFLASH_MAX_LAYERS], *dv[Q4X_DFLASH_MAX_LAYERS];

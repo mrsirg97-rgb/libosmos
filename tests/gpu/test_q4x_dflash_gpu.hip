@@ -284,6 +284,10 @@ int main() {
   CHECK(q4x_dflash_draft(g, ra, toks[W + 101], 7, 0, 0, a, ca, err) == 7);
   CHECK(q4x_dflash_draft(g, rb, toks[W + 101], 7, 0, 0, b, cb, err) == 7);
   CHECK(std::memcmp(a, b, 7 * 4) == 0 && std::memcmp(ca, cb, 7 * 4) == 0);
+  // a seed after another step (a batch of more than 64 sequences is several: the later ones' taps over its): refused
+  step(g, ra, toks.data(), 4);
+  step(g, rb, toks.data(), 4);
+  CHECK(!q4x_dflash_seed(g, ra, (int32_t) W + 101, (int32_t) W + 105, err) && std::strstr(err, "another step"));
   q4x_seq_destroy(ra), q4x_seq_destroy(rb);
   q4x_forward_destroy(g);
   std::printf("  past the window (%u): 8 seeded positions rolled back, 1 seeded after - the drafts the bits of the"

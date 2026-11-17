@@ -31,6 +31,10 @@ bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char er
     return q4x_fail(err, "no forward with a drafter, or a sequence of another forward");
   if (s->broken)
     return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+  if (s->step_n && s->step_id != f->steps) /* 0.9.2: b.taps a step's alone, from its row 0 - a batch of more than
+                                              Q4X_MAX_RUNS runs is several steps, the later ones' taps over its */
+    return q4x_fail(err, "the drafter's taps another step's: seed right after the sequence's step (a batch of at most "
+                         "64 sequences)");
   if (from >= to || !s->step_n || from < s->step_pos0 || to > s->step_pos0 + (int32_t)s->step_n || to > s->pos)
     return q4x_fail(err, "positions not of the sequence's last step, or past its position");
   const int32_t p0 = from;
