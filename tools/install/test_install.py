@@ -211,6 +211,15 @@ class UserFiles(unittest.TestCase):
             os.remove(a)  # alone again: its bytes enough
             self.assertEqual(userfiles.find(dict(eb, sha256="0" * 64), [d], trust_size=True), os.path.realpath(b))
 
+    def test_serve_port(self):  # 0.9.2: --serve on the first free port, not 8091 whatever held it
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            held = s.getsockname()[1]
+            self.assertNotEqual(osmos_install.free_port(held), held)
+            self.assertEqual(osmos_install.parser().parse_args(["p", "--serve", "--port", "9000"]).port, 9000)
+
     def test_have_flags(self):  # 0.9.2: --have again kept the last alone; a directory not there passed over
         with tempfile.TemporaryDirectory() as d:
             x, y, z = (os.path.join(d, n) for n in "xyz")

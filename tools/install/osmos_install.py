@@ -149,11 +149,26 @@ def parser():
     ap.add_argument("--rig-home", default=os.environ.get("RIG_HOME", os.path.expanduser("~/.rig")))
     ap.add_argument("--rig-default", choices=("yes", "no", "ask"), default="ask")
     ap.add_argument("--serve", action="store_true", help="start osmos-api on the (first) pack")
+    ap.add_argument("--port", type=int, default=None,
+                    help="--serve's port (the first free one from 8091 by default: rig's rows' own may be serving)")
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="the checks and the plan, nothing written")
     ap.add_argument("--doctor", action="store_true",
                     help="the machine as osmos will run on it: every check, what to change (doctor.py)")
     return ap
+
+
+def free_port(start, host="127.0.0.1"):
+    """the first port from start nothing listens on (0.9.2: --serve took 8091 whatever held it - rig's first row)"""
+    import socket
+    for p in range(start, start + 100):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, p))
+                return p
+            except OSError:
+                continue
+    raise SystemExit(f"--serve: no free port from {start} (--port one)")
 
 
 def main():
@@ -226,7 +241,9 @@ def main():
     if a.serve:
         if not os.path.exists(API):
             raise SystemExit(f"{API} is not built (make api)")
-        os.execv(API, [API, "--config", cfgs[0], "--port", str(rig.PORT_BASE)])
+        port = a.port or free_port(rig.PORT_BASE)
+        print(f"osmos-api on 127.0.0.1:{port}", flush=True)
+        os.execv(API, [API, "--config", cfgs[0], "--port", str(port)])
     return 0
 
 
