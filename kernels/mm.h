@@ -132,6 +132,7 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
   const _Float16* xb[CT];  // each tile's fragments: a step kFrag on (the lane's column osmos_load_b's)
   for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile, 0, xts);
   f8 acc[CT] = {};
+#if defined(__HIP__)  // RDNA's alone (WMMA's lane layout, the A fragments built in place): CUDA takes the next branch
   if constexpr (CT == 1 && T == quant::kNVFP4 && SL == quant::Block<T>::values) {
     // NVFP4 at one tile: a slab one block a row - a lane its row's 36 bytes whole (9 words, lanes l and l + 16 the
     // same), the next slab's in flight under this one's WMMAs, both of a step's chunks decoded where they are
@@ -180,7 +181,9 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
       run(std::true_type{});
     else
       run(std::false_type{});
-  } else if constexpr (CT == 1 && kRegAShape<T, S>) {  // the A operand straight from the decode (kRegA)
+  } else
+#endif  // __HIP__
+  if constexpr (CT == 1 && kRegAShape<T, S>) {  // the A operand straight from the decode (kRegA)
     for (uint32_t k0 = wave * SL; k0 < cols; k0 += S::kWaves * SL) {
       h16 a[G];
       osmos_fb bx[G];

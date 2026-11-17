@@ -329,18 +329,18 @@ __global__ void attn_kernel(Ink2Attn a, const float* q, const float* rel, const 
 // (j < 8) at column lane % 16 of a tile's scores and of each 16-dim slice of O (q4x_attn.hip's layout)
 constexpr int kFaTile = INK2_FA_TILE;
 constexpr int kFaHead = INK2_MAX_HEAD;
-constexpr int kFaRow = kFaHead + 8;  // f16s a row in LDS, then a pad
-constexpr int kFaKey = kFaTile + 8;
-constexpr int kFaRowTiles = 4;
+[[maybe_unused]] constexpr int kFaRow = kFaHead + 8;  // f16s a row in LDS, then a pad
+[[maybe_unused]] constexpr int kFaKey = kFaTile + 8;
+[[maybe_unused]] constexpr int kFaRowTiles = 4;
 constexpr uint32_t kFaUnit = INK2_FA_UNIT;  // a block's row tiles (INK2_FA_RT 1 / 2 / 4 for a sweep; 16K full: 756 / 716 / 638 ms)
 typedef _Float16 fa_h16 __attribute__((ext_vector_type(16)));
 typedef float fa_f8 __attribute__((ext_vector_type(8)));
 
-__device__ inline float fa_row_max(float v) {
+[[maybe_unused]] __device__ inline float fa_row_max(float v) {
   for (int o = 1; o < kFaTile; o <<= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
   return v;
 }
-__device__ inline float fa_row_sum(float v) {
+[[maybe_unused]] __device__ inline float fa_row_sum(float v) {
   for (int o = 1; o < kFaTile; o <<= 1) v += __shfl_xor(v, o, 32);
   return v;
 }
@@ -365,10 +365,10 @@ struct Kv8Raw {
   uint2 q;
   _Float16 s;
 };
-__device__ inline Kv8Raw kv8_raw(const uint8_t* rec, uint32_t d) {
+[[maybe_unused]] __device__ inline Kv8Raw kv8_raw(const uint8_t* rec, uint32_t d) {
   return {*(const uint2*) (rec + d), *(const _Float16*) (rec + INK2_MAX_HEAD + d / INK2_KV8_BLOCK * 2)};
 }
-__device__ inline fa_h8 kv8_vals(const Kv8Raw& r) {
+[[maybe_unused]] __device__ inline fa_h8 kv8_vals(const Kv8Raw& r) {
   const float scale = (float) r.s;
   const int8_t* q = (const int8_t*) &r.q;
   fa_h8 out;
@@ -387,12 +387,12 @@ struct Kv5Raw {
   uint32_t nib, hi;
   _Float16 s;
 };
-__device__ inline Kv5Raw kv5_raw(const uint8_t* rec, uint32_t d) {
+[[maybe_unused]] __device__ inline Kv5Raw kv5_raw(const uint8_t* rec, uint32_t d) {
   constexpr uint32_t H = INK2_MAX_HEAD;
   return {*(const uint32_t*) (rec + d / 2), rec[H / 2 + d / 8],
           *(const _Float16*) (rec + H / 2 + H / 8 + d / INK2_KV8_BLOCK * 2)};
 }
-__device__ inline fa_h8 kv5_vals(const Kv5Raw& r) {
+[[maybe_unused]] __device__ inline fa_h8 kv5_vals(const Kv5Raw& r) {
   const float scale = (float) r.s;
   fa_h8 out;
   for (int e = 0; e < 8; e++) {
@@ -408,6 +408,7 @@ __device__ inline fa_h8 kv5_vals(const Kv5Raw& r) {
 // a query's keys in units of kFaUnit at absolute positions (pos0 key 0's): each unit's online softmax from nothing,
 // folded into the running one in order. SPLIT: a block a unit (blockIdx.z, from unit u0), its partial (m, l, o)
 // written to part for ink2_fa_fold - a decode's units in parallel, the prompt's fold's bits
+#if defined(__HIP__)  // RDNA's alone: WMMA's lane layout throughout (on CUDA fa_launch refuses)
 template <int G, int RT, class KV, bool SPLIT, int W = G * RT>
 __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, const float* rel, const float* sink,
                                                      const float* gate, uint32_t n_tok, const KV* k,
@@ -628,10 +629,11 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       }
   }
 }
+#endif  // __HIP__
 
 // a split decode's units folded in order into the sink's start (fa_kernel's fold): a block a (token, head), a
 // thread a value dim
-__global__ void fa_fold_kernel(const float* part, uint32_t units, uint32_t n_tok, uint32_t H, const float* sink,
+[[maybe_unused]] __global__ void fa_fold_kernel(const float* part, uint32_t units, uint32_t n_tok, uint32_t H, const float* sink,
                                const float* gate, float* out, _Float16* x16, int32_t* overflow) {
   const uint32_t t = blockIdx.x / H, h = blockIdx.x % H, d = threadIdx.x, cols = H * kFaHead;
   if (t >= n_tok) return mm::x16_put(x16, t, h * kFaHead + d, cols, 0.0f, overflow);  // a pad row of x16's tile
@@ -654,6 +656,9 @@ template <class KV>
 static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const float* sink, const float* gate,
                       uint32_t n_tok, const KV* k, const KV* v, uint32_t n_keys, uint32_t pos0, const float* rel_proj,
                       float* out, float* scratch, void* stream) {
+#if !defined(__HIP__)
+  return false;  // fa_kernel is RDNA's alone (Inkling's prompt attention not on CUDA)
+#else
   if (!a || !q || !rel || !sink || !k || !v || !rel_proj || !out || !n_tok || n_tok > n_keys ||
       a->head_dim != INK2_MAX_HEAD || !a->kv_heads || a->heads % a->kv_heads ||
       a->heads / a->kv_heads > INK2_FA_MAX_GROUP || !a->d_rel || a->d_rel > INK2_MAX_REL || !a->extent ||
@@ -696,6 +701,7 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
   FA(6, 4)
 #undef FA
   return false;
+#endif  // __HIP__
 }
 
 extern "C" uint64_t ink2_fa_scratch(uint32_t heads, uint32_t max_keys) {

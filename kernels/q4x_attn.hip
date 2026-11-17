@@ -246,6 +246,7 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
   }
 }
 
+#if defined(__HIP__)  // RDNA's alone: its LDS (60.7 KB) past CUDA's 48 KB static - fa_kernel's bits all the same
 // a chunk whole for every token of a group (dense keys: no picks) - tt consecutive tokens' rows (t G + r: up to
 // kWholeRows), the chunk's K and V read once for the group, not a token at a time. a wave a 16-row tile and half of
 // O's columns (its pair the other half: both the tile's scores, as fa_kernel's waves - 128 accumulators a lane spilled).
@@ -342,6 +343,7 @@ __global__ __launch_bounds__(kWholeWaves * 32) void fa_whole_kernel(const float*
     }
   }
 }
+#endif  // __HIP__
 
 // a block a (token, q head), a thread a dim: its row's chunks merged in order, the gate - out[t][h][d]. the chunks a
 // row reads: those up to its own position, whatever its batch computed
@@ -441,12 +443,16 @@ extern "C" bool q4x_attn(const float* q, const void* kc, const void* vc, uint32_
     float *ml = scratch, *po = scratch + (uint64_t) 2 * chunks * kv_heads * rows;
     const uint64_t at = (uint64_t) t0 * heads * kHead;
     // dense keys: the chunks whole for a group's first token the group's (fa_whole_kernel), its tokens' rest their own
+#if defined(__HIP__)
     const uint32_t tt = pick ? 0 : kWholeRows / (heads / kv_heads);
     if (tt && (p0 + n) / kChunk) {  // some group's first token past a whole chunk (fa_kernel skips them all the same)
       fa_whole_kernel<<<dim3((n + tt - 1) / tt, kv_heads, ((p0 + n) / kChunk + kWholeChunks - 1) / kWholeChunks), kWholeWaves * 32, 0, st(stream)>>>(
           q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, tt, ml, po);
       if (!ok()) return false;
     }
+#else
+    const uint32_t tt = 0;  // fa_whole_kernel RDNA's alone: every chunk fa_kernel's
+#endif
     fa_kernel<<<dim3(n, kv_heads, chunks), kWaves * 32, 0, st(stream)>>>(
         q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, ppk, tt, ml, po);
     if (!ok()) return false;

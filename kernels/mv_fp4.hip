@@ -113,7 +113,7 @@ __global__ __launch_bounds__(32 * kWarps) void fp4_kernel(const uint8_t* __restr
 // sums in its order: its bits. FFN gate / up 17408 x 5120, one token, low-power: fp4_kernel 41 GB/s (R 4, spilled), 139
 // (R 2); this 228 (fp4exp)
 constexpr uint32_t kTabLo = 0x42403C00u, kTabHi = 0x4A484644u;  // 0, 1, 2, 3 | 4, 6, 8, 12 as f16 high bytes
-__device__ inline void e2m1x4(uint32_t codes, float* v) {  // bytes' low nibbles 0..3 as 4 values
+[[maybe_unused]] __device__ inline void e2m1x4(uint32_t codes, float* v) {  // bytes' low nibbles 0..3 as 4 values
   const uint32_t hb = osmos_perm(kTabHi, kTabLo, codes & 0x07070707u) | (codes & 0x08080808u) << 4;
   const uint32_t h01 = osmos_perm(0, hb, 0x010C000Cu), h23 = osmos_perm(0, hb, 0x030C020Cu);  // (0, hb_i) halves
   v[0] = (float) __builtin_bit_cast(_Float16, (uint16_t) h01), v[1] = (float) __builtin_bit_cast(_Float16, (uint16_t) (h01 >> 16));
