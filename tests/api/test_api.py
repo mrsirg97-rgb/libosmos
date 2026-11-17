@@ -1046,6 +1046,20 @@ class InklingApi(Served, unittest.TestCase):
         self.post({"messages": msgs, "reasoning_effort": 0.35}).read()
         self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort=0.35))
 
+    def test_3b_thinking_off_and_developer(self):  # 0.9.2: thinking off the template's "none" (it was the default
+        # 0.9); a developer message a system one (it was refused: the template knows no developer role)
+        self.ready()
+        msgs = [{"role": "user", "content": "three primary colors?"}]
+        for off in ({"chat_template_kwargs": {"enable_thinking": False}}, {"thinking": {"type": "disabled"}},
+                    {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "high"}):
+            self.reply(I_TEXT + "ok" + I_END + I_EOS)
+            self.assertEqual(self.post(dict({"messages": msgs}, **off)).status, 200)
+            self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort="none"), off)
+        self.reply(I_TEXT + "ok" + I_END + I_EOS)
+        r = self.post({"messages": [{"role": "developer", "content": "Be brief."}] + msgs})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(self.last_gen()[-1], self.prompt([{"role": "system", "content": "Be brief."}] + msgs))
+
     def test_4_history_whole(self):  # a client's arguments string the object the template asks for; reasoning kept
         self.ready()
         self.reply(I_TEXT + "Sunny." + I_END + I_EOS)
