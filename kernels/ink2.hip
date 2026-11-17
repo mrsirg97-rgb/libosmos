@@ -552,7 +552,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         for (int e = 0; e < kVec; e++) kb16[e] = lo[e], kb16[kVec + e] = hi[e];
       } else
         kb16 = *(const fa_h16*) (ks + col * kFaRow + g * kFaTile);
-      sacc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(qa[g], kb16, sacc);
+      sacc = osmos_wmma_f16(qa[g], kb16, sacc);
     }
     if constexpr (kKD)
       if (kb + kFaTile <= khi) fetch_k(kb + kFaTile);
@@ -578,7 +578,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       l[j] = l[j] * alpha[j] + fa_row_sum(pv), m[j] = mn;
       ps[wave][(2 * j + half) * kFaKey + col] = (_Float16) pv;
     }
-    __builtin_amdgcn_wave_barrier();
+    osmos_wave_barrier();
     const fa_h16 pa = *(const fa_h16*) (ps[wave] + col * kFaKey);
     // a row whose own key is in this tile (not its last): its p . v over the tile's values up to its own alone - the
     // WMMA's sum moves with a value whose p is 0, and the keys past a query are the prompt's next tokens in one
@@ -590,16 +590,16 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
       const fa_h16 bv = *(const fa_h16*) (vt + (nt * kFaTile + col) * kFaKey);
       const fa_f8 prev = o[nt];
-      o[nt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bv, prev);
+      o[nt] = osmos_wmma_f16(pa, bv, prev);
       for (int c = cmin; c <= cmax; c++) {
         fa_h16 bc = bv;
         for (int e = c + 1; e < kFaTile; e++) bc[e] = (_Float16) 0.0f;
-        const fa_f8 d = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bc, prev);
+        const fa_f8 d = osmos_wmma_f16(pa, bc, prev);
         for (int j = 0; j < 8; j++)
           if ((int64_t) (base + rtok(2 * j + half)) == (int64_t) kb + c) o[nt][j] = d[j];
       }
     }
-    __builtin_amdgcn_wave_barrier();
+    osmos_wave_barrier();
     if constexpr (!SPLIT)
       if ((pos0 + kb + kFaTile) % kFaUnit == 0 || kb + kFaTile > khi) {  // a unit's end: folded, the next from nothing
         for (int j = 0; j < 8; j++) {

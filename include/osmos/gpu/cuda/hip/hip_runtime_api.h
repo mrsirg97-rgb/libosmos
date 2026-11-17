@@ -20,6 +20,7 @@ typedef cudaEvent_t hipEvent_t;
 #define hipMemsetAsync cudaMemsetAsync
 #define hipMemcpy cudaMemcpy
 #define hipMemcpyAsync cudaMemcpyAsync
+#define hipMemcpy2DAsync cudaMemcpy2DAsync /* (Inkling's forward and drafter taps: the same arguments, in CUDA's order) */
 #define hipMemcpyHostToDevice cudaMemcpyHostToDevice
 #define hipMemcpyDeviceToHost cudaMemcpyDeviceToHost
 #define hipMemcpyDeviceToDevice cudaMemcpyDeviceToDevice
@@ -65,7 +66,8 @@ typedef enum
 {
   hipDeviceAttributeWallClockRate,
   hipDeviceAttributeComputeCapabilityMajor,
-  hipDeviceAttributeComputeCapabilityMinor
+  hipDeviceAttributeComputeCapabilityMinor,
+  hipDeviceAttributeMultiprocessorCount
 } hipDeviceAttribute_t;
 static inline hipError_t hipDeviceGetAttribute(int *v, hipDeviceAttribute_t a, int dev)
 { /* the wall clock: %globaltimer, ns (1,000,000 kHz); a compute capability CUDA's own */
@@ -73,6 +75,8 @@ static inline hipError_t hipDeviceGetAttribute(int *v, hipDeviceAttribute_t a, i
     return cudaDeviceGetAttribute(v, cudaDevAttrComputeCapabilityMajor, dev);
   if (a == hipDeviceAttributeComputeCapabilityMinor)
     return cudaDeviceGetAttribute(v, cudaDevAttrComputeCapabilityMinor, dev);
+  if (a == hipDeviceAttributeMultiprocessorCount) /* (the SMs: mv.hip's cus) */
+    return cudaDeviceGetAttribute(v, cudaDevAttrMultiProcessorCount, dev);
   if (a != hipDeviceAttributeWallClockRate) return cudaErrorInvalidValue;
   (void)dev;
   *v = 1000000;

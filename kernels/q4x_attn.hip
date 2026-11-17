@@ -253,7 +253,12 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
 // the same softmax (a WMMA's row its own: the tile's other rows another token's, or zeros, change none of its bits -
 // test_q35_gpu's dump, steps of 64, 100 and 2,048), its partials at the same (chunk, kvh, row). a block kWholeChunks
 // chunks (its q read once), each chunk's partials its own
-constexpr int kWholeTiles = 4, kWholeWaves = 2 * kWholeTiles, kWholeRows = kWholeTiles * kTile;
+#if defined(__HIP__)
+constexpr int kWholeTiles = 4;
+#else
+constexpr int kWholeTiles = 2;  // (CUDA: 4 tiles' 60.7 KB of static shared memory past its 48 KB; tt follows kWholeRows)
+#endif
+constexpr int kWholeWaves = 2 * kWholeTiles, kWholeRows = kWholeTiles * kTile;
 #ifndef WHOLE_CHUNKS
 #define WHOLE_CHUNKS 4
 #endif

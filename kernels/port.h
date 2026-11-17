@@ -15,6 +15,8 @@
 #define osmos_keep(x) asm("" : "+v"(x))
 #define osmos_keep3(a, b, c) asm("" : "+v"(a), "+v"(b), "+v"(c))
 __device__ inline void osmos_wave_barrier() { __builtin_amdgcn_wave_barrier(); }
+__device__ inline void osmos_barrier_nofence() { __builtin_amdgcn_s_barrier(); }  // the workgroup's waves, no fence
+constexpr bool osmos_rdna_regs = true;  // A's f16 in RDNA's WMMA registers a kernel may build itself (mm.h's one tile)
 __device__ inline void osmos_wave_fence() {
   __builtin_amdgcn_fence(__ATOMIC_RELEASE, "workgroup");
   __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "workgroup");
@@ -75,6 +77,8 @@ __device__ inline float osmos_row_sum(float v) {
 #define osmos_keep(x) asm volatile("" : "+f"(x))
 #define osmos_keep3(a, b, c) asm volatile("" : "+f"(a), "+f"(b), "+f"(c))
 __device__ inline void osmos_wave_barrier() { __syncwarp(); }
+__device__ inline void osmos_barrier_nofence() { __syncthreads(); }  // (bar.sync: s_barrier's wait, a fence too)
+constexpr bool osmos_rdna_regs = false;  // mma.sync's fragments, not RDNA's registers: mm.h's general paths
 __device__ inline void osmos_wave_fence() { __syncwarp(); }  // __syncwarp orders the warp's shared memory too
 
 // v_perm_b32: each byte of the result chosen by sel's byte from {a, b} as bytes 7..4 = a, 3..0 = b; 8 .. 11 a sign
