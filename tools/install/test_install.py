@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -25,6 +26,7 @@ import host  # noqa: E402
 import rig  # noqa: E402
 import stamp  # noqa: E402
 import userfiles  # noqa: E402
+import versions  # noqa: E402
 
 REAL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs.json")
 REV = "2688c0c3c2c3b052ec4f6d10a8417b0ef7ee4eba"
@@ -1215,6 +1217,135 @@ class Rig(unittest.TestCase):
                 rig.register(home, self.CFG, "/b/osmos-api", "/m/osmos.json", default=False, row=self.DS)
             with open(p, "rb") as f:
                 self.assertEqual(f.read(), b"[{not json")
+
+
+class Versions(unittest.TestCase):
+    """0.9.2: osmos's versions side by side (versions.py) - rig's rows moved between them by their command alone, each
+    version's config frozen, the last move undone by --rollback"""
+
+    def layout(self, d):
+        h, rig_home, pack = os.path.join(d, "osmos"), os.path.join(d, "rig"), os.path.join(d, "models", "p")
+        for v in ("0.5.12", "0.9.1"):
+            api = os.path.join(h, v, "bin", "osmos-api")
+            os.makedirs(os.path.dirname(api))
+            put(api, f"#!/bin/sh\necho osmos {v}\n".encode())
+            os.chmod(api, 0o755)
+        os.makedirs(pack)
+        with open(os.path.join(pack, "osmos.json"), "w") as f:
+            json.dump({"pack": "p", "model": "/m.gguf", "max_context": 4096}, f)
+        os.makedirs(rig_home)
+        cmd = lambda v: f"{h}/{v}/bin/osmos-api --config {pack}/osmos.json --port ${{PORT}}"  # noqa: E731
+        rows = [{"id": "old", "command": cmd("0.5.12"), "port": 8092},
+                {"id": "new", "command": cmd("0.9.1"), "port": 8091, "maxTokens": 1234, "mine": "kept"},
+                {"id": "other", "command": "/usr/bin/llama-server --port ${PORT}", "port": 9000}]
+        with open(os.path.join(rig_home, "models.json"), "w") as f:
+            json.dump(rows, f)
+        return h, rig_home, pack
+
+    def fake_build(self, h, ver):
+        api = os.path.join(h, ver, "bin", "osmos-api")
+        os.makedirs(os.path.dirname(api))
+        put(api, f"#!/bin/sh\necho osmos {ver}\n".encode())
+        os.chmod(api, 0o755)
+
+    def rows(self, rig_home):
+        with open(os.path.join(rig_home, "models.json")) as f:
+            return {r["id"]: r for r in json.load(f)}
+
+    def test_upgrade_and_rollback(self):
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            self.fake_build(h, "0.9.2")
+            moved = versions.upgrade(rig_home, h, "0.9.2", log=lambda m: None)
+            self.assertEqual([m["id"] for m in moved], ["new"])  # the rows on the newest built before it, alone
+            r = self.rows(rig_home)
+            self.assertEqual(r["new"]["command"], f"{h}/0.9.2/bin/osmos-api --config {pack}/osmos.0.9.2.json --port ${{PORT}}")
+            self.assertEqual((r["new"]["port"], r["new"]["maxTokens"], r["new"]["mine"]), (8091, 1234, "kept"))
+            self.assertIn("0.5.12", r["old"]["command"])
+            self.assertEqual(r["other"]["command"], "/usr/bin/llama-server --port ${PORT}")
+            for v in ("0.9.1", "0.9.2"):  # each version's config frozen: a later key never reaches an older one
+                self.assertTrue(os.path.exists(os.path.join(pack, f"osmos.{v}.json")))
+            with open(os.path.join(pack, "osmos.json"), "w") as f:
+                json.dump({"pack": "p", "model": "/m.gguf", "max_context": 4096, "a_later_key": 1}, f)
+            versions.rollback(rig_home, h, log=lambda m: None)
+            r = self.rows(rig_home)
+            self.assertEqual(r["new"]["command"], f"{h}/0.9.1/bin/osmos-api --config {pack}/osmos.0.9.1.json --port ${{PORT}}")
+            with open(os.path.join(pack, "osmos.0.9.1.json")) as f:
+                self.assertNotIn("a_later_key", json.load(f))
+            with self.assertRaises(versions.VersionError):  # nothing left to roll back
+                versions.rollback(rig_home, h, log=lambda m: None)
+
+    def test_rows_chosen_and_a_changed_row_left(self):
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            self.fake_build(h, "0.9.2")
+            self.assertEqual(sorted(m["id"] for m in versions.upgrade(rig_home, h, "0.9.2", "all", log=lambda m: None)),
+                             ["new", "old"])
+            with self.assertRaises(versions.VersionError):
+                versions.pick(list(self.rows(rig_home).values()), "other", ["0.9.2"])  # not a versioned row
+            rows = list(self.rows(rig_home).values())
+            for r in rows:
+                if r["id"] == "old":
+                    r["command"] = "edited by hand"
+            with open(os.path.join(rig_home, "models.json"), "w") as f:
+                json.dump(rows, f)
+            said = []
+            self.assertEqual(versions.rollback(rig_home, h, log=said.append), ["new"])
+            self.assertTrue(any("changed since" in m for m in said))
+            self.assertEqual(self.rows(rig_home)["old"]["command"], "edited by hand")
+
+    def test_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            h = os.path.join(d, "osmos")
+            calls = []
+
+            def run(cmd, cwd=None, **kw):
+                calls.append(cmd)
+                if cmd[:2] == ["git", "clone"]:
+                    api = os.path.join(cmd[-1], "bin", "osmos-api")
+                    os.makedirs(os.path.dirname(api))
+                    put(api, b"#!/bin/sh\necho osmos 0.9.2\n")
+                    os.chmod(api, 0o755)
+                return subprocess.run(cmd, capture_output=True, text=True) if cmd[0].endswith("osmos-api") else \
+                    subprocess.CompletedProcess(cmd, 0, "", "")
+            at = versions.build(h, "0.9.2", "repo", run=run, log=lambda m: None)
+            self.assertEqual(at, os.path.join(h, "0.9.2"))
+            self.assertIn(["git", "clone", "--depth", "1", "--branch", "v0.9.2", "repo", at + ".osmos-tmp"], calls)
+            self.assertFalse(os.path.exists(at + ".osmos-tmp"))
+            n = len(calls)
+            versions.build(h, "0.9.2", "repo", run=run, log=lambda m: None)  # built already: its --version alone
+            self.assertEqual(len(calls), n + 1)
+            fail = lambda cmd, cwd=None, **kw: subprocess.CompletedProcess(cmd, 1, "", "no such tag")  # noqa: E731
+            with self.assertRaises(versions.VersionError):
+                versions.build(h, "0.9.3", "repo", run=fail, log=lambda m: None)
+            self.assertFalse(os.path.exists(os.path.join(h, "0.9.3")))
+
+    def test_latest_and_prune(self):
+        out = "a\trefs/tags/v0.9.0\nb\trefs/tags/v0.10.1\nc\trefs/tags/v0.9.2\nd\trefs/tags/vbad\n"
+        self.assertEqual(versions.latest("r", run=lambda *a, **k: subprocess.CompletedProcess(a, 0, out, "")), "0.10.1")
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            self.fake_build(h, "0.5.9")
+            self.fake_build(h, "0.9.2")
+            self.assertEqual(versions.unused(rig_home, h), ["0.5.9"])  # 0.9.2 the newest: kept whatever
+            versions.prune(rig_home, h, False, log=lambda m: None)
+            self.assertTrue(os.path.isdir(os.path.join(h, "0.5.9")))
+            versions.prune(rig_home, h, True, log=lambda m: None)
+            self.assertFalse(os.path.exists(os.path.join(h, "0.5.9")))
+
+    def test_register_keeps_a_rows_other_keys(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = {"pack": "t", "max_context": 65536}
+            rig.register(d, cfg, "/api", "/c.json", False, ROW)
+            with open(os.path.join(d, "models.json")) as f:
+                rows = json.load(f)
+            rows[0]["mine"] = "kept"
+            with open(os.path.join(d, "models.json"), "w") as f:
+                json.dump(rows, f)
+            rig.register(d, cfg, "/api2", "/c.json", False, ROW)
+            with open(os.path.join(d, "models.json")) as f:
+                r = json.load(f)[0]
+            self.assertEqual((r["mine"], r["command"].split()[0]), ("kept", "/api2"))
 
 
 if __name__ == "__main__":

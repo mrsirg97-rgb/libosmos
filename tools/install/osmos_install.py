@@ -30,6 +30,7 @@ import layout  # noqa: E402
 import manifest  # noqa: E402
 import rig  # noqa: E402
 import userfiles  # noqa: E402
+import versions  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
 API = os.path.join(ROOT, "bin", "osmos-api")
@@ -152,6 +153,14 @@ def parser():
     ap.add_argument("--port", type=int, default=None,
                     help="--serve's port (the first free one from 8091 by default: rig's rows' own may be serving)")
     ap.add_argument("--no-build", action="store_true")
+    ap.add_argument("--upgrade", nargs="?", const="latest", metavar="VERSION",
+                    help="build osmos VERSION (the newest release by default) beside the others and move rig's rows to "
+                         "it - the rows on the newest version built, or --rows (versions.py)")
+    ap.add_argument("--rows", default=None, help="--upgrade's rig rows: ids, comma-separated, or all")
+    ap.add_argument("--rollback", action="store_true", help="the last --upgrade's rows back where they were")
+    ap.add_argument("--versions", action="store_true", help="the osmos versions built here and the rig rows on each")
+    ap.add_argument("--prune", action="store_true", help="the versions no rig row runs (removed with --yes)")
+    ap.add_argument("--yes", action="store_true", help="--prune: remove them")
     ap.add_argument("--dry-run", action="store_true", help="the checks and the plan, nothing written")
     ap.add_argument("--doctor", action="store_true",
                     help="the machine as osmos will run on it: every check, what to change (doctor.py)")
@@ -171,11 +180,41 @@ def free_port(start, host="127.0.0.1"):
     raise SystemExit(f"--serve: no free port from {start} (--port one)")
 
 
+def versions_mode(a):
+    """--upgrade, --rollback, --versions, --prune: osmos's versions side by side, rig's rows moved between them"""
+    h = versions.home()
+    try:
+        if a.versions:
+            print(f"osmos versions in {h} (rig's rows on each):")
+            versions.report(a.rig_home, h)
+        if a.upgrade:
+            repo = subprocess.run(["git", "-C", ROOT, "remote", "get-url", "origin"], capture_output=True,
+                                  text=True).stdout.strip() or versions.REPO
+            ver = versions.latest(repo) if a.upgrade == "latest" else a.upgrade.lstrip("v")
+            print(f"osmos {ver}:")
+            versions.build(h, ver, repo)
+            print("rig:")
+            moved = versions.upgrade(a.rig_home, h, ver, a.rows)
+            print(f"  {len(moved)} row(s) moved; rig starts them on {ver} at their next launch (a running one: restart "
+                  f"it)" if moved else "  no row moved (--rows names them, or all)")
+        if a.rollback:
+            print("rig:")
+            versions.rollback(a.rig_home, h)
+        if a.prune:
+            print(f"versions no rig row runs ({h}):")
+            versions.prune(a.rig_home, h, a.yes)
+    except (versions.VersionError, rig.RigError) as x:
+        raise SystemExit(str(x))
+    return 0
+
+
 def main():
     a = parser().parse_args()
     missing = [d for d in a.have if not os.path.isdir(d)]
     if missing:  # 0.9.2: passed over in silence - its files then fetched
         raise SystemExit("--have: no such directory: " + ", ".join(missing))
+    if a.upgrade or a.rollback or a.versions or a.prune:
+        return versions_mode(a)
     if a.doctor:
         checks = doctor.run(a.models)
         for level, why in checks:

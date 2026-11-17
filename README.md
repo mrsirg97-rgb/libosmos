@@ -25,21 +25,35 @@ python3 tools/install/osmos_install.py osmos-evo-inkling --serve   # Inkling-2-S
 ```
 
 The installer builds the engine, downloads the pack's files at pinned commits, checks every SHA-256, writes the
-pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on port 8091 (`/v1/chat/completions`
-streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
+pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on the first free port from 8091, or
+`--port` (`/v1/chat/completions` streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
 
 - `--abliterated` adds huihui-ai's abliteration as an overlay (the DeepSeek and Qwen packs; the stock files stay as
   they are).
 - `--npu` puts the NPU to work beside the GPU on prompts (decode the same): it checks for the NPU and
   XRT, builds with them, and fetches the pack's NPU kernels (the four DeepSeek packs and `qwen38-ud-iq3_xxs`).
   Opt-in: its output is its own, the same every run but not the GPU-only bits.
-- `--have <dir>` uses files you already have.
+- `--have <dir> ...` uses files you already have (several folders, or the flag again).
 - `--doctor` checks the machine as osmos will run on it, and says what to change: the GPU and the memory it may
   map, the driver and ROCm, the power profile (balanced is slower than the profiles osmos is measured at), the RAM,
   `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
   `deepseek-1017-evo`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS), `qwen3.8-flash-next`
   (`-l`: UD-Q4_K_XL) or `inkling-2-small-evo`.
+
+**Upgrading** (0.9.2): each osmos version is built from its tag beside the others, in `~/.local/share/osmos/<version>`,
+and rig's rows move between them by their command alone - their ports and settings stay yours.
+
+```sh
+python3 tools/install/osmos_install.py --upgrade            # the newest release, for the rows on the newest version here
+python3 tools/install/osmos_install.py --upgrade 0.9.2 --rows deepseek-1017-evo,inkling-2-small-evo   # or --rows all
+python3 tools/install/osmos_install.py --rollback           # the last upgrade's rows back where they were
+python3 tools/install/osmos_install.py --versions           # the versions built here, the rows on each
+python3 tools/install/osmos_install.py --prune [--yes]      # the versions no row runs (removed with --yes)
+```
+
+Each version reads its own frozen `osmos.<version>.json`, so a newer installer's settings never break an older row.
+A running row takes the new version at its next start.
 
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
 header - turns since the last tool call, the most repeated recent call, orphaned calls and results (a client's
