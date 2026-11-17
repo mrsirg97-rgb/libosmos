@@ -844,7 +844,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   uint32_t nb = 0;
   pf(PF_HEAD);
   if (f->mtp) /* the drafter's taps: this run's rows of the step's */
-    s->tap_row0 = row0, s->tap_pos0 = (int32_t)pos;
+    s->tap_row0 = row0, s->tap_pos0 = (int32_t)pos, s->tap_step = f->steps;
   for (int l = 0; l < g->n_layers; l++)
   {
     const Ink2Layer *L = &W->layer[l];
@@ -1028,6 +1028,7 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
   f->n = 0;
   memset(f->kept, 0, f->max_tokens);
   f->n_slots = 0;
+  f->steps++;
   bool ok = true;
   for (uint32_t i = 0, at = 0; ok && i < runs; at += lens[i++])
     ok = run(f, seqs[i], tokens + at, lens[i], at, err);

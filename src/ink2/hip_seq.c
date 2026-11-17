@@ -259,6 +259,7 @@ static void settle(Ink2Seq *s, int32_t pos, bool mark)
   }
   s->pos = pos, s->reach = 0, s->prompt_end = 0, s->failed = false;
   s->mfrom = s->mend = 0; /* the drafter's context not saved: seeded again from here */
+  s->tap_step = 0;        /* no step's taps its own: a seed waits for its next step */
 }
 
 uint64_t ink2_seq_state_bytes(const Ink2Seq *s) { return s ? bytes_at(s, s->pos, false) : 0; }
