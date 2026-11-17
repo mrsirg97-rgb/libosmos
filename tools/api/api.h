@@ -72,6 +72,7 @@ bool http_stream_open(int fd);
 bool http_stream_open_h(int fd, const char *head);
 bool http_stream_event(int fd, const char *data, size_t n);
 bool http_error(int fd, int status, const char *message);
+bool http_error_code(int fd, int status, const char *message, const char *param, const char *code);
 void http_linger(int fd, bool wait);
 
 /* the server: what a request needs */

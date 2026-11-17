@@ -137,12 +137,21 @@ bool http_stream_event(int fd, const char *data, size_t n)
   return send_all(fd, "data: ", 6) && send_all(fd, data, n) && send_all(fd, "\n\n", 2);
 }
 
-bool http_error(int fd, int status, const char *message)
+bool http_error(int fd, int status, const char *message) { return http_error_code(fd, status, message, NULL, NULL); }
+
+/* with OpenAI's param and code (or NULL): a client's own handling keyed on them - context_length_exceeded the one
+   harnesses compact a conversation on (0.9.2) */
+bool http_error_code(int fd, int status, const char *message, const char *param, const char *code)
 {
   JsonBuf b = {0};
   json_puts(&b, "{\"error\": {\"message\": ");
   json_dump_string(&b, message, strlen(message));
-  json_puts(&b, status >= 500 ? ", \"type\": \"server_error\"}}" : ", \"type\": \"invalid_request_error\"}}");
+  json_puts(&b, status >= 500 ? ", \"type\": \"server_error\"" : ", \"type\": \"invalid_request_error\"");
+  if (param)
+    json_puts(&b, ", \"param\": "), json_dump_string(&b, param, strlen(param));
+  if (code)
+    json_puts(&b, ", \"code\": "), json_dump_string(&b, code, strlen(code));
+  json_puts(&b, "}}");
   const bool ok = !b.oom && http_send(fd, status, "application/json", b.p, b.n);
   free(b.p);
   return ok;

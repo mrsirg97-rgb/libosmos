@@ -433,17 +433,21 @@ void api_chat(Api *a, Http *h)
   size_t n = 0;
   int32_t *ids = prompt_ids(a, &rq, &n, err);
   const unsigned ctx = a->engine.max_ctx;
+  bool loading = false, over = false; /* the refusal's kind: a 503 to retry, OpenAI's context_length_exceeded */
   if (ids && !engine_ready(&a->engine)) /* loading: no context known yet (its 503 below, said as it is) */
-    snprintf(err, sizeof err, "the engine is not ready"), free(ids), ids = NULL;
+    snprintf(err, sizeof err, "the engine is not ready (loading)"), free(ids), ids = NULL, loading = true;
   else if (ids && n >= ctx)
-    snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL;
+    snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL, over = true;
   if (ids && rq.max_tokens && n + rq.max_tokens > ctx)
     rq.max_tokens = (unsigned)(ctx - n); /* past the context: as many as it leaves (finish "length") */
   Run *r = ids ? engine_run(&a->engine, ids, n, rq.max_tokens, next_mark(a, &rq, ids, n), err) : NULL;
   free(ids);
-  if (!r)
+  if (!r) /* 503 for loading alone (a request's own fault - its template's - a 400 then too: 0.9.2's, retried) */
   {
-    http_error(h->fd, engine_ready(&a->engine) ? 400 : 503, err);
+    if (over)
+      http_error_code(h->fd, 400, err, "messages", "context_length_exceeded");
+    else
+      http_error(h->fd, loading ? 503 : 400, err);
     request_free(&rq);
     return;
   }

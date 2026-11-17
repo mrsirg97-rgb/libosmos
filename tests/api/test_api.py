@@ -155,7 +155,13 @@ class Api(Served, unittest.TestCase):
     def test_0_health_while_loading(self):
         self.assertEqual(self.get("/health")[0], 503)
         self.assertEqual(self.post({"messages": [{"role": "user", "content": "hi"}]}).status, 503)
+        loading = json.loads(self.get("/v1/models")[1])["data"][0]  # 0.9.2: listed, said loading, no context yet
+        self.assertEqual((loading["osmos"]["ready"], "context_length" in loading), (False, False))
+        r = self.post({"messages": [{"role": "critic", "content": "hi"}]})  # its own fault: 400 even while loading
+        self.assertEqual(r.status, 400)
         self.ready()
+        ready = json.loads(self.get("/v1/models")[1])["data"][0]
+        self.assertEqual((ready["osmos"]["ready"], ready["context_length"]), (True, 4096))
         argv = self.log()[0].split()
         self.assertEqual(argv[argv.index("--max-context") + 1], "4096")
         self.assertIn("--no-guess", argv)
@@ -570,6 +576,20 @@ class Api(Served, unittest.TestCase):
         self.assertNotIn("[DONE]", ev)
         self.assertIn("error", json.loads(ev[-1]))
         self.assertFalse(any((e.get("choices") or [{}])[0].get("finish_reason") for e in map(json.loads, ev)))
+
+    def test_6q_context_exceeded(self):  # 0.9.2: OpenAI's code, the one harnesses compact a conversation on
+        self.ready()
+        r = self.post({"messages": [{"role": "user", "content": "word " * 5000}], "reasoning_effort": "none"})
+        self.assertEqual(r.status, 400)
+        e = json.loads(r.read())["error"]
+        self.assertEqual((e["code"], e["param"], e["type"]), ("context_length_exceeded", "messages", "invalid_request_error"))
+        self.assertIn("the context is 4096", e["message"])
+
+    def test_6r_port_in_use(self):  # 0.9.2: why, not "could not listen there"
+        r = subprocess.run([API, "--config", self.cfg, "--port", str(self.port), "--engine", FAKE],
+                           env=dict(os.environ, FAKE_DIR=self.dir), capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(f"port {self.port} on 127.0.0.1 is in use", r.stderr)
 
     def test_7_engine_gone(self):
         self.ready()

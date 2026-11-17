@@ -8,6 +8,7 @@
    its exit ends this server (the launcher restarts it) */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <errno.h>
 #include <limits.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -83,7 +84,12 @@ static void answer(Http *h)
     JsonBuf b = {0};
     json_puts(&b, "{\"object\": \"list\", \"data\": [{\"id\": ");
     json_dump_string(&b, api.model, strlen(api.model));
-    json_puts(&b, ", \"object\": \"model\", \"owned_by\": \"osmos\"}]}");
+    json_puts(&b, ", \"object\": \"model\", \"owned_by\": \"osmos\"");
+    char t[96];
+    const bool ready = engine_ready(&api.engine); /* 0.9.2: listed while loading, said so - and the context once known */
+    if (ready)
+      snprintf(t, sizeof t, ", \"context_length\": %u", api.engine.max_ctx), json_puts(&b, t);
+    json_puts(&b, ready ? ", \"osmos\": {\"ready\": true}}]}" : ", \"osmos\": {\"ready\": false}}]}");
     if (!b.oom)
       http_send(h->fd, 200, "application/json", b.p, b.n);
     free(b.p);
@@ -211,7 +217,14 @@ int main(int argc, char **argv)
   const int port = atoi(opt(argc, argv, "--port", dport));
   const int lfd = listen_on(opt(argc, argv, "--host", "127.0.0.1"), port);
   if (lfd < 0)
-    return die("could not listen there (--host, --port)");
+  {
+    char why[256];
+    snprintf(why, sizeof why, errno == EADDRINUSE ? "port %d on %s is in use (another osmos-api, or rig's: --port another)"
+                              : errno == EACCES   ? "port %d on %s: not permitted (a port under 1024 needs root)"
+                                                  : "could not listen on port %d on %s (--host an IPv4 address, --port)",
+             port, opt(argc, argv, "--host", "127.0.0.1"));
+    return die(why);
+  }
   if (!engine_start(&api.engine, args, c.drafter[0] != 0, err))
     return die(err);
   fprintf(stderr, "osmos-api: %s on %s:%d (the engine loading)\n", api.model, opt(argc, argv, "--host", "127.0.0.1"),
