@@ -366,10 +366,12 @@ __global__ __launch_bounds__(kHead) void fa_merge_kernel(const float* ml, const 
 
 }  // namespace
 
-extern "C" bool q4x_rope(uint32_t dim, float base, uint32_t native_ctx, uint32_t ctx, Q4xRope* rope) {
-  if (!rope || !dim || dim % 2 || !native_ctx || !ctx || (uint64_t) ctx > 64ull * native_ctx || !(base > 1.0f))
+extern "C" bool q4x_rope(uint32_t dim, uint32_t pairs, float base, uint32_t native_ctx, uint32_t ctx, Q4xRope* rope) {
+  if (!rope || !dim || dim % 2 || !pairs || pairs > dim / 2 || !native_ctx || !ctx ||
+      (uint64_t) ctx > 64ull * native_ctx || !(base > 1.0f))
     return false;
-  *rope = Q4xRope{dim, powf(base, -2.0f / (float) dim), 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+  if (pairs != dim / 2) return false;  // the zero tail: the schema's (vibes-flash step 1), the kernels' next
+  *rope = Q4xRope{dim, pairs, powf(base, -2.0f / (float) dim), 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
   if (ctx <= native_ctx) return true;  // the plain rotation
   // the model card's static YaRN, llama.cpp's for it: ext 1, beta_fast 32 / beta_slow 1 (ggml_rope_yarn_corr_dims)
   const float factor = (float) ctx / (float) native_ctx;
@@ -414,7 +416,9 @@ extern "C" uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx) {
 
 extern "C" bool q4x_attn(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
                          uint32_t kv_heads, uint32_t dim, uint32_t pos0, const float* gate, const Q4xPick* pick,
-                         float* scratch, float* out, const Q4xX16* side, void* stream) {
+                         const AttnShape* shape, float* scratch, float* out, const Q4xX16* side, void* stream) {
+  if (shape && (shape->gate_span != 1 || shape->window))  // LFM3's: the schema's (vibes-flash step 1), the kernel's next
+    return false;
   if (!n_tok || !heads || !kv_heads || heads % kv_heads || heads / kv_heads > kTile || dim != kHead ||
       pos0 + n_tok > OPS_Q4X_MAX_KEYS)
     return false;

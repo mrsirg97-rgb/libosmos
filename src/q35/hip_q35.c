@@ -144,7 +144,7 @@ static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint32_
     if (!close_blocks(f, s, l, (P + t) / LSA_WINDOW) ||
         !lsa_index_gpu(f->q + at, 1, q, kvh, heads / kvh, hd, rot, f->wq[l], false, f->iq, NULL) ||
         !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], s->closed[l], f->lsa_s, f->list, f->list_n, NULL) ||
-        !q35_attn_read(f->q + at, s->kc[l], s->vc[l], heads, kvh, f->list, f->list_n, LSA_READ_MAX, f->gt + at, f->da,
+        !q35_attn_read(f->q + at, s->kc[l], s->vc[l], heads, kvh, hd, NULL, f->list, f->list_n, LSA_READ_MAX, f->gt + at, f->da,
                        f->ao + at, NULL))
       return false;
   }
@@ -161,13 +161,14 @@ static bool dense_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint3
   const uint64_t q = (uint64_t)heads * hd;
   if (read)
     return q4x_attn(f->q + off * q, s->kc[l], s->vc[l], n, heads, kvh, hd, (uint32_t)s->pos, f->gt + off * q, NULL,
+                    NULL,
                     f->fa, f->ao + off * q, NULL, NULL);
   bool ok = true;
   for (uint32_t t = 0; ok && t < n; t += Q35_ATTN_DECODE_MAX)
   {
     const uint64_t at = (uint64_t)(off + t) * q;
     ok = q35_attn_decode(f->q + at, s->kc[l], s->vc[l], n - t < Q35_ATTN_DECODE_MAX ? n - t : Q35_ATTN_DECODE_MAX, heads,
-                         kvh, (uint32_t)s->pos + t, f->gt + at, f->da, f->ao + at, NULL);
+                         kvh, hd, NULL, (uint32_t)s->pos + t, f->gt + at, f->da, f->ao + at, NULL);
   }
   return ok;
 }

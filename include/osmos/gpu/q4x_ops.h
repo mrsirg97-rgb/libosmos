@@ -1,6 +1,7 @@
 #ifndef OSMOS_GPU_Q4X_OPS_H
 #define OSMOS_GPU_Q4X_OPS_H
 
+#include "osmos/gpu/attn_shape.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -53,13 +54,15 @@ bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint3
 typedef struct Q4xRope
 {
   uint32_t dim;
+  uint32_t pairs;         /* the pairs rotated, the first ones (dim / 2: all; LFM3's full layers 32 of 64, the rest
+                             unrotated - its zero tail, theta still the whole dim's progression) */
   float theta_scale;      /* base^(-2 / dim): theta_i a running product of it */
   float freq_scale;       /* YaRN's 1 / factor */
   float ext_factor;       /* YaRN's extrapolation mix */
   float corr_lo, corr_hi; /* its ramp: the correction dims */
   float mscale;           /* a rotated pair's magnitude: 1 + 0.1 ln(factor) */
 } Q4xRope;
-bool q4x_rope(uint32_t dim, float base, uint32_t native_ctx, uint32_t ctx, Q4xRope *rope);
+bool q4x_rope(uint32_t dim, uint32_t pairs, float base, uint32_t native_ctx, uint32_t ctx, Q4xRope *rope);
 bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
             const Q4xRope *rope, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float *q,
             float *gate, float *k_out, void *stream);
@@ -76,8 +79,8 @@ typedef struct Q4xPick
 } Q4xPick;
 uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx);
 bool q4x_attn(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-              uint32_t dim, uint32_t pos0, const float *gate, const Q4xPick *pick, float *scratch, float *out,
-              const Q4xX16 *side, void *stream);
+              uint32_t dim, uint32_t pos0, const float *gate, const Q4xPick *pick, const AttnShape *shape,
+              float *scratch, float *out, const Q4xX16 *side, void *stream);
 
 #define Q4X_IX_DIM 128 /* an indexer head's dim (qwen4exp.attention.indexer.key_length) */
 /* the kernels' fixed shapes - the loader refuses a model past them (q4x_geo.h), never a step */
