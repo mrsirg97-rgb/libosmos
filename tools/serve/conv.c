@@ -309,7 +309,9 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
 }
 
 /* k tokens of p (from held.n) through one osmos_read; the drafter's rings seeded with the piece's part of the last
-   window of the prompt's n tokens (serve.h) */
+   window before n - the prompt's end it is read with (conv_prompt_end: a mark's ahead of it, so the mark's point holds
+   its own window; 0.9.2: the whole prompt's, so a turn gone back to the mark with a short tail drafted from rings
+   that held no rows for it) (serve.h) */
 static bool read_piece(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t n, bool seed)
 {
   if (!k)
@@ -351,21 +353,22 @@ bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t
     c->user = c->prompt, c->prompt = t, c->prompt.n = 0;
   }
   const uint32_t end = c->held.n + k, stops[2] = {mark < n - 1 ? mark : 0, n - 1};
-  uint32_t len = 0; /* the last read's tokens */
+  uint32_t len = 0, at_end = conv_prompt_end(c, n, mark); /* the last read's tokens; the prompt's end it is read to */
   for (int i = 0; i < 2; i++)
     if (stops[i] > c->held.n && stops[i] <= end)
     {
       len = stops[i] - c->held.n;
-      if (!read_piece(c, sv, p, len, n, seed))
+      if (!read_piece(c, sv, p, len, at_end, seed))
         return false;
       take(c, i ? &c->prompt : &c->user, i ? "prompt's" : "last user turn's");
       if (!i && !oseq_prompt(c->s, n)) /* past the mark: the prompt's own end */
         return snprintf(c->err, sizeof c->err, "the prompt's end not past its mark"), false;
+      at_end = n;
     }
   if (c->held.n < end)
   {
     len = end - c->held.n;
-    if (!read_piece(c, sv, p, len, n, seed))
+    if (!read_piece(c, sv, p, len, at_end, seed))
       return false;
   }
   *row = len - 1; /* the last read's last token: its logits the next token's */
