@@ -20,6 +20,7 @@
 /* (40: NVFP4 as ggml lays it - 64 values: 4 UE4M3 scales, one a 16, then 32 bytes of E2M1 codes; a tensor's own
    scale (one, or one an expert) is a tensor beside it, not the block's: Inkling-2's experts, as their checkpoint holds
    them) */
+/* (34: TQ1_0 - 256 ternary values {-1, 0, 1} times an f16 d, five a byte: vibes594b's experts, 1.69 bits a weight) */
 /* (43: unsloth's MXFP8 - an E8M0 scale, then 32 E4M3 codes - its GGUFs' Engram tables; upstream llama.cpp's 43 is
    F8_E4M3, one byte a value and no scales: a file of that is refused by its size, gguf.c) */
 #define QTYPES(X)                                                                                  \
@@ -29,6 +30,7 @@
   X(Q4_K, 12, 256, 144, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(Q5_K, 13, 256, 176, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(Q2_K, 10, 256, 84, QTYPE_IQ)                                                                   \
+  X(TQ1_0, 34, 256, 54, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)           \
   X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MM | QTYPE_EMBED)             \
   X(IQ2_XXS, 16, 256, 66, QTYPE_IQ)                                                                \
   X(IQ2_XS, 17, 256, 74, QTYPE_IQ)                                                                 \
