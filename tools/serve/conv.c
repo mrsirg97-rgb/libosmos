@@ -176,6 +176,19 @@ static bool back_to_prompt(Conv *c, const Server *sv)
   return go_back(c, sv, &c->prompt);
 }
 
+/* a prompt's read cancelled part-way (STOP, its client gone): the state there not kept - its prompt's end lies past it
+   (DeepSeek's decoder skip ran its last layers for that end) - so back to the furthest point it still holds: this
+   request's user turn's, else the last prompt's. none: read again from the start. 0.9.2: a restart every time, so a
+   client's retry after a timeout read the whole conversation again (and, the read longer than its timeout, again) */
+bool conv_cancel_read(Conv *c, const Server *sv)
+{
+  const uint32_t a = c->prompt.n && c->prompt.n <= c->held.n ? c->prompt.n : 0,
+                 b = c->user.n && c->user.n <= c->held.n ? c->user.n : 0;
+  if (!a && !b)
+    return conv_restart(c, sv);
+  return go_back(c, sv, a > b ? &c->prompt : &c->user);
+}
+
 /* after a request's failure (its ERR written): a new sequence for the conversation, or - the GPU's state lost (a
    kernel's fault: every call after it fails the same) or no sequence to be had - FATAL and exit, so osmos-api's
    "the engine exited" ends every request instead of each one answering ERR forever */
