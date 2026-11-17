@@ -160,23 +160,26 @@ static size_t choose(Forward *f, int32_t *rix, const PoolUnit *ex, PoolUnit *res
   return n;
 }
 
-/* the pool's room: two layers' streamed experts (the one the GPU is in, the next one's reads) */
+/* the stream's room: two layers' experts not warm at load (the one the GPU is in, the next one's reads) - and never
+   under a whole layer's. the membrane's room is shared by every layer, so decode misses on some layers evict another's
+   stale units (pool.c's furthest): its cold set grows past the load's, and a prompt step (passing) holds every cold
+   pick of a layer in the stream at once - under the whole layer, "an expert the pool cannot hold" (Inkling's rule,
+   ink2/hip_forward.c). each unit at its size in the pool: pool_unit_bytes at the arena's grain, its reads' padding */
 static uint64_t stream_budget(const Forward *f, const int32_t *rix, const PoolUnit *ex)
 {
   const uint32_t E = (uint32_t)f->g->n_experts;
-  uint64_t most = 0, unit = 0;
+  uint64_t most = 0, whole = 0;
   for (int l = 0; l < f->n_layers; l++)
   {
-    uint64_t layer = 0;
+    uint64_t layer = 0, cold = 0;
     for (uint32_t e = 0; e < E; e++)
     {
-      const uint64_t b = unit_bytes(&ex[l * E + e]);
-      unit = b > unit ? b : unit;
-      layer += rix[l * E + e] < 0 ? b : 0;
+      const uint64_t b = pool_unit_bytes(&ex[l * E + e], ARENA_GRAIN);
+      layer += b, cold += rix[l * E + e] < 0 ? b : 0;
     }
-    most = layer > most ? layer : most;
+    most = cold > most ? cold : most, whole = layer > whole ? layer : whole;
   }
-  return 2 * most > unit ? 2 * most : unit;
+  return 2 * most > whole ? 2 * most : whole;
 }
 
 /* a resident Q5_K matrix the matmuls read (all but the embedding's rows, which ops_embed reads a token at a time):

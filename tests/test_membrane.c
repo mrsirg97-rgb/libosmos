@@ -424,6 +424,42 @@ static void test_walk(void)
   printf("  a walk of 400 visits: every held unit's bytes the file's\n");
 }
 
+/* decode drift (0.9.2): every layer warm at 6 of its 8, a stream of a whole layer (DeepSeek's stream_budget floor,
+   Inkling's). layer 0's routing concentrated on 2 units, the others' misses evicting layer 0's stale residents; then a
+   prompt step on layer 0 holds all 8 - the stream holds its cold ones, however many drift left. the load's rule
+   alone (twice the 2 cold a layer: 4) refused it */
+static void test_drift(void)
+{
+  uint32_t warm[L * 6];
+  size_t nw = 0;
+  for (uint32_t l = 0; l < L; l++)
+    for (uint32_t e = 0; e < 6; e++)
+      warm[nw++] = l * E + e;
+  Membrane *m = make(L * 6, E, warm, nw);
+  char err[MEMBRANE_ERR] = "";
+  assert(membrane_warm(m, err));
+  for (uint32_t r = 0; r < 12; r++)
+    for (uint32_t l = 0; l < L; l++)
+    {
+      visit(m, l, false);
+      if (l == 0)
+        take(m, 0), take(m, 1);
+      else
+        take(m, l * E + 6), take(m, l * E + 7), take(m, l * E + r % 6);
+    }
+  int resident = 0;
+  for (uint32_t e = 0; e < E; e++)
+    resident += ready(m, e);
+  assert(resident < 4); /* drifted: more cold than the load's 2 */
+  visit(m, 0, true);
+  for (uint32_t e = 0; e < E; e++)
+    take(m, e);
+  membrane_end(m);
+  membrane_destroy(m);
+  printf("  decode drift: layer 0 down to %d of %d resident, a prompt step holds all of it in a whole layer's stream\n",
+         resident, E);
+}
+
 int main(void)
 {
   printf("[test_membrane] start\n");
@@ -443,6 +479,7 @@ int main(void)
     test_guess();
     test_warm();
     test_warm_failed();
+    test_drift();
     test_whole();
     test_full();
     test_walk();
