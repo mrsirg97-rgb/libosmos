@@ -60,11 +60,11 @@ int main() {
     CHECK(q4x_kv_put(dk, dv, ctx, kv, kc, vc, nullptr));
     CHECK(hipDeviceSynchronize() == hipSuccess);
     const auto t0 = std::chrono::steady_clock::now();
-    CHECK(q4x_attn(dq, kc, vc, T, H, KV, D, pos0, dg, nullptr, fa, out, nullptr, nullptr));
+    CHECK(q4x_attn(dq, kc, vc, T, H, KV, D, pos0, dg, nullptr, nullptr, fa, out, nullptr, nullptr));
     CHECK(hipDeviceSynchronize() == hipSuccess);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     for (uint32_t t = 0; t < T; t++)
-      CHECK(q35_attn_decode(dq + (size_t) t * q, kc, vc, 1, H, KV, pos0 + t, dg + (size_t) t * q, da,
+      CHECK(q35_attn_decode(dq + (size_t) t * q, kc, vc, 1, H, KV, D, nullptr, pos0 + t, dg + (size_t) t * q, da,
                             ref + (size_t) t * q, nullptr));
     std::vector<float> a(hq.size()), r(hq.size());
     CHECK(hipMemcpy(a.data(), out, a.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);

@@ -136,14 +136,18 @@ static bool run(const float* q, const void* kc, const void* vc, uint32_t n_tok, 
   return launches::ok();
 }
 
+static bool qwen(uint32_t dim, const AttnShape* shape) {  // the one shape run today: LFM3's is the kernel's next
+  return dim == kHead && (!shape || (shape->gate_span == 1 && !shape->window));
+}
+
 extern "C" bool q35_attn_decode(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
-                                uint32_t kv_heads, uint32_t pos0, const float* gate, float* scratch, float* out,
-                                void* stream) {
-  return run(q, kc, vc, n_tok, heads, kv_heads, pos0, nullptr, nullptr, 0, gate, scratch, out, stream);
+                                uint32_t kv_heads, uint32_t dim, const AttnShape* shape, uint32_t pos0,
+                                const float* gate, float* scratch, float* out, void* stream) {
+  return qwen(dim, shape) && run(q, kc, vc, n_tok, heads, kv_heads, pos0, nullptr, nullptr, 0, gate, scratch, out, stream);
 }
 
 extern "C" bool q35_attn_read(const float* q, const void* kc, const void* vc, uint32_t heads, uint32_t kv_heads,
-                              const uint32_t* list, const uint32_t* list_len, uint32_t list_max, const float* gate,
-                              float* scratch, float* out, void* stream) {
-  return run(q, kc, vc, 1, heads, kv_heads, 0, list, list_len, list_max, gate, scratch, out, stream);
+                              uint32_t dim, const AttnShape* shape, const uint32_t* list, const uint32_t* list_len,
+                              uint32_t list_max, const float* gate, float* scratch, float* out, void* stream) {
+  return qwen(dim, shape) && run(q, kc, vc, 1, heads, kv_heads, 0, list, list_len, list_max, gate, scratch, out, stream);
 }

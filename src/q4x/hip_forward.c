@@ -436,7 +436,7 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
     return q4x_fail(err, "tap layers past the model's, out of order, or more than Q4X_MAX_TAPS"), q4x_forward_destroy(f), NULL;
   if (!(f->sub_seq = calloc(Q4X_MAX_RUNS, sizeof *f->sub_seq)))
     return q4x_fail(err, "out of memory"), q4x_forward_destroy(f), NULL;
-  if (!q4x_rope((uint32_t)w->geo.rope_dim, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))
+  if (!q4x_rope((uint32_t)w->geo.rope_dim, (uint32_t)w->geo.rope_dim / 2, w->geo.rope_base, w->geo.native_ctx, max_ctx, &f->rope))
     return q4x_fail(err, "no rotation for this context (q4x_rope: past 64 times the native)"), q4x_forward_destroy(f),
            NULL;
   const GgufTensor *skip = f->stream_ngram ? w->ple_table : NULL;
