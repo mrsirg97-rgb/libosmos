@@ -81,7 +81,7 @@ struct Q4xForward
   const Q4xMtp *mtp; /* or NULL */
   const Q4xDflash *df; /* or NULL */
   void **df_dev;       /* its tensors' bytes on the device (its file's table) */
-  uint32_t df_ring;    /* a sequence's drafter rings' rows: the drafter's window (max_ctx at most) */
+  uint32_t df_ring;    /* a sequence's drafter rings' rows: the drafter's window and Q4X_SLOTS (max_ctx at most) */
   Q4xDfBuf d;
   void **dev, **mtp_dev, **ov_dev; /* a tensor's bytes on the device, by its index in its file's table (the model's -
                                       none where the overlay stands in for it -, the MTP head's, the overlay's) */

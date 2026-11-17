@@ -415,7 +415,10 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
     f->tap_layer[i] = tl[i];
   f->n_taps = taps_ok ? nt : 0;
   f->df = taps_ok ? df : NULL;
-  f->df_ring = df && (uint32_t)df->geo.window < max_ctx ? (uint32_t)df->geo.window : max_ctx;
+  /* the window and the positions a rollback leaves seeded past the sequence (Q4X_SLOTS - 1 at most): theirs never a
+     window's slot (0.9.2: a ring of the window alone - a rollback, then a shorter seed, left up to 6 dropped
+     positions' keys read as the window's oldest) */
+  f->df_ring = df && (uint32_t)df->geo.window + Q4X_SLOTS < max_ctx ? (uint32_t)df->geo.window + Q4X_SLOTS : max_ctx;
   f->ple_fd = -1;
   if (hipStreamCreateWithFlags(&f->s2, hipStreamNonBlocking) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_in, hipEventDisableTiming) != hipSuccess ||

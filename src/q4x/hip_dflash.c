@@ -112,7 +112,7 @@ int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float co
   const GgufTensor *e = f->w->embed, *out = f->w->output;
   const uint32_t B = (uint32_t)g->block, D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab, R = (uint32_t)g->sel_rank;
   const uint32_t K = (uint32_t)g->sel_top_k;
-  const int32_t lo = pos0 - (int32_t)f->df_ring, ctx_from = lo > s->df_lo ? lo : s->df_lo;
+  const int32_t lo = pos0 - (int32_t)g->window, ctx_from = lo > s->df_lo ? lo : s->df_lo; /* (the ring past it) */
   d->pin_tok[0] = y; /* (the pinned row free: the draft before synchronized at its end) */
   bool ok = hipMemcpyAsync(d->tok, d->pin_tok, 4, hipMemcpyHostToDevice, NULL) == hipSuccess &&
             q4x_rows(e->type, q4x_dev(f, e), e->bytes / e->dims[1], D, d->tok, B, d->h, NULL);
