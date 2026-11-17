@@ -46,7 +46,9 @@ drafter_seed
   s's ring rows for its positions from .. to - 1 of f's last step (each one's taps, keys for every block): after a
   prompt (its last 128 positions), a step, or a verify (its accepted rows only: a rejected row's would overwrite a
   position still in the window). only to - window .. to - 1 are seeded (the ring holds a window). false with why for
-  a position the last step did not tap.
+  a position the last step did not tap - the step's taps are its last FWD_MAX_BATCH rows across every sequence in it,
+  so a step of several prompts past that (rows counted after the decoder skip's compaction) taps only the last ones'
+  ends: seed each prompt from a step of its own (osmos-serve reads one prompt a step).
 
 drafter_draft
   a round at s's next position, y the token there (not yet stepped): up to DRAFTER_BLOCK drafts, each with its
