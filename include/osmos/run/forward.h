@@ -3,8 +3,9 @@
 
 #include <stdbool.h>
 
-#define SEQ_STATE_VERSION 2 /* seq_save's format or meaning: raised when it changes (forward_identity has it). 2 (0.7.1):
-                               a kept state is a prompt's alone - 1's held decoded answers, not taken back */
+#define SEQ_STATE_VERSION 3 /* seq_save's format or meaning: raised when it changes (forward_identity has it). 2 (0.7.1):
+                               a kept state is a prompt's alone - 1's held decoded answers, not taken back. 3
+                               (0.9.2): the header's rollback room (hi - pos) in its spare word */
 #include <stdint.h>
 
 #include "osmos/gpu/mm.h"
@@ -146,15 +147,15 @@ seq_prompt
   than before.
 
 seq_reach
-  the most seq_rollback takes now: SEQ_MAX_BACK, the tokens it holds and its positions past the prompt's end, the
-  least of them.
+  the most seq_rollback takes now: SEQ_MAX_BACK less what rollbacks since its last step took (back to back, no step
+  between, SEQ_MAX_BACK together), the tokens it holds and its positions past the prompt's end, the least of them.
 
 seq_rollback
   the sequence's last n positions undone: its next position n back, its last tokens (Engram's n-gram) as they were
   there - the state a forward of those positions leaves (each its window row, its compressor's pending row, a
   compressed row it completed) is rewritten when the positions are stepped again, before anything reads it, so the
   rows after are the bits of a run that never stepped them (a verify's rejected drafts). false, nothing changed, for
-  n past SEQ_MAX_BACK or the tokens it holds, or a position before the prompt's end (seq_prompt).
+  n past seq_reach.
 
 seq_position
   the sequence's next position: the tokens it holds (0 for none, or NULL).

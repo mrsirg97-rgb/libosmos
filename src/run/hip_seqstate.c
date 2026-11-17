@@ -23,7 +23,7 @@ typedef struct Header
   uint64_t identity;
   int32_t pos, prompt_end, dec_from, n_last;
   int32_t last[STATE_LAST];
-  uint32_t has_dring, pad;
+  uint32_t has_dring, ahead; /* ahead: hi - pos (forward_impl.h) - a rollback's room after the load as before */
 } Header;
 
 uint64_t forward_identity(const Forward *f)
@@ -161,7 +161,7 @@ bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
   if (hipDeviceSynchronize() != hipSuccess) /* the stream's writes of its rows done */
     return fwd_fail(err, "a GPU call failed (before the save)");
   Header h = {STATE_MAGIC, SEQ_STATE_VERSION, forward_identity(s->f), s->pos, s->prompt_end, s->dec_from, s->n_last,
-              {0}, s->dring != NULL, 0};
+              {0}, s->dring != NULL, (uint32_t)(s->hi - s->pos)};
   memcpy(h.last, s->last, sizeof h.last);
   uint8_t *bounce = malloc(STATE_CHUNK);
   uint64_t sum = fnv(&h, sizeof h, FNV_SEED);
@@ -179,7 +179,7 @@ bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
    state written by its step) */
 static void reset(Seq *s)
 {
-  s->pos = 0, s->prompt_end = 0, s->staged = 0, s->dec_from = 0, s->n_last = 0, s->broken = false;
+  s->pos = 0, s->prompt_end = 0, s->staged = 0, s->dec_from = 0, s->n_last = 0, s->hi = 0, s->broken = false;
   memset(s->last, 0, sizeof s->last);
 }
 
@@ -205,7 +205,7 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
   if (h.identity != forward_identity(f))
     return refuse(s, err, "a state of another model or geometry (its identity)");
   if (h.pos < 0 || (uint32_t)h.pos > f->max_ctx || h.prompt_end < 0 || (uint32_t)h.prompt_end > f->max_ctx || h.dec_from < 0 ||
-      h.n_last < 0 || h.n_last > STATE_LAST || h.has_dring > 1)
+      h.n_last < 0 || h.n_last > STATE_LAST || h.has_dring > 1 || h.ahead > SEQ_MAX_BACK)
     return refuse(s, err, "a state's position past this forward's context, or its fields out of range");
   /* the parts as the state laid them out: the sequence at its position (and a drafter's rings to fill) */
   if (h.has_dring && !s->dring &&
@@ -240,7 +240,7 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
   /* a state saved part-way through its prompt (osmos-serve's points, 0.7.5) loads with its prompt's end at its
      position: the next prompt's end told again (seq_prompt), nothing behind it to roll back into */
   s->prompt_end = h.prompt_end < h.pos ? h.prompt_end : h.pos;
-  s->dec_from = h.dec_from, s->n_last = h.n_last, s->staged = 0;
+  s->dec_from = h.dec_from, s->n_last = h.n_last, s->staged = 0, s->hi = h.pos + (int32_t)h.ahead;
   memcpy(s->last, h.last, sizeof s->last);
   s->broken = false;
   return true;

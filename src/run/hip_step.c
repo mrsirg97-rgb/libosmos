@@ -332,7 +332,7 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     return (void)hipMemset(f->b.overflow, 0, 4),
            fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   for (uint32_t i = 0; i < n; i++)
-    seqs[i]->pos++;
+    seqs[i]->pos++, seqs[i]->hi = seqs[i]->pos > seqs[i]->hi ? seqs[i]->pos : seqs[i]->hi;
   return true;
 }
 
@@ -358,15 +358,15 @@ uint32_t seq_reach(const Seq *s)
 {
   if (!s)
     return 0;
-  const int64_t past = (int64_t)s->pos - (int64_t)s->prompt_end;
-  int64_t r = SEQ_MAX_BACK < s->n_last ? SEQ_MAX_BACK : s->n_last;
+  const int64_t past = (int64_t)s->pos - (int64_t)s->prompt_end, left = SEQ_MAX_BACK - ((int64_t)s->hi - s->pos);
+  int64_t r = left < s->n_last ? left : s->n_last;
   r = past < r ? past : r;
   return r > 0 ? (uint32_t)r : 0;
 }
 
 bool seq_rollback(Seq *s, uint32_t n)
 {
-  if (!s || s->broken || n > SEQ_MAX_BACK || (int)n > s->n_last || (int64_t)s->pos - n < (int64_t)s->prompt_end)
+  if (!s || s->broken || n > seq_reach(s))
     return false;
   const int cap = ENGRAM_MAX_NGRAM + SEQ_MAX_BACK;
   memmove(s->last, s->last + n, (size_t)(cap - (int)n) * sizeof *s->last);
