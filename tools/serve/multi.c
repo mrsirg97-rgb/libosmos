@@ -107,7 +107,8 @@ static Lane *lane_of(Multi *m, long long rid)
   return NULL;
 }
 
-/* STOP: a reading lane's state is not kept (its prompt's end past it), an answering one's is (to its last fed) */
+/* STOP: a reading lane's state is not kept (its prompt's end past it: back to its furthest point, conv_cancel_read),
+   an answering one's is (to its last fed) */
 static void stop(Multi *m, bool all, long long rid)
 {
   for (int i = 0; i < m->n; i++)
@@ -116,7 +117,7 @@ static void stop(Multi *m, bool all, long long rid)
     if (ln->st == IDLE || (!all && ln->g.rid != rid))
       continue;
     if (ln->st == READING)
-      conv_restart(&ln->c, m->sv);
+      conv_cancel_read(&ln->c, m->sv);
     lane_finish(m, ln, "cancel");
   }
   for (int k = 0; k < m->nwait;)

@@ -82,6 +82,41 @@ static void drafted_together(Osmos* e, const std::vector<int32_t>& ids, float co
   for (int i = 0; i < 3; i++) oseq_destroy(s[i]);
 }
 
+// 0.9.2: the MTP head's drafts after a state taken back into a sequence that held another conversation (the slots'
+// load), and after a mark gone back to past later tokens - each the bits of the conversation never set aside (its
+// head's cache, indexer and pending h the state's: before, the head attended the other conversation's rows)
+static void restored(Osmos* e, const std::vector<int32_t>& ids) {
+  char err[OSMOS_ERR];
+  int32_t ref[OSMOS_MAX_BLOCK], got[OSMOS_MAX_BLOCK];
+  float rc[OSMOS_MAX_BLOCK], gc[OSMOS_MAX_BLOCK];
+  OsmosSeq* a = oseq_create(e, err);
+  const int32_t y = prompt(e, a, ids, true);
+  const int k = oseq_draft(a, y, 0.0f, 0.0f, ref, rc, err);
+  CHECK(k > 0);
+  std::vector<uint8_t> st(oseq_state_bytes(a));
+  CHECK(oseq_save(a, st.data(), st.size(), err));
+  oseq_destroy(a);
+  OsmosSeq* b = oseq_create(e, err);  // another conversation first: its head's rows where A's will be read
+  int32_t d[OSMOS_MAX_BLOCK];
+  float c[OSMOS_MAX_BLOCK];
+  const int32_t yb = prompt(e, b, ids, true, 56, 144);
+  CHECK(oseq_draft(b, yb, 0.0f, 0.0f, d, c, err) >= 0);
+  CHECK(oseq_load(b, st.data(), st.size(), err));
+  CHECK(oseq_draft(b, y, 0.0f, 0.0f, got, gc, err) == k && !std::memcmp(got, ref, k * 4) && !std::memcmp(gc, rc, k * 4));
+  oseq_destroy(b);
+  OsmosSeq* m = oseq_create(e, err);  // a mark at the prompt, 40 tokens more (seeded), the mark gone back to
+  CHECK(prompt(e, m, ids, true) == y);
+  std::vector<uint8_t> mk(oseq_mark_bytes(m));
+  CHECK(oseq_mark_save(m, mk.data(), mk.size(), err));
+  std::vector<OsmosSeq*> ss(40, m);
+  CHECK(osmos_batch(e, ss.data(), ids.data() + 120, 40, err) && oseq_seed(m, kPrompt, kPrompt + 40, err));
+  CHECK(oseq_mark_load(m, mk.data(), mk.size(), err));
+  CHECK(oseq_draft(m, y, 0.0f, 0.0f, got, gc, err) == k && !std::memcmp(got, ref, k * 4) && !std::memcmp(gc, rc, k * 4));
+  oseq_destroy(m);
+  std::printf("  the head's %d drafts after a state taken back into another conversation's sequence, and after a "
+              "mark gone back to: the bits of the conversation never set aside\n", k);
+}
+
 // greedy decode plain, then drafted the server's way, on an engine with the drafter at path: the same tokens
 static void drafted(OsmosModel* m, const std::vector<int32_t>& ids, const std::string& path, const char* name) {
   char err[OSMOS_ERR] = "";
@@ -133,6 +168,7 @@ static void drafted(OsmosModel* m, const std::vector<int32_t>& ids, const std::s
               (double) (kGen - 1) / rounds);
   CHECK(accepted > 0);
   oseq_destroy(s);
+  if (!std::strcmp(name, "the MTP head")) restored(e, ids);
   drafted_together(e, ids, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, false);
   drafted_together(e, ids, 0.0f, 0.0f, true);  // the first's drafts cut at the context's end, the others' whole
   osmos_destroy(e);

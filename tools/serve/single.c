@@ -156,7 +156,15 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
     if (!ids_push(&c->held, toks[i]))
       return -1;
   *t = picks[m];
-  return !end && (uint32_t)oseq_position(c->s) + 1 < sv->max_ctx;
+  if (!end && (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx) /* the context's last position: its pick printed, not
+                                                                    fed, as step_greedy's last (0.9.2: dropped) */
+  {
+    out("T %d\n", *t), a->produced++;
+    if (server_eos(sv, *t))
+      a->finish = "stop";
+    return 0;
+  }
+  return !end;
 }
 
 /* a greedy token: printed, then fed (the last printed never is: the next turn's prompt holds it) */
@@ -222,9 +230,9 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
     const double ms = now_ms() - t0;
     out("PP %u %u %.1f %.1f %u\n", c->held.n, n, ms, (c->held.n - reused) / (ms / 1e3), reused);
     pump(l, ctl);
-    if (ctl->cancel && c->held.n < n) /* a prompt read part-way: its end past the state, the state not kept */
+    if (ctl->cancel && c->held.n < n) /* a prompt read part-way: its end past the state - back to its furthest point */
     {
-      conv_restart(c, sv);
+      conv_cancel_read(c, sv);
       out("DONE 0 %u %.1f 0.0 cancel 0 0 %u 0 0\n", n, now_ms() - t0, reused);
       return;
     }

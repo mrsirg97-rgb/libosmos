@@ -128,7 +128,7 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
 /* a run that gives no answer: a streamed one's error event (no [DONE]), or a 500. a completion its parse refused
    goes with it as its text (the EOS dropped): greedy, the same messages again are the same completion, so a client
    can only get past one by showing the model what it wrote (#34) - sent back, a client's text is defused as any */
-static void fail(int fd, bool stream, const char *why, const JsonBuf *completion, const char *eos)
+static void fail_at(int fd, int status, bool stream, const char *why, const JsonBuf *completion, const char *eos)
 {
   JsonBuf e = {0};
   json_puts(&e, "{\"error\": {\"message\": "), json_dump_string(&e, why, strlen(why));
@@ -149,8 +149,13 @@ static void fail(int fd, bool stream, const char *why, const JsonBuf *completion
   else if (stream)
     http_stream_event(fd, e.p, e.n);
   else
-    http_send(fd, 500, "application/json", e.p, e.n);
+    http_send(fd, status, "application/json", e.p, e.n);
   free(e.p);
+}
+
+static void fail(int fd, bool stream, const char *why, const JsonBuf *completion, const char *eos)
+{
+  fail_at(fd, 500, stream, why, completion, eos);
 }
 
 /* the x-osmos-loop header line (loop.h's value, "\r\n" ended) */
@@ -428,17 +433,21 @@ void api_chat(Api *a, Http *h)
   size_t n = 0;
   int32_t *ids = prompt_ids(a, &rq, &n, err);
   const unsigned ctx = a->engine.max_ctx;
+  bool loading = false, over = false; /* the refusal's kind: a 503 to retry, OpenAI's context_length_exceeded */
   if (ids && !engine_ready(&a->engine)) /* loading: no context known yet (its 503 below, said as it is) */
-    snprintf(err, sizeof err, "the engine is not ready"), free(ids), ids = NULL;
+    snprintf(err, sizeof err, "the engine is not ready (loading)"), free(ids), ids = NULL, loading = true;
   else if (ids && n >= ctx)
-    snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL;
+    snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL, over = true;
   if (ids && rq.max_tokens && n + rq.max_tokens > ctx)
     rq.max_tokens = (unsigned)(ctx - n); /* past the context: as many as it leaves (finish "length") */
   Run *r = ids ? engine_run(&a->engine, ids, n, rq.max_tokens, next_mark(a, &rq, ids, n), err) : NULL;
   free(ids);
-  if (!r)
+  if (!r) /* 503 for loading alone (a request's own fault - its template's - a 400 then too: 0.9.2's, retried) */
   {
-    http_error(h->fd, engine_ready(&a->engine) ? 400 : 503, err);
+    if (over)
+      http_error_code(h->fd, 400, err, "messages", "context_length_exceeded");
+    else
+      http_error(h->fd, loading ? 503 : 400, err);
     request_free(&rq);
     return;
   }
@@ -462,6 +471,10 @@ void api_chat(Api *a, Http *h)
   }
   else if (!strcmp(r->finish, "error"))
     fail(h->fd, rq.stream, r->err, NULL, NULL);
+  else if (!strcmp(r->finish, "cancel")) /* cancelled with its client still here: the engine's QUIT (this server
+                                            stopping) - a cut answer, never a "stop" (0.9.2): a stream's error event,
+                                            no [DONE]; a whole answer's 503, its retry for the next server */
+    fail_at(h->fd, 503, rq.stream, "the server stopped before the answer's end (osmos-api shutting down)", NULL, NULL);
   else
   {
     answer_advance(&s);

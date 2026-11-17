@@ -5326,6 +5326,17 @@ already. `tools/install/` (python, the standard library alone; `hf` for download
 - **the tests** (`tools/install/test_install.py`, unittest, no network): the manifest's checks (an unpinned file,
   an unknown id, a slot out of range, refused); the stamp read, written and hashed canonically on a small GGUF; the
   user's files found, a wrong hash refused, a wrong stamp copied not written; a pack laid out from local files.
+- **versions side by side** (0.9.2, `versions.py`): `--upgrade [VERSION]` clones the tag beside the others
+  (`~/.local/share/osmos/<version>`, or `$OSMOS_VERSIONS`), builds it there, checks its `osmos-api --version`, then
+  moves it into place - nothing half-built is left where a row could run it. rig's rows move by their `command`
+  alone: by default the rows on the newest version built before (the ones following releases; a row kept on an
+  older version stays), or `--rows ids|all`. osmos-api refuses a key it does not know, so one shared `osmos.json`
+  would break every older row the day a newer installer writes a new key into it: each version reads its own
+  `osmos.<version>.json`, written once (from the shared file) and never again - the version a row leaves frozen as
+  well as the one it takes. every move is journaled (`upgrades.json`); `--rollback` restores the last one's
+  commands on the rows it left as they were (a row edited since is said and left alone). `--versions` lists them
+  and the rows on each; `--prune` names the versions no row runs (the newest kept), `--yes` removes them.
+  `--rig` keeps a row's keys the pack does not set (0.9.2: the row was replaced whole).
 
 ## osmos-api: the engine as an OpenAI-compatible server (design, 2026-11-04)
 

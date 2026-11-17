@@ -255,6 +255,43 @@ int main() {
               " held\n");
 
   q4x_forward_destroy(f);
+
+  // 0.9.2: past the drafter's window, a rollback of seeded positions and a shorter seed after - the rings' slots of the
+  // positions dropped must not stand in for the window's oldest (a ring of the window alone aliased them: up to 6 stale
+  // keys read as context). A: W + 100 seeded, 8 more seeded, rolled back, 1 seeded; B: the same W + 101 straight
+  const uint32_t W = (uint32_t) df->geo.window, kBig = 2 * W;
+  Q4xOptions ob = {kBig, 512, false, nullptr, 0, df};
+  Q4xForward* g = q4x_forward_create_with(w, nullptr, &ob, err);
+  CHECK(g);
+  std::vector<int32_t> toks(W + 109);
+  for (size_t i = 0; i < toks.size(); i++) toks[i] = ids[i % ids.size()];
+  auto read = [&](Q4xSeq* q, uint32_t from, uint32_t to) {
+    for (uint32_t at = from; at < to; at += 512) {
+      const uint32_t n = to - at < 512 ? to - at : 512;
+      step(g, q, toks.data() + at, n);
+      CHECK(q4x_dflash_seed(g, q, (int32_t) at, (int32_t) (at + n), err));
+    }
+  };
+  Q4xSeq *ra = q4x_seq_create(g, err), *rb = q4x_seq_create(g, err);
+  CHECK(ra && rb);
+  read(ra, 0, W + 100);
+  std::vector<int32_t> eight(toks.begin() + W + 100, toks.begin() + W + 108);
+  for (int32_t& x : eight) x = kJunkToken;  // another turn's tokens: seeded, then dropped
+  step(g, ra, eight.data(), 8);
+  CHECK(q4x_dflash_seed(g, ra, (int32_t) W + 100, (int32_t) W + 108, err) && q4x_seq_rollback(ra, 8));
+  read(ra, W + 100, W + 101);
+  read(rb, 0, W + 101);
+  CHECK(q4x_dflash_draft(g, ra, toks[W + 101], 7, 0, 0, a, ca, err) == 7);
+  CHECK(q4x_dflash_draft(g, rb, toks[W + 101], 7, 0, 0, b, cb, err) == 7);
+  CHECK(std::memcmp(a, b, 7 * 4) == 0 && std::memcmp(ca, cb, 7 * 4) == 0);
+  // a seed after another step (a batch of more than 64 sequences is several: the later ones' taps over its): refused
+  step(g, ra, toks.data(), 4);
+  step(g, rb, toks.data(), 4);
+  CHECK(!q4x_dflash_seed(g, ra, (int32_t) W + 101, (int32_t) W + 105, err) && std::strstr(err, "another step"));
+  q4x_seq_destroy(ra), q4x_seq_destroy(rb);
+  q4x_forward_destroy(g);
+  std::printf("  past the window (%u): 8 seeded positions rolled back, 1 seeded after - the drafts the bits of the"
+              " sequence that never held them\n", W);
   q4x_dflash_destroy(df);
   q4x_weights_destroy(w);
   gguf_destroy(draft), gguf_destroy(model);

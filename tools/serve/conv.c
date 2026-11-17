@@ -176,6 +176,19 @@ static bool back_to_prompt(Conv *c, const Server *sv)
   return go_back(c, sv, &c->prompt);
 }
 
+/* a prompt's read cancelled part-way (STOP, its client gone): the state there not kept - its prompt's end lies past it
+   (DeepSeek's decoder skip ran its last layers for that end) - so back to the furthest point it still holds: this
+   request's user turn's, else the last prompt's. none: read again from the start. 0.9.2: a restart every time, so a
+   client's retry after a timeout read the whole conversation again (and, the read longer than its timeout, again) */
+bool conv_cancel_read(Conv *c, const Server *sv)
+{
+  const uint32_t a = c->prompt.n && c->prompt.n <= c->held.n ? c->prompt.n : 0,
+                 b = c->user.n && c->user.n <= c->held.n ? c->user.n : 0;
+  if (!a && !b)
+    return conv_restart(c, sv);
+  return go_back(c, sv, a > b ? &c->prompt : &c->user);
+}
+
 /* after a request's failure (its ERR written): a new sequence for the conversation, or - the GPU's state lost (a
    kernel's fault: every call after it fails the same) or no sequence to be had - FATAL and exit, so osmos-api's
    "the engine exited" ends every request instead of each one answering ERR forever */
@@ -287,11 +300,18 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   for (uint32_t i = 0; i < len; i++)
     if (!ids_push(&c->held, p[i]))
       return snprintf(c->err, sizeof c->err, "out of memory (a kept conversation's tokens)"), false;
+  /* kept as its prompt's point left it (conv_set_aside): that point again, taken back. 0.9.2: none was, and the turn
+     taken back at exactly that point (the same turn again, or a tool result whose mark it is) read on without one -
+     its stops not past held.n - so its next turn found nothing to go back to and read the whole conversation again
+     (DeepSeek: or continued on its decoded answer) */
+  take(c, &c->prompt, "prompt's");
   return true;
 }
 
 /* k tokens of p (from held.n) through one osmos_read; the drafter's rings seeded with the piece's part of the last
-   window of the prompt's n tokens (serve.h) */
+   window before n - the prompt's end it is read with (conv_prompt_end: a mark's ahead of it, so the mark's point holds
+   its own window; 0.9.2: the whole prompt's, so a turn gone back to the mark with a short tail drafted from rings
+   that held no rows for it) (serve.h) */
 static bool read_piece(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t n, bool seed)
 {
   if (!k)
@@ -333,21 +353,22 @@ bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t
     c->user = c->prompt, c->prompt = t, c->prompt.n = 0;
   }
   const uint32_t end = c->held.n + k, stops[2] = {mark < n - 1 ? mark : 0, n - 1};
-  uint32_t len = 0; /* the last read's tokens */
+  uint32_t len = 0, at_end = conv_prompt_end(c, n, mark); /* the last read's tokens; the prompt's end it is read to */
   for (int i = 0; i < 2; i++)
     if (stops[i] > c->held.n && stops[i] <= end)
     {
       len = stops[i] - c->held.n;
-      if (!read_piece(c, sv, p, len, n, seed))
+      if (!read_piece(c, sv, p, len, at_end, seed))
         return false;
       take(c, i ? &c->prompt : &c->user, i ? "prompt's" : "last user turn's");
       if (!i && !oseq_prompt(c->s, n)) /* past the mark: the prompt's own end */
         return snprintf(c->err, sizeof c->err, "the prompt's end not past its mark"), false;
+      at_end = n;
     }
   if (c->held.n < end)
   {
     len = end - c->held.n;
-    if (!read_piece(c, sv, p, len, n, seed))
+    if (!read_piece(c, sv, p, len, at_end, seed))
       return false;
   }
   *row = len - 1; /* the last read's last token: its logits the next token's */

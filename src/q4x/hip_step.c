@@ -163,7 +163,7 @@ static void advance(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t
     if (f->mtp)
       memcpy(s->step_tok, tok, n * sizeof *tok);
     if (f->mtp || f->df) /* the step's place: the head's seed reads its rows, the drafter's feed its taps */
-      s->step_pos0 = s->pos, s->step_row0 = row0 + r[i].t0, s->step_n = n, s->step_t0 = r[i].t0;
+      s->step_pos0 = s->pos, s->step_row0 = row0 + r[i].t0, s->step_n = n, s->step_t0 = r[i].t0, s->step_id = f->steps;
     const int keep = (int)(sizeof s->last / sizeof *s->last);
     for (uint32_t t = 0; t < n; t++) /* the latest first */
     {
@@ -216,6 +216,7 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
     if (seqs[i] && seqs[i]->broken)
       return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   const uint32_t n = runs_of(f, seqs, lens, runs, r);
+  f->steps++;
   if (!n || (uint64_t)row0 + n > f->max_tokens)
     return q4x_fail(err, "a run of no tokens, a sequence twice, of another forward or past its context, or the rows "
                          "past the forward's max_tokens");

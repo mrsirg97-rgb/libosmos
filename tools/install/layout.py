@@ -40,12 +40,14 @@ def _resolve(m, fid, have, trust_size, fetch, found=None):
     return fetch(e), True
 
 
-def made(m, fid, models, have):
-    """a derived file already made: under <models>/derived/, or among the user's files - by its bytes (the layout
-    checks its SHA-256 before using it, and makes it again if not the pinned one)"""
+def made(m, fid, models, have, trust_size=False):
+    """a derived file already made: under <models>/derived/, or among the user's files - by the check the layout makes
+    before it uses one (0.9.2: by its bytes alone, so a stale one passed the plan, failed the layout, and its inputs
+    were fetched unplanned). its hash is computed once a run (userfiles._sha256)"""
     e = m["files"][fid]
     p = os.path.join(models, "derived", e["path"])
-    return (os.path.exists(p) and os.path.getsize(p) == e["bytes"]) or bool(have and userfiles.find(e, have, True))
+    return (os.path.exists(p) and userfiles.made_matches(p, e, trust_size)) or \
+        bool(have and userfiles.find(e, have, False))
 
 
 def _input(m, fid, models, have, trust_size, fetch, found):

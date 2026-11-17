@@ -155,7 +155,13 @@ class Api(Served, unittest.TestCase):
     def test_0_health_while_loading(self):
         self.assertEqual(self.get("/health")[0], 503)
         self.assertEqual(self.post({"messages": [{"role": "user", "content": "hi"}]}).status, 503)
+        loading = json.loads(self.get("/v1/models")[1])["data"][0]  # 0.9.2: listed, said loading, no context yet
+        self.assertEqual((loading["osmos"]["ready"], "context_length" in loading), (False, False))
+        r = self.post({"messages": [{"role": "critic", "content": "hi"}]})  # its own fault: 400 even while loading
+        self.assertEqual(r.status, 400)
         self.ready()
+        ready = json.loads(self.get("/v1/models")[1])["data"][0]
+        self.assertEqual((ready["osmos"]["ready"], ready["context_length"]), (True, 4096))
         argv = self.log()[0].split()
         self.assertEqual(argv[argv.index("--max-context") + 1], "4096")
         self.assertIn("--no-guess", argv)
@@ -555,6 +561,35 @@ class Api(Served, unittest.TestCase):
         self.assertIn("orphan-calls=1", r.getheader("x-osmos-loop"))
         ev = [json.loads(e[len("data: "):]) for e in r.read().decode().split("\n\n") if e and e != "data: [DONE]"]
         self.assertEqual(ev[-1]["osmos"]["loop"]["orphan_calls"], ["c1"])
+
+    # 0.9.2: a run cancelled with its client still here (the engine's QUIT: rig stopping osmos-api mid-answer) - its
+    # cut answer never finish "stop": a stream's error event without [DONE], a whole answer's 503
+    def test_6p_cancelled_unasked(self):
+        self.ready()
+        body = {"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none"}
+        self.reply("a b c d", finish="cancel")
+        r = self.post(body)
+        self.assertEqual(r.status, 503)
+        self.assertIn("stopped", json.loads(r.read())["error"]["message"])
+        self.reply("a b c d", finish="cancel")
+        ev = self.raw_events(body)
+        self.assertNotIn("[DONE]", ev)
+        self.assertIn("error", json.loads(ev[-1]))
+        self.assertFalse(any((e.get("choices") or [{}])[0].get("finish_reason") for e in map(json.loads, ev)))
+
+    def test_6q_context_exceeded(self):  # 0.9.2: OpenAI's code, the one harnesses compact a conversation on
+        self.ready()
+        r = self.post({"messages": [{"role": "user", "content": "word " * 5000}], "reasoning_effort": "none"})
+        self.assertEqual(r.status, 400)
+        e = json.loads(r.read())["error"]
+        self.assertEqual((e["code"], e["param"], e["type"]), ("context_length_exceeded", "messages", "invalid_request_error"))
+        self.assertIn("the context is 4096", e["message"])
+
+    def test_6r_port_in_use(self):  # 0.9.2: why, not "could not listen there"
+        r = subprocess.run([API, "--config", self.cfg, "--port", str(self.port), "--engine", FAKE],
+                           env=dict(os.environ, FAKE_DIR=self.dir), capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(f"port {self.port} on 127.0.0.1 is in use", r.stderr)
 
     def test_7_engine_gone(self):
         self.ready()
@@ -1030,6 +1065,20 @@ class InklingApi(Served, unittest.TestCase):
         self.reply(I_TEXT + "ok" + I_END + I_EOS)
         self.post({"messages": msgs, "reasoning_effort": 0.35}).read()
         self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort=0.35))
+
+    def test_3b_thinking_off_and_developer(self):  # 0.9.2: thinking off the template's "none" (it was the default
+        # 0.9); a developer message a system one (it was refused: the template knows no developer role)
+        self.ready()
+        msgs = [{"role": "user", "content": "three primary colors?"}]
+        for off in ({"chat_template_kwargs": {"enable_thinking": False}}, {"thinking": {"type": "disabled"}},
+                    {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "high"}):
+            self.reply(I_TEXT + "ok" + I_END + I_EOS)
+            self.assertEqual(self.post(dict({"messages": msgs}, **off)).status, 200)
+            self.assertEqual(self.last_gen()[-1], self.prompt(msgs, effort="none"), off)
+        self.reply(I_TEXT + "ok" + I_END + I_EOS)
+        r = self.post({"messages": [{"role": "developer", "content": "Be brief."}] + msgs})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(self.last_gen()[-1], self.prompt([{"role": "system", "content": "Be brief."}] + msgs))
 
     def test_4_history_whole(self):  # a client's arguments string the object the template asks for; reasoning kept
         self.ready()

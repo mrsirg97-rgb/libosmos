@@ -81,10 +81,12 @@ struct Ink2Seq
   float *mlast;
   int32_t mfrom, mend, tap_pos0;
   uint32_t tap_row0;
+  uint64_t tap_step; /* the forward's step that wrote its taps (Ink2Forward.steps; 0: none) - a seed reads its own */
 };
 
 struct Ink2Forward
 {
+  uint64_t steps; /* ink2_step's calls: the drafter's taps the last one's, every sequence's in it (Ink2Seq.tap_step) */
   const Ink2Weights *w;
   const Ink2Mtp *mtp; /* the drafter, or NULL */
   Ink2MtpDev md;

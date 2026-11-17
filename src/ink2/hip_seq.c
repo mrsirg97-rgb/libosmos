@@ -191,12 +191,8 @@ uint64_t ink2_identity(const Ink2Forward *f)
   for (int l = 0; l < g->n_layers; l++)
     h = fnv_u64(g->sliding[l], h);
   const Gguf *m = f->w->model;
-  for (int i = 0; i < m->n_files; i++)
-  {
-    const char *base = strrchr(m->paths[i], '/');
-    base = base ? base + 1 : m->paths[i];
-    h = fnv_u64(m->sizes[i], fnv(base, strlen(base), h));
-  }
+  for (int i = 0; i < m->n_files; i++) /* each file: fnv.h's fnv_file (its patched shards another identity) */
+    h = fnv_file(m->paths[i], h);
   return h;
 }
 
@@ -263,6 +259,7 @@ static void settle(Ink2Seq *s, int32_t pos, bool mark)
   }
   s->pos = pos, s->reach = 0, s->prompt_end = 0, s->failed = false;
   s->mfrom = s->mend = 0; /* the drafter's context not saved: seeded again from here */
+  s->tap_step = 0;        /* no step's taps its own: a seed waits for its next step */
 }
 
 uint64_t ink2_seq_state_bytes(const Ink2Seq *s) { return s ? bytes_at(s, s->pos, false) : 0; }

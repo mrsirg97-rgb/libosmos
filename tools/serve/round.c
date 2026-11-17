@@ -68,8 +68,13 @@ static void settle(Multi *m, const Entry *e, const int32_t *toks, const int32_t 
   ln->t = pk[acc];
   if (end)
     lane_finish(m, ln, end);
-  else if ((uint32_t)oseq_position(ln->c.s) + 1 >= m->sv->max_ctx)
-    lane_finish(m, ln, "length");
+  else if ((uint32_t)oseq_position(ln->c.s) + 1 >= m->sv->max_ctx) /* the context's last position: its pick printed,
+                                                                      not fed - a greedy lane's last (0.9.2: dropped, a
+                                                                      drafted answer a token short of the plain one) */
+  {
+    out("T %lld %d\n", ln->g.rid, ln->t), ln->produced++;
+    lane_finish(m, ln, server_eos(m->sv, ln->t) ? "stop" : "length");
+  }
 }
 
 /* the round's lanes in order (a greedy one's token printed first: one at its end left out), each with the answering

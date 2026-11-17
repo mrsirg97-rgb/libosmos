@@ -235,6 +235,9 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
     return true;
   if (from < s->tap_pos0 || to > s->pos || (uint32_t)(to - s->tap_pos0) > f->max_tokens)
     return fail(err, "inkling2: positions not of the sequence's last step, or past its position");
+  if (!s->tap_step || s->tap_step != f->steps) /* 0.9.2: the taps every step overwrites - another sequence's step since,
+                                                 or a load (none since): its rings built from another's rows */
+    return fail(err, "inkling2: a seed after another step, or a load: the taps are not this sequence's (step it first)");
   const Ink2Mtp *m = f->mtp;
   Ink2MtpDev *d = &f->md;
   const uint32_t C = (uint32_t)m->n_embd, KV = kvw(m), K = (uint32_t)m->n_taps, n = (uint32_t)(to - from);
@@ -243,9 +246,11 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
   if (from > s->mend || from < s->mfrom)
     s->mfrom = from;
   bool ok = true;
-  for (int32_t at = 0; ok && at < (int32_t)n; at += INK2_MTP_BLOCK) /* the rope's positions a block at a time */
+  const uint32_t B = (uint32_t)m->block; /* the buffers' rows: the drafter's block (0.9.2: INK2_MTP_BLOCK, past a block of
+                                            2 or 3's buffers) */
+  for (int32_t at = 0; ok && at < (int32_t)n; at += (int32_t)B) /* the rope's positions a block at a time */
   {
-    const uint32_t k = n - (uint32_t)at < INK2_MTP_BLOCK ? n - (uint32_t)at : INK2_MTP_BLOCK;
+    const uint32_t k = n - (uint32_t)at < B ? n - (uint32_t)at : B;
     ok = positions(f, from + at, k);
     for (int l = 0; ok && l < m->n_layers; l++)
     {

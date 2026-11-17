@@ -5,7 +5,10 @@
 #include "dialect.h"
 
 /* Inkling's reader: the messages as its template takes them (request_messages: a call's arguments an object, as it
-   asks) - the tools apart, the reasoning effort as asked (a name or a number: its template names and bounds them) */
+   asks; a developer message a system one, as DeepSeek's and Qwen's readers take it - the template knows no other) -
+   the tools apart, the reasoning effort as asked (a name or a number: its template names and bounds them). thinking
+   off (enable_thinking false, thinking disabled) is the template's "none" - effort 0, its only off; 0.9.2: ignored,
+   the default 0.9 */
 
 bool request_ink2(const Json *body, Request *r, char err[API_ERR])
 {
@@ -17,6 +20,9 @@ bool request_ink2(const Json *body, Request *r, char err[API_ERR])
     return false;
   if (formatted)
     return request_fail(err, "response_format: Inkling's template has no response format (text only)");
+  static const Json off = {.type = JSON_STRING, .s = (char *)"none", .len = 4};
+  if (r->mode == CHAT_PLAIN)
+    eff = &off;
   if (eff && eff->type != JSON_NULL)
   {
     if (eff->type != JSON_STRING && eff->type != JSON_INT && eff->type != JSON_FLOAT)
@@ -31,6 +37,13 @@ bool request_ink2(const Json *body, Request *r, char err[API_ERR])
   }
   if (!request_messages(msgs, &r->messages, err))
     return false;
+  for (size_t i = 0; r->messages && i < r->messages->n; i++)
+  {
+    Json *role = (Json *)json_get(r->messages->item[i], "role");
+    char *sys = role && role->type == JSON_STRING && !strcmp(role->s, "developer") ? strdup("system") : NULL;
+    if (sys)
+      free(role->s), role->s = sys, role->len = 6;
+  }
   r->tools = request_tools(body);
   return true;
 }

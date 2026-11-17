@@ -90,6 +90,8 @@ def register(home, cfg, api, cfg_path, default, row):
            "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive", "efforts": list(row["efforts"]),
            "effort": row["effort"], "command": f"{api} --config {cfg_path} --port ${{PORT}}", "port": _port(rows, rid if any(r.get("id") == rid for r in rows) else old),
            "aliases": list(row["aliases"]), "stopGrace": STOP_GRACE, "places": 1}
+    prev = next((r for r in rows if r.get("id") == rid), None) or next((r for r in rows if r.get("id") in olds), {})
+    out = {**{k: v for k, v in prev.items() if k not in out and k != "id"}, **out}  # 0.9.2: a row's other keys kept
     rows = [r for r in rows if r.get("id") != rid and r.get("id") not in olds] + [out]
     _write(mpath, rows)
     if not default and os.path.exists(spath):  # a default left on the old row: moved with it (rig would find none)

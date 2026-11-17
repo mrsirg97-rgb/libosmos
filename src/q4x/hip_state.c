@@ -11,7 +11,8 @@
    values, then its indexer's pooled keys below the position's blocks and its raw keys' ring - then a checksum */
 
 #define STATE_MAGIC 0x53583451u /* "Q4XS" */
-#define STATE_VERSION 3u /* 2: the attention cache in Q8_0; 3: QSA's pooled keys and ring */
+#define STATE_VERSION 4u /* 2: the attention cache in Q8_0; 3: QSA's pooled keys and ring; 4 (0.9.2): the MTP head's
+                            cache, indexer and pending h (a forward with a head: its identity says so) */
 
 typedef struct Header
 {
@@ -19,11 +20,12 @@ typedef struct Header
   uint64_t identity;
   int32_t pos, n_last;
   int32_t last[Q4X_MAX_NGRAM];
+  int32_t pend_pos, pad; /* the head's pending h's position (-1: none) */
 } Header;
 
 typedef StatePart Part;
 
-#define MAX_PARTS (1 + 4 * Q4X_MAX_LAYERS)
+#define MAX_PARTS (1 + 4 * Q4X_MAX_LAYERS + 5)
 
 /* the parts of a sequence at position pos (its rings' latest slot), in the string's order: their count */
 static int parts(const Q4xSeq *s, int32_t pos, Part *p)
@@ -39,6 +41,13 @@ static int parts(const Q4xSeq *s, int32_t pos, Part *p)
     else
       p[n++] = (Part){s->kc[l], (uint64_t)pos * sb.kv_row}, p[n++] = (Part){s->vc[l], (uint64_t)pos * sb.kv_row},
       p[n++] = (Part){s->ixk[l], (uint64_t)(pos / g->ix_ratio) * sb.ix_block}, p[n++] = (Part){s->ixr[l], sb.ix_ring};
+  /* the MTP head's (0.9.2): its cache, indexer and pending h - a state taken back drafts as the conversation never set
+     aside did. without them the head's attention read the rows another conversation's seeding left (it has no lower
+     bound: every position from 0) */
+  if (s->mkc)
+    p[n++] = (Part){s->mkc, (uint64_t)pos * sb.kv_row}, p[n++] = (Part){s->mvc, (uint64_t)pos * sb.kv_row},
+    p[n++] = (Part){s->mixk, (uint64_t)(pos / g->ix_ratio) * sb.ix_block}, p[n++] = (Part){s->mixr, sb.ix_ring},
+    p[n++] = (Part){s->pend, (uint64_t)g->hc * g->n_embd * sizeof(float)};
   return n;
 }
 
@@ -63,6 +72,9 @@ uint64_t q4x_identity(const Q4xForward *f)
   for (int l = 0; l < g->n_layers; l++)
     h = fnv_u64(g->recurrent[l], h);
   h = fnv(&f->rope, sizeof f->rope, h); /* YaRN's or the plain rotation: another context's numbers another model's */
+  if (f->mtp) /* a head's cache in the state (parts()): its file's */
+    for (int i = 0; i < f->mtp->model->n_files; i++)
+      h = fnv_file(f->mtp->model->paths[i], fnv_u64(0x4d5450ull, h));
   if (f->npu) /* the NPU's sums its own, its parts by its share (q4x_forward_npu): another's states */
   {
     uint32_t share;
@@ -71,14 +83,8 @@ uint64_t q4x_identity(const Q4xForward *f)
   }
   const Gguf *files[2] = {f->w->model, f->w->overlay}; /* with an overlay or without: another model's states */
   for (int k = 0; k < 2 && files[k]; k++)
-    for (int i = 0; i < files[k]->n_files; i++) /* each file's name and size */
-    {
-      const char *base = strrchr(files[k]->paths[i], '/');
-      base = base ? base + 1 : files[k]->paths[i];
-      struct stat st;
-      h = fnv(base, strlen(base), h);
-      h = fnv_u64(stat(files[k]->paths[i], &st) == 0 ? (uint64_t)st.st_size : 0, h);
-    }
+    for (int i = 0; i < files[k]->n_files; i++) /* each file: fnv.h's fnv_file */
+      h = fnv_file(files[k]->paths[i], h);
   return h;
 }
 
@@ -111,6 +117,7 @@ bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FW
   memset(&h, 0, sizeof h);
   h.magic = STATE_MAGIC, h.version = STATE_VERSION, h.identity = q4x_identity(s->f), h.pos = s->pos;
   h.n_last = s->n_last < Q4X_MAX_NGRAM ? s->n_last : Q4X_MAX_NGRAM;
+  h.pend_pos = s->mkc ? s->pend_pos : -1;
   memcpy(h.last, s->last, sizeof h.last); /* the latest Q4X_MAX_NGRAM: what the n-gram layer reads */
   Part p[MAX_PARTS];
   const char *why = state_parts_save(&h, sizeof h, p, parts(s, s->pos, p), sink, ctx);
@@ -137,7 +144,7 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
   if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != q4x_identity(s->f))
     return refuse(s, err, "a state of another format or model (its identity)");
   if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM ||
-      bytes != bytes_at(s, h.pos))
+      h.pend_pos < -1 || h.pend_pos >= h.pos || bytes != bytes_at(s, h.pos))
     return refuse(s, err, "a state past this context, or not its position's size");
   Part p[MAX_PARTS];
   s->cur = 0, s->back = 0; /* loaded into slot 0, nothing behind it */
@@ -145,8 +152,8 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
   if (why) /* (the parts part written: the reset makes the sequence empty) */
     return refuse(s, err, why);
   s->pos = h.pos, s->n_last = h.n_last;
-  s->pend_pos = -1, s->step_n = 0; /* the head's cache not saved: its seeding starts over (drafts weaker, no bit moved) */
-  s->df_lo = s->df_pos = s->pos;    /* the drafter's rings neither: its context starts here */
+  s->pend_pos = h.pend_pos, s->step_n = 0; /* the head's cache the state's (parts()); its last step's taps not */
+  s->df_lo = s->df_pos = s->pos;           /* the drafter's rings are not the state's: its context starts here */
   memcpy(s->last, h.last, sizeof h.last);
   s->broken = false;
   return true;
@@ -183,6 +190,7 @@ typedef struct MarkHeader
   uint32_t magic;
   int32_t pos, n_last;
   int32_t last[Q4X_MAX_NGRAM];
+  int32_t pend_pos; /* the head's pending h's (-1: none) */
 } MarkHeader;
 
 static int mark_parts(const Q4xSeq *s, Part *p)
@@ -197,6 +205,9 @@ static int mark_parts(const Q4xSeq *s, Part *p)
       p[n++] = (Part){(uint8_t *)s->conv[l] + s->cur * sb.conv, sb.conv};
     else
       p[n++] = (Part){s->ixr[l], sb.ix_ring};
+  if (s->mkc) /* the head's raw keys' ring and pending h: later tokens change them (its cache rows below the mark they
+                 do not - the same conversation's) */
+    p[n++] = (Part){s->mixr, sb.ix_ring}, p[n++] = (Part){s->pend, (uint64_t)g->hc * g->n_embd * sizeof(float)};
   return n;
 }
 
@@ -219,6 +230,7 @@ bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_
   MarkHeader h;
   memset(&h, 0, sizeof h);
   h.magic = MARK_MAGIC, h.pos = s->pos, h.n_last = s->n_last < Q4X_MAX_NGRAM ? s->n_last : Q4X_MAX_NGRAM;
+  h.pend_pos = s->mkc ? s->pend_pos : -1;
   memcpy(h.last, s->last, sizeof h.last);
   memcpy(out, &h, sizeof h);
   Part p[MAX_PARTS];
@@ -247,7 +259,7 @@ bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_F
   }
   s->pos = h.pos, s->n_last = h.n_last, s->prompt_end = 0;
   memcpy(s->last, h.last, sizeof h.last);
-  s->pend_pos = -1, s->step_n = 0; /* the head's and the drafter's context start here (drafts weaker, no bit moved) */
-  s->df_lo = s->df_pos = s->pos;
+  s->pend_pos = h.pend_pos < h.pos ? h.pend_pos : -1, s->step_n = 0; /* the head's as at the mark (mark_parts) */
+  s->df_lo = s->df_pos = s->pos; /* the drafter's context starts here */
   return true;
 }

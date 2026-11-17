@@ -12,7 +12,18 @@ _CHUNK = 1 << 24
 TRUST_FROM = 1 << 30
 
 
+_SEEN = {}  # (real path, bytes, mtime_ns): its SHA-256 - a file hashed once a run (the plan's, then the layout's)
+
+
 def _sha256(path):
+    st = os.stat(path)
+    key = (os.path.realpath(path), st.st_size, st.st_mtime_ns)
+    if key not in _SEEN:
+        _SEEN[key] = _sha256_read(path)
+    return _SEEN[key]
+
+
+def _sha256_read(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(_CHUNK), b""):
@@ -80,7 +91,11 @@ def made_matches(path, entry, trust_size=False):
 
 
 def find(entry, dirs, trust_size=False):
-    for p in candidates(dirs, entry["bytes"]):
-        if matches(p, entry, trust_size):
+    """the first of the user's files that is the entry's. under trust_size a large file's bytes alone - unless more than
+    one file has them (0.9.2: the first taken, another pack's shard of the same size perhaps): then each hashed"""
+    found = list(candidates(dirs, entry["bytes"]))
+    alone = trust_size and len(found) == 1
+    for p in found:
+        if matches(p, entry, alone):
             return p
     return None

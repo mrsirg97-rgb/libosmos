@@ -2,6 +2,8 @@
 #define OSMOS_MODEL_FNV_H
 
 #include <stdint.h>
+#include <string.h>
+#include <sys/stat.h>
 
 /* 64-bit FNV-1a: a saved state's checksum, an identity's key (the families' seq states) */
 #define FNV_SEED 1469598103934665603ull
@@ -16,5 +18,23 @@ static inline uint64_t fnv(const void *p, uint64_t n, uint64_t h)
 }
 
 static inline uint64_t fnv_u64(uint64_t v, uint64_t h) { return fnv(&v, sizeof v, h); }
+
+/* a weights file in an identity (a kept conversation's, slots.h): its name, size, and which file it is now - device,
+   inode, modification time to the nanosecond (a link's target's). name and size alone took a file rewritten in place
+   at the same size (an overlay made again at another strength, a pack's shards patched) for the one a state was
+   read with: its old KV continued under new weights (0.9.2). a file moved or copied (cp without -p) another: its
+   kept states read again once, never another file's bits */
+static inline uint64_t fnv_file(const char *path, uint64_t h)
+{
+  const char *base = strrchr(path, '/');
+  base = base ? base + 1 : path;
+  h = fnv(base, strlen(base), h);
+  struct stat st;
+  if (stat(path, &st) != 0)
+    return fnv_u64(0, h);
+  const uint64_t id[] = {(uint64_t)st.st_size, (uint64_t)st.st_dev, (uint64_t)st.st_ino, (uint64_t)st.st_mtim.tv_sec,
+                         (uint64_t)st.st_mtim.tv_nsec};
+  return fnv(id, sizeof id, h);
+}
 
 #endif
