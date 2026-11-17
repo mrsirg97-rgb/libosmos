@@ -130,6 +130,19 @@ int main() {
     total += r.values.size();
     checked++;
   }
+  // a reference for a type a file may hold that the table does not decode: a type a model of ours ships in (Q4_0,
+  // vibes-flash's) the GPU cannot read yet - a failure, not a skip
+  for (uint32_t id = 0; id < kSweep; id++) {
+    const QTypeInfo* t = qtype_info(id);
+    if (!t || (t->paths & QTYPE_DECODE) || !(t->paths & QTYPE_FILE)) continue;
+    char path[512];
+    std::snprintf(path, sizeof path, "%s/osmos-oracle/dequant/%s.bin", home ? home : "", t->name);
+    Ref r;
+    if (load(path, &r)) {
+      std::fprintf(stderr, "  %s: a reference file, and the table does not decode it\n", t->name);
+      std::exit(1);
+    }
+  }
   if (!checked) {
     std::printf("[test_quant_gpu] skipped: no reference in ~/osmos-oracle/dequant (oracle/dequant_ref.py)\n");
     return 77;
