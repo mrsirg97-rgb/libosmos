@@ -300,6 +300,11 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   for (uint32_t i = 0; i < len; i++)
     if (!ids_push(&c->held, p[i]))
       return snprintf(c->err, sizeof c->err, "out of memory (a kept conversation's tokens)"), false;
+  /* kept as its prompt's point left it (conv_set_aside): that point again, taken back. 0.9.2: none was, and the turn
+     taken back at exactly that point (the same turn again, or a tool result whose mark it is) read on without one -
+     its stops not past held.n - so its next turn found nothing to go back to and read the whole conversation again
+     (DeepSeek: or continued on its decoded answer) */
+  take(c, &c->prompt, "prompt's");
   return true;
 }
 
