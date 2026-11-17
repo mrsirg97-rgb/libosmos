@@ -196,6 +196,33 @@ class UserFiles(unittest.TestCase):
             self.assertEqual(userfiles.find(entry(b), [d], trust_size=True), os.path.realpath(b))
             self.assertEqual(userfiles.find(entry(a), [d], trust_size=True), os.path.realpath(a))
 
+    def test_trust_size_hashes_same_size_large_files(self):  # 0.9.2: the first of two took the entry by bytes
+        with tempfile.TemporaryDirectory() as d:
+            a, b = os.path.join(d, "a.gguf"), os.path.join(d, "b.gguf")
+            for p, last in ((a, b"A"), (b, b"B")):  # large (sparse), the same size, other bytes
+                with open(p, "wb") as f:
+                    f.truncate(userfiles.TRUST_FROM - 1)
+                    f.seek(userfiles.TRUST_FROM - 1)
+                    f.write(last)
+            ea, eb = ({"repo": "r/a", "revision": REV, "path": "x/" + os.path.basename(p), "bytes": userfiles.TRUST_FROM,
+                       "sha256": userfiles._sha256(p)} for p in (a, b))
+            self.assertEqual(userfiles.find(ea, [d], trust_size=True), os.path.realpath(a))  # each its own, whichever
+            self.assertEqual(userfiles.find(eb, [d], trust_size=True), os.path.realpath(b))  # the walk finds first
+            os.remove(a)  # alone again: its bytes enough
+            self.assertEqual(userfiles.find(dict(eb, sha256="0" * 64), [d], trust_size=True), os.path.realpath(b))
+
+    def test_have_flags(self):  # 0.9.2: --have again kept the last alone; a directory not there passed over
+        with tempfile.TemporaryDirectory() as d:
+            x, y, z = (os.path.join(d, n) for n in "xyz")
+            for p in (x, y, z):
+                os.makedirs(p)
+            a = osmos_install.parser().parse_args(["p", "--have", x, "--have", y, z])
+            self.assertEqual(a.have, [x, y, z])
+            with mock.patch.object(sys, "argv", ["osmos_install.py", "p", "--have", x, os.path.join(d, "gone")]):
+                with self.assertRaises(SystemExit) as cm:
+                    osmos_install.main()
+            self.assertIn("no such directory", str(cm.exception))
+
     def test_table_restamped_found(self):
         with tempfile.TemporaryDirectory() as d:
             pub = os.path.join(d, "pub.gguf")
@@ -588,6 +615,24 @@ class DerivedSet(unittest.TestCase):
             cfg = layout.read_config(layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None))
             self.assertEqual(sha(cfg["model"]), sha(made[0]))
             self.assertEqual(sha(os.path.join(models, "e", "e-00002-of-00002.gguf")), sha(made[1]))
+
+    def test_plan_checks_made_as_the_layout_does(self):
+        """0.9.2: a made file of its size but other bytes (a stale make, no stamp): not made for the plan either - its
+        inputs planned, not fetched unplanned when the layout refuses it"""
+        with tempfile.TemporaryDirectory() as d:
+            have, models, m, made = self.setup(d)
+            layout.lay(m, "e", models, [have], trust_size=False, abliterated=False, fetch=None)  # makes it
+            is_made = lambda fid: layout.made(m, fid, models, [])  # noqa: E731
+            self.assertEqual(osmos_install.needed(m, ["e"], False, is_made), [])
+            p = os.path.join(models, "derived", m["files"]["e2"]["path"])
+            with open(p, "r+b") as f:  # the same size, its last byte another
+                f.seek(-1, 2)
+                last = f.read(1)
+                f.seek(-1, 2)
+                f.write(bytes([last[0] ^ 0xFF]))
+            os.remove(p + userfiles.MADE_STAMP)
+            getattr(userfiles, "_SEEN", {}).clear()
+            self.assertEqual(osmos_install.needed(m, ["e"], False, is_made), ["b1", "b2", "delta"])
 
     def test_trust_size_takes_made_set_by_bytes(self):
         """a set made before: --trust-size takes it again by its bytes and its stamp (the pinned SHA-256 it was made

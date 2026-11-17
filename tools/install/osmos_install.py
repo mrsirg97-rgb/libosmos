@@ -130,13 +130,14 @@ def ctx_length(v):
     return n
 
 
-def main():
+def parser():
     ap = argparse.ArgumentParser(description="osmos-install: a pack from a stock Strix Halo, or from files you have")
     ap.add_argument("packs", nargs="*")
     ap.add_argument("--list", action="store_true", help="the packs and what each is")
     ap.add_argument("--manifest", default=os.path.join(HERE, "packs.json"))
     ap.add_argument("--models", default=os.path.expanduser("~/Models/osmos"), help="where packs are laid out")
-    ap.add_argument("--have", nargs="*", default=[], help="directories of files you already have")
+    ap.add_argument("--have", nargs="+", action="extend", default=[], metavar="DIR",
+                    help="directories of files you already have (more than one, or the flag again: each added)")
     ap.add_argument("--trust-size", action="store_true",
                     help="take your large files by bytes alone (small ones are hashed still)")
     ap.add_argument("--abliterated", action="store_true", help="the abliteration overlay (huihui-ai), opt-in")
@@ -152,7 +153,14 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="the checks and the plan, nothing written")
     ap.add_argument("--doctor", action="store_true",
                     help="the machine as osmos will run on it: every check, what to change (doctor.py)")
-    a = ap.parse_args()
+    return ap
+
+
+def main():
+    a = parser().parse_args()
+    missing = [d for d in a.have if not os.path.isdir(d)]
+    if missing:  # 0.9.2: passed over in silence - its files then fetched
+        raise SystemExit("--have: no such directory: " + ", ".join(missing))
     if a.doctor:
         checks = doctor.run(a.models)
         for level, why in checks:
@@ -186,7 +194,7 @@ def main():
             if not m["packs"][pid].get("npu"):
                 raise SystemExit(f"--npu: pack {pid} has no NPU kernels (the GPU alone runs it)")
     print("the files:")
-    made = lambda fid: layout.made(m, fid, a.models, a.have)  # noqa: E731
+    made = lambda fid: layout.made(m, fid, a.models, a.have, a.trust_size)  # noqa: E731
     ids = list(dict.fromkeys(needed(m, a.packs, a.abliterated, made) +
                              ([m["packs"][p]["npu"] for p in a.packs] if a.npu else [])))
     found, fetch_ids = plan(m, ids, a.have, a.trust_size)
