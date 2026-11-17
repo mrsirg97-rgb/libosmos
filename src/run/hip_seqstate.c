@@ -42,11 +42,7 @@ uint64_t forward_identity(const Forward *f)
   for (int i = 0; i < n; i++)
   {
     const char *p = i < f->w->n_files ? f->w->paths[i] : f->w->engram->paths[i - f->w->n_files];
-    const char *base = strrchr(p, '/');
-    base = base ? base + 1 : p;
-    struct stat st;
-    h = fnv(base, strlen(base), h);
-    h = fnv_u64(stat(p, &st) == 0 ? (uint64_t)st.st_size : 0, h);
+    h = fnv_file(p, h);
   }
   if (f->npu) /* the NPU's sums its own, its parts by its share (forward_npu): another's states */
   {

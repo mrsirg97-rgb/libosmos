@@ -71,14 +71,8 @@ uint64_t q4x_identity(const Q4xForward *f)
   }
   const Gguf *files[2] = {f->w->model, f->w->overlay}; /* with an overlay or without: another model's states */
   for (int k = 0; k < 2 && files[k]; k++)
-    for (int i = 0; i < files[k]->n_files; i++) /* each file's name and size */
-    {
-      const char *base = strrchr(files[k]->paths[i], '/');
-      base = base ? base + 1 : files[k]->paths[i];
-      struct stat st;
-      h = fnv(base, strlen(base), h);
-      h = fnv_u64(stat(files[k]->paths[i], &st) == 0 ? (uint64_t)st.st_size : 0, h);
-    }
+    for (int i = 0; i < files[k]->n_files; i++) /* each file: fnv.h's fnv_file */
+      h = fnv_file(files[k]->paths[i], h);
   return h;
 }
 

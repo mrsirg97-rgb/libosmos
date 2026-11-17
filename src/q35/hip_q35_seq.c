@@ -132,14 +132,8 @@ uint64_t q35_identity(const Q35Forward *f)
     h = fnv_u64(g->recurrent[l], h);
   h = fnv(&f->rope, sizeof f->rope, h); /* YaRN's or the plain rotation: another context's numbers another model's */
   const Gguf *m = f->w->model;
-  for (int i = 0; i < m->n_files; i++) /* each file's name and size */
-  {
-    const char *base = strrchr(m->paths[i], '/');
-    base = base ? base + 1 : m->paths[i];
-    struct stat st;
-    h = fnv(base, strlen(base), h);
-    h = fnv_u64(stat(m->paths[i], &st) == 0 ? (uint64_t)st.st_size : 0, h);
-  }
+  for (int i = 0; i < m->n_files; i++) /* each file: fnv.h's fnv_file */
+    h = fnv_file(m->paths[i], h);
   return h;
 }
 

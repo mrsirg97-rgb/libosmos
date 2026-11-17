@@ -191,12 +191,8 @@ uint64_t ink2_identity(const Ink2Forward *f)
   for (int l = 0; l < g->n_layers; l++)
     h = fnv_u64(g->sliding[l], h);
   const Gguf *m = f->w->model;
-  for (int i = 0; i < m->n_files; i++)
-  {
-    const char *base = strrchr(m->paths[i], '/');
-    base = base ? base + 1 : m->paths[i];
-    h = fnv_u64(m->sizes[i], fnv(base, strlen(base), h));
-  }
+  for (int i = 0; i < m->n_files; i++) /* each file: fnv.h's fnv_file (its patched shards another identity) */
+    h = fnv_file(m->paths[i], h);
   return h;
 }
 
