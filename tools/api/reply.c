@@ -128,7 +128,7 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
 /* a run that gives no answer: a streamed one's error event (no [DONE]), or a 500. a completion its parse refused
    goes with it as its text (the EOS dropped): greedy, the same messages again are the same completion, so a client
    can only get past one by showing the model what it wrote (#34) - sent back, a client's text is defused as any */
-static void fail(int fd, bool stream, const char *why, const JsonBuf *completion, const char *eos)
+static void fail_at(int fd, int status, bool stream, const char *why, const JsonBuf *completion, const char *eos)
 {
   JsonBuf e = {0};
   json_puts(&e, "{\"error\": {\"message\": "), json_dump_string(&e, why, strlen(why));
@@ -149,8 +149,13 @@ static void fail(int fd, bool stream, const char *why, const JsonBuf *completion
   else if (stream)
     http_stream_event(fd, e.p, e.n);
   else
-    http_send(fd, 500, "application/json", e.p, e.n);
+    http_send(fd, status, "application/json", e.p, e.n);
   free(e.p);
+}
+
+static void fail(int fd, bool stream, const char *why, const JsonBuf *completion, const char *eos)
+{
+  fail_at(fd, 500, stream, why, completion, eos);
 }
 
 /* the x-osmos-loop header line (loop.h's value, "\r\n" ended) */
@@ -462,6 +467,10 @@ void api_chat(Api *a, Http *h)
   }
   else if (!strcmp(r->finish, "error"))
     fail(h->fd, rq.stream, r->err, NULL, NULL);
+  else if (!strcmp(r->finish, "cancel")) /* cancelled with its client still here: the engine's QUIT (this server
+                                            stopping) - a cut answer, never a "stop" (0.9.2): a stream's error event,
+                                            no [DONE]; a whole answer's 503, its retry for the next server */
+    fail_at(h->fd, 503, rq.stream, "the server stopped before the answer's end (osmos-api shutting down)", NULL, NULL);
   else
   {
     answer_advance(&s);

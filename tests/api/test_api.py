@@ -556,6 +556,21 @@ class Api(Served, unittest.TestCase):
         ev = [json.loads(e[len("data: "):]) for e in r.read().decode().split("\n\n") if e and e != "data: [DONE]"]
         self.assertEqual(ev[-1]["osmos"]["loop"]["orphan_calls"], ["c1"])
 
+    # 0.9.2: a run cancelled with its client still here (the engine's QUIT: rig stopping osmos-api mid-answer) - its
+    # cut answer never finish "stop": a stream's error event without [DONE], a whole answer's 503
+    def test_6p_cancelled_unasked(self):
+        self.ready()
+        body = {"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none"}
+        self.reply("a b c d", finish="cancel")
+        r = self.post(body)
+        self.assertEqual(r.status, 503)
+        self.assertIn("stopped", json.loads(r.read())["error"]["message"])
+        self.reply("a b c d", finish="cancel")
+        ev = self.raw_events(body)
+        self.assertNotIn("[DONE]", ev)
+        self.assertIn("error", json.loads(ev[-1]))
+        self.assertFalse(any((e.get("choices") or [{}])[0].get("finish_reason") for e in map(json.loads, ev)))
+
     def test_7_engine_gone(self):
         self.ready()
         self.reply("a b c d e f g h", finish="exit")
