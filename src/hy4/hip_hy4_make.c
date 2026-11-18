@@ -13,6 +13,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/gpu/upload.h"
+#include "osmos/model/fnv.h"
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
 
@@ -130,6 +131,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
 {
   if (!w || !fds || !o || !o->max_tokens || o->max_tokens > o->max_ctx)
     return hy4_fail(err, "no weights, files or options, or a step past the context"), NULL;
+  if (w->geo.engram_ngram - 1 > HY4_STATE_HISTORY)
+    return hy4_fail(err, "an n-gram longer than a saved state's history keeps"), NULL;
   Hy4Forward *f = calloc(1, sizeof *f);
   if (!f)
     return hy4_fail(err, "out of memory"), NULL;
@@ -194,11 +197,9 @@ uint64_t hy4_identity(const Hy4Forward *f)
 {
   if (!f)
     return 0;
-  uint64_t h = 1469598103934665603ull; /* FNV-1a over the geometry and the files' sizes */
-  const uint8_t *p = (const uint8_t *)&f->w->geo;
-  for (size_t i = 0; i < sizeof f->w->geo; i++)
-    h = (h ^ p[i]) * 1099511628211ull;
+  uint64_t h = fnv(&f->w->geo, sizeof f->w->geo, FNV_SEED);
+  h = fnv_u64(f->ring, h); /* a sliding layer's ring: its rows' places another forward's */
   for (int i = 0; i < f->w->model->n_files; i++)
-    h = (h ^ f->w->model->sizes[i]) * 1099511628211ull;
+    h = fnv_file(f->w->model->paths[i], h);
   return h;
 }

@@ -161,11 +161,39 @@ def engram(R, config, g, table, L, c):
     return eg
 
 
+def build_layer(R, config, g, c, table, tables, L):
+    """layer L's HYV4FlashDecoderLayer on the GGUF's weights: its iHC, norms, attention, MLP and Engram"""
+    D, kind, blk = c["hidden_size"], config.layer_types[L], f"blk.{L}."
+    engram_layers = [i - 1 for i in c["engram_layer_ids"]]
+    layer = R["HYV4FlashDecoderLayer"].__new__(R["HYV4FlashDecoderLayer"])
+    nn.Module.__init__(layer)
+    layer.layer_idx, layer.attention_type = L, kind
+    for name, pre in (("attn_hc", "hc_attn"), ("ffn_hc", "hc_ffn")):
+        m = R["HYV4FlashHyperConnection"](config)
+        m.fn, m.base = param(g.tensor(blk + pre + "_fn.weight")), param(g.tensor(blk + pre + "_base.weight"))
+        m.scale = param(g.tensor(blk + pre + "_scale.weight"))
+        setattr(layer, name, m)
+    for name, t in (("input_layernorm", "attn_norm"), ("post_attention_layernorm", "ffn_norm")):
+        m = R["HYV4FlashRMSNorm"](D, eps=c["rms_norm_eps"])
+        m.weight = param(g.tensor(blk + t + ".weight"))
+        setattr(layer, name, m)
+    layer.self_attn = M.attention(R, config, g, L)
+    if L < 1:
+        layer.mlp = dense(R, config, g, L)
+    else:
+        layer.mlp = moe(R, config, g, L, tables)
+        layer.mlp.forward = route_then_fill(layer.mlp, g, L, tables)
+    layer.engram_layer = engram(R, config, g, table, L, c) if L in engram_layers else None
+    return layer
+
+
 def main():
     ap = argparse.ArgumentParser()
     for k in ("modeling", "config", "tokenizer", "shard", "gguf", "text", "out"):
         ap.add_argument("--" + k, required=True)
     ap.add_argument("--tokens", type=int, default=TOKENS)
+    ap.add_argument("--check-layer", type=int, default=-1, help="the reference's layer L on osmos's streams")
+    ap.add_argument("--osmos", help="osmos's streams: DIR/h<L-1>.f32 entering layer L, DIR/h<L>.f32 leaving it")
     a = ap.parse_args()
     T = a.tokens
     ROWS = rows_of(T)
@@ -206,31 +234,15 @@ def main():
     for kind in ("sliding_attention", "indexed_attention"):
         allowed = (j <= i) & ((i - j < config.sliding_window) if kind == "sliding_attention" else True)
         masks[kind] = torch.zeros(1, 1, T, T).masked_fill(~allowed, torch.finfo(torch.float32).min)
+    if a.check_layer >= 0:
+        return check_layer(R, config, g, c, table, a.check_layer, a.osmos, T, masks, pos, rotary, ngram, emask)
     taps = np.zeros((n_layers, len(ROWS), hc, D), dtype=np.float32)
     tables = ExpertTables(config)
     for L in range(n_layers):
         t0 = time.time()
         kind = config.layer_types[L]
         blk = f"blk.{L}."
-        layer = R["HYV4FlashDecoderLayer"].__new__(R["HYV4FlashDecoderLayer"])
-        nn.Module.__init__(layer)
-        layer.layer_idx, layer.attention_type = L, kind
-        for name, pre in (("attn_hc", "hc_attn"), ("ffn_hc", "hc_ffn")):
-            m = R["HYV4FlashHyperConnection"](config)
-            m.fn, m.base = param(g.tensor(blk + pre + "_fn.weight")), param(g.tensor(blk + pre + "_base.weight"))
-            m.scale = param(g.tensor(blk + pre + "_scale.weight"))
-            setattr(layer, name, m)
-        for name, t in (("input_layernorm", "attn_norm"), ("post_attention_layernorm", "ffn_norm")):
-            m = R["HYV4FlashRMSNorm"](D, eps=c["rms_norm_eps"])
-            m.weight = param(g.tensor(blk + t + ".weight"))
-            setattr(layer, name, m)
-        layer.self_attn = M.attention(R, config, g, L)
-        if L < 1:
-            layer.mlp = dense(R, config, g, L)
-        else:
-            layer.mlp = moe(R, config, g, L, tables)
-            layer.mlp.forward = route_then_fill(layer.mlp, g, L, tables)
-        layer.engram_layer = engram(R, config, g, table, L, c) if L in engram_layers else None
+        layer = build_layer(R, config, g, c, table, tables, L)
         h = layer.forward(h, attention_mask=masks[kind], position_ids=pos, cache=None,
                           position_embeddings=rotary(h, pos, kind), indexer_position_ids=pos, ngram_tokens=ngram,
                           engram_mask=emask)
@@ -254,6 +266,38 @@ def main():
     P.write(a.out, {"ids": ids.astype(np.float32), "rows": np.array(ROWS, dtype=np.float32), "taps": taps,
                     "logits": logits})
     print(f"{a.out}: {T} ids, {len(ROWS)} rows kept, {n_layers} layers' taps")
+
+
+def check_layer(R, config, g, c, table, L, d, T, masks, pos, rotary, ngram, emask):
+    """the reference's layer L on osmos's own streams entering it, against osmos's leaving it: a layer's error alone,
+    whatever came before - and each worst row's router margin (its 16th pick's score + bias over the 17th's)"""
+    D, hc, K = c["hidden_size"], c["hc_mult"], c["num_experts_per_tok"]
+    h_in = torch.from_numpy(np.fromfile(f"{d}/h{L - 1}.f32", dtype=np.float32).reshape(1, T, hc, D))
+    want = np.fromfile(f"{d}/h{L}.f32", dtype=np.float32).reshape(T, hc, D)
+    layer = build_layer(R, config, g, c, table, ExpertTables(config), L)
+    margins = {}
+    if L > 0:
+        gate = layer.mlp.gate
+
+        def keep(m, i, o):
+            sc = torch.sigmoid(o[0].float()) + gate.e_score_correction_bias  # (router_logits are o[0])
+            top = sc.topk(K + 1, dim=-1).values
+            margins["m"] = (top[:, K - 1] - top[:, K]).numpy()
+        gate.register_forward_hook(keep)
+    kind = config.layer_types[L]
+    out = layer.forward(h_in, attention_mask=masks[kind], position_ids=pos, cache=None,
+                        position_embeddings=rotary(h_in, pos, kind), indexer_position_ids=pos, ngram_tokens=ngram,
+                        engram_mask=emask)[0].numpy()
+    err = np.abs(out - want).reshape(T, -1).max(-1)
+    top = np.abs(out).max()
+    print(f"layer {L} on osmos's input: max error {err.max():.3g} of {top:.4g} ({err.max() / top:.2g}); rows past 1e-5: "
+          f"{int((err > 1e-5 * top).sum())} of {T}")
+    for t in np.argsort(-err)[:6]:
+        mg = margins["m"][t] if "m" in margins else float("nan")
+        print(f"  row {t}: error {err[t]:.3g}; router margin {mg:.3g}")
+    if "m" in margins:
+        print(f"  router margins: smallest {margins['m'].min():.3g} (row {int(margins['m'].argmin())}), median "
+              f"{np.median(margins['m']):.3g}")
 
 
 if __name__ == "__main__":

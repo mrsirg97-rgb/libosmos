@@ -1,11 +1,12 @@
 /* a hy4 sequence (osmos/hy4/forward.h): its sparse layers' MLA rows, token keys and pooled groups by position, its
-   sliding layers' rings, its tokens (the n-grams' history); rollback; the prompt's end. its state's bytes are 2b's */
+   sliding layers' rings, its tokens (the n-grams' history); rollback; the prompt's end; its state saved and loaded */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/gpu/state_parts.h"
 #include "hy4_impl.h"
 
 Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR])
@@ -66,16 +67,92 @@ void hy4_seq_fail(Hy4Seq *s)
     s->broken = true;
 }
 
-uint64_t hy4_seq_state_bytes(const Hy4Seq *s) { return s ? 0 : 0; }
+/* a saved state: the header (its position and the two tokens before it - the next step's n-grams' history; the
+   rest of it never read after a load, whose reach is 0), then the parts, then the sum (state_parts.h) */
+#define STATE_MAGIC 0x53345948u /* "HY4S" */
+#define STATE_VERSION 1u
+#define HISTORY HY4_STATE_HISTORY
+
+typedef struct Header
+{
+  uint32_t magic, version;
+  uint64_t identity;
+  int32_t pos;
+  int32_t last[HISTORY];
+} Header;
+
+#define MAX_PARTS (3 * HY4_MAX_LAYERS)
+
+/* the parts at position pos, in the string's order: a sparse layer's MLA rows and token keys below pos and its
+   complete groups; a sliding layer's whole ring */
+static int parts(const Hy4Seq *s, int32_t pos, StatePart *p)
+{
+  const Hy4Forward *f = s->f;
+  const Hy4Geometry *g = &f->w->geo;
+  const uint64_t row = (uint64_t)(g->kv_lora + g->rope_dim) * F, key = (uint64_t)g->ix_dim * F;
+  int n = 0;
+  for (int l = 0; l < g->n_layers; l++)
+    if (g->sliding[l])
+      p[n++] = (StatePart){s->cache[l], f->ring * row};
+    else
+      p[n++] = (StatePart){s->cache[l], (uint64_t)pos * row}, p[n++] = (StatePart){s->keys[l], (uint64_t)pos * key},
+      p[n++] = (StatePart){s->groups[l], (uint64_t)(pos / g->ix_pool) * key};
+  return n;
+}
+
+uint64_t hy4_seq_state_bytes(const Hy4Seq *s)
+{
+  if (!s)
+    return 0;
+  StatePart p[MAX_PARTS];
+  return state_parts_bytes(sizeof(Header), p, parts(s, s->pos, p));
+}
 
 bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[HY4_ERR])
 {
-  (void)s, (void)sink, (void)ctx;
-  return hy4_fail(err, "hy4: a sequence's state not saved yet (step 2b)");
+  if (!s || !sink)
+    return hy4_fail(err, "no sequence or sink");
+  if (s->broken)
+    return hy4_fail(err, "a sequence after a failed step (its state part written): load it, or make another");
+  Header h;
+  memset(&h, 0, sizeof h);
+  h.magic = STATE_MAGIC, h.version = STATE_VERSION, h.identity = hy4_identity(s->f), h.pos = s->pos;
+  for (int j = 0; j < HISTORY; j++)
+    h.last[j] = s->pos > j ? s->tokens[s->pos - 1 - j] : -1;
+  StatePart p[MAX_PARTS];
+  const char *why = state_parts_save(&h, sizeof h, p, parts(s, s->pos, p), sink, ctx);
+  return !why || hy4_fail(err, why);
+}
+
+static bool refuse(Hy4Seq *s, char *err, const char *why)
+{
+  s->pos = 0, s->back = 0, s->prompt_end = 0, s->broken = false; /* empty: its rows never read again */
+  return hy4_fail(err, why);
 }
 
 bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[HY4_ERR])
 {
-  (void)s, (void)bytes, (void)src, (void)ctx;
-  return hy4_fail(err, "hy4: a sequence's state not loaded yet (step 2b)");
+  if (!s || !src)
+    return hy4_fail(err, "no sequence or source");
+  Header h;
+  if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
+    return refuse(s, err, "a state shorter than its header, or its source failed");
+  if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != hy4_identity(s->f))
+    return refuse(s, err, "a state of another format or model (its identity)");
+  if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx)
+    return refuse(s, err, "a state past this context");
+  for (int j = 0; j < HISTORY; j++)
+    if (h.pos > j && (h.last[j] < 0 || h.last[j] >= s->f->w->geo.n_vocab))
+      return refuse(s, err, "a state whose last tokens are outside the vocabulary");
+  StatePart p[MAX_PARTS];
+  const int n = parts(s, h.pos, p);
+  if (bytes != state_parts_bytes(sizeof h, p, n))
+    return refuse(s, err, "a state not its position's size");
+  const char *why = state_parts_load(&h, sizeof h, p, n, src, ctx);
+  if (why)
+    return refuse(s, err, why);
+  for (int j = 0; j < HISTORY && h.pos > j; j++)
+    s->tokens[h.pos - 1 - j] = h.last[j];
+  s->pos = h.pos, s->back = 0, s->prompt_end = 0, s->broken = false;
+  return true;
 }

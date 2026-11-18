@@ -10,7 +10,8 @@
 #include "osmos/model/engram.h"
 
 #define F sizeof(float)
-#define HY4_ROW_THREADS 8 /* the Engram rows' readers (rowread's threads) */
+#define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
+#define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
 
 struct Hy4Forward
 {
