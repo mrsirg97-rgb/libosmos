@@ -1,5 +1,5 @@
 /* Hy4-flash's Engram hash (hy4_engram_shape -> engram_create_shape -> engram_rows) against the reference's
-   (oracle/hy4_engram_rows.py: modeling_hy_v4_flash.py's hash on the release's own lookup table and config, never the
+   (oracle/hy4_engram_rows.py --modeling: modeling_hy_v4_flash.py's own hash code on the release's lookup table and config, never the
    GGUF's lists): every row of 512 positions as one sequence, the pad before its start, the tokens past the release's
    table (llama.cpp's identity extension) read as the pad. then the map edited: an entry no compressed token refused.
    OSMOS_TEST_HY4 (or ~/Models/hy4-flash/Hy4-flash-SPARK-4Bit.gguf; a sparse header copy is enough) and
