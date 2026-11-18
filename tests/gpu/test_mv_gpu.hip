@@ -91,6 +91,15 @@ static const Shape kInk1Shapes[] = {
 constexpr const char* kInk9 = "%s/Models/inkling2/ref/ink2-ref-00009-of-00009.gguf";
 static const Shape kInk9Shapes[] = {{"blk.46.ffn_gate_exps.weight", 7}, {"blk.47.ffn_down_exps.weight", 300}};
 
+// vibes1.7b (LFM3-1.7B on the Q4_0 grid): every matrix Q4_0 - the FFN's, the convolution's, attention's (its gate 16
+// rows) - and the BF16 tied head
+constexpr const char* kVibes = "%s/Models/vibes1.7b/vibes1.7b-q40.gguf";
+static const Shape kVibesShapes[] = {
+  {"blk.0.ffn_gate.weight", -1},       {"blk.0.ffn_down.weight", -1}, {"blk.0.shortconv.in_proj.weight", -1},
+  {"blk.0.shortconv.out_proj.weight", -1}, {"blk.2.attn_q.weight", -1},  {"blk.2.attn_k.weight", -1},
+  {"blk.2.attn_gate.weight", -1},      {"blk.23.ffn_up.weight", -1},  {"token_embd.weight", -1},
+};
+
 static uint32_t rng = 1017;
 static int tok_shapes = 0;
 static float uniform() {
@@ -281,6 +290,14 @@ int main() {
     gguf_destroy(g);
   } else {
     std::printf("  Qwen3.8-Flash-Next UD-Q4_K_XL: not on this machine, its shapes not checked\n");
+  }
+  std::snprintf(qwen, sizeof qwen, kVibes, std::getenv("HOME") ? std::getenv("HOME") : "");
+  if ((g = gguf_create(qwen, err))) {
+    std::printf("  vibes1.7b (Q4_0):\n");
+    for (const Shape& s : kVibesShapes) shape(g, s);
+    gguf_destroy(g);
+  } else {
+    std::printf("  vibes1.7b: not on this machine, its shapes not checked\n");
   }
   for (const auto& m : {std::make_pair(kInk1, std::make_pair(kInk1Shapes, sizeof kInk1Shapes / sizeof *kInk1Shapes)),
                         std::make_pair(kInk9, std::make_pair(kInk9Shapes, sizeof kInk9Shapes / sizeof *kInk9Shapes))}) {
