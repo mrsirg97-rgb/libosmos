@@ -2062,6 +2062,79 @@ yarn - costs a short conversation what its factor costs it (the 2,048-id fixture
 - **checked**: each stage against Liquid's YaRN at its factor over the same base (oracle --yarn, --native); LSA
   against dense to 512K (the card's rows); at 1M and 2M a needle - a fact placed deep, asked at the end - and the
   next-token NLL over held-out text (llama.cpp's source: ~2M tokens).
+## 0.10.0: Hy4-flash (hy4) (design, 2026-11-18)
+
+the operator's: Tencent's Hy4-flash (tencent/Hy4-flash, Tencent Hy License) - 220B total (155.5B backbone + 63.5B
+Engram), ~11.3B active a token, 1M context, text + image in. the box's shape: the backbone at 4 bits ~89 GiB in GPU
+memory (GTT 113 GiB), the Engram table read from the SSD (DeepSeek-V4.1's way), the KV cache small (MLA's latent,
+sparse layers alone past the window). step 1 of three: the model (this section); then the sequence and the engine;
+then the drafter and speed.
+
+- **the file**: AngelSlim/Hy4-flash-GGUF `Hy4-flash-SPARK-4Bit.gguf` (162.5 GB, sha256 f92c1b40...), llama.cpp PR
+  #32517's layout (`general.architecture` hy_v4_flash). the routed experts NVFP4 (41 layers; one layer's Q8_0),
+  every other matrix Q8_0, the norms, router, biases and HC parameters F32; the Engram table Q8_0
+  (per_layer_token_embd [96 x 660,006,416], 67.3 GB). `general.name` A12B-1108 and its special tokens `:6124c78e`
+  (the release's `:opensource`: the same 24 ids, the text differs) - it was converted from a checkpoint with an MTP
+  layer (blk.42.nextn.*), which the HF release does not carry (it carries DFly2, 87 tensors). whether its backbone is
+  the release's: its F32 norms against the release's BF16 ones, bit for bit, before anything is built on it.
+- **references**: the transformers PR #50903 modeling_hy_v4_flash.py (head c2ec8505) is the model - but its BF16
+  weights are 440 GB, not runnable here. so: the oracle by the piece (a layer's maths in the reference's own code on
+  CPU, its tensors from the one release shard that holds them, on fixed inputs) for each kind of layer (the dense
+  layer 0, a window layer, a sparse layer past 2,048 keys, an Engram layer); llama.cpp with the PR's patch
+  (hy4-flash-spark.patch on 2cbca389f) on this box for the whole forward on the same GGUF (logits, KL, its
+  intermediate tensors). where llama.cpp departs from the reference, the reference wins (Engram's fp8, below).
+- **the backbone** (42 layers, D 3072, vocab 120,832, rms eps 1e-5):
+  - layers: 0, 1, 5, 9, ..., 41 sparse attention (12; 32 heads, rope base 1e7); the other 30 sliding-window (64 heads,
+    base 1e4, 512 keys: 511 back and its own). MLP: layer 0 dense SwiGLU (13,824), 1 .. 41 the latent MoE.
+  - **iHC, 4 streams** (hc_eps 1e-6, magnitude 2): the embedding copied into 4 streams. before each sublayer: flat =
+    the 4 streams (12,288); mixes = fn (8 x 12,288, Q8_0) flat * rsqrt(mean(flat^2) + rms_eps); pre_s =
+    sigmoid(mix_s * scale0 + base_s) + hc_eps, post_s = 2 sigmoid(mix_{4+s} * scale1 + base_{4+s}) + hc_eps; the
+    sublayer's input sum_s pre_s x_s; after it x_s += post_s y. no comb matrix (DeepSeek-V4's sinkhorn: none). the
+    head: pre alone (fn 4 x 12,288, one scale), then output_norm and the Q8_0 head (F32 logits).
+  - **gated MLA** (one latent geometry; only the head count differs): q = q_b(rms(q_a x)) [heads x (192 nope + 64
+    rope)]; kv_a x -> [512 latent | 64 rope], the latent rms'd; the cache one row of 576 a token (MQA). absorbed:
+    q_nope through k_b [192 -> 512 a head] meets the latent, V the latent through v_b [512 -> 256 a head] after the
+    softmax. scale 1/sqrt(256). a learned sink a head (a logit in the softmax, no value). the output times
+    sigmoid(gate x) [heads x 256] before attn_output, then post_attention_norm (the sandwich). the rope GPT-J's
+    (pairs 2i, 2i+1), 64 dims, MRoPE's three planes equal for text - plain rope.
+  - **the sparse layers' indexer** (dense while the keys are <= 2,048): a token key a token, rms(ix_k x) [128],
+    cached; a group of 4 complete keys pooled: v = W_v k, g = W_g k + ape[slot], softmax over the 4 slots, sum, rms
+    (F32, the reference's: near-ties flip groups in BF16); the group's rope its first token's (base 1e7, the last 64
+    of 128). a query: 16 heads x 128 from q_a's output (rope on its last 64), score_g = sum_h w_h relu(q_h . k_g),
+    w = proj x * 16^-1/2 * 128^-1/2; the 511 best complete groups before its own, and its own: 2,048 keys at most.
+    ties: the lower group first (the bits contract: no order an atomic chooses).
+  - **the latent MoE**: router F32 on the normed input, sigmoid, + exp_probs_b to choose, 16 of 512, weights the
+    sigmoids normalized (+1e-20) x 3.998. routed_down [3072 -> 1536], each expert gate/up [1536 -> 1536] (gate <= 10,
+    up in [-10, 10]), silu(gate) up, down [1536 -> 1536], weighted, summed, routed_up [1536 -> 3072]; + the shared
+    expert (SwiGLU 3072 -> 1536 -> 3072, unclamped); post_ffw_norm on the sum.
+  - **Engram** (before layers 1, 11, 21, 31's iHC): the n-gram (t, t-1, t-2), pad 120,002 before the sequence; each
+    token through the file's token map; m_k = map(t_k) * mult_k (int64, the file's multipliers); a bigram's hash m_0
+    ^ m_1, a trigram's m_0 ^ m_1 ^ m_2, each mod its head's prime (8 heads an order): 16 rows of 96 from the table at
+    the file's offsets. each row: the fp8 round trip the reference applies (e4m3, a scale a row: amax / 448) -
+    llama.cpp skips it; then RMSNorm (eps 1.19e-7, F32's epsilon: the reference's eps unset) times its head's weight.
+    the 1,536 through engram_kv (+ its bias) -> 4 keys and a value [3072 each]; gate_s = (rms(key_s) . rms(x_s) *
+    engram_gate_s) / sqrt(3072), signed sqrt, sigmoid; v = rms(value) * pre_gamma; x_s += (gate_s + hc_scale_s) v.
+- **the reads a token** (decode, measured from the file's types): routed experts 2.6 GB, attention 5.3 GB (the window
+  layers' 4.4 GB of it, their gate and output - 64 x 256 wide, Q8_0 - 3.2 GB), shared expert and latent projections 1.05 GB, head 0.39
+  GB, Engram 64 rows from the SSD: ~9.5 GB - ~20 tok/s at the box's 200 GB/s. the attention's bytes are the lever
+  (a 4-bit grid on them: step 3's, against KL).
+- **a sequence's state**: per sparse layer a 576-row latent (Q8_0: 612 B a token) and a 128 index key; per window
+  layer a ring of 512 latent rows. 12 sparse layers ~9 KB a token: 1M tokens ~9 GB. rollback: rows past a position
+  never read again; a group pooled once its 4th key lands (a rollback across it re-pools).
+- **the kernels**: reused - mv / mm (Q8_0, NVFP4 with its scale), rms, SwiGLU, argmax / top, Engram's SSD reads and
+  hash (src/model/engram.c's contract, the hash's form widened), the router (DeepSeek's sigmoid + bias top-k). new:
+  iHC's pre / post (no comb), MLA's absorbed decode and prompt attention at 576 / 512 with sinks and a 512 window,
+  the group pooling and the group indexer (score, top 511, expand), Engram's gate.
+- **the shape**: a family of its own - src/hy4/ and include/osmos/hy4/ (geometry, roles, forward), q35's and spark's
+  shape; DeepSeek's code shared where the maths is the same (Engram's reads, the router), not branched into.
+- **out of scope for 0.10.0**: the vision tower (mmproj, later); DFly2 (the release's drafter, its weights BF16 from
+  the release) and the file's MTP layer - step 3 picks one.
+- **the order** (tests first, each seen to fail): the file's provenance (norms bit for bit); the geometry - every
+  tensor in a role, the layer kinds from the file, refusals; Engram's hash against the reference's on fixed ids; iHC,
+  MLA, the indexer, the latent MoE each against the oracle by the piece; the forward one sequence against llama.cpp
+  (KL at 2K and 8K: past the window and past the indexer's 2,048).
+- **done when**: the forward's logits match llama.cpp on the GGUF within the tolerances its tests state (Engram's fp8
+  the measured difference), each piece its oracle's.
 
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
