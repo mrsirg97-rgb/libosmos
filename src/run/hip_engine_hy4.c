@@ -9,8 +9,9 @@
 #include "osmos/model/gguf.h"
 
 /* Tencent's Hy4-flash (hy_v4_flash) behind the engine: every weight resident but the Engram table (its rows read from
-   the model's file a step at a time), hy4's sequence (DESIGN.md, "0.10.0 step 2"). one math for prompts and decode:
-   a token's bits however its step is split or shared; the logits of the kept rows alone. no drafter yet: block 0 */
+   the model's file a step at a time), hy4's sequence (DESIGN.md, "0.10.0 step 2"). a batch is a decode's math, a
+   prompt's read the matrix cores' (two maths, as DeepSeek's and q35's), each a token's bits however its step is split
+   or shared; the logits of the kept rows alone. no drafter yet: block 0 */
 _Static_assert(HY4_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 _Static_assert(OSMOS_ERR >= HY4_ERR && OSMOS_ERR >= GGUF_ERR, "one error buffer for the engine and the family's calls");
 
@@ -112,9 +113,8 @@ static bool e_room(const void *p, uint64_t *bytes)
 static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
 
 /* the batch's sequences one step (each one's consecutive tokens a run), HY4_MAX_RUNS at a time */
-static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+static bool batch(Eng *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, bool read, char err[OSMOS_ERR])
 {
-  Eng *e = p;
   for (uint32_t i = 0; i < n; i++)
     for (uint32_t j = 0; j < i; j++)
       if (seqs[j] == seqs[i] && seqs[i - 1] != seqs[i])
@@ -133,11 +133,21 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
     }
     if (at + k < n)
       return fail(err, "hy_v4_flash: a batch past HY4_MAX_RUNS sequences"); /* its logits one step's: never split */
-    if (!hy4_step_runs(e->f, run, len, runs, tokens + at, err))
+    if (!(read ? hy4_step_read : hy4_step_runs)(e->f, run, len, runs, tokens + at, err))
       return false;
     at += k;
   }
   return true;
+}
+
+static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+{
+  return batch(p, seqs, tokens, n, false, err);
+}
+
+static bool e_read(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+{
+  return batch(p, seqs, tokens, n, true, err);
 }
 
 static const float *e_logits(const void *p, uint32_t row) { return hy4_row_logits(((const Eng *)p)->f, row); }
@@ -188,6 +198,6 @@ const OsmosFamily osmos_hy4 = {
     "hy_v4_flash", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_room,  e_stats,
     e_batch,       e_logits,   e_greedy,      e_block,   s_create,    s_destroy,  s_prompt, s_rollback,
     s_reach,       s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
-    NULL, /* one math: a prompt's step its batch */
+    e_read, /* a prompt's read the matrix cores' math, a decode's the matvecs': two maths (hy4_step_read) */
     NULL, NULL, NULL, /* no marks: the whole state */
 };

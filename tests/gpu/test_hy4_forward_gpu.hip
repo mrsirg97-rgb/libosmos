@@ -27,6 +27,13 @@ extern "C" {
 constexpr double kTolStreams = 1e-3, kKl = 1e-4;
 constexpr double kKlMeanLong = 2e-3, kKlMaxLong = 2e-2;
 constexpr uint32_t kTop1MissLong = 1;
+// a read's (hy4_step_read: the matrix cores' f16 inputs) against the F32 reference, bounded by the reference itself run
+// in BF16 (hy4_forward.py --dtype bf16, the release as served) on the same ids, 2026-11-18: 64 ids KL mean 0.028,
+// max 0.244, top-1 62 of 64 (the read: 0.020, 0.347, 59); 2,600 ids 0.119, 2.32, 58 of 64 (the read: 0.0885, 3.9,
+// 60). the bounds: BF16's mean with room, the max past both (one near-tie's row), the misses BF16's and more - a real
+// fault (a dropped sink: KL mean 1.0) past every one
+constexpr double kReadKlMean = 0.05, kReadKlMax = 1.0, kReadKlMeanLong = 0.2, kReadKlMaxLong = 6.0;
+constexpr uint32_t kReadTop1Miss = 6, kReadTop1MissLong = 8;
 
 struct Taps {
   std::vector<int32_t> rows;  // the kept rows
@@ -78,6 +85,74 @@ static uint32_t argmax(const float* x, uint32_t V) {
   return b;
 }
 
+struct Stats {
+  double kl_mean = 0, kl_max = 0, worst = 0;
+  uint32_t same = 0, first_bad = 0;
+  std::vector<float> logits;  // the last rows'
+};
+
+// the prompt in one step - a decode's math (hy4_step_runs: its prompt's end marked, the last rows kept) or a read's
+// (hy4_step_read) - every layer's streams at the reference's kept rows and the last rows' logits against its
+static Stats measure(Hy4Forward* f, const std::vector<int32_t>& ids, uint32_t last, bool read) {
+  char err[HY4_ERR] = "";
+  const uint32_t T = (uint32_t) ids.size(), V = (uint32_t) fx["logits"].dims[1];
+  Taps taps;
+  for (float r : A("rows")) taps.rows.push_back((int32_t) r);
+  taps.layers = (uint32_t) fx["taps"].dims[0];
+  hy4_forward_tap(f, tap, &taps);
+  Hy4Seq* s = hy4_seq_create(f, err);
+  CHECK(s);
+  CHECK(hy4_seq_prompt(s, T - last + 1));
+  Hy4Seq* const seqs[1] = {s};
+  const uint32_t lens[1] = {T};
+  if (!(read ? hy4_step_read : hy4_step_runs)(f, seqs, lens, 1, ids.data(), err)) std::printf("  refused: %s\n", err);
+  CHECK(hy4_seq_position(s) == (int32_t) T);
+  hy4_forward_tap(f, nullptr, nullptr);
+  Stats st;
+  st.logits.resize((size_t) last * V);
+  for (uint32_t r = 0; r < last; r++) {
+    const float* d = hy4_row_logits(f, T - last + r);
+    CHECK(d && hipMemcpy(st.logits.data() + (size_t) r * V, d, V * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess);
+  }
+  hy4_seq_destroy(s);
+  const std::vector<float>& ref_taps = A("taps");
+  CHECK(taps.got.size() == ref_taps.size());
+  const size_t per_row = (size_t) taps.hc * taps.dim, per_layer = taps.rows.size() * per_row;
+  st.first_bad = taps.layers;
+  std::printf("  %s:\n", read ? "read (the matrix cores)" : "decode (the matvecs)");
+  for (uint32_t l = 0; l < taps.layers; l++) {
+    double err_l = 0, top = 0;
+    for (size_t i = 0; i < per_layer; i++) {
+      const double r = ref_taps[l * per_layer + i];
+      err_l = std::fmax(err_l, std::fabs(taps.got[l * per_layer + i] - r)), top = std::fmax(top, std::fabs(r));
+    }
+    st.worst = std::fmax(st.worst, err_l / top);
+    if (err_l > kTolStreams * top && st.first_bad == taps.layers) st.first_bad = l;
+    if (l % 6 == 0 || l + 1 == taps.layers) {
+      uint32_t off_rows = 0;
+      for (size_t r = 0; r < taps.rows.size(); r++) {  // rows whose error passes 1e-4 of the layer's largest
+        double e = 0;
+        for (size_t i = 0; i < per_row; i++)
+          e = std::fmax(e, std::fabs(taps.got[l * per_layer + r * per_row + i] - ref_taps[l * per_layer + r * per_row + i]));
+        off_rows += e > 1e-4 * top;
+      }
+      std::printf("    layer %2u's streams: max error %.3g of %.4g (%.2g); %u of %zu rows past 1e-4\n", l, err_l, top,
+                  err_l / top, off_rows, taps.rows.size());
+    }
+  }
+  const std::vector<float>& ref = A("logits");
+  const size_t ref_rows = taps.rows.size();
+  for (uint32_t r = 0; r < last; r++) {
+    const float* p = ref.data() + (ref_rows - last + r) * (size_t) V;  // the reference's last rows: its kept rows' tail
+    const double k = kl(p, st.logits.data() + (size_t) r * V, V);
+    st.kl_mean += k / last, st.kl_max = std::fmax(st.kl_max, k);
+    st.same += argmax(p, V) == argmax(st.logits.data() + (size_t) r * V, V);
+  }
+  std::printf("    the last %u rows' logits: KL mean %.3g, max %.3g nats; top-1 the reference's %u of %u\n", last,
+              st.kl_mean, st.kl_max, st.same, last);
+  return st;
+}
+
 int main() {
   const char* home = getenv("HOME") ? getenv("HOME") : "";
   char model_path[512], ref_path[512], err[HY4_ERR] = "", gerr[GGUF_ERR] = "";
@@ -107,72 +182,34 @@ int main() {
   CHECK(f);
   std::printf("[test_hy4_forward_gpu] %u ids, %d layers; the last %u rows' logits\n", T, w->geo.n_layers, last);
 
-  // one step: every layer's streams at the kept rows, the last rows' logits
-  Taps taps;
-  for (float r : A("rows")) taps.rows.push_back((int32_t) r);
-  taps.layers = (uint32_t) w->geo.n_layers;
-  hy4_forward_tap(f, tap, &taps);
-  Hy4Seq* s = hy4_seq_create(f, err);
-  CHECK(s);
-  if (!hy4_step(f, s, ids.data(), T, last, err)) std::printf("  step refused: %s\n", err);
-  CHECK(hy4_seq_position(s) == (int32_t) T);
-  hy4_forward_tap(f, nullptr, nullptr);
-  const std::vector<float>& ref_taps = A("taps");
-  CHECK(taps.got.size() == ref_taps.size());
-  const size_t per_layer = taps.rows.size() * taps.hc * taps.dim;
-  double worst = 0;
-  const size_t per_row = (size_t) taps.hc * taps.dim;
-  uint32_t first_bad = taps.layers;
-  for (uint32_t l = 0; l < taps.layers; l++) {
-    double err_l = 0, top = 0;
-    for (size_t i = 0; i < per_layer; i++) {
-      const double r = ref_taps[l * per_layer + i];
-      err_l = std::fmax(err_l, std::fabs(taps.got[l * per_layer + i] - r)), top = std::fmax(top, std::fabs(r));
-    }
-    worst = std::fmax(worst, err_l / top);
-    if (err_l > kTolStreams * top && first_bad == taps.layers) first_bad = l;
-    if (l % 6 == 0 || l + 1 == taps.layers || err_l > kTolStreams * top || (l > 0 && l < 20)) {
-      uint32_t off_rows = 0;
-      int32_t first_row = -1;
-      for (size_t r = 0; r < taps.rows.size(); r++) {  // rows whose error passes 1e-4 of the layer's largest
-        double e = 0;
-        for (size_t i = 0; i < per_row; i++)
-          e = std::fmax(e, std::fabs(taps.got[l * per_layer + r * per_row + i] - ref_taps[l * per_layer + r * per_row + i]));
-        if (e > 1e-4 * top) off_rows++, first_row = first_row < 0 ? taps.rows[r] : first_row;
-      }
-      std::printf("  layer %2u's streams: max error %.3g of %.4g (%.2g); %u of %zu rows past 1e-4 (first: row %d)\n", l,
-                  err_l, top, err_l / top, off_rows, taps.rows.size(), first_row);
-    }
-  }
-  const std::vector<float> got(hy4_logits(f), hy4_logits(f) + (size_t) last * V);
-  const std::vector<float>& ref = A("logits");
-  const size_t ref_rows = taps.rows.size();
-  double kl_sum = 0, kl_max = 0;
-  uint32_t same = 0;
-  for (uint32_t r = 0; r < last; r++) {
-    const float* p = ref.data() + (ref_rows - last + r) * (size_t) V;  // the reference's last rows: its kept rows' tail
-    const double k = kl(p, got.data() + (size_t) r * V, V);
-    kl_sum += k, kl_max = std::fmax(kl_max, k), same += argmax(p, V) == argmax(got.data() + (size_t) r * V, V);
-  }
-  std::printf("  the last %u rows' logits: KL mean %.3g, max %.3g nats; top-1 the reference's %u of %u (streams' worst "
-              "%.2g)\n", last, kl_sum / last, kl_max, same, last, worst);
-  if (first_bad == taps.layers)
-    CHECK(kl_max <= kKl && same == last);
+  // the prompt in one step of each math: every layer's streams at the kept rows, the last rows' logits
+  const Stats dec = measure(f, ids, last, false), rd = measure(f, ids, last, true);
+  if (dec.first_bad == (uint32_t) w->geo.n_layers)
+    CHECK(dec.kl_max <= kKl && dec.same == last);
   else {  // near-ties flipped (see kKlMeanLong): the logits within the measured bounds
-    std::printf("  streams apart from layer %u (the router's near-ties): the logits' bounds instead\n", first_bad);
-    CHECK(kl_sum / last <= kKlMeanLong && kl_max <= kKlMaxLong && same + kTop1MissLong >= last);
+    std::printf("  decode: streams apart from layer %u (the router's near-ties): the logits' bounds instead\n",
+                dec.first_bad);
+    CHECK(dec.kl_mean <= kKlMeanLong && dec.kl_max <= kKlMaxLong && dec.same + kTop1MissLong >= last);
   }
+  // the read's: f16 inputs on the matrix cores, as far from the F32 reference as the release served in BF16 is
+  const bool longer = ids.size() > 64;
+  const double mean_b = longer ? kReadKlMeanLong : kReadKlMean, max_b = longer ? kReadKlMaxLong : kReadKlMax;
+  const uint32_t miss_b = longer ? kReadTop1MissLong : kReadTop1Miss;
+  std::printf("  read: KL mean %.3g (bound %.3g), max %.3g (%.3g), top-1 %u of %u (at least %u)\n", rd.kl_mean, mean_b,
+              rd.kl_max, max_b, rd.same, last, last - miss_b);
+  CHECK(rd.kl_mean <= mean_b && rd.kl_max <= max_b && rd.same + miss_b >= last);
+  const std::vector<float>& got = rd.logits;
 
-  // the bits a token's own: the prompt in uneven steps, its last tokens one at a time - the same logits
+  // the bits a token's own: the prompt in uneven steps (each a read: hy4_step's prompt math past HY4_MV_TOKENS) -
+  // the last step's rows the one step's, bit for bit (a decode's math its own: the rollback's and the state's below)
   Hy4Seq* s2 = hy4_seq_create(f, err);
   CHECK(s2);
-  const uint32_t tail = last < T / 4 ? last : T / 4, a = (T - tail) / 3 + 1, b = T - tail - a;  // tail of the kept rows
+  const uint32_t a = T / 3, b = T / 3, c = T - a - b, tail = c < last ? c : last;  // three reads, the last's rows
+  CHECK(a > HY4_MV_TOKENS && b > HY4_MV_TOKENS && c > HY4_MV_TOKENS);
   CHECK(hy4_step(f, s2, ids.data(), a, 1, err) && hy4_step(f, s2, ids.data() + a, b, 1, err));
-  for (uint32_t r = 0; r < tail; r++) {
-    CHECK(hy4_step(f, s2, ids.data() + a + b + r, 1, 1, err));
-    CHECK(std::memcmp(hy4_logits(f), got.data() + (size_t) (last - tail + r) * V, (size_t) V * sizeof(float)) == 0);
-  }
-  std::printf("  in steps of %u, %u and %u ones: the same logits, bit for bit\n", a, b, tail);
+  CHECK(hy4_step(f, s2, ids.data() + a + b, c, tail, err));
+  CHECK(std::memcmp(hy4_logits(f), got.data() + (size_t) (last - tail) * V, (size_t) tail * V * sizeof(float)) == 0);
+  std::printf("  in read steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c, tail);
 
   // a step rolled back and run again: the same bits
   const int32_t more[4] = {ids[1], ids[2], ids[3], ids[4]};
@@ -214,7 +251,6 @@ int main() {
               saved.size() >> 20);
   hy4_seq_destroy(s3);
   hy4_seq_destroy(s2);
-  hy4_seq_destroy(s);
   hy4_forward_destroy(f);
   for (int fd : fds) close(fd);
   hy4_weights_destroy(w);

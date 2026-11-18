@@ -634,3 +634,17 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
                                                        sel, n_sel);
   return ok();
 }
+
+extern "C" bool hy4_mla_qrope(const float* q, uint32_t heads, uint32_t qk, uint32_t row, uint32_t rope_dim,
+                              const float* freqs, const int32_t* pos, uint32_t n_tok, float* qa, void* stream) {
+  if (!q || !freqs || !pos || !qa || !heads || !n_tok || !rope_dim || rope_dim % 2 || rope_dim > qk || rope_dim > row)
+    return false;
+  q_rope_kernel<<<dim3(heads, n_tok), 64, 0, st(stream)>>>(q, heads, qk, row, rope_dim, freqs, pos, qa);
+  return ok();
+}
+
+extern "C" bool hy4_gate_mul(float* out, const float* gate, uint64_t n, void* stream) {
+  if (!out || !gate || !n) return false;
+  gate_kernel<<<(unsigned) ((n + kThreads - 1) / kThreads), kThreads, 0, st(stream)>>>(out, gate, n);
+  return ok();
+}

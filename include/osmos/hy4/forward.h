@@ -3,8 +3,9 @@
 
 /* Hy4-flash's forward on one GPU (DESIGN.md, "0.10.0 step 2"): the weights whole in its memory but the Engram table,
    whose rows come from the SSD a step at a time; a sequence's state its sparse layers' latent cache, token keys and
-   pooled groups, its sliding layers' rings, its last tokens (the next step's n-grams). one math for prompts and
-   decode: a token's bits the same however its sequence is split into steps */
+   pooled groups, its sliding layers' rings, its last tokens (the next step's n-grams). two maths, each a
+   token's bits however its sequence is split into steps: a prompt's (hy4_step_read) the matrix cores', a decode's
+   (hy4_step_runs) the matvecs' */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -42,7 +43,14 @@ int32_t hy4_seq_position(const Hy4Seq *s);
    refused from then on (hy4_seq_fail's), until a load */
 bool hy4_step_runs(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                    char err[HY4_ERR]);
-/* one sequence, its last `rows` rows' logits on the host (hy4_logits: rows x n_vocab) - the checks' form */
+/* the same step in a prompt's math (the engine's read): the matrices and the experts on the matrix cores (mm), its
+   bits a prompt's however it is split - not a decode's (two maths, as DeepSeek's and q35's: DESIGN.md). false past
+   it as hy4_step_runs, and for an activation past f16's range (the step refused) */
+bool hy4_step_read(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
+                   char err[HY4_ERR]);
+/* one sequence, its last `rows` rows' logits on the host (hy4_logits: rows x n_vocab) - the checks' form: a step past
+   HY4_MV_TOKENS tokens a prompt's math, the rest a decode's */
+#define HY4_MV_TOKENS 4
 bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[HY4_ERR]);
 const float *hy4_logits(const Hy4Forward *f);
 /* row's logits (device, n_vocab floats) of the last hy4_step_runs, NULL for a row not kept */

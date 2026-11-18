@@ -25,7 +25,7 @@ static bool embed(Hy4Forward *f, uint32_t n)
 
 /* the step (hy4_step_runs); keep_from: rows below it not kept whatever the prompts say (hy4_step's: its last rows) */
 static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                 uint32_t keep_from, char *err)
+                 bool read, uint32_t keep_from, char *err)
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > HY4_MAX_RUNS)
     return hy4_fail(err, "no forward, sequences or tokens, or past HY4_MAX_RUNS runs");
@@ -67,7 +67,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
             hy4_engram_read(f, run, runs, n) && embed(f, n);
   for (int l = 0; ok && l < g->n_layers; l++)
   {
-    ok = hy4_layer(f, run, runs, n, l);
+    ok = hy4_layer(f, run, runs, n, l, read);
     if (ok && f->tap && (ok = hipStreamSynchronize(NULL) == hipSuccess))
       f->tap(f->tap_arg, l, f->h, n, hc, D);
   }
@@ -90,14 +90,19 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   if (ok && kept)
     ok = hy4_hc_pre(f->hx, f->fn_out, hy4_fv(f, f->w->out_hc_scale), hy4_fv(f, f->w->out_hc_base), hc, hc, D,
                     g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, f->w->output_norm), kept, f->xn, NULL, f->hcs, NULL) &&
-         hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits);
+         hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read);
   ok = ok && hipStreamSynchronize(NULL) == hipSuccess;
-  f->rows = ok ? n : 0;
-  if (!ok)
+  int32_t over = 0;
+  ok = ok && hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
+  f->rows = ok && !over ? n : 0;
+  if (!ok || over)
   {
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
-    return hy4_fail(err, "a GPU call or an Engram read failed in the step");
+    if (over)
+      hipMemset(f->overflow, 0, 4);
+    return hy4_fail(err, over ? "an activation past f16's range (the step refused)"
+                              : "a GPU call or an Engram read failed in the step");
   }
   for (uint32_t r = 0; r < runs; r++)
   {
@@ -111,14 +116,20 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
 bool hy4_step_runs(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                    char err[HY4_ERR])
 {
-  return step(f, seqs, lens, runs, tokens, 0, err);
+  return step(f, seqs, lens, runs, tokens, false, 0, err);
+}
+
+bool hy4_step_read(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
+                   char err[HY4_ERR])
+{
+  return step(f, seqs, lens, runs, tokens, true, 0, err);
 }
 
 bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[HY4_ERR])
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
     return hy4_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
-  if (!step(f, &s, &n, 1, tokens, n - rows, err))
+  if (!step(f, &s, &n, 1, tokens, n > HY4_MV_TOKENS, n - rows, err))
     return false;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||

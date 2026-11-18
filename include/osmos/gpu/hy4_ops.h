@@ -34,6 +34,9 @@ bool hy4_mla_attn(const float *qa, const float *cache, uint32_t slots, const flo
                   uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
                   uint32_t pool, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat, float *scratch,
                   void *stream);
+bool hy4_mla_qrope(const float *q, uint32_t heads, uint32_t qk, uint32_t row, uint32_t rope_dim, const float *freqs,
+                   const int32_t *pos, uint32_t n_tok, float *qa, void *stream);
+bool hy4_gate_mul(float *out, const float *gate, uint64_t n, void *stream);
 bool hy4_mla_out(const float *o_lat, const void *v_b, const float *gate, uint32_t heads, uint32_t latent,
                  uint32_t v_dim, uint32_t n_tok, float *out, void *table, void *stream);
 bool hy4_ix_pool(const float *keys, const void *w_value, const void *w_gate, const float *ape, const float *norm_w,
@@ -99,6 +102,10 @@ hy4_mla_attn
   flash decoding: a block a group of 8 heads (MQA's rows read once for them) over a split of 64 of its token's keys,
   an online softmax in the keys' order; the splits merged in order with the sink - the splits a token's own: its bits
   whatever the step. scratch: hy4_mla_attn_scratch(heads) floats (the partials of 16 tokens at a time). at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
+
+hy4_mla_qrope / hy4_gate_mul
+  hy4_mla_q's and hy4_mla_out's ends alone (a read's absorptions on the matrix cores: mm_group a head): each head's
+  rope part of q (its last rope_dim of qk) roped at pos[t] into qa's (its last rope_dim of row); out *= sigmoid(gate).
 
 hy4_mla_out
   each head's latent through its v_b (v_dim values), times sigmoid of the gate's (gate_proj's output, [n_tok][heads *

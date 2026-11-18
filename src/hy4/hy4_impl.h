@@ -11,6 +11,7 @@
 
 #define F sizeof(float)
 #define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
+#define HY4_MAX_HEADS 128   /* a layer's heads at most (the per-head tables' room) */
 #define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
 
 struct Hy4Forward
@@ -34,6 +35,16 @@ struct Hy4Forward
   float *hcs;                          /* iHC's dots' slices (hy4_hc_scratch) */
   void *table;                         /* MLA's per-head matvecs' table (hy4_mla_table_bytes) */
   float *attn_part;                    /* MLA's attention's partials (hy4_mla_attn_scratch) */
+  /* the read math's: the f16 activations an mm reads (MM_MAX_TOKENS of the widest input), the experts' gathered
+     slots, f16's overflow; the experts' read tables (mm_group's: entries, slots) */
+  void *x16, *xe16;
+  int32_t *overflow;
+  uint32_t *rx, *ry, *rxd, *ryd, *h_rx, *h_ry, *h_rxd, *h_ryd;
+  int32_t *rgidx, *rhidx, *h_rgidx, *h_rhidx, *rcnt, *h_rcnt;
+  const void **rw, **h_rw;    /* the entries' gate, up, down (3 x entries) */
+  uint64_t *rkey;             /* the entries' sort keys (count, then build order) */
+  void *h_stage;              /* the sorted tables' staging (host) */
+
   float *qr, *qres, *q, *kva, *gt, *qa, *olat, *ao, *out;
   float *ixk, *ixq, *ixw, *scores;     /* the indexer */
   int32_t *sel, *n_sel;
@@ -74,12 +85,18 @@ typedef struct Hy4Run
 bool hy4_fail(char *err, const char *why);
 bool hy4_alloc(void *p, uint64_t bytes);
 /* y = W x for n tokens (W the tensor on the GPU, any type the matvec reads): a token's sums its own */
-bool hy4_mat(const Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
-             float *y);
+bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
+             bool read);
 /* the step's Engram rows read and decoded (f->eg_rows), the runs' tokens already in their sequences' histories */
 bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n);
 /* layer l's blocks on the step's streams */
-bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l);
+bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l, bool read);
+/* the latent MoE (hip_hy4_moe.c): the router, the experts (the matvecs, or read: the matrix cores), the shared
+   expert, the combine norm - into f->y */
+bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read);
+/* the read tables' room: entries and slots for n tokens */
+uint64_t hy4_read_entries(uint64_t n, const Hy4Geometry *g);
+uint64_t hy4_read_slots(uint64_t n, const Hy4Geometry *g);
 
 static inline const void *hy4_dev(const Hy4Forward *f, const GgufTensor *t)
 {

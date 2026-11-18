@@ -193,6 +193,8 @@ def main():
         ap.add_argument("--" + k, required=True)
     ap.add_argument("--tokens", type=int, default=TOKENS)
     ap.add_argument("--check-layer", type=int, default=-1, help="the reference's layer L on osmos's streams")
+    ap.add_argument("--dtype", default="f32", choices=("f32", "bf16"),
+                    help="bf16: the layers and the streams in BF16, as the release is served (its own rounding)")
     ap.add_argument("--osmos", help="osmos's streams: DIR/h<L-1>.f32 entering layer L, DIR/h<L>.f32 leaving it")
     a = ap.parse_args()
     T = a.tokens
@@ -224,7 +226,8 @@ def main():
     D, hc, n_layers = c["hidden_size"], c["hc_mult"], c["num_hidden_layers"]
     engram_layers = [i - 1 for i in c["engram_layer_ids"]]
 
-    h = torch.from_numpy(g.rows("token_embd.weight", ids))[None].unsqueeze(2).expand(-1, -1, hc, -1).contiguous()
+    dt = torch.bfloat16 if a.dtype == "bf16" else torch.float32
+    h = torch.from_numpy(g.rows("token_embd.weight", ids))[None].unsqueeze(2).expand(-1, -1, hc, -1).contiguous().to(dt)
     pos = torch.arange(T).view(1, 1, -1).expand(3, 1, -1)
     rotary = R["HYV4FlashRotaryEmbedding"](config)
     ngram = torch.from_numpy(hashes.build_ngram_tokens(ids, c["engram_max_ngram_size"], c["engram_pad_id"]))[None]
@@ -233,7 +236,7 @@ def main():
     masks = {}
     for kind in ("sliding_attention", "indexed_attention"):
         allowed = (j <= i) & ((i - j < config.sliding_window) if kind == "sliding_attention" else True)
-        masks[kind] = torch.zeros(1, 1, T, T).masked_fill(~allowed, torch.finfo(torch.float32).min)
+        masks[kind] = torch.zeros(1, 1, T, T, dtype=dt).masked_fill(~allowed, torch.finfo(dt).min)
     if a.check_layer >= 0:
         return check_layer(R, config, g, c, table, a.check_layer, a.osmos, T, masks, pos, rotary, ngram, emask)
     taps = np.zeros((n_layers, len(ROWS), hc, D), dtype=np.float32)
@@ -243,10 +246,14 @@ def main():
         kind = config.layer_types[L]
         blk = f"blk.{L}."
         layer = build_layer(R, config, g, c, table, tables, L)
+        if dt != torch.float32:  # (the hyper-connections keep their parameters F32: the reference forces it)
+            for name, mod in layer.named_children():
+                if name not in ("attn_hc", "ffn_hc"):
+                    mod.to(dt)
         h = layer.forward(h, attention_mask=masks[kind], position_ids=pos, cache=None,
                           position_embeddings=rotary(h, pos, kind), indexer_position_ids=pos, ngram_tokens=ngram,
                           engram_mask=emask)
-        taps[L] = h[0, ROWS].numpy()
+        taps[L] = h[0, ROWS].float().numpy()
         del layer
         gc.collect()
         print(f"layer {L:2d} ({kind}): {time.time() - t0:5.1f} s, |h| {float(h.abs().mean()):.4g}", flush=True)
@@ -255,7 +262,7 @@ def main():
     head.hc_scale = param(g.tensor("output_hc_scale.weight"))
     norm = R["HYV4FlashRMSNorm"](D, eps=c["rms_norm_eps"])
     norm.weight = param(g.tensor("output_norm.weight"))
-    x = norm(head(h[:, ROWS]))[0]
+    x = norm(head(h[:, ROWS])).float()[0]
     logits = (x @ torch.from_numpy(g.tensor("output.weight")).T).numpy()
     nxt = ids[np.minimum(np.array(ROWS) + 1, T - 1)]
     lp = logits - logits.max(-1, keepdims=True)

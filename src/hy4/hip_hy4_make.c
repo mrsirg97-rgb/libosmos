@@ -9,6 +9,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/hy4_ops.h"
+#include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/quant.h"
@@ -114,7 +115,8 @@ void hy4_forward_destroy(Hy4Forward *f)
     hipFree(f->fn_attn[l]), hipFree(f->fn_ffn[l]);
   void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->h, f->xn, f->y, f->post, f->hcs, f->table, f->attn_part, f->wtok, f->qr,
                f->qres, f->q, f->kva, f->gt, f->qa, f->olat, f->ao, f->out, f->ixk, f->ixq, f->ixw, f->scores, f->sel,
-               f->n_sel, f->emb, f->ekv, f->ga, f->up, f->act, f->logit_r, f->rin, f->xg, f->eg_g, f->eg_u, f->eg_h,
+               f->n_sel, f->x16, f->xe16, f->overflow, f->rx, f->ry, f->rxd, f->ryd, f->rcnt, f->rw, f->rgidx, f->rhidx,
+               f->emb, f->ekv, f->ga, f->up, f->act, f->logit_r, f->rin, f->xg, f->eg_g, f->eg_u, f->eg_h,
                f->eg_y, f->wsel, f->rsum, f->sh, f->idx, f->gidx, f->sidx, f->cnt, f->xrow, f->wptr, f->tok, f->pos,
                f->hx, f->logits, f->ids, f->argmax};
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
@@ -124,6 +126,8 @@ void hy4_forward_destroy(Hy4Forward *f)
   engram_destroy(f->eg);
   free(f->eg_off), free(f->slot), free(f->h_idx), free(f->h_gidx), free(f->h_sidx), free(f->h_cnt), free(f->h_xrow);
   free(f->h_wptr), free(f->h_w), free(f->h_wsel);
+  free(f->h_rx), free(f->h_ry), free(f->h_rxd), free(f->h_ryd), free(f->h_rcnt), free(f->h_rw), free(f->rkey);
+  free(f->h_rgidx), free(f->h_rhidx), free(f->h_stage);
   free(f);
 }
 
@@ -171,7 +175,30 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
       {&f->tok, n * 4}, {&f->pos, n * 4}, {&f->hx, lr * hc * D * F}, {&f->logits, lr * g->n_vocab * F},
       {&f->ids, lr * 4}, {&f->argmax, ops_argmax_scratch((uint32_t)lr)},
   };
-  bool ok = upload(f, err);
+  /* the read math's: the widest matrix input an mm reads (o_proj's heads x v_dim, the dense down's n_ff, Engram's) */
+  uint64_t wide = (uint64_t)g->n_ff > H * g->v_dim ? (uint64_t)g->n_ff : H * g->v_dim;
+  wide = wide > H * qk ? wide : H * qk, wide = wide > H * g->kv_lora ? wide : H * g->kv_lora;
+  const uint64_t ecap = hy4_read_entries(n, g), scap = hy4_read_slots(n, g);
+  const uint64_t xe = L > ffe ? L : ffe;
+  const struct
+  {
+    void *p;
+    uint64_t bytes;
+  } read_want[] = {
+      {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2}, {&f->xe16, scap * xe * 2}, {&f->overflow, 4},
+      {&f->rx, ecap * 4}, {&f->ry, ecap * 4}, {&f->rxd, ecap * 4}, {&f->ryd, ecap * 4}, {&f->rcnt, ecap * 4},
+      {&f->rw, 3 * ecap * sizeof(void *)}, {&f->rgidx, scap * 4}, {&f->rhidx, scap * 4},
+
+  };
+  bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || hy4_fail(err, "more heads than this build's tables");
+  ok = ok && upload(f, err);
+  for (size_t i = 0; ok && i < sizeof read_want / sizeof *read_want; i++)
+    ok = hy4_alloc(read_want[i].p, read_want[i].bytes) || hy4_fail(err, "GPU memory refused (the read's buffers)");
+  ok = ok && hipMemset(f->overflow, 0, 4) == hipSuccess && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
+       (f->h_rxd = malloc(ecap * 4)) && (f->h_ryd = malloc(ecap * 4)) && (f->h_rcnt = malloc(ecap * 4)) &&
+       (f->h_rw = malloc(3 * ecap * sizeof(void *))) && (f->rkey = malloc(ecap * 8)) &&
+       (f->h_rgidx = malloc(scap * 4)) && (f->h_rhidx = malloc(scap * 4)) &&
+       (f->h_stage = malloc(3 * ecap * sizeof(void *) + 5 * ecap * 4));
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = (as_f32(f, w->layer[l].hc_attn_fn, &f->fn_attn[l]) && as_f32(f, w->layer[l].hc_ffn_fn, &f->fn_ffn[l])) ||
          hy4_fail(err, "iHC's mixes not made F32");
