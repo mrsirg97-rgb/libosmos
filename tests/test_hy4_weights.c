@@ -140,7 +140,10 @@ static void test_kv(void)
   edit_u(ARCH "hyper_connection.count", 5, "five residual streams");
   edit_u(ARCH "attention.indexer.kpool", 3, "a pooled group not dividing the indexer's keys");
   edit_u(ARCH "attention.key_length", 577, "a cache row not the latent and its rope");
-  edit_u(ARCH "leading_dense_block_count", 2, "two dense layers (layer 1's tensors a MoE's)");
+  k = kv(ARCH "leading_dense_block_count");
+  k->v.u = 2;
+  refused("two dense layers (layer 1's tensors a MoE's)", "blk.1.ffn_gate.weight: missing");
+  k->v.u = 1;
   k = kv(ARCH "ple.layers");
   int32_t *items = (int32_t *)k->v.items, was = items[3];
   items[3] = 42;
@@ -189,11 +192,11 @@ static void test_tensors(void)
   refused("a router's bias missing", "blk.5.exp_probs_b.bias: missing");
   t->name[0] = 'b';
 
-  /* a tensor no role takes: a sliding layer's sinks renamed as an indexer's norm it does not have */
-  t = tensor("blk.2.attn_sinks.weight");
+  /* a tensor no role takes: the drafter's (left to it) renamed as an indexer norm a sliding layer does not have */
+  t = tensor("blk.42.nextn.enorm.weight");
   char *was = t->name;
   t->name = (char *)"blk.2.indexer.k_norm.weight";
-  refused("an indexer tensor on a sliding layer", "blk.2.");
+  refused("an indexer tensor on a sliding layer", "blk.2.indexer.k_norm.weight: a tensor no role");
   t->name = was;
 
   t = tensor("per_layer_token_embd.weight");

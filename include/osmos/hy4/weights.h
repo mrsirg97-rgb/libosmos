@@ -75,6 +75,7 @@ typedef struct Hy4Weights
   const GgufTensor *embed, *output_norm, *output;
   const GgufTensor *out_hc_fn, *out_hc_base, *out_hc_scale; /* the head's iHC: pre alone */
   const GgufTensor *engram_table;                           /* per_layer_token_embd: every Engram layer's rows */
+  uint64_t engram_rows[HY4_MAX_ENGRAM];                     /* each Engram layer's rows of it (its columns' span) */
   Hy4Layer layer[HY4_MAX_LAYERS];
 } Hy4Weights;
 
