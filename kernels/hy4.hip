@@ -244,6 +244,141 @@ __global__ __launch_bounds__(kThreads) void mla_out_kernel(const float* o_lat, c
   }
 }
 
+
+// the compressed indexer. a group's keys pooled: a thread a dimension (dim at most kIxDim)
+constexpr uint32_t kIxDim = 128, kIxPoolMax = 8;
+
+__global__ __launch_bounds__(kIxDim) void ix_pool_kernel(const float* keys, const uint8_t* w_value,
+                                                         const uint8_t* w_gate, const float* ape, const float* norm_w,
+                                                         uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps,
+                                                         const float* freqs, uint32_t g0, float* groups) {
+  __shared__ float ks[kIxPoolMax][kIxDim], out[kIxDim], lds[kIxDim];
+  const uint32_t g = g0 + blockIdx.x, i = threadIdx.x;
+  const bool live = i < dim;
+  for (uint32_t s = 0; s < pool; s++) ks[s][i] = live ? keys[((uint64_t) g * pool + s) * dim + i] : 0.0f;
+  __syncthreads();
+  float v[kIxPoolMax], gt[kIxPoolMax], m = -INFINITY;
+  const uint64_t row_bytes = dim / kQ8Block * kQ8Bytes;
+  for (uint32_t s = 0; live && s < pool; s++) {
+    float av = 0, ag = 0;
+    for (uint32_t j = 0; j < dim; j++) {
+      av = fmaf(q8_value(w_value + i * row_bytes, j), ks[s][j], av);
+      ag = fmaf(q8_value(w_gate + i * row_bytes, j), ks[s][j], ag);
+    }
+    v[s] = av, gt[s] = ag + ape[(uint64_t) s * dim + i];
+    m = fmaxf(m, gt[s]);
+  }
+  float z = 0, x = 0;
+  for (uint32_t s = 0; live && s < pool; s++) z += (gt[s] = expf(gt[s] - m));
+  for (uint32_t s = 0; live && s < pool; s++) x += v[s] * (gt[s] / z);
+  const float ss = block_sum<kIxDim>(live ? x * x : 0.0f, lds);
+  const float r = 1.0f / sqrtf(ss / (float) dim + eps);
+  __shared__ float roped[kIxDim];
+  if (live) out[i] = roped[i] = norm_w[i] * (x * r);
+  __syncthreads();
+  if (freqs && i < rope_dim / 2) rope_pair(out + dim - rope_dim, roped + dim - rope_dim, i, (int32_t) (g * pool), freqs);
+  __syncthreads();
+  if (live) groups[(uint64_t) g * dim + i] = roped[i];
+}
+
+__global__ __launch_bounds__(kThreads) void ix_query_kernel(float* q, float* w, uint32_t heads, uint32_t dim,
+                                                            uint32_t rope_dim, const float* freqs, const int32_t* pos,
+                                                            float scale) {
+  const uint32_t t = blockIdx.x, half = rope_dim / 2;
+  for (uint32_t j = threadIdx.x; j < heads * half; j += kThreads) {
+    float* r = q + ((uint64_t) t * heads + j / half) * dim + dim - rope_dim;
+    float pair[2] = {r[2 * (j % half)], r[2 * (j % half) + 1]}, rot[2];
+    const float a = (float) pos[t] * freqs[j % half], c = cosf(a), s = sinf(a);
+    rot[0] = pair[0] * c + (-pair[1]) * s, rot[1] = pair[1] * c + pair[0] * s;
+    r[2 * (j % half)] = rot[0], r[2 * (j % half) + 1] = rot[1];
+  }
+  for (uint32_t h = threadIdx.x; h < heads; h += kThreads) w[(uint64_t) t * heads + h] *= scale;
+}
+
+// a float's order as an unsigned key (the greater float, the greater key)
+__device__ inline uint32_t order_key(float x) {
+  const uint32_t u = __float_as_uint(x);
+  return u & 0x80000000u ? ~u : u | 0x80000000u;
+}
+
+// a block's exclusive prefix sum of each thread's v (a fixed Hillis-Steele scan), and the total
+__device__ inline uint32_t block_scan(uint32_t v, uint32_t* lds, uint32_t* total) {
+  lds[threadIdx.x] = v;
+  __syncthreads();
+  for (uint32_t off = 1; off < kThreads; off <<= 1) {
+    const uint32_t add = threadIdx.x >= off ? lds[threadIdx.x - off] : 0;
+    __syncthreads();
+    lds[threadIdx.x] += add;
+    __syncthreads();
+  }
+  const uint32_t incl = lds[threadIdx.x];
+  *total = lds[kThreads - 1];
+  __syncthreads();
+  return incl - v;
+}
+
+// a block a token: its complete groups' scores (a thread a group, the heads in order), then the top - 1 greatest by
+// the scores' bits (the k-th greatest key bit by bit, then those over it and its ties from the lowest group),
+// written ascending, its own last
+__global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, const float* w, const float* groups,
+                                                             uint32_t heads, uint32_t dim, uint32_t pool, uint32_t top,
+                                                             const int32_t* pos, uint32_t max_groups, float* scores,
+                                                             int32_t* sel, int32_t* n_sel) {
+  __shared__ float qs[kIxDim * 16], ws[16];
+  __shared__ uint32_t lds[kThreads];
+  const uint32_t t = blockIdx.x, own = (uint32_t) pos[t] / pool;
+  int32_t* out = sel + (uint64_t) t * top;
+  if (own < top) {  // every complete group, and its own
+    for (uint32_t g = threadIdx.x; g <= own; g += kThreads) out[g] = (int32_t) g;
+    if (threadIdx.x == 0) n_sel[t] = (int32_t) own + 1;
+    return;
+  }
+  for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
+  for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
+  __syncthreads();
+  float* sc = scores + (uint64_t) t * max_groups;
+  for (uint32_t g = threadIdx.x; g < own; g += kThreads) {
+    const float* k = groups + (uint64_t) g * dim;
+    float s = 0;
+    for (uint32_t h = 0; h < heads; h++) {
+      float d = 0;
+      for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * dim + i], k[i], d);
+      s = fmaf(ws[h], fmaxf(d, 0.0f), s);
+    }
+    sc[g] = s;
+  }
+  __syncthreads();
+  const uint32_t want = top - 1;
+  uint32_t prefix = 0, total = 0;
+  for (int bit = 31; bit >= 0; bit--) {  // the greatest key V with at least `want` keys >= V
+    const uint32_t cand = prefix | (1u << bit);
+    uint32_t c = 0;
+    for (uint32_t g = threadIdx.x; g < own; g += kThreads) c += order_key(sc[g]) >= cand;
+    block_scan(c, lds, &total);
+    if (total >= want) prefix = cand;
+  }
+  uint32_t over = 0;
+  {
+    uint32_t c = 0;
+    for (uint32_t g = threadIdx.x; g < own; g += kThreads) c += order_key(sc[g]) > prefix;
+    block_scan(c, lds, &over);
+  }
+  const uint32_t ties = want - over;
+  uint32_t written = 0, tied = 0;
+  for (uint32_t g0 = 0; g0 < own; g0 += kThreads) {  // in group order: a chunk's picks placed by a scan
+    const uint32_t g = g0 + threadIdx.x;
+    const uint32_t key = g < own ? order_key(sc[g]) : 0;
+    const uint32_t eq = g < own && key == prefix;
+    uint32_t eq_total = 0, take_total = 0;
+    const uint32_t eq_before = block_scan(eq, lds, &eq_total);
+    const uint32_t take = g < own && (key > prefix || (eq && tied + eq_before < ties));
+    const uint32_t at = block_scan(take, lds, &take_total);
+    if (take) out[written + at] = (int32_t) g;
+    written += take_total, tied += eq_total;
+  }
+  if (threadIdx.x == 0) out[want] = (int32_t) own, n_sel[t] = (int32_t) top;
+}
+
 }  // namespace
 
 extern "C" bool hy4_hc_pre(const float* h, const float* fn, const float* scale, const float* base, uint32_t rows,
@@ -327,15 +462,32 @@ extern "C" bool hy4_mla_out(const float* o_lat, const void* v_b, const float* ga
   return ok();
 }
 
-extern "C" bool hy4_ix_pool(const float*, const void*, const void*, const float*, const float*, uint32_t, uint32_t,
-                            uint32_t, float, const float*, uint32_t, uint32_t, float*, void*) {
-  return false;
+extern "C" bool hy4_ix_pool(const float* keys, const void* w_value, const void* w_gate, const float* ape,
+                            const float* norm_w, uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps,
+                            const float* freqs, uint32_t g0, uint32_t n_groups, float* groups, void* stream) {
+  if (!keys || !w_value || !w_gate || !ape || !norm_w || !groups || !dim || dim > kIxDim || dim % kQ8Block || !pool ||
+      pool > kIxPoolMax || rope_dim % 2 || rope_dim > dim || !n_groups)
+    return false;
+  ix_pool_kernel<<<n_groups, kIxDim, 0, st(stream)>>>(keys, (const uint8_t*) w_value, (const uint8_t*) w_gate, ape,
+                                                      norm_w, dim, pool, rope_dim, eps, freqs, g0, groups);
+  return ok();
 }
-extern "C" bool hy4_ix_query(float*, float*, uint32_t, uint32_t, uint32_t, const float*, const int32_t*, uint32_t,
-                             void*) {
-  return false;
+
+extern "C" bool hy4_ix_query(float* q, float* w, uint32_t heads, uint32_t dim, uint32_t rope_dim, const float* freqs,
+                             const int32_t* pos, uint32_t n_tok, void* stream) {
+  if (!q || !w || !freqs || !pos || !heads || !dim || rope_dim % 2 || rope_dim > dim || !n_tok) return false;
+  const float scale = (float) (1.0 / sqrt((double) heads) * (1.0 / sqrt((double) dim)));
+  ix_query_kernel<<<n_tok, kThreads, 0, st(stream)>>>(q, w, heads, dim, rope_dim, freqs, pos, scale);
+  return ok();
 }
-extern "C" bool hy4_ix_select(const float*, const float*, const float*, uint32_t, uint32_t, uint32_t, uint32_t,
-                              const int32_t*, uint32_t, uint32_t, float*, int32_t*, int32_t*, void*) {
-  return false;
+
+extern "C" bool hy4_ix_select(const float* q, const float* w, const float* groups, uint32_t heads, uint32_t dim,
+                              uint32_t pool, uint32_t top, const int32_t* pos, uint32_t n_tok, uint32_t max_groups,
+                              float* scores, int32_t* sel, int32_t* n_sel, void* stream) {
+  if (!q || !w || !groups || !pos || !scores || !sel || !n_sel || !heads || heads > 16 || !dim || dim > kIxDim ||
+      !pool || top < 2 || !n_tok || !max_groups)
+    return false;
+  ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool, top, pos, max_groups, scores,
+                                                       sel, n_sel);
+  return ok();
 }

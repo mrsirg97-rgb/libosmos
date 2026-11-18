@@ -3,7 +3,7 @@
 // sparse layer past 2,048 keys), in F32 on the GGUF's weights, 2,600 tokens from position 0: the token keys, the
 // pooled group keys (pool_groups'), each token's groups the reference's recall exactly (its 511 best complete groups
 // before its own and its own; fewer complete groups: all of them), then the gated attention over them entering
-// o_proj. and every group selected, the dense path's bits. ~/osmos-oracle/hy4_indexer.bin; skipped (77) without.
+// o_proj. every group selected, the dense path's bits; run twice, the same bits. ~/osmos-oracle/hy4_indexer.bin; skipped (77) without.
 extern "C" {
 #include "osmos/gpu/hy4_ops.h"
 #include "osmos/gpu/ops.h"
@@ -81,13 +81,30 @@ int main() {
       if ((int32_t) recall[(size_t) t * top + i] < own) want.insert((int32_t) recall[(size_t) t * top + i]);
     std::vector<int32_t> got(s.begin() + (size_t) t * top, s.begin() + (size_t) t * top + n[t]);
     CHECK(std::is_sorted(got.begin(), got.end()) && !got.empty() && got.back() == own);
-    if (std::set<int32_t>(got.begin(), got.end()) != want && differ++ < 4)
-      std::printf("  token %u: %zu groups, the reference's %zu\n", t, got.size(), want.size());
+    const std::set<int32_t> gs(got.begin(), got.end());
+    if (gs != want && differ++ < 6) {
+      std::vector<int32_t> only_ours, only_ref;
+      std::set_difference(gs.begin(), gs.end(), want.begin(), want.end(), std::back_inserter(only_ours));
+      std::set_difference(want.begin(), want.end(), gs.begin(), gs.end(), std::back_inserter(only_ref));
+      std::printf("  token %u: %zu groups ours alone, %zu the reference's alone (first %d / %d)\n", t,
+                  only_ours.size(), only_ref.size(), only_ours.empty() ? -1 : only_ours[0],
+                  only_ref.empty() ? -1 : only_ref[0]);
+    }
     chosen += (uint32_t) own > top - 1;
   }
   std::printf("  each token's groups: %u of %u the reference's exactly (%u chosen among more than %u)\n", T - differ,
               T, chosen, top - 1);
   CHECK(!differ && chosen > 0);
+
+  // run again: the pooled keys and every token's groups the same bits (no order a race picks)
+  const std::vector<float> g1 = down(groups, (size_t) G * ID);
+  CHECK(hy4_ix_pool(keys, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, 0, G, groups, 0));
+  CHECK(hy4_ix_select(ixq, ixw, groups, IH, ID, pool, top, dpos, T, G, scores, sel, n_sel, 0));
+  const std::vector<float> g2 = down(groups, (size_t) G * ID);
+  std::vector<int32_t> s2((size_t) T * top);
+  CHECK(hipMemcpy(s2.data(), sel, s2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(std::memcmp(g1.data(), g2.data(), g1.size() * 4) == 0 && s2 == s);
+  std::printf("  again: the pooled keys and the groups the same bits\n");
 
   // the attention over them (MLA as test_hy4_mla_gpu's), against the reference's
   float *kva = up(A("kva")), *q = up(A("q")), *gate = up(A("gate")), *kb = up(A("k_b_q8")), *vb = up(A("v_b_q8"));
