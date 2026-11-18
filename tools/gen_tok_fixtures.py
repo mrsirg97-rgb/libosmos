@@ -12,6 +12,9 @@ python3 tools/gen_tok_fixtures.py --hf <tokenizer.json> inkling > tests/fixtures
 LFM3's (vibes1.7b: pre lfm2 - the Llama-3 expression, ignore_merges: digits in threes, contractions in any case,
 marks outside a letter run, a word the vocabulary holds whole) from its checkpoint's tokenizer.json:
 python3 tools/gen_tok_fixtures.py --hf <tokenizer.json> lfm2 > tests/fixtures/tokenizer_lfm2.txt
+Hy4-flash's (DeepSeek-V3's expressions, its own vocabulary and merges) from the release's tokenizer.json with its 24
+`:opensource` special tokens' text renamed `:6124c78e` - AngelSlim's GGUF's (the same ids):
+python3 tools/gen_tok_fixtures.py --hf <tokenizer.json, renamed> hy4 > tests/fixtures/tokenizer_hy4.txt
 
 the file: a case a block - `S 0|1` (special tokens parsed), `T <the text's UTF-8 bytes in hex>`, `I <ids>`."""
 import subprocess
@@ -56,6 +59,10 @@ SPECIALS = {
                 'a//b\n', ' ...//\r\n', '?!/\n\nx', '12,345.67 1234567', '½x ²3', 'नमस्ते दुनिया', 'ภาษาไทย',
                 'a\x00b\x01', '\ufffd', '\U0010FFFD \U000E0001', "x'Very 'Return 's'", 'end.\n\nNext', '});\n\n',
                 '"\u0301', '.\u0301\u0301', '-\u0301', '1\u0301', 'ǅ', 'ᾈᾉ', 'ΣΑΣ σας', 'İstanbul ı'],
+    'hy4': ['<｜hy_start:6124c78e｜>hi<｜hy_middle:6124c78e｜>', 'a<｜hy_end:6124c78e｜>b',
+            '<think:6124c78e>reason</think:6124c78e>answer', '<tool_call:6124c78e>f<arg_key:6124c78e>x',
+            '<｜reasoning_mode:6124c78e｜>high', '<tool_response:6124c78e>{"a":1}</tool_response:6124c78e>',
+            '<｜hy_EOT｜>x', '中文abc 日本語ABC', '12,345.67 1234567', 'a\u0301b \u0301x', 'नमस्ते दुनिया'],
 }
 
 
