@@ -27,6 +27,30 @@ import hy4_mla as M  # noqa: E402
 import hy4_pieces as P  # noqa: E402
 from hy4_gguf import Gguf  # noqa: E402
 
+
+class Mixed:
+    """a GGUF whose tensors matching `names` come from another (the same shapes, another quant): every read by name
+    routed, the metadata the first's"""
+
+    def __init__(self, base, other, names):
+        import re
+        self.base, self.other, self.pat = base, other, re.compile(names)
+        self.kv, self.tensors = base.kv, base.tensors
+        self.taken = sorted(n for n in base.tensors if self.pat.search(n))
+        for n in self.taken:
+            if n not in other.tensors or other.tensors[n][0] != base.tensors[n][0]:
+                raise SystemExit(f"--take: {n} not in the other file, or another shape")
+        print(f"--take: {len(self.taken)} tensors from the other file (first {self.taken[:3]})", flush=True)
+
+    def __getattr__(self, attr):
+        fn = getattr(self.base, attr)
+        if not callable(fn):
+            return fn
+        def route(name, *args, **kw):
+            src = self.other if isinstance(name, str) and self.pat.search(name) else self.base
+            return getattr(src, attr)(name, *args, **kw)
+        return route
+
 TOKENS = 2600  # past the window (512) and the indexer's dense length (2,048)
 
 
@@ -193,6 +217,8 @@ def main():
         ap.add_argument("--" + k, required=True)
     ap.add_argument("--tokens", type=int, default=TOKENS)
     ap.add_argument("--check-layer", type=int, default=-1, help="the reference's layer L on osmos's streams")
+    ap.add_argument("--take", help="another GGUF: the tensors --names matches read from it (a quant's sensitivity)")
+    ap.add_argument("--names", help="a regex of tensor names --take's file gives")
     ap.add_argument("--dtype", default="f32", choices=("f32", "bf16"),
                     help="bf16: the layers and the streams in BF16, as the release is served (its own rounding)")
     ap.add_argument("--osmos", help="osmos's streams: DIR/h<L-1>.f32 entering layer L, DIR/h<L>.f32 leaving it")
@@ -205,6 +231,8 @@ def main():
                                         "ACT2FN": {"silu": nn.SiLU()}, "use_experts_implementation": None})
     c = json.load(open(a.config))["text_config"]
     g = Gguf(a.gguf)
+    if a.take:
+        g = Mixed(g, Gguf(a.take), a.names)
     config = M.make_config(c)
     for k, v in dict(hc_mult=c["hc_mult"], hc_eps=c["hc_eps"], hc_magnitude=c["hc_magnitude"],
                      intermediate_size=c["intermediate_size"], hidden_act=c["hidden_act"],
