@@ -1984,6 +1984,36 @@ revised (operator, 2026-11-18) - the release as it ships, brought up on the Halo
 - Q4_0's kernels (decode, mv, mm) landed first, IQ4_NL's shapes (2f78256): one token 205 GB/s on the FFN; a prompt's
   matmul ~3.6 GB/s of weights at 256 tokens - step 3's to tune.
 
+## vibes-flash: LFM3 step 2 - the sequence and the engine (design, 2026-11-18)
+
+step 1's forward (one sequence, rows by position, one convolution state) becomes the engine's: hy4's step-2 shape.
+
+- **runs**: lfm3_step_runs - several sequences' consecutive tokens one step (LFM3_MAX_RUNS), every matrix read once
+  for all, each sequence's convolution states and caches its own: a token's bits however the sequences share the step
+  or a sequence is split into steps. the kept rows' logits on the device (lfm3_row_logits; a row kept from its
+  sequence's prompt end - 1: lfm3_seq_prompt), lfm3_greedy (ops_argmax). lfm3_step stays the checks' one-sequence form.
+- **rollback** (LFM3_MAX_BACK tokens: a drafted round's): a convolution's states a ring of LFM3_MAX_BACK + 1 slots
+  (q4x_conv's / lfm3_shortconv's: the state after each of a step's last tokens in its slot - a rollback reads an
+  earlier one); a full layer's rows past the position never read again; a sliding layer's cache a ring of
+  window + max_tokens + LFM3_MAX_BACK rows (AttnShape's slots): a step's tokens past its first, and a rollback's,
+  never overwrite a key a later token's window still reads (2,312 rows at a 2,048-token step, against max_ctx).
+- **state**: hy4's (state_parts.h): a header (format, the identity - fnv of the geometry, the ring, the model's file -
+  the position), the parts (each convolution's current state; a full layer's K and V rows below the position; a
+  sliding layer's whole ring), the sum. load refuses another identity or format, a size not its position's, a damaged
+  string - the sequence then empty; its reach 0. a failed step refuses its sequences until a load (lfm3_seq_fail).
+- **text**: the tokenizer's pre `lfm2` - llama.cpp's LLAMA3 split (the checkpoint's tokenizer.json: the Llama-3
+  expression, ignore_merges: a pre-token that is a token taken whole) - fixtures from HF tokenizers on the
+  checkpoint's tokenizer.json. the chat: ChatML's turns (<|im_start|>role ... <|im_end|>), <think> (the generation
+  prompt opens it; enable_thinking false: <think></think>), tools as JSON lines in <tools> in the system turn, a tool
+  turn's <tool_response>; calls Qwen3.5's XML (<tool_call><function=..><parameter=..>) - parsed by Qwen's parser,
+  rendered by the template's own branches (its own file: chat_lfm3.c), fixtures from the template itself (jinja2).
+- **the engine**: the family `lfm3` (hip_engine_lfm3.c): every weight resident, one math (no read: step 3's), no
+  drafter yet (block 0); osmos-serve and osmos-api end to end.
+- **the order** (tests first, each seen to fail): runs and rollback and state in test_lfm3_forward_gpu (two sequences
+  in one step their alone bits; a rollback's tokens again the same bits; a state saved and loaded the next step's
+  bits; a damaged one refused) and the ring past the window against the 2,048-id fixture; the tokenizer's fixtures; the
+  dialect's; then the engine, served.
+
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
 the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,

@@ -5,17 +5,19 @@
    short convolution or attention a layer (full, or a window of keys), each followed by a dense SwiGLU, each block's
    output normed before the residual. q35's shape on one GPU, the weights whole in its memory; a sequence's state its
    convolutions' last rows and its attention layers' cache (Q8_0: the full layers' every row, the window's ring).
-   step 1's surface: the model and one sequence's forward - the engine's contracts (runs, rollback, saved state) are
-   step 2's, beside q35's */
+   the engine's contracts beside it (DESIGN.md, "LFM3 step 2"): runs, rollback, the prompt's end, a saved state */
 
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/model/gguf.h"
+#include "osmos/model/state_io.h"
 
 #define LFM3_ERR 256
 #define LFM3_MAX_LAYERS 64
 #define LFM3_HEAD_DIM 128 /* the attention kernels' head (q35's widened to it: DESIGN.md) */
+#define LFM3_MAX_BACK 8   /* the tokens a sequence can drop (a drafted round's) */
+#define LFM3_MAX_RUNS 64  /* a step's sequences at most */
 
 typedef enum Lfm3Kind
 {
@@ -77,6 +79,7 @@ typedef struct Lfm3Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;
 } Lfm3Options;
+/* the model's open files' paths are its Gguf's (the identity hashes them) */
 Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[LFM3_ERR]);
 void lfm3_forward_destroy(Lfm3Forward *f);
 
@@ -84,11 +87,38 @@ Lfm3Seq *lfm3_seq_create(Lfm3Forward *f, char err[LFM3_ERR]);
 void lfm3_seq_destroy(Lfm3Seq *s);
 int32_t lfm3_seq_position(const Lfm3Seq *s);
 
-/* n tokens (n <= max_tokens) after the sequence's own: its state advanced, the logits of the last `rows` of them on
-   the host (lfm3_logits: rows x n_vocab); refused past max_ctx, a token past the vocabulary, rows > n or past
-   logit_rows - the sequence then unchanged */
+/* runs sequences' tokens in one step (seqs[i] the next lens[i] tokens, consecutive; each once): every matrix read
+   once for all of them, each sequence's convolution states and caches its own - a token's bits the same however the
+   sequences share the step or a sequence's tokens are split into steps. the kept rows' logits (lfm3_row_logits): a
+   row kept unless its token is before its sequence's prompt end - 1 (lfm3_seq_prompt). false with why, every sequence
+   unchanged, for a refusal before the work; false after it began (a GPU call failed): the step's sequences refused
+   from then on (lfm3_seq_fail's), until a load */
+bool lfm3_step_runs(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
+                    char err[LFM3_ERR]);
+/* one sequence, its last `rows` rows' logits on the host (lfm3_logits: rows x n_vocab) - the checks' form */
 bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[LFM3_ERR]);
 const float *lfm3_logits(const Lfm3Forward *f);
+/* row's logits (device, n_vocab floats) of the last step, NULL for a row not kept */
+const float *lfm3_row_logits(const Lfm3Forward *f, uint32_t row);
+/* the greatest token of each of rows row0 .. row0 + rows - 1 (the lowest among equals); false for a row not kept */
+bool lfm3_greedy(Lfm3Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[LFM3_ERR]);
+
+/* the prompt ends at end (its last token end - 1): rows before it not kept (the head not run for them) */
+bool lfm3_seq_prompt(Lfm3Seq *s, uint32_t end);
+/* the tokens a sequence can drop (LFM3_MAX_BACK at most; 0 after a load or a new one), and the drop: every state as
+   before them - the bits of never having run them. false past the reach, unchanged */
+uint32_t lfm3_seq_reach(const Lfm3Seq *s);
+bool lfm3_seq_rollback(Lfm3Seq *s, uint32_t n);
+/* a sequence refused (every step, rollback, save) until a load: an engine's batch that failed past its step */
+void lfm3_seq_fail(Lfm3Seq *s);
+/* a 64-bit key of what a saved state depends on (its format, the geometry, the ring, the model's file) */
+uint64_t lfm3_identity(const Lfm3Forward *f);
+/* a sequence as one byte string (a header, each convolution's current state, the full layers' rows below the
+   position, the sliding layers' rings, then a sum) - load refuses another identity or format, a size not its
+   position's, a damaged string: the sequence then empty */
+uint64_t lfm3_seq_state_bytes(const Lfm3Seq *s);
+bool lfm3_seq_save_to(const Lfm3Seq *s, StateSink sink, void *ctx, char err[LFM3_ERR]);
+bool lfm3_seq_load_from(Lfm3Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[LFM3_ERR]);
 
 /* the per-op checks' (llama-eval-callback's tensors): a tap, when set, gets each layer's named outputs - "operator"
    (the conv's or attention's, before its post-norm) and "residual" (the layer's output) - n x n_embd, the GPU's */

@@ -127,6 +127,93 @@ int main() {
   CHECK(lfm3_step(f, s2, ids.data() + a + b, c, tail, err));
   CHECK(std::memcmp(lfm3_logits(f), got.data() + (size_t) (last - tail) * V, (size_t) tail * V * sizeof(float)) == 0);
   std::printf("  in steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c, tail);
+
+  // two sequences in one step (each its prompt's last row kept), each the bits of its own step alone
+  {
+    const uint32_t P = T / 4 > 8 ? T / 4 : 8;
+    Lfm3Seq *a1 = lfm3_seq_create(f, err), *b1 = lfm3_seq_create(f, err), *a2 = lfm3_seq_create(f, err);
+    Lfm3Seq* b2 = lfm3_seq_create(f, err);
+    CHECK(a1 && b1 && a2 && b2);
+    std::vector<int32_t> both(ids.begin(), ids.begin() + P);
+    both.insert(both.end(), ids.begin() + 7, ids.begin() + 7 + P);
+    CHECK(lfm3_seq_prompt(a1, P) && lfm3_seq_prompt(b1, P));
+    Lfm3Seq* const pair[2] = {a1, b1};
+    const uint32_t lens[2] = {P, P};
+    CHECK(lfm3_step_runs(f, pair, lens, 2, both.data(), err));
+    std::vector<float> ra(V), rb(V);
+    CHECK(lfm3_row_logits(f, P - 1) && lfm3_row_logits(f, 2 * P - 1) && !lfm3_row_logits(f, 0));
+    CHECK(hipMemcpy(ra.data(), lfm3_row_logits(f, P - 1), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(hipMemcpy(rb.data(), lfm3_row_logits(f, 2 * P - 1), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    int32_t ga[1], gb[1];
+    CHECK(lfm3_greedy(f, P - 1, 1, ga, err) && lfm3_greedy(f, 2 * P - 1, 1, gb, err));
+    CHECK(lfm3_step(f, a2, ids.data(), P, 1, err) && std::memcmp(lfm3_logits(f), ra.data(), V * 4) == 0);
+    CHECK(ga[0] == (int32_t) argmax(ra.data(), V));
+    CHECK(lfm3_step(f, b2, ids.data() + 7, P, 1, err) && std::memcmp(lfm3_logits(f), rb.data(), V * 4) == 0);
+    CHECK(gb[0] == (int32_t) argmax(rb.data(), V));
+    std::printf("  two sequences of %u in one step: each the bits of its own step alone; the greedy ids the argmax's\n",
+                P);
+
+    // a rollback: 4 more tokens, 3 of them dropped and run again - the same bits
+    const int32_t more[4] = {ids[1], ids[2], ids[3], ids[4]};
+    CHECK(lfm3_step(f, a2, more, 4, 4, err));
+    const std::vector<float> first(lfm3_logits(f), lfm3_logits(f) + (size_t) 4 * V);
+    CHECK(lfm3_seq_reach(a2) >= 4 && lfm3_seq_rollback(a2, 3) && lfm3_seq_position(a2) == (int32_t) P + 1);
+    CHECK(!lfm3_seq_rollback(a2, LFM3_MAX_BACK + 1));
+    CHECK(lfm3_step(f, a2, more + 1, 3, 3, err));
+    CHECK(std::memcmp(lfm3_logits(f), first.data() + V, (size_t) 3 * V * 4) == 0);
+    std::printf("  4 tokens, 3 rolled back and run again: the same bits\n");
+
+    // the state saved and loaded into another sequence: its next step the same bits; damaged, refused
+    CHECK(lfm3_seq_rollback(a2, 4));
+    std::vector<uint8_t> saved;
+    auto sink = [](void* ctx, const void* bytes, uint64_t n) {
+      auto* v = (std::vector<uint8_t>*) ctx;
+      v->insert(v->end(), (const uint8_t*) bytes, (const uint8_t*) bytes + n);
+      return true;
+    };
+    CHECK(lfm3_seq_save_to(a2, sink, &saved, err) && saved.size() == lfm3_seq_state_bytes(a2));
+    struct Src {
+      const std::vector<uint8_t>* v;
+      size_t at;
+    } src = {&saved, 0};
+    auto source = [](void* ctx, void* bytes, uint64_t n) {
+      auto* q = (Src*) ctx;
+      if (q->at + n > q->v->size()) return false;
+      std::memcpy(bytes, q->v->data() + q->at, n), q->at += n;
+      return true;
+    };
+    Lfm3Seq* c = lfm3_seq_create(f, err);
+    CHECK(c && lfm3_seq_load_from(c, saved.size(), source, &src, err) && lfm3_seq_position(c) == (int32_t) P);
+    CHECK(lfm3_seq_reach(c) == 0 && lfm3_step(f, c, more, 4, 4, err));
+    CHECK(std::memcmp(lfm3_logits(f), first.data(), first.size() * 4) == 0);
+    saved[saved.size() / 2] ^= 1;
+    src.at = 0;
+    CHECK(!lfm3_seq_load_from(c, saved.size(), source, &src, err) && lfm3_seq_position(c) == 0);
+    std::printf("  saved (%zu KB) and loaded into another sequence: its next step the same bits; damaged, refused\n",
+                saved.size() >> 10);
+    for (Lfm3Seq* q : {a1, b1, a2, b2, c}) lfm3_seq_destroy(q);
+  }
+
+  // the sliding layers' rings wrapping: another forward, steps of 300 (its rings 256 + 300 + LFM3_MAX_BACK rows) -
+  // the prompt in its steps the one step's last rows, bit for bit
+  {
+    const uint32_t S = 300 < T ? 300 : T;
+    const Lfm3Options o2 = {S, T, last};
+    Lfm3Forward* f2 = lfm3_forward_create(w, &o2, err);
+    CHECK(f2);
+    Lfm3Seq* r = lfm3_seq_create(f2, err);
+    CHECK(r);
+    for (uint32_t at = 0; at < T; at += S) {
+      const uint32_t n = T - at < S ? T - at : S, keep = T - at - n == 0 ? (n < last ? n : last) : 1;
+      CHECK(lfm3_step(f2, r, ids.data() + at, n, keep, err));
+      if (at + n == T)
+        CHECK(std::memcmp(lfm3_logits(f2), got.data() + (size_t) (last - keep) * V, (size_t) keep * V * 4) == 0);
+    }
+    std::printf("  in steps of %u (the rings wrap past %u tokens): the last rows the one step's, bit for bit\n", S,
+                256 + S + LFM3_MAX_BACK);
+    lfm3_seq_destroy(r);
+    lfm3_forward_destroy(f2);
+  }
   lfm3_seq_destroy(s2);
   lfm3_seq_destroy(s);
   lfm3_forward_destroy(f);
