@@ -23,6 +23,10 @@ bool mv_fp4(const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_
 /* NVFP4 matrices each over its own 1 .. 4 tokens (mv_group_tok's table: matrix m at w[m] on cnt[m] rows of x from
    xrow[m], into y's rows from xrow[m]; cnt 0 skipped) - a short row's blocks over 8, 16 or 32 lanes: its own sums, a
    token's the same at every count (a step's split). no tensor scale (ggml's blocks alone). xs a multiple of 4 */
+/* one NVFP4 matrix over n tokens (any n: tok_kernel's entries of 4 tokens, the last its rest) - rows of x xs floats
+   apart, y's ys apart: each token's sums mv_fp4_tok's at count 1, whatever n (a decode's dense matrices) */
+bool mv_fp4_rows(const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t xs, uint32_t n, float *y,
+                 uint32_t ys, void *stream);
 bool mv_fp4_tok(const void *const *w, const int32_t *cnt, const int32_t *xrow, uint32_t n, uint32_t rows,
                 uint32_t cols, const float *x, uint32_t xs, float *y, uint32_t ys, void *stream);
 

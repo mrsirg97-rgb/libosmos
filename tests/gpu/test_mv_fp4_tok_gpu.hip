@@ -113,6 +113,52 @@ static void run(uint32_t rows, uint32_t cols, uint32_t n_mats, std::mt19937& rng
     CHECK(hipFree(p) == hipSuccess);
 }
 
+// mv_fp4_rows: one matrix over n tokens - every n's tokens the bits each takes alone, and mv_fp4_tok's at count 1
+static void dense(uint32_t rows, uint32_t cols, std::mt19937& rng) {
+  const uint64_t bytes = (uint64_t) rows * cols / kBlock * kBlockBytes;
+  std::vector<uint8_t> w(bytes);
+  for (auto& b : w) b = (uint8_t) rng();
+  for (uint64_t at = 0; at < w.size(); at += kBlockBytes)
+    for (int s = 0; s < 4; s++) w[at + s] = (uint8_t) (8 + rng() % 56);
+  constexpr uint32_t kN = 13, kXs = 4;  // x's rows cols + kXs apart (a strided slice), y's rows + 3
+  const uint32_t xs = cols + kXs, ys = rows + 3;
+  std::normal_distribution<float> nd(0, 1);
+  std::vector<float> x((size_t) kN * xs);
+  for (auto& v : x) v = nd(rng);
+  uint8_t* dw = nullptr;
+  float *dx = nullptr, *dy = nullptr, *dy1 = nullptr;
+  CHECK(hipMalloc(&dw, bytes) == hipSuccess && hipMemcpy(dw, w.data(), bytes, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMalloc(&dx, x.size() * 4) == hipSuccess && hipMemcpy(dx, x.data(), x.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMalloc(&dy, (size_t) kN * ys * 4) == hipSuccess && hipMalloc(&dy1, (size_t) kN * ys * 4) == hipSuccess);
+  CHECK(hipMemset(dy, 0, (size_t) kN * ys * 4) == hipSuccess && hipMemset(dy1, 0, (size_t) kN * ys * 4) == hipSuccess);
+  CHECK(mv_fp4_rows(dw, rows, cols, dx, xs, kN, dy, ys, nullptr));
+  for (uint32_t t = 0; t < kN; t++) CHECK(mv_fp4_rows(dw, rows, cols, dx + (size_t) t * xs, xs, 1, dy1 + (size_t) t * ys, ys, nullptr));
+  std::vector<float> y((size_t) kN * ys), y1(y.size()), y2(y.size());
+  CHECK(hipDeviceSynchronize() == hipSuccess);
+  CHECK(hipMemcpy(y.data(), dy, y.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(y1.data(), dy1, y1.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(std::memcmp(y.data(), y1.data(), y.size() * 4) == 0);
+  // mv_fp4_tok's: each token its own count-1 entry
+  const void** dp = nullptr;
+  int32_t *dc = nullptr, *dr = nullptr;
+  std::vector<const void*> p(kN, dw);
+  std::vector<int32_t> c(kN, 1), r(kN);
+  for (uint32_t t = 0; t < kN; t++) r[t] = (int32_t) t;
+  CHECK(hipMalloc(&dp, kN * sizeof(void*)) == hipSuccess && hipMalloc(&dc, kN * 4) == hipSuccess && hipMalloc(&dr, kN * 4) == hipSuccess);
+  CHECK(hipMemcpy(dp, p.data(), kN * sizeof(void*), hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dc, c.data(), kN * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dr, r.data(), kN * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemset(dy1, 0, (size_t) kN * ys * 4) == hipSuccess);
+  CHECK(mv_fp4_tok(dp, dc, dr, kN, rows, cols, dx, xs, dy1, ys, nullptr));
+  CHECK(hipDeviceSynchronize() == hipSuccess);
+  CHECK(hipMemcpy(y2.data(), dy1, y2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(std::memcmp(y.data(), y2.data(), y.size() * 4) == 0);
+  CHECK(!mv_fp4_rows(dw, rows, cols, dx, xs, 0, dy, ys, nullptr) && !mv_fp4_rows(dw, rows, cols + 1, dx, xs, 1, dy, ys, nullptr));
+  std::printf("  dense %u x %u over %u tokens (x and y strided): each token alone and mv_fp4_tok's, bit for bit\n", rows,
+              cols, kN);
+  for (void* q : {(void*) dw, (void*) dx, (void*) dy, (void*) dy1, (void*) dp, (void*) dc, (void*) dr}) CHECK(hipFree(q) == hipSuccess);
+}
+
 int main() {
   int devs = 0;
   if (hipGetDeviceCount(&devs) != hipSuccess || !devs) return std::printf("[test_mv_fp4_tok_gpu] skipped: no GPU\n"), 77;
@@ -122,6 +168,9 @@ int main() {
   run(1536, 1536, 16, rng);
   run(256, 3072, 8, rng);
   run(128, 6144, 4, rng);
+  dense(3072, 16384, rng);  // Hy4-flash's attention output (64 heads x 256 to the embedding)
+  dense(16384, 3072, rng);  // its gate
+  dense(1024, 3072, rng);   // its q_a
   std::printf("[test_mv_fp4_tok_gpu] ok\n");
   return 0;
 }

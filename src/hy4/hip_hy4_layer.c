@@ -13,7 +13,8 @@
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
 
-/* y = W x: a decode's the matvec (mv_strided: a token's sums its own), a read's the matrix cores where mm takes the
+/* y = W x: a decode's the matvec (mv_strided: a token's sums its own; NVFP4's mv_fp4_rows, the experts' kernel - the
+   generic NVFP4 matvec read Hy4's dense shapes at ~135 GB/s, 2026-11-18), a read's the matrix cores where mm takes the
    type and shape (mm_tokens: MM_MAX_TOKENS a launch through f->x16, a token's sums its own), else the matvec */
 bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
              bool read)
@@ -21,6 +22,8 @@ bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
   if (read && mm_known(t->type) && mm_fits(t->type, rows, cols))
     return mm_tokens(t->type, hy4_dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow,
                      false, f->st);
+  if (t->type == QTYPE_NVFP4)
+    return mv_fp4_rows(hy4_dev(f, t), rows, cols, x, cols, n, y, rows, f->st);
   return mv_strided(t->type, hy4_dev(f, t), rows, cols, x, cols, n, y, rows, f->st);
 }
 
