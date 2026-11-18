@@ -15,6 +15,7 @@
 
 #define LFM3_ERR 256
 #define LFM3_MAX_LAYERS 64
+#define LFM3_HEAD_DIM 128 /* the attention kernels' head (q35's widened to it: DESIGN.md) */
 
 typedef enum Lfm3Kind
 {
@@ -37,7 +38,8 @@ typedef struct Lfm3Geometry
 
 /* from the file's metadata, every field checked: the layer kinds by the per-layer head_count_kv (0: a convolution)
    and the window pattern; refused - an unknown architecture, a kind the file does not say, a field past the kernels'
-   shapes (q4x_ops.h's Q4X_CONV_TAPS_MAX, Q4X_GQA_MAX) */
+   shapes (q4x_ops.h's Q4X_CONV_TAPS_MAX, Q4X_GQA_MAX; LFM3_HEAD_DIM). rope_pairs is lfm3_weights_create's (the
+   rope_freqs tensor's: rotated pairs a factor 1, the rest at least 1e30 - any other factor refused) */
 bool lfm3_geometry(const Gguf *model, Lfm3Geometry *g, char err[LFM3_ERR]);
 
 /* a layer's tensors (the ones its kind has; the rest NULL): every matrix the file's one matrix type (vibes1.7b's
