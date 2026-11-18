@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 extern "C" {
@@ -28,7 +29,7 @@ static double now() {
 
 int main(int argc, char** argv) {
   char err[LFM3_ERR] = "", gerr[GGUF_ERR] = "";
-  if (argc < 2) return std::fprintf(stderr, "usage: lfm3_run <GGUF> [prompt=512] [step=512] [decode=64]\n"), 2;
+  if (argc < 2) return std::fprintf(stderr, "usage: lfm3_run <GGUF> [prompt=512] [step=512] [decode=64] [file: the BF16 head]\n"), 2;
   const uint32_t P = argc > 2 ? (uint32_t) atoi(argv[2]) : 512, S = argc > 3 ? (uint32_t) atoi(argv[3]) : 512;
   const uint32_t Dn = argc > 4 ? (uint32_t) atoi(argv[4]) : 64;
   const double t0 = now();
@@ -36,7 +37,8 @@ int main(int argc, char** argv) {
   if (!g) return std::fprintf(stderr, "%s\n", gerr), 1;
   Lfm3Weights* w = lfm3_weights_create(g, err);
   CHECK(w);
-  const Lfm3Options o = {S, P + Dn + 1, 1};
+  const bool file_head = argc > 5 && !strcmp(argv[5], "file");  // the head as the file's BF16, not its Q8_0 copy
+  const Lfm3Options o = {S, P + Dn + 1, 1, file_head ? LFM3_HEAD_FILE : LFM3_HEAD_Q8_0};
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   CHECK(f);
   Lfm3Seq* s = lfm3_seq_create(f, err);

@@ -8,6 +8,8 @@
 
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
+#include "osmos/gpu/quant.h"
+#include "osmos/model/qtype.h"
 #include "osmos/gpu/upload.h"
 #include "lfm3_impl.h"
 
@@ -39,6 +41,32 @@ static bool upload(Lfm3Forward *f, char *err)
   return ok;
 }
 
+/* the tied head's Q8_0 copy (q35's head_q8: ggml's quantizer through q4x_kv_put, a chunk of rows at a time) - the
+   embedding's table kept the file's: the head alone reads the copy */
+static bool head_q8(Lfm3Forward *f, char *err)
+{
+  const GgufTensor *t = f->w->embd;
+  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd, chunk = 4096;
+  const uint64_t rb = q4x_kv_row_bytes(D);
+  void *spare = NULL;
+  float *tmp = NULL;
+  bool ok = lfm3_alloc(&f->head_q8, (uint64_t)V * rb) && lfm3_alloc(&spare, (uint64_t)chunk * rb) &&
+            lfm3_alloc(&tmp, (uint64_t)chunk * D * F);
+  for (uint32_t r = 0; ok && r < V; r += chunk)
+  {
+    const uint32_t m = V - r < chunk ? V - r : chunk;
+    ok = quant_dequant(t->type, (const uint8_t *)lfm3_dev(f, t) + (uint64_t)r * (t->bytes / V), (uint64_t)m * D, tmp,
+                       NULL) &&
+         q4x_kv_put(tmp, tmp, m, D, (uint8_t *)f->head_q8 + (uint64_t)r * rb, spare, NULL);
+  }
+  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  hipFree(spare), hipFree(tmp);
+  if (!ok)
+    return lfm3_fail(err, "the head's Q8_0 not made (GPU memory, or a launch)");
+  f->head = f->head_q8, f->head_type = QTYPE_Q8_0;
+  return true;
+}
+
 void lfm3_forward_destroy(Lfm3Forward *f)
 {
   if (!f)
@@ -53,6 +81,7 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     hipFree(b[i]);
   hipHostFree(f->pin_tok), hipHostFree(f->pin_logits);
+  hipFree(f->head_q8);
   free(f->slot);
   free(f);
 }
@@ -79,6 +108,10 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   ok = ok || lfm3_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || lfm3_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
+  if (ok)
+    f->head = lfm3_dev(f, w->embd), f->head_type = w->embd->type;
+  ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || lfm3_fail(err, "a head this build does not make")) &&
+       (o->head == LFM3_HEAD_FILE || head_q8(f, err));
   const struct
   {
     void *p;

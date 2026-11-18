@@ -75,9 +75,18 @@ typedef struct Lfm3Seq Lfm3Seq;
 /* the weights in the GPU's memory, a step's buffers for max_tokens tokens, contexts to max_ctx (past the native
    length the full layers' rotation is YaRN's, factor max_ctx / native, the sliding layers' never), logit_rows the
    rows a step keeps the logits of at most (0: max_tokens) */
+/* the tied head as the step reads it: a Q8_0 copy made at load (ggml's quantizer: a row's blocks of 32, d = amax /
+   127) - half the BF16 table's bytes a token reads, the embedding still the file's - or the file's BF16 itself */
+typedef enum Lfm3Head
+{
+  LFM3_HEAD_Q8_0,
+  LFM3_HEAD_FILE,
+} Lfm3Head;
+
 typedef struct Lfm3Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;
+  Lfm3Head head;
 } Lfm3Options;
 /* the model's open files' paths are its Gguf's (the identity hashes them) */
 Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[LFM3_ERR]);

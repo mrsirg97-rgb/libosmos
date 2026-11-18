@@ -153,7 +153,7 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
                           hipMemcpyDeviceToDevice, f->st) == hipSuccess;
   if (ok && kept)
     ok = ops_rms(f->hk, D, D, lfm3_fv(f, f->w->out_norm), g->rms_eps, kept, f->xf, D, f->st) &&
-         mat(f, f->w->embd, V, D, f->xf, kept, f->logits);
+         mv_strided(f->head_type, f->head, V, D, f->xf, D, kept, f->logits, V, f->st);
   ok = ok && hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
   f->rows = ok ? n : 0;
   if (!ok)

@@ -19,6 +19,10 @@ extern "C" {
 // off by one, a window's edge) far past them
 constexpr double kTolLayer = 5e-3, kKlMean = 5e-5, kKlMax = 5e-4;
 constexpr uint32_t kTop1Miss = 1;
+// the head's Q8_0 copy against the file's BF16 head on the same streams, measured (2026-11-18): KL mean 3.9e-5 / 3.6e-5,
+// max 1.0e-4 / 1.05e-4, top-1 64 / 64 (64 / 2,048 ids) - the Q8_0 cache's own order; the bounds with room
+constexpr double kHeadKlMean = 2e-4, kHeadKlMax = 1e-3;
+constexpr uint32_t kHeadTop1Miss = 1;
 
 struct Taps {
   std::vector<int32_t> rows;
@@ -76,7 +80,7 @@ int main() {
   const uint32_t T = (uint32_t) fid.size(), V = (uint32_t) w->geo.n_vocab, last = 64 < T ? 64 : T;
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
-  const Lfm3Options o = {T, T, last};
+  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE};  // the reference's head: the file's BF16
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -198,7 +202,7 @@ int main() {
   // the prompt in its steps the one step's last rows, bit for bit
   {
     const uint32_t S = 300 < T ? 300 : T;
-    const Lfm3Options o2 = {S, T, last};
+    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE};
     Lfm3Forward* f2 = lfm3_forward_create(w, &o2, err);
     CHECK(f2);
     Lfm3Seq* r = lfm3_seq_create(f2, err);
@@ -213,6 +217,27 @@ int main() {
                 256 + S + LFM3_MAX_BACK);
     lfm3_seq_destroy(r);
     lfm3_forward_destroy(f2);
+  }
+  // the head's Q8_0 copy (the engine's default): the same ids, its logits against the file's head's - the rounding's
+  // own cost, measured (2026-11-18): see kHeadKl
+  {
+    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0};
+    Lfm3Forward* fq = lfm3_forward_create(w, &oq, err);
+    CHECK(fq);
+    Lfm3Seq* q = lfm3_seq_create(fq, err);
+    CHECK(q && lfm3_step(fq, q, ids.data(), T, last, err));
+    double ks = 0, km = 0;
+    uint32_t agree = 0;
+    for (uint32_t r = 0; r < last; r++) {
+      const double k = kl(got.data() + (size_t) r * V, lfm3_logits(fq) + (size_t) r * V, V);
+      ks += k, km = std::fmax(km, k);
+      agree += argmax(got.data() + (size_t) r * V, V) == argmax(lfm3_logits(fq) + (size_t) r * V, V);
+    }
+    std::printf("  the head's Q8_0 copy against the file's BF16: KL mean %.3g, max %.3g; top-1 the same %u of %u\n",
+                ks / last, km, agree, last);
+    CHECK(ks / last <= kHeadKlMean && km <= kHeadKlMax && agree + kHeadTop1Miss >= last);
+    lfm3_seq_destroy(q);
+    lfm3_forward_destroy(fq);
   }
   lfm3_seq_destroy(s2);
   lfm3_seq_destroy(s);

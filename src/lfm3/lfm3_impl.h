@@ -17,6 +17,9 @@ struct Lfm3Forward
   uint32_t max_tokens, max_ctx, logit_rows;
   uint32_t ring; /* a sliding layer's cache rows: window + max_tokens + LFM3_MAX_BACK (DESIGN.md, step 2) */
   Q4xRope rope_full, rope_swa;
+  const void *head;   /* the tied head as the step reads it: head_q8 (LFM3_HEAD_Q8_0) or the embedding's table */
+  uint32_t head_type;
+  void *head_q8;      /* its Q8_0 copy (owned), NULL for the file's */
   void *st;
   /* a step's buffers: max_tokens rows each */
   int32_t *tok, *pin_tok;
