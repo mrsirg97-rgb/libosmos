@@ -104,7 +104,14 @@ int32_t lfm3_seq_position(const Lfm3Seq *s);
    from then on (lfm3_seq_fail's), until a load */
 bool lfm3_step_runs(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                     char err[LFM3_ERR]);
-/* one sequence, its last `rows` rows' logits on the host (lfm3_logits: rows x n_vocab) - the checks' form */
+/* the same step in a prompt's math (the engine's read): every matrix on the matrix cores (mm_tokens: f16 inputs), its
+   bits a prompt's however it is split - not a decode's (two maths, as q35's and hy4's: DESIGN.md). false past it as
+   lfm3_step_runs, and for an activation past f16's range (the step refused) */
+bool lfm3_step_read(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
+                    char err[LFM3_ERR]);
+/* one sequence, its last `rows` rows' logits on the host (lfm3_logits: rows x n_vocab) - the checks' form: a step past
+   LFM3_MV_TOKENS tokens a prompt's math, the rest a decode's */
+#define LFM3_MV_TOKENS 4
 bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[LFM3_ERR]);
 const float *lfm3_logits(const Lfm3Forward *f);
 /* row's logits (device, n_vocab floats) of the last step, NULL for a row not kept */

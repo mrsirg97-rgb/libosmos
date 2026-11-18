@@ -121,16 +121,42 @@ int main() {
   }
   std::printf("  the last %u rows' logits: KL mean %.3g, max %.3g nats; top-1 the reference's %u of %u (layers' worst "
               "%.2g)\n", last, kl_sum / last, kl_max, same, last, worst);
+  std::printf("  (the one step: a read - the matrix cores' math)\n");
   CHECK(worst <= kTolLayer && kl_sum / last <= kKlMean && kl_max <= kKlMax && same + kTop1Miss >= last);
 
-  // the bits a token's own: the ids in uneven steps (a step of 1, one of an odd count, the rest) - the last rows' the same
+  // the bits a token's own: the ids in three reads (each past LFM3_MV_TOKENS: lfm3_step's prompt math) - the last
+  // step's rows the one step's, bit for bit
   Lfm3Seq* s2 = lfm3_seq_create(f, err);
   CHECK(s2);
-  const uint32_t a = 1, b = (T - last) / 3 * 2 + 1, c = T - a - b, tail = c < last ? c : last;
+  const uint32_t a = T / 3, b = T / 3, c = T - a - b, tail = c < last ? c : last;
+  CHECK(a > LFM3_MV_TOKENS && b > LFM3_MV_TOKENS && c > LFM3_MV_TOKENS);
   CHECK(lfm3_step(f, s2, ids.data(), a, 1, err) && lfm3_step(f, s2, ids.data() + a, b, 1, err));
   CHECK(lfm3_step(f, s2, ids.data() + a + b, c, tail, err));
   CHECK(std::memcmp(lfm3_logits(f), got.data() + (size_t) (last - tail) * V, (size_t) tail * V * sizeof(float)) == 0);
-  std::printf("  in steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c, tail);
+  std::printf("  in read steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c, tail);
+
+  // a decode's math over the same ids, one step (lfm3_step_runs, its prompt's last rows kept): within the same bounds
+  {
+    Lfm3Seq* d = lfm3_seq_create(f, err);
+    CHECK(d && lfm3_seq_prompt(d, T - last + 1));
+    Lfm3Seq* const one[1] = {d};
+    const uint32_t len1[1] = {T};
+    CHECK(lfm3_step_runs(f, one, len1, 1, ids.data(), err));
+    std::vector<float> row(V);
+    double ks = 0, km = 0;
+    uint32_t agree = 0;
+    for (uint32_t r = 0; r < last; r++) {
+      const float* dv = lfm3_row_logits(f, T - last + r);
+      CHECK(dv && hipMemcpy(row.data(), dv, V * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      const float* p = ref.data() + (ref_rows - last + r) * (size_t) V;
+      const double k = kl(p, row.data(), V);
+      ks += k, km = std::fmax(km, k), agree += argmax(p, V) == argmax(row.data(), V);
+    }
+    std::printf("  a decode's math (the matvecs): KL mean %.3g, max %.3g; top-1 the reference's %u of %u\n", ks / last,
+                km, agree, last);
+    CHECK(ks / last <= kKlMean && km <= kKlMax && agree + kTop1Miss >= last);
+    lfm3_seq_destroy(d);
+  }
 
   // two sequences in one step (each its prompt's last row kept), each the bits of its own step alone
   {
@@ -143,7 +169,7 @@ int main() {
     CHECK(lfm3_seq_prompt(a1, P) && lfm3_seq_prompt(b1, P));
     Lfm3Seq* const pair[2] = {a1, b1};
     const uint32_t lens[2] = {P, P};
-    CHECK(lfm3_step_runs(f, pair, lens, 2, both.data(), err));
+    CHECK(lfm3_step_read(f, pair, lens, 2, both.data(), err));  // a read: lfm3_step's math for P tokens
     std::vector<float> ra(V), rb(V);
     CHECK(lfm3_row_logits(f, P - 1) && lfm3_row_logits(f, 2 * P - 1) && !lfm3_row_logits(f, 0));
     CHECK(hipMemcpy(ra.data(), lfm3_row_logits(f, P - 1), V * 4, hipMemcpyDeviceToHost) == hipSuccess);

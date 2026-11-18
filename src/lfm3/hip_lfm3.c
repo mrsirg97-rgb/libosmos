@@ -12,27 +12,34 @@
 
 #include "osmos/gpu/attn_shape.h"
 #include "osmos/gpu/lfm3_ops.h"
+#include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "lfm3_impl.h"
 
-static bool mat(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y)
+/* y = W x: a decode's the matvec (mv_strided: a token's sums its own), a read's the matrix cores where mm takes the
+   type and shape (mm_tokens, f16 x: a token's sums its own), else the matvec */
+static bool mat(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
+                bool read)
 {
+  if (read && mm_known(t->type) && mm_fits(t->type, rows, cols))
+    return mm_tokens(t->type, lfm3_dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow,
+                     false, f->st);
   return mv_strided(t->type, lfm3_dev(f, t), rows, cols, x, cols, n, y, rows, f->st);
 }
 
-static bool conv(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n)
+static bool conv(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n, bool read)
 {
   const Lfm3Geometry *g = &f->w->geo;
   const Lfm3Layer *L = &f->w->layer[l];
   const uint32_t D = (uint32_t)g->n_embd;
-  bool ok = mat(f, L->in_proj, 3 * D, D, f->xn, n, f->bcx);
+  bool ok = mat(f, L->in_proj, 3 * D, D, f->xn, n, f->bcx, read);
   for (uint32_t r = 0; ok && r < runs; r++)
     ok = lfm3_shortconv(f->bcx + (uint64_t)run[r].off * 3 * D, run[r].len, D, (uint32_t)g->conv_taps,
                         lfm3_fv(f, L->conv), run[r].s->conv[l], LFM3_CONV_SLOTS, run[r].s->cur,
                         f->u + (uint64_t)run[r].off * D, f->st);
-  return ok && mat(f, L->out_proj, D, D, f->u, n, f->y);
+  return ok && mat(f, L->out_proj, D, D, f->u, n, f->y, read);
 }
 
 /* a run's K and V rows into its cache: a full layer's at their positions, a sliding layer's ring at pos % ring - a
@@ -50,7 +57,7 @@ static bool kv_put(Lfm3Forward *f, const Lfm3Run *r, const float *vf, int l, boo
   return ok;
 }
 
-static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n)
+static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n, bool read)
 {
   const Lfm3Geometry *g = &f->w->geo;
   const Lfm3Layer *L = &f->w->layer[l];
@@ -59,12 +66,12 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
   const bool sliding = g->kind[l] == LFM3_SLIDING;
   const AttnShape shape = {hd, sliding ? (uint32_t)g->window : 0, sliding ? f->ring : 0};
   /* q, k, v and the gate on xn: a token's one joint launch (their outputs in jo, one after another), else each */
-  const bool joint = n == 1 && f->j_attn[l];
+  const bool joint = n == 1 && !read && f->j_attn[l];
   float *qf = joint ? f->jo : f->qf, *kf = joint ? f->jo + q : f->kf, *vf = joint ? f->jo + q + kv : f->vf;
   float *gt = joint ? f->jo + q + 2 * kv : f->g;
   bool ok = joint ? mv_strided(L->q->type, f->j_attn[l], q + 2 * kv + H, D, f->xn, D, 1, f->jo, q + 2 * kv + H, f->st)
-                  : mat(f, L->q, q, D, f->xn, n, qf) && mat(f, L->k, kv, D, f->xn, n, kf) &&
-                        mat(f, L->v, kv, D, f->xn, n, vf) && mat(f, L->gate, H, D, f->xn, n, gt);
+                  : mat(f, L->q, q, D, f->xn, n, qf, read) && mat(f, L->k, kv, D, f->xn, n, kf, read) &&
+                        mat(f, L->v, kv, D, f->xn, n, vf, read) && mat(f, L->gate, H, D, f->xn, n, gt, read);
   for (uint32_t r = 0; ok && r < runs; r++)
   {
     const Lfm3Run *R = &run[r];
@@ -81,32 +88,32 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
                            f->st);
     }
   }
-  return ok && mat(f, L->out, D, q, f->att, n, f->y);
+  return ok && mat(f, L->out, D, q, f->att, n, f->y, read);
 }
 
 /* a layer: its operator and its SwiGLU, each on xn (the norm before it, already made) and each one launch after into
    the residual with the next norm (ops_rms_add_rms: the post-norm, the add, the next pre-norm - the FFN's, then the
    next layer's attention's; the last layer's none) */
-static bool layer(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n)
+static bool layer(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n, bool read)
 {
   const Lfm3Geometry *g = &f->w->geo;
   const Lfm3Layer *L = &f->w->layer[l];
   const uint32_t D = (uint32_t)g->n_embd, ff = (uint32_t)g->n_ff;
   const float *next = l + 1 < g->n_layers ? lfm3_fv(f, f->w->layer[l + 1].attn_norm) : NULL;
-  const bool joint = n == 1 && f->j_ffn[l];
+  const bool joint = n == 1 && !read && f->j_ffn[l];
   float *ga = joint ? f->jo : f->ga, *up = joint ? f->jo + ff : f->up;
-  return (g->kind[l] == LFM3_CONV ? conv(f, run, runs, l, n) : attention(f, run, runs, l, n)) &&
+  return (g->kind[l] == LFM3_CONV ? conv(f, run, runs, l, n, read) : attention(f, run, runs, l, n, read)) &&
          ops_rms_add_rms(f->h, f->y, lfm3_fv(f, L->post_attn_norm), lfm3_fv(f, L->ffn_norm), g->rms_eps, D, n, f->xn,
                          f->st) &&
          (joint ? mv_strided(L->ffn_gate->type, f->j_ffn[l], 2 * ff, D, f->xn, D, 1, f->jo, 2 * ff, f->st)
-                : mat(f, L->ffn_gate, ff, D, f->xn, n, ga) && mat(f, L->ffn_up, ff, D, f->xn, n, up)) &&
-         ops_swiglu(ga, up, ff, INFINITY, NULL, n, f->act, f->st) && mat(f, L->ffn_down, D, ff, f->act, n, f->y) &&
+                : mat(f, L->ffn_gate, ff, D, f->xn, n, ga, read) && mat(f, L->ffn_up, ff, D, f->xn, n, up, read)) &&
+         ops_swiglu(ga, up, ff, INFINITY, NULL, n, f->act, f->st) && mat(f, L->ffn_down, D, ff, f->act, n, f->y, read) &&
          ops_rms_add_rms(f->h, f->y, lfm3_fv(f, L->post_ffn_norm), next, g->rms_eps, D, n, f->xn, f->st);
 }
 
 /* the step (lfm3_step_runs); keep_from: rows below it not kept whatever the prompts say (lfm3_step's: its last rows) */
 static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                 uint32_t keep_from, char *err)
+                 bool read, uint32_t keep_from, char *err)
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > LFM3_MAX_RUNS)
     return lfm3_fail(err, "no forward, sequences or tokens, or past LFM3_MAX_RUNS runs");
@@ -146,7 +153,7 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
             ops_rms(f->h, D, D, lfm3_fv(f, f->w->layer[0].attn_norm), g->rms_eps, n, f->xn, D, f->st);
   for (int l = 0; ok && l < g->n_layers; l++)
   {
-    ok = layer(f, run, runs, l, n);
+    ok = layer(f, run, runs, l, n, read);
     if (ok && f->tap && (ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess))
       f->tap(f->tap_arg, l, "residual", f->h, n, D);
   }
@@ -158,13 +165,18 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   if (ok && kept)
     ok = ops_rms(f->hk, D, D, lfm3_fv(f, f->w->out_norm), g->rms_eps, kept, f->xf, D, f->st) &&
          mv_strided(f->head_type, f->head, V, D, f->xf, D, kept, f->logits, V, f->st);
-  ok = ok && hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
-  f->rows = ok ? n : 0;
-  if (!ok)
+  int32_t over = 0;
+  ok = ok && hipStreamSynchronize((hipStream_t)f->st) == hipSuccess &&
+       hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
+  f->rows = ok && !over ? n : 0;
+  if (!ok || over)
   {
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
-    return lfm3_fail(err, "a GPU call failed in the step (its sequences refused until a load)");
+    if (over)
+      hipMemset(f->overflow, 0, 4);
+    return lfm3_fail(err, over ? "an activation past f16's range in a read (the step refused)"
+                               : "a GPU call failed in the step (its sequences refused until a load)");
   }
   for (uint32_t r = 0; r < runs; r++)
   {
@@ -178,14 +190,20 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
 bool lfm3_step_runs(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                     char err[LFM3_ERR])
 {
-  return step(f, seqs, lens, runs, tokens, 0, err);
+  return step(f, seqs, lens, runs, tokens, false, 0, err);
+}
+
+bool lfm3_step_read(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
+                    char err[LFM3_ERR])
+{
+  return step(f, seqs, lens, runs, tokens, true, 0, err);
 }
 
 bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[LFM3_ERR])
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
     return lfm3_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
-  if (!step(f, &s, &n, 1, tokens, n - rows, err))
+  if (!step(f, &s, &n, 1, tokens, n > LFM3_MV_TOKENS, n - rows, err))
     return false;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||

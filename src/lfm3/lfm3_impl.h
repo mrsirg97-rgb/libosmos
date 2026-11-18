@@ -27,6 +27,8 @@ struct Lfm3Forward
   uint32_t n_joints;
   bool *in_joint;     /* a tensor's bytes inside a joint (not freed alone) */
   float *jo;          /* a joint's outputs (a token's) */
+  void *x16;          /* a read's matrices' f16 input (MM_MAX_TOKENS rows of the widest) */
+  int32_t *overflow;  /* an activation past f16's range in a read (mm_x16's): the step refused */
   void *st;
   /* a step's buffers: max_tokens rows each */
   int32_t *tok, *pin_tok;
