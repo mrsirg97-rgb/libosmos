@@ -36,6 +36,9 @@ NAMES = ["HYV4FlashRMSNorm", "HYV4FlashUnweightedRMSNorm", "HYV4FlashHyperConnec
          "HYV4FlashEngramEmbedding", "_fp8_round_trip", "HYV4FlashEngramLayer", "HYV4FlashDecoderLayer"]
 
 
+KEEP = ("staticmethod", "classmethod", "property")
+
+
 class Stub:
     """a name the reference's signatures use (annotations, bases' arguments): subscriptable, unionable"""
 
@@ -43,24 +46,35 @@ class Stub:
         return cls
 
 
-def reference(path):
-    """the classes and functions in NAMES from the reference's file, compiled alone, their decorators dropped"""
+def reference(path, names=NAMES, extra=None):
+    """the classes and functions named from the reference's file, compiled alone, their decorators dropped"""
     scope = {"torch": torch, "nn": nn, "F": F, "np": np, "maybe_autocast": lambda **k: contextlib.nullcontext(),
              "GradientCheckpointingLayer": nn.Module, "Cache": Stub, "Unpack": Stub, "TransformersKwargs": Stub,
-             "HYV4FlashConfig": Stub, "HYV4FlashTextConfig": Stub, "deprecate_kwarg": None}
+             "HYV4FlashConfig": Stub, "HYV4FlashTextConfig": Stub, "deprecate_kwarg": None, **(extra or {})}
     nodes = []
     for node in ast.parse(open(path).read()).body:
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in NAMES:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names:
             node.decorator_list = []
             for fn in getattr(node, "body", []):
-                if isinstance(fn, ast.FunctionDef):
-                    fn.decorator_list = []
+                if isinstance(fn, ast.FunctionDef):  # python's own kept: staticmethod, classmethod, property
+                    fn.decorator_list = [d for d in fn.decorator_list
+                                         if isinstance(d, ast.Name) and d.id in KEEP]
             nodes.append(node)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), path, "exec"), scope)
-    missing = [n for n in NAMES if n not in scope]
+    missing = [n for n in names if n not in scope]
     if missing:
         raise SystemExit(f"{missing} not in {path}")
     return scope
+
+
+def write(path, arrays):
+    """the fixture: b"HY4P", u32 version, u32 count, then each array's name, dims and F32 values"""
+    with open(path, "wb") as f:
+        f.write(b"HY4P" + struct.pack("<2I", VERSION, len(arrays)))
+        for name, v in arrays.items():
+            v = np.ascontiguousarray(v, dtype=np.float32)
+            f.write(struct.pack("<I", len(name)) + name.encode() + struct.pack("<I", v.ndim))
+            f.write(struct.pack(f"<{v.ndim}Q", *v.shape) + v.tobytes())
 
 
 class Fixed(nn.Module):
@@ -203,12 +217,7 @@ def main():
         "attn_in": layer.self_attn.seen[0].numpy(), "attn_post": post_attn[0].numpy(),
         "ffn_in": layer.mlp.seen[0].numpy(), "h_out": out[0].numpy(), "head": head.numpy(),
     }
-    with open(a.out, "wb") as f:
-        f.write(b"HY4P" + struct.pack("<2I", VERSION, len(arrays)))
-        for name, v in arrays.items():
-            v = np.ascontiguousarray(v, dtype=np.float32)
-            f.write(struct.pack("<I", len(name)) + name.encode() + struct.pack("<I", v.ndim))
-            f.write(struct.pack(f"<{v.ndim}Q", *v.shape) + v.tobytes())
+    write(a.out, arrays)
     print(f"{a.out}: {len(arrays)} arrays; {T} tokens, layer {LAYER}; h_out |max| {np.abs(arrays['h_out']).max():.4g}")
 
 

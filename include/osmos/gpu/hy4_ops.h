@@ -11,6 +11,8 @@
 
 #define HY4_HC_MAX 4                    /* the streams (hy4/weights.h's HY4_MAX_HC) */
 #define HY4_ENGRAM_EPS 1.1920929e-07f   /* Engram's RMSNorms' eps: the reference's eps unset, F32's machine epsilon */
+#define HY4_MLA_MAX_KEYS 4096           /* the keys a query reads at most (a window's 512; the indexer's 2,048) */
+#define HY4_MLA_MAX_LATENT 512          /* the latent's width at most (Hy4-flash's kv_lora) */
 
 bool hy4_hc_pre(const float *h, const float *fn, const float *scale, const float *base, uint32_t rows, uint32_t hc,
                 uint32_t dim, float eps, float hc_eps, float magnitude, const float *norm_w, uint32_t n_tok, float *x,
@@ -21,6 +23,15 @@ bool hy4_engram_rows(const float *rows, const float *norm_w, uint32_t cols, uint
                      float *emb, void *stream);
 bool hy4_engram_update(float *h, const float *kv, const float *kv_b, const float *gate, const float *hc_scale,
                        const float *pre_gamma, uint32_t hc, uint32_t dim, uint32_t n_tok, void *stream);
+bool hy4_mla_kv(const float *kva, const float *norm_w, uint32_t latent, uint32_t rope_dim, float eps,
+                const float *freqs, const int32_t *pos, uint32_t n_tok, float *cache, void *stream);
+bool hy4_mla_q(const float *q, const void *k_b, uint32_t heads, uint32_t nope, uint32_t latent, uint32_t rope_dim,
+               const float *freqs, const int32_t *pos, uint32_t n_tok, float *qa, void *stream);
+bool hy4_mla_attn(const float *qa, const float *cache, const float *sinks, uint32_t heads, uint32_t latent,
+                  uint32_t rope_dim, uint32_t window, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat,
+                  void *stream);
+bool hy4_mla_out(const float *o_lat, const void *v_b, const float *gate, uint32_t heads, uint32_t latent,
+                 uint32_t v_dim, uint32_t n_tok, float *out, void *stream);
 
 #endif
 
@@ -48,4 +59,28 @@ hy4_engram_update
   sqrt(max(|g|, 1e-6))), g = sum(rms(key_k) rms(h_k) gate_k) / sqrt(dim) (gate [hc][dim]: the file's key and query
   norms' weights multiplied); v = pre_gamma * rms(value) (no weight); h_k = h_k + (gate_k v + hc_scale_k * v)
   (hc_scale [hc][dim]). every norm HY4_ENGRAM_EPS. h in place.
+
+gated MLA, absorbed (HYV4FlashAttention, its kv_b_proj split as the file keeps it: k_b [heads][latent][nope] and v_b
+[heads][v_dim][latent], Q8_0 - read as stored). a cache row is latent + rope_dim F32 values a position (the step's
+F32 form: the sequence's cache comes with step 2); rope the reference's: rope_dim / 2 adjacent pairs, pair i by
+pos * freqs[i] (freqs: the layer kind's base^(-2i / rope_dim)), on the rope part's values in place.
+
+hy4_mla_kv
+  the latent and its key from kv_a's output (kva [n_tok][latent + rope_dim]): the latent RMSNorm'd (norm_w, eps), the
+  key's rope part roped at pos[t]; the row into cache row pos[t].
+
+hy4_mla_q
+  q_b's output (q [n_tok][heads][nope + rope_dim]) to the queries the cache is read with: each head's nope part
+  through its k_b (qa_h[j] = sum_i k_b[h][j][i] q_h[i], j < latent) and its rope part roped at pos[t] - qa
+  [n_tok][heads][latent + rope_dim].
+
+hy4_mla_attn
+  each head's attention over the cache rows at positions max(0, pos[t] - window + 1) .. pos[t] (window 0: from 0):
+  scores qa_h . row * scale; the head's sink a logit with no value (softmax over the scores and the sink); o_lat
+  [n_tok][heads][latent] = sum over the keys of p row[:latent], in the keys' order. at most HY4_MLA_MAX_KEYS keys,
+  latent at most HY4_MLA_MAX_LATENT.
+
+hy4_mla_out
+  each head's latent through its v_b (v_dim values), times sigmoid of the gate's (gate_proj's output, [n_tok][heads *
+  v_dim]) - out [n_tok][heads * v_dim], o_proj's input.
 */

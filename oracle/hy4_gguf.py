@@ -68,6 +68,13 @@ class Gguf:
         raw = self.f.read(rows * self._row_bytes(ty, dims[0]))
         return self._decode(ty, raw, count).reshape(list(reversed(dims)))
 
+    def raw(self, name):
+        """the tensor's bytes as stored (its blocks), a uint8 array"""
+        dims, ty, off = self.tensors[name]
+        rows = int(np.prod(dims)) // dims[0]
+        self.f.seek(self.base + off)
+        return np.frombuffer(self.f.read(rows * self._row_bytes(ty, dims[0])), dtype=np.uint8).copy()
+
     def rows(self, name, ids):
         """rows ids of a 2-D tensor ([len(ids)][ne0]), each read alone (a table too large to read whole)"""
         dims, ty, off = self.tensors[name]

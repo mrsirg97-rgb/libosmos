@@ -165,3 +165,20 @@ extern "C" bool hy4_engram_update(float* h, const float* kv, const float* kv_b, 
                                                                      dim);
   return ok();
 }
+
+extern "C" bool hy4_mla_kv(const float*, const float*, uint32_t, uint32_t, float, const float*, const int32_t*,
+                           uint32_t, float*, void*) {
+  return false;
+}
+extern "C" bool hy4_mla_q(const float*, const void*, uint32_t, uint32_t, uint32_t, uint32_t, const float*,
+                          const int32_t*, uint32_t, float*, void*) {
+  return false;
+}
+extern "C" bool hy4_mla_attn(const float*, const float*, const float*, uint32_t, uint32_t, uint32_t, uint32_t, float,
+                             const int32_t*, uint32_t, float*, void*) {
+  return false;
+}
+extern "C" bool hy4_mla_out(const float*, const void*, const float*, uint32_t, uint32_t, uint32_t, uint32_t, float*,
+                            void*) {
+  return false;
+}
