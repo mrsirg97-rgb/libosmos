@@ -40,18 +40,15 @@ typedef struct Lfm3Geometry
    shapes (q4x_ops.h's Q4X_CONV_TAPS_MAX, Q4X_GQA_MAX) */
 bool lfm3_geometry(const Gguf *model, Lfm3Geometry *g, char err[LFM3_ERR]);
 
-/* a layer's tensors (the ones its kind has; the rest NULL) and each matrix's own scale (NVFP4's: its .scale beside it,
-   1 for any other type) */
+/* a layer's tensors (the ones its kind has; the rest NULL): every matrix the file's one matrix type (vibes1.7b's
+   files: Q4_0, or BF16) */
 typedef struct Lfm3Layer
 {
   const GgufTensor *attn_norm, *post_attn_norm, *ffn_norm, *post_ffn_norm, *ffn_gate, *ffn_up, *ffn_down;
-  float s_ffn_gate, s_ffn_up, s_ffn_down;
   /* the short convolution */
   const GgufTensor *in_proj, *conv, *out_proj;
-  float s_in_proj, s_out_proj;
   /* attention, full or sliding */
   const GgufTensor *q, *k, *v, *q_norm, *k_norm, *gate, *out;
-  float s_q, s_k, s_v, s_gate, s_out;
 } Lfm3Layer;
 
 typedef struct Lfm3Weights
@@ -63,7 +60,8 @@ typedef struct Lfm3Weights
 } Lfm3Weights;
 
 /* every tensor the forward reads, found and its shape and type checked against the geometry; NULL and err otherwise
-   (an NVFP4 matrix without its one F32 .scale, a tensor no role takes, a role's tensor missing) */
+   (a matrix of another type than the file's others, a type the matvec does not take, a tensor no role takes, a
+   role's tensor missing) */
 Lfm3Weights *lfm3_weights_create(const Gguf *model, char err[LFM3_ERR]);
 void lfm3_weights_destroy(Lfm3Weights *w);
 

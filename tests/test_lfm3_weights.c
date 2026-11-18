@@ -1,9 +1,8 @@
-/* LFM3's weights (osmos/lfm3/forward.h) on LFM3-1.7B's BF16 and NVFP4 files: the geometry its metadata says, each
-   layer's kind its tensors, each NVFP4 matrix's scale its .scale's, then the file edited in memory - another
-   architecture, a role's tensor missing, of another shape or type, a convolution past the kernel's taps, an NVFP4
-   matrix without its .scale, a layer the metadata calls a convolution with attention's tensors - each refused, its
-   cause named. OSMOS_TEST_LFM3 / OSMOS_TEST_LFM3_NVFP4 (the BF16 and NVFP4 files; vibes-flash's own pipeline writes
-   both: incarnate's convert and student export); skipped without */
+/* LFM3's weights (osmos/lfm3/forward.h) on vibes1.7b's Q4_0 and BF16 files: the geometry its metadata says, each
+   layer's kind its tensors, every matrix the file's one type; then the Q4_0 file edited in memory - another
+   architecture, a role's tensor missing, of another shape or type, one matrix of another type than the rest, a
+   convolution past the kernel's taps, a layer the metadata calls a convolution with attention's tensors - each
+   refused, its cause named. OSMOS_TEST_LFM3 / OSMOS_TEST_LFM3_BF16 (default ~/Models/vibes1.7b's); skipped without */
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -13,11 +12,12 @@
 #include "osmos/lfm3/forward.h"
 #include "osmos/model/gguf.h"
 
-#define BF16_FILE "/mnt/data/models/lfm3-orig-bf16.gguf"
-#define NVFP4_FILE "/mnt/data/models/lfm3-orig-nvfp4-rtn.gguf"
+#define Q4_0_FILE "Models/vibes1.7b/vibes1.7b-q40.gguf"
+#define BF16_FILE "Models/vibes1.7b/vibes1.7b-bf16.gguf"
 #define T_F32 0
+#define T_Q4_0 2
+#define T_Q8_0 8
 #define T_BF16 30
-#define T_NVFP4 40
 
 static Gguf *model;
 
@@ -49,7 +49,9 @@ static void refused(const char *what, const char *needle)
 
 static Gguf *open_file(const char *env, const char *fallback)
 {
-  const char *path = getenv(env) ? getenv(env) : fallback;
+  char home[512];
+  snprintf(home, sizeof home, "%s/%s", getenv("HOME") ? getenv("HOME") : "", fallback);
+  const char *path = getenv(env) ? getenv(env) : home;
   char err[GGUF_ERR] = "";
   Gguf *g = gguf_create(path, err);
   if (!g)
@@ -78,8 +80,8 @@ static void test_geometry(const Lfm3Weights *w)
          "window 256, 32 of 64 pairs rotated\n");
 }
 
-/* each layer's tensors its kind's, the other kind's NULL; the head the embedding (tied); scales 1 but NVFP4's */
-static void test_roles(const Lfm3Weights *w, bool nvfp4)
+/* each layer's tensors its kind's, the other kind's NULL; every matrix `type`; the head the embedding (tied, BF16) */
+static void test_roles(const Lfm3Weights *w, uint32_t type)
 {
   const Lfm3Geometry *g = &w->geo;
   assert(w->embd && w->out_norm && w->rope_freqs && w->embd->type == T_BF16);
@@ -92,17 +94,13 @@ static void test_roles(const Lfm3Weights *w, bool nvfp4)
     assert(conv == !!L->in_proj && conv == !!L->conv && conv == !!L->out_proj);
     assert(!conv == !!L->q && !conv == !!L->k && !conv == !!L->v && !conv == !!L->q_norm && !conv == !!L->k_norm &&
            !conv == !!L->gate && !conv == !!L->out);
-    const float s[] = {L->s_ffn_gate, L->s_ffn_up, L->s_ffn_down, conv ? L->s_in_proj : L->s_q,
-                       conv ? L->s_out_proj : L->s_out};
-    for (size_t i = 0; i < sizeof s / sizeof *s; i++)
-      assert(nvfp4 ? s[i] > 0.0f && s[i] != 1.0f : s[i] == 1.0f);
+    const GgufTensor *m[] = {L->ffn_gate, L->ffn_up, L->ffn_down, conv ? L->in_proj : L->q,
+                             conv ? L->out_proj : L->out, conv ? L->out_proj : L->k, conv ? L->out_proj : L->gate};
+    for (size_t i = 0; i < sizeof m / sizeof *m; i++)
+      assert(m[i]->type == type);
   }
-  if (nvfp4)
-  { /* the scale beside a matrix read as stored: blk.0.ffn_up's */
-    assert(w->layer[0].ffn_up->type == T_NVFP4);
-    printf("  NVFP4: every matrix with its .scale (blk.0.ffn_up %.6g)\n", (double)w->layer[0].s_ffn_up);
-  }
-  printf("  roles: each layer its kind's tensors, the other's none; the head the embedding\n");
+  printf("  roles: each layer its kind's tensors, the other's none; every matrix type %u; the head the embedding\n",
+         type);
 }
 
 static void test_refusals(void)
@@ -127,6 +125,11 @@ static void test_refusals(void)
   t->type = T_BF16;
   refused("a norm not F32 (blk.0.ffn_norm)", "blk.0.ffn_norm.weight");
   t->type = T_F32;
+
+  t = tensor("blk.6.ffn_down.weight");
+  t->type = T_Q8_0;
+  refused("one matrix of another type than the rest (blk.6.ffn_down)", "blk.6.ffn_down.weight");
+  t->type = T_Q4_0;
 
   GgufKv *taps = kv("lfm3.shortconv.l_cache");
   const uint64_t taps0 = taps->v.u;
@@ -154,18 +157,10 @@ static void test_refusals(void)
   lfm3_weights_destroy(w);
 }
 
-static void test_nvfp4_scale_missing(void)
-{
-  GgufTensor *t = tensor("blk.0.ffn_up.scale");
-  t->name[0] = 'X';
-  refused("an NVFP4 matrix without its .scale (blk.0.ffn_up)", ".scale");
-  t->name[0] = 'b';
-}
-
 int main(void)
 {
   printf("[test_lfm3_weights] start\n");
-  model = open_file("OSMOS_TEST_LFM3", BF16_FILE);
+  model = open_file("OSMOS_TEST_LFM3", Q4_0_FILE);
   if (!model)
     return 77;
   char err[LFM3_ERR] = "";
@@ -176,24 +171,23 @@ int main(void)
     return 1;
   }
   test_geometry(w);
-  test_roles(w, false);
+  test_roles(w, T_Q4_0);
   lfm3_weights_destroy(w);
   test_refusals();
   gguf_destroy(model);
 
-  model = open_file("OSMOS_TEST_LFM3_NVFP4", NVFP4_FILE);
+  model = open_file("OSMOS_TEST_LFM3_BF16", BF16_FILE);
   if (model)
   {
     w = lfm3_weights_create(model, err);
     if (!w)
     {
-      printf("  NVFP4 refused: %s\n", err);
+      printf("  BF16 refused: %s\n", err);
       return 1;
     }
     test_geometry(w);
-    test_roles(w, true);
+    test_roles(w, T_BF16);
     lfm3_weights_destroy(w);
-    test_nvfp4_scale_missing();
     gguf_destroy(model);
   }
   printf("[test_lfm3_weights] ok\n");

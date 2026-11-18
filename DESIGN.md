@@ -1973,6 +1973,17 @@ decisions (operator, 2026-11-17):
 - the first file brought up: BF16 (the oracle's own maths: a mismatch is the forward's, not a grid's), then NVFP4 and
   Q4_0 (their types alone added, against llama.cpp on the same files).
 
+revised (operator, 2026-11-18) - the release as it ships, brought up on the Halo:
+- **the files**: mrsirg97-rgb/vibes1.7b (recipe v ii) - vibes1.7b-q40.gguf (1.36 GB, the model: trained on the Q4_0
+  grid), vibes1.7b-bf16.gguf (the same values in BF16), vibes1.7b-lsa-maps.safetensors (step 3's); ~/Models/vibes1.7b,
+  every one against the release's SHA256SUMS. no NVFP4 file: its per-matrix scales leave the schema (Lfm3Layer's
+  s_* fields), every matrix the file's one type.
+- **Q4_0 first**, not BF16: the Q4_0 file is the trained model, and the oracle reads the file's own values - Liquid's
+  modeling code in F32 on the GGUF's dequantized weights (hy4's oracles' way) - so a mismatch is still the forward's,
+  not a grid's. BF16 the cross-check after (the same values: the forwards' logits close).
+- Q4_0's kernels (decode, mv, mm) landed first, IQ4_NL's shapes (2f78256): one token 205 GB/s on the FFN; a prompt's
+  matmul ~3.6 GB/s of weights at 256 tokens - step 3's to tune.
+
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
 the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,
