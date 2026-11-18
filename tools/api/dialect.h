@@ -5,7 +5,8 @@
 
 #include "request.h"
 
-#define DIALECT_REFUSED_MAX 12 /* the most refused texts a dialect names (DeepSeek's five, Qwen's three, Inkling's ten) */
+#define DIALECT_REFUSED_MAX 16 /* the most refused texts a dialect names (DeepSeek's five, Qwen's three, Inkling's ten,
+                                  Hy4-flash's sixteen) */
 
 /* the field a block-shaped dialect's next block streams into (its header hook's) */
 typedef enum DialectField
@@ -39,11 +40,13 @@ typedef struct Dialect
   void (*loose)(const char *text, const char *shape, size_t n, JsonBuf *out);
 } Dialect;
 
-/* the dialect of a model family, or NULL (one naming more than DIALECT_REFUSED_MAX refused texts too) */
-const Dialect *dialect_of(const char *arch);
+/* the dialect of a model family, or NULL (one naming more than DIALECT_REFUSED_MAX refused texts too) - tmpl the model's
+   chat template (tokenizer.chat_template, or NULL): Hy4-flash's special tokens and efforts are its template's */
+const Dialect *dialect_of(const char *arch, const char *tmpl);
 
 /* request_ds.c, request_qwen.c: a request's messages, tools and effort as the family's template takes them */
 bool request_ds(const Json *body, Request *r, char err[API_ERR]);
 bool request_qwen(const Json *body, Request *r, char err[API_ERR]);
 bool request_ink2(const Json *body, Request *r, char err[API_ERR]);
 bool request_lfm3(const Json *body, Request *r, char err[API_ERR]);
+bool request_hy4(const Json *body, Request *r, char err[API_ERR]);

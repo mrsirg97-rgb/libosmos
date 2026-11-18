@@ -15,7 +15,8 @@ typedef struct Request
   ChatMode mode;
   int effort;          /* DeepSeek's reasoning budget */
   char level[16];      /* Qwen's reasoning effort as asked ("": the template's default) */
-  bool preserve;       /* Qwen's preserve_thinking (its default: true) */
+  bool preserve;       /* Qwen's preserve_thinking (its default: true); Hy4's preserved_thinking where given */
+  bool preserve_given; /* Hy4's: preserved_thinking given (else its template's default: on with tools) */
   Json *effort_value;  /* Inkling's reasoning effort as asked - a name or a number (owned; NULL: the template's 0.9) */
   unsigned max_tokens; /* 0: as many as the context leaves */
   bool stream, usage;

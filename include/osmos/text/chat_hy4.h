@@ -24,6 +24,8 @@ bool hchat_render(const Json *messages, const Json *tools, const char *effort, i
                   JsonBuf *out, char err[CHAT_ERR]);
 bool hchat_parse(const char *text, size_t len, bool thinking, const Json *tools, const HchatTokens *t, JsonBuf *out,
                  char err[CHAT_ERR]);
+bool hchat_parse_shaped(const char *text, const char *shape, size_t len, bool thinking, const Json *tools,
+                        const HchatTokens *t, JsonBuf *out, char err[CHAT_ERR]);
 /* every special token's text of the suffix a completion's text or a request's string can't hold (NULL-terminated:
    the caller's array of HCHAT_REFUSED + 1) */
 #define HCHAT_REFUSED 16
@@ -66,4 +68,8 @@ hchat_parse
   tool's schema (chat_args.h). nothing trimmed. false with why for a completion out of the format: no end of turn,
   no think block's end when thinking, a special token's text out of its place, a malformed or repeated argument, text
   after the calls.
+
+hchat_parse_shaped
+  hchat_parse with its markers read from shape and what it gives the text's, as chat_parse_shaped (#34): a special
+  token's text the model wrote as plain tokens defused in the shape, kept in the text.
 */

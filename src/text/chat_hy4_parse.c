@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,7 +58,7 @@ static bool clean(Span s, const char *const *refused)
 
 /* one call from rest: its JSON into calls */
 static bool call(Span *rest, const Json *tools, const HchatTokens *t, const char *const *refused, JsonBuf *calls,
-                 char *err)
+                 ptrdiff_t off, char *err)
 {
   Span fn, keys[MAX_ARGS];
   if (!take(rest, t->call))
@@ -82,14 +83,14 @@ static bool call(Span *rest, const Json *tools, const HchatTokens *t, const char
       ok = !(keys[i].n == key.n && !memcmp(keys[i].p, key.p, key.n));
     if (!ok)
       return free(args.p), fail(err, "a tool call's argument malformed, repeated or past the most read");
-    json_puts(&args, n ? ", " : ""), json_dump_string(&args, key.p, key.n), json_puts(&args, ": ");
-    chat_arg_value(&args, raw.p, raw.n, chat_arg_schema(tools, fn.p, fn.n, key.p, key.n));
+    json_puts(&args, n ? ", " : ""), json_dump_string(&args, key.p + off, key.n), json_puts(&args, ": ");
+    chat_arg_value(&args, raw.p + (raw.n ? off : 0), raw.n, chat_arg_schema(tools, fn.p + off, fn.n, key.p + off, key.n));
     keys[n++] = key;
   }
   json_puts(&args, "}");
   if (!take(rest, t->call_end))
     return free(args.p), fail(err, "a tool call not closed after its arguments");
-  json_puts(calls, "{\"type\": \"function\", \"function\": {\"name\": "), json_dump_string(calls, fn.p, fn.n);
+  json_puts(calls, "{\"type\": \"function\", \"function\": {\"name\": "), json_dump_string(calls, fn.p + off, fn.n);
   json_puts(calls, ", \"arguments\": "), json_dump_string(calls, args.p ? args.p : "", args.n), json_puts(calls, "}}");
   const bool oom = args.oom;
   free(args.p);
@@ -99,6 +100,14 @@ static bool call(Span *rest, const Json *tools, const HchatTokens *t, const char
 bool hchat_parse(const char *text, size_t len, bool thinking, const Json *tools, const HchatTokens *t, JsonBuf *out,
                  char err[CHAT_ERR])
 {
+  return hchat_parse_shaped(text, text, len, thinking, tools, t, out, err);
+}
+
+bool hchat_parse_shaped(const char *text, const char *shape, size_t len, bool thinking, const Json *tools,
+                        const HchatTokens *t, JsonBuf *out, char err[CHAT_ERR])
+{
+  const ptrdiff_t off = text - shape; /* the parse reads the shape; what it gives is the text's */
+  text = shape;
   if (!text || !t || !out)
     return fail(err, "no completion, tokens or output");
   const size_t en = strlen(t->end);
@@ -123,15 +132,15 @@ bool hchat_parse(const char *text, size_t len, bool thinking, const Json *tools,
     for (size_t k = 0; !take(&rest, t->calls_end); k++)
     {
       json_puts(&calls, k ? ", " : "");
-      if (!call(&rest, tools, t, refused, &calls, err))
+      if (!call(&rest, tools, t, refused, &calls, off, err))
         return free(calls.p), false;
     }
     if (rest.n)
       return free(calls.p), fail(err, "text after the tool calls");
   }
   json_puts(&calls, "]");
-  json_puts(out, "{\"role\": \"assistant\", \"content\": "), json_dump_string(out, content.p, content.n);
-  json_puts(out, ", \"reasoning_content\": "), json_dump_string(out, reasoning.p, reasoning.n);
+  json_puts(out, "{\"role\": \"assistant\", \"content\": "), json_dump_string(out, content.p + (content.n ? off : 0), content.n);
+  json_puts(out, ", \"reasoning_content\": "), json_dump_string(out, reasoning.p + (reasoning.n ? off : 0), reasoning.n);
   json_puts(out, ", \"tool_calls\": "), json_put(out, calls.p, calls.n), json_puts(out, "}");
   const bool oom = calls.oom || out->oom;
   free(calls.p);
