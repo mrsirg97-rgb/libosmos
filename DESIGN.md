@@ -2014,6 +2014,32 @@ step 1's forward (one sequence, rows by position, one convolution state) becomes
   bits; a damaged one refused) and the ring past the window against the 2,048-id fixture; the tokenizer's fixtures; the
   dialect's; then the engine, served.
 
+## vibes-flash: 2M (design, 2026-11-18)
+
+the operator's: vibes1.7b ships with a 2M context, its attention as cheap as it can be made. measured first
+(tools/bench/lfm3_yarn_check): static YaRN - a context's factor at every position, as llama.cpp's and transformers'
+yarn - costs a short conversation what its factor costs it (the 2,048-id fixture: native KL 1.9e-5, x2 0.013, x4
+0.062, x8 0.167; top-1 63 / 60 / 53 / 48 of 64). so a 2M pack's rotation cannot be one factor.
+
+- **a sequence's YaRN by its length (stages)**: stage s the full layers' rotation at factor 2^s over the base (the
+  native 262,144; Lfm3Options' yarn_from for the checks), the stage the least whose span (base 2^s) holds the
+  sequence's positions after the step. crossing into a higher one before a step: every full layer's cached keys
+  re-rotated - each row dequantized, its rotated pairs turned back by the old stage's angle and on by the new's, its
+  unrotated tail times the new magnitude over the old, then Q8_0 again (its one cost: a second rounding, measured
+  against a sequence begun in the stage). the sliding layers never YaRN; LSA's index the unrotated dims (scale-free:
+  normalized) - neither touched. a rollback never across a stage's change (its keys' rotation the new one), the state
+  its stage.
+- **a prompt read sparse**: past a closed block, a prompt chunk's attention LSA's read too (the buckets closed before
+  the chunk, its keys' window and the sinks) - not incarnate's served read (its prompts dense), so measured against
+  dense prompts where dense still fits (to 512K) by the next tokens' agreement and KL.
+- **the limits to 2M**: q4x_attn's keys (OPS_Q4X_MAX_KEYS), the read's scratch, LSA's buckets (2M: 4,096 blocks,
+  262,144 buckets a layer).
+- **the scan**: a decode's read scores every closed bucket (2M: 262,144 x 64 a layer, six layers) - then cheapened
+  (f16 centroids, the six layers' scans one launch) as measured.
+- **checked**: each stage against Liquid's YaRN at its factor over the same base (oracle --yarn, --native); LSA
+  against dense to 512K (the card's rows); at 1M and 2M a needle - a fact placed deep, asked at the end - and the
+  next-token NLL over held-out text (llama.cpp's source: ~2M tokens).
+
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
 the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,
