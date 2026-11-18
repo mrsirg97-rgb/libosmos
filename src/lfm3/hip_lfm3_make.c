@@ -214,11 +214,17 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
   /* the full layers' rotation the zero tail's (YaRN past the native length), the sliding ones' every pair, never
      scaled (the window's keys are near) - transformers' angle step, Liquid's */
-  bool ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, g->native_ctx, f->max_ctx,
-                     Q4X_THETA_HF, &f->rope_full) &&
-            q4x_rope((uint32_t)g->head_dim, (uint32_t)g->head_dim / 2, g->rope_base_swa, g->native_ctx, g->native_ctx,
+  f->yarn_from = o->yarn_from ? o->yarn_from : g->native_ctx;
+  while (f->stages < LFM3_MAX_STAGES && (f->stages == 0 || (uint64_t)f->yarn_from << (f->stages - 1) < f->max_ctx))
+    f->stages++;
+  bool ok = (uint64_t)f->yarn_from << (f->stages - 1) >= f->max_ctx ||
+            lfm3_fail(err, "a context past the YaRN stages' (LFM3_MAX_STAGES over yarn_from)");
+  for (uint32_t s = 0; ok && s < f->stages; s++)
+    ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from, f->yarn_from << s,
+                  Q4X_THETA_HF, &f->rope_full[s]);
+  ok = ok && q4x_rope((uint32_t)g->head_dim, (uint32_t)g->head_dim / 2, g->rope_base_swa, g->native_ctx, g->native_ctx,
                      Q4X_THETA_HF, &f->rope_swa);
-  ok = ok || lfm3_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
+  ok = ok || err[0] || lfm3_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || lfm3_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
   ok = ok && joints(f, err) && (!o->lsa || lsa_load(f, o->lsa, err));

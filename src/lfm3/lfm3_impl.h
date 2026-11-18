@@ -18,7 +18,8 @@ struct Lfm3Forward
   void **dev; /* each tensor's device copy, by the model's index */
   uint32_t max_tokens, max_ctx, logit_rows;
   uint32_t ring; /* a sliding layer's cache rows: window + max_tokens + LFM3_MAX_BACK (DESIGN.md, step 2) */
-  Q4xRope rope_full, rope_swa;
+  Q4xRope rope_full[LFM3_MAX_STAGES], rope_swa; /* the full layers' a stage's: plain, then YaRN x2, x4, ... */
+  uint32_t stages, yarn_from;                    /* the stages made (max_ctx's), their base */
   const void *head;   /* the tied head as the step reads it: head_q8 (LFM3_HEAD_Q8_0) or the embedding's table */
   uint32_t head_type;
   void *head_q8;      /* its Q8_0 copy (owned), NULL for the file's */
@@ -60,6 +61,7 @@ struct Lfm3Seq
 {
   Lfm3Forward *f;
   int32_t pos;
+  uint32_t stage, turned; /* its YaRN stage; the position its last crossing turned the keys at (a rollback's floor) */
   uint32_t back, prompt_end, cur; /* the reach; the prompt's end (0: none); the convolutions' current slot */
   bool broken;
   float *conv[LFM3_MAX_LAYERS];         /* a convolution layer's state ring (LFM3_CONV_SLOTS x (taps - 1) x D) */

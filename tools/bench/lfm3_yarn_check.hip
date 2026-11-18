@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
   std::vector<float> native;
   for (int a = 3; a < argc; a++) {
     const uint32_t ctx = (uint32_t) strtoul(argv[a], nullptr, 10);
-    const Lfm3Options o = {T, ctx, last, LFM3_HEAD_FILE, nullptr};
+    const Lfm3Options o = {T, ctx, last, LFM3_HEAD_FILE, nullptr, 0};
     Lfm3Forward* f = lfm3_forward_create(w, &o, err);
     CHECK(f);
     Lfm3Seq* s = lfm3_seq_create(f, err);

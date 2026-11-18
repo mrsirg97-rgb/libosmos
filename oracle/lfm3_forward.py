@@ -64,10 +64,15 @@ def gguf_state(path):
     return state
 
 
-def build(ref, gguf):
+def build(ref, gguf, yarn=None, native=None):
     from transformers import AutoConfig, AutoModelForCausalLM
 
     config = AutoConfig.from_pretrained(ref, trust_remote_code=True)
+    if yarn:  # the full layers' rotation YaRN at `yarn` over `native` positions (transformers' yarn: the sliding never)
+        full = dict(config.rope_parameters["full_attention"])
+        full.update({"rope_type": "yarn", "factor": float(yarn), "original_max_position_embeddings": int(native)})
+        config.rope_parameters = {**config.rope_parameters, "full_attention": full}
+        config.max_position_embeddings = int(native * yarn)
     config._attn_implementation = "eager"
     model = AutoModelForCausalLM.from_config(config, trust_remote_code=True, torch_dtype=torch.float32)
     # Liquid's class, never transformers' built-in Lfm3 (it rotates all 64 pairs: not the model - DESIGN.md)
@@ -112,6 +117,8 @@ def main():
     ap.add_argument("--text", required=True)
     ap.add_argument("--tokens", type=int, default=2048)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--yarn", type=float, help="the full layers' rotation YaRN at this factor (over --native)")
+    ap.add_argument("--native", type=int, default=262144, help="YaRN's original positions")
     ap.add_argument("--kv-q8", action="store_true",
                     help="K and V through ggml's Q8_0 before the attention (osmos's cache: q4x_kv_put's rounding)")
     ap.add_argument("--check-layer", type=int, default=-1)
@@ -122,7 +129,11 @@ def main():
 
     ids = Tokenizer.from_file(os.path.join(a.ref, "tokenizer.json")).encode(open(a.text).read()).ids[: a.tokens]
     T = len(ids)
-    model, config = build(a.ref, a.gguf)
+    model, config = build(a.ref, a.gguf, a.yarn, a.native)
+    if a.yarn:
+        rot = model.model.rotary_emb
+        print(f"YaRN x{a.yarn} over {a.native}: attention scaling {rot.full_attention_attention_scaling:.6f}, "
+              f"rotated pairs {(rot.full_attention_inv_freq != 0).sum().item()}")
     if a.kv_q8:
         kv_q8(model)
     D, L = config.hidden_size, config.num_hidden_layers

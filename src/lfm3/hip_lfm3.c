@@ -126,7 +126,7 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
   {
     const Lfm3Run *R = &run[r];
     const uint64_t o = R->off;
-    ok = q4x_qk(qf + o * q, kf + o * kv, R->len, H, KV, hd, sliding ? &f->rope_swa : &f->rope_full,
+    ok = q4x_qk(qf + o * q, kf + o * kv, R->len, H, KV, hd, sliding ? &f->rope_swa : &f->rope_full[R->s->stage],
                 lfm3_fv(f, L->q_norm), lfm3_fv(f, L->k_norm), g->rms_eps, R->s->pos, f->qr + o * q, NULL,
                 f->kr + o * kv, f->st) &&
          kv_put(f, R, vf, l, sliding, kv);
@@ -204,12 +204,31 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   if (kept > f->logit_rows)
     return lfm3_fail(err, "a step's kept rows past the logits' (Lfm3Options' logit_rows)");
   const Lfm3Geometry *g = &f->w->geo;
+  uint32_t stage[LFM3_MAX_RUNS]; /* each run's stage after the step: the least whose span holds its positions */
+  for (uint32_t r = 0; r < runs; r++)
+  {
+    const uint64_t end = (uint64_t)run[r].s->pos + run[r].len;
+    stage[r] = run[r].s->stage;
+    while ((uint64_t)f->yarn_from << stage[r] < end)
+      stage[r]++;
+  }
   for (uint32_t i = 0; i < n; i++)
     if (tokens[i] < 0 || tokens[i] >= g->n_vocab)
       return lfm3_fail(err, "a token outside the vocabulary");
   const uint32_t D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab;
+  bool ok = true;
+  for (uint32_t r = 0; r < runs; r++) /* a crossing: the full layers' cached keys turned to the new stage first */
+  {
+    Lfm3Seq *s = run[r].s;
+    for (int l = 0; ok && stage[r] != s->stage && l < g->n_layers; l++)
+      if (g->kind[l] == LFM3_FULL)
+        ok = lfm3_kv_turn(s->kc[l], (uint32_t)s->pos, (uint32_t)g->n_kv_heads, (uint32_t)g->head_dim,
+                          &f->rope_full[s->stage], &f->rope_full[stage[r]], f->st);
+    if (stage[r] != s->stage)
+      s->stage = stage[r], s->turned = (uint32_t)s->pos, s->back = 0;
+  }
   memcpy(f->pin_tok, tokens, (size_t)n * 4);
-  bool ok = hipMemcpyAsync(f->tok, f->pin_tok, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
+  ok = ok && hipMemcpyAsync(f->tok, f->pin_tok, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             ops_embed(f->w->embd->type, lfm3_dev(f, f->w->embd), D, f->tok, n, 1, f->h, f->st) &&
             ops_rms(f->h, D, D, lfm3_fv(f, f->w->layer[0].attn_norm), g->rms_eps, n, f->xn, D, f->st);
   for (int l = 0; ok && l < g->n_layers; l++)

@@ -19,6 +19,10 @@ extern "C" {
 // off by one, a window's edge) far past them
 constexpr double kTolLayer = 5e-3, kKlMean = 5e-5, kKlMax = 5e-4;
 constexpr uint32_t kTop1Miss = 1;
+// a sequence crossing a YaRN stage against one begun in it: its earlier tokens read under the plain rotation, their
+// keys turned and Q8_0 again - measured KL mean 8.2e-4, max 9.6e-3, top-1 64 / 64 (the turn skipped: 0.05, 0.18,
+// 51 / 64)
+constexpr double kStageKlMean = 2e-3, kStageKlMax = 2.5e-2;
 // the head's Q8_0 copy against the file's BF16 head on the same streams, measured (2026-11-18): KL mean 3.9e-5 / 3.6e-5,
 // max 1.0e-4 / 1.05e-4, top-1 64 / 64 (64 / 2,048 ids) - the Q8_0 cache's own order; the bounds with room
 constexpr double kHeadKlMean = 2e-4, kHeadKlMax = 1e-3;
@@ -80,7 +84,7 @@ int main() {
   const uint32_t T = (uint32_t) fid.size(), V = (uint32_t) w->geo.n_vocab, last = 64 < T ? 64 : T;
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
-  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr};  // the reference's head: the file's BF16
+  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr, 0};  // the reference's head: the file's BF16
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -228,7 +232,7 @@ int main() {
   // the prompt in its steps the one step's last rows, bit for bit
   {
     const uint32_t S = 300 < T ? 300 : T;
-    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr};
+    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr, 0};
     Lfm3Forward* f2 = lfm3_forward_create(w, &o2, err);
     CHECK(f2);
     Lfm3Seq* r = lfm3_seq_create(f2, err);
@@ -247,7 +251,7 @@ int main() {
   // the head's Q8_0 copy (the engine's default): the same ids, its logits against the file's head's - the rounding's
   // own cost, measured (2026-11-18): see kHeadKl
   {
-    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr};
+    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr, 0};
     Lfm3Forward* fq = lfm3_forward_create(w, &oq, err);
     CHECK(fq);
     Lfm3Seq* q = lfm3_seq_create(fq, err);
@@ -264,6 +268,53 @@ int main() {
     CHECK(ks / last <= kHeadKlMean && km <= kHeadKlMax && agree + kHeadTop1Miss >= last);
     lfm3_seq_destroy(q);
     lfm3_forward_destroy(fq);
+  }
+  // YaRN's stages (OSMOS_TEST_LFM3_YARN: oracle/lfm3_forward.py --kv-q8 --yarn 2 --native 1024 over the same ids):
+  // a forward whose stages begin at 1,024 - the ids in one step its stage 1 (x2), against Liquid's YaRN x2; the ids
+  // first under the base then past it (the cache turned to stage 1 at the crossing) against the one step; a rollback
+  // across the crossing refused
+  {
+    std::string yarn_path = getenv("OSMOS_TEST_LFM3_YARN") ? getenv("OSMOS_TEST_LFM3_YARN") : "";
+    if (yarn_path.empty()) yarn_path = std::string(home) + "/osmos-oracle/lfm3_forward_2048_yarn2_n1024.bin";
+    std::map<std::string, Arr> base = fx;
+    if (T == 2048 && load(yarn_path.c_str())) {
+      const std::vector<float> yref = A("logits");
+      const Lfm3Options oy = {T, 4 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024};
+      Lfm3Forward* fy = lfm3_forward_create(w, &oy, err);
+      CHECK(fy);
+      Lfm3Seq *one = lfm3_seq_create(fy, err), *two = lfm3_seq_create(fy, err);
+      CHECK(one && two && lfm3_step(fy, one, ids.data(), T, last, err) && lfm3_seq_stage(one) == 1);
+      const std::vector<float> y1(lfm3_logits(fy), lfm3_logits(fy) + (size_t) last * V);
+      double ks = 0, km = 0;
+      uint32_t agree = 0;
+      for (uint32_t r = 0; r < last; r++) {
+        const float* p = yref.data() + (ref_rows - last + r) * (size_t) V;
+        const double k = kl(p, y1.data() + (size_t) r * V, V);
+        ks += k, km = std::fmax(km, k), agree += argmax(p, V) == argmax(y1.data() + (size_t) r * V, V);
+      }
+      std::printf("  YaRN x2 over 1,024 (stage 1 from the start): against Liquid's KL mean %.3g, max %.3g; top-1 %u "
+                  "of %u\n", ks / last, km, agree, last);
+      CHECK(ks / last <= kKlMean && km <= kKlMax && agree + kTop1Miss >= last);
+      const uint32_t a = 1020, b = 8;  // under the base (plain rope), a step across it (the cache turned), the rest
+      CHECK(lfm3_step(fy, two, ids.data(), a, 1, err) && lfm3_seq_stage(two) == 0);
+      CHECK(lfm3_step(fy, two, ids.data() + a, b, 1, err) && lfm3_seq_stage(two) == 1);
+      CHECK(lfm3_seq_reach(two) == b && !lfm3_seq_rollback(two, b + 1));  // never back across the crossing
+      std::printf("  a rollback across the crossing refused (its reach %u: the crossing step's)\n", lfm3_seq_reach(two));
+      CHECK(lfm3_step(fy, two, ids.data() + a + b, T - a - b, last, err) && lfm3_seq_stage(two) == 1);
+      double kc = 0, kcm = 0;
+      uint32_t same = 0;
+      for (uint32_t r = 0; r < last; r++) {
+        const double k = kl(y1.data() + (size_t) r * V, lfm3_logits(fy) + (size_t) r * V, V);
+        kc += k, kcm = std::fmax(kcm, k), same += argmax(y1.data() + (size_t) r * V, V) == argmax(lfm3_logits(fy) + (size_t) r * V, V);
+      }
+      std::printf("  crossing into stage 1 at %u (the cache turned): against stage 1 from the start KL mean %.3g, max "
+                  "%.3g; top-1 %u of %u\n", a + b, kc / last, kcm, same, last);
+      CHECK(kc / last <= kStageKlMean && kcm <= kStageKlMax && same + kTop1Miss >= last);
+      lfm3_seq_destroy(one), lfm3_seq_destroy(two), lfm3_forward_destroy(fy);
+    } else {
+      std::printf("  YaRN's stages skipped: no %s (or not the 2,048-id fixture)\n", yarn_path.c_str());
+    }
+    fx = base;
   }
   lfm3_seq_destroy(s2);
   lfm3_seq_destroy(s);

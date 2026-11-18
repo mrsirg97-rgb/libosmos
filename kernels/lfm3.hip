@@ -1,9 +1,12 @@
 // LFM3's own steps (include/osmos/gpu/lfm3_ops.h)
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <cstdint>
 
+#include "block.h"
 #include "launch.h"
+#include "rope.h"
 
 extern "C" {
 #include "osmos/gpu/lfm3_ops.h"
@@ -85,5 +88,55 @@ extern "C" bool lfm3_shortconv(const float* bcx, uint32_t n_tok, uint32_t dim, u
   if (!ok()) return false;
   const uint32_t keep = n_tok < slots ? n_tok : slots;
   state_kernel<<<(dim + kThreads - 1) / kThreads, kThreads, 0, s>>>(bcx, n_tok, dim, h, ring, slots, cur, keep);
+  return ok();
+}
+
+namespace {
+
+constexpr uint32_t kTurnDim = Q4X_QK_HEAD_NARROW;
+
+// a block a row's head: a thread a value, then a thread each Q8_0 block's rounding
+__global__ void __launch_bounds__(kTurnDim) kv_turn_kernel(uint8_t* kc, uint32_t kv_heads, Q4xRope from, Q4xRope to) {
+  __shared__ float x[kTurnDim];
+  const uint32_t d = threadIdx.x, head = blockIdx.x % kv_heads, row = blockIdx.x / kv_heads;
+  constexpr uint32_t kBlocks = kTurnDim / Q4X_KV_BLOCK;
+  uint8_t* rec = kc + ((uint64_t) row * kv_heads + head) * kBlocks * Q4X_KV_BLOCK_BYTES;
+  {
+    const uint8_t* b = rec + d / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
+    const float scale = __half2float(*(const __half*) b);
+    x[d] = scale * (float) (int8_t) b[2 + d % Q4X_KV_BLOCK];
+  }
+  __syncthreads();
+  const uint32_t half = from.dim / 2, i = d % half;
+  float v = x[d];
+  if (d < from.dim && i < from.pairs) {
+    float c0, s0, c1, s1;
+    rope_cs(from, (float) row, i, &c0, &s0);
+    rope_cs(to, (float) row, i, &c1, &s1);
+    const float m2 = c0 * c0 + s0 * s0, a = x[i], b = x[i + half];
+    const float u0 = (a * c0 + b * s0) / m2, u1 = (b * c0 - a * s0) / m2;  // the rotation undone
+    v = d < half ? u0 * c1 - u1 * s1 : u0 * s1 + u1 * c1;
+  } else if (d < from.dim) {
+    v = x[d] / from.mscale * to.mscale;
+  }
+  __syncthreads();
+  x[d] = v;
+  __syncthreads();
+  if (d < kBlocks) {
+    uint8_t* b = rec + d * Q4X_KV_BLOCK_BYTES;
+    const float scale = q8_0_block<Q4X_KV_BLOCK>(x + d * Q4X_KV_BLOCK, 1, b + 2);
+    *(__half*) b = __float2half(scale);
+  }
+}
+
+}  // namespace
+
+extern "C" bool lfm3_kv_turn(void* kc, uint32_t rows, uint32_t kv_heads, uint32_t dim, const Q4xRope* from,
+                             const Q4xRope* to, void* stream) {
+  if (!kc || !from || !to || !kv_heads || dim != kTurnDim || from->dim != to->dim || from->pairs != to->pairs ||
+      from->dim > dim || !from->pairs || from->pairs > from->dim / 2)
+    return false;
+  if (!rows) return true;
+  kv_turn_kernel<<<(uint64_t) rows * kv_heads, kTurnDim, 0, st(stream)>>>((uint8_t*) kc, kv_heads, *from, *to);
   return ok();
 }

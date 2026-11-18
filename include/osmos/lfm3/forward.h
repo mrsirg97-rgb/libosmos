@@ -87,11 +87,16 @@ typedef enum Lfm3Head
    W_K_idx, F32 [256 x 64] - its 4 KV heads' zero-tail dims), or NULL: every full layer dense. with them a decode's
    full layers read incarnate's served read (osmos/lsa.h: 512-key blocks, 64 buckets each, the top 1,024 buckets' keys
    cut at 4,096, the window and the sinks); a prompt's stay dense (lsa.py's) */
+/* yarn_from: the YaRN stages' base (0: the native context) - a sequence's full layers rotated at the least factor 2^s
+   whose span (yarn_from 2^s) holds its positions: plain rope below the base, and crossing a span its cached keys
+   turned to the next stage's (DESIGN.md, "vibes-flash: 2M"); the stages to max_ctx's, LFM3_MAX_STAGES at most */
+#define LFM3_MAX_STAGES 8
 typedef struct Lfm3Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;
   Lfm3Head head;
   const char *lsa;
+  uint32_t yarn_from;
 } Lfm3Options;
 /* the model's open files' paths are its Gguf's (the identity hashes them) */
 Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[LFM3_ERR]);
@@ -127,7 +132,7 @@ bool lfm3_greedy(Lfm3Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, cha
 /* the prompt ends at end (its last token end - 1): rows before it not kept (the head not run for them) */
 bool lfm3_seq_prompt(Lfm3Seq *s, uint32_t end);
 /* the tokens a sequence can drop (LFM3_MAX_BACK at most; 0 after a load or a new one; with LSA never across a block's
-   close: its buckets made of the keys), and the drop: every state as before them - the bits of never having run
+   close: its buckets made of the keys; never across a YaRN stage's change: its keys turned), and the drop: every state as before them - the bits of never having run
    them. false past the reach, unchanged */
 uint32_t lfm3_seq_reach(const Lfm3Seq *s);
 bool lfm3_seq_rollback(Lfm3Seq *s, uint32_t n);
@@ -141,6 +146,9 @@ uint64_t lfm3_identity(const Lfm3Forward *f);
 uint64_t lfm3_seq_state_bytes(const Lfm3Seq *s);
 bool lfm3_seq_save_to(const Lfm3Seq *s, StateSink sink, void *ctx, char err[LFM3_ERR]);
 bool lfm3_seq_load_from(Lfm3Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[LFM3_ERR]);
+
+/* the sequence's YaRN stage (0: plain rope) */
+uint32_t lfm3_seq_stage(const Lfm3Seq *s);
 
 /* the per-op checks' (llama-eval-callback's tensors): a tap, when set, gets each layer's named outputs - "operator"
    (the conv's or attention's, before its post-norm) and "residual" (the layer's output) - n x n_embd, the GPU's */
