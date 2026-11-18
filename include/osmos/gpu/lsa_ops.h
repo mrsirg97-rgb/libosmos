@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/lsa.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -25,12 +27,20 @@ void lsa_scratch_destroy(LsaScratch *s);
 bool lsa_read_gpu(const float *iq, uint32_t p, const float *cent, const int32_t *members, uint32_t blocks,
                   LsaScratch *s, uint32_t *out, uint32_t *n, void *stream);
 
+/* a head's position-free dims, the index's input: [lo0, hi0) then [lo1, hi1) - Qwen's past its rotary prefix
+   ({rot, head_dim, 0, 0}), LFM3's zero tail ({32, 64, 96, 128}: pairs (i, i + 64) rotated for i < 32) */
+typedef struct LsaDims
+{
+  uint32_t lo0, hi0, lo1, hi1;
+} LsaDims;
+
 /* index vectors of n tokens (osmos/lsa.h's lsa_index, its bits: double sums in order, BF16 for keys): token t's input
-   the kv_heads heads' dims past rot, side by side, each the sum of `group` consecutive heads (a key: group 1; a query:
-   a KV head's query heads) of src's row t (row_stride floats: heads of head_dim); W [LSA_IN x LSA_DIM]; out n x
-   LSA_DIM. kv_heads (head_dim - rot) must be LSA_IN */
+   the kv_heads heads' free dims (dims's), side by side, each the sum of `group` consecutive heads (a key: group 1; a
+   query: a KV head's query heads) of src's row t (row_stride floats: heads of head_dim); W [in x LSA_DIM], in =
+   kv_heads x the free dims' count, at most LSA_IN_MAX; out n x LSA_DIM */
+#define LSA_IN_MAX LSA_IN
 bool lsa_index_gpu(const float *src, uint32_t n, uint32_t row_stride, uint32_t kv_heads, uint32_t group,
-                   uint32_t head_dim, uint32_t rot, const float *W, bool bf16, float *out, void *stream);
+                   uint32_t head_dim, const LsaDims *dims, const float *W, bool bf16, float *out, void *stream);
 
 #ifdef __cplusplus
 }

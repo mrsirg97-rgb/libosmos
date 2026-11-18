@@ -143,15 +143,17 @@ static void random_scale(uint32_t blocks, const char* what) {
               blocks * (double) LSA_WINDOW / 1e6, blocks * LSA_BUCKETS, ms);
 }
 
-// the index on the GPU against lsa_index: a key's input as the forward holds it (4 KV heads of 256, its first 64
-// rotary), a query's 6 heads a KV head summed - bits for bits, BF16 and F32
-static void index_check(const char* dir) {
-  const uint32_t heads = 4, hd = 256, rot = 64, G = 6, free = hd - rot;
-  std::vector<float> W((size_t) LSA_IN * LSA_DIM), key(heads * hd), qry(heads * G * hd), x(LSA_IN), host(LSA_DIM), gpu(LSA_DIM);
+// the index on the GPU against lsa_index: a key's input as the forward holds it, a query's G heads a KV head summed -
+// bits for bits, BF16 and F32. Qwen's (4 KV heads of 256, its first 64 rotary; 6 a group) and LFM3's (4 of 128, the
+// zero tail's 32..63 and 96..127 free; 4 a group)
+static void index_check(const char* dir, uint32_t hd, LsaDims dims, uint32_t G, const char* what) {
+  const uint32_t heads = 4, free = (dims.hi0 - dims.lo0) + (dims.hi1 - dims.lo1), in = heads * free;
+  auto dim_of = [&](uint32_t j) { return j < dims.hi0 - dims.lo0 ? dims.lo0 + j : dims.lo1 + (j - (dims.hi0 - dims.lo0)); };
+  std::vector<float> W((size_t) in * LSA_DIM), key(heads * hd), qry(heads * G * hd), x(in), host(LSA_DIM), gpu(LSA_DIM);
   for (auto& v : W) v = uniform() * 0.1f;
   for (auto& v : key) v = uniform();
   for (auto& v : qry) v = uniform();
-  if (dir) {  // a real key's input and map, when the cases are here
+  if (dir && in == LSA_IN) {  // a real key's input and map (Qwen's), when the cases are here
     DIR* dd = opendir(dir);
     for (struct dirent* e; dd && (e = readdir(dd));) {
       const std::string n = e->d_name;
@@ -160,10 +162,10 @@ static void index_check(const char* dir) {
       FILE* fw = std::fopen((std::string(dir) + "/" + n + ".W").c_str(), "rb");
       uint32_t T = 0;
       CHECK(f && fw && std::fseek(f, 4, SEEK_SET) == 0 && std::fread(&T, 4, 1, f) == 1);
-      CHECK(std::fseek(f, 16 + (long) T * LSA_DIM * 4, SEEK_SET) == 0 && std::fread(x.data(), 4, LSA_IN, f) == LSA_IN);
+      CHECK(std::fseek(f, 16 + (long) T * LSA_DIM * 4, SEEK_SET) == 0 && std::fread(x.data(), 4, in, f) == in);
       CHECK(std::fread(W.data(), 4, W.size(), fw) == W.size());
       std::fclose(f), std::fclose(fw);
-      for (uint32_t i = 0; i < LSA_IN; i++) key[i / free * hd + rot + i % free] = x[i];
+      for (uint32_t i = 0; i < in; i++) key[i / free * hd + dim_of(i % free)] = x[i];
       break;
     }
     if (dd) closedir(dd);
@@ -175,18 +177,20 @@ static void index_check(const char* dir) {
   CHECK(hipMemcpy(dk, key.data(), key.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(dq, qry.data(), qry.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   for (int q = 0; q < 2; q++) {
-    for (uint32_t i = 0; i < LSA_IN; i++) {
-      const uint32_t h = i / free, j = i % free;
+    for (uint32_t i = 0; i < in; i++) {
+      const uint32_t h = i / free, j = dim_of(i % free);
       float v = 0.0f;
-      for (uint32_t g = 0; g < (q ? G : 1); g++) v += q ? qry[(h * G + g) * hd + rot + j] : key[h * hd + rot + j];
+      for (uint32_t g = 0; g < (q ? G : 1); g++) v += q ? qry[(h * G + g) * hd + j] : key[h * hd + j];
       x[i] = v;
     }
-    lsa_index(x.data(), LSA_IN, W.data(), !q, host.data());
-    CHECK(lsa_index_gpu(q ? dq : dk, 1, q ? heads * G * hd : heads * hd, heads, q ? G : 1, hd, rot, dW, !q, dout, nullptr));
+    lsa_index(x.data(), in, W.data(), !q, host.data());
+    CHECK(lsa_index_gpu(q ? dq : dk, 1, q ? heads * G * hd : heads * hd, heads, q ? G : 1, hd, &dims, dW, !q, dout,
+                        nullptr));
     CHECK(hipMemcpy(gpu.data(), dout, LSA_DIM * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(!std::memcmp(gpu.data(), host.data(), LSA_DIM * 4));
   }
-  std::printf("  the index: a key (BF16, %s) and a query (6 heads summed) lsa_index's bits\n", dir ? "-vibes' own" : "random");
+  std::printf("  the index, %s: a key (BF16, %s) and a query (%u heads summed) lsa_index's bits\n", what,
+              dir && in == LSA_IN ? "-vibes' own" : "random", G);
   hipFree(dW), hipFree(dk), hipFree(dq), hipFree(dout);
 }
 
@@ -198,7 +202,9 @@ int main() {
     return 77;
   }
   const char* dir = std::getenv("OSMOS_LSA_CASES");
-  index_check(dir);
+  index_check(dir, 256, LsaDims{64, 256, 0, 0}, 6, "Qwen's (past its rotary prefix)");
+  index_check(dir, 128, LsaDims{32, 64, 96, 128}, 4, "LFM3's (its zero tail)");
+  { const LsaDims over{0, 256, 0, 0}; float* p = nullptr; CHECK(!lsa_index_gpu(p, 1, 1024, 4, 1, 256, &over, p, true, p, nullptr)); }
   if (dir)
     cases(dir);
   else

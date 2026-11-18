@@ -224,22 +224,22 @@ __device__ inline float bf16_round(float v) {  // to nearest, ties to even (src/
 // double over the input in order, the norm thread 0's (the dims in order), as lsa_index
 __global__ __launch_bounds__(LSA_DIM) void index_kernel(const float* __restrict__ src, uint32_t row_stride,
                                                         uint32_t kv_heads, uint32_t group, uint32_t head_dim,
-                                                        uint32_t rot, const float* __restrict__ W, bool bf16,
-                                                        float* __restrict__ out) {
-  __shared__ float x[LSA_IN];
+                                                        LsaDims dims, uint32_t in, const float* __restrict__ W,
+                                                        bool bf16, float* __restrict__ out) {
+  __shared__ float x[LSA_IN_MAX];
   __shared__ double y[LSA_DIM];
   __shared__ double norm;
-  const uint32_t t = blockIdx.x, d = threadIdx.x, free = head_dim - rot;
+  const uint32_t t = blockIdx.x, d = threadIdx.x, n0 = dims.hi0 - dims.lo0, free = n0 + (dims.hi1 - dims.lo1);
   const float* row = src + (uint64_t) t * row_stride;
-  for (uint32_t i = d; i < LSA_IN; i += LSA_DIM) {
-    const uint32_t h = i / free, j = i % free;
+  for (uint32_t i = d; i < in; i += LSA_DIM) {
+    const uint32_t h = i / free, j = i % free, dim = j < n0 ? dims.lo0 + j : dims.lo1 + (j - n0);
     float v = 0.0f;
-    for (uint32_t g = 0; g < group; g++) v += row[(h * group + g) * head_dim + rot + j];
+    for (uint32_t g = 0; g < group; g++) v += row[(h * group + g) * head_dim + dim];
     x[i] = v;
   }
   __syncthreads();
   double s = 0.0;
-  for (int i = 0; i < LSA_IN; i++) s = __dadd_rn(s, __dmul_rn((double) x[i], (double) W[(uint64_t) i * LSA_DIM + d]));
+  for (uint32_t i = 0; i < in; i++) s = __dadd_rn(s, __dmul_rn((double) x[i], (double) W[(uint64_t) i * LSA_DIM + d]));
   y[d] = s;
   __syncthreads();
   if (d == 0) {
@@ -256,9 +256,15 @@ __global__ __launch_bounds__(LSA_DIM) void index_kernel(const float* __restrict_
 }  // namespace
 
 extern "C" bool lsa_index_gpu(const float* src, uint32_t n, uint32_t row_stride, uint32_t kv_heads, uint32_t group,
-                              uint32_t head_dim, uint32_t rot, const float* W, bool bf16, float* out, void* stream) {
-  if (!src || !W || !out || !n || !group || rot >= head_dim || kv_heads * (head_dim - rot) != LSA_IN) return false;
-  index_kernel<<<n, LSA_DIM, 0, launches::st(stream)>>>(src, row_stride, kv_heads, group, head_dim, rot, W, bf16, out);
+                              uint32_t head_dim, const LsaDims* dims, const float* W, bool bf16, float* out,
+                              void* stream) {
+  if (!src || !W || !out || !n || !group || !dims || dims->lo0 > dims->hi0 || dims->lo1 > dims->hi1 ||
+      dims->hi0 > head_dim || dims->hi1 > head_dim || (dims->hi1 > dims->lo1 && dims->lo1 < dims->hi0))
+    return false;
+  const uint32_t in = kv_heads * ((dims->hi0 - dims->lo0) + (dims->hi1 - dims->lo1));
+  if (!in || in > LSA_IN_MAX) return false;
+  index_kernel<<<n, LSA_DIM, 0, launches::st(stream)>>>(src, row_stride, kv_heads, group, head_dim, *dims, in, W, bf16,
+                                                        out);
   return launches::ok();
 }
 
