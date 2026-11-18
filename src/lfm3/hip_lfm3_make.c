@@ -12,6 +12,7 @@
 #include "osmos/gpu/quant.h"
 #include "osmos/model/qtype.h"
 #include "osmos/gpu/upload.h"
+#include "osmos/text/json.h"
 #include "lfm3_impl.h"
 
 #define READ_PIECE (64ull << 20)
@@ -110,10 +111,75 @@ static bool head_q8(Lfm3Forward *f, char *err)
   return true;
 }
 
+/* the maps (a safetensors file: its JSON header, then the tensors' bytes): every full layer's layers.<l>.W_Q_idx and
+   W_K_idx, F32 [lsa_in x LSA_DIM], to the GPU - a layer missing, another shape or dtype refused */
+static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
+{
+  const Lfm3Geometry *g = &f->w->geo;
+  const LsaDims fd = lfm3_free_dims(g);
+  f->lsa_in = (uint32_t)g->n_kv_heads * ((fd.hi0 - fd.lo0) + (fd.hi1 - fd.lo1));
+  if (f->lsa_in > LSA_IN_MAX)
+    return lfm3_fail(err, "LSA: the index's input past LSA_IN_MAX");
+  FILE *fp = fopen(path, "rb");
+  uint64_t hn = 0;
+  if (!fp || fread(&hn, 8, 1, fp) != 1 || hn > (64u << 20))
+  {
+    if (fp)
+      fclose(fp);
+    return lfm3_fail(err, "LSA: the maps file not read (a safetensors file)");
+  }
+  char *head = malloc(hn + 1);
+  char jerr[JSON_ERR] = "";
+  Json *j = head && fread(head, 1, hn, fp) == hn ? json_parse(head, hn, jerr) : NULL;
+  const uint64_t m = (uint64_t)f->lsa_in * LSA_DIM;
+  float *buf = malloc(m * F);
+  bool ok = j && buf;
+  for (int l = 0; ok && l < g->n_layers; l++)
+  {
+    if (g->kind[l] != LFM3_FULL)
+      continue;
+    for (int w = 0; ok && w < 2; w++)
+    {
+      char name[64];
+      snprintf(name, sizeof name, "layers.%d.W_%c_idx", l, w ? 'K' : 'Q');
+      const Json *t = json_get(j, name), *dt = json_get(t, "dtype"), *sh = json_get(t, "shape"),
+                 *off = json_get(t, "data_offsets");
+      ok = t && dt && dt->type == JSON_STRING && !strcmp(dt->s, "F32") && sh && sh->type == JSON_ARRAY && sh->n == 2 &&
+           sh->item[0]->type == JSON_INT && strtoull(sh->item[0]->s, NULL, 10) == f->lsa_in &&
+           sh->item[1]->type == JSON_INT && strtoull(sh->item[1]->s, NULL, 10) == LSA_DIM && off &&
+           off->type == JSON_ARRAY && off->n == 2 && off->item[0]->type == JSON_INT;
+      if (!ok)
+      {
+        snprintf(err, LFM3_ERR, "LSA: %s missing, or not F32 [%u x %u]", name, f->lsa_in, LSA_DIM);
+        break;
+      }
+      float **dst = w ? &f->wk[l] : &f->wq[l];
+      ok = fseeko(fp, (off_t)(8 + hn + strtoull(off->item[0]->s, NULL, 10)), SEEK_SET) == 0 &&
+           fread(buf, F, m, fp) == m && lfm3_alloc(dst, m * F) &&
+           hipMemcpy(*dst, buf, m * F, hipMemcpyHostToDevice) == hipSuccess;
+      if (!ok)
+        lfm3_fail(err, "LSA: a map not read (its bytes, or GPU memory)");
+    }
+  }
+  fclose(fp), free(head), free(buf), json_free(j);
+  if (!ok)
+    return err && !*err ? lfm3_fail(err, "LSA: the maps not read") : false;
+  ok = (f->lsa_s = lsa_scratch_create(f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && lfm3_alloc(&f->iq, LSA_DIM * F) &&
+       lfm3_alloc(&f->list, LSA_READ_MAX * 4) && lfm3_alloc(&f->list_n, 4) &&
+       (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) && (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) &&
+       (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
+  return (f->lsa = ok) || lfm3_fail(err, "LSA: out of memory (the read's scratch)");
+}
+
 void lfm3_forward_destroy(Lfm3Forward *f)
 {
   if (!f)
     return;
+  for (int l = 0; l < LFM3_MAX_LAYERS; l++)
+    hipFree(f->wq[l]), hipFree(f->wk[l]);
+  lsa_scratch_destroy(f->lsa_s);
+  hipFree(f->iq), hipFree(f->list), hipFree(f->list_n);
+  free(f->h_ik), free(f->h_cent), free(f->h_mem);
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
@@ -155,7 +221,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   ok = ok || lfm3_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || lfm3_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
-  ok = ok && joints(f, err);
+  ok = ok && joints(f, err) && (!o->lsa || lsa_load(f, o->lsa, err));
   if (ok)
     f->head = lfm3_dev(f, w->embd), f->head_type = w->embd->type;
   ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || lfm3_fail(err, "a head this build does not make")) &&

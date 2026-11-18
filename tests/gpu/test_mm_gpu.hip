@@ -89,7 +89,7 @@ constexpr const char* kQwenQ4 = "%s/Models/qwen38/q4kxl-dl/UD-Q4_K_XL/Qwen3.8-Fl
 // its dense matrices (BF16) and the NVFP4 experts of layers 0-4, the last the MXFP8 experts of 46-47 - each block's
 // values (a tensor's own scale is its role's, not the matvec's)
 // vibes1.7b (LFM3-1.7B on the Q4_0 grid): a prompt's Q4_0 matrices - the FFN's, the convolution's in, attention's q
-constexpr const char* kVibes = "%s/Models/vibes1.7b/vibes1.7b-q40.gguf";
+constexpr const char* kVibes = "%s/Models/vibes1.7b/vibes1.7b-Q4_0.gguf";
 static const Shape kVibesShapes[] = {{"blk.0.ffn_gate.weight", -1}, {"blk.0.ffn_down.weight", -1},
                                      {"blk.0.shortconv.in_proj.weight", -1}, {"blk.2.attn_q.weight", -1}};
 constexpr const char* kInk1 = "%s/Models/inkling2/ref/ink2-ref-00001-of-00009.gguf";

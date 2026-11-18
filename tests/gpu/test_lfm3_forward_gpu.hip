@@ -63,7 +63,7 @@ int main() {
   const char* home = getenv("HOME") ? getenv("HOME") : "";
   char model_path[512], ref_path[512], err[LFM3_ERR] = "", gerr[GGUF_ERR] = "";
   std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_LFM3") ? getenv("OSMOS_TEST_LFM3") : "");
-  if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/vibes1.7b/vibes1.7b-q40.gguf", home);
+  if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/vibes1.7b/vibes1.7b-Q4_0.gguf", home);
   std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_LFM3_REF") ? getenv("OSMOS_TEST_LFM3_REF") : "");
   if (!ref_path[0]) std::snprintf(ref_path, sizeof ref_path, "%s/osmos-oracle/lfm3_forward_64_kvq8.bin", home);
   int devs = 0;
@@ -80,7 +80,7 @@ int main() {
   const uint32_t T = (uint32_t) fid.size(), V = (uint32_t) w->geo.n_vocab, last = 64 < T ? 64 : T;
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
-  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE};  // the reference's head: the file's BF16
+  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr};  // the reference's head: the file's BF16
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -228,7 +228,7 @@ int main() {
   // the prompt in its steps the one step's last rows, bit for bit
   {
     const uint32_t S = 300 < T ? 300 : T;
-    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE};
+    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr};
     Lfm3Forward* f2 = lfm3_forward_create(w, &o2, err);
     CHECK(f2);
     Lfm3Seq* r = lfm3_seq_create(f2, err);
@@ -247,7 +247,7 @@ int main() {
   // the head's Q8_0 copy (the engine's default): the same ids, its logits against the file's head's - the rounding's
   // own cost, measured (2026-11-18): see kHeadKl
   {
-    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0};
+    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr};
     Lfm3Forward* fq = lfm3_forward_create(w, &oq, err);
     CHECK(fq);
     Lfm3Seq* q = lfm3_seq_create(fq, err);

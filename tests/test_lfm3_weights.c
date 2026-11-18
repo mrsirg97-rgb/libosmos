@@ -12,8 +12,8 @@
 #include "osmos/lfm3/forward.h"
 #include "osmos/model/gguf.h"
 
-#define Q4_0_FILE "Models/vibes1.7b/vibes1.7b-q40.gguf"
-#define BF16_FILE "Models/vibes1.7b/vibes1.7b-bf16.gguf"
+#define Q4_0_FILE "Models/vibes1.7b/vibes1.7b-Q4_0.gguf"
+#define BF16_FILE "Models/vibes1.7b/vibes1.7b-BF16.gguf"
 #define T_F32 0
 #define T_Q4_0 2
 #define T_Q8_0 8

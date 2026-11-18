@@ -227,7 +227,7 @@ int main(void)
   }
   else
     printf("  Inkling skipped: no Inkling-2-Small UD-IQ1_S first shard\n");
-  t = of("vibes1.7b/vibes1.7b-q40.gguf");
+  t = of("vibes1.7b/vibes1.7b-Q4_0.gguf");
   if (t)
   {
     const int32_t im_end = tokenizer_find(t, "<|im_end|>");

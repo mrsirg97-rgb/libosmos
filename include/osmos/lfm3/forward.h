@@ -83,10 +83,15 @@ typedef enum Lfm3Head
   LFM3_HEAD_FILE,
 } Lfm3Head;
 
+/* lsa: latent sparse attention's maps (the release's vibes1.7b-lsa-maps.safetensors: a full layer's W_Q_idx and
+   W_K_idx, F32 [256 x 64] - its 4 KV heads' zero-tail dims), or NULL: every full layer dense. with them a decode's
+   full layers read incarnate's served read (osmos/lsa.h: 512-key blocks, 64 buckets each, the top 1,024 buckets' keys
+   cut at 4,096, the window and the sinks); a prompt's stay dense (lsa.py's) */
 typedef struct Lfm3Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;
   Lfm3Head head;
+  const char *lsa;
 } Lfm3Options;
 /* the model's open files' paths are its Gguf's (the identity hashes them) */
 Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[LFM3_ERR]);
@@ -121,8 +126,9 @@ bool lfm3_greedy(Lfm3Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, cha
 
 /* the prompt ends at end (its last token end - 1): rows before it not kept (the head not run for them) */
 bool lfm3_seq_prompt(Lfm3Seq *s, uint32_t end);
-/* the tokens a sequence can drop (LFM3_MAX_BACK at most; 0 after a load or a new one), and the drop: every state as
-   before them - the bits of never having run them. false past the reach, unchanged */
+/* the tokens a sequence can drop (LFM3_MAX_BACK at most; 0 after a load or a new one; with LSA never across a block's
+   close: its buckets made of the keys), and the drop: every state as before them - the bits of never having run
+   them. false past the reach, unchanged */
 uint32_t lfm3_seq_reach(const Lfm3Seq *s);
 bool lfm3_seq_rollback(Lfm3Seq *s, uint32_t n);
 /* a sequence refused (every step, rollback, save) until a load: an engine's batch that failed past its step */

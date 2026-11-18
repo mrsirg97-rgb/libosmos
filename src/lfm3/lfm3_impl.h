@@ -4,7 +4,9 @@
 /* the lfm3 forward's state (osmos/lfm3/forward.h), shared by hip_lfm3_make.c (the weights, buffers, sequences) and
    hip_lfm3.c (the step) */
 
+#include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/lsa.h"
 #include "osmos/lfm3/forward.h"
 
 #define F 4ull               /* a float's bytes */
@@ -29,6 +31,16 @@ struct Lfm3Forward
   float *jo;          /* a joint's outputs (a token's) */
   void *x16;          /* a read's matrices' f16 input (MM_MAX_TOKENS rows of the widest) */
   float *fa_scratch;  /* a read's attention's (q4x_attn: the matrix cores'), q4x_attn_scratch floats */
+  /* latent sparse attention (Lfm3Options' lsa): a full layer's maps (device, lsa_in x LSA_DIM), the read's scratch,
+     a query's index and read (device), a block's index vectors, centroids and buckets on the host (Ward's) */
+  bool lsa;
+  uint32_t lsa_in;
+  float *wq[LFM3_MAX_LAYERS], *wk[LFM3_MAX_LAYERS];
+  LsaScratch *lsa_s;
+  float *iq;
+  uint32_t *list, *list_n;
+  float *h_ik, *h_cent;
+  int32_t *h_mem;
   int32_t *overflow;  /* an activation past f16's range in a read (mm_x16's): the step refused */
   void *st;
   /* a step's buffers: max_tokens rows each */
@@ -53,6 +65,11 @@ struct Lfm3Seq
   float *conv[LFM3_MAX_LAYERS];         /* a convolution layer's state ring (LFM3_CONV_SLOTS x (taps - 1) x D) */
   void *kc[LFM3_MAX_LAYERS], *vc[LFM3_MAX_LAYERS]; /* an attention layer's Q8_0 cache: a full layer's a row a
                                                        position, a sliding layer's a ring of f->ring rows */
+  /* with LSA a full layer's index vectors (a row a position), its closed blocks' centroids and buckets; the closed
+     blocks' count (every full layer's the same) */
+  float *ik[LFM3_MAX_LAYERS], *cent[LFM3_MAX_LAYERS];
+  int32_t *mem[LFM3_MAX_LAYERS];
+  uint32_t closed;
 };
 
 /* a step's runs: each sequence's tokens at rows off .. off + len - 1 of the step */
@@ -61,6 +78,14 @@ typedef struct Lfm3Run
   Lfm3Seq *s;
   uint32_t off, len;
 } Lfm3Run;
+
+/* a head's position-free dims, LSA's index input: the zero tail's (the rotated pairs (i, i + head_dim / 2), i <
+   rope_pairs; the rest the free) */
+static inline LsaDims lfm3_free_dims(const Lfm3Geometry *g)
+{
+  const uint32_t half = (uint32_t)g->head_dim / 2, p = (uint32_t)g->rope_pairs;
+  return (LsaDims){p, half, half + p, (uint32_t)g->head_dim};
+}
 
 bool lfm3_fail(char *err, const char *why);
 bool lfm3_alloc(void *p, uint64_t bytes);

@@ -57,6 +57,56 @@ static bool kv_put(Lfm3Forward *f, const Lfm3Run *r, const float *vf, int l, boo
   return ok;
 }
 
+/* a full layer's blocks closed up to `want` (each its 512 keys indexed): its index vectors to the host, Ward there
+   (src/lsa's lsa_block), its buckets back - every full layer's at once (the count the sequence's) */
+static bool close_blocks(Lfm3Forward *f, Lfm3Seq *s, int l, uint32_t want, uint32_t from)
+{
+  for (uint32_t b = from; b < want; b++)
+    if (hipMemcpyAsync(f->h_ik, s->ik[l] + (uint64_t)b * LSA_WINDOW * LSA_DIM, LSA_WINDOW * LSA_DIM * F,
+                       hipMemcpyDeviceToHost, f->st) != hipSuccess ||
+        hipStreamSynchronize((hipStream_t)f->st) != hipSuccess || !lsa_block(f->h_ik, b, f->h_cent, f->h_mem) ||
+        hipMemcpy(s->cent[l] + (uint64_t)b * LSA_BUCKETS * LSA_DIM, f->h_cent, LSA_BUCKETS * LSA_DIM * F,
+                  hipMemcpyHostToDevice) != hipSuccess ||
+        hipMemcpy(s->mem[l] + (uint64_t)b * LSA_BUCKETS * LSA_CAP, f->h_mem, LSA_BUCKETS * LSA_CAP * 4,
+                  hipMemcpyHostToDevice) != hipSuccess)
+      return false;
+  return true;
+}
+
+/* LSA on a full layer's run: its keys indexed (the zero tail's dims, post-norm; the rotation leaves them), the blocks
+   they close bucketed; a decode's tokens each its read (the blocks closed before its window) and its attention over
+   the read alone - a prompt's stays dense (lsa.py's) */
+static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *gt, bool read, bool *done)
+{
+  const Lfm3Geometry *g = &f->w->geo;
+  const uint32_t H = (uint32_t)g->n_heads, KV = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim;
+  const uint32_t q = H * hd, kv = KV * hd, P = (uint32_t)R->s->pos, n = R->len;
+  const LsaDims fd = lfm3_free_dims(g);
+  const AttnShape shape = {hd, 0, 0};
+  Lfm3Seq *s = R->s;
+  *done = false;
+  if (!lsa_index_gpu(f->kr + (uint64_t)R->off * kv, n, kv, KV, 1, hd, &fd, f->wk[l], true,
+                     s->ik[l] + (uint64_t)P * LSA_DIM, f->st))
+    return false;
+  if (read)
+    return close_blocks(f, s, l, (P + n) / LSA_WINDOW, s->closed);
+  uint32_t closed = s->closed;
+  for (uint32_t t = 0; t < n; t++)
+  {
+    const uint64_t at = (uint64_t)R->off + t;
+    const uint32_t want = (P + t) / LSA_WINDOW;
+    if (!close_blocks(f, s, l, want, closed) ||
+        !lsa_index_gpu(f->qr + at * q, 1, q, KV, H / KV, hd, &fd, f->wq[l], false, f->iq, f->st) ||
+        !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], want, f->lsa_s, f->list, f->list_n, f->st) ||
+        !q35_attn_read(f->qr + at * q, s->kc[l], s->vc[l], H, KV, hd, &shape, f->list, f->list_n, LSA_READ_MAX,
+                       gt + at * H, f->attn_scratch, f->att + at * q, f->st))
+      return false;
+    closed = want > closed ? want : closed;
+  }
+  *done = true;
+  return close_blocks(f, s, l, (P + n) / LSA_WINDOW, closed);
+}
+
 static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n, bool read)
 {
   const Lfm3Geometry *g = &f->w->geo;
@@ -80,6 +130,11 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
                 lfm3_fv(f, L->q_norm), lfm3_fv(f, L->k_norm), g->rms_eps, R->s->pos, f->qr + o * q, NULL,
                 f->kr + o * kv, f->st) &&
          kv_put(f, R, vf, l, sliding, kv);
+    bool done = false; /* the run's attention done by its read (LSA's decode) */
+    if (ok && f->lsa && g->kind[l] == LFM3_FULL)
+      ok = lsa_attention(f, R, l, gt, read, &done);
+    if (done)
+      continue;
     if (read) /* a prompt's: the run's step on the matrix cores (q4x_attn: f16 q, k, v and weights) */
     {
       ok = ok && q4x_attn(f->qr + o * q, R->s->kc[l], R->s->vc[l], R->len, H, KV, hd, (uint32_t)R->s->pos,
@@ -188,6 +243,8 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   {
     Lfm3Seq *s = run[r].s;
     s->pos += (int32_t)run[r].len, s->cur = (s->cur + run[r].len) % LFM3_CONV_SLOTS;
+    if (f->lsa)
+      s->closed = (uint32_t)s->pos / LSA_WINDOW; /* every full layer's blocks closed to here (lsa_attention's) */
     s->back = s->back + run[r].len < LFM3_MAX_BACK ? s->back + run[r].len : LFM3_MAX_BACK;
   }
   return true;

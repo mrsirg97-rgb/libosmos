@@ -1974,8 +1974,8 @@ decisions (operator, 2026-11-17):
   Q4_0 (their types alone added, against llama.cpp on the same files).
 
 revised (operator, 2026-11-18) - the release as it ships, brought up on the Halo:
-- **the files**: mrsirg97-rgb/vibes1.7b (recipe v ii) - vibes1.7b-q40.gguf (1.36 GB, the model: trained on the Q4_0
-  grid), vibes1.7b-bf16.gguf (the same values in BF16), vibes1.7b-lsa-maps.safetensors (step 3's); ~/Models/vibes1.7b,
+- **the files**: mrsirg97-rgb/vibes1.7b (recipe v ii) - vibes1.7b-Q4_0.gguf (1.36 GB, the model: trained on the Q4_0
+  grid), vibes1.7b-BF16.gguf (the same values in BF16), vibes1.7b-lsa-maps.safetensors (step 3's); ~/Models/vibes1.7b,
   every one against the release's SHA256SUMS. no NVFP4 file: its per-matrix scales leave the schema (Lfm3Layer's
   s_* fields), every matrix the file's one type.
 - **Q4_0 first**, not BF16: the Q4_0 file is the trained model, and the oracle reads the file's own values - Liquid's
