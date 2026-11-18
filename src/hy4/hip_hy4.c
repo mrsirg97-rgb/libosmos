@@ -97,16 +97,15 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
             hipMemcpyAsync(f->pos, f->pin_pos, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             hy4_engram_read(f, run, runs, n);
   ok = ok && launches(f, run, runs, n, kept, read);
-  ok = ok && hipStreamSynchronize(f->st) == hipSuccess;
-  int32_t over = 0, fault = 0;
-  ok = ok && hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess &&
-       hipMemcpy(&fault, f->fault, 4, hipMemcpyDeviceToHost) == hipSuccess;
+  ok = ok && hipMemcpyAsync(f->pin_flags, f->overflow, 8, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
+       hipStreamSynchronize(f->st) == hipSuccess;
+  const int32_t over = ok ? f->pin_flags[0] : 0, fault = ok ? f->pin_flags[1] : 0;
   f->rows = ok && !over && !fault ? n : 0;
   if (!ok || over || fault)
   {
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
-    hipMemset(f->overflow, 0, 4), hipMemset(f->fault, 0, 4);
+    hipMemset(f->overflow, 0, 8);
     return hy4_fail(err, over    ? "an activation past f16's range (the step refused)"
                          : fault ? "the router picked an expert out of range or twice (the step refused)"
                                  : "a GPU call or an Engram read failed in the step");

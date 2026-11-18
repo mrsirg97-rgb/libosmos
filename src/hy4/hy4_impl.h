@@ -41,6 +41,7 @@ struct Hy4Forward
   int32_t *overflow;
   void *st;                   /* the step's stream (every launch) */
   int32_t *fault;             /* a decode's routing saw a pick out of range or twice (hy4_route): the step refused */
+  int32_t *pin_flags;         /* overflow and fault (one buffer on the GPU: fault = overflow + 1) read with one copy */
   uint32_t *rx, *ry, *rxd, *ryd, *h_rx, *h_ry, *h_rxd, *h_ryd;
   int32_t *rgidx, *rhidx, *h_rgidx, *h_rhidx, *rcnt, *h_rcnt;
   const void **rw, **h_rw;    /* the entries' gate, up, down (3 x entries) */
