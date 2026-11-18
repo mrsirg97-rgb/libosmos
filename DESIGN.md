@@ -2136,6 +2136,56 @@ then the drafter and speed.
 - **done when**: the forward's logits match llama.cpp on the GGUF within the tolerances its tests state (Engram's fp8
   the measured difference), each piece its oracle's.
 
+### 0.10.0 step 2: Hy4-flash's sequence and forward (design, 2026-11-18)
+
+step 1's pieces (osmos/hy4/weights.h, osmos/gpu/hy4_ops.h, the MoE's ops) each the reference's within ~2e-6; step 2
+runs them as the model: one forward, its sequences, the whole forward against the reference. the engine's family
+(hip_engine_hy4.c) and osmos-api's dialect after it (2b), the speed after that (step 3).
+
+- **the shape**: q35's - include/osmos/hy4/forward.h (Hy4Forward, Hy4Seq, hy4_step_runs, the q35 contracts:
+  rollback, reach, prompt, state, marks), src/hy4/hip_hy4.c (the step), hip_hy4_make.c (the weights to the GPU:
+  gpu_read_tensor, every tensor but the Engram table), hip_hy4_seq.c (a sequence).
+- **one math, prompt and decode**: every step-1 piece computes a token alone (a block a token or a head and token,
+  fixed trees), mv_strided's matrices a token's sums whatever the step - so a token's bits are the same however its
+  sequence is split into steps, and the prompt path is the decode path. step 3 adds the read math (the matmul, a
+  flash attention) the way spark's and q35's did, its bits its own.
+- **a layer** (the reference's HYV4FlashDecoderLayer): Engram's residual (layers 1, 11, 21, 31); iHC pre -> attn_norm
+  -> MLA (q_a, its norm, q_b; kv_a; the gate; hy4_mla_*; o_proj) -> post_attention_norm -> iHC post; iHC pre ->
+  ffn_norm -> the MLP (layer 0 dense; else the router, the latent's down, each token's 16 experts, up, the shared
+  expert, their sum) -> post_ffw_norm -> iHC post. the head: hy4_hc_pre's collapse (output_norm), the Q8_0 head, F32
+  logits. the streams F32 throughout (the reference's BF16 rounding between layers not copied: KL measures it).
+- **the experts**: mv_group_tok (an expert read once for the step's tokens that picked it, a token's bits its own);
+  their sum a small op (the picks' weights applied before down, as step 1's test; hy4_moe_sum). the weights whole in
+  GPU memory (~89 GiB at NVFP4): no expert cache, no pool - the box holds them.
+- **Engram from the SSD**: the table (per_layer_token_embd, 67 GB) stays in its file. a step's rows (64 a token:
+  engram_rows on the token and the two before it) read by rowread (q4x's: threads of pread into pinned memory),
+  started as the step begins and waited for at layer 1 - a token's 64 x 102 bytes, a 2,048-token step ~13 MB; the
+  page cache holds what was read. decoded on the GPU (q4x_rows: Q8_0), then hy4_engram_rows, engram_kv (mv), its
+  update. a sequence keeps its last two tokens (the next step's n-grams), rolled back with it.
+- **a sequence's state**: a sparse layer - MLA's cache rows (latent + rope, F32: 2.3 KB a token a layer), its token
+  keys (128 F32) and its pooled groups (128 F32 a 4 tokens); a sliding layer - a ring of 512 + Hy4_MAX_BACK rows.
+  12 sparse layers at F32 ~31 KB a token: 128K tokens 4 GB, 1M 31 GB - past the box with the weights. step 2 holds F32
+  and a max_ctx the box fits (~256K); the Q8_0 cache (612 B a row: 1M ~10 GB with the keys) is step 3's, against KL.
+- **the indexer in a step**: a token's key written as it lands; a group pooled when its 4th key lands (hy4_ix_pool on
+  the groups the step completes); a sparse layer past 2,048 keys selects (hy4_ix_select over its complete groups),
+  else dense. rollback past a completed group: the group pooled again when its keys land again (its rows overwritten).
+  ix_select's score scratch is n_tok x the groups: a step's tokens x max_ctx / 4 - at 256K a 64-token step 16 MB;
+  long prompts in steps sized so (step 3 replaces it).
+- **rollback** (Hy4_MAX_BACK 8, a drafted round's): the cache's rows past a position never read again; the sliding
+  ring holds 8 rows past its window, so rolling back leaves the window whole; the two tokens kept for Engram as a
+  ring of Hy4_MAX_BACK + 2.
+- **the whole-forward reference** (oracle/hy4_forward.py): the reference's own decoder layers chained (step 1's
+  oracles' setup: HYV4FlashDecoderLayer with its real attention, MoE, MLP and Engram; the head) on CPU in F32 on the
+  GGUF's weights dequantised, every Engram row the table's - 2,600 ids (past the window and the indexer's 2,048) of
+  real text through the tokenizer: every layer's streams (taps), the logits. llama.cpp with Tencent's patch is a
+  cross-check, not the reference (it skips Engram's fp8 and hashes the map's tail otherwise).
+- **the order** (tests first): the sequence (rollback restores the bits: a step, a rollback, the step again; a step
+  of n against n steps of 1 - the same bits; state save and load); the forward against the reference - each layer's
+  streams within a stated error, the logits' KL and top-1 at 2,600 tokens; Engram's reads (the rows rowread brings
+  the table's, a token's n-gram across a step's boundary).
+- **done when**: hy4_step's logits match the reference's within the tolerances its test states, one token at a
+  time and 2,600 at once giving the same bits; then 2b (the engine, osmos-serve, osmos-api's hy_v4 dialect).
+
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
 the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,
