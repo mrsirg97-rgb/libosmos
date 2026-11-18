@@ -115,7 +115,7 @@ void hy4_forward_destroy(Hy4Forward *f)
     hipFree(f->fn_attn[l]), hipFree(f->fn_ffn[l]);
   void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->h, f->xn, f->y, f->post, f->hcs, f->table, f->attn_part, f->wtok, f->qr,
                f->qres, f->q, f->kva, f->gt, f->qa, f->olat, f->ao, f->out, f->ixk, f->ixq, f->ixw, f->scores, f->sel,
-               f->n_sel, f->x16, f->xe16, f->overflow, f->rx, f->ry, f->rxd, f->ryd, f->rcnt, f->rw, f->rgidx, f->rhidx,
+               f->n_sel, f->x16, f->xe16, f->overflow, f->fault, f->rx, f->ry, f->rxd, f->ryd, f->rcnt, f->rw, f->rgidx, f->rhidx,
                f->emb, f->ekv, f->ga, f->up, f->act, f->logit_r, f->rin, f->xg, f->eg_g, f->eg_u, f->eg_h,
                f->eg_y, f->wsel, f->rsum, f->sh, f->idx, f->gidx, f->sidx, f->cnt, f->xrow, f->wptr, f->tok, f->pos,
                f->hx, f->logits, f->ids, f->argmax};
@@ -124,8 +124,8 @@ void hy4_forward_destroy(Hy4Forward *f)
   hipHostFree(f->eg_stage), hipHostFree(f->pin_tok), hipHostFree(f->pin_pos), hipHostFree(f->pin_logits);
   rowread_destroy(f->eg_read);
   engram_destroy(f->eg);
-  free(f->eg_off), free(f->slot), free(f->h_idx), free(f->h_gidx), free(f->h_sidx), free(f->h_cnt), free(f->h_xrow);
-  free(f->h_wptr), free(f->h_w), free(f->h_wsel);
+  free(f->eg_off), free(f->slot), free(f->h_idx), free(f->h_gidx), free(f->h_sidx);
+  free(f->h_w), free(f->h_wsel);
   free(f->h_rx), free(f->h_ry), free(f->h_rxd), free(f->h_ryd), free(f->h_rcnt), free(f->h_rw), free(f->rkey);
   free(f->h_rgidx), free(f->h_rhidx), free(f->h_stage);
   free(f);
@@ -185,7 +185,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
     void *p;
     uint64_t bytes;
   } read_want[] = {
-      {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2}, {&f->xe16, scap * xe * 2}, {&f->overflow, 4},
+      {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2}, {&f->xe16, scap * xe * 2}, {&f->overflow, 4}, {&f->fault, 4},
       {&f->rx, ecap * 4}, {&f->ry, ecap * 4}, {&f->rxd, ecap * 4}, {&f->ryd, ecap * 4}, {&f->rcnt, ecap * 4},
       {&f->rw, 3 * ecap * sizeof(void *)}, {&f->rgidx, scap * 4}, {&f->rhidx, scap * 4},
 
@@ -194,7 +194,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   ok = ok && upload(f, err);
   for (size_t i = 0; ok && i < sizeof read_want / sizeof *read_want; i++)
     ok = hy4_alloc(read_want[i].p, read_want[i].bytes) || hy4_fail(err, "GPU memory refused (the read's buffers)");
-  ok = ok && hipMemset(f->overflow, 0, 4) == hipSuccess && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
+  ok = ok && hipMemset(f->overflow, 0, 4) == hipSuccess && hipMemset(f->fault, 0, 4) == hipSuccess && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
        (f->h_rxd = malloc(ecap * 4)) && (f->h_ryd = malloc(ecap * 4)) && (f->h_rcnt = malloc(ecap * 4)) &&
        (f->h_rw = malloc(3 * ecap * sizeof(void *))) && (f->rkey = malloc(ecap * 8)) &&
        (f->h_rgidx = malloc(scap * 4)) && (f->h_rhidx = malloc(scap * 4)) &&
@@ -213,8 +213,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
        hipHostMalloc((void **)&f->pin_pos, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&
        (f->h_idx = malloc(n * K * 4)) && (f->h_gidx = malloc(n * K * 4)) && (f->h_sidx = malloc(n * K * 4)) &&
-       (f->h_cnt = malloc(entries * 4)) && (f->h_xrow = malloc(entries * 4)) &&
-       (f->h_wptr = malloc(3 * entries * sizeof(void *))) && (f->h_w = malloc(n * K * F)) &&
+       (f->h_w = malloc(n * K * F)) &&
        (f->h_wsel = malloc(n * K * F)) && hipDeviceSynchronize() == hipSuccess;
   if (!ok)
     return hy4_forward_destroy(f), (err && !*err ? hy4_fail(err, "the forward not made") : false), NULL;

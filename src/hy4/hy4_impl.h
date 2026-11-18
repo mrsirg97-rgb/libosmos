@@ -39,6 +39,7 @@ struct Hy4Forward
      slots, f16's overflow; the experts' read tables (mm_group's: entries, slots) */
   void *x16, *xe16;
   int32_t *overflow;
+  int32_t *fault;             /* a decode's routing saw a pick out of range or twice (hy4_route): the step refused */
   uint32_t *rx, *ry, *rxd, *ryd, *h_rx, *h_ry, *h_rxd, *h_ryd;
   int32_t *rgidx, *rhidx, *h_rgidx, *h_rhidx, *rcnt, *h_rcnt;
   const void **rw, **h_rw;    /* the entries' gate, up, down (3 x entries) */
@@ -53,9 +54,8 @@ struct Hy4Forward
   float *logit_r, *wtok, *rin, *xg, *eg_g, *eg_u, *eg_h, *eg_y, *wsel, *rsum, *sh;
   int32_t *idx, *gidx, *sidx, *cnt, *xrow; /* the router's picks; the experts' order and back; mv_group_tok's table */
   void **wptr;                             /* mv_group_tok's matrices (device), a table of three */
-  int32_t *h_idx, *h_gidx, *h_sidx, *h_cnt, *h_xrow; /* host copies */
+  int32_t *h_idx, *h_gidx, *h_sidx;                  /* host copies (a read's routing) */
   float *h_w, *h_wsel;                                /* the router's weights, and in the experts' order */
-  const void **h_wptr;
   int32_t *tok, *pos, *pin_tok, *pin_pos;
   float *hx, *logits, *pin_logits;
   int32_t *slot, *ids, *argmax;

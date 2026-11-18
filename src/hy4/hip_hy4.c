@@ -92,17 +92,18 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
                     g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, f->w->output_norm), kept, f->xn, NULL, f->hcs, NULL) &&
          hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read);
   ok = ok && hipStreamSynchronize(NULL) == hipSuccess;
-  int32_t over = 0;
-  ok = ok && hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
-  f->rows = ok && !over ? n : 0;
-  if (!ok || over)
+  int32_t over = 0, fault = 0;
+  ok = ok && hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess &&
+       hipMemcpy(&fault, f->fault, 4, hipMemcpyDeviceToHost) == hipSuccess;
+  f->rows = ok && !over && !fault ? n : 0;
+  if (!ok || over || fault)
   {
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
-    if (over)
-      hipMemset(f->overflow, 0, 4);
-    return hy4_fail(err, over ? "an activation past f16's range (the step refused)"
-                              : "a GPU call or an Engram read failed in the step");
+    hipMemset(f->overflow, 0, 4), hipMemset(f->fault, 0, 4);
+    return hy4_fail(err, over    ? "an activation past f16's range (the step refused)"
+                         : fault ? "the router picked an expert out of range or twice (the step refused)"
+                                 : "a GPU call or an Engram read failed in the step");
   }
   for (uint32_t r = 0; r < runs; r++)
   {

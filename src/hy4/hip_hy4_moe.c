@@ -1,6 +1,6 @@
 /* the hy4 latent MoE (hy4_impl.h's hy4_moe): the router, the routed experts in the latent - each expert read once for
    the tokens that picked it, a decode's on the matvecs (mv_fp4_tok, mv_group_tok), a prompt's on the matrix cores
-   (mm_group over each expert's gathered tokens) - the shared expert, the combine norm. a token's sums its own in
+   (mm_group over each expert's gathered tokens); a decode's tables built on the GPU (hy4_route), a read's on the host - the shared expert, the combine norm. a token's sums its own in
    either: its picks' order and its sum's (slot order) its own */
 #include <math.h>
 #include <stdlib.h>
@@ -8,6 +8,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/gpu/hy4_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -16,10 +17,7 @@
 
 #define FP4_TOK_MAX 4 /* a decode entry's tokens at most: mv_fp4_tok's for NVFP4 experts, mv_group_tok's else */
 
-static uint32_t chunk_of(const GgufTensor *t, bool read)
-{
-  return read ? MM_MAX_TOKENS : t->type == QTYPE_NVFP4 ? FP4_TOK_MAX : MV_MAX_TOKENS;
-}
+static uint32_t mv_chunk(const GgufTensor *t) { return t->type == QTYPE_NVFP4 ? FP4_TOK_MAX : MV_MAX_TOKENS; }
 
 uint64_t hy4_read_entries(uint64_t n, const Hy4Geometry *g)
 {
@@ -32,11 +30,11 @@ uint64_t hy4_read_slots(uint64_t n, const Hy4Geometry *g)
   return n * (uint64_t)g->n_used + (uint64_t)g->n_experts * (MM_TILE - 1); /* each expert's padded to a tile */
 }
 
-/* the step's picks grouped by expert (ascending; within one, its tokens ascending): each sorted row's token and
-   weight, each (token, slot)'s row; the entries - a decode's (mv's table, an expert's rows in chunks of its kernel's
-   count) or a read's (mm_group's: chunks of MM_MAX_TOKENS, each expert's slots a whole number of tiles, the entries
-   ordered by count so a launch is a run of the same column tiles) */
-static bool route(Hy4Forward *f, int l, uint32_t n, bool read, uint32_t *entries, uint32_t *slots)
+/* a read's picks grouped by expert on the host (ascending; within one, its tokens ascending): each sorted row's token
+   and weight, each (token, slot)'s row; mm_group's entries (chunks of MM_MAX_TOKENS, each expert's slots a whole
+   number of tiles, the entries ordered by count so a launch is a run of the same column tiles). a decode's tables
+   are the GPU's (hy4_route: no host between the router and the experts) */
+static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t *slots)
 {
   const Hy4Geometry *g = &f->w->geo;
   const Hy4Layer *L = &f->w->layer[l];
@@ -47,7 +45,7 @@ static bool route(Hy4Forward *f, int l, uint32_t n, bool read, uint32_t *entries
     return false;
   const uint64_t bytes_g = L->exp_gate->bytes / E, bytes_u = L->exp_up->bytes / E, bytes_d = L->exp_down->bytes / E;
   const uint8_t *bg = hy4_dev(f, L->exp_gate), *bu = hy4_dev(f, L->exp_up), *bd = hy4_dev(f, L->exp_down);
-  const uint32_t chunk = chunk_of(L->exp_gate, read);
+  const uint32_t chunk = MM_MAX_TOKENS;
   uint32_t r = 0, e_n = 0, s_n = 0;
   for (uint32_t e = 0; e < E; e++)
   {
@@ -61,27 +59,18 @@ static bool route(Hy4Forward *f, int l, uint32_t n, bool read, uint32_t *entries
     for (uint32_t c = first; c < r; c += chunk, e_n++)
     {
       const uint32_t cnt = r - c < chunk ? r - c : chunk;
-      if (!read)
-      {
-        f->h_cnt[e_n] = (int32_t)cnt, f->h_xrow[e_n] = (int32_t)c;
-        f->h_wptr[e_n] = bg + e * bytes_g, f->h_wptr[nk + e_n] = bu + e * bytes_u, f->h_wptr[2 * nk + e_n] = bd + e * bytes_d;
-        continue;
-      }
       const uint32_t slot = s_n + (c - first);
       f->h_rcnt[e_n] = (int32_t)cnt;
       f->h_rx[e_n] = slot * lat, f->h_ry[e_n] = c * ffe, f->h_rxd[e_n] = slot * ffe, f->h_ryd[e_n] = c * lat;
       f->h_rw[3 * e_n] = bg + e * bytes_g, f->h_rw[3 * e_n + 1] = bu + e * bytes_u, f->h_rw[3 * e_n + 2] = bd + e * bytes_d;
       f->rkey[e_n] = (uint64_t)cnt << 32 | e_n;
     }
-    if (read)
-    {
-      for (uint32_t q = first; q < r; q++)
-        f->h_rgidx[s_n + (q - first)] = f->h_gidx[q], f->h_rhidx[s_n + (q - first)] = (int32_t)q;
-      const uint32_t padded = (r - first + MM_TILE - 1) / MM_TILE * MM_TILE;
-      for (uint32_t s = s_n + (r - first); s < s_n + padded; s++)
-        f->h_rgidx[s] = f->h_rhidx[s] = -1;
-      s_n += padded;
-    }
+    for (uint32_t q = first; q < r; q++)
+      f->h_rgidx[s_n + (q - first)] = f->h_gidx[q], f->h_rhidx[s_n + (q - first)] = (int32_t)q;
+    const uint32_t padded = (r - first + MM_TILE - 1) / MM_TILE * MM_TILE;
+    for (uint32_t s = s_n + (r - first); s < s_n + padded; s++)
+      f->h_rgidx[s] = f->h_rhidx[s] = -1;
+    s_n += padded;
   }
   *entries = e_n, *slots = s_n;
   if (r != nk)
@@ -89,10 +78,6 @@ static bool route(Hy4Forward *f, int l, uint32_t n, bool read, uint32_t *entries
   bool ok = hipMemcpy(f->sidx, f->h_sidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
             hipMemcpy(f->wsel, f->h_wsel, (size_t)nk * F, hipMemcpyHostToDevice) == hipSuccess &&
             hipMemcpy(f->gidx, f->h_gidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess;
-  if (!read)
-    return ok && hipMemcpy(f->cnt, f->h_cnt, (size_t)e_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
-           hipMemcpy(f->xrow, f->h_xrow, (size_t)e_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
-           hipMemcpy(f->wptr, f->h_wptr, (size_t)3 * nk * sizeof(void *), hipMemcpyHostToDevice) == hipSuccess;
   /* the entries by count (each count's in build order): mm_group's launches runs of the same column tiles */
   for (uint32_t i = 1; i < e_n; i++) /* (insertion sort: a layer's entries are a few hundred) */
     for (uint32_t j = i; j > 0 && f->rkey[j - 1] > f->rkey[j]; j--)
@@ -153,19 +138,24 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read)
 {
   const Hy4Geometry *g = &f->w->geo;
   const Hy4Layer *L = &f->w->layer[l];
-  const uint32_t K = (uint32_t)g->n_used, lat = (uint32_t)g->latent, ffe = (uint32_t)g->ff_exp, nk = n * K;
-  uint32_t entries = 0, slots = 0;
-  if (!route(f, l, n, read, &entries, &slots))
-    return false;
+  const uint32_t K = (uint32_t)g->n_used, E = (uint32_t)g->n_experts, nk = n * K;
+  const uint32_t lat = (uint32_t)g->latent, ffe = (uint32_t)g->ff_exp;
   if (!read)
   {
+    const void *base[3] = {hy4_dev(f, L->exp_gate), hy4_dev(f, L->exp_up), hy4_dev(f, L->exp_down)};
+    const uint64_t bytes[3] = {L->exp_gate->bytes / E, L->exp_up->bytes / E, L->exp_down->bytes / E};
     const void **wg = (const void **)f->wptr, **wu = wg + nk, **wd = wg + 2 * nk;
-    return ops_gather_rows(f->xg, f->rin, f->gidx, nk, lat, NULL) &&
-           mv_experts(L->exp_gate, wg, f, entries, ffe, lat, f->xg, f->eg_g) &&
-           mv_experts(L->exp_up, wu, f, entries, ffe, lat, f->xg, f->eg_u) &&
+    return hy4_route(f->idx, f->wtok, n, K, E, mv_chunk(L->exp_gate), base, bytes, f->gidx, f->sidx, f->wsel, f->cnt,
+                     f->xrow, wg, f->fault, NULL) &&
+           ops_gather_rows(f->xg, f->rin, f->gidx, nk, lat, NULL) &&
+           mv_experts(L->exp_gate, wg, f, nk, ffe, lat, f->xg, f->eg_g) &&
+           mv_experts(L->exp_up, wu, f, nk, ffe, lat, f->xg, f->eg_u) &&
            ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, NULL) &&
-           mv_experts(L->exp_down, wd, f, entries, lat, ffe, f->eg_h, f->eg_y);
+           mv_experts(L->exp_down, wd, f, nk, lat, ffe, f->eg_h, f->eg_y);
   }
+  uint32_t entries = 0, slots = 0;
+  if (!route(f, l, n, &entries, &slots))
+    return false;
   const uint64_t ecap = hy4_read_entries(f->max_tokens, g);
   const void **rw = f->rw;
   return mm_x16_rows(f->rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, NULL) &&
