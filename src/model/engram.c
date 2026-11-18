@@ -161,6 +161,13 @@ Engram *engram_create(const Weights *w, const int *fds, char err[ENGRAM_ERR])
   return e;
 }
 
+Engram *engram_create_shape(const EngramShape *s, char err[ENGRAM_ERR])
+{
+  (void)s;
+  fail(err, "a stated shape: not built yet");
+  return NULL;
+}
+
 void engram_destroy(Engram *e)
 {
   if (!e)
