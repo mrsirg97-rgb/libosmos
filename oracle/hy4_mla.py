@@ -41,18 +41,9 @@ def param(t):
     return nn.Parameter(torch.from_numpy(np.ascontiguousarray(t, dtype=np.float32)), requires_grad=False)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--modeling", required=True)
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--gguf", required=True)
-    ap.add_argument("--out", required=True)
-    a = ap.parse_args()
-    torch.set_grad_enabled(False)
-    R = P.reference(a.modeling, NAMES, {"ALL_ATTENTION_FUNCTIONS": Interfaces, "ROPE_INIT_FUNCTIONS": {},
-                                        "dynamic_rope_update": None, "Callable": object})
-    c = json.load(open(a.config))["text_config"]
-    g = Gguf(a.gguf)
+def make_config(c):
+    """the reference's text config as its attention reads it (config.json's text_config, its layer kinds
+    renamed as the configuration class does)"""
     sliding = c["swa_pattern"]
     rope = {"indexed_attention": c["rope_parameters"]["deepseek_sparse_attention"],
             "sliding_attention": c["rope_parameters"]["sliding_attention"]}
@@ -73,36 +64,60 @@ def main():
         compressed_indexer_group_topk=c["compressed_indexer_group_topk"],
         candidate_topk=c["compressed_indexer_group_topk"] * c["compressed_indexer_compress_ratio"],
         sliding_window=c["sliding_window"])
+    return config
+
+
+def attention(R, config, g, L):
+    """layer L's HYV4FlashAttention on the GGUF's weights (kv_b_proj rebuilt from k_b and v_b)"""
+    blk = f"blk.{L}."
+    att = R["HYV4FlashAttention"](config, L)
+    H, nope, vd = att.num_heads, att.qk_nope_head_dim, att.v_head_dim
+    set_ = lambda m, name, t: setattr(m, name, param(t))  # noqa: E731
+    set_(att.q_a_proj, "weight", g.tensor(blk + "attn_q_a.weight"))
+    set_(att.q_a_layernorm, "weight", g.tensor(blk + "attn_q_a_norm.weight"))
+    set_(att.q_b_proj, "weight", g.tensor(blk + "attn_q_b.weight"))
+    set_(att.kv_a_proj_with_mqa, "weight", g.tensor(blk + "attn_kv_a_mqa.weight"))
+    set_(att.kv_a_layernorm, "weight", g.tensor(blk + "attn_kv_a_norm.weight"))
+    k_b, v_b = g.tensor(blk + "attn_k_b.weight"), g.tensor(blk + "attn_v_b.weight")  # [H][512][192], [H][256][512]
+    set_(att.kv_b_proj, "weight", np.concatenate([np.concatenate([k_b[h].T, v_b[h]]) for h in range(H)]))
+    set_(att.gate_proj, "weight", g.tensor(blk + "attn_gate.weight"))
+    set_(att.o_proj, "weight", g.tensor(blk + "attn_output.weight"))
+    set_(att.post_proj_norm, "weight", g.tensor(blk + "post_attention_norm.weight"))
+    att.sinks = param(g.tensor(blk + "attn_sinks.weight"))
+    if att.compressed_indexer is not None:
+        ix = att.compressed_indexer
+        set_(ix.query_projection, "weight", g.tensor(blk + "indexer.attn_q_b.weight"))
+        set_(ix.head_weight_projection, "weight", g.tensor(blk + "indexer.proj.weight"))
+        set_(ix.token_key_projection, "weight", g.tensor(blk + "indexer.attn_k.weight"))
+        set_(ix.token_key_norm, "weight", g.tensor(blk + "indexer.k_norm.weight"))
+        set_(ix.key_value_projection, "weight", g.tensor(blk + "indexer_compressor_value.weight"))
+        set_(ix.key_gate_projection, "weight", g.tensor(blk + "indexer_compressor_gate.weight"))
+        set_(ix.key_norm, "weight", g.tensor(blk + "indexer_compressor_norm.weight"))
+        ix.intra_group_ape = param(g.tensor(blk + "indexer_compressor_ape.weight"))
+    return att
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--modeling", required=True)
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--gguf", required=True)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args()
+    torch.set_grad_enabled(False)
+    R = P.reference(a.modeling, NAMES, {"ALL_ATTENTION_FUNCTIONS": Interfaces, "ROPE_INIT_FUNCTIONS": {},
+                                        "dynamic_rope_update": None, "Callable": object})
+    c = json.load(open(a.config))["text_config"]
+    g = Gguf(a.gguf)
+    config = make_config(c)
     rotary = R["HYV4FlashRotaryEmbedding"](config)
     rng = np.random.default_rng(SEED)
     pos = torch.arange(T).view(1, 1, -1).expand(3, 1, -1)
     arrays = {}
     for L in LAYERS:
         blk, kind = f"blk.{L}.", config.layer_types[L]
-        att = R["HYV4FlashAttention"](config, L)
+        att = attention(R, config, g, L)
         H, nope, vd = att.num_heads, att.qk_nope_head_dim, att.v_head_dim
-        set_ = lambda m, name, t: setattr(m, name, param(t))  # noqa: E731
-        set_(att.q_a_proj, "weight", g.tensor(blk + "attn_q_a.weight"))
-        set_(att.q_a_layernorm, "weight", g.tensor(blk + "attn_q_a_norm.weight"))
-        set_(att.q_b_proj, "weight", g.tensor(blk + "attn_q_b.weight"))
-        set_(att.kv_a_proj_with_mqa, "weight", g.tensor(blk + "attn_kv_a_mqa.weight"))
-        set_(att.kv_a_layernorm, "weight", g.tensor(blk + "attn_kv_a_norm.weight"))
-        k_b, v_b = g.tensor(blk + "attn_k_b.weight"), g.tensor(blk + "attn_v_b.weight")  # [H][512][192], [H][256][512]
-        set_(att.kv_b_proj, "weight", np.concatenate([np.concatenate([k_b[h].T, v_b[h]]) for h in range(H)]))
-        set_(att.gate_proj, "weight", g.tensor(blk + "attn_gate.weight"))
-        set_(att.o_proj, "weight", g.tensor(blk + "attn_output.weight"))
-        set_(att.post_proj_norm, "weight", g.tensor(blk + "post_attention_norm.weight"))
-        att.sinks = param(g.tensor(blk + "attn_sinks.weight"))
-        if att.compressed_indexer is not None:
-            ix = att.compressed_indexer
-            set_(ix.query_projection, "weight", g.tensor(blk + "indexer.attn_q_b.weight"))
-            set_(ix.head_weight_projection, "weight", g.tensor(blk + "indexer.proj.weight"))
-            set_(ix.token_key_projection, "weight", g.tensor(blk + "indexer.attn_k.weight"))
-            set_(ix.token_key_norm, "weight", g.tensor(blk + "indexer.k_norm.weight"))
-            set_(ix.key_value_projection, "weight", g.tensor(blk + "indexer_compressor_value.weight"))
-            set_(ix.key_gate_projection, "weight", g.tensor(blk + "indexer_compressor_gate.weight"))
-            set_(ix.key_norm, "weight", g.tensor(blk + "indexer_compressor_norm.weight"))
-            ix.intra_group_ape = param(g.tensor(blk + "indexer_compressor_ape.weight"))
         seen = {}
         hook = lambda key: (lambda m, i, o: seen.__setitem__(key, o.detach().clone()))  # noqa: E731
         att.q_b_proj.register_forward_hook(hook("q"))
@@ -122,7 +137,7 @@ def main():
                        p + "sinks": g.tensor(blk + "attn_sinks.weight"),
                        p + "k_b_q8": g.raw(blk + "attn_k_b.weight").view(np.float32),
                        p + "v_b_q8": g.raw(blk + "attn_v_b.weight").view(np.float32),
-                       p + "rope_base": np.array([rope[kind]["rope_theta"]], dtype=np.float32),
+                       p + "rope_base": np.array([config.rope_parameters[kind]["rope_theta"]], dtype=np.float32),
                        p + "shape": np.array([H, nope, vd, config.kv_lora_rank, config.qk_rope_head_dim,
                                               config.sliding_window if kind == "sliding_attention" else 0],
                                              dtype=np.float32)})

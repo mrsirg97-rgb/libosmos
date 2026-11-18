@@ -186,17 +186,24 @@ __global__ __launch_bounds__(kThreads) void mla_q_kernel(const float* q, const u
 // in LDS; the softmax with the sink (a fixed tree each); the latent's values summed over the keys in order
 __global__ __launch_bounds__(kThreads) void mla_attn_kernel(const float* qa, const float* cache, const float* sinks,
                                                             uint32_t latent, uint32_t rope_dim, uint32_t window,
-                                                            float scale, const int32_t* pos, float* o_lat) {
+                                                            const int32_t* sel, const int32_t* n_sel,
+                                                            uint32_t sel_cap, uint32_t pool, float scale,
+                                                            const int32_t* pos, float* o_lat) {
   __shared__ float sc[HY4_MLA_MAX_KEYS], qs[HY4_MLA_MAX_LATENT + kMaxRope], lds[kThreads];
   const uint32_t h = blockIdx.x, t = blockIdx.y, heads = gridDim.x, row = latent + rope_dim;
   const int32_t p = pos[t], lo = window && p >= (int32_t) window ? p - (int32_t) window + 1 : 0;
-  const uint32_t n = (uint32_t) (p - lo + 1);
+  // key k's position: lo + k, or the k-th token of the selected groups (ascending; the last the token's own, up to p)
+  const int32_t* gs = sel ? sel + (uint64_t) t * sel_cap : nullptr;
+  const uint32_t groups = sel ? (uint32_t) n_sel[t] : 0;
+  const uint32_t n = sel ? (groups - 1) * pool + (uint32_t) (p - gs[groups - 1] * (int32_t) pool + 1)
+                         : (uint32_t) (p - lo + 1);
+  auto at = [&](uint32_t k) -> int64_t { return sel ? (int64_t) gs[k / pool] * pool + k % pool : lo + (int64_t) k; };
   const float* qh = qa + ((uint64_t) t * heads + h) * row;
   for (uint32_t i = threadIdx.x; i < row; i += kThreads) qs[i] = qh[i];
   __syncthreads();
   const uint32_t wave = threadIdx.x / 32, lane = threadIdx.x % 32;
   for (uint32_t k = wave; k < n; k += kWaves) {
-    const float* r = cache + (uint64_t) (lo + k) * row;
+    const float* r = cache + (uint64_t) at(k) * row;
     float acc = 0;
     for (uint32_t i = lane; i < row; i += 32) acc = fmaf(qs[i], r[i], acc);
     for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor(acc, off, 32);
@@ -215,7 +222,7 @@ __global__ __launch_bounds__(kThreads) void mla_attn_kernel(const float* qa, con
   float* out = o_lat + ((uint64_t) t * heads + h) * latent;
   for (uint32_t d = threadIdx.x; d < latent; d += kThreads) {
     float acc = 0;
-    for (uint32_t k = 0; k < n; k++) acc = fmaf(sc[k], cache[(uint64_t) (lo + k) * row + d], acc);
+    for (uint32_t k = 0; k < n; k++) acc = fmaf(sc[k], cache[(uint64_t) at(k) * row + d], acc);
     out[d] = acc;
   }
 }
@@ -298,13 +305,15 @@ extern "C" bool hy4_mla_q(const float* q, const void* k_b, uint32_t heads, uint3
 }
 
 extern "C" bool hy4_mla_attn(const float* qa, const float* cache, const float* sinks, uint32_t heads,
-                             uint32_t latent, uint32_t rope_dim, uint32_t window, float scale, const int32_t* pos,
+                             uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t* sel,
+                             const int32_t* n_sel, uint32_t sel_cap, uint32_t pool, float scale, const int32_t* pos,
                              uint32_t n_tok, float* o_lat, void* stream) {
   if (!qa || !cache || !sinks || !pos || !o_lat || !heads || !latent || latent > HY4_MLA_MAX_LATENT || !rope_dim ||
       rope_dim > kMaxRope || !n_tok || (window && window > HY4_MLA_MAX_KEYS))
     return false;
-  mla_attn_kernel<<<dim3(heads, n_tok), kThreads, 0, st(stream)>>>(qa, cache, sinks, latent, rope_dim, window, scale,
-                                                                   pos, o_lat);
+  if (sel && (!n_sel || window || !pool || !sel_cap || (uint64_t) sel_cap * pool > HY4_MLA_MAX_KEYS)) return false;
+  mla_attn_kernel<<<dim3(heads, n_tok), kThreads, 0, st(stream)>>>(qa, cache, sinks, latent, rope_dim, window, sel,
+                                                                   n_sel, sel_cap, pool, scale, pos, o_lat);
   return ok();
 }
 
@@ -316,4 +325,17 @@ extern "C" bool hy4_mla_out(const float* o_lat, const void* v_b, const float* ga
   mla_out_kernel<<<dim3(heads, n_tok), kThreads, 0, st(stream)>>>(o_lat, (const uint8_t*) v_b, gate, latent, v_dim,
                                                                   out);
   return ok();
+}
+
+extern "C" bool hy4_ix_pool(const float*, const void*, const void*, const float*, const float*, uint32_t, uint32_t,
+                            uint32_t, float, const float*, uint32_t, uint32_t, float*, void*) {
+  return false;
+}
+extern "C" bool hy4_ix_query(float*, float*, uint32_t, uint32_t, uint32_t, const float*, const int32_t*, uint32_t,
+                             void*) {
+  return false;
+}
+extern "C" bool hy4_ix_select(const float*, const float*, const float*, uint32_t, uint32_t, uint32_t, uint32_t,
+                              const int32_t*, uint32_t, uint32_t, float*, int32_t*, int32_t*, void*) {
+  return false;
 }

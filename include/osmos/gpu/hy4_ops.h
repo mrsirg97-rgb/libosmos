@@ -28,10 +28,18 @@ bool hy4_mla_kv(const float *kva, const float *norm_w, uint32_t latent, uint32_t
 bool hy4_mla_q(const float *q, const void *k_b, uint32_t heads, uint32_t nope, uint32_t latent, uint32_t rope_dim,
                const float *freqs, const int32_t *pos, uint32_t n_tok, float *qa, void *stream);
 bool hy4_mla_attn(const float *qa, const float *cache, const float *sinks, uint32_t heads, uint32_t latent,
-                  uint32_t rope_dim, uint32_t window, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat,
-                  void *stream);
+                  uint32_t rope_dim, uint32_t window, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
+                  uint32_t pool, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat, void *stream);
 bool hy4_mla_out(const float *o_lat, const void *v_b, const float *gate, uint32_t heads, uint32_t latent,
                  uint32_t v_dim, uint32_t n_tok, float *out, void *stream);
+bool hy4_ix_pool(const float *keys, const void *w_value, const void *w_gate, const float *ape, const float *norm_w,
+                 uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps, const float *freqs, uint32_t g0,
+                 uint32_t n_groups, float *groups, void *stream);
+bool hy4_ix_query(float *q, float *w, uint32_t heads, uint32_t dim, uint32_t rope_dim, const float *freqs,
+                  const int32_t *pos, uint32_t n_tok, void *stream);
+bool hy4_ix_select(const float *q, const float *w, const float *groups, uint32_t heads, uint32_t dim, uint32_t pool,
+                   uint32_t top, const int32_t *pos, uint32_t n_tok, uint32_t max_groups, float *scores, int32_t *sel,
+                   int32_t *n_sel, void *stream);
 
 #endif
 
@@ -75,12 +83,35 @@ hy4_mla_q
   [n_tok][heads][latent + rope_dim].
 
 hy4_mla_attn
-  each head's attention over the cache rows at positions max(0, pos[t] - window + 1) .. pos[t] (window 0: from 0):
-  scores qa_h . row * scale; the head's sink a logit with no value (softmax over the scores and the sink); o_lat
-  [n_tok][heads][latent] = sum over the keys of p row[:latent], in the keys' order. at most HY4_MLA_MAX_KEYS keys,
-  latent at most HY4_MLA_MAX_LATENT.
+  each head's attention over its token's keys: the cache rows at positions max(0, pos[t] - window + 1) .. pos[t]
+  (window 0: from 0) - or, sel given (a sparse layer past its dense length), the tokens of the n_sel[t] groups at
+  sel[t * sel_cap ..] (ascending; each `pool` positions, the last the token's own, its tokens up to pos[t]): scores
+  qa_h . row * scale; the head's sink a logit with no value (softmax over the scores and the sink); o_lat
+  [n_tok][heads][latent] = sum over the keys of p row[:latent], in the keys' order - every group selected, the dense
+  path's bits. at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
 
 hy4_mla_out
   each head's latent through its v_b (v_dim values), times sigmoid of the gate's (gate_proj's output, [n_tok][heads *
   v_dim]) - out [n_tok][heads * v_dim], o_proj's input.
+
+the sparse layers' compressed indexer (HYV4FlashCompressedIndexer): a token key a position (rms(ix_k x): ops_rms),
+groups of `pool` of them pooled into a key each, a query's heads scoring the complete groups before its own.
+
+hy4_ix_pool
+  groups g0 .. g0 + n_groups - 1 of the token keys (keys [position][dim]; group g positions g pool .. g pool + pool -
+  1, every one present): each key's value W_v k and gate W_g k + ape[slot] (w_value, w_gate Q8_0 [dim][dim]; ape
+  [pool][dim]), a softmax over the group's slots each dimension, the values summed by it, then RMSNorm (norm_w, eps)
+  - pool_groups' - and roped on its last rope_dim at the group's first position (freqs NULL: not roped) - groups
+  [g][dim] (g from 0: row g0 the first written).
+
+hy4_ix_query
+  the indexer's query and its heads' weights in place: q [n_tok][heads][dim] roped on each head's last rope_dim at
+  pos[t]; w [n_tok][heads] times heads^-1/2 dim^-1/2.
+
+hy4_ix_select
+  each token's groups: C = pos[t] / pool complete groups before its own (group C). C < top: all of them and its own
+  (the reference's top-k picks masked groups then, the causal mask dropping them: the same keys). else the top - 1
+  with the greatest score_g = sum over the heads of w_h relu(q_h . groups[g]) (each a fixed order), ties to the
+  lower group - an exact selection (the score's k-th greatest by its bits), any C - then its own: sel[t * top ..]
+  ascending, n_sel[t] how many. scores: scratch for n_tok x max_groups (C at most max_groups).
 */
