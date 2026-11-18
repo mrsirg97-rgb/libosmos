@@ -89,7 +89,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   }
   if (ok && kept)
     ok = hy4_hc_pre(f->hx, f->fn_out, hy4_fv(f, f->w->out_hc_scale), hy4_fv(f, f->w->out_hc_base), hc, hc, D,
-                    g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, f->w->output_norm), kept, f->xn, NULL, NULL) &&
+                    g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, f->w->output_norm), kept, f->xn, NULL, f->hcs, NULL) &&
          hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits);
   ok = ok && hipStreamSynchronize(NULL) == hipSuccess;
   f->rows = ok ? n : 0;

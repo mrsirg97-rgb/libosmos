@@ -14,9 +14,10 @@
 #define HY4_MLA_MAX_KEYS 4096           /* the keys a query reads at most (a window's 512; the indexer's 2,048) */
 #define HY4_MLA_MAX_LATENT 512          /* the latent's width at most (Hy4-flash's kv_lora) */
 
+uint64_t hy4_hc_scratch(uint32_t n_tok); /* hy4_hc_pre's scratch: floats for n_tok tokens */
 bool hy4_hc_pre(const float *h, const float *fn, const float *scale, const float *base, uint32_t rows, uint32_t hc,
                 uint32_t dim, float eps, float hc_eps, float magnitude, const float *norm_w, uint32_t n_tok, float *x,
-                float *post, void *stream);
+                float *post, float *scratch, void *stream);
 bool hy4_hc_post(float *h, const float *y, const float *post, uint32_t hc, uint32_t dim, uint32_t n_tok,
                  void *stream);
 bool hy4_engram_rows(const float *rows, const float *norm_w, uint32_t cols, uint32_t row_dim, uint32_t n_tok,
@@ -25,13 +26,16 @@ bool hy4_engram_update(float *h, const float *kv, const float *kv_b, const float
                        const float *pre_gamma, uint32_t hc, uint32_t dim, uint32_t n_tok, void *stream);
 bool hy4_mla_kv(const float *kva, const float *norm_w, uint32_t latent, uint32_t rope_dim, float eps,
                 const float *freqs, const int32_t *pos, uint32_t n_tok, float *cache, uint32_t slots, void *stream);
+uint64_t hy4_mla_table_bytes(uint32_t n_tok, uint32_t heads); /* hy4_mla_q's and hy4_mla_out's table: bytes */
 bool hy4_mla_q(const float *q, const void *k_b, uint32_t heads, uint32_t nope, uint32_t latent, uint32_t rope_dim,
-               const float *freqs, const int32_t *pos, uint32_t n_tok, float *qa, void *stream);
+               const float *freqs, const int32_t *pos, uint32_t n_tok, float *qa, void *table, void *stream);
+uint64_t hy4_mla_attn_scratch(uint32_t heads); /* hy4_mla_attn's partials: floats */
 bool hy4_mla_attn(const float *qa, const float *cache, uint32_t slots, const float *sinks, uint32_t heads,
                   uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
-                  uint32_t pool, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat, void *stream);
+                  uint32_t pool, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat, float *scratch,
+                  void *stream);
 bool hy4_mla_out(const float *o_lat, const void *v_b, const float *gate, uint32_t heads, uint32_t latent,
-                 uint32_t v_dim, uint32_t n_tok, float *out, void *stream);
+                 uint32_t v_dim, uint32_t n_tok, float *out, void *table, void *stream);
 bool hy4_ix_pool(const float *keys, const void *w_value, const void *w_gate, const float *ape, const float *norm_w,
                  uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps, const float *freqs, uint32_t g0,
                  uint32_t n_groups, float *groups, void *stream);
@@ -49,8 +53,9 @@ hy4_hc_pre
   h[t] ([hc][dim], flat hc * dim) mixed by fn's `rows` rows (F32, [rows][hc * dim]): mix_r = (fn_r . flat) *
   rsqrt(mean(flat^2) + eps); pre_k = sigmoid(mix_k * scale[0] + base[k]) + hc_eps; then x = rms(sum over k of pre_k
   h_k, norm_w) (eps again: the sublayer's norm, HYV4FlashRMSNorm). rows 2 hc: post_k = magnitude sigmoid(mix_{hc+k} *
-  scale[1] + base[hc + k]) + hc_eps into post ([n_tok][hc]); rows hc (the head): no post (NULL). hc at most
-  HY4_HC_MAX.
+  scale[1] + base[hc + k]) + hc_eps into post ([n_tok][hc]); rows hc (the head): no post (NULL). hc HY4_HC_MAX,
+  hc * dim a multiple of 32. the dots in 32 fixed slices of the flat streams (a block each), summed in order: a
+  token's bits whatever the step. scratch: hy4_hc_scratch(n_tok) floats.
 
 hy4_hc_post
   the sublayer's output y ([n_tok][dim]) back into the streams: h_k = post_k y + h_k (the reference's order, F32).
@@ -81,7 +86,8 @@ hy4_mla_kv
 hy4_mla_q
   q_b's output (q [n_tok][heads][nope + rope_dim]) to the queries the cache is read with: each head's nope part
   through its k_b (qa_h[j] = sum_i k_b[h][j][i] q_h[i], j < latent) and its rope part roped at pos[t] - qa
-  [n_tok][heads][latent + rope_dim].
+  [n_tok][heads][latent + rope_dim]. the absorption a matvec a (token, head): mv_group_tok's (its Q8_0 sums, a
+  token's own), its table in `table` (hy4_mla_table_bytes, the device's).
 
 hy4_mla_attn
   each head's attention over its token's keys: the cache rows at positions max(0, pos[t] - window + 1) .. pos[t]
@@ -89,11 +95,14 @@ hy4_mla_attn
   sel[t * sel_cap ..] (ascending; each `pool` positions, the last the token's own, its tokens up to pos[t]): scores
   qa_h . row * scale; the head's sink a logit with no value (softmax over the scores and the sink); o_lat
   [n_tok][heads][latent] = sum over the keys of p row[:latent], in the keys' order - every group selected, the dense
-  path's bits. a key's row is its position's, or position % slots (slots given: a ring at least the window long). at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
+  path's bits. a key's row is its position's, or position % slots (slots given: a ring at least the window long).
+  flash decoding: a block a group of 8 heads (MQA's rows read once for them) over a split of 64 of its token's keys,
+  an online softmax in the keys' order; the splits merged in order with the sink - the splits a token's own: its bits
+  whatever the step. scratch: hy4_mla_attn_scratch(heads) floats (the partials of 16 tokens at a time). at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
 
 hy4_mla_out
   each head's latent through its v_b (v_dim values), times sigmoid of the gate's (gate_proj's output, [n_tok][heads *
-  v_dim]) - out [n_tok][heads * v_dim], o_proj's input.
+  v_dim]) - out [n_tok][heads * v_dim], o_proj's input. the matvecs mv_group_tok's, as hy4_mla_q's (its table).
 
 the sparse layers' compressed indexer (HYV4FlashCompressedIndexer): a token key a position (rms(ix_k x): ops_rms),
 groups of `pool` of them pooled into a key each, a query's heads scoring the complete groups before its own.

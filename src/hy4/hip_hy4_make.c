@@ -112,7 +112,7 @@ void hy4_forward_destroy(Hy4Forward *f)
   free(f->dev);
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     hipFree(f->fn_attn[l]), hipFree(f->fn_ffn[l]);
-  void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->h, f->xn, f->y, f->post, f->wtok, f->qr,
+  void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->h, f->xn, f->y, f->post, f->hcs, f->table, f->attn_part, f->wtok, f->qr,
                f->qres, f->q, f->kva, f->gt, f->qa, f->olat, f->ao, f->out, f->ixk, f->ixq, f->ixw, f->scores, f->sel,
                f->n_sel, f->emb, f->ekv, f->ga, f->up, f->act, f->logit_r, f->rin, f->xg, f->eg_g, f->eg_u, f->eg_h,
                f->eg_y, f->wsel, f->rsum, f->sh, f->idx, f->gidx, f->sidx, f->cnt, f->xrow, f->wptr, f->tok, f->pos,
@@ -155,7 +155,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
     void *p;
     uint64_t bytes;
   } want[] = {
-      {&f->h, n * hc * D * F}, {&f->xn, n * D * F}, {&f->y, n * D * F}, {&f->post, n * hc * F},
+      {&f->h, n * hc * D * F}, {&f->xn, n * D * F}, {&f->y, n * D * F}, {&f->post, n * hc * F}, {&f->hcs, hy4_hc_scratch((uint32_t)n) * F},
+      {&f->table, hy4_mla_table_bytes((uint32_t)n, (uint32_t)H)}, {&f->attn_part, hy4_mla_attn_scratch((uint32_t)H) * F},
       {&f->qr, n * g->q_lora * F}, {&f->qres, n * g->q_lora * F}, {&f->q, n * H * qk * F}, {&f->kva, n * row * F},
       {&f->gt, n * H * g->v_dim * F}, {&f->qa, n * H * row * F}, {&f->olat, n * H * g->kv_lora * F},
       {&f->ao, n * H * g->v_dim * F}, {&f->out, n * D * F}, {&f->ixk, n * g->ix_dim * F},

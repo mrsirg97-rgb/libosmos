@@ -79,19 +79,32 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
     ok = hy4_mla_kv(f->kva + o * row, hy4_fv(f, L->kv_a_norm), lat, rd, g->rms_eps, freqs, f->pos + o, m, s->cache[l],
                     sw ? f->ring : 0, NULL) &&
          hy4_mla_q(f->q + o * H * qk, hy4_dev(f, L->k_b), H, nope, lat, rd, freqs, f->pos + o, m, f->qa + o * H * row,
-                   NULL) &&
+                   f->table, NULL) &&
          (sw || indexer(f, s, l, (uint32_t)o, m)) &&
          hy4_mla_attn(f->qa + o * H * row, s->cache[l], sw ? f->ring : 0, hy4_fv(f, L->sinks), H, lat, rd,
                       sw ? (uint32_t)g->window : 0, sw ? NULL : f->sel + o * top, sw ? NULL : f->n_sel + o,
-                      sw ? 0 : top, sw ? 0 : (uint32_t)g->ix_pool, scale, f->pos + o, m, f->olat + o * H * lat, NULL);
+                      sw ? 0 : top, sw ? 0 : (uint32_t)g->ix_pool, scale, f->pos + o, m, f->olat + o * H * lat, f->attn_part, NULL);
   }
-  return ok && hy4_mla_out(f->olat, hy4_dev(f, L->v_b), f->gt, H, lat, vd, n, f->ao, NULL) &&
+  return ok && hy4_mla_out(f->olat, hy4_dev(f, L->v_b), f->gt, H, lat, vd, n, f->ao, f->table, NULL) &&
          hy4_mat(f, L->out, D, H * vd, f->ao, n, f->out) &&
          ops_rms(f->out, D, D, hy4_fv(f, L->post_attn_norm), g->rms_eps, n, f->y, D, NULL);
 }
 
 /* the step's picks grouped by expert (ascending; within one, its tokens ascending): each gathered row's token and
    weight, each (token, slot)'s row, and mv_group_tok's entries (an expert's rows in chunks of MV_MAX_TOKENS) */
+/* an entry's tokens at most: mv_fp4_tok's for NVFP4 experts, mv_group_tok's for the rest */
+#define FP4_TOK_MAX 4
+static uint32_t chunk_of(const GgufTensor *t) { return t->type == QTYPE_NVFP4 ? FP4_TOK_MAX : MV_MAX_TOKENS; }
+
+/* the experts' matvec over the entries: mv_fp4_tok for NVFP4, mv_group_tok else */
+static bool experts(const GgufTensor *t, const void *const *w, const Hy4Forward *f, uint32_t entries, uint32_t rows,
+                    uint32_t cols, const float *x, float *y)
+{
+  if (t->type == QTYPE_NVFP4)
+    return mv_fp4_tok(w, f->cnt, f->xrow, entries, rows, cols, x, cols, y, rows, NULL);
+  return mv_group_tok(t->type, w, f->cnt, f->xrow, entries, MV_MAX_TOKENS, rows, cols, x, cols, y, rows, NULL);
+}
+
 static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -109,9 +122,10 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries)
       for (uint32_t s = 0; s < K; s++)
         if ((uint32_t)f->h_idx[t * K + s] == e)
           f->h_gidx[r] = (int32_t)t, f->h_sidx[t * K + s] = (int32_t)r, f->h_wsel[r] = f->h_w[t * K + s], r++;
-    for (uint32_t c = first; c < r; c += MV_MAX_TOKENS, e_n++)
+    const uint32_t chunk = chunk_of(L->exp_gate);
+    for (uint32_t c = first; c < r; c += chunk, e_n++)
     {
-      f->h_cnt[e_n] = (int32_t)(r - c < MV_MAX_TOKENS ? r - c : MV_MAX_TOKENS), f->h_xrow[e_n] = (int32_t)c;
+      f->h_cnt[e_n] = (int32_t)(r - c < chunk ? r - c : chunk), f->h_xrow[e_n] = (int32_t)c;
       f->h_wptr[e_n] = (const uint8_t *)hy4_dev(f, L->exp_gate) + e * bytes_g;
       f->h_wptr[nk + e_n] = (const uint8_t *)hy4_dev(f, L->exp_up) + e * bytes_u;
       f->h_wptr[2 * nk + e_n] = (const uint8_t *)hy4_dev(f, L->exp_down) + e * bytes_d;
@@ -139,13 +153,10 @@ static bool moe(Hy4Forward *f, uint32_t n, int l)
                            f->wtok, NULL) &&
          hy4_mat(f, L->routed_down, lat, D, f->xn, n, f->rin) && route(f, l, n, &entries) &&
          ops_gather_rows(f->xg, f->rin, f->gidx, nk, lat, NULL) &&
-         mv_group_tok(L->exp_gate->type, wg, f->cnt, f->xrow, entries, MV_MAX_TOKENS, ffe, lat, f->xg, lat, f->eg_g,
-                      ffe, NULL) &&
-         mv_group_tok(L->exp_up->type, wu, f->cnt, f->xrow, entries, MV_MAX_TOKENS, ffe, lat, f->xg, lat, f->eg_u, ffe,
-                      NULL) &&
+         experts(L->exp_gate, wg, f, entries, ffe, lat, f->xg, f->eg_g) &&
+         experts(L->exp_up, wu, f, entries, ffe, lat, f->xg, f->eg_u) &&
          ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, NULL) &&
-         mv_group_tok(L->exp_down->type, wd, f->cnt, f->xrow, entries, MV_MAX_TOKENS, lat, ffe, f->eg_h, ffe, f->eg_y,
-                      lat, NULL) &&
+         experts(L->exp_down, wd, f, entries, lat, ffe, f->eg_h, f->eg_y) &&
          ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, NULL) &&
          hy4_mat(f, L->routed_up, D, lat, f->rsum, n, f->out) && hy4_mat(f, L->sh_gate, sh, D, f->xn, n, f->ga) &&
          hy4_mat(f, L->sh_up, sh, D, f->xn, n, f->up) && ops_swiglu(f->ga, f->up, sh, INFINITY, NULL, n, f->act, NULL) &&
@@ -171,9 +182,9 @@ bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int 
   const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc;
   return (!g->engram[l] || engram(f, n, l)) &&
          hy4_hc_pre(f->h, f->fn_attn[l], hy4_fv(f, L->hc_attn_scale), hy4_fv(f, L->hc_attn_base), 2 * hc, hc, D,
-                    g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, L->attn_norm), n, f->xn, f->post, NULL) &&
+                    g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, L->attn_norm), n, f->xn, f->post, f->hcs, NULL) &&
          attention(f, run, runs, n, l) && hy4_hc_post(f->h, f->y, f->post, hc, D, n, NULL) &&
          hy4_hc_pre(f->h, f->fn_ffn[l], hy4_fv(f, L->hc_ffn_scale), hy4_fv(f, L->hc_ffn_base), 2 * hc, hc, D,
-                    g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, L->ffn_norm), n, f->xn, f->post, NULL) &&
+                    g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, L->ffn_norm), n, f->xn, f->post, f->hcs, NULL) &&
          (l < g->n_dense ? dense(f, n, l) : moe(f, n, l)) && hy4_hc_post(f->h, f->y, f->post, hc, D, n, NULL);
 }

@@ -203,6 +203,86 @@ bool run(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t x
   return hipGetLastError() == hipSuccess;
 }
 
+// several matrices, each over its own tokens (a MoE's picked experts: mv_group_tok's table) - a row's blocks over G
+// lanes (a short row's: an expert's 1,536 values are 24 blocks), a warp 32 / G rows, a lane its blocks sub, sub + G,
+// .. (2 in flight), then the G-lane tree. a token's sums its own at any count 1 .. 4 (its bits whatever the step).
+// grid: (the rows' blocks, the table's entries); an entry of count 0 skipped
+template <int G, int NT>
+__device__ void tok_rows(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols, const float* __restrict__ x,
+                         uint32_t xs, float* __restrict__ y, uint32_t ys) {
+  constexpr int U = 2;
+  const uint32_t lane = threadIdx.x % 32, sub = lane % G;
+  const uint32_t r = (blockIdx.x * kWarps + threadIdx.x / 32) * (32 / G) + lane / G;
+  const uint32_t nb = cols / kBlock;
+  const uint64_t row_bytes = (uint64_t) nb * kBlockWords * 4;
+  float acc[NT] = {};
+  const bool live = r < rows;
+  for (uint32_t b = sub; live && b < nb; b += G * U) {
+    uint32_t q[U][kBlockWords];
+#pragma unroll
+    for (int u = 0; u < U; u++) {
+      const uint32_t bb = b + G * u < nb ? b + G * u : b;
+      const uint32_t* p = (const uint32_t*) (w + (uint64_t) r * row_bytes + (uint64_t) bb * kBlockWords * 4);
+#pragma unroll
+      for (int k = 0; k < kBlockWords; k++) q[u][k] = p[k];
+    }
+#pragma unroll
+    for (int u = 0; u < U; u++) {
+      const uint32_t bu = b + G * u;
+      if (bu >= nb) break;
+#pragma unroll
+      for (int s = 0; s < 4; s++) {
+        float xv[NT][16];
+#pragma unroll
+        for (int t = 0; t < NT; t++) {
+          const float4* xp = (const float4*) (x + (uint64_t) t * xs + (uint64_t) bu * kBlock + 16 * s);
+#pragma unroll
+          for (int k = 0; k < 4; k++) {
+            const float4 v = xp[k];
+            xv[t][4 * k] = v.x, xv[t][4 * k + 1] = v.y, xv[t][4 * k + 2] = v.z, xv[t][4 * k + 3] = v.w;
+          }
+        }
+        const float d = rnd::ue4m3_value(q[u][0] >> (8 * s) & 0xFFu) * 0.5f;
+        const uint32_t lo = q[u][1 + 2 * s], hi = q[u][2 + 2 * s];
+        float av[8], cv[8];
+        e2m1x4(lo, av), e2m1x4(hi, av + 4), e2m1x4(lo >> 4, cv), e2m1x4(hi >> 4, cv + 4);
+        float part[NT] = {};
+#pragma unroll
+        for (int j = 0; j < 8; j++)
+#pragma unroll
+          for (int t = 0; t < NT; t++) part[t] = __fmaf_rn(av[j], xv[t][j], __fmaf_rn(cv[j], xv[t][j + 8], part[t]));
+#pragma unroll
+        for (int t = 0; t < NT; t++) acc[t] = __fmaf_rn(d, part[t], acc[t]);
+      }
+    }
+  }
+#pragma unroll
+  for (int t = 0; t < NT; t++) {
+    float v = acc[t];
+#pragma unroll
+    for (int o = G / 2; o > 0; o >>= 1) v += __shfl_xor(v, o);
+    if (sub == 0 && live) y[(uint64_t) t * ys + r] = v;
+  }
+}
+
+template <int G>
+__global__ __launch_bounds__(32 * kWarps) void tok_kernel(const void* const* w, const int32_t* cnt,
+                                                          const int32_t* xrow, uint32_t rows, uint32_t cols,
+                                                          const float* x, uint32_t xs, float* y, uint32_t ys) {
+  const uint32_t e = blockIdx.y;
+  const int32_t c = cnt[e];
+  const uint8_t* m = (const uint8_t*) w[e];
+  const float* xe = x + (uint64_t) xrow[e] * xs;
+  float* ye = y + (uint64_t) xrow[e] * ys;
+  switch (c) {  // (uniform a block: an entry a grid row)
+    case 1: tok_rows<G, 1>(m, rows, cols, xe, xs, ye, ys); break;
+    case 2: tok_rows<G, 2>(m, rows, cols, xe, xs, ye, ys); break;
+    case 3: tok_rows<G, 3>(m, rows, cols, xe, xs, ye, ys); break;
+    case 4: tok_rows<G, 4>(m, rows, cols, xe, xs, ye, ys); break;
+    default: break;
+  }
+}
+
 }  // namespace
 
 // y[t * ys + r] = scale * sum_c W[r, c] x[t * xs + c], n 1 .. 4 tokens; cols whole 64-value blocks, x 16-byte aligned
@@ -224,4 +304,24 @@ extern "C" bool mv_fp4(const void* w, uint32_t rows, uint32_t cols, const float*
     case 3: return run<1, 3>(w, rows, cols, x, xs, y, ys, scale, stream);
     default: return run<1, 4>(w, rows, cols, x, xs, y, ys, scale, stream);
   }
+}
+
+// the routed experts' decode (Hy4-flash's latent experts: 1,536 x 1,536): mv_group_tok's table over tok_kernel - a
+// row's G its length's (every count the same G: a token's bits whatever the step)
+extern "C" bool mv_fp4_tok(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t rows,
+                           uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, void* stream) {
+  if (!w || !cnt || !xrow || !x || !y || !n || n > 65535 || !rows || !cols || cols % kBlock || xs % 4) return false;
+  const uint32_t nb = cols / kBlock;
+  const hipStream_t s = (hipStream_t) stream;
+#define TOK(G)                                                                                              \
+  tok_kernel<G><<<dim3((rows + kWarps * (32 / G) - 1) / (kWarps * (32 / G)), n), 32 * kWarps, 0, s>>>(w, cnt, xrow, \
+                                                                                                    rows, cols, x, xs, y, ys)
+  if (nb <= 24)
+    TOK(8);
+  else if (nb <= 48)
+    TOK(16);
+  else
+    TOK(32);
+#undef TOK
+  return hipGetLastError() == hipSuccess;
 }

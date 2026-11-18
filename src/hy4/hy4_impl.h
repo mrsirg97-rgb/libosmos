@@ -31,6 +31,9 @@ struct Hy4Forward
   float *eg_rows;    /* device: the rows decoded ([layer][token][cols][dim]) */
   /* a step's buffers */
   float *h, *xn, *y, *post;            /* the streams, a sublayer's input, its output, iHC's post */
+  float *hcs;                          /* iHC's dots' slices (hy4_hc_scratch) */
+  void *table;                         /* MLA's per-head matvecs' table (hy4_mla_table_bytes) */
+  float *attn_part;                    /* MLA's attention's partials (hy4_mla_attn_scratch) */
   float *qr, *qres, *q, *kva, *gt, *qa, *olat, *ao, *out;
   float *ixk, *ixq, *ixw, *scores;     /* the indexer */
   int32_t *sel, *n_sel;

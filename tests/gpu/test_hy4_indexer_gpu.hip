@@ -110,19 +110,21 @@ int main() {
   float *kva = up(A("kva")), *q = up(A("q")), *gate = up(A("gate")), *kb = up(A("k_b_q8")), *vb = up(A("v_b_q8"));
   float *norm = up(A("kv_a_norm")), *sinks = up(A("sinks"));
   float *cache = scratch((size_t) T * row), *qa = scratch((size_t) T * H * row);
+  void* table = scratch(hy4_mla_table_bytes(T, H) / sizeof(float) + 1);
+  float* part = scratch(hy4_mla_attn_scratch(H));
   float *o_lat = scratch((size_t) T * H * lat), *out = scratch((size_t) T * H * vd);
   const float scale = 1.0f / sqrtf((float) (nope + rd));
   CHECK(hy4_mla_kv(kva, norm, lat, rd, kEps, freqs, dpos, T, cache, 0, 0));
-  CHECK(hy4_mla_q(q, kb, H, nope, lat, rd, freqs, dpos, T, qa, 0));
-  CHECK(hy4_mla_attn(qa, cache, 0, sinks, H, lat, rd, 0, sel, n_sel, top, pool, scale, dpos, T, o_lat, 0));
-  CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, 0));
+  CHECK(hy4_mla_q(q, kb, H, nope, lat, rd, freqs, dpos, T, qa, table, 0));
+  CHECK(hy4_mla_attn(qa, cache, 0, sinks, H, lat, rd, 0, sel, n_sel, top, pool, scale, dpos, T, o_lat, part, 0));
+  CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
   const std::vector<float> sparse = down(out, (size_t) T * H * vd);
   match("o_proj's input (sparse attention)", sparse, "o_in", kTolAttn);
 
   // every group selected (the first 2,048 tokens' own selection is all of theirs): the dense path's bits
   const uint32_t dense_n = (top - 1) * pool;
-  CHECK(hy4_mla_attn(qa, cache, 0, sinks, H, lat, rd, 0, nullptr, nullptr, 0, 0, scale, dpos, dense_n, o_lat, 0));
-  CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, dense_n, out, 0));
+  CHECK(hy4_mla_attn(qa, cache, 0, sinks, H, lat, rd, 0, nullptr, nullptr, 0, 0, scale, dpos, dense_n, o_lat, part, 0));
+  CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, dense_n, out, table, 0));
   const std::vector<float> dense = down(out, (size_t) dense_n * H * vd);
   CHECK(std::memcmp(dense.data(), sparse.data(), dense.size() * sizeof(float)) == 0);
   std::printf("  the first %u tokens (every group theirs): the dense path's bits\n", dense_n);

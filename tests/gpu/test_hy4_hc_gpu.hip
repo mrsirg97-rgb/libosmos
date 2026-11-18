@@ -28,7 +28,7 @@ int main() {
   std::printf("[test_hy4_hc_gpu] %u tokens, %u streams of %u; Engram %u rows of %u\n", T, hc, D, cols, rd);
 
   // refusals: nothing queued for a shape the ops do not run
-  CHECK(!hy4_hc_pre(nullptr, nullptr, nullptr, nullptr, 8, 4, D, eps, hc_eps, mag, nullptr, T, nullptr, nullptr, 0));
+  CHECK(!hy4_hc_pre(nullptr, nullptr, nullptr, nullptr, 8, 4, D, eps, hc_eps, mag, nullptr, T, nullptr, nullptr, nullptr, 0));
   CHECK(!hy4_hc_post(nullptr, nullptr, nullptr, HY4_HC_MAX + 1, D, T, 0));
 
   // Engram: the rows to the projection's input, the projection (host), the residual into the streams
@@ -56,13 +56,14 @@ int main() {
   float *fa = up(A("hc_attn_fn")), *sa = up(A("hc_attn_scale")), *ba = up(A("hc_attn_base")), *na = up(A("attn_norm"));
   float *ff = up(A("hc_ffn_fn")), *sf = up(A("hc_ffn_scale")), *bf = up(A("hc_ffn_base")), *nf = up(A("ffn_norm"));
   float* x = scratch((size_t) T * D);
+  float* hcs = scratch(hy4_hc_scratch(T));
   float* post = scratch((size_t) T * hc);
-  CHECK(hy4_hc_pre(h, fa, sa, ba, 2 * hc, hc, D, eps, hc_eps, mag, na, T, x, post, 0));
+  CHECK(hy4_hc_pre(h, fa, sa, ba, 2 * hc, hc, D, eps, hc_eps, mag, na, T, x, post, hcs, 0));
   match("iHC: the attention's input", down(x, (size_t) T * D), "attn_in", kTol);
   match("iHC: the attention's post", down(post, (size_t) T * hc), "attn_post", kTol);
   float* ya = up(A("y_attn"));
   CHECK(hy4_hc_post(h, ya, post, hc, D, T, 0));
-  CHECK(hy4_hc_pre(h, ff, sf, bf, 2 * hc, hc, D, eps, hc_eps, mag, nf, T, x, post, 0));
+  CHECK(hy4_hc_pre(h, ff, sf, bf, 2 * hc, hc, D, eps, hc_eps, mag, nf, T, x, post, hcs, 0));
   match("iHC: the MLP's input", down(x, (size_t) T * D), "ffn_in", kTol);
   float* yf = up(A("y_ffn"));
   CHECK(hy4_hc_post(h, yf, post, hc, D, T, 0));
@@ -71,12 +72,12 @@ int main() {
   // the head's collapse: pre alone (hc rows), then output_norm - from the layer's input streams
   float* h0 = up(A("h"));
   float *fo = up(A("out_hc_fn")), *so = up(A("out_hc_scale")), *bo = up(A("out_hc_base")), *no = up(A("output_norm"));
-  CHECK(hy4_hc_pre(h0, fo, so, bo, hc, hc, D, eps, hc_eps, mag, no, T, x, nullptr, 0));
+  CHECK(hy4_hc_pre(h0, fo, so, bo, hc, hc, D, eps, hc_eps, mag, no, T, x, nullptr, hcs, 0));
   match("the head's collapse", down(x, (size_t) T * D), "head", kTol);
 
   // a token's bits its own: the head's collapse of token 5 alone, the same as among the 16
   std::vector<float> all = down(x, (size_t) T * D);
-  CHECK(hy4_hc_pre(h0 + (size_t) 5 * hc * D, fo, so, bo, hc, hc, D, eps, hc_eps, mag, no, 1, x, nullptr, 0));
+  CHECK(hy4_hc_pre(h0 + (size_t) 5 * hc * D, fo, so, bo, hc, hc, D, eps, hc_eps, mag, no, 1, x, nullptr, hcs, 0));
   const std::vector<float> one = down(x, D);
   CHECK(std::memcmp(one.data(), all.data() + (size_t) 5 * D, D * sizeof(float)) == 0);
   std::printf("  a token alone: its collapse the same bits as among %u\n", T);
