@@ -212,6 +212,27 @@ int main() {
   CHECK(std::memcmp(hy4_logits(f), got.data() + (size_t) (last - tail) * V, (size_t) tail * V * sizeof(float)) == 0);
   std::printf("  in read steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c, tail);
 
+  // a decode's split: four tokens one step (each matrix its own launch) and four steps of one (a token's joint
+  // matrices: hy4_impl.h's Hy4Joint) - every row the same bits
+  {
+    const int32_t four[4] = {ids[5], ids[6], ids[7], ids[8]};
+    Hy4Seq* const one[1] = {s2};
+    const uint32_t len4[1] = {4};
+    CHECK(hy4_seq_prompt(s2, 0));
+    CHECK(hy4_step_runs(f, one, len4, 1, four, err));
+    std::vector<float> together((size_t) 4 * V);
+    for (uint32_t r = 0; r < 4; r++)
+      CHECK(hipMemcpy(together.data() + (size_t) r * V, hy4_row_logits(f, r), V * sizeof(float), hipMemcpyDeviceToHost) ==
+            hipSuccess);
+    CHECK(hy4_seq_rollback(s2, 4));
+    for (uint32_t r = 0; r < 4; r++) {
+      CHECK(hy4_step(f, s2, four + r, 1, 1, err));
+      CHECK(std::memcmp(hy4_logits(f), together.data() + (size_t) r * V, V * sizeof(float)) == 0);
+    }
+    CHECK(hy4_seq_rollback(s2, 4));
+    std::printf("  a decode's four tokens in one step and in four: the same bits\n");
+  }
+
   // a step rolled back and run again: the same bits
   const int32_t more[4] = {ids[1], ids[2], ids[3], ids[4]};
   CHECK(hy4_step(f, s2, more, 4, 4, err));

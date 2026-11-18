@@ -59,6 +59,79 @@ static bool upload(Hy4Forward *f, char *err)
   return ok;
 }
 
+/* a joint of members (NULL ones skipped; rows each, cols alike): grouped by type in the members' order, each type's
+   two or more concatenated into one buffer (the tensors' device pointers then into it) */
+static bool joint_make(Hy4Forward *f, const GgufTensor *const *m, const uint32_t *rows, int k, Hy4Joint *j)
+{
+  const Gguf *g = f->w->model;
+  memset(j, 0, sizeof *j);
+  bool done[HY4_JOINT_MAX] = {false};
+  for (int a = 0; a < k; a++)
+  {
+    if (!m[a] || done[a])
+      continue;
+    uint32_t type = m[a]->type, sum = 0;
+    uint64_t bytes = 0;
+    int count = 0;
+    for (int b = a; b < k; b++)
+      if (m[b] && !done[b] && m[b]->type == type)
+        j->off[b] = j->total + sum, sum += rows[b], bytes += m[b]->bytes, count++;
+    const void *w = hy4_dev(f, m[a]);
+    if (count > 1)
+    {
+      uint8_t *buf = NULL;
+      if (hipMalloc((void **)&buf, bytes) != hipSuccess)
+        return false;
+      f->joints[f->n_joints++] = buf, w = buf;
+      uint64_t at = 0;
+      for (int b = a; b < k; b++)
+        if (m[b] && !done[b] && m[b]->type == type)
+        {
+          const size_t i = (size_t)(m[b] - g->tensors);
+          if (hipMemcpy(buf + at, f->dev[i], m[b]->bytes, hipMemcpyDeviceToDevice) != hipSuccess)
+            return false;
+          hipFree(f->dev[i]);
+          f->dev[i] = buf + at, f->in_joint[i] = true, at += m[b]->bytes;
+        }
+    }
+    for (int b = a; b < k; b++)
+      if (m[b] && m[b]->type == type)
+        done[b] = true;
+    j->run[j->n_runs++] = (typeof(j->run[0])){type, sum, j->total, w};
+    j->total += sum;
+  }
+  return true;
+}
+
+/* every layer's joints: the attention input's (q_a, kv_a, gate, the indexer's k and weights) and the FFN input's
+   (the router, the routed latent's down and the shared expert's gate and up; the dense layer's gate and up) */
+static bool joints_make(Hy4Forward *f, uint32_t *most)
+{
+  const Hy4Geometry *g = &f->w->geo;
+  const uint32_t ql = (uint32_t)g->q_lora, row = (uint32_t)(g->kv_lora + g->rope_dim), vd = (uint32_t)g->v_dim;
+  const uint32_t ID = (uint32_t)g->ix_dim, IH = (uint32_t)g->ix_heads, E = (uint32_t)g->n_experts;
+  const uint32_t lat = (uint32_t)g->latent, sh = (uint32_t)(g->ff_exp * g->n_shexp), ff = (uint32_t)g->n_ff;
+  if (!(f->joints = calloc(2 * (size_t)g->n_layers * HY4_JOINT_MAX, sizeof *f->joints)))
+    return false;
+  for (int l = 0; l < g->n_layers; l++)
+  {
+    const Hy4Layer *L = &f->w->layer[l];
+    const bool sw = g->sliding[l];
+    const GgufTensor *a[5] = {L->q_a, L->kv_a, L->gate, sw ? NULL : L->ix_k, sw ? NULL : L->ix_proj};
+    const uint32_t ar[5] = {ql, row, (uint32_t)g->n_heads[l] * vd, ID, IH};
+    const GgufTensor *d[4] = {L->router, L->routed_down, L->sh_gate, L->sh_up};
+    const uint32_t dr[4] = {E, lat, sh, sh};
+    const GgufTensor *dd[2] = {L->ffn_gate, L->ffn_up};
+    const uint32_t ddr[2] = {ff, ff};
+    if (!joint_make(f, a, ar, 5, &f->j_attn[l]) ||
+        !(l < g->n_dense ? joint_make(f, dd, ddr, 2, &f->j_ffn[l]) : joint_make(f, d, dr, 4, &f->j_ffn[l])))
+      return false;
+    *most = f->j_attn[l].total > *most ? f->j_attn[l].total : *most;
+    *most = f->j_ffn[l].total > *most ? f->j_ffn[l].total : *most;
+  }
+  return true;
+}
+
 /* a matrix the kernels read as F32 (iHC's mixes: Q8_0 in the file) */
 static bool as_f32(Hy4Forward *f, const GgufTensor *t, float **out)
 {
@@ -111,12 +184,16 @@ void hy4_forward_destroy(Hy4Forward *f)
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
-    hipFree(f->dev[i]);
+    if (!f->in_joint || !f->in_joint[i])
+      hipFree(f->dev[i]);
   free(f->dev);
+  for (uint32_t i = 0; i < f->n_joints; i++)
+    hipFree(f->joints[i]);
+  free(f->joints), free(f->in_joint);
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     hipFree(f->fn_attn[l]), hipFree(f->fn_ffn[l]);
   void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->h, f->xn, f->y, f->post, f->hcs, f->table, f->attn_part, f->wtok, f->qr,
-               f->qres, f->q, f->kva, f->gt, f->qa, f->olat, f->ao, f->out, f->ixk, f->ixkn, f->ixq, f->ixw, f->scores, f->sel,
+               f->qres, f->q, f->kva, f->gt, f->qa, f->olat, f->ao, f->out, f->ixk, f->ixkn, f->jo_attn, f->jo_ffn, f->ixq, f->ixw, f->scores, f->sel,
                f->n_sel, f->x16, f->xe16, f->overflow, f->rx, f->ry, f->rxd, f->ryd, f->rcnt, f->rw, f->rgidx, f->rhidx,
                f->emb, f->ekv, f->ga, f->up, f->act, f->logit_r, f->rin, f->xg, f->eg_g, f->eg_u, f->eg_h,
                f->eg_y, f->wsel, f->rsum, f->sh, f->idx, f->gidx, f->sidx, f->cnt, f->xrow, f->wptr, f->tok, f->pos,
@@ -195,6 +272,10 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || hy4_fail(err, "more heads than this build's tables");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || hy4_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
+  uint32_t joint_most = 0;
+  ok = ok && (((f->in_joint = calloc(w->model->n_tensors, sizeof *f->in_joint)) && joints_make(f, &joint_most) &&
+               hy4_alloc(&f->jo_attn, (uint64_t)joint_most * F) && hy4_alloc(&f->jo_ffn, (uint64_t)joint_most * F)) ||
+              hy4_fail(err, "the joint matrices not made (GPU memory)"));
   for (size_t i = 0; ok && i < sizeof read_want / sizeof *read_want; i++)
     ok = hy4_alloc(read_want[i].p, read_want[i].bytes) || hy4_fail(err, "GPU memory refused (the read's buffers)");
   ok = ok && hipMemset(f->overflow, 0, 8) == hipSuccess && (f->fault = f->overflow + 1) &&

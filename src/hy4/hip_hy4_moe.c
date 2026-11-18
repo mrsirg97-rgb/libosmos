@@ -134,7 +134,7 @@ static bool mm_experts(uint32_t type, const void *const *w, const int32_t *h_cnt
   return ok;
 }
 
-static bool routed(Hy4Forward *f, int l, uint32_t n, bool read)
+static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin)
 {
   const Hy4Geometry *g = &f->w->geo;
   const Hy4Layer *L = &f->w->layer[l];
@@ -147,7 +147,7 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read)
     const void **wg = (const void **)f->wptr, **wu = wg + nk, **wd = wg + 2 * nk;
     return hy4_route(f->idx, f->wtok, n, K, E, mv_chunk(L->exp_gate), base, bytes, f->gidx, f->sidx, f->wsel, f->cnt,
                      f->xrow, wg, f->fault, f->st) &&
-           ops_gather_rows(f->xg, f->rin, f->gidx, nk, lat, f->st) &&
+           ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) &&
            mv_experts(L->exp_gate, wg, f, nk, ffe, lat, f->xg, f->eg_g) &&
            mv_experts(L->exp_up, wu, f, nk, ffe, lat, f->xg, f->eg_u) &&
            ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, f->st) &&
@@ -158,7 +158,7 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read)
     return false;
   const uint64_t ecap = hy4_read_entries(f->max_tokens, g);
   const void **rw = f->rw;
-  return mm_x16_rows(f->rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, f->st) &&
+  return mm_x16_rows(rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, f->st) &&
          mm_experts(L->exp_gate->type, rw, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_g, f->ry, ffe, f->st) &&
          mm_experts(L->exp_up->type, rw + ecap, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_u, f->ry,
                     ffe, f->st) &&
@@ -174,14 +174,24 @@ bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)
   const Hy4Layer *L = &f->w->layer[l];
   const uint32_t D = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, K = (uint32_t)g->n_used;
   const uint32_t lat = (uint32_t)g->latent, sh = (uint32_t)g->ff_exp * (uint32_t)g->n_shexp;
-  return hy4_mat(f, L->router, E, D, f->xn, n, f->logit_r, read) &&
-         ops_router_scored(f->logit_r, hy4_fv(f, L->router_bias), E, K, g->expert_scale, OPS_SCORE_SIGMOID, n, f->idx,
+  /* the matrices on xn: a token's one joint (its outputs in jo_ffn), else each its own */
+  const bool joint = n == 1 && !read;
+  const Hy4Joint *J = &f->j_ffn[l];
+  float *logit = joint ? f->jo_ffn + J->off[0] : f->logit_r, *rin = joint ? f->jo_ffn + J->off[1] : f->rin;
+  float *ga = joint ? f->jo_ffn + J->off[2] : f->ga, *up = joint ? f->jo_ffn + J->off[3] : f->up;
+  const bool on_x = joint ? hy4_joint(f, J, D, f->xn, f->jo_ffn)
+                          : hy4_mat(f, L->router, E, D, f->xn, n, logit, read) &&
+                                hy4_mat(f, L->routed_down, lat, D, f->xn, n, rin, read) &&
+                                hy4_mat(f, L->sh_gate, sh, D, f->xn, n, ga, read) &&
+                                hy4_mat(f, L->sh_up, sh, D, f->xn, n, up, read);
+  return on_x &&
+         ops_router_scored(logit, hy4_fv(f, L->router_bias), E, K, g->expert_scale, OPS_SCORE_SIGMOID, n, f->idx,
                            f->wtok, f->st) &&
-         hy4_mat(f, L->routed_down, lat, D, f->xn, n, f->rin, read) && routed(f, l, n, read) &&
-         ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, f->st) &&
+         routed(f, l, n, read, rin) && ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, f->st) &&
          hy4_mat(f, L->routed_up, D, lat, f->rsum, n, f->out, read) &&
-         hy4_mat(f, L->sh_gate, sh, D, f->xn, n, f->ga, read) && hy4_mat(f, L->sh_up, sh, D, f->xn, n, f->up, read) &&
-         ops_swiglu(f->ga, f->up, sh, INFINITY, NULL, n, f->act, f->st) &&
-         hy4_mat(f, L->sh_down, D, sh, f->act, n, f->sh, read) && ops_add(f->out, f->sh, (uint64_t)n * D, f->st) &&
-         ops_rms(f->out, D, D, hy4_fv(f, L->post_ffn_norm), g->rms_eps, n, f->y, D, f->st);
+         ops_swiglu(ga, up, sh, INFINITY, NULL, n, f->act, f->st) &&
+         hy4_mat(f, L->sh_down, D, sh, f->act, n, f->sh, read) &&
+         ops_add(f->out, f->sh, (uint64_t)n * D, f->st) &&
+         ops_rms(f->out, D, D, hy4_fv(f, L->post_ffn_norm), g->rms_eps, n, f->y, D, f->st) &&
+         hy4_hc_post(f->h, f->y, f->post, (uint32_t)g->hc, D, n, f->st); /* the routed and shared sum, its post norm, into the streams */
 }

@@ -14,6 +14,21 @@
 #define HY4_MAX_HEADS 128   /* a layer's heads at most (the per-head tables' room) */
 #define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
 
+/* matrices that read the same input (a layer's normed attention or FFN input), for a one-token step: each type's
+   members one matrix (their rows concatenated at load: a row's sums its own, the same bits) and one launch, every
+   member's output at its offset of one buffer */
+#define HY4_JOINT_MAX 6
+typedef struct Hy4Joint
+{
+  uint32_t n_runs, total;
+  struct
+  {
+    uint32_t type, rows, off;
+    const void *w;
+  } run[HY4_JOINT_MAX];
+  uint32_t off[HY4_JOINT_MAX]; /* member k's output offset (members in the builder's order) */
+} Hy4Joint;
+
 struct Hy4Forward
 {
   const Hy4Weights *w;
@@ -40,6 +55,11 @@ struct Hy4Forward
   void *x16, *xe16;
   int32_t *overflow;
   void *st;                   /* the step's stream (every launch) */
+  Hy4Joint j_attn[HY4_MAX_LAYERS], j_ffn[HY4_MAX_LAYERS];
+  float *jo_attn, *jo_ffn;    /* their outputs (a token's) */
+  void **joints;              /* the concatenated matrices (freed whole), n_joints of them */
+  uint32_t n_joints;
+  bool *in_joint;             /* a tensor's device bytes inside one (not freed alone) */
   int32_t *fault;             /* a decode's routing saw a pick out of range or twice (hy4_route): the step refused */
   int32_t *pin_flags;         /* overflow and fault (one buffer on the GPU: fault = overflow + 1) read with one copy */
   uint32_t *rx, *ry, *rxd, *ryd, *h_rx, *h_ry, *h_rxd, *h_ryd;
@@ -93,6 +113,8 @@ bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
 bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n);
 /* layer l's blocks on the step's streams */
 bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l, bool read);
+/* a joint's launches over a token's x into out (its members at their offsets) */
+bool hy4_joint(Hy4Forward *f, const Hy4Joint *j, uint32_t cols, const float *x, float *out);
 
 /* the latent MoE (hip_hy4_moe.c): the router, the experts (the matvecs, or read: the matrix cores), the shared
    expert, the combine norm - into f->y */
