@@ -30,10 +30,11 @@ constexpr uint32_t kTop1MissLong = 1;
 // a read's (hy4_step_read: the matrix cores' f16 inputs) against the F32 reference, bounded by the reference itself run
 // in BF16 (hy4_forward.py --dtype bf16, the release as served) on the same ids, 2026-11-18: 64 ids KL mean 0.028,
 // max 0.244, top-1 62 of 64 (the read: 0.020, 0.347, 59); 2,600 ids 0.119, 2.32, 58 of 64 (the read: 0.0885, 3.9,
-// 60). the bounds: BF16's mean with room, the max past both (one near-tie's row), the misses BF16's and more - a real
-// fault (a dropped sink: KL mean 1.0) past every one
+// 60). the bounds: BF16's mean with room, the max past both (one near-tie's row), the top-1 misses BF16's worst (6 of
+// 64, the long run's) with room at either length - a 64-row count moves by near-ties alone (the read's own 5 to 6
+// with the attention's sums reordered, 2026-11-18) - and a real fault (a dropped sink: KL mean 1.0) past every one
 constexpr double kReadKlMean = 0.05, kReadKlMax = 1.0, kReadKlMeanLong = 0.2, kReadKlMaxLong = 6.0;
-constexpr uint32_t kReadTop1Miss = 6, kReadTop1MissLong = 8;
+constexpr uint32_t kReadTop1Miss = 8, kReadTop1MissLong = 8;
 
 struct Taps {
   std::vector<int32_t> rows;  // the kept rows

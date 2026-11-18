@@ -215,7 +215,9 @@ __global__ void gate_kernel(float* out, const float* gate, uint64_t n) {
 // of kTileKeys at a time for every head, each wave its head's scores (a lane 18 of the 576 dims, an xor tree), an
 // online softmax in the keys' order, its latent output (a lane 16 of the 512 dims). partials (max, sum, output) a
 // (token, head, split); the merge their order with the sink. the splits a token's own keys': its bits whatever the step
-constexpr uint32_t kHeadGroup = kWaves, kSplitKeys = 64, kTileKeys = 16, kLanes = 32;
+// kSplitKeys, kTileKeys: tools/bench/mla_bench's sweep (2026-11-18, low-power, a decode's 512-window and 1,024-key
+// layers): 32 and 8 the fastest of 8..64 and 8..16 (64 us vs 64/16's 81, 16/8's 79)
+constexpr uint32_t kHeadGroup = kWaves, kSplitKeys = 32, kTileKeys = 8, kLanes = 32;
 constexpr uint32_t kRowMax = HY4_MLA_MAX_LATENT + kMaxRope, kTokChunk = 16; /* a launch's tokens (the partials' room) */
 constexpr uint32_t kMaxSplits = HY4_MLA_MAX_KEYS / kSplitKeys;
 
@@ -246,7 +248,8 @@ __global__ __launch_bounds__(kThreads) void mla_split_kernel(const float* qa, co
                                                              uint32_t window, const int32_t* sel, const int32_t* n_sel,
                                                              uint32_t sel_cap, uint32_t pool, float scale,
                                                              const int32_t* pos, uint32_t t0, float* part) {
-  __shared__ float tile[kTileKeys][kRowMax];
+  __shared__ __attribute__((aligned(16))) float tile[kTileKeys][kRowMax];
+  __shared__ int64_t rows[kTileKeys];
   const uint32_t split = blockIdx.x, g = blockIdx.y, t = t0 + blockIdx.z, row = latent + rope_dim;
   const Keys keys = keys_of(t, pos, window, sel, n_sel, sel_cap, pool, slots);
   const uint32_t k0 = split * kSplitKeys;
@@ -258,48 +261,107 @@ __global__ __launch_bounds__(kThreads) void mla_split_kernel(const float* qa, co
     return;
   }
   const uint32_t k1 = k0 + kSplitKeys < keys.n ? k0 + kSplitKeys : keys.n;
-  constexpr uint32_t kQPer = kRowMax / kLanes, kOPer = HY4_MLA_MAX_LATENT / kLanes;
-  float q[kQPer], o[kOPer] = {}, m = -INFINITY, l = 0.0f;
+  // a lane's dims in chunks of 4 (128-bit reads of the tile): the score's 4 x kQ4 of the row, the output's 4 x kO4
+  constexpr uint32_t kQ4 = (kRowMax + 4 * kLanes - 1) / (4 * kLanes), kO4 = HY4_MLA_MAX_LATENT / (4 * kLanes);
+  float4 q[kQ4], o[kO4];
+  float m = -INFINITY, l = 0.0f;
   const float* qh = qa + ((uint64_t) t * heads + (live ? h : 0)) * row;
 #pragma unroll
-  for (uint32_t j = 0; j < kQPer; j++) q[j] = lane + kLanes * j < row ? qh[lane + kLanes * j] : 0.0f;
+  for (uint32_t j = 0; j < kQ4; j++) {
+    const uint32_t d = 4 * (lane + kLanes * j);
+    q[j] = d < row ? *(const float4*) (qh + d) : make_float4(0, 0, 0, 0);
+  }
+#pragma unroll
+  for (uint32_t j = 0; j < kO4; j++) o[j] = make_float4(0, 0, 0, 0);
   for (uint32_t kt = k0; kt < k1; kt += kTileKeys) {
     const uint32_t nt = k1 - kt < kTileKeys ? k1 - kt : kTileKeys;
     __syncthreads();
-    for (uint32_t i = threadIdx.x; i < nt * row; i += kThreads) {
-      const uint32_t kk = i / row, d = i % row;
-      tile[kk][d] = cache[(uint64_t) keys.row(kt + kk) * row + d];
+    if (threadIdx.x < nt) rows[threadIdx.x] = keys.row(kt + threadIdx.x);  // a key's cache row once, not a value's
+    __syncthreads();
+    const uint32_t row4 = row / 4;  // (row a multiple of 4: hy4_mla_attn's check)
+    for (uint32_t i = threadIdx.x; i < nt * row4; i += kThreads) {
+      const uint32_t kk = i / row4, d = i % row4;
+      *(float4*) &tile[kk][4 * d] = *(const float4*) (cache + (uint64_t) rows[kk] * row + 4 * d);
     }
     __syncthreads();
     if (!live) continue;
     float sc[kTileKeys];
     float mt = m;
-    for (uint32_t kk = 0; kk < nt; kk++) {
-      float a = 0.0f;
+    {
+      float a[kTileKeys];
 #pragma unroll
-      for (uint32_t j = 0; j < kQPer; j++) a = fmaf(q[j], lane + kLanes * j < row ? tile[kk][lane + kLanes * j] : 0.0f, a);
-      for (int off = kLanes / 2; off > 0; off >>= 1) a += __shfl_xor(a, off, kLanes);
-      sc[kk] = a * scale;
-      mt = fmaxf(mt, sc[kk]);
+      for (uint32_t kk = 0; kk < kTileKeys; kk++) {  // each lane's part of every key's dot
+        a[kk] = 0.0f;
+#pragma unroll
+        for (uint32_t j = 0; j < kQ4; j++) {
+          const uint32_t d = 4 * (lane + kLanes * j);
+          if (d < row) {
+            const float4 k4 = *(const float4*) &tile[kk][d];
+            a[kk] = fmaf(q[j].x, k4.x, a[kk]), a[kk] = fmaf(q[j].y, k4.y, a[kk]);
+            a[kk] = fmaf(q[j].z, k4.z, a[kk]), a[kk] = fmaf(q[j].w, k4.w, a[kk]);
+          }
+        }
+      }
+      // the lanes' parts summed transposed: each step a lane keeps half its keys (its lane bit's half) and adds its
+      // partner's parts of them - kTileKeys - 1 shuffles in all, then the last lanes' sum; lane L holds key
+      // (L / (kLanes / kTileKeys)) % kTileKeys's whole dot
+      uint32_t live_n = kTileKeys;
+#pragma unroll
+      for (uint32_t off = kLanes / 2; off >= kLanes / kTileKeys; off >>= 1) {
+        const bool upper = lane & off;
+        live_n >>= 1;
+#pragma unroll
+        for (uint32_t i = 0; i < kTileKeys / 2; i++) {
+          if (i >= live_n) break;
+          const float send = upper ? a[i] : a[i + live_n], keep = upper ? a[i + live_n] : a[i];
+          a[i] = keep + __shfl_xor(send, off, kLanes);
+        }
+      }
+#pragma unroll
+      for (uint32_t off = kLanes / kTileKeys / 2; off > 0; off >>= 1) a[0] += __shfl_xor(a[0], off, kLanes);
+      constexpr uint32_t kSpan = kLanes / kTileKeys;  // lanes a key
+      __shared__ float wsc[kWaves][kTileKeys];
+      if (lane % kSpan == 0) {
+        // lane L's key: its bits from the top step down (the halves kept), lowest step the key's lowest bit
+        uint32_t key = 0;
+#pragma unroll
+        for (uint32_t off = kLanes / 2, bit = kTileKeys / 2; off >= kSpan; off >>= 1, bit >>= 1) key |= lane & off ? bit : 0;
+        wsc[wave][key] = a[0];
+      }
+      __builtin_amdgcn_wave_barrier();
+#pragma unroll
+      for (uint32_t kk = 0; kk < kTileKeys; kk++) {
+        sc[kk] = kk < nt ? wsc[wave][kk] * scale : -INFINITY;
+        mt = fmaxf(mt, sc[kk]);
+      }
+      __builtin_amdgcn_wave_barrier();
     }
     const float alpha = expf(m - mt);  // (m -inf at the start: 0)
     l *= alpha;
 #pragma unroll
-    for (uint32_t j = 0; j < kOPer; j++) o[j] *= alpha;
+    for (uint32_t j = 0; j < kO4; j++) o[j].x *= alpha, o[j].y *= alpha, o[j].z *= alpha, o[j].w *= alpha;
     for (uint32_t kk = 0; kk < nt; kk++) {
       const float p = expf(sc[kk] - mt);
       l += p;
 #pragma unroll
-      for (uint32_t j = 0; j < kOPer; j++)
-        if (lane + kLanes * j < latent) o[j] = fmaf(p, tile[kk][lane + kLanes * j], o[j]);
+      for (uint32_t j = 0; j < kO4; j++) {
+        const uint32_t d = 4 * (lane + kLanes * j);
+        if (d < latent) {
+          const float4 v4 = *(const float4*) &tile[kk][d];
+          o[j].x = fmaf(p, v4.x, o[j].x), o[j].y = fmaf(p, v4.y, o[j].y);
+          o[j].z = fmaf(p, v4.z, o[j].z), o[j].w = fmaf(p, v4.w, o[j].w);
+        }
+      }
     }
     m = mt;
   }
   if (!live) return;
   if (lane == 0) out[0] = m, out[1] = l;
 #pragma unroll
-  for (uint32_t j = 0; j < kOPer; j++)
-    if (lane + kLanes * j < latent) out[2 + lane + kLanes * j] = o[j];
+  for (uint32_t j = 0; j < kO4; j++) {
+    const uint32_t d = 4 * (lane + kLanes * j);
+    if (d < latent) out[2 + d] = o[j].x, out[3 + d] = o[j].y, out[4 + d] = o[j].z, out[5 + d] = o[j].w;
+  }
 }
 
 // a (token, head)'s splits merged in their order with the sink (a logit with no value)
@@ -569,7 +631,8 @@ extern "C" bool hy4_mla_attn(const float* qa, const float* cache, uint32_t slots
                              const int32_t* n_sel, uint32_t sel_cap, uint32_t pool, float scale, const int32_t* pos,
                              uint32_t n_tok, float* o_lat, float* scratch, void* stream) {
   if (!qa || !cache || !sinks || !pos || !o_lat || !scratch || !heads || !latent || latent > HY4_MLA_MAX_LATENT ||
-      !rope_dim || rope_dim > kMaxRope || !n_tok || (window && window > HY4_MLA_MAX_KEYS))
+      !rope_dim || rope_dim > kMaxRope || !n_tok || (window && window > HY4_MLA_MAX_KEYS) || latent % 4 || rope_dim % 4 ||
+      (uintptr_t) cache % 16 || (uintptr_t) qa % 16)
     return false;
   if (sel && (!n_sel || window || !pool || !sel_cap || (uint64_t) sel_cap * pool > HY4_MLA_MAX_KEYS)) return false;
   if (slots && slots < window) return false;
