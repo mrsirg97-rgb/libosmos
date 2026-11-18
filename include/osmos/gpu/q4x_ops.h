@@ -95,6 +95,9 @@ typedef struct Q4xPick
   uint32_t ratio, blocks;
 } Q4xPick;
 uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx);
+/* the scratch at a shape (LFM3's head of 128: its prompt's spans a group's tokens a piece, to 2M) - at least
+   q4x_attn_scratch's */
+uint64_t q4x_attn_scratch_dim(uint32_t heads, uint32_t kv_heads, uint32_t dim, uint32_t max_ctx);
 bool q4x_attn(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
               uint32_t dim, uint32_t pos0, const float *gate, const Q4xPick *pick, const AttnShape *shape,
               float *scratch, float *out, const Q4xX16 *side, void *stream);

@@ -445,20 +445,30 @@ extern "C" uint64_t q4x_kv_row_bytes(uint32_t values) {
 // chunk's (a 2M context's 1,024, not 16,384). a row's keys past its position masked (-inf: weight 0); the tile's keys
 // past the group's last position loaded as zeros. a row's bits its own: its tiles' values its position's (the
 // masked keys' weights 0 exactly), whichever group it is in (test_lfm3_attn_gpu: a step in pieces the same bits)
+#ifndef SPAN_WAVES
+#define SPAN_WAVES 8
+#endif
 constexpr uint32_t kSpanChunks = 16, kSpan = kSpanChunks * kChunk;
 constexpr uint32_t kSpanStepTokens = 256;  // a piece's most tokens
+constexpr int kSpanWaves = SPAN_WAVES, kSpanRows = kSpanWaves * kTile;  // a wave a row tile, all of O's columns
 
 // a row's update by one tile (fa_span_kernel's): its scores masked past lim, the running max and sum, O += P V -
 // only the rows upd selects (the rest's m, l, O untouched: the WMMA's other rows' results dropped)
+__device__ inline int32_t span_lim(int r, uint32_t rt, uint32_t G, uint32_t nt, uint32_t first) {
+  const uint32_t tl = (rt * kTile + (uint32_t) osmos_slot_row(r)) / G;  // a slot's row's token, its position (-1 none)
+  return tl < nt ? (int32_t) (first + tl) : -1;
+}
+
 template <int HD>
-__device__ inline void span_tile(const f8& sacc, const int32_t* lim, const bool* upd, uint32_t kb, float scale,
-                                 const _Float16* vt, _Float16* pw, uint32_t half, float* m, float* l, f8* o) {
-  constexpr int kHalfCols = HD / kTile / 2;
-  float sv[8], alpha[osmos_slots], mn[osmos_slots], ln[osmos_slots];
+__device__ inline void span_tile(const f8& sacc, uint32_t rt, uint32_t G, uint32_t nt, uint32_t first,
+                                 const bool* upd, uint32_t kb, float scale, const _Float16* vt, _Float16* pw, float* m,
+                                 float* l, f8* o) {
+  constexpr int kCols = HD / kTile;
+  float sv[8], alpha[osmos_slots];
 #pragma unroll
   for (int j = 0; j < 8; j++) {
     const int32_t key = (int32_t) (kb + osmos_acc_col(j));
-    sv[j] = key <= lim[osmos_slot(j)] ? sacc[j] * scale : -INFINITY;
+    sv[j] = key <= span_lim(osmos_slot(j), rt, G, nt, first) ? sacc[j] * scale : -INFINITY;
   }
 #pragma unroll
   for (int r = 0; r < osmos_slots; r++) {
@@ -466,69 +476,67 @@ __device__ inline void span_tile(const f8& sacc, const int32_t* lim, const bool*
 #pragma unroll
     for (int j = 0; j < 8; j++)
       if (osmos_slot(j) == r) mx = fmaxf(mx, sv[j]);
-    mn[r] = fmaxf(m[r], osmos_row_max(mx));
+    const float mn = fmaxf(m[r], osmos_row_max(mx));
     float sum = 0.0f;
 #pragma unroll
     for (int j = 0; j < 8; j++)
       if (osmos_slot(j) == r) {
-        const float pv = mn[r] == -INFINITY ? 0.0f : expf(sv[j] - mn[r]);
+        const float pv = mn == -INFINITY ? 0.0f : expf(sv[j] - mn);
         sum += pv;
         pw[osmos_acc_row(j) * kKeyLds + osmos_acc_col(j)] = (_Float16) pv;
       }
-    alpha[r] = mn[r] == -INFINITY ? 1.0f : expf(m[r] - mn[r]);
-    ln[r] = l[r] * alpha[r] + osmos_row_sum(sum);
+    alpha[r] = mn == -INFINITY ? 1.0f : expf(m[r] - mn);
+    const float ln = l[r] * alpha[r] + osmos_row_sum(sum);
+    if (upd[r]) m[r] = mn, l[r] = ln;
   }
   osmos_wave_barrier();
   const osmos_fa pa = osmos_load_a(pw, kKeyLds);
 #pragma unroll
-  for (int c = 0; c < kHalfCols; c++) {
+  for (int c = 0; c < kCols; c++) {
     const f8 prev = o[c];
     f8 x = prev;
 #pragma unroll
     for (int j = 0; j < 8; j++) x[j] *= alpha[osmos_slot(j)];
-    x = osmos_mma(pa, osmos_load_b_s(vt + (half * kHalfCols + c) * kTile * kKeyLds, kKeyLds), x);
+    x = osmos_mma(pa, osmos_load_b_s(vt + c * kTile * kKeyLds, kKeyLds), x);
 #pragma unroll
     for (int j = 0; j < 8; j++) o[c][j] = upd[osmos_slot(j)] ? x[j] : prev[j];
   }
-#pragma unroll
-  for (int r = 0; r < osmos_slots; r++)
-    if (upd[r]) m[r] = mn[r], l[r] = ln[r];
   osmos_wave_barrier();
 }
 
 template <int HD>
-__global__ __launch_bounds__(kWholeWaves * 32) void fa_span_kernel(const float* q, const uint8_t* kc,
+__global__ __launch_bounds__(kSpanWaves * 32) void fa_span_kernel(const float* q, const uint8_t* kc,
                                                                    const uint8_t* vc, uint32_t n_tok, uint32_t heads,
                                                                    uint32_t kv_heads, uint32_t pos0, uint32_t tt,
                                                                    float scale, float* ml, float* po) {
-  constexpr int kRowLds = ::kRowLds<HD>, kHead = HD, kHalfCols = HD / kTile / 2;
-  __shared__ __attribute__((aligned(32))) _Float16 qs[kWholeRows * kRowLds], ks[kTile * kRowLds], vt[kHead * kKeyLds];
-  __shared__ __attribute__((aligned(32))) _Float16 ps[kWholeWaves][kTile * kKeyLds];
+  constexpr int kRowLds = ::kRowLds<HD>, kHead = HD, kCols = HD / kTile;  // a wave a row tile, all of O's columns
+  __shared__ __attribute__((aligned(32))) _Float16 ks[kTile * kRowLds], vt[kHead * kKeyLds];
+  __shared__ __attribute__((aligned(32))) _Float16 ps[kSpanWaves][kTile * kKeyLds];
   const uint32_t G = heads / kv_heads, t0 = blockIdx.x * tt, kvh = blockIdx.y, sp = blockIdx.z;
-  const uint32_t wave = threadIdx.x / 32, rt = wave / 2, half = wave % 2;
+  const uint32_t wave = threadIdx.x / 32, rt = wave;
   const uint32_t nt = n_tok - t0 < tt ? n_tok - t0 : tt, first = pos0 + t0, top = first + nt - 1;
   const uint32_t k0 = sp * kSpan;
   if (k0 > top) return;  // a span past the group's every token
   const uint32_t k1 = k0 + kSpan < top + 1 ? k0 + kSpan : top + 1;
   const uint64_t row = (uint64_t) kv_heads * kHead / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
   const Keys keys{nullptr, 1, 0, 0, top + 1, 0, 0};
-  for (uint32_t i = threadIdx.x; i < kWholeRows * kHead; i += kWholeWaves * 32) {
-    const uint32_t r = i / kHead, d = i % kHead, tl = r / G;
-    qs[r * kRowLds + d] = (_Float16) (tl < nt ? q[((uint64_t) (t0 + tl) * heads + kvh * G + r % G) * kHead + d] : 0.0f);
+  // the wave's Q tile in registers, f16: an A operand a lane's row's 16 dims (port.h), a k-step's (rows past nt G zero)
+  osmos_fa qa[kHead / kTile];
+  {
+    const uint32_t r = rt * kTile + threadIdx.x % 32 % 16, tl = r / G;
+    const float* qr = q + ((uint64_t) (t0 + tl) * heads + kvh * G + r % G) * kHead;
+#pragma unroll
+    for (int g = 0; g < kHead / kTile; g++)
+#pragma unroll
+      for (int e = 0; e < kTile; e++) qa[g][e] = (_Float16) (tl < nt ? qr[g * kTile + e] : 0.0f);
   }
-  // a slot's row: its token (in the group), its position (-1: none)
-  int32_t lim[osmos_slots], tok[osmos_slots];
   float m[osmos_slots], l[osmos_slots];
-  for (int r = 0; r < osmos_slots; r++) {
-    const uint32_t tl = (rt * kTile + (uint32_t) osmos_slot_row(r)) / G;
-    tok[r] = tl < nt ? (int32_t) tl : -1, lim[r] = tl < nt ? (int32_t) (first + tl) : -1;
-    m[r] = -INFINITY, l[r] = 0.0f;
-  }
-  const bool fetcher = threadIdx.x < kWaves * 32;
-  const _Float16* qw = qs + rt * kTile * kRowLds;
+#pragma unroll
+  for (int r = 0; r < osmos_slots; r++) m[r] = -INFINITY, l[r] = 0.0f;
+  const bool fetcher = threadIdx.x < kWaves * 32;  // raw's items: the first kWaves waves'
   Raw<HD> raw;
   if (fetcher) raw_fetch<HD>(raw, kc, vc, row, kvh, keys, k0, k1);
-  f8 o[kHalfCols] = {};
+  f8 o[kCols] = {};
   for (uint32_t kb = k0; kb < k1; kb += kTile) {
     __syncthreads();
     if (fetcher) raw_store<HD>(raw, ks, vt);
@@ -536,26 +544,30 @@ __global__ __launch_bounds__(kWholeWaves * 32) void fa_span_kernel(const float* 
     if (fetcher && kb + kTile < k1) raw_fetch<HD>(raw, kc, vc, row, kvh, keys, kb + kTile, k1);
     f8 sacc = {};
     for (int g = 0; g < kHead / kTile; g++)
-      sacc = osmos_mma(osmos_load_a(qw + g * kTile, kRowLds), osmos_load_b_s(ks + g * kTile, kRowLds), sacc);
-    bool upd[osmos_slots];
-    for (int r = 0; r < osmos_slots; r++) upd[r] = lim[r] >= (int32_t) (kb + kTile - 1);  // the tile whole for it
-    span_tile<HD>(sacc, lim, upd, kb, scale, vt, ps[wave], half, m, l, o);
-    if (kb + kTile - 1 <= first) continue;  // no row's diagonal
-    // the diagonal: each token whose position is in the tile (last first), V's keys past it zeroed - its rows' tile
-    // its position's whatever the group
-    const uint32_t hi = top < kb + kTile - 1 ? top : kb + kTile - 2;
-    for (int32_t p = (int32_t) hi; p >= (int32_t) kb && p >= (int32_t) first; p--) {
-      __syncthreads();  // the last pass's reads of vt
-      for (uint32_t i = threadIdx.x; i < (uint32_t) kHead * kTile; i += kWholeWaves * 32) {
-        const uint32_t d = i / kTile, k = i % kTile;
-        if (kb + k > (uint32_t) p) vt[d * kKeyLds + k] = (_Float16) 0.0f;
+      sacc = osmos_mma(qa[g], osmos_load_b_s(ks + g * kTile, kRowLds), sacc);
+    // pass 0 the rows the tile is whole for; then each token whose position is in the tile (last first), V's keys past
+    // it zeroed - its rows' tile its position's whatever the group
+    const bool diag = kb + kTile - 1 > first;
+    int32_t p = (int32_t) (top < kb + kTile - 1 ? top : kb + kTile - 2) + 1;
+    for (bool pass0 = true;; pass0 = false) {
+      bool upd[osmos_slots], mine = pass0;
+      if (!pass0) {
+        if (--p < (int32_t) kb || p < (int32_t) first) break;
+        __syncthreads();  // the last pass's reads of vt
+        for (uint32_t i = threadIdx.x; i < (uint32_t) kHead * kTile; i += kSpanWaves * 32) {
+          const uint32_t d = i / kTile, k = i % kTile;
+          if (kb + k > (uint32_t) p) vt[d * kKeyLds + k] = (_Float16) 0.0f;
+        }
+        __syncthreads();
       }
-      __syncthreads();
-      const int32_t tl = p - (int32_t) first;
-      bool mine = false;
-      for (int r = 0; r < osmos_slots; r++) upd[r] = tok[r] == tl, mine |= upd[r];
-      if (__builtin_amdgcn_readfirstlane((int) mine) || __any(mine))
-        span_tile<HD>(sacc, lim, upd, kb, scale, vt, ps[wave], half, m, l, o);
+#pragma unroll
+      for (int r = 0; r < osmos_slots; r++) {
+        const int32_t at = span_lim(r, rt, G, nt, first);
+        upd[r] = pass0 ? at >= (int32_t) (kb + kTile - 1) : at == p;
+        mine |= upd[r];
+      }
+      if (__any(mine)) span_tile<HD>(sacc, rt, G, nt, first, upd, kb, scale, vt, ps[wave], m, l, o);
+      if (!diag) break;
     }
   }
   const uint64_t base = ((uint64_t) sp * kv_heads + kvh) * n_tok * G;
@@ -563,11 +575,11 @@ __global__ __launch_bounds__(kWholeWaves * 32) void fa_span_kernel(const float* 
   for (int j = 0; j < 8; j++) {
     const uint32_t r = rt * kTile + osmos_acc_row(j), R = t0 * G + r;
     if (r >= nt * G) continue;
-    if (half == 0 && osmos_acc_col(j) == 0)
+    if (osmos_acc_col(j) == 0)
       ml[(base + R) * 2] = m[osmos_slot(j)], ml[(base + R) * 2 + 1] = l[osmos_slot(j)];
 #pragma unroll
-    for (int c = 0; c < kHalfCols; c++)
-      po[(base + R) * kHead + (half * kHalfCols + c) * kTile + osmos_acc_col(j)] = o[c][j];
+    for (int c = 0; c < kCols; c++)
+      po[(base + R) * kHead + c * kTile + osmos_acc_col(j)] = o[c][j];
   }
 }
 
@@ -607,23 +619,38 @@ extern "C" uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx) {
   return pairs * heads * (kHead + 2);  // a piece of at least one token at the context's end
 }
 
+// the span path's pairs: a piece of a group's tokens (its least) at the context's end, or the chunk path's
+static uint64_t span_pairs(uint32_t heads, uint32_t kv_heads, uint64_t end) {
+  const uint64_t chunks = (end + kChunk - 1) / kChunk, spans = (end + kSpan - 1) / kSpan;
+  const uint64_t tt = (uint64_t) kSpanRows / (heads / kv_heads), least = tt * spans;
+  const uint64_t pairs = chunks < kPieceChunks ? kPieceChunks : chunks;
+  return pairs > least ? pairs : least;
+}
+
+extern "C" uint64_t q4x_attn_scratch_dim(uint32_t heads, uint32_t kv_heads, uint32_t dim, uint32_t max_ctx) {
+  if (dim != Q4X_QK_HEAD_NARROW || !kv_heads || heads % kv_heads) return q4x_attn_scratch(heads, max_ctx);
+  const uint64_t a = span_pairs(heads, kv_heads, max_ctx) * heads * (dim + 2), b = q4x_attn_scratch(heads, max_ctx);
+  return a > b ? a : b;
+}
+
 template <int HD>
 static bool attn(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
                  uint32_t pos0, const float* gate, const Q4xPick* pick, const AttnShape& sh, float* scratch,
                  float* out, const Q4xX16* side, void* stream) {
-  if (HD == Q4X_QK_HEAD_NARROW && !pick && !sh.window && !sh.slots) {  // LFM3's dense prompt: by spans
+  if constexpr (HD == Q4X_QK_HEAD_NARROW)
+  if (!pick && !sh.window && !sh.slots) {  // LFM3's dense prompt: by spans
     const float scale = 1.0f / sqrtf((float) HD);
-    const uint32_t G = heads / kv_heads, tt = kWholeRows / G;
+    const uint32_t G = heads / kv_heads, tt = kSpanRows / G;
     // the scratch's pairs (q4x_attn_scratch's for a context at least this step's end): a piece's tokens x its spans
-    const uint64_t end = (uint64_t) pos0 + n_tok, chunks = (end + kChunk - 1) / kChunk;
-    const uint64_t pairs = chunks < kPieceChunks ? kPieceChunks : chunks, spans = (end - 1) / kSpan + 1;
+    // (q4x_attn_scratch_dim's: a piece of at least a group at the step's end)
+    const uint64_t end = (uint64_t) pos0 + n_tok, pairs = span_pairs(heads, kv_heads, end), spans = (end - 1) / kSpan + 1;
     uint32_t piece = (uint32_t) (pairs / spans / tt * tt);
-    piece = piece < tt ? tt : piece > kSpanStepTokens ? kSpanStepTokens : piece;
+    piece = piece > kSpanStepTokens ? kSpanStepTokens : piece;
     for (uint32_t t0 = 0; t0 < n_tok; t0 += piece) {
       const uint32_t n = n_tok - t0 < piece ? n_tok - t0 : piece, p0 = pos0 + t0, ps = (p0 + n - 1) / kSpan + 1;
       float *ml = scratch, *po = scratch + (uint64_t) 2 * ps * kv_heads * n * G;
       const uint64_t at = (uint64_t) t0 * heads * HD;
-      fa_span_kernel<HD><<<dim3((n + tt - 1) / tt, kv_heads, ps), kWholeWaves * 32, 0, st(stream)>>>(
+      fa_span_kernel<HD><<<dim3((n + tt - 1) / tt, kv_heads, ps), kSpanWaves * 32, 0, st(stream)>>>(
           q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, tt, scale, ml, po);
       if (!ok()) return false;
       span_merge_kernel<HD><<<n * heads, HD, 0, st(stream)>>>(ml, po, gate + at / sh.gate_span, n, heads, kv_heads,

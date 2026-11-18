@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
     }
     CK(hipMalloc((void**) &q, (size_t) T * H * D * 4) == hipSuccess && hipMalloc((void**) &g, (size_t) T * H * 4) == hipSuccess);
     CK(hipMalloc((void**) &out, (size_t) T * H * D * 4) == hipSuccess);
-    CK(hipMalloc((void**) &fa, q4x_attn_scratch(H, C) * 4) == hipSuccess);
+    CK(hipMalloc((void**) &fa, q4x_attn_scratch_dim(H, KV, D, C) * 4) == hipSuccess);
     CK(hipMemcpy(q, h.data(), (size_t) T * H * D * 4 < h.size() * 4 ? (size_t) T * H * D * 4 : h.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
     CK(hipMemset(g, 0, (size_t) T * H * 4) == hipSuccess);
     const AttnShape sh = {D, 0, 0};

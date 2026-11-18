@@ -139,7 +139,7 @@ static void prompt(uint32_t pos0, uint32_t T, uint32_t window, uint32_t slots) {
   CHECK(hipMalloc((void**) &dq, hq.size() * 4) == hipSuccess && hipMalloc((void**) &dg, hg.size() * 4) == hipSuccess);
   CHECK(hipMalloc((void**) &out, hq.size() * 4) == hipSuccess && hipMalloc((void**) &out2, hq.size() * 4) == hipSuccess &&
         hipMalloc((void**) &ref, hq.size() * 4) == hipSuccess);
-  CHECK(hipMalloc((void**) &fa, q4x_attn_scratch(H, ctx) * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &fa, q4x_attn_scratch_dim(H, KV, D, ctx) * 4) == hipSuccess);
   CHECK(hipMalloc((void**) &da, q35_attn_decode_scratch(H, Q35_ATTN_DECODE_MAX) * 4) == hipSuccess);
   CHECK(hipMemcpy(dk, hk.data(), hk.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(dv, hv.data(), hv.size() * 4, hipMemcpyHostToDevice) == hipSuccess);

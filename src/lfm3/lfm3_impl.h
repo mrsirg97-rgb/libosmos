@@ -31,7 +31,7 @@ struct Lfm3Forward
   bool *in_joint;     /* a tensor's bytes inside a joint (not freed alone) */
   float *jo;          /* a joint's outputs (a token's) */
   void *x16;          /* a read's matrices' f16 input (MM_MAX_TOKENS rows of the widest) */
-  float *fa_scratch;  /* a read's attention's (q4x_attn: the matrix cores'), q4x_attn_scratch floats */
+  float *fa_scratch;  /* a read's attention's (q4x_attn: the matrix cores'), q4x_attn_scratch_dim floats */
   /* latent sparse attention (Lfm3Options' lsa): a full layer's maps (device, lsa_in x LSA_DIM), the read's scratch,
      a query's index and read (device), a block's index vectors, centroids and buckets on the host (Ward's) */
   bool lsa;
