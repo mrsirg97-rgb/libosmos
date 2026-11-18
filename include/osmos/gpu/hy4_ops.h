@@ -48,6 +48,10 @@ bool hy4_mla_out(const float *o_lat, const void *v_b, const float *gate, uint32_
 bool hy4_ix_pool(const float *keys, const void *w_value, const void *w_gate, const float *ape, const float *norm_w,
                  uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps, const float *freqs, uint32_t g0,
                  uint32_t n_groups, float *groups, void *stream);
+bool hy4_ix_pool_at(const float *keys, const void *w_value, const void *w_gate, const float *ape, const float *norm_w,
+                    uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps, const float *freqs, const int32_t *pos,
+                    uint32_t n_tok, float *groups, void *stream);
+bool hy4_rows_at(float *dst, const float *src, const int32_t *pos, uint32_t n, uint32_t len, void *stream);
 bool hy4_ix_query(float *q, float *w, uint32_t heads, uint32_t dim, uint32_t rope_dim, const float *freqs,
                   const int32_t *pos, uint32_t n_tok, void *stream);
 bool hy4_ix_select(const float *q, const float *w, const float *groups, uint32_t heads, uint32_t dim, uint32_t pool,
@@ -128,6 +132,11 @@ hy4_mla_out
 
 the sparse layers' compressed indexer (HYV4FlashCompressedIndexer): a token key a position (rms(ix_k x): ops_rms),
 groups of `pool` of them pooled into a key each, a query's heads scoring the complete groups before its own.
+
+hy4_ix_pool_at / hy4_rows_at
+  a step's own, its positions on the GPU (pos[t], t < n_tok: a decode replayed without the host): hy4_ix_pool of the
+  group each token completes (pos[t] + 1 a multiple of pool: group pos[t] / pool; the rest nothing) - hy4_ix_pool's
+  bits; dst's row pos[t] = src's row t (len floats a row).
 
 hy4_ix_pool
   groups g0 .. g0 + n_groups - 1 of the token keys (keys [position][dim]; group g positions g pool .. g pool + pool -

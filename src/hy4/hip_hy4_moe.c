@@ -113,14 +113,14 @@ static bool mv_experts(const GgufTensor *t, const void *const *w, const Hy4Forwa
                        uint32_t cols, const float *x, float *y)
 {
   if (t->type == QTYPE_NVFP4)
-    return mv_fp4_tok(w, f->cnt, f->xrow, entries, rows, cols, x, cols, y, rows, NULL);
-  return mv_group_tok(t->type, w, f->cnt, f->xrow, entries, MV_MAX_TOKENS, rows, cols, x, cols, y, rows, NULL);
+    return mv_fp4_tok(w, f->cnt, f->xrow, entries, rows, cols, x, cols, y, rows, f->st);
+  return mv_group_tok(t->type, w, f->cnt, f->xrow, entries, MV_MAX_TOKENS, rows, cols, x, cols, y, rows, f->st);
 }
 
 /* a read's one role of the experts (the entries in ascending count): a launch a run of the same column tiles */
 static bool mm_experts(uint32_t type, const void *const *w, const int32_t *h_cnt, const int32_t *cnt, uint32_t ne,
                        uint32_t rows, uint32_t cols, const void *x16, const uint32_t *xo, float *y, const uint32_t *yo,
-                       uint32_t ys)
+                       uint32_t ys, void *stream)
 {
   bool ok = true;
   for (uint32_t a = 0, z = 0; ok && a < ne; a = z)
@@ -129,7 +129,7 @@ static bool mm_experts(uint32_t type, const void *const *w, const int32_t *h_cnt
     for (z = a + 1; z < ne && mm_col_tiles(type, (uint32_t)h_cnt[z]) == ct;)
       z++;
     ok = mm_group(type, w + a, cnt + a, z - a, (uint32_t)h_cnt[z - 1], rows, cols, x16, xo + a, cols, y, yo + a, ys,
-                  NULL);
+                  stream);
   }
   return ok;
 }
@@ -146,11 +146,11 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read)
     const uint64_t bytes[3] = {L->exp_gate->bytes / E, L->exp_up->bytes / E, L->exp_down->bytes / E};
     const void **wg = (const void **)f->wptr, **wu = wg + nk, **wd = wg + 2 * nk;
     return hy4_route(f->idx, f->wtok, n, K, E, mv_chunk(L->exp_gate), base, bytes, f->gidx, f->sidx, f->wsel, f->cnt,
-                     f->xrow, wg, f->fault, NULL) &&
-           ops_gather_rows(f->xg, f->rin, f->gidx, nk, lat, NULL) &&
+                     f->xrow, wg, f->fault, f->st) &&
+           ops_gather_rows(f->xg, f->rin, f->gidx, nk, lat, f->st) &&
            mv_experts(L->exp_gate, wg, f, nk, ffe, lat, f->xg, f->eg_g) &&
            mv_experts(L->exp_up, wu, f, nk, ffe, lat, f->xg, f->eg_u) &&
-           ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, NULL) &&
+           ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, f->st) &&
            mv_experts(L->exp_down, wd, f, nk, lat, ffe, f->eg_h, f->eg_y);
   }
   uint32_t entries = 0, slots = 0;
@@ -158,14 +158,14 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read)
     return false;
   const uint64_t ecap = hy4_read_entries(f->max_tokens, g);
   const void **rw = f->rw;
-  return mm_x16_rows(f->rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, NULL) &&
-         mm_experts(L->exp_gate->type, rw, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_g, f->ry, ffe) &&
+  return mm_x16_rows(f->rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, f->st) &&
+         mm_experts(L->exp_gate->type, rw, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_g, f->ry, ffe, f->st) &&
          mm_experts(L->exp_up->type, rw + ecap, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_u, f->ry,
-                    ffe) &&
-         ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, NULL) &&
-         mm_x16_rows(f->eg_h, ffe, f->rhidx, slots, ffe, f->xe16, f->overflow, NULL) &&
+                    ffe, f->st) &&
+         ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, f->st) &&
+         mm_x16_rows(f->eg_h, ffe, f->rhidx, slots, ffe, f->xe16, f->overflow, f->st) &&
          mm_experts(L->exp_down->type, rw + 2 * ecap, f->h_rcnt, f->rcnt, entries, lat, ffe, f->xe16, f->rxd, f->eg_y,
-                    f->ryd, lat);
+                    f->ryd, lat, f->st);
 }
 
 bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)
@@ -176,12 +176,12 @@ bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)
   const uint32_t lat = (uint32_t)g->latent, sh = (uint32_t)g->ff_exp * (uint32_t)g->n_shexp;
   return hy4_mat(f, L->router, E, D, f->xn, n, f->logit_r, read) &&
          ops_router_scored(f->logit_r, hy4_fv(f, L->router_bias), E, K, g->expert_scale, OPS_SCORE_SIGMOID, n, f->idx,
-                           f->wtok, NULL) &&
+                           f->wtok, f->st) &&
          hy4_mat(f, L->routed_down, lat, D, f->xn, n, f->rin, read) && routed(f, l, n, read) &&
-         ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, NULL) &&
+         ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, f->st) &&
          hy4_mat(f, L->routed_up, D, lat, f->rsum, n, f->out, read) &&
          hy4_mat(f, L->sh_gate, sh, D, f->xn, n, f->ga, read) && hy4_mat(f, L->sh_up, sh, D, f->xn, n, f->up, read) &&
-         ops_swiglu(f->ga, f->up, sh, INFINITY, NULL, n, f->act, NULL) &&
-         hy4_mat(f, L->sh_down, D, sh, f->act, n, f->sh, read) && ops_add(f->out, f->sh, (uint64_t)n * D, NULL) &&
-         ops_rms(f->out, D, D, hy4_fv(f, L->post_ffn_norm), g->rms_eps, n, f->y, D, NULL);
+         ops_swiglu(f->ga, f->up, sh, INFINITY, NULL, n, f->act, f->st) &&
+         hy4_mat(f, L->sh_down, D, sh, f->act, n, f->sh, read) && ops_add(f->out, f->sh, (uint64_t)n * D, f->st) &&
+         ops_rms(f->out, D, D, hy4_fv(f, L->post_ffn_norm), g->rms_eps, n, f->y, D, f->st);
 }

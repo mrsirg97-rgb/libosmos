@@ -394,9 +394,12 @@ constexpr uint32_t kIxDim = 128, kIxPoolMax = 8;
 __global__ __launch_bounds__(kIxDim) void ix_pool_kernel(const float* keys, const uint8_t* w_value,
                                                          const uint8_t* w_gate, const float* ape, const float* norm_w,
                                                          uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps,
-                                                         const float* freqs, uint32_t g0, float* groups) {
+                                                         const float* freqs, uint32_t g0, const int32_t* pos,
+                                                         float* groups) {
   __shared__ float ks[kIxPoolMax][kIxDim], out[kIxDim], lds[kIxDim];
-  const uint32_t g = g0 + blockIdx.x, i = threadIdx.x;
+  // pos given: the group this block's token completes, or none (a whole block's return: no barrier passed)
+  if (pos && ((uint32_t) pos[blockIdx.x] + 1) % pool) return;
+  const uint32_t g = pos ? (uint32_t) pos[blockIdx.x] / pool : g0 + blockIdx.x, i = threadIdx.x;
   const bool live = i < dim;
   for (uint32_t s = 0; s < pool; s++) ks[s][i] = live ? keys[((uint64_t) g * pool + s) * dim + i] : 0.0f;
   __syncthreads();
@@ -675,7 +678,31 @@ extern "C" bool hy4_ix_pool(const float* keys, const void* w_value, const void* 
       pool > kIxPoolMax || rope_dim % 2 || rope_dim > dim || !n_groups)
     return false;
   ix_pool_kernel<<<n_groups, kIxDim, 0, st(stream)>>>(keys, (const uint8_t*) w_value, (const uint8_t*) w_gate, ape,
-                                                      norm_w, dim, pool, rope_dim, eps, freqs, g0, groups);
+                                                      norm_w, dim, pool, rope_dim, eps, freqs, g0, nullptr, groups);
+  return ok();
+}
+
+extern "C" bool hy4_ix_pool_at(const float* keys, const void* w_value, const void* w_gate, const float* ape,
+                               const float* norm_w, uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps,
+                               const float* freqs, const int32_t* pos, uint32_t n_tok, float* groups, void* stream) {
+  if (!keys || !w_value || !w_gate || !ape || !norm_w || !groups || !pos || !dim || dim > kIxDim || dim % kQ8Block ||
+      !pool || pool > kIxPoolMax || rope_dim % 2 || rope_dim > dim || !n_tok)
+    return false;
+  ix_pool_kernel<<<n_tok, kIxDim, 0, st(stream)>>>(keys, (const uint8_t*) w_value, (const uint8_t*) w_gate, ape, norm_w,
+                                                   dim, pool, rope_dim, eps, freqs, 0, pos, groups);
+  return ok();
+}
+
+__global__ void rows_at_kernel(float* dst, const float* src, const int32_t* pos, uint32_t len) {
+  const uint32_t t = blockIdx.y;
+  for (uint32_t i = blockIdx.x * kThreads + threadIdx.x; i < len; i += gridDim.x * kThreads)
+    dst[(uint64_t) pos[t] * len + i] = src[(uint64_t) t * len + i];
+}
+
+extern "C" bool hy4_rows_at(float* dst, const float* src, const int32_t* pos, uint32_t n, uint32_t len, void* stream) {
+  if (!dst || !src || !pos || !n || !len) return false;
+  const uint32_t bx = (len + kThreads - 1) / kThreads;
+  rows_at_kernel<<<dim3(bx < 64 ? bx : 64, n), kThreads, 0, st(stream)>>>(dst, src, pos, len);
   return ok();
 }
 

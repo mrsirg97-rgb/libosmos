@@ -108,13 +108,15 @@ void hy4_forward_destroy(Hy4Forward *f)
 {
   if (!f)
     return;
+  if (f->st)
+    hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
     hipFree(f->dev[i]);
   free(f->dev);
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     hipFree(f->fn_attn[l]), hipFree(f->fn_ffn[l]);
   void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->h, f->xn, f->y, f->post, f->hcs, f->table, f->attn_part, f->wtok, f->qr,
-               f->qres, f->q, f->kva, f->gt, f->qa, f->olat, f->ao, f->out, f->ixk, f->ixq, f->ixw, f->scores, f->sel,
+               f->qres, f->q, f->kva, f->gt, f->qa, f->olat, f->ao, f->out, f->ixk, f->ixkn, f->ixq, f->ixw, f->scores, f->sel,
                f->n_sel, f->x16, f->xe16, f->overflow, f->fault, f->rx, f->ry, f->rxd, f->ryd, f->rcnt, f->rw, f->rgidx, f->rhidx,
                f->emb, f->ekv, f->ga, f->up, f->act, f->logit_r, f->rin, f->xg, f->eg_g, f->eg_u, f->eg_h,
                f->eg_y, f->wsel, f->rsum, f->sh, f->idx, f->gidx, f->sidx, f->cnt, f->xrow, f->wptr, f->tok, f->pos,
@@ -163,7 +165,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
       {&f->table, hy4_mla_table_bytes((uint32_t)n, (uint32_t)H)}, {&f->attn_part, hy4_mla_attn_scratch((uint32_t)H) * F},
       {&f->qr, n * g->q_lora * F}, {&f->qres, n * g->q_lora * F}, {&f->q, n * H * qk * F}, {&f->kva, n * row * F},
       {&f->gt, n * H * g->v_dim * F}, {&f->qa, n * H * row * F}, {&f->olat, n * H * g->kv_lora * F},
-      {&f->ao, n * H * g->v_dim * F}, {&f->out, n * D * F}, {&f->ixk, n * g->ix_dim * F},
+      {&f->ao, n * H * g->v_dim * F}, {&f->out, n * D * F}, {&f->ixk, n * g->ix_dim * F}, {&f->ixkn, n * g->ix_dim * F},
       {&f->ixq, n * g->ix_heads * g->ix_dim * F}, {&f->ixw, n * g->ix_heads * F},
       {&f->scores, n * (o->max_ctx / g->ix_pool + 1) * F}, {&f->sel, n * (g->ix_topk / g->ix_pool) * 4},
       {&f->n_sel, n * 4}, {&f->emb, n * eg_in * F}, {&f->ekv, n * (hc + 1) * D * F}, {&f->ga, n * g->n_ff * F},
@@ -191,6 +193,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
 
   };
   bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || hy4_fail(err, "more heads than this build's tables");
+  ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || hy4_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
   for (size_t i = 0; ok && i < sizeof read_want / sizeof *read_want; i++)
     ok = hy4_alloc(read_want[i].p, read_want[i].bytes) || hy4_fail(err, "GPU memory refused (the read's buffers)");

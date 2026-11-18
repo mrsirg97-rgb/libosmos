@@ -17,10 +17,34 @@ static bool embed(Hy4Forward *f, uint32_t n)
   const Hy4Geometry *g = &f->w->geo;
   const GgufTensor *t = f->w->embed;
   const uint64_t D = (uint64_t)g->n_embd, hc = (uint64_t)g->hc;
-  bool ok = q4x_rows(t->type, hy4_dev(f, t), t->bytes / t->dims[1], (uint32_t)D, f->tok, n, f->y, NULL);
+  bool ok = q4x_rows(t->type, hy4_dev(f, t), t->bytes / t->dims[1], (uint32_t)D, f->tok, n, f->y, f->st);
   for (uint64_t k = 0; ok && k < hc; k++)
-    ok = hipMemcpy2DAsync(f->h + k * D, hc * D * F, f->y, D * F, D * F, n, hipMemcpyDeviceToDevice, NULL) == hipSuccess;
+    ok = hipMemcpy2DAsync(f->h + k * D, hc * D * F, f->y, D * F, D * F, n, hipMemcpyDeviceToDevice, f->st) == hipSuccess;
   return ok;
+}
+
+/* a step's launches: the embedding, the layers (a tap after each), the kept rows' streams gathered, the head's
+   collapse and the head on them */
+static bool launches(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, uint32_t kept, bool read)
+{
+  const Hy4Geometry *g = &f->w->geo;
+  const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, V = (uint32_t)g->n_vocab;
+  bool ok = embed(f, n);
+  for (int l = 0; ok && l < g->n_layers; l++)
+  {
+    ok = hy4_layer(f, run, runs, n, l, read);
+    if (ok && f->tap && (ok = hipStreamSynchronize(f->st) == hipSuccess))
+      f->tap(f->tap_arg, l, f->h, n, hc, D);
+  }
+  for (uint32_t row = 0; ok && row < n; row++)
+    if (f->slot[row] >= 0)
+      ok = hipMemcpyAsync(f->hx + (uint64_t)f->slot[row] * hc * D, f->h + (uint64_t)row * hc * D, (uint64_t)hc * D * F,
+                          hipMemcpyDeviceToDevice, f->st) == hipSuccess;
+  return ok && (!kept ||
+                (hy4_hc_pre(f->hx, f->fn_out, hy4_fv(f, f->w->out_hc_scale), hy4_fv(f, f->w->out_hc_base), hc, hc, D,
+                            g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, f->w->output_norm), kept, f->xn, NULL,
+                            f->hcs, f->st) &&
+                 hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read)));
 }
 
 /* the step (hy4_step_runs); keep_from: rows below it not kept whatever the prompts say (hy4_step's: its last rows) */
@@ -53,45 +77,27 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   for (uint32_t i = 0; i < n; i++)
     if (tokens[i] < 0 || tokens[i] >= f->w->geo.n_vocab)
       return hy4_fail(err, "a token outside the vocabulary");
-  const Hy4Geometry *g = &f->w->geo;
-  const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, V = (uint32_t)g->n_vocab;
   for (uint32_t r = 0; r < runs; r++)
     for (uint32_t t = 0; t < run[r].len; t++)
     {
       run[r].s->tokens[run[r].s->pos + t] = tokens[run[r].off + t];
       f->pin_pos[run[r].off + t] = run[r].s->pos + (int32_t)t;
     }
-  memcpy(f->pin_tok, tokens, (size_t)n * 4);
-  bool ok = hipMemcpyAsync(f->tok, f->pin_tok, (size_t)n * 4, hipMemcpyHostToDevice, NULL) == hipSuccess &&
-            hipMemcpyAsync(f->pos, f->pin_pos, (size_t)n * 4, hipMemcpyHostToDevice, NULL) == hipSuccess &&
-            hy4_engram_read(f, run, runs, n) && embed(f, n);
-  for (int l = 0; ok && l < g->n_layers; l++)
-  {
-    ok = hy4_layer(f, run, runs, n, l, read);
-    if (ok && f->tap && (ok = hipStreamSynchronize(NULL) == hipSuccess))
-      f->tap(f->tap_arg, l, f->h, n, hc, D);
-  }
-  /* the kept rows' streams gathered, then the head's collapse and the head on them alone */
-  uint32_t k = 0;
-  for (uint32_t r = 0; r < runs; r++)
-  {
-    const Hy4Seq *s = run[r].s;
+  /* the kept rows (the head's): their slots in the logits */
+  for (uint32_t r = 0, k = 0; r < runs; r++)
     for (uint32_t t = 0; t < run[r].len; t++)
     {
       const uint32_t row = run[r].off + t;
-      const bool keep = row >= keep_from && (!s->prompt_end || s->pos + t + 1 >= s->prompt_end);
+      const bool keep = row >= keep_from && (!run[r].s->prompt_end || run[r].s->pos + t + 1 >= run[r].s->prompt_end);
       f->slot[row] = keep ? (int32_t)k : -1;
-      if (keep && ok)
-        ok = hipMemcpyAsync(f->hx + (uint64_t)k * hc * D, f->h + (uint64_t)row * hc * D, (uint64_t)hc * D * F,
-                            hipMemcpyDeviceToDevice, NULL) == hipSuccess;
       k += keep;
     }
-  }
-  if (ok && kept)
-    ok = hy4_hc_pre(f->hx, f->fn_out, hy4_fv(f, f->w->out_hc_scale), hy4_fv(f, f->w->out_hc_base), hc, hc, D,
-                    g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, f->w->output_norm), kept, f->xn, NULL, f->hcs, NULL) &&
-         hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read);
-  ok = ok && hipStreamSynchronize(NULL) == hipSuccess;
+  memcpy(f->pin_tok, tokens, (size_t)n * 4);
+  bool ok = hipMemcpyAsync(f->tok, f->pin_tok, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
+            hipMemcpyAsync(f->pos, f->pin_pos, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
+            hy4_engram_read(f, run, runs, n);
+  ok = ok && launches(f, run, runs, n, kept, read);
+  ok = ok && hipStreamSynchronize(f->st) == hipSuccess;
   int32_t over = 0, fault = 0;
   ok = ok && hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess &&
        hipMemcpy(&fault, f->fault, 4, hipMemcpyDeviceToHost) == hipSuccess;
@@ -152,7 +158,7 @@ bool hy4_greedy(Hy4Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char 
     if (f->slot[row0 + r] < 0 || f->slot[row0 + r] != f->slot[row0] + (int32_t)r)
       return hy4_fail(err, "a row the last step kept no logits of");
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
-  if (!ops_argmax(f->logits + (uint64_t)f->slot[row0] * V, V, rows, V, f->ids, f->argmax, NULL) ||
+  if (!ops_argmax(f->logits + (uint64_t)f->slot[row0] * V, V, rows, V, f->ids, f->argmax, f->st) ||
       hipMemcpy(ids, f->ids, rows * 4, hipMemcpyDeviceToHost) != hipSuccess)
     return hy4_fail(err, "a GPU call failed (the greedy pick)");
   for (uint32_t r = 0; r < rows; r++)

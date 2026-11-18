@@ -106,6 +106,23 @@ int main() {
   CHECK(std::memcmp(g1.data(), g2.data(), g1.size() * 4) == 0 && s2 == s);
   std::printf("  again: the pooled keys and the groups the same bits\n");
 
+  // the keys and groups a step at a time on the GPU's positions (a decode's: 1, 1, 3, then the rest) - the same bits
+  {
+    float *keys2 = scratch((size_t) T * ID), *groups2 = scratch((size_t) G * ID), *kn = scratch((size_t) T * ID);
+    CHECK(ops_rms(ixk, ID, ID, knorm, kEps, T, kn, ID, 0));
+    const uint32_t cuts[] = {0, 1, 2, 5, T};
+    for (int c = 0; c + 1 < 5; c++) {
+      const uint32_t a = cuts[c], m = cuts[c + 1] - a;
+      CHECK(hy4_rows_at(keys2, kn + (size_t) a * ID, dpos + a, m, ID, 0));
+      CHECK(hy4_ix_pool_at(keys2, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, dpos + a, m, groups2, 0));
+    }
+    CHECK(std::memcmp(down(keys2, (size_t) T * ID).data(), down(keys, (size_t) T * ID).data(), (size_t) T * ID * 4) == 0);
+    CHECK(std::memcmp(down(groups2, (size_t) G * ID).data(), g2.data(), g2.size() * 4) == 0);
+    CHECK(!hy4_ix_pool_at(keys2, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, dpos, 0, groups2, 0));
+    CHECK(!hy4_rows_at(keys2, kn, dpos, 0, ID, 0));
+    std::printf("  in steps of 1, 1, 3 and %u on the GPU's positions: the keys and the groups the same bits\n", T - 5);
+  }
+
   // the attention over them (MLA as test_hy4_mla_gpu's), against the reference's
   float *kva = up(A("kva")), *q = up(A("q")), *gate = up(A("gate")), *kb = up(A("k_b_q8")), *vb = up(A("v_b_q8"));
   float *norm = up(A("kv_a_norm")), *sinks = up(A("sinks"));

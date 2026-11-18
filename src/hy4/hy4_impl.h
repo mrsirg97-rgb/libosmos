@@ -39,6 +39,7 @@ struct Hy4Forward
      slots, f16's overflow; the experts' read tables (mm_group's: entries, slots) */
   void *x16, *xe16;
   int32_t *overflow;
+  void *st;                   /* the step's stream (every launch) */
   int32_t *fault;             /* a decode's routing saw a pick out of range or twice (hy4_route): the step refused */
   uint32_t *rx, *ry, *rxd, *ryd, *h_rx, *h_ry, *h_rxd, *h_ryd;
   int32_t *rgidx, *rhidx, *h_rgidx, *h_rhidx, *rcnt, *h_rcnt;
@@ -47,7 +48,7 @@ struct Hy4Forward
   void *h_stage;              /* the sorted tables' staging (host) */
 
   float *qr, *qres, *q, *kva, *gt, *qa, *olat, *ao, *out;
-  float *ixk, *ixq, *ixw, *scores;     /* the indexer */
+  float *ixk, *ixkn, *ixq, *ixw, *scores; /* the indexer (ixkn: the step's keys normed, before their rows) */
   int32_t *sel, *n_sel;
   float *emb, *ekv;                    /* Engram's projection's input and output */
   float *ga, *up, *act;                /* the MLPs */
@@ -91,6 +92,7 @@ bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
 bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n);
 /* layer l's blocks on the step's streams */
 bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l, bool read);
+
 /* the latent MoE (hip_hy4_moe.c): the router, the experts (the matvecs, or read: the matrix cores), the shared
    expert, the combine norm - into f->y */
 bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read);
