@@ -80,6 +80,12 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
                 lfm3_fv(f, L->q_norm), lfm3_fv(f, L->k_norm), g->rms_eps, R->s->pos, f->qr + o * q, NULL,
                 f->kr + o * kv, f->st) &&
          kv_put(f, R, vf, l, sliding, kv);
+    if (read) /* a prompt's: the run's step on the matrix cores (q4x_attn: f16 q, k, v and weights) */
+    {
+      ok = ok && q4x_attn(f->qr + o * q, R->s->kc[l], R->s->vc[l], R->len, H, KV, hd, (uint32_t)R->s->pos,
+                          gt + o * H, NULL, &shape, f->fa_scratch, f->att + o * q, NULL, f->st);
+      continue;
+    }
     for (uint32_t t0 = 0; ok && t0 < R->len; t0 += Q35_ATTN_DECODE_MAX)
     {
       const uint32_t m = R->len - t0 < Q35_ATTN_DECODE_MAX ? R->len - t0 : Q35_ATTN_DECODE_MAX;

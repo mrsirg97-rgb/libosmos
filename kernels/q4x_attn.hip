@@ -76,26 +76,32 @@ constexpr int kWaves = 4;                   // a wave a quarter of O's columns
 constexpr int kChunk = 128;                 // a chunk's keys: absolute positions [c kChunk, (c + 1) kChunk)
 constexpr int kStepTokens = 64;             // a piece's most tokens
 constexpr uint32_t kPieceChunks = 8192;     // the scratch's (token, chunk) pairs: a piece's tokens x its chunks
-constexpr int kRowLds = kHead + 8;          // f16s a row in LDS, past it a pad (rows 4 banks apart)
+template <int HD> constexpr int kRowLds = HD + 8;  // f16s a row in LDS, past it a pad (rows 4 banks apart)
 constexpr int kKeyLds = kTile + 8;
 typedef _Float16 h16 __attribute__((ext_vector_type(16)));
 typedef float f8 __attribute__((ext_vector_type(8)));
 
 // a token's key list (q4x_ops.h's Q4xPick; none: every position to its own): its length, and entry i's position -
 // its picked blocks' positions in block order, then its tail. every block picked, entry i is position i
+// a window's (AttnShape's): dense keys from the window's first position (lo), each position's cache row pos % slots
 struct Keys {
-  const int32_t* sel;  // the token's picked blocks, or NULL: entry i position i
-  uint32_t ratio, np, nv, len;
+  const int32_t* sel;  // the token's picked blocks, or NULL: entry i position lo + i
+  uint32_t ratio, np, nv, len, lo, slots;
   __device__ uint32_t at(uint32_t i) const {
-    if (!sel) return i;
+    if (!sel) return lo + i;
     return i < ratio * np ? ratio * (uint32_t) sel[i / ratio] + i % ratio : ratio * nv + (i - ratio * np);
   }
+  __device__ uint64_t row_of(uint32_t i) const { return slots ? at(i) % slots : at(i); }
 };
 
-__device__ inline Keys keys_of(const Q4xPick& pk, uint32_t t, uint32_t top) {
-  if (!pk.npick) return Keys{nullptr, 1, 0, 0, top + 1};
+__device__ inline Keys keys_of(const Q4xPick& pk, uint32_t t, uint32_t top, uint32_t window = 0, uint32_t slots = 0) {
+  if (!pk.npick) {
+    const uint32_t lo = window && top + 1 > window ? top + 1 - window : 0;
+    return Keys{nullptr, 1, 0, 0, top + 1 - lo, lo, slots};
+  }
   const uint32_t nv = (top + 1) / pk.ratio, np = (uint32_t) pk.npick[t];
-  return Keys{np == nv ? nullptr : pk.sel + (uint64_t) t * pk.blocks, pk.ratio, np, nv, pk.ratio * np + (top + 1) % pk.ratio};
+  return Keys{np == nv ? nullptr : pk.sel + (uint64_t) t * pk.blocks, pk.ratio, np, nv,
+              pk.ratio * np + (top + 1) % pk.ratio, 0, 0};
 }
 
 constexpr int kLoad = 8;  // an item's values: a load within one Q8_0 block
@@ -104,18 +110,22 @@ static_assert(Q4X_KV_BLOCK % kLoad == 0, "a load within one block");
 // a thread's share of a block of kTile keys' K and V, raw: each item kLoad int8s and their block's scale - loaded a
 // block ahead (the next block's while this one's WMMAs run); a value its scale times its int8, the product exact in
 // F32, then rounded to f16
-constexpr int kItems = kTile * kHead / kLoad / (kWaves * 32);
-static_assert(kItems * kWaves * 32 * kLoad == kTile * kHead, "a block's values the threads' whole items");
+template <int HD> constexpr int kItems = kTile * HD / kLoad / (kWaves * 32);
+static_assert(kItems<Q4X_HEAD_DIM> * kWaves * 32 * kLoad == kTile * Q4X_HEAD_DIM &&
+                  kItems<Q4X_QK_HEAD_NARROW> * kWaves * 32 * kLoad == kTile * Q4X_QK_HEAD_NARROW,
+              "a block's values the threads' whole items");
+template <int HD>
 struct Raw {
-  uint64_t kq[kItems], vq[kItems];
-  _Float16 ksc[kItems], vsc[kItems];
+  uint64_t kq[kItems<HD>], vq[kItems<HD>];
+  _Float16 ksc[kItems<HD>], vsc[kItems<HD>];
 };
 
 // an item's key and first dim: K's lanes along a key's dims (its LDS rows written whole), V's along the keys (V^T's
 // columns: a wave's stores across the banks - along the dims they were 16-way on one bank pair)
+template <int HD>
 __device__ inline void item_k(uint32_t it, uint32_t* r, uint32_t* d) {
   const uint32_t i = threadIdx.x + it * kWaves * 32;
-  *r = i / (kHead / kLoad), *d = i % (kHead / kLoad) * kLoad;
+  *r = i / (HD / kLoad), *d = i % (HD / kLoad) * kLoad;
 }
 __device__ inline void item_v(uint32_t it, uint32_t* r, uint32_t* d) {
   const uint32_t i = threadIdx.x + it * kWaves * 32;
@@ -123,11 +133,12 @@ __device__ inline void item_v(uint32_t it, uint32_t* r, uint32_t* d) {
 }
 
 // an item's kLoad int8s and their block's scale: zeros past k1
+template <int HD>
 __device__ inline void raw_one(const uint8_t* cache, uint64_t row, uint32_t kvh, const Keys& keys, uint32_t e,
                                uint32_t k1, uint32_t d, uint64_t* q, _Float16* sc) {
   if (e < k1) {
-    const uint32_t c = kvh * kHead + d;
-    const uint8_t* b8 = cache + keys.at(e) * row + (c / Q4X_KV_BLOCK) * Q4X_KV_BLOCK_BYTES;
+    const uint32_t c = kvh * HD + d;
+    const uint8_t* b8 = cache + keys.row_of(e) * row + (c / Q4X_KV_BLOCK) * Q4X_KV_BLOCK_BYTES;
     *sc = *(const _Float16*) b8;
     __builtin_memcpy(q, b8 + 2 + c % Q4X_KV_BLOCK, kLoad);
   } else {
@@ -135,23 +146,25 @@ __device__ inline void raw_one(const uint8_t* cache, uint64_t row, uint32_t kvh,
   }
 }
 
-__device__ inline void raw_fetch(Raw& w, const uint8_t* kc, const uint8_t* vc, uint64_t row, uint32_t kvh,
+template <int HD>
+__device__ inline void raw_fetch(Raw<HD>& w, const uint8_t* kc, const uint8_t* vc, uint64_t row, uint32_t kvh,
                                  const Keys& keys, uint32_t kb, uint32_t k1) {
-  for (int it = 0; it < kItems; it++) {
+  for (int it = 0; it < kItems<HD>; it++) {
     uint32_t r, d;
-    item_k(it, &r, &d);
-    raw_one(kc, row, kvh, keys, kb + r, k1, d, &w.kq[it], &w.ksc[it]);
+    item_k<HD>(it, &r, &d);
+    raw_one<HD>(kc, row, kvh, keys, kb + r, k1, d, &w.kq[it], &w.ksc[it]);
     item_v(it, &r, &d);
-    raw_one(vc, row, kvh, keys, kb + r, k1, d, &w.vq[it], &w.vsc[it]);
+    raw_one<HD>(vc, row, kvh, keys, kb + r, k1, d, &w.vq[it], &w.vsc[it]);
   }
 }
 
-__device__ inline void raw_store(const Raw& w, _Float16* ks, _Float16* vt) {
-  for (int it = 0; it < kItems; it++) {
+template <int HD>
+__device__ inline void raw_store(const Raw<HD>& w, _Float16* ks, _Float16* vt) {
+  for (int it = 0; it < kItems<HD>; it++) {
     uint32_t r, d;
-    item_k(it, &r, &d);
+    item_k<HD>(it, &r, &d);
     const float sk = (float) w.ksc[it], sv = (float) w.vsc[it];
-    for (int j = 0; j < kLoad; j++) ks[r * kRowLds + d + j] = (_Float16) (sk * (float) (int8_t) (w.kq[it] >> (8 * j)));
+    for (int j = 0; j < kLoad; j++) ks[r * kRowLds<HD> + d + j] = (_Float16) (sk * (float) (int8_t) (w.kq[it] >> (8 * j)));
     item_v(it, &r, &d);
     for (int j = 0; j < kLoad; j++) vt[(d + j) * kKeyLds + r] = (_Float16) (sv * (float) (int8_t) (w.vq[it] >> (8 * j)));
   }
@@ -171,15 +184,18 @@ __device__ inline uint32_t whole_chunks(uint32_t pos0, uint32_t t, uint32_t tt) 
   return tt ? (pos0 + t / tt * tt + 1) / kChunk : 0;
 }
 
+template <int HD>
 __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const uint8_t* kc, const uint8_t* vc,
                                                          uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-                                                         uint32_t pos0, Q4xPick pk, uint32_t tt, float* ml, float* po) {
+                                                         uint32_t pos0, Q4xPick pk, uint32_t tt, uint32_t window,
+                                                         uint32_t slots, float scale, float* ml, float* po) {
+  constexpr int kRowLds = ::kRowLds<HD>, kHead = HD;
   __shared__ __attribute__((aligned(32))) _Float16 qs[kTile * kRowLds], ks[kTile * kRowLds], vt[kHead * kKeyLds];
   __shared__ __attribute__((aligned(32))) _Float16 ps[kWaves][kTile * kKeyLds];
   const uint32_t G = heads / kv_heads, t = blockIdx.x, kvh = blockIdx.y, chunk = blockIdx.z;
   const uint32_t wave = threadIdx.x / 32;
   const uint64_t row = (uint64_t) kv_heads * kHead / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;  // a position's bytes
-  const Keys keys = keys_of(pk, t, pos0 + t);  // the token's key list: its entries in chunks
+  const Keys keys = keys_of(pk, t, pos0 + t, window, slots);  // the token's key list: its entries in chunks
   const uint32_t k0 = chunk * kChunk;
   if (k0 >= keys.len) return;  // a chunk past the token's list: it reads no scratch of it
   if (chunk < whole_chunks(pos0, t, tt)) return;  // its group's, fa_whole_kernel's
@@ -195,13 +211,13 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
   for (int r = 0; r < osmos_slots; r++)
     lim[r] = (uint32_t) osmos_slot_row(r) < G ? (int32_t) keys.len - 1 : -1, m[r] = -INFINITY, l[r] = 0.0f;
   f8 o[kHead / kTile / kWaves] = {};
-  Raw raw;
-  raw_fetch(raw, kc, vc, row, kvh, keys, k0, k1);
+  Raw<HD> raw;
+  raw_fetch<HD>(raw, kc, vc, row, kvh, keys, k0, k1);
   for (uint32_t kb = k0; kb < k1; kb += kTile) {
     __syncthreads();  // the last block's K, V read by every wave
-    raw_store(raw, ks, vt);  // K and V^T, f16 (keys past k1 zero)
+    raw_store<HD>(raw, ks, vt);  // K and V^T, f16 (keys past k1 zero)
     __syncthreads();
-    if (kb + kTile < k1) raw_fetch(raw, kc, vc, row, kvh, keys, kb + kTile, k1);  // the next block's, in flight
+    if (kb + kTile < k1) raw_fetch<HD>(raw, kc, vc, row, kvh, keys, kb + kTile, k1);  // the next block's, in flight
     f8 sacc = {};
     for (int g = 0; g < kHead / kTile; g++)
       sacc = osmos_mma(osmos_load_a(qs + g * kTile, kRowLds), osmos_load_b_s(ks + g * kTile, kRowLds), sacc);
@@ -210,7 +226,7 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
 #pragma unroll
     for (int j = 0; j < 8; j++) {
       const int32_t key = (int32_t) (kb + osmos_acc_col(j));
-      sv[j] = key <= lim[osmos_slot(j)] ? sacc[j] * (1.0f / 16.0f) : -INFINITY;  // 1 / sqrt(256)
+      sv[j] = key <= lim[osmos_slot(j)] ? sacc[j] * scale : -INFINITY;  // 1 / sqrt(HD): Qwen's 1 / 16 exactly
     }
 #pragma unroll
     for (int r = 0; r < osmos_slots; r++) {
@@ -267,11 +283,12 @@ constexpr int kWholeTiles = 4, kWholeWaves = 2 * kWholeTiles, kWholeRows = kWhol
 #define WHOLE_CHUNKS 4
 #endif
 constexpr uint32_t kWholeChunks = WHOLE_CHUNKS;
-constexpr int kHalfCols = kHead / kTile / 2;  // a wave's O tiles
+template <int HD>
 __global__ __launch_bounds__(kWholeWaves * 32) void fa_whole_kernel(const float* q, const uint8_t* kc,
                                                                     const uint8_t* vc, uint32_t n_tok, uint32_t heads,
                                                                     uint32_t kv_heads, uint32_t pos0, uint32_t tt,
-                                                                    float* ml, float* po) {
+                                                                    float scale, float* ml, float* po) {
+  constexpr int kRowLds = ::kRowLds<HD>, kHead = HD, kHalfCols = HD / kTile / 2;  // a wave's O tiles
   __shared__ __attribute__((aligned(32))) _Float16 qs[kWholeRows * kRowLds], ks[kTile * kRowLds], vt[kHead * kKeyLds];
   __shared__ __attribute__((aligned(32))) _Float16 ps[kWholeWaves][kTile * kKeyLds];
   const uint32_t G = heads / kv_heads, t0 = blockIdx.x * tt, kvh = blockIdx.y, c0 = blockIdx.z * kWholeChunks;
@@ -280,15 +297,15 @@ __global__ __launch_bounds__(kWholeWaves * 32) void fa_whole_kernel(const float*
   if (c0 >= whole) return;  // not whole for the group: its tokens' own (fa_kernel)
   const uint32_t c1 = c0 + kWholeChunks < whole ? c0 + kWholeChunks : whole;
   const uint64_t row = (uint64_t) kv_heads * kHead / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
-  const Keys keys{nullptr, 1, 0, 0, pos0 + t0 + 1};
+  const Keys keys{nullptr, 1, 0, 0, pos0 + t0 + 1, 0, 0};
   for (uint32_t i = threadIdx.x; i < kWholeRows * kHead; i += kWholeWaves * 32) {
     const uint32_t r = i / kHead, d = i % kHead, tl = r / G;
     qs[r * kRowLds + d] = (_Float16) (tl < nt ? q[((uint64_t) (t0 + tl) * heads + kvh * G + r % G) * kHead + d] : 0.0f);
   }
   const bool fetcher = threadIdx.x < kWaves * 32;  // raw's items fa_kernel's threads' (the first four waves)
   const _Float16* qw = qs + rt * kTile * kRowLds;
-  Raw raw;
-  if (fetcher) raw_fetch(raw, kc, vc, row, kvh, keys, c0 * kChunk, c0 * kChunk + kChunk);
+  Raw<HD> raw;
+  if (fetcher) raw_fetch<HD>(raw, kc, vc, row, kvh, keys, c0 * kChunk, c0 * kChunk + kChunk);
   for (uint32_t chunk = c0; chunk < c1; chunk++) {
     const uint32_t k0 = chunk * kChunk, k1 = k0 + kChunk;
     float m[osmos_slots], l[osmos_slots];
@@ -297,19 +314,19 @@ __global__ __launch_bounds__(kWholeWaves * 32) void fa_whole_kernel(const float*
     for (uint32_t kb = k0; kb < k1; kb += kTile) {
       __syncthreads();
       if (fetcher) {
-        raw_store(raw, ks, vt);
+        raw_store<HD>(raw, ks, vt);
       }
       __syncthreads();
       if (fetcher) {
-        if (kb + kTile < k1) raw_fetch(raw, kc, vc, row, kvh, keys, kb + kTile, k1);
-        else if (chunk + 1 < c1) raw_fetch(raw, kc, vc, row, kvh, keys, k1, k1 + kChunk);  // the next chunk's first
+        if (kb + kTile < k1) raw_fetch<HD>(raw, kc, vc, row, kvh, keys, kb + kTile, k1);
+        else if (chunk + 1 < c1) raw_fetch<HD>(raw, kc, vc, row, kvh, keys, k1, k1 + kChunk);  // the next chunk's first
       }
       f8 sacc = {};
       for (int g = 0; g < kHead / kTile; g++)
         sacc = osmos_mma(osmos_load_a(qw + g * kTile, kRowLds), osmos_load_b_s(ks + g * kTile, kRowLds), sacc);
       float sv[8], alpha[osmos_slots];
 #pragma unroll
-      for (int j = 0; j < 8; j++) sv[j] = sacc[j] * (1.0f / 16.0f);  // every key the rows' (fa_kernel's mask all true)
+      for (int j = 0; j < 8; j++) sv[j] = sacc[j] * scale;  // every key the rows' (fa_kernel's mask all true)
 #pragma unroll
       for (int r = 0; r < osmos_slots; r++) {
         float mx = -INFINITY;
@@ -354,12 +371,16 @@ __global__ __launch_bounds__(kWholeWaves * 32) void fa_whole_kernel(const float*
 
 // a block a (token, q head), a thread a dim: its row's chunks merged in order, the gate - out[t][h][d]. the chunks a
 // row reads: those up to its own position, whatever its batch computed
-__global__ __launch_bounds__(kHead) void fa_merge_kernel(const float* ml, const float* po, const float* gate,
-                                                         uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-                                                         uint32_t pos0, Q4xPick pk, uint32_t t0, float* out,
-                                                         Q4xX16 side) {
+// a gate a value (span 1) or a head (span HD)
+template <int HD>
+__global__ __launch_bounds__(HD) void fa_merge_kernel(const float* ml, const float* po, const float* gate,
+                                                      uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
+                                                      uint32_t pos0, Q4xPick pk, uint32_t t0, uint32_t window,
+                                                      uint32_t gate_span, float* out, Q4xX16 side) {
+  constexpr int kHead = HD;
   const uint32_t t = blockIdx.x / heads, h = blockIdx.x % heads, d = threadIdx.x, G = heads / kv_heads;
-  const uint32_t rows = n_tok * G, R = t * G + h % G, kvh = h / G, last = (keys_of(pk, t, pos0 + t).len - 1) / kChunk;
+  const uint32_t rows = n_tok * G, R = t * G + h % G, kvh = h / G;
+  const uint32_t last = (keys_of(pk, t, pos0 + t, window).len - 1) / kChunk;
   float mx = -INFINITY;
   for (uint32_t c = 0; c <= last; c++) mx = fmaxf(mx, ml[(((uint64_t) c * kv_heads + kvh) * rows + R) * 2]);
   float sum = 0.0f, acc = 0.0f;
@@ -369,7 +390,7 @@ __global__ __launch_bounds__(kHead) void fa_merge_kernel(const float* ml, const 
     sum += ml[at * 2 + 1] * w, acc += po[at * kHead + d] * w;
   }
   const uint64_t i = ((uint64_t) t * heads + h) * kHead + d;
-  out[i] = acc / sum * sigmoid(gate[i]);
+  out[i] = acc / sum * sigmoid(gate[i / gate_span]);
   x16_side(side, i + (uint64_t) t0 * heads * kHead, out[i]);  // the step's row: the piece's from its first, t0
 }
 
@@ -433,45 +454,64 @@ extern "C" uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx) {
   return pairs * heads * (kHead + 2);  // a piece of at least one token at the context's end
 }
 
-extern "C" bool q4x_attn(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
-                         uint32_t kv_heads, uint32_t dim, uint32_t pos0, const float* gate, const Q4xPick* pick,
-                         const AttnShape* shape, float* scratch, float* out, const Q4xX16* side, void* stream) {
-  if (shape && (shape->gate_span != 1 || shape->window))  // LFM3's: the schema's (vibes-flash step 1), the kernel's next
-    return false;
-  if (!n_tok || !heads || !kv_heads || heads % kv_heads || heads / kv_heads > kTile || dim != kHead ||
-      pos0 + n_tok > OPS_Q4X_MAX_KEYS)
-    return false;
-  if (!q || !kc || !vc || !gate || !scratch || !out ||
-      (pick && (!pick->npick || !pick->sel || pick->ratio < 2 || !pick->blocks)))
-    return false;
+template <int HD>
+static bool attn(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
+                 uint32_t pos0, const float* gate, const Q4xPick* pick, const AttnShape& sh, float* scratch,
+                 float* out, const Q4xX16* side, void* stream) {
   const Q4xPick pk = pick ? *pick : Q4xPick{nullptr, nullptr, 1, 0};
-  // a step's token's most entries: its position's, or with picks at most its blocks' and a tail
-  const uint64_t dense = (uint64_t) pos0 + n_tok, picked = (uint64_t) pk.ratio * pk.blocks + pk.ratio - 1;
+  const float scale = 1.0f / sqrtf((float) HD);
+  // a step's token's most entries: its position's (a window's at most), or with picks at most its blocks' and a tail
+  uint64_t dense = (uint64_t) pos0 + n_tok;
+  dense = sh.window && dense > sh.window ? sh.window : dense;
+  const uint64_t picked = (uint64_t) pk.ratio * pk.blocks + pk.ratio - 1;
   const uint64_t longest = pick && picked < dense ? picked : dense;
   const uint32_t most = (uint32_t) ((longest - 1) / kChunk + 1), fit = kPieceChunks / most;
   const uint32_t piece = fit < 1 ? 1 : fit < (uint32_t) kStepTokens ? fit : (uint32_t) kStepTokens;
   for (uint32_t t0 = 0; t0 < n_tok; t0 += piece) {  // a piece of the step at a time: the scratch's tokens
     const uint32_t n = n_tok - t0 < piece ? n_tok - t0 : piece;
     const uint32_t rows = n * (heads / kv_heads), p0 = pos0 + t0;
-    const uint64_t piece_dense = (uint64_t) p0 + n, piece_long = pick && picked < piece_dense ? picked : piece_dense;
+    uint64_t piece_dense = (uint64_t) p0 + n;
+    piece_dense = sh.window && piece_dense > sh.window ? sh.window : piece_dense;
+    const uint64_t piece_long = pick && picked < piece_dense ? picked : piece_dense;
     const uint32_t chunks = (uint32_t) ((piece_long - 1) / kChunk + 1);
     Q4xPick ppk = pk;  // the piece's tokens' rows of the picks
     if (pick) ppk.sel = pk.sel + (uint64_t) t0 * pk.blocks, ppk.npick = pk.npick + t0;
     float *ml = scratch, *po = scratch + (uint64_t) 2 * chunks * kv_heads * rows;
-    const uint64_t at = (uint64_t) t0 * heads * kHead;
-    // dense keys: the chunks whole for a group's first token the group's (fa_whole_kernel), its tokens' rest their own
-    const uint32_t tt = pick ? 0 : kWholeRows / (heads / kv_heads);
+    const uint64_t at = (uint64_t) t0 * heads * HD;
+    // dense keys from 0: the chunks whole for a group's first token the group's (fa_whole_kernel), its tokens' rest
+    // their own - not under a window (a token's keys start at its own place) or a ring
+    const uint32_t tt = pick || sh.window ? 0 : kWholeRows / (heads / kv_heads);
     if (tt && (p0 + n) / kChunk) {  // some group's first token past a whole chunk (fa_kernel skips them all the same)
-      fa_whole_kernel<<<dim3((n + tt - 1) / tt, kv_heads, ((p0 + n) / kChunk + kWholeChunks - 1) / kWholeChunks), kWholeWaves * 32, 0, st(stream)>>>(
-          q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, tt, ml, po);
+      fa_whole_kernel<HD><<<dim3((n + tt - 1) / tt, kv_heads, ((p0 + n) / kChunk + kWholeChunks - 1) / kWholeChunks),
+                            kWholeWaves * 32, 0, st(stream)>>>(q + at, (const uint8_t*) kc, (const uint8_t*) vc, n,
+                                                               heads, kv_heads, p0, tt, scale, ml, po);
       if (!ok()) return false;
     }
-    fa_kernel<<<dim3(n, kv_heads, chunks), kWaves * 32, 0, st(stream)>>>(
-        q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, ppk, tt, ml, po);
+    fa_kernel<HD><<<dim3(n, kv_heads, chunks), kWaves * 32, 0, st(stream)>>>(
+        q + at, (const uint8_t*) kc, (const uint8_t*) vc, n, heads, kv_heads, p0, ppk, tt, sh.window, sh.slots, scale,
+        ml, po);
     if (!ok()) return false;
-    fa_merge_kernel<<<n * heads, kHead, 0, st(stream)>>>(ml, po, gate + at, n, heads, kv_heads, p0, ppk, t0,
+    fa_merge_kernel<HD><<<n * heads, HD, 0, st(stream)>>>(ml, po, gate + (uint64_t) t0 * heads * HD / sh.gate_span, n,
+                                                          heads, kv_heads, p0, ppk, t0, sh.window, sh.gate_span,
                                                           out + at, side_of(side));
     if (!ok()) return false;
   }
   return true;
+}
+
+extern "C" bool q4x_attn(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
+                         uint32_t kv_heads, uint32_t dim, uint32_t pos0, const float* gate, const Q4xPick* pick,
+                         const AttnShape* shape, float* scratch, float* out, const Q4xX16* side, void* stream) {
+  const AttnShape sh = shape ? *shape : AttnShape{1, 0, 0};
+  if (!n_tok || !heads || !kv_heads || heads % kv_heads || heads / kv_heads > kTile ||
+      (dim != (uint32_t) kHead && dim != Q4X_QK_HEAD_NARROW) || (sh.gate_span != 1 && sh.gate_span != dim) ||
+      (sh.slots && (!sh.window || sh.slots < sh.window + n_tok - 1)) || pos0 + n_tok > OPS_Q4X_MAX_KEYS)
+    return false;
+  if (!q || !kc || !vc || !gate || !scratch || !out ||
+      (pick && (!pick->npick || !pick->sel || pick->ratio < 2 || !pick->blocks || sh.window)))
+    return false;
+  return dim == (uint32_t) kHead
+             ? attn<Q4X_HEAD_DIM>(q, kc, vc, n_tok, heads, kv_heads, pos0, gate, pick, sh, scratch, out, side, stream)
+             : attn<Q4X_QK_HEAD_NARROW>(q, kc, vc, n_tok, heads, kv_heads, pos0, gate, pick, sh, scratch, out, side,
+                                        stream);
 }

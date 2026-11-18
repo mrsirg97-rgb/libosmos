@@ -118,6 +118,66 @@ static void one(uint32_t pos0, uint32_t n, uint32_t window, uint32_t slots) {
     CHECK(hipFree(x) == hipSuccess);
 }
 
+// q4x_attn (a prompt's attention on the matrix cores, f16 q, k, v and weights) at the same shape over a step of T
+// tokens, against the decode's F32 attention a token at a time over the same cache - the gap the f16's; and the step
+// in two pieces the bits of the whole
+static void prompt(uint32_t pos0, uint32_t T, uint32_t window, uint32_t slots) {
+  const uint32_t ctx = pos0 + T, rows = slots ? slots : ctx;
+  const uint64_t rb = q4x_kv_row_bytes(kkv);
+  std::vector<float> hq((size_t) T * kq), hg((size_t) T * H), hk((size_t) ctx * kkv), hv((size_t) ctx * kkv);
+  for (auto& x : hq) x = 4.0f * uniform();
+  for (auto& x : hg) x = 2.0f * uniform();
+  for (auto& x : hk) x = 4.0f * uniform();
+  for (auto& x : hv) x = uniform();
+  void *kc, *vc;
+  float *dk, *dv, *dq, *dg, *fa, *da, *out, *out2, *ref;
+  CHECK(hipMalloc(&kc, rows * rb) == hipSuccess && hipMalloc(&vc, rows * rb) == hipSuccess);
+  CHECK(hipMalloc((void**) &dk, hk.size() * 4) == hipSuccess && hipMalloc((void**) &dv, hv.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &dq, hq.size() * 4) == hipSuccess && hipMalloc((void**) &dg, hg.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &out, hq.size() * 4) == hipSuccess && hipMalloc((void**) &out2, hq.size() * 4) == hipSuccess &&
+        hipMalloc((void**) &ref, hq.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &fa, q4x_attn_scratch(H, ctx) * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &da, q35_attn_decode_scratch(H, Q35_ATTN_DECODE_MAX) * 4) == hipSuccess);
+  CHECK(hipMemcpy(dk, hk.data(), hk.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dv, hv.data(), hv.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dq, hq.data(), hq.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dg, hg.data(), hg.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  // the cache as a step writes it: the prefix's rows, then the step's - a ring's later rows over its earlier ones only
+  // past the step's own reach (slots at least window + T - 1)
+  for (uint32_t p = 0; p < ctx; p++) {
+    const uint64_t r = slots ? p % slots : p;
+    CHECK(q4x_kv_put(dk + (size_t) p * kkv, dv + (size_t) p * kkv, 1, kkv, (uint8_t*) kc + r * rb,
+                     (uint8_t*) vc + r * rb, nullptr));
+  }
+  const AttnShape shape = {D, window, slots};
+  CHECK(q4x_attn(dq, kc, vc, T, H, KV, D, pos0, dg, nullptr, &shape, fa, out, nullptr, nullptr));
+  const uint32_t a = T / 3 + 1;
+  CHECK(q4x_attn(dq, kc, vc, a, H, KV, D, pos0, dg, nullptr, &shape, fa, out2, nullptr, nullptr));
+  CHECK(q4x_attn(dq + (size_t) a * kq, kc, vc, T - a, H, KV, D, pos0 + a, dg + (size_t) a * H, nullptr, &shape, fa,
+                 out2 + (size_t) a * kq, nullptr, nullptr));
+  for (uint32_t t = 0; t < T; t++)
+    CHECK(q35_attn_decode(dq + (size_t) t * kq, kc, vc, 1, H, KV, D, &shape, pos0 + t, dg + (size_t) t * H, da,
+                          ref + (size_t) t * kq, nullptr));
+  CHECK(hipDeviceSynchronize() == hipSuccess);
+  std::vector<float> g(hq.size()), g2(hq.size()), r(hq.size());
+  CHECK(hipMemcpy(g.data(), out, g.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(g2.data(), out2, g2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(r.data(), ref, r.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  double num = 0, den = 0, worst = 0;
+  for (size_t i = 0; i < g.size(); i++) {
+    num += ((double) g[i] - r[i]) * ((double) g[i] - r[i]), den += (double) r[i] * r[i];
+    worst = std::fmax(worst, std::fabs((double) g[i] - r[i]));
+  }
+  CHECK(std::memcmp(g.data(), g2.data(), g.size() * 4) == 0);
+  std::printf("  a prompt of %u at %u, window %u, %s: against the decode's F32 relative %.2e, largest gap %.2e; in "
+              "pieces of %u and %u the same bits\n", T, pos0, window, slots ? "a ring" : "rows by position",
+              std::sqrt(num / den), worst, a, T - a);
+  CHECK(std::sqrt(num / den) < 5e-3);  // test_q35_attn_gpu's bound: the f16's
+  for (void* x : {kc, vc, (void*) dk, (void*) dv, (void*) dq, (void*) dg, (void*) fa, (void*) da, (void*) out,
+                  (void*) out2, (void*) ref})
+    CHECK(hipFree(x) == hipSuccess);
+}
+
 int main() {
   std::printf("[test_lfm3_attn_gpu] start\n");
   int ndev = 0;
@@ -138,6 +198,10 @@ int main() {
     one(700, n, 0, 0);
   }
   one(5, 4, 256, 0);  // within the window: every key
+  prompt(0, 300, 256, 0);
+  prompt(700, 300, 256, 256 + 300 + 8);
+  prompt(700, 300, 0, 0);
+  prompt(5000, 64, 256, 256 + 64 + 8);
   std::printf("[test_lfm3_attn_gpu] ok\n");
   return 0;
 }

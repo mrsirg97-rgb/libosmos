@@ -124,7 +124,7 @@ void lfm3_forward_destroy(Lfm3Forward *f)
     hipFree(f->joints[i]);
   free(f->in_joint);
   void *b[] = {f->tok, f->h, f->xn, f->y, f->bcx, f->u, f->qf, f->kf, f->vf, f->qr, f->kr, f->g, f->att, f->ga,
-               f->up, f->act, f->attn_scratch, f->xf, f->logits, f->hk, f->ids, f->argmax, f->jo, f->x16, f->overflow};
+               f->up, f->act, f->attn_scratch, f->xf, f->logits, f->hk, f->ids, f->argmax, f->jo, f->x16, f->overflow, f->fa_scratch};
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     hipFree(b[i]);
   hipHostFree(f->pin_tok), hipHostFree(f->pin_logits);
@@ -172,6 +172,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
       {&f->attn_scratch, q35_attn_decode_scratch((uint32_t)g->n_heads, Q35_ATTN_DECODE_MAX) * F},
       {&f->xf, lr * D * F},      {&f->logits, lr * g->n_vocab * F}, {&f->hk, lr * D * F},
       {&f->ids, lr * 4},         {&f->argmax, ops_argmax_scratch((uint32_t)lr)},
+      {&f->fa_scratch, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F},
       {&f->x16, (uint64_t)MM_MAX_TOKENS * (ff > 3 * D ? ff : 3 * D) * 2}, {&f->overflow, 4},
       {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
