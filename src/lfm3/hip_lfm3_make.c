@@ -201,8 +201,8 @@ void lfm3_forward_destroy(Lfm3Forward *f)
 
 Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[LFM3_ERR])
 {
-  if (!w || !o || !o->max_tokens || !o->max_ctx || o->max_tokens > o->max_ctx)
-    return lfm3_fail(err, "no weights or options, or a step past the context"), NULL;
+  if (!w || !o || !o->max_tokens || !o->max_ctx || o->max_tokens > o->max_ctx || o->max_ctx > LFM3_MAX_CTX)
+    return lfm3_fail(err, "no weights or options, a step past the context, or a context past LFM3_MAX_CTX"), NULL;
   Lfm3Forward *f = calloc(1, sizeof *f);
   if (!f)
     return lfm3_fail(err, "out of memory"), NULL;

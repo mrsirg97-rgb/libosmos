@@ -505,7 +505,7 @@ extern "C" bool q4x_attn(const float* q, const void* kc, const void* vc, uint32_
   const AttnShape sh = shape ? *shape : AttnShape{1, 0, 0};
   if (!n_tok || !heads || !kv_heads || heads % kv_heads || heads / kv_heads > kTile ||
       (dim != (uint32_t) kHead && dim != Q4X_QK_HEAD_NARROW) || (sh.gate_span != 1 && sh.gate_span != dim) ||
-      (sh.slots && (!sh.window || sh.slots < sh.window + n_tok - 1)) || pos0 + n_tok > OPS_Q4X_MAX_KEYS)
+      (sh.slots && (!sh.window || sh.slots < sh.window + n_tok - 1)) || (uint64_t) pos0 + n_tok > OPS_ATTN_MAX_KEYS)
     return false;
   if (!q || !kc || !vc || !gate || !scratch || !out ||
       (pick && (!pick->npick || !pick->sel || pick->ratio < 2 || !pick->blocks || sh.window)))

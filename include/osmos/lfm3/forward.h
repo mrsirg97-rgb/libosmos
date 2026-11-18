@@ -91,6 +91,7 @@ typedef enum Lfm3Head
    whose span (yarn_from 2^s) holds its positions: plain rope below the base, and crossing a span its cached keys
    turned to the next stage's (DESIGN.md, "vibes-flash: 2M"); the stages to max_ctx's, LFM3_MAX_STAGES at most */
 #define LFM3_MAX_STAGES 8
+#define LFM3_MAX_CTX 2097152 /* a context's most positions: 2M (the stages to YaRN x8 over the native 262,144) */
 typedef struct Lfm3Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;

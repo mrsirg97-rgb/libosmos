@@ -26,6 +26,7 @@ extern "C" {
   } while (0)
 
 constexpr uint32_t H = 16, KV = 4, D = 128, G = H / KV, kq = H * D, kkv = KV * D;
+constexpr uint32_t LFM3_ATTN_LONG = 2097152;
 
 static uint32_t rng = 1711;
 static float uniform() {
@@ -68,8 +69,10 @@ static void one(uint32_t pos0, uint32_t n, uint32_t window, uint32_t slots) {
   CHECK(hipMemcpy(dg, hg.data(), hg.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   // the cache: position p's row at p (slots 0) or p % slots - written in position order, a ring's later ones over its
   // earlier ones, as a sequence writes it
-  for (uint32_t p = 0; p < ctx; p++) {
-    const uint64_t r = slots ? p % slots : p;
+  if (!slots)  // rows by position: the cache in one put
+    CHECK(q4x_kv_put(dk, dv, ctx, kkv, kc, vc, nullptr));
+  for (uint32_t p = 0; slots && p < ctx; p++) {
+    const uint64_t r = p % slots;
     CHECK(q4x_kv_put(dk + (size_t) p * kkv, dv + (size_t) p * kkv, 1, kkv, (uint8_t*) kc + r * rb,
                      (uint8_t*) vc + r * rb, nullptr));
   }
@@ -144,8 +147,10 @@ static void prompt(uint32_t pos0, uint32_t T, uint32_t window, uint32_t slots) {
   CHECK(hipMemcpy(dg, hg.data(), hg.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   // the cache as a step writes it: the prefix's rows, then the step's - a ring's later rows over its earlier ones only
   // past the step's own reach (slots at least window + T - 1)
-  for (uint32_t p = 0; p < ctx; p++) {
-    const uint64_t r = slots ? p % slots : p;
+  if (!slots)  // rows by position: the cache in one put
+    CHECK(q4x_kv_put(dk, dv, ctx, kkv, kc, vc, nullptr));
+  for (uint32_t p = 0; slots && p < ctx; p++) {
+    const uint64_t r = p % slots;
     CHECK(q4x_kv_put(dk + (size_t) p * kkv, dv + (size_t) p * kkv, 1, kkv, (uint8_t*) kc + r * rb,
                      (uint8_t*) vc + r * rb, nullptr));
   }
@@ -202,6 +207,7 @@ int main() {
   prompt(700, 300, 256, 256 + 300 + 8);
   prompt(700, 300, 0, 0);
   prompt(5000, 64, 256, 256 + 64 + 8);
+  prompt(LFM3_ATTN_LONG - 64, 64, 0, 0);  // a 2M context's last keys (vibes1.7b's pack: past Qwen's 1M)
   std::printf("[test_lfm3_attn_gpu] ok\n");
   return 0;
 }

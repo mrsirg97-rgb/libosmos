@@ -19,6 +19,9 @@ typedef struct Q4xX16
    - no kernel limit (QSA's picks a token's 2,051 keys at most), a context's: its Q8_0 cache ~13 KB a token a sequence
    (1M: ~13.6 GB), its pooled keys ~1.5 KB */
 #define OPS_Q4X_MAX_KEYS 1048576
+/* q4x_attn's own most keys (its offsets 64-bit, its chunks a grid's z under 65,536): LFM3's 2M context (its Qwen
+   callers OPS_Q4X_MAX_KEYS') */
+#define OPS_ATTN_MAX_KEYS 4194304
 
 /* Qwen3.8-Flash-Next's own steps (DESIGN.md, "Qwen's forward, op by op"), F32 on the GPU, queued on `stream` */
 
@@ -311,7 +314,7 @@ q4x_attn
   blocks' positions (ratio of them a block, in block order), then its tail (the positions past its visible blocks,
   ratio nv .. pos0 + t, nv = (pos0 + t + 1) / ratio) - every block picked, the list 0 .. pos0 + t: the dense bits.
   g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, Q8_0 rows of
-  kv_heads x dim (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_Q4X_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
+  kv_heads x dim (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_ATTN_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
   weights as f16, the sums F32; a token's key list in chunks of 128, a row's chunks merged in order - a row's bits
   its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads, max_ctx) floats
   (a step of more tokens taken in pieces).
