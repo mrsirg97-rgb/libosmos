@@ -37,10 +37,10 @@ static bool conv(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint3
 
 /* a run's K and V rows into its cache: a full layer's at their positions, a sliding layer's ring at pos % ring - a
    step's rows past the ring's end wrapped to its start */
-static bool kv_put(Lfm3Forward *f, const Lfm3Run *r, int l, bool sliding, uint32_t kv)
+static bool kv_put(Lfm3Forward *f, const Lfm3Run *r, const float *vf, int l, bool sliding, uint32_t kv)
 {
   const uint64_t row = q4x_kv_row_bytes(kv);
-  const float *k = f->kr + (uint64_t)r->off * kv, *v = f->vf + (uint64_t)r->off * kv;
+  const float *k = f->kr + (uint64_t)r->off * kv, *v = vf + (uint64_t)r->off * kv;
   uint8_t *kc = r->s->kc[l], *vc = r->s->vc[l];
   const uint32_t p = (uint32_t)r->s->pos, at = sliding ? p % f->ring : p;
   const uint32_t first = sliding && at + r->len > f->ring ? f->ring - at : r->len;
@@ -58,47 +58,50 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
   const uint32_t hd = (uint32_t)g->head_dim, q = H * hd, kv = KV * hd;
   const bool sliding = g->kind[l] == LFM3_SLIDING;
   const AttnShape shape = {hd, sliding ? (uint32_t)g->window : 0, sliding ? f->ring : 0};
-  bool ok = mat(f, L->q, q, D, f->xn, n, f->qf) && mat(f, L->k, kv, D, f->xn, n, f->kf) &&
-            mat(f, L->v, kv, D, f->xn, n, f->vf) && mat(f, L->gate, H, D, f->xn, n, f->g);
+  /* q, k, v and the gate on xn: a token's one joint launch (their outputs in jo, one after another), else each */
+  const bool joint = n == 1 && f->j_attn[l];
+  float *qf = joint ? f->jo : f->qf, *kf = joint ? f->jo + q : f->kf, *vf = joint ? f->jo + q + kv : f->vf;
+  float *gt = joint ? f->jo + q + 2 * kv : f->g;
+  bool ok = joint ? mv_strided(L->q->type, f->j_attn[l], q + 2 * kv + H, D, f->xn, D, 1, f->jo, q + 2 * kv + H, f->st)
+                  : mat(f, L->q, q, D, f->xn, n, qf) && mat(f, L->k, kv, D, f->xn, n, kf) &&
+                        mat(f, L->v, kv, D, f->xn, n, vf) && mat(f, L->gate, H, D, f->xn, n, gt);
   for (uint32_t r = 0; ok && r < runs; r++)
   {
     const Lfm3Run *R = &run[r];
     const uint64_t o = R->off;
-    ok = q4x_qk(f->qf + o * q, f->kf + o * kv, R->len, H, KV, hd, sliding ? &f->rope_swa : &f->rope_full,
+    ok = q4x_qk(qf + o * q, kf + o * kv, R->len, H, KV, hd, sliding ? &f->rope_swa : &f->rope_full,
                 lfm3_fv(f, L->q_norm), lfm3_fv(f, L->k_norm), g->rms_eps, R->s->pos, f->qr + o * q, NULL,
                 f->kr + o * kv, f->st) &&
-         kv_put(f, R, l, sliding, kv);
+         kv_put(f, R, vf, l, sliding, kv);
     for (uint32_t t0 = 0; ok && t0 < R->len; t0 += Q35_ATTN_DECODE_MAX)
     {
       const uint32_t m = R->len - t0 < Q35_ATTN_DECODE_MAX ? R->len - t0 : Q35_ATTN_DECODE_MAX;
       ok = q35_attn_decode(f->qr + (o + t0) * q, R->s->kc[l], R->s->vc[l], m, H, KV, hd, &shape,
-                           (uint32_t)R->s->pos + t0, f->g + (o + t0) * H, f->attn_scratch, f->att + (o + t0) * q,
+                           (uint32_t)R->s->pos + t0, gt + (o + t0) * H, f->attn_scratch, f->att + (o + t0) * q,
                            f->st);
     }
   }
   return ok && mat(f, L->out, D, q, f->att, n, f->y);
 }
 
-/* x += rms(y) w: a block's output normed (its post-norm) and added to the residual */
-static bool post(Lfm3Forward *f, const GgufTensor *norm, uint32_t n)
-{
-  const uint32_t D = (uint32_t)f->w->geo.n_embd;
-  return ops_rms(f->y, D, D, lfm3_fv(f, norm), f->w->geo.rms_eps, n, f->y, D, f->st) &&
-         ops_add(f->h, f->y, (uint64_t)n * D, f->st);
-}
-
+/* a layer: its operator and its SwiGLU, each on xn (the norm before it, already made) and each one launch after into
+   the residual with the next norm (ops_rms_add_rms: the post-norm, the add, the next pre-norm - the FFN's, then the
+   next layer's attention's; the last layer's none) */
 static bool layer(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n)
 {
   const Lfm3Geometry *g = &f->w->geo;
   const Lfm3Layer *L = &f->w->layer[l];
   const uint32_t D = (uint32_t)g->n_embd, ff = (uint32_t)g->n_ff;
-  return ops_rms(f->h, D, D, lfm3_fv(f, L->attn_norm), g->rms_eps, n, f->xn, D, f->st) &&
-         (g->kind[l] == LFM3_CONV ? conv(f, run, runs, l, n) : attention(f, run, runs, l, n)) &&
-         post(f, L->post_attn_norm, n) &&
-         ops_rms(f->h, D, D, lfm3_fv(f, L->ffn_norm), g->rms_eps, n, f->xn, D, f->st) &&
-         mat(f, L->ffn_gate, ff, D, f->xn, n, f->ga) && mat(f, L->ffn_up, ff, D, f->xn, n, f->up) &&
-         ops_swiglu(f->ga, f->up, ff, INFINITY, NULL, n, f->act, f->st) && mat(f, L->ffn_down, D, ff, f->act, n, f->y) &&
-         post(f, L->post_ffn_norm, n);
+  const float *next = l + 1 < g->n_layers ? lfm3_fv(f, f->w->layer[l + 1].attn_norm) : NULL;
+  const bool joint = n == 1 && f->j_ffn[l];
+  float *ga = joint ? f->jo : f->ga, *up = joint ? f->jo + ff : f->up;
+  return (g->kind[l] == LFM3_CONV ? conv(f, run, runs, l, n) : attention(f, run, runs, l, n)) &&
+         ops_rms_add_rms(f->h, f->y, lfm3_fv(f, L->post_attn_norm), lfm3_fv(f, L->ffn_norm), g->rms_eps, D, n, f->xn,
+                         f->st) &&
+         (joint ? mv_strided(L->ffn_gate->type, f->j_ffn[l], 2 * ff, D, f->xn, D, 1, f->jo, 2 * ff, f->st)
+                : mat(f, L->ffn_gate, ff, D, f->xn, n, ga) && mat(f, L->ffn_up, ff, D, f->xn, n, up)) &&
+         ops_swiglu(ga, up, ff, INFINITY, NULL, n, f->act, f->st) && mat(f, L->ffn_down, D, ff, f->act, n, f->y) &&
+         ops_rms_add_rms(f->h, f->y, lfm3_fv(f, L->post_ffn_norm), next, g->rms_eps, D, n, f->xn, f->st);
 }
 
 /* the step (lfm3_step_runs); keep_from: rows below it not kept whatever the prompts say (lfm3_step's: its last rows) */
@@ -139,7 +142,8 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   const uint32_t D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab;
   memcpy(f->pin_tok, tokens, (size_t)n * 4);
   bool ok = hipMemcpyAsync(f->tok, f->pin_tok, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
-            ops_embed(f->w->embd->type, lfm3_dev(f, f->w->embd), D, f->tok, n, 1, f->h, f->st);
+            ops_embed(f->w->embd->type, lfm3_dev(f, f->w->embd), D, f->tok, n, 1, f->h, f->st) &&
+            ops_rms(f->h, D, D, lfm3_fv(f, f->w->layer[0].attn_norm), g->rms_eps, n, f->xn, D, f->st);
   for (int l = 0; ok && l < g->n_layers; l++)
   {
     ok = layer(f, run, runs, l, n);

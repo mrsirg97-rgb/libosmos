@@ -20,6 +20,13 @@ struct Lfm3Forward
   const void *head;   /* the tied head as the step reads it: head_q8 (LFM3_HEAD_Q8_0) or the embedding's table */
   uint32_t head_type;
   void *head_q8;      /* its Q8_0 copy (owned), NULL for the file's */
+  /* a one-token step's joints: an attention layer's q, k, v and gate one matrix, every layer's FFN gate and up one -
+     their rows concatenated at load (a row's sums its own: the same bits), each tensor's device pointer into it */
+  const void *j_attn[LFM3_MAX_LAYERS], *j_ffn[LFM3_MAX_LAYERS]; /* NULL: not joined (types unlike) */
+  void *joints[2 * LFM3_MAX_LAYERS];
+  uint32_t n_joints;
+  bool *in_joint;     /* a tensor's bytes inside a joint (not freed alone) */
+  float *jo;          /* a joint's outputs (a token's) */
   void *st;
   /* a step's buffers: max_tokens rows each */
   int32_t *tok, *pin_tok;

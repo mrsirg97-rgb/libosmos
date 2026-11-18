@@ -616,6 +616,51 @@ extern "C" bool ops_embed(uint32_t type, const void* table, uint32_t dim, const 
   return ok();
 }
 
+// ops_rms_add_rms: a row a block - rms_kernel's sums on y, its normed value added to h as add_kernel adds it, then
+// rms_kernel's sums on the new h into xn. a thread's values (i = its index + kThreads j) held in registers between the
+// halves: each read once, each written once (13 us a 2,048-wide row with the halves' re-reads, low-power)
+constexpr uint32_t kRmsAddRegs = 24;  // a row's values a thread at most: 6,144 wide
+__global__ void rms_add_rms_kernel(float* h, float* y, const float* w_post, const float* w_next, float eps, uint32_t n,
+                                   float* xn) {
+  __shared__ float lds[kThreads];
+  float* yr = y + (uint64_t) blockIdx.x * n;
+  float* hr = h + (uint64_t) blockIdx.x * n;
+  float v[kRmsAddRegs], hv[kRmsAddRegs];
+  float ss = 0;
+#pragma unroll
+  for (uint32_t j = 0; j < kRmsAddRegs; j++) {
+    const uint32_t i = threadIdx.x + j * kThreads;
+    v[j] = i < n ? yr[i] : 0.0f, hv[j] = i < n ? hr[i] : 0.0f;
+    if (i < n) ss += v[j] * v[j];
+  }
+  const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) n + eps);
+  float ss2 = 0;
+#pragma unroll
+  for (uint32_t j = 0; j < kRmsAddRegs; j++) {
+    const uint32_t i = threadIdx.x + j * kThreads;
+    if (i >= n) continue;
+    const float o = (v[j] * r) * w_post[i];
+    hv[j] += o;
+    yr[i] = o, hr[i] = hv[j];
+    ss2 += hv[j] * hv[j];
+  }
+  if (!w_next) return;
+  const float r2 = 1.0f / sqrtf(block_sum<kThreads>(ss2, lds) / (float) n + eps);
+  float* xr = xn + (uint64_t) blockIdx.x * n;
+#pragma unroll
+  for (uint32_t j = 0; j < kRmsAddRegs; j++) {
+    const uint32_t i = threadIdx.x + j * kThreads;
+    if (i < n) xr[i] = (hv[j] * r2) * w_next[i];
+  }
+}
+
+extern "C" bool ops_rms_add_rms(float* h, float* y, const float* w_post, const float* w_next, float eps, uint32_t dim,
+                                uint32_t rows, float* xn, void* stream) {
+  if (!h || !y || !w_post || (w_next && !xn) || !dim || !rows || dim > kRmsAddRegs * kThreads) return false;
+  rms_add_rms_kernel<<<rows, kThreads, 0, st(stream)>>>(h, y, w_post, w_next, eps, dim, xn);
+  return ok();
+}
+
 extern "C" bool ops_rms(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, uint32_t rows, float* y,
                         uint32_t ys, void* stream) {
   if (!n || !rows) return false;

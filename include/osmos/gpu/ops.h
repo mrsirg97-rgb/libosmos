@@ -19,6 +19,11 @@ bool ops_embed(uint32_t type, const void *table, uint32_t dim, const int32_t *id
                float *h, void *stream);
 bool ops_rms(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
              uint32_t y_stride, void *stream);
+/* a block's post-norm into the residual and the next norm, one launch: y's rows normed (w_post), added to h's, then
+   h's normed (w_next) into xn - ops_rms, ops_add and ops_rms in turn, their bits; w_next NULL: no next norm (xn
+   untouched). y, h and xn dim floats a row (6,144 at most), rows apart; y overwritten with its normed rows */
+bool ops_rms_add_rms(float *h, float *y, const float *w_post, const float *w_next, float eps, uint32_t dim, uint32_t rows,
+                     float *xn, void *stream);
 bool ops_rms_x16(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
                  uint32_t y_stride, void *x16, int32_t *overflow, void *stream);
 #define OPS_HC_PARTS 64

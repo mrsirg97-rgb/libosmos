@@ -41,6 +41,48 @@ static bool upload(Lfm3Forward *f, char *err)
   return ok;
 }
 
+/* tensors' rows concatenated (one type) into one buffer, their device pointers then into it; NULL if their types
+   differ or one is missing */
+static const void *join(Lfm3Forward *f, const GgufTensor *const *t, int k, bool *ok)
+{
+  const Gguf *g = f->w->model;
+  uint64_t bytes = 0;
+  for (int i = 0; i < k; i++)
+  {
+    if (!t[i] || t[i]->type != t[0]->type)
+      return NULL;
+    bytes += t[i]->bytes;
+  }
+  uint8_t *buf = NULL;
+  if (!lfm3_alloc(&buf, bytes))
+    return *ok = false, NULL;
+  f->joints[f->n_joints++] = buf;
+  uint64_t at = 0;
+  for (int i = 0; i < k && *ok; i++)
+  {
+    const size_t idx = (size_t)(t[i] - g->tensors);
+    *ok = hipMemcpy(buf + at, f->dev[idx], t[i]->bytes, hipMemcpyDeviceToDevice) == hipSuccess;
+    hipFree(f->dev[idx]);
+    f->dev[idx] = buf + at, f->in_joint[idx] = true, at += t[i]->bytes;
+  }
+  return buf;
+}
+
+static bool joints(Lfm3Forward *f, char *err)
+{
+  const Lfm3Geometry *g = &f->w->geo;
+  bool ok = (f->in_joint = calloc(f->w->model->n_tensors, sizeof *f->in_joint)) != NULL;
+  for (int l = 0; ok && l < g->n_layers; l++)
+  {
+    const Lfm3Layer *L = &f->w->layer[l];
+    const GgufTensor *ffn[2] = {L->ffn_gate, L->ffn_up}, *att[4] = {L->q, L->k, L->v, L->gate};
+    f->j_ffn[l] = join(f, ffn, 2, &ok);
+    if (ok && g->kind[l] != LFM3_CONV)
+      f->j_attn[l] = join(f, att, 4, &ok);
+  }
+  return ok || lfm3_fail(err, "the joints not made (GPU memory)");
+}
+
 /* the tied head's Q8_0 copy (q35's head_q8: ggml's quantizer through q4x_kv_put, a chunk of rows at a time) - the
    embedding's table kept the file's: the head alone reads the copy */
 static bool head_q8(Lfm3Forward *f, char *err)
@@ -74,10 +116,14 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
-    hipFree(f->dev[i]);
+    if (!f->in_joint || !f->in_joint[i])
+      hipFree(f->dev[i]);
   free(f->dev);
+  for (uint32_t i = 0; i < f->n_joints; i++)
+    hipFree(f->joints[i]);
+  free(f->in_joint);
   void *b[] = {f->tok, f->h, f->xn, f->y, f->bcx, f->u, f->qf, f->kf, f->vf, f->qr, f->kr, f->g, f->att, f->ga,
-               f->up, f->act, f->attn_scratch, f->xf, f->logits, f->hk, f->ids, f->argmax};
+               f->up, f->act, f->attn_scratch, f->xf, f->logits, f->hk, f->ids, f->argmax, f->jo};
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     hipFree(b[i]);
   hipHostFree(f->pin_tok), hipHostFree(f->pin_logits);
@@ -108,6 +154,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   ok = ok || lfm3_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || lfm3_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
+  ok = ok && joints(f, err);
   if (ok)
     f->head = lfm3_dev(f, w->embd), f->head_type = w->embd->type;
   ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || lfm3_fail(err, "a head this build does not make")) &&
@@ -124,6 +171,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
       {&f->attn_scratch, q35_attn_decode_scratch((uint32_t)g->n_heads, Q35_ATTN_DECODE_MAX) * F},
       {&f->xf, lr * D * F},      {&f->logits, lr * g->n_vocab * F}, {&f->hk, lr * D * F},
       {&f->ids, lr * 4},         {&f->argmax, ops_argmax_scratch((uint32_t)lr)},
+      {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
   for (size_t i = 0; ok && i < sizeof want / sizeof *want; i++)
     ok = lfm3_alloc(want[i].p, want[i].bytes) || lfm3_fail(err, "GPU memory refused (a step's buffers)");
