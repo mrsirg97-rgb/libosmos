@@ -51,6 +51,15 @@ bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint3
 
 /* a rotation (q4x_rope): its dims (a head's first), its angles' step, and YaRN's - none: ext_factor 0, freq_scale and
    mscale 1 (the plain rotation's bits) */
+/* a pair's angle step, as each model's reference forms it: ggml's (theta_scale^i, a running product - llama.cpp's, Qwen's
+   reference) or transformers' (1 / base^(2i / dim) in F32 - Liquid's modeling code, LFM3's) */
+#define Q4X_ROPE_PAIRS_MAX 128 /* a rotation's pairs at most (a 256 head's) */
+typedef enum Q4xTheta
+{
+  Q4X_THETA_GGML,
+  Q4X_THETA_HF,
+} Q4xTheta;
+
 typedef struct Q4xRope
 {
   uint32_t dim;
@@ -61,8 +70,13 @@ typedef struct Q4xRope
   float ext_factor;       /* YaRN's extrapolation mix */
   float corr_lo, corr_hi; /* its ramp: the correction dims */
   float mscale;           /* a rotated pair's magnitude: 1 + 0.1 ln(factor) */
+  Q4xTheta theta;         /* its angle step's form */
+  float inv_freq[Q4X_ROPE_PAIRS_MAX]; /* Q4X_THETA_HF's: pair i's 1 / base^(2i / dim), formed on the host in F32 (the
+                                         reference's own powf: the device's may differ by an ulp, ~1e-3 at 8K) */
 } Q4xRope;
-bool q4x_rope(uint32_t dim, uint32_t pairs, float base, uint32_t native_ctx, uint32_t ctx, Q4xRope *rope);
+bool q4x_rope(uint32_t dim, uint32_t pairs, float base, uint32_t native_ctx, uint32_t ctx, Q4xTheta theta,
+              Q4xRope *rope);
+#define Q4X_QK_HEAD_NARROW 128 /* q4x_qk's other head (LFM3's): its heads Q4X_HEAD_DIM wide or this */
 bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
             const Q4xRope *rope, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float *q,
             float *gate, float *k_out, void *stream);
@@ -281,7 +295,9 @@ q4x_qk
   gate[t][h] its gate; k_out[t][g] = rope(rms_norm(k[t][g]) k_norm) (k_out may be a cache's row pos0). rope: the first
   rope->dim of a head, pairs (i, i + dim / 2), angle (pos0 + t) theta_i, theta_i = theta_scale^i as ggml builds it (a
   running product; YaRN's as q4x_rope says); IMRoPE's sections all the token's position (text) - this rotation. heads 0: the
-  keys alone (qfull, q and gate unread: the MTP head's cache seeding).
+  keys alone (qfull, q and gate unread: the MTP head's cache seeding). gate NULL: qfull plain q, a head after a head
+  (LFM3's: its gate its own matrix). a head Q4X_HEAD_DIM or Q4X_QK_HEAD_NARROW wide; the pairs past rope->pairs
+  unrotated, times rope->mscale (LFM3's zero tail: Liquid's YaRN scales it too).
 
 q4x_kv_row_bytes, q4x_kv_put
   the attention's cache in Q8_0 (ggml's: a block of 32, d = max |x| / 127 as f16, q = x / d rounded to nearest):

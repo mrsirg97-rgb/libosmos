@@ -157,7 +157,7 @@ static void yarn_case(const char* dir, int32_t pos0, const float* qn, const floa
     return;
   }
   Q4xRope rope;
-  CHECK(q4x_rope(kRope, kRope / 2, kBase, kNative, kYarnCtx, &rope) && rope.ext_factor == 1.0f && rope.freq_scale == 0.25f);
+  CHECK(q4x_rope(kRope, kRope / 2, kBase, kNative, kYarnCtx, Q4X_THETA_GGML, &rope) && rope.ext_factor == 1.0f && rope.freq_scale == 0.25f);
   float *q = dev_alloc<float>((size_t) kTok * kQ), *gate = dev_alloc<float>((size_t) kTok * kQ);
   float* k = dev_alloc<float>((size_t) kTok * kKvW);
   CHECK(q4x_qk(dev_from(full.v), dev_from(kraw.v), kTok, kHeads, kKv, kHead, &rope, qn, kn, kEps, pos0, q, gate, k,
@@ -196,8 +196,8 @@ int main() {
   float *q = dev_alloc<float>((size_t) kTok * kQ), *gate = dev_alloc<float>((size_t) kTok * kQ);
   float *kf = dev_alloc<float>((size_t) kTok * kKvW), *vf = dev_alloc<float>((size_t) kTok * kKvW);
   Q4xRope rope;
-  CHECK(q4x_rope(kRope, kRope / 2, kBase, kNative, kNative, &rope) && rope.ext_factor == 0.0f && rope.mscale == 1.0f);  // plain
-  CHECK(!q4x_rope(kRope + 1, (kRope + 1) / 2, kBase, kNative, kNative, &rope) && !q4x_rope(kRope, kRope / 2, kBase, 0, kNative, &rope));
+  CHECK(q4x_rope(kRope, kRope / 2, kBase, kNative, kNative, Q4X_THETA_GGML, &rope) && rope.ext_factor == 0.0f && rope.mscale == 1.0f);  // plain
+  CHECK(!q4x_rope(kRope + 1, (kRope + 1) / 2, kBase, kNative, kNative, Q4X_THETA_GGML, &rope) && !q4x_rope(kRope, kRope / 2, kBase, 0, kNative, Q4X_THETA_GGML, &rope));
   CHECK(q4x_qk(dev_from(full.v), dev_from(kraw.v), kTok, kHeads, kKv, kHead, &rope, qn, kn, kEps, 0, q, gate, kf,
                nullptr));
   held("q normed, rotated (Qcur)", host_of(q, (size_t) kTok * kQ), ref("Qcur-3"), 1.0, kExactRel);

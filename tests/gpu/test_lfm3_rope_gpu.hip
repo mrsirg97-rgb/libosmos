@@ -98,7 +98,7 @@ static void run(bool yarn) {
   for (auto& v : wq) v = 1.0f + 0.1f * nd(rng);
   for (auto& v : wk) v = 1.0f + 0.1f * nd(rng);
   Q4xRope rope;
-  CHECK(q4x_rope(kDim, kPairs, kBase, kNative, yarn ? kYarn * kNative : kNative, &rope));
+  CHECK(q4x_rope(kDim, kPairs, kBase, kNative, yarn ? kYarn * kNative : kNative, Q4X_THETA_HF, &rope));
   float *dq = dev(hq), *dk = dev(hk), *dwq = dev(wq), *dwk = dev(wk), *oq, *ok;
   CHECK(hipMalloc((void**) &oq, hq.size() * 4) == hipSuccess && hipMalloc((void**) &ok, hk.size() * 4) == hipSuccess);
   CHECK(q4x_qk(dq, dk, kTok, kHeads, kKv, kDim, &rope, dwq, dwk, kEps, kPos0, oq, nullptr, ok, nullptr));
@@ -130,7 +130,7 @@ int main() {
     return 77;
   }
   Q4xRope r;
-  CHECK(!q4x_rope(kDim, 0, kBase, kNative, kNative, &r) && !q4x_rope(kDim, kDim / 2 + 1, kBase, kNative, kNative, &r));
+  CHECK(!q4x_rope(kDim, 0, kBase, kNative, kNative, Q4X_THETA_HF, &r) && !q4x_rope(kDim, kDim / 2 + 1, kBase, kNative, kNative, Q4X_THETA_HF, &r));
   std::printf("  refusals: no pairs, more pairs than half the dim\n");
   run(false);
   run(true);

@@ -27,7 +27,7 @@ constexpr uint32_t kSteps[] = {1000, 999, 1, 1000};
 // the plain rotation (the native context: no YaRN)
 static Q4xRope plain_rope() {
   Q4xRope r;
-  CHECK(q4x_rope(kRope, kRope / 2, kBase, 262144, 262144, &r));
+  CHECK(q4x_rope(kRope, kRope / 2, kBase, 262144, 262144, Q4X_THETA_GGML, &r));
   return r;
 }  // a prompt's pieces: one past a block, one ending inside one
 
