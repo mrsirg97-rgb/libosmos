@@ -1,0 +1,143 @@
+// q35_attn_decode at LFM3's shape (DESIGN.md, "vibes-flash: LFM3"): 16 query heads on 4 KV heads of 128, a gate a
+// head (AttnShape's gate_span the dim), a 256-key window or every key, rows by position or a ring - against a
+// double-precision attention over the cache's own Q8_0 values (read back, decoded here: only the order of the sums
+// differs), steps of 1 to 4 tokens past the window's reach; a token's bits the same alone or in its step; Qwen's
+// shape (NULL) untouched (test_q35_attn_gpu); shapes it does not take refused. skipped (77) without a GPU
+#include <hip/hip_runtime.h>
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+extern "C" {
+#include "osmos/gpu/attn_shape.h"
+#include "osmos/gpu/q35_ops.h"
+#include "osmos/gpu/q4x_ops.h"
+}
+
+#define CHECK(c)                                                                  \
+  do {                                                                            \
+    if (!(c)) {                                                                   \
+      std::fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__, #c); \
+      std::exit(1);                                                               \
+    }                                                                             \
+  } while (0)
+
+constexpr uint32_t H = 16, KV = 4, D = 128, G = H / KV, kq = H * D, kkv = KV * D;
+
+static uint32_t rng = 1711;
+static float uniform() {
+  rng = rng * 1664525u + 1013904223u;
+  return (float) (rng >> 8) / 16777216.0f - 0.5f;
+}
+
+static float f16(uint16_t h) {
+  _Float16 v;
+  std::memcpy(&v, &h, 2);
+  return (float) v;
+}
+
+// a cache row's value i (its KV heads' dims in order): the Q8_0 block's scale times its int8
+static double cached(const std::vector<uint8_t>& c, uint64_t row_bytes, uint64_t row, uint32_t i) {
+  const uint8_t* b = c.data() + row * row_bytes + (i / Q4X_KV_BLOCK) * Q4X_KV_BLOCK_BYTES;
+  uint16_t d;
+  std::memcpy(&d, b, 2);
+  return (double) f16(d) * (double) (int8_t) b[2 + i % Q4X_KV_BLOCK];
+}
+
+static void one(uint32_t pos0, uint32_t n, uint32_t window, uint32_t slots) {
+  const uint32_t ctx = pos0 + n, rows = slots ? slots : ctx;
+  const uint64_t rb = q4x_kv_row_bytes(kkv);
+  std::vector<float> hq((size_t) n * kq), hg((size_t) n * H), hk((size_t) ctx * kkv), hv((size_t) ctx * kkv);
+  for (auto& x : hq) x = 4.0f * uniform();
+  for (auto& x : hg) x = 2.0f * uniform();
+  for (auto& x : hk) x = 4.0f * uniform();
+  for (auto& x : hv) x = uniform();
+  void *kc, *vc;
+  float *dk, *dv, *dq, *dg, *da, *out, *one_out;
+  CHECK(hipMalloc(&kc, rows * rb) == hipSuccess && hipMalloc(&vc, rows * rb) == hipSuccess);
+  CHECK(hipMalloc((void**) &dk, hk.size() * 4) == hipSuccess && hipMalloc((void**) &dv, hv.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &dq, hq.size() * 4) == hipSuccess && hipMalloc((void**) &dg, hg.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &out, hq.size() * 4) == hipSuccess && hipMalloc((void**) &one_out, kq * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &da, q35_attn_decode_scratch(H, Q35_ATTN_DECODE_MAX) * 4) == hipSuccess);
+  CHECK(hipMemcpy(dk, hk.data(), hk.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dv, hv.data(), hv.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dq, hq.data(), hq.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dg, hg.data(), hg.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  // the cache: position p's row at p (slots 0) or p % slots - written in position order, a ring's later ones over its
+  // earlier ones, as a sequence writes it
+  for (uint32_t p = 0; p < ctx; p++) {
+    const uint64_t r = slots ? p % slots : p;
+    CHECK(q4x_kv_put(dk + (size_t) p * kkv, dv + (size_t) p * kkv, 1, kkv, (uint8_t*) kc + r * rb,
+                     (uint8_t*) vc + r * rb, nullptr));
+  }
+  const AttnShape shape = {D, window, slots};
+  CHECK(q35_attn_decode(dq, kc, vc, n, H, KV, D, &shape, pos0, dg, da, out, nullptr));
+  CHECK(hipDeviceSynchronize() == hipSuccess);
+  std::vector<uint8_t> ck(rows * rb), cv(rows * rb);
+  std::vector<float> got(hq.size());
+  CHECK(hipMemcpy(ck.data(), kc, ck.size(), hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(cv.data(), vc, cv.size(), hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(got.data(), out, got.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  double worst = 0, top = 0;
+  for (uint32_t t = 0; t < n; t++) {
+    const uint32_t p = pos0 + t, lo = window && p + 1 > window ? p + 1 - window : 0;
+    for (uint32_t h = 0; h < H; h++) {
+      const uint32_t g = h / G;
+      std::vector<double> s(p + 1 - lo);
+      double mx = -INFINITY;
+      for (uint32_t k = lo; k <= p; k++) {
+        double a = 0;
+        for (uint32_t d = 0; d < D; d++)
+          a += (double) hq[((size_t) t * H + h) * D + d] * cached(ck, rb, slots ? k % slots : k, g * D + d);
+        s[k - lo] = a / std::sqrt((double) D), mx = std::fmax(mx, s[k - lo]);
+      }
+      double sum = 0;
+      for (double& x : s) sum += (x = std::exp(x - mx));
+      const double gate = 1.0 / (1.0 + std::exp(-(double) hg[(size_t) t * H + h]));
+      for (uint32_t d = 0; d < D; d++) {
+        double o = 0;
+        for (uint32_t k = lo; k <= p; k++) o += s[k - lo] * cached(cv, rb, slots ? k % slots : k, g * D + d);
+        const double want = o / sum * gate, e = std::fabs(want - got[((size_t) t * H + h) * D + d]);
+        worst = std::fmax(worst, e), top = std::fmax(top, std::fabs(want));
+      }
+    }
+  }
+  // a token's bits alone: the step's last alone, its own position, the same keys
+  CHECK(q35_attn_decode(dq + (size_t) (n - 1) * kq, kc, vc, 1, H, KV, D, &shape, pos0 + n - 1,
+                        dg + (size_t) (n - 1) * H, da, one_out, nullptr));
+  std::vector<float> alone(kq);
+  CHECK(hipMemcpy(alone.data(), one_out, kq * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(std::memcmp(alone.data(), got.data() + (size_t) (n - 1) * kq, kq * 4) == 0);
+  std::printf("  %u tokens at %u, window %u, %s: max error %.2e of %.3f (%.1e); the last alone the same bits\n", n,
+              pos0, window, slots ? "a ring" : "rows by position", worst, top, worst / top);
+  CHECK(worst <= 1e-5 * top);
+  for (void* x : {kc, vc, (void*) dk, (void*) dv, (void*) dq, (void*) dg, (void*) da, (void*) out, (void*) one_out})
+    CHECK(hipFree(x) == hipSuccess);
+}
+
+int main() {
+  std::printf("[test_lfm3_attn_gpu] start\n");
+  int ndev = 0;
+  if (hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
+    std::printf("[test_lfm3_attn_gpu] skipped: no GPU\n");
+    return 77;
+  }
+  float x[1];
+  const AttnShape span3 = {3, 0, 0}, ring_short = {D, 256, 256}, ring_no_window = {D, 0, 512};
+  CHECK(!q35_attn_decode(x, x, x, 1, H, KV, D, &span3, 0, x, x, x, nullptr));         // a gate neither 1 nor a head
+  CHECK(!q35_attn_decode(x, x, x, 2, H, KV, D, &ring_short, 300, x, x, x, nullptr));  // a ring under window + step - 1
+  CHECK(!q35_attn_decode(x, x, x, 1, H, KV, D, &ring_no_window, 0, x, x, x, nullptr)); // a ring without a window
+  CHECK(!q35_attn_decode(x, x, x, 1, H, KV, 64, nullptr, 0, x, x, x, nullptr));       // a head neither 128 nor 256
+  std::printf("  refusals: a gate's span, a ring too short or without a window, a head's dim\n");
+  for (uint32_t n : {1u, 3u, 4u}) {
+    one(700, n, 256, 0);
+    one(700, n, 256, 256 + 3);
+    one(700, n, 0, 0);
+  }
+  one(5, 4, 256, 0);  // within the window: every key
+  std::printf("[test_lfm3_attn_gpu] ok\n");
+  return 0;
+}
