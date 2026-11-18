@@ -1,0 +1,137 @@
+// LFM3's forward (osmos/lfm3/forward.h) against Liquid's own (oracle/lfm3_forward.py: modeling_lfm3.py in F32 on the
+// GGUF's own values): its ids through one step - every layer's output at the reference's kept rows, the last rows'
+// logits (KL against the reference's, its top-1) - then the same ids in uneven steps, the last rows' logits the same
+// bits. vibes1.7b's Q4_0 file (OSMOS_TEST_LFM3) and ~/osmos-oracle/lfm3_forward_64_kvq8.bin (OSMOS_TEST_LFM3_REF:
+// another, lfm3_forward_2048_kvq8.bin past the window); skipped (77) without.
+extern "C" {
+#include "osmos/lfm3/forward.h"
+#include "osmos/model/gguf.h"
+}
+
+#include "oracle_fixture.h"
+
+// the reference rounds K and V through Q8_0 as osmos's cache does (lfm3_forward.py --kv-q8): F32 both sides over the
+// same weights and the same cache values, the order of every sum another - and a key a rounding's boundary apart
+// lands a code apart, so a layer's output drifts past F32's ~1e-6. measured (2026-11-18): the layers' worst 9.1e-4 of
+// the largest (64 ids), 1.6e-3 (2,048); the logits' KL mean 4.8e-6 / 9.7e-6, max 2.3e-5 / 1.0e-4, top-1 64 / 63 of
+// 64 (a near-tie). against the reference's own F32 cache (no --kv-q8): KL mean 8.2e-5 / 3.5e-5, max 8.7e-4 / 1.4e-4,
+// top-1 64 / 64 - the cache's cost. the bounds the measurements' with room; a wrong term (the convolution's taps
+// off by one, a window's edge) far past them
+constexpr double kTolLayer = 5e-3, kKlMean = 5e-5, kKlMax = 5e-4;
+constexpr uint32_t kTop1Miss = 1;
+
+struct Taps {
+  std::vector<int32_t> rows;
+  std::vector<float> got;  // [layer][row][D]
+  uint32_t layers = 0, dim = 0;
+};
+
+static void tap(void* arg, int layer, const char* what, const float* dev, uint32_t n, uint32_t dim) {
+  Taps* t = (Taps*) arg;
+  if (std::strcmp(what, "residual") || n < (uint32_t) t->rows.back() + 1) return;
+  t->dim = dim;
+  if (t->got.empty()) t->got.resize((size_t) t->layers * t->rows.size() * dim);
+  for (size_t r = 0; r < t->rows.size(); r++)
+    CHECK(hipMemcpy(t->got.data() + ((size_t) layer * t->rows.size() + r) * dim, dev + (size_t) t->rows[r] * dim,
+                    dim * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess);
+}
+
+static double kl(const float* p, const float* q, uint32_t V) {  // KL(reference || ours), nats
+  double mp = -INFINITY, mq = -INFINITY;
+  for (uint32_t i = 0; i < V; i++) mp = std::fmax(mp, p[i]), mq = std::fmax(mq, q[i]);
+  double zp = 0, zq = 0;
+  for (uint32_t i = 0; i < V; i++) zp += std::exp(p[i] - mp), zq += std::exp(q[i] - mq);
+  double k = 0;
+  for (uint32_t i = 0; i < V; i++) {
+    const double lp = p[i] - mp - std::log(zp), lq = q[i] - mq - std::log(zq);
+    k += std::exp(lp) * (lp - lq);
+  }
+  return k;
+}
+
+static uint32_t argmax(const float* x, uint32_t V) {
+  uint32_t b = 0;
+  for (uint32_t i = 1; i < V; i++) b = x[i] > x[b] ? i : b;
+  return b;
+}
+
+int main() {
+  const char* home = getenv("HOME") ? getenv("HOME") : "";
+  char model_path[512], ref_path[512], err[LFM3_ERR] = "", gerr[GGUF_ERR] = "";
+  std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_LFM3") ? getenv("OSMOS_TEST_LFM3") : "");
+  if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/vibes1.7b/vibes1.7b-q40.gguf", home);
+  std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_LFM3_REF") ? getenv("OSMOS_TEST_LFM3_REF") : "");
+  if (!ref_path[0]) std::snprintf(ref_path, sizeof ref_path, "%s/osmos-oracle/lfm3_forward_64_kvq8.bin", home);
+  int devs = 0;
+  Gguf* g = nullptr;
+  if (hipGetDeviceCount(&devs) != hipSuccess || !devs || !load(ref_path) || !(g = gguf_create(model_path, gerr))) {
+    std::printf("[test_lfm3_forward_gpu] skipped: no GPU, no %s (oracle/lfm3_forward.py) or no model (%s)\n", ref_path,
+                gerr);
+    return 77;
+  }
+  Lfm3Weights* w = lfm3_weights_create(g, err);
+  if (!w) std::printf("  refused: %s\n", err);
+  CHECK(w);
+  const std::vector<float>& fid = A("ids");
+  const uint32_t T = (uint32_t) fid.size(), V = (uint32_t) w->geo.n_vocab, last = 64 < T ? 64 : T;
+  std::vector<int32_t> ids(T);
+  for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
+  const Lfm3Options o = {T, T, last};
+  Lfm3Forward* f = lfm3_forward_create(w, &o, err);
+  if (!f) std::printf("  refused: %s\n", err);
+  CHECK(f);
+  std::printf("[test_lfm3_forward_gpu] %u ids, %d layers; the last %u rows' logits\n", T, w->geo.n_layers, last);
+
+  Taps taps;
+  for (float r : A("rows")) taps.rows.push_back((int32_t) r);
+  taps.layers = (uint32_t) w->geo.n_layers;
+  lfm3_forward_tap(f, tap, &taps);
+  Lfm3Seq* s = lfm3_seq_create(f, err);
+  CHECK(s);
+  if (!lfm3_step(f, s, ids.data(), T, last, err)) std::printf("  step refused: %s\n", err);
+  CHECK(lfm3_seq_position(s) == (int32_t) T);
+  lfm3_forward_tap(f, nullptr, nullptr);
+  const std::vector<float>& ref_taps = A("taps");
+  CHECK(taps.got.size() == ref_taps.size());
+  const size_t per_layer = taps.rows.size() * taps.dim;
+  double worst = 0;
+  for (uint32_t l = 0; l < taps.layers; l++) {
+    double e = 0, top = 0;
+    for (size_t i = 0; i < per_layer; i++) {
+      const double r = ref_taps[l * per_layer + i];
+      e = std::fmax(e, std::fabs(taps.got[l * per_layer + i] - r)), top = std::fmax(top, std::fabs(r));
+    }
+    worst = std::fmax(worst, e / top);
+    if (l % 6 == 0 || l + 1 == taps.layers || e > kTolLayer * top)
+      std::printf("  layer %2u's output: max error %.3g of %.4g (%.2g)\n", l, e, top, e / top);
+  }
+  const std::vector<float> got(lfm3_logits(f), lfm3_logits(f) + (size_t) last * V);
+  const std::vector<float>& ref = A("logits");
+  const size_t ref_rows = taps.rows.size();
+  double kl_sum = 0, kl_max = 0;
+  uint32_t same = 0;
+  for (uint32_t r = 0; r < last; r++) {
+    const float* p = ref.data() + (ref_rows - last + r) * (size_t) V;
+    const double k = kl(p, got.data() + (size_t) r * V, V);
+    kl_sum += k, kl_max = std::fmax(kl_max, k), same += argmax(p, V) == argmax(got.data() + (size_t) r * V, V);
+  }
+  std::printf("  the last %u rows' logits: KL mean %.3g, max %.3g nats; top-1 the reference's %u of %u (layers' worst "
+              "%.2g)\n", last, kl_sum / last, kl_max, same, last, worst);
+  CHECK(worst <= kTolLayer && kl_sum / last <= kKlMean && kl_max <= kKlMax && same + kTop1Miss >= last);
+
+  // the bits a token's own: the ids in uneven steps (a step of 1, one of an odd count, the rest) - the last rows' the same
+  Lfm3Seq* s2 = lfm3_seq_create(f, err);
+  CHECK(s2);
+  const uint32_t a = 1, b = (T - last) / 3 * 2 + 1, c = T - a - b, tail = c < last ? c : last;
+  CHECK(lfm3_step(f, s2, ids.data(), a, 1, err) && lfm3_step(f, s2, ids.data() + a, b, 1, err));
+  CHECK(lfm3_step(f, s2, ids.data() + a + b, c, tail, err));
+  CHECK(std::memcmp(lfm3_logits(f), got.data() + (size_t) (last - tail) * V, (size_t) tail * V * sizeof(float)) == 0);
+  std::printf("  in steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c, tail);
+  lfm3_seq_destroy(s2);
+  lfm3_seq_destroy(s);
+  lfm3_forward_destroy(f);
+  lfm3_weights_destroy(w);
+  gguf_destroy(g);
+  std::printf("[test_lfm3_forward_gpu] ok\n");
+  return 0;
+}

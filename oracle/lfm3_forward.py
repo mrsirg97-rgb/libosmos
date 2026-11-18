@@ -83,6 +83,28 @@ def build(ref, gguf):
     return model.eval(), config
 
 
+def q8_0(x):
+    """ggml's quantize_row_q8_0 then its dequantization, blocks of 32 along the last dim: d = amax / 127 (its f16
+    stored), q = round(x / d) half away from zero"""
+    shape = x.shape
+    b = x.float().reshape(-1, 32)
+    d = b.abs().amax(-1, keepdim=True) / 127.0
+    inv = torch.where(d > 0, 1.0 / d, torch.zeros_like(d))
+    q = torch.sign(b * inv) * torch.floor(torch.abs(b * inv) + 0.5)
+    return (q * d.half().float()).reshape(shape)
+
+
+def kv_q8(model):
+    """the attention's K and V rounded as osmos's cache rounds them (its eager attention patched: the same call)"""
+    mod = sys.modules[type(model).__module__]
+    eager = mod.eager_attention_forward
+
+    def rounded(module, query, key, value, *args, **kwargs):
+        return eager(module, query, q8_0(key), q8_0(value), *args, **kwargs)
+
+    mod.eager_attention_forward = rounded
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", required=True, help="the checkpoint's config.json, configuration / modeling code")
@@ -90,6 +112,8 @@ def main():
     ap.add_argument("--text", required=True)
     ap.add_argument("--tokens", type=int, default=2048)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--kv-q8", action="store_true",
+                    help="K and V through ggml's Q8_0 before the attention (osmos's cache: q4x_kv_put's rounding)")
     ap.add_argument("--check-layer", type=int, default=-1)
     ap.add_argument("--osmos", help="osmos's dumped streams (DIR/h<L>.f32)")
     a = ap.parse_args()
@@ -99,6 +123,8 @@ def main():
     ids = Tokenizer.from_file(os.path.join(a.ref, "tokenizer.json")).encode(open(a.text).read()).ids[: a.tokens]
     T = len(ids)
     model, config = build(a.ref, a.gguf)
+    if a.kv_q8:
+        kv_q8(model)
     D, L = config.hidden_size, config.num_hidden_layers
 
     if a.check_layer >= 0:
