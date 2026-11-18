@@ -24,11 +24,11 @@ bool hy4_engram_rows(const float *rows, const float *norm_w, uint32_t cols, uint
 bool hy4_engram_update(float *h, const float *kv, const float *kv_b, const float *gate, const float *hc_scale,
                        const float *pre_gamma, uint32_t hc, uint32_t dim, uint32_t n_tok, void *stream);
 bool hy4_mla_kv(const float *kva, const float *norm_w, uint32_t latent, uint32_t rope_dim, float eps,
-                const float *freqs, const int32_t *pos, uint32_t n_tok, float *cache, void *stream);
+                const float *freqs, const int32_t *pos, uint32_t n_tok, float *cache, uint32_t slots, void *stream);
 bool hy4_mla_q(const float *q, const void *k_b, uint32_t heads, uint32_t nope, uint32_t latent, uint32_t rope_dim,
                const float *freqs, const int32_t *pos, uint32_t n_tok, float *qa, void *stream);
-bool hy4_mla_attn(const float *qa, const float *cache, const float *sinks, uint32_t heads, uint32_t latent,
-                  uint32_t rope_dim, uint32_t window, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
+bool hy4_mla_attn(const float *qa, const float *cache, uint32_t slots, const float *sinks, uint32_t heads,
+                  uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
                   uint32_t pool, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat, void *stream);
 bool hy4_mla_out(const float *o_lat, const void *v_b, const float *gate, uint32_t heads, uint32_t latent,
                  uint32_t v_dim, uint32_t n_tok, float *out, void *stream);
@@ -75,7 +75,8 @@ pos * freqs[i] (freqs: the layer kind's base^(-2i / rope_dim)), on the rope part
 
 hy4_mla_kv
   the latent and its key from kv_a's output (kva [n_tok][latent + rope_dim]): the latent RMSNorm'd (norm_w, eps), the
-  key's rope part roped at pos[t]; the row into cache row pos[t].
+  key's rope part roped at pos[t]; the row into cache row pos[t] - or, slots given (a sliding layer's ring), row
+  pos[t] % slots.
 
 hy4_mla_q
   q_b's output (q [n_tok][heads][nope + rope_dim]) to the queries the cache is read with: each head's nope part
@@ -88,7 +89,7 @@ hy4_mla_attn
   sel[t * sel_cap ..] (ascending; each `pool` positions, the last the token's own, its tokens up to pos[t]): scores
   qa_h . row * scale; the head's sink a logit with no value (softmax over the scores and the sink); o_lat
   [n_tok][heads][latent] = sum over the keys of p row[:latent], in the keys' order - every group selected, the dense
-  path's bits. at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
+  path's bits. a key's row is its position's, or position % slots (slots given: a ring at least the window long). at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
 
 hy4_mla_out
   each head's latent through its v_b (v_dim values), times sigmoid of the gate's (gate_proj's output, [n_tok][heads *

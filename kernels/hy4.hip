@@ -148,11 +148,11 @@ __device__ inline void rope_pair(const float* in, float* out, uint32_t i, int32_
 
 __global__ __launch_bounds__(kThreads) void mla_kv_kernel(const float* kva, const float* norm_w, uint32_t latent,
                                                           uint32_t rope_dim, float eps, const float* freqs,
-                                                          const int32_t* pos, float* cache) {
+                                                          const int32_t* pos, float* cache, uint32_t slots) {
   __shared__ float lds[kThreads];
   const uint32_t t = blockIdx.x, row = latent + rope_dim;
   const float* in = kva + (uint64_t) t * row;
-  float* out = cache + (uint64_t) pos[t] * row;
+  float* out = cache + (uint64_t) (slots ? (uint32_t) pos[t] % slots : (uint32_t) pos[t]) * row;
   float ss = 0;
   for (uint32_t d = threadIdx.x; d < latent; d += kThreads) ss = fmaf(in[d], in[d], ss);
   ss = block_sum<kThreads>(ss, lds);
@@ -184,7 +184,8 @@ __global__ __launch_bounds__(kThreads) void mla_q_kernel(const float* q, const u
 
 // a block a (head, token): a wave a key at a time (its lanes a strided share of the row, an xor tree), the scores
 // in LDS; the softmax with the sink (a fixed tree each); the latent's values summed over the keys in order
-__global__ __launch_bounds__(kThreads) void mla_attn_kernel(const float* qa, const float* cache, const float* sinks,
+__global__ __launch_bounds__(kThreads) void mla_attn_kernel(const float* qa, const float* cache, uint32_t slots,
+                                                            const float* sinks,
                                                             uint32_t latent, uint32_t rope_dim, uint32_t window,
                                                             const int32_t* sel, const int32_t* n_sel,
                                                             uint32_t sel_cap, uint32_t pool, float scale,
@@ -197,7 +198,10 @@ __global__ __launch_bounds__(kThreads) void mla_attn_kernel(const float* qa, con
   const uint32_t groups = sel ? (uint32_t) n_sel[t] : 0;
   const uint32_t n = sel ? (groups - 1) * pool + (uint32_t) (p - gs[groups - 1] * (int32_t) pool + 1)
                          : (uint32_t) (p - lo + 1);
-  auto at = [&](uint32_t k) -> int64_t { return sel ? (int64_t) gs[k / pool] * pool + k % pool : lo + (int64_t) k; };
+  auto at = [&](uint32_t k) -> int64_t {
+    const int64_t p = sel ? (int64_t) gs[k / pool] * pool + k % pool : lo + (int64_t) k;
+    return slots ? p % slots : p;
+  };
   const float* qh = qa + ((uint64_t) t * heads + h) * row;
   for (uint32_t i = threadIdx.x; i < row; i += kThreads) qs[i] = qh[i];
   __syncthreads();
@@ -422,9 +426,10 @@ extern "C" bool hy4_engram_update(float* h, const float* kv, const float* kv_b, 
 }
 
 extern "C" bool hy4_mla_kv(const float* kva, const float* norm_w, uint32_t latent, uint32_t rope_dim, float eps,
-                           const float* freqs, const int32_t* pos, uint32_t n_tok, float* cache, void* stream) {
+                           const float* freqs, const int32_t* pos, uint32_t n_tok, float* cache, uint32_t slots,
+                           void* stream) {
   if (!kva || !norm_w || !freqs || !pos || !cache || !latent || !rope_dim || rope_dim % 2 || !n_tok) return false;
-  mla_kv_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kva, norm_w, latent, rope_dim, eps, freqs, pos, cache);
+  mla_kv_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kva, norm_w, latent, rope_dim, eps, freqs, pos, cache, slots);
   return ok();
 }
 
@@ -439,7 +444,7 @@ extern "C" bool hy4_mla_q(const float* q, const void* k_b, uint32_t heads, uint3
   return ok();
 }
 
-extern "C" bool hy4_mla_attn(const float* qa, const float* cache, const float* sinks, uint32_t heads,
+extern "C" bool hy4_mla_attn(const float* qa, const float* cache, uint32_t slots, const float* sinks, uint32_t heads,
                              uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t* sel,
                              const int32_t* n_sel, uint32_t sel_cap, uint32_t pool, float scale, const int32_t* pos,
                              uint32_t n_tok, float* o_lat, void* stream) {
@@ -447,7 +452,8 @@ extern "C" bool hy4_mla_attn(const float* qa, const float* cache, const float* s
       rope_dim > kMaxRope || !n_tok || (window && window > HY4_MLA_MAX_KEYS))
     return false;
   if (sel && (!n_sel || window || !pool || !sel_cap || (uint64_t) sel_cap * pool > HY4_MLA_MAX_KEYS)) return false;
-  mla_attn_kernel<<<dim3(heads, n_tok), kThreads, 0, st(stream)>>>(qa, cache, sinks, latent, rope_dim, window, sel,
+  if (slots && slots < window) return false;
+  mla_attn_kernel<<<dim3(heads, n_tok), kThreads, 0, st(stream)>>>(qa, cache, slots, sinks, latent, rope_dim, window, sel,
                                                                    n_sel, sel_cap, pool, scale, pos, o_lat);
   return ok();
 }
