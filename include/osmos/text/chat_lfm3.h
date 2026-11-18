@@ -13,6 +13,8 @@
 bool lchat_render(const Json *messages, const Json *tools, ChatMode mode, bool preserve, JsonBuf *out,
                   char err[CHAT_ERR]);
 bool lchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR]);
+bool lchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
+                        JsonBuf *out, char err[CHAT_ERR]);
 extern const char *const lchat_refused[]; /* special tokens' text a completion can't hold (NULL-terminated) */
 
 #endif
@@ -39,4 +41,7 @@ lchat_render
 lchat_parse
   a completion - the model's text after the generation prompt through <|im_end|> - as the assistant message:
   qchat_parse's (the calls the same XML; the reasoning before </think>), but LFM3's special tokens refused in it.
+
+lchat_parse_shaped
+  lchat_parse with its markers read from shape and what it gives the text's, as qchat_parse_shaped.
 */

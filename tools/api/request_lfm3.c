@@ -1,0 +1,31 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "dialect.h"
+
+/* LFM3's reader: the messages as its template takes them (request_messages) - the tools apart, preserve_thinking
+   (off unless true: the template's default). its template names no reasoning effort: one asked refused, not dropped
+   (thinking on or off is the request's mode) */
+
+bool request_lfm3(const Json *body, Request *r, char err[API_ERR])
+{
+  const Json *msgs = json_get(body, "messages"), *eff = request_effort(body);
+  const Json *pt = json_get(json_get(body, "chat_template_kwargs"), "preserve_thinking");
+  JsonBuf rf = {0};
+  const bool rf_ok = request_format(body, &rf, err), formatted = rf.n > 0;
+  free(rf.p);
+  if (!rf_ok)
+    return false;
+  if (formatted)
+    return request_fail(err, "response_format: LFM3's template has no response format (text only)");
+  if (eff && eff->type == JSON_STRING && strcmp(eff->s, "none") != 0)
+    return request_fail(err, "reasoning_effort: LFM3's template has no effort levels (thinking on, or none for off)");
+  if (pt && pt->type != JSON_TRUE && pt->type != JSON_FALSE && pt->type != JSON_NULL)
+    return request_fail(err, "chat_template_kwargs.preserve_thinking: true or false");
+  r->preserve = pt && pt->type == JSON_TRUE;
+  if (!request_messages(msgs, &r->messages, err))
+    return false;
+  r->tools = request_tools(body);
+  return true;
+}

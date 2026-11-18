@@ -330,13 +330,19 @@ bool lchat_render(const Json *messages, const Json *tools, ChatMode mode, bool p
   return ok;
 }
 
+bool lchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
+                        JsonBuf *out, char err[CHAT_ERR])
+{
+  if (!text || !shape)
+    return fail(err, "no completion");
+  const size_t en = strlen(LCHAT_EOS), body = len >= en ? len - en : len;
+  for (int i = 0; lchat_refused[i]; i++)
+    if (memmem(shape, body, lchat_refused[i], strlen(lchat_refused[i])))
+      return fail(err, "a special token in the completion's text");
+  return qchat_parse_shaped(text, shape, len, mode, tools, out, err);
+}
+
 bool lchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR])
 {
-  if (!text)
-    return fail(err, "no completion");
-  for (int i = 0; lchat_refused[i]; i++)
-    if (memmem(text, len >= strlen(LCHAT_EOS) ? len - strlen(LCHAT_EOS) : len, lchat_refused[i],
-               strlen(lchat_refused[i])))
-      return fail(err, "a special token in the text");
-  return qchat_parse(text, len, mode, tools, out, err);
+  return lchat_parse_shaped(text, text, len, mode, tools, out, err);
 }
