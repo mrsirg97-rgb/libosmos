@@ -1,6 +1,7 @@
 #include <hip/hip_runtime_api.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "engine_impl.h"
 #include "osmos/lfm3/forward.h"
@@ -20,6 +21,7 @@ typedef struct Model
 {
   Gguf *g;
   Lfm3Weights *w;
+  char *lsa; /* the maps' path (its forwards' lsa), NULL dense */
 } Model;
 
 typedef struct Eng
@@ -39,6 +41,7 @@ static void m_close(void *p)
   if (!m)
     return;
   lfm3_weights_destroy(m->w);
+  free(m->lsa);
   gguf_destroy(m->g);
   free(m);
 }
@@ -52,6 +55,8 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
     return fail(err, "out of memory"), NULL;
   if (!(m->g = gguf_create(files->model, err)) || !(m->w = lfm3_weights_create(m->g, err)))
     return m_close(m), NULL;
+  if (files->lsa && !(m->lsa = strdup(files->lsa)))
+    return fail(err, "out of memory"), m_close(m), NULL;
   const Lfm3Geometry *geo = &m->w->geo;
   *facts = (OsmosFacts){"lfm3", (uint32_t)geo->n_vocab, geo->native_ctx, LFM3_LOGIT_ROWS, 0, false};
   return m;
@@ -77,7 +82,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (!e)
     return fail(err, "out of memory"), NULL;
   const uint32_t steps = o->max_tokens ? o->max_tokens : LFM3_STEP_TOKENS;
-  const Lfm3Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, NULL};
+  const Lfm3Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa};
   if (!(e->f = lfm3_forward_create(m->w, &ho, err)))
     return e_destroy(e), NULL;
   return e;

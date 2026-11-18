@@ -47,6 +47,8 @@ static void m_close(void *p)
 
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
+  if (files->lsa)
+    return snprintf(err, OSMOS_ERR, "%s", "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
   if (files->table || files->overlay)
     return fail(err, "qwen35: no Engram table or overlay is read for this family"), NULL;
   Model *m = calloc(1, sizeof *m);
