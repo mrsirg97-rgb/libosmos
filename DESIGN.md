@@ -2029,9 +2029,18 @@ yarn - costs a short conversation what its factor costs it (the 2,048-id fixture
   against a sequence begun in the stage). the sliding layers never YaRN; LSA's index the unrotated dims (scale-free:
   normalized) - neither touched. a rollback never across a stage's change (its keys' rotation the new one), the state
   its stage.
-- **a prompt read sparse**: past a closed block, a prompt chunk's attention LSA's read too (the buckets closed before
-  the chunk, its keys' window and the sinks) - not incarnate's served read (its prompts dense), so measured against
-  dense prompts where dense still fits (to 512K) by the next tokens' agreement and KL.
+- **a prompt read sparse** (built): a prompt's tokens from LFM3_LSA_SPARSE_FROM (LSA_READ_MAX: the first position
+  whose read can leave a key out) read as a decode does - their reads made in a batch (lsa_read_batch_gpu: F32 scores
+  of a tile of tokens x buckets, a block a token's radix select, sort and gather - the host's lists exactly with the
+  same scores), their attention over their lists (q4x_attn_lists: a wave a token's KV head, K's operands from the
+  cache, V^T through LDS). a token's path its position's, so its bits whatever the steps. measured against the
+  dense-prompt read (lfm3_lsa_check): slower to 32K (+1-2 s), even at 64K, 128K 45.9 s against 68.9; the next
+  token's NLL lower at 16K / 32K (2.97 / 2.06 against dense 3.20 / 2.37) - lsa.py trains every position's read, so
+  the default is the read's own, not the crossover. 512K: the prompt 203 s (2,580 tok/s), decode 14.4 ms.
+- **the dense prompt** (built): fa_span_kernel for a head of 128 - a block 32 tokens' rows, a KV head, a 2,048-key
+  span, 32 keys a step, one running state a span (the per-chunk partials had capped a piece at one token past 64K
+  keys); a row's diagonal step its own pass with V zeroed past its position (the WMMA is not blind to a zero
+  weight's V: measured). one layer's 2,048-token step at 1M: 59 s -> 1.3 s.
 - **the limits to 2M**: q4x_attn's keys (OPS_Q4X_MAX_KEYS), the read's scratch, LSA's buckets (2M: 4,096 blocks,
   262,144 buckets a layer).
 - **the scan**: a decode's read scores every closed bucket (2M: 262,144 x 64 a layer, six layers) - then cheapened
