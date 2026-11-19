@@ -8,8 +8,8 @@ attention (LSA) maps, served at 512K. DeepSeek, Qwen and Inkling give 0.9.2's bi
 `test_q35_*` against vibes27b's references).
 
 - **The pack `vibes1.7b`**: 512K context, rig's row `vibes1.7b` (`none` / `high`: LFM3's template has thinking on or
-  off, no levels). Low-power: decode 148.6 tok/s short, 104 at 128K, 69 at 512K; prompts 5,364 tok/s at 2K, 2,855 at
-  128K, 2,580 at 512K. A code placed at 10 / 50 / 90% of a 131K and a 524K prompt, asked at its end: 6 of 6; past
+  off, no levels). `performance`: decode 153 tok/s short, 100 at 128K, 84 at 512K; prompts 6,593 tok/s at 2K,
+  3,631 at 128K, 3,170 at 512K. A code placed at 10 / 50 / 90% of a 131K and a 524K prompt, asked at its end: 6 of 6; past
   512K the model does not find it (the forward runs to 2M for a model trained that far).
 - **The forward against Liquid's reference**: KL 2e-5 at 2,048 tokens, 4e-5 at 24,576 (top-1 63/64, 64/64);
   `oracle/lfm3_forward.py` runs Liquid's modeling code on the GGUF's values, its K/V rounded as osmos's Q8_0 cache.

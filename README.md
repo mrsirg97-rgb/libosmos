@@ -152,19 +152,19 @@ run at the same acceptance (which experts are resident when); plain decode and p
 
 LFM3-1.7B (Liquid's hybrid: 13 short-convolution, 5 sliding and 6 full-attention layers) in Q4_0, its full layers
 reading through its latent sparse attention maps - a token's read its 1,024 best buckets of the closed 512-key
-blocks, then the window and the sinks: ~4,600 keys, however long the context. osmos 0.10.0, the `low-power` profile
-(the others' rows are `performance`), one conversation:
+blocks, then the window and the sinks: ~4,600 keys, however long the context. osmos 0.10.0, the `performance` profile,
+one conversation:
 
 | | |
 | --- | ---: |
-| Decode, a short context | **148.6** tok/s |
-| Decode at 128K / 512K | 104 / 69 tok/s |
-| Prompt, 2K / 32K / 128K / 512K tokens | **5,364** / 4,336 / 2,855 / 2,580 tok/s |
+| Decode, a short context | **153** tok/s |
+| Decode at 128K / 512K | 100 / 84 tok/s |
+| Prompt, 2K / 32K / 128K / 512K tokens | **6,593** / 5,140 / 3,631 / 3,170 tok/s |
 | A code placed at 10 / 50 / 90% of a 131K and a 524K prompt (source code), asked at its end | 6 of 6 |
 | KL against Liquid's reference (2,048 and 24,576 tokens) | 2e-5, 4e-5 (top-1 63/64, 64/64) |
 
 The pack is 512K: past it the model does not find what it read (a code ~940K tokens back: an invented answer); the
-forward runs to 2M (a 2M prompt in 20.7 minutes, decode 45 tok/s) for a model trained that far. vibes1.7b trained at
+forward runs to 2M (a 2M prompt in 20.7 minutes, decode 45 tok/s - at `low-power`) for a model trained that far. vibes1.7b trained at
 16K on native rope, so its full layers' rotation goes by the conversation's length - native to 32K, then YaRN x2, x4
 past 160K, x8 past 384K, each boundary where the next factor's loss crossed below (DESIGN.md, "vibes-flash: rope");
 crossing one turns the cached keys. Prompts read sparse past 4,612 tokens (the first position a read can leave a key
