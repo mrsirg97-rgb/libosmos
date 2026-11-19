@@ -10,7 +10,8 @@
 #define TY(name) (1u << QTYPE_##name)
 #define MAT QTYPE_MV         /* a matrix a token reads: the matvec */
 #define EXPERTS QTYPE_MV_TOK /* the routed experts, by their tokens */
-#define EMBED QTYPE_EMBED    /* a token's row (the embedding; the Engram table's rows) */
+#define EMBED QTYPE_EMBED    /* a token's row of the embedding (ops_embed) */
+#define DECODED QTYPE_DECODE /* the Engram table's rows: read from the file, decoded to F32 (quant_dequant) */
 #define RAW 0                /* read as its bytes: `types` */
 #define F32 TY(F32)          /* a norm, a bias, a sink, the router, iHC's bases and scales: llama.cpp keeps them F32 */
 #define NAME_MAX_LEN 96
@@ -46,7 +47,7 @@ static const Role tops[] = {
   {"output_hc_fn.weight", TOP(out_hc_fn), ALL, MAT, 0, {D_HC_FLAT, D_HC}},
   {"output_hc_base.weight", TOP(out_hc_base), ALL, RAW, F32, {D_HC}},
   {"output_hc_scale.weight", TOP(out_hc_scale), ALL, RAW, F32, {D_ONE}},
-  {"per_layer_token_embd.weight", TOP(engram_table), ALL, EMBED, 0, {D_EG_DIM, D_EG_ROWS}},
+  {"per_layer_token_embd.weight", TOP(engram_table), ALL, DECODED, 0, {D_EG_DIM, D_EG_ROWS}},
 };
 
 static const Role roles[] = {
