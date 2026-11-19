@@ -7,7 +7,7 @@ kept: the MLA projections' outputs as hy4_mla.py's, the indexer's (its query, it
 before their norm), the pooled group keys (pool_groups' output, before their rope), the groups each query recalled
 (group_recall: the 511 best complete groups and its own), the gated attention entering o_proj. the file's Q8_0 bytes
 of k_b, v_b and the pooling's value and gate projections beside them.
-run: python -I hy4_indexer.py --modeling modeling_hy_v4_flash.py --config config.json --gguf Hy4-flash-Q4_K_M-00001-of-00002.gguf
+run: python -I hy4_indexer.py --modeling modeling_hy_v4_flash.py --config config.json --gguf Hy4-flash-Q3_K-00001-of-00002.gguf
      --out FILE"""
 import argparse
 import json

@@ -9,7 +9,7 @@ Engram's rows are the GGUF table's at the reference's hash (its lookup_table the
 one file of named F32 arrays: b"HY4P", u32 version, u32 count, then each: u32 name length, the name, u32 dims, the
 dims (u64, outermost first), the values.
 run: python -I hy4_pieces.py --modeling modeling_hy_v4_flash.py --config config.json --shard
-     model-00147-of-00148.safetensors --gguf Hy4-flash-Q4_K_M-00001-of-00002.gguf --out FILE"""
+     model-00147-of-00148.safetensors --gguf Hy4-flash-Q3_K-00001-of-00002.gguf --out FILE"""
 import argparse
 import ast
 import contextlib

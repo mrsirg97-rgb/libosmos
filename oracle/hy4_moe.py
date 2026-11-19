@@ -3,11 +3,11 @@ code - the transformers PR #50903 modeling_hy_v4_flash.py's HYV4FlashMoE.forward
 the bias for the pick alone, the picked weights normalized and scaled; the routed experts in the latent, their SwiGLU
 clamped; the shared expert; the combine norm) on a sparse layer, and HYV4FlashMLP (its post_fc2_norm) on the dense
 layer 0 - their source compiled alone (hy4_pieces.reference), in F32 on the GGUF's own weights dequantised (the
-experts the file's - Q4_K_M's gate and up Q4_K, layer 3's down Q6_K -, the rest Q8_0 or F32; only the experts the tokens pick read: the reference's loop reads no other).
+experts the file's - Q3_K's layer 6: gate and up Q3_K, down Q4_K -, the rest Q8_0 or F32; only the experts the tokens pick read: the reference's loop reads no other).
 half the tokens loud (x 8: the routed SwiGLU's clamp acting on some of their values - counted, some
 required). each step kept: the router's logits, picks and weights, the latent's input, the experts' sum, the shared expert's
 output, the block's output; the file's bytes beside them (each picked expert's own), as the GPU reads them.
-run: python -I hy4_moe.py --modeling modeling_hy_v4_flash.py --config config.json --gguf Hy4-flash-Q4_K_M-00001-of-00002.gguf
+run: python -I hy4_moe.py --modeling modeling_hy_v4_flash.py --config config.json --gguf Hy4-flash-Q3_K-00001-of-00002.gguf
      --out FILE"""
 import argparse
 import json
@@ -25,7 +25,7 @@ from hy4_gguf import Gguf  # noqa: E402
 
 T = 8  # a decode step's tokens at most (mv's MV_MAX_TOKENS)
 SEED = 1121
-LAYER, DENSE = 3, 0
+LAYER, DENSE = 6, 0  # (6: Q3_K's gate and up, Q4_K's down - both of its expert types)
 LOUD = 8.0  # the loud tokens' scale: enough that the routed SwiGLU's clamp (10) acts on some of their values
 NAMES = ["HYV4FlashRMSNorm", "HYV4FlashMLP", "HYV4FlashExperts", "HYV4FlashTopkRouter", "HYV4FlashMoE"]
 

@@ -45,7 +45,7 @@ int main() {
   char err[HY4_ERR] = "", gerr[GGUF_ERR] = "";
   const char* home = getenv("HOME") ? getenv("HOME") : "";
   const std::string model = getenv("OSMOS_TEST_HY4") ? getenv("OSMOS_TEST_HY4")
-                                                     : std::string(home) + "/Models/hy4-flash/Hy4-flash-Q4_K_M-00001-of-00002.gguf";
+                                                     : std::string(home) + "/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf";
   const std::string dfly = getenv("OSMOS_TEST_DFLY") ? getenv("OSMOS_TEST_DFLY")
                                                      : std::string(home) + "/Models/hy4-flash/model-00148-of-00148.safetensors";
   int devs = 0;

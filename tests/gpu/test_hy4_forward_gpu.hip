@@ -180,7 +180,7 @@ int main() {
   const char* home = getenv("HOME") ? getenv("HOME") : "";
   char model_path[512], ref_path[512], err[HY4_ERR] = "", gerr[GGUF_ERR] = "";
   std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_HY4") ? getenv("OSMOS_TEST_HY4") : "");
-  if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/hy4-flash/Hy4-flash-Q4_K_M-00001-of-00002.gguf", home);
+  if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf", home);
   std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_HY4_REF") ? getenv("OSMOS_TEST_HY4_REF") : "");
   if (!ref_path[0]) std::snprintf(ref_path, sizeof ref_path, "%s/osmos-oracle/hy4_forward.bin", home);
   int devs = 0;

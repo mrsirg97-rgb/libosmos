@@ -192,6 +192,7 @@ extern "C" bool mv_group_tok(uint32_t type, const void* const* w, const int32_t*
     case quant::kIQ4_NL: return group_tok<quant::kIQ4_NL>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ4_0: return group_tok<quant::kQ4_0>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kIQ3_XXS: return group_tok<quant::kIQ3_XXS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kQ3_K: return group_tok<quant::kQ3_K>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ2_K: return group_tok<quant::kQ2_K>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kIQ4_XS: return group_tok<quant::kIQ4_XS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ4_K: return group_tok<quant::kQ4_K>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
@@ -224,6 +225,7 @@ extern "C" bool mv_group(uint32_t type, const void* const* w, uint32_t n, uint32
     case quant::kMXFP4: return group<quant::kMXFP4>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kMXFP8: return group<quant::kMXFP8>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kIQ3_XXS: return group<quant::kIQ3_XXS>(w, n, rows, cols, x, x_mat, x_div, y, s);
+    case quant::kQ3_K: return group<quant::kQ3_K>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kQ2_K: return group<quant::kQ2_K>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kIQ4_XS: return group<quant::kIQ4_XS>(w, n, rows, cols, x, x_mat, x_div, y, s);
     case quant::kQ4_K: return group<quant::kQ4_K>(w, n, rows, cols, x, x_mat, x_div, y, s);
@@ -260,6 +262,7 @@ extern "C" bool mv_strided(uint32_t type, const void* w, uint32_t rows, uint32_t
     case quant::kMXFP4: return by_tokens<quant::kMXFP4>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kMXFP8: return by_tokens<quant::kMXFP8>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kIQ3_XXS: return by_tokens<quant::kIQ3_XXS>(w, rows, cols, x, xs, n_tok, y, ys, s);
+    case quant::kQ3_K: return by_tokens<quant::kQ3_K>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ2_K: return by_tokens<quant::kQ2_K>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kIQ4_XS: return by_tokens<quant::kIQ4_XS>(w, rows, cols, x, xs, n_tok, y, ys, s);
     case quant::kQ4_K: return by_tokens<quant::kQ4_K>(w, rows, cols, x, xs, n_tok, y, ys, s);

@@ -5,7 +5,7 @@ source compiled alone (hy4_pieces.reference), in F32 on the GGUF's own weights d
 the file's k_b and v_b as the converter split it). T tokens from position 0 through a sliding layer (past its 512-key
 window) and a sparse one; each step's tensors kept by hooks: the projections' outputs (q_b, kv_a, gate), the gated
 attention entering o_proj, the layer's output. the file's k_b and v_b bytes (Q8_0) beside them, as the GPU reads them.
-run: python -I hy4_mla.py --modeling modeling_hy_v4_flash.py --config config.json --gguf Hy4-flash-Q4_K_M-00001-of-00002.gguf
+run: python -I hy4_mla.py --modeling modeling_hy_v4_flash.py --config config.json --gguf Hy4-flash-Q3_K-00001-of-00002.gguf
      --out FILE"""
 import argparse
 import json

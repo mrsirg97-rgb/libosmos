@@ -1,6 +1,6 @@
 // Hy4-flash's latent MoE and dense MLP, composed of osmos's ops as the forward runs them (mv_run: the router F32, the
-// latent's projections and the shared expert Q8_0, each picked expert the file's type (Q4_K_M: gate and up Q4_K, layer
-// 3's down Q6_K - the fixture's exp_types); ops_router_scored's sigmoid router;
+// latent's projections and the shared expert Q8_0, each picked expert the file's type (Q3_K's layer 6: gate and up Q3_K, down Q4_K; the
+// fixture's exp_types); ops_router_scored's sigmoid router;
 // ops_swiglu, the routed experts clamped at the file's limit, their weight before the down projection; ops_rms's
 // combine norm), against the reference's own (oracle/hy4_moe.py: modeling_hy_v4_flash.py's HYV4FlashMoE on a sparse
 // layer, HYV4FlashMLP on the dense layer 0), in F32 on the GGUF's weights, 8 tokens: each token's 16 experts and

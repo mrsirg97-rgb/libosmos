@@ -33,6 +33,7 @@
   X(Q4_K, 12, 256, 144, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(Q5_K, 13, 256, 176, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(Q2_K, 10, 256, 84, QTYPE_IQ)                                                                   \
+  X(Q3_K, 11, 256, 110, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                                                                   \
   X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(IQ2_XXS, 16, 256, 66, QTYPE_IQ)                                                                \
   X(IQ2_XS, 17, 256, 74, QTYPE_IQ)                                                                 \

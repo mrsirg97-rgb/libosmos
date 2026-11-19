@@ -2,7 +2,7 @@
    (oracle/hy4_engram_rows.py --modeling: modeling_hy_v4_flash.py's own hash code on the release's lookup table and config, never the
    GGUF's lists): every row of 512 positions as one sequence, the pad before its start, the tokens past the release's
    table (llama.cpp's identity extension) read as the pad. then the map edited: an entry no compressed token refused.
-   OSMOS_TEST_HY4 (or ~/Models/hy4-flash/Hy4-flash-Q4_K_M-00001-of-00002.gguf; a sparse header copy is enough) and
+   OSMOS_TEST_HY4 (or ~/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf; a sparse header copy is enough) and
    ~/osmos-oracle/hy4_engram_rows.bin; skipped without */
 #include <assert.h>
 #include <stdio.h>
@@ -13,7 +13,7 @@
 #include "osmos/model/engram.h"
 #include "osmos/model/gguf.h"
 
-#define MODEL "%s/Models/hy4-flash/Hy4-flash-Q4_K_M-00001-of-00002.gguf"
+#define MODEL "%s/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf"
 #define ROWS "%s/osmos-oracle/hy4_engram_rows.bin"
 #define TABLE_TOKENS 120818  /* the release's lookup_table (model.layers.N.engram_layer.lookup_table: I32 [120818]) */
 #define COMPRESSED 92620     /* its greatest entry + 1; the multipliers' bound (draw_hash_multipliers) */

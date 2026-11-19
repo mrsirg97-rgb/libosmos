@@ -21,7 +21,7 @@ enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
   kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8, kIQ3_XXS = QTYPE_IQ3_XXS, kIQ4_XS = QTYPE_IQ4_XS,
-  kQ4_0 = QTYPE_Q4_0, kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1, kNVFP4 = QTYPE_NVFP4,
+  kQ4_0 = QTYPE_Q4_0, kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ3_K = QTYPE_Q3_K, kQ5_1 = QTYPE_Q5_1, kNVFP4 = QTYPE_NVFP4,
   kF8_E4M3 = QTYPE_F8_E4M3,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
@@ -37,7 +37,7 @@ template <Type T> struct Block;
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
 QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S) QUANT_BLOCK(IQ3_XXS)
-QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q4_0) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1) QUANT_BLOCK(NVFP4)
+QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q4_0) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q3_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1) QUANT_BLOCK(NVFP4)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -51,7 +51,7 @@ static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && 
                   Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
                   Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
                   Block<kIQ2_S>::values == kQK && Block<kIQ3_XXS>::values == kQK &&
-                  Block<kIQ4_XS>::values == kQK && Block<kQ4_0>::values == kQ32 && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK &&
+                  Block<kIQ4_XS>::values == kQK && Block<kQ4_0>::values == kQ32 && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK && Block<kQ3_K>::values == kQK &&
                   Block<kQ4_K>::values == kQK && Block<kQ5_1>::values == kQ32 && Block<kNVFP4>::values == kQ64,
               "the decoders' block lengths");
 
@@ -263,6 +263,24 @@ template <> __device__ inline void decode<kQ2_K>(const uint8_t* b, int k, float*
   const float dl = mul(f16(ld16(b + 80)), (float) (b[g] & 0x0F));
   const float ml = mul(f16(ld16(b + 82)), (float) (b[g] >> 4));
   for (int j = 0; j < kChunk; j++) v[j] = __fsub_rn(mul(dl, (float) ((qs[j] >> shift) & 0x03)), ml);
+}
+
+// ggml's dequantize_row_q3_K: 16 groups of 16, value i = d * (sc - 32) * (q - (hm ? 0 : 4)) - q 2 bits of byte
+// qs[32 (i / 128) + i % 32] at shift 2 ((i % 128) / 32), its high bit hmask[i % 32]'s bit 4 (i / 128) + (i % 128) / 32
+// set (else 4 off); sc the group's 6 bits (low 4 a nibble of scales[0..7], high 2 of scales[8..11]). bytes: hmask
+// (32), qs (64), scales (12), d. every product exact in F32 (an f16 times 6 bits times 3): the order changes no bit
+template <> __device__ inline void decode<kQ3_K>(const uint8_t* b, int k, float* v) {
+  const int i0 = k * kChunk, n = i0 / 128, r = i0 % 128, j = r / 32, sub = (r % 32) / 16, l0 = r % 16;
+  const int g = 8 * n + 2 * j + sub, grp = g / 4, w = g % 4;
+  const uint8_t* sc = b + 96;
+  const int low = (grp & 1 ? sc[4 + w] : sc[w]) >> (grp & 2 ? 4 : 0) & 0x0F;
+  const int sc6 = low | ((sc[8 + w] >> (2 * grp)) & 0x03) << 4;
+  const float dl = mul(f16(ld16(b + 108)), (float) (sc6 - 32));
+  const uint8_t* qs = b + 32 + 32 * n + 16 * sub + l0;
+  const uint8_t* hm = b + 16 * sub + l0;
+  const int bit = 4 * n + j;
+  for (int jj = 0; jj < kChunk; jj++)
+    v[jj] = mul(dl, (float) (((qs[jj] >> (2 * j)) & 0x03) - ((hm[jj] >> bit) & 1 ? 0 : 4)));
 }
 
 // DSpark's experts: an E8M0 scale e (2^(e - 128), exact at every e: the low ones subnormal), then E2M1 codes as

@@ -10,7 +10,7 @@ block's own rows up to the row's, the head's learnable sink a logit with no valu
 heads' outputs; o_proj; post_proj_norm) then the dense SwiGLU; the final norm; then the chain: draft j from row j's
 hidden corrected (hidden_norm, embed_norm of the token before, a SwiGLU, added) through the target's head, greedy.
 prints the drafts and their softmax probabilities and writes them with the corrected hiddens.
-run: python -I hy4_dfly.py --dfly model-00148-of-00148.safetensors --gguf Hy4-flash-Q4_K_M-00001-of-00002.gguf
+run: python -I hy4_dfly.py --dfly model-00148-of-00148.safetensors --gguf Hy4-flash-Q3_K-00001-of-00002.gguf
      --dump DIR --out FILE"""
 import argparse
 import json

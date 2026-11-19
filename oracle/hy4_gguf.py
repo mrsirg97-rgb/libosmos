@@ -45,6 +45,28 @@ def q4_k(b):
     return y.astype(np.float32)
 
 
+def q3_k(b):
+    """ggml's dequantize_row_q3_K, blocks [n][110]: 32 bytes of high bits, 64 of 2-bit codes, 12 of 6-bit scales, d
+    (f16); value i of 16-groups: d * (sc - 32) * (q - (the high bit set ? 0 : 4))"""
+    hm, qs, sc, d = b[:, :32].astype(np.int32), b[:, 32:96].astype(np.int32), b[:, 96:108].astype(np.int32), _f16(b, 108)
+    s6 = np.empty((len(b), 16), np.int32)
+    for g in range(16):
+        grp, w = g // 4, g % 4
+        low = ((sc[:, 4 + w] if grp & 1 else sc[:, w]) >> (4 if grp & 2 else 0)) & 0x0F
+        s6[:, g] = low | (((sc[:, 8 + w] >> (2 * grp)) & 3) << 4)
+    y = np.empty((len(b), 256), np.float32)
+    for n in range(2):
+        for j in range(4):
+            for sub in range(2):
+                l = slice(16 * sub, 16 * sub + 16)
+                q = (qs[:, 32 * n + 16 * sub:32 * n + 16 * sub + 16] >> (2 * j)) & 3
+                h = (hm[:, l] >> (4 * n + j)) & 1
+                dl = d * (s6[:, 8 * n + 2 * j + sub] - 32).astype(np.float32)[:, None]
+                i0 = 128 * n + 32 * j + 16 * sub
+                y[:, i0:i0 + 16] = dl * (q - np.where(h == 1, 0, 4)).astype(np.float32)
+    return y
+
+
 def q6_k(b):
     """ggml's dequantize_row_q6_K, blocks [n][210]: 128 bytes of low nibbles, 64 of high pairs, 16 int8 scales, d (f16);
     each half 128 values, value l + 32k: (ql's nibble | qh's pair << 4) - 32, times d * its scale"""
@@ -73,7 +95,7 @@ def e4m3fn_table():
 
 E4M3FN = e4m3fn_table()
 F8_E4M3 = 0x100 | 43  # (osmos's own id for upstream's 43, here too)
-TYPES = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 8: ("Q8_0", 32, 34), 12: ("Q4_K", 256, 144), 14: ("Q6_K", 256, 210),
+TYPES = {0: ("F32", 1, 4), 1: ("F16", 1, 2), 8: ("Q8_0", 32, 34), 11: ("Q3_K", 256, 110), 12: ("Q4_K", 256, 144), 14: ("Q6_K", 256, 210),
          30: ("BF16", 1, 2), 40: ("NVFP4", 64, 36), F8_E4M3: ("F8_E4M3", 1, 1)}
 SCALAR = {0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d"}
 
@@ -154,6 +176,8 @@ class Gguf:
             return E4M3FN[np.frombuffer(raw, dtype=np.uint8, count=count)]
         if name == "Q4_K":
             return q4_k(np.frombuffer(raw, dtype=np.uint8).reshape(-1, 144)).reshape(-1)[:count]
+        if name == "Q3_K":
+            return q3_k(np.frombuffer(raw, dtype=np.uint8).reshape(-1, 110)).reshape(-1)[:count]
         if name == "Q6_K":
             return q6_k(np.frombuffer(raw, dtype=np.uint8).reshape(-1, 210)).reshape(-1)[:count]
         if name == "NVFP4":
