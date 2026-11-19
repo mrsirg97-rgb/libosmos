@@ -1303,6 +1303,34 @@ class Versions(unittest.TestCase):
             with self.assertRaises(versions.VersionError):  # nothing left to roll back
                 versions.rollback(rig_home, h, log=lambda m: None)
 
+    def test_a_fresh_rows_versioned(self):  # 0.10.1: --rig registers on <home>/<version>, so --upgrade moves it
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            cfg = os.path.join(pack, "osmos.json")
+            built = []
+            api, cfg_path = osmos_install.rig_target(cfg, "0.9.1", h, dev=False,
+                                                     build=lambda hh, v: built.append(v))
+            self.assertEqual((api, cfg_path), (f"{h}/0.9.1/bin/osmos-api", f"{pack}/osmos.0.9.1.json"))
+            self.assertEqual(built, ["0.9.1"])  # built (or kept as it is) before a row names it
+            row = rig.register(rig_home, layout.read_config(cfg), api, cfg_path, default=False, row=dict(ROW, id="fresh", max_tokens=512, reserve=512))
+            self.assertIsNotNone(versions.command(row["command"]))
+            self.fake_build(h, "0.9.2")
+            self.assertIn("fresh", [m["id"] for m in versions.upgrade(rig_home, h, "0.9.2", "fresh", log=lambda m: None)])
+            self.assertEqual(self.rows(rig_home)["fresh"]["command"],
+                             f"{h}/0.9.2/bin/osmos-api --config {pack}/osmos.0.9.2.json --port ${{PORT}}")
+            # --rig-dev: the checkout's own osmos-api and the pack's osmos.json, nothing built
+            api, cfg_path = osmos_install.rig_target(cfg, "0.9.1", h, dev=True, build=lambda hh, v: self.fail(v))
+            self.assertEqual((api, cfg_path), (osmos_install.API, cfg))
+            # a version with no release to build: refused, naming --rig-dev
+            def none(hh, v):
+                raise versions.VersionError(f"no tag v{v}")
+            with self.assertRaises(SystemExit) as e:
+                osmos_install.rig_target(cfg, "9.9.9", h, dev=False, build=none)
+            self.assertIn("--rig-dev", str(e.exception))
+
+    def test_own_version(self):  # the checkout's: include/osmos/version.h's
+        self.assertRegex(osmos_install.own_version(), r"^[0-9]+\.[0-9]+\.[0-9]+$")
+
     def test_rows_chosen_and_a_changed_row_left(self):
         with tempfile.TemporaryDirectory() as d:
             h, rig_home, pack = self.layout(d)

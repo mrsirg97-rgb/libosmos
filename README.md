@@ -41,7 +41,9 @@ pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on the
   `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
   `deepseek-1017-evo`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS), `qwen3.8-flash-next`
-  (`-l`: UD-Q4_K_XL), `inkling-2-small-evo` or `vibes1.7b`.
+  (`-l`: UD-Q4_K_XL), `inkling-2-small-evo` or `vibes1.7b` - its row on this version's release, built under
+  `~/.local/share/osmos/<version>` (so `--upgrade` moves it later; `--rig-dev`: this checkout's own build, to test a
+  branch).
 
 **Upgrading** (0.10.0): each osmos version is built from its tag beside the others, in `~/.local/share/osmos/<version>`,
 and rig's rows move between them by their command alone - their ports and settings stay yours.
