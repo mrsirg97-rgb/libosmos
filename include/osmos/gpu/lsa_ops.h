@@ -39,6 +39,16 @@ typedef struct LsaDims
    query: a KV head's query heads) of src's row t (row_stride floats: heads of head_dim); W [in x LSA_DIM], in =
    kv_heads x the free dims' count, at most LSA_IN_MAX; out n x LSA_DIM */
 #define LSA_IN_MAX LSA_IN
+
+/* a prompt's reads, a batch at once (tokens at p0 .. p0 + n - 1, their index vectors iq [n x LSA_DIM]): lsa_read's
+   lists - token t's at lists + t LSA_READ_MAX, its count at counts[t] - over the first `blocks` closed blocks (a
+   token's its own block's before it) - but each bucket's score F32 (its dims in order, each product and sum rounded
+   on its own: not lsa_read_gpu's double), a tie the lower bucket. n_sub tokens' scores at a time in scratch
+   (lsa_batch_scratch's floats, for at most max_buckets closed buckets); queued on the stream */
+uint64_t lsa_batch_scratch(uint32_t n_sub, uint32_t max_buckets);
+bool lsa_read_batch_gpu(const float *iq, uint32_t n, uint32_t p0, const float *cent, const int32_t *members,
+                        uint32_t blocks, float *scratch, uint32_t n_sub, uint32_t max_buckets, uint32_t *lists,
+                        int32_t *counts, void *stream);
 bool lsa_index_gpu(const float *src, uint32_t n, uint32_t row_stride, uint32_t kv_heads, uint32_t group,
                    uint32_t head_dim, const LsaDims *dims, const float *W, bool bf16, float *out, void *stream);
 
