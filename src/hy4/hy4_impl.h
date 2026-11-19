@@ -13,6 +13,8 @@
 #define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
 #define HY4_MAX_HEADS 128   /* a layer's heads at most (the per-head tables' room) */
 #define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
+#define HY4_SCORE_ROWS 256 /* the indexer's score scratch's tokens: a longer run's selection in sub-batches of these (a step
+                              of 4,096 at 1M was 4.3 GB of scratch; a block a token, the same bits) */
 #define HY4_DFLY_KEEP (HY4_MAX_BACK + 1) /* a step's last rows whose drafting snapshot a sequence keeps (a verify's) */
 
 /* matrices that read the same input (a layer's normed attention or FFN input), for a one-token step: each type's

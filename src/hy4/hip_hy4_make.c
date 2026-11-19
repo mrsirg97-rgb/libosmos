@@ -253,7 +253,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
       {&f->gt, n * H * g->v_dim * F}, {&f->qa, n * H * row * F}, {&f->olat, n * H * g->kv_lora * F},
       {&f->ao, n * H * g->v_dim * F}, {&f->out, n * D * F}, {&f->ixk, n * g->ix_dim * F}, {&f->ixkn, n * g->ix_dim * F},
       {&f->ixq, n * g->ix_heads * g->ix_dim * F}, {&f->ixw, n * g->ix_heads * F},
-      {&f->scores, n * (o->max_ctx / g->ix_pool + 1) * F}, {&f->sel, n * (g->ix_topk / g->ix_pool) * 4},
+      {&f->scores, (n < HY4_SCORE_ROWS ? n : HY4_SCORE_ROWS) * (o->max_ctx / g->ix_pool + 1) * F}, {&f->sel, n * (g->ix_topk / g->ix_pool) * 4},
       {&f->n_sel, n * 4}, {&f->emb, n * eg_in * F}, {&f->ekv, n * (hc + 1) * D * F}, {&f->ga, n * g->n_ff * F},
       {&f->up, n * g->n_ff * F}, {&f->act, n * g->n_ff * F}, {&f->logit_r, n * g->n_experts * F}, {&f->wtok, n * K * F},
       {&f->rin, n * L * F}, {&f->xg, (n * K + MV_MAX_TOKENS) * L * F}, {&f->eg_g, n * K * ffe * F},

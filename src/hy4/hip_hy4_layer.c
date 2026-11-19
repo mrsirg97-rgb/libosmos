@@ -69,6 +69,21 @@ static bool engram(Hy4Forward *f, uint32_t n, int l)
                            hy4_fv(f, L->eg_pre_gamma), hc, D, n, f->st);
 }
 
+/* a run's selections, HY4_SCORE_ROWS tokens at a time (the score scratch's) */
+static bool select_runs(Hy4Forward *f, const float *ixw, const float *groups, uint32_t off, uint32_t len, uint32_t IH,
+                        uint32_t ID, uint32_t pool, uint32_t top)
+{
+  const uint32_t mg = f->max_ctx / pool + 1;
+  bool ok = true;
+  for (uint32_t a = 0; ok && a < len; a += HY4_SCORE_ROWS)
+  {
+    const uint32_t m = len - a < HY4_SCORE_ROWS ? len - a : HY4_SCORE_ROWS, o = off + a;
+    ok = hy4_ix_select(f->ixq + (uint64_t)o * IH * ID, ixw + (uint64_t)o * IH, groups, IH, ID, pool, top, f->pos + o, m, mg,
+                       f->scores, f->sel + (uint64_t)o * top, f->n_sel + o, f->st);
+  }
+  return ok;
+}
+
 /* a sparse layer's run: its token keys at their positions, the groups they complete pooled, each token's groups -
    every position the GPU's (pos), none the host's */
 static bool indexer(Hy4Forward *f, Hy4Seq *s, int l, uint32_t off, uint32_t len, const float *ixk, const float *ixw)
@@ -83,9 +98,7 @@ static bool indexer(Hy4Forward *f, Hy4Seq *s, int l, uint32_t off, uint32_t len,
          hy4_ix_pool_at(s->keys[l], f->kring, hy4_dev(f, L->ix_pool_value), hy4_dev(f, L->ix_pool_gate), hy4_fv(f, L->ix_pool_ape),
                         hy4_fv(f, L->ix_pool_norm), ID, pool, (uint32_t)g->rope_dim, g->rms_eps, f->freqs_sparse,
                         f->pos + off, len, s->groups[l], f->st) &&
-         hy4_ix_select(f->ixq + (uint64_t)off * IH * ID, ixw + (uint64_t)off * IH, s->groups[l], IH, ID, pool, top,
-                       f->pos + off, len, f->max_ctx / pool + 1, f->scores + (uint64_t)off * (f->max_ctx / pool + 1),
-                       f->sel + (uint64_t)off * top, f->n_sel + off, f->st);
+         select_runs(f, ixw, s->groups[l], off, len, IH, ID, pool, top);
 }
 
 /* DFly2's snapshot (a draft layer reads this one): the run's last rows' picks and counts, into its sequence's */

@@ -74,7 +74,7 @@ class Manifest(unittest.TestCase):
         self.assertEqual((v["lsa"], v["settings"]), ("vibes1.7b-lsa", {"max_context": 524288, "max_tokens": 4096}))
         self.assertEqual((v["rig"]["efforts"], v["rig"]["effort"]), (["none", "high"], "high"))  # thinking off, on
         self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/vibes1.7b"})
-        h = m["packs"]["hy4-flash"]  # 0.11.0: AngelSlim's Q4_K_M (the Engram table its shard 2), Tencent's own DFly2
+        h = m["packs"]["hy4-flash"]  # 0.11.0: AngelSlim's Q3_K (the Engram table its shard 2), Tencent's own DFly2
         self.assertEqual((h["drafter"], h["drafter_kind"], h["table"]), (["hy4-dfly2"], "dfly", None))
         self.assertEqual({m["files"][f]["repo"] for f in h["shards"]}, {"AngelSlim/Hy4-flash-GGUF"})
         self.assertEqual((m["files"]["hy4-dfly2"]["repo"], m["files"]["hy4-dfly2"]["path"]),
@@ -145,7 +145,7 @@ class Manifest(unittest.TestCase):
         q = "qwen38-ud-iq3_xxs"
         self.refused(lambda m: m["packs"][q].update(drafter_kind="eagle"), "drafter_kind")
         self.refused(lambda m: m["packs"][q]["drafter"].append(m["packs"][q]["drafter"][0]), "one")  # mtp: one file
-        self.refused(lambda m: m["packs"]["hy4-flash"]["drafter"].append("hy4-q4km-1"), "one")  # dfly: one file
+        self.refused(lambda m: m["packs"]["hy4-flash"]["drafter"].append("hy4-q3k-1"), "one")  # dfly: one file
         self.refused(lambda m: m["packs"][q].pop("rig"), "rig")              # every pack its rig row's settings
         self.refused(lambda m: m["packs"][q]["rig"].update(effort="max"), "effort")  # not among its efforts
         self.refused(lambda m: m["packs"][q]["rig"].update(reserve=0), "reserve")
