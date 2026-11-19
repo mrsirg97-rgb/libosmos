@@ -132,11 +132,15 @@ static bool joints_make(Hy4Forward *f, uint32_t *most)
   return true;
 }
 
-/* a matrix the kernels read as F32 (iHC's mixes: Q8_0 in the file) */
+/* a matrix the kernels read as F32 (iHC's mixes: Q4_K_M's F32, copied; SPARK-4Bit's were Q8_0, decoded) */
 static bool as_f32(Hy4Forward *f, const GgufTensor *t, float **out)
 {
   const uint64_t n = t->dims[0] * t->dims[1];
-  return hy4_alloc(out, n * F) && quant_dequant(t->type, hy4_dev(f, t), n, *out, NULL);
+  if (!hy4_alloc(out, n * F))
+    return false;
+  if (t->type == QTYPE_F32)
+    return hipMemcpy(*out, hy4_dev(f, t), n * F, hipMemcpyDeviceToDevice) == hipSuccess;
+  return quant_dequant(t->type, hy4_dev(f, t), n, *out, NULL);
 }
 
 /* a rope's frequencies: 1 / base^(2i / dim), as the reference computes them (F32) */

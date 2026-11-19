@@ -34,7 +34,7 @@ struct Hy4Forward
   const Hy4Weights *w;
   uint32_t max_tokens, max_ctx, logit_rows, ring; /* ring: a sliding layer's rows (its window, a step, the reach) */
   void **dev;                                     /* the model's tensors on the GPU, by index in its table */
-  float *fn_attn[HY4_MAX_LAYERS], *fn_ffn[HY4_MAX_LAYERS], *fn_out; /* iHC's mixes, F32 (the file's Q8_0) */
+  float *fn_attn[HY4_MAX_LAYERS], *fn_ffn[HY4_MAX_LAYERS], *fn_out; /* iHC's mixes, F32 (the file's, or decoded) */
   float *freqs_swa, *freqs_sparse;                                  /* the ropes' frequencies */
   /* Engram: the hash, the table's file, its rows' bytes and each Engram layer's first row; a step's offsets, rows */
   Engram *eg;
