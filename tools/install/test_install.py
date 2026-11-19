@@ -69,7 +69,11 @@ class Manifest(unittest.TestCase):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertEqual(set(m["packs"]), {"osmos-evo-1017", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
-                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling"})  # 0.6.10: one Qwen context, 512K - no 1M pack
+                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "vibes1.7b"})  # 0.6.10: one Qwen context, 512K - no 1M pack
+        v = m["packs"]["vibes1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 512K (its needles: DESIGN.md, "rope")
+        self.assertEqual((v["lsa"], v["settings"]), ("vibes1.7b-lsa", {"max_context": 524288, "max_tokens": 4096}))
+        self.assertEqual((v["rig"]["efforts"], v["rig"]["effort"]), (["none", "high"], "high"))  # thinking off, on
+        self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/vibes1.7b"})
         self.assertEqual(manifest.pack_id(m, "osmos-evo-a"), "osmos-evo-1017")  # 0.7.6's old name, and 0.7.6's own
         self.assertEqual(manifest.pack_id(m, "osmos-evo"), "osmos-evo-1017")    # (0.8.0: osmos-evo-<model>)
         evo = m["packs"]["osmos-evo-1017"]  # osmos's own: evo-A's shards with evo-A2's patch in, evo-A UD-IQ1_M's + its delta
@@ -321,6 +325,30 @@ class Layout(unittest.TestCase):
             self.assertTrue("picks" not in cfg and cfg["max_context"] == 262144)
             self.assertEqual(sorted(os.listdir(pack)), ["Q-00001-of-00002.gguf", "Q-00002-of-00002.gguf",
                                                         "mtp-head.gguf", "osmos.json"])
+
+    def test_lsa_pack_from_user_files(self):
+        with tempfile.TemporaryDirectory() as d:                # vibes1.7b's shape: one GGUF and its LSA maps beside it
+            have, models = os.path.join(d, "have"), os.path.join(d, "models")
+            os.makedirs(have)
+            model = os.path.join(have, "v.gguf")
+            gguf(model, 1, 1, b"v" * 600)
+            maps = os.path.join(have, "v-lsa-maps.safetensors")
+            put(maps, b"m" * 128)
+            m = {"version": 1, "rig": RIG_PIN, "files": {"v": entry(model), "maps": entry(maps)},
+                 "packs": {"v": {"title": "t", "shards": ["v"], "table": None, "picks": None, "drafter": [],
+                                 "overlay": None, "lsa": "maps", "rig": ROW, "settings": {"max_context": 524288}}}}
+            manifest.check(m)
+            self.assertEqual(osmos_install.needed(m, ["v"], False), ["v", "maps"])
+            layout.lay(m, "v", models, [have], trust_size=False, abliterated=False, fetch=None)
+            pack = os.path.join(models, "v")
+            cfg = layout.read_config(os.path.join(pack, "osmos.json"))
+            self.assertEqual(cfg["lsa"], os.path.join(pack, "v-lsa-maps.safetensors"))
+            self.assertEqual(os.path.realpath(cfg["lsa"]), os.path.realpath(maps))
+            self.assertEqual(cfg["max_context"], 524288)
+            bad = json.loads(json.dumps(m))
+            bad["packs"]["v"]["lsa"] = "nope"
+            with self.assertRaises(manifest.ManifestError):
+                manifest.check(bad)
 
     def test_missing_unpublished_refused(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1155,7 +1183,7 @@ class Rig(unittest.TestCase):
                                "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
                                "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l",
-                           "osmos-evo-inkling": "inkling-2-small-evo"})
+                           "osmos-evo-inkling": "inkling-2-small-evo", "vibes1.7b": "vibes1.7b"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
         self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
 

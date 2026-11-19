@@ -4,7 +4,8 @@ a file: repo, revision (a commit, 40 hex - or null: ours, not yet published), pa
 (optional: [no, count], the split stamp it is published with). a release asset (osmos's own GitHub release: 0.7.0's
 NPU kernels): release (its tag, vX.Y.Z), path (the asset's name), bytes, sha256 - no repo nor revision. a pack: title, shards (file ids, in order), table
 (null, or {file, slot: [no, count]}), picks, drafter (file ids), drafter_kind (dspark: a directory of its files - the
-default; mtp: one GGUF, the model's MTP head), overlay (a file id or null), npu (optional: a release asset's id,
+default; mtp: one GGUF, the model's MTP head), overlay (a file id or null), lsa (optional: a file id - latent sparse
+attention's maps, osmos.json's "lsa"), npu (optional: a release asset's id,
 a tarball of the NPU's kernels - a directory a format and kind), rig (its row's: max_tokens, reserve, efforts, effort -
 one of them - and aliases), settings. aliases (optional): {an old pack id: the pack it names now} - osmos-evo-a,
 osmos-evo since 0.7.6.
@@ -176,7 +177,7 @@ def check(m):
                 raise ManifestError(f"pack {pid}: table slot {t.get('slot')!r} is not [no, count] with no <= count")
             if "stamp" not in m["files"][t["file"]]:
                 raise ManifestError(f"pack {pid}: table {t['file']} has no published stamp")
-        for k in ("picks", "overlay"):
+        for k in ("picks", "overlay", "lsa"):
             if p.get(k) is not None:
                 _ref(m, pid, k, p[k])
         if p.get("npu") is not None:

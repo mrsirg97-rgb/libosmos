@@ -205,6 +205,10 @@ def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None, npu=Fa
             src, _ = _resolve(m, fid, have, trust_size, fetch, found)
             _link(src, os.path.join(d, os.path.basename(m["files"][fid]["path"])))
         cfg["drafter"] = d
+    if pack.get("lsa"):  # latent sparse attention's maps: osmos.json names them (osmos-serve --lsa)
+        src, _ = _resolve(m, pack["lsa"], have, trust_size, fetch, found)
+        cfg["lsa"] = os.path.join(out, os.path.basename(m["files"][pack["lsa"]]["path"]))
+        _link(src, cfg["lsa"])
     if abliterated:
         if not pack.get("overlay"):
             raise LayoutError(f"pack {pid} has no abliteration overlay")
