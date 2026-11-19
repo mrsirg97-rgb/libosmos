@@ -164,7 +164,7 @@ one conversation:
 | KL against Liquid's reference (2,048 and 24,576 tokens) | 2e-5, 4e-5 (top-1 63/64, 64/64) |
 
 The pack is 512K: past it the model does not find what it read (a code ~940K tokens back: an invented answer); the
-forward runs to 2M (a 2M prompt in 20.7 minutes, decode 45 tok/s - at `low-power`) for a model trained that far. vibes1.7b trained at
+forward runs to 2M (a 2M prompt in 16.3 minutes, decode 55 tok/s) for a model trained that far. vibes1.7b trained at
 16K on native rope, so its full layers' rotation goes by the conversation's length - native to 32K, then YaRN x2, x4
 past 160K, x8 past 384K, each boundary where the next factor's loss crossed below (DESIGN.md, "vibes-flash: rope");
 crossing one turns the cached keys. Prompts read sparse past 4,612 tokens (the first position a read can leave a key
