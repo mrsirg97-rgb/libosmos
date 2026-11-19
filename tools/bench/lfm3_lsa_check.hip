@@ -1,5 +1,6 @@
 // LSA's read against dense attention (osmos/lfm3/forward.h's lsa option): lfm3_lsa_check <GGUF> <maps> <text> [P=16384]
-// [D=64] [F=LFM3_LSA_SPARSE_FROM: the LSA prompt's sparse reads from position F] - two forwards on the same weights, one dense, one with the maps; the text's first P tokens a prompt in
+// [D=64] [F=LFM3_LSA_SPARSE_FROM: the LSA prompt's sparse reads from position F] [LSA_ONLY=0: 1 skips the dense
+// forward (its prompt hours past 512K): each step's NLL and the LSA forward's times alone] - two forwards on the same weights, one dense, one with the maps; the text's first P tokens a prompt in
 // each (LSA's read sparse past LFM3_LSA_SPARSE_FROM, its buckets made as its blocks close), then its next D tokens one decode step at a time
 // (teacher-forced: the text's own) - each step's logits compared: the share whose top token is dense's (the card's
 // "same top token as dense"), the KL of LSA's from dense's, and each forward's mean NLL of the text's next token
@@ -43,6 +44,7 @@ int main(int argc, char** argv) {
   if (argc < 4) return std::fprintf(stderr, "usage: lfm3_lsa_check <GGUF> <maps> <text> [P=16384] [D=64] [F]\n"), 2;
   const uint32_t P = argc > 4 ? (uint32_t) atoi(argv[4]) : 16384, D = argc > 5 ? (uint32_t) atoi(argv[5]) : 64;
   const uint32_t F = argc > 6 ? (uint32_t) strtoul(argv[6], nullptr, 10) : 0;
+  const bool only = argc > 7 && atoi(argv[7]) == 1;
   Gguf* g = gguf_create(argv[1], gerr);
   if (!g) return std::fprintf(stderr, "%s\n", gerr), 1;
   Tokenizer* tok = tokenizer_create(g, terr);
@@ -61,17 +63,17 @@ int main(int argc, char** argv) {
   CHECK(w);
   const uint32_t S = 2048 < P ? 2048 : P, V = (uint32_t) w->geo.n_vocab;
   const Lfm3Options od = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, nullptr, 0, 0}, ol = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, argv[2], 0, F};
-  Lfm3Forward *fd = lfm3_forward_create(w, &od, err), *fl = nullptr;
-  CHECK(fd);
+  Lfm3Forward *fd = only ? nullptr : lfm3_forward_create(w, &od, err), *fl = nullptr;
+  CHECK(only || fd);
   fl = lfm3_forward_create(w, &ol, err);
   CHECK(fl);
-  Lfm3Seq *sd = lfm3_seq_create(fd, err), *sl = lfm3_seq_create(fl, err);
-  CHECK(sd && sl);
+  Lfm3Seq *sd = only ? nullptr : lfm3_seq_create(fd, err), *sl = lfm3_seq_create(fl, err);
+  CHECK((only || sd) && sl);
   double pd = 0, pl = 0;  // each forward's prompt (LSA's sparse from LFM3_LSA_SPARSE_FROM)
   for (uint32_t at = 0; at < P; at += S) {
     const uint32_t n = P - at < S ? P - at : S;
     double a = now();
-    CHECK(lfm3_step(fd, sd, ids.data() + at, n, 1, err));
+    CHECK(only || lfm3_step(fd, sd, ids.data() + at, n, 1, err));
     pd += now() - a, a = now();
     CHECK(lfm3_step(fl, sl, ids.data() + at, n, 1, err));
     pl += now() - a;
@@ -82,12 +84,13 @@ int main(int argc, char** argv) {
   for (uint32_t i = 0; i < D; i++) {
     const int32_t x = ids[P + i], next = ids[P + i + 1];
     double a = now();
-    CHECK(lfm3_step(fd, sd, &x, 1, 1, err));
+    CHECK(only || lfm3_step(fd, sd, &x, 1, 1, err));
     ms_d += now() - a;
-    std::copy(lfm3_logits(fd), lfm3_logits(fd) + V, ld.begin());
+    if (!only) std::copy(lfm3_logits(fd), lfm3_logits(fd) + V, ld.begin());
     a = now();
     CHECK(lfm3_step(fl, sl, &x, 1, 1, err));
     ms_l += now() - a;
+    if (only) std::copy(lfm3_logits(fl), lfm3_logits(fl) + V, ld.begin());  // (dense's columns LSA's own)
     const float* ll = lfm3_logits(fl);
     const double zd = logsumexp(ld.data(), V), zl = logsumexp(ll, V);
     double k = 0;
