@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.10.0]: vibes1.7b - a small model, a long context
+
+A fourth family: **LFM3** (Liquid's hybrid of short convolutions, sliding and full attention), as
+[vibes1.7b](https://huggingface.co/mrsirg97-rgb/vibes1.7b) - LFM3-1.7B in Q4_0, 1.36 GB - with its latent sparse
+attention (LSA) maps, served at 512K. DeepSeek, Qwen and Inkling give 0.9.2's bits (the GPU suite; Qwen3.5-27B's
+`test_q35_*` against vibes27b's references).
+
+- **The pack `vibes1.7b`**: 512K context, rig's row `vibes1.7b` (`none` / `high`: LFM3's template has thinking on or
+  off, no levels). `performance`: decode 153 tok/s short, 100 at 128K, 84 at 512K; prompts 6,593 tok/s at 2K,
+  3,631 at 128K, 3,170 at 512K. A code placed at 10 / 50 / 90% of a 131K and a 524K prompt, asked at its end: 6 of 6; past
+  512K the model does not find it (the forward runs to 2M for a model trained that far).
+- **The forward against Liquid's reference**: KL 2e-5 at 2,048 tokens, 4e-5 at 24,576 (top-1 63/64, 64/64);
+  `oracle/lfm3_forward.py` runs Liquid's modeling code on the GGUF's values, its K/V rounded as osmos's Q8_0 cache.
+  The tokenizer (`lfm2`) and the chat template (ChatML with `<think>`, Qwen3.5's tool calls) are its checkpoint's.
+- **Latent sparse attention**: a decode's and a long prompt's full-attention reads are LSA's (incarnate's served
+  read: a token's 1,024 best buckets of the closed 512-key blocks, cut at 4,096 keys, then the window and the sinks);
+  prompts from position 4,612 read sparse too, in batches (`lsa_read_batch_gpu`, `q4x_attn_lists`). `osmos-serve
+  --lsa <maps>`, a pack's `"lsa"`; other families refuse a maps file.
+- **The rotation by the conversation's length**: vibes1.7b trained at 16K on native rope, which degrades past it;
+  its full layers' rope is a table of stages measured on wiki, a PG-19 novel and source code - native to 32K, YaRN x2,
+  x4 past 160K, x8 past 384K - a crossing turning the cached keys (`lfm3_kv_turn`). Static YaRN x40 (the card's) the
+  worst at every length.
+- **A prompt's attention by spans** (`fa_span_kernel`, a head of 128): 32 tokens' rows, a 2,048-key span, one running
+  state a span - one layer's 2,048-token step at 1M from 59 s to 1.3 s (~13.5 TFLOPS). A token's bits its own however
+  its prompt is split: the matrix cores are not blind to a zero weight's value, so a row's last tile is its own pass.
+- **Shared code**: `q4x_attn` takes 4M keys (`OPS_ATTN_MAX_KEYS`; Qwen's forwards still 1M), `lsa_index_gpu` a head's
+  free dims (`LsaDims`: Qwen's its rotary prefix's, as before), `OsmosFiles.lsa`, the installer's `lsa` sidecar.
+- **A fix**: `test_lfm3_weights` without its file exits 0 (CI's host runner takes 0 alone).
+
 ## [0.9.2]: a correctness pass, osmos-api's edges, upgrades
 
 A sweep for edge cases like 0.9.1's - each candidate reproduced (a failing test, or a replay through osmos-api)

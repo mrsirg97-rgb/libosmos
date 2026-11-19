@@ -224,22 +224,22 @@ __device__ inline float bf16_round(float v) {  // to nearest, ties to even (src/
 // double over the input in order, the norm thread 0's (the dims in order), as lsa_index
 __global__ __launch_bounds__(LSA_DIM) void index_kernel(const float* __restrict__ src, uint32_t row_stride,
                                                         uint32_t kv_heads, uint32_t group, uint32_t head_dim,
-                                                        uint32_t rot, const float* __restrict__ W, bool bf16,
-                                                        float* __restrict__ out) {
-  __shared__ float x[LSA_IN];
+                                                        LsaDims dims, uint32_t in, const float* __restrict__ W,
+                                                        bool bf16, float* __restrict__ out) {
+  __shared__ float x[LSA_IN_MAX];
   __shared__ double y[LSA_DIM];
   __shared__ double norm;
-  const uint32_t t = blockIdx.x, d = threadIdx.x, free = head_dim - rot;
+  const uint32_t t = blockIdx.x, d = threadIdx.x, n0 = dims.hi0 - dims.lo0, free = n0 + (dims.hi1 - dims.lo1);
   const float* row = src + (uint64_t) t * row_stride;
-  for (uint32_t i = d; i < LSA_IN; i += LSA_DIM) {
-    const uint32_t h = i / free, j = i % free;
+  for (uint32_t i = d; i < in; i += LSA_DIM) {
+    const uint32_t h = i / free, j = i % free, dim = j < n0 ? dims.lo0 + j : dims.lo1 + (j - n0);
     float v = 0.0f;
-    for (uint32_t g = 0; g < group; g++) v += row[(h * group + g) * head_dim + rot + j];
+    for (uint32_t g = 0; g < group; g++) v += row[(h * group + g) * head_dim + dim];
     x[i] = v;
   }
   __syncthreads();
   double s = 0.0;
-  for (int i = 0; i < LSA_IN; i++) s = __dadd_rn(s, __dmul_rn((double) x[i], (double) W[(uint64_t) i * LSA_DIM + d]));
+  for (uint32_t i = 0; i < in; i++) s = __dadd_rn(s, __dmul_rn((double) x[i], (double) W[(uint64_t) i * LSA_DIM + d]));
   y[d] = s;
   __syncthreads();
   if (d == 0) {
@@ -256,9 +256,15 @@ __global__ __launch_bounds__(LSA_DIM) void index_kernel(const float* __restrict_
 }  // namespace
 
 extern "C" bool lsa_index_gpu(const float* src, uint32_t n, uint32_t row_stride, uint32_t kv_heads, uint32_t group,
-                              uint32_t head_dim, uint32_t rot, const float* W, bool bf16, float* out, void* stream) {
-  if (!src || !W || !out || !n || !group || rot >= head_dim || kv_heads * (head_dim - rot) != LSA_IN) return false;
-  index_kernel<<<n, LSA_DIM, 0, launches::st(stream)>>>(src, row_stride, kv_heads, group, head_dim, rot, W, bf16, out);
+                              uint32_t head_dim, const LsaDims* dims, const float* W, bool bf16, float* out,
+                              void* stream) {
+  if (!src || !W || !out || !n || !group || !dims || dims->lo0 > dims->hi0 || dims->lo1 > dims->hi1 ||
+      dims->hi0 > head_dim || dims->hi1 > head_dim || (dims->hi1 > dims->lo1 && dims->lo1 < dims->hi0))
+    return false;
+  const uint32_t in = kv_heads * ((dims->hi0 - dims->lo0) + (dims->hi1 - dims->lo1));
+  if (!in || in > LSA_IN_MAX) return false;
+  index_kernel<<<n, LSA_DIM, 0, launches::st(stream)>>>(src, row_stride, kv_heads, group, head_dim, *dims, in, W, bf16,
+                                                        out);
   return launches::ok();
 }
 
@@ -326,4 +332,180 @@ extern "C" bool lsa_read_gpu(const float* iq, uint32_t p, const float* cent, con
   if (!launches::ok()) return false;
   gather_kernel<<<1, kThreads, 0, st>>>(s->picks, members, p, win0, out, n);
   return launches::ok();
+}
+
+// a prompt's reads in a batch (lsa_read_batch_gpu): the scores of a tile of tokens x buckets (F32, dims in order, a
+// product and a sum each rounded: the file's -ffp-contract=off), then a block a token - its top LSA_TOP_P by a radix
+// select over the scores' ordered bits (4 passes of 8, histograms in LDS), the ties at the threshold the lowest
+// buckets, the picks sorted by (score, then the lower bucket), their keys gathered as gather_kernel's
+namespace {
+
+constexpr int kBt = 32, kBb = 64;  // a scores tile: tokens x buckets (256 threads: a thread 2 tokens x 4 buckets)
+
+__global__ __launch_bounds__(256) void batch_scores_kernel(const float* __restrict__ iq, uint32_t n, uint32_t p0,
+                                                           const float* __restrict__ cent, uint32_t blocks,
+                                                           uint32_t stride, float* __restrict__ out) {
+  __shared__ float qs[kBt][LSA_DIM + 1], cs[kBb][LSA_DIM + 1];
+  const uint32_t t0 = blockIdx.y * kBt, b0 = blockIdx.x * kBb, tid = threadIdx.x;
+  const uint32_t last = t0 + kBt < n ? t0 + kBt : n;  // the tile's tokens: the visible buckets of its last the most
+  uint32_t vis = (p0 + last - 1) / LSA_WINDOW;
+  vis = (vis < blocks ? vis : blocks) * LSA_BUCKETS;
+  if (b0 >= vis) return;
+  for (uint32_t i = tid; i < kBt * LSA_DIM; i += 256) {
+    const uint32_t t = i / LSA_DIM, d = i % LSA_DIM;
+    qs[t][d] = t0 + t < n ? iq[(uint64_t) (t0 + t) * LSA_DIM + d] : 0.0f;
+  }
+  for (uint32_t i = tid; i < kBb * LSA_DIM; i += 256) {
+    const uint32_t b = i / LSA_DIM, d = i % LSA_DIM;
+    cs[b][d] = b0 + b < vis ? cent[(uint64_t) (b0 + b) * LSA_DIM + d] : 0.0f;
+  }
+  __syncthreads();
+  const uint32_t tx = tid % 16, ty = tid / 16;
+  float acc[2][4] = {};
+  for (int d = 0; d < LSA_DIM; d++)
+#pragma unroll
+    for (int i = 0; i < 2; i++)
+#pragma unroll
+      for (int j = 0; j < 4; j++) acc[i][j] = acc[i][j] + cs[tx * 4 + j][d] * qs[ty * 2 + i][d];
+#pragma unroll
+  for (int i = 0; i < 2; i++) {
+    const uint32_t t = t0 + ty * 2 + i;
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+      const uint32_t b = b0 + tx * 4 + j;
+      if (t < n && b < vis) out[(uint64_t) t * stride + b] = acc[i][j];
+    }
+  }
+}
+
+// a float's bits in an order whose ascending is the value's
+__device__ inline uint32_t ordered32(float v) {
+  const uint32_t u = __float_as_uint(v);
+  return u & 0x80000000u ? ~u : u | 0x80000000u;
+}
+
+__global__ __launch_bounds__(kThreads) void batch_select_kernel(const float* __restrict__ sc, uint32_t stride,
+                                                                uint32_t n, uint32_t p0, uint32_t blocks,
+                                                                const int32_t* __restrict__ members,
+                                                                uint32_t* __restrict__ lists,
+                                                                int32_t* __restrict__ counts) {
+  __shared__ uint32_t hist[256], lds[kThreads];
+  __shared__ uint64_t key[kThreads];
+  __shared__ uint32_t s_prefix, s_want, s_above, s_ties;
+  const uint32_t t = blockIdx.x, tid = threadIdx.x, p = p0 + t;
+  const float* row = sc + (uint64_t) t * stride;
+  const uint32_t win0 = p + 1 > LSA_WINDOW ? p + 1 - LSA_WINDOW : 0;
+  uint32_t nb = p / LSA_WINDOW;
+  nb = (nb < blocks ? nb : blocks) * LSA_BUCKETS;
+  // the threshold: the LSA_TOP_P-th largest key, a byte at a time from the top
+  if (tid == 0) s_prefix = 0, s_want = LSA_TOP_P;
+  __syncthreads();
+  const bool all = nb <= LSA_TOP_P;
+  uint32_t mask = 0;
+  for (int shift = 24; !all && shift >= 0; shift -= 8) {
+    if (tid < 256) hist[tid] = 0;
+    __syncthreads();
+    const uint32_t prefix = s_prefix;
+    for (uint32_t b = tid; b < nb; b += kThreads) {
+      const uint32_t k = ordered32(row[b]);
+      if ((k & mask) == prefix) atomicAdd(&hist[(k >> shift) & 255], 1u);
+    }
+    __syncthreads();
+    if (tid == 0) {
+      uint32_t want = s_want, d = 255;
+      for (;; d--) {
+        if (hist[d] >= want || d == 0) break;
+        want -= hist[d];
+      }
+      s_prefix = prefix | (d << shift), s_want = want;
+    }
+    __syncthreads();
+    mask |= 255u << shift;
+  }
+  const uint32_t thr = s_prefix, ties = all ? 0 : s_want;  // ties: the threshold's keys taken, the lowest buckets
+  // the picks: every key above the threshold, then the ties in bucket order (a block's scan a round of kThreads)
+  if (tid == 0) s_above = 0, s_ties = 0;
+  key[tid] = ~0ull;
+  __syncthreads();
+  const uint32_t above_n = all ? nb : LSA_TOP_P - ties;
+  for (uint32_t base = 0; base < nb; base += kThreads) {
+    const uint32_t b = base + tid;
+    const uint32_t k = b < nb ? ordered32(row[b]) : 0;
+    const bool gt = b < nb && (all || k > thr), eq = b < nb && !all && k == thr;
+    if (gt) {
+      const uint32_t at = atomicAdd(&s_above, 1u);
+      key[at] = ((uint64_t) (~k) << 32) | b;  // ascending: score descending, then the lower bucket
+    }
+    uint32_t total;
+    const uint32_t r = block_scan(eq ? 1u : 0u, lds, &total);
+    const uint32_t taken = s_ties;
+    if (eq && taken + r < ties) key[above_n + taken + r] = ((uint64_t) (~k) << 32) | b;
+    __syncthreads();
+    if (tid == 0) s_ties = taken + total;
+    __syncthreads();
+  }
+  // sort ascending (bitonic, kThreads in LDS; the empties ~0 last)
+  for (uint32_t size = 2; size <= kThreads; size <<= 1)
+    for (uint32_t j = size >> 1; j > 0; j >>= 1) {
+      const uint32_t o = tid ^ j;
+      if (o > tid) {
+        const bool up = (tid & size) == 0;
+        if ((key[tid] > key[o]) == up) {
+          const uint64_t x = key[tid];
+          key[tid] = key[o], key[o] = x;
+        }
+      }
+      __syncthreads();
+    }
+  // gather: a pick's keys (from LSA_SINK on, before the window) at its place in pick order, the first LSA_TOP_K
+  const uint32_t pb = key[tid] == ~0ull ? UINT32_MAX : (uint32_t) key[tid];
+  uint32_t* out = lists + (uint64_t) t * LSA_READ_MAX;
+  uint32_t mine = 0;
+  if (pb != UINT32_MAX)
+    for (int k = 0; k < LSA_CAP; k++) {
+      const int32_t m = members[(uint64_t) pb * LSA_CAP + k];
+      mine += m >= LSA_SINK && (uint32_t) m < win0;
+    }
+  uint32_t total;
+  uint32_t at = block_scan(mine, lds, &total);
+  if (pb != UINT32_MAX)
+    for (int k = 0; k < LSA_CAP && at < LSA_TOP_K; k++) {
+      const int32_t m = members[(uint64_t) pb * LSA_CAP + k];
+      if (m >= LSA_SINK && (uint32_t) m < win0) out[at++] = (uint32_t) m;
+    }
+  const uint32_t nk = total < LSA_TOP_K ? total : LSA_TOP_K;
+  const uint32_t win = p + 1 - win0, sinks = LSA_SINK < win0 ? LSA_SINK : win0 < p + 1 ? win0 : p + 1;
+  for (uint32_t i = tid; i < win; i += kThreads) out[nk + i] = win0 + i;
+  for (uint32_t i = tid; i < sinks; i += kThreads) out[nk + win + i] = i;
+  if (tid == 0) counts[t] = (int32_t) (nk + win + sinks);
+}
+
+}  // namespace
+
+extern "C" uint64_t lsa_batch_scratch(uint32_t n_sub, uint32_t max_buckets) {
+  return (uint64_t) n_sub * (max_buckets ? max_buckets : 1);
+}
+
+extern "C" bool lsa_read_batch_gpu(const float* iq, uint32_t n, uint32_t p0, const float* cent, const int32_t* members,
+                                   uint32_t blocks, float* scratch, uint32_t n_sub, uint32_t max_buckets,
+                                   uint32_t* lists, int32_t* counts, void* stream) {
+  if (!iq || !n || !scratch || !n_sub || !lists || !counts || (blocks && (!cent || !members)) ||
+      (uint64_t) blocks * LSA_BUCKETS > max_buckets)
+    return false;
+  const hipStream_t st = (hipStream_t) stream;
+  const uint32_t stride = max_buckets ? max_buckets : 1;
+  for (uint32_t t0 = 0; t0 < n; t0 += n_sub) {
+    const uint32_t m = n - t0 < n_sub ? n - t0 : n_sub, p = p0 + t0;
+    uint32_t vis = (p + m - 1) / LSA_WINDOW;
+    vis = (vis < blocks ? vis : blocks) * LSA_BUCKETS;
+    if (vis) {
+      batch_scores_kernel<<<dim3((vis + kBb - 1) / kBb, (m + kBt - 1) / kBt), 256, 0, st>>>(
+          iq + (uint64_t) t0 * LSA_DIM, m, p, cent, blocks, stride, scratch);
+      if (!launches::ok()) return false;
+    }
+    batch_select_kernel<<<m, kThreads, 0, st>>>(scratch, stride, m, p, blocks, members,
+                                                lists + (uint64_t) t0 * LSA_READ_MAX, counts + t0);
+    if (!launches::ok()) return false;
+  }
+  return true;
 }

@@ -77,6 +77,7 @@ def needed(m, pids, abliterated, made=lambda fid: False):
         ids += [p["table"]["file"]] if p.get("table") else []
         ids += [p["picks"]] if p.get("picks") else []
         ids += p.get("drafter") or []
+        ids += [p["lsa"]] if p.get("lsa") else []
         if abliterated and p.get("overlay"):
             ids += inputs(m, p["overlay"])
     return list(dict.fromkeys(ids))

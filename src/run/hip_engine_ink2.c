@@ -41,6 +41,8 @@ static void m_close(void *p)
 
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
+  if (files->lsa)
+    return snprintf(err, OSMOS_ERR, "%s", "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
   if (files->table)
     return fail(err, "no Engram table is read for this family"), NULL;
   if (files->overlay)

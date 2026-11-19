@@ -20,10 +20,13 @@
 /* (40: NVFP4 as ggml lays it - 64 values: 4 UE4M3 scales, one a 16, then 32 bytes of E2M1 codes; a tensor's own
    scale (one, or one an expert) is a tensor beside it, not the block's: Inkling-2's experts, as their checkpoint holds
    them) */
+/* (2: Q4_0 - 32 values, an f16 scale, 16 bytes of 4-bit codes less 8: vibes1.7b's file - DESIGN.md, "vibes-flash:
+   LFM3") */
 /* (43: unsloth's MXFP8 - an E8M0 scale, then 32 E4M3 codes - its GGUFs' Engram tables; upstream llama.cpp's 43 is
    F8_E4M3, one byte a value and no scales: a file of that is refused by its size, gguf.c) */
 #define QTYPES(X)                                                                                  \
   X(F32, 0, 1, 4, QTYPE_FILE | QTYPE_MV)                                                           \
+  X(Q4_0, 2, 32, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                \
   X(Q5_1, 7, 32, 24, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                \
   X(Q8_0, 8, 32, 34, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(Q4_K, 12, 256, 144, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \

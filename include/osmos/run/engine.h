@@ -25,6 +25,7 @@ typedef struct OsmosFiles
   const char *model;
   const char *table;   /* DeepSeek's Engram table: a file of its own beside the shards */
   const char *overlay; /* a patch's tensors in place of the model's (an abliteration) */
+  const char *lsa;     /* latent sparse attention's maps (LFM3's: the release's safetensors), NULL dense */
 } OsmosFiles;
 
 /* what the server sizes itself by, before any build */

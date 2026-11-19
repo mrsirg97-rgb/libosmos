@@ -132,8 +132,9 @@ static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint32_
   const Q35Geometry *g = &f->w->geo;
   const uint32_t heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim;
   const uint32_t q = heads * hd, kv = kvh * hd, rot = (uint32_t)g->rope_dim, P = (uint32_t)s->pos;
+  const LsaDims free_dims = {rot, hd, 0, 0}; /* past the rotary prefix */
   *done = false;
-  if (!lsa_index_gpu(f->kq + (uint64_t)off * kv, n, kv, kvh, 1, hd, rot, f->wk[l], true,
+  if (!lsa_index_gpu(f->kq + (uint64_t)off * kv, n, kv, kvh, 1, hd, &free_dims, f->wk[l], true,
                      s->ik[l] + (uint64_t)P * LSA_DIM, NULL))
     return false;
   if (read)
@@ -142,9 +143,9 @@ static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint32_
   {
     const uint64_t at = (uint64_t)(off + t) * q;
     if (!close_blocks(f, s, l, (P + t) / LSA_WINDOW) ||
-        !lsa_index_gpu(f->q + at, 1, q, kvh, heads / kvh, hd, rot, f->wq[l], false, f->iq, NULL) ||
+        !lsa_index_gpu(f->q + at, 1, q, kvh, heads / kvh, hd, &free_dims, f->wq[l], false, f->iq, NULL) ||
         !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], s->closed[l], f->lsa_s, f->list, f->list_n, NULL) ||
-        !q35_attn_read(f->q + at, s->kc[l], s->vc[l], heads, kvh, f->list, f->list_n, LSA_READ_MAX, f->gt + at, f->da,
+        !q35_attn_read(f->q + at, s->kc[l], s->vc[l], heads, kvh, hd, NULL, f->list, f->list_n, LSA_READ_MAX, f->gt + at, f->da,
                        f->ao + at, NULL))
       return false;
   }
@@ -161,13 +162,14 @@ static bool dense_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint3
   const uint64_t q = (uint64_t)heads * hd;
   if (read)
     return q4x_attn(f->q + off * q, s->kc[l], s->vc[l], n, heads, kvh, hd, (uint32_t)s->pos, f->gt + off * q, NULL,
+                    NULL,
                     f->fa, f->ao + off * q, NULL, NULL);
   bool ok = true;
   for (uint32_t t = 0; ok && t < n; t += Q35_ATTN_DECODE_MAX)
   {
     const uint64_t at = (uint64_t)(off + t) * q;
     ok = q35_attn_decode(f->q + at, s->kc[l], s->vc[l], n - t < Q35_ATTN_DECODE_MAX ? n - t : Q35_ATTN_DECODE_MAX, heads,
-                         kvh, (uint32_t)s->pos + t, f->gt + at, f->da, f->ao + at, NULL);
+                         kvh, hd, NULL, (uint32_t)s->pos + t, f->gt + at, f->da, f->ao + at, NULL);
   }
   return ok;
 }

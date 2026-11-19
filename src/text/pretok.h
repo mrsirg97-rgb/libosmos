@@ -16,6 +16,11 @@ size_t pretok_split(const uint32_t *cp, size_t n, size_t *cuts);
    code point none of them takes, a piece of its own */
 size_t pretok_split_qwen35(const uint32_t *cp, size_t n, size_t *cuts);
 
+/* the same, by Llama-3's expression (LFM3's: its tokenizer.json, pre lfm2): (?i:'s|'t|'re|'ve|'m|'ll|'d) |
+   [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}{1,3} | ' '?[^\s\p{L}\p{N}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+ - a mark
+   outside the letter runs (Qwen's takes it in), a code point none of them takes a piece of its own */
+size_t pretok_split_llama3(const uint32_t *cp, size_t n, size_t *cuts);
+
 /* the same, by o200k's expression (Inkling-2's tokenizer.json: GPT-4o's) - pretok_o200k.c names its branches */
 size_t pretok_split_o200k(const uint32_t *cp, size_t n, size_t *cuts);
 

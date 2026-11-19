@@ -8,6 +8,17 @@ extern "C" {
 }
 
 __device__ inline void rope_cs(const Q4xRope& r, float pos, uint32_t i, float* c, float* s) {
+  if (r.theta == Q4X_THETA_HF) {  // transformers': the angle pos x inv_freq; YaRN's mix of it and its 1 / factor
+    const float inv = r.inv_freq[i];  // (q4x_rope's, on the host: compute_default_rope_parameters' inv_freq)
+    float th = pos * inv;
+    if (r.ext_factor != 0.0f) {
+      const float y = ((float) i - r.corr_lo) / fmaxf(0.001f, r.corr_hi - r.corr_lo);
+      const float extra = (1.0f - fminf(1.0f, fmaxf(0.0f, y))) * r.ext_factor;
+      th = pos * (inv * r.freq_scale * (1.0f - extra) + inv * extra);
+    }
+    *c = cosf(th) * r.mscale, *s = sinf(th) * r.mscale;
+    return;
+  }
   if (r.ext_factor == 0.0f) {  // the plain rotation: theta_i the running product, as ggml's rope cache builds it
     float theta = pos;
     for (uint32_t j = 0; j < i; j++) theta *= r.theta_scale;

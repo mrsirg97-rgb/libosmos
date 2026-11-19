@@ -21,13 +21,13 @@ enum Type : uint32_t {
   kF32 = QTYPE_F32, kQ8_0 = QTYPE_Q8_0, kQ5_K = QTYPE_Q5_K, kQ6_K = QTYPE_Q6_K, kIQ2_XXS = QTYPE_IQ2_XXS,
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
   kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8, kIQ3_XXS = QTYPE_IQ3_XXS, kIQ4_XS = QTYPE_IQ4_XS,
-  kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1, kNVFP4 = QTYPE_NVFP4,
+  kQ4_0 = QTYPE_Q4_0, kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1, kNVFP4 = QTYPE_NVFP4,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
 constexpr int kChunk = 8;
 constexpr int kQK = 256;  // a K-quant's or an IQ type's values a block
-constexpr int kQ32 = 32;  // Q8_0's and IQ4_NL's
+constexpr int kQ32 = 32;  // Q8_0's, IQ4_NL's and Q4_0's
 constexpr int kQ64 = 64;  // Q2_0's and NVFP4's
 constexpr float kIq1Delta = 0.125f;
 
@@ -36,7 +36,7 @@ template <Type T> struct Block;
   template <> struct Block<k##name> { static constexpr int values = QTYPE_##name##_VALUES, bytes = QTYPE_##name##_BYTES; };
 QUANT_BLOCK(Q8_0) QUANT_BLOCK(Q5_K) QUANT_BLOCK(Q6_K) QUANT_BLOCK(IQ2_XXS) QUANT_BLOCK(IQ2_XS) QUANT_BLOCK(IQ4_NL)
 QUANT_BLOCK(IQ1_M) QUANT_BLOCK(MXFP4) QUANT_BLOCK(MXFP8) QUANT_BLOCK(IQ1_S) QUANT_BLOCK(IQ2_S) QUANT_BLOCK(IQ3_XXS)
-QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1) QUANT_BLOCK(NVFP4)
+QUANT_BLOCK(IQ4_XS) QUANT_BLOCK(Q4_0) QUANT_BLOCK(Q2_0) QUANT_BLOCK(Q2_K) QUANT_BLOCK(Q4_K) QUANT_BLOCK(Q5_1) QUANT_BLOCK(NVFP4)
 #undef QUANT_BLOCK
 template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 180; };  // a row's share of a tile's
 // no block: a chunk of the table's one-value "blocks"
@@ -48,7 +48,7 @@ static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && 
                   Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
                   Block<kIQ2_XXS>::values == kQK && Block<kIQ2_XS>::values == kQK && Block<kIQ1_S>::values == kQK &&
                   Block<kIQ2_S>::values == kQK && Block<kIQ3_XXS>::values == kQK &&
-                  Block<kIQ4_XS>::values == kQK && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK &&
+                  Block<kIQ4_XS>::values == kQK && Block<kQ4_0>::values == kQ32 && Block<kQ2_0>::values == kQ64 && Block<kQ2_K>::values == kQK &&
                   Block<kQ4_K>::values == kQK && Block<kQ5_1>::values == kQ32 && Block<kNVFP4>::values == kQ64,
               "the decoders' block lengths");
 
@@ -234,6 +234,14 @@ template <> __device__ inline void decode<kIQ4_XS>(const uint8_t* b, int k, floa
   const float dl = mul(f16(ld16(b)), (float) (ls - 32));
   const uint8_t* qs = b + 8 + 16 * g + j0 % 16;
   for (int j = 0; j < kChunk; j++) v[j] = mul(dl, (float) kIq4nlValues[(qs[j] >> (4 * (j0 / 16))) & 0x0F]);
+}
+
+// d * (code - 8): IQ4_NL's layout (values 0-15 the low nibbles, 16-31 the high), the code itself for its table - an
+// f16 times a 4-bit integer, exact in F32 (ggml's dequantize_row_q4_0)
+template <> __device__ inline void decode<kQ4_0>(const uint8_t* b, int k, float* v) {
+  const float d = f16(ld16(b));
+  const uint8_t* qs = b + 2 + (k % 2) * kChunk;
+  for (int j = 0; j < kChunk; j++) v[j] = mul(d, (float) ((int) ((qs[j] >> (4 * (k / 2))) & 0x0F) - 8));
 }
 
 // d * (code - 1): 64 values, an f16 then 2-bit codes, value i bits 2 (i % 4) of byte i / 4

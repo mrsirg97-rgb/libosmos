@@ -9,6 +9,9 @@ Inkling-2's (o200k's expression: an upper run before lowers, title case, marks a
 in threes, a punctuation run into slashes and newlines) from its own tokenizer.json (Hugging Face's tokenizers - the
 model's reference; llama.cpp's inkling pre-tokenizer is not in this tree):
 python3 tools/gen_tok_fixtures.py --hf <tokenizer.json> inkling > tests/fixtures/tokenizer_inkling.txt
+LFM3's (vibes1.7b: pre lfm2 - the Llama-3 expression, ignore_merges: digits in threes, contractions in any case,
+marks outside a letter run, a word the vocabulary holds whole) from its checkpoint's tokenizer.json:
+python3 tools/gen_tok_fixtures.py --hf <tokenizer.json> lfm2 > tests/fixtures/tokenizer_lfm2.txt
 
 the file: a case a block - `S 0|1` (special tokens parsed), `T <the text's UTF-8 bytes in hex>`, `I <ids>`."""
 import subprocess
@@ -38,6 +41,14 @@ SPECIALS = {
                '-\u0301', '1\u0301', '12,345.67', '½x', 'a\x00b\x01', '\ufffd', '\U0010FFFD \U000E0001',
                "'Day", "'Time", "'Model", "x'Very", "'Return", "'Llama", 'end.\n\nNext', '{\n}\n', '});\n\n', 'a:\n  b', '"\u0301', '.\u0301\u0301',
                ' \u093e', '(\u0301)', 'x \u0301\u0301y'],
+    'lfm2': ['<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>', 'a<|im_end|>b', '<|startoftext|>x',
+             '<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>',
+             '<tool_response>\nok\n</tool_response>', "I'M HE'S WE'RE THEY'VE YOU'LL I'D 'T", "'x 'S' ''s",
+             'a\u0301b \u0301x \u0301 x\u0301\u0302', 'नमस्ते दुनिया', 'ภาษาไทย', '?!\n\n.x', ' ...\r\n',
+             '-\u0301', '1\u0301', '12,345.67 1234567', '½x ²3', 'a\x00b\x01', '\ufffd', '\U0010FFFD \U000E0001',
+             "x'Very 'Return 's'", 'end.\n\nNext', '{\n}\n', '});\n\n', 'a:\n  b', '"\u0301', '.\u0301\u0301',
+             ' information internationalization antidisestablishmentarianism', ' the The THE tHe',
+             '                ', '\n\n\n\n\n\n\n\n\n\n\n', 'ʰello ˈstress', 'ǅ ᾈᾉ ΣΑΣ σας İstanbul ı'],
     'inkling': ['<|message_user|><|content_text|>hi<|end_message|><|message_model|>', 'a<|end_message|>b',
                 '<|content_thinking|>x<|content_invoke_tool_json|>{"a":1}', "I'M HE'S WE'RE THEY'VE YOU'LL I'D 'T",
                 'HTTPServer XMLHttpRequest ABCdef aBC AbC', '\u01c5ungla \u01c4UNGLA \u01c6ungla', 'MacDonald McDONALD',

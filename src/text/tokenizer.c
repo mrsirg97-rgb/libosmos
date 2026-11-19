@@ -19,6 +19,7 @@ struct Tokenizer
   int32_t *special; /* the special tokens, the longest text first (ties: the lower id) */
   int32_t n_special;
   size_t (*split)(const uint32_t *cp, size_t n, size_t *cuts); /* the pre-tokenizer's (pretok.h) */
+  bool ignore_merges; /* a pre-token the vocabulary holds whole taken so (lfm2: its tokenizer.json's ignore_merges) */
 };
 
 static int longest_first(const void *a, const void *b, void *arg)
@@ -52,16 +53,18 @@ Tokenizer *tokenizer_create(const Gguf *g, char err[TOKENIZER_ERR])
     return fail(err, "not a byte-level BPE (tokenizer.ggml.model gpt2)"), NULL;
   const bool qwen = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "qwen35");
   const bool o200k = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "inkling");
+  const bool llama3 = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "lfm2"); /* llama.cpp's LLAMA3 split */
   if (!pre || pre->type != GGUF_STRING ||
-      (strcmp(pre->v.s, "deepseek-v3") && strcmp(pre->v.s, "joyai-llm") && !qwen && !o200k))
-    return fail(err, "a pre-tokenizer this build does not split by (deepseek-v3, joyai-llm, qwen35, inkling)"), NULL;
+      (strcmp(pre->v.s, "deepseek-v3") && strcmp(pre->v.s, "joyai-llm") && !qwen && !o200k && !llama3))
+    return fail(err, "a pre-tokenizer this build does not split by (deepseek-v3, joyai-llm, qwen35, inkling, lfm2)"), NULL;
   if (!tok || !mer || !typ || typ->type != GGUF_ARRAY || typ->n != tok->n || tok->n > INT32_MAX)
     return fail(err, "no tokens, token types or merges, or of unequal lengths"), NULL;
   Tokenizer *t = calloc(1, sizeof *t);
   bool ok = t != NULL;
   if (ok)
   {
-    t->split = qwen ? pretok_split_qwen35 : o200k ? pretok_split_o200k : pretok_split;
+    t->split = qwen ? pretok_split_qwen35 : o200k ? pretok_split_o200k : llama3 ? pretok_split_llama3 : pretok_split;
+    t->ignore_merges = llama3; /* lfm2's: a pre-token the vocabulary holds whole taken so (its tokenizer.json) */
     t->n = (int32_t)tok->n;
     ok = (t->type = calloc(tok->n, 1)) && (t->text = calloc(tok->n, sizeof *t->text)) &&
          (t->special = malloc(tok->n * sizeof *t->special));
@@ -187,7 +190,15 @@ static size_t raw(const Tokenizer *t, const unsigned char *s, size_t len, int32_
         word[w++] = (unsigned char)(0xF0 | c >> 18), word[w++] = (unsigned char)(0x80 | (c >> 12 & 0x3F)),
         word[w++] = (unsigned char)(0x80 | (c >> 6 & 0x3F)), word[w++] = (unsigned char)(0x80 | (c & 0x3F));
     }
-    n += bpe_word(t->bpe, word, w, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+    const int32_t whole = t->ignore_merges ? bpe_whole(t->bpe, word, w) : -1;
+    if (whole >= 0)
+    {
+      if (n < cap)
+        ids[n] = whole;
+      n++;
+    }
+    else
+      n += bpe_word(t->bpe, word, w, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
   }
   free(cp), free(cuts), free(word);
   return n;

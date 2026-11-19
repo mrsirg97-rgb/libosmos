@@ -52,6 +52,7 @@ template <> struct Tuned<quant::kIQ2_S> : Tuned<quant::kIQ2_XS> {};  // not meas
 template <> struct Tuned<quant::kIQ3_XXS> { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ4_NL> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ4_XS> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
+template <> struct Tuned<quant::kQ4_0> : Tuned<quant::kIQ4_NL> {};  // not measured: IQ4_NL's (its layout, its block)
 template <> struct Tuned<quant::kQ2_0> { using S = mm::Shape<64, 8, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ2_K> : Tuned<quant::kQ2_0> {};  // not measured: Q2_0's (its shape its bits: fixed before a pack)
 // NVFP4 (Inkling-2's experts: 4,608 and 2,304 columns, whole 64-value slabs) not measured: Q2_0's, a 64-value block too.
@@ -166,7 +167,7 @@ bool group_ct(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t
 template <quant::Type T>
 struct GroupPlan {
   static constexpr bool kRm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_XS || T == quant::kQ2_K;
-  static constexpr bool kGemm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_NL || T == quant::kQ2_0 || T == quant::kNVFP4 ||
+  static constexpr bool kGemm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_NL || T == quant::kQ4_0 || T == quant::kQ2_0 || T == quant::kNVFP4 ||
                                 T == quant::kIQ3_XXS || T == quant::kQ2_K || T == quant::kIQ2_S || T == quant::kIQ1_S;
 };
 constexpr int kGroupRm = 2, kGroupGemmRm = 2, kGroupGemmRn = 2, kGroupGemmWr = 2, kGroupGemmWc = 4;
@@ -393,6 +394,7 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
     case quant::kIQ3_XXS: return launch<quant::kIQ3_XXS>(m, cols, x16, n, s);
     case quant::kQ2_K: return launch<quant::kQ2_K>(m, cols, x16, n, s);
     case quant::kIQ4_NL: return launch<quant::kIQ4_NL>(m, cols, x16, n, s);
+    case quant::kQ4_0: return launch<quant::kQ4_0>(m, cols, x16, n, s);
     case quant::kIQ4_XS: return launch<quant::kIQ4_XS>(m, cols, x16, n, s);
     case quant::kQ2_0: return launch<quant::kQ2_0>(m, cols, x16, n, s);
     case quant::kNVFP4: return launch<quant::kNVFP4>(m, cols, x16, n, s);
@@ -420,7 +422,7 @@ extern "C" bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols) {
 #define FITS(t) \
   case quant::t: return fits<quant::t>(rows, cols);
     FITS(kQ8_0) FITS(kQ5_K) FITS(kQ5_KR) FITS(kQ6_K) FITS(kIQ1_M) FITS(kIQ2_XXS) FITS(kIQ2_XS) FITS(kIQ1_S)
-    FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K) FITS(kQ4_K) FITS(kQ5_1)
+    FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kQ4_0) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K) FITS(kQ4_K) FITS(kQ5_1)
     FITS(kMXFP4) FITS(kMXFP8) FITS(kNVFP4)
 #undef FITS
     default: return false;
@@ -432,7 +434,7 @@ extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
 #define TILES(t) \
   case quant::t: return col_tiles<quant::t>(n);
     TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS) TILES(kIQ1_S)
-    TILES(kIQ2_S) TILES(kIQ3_XXS) TILES(kIQ4_NL) TILES(kIQ4_XS) TILES(kQ2_0) TILES(kQ2_K) TILES(kQ4_K) TILES(kQ5_1)
+    TILES(kIQ2_S) TILES(kIQ3_XXS) TILES(kIQ4_NL) TILES(kQ4_0) TILES(kIQ4_XS) TILES(kQ2_0) TILES(kQ2_K) TILES(kQ4_K) TILES(kQ5_1)
     TILES(kMXFP4) TILES(kMXFP8) TILES(kNVFP4)
 #undef TILES
     default: return 0;
@@ -573,7 +575,7 @@ extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt
   case quant::t:                                                                                                     \
     return group_launch<quant::t>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS) GROUP(kIQ1_S)
-    GROUP(kIQ2_S) GROUP(kIQ3_XXS) GROUP(kIQ4_NL) GROUP(kIQ4_XS) GROUP(kQ2_0) GROUP(kQ2_K) GROUP(kQ4_K) GROUP(kQ5_1)
+    GROUP(kIQ2_S) GROUP(kIQ3_XXS) GROUP(kIQ4_NL) GROUP(kQ4_0) GROUP(kIQ4_XS) GROUP(kQ2_0) GROUP(kQ2_K) GROUP(kQ4_K) GROUP(kQ5_1)
     GROUP(kMXFP4) GROUP(kMXFP8) GROUP(kNVFP4)
 #undef GROUP
     default: return false;

@@ -185,6 +185,19 @@ static void queue(const Bpe *b, const char *buf, const size_t *start, const size
     heap_push(h, n, (Pair){r, i, j, size[i], size[j]});
 }
 
+int32_t bpe_whole(const Bpe *b, const unsigned char *word, size_t len)
+{
+  char *buf = malloc(2 * len + 1);
+  if (!buf)
+    return -1;
+  size_t at = 0;
+  for (size_t i = 0; i < len; i++)
+    at += put_cp(buf + at, byte_cp[word[i]]);
+  const int32_t id = map_get(&b->vocab, buf, at);
+  free(buf);
+  return id;
+}
+
 size_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *ids, size_t cap)
 {
   char *buf = malloc(2 * len + 1), *key = malloc(4 * len + 2);

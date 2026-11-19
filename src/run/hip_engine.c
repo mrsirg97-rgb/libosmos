@@ -9,7 +9,7 @@
 
 /* the dispatch: a model's family by its file's general.architecture, then every call that family's */
 
-static const OsmosFamily *const families[] = {&osmos_ds4, &osmos_q4x, &osmos_ink2, &osmos_q35};
+static const OsmosFamily *const families[] = {&osmos_ds4, &osmos_q4x, &osmos_ink2, &osmos_q35, &osmos_lfm3};
 
 struct OsmosModel
 {

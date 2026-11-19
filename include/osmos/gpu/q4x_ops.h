@@ -1,6 +1,7 @@
 #ifndef OSMOS_GPU_Q4X_OPS_H
 #define OSMOS_GPU_Q4X_OPS_H
 
+#include "osmos/gpu/attn_shape.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -18,6 +19,9 @@ typedef struct Q4xX16
    - no kernel limit (QSA's picks a token's 2,051 keys at most), a context's: its Q8_0 cache ~13 KB a token a sequence
    (1M: ~13.6 GB), its pooled keys ~1.5 KB */
 #define OPS_Q4X_MAX_KEYS 1048576
+/* q4x_attn's own most keys (its offsets 64-bit, its chunks a grid's z under 65,536): LFM3's 2M context (its Qwen
+   callers OPS_Q4X_MAX_KEYS') */
+#define OPS_ATTN_MAX_KEYS 4194304
 
 /* Qwen3.8-Flash-Next's own steps (DESIGN.md, "Qwen's forward, op by op"), F32 on the GPU, queued on `stream` */
 
@@ -50,16 +54,32 @@ bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint3
 
 /* a rotation (q4x_rope): its dims (a head's first), its angles' step, and YaRN's - none: ext_factor 0, freq_scale and
    mscale 1 (the plain rotation's bits) */
+/* a pair's angle step, as each model's reference forms it: ggml's (theta_scale^i, a running product - llama.cpp's, Qwen's
+   reference) or transformers' (1 / base^(2i / dim) in F32 - Liquid's modeling code, LFM3's) */
+#define Q4X_ROPE_PAIRS_MAX 128 /* a rotation's pairs at most (a 256 head's) */
+typedef enum Q4xTheta
+{
+  Q4X_THETA_GGML,
+  Q4X_THETA_HF,
+} Q4xTheta;
+
 typedef struct Q4xRope
 {
   uint32_t dim;
+  uint32_t pairs;         /* the pairs rotated, the first ones (dim / 2: all; LFM3's full layers 32 of 64, the rest
+                             unrotated - its zero tail, theta still the whole dim's progression) */
   float theta_scale;      /* base^(-2 / dim): theta_i a running product of it */
   float freq_scale;       /* YaRN's 1 / factor */
   float ext_factor;       /* YaRN's extrapolation mix */
   float corr_lo, corr_hi; /* its ramp: the correction dims */
   float mscale;           /* a rotated pair's magnitude: 1 + 0.1 ln(factor) */
+  Q4xTheta theta;         /* its angle step's form */
+  float inv_freq[Q4X_ROPE_PAIRS_MAX]; /* Q4X_THETA_HF's: pair i's 1 / base^(2i / dim), formed on the host in F32 (the
+                                         reference's own powf: the device's may differ by an ulp, ~1e-3 at 8K) */
 } Q4xRope;
-bool q4x_rope(uint32_t dim, float base, uint32_t native_ctx, uint32_t ctx, Q4xRope *rope);
+bool q4x_rope(uint32_t dim, uint32_t pairs, float base, uint32_t native_ctx, uint32_t ctx, Q4xTheta theta,
+              Q4xRope *rope);
+#define Q4X_QK_HEAD_NARROW 128 /* q4x_qk's other head (LFM3's): its heads Q4X_HEAD_DIM wide or this */
 bool q4x_qk(const float *qfull, const float *k, uint32_t n_tok, uint32_t heads, uint32_t kv_heads, uint32_t dim,
             const Q4xRope *rope, const float *q_norm, const float *k_norm, float eps, int32_t pos0, float *q,
             float *gate, float *k_out, void *stream);
@@ -75,9 +95,19 @@ typedef struct Q4xPick
   uint32_t ratio, blocks;
 } Q4xPick;
 uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx);
+/* the scratch at a shape (LFM3's head of 128: its prompt's spans a group's tokens a piece, to 2M) - at least
+   q4x_attn_scratch's */
+/* a prompt's sparse reads (LSA's: lsa_read_batch_gpu's lists): token t's attention over its own counts[t] positions
+   lists[t list_stride ..] (any order, at most list_stride), on the matrix cores (f16 q, k, v and weights) - a block a
+   token's KV head, one wave over its list in order; no scratch. a head of 128; the gate's span
+   AttnShape's (no window or ring). a token's bits its list's alone, whatever its batch */
+bool q4x_attn_lists(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
+                    uint32_t dim, const uint32_t *lists, const int32_t *counts, uint32_t list_stride, const float *gate,
+                    const AttnShape *shape, float *out, void *stream);
+uint64_t q4x_attn_scratch_dim(uint32_t heads, uint32_t kv_heads, uint32_t dim, uint32_t max_ctx);
 bool q4x_attn(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-              uint32_t dim, uint32_t pos0, const float *gate, const Q4xPick *pick, float *scratch, float *out,
-              const Q4xX16 *side, void *stream);
+              uint32_t dim, uint32_t pos0, const float *gate, const Q4xPick *pick, const AttnShape *shape,
+              float *scratch, float *out, const Q4xX16 *side, void *stream);
 
 #define Q4X_IX_DIM 128 /* an indexer head's dim (qwen4exp.attention.indexer.key_length) */
 /* the kernels' fixed shapes - the loader refuses a model past them (q4x_geo.h), never a step */
@@ -278,7 +308,9 @@ q4x_qk
   gate[t][h] its gate; k_out[t][g] = rope(rms_norm(k[t][g]) k_norm) (k_out may be a cache's row pos0). rope: the first
   rope->dim of a head, pairs (i, i + dim / 2), angle (pos0 + t) theta_i, theta_i = theta_scale^i as ggml builds it (a
   running product; YaRN's as q4x_rope says); IMRoPE's sections all the token's position (text) - this rotation. heads 0: the
-  keys alone (qfull, q and gate unread: the MTP head's cache seeding).
+  keys alone (qfull, q and gate unread: the MTP head's cache seeding). gate NULL: qfull plain q, a head after a head
+  (LFM3's: its gate its own matrix). a head Q4X_HEAD_DIM or Q4X_QK_HEAD_NARROW wide; the pairs past rope->pairs
+  unrotated, times rope->mscale (LFM3's zero tail: Liquid's YaRN scales it too).
 
 q4x_kv_row_bytes, q4x_kv_put
   the attention's cache in Q8_0 (ggml's: a block of 32, d = max |x| / 127 as f16, q = x / d rounded to nearest):
@@ -292,7 +324,7 @@ q4x_attn
   blocks' positions (ratio of them a block, in block order), then its tail (the positions past its visible blocks,
   ratio nv .. pos0 + t, nv = (pos0 + t + 1) / ratio) - every block picked, the list 0 .. pos0 + t: the dense bits.
   g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, Q8_0 rows of
-  kv_heads x dim (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_Q4X_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
+  kv_heads x dim (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_ATTN_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
   weights as f16, the sums F32; a token's key list in chunks of 128, a row's chunks merged in order - a row's bits
   its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads, max_ctx) floats
   (a step of more tokens taken in pieces).

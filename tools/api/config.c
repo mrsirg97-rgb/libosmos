@@ -48,6 +48,8 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
     return str(v, c->drafter, sizeof c->drafter, k, err);
   if (!strcmp(k, "overlay"))
     return str(v, c->overlay, sizeof c->overlay, k, err);
+  if (!strcmp(k, "lsa"))
+    return str(v, c->lsa, sizeof c->lsa, k, err);
   if (!strcmp(k, "budget_gib"))
     return num(v, &c->budget_gib, k, err);
   if (!strcmp(k, "drafted_budget_gib"))
@@ -129,6 +131,8 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
     argv[n++] = "--dspark", argv[n++] = c->drafter;
   if (c->overlay[0])
     argv[n++] = "--overlay", argv[n++] = c->overlay;
+  if (c->lsa[0])
+    argv[n++] = "--lsa", argv[n++] = c->lsa;
   argv[n++] = "--max-context", argv[n++] = c->num[0];
   argv[n++] = "--budget", argv[n++] = c->num[1];
   argv[n++] = "--eos", argv[n++] = c->num[2];

@@ -1143,6 +1143,37 @@ class InklingApi(Served, unittest.TestCase):
         self.assertEqual(json.loads(r.read())["choices"][0]["message"]["content"], "Use<|end_message|>.")
 
 
+LFM3 = os.environ.get("OSMOS_TEST_LFM3") or os.path.expanduser("~/Models/vibes1.7b/vibes1.7b-Q4_0.gguf")
+
+
+@unittest.skipUnless(os.path.exists(LFM3), "no vibes1.7b Q4_0 (the tokenizer's)")
+class Lfm3Api(Served, unittest.TestCase):
+    """LFM3's dialect (vibes1.7b): its template has no effort levels - thinking on or off; rig's row sends "high" (on)
+    or "none" (off), any other level refused, not dropped"""
+    model = LFM3
+
+    def ok(self, body):
+        self.reply(("4" if body.get("reasoning_effort") == "none" else "hm\n</think>\n\n4") + IM_END)
+        r = self.post(body)
+        self.assertEqual(r.status, 200, r.read())
+        r.read()
+        return self.last_gen()[-1]
+
+    def test_0_high_is_thinking_on(self):
+        self.ready()
+        msgs = [{"role": "user", "content": "2+2?"}]
+        on = self.ok({"messages": msgs})
+        self.assertEqual(self.ok({"messages": msgs, "reasoning_effort": "high"}), on)  # the template's thinking
+        self.assertNotEqual(self.ok({"messages": msgs, "reasoning_effort": "none"}), on)  # thinking off
+
+    def test_1_other_levels_refused(self):
+        self.ready()
+        for level in ("low", "medium", "xhigh", "max"):
+            r = self.post({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": level})
+            self.assertEqual(r.status, 400, level)
+            self.assertIn("reasoning_effort", r.read().decode())
+
+
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
 class Shutdown(Served, unittest.TestCase):
     def test_sigterm_quits_the_engine(self):  # 0.7.1: rig's stop (SIGTERM) left the engine to its PDEATHSIG - killed,

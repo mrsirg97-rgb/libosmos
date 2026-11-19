@@ -1912,6 +1912,157 @@ per full-attention layer, keys in blocks of 512 at their position; a block once 
   another sequence or a short file refused (the identity, as seq_load's).
 - the model: step 0's logits against HF's (Qwen3.8-27B, then -vibes); step 1's tail loss against night5's.
 
+## vibes-flash: LFM3 (lfm3) (design, 2026-11-17)
+
+the operator's: vibes-flash - LiquidAI's LFM3-1.7B liberated (the refusal direction of layer 12 projected out of its
+writers through their post-norms) and trained on recipe v, on each grid it ships in: NVFP4 and Q4_0 (each its own
+in-quantizer run), and BF16 (the NVFP4 run's values). 10M context with LSA on its six full-attention layers. brought up
+here first (CUDA, battlestation: the oracle, the trainer and the files are here), the Halo after (the operator).
+step 1 of three: the model (this section); then the sequence and the engine; then LSA.
+
+- **references**: Liquid's modeling code (the checkpoint's own modeling_lfm3.py, LFM Open License v1.0) is the
+  oracle - its zero-tail rope is the model. llama.cpp's graph (src/models/lfm3.cpp, lfm-base.cpp: our build at
+  /mnt/data/rl/llama-lfm3, with the NVFP4 scales its upstream drops) matches it on identical tokens (log-probs within
+  0.08 past 100 tokens, BF16's noise); its intermediate tensors (llama-eval-callback) are the per-op reference.
+  transformers' built-in Lfm3 is not the model (v5.23 and main rotate all 64 pairs: KL 0.047 at 4K, growing with
+  position; huggingface/transformers #50853, Liquid's config fix pending) - never a reference here.
+- **the file** (`general.architecture` lfm3; 24 layers, D 2048, vocab 128,000 rows - 125,033 tokens -, eps 1e-5,
+  native context 262,144):
+  - layers 0, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23 (13): the short convolution - shortconv.in_proj [2048 ->
+    6144: B, C, x], shortconv.conv [7 taps x 2048] (depthwise, causal from a zero state), shortconv.out_proj
+    [2048 -> 2048]: y = out_proj(C * conv(B * x)); no activation. a sequence's state the last 6 rows of B * x.
+  - layers 2, 6, 10, 14, 18, 22 (6): full attention; 4, 8, 12, 16, 20 (5): sliding-window attention (256 keys). both:
+    attn_q [2048 -> 16 x 128], attn_k / attn_v [2048 -> 4 x 128], attn_q_norm / attn_k_norm [128] (RMS a head),
+    attn_gate [2048 -> 16] (a scalar a head: out_h *= sigmoid(gate_h)), attn_output [2048 -> 2048], scale 1 / sqrt(128).
+    the rope NEOX (pair i with i + 64): full attention base 1e6 with the zero tail - pairs 0 .. 31 at base^(-2i / 128),
+    pairs 32 .. 63 unrotated (the file's rope_freqs: factor 1e30 on them, applied to full attention alone); sliding
+    attention base 1e4, all 64 pairs, no factors.
+  - every layer: attn_norm -> the operator (conv or attention) -> post_attention_norm -> += residual; ffn_norm ->
+    SwiGLU (ffn_gate, ffn_up [2048 -> 7680], ffn_down) -> post_ffw_norm -> += residual (RMS norms, weight w not 1 + w).
+  - the head: output_norm, the embedding tied (token_embd BF16, never quantized).
+  - NVFP4 files: every matrix NVFP4 with its F32 .scale beside it (q35's reading: geo.c); Q4_0 files the same
+    matrices Q4_0; the norms, conv taps and rope_freqs F32 in both.
+- **a sequence's state**: the conv's 6 rows a layer (13 x 6 x 2048 F32, 0.6 MB); sliding attention a ring of 256 rows
+  a layer (5 x 256 x 4 x 128, K and V); full attention every row (6 x 4 x 128 x 2 values a token: 12 KB in BF16,
+  6 KB in the cache's Q8_0 - 10M tokens ~65 GB, LSA's tiers' business). rollback: q35's ring of slots for the conv
+  (q4x_conv's `slots`), the attention rows past a position never read again.
+- **the kernels**: reused - rms, embed (BF16), mv / mm (BF16; NVFP4 with its scale), q4x_conv (7 taps <=
+  Q4X_CONV_TAPS_MAX 8; its ring), SwiGLU, add, argmax / top. new or widened:
+  - **Q4_0** (ggml 2: 32 values, an f16 scale, 4-bit codes - 8): a type for quant.h and mv / mm, against ggml's
+    dequant bit for bit, as Q2_0 was.
+  - **the rope's zero tail**: q4x's NEOX rope (Q4xRope, YaRN's fields - the 10M stretch needs them) with a rotated
+    pair count below dim / 2 and the full dim's progression - one rope, not a second.
+  - **attention**: q35's decode attention is the shape (flash decoding over the Q8_0 cache, the gate on the merge),
+    fixed at head 256 (its 1 / 16), a gate a value; LFM3's head 128, a gate a head, and a 256-key window on five
+    layers. widened: the head dim, the gate's stride and a window as arguments (decisions below).
+  - B * x and C * y: an elementwise multiply of strided thirds (ops' family).
+- **the shape**: q35's - src/lfm3/ and include/osmos/lfm3/ (geometry, roles, forward), the shared parts shared; the
+  engine's family `lfm3` (hip_engine_lfm3.c) later, with the sequence.
+- **the order** (tests first, each seen to fail): Q4_0 against ggml's dequant, bit for bit; the geometry - every
+  tensor in a role, the layer types from the file (the per-layer head_count_kv: 0 for a conv layer), refusals (a
+  missing .scale beside an NVFP4 matrix, an unknown tensor, a conv not 7 taps); the zero-tail rope against Liquid's
+  inv_freq; the forward one sequence, one block at a time against llama.cpp's intermediate tensors, then the logits:
+  BF16 against the oracle on fixed ids (2K and 8K tokens: past the sliding window, where the built-in class drifts),
+  NVFP4 and Q4_0 against llama.cpp on the same files (KL, top-1).
+- **done when**: the forward's logits match the oracle (BF16) and llama.cpp (NVFP4, Q4_0) at 8K tokens within the
+  tolerances the tests state; the CUDA build passes them on battlestation.
+
+decisions (operator, 2026-11-17):
+- attention: q35's kernels widened - the head dim, a gate's stride (a value or a head) and a window as arguments; one
+  kernel for both families, q35's tests still its bits.
+- the first file brought up: BF16 (the oracle's own maths: a mismatch is the forward's, not a grid's), then NVFP4 and
+  Q4_0 (their types alone added, against llama.cpp on the same files).
+
+revised (operator, 2026-11-18) - the release as it ships, brought up on the Halo:
+- **the files**: mrsirg97-rgb/vibes1.7b (recipe v ii) - vibes1.7b-Q4_0.gguf (1.36 GB, the model: trained on the Q4_0
+  grid), vibes1.7b-BF16.gguf (the same values in BF16), vibes1.7b-lsa-maps.safetensors (step 3's); ~/Models/vibes1.7b,
+  every one against the release's SHA256SUMS. no NVFP4 file: its per-matrix scales leave the schema (Lfm3Layer's
+  s_* fields), every matrix the file's one type.
+- **Q4_0 first**, not BF16: the Q4_0 file is the trained model, and the oracle reads the file's own values - Liquid's
+  modeling code in F32 on the GGUF's dequantized weights (hy4's oracles' way) - so a mismatch is still the forward's,
+  not a grid's. BF16 the cross-check after (the same values: the forwards' logits close).
+- Q4_0's kernels (decode, mv, mm) landed first, IQ4_NL's shapes (2f78256): one token 205 GB/s on the FFN; a prompt's
+  matmul ~3.6 GB/s of weights at 256 tokens - step 3's to tune.
+
+## vibes-flash: LFM3 step 2 - the sequence and the engine (design, 2026-11-18)
+
+step 1's forward (one sequence, rows by position, one convolution state) becomes the engine's: hy4's step-2 shape.
+
+- **runs**: lfm3_step_runs - several sequences' consecutive tokens one step (LFM3_MAX_RUNS), every matrix read once
+  for all, each sequence's convolution states and caches its own: a token's bits however the sequences share the step
+  or a sequence is split into steps. the kept rows' logits on the device (lfm3_row_logits; a row kept from its
+  sequence's prompt end - 1: lfm3_seq_prompt), lfm3_greedy (ops_argmax). lfm3_step stays the checks' one-sequence form.
+- **rollback** (LFM3_MAX_BACK tokens: a drafted round's): a convolution's states a ring of LFM3_MAX_BACK + 1 slots
+  (q4x_conv's / lfm3_shortconv's: the state after each of a step's last tokens in its slot - a rollback reads an
+  earlier one); a full layer's rows past the position never read again; a sliding layer's cache a ring of
+  window + max_tokens + LFM3_MAX_BACK rows (AttnShape's slots): a step's tokens past its first, and a rollback's,
+  never overwrite a key a later token's window still reads (2,312 rows at a 2,048-token step, against max_ctx).
+- **state**: hy4's (state_parts.h): a header (format, the identity - fnv of the geometry, the ring, the model's file -
+  the position), the parts (each convolution's current state; a full layer's K and V rows below the position; a
+  sliding layer's whole ring), the sum. load refuses another identity or format, a size not its position's, a damaged
+  string - the sequence then empty; its reach 0. a failed step refuses its sequences until a load (lfm3_seq_fail).
+- **text**: the tokenizer's pre `lfm2` - llama.cpp's LLAMA3 split (the checkpoint's tokenizer.json: the Llama-3
+  expression, ignore_merges: a pre-token that is a token taken whole) - fixtures from HF tokenizers on the
+  checkpoint's tokenizer.json. the chat: ChatML's turns (<|im_start|>role ... <|im_end|>), <think> (the generation
+  prompt opens it; enable_thinking false: <think></think>), tools as JSON lines in <tools> in the system turn, a tool
+  turn's <tool_response>; calls Qwen3.5's XML (<tool_call><function=..><parameter=..>) - parsed by Qwen's parser,
+  rendered by the template's own branches (its own file: chat_lfm3.c), fixtures from the template itself (jinja2).
+- **the engine**: the family `lfm3` (hip_engine_lfm3.c): every weight resident, one math (no read: step 3's), no
+  drafter yet (block 0); osmos-serve and osmos-api end to end.
+- **the order** (tests first, each seen to fail): runs and rollback and state in test_lfm3_forward_gpu (two sequences
+  in one step their alone bits; a rollback's tokens again the same bits; a state saved and loaded the next step's
+  bits; a damaged one refused) and the ring past the window against the 2,048-id fixture; the tokenizer's fixtures; the
+  dialect's; then the engine, served.
+
+## vibes-flash: rope (measured, 2026-11-18)
+
+vibes1.7b trained on 16,384-token examples, native rope (the config's: no YaRN); its card's long-context LSA numbers
+ran static YaRN x40 over 262,144 (incarnate lsa.py). measured (lfm3_rope_nll: the last 2,048 tokens' NLL after a
+P-token read; wiki to 40K, a PG-19 test novel and llama.cpp's source to 512K): x40 the worst everywhere (0.1-0.4 nats
+over the best); native the best to 16-32K, then the worst - past training's length it degrades (wiki 24K: 3.17
+against x4 2.68; a 24K fixture of Liquid's own code shows it, osmos matching, KL 4.4e-5); each factor wins a band:
+native to ~32K, x2 to 128-192K, x4 to 256-512K, x8 at 512K on the novel (code: x4 by 0.007). so the stages are a
+table (Lfm3Stage {from, factor}, YaRN over the native 262,144), each boundary its bracket's midpoint
+(LFM3_STAGE_X2/X4/X8_FROM: 32K, 160K, 384K). the 2M pack's needles (0/2 at 1.9M, 6/6 to 524K) ran the old stages
+(native to 262K); a 1M pack and its needles on these: 0/1 (10% depth, ~940K back: a confident invention; the
+prompt 1.04M tokens in 488 s). the pack 512K (the operator's, 2026-11-19): 6/6 needles to 524K (10/50/90% depth),
+the forward 2M-capable for a model trained past it (a retrain, or vibes27b).
+
+## vibes-flash: 2M (design, 2026-11-18)
+
+the operator's: vibes1.7b ships with a 2M context, its attention as cheap as it can be made. measured first
+(tools/bench/lfm3_yarn_check): static YaRN - a context's factor at every position, as llama.cpp's and transformers'
+yarn - costs a short conversation what its factor costs it (the 2,048-id fixture: native KL 1.9e-5, x2 0.013, x4
+0.062, x8 0.167; top-1 63 / 60 / 53 / 48 of 64). so a 2M pack's rotation cannot be one factor.
+
+- **a sequence's YaRN by its length (stages)**: stage s the full layers' rotation at factor 2^s over the base (the
+  native 262,144; Lfm3Options' yarn_from for the checks), the stage the least whose span (base 2^s) holds the
+  sequence's positions after the step. crossing into a higher one before a step: every full layer's cached keys
+  re-rotated - each row dequantized, its rotated pairs turned back by the old stage's angle and on by the new's, its
+  unrotated tail times the new magnitude over the old, then Q8_0 again (its one cost: a second rounding, measured
+  against a sequence begun in the stage). the sliding layers never YaRN; LSA's index the unrotated dims (scale-free:
+  normalized) - neither touched. a rollback never across a stage's change (its keys' rotation the new one), the state
+  its stage.
+- **a prompt read sparse** (built): a prompt's tokens from LFM3_LSA_SPARSE_FROM (LSA_READ_MAX: the first position
+  whose read can leave a key out) read as a decode does - their reads made in a batch (lsa_read_batch_gpu: F32 scores
+  of a tile of tokens x buckets, a block a token's radix select, sort and gather - the host's lists exactly with the
+  same scores), their attention over their lists (q4x_attn_lists: a wave a token's KV head, K's operands from the
+  cache, V^T through LDS). a token's path its position's, so its bits whatever the steps. measured against the
+  dense-prompt read (lfm3_lsa_check): slower to 32K (+1-2 s), even at 64K, 128K 45.9 s against 68.9; the next
+  token's NLL lower at 16K / 32K (2.97 / 2.06 against dense 3.20 / 2.37) - lsa.py trains every position's read, so
+  the default is the read's own, not the crossover. 512K: the prompt 203 s (2,580 tok/s), decode 14.4 ms.
+- **the dense prompt** (built): fa_span_kernel for a head of 128 - a block 32 tokens' rows, a KV head, a 2,048-key
+  span, 32 keys a step, one running state a span (the per-chunk partials had capped a piece at one token past 64K
+  keys); a row's diagonal step its own pass with V zeroed past its position (the WMMA is not blind to a zero
+  weight's V: measured). one layer's 2,048-token step at 1M: 59 s -> 1.3 s.
+- **the limits to 2M**: q4x_attn's keys (OPS_Q4X_MAX_KEYS), the read's scratch, LSA's buckets (2M: 4,096 blocks,
+  262,144 buckets a layer).
+- **the scan**: a decode's read scores every closed bucket (2M: 262,144 x 64 a layer, six layers) - then cheapened
+  (f16 centroids, the six layers' scans one launch) as measured.
+- **checked**: each stage against Liquid's YaRN at its factor over the same base (oracle --yarn, --native); LSA
+  against dense to 512K (the card's rows); at 1M and 2M a needle - a fact placed deep, asked at the end - and the
+  next-token NLL over held-out text (llama.cpp's source: ~2M tokens).
+
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
 the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,

@@ -3,6 +3,7 @@
 #include "chat_impl.h"
 #include "dialect.h"
 #include "osmos/text/chat_ink2.h"
+#include "osmos/text/chat_lfm3.h"
 #include "osmos/text/chat_qwen.h"
 
 /* each family's chat: DeepSeek's encoding (osmos/text/chat.h), Qwen's template (osmos/text/chat_qwen.h), Inkling's
@@ -54,6 +55,17 @@ static bool ds_drops(const Request *r)
 /* Qwen's template drops it unless preserve_thinking (the request's, on unless false) */
 static bool qwen_drops(const Request *r) { return r->mode == CHAT_THINKING && !r->preserve && past_user(r); }
 
+static bool lfm3_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
+{
+  return lchat_render(r->messages, r->tools, r->mode, r->preserve, out, err);
+}
+
+static bool lfm3_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
+                       char err[CHAT_ERR])
+{
+  return lchat_parse_shaped(text, shape, n, r->mode, r->tools, out, err);
+}
+
 static bool ink2_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
 {
   return ichat_render(r->messages, r->tools, r->effort_value, out, err);
@@ -85,6 +97,10 @@ static const Dialect kDialects[] = {
     /* Qwen3.5 / 3.8's dense models (vibes27b): Qwen-Next's turn - their template the same but for several system
        messages (the first one alone, not merged) and "high" effort (not raised to "xhigh") */
     {"qwen35", QCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, qchat_refused, request_qwen, qwen_render, qwen_parse,
+     qwen_drops, QCHAT_THINK_END, NULL, NULL, NULL},
+    /* LFM3's (vibes1.7b): ChatML with <think>, Qwen3.5's calls - its template drops reasoning before the last user
+       message unless preserve_thinking (the request's, off unless true: the template's default) */
+    {"lfm3", LCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, lchat_refused, request_lfm3, lfm3_render, lfm3_parse,
      qwen_drops, QCHAT_THINK_END, NULL, NULL, NULL},
     /* Inkling's turn: blocks, the thinking optional (none at effort 0) - no answer-after (a block's end is every
        block's: the rule would refuse a text block's end of turn) */

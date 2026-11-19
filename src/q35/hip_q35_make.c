@@ -70,7 +70,7 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_E
   if (f->lsa)
     return fail(err, "the read already on");
   if (!maps) /* YaRN alone: the dense model under the maps' rotation (the read's comparison) */
-    return q4x_rope((uint32_t)g->rope_dim, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), &f->rope) ||
+    return q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), Q4X_THETA_GGML, &f->rope) ||
            fail(err, "the YaRN rotation refused");
   if ((uint32_t)g->n_kv_heads * (uint32_t)(g->head_dim - g->rope_dim) != LSA_IN)
     return fail(err, "the model's free key dims are not the maps' input");
@@ -102,7 +102,7 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_E
   if (!ok)
     return err && !*err ? fail(err, "the maps not loaded") : false;
   /* the maps' rotation: YaRN at yarn x native (their training's), whatever this forward's context */
-  if (!q4x_rope((uint32_t)g->rope_dim, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), &f->rope))
+  if (!q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), Q4X_THETA_GGML, &f->rope))
     return fail(err, "the maps' YaRN rotation refused");
   ok = (f->lsa_s = lsa_scratch_create(f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && alloc(&f->iq, LSA_DIM * F) &&
        alloc(&f->list, LSA_READ_MAX * 4) && alloc(&f->list_n, 4) && (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) &&
@@ -180,7 +180,7 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
       {&f->hx, lr * D * F},     {&f->ids, lr * 4},    {&f->argmax, ops_argmax_scratch((uint32_t)lr)},
       {&f->tok, n * 4},         {&f->overflow, 4},    {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2},
   };
-  bool ok = q4x_rope((uint32_t)g->rope_dim, g->rope_base, g->native_ctx, max_ctx, &f->rope) && upload(f, err);
+  bool ok = q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, max_ctx, Q4X_THETA_GGML, &f->rope) && upload(f, err);
   for (size_t i = 0; ok && i < sizeof want / sizeof *want; i++)
     ok = alloc(want[i].p, want[i].bytes) || fail(err, "GPU memory refused (a step's buffers)");
   f->head_type = w->output->type;

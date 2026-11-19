@@ -46,3 +46,4 @@ const Dialect *dialect_of(const char *arch);
 bool request_ds(const Json *body, Request *r, char err[API_ERR]);
 bool request_qwen(const Json *body, Request *r, char err[API_ERR]);
 bool request_ink2(const Json *body, Request *r, char err[API_ERR]);
+bool request_lfm3(const Json *body, Request *r, char err[API_ERR]);

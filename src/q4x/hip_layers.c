@@ -296,6 +296,7 @@ bool q4x_attention(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t
     const uint64_t t0 = c[i].t0;
     const Q4xPick pick = {b->sel + t0 * blocks, b->npick + t0, ratio, blocks};
     ok = q4x_attn(b->q + t0 * q, c[i].kc, c[i].vc, c[i].n, heads, kvh, hd, (uint32_t)c[i].pos, b->gt + t0 * q, &pick,
+                  NULL,
                   b->fa, b->ao + t0 * q, side_at(all, c[i].t0, &rs), NULL);
   }
   return ok && q4x_mat(f, L->out, D, q, b->ao, q, n, b->out, D, ready);
