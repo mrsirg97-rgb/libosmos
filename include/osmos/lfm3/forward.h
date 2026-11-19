@@ -98,6 +98,7 @@ typedef struct Lfm3Options
   Lfm3Head head;
   const char *lsa;
   uint32_t yarn_from;
+  bool yarn_static;         /* every position the top stage's rotation (YaRN at max_ctx over yarn_from), no stages */
   uint32_t lsa_sparse_from; /* with LSA, a prompt's tokens from this position read sparse (0: LFM3_LSA_SPARSE_FROM) */
 } Lfm3Options;
 /* a prompt token's read sparse from here: under LSA_READ_MAX positions a read is every key (the dense attention's) */

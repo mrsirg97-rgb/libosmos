@@ -223,7 +223,7 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   {
     const uint64_t end = (uint64_t)run[r].s->pos + run[r].len;
     stage[r] = run[r].s->stage;
-    while ((uint64_t)f->yarn_from << stage[r] < end)
+    while (f->stages > 1 && (uint64_t)f->yarn_from << stage[r] < end)
       stage[r]++;
   }
   for (uint32_t i = 0; i < n; i++)

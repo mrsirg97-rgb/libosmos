@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
   Lfm3Weights* w = lfm3_weights_create(g, err);
   CHECK(w);
   const uint32_t S = 2048 < P ? 2048 : P, V = (uint32_t) w->geo.n_vocab;
-  const Lfm3Options od = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, nullptr, 0, 0}, ol = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, argv[2], 0, F};
+  const Lfm3Options od = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, nullptr, 0, false, 0}, ol = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, argv[2], 0, false, F};
   Lfm3Forward *fd = only ? nullptr : lfm3_forward_create(w, &od, err), *fl = nullptr;
   CHECK(only || fd);
   fl = lfm3_forward_create(w, &ol, err);

@@ -84,7 +84,7 @@ int main() {
   const uint32_t T = (uint32_t) fid.size(), V = (uint32_t) w->geo.n_vocab, last = 64 < T ? 64 : T;
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
-  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr, 0, 0};  // the reference's head: the file's BF16
+  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr, 0, false, 0};  // the reference's head: the file's BF16
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -232,7 +232,7 @@ int main() {
   // the prompt in its steps the one step's last rows, bit for bit
   {
     const uint32_t S = 300 < T ? 300 : T;
-    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr, 0, 0};
+    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr, 0, false, 0};
     Lfm3Forward* f2 = lfm3_forward_create(w, &o2, err);
     CHECK(f2);
     Lfm3Seq* r = lfm3_seq_create(f2, err);
@@ -251,7 +251,7 @@ int main() {
   // the head's Q8_0 copy (the engine's default): the same ids, its logits against the file's head's - the rounding's
   // own cost, measured (2026-11-18): see kHeadKl
   {
-    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr, 0, 0};
+    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr, 0, false, 0};
     Lfm3Forward* fq = lfm3_forward_create(w, &oq, err);
     CHECK(fq);
     Lfm3Seq* q = lfm3_seq_create(fq, err);
@@ -279,7 +279,7 @@ int main() {
     FILE* mf = std::fopen(maps.c_str(), "rb");
     if (T == 2048 && mf) {
       std::fclose(mf);
-      const Lfm3Options os = {T, T, last, LFM3_HEAD_FILE, maps.c_str(), 0, 1024};
+      const Lfm3Options os = {T, T, last, LFM3_HEAD_FILE, maps.c_str(), 0, false, 1024};
       Lfm3Forward* fs = lfm3_forward_create(w, &os, err);
       CHECK(fs);
       Lfm3Seq *one = lfm3_seq_create(fs, err), *three = lfm3_seq_create(fs, err);
@@ -318,7 +318,7 @@ int main() {
     std::map<std::string, Arr> base = fx;
     if (T == 2048 && load(yarn_path.c_str())) {
       const std::vector<float> yref = A("logits");
-      const Lfm3Options oy = {T, 4 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024, 0};
+      const Lfm3Options oy = {T, 4 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024, false, 0};
       Lfm3Forward* fy = lfm3_forward_create(w, &oy, err);
       CHECK(fy);
       Lfm3Seq *one = lfm3_seq_create(fy, err), *two = lfm3_seq_create(fy, err);
@@ -349,6 +349,26 @@ int main() {
       std::printf("  crossing into stage 1 at %u (the cache turned): against stage 1 from the start KL mean %.3g, max "
                   "%.3g; top-1 %u of %u\n", a + b, kc / last, kcm, same, last);
       CHECK(kc / last <= kStageKlMean && kcm <= kStageKlMax && same + kTop1Miss >= last);
+      // static (Lfm3Options' yarn_static): every position YaRN x2, the ids in two steps (under the base, then past
+      // it) against Liquid's x2 within the forward's bounds - no crossing, no turn
+      {
+        const Lfm3Options ox = {T, 2 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024, true, 0};
+        Lfm3Forward* fx = lfm3_forward_create(w, &ox, err);
+        CHECK(fx);
+        Lfm3Seq* sx = lfm3_seq_create(fx, err);
+        CHECK(sx && lfm3_step(fx, sx, ids.data(), 1000, 1, err) && lfm3_step(fx, sx, ids.data() + 1000, T - 1000, last, err));
+        double kx = 0, kxm = 0;
+        uint32_t ax = 0;
+        for (uint32_t r = 0; r < last; r++) {
+          const float* p = yref.data() + (ref_rows - last + r) * (size_t) V;
+          const double k = kl(p, lfm3_logits(fx) + (size_t) r * V, V);
+          kx += k, kxm = std::fmax(kxm, k), ax += argmax(p, V) == argmax(lfm3_logits(fx) + (size_t) r * V, V);
+        }
+        std::printf("  static YaRN x2 (in steps of 1,000 and %u): against Liquid's KL mean %.3g, max %.3g; top-1 %u "
+                    "of %u\n", T - 1000, kx / last, kxm, ax, last);
+        CHECK(kx / last <= kKlMean && kxm <= kKlMax && ax + kTop1Miss >= last);
+        lfm3_seq_destroy(sx), lfm3_forward_destroy(fx);
+      }
       lfm3_seq_destroy(one), lfm3_seq_destroy(two), lfm3_forward_destroy(fy);
     } else {
       std::printf("  YaRN's stages skipped: no %s (or not the 2,048-id fixture)\n", yarn_path.c_str());

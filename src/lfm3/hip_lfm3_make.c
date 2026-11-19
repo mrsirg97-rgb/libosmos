@@ -231,7 +231,10 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
     f->stages++;
   bool ok = (uint64_t)f->yarn_from << (f->stages - 1) >= f->max_ctx ||
             lfm3_fail(err, "a context past the YaRN stages' (LFM3_MAX_STAGES over yarn_from)");
-  for (uint32_t s = 0; ok && s < f->stages; s++)
+  if (ok && o->yarn_static) /* one stage: every position the top's (YaRN at max_ctx over yarn_from) */
+    f->stages = 1, ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from,
+                                  f->max_ctx, Q4X_THETA_HF, &f->rope_full[0]);
+  for (uint32_t s = 0; ok && !o->yarn_static && s < f->stages; s++)
     ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from, f->yarn_from << s,
                   Q4X_THETA_HF, &f->rope_full[s]);
   ok = ok && q4x_rope((uint32_t)g->head_dim, (uint32_t)g->head_dim / 2, g->rope_base_swa, g->native_ctx, g->native_ctx,

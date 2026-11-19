@@ -95,7 +95,7 @@ uint64_t lfm3_identity(const Lfm3Forward *f)
 {
   const Lfm3Geometry *g = &f->w->geo;
   uint64_t h = fnv_u64(STATE_VERSION, 1469598103934665603ull);
-  h = fnv(g, sizeof *g, h), h = fnv_u64(f->ring, h), h = fnv_u64(f->lsa, h), h = fnv_u64(f->yarn_from, h);
+  h = fnv(g, sizeof *g, h), h = fnv_u64(f->ring, h), h = fnv_u64(f->lsa, h), h = fnv_u64(f->yarn_from, h), h = fnv_u64(f->stages, h);
   for (int i = 0; i < f->w->model->n_files; i++)
     h = fnv_file(f->w->model->paths[i], h);
   return h;
