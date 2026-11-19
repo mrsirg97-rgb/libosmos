@@ -188,7 +188,7 @@ out), as the model was trained; every token's bits are the same however its prom
 DeepSeek streams its experts from the SSD, so the drive is part of its numbers: a prompt reads at ~7.1 GB/s (near
 the PCIe 4.0 x4 ceiling); decode reads experts a few MB at a time (`O_DIRECT`), where random-read latency counts.
 
-**NOTE - let your Strix breathe.** It cools through its base. On a warm table beside another machine, a sustained
+**NOTE - let your Strix breathe.** On a warm table beside another machine, a sustained
 DeepSeek run took the GPU to 102 °C and its clock down to 925 MHz, and drafted decode after a 64K prompt read 17 tok/s
 against 29 raised in open air (the same code, the same tokens). These numbers are from a warm room: under sustained
 load the GPU still runs 95-100 °C with its clock near 2.6 GHz.
