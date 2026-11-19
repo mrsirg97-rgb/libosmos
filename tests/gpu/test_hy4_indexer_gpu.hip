@@ -113,14 +113,27 @@ int main() {
     const uint32_t cuts[] = {0, 1, 2, 5, T};
     for (int c = 0; c + 1 < 5; c++) {
       const uint32_t a = cuts[c], m = cuts[c + 1] - a;
-      CHECK(hy4_rows_at(keys2, kn + (size_t) a * ID, dpos + a, m, ID, 0));
-      CHECK(hy4_ix_pool_at(keys2, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, dpos + a, m, groups2, 0));
+      CHECK(hy4_rows_at(keys2, kn + (size_t) a * ID, dpos + a, m, ID, 0, 0));
+      CHECK(hy4_ix_pool_at(keys2, 0, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, dpos + a, m, groups2, 0));
     }
     CHECK(std::memcmp(down(keys2, (size_t) T * ID).data(), down(keys, (size_t) T * ID).data(), (size_t) T * ID * 4) == 0);
     CHECK(std::memcmp(down(groups2, (size_t) G * ID).data(), g2.data(), g2.size() * 4) == 0);
-    CHECK(!hy4_ix_pool_at(keys2, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, dpos, 0, groups2, 0));
-    CHECK(!hy4_rows_at(keys2, kn, dpos, 0, ID, 0));
+    CHECK(!hy4_ix_pool_at(keys2, 0, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, dpos, 0, groups2, 0));
+    CHECK(!hy4_rows_at(keys2, kn, dpos, 0, ID, 0, 0));
     std::printf("  in steps of 1, 1, 3 and %u on the GPU's positions: the keys and the groups the same bits\n", T - 5);
+    // the keys a ring (a sequence's: a step's tokens and a pool's - 0.11.0): steps of 8, a ring of 16 - the groups
+    // the full rows' bits
+    float* ring = scratch((size_t) 16 * ID);
+    float* groups3 = scratch((size_t) G * ID);
+    for (uint32_t a = 0; a < T; a += 8) {
+      const uint32_t m = T - a < 8 ? T - a : 8;
+      CHECK(hy4_rows_at(ring, kn + (size_t) a * ID, dpos + a, m, ID, 16, 0));
+      CHECK(hy4_ix_pool_at(ring, 16, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, dpos + a, m, groups3, 0));
+    }
+    CHECK(std::memcmp(down(groups3, (size_t) G * ID).data(), g2.data(), g2.size() * 4) == 0);
+    CHECK(!hy4_ix_pool_at(ring, 6, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, dpos, 1, groups3, 0));  // (not a pool's multiple)
+    std::printf("  the keys a ring of 16 in steps of 8: the groups the full rows' bits\n");
+    CHECK(hipFree(ring) == hipSuccess && hipFree(groups3) == hipSuccess);
   }
 
   // the attention over them (MLA as test_hy4_mla_gpu's), against the reference's
@@ -131,16 +144,16 @@ int main() {
   float* part = scratch(hy4_mla_attn_scratch(H));
   float *o_lat = scratch((size_t) T * H * lat), *out = scratch((size_t) T * H * vd);
   const float scale = 1.0f / sqrtf((float) (nope + rd));
-  CHECK(hy4_mla_kv(kva, norm, lat, rd, kEps, freqs, dpos, T, cache, 0, 0));
+  CHECK(hy4_mla_kv(kva, norm, lat, rd, kEps, freqs, dpos, T, cache, 0, false, 0));
   CHECK(hy4_mla_q(q, kb, H, nope, lat, rd, freqs, dpos, T, qa, table, 0));
-  CHECK(hy4_mla_attn(qa, cache, 0, sinks, H, lat, rd, 0, sel, n_sel, top, pool, scale, dpos, T, o_lat, part, 0));
+  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, sel, n_sel, top, pool, scale, dpos, T, o_lat, part, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
   const std::vector<float> sparse = down(out, (size_t) T * H * vd);
   match("o_proj's input (sparse attention)", sparse, "o_in", kTolAttn);
 
   // every group selected (the first 2,048 tokens' own selection is all of theirs): the dense path's bits
   const uint32_t dense_n = (top - 1) * pool;
-  CHECK(hy4_mla_attn(qa, cache, 0, sinks, H, lat, rd, 0, nullptr, nullptr, 0, 0, scale, dpos, dense_n, o_lat, part, 0));
+  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, nullptr, nullptr, 0, 0, scale, dpos, dense_n, o_lat, part, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, dense_n, out, table, 0));
   const std::vector<float> dense = down(out, (size_t) dense_n * H * vd);
   CHECK(std::memcmp(dense.data(), sparse.data(), dense.size() * sizeof(float)) == 0);

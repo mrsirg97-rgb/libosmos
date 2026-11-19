@@ -389,12 +389,12 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          mat(f, d->wtype, L->gate, H * vd, D, d->xn, R, d->gt) &&
          ops_rms(d->qr, ql, ql, L->q_a_norm, eps, R, d->qres, ql, f->st) &&
          mat(f, d->wtype, L->q_b, H * qk, ql, d->qres, R, d->q) &&
-         hy4_mla_kv(d->kva, L->kv_a_norm, lat, rd, eps, f->freqs_sparse, d->pos, R, s->cache[tl], 0, f->st) &&
+         hy4_mla_kv(d->kva, L->kv_a_norm, lat, rd, eps, f->freqs_sparse, d->pos, R, s->cache[tl], 0, f->kv8, f->st) &&
          hy4_mla_q(d->q, L->k_b, H, nope, lat, rd, f->freqs_sparse, d->pos, R, d->qa, f->table, f->st) &&
          hy4_dfly_sel(s->dsel + ((uint64_t)li * HY4_DFLY_KEEP + (uint32_t)i) * top,
                       s->dn + (uint64_t)li * HY4_DFLY_KEEP + (uint32_t)i, anchor, pool, top, R, d->cap, d->sel, d->n_sel,
                       f->st) &&
-         hy4_mla_attn(d->qa, s->cache[tl], 0, L->sinks, H, lat, rd, 0, d->sel, d->n_sel, d->cap, pool, scale, d->pos, R,
+         hy4_mla_attn(d->qa, s->cache[tl], 0, f->kv8, L->sinks, H, lat, rd, 0, d->sel, d->n_sel, d->cap, pool, scale, d->pos, R,
                       d->olat, f->attn_part, f->st) &&
          hy4_mla_out(d->olat, L->v_b, d->gt, H, lat, vd, R, d->ao, f->table, f->st) &&
          mat(f, d->wtype, L->o, D, H * vd, d->ao, R, d->out) &&

@@ -171,19 +171,41 @@ __device__ inline void rope_pair(const float* in, float* out, uint32_t i, int32_
   out[2 * i + 1] = x1 * c + x0 * s;
 }
 
+// a cache row: F32 [latent | rope], or q8: the latent Q8_0 (ggml's blocks: an f16 d = amax / 127, 32 codes
+// round(x / d)) then the rope part F32 (vLLM's fp8_ds_mla keeps it wide too) - kQ8Bytes a 32 latent values
+__host__ __device__ inline uint64_t mla_row_bytes(uint32_t latent, uint32_t rope_dim, bool q8) {
+  return q8 ? (uint64_t) latent / 32 * 34 + (uint64_t) rope_dim * 4 : (uint64_t) (latent + rope_dim) * 4;
+}
+
 __global__ __launch_bounds__(kThreads) void mla_kv_kernel(const float* kva, const float* norm_w, uint32_t latent,
                                                           uint32_t rope_dim, float eps, const float* freqs,
-                                                          const int32_t* pos, float* cache, uint32_t slots) {
+                                                          const int32_t* pos, uint8_t* cache, uint32_t slots, bool q8) {
   __shared__ float lds[kThreads];
+  __shared__ float lat[HY4_MLA_MAX_LATENT];
   const uint32_t t = blockIdx.x, row = latent + rope_dim;
   const float* in = kva + (uint64_t) t * row;
-  float* out = cache + (uint64_t) (slots ? (uint32_t) pos[t] % slots : (uint32_t) pos[t]) * row;
+  uint8_t* out = cache + (uint64_t) (slots ? (uint32_t) pos[t] % slots : (uint32_t) pos[t]) * mla_row_bytes(latent, rope_dim, q8);
   float ss = 0;
   for (uint32_t d = threadIdx.x; d < latent; d += kThreads) ss = fmaf(in[d], in[d], ss);
   ss = block_sum<kThreads>(ss, lds);
   const float r = 1.0f / sqrtf(ss / (float) latent + eps);
-  for (uint32_t d = threadIdx.x; d < latent; d += kThreads) out[d] = norm_w[d] * (in[d] * r);
-  for (uint32_t i = threadIdx.x; i < rope_dim / 2; i += kThreads) rope_pair(in + latent, out + latent, i, pos[t], freqs);
+  float* rope_out = (float*) (out + (q8 ? (uint64_t) latent / 32 * 34 : (uint64_t) latent * 4));
+  if (!q8) {
+    for (uint32_t d = threadIdx.x; d < latent; d += kThreads) ((float*) out)[d] = norm_w[d] * (in[d] * r);
+  } else {
+    for (uint32_t d = threadIdx.x; d < latent; d += kThreads) lat[d] = norm_w[d] * (in[d] * r);
+    __syncthreads();
+    for (uint32_t b = threadIdx.x; b < latent / 32; b += kThreads) {  // a thread a block, in its values' order
+      float amax = 0;
+      for (int i = 0; i < 32; i++) amax = fmaxf(amax, fabsf(lat[b * 32 + i]));
+      const float dd = amax / 127.0f, id = dd != 0.0f ? 1.0f / dd : 0.0f;
+      uint8_t* blk = out + (uint64_t) b * 34;
+      const __half h = __float2half(dd);
+      *(__half*) blk = h;
+      for (int i = 0; i < 32; i++) blk[2 + i] = (uint8_t) (int8_t) roundf(lat[b * 32 + i] * id);
+    }
+  }
+  for (uint32_t i = threadIdx.x; i < rope_dim / 2; i += kThreads) rope_pair(in + latent, rope_out, i, pos[t], freqs);
 }
 
 // the per-head matvecs' table (mv_group_tok's): entry e = token t, head h (e = t heads + h) - head h's matrix,
@@ -243,7 +265,7 @@ __device__ inline Keys keys_of(uint32_t t, const int32_t* pos, uint32_t window, 
   return k;
 }
 
-__global__ __launch_bounds__(kThreads) void mla_split_kernel(const float* qa, const float* cache, uint32_t slots,
+__global__ __launch_bounds__(kThreads) void mla_split_kernel(const float* qa, const uint8_t* cache, uint32_t slots, bool q8,
                                                              uint32_t heads, uint32_t latent, uint32_t rope_dim,
                                                              uint32_t window, const int32_t* sel, const int32_t* n_sel,
                                                              uint32_t sel_cap, uint32_t pool, float scale,
@@ -279,9 +301,26 @@ __global__ __launch_bounds__(kThreads) void mla_split_kernel(const float* qa, co
     if (threadIdx.x < nt) rows[threadIdx.x] = keys.row(kt + threadIdx.x);  // a key's cache row once, not a value's
     __syncthreads();
     const uint32_t row4 = row / 4;  // (row a multiple of 4: hy4_mla_attn's check)
-    for (uint32_t i = threadIdx.x; i < nt * row4; i += kThreads) {
-      const uint32_t kk = i / row4, d = i % row4;
-      *(float4*) &tile[kk][4 * d] = *(const float4*) (cache + (uint64_t) rows[kk] * row + 4 * d);
+    const uint64_t rb = mla_row_bytes(latent, rope_dim, q8);
+    if (!q8)
+      for (uint32_t i = threadIdx.x; i < nt * row4; i += kThreads) {
+        const uint32_t kk = i / row4, d = i % row4;
+        *(float4*) &tile[kk][4 * d] = *(const float4*) (cache + (uint64_t) rows[kk] * rb + 16 * d);
+      }
+    else {  // a row's latent decoded (d times a code: Q8_0's values, exact in F32), its rope part as stored
+      const uint32_t lb = latent / 32;
+      for (uint32_t i = threadIdx.x; i < nt * lb * 8; i += kThreads) {  // a thread 4 codes of a block
+        const uint32_t kk = i / (lb * 8), b = (i / 8) % lb, c = i % 8;
+        const uint8_t* blk = cache + (uint64_t) rows[kk] * rb + (uint64_t) b * 34;
+        const float d = __half2float(*(const __half*) blk);
+        const int8_t* q = (const int8_t*) (blk + 2 + 4 * c);  // (a block 34 bytes: its codes 2-aligned - byte loads)
+        *(float4*) &tile[kk][b * 32 + 4 * c] = make_float4(d * q[0], d * q[1], d * q[2], d * q[3]);
+      }
+      const uint32_t r4 = rope_dim / 4;
+      for (uint32_t i = threadIdx.x; i < nt * r4; i += kThreads) {
+        const uint32_t kk = i / r4, d = i % r4;
+        *(float4*) &tile[kk][latent + 4 * d] = *(const float4*) (cache + (uint64_t) rows[kk] * rb + (uint64_t) lb * 34 + 16 * d);
+      }
     }
     __syncthreads();
     if (!live) continue;
@@ -395,13 +434,16 @@ __global__ __launch_bounds__(kIxDim) void ix_pool_kernel(const float* keys, cons
                                                          const uint8_t* w_gate, const float* ape, const float* norm_w,
                                                          uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps,
                                                          const float* freqs, uint32_t g0, const int32_t* pos,
-                                                         float* groups) {
+                                                         float* groups, uint32_t slots) {
   __shared__ float ks[kIxPoolMax][kIxDim], out[kIxDim], lds[kIxDim];
   // pos given: the group this block's token completes, or none (a whole block's return: no barrier passed)
   if (pos && ((uint32_t) pos[blockIdx.x] + 1) % pool) return;
   const uint32_t g = pos ? (uint32_t) pos[blockIdx.x] / pool : g0 + blockIdx.x, i = threadIdx.x;
   const bool live = i < dim;
-  for (uint32_t s = 0; s < pool; s++) ks[s][i] = live ? keys[((uint64_t) g * pool + s) * dim + i] : 0.0f;
+  for (uint32_t s = 0; s < pool; s++) {  // (slots: the keys a ring, a position's row its place mod slots)
+    const uint64_t p = (uint64_t) g * pool + s;
+    ks[s][i] = live ? keys[(slots ? p % slots : p) * dim + i] : 0.0f;
+  }
   __syncthreads();
   float v[kIxPoolMax], gt[kIxPoolMax], m = -INFINITY;
   const uint64_t row_bytes = dim / kQ8Block * kQ8Bytes;
@@ -604,11 +646,18 @@ extern "C" bool hy4_engram_update(float* h, const float* kv, const float* kv_b, 
   return ok();
 }
 
+extern "C" uint64_t hy4_mla_row_bytes(uint32_t latent, uint32_t rope_dim, bool q8) {
+  return mla_row_bytes(latent, rope_dim, q8);
+}
+
 extern "C" bool hy4_mla_kv(const float* kva, const float* norm_w, uint32_t latent, uint32_t rope_dim, float eps,
-                           const float* freqs, const int32_t* pos, uint32_t n_tok, float* cache, uint32_t slots,
-                           void* stream) {
-  if (!kva || !norm_w || !freqs || !pos || !cache || !latent || !rope_dim || rope_dim % 2 || !n_tok) return false;
-  mla_kv_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kva, norm_w, latent, rope_dim, eps, freqs, pos, cache, slots);
+                           const float* freqs, const int32_t* pos, uint32_t n_tok, void* cache, uint32_t slots,
+                           bool q8, void* stream) {
+  if (!kva || !norm_w || !freqs || !pos || !cache || !latent || latent > HY4_MLA_MAX_LATENT || !rope_dim ||
+      rope_dim % 2 || !n_tok || (q8 && latent % 32))
+    return false;
+  mla_kv_kernel<<<n_tok, kThreads, 0, st(stream)>>>(kva, norm_w, latent, rope_dim, eps, freqs, pos, (uint8_t*) cache,
+                                                    slots, q8);
   return ok();
 }
 
@@ -658,13 +707,13 @@ extern "C" uint64_t hy4_mla_attn_scratch(uint32_t heads) {
   return (uint64_t) kTokChunk * heads * kMaxSplits * (HY4_MLA_MAX_LATENT + 2);
 }
 
-extern "C" bool hy4_mla_attn(const float* qa, const float* cache, uint32_t slots, const float* sinks, uint32_t heads,
+extern "C" bool hy4_mla_attn(const float* qa, const void* cache, uint32_t slots, bool q8, const float* sinks, uint32_t heads,
                              uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t* sel,
                              const int32_t* n_sel, uint32_t sel_cap, uint32_t pool, float scale, const int32_t* pos,
                              uint32_t n_tok, float* o_lat, float* scratch, void* stream) {
   if (!qa || !cache || !sinks || !pos || !o_lat || !scratch || !heads || !latent || latent > HY4_MLA_MAX_LATENT ||
       !rope_dim || rope_dim > kMaxRope || !n_tok || (window && window > HY4_MLA_MAX_KEYS) || latent % 4 || rope_dim % 4 ||
-      (uintptr_t) cache % 16 || (uintptr_t) qa % 16)
+      (uintptr_t) cache % 16 || (uintptr_t) qa % 16 || (q8 && (latent % 32 || mla_row_bytes(latent, rope_dim, true) % 16)))
     return false;
   if (sel && (!n_sel || window || !pool || !sel_cap || (uint64_t) sel_cap * pool > HY4_MLA_MAX_KEYS)) return false;
   if (slots && slots < window) return false;
@@ -675,7 +724,8 @@ extern "C" bool hy4_mla_attn(const float* qa, const float* cache, uint32_t slots
   for (uint32_t t0 = 0; t0 < n_tok; t0 += kTokChunk) {
     const uint32_t m = n_tok - t0 < kTokChunk ? n_tok - t0 : kTokChunk;
     mla_split_kernel<<<dim3(splits, (heads + kHeadGroup - 1) / kHeadGroup, m), kThreads, 0, s>>>(
-        qa, cache, slots, heads, latent, rope_dim, window, sel, n_sel, sel_cap, pool, scale, pos, t0, scratch);
+        qa, (const uint8_t*) cache, slots, q8, heads, latent, rope_dim, window, sel, n_sel, sel_cap, pool, scale, pos, t0,
+        scratch);
     mla_merge_kernel<<<dim3(heads, m), kThreads, 0, s>>>(scratch, sinks, heads, latent, window, sel, n_sel, sel_cap,
                                                          pool, pos, t0, o_lat);
     if (!ok()) return false;
@@ -707,31 +757,34 @@ extern "C" bool hy4_ix_pool(const float* keys, const void* w_value, const void* 
       pool > kIxPoolMax || rope_dim % 2 || rope_dim > dim || !n_groups)
     return false;
   ix_pool_kernel<<<n_groups, kIxDim, 0, st(stream)>>>(keys, (const uint8_t*) w_value, (const uint8_t*) w_gate, ape,
-                                                      norm_w, dim, pool, rope_dim, eps, freqs, g0, nullptr, groups);
+                                                      norm_w, dim, pool, rope_dim, eps, freqs, g0, nullptr, groups, 0);
   return ok();
 }
 
-extern "C" bool hy4_ix_pool_at(const float* keys, const void* w_value, const void* w_gate, const float* ape,
-                               const float* norm_w, uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps,
-                               const float* freqs, const int32_t* pos, uint32_t n_tok, float* groups, void* stream) {
+extern "C" bool hy4_ix_pool_at(const float* keys, uint32_t slots, const void* w_value, const void* w_gate,
+                               const float* ape, const float* norm_w, uint32_t dim, uint32_t pool, uint32_t rope_dim,
+                               float eps, const float* freqs, const int32_t* pos, uint32_t n_tok, float* groups,
+                               void* stream) {
   if (!keys || !w_value || !w_gate || !ape || !norm_w || !groups || !pos || !dim || dim > kIxDim || dim % kQ8Block ||
-      !pool || pool > kIxPoolMax || rope_dim % 2 || rope_dim > dim || !n_tok)
+      !pool || pool > kIxPoolMax || rope_dim % 2 || rope_dim > dim || !n_tok || (slots && (slots < pool || slots % pool)))
     return false;
   ix_pool_kernel<<<n_tok, kIxDim, 0, st(stream)>>>(keys, (const uint8_t*) w_value, (const uint8_t*) w_gate, ape, norm_w,
-                                                   dim, pool, rope_dim, eps, freqs, 0, pos, groups);
+                                                   dim, pool, rope_dim, eps, freqs, 0, pos, groups, slots);
   return ok();
 }
 
-__global__ void rows_at_kernel(float* dst, const float* src, const int32_t* pos, uint32_t len) {
+__global__ void rows_at_kernel(float* dst, const float* src, const int32_t* pos, uint32_t len, uint32_t slots) {
   const uint32_t t = blockIdx.y;
+  const uint64_t r = slots ? (uint32_t) pos[t] % slots : (uint32_t) pos[t];
   for (uint32_t i = blockIdx.x * kThreads + threadIdx.x; i < len; i += gridDim.x * kThreads)
-    dst[(uint64_t) pos[t] * len + i] = src[(uint64_t) t * len + i];
+    dst[r * len + i] = src[(uint64_t) t * len + i];
 }
 
-extern "C" bool hy4_rows_at(float* dst, const float* src, const int32_t* pos, uint32_t n, uint32_t len, void* stream) {
+extern "C" bool hy4_rows_at(float* dst, const float* src, const int32_t* pos, uint32_t n, uint32_t len, uint32_t slots,
+                            void* stream) {
   if (!dst || !src || !pos || !n || !len) return false;
   const uint32_t bx = (len + kThreads - 1) / kThreads;
-  rows_at_kernel<<<dim3(bx < 64 ? bx : 64, n), kThreads, 0, st(stream)>>>(dst, src, pos, len);
+  rows_at_kernel<<<dim3(bx < 64 ? bx : 64, n), kThreads, 0, st(stream)>>>(dst, src, pos, len, slots);
   return ok();
 }
 

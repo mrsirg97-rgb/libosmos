@@ -79,8 +79,8 @@ static bool indexer(Hy4Forward *f, Hy4Seq *s, int l, uint32_t off, uint32_t len,
   const uint32_t top = (uint32_t)(g->ix_topk / g->ix_pool);
   float *kn = f->ixkn + (uint64_t)off * ID;
   return ops_rms(ixk + (uint64_t)off * ID, ID, ID, hy4_fv(f, L->ix_k_norm), g->rms_eps, len, kn, ID, f->st) &&
-         hy4_rows_at(s->keys[l], kn, f->pos + off, len, ID, f->st) &&
-         hy4_ix_pool_at(s->keys[l], hy4_dev(f, L->ix_pool_value), hy4_dev(f, L->ix_pool_gate), hy4_fv(f, L->ix_pool_ape),
+         hy4_rows_at(s->keys[l], kn, f->pos + off, len, ID, f->kring, f->st) &&
+         hy4_ix_pool_at(s->keys[l], f->kring, hy4_dev(f, L->ix_pool_value), hy4_dev(f, L->ix_pool_gate), hy4_fv(f, L->ix_pool_ape),
                         hy4_fv(f, L->ix_pool_norm), ID, pool, (uint32_t)g->rope_dim, g->rms_eps, f->freqs_sparse,
                         f->pos + off, len, s->groups[l], f->st) &&
          hy4_ix_select(f->ixq + (uint64_t)off * IH * ID, ixw + (uint64_t)off * IH, s->groups[l], IH, ID, pool, top,
@@ -135,14 +135,14 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
     const uint32_t m = run[r].len;
     Hy4Seq *s = run[r].s;
     ok = hy4_mla_kv(kva + o * row, hy4_fv(f, L->kv_a_norm), lat, rd, g->rms_eps, freqs, f->pos + o, m, s->cache[l],
-                    sw ? f->ring : 0, f->st) &&
+                    sw ? f->ring : 0, f->kv8, f->st) &&
          (read ? heads_mm(f, H, hy4_dev(f, L->k_b), (uint64_t)lat * nope / 32 * 34, lat, nope, f->q + o * H * qk, H * qk,
                           qk, m, f->qa + o * H * row, H * row, row) &&
                      hy4_mla_qrope(f->q + o * H * qk, H, qk, row, rd, freqs, f->pos + o, m, f->qa + o * H * row, f->st)
                 : hy4_mla_q(f->q + o * H * qk, hy4_dev(f, L->k_b), H, nope, lat, rd, freqs, f->pos + o, m,
                             f->qa + o * H * row, f->table, f->st)) &&
          (sw || indexer(f, s, l, (uint32_t)o, m, ixk, ixw)) && dfly_snap(f, s, l, (uint32_t)o, m) &&
-         hy4_mla_attn(f->qa + o * H * row, s->cache[l], sw ? f->ring : 0, hy4_fv(f, L->sinks), H, lat, rd,
+         hy4_mla_attn(f->qa + o * H * row, s->cache[l], sw ? f->ring : 0, f->kv8, hy4_fv(f, L->sinks), H, lat, rd,
                       sw ? (uint32_t)g->window : 0, sw ? NULL : f->sel + o * top, sw ? NULL : f->n_sel + o,
                       sw ? 0 : top, sw ? 0 : (uint32_t)g->ix_pool, scale, f->pos + o, m, f->olat + o * H * lat, f->attn_part, f->st);
   }

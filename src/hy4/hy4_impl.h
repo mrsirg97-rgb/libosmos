@@ -34,6 +34,9 @@ struct Hy4Forward
 {
   const Hy4Weights *w;
   uint32_t max_tokens, max_ctx, logit_rows, ring; /* ring: a sliding layer's rows (its window, a step, the reach) */
+  bool kv8;                                       /* MLA's cache rows Q8_0 (Hy4Options' kv_f32 not set) */
+  uint32_t kring;    /* a sparse layer's token keys a ring of this many (a step's, a pool's and the reach: a key is
+                        read only when its group completes - 0.11.0; was a row a position, 6 KB a token) */
   void **dev;                                     /* the model's tensors on the GPU, by index in its table */
   float *fn_attn[HY4_MAX_LAYERS], *fn_ffn[HY4_MAX_LAYERS], *fn_out; /* iHC's mixes, F32 (the file's, or decoded) */
   float *freqs_swa, *freqs_sparse;                                  /* the ropes' frequencies */
@@ -97,7 +100,7 @@ struct Hy4Seq
   bool broken;
   int32_t *tokens;                                     /* host: every token so far (the n-grams' history) */
   float *cache[HY4_MAX_LAYERS];                        /* MLA's rows: a sparse layer's by position, a sliding one's ring */
-  float *keys[HY4_MAX_LAYERS], *groups[HY4_MAX_LAYERS]; /* a sparse layer's token keys and pooled groups */
+  float *keys[HY4_MAX_LAYERS], *groups[HY4_MAX_LAYERS]; /* a sparse layer's token keys (a ring) and pooled groups */
   /* DFly2's snapshot of the last step's last rows (positions dpos0 .. dpos0 + dkeep - 1): each draft layer's target
      picks ([HY4_DFLY_LAYERS][HY4_DFLY_KEEP][top] and their counts) and the head's normed input (dhid_ok: kept) */
   int32_t *dsel, *dn;

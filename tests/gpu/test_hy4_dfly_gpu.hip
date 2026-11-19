@@ -11,6 +11,7 @@ extern "C" {
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "osmos/gpu/hy4_ops.h"
 #include "osmos/hy4/forward.h"
 #include "osmos/model/gguf.h"
 }
@@ -62,7 +63,7 @@ int main() {
                                                              : kPromptDefault;
   const std::vector<float>& fid = A("ids");
   CHECK(kPrompt > 0 && fid.size() >= kPrompt);
-  const Hy4Options o = {kPrompt, kPrompt + kGen + 64, HY4_DFLY_DRAFTS + 1};
+  const Hy4Options o = {kPrompt, kPrompt + kGen + 64, HY4_DFLY_DRAFTS + 1, getenv("OSMOS_TEST_HY4_KV8") == nullptr};
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -130,8 +131,25 @@ int main() {
         for (int li = 0, l = 0; l < geo->n_layers; l++) {
           if (f->dfly_slot[l] < 0) continue;
           li = f->dfly_slot[l];
-          const uint64_t row = (uint64_t) (geo->kv_lora + geo->rope_dim) * 4;
-          dump(dir, ("cache" + std::to_string(l) + ".f32").c_str(), b->cache[l], (uint64_t) anchor * row);
+          const uint32_t lat = (uint32_t) geo->kv_lora, rd = (uint32_t) geo->rope_dim, rf = lat + rd;
+          const uint64_t rb = hy4_mla_row_bytes(lat, rd, f->kv8);
+          std::vector<uint8_t> raw((size_t) anchor * rb);
+          CHECK(hipMemcpy(raw.data(), b->cache[l], raw.size(), hipMemcpyDeviceToHost) == hipSuccess);
+          std::vector<float> rows((size_t) anchor * rf);  // (F32 for the oracle: a Q8_0 row's latent decoded)
+          for (int32_t t = 0; t < anchor; t++) {
+            const uint8_t* r = raw.data() + (size_t) t * rb;
+            if (!f->kv8) {
+              std::memcpy(&rows[(size_t) t * rf], r, rf * 4);
+              continue;
+            }
+            for (uint32_t blk = 0; blk < lat / 32; blk++) {
+              _Float16 d16;
+              std::memcpy(&d16, r + blk * 34, 2);
+              for (int i = 0; i < 32; i++) rows[(size_t) t * rf + blk * 32 + i] = (float) d16 * (float) (int8_t) r[blk * 34 + 2 + i];
+            }
+            std::memcpy(&rows[(size_t) t * rf + lat], r + lat / 32 * 34, rd * 4);
+          }
+          dump(dir, ("cache" + std::to_string(l) + ".f32").c_str(), rows.data(), rows.size() * 4, true);
           dump(dir, ("sel" + std::to_string(l) + ".i32").c_str(), b->dsel + ((uint64_t) li * HY4_DFLY_KEEP + i) * top,
                (uint64_t) top * 4);
           dump(dir, ("nsel" + std::to_string(l) + ".i32").c_str(), b->dn + (uint64_t) li * HY4_DFLY_KEEP + i, 4);

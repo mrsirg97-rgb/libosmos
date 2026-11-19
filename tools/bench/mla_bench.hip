@@ -35,11 +35,11 @@ int main(int argc, char** argv) {
     if (hipEventCreate(&a) != hipSuccess || hipEventCreate(&b) != hipSuccess) return 1;
     bool ok = true;
     for (uint32_t i = 0; i < 10 && ok; i++)
-      ok = hy4_mla_attn(qa, cache, s.slots, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
+      ok = hy4_mla_attn(qa, cache, s.slots, false, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
                         scratch, nullptr);
     if (hipEventRecord(a, nullptr) != hipSuccess) return 1;
     for (uint32_t i = 0; i < iters && ok; i++)
-      ok = hy4_mla_attn(qa, cache, s.slots, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
+      ok = hy4_mla_attn(qa, cache, s.slots, false, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
                         scratch, nullptr);
     float ms = 0;
     if (!ok || hipEventRecord(b, nullptr) != hipSuccess || hipEventSynchronize(b) != hipSuccess ||

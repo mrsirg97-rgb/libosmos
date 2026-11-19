@@ -24,13 +24,15 @@ bool hy4_engram_rows(const float *rows, const float *norm_w, uint32_t cols, uint
                      float *emb, void *stream);
 bool hy4_engram_update(float *h, const float *kv, const float *kv_b, const float *gate, const float *hc_scale,
                        const float *pre_gamma, uint32_t hc, uint32_t dim, uint32_t n_tok, void *stream);
+uint64_t hy4_mla_row_bytes(uint32_t latent, uint32_t rope_dim, bool q8); /* a cache row's bytes */
 bool hy4_mla_kv(const float *kva, const float *norm_w, uint32_t latent, uint32_t rope_dim, float eps,
-                const float *freqs, const int32_t *pos, uint32_t n_tok, float *cache, uint32_t slots, void *stream);
+                const float *freqs, const int32_t *pos, uint32_t n_tok, void *cache, uint32_t slots, bool q8,
+                void *stream);
 uint64_t hy4_mla_table_bytes(uint32_t n_tok, uint32_t heads); /* hy4_mla_q's and hy4_mla_out's table: bytes */
 bool hy4_mla_q(const float *q, const void *k_b, uint32_t heads, uint32_t nope, uint32_t latent, uint32_t rope_dim,
                const float *freqs, const int32_t *pos, uint32_t n_tok, float *qa, void *table, void *stream);
 uint64_t hy4_mla_attn_scratch(uint32_t heads); /* hy4_mla_attn's partials: floats */
-bool hy4_mla_attn(const float *qa, const float *cache, uint32_t slots, const float *sinks, uint32_t heads,
+bool hy4_mla_attn(const float *qa, const void *cache, uint32_t slots, bool q8, const float *sinks, uint32_t heads,
                   uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
                   uint32_t pool, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat, float *scratch,
                   void *stream);
@@ -48,10 +50,11 @@ bool hy4_mla_out(const float *o_lat, const void *v_b, const float *gate, uint32_
 bool hy4_ix_pool(const float *keys, const void *w_value, const void *w_gate, const float *ape, const float *norm_w,
                  uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps, const float *freqs, uint32_t g0,
                  uint32_t n_groups, float *groups, void *stream);
-bool hy4_ix_pool_at(const float *keys, const void *w_value, const void *w_gate, const float *ape, const float *norm_w,
-                    uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps, const float *freqs, const int32_t *pos,
-                    uint32_t n_tok, float *groups, void *stream);
-bool hy4_rows_at(float *dst, const float *src, const int32_t *pos, uint32_t n, uint32_t len, void *stream);
+bool hy4_ix_pool_at(const float *keys, uint32_t slots, const void *w_value, const void *w_gate, const float *ape,
+                    const float *norm_w, uint32_t dim, uint32_t pool, uint32_t rope_dim, float eps, const float *freqs,
+                    const int32_t *pos, uint32_t n_tok, float *groups, void *stream);
+bool hy4_rows_at(float *dst, const float *src, const int32_t *pos, uint32_t n, uint32_t len, uint32_t slots,
+                 void *stream);
 bool hy4_ix_query(float *q, float *w, uint32_t heads, uint32_t dim, uint32_t rope_dim, const float *freqs,
                   const int32_t *pos, uint32_t n_tok, void *stream);
 bool hy4_ix_select(const float *q, const float *w, const float *groups, uint32_t heads, uint32_t dim, uint32_t pool,
@@ -100,7 +103,9 @@ pos * freqs[i] (freqs: the layer kind's base^(-2i / rope_dim)), on the rope part
 hy4_mla_kv
   the latent and its key from kv_a's output (kva [n_tok][latent + rope_dim]): the latent RMSNorm'd (norm_w, eps), the
   key's rope part roped at pos[t]; the row into cache row pos[t] - or, slots given (a sliding layer's ring), row
-  pos[t] % slots.
+  pos[t] % slots. a row hy4_mla_row_bytes: F32 [latent | rope], or q8 the latent Q8_0 (ggml's: an f16 d = amax / 127
+  a 32 values, codes round(x / d); latent a multiple of 32) then the rope part F32 - 800 bytes for Hy4's 512 + 64
+  against 2,304 (0.11.0: the context's memory a quarter).
 
 hy4_mla_q
   q_b's output (q [n_tok][heads][nope + rope_dim]) to the queries the cache is read with: each head's nope part
@@ -114,7 +119,8 @@ hy4_mla_attn
   sel[t * sel_cap ..] (ascending; each `pool` positions, the last the token's own, its tokens up to pos[t]): scores
   qa_h . row * scale; the head's sink a logit with no value (softmax over the scores and the sink); o_lat
   [n_tok][heads][latent] = sum over the keys of p row[:latent], in the keys' order - every group selected, the dense
-  path's bits. a key's row is its position's, or position % slots (slots given: a ring at least the window long).
+  path's bits. a key's row is its position's, or position % slots (slots given: a ring at least the window long);
+  q8: rows hy4_mla_kv's q8 (their latent decoded d times a code, exact in F32, before any of the math).
   flash decoding: a block a group of 8 heads (MQA's rows read once for them) over a split of 64 of its token's keys,
   an online softmax in the keys' order; the splits merged in order with the sink - the splits a token's own: its bits
   whatever the step. scratch: hy4_mla_attn_scratch(heads) floats (the partials of 16 tokens at a time). at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
@@ -139,7 +145,8 @@ hy4_mla_out
 the sparse layers' compressed indexer (HYV4FlashCompressedIndexer): a token key a position (rms(ix_k x): ops_rms),
 groups of `pool` of them pooled into a key each, a query's heads scoring the complete groups before its own.
 
-hy4_ix_pool_at / hy4_rows_at
+hy4_ix_pool_at / hy4_rows_at (slots: the keys a ring - a position's row its place mod slots, slots a multiple of
+  pool: a group's keys read from it while the ring holds them; 0 a row a position)
   a step's own, its positions on the GPU (pos[t], t < n_tok: a decode replayed without the host): hy4_ix_pool of the
   group each token completes (pos[t] + 1 a multiple of pool: group pos[t] / pool; the rest nothing) - hy4_ix_pool's
   bits; dst's row pos[t] = src's row t (len floats a row).

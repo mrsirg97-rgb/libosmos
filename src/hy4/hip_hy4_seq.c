@@ -7,6 +7,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/state_parts.h"
+#include "osmos/gpu/hy4_ops.h"
 #include "hy4_impl.h"
 
 Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR])
@@ -18,11 +19,11 @@ Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR])
     return hy4_fail(err, "out of memory"), NULL;
   s->f = f;
   const Hy4Geometry *g = &f->w->geo;
-  const uint64_t row = (uint64_t)(g->kv_lora + g->rope_dim) * F, ctx = f->max_ctx;
+  const uint64_t row = hy4_mla_row_bytes((uint32_t)g->kv_lora, (uint32_t)g->rope_dim, f->kv8), ctx = f->max_ctx;
   bool ok = (s->tokens = malloc(ctx * 4)) != NULL;
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = g->sliding[l] ? hy4_alloc(&s->cache[l], f->ring * row)
-                       : hy4_alloc(&s->cache[l], ctx * row) && hy4_alloc(&s->keys[l], ctx * g->ix_dim * F) &&
+                       : hy4_alloc(&s->cache[l], ctx * row) && hy4_alloc(&s->keys[l], (uint64_t)f->kring * g->ix_dim * F) &&
                              hy4_alloc(&s->groups[l], (ctx / g->ix_pool + 1) * g->ix_dim * F);
   const uint64_t top = (uint64_t)(g->ix_topk / g->ix_pool); /* DFly2's snapshot (small: always made) */
   ok = ok && hy4_alloc(&s->dsel, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * top * 4) &&
@@ -75,7 +76,7 @@ void hy4_seq_fail(Hy4Seq *s)
 /* a saved state: the header (its position and the two tokens before it - the next step's n-grams' history; the
    rest of it never read after a load, whose reach is 0), then the parts, then the sum (state_parts.h) */
 #define STATE_MAGIC 0x53345948u /* "HY4S" */
-#define STATE_VERSION 1u
+#define STATE_VERSION 2u /* (2: 0.11.0's cache rows, hy4_mla_row_bytes - Q8_0 latents by default) */
 #define HISTORY HY4_STATE_HISTORY
 
 typedef struct Header
@@ -88,19 +89,20 @@ typedef struct Header
 
 #define MAX_PARTS (3 * HY4_MAX_LAYERS)
 
-/* the parts at position pos, in the string's order: a sparse layer's MLA rows and token keys below pos and its
+/* the parts at position pos, in the string's order: a sparse layer's MLA rows below pos, its token keys' ring and its
    complete groups; a sliding layer's whole ring */
 static int parts(const Hy4Seq *s, int32_t pos, StatePart *p)
 {
   const Hy4Forward *f = s->f;
   const Hy4Geometry *g = &f->w->geo;
-  const uint64_t row = (uint64_t)(g->kv_lora + g->rope_dim) * F, key = (uint64_t)g->ix_dim * F;
+  const uint64_t row = hy4_mla_row_bytes((uint32_t)g->kv_lora, (uint32_t)g->rope_dim, f->kv8),
+                 key = (uint64_t)g->ix_dim * F;
   int n = 0;
   for (int l = 0; l < g->n_layers; l++)
     if (g->sliding[l])
       p[n++] = (StatePart){s->cache[l], f->ring * row};
     else
-      p[n++] = (StatePart){s->cache[l], (uint64_t)pos * row}, p[n++] = (StatePart){s->keys[l], (uint64_t)pos * key},
+      p[n++] = (StatePart){s->cache[l], (uint64_t)pos * row}, p[n++] = (StatePart){s->keys[l], (uint64_t)f->kring * key},
       p[n++] = (StatePart){s->groups[l], (uint64_t)(pos / g->ix_pool) * key};
   return n;
 }

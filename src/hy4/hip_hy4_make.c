@@ -225,9 +225,11 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   if (!f)
     return hy4_fail(err, "out of memory"), NULL;
   const Hy4Geometry *g = &w->geo;
-  f->w = w, f->max_tokens = o->max_tokens, f->max_ctx = o->max_ctx;
+  f->w = w, f->max_tokens = o->max_tokens, f->max_ctx = o->max_ctx, f->kv8 = !o->kv_f32;
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
   f->ring = (uint32_t)g->window + o->max_tokens + HY4_MAX_BACK;
+  f->kring = (o->max_tokens + (uint32_t)g->ix_pool + HY4_MAX_BACK + (uint32_t)g->ix_pool - 1) / (uint32_t)g->ix_pool *
+             (uint32_t)g->ix_pool;
   f->eg_fd = -1;
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     f->dfly_slot[l] = -1;
@@ -318,6 +320,7 @@ uint64_t hy4_identity(const Hy4Forward *f)
     return 0;
   uint64_t h = fnv(&f->w->geo, sizeof f->w->geo, FNV_SEED);
   h = fnv_u64(f->ring, h); /* a sliding layer's ring: its rows' places another forward's */
+  h = fnv_u64(f->kv8, h);  /* the cache rows' format */
   for (int i = 0; i < f->w->model->n_files; i++)
     h = fnv_file(f->w->model->paths[i], h);
   return h;

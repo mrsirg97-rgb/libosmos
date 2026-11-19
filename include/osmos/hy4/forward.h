@@ -24,6 +24,8 @@ typedef struct Hy4Options
   uint32_t max_tokens; /* a step's tokens at most */
   uint32_t max_ctx;    /* a sequence's positions at most (its state sized for them) */
   uint32_t logit_rows; /* the logits' rows a step keeps at most (0: max_tokens) */
+  bool kv_f32;         /* MLA's cache rows F32 (the reference's checks); else (0.11.0's default) the latent Q8_0 and
+                          the rope part F32 - 800 bytes a row against 2,304 (hy4_mla_row_bytes) */
 } Hy4Options;
 
 /* the weights to the GPU (every tensor but the Engram table, read from `fds`' files as the step needs its rows: the

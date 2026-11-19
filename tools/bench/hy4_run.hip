@@ -8,6 +8,8 @@
 //              the sampled token one decode step, the target's greedy picks keeping the leading drafts - its rate,
 //              its drafts accepted a round; the tokens the plain decode's (the same hash). CUM=x: a round's drafts
 //              kept while their probabilities' product is at least x (the engine's cum_min)
+//   NLL=1      the prompt's every row kept: the mean NLL of each next id (teacher-forced), a cache's or a math's cost
+//              over the whole text (KV_F32: the reference's F32 cache against the engine's Q8_0)
 #include <fcntl.h>
 #include <hip/hip_runtime.h>
 #include <unistd.h>
@@ -56,7 +58,10 @@ int main(int argc, char** argv) {
   }
   const char* dfly = getenv("DFLY");
   const double t0 = now();
-  const Hy4Options o = {S, P + D + 2 * HY4_DFLY_DRAFTS + HY4_MAX_BACK, dfly ? (uint32_t) HY4_DFLY_DRAFTS + 1 : 1u};
+  const bool nll_mode = getenv("NLL") != nullptr;
+  const Hy4Options o = {S, P + D + 2 * HY4_DFLY_DRAFTS + HY4_MAX_BACK,
+                        nll_mode ? S : dfly ? (uint32_t) HY4_DFLY_DRAFTS + 1 : 1u,
+                       getenv("KV_F32") != nullptr};  // (KV_F32: the reference's F32 cache; else the engine's Q8_0)
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::fprintf(stderr, "%s\n", err);
   CHECK(f);
@@ -66,10 +71,22 @@ int main(int argc, char** argv) {
   std::printf("hy4_run: loaded in %.1f s; prompt %u in steps of %u, decode %u\n", now() - t0, P, S, D);
   const double t1 = now();
   uint32_t n = 0;
+  double nll = 0;
+  uint64_t scored = 0;
+  const uint32_t V = (uint32_t) w->geo.n_vocab;
   for (uint32_t at = 0; at < P; at += S) {
     n = P - at < S ? P - at : S;
-    if (!hy4_step(f, s, ids.data() + at, n, 1, err)) std::fprintf(stderr, "%s\n", err), std::exit(1);
+    if (!hy4_step(f, s, ids.data() + at, n, nll_mode ? n : 1, err)) std::fprintf(stderr, "%s\n", err), std::exit(1);
+    for (uint32_t r = 0; nll_mode && r < n && at + r + 1 < P; r++) {
+      const float* x = hy4_logits(f) + (uint64_t) r * V;
+      double m = -INFINITY, z = 0;
+      for (uint32_t v = 0; v < V; v++) m = std::fmax(m, x[v]);
+      for (uint32_t v = 0; v < V; v++) z += std::exp(x[v] - m);
+      nll -= x[ids[at + r + 1]] - m - std::log(z), scored++;
+    }
   }
+  if (nll_mode) std::printf("NLL: %.5f over %llu tokens (%s cache)\n", nll / scored, (unsigned long long) scored,
+                            getenv("KV_F32") ? "F32" : "Q8_0");
   const double t2 = now();
   int32_t next = 0;
   uint64_t hash = 1469598103934665603ull;

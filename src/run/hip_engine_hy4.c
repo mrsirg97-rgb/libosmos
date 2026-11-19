@@ -92,7 +92,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (!e)
     return fail(err, "out of memory"), NULL;
   const uint32_t steps = o->max_tokens ? o->max_tokens : HY4_STEP_TOKENS;
-  const Hy4Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, HY4_LOGIT_ROWS};
+  const Hy4Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, HY4_LOGIT_ROWS, false};
   if (!(e->f = hy4_forward_create(m->w, m->fds, &ho, err)))
     return e_destroy(e), NULL;
   if (o->drafter && !hy4_dfly_load(e->f, o->drafter, true, err)) /* (Q8_0: half the draft's reads) */
