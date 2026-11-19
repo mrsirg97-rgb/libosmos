@@ -168,6 +168,16 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
        lfm3_alloc(&f->list, LSA_READ_MAX * 4) && lfm3_alloc(&f->list_n, 4) &&
        (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) && (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) &&
        (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
+  /* the scores' scratch: a sub-batch's tokens x every closed bucket, at most a step's prompt rows' F32 (its q, k, v,
+     gate and attention: max_tokens x (2 q + 2 kv + heads)) - one more of a step's own size */
+  const uint64_t rows = (uint64_t)f->max_tokens * (2 * g->n_heads * g->head_dim + 2 * g->n_kv_heads * g->head_dim);
+  f->max_buckets = f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1;
+  f->sub_n = rows / f->max_buckets < f->max_tokens ? (uint32_t)(rows / f->max_buckets) : f->max_tokens;
+  f->sub_n = f->sub_n ? f->sub_n : 1;
+  ok = ok && lfm3_alloc(&f->iqb, (uint64_t)f->max_tokens * LSA_DIM * F) &&
+       lfm3_alloc(&f->lists, (uint64_t)f->max_tokens * LSA_READ_MAX * 4) &&
+       lfm3_alloc(&f->counts, (uint64_t)f->max_tokens * 4) &&
+       lfm3_alloc(&f->lsa_sc, lsa_batch_scratch(f->sub_n, f->max_buckets) * F);
   return (f->lsa = ok) || lfm3_fail(err, "LSA: out of memory (the read's scratch)");
 }
 
@@ -179,6 +189,7 @@ void lfm3_forward_destroy(Lfm3Forward *f)
     hipFree(f->wq[l]), hipFree(f->wk[l]);
   lsa_scratch_destroy(f->lsa_s);
   hipFree(f->iq), hipFree(f->list), hipFree(f->list_n);
+  hipFree(f->iqb), hipFree(f->lists), hipFree(f->counts), hipFree(f->lsa_sc);
   free(f->h_ik), free(f->h_cent), free(f->h_mem);
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
@@ -215,6 +226,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   /* the full layers' rotation the zero tail's (YaRN past the native length), the sliding ones' every pair, never
      scaled (the window's keys are near) - transformers' angle step, Liquid's */
   f->yarn_from = o->yarn_from ? o->yarn_from : g->native_ctx;
+  f->sparse_from = o->lsa_sparse_from ? o->lsa_sparse_from : LFM3_LSA_SPARSE_FROM;
   while (f->stages < LFM3_MAX_STAGES && (f->stages == 0 || (uint64_t)f->yarn_from << (f->stages - 1) < f->max_ctx))
     f->stages++;
   bool ok = (uint64_t)f->yarn_from << (f->stages - 1) >= f->max_ctx ||

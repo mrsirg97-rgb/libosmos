@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
   Lfm3Weights* w = lfm3_weights_create(g, err);
   CHECK(w);
   const bool file_head = argc > 5 && !strcmp(argv[5], "file");  // the head as the file's BF16, not its Q8_0 copy
-  const Lfm3Options o = {S, P + Dn + 1, 1, file_head ? LFM3_HEAD_FILE : LFM3_HEAD_Q8_0, nullptr, 0};
+  const Lfm3Options o = {S, P + Dn + 1, 1, file_head ? LFM3_HEAD_FILE : LFM3_HEAD_Q8_0, nullptr, 0, 0};
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   CHECK(f);
   Lfm3Seq* s = lfm3_seq_create(f, err);

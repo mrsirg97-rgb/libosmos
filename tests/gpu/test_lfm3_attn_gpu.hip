@@ -183,6 +183,74 @@ static void prompt(uint32_t pos0, uint32_t T, uint32_t window, uint32_t slots) {
     CHECK(hipFree(x) == hipSuccess);
 }
 
+// q4x_attn_lists (a prompt's sparse reads: a token's attention over its own list of positions, any order) against
+// q35_attn_read (the decode's F32 attention over the same list) token by token - the gap the f16's; the lists of
+// every length class (under a tile, a tile's multiple, past LSA's 4,096 + window); a token's bits the same alone as
+// in its batch
+static void lists(uint32_t ctx, uint32_t T) {
+  const uint64_t rb = q4x_kv_row_bytes(kkv);
+  constexpr uint32_t kMax = 4612;
+  std::vector<float> hq((size_t) T * kq), hg((size_t) T * H), hk((size_t) ctx * kkv), hv((size_t) ctx * kkv);
+  for (auto& x : hq) x = 4.0f * uniform();
+  for (auto& x : hg) x = 2.0f * uniform();
+  for (auto& x : hk) x = 4.0f * uniform();
+  for (auto& x : hv) x = uniform();
+  std::vector<uint32_t> hl((size_t) T * kMax);
+  std::vector<int32_t> hn(T);
+  const uint32_t lens[] = {1, 7, 16, 100, 4096, kMax, 2049, 512};
+  for (uint32_t t = 0; t < T; t++) {
+    const uint32_t len = lens[t % 8] < ctx ? lens[t % 8] : ctx;
+    std::vector<uint32_t> all(ctx);
+    for (uint32_t i = 0; i < ctx; i++) all[i] = i;
+    for (uint32_t i = 0; i < len; i++) {  // a random subset in a random order
+      rng = rng * 1664525u + 1013904223u;
+      std::swap(all[i], all[i + (rng >> 8) % (ctx - i)]);
+      hl[(size_t) t * kMax + i] = all[i];
+    }
+    hn[t] = (int32_t) len;
+  }
+  void *kc, *vc;
+  float *dk, *dv, *dq, *dg, *da, *out, *out1, *ref;
+  uint32_t* dl;
+  int32_t* dn;
+  CHECK(hipMalloc(&kc, ctx * rb) == hipSuccess && hipMalloc(&vc, ctx * rb) == hipSuccess);
+  CHECK(hipMalloc((void**) &dk, hk.size() * 4) == hipSuccess && hipMalloc((void**) &dv, hv.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &dq, hq.size() * 4) == hipSuccess && hipMalloc((void**) &dg, hg.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &out, hq.size() * 4) == hipSuccess && hipMalloc((void**) &out1, hq.size() * 4) == hipSuccess &&
+        hipMalloc((void**) &ref, hq.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &dl, hl.size() * 4) == hipSuccess && hipMalloc((void**) &dn, hn.size() * 4) == hipSuccess);
+  CHECK(hipMalloc((void**) &da, q35_attn_decode_scratch(H, Q35_ATTN_DECODE_MAX) * 4) == hipSuccess);
+  CHECK(hipMemcpy(dk, hk.data(), hk.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dv, hv.data(), hv.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dq, hq.data(), hq.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dg, hg.data(), hg.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dl, hl.data(), hl.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hipMemcpy(dn, hn.data(), hn.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(q4x_kv_put(dk, dv, ctx, kkv, kc, vc, nullptr));
+  const AttnShape shape = {D, 0, 0};
+  CHECK(q4x_attn_lists(dq, kc, vc, T, H, KV, D, dl, dn, kMax, dg, &shape, out, nullptr));
+  for (uint32_t t = 0; t < T; t++) {
+    CHECK(q4x_attn_lists(dq + (size_t) t * kq, kc, vc, 1, H, KV, D, dl + (size_t) t * kMax, dn + t, kMax,
+                         dg + (size_t) t * H, &shape, out1 + (size_t) t * kq, nullptr));
+    CHECK(q35_attn_read(dq + (size_t) t * kq, kc, vc, H, KV, D, &shape, dl + (size_t) t * kMax, (const uint32_t*) dn + t,
+                        kMax, dg + (size_t) t * H, da, ref + (size_t) t * kq, nullptr));
+  }
+  CHECK(hipDeviceSynchronize() == hipSuccess);
+  std::vector<float> g(hq.size()), g1(hq.size()), r(hq.size());
+  CHECK(hipMemcpy(g.data(), out, g.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(g1.data(), out1, g1.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  CHECK(hipMemcpy(r.data(), ref, r.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+  double num = 0, den = 0;
+  for (size_t i = 0; i < g.size(); i++) num += ((double) g[i] - r[i]) * ((double) g[i] - r[i]), den += (double) r[i] * r[i];
+  CHECK(std::memcmp(g.data(), g1.data(), g.size() * 4) == 0);
+  std::printf("  lists of 1 to %u over %u keys, %u tokens: against the decode's F32 read relative %.2e; a token alone "
+              "its batch's bits\n", kMax, ctx, T, std::sqrt(num / den));
+  CHECK(std::sqrt(num / den) < 5e-3);
+  for (void* x : {kc, vc, (void*) dk, (void*) dv, (void*) dq, (void*) dg, (void*) da, (void*) out, (void*) out1,
+                  (void*) ref, (void*) dl, (void*) dn})
+    CHECK(hipFree(x) == hipSuccess);
+}
+
 int main() {
   std::printf("[test_lfm3_attn_gpu] start\n");
   int ndev = 0;
@@ -207,7 +275,8 @@ int main() {
   prompt(700, 300, 256, 256 + 300 + 8);
   prompt(700, 300, 0, 0);
   prompt(5000, 64, 256, 256 + 64 + 8);
-  prompt(LFM3_ATTN_LONG - 64, 64, 0, 0);  // a 2M context's last keys (vibes1.7b's pack: past Qwen's 1M)
+  prompt(LFM3_ATTN_LONG - 64, 64, 0, 0);
+  lists(20000, 64);  // a 2M context's last keys (vibes1.7b's pack: past Qwen's 1M)
   std::printf("[test_lfm3_attn_gpu] ok\n");
   return 0;
 }

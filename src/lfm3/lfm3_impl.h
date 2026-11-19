@@ -40,6 +40,12 @@ struct Lfm3Forward
   LsaScratch *lsa_s;
   float *iq;
   uint32_t *list, *list_n;
+  /* a prompt's sparse reads: from position sparse_from, its queries' index vectors, lists and counts (max_tokens
+     each), their scores sub_n tokens at a time (lsa_batch_scratch) */
+  uint32_t sparse_from, sub_n, max_buckets;
+  float *iqb, *lsa_sc;
+  uint32_t *lists;
+  int32_t *counts;
   float *h_ik, *h_cent;
   int32_t *h_mem;
   int32_t *overflow;  /* an activation past f16's range in a read (mm_x16's): the step refused */

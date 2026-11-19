@@ -643,6 +643,145 @@ __global__ __launch_bounds__(HD) void span_merge_kernel(const float* ml, const f
   x16_side(side, i + (uint64_t) t0 * heads * HD, out[i]);
 }
 
+// a prompt's sparse reads (q4x_attn_lists): a block one wave, a token's KV head, its list's entries 16 a tile in order
+// with one running (max, sum, O) - K's B operands straight from the cache (a lane a key's 16 dims a k-step: one load),
+// V^T through LDS; a tile's next K and V fetched while its softmax and P V run. entries past the list loaded as
+// zeros: a token's bits its list's alone
+constexpr int kListGqa = 4;  // a KV head's query heads at most (LFM3's 4)
+constexpr int kListVBlocks = Q4X_QK_HEAD_NARROW / Q4X_KV_BLOCK / 2;  // a lane's V blocks: its key's half of the dims
+
+struct ListRaw {
+  uint64_t kq[Q4X_QK_HEAD_NARROW / kTile][2];  // a k-step's 16 int8s of the lane's key
+  _Float16 ksc[Q4X_QK_HEAD_NARROW / Q4X_KV_BLOCK];
+  uint64_t vq[kListVBlocks][Q4X_KV_BLOCK / 8];  // the lane's key's V, its half (lane / 16) of the dims
+  _Float16 vsc[kListVBlocks];
+};
+
+__device__ inline void list_fetch(ListRaw& w, const uint8_t* kc, const uint8_t* vc, uint64_t row, uint32_t kvh,
+                                  const uint32_t* list, uint32_t kb, uint32_t len) {
+  constexpr int HD = Q4X_QK_HEAD_NARROW, kBlocks = HD / Q4X_KV_BLOCK;
+  const uint32_t lane = threadIdx.x % 32, e = kb + lane % 16;
+  const uint8_t* kr = kc + (uint64_t) (e < len ? list[e] : 0) * row + kvh * kBlocks * Q4X_KV_BLOCK_BYTES;
+#pragma unroll
+  for (int b = 0; b < kBlocks; b++) {
+    w.ksc[b] = e < len ? *(const _Float16*) (kr + b * Q4X_KV_BLOCK_BYTES) : (_Float16) 0.0f;
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      uint64_t x[2] = {0, 0};
+      if (e < len) __builtin_memcpy(x, kr + b * Q4X_KV_BLOCK_BYTES + 2 + h * kTile, kTile);
+      w.kq[2 * b + h][0] = x[0], w.kq[2 * b + h][1] = x[1];
+    }
+  }
+  const uint8_t* vr = vc + (uint64_t) (e < len ? list[e] : 0) * row +
+                      (kvh * kBlocks + lane / 16 * kListVBlocks) * Q4X_KV_BLOCK_BYTES;
+#pragma unroll
+  for (int b = 0; b < kListVBlocks; b++) {
+    w.vsc[b] = e < len ? *(const _Float16*) (vr + b * Q4X_KV_BLOCK_BYTES) : (_Float16) 0.0f;
+    uint64_t x[Q4X_KV_BLOCK / 8] = {};
+    if (e < len) __builtin_memcpy(x, vr + b * Q4X_KV_BLOCK_BYTES + 2, Q4X_KV_BLOCK);
+#pragma unroll
+    for (int i = 0; i < Q4X_KV_BLOCK / 8; i++) w.vq[b][i] = x[i];
+  }
+}
+
+__global__ __launch_bounds__(32) void fa_list_kernel(const float* q, const uint8_t* kc, const uint8_t* vc,
+                                                     uint32_t heads, uint32_t kv_heads, const uint32_t* lists,
+                                                     const int32_t* counts, uint32_t stride, const float* gate,
+                                                     uint32_t gate_span, float scale, float* out) {
+  constexpr int HD = Q4X_QK_HEAD_NARROW, kLds = kRowLds<HD>, kCols = HD / kTile;
+  __shared__ __attribute__((aligned(32))) _Float16 qs[kTile * kLds], vt[HD * kKeyLds], ps[kTile * kKeyLds];
+  const uint32_t t = blockIdx.x, kvh = blockIdx.y, G = heads / kv_heads, lane = threadIdx.x % 32;
+  const uint32_t len = (uint32_t) counts[t];
+  const uint32_t* list = lists + (uint64_t) t * stride;
+  const uint64_t row = (uint64_t) kv_heads * HD / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
+  for (uint32_t i = lane; i < kTile * HD; i += 32) {  // the KV head's query rows, f16 (past G zero)
+    const uint32_t r = i / HD, d = i % HD;
+    qs[r * kLds + d] = (_Float16) (r < G ? q[((uint64_t) t * heads + kvh * G + r) * HD + d] : 0.0f);
+  }
+  float m[osmos_slots], l[osmos_slots];
+#pragma unroll
+  for (int r = 0; r < osmos_slots; r++) m[r] = -INFINITY, l[r] = 0.0f;
+  f8 o[kCols] = {};
+  ListRaw raw;
+  list_fetch(raw, kc, vc, row, kvh, list, 0, len);
+  osmos_wave_barrier();
+  for (uint32_t kb = 0; kb < len; kb += kTile) {
+    f8 sacc = {};
+#pragma unroll
+    for (int g = 0; g < HD / kTile; g++) {  // K's operand: its int8s times their block's scale, exact in F32, to f16
+      osmos_fb kf;
+      const float sk = (float) raw.ksc[g / 2];
+#pragma unroll
+      for (int e = 0; e < kTile; e++) kf[e] = (_Float16) (sk * (float) (int8_t) (raw.kq[g][e / 8] >> (8 * (e % 8))));
+      sacc = osmos_mma(osmos_load_a(qs + g * kTile, kLds), kf, sacc);
+    }
+#pragma unroll
+    for (int b = 0; b < kListVBlocks; b++) {  // V^T, f16: the lane's key's column, its half of the dims
+      const float sv = (float) raw.vsc[b];
+      const uint32_t d0 = (lane / 16 * kListVBlocks + b) * Q4X_KV_BLOCK;
+#pragma unroll
+      for (int j = 0; j < Q4X_KV_BLOCK; j++)
+        vt[(d0 + j) * kKeyLds + lane % 16] = (_Float16) (sv * (float) (int8_t) (raw.vq[b][j / 8] >> (8 * (j % 8))));
+    }
+    if (kb + kTile < len) list_fetch(raw, kc, vc, row, kvh, list, kb + kTile, len);  // the next tile's, in flight
+    float sv[8], alpha[osmos_slots];
+#pragma unroll
+    for (int j = 0; j < 8; j++) sv[j] = kb + osmos_acc_col(j) < len ? sacc[j] * scale : -INFINITY;
+#pragma unroll
+    for (int r = 0; r < osmos_slots; r++) {
+      float mx = -INFINITY;
+#pragma unroll
+      for (int j = 0; j < 8; j++)
+        if (osmos_slot(j) == r) mx = fmaxf(mx, sv[j]);
+      const float mn = fmaxf(m[r], osmos_row_max(mx));
+      float sum = 0.0f;
+#pragma unroll
+      for (int j = 0; j < 8; j++)
+        if (osmos_slot(j) == r) {
+          const float pv = mn == -INFINITY ? 0.0f : expf(sv[j] - mn);
+          sum += pv;
+          ps[osmos_acc_row(j) * kKeyLds + osmos_acc_col(j)] = (_Float16) pv;
+        }
+      alpha[r] = mn == -INFINITY ? 1.0f : expf(m[r] - mn);
+      l[r] = l[r] * alpha[r] + osmos_row_sum(sum), m[r] = mn;
+    }
+    osmos_wave_barrier();
+    const osmos_fa pa = osmos_load_a(ps, kKeyLds);
+#pragma unroll
+    for (int c = 0; c < kCols; c++) {
+#pragma unroll
+      for (int j = 0; j < 8; j++) o[c][j] *= alpha[osmos_slot(j)];
+      o[c] = osmos_mma(pa, osmos_load_b_s(vt + c * kTile * kKeyLds, kKeyLds), o[c]);
+    }
+    osmos_wave_barrier();
+  }
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    const uint32_t r = osmos_acc_row(j);
+    if (r >= G) continue;
+#pragma unroll
+    for (int c = 0; c < kCols; c++) {
+      const uint64_t at = ((uint64_t) t * heads + kvh * G + r) * HD + c * kTile + osmos_acc_col(j);
+      out[at] = o[c][j] / l[osmos_slot(j)] * sigmoid(gate[at / gate_span]);
+    }
+  }
+}
+
+extern "C" bool q4x_attn_lists(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
+                               uint32_t kv_heads, uint32_t dim, const uint32_t* lists, const int32_t* counts,
+                               uint32_t list_stride, const float* gate, const AttnShape* shape, float* out,
+                               void* stream) {
+  const AttnShape sh = shape ? *shape : AttnShape{1, 0, 0};
+  if (!q || !kc || !vc || !lists || !counts || !gate || !out || !n_tok || !kv_heads || heads % kv_heads ||
+      heads / kv_heads > (uint32_t) kListGqa || dim != Q4X_QK_HEAD_NARROW || !list_stride || sh.window || sh.slots ||
+      (sh.gate_span != 1 && sh.gate_span != dim))
+    return false;
+  fa_list_kernel<<<dim3(n_tok, kv_heads), 32, 0, st(stream)>>>(
+      q, (const uint8_t*) kc, (const uint8_t*) vc, heads, kv_heads, lists, counts, list_stride, gate, sh.gate_span,
+      1.0f / sqrtf((float) dim), out);
+  return ok();
+}
+
 extern "C" bool q4x_kv_put(const float* k, const float* v, uint32_t n_tok, uint32_t values, void* kc, void* vc,
                            void* stream) {
   if (!k || !v || !kc || !vc || !n_tok || !values || values % Q4X_KV_BLOCK) return false;

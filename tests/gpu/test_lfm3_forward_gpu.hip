@@ -84,7 +84,7 @@ int main() {
   const uint32_t T = (uint32_t) fid.size(), V = (uint32_t) w->geo.n_vocab, last = 64 < T ? 64 : T;
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
-  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr, 0};  // the reference's head: the file's BF16
+  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr, 0, 0};  // the reference's head: the file's BF16
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -232,7 +232,7 @@ int main() {
   // the prompt in its steps the one step's last rows, bit for bit
   {
     const uint32_t S = 300 < T ? 300 : T;
-    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr, 0};
+    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr, 0, 0};
     Lfm3Forward* f2 = lfm3_forward_create(w, &o2, err);
     CHECK(f2);
     Lfm3Seq* r = lfm3_seq_create(f2, err);
@@ -251,7 +251,7 @@ int main() {
   // the head's Q8_0 copy (the engine's default): the same ids, its logits against the file's head's - the rounding's
   // own cost, measured (2026-11-18): see kHeadKl
   {
-    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr, 0};
+    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr, 0, 0};
     Lfm3Forward* fq = lfm3_forward_create(w, &oq, err);
     CHECK(fq);
     Lfm3Seq* q = lfm3_seq_create(fq, err);
@@ -269,6 +269,45 @@ int main() {
     lfm3_seq_destroy(q);
     lfm3_forward_destroy(fq);
   }
+  // a prompt read sparse (LSA's read: OSMOS_TEST_LFM3_LSA, the release's maps), its tokens past position 1,024
+  // (Lfm3Options' lsa_sparse_from) each over its read - under LSA_READ_MAX's positions every key, so against the
+  // reference within the forward's bounds, its bits not the dense prompt's (the read's path); and in three steps the
+  // one step's bits
+  {
+    std::string maps = getenv("OSMOS_TEST_LFM3_LSA") ? getenv("OSMOS_TEST_LFM3_LSA") : "";
+    if (maps.empty()) maps = std::string(home) + "/Models/vibes1.7b/vibes1.7b-lsa-maps.safetensors";
+    FILE* mf = std::fopen(maps.c_str(), "rb");
+    if (T == 2048 && mf) {
+      std::fclose(mf);
+      const Lfm3Options os = {T, T, last, LFM3_HEAD_FILE, maps.c_str(), 0, 1024};
+      Lfm3Forward* fs = lfm3_forward_create(w, &os, err);
+      CHECK(fs);
+      Lfm3Seq *one = lfm3_seq_create(fs, err), *three = lfm3_seq_create(fs, err);
+      CHECK(one && three && lfm3_step(fs, one, ids.data(), T, last, err));
+      const std::vector<float> sp(lfm3_logits(fs), lfm3_logits(fs) + (size_t) last * V);
+      double ks = 0, km = 0;
+      uint32_t agree = 0;
+      for (uint32_t r = 0; r < last; r++) {
+        const float* p = ref.data() + (ref_rows - last + r) * (size_t) V;
+        const double k = kl(p, sp.data() + (size_t) r * V, V);
+        ks += k, km = std::fmax(km, k), agree += argmax(p, V) == argmax(sp.data() + (size_t) r * V, V);
+      }
+      std::printf("  a sparse read (from 1,024; every key under LSA_READ_MAX): against the reference KL mean %.3g, max "
+                  "%.3g; top-1 %u of %u\n", ks / last, km, agree, last);
+      CHECK(ks / last <= kKlMean && km <= kKlMax && agree + kTop1Miss >= last);
+      CHECK(std::memcmp(sp.data(), got.data(), sp.size() * 4) != 0);  // the read's path, not the dense one's
+      CHECK(lfm3_step(fs, three, ids.data(), a, 1, err) && lfm3_step(fs, three, ids.data() + a, b, 1, err));
+      CHECK(lfm3_step(fs, three, ids.data() + a + b, c, tail, err));
+      CHECK(std::memcmp(lfm3_logits(fs), sp.data() + (size_t) (last - tail) * V, (size_t) tail * V * 4) == 0);
+      std::printf("  sparse, in read steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c,
+                  tail);
+      lfm3_seq_destroy(one), lfm3_seq_destroy(three), lfm3_forward_destroy(fs);
+    } else {
+      if (mf) std::fclose(mf);
+      std::printf("  the sparse read skipped: no %s (or not the 2,048-id fixture)\n", maps.c_str());
+    }
+  }
+
   // YaRN's stages (OSMOS_TEST_LFM3_YARN: oracle/lfm3_forward.py --kv-q8 --yarn 2 --native 1024 over the same ids):
   // a forward whose stages begin at 1,024 - the ids in one step its stage 1 (x2), against Liquid's YaRN x2; the ids
   // first under the base then past it (the cache turned to stage 1 at the crossing) against the one step; a rollback
@@ -279,7 +318,7 @@ int main() {
     std::map<std::string, Arr> base = fx;
     if (T == 2048 && load(yarn_path.c_str())) {
       const std::vector<float> yref = A("logits");
-      const Lfm3Options oy = {T, 4 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024};
+      const Lfm3Options oy = {T, 4 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024, 0};
       Lfm3Forward* fy = lfm3_forward_create(w, &oy, err);
       CHECK(fy);
       Lfm3Seq *one = lfm3_seq_create(fy, err), *two = lfm3_seq_create(fy, err);

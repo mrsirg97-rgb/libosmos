@@ -75,8 +75,9 @@ static bool close_blocks(Lfm3Forward *f, Lfm3Seq *s, int l, uint32_t want, uint3
 
 /* LSA on a full layer's run: its keys indexed (the zero tail's dims, post-norm; the rotation leaves them), the blocks
    they close bucketed; a decode's tokens each its read (the blocks closed before its window) and its attention over
-   the read alone - a prompt's stays dense (lsa.py's) */
-static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *gt, bool read, bool *done)
+   the read alone; a prompt's tokens from sparse_from the same reads in a batch (F32 scores) and their attention on
+   the matrix cores over them, those before dense (*dense: the run's first tokens left to the dense attention) */
+static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *gt, bool read, uint32_t *dense)
 {
   const Lfm3Geometry *g = &f->w->geo;
   const uint32_t H = (uint32_t)g->n_heads, KV = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim;
@@ -84,12 +85,25 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
   const LsaDims fd = lfm3_free_dims(g);
   const AttnShape shape = {hd, 0, 0};
   Lfm3Seq *s = R->s;
-  *done = false;
+  *dense = n;
   if (!lsa_index_gpu(f->kr + (uint64_t)R->off * kv, n, kv, KV, 1, hd, &fd, f->wk[l], true,
                      s->ik[l] + (uint64_t)P * LSA_DIM, f->st))
     return false;
   if (read)
-    return close_blocks(f, s, l, (P + n) / LSA_WINDOW, s->closed);
+  {
+    if (!close_blocks(f, s, l, (P + n) / LSA_WINDOW, s->closed))
+      return false;
+    const uint32_t d = P >= f->sparse_from ? 0 : f->sparse_from - P < n ? f->sparse_from - P : n, m = n - d;
+    *dense = d;
+    if (!m)
+      return true;
+    const uint64_t at = (uint64_t)R->off + d;
+    return lsa_index_gpu(f->qr + at * q, m, q, KV, H / KV, hd, &fd, f->wq[l], false, f->iqb, f->st) &&
+           lsa_read_batch_gpu(f->iqb, m, P + d, s->cent[l], s->mem[l], (P + n) / LSA_WINDOW, f->lsa_sc, f->sub_n,
+                              f->max_buckets, f->lists, f->counts, f->st) &&
+           q4x_attn_lists(f->qr + at * q, s->kc[l], s->vc[l], m, H, KV, hd, f->lists, f->counts, LSA_READ_MAX,
+                          gt + at * H, &shape, f->att + at * q, f->st);
+  }
   uint32_t closed = s->closed;
   for (uint32_t t = 0; t < n; t++)
   {
@@ -103,7 +117,7 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
       return false;
     closed = want > closed ? want : closed;
   }
-  *done = true;
+  *dense = 0;
   return close_blocks(f, s, l, (P + n) / LSA_WINDOW, closed);
 }
 
@@ -130,14 +144,14 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
                 lfm3_fv(f, L->q_norm), lfm3_fv(f, L->k_norm), g->rms_eps, R->s->pos, f->qr + o * q, NULL,
                 f->kr + o * kv, f->st) &&
          kv_put(f, R, vf, l, sliding, kv);
-    bool done = false; /* the run's attention done by its read (LSA's decode) */
+    uint32_t dense = R->len; /* the run's first tokens the dense attention's (LSA's reads the rest) */
     if (ok && f->lsa && g->kind[l] == LFM3_FULL)
-      ok = lsa_attention(f, R, l, gt, read, &done);
-    if (done)
+      ok = lsa_attention(f, R, l, gt, read, &dense);
+    if (!dense)
       continue;
     if (read) /* a prompt's: the run's step on the matrix cores (q4x_attn: f16 q, k, v and weights) */
     {
-      ok = ok && q4x_attn(f->qr + o * q, R->s->kc[l], R->s->vc[l], R->len, H, KV, hd, (uint32_t)R->s->pos,
+      ok = ok && q4x_attn(f->qr + o * q, R->s->kc[l], R->s->vc[l], dense, H, KV, hd, (uint32_t)R->s->pos,
                           gt + o * H, NULL, &shape, f->fa_scratch, f->att + o * q, NULL, f->st);
       continue;
     }

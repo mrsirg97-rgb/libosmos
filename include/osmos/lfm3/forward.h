@@ -98,7 +98,10 @@ typedef struct Lfm3Options
   Lfm3Head head;
   const char *lsa;
   uint32_t yarn_from;
+  uint32_t lsa_sparse_from; /* with LSA, a prompt's tokens from this position read sparse (0: LFM3_LSA_SPARSE_FROM) */
 } Lfm3Options;
+/* a prompt token's read sparse from here: under LSA_READ_MAX positions a read is every key (the dense attention's) */
+#define LFM3_LSA_SPARSE_FROM LSA_READ_MAX
 /* the model's open files' paths are its Gguf's (the identity hashes them) */
 Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[LFM3_ERR]);
 void lfm3_forward_destroy(Lfm3Forward *f);
