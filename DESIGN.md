@@ -2062,7 +2062,7 @@ yarn - costs a short conversation what its factor costs it (the 2,048-id fixture
 - **checked**: each stage against Liquid's YaRN at its factor over the same base (oracle --yarn, --native); LSA
   against dense to 512K (the card's rows); at 1M and 2M a needle - a fact placed deep, asked at the end - and the
   next-token NLL over held-out text (llama.cpp's source: ~2M tokens).
-## 0.10.0: Hy4-flash (hy4) (design, 2026-11-18)
+## 0.11.0: Hy4-flash (hy4) (design, 2026-11-18; 0.10.0 when begun - vibes1.7b shipped as it)
 
 the operator's: Tencent's Hy4-flash (tencent/Hy4-flash, Tencent Hy License) - 220B total (155.5B backbone + 63.5B
 Engram), ~11.3B active a token, 1M context, text + image in. the box's shape: the backbone at 4 bits ~89 GiB in GPU
@@ -2127,7 +2127,7 @@ then the drafter and speed.
   the group pooling and the group indexer (score, top 511, expand), Engram's gate.
 - **the shape**: a family of its own - src/hy4/ and include/osmos/hy4/ (geometry, roles, forward), q35's and spark's
   shape; DeepSeek's code shared where the maths is the same (Engram's reads, the router), not branched into.
-- **out of scope for 0.10.0**: the vision tower (mmproj, later); DFly2 (the release's drafter, its weights BF16 from
+- **out of scope for 0.11.0**: the vision tower (mmproj, later); DFly2 (the release's drafter, its weights BF16 from
   the release) and the file's MTP layer - step 3 picks one.
 - **the order** (tests first, each seen to fail): the file's provenance (norms bit for bit); the geometry - every
   tensor in a role, the layer kinds from the file, refusals; Engram's hash against the reference's on fixed ids; iHC,
@@ -2136,7 +2136,7 @@ then the drafter and speed.
 - **done when**: the forward's logits match llama.cpp on the GGUF within the tolerances its tests state (Engram's fp8
   the measured difference), each piece its oracle's.
 
-### 0.10.0 step 2: Hy4-flash's sequence and forward (design, 2026-11-18)
+### 0.11.0 step 2: Hy4-flash's sequence and forward (design, 2026-11-18)
 
 step 1's pieces (osmos/hy4/weights.h, osmos/gpu/hy4_ops.h, the MoE's ops) each the reference's within ~2e-6; step 2
 runs them as the model: one forward, its sequences, the whole forward against the reference. the engine's family
@@ -2185,6 +2185,66 @@ runs them as the model: one forward, its sequences, the whole forward against th
   the table's, a token's n-gram across a step's boundary).
 - **done when**: hy4_step's logits match the reference's within the tolerances its test states, one token at a
   time and 2,600 at once giving the same bits; then 2b (the engine, osmos-serve, osmos-api's hy_v4 dialect).
+
+### 0.11.0 step 3: the pack - AngelSlim's Q4_K_M, and DFly2 (2026-11-19)
+
+the operator's, 2026-11-19: the pack is the official GGUF (AngelSlim/Hy4-flash-GGUF, Tencent's own compression
+team), its Q4_K_M; the NVFP4 build (SPARK-4Bit) dropped; DFly2, the release's drafter, in 0.11.0.
+
+- **the file**: Q4_K_M at 65acb8ae, two shards. -00001 (105.0 GB) converted from the HF release (`general.name`
+  Huggingface; the same template and token ids as SPARK's file; 43 blocks, the MTP layer blk.42 BF16 and not
+  resident): the routed experts' gate and up Q4_K, down Q6_K on 19 layers and Q4_K on 22; attention, the shared
+  expert and the latent's projections Q8_0; iHC's mixes, indexer.proj and output_hc_fn F32; the head BF16. -00002
+  (63.4 GB, the same file in all three of AngelSlim's builds): the Engram table in upstream's F8_E4M3 - ggml type 43,
+  which osmos had for unsloth's MXFP8. gguf.c tells them apart by room (a 43 whose MXFP8 bytes leave its room but
+  whose values fill it a byte each is F8_E4M3, osmos's id 0x100 | 43); quant_dequant decodes it (float8_e4m3fn,
+  exact) before Engram's own fp8 round trip. Q6_K's experts by their tokens (mv_group_tok). the reference runs on
+  these values (hy4_gguf.py reads Q4_K, Q6_K, BF16 and F8_E4M3, bit for bit gguf-py's).
+- **correctness on the file**: every piece's test on its weights (attention, the indexer's 2,600 selections, the
+  MoE with Q4_K and Q6_K experts, iHC, Engram) within ~1e-6; the forward at 64 ids KL 1.2e-11. at 2,600 ids one router
+  near-tie (layer 1, row 1821, its 16th and 17th experts 3e-8 apart) flips and spreads: --check-layer on the
+  decode's streams (the dump had held the read's f16 streams: fixed) puts every checked layer (1-6, 11, 21, 31,
+  41) within 5e-7 of the reference on every other row; the logits then bounded by two right runs' spread (the
+  reference in BF16: KL 0.113, top-1 59/64; the decode 0.231, 60/64; the read 0.331, 57/64).
+- **DFly2** (vLLM's hy_v4 dfly.py / dfly_speculator.py / dfly_inputs.py at 076fe951, AngelSpec's docs): five
+  pre-norm layers (gated MLA, 32 heads, a learnable sink, post_proj_norm after o_proj; a dense SwiGLU of 9,216), a
+  fusion and a hidden correction, 0.85B parameters BF16 in the release's last shard (87 tensors, read as it ships:
+  st_create). a round: the block [y, mask x 5] at positions anchor .. anchor + 5 (y the sampled token); the anchor's
+  row + gate * eh_proj([enorm(e); hnorm(h)]), h the target's head input (iHC's collapse, output_norm) at the last
+  accepted token; draft layer i reads target sparse layer 25 + 4i's cache - the keys its indexer picked for that
+  token (the step's snapshot) and the block's own rows, written into that cache past the position (vLLM aliases the
+  draft's KV to the target's: the verify overwrites them) - rope base 1e7, GPT-J's; the final norm; then draft j
+  from row j's hidden corrected by the token before it (hidden_norm, embed_norm, a SwiGLU of 3,072) through the
+  target's head. no extra KV; each draft attends to ~2,048 keys at any context. the confidence head unused (vLLM's).
+  every step keeps the snapshot a draft reads: its last HY4_DFLY_KEEP rows' groups at the five layers and their head
+  input. the engine loads it Q8_0 (its matrices and a copy of the head for the picks: ggml's rounding of the BF16;
+  the same acceptance), HY4_DFLY_DRAFTS a round cut where the drafts' probabilities multiply under 0.3.
+- **DFly2's checks**: oracle/hy4_dfly.py (the speculator's math transcribed, F32 on the release's BF16) on osmos's
+  own target state: at 600 and 2,600 tokens (the indexer's picks dense, then 512 of 650 groups) the same five drafts,
+  their probabilities within 0.004 and 0.007; drafted rounds verified in the decode's math the tokens plain greedy
+  decoding's, bit for bit, in the test, hy4_run and through osmos-api.
+- **Q3_K, the pack** (the operator's, 2026-11-19, after AngelSlim's benchmarks: Q3_K 53.8 / 64.3 / 63.2 / 51.9 on
+  PPTGen / DeepSWE / APEX-agents / AutomationBench, Q4_K_M 54.1 / 62.7 / 62.6 / 51.0, BF16 54.2 / 64.6 / 63.1 / 52.2):
+  its first shard 92.0 GB (the experts' gate and up Q3_K on 22 layers, Q4_K on 19; every down Q4_K; the rest as
+  Q4_K_M's), its second the same Engram file. Q3_K's decode (ggml's dequantize_row_q3_K, every product exact) under
+  every path. resident ~79 GiB against ~91: decode no faster (its 30 ms of Q8_0 attention and dense matvecs at the bus
+  are the two builds' alike; the experts ~15 ms) - its gain the memory, which 1M wants.
+- **the context's bytes**: MLA's latent rows Q8_0 (the rope part F32: 800 bytes a row against 2,304; the attention
+  over them the F32 path's over the decoded rows, bit for bit), the indexer's token keys a ring (a key read only when
+  its group completes, or after a rollback: a step's tokens, a pool's and the reach - exact), the pooled groups F32:
+  ~11 KB a token. the Q8_0 cache: 64 ids KL 0.033 (the reference in BF16 0.028); teacher-forced NLL over 2K / 8K
+  tokens 2.908 / 3.656 against F32's 2.970 / 3.694. 1M loads in ~98 GiB, ~22 GB of the box left.
+- **a decode's indexer at long context**: its scores a thread a group read the group's key once a head at 512-byte
+  strides, and its selection a block a token - at 128K 113 ms a step, at 1M 0.9 s. now 32 groups a block (their keys
+  once in LDS for every token of the step, a thread a (group, head)'s dot: the same bits) and, for a step's few tokens,
+  the selection over many blocks (4 radix passes of integer-atomic histograms, then counts, offsets, writes: the same
+  picks): 8.7 / 66 ms, a verify's 6 tokens 44 / 344 ms. the scratch in sub-batches of 256 tokens (4.3 GB at 1M -> 270 MB).
+- **a long prompt's limit**: at 32K the prefill's cost is MLA's attention a token at a time (47%: no matrix cores) and
+  the indexer's scores (20%, growing as n^2): 177 tok/s at 32K, 124 at 128K, a 1M prompt ~1.5-2 hours. the next step:
+  the prompt's attention and scores on the matrix cores (f16 inputs: against KL, as the read's other matrices).
+- **speed** (performance, 1K): the experts' matvec at the step's own tokens (one token the single-token kernel, not
+  the 8-token one: 83.1 -> 63.4 ms a token); DFly2 accepts 2.4-2.9 a round, code 15.8 -> 24.4 tok/s, prose 15.8 ->
+  22.5. a verify of 6 tokens reads ~5x one token's experts (~80 distinct of 512 a layer): MoE's floor on drafting.
 
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 

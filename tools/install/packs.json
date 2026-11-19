@@ -287,11 +287,11 @@
       "settings": {"max_context": 524288, "max_tokens": 4096}
     },
     "hy4-flash": {
-      "title": "Tencent Hy4-flash (AngelSlim's Q3_K) with its DFly2 drafter, 256K context",
+      "title": "Tencent Hy4-flash (AngelSlim's Q3_K) with its DFly2 drafter, 1M context",
       "shards": ["hy4-q3k-1", "hy4-q3k-2"],
       "table": null, "picks": null, "drafter": ["hy4-dfly2"], "drafter_kind": "dfly", "overlay": null,
-      "rig": {"id": "hy4-flash", "max_tokens": 65536, "reserve": 65536, "efforts": ["none", "low", "high", "max"], "effort": "high", "aliases": ["hy4"]},
-      "settings": {"max_context": 262144, "max_tokens": 4096}
+      "rig": {"id": "hy4-flash", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "low", "high", "max"], "effort": "high", "aliases": ["hy4"]},
+      "settings": {"max_context": 1048576, "max_tokens": 4096}
     }
   }
 }
