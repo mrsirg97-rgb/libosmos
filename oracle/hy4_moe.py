@@ -3,11 +3,11 @@ code - the transformers PR #50903 modeling_hy_v4_flash.py's HYV4FlashMoE.forward
 the bias for the pick alone, the picked weights normalized and scaled; the routed experts in the latent, their SwiGLU
 clamped; the shared expert; the combine norm) on a sparse layer, and HYV4FlashMLP (its post_fc2_norm) on the dense
 layer 0 - their source compiled alone (hy4_pieces.reference), in F32 on the GGUF's own weights dequantised (the
-experts NVFP4, the rest Q8_0 or F32; only the experts the tokens pick read: the reference's loop reads no other).
+experts the file's - Q4_K_M's gate and up Q4_K, layer 3's down Q6_K -, the rest Q8_0 or F32; only the experts the tokens pick read: the reference's loop reads no other).
 half the tokens loud (x 8: the routed SwiGLU's clamp acting on some of their values - counted, some
 required). each step kept: the router's logits, picks and weights, the latent's input, the experts' sum, the shared expert's
 output, the block's output; the file's bytes beside them (each picked expert's own), as the GPU reads them.
-run: python -I hy4_moe.py --modeling modeling_hy_v4_flash.py --config config.json --gguf Hy4-flash-SPARK-4Bit.gguf
+run: python -I hy4_moe.py --modeling modeling_hy_v4_flash.py --config config.json --gguf Hy4-flash-Q4_K_M-00001-of-00002.gguf
      --out FILE"""
 import argparse
 import json
@@ -112,6 +112,8 @@ def main():
         "sh_down_q8": g.raw(blk + "ffn_down_shexp.weight").view(np.float32),
         "post_norm": g.tensor(blk + "post_ffw_norm.weight"),
         "hit": np.array(hit, dtype=np.float32),
+        "exp_types": np.array([g.tensors[blk + f"ffn_{r}_exps.weight"][1] for r in ("gate", "up", "down")],
+                              dtype=np.float32),
         "exp_gate": np.stack([g.expert_raw(blk + "ffn_gate_exps.weight", e) for e in hit]).view(np.float32),
         "exp_up": np.stack([g.expert_raw(blk + "ffn_up_exps.weight", e) for e in hit]).view(np.float32),
         "exp_down": np.stack([g.expert_raw(blk + "ffn_down_exps.weight", e) for e in hit]).view(np.float32),

@@ -2,7 +2,7 @@
    config.json states (tencent/Hy4-flash: 42 layers, swa_pattern, MLA's dims, the indexer, the latent MoE, Engram),
    each layer's kind its tensors, then the file edited in memory - a key out of range or another router, a tensor
    missing, of another shape or type, a tensor no role takes - each refused, its cause named. OSMOS_TEST_HY4: the
-   GGUF, else ~/Models/hy4-flash/Hy4-flash-SPARK-4Bit.gguf. the tensors' data is never read: a sparse file of the
+   GGUF, else ~/Models/hy4-flash/Hy4-flash-Q4_K_M-00001-of-00002.gguf. the tensors' data is never read: a sparse file of the
    header alone is enough (`head -c 6000000 FILE > H; truncate -s SIZE H`). skipped without */
 #include <assert.h>
 #include <stdio.h>
@@ -15,7 +15,7 @@
 
 #define T_Q8_0 8
 #define T_BF16 30
-#define MODEL "%s/Models/hy4-flash/Hy4-flash-SPARK-4Bit.gguf"
+#define MODEL "%s/Models/hy4-flash/Hy4-flash-Q4_K_M-00001-of-00002.gguf"
 #define ARCH "hy_v4_flash."
 
 /* config.json's text_config: swa_pattern (1 a sliding layer), engram_layer_ids (1-based: before 0-based id - 1) */

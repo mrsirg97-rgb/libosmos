@@ -1,5 +1,6 @@
 // Hy4-flash's latent MoE and dense MLP, composed of osmos's ops as the forward runs them (mv_run: the router F32, the
-// latent's projections and the shared expert Q8_0, each picked expert NVFP4; ops_router_scored's sigmoid router;
+// latent's projections and the shared expert Q8_0, each picked expert the file's type (Q4_K_M: gate and up Q4_K, layer
+// 3's down Q6_K - the fixture's exp_types); ops_router_scored's sigmoid router;
 // ops_swiglu, the routed experts clamped at the file's limit, their weight before the down projection; ops_rms's
 // combine norm), against the reference's own (oracle/hy4_moe.py: modeling_hy_v4_flash.py's HYV4FlashMoE on a sparse
 // layer, HYV4FlashMLP on the dense layer 0), in F32 on the GGUF's weights, 8 tokens: each token's 16 experts and
@@ -80,11 +81,15 @@ int main() {
   std::printf("  each token's %u experts the reference's; their weights within %.3g\n", K, werr);
   CHECK(werr <= kTol * rscale);
 
-  // the latent's input; each picked expert (the file's NVFP4) on its token, weighted, summed in the picks' order
+  // the latent's input; each picked expert (the file's types) on its token, weighted, summed in the picks' order
   const std::vector<float> rin = mv(QTYPE_Q8_0, up(A("routed_down_q8")), L, D, x, T);
   match("the latent's input", rin, "routed_in", kTol);
   const std::vector<float>& hit = A("hit");
-  const uint64_t eb = fx["exp_gate"].v.size() / hit.size() * 4;  // an expert's bytes
+  const std::vector<float>& ty = A("exp_types");
+  CHECK(ty.size() == 3);
+  const uint32_t tg = (uint32_t) ty[0], tu = (uint32_t) ty[1], td = (uint32_t) ty[2];
+  const uint64_t eb = fx["exp_gate"].v.size() / hit.size() * 4, ebu = fx["exp_up"].v.size() / hit.size() * 4,
+                 ebd = fx["exp_down"].v.size() / hit.size() * 4;  // an expert's bytes, each role's
   uint8_t *eg = (uint8_t*) up(A("exp_gate")), *eu = (uint8_t*) up(A("exp_up")), *ed = (uint8_t*) up(A("exp_down"));
   float* drin = up(rin);
   std::vector<float> sum((size_t) T * L, 0.0f);
@@ -92,10 +97,10 @@ int main() {
     for (uint32_t s = 0; s < K; s++) {
       const uint64_t at = std::find(hit.begin(), hit.end(), (float) picks[(size_t) t * K + s]) - hit.begin();
       CHECK(at < hit.size());
-      const std::vector<float> g = mv(QTYPE_NVFP4, (const float*) (eg + at * eb), I, L, drin + (size_t) t * L, 1);
-      const std::vector<float> u = mv(QTYPE_NVFP4, (const float*) (eu + at * eb), I, L, drin + (size_t) t * L, 1);
+      const std::vector<float> g = mv(tg, (const float*) (eg + at * eb), I, L, drin + (size_t) t * L, 1);
+      const std::vector<float> u = mv(tu, (const float*) (eu + at * ebu), I, L, drin + (size_t) t * L, 1);
       float* h = up(swiglu(g, u, I, lim, w + (size_t) t * K + s, 1));
-      const std::vector<float> y = mv(QTYPE_NVFP4, (const float*) (ed + at * eb), L, I, h, 1);
+      const std::vector<float> y = mv(td, (const float*) (ed + at * ebd), L, I, h, 1);
       for (uint32_t d = 0; d < L; d++) sum[(size_t) t * L + d] += y[d];
       CHECK(hipFree(h) == hipSuccess);
     }

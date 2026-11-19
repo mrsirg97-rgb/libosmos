@@ -242,7 +242,7 @@ int main(void)
   }
   else
     printf("  LFM3 skipped: no vibes1.7b Q4_0 file\n");
-  t = of("hy4-flash/Hy4-flash-SPARK-4Bit.gguf");
+  t = of("hy4-flash/Hy4-flash-Q4_K_M-00001-of-00002.gguf");
   if (t)
   {
     const int32_t end = tokenizer_find(t, "<｜hy_end:6124c78e｜>");
@@ -254,7 +254,7 @@ int main(void)
     printf("  Hy4-flash's: %d cases, every id its tokenizer.json's, every case's pieces its bytes\n", n);
   }
   else
-    printf("  Hy4 skipped: no Hy4-flash SPARK-4Bit GGUF\n");
+    printf("  Hy4 skipped: no Hy4-flash Q4_K_M first shard\n");
   printf("[test_tokenizer] ok\n");
   return 0;
 }

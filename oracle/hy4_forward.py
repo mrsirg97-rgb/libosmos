@@ -8,7 +8,7 @@ public wiki text (osmos-eval's wiki10k_text.txt) split by the release's vocabula
 byte alphabet (realistic ids for routing and the indexer, not the tokenizer's merges: osmos is given the same ids).
 kept at the rows rows_of(T): every layer's streams after it (taps) and the logits.
 run: python -I hy4_forward.py --modeling modeling_hy_v4_flash.py --config config.json --tokenizer tokenizer.json
-     --shard model-00147-of-00148.safetensors --gguf Hy4-flash-SPARK-4Bit.gguf --text wiki10k_text.txt --out FILE"""
+     --shard model-00147-of-00148.safetensors --gguf Hy4-flash-Q4_K_M-00001-of-00002.gguf --text wiki10k_text.txt --out FILE"""
 import argparse
 import gc
 import json
