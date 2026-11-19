@@ -54,15 +54,15 @@ int main(int argc, char** argv) {
   std::string text;
   for (int c; (c = std::fgetc(f)) != EOF;) text.push_back((char) c);
   std::fclose(f);
-  const size_t want = tokenizer_encode(tok, text.data(), text.size(), false, nullptr, 0);
+  const size_t want = tokenizer_encode(tok, text.data(), text.size(), 0, nullptr, 0);
   std::vector<int32_t> ids(want);
-  tokenizer_encode(tok, text.data(), text.size(), false, ids.data(), want);
+  tokenizer_encode(tok, text.data(), text.size(), 0, ids.data(), want);
   if (ids.size() < (size_t) P + D + 1)
     return std::fprintf(stderr, "the text's %zu tokens under P + D + 1 = %u\n", ids.size(), P + D + 1), 1;
   Lfm3Weights* w = lfm3_weights_create(g, err);
   CHECK(w);
   const uint32_t S = 2048 < P ? 2048 : P, V = (uint32_t) w->geo.n_vocab;
-  const Lfm3Options od = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, nullptr, 0, false, 0}, ol = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, argv[2], 0, false, F};
+  const Lfm3Options od = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, nullptr, 0, nullptr, 0, 0, 0}, ol = {S, P + D + 1, 1, LFM3_HEAD_Q8_0, argv[2], 0, nullptr, 0, 0, F};
   Lfm3Forward *fd = only ? nullptr : lfm3_forward_create(w, &od, err), *fl = nullptr;
   CHECK(only || fd);
   fl = lfm3_forward_create(w, &ol, err);

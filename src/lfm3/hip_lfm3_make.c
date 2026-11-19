@@ -210,6 +210,20 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   free(f);
 }
 
+/* vibes1.7b's: lfm3_rope_nll's crossovers (DESIGN.md, "vibes-flash: rope") */
+const Lfm3Stage lfm3_stages_default[] = {{0, 1}, {LFM3_STAGE_X2_FROM, 2}, {LFM3_STAGE_X4_FROM, 4}, {LFM3_STAGE_X8_FROM, 8}};
+const uint32_t lfm3_stages_default_n = sizeof lfm3_stages_default / sizeof lfm3_stages_default[0];
+
+static bool stages_ok(const Lfm3Stage *t, uint32_t n)
+{
+  if (!t || !n || n > LFM3_MAX_STAGES || t[0].from)
+    return false;
+  for (uint32_t s = 0; s < n; s++)
+    if (t[s].factor < 1 || t[s].factor > 64 || (s && t[s].from <= t[s - 1].from))
+      return false;
+  return true;
+}
+
 Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[LFM3_ERR])
 {
   if (!w || !o || !o->max_tokens || !o->max_ctx || o->max_tokens > o->max_ctx || o->max_ctx > LFM3_MAX_CTX)
@@ -227,19 +241,23 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
      scaled (the window's keys are near) - transformers' angle step, Liquid's */
   f->yarn_from = o->yarn_from ? o->yarn_from : g->native_ctx;
   f->sparse_from = o->lsa_sparse_from ? o->lsa_sparse_from : LFM3_LSA_SPARSE_FROM;
-  while (f->stages < LFM3_MAX_STAGES && (f->stages == 0 || (uint64_t)f->yarn_from << (f->stages - 1) < f->max_ctx))
-    f->stages++;
-  bool ok = (uint64_t)f->yarn_from << (f->stages - 1) >= f->max_ctx ||
-            lfm3_fail(err, "a context past the YaRN stages' (LFM3_MAX_STAGES over yarn_from)");
-  if (ok && o->yarn_static) /* one stage: every position the top's (YaRN at max_ctx over yarn_from) */
-    f->stages = 1, ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from,
-                                  f->max_ctx, Q4X_THETA_HF, &f->rope_full[0]);
-  for (uint32_t s = 0; ok && !o->yarn_static && s < f->stages; s++)
-    ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from, f->yarn_from << s,
-                  Q4X_THETA_HF, &f->rope_full[s]);
+  const Lfm3Stage *table = o->stages ? o->stages : lfm3_stages_default;
+  const uint32_t nt = o->stages ? o->n_stages : lfm3_stages_default_n;
+  bool ok = o->yarn_static_ctx || stages_ok(table, nt) ||
+            lfm3_fail(err, "the YaRN stages: none, past LFM3_MAX_STAGES, not from 0, out of order, or a factor not 1-64");
+  f->yarn_static_ctx = o->yarn_static_ctx;
+  if (ok && o->yarn_static_ctx) /* one stage: every position YaRN at yarn_static_ctx over yarn_from */
+    f->stages = 1, f->stage[0] = (Lfm3Stage){0, 0},
+    ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from, o->yarn_static_ctx,
+                  Q4X_THETA_HF, &f->rope_full[0]);
+  for (uint32_t s = 0; ok && !o->yarn_static_ctx && s < nt; s++)
+    f->stage[s] = table[s], f->stages = s + 1,
+    ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from,
+                  f->yarn_from * table[s].factor, Q4X_THETA_HF, &f->rope_full[s]);
   ok = ok && q4x_rope((uint32_t)g->head_dim, (uint32_t)g->head_dim / 2, g->rope_base_swa, g->native_ctx, g->native_ctx,
                      Q4X_THETA_HF, &f->rope_swa);
-  ok = ok || err[0] || lfm3_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
+  if (!ok && !err[0]) /* a refusal before keeps its own message */
+    lfm3_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || lfm3_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
   ok = ok && joints(f, err) && (!o->lsa || lsa_load(f, o->lsa, err));

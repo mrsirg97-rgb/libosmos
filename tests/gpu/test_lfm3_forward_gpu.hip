@@ -84,7 +84,7 @@ int main() {
   const uint32_t T = (uint32_t) fid.size(), V = (uint32_t) w->geo.n_vocab, last = 64 < T ? 64 : T;
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
-  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr, 0, false, 0};  // the reference's head: the file's BF16
+  const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr, 0, nullptr, 0, 0, 0};  // the reference's head: the file's BF16
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -232,7 +232,7 @@ int main() {
   // the prompt in its steps the one step's last rows, bit for bit
   {
     const uint32_t S = 300 < T ? 300 : T;
-    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr, 0, false, 0};
+    const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr, 0, nullptr, 0, 0, 0};
     Lfm3Forward* f2 = lfm3_forward_create(w, &o2, err);
     CHECK(f2);
     Lfm3Seq* r = lfm3_seq_create(f2, err);
@@ -251,7 +251,7 @@ int main() {
   // the head's Q8_0 copy (the engine's default): the same ids, its logits against the file's head's - the rounding's
   // own cost, measured (2026-11-18): see kHeadKl
   {
-    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr, 0, false, 0};
+    const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr, 0, nullptr, 0, 0, 0};
     Lfm3Forward* fq = lfm3_forward_create(w, &oq, err);
     CHECK(fq);
     Lfm3Seq* q = lfm3_seq_create(fq, err);
@@ -279,7 +279,7 @@ int main() {
     FILE* mf = std::fopen(maps.c_str(), "rb");
     if (T == 2048 && mf) {
       std::fclose(mf);
-      const Lfm3Options os = {T, T, last, LFM3_HEAD_FILE, maps.c_str(), 0, false, 1024};
+      const Lfm3Options os = {T, T, last, LFM3_HEAD_FILE, maps.c_str(), 0, nullptr, 0, 0, 1024};
       Lfm3Forward* fs = lfm3_forward_create(w, &os, err);
       CHECK(fs);
       Lfm3Seq *one = lfm3_seq_create(fs, err), *three = lfm3_seq_create(fs, err);
@@ -318,7 +318,8 @@ int main() {
     std::map<std::string, Arr> base = fx;
     if (T == 2048 && load(yarn_path.c_str())) {
       const std::vector<float> yref = A("logits");
-      const Lfm3Options oy = {T, 4 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024, false, 0};
+      const Lfm3Stage two_stages[] = {{0, 1}, {1024, 2}};  // native, then x2 past 1,024
+      const Lfm3Options oy = {T, 4 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024, two_stages, 2, 0, 0};
       Lfm3Forward* fy = lfm3_forward_create(w, &oy, err);
       CHECK(fy);
       Lfm3Seq *one = lfm3_seq_create(fy, err), *two = lfm3_seq_create(fy, err);
@@ -349,10 +350,10 @@ int main() {
       std::printf("  crossing into stage 1 at %u (the cache turned): against stage 1 from the start KL mean %.3g, max "
                   "%.3g; top-1 %u of %u\n", a + b, kc / last, kcm, same, last);
       CHECK(kc / last <= kStageKlMean && kcm <= kStageKlMax && same + kTop1Miss >= last);
-      // static (Lfm3Options' yarn_static): every position YaRN x2, the ids in two steps (under the base, then past
+      // static (Lfm3Options' yarn_static_ctx 2,048 over 1,024): every position YaRN x2, the ids in two steps (under the base, then past
       // it) against Liquid's x2 within the forward's bounds - no crossing, no turn
       {
-        const Lfm3Options ox = {T, 2 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024, true, 0};
+        const Lfm3Options ox = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, nullptr, 0, 2 * 1024, 0};
         Lfm3Forward* fx = lfm3_forward_create(w, &ox, err);
         CHECK(fx);
         Lfm3Seq* sx = lfm3_seq_create(fx, err);
@@ -368,6 +369,29 @@ int main() {
                     "of %u\n", T - 1000, kx / last, kxm, ax, last);
         CHECK(kx / last <= kKlMean && kxm <= kKlMax && ax + kTop1Miss >= last);
         lfm3_seq_destroy(sx), lfm3_forward_destroy(fx);
+      }
+      // a table's thresholds its own (not the base's powers): native, x2 past 1,500, x4 past 1,900 - one step to 2,048
+      // its stage 2; steps ending at 1,400, 1,700 and 2,048 stages 0, 1, 2; tables out of order, not from 0, a factor
+      // 0 or past 64 refused
+      {
+        const Lfm3Stage three[] = {{0, 1}, {1500, 2}, {1900, 4}};
+        const Lfm3Options o3 = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, three, 3, 0, 0};
+        Lfm3Forward* f3 = lfm3_forward_create(w, &o3, err);
+        CHECK(f3);
+        Lfm3Seq *a3 = lfm3_seq_create(f3, err), *b3 = lfm3_seq_create(f3, err);
+        CHECK(a3 && b3 && lfm3_step(f3, a3, ids.data(), T, 1, err) && lfm3_seq_stage(a3) == 2);
+        CHECK(lfm3_step(f3, b3, ids.data(), 1400, 1, err) && lfm3_seq_stage(b3) == 0);
+        CHECK(lfm3_step(f3, b3, ids.data() + 1400, 300, 1, err) && lfm3_seq_stage(b3) == 1);
+        CHECK(lfm3_step(f3, b3, ids.data() + 1700, T - 1700, 1, err) && lfm3_seq_stage(b3) == 2);
+        lfm3_seq_destroy(a3), lfm3_seq_destroy(b3), lfm3_forward_destroy(f3);
+        const Lfm3Stage desc[] = {{0, 1}, {1900, 2}, {1500, 4}}, late[] = {{10, 1}, {1500, 2}}, zero[] = {{0, 0}},
+                        big[] = {{0, 1}, {100, 65}};
+        for (const auto& bad : {std::make_pair(desc, 3u), std::make_pair(late, 2u), std::make_pair(zero, 1u),
+                                std::make_pair(big, 2u)}) {
+          const Lfm3Options ob = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, bad.first, bad.second, 0, 0};
+          CHECK(!lfm3_forward_create(w, &ob, err));
+        }
+        std::printf("  a table's stages (1,500, 1,900): stages 0, 1, 2 at 1,400, 1,700, 2,048; bad tables refused\n");
       }
       lfm3_seq_destroy(one), lfm3_seq_destroy(two), lfm3_forward_destroy(fy);
     } else {

@@ -87,18 +87,36 @@ typedef enum Lfm3Head
    W_K_idx, F32 [256 x 64] - its 4 KV heads' zero-tail dims), or NULL: every full layer dense. with them a decode's
    full layers read incarnate's served read (osmos/lsa.h: 512-key blocks, 64 buckets each, the top 1,024 buckets' keys
    cut at 4,096, the window and the sinks); a prompt's stay dense (lsa.py's) */
-/* yarn_from: the YaRN stages' base (0: the native context) - a sequence's full layers rotated at the least factor 2^s
-   whose span (yarn_from 2^s) holds its positions: plain rope below the base, and crossing a span its cached keys
-   turned to the next stage's (DESIGN.md, "vibes-flash: 2M"); the stages to max_ctx's, LFM3_MAX_STAGES at most */
+/* a YaRN stage: a sequence past `from` positions has its full layers rotated YaRN at `factor` over yarn_from's
+   positions (factor 1: the native rotation); a sequence's stage the last whose `from` its length passes, a crossing
+   its cached keys turned (DESIGN.md, "vibes-flash: 2M"). a table: the first from 0, from ascending, factors at least
+   1 and at most 64, LFM3_MAX_STAGES at most */
 #define LFM3_MAX_STAGES 8
+typedef struct Lfm3Stage
+{
+  uint32_t from, factor;
+} Lfm3Stage;
+/* vibes1.7b's (lfm3_rope_nll's crossovers: DESIGN.md, "vibes-flash: rope"), Lfm3Options' stages when NULL - each
+   boundary its measured bracket's midpoint (the last 2,048 tokens' NLL on wiki, a PG-19 novel and llama.cpp's source):
+   x2 from 32K (16K / 32K / 64K: the least worst case - the novel +0.063 at 32K, wiki -0.40); x4 from 160K (x2 at 128K
+   on both, x4 at 192K on both); x8 from 384K (x4 at 256K on both, x8 at 512K on the novel by 0.052, x4 on code by
+   0.007) */
+#define LFM3_STAGE_X2_FROM 32768
+#define LFM3_STAGE_X4_FROM 163840
+#define LFM3_STAGE_X8_FROM 393216
+extern const Lfm3Stage lfm3_stages_default[];
+extern const uint32_t lfm3_stages_default_n;
 #define LFM3_MAX_CTX 2097152 /* a context's most positions: 2M (the stages to YaRN x8 over the native 262,144) */
 typedef struct Lfm3Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;
   Lfm3Head head;
   const char *lsa;
-  uint32_t yarn_from;
-  bool yarn_static;         /* every position the top stage's rotation (YaRN at max_ctx over yarn_from), no stages */
+  uint32_t yarn_from;        /* YaRN's original positions (0: the model's native context) */
+  const Lfm3Stage *stages;   /* NULL: lfm3_stages_default */
+  uint32_t n_stages;
+  uint32_t yarn_static_ctx; /* every position YaRN at yarn_static_ctx over yarn_from (64 times it at most), no stages;
+                               0 the stages */
   uint32_t lsa_sparse_from; /* with LSA, a prompt's tokens from this position read sparse (0: LFM3_LSA_SPARSE_FROM) */
 } Lfm3Options;
 /* a prompt token's read sparse from here: under LSA_READ_MAX positions a read is every key (the dense attention's) */

@@ -19,7 +19,9 @@ struct Lfm3Forward
   uint32_t max_tokens, max_ctx, logit_rows;
   uint32_t ring; /* a sliding layer's cache rows: window + max_tokens + LFM3_MAX_BACK (DESIGN.md, step 2) */
   Q4xRope rope_full[LFM3_MAX_STAGES], rope_swa; /* the full layers' a stage's: plain, then YaRN x2, x4, ... */
-  uint32_t stages, yarn_from;                    /* the stages made (max_ctx's), their base */
+  uint32_t stages, yarn_from;                    /* the stages made, YaRN's original positions */
+  Lfm3Stage stage[LFM3_MAX_STAGES];              /* their table (Lfm3Options' or lfm3_stages_default) */
+  uint32_t yarn_static_ctx;                      /* Lfm3Options' (0: the stages) */
   const void *head;   /* the tied head as the step reads it: head_q8 (LFM3_HEAD_Q8_0) or the embedding's table */
   uint32_t head_type;
   void *head_q8;      /* its Q8_0 copy (owned), NULL for the file's */

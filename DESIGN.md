@@ -2014,6 +2014,18 @@ step 1's forward (one sequence, rows by position, one convolution state) becomes
   bits; a damaged one refused) and the ring past the window against the 2,048-id fixture; the tokenizer's fixtures; the
   dialect's; then the engine, served.
 
+## vibes-flash: rope (measured, 2026-11-18)
+
+vibes1.7b trained on 16,384-token examples, native rope (the config's: no YaRN); its card's long-context LSA numbers
+ran static YaRN x40 over 262,144 (incarnate lsa.py). measured (lfm3_rope_nll: the last 2,048 tokens' NLL after a
+P-token read; wiki to 40K, a PG-19 test novel and llama.cpp's source to 512K): x40 the worst everywhere (0.1-0.4 nats
+over the best); native the best to 16-32K, then the worst - past training's length it degrades (wiki 24K: 3.17
+against x4 2.68; a 24K fixture of Liquid's own code shows it, osmos matching, KL 4.4e-5); each factor wins a band:
+native to ~32K, x2 to 128-192K, x4 to 256-512K, x8 at 512K on the novel (code: x4 by 0.007). so the stages are a
+table (Lfm3Stage {from, factor}, YaRN over the native 262,144), each boundary its bracket's midpoint
+(LFM3_STAGE_X2/X4/X8_FROM: 32K, 160K, 384K). the 2M pack's needles (0/2 at 1.9M, 6/6 to 524K) ran the old stages
+(native to 262K); a 1M pack and its needles on these.
+
 ## vibes-flash: 2M (design, 2026-11-18)
 
 the operator's: vibes1.7b ships with a 2M context, its attention as cheap as it can be made. measured first

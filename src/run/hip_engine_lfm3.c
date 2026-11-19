@@ -82,7 +82,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (!e)
     return fail(err, "out of memory"), NULL;
   const uint32_t steps = o->max_tokens ? o->max_tokens : LFM3_STEP_TOKENS;
-  const Lfm3Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa, 0, false, 0};
+  const Lfm3Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa, 0, NULL, 0, 0, 0};
   if (!(e->f = lfm3_forward_create(m->w, &ho, err)))
     return e_destroy(e), NULL;
   return e;
@@ -132,7 +132,7 @@ static bool batch(Eng *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t
 
 static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {
-  return batch(p, seqs, tokens, n, false, err);
+  return batch(p, seqs, tokens, n, 0, err);
 }
 
 static bool e_read(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])

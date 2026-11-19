@@ -1,11 +1,13 @@
 // which rotation the model reads best: lfm3_rope_nll <GGUF> <text> P... - the text's first P tokens read (steps of
-// 2,048), the last 2,048's next-token NLL, under the plain rotation (the stages under the native length) and static
-// YaRN at a 512K, 1M and 2M context (Lfm3Options' yarn_static: every position the factor's)
+// 2,048), the last 2,048's next-token NLL, under the native rotation and static YaRN over 262,144 at x2, x4, x8 and
+// x40 (Lfm3Options' yarn_static_ctx: every position the factor's; x40 incarnate lsa.py's long-context measurements') -
+// OSMOS_ROPE_MODES (a comma list of the names) runs those alone
 #include <hip/hip_runtime.h>
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <algorithm>
 #include <vector>
@@ -45,15 +47,15 @@ int main(int argc, char** argv) {
   struct Mode {
     const char* name;
     uint32_t ctx;
-    bool fixed;
-  } modes[] = {{"plain", 0, false}, {"static 512K (x2)", 524288, true}, {"static 1M (x4)", 1048576, true},
-               {"static 2M (x8)", 2097152, true}};
+  } modes[] = {{"native", 0}, {"x2", 524288}, {"x4", 1048576}, {"x8", 2097152}, {"x40", 10485760}};
+  const char* only = getenv("OSMOS_ROPE_MODES");
   for (int a = 3; a < argc; a++) {
     const uint32_t P = (uint32_t) atoi(argv[a]);
     CHECK(ids.size() > (size_t) P + 1 && P >= S);
     std::printf("P %u:", P);
     for (const Mode& m : modes) {
-      const Lfm3Options o = {S, m.fixed ? m.ctx : P + 1, S, LFM3_HEAD_Q8_0, nullptr, 0, m.fixed, 0};
+      if (only && !std::strstr((std::string(",") + only + ",").c_str(), (std::string(",") + m.name + ",").c_str())) continue;
+      const Lfm3Options o = {S, P + 1, S, LFM3_HEAD_Q8_0, nullptr, 0, nullptr, 0, m.ctx, 0};
       Lfm3Forward* fw = lfm3_forward_create(w, &o, err);
       CHECK(fw);
       Lfm3Seq* s = lfm3_seq_create(fw, err);
