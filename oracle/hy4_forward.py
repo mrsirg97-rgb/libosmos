@@ -325,6 +325,8 @@ def check_layer(R, config, g, c, table, L, d, T, masks, pos, rotary, ngram, emas
                         engram_mask=emask)[0].numpy()
     err = np.abs(out - want).reshape(T, -1).max(-1)
     top = np.abs(out).max()
+    if os.environ.get("HY4_CHECK_ERR"):  # each row's error, for a pattern (np.save)
+        np.save(os.environ["HY4_CHECK_ERR"], err)
     print(f"layer {L} on osmos's input: max error {err.max():.3g} of {top:.4g} ({err.max() / top:.2g}); rows past 1e-5: "
           f"{int((err > 1e-5 * top).sum())} of {T}")
     for t in np.argsort(-err)[:6]:
