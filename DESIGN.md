@@ -2024,7 +2024,9 @@ against x4 2.68; a 24K fixture of Liquid's own code shows it, osmos matching, KL
 native to ~32K, x2 to 128-192K, x4 to 256-512K, x8 at 512K on the novel (code: x4 by 0.007). so the stages are a
 table (Lfm3Stage {from, factor}, YaRN over the native 262,144), each boundary its bracket's midpoint
 (LFM3_STAGE_X2/X4/X8_FROM: 32K, 160K, 384K). the 2M pack's needles (0/2 at 1.9M, 6/6 to 524K) ran the old stages
-(native to 262K); a 1M pack and its needles on these.
+(native to 262K); a 1M pack and its needles on these: 0/1 (10% depth, ~940K back: a confident invention; the
+prompt 1.04M tokens in 488 s). the pack 512K (the operator's, 2026-11-19): 6/6 needles to 524K (10/50/90% depth),
+the forward 2M-capable for a model trained past it (a retrain, or vibes27b).
 
 ## vibes-flash: 2M (design, 2026-11-18)
 
