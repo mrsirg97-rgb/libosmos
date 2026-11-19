@@ -466,10 +466,37 @@ __device__ inline uint32_t block_scan(uint32_t v, uint32_t* lds, uint32_t* total
 // a block a token: its complete groups' scores (a thread a group, the heads in order), then the top - 1 greatest by
 // the scores' bits (the k-th greatest key bit by bit, then those over it and its ties from the lowest group),
 // written ascending, its own last
+constexpr uint32_t kIxSpreadTokens = 16;  // a step's tokens at most whose scores ix_score_kernel spreads
+
+// each token's groups' scores, a thread a group and many blocks a token (one block a token left a decode's token on
+// one of the GPU's 40 units: 37 ms a token at 32K, 2026-11-19): score_g = sum over the heads of w_h relu(q_h . g), in
+// the heads' and the dims' order - the bits the select kernel's loop had
+__global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, const float* w, const float* groups,
+                                                            uint32_t heads, uint32_t dim, uint32_t pool, uint32_t top,
+                                                            const int32_t* pos, uint32_t max_groups, float* scores) {
+  __shared__ float qs[kIxDim * 16], ws[16];
+  const uint32_t t = blockIdx.y, own = (uint32_t) pos[t] / pool, g = blockIdx.x * kThreads + threadIdx.x;
+  if (own < top || blockIdx.x * kThreads >= own) return;
+  for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
+  for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
+  __syncthreads();
+  if (g >= own) return;
+  const float* k = groups + (uint64_t) g * dim;
+  float s = 0;
+  for (uint32_t h = 0; h < heads; h++) {
+    float d = 0;
+    for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * dim + i], k[i], d);
+    s = fmaf(ws[h], fmaxf(d, 0.0f), s);
+  }
+  scores[(uint64_t) t * max_groups + g] = s;
+}
+
+// the selection: a block a token; scored, its scores ix_score_kernel's - else computed here, a thread a group (a
+// prompt's many tokens: one block each the better shape; the same bits either way)
 __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, const float* w, const float* groups,
                                                              uint32_t heads, uint32_t dim, uint32_t pool, uint32_t top,
                                                              const int32_t* pos, uint32_t max_groups, float* scores,
-                                                             int32_t* sel, int32_t* n_sel) {
+                                                             int32_t* sel, int32_t* n_sel, bool scored) {
   __shared__ float qs[kIxDim * 16], ws[16];
   __shared__ uint32_t lds[kThreads];
   const uint32_t t = blockIdx.x, own = (uint32_t) pos[t] / pool;
@@ -479,19 +506,21 @@ __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, con
     if (threadIdx.x == 0) n_sel[t] = (int32_t) own + 1;
     return;
   }
-  for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
-  for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
-  __syncthreads();
   float* sc = scores + (uint64_t) t * max_groups;
-  for (uint32_t g = threadIdx.x; g < own; g += kThreads) {
-    const float* k = groups + (uint64_t) g * dim;
-    float s = 0;
-    for (uint32_t h = 0; h < heads; h++) {
-      float d = 0;
-      for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * dim + i], k[i], d);
-      s = fmaf(ws[h], fmaxf(d, 0.0f), s);
+  if (!scored) {
+    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
+    for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
+    __syncthreads();
+    for (uint32_t g = threadIdx.x; g < own; g += kThreads) {
+      const float* k = groups + (uint64_t) g * dim;
+      float s = 0;
+      for (uint32_t h = 0; h < heads; h++) {
+        float d = 0;
+        for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * dim + i], k[i], d);
+        s = fmaf(ws[h], fmaxf(d, 0.0f), s);
+      }
+      sc[g] = s;
     }
-    sc[g] = s;
   }
   __syncthreads();
   const uint32_t want = top - 1;
@@ -720,8 +749,12 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
   if (!q || !w || !groups || !pos || !scores || !sel || !n_sel || !heads || heads > 16 || !dim || dim > kIxDim ||
       !pool || top < 2 || !n_tok || !max_groups)
     return false;
+  const bool spread = n_tok <= kIxSpreadTokens;  // (a decode's or a verify's tokens: the scores over many blocks)
+  if (spread)
+    ix_score_kernel<<<dim3((max_groups + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(
+        q, w, groups, heads, dim, pool, top, pos, max_groups, scores);
   ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool, top, pos, max_groups, scores,
-                                                       sel, n_sel);
+                                                       sel, n_sel, spread);
   return ok();
 }
 
