@@ -96,6 +96,25 @@ int main() {
               T, chosen, top - 1);
   CHECK(!differ && chosen > 0);
 
+  // a decode's and a verify's few tokens (the spread selection: up to 16 a step) - every token's groups the same
+  {
+    std::vector<int32_t> nz2(T, 0);
+    int32_t *sel2 = dev(zeros), *n2 = dev(nz2);
+    for (uint32_t a = 0; a < T; a += 6) {
+      const uint32_t m = T - a < 6 ? T - a : 6;
+      CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a, m, G,
+                          scores, sel2 + (size_t) a * top, n2 + a, 0));
+    }
+    std::vector<int32_t> s2((size_t) T * top), n2h(T);
+    CHECK(hipMemcpy(s2.data(), sel2, s2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(hipMemcpy(n2h.data(), n2, n2h.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    for (uint32_t t = 0; t < T; t++)
+      CHECK(n2h[t] == n[t] && std::equal(s2.begin() + (size_t) t * top, s2.begin() + (size_t) t * top + n[t],
+                                         s.begin() + (size_t) t * top));
+    std::printf("  six tokens a step (the spread selection): every token's groups the one-step run's\n");
+    CHECK(hipFree(sel2) == hipSuccess && hipFree(n2) == hipSuccess);
+  }
+
   // run again: the pooled keys and every token's groups the same bits (no order a race picks)
   const std::vector<float> g1 = down(groups, (size_t) G * ID);
   CHECK(hy4_ix_pool(keys, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, 0, G, groups, 0));

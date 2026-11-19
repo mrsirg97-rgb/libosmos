@@ -510,27 +510,48 @@ __device__ inline uint32_t block_scan(uint32_t v, uint32_t* lds, uint32_t* total
 // written ascending, its own last
 constexpr uint32_t kIxSpreadTokens = 16;  // a step's tokens at most whose scores ix_score_kernel spreads
 
-// each token's groups' scores, a thread a group and many blocks a token (one block a token left a decode's token on
-// one of the GPU's 40 units: 37 ms a token at 32K, 2026-11-19): score_g = sum over the heads of w_h relu(q_h . g), in
-// the heads' and the dims' order - the bits the select kernel's loop had
+// each token's groups' scores, kIxTile groups a block: their keys loaded once into LDS (coalesced - a thread a group
+// reading its own key once a head read 512-byte strides 16 times: 113 ms a decode step at 128K, 2026-11-19), a
+// thread a (group, head)'s dot over the dims in their order, then a group's sum over the heads in theirs: score_g =
+// sum_h w_h relu(q_h . g) - the bits the select kernel's own loop gives
+constexpr uint32_t kIxTile = 32;
 __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, const float* w, const float* groups,
                                                             uint32_t heads, uint32_t dim, uint32_t pool, uint32_t top,
-                                                            const int32_t* pos, uint32_t max_groups, float* scores) {
-  __shared__ float qs[kIxDim * 16], ws[16];
-  const uint32_t t = blockIdx.y, own = (uint32_t) pos[t] / pool, g = blockIdx.x * kThreads + threadIdx.x;
-  if (own < top || blockIdx.x * kThreads >= own) return;
-  for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
-  for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
-  __syncthreads();
-  if (g >= own) return;
-  const float* k = groups + (uint64_t) g * dim;
-  float s = 0;
-  for (uint32_t h = 0; h < heads; h++) {
-    float d = 0;
-    for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * dim + i], k[i], d);
-    s = fmaf(ws[h], fmaxf(d, 0.0f), s);
+                                                            const int32_t* pos, uint32_t n_tok, uint32_t max_groups,
+                                                            float* scores) {
+  // a tile's keys once for every token of the step (a verify's 6 read them once, not 6 times), each token's query in
+  // turn
+  __shared__ float qs[kIxDim * 16], ws[16], ks[kIxTile][kIxDim + 1], ds[kIxTile][16];
+  const uint32_t g0 = blockIdx.x * kIxTile;
+  uint32_t most = 0;
+  for (uint32_t t = 0; t < n_tok; t++) {
+    const uint32_t own = (uint32_t) pos[t] / pool;
+    if (own >= top && own > most) most = own;
   }
-  scores[(uint64_t) t * max_groups + g] = s;
+  if (g0 >= most) return;
+  const uint32_t nk = most - g0 < kIxTile ? most - g0 : kIxTile;
+  for (uint32_t i = threadIdx.x; i < nk * dim; i += kThreads) ks[i / dim][i % dim] = groups[(uint64_t) (g0 + i / dim) * dim + i % dim];
+  for (uint32_t t = 0; t < n_tok; t++) {
+    const uint32_t own = (uint32_t) pos[t] / pool;
+    if (own < top || g0 >= own) continue;
+    const uint32_t n = own - g0 < kIxTile ? own - g0 : kIxTile;
+    __syncthreads();
+    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
+    for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
+    __syncthreads();
+    for (uint32_t e = threadIdx.x; e < n * heads; e += kThreads) {
+      const uint32_t gl = e / heads, h = e % heads;
+      float d = 0;
+      for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * dim + i], ks[gl][i], d);
+      ds[gl][h] = d;
+    }
+    __syncthreads();
+    if (threadIdx.x < n) {
+      float sc = 0;
+      for (uint32_t h = 0; h < heads; h++) sc = fmaf(ws[h], fmaxf(ds[threadIdx.x][h], 0.0f), sc);
+      scores[(uint64_t) t * max_groups + g0 + threadIdx.x] = sc;
+    }
+  }
 }
 
 // the selection: a block a token; scored, its scores ix_score_kernel's - else computed here, a thread a group (a
@@ -538,7 +559,8 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
 __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, const float* w, const float* groups,
                                                              uint32_t heads, uint32_t dim, uint32_t pool, uint32_t top,
                                                              const int32_t* pos, uint32_t max_groups, float* scores,
-                                                             int32_t* sel, int32_t* n_sel, bool scored) {
+                                                             int32_t* sel, int32_t* n_sel, bool scored,
+                                                             bool dense_only) {
   __shared__ float qs[kIxDim * 16], ws[16];
   __shared__ uint32_t lds[kThreads];
   const uint32_t t = blockIdx.x, own = (uint32_t) pos[t] / pool;
@@ -548,6 +570,7 @@ __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, con
     if (threadIdx.x == 0) n_sel[t] = (int32_t) own + 1;
     return;
   }
+  if (dense_only) return;  // (the spread selection's tokens: ix_wide_*)
   float* sc = scores + (uint64_t) t * max_groups;
   if (!scored) {
     for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
@@ -596,6 +619,104 @@ __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, con
   if (threadIdx.x == 0) out[want] = (int32_t) own, n_sel[t] = (int32_t) top;
 }
 
+
+// the selection spread over the GPU for a step's few tokens (a decode's, a verify's - 2026-11-19: a block a token's
+// radix over 32K groups took 113 ms a step at 128K, 0.9 s at 1M): the same picks as ix_select_kernel's - the key V
+// with count(> V) < want <= count(>= V) by four 8-bit radix passes (each a many-block histogram of the keys under the
+// prefix so far, integer atomics: exact in any order; then a block a token picks the digit), then in group order
+// every key > V and the first want - count(> V) keys == V (block counts, their offsets, the writes), then its own
+struct IxWide {   // a token's state (ix_wide_scratch's): the prefix so far, the keys still wanted, a pass's histogram
+  uint32_t prefix, need, hist[256];
+};
+constexpr uint32_t kWideBlocks = 256;  // a token's blocks over its groups at most (each a chunk of them)
+
+__device__ inline uint32_t wide_chunk(uint32_t own) { return ((own + kWideBlocks - 1) / kWideBlocks + kThreads - 1) / kThreads * kThreads; }
+
+__global__ void ix_wide_init_kernel(const int32_t* pos, uint32_t pool, uint32_t top, IxWide* st) {
+  const uint32_t t = blockIdx.x;
+  for (uint32_t b = threadIdx.x; b < 256; b += blockDim.x) st[t].hist[b] = 0;
+  if (threadIdx.x == 0) st[t].prefix = 0, st[t].need = top - 1;
+}
+
+__global__ __launch_bounds__(kThreads) void ix_wide_hist_kernel(const float* scores, const int32_t* pos, uint32_t pool,
+                                                                uint32_t top, uint32_t max_groups, uint32_t shift,
+                                                                IxWide* st) {
+  __shared__ uint32_t h[256];
+  const uint32_t t = blockIdx.y, own = (uint32_t) pos[t] / pool, chunk = wide_chunk(own), g0 = blockIdx.x * chunk;
+  if (own < top || g0 >= own) return;
+  for (uint32_t b = threadIdx.x; b < 256; b += kThreads) h[b] = 0;
+  __syncthreads();
+  const uint32_t prefix = st[t].prefix, mask = shift == 24 ? 0u : ~0u << (shift + 8);
+  const float* sc = scores + (uint64_t) t * max_groups;
+  const uint32_t g1 = g0 + chunk < own ? g0 + chunk : own;
+  for (uint32_t g = g0 + threadIdx.x; g < g1; g += kThreads) {
+    const uint32_t k = order_key(sc[g]);
+    if ((k & mask) == (prefix & mask)) atomicAdd(&h[(k >> shift) & 255], 1u);
+  }
+  __syncthreads();
+  for (uint32_t b = threadIdx.x; b < 256; b += kThreads)
+    if (h[b]) atomicAdd(&st[t].hist[b], h[b]);
+}
+
+__global__ void ix_wide_pick_kernel(const int32_t* pos, uint32_t pool, uint32_t top, uint32_t shift, IxWide* st) {
+  const uint32_t t = blockIdx.x, own = (uint32_t) pos[t] / pool;
+  if (own < top || threadIdx.x) return;
+  uint32_t acc = 0, b = 255;  // from the top digit down: the first whose keys reach the ones still wanted
+  for (;; b--) {
+    if (acc + st[t].hist[b] >= st[t].need || b == 0) break;
+    acc += st[t].hist[b];
+  }
+  st[t].prefix |= b << shift, st[t].need -= acc;
+  for (uint32_t i = 0; i < 256; i++) st[t].hist[i] = 0;
+}
+
+__global__ __launch_bounds__(kThreads) void ix_wide_count_kernel(const float* scores, const int32_t* pos, uint32_t pool,
+                                                                 uint32_t top, uint32_t max_groups, const IxWide* st,
+                                                                 uint32_t* cnt) {
+  __shared__ uint32_t lds[kThreads];
+  const uint32_t t = blockIdx.y, own = (uint32_t) pos[t] / pool, chunk = wide_chunk(own), g0 = blockIdx.x * chunk;
+  if (own < top) return;
+  uint32_t gt = 0, eq = 0;
+  const uint32_t v = st[t].prefix, g1 = g0 + chunk < own ? g0 + chunk : own;
+  const float* sc = scores + (uint64_t) t * max_groups;
+  for (uint32_t g = g0 + threadIdx.x; g < g1; g += kThreads) {
+    const uint32_t k = order_key(sc[g]);
+    gt += k > v, eq += k == v;
+  }
+  uint32_t tg = 0, te = 0;
+  block_scan(gt, lds, &tg);
+  block_scan(eq, lds, &te);
+  if (threadIdx.x == 0) cnt[((uint64_t) t * kWideBlocks + blockIdx.x) * 2] = tg, cnt[((uint64_t) t * kWideBlocks + blockIdx.x) * 2 + 1] = te;
+}
+
+__global__ __launch_bounds__(kThreads) void ix_wide_write_kernel(const float* scores, const int32_t* pos, uint32_t pool,
+                                                                 uint32_t top, uint32_t max_groups, const IxWide* st,
+                                                                 const uint32_t* cnt, int32_t* sel, int32_t* n_sel) {
+  __shared__ uint32_t lds[kThreads];
+  const uint32_t t = blockIdx.y, own = (uint32_t) pos[t] / pool, chunk = wide_chunk(own), g0 = blockIdx.x * chunk;
+  if (own < top || g0 >= own) return;
+  const uint32_t v = st[t].prefix, ties = st[t].need, want = top - 1;
+  uint32_t taken = 0, eq_seen = 0;  // the blocks before this one's (their counts in order: a fixed sum)
+  for (uint32_t b = 0; b < blockIdx.x; b++) {
+    const uint32_t gt = cnt[((uint64_t) t * kWideBlocks + b) * 2], eq = cnt[((uint64_t) t * kWideBlocks + b) * 2 + 1];
+    taken += gt + (eq_seen < ties ? (ties - eq_seen < eq ? ties - eq_seen : eq) : 0), eq_seen += eq;
+  }
+  int32_t* out = sel + (uint64_t) t * top;
+  const float* sc = scores + (uint64_t) t * max_groups;
+  const uint32_t g1 = g0 + chunk < own ? g0 + chunk : own;
+  for (uint32_t c0 = g0; c0 < g1; c0 += kThreads) {  // in group order: a chunk's picks placed by a scan
+    const uint32_t g = c0 + threadIdx.x;
+    const uint32_t key = g < g1 ? order_key(sc[g]) : 0;
+    const uint32_t eq = g < g1 && key == v;
+    uint32_t eq_total = 0, take_total = 0;
+    const uint32_t eq_before = block_scan(eq, lds, &eq_total);
+    const uint32_t take = g < g1 && (key > v || (eq && eq_seen + eq_before < ties));
+    const uint32_t at = block_scan(take, lds, &take_total);
+    if (take) out[taken + at] = (int32_t) g;
+    taken += take_total, eq_seen += eq_total;
+  }
+  if (blockIdx.x == 0 && threadIdx.x == 0) out[want] = (int32_t) own, n_sel[t] = (int32_t) top;
+}
 }  // namespace
 
 extern "C" uint64_t hy4_hc_scratch(uint32_t n_tok) { return (uint64_t) n_tok * (2 * HY4_HC_MAX + 1) * kHcParts; }
@@ -804,10 +925,26 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
     return false;
   const bool spread = n_tok <= kIxSpreadTokens;  // (a decode's or a verify's tokens: the scores over many blocks)
   if (spread)
-    ix_score_kernel<<<dim3((max_groups + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(
-        q, w, groups, heads, dim, pool, top, pos, max_groups, scores);
+    ix_score_kernel<<<(max_groups + kIxTile - 1) / kIxTile, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool,
+                                                                                       top, pos, n_tok, max_groups,
+                                                                                       scores);
   ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool, top, pos, max_groups, scores,
-                                                       sel, n_sel, spread);
+                                                       sel, n_sel, spread, spread);
+  if (!spread) return ok();
+  static IxWide* wst = nullptr;  // (the spread selection's scratch: kIxSpreadTokens tokens' - made once)
+  static uint32_t* wcnt = nullptr;
+  if (!wst && (hipMalloc(&wst, kIxSpreadTokens * sizeof(IxWide)) != hipSuccess ||
+               hipMalloc(&wcnt, (size_t) kIxSpreadTokens * kWideBlocks * 2 * 4) != hipSuccess))
+    return false;
+  const hipStream_t s = st(stream);
+  const dim3 grid(kWideBlocks, n_tok);
+  ix_wide_init_kernel<<<n_tok, 64, 0, s>>>(pos, pool, top, wst);
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    ix_wide_hist_kernel<<<grid, kThreads, 0, s>>>(scores, pos, pool, top, max_groups, (uint32_t) shift, wst);
+    ix_wide_pick_kernel<<<n_tok, 64, 0, s>>>(pos, pool, top, (uint32_t) shift, wst);
+  }
+  ix_wide_count_kernel<<<grid, kThreads, 0, s>>>(scores, pos, pool, top, max_groups, wst, wcnt);
+  ix_wide_write_kernel<<<grid, kThreads, 0, s>>>(scores, pos, pool, top, max_groups, wst, wcnt, sel, n_sel);
   return ok();
 }
 
