@@ -69,11 +69,18 @@ class Manifest(unittest.TestCase):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertEqual(set(m["packs"]), {"osmos-evo-1017", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
-                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "vibes1.7b"})  # 0.6.10: one Qwen context, 512K - no 1M pack
+                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "vibes1.7b", "hy4-flash"})  # 0.6.10: one Qwen context, 512K - no 1M pack
         v = m["packs"]["vibes1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 512K (its needles: DESIGN.md, "rope")
         self.assertEqual((v["lsa"], v["settings"]), ("vibes1.7b-lsa", {"max_context": 524288, "max_tokens": 4096}))
         self.assertEqual((v["rig"]["efforts"], v["rig"]["effort"]), (["none", "high"], "high"))  # thinking off, on
         self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/vibes1.7b"})
+        h = m["packs"]["hy4-flash"]  # 0.11.0: AngelSlim's Q4_K_M (the Engram table its shard 2), Tencent's own DFly2
+        self.assertEqual((h["drafter"], h["drafter_kind"], h["table"]), (["hy4-dfly2"], "dfly", None))
+        self.assertEqual({m["files"][f]["repo"] for f in h["shards"]}, {"AngelSlim/Hy4-flash-GGUF"})
+        self.assertEqual((m["files"]["hy4-dfly2"]["repo"], m["files"]["hy4-dfly2"]["path"]),
+                         ("tencent/Hy4-flash", "model-00148-of-00148.safetensors"))
+        self.assertEqual(h["rig"]["efforts"], ["none", "low", "high", "max"])  # its template's levels
+        self.assertTrue(all(m["files"][f]["bytes"] > 50 * 10 ** 9 for f in h["shards"]))  # (fetch.py's direct path)
         self.assertEqual(manifest.pack_id(m, "osmos-evo-a"), "osmos-evo-1017")  # 0.7.6's old name, and 0.7.6's own
         self.assertEqual(manifest.pack_id(m, "osmos-evo"), "osmos-evo-1017")    # (0.8.0: osmos-evo-<model>)
         evo = m["packs"]["osmos-evo-1017"]  # osmos's own: evo-A's shards with evo-A2's patch in, evo-A UD-IQ1_M's + its delta
@@ -138,6 +145,7 @@ class Manifest(unittest.TestCase):
         q = "qwen38-ud-iq3_xxs"
         self.refused(lambda m: m["packs"][q].update(drafter_kind="eagle"), "drafter_kind")
         self.refused(lambda m: m["packs"][q]["drafter"].append(m["packs"][q]["drafter"][0]), "one")  # mtp: one file
+        self.refused(lambda m: m["packs"]["hy4-flash"]["drafter"].append("hy4-q4km-1"), "one")  # dfly: one file
         self.refused(lambda m: m["packs"][q].pop("rig"), "rig")              # every pack its rig row's settings
         self.refused(lambda m: m["packs"][q]["rig"].update(effort="max"), "effort")  # not among its efforts
         self.refused(lambda m: m["packs"][q]["rig"].update(reserve=0), "reserve")
@@ -250,6 +258,73 @@ class UserFiles(unittest.TestCase):
             self.assertEqual(userfiles.find(e, [os.path.join(d, "mine")]), os.path.realpath(mine))
 
 
+class Fetch(unittest.TestCase):
+    """a file past HF_CLI_MAX over HTTPS at its revision (0.11.0: the hub's CLI refuses one past 50 GB without Xet):
+    fetched, a stopped run's .part resumed by a Range, a server's whole answer to a Range taken from the start, a short
+    body and a wrong one refused - never used"""
+
+    BODY = bytes(range(256)) * 40
+
+    class Server:
+        def __init__(self, body, honour=True, cut=None):
+            self.body, self.honour, self.cut, self.asked = body, honour, cut, []
+
+        def __call__(self, req, timeout=None):
+            import io
+            self.asked.append((req.full_url, req.get_header("Range")))
+            rng, start = req.get_header("Range"), 0
+            if rng and self.honour:
+                start = int(rng.split("=")[1].rstrip("-"))
+            data = self.body[start:self.cut]
+            r = io.BytesIO(data)
+            r.status = 206 if (rng and self.honour) else 200
+            return r
+
+    def entry(self, body=None):
+        body = self.BODY if body is None else body
+        return {"repo": "o/r", "revision": "a" * 40, "path": "big.gguf", "bytes": len(self.BODY),
+                "sha256": hashlib.sha256(body).hexdigest()}
+
+    def run_fetch(self, d, server, entry=None):
+        import fetch
+        with mock.patch.object(fetch, "HF_CLI_MAX", 100), mock.patch("shutil.which", return_value=None):
+            return fetch.fetcher(d, opener=server)(entry or self.entry())
+
+    def test_fetched_at_its_revision(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self.Server(self.BODY)
+            p = self.run_fetch(d, s)
+            self.assertEqual(open(p, "rb").read(), self.BODY)
+            self.assertEqual(s.asked, [(f"https://huggingface.co/o/r/resolve/{'a' * 40}/big.gguf", None)])
+            self.run_fetch(d, s)   # (there and right: not fetched again)
+            self.assertEqual(len(s.asked), 1)
+
+    def test_resumed(self):
+        import fetch
+        with tempfile.TemporaryDirectory() as d:
+            part = os.path.join(fetch.cache(d, self.entry()), "big.gguf.part")
+            os.makedirs(os.path.dirname(part))
+            open(part, "wb").write(self.BODY[:3000])
+            s = self.Server(self.BODY)
+            self.assertEqual(open(self.run_fetch(d, s), "rb").read(), self.BODY)
+            self.assertEqual(s.asked[0][1], "bytes=3000-")
+            open(part, "wb").write(self.BODY[:3000])   # (a server that answers a Range with the whole file)
+            os.remove(os.path.join(os.path.dirname(part), "big.gguf"))
+            self.assertEqual(open(self.run_fetch(d, self.Server(self.BODY, honour=False)), "rb").read(), self.BODY)
+
+    def test_short_and_wrong_refused(self):
+        import fetch
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(fetch.FetchError, "resume"):
+                self.run_fetch(d, self.Server(self.BODY, cut=5000))
+            p = os.path.join(fetch.cache(d, self.entry()), "big.gguf")
+            self.assertFalse(os.path.exists(p))
+            self.assertEqual(os.path.getsize(p + ".part"), 5000)   # (kept: the next run resumes it)
+            with self.assertRaisesRegex(fetch.FetchError, "not the manifest's"):
+                self.run_fetch(d, self.Server(self.BODY), self.entry(b"another file"))
+            self.assertFalse(os.path.exists(p))
+
+
 class Layout(unittest.TestCase):
     def test_pack_from_user_files(self):
         with tempfile.TemporaryDirectory() as d:
@@ -314,6 +389,13 @@ class Layout(unittest.TestCase):
                  "packs": {"q": {"title": "t", "shards": ["s1", "s2"], "table": None, "picks": None,
                                  "drafter": ["mtp"], "drafter_kind": "mtp", "overlay": None, "rig": ROW,
                                  "settings": {"max_context": 262144}}}}
+            for kind in ("dfly",):  # (Hy4-flash's DFly2, a safetensors: laid out as the MTP head's one file)
+                m2 = json.loads(json.dumps(m))
+                m2["packs"]["q"]["drafter_kind"] = kind
+                manifest.check(m2)
+                layout.lay(m2, "q", os.path.join(d, kind), [have], trust_size=False, abliterated=False, fetch=None)
+                with open(os.path.join(d, kind, "q", "osmos.json")) as f:
+                    self.assertEqual(json.load(f)["drafter"], os.path.join(d, kind, "q", "mtp-head.gguf"))
             manifest.check(m)
             layout.lay(m, "q", models, [have], trust_size=False, abliterated=False, fetch=None)
             pack = os.path.join(models, "q")
@@ -1183,7 +1265,8 @@ class Rig(unittest.TestCase):
                                "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
                                "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l",
-                           "osmos-evo-inkling": "inkling-2-small-evo", "vibes1.7b": "vibes1.7b"})
+                           "osmos-evo-inkling": "inkling-2-small-evo", "vibes1.7b": "vibes1.7b",
+                       "hy4-flash": "hy4-flash"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
         self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
 
