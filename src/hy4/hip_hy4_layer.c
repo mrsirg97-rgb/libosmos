@@ -13,16 +13,13 @@
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
 
-/* y = W x: a decode's the matvec (mv_strided: a token's sums its own; NVFP4's mv_fp4_rows, the experts' kernel - the
-   generic NVFP4 matvec read Hy4's dense shapes at ~135 GB/s, 2026-11-18), a read's the matrix cores where mm takes the
+/* y = W x: a decode's the matvec (mv_strided: a token's sums its own), a read's the matrix cores where mm takes the
    type and shape (mm_tokens: MM_MAX_TOKENS a launch through f->x16, a token's sums its own), else the matvec */
 static bool mat(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                 float *y, bool read)
 {
   if (read && mm_known(type) && mm_fits(type, rows, cols))
     return mm_tokens(type, w, rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow, false, f->st);
-  if (type == QTYPE_NVFP4)
-    return mv_fp4_rows(w, rows, cols, x, cols, n, y, rows, f->st);
   return mv_strided(type, w, rows, cols, x, cols, n, y, rows, f->st);
 }
 

@@ -118,7 +118,7 @@ hy4_route
   tables, no host between: the picks by expert ascending, an expert's tokens ascending - row r's token gidx[r] and
   weight wsel[r], pick m's row sidx[m]; the entries (each expert's rows in chunks of `chunk`, experts ascending) cnt,
   xrow (its first row) and wptr (3 tables, n_tok x k apart: base[i] + e * bytes[i] - gate, up, down), then count 0 to
-  n_tok x k (mv_group_tok's and mv_fp4_tok's skipped entries: a launch to that bound). a pick out of range or twice
+  n_tok x k (mv_group_tok's skipped entries: a launch to that bound). a pick out of range or twice
   in a token: *fault = 1 (the tables then not used). false, nothing queued, for k 0 or past HY4_ROUTE_MAX_K, n_exp
   past HY4_ROUTE_MAX_EXPERTS, chunk 0, n_tok 0.
 

@@ -1,5 +1,5 @@
 /* the hy4 latent MoE (hy4_impl.h's hy4_moe): the router, the routed experts in the latent - each expert read once for
-   the tokens that picked it, a decode's on the matvecs (mv_fp4_tok, mv_group_tok), a prompt's on the matrix cores
+   the tokens that picked it, a decode's on the matvec (mv_group_tok), a prompt's on the matrix cores
    (mm_group over each expert's gathered tokens); a decode's tables built on the GPU (hy4_route), a read's on the host - the shared expert, the combine norm. a token's sums its own in
    either: its picks' order and its sum's (slot order) its own */
 #include <math.h>
@@ -14,10 +14,6 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
-
-#define FP4_TOK_MAX 4 /* a decode entry's tokens at most: mv_fp4_tok's for NVFP4 experts, mv_group_tok's else */
-
-static uint32_t mv_chunk(const GgufTensor *t) { return t->type == QTYPE_NVFP4 ? FP4_TOK_MAX : MV_MAX_TOKENS; }
 
 uint64_t hy4_read_entries(uint64_t n, const Hy4Geometry *g)
 {
@@ -108,12 +104,10 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t 
          hipMemcpy(f->rhidx, f->h_rhidx, (size_t)s_n * 4, hipMemcpyHostToDevice) == hipSuccess;
 }
 
-/* a decode's experts' matvec over the entries: mv_fp4_tok for NVFP4, mv_group_tok else */
+/* a decode's experts' matvec over the entries (MV_MAX_TOKENS of an expert's tokens an entry) */
 static bool mv_experts(const GgufTensor *t, const void *const *w, const Hy4Forward *f, uint32_t entries, uint32_t rows,
                        uint32_t cols, const float *x, float *y)
 {
-  if (t->type == QTYPE_NVFP4)
-    return mv_fp4_tok(w, f->cnt, f->xrow, entries, rows, cols, x, cols, y, rows, f->st);
   return mv_group_tok(t->type, w, f->cnt, f->xrow, entries, MV_MAX_TOKENS, rows, cols, x, cols, y, rows, f->st);
 }
 
@@ -145,7 +139,7 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin
     const void *base[3] = {hy4_dev(f, L->exp_gate), hy4_dev(f, L->exp_up), hy4_dev(f, L->exp_down)};
     const uint64_t bytes[3] = {L->exp_gate->bytes / E, L->exp_up->bytes / E, L->exp_down->bytes / E};
     const void **wg = (const void **)f->wptr, **wu = wg + nk, **wd = wg + 2 * nk;
-    return hy4_route(f->idx, f->wtok, n, K, E, mv_chunk(L->exp_gate), base, bytes, f->gidx, f->sidx, f->wsel, f->cnt,
+    return hy4_route(f->idx, f->wtok, n, K, E, MV_MAX_TOKENS, base, bytes, f->gidx, f->sidx, f->wsel, f->cnt,
                      f->xrow, wg, f->fault, f->st) &&
            ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) &&
            mv_experts(L->exp_gate, wg, f, nk, ffe, lat, f->xg, f->eg_g) &&

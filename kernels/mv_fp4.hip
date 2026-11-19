@@ -265,19 +265,15 @@ __device__ void tok_rows(const uint8_t* __restrict__ w, uint32_t rows, uint32_t 
   }
 }
 
-// an entry's matrix, tokens and rows: the table's (w, cnt, xrow), or - w1 given (cnt NULL) - one matrix over n_tok
-// tokens in entries of 4, entry e tokens 4e .. (mv_fp4_rows)
 template <int G>
 __global__ __launch_bounds__(32 * kWarps) void tok_kernel(const void* const* w, const int32_t* cnt,
                                                           const int32_t* xrow, uint32_t rows, uint32_t cols,
-                                                          const float* x, uint32_t xs, float* y, uint32_t ys,
-                                                          const void* w1, uint32_t n_tok) {
+                                                          const float* x, uint32_t xs, float* y, uint32_t ys) {
   const uint32_t e = blockIdx.y;
-  const int32_t c = cnt ? cnt[e] : (int32_t) min(4u, n_tok - 4 * e);
-  const uint8_t* m = (const uint8_t*) (cnt ? w[e] : w1);
-  const uint64_t r0 = cnt ? (uint64_t) xrow[e] : 4ull * e;
-  const float* xe = x + r0 * xs;
-  float* ye = y + r0 * ys;
+  const int32_t c = cnt[e];
+  const uint8_t* m = (const uint8_t*) w[e];
+  const float* xe = x + (uint64_t) xrow[e] * xs;
+  float* ye = y + (uint64_t) xrow[e] * ys;
   switch (c) {  // (uniform a block: an entry a grid row)
     case 1: tok_rows<G, 1>(m, rows, cols, xe, xs, ye, ys); break;
     case 2: tok_rows<G, 2>(m, rows, cols, xe, xs, ye, ys); break;
@@ -310,22 +306,6 @@ extern "C" bool mv_fp4(const void* w, uint32_t rows, uint32_t cols, const float*
   }
 }
 
-// a row's G its length's (every count, every form the same G: a token's bits whatever the step)
-static void tok_launch(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t entries, uint32_t rows,
-                       uint32_t cols, uint32_t nb, const float* x, uint32_t xs, float* y, uint32_t ys, const void* w1,
-                       uint32_t n_tok, hipStream_t s) {
-#define TOK(G)                                                                                                    \
-  tok_kernel<G><<<dim3((rows + kWarps * (32 / G) - 1) / (kWarps * (32 / G)), entries), 32 * kWarps, 0, s>>>(     \
-      w, cnt, xrow, rows, cols, x, xs, y, ys, w1, n_tok)
-  if (nb <= 24)
-    TOK(8);
-  else if (nb <= 48)
-    TOK(16);
-  else
-    TOK(32);
-#undef TOK
-}
-
 // the routed experts' decode (Hy4-flash's latent experts: 1,536 x 1,536): mv_group_tok's table over tok_kernel - a
 // row's G its length's (every count the same G: a token's bits whatever the step)
 extern "C" bool mv_fp4_tok(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t rows,
@@ -333,13 +313,15 @@ extern "C" bool mv_fp4_tok(const void* const* w, const int32_t* cnt, const int32
   if (!w || !cnt || !xrow || !x || !y || !n || n > 65535 || !rows || !cols || cols % kBlock || xs % 4) return false;
   const uint32_t nb = cols / kBlock;
   const hipStream_t s = (hipStream_t) stream;
-  tok_launch(w, cnt, xrow, n, rows, cols, nb, x, xs, y, ys, nullptr, 0, s);
-  return hipGetLastError() == hipSuccess;
-}
-
-extern "C" bool mv_fp4_rows(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, uint32_t n,
-                            float* y, uint32_t ys, void* stream) {
-  if (!w || !x || !y || !n || (n + 3) / 4 > 65535 || !rows || !cols || cols % kBlock || xs % 4 || xs < cols) return false;
-  tok_launch(nullptr, nullptr, nullptr, (n + 3) / 4, rows, cols, cols / kBlock, x, xs, y, ys, w, n, (hipStream_t) stream);
+#define TOK(G)                                                                                              \
+  tok_kernel<G><<<dim3((rows + kWarps * (32 / G) - 1) / (kWarps * (32 / G)), n), 32 * kWarps, 0, s>>>(w, cnt, xrow, \
+                                                                                                    rows, cols, x, xs, y, ys)
+  if (nb <= 24)
+    TOK(8);
+  else if (nb <= 48)
+    TOK(16);
+  else
+    TOK(32);
+#undef TOK
   return hipGetLastError() == hipSuccess;
 }
