@@ -34,6 +34,28 @@ import versions  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(HERE))
 API = os.path.join(ROOT, "bin", "osmos-api")
+
+
+def own_version(path=os.path.join(ROOT, "include", "osmos", "version.h")):
+    """this checkout's osmos version (OSMOS_VERSION)"""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("#define OSMOS_VERSION "):
+                return line.split('"')[1]
+    raise SystemExit(f"{path}: no OSMOS_VERSION")
+
+
+def rig_target(cfg, ver, h, dev, build=lambda h, v: versions.build(h, v, versions.REPO)):
+    """the osmos-api and config a new rig row names: <h>/<ver> (its release built there, or kept as it is) and the
+    pack's config frozen for it (osmos.<ver>.json) - the shape --upgrade moves; dev (--rig-dev): this checkout's own
+    osmos-api and osmos.json, a row no upgrade moves (a branch's, to test)"""
+    if dev:
+        return API, cfg
+    try:
+        build(h, ver)
+    except versions.VersionError as x:
+        raise SystemExit(f"--rig: osmos {ver} has no release to build ({x}); --rig-dev registers this checkout's own")
+    return os.path.join(h, ver, "bin", "osmos-api"), versions.freeze(cfg, ver)
 BUILD = [["git", "submodule", "update", "--init"],  # libevt (osmos-serve's loop)
          ["make", "-j"], ["make", "-j", "serve"], ["make", "-j", "api"]]  # the engine, osmos-serve, osmos-api
 
@@ -147,7 +169,10 @@ def parser():
                     help="the NPU beside the GPU for prompts (0.7.0, opt-in): its kernels fetched, osmos built with it")
     ap.add_argument("--ctx", type=ctx_length, default=None,
                     help="the context length, 4096 to 1M: N, Nk or Nm (the pack's own by default: DeepSeek's 1M, Qwen's 512K)")
-    ap.add_argument("--rig", action="store_true", help="register each pack in rig (~/.rig/models.json)")
+    ap.add_argument("--rig", action="store_true", help="register each pack in rig (~/.rig/models.json), on this "
+                    "version's release (built under ~/.local/share/osmos)")
+    ap.add_argument("--rig-dev", action="store_true", help="with --rig: the row on this checkout's own osmos-api "
+                    "(a branch's, to test; --upgrade does not move it)")
     ap.add_argument("--rig-home", default=os.environ.get("RIG_HOME", os.path.expanduser("~/.rig")))
     ap.add_argument("--rig-default", choices=("yes", "no", "ask"), default="ask")
     ap.add_argument("--serve", action="store_true", help="start osmos-api on the (first) pack")
@@ -273,10 +298,12 @@ def main():
         print("rig:")
         exe = rig.ensure(m["rig"], find_rig, download, run_sh)
         print(f"  {exe}")
+        ver, h = own_version(), versions.home()
         for c in cfgs:
             cfg = layout.read_config(c)
             rid = f"osmos-{cfg['pack']}"
-            row = rig.register(a.rig_home, cfg, API, c, ask_default(a.rig_default, rid), m["packs"][cfg["pack"]]["rig"])
+            api, cfg_path = rig_target(c, ver, h, a.rig_dev)
+            row = rig.register(a.rig_home, cfg, api, cfg_path, ask_default(a.rig_default, rid), m["packs"][cfg["pack"]]["rig"])
             print(f"  {row['id']} on port {row['port']} in {a.rig_home}/models.json")
     if a.serve:
         if not os.path.exists(API):
