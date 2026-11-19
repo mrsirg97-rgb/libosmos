@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.1]: an installed pack's rig row on its release
+
+- **A fix: `osmos_install.py --rig` registered a row `--upgrade` could not move.** A fresh install named the
+  checkout's own `bin/osmos-api` and the pack's `osmos.json`; `--upgrade` moves only rows on a versioned build
+  (`~/.local/share/osmos/<version>`), so the row stayed on whatever the checkout became. `--rig` now registers it on
+  this version's release - built from its tag there, or kept as it is - with the config frozen for it
+  (`osmos.<version>.json`), as `--upgrade` writes; `--rig-dev` keeps the checkout's own build, to test a branch. The
+  engine and every pack's bits are 0.10.0's.
+
 ## [0.10.0]: vibes1.7b - a small model, a long context
 
 A fourth family: **LFM3** (Liquid's hybrid of short convolutions, sliding and full attention), as

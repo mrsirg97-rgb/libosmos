@@ -45,12 +45,12 @@ pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on the
   `~/.local/share/osmos/<version>` (so `--upgrade` moves it later; `--rig-dev`: this checkout's own build, to test a
   branch).
 
-**Upgrading** (0.10.0): each osmos version is built from its tag beside the others, in `~/.local/share/osmos/<version>`,
+**Upgrading** (0.10.1): each osmos version is built from its tag beside the others, in `~/.local/share/osmos/<version>`,
 and rig's rows move between them by their command alone - their ports and settings stay yours.
 
 ```sh
 python3 tools/install/osmos_install.py --upgrade            # the newest release, for the rows on the newest version here
-python3 tools/install/osmos_install.py --upgrade 0.10.0 --rows deepseek-1017-evo,inkling-2-small-evo   # or --rows all
+python3 tools/install/osmos_install.py --upgrade 0.10.1 --rows deepseek-1017-evo,inkling-2-small-evo   # or --rows all
 python3 tools/install/osmos_install.py --rollback           # the last upgrade's rows back where they were
 python3 tools/install/osmos_install.py --versions           # the versions built here, the rows on each
 python3 tools/install/osmos_install.py --prune [--yes]      # the versions no row runs (removed with --yes)
