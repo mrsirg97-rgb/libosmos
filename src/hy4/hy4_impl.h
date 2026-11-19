@@ -13,6 +13,7 @@
 #define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
 #define HY4_MAX_HEADS 128   /* a layer's heads at most (the per-head tables' room) */
 #define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
+#define HY4_DFLY_KEEP (HY4_MAX_BACK + 1) /* a step's last rows whose drafting snapshot a sequence keeps (a verify's) */
 
 /* matrices that read the same input (a layer's normed attention or FFN input), for a one-token step: each type's
    members one matrix (their rows concatenated at load: a row's sums its own, the same bits) and one launch, every
@@ -84,6 +85,8 @@ struct Hy4Forward
   uint32_t rows;
   hy4_tap_fn tap;
   void *tap_arg;
+  struct Hy4Dfly *dfly;                /* DFly2, when loaded (hip_hy4_dfly.c) */
+  int dfly_slot[HY4_MAX_LAYERS];       /* a target layer's draft layer reading it, -1 none */
 };
 
 struct Hy4Seq
@@ -95,6 +98,13 @@ struct Hy4Seq
   int32_t *tokens;                                     /* host: every token so far (the n-grams' history) */
   float *cache[HY4_MAX_LAYERS];                        /* MLA's rows: a sparse layer's by position, a sliding one's ring */
   float *keys[HY4_MAX_LAYERS], *groups[HY4_MAX_LAYERS]; /* a sparse layer's token keys and pooled groups */
+  /* DFly2's snapshot of the last step's last rows (positions dpos0 .. dpos0 + dkeep - 1): each draft layer's target
+     picks ([HY4_DFLY_LAYERS][HY4_DFLY_KEEP][top] and their counts) and the head's normed input (dhid_ok: kept) */
+  int32_t *dsel, *dn;
+  float *dhid;
+  int32_t dpos0;
+  uint32_t dkeep;
+  bool dhid_ok[HY4_DFLY_KEEP];
 };
 
 /* a step's runs: each sequence's tokens at rows off .. off + len - 1 of the step */
@@ -115,6 +125,9 @@ bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n
 bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l, bool read);
 /* a joint's launches over a token's x into out (its members at their offsets) */
 bool hy4_joint(Hy4Forward *f, const Hy4Joint *j, uint32_t cols, const float *x, float *out);
+
+/* DFly2's weights and buffers freed (hip_hy4_dfly.c; none loaded: nothing) */
+void hy4_dfly_free(Hy4Forward *f);
 
 /* the latent MoE (hip_hy4_moe.c): the router, the experts (the matvecs, or read: the matrix cores), the shared
    expert, the combine norm - into f->y */

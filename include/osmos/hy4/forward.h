@@ -75,6 +75,22 @@ uint64_t hy4_identity(const Hy4Forward *f);
 /* a sequence as one byte string (a header, every layer's rows below the position, the rings, the last tokens, then a
    sum) - load refuses another identity or format, a size not its position's, a damaged string: the sequence then
    empty */
+/* DFly2, the release's drafter (0.11.0; DESIGN.md, "0.11.0: DFly2"): its five layers read from the release's own
+   safetensors (model-00148-of-00148.safetensors, BF16) onto the GPU beside the forward; a draft block the anchor (the
+   sampled token, at the sequence's position) and HY4_DFLY_DRAFTS mask tokens, each layer attending to its target
+   sparse layer's keys for the last accepted token (that layer's indexer picks, kept by every step) and the block's
+   own rows (written into that layer's cache past the position: a verify's step writes its own over them) - then the
+   hidden correction's chain, each draft through the target's head. hy4_dfly_load: before any sequence drafts;
+   false, err said, for a file not the drafter or not this model's shapes. hy4_seq_draft: up to `most` drafts after
+   y (HY4_DFLY_DRAFTS at most), each kept while its probability under the draft's own logits is at least conf_min and
+   their product at least cum_min - the count; 0 when the last step kept no snapshot of the position before (a load,
+   a prompt not run to its end) or the block would pass max_ctx; -1 with why on a GPU failure */
+#define HY4_DFLY_DRAFTS 5
+#define HY4_DFLY_LAYERS 5
+bool hy4_dfly_load(Hy4Forward *f, const char *path, char err[HY4_ERR]);
+int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf_min, float cum_min, int32_t *drafts,
+                  float *conf, char err[HY4_ERR]);
+
 uint64_t hy4_seq_state_bytes(const Hy4Seq *s);
 bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[HY4_ERR]);
 bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[HY4_ERR]);

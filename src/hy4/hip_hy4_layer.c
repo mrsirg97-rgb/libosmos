@@ -88,6 +88,21 @@ static bool indexer(Hy4Forward *f, Hy4Seq *s, int l, uint32_t off, uint32_t len,
                        f->sel + (uint64_t)off * top, f->n_sel + off, f->st);
 }
 
+/* DFly2's snapshot (a draft layer reads this one): the run's last rows' picks and counts, into its sequence's */
+static bool dfly_snap(Hy4Forward *f, Hy4Seq *s, int l, uint32_t off, uint32_t len)
+{
+  const int slot = f->dfly ? f->dfly_slot[l] : -1;
+  if (slot < 0)
+    return true;
+  const Hy4Geometry *g = &f->w->geo;
+  const uint32_t top = (uint32_t)(g->ix_topk / g->ix_pool), keep = len < HY4_DFLY_KEEP ? len : HY4_DFLY_KEEP;
+  const uint32_t from = off + len - keep;
+  return hipMemcpyAsync(s->dsel + (uint64_t)slot * HY4_DFLY_KEEP * top, f->sel + (uint64_t)from * top,
+                        (uint64_t)keep * top * 4, hipMemcpyDeviceToDevice, f->st) == hipSuccess &&
+         hipMemcpyAsync(s->dn + (uint64_t)slot * HY4_DFLY_KEEP, f->n_sel + from, (uint64_t)keep * 4,
+                        hipMemcpyDeviceToDevice, f->st) == hipSuccess;
+}
+
 static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l, bool read)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -126,7 +141,7 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
                      hy4_mla_qrope(f->q + o * H * qk, H, qk, row, rd, freqs, f->pos + o, m, f->qa + o * H * row, f->st)
                 : hy4_mla_q(f->q + o * H * qk, hy4_dev(f, L->k_b), H, nope, lat, rd, freqs, f->pos + o, m,
                             f->qa + o * H * row, f->table, f->st)) &&
-         (sw || indexer(f, s, l, (uint32_t)o, m, ixk, ixw)) &&
+         (sw || indexer(f, s, l, (uint32_t)o, m, ixk, ixw)) && dfly_snap(f, s, l, (uint32_t)o, m) &&
          hy4_mla_attn(f->qa + o * H * row, s->cache[l], sw ? f->ring : 0, hy4_fv(f, L->sinks), H, lat, rd,
                       sw ? (uint32_t)g->window : 0, sw ? NULL : f->sel + o * top, sw ? NULL : f->n_sel + o,
                       sw ? 0 : top, sw ? 0 : (uint32_t)g->ix_pool, scale, f->pos + o, m, f->olat + o * H * lat, f->attn_part, f->st);

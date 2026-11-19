@@ -827,3 +827,50 @@ extern "C" bool hy4_route(const int32_t* idx, const float* wtok, uint32_t n_tok,
                                                     wptr, fault);
   return ok();
 }
+
+// DFly2's draft block (0.11.0): each draft row's groups - the target layer's picks for the last accepted token (its
+// snapshot: snap_n groups ascending, the last the token's own) and every group after that one through the row's own
+// position (the block's rows, written at anchor ..): a thread a row
+__global__ void dfly_sel_kernel(const int32_t* snap, const int32_t* snap_n, int32_t anchor, uint32_t pool,
+                                uint32_t rows, uint32_t cap, int32_t* sel, int32_t* n_sel) {
+  const uint32_t j = threadIdx.x;
+  if (j >= rows) return;
+  const int32_t n = *snap_n, own = (anchor - 1) / (int32_t) pool, last = (anchor + (int32_t) j) / (int32_t) pool;
+  int32_t* out = sel + (uint64_t) j * cap;
+  for (int32_t i = 0; i < n; i++) out[i] = snap[i];
+  int32_t k = n;
+  for (int32_t g = own + 1; g <= last; g++) out[k++] = g;
+  n_sel[j] = k;
+}
+
+extern "C" bool hy4_dfly_sel(const int32_t* snap, const int32_t* snap_n, int32_t anchor, uint32_t pool, uint32_t top,
+                             uint32_t rows, uint32_t cap, int32_t* sel, int32_t* n_sel, void* stream) {
+  if (!snap || !snap_n || anchor < 1 || !pool || !rows || rows > HY4_DFLY_MAX_ROWS ||
+      cap < top + (rows + pool - 1) / pool + 1 || !sel || !n_sel)
+    return false;
+  dfly_sel_kernel<<<1, 64, 0, st(stream)>>>(snap, snap_n, anchor, pool, rows, cap, sel, n_sel);
+  return ok();
+}
+
+// a row's greatest logit (the lowest index among equal ones) and its softmax probability: max, then sum exp(x - max)
+// by a fixed tree, p = 1 / sum
+constexpr int kPickThreads = 1024;
+__global__ __launch_bounds__(kPickThreads) void dfly_pick_kernel(const float* x, uint32_t n, int32_t* id, float* p) {
+  __shared__ float lds[kPickThreads];
+  __shared__ int ldi[kPickThreads];
+  float m = -INFINITY;
+  int mi = 0;
+  for (uint32_t i = threadIdx.x; i < n; i += kPickThreads)
+    if (x[i] > m) m = x[i], mi = (int) i;
+  const int best = block_argmax<kPickThreads>(&m, mi, lds, ldi);
+  float s = 0;
+  for (uint32_t i = threadIdx.x; i < n; i += kPickThreads) s += expf(x[i] - m);
+  s = block_sum<kPickThreads>(s, lds);
+  if (threadIdx.x == 0) *id = best, *p = 1.0f / s;
+}
+
+extern "C" bool hy4_dfly_pick(const float* logits, uint32_t n, int32_t* id, float* p, void* stream) {
+  if (!logits || !n || !id || !p) return false;
+  dfly_pick_kernel<<<1, kPickThreads, 0, st(stream)>>>(logits, n, id, p);
+  return ok();
+}

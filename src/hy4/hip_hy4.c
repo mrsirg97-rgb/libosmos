@@ -40,11 +40,23 @@ static bool launches(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n
     if (f->slot[row] >= 0)
       ok = hipMemcpyAsync(f->hx + (uint64_t)f->slot[row] * hc * D, f->h + (uint64_t)row * hc * D, (uint64_t)hc * D * F,
                           hipMemcpyDeviceToDevice, f->st) == hipSuccess;
-  return ok && (!kept ||
-                (hy4_hc_pre(f->hx, f->fn_out, hy4_fv(f, f->w->out_hc_scale), hy4_fv(f, f->w->out_hc_base), hc, hc, D,
-                            g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, f->w->output_norm), kept, f->xn, NULL,
-                            f->hcs, f->st) &&
-                 hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read)));
+  ok = ok && (!kept || hy4_hc_pre(f->hx, f->fn_out, hy4_fv(f, f->w->out_hc_scale), hy4_fv(f, f->w->out_hc_base), hc,
+                                  hc, D, g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, f->w->output_norm), kept,
+                                  f->xn, NULL, f->hcs, f->st));
+  /* DFly2's snapshot: each run's last rows' normed head input (its fusion's target hidden), where the head ran */
+  for (uint32_t r = 0; ok && f->dfly && r < runs; r++)
+  {
+    const uint32_t len = run[r].len, keep = len < HY4_DFLY_KEEP ? len : HY4_DFLY_KEEP;
+    for (uint32_t i = 0; ok && i < keep; i++)
+    {
+      const int32_t sl = f->slot[run[r].off + len - keep + i];
+      run[r].s->dhid_ok[i] = sl >= 0;
+      if (sl >= 0)
+        ok = hipMemcpyAsync(run[r].s->dhid + (uint64_t)i * D, f->xn + (uint64_t)sl * D, (uint64_t)D * F,
+                            hipMemcpyDeviceToDevice, f->st) == hipSuccess;
+    }
+  }
+  return ok && (!kept || hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read));
 }
 
 /* the step (hy4_step_runs); keep_from: rows below it not kept whatever the prompts say (hy4_step's: its last rows) */
@@ -113,6 +125,8 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   for (uint32_t r = 0; r < runs; r++)
   {
     Hy4Seq *s = run[r].s;
+    s->dkeep = run[r].len < HY4_DFLY_KEEP ? run[r].len : HY4_DFLY_KEEP;
+    s->dpos0 = s->pos + (int32_t)(run[r].len - s->dkeep);
     s->pos += (int32_t)run[r].len;
     s->back = s->back + run[r].len < HY4_MAX_BACK ? s->back + run[r].len : HY4_MAX_BACK;
   }

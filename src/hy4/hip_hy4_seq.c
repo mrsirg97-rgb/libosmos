@@ -24,6 +24,10 @@ Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR])
     ok = g->sliding[l] ? hy4_alloc(&s->cache[l], f->ring * row)
                        : hy4_alloc(&s->cache[l], ctx * row) && hy4_alloc(&s->keys[l], ctx * g->ix_dim * F) &&
                              hy4_alloc(&s->groups[l], (ctx / g->ix_pool + 1) * g->ix_dim * F);
+  const uint64_t top = (uint64_t)(g->ix_topk / g->ix_pool); /* DFly2's snapshot (small: always made) */
+  ok = ok && hy4_alloc(&s->dsel, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * top * 4) &&
+       hy4_alloc(&s->dn, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * 4) &&
+       hy4_alloc(&s->dhid, (uint64_t)HY4_DFLY_KEEP * g->n_embd * F);
   if (!ok)
     return hy4_seq_destroy(s), hy4_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
@@ -35,6 +39,7 @@ void hy4_seq_destroy(Hy4Seq *s)
     return;
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     hipFree(s->cache[l]), hipFree(s->keys[l]), hipFree(s->groups[l]);
+  hipFree(s->dsel), hipFree(s->dn), hipFree(s->dhid);
   free(s->tokens);
   free(s);
 }
@@ -134,6 +139,7 @@ bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, ch
 {
   if (!s || !src)
     return hy4_fail(err, "no sequence or source");
+  s->dkeep = 0; /* (DFly2's snapshot: none until a step runs) */
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");

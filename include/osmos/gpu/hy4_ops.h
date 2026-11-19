@@ -60,6 +60,12 @@ bool hy4_ix_select(const float *q, const float *w, const float *groups, uint32_t
 
 #endif
 
+/* DFly2's draft block (0.11.0) */
+#define HY4_DFLY_MAX_ROWS 8 /* a draft block's rows at most (the anchor and its masks) */
+bool hy4_dfly_sel(const int32_t *snap, const int32_t *snap_n, int32_t anchor, uint32_t pool, uint32_t top,
+                  uint32_t rows, uint32_t cap, int32_t *sel, int32_t *n_sel, void *stream);
+bool hy4_dfly_pick(const float *logits, uint32_t n, int32_t *id, float *p, void *stream);
+
 /*
 hy4_hc_pre
   iHC before a sublayer (HYV4FlashHyperConnection), or the head's collapse (HYV4FlashHyperHead): token t's hc streams
@@ -155,4 +161,15 @@ hy4_ix_select
   with the greatest score_g = sum over the heads of w_h relu(q_h . groups[g]) (each a fixed order), ties to the
   lower group - an exact selection (the score's k-th greatest by its bits), any C - then its own: sel[t * top ..]
   ascending, n_sel[t] how many. scores: scratch for n_tok x max_groups (C at most max_groups).
+
+hy4_dfly_sel
+  a DFly2 draft block's rows' groups (hy4_mla_attn's sel / n_sel, cap apart): row j (position anchor + j, j < rows)
+  the snapshot's snap_n groups (a target layer's picks for position anchor - 1, ascending, the last its own group),
+  then every group after that one through (anchor + j) / pool - the target's keys for the last accepted token and the
+  block's own rows up to the row's. false, nothing queued, for anchor < 1, rows 0 or past HY4_DFLY_MAX_ROWS, or a cap
+  under top plus the block's groups.
+
+hy4_dfly_pick
+  a logits row's greatest (the lowest index among equal values) into *id and its softmax probability into *p (the
+  sum of exp(x - max) by a fixed tree) - a draft token and its confidence, one launch.
 */

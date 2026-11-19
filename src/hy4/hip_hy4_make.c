@@ -187,6 +187,7 @@ void hy4_forward_destroy(Hy4Forward *f)
     return;
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
+  hy4_dfly_free(f);
   for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
     if (!f->in_joint || !f->in_joint[i])
       hipFree(f->dev[i]);
@@ -228,6 +229,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
   f->ring = (uint32_t)g->window + o->max_tokens + HY4_MAX_BACK;
   f->eg_fd = -1;
+  for (int l = 0; l < HY4_MAX_LAYERS; l++)
+    f->dfly_slot[l] = -1;
   int hmax = 0;
   for (int l = 0; l < g->n_layers; l++)
     hmax = g->n_heads[l] > hmax ? g->n_heads[l] : hmax;
