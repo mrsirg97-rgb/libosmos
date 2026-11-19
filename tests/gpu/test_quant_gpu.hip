@@ -24,7 +24,7 @@ extern "C" {
     }                                                                            \
   } while (0)
 
-constexpr uint32_t kSweep = 256;  // past every ggml type id, as test_qtype's
+constexpr uint32_t kSweep = 0x200;  // past every ggml type id and osmos's own (0x100 | id), as test_qtype's
 
 struct Ref {
   uint32_t type = 0;

@@ -196,6 +196,7 @@ extern "C" bool mv_group_tok(uint32_t type, const void* const* w, const int32_t*
     case quant::kIQ4_XS: return group_tok<quant::kIQ4_XS>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ4_K: return group_tok<quant::kQ4_K>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ5_K: return group_tok<quant::kQ5_K>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
+    case quant::kQ6_K: return group_tok<quant::kQ6_K>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ5_1: return group_tok<quant::kQ5_1>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kQ2_0: return group_tok<quant::kQ2_0>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);
     case quant::kNVFP4: return group_tok<quant::kNVFP4>(w, cnt, xrow, n, max_cnt, rows, cols, x, xs, y, ys, s);

@@ -137,7 +137,7 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
     if (!gguf_u32(r, &x->type) || !gguf_u64(r, &x->offset))
       return false;
     const QTypeInfo *ts = qtype_info(x->type);
-    if (!ts || !(ts->paths & QTYPE_FILE))
+    if (!ts || !(ts->paths & QTYPE_FILE) || x->type >= 0x100) /* (0x100 | id: osmos's own, no file's) */
       return gguf_fail(r, "a tensor type this build does not know");
     if (x->dims[0] % ts->values || !(x->bytes = gguf_bytes(x->type, values)))
       return gguf_fail(r, "a tensor's rows are not whole blocks");
@@ -146,6 +146,21 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
     x->file = file;
   }
   const uint64_t data = (r->pos + align - 1) / align * align;
+  /* a 43 (MXFP8) whose bytes run past its room - the next tensor's offset, else the file's end - and whose values fit
+     it a byte each is upstream's F8_E4M3 (qtype.h; MXFP8's 33 bytes a 32 values are always more) */
+  for (size_t i = first; i < g->n_tensors && data <= r->size; i++)
+  {
+    GgufTensor *x = &g->tensors[i];
+    if (x->type != QTYPE_MXFP8)
+      continue;
+    uint64_t room = x->offset <= r->size - data ? r->size - data - x->offset : 0;
+    for (size_t j = first; j < g->n_tensors; j++)
+      if (g->tensors[j].offset > x->offset && g->tensors[j].offset - x->offset < room)
+        room = g->tensors[j].offset - x->offset;
+    const uint64_t f8 = gguf_bytes(QTYPE_F8_E4M3, x->bytes / QTYPE_MXFP8_BYTES * QTYPE_MXFP8_VALUES);
+    if (x->bytes > room && f8 && f8 <= room)
+      x->type = QTYPE_F8_E4M3, x->bytes = f8;
+  }
   for (size_t i = first; i < g->n_tensors; i++)
   {
     GgufTensor *x = &g->tensors[i];

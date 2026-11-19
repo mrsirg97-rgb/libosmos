@@ -2,10 +2,12 @@
 that type: its start, a seeded middle, its end) and random blocks (any bytes are a block; those whose values are not all finite are drawn
 again), each with gguf-py's values. one file a type: b"SUBQ", u32 version, u32 type, u64 values, u64 bytes, the bytes,
 the values (f32). run: PYTHONPATH=<llama.cpp>/gguf-py ../.oracle-venv/bin/python dequant_ref.py --out DIR [--model DIR] [--dspark DIR]
-[--mxfp8 FILE]. MXFP8 (unsloth's Engram tables, ggml type 43 in their GGUFs - upstream's 43 is F8_E4M3, which gguf-py
+[--mxfp8 FILE] [--f8 FILE]. MXFP8 (unsloth's Engram tables, ggml type 43 in their GGUFs - upstream's 43 is F8_E4M3, which gguf-py
 reads it as) is not gguf-py's: its blocks found by this file's own header walk and decoded by torch's float8_e4m3fn
 times 2^(e - 127), as the OCP MX spec writes them. NVFP4 (ggml type 40) is gguf-py's: --random NVFP4, or --model a
-folder of Inkling-2's reference GGUF (tools: ink2_ref_gguf.py) for its experts' real blocks."""
+folder of Inkling-2's reference GGUF (tools: ink2_ref_gguf.py) for its experts' real blocks. F8_E4M3 (upstream's 43:
+a byte a value, no scale - AngelSlim's Hy4-flash Engram shard, --f8) by torch's float8_e4m3fn; its file's type osmos's
+own id for it, 0x100 | 43 (osmos/model/qtype.h)."""
 import argparse
 import glob
 import os
@@ -21,6 +23,7 @@ RANDOM_BLOCKS = 8192
 SEED = 1017
 MXFP4_TENSOR = "mtp.0.ffn.experts.0.w1.weight"  # DSpark's experts: dspark.bin, as dspark.json says
 MXFP8_ID, MXFP8_VALUES, MXFP8_BYTES, MXFP8_BIAS = 43, 32, 33, 127  # an E8M0 scale byte, then 32 E4M3 codes
+F8_ID = 0x100 | 43  # upstream's F8_E4M3 as osmos names it (its files' 43)
 
 
 def tensors(model_dir):
@@ -54,9 +57,9 @@ def dspark_mxfp4(dspark_dir):
     raise SystemExit("no tensor " + MXFP4_TENSOR + " in " + meta)
 
 
-def mxfp8_table(path):
-    """the first tensor of a GGUF (unsloth's Engram shard: per_layer_token_embd, ggml type 43) as raw bytes - a walk of
-    the header, gguf-py not asked (it takes 43 for F8_E4M3)"""
+def mxfp8_table(path, f8=False):
+    """the first tensor of a GGUF (unsloth's Engram shard: per_layer_token_embd, ggml type 43 - MXFP8's blocks, or with
+    f8 AngelSlim's: a byte a value) as raw bytes - a walk of the header, gguf-py not asked (it takes 43 for F8_E4M3)"""
     sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
     with open(path, "rb") as f:
         def u(fmt):
@@ -90,7 +93,7 @@ def mxfp8_table(path):
         data = (f.tell() + align - 1) // align * align
     name, dims, typ, off = first
     assert typ == MXFP8_ID, (name, typ)
-    n = int(np.prod(dims)) // MXFP8_VALUES * MXFP8_BYTES
+    n = int(np.prod(dims)) if f8 else int(np.prod(dims)) // MXFP8_VALUES * MXFP8_BYTES
     return name, np.memmap(path, np.uint8, "r", data + off, (n,))
 
 
@@ -104,6 +107,9 @@ def mxfp8_values(b):
 def values(qtype, b):
     if qtype == MXFP8_ID:
         return mxfp8_values(b)
+    if qtype == F8_ID:
+        import torch
+        return torch.from_numpy(np.ascontiguousarray(b)).view(torch.float8_e4m3fn).float().numpy().astype(np.float32)
     with np.errstate(invalid="ignore", over="ignore"):  # a random draw may decode to NaN: it is drawn again
             return Q.dequantize(b.reshape(1, -1), qtype).reshape(-1).astype(np.float32)
 
@@ -114,11 +120,12 @@ def main():
     ap.add_argument("--model", default="~/models/ds1017", help="a folder of a model's GGUF files (ds1017; UD-IQ1_M)")
     ap.add_argument("--dspark", default=DSPARK_DEFAULT, help="maya's dspark.bin / dspark.json (MXFP4); absent: none")
     ap.add_argument("--mxfp8", help="unsloth's MXFP8 Engram GGUF (its shard); absent: none")
+    ap.add_argument("--f8", help="AngelSlim's Hy4-flash Engram shard (F8_E4M3; Q4_K_M's -00002-of-00002); absent: none")
     ap.add_argument("--random", action="append", default=[], metavar="TYPE",
                     help="a type with random blocks alone (no model tensor of it at hand), its file the others' format")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    picked = {getattr(T, t): ("random", None) for t in a.random}
+    picked = {(F8_ID if t == "F8_E4M3" else getattr(T, t)): ("random", None) for t in a.random}
     if not a.random:
         picked = tensors(os.path.expanduser(a.model))
     mx = None if a.random else dspark_mxfp4(os.path.expanduser(a.dspark))
@@ -126,9 +133,12 @@ def main():
         picked[T.MXFP4] = mx
     if a.mxfp8:
         picked[MXFP8_ID] = mxfp8_table(os.path.expanduser(a.mxfp8))
+    if a.f8:
+        picked[F8_ID] = mxfp8_table(os.path.expanduser(a.f8), f8=True)
     rng = np.random.default_rng(SEED)
     for qtype, (name, data) in sorted(picked.items(), key=lambda kv: int(kv[0])):
-        bv, bb = (MXFP8_VALUES, MXFP8_BYTES) if qtype == MXFP8_ID else GGML_QUANT_SIZES[qtype]
+        bv, bb = (MXFP8_VALUES, MXFP8_BYTES) if qtype == MXFP8_ID else (1, 1) if qtype == F8_ID else \
+            GGML_QUANT_SIZES[qtype]
         n = 0 if data is None else data.size // bb
         mid = int(rng.integers(RANGE_BLOCKS, n - 2 * RANGE_BLOCKS)) if n else 0
         parts = [data[s * bb:(s + RANGE_BLOCKS) * bb] for s in (0, mid, n - RANGE_BLOCKS)] if n else []
@@ -140,7 +150,7 @@ def main():
         b = np.concatenate(parts + rand)
         v = values(qtype, b)
         assert v.size == b.size // bb * bv
-        tname = "MXFP8" if qtype == MXFP8_ID else qtype.name
+        tname = "MXFP8" if qtype == MXFP8_ID else "F8_E4M3" if qtype == F8_ID else qtype.name
         path = os.path.join(a.out, tname + ".bin")
         with open(path, "wb") as f:
             f.write(b"SUBQ" + struct.pack("<IIQQ", 1, int(qtype), v.size, b.size))

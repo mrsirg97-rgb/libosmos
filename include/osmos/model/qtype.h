@@ -23,7 +23,8 @@
 /* (2: Q4_0 - 32 values, an f16 scale, 16 bytes of 4-bit codes less 8: vibes1.7b's file - DESIGN.md, "vibes-flash:
    LFM3") */
 /* (43: unsloth's MXFP8 - an E8M0 scale, then 32 E4M3 codes - its GGUFs' Engram tables; upstream llama.cpp's 43 is
-   F8_E4M3, one byte a value and no scales: a file of that is refused by its size, gguf.c) */
+   F8_E4M3, one byte a value and no scales - AngelSlim's Hy4-flash Engram table: a 43 whose MXFP8 bytes leave its room
+   but whose values fit it a byte each is taken for F8_E4M3 (gguf.c) and given the id 0x100 | 43, no file's) */
 #define QTYPES(X)                                                                                  \
   X(F32, 0, 1, 4, QTYPE_FILE | QTYPE_MV)                                                           \
   X(Q4_0, 2, 32, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                \
@@ -32,7 +33,7 @@
   X(Q4_K, 12, 256, 144, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(Q5_K, 13, 256, 176, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(Q2_K, 10, 256, 84, QTYPE_IQ)                                                                   \
-  X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MM | QTYPE_EMBED)             \
+  X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
   X(IQ2_XXS, 16, 256, 66, QTYPE_IQ)                                                                \
   X(IQ2_XS, 17, 256, 74, QTYPE_IQ)                                                                 \
   X(IQ3_XXS, 18, 256, 98, QTYPE_IQ)                                                                \
@@ -47,7 +48,8 @@
   X(MXFP4, 39, 32, 17, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
   X(NVFP4, 40, 64, 36, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
   X(Q2_0, 42, 64, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                           \
-  X(MXFP8, 43, 32, 33, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)
+  X(MXFP8, 43, 32, 33, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
+  X(F8_E4M3, 0x12B, 1, 1, QTYPE_FILE | QTYPE_DECODE)
 
 #define QTYPE_ID(name, id, values, bytes, paths) QTYPE_##name = id,
 enum QType { QTYPES(QTYPE_ID) };

@@ -22,6 +22,7 @@ enum Type : uint32_t {
   kIQ2_XS = QTYPE_IQ2_XS, kIQ1_S = QTYPE_IQ1_S, kIQ4_NL = QTYPE_IQ4_NL, kIQ2_S = QTYPE_IQ2_S, kIQ1_M = QTYPE_IQ1_M,
   kBF16 = QTYPE_BF16, kMXFP4 = QTYPE_MXFP4, kMXFP8 = QTYPE_MXFP8, kIQ3_XXS = QTYPE_IQ3_XXS, kIQ4_XS = QTYPE_IQ4_XS,
   kQ4_0 = QTYPE_Q4_0, kQ2_0 = QTYPE_Q2_0, kQ2_K = QTYPE_Q2_K, kQ4_K = QTYPE_Q4_K, kQ5_1 = QTYPE_Q5_1, kNVFP4 = QTYPE_NVFP4,
+  kF8_E4M3 = QTYPE_F8_E4M3,
   kQ5_KR = 0x100 | kQ5_K,  // Q5_K repacked a 16-row tile at a time (below; not a GGUF's: the forward's, at load)
 };
 
@@ -42,7 +43,9 @@ template <> struct Block<kQ5_KR> { static constexpr int values = kQK, bytes = 18
 // no block: a chunk of the table's one-value "blocks"
 template <> struct Block<kF32> { static constexpr int values = kChunk, bytes = QTYPE_F32_BYTES * kChunk; };
 template <> struct Block<kBF16> { static constexpr int values = kChunk, bytes = QTYPE_BF16_BYTES * kChunk; };
-static_assert(QTYPE_F32_VALUES == 1 && QTYPE_BF16_VALUES == 1, "F32 and BF16 decode a value at a time");
+template <> struct Block<kF8_E4M3> { static constexpr int values = kChunk, bytes = QTYPE_F8_E4M3_BYTES * kChunk; };
+static_assert(QTYPE_F32_VALUES == 1 && QTYPE_BF16_VALUES == 1 && QTYPE_F8_E4M3_VALUES == 1,
+              "F32, BF16 and F8_E4M3 decode a value at a time");
 static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && Block<kMXFP4>::values == kQ32 &&
                   Block<kMXFP8>::values == kQ32 &&
                   Block<kQ5_K>::values == kQK && Block<kQ6_K>::values == kQK && Block<kIQ1_M>::values == kQK &&
@@ -324,6 +327,11 @@ template <> __device__ inline void decode<kIQ1_M>(const uint8_t* b, int k, float
   const float delta = h & 0x08 ? -kIq1Delta : kIq1Delta;
   const uint64_t grid = kIq1sGrid[qs[k] | (h & 0x07) << 8];
   for (int j = 0; j < kChunk; j++) v[j] = mul(dl, (float) (int8_t) (grid >> (8 * j)) + delta);
+}
+
+// upstream's F8_E4M3: a byte a value, no scale (a code 0x7F / 0xFF NaN, as torch's float8_e4m3fn); exact
+template <> __device__ inline void decode<kF8_E4M3>(const uint8_t* b, int k, float* v) {
+  for (int j = 0; j < kChunk; j++) v[j] = rnd::e4m3_value(b[k * kChunk + j]);
 }
 
 // the top half of an F32; 8 values a chunk like the others
