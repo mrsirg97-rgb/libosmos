@@ -923,13 +923,14 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
   if (!q || !w || !groups || !pos || !scores || !sel || !n_sel || !heads || heads > 16 || !dim || dim > kIxDim ||
       !pool || top < 2 || !n_tok || !max_groups)
     return false;
-  const bool spread = n_tok <= kIxSpreadTokens;  // (a decode's or a verify's tokens: the scores over many blocks)
-  if (spread)
-    ix_score_kernel<<<(max_groups + kIxTile - 1) / kIxTile, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool,
+  // the scores tiled for every step (a prompt's too: the same bits as the select kernel's own loop); the selection over
+  // many blocks for a decode's or a verify's few tokens, a block a token for a prompt's many
+  const bool spread = n_tok <= kIxSpreadTokens;
+  ix_score_kernel<<<(max_groups + kIxTile - 1) / kIxTile, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool,
                                                                                        top, pos, n_tok, max_groups,
                                                                                        scores);
   ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool, top, pos, max_groups, scores,
-                                                       sel, n_sel, spread, spread);
+                                                       sel, n_sel, true, spread);
   if (!spread) return ok();
   static IxWide* wst = nullptr;  // (the spread selection's scratch: kIxSpreadTokens tokens' - made once)
   static uint32_t* wcnt = nullptr;
