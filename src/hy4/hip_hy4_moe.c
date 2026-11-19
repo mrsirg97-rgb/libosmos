@@ -104,11 +104,13 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t 
          hipMemcpy(f->rhidx, f->h_rhidx, (size_t)s_n * 4, hipMemcpyHostToDevice) == hipSuccess;
 }
 
-/* a decode's experts' matvec over the entries (MV_MAX_TOKENS of an expert's tokens an entry) */
-static bool mv_experts(const GgufTensor *t, const void *const *w, const Hy4Forward *f, uint32_t entries, uint32_t rows,
-                       uint32_t cols, const float *x, float *y)
+/* a decode's experts' matvec over the entries (chunk of an expert's tokens an entry at most: the step's tokens, up to
+   MV_MAX_TOKENS - one token's decode the single-token kernel, not the 8-token one's idle lanes: Q4_K_M's experts
+   32 -> 14 ms a token, 2026-11-19; a token's sums its own whatever the chunk) */
+static bool mv_experts(const GgufTensor *t, const void *const *w, const Hy4Forward *f, uint32_t entries, uint32_t chunk,
+                       uint32_t rows, uint32_t cols, const float *x, float *y)
 {
-  return mv_group_tok(t->type, w, f->cnt, f->xrow, entries, MV_MAX_TOKENS, rows, cols, x, cols, y, rows, f->st);
+  return mv_group_tok(t->type, w, f->cnt, f->xrow, entries, chunk, rows, cols, x, cols, y, rows, f->st);
 }
 
 /* a read's one role of the experts (the entries in ascending count): a launch a run of the same column tiles */
@@ -139,13 +141,14 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin
     const void *base[3] = {hy4_dev(f, L->exp_gate), hy4_dev(f, L->exp_up), hy4_dev(f, L->exp_down)};
     const uint64_t bytes[3] = {L->exp_gate->bytes / E, L->exp_up->bytes / E, L->exp_down->bytes / E};
     const void **wg = (const void **)f->wptr, **wu = wg + nk, **wd = wg + 2 * nk;
-    return hy4_route(f->idx, f->wtok, n, K, E, MV_MAX_TOKENS, base, bytes, f->gidx, f->sidx, f->wsel, f->cnt,
-                     f->xrow, wg, f->fault, f->st) &&
+    const uint32_t chunk = n < MV_MAX_TOKENS ? n : MV_MAX_TOKENS;
+    return hy4_route(f->idx, f->wtok, n, K, E, chunk, base, bytes, f->gidx, f->sidx, f->wsel, f->cnt, f->xrow, wg,
+                     f->fault, f->st) &&
            ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) &&
-           mv_experts(L->exp_gate, wg, f, nk, ffe, lat, f->xg, f->eg_g) &&
-           mv_experts(L->exp_up, wu, f, nk, ffe, lat, f->xg, f->eg_u) &&
+           mv_experts(L->exp_gate, wg, f, nk, chunk, ffe, lat, f->xg, f->eg_g) &&
+           mv_experts(L->exp_up, wu, f, nk, chunk, ffe, lat, f->xg, f->eg_u) &&
            ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, f->st) &&
-           mv_experts(L->exp_down, wd, f, nk, lat, ffe, f->eg_h, f->eg_y);
+           mv_experts(L->exp_down, wd, f, nk, chunk, lat, ffe, f->eg_h, f->eg_y);
   }
   uint32_t entries = 0, slots = 0;
   if (!route(f, l, n, &entries, &slots))

@@ -11,7 +11,8 @@
 /* Tencent's Hy4-flash (hy_v4_flash) behind the engine: every weight resident but the Engram table (its rows read from
    the model's file a step at a time), hy4's sequence (DESIGN.md, "0.10.0 step 2"). a batch is a decode's math, a
    prompt's read the matrix cores' (two maths, as DeepSeek's and q35's), each a token's bits however its step is split
-   or shared; the logits of the kept rows alone. no drafter yet: block 0 */
+   or shared; the logits of the kept rows alone. the drafter, when named, DFly2 (the release's
+   model-00148-of-00148.safetensors): HY4_DFLY_DRAFTS a round, verified in a decode's step */
 _Static_assert(HY4_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 _Static_assert(OSMOS_ERR >= HY4_ERR && OSMOS_ERR >= GGUF_ERR, "one error buffer for the engine and the family's calls");
 
@@ -30,6 +31,7 @@ typedef struct Model
 typedef struct Eng
 {
   Hy4Forward *f;
+  uint32_t drafts; /* a round's drafts (DFly2's), 0 without a drafter */
 } Eng;
 
 static bool fail(char err[OSMOS_ERR], const char *what)
@@ -86,8 +88,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   const Model *m = pm;
   if (o->budget || o->picks || o->no_guess || o->npu)
     return fail(err, "hy_v4_flash: every weight resident - no budget, picks, no_guess or NPU"), NULL;
-  if (o->drafter)
-    return fail(err, "hy_v4_flash: no drafter yet (its MTP layer or DFly2: step 3)"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;
@@ -95,6 +95,9 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   const Hy4Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, HY4_LOGIT_ROWS};
   if (!(e->f = hy4_forward_create(m->w, m->fds, &ho, err)))
     return e_destroy(e), NULL;
+  if (o->drafter && !hy4_dfly_load(e->f, o->drafter, true, err)) /* (Q8_0: half the draft's reads) */
+    return e_destroy(e), NULL;
+  e->drafts = o->drafter ? HY4_DFLY_DRAFTS : 0;
   return e;
 }
 
@@ -157,11 +160,7 @@ static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char e
   return hy4_greedy(((Eng *)p)->f, row0, rows, ids, err);
 }
 
-static uint32_t e_block(const void *p)
-{
-  (void)p;
-  return 0;
-}
+static uint32_t e_block(const void *p) { return ((const Eng *)p)->drafts; }
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return hy4_seq_create(((Eng *)p)->f, err); }
 static void s_destroy(void *s) { hy4_seq_destroy(s); }
@@ -184,14 +183,21 @@ static bool s_load_from(void *s, uint64_t bytes, StateSource src, void *ctx, cha
 static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
   (void)p, (void)s, (void)from, (void)to, (void)err;
-  return true; /* no drafter: nothing to seed */
+  return true; /* DFly2 reads the target's own state (every step keeps its snapshot): nothing to seed */
 }
+
+/* a round's drafts while their probabilities' product is at least this: a verified token reads its own experts (~14
+   ms of a step's 63), so an unlikely one costs more than it brings - 0.3 between code's best (0.4: 24.4 tok/s, plain
+   15.8) and prose's (0.25: 22.5), 2026-11-19, Q4_K_M at 1K */
+#define HY4_DRAFT_CUM_MIN 0.3f
 
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                    char err[OSMOS_ERR])
 {
-  (void)p, (void)s, (void)y, (void)conf_min, (void)cum_min, (void)drafts, (void)conf, (void)err;
-  return 0; /* no drafter: no drafts */
+  const Eng *e = p;
+  if (cum_min < HY4_DRAFT_CUM_MIN)
+    cum_min = HY4_DRAFT_CUM_MIN;
+  return e->drafts ? hy4_seq_draft(e->f, s, y, e->drafts, conf_min, cum_min, drafts, conf, err) : 0;
 }
 
 const OsmosFamily osmos_hy4 = {

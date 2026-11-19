@@ -39,6 +39,10 @@ typedef struct Layer
 struct Hy4Dfly
 {
   Gguf *st;
+  bool q8;           /* the matrices Q8_0 (ggml's rounding of the file's BF16), else as the file holds them */
+  uint32_t wtype;    /* the layers' and the correction's matrices' type: QTYPE_Q8_0 or QTYPE_BF16 */
+  uint32_t ehtype;   /* the fusion's: QTYPE_Q8_0 or QTYPE_F32 */
+  void *head8;       /* q8: the target's head as Q8_0 for the drafts' picks (NULL: the target's own) */
   void **dev; /* the file's tensors on the GPU, by index (the matrices alone) */
   Layer layer[HY4_DFLY_LAYERS];
   float *eh;  /* the fusion's eh_proj, its rows times its gate (F32: gate * (W x) = (gate W) x) */
@@ -155,11 +159,35 @@ static bool split_kvb(const Gguf *g, const GgufTensor *t, uint32_t H, uint32_t n
   return ok;
 }
 
+/* an F32 matrix [rows][cols] as Q8_0 on the GPU */
+static bool q8_up(const float *x, uint64_t rows, uint32_t cols, void **dev)
+{
+  const uint64_t rb = cols / 32 * 34;
+  uint8_t *q = x && cols % 32 == 0 ? malloc(rows * rb) : NULL;
+  for (uint64_t r = 0; q && r < rows; r++)
+    q8_row(x + r * cols, cols, q + r * rb);
+  const bool ok = q && hy4_alloc(dev, rows * rb) && hipMemcpy(*dev, q, rows * rb, hipMemcpyHostToDevice) == hipSuccess;
+  free(q);
+  return ok;
+}
+
+/* a matrix of the file to the GPU: as it is (BF16), or q8 its Q8_0 */
 static bool matrix(struct Hy4Dfly *d, const GgufTensor *t, void *pin, const void **dev)
 {
   void **slot = &d->dev[t - d->st->tensors];
-  if (!*slot && gpu_read_tensor(d->st, t, pin, READ_PIECE, slot))
-    return false;
+  if (!*slot)
+  {
+    if (d->q8)
+    {
+      float *x = host_f32(d->st, t);
+      const bool ok = q8_up(x, t->dims[1], (uint32_t)t->dims[0], slot);
+      free(x);
+      if (!ok)
+        return false;
+    }
+    else if (gpu_read_tensor(d->st, t, pin, READ_PIECE, slot))
+      return false;
+  }
   *dev = *slot;
   return true;
 }
@@ -184,6 +212,7 @@ void hy4_dfly_free(Hy4Forward *f)
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     hipFree(b[i]);
   hipHostFree(d->pin_ids), hipHostFree(d->pin_pos), hipHostFree(d->pin_pick), hipHostFree(d->pin_prob);
+  hipFree(d->head8);
   gguf_destroy(d->st);
   free(d);
   f->dfly = NULL;
@@ -191,7 +220,7 @@ void hy4_dfly_free(Hy4Forward *f)
     f->dfly_slot[l] = -1;
 }
 
-bool hy4_dfly_load(Hy4Forward *f, const char *path, char err[HY4_ERR])
+bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
 {
   if (!f || !path)
     return fail(err, "no forward or drafter path");
@@ -210,6 +239,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, char err[HY4_ERR])
   if (!d)
     return fail(err, "out of memory");
   f->dfly = d;
+  d->q8 = q8, d->wtype = q8 ? QTYPE_Q8_0 : QTYPE_BF16, d->ehtype = q8 ? QTYPE_Q8_0 : QTYPE_F32;
   if (!(d->st = st_create(path, err)))
     return hy4_dfly_free(f), false;
   void *pin = NULL;
@@ -265,7 +295,8 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, char err[HY4_ERR])
     for (uint64_t r = 0; w && gv && r < D; r++)
       for (uint64_t c = 0; c < 2ull * D; c++)
         w[r * 2 * D + c] *= gv[r];
-    ok = (w && gv && up_f32(w, (uint64_t)D * 2 * D, &d->eh)) || fail(err, "DFly2: the fusion not made");
+    ok = (w && gv && (q8 ? q8_up(w, D, 2 * D, (void **)&d->eh) : up_f32(w, (uint64_t)D * 2 * D, &d->eh))) ||
+         fail(err, "DFly2: the fusion not made");
     free(w), free(gv);
   }
   ok = ok && ((small(d->st, en, &d->enorm) && small(d->st, hn, &d->hnorm) && small(d->st, fnm, &d->final_norm) &&
@@ -274,6 +305,14 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, char err[HY4_ERR])
                matrix(d, cd, pin, &d->corr_down)) ||
               fail(err, "DFly2: its shared tensors not read into GPU memory"));
   hipHostFree(pin);
+  const GgufTensor *out = f->w->output;
+  if (ok && q8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
+  { /* the drafts' head: the target's own as Q8_0 (a draft's precision moves its acceptance, never the output) */
+    float *x = out->type == QTYPE_BF16 ? host_f32(f->w->model, out) : NULL;
+    ok = (x && q8_up(x, out->dims[1], (uint32_t)out->dims[0], &d->head8)) ||
+         fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
+    free(x);
+  }
   /* the buffers: ROWS rows each */
   const uint64_t R = ROWS, row = lat + rd, qk = nope + rd, V = (uint64_t)g->n_vocab, top = g->ix_topk / g->ix_pool;
   d->cap = (uint32_t)(top + (ROWS + g->ix_pool - 1) / g->ix_pool + 1);
@@ -340,16 +379,16 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
   /* the fusion on the anchor's row: h0 += (gate W) [enorm(e0); hnorm(target hidden)] */
   ok = ok && ops_rms(d->h, D, D, d->enorm, eps, 1, d->cat, 2 * D, f->st) &&
        ops_rms(s->dhid + (uint64_t)i * D, D, D, d->hnorm, eps, 1, d->cat + D, 2 * D, f->st) &&
-       mat(f, QTYPE_F32, d->eh, D, 2 * D, d->cat, 1, d->y) && ops_add(d->h, d->y, D, f->st);
+       mat(f, d->ehtype, d->eh, D, 2 * D, d->cat, 1, d->y) && ops_add(d->h, d->y, D, f->st);
   for (int li = 0; ok && li < HY4_DFLY_LAYERS; li++)
   {
     const Layer *L = &d->layer[li];
     const int tl = TARGETS[li];
     ok = ops_rms(d->h, D, D, L->in_norm, eps, R, d->xn, D, f->st) &&
-         mat(f, QTYPE_BF16, L->q_a, ql, D, d->xn, R, d->qr) && mat(f, QTYPE_BF16, L->kv_a, row, D, d->xn, R, d->kva) &&
-         mat(f, QTYPE_BF16, L->gate, H * vd, D, d->xn, R, d->gt) &&
+         mat(f, d->wtype, L->q_a, ql, D, d->xn, R, d->qr) && mat(f, d->wtype, L->kv_a, row, D, d->xn, R, d->kva) &&
+         mat(f, d->wtype, L->gate, H * vd, D, d->xn, R, d->gt) &&
          ops_rms(d->qr, ql, ql, L->q_a_norm, eps, R, d->qres, ql, f->st) &&
-         mat(f, QTYPE_BF16, L->q_b, H * qk, ql, d->qres, R, d->q) &&
+         mat(f, d->wtype, L->q_b, H * qk, ql, d->qres, R, d->q) &&
          hy4_mla_kv(d->kva, L->kv_a_norm, lat, rd, eps, f->freqs_sparse, d->pos, R, s->cache[tl], 0, f->st) &&
          hy4_mla_q(d->q, L->k_b, H, nope, lat, rd, f->freqs_sparse, d->pos, R, d->qa, f->table, f->st) &&
          hy4_dfly_sel(s->dsel + ((uint64_t)li * HY4_DFLY_KEEP + (uint32_t)i) * top,
@@ -358,12 +397,12 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          hy4_mla_attn(d->qa, s->cache[tl], 0, L->sinks, H, lat, rd, 0, d->sel, d->n_sel, d->cap, pool, scale, d->pos, R,
                       d->olat, f->attn_part, f->st) &&
          hy4_mla_out(d->olat, L->v_b, d->gt, H, lat, vd, R, d->ao, f->table, f->st) &&
-         mat(f, QTYPE_BF16, L->o, D, H * vd, d->ao, R, d->out) &&
+         mat(f, d->wtype, L->o, D, H * vd, d->ao, R, d->out) &&
          ops_rms_add_rms(d->h, d->out, L->post_proj_norm, L->ffn_norm, eps, D, R, d->xn, f->st) &&
-         mat(f, QTYPE_BF16, L->ffn_gate, d->ff, D, d->xn, R, d->ga) &&
-         mat(f, QTYPE_BF16, L->ffn_up, d->ff, D, d->xn, R, d->up) &&
+         mat(f, d->wtype, L->ffn_gate, d->ff, D, d->xn, R, d->ga) &&
+         mat(f, d->wtype, L->ffn_up, d->ff, D, d->xn, R, d->up) &&
          ops_swiglu(d->ga, d->up, d->ff, INFINITY, NULL, R, d->act, f->st) &&
-         mat(f, QTYPE_BF16, L->ffn_down, D, d->ff, d->act, R, d->y) && ops_add(d->h, d->y, (uint64_t)R * D, f->st);
+         mat(f, d->wtype, L->ffn_down, D, d->ff, d->act, R, d->y) && ops_add(d->h, d->y, (uint64_t)R * D, f->st);
   }
   ok = ok && ops_rms(d->h, D, D, d->final_norm, eps, R, d->z, D, f->st);
   /* the chain: draft j from row j's hidden corrected by the token before it (the anchor's, then each draft's) */
@@ -373,12 +412,13 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
     ok = ops_rms(d->z + (uint64_t)j * D, D, D, d->hidden_norm, eps, 1, d->cat, 2 * D, f->st) &&
          q4x_rows(emb->type, hy4_dev(f, emb), erow, D, prev, 1, d->e, f->st) &&
          ops_rms(d->e, D, D, d->embed_norm, eps, 1, d->cat + D, 2 * D, f->st) &&
-         mat(f, QTYPE_BF16, d->corr_gate, d->corr_ff, 2 * D, d->cat, 1, d->ga) &&
-         mat(f, QTYPE_BF16, d->corr_up, d->corr_ff, 2 * D, d->cat, 1, d->up) &&
+         mat(f, d->wtype, d->corr_gate, d->corr_ff, 2 * D, d->cat, 1, d->ga) &&
+         mat(f, d->wtype, d->corr_up, d->corr_ff, 2 * D, d->cat, 1, d->up) &&
          ops_swiglu(d->ga, d->up, d->corr_ff, INFINITY, NULL, 1, d->act, f->st) &&
-         mat(f, QTYPE_BF16, d->corr_down, D, d->corr_ff, d->act, 1, d->c) &&
+         mat(f, d->wtype, d->corr_down, D, d->corr_ff, d->act, 1, d->c) &&
          ops_add(d->c, d->z + (uint64_t)j * D, D, f->st) &&
-         hy4_mat(f, f->w->output, V, D, d->c, 1, d->logits, false) &&
+         (d->head8 ? mat(f, QTYPE_Q8_0, d->head8, V, D, d->c, 1, d->logits)
+                   : hy4_mat(f, f->w->output, V, D, d->c, 1, d->logits, false)) &&
          hy4_dfly_pick(d->logits, V, d->pick + (j - 1), d->prob + (j - 1), f->st);
   }
   ok = ok && hipMemcpyAsync(d->pin_pick, d->pick, most * 4, hipMemcpyDeviceToHost, f->st) == hipSuccess &&

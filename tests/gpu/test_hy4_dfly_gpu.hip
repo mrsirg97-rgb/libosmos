@@ -3,6 +3,7 @@
 // kept, the rest rolled back) - the tokens bit for bit plain greedy decoding's, the drafts' mean acceptance stated and
 // bounded below (a broken draft accepts ~0). OSMOS_TEST_HY4_DFLY_DUMP=dir: the first round's draft state and outputs
 // for oracle/hy4_dfly.py (the reference's draft on osmos's own target state); with its fixture
+// (OSMOS_TEST_DFLY_Q8: the engine's Q8_0 drafter, its agreement with the reference reported, not bounded)
 // (~/osmos-oracle/hy4_dfly.bin, OSMOS_TEST_HY4_DFLY_REF) the draft's hidden rows and tokens against the reference's.
 // needs the GGUF (OSMOS_TEST_HY4), the drafter (OSMOS_TEST_DFLY: model-00148-of-00148.safetensors) and the ids of
 // ~/osmos-oracle/hy4_forward.bin; skipped (77) without. run under the memory guard (~95 GB on the GPU).
@@ -65,7 +66,8 @@ int main() {
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
-  if (!hy4_dfly_load(f, dfly.c_str(), err)) std::printf("  refused: %s\n", err);
+  const bool q8 = getenv("OSMOS_TEST_DFLY_Q8") != nullptr;  // (the engine's: Q8_0; the reference's check strict in BF16)
+  if (!hy4_dfly_load(f, dfly.c_str(), q8, err)) std::printf("  refused: %s\n", err);
   CHECK(f->dfly);
   std::printf("[test_hy4_dfly_gpu] DFly2 loaded beside the forward (%s); a prompt of %u tokens\n", dfly.c_str(), kPrompt);
   std::vector<int32_t> ids(kPrompt);
@@ -107,12 +109,14 @@ int main() {
         const std::vector<float>&rd = A("drafts"), &rp = A("probs");
         CHECK((int) rd.size() == k);
         float worst = 0;
+        int same = 0;
         for (int j = 0; j < k; j++) {
-          CHECK((int32_t) rd[j] == d[j]);
+          same += (int32_t) rd[j] == d[j];
           worst = std::fmax(worst, std::fabs(rp[j] - c[j]));
         }
-        std::printf("  the reference's drafts on this state the same %d; their probabilities within %.4f\n", k, worst);
-        CHECK(worst <= kProbTol);
+        std::printf("  the reference's drafts on this state: %d of %d the same; their probabilities within %.4f%s\n",
+                    same, k, worst, q8 ? " (Q8_0: reported, not bounded)" : "");
+        if (!q8) CHECK(same == k && worst <= kProbTol);
       } else
         std::printf("  no reference (%s): the drafts not checked against it\n", ref.c_str());
       if (dir) {  // the draft's inputs and outputs (oracle/hy4_dfly.py)

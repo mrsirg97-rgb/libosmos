@@ -3,7 +3,11 @@
 // hash (two runs the same model the same ids). under rocprofv3 --kernel-trace --stats each kernel's share.
 //
 //   hy4_run <GGUF> [P=2048] [S=2048] [D=32]
-//   IDS=path  a fixture of the oracle's (oracle/hy4_forward.py: its "ids") for the prompt's ids
+//   IDS=path   the prompt's ids: a file of int32 (the first P), else 1000 + i * 7919 % 50000
+//   DFLY=path  DFly2 (the release's model-00148-of-00148.safetensors): the decode in drafted rounds - the drafts and
+//              the sampled token one decode step, the target's greedy picks keeping the leading drafts - its rate,
+//              its drafts accepted a round; the tokens the plain decode's (the same hash). CUM=x: a round's drafts
+//              kept while their probabilities' product is at least x (the engine's cum_min)
 #include <fcntl.h>
 #include <hip/hip_runtime.h>
 #include <unistd.h>
@@ -45,13 +49,20 @@ int main(int argc, char** argv) {
   for (int i = 0; i < g->n_files; i++) CHECK((fds[i] = open(g->paths[i], O_RDONLY)) >= 0);
   std::vector<int32_t> ids(P);
   for (uint32_t i = 0; i < P; i++) ids[i] = (int32_t) (1000 + i * 7919 % 50000);
+  if (const char* ip = getenv("IDS")) {
+    FILE* fi = std::fopen(ip, "rb");
+    CHECK(fi && std::fread(ids.data(), 4, P, fi) == P);
+    std::fclose(fi);
+  }
+  const char* dfly = getenv("DFLY");
   const double t0 = now();
-  const Hy4Options o = {S, P + D + HY4_MAX_BACK, 1};
+  const Hy4Options o = {S, P + D + 2 * HY4_DFLY_DRAFTS + HY4_MAX_BACK, dfly ? (uint32_t) HY4_DFLY_DRAFTS + 1 : 1u};
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::fprintf(stderr, "%s\n", err);
   CHECK(f);
   Hy4Seq* s = hy4_seq_create(f, err);
   CHECK(s);
+  if (dfly && !hy4_dfly_load(f, dfly, !getenv("DFLY_BF16"), err)) std::fprintf(stderr, "%s\n", err), std::exit(1);
   std::printf("hy4_run: loaded in %.1f s; prompt %u in steps of %u, decode %u\n", now() - t0, P, S, D);
   const double t1 = now();
   uint32_t n = 0;
@@ -64,11 +75,32 @@ int main(int argc, char** argv) {
   uint64_t hash = 1469598103934665603ull;
   CHECK(hy4_greedy(f, n - 1, 1, &next, err));  /* the step's last row: its one kept */
   const double t3 = now();
-  for (uint32_t d = 0; d < D; d++) {
-    CHECK(hy4_step(f, s, &next, 1, 1, err) && hy4_greedy(f, 0, 1, &next, err));
-    hash = (hash ^ (uint64_t) next) * 1099511628211ull;
+  uint32_t rounds = 0, accepted = 0, drafted = 0;
+  for (uint32_t d = 0; d < D;) {
+    if (!dfly) {
+      CHECK(hy4_step(f, s, &next, 1, 1, err) && hy4_greedy(f, 0, 1, &next, err));
+      hash = (hash ^ (uint64_t) next) * 1099511628211ull, d++;
+      continue;
+    }
+    int32_t tok[1 + HY4_DFLY_DRAFTS], pick[1 + HY4_DFLY_DRAFTS];
+    float conf[HY4_DFLY_DRAFTS];
+    const int k = hy4_seq_draft(f, s, next, HY4_DFLY_DRAFTS, 0.0f, getenv("CUM") ? (float) atof(getenv("CUM")) : 0.0f,
+                                tok + 1, conf, err);
+    CHECK(k >= 0);
+    tok[0] = next;
+    const uint32_t len = 1 + (uint32_t) k;
+    CHECK(hy4_step_runs(f, &s, &len, 1, tok, err) && hy4_greedy(f, 0, len, pick, err));
+    int a = 0;
+    while (a < k && tok[1 + a] == pick[a]) a++;
+    if (k > a) CHECK(hy4_seq_rollback(s, (uint32_t) (k - a)));
+    for (int j = 0; j <= a && d < D; j++, d++) hash = (hash ^ (uint64_t) pick[j]) * 1099511628211ull;
+    next = pick[a];
+    rounds++, accepted += (uint32_t) a, drafted += (uint32_t) k;
   }
   const double t4 = now();
+  if (dfly)
+    std::printf("drafted: %u rounds, %u drafts, %u accepted (%.2f a round, %.0f%%)\n", rounds, drafted, accepted,
+                (double) accepted / rounds, 100.0 * accepted / (drafted ? drafted : 1));
   std::printf("prompt: %u tokens in %.2f s (%.1f tok/s)\ndecode: %u tokens in %.2f s (%.2f tok/s, %.1f ms a token); "
               "ids hash %016llx\n", P, t2 - t1, P / (t2 - t1), D, t4 - t3, D / (t4 - t3), 1000 * (t4 - t3) / D,
               (unsigned long long) hash);
