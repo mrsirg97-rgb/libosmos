@@ -96,14 +96,9 @@ typedef struct Lfm3Stage
 {
   uint32_t from, factor;
 } Lfm3Stage;
-/* vibes1.7b's (lfm3_rope_nll's crossovers: DESIGN.md, "vibes-flash: rope"), Lfm3Options' stages when NULL - each
-   boundary its measured bracket's midpoint (the last 2,048 tokens' NLL on wiki, a PG-19 novel and llama.cpp's source):
-   x2 from 32K (16K / 32K / 64K: the least worst case - the novel +0.063 at 32K, wiki -0.40); x4 from 160K (x2 at 128K
-   on both, x4 at 192K on both); x8 from 384K (x4 at 256K on both, x8 at 512K on the novel by 0.052, x4 on code by
-   0.007) */
-#define LFM3_STAGE_X2_FROM 32768
-#define LFM3_STAGE_X4_FROM 163840
-#define LFM3_STAGE_X8_FROM 393216
+/* osmos1.7b's, Lfm3Options' stages when NULL: the native rotation throughout - one stage, its keys never turned
+   (DESIGN.md, "osmos1.7b: rope"). x4 from 160K read the last tokens' NLL best past 192K, but lost a needle 50K back
+   at 512K that native found; native found 8 of 8 to 512K, 4 of 5 at 1M (the miss x4's too) */
 extern const Lfm3Stage lfm3_stages_default[];
 extern const uint32_t lfm3_stages_default_n;
 #define LFM3_MAX_CTX 2097152 /* a context's most positions: 2M (the stages to YaRN x8 over the native 262,144) */
@@ -118,6 +113,8 @@ typedef struct Lfm3Options
   uint32_t yarn_static_ctx; /* every position YaRN at yarn_static_ctx over yarn_from (64 times it at most), no stages;
                                0 the stages */
   uint32_t lsa_sparse_from; /* with LSA, a prompt's tokens from this position read sparse (0: LFM3_LSA_SPARSE_FROM) */
+  const struct Q4xDflash *dflash; /* a DFlash2 drafter (q4x_dflash_create_for against these weights; lfm3_dflash_*):
+                                     its taps every step's, its rings each sequence's; NULL none */
 } Lfm3Options;
 /* a prompt token's read sparse from here: under LSA_READ_MAX positions a read is every key (the dense attention's) */
 #define LFM3_LSA_SPARSE_FROM LSA_READ_MAX
@@ -169,6 +166,15 @@ uint64_t lfm3_identity(const Lfm3Forward *f);
 uint64_t lfm3_seq_state_bytes(const Lfm3Seq *s);
 bool lfm3_seq_save_to(const Lfm3Seq *s, StateSink sink, void *ctx, char err[LFM3_ERR]);
 bool lfm3_seq_load_from(Lfm3Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[LFM3_ERR]);
+
+/* DFlash2 (a forward made with Lfm3Options' dflash; q4x's drafter, its kernels, on LFM3's taps - DESIGN.md,
+   "osmos1.7b: DFlash2"): seed the drafter's context at positions from .. to - 1 from the sequence's last step's taps,
+   and draft up to max tokens after y (the token at the sequence's position) - q4x_dflash_seed / q4x_dflash_draft's
+   contracts, and a round's drafts capped where its verify would leave the reach (lfm3_seq_reach: an LSA block's close,
+   a YaRN stage's crossing) - every dropped draft then within it. neither moves a bit of the sequence's own state */
+bool lfm3_dflash_seed(Lfm3Forward *f, Lfm3Seq *s, int32_t from, int32_t to, char err[LFM3_ERR]);
+int lfm3_dflash_draft(Lfm3Forward *f, Lfm3Seq *s, int32_t y, uint32_t max, float conf_min, float cum_min,
+                      int32_t *drafts, float *conf, char err[LFM3_ERR]);
 
 /* the sequence's YaRN stage (0: plain rope) */
 uint32_t lfm3_seq_stage(const Lfm3Seq *s);

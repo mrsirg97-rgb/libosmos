@@ -2028,6 +2028,34 @@ table (Lfm3Stage {from, factor}, YaRN over the native 262,144), each boundary it
 prompt 1.04M tokens in 488 s). the pack 512K (the operator's, 2026-11-19): 6/6 needles to 524K (10/50/90% depth),
 the forward 2M-capable for a model trained past it (a retrain, or vibes27b).
 
+## osmos1.7b: rope (measured, 2026-11-20)
+
+osmos1.7b (0.11.1: vibes1.7b renamed, retrained on 32K-token examples, the same tensors and template) read again as
+vibes1.7b was (lfm3_rope_nll: the last 2,048 tokens' NLL after a P-token read) on the same PG-19 novel and llama.cpp's
+source - native now holds about five times as far:
+
+| P | novel: native / x2 / x4 / x8 | code: native / x4 / x8 |
+| ---: | --- | --- |
+| 32K | **3.240** / 3.325 / 3.605 / 4.005 | **0.547** / 0.559 / 0.581 |
+| 64K | 3.388 / **3.384** / 3.573 / 3.943 | **0.648** / 0.682 / 0.732 |
+| 128K | **3.381** / 3.385 / 3.476 / 3.804 | **1.063** / 1.074 / 1.118 |
+| 192K | 3.190 / 3.232 / **3.166** / 3.405 | 1.127 / **1.044** / 1.110 |
+| 256K | 3.482 / 3.603 / **3.452** / 3.575 | 0.596 / **0.566** / 0.610 |
+| 384K | 3.779 / 3.929 / **3.762** / 3.874 | 1.242 / **1.223** / 1.272 |
+| 512K | 3.656 / 3.953 / 3.674 / **3.647** | 1.164 / **1.061** / 1.084 |
+
+(vibes1.7b's novel, native: 3.268 at 32K, 3.610 at 128K, 3.944 at 256K.) x2 never the best past 64K, x8 once by
+0.027 (the novel at 512K; code's worse by 0.023) - by the NLL two stages: native to 160K (128K / 192K's midpoint),
+x4 from it, where vibes1.7b had four (x2 from 32K, x4 from 160K, x8 from 384K).
+
+then the needles (~/bench/lfm3/needle_o17: a code word in llama.cpp's source at a depth, asked at the end, greedy) -
+the NLL's table lost one: x4 from 160K found 512K's at 10% and 50% and wrote code for 90%'s (~52K back); native
+found it (`vortex-4777`). on native throughout: 512K 3 of 3 (10 / 50 / 90%), 1.04M 4 of 5 (10 / 30 / 50 / 90%; 70%
+answered with a path from the code beside it - x4 past 600K missed it too, with another of the code's notes), the
+prompt 2,550-3,000 tok/s, decode 74-101. the last 2,048 tokens' NLL rewards the angles compressed; finding a line
+50K back wants them sharp. so the stages are one, native (lfm3_stages_default; OSMOS_LFM3_STAGES tries another table
+without a build), and the pack 512K (the operator's, 2026-11-20); 1M by `--ctx 1m`, 4 of 5.
+
 ## vibes-flash: 2M (design, 2026-11-18)
 
 the operator's: vibes1.7b ships with a 2M context, its attention as cheap as it can be made. measured first
