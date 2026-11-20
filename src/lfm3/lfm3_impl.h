@@ -9,18 +9,12 @@
 #include "osmos/lsa.h"
 #include "osmos/lfm3/forward.h"
 #include "osmos/q4x/dflash.h"
+#include "../q4x/dflash_core.h"
 
 #define F 4ull               /* a float's bytes */
 #define LFM3_CONV_SLOTS (LFM3_MAX_BACK + 1) /* a convolution's states a sequence keeps: the current, and a rollback's */
 
-/* the drafter's buffers (q4x's Q4xDfBuf): a seed's context rows, a block's, the selector's, pinned copies out */
-typedef struct Lfm3DfBuf
-{
-  float *th, *k, *v, *h, *x, *xc, *dyn, *q, *att, *a, *gate, *up, *hn, *logits, *hp, *val, *top_p;
-  int32_t *idx, *path, *top_id, *tok, *iota;
-  int32_t *pin_tok, *pin_path, *pin_idx;
-  float *pin_val, *pin_p;
-} Lfm3DfBuf;
+typedef DfBuf Lfm3DfBuf; /* the drafter's buffers: the DFlash2 core's (src/q4x/dflash_core.h) */
 
 struct Lfm3Forward
 {

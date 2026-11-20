@@ -12,6 +12,7 @@
 #include "osmos/npu/npu.h"
 #include "osmos/q4x/dflash.h"
 #include "osmos/q4x/forward.h"
+#include "dflash_core.h"
 
 /* a step's buffers, for max_tokens tokens */
 typedef struct Q4xBuf
@@ -56,18 +57,7 @@ typedef struct Q4xMtpBuf
 } Q4xMtpBuf;
 
 /* the DFlash2 drafter's buffers (with a drafter): a seed's context rows, then a block's */
-typedef struct Q4xDfBuf
-{
-  float *th;            /* [max_tokens][n_embd]: the context's taps through fc, then its hidden norm */
-  float *k, *v;         /* [max(max_tokens, block)][kv]: a layer's keys and values (the context's, the block's) */
-  float *h, *x, *xc, *dyn, *q, *att, *a, *gate, *up, *hn; /* the block's: residual, normed, convolved, .. its out */
-  float *logits, *hp, *val; /* the head's at the block's drafts' places, the selector's projection, the top-k */
-  float *top_p;             /* each place's greatest token's probability (q4x_top: a draft's confidence's) */
-  int32_t *idx, *path, *top_id;
-  int32_t *tok, *iota; /* device: the block's tokens (y, then masks); 0 .. max_ctx + block (a run's positions) */
-  int32_t *pin_tok, *pin_path, *pin_idx; /* pinned: the block's anchor in; its path, the top-k's ids, values, p out */
-  float *pin_val, *pin_p;
-} Q4xDfBuf;
+typedef DfBuf Q4xDfBuf; /* the drafter's buffers: the DFlash2 core's (dflash_core.h) */
 
 #define Q4X_SIDE_STEP MM_TILE /* a step this small or smaller: the second stream (decode, a draft's verify) */
 #define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_forward.c's table) */

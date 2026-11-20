@@ -47,37 +47,12 @@ static bool upload_file(const Gguf *g, void ***table, char *err)
 
 static bool upload(Lfm3Forward *f, char *err) { return upload_file(f->w->model, &f->dev, err); }
 
-/* the drafter's buffers: a seed's max_tokens context rows, a block's (q4x's df_buffers) */
-static bool df_buffers(Lfm3Forward *f, char *err)
+/* the drafter's buffers (the DFlash2 core's), and its taps' rows: a step's max_tokens */
+static bool lfm3_df_buffers(Lfm3Forward *f, char *err)
 {
-  const Q4xDflashGeometry *g = &f->df->geo;
-  const uint64_t n = f->max_tokens, B = (uint64_t)g->block, D = (uint64_t)g->n_embd, V = (uint64_t)g->n_vocab;
-  const uint64_t kv = (uint64_t)g->n_kv_heads * g->head_dim, q = (uint64_t)g->n_heads * g->head_dim;
-  const uint64_t rows = n > B ? n : B, dyn = 2ull * Q4X_DFLASH_CONV * (D / (uint64_t)g->conv_group);
-  const uint64_t ff = (uint64_t)g->ff, k = (uint64_t)g->sel_top_k, iota = (uint64_t)f->max_ctx + B;
-  Lfm3DfBuf *d = &f->d;
-  bool ok = lfm3_alloc(&f->taps, n * (uint64_t)g->n_taps * D * F) && lfm3_alloc(&d->th, n * D * F) &&
-            lfm3_alloc(&d->k, rows * kv * F) && lfm3_alloc(&d->v, rows * kv * F) && lfm3_alloc(&d->h, B * D * F) &&
-            lfm3_alloc(&d->x, B * D * F) && lfm3_alloc(&d->xc, B * D * F) && lfm3_alloc(&d->dyn, B * dyn * F) &&
-            lfm3_alloc(&d->q, B * q * F) && lfm3_alloc(&d->att, B * q * F) && lfm3_alloc(&d->a, B * D * F) &&
-            lfm3_alloc(&d->gate, B * ff * F) && lfm3_alloc(&d->up, B * ff * F) && lfm3_alloc(&d->hn, B * D * F) &&
-            lfm3_alloc(&d->logits, B * V * F) && lfm3_alloc(&d->hp, B * (uint64_t)g->sel_rank * F) &&
-            lfm3_alloc(&d->val, B * k * F) && lfm3_alloc(&d->idx, B * k * 4) && lfm3_alloc(&d->top_p, B * F) &&
-            lfm3_alloc(&d->path, B * 4) && lfm3_alloc(&d->top_id, B * 4) && lfm3_alloc(&d->tok, B * 4) &&
-            lfm3_alloc(&d->iota, iota * 4) && hipHostMalloc((void **)&d->pin_tok, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_path, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_idx, B * k * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_val, B * k * F, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_p, B * F, 0) == hipSuccess;
-  int32_t *h = ok ? malloc(iota * 4) : NULL;
-  for (uint64_t i = 0; h && i < iota; i++)
-    h[i] = (int32_t)i;
-  for (uint64_t i = 1; h && i < B; i++) /* the block's tokens after its anchor: the mask */
-    d->pin_tok[i] = g->mask_token;
-  ok = h && hipMemcpy(d->iota, h, iota * 4, hipMemcpyHostToDevice) == hipSuccess &&
-       hipMemcpy(d->tok, d->pin_tok, B * 4, hipMemcpyHostToDevice) == hipSuccess;
-  free(h);
-  return ok || lfm3_fail(err, "GPU memory refused (the drafter's buffers)");
+  const uint64_t T = (uint64_t)f->df->geo.n_taps * (uint64_t)f->df->geo.n_embd;
+  return (lfm3_alloc(&f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, &f->df->geo, f->max_tokens, f->max_ctx)) ||
+         lfm3_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 
 /* the drafter: its geometry these weights' (its taps their layers'), its tensors uploaded, its buffers */
@@ -99,7 +74,7 @@ static bool df_make(Lfm3Forward *f, const Q4xDflash *df, char *err)
   }
   f->df = df;
   f->df_ring = (uint32_t)dg->window + LFM3_CONV_SLOTS < f->max_ctx ? (uint32_t)dg->window + LFM3_CONV_SLOTS : f->max_ctx;
-  return upload_file(df->model, &f->df_dev, err) && df_buffers(f, err);
+  return upload_file(df->model, &f->df_dev, err) && lfm3_df_buffers(f, err);
 }
 
 /* tensors' rows concatenated (one type) into one buffer, their device pointers then into it; NULL if their types
@@ -269,14 +244,8 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   for (size_t i = 0; f->df_dev && i < f->df->model->n_tensors; i++)
     hipFree(f->df_dev[i]);
   free(f->df_dev);
-  void *db[] = {f->taps, f->d.th, f->d.k, f->d.v, f->d.h, f->d.x, f->d.xc, f->d.dyn, f->d.q, f->d.att, f->d.a,
-                f->d.gate, f->d.up, f->d.hn, f->d.logits, f->d.hp, f->d.val, f->d.top_p, f->d.idx, f->d.path,
-                f->d.top_id, f->d.tok, f->d.iota};
-  for (size_t i = 0; i < sizeof db / sizeof *db; i++)
-    hipFree(db[i]);
-  void *dp[] = {f->d.pin_tok, f->d.pin_path, f->d.pin_idx, f->d.pin_val, f->d.pin_p};
-  for (size_t i = 0; i < sizeof dp / sizeof *dp; i++)
-    hipHostFree(dp[i]);
+  hipFree(f->taps);
+  df_buffers_free(&f->d);
   free(f);
 }
 
