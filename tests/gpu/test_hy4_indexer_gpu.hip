@@ -119,6 +119,20 @@ int main() {
     std::printf("  a prompt's step (scores on the matrix cores): %u of %u choosing tokens a pick apart from the F32 "
                 "path's, at most %u groups each\n", moved, chosen, worst);
     CHECK(moved * 20 <= chosen && worst <= 2);
+    // a read's short step (a prompt's last chunk, a short turn: 4 tokens) the same math as its long one - the last 4
+    // tokens' scores the one step's bits (0.11.2: a read of 16 tokens or fewer took the F32 scores)
+    {
+      const std::vector<float> all = down(scores, (size_t) T * G);
+      const uint32_t a = T - 4;
+      CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a, 4, G,
+                          scores, sel2, n2, true, 0));
+      const std::vector<float> tail = down(scores, (size_t) 4 * G);
+      for (uint32_t t = 0; t < 4; t++) {
+        const uint32_t own = (a + t) / pool;  // its complete groups (position t): the scores it reads
+        CHECK(std::memcmp(tail.data() + (size_t) t * G, all.data() + (size_t) (a + t) * G, (size_t) own * 4) == 0);
+      }
+      std::printf("  a read's step of 4 tokens: their scores the long step's bits\n");
+    }
     CHECK(hipFree(sel2) == hipSuccess && hipFree(n2) == hipSuccess);
   }
 
