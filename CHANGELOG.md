@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.3]: a long wait's cause in the log, and osmos1.7b's tool loops kept
+
+- **A request's prefix reuse in osmos-api's log** (rig's row log): `request N: a P-token prompt, R reused (via), K
+  read in S s` - via the conversation as held, a rollback, its prompt's or last user turn's point, a kept slot, or
+  none. osmos-serve's PP line carries it as a last field (an older engine's line still read). A long wait to the
+  first token says its cause.
+- **osmos1.7b keeps an earlier turn's reasoning** (the pack's `preserve_thinking`, a new osmos.json setting; a
+  request's `chat_template_kwargs.preserve_thinking` over it). LFM3's template drops reasoning before the last user
+  message: an agent's tool loop - its reasoning kept through the loop - lost it all at the next user turn, and the
+  whole loop was read again (a 60K session's long wait). After a 4-step loop the next turn read 85 tokens, not
+  3,795. Reinstalling the pack (`osmos_install.py osmos1.7b --rig`) sets it on a row.
+- Measured, no change: prefix reuse in every family (a conversation's follow-up and a restart's slot reuse all of
+  it, the answers a cold read's bits; an edit inside the history reads from the start - reuse goes back to the
+  conversation, a point or a slot, no further). Hy4-flash's decode ~80% of its bandwidth floor (DESIGN.md's
+  0.11.0 requant note; the expert kernels already at their sweep's best).
+
 ## [0.11.2]: the audit - correctness across the engine, its families' shared code, the API and server's edges
 
 A sweep of all of libosmos after six families in a few weeks (DESIGN.md, "0.11.2: the audit"): read-only reviewers by
