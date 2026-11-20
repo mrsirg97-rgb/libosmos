@@ -463,6 +463,8 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
 {
   if (!w || !o || !o->max_ctx || !o->max_tokens)
     return ink2_fail(err, "inkling2: no weights, or max_ctx / max_tokens 0"), NULL;
+  if (w->geo.loop.passes)
+    return ink2_fail(err, "inkling2: a loop (Inkling-2-Mini's): its passes not implemented"), NULL;
   Ink2Forward *f = calloc(1, sizeof *f);
   if (!f)
     return ink2_fail(err, "out of memory"), NULL;
@@ -967,6 +969,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
         GPU(ink2_moe_sum(f->moe, f->ed, f->m_a, f->m_row, K, n, C, NULL) &&
             conv_put(cf, f->moe, n, C, taps, d->ffn_out_conv, 0, NULL, conv_res, conv_scale, f->r, f->h));
     }
+    if (f->tap)
+      f->tap(f->tap_arg, l, "l_out", f->h, n, C);
   }
   pf(PF_MID);
   /* the head: the rows from the prompt's end - 1 on */
@@ -1004,6 +1008,12 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   s->pos += (int32_t)n;
   s->reach = s->reach + n < INK2_MAX_BACK ? s->reach + n : INK2_MAX_BACK;
   return true;
+}
+
+void ink2_forward_tap(Ink2Forward *f, ink2_tap_fn fn, void *arg)
+{
+  if (f)
+    f->tap = fn, f->tap_arg = arg;
 }
 
 bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,

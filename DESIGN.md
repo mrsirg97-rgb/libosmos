@@ -2060,8 +2060,8 @@ each pass of a core layer its own cache slot (KV, the short convolutions' states
 a message from the pass before: message c (q, k, v, ffn) = mix(bank, bank_out, query c) - attn_res's depth attention
 (the operator osmos has) over the previous pass's core blocks after its first and its output, with the layer's four
 queries; then input' = (1 - forget) input + gain message, gate = down(concat(rms(input), rms(message))) (rank 64),
-gain, forget = tanh(their matrices of gate). a sliding layer's attention takes one mixed input (its q's control
-only), a full layer's one each for q, k and v. the four queries a core layer i (from 6): q = loop_res_query[2i], k =
+gain, forget = tanh(their matrices of gate). every core layer's q, k and v inputs controlled each by its own
+message - a sliding layer's too, its three then apart (each through its attn_norm; unlooped they are one). the four queries a core layer i (from 6): q = loop_res_query[2i], k =
 loop_kv_res_query[2i], v = loop_kv_res_query[2i + 1], ffn = loop_res_query[2i + 1] (upstream's converter's order,
 checked: unsloth's tables against upstream's per-layer loop_msg_query, every column equal). unsloth's loop_attn is
 upstream's q controller, loop_mlp its ffn's.

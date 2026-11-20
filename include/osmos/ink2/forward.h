@@ -54,6 +54,12 @@ bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[INK
 bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                char err[INK2_FWD_ERR]);
 const float *ink2_logits(const Ink2Forward *f);
+
+/* the per-slot checks' (oracle/qwen_dump.cpp's l_out-<slot>, upstream llama.cpp's tensors): a tap, when set, gets
+   each cache slot's output - "l_out", the layer's stream after its MoE (its attn_res block's partial: a block's first
+   layer's its own outputs alone), n x n_embd, the GPU's - a step's run of rows at a time */
+typedef void (*ink2_tap_fn)(void *arg, int slot, const char *what, const float *dev, uint32_t n, uint32_t dim);
+void ink2_forward_tap(Ink2Forward *f, ink2_tap_fn fn, void *arg);
 const float *ink2_row_logits(const Ink2Forward *f, uint32_t row);
 bool ink2_kept(const Ink2Forward *f, uint32_t row);
 bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[INK2_FWD_ERR]);

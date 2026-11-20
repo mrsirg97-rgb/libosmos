@@ -9,6 +9,7 @@
 //   QWEN_DUMP_KV=q8_0: the cache in Q8_0 (keys and values; flash attention), as osmos keeps it
 //   QWEN_DUMP_YARN=f: YaRN, factor f over the native context (the model card's static YaRN, original 262,144)
 //   QWEN_DUMP_POS0=p: the tokens at positions p, p + 1, ... (a long context's rotation without its cache)
+//   QWEN_DUMP_LOGITS_LAST=k: the last k rows' logits alone (result_output k rows: a long text's every row's too big)
 //   QWEN_DUMP_LAYER=l: layer l's tensors alone (and those of no layer); I32 ones (indexer_top_k) as F32, exact
 //        sequence, each next token scored by log-softmax in double - tools/bench/q4x_ppl's protocol)
 //
@@ -136,6 +137,8 @@ int main(int argc, char** argv) {
     b.token[i] = ids[i], b.pos[i] = pos0 + i, b.n_seq_id[i] = 1, b.seq_id[i][0] = 0, b.logits[i] = true;
   }
   b.n_tokens = n_tok;
+  if (const char* last = std::getenv("QWEN_DUMP_LOGITS_LAST"); last && !ppl)
+    for (int i = 0; i < n_tok - std::atoi(last); i++) b.logits[i] = false;
   if (llama_decode(ctx, b) != 0) return std::fprintf(stderr, "qwen_dump: decode failed\n"), 1;
   if (ppl) {
     const int V = llama_vocab_n_tokens(vocab);

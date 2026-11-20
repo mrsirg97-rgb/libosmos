@@ -89,6 +89,8 @@ struct Ink2Forward
   uint64_t steps; /* ink2_step's calls: the drafter's taps the last one's, every sequence's in it (Ink2Seq.tap_step) */
   const Ink2Weights *w;
   const Ink2Mtp *mtp; /* the drafter, or NULL */
+  ink2_tap_fn tap;    /* the per-slot checks' (ink2_forward_tap), or NULL */
+  void *tap_arg;
   Ink2MtpDev md;
   uint32_t max_ctx, max_tokens, maxb, vocab;
   Ink2Dev L[INK2_MAX_LAYERS];

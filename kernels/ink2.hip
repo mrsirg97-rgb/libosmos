@@ -678,7 +678,7 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
     return ok();                                                                                                     \
   }
 #define FS(g) FSW(g, 1) FSW(g, 2) FSW(g, 4) FSW(g, 8)
-    FS(1) FS(2) FS(4) FS(6) FS(8)
+    FS(1) FS(2) FS(3) FS(4) FS(6) FS(8)
 #undef FS
 #undef FSW
     return false;
@@ -692,8 +692,8 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
                                                                        pos0, rel_proj, out, 0, nullptr);            \
     return ok();                                                                                                    \
   }
-  FA(1, 1) FA(2, 1) FA(4, 1) FA(6, 1) FA(8, 1) FA(1, 2) FA(2, 2) FA(4, 2) FA(6, 2) FA(8, 2) FA(1, 4) FA(2, 4) FA(4, 4)
-  FA(6, 4)
+  FA(1, 1) FA(2, 1) FA(3, 1) FA(4, 1) FA(6, 1) FA(8, 1) FA(1, 2) FA(2, 2) FA(3, 2) FA(4, 2) FA(6, 2) FA(8, 2) FA(1, 4)
+  FA(2, 4) FA(3, 4) FA(4, 4) FA(6, 4)
 #undef FA
   return false;
 }
