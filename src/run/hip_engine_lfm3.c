@@ -64,7 +64,9 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   if (files->lsa && !(m->lsa = strdup(files->lsa)))
     return fail(err, "out of memory"), m_close(m), NULL;
   const Lfm3Geometry *geo = &m->w->geo;
-  *facts = (OsmosFacts){"lfm3", (uint32_t)geo->n_vocab, geo->native_ctx, LFM3_LOGIT_ROWS, 0, false};
+  /* seed_window: a DFlash2 drafter's context the prompt's last Q4X_DFLASH_WINDOW_MAX positions (its sliding window at
+     most, the loader's check) - 0 left every prompt unseeded, a drafted turn refused (0.11.2) */
+  *facts = (OsmosFacts){"lfm3", (uint32_t)geo->n_vocab, geo->native_ctx, LFM3_LOGIT_ROWS, Q4X_DFLASH_WINDOW_MAX, false};
   return m;
 }
 
