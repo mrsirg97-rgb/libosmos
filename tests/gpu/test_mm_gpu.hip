@@ -88,8 +88,8 @@ constexpr const char* kQwenQ4 = "%s/Models/qwen38/q4kxl-dl/UD-Q4_K_XL/Qwen3.8-Fl
 // Inkling-2-Small's reference (the original weights: /mnt/data/ink2/tools/ink2_ref_gguf.py), a shard alone: the first
 // its dense matrices (BF16) and the NVFP4 experts of layers 0-4, the last the MXFP8 experts of 46-47 - each block's
 // values (a tensor's own scale is its role's, not the matvec's)
-// vibes1.7b (LFM3-1.7B on the Q4_0 grid): a prompt's Q4_0 matrices - the FFN's, the convolution's in, attention's q
-constexpr const char* kVibes = "%s/Models/vibes1.7b/vibes1.7b-Q4_0.gguf";
+// osmos1.7b (LFM3-1.7B on the Q4_0 grid): a prompt's Q4_0 matrices - the FFN's, the convolution's in, attention's q
+constexpr const char* kVibes = "%s/Models/osmos1.7b/osmos1.7b-Q4_0.gguf";
 static const Shape kVibesShapes[] = {{"blk.0.ffn_gate.weight", -1}, {"blk.0.ffn_down.weight", -1},
                                      {"blk.0.shortconv.in_proj.weight", -1}, {"blk.2.attn_q.weight", -1}};
 constexpr const char* kInk1 = "%s/Models/inkling2/ref/ink2-ref-00001-of-00009.gguf";
@@ -446,11 +446,11 @@ int main() {
   }
   std::snprintf(qpath, sizeof qpath, kVibes, std::getenv("HOME") ? std::getenv("HOME") : "");
   if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_create(qpath, err)) {
-    std::printf("  vibes1.7b (Q4_0):\n");
+    std::printf("  osmos1.7b (Q4_0):\n");
     for (const Shape& sh : kVibesShapes) shape(q, sh);
     gguf_destroy(q);
   } else {
-    std::printf("  vibes1.7b's shapes skipped: no %s\n", qpath);
+    std::printf("  osmos1.7b's shapes skipped: no %s\n", qpath);
   }
   for (const auto& m : {std::make_pair(kInk1, std::make_pair(kInk1Shapes, sizeof kInk1Shapes / sizeof *kInk1Shapes)),
                         std::make_pair(kInk9, std::make_pair(kInk9Shapes, sizeof kInk9Shapes / sizeof *kInk9Shapes))}) {

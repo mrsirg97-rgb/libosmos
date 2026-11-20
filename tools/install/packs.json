@@ -196,11 +196,11 @@
     "picks-evo-inkling": {"repo": "mrsirg97-rgb/osmos-evo-inkling",
                           "revision": "9e8b11f080fed8a9fc4213c53cc1117ee63263c3", "path": "picks/osmos-picks.bin",
                           "bytes": 147456, "sha256": "9c136d4387c284c9aa3edb08114ac054727dc98f70be41bfbdd5fc8673c48925"},
-    "vibes1.7b-q4_0": {"repo": "mrsirg97-rgb/vibes1.7b", "revision": "da7e41c80dc8f5cee4f3d06cbb4e04a235926a51",
-                       "path": "vibes1.7b-Q4_0.gguf", "bytes": 1358863808,
-                       "sha256": "c710667d6f63b56d33fe0e9e54df1447feb9d7e0a7d541d1dd40da4dfd58f0d8"},
-    "vibes1.7b-lsa": {"repo": "mrsirg97-rgb/vibes1.7b", "revision": "da7e41c80dc8f5cee4f3d06cbb4e04a235926a51",
-                      "path": "vibes1.7b-lsa-maps.safetensors", "bytes": 787752,
+    "osmos1.7b-q4_0": {"repo": "mrsirg97-rgb/osmos1.7b", "revision": "3049e242f673cf0604426af162b00d16d7bb1834",
+                       "path": "osmos1.7b-Q4_0.gguf", "bytes": 1358863904,
+                       "sha256": "c8c89c351ed8d63a89040d68a8dff58d22932b85ec5ddad135bcf400e1c8c660"},
+    "osmos1.7b-lsa": {"repo": "mrsirg97-rgb/osmos1.7b", "revision": "3049e242f673cf0604426af162b00d16d7bb1834",
+                      "path": "osmos1.7b-lsa-maps.safetensors", "bytes": 787752,
                       "sha256": "3f4afec61cd04fee8943770e7cbf5aa2f6e51a6688927c7872e1d81e6b1080ad"},
     "hy4-q3k-1": {"repo": "AngelSlim/Hy4-flash-GGUF", "revision": "65acb8ae7f59847fe03a17291f1b72b89b141a9e",
                   "path": "Hy4-flash-Q3_K-00001-of-00002.gguf", "bytes": 92010389504,
@@ -212,7 +212,7 @@
                   "path": "model-00148-of-00148.safetensors", "bytes": 1691383434,
                   "sha256": "9e65e4e71345913784004a081ea3831b34d666e46bb6ba36dc3c6d3798b76ac3"}
   },
-  "aliases": {"osmos-evo": "osmos-evo-1017", "osmos-evo-a": "osmos-evo-1017"},
+  "aliases": {"osmos-evo": "osmos-evo-1017", "osmos-evo-a": "osmos-evo-1017", "vibes1.7b": "osmos1.7b"},
   "packs": {
     "osmos-evo-1017": {
       "title": "DeepSeek-V4.1-Flash-1017 osmos-evo-1017 (the default): halfway from UD-IQ1_M's quality to UD-IQ2_XXS's, faster than either, 1M context (shorter: --ctx 512k)", "quality": {"wiki_kld": 0.1578, "agent_kld": 0.0422},
@@ -279,11 +279,11 @@
       "rig": {"id": "inkling-2-small-evo", "max_tokens": 131072, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "high", "aliases": ["inkling"]},
       "settings": {"max_context": 262144, "max_tokens": 4096}
     },
-    "vibes1.7b": {
-      "title": "vibes1.7b (LFM3-1.7B, Q4_0) with latent sparse attention, 512K context",
-      "shards": ["vibes1.7b-q4_0"],
-      "table": null, "picks": null, "drafter": [], "overlay": null, "lsa": "vibes1.7b-lsa",
-      "rig": {"id": "vibes1.7b", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "high"], "effort": "high", "aliases": ["vibes"]},
+    "osmos1.7b": {
+      "title": "osmos1.7b (LFM3-1.7B, Q4_0; was vibes1.7b) with latent sparse attention, 512K context",
+      "shards": ["osmos1.7b-q4_0"],
+      "table": null, "picks": null, "drafter": [], "overlay": null, "lsa": "osmos1.7b-lsa",
+      "rig": {"id": "osmos1.7b", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "high"], "effort": "high", "aliases": ["vibes1.7b", "vibes"]},
       "settings": {"max_context": 524288, "max_tokens": 4096}
     },
     "hy4-flash": {

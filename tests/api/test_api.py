@@ -1143,12 +1143,12 @@ class InklingApi(Served, unittest.TestCase):
         self.assertEqual(json.loads(r.read())["choices"][0]["message"]["content"], "Use<|end_message|>.")
 
 
-LFM3 = os.environ.get("OSMOS_TEST_LFM3") or os.path.expanduser("~/Models/vibes1.7b/vibes1.7b-Q4_0.gguf")
+LFM3 = os.environ.get("OSMOS_TEST_LFM3") or os.path.expanduser("~/Models/osmos1.7b/osmos1.7b-Q4_0.gguf")
 
 
-@unittest.skipUnless(os.path.exists(LFM3), "no vibes1.7b Q4_0 (the tokenizer's)")
+@unittest.skipUnless(os.path.exists(LFM3), "no osmos1.7b Q4_0 (the tokenizer's)")
 class Lfm3Api(Served, unittest.TestCase):
-    """LFM3's dialect (vibes1.7b): its template has no effort levels - thinking on or off; rig's row sends "high" (on)
+    """LFM3's dialect (osmos1.7b): its template has no effort levels - thinking on or off; rig's row sends "high" (on)
     or "none" (off), any other level refused, not dropped"""
     model = LFM3
 

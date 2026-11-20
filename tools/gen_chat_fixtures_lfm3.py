@@ -1,4 +1,4 @@
-"""tests/fixtures/chat_lfm3.jsonl: LFM3's own chat template (tokenizer.chat_template in vibes1.7b's GGUF: LiquidAI's
+"""tests/fixtures/chat_lfm3.jsonl: LFM3's own chat template (tokenizer.chat_template in osmos1.7b's GGUF: LiquidAI's
 LFM3-1.7B's chat_template.jinja) as transformers renders it - jinja2's sandbox with trim_blocks, lstrip_blocks,
 loopcontrols, its tojson (json.dumps, ensure_ascii False), {% generation %} (transformers' assistant-mask tag: a block
 that renders its body) - over chats chosen to cross the template's branches: a leading system message and one later,

@@ -276,7 +276,7 @@ int main() {
   prompt(700, 300, 0, 0);
   prompt(5000, 64, 256, 256 + 64 + 8);
   prompt(LFM3_ATTN_LONG - 64, 64, 0, 0);
-  lists(20000, 64);  // a 2M context's last keys (vibes1.7b's pack: past Qwen's 1M)
+  lists(20000, 64);  // a 2M context's last keys (osmos1.7b's pack: past Qwen's 1M)
   std::printf("[test_lfm3_attn_gpu] ok\n");
   return 0;
 }

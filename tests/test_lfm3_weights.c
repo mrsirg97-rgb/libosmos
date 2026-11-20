@@ -1,8 +1,8 @@
-/* LFM3's weights (osmos/lfm3/forward.h) on vibes1.7b's Q4_0 and BF16 files: the geometry its metadata says, each
+/* LFM3's weights (osmos/lfm3/forward.h) on osmos1.7b's Q4_0 and BF16 files: the geometry its metadata says, each
    layer's kind its tensors, every matrix the file's one type; then the Q4_0 file edited in memory - another
    architecture, a role's tensor missing, of another shape or type, one matrix of another type than the rest, a
    convolution past the kernel's taps, a layer the metadata calls a convolution with attention's tensors - each
-   refused, its cause named. OSMOS_TEST_LFM3 / OSMOS_TEST_LFM3_BF16 (default ~/Models/vibes1.7b's); skipped without
+   refused, its cause named. OSMOS_TEST_LFM3 / OSMOS_TEST_LFM3_BF16 (default ~/Models/osmos1.7b's); skipped without
    (said, then 0) */
 #include <assert.h>
 #include <math.h>
@@ -13,8 +13,8 @@
 #include "osmos/lfm3/forward.h"
 #include "osmos/model/gguf.h"
 
-#define Q4_0_FILE "Models/vibes1.7b/vibes1.7b-Q4_0.gguf"
-#define BF16_FILE "Models/vibes1.7b/vibes1.7b-BF16.gguf"
+#define Q4_0_FILE "Models/osmos1.7b/osmos1.7b-Q4_0.gguf"
+#define BF16_FILE "Models/osmos1.7b/osmos1.7b-BF16.gguf"
 #define T_F32 0
 #define T_Q4_0 2
 #define T_Q8_0 8
