@@ -45,5 +45,16 @@ typedef struct OsmosFamily
 /* a sequence's family half (a family's batch reads its sequences' through it) */
 void *oseq_impl(const OsmosSeq *s);
 
+/* the families' shared glue (hip_engine_runs.c). a batch's runs: osmos_runs_consecutive - every sequence's tokens
+   together (false with why: "a sequence's tokens not consecutive in the batch"); osmos_runs - from token at, the
+   next OSMOS_FAMILY_RUNS runs at most (each a sequence's consecutive tokens: first[r] its first, len[r] its count),
+   their count in *runs, the tokens they take returned (n - at when every run fit). a family's step its own: refused
+   past its runs, or split over several steps (q4x's). osmos_gpu_room: hipMemGetInfo's free bytes */
+#define OSMOS_FAMILY_RUNS 64 /* every family's step's sequences at most (LFM3_MAX_RUNS, Q4X_MAX_RUNS, ...) */
+bool osmos_runs_consecutive(OsmosSeq *const *seqs, uint32_t n, char err[OSMOS_ERR]);
+uint32_t osmos_runs(OsmosSeq *const *seqs, uint32_t n, uint32_t at, uint32_t first[OSMOS_FAMILY_RUNS],
+                    uint32_t len[OSMOS_FAMILY_RUNS], uint32_t *runs);
+bool osmos_gpu_room(uint64_t *bytes);
+
 extern const OsmosFamily osmos_ds4, osmos_q4x, osmos_ink2, osmos_q35, osmos_lfm3, osmos_hy4;
 

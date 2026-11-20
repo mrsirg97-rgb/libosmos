@@ -108,11 +108,7 @@ static uint64_t e_identity(const void *p) { return hy4_identity(((const Eng *)p)
 static bool e_room(const void *p, uint64_t *bytes)
 {
   (void)p;
-  size_t free_b = 0, total = 0;
-  if (hipMemGetInfo(&free_b, &total) != hipSuccess)
-    return false;
-  *bytes = free_b;
-  return true;
+  return osmos_gpu_room(bytes);
 }
 
 static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
@@ -120,24 +116,18 @@ static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
 /* the batch's sequences one step (each one's consecutive tokens a run), HY4_MAX_RUNS at a time */
 static bool batch(Eng *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, bool read, char err[OSMOS_ERR])
 {
-  for (uint32_t i = 0; i < n; i++)
-    for (uint32_t j = 0; j < i; j++)
-      if (seqs[j] == seqs[i] && seqs[i - 1] != seqs[i])
-        return fail(err, "a sequence's tokens not consecutive in the batch");
+  _Static_assert(HY4_MAX_RUNS == OSMOS_FAMILY_RUNS, "a step's runs the engine's");
+  if (!osmos_runs_consecutive(seqs, n, err))
+    return false;
   Hy4Seq *run[HY4_MAX_RUNS];
-  uint32_t len[HY4_MAX_RUNS];
+  uint32_t first[HY4_MAX_RUNS], len[HY4_MAX_RUNS], runs;
   for (uint32_t at = 0; at < n;)
   {
-    uint32_t runs = 0, k = 0;
-    for (; at + k < n && runs < HY4_MAX_RUNS; runs++)
-    {
-      uint32_t m = 1;
-      while (at + k + m < n && seqs[at + k + m] == seqs[at + k])
-        m++;
-      run[runs] = oseq_impl(seqs[at + k]), len[runs] = m, k += m;
-    }
+    const uint32_t k = osmos_runs(seqs, n, at, first, len, &runs);
     if (at + k < n)
       return fail(err, "hy_v4_flash: a batch past HY4_MAX_RUNS sequences"); /* its logits one step's: never split */
+    for (uint32_t r = 0; r < runs; r++)
+      run[r] = oseq_impl(seqs[first[r]]);
     if (!(read ? hy4_step_read : hy4_step_runs)(e->f, run, len, runs, tokens + at, err))
       return false;
     at += k;

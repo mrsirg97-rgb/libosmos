@@ -191,10 +191,10 @@ static uint64_t e_identity(const void *p) { return ink2_identity(((const Eng *)p
    in the GPU's free count (DeepSeek's forward_room) */
 static bool e_room(const void *p, uint64_t *bytes)
 {
-  size_t free_b = 0, total = 0;
-  if (hipMemGetInfo(&free_b, &total) != hipSuccess)
+  uint64_t free_b = 0;
+  if (!osmos_gpu_room(&free_b))
     return false;
-  *bytes = fit_room((uint64_t)free_b, fit_ram_available(), ((const Eng *)p)->ram_kept);
+  *bytes = fit_room(free_b, fit_ram_available(), ((const Eng *)p)->ram_kept);
   return true;
 }
 
@@ -204,23 +204,17 @@ static void e_stats(const void *p, OsmosStats *s) { s->budget = ink2_forward_byt
    met again after another's refused */
 static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {
+  _Static_assert(INK2_MAX_RUNS == OSMOS_FAMILY_RUNS, "a step's runs the engine's");
   Eng *e = p;
   e->n = 0;
-  for (uint32_t i = 0; i < n; i++)
-    for (uint32_t j = 0; j < i; j++)
-      if (seqs[j] == seqs[i] && seqs[i - 1] != seqs[i])
-        return fail(err, "a sequence's tokens not consecutive in the batch");
+  if (!osmos_runs_consecutive(seqs, n, err))
+    return false;
   Ink2Seq *run[INK2_MAX_RUNS];
-  uint32_t len[INK2_MAX_RUNS], runs = 0;
-  for (uint32_t at = 0; at < n; runs++) /* the runs counted before any step: a batch of more is refused whole */
-  {
-    if (runs == INK2_MAX_RUNS)
-      return fail(err, "inkling2: a batch of more than INK2_MAX_RUNS sequences");
-    uint32_t m = 1;
-    while (at + m < n && seqs[at + m] == seqs[at])
-      m++;
-    run[runs] = oseq_impl(seqs[at]), len[runs] = m, at += m;
-  }
+  uint32_t first[INK2_MAX_RUNS], len[INK2_MAX_RUNS], runs;
+  if (osmos_runs(seqs, n, 0, first, len, &runs) < n) /* the runs counted before any step: a batch of more refused whole */
+    return fail(err, "inkling2: a batch of more than INK2_MAX_RUNS sequences");
+  for (uint32_t r = 0; r < runs; r++)
+    run[r] = oseq_impl(seqs[first[r]]);
   const double t0 = rp_on() ? now_s() : 0;
   if (!n || !ink2_step(e->f, run, len, runs, tokens, err))
     return n ? false : fail(err, "an empty batch");

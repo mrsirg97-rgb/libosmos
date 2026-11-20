@@ -116,11 +116,7 @@ static uint64_t e_identity(const void *p) { return q4x_identity(((const Eng *)p)
 static bool e_room(const void *p, uint64_t *bytes)
 {
   (void)p;
-  size_t free_b = 0, total = 0;
-  if (hipMemGetInfo(&free_b, &total) != hipSuccess)
-    return false;
-  *bytes = free_b;
-  return true;
+  return osmos_gpu_room(bytes);
 }
 
 static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
@@ -129,24 +125,18 @@ static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
    sequence met again after another's refused */
 static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {
+  _Static_assert(Q4X_MAX_RUNS == OSMOS_FAMILY_RUNS, "a step's runs the engine's");
   Eng *e = p;
   e->n = 0;
-  for (uint32_t i = 0; i < n; i++)
-    for (uint32_t j = 0; j < i; j++)
-      if (seqs[j] == seqs[i] && seqs[i - 1] != seqs[i])
-        return fail(err, "a sequence's tokens not consecutive in the batch");
+  if (!osmos_runs_consecutive(seqs, n, err))
+    return false;
   Q4xSeq *run[Q4X_MAX_RUNS];
-  uint32_t len[Q4X_MAX_RUNS];
-  for (uint32_t at = 0; at < n;)
+  uint32_t first[Q4X_MAX_RUNS], len[Q4X_MAX_RUNS], runs;
+  for (uint32_t at = 0; at < n;) /* past Q4X_MAX_RUNS sequences: several steps */
   {
-    uint32_t runs = 0, k = 0;
-    for (; at + k < n && runs < Q4X_MAX_RUNS; runs++)
-    {
-      uint32_t m = 1;
-      while (at + k + m < n && seqs[at + k + m] == seqs[at + k])
-        m++;
-      run[runs] = oseq_impl(seqs[at + k]), len[runs] = m, k += m;
-    }
+    const uint32_t k = osmos_runs(seqs, n, at, first, len, &runs);
+    for (uint32_t r = 0; r < runs; r++)
+      run[r] = oseq_impl(seqs[first[r]]);
     if (!q4x_step(e->f, run, len, runs, tokens + at, at, err))
     {
       for (uint32_t i = 0; i < at; i++) /* the steps before it advanced theirs: their tokens never fed again */
