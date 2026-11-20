@@ -14,7 +14,7 @@
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
    --no-guess: no experts guessed a layer ahead (OsmosOptions' no_guess - a model whose misses are few).
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
-   --lsa: latent sparse attention's maps (LFM3's: vibes1.7b-lsa-maps.safetensors) - a decode's full layers read them.
+   --lsa: latent sparse attention's maps (LFM3's: osmos1.7b-lsa-maps.safetensors) - a decode's full layers read them.
    --stream-ngram: Qwen's n-gram table (per_layer_token_embd) read from its file each step, not held in GPU memory
    (Q4xOptions' stream_ngram: the same bits, its 26.8 GiB of UD-IQ3_XXS left free); DeepSeek's Engram always is.
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).

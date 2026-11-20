@@ -117,10 +117,9 @@ static bool in(GgufMeta *m, const char *key, int lo, int hi, const char *why, in
   return true;
 }
 
-static bool geometry(const Gguf *gg, const Q4xWeights *w, Q4xDflashGeometry *g, char *err)
+static bool geometry(const Gguf *gg, const Q4xDflashTarget *t, Q4xDflashGeometry *g, char *err)
 {
   GgufMeta m = {gg, err, NULL, 0};
-  const Q4xGeometry *t = &w->geo;
   int embd = 0, vocab = 0, target_layers = 0, kernel = 0;
   if (!meta_text_is(&m, "general.architecture", "dflash2"))
     return false;
@@ -163,6 +162,14 @@ static bool geometry(const Gguf *gg, const Q4xWeights *w, Q4xDflashGeometry *g, 
 }
 
 Q4xDflash *q4x_dflash_create(const Gguf *g, const Q4xWeights *target, char err[Q4X_ERR])
+{
+  if (!target)
+    return fail(err, "q4x_dflash_create", "no drafter or no target"), NULL;
+  const Q4xDflashTarget t = {target->geo.n_embd, target->geo.n_vocab, target->geo.n_layers};
+  return q4x_dflash_create_for(g, &t, err);
+}
+
+Q4xDflash *q4x_dflash_create_for(const Gguf *g, const Q4xDflashTarget *target, char err[Q4X_ERR])
 {
   if (!g || !target)
     return fail(err, "q4x_dflash_create", "no drafter or no target"), NULL;

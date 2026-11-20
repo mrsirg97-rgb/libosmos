@@ -245,9 +245,13 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   ok = ok && hipMemcpyAsync(f->tok, f->pin_tok, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             ops_embed(f->w->embd->type, lfm3_dev(f, f->w->embd), D, f->tok, n, 1, f->h, f->st) &&
             ops_rms(f->h, D, D, lfm3_fv(f, f->w->layer[0].attn_norm), g->rms_eps, n, f->xn, D, f->st);
+  const uint64_t T = f->df ? (uint64_t)f->df->geo.n_taps * D : 0; /* a token's taps (the drafter's) */
   for (int l = 0; ok && l < g->n_layers; l++)
   {
     ok = layer(f, run, runs, l, n, read);
+    if (ok && f->df && f->tap_of[l] >= 0) /* the drafter's feature: the layer's output, every row of the step */
+      ok = hipMemcpy2DAsync(f->taps + (uint64_t)f->tap_of[l] * D, T * F, f->h, (uint64_t)D * F, (uint64_t)D * F, n,
+                            hipMemcpyDeviceToDevice, (hipStream_t)f->st) == hipSuccess;
     if (ok && f->tap && (ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess))
       f->tap(f->tap_arg, l, "residual", f->h, n, D);
   }
@@ -272,9 +276,11 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
     return lfm3_fail(err, over ? "an activation past f16's range in a read (the step refused)"
                                : "a GPU call failed in the step (its sequences refused until a load)");
   }
+  f->steps++;
   for (uint32_t r = 0; r < runs; r++)
   {
     Lfm3Seq *s = run[r].s;
+    s->step_pos0 = s->pos, s->step_t0 = run[r].off, s->step_n = run[r].len, s->step_id = f->steps; /* its taps' rows */
     s->pos += (int32_t)run[r].len, s->cur = (s->cur + run[r].len) % LFM3_CONV_SLOTS;
     if (f->lsa)
       s->closed = (uint32_t)s->pos / LSA_WINDOW; /* every full layer's blocks closed to here (lsa_attention's) */

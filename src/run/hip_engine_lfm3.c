@@ -6,11 +6,15 @@
 #include "engine_impl.h"
 #include "osmos/lfm3/forward.h"
 #include "osmos/model/gguf.h"
+#include "osmos/q4x/dflash.h"
 
-/* LiquidAI's LFM3 (lfm3: vibes1.7b) behind the engine: every weight resident, lfm3's sequence (DESIGN.md, "LFM3 step
+/* LiquidAI's LFM3 (lfm3: osmos1.7b) behind the engine: every weight resident, lfm3's sequence (DESIGN.md, "LFM3 step
    2"). a batch is a decode's math, a prompt's read the matrix cores' (two maths, as q35's and hy4's), each a token's
-   bits however its step is split or shared; the logits of the kept rows alone. no drafter yet: block 0 */
+   bits however its step is split or shared; the logits of the kept rows alone. its drafter o->drafter's GGUF, a
+   DFlash2 (lfm3_dflash_*: q4x's drafter on LFM3's taps), or none: block 0 */
 _Static_assert(LFM3_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
+_Static_assert(Q4X_DFLASH_BLOCK_MAX - 1 <= OSMOS_MAX_BLOCK, "a DFlash block's drafts within the engine's");
+_Static_assert(OSMOS_ERR >= Q4X_ERR, "the drafter's loader's errors in the engine's buffer");
 _Static_assert(OSMOS_ERR >= LFM3_ERR && OSMOS_ERR >= GGUF_ERR, "one error buffer for the engine and the family's calls");
 
 /* a step's most tokens when the server names none (a prompt's chunk), and a round's most kept rows */
@@ -27,6 +31,8 @@ typedef struct Model
 typedef struct Eng
 {
   Lfm3Forward *f;
+  Gguf *dg;      /* the drafter's file, or NULL */
+  Q4xDflash *df; /* its DFlash2, or NULL */
 } Eng;
 
 static bool fail(char err[OSMOS_ERR], const char *what)
@@ -68,6 +74,8 @@ static void e_destroy(void *p)
   if (!e)
     return;
   lfm3_forward_destroy(e->f);
+  q4x_dflash_destroy(e->df);
+  gguf_destroy(e->dg);
   free(e);
 }
 
@@ -76,13 +84,23 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   const Model *m = pm;
   if (o->budget || o->picks || o->no_guess || o->npu)
     return fail(err, "lfm3: every weight resident - no budget, picks, no_guess or NPU"), NULL;
-  if (o->drafter)
-    return fail(err, "lfm3: no drafter yet"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;
+  if (o->drafter)
+  {
+    if (!(e->dg = gguf_create(o->drafter, err)))
+      return e_destroy(e), NULL;
+    const GgufKv *arch = gguf_kv(e->dg, "general.architecture");
+    if (!arch || arch->type != GGUF_STRING || strcmp(arch->v.s, "dflash2"))
+      return fail(err, "lfm3: a drafter not a DFlash2 (general.architecture dflash2)"), e_destroy(e), NULL;
+    const Lfm3Geometry *geo = &m->w->geo;
+    const Q4xDflashTarget t = {geo->n_embd, geo->n_vocab, geo->n_layers};
+    if (!(e->df = q4x_dflash_create_for(e->dg, &t, err)))
+      return e_destroy(e), NULL;
+  }
   const uint32_t steps = o->max_tokens ? o->max_tokens : LFM3_STEP_TOKENS;
-  const Lfm3Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa, 0, NULL, 0, 0, 0};
+  const Lfm3Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa, 0, NULL, 0, 0, 0, e->df};
   if (!(e->f = lfm3_forward_create(m->w, &ho, err)))
     return e_destroy(e), NULL;
   return e;
@@ -149,8 +167,8 @@ static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char e
 
 static uint32_t e_block(const void *p)
 {
-  (void)p;
-  return 0;
+  const Eng *e = p;
+  return e->df ? (uint32_t)e->df->geo.block - 1 : 0;
 }
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return lfm3_seq_create(((Eng *)p)->f, err); }
@@ -173,15 +191,15 @@ static bool s_load_from(void *s, uint64_t bytes, StateSource src, void *ctx, cha
 
 static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
-  (void)p, (void)s, (void)from, (void)to, (void)err;
-  return true; /* no drafter: nothing to seed */
+  Eng *e = p;
+  return !e->df || lfm3_dflash_seed(e->f, s, from, to, err); /* no drafter: nothing to seed */
 }
 
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                    char err[OSMOS_ERR])
 {
-  (void)p, (void)s, (void)y, (void)conf_min, (void)cum_min, (void)drafts, (void)conf, (void)err;
-  return 0; /* no drafter: no drafts */
+  Eng *e = p;
+  return e->df ? lfm3_dflash_draft(e->f, s, y, e_block(e), conf_min, cum_min, drafts, conf, err) : 0;
 }
 
 const OsmosFamily osmos_lfm3 = {

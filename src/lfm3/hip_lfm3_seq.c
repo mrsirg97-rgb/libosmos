@@ -37,6 +37,9 @@ Lfm3Seq *lfm3_seq_create(Lfm3Forward *f, char err[LFM3_ERR])
            lfm3_alloc(&s->mem[l], blocks * LSA_BUCKETS * LSA_CAP * 4);
     }
   }
+  const uint64_t ring = f->df ? (uint64_t)f->df_ring * f->df->geo.n_kv_heads * f->df->geo.head_dim * F : 0;
+  for (int l = 0; ok && f->df && l < f->df->geo.n_layers; l++) /* the drafter's rings (its context's keys, values) */
+    ok = lfm3_alloc(&s->dk[l], ring) && lfm3_alloc(&s->dv[l], ring);
   if (!ok)
     return lfm3_seq_destroy(s), lfm3_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
@@ -49,6 +52,8 @@ void lfm3_seq_destroy(Lfm3Seq *s)
   for (int l = 0; l < LFM3_MAX_LAYERS; l++)
     hipFree(s->conv[l]), hipFree(s->kc[l]), hipFree(s->vc[l]), hipFree(s->ik[l]), hipFree(s->cent[l]),
         hipFree(s->mem[l]);
+  for (int l = 0; l < Q4X_DFLASH_MAX_LAYERS; l++)
+    hipFree(s->dk[l]), hipFree(s->dv[l]);
   free(s);
 }
 
@@ -79,6 +84,8 @@ bool lfm3_seq_rollback(Lfm3Seq *s, uint32_t n)
   if (!s || s->broken || n > lfm3_seq_reach(s))
     return false;
   s->pos -= (int32_t)n, s->back -= n, s->cur = (s->cur + LFM3_CONV_SLOTS - n) % LFM3_CONV_SLOTS;
+  if (s->df_pos > s->pos) /* the drafter's context past the position dropped (its rows written again when fed) */
+    s->df_pos = s->pos, s->df_lo = s->df_lo < s->df_pos ? s->df_lo : s->df_pos;
   return true;
 }
 
@@ -159,7 +166,7 @@ bool lfm3_seq_save_to(const Lfm3Seq *s, StateSink sink, void *ctx, char err[LFM3
 static bool refuse(Lfm3Seq *s, char *err, const char *why)
 {
   s->pos = 0, s->back = 0, s->prompt_end = 0, s->cur = 0, s->closed = 0, s->broken = false; /* empty */
-  s->stage = 0, s->turned = 0;
+  s->stage = 0, s->turned = 0, s->step_n = 0, s->df_lo = s->df_pos = 0; /* no step to seed from, no context */
   const Lfm3Geometry *g = &s->f->w->geo;
   for (int l = 0; l < g->n_layers; l++)
     if (g->kind[l] == LFM3_CONV)
@@ -188,5 +195,6 @@ bool lfm3_seq_load_from(Lfm3Seq *s, uint64_t bytes, StateSource src, void *ctx, 
     return refuse(s, err, why);
   s->pos = h.pos, s->back = 0, s->prompt_end = 0, s->cur = 0, s->closed = h.closed, s->broken = false;
   s->stage = h.stage, s->turned = 0;
+  s->step_n = 0, s->df_lo = s->df_pos = s->pos; /* the drafter's rings not the state's: its context starts here */
   return true;
 }

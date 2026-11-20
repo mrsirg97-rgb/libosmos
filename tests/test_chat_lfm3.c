@@ -6,7 +6,7 @@
 #include "osmos/text/chat_lfm3.h"
 #include "osmos/text/json.h"
 
-/* LFM3's chat template against its own (tests/fixtures/chat_lfm3.jsonl: jinja2 over vibes1.7b's GGUF's template,
+/* LFM3's chat template against its own (tests/fixtures/chat_lfm3.jsonl: jinja2 over osmos1.7b's GGUF's template,
    as transformers renders it - tools/gen_chat_fixtures_lfm3.py): each chat's prompt byte for byte or its refusal
    (the template's, and osmos's: images, videos, tool-search forms); each completion's parse the same message (its
    JSON as Python writes it) or its refusal - each last assistant turn the template renders read back to its message */

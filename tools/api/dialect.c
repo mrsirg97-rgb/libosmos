@@ -138,7 +138,7 @@ static const Dialect kDialects[] = {
        messages (the first one alone, not merged) and "high" effort (not raised to "xhigh") */
     {"qwen35", QCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, qchat_refused, request_qwen, qwen_render, qwen_parse,
      qwen_drops, QCHAT_THINK_END, NULL, NULL, NULL},
-    /* LFM3's (vibes1.7b): ChatML with <think>, Qwen3.5's calls - its template drops reasoning before the last user
+    /* LFM3's (osmos1.7b): ChatML with <think>, Qwen3.5's calls - its template drops reasoning before the last user
        message unless preserve_thinking (the request's, off unless true: the template's default) */
     {"lfm3", LCHAT_EOS, QCHAT_THINK_END, QCHAT_CALL_OPEN, true, lchat_refused, request_lfm3, lfm3_render, lfm3_parse,
      qwen_drops, QCHAT_THINK_END, NULL, NULL, NULL},

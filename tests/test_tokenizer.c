@@ -227,7 +227,7 @@ int main(void)
   }
   else
     printf("  Inkling skipped: no Inkling-2-Small UD-IQ1_S first shard\n");
-  t = of("vibes1.7b/vibes1.7b-Q4_0.gguf");
+  t = of("osmos1.7b/osmos1.7b-Q4_0.gguf");
   if (t)
   {
     const int32_t im_end = tokenizer_find(t, "<|im_end|>");
@@ -241,7 +241,7 @@ int main(void)
     printf("  LFM3's (lfm2): %d cases, every id its checkpoint's tokenizer.json's, every case's pieces its bytes\n", n);
   }
   else
-    printf("  LFM3 skipped: no vibes1.7b Q4_0 file\n");
+    printf("  LFM3 skipped: no osmos1.7b Q4_0 file\n");
   t = of("hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf");
   if (t)
   {

@@ -1,5 +1,5 @@
 // lfm3_shortconv (osmos/gpu/lfm3_ops.h): LFM3's short convolution between its projections - C * conv(B * x), 7 taps,
-// no activation - against a double-precision reference with a state before the step, at vibes1.7b's width (2,048);
+// no activation - against a double-precision reference with a state before the step, at osmos1.7b's width (2,048);
 // a step split in two the same bits and the same states; the ring's slots each token's state (a rollback's); refusals
 #include <hip/hip_runtime.h>
 

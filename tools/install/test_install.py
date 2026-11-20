@@ -69,11 +69,12 @@ class Manifest(unittest.TestCase):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertEqual(set(m["packs"]), {"osmos-evo-1017", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
-                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "vibes1.7b", "hy4-flash"})  # 0.6.10: one Qwen context, 512K - no 1M pack
-        v = m["packs"]["vibes1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 512K (its needles: DESIGN.md, "rope")
-        self.assertEqual((v["lsa"], v["settings"]), ("vibes1.7b-lsa", {"max_context": 524288, "max_tokens": 4096}))
+                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "osmos1.7b", "hy4-flash"})  # 0.6.10: one Qwen context, 512K - no 1M pack
+        v = m["packs"]["osmos1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 512K (its needles: DESIGN.md, "rope")
+        self.assertEqual((v["lsa"], v["settings"]), ("osmos1.7b-lsa", {"max_context": 524288, "max_tokens": 4096}))
         self.assertEqual((v["rig"]["efforts"], v["rig"]["effort"]), (["none", "high"], "high"))  # thinking off, on
-        self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/vibes1.7b"})
+        self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/osmos1.7b"})
+        self.assertEqual((manifest.pack_id(m, "vibes1.7b"), v["rig"]["aliases"]), ("osmos1.7b", ["vibes1.7b", "vibes"]))  # 0.11.1: renamed
         h = m["packs"]["hy4-flash"]  # 0.11.0: AngelSlim's Q3_K (the Engram table its shard 2), Tencent's own DFly2
         self.assertEqual((h["drafter"], h["drafter_kind"], h["table"]), (["hy4-dfly2"], "dfly", None))
         self.assertEqual({m["files"][f]["repo"] for f in h["shards"]}, {"AngelSlim/Hy4-flash-GGUF"})
@@ -1265,7 +1266,7 @@ class Rig(unittest.TestCase):
                                "ud-iq1_m": "deepseek-1017-ud-m",
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
                                "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l",
-                           "osmos-evo-inkling": "inkling-2-small-evo", "vibes1.7b": "vibes1.7b",
+                           "osmos-evo-inkling": "inkling-2-small-evo", "osmos1.7b": "osmos1.7b",
                        "hy4-flash": "hy4-flash"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
         self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'

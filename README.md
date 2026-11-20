@@ -1,6 +1,6 @@
 # libosmos
 
-An inference engine for three big mixture-of-experts models, and one small long-context one, on one **AMD Strix Halo**
+An inference engine for four big mixture-of-experts models, and one small long-context one, on one **AMD Strix Halo**
 (Ryzen AI MAX+ 395, Radeon 8060S / gfx1151, 128 GB):
 
 - **DeepSeek-V4.1-Flash** (~768B parameters, ~250 GB quantized), more than fits in memory: the experts it needs are
@@ -8,7 +8,9 @@ An inference engine for three big mixture-of-experts models, and one small long-
 - **Qwen3.8-Flash-Next** (~177B, 512 experts, the Qwen4 architecture's preview), fully resident in GPU memory.
 - **Inkling-2-Small** (Thinking Machines; 384 experts a layer, a 158 GB pack), its experts streamed from the SSD beside
   the ~84 GB osmos keeps in memory, drafted by its own multi-token-prediction head.
-- **vibes1.7b** (LFM3-1.7B, 1.36 GB in Q4_0), its full-attention layers reading a 512K context through latent sparse
+- **Hy4-flash** (Tencent; 220B, ~11B active a token, AngelSlim's Q3_K), its backbone in GPU memory and its 63 GB
+  Engram table read from the SSD, drafted by the release's own DFly2, to a 1M context.
+- **osmos1.7b** (LFM3-1.7B, 1.36 GB in Q4_0), its full-attention layers reading a 512K context through latent sparse
   attention: prompts at thousands of tokens a second, each token's attention ~4,600 keys however long the context.
 
 **The same input gives the same output, bit for bit**, however it runs: alone or batched with other conversations,
@@ -41,7 +43,7 @@ pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on the
   `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
   `deepseek-1017-evo`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS), `qwen3.8-flash-next`
-  (`-l`: UD-Q4_K_XL), `inkling-2-small-evo`, `vibes1.7b` or `hy4-flash` - its row on this version's release, built under
+  (`-l`: UD-Q4_K_XL), `inkling-2-small-evo`, `osmos1.7b` or `hy4-flash` - its row on this version's release, built under
   `~/.local/share/osmos/<version>` (so `--upgrade` moves it later; `--rig-dev`: this checkout's own build, to test a
   branch).
 
@@ -62,7 +64,7 @@ A running row takes the new version at its next start.
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
 header - turns since the last tool call, the most repeated recent call, orphaned calls and results (a client's
 history compaction can drop one side), and `stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
-true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling 256K, vibes1.7b 512K), or
+true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling 256K, Hy4-flash 1M, osmos1.7b 512K), or
 `--ctx` (installer or osmos-api: `512k`, `1m`, ...).
 
 ## The packs
@@ -76,7 +78,7 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 | `qwen38-ud-iq3_xxs` | 84 GB + 3 GB MTP head | 512K | Qwen, fully in GPU memory |
 | `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant: slower than UD-IQ3_XXS, no better perplexity on our text |
 | `osmos-evo-inkling` | 158 GB (unsloth's UD-IQ1_S files + a 55.5 GB delta in two parts, made where you install it) + 1.3 GB drafter | 256K | Inkling-2-Small: UD-IQ1_S with its experts' down projections IQ2_S / IQ3_XXS and its attention and head Q5_K |
-| `vibes1.7b` | 1.36 GB + 0.8 MB of LSA maps | 512K | a small, fast agent model: LFM3-1.7B, its long contexts read sparse |
+| `osmos1.7b` | 1.36 GB + 0.8 MB of LSA maps | 512K | a small, fast agent model: LFM3-1.7B, its long contexts read sparse (`vibes1.7b`: its old name) |
 | `hy4-flash` | 92 GB (~79 GiB in GPU memory) + 63 GB Engram table + 1.7 GB DFly2 drafter | 1M | Tencent's Hy4-flash: 220B, ~11B active a token, its own drafter - AngelSlim's Q3_K |
 
 ## osmos-evo-1017 in numbers
@@ -151,27 +153,29 @@ experts (61%) stay in memory and the rest stream from the SSD; a full-attention 
 values Q5 (KL +0.001 against f16), so a 256K context's cache is 3.5 GB. Drafted runs vary by about ±8% from run to
 run at the same acceptance (which experts are resident when); plain decode and prompts within ~2%.
 
-## vibes1.7b in numbers
+## osmos1.7b in numbers
 
-LFM3-1.7B (Liquid's hybrid: 13 short-convolution, 5 sliding and 6 full-attention layers) in Q4_0, its full layers
-reading through its latent sparse attention maps - a token's read its 1,024 best buckets of the closed 512-key
-blocks, then the window and the sinks: ~4,600 keys, however long the context. osmos 0.10.0, the `performance` profile,
-one conversation:
+[osmos1.7b](https://huggingface.co/mrsirg97-rgb/osmos1.7b) (vibes1.7b until 0.11.1): LFM3-1.7B (Liquid's hybrid: 13
+short-convolution, 5 sliding and 6 full-attention layers) fine-tuned on 32K-token examples and trained on the Q4_0 grid
+it ships in, its full layers reading through its latent sparse attention maps - a token's read its 1,024 best buckets
+of the closed 512-key blocks, then the window and the sinks: ~4,600 keys, however long the context. osmos 0.11.1, the
+`performance` profile, one conversation:
 
 | | |
 | --- | ---: |
 | Decode, a short context | **153** tok/s |
-| Decode at 128K / 512K | 100 / 84 tok/s |
-| Prompt, 2K / 32K / 128K / 512K tokens | **6,593** / 5,140 / 3,631 / 3,170 tok/s |
-| A code placed at 10 / 50 / 90% of a 131K and a 524K prompt (source code), asked at its end | 6 of 6 |
-| KL against Liquid's reference (2,048 and 24,576 tokens) | 2e-5, 4e-5 (top-1 63/64, 64/64) |
+| Decode at 32K / 128K / 512K | 100 / 97 / 85 tok/s |
+| Prompt, 2K / 32K / 128K / 512K tokens | **6,479** / 3,948 / 3,591 / 3,128 tok/s |
+| A code placed at 10 / 50 / 90% of a 524K prompt (source code), asked at its end | 3 of 3 |
+| The same at 10 / 30 / 50 / 70 / 90% of a 1.04M prompt (`--ctx 1m`) | 4 of 5 |
+| KL against Liquid's reference (64 / 2,048 / 24,576 tokens) | 3.1e-5 / 2.0e-5 / 3.2e-5 (top-1 63, 64, 64 of 64) |
 
-The pack is 512K: past it the model does not find what it read (a code ~940K tokens back: an invented answer); the
-forward runs to 2M (a 2M prompt in 16.3 minutes, decode 55 tok/s) for a model trained that far. vibes1.7b trained at
-16K on native rope, so its full layers' rotation goes by the conversation's length - native to 32K, then YaRN x2, x4
-past 160K, x8 past 384K, each boundary where the next factor's loss crossed below (DESIGN.md, "vibes-flash: rope");
-crossing one turns the cached keys. Prompts read sparse past 4,612 tokens (the first position a read can leave a key
-out), as the model was trained; every token's bits are the same however its prompt is split into steps.
+Its rope is native at every length: on the last 2,048 tokens' loss YaRN x4 read best past ~192K, but it lost the 524K
+prompt's code 52K from its end, which native found (DESIGN.md, "osmos1.7b: rope"), so there are no stages and no
+cached key is ever turned. The pack is 512K; `--ctx 1m` reaches 1M, where the model found 4 of 5 codes (the miss
+answered with a path from the source beside it, as YaRN did). Prompts read sparse past 4,612 tokens (the first
+position a read can leave a key out), as the model was trained; every token's bits are the same however its prompt
+is split into steps.
 
 ## hy4-flash in numbers
 
@@ -413,11 +417,16 @@ is the guarantee (the NPU's is its own).
   - `qwen4exp`, the reference Qwen's forward is held to
 - [DeepSeek](https://github.com/deepseek-ai), [Qwen](https://huggingface.co/Qwen) and
   [Thinking Machines](https://huggingface.co/thinkingmachines) (Inkling-2-Small, Apache 2.0): the models.
-- [Liquid AI](https://huggingface.co/LiquidAI) (LFM3-1.7B, the LFM Open License v1.0): vibes1.7b's base model, and its
+- [Liquid AI](https://huggingface.co/LiquidAI) (LFM3-1.7B, the LFM Open License v1.0): osmos1.7b's base model, and its
   modeling code the reference LFM3's forward is held to (`oracle/lfm3_forward.py`).
-- [vibes1.7b](https://huggingface.co/mrsirg97-rgb/vibes1.7b) (the same author): the fine-tune and its LSA maps.
-- [PG-19](https://huggingface.co/datasets/deepmind/pg19) (DeepMind, Apache 2.0): the held-out novel vibes1.7b's long
+- [osmos1.7b](https://huggingface.co/mrsirg97-rgb/osmos1.7b) (the same author): the fine-tune and its LSA maps.
+- [PG-19](https://huggingface.co/datasets/deepmind/pg19) (DeepMind, Apache 2.0): the held-out novel osmos1.7b's long
   rotation is measured on.
+- [Tencent](https://huggingface.co/tencent) (Hy4-flash and its DFly2 drafter) and its compression team
+  [AngelSlim](https://huggingface.co/AngelSlim) (the Q3_K GGUF osmos serves): the model, and the transformers
+  modeling code its forward is held to.
+- [vLLM](https://github.com/vllm-project/vllm) (Apache 2.0): DFly2's speculator, the reference osmos's drafts are
+  checked against token for token.
 - [unsloth](https://huggingface.co/unsloth): the quantizations (Inkling's UD-IQ1_S and its importance matrix among
   them), the MXFP8 Engram table and Qwen's MTP head.
 - [eaddario/imatrix-calibration](https://huggingface.co/datasets/eaddario/imatrix-calibration) (MIT): the text

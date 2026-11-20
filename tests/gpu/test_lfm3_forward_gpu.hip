@@ -1,7 +1,7 @@
 // LFM3's forward (osmos/lfm3/forward.h) against Liquid's own (oracle/lfm3_forward.py: modeling_lfm3.py in F32 on the
 // GGUF's own values): its ids through one step - every layer's output at the reference's kept rows, the last rows'
 // logits (KL against the reference's, its top-1) - then the same ids in uneven steps, the last rows' logits the same
-// bits. vibes1.7b's Q4_0 file (OSMOS_TEST_LFM3) and ~/osmos-oracle/lfm3_forward_64_kvq8.bin (OSMOS_TEST_LFM3_REF:
+// bits. osmos1.7b's Q4_0 file (OSMOS_TEST_LFM3) and ~/osmos-oracle/lfm3_forward_64_kvq8.bin (OSMOS_TEST_LFM3_REF:
 // another, lfm3_forward_2048_kvq8.bin past the window); skipped (77) without.
 extern "C" {
 #include "osmos/lfm3/forward.h"
@@ -67,7 +67,7 @@ int main() {
   const char* home = getenv("HOME") ? getenv("HOME") : "";
   char model_path[512], ref_path[512], err[LFM3_ERR] = "", gerr[GGUF_ERR] = "";
   std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_LFM3") ? getenv("OSMOS_TEST_LFM3") : "");
-  if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/vibes1.7b/vibes1.7b-Q4_0.gguf", home);
+  if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/osmos1.7b/osmos1.7b-Q4_0.gguf", home);
   std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_LFM3_REF") ? getenv("OSMOS_TEST_LFM3_REF") : "");
   if (!ref_path[0]) std::snprintf(ref_path, sizeof ref_path, "%s/osmos-oracle/lfm3_forward_64_kvq8.bin", home);
   int devs = 0;
@@ -275,7 +275,7 @@ int main() {
   // one step's bits
   {
     std::string maps = getenv("OSMOS_TEST_LFM3_LSA") ? getenv("OSMOS_TEST_LFM3_LSA") : "";
-    if (maps.empty()) maps = std::string(home) + "/Models/vibes1.7b/vibes1.7b-lsa-maps.safetensors";
+    if (maps.empty()) maps = std::string(home) + "/Models/osmos1.7b/osmos1.7b-lsa-maps.safetensors";
     FILE* mf = std::fopen(maps.c_str(), "rb");
     if (T == 2048 && mf) {
       std::fclose(mf);

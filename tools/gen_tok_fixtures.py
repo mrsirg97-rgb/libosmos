@@ -9,7 +9,7 @@ Inkling-2's (o200k's expression: an upper run before lowers, title case, marks a
 in threes, a punctuation run into slashes and newlines) from its own tokenizer.json (Hugging Face's tokenizers - the
 model's reference; llama.cpp's inkling pre-tokenizer is not in this tree):
 python3 tools/gen_tok_fixtures.py --hf <tokenizer.json> inkling > tests/fixtures/tokenizer_inkling.txt
-LFM3's (vibes1.7b: pre lfm2 - the Llama-3 expression, ignore_merges: digits in threes, contractions in any case,
+LFM3's (osmos1.7b: pre lfm2 - the Llama-3 expression, ignore_merges: digits in threes, contractions in any case,
 marks outside a letter run, a word the vocabulary holds whole) from its checkpoint's tokenizer.json:
 python3 tools/gen_tok_fixtures.py --hf <tokenizer.json> lfm2 > tests/fixtures/tokenizer_lfm2.txt
 Hy4-flash's (DeepSeek-V3's expressions, its own vocabulary and merges) from the release's tokenizer.json with its 24

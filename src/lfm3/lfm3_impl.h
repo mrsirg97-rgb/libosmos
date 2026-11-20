@@ -8,9 +8,19 @@
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/lsa.h"
 #include "osmos/lfm3/forward.h"
+#include "osmos/q4x/dflash.h"
 
 #define F 4ull               /* a float's bytes */
 #define LFM3_CONV_SLOTS (LFM3_MAX_BACK + 1) /* a convolution's states a sequence keeps: the current, and a rollback's */
+
+/* the drafter's buffers (q4x's Q4xDfBuf): a seed's context rows, a block's, the selector's, pinned copies out */
+typedef struct Lfm3DfBuf
+{
+  float *th, *k, *v, *h, *x, *xc, *dyn, *q, *att, *a, *gate, *up, *hn, *logits, *hp, *val, *top_p;
+  int32_t *idx, *path, *top_id, *tok, *iota;
+  int32_t *pin_tok, *pin_path, *pin_idx;
+  float *pin_val, *pin_p;
+} Lfm3DfBuf;
 
 struct Lfm3Forward
 {
@@ -63,6 +73,15 @@ struct Lfm3Forward
   void *argmax;                     /* ops_argmax's scratch */
   lfm3_tap_fn tap;
   void *tap_arg;
+  /* a DFlash2 drafter (Lfm3Options' dflash), or none: its tensors on the device (its file's table), its taps' rows
+     of every step ([token][n_taps][n_embd]), a layer's place among them (-1 none), its buffers, a sequence's ring rows */
+  const Q4xDflash *df;
+  void **df_dev;
+  float *taps;
+  int tap_of[LFM3_MAX_LAYERS];
+  uint32_t df_ring;
+  uint64_t steps; /* the steps run: a sequence's taps its last step's (Lfm3Seq.step_id) */
+  Lfm3DfBuf d;
 };
 
 struct Lfm3Seq
@@ -80,6 +99,13 @@ struct Lfm3Seq
   float *ik[LFM3_MAX_LAYERS], *cent[LFM3_MAX_LAYERS];
   int32_t *mem[LFM3_MAX_LAYERS];
   uint32_t closed;
+  /* the last step's rows (its taps': positions step_pos0 .., rows step_t0 .. of step step_id), and with a drafter
+     each of its layers' key and value rings (df_ring rows, position p at p % df_ring) holding df_lo .. df_pos - 1 */
+  int32_t step_pos0;
+  uint32_t step_n, step_t0;
+  uint64_t step_id;
+  float *dk[Q4X_DFLASH_MAX_LAYERS], *dv[Q4X_DFLASH_MAX_LAYERS];
+  int32_t df_lo, df_pos;
 };
 
 /* a step's runs: each sequence's tokens at rows off .. off + len - 1 of the step */

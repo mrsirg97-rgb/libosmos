@@ -44,7 +44,14 @@ typedef struct Q4xDflash
   Q4xDflashLayer layer[Q4X_DFLASH_MAX_LAYERS];
 } Q4xDflash;
 
+/* a target's shape the drafter is checked against (q4x_dflash_create_for: another family's - LFM3's) */
+typedef struct Q4xDflashTarget
+{
+  int n_embd, n_vocab, n_layers;
+} Q4xDflashTarget;
+
 Q4xDflash *q4x_dflash_create(const Gguf *g, const Q4xWeights *target, char err[Q4X_ERR]);
+Q4xDflash *q4x_dflash_create_for(const Gguf *g, const Q4xDflashTarget *target, char err[Q4X_ERR]);
 void q4x_dflash_destroy(Q4xDflash *d);
 
 #endif
@@ -58,6 +65,10 @@ q4x_dflash_create
   checked as q4x_weights_create checks the model's: its name, dims, a type its reader takes (a matrix the matvec's
   and the matmul's, the codebooks a row gather's, the norms and the conv kernels F32), its bytes; a tensor no role
   takes refused. NULL with why, the key or the tensor named. the drafter points into g's tensors: g outlives it.
+
+q4x_dflash_create_for
+  the same against a target's width, vocabulary and layer count alone (q4x_dflash_create's from Qwen's weights; the
+  LFM3 forward's, lfm3_dflash_*).
 
 q4x_dflash_destroy
   frees it. NULL is nothing to do.

@@ -1,5 +1,5 @@
 // ops_rms_add_rms (osmos/gpu/ops.h): a block's post-norm added to the residual and the next norm, one launch -
-// against ops_rms, ops_add and ops_rms in turn: h, y and xn bit for bit, with a next norm and without, at vibes1.7b's
+// against ops_rms, ops_add and ops_rms in turn: h, y and xn bit for bit, with a next norm and without, at osmos1.7b's
 // width (2,048) and another (5,120), 1 and 7 rows; refusals
 #include <hip/hip_runtime.h>
 
