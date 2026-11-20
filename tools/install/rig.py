@@ -72,6 +72,13 @@ def _port(rows, rid):
     return p
 
 
+def room(window, reserve):
+    """None, or why rig would refuse a row of this context and reply reserve (the installer asks before it fetches)"""
+    if reserve >= window or window // KEEP_RECENT_SHARE >= window - reserve:
+        return f"a {window}-token context leaves no room for a {reserve}-token reply (rig would refuse the row)"
+    return None
+
+
 def register(home, cfg, api, cfg_path, default, row):
     """the row rig launches the pack by (returned); `api` the osmos-api binary, `cfg_path` the pack's osmos.json,
     `row` the pack's rig settings (packs.json)"""
@@ -84,8 +91,9 @@ def register(home, cfg, api, cfg_path, default, row):
     rid, olds = row["id"], [f"osmos-{cfg['pack']}"] + [a for a in row["aliases"] if a != row["id"]]
     old = next((o for o in olds if any(r.get("id") == o for r in rows)), olds[0])
     window, reserve = cfg["max_context"], row["reserve"]
-    if reserve >= window or window // KEEP_RECENT_SHARE >= window - reserve:
-        raise RigError(f"a {window}-token context leaves no room for a {reserve}-token reply (rig would refuse the row)")
+    why = room(window, reserve)
+    if why:
+        raise RigError(why)
     out = {"id": rid, "window": window, "maxTokens": row["max_tokens"], "reserve": reserve,
            "keepRecent": window // KEEP_RECENT_SHARE, "role": "interactive", "efforts": list(row["efforts"]),
            "effort": row["effort"], "command": f"{api} --config {cfg_path} --port ${{PORT}}", "port": _port(rows, rid if any(r.get("id") == rid for r in rows) else old),

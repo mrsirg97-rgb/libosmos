@@ -6,12 +6,14 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/gpu/bufs.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/model/qtype.h"
 #include "osmos/gpu/upload.h"
+#include "osmos/model/fnv.h"
 #include "osmos/text/json.h"
 #include "lfm3_impl.h"
 
@@ -29,54 +31,17 @@ bool lfm3_alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? 
 /* every tensor of g into GPU memory, its device pointer at its index in *table */
 static bool upload_file(const Gguf *g, void ***table, char *err)
 {
-  void *pin = NULL;
-  if (!(*table = calloc(g->n_tensors ? g->n_tensors : 1, sizeof **table)) ||
-      hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
-    return lfm3_fail(err, "out of memory (the weights' table, or a pinned piece)");
-  bool ok = true;
-  for (size_t i = 0; ok && i < g->n_tensors; i++)
-  {
-    const char *why = gpu_read_tensor(g, &g->tensors[i], pin, READ_PIECE, &(*table)[i]);
-    if ((ok = !why) == false && err)
-      snprintf(err, LFM3_ERR, "%s: not read into GPU memory (%s)", g->tensors[i].name, why);
-  }
-  hipHostFree(pin);
-  return ok;
+  return gpu_upload_table(g, READ_PIECE, NULL, NULL, table, err, err ? LFM3_ERR : 0);
 }
 
 static bool upload(Lfm3Forward *f, char *err) { return upload_file(f->w->model, &f->dev, err); }
 
-/* the drafter's buffers: a seed's max_tokens context rows, a block's (q4x's df_buffers) */
-static bool df_buffers(Lfm3Forward *f, char *err)
+/* the drafter's buffers (the DFlash2 core's), and its taps' rows: a step's max_tokens */
+static bool lfm3_df_buffers(Lfm3Forward *f, char *err)
 {
-  const Q4xDflashGeometry *g = &f->df->geo;
-  const uint64_t n = f->max_tokens, B = (uint64_t)g->block, D = (uint64_t)g->n_embd, V = (uint64_t)g->n_vocab;
-  const uint64_t kv = (uint64_t)g->n_kv_heads * g->head_dim, q = (uint64_t)g->n_heads * g->head_dim;
-  const uint64_t rows = n > B ? n : B, dyn = 2ull * Q4X_DFLASH_CONV * (D / (uint64_t)g->conv_group);
-  const uint64_t ff = (uint64_t)g->ff, k = (uint64_t)g->sel_top_k, iota = (uint64_t)f->max_ctx + B;
-  Lfm3DfBuf *d = &f->d;
-  bool ok = lfm3_alloc(&f->taps, n * (uint64_t)g->n_taps * D * F) && lfm3_alloc(&d->th, n * D * F) &&
-            lfm3_alloc(&d->k, rows * kv * F) && lfm3_alloc(&d->v, rows * kv * F) && lfm3_alloc(&d->h, B * D * F) &&
-            lfm3_alloc(&d->x, B * D * F) && lfm3_alloc(&d->xc, B * D * F) && lfm3_alloc(&d->dyn, B * dyn * F) &&
-            lfm3_alloc(&d->q, B * q * F) && lfm3_alloc(&d->att, B * q * F) && lfm3_alloc(&d->a, B * D * F) &&
-            lfm3_alloc(&d->gate, B * ff * F) && lfm3_alloc(&d->up, B * ff * F) && lfm3_alloc(&d->hn, B * D * F) &&
-            lfm3_alloc(&d->logits, B * V * F) && lfm3_alloc(&d->hp, B * (uint64_t)g->sel_rank * F) &&
-            lfm3_alloc(&d->val, B * k * F) && lfm3_alloc(&d->idx, B * k * 4) && lfm3_alloc(&d->top_p, B * F) &&
-            lfm3_alloc(&d->path, B * 4) && lfm3_alloc(&d->top_id, B * 4) && lfm3_alloc(&d->tok, B * 4) &&
-            lfm3_alloc(&d->iota, iota * 4) && hipHostMalloc((void **)&d->pin_tok, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_path, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_idx, B * k * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_val, B * k * F, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_p, B * F, 0) == hipSuccess;
-  int32_t *h = ok ? malloc(iota * 4) : NULL;
-  for (uint64_t i = 0; h && i < iota; i++)
-    h[i] = (int32_t)i;
-  for (uint64_t i = 1; h && i < B; i++) /* the block's tokens after its anchor: the mask */
-    d->pin_tok[i] = g->mask_token;
-  ok = h && hipMemcpy(d->iota, h, iota * 4, hipMemcpyHostToDevice) == hipSuccess &&
-       hipMemcpy(d->tok, d->pin_tok, B * 4, hipMemcpyHostToDevice) == hipSuccess;
-  free(h);
-  return ok || lfm3_fail(err, "GPU memory refused (the drafter's buffers)");
+  const uint64_t T = (uint64_t)f->df->geo.n_taps * (uint64_t)f->df->geo.n_embd;
+  return (lfm3_alloc(&f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, &f->df->geo, f->max_tokens, f->max_ctx)) ||
+         lfm3_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 
 /* the drafter: its geometry these weights' (its taps their layers'), its tensors uploaded, its buffers */
@@ -98,7 +63,7 @@ static bool df_make(Lfm3Forward *f, const Q4xDflash *df, char *err)
   }
   f->df = df;
   f->df_ring = (uint32_t)dg->window + LFM3_CONV_SLOTS < f->max_ctx ? (uint32_t)dg->window + LFM3_CONV_SLOTS : f->max_ctx;
-  return upload_file(df->model, &f->df_dev, err) && df_buffers(f, err);
+  return upload_file(df->model, &f->df_dev, err) && lfm3_df_buffers(f, err);
 }
 
 /* tensors' rows concatenated (one type) into one buffer, their device pointers then into it; NULL if their types
@@ -148,22 +113,8 @@ static bool joints(Lfm3Forward *f, char *err)
 static bool head_q8(Lfm3Forward *f, char *err)
 {
   const GgufTensor *t = f->w->embd;
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd, chunk = 4096;
-  const uint64_t rb = q4x_kv_row_bytes(D);
-  void *spare = NULL;
-  float *tmp = NULL;
-  bool ok = lfm3_alloc(&f->head_q8, (uint64_t)V * rb) && lfm3_alloc(&spare, (uint64_t)chunk * rb) &&
-            lfm3_alloc(&tmp, (uint64_t)chunk * D * F);
-  for (uint32_t r = 0; ok && r < V; r += chunk)
-  {
-    const uint32_t m = V - r < chunk ? V - r : chunk;
-    ok = quant_dequant(t->type, (const uint8_t *)lfm3_dev(f, t) + (uint64_t)r * (t->bytes / V), (uint64_t)m * D, tmp,
-                       NULL) &&
-         q4x_kv_put(tmp, tmp, m, D, (uint8_t *)f->head_q8 + (uint64_t)r * rb, spare, NULL);
-  }
-  ok = ok && hipDeviceSynchronize() == hipSuccess;
-  hipFree(spare), hipFree(tmp);
-  if (!ok)
+  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd;
+  if (!gpu_q8_rows(t->type, lfm3_dev(f, t), t->bytes / V, V, D, &f->head_q8))
     return lfm3_fail(err, "the head's Q8_0 not made (GPU memory, or a launch)");
   f->head = f->head_q8, f->head_type = QTYPE_Q8_0;
   return true;
@@ -251,37 +202,52 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   free(f->h_ik), free(f->h_cent), free(f->h_mem);
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
-  for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
-    if (!f->in_joint || !f->in_joint[i])
-      hipFree(f->dev[i]);
-  free(f->dev);
+  gpu_free_table(f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
   for (uint32_t i = 0; i < f->n_joints; i++)
     hipFree(f->joints[i]);
   free(f->in_joint);
-  void *b[] = {f->tok, f->h, f->xn, f->y, f->bcx, f->u, f->qf, f->kf, f->vf, f->qr, f->kr, f->g, f->att, f->ga,
-               f->up, f->act, f->attn_scratch, f->xf, f->logits, f->hk, f->ids, f->argmax, f->jo, f->x16, f->overflow, f->fa_scratch};
-  for (size_t i = 0; i < sizeof b / sizeof *b; i++)
-    hipFree(b[i]);
+  gpu_bufs_free(&f->bufs); /* the step's buffers: the table's */
   hipHostFree(f->pin_tok), hipHostFree(f->pin_logits);
   hipFree(f->head_q8);
   free(f->slot);
-  for (size_t i = 0; f->df_dev && i < f->df->model->n_tensors; i++)
-    hipFree(f->df_dev[i]);
-  free(f->df_dev);
-  void *db[] = {f->taps, f->d.th, f->d.k, f->d.v, f->d.h, f->d.x, f->d.xc, f->d.dyn, f->d.q, f->d.att, f->d.a,
-                f->d.gate, f->d.up, f->d.hn, f->d.logits, f->d.hp, f->d.val, f->d.top_p, f->d.idx, f->d.path,
-                f->d.top_id, f->d.tok, f->d.iota};
-  for (size_t i = 0; i < sizeof db / sizeof *db; i++)
-    hipFree(db[i]);
-  void *dp[] = {f->d.pin_tok, f->d.pin_path, f->d.pin_idx, f->d.pin_val, f->d.pin_p};
-  for (size_t i = 0; i < sizeof dp / sizeof *dp; i++)
-    hipHostFree(dp[i]);
+  if (f->df)
+    gpu_free_table(f->df->model, f->df_dev, NULL);
+  hipFree(f->taps);
+  df_buffers_free(&f->d);
   free(f);
 }
 
 /* osmos1.7b's: lfm3_rope_nll's crossovers (DESIGN.md, "osmos1.7b: rope") */
 const Lfm3Stage lfm3_stages_default[] = {{0, 1}};
 const uint32_t lfm3_stages_default_n = sizeof lfm3_stages_default / sizeof lfm3_stages_default[0];
+
+/* OSMOS_LFM3_STAGES: "from:factor,from:factor,..." - each a decimal of 32 bits, LFM3_MAX_STAGES at most, nothing
+   else (0.11.2: a malformed string used whatever parsed before it) */
+static bool parse_stages(const char *c, Lfm3Stage *t, uint32_t *n)
+{
+  uint32_t m = 0;
+  for (;;)
+  {
+    unsigned long long v[2];
+    for (int i = 0; i < 2; i++) /* from, then factor: a ':' between them */
+    {
+      if (*c < '0' || *c > '9')
+        return false;
+      char *e;
+      v[i] = strtoull(c, &e, 10);
+      if (v[i] > UINT32_MAX || (i == 0 && *e != ':'))
+        return false;
+      c = i == 0 ? e + 1 : e;
+    }
+    if (m == LFM3_MAX_STAGES)
+      return false;
+    t[m++] = (Lfm3Stage){(uint32_t)v[0], (uint32_t)v[1]};
+    if (!*c)
+      return *n = m, true;
+    if (*c++ != ',')
+      return false;
+  }
+}
 
 static bool stages_ok(const Lfm3Stage *t, uint32_t n)
 {
@@ -315,28 +281,13 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   Lfm3Stage env_table[LFM3_MAX_STAGES];
   const char *env = o->stages ? NULL : getenv("OSMOS_LFM3_STAGES"); /* "from:factor,..." (0:1 native throughout): a
                                                                        model's table tried without a build */
+  bool env_ok = true;
   if (env && *env)
-  {
-    uint32_t m = 0;
-    for (const char *c = env; m < LFM3_MAX_STAGES && *c;)
-    {
-      char *e;
-      const unsigned long from = strtoul(c, &e, 10);
-      if (*e != ':')
-        break;
-      const unsigned long factor = strtoul(e + 1, &e, 10);
-      env_table[m++] = (Lfm3Stage){(uint32_t)from, (uint32_t)factor};
-      if (*e != ',')
-      {
-        c = e;
-        break;
-      }
-      c = e + 1;
-    }
-    table = env_table, nt = m;
-  }
-  bool ok = o->yarn_static_ctx || stages_ok(table, nt) ||
-            lfm3_fail(err, "the YaRN stages: none, past LFM3_MAX_STAGES, not from 0, out of order, or a factor not 1-64");
+    env_ok = parse_stages(env, env_table, &nt), table = env_table;
+  bool ok = (env_ok || lfm3_fail(err, "OSMOS_LFM3_STAGES: not from:factor,... (at most LFM3_MAX_STAGES, each a 32-bit "
+                                      "integer)")) &&
+            (o->yarn_static_ctx || stages_ok(table, nt) ||
+            lfm3_fail(err, "the YaRN stages: none, past LFM3_MAX_STAGES, not from 0, out of order, or a factor not 1-64"));
   f->yarn_static_ctx = o->yarn_static_ctx;
   if (ok && o->yarn_static_ctx) /* one stage: every position YaRN at yarn_static_ctx over yarn_from */
     f->stages = 1, f->stage[0] = (Lfm3Stage){0, 0},
@@ -353,15 +304,13 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || lfm3_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err) && df_make(f, o->dflash, err);
   ok = ok && joints(f, err) && (!o->lsa || lsa_load(f, o->lsa, err));
+  if (ok && o->lsa)
+    f->lsa_id = fnv_file(o->lsa, FNV_SEED);
   if (ok)
     f->head = lfm3_dev(f, w->embd), f->head_type = w->embd->type;
   ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || lfm3_fail(err, "a head this build does not make")) &&
        (o->head == LFM3_HEAD_FILE || head_q8(f, err));
-  const struct
-  {
-    void *p;
-    uint64_t bytes;
-  } want[] = {
+  const GpuWant want[] = {
       {&f->tok, n * 4},          {&f->h, n * D * F},       {&f->xn, n * D * F},    {&f->y, n * D * F},
       {&f->bcx, n * 3 * D * F},  {&f->u, n * D * F},       {&f->qf, n * q * F},    {&f->kf, n * kv * F},
       {&f->vf, n * kv * F},      {&f->qr, n * q * F},      {&f->kr, n * kv * F},   {&f->g, n * g->n_heads * F},
@@ -373,8 +322,8 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
       {&f->x16, (uint64_t)MM_MAX_TOKENS * (ff > 3 * D ? ff : 3 * D) * 2}, {&f->overflow, 4},
       {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
-  for (size_t i = 0; ok && i < sizeof want / sizeof *want; i++)
-    ok = lfm3_alloc(want[i].p, want[i].bytes) || lfm3_fail(err, "GPU memory refused (a step's buffers)");
+  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
+              lfm3_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&
        hipMemset(f->overflow, 0, 4) == hipSuccess && hipDeviceSynchronize() == hipSuccess;

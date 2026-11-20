@@ -265,6 +265,8 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
       return fail(err, "DFly2: a target layer not one of this model's sparse layers");
   if (MASK_TOKEN >= g->n_vocab)
     return fail(err, "DFly2: its mask token past this model's vocabulary");
+  if (f->max_tokens < ROWS) /* a draft's block in the step's buffers (its MLA table max_tokens x heads - 0.11.2) */
+    return fail(err, "DFly2: a forward's step smaller than a draft block");
   const uint32_t H = (uint32_t)g->n_heads[TARGETS[0]];
   struct Hy4Dfly *d = calloc(1, sizeof *d);
   if (!d)

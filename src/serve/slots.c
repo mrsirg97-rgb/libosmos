@@ -228,14 +228,19 @@ static bool trim_ram(Slots *s)
   return true;
 }
 
-/* a .meta read and checked: its tokens (malloc'd) and fixed part; false for anything not this store's or damaged */
-static bool read_meta(const Slots *s, const char *p, Meta *m, int32_t **tokens)
+/* a .meta read and checked: its tokens (malloc'd) and fixed part; false for anything not this store's or damaged -
+   *foreign for a whole one of another identity (another model's, or this one's with other options: another server's,
+   left alone - 0.11.2) */
+static bool read_meta(const Slots *s, const char *p, Meta *m, int32_t **tokens, bool *foreign)
 {
+  *foreign = false;
   FILE *f = fopen(p, "rb");
   if (!f)
     return false;
-  bool ok = fread(m, sizeof *m, 1, f) == 1 && m->magic == SLOTS_META_MAGIC && m->identity == s->o.identity &&
-            m->n > 0 && m->n <= (1u << 26);
+  bool ok = fread(m, sizeof *m, 1, f) == 1 && m->magic == SLOTS_META_MAGIC;
+  if (ok && m->identity != s->o.identity)
+    return fclose(f), *foreign = true, false;
+  ok = ok && m->n > 0 && m->n <= (1u << 26);
   *tokens = ok ? malloc((uint64_t)m->n * sizeof **tokens) : NULL;
   uint64_t sum = 0;
   ok = ok && *tokens && fread(*tokens, sizeof **tokens, m->n, f) == m->n && fread(&sum, sizeof sum, 1, f) == 1 &&
@@ -258,7 +263,20 @@ static bool has_ext(const char *name, const char *ext)
   return a > b && !strcmp(name + a - b, ext);
 }
 
-/* the folder indexed: each .meta checked against its .bin and the clock; whatever is not a whole slot removed */
+/* a file older than an hour: another server's write would be newer (a write's .tmp, a .bin before its .meta) */
+#define STALE_NS (3600ull * 1000000000ull)
+static bool stale(const char *p, uint64_t now)
+{
+  struct stat st;
+  if (stat(p, &st) != 0)
+    return false;
+  const uint64_t m = (uint64_t)st.st_mtim.tv_sec * 1000000000ull + (uint64_t)st.st_mtim.tv_nsec;
+  return now > m && now - m > STALE_NS;
+}
+
+/* the folder indexed: each .meta checked against its .bin and the clock; this store's broken or old slots removed -
+   another identity's left, and a write's files left until stale (0.11.2: two servers on one folder - another
+   --max-tokens, --lsa or not, another quant beside - removed each other's conversations and in-flight writes) */
 static bool index_dir(Slots *s, char *err)
 {
   DIR *d = opendir(s->dir);
@@ -272,9 +290,10 @@ static bool index_dir(Slots *s, char *err)
       continue;
     char p[4096];
     snprintf(p, sizeof p, "%s/%s", s->dir, nm);
-    if (has_ext(nm, ".tmp")) /* a write that never ended */
+    if (has_ext(nm, ".tmp")) /* a write that never ended - or another server's, still going */
     {
-      unlink(p);
+      if (stale(p, now))
+        unlink(p);
       continue;
     }
     if (!has_ext(nm, ".meta"))
@@ -290,7 +309,10 @@ static bool index_dir(Slots *s, char *err)
     path(s, stem, ".bin", bp, sizeof bp);
     struct stat st;
     const bool young = s->o.days <= 0;
-    bool ok = read_meta(s, p, &m, &t) && stat(bp, &st) == 0 && (uint64_t)st.st_size == m.bytes;
+    bool foreign = false;
+    bool ok = read_meta(s, p, &m, &t, &foreign) && stat(bp, &st) == 0 && (uint64_t)st.st_size == m.bytes;
+    if (foreign)
+      continue; /* another identity's slot: its server's to keep or drop */
     ok = ok && (young || (double)(now > m.used ? now - m.used : 0) <= s->o.days * 86400e9);
     if (!ok || !grow(s))
     {
@@ -314,12 +336,11 @@ static bool index_dir(Slots *s, char *err)
     bool known = false;
     for (uint32_t i = 0; i < s->n && !known; i++)
       known = strlen(s->e[i].name) == strlen(nm) - 4 && !strncmp(s->e[i].name, nm, strlen(nm) - 4);
-    if (!known)
-    {
-      char p[4096];
-      snprintf(p, sizeof p, "%s/%s", s->dir, nm);
+    char p[4096], mp[4096];
+    snprintf(p, sizeof p, "%s/%s", s->dir, nm);
+    snprintf(mp, sizeof mp, "%.*s.meta", (int)(strlen(p) - 4), p);
+    if (!known && access(mp, F_OK) != 0 && stale(p, now)) /* no .meta, and not a write still going */
       unlink(p);
-    }
   }
   closedir(d);
   trim_dir(s, -1);

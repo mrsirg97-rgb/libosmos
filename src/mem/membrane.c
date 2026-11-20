@@ -23,7 +23,10 @@ struct Membrane
   Pool **held_in;
   uint32_t n_held;
   bool *is_held;
-  uint32_t *pend; /* membrane_begin's units still reading */
+  uint32_t *pend; /* membrane_begin's units still reading, and the pool each was pinned in (a failed read leaves it
+                     cold there: its hold that pool's - 0.11.2, looked up again it was the membrane's, the stream's
+                     slot held for good) */
+  Pool **pend_in;
   uint32_t n_pend;
   uint64_t *guessed; /* the visit a unit was guessed for */
   uint32_t *failed;  /* promotions whose copy failed: pinned in the membrane's pool, their bytes never written -
@@ -89,7 +92,8 @@ Membrane *membrane_create(const MembraneOptions *o, char err[MEMBRANE_ERR])
   char perr[POOL_ERR] = "";
   const bool ok = (m->units = malloc(n * sizeof *m->units)) && (m->held = malloc(2 * n * sizeof *m->held)) &&
                   (m->held_in = malloc(2 * n * sizeof *m->held_in)) && (m->is_held = calloc(n, sizeof *m->is_held)) &&
-                  (m->pend = malloc(n * sizeof *m->pend)) && (m->failed = malloc(n * sizeof *m->failed)) && (m->guessed = calloc(n, sizeof *m->guessed)) &&
+                  (m->pend = malloc(n * sizeof *m->pend)) &&
+                  (m->pend_in = malloc(n * sizeof *m->pend_in)) && (m->failed = malloc(n * sizeof *m->failed)) && (m->guessed = calloc(n, sizeof *m->guessed)) &&
                   (!o->n_warm || (m->warm = malloc(o->n_warm * sizeof *m->warm)));
   if (!ok)
     return membrane_destroy(m), fail(err, "out of memory"), NULL;
@@ -116,7 +120,7 @@ void membrane_destroy(Membrane *m)
     return;
   reads_destroy(m->reads); /* its readers stopped before the pools they feed go */
   pool_destroy(m->pool), pool_destroy(m->stream);
-  free(m->units), free(m->held), free(m->held_in), free(m->is_held), free(m->pend), free(m->failed), free(m->guessed), free(m->warm);
+  free(m->units), free(m->held), free(m->held_in), free(m->is_held), free(m->pend), free(m->pend_in), free(m->failed), free(m->guessed), free(m->warm);
   free(m);
 }
 
@@ -303,7 +307,7 @@ bool membrane_begin(Membrane *m, uint32_t unit)
   if (pin == POOL_FULL)
     return false;
   if (pin == POOL_WAIT)
-    m->pend[m->n_pend++] = unit;
+    m->pend_in[m->n_pend] = in, m->pend[m->n_pend++] = unit;
   else
     held(m, in, unit);
   m->is_held[unit] = true;
@@ -316,11 +320,11 @@ void membrane_settle(Membrane *m)
   for (uint32_t k = 0; k < m->n_pend; k++)
   {
     const uint32_t u = m->pend[k];
-    Pool *in = pool_in(m, u);
-    if (in && pool_state(in, u) == POOL_READING)
-      m->pend[keep++] = u;
+    Pool *in = m->pend_in[k];
+    if (pool_state(in, u) == POOL_READING)
+      m->pend_in[keep] = in, m->pend[keep++] = u;
     else
-      held(m, in ? in : m->pool, u);
+      held(m, in, u); /* (read or failed: its hold where it was pinned) */
   }
   m->n_pend = keep;
 }

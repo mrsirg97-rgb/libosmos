@@ -11,6 +11,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/quant.h"
+#include "osmos/gpu/bufs.h"
 #include "osmos/gpu/upload.h"
 #include "osmos/model/qtype.h"
 #include "q35_impl.h"
@@ -21,39 +22,22 @@
 
 void q35_forward_tap(Q35Forward *f, q35_tap_fn fn, void *arg) { f->tap = fn, f->tap_arg = arg; }
 
+static bool past_layers(const GgufTensor *t, void *arg) /* the MTP head's layers: not this forward's */
+{
+  return strncmp(t->name, "blk.", 4) == 0 && atoi(t->name + 4) >= ((const Q35Forward *)arg)->w->geo.n_layers;
+}
+
 static bool upload(Q35Forward *f, char *err)
 {
-  const Gguf *g = f->w->model;
-  void *pin = NULL;
-  if (!(f->dev = calloc(g->n_tensors, sizeof *f->dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
-    return fail(err, "out of memory (the weights' table, or a pinned piece)");
-  bool ok = true;
-  for (size_t i = 0; ok && i < g->n_tensors; i++)
-  {
-    const GgufTensor *t = &g->tensors[i];
-    if (strncmp(t->name, "blk.", 4) == 0 && atoi(t->name + 4) >= f->w->geo.n_layers)
-      continue; /* the MTP head's layers: not this forward's */
-    const char *why = gpu_read_tensor(g, t, pin, READ_PIECE, &f->dev[i]);
-    ok = !why;
-    if (!ok && err)
-      snprintf(err, Q35_ERR, "%s: not read into GPU memory (%s)", t->name, why);
-  }
-  hipHostFree(pin);
-  return ok;
+  return gpu_upload_table(f->w->model, READ_PIECE, past_layers, f, &f->dev, err, err ? Q35_ERR : 0);
 }
 
 void q35_forward_destroy(Q35Forward *f)
 {
   if (!f)
     return;
-  for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
-    hipFree(f->dev[i]);
-  free(f->dev);
-  void *b[] = {f->da, f->h,  f->xn, f->out, f->qkv, f->z,  f->al, f->be, f->g,  f->b,  f->cv,     f->qkn, f->ro,
-               f->fo, f->qf, f->kr,  f->vr,  f->q,  f->gt, f->kq, f->ao, f->fa, f->ga,     f->up,  f->y,
-               f->logits, f->tok, f->overflow, f->x16, f->hx, f->ids, f->argmax};
-  for (size_t i = 0; i < sizeof b / sizeof *b; i++)
-    hipFree(b[i]);
+  gpu_free_table(f->w->model, f->dev, NULL);
+  gpu_bufs_free(&f->bufs); /* the step's buffers: the table's */
   hipHostFree(f->pin_logits), hipHostFree(f->pin_tok);
   free(f->slot);
   for (int l = 0; l < Q35_MAX_LAYERS; l++)
@@ -121,22 +105,11 @@ static bool head_q8(Q35Forward *f, char *err)
   const char *keep = getenv("Q35_HEAD");
   if (t->type != QTYPE_BF16 || (keep && strcmp(keep, "bf16") == 0))
     return true;
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd, chunk = 4096;
-  const uint64_t rb = q4x_kv_row_bytes(D);
+  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd;
   void **slot = &f->dev[t - f->w->model->tensors];
-  void *q = NULL, *spare = NULL;
-  float *tmp = NULL;
-  bool ok = alloc(&q, (uint64_t)V * rb) && alloc(&spare, (uint64_t)chunk * rb) && alloc(&tmp, (uint64_t)chunk * D * F);
-  for (uint32_t r = 0; ok && r < V; r += chunk)
-  {
-    const uint32_t m = V - r < chunk ? V - r : chunk;
-    ok = quant_dequant(QTYPE_BF16, (const uint8_t *)*slot + (uint64_t)r * D * 2, (uint64_t)m * D, tmp, NULL) &&
-         q4x_kv_put(tmp, tmp, m, D, (uint8_t *)q + (uint64_t)r * rb, spare, NULL);
-  }
-  ok = ok && hipDeviceSynchronize() == hipSuccess;
-  hipFree(spare), hipFree(tmp);
-  if (!ok)
-    return hipFree(q), fail(err, "the LM head's Q8_0 not made (GPU memory, or a launch)");
+  void *q = NULL;
+  if (!gpu_q8_rows(QTYPE_BF16, *slot, (uint64_t)D * 2, V, D, &q))
+    return fail(err, "the LM head's Q8_0 not made (GPU memory, or a launch)");
   hipFree(*slot);
   *slot = q, f->head_type = QTYPE_Q8_0;
   return true;
@@ -164,11 +137,7 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
   const uint64_t in = (uint64_t)g->ssm_inner, ch = 2ull * g->ssm_groups * g->ssm_state + in;
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
   const uint64_t wide = ff > ch ? ff : ch; /* mm's widest input: the SwiGLU's down */
-  const struct
-  {
-    void *p;
-    uint64_t bytes;
-  } want[] = {
+  const GpuWant want[] = {
       {&f->h, n * D * F},       {&f->xn, n * D * F},  {&f->out, n * D * F},     {&f->qkv, n * ch * F},
       {&f->z, n * in * F},      {&f->al, n * vh * F}, {&f->be, n * vh * F},     {&f->g, n * vh * F},
       {&f->b, n * vh * F},      {&f->cv, n * ch * F}, {&f->qkn, n * 2 * g->ssm_groups * g->ssm_state * F},
@@ -181,8 +150,8 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
       {&f->tok, n * 4},         {&f->overflow, 4},    {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2},
   };
   bool ok = q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, max_ctx, Q4X_THETA_GGML, &f->rope) && upload(f, err);
-  for (size_t i = 0; ok && i < sizeof want / sizeof *want; i++)
-    ok = alloc(want[i].p, want[i].bytes) || fail(err, "GPU memory refused (a step's buffers)");
+  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
+              fail(err, "GPU memory refused (a step's buffers)"));
   f->head_type = w->output->type;
   ok = ok && head_q8(f, err) && hipMemset(f->overflow, 0, 4) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess &&

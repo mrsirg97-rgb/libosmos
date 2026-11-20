@@ -2,6 +2,7 @@
    layer's blocks; hip_hy4_seq.c: a sequence) */
 #pragma once
 
+#include "osmos/gpu/bufs.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -96,6 +97,7 @@ struct Hy4Forward
   void *tap_arg;
   struct Hy4Dfly *dfly;                /* DFly2, when loaded (hip_hy4_dfly.c) */
   int dfly_slot[HY4_MAX_LAYERS];       /* a target layer's draft layer reading it, -1 none */
+  GpuBufs bufs; /* the step's buffers (want[]'s): freed from it */
 };
 
 struct Hy4Seq

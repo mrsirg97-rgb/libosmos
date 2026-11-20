@@ -417,7 +417,8 @@ __global__ __launch_bounds__(kThreads) void mla_split_kernel(const float* qa, co
 // chunks (its Q's A fragments in registers), the four partial tiles summed in LDS in the waves' order (every wave the
 // same S), the online softmax a wave's own copy (the same P), then a wave a quarter of the latent's output (8 tiles).
 // f16 in, F32 sums - the read's math, not the F32 path's bits; the sink folded at the end (the merge's arithmetic).
-// a decode's and a verify's steps (16 tokens or fewer) stay on mla_split_kernel (their bits the reference-checked)
+// a decode's and a verify's steps (not a read) stay on mla_split_kernel (their bits the reference-checked); a read's
+// at any size on this one (its bits a prompt's however it is split)
 constexpr uint32_t kMlaRow = 576;  // a row at most (Hy4-flash's 512 + 64: the LDS a 2-group block fits)
 constexpr uint32_t kMlaQc = (kMlaRow / 16 + 3) / 4, kMlaKeys = 16, kMlaKRow = kMlaRow + 8, kMlaVRow = kMlaKeys;
 template <uint32_t G>  // head groups a block (each 16 heads, 4 waves): the key tile loaded once for all
@@ -921,14 +922,11 @@ __global__ __launch_bounds__(128) void ix_score_mm2_kernel(const float* q, const
   }
 }
 
-// the selection: a block a token; scored, its scores ix_score_kernel's - else computed here, a thread a group (a
-// prompt's many tokens: one block each the better shape; the same bits either way)
-__global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, const float* w, const float* groups,
-                                                             uint32_t heads, uint32_t dim, uint32_t pool, uint32_t top,
-                                                             const int32_t* pos, uint32_t max_groups, float* scores,
-                                                             int32_t* sel, int32_t* n_sel, bool scored,
-                                                             bool dense_only) {
-  __shared__ float qs[kIxDim * 16], ws[16];
+// the selection: a block a token, its scores the scorer's (ix_score_*: 0.11.2 - its own F32 loop removed, never
+// called, its LDS rows at another stride than it read them)
+__global__ __launch_bounds__(kThreads) void ix_select_kernel(const int32_t* pos, uint32_t pool, uint32_t top,
+                                                             uint32_t max_groups, float* scores, int32_t* sel,
+                                                             int32_t* n_sel, bool dense_only) {
   __shared__ uint32_t lds[kThreads];
   const uint32_t t = blockIdx.x, own = (uint32_t) pos[t] / pool;
   int32_t* out = sel + (uint64_t) t * top;
@@ -939,21 +937,6 @@ __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, con
   }
   if (dense_only) return;  // (the spread selection's tokens: ix_wide_*)
   float* sc = scores + (uint64_t) t * max_groups;
-  if (!scored) {
-    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i / dim * kIxRow + i % dim] = q[(uint64_t) t * heads * dim + i];
-    for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
-    __syncthreads();
-    for (uint32_t g = threadIdx.x; g < own; g += kThreads) {
-      const float* k = groups + (uint64_t) g * dim;
-      float s = 0;
-      for (uint32_t h = 0; h < heads; h++) {
-        float d = 0;
-        for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * dim + i], k[i], d);
-        s = fmaf(ws[h], fmaxf(d, 0.0f), s);
-      }
-      sc[g] = s;
-    }
-  }
   __syncthreads();
   const uint32_t want = top - 1;
   __shared__ uint32_t hist[256], st_prefix, st_need;
@@ -1324,14 +1307,16 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
   if (!q || !w || !groups || !pos || !scores || !sel || !n_sel || !heads || heads > 16 || !dim || dim > kIxDim ||
       !pool || top < 2 || !n_tok || !max_groups)
     return false;
-  // the scores tiled for every step (a prompt's too: the same bits as the select kernel's own loop); the selection over
-  // many blocks for a decode's or a verify's few tokens, a block a token for a prompt's many
+  // a read's scores the matrix cores' at any step size (its bits a prompt's however it is split: 0.11.2 - a read's
+  // step of kIxSpreadTokens or fewer took the F32 loop's, a prompt's last chunk or a short turn another math); a
+  // decode's or a verify's F32. the selection over many blocks for a step's few tokens, a block a token for many (the
+  // same picks either way: integer counts)
   const bool spread = n_tok <= kIxSpreadTokens;
   static const bool exact = getenv("HY4_IX_F32") != nullptr;  // (a read's scores the F32 loop's: A/B)
-  if (read && !spread && !exact && dim == kIxDim && heads == 16 && !getenv("HY4_IX_MM1"))
+  if (read && !exact && dim == kIxDim && heads == 16 && !getenv("HY4_IX_MM1"))
     ix_score_mm2_kernel<<<dim3((max_groups + kM2Groups - 1) / kM2Groups, (n_tok + kM2Tok - 1) / kM2Tok), 128, 0,
                           st(stream)>>>(q, w, groups, pool, top, pos, n_tok, max_groups, scores);
-  else if (read && !spread && !exact && dim == kIxDim && heads <= 16)
+  else if (read && !exact && dim == kIxDim && heads <= 16)
     ix_score_mm_kernel<<<dim3((max_groups + kMmGroups - 1) / kMmGroups, (n_tok + kMmTok - 1) / kMmTok), 128, 0,
                          st(stream)>>>(q, w, groups, heads, pool, top, pos, n_tok, max_groups, scores);
   else if (!read && heads == 16 && dim == kIxDim && !getenv("HY4_IX_TILE"))
@@ -1341,8 +1326,7 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
     ix_score_kernel<<<(max_groups + kIxTile - 1) / kIxTile, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool,
                                                                                          top, pos, n_tok, max_groups,
                                                                                          scores);
-  ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool, top, pos, max_groups, scores,
-                                                       sel, n_sel, true, spread);
+  ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(pos, pool, top, max_groups, scores, sel, n_sel, spread);
   if (!spread) return ok();
   static IxWide* wst = nullptr;  // (the spread selection's scratch: kIxSpreadTokens tokens' - made once)
   static uint32_t* wcnt = nullptr;

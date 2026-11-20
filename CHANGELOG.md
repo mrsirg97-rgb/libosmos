@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.11.2]: the audit - correctness across the engine, its families' shared code, the API and server's edges
+
+A sweep of all of libosmos after six families in a few weeks (DESIGN.md, "0.11.2: the audit"): read-only reviewers by
+area, every finding reproduced - a test failing before its fix, or a replay - before it counted. Every family's bits
+are 0.11.1's but where a fix below says otherwise (the GPU suite, each family's reference fixtures).
+
+- **Engine and kernels, the fixes**:
+  - osmos1.7b with its drafter: osmos-serve never seeded the drafter from a prompt (every drafted turn refused), and a
+    drafted turn ending at an LSA block's close answered ERR after its whole answer.
+  - Qwen3.5: one f16 overflow refused every later step on every lane until a restart; its decode attention split a
+    token's keys by its step's last token past 8,192 keys (its bits its step's: a verify's against a decode's).
+  - Hy4-flash: a prompt's bits depended on how it was split (a read of 16 tokens or fewer scored in F32).
+  - DeepSeek: a batch refused by its own checks marked its conversations broken for good; a failed SSD read held an
+    expert's slot for good; its drafter drafted from a loaded conversation's stale rings.
+  - the matmul: two kernels read past their input for a block's dead tiles (a possible GPU fault, no wrong output).
+  - LFM3: a rollback across a rope stage (non-default tables), OSMOS_LFM3_STAGES half-parsed, its state identity left
+    out its LSA maps (a conversation kept under 0.11.1 is read again once).
+  - smaller: Hy4 took --lsa and ignored it; DFlash2 files loaded that no draft could use; a refused step's logits
+    served from the step before; Qwen's MTP seed had no step guard.
+- **The families' shared code**: one batch splitter and room check (five families), one DFlash2 drafter for Qwen and
+  LFM3, one weights upload, step buffers from one table, one kept-logits pick, one Q8_0 head copy - each proven by the
+  same ids hash or reference drafts and the families' tests.
+- **osmos-api**: a stream gets an SSE keep-alive every 15 s (a long prompt's silent read was taken for a dead server,
+  and its client's retry read it again from the start); an answer that did not parse is a 500 with x-should-retry:
+  false (OpenAI's clients generated it three times); the loading 503 says Retry-After; a lone UTF-16 surrogate reads
+  as U+FFFD (a JS harness's cut string refused the conversation); ids carry the run's start (they repeated after a
+  restart); a huge max_tokens and tool_choice none with no tools taken; Expect: 100-continue answered.
+- **osmos-serve**: --parallel at most 64 (past it a round overran its arrays); two servers on one slots folder no
+  longer delete each other's conversations; a single lane's failed continue restarts its conversation.
+- **The installer**: --prune keeps what a --rollback needs; --rig run again reaches the row's config; a resumed
+  download asks the disk only for what is missing; a --ctx rig would refuse said before the fetch; a failed step one
+  line, not a traceback; the --rig-default prompt names the row.
+
 ## [0.11.1]: osmos1.7b - vibes1.7b retrained and renamed, its rope native
 
 vibes1.7b becomes **osmos1.7b** ([mrsirg97-rgb/osmos1.7b](https://huggingface.co/mrsirg97-rgb/osmos1.7b)): the same

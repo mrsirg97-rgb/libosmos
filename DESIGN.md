@@ -2028,6 +2028,57 @@ table (Lfm3Stage {from, factor}, YaRN over the native 262,144), each boundary it
 prompt 1.04M tokens in 488 s). the pack 512K (the operator's, 2026-11-19): 6/6 needles to 524K (10/50/90% depth),
 the forward 2M-capable for a model trained past it (a retrain, or vibes27b).
 
+## 0.11.2: the audit - correctness, then the families' shared code (2026-11-20)
+
+the operator's: a full sweep after six families in a few weeks - the engine and kernels first (correctness, then
+where the families' code could be one), the API and server's edge cases after. six read-only reviewers by area
+(DeepSeek and the engine, Qwen's two, Inkling and Hy4, LFM3 and LSA, the shared kernels, and one for duplication);
+every candidate reproduced before it counted - a test that fails on the code before the fix.
+
+**found and fixed** (each its test, failing before): LFM3's drafter seed window 0 (osmos-serve never seeded it from
+a prompt: every drafted turn refused - its bench seeded by hand); Qwen3.5's f16 overflow flag never cleared (one
+overflowing step, every later step refused on every lane); q35_attn_decode's key split by the call's last token,
+not each token's (past 8,192 keys a token's bits its step's - a verify's against a decode's; its test needed a call
+across a multiple of 512 to show it); DeepSeek's batch marked broken by a refusal before any work (a token past the
+vocabulary: the conversation dead); Hy4's read scores by a call's token count (16 or fewer F32, more the matrix
+cores': a prompt's bits by its chunks - 0.11.0's own gap); gemm_kernel's dead tiles read past an x16 sized to its
+tokens; LFM3's rollback past a stage's from, and OSMOS_LFM3_STAGES half-parsed. the smaller: Hy4 took --lsa and
+ignored it, wrote its rope table before its bound check, and a dead branch of ix_select_kernel read LDS at another
+stride; DFlash2 files loaded that every draft would refuse; a refused step's half-written slot table served the step
+before's logits; a failed stream read left its slot held for good (the membrane released it in the other pool);
+DeepSeek's drafter drafted from a loaded sequence's stale rings; q4x's MTP seed had no step guard; LFM3's identity
+left out its LSA maps; ops_topk's mask check rounded down; mm_group's contract claimed mm_run's bits for Q6_K under
+2,048 columns (corrected, no shape changed). not fixed, written down: Hy4's spread selection's scratch is one a
+process (one forward a process: the engine's); the f16 casts of Hy4's read kernels (mla_mm, ix_score_mm2) set no
+overflow flag (normed inputs: not reached).
+
+**the shared code** (each proven: the ids hash, a reference's drafts, the families' GPU tests, then the suite):
+the engine's batch runs and room (hip_engine_runs.c: five families' loops); one DFlash2 drafter (src/q4x/
+dflash_core.h: Qwen's and LFM3's, each a DfHost of its own calls - Qwen's 511 of 511 drafts the reference's, LFM3's
+rounds the same); the weights' table (gpu_upload_table, gpu_free_table: four uploads); the step buffers from one table
+(bufs.h: three families' allocation and teardown lists kept in step by hand); the kept rows' logits and greedy
+pick (kept.h: three copies); the Q8_0 head (gpu_q8_rows: two). not done, and why: the families' sequence fields as one
+struct (each family's reach and rollback mostly its own - LSA's closes, the stages, its rings, its n-grams: a
+layout change in four families for little), the state files' framing (each header its format; the parts already
+shared), the draft confidence loop (Qwen and LFM3 share it in the core; the rest compute their confidence apart),
+the weight role checks (their messages the weight tests' exact needles), the identity's file loops (two lines each).
+
+**then the API and the server** (three reviewers: osmos-api, osmos-serve, the installer and rig; the same rule - each
+reproduced first, a replay or a test). osmos-serve: a drafted turn's last token verified alone at an LSA block's
+close (LFM3's drafts stop short of one) was rolled back past the close, refused, and the turn answered ERR after its
+whole answer had streamed - its last token now printed without a verify, as a greedy one's (osmos-serve by its
+protocol, 500 ids then 12: ERR before, DONE after); --parallel past 64 overran a round's arrays; two servers on one
+slots folder deleted each other's conversations and in-flight writes; a single lane's failed continue left its held
+ids apart from its state. osmos-api: a long prompt's read was silent for minutes - a client's idle timeout took it for
+a dead server, and its retry read the prompt again from the start (an SSE keep-alive every 15 s); a deterministic 500
+retried by OpenAI's clients (x-should-retry: false), the loading 503 without Retry-After, a lone UTF-16 surrogate
+refused (now U+FFFD), ids repeated across a restart, a huge max_tokens and tool_choice none with no tools refused,
+Expect: 100-continue unanswered. the installer: --prune then --rollback left rows on a deleted build, --rig again
+never reached the row's frozen config, a resumed download's disk check counted what was on disk, a --ctx rig refuses
+found after the fetch, a failed step a traceback. not done, written down: the marks' RAM is not counted against
+--fill (unmeasured), usage on the finish chunk rather than OpenAI's separate one, a half-closed client taken as gone,
+DeepSeek's image placeholder refused in any message (deliberate, tested).
+
 ## osmos1.7b: rope (measured, 2026-11-20)
 
 osmos1.7b (0.11.1: vibes1.7b renamed, retrained on 32K-token examples, the same tensors and template) read again as

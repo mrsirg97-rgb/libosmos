@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 extern "C" {
@@ -37,7 +38,7 @@ int main() {
     return 77;
   }
   const uint32_t H = 24, KV = 4, D = 256, kv = KV * D, q = H * D;
-  for (const uint32_t pos0 : {0u, 5000u}) {
+  for (const uint32_t pos0 : {0u, 5000u, 8702u}) {  // (8,702: past 8,192 keys, a call across 8,704 = 17 x 512)
     const uint32_t T = 300, ctx = pos0 + T;
     std::vector<float> hq((size_t) T * q), hk((size_t) ctx * kv), hv((size_t) ctx * kv), hg((size_t) T * q);
     for (auto& x : hq) x = 4.0f * uniform();  // (scores of a few units: a softmax with a shape)
@@ -77,6 +78,19 @@ int main() {
     std::printf("  %u tokens after %u: the prompt's attention against the decode's F32 - relative error %.2e, "
                 "largest gap %.2e; %.2f ms\n", T, pos0, std::sqrt(num / den), worst, ms);
     CHECK(std::sqrt(num / den) < 5e-3);
+    // the decode a step of Q35_ATTN_DECODE_MAX tokens at a time: each token's bits its one-token call's (0.11.2 - past
+    // 8,192 keys a step's first tokens took its last's split)
+    for (uint32_t t = 0; t < T; t += Q35_ATTN_DECODE_MAX) {
+      const uint32_t m = T - t < Q35_ATTN_DECODE_MAX ? T - t : Q35_ATTN_DECODE_MAX;
+      CHECK(q35_attn_decode(dq + (size_t) t * q, kc, vc, m, H, KV, D, nullptr, pos0 + t, dg + (size_t) t * q, da,
+                            out + (size_t) t * q, nullptr));
+    }
+    CHECK(hipMemcpy(a.data(), out, a.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    size_t apart = 0;
+    for (size_t i = 0; i < a.size(); i++) apart += std::memcmp(&a[i], &r[i], 4) != 0;
+    std::printf("  the decode %u tokens a call: %zu of %zu values apart from a token a call\n", Q35_ATTN_DECODE_MAX,
+                apart, a.size());
+    CHECK(apart == 0);
     hipFree(dq), hipFree(dk), hipFree(dv), hipFree(dg), hipFree(out), hipFree(ref), hipFree(kc), hipFree(vc),
         hipFree(fa), hipFree(da);
   }

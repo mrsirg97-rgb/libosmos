@@ -53,6 +53,10 @@ bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q
     return q4x_fail(err, "no forward with an MTP head, or a sequence of another forward");
   if (s->broken)
     return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+  if (s->step_n && s->step_id != f->steps) /* (DFlash's guard: m.hid a later step's rows - 0.11.2, another sequence's
+                                              h read as its own) */
+    return q4x_fail(err, "the head's h another step's: seed right after the sequence's step (a batch of at most 64 "
+                         "sequences)");
   if (!s->step_n || from < s->step_pos0 || from >= to || to > s->step_pos0 + (int32_t)s->step_n || to > s->pos)
     return q4x_fail(err, "positions not of the sequence's last step");
   const Q4xGeometry *g = &f->w->geo;

@@ -61,13 +61,13 @@ bool hy4_ix_select(const float *q, const float *w, const float *groups, uint32_t
                    uint32_t top, const int32_t *pos, uint32_t n_tok, uint32_t max_groups, float *scores, int32_t *sel,
                    int32_t *n_sel, bool read, void *stream);
 
-#endif
-
 /* DFly2's draft block (0.11.0) */
 #define HY4_DFLY_MAX_ROWS 8 /* a draft block's rows at most (the anchor and its masks) */
 bool hy4_dfly_sel(const int32_t *snap, const int32_t *snap_n, int32_t anchor, uint32_t pool, uint32_t top,
                   uint32_t rows, uint32_t cap, int32_t *sel, int32_t *n_sel, void *stream);
 bool hy4_dfly_pick(const float *logits, uint32_t n, int32_t *id, float *p, void *stream);
+
+#endif
 
 /*
 hy4_hc_pre

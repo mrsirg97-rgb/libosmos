@@ -64,7 +64,7 @@ int http_read(Http *h, char err[API_ERR])
   if (sscanf(head, "%7s %255s %15s", h->method, h->path, version) != 3 || strncmp(version, "HTTP/1.", 7))
     return free(head), snprintf(err, API_ERR, "not an HTTP/1.x request line"), 400;
   size_t length = 0;
-  bool has_length = false;
+  bool has_length = false, cont = false;
   for (char *l = strstr(head, "\r\n") + 2; l < end; l = strstr(l, "\r\n") + 2)
   {
     if (!strncasecmp(l, "Content-Length:", 15))
@@ -83,6 +83,8 @@ int http_read(Http *h, char err[API_ERR])
     }
     else if (!strncasecmp(l, "Transfer-Encoding:", 18))
       return free(head), snprintf(err, API_ERR, "a chunked body (send its Content-Length)"), 411;
+    else if (!strncasecmp(l, "Expect:", 7) && strcasestr(l, "100-continue") && strcasestr(l, "100-continue") < strstr(l, "\r\n"))
+      cont = true;
   }
   if (strcmp(h->method, "POST") == 0 && !has_length)
     return free(head), snprintf(err, API_ERR, "a POST without Content-Length"), 411;
@@ -93,6 +95,9 @@ int http_read(Http *h, char err[API_ERR])
   h->body_n = have < length ? have : length;
   memcpy(h->body, end + 4, h->body_n);
   free(head);
+  if (cont && h->body_n < length) /* the client waits for this before its body (curl's, past 1 KB: 0.11.2 - a second
+                                     lost a request, its wait for one never sent) */
+    send_all(h->fd, "HTTP/1.1 100 Continue\r\n\r\n", 25);
   while (h->body_n < length)
   {
     const ssize_t k = recv(h->fd, h->body + h->body_n, length - h->body_n, 0);
@@ -137,11 +142,18 @@ bool http_stream_event(int fd, const char *data, size_t n)
   return send_all(fd, "data: ", 6) && send_all(fd, data, n) && send_all(fd, "\n\n", 2);
 }
 
+bool http_stream_comment(int fd) { return send_all(fd, ": keep-alive\n\n", 14); }
+
 bool http_error(int fd, int status, const char *message) { return http_error_code(fd, status, message, NULL, NULL); }
 
 /* with OpenAI's param and code (or NULL): a client's own handling keyed on them - context_length_exceeded the one
    harnesses compact a conversation on (0.9.2) */
 bool http_error_code(int fd, int status, const char *message, const char *param, const char *code)
+{
+  return http_error_head(fd, status, message, param, code, NULL);
+}
+
+bool http_error_head(int fd, int status, const char *message, const char *param, const char *code, const char *head)
 {
   JsonBuf b = {0};
   json_puts(&b, "{\"error\": {\"message\": ");
@@ -152,7 +164,7 @@ bool http_error_code(int fd, int status, const char *message, const char *param,
   if (code)
     json_puts(&b, ", \"code\": "), json_dump_string(&b, code, strlen(code));
   json_puts(&b, "}}");
-  const bool ok = !b.oom && http_send(fd, status, "application/json", b.p, b.n);
+  const bool ok = !b.oom && http_send_h(fd, status, "application/json", b.p, b.n, head);
   free(b.p);
   return ok;
 }

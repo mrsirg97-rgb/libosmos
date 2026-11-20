@@ -157,32 +157,27 @@ static bool experts_whole(Q4xForward *f, char *err)
   return ok;
 }
 
-static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
+/* a tensor not read: one the overlay stands in for, the one skipped, or one on the experts' membrane */
+typedef struct UploadSkip
 {
-  void *pin = NULL;
-  if (!(*dev = calloc(g->n_tensors, sizeof **dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
-    return q4x_fail(err, "out of memory (the weights' table, or a pinned piece)");
-  bool ok = true;
-  for (size_t i = 0; ok && i < g->n_tensors; i++)
-  {
-    const GgufTensor *t = &g->tensors[i];
-    if ((shadow && gguf_tensor(shadow, t->name)) || t == skip || on_membrane(f, t))
-      continue;
-    const char *why = gpu_read_tensor(g, t, pin, READ_PIECE, &(*dev)[i]);
-    ok = !why;
-    if (!ok && err)
-      snprintf(err, Q4X_FWD_ERR, "%s: not read into GPU memory (%s)", t->name, why);
-  }
-  hipHostFree(pin);
-  return ok;
+  const Q4xForward *f;
+  const Gguf *shadow;
+  const GgufTensor *skip;
+} UploadSkip;
+
+static bool not_uploaded(const GgufTensor *t, void *arg)
+{
+  const UploadSkip *u = arg;
+  return (u->shadow && gguf_tensor(u->shadow, t->name)) || t == u->skip || on_membrane(u->f, t);
 }
 
-static void free_table(const Gguf *g, void **dev)
+static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
 {
-  for (size_t i = 0; dev && i < g->n_tensors; i++)
-    hipFree(dev[i]);
-  free(dev);
+  UploadSkip u = {f, shadow, skip};
+  return gpu_upload_table(g, READ_PIECE, not_uploaded, &u, dev, err, err ? Q4X_FWD_ERR : 0);
 }
+
+static void free_table(const Gguf *g, void **dev) { gpu_free_table(g, dev, NULL); }
 
 /* the MTP head's buffers */
 static bool mtp_buffers(Q4xForward *f, char *err)
@@ -202,37 +197,11 @@ static bool mtp_buffers(Q4xForward *f, char *err)
 
 #define Q8_0 8 /* ggml's: the selector kernel's codebooks */
 
-/* the drafter's buffers: a feed's max_tokens context rows, a block's */
-static bool df_buffers(Q4xForward *f, char *err)
+/* the drafter's buffers (the DFlash2 core's): a feed's max_tokens context rows, a block's */
+static bool q4x_df_buffers(Q4xForward *f, char *err)
 {
-  const Q4xDflashGeometry *g = &f->df->geo;
-  const uint64_t n = f->max_tokens, B = (uint64_t)g->block, D = (uint64_t)g->n_embd, V = (uint64_t)g->n_vocab;
-  const uint64_t kv = (uint64_t)g->n_kv_heads * g->head_dim, q = (uint64_t)g->n_heads * g->head_dim;
-  const uint64_t rows = n > B ? n : B, dyn = 2ull * Q4X_DFLASH_CONV * (D / (uint64_t)g->conv_group);
-  const uint64_t ff = (uint64_t)g->ff, k = (uint64_t)g->sel_top_k, iota = (uint64_t)f->max_ctx + B;
-  Q4xDfBuf *d = &f->d;
-  bool ok = alloc(&d->th, n * D * F) && alloc(&d->k, rows * kv * F) && alloc(&d->v, rows * kv * F) &&
-            alloc(&d->h, B * D * F) && alloc(&d->x, B * D * F) && alloc(&d->xc, B * D * F) &&
-            alloc(&d->dyn, B * dyn * F) && alloc(&d->q, B * q * F) && alloc(&d->att, B * q * F) &&
-            alloc(&d->a, B * D * F) && alloc(&d->gate, B * ff * F) && alloc(&d->up, B * ff * F) &&
-            alloc(&d->hn, B * D * F) && alloc(&d->logits, B * V * F) &&
-            alloc(&d->hp, B * (uint64_t)g->sel_rank * F) && alloc(&d->val, B * k * F) && alloc(&d->idx, B * k * 4) &&
-            alloc(&d->top_p, B * F) && alloc(&d->path, B * 4) && alloc(&d->top_id, B * 4) &&
-            alloc(&d->tok, B * 4) && alloc(&d->iota, iota * 4) &&
-            hipHostMalloc((void **)&d->pin_tok, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_path, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_idx, B * k * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_val, B * k * F, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_p, B * F, 0) == hipSuccess;
-  int32_t *h = ok ? malloc(iota * 4) : NULL;
-  for (uint64_t i = 0; h && i < iota; i++)
-    h[i] = (int32_t)i;
-  for (uint64_t i = 1; h && i < B; i++) /* the block's tokens after its anchor: the mask */
-    d->pin_tok[i] = g->mask_token;
-  ok = h && hipMemcpy(d->iota, h, iota * 4, hipMemcpyHostToDevice) == hipSuccess &&
-       hipMemcpy(d->tok, d->pin_tok, B * 4, hipMemcpyHostToDevice) == hipSuccess;
-  free(h);
-  return ok || q4x_fail(err, "GPU memory refused (the drafter's buffers)");
+  return df_buffers(&f->d, &f->df->geo, f->max_tokens, f->max_ctx) ||
+         q4x_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 
 /* a row of the n-gram table: its bytes in the file (the held table's row stride) */
@@ -344,12 +313,7 @@ void q4x_forward_destroy(Q4xForward *f)
     free_table(f->mtp->model, f->mtp_dev);
   if (f->df)
     free_table(f->df->model, f->df_dev);
-  Q4xDfBuf *d = &f->d;
-  void **dbufs = (void **)d;
-  for (size_t i = 0; i < offsetof(Q4xDfBuf, pin_tok) / sizeof(void *); i++)
-    hipFree(dbufs[i]);
-  hipHostFree(d->pin_tok), hipHostFree(d->pin_path), hipHostFree(d->pin_idx), hipHostFree(d->pin_val);
-  hipHostFree(d->pin_p);
+  df_buffers_free(&f->d);
   Q4xMtpBuf *m = &f->m;
   hipFree(m->hid), hipFree(m->hin), hipFree(m->emb), hipFree(m->hn), hipFree(m->join), hipFree(m->logits);
   hipFree(m->top_id), hipFree(m->top_p), hipHostFree(m->pin_id), hipHostFree(m->pin_p);
@@ -456,7 +420,7 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
       (w->overlay && !upload(NULL, w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
       (f->stream_ngram && !ple_stream(f, err)) ||
       (mtp && (!upload(NULL, mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))) ||
-      (f->df && (!upload(NULL, f->df->model, NULL, NULL, &f->df_dev, err) || !df_buffers(f, err))) ||
+      (f->df && (!upload(NULL, f->df->model, NULL, NULL, &f->df_dev, err) || !q4x_df_buffers(f, err))) ||
       !room_left("the forward", err))
     return q4x_forward_destroy(f), NULL;
   return f;

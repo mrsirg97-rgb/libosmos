@@ -61,7 +61,7 @@ int32_t lfm3_seq_position(const Lfm3Seq *s) { return s ? s->pos : -1; }
 
 bool lfm3_seq_prompt(Lfm3Seq *s, uint32_t end)
 {
-  if (!s || s->broken)
+  if (!s || s->broken || end > s->f->max_ctx) /* (0.11.2: an end past the context taken - the other families' refused) */
     return false;
   s->prompt_end = end;
   return true;
@@ -74,7 +74,14 @@ uint32_t lfm3_seq_reach(const Lfm3Seq *s)
   if (!s || s->broken)
     return 0;
   const int64_t past_close = (int64_t)s->pos - (int64_t)s->closed * LSA_WINDOW; /* a rollback never un-closes */
-  return !s->f->lsa || past_close >= (int64_t)s->back ? s->back : (uint32_t)(past_close > 0 ? past_close : 0);
+  uint32_t r = !s->f->lsa || past_close >= (int64_t)s->back ? s->back : (uint32_t)(past_close > 0 ? past_close : 0);
+  if (s->stage) /* never back to the stage's from or below: a sequence there is the stage before's (0.11.2 - a
+                   crossing step's own tokens rolled back past it, its rope then the new stage's at an old position) */
+  {
+    const int64_t past_from = (int64_t)s->pos - (int64_t)s->f->stage[s->stage].from - 1;
+    r = past_from < (int64_t)r ? (uint32_t)(past_from > 0 ? past_from : 0) : r;
+  }
+  return r;
 }
 
 /* a convolution's state the slot before (its ring kept each of the last tokens'); a full layer's rows past the
@@ -102,7 +109,7 @@ uint64_t lfm3_identity(const Lfm3Forward *f)
 {
   const Lfm3Geometry *g = &f->w->geo;
   uint64_t h = fnv_u64(STATE_VERSION, 1469598103934665603ull);
-  h = fnv(g, sizeof *g, h), h = fnv_u64(f->ring, h), h = fnv_u64(f->lsa, h), h = fnv_u64(f->yarn_from, h), h = fnv_u64(f->stages, h), h = fnv_u64(f->yarn_static_ctx, h), h = fnv(f->stage, sizeof f->stage, h);
+  h = fnv(g, sizeof *g, h), h = fnv_u64(f->ring, h), h = fnv_u64(f->lsa, h), h = fnv_u64(f->lsa_id, h), h = fnv_u64(f->yarn_from, h), h = fnv_u64(f->stages, h), h = fnv_u64(f->yarn_static_ctx, h), h = fnv(f->stage, sizeof f->stage, h);
   for (int i = 0; i < f->w->model->n_files; i++)
     h = fnv_file(f->w->model->paths[i], h);
   return h;

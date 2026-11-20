@@ -71,8 +71,12 @@ bool http_send_h(int fd, int status, const char *type, const char *body, size_t 
 bool http_stream_open(int fd);
 bool http_stream_open_h(int fd, const char *head);
 bool http_stream_event(int fd, const char *data, size_t n);
+/* an SSE comment (": keep-alive"), every client's to pass over: a long prompt's read not silent (0.11.2) */
+bool http_stream_comment(int fd);
 bool http_error(int fd, int status, const char *message);
 bool http_error_code(int fd, int status, const char *message, const char *param, const char *code);
+/* the same with header lines of its own ("Name: value\r\n" each, or NULL): a 503's Retry-After (0.11.2) */
+bool http_error_head(int fd, int status, const char *message, const char *param, const char *code, const char *head);
 void http_linger(int fd, bool wait);
 
 /* the server: what a request needs */

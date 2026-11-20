@@ -149,8 +149,8 @@ int main(int argc, char **argv)
     sv.ram_kept = FIT_RAM_FREE;
   const char *par = opt(argc, argv, "--parallel", NULL);
   const int lanes = par ? atoi(par) : 1;
-  if (lanes < 1)
-    return die("--parallel takes 1 or more");
+  if (lanes < 1 || lanes > OSMOS_MAX_LANES) /* (0.11.2: past 64 a round's lane arrays overran, every batch refused) */
+    return die("--parallel takes 1 to 64 (OSMOS_MAX_LANES)");
   char *list = strdup(opt(argc, argv, "--eos", "1")), *sv_ = NULL;
   for (char *x = strtok_r(list, ",", &sv_); x && sv.n_eos < SERVE_MAX_EOS; x = strtok_r(NULL, ",", &sv_))
     sv.eos[sv.n_eos++] = (int32_t)atol(x);

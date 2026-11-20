@@ -4,23 +4,18 @@
 /* the lfm3 forward's state (osmos/lfm3/forward.h), shared by hip_lfm3_make.c (the weights, buffers, sequences) and
    hip_lfm3.c (the step) */
 
+#include "osmos/gpu/bufs.h"
 #include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/lsa.h"
 #include "osmos/lfm3/forward.h"
 #include "osmos/q4x/dflash.h"
+#include "../q4x/dflash_core.h"
 
 #define F 4ull               /* a float's bytes */
 #define LFM3_CONV_SLOTS (LFM3_MAX_BACK + 1) /* a convolution's states a sequence keeps: the current, and a rollback's */
 
-/* the drafter's buffers (q4x's Q4xDfBuf): a seed's context rows, a block's, the selector's, pinned copies out */
-typedef struct Lfm3DfBuf
-{
-  float *th, *k, *v, *h, *x, *xc, *dyn, *q, *att, *a, *gate, *up, *hn, *logits, *hp, *val, *top_p;
-  int32_t *idx, *path, *top_id, *tok, *iota;
-  int32_t *pin_tok, *pin_path, *pin_idx;
-  float *pin_val, *pin_p;
-} Lfm3DfBuf;
+typedef DfBuf Lfm3DfBuf; /* the drafter's buffers: the DFlash2 core's (src/q4x/dflash_core.h) */
 
 struct Lfm3Forward
 {
@@ -47,6 +42,7 @@ struct Lfm3Forward
   /* latent sparse attention (Lfm3Options' lsa): a full layer's maps (device, lsa_in x LSA_DIM), the read's scratch,
      a query's index and read (device), a block's index vectors, centroids and buckets on the host (Ward's) */
   bool lsa;
+  uint64_t lsa_id; /* the maps file's (fnv_file): a state's index vectors and buckets theirs (lfm3_identity - 0.11.2) */
   uint32_t lsa_in;
   float *wq[LFM3_MAX_LAYERS], *wk[LFM3_MAX_LAYERS];
   LsaScratch *lsa_s;
@@ -82,6 +78,7 @@ struct Lfm3Forward
   uint32_t df_ring;
   uint64_t steps; /* the steps run: a sequence's taps its last step's (Lfm3Seq.step_id) */
   Lfm3DfBuf d;
+  GpuBufs bufs; /* the step's buffers (want[]'s): freed from it */
 };
 
 struct Lfm3Seq

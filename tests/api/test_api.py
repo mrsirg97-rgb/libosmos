@@ -69,6 +69,7 @@ class Served:
     """osmos-api over the fake engine, the tokenizer cls.model's"""
     model = MODEL
     settings = {}  # a class's own pack settings beside these
+    env = {}  # a class's own environment for osmos-api
 
     @classmethod
     def setUpClass(cls):
@@ -77,7 +78,7 @@ class Served:
         with open(cls.cfg, "w") as f:
             json.dump(dict({"pack": "test", "model": cls.model, "max_context": 4096, "no_guess": True}, **cls.settings), f)
         cls.port = free_port()
-        env = dict(os.environ, FAKE_DIR=cls.dir)
+        env = dict(os.environ, FAKE_DIR=cls.dir, **cls.env)
         cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE], env=env,
                                     stderr=subprocess.DEVNULL)
         for _ in range(200):
@@ -154,7 +155,8 @@ class Api(Served, unittest.TestCase):
     settings = {"max_tokens": 8192}  # a DeepSeek pack's prompt step
     def test_0_health_while_loading(self):
         self.assertEqual(self.get("/health")[0], 503)
-        self.assertEqual(self.post({"messages": [{"role": "user", "content": "hi"}]}).status, 503)
+        r = self.post({"messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual((r.status, r.getheader("Retry-After")), (503, "10"))  # 0.11.2: a client's retries spaced
         loading = json.loads(self.get("/v1/models")[1])["data"][0]  # 0.9.2: listed, said loading, no context yet
         self.assertEqual((loading["osmos"]["ready"], "context_length" in loading), (False, False))
         r = self.post({"messages": [{"role": "critic", "content": "hi"}]})  # its own fault: 400 even while loading
@@ -616,12 +618,43 @@ class Api(Served, unittest.TestCase):
         self.assertEqual([(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in b["message"]["tool_calls"]],
                          [("mcp", {}), ("mcp", {"search": "fl"})])
 
+    def test_6a2_lenient_limits(self):  # 0.11.2: a huge max_tokens the room; tool_choice none with no tools asks nothing
+        self.ready()
+        for extra in ({"max_tokens": 4294967295}, {"max_completion_tokens": 10 ** 12}, {"tool_choice": "none"},
+                      {"tool_choice": "none", "tools": []}):
+            self.reply("ok</think>fine" + EOS)
+            r = self.post(dict({"messages": [{"role": "user", "content": "x"}]}, **extra))
+            self.assertEqual(r.status, 200, extra)
+            r.read()
+        self.reply("ok</think>fine" + EOS)
+        r = self.post({"messages": [{"role": "user", "content": "x"}], "tools": TOOLS, "tool_choice": "none"})
+        self.assertEqual(r.status, 400)  # with tools: still not built
+        r.read()
+
+    def test_6a3_expect_continue(self):  # 0.11.2: curl's Expect (past 1 KB) answered - it waited for a 100 never sent
+        self.ready()
+        self.reply("ok</think>fine" + EOS)
+        body = json.dumps({"messages": [{"role": "user", "content": "x" * 2000}]}).encode()
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as c:
+            c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                      b"Expect: 100-continue\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n")
+            self.assertTrue(c.recv(64).startswith(b"HTTP/1.1 100 Continue\r\n\r\n"))
+            c.sendall(body)
+            got = b""
+            while True:
+                k = c.recv(65536)
+                if not k:
+                    break
+                got += k
+        self.assertTrue(got.startswith(b"HTTP/1.1 200"), got[:80])
+
     def test_6b_calls_unparsed(self):
         self.ready()
         body = {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS}
         self.reply(BAD_CALLS)
         r = self.post(body)
         self.assertEqual(r.status, 500)
+        self.assertEqual(r.getheader("x-should-retry"), "false")  # 0.11.2: the same answer again - not retried
         msg = json.loads(r.read())["error"]["message"]
         self.assertIn("tool call", msg)
         self.assertIn("not '>\\n' before it", msg)  # the parse's why
@@ -659,6 +692,28 @@ def qwen_template():
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import gen_chat_fixtures_qwen
     return gen_chat_fixtures_qwen.template(QWEN, GGUF_PY)
+
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class KeepAlive(Served, unittest.TestCase):
+    """0.11.2: a stream silent past the keep-alive (a long prompt's read) gets SSE comments - a client's idle timeout
+    not taken for a dead server (its retry read the prompt again from the start, and timed out again)"""
+    env = {"OSMOS_API_KEEPALIVE_MS": "1000"}
+
+    def test_a_silent_read_kept_alive(self):
+        self.ready()
+        self.reply("ok</think>Hello there." + EOS)
+        with open(os.path.join(self.dir, "delay"), "w") as f:
+            f.write("2.5")
+        r = self.post({"messages": [{"role": "user", "content": "hi"}], "stream": True})
+        self.assertEqual(r.status, 200)
+        body = r.read().decode("utf-8")
+        events = [e for e in body.split("\n\n") if e]
+        self.assertIn(": keep-alive", events)  # a comment, a client's to pass over
+        data = [json.loads(e[len("data: "):]) for e in events if e.startswith("data: ") and e != "data: [DONE]"]
+        text = "".join(e["choices"][0]["delta"].get("content") or "" for e in data if e.get("choices"))
+        self.assertEqual((text, events[-1]), ("Hello there.", "data: [DONE]"))
+        os.remove(os.path.join(self.dir, "delay"))
 
 
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")

@@ -338,8 +338,10 @@ int main() {
       const uint32_t a = 1020, b = 8;  // under the base (plain rope), a step across it (the cache turned), the rest
       CHECK(lfm3_step(fy, two, ids.data(), a, 1, err) && lfm3_seq_stage(two) == 0);
       CHECK(lfm3_step(fy, two, ids.data() + a, b, 1, err) && lfm3_seq_stage(two) == 1);
-      CHECK(lfm3_seq_reach(two) == b && !lfm3_seq_rollback(two, b + 1));  // never back across the crossing
-      std::printf("  a rollback across the crossing refused (its reach %u: the crossing step's)\n", lfm3_seq_reach(two));
+      // never back to the stage's from or below (0.11.2: the crossing step's own tokens were within reach - 1,020 in
+      // stage 1, where a sequence fed the same tokens is stage 0's): its reach to 1,025
+      CHECK(lfm3_seq_reach(two) == a + b - 1024 - 1 && !lfm3_seq_rollback(two, a + b - 1024));
+      std::printf("  a rollback to the stage's from refused (its reach %u: back to 1,025)\n", lfm3_seq_reach(two));
       CHECK(lfm3_step(fy, two, ids.data() + a + b, T - a - b, last, err) && lfm3_seq_stage(two) == 1);
       double kc = 0, kcm = 0;
       uint32_t same = 0;
@@ -383,7 +385,13 @@ int main() {
         CHECK(lfm3_step(f3, b3, ids.data(), 1400, 1, err) && lfm3_seq_stage(b3) == 0);
         CHECK(lfm3_step(f3, b3, ids.data() + 1400, 300, 1, err) && lfm3_seq_stage(b3) == 1);
         CHECK(lfm3_step(f3, b3, ids.data() + 1700, T - 1700, 1, err) && lfm3_seq_stage(b3) == 2);
-        lfm3_seq_destroy(a3), lfm3_seq_destroy(b3), lfm3_forward_destroy(f3);
+        // a crossing step's own tokens not rolled back past the stage's from (0.11.2): 1,898 then 4 - at 1,902 in
+        // stage 2 (from 1,900), its reach 1 (back to 1,901), not the step's 4
+        Lfm3Seq* c3 = lfm3_seq_create(f3, err);
+        CHECK(c3 && lfm3_step(f3, c3, ids.data(), 1898, 1, err) && lfm3_seq_stage(c3) == 1);
+        CHECK(lfm3_step(f3, c3, ids.data() + 1898, 4, 1, err) && lfm3_seq_stage(c3) == 2);
+        CHECK(lfm3_seq_reach(c3) == 1 && !lfm3_seq_rollback(c3, 2) && lfm3_seq_rollback(c3, 1));
+        lfm3_seq_destroy(c3), lfm3_seq_destroy(a3), lfm3_seq_destroy(b3), lfm3_forward_destroy(f3);
         const Lfm3Stage desc[] = {{0, 1}, {1900, 2}, {1500, 4}}, late[] = {{10, 1}, {1500, 2}}, zero[] = {{0, 0}},
                         big[] = {{0, 1}, {100, 65}};
         for (const auto& bad : {std::make_pair(desc, 3u), std::make_pair(late, 2u), std::make_pair(zero, 1u),
@@ -391,7 +399,23 @@ int main() {
           const Lfm3Options ob = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, bad.first, bad.second, 0, 0};
           CHECK(!lfm3_forward_create(w, &ob, err));
         }
-        std::printf("  a table's stages (1,500, 1,900): stages 0, 1, 2 at 1,400, 1,700, 2,048; bad tables refused\n");
+        // OSMOS_LFM3_STAGES (a table without a build): a well-formed one taken, any malformed refused (0.11.2: a bad
+        // string used whatever parsed before it)
+        const Lfm3Options oe = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, nullptr, 0, 0, 0};
+        setenv("OSMOS_LFM3_STAGES", "0:1,1500:2,1900:4", 1);
+        Lfm3Forward* fe = lfm3_forward_create(w, &oe, err);
+        CHECK(fe);
+        Lfm3Seq* e3 = lfm3_seq_create(fe, err);
+        CHECK(e3 && lfm3_step(fe, e3, ids.data(), T, 1, err) && lfm3_seq_stage(e3) == 2);
+        lfm3_seq_destroy(e3), lfm3_forward_destroy(fe);
+        for (const char* bad : {"0:1,160000:4x", "0:1;160000:4", "0:1 160000:4", "0:1,4294967396:4", ":1", "0:",
+                                "0:1,", "0:1,1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1"}) {
+          setenv("OSMOS_LFM3_STAGES", bad, 1);
+          CHECK(!lfm3_forward_create(w, &oe, err));
+        }
+        unsetenv("OSMOS_LFM3_STAGES");
+        std::printf("  a table's stages (1,500, 1,900): stages 0, 1, 2 at 1,400, 1,700, 2,048; a crossing's reach its "
+                    "stage's; bad tables and OSMOS_LFM3_STAGES strings refused\n");
       }
       lfm3_seq_destroy(one), lfm3_seq_destroy(two), lfm3_forward_destroy(fy);
     } else {
