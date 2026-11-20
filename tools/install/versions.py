@@ -102,12 +102,14 @@ def build(h, ver, repo, run=subprocess.run, log=print):
     return at
 
 
-def freeze(cfg, ver):
+def freeze(cfg, ver, own=False):
     """the pack's config for version ver: osmos.<ver>.json beside it - written once, from the shared osmos.json (or
-    the frozen file given), never rewritten: a later installer's keys never reach a version that does not know them"""
+    the frozen file given), never rewritten: a later installer's keys never reach a version that does not know them.
+    own: ver the installer's own (--rig: its osmos.json this version's keys) - written again, so a --rig run again
+    with other options (--ctx, --abliterated, --npu) reaches the row (0.11.2: the first run's kept)"""
     d = os.path.dirname(cfg)
     out = os.path.join(d, f"osmos.{ver}.json")
-    if not os.path.exists(out):
+    if own or not os.path.exists(out):
         with open(cfg, encoding="utf-8") as f:
             body = json.load(f)
         tmp = out + ".osmos-tmp"
@@ -205,6 +207,11 @@ def rollback(rig_home, h, log=print):
         if r is None or r.get("command") != mv["to"]:
             log(f"  {mv['id']}: changed since the upgrade - left as it is")
             continue
+        was = command(mv["from"])
+        if was and not os.access(os.path.join(was[0], "bin", "osmos-api"), os.X_OK):  # (0.11.2: a row on a build gone)
+            log(f"  {mv['id']}: {mv['from_version']} is gone ({was[0]}) - left on {last['version']}; "
+                f"--upgrade {mv['from_version']} builds it again")
+            continue
         r["command"] = mv["from"]
         back.append(mv["id"])
         log(f"  {mv['id']}: {last['version']} -> {mv['from_version']}")
@@ -214,10 +221,12 @@ def rollback(rig_home, h, log=print):
 
 
 def unused(rig_home, h):
-    """the versions built under h no rig row runs - the newest kept whatever (the next upgrade's start)"""
+    """the versions built under h no rig row runs and no rollback goes back to - the newest kept whatever (the next
+    upgrade's start). 0.11.2: a journal's versions kept (a prune then a rollback left its rows on a build removed)"""
     vs = installed(h)
     on = rows_on(rig._read(os.path.join(rig_home, "models.json"), []))
-    return [v for v in vs[:-1] if v not in on]
+    back = {mv["from_version"] for e in _read_journal(h) for mv in e.get("rows", []) if mv.get("from_version")}
+    return [v for v in vs[:-1] if v not in on and v not in back]
 
 
 def prune(rig_home, h, yes, log=print):

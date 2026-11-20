@@ -28,6 +28,17 @@ def cache(models, entry):
     return os.path.join(models, ".hf", entry["repo"].replace("/", "--"))
 
 
+def on_disk(models, entry):
+    """the bytes of entry a run already holds in the cache: its whole file (by size - the fetch checks its SHA), else
+    a stopped download's .part - the disk check's (0.11.2: a re-run asked for the whole pack again)"""
+    p = os.path.join(cache(models, entry), entry["path"])
+    if os.path.exists(p) and os.path.getsize(p) == entry["bytes"]:
+        return entry["bytes"]
+    part = p + ".part"
+    n = os.path.getsize(part) if os.path.exists(part) else 0
+    return n if n <= entry["bytes"] else 0
+
+
 def _asset(entry, d, p):
     os.makedirs(d, exist_ok=True)
     url = f"{RELEASES}/{entry['release']}/{entry['path']}"

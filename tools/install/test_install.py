@@ -18,6 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import doctor  # noqa: E402
+import fetch  # noqa: E402
 import layout  # noqa: E402
 import overlay_q4x  # noqa: E402
 import osmos_install  # noqa: E402
@@ -1331,6 +1332,35 @@ class Rig(unittest.TestCase):
                 self.assertEqual(f.read(), b"[{not json")
 
 
+class RigRoom(unittest.TestCase):
+    """0.11.2: a --ctx rig would refuse for a pack's reply reserve refused before any file is fetched, said in a line"""
+
+    def test_small_ctx_refused_first(self):
+        m = manifest.load(REAL)
+        osmos_install.rig_rooms(m, ["osmos1.7b"], None)  # the pack's own context: room
+        with self.assertRaises(SystemExit) as c:
+            osmos_install.rig_rooms(m, ["osmos1.7b"], 131072)  # its reserve 131072: none
+        self.assertIn("--rig osmos1.7b", str(c.exception))
+        self.assertIsNone(rig.room(524288, 131072))
+
+
+class DiskNeed(unittest.TestCase):
+    """0.11.2: the disk check asks for what is not already on disk - a whole file held, a stopped download's .part"""
+
+    def test_cached_and_part_bytes_not_asked_again(self):
+        with tempfile.TemporaryDirectory() as d:
+            m = {"files": {"a": {"repo": "o/r", "revision": "x" * 40, "path": "a.gguf", "bytes": 100},
+                           "b": {"repo": "o/r", "revision": "x" * 40, "path": "b.gguf", "bytes": 300}}}
+            self.assertEqual(osmos_install.fetch_bytes(m, ["a", "b"], d), 400)
+            c = fetch.cache(d, m["files"]["a"])
+            os.makedirs(c)
+            put(os.path.join(c, "a.gguf"), b"x" * 100)    # the first whole
+            put(os.path.join(c, "b.gguf.part"), b"x" * 120)  # the second stopped at 120
+            self.assertEqual(osmos_install.fetch_bytes(m, ["a", "b"], d), 180)
+            put(os.path.join(c, "a.gguf"), b"x" * 99)     # not its size: asked for whole
+            self.assertEqual(osmos_install.fetch_bytes(m, ["a", "b"], d), 280)
+
+
 class Versions(unittest.TestCase):
     """0.9.2: osmos's versions side by side (versions.py) - rig's rows moved between them by their command alone, each
     version's config frozen, the last move undone by --rollback"""
@@ -1472,6 +1502,42 @@ class Versions(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(h, "0.5.9")))
             versions.prune(rig_home, h, True, log=lambda m: None)
             self.assertFalse(os.path.exists(os.path.join(h, "0.5.9")))
+
+    def test_prune_keeps_what_a_rollback_needs(self):  # 0.11.2: prune then rollback left rows on a deleted build
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            self.fake_build(h, "0.9.2")
+            versions.upgrade(rig_home, h, "0.9.2", log=lambda m: None)  # "new" 0.9.1 -> 0.9.2
+            self.assertNotIn("0.9.1", versions.unused(rig_home, h))  # its rollback's version: not unused
+            versions.prune(rig_home, h, True, log=lambda m: None)
+            self.assertTrue(os.path.isdir(os.path.join(h, "0.9.1")))
+            versions.rollback(rig_home, h, log=lambda m: None)
+            self.assertIn("/0.9.1/", self.rows(rig_home)["new"]["command"])
+            self.assertIn("0.9.1", versions.rows_on(list(self.rows(rig_home).values())))  # its row back on it
+            # a build gone all the same (removed by hand): the rollback leaves the row where it is, and says so
+            versions.upgrade(rig_home, h, "0.9.2", log=lambda m: None)
+            shutil.rmtree(os.path.join(h, "0.9.1"))
+            said = []
+            versions.rollback(rig_home, h, log=said.append)
+            self.assertIn("/0.9.2/", self.rows(rig_home)["new"]["command"])
+            self.assertTrue(any("0.9.1" in m and "gone" in m for m in said))
+
+    def test_rig_again_refreezes_its_own_version(self):  # 0.11.2: --rig again with another --ctx kept the first's
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            cfg = os.path.join(pack, "osmos.json")
+            _, frozen = osmos_install.rig_target(cfg, "0.9.1", h, dev=False, build=lambda hh, v: None)
+            with open(cfg, "w") as f:
+                json.dump({"pack": "p", "model": "/m.gguf", "max_context": 8192}, f)
+            osmos_install.rig_target(cfg, "0.9.1", h, dev=False, build=lambda hh, v: None)
+            with open(frozen) as f:
+                self.assertEqual(json.load(f)["max_context"], 8192)
+            self.fake_build(h, "0.9.2")  # an upgrade's freeze still written once: a later key never reaches it
+            versions.freeze(cfg, "0.9.2")
+            with open(cfg, "w") as f:
+                json.dump({"pack": "p", "model": "/m.gguf", "max_context": 8192, "later": 1}, f)
+            with open(versions.freeze(cfg, "0.9.2")) as f:
+                self.assertNotIn("later", json.load(f))
 
     def test_register_keeps_a_rows_other_keys(self):
         with tempfile.TemporaryDirectory() as d:

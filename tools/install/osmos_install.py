@@ -55,7 +55,7 @@ def rig_target(cfg, ver, h, dev, build=lambda h, v: versions.build(h, v, version
         build(h, ver)
     except versions.VersionError as x:
         raise SystemExit(f"--rig: osmos {ver} has no release to build ({x}); --rig-dev registers this checkout's own")
-    return os.path.join(h, ver, "bin", "osmos-api"), versions.freeze(cfg, ver)
+    return os.path.join(h, ver, "bin", "osmos-api"), versions.freeze(cfg, ver, own=True)
 BUILD = [["git", "submodule", "update", "--init"],  # libevt (osmos-serve's loop)
          ["make", "-j"], ["make", "-j", "serve"], ["make", "-j", "api"]]  # the engine, osmos-serve, osmos-api
 
@@ -121,6 +121,11 @@ def plan(m, ids, have, trust_size):
             where = f"release {e['release']}" if "release" in e else e["repo"]
             print(f"  fetch  {fid:16s} {where}/{e['path']} ({e['bytes'] / 1e9:.1f} GB)")
     return found, fetch_ids
+
+
+def fetch_bytes(m, fetch_ids, models):
+    """the bytes the files to fetch still need on disk: each one's past what the cache holds (fetch.on_disk)"""
+    return sum(m["files"][f]["bytes"] - fetch.on_disk(models, m["files"][f]) for f in fetch_ids)
 
 
 def check(ok_why):
@@ -234,7 +239,27 @@ def versions_mode(a):
     return 0
 
 
+def rig_rooms(m, packs, ctx):
+    """--rig: each pack's row refused before anything is fetched, where rig would refuse it after (0.11.2: a --ctx too
+    small for a pack's reply reserve found once its files were down)"""
+    for pid in packs:
+        why = rig.room(ctx or m["packs"][pid]["settings"]["max_context"], m["packs"][pid]["rig"]["reserve"])
+        if why:
+            raise SystemExit(f"--rig {pid}: {why} - a larger --ctx, or none (the pack's own)")
+
+
 def main():
+    """the installer: a failure of a step (a download, the layout, rig, the build) one line, not a traceback (0.11.2)"""
+    try:
+        return run()
+    except (fetch.FetchError, layout.LayoutError, rig.RigError, versions.VersionError) as x:
+        raise SystemExit(f"osmos_install: {x}")
+    except subprocess.CalledProcessError as x:
+        raise SystemExit(f"osmos_install: the build failed ({' '.join(map(str, x.cmd))}, exit {x.returncode}) - "
+                         "its output above says why; --no-build skips it")
+
+
+def run():
     a = parser().parse_args()
     missing = [d for d in a.have if not os.path.isdir(d)]
     if missing:  # 0.9.2: passed over in silence - its files then fetched
@@ -264,6 +289,8 @@ def main():
     for pid in a.packs:
         if pid not in m["packs"]:
             raise SystemExit(f"no pack {pid!r}: --list names them")
+    if a.rig:
+        rig_rooms(m, a.packs, a.ctx)
     print("the machine:")
     if not (check(host.gpu()) & check(host.gpu_memory())):
         raise SystemExit("not a machine osmos runs on as it is: the lines above say why")
@@ -278,7 +305,7 @@ def main():
     ids = list(dict.fromkeys(needed(m, a.packs, a.abliterated, made) +
                              ([m["packs"][p]["npu"] for p in a.packs] if a.npu else [])))
     found, fetch_ids = plan(m, ids, a.have, a.trust_size)
-    if not check(host.disk(a.models, sum(m["files"][f]["bytes"] for f in fetch_ids))):
+    if not check(host.disk(a.models, fetch_bytes(m, fetch_ids, a.models))):
         raise SystemExit("not enough disk")
     if not check(host.tools(bool(fetch_ids), not a.no_build)):
         raise SystemExit("a tool missing: the line above says which")
@@ -301,7 +328,7 @@ def main():
         ver, h = own_version(), versions.home()
         for c in cfgs:
             cfg = layout.read_config(c)
-            rid = f"osmos-{cfg['pack']}"
+            rid = m["packs"][cfg["pack"]]["rig"]["id"]  # (0.11.2: the prompt named 0.5.8's osmos-<pack>)
             api, cfg_path = rig_target(c, ver, h, a.rig_dev)
             row = rig.register(a.rig_home, cfg, api, cfg_path, ask_default(a.rig_default, rid), m["packs"][cfg["pack"]]["rig"])
             print(f"  {row['id']} on port {row['port']} in {a.rig_home}/models.json")
