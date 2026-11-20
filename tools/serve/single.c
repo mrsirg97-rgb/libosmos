@@ -220,7 +220,8 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
   }
   if (!conv_continue(c, sv, g->ids, n))
   {
-    out("ERR %s\n", c->err);
+    fail(sv, c); /* its state and held ids restarted as one (0.11.2: a slot's load short of memory part way left them
+                    apart - the next turn read on at the wrong position); multi.c's lane_fail as ever */
     return;
   }
   const uint32_t reused = c->held.n;
