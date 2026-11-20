@@ -1,7 +1,8 @@
 /* the kept conversations' store (osmos/serve/slots.h): states as opaque bytes, tokens as the prefixes to match.
    RAM alone (the minimum, the longest prefix, `beyond`, take, the cap, the same tokens replaced); the folder past RAM
    (a conversation written there and taken back, its files gone); flush and a new store over the folder (a restart);
-   a store of another identity, a damaged .meta, a .bin of the wrong size and a .bin alone - each removed at start;
+   a store of another identity's (left: another server's - 0.11.2), a damaged .meta, a .bin of the wrong size and a
+   .bin alone an hour old - each removed at start, a write's fresh .tmp left (another server's, still going);
    the folder's cap (its least recently used removed, never the one just written); a conversation older than `days`;
    RAM's bytes cap (its least recently used to the folder; a state past it alone straight there, the others kept; with
    no folder not kept); a state handed over, not copied (RAM's take-back the same buffer) */
@@ -9,6 +10,9 @@
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -194,13 +198,28 @@ int main(void)
   printf("  the folder: RAM's least recently used written there and taken back (its files removed); a flush, a new "
          "store over it, every conversation found\n");
 
-  /* removed at start: another identity's; a damaged .meta; a .bin not its size; a .bin alone */
+  /* another identity's left (another server's on one folder - 0.11.2: removed); a damaged .meta, a .bin not its size,
+     a .bin alone an hour old removed; a write's .tmp left while fresh, removed when stale */
   assert((s = slots_create(&o, err)));
   put(s, 1, N, STATE, true), put(s, 2, N, STATE, true), slots_flush(s, err);
   slots_destroy(s);
   SlotsOptions other = opts(dir, 1, 0, 0, 8);
-  assert((s = slots_create(&other, err)) && slots_in_dir(s) == 0 && files(".bin") == 0 && files(".meta") == 0);
+  assert((s = slots_create(&other, err)) && slots_in_dir(s) == 0 && files(".bin") == 2 && files(".meta") == 2);
   slots_destroy(s);
+  assert((s = slots_create(&o, err)) && slots_in_dir(s) == 2); /* its own, found again */
+  slots_destroy(s);
+  {
+    char tmp[700];
+    snprintf(tmp, sizeof tmp, "%s/slot-inflight.bin.tmp", dir);
+    FILE *f = fopen(tmp, "wb");
+    assert(f), fputc(1, f), fclose(f);
+    assert((s = slots_create(&o, err)) && access(tmp, F_OK) == 0); /* fresh: another server's write */
+    slots_destroy(s);
+    const struct timeval old[2] = {{time(NULL) - 7200, 0}, {time(NULL) - 7200, 0}};
+    assert(utimes(tmp, old) == 0);
+    assert((s = slots_create(&o, err)) && access(tmp, F_OK) != 0); /* two hours old: a write that never ended */
+    slots_destroy(s);
+  }
   char path[700];
   for (int damage = 0; damage < 3; damage++)
   {
@@ -221,10 +240,26 @@ int main(void)
       first(".bin", path, sizeof path);
       assert(truncate(path, STATE - 1) == 0);
     }
-    else /* a .meta removed: its .bin alone */
+    else /* a .meta removed: its .bin alone, an hour old (a fresh one another server's write, before its .meta) */
     {
       first(".meta", path, sizeof path);
       assert(unlink(path) == 0);
+      first(".bin", path, sizeof path);
+      char m[700];
+      snprintf(m, sizeof m, "%.*s.meta", (int)(strlen(path) - 4), path);
+      for (int k = 0; k < 2 && access(m, F_OK) == 0; k++) /* the .bin whose .meta went */
+        first(".bin", path, sizeof path);
+      const struct timeval old[2] = {{time(NULL) - 7200, 0}, {time(NULL) - 7200, 0}};
+      DIR *dd = opendir(dir);
+      for (struct dirent *de; dd && (de = readdir(dd));) /* every .bin aged: the one alone removed, its peer kept */
+        if (strstr(de->d_name, ".bin"))
+        {
+          char bp[700];
+          snprintf(bp, sizeof bp, "%s/%s", dir, de->d_name);
+          assert(utimes(bp, old) == 0);
+        }
+      if (dd)
+        closedir(dd);
     }
     assert((s = slots_create(&o, err)) && slots_in_dir(s) == 1 && files(".bin") == 1 && files(".meta") == 1);
     slots_destroy(s);
