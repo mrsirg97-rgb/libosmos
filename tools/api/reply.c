@@ -473,7 +473,7 @@ void api_chat(Api *a, Http *h)
     return;
   }
   Request rq;
-  const bool ok = request_read(body, a->d, a->fill_orphans, &rq, err);
+  const bool ok = request_read(body, a->d, a->fill_orphans, a->preserve_thinking, &rq, err);
   json_free(body);
   if (!ok)
   {

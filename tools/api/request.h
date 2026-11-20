@@ -17,13 +17,15 @@ typedef struct Request
   char level[16];      /* Qwen's reasoning effort as asked ("": the template's default) */
   bool preserve;       /* Qwen's preserve_thinking (its default: true); Hy4's preserved_thinking where given */
   bool preserve_given; /* Hy4's: preserved_thinking given (else its template's default: on with tools) */
+  bool preserve_default; /* the pack's preserve_thinking (LFM3's reader: a request's unset, this) */
   Json *effort_value;  /* Inkling's reasoning effort as asked - a name or a number (owned; NULL: the template's 0.9) */
   unsigned max_tokens; /* 0: as many as the context leaves */
   bool stream, usage;
   Loop loop; /* the history's loop signals (loop.h): reported beside the answer */
 } Request;
 
-bool request_read(const Json *body, const struct Dialect *d, bool fill_orphans, Request *r, char err[API_ERR]);
+bool request_read(const Json *body, const struct Dialect *d, bool fill_orphans, bool preserve_default, Request *r,
+                  char err[API_ERR]);
 void request_free(Request *r);
 
 /* shared by the readers: the effort asked (reasoning_effort, else chat_template_kwargs'), a failure, the tools as

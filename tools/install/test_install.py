@@ -72,7 +72,8 @@ class Manifest(unittest.TestCase):
         self.assertEqual(set(m["packs"]), {"osmos-evo-1017", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
                                            "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "osmos1.7b", "hy4-flash"})  # 0.6.10: one Qwen context, 512K - no 1M pack
         v = m["packs"]["osmos1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 512K (its needles: DESIGN.md, "rope")
-        self.assertEqual((v["lsa"], v["settings"]), ("osmos1.7b-lsa", {"max_context": 524288, "max_tokens": 4096}))
+        self.assertEqual((v["lsa"], v["settings"]), ("osmos1.7b-lsa", {"max_context": 524288, "max_tokens": 4096,
+                                                                        "preserve_thinking": True}))  # 0.11.3
         self.assertEqual((v["rig"]["efforts"], v["rig"]["effort"]), (["none", "high"], "high"))  # thinking off, on
         self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/osmos1.7b"})
         self.assertEqual((manifest.pack_id(m, "vibes1.7b"), v["rig"]["aliases"]), ("osmos1.7b", ["vibes1.7b", "vibes"]))  # 0.11.1: renamed

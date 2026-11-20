@@ -76,10 +76,11 @@ static bool sampled(const Json *v, double greedy)
   return x != greedy;
 }
 
-bool request_read(const Json *body, const Dialect *d, bool fill_orphans, Request *r, char err[API_ERR])
+bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool preserve_default, Request *r,
+                  char err[API_ERR])
 {
   memset(r, 0, sizeof *r);
-  r->preserve = true;
+  r->preserve = true, r->preserve_default = preserve_default;
   const Json *msgs = json_get(body, "messages");
   if (!msgs || msgs->type != JSON_ARRAY || !msgs->n)
     return request_fail(err, "messages: a non-empty list is needed");

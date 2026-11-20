@@ -88,6 +88,7 @@ typedef struct Api
   char model[128];
   int32_t eos;
   bool fill_orphans; /* the pack's fill_orphans: a request's osmos.fill_orphans unset, this */
+  bool preserve_thinking; /* the pack's preserve_thinking: a request's unset, this (LFM3's reader) */
 } Api;
 
 void api_chat(Api *a, Http *h);
