@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """osmos-serve's protocol, scripted, for osmos-api's tests: READY after FAKE_DIR/ready appears; a GEN answered with
 the ids in FAKE_DIR/reply (its first line; a second line, if any, the finish: stop by default, "exit" to die
-mid-answer), a token every FAKE_DIR/pace seconds (0.01); a STOP ends its run (cancel). every line in, and the argv,
+mid-answer), a token every FAKE_DIR/pace seconds (0.01), FAKE_DIR/delay seconds (none) before the first (a long
+prompt's read); a STOP ends its run (cancel). every line in, and the argv,
 logged to FAKE_DIR/log"""
 import os
 import sys
@@ -29,6 +30,11 @@ def answer(rid, prompt_n):
     ids = [int(x) for x in lines[0].split(",") if x]
     finish = lines[1] if len(lines) > 1 and lines[1] else "stop"
     pace = float(open(os.path.join(D, "pace")).read()) if os.path.exists(os.path.join(D, "pace")) else 0.01
+    dp = os.path.join(D, "delay")
+    delay = float(open(dp).read()) if os.path.exists(dp) else 0.0
+    t0 = time.time()
+    while time.time() - t0 < delay and rid not in stopped:  # (a prompt's read: no token yet)
+        time.sleep(0.01)
     out(f"PP {rid} {prompt_n} {prompt_n} 12.5 1000.0 0")
     n = 0
     for t in ids:

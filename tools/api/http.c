@@ -137,6 +137,8 @@ bool http_stream_event(int fd, const char *data, size_t n)
   return send_all(fd, "data: ", 6) && send_all(fd, data, n) && send_all(fd, "\n\n", 2);
 }
 
+bool http_stream_comment(int fd) { return send_all(fd, ": keep-alive\n\n", 14); }
+
 bool http_error(int fd, int status, const char *message) { return http_error_code(fd, status, message, NULL, NULL); }
 
 /* with OpenAI's param and code (or NULL): a client's own handling keyed on them - context_length_exceeded the one

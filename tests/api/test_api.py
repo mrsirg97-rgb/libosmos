@@ -69,6 +69,7 @@ class Served:
     """osmos-api over the fake engine, the tokenizer cls.model's"""
     model = MODEL
     settings = {}  # a class's own pack settings beside these
+    env = {}  # a class's own environment for osmos-api
 
     @classmethod
     def setUpClass(cls):
@@ -77,7 +78,7 @@ class Served:
         with open(cls.cfg, "w") as f:
             json.dump(dict({"pack": "test", "model": cls.model, "max_context": 4096, "no_guess": True}, **cls.settings), f)
         cls.port = free_port()
-        env = dict(os.environ, FAKE_DIR=cls.dir)
+        env = dict(os.environ, FAKE_DIR=cls.dir, **cls.env)
         cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE], env=env,
                                     stderr=subprocess.DEVNULL)
         for _ in range(200):
@@ -659,6 +660,28 @@ def qwen_template():
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import gen_chat_fixtures_qwen
     return gen_chat_fixtures_qwen.template(QWEN, GGUF_PY)
+
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class KeepAlive(Served, unittest.TestCase):
+    """0.11.2: a stream silent past the keep-alive (a long prompt's read) gets SSE comments - a client's idle timeout
+    not taken for a dead server (its retry read the prompt again from the start, and timed out again)"""
+    env = {"OSMOS_API_KEEPALIVE_MS": "1000"}
+
+    def test_a_silent_read_kept_alive(self):
+        self.ready()
+        self.reply("ok</think>Hello there." + EOS)
+        with open(os.path.join(self.dir, "delay"), "w") as f:
+            f.write("2.5")
+        r = self.post({"messages": [{"role": "user", "content": "hi"}], "stream": True})
+        self.assertEqual(r.status, 200)
+        body = r.read().decode("utf-8")
+        events = [e for e in body.split("\n\n") if e]
+        self.assertIn(": keep-alive", events)  # a comment, a client's to pass over
+        data = [json.loads(e[len("data: "):]) for e in events if e.startswith("data: ") and e != "data: [DONE]"]
+        text = "".join(e["choices"][0]["delta"].get("content") or "" for e in data if e.get("choices"))
+        self.assertEqual((text, events[-1]), ("Hello there.", "data: [DONE]"))
+        os.remove(os.path.join(self.dir, "delay"))
 
 
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")

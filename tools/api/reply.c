@@ -14,6 +14,23 @@
    finish, usage and timings (DESIGN.md, "osmos-api: the answer") */
 
 #define WAIT_MS 500 /* how often a waiting request looks whether its client went away */
+/* a stream silent this long gets an SSE comment: a long prompt's read (minutes past 100K tokens) not taken by a
+   client's idle timeout for a dead server - its retry then read the prompt from the start again, and timed out
+   again (0.11.2) */
+#define KEEPALIVE_MS 15000
+
+/* KEEPALIVE_MS, or OSMOS_API_KEEPALIVE_MS (a test's shorter one) */
+static uint32_t keepalive_ms(void)
+{
+  static uint32_t ms;
+  if (!ms)
+  {
+    const char *e = getenv("OSMOS_API_KEEPALIVE_MS");
+    const long v = e ? strtol(e, NULL, 10) : 0;
+    ms = v > 0 ? (uint32_t)v : KEEPALIVE_MS;
+  }
+  return ms;
+}
 
 /* the client closed its end (a stream's reader gone: its run STOPped) */
 static bool closed(int fd)
@@ -26,9 +43,15 @@ static bool closed(int fd)
 /* the run's tokens since `seen` as text; false when the run is done (and all of it read) */
 static bool more(Api *a, Run *r, size_t *seen, Answer *s)
 {
+  bool ping = false;
   pthread_mutex_lock(&r->mu);
   while (*seen == r->n && !r->done)
   {
+    if (s->stream && !s->gone && ++s->idle * WAIT_MS > keepalive_ms())
+    {
+      ping = true; /* written below, the lock let go: a slow client never holds the engine's appends */
+      break;
+    }
     struct timespec t;
     clock_gettime(CLOCK_REALTIME, &t);
     t.tv_nsec += WAIT_MS * 1000000L;
@@ -46,6 +69,10 @@ static bool more(Api *a, Run *r, size_t *seen, Answer *s)
     memcpy(tok, r->tok + from, (to - from) * sizeof *tok);
   const bool done = r->done && (tok || to == from);
   pthread_mutex_unlock(&r->mu);
+  if (to > from)
+    s->idle = 0;
+  if (ping)
+    s->idle = 0, s->gone = s->gone || !http_stream_comment(s->fd);
   if (to > from && !tok)
     return s->gone = true, false; /* out of memory: given up as a client gone */
   for (size_t i = 0; i < to - from; i++)

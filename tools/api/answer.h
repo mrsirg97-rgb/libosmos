@@ -29,6 +29,7 @@ typedef struct Answer
   bool begun; /* the phase has streamed text (until then a trimming dialect's whitespace is passed over) */
   bool boundary; /* a block-shaped dialect's: the next bytes a block's header (its field theirs to say) */
   bool gone; /* the client stopped reading */
+  uint32_t idle; /* a stream's waits with nothing new since its last bytes (a keep-alive comment past KEEPALIVE_MS) */
   const Loop *loop; /* the request's loop signals: beside the answer's usage, its header (0.7.3) */
 } Answer;
 
