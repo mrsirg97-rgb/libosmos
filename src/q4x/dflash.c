@@ -147,6 +147,10 @@ static bool geometry(const Gguf *gg, const Q4xDflashTarget *t, Q4xDflashGeometry
     return meta_fail(&m, KEY("attention.head_count_kv"), "the heads not a multiple of it");
   if (embd % g->conv_group)
     return meta_fail(&m, KEY("conv.group"), "does not divide the width");
+  if (g->sel_rank % 32) /* (q4x_df_select's: its codebooks' rows Q8_0, 32 a block - 0.11.2: every draft refused) */
+    return meta_fail(&m, KEY("selector.rank"), "not a multiple of 32 (its codebooks' Q8_0 blocks)");
+  if (g->window < g->block) /* (q4x_df_attn's: a block's queries within its window) */
+    return meta_fail(&m, KEY("attention.sliding_window"), "below the block size");
   int64_t taps[Q4X_MAX_TAPS];
   size_t n = 0;
   if (!meta_ints(&m, KEY("target_layers"), 1, Q4X_MAX_TAPS, taps, &n))
