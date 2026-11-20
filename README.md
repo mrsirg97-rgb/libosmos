@@ -1,6 +1,6 @@
 # libosmos
 
-An inference engine for three big mixture-of-experts models, and one small long-context one, on one **AMD Strix Halo**
+An inference engine for four big mixture-of-experts models, and one small long-context one, on one **AMD Strix Halo**
 (Ryzen AI MAX+ 395, Radeon 8060S / gfx1151, 128 GB):
 
 - **DeepSeek-V4.1-Flash** (~768B parameters, ~250 GB quantized), more than fits in memory: the experts it needs are
@@ -8,6 +8,8 @@ An inference engine for three big mixture-of-experts models, and one small long-
 - **Qwen3.8-Flash-Next** (~177B, 512 experts, the Qwen4 architecture's preview), fully resident in GPU memory.
 - **Inkling-2-Small** (Thinking Machines; 384 experts a layer, a 158 GB pack), its experts streamed from the SSD beside
   the ~84 GB osmos keeps in memory, drafted by its own multi-token-prediction head.
+- **Hy4-flash** (Tencent; 220B, ~11B active a token, AngelSlim's Q3_K), its backbone in GPU memory and its 63 GB
+  Engram table read from the SSD, drafted by the release's own DFly2, to a 1M context.
 - **vibes1.7b** (LFM3-1.7B, 1.36 GB in Q4_0), its full-attention layers reading a 512K context through latent sparse
   attention: prompts at thousands of tokens a second, each token's attention ~4,600 keys however long the context.
 
@@ -62,7 +64,7 @@ A running row takes the new version at its next start.
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
 header - turns since the last tool call, the most repeated recent call, orphaned calls and results (a client's
 history compaction can drop one side), and `stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
-true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling 256K, vibes1.7b 512K), or
+true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling 256K, Hy4-flash 1M, osmos1.7b 512K), or
 `--ctx` (installer or osmos-api: `512k`, `1m`, ...).
 
 ## The packs
@@ -418,6 +420,11 @@ is the guarantee (the NPU's is its own).
 - [vibes1.7b](https://huggingface.co/mrsirg97-rgb/vibes1.7b) (the same author): the fine-tune and its LSA maps.
 - [PG-19](https://huggingface.co/datasets/deepmind/pg19) (DeepMind, Apache 2.0): the held-out novel vibes1.7b's long
   rotation is measured on.
+- [Tencent](https://huggingface.co/tencent) (Hy4-flash and its DFly2 drafter) and its compression team
+  [AngelSlim](https://huggingface.co/AngelSlim) (the Q3_K GGUF osmos serves): the model, and the transformers
+  modeling code its forward is held to.
+- [vLLM](https://github.com/vllm-project/vllm) (Apache 2.0): DFly2's speculator, the reference osmos's drafts are
+  checked against token for token.
 - [unsloth](https://huggingface.co/unsloth): the quantizations (Inkling's UD-IQ1_S and its importance matrix among
   them), the MXFP8 Engram table and Qwen's MTP head.
 - [eaddario/imatrix-calibration](https://huggingface.co/datasets/eaddario/imatrix-calibration) (MIT): the text
