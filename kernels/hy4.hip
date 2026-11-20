@@ -691,6 +691,7 @@ constexpr uint32_t kIxSpreadTokens = 16;  // a step's tokens at most whose score
 // thread a (group, head)'s dot over the dims in their order, then a group's sum over the heads in theirs: score_g =
 // sum_h w_h relu(q_h . g) - the bits the select kernel's own loop gives
 constexpr uint32_t kIxTile = 32;
+constexpr uint32_t kIxRow = kIxDim + 4;  // a key's and a query's row in LDS: whole float4s, the 16 heads' rows 4 banks apart
 __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, const float* w, const float* groups,
                                                             uint32_t heads, uint32_t dim, uint32_t pool, uint32_t top,
                                                             const int32_t* pos, uint32_t n_tok, uint32_t max_groups,
@@ -699,7 +700,8 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
   // turn
   // (qs's rows padded too: a wave's 32 threads are 2 groups x 16 heads, so unpadded its heads' rows 512 bytes apart
   // read one bank - a 16-way conflict every term; 1M, a token: 5.45 ms a layer before)
-  __shared__ float qs[(kIxDim + 1) * 16], ws[16], ks[kIxTile][kIxDim + 1], ds[kIxTile][16];
+  __shared__ __attribute__((aligned(16))) float qs[kIxRow * 16], ks[kIxTile][kIxRow];
+  __shared__ float ws[16], ds[kIxTile][16];
   const uint32_t g0 = blockIdx.x * kIxTile;
   uint32_t most = 0;
   for (uint32_t t = 0; t < n_tok; t++) {
@@ -714,20 +716,98 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
     if (own < top || g0 >= own) continue;
     const uint32_t n = own - g0 < kIxTile ? own - g0 : kIxTile;
     __syncthreads();
-    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i / dim * (kIxDim + 1) + i % dim] = q[(uint64_t) t * heads * dim + i];
+    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i / dim * kIxRow + i % dim] = q[(uint64_t) t * heads * dim + i];
     for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
     __syncthreads();
     for (uint32_t e = threadIdx.x; e < n * heads; e += kThreads) {
       const uint32_t gl = e / heads, h = e % heads;
-      float d = 0;
-      for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * (kIxDim + 1) + i], ks[gl][i], d);
-      ds[gl][h] = d;
+      // 4 sums a dot, the terms i % 4 apart, added (0 + 1) + (2 + 3): a dependent chain a quarter long (the scores
+      // latency-bound, not the keys' bytes: at 1M a token 1.6 ms a layer against ~0.6) - every step's the same
+      float d0 = 0, d1 = 0, d2 = 0, d3 = 0;
+      const float4 *qh = (const float4*) (qs + h * kIxRow), *kg = (const float4*) ks[gl];
+      for (uint32_t i = 0; i < dim / 4; i++) {
+        const float4 a = qh[i], b = kg[i];
+        d0 = fmaf(a.x, b.x, d0), d1 = fmaf(a.y, b.y, d1), d2 = fmaf(a.z, b.z, d2), d3 = fmaf(a.w, b.w, d3);
+      }
+      ds[gl][h] = (d0 + d1) + (d2 + d3);
     }
     __syncthreads();
     if (threadIdx.x < n) {
       float sc = 0;
       for (uint32_t h = 0; h < heads; h++) sc = fmaf(ws[h], fmaxf(ds[threadIdx.x][h], 0.0f), sc);
       scores[(uint64_t) t * max_groups + g0 + threadIdx.x] = sc;
+    }
+  }
+}
+
+// the same scores (each dot's 4 sums, the heads' fmaf in order: ix_score_kernel's bits) from a few blocks each over
+// many tiles - the step's queries in LDS once a block (4 tokens a pass), the next tile's keys loaded into registers
+// under this one's math. ix_score_kernel's a block a tile: its keys' load, then the queries' (8 KB a token, read by
+// every one of 8,192 blocks at 1M), then the math, serial - latency-bound at ~1.6 ms a layer a token against ~0.6 of
+// bytes
+constexpr uint32_t kIxPTok = 4, kIxPBlocks = 160, kIxPLoads = kIxTile * kIxDim / 4 / kThreads;
+__global__ __launch_bounds__(kThreads) void ix_score_persist_kernel(const float* q, const float* w, const float* groups,
+                                                                    uint32_t pool, uint32_t top, const int32_t* pos,
+                                                                    uint32_t n_tok, uint32_t max_groups,
+                                                                    float* scores) {
+  __shared__ __attribute__((aligned(16))) float qs[kIxPTok][16 * kIxRow], ks[kIxTile][kIxRow];
+  __shared__ float ws[kIxPTok][16], ds[kIxTile][16];
+  uint32_t most = 0;
+  for (uint32_t t = 0; t < n_tok; t++) {
+    const uint32_t own = (uint32_t) pos[t] / pool;
+    if (own >= top && own > most) most = own;
+  }
+  const uint32_t tiles = (most + kIxTile - 1) / kIxTile;
+  if (blockIdx.x >= tiles) return;
+  auto fetch = [&](float4* r, uint32_t tile) {
+#pragma unroll
+    for (uint32_t j = 0; j < kIxPLoads; j++) {
+      const uint32_t i = threadIdx.x + kThreads * j, g = tile * kIxTile + i / (kIxDim / 4);
+      r[j] = g < most ? ((const float4*) (groups + (uint64_t) g * kIxDim))[i % (kIxDim / 4)] : make_float4(0, 0, 0, 0);
+    }
+  };
+  for (uint32_t t0 = 0; t0 < n_tok; t0 += kIxPTok) {
+    const uint32_t nt = n_tok - t0 < kIxPTok ? n_tok - t0 : kIxPTok;
+    __syncthreads();
+    for (uint32_t i = threadIdx.x; i < nt * 16 * kIxDim; i += kThreads) {
+      const uint32_t tt = i / (16 * kIxDim), r = i % (16 * kIxDim);
+      qs[tt][r / kIxDim * kIxRow + r % kIxDim] = q[(uint64_t) (t0 + tt) * 16 * kIxDim + r];
+    }
+    for (uint32_t i = threadIdx.x; i < nt * 16; i += kThreads) ws[i / 16][i % 16] = w[(uint64_t) t0 * 16 + i];
+    float4 pre[kIxPLoads];
+    fetch(pre, blockIdx.x);
+    for (uint32_t tile = blockIdx.x; tile < tiles; tile += gridDim.x) {
+      __syncthreads();
+#pragma unroll
+      for (uint32_t j = 0; j < kIxPLoads; j++) {
+        const uint32_t i = threadIdx.x + kThreads * j;
+        *(float4*) &ks[i / (kIxDim / 4)][4 * (i % (kIxDim / 4))] = pre[j];
+      }
+      __syncthreads();
+      if (tile + gridDim.x < tiles) fetch(pre, tile + gridDim.x);
+      const uint32_t g0 = tile * kIxTile;
+      for (uint32_t tt = 0; tt < nt; tt++) {
+        const uint32_t own = (uint32_t) pos[t0 + tt] / pool;
+        if (own < top || g0 >= own) continue;  // (block-uniform)
+        const uint32_t n = own - g0 < kIxTile ? own - g0 : kIxTile;
+        for (uint32_t e = threadIdx.x; e < n * 16; e += kThreads) {
+          const uint32_t gl = e / 16, h = e % 16;
+          float d0 = 0, d1 = 0, d2 = 0, d3 = 0;
+          const float4 *qh = (const float4*) (qs[tt] + h * kIxRow), *kg = (const float4*) ks[gl];
+          for (uint32_t i = 0; i < kIxDim / 4; i++) {
+            const float4 a = qh[i], b = kg[i];
+            d0 = fmaf(a.x, b.x, d0), d1 = fmaf(a.y, b.y, d1), d2 = fmaf(a.z, b.z, d2), d3 = fmaf(a.w, b.w, d3);
+          }
+          ds[gl][h] = (d0 + d1) + (d2 + d3);
+        }
+        __syncthreads();
+        if (threadIdx.x < n) {
+          float sc = 0;
+          for (uint32_t h = 0; h < 16; h++) sc = fmaf(ws[tt][h], fmaxf(ds[threadIdx.x][h], 0.0f), sc);
+          scores[(uint64_t) (t0 + tt) * max_groups + g0 + threadIdx.x] = sc;
+        }
+        __syncthreads();
+      }
     }
   }
 }
@@ -801,7 +881,7 @@ __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, con
   if (dense_only) return;  // (the spread selection's tokens: ix_wide_*)
   float* sc = scores + (uint64_t) t * max_groups;
   if (!scored) {
-    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i / dim * (kIxDim + 1) + i % dim] = q[(uint64_t) t * heads * dim + i];
+    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i / dim * kIxRow + i % dim] = q[(uint64_t) t * heads * dim + i];
     for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
     __syncthreads();
     for (uint32_t g = threadIdx.x; g < own; g += kThreads) {
@@ -1178,6 +1258,9 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
   if (read && !spread && !exact && dim == kIxDim && heads <= 16)
     ix_score_mm_kernel<<<dim3((max_groups + kMmGroups - 1) / kMmGroups, (n_tok + kMmTok - 1) / kMmTok), 128, 0,
                          st(stream)>>>(q, w, groups, heads, pool, top, pos, n_tok, max_groups, scores);
+  else if (!read && heads == 16 && dim == kIxDim && !getenv("HY4_IX_TILE"))
+    ix_score_persist_kernel<<<kIxPBlocks, kThreads, 0, st(stream)>>>(q, w, groups, pool, top, pos, n_tok, max_groups,
+                                                                     scores);
   else
     ix_score_kernel<<<(max_groups + kIxTile - 1) / kIxTile, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool,
                                                                                          top, pos, n_tok, max_groups,
