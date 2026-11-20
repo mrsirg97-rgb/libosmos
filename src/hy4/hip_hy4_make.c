@@ -189,6 +189,8 @@ void hy4_forward_destroy(Hy4Forward *f)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   hy4_dfly_free(f);
   hipFree(f->head8);
+  hipFree(f->kb_tab), hipFree(f->vb_tab), hipFree(f->kb_xo), hipFree(f->kb_yo), hipFree(f->vb_xo), hipFree(f->vb_yo);
+  hipFree(f->hcnt);
   for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
     if (!f->in_joint || !f->in_joint[i])
       hipFree(f->dev[i]);
@@ -214,6 +216,41 @@ void hy4_forward_destroy(Hy4Forward *f)
   free(f->h_rx), free(f->h_ry), free(f->h_rxd), free(f->h_ryd), free(f->h_rcnt), free(f->h_rw), free(f->rkey);
   free(f->h_rgidx), free(f->h_rhidx), free(f->h_stage);
   free(f);
+}
+
+/* a read's per-head absorption (k_b: q_nope to the latent; v_b: the latent to the head's values) as one mm_group a
+   layer over its heads: each layer's heads' matrices, and where head h reads (its columns of the tiled x16: the q /
+   latent rows converted once) and writes - fixed for the forward's life */
+static bool head_tables(Hy4Forward *f)
+{
+  const Hy4Geometry *g = &f->w->geo;
+  const uint32_t L = (uint32_t)g->n_layers, M = HY4_MAX_HEADS, nope = (uint32_t)g->nope_dim, rd = (uint32_t)g->rope_dim;
+  const uint32_t qk = nope + rd, lat = (uint32_t)g->kv_lora, vd = (uint32_t)g->v_dim, row = lat + rd;
+  const void **kb = calloc((size_t)L * M, sizeof *kb), **vb = calloc((size_t)L * M, sizeof *vb);
+  uint32_t xo[2][HY4_MAX_HEADS], yo[2][HY4_MAX_HEADS];
+  for (uint32_t h = 0; h < M; h++)
+    xo[0][h] = h * qk * MM_TILE, yo[0][h] = h * row, xo[1][h] = h * lat * MM_TILE, yo[1][h] = h * vd;
+  bool ok = kb && vb;
+  for (uint32_t l = 0; ok && l < L; l++)
+  {
+    const Hy4Layer *Ly = &f->w->layer[l];
+    for (uint32_t h = 0; h < (uint32_t)g->n_heads[l]; h++)
+      kb[(size_t)l * M + h] = (const uint8_t *)hy4_dev(f, Ly->k_b) + (uint64_t)h * lat * nope / 32 * 34,
+      vb[(size_t)l * M + h] = (const uint8_t *)hy4_dev(f, Ly->v_b) + (uint64_t)h * vd * lat / 32 * 34;
+  }
+  const uint64_t tb = (uint64_t)L * M * sizeof *kb;
+  ok = ok && hipMalloc((void **)&f->kb_tab, tb) == hipSuccess && hipMalloc((void **)&f->vb_tab, tb) == hipSuccess &&
+       hipMalloc((void **)&f->kb_xo, M * 4) == hipSuccess && hipMalloc((void **)&f->kb_yo, M * 4) == hipSuccess &&
+       hipMalloc((void **)&f->vb_xo, M * 4) == hipSuccess && hipMalloc((void **)&f->vb_yo, M * 4) == hipSuccess &&
+       hipMalloc((void **)&f->hcnt, M * 4) == hipSuccess &&
+       hipMemcpy(f->kb_tab, kb, tb, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(f->vb_tab, vb, tb, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(f->kb_xo, xo[0], M * 4, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(f->kb_yo, yo[0], M * 4, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(f->vb_xo, xo[1], M * 4, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(f->vb_yo, yo[1], M * 4, hipMemcpyHostToDevice) == hipSuccess;
+  free(kb), free(vb);
+  return ok;
 }
 
 Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Options *o, char err[HY4_ERR])
@@ -282,6 +319,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || hy4_fail(err, "more heads than this build's tables");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || hy4_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
+  if (ok)
+    ok = head_tables(f) || hy4_fail(err, "a GPU allocation refused (the heads' tables)");
   if (ok && o->head_q8 && f->w->output->type == QTYPE_BF16)
   { /* the head's Q8_0 copy (Hy4Options' head_q8): its BF16 freed */
     const GgufTensor *out = f->w->output;

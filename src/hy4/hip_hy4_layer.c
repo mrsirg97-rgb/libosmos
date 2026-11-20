@@ -46,13 +46,33 @@ bool hy4_joint(Hy4Forward *f, const Hy4Joint *j, uint32_t cols, const float *x, 
 /* a read's per-head matvecs on the matrix cores: head h's matrix (base + h head_bytes) over x's columns h xh ..
    (rows xs apart: mm_tokens' strided x) into y + h yh (rows ys apart) - mm_tokens a head (mm_group's tiles want rows
    of a whole slab: k_b's 192 columns are not), a token's sums its own */
-static bool heads_mm(Hy4Forward *f, uint32_t heads, const void *base, uint64_t head_bytes, uint32_t rows, uint32_t cols,
-                     const float *x, uint32_t xs, uint32_t xh, uint32_t n, float *y, uint32_t ys, uint32_t yh)
+/* y = W x a head at a time (a read: mm_tokens, each head's slice converted on its own) - k_b's: its 192 columns
+   (q_nope) not a whole number of mm_group's slabs */
+static bool heads_each(Hy4Forward *f, uint32_t heads, const void *base, uint64_t head_bytes, uint32_t rows,
+                       uint32_t cols, const float *x, uint32_t xs, uint32_t xh, uint32_t n, float *y, uint32_t ys,
+                       uint32_t yh)
 {
   bool ok = true;
   for (uint32_t h = 0; ok && h < heads; h++)
     ok = mm_tokens(QTYPE_Q8_0, (const uint8_t *)base + h * head_bytes, rows, y + (uint64_t)h * yh, ys, NULL, 0, NULL, 0,
                    cols, x + (uint64_t)h * xh, xs, n, f->x16, f->overflow, false, f->st);
+  return ok;
+}
+
+/* a read's per-head absorption: x (n rows, xs apart: every head's slice) to f16 once, then one mm_group over the
+   layer's heads (head_tables' matrices and offsets) - each head's sums mm_run's, the same bits as a head at a time.
+   MM_MAX_TOKENS a chunk (the x16's) */
+static bool heads_mm(Hy4Forward *f, const void *const *tab, uint32_t heads, uint32_t rows, uint32_t cols,
+                     const float *x, uint32_t xs, uint32_t n, float *y, uint32_t ys, const uint32_t *xo, const uint32_t *yo)
+{
+  bool ok = true;
+  for (uint32_t a = 0; ok && a < n; a += MM_MAX_TOKENS)
+  {
+    const uint32_t c = n - a < MM_MAX_TOKENS ? n - a : MM_MAX_TOKENS;
+    ok = mm_x16(x + (uint64_t)a * xs, xs, c, xs, f->x16, f->overflow, f->st) &&
+         hipMemsetD32Async((hipDeviceptr_t)f->hcnt, (int)c, heads, f->st) == hipSuccess &&
+         mm_group(QTYPE_Q8_0, tab, f->hcnt, heads, c, rows, cols, f->x16, xo, xs, y + (uint64_t)a * ys, yo, ys, f->st);
+  }
   return ok;
 }
 
@@ -156,8 +176,8 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
     Hy4Seq *s = run[r].s;
     ok = hy4_mla_kv(kva + o * row, hy4_fv(f, L->kv_a_norm), lat, rd, g->rms_eps, freqs, f->pos + o, m, s->cache[l],
                     sw ? f->ring : 0, f->kv8, f->st) &&
-         (read ? heads_mm(f, H, hy4_dev(f, L->k_b), (uint64_t)lat * nope / 32 * 34, lat, nope, f->q + o * H * qk, H * qk,
-                          qk, m, f->qa + o * H * row, H * row, row) &&
+         (read ? heads_each(f, H, hy4_dev(f, L->k_b), (uint64_t)lat * nope / 32 * 34, lat, nope, f->q + o * H * qk,
+                            H * qk, qk, m, f->qa + o * H * row, H * row, row) &&
                      hy4_mla_qrope(f->q + o * H * qk, H, qk, row, rd, freqs, f->pos + o, m, f->qa + o * H * row, f->st)
                 : hy4_mla_q(f->q + o * H * qk, hy4_dev(f, L->k_b), H, nope, lat, rd, freqs, f->pos + o, m,
                             f->qa + o * H * row, f->table, f->st)) &&
@@ -166,8 +186,8 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
                       sw ? (uint32_t)g->window : 0, sw ? NULL : f->sel + o * top, sw ? NULL : f->n_sel + o,
                       sw ? 0 : top, sw ? 0 : (uint32_t)g->ix_pool, scale, f->pos + o, m, f->olat + o * H * lat, f->attn_part, read, f->st);
   }
-  ok = ok && (read ? heads_mm(f, H, hy4_dev(f, L->v_b), (uint64_t)vd * lat / 32 * 34, vd, lat, f->olat, H * lat, lat, n,
-                              f->ao, H * vd, vd) &&
+  ok = ok && (read ? heads_mm(f, f->vb_tab + (uint64_t)l * HY4_MAX_HEADS, H, vd, lat, f->olat, H * lat, n, f->ao,
+                              H * vd, f->vb_xo, f->vb_yo) &&
                          hy4_gate_mul(f->ao, gt, (uint64_t)n * H * vd, f->st)
                     : hy4_mla_out(f->olat, hy4_dev(f, L->v_b), gt, H, lat, vd, n, f->ao, f->table, f->st));
   return ok &&

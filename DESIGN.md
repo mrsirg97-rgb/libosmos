@@ -2246,6 +2246,40 @@ team), its Q4_K_M; the NVFP4 build (SPARK-4Bit) dropped; DFly2, the release's dr
   the 8-token one: 83.1 -> 63.4 ms a token); DFly2 accepts 2.4-2.9 a round, code 15.8 -> 24.4 tok/s, prose 15.8 ->
   22.5. a verify of 6 tokens reads ~5x one token's experts (~80 distinct of 512 a layer): MoE's floor on drafting.
 
+### 0.11.0 step 4: speed - the prompt on the matrix cores, a decode's reads (2026-11-19)
+
+the operator's, 2026-11-19: no deadline - push decode and prefill as far as they go in 0.11.0, a commit each. on Q3_K
+(every number `performance`; the references regenerated on its file first: MoE within 5e-7, 64 ids KL 1.4e-11, 2,600
+ids 0.061 F32 / 0.097 Q8_0 against the reference in BF16's own 0.151; DFly2's drafts the same at 600 and 2,600).
+
+- **a prompt's indexer scores on the matrix cores** (ix_score_mm_kernel): 16 tokens x 64 groups a block, a head's tile
+  8 WMMAs over the 128 dims, its weighted relu summed in registers. f16 in, F32 sums: 14 of 552 choosing tokens a
+  group apart from the F32 loop's at the 511th (test_hy4_indexer_gpu bounds it). 32K 166 -> 210 tok/s.
+- **a prompt's MLA attention on the matrix cores** (mla_mm_kernel): absorbed MLA is MQA, so a block is a token and 16 x G
+  of its heads (G 4 at 64 heads, 2 at 32) and its keys go 16 at a time to LDS as f16 - K [key][dim] and the latent's
+  V^T [dim][key] (the same bytes, both layouts: RDNA 3.5 has no transposing load), written key-fastest (V^T's
+  consecutive halves, K's rows on distinct banks: the pads were masking a bank conflict - unpadded and key-slow, G=2
+  went 22.5 -> 30.3 ms). a wave 9 of the score's 36 16-dim chunks, its Q's A fragments in registers (72 VGPRs); the 4
+  partial tiles summed in LDS in a fixed order; each wave its own copy of the online softmax (the same P), then P.V a
+  quarter of the 512 latent dims (8 tiles). the next tile's Q8_0 codes fetched to registers under the current one's
+  math. hy4_mlabench, 2,048 tokens, Q8_0 cache: a sliding layer 89.9 -> 13.4 ms (10.9 TFLOP/s), a sparse 208.7 ->
+  30.9 (G=1 49.3 / 93.4: the shared tile is the lever). the layer's error against the reference 2.2e-4 of its range
+  (the Q8_0 cache's own 4.9e-3); a token's output its own keys' alone: its bits whatever the step.
+- **which steps**: hy4_mla_attn and hy4_ix_select take the step's read flag - a prompt's (read) on the matrix cores, a
+  decode's and a verify's always the F32 math. (first gated on a step's tokens: the forward test's decode measure,
+  a one-step 2,600-token prompt, took the f16 scores - its "router near-tie" at layer 1 was that; on the flag, the
+  decode's math is the reference's at 2,600 too, KL 1.4e-10.) HY4_MLA_F32 / HY4_IX_F32 the F32 paths for an A/B.
+- **is f16 a loss?** teacher-forced NLL, 8 windows of 8K tokens (prose.i32 at 0, 4K, 10K, 16K, 20K, 28K, 33K, 38K):
+  the f16 path minus F32 +0.051, -0.007, +0.033, -0.018, +0.025, -0.009, +0.003, -0.002 - mean +0.0095, SE 0.0085,
+  four each way: the near-ties' spread (one window alone read +0.051: why one text is not the measure). the
+  scores alone +0.017 and the attention alone +0.038 on the first.
+- **a decode's reads**: the head read as its Q8_0 copy (made at load, the BF16 freed: -370 MB; 8K teacher-forced NLL
+  3.62285 -> 3.62286, the same ids): 61.4 -> 58.8 ms a token, DFly2's round 43.0 -> 39.5 (its picks read it already).
+  mvsweep hy4: a Q8_0 matrix of 8M values or more 4 chunks in flight a lane at one token (the sliding gate 16384 x
+  3072 305.8 -> 244.1 us), Q3_K's experts 2 rows and 2 in flight (72.8 -> 67.4), Q4_K's 2 in flight (and Qwen3.8's
+  UD-Q4_K_XL shapes, 51.9 -> 49.4): 63.5 -> 60.7 ms a token, the same bits.
+- 32K prefill, all of it: 166 (step 3) -> 210 -> 393 tok/s.
+
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
 the q35 forward (above) runs one sequence a step and keeps one DeltaNet state: enough for its checks against HF,

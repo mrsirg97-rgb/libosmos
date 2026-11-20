@@ -32,27 +32,35 @@ constexpr float kGateFloor = 1e-6f;            // the gate's clamp_min(1e-6) bef
 // in order - pre, post, the pre-weighted sum, the sublayer's RMSNorm. the slices fixed: a token's bits whatever the step
 constexpr uint32_t kHcParts = 32;
 
+// a block a slice and kHcTok tokens: the slice's fn rows in LDS once (fn read a block, not a token), each token's
+// dots and sum of squares the same thread's terms in the same order, the same block sums - a token's bits its own
+constexpr uint32_t kHcTok = 8;
 template <uint32_t rows>
-__global__ __launch_bounds__(kThreads) void hc_dot_kernel(const float* h, const float* fn, uint32_t len,
+__global__ __launch_bounds__(kThreads) void hc_dot_kernel(const float* h, const float* fn, uint32_t len, uint32_t n_tok,
                                                           float* partial) {
+  extern __shared__ float fs[];  // [rows][seg]
   __shared__ float lds[kThreads];
-  const uint32_t p = blockIdx.x, t = blockIdx.y, seg = len / kHcParts, i0 = p * seg;
-  const float* ht = h + (uint64_t) t * len;
-  float dot[rows] = {}, sq = 0;
-  for (uint32_t i = i0 + threadIdx.x; i < i0 + seg; i += kThreads) {
-    const float v = ht[i];
-    sq = fmaf(v, v, sq);
+  const uint32_t p = blockIdx.x, t0 = blockIdx.y * kHcTok, seg = len / kHcParts, i0 = p * seg;
+  for (uint32_t k = threadIdx.x; k < rows * seg; k += kThreads) fs[k] = fn[(uint64_t) (k / seg) * len + i0 + k % seg];
+  __syncthreads();
+  for (uint32_t t = t0; t < t0 + kHcTok && t < n_tok; t++) {
+    const float* ht = h + (uint64_t) t * len;
+    float dot[rows] = {}, sq = 0;
+    for (uint32_t i = threadIdx.x; i < seg; i += kThreads) {
+      const float v = ht[i0 + i];
+      sq = fmaf(v, v, sq);
 #pragma unroll
-    for (uint32_t r = 0; r < rows; r++) dot[r] = fmaf(fn[(uint64_t) r * len + i], v, dot[r]);
-  }
-  float* out = partial + (uint64_t) t * (rows + 1) * kHcParts;
+      for (uint32_t r = 0; r < rows; r++) dot[r] = fmaf(fs[r * seg + i], v, dot[r]);
+    }
+    float* out = partial + (uint64_t) t * (rows + 1) * kHcParts;
 #pragma unroll
-  for (uint32_t r = 0; r < rows; r++) {
-    const float d = block_sum<kThreads>(dot[r], lds);
-    if (threadIdx.x == 0) out[r * kHcParts + p] = d;
+    for (uint32_t r = 0; r < rows; r++) {
+      const float d = block_sum<kThreads>(dot[r], lds);
+      if (threadIdx.x == 0) out[r * kHcParts + p] = d;
+    }
+    sq = block_sum<kThreads>(sq, lds);
+    if (threadIdx.x == 0) out[rows * kHcParts + p] = sq;
   }
-  sq = block_sum<kThreads>(sq, lds);
-  if (threadIdx.x == 0) out[rows * kHcParts + p] = sq;
 }
 
 template <uint32_t hc, uint32_t rows>
@@ -946,14 +954,17 @@ extern "C" bool hy4_hc_pre(const float* h, const float* fn, const float* scale, 
       (hc * dim) % kHcParts)
     return false;
   if (rows == 2 * hc ? !post : rows != hc) return false;
+  if ((uint64_t) 2 * HY4_HC_MAX * (hc * dim / kHcParts) * 4 > 48 * 1024) return false;  // (a slice's fn rows in LDS)
   const hipStream_t s = st(stream);
   const uint32_t len = hc * dim;
   if (rows == 2 * hc) {
-    hc_dot_kernel<2 * HY4_HC_MAX><<<dim3(kHcParts, n_tok), kThreads, 0, s>>>(h, fn, len, scratch);
+    hc_dot_kernel<2 * HY4_HC_MAX><<<dim3(kHcParts, (n_tok + kHcTok - 1) / kHcTok), kThreads,
+                                     2 * HY4_HC_MAX * (len / kHcParts) * 4, s>>>(h, fn, len, n_tok, scratch);
     hc_pre_kernel<HY4_HC_MAX, 2 * HY4_HC_MAX><<<n_tok, kThreads, 0, s>>>(h, scratch, scale, base, dim, eps, hc_eps,
                                                                          magnitude, norm_w, x, post);
   } else {
-    hc_dot_kernel<HY4_HC_MAX><<<dim3(kHcParts, n_tok), kThreads, 0, s>>>(h, fn, len, scratch);
+    hc_dot_kernel<HY4_HC_MAX><<<dim3(kHcParts, (n_tok + kHcTok - 1) / kHcTok), kThreads,
+                                 HY4_HC_MAX * (len / kHcParts) * 4, s>>>(h, fn, len, n_tok, scratch);
     hc_pre_kernel<HY4_HC_MAX, HY4_HC_MAX><<<n_tok, kThreads, 0, s>>>(h, scratch, scale, base, dim, eps, hc_eps,
                                                                      magnitude, norm_w, x, nullptr);
   }
