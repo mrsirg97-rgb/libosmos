@@ -306,7 +306,9 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
   bool live[RN];
   for (int j = 0; j < RN; j++) {
     const uint32_t t0 = c0 + (wc * RN + j) * kTile;
-    live[j] = t0 < n, xb[j] = x16 + x16_at(t0, 0, cols);
+    // a tile past the tokens loads the block's first (c0 < n: the grid's) - its WMMA skipped (live), its rows never
+    // past the x16's round16(n) (0.11.2: they read up to the block's 256 tokens, past a buffer sized to the step)
+    live[j] = t0 < n, xb[j] = x16 + x16_at(t0 < n ? t0 : c0, 0, cols);
   }
   f8 run[RM][RN], acc[RM][RN];
   const uint32_t slabs = cols / SL;  // >= W (the launch's): every partition a slab at least
@@ -512,7 +514,7 @@ __global__ __launch_bounds__(256) void group_gemm_kernel(const uint8_t* const* _
   bool live[RN];
   for (int j = 0; j < RN; j++) {
     const uint32_t t0 = c0 + (wc * RN + j) * kTile;
-    live[j] = t0 < n, xb[j] = x16 + x16_at(t0, 0, xts);
+    live[j] = t0 < n, xb[j] = x16 + x16_at(t0 < n ? t0 : c0, 0, xts);  // (a dead tile the block's first: as gemm's)
   }
   f8 run[RM][RN], acc[RM][RN];
   const uint32_t slabs = cols / SL;  // >= W (the launch's): every partition a slab at least
