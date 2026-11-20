@@ -862,6 +862,65 @@ __global__ __launch_bounds__(128) void ix_score_mm_kernel(const float* q, const 
   }
 }
 
+// a prompt's scores, a wave a token: its 16 heads the 16 rows of a WMMA tile (its queries f16 in registers once, 8
+// fragments over the 128 dims), over a block's 128 groups in LDS (f16, 8 tiles of 16) - 64 WMMAs a token, not a
+// head's 8 between two syncs; w_h relu(.) over the heads a column sum in the tile (a lane's 8 rows, then its half's
+// partner). f16 in, F32 sums: the read's math (ix_score_mm_kernel's inputs; its heads' order another)
+constexpr uint32_t kM2Tok = 16, kM2Groups = 128, kM2Row = kIxDim + 8;
+__global__ __launch_bounds__(128) void ix_score_mm2_kernel(const float* q, const float* w, const float* groups,
+                                                           uint32_t pool, uint32_t top, const int32_t* pos,
+                                                           uint32_t n_tok, uint32_t max_groups, float* scores) {
+  __shared__ __attribute__((aligned(32))) _Float16 gk[kM2Groups * kM2Row];
+  const uint32_t t0 = blockIdx.y * kM2Tok, g0 = blockIdx.x * kM2Groups;
+  const uint32_t nt = n_tok - t0 < kM2Tok ? n_tok - t0 : kM2Tok, wave = threadIdx.x / 32, lane = threadIdx.x % 32;
+  uint32_t most = 0;
+  for (uint32_t t = 0; t < nt; t++) {
+    const uint32_t own = (uint32_t) pos[t0 + t] / pool;
+    if (own >= top && own > most) most = own;
+  }
+  if (g0 >= most) return;
+  const uint32_t ng = most - g0 < kM2Groups ? most - g0 : kM2Groups;
+  for (uint32_t i = threadIdx.x; i < kM2Groups * kIxDim / 4; i += 128) {
+    const uint32_t r = i / (kIxDim / 4), c = 4 * (i % (kIxDim / 4));
+    const float4 v = r < ng ? *(const float4*) (groups + (uint64_t) (g0 + r) * kIxDim + c) : make_float4(0, 0, 0, 0);
+    _Float16* o = gk + r * kM2Row + c;
+    o[0] = (_Float16) v.x, o[1] = (_Float16) v.y, o[2] = (_Float16) v.z, o[3] = (_Float16) v.w;
+  }
+  __syncthreads();
+  for (uint32_t tt = wave; tt < nt; tt += 4) {
+    const uint32_t t = t0 + tt, own = (uint32_t) pos[t] / pool;
+    if (own < top || g0 >= own) continue;  // (wave-uniform)
+    osmos_fa a[kIxDim / 16];
+    const float* qr = q + ((uint64_t) t * 16 + lane % 16) * kIxDim;
+#pragma unroll
+    for (uint32_t kc = 0; kc < kIxDim / 16; kc++) {
+      osmos_h16 v;
+#pragma unroll
+      for (int e = 0; e < 16; e += 4) {
+        const float4 x = *(const float4*) (qr + kc * 16 + e);
+        v[e] = (_Float16) x.x, v[e + 1] = (_Float16) x.y, v[e + 2] = (_Float16) x.z, v[e + 3] = (_Float16) x.w;
+      }
+      a[kc] = v;
+    }
+    float wr[8];
+#pragma unroll
+    for (int j = 0; j < 8; j++) wr[j] = w[(uint64_t) t * 16 + osmos_acc_row(j)];
+    const uint32_t mine = own - g0 < kM2Groups ? own - g0 : kM2Groups;
+    for (uint32_t gt = 0; gt * 16 < mine; gt++) {
+      osmos_f8 acc = {};
+#pragma unroll
+      for (uint32_t kc = 0; kc < kIxDim / 16; kc++)
+        acc = osmos_mma(a[kc], osmos_load_b_s(gk + gt * 16 * kM2Row + kc * 16, kM2Row), acc);
+      float sc = 0;
+#pragma unroll
+      for (int j = 0; j < 8; j++) sc = fmaf(wr[j], fmaxf(acc[j], 0.0f), sc);
+      sc += __shfl_xor(sc, 16, 32);
+      const uint32_t g = gt * 16 + (uint32_t) osmos_acc_col(0);
+      if (lane < 16 && g < mine) scores[(uint64_t) t * max_groups + g0 + g] = sc;
+    }
+  }
+}
+
 // the selection: a block a token; scored, its scores ix_score_kernel's - else computed here, a thread a group (a
 // prompt's many tokens: one block each the better shape; the same bits either way)
 __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, const float* w, const float* groups,
@@ -1255,7 +1314,10 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
   // many blocks for a decode's or a verify's few tokens, a block a token for a prompt's many
   const bool spread = n_tok <= kIxSpreadTokens;
   static const bool exact = getenv("HY4_IX_F32") != nullptr;  // (a read's scores the F32 loop's: A/B)
-  if (read && !spread && !exact && dim == kIxDim && heads <= 16)
+  if (read && !spread && !exact && dim == kIxDim && heads == 16 && !getenv("HY4_IX_MM1"))
+    ix_score_mm2_kernel<<<dim3((max_groups + kM2Groups - 1) / kM2Groups, (n_tok + kM2Tok - 1) / kM2Tok), 128, 0,
+                          st(stream)>>>(q, w, groups, pool, top, pos, n_tok, max_groups, scores);
+  else if (read && !spread && !exact && dim == kIxDim && heads <= 16)
     ix_score_mm_kernel<<<dim3((max_groups + kMmGroups - 1) / kMmGroups, (n_tok + kMmTok - 1) / kMmTok), 128, 0,
                          st(stream)>>>(q, w, groups, heads, pool, top, pos, n_tok, max_groups, scores);
   else if (!read && heads == 16 && dim == kIxDim && !getenv("HY4_IX_TILE"))
