@@ -112,6 +112,15 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
 {
   int32_t dr[OSMOS_MAX_BLOCK], picks[OSMOS_MAX_BLOCK + 1], toks[OSMOS_MAX_BLOCK + 1];
   float cf[OSMOS_MAX_BLOCK];
+  if (server_eos(sv, *t) || a->produced + 1 >= a->limit) /* t the answer's last: printed, not fed (a greedy token's
+                                                            end) - its verify was work for nothing, and its rollback
+                                                            past a block's close refused, the turn failed (0.11.2) */
+  {
+    out("T %d\n", *t), a->produced++;
+    if (server_eos(sv, *t))
+      a->finish = "stop";
+    return 0;
+  }
   int k = oseq_draft(c->s, *t, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, dr, cf, c->err);
   if (k < 0)
     return -1;
@@ -149,7 +158,10 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
   pump(l, ctl);
   if (ctl->cancel && !end)
     a->finish = "cancel", end = true;
-  const int keep = end ? printed - 1 : m + 1;
+  int keep = end ? printed - 1 : m + 1;
+  if (end && k + 1 - keep == 1 && !oseq_reach(c->s)) /* a cancel's last printed token at a block's close: kept fed
+                                                        (and held - the state and the held ids one), not refused */
+    keep++;
   if (!oseq_rollback(c->s, (uint32_t)(k + 1 - keep)) || (keep && !oseq_seed(c->s, pos, pos + keep, c->err)))
     return -1;
   for (int i = 0; i < keep; i++)

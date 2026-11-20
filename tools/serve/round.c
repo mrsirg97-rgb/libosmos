@@ -94,6 +94,12 @@ static int lanes_of(Multi *m, Lane **go, int *after, int32_t (*dr)[OSMOS_MAX_BLO
     left--;
     if (!ln->g.spec && !greedy_goes_on(m, ln))
       continue;
+    if (ln->g.spec && (server_eos(m->sv, ln->t) || ln->produced + 1 >= ln->limit)) /* its last token: printed and the
+        lane finished, not fed (greedy_goes_on's) - its verify's rollback past a block's close refused (0.11.2) */
+    {
+      greedy_goes_on(m, ln);
+      continue;
+    }
     k[n] = 0, after[n] = left, go[n] = ln;
     if (ln->g.spec)
       at[nd] = n, ds[nd] = ln->c.s, ys[nd++] = ln->t;
