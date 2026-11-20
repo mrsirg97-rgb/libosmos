@@ -19,6 +19,28 @@
    again (0.11.2) */
 #define KEEPALIVE_MS 15000
 
+/* this run's tag in its ids (its start time, base 36): a run's request numbers start at 1 again after a restart, and
+   a conversation across one held two calls of one id (a harness matches a result to its call by it - 0.11.2) */
+static char boot[16];
+static void boot_make(void)
+{
+  unsigned long long t = (unsigned long long)time(NULL);
+  char rev[16];
+  int n = 0;
+  do
+    rev[n++] = "0123456789abcdefghijklmnopqrstuvwxyz"[t % 36], t /= 36;
+  while (t && n < 12);
+  for (int k = 0; k < n; k++)
+    boot[k] = rev[n - 1 - k];
+  boot[n] = '-', boot[n + 1] = 0;
+}
+static const char *boot_tag(void)
+{
+  static pthread_once_t once = PTHREAD_ONCE_INIT; /* (the request threads': made once) */
+  pthread_once(&once, boot_make);
+  return boot;
+}
+
 /* KEEPALIVE_MS, or OSMOS_API_KEEPALIVE_MS (a test's shorter one) */
 static uint32_t keepalive_ms(void)
 {
@@ -113,7 +135,7 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
         c->klen = klen;
       if (!item || !key || !klen || !id || !(id->s = malloc(48)) || !(c->key[c->n] = strdup("id")))
         return free(id ? id->s : NULL), free(id), json_free(m), NULL;
-      id->type = JSON_STRING, id->len = (size_t)snprintf(id->s, 48, "call_%lld_%zu", rid, i);
+      id->type = JSON_STRING, id->len = (size_t)snprintf(id->s, 48, "call_%s%lld_%zu", boot_tag(), rid, i);
       c->item[c->n] = id, c->klen[c->n] = 2, c->n++;
     }
     return m;
@@ -483,7 +505,7 @@ void api_chat(Api *a, Http *h)
   Answer s = {.fd = h->fd, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
               .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT, .loop = &rq.loop,
               .boundary = a->d->header != NULL};
-  snprintf(s.id, sizeof s.id, "chatcmpl-osmos-%lld", r->rid);
+  snprintf(s.id, sizeof s.id, "chatcmpl-osmos-%s%lld", boot_tag(), r->rid);
   char head[512];
   loop_head(head, sizeof head, &rq.loop);
   if (rq.stream && !http_stream_open_h(h->fd, head))

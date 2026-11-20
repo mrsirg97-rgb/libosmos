@@ -64,7 +64,7 @@ int http_read(Http *h, char err[API_ERR])
   if (sscanf(head, "%7s %255s %15s", h->method, h->path, version) != 3 || strncmp(version, "HTTP/1.", 7))
     return free(head), snprintf(err, API_ERR, "not an HTTP/1.x request line"), 400;
   size_t length = 0;
-  bool has_length = false;
+  bool has_length = false, cont = false;
   for (char *l = strstr(head, "\r\n") + 2; l < end; l = strstr(l, "\r\n") + 2)
   {
     if (!strncasecmp(l, "Content-Length:", 15))
@@ -83,6 +83,8 @@ int http_read(Http *h, char err[API_ERR])
     }
     else if (!strncasecmp(l, "Transfer-Encoding:", 18))
       return free(head), snprintf(err, API_ERR, "a chunked body (send its Content-Length)"), 411;
+    else if (!strncasecmp(l, "Expect:", 7) && strcasestr(l, "100-continue") && strcasestr(l, "100-continue") < strstr(l, "\r\n"))
+      cont = true;
   }
   if (strcmp(h->method, "POST") == 0 && !has_length)
     return free(head), snprintf(err, API_ERR, "a POST without Content-Length"), 411;
@@ -93,6 +95,9 @@ int http_read(Http *h, char err[API_ERR])
   h->body_n = have < length ? have : length;
   memcpy(h->body, end + 4, h->body_n);
   free(head);
+  if (cont && h->body_n < length) /* the client waits for this before its body (curl's, past 1 KB: 0.11.2 - a second
+                                     lost a request, its wait for one never sent) */
+    send_all(h->fd, "HTTP/1.1 100 Continue\r\n\r\n", 25);
   while (h->body_n < length)
   {
     const ssize_t k = recv(h->fd, h->body + h->body_n, length - h->body_n, 0);

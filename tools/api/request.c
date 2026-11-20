@@ -107,7 +107,10 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, Request
     return request_fail(err, "logit_bias: osmos decodes greedily - a bias is not built");
   if (lp && lp->type != JSON_NULL && lp->type != JSON_FALSE)
     return request_fail(err, "logprobs: log-probabilities are not built");
-  if (choice && !(choice->type == JSON_STRING && !strcmp(choice->s, "auto")) && choice->type != JSON_NULL)
+  const Json *tl = json_get(body, "tools");
+  const bool no_tools = !tl || tl->type == JSON_NULL || (tl->type == JSON_ARRAY && !tl->n);
+  if (choice && !(choice->type == JSON_STRING && !strcmp(choice->s, "auto")) && choice->type != JSON_NULL &&
+      !(no_tools && choice->type == JSON_STRING && !strcmp(choice->s, "none"))) /* (none with no tools: asks nothing) */
     return request_fail(err, "tool_choice: auto only (a forced or a disabled call is not built)");
   const Json *th = json_get(body, "thinking"), *eff = request_effort(body);
   const Json *et = json_get(json_get(body, "chat_template_kwargs"), "enable_thinking");
@@ -142,7 +145,10 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, Request
   const Json *mt = json_get(body, "max_completion_tokens");
   if (!mt || mt->type == JSON_NULL)
     mt = json_get(body, "max_tokens");
-  if (mt && mt->type == JSON_INT && mt->s[0] != '-' && mt->len <= 9 && atol(mt->s) > 0)
+  if (mt && mt->type == JSON_INT && mt->s[0] != '-' && mt->len > 9) /* past 999,999,999: as many as the context's room
+                                                                       (0.11.2: "a positive integer" for 4294967295) */
+    r->max_tokens = 999999999u;
+  else if (mt && mt->type == JSON_INT && mt->s[0] != '-' && mt->len <= 9 && atol(mt->s) > 0)
     r->max_tokens = (unsigned)atol(mt->s);
   else if (mt && mt->type != JSON_NULL)
     return request_free(r), request_fail(err, "max_tokens: a positive integer");

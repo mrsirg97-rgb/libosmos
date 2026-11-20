@@ -618,6 +618,36 @@ class Api(Served, unittest.TestCase):
         self.assertEqual([(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in b["message"]["tool_calls"]],
                          [("mcp", {}), ("mcp", {"search": "fl"})])
 
+    def test_6a2_lenient_limits(self):  # 0.11.2: a huge max_tokens the room; tool_choice none with no tools asks nothing
+        self.ready()
+        for extra in ({"max_tokens": 4294967295}, {"max_completion_tokens": 10 ** 12}, {"tool_choice": "none"},
+                      {"tool_choice": "none", "tools": []}):
+            self.reply("ok</think>fine" + EOS)
+            r = self.post(dict({"messages": [{"role": "user", "content": "x"}]}, **extra))
+            self.assertEqual(r.status, 200, extra)
+            r.read()
+        self.reply("ok</think>fine" + EOS)
+        r = self.post({"messages": [{"role": "user", "content": "x"}], "tools": TOOLS, "tool_choice": "none"})
+        self.assertEqual(r.status, 400)  # with tools: still not built
+        r.read()
+
+    def test_6a3_expect_continue(self):  # 0.11.2: curl's Expect (past 1 KB) answered - it waited for a 100 never sent
+        self.ready()
+        self.reply("ok</think>fine" + EOS)
+        body = json.dumps({"messages": [{"role": "user", "content": "x" * 2000}]}).encode()
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as c:
+            c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                      b"Expect: 100-continue\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n")
+            self.assertTrue(c.recv(64).startswith(b"HTTP/1.1 100 Continue\r\n\r\n"))
+            c.sendall(body)
+            got = b""
+            while True:
+                k = c.recv(65536)
+                if not k:
+                    break
+                got += k
+        self.assertTrue(got.startswith(b"HTTP/1.1 200"), got[:80])
+
     def test_6b_calls_unparsed(self):
         self.ready()
         body = {"messages": [{"role": "user", "content": "x"}], "tools": TOOLS}
