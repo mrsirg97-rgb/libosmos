@@ -24,6 +24,8 @@ typedef struct Ink2Dev
   float *q_clip, *rel_clip, *rel_proj, *router_bias;
   float *k_conv, *v_conv, *out_conv, *ffn_out_conv; /* the static convs: a full layer's k / v [taps][ch], tap 0 first */
   float *scale[3]; /* host: each expert's gate, up, down scale (1 where the file has none) */
+  void *ctrl_down[INK2_CTRLS], *ctrl_gain[INK2_CTRLS], *ctrl_forget[INK2_CTRLS]; /* a core layer's loop controls */
+  float *msg_q; /* its message queries, [q, k, v, ffn][n_embd] (the loop's tables' columns) */
 } Ink2Dev;
 
 /* a sequence's rows of one kind, oldest first: `held` of them at d, room for cap; the last `keep` (what a later
@@ -90,6 +92,11 @@ struct Ink2Forward
   const Ink2Weights *w;
   const Ink2Mtp *mtp; /* the drafter, or NULL */
   ink2_tap_fn tap;    /* the per-slot checks' (ink2_forward_tap), or NULL */
+  /* the loop's step buffers (NULL without one): the prelude's output, the pass before's bank (its core blocks after
+     the first, [row][maxbank][C]) and output, the messages [ctrl][row][C], the controlled q / k / v [3][row][C], a
+     control's concat [row][2C], gate [row][rank], gain and forget (pre-tanh) [row][C] */
+  float *pre_h, *bank, *bank_out, *msg, *ctl, *ccat, *cgate, *cgain, *cforget;
+  uint32_t maxbank;
   void *tap_arg;
   Ink2MtpDev md;
   uint32_t max_ctx, max_tokens, maxb, vocab;

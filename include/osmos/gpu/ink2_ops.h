@@ -9,11 +9,15 @@
 
 #define INK2_MAX_TAPS 8   /* a short conv's taps at most (Inkling's 4) */
 #define INK2_MAX_RES 16   /* attn_res's states a token at most (its blocks, then the partial one: Inkling's <= 9) */
-#define INK2_MAX_QUERIES 3 /* attn_res's queries at once (a full layer's q, k, v) */
+#define INK2_MAX_QUERIES 4 /* attn_res's queries at once (a full layer's q, k, v; a loop's messages: q, k, v, the MoE's) */
 #define INK2_RES_SPLIT_TOKENS 64 /* attn_res's steps of at most these split (its scratch's) */
 #define INK2_RES_SCRATCH (INK2_RES_SPLIT_TOKENS * (1 + INK2_MAX_QUERIES) * INK2_MAX_RES) /* its floats */
 
 bool ink2_softcap(float *x, uint64_t n, float cap, void *stream);
+/* a loop's control of a core layer's input x by its message m: out = x - tanh(forget) x + tanh(gain) m, n values
+   (gain and forget their matrices of the gate, pre-tanh); out may be x */
+bool ink2_loop_ctrl(const float *x, const float *m, const float *gain, const float *forget, uint64_t n, float *out,
+                    void *stream);
 bool ink2_swiglu(const float *g, const float *u, uint32_t n, float gcap, float ucap, uint32_t n_tok, float *h,
                  void *stream);
 bool ink2_swiglu_rows(const float *g, const float *u, const float *sg, const float *su, uint32_t n, float gcap,

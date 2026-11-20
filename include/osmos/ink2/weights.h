@@ -102,6 +102,8 @@ static inline int ink2_slot_layer(const Ink2Geometry *g, int slot)
   return slot < g->n_layers ? slot : g->loop.start + (slot - g->n_layers) % (g->loop.end - g->loop.start);
 }
 
+static inline bool ink2_slot_sliding(const Ink2Geometry *g, int slot) { return g->sliding[ink2_slot_layer(g, slot)]; }
+
 bool ink2_geometry(const Gguf *model, Ink2Geometry *g, char err[INK2_ERR]);
 Ink2Weights *ink2_weights_create(const Gguf *model, char err[INK2_ERR]);
 void ink2_weights_destroy(Ink2Weights *w);

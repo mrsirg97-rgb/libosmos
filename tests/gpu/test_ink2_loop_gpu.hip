@@ -25,13 +25,15 @@ extern "C" {
 
 #include "q4x_ref.h"
 
-// the oracle's own noise (measured 2026-11-20, 64 ids): llama.cpp's GPU run against its CPU run of the same file -
-// BF16 activations, BF16-rounded experts (the release's NVFP4, ~2e-3 of a weight), an F16 cache, each sum's order its
-// own - a slot's output 1.1e-2 .. 6.6e-2 relative L2 apart, the logits KL mean 3.0e-3, max 3.0e-2, top-1 63 / 64.
-// osmos's (its own cache: a full layer's keys Q8, values Q5, a window's f16) against the GPU run held to about that
-// spread - TO SET from osmos's looped measurement; the unlooped prelude and first pass measured 1.1e-2 .. 6.8e-2, the
-// tail on the wrong pass's input 0.55 .. 0.76: a wrong term far past
-constexpr double kTolSlot = 1e-1, kKlMean = 5e-3, kKlMax = 5e-2;
+// the oracle's own noise (measured 2026-11-20): llama.cpp's GPU run against its CPU run of the same file - BF16
+// activations, BF16-rounded experts (the release's NVFP4, ~2e-3 of a weight), an F16 cache, each sum's order its own:
+// a slot's output 1.1e-2 .. 6.6e-2 relative L2 apart at 64 ids, 6.5e-3 .. 1.09e-1 at 2,048 (the worst slot 41, pass
+// 3's layer 11 - the noise's amplifier); the logits KL mean 3.0e-3 / 1.2e-3, max 3.0e-2 / 1.2e-2, top-1 63 / 64 and
+// 64 / 64. osmos (its cache: a full layer's keys Q8, values Q5, a window's f16) against the GPU run, measured: the
+// slots' worst 8.1e-2 / 1.30e-1 (slot 31 / 41), the logits KL mean 2.7e-3 / 1.4e-3, max 3.7e-2 / 2.3e-2, top-1 63 / 64
+// and 64 / 64 - the oracle's own spread. the bounds those with room (1.5x the slots', 2x the logits'); a wrong term far
+// past them (the tail on the wrong pass's input: 0.55 .. 0.76)
+constexpr double kTolSlot = 2e-1, kKlMean = 6e-3, kKlMax = 8e-2;
 constexpr double kTop1Miss = 0.05;  // of the rows
 constexpr const char* kRefModel = "%s/Models/inkling2-mini/osmos/ink2-mini-00001-of-00002.gguf";
 constexpr const char* kDump = "%s/osmos-oracle/ink2-mini-dump-%u";
@@ -120,7 +122,6 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   std::printf("  %u ids, one step: every slot's output within %.3e relative L2 of the reference's (worst slot %d, "
               "layer %d)\n",
               n, worst, worst_at, ink2_slot_layer(g, worst_at));
-  CHECK(worst <= kTolSlot);
 
   // the logits: the reference's rows the last ones
   const Ref lr = ref("result_output", dir);
@@ -135,7 +136,7 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   }
   std::printf("  the logits (%u rows): KL mean %.3e, max %.3e; top-1 %u / %u\n", rows, kl_sum / rows, kl_max,
               rows - miss, rows);
-  CHECK(kl_sum / rows <= kKlMean && kl_max <= kKlMax && miss <= kTop1Miss * rows);
+  CHECK(worst <= kTolSlot && kl_sum / rows <= kKlMean && kl_max <= kKlMax && miss <= kTop1Miss * rows);
 
   // the same ids in uneven steps: the last row's logits the same bits
   ink2_seq_destroy(s);
@@ -143,13 +144,14 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   for (uint32_t first : kSplits) {
     Ink2Seq* u = ink2_seq_create(f, err);
     CHECK(u);
-    uint32_t at = 0, len = first;
-    while (at < n) {
-      len = std::min(len, n - at);
+    uint32_t at = 0, len = std::min(first, n);
+    for (;;) {
       CHECK(ink2_step(f, &u, &len, 1, ids.data() + at, err) || (std::fprintf(stderr, "  %s\n", err), false));
-      at += len, len = n - at;
+      at += len;
+      if (at == n) break;
+      len = n - at;
     }
-    const std::vector<float> last = host_of(ink2_logits(f) + (size_t) (len - 1) * V, V);
+    const std::vector<float> last = host_of(ink2_logits(f) + (size_t) (len - 1) * V, V);  // the last step's last row
     CHECK(std::memcmp(last.data(), logits.data() + (size_t) (n - 1) * V, (size_t) V * 4) == 0);
     ink2_seq_destroy(u);
   }

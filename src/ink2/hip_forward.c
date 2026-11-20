@@ -211,6 +211,36 @@ static bool up_conv_static(Ink2Forward *f, const GgufTensor *t, float **out)
   return ok;
 }
 
+/* the loop's: each core layer's controls, and its four message queries from the two tables (core layer i's q the
+   first table's column 2i, ffn its 2i + 1; k the second's 2i, v its 2i + 1) as [q, k, v, ffn][C] */
+static bool up_loop(Ink2Forward *f)
+{
+  const Ink2Weights *w = f->w;
+  const Ink2Geometry *g = &w->geo;
+  if (!g->loop.passes)
+    return true;
+  const uint64_t C = (uint64_t)g->n_embd, core = (uint64_t)(g->loop.end - g->loop.start);
+  uint64_t nq = 0, nk = 0;
+  float *q = ink2_host_f32(w->model, w->loop_query, &nq), *kv = ink2_host_f32(w->model, w->loop_kv_query, &nk),
+        *four = malloc(INK2_CTRLS * C * 4);
+  bool ok = q && kv && four && nq == 2 * core * C && nk == 2 * core * C;
+  for (int l = g->loop.start; ok && l < g->loop.end; l++)
+  {
+    const uint64_t i = (uint64_t)(l - g->loop.start);
+    const float *col[INK2_CTRLS] = {q + 2 * i * C, kv + 2 * i * C, kv + (2 * i + 1) * C, q + (2 * i + 1) * C};
+    for (int c = 0; c < INK2_CTRLS; c++)
+      memcpy(four + c * C, col[c], C * 4);
+    Ink2Dev *d = &f->L[l];
+    const Ink2Layer *L = &w->layer[l];
+    ok = ink2_up_host(f, four, INK2_CTRLS * C, &d->msg_q);
+    for (int c = 0; ok && c < INK2_CTRLS; c++)
+      ok = up_raw(f, L->ctrl_down[c], &d->ctrl_down[c]) && up_raw(f, L->ctrl_gain[c], &d->ctrl_gain[c]) &&
+           up_raw(f, L->ctrl_forget[c], &d->ctrl_forget[c]);
+  }
+  free(q), free(kv), free(four);
+  return ok;
+}
+
 static bool upload(Ink2Forward *f)
 {
   const Ink2Weights *w = f->w;
@@ -246,7 +276,7 @@ static bool upload(Ink2Forward *f)
         d->scale[k][e] = 1.0f;
     }
   }
-  return ok;
+  return ok && up_loop(f);
 }
 
 static bool copy_host(void *dst, const void *src, uint64_t bytes, void *ctx)
@@ -404,7 +434,8 @@ static bool buffers(Ink2Forward *f)
   const uint64_t T = f->max_tokens, C = (uint64_t)g->n_embd, H = (uint64_t)g->n_heads,
                  KV = (uint64_t)g->n_kv_heads, D = (uint64_t)g->head_dim, R = (uint64_t)g->d_rel,
                  taps = (uint64_t)g->conv, E = (uint64_t)g->n_experts, K = (uint64_t)g->n_used,
-                 F = (uint64_t)g->ff_exp, VR = f->w->output->dims[1], CH = H * D > C ? H * D : C,
+                 F = (uint64_t)g->ff_exp, VR = f->w->output->dims[1],
+                 CH0 = H * D > C ? H * D : C, CH = g->loop.passes && 2 * C > CH0 ? 2 * C : CH0,
                  X16 = ((T < MM_MAX_TOKENS ? T : MM_MAX_TOKENS) + MM_TILE - 1) / MM_TILE * MM_TILE;
   const uint32_t head = ink2_type(f->w->output);
   f->head_rows = mm_takes(head, (uint32_t)VR, (uint32_t)C) ? MM_TILE * mm_col_tiles(head, MM_MAX_TOKENS) : MV_MAX_TOKENS;
@@ -441,6 +472,26 @@ static bool buffers(Ink2Forward *f)
     if (mem_on() && b[i].bytes >= (256ull << 20))
       fprintf(stderr, "ink2 mem:   step buffer %2zu %8.3f GiB\n", i, b[i].bytes / 1073741824.0);
   }
+  if (g->loop.passes) /* the loop's */
+  {
+    const uint64_t core = (uint64_t)(g->loop.end - g->loop.start), rank = (uint64_t)g->loop.gate_rank;
+    f->maxbank = core / (uint64_t)g->res_block > 1 ? (uint32_t)(core / (uint64_t)g->res_block - 1) : 1;
+    struct
+    {
+      float **p;
+      uint64_t bytes;
+    } lb[] = {
+        {&f->pre_h, T * C * 4}, {&f->bank, T * f->maxbank * C * 4}, {&f->bank_out, T * C * 4},
+        {&f->msg, INK2_CTRLS * T * C * 4}, {&f->ctl, 3 * T * C * 4}, {&f->ccat, 2 * T * C * 4},
+        {&f->cgate, T * rank * 4}, {&f->cgain, T * C * 4}, {&f->cforget, T * C * 4},
+    };
+    for (size_t i = 0; i < sizeof lb / sizeof *lb; i++)
+    {
+      if (!ink2_dalloc(f, (void **)lb[i].p, lb[i].bytes))
+        return false;
+      sum += lb[i].bytes;
+    }
+  }
   if (mem_on())
     fprintf(stderr, "ink2 mem:   step buffers, all %zu: %.3f GiB\n", sizeof b / sizeof *b, sum / 1073741824.0);
   f->fa_part = (float *)f->ed; /* (the down rows' buffer: ed_bytes) */
@@ -463,8 +514,8 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
 {
   if (!w || !o || !o->max_ctx || !o->max_tokens)
     return ink2_fail(err, "inkling2: no weights, or max_ctx / max_tokens 0"), NULL;
-  if (w->geo.loop.passes)
-    return ink2_fail(err, "inkling2: a loop (Inkling-2-Mini's): its passes not implemented"), NULL;
+  if (w->geo.loop.passes && o->mtp)
+    return ink2_fail(err, "inkling2: a drafter beside a loop (Inkling-2-Mini's): not implemented"), NULL;
   Ink2Forward *f = calloc(1, sizeof *f);
   if (!f)
     return ink2_fail(err, "out of memory"), NULL;
@@ -549,7 +600,8 @@ void ink2_forward_destroy(Ink2Forward *f)
                  f->xn, f->kn, f->vn, f->q, f->k, f->v, f->kc, f->vc, f->rel, f->gate, f->sink, f->att, f->dyn,
                  f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->eg, f->eu, f->ed, f->head,
                  f->logits, f->gid, f->amax, f->m_dev, f->gpick, f->gw, f->x16, f->xe16, f->overflow,
-                 f->res_sc};
+                 f->res_sc, f->pre_h, f->bank, f->bank_out, f->msg, f->ctl, f->ccat, f->cgate, f->cgain,
+                 f->cforget};
   for (size_t i = 0; i < sizeof dev / sizeof *dev; i++)
     if (dev[i])
       hipFree(dev[i]);
@@ -559,10 +611,17 @@ void ink2_forward_destroy(Ink2Forward *f)
     void *p[] = {d->attn_res_q, d->ffn_res_q, d->attn_norm, d->q_norm, d->k_norm, d->v_norm, d->ffn_norm, d->q,
                  d->k, d->v, d->rel, d->out, d->gate, d->sink, d->router, d->k_conv_proj, d->v_conv_proj,
                  d->q_clip, d->rel_clip, d->rel_proj, d->router_bias, d->k_conv, d->v_conv, d->out_conv,
-                 d->ffn_out_conv};
+                 d->ffn_out_conv, d->msg_q};
     for (size_t i = 0; i < sizeof p / sizeof *p; i++)
       if (p[i])
         hipFree(p[i]);
+    for (int c = 0; c < INK2_CTRLS; c++)
+    {
+      void *q[] = {d->ctrl_down[c], d->ctrl_gain[c], d->ctrl_forget[c]};
+      for (int i = 0; i < 3; i++)
+        if (q[i])
+          hipFree(q[i]);
+    }
     for (int k = 0; k < 3; k++)
       free(d->scale[k]);
   }
@@ -819,6 +878,21 @@ static bool conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint3
 
 /* a run: n tokens of s at its next positions through the model, their logits at rows row0 .. (those before the
    prompt's end - 1 not) */
+/* a loop's control of input x by message m (upstream's control): gate = down(concat(rms(x), rms(m))), out = x -
+   tanh(forget(gate)) x + tanh(gain(gate)) m; out may be x */
+static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, const float *x, const float *m,
+                    uint32_t n, float *out)
+{
+  const uint32_t C = (uint32_t)f->w->geo.n_embd;
+  const float eps = f->w->geo.rms_eps;
+  return ops_rms(x, C, C, NULL, eps, n, f->ccat, 2 * C, NULL) &&
+         ops_rms(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, NULL) &&
+         mat(f, L->ctrl_down[c], d->ctrl_down[c], f->ccat, n, f->cgate) &&
+         mat2(f, L->ctrl_gain[c], d->ctrl_gain[c], f->cgain, L->ctrl_forget[c], d->ctrl_forget[c], f->cforget,
+              f->cgate, n, false) &&
+         ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL);
+}
+
 static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint32_t row0, char *err)
 {
   const Ink2Weights *W = f->w;
@@ -841,17 +915,48 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   GPU(ops_embed(W->embed->type, f->embed, C, f->ids_d, n, 1, f->h, NULL));
   GPU(ops_rms(f->h, C, C, f->embed_norm, g->rms_eps, n, f->h, C, NULL));
   for (int c = 0; c < INK2_CONVS; c++) /* every tail's room first: the step's reads and writes in one place */
-    for (int l = 0; l < g->n_layers; l++)
-      GPU(ink2_tail_room(&s->conv[l][c], n));
+    for (int sl = 0; sl < g->n_slots; sl++)
+      GPU(ink2_tail_room(&s->conv[sl][c], n));
   uint32_t nb = 0;
   pf(PF_HEAD);
   if (f->mtp) /* the drafter's taps: this run's rows of the step's */
     s->tap_row0 = row0, s->tap_pos0 = (int32_t)pos, s->tap_step = f->steps;
-  for (int l = 0; l < g->n_layers; l++)
+  /* the slots in their order: the prelude, the core `passes` times (each from the prelude's output and blocks; a pass
+     after the first its own slots and its layers' messages from the pass before's bank), the tail */
+  const int core = g->loop.passes ? g->loop.end - g->loop.start : 0, passes = core ? g->loop.passes : 1,
+            cs = core ? g->loop.start : g->n_layers;
+  const uint64_t nC = (uint64_t)n * C;
+  uint32_t pre_nb = 0, nbank = 0;
+  for (int step = 0; step < g->n_slots; step++)
   {
+    const int in = step - cs, pass = core && in >= 0 && in < passes * core ? in / core : -1;
+    const int l = pass >= 0 ? cs + in % core : step < cs ? step : step - (passes - 1) * core;
+    const int slot = pass > 0 ? g->n_layers + (pass - 1) * core + in % core : l;
+    const bool looped = pass > 0;
+    if (core && step == cs) /* the prelude's output and blocks: each pass's start */
+    {
+      GPU(hipMemcpyAsync(f->pre_h, f->h, nC * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess);
+      pre_nb = nb;
+    }
+    if (looped && l == cs) /* the pass before's bank (its blocks after its first) and output; then the prelude's */
+    {
+      nbank = nb - pre_nb - 1;
+      if (nbank > f->maxbank)
+        return ink2_fail(err, "inkling2: a pass's blocks past the loop's bank");
+      if (nbank)
+        GPU(hipMemcpy2DAsync(f->bank, (uint64_t)f->maxbank * C * 4, f->blocks + (uint64_t)(pre_nb + 1) * C,
+                             (uint64_t)maxb * C * 4, (uint64_t)nbank * C * 4, n, hipMemcpyDeviceToDevice,
+                             NULL) == hipSuccess);
+      GPU(hipMemcpyAsync(f->bank_out, f->h, nC * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess &&
+          hipMemcpyAsync(f->h, f->pre_h, nC * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess);
+      nb = pre_nb;
+    }
     const Ink2Layer *L = &W->layer[l];
     const Ink2Dev *d = &f->L[l];
     const bool full = !g->sliding[l], boundary = l % g->res_block == 0;
+    if (looped) /* the layer's messages: q, k, v, ffn */
+      GPU(ink2_attn_res(d->msg_q, INK2_CTRLS, f->bank, nbank, f->maxbank, f->bank_out, n, C, g->rms_eps, res_scale,
+                        f->msg, f->res_sc, NULL));
     for (int k = 0; f->mtp && k + 1 < f->mtp->n_taps; k++) /* h entering a target layer: the attention residual's
                                                               running partial */
       if (f->mtp->targets[k] == l)
@@ -863,18 +968,27 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                         f->res_sc, NULL));
       aq = f->a3, ak = full ? f->a3 + (uint64_t)n * C : f->a3, av = full ? f->a3 + (uint64_t)2 * n * C : f->a3;
     }
+    if (looped) /* each input by its message: a sliding layer's q, k and v then apart */
+    {
+      GPU(control(f, L, d, INK2_CTRL_Q, aq, f->msg, n, f->ctl) &&
+          control(f, L, d, INK2_CTRL_K, ak, f->msg + nC, n, f->ctl + nC) &&
+          control(f, L, d, INK2_CTRL_V, av, f->msg + 2 * nC, n, f->ctl + 2 * nC));
+      aq = f->ctl, ak = f->ctl + nC, av = f->ctl + 2 * nC;
+    }
+    const bool apart = full || looped; /* q, k and v each their own norm's */
+    const float *k_norm = full ? d->k_norm : d->attn_norm, *v_norm = full ? d->v_norm : d->attn_norm;
     bool ready;
     GPU(rms_for(f, L->q, aq, full ? d->q_norm : d->attn_norm, n, f->xn, &ready));
-    const float *xk = full ? f->kn : f->xn, *xv = full ? f->vn : f->xn;
+    const float *xk = apart ? f->kn : f->xn, *xv = apart ? f->vn : f->xn;
     /* the projections on xn in pairs through its one f16 (the norm's; a sliding layer's k and v too: xn theirs),
        then a full layer's k on kn and v on vn, each its norm's f16 - each matrix's bits its own launch's */
     GPU(mat2(f, L->q, d->q, f->q, L->gate, d->gate, f->gate, f->xn, n, ready) &&
         mat2(f, L->rel, d->rel, f->rel, NULL, NULL, NULL, f->xn, n, true));
-    if (full)
+    if (apart)
     {
-      GPU(rms_for(f, L->k, ak, d->k_norm, n, f->kn, &ready) &&
+      GPU(rms_for(f, L->k, ak, k_norm, n, f->kn, &ready) &&
           mat2(f, L->k, d->k, f->k, NULL, NULL, NULL, xk, n, ready));
-      GPU(rms_for(f, L->v, av, d->v_norm, n, f->vn, &ready) &&
+      GPU(rms_for(f, L->v, av, v_norm, n, f->vn, &ready) &&
           mat2(f, L->v, d->v, f->v, NULL, NULL, NULL, xv, n, ready));
     }
     else
@@ -899,7 +1013,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                          1.0f / sqrtf((float)D),
                          att16 ? f->x16 : NULL,
                          att16 ? f->overflow : NULL};
-    Ink2Tail *tk = &s->kw[l], *tv = &s->vw[l];
+    Ink2Tail *tk = &s->kw[slot], *tv = &s->vw[slot];
     uint32_t n_keys = pos + n;
     if (full)
       tk->held = tv->held = pos; /* the rows to its position, then these */
@@ -912,7 +1026,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     }
     /* the convs, clips, v's norm and the caches' rows in one launch (ink2_attn_prep); a conv tail past its room
        takes its rows after (ink2_tail_put) */
-    Ink2Tail *ck = &s->conv[l][INK2_CONV_K], *cv = &s->conv[l][INK2_CONV_V];
+    Ink2Tail *ck = &s->conv[slot][INK2_CONV_K], *cv = &s->conv[slot][INK2_CONV_V];
     const float *hk = ink2_tail_last(ck, taps - 1), *hv = ink2_tail_last(cv, taps - 1);
     float *keep_k = ink2_tail_claim(ck, n), *keep_v = ink2_tail_claim(cv, n);
     void *store_k = ink2_tail_claim(tk, n), *store_v = ink2_tail_claim(tv, n);
@@ -938,7 +1052,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     GPU(attended);
     pf(PF_ATTN);
     GPU(mat2(f, L->out, d->out, f->o, NULL, NULL, NULL, f->att, n, att16));
-    Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];
+    Ink2Tail *co = &s->conv[slot][INK2_CONV_OUT], *cf = &s->conv[slot][INK2_CONV_FFN];
     /* r: the output's conv, plus h within a block (a block's first layer's h a block state of its own) */
     if (boundary)
     {
@@ -951,6 +1065,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     GPU(conv_put(co, f->o, n, C, taps, d->out_conv, 0, NULL, conv_res, conv_scale, boundary ? NULL : f->h, f->r));
     GPU(ink2_attn_res(d->ffn_res_q, 1, f->blocks, nb, maxb, f->r, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
                       NULL));
+    if (looped)
+      GPU(control(f, L, d, INK2_CTRL_FFN, f->tmp, f->msg + 3 * nC, n, f->tmp));
     GPU(ops_rms(f->tmp, C, C, d->ffn_norm, g->rms_eps, n, f->xn, C, NULL));
     pf(PF_MID);
     if (!moe(f, l, n, err))
@@ -970,7 +1086,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
             conv_put(cf, f->moe, n, C, taps, d->ffn_out_conv, 0, NULL, conv_res, conv_scale, f->r, f->h));
     }
     if (f->tap)
-      f->tap(f->tap_arg, l, "l_out", f->h, n, C);
+      f->tap(f->tap_arg, slot, "l_out", f->h, n, C);
   }
   pf(PF_MID);
   /* the head: the rows from the prompt's end - 1 on */

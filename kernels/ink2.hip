@@ -17,6 +17,14 @@ using launches::grid;
 using launches::st;
 using launches::ok;
 
+// a loop's control: x - tanh(forget) x + tanh(gain) m, upstream's order (inkling2.cpp's control: sub, then add)
+__global__ void loop_ctrl_kernel(const float* x, const float* m, const float* gain, const float* forget, uint64_t n,
+                                 float* out) {
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= n) return;
+  out[i] = (x[i] - tanhf(forget[i]) * x[i]) + tanhf(gain[i]) * m[i];
+}
+
 __global__ void softcap_kernel(float* x, uint64_t n, float cap) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) x[i] = cap * tanhf(x[i] / cap);
@@ -861,6 +869,13 @@ extern "C" bool ink2_attn(const Ink2Attn* a, const float* q, const float* rel, c
     return false;
   attn_kernel<<<n_tok * a->heads, a->head_dim, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj,
                                                                 out);
+  return ok();
+}
+
+extern "C" bool ink2_loop_ctrl(const float* x, const float* m, const float* gain, const float* forget, uint64_t n,
+                               float* out, void* stream) {
+  if (!x || !m || !gain || !forget || !out || !n) return false;
+  loop_ctrl_kernel<<<grid(n), kThreads, 0, st(stream)>>>(x, m, gain, forget, n, out);
   return ok();
 }
 
