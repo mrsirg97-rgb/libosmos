@@ -1,4 +1,4 @@
-// mvsweep [experts|dense|f32|ink2] [tokens]: (ink2: Inkling-2's expert types at its shapes - gate / up 2304 x 4608,
+// mvsweep [experts|dense|f32|ink2|hy4] [tokens]: (hy4: Hy4-flash's Q3_K / Q4_K experts and Q8_0 attention, 1 or 6) (ink2: Inkling-2's expert types at its shapes - gate / up 2304 x 4608,
 // down 4608 x 2304 - at 1, 2, 4 or 8 tokens) the matvec kernel's shapes (kernels/mv.h: R rows a wave, U chunks in flight a
 // lane) timed on Qwen3.8-Flash-Next's shapes at 1, 2, 3 or 4 tokens (an expert read for that many) - each expert type's gate / up (640 x 2560) and down (2560 x 640), 10 experts
 // a call, and the dense matrices' - every call reading cold memory (its matrices rotated through 1 GiB). R and U
@@ -146,6 +146,21 @@ static void sweep_ink2() {
   SWEEP_G(quant::kIQ4_XS, NT, "IQ4_XS", 4608, 2304);
 }
 
+template <int NT>
+static void sweep_hy4() {  // Hy4-flash's experts (Q3_K's file): gate / up 1536 x 1536 Q3_K or Q4_K, down 1536 x 1536 Q4_K
+  SWEEP_G(quant::kQ3_K, NT, "Q3_K", 1536, 1536);
+  SWEEP_G(quant::kQ4_K, NT, "Q4_K", 1536, 1536);
+  SWEEP_D(quant::kQ8_0, NT, "Q8_0", 16384, 3072);  // (a sliding layer's gate / out: 64 x 256 wide)
+  SWEEP_D(quant::kQ8_0, NT, "Q8_0", 3072, 16384);
+  SWEEP_D(quant::kQ8_0, NT, "Q8_0", 120832, 3072);  // (DFly2's head, Q8_0)
+  SWEEP_D(quant::kQ8_0, NT, "Q8_0", 3072, 6144);    // (DFly2's fusion)
+  SWEEP_D(quant::kQ8_0, NT, "Q8_0", 1024, 3072);   // (q_a)
+  SWEEP_D(quant::kQ8_0, NT, "Q8_0", 8192, 1024);   // (a sparse layer's q_b)
+  SWEEP_D(quant::kQ8_0, NT, "Q8_0", 1536, 3072);   // (the latent's down)
+  SWEEP_G(quant::kQ4_K, NT, "Q4_K", 640, 2560);    // (Qwen3.8 UD-Q4_K_XL's experts: the shared tune's other user)
+  SWEEP_G(quant::kQ4_K, NT, "Q4_K", 2560, 640);
+}
+
 int main(int argc, char** argv) {
   const char* which = argc > 1 ? argv[1] : "experts";
   HIP(hipMalloc(&pool, kPool));
@@ -168,6 +183,14 @@ int main(int argc, char** argv) {
       case 4: sweep_ink2_dense<4>(); break;
       case 8: sweep_ink2_dense<8>(); break;
       default: return std::printf("ink2dense tokens: 1, 4, 8\n"), 2;
+    }
+    return 0;
+  }
+  if (!std::strcmp(which, "hy4")) {
+    switch (nt) {
+      case 1: sweep_hy4<1>(); break;
+      case 6: sweep_hy4<6>(); break;
+      default: return std::printf("hy4 tokens: 1, 6\n"), 2;
     }
     return 0;
   }

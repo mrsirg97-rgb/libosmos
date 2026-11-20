@@ -60,6 +60,8 @@ constexpr Wide kWide = {4, 8};
 // its own tokens. a tile's sums are its rows' and tokens' own: any of them the same bits
 constexpr Wide kWideF32 = {3, 12}, kNarrow = {4, 1};
 
+constexpr uint64_t kQ8Wide = 8u << 20;  // a Q8_0 matrix's values from which a token's matvec takes 4 chunks in flight
+
 // the device's CUs (0: not read)
 static uint32_t cus() {
   static int n = -1;
@@ -75,6 +77,11 @@ bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_
   constexpr Tune k = tune(T, NT);
   if constexpr (T == quant::kF32)
     if (rows < (uint64_t) cus() * mv::kWavesPerBlock * k.r) return mv::launch<T, NT, k.r, k.u, 1>(w, rows, cols, x, xs, y, ys, s);
+  // a large Q8_0 matrix, one token: 4 chunks in flight a lane (mvsweep hy4 / dense, cold, 2026-11-19: Hy4-flash's
+  // sliding gate 16384 x 3072 305.8 -> 244.1 us, its output 3072 x 16384 281.2 -> 255.6, Qwen3.8's 320 x 10240 21.5
+  // -> 18.3; under 8M values level or a few % slower: 1). the same bits (a lane's chunks summed in the same order)
+  if constexpr (T == quant::kQ8_0 && NT == 1)
+    if ((uint64_t) rows * cols >= kQ8Wide) return mv::launch<T, NT, 1, 4>(w, rows, cols, x, xs, y, ys, s);
   return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, xs, y, ys, s);
 }
 
@@ -124,6 +131,11 @@ constexpr Tune tune_group1(quant::Type t, bool short_row) {
     case quant::kIQ2_XXS:
     case quant::kIQ2_XS:
     case quant::kIQ2_S: return {2, 4};
+    // Hy4-flash's experts (mvsweep hy4, 16 cold, 2026-11-19): Q3_K's 1536 x 1536 72.8 -> 67.4 us at 2 and 2; Q4_K
+    // 2 in flight at every shape measured (76.2 -> 72.2; Qwen3.8 UD-Q4_K_XL's 640 x 2560 51.9 -> 49.4, 2560 x 640
+    // 69.6 -> 67.6)
+    case quant::kQ3_K: return {2, 2};
+    case quant::kQ4_K: return {1, 2};
     case quant::kIQ1_M:
     case quant::kIQ1_S: return short_row ? Tune{2, 2} : tune(t, 1);
     // Qwen3.8's expert types, 10 experts cold (tools/bench/mvsweep, 2026-11-06; R 1-8, U 1-4): IQ4_NL down 63.5 ->
