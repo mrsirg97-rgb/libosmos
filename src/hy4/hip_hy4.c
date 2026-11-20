@@ -67,6 +67,8 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > HY4_MAX_RUNS)
     return hy4_fail(err, "no forward, sequences or tokens, or past HY4_MAX_RUNS runs");
+  f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
+                  half-rewritten slot table (0.11.2) */
   Hy4Run run[HY4_MAX_RUNS];
   uint32_t n = 0, kept = 0;
   for (uint32_t r = 0; r < runs; r++)

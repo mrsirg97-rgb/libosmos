@@ -12,6 +12,7 @@
 #include "osmos/gpu/quant.h"
 #include "osmos/model/qtype.h"
 #include "osmos/gpu/upload.h"
+#include "osmos/model/fnv.h"
 #include "osmos/text/json.h"
 #include "lfm3_impl.h"
 
@@ -366,6 +367,8 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || lfm3_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err) && df_make(f, o->dflash, err);
   ok = ok && joints(f, err) && (!o->lsa || lsa_load(f, o->lsa, err));
+  if (ok && o->lsa)
+    f->lsa_id = fnv_file(o->lsa, FNV_SEED);
   if (ok)
     f->head = lfm3_dev(f, w->embd), f->head_type = w->embd->type;
   ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || lfm3_fail(err, "a head this build does not make")) &&

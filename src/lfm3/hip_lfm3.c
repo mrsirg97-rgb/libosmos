@@ -192,6 +192,8 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > LFM3_MAX_RUNS)
     return lfm3_fail(err, "no forward, sequences or tokens, or past LFM3_MAX_RUNS runs");
+  f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
+                  half-rewritten slot table (0.11.2) */
   Lfm3Run run[LFM3_MAX_RUNS];
   uint32_t n = 0, kept = 0;
   for (uint32_t r = 0; r < runs; r++)

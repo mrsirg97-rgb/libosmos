@@ -217,6 +217,8 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > Q35_MAX_RUNS)
     return fail(err, "no forward, sequences or tokens, or past Q35_MAX_RUNS runs");
+  f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
+                  half-rewritten slot table (0.11.2) */
   Run run[Q35_MAX_RUNS];
   uint32_t n = 0, kept = 0;
   for (uint32_t r = 0; r < runs; r++)
