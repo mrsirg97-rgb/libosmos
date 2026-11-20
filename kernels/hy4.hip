@@ -1,5 +1,6 @@
 // Hy4-flash's small steps (include/osmos/gpu/hy4_ops.h): iHC and Engram's ends, the reference's order in F32
 #include <cmath>
+#include <cstdlib>
 
 #include <hip/hip_fp16.h>
 
@@ -554,6 +555,56 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
   }
 }
 
+// a prompt's scores on the matrix cores: a block 16 tokens x 64 groups, a wave 16 of the groups; each head's 16 x 16
+// tile 8 WMMAs over the 128 dims (f16 in, F32 sums - the prompt's other matrices' read math), its weighted relu
+// summed into the score in registers, the heads in order. the keys f16 in LDS once a block, a head's queries in turn.
+// not the F32 loop's bits (f16 inputs): a prompt's selections against the reference's measured (test_hy4_indexer_gpu)
+constexpr uint32_t kMmTok = 16, kMmGroups = 64, kMmPad = 8, kMmRow = kIxDim + kMmPad;
+__global__ __launch_bounds__(128) void ix_score_mm_kernel(const float* q, const float* w, const float* groups,
+                                                          uint32_t heads, uint32_t pool, uint32_t top,
+                                                          const int32_t* pos, uint32_t n_tok, uint32_t max_groups,
+                                                          float* scores) {
+  __shared__ _Float16 gk[kMmGroups * kMmRow], qh[kMmTok * kMmRow];
+  __shared__ float ws[kMmTok][16];
+  const uint32_t t0 = blockIdx.y * kMmTok, g0 = blockIdx.x * kMmGroups, nt = n_tok - t0 < kMmTok ? n_tok - t0 : kMmTok;
+  uint32_t most = 0;
+  for (uint32_t t = 0; t < nt; t++) {
+    const uint32_t own = (uint32_t) pos[t0 + t] / pool;
+    if (own >= top && own > most) most = own;
+  }
+  if (g0 >= most) return;
+  const uint32_t ng = most - g0 < kMmGroups ? most - g0 : kMmGroups;
+  for (uint32_t i = threadIdx.x; i < kMmGroups * kIxDim; i += 128) {
+    const uint32_t r = i / kIxDim, c = i % kIxDim;
+    gk[r * kMmRow + c] = (_Float16) (r < ng ? groups[(uint64_t) (g0 + r) * kIxDim + c] : 0.0f);
+  }
+  for (uint32_t i = threadIdx.x; i < kMmTok * 16; i += 128) {
+    const uint32_t t = i / 16, h = i % 16;
+    ws[t][h] = t < nt && h < heads ? w[(uint64_t) (t0 + t) * heads + h] : 0.0f;
+  }
+  const uint32_t wave = threadIdx.x / 32;
+  osmos_f8 sc = {};
+  for (uint32_t h = 0; h < heads; h++) {
+    __syncthreads();
+    for (uint32_t i = threadIdx.x; i < kMmTok * kIxDim; i += 128) {
+      const uint32_t t = i / kIxDim, c = i % kIxDim;
+      qh[t * kMmRow + c] = (_Float16) (t < nt ? q[((uint64_t) (t0 + t) * heads + h) * kIxDim + c] : 0.0f);
+    }
+    __syncthreads();
+    osmos_f8 acc = {};
+#pragma unroll
+    for (uint32_t kc = 0; kc < kIxDim / 16; kc++)
+      acc = osmos_mma(osmos_load_a(qh + kc * 16, kMmRow), osmos_load_b_s(gk + wave * 16 * kMmRow + kc * 16, kMmRow), acc);
+#pragma unroll
+    for (int j = 0; j < 8; j++) sc[j] = fmaf(ws[osmos_acc_row(j)][h], fmaxf(acc[j], 0.0f), sc[j]);
+  }
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    const uint32_t t = (uint32_t) osmos_acc_row(j), g = g0 + wave * 16 + (uint32_t) osmos_acc_col(j);
+    if (t < nt && g < (uint32_t) pos[t0 + t] / pool) scores[(uint64_t) (t0 + t) * max_groups + g] = sc[j];
+  }
+}
+
 // the selection: a block a token; scored, its scores ix_score_kernel's - else computed here, a thread a group (a
 // prompt's many tokens: one block each the better shape; the same bits either way)
 __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, const float* w, const float* groups,
@@ -926,9 +977,14 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
   // the scores tiled for every step (a prompt's too: the same bits as the select kernel's own loop); the selection over
   // many blocks for a decode's or a verify's few tokens, a block a token for a prompt's many
   const bool spread = n_tok <= kIxSpreadTokens;
-  ix_score_kernel<<<(max_groups + kIxTile - 1) / kIxTile, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool,
-                                                                                       top, pos, n_tok, max_groups,
-                                                                                       scores);
+  static const bool exact = getenv("HY4_IX_F32") != nullptr;  // (a prompt's scores the F32 loop's: A/B)
+  if (!spread && !exact && dim == kIxDim && heads <= 16)
+    ix_score_mm_kernel<<<dim3((max_groups + kMmGroups - 1) / kMmGroups, (n_tok + kMmTok - 1) / kMmTok), 128, 0,
+                         st(stream)>>>(q, w, groups, heads, pool, top, pos, n_tok, max_groups, scores);
+  else
+    ix_score_kernel<<<(max_groups + kIxTile - 1) / kIxTile, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool,
+                                                                                         top, pos, n_tok, max_groups,
+                                                                                         scores);
   ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(q, w, groups, heads, dim, pool, top, pos, max_groups, scores,
                                                        sel, n_sel, true, spread);
   if (!spread) return ok();

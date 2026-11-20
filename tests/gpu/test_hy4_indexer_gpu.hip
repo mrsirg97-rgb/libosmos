@@ -67,7 +67,9 @@ int main() {
   std::vector<int32_t> zeros((size_t) T * top, -1), nz(T, 0);
   int32_t *sel = dev(zeros), *n_sel = dev(nz);
   CHECK(hy4_ix_query(ixq, ixw, IH, ID, rd, freqs, dpos, T, 0));
-  CHECK(hy4_ix_select(ixq, ixw, groups, IH, ID, pool, top, dpos, T, G, scores, sel, n_sel, 0));
+  for (uint32_t a = 0; a < T; a += 6)  // (a decode's or a verify's steps: the F32 scores - the reference's picks exactly)
+    CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a,
+                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, 0));
   CHECK(hipDeviceSynchronize() == hipSuccess);
   std::vector<int32_t> s((size_t) T * top), n(T);
   CHECK(hipMemcpy(s.data(), sel, s.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -96,29 +98,36 @@ int main() {
               T, chosen, top - 1);
   CHECK(!differ && chosen > 0);
 
-  // a decode's and a verify's few tokens (the spread selection: up to 16 a step) - every token's groups the same
+  // a prompt's step (its scores on the matrix cores, f16 inputs: hy4_ix_select's past 16 tokens) - its picks against the
+  // F32 ones: a near-tie at the 511th group may swap (2026-11-19, Q3_K's file: 14 of 552 choosing tokens, a group each)
   {
     std::vector<int32_t> nz2(T, 0);
     int32_t *sel2 = dev(zeros), *n2 = dev(nz2);
-    for (uint32_t a = 0; a < T; a += 6) {
-      const uint32_t m = T - a < 6 ? T - a : 6;
-      CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a, m, G,
-                          scores, sel2 + (size_t) a * top, n2 + a, 0));
-    }
+    CHECK(hy4_ix_select(ixq, ixw, groups, IH, ID, pool, top, dpos, T, G, scores, sel2, n2, 0));
     std::vector<int32_t> s2((size_t) T * top), n2h(T);
     CHECK(hipMemcpy(s2.data(), sel2, s2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(hipMemcpy(n2h.data(), n2, n2h.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
-    for (uint32_t t = 0; t < T; t++)
-      CHECK(n2h[t] == n[t] && std::equal(s2.begin() + (size_t) t * top, s2.begin() + (size_t) t * top + n[t],
-                                         s.begin() + (size_t) t * top));
-    std::printf("  six tokens a step (the spread selection): every token's groups the one-step run's\n");
+    uint32_t moved = 0, worst = 0;
+    for (uint32_t t = 0; t < T; t++) {
+      CHECK(n2h[t] == n[t]);
+      std::set<int32_t> a(s.begin() + (size_t) t * top, s.begin() + (size_t) t * top + n[t]);
+      std::set<int32_t> b(s2.begin() + (size_t) t * top, s2.begin() + (size_t) t * top + n[t]);
+      std::vector<int32_t> only;
+      std::set_difference(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(only));
+      moved += !only.empty(), worst = std::max(worst, (uint32_t) only.size());
+    }
+    std::printf("  a prompt's step (scores on the matrix cores): %u of %u choosing tokens a pick apart from the F32 "
+                "path's, at most %u groups each\n", moved, chosen, worst);
+    CHECK(moved * 20 <= chosen && worst <= 2);
     CHECK(hipFree(sel2) == hipSuccess && hipFree(n2) == hipSuccess);
   }
 
   // run again: the pooled keys and every token's groups the same bits (no order a race picks)
   const std::vector<float> g1 = down(groups, (size_t) G * ID);
   CHECK(hy4_ix_pool(keys, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, 0, G, groups, 0));
-  CHECK(hy4_ix_select(ixq, ixw, groups, IH, ID, pool, top, dpos, T, G, scores, sel, n_sel, 0));
+  for (uint32_t a = 0; a < T; a += 6)
+    CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a,
+                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, 0));
   const std::vector<float> g2 = down(groups, (size_t) G * ID);
   std::vector<int32_t> s2((size_t) T * top);
   CHECK(hipMemcpy(s2.data(), sel, s2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
