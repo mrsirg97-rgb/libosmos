@@ -208,8 +208,8 @@ static void piece(Multi *m)
     return;
   }
   const double ms = now_ms() - ln->t0;
-  out("PP %lld %u %u %.1f %.1f %u\n", ln->g.rid, ln->c.held.n, n, ms, (ln->c.held.n - ln->reused) / (ms / 1e3),
-      ln->reused);
+  out("PP %lld %u %u %.1f %.1f %u %s\n", ln->g.rid, ln->c.held.n, n, ms, (ln->c.held.n - ln->reused) / (ms / 1e3),
+      ln->reused, ln->c.via ? ln->c.via : "none");
   if (ln->c.held.n < n)
     return;
   if (!osmos_greedy(sv->e, row, 1, &ln->t, ln->c.err) || !server_answer(sv, &ln->c.held, NULL, 0, row, &ln->t,

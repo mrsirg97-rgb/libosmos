@@ -45,6 +45,8 @@ typedef struct Conv
 {
   OsmosSeq *s;
   Ids held; /* the tokens the sequence holds: oseq_position(s) of them */
+  const char *via; /* how the last conv_continue kept what it reused (PP's last field): held, rollback, prompt-point,
+                      user-point, slot, none */
   /* its last prompt's point, one token short of its end: a family that reads apart (DeepSeek) goes back to it every
      turn (a decoded answer read again as the prompt's, never continued on: its answers the bits of their prompts
      read whole, 0.7.1); every family where a turn leaves the decoded answer (a client writes it back otherwise) */
