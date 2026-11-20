@@ -44,16 +44,30 @@ __device__ inline Keys keys_of(uint32_t pos, uint32_t window, const uint32_t* li
   return {lo, pos + 1 - lo};
 }
 
+// a token's keys a part (at least 16) and its parts (at most Q35_ATTN_PARTS) from its own key count - not the call's
+// last token's: a token's split its own, its bits whatever the step (0.11.2 - past 8,192 keys a step's first tokens
+// took its last's split). len_t: min(its position + 1, the window), or a list's length (a one-token call)
+__device__ inline uint32_t part_keys(uint32_t len_t) {
+  const uint32_t per = (len_t + Q35_ATTN_PARTS - 1) / Q35_ATTN_PARTS;
+  return per < 16 ? 16 : per;
+}
+__device__ inline uint32_t token_len(uint32_t pos, uint32_t window, uint32_t list_len) {
+  if (list_len) return list_len;
+  return window && pos + 1 > window ? window : pos + 1;
+}
+
 template <int HD, int G>
 __global__ __launch_bounds__(32 * kWarps) void decode_kernel(const float* q, const uint8_t* kc, const uint8_t* vc,
                                                              uint32_t heads, uint32_t kv_heads, uint32_t pos0,
                                                              uint32_t window, uint32_t slots, float scale,
-                                                             uint32_t per, uint32_t parts, const uint32_t* list,
+                                                             uint32_t list_max, uint32_t parts, const uint32_t* list,
                                                              const uint32_t* list_len, float* ml, float* po) {
   constexpr int L = HD / 32;
   const uint32_t lane = threadIdx.x % 32, kvh = blockIdx.x, t = blockIdx.z;
   const uint32_t part = blockIdx.y * kWarps + threadIdx.x / 32;
   const Keys keys = keys_of(pos0 + t, window, list ? list_len : nullptr);
+  const uint32_t len_t = token_len(pos0 + t, window, list ? list_max : 0), per = part_keys(len_t);
+  const uint32_t parts_t = (len_t + per - 1) / per;  // (parts: the stride, the call's most)
   const uint32_t k0 = part * per, k1 = k0 + per < keys.n ? k0 + per : keys.n;
   const uint64_t row = (uint64_t) kv_heads * HD / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
   const uint32_t c = kvh * HD + lane * L;
@@ -83,7 +97,7 @@ __global__ __launch_bounds__(32 * kWarps) void decode_kernel(const float* q, con
       for (int j = 0; j < L; j++) o[h][j] = __fmaf_rn(p, vv[j], o[h][j] * a);
     }
   }
-  if (part >= parts) return;
+  if (part >= parts_t) return;
   // a part past the keys (k0 >= its count) writes (-inf, 0): the merge weighs it 0
   const uint64_t base = ((uint64_t) t * heads + kvh * G) * parts + part;
 #pragma unroll
@@ -99,13 +113,16 @@ __global__ __launch_bounds__(32 * kWarps) void decode_kernel(const float* q, con
 // value (span 1) or a head (span HD)
 template <int HD>
 __global__ __launch_bounds__(HD) void merge_kernel(const float* ml, const float* po, const float* gate, uint32_t heads,
-                                                   uint32_t parts, uint32_t gate_span, float* out) {
+                                                   uint32_t parts, uint32_t gate_span, uint32_t pos0, uint32_t window,
+                                                   uint32_t list_max, float* out) {
   const uint32_t th = blockIdx.x, d = threadIdx.x;  // th: token t's query head h, t heads + h
+  const uint32_t len_t = token_len(pos0 + th / heads, window, list_max), per = part_keys(len_t);
+  const uint32_t parts_t = (len_t + per - 1) / per;  // its own parts, at the call's stride
   const uint64_t base = (uint64_t) th * parts;
   float mx = -INFINITY;
-  for (uint32_t p = 0; p < parts; p++) mx = fmaxf(mx, ml[(base + p) * 2]);
+  for (uint32_t p = 0; p < parts_t; p++) mx = fmaxf(mx, ml[(base + p) * 2]);
   float sum = 0.0f, acc = 0.0f;
-  for (uint32_t p = 0; p < parts; p++) {
+  for (uint32_t p = 0; p < parts_t; p++) {
     const float mp = ml[(base + p) * 2];
     if (mp == -INFINITY) continue;
     const float w = expf(mp - mx);
@@ -126,17 +143,25 @@ static bool launch(const float* q, const uint8_t* k8, const uint8_t* v8, uint32_
                    uint32_t kv_heads, uint32_t pos0, uint32_t window, uint32_t slots, uint32_t gate_span,
                    const uint32_t* list, const uint32_t* list_len, uint32_t len, const float* gate, float* scratch,
                    float* out, hipStream_t s) {
-  // keys a warp: at least 16, the parts at most Q35_ATTN_PARTS a (token, head)
-  uint32_t per = (len + Q35_ATTN_PARTS - 1) / Q35_ATTN_PARTS;
-  per = per < 16 ? 16 : per;
-  const uint32_t parts = (len + per - 1) / per, blocks = (parts + kWarps - 1) / kWarps;
+  // keys a warp: at least 16, the parts at most Q35_ATTN_PARTS a (token, head) - each token's split its own
+  // (part_keys), the grid the most parts any token of the call wants
+  // (a shorter token may want more parts than the longest - 8,703 keys 512 of 17, 8,706 484 of 18: the most of any)
+  const uint32_t list_max = list ? len : 0;
+  uint32_t parts = 0;
+  for (uint32_t t = 0; t < n_tok; t++) {
+    const uint32_t len_t = list_max ? list_max : window && pos0 + t + 1 > window ? window : pos0 + t + 1;
+    uint32_t per = (len_t + Q35_ATTN_PARTS - 1) / Q35_ATTN_PARTS;
+    per = per < 16 ? 16 : per;
+    parts = (len_t + per - 1) / per > parts ? (len_t + per - 1) / per : parts;
+  }
+  const uint32_t blocks = (parts + kWarps - 1) / kWarps;
   float* ml = scratch;
   float* po = scratch + (uint64_t) n_tok * heads * parts * 2;
   const dim3 grid(kv_heads, blocks, n_tok);
   const float scale = 1.0f / sqrtf((float) HD);
 #define Q35_DECODE(G)                                                                                              \
-  decode_kernel<HD, G><<<grid, 32 * kWarps, 0, s>>>(q, k8, v8, heads, kv_heads, pos0, window, slots, scale, per,   \
-                                                     parts, list, list_len, ml, po)
+  decode_kernel<HD, G><<<grid, 32 * kWarps, 0, s>>>(q, k8, v8, heads, kv_heads, pos0, window, slots, scale,        \
+                                                     list_max, parts, list, list_len, ml, po)
   switch (heads / kv_heads) {
     case 1: Q35_DECODE(1); break;
     case 2: Q35_DECODE(2); break;
@@ -147,7 +172,7 @@ static bool launch(const float* q, const uint8_t* k8, const uint8_t* v8, uint32_
   }
 #undef Q35_DECODE
   if (!launches::ok()) return false;
-  merge_kernel<HD><<<n_tok * heads, HD, 0, s>>>(ml, po, gate, heads, parts, gate_span, out);
+  merge_kernel<HD><<<n_tok * heads, HD, 0, s>>>(ml, po, gate, heads, parts, gate_span, pos0, window, list_max, out);
   return launches::ok();
 }
 
