@@ -69,7 +69,7 @@ int main() {
   CHECK(hy4_ix_query(ixq, ixw, IH, ID, rd, freqs, dpos, T, 0));
   for (uint32_t a = 0; a < T; a += 6)  // (a decode's or a verify's steps: the F32 scores - the reference's picks exactly)
     CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a,
-                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, 0));
+                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, false, 0));
   CHECK(hipDeviceSynchronize() == hipSuccess);
   std::vector<int32_t> s((size_t) T * top), n(T);
   CHECK(hipMemcpy(s.data(), sel, s.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -103,7 +103,7 @@ int main() {
   {
     std::vector<int32_t> nz2(T, 0);
     int32_t *sel2 = dev(zeros), *n2 = dev(nz2);
-    CHECK(hy4_ix_select(ixq, ixw, groups, IH, ID, pool, top, dpos, T, G, scores, sel2, n2, 0));
+    CHECK(hy4_ix_select(ixq, ixw, groups, IH, ID, pool, top, dpos, T, G, scores, sel2, n2, true, 0));
     std::vector<int32_t> s2((size_t) T * top), n2h(T);
     CHECK(hipMemcpy(s2.data(), sel2, s2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(hipMemcpy(n2h.data(), n2, n2h.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -127,7 +127,7 @@ int main() {
   CHECK(hy4_ix_pool(keys, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, 0, G, groups, 0));
   for (uint32_t a = 0; a < T; a += 6)
     CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a,
-                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, 0));
+                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, false, 0));
   const std::vector<float> g2 = down(groups, (size_t) G * ID);
   std::vector<int32_t> s2((size_t) T * top);
   CHECK(hipMemcpy(s2.data(), sel, s2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -174,14 +174,14 @@ int main() {
   const float scale = 1.0f / sqrtf((float) (nope + rd));
   CHECK(hy4_mla_kv(kva, norm, lat, rd, kEps, freqs, dpos, T, cache, 0, false, 0));
   CHECK(hy4_mla_q(q, kb, H, nope, lat, rd, freqs, dpos, T, qa, table, 0));
-  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, sel, n_sel, top, pool, scale, dpos, T, o_lat, part, 0));
+  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, sel, n_sel, top, pool, scale, dpos, T, o_lat, part, false, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
   const std::vector<float> sparse = down(out, (size_t) T * H * vd);
   match("o_proj's input (sparse attention)", sparse, "o_in", kTolAttn);
 
   // every group selected (the first 2,048 tokens' own selection is all of theirs): the dense path's bits
   const uint32_t dense_n = (top - 1) * pool;
-  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, nullptr, nullptr, 0, 0, scale, dpos, dense_n, o_lat, part, 0));
+  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, nullptr, nullptr, 0, 0, scale, dpos, dense_n, o_lat, part, false, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, dense_n, out, table, 0));
   const std::vector<float> dense = down(out, (size_t) dense_n * H * vd);
   CHECK(std::memcmp(dense.data(), sparse.data(), dense.size() * sizeof(float)) == 0);

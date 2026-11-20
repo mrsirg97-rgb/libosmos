@@ -14,6 +14,7 @@ extern "C" {
 // the Q8_0 cache's gated attention output against the F32 reference: a latent value's rounding (1/254 of its
 // block's largest) through the softmax and v_b - its error relative to the largest output under this
 constexpr double kQ8Rel = 0.05;
+constexpr double kMmRel = 2e-3;  // a prompt's attention on the matrix cores (f16 Q, K and P), the F32 cache
 
 // absorbing changes the order of 192 + 512 products per score and the softmax's sums over up to 600 keys: errors of a
 // few ulps of each term, the output a weighted mean of the latent - 1e-5 of the largest output is ~80 ulps of it
@@ -52,7 +53,7 @@ static void layer(int L) {
   const float scale = 1.0f / sqrtf((float) (nope + rd));
   CHECK(hy4_mla_kv(kva, norm, lat, rd, 1e-5f, freqs, dpos, T, cache, 0, false, 0));
   CHECK(hy4_mla_q(q, kb, H, nope, lat, rd, freqs, dpos, T, qa, table, 0));
-  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, 0));
+  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
   const std::vector<float> all = down(out, (size_t) T * H * vd);
   match("o_proj's input (gated attention)", all, key("o_in").c_str(), kTol);
@@ -60,7 +61,7 @@ static void layer(int L) {
   // the last token alone, its queries' the batch's rows: the cache the batch's (every earlier row written)
   const uint32_t last = T - 1;
   CHECK(hy4_mla_attn(qa + (size_t) last * H * row, cache, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale,
-                     dpos + last, 1, o_lat, part, 0));
+                     dpos + last, 1, o_lat, part, false, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate + (size_t) last * H * vd, H, lat, vd, 1, out, table, 0));
   const std::vector<float> one = down(out, (size_t) H * vd);
   CHECK(std::memcmp(one.data(), all.data() + (size_t) last * H * vd, (size_t) H * vd * sizeof(float)) == 0);
@@ -75,12 +76,12 @@ static void layer(int L) {
       const uint32_t m = T - t0 < step ? T - t0 : step;
       CHECK(hy4_mla_kv(kva + (size_t) t0 * row, norm, lat, rd, 1e-5f, freqs, dpos + t0, m, ring, slots, false, 0));
       CHECK(hy4_mla_attn(qa + (size_t) t0 * H * row, ring, slots, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0,
-                         scale, dpos + t0, m, o_lat + (size_t) t0 * H * lat, part, 0));
+                         scale, dpos + t0, m, o_lat + (size_t) t0 * H * lat, part, false, 0));
     }
     CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
     const std::vector<float> ringed = down(out, (size_t) T * H * vd);
     CHECK(std::memcmp(ringed.data(), all.data(), all.size() * sizeof(float)) == 0);
-    CHECK(!hy4_mla_attn(qa, ring, window - 1, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, 1, o_lat, part,
+    CHECK(!hy4_mla_attn(qa, ring, window - 1, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, 1, o_lat, part, false,
                         0));
     std::printf("  a ring of %u rows in steps of %u: the full cache's bits (a ring under the window refused)\n", slots,
                 step);
@@ -106,12 +107,12 @@ static void layer(int L) {
       std::memcpy(&dec[(size_t) t * row + lat], r + lat / 32 * 34, rd * sizeof(float));
     }
     float* cd = up(dec);
-    CHECK(hy4_mla_attn(qa, c8, 0, true, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, 0));
+    CHECK(hy4_mla_attn(qa, c8, 0, true, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
     const std::vector<float> o8 = down(o_lat, (size_t) T * H * lat);
-    CHECK(hy4_mla_attn(qa, cd, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, 0));
+    CHECK(hy4_mla_attn(qa, cd, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
     const std::vector<float> od = down(o_lat, (size_t) T * H * lat);
     CHECK(std::memcmp(o8.data(), od.data(), o8.size() * sizeof(float)) == 0);
-    CHECK(hy4_mla_attn(qa, c8, 0, true, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, 0));
+    CHECK(hy4_mla_attn(qa, c8, 0, true, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
     CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
     const std::vector<float> q8out = down(out, (size_t) T * H * vd);
     double worst = 0, top = 0;
@@ -121,6 +122,35 @@ static void layer(int L) {
     std::printf("  the Q8_0 cache (%llu bytes a row, F32's %u): the F32 path's bits on its rows decoded; against the "
                 "reference max error %.3g of %.4g (%.2g)\n", (unsigned long long) rb, row * 4, worst, top, worst / top);
     CHECK(worst / top < kQ8Rel);
+    // a prompt's steps on the matrix cores (f16 in, F32 sums): the F32 cache and the Q8_0 against the reference;
+    // a token's output its own keys' alone - in steps of 32 (a ring for a sliding layer) the whole batch's bits
+    for (int k8 = 0; k8 < 2; k8++) {
+      const void* c = k8 ? (const void*) c8 : (const void*) cache;
+      CHECK(hy4_mla_attn(qa, c, 0, k8, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, true, 0));
+      const std::vector<float> om = down(o_lat, (size_t) T * H * lat);
+      CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
+      const std::vector<float> mo = down(out, (size_t) T * H * vd);
+      double w = 0;
+      for (size_t i = 0; i < ref.size(); i++) w = std::fmax(w, std::fabs((double) mo[i] - ref[i]));
+      const uint32_t step = 32, slots = window ? window + step : 0;
+      const uint64_t rbk = hy4_mla_row_bytes(lat, rd, k8);
+      float* ring = window ? scratch((size_t) (slots * rbk / sizeof(float)) + 4) : nullptr;
+      for (uint32_t t0 = 0; t0 < T; t0 += step) {
+        const uint32_t n = T - t0 < step ? T - t0 : step;
+        if (window) CHECK(hy4_mla_kv(kva + (size_t) t0 * row, norm, lat, rd, 1e-5f, freqs, dpos + t0, n, ring, slots, k8, 0));
+        CHECK(hy4_mla_attn(qa + (size_t) t0 * H * row, window ? (const void*) ring : c, slots, k8, sinks, H, lat, rd,
+                             window, nullptr, nullptr, 0, 0, scale, dpos + t0, n, o_lat + (size_t) t0 * H * lat, part, true, 0));
+      }
+      const std::vector<float> os = down(o_lat, (size_t) T * H * lat);
+      bool same = true;
+      for (uint32_t t = 0; t < T; t++)
+        same = same && !std::memcmp(&os[(size_t) t * H * lat], &om[(size_t) t * H * lat], (size_t) H * lat * 4);
+      std::printf("  a prompt's steps on the matrix cores, the %s cache: against the reference max error %.3g of %.4g "
+                  "(%.2g); in steps of %u%s%s the batch's bits\n", k8 ? "Q8_0" : "F32", w, top, w / top, step,
+                  window ? " on a ring" : "", same ? "" : " NOT");
+      CHECK(w / top < (k8 ? kQ8Rel : kMmRel) && same);
+      if (ring) CHECK(hipFree(ring) == hipSuccess);
+    }
     CHECK(hipFree(c8) == hipSuccess && hipFree(cd) == hipSuccess);
   }
   for (float* d : {freqs, kva, q, gate, kb, vb, norm, sinks, cache, qa, o_lat, out}) CHECK(hipFree(d) == hipSuccess);
@@ -137,7 +167,7 @@ int main() {
   }
   std::printf("[test_hy4_mla_gpu] start\n");
   CHECK(!hy4_mla_attn(nullptr, nullptr, 0, false, nullptr, 64, HY4_MLA_MAX_LATENT + 32, 64, 0, nullptr, nullptr, 0, 0, 1.0f,
-                      nullptr, 1, nullptr, nullptr, 0));
+                      nullptr, 1, nullptr, nullptr, false, 0));
   layer(2);
   layer(5);
   std::printf("[test_hy4_mla_gpu] ok\n");

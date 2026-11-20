@@ -35,7 +35,7 @@ uint64_t hy4_mla_attn_scratch(uint32_t heads); /* hy4_mla_attn's partials: float
 bool hy4_mla_attn(const float *qa, const void *cache, uint32_t slots, bool q8, const float *sinks, uint32_t heads,
                   uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
                   uint32_t pool, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat, float *scratch,
-                  void *stream);
+                  bool read, void *stream);
 /* a decode's expert tables on the GPU (hy4_route below) */
 #define HY4_ROUTE_MAX_EXPERTS 1024
 #define HY4_ROUTE_MAX_K 64
@@ -59,7 +59,7 @@ bool hy4_ix_query(float *q, float *w, uint32_t heads, uint32_t dim, uint32_t rop
                   const int32_t *pos, uint32_t n_tok, void *stream);
 bool hy4_ix_select(const float *q, const float *w, const float *groups, uint32_t heads, uint32_t dim, uint32_t pool,
                    uint32_t top, const int32_t *pos, uint32_t n_tok, uint32_t max_groups, float *scores, int32_t *sel,
-                   int32_t *n_sel, void *stream);
+                   int32_t *n_sel, bool read, void *stream);
 
 #endif
 
@@ -124,6 +124,9 @@ hy4_mla_attn
   flash decoding: a block a group of 8 heads (MQA's rows read once for them) over a split of 64 of its token's keys,
   an online softmax in the keys' order; the splits merged in order with the sink - the splits a token's own: its bits
   whatever the step. scratch: hy4_mla_attn_scratch(heads) floats (the partials of 16 tokens at a time). at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
+  read (a prompt's step): on the matrix cores where the shape fits (16 heads a group, a row at most 576) - f16 Q, K, V
+  and P, F32 sums (mla_mm_kernel: a token's output its own keys' alone, its bits whatever the step; not the F32 path's
+  bits); env HY4_MLA_F32 set: the F32 path's for every step
 
 hy4_route
   a decode's routed picks (idx/wtok: n_tok x k, each token's k experts distinct, < n_exp) as the expert matvecs'
@@ -168,6 +171,8 @@ hy4_ix_select
   with the greatest score_g = sum over the heads of w_h relu(q_h . groups[g]) (each a fixed order), ties to the
   lower group - an exact selection (the score's k-th greatest by its bits), any C - then its own: sel[t * top ..]
   ascending, n_sel[t] how many. scores: scratch for n_tok x max_groups (C at most max_groups).
+  read (a prompt's step) past 16 tokens: the scores on the matrix cores (f16 inputs, F32 sums: a near-tie at the
+  511th group may swap; env HY4_IX_F32 set: the F32 loop's)
 
 hy4_dfly_sel
   a DFly2 draft block's rows' groups (hy4_mla_attn's sel / n_sel, cap apart): row j (position anchor + j, j < rows)

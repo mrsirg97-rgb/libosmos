@@ -404,6 +404,173 @@ __global__ __launch_bounds__(kThreads) void mla_split_kernel(const float* qa, co
   }
 }
 
+// a prompt's MLA on the matrix cores: a block a token and 16 of its heads (absorbed MLA is MQA: one key list), its
+// keys 16 at a time f16 in LDS (K [key][dim], and the latent's V^T [dim][key]); a wave 9 of the score's 36 16-dim
+// chunks (its Q's A fragments in registers), the four partial tiles summed in LDS in the waves' order (every wave the
+// same S), the online softmax a wave's own copy (the same P), then a wave a quarter of the latent's output (8 tiles).
+// f16 in, F32 sums - the read's math, not the F32 path's bits; the sink folded at the end (the merge's arithmetic).
+// a decode's and a verify's steps (16 tokens or fewer) stay on mla_split_kernel (their bits the reference-checked)
+constexpr uint32_t kMlaRow = 576;  // a row at most (Hy4-flash's 512 + 64: the LDS a 2-group block fits)
+constexpr uint32_t kMlaQc = (kMlaRow / 16 + 3) / 4, kMlaKeys = 16, kMlaKRow = kMlaRow + 8, kMlaVRow = kMlaKeys;
+template <uint32_t G>  // head groups a block (each 16 heads, 4 waves): the key tile loaded once for all
+__global__ __launch_bounds__(128 * G) void mla_mm_kernel(const float* qa, const uint8_t* cache, uint32_t slots, bool q8,
+                                                     const float* sinks, uint32_t heads, uint32_t latent,
+                                                     uint32_t rope_dim, uint32_t window, const int32_t* sel,
+                                                     const int32_t* n_sel, uint32_t sel_cap, uint32_t pool, float scale,
+                                                     const int32_t* pos, float* o_lat) {
+  __shared__ __attribute__((aligned(32))) _Float16 ks[kMlaKeys * kMlaKRow], vt[HY4_MLA_MAX_LATENT * kMlaVRow];
+  __shared__ __attribute__((aligned(32))) _Float16 ps[4 * G][16 * kMlaVRow];
+  __shared__ float sp[G][4][8][32];
+  constexpr uint32_t kT = 128 * G;
+  __shared__ int64_t rows[kMlaKeys];
+  const uint32_t row = latent + rope_dim, nch = row / 16, t = blockIdx.y;
+  const uint32_t wid = threadIdx.x / 32, grp = wid / 4, wave = wid % 4, lane = threadIdx.x % 32;
+  const uint32_t h0 = (blockIdx.x * G + grp) * 16;
+  const Keys keys = keys_of(t, pos, window, sel, n_sel, sel_cap, pool, slots);
+  const uint64_t rb = mla_row_bytes(latent, rope_dim, q8);
+  osmos_fa qf[kMlaQc];
+#pragma unroll
+  for (uint32_t i = 0; i < kMlaQc; i++) {
+    const uint32_t c = wave + 4 * i;
+    osmos_h16 a = {};
+    if (c < nch) {
+      const float* qp = qa + ((uint64_t) t * heads + h0 + lane % 16) * row + c * 16;
+#pragma unroll
+      for (int e = 0; e < 16; e++) a[e] = (_Float16) qp[e];
+    }
+    qf[i] = a;
+  }
+  float m[osmos_slots], l[osmos_slots];
+#pragma unroll
+  for (int r = 0; r < osmos_slots; r++) m[r] = -INFINITY, l[r] = 0.0f;
+  const uint32_t ot = latent / 64;  // a wave's output tiles (latent / 4 / 16)
+  osmos_f8 o[HY4_MLA_MAX_LATENT / 64] = {};
+  // the Q8_0 cache's next tile in registers while this one's computed: a thread its key's (threadIdx.x % 16: the
+  // items key-fastest - V^T's writes consecutive halves, K's rows on distinct banks) 4 codes and their block's d an
+  // item, and its rope part's float4s
+  constexpr uint32_t kQ8Items = kMlaKeys * (HY4_MLA_MAX_LATENT / 32) * 8 / kT, kRopeItems = (kMlaKeys * 16 + kT - 1) / kT;
+  const uint32_t lb = latent / 32, r4 = rope_dim / 4, kk = threadIdx.x % kMlaKeys;
+  uint32_t cq[kQ8Items];
+  _Float16 dq[kQ8Items];
+  float4 rp[kRopeItems];
+  auto fetch = [&](uint32_t kb) {
+    const uint8_t* base = kb + kk < keys.n ? cache + (uint64_t) keys.row(kb + kk) * rb : nullptr;
+#pragma unroll
+    for (uint32_t j = 0; j < kQ8Items; j++) {
+      const uint32_t i = threadIdx.x + kT * j, b = i / kMlaKeys / 8, c = i / kMlaKeys % 8;
+      cq[j] = 0, dq[j] = (_Float16) 0.0f;
+      if (base && b < lb) {
+        const uint8_t* blk = base + (uint64_t) b * 34;
+        const uint16_t* w = (const uint16_t*) (blk + 2 + 4 * c);  // (a block 34 bytes: its codes 2-aligned)
+        dq[j] = *(const _Float16*) blk, cq[j] = (uint32_t) w[0] | (uint32_t) w[1] << 16;
+      }
+    }
+#pragma unroll
+    for (uint32_t j = 0; j < kRopeItems; j++) {
+      const uint32_t d = (threadIdx.x + kT * j) / kMlaKeys;
+      rp[j] = base && d < r4 ? *(const float4*) (base + (uint64_t) lb * 34 + 16 * d) : make_float4(0, 0, 0, 0);
+    }
+  };
+  if (q8) fetch(0);
+  for (uint32_t kb = 0; kb < keys.n; kb += kMlaKeys) {
+    const uint32_t nt = keys.n - kb < kMlaKeys ? keys.n - kb : kMlaKeys;
+    __syncthreads();
+    if (q8) {  // the fetched tile to LDS: a code times its d (exact in F32) to f16
+#pragma unroll
+      for (uint32_t j = 0; j < kQ8Items; j++) {
+        const uint32_t i = threadIdx.x + kT * j, b = i / kMlaKeys / 8, c = i / kMlaKeys % 8, d0 = b * 32 + 4 * c;
+        if (b >= lb) continue;
+        const float d = (float) dq[j];
+#pragma unroll
+        for (int e = 0; e < 4; e++) {
+          const _Float16 v = (_Float16) (d * (float) (int8_t) (cq[j] >> (8 * e)));
+          ks[kk * kMlaKRow + d0 + e] = v, vt[(d0 + e) * kMlaVRow + kk] = v;
+        }
+      }
+#pragma unroll
+      for (uint32_t j = 0; j < kRopeItems; j++) {
+        const uint32_t d = (threadIdx.x + kT * j) / kMlaKeys;
+        if (d >= r4) continue;
+        _Float16* kp = ks + kk * kMlaKRow + latent + 4 * d;
+        kp[0] = (_Float16) rp[j].x, kp[1] = (_Float16) rp[j].y, kp[2] = (_Float16) rp[j].z, kp[3] = (_Float16) rp[j].w;
+      }
+      __syncthreads();
+      if (kb + kMlaKeys < keys.n) fetch(kb + kMlaKeys);  // the next tile's loads in flight under this one's math
+    } else {
+      if (threadIdx.x < kMlaKeys) rows[threadIdx.x] = threadIdx.x < nt ? keys.row(kb + threadIdx.x) : -1;
+      __syncthreads();
+      const uint32_t row4 = row / 4;
+      for (uint32_t i = threadIdx.x; i < kMlaKeys * row4; i += kT) {
+        const uint32_t k2 = i / row4, d = 4 * (i % row4);
+        float4 x = make_float4(0, 0, 0, 0);
+        if (rows[k2] >= 0) x = *(const float4*) (cache + (uint64_t) rows[k2] * rb + 4 * d);
+        const _Float16 v[4] = {(_Float16) x.x, (_Float16) x.y, (_Float16) x.z, (_Float16) x.w};
+#pragma unroll
+        for (int e = 0; e < 4; e++) {
+          ks[k2 * kMlaKRow + d + e] = v[e];
+          if (d + e < latent) vt[(d + e) * kMlaVRow + k2] = v[e];
+        }
+      }
+      __syncthreads();
+    }
+    osmos_f8 sacc = {};
+#pragma unroll
+    for (uint32_t i = 0; i < kMlaQc; i++) {
+      const uint32_t c = wave + 4 * i;
+      if (c < nch) sacc = osmos_mma(qf[i], osmos_load_b_s(ks + c * 16, kMlaKRow), sacc);
+    }
+#pragma unroll
+    for (int j = 0; j < 8; j++) sp[grp][wave][j][lane] = sacc[j];
+    __syncthreads();
+    float sv[8], alpha[osmos_slots];
+#pragma unroll
+    for (int j = 0; j < 8; j++) {
+      const float s4 = ((sp[grp][0][j][lane] + sp[grp][1][j][lane]) + sp[grp][2][j][lane]) + sp[grp][3][j][lane];
+      sv[j] = (uint32_t) osmos_acc_col(j) < nt ? s4 * scale : -INFINITY;
+    }
+#pragma unroll
+    for (int r = 0; r < osmos_slots; r++) {
+      float mx = -INFINITY;
+#pragma unroll
+      for (int j = 0; j < 8; j++)
+        if (osmos_slot(j) == r) mx = fmaxf(mx, sv[j]);
+      const float mn = fmaxf(m[r], osmos_row_max(mx));
+      float sum = 0.0f;
+#pragma unroll
+      for (int j = 0; j < 8; j++)
+        if (osmos_slot(j) == r) {
+          const float pv = mn == -INFINITY ? 0.0f : expf(sv[j] - mn);
+          sum += pv;
+          ps[wid][osmos_acc_row(j) * kMlaVRow + osmos_acc_col(j)] = (_Float16) pv;
+        }
+      alpha[r] = mn == -INFINITY ? 1.0f : expf(m[r] - mn);
+      l[r] = l[r] * alpha[r] + osmos_row_sum(sum), m[r] = mn;
+    }
+    osmos_wave_barrier();
+    const osmos_fa pa = osmos_load_a(ps[wid], kMlaVRow);
+#pragma unroll
+    for (uint32_t n = 0; n < HY4_MLA_MAX_LATENT / 64; n++) {
+      if (n >= ot) break;
+#pragma unroll
+      for (int j = 0; j < 8; j++) o[n][j] *= alpha[osmos_slot(j)];
+      o[n] = osmos_mma(pa, osmos_load_b_s(vt + (wave * ot + n) * 16 * kMlaVRow, kMlaVRow), o[n]);
+    }
+    osmos_wave_barrier();
+  }
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    const uint32_t r = (uint32_t) osmos_acc_row(j), h = h0 + r;
+    const float mm = m[osmos_slot(j)], big = fmaxf(mm, sinks[h]), f = expf(mm - big);
+    const float inv = 1.0f / (l[osmos_slot(j)] * f + expf(sinks[h] - big));
+    float* out = o_lat + ((uint64_t) t * heads + h) * latent;
+#pragma unroll
+    for (uint32_t n = 0; n < HY4_MLA_MAX_LATENT / 64; n++) {
+      if (n >= ot) break;
+      out[(wave * ot + n) * 16 + osmos_acc_col(j)] = o[n][j] * f * inv;
+    }
+  }
+}
+
 // a (token, head)'s splits merged in their order with the sink (a logit with no value)
 __global__ __launch_bounds__(kThreads) void mla_merge_kernel(const float* part, const float* sinks, uint32_t heads,
                                                              uint32_t latent, uint32_t window, const int32_t* sel,
@@ -882,7 +1049,7 @@ extern "C" uint64_t hy4_mla_attn_scratch(uint32_t heads) {
 extern "C" bool hy4_mla_attn(const float* qa, const void* cache, uint32_t slots, bool q8, const float* sinks, uint32_t heads,
                              uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t* sel,
                              const int32_t* n_sel, uint32_t sel_cap, uint32_t pool, float scale, const int32_t* pos,
-                             uint32_t n_tok, float* o_lat, float* scratch, void* stream) {
+                             uint32_t n_tok, float* o_lat, float* scratch, bool read, void* stream) {
   if (!qa || !cache || !sinks || !pos || !o_lat || !scratch || !heads || !latent || latent > HY4_MLA_MAX_LATENT ||
       !rope_dim || rope_dim > kMaxRope || !n_tok || (window && window > HY4_MLA_MAX_KEYS) || latent % 4 || rope_dim % 4 ||
       (uintptr_t) cache % 16 || (uintptr_t) qa % 16 || (q8 && (latent % 32 || mla_row_bytes(latent, rope_dim, true) % 16)))
@@ -893,6 +1060,23 @@ extern "C" bool hy4_mla_attn(const float* qa, const void* cache, uint32_t slots,
   const uint32_t splits = (window ? window : HY4_MLA_MAX_KEYS) / kSplitKeys + 1 < kMaxSplits
                               ? (window ? window : HY4_MLA_MAX_KEYS) / kSplitKeys + 1
                               : kMaxSplits;
+  static const bool exact = getenv("HY4_MLA_F32") != nullptr;  // (a read's attention the F32 path's: A/B)
+  if (read && !exact && heads % 16 == 0 && latent % 64 == 0 && (latent + rope_dim) % 16 == 0 &&
+      latent + rope_dim <= kMlaRow && rope_dim <= 64) {
+    if (heads % 64 == 0 && !getenv("MLA_G2"))
+      mla_mm_kernel<4><<<dim3(heads / 64, n_tok), 512, 0, s>>>(qa, (const uint8_t*) cache, slots, q8, sinks, heads,
+                                                               latent, rope_dim, window, sel, n_sel, sel_cap, pool, scale,
+                                                               pos, o_lat);
+    else if (heads % 32 == 0)
+      mla_mm_kernel<2><<<dim3(heads / 32, n_tok), 256, 0, s>>>(qa, (const uint8_t*) cache, slots, q8, sinks, heads,
+                                                               latent, rope_dim, window, sel, n_sel, sel_cap, pool, scale,
+                                                               pos, o_lat);
+    else
+      mla_mm_kernel<1><<<dim3(heads / 16, n_tok), 128, 0, s>>>(qa, (const uint8_t*) cache, slots, q8, sinks, heads,
+                                                               latent, rope_dim, window, sel, n_sel, sel_cap, pool, scale,
+                                                               pos, o_lat);
+    return ok();
+  }
   for (uint32_t t0 = 0; t0 < n_tok; t0 += kTokChunk) {
     const uint32_t m = n_tok - t0 < kTokChunk ? n_tok - t0 : kTokChunk;
     mla_split_kernel<<<dim3(splits, (heads + kHeadGroup - 1) / kHeadGroup, m), kThreads, 0, s>>>(
@@ -970,15 +1154,15 @@ extern "C" bool hy4_ix_query(float* q, float* w, uint32_t heads, uint32_t dim, u
 
 extern "C" bool hy4_ix_select(const float* q, const float* w, const float* groups, uint32_t heads, uint32_t dim,
                               uint32_t pool, uint32_t top, const int32_t* pos, uint32_t n_tok, uint32_t max_groups,
-                              float* scores, int32_t* sel, int32_t* n_sel, void* stream) {
+                              float* scores, int32_t* sel, int32_t* n_sel, bool read, void* stream) {
   if (!q || !w || !groups || !pos || !scores || !sel || !n_sel || !heads || heads > 16 || !dim || dim > kIxDim ||
       !pool || top < 2 || !n_tok || !max_groups)
     return false;
   // the scores tiled for every step (a prompt's too: the same bits as the select kernel's own loop); the selection over
   // many blocks for a decode's or a verify's few tokens, a block a token for a prompt's many
   const bool spread = n_tok <= kIxSpreadTokens;
-  static const bool exact = getenv("HY4_IX_F32") != nullptr;  // (a prompt's scores the F32 loop's: A/B)
-  if (!spread && !exact && dim == kIxDim && heads <= 16)
+  static const bool exact = getenv("HY4_IX_F32") != nullptr;  // (a read's scores the F32 loop's: A/B)
+  if (read && !spread && !exact && dim == kIxDim && heads <= 16)
     ix_score_mm_kernel<<<dim3((max_groups + kMmGroups - 1) / kMmGroups, (n_tok + kMmTok - 1) / kMmTok), 128, 0,
                          st(stream)>>>(q, w, groups, heads, pool, top, pos, n_tok, max_groups, scores);
   else

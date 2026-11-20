@@ -395,7 +395,7 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
                       s->dn + (uint64_t)li * HY4_DFLY_KEEP + (uint32_t)i, anchor, pool, top, R, d->cap, d->sel, d->n_sel,
                       f->st) &&
          hy4_mla_attn(d->qa, s->cache[tl], 0, f->kv8, L->sinks, H, lat, rd, 0, d->sel, d->n_sel, d->cap, pool, scale, d->pos, R,
-                      d->olat, f->attn_part, f->st) &&
+                      d->olat, f->attn_part, false, f->st) &&
          hy4_mla_out(d->olat, L->v_b, d->gt, H, lat, vd, R, d->ao, f->table, f->st) &&
          mat(f, d->wtype, L->o, D, H * vd, d->ao, R, d->out) &&
          ops_rms_add_rms(d->h, d->out, L->post_proj_norm, L->ffn_norm, eps, D, R, d->xn, f->st) &&

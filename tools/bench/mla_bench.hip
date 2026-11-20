@@ -36,11 +36,11 @@ int main(int argc, char** argv) {
     bool ok = true;
     for (uint32_t i = 0; i < 10 && ok; i++)
       ok = hy4_mla_attn(qa, cache, s.slots, false, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
-                        scratch, nullptr);
+                        scratch, false, nullptr);
     if (hipEventRecord(a, nullptr) != hipSuccess) return 1;
     for (uint32_t i = 0; i < iters && ok; i++)
       ok = hy4_mla_attn(qa, cache, s.slots, false, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
-                        scratch, nullptr);
+                        scratch, false, nullptr);
     float ms = 0;
     if (!ok || hipEventRecord(b, nullptr) != hipSuccess || hipEventSynchronize(b) != hipSuccess ||
         hipEventElapsedTime(&ms, a, b) != hipSuccess)

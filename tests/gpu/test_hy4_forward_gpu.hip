@@ -38,6 +38,9 @@ constexpr uint32_t kTop1MissLong = 8;
 // 64 ids) past the short ones
 constexpr double kReadKlMean = 0.05, kReadKlMax = 1.0, kReadKlMeanLong = 0.6, kReadKlMaxLong = 20.0;
 constexpr uint32_t kReadTop1Miss = 8, kReadTop1MissLong = 8;
+// the Q8_0 cache's read at 64 tokens: the cache alone (the decode's math on it) 0.0553 mean, 1.63 max against the
+// reference (2026-11-19, Q3_K's file); its read (the matrix cores' attention and matrices) 0.0557, 1.42
+constexpr double kReadKlMean8 = 0.1, kReadKlMax8 = 3.0;
 
 struct Taps {
   std::vector<int32_t> rows;  // the kept rows
@@ -217,7 +220,8 @@ int main() {
   }
   // the read's: f16 inputs on the matrix cores, as far from the F32 reference as the release served in BF16 is
   const bool longer = ids.size() > 64;
-  const double mean_b = longer ? kReadKlMeanLong : kReadKlMean, max_b = longer ? kReadKlMaxLong : kReadKlMax;
+  const double mean_b = longer ? kReadKlMeanLong : kv8 ? kReadKlMean8 : kReadKlMean;
+  const double max_b = longer ? kReadKlMaxLong : kv8 ? kReadKlMax8 : kReadKlMax;
   const uint32_t miss_b = longer ? kReadTop1MissLong : kReadTop1Miss;
   std::printf("  read: KL mean %.3g (bound %.3g), max %.3g (%.3g), top-1 %u of %u (at least %u)\n", rd.kl_mean, mean_b,
               rd.kl_max, max_b, rd.same, last, last - miss_b);

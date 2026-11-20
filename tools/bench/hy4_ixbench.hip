@@ -46,12 +46,12 @@ int main() {
       CHECK(hipMemcpy(dq, q.data(), q.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
       CHECK(hipMemcpy(dw, w.data(), w.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
       CHECK(hipMemcpy(dp, pos.data(), n_tok * 4, hipMemcpyHostToDevice) == hipSuccess);
-      (void) rd;
+      
       std::vector<double> ms;
       for (int r = 0; r < 6; r++) {
         CHECK(hipDeviceSynchronize() == hipSuccess);
         const auto t0 = std::chrono::steady_clock::now();
-        CHECK(hy4_ix_select(dq, dw, dg, heads, dim, pool, top, dp, n_tok, max_groups, sc, sel, ns, nullptr));
+        CHECK(hy4_ix_select(dq, dw, dg, heads, dim, pool, top, dp, n_tok, max_groups, sc, sel, ns, false, nullptr));
         CHECK(hipDeviceSynchronize() == hipSuccess);
         if (r) ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
       }
