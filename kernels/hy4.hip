@@ -956,14 +956,28 @@ __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, con
   }
   __syncthreads();
   const uint32_t want = top - 1;
-  uint32_t prefix = 0, total = 0;
-  for (int bit = 31; bit >= 0; bit--) {  // the greatest key V with at least `want` keys >= V
-    const uint32_t cand = prefix | (1u << bit);
-    uint32_t c = 0;
-    for (uint32_t g = threadIdx.x; g < own; g += kThreads) c += order_key(sc[g]) >= cand;
-    block_scan(c, lds, &total);
-    if (total >= want) prefix = cand;
+  __shared__ uint32_t hist[256], st_prefix, st_need;
+  if (threadIdx.x == 0) st_prefix = 0, st_need = want;
+  for (int shift = 24; shift >= 0; shift -= 8) {  // the greatest key V with at least `want` keys >= V: four 8-bit
+    for (uint32_t b = threadIdx.x; b < 256; b += kThreads) hist[b] = 0;  // digits, a histogram of the keys under
+    __syncthreads();                                                     // the prefix so far each (ix_wide_*'s)
+    const uint32_t pre = st_prefix, mask = shift == 24 ? 0u : ~0u << (shift + 8);
+    for (uint32_t g = threadIdx.x; g < own; g += kThreads) {
+      const uint32_t k = order_key(sc[g]);
+      if ((k & mask) == (pre & mask)) atomicAdd(&hist[(k >> shift) & 255], 1u);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {  // from the top digit down: the first whose keys reach the ones still wanted
+      uint32_t acc = 0, b = 255;
+      for (;; b--) {
+        if (acc + hist[b] >= st_need || b == 0) break;
+        acc += hist[b];
+      }
+      st_prefix = pre | b << shift, st_need -= acc;
+    }
+    __syncthreads();
   }
+  const uint32_t prefix = st_prefix;
   uint32_t over = 0;
   {
     uint32_t c = 0;
