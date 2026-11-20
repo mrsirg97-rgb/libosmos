@@ -74,7 +74,14 @@ uint32_t lfm3_seq_reach(const Lfm3Seq *s)
   if (!s || s->broken)
     return 0;
   const int64_t past_close = (int64_t)s->pos - (int64_t)s->closed * LSA_WINDOW; /* a rollback never un-closes */
-  return !s->f->lsa || past_close >= (int64_t)s->back ? s->back : (uint32_t)(past_close > 0 ? past_close : 0);
+  uint32_t r = !s->f->lsa || past_close >= (int64_t)s->back ? s->back : (uint32_t)(past_close > 0 ? past_close : 0);
+  if (s->stage) /* never back to the stage's from or below: a sequence there is the stage before's (0.11.2 - a
+                   crossing step's own tokens rolled back past it, its rope then the new stage's at an old position) */
+  {
+    const int64_t past_from = (int64_t)s->pos - (int64_t)s->f->stage[s->stage].from - 1;
+    r = past_from < (int64_t)r ? (uint32_t)(past_from > 0 ? past_from : 0) : r;
+  }
+  return r;
 }
 
 /* a convolution's state the slot before (its ring kept each of the last tokens'); a full layer's rows past the

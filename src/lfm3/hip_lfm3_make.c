@@ -283,6 +283,34 @@ void lfm3_forward_destroy(Lfm3Forward *f)
 const Lfm3Stage lfm3_stages_default[] = {{0, 1}};
 const uint32_t lfm3_stages_default_n = sizeof lfm3_stages_default / sizeof lfm3_stages_default[0];
 
+/* OSMOS_LFM3_STAGES: "from:factor,from:factor,..." - each a decimal of 32 bits, LFM3_MAX_STAGES at most, nothing
+   else (0.11.2: a malformed string used whatever parsed before it) */
+static bool parse_stages(const char *c, Lfm3Stage *t, uint32_t *n)
+{
+  uint32_t m = 0;
+  for (;;)
+  {
+    unsigned long long v[2];
+    for (int i = 0; i < 2; i++) /* from, then factor: a ':' between them */
+    {
+      if (*c < '0' || *c > '9')
+        return false;
+      char *e;
+      v[i] = strtoull(c, &e, 10);
+      if (v[i] > UINT32_MAX || (i == 0 && *e != ':'))
+        return false;
+      c = i == 0 ? e + 1 : e;
+    }
+    if (m == LFM3_MAX_STAGES)
+      return false;
+    t[m++] = (Lfm3Stage){(uint32_t)v[0], (uint32_t)v[1]};
+    if (!*c)
+      return *n = m, true;
+    if (*c++ != ',')
+      return false;
+  }
+}
+
 static bool stages_ok(const Lfm3Stage *t, uint32_t n)
 {
   if (!t || !n || n > LFM3_MAX_STAGES || t[0].from)
@@ -315,28 +343,13 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   Lfm3Stage env_table[LFM3_MAX_STAGES];
   const char *env = o->stages ? NULL : getenv("OSMOS_LFM3_STAGES"); /* "from:factor,..." (0:1 native throughout): a
                                                                        model's table tried without a build */
+  bool env_ok = true;
   if (env && *env)
-  {
-    uint32_t m = 0;
-    for (const char *c = env; m < LFM3_MAX_STAGES && *c;)
-    {
-      char *e;
-      const unsigned long from = strtoul(c, &e, 10);
-      if (*e != ':')
-        break;
-      const unsigned long factor = strtoul(e + 1, &e, 10);
-      env_table[m++] = (Lfm3Stage){(uint32_t)from, (uint32_t)factor};
-      if (*e != ',')
-      {
-        c = e;
-        break;
-      }
-      c = e + 1;
-    }
-    table = env_table, nt = m;
-  }
-  bool ok = o->yarn_static_ctx || stages_ok(table, nt) ||
-            lfm3_fail(err, "the YaRN stages: none, past LFM3_MAX_STAGES, not from 0, out of order, or a factor not 1-64");
+    env_ok = parse_stages(env, env_table, &nt), table = env_table;
+  bool ok = (env_ok || lfm3_fail(err, "OSMOS_LFM3_STAGES: not from:factor,... (at most LFM3_MAX_STAGES, each a 32-bit "
+                                      "integer)")) &&
+            (o->yarn_static_ctx || stages_ok(table, nt) ||
+            lfm3_fail(err, "the YaRN stages: none, past LFM3_MAX_STAGES, not from 0, out of order, or a factor not 1-64"));
   f->yarn_static_ctx = o->yarn_static_ctx;
   if (ok && o->yarn_static_ctx) /* one stage: every position YaRN at yarn_static_ctx over yarn_from */
     f->stages = 1, f->stage[0] = (Lfm3Stage){0, 0},
