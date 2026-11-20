@@ -264,6 +264,8 @@ struct Seq
   uint8_t *ckv[WEIGHTS_MAX_LAYERS], *ik[WEIGHTS_MAX_LAYERS];     /* KV_FP4_E4M3, KV_FP4_POW2 rows */
   float *pend_kvc[WEIGHTS_MAX_LAYERS], *pend_sc[WEIGHTS_MAX_LAYERS];
   uint8_t *dring; /* a drafter's rings, [block][window] KV_FP8 rows (drafter_seed's; NULL until then) */
+  bool dseeded;   /* dring holds this sequence's context (drafter_seed's, or a state's): a reset or a load without
+                     rings leaves the buffer, not its rows (0.11.2 - a draft read the last conversation's) */
 };
 
 /* a small step's routed experts the lane's (int8, the matvec's order): a step of `picks` under n_experts, the lane

@@ -100,7 +100,7 @@ static int parts(const Seq *s, Part *p)
       p[n++] = (Part){(uint8_t *)s->pend_sc[l], hd * F, pend, pf, (uint64_t)s->pos - pf};
     }
   }
-  if (s->dring)
+  if (s->dring && s->dseeded) /* (rings not this sequence's: not its state) */
     p[n++] = (Part){s->dring, kv_row_bytes(KV_FP8, (uint32_t)hd), 0, 0, (uint64_t)DRAFTER_BLOCKS * g->window};
   return n;
 }
@@ -161,7 +161,7 @@ bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
   if (hipDeviceSynchronize() != hipSuccess) /* the stream's writes of its rows done */
     return fwd_fail(err, "a GPU call failed (before the save)");
   Header h = {STATE_MAGIC, SEQ_STATE_VERSION, forward_identity(s->f), s->pos, s->prompt_end, s->dec_from, s->n_last,
-              {0}, s->dring != NULL, (uint32_t)(s->hi - s->pos)};
+              {0}, s->dring && s->dseeded, (uint32_t)(s->hi - s->pos)};
   memcpy(h.last, s->last, sizeof h.last);
   uint8_t *bounce = malloc(STATE_CHUNK);
   uint64_t sum = fnv(&h, sizeof h, FNV_SEED);
@@ -180,6 +180,7 @@ bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
 static void reset(Seq *s)
 {
   s->pos = 0, s->prompt_end = 0, s->staged = 0, s->dec_from = 0, s->n_last = 0, s->hi = 0, s->broken = false;
+  s->dseeded = false; /* (the drafter's rings kept, not their rows) */
   memset(s->last, 0, sizeof s->last);
 }
 
@@ -212,12 +213,9 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
       !fwd_alloc(&s->dring, (uint64_t)DRAFTER_BLOCKS * f->g->window * kv_row_bytes(KV_FP8, (uint32_t)f->g->head_dim)))
     return refuse(s, err, "GPU memory refused (the drafter's rings)");
   s->pos = h.pos;
-  uint8_t *keep = s->dring;
-  if (!h.has_dring) /* (the sequence's own rings, if any, are not the state's: not read until drafter_seed) */
-    s->dring = NULL;
+  s->dseeded = h.has_dring; /* the rings the state's, or none (not read until drafter_seed) */
   Part p[MAX_PARTS];
   const int n = parts(s, p);
-  s->dring = keep;
   uint64_t want = sizeof h + sizeof sum;
   for (int i = 0; i < n; i++)
     want += p[i].n * p[i].row;

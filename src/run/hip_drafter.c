@@ -298,7 +298,10 @@ bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[FORWARD
       return fail(err, "a GPU call failed (the drafter's seed)");
     want = f->tap_pos[e - 1] + 1, i = e;
   }
-  return want == to || fail(err, "a position the last step did not tap");
+  if (want != to)
+    return fail(err, "a position the last step did not tap");
+  s->dseeded = true; /* its rings this sequence's context from here */
+  return true;
 }
 
 /* the confidence of row t: sigmoid(conf_w . [x_t ; E[prev]]), E[prev] already in cat's tail */
@@ -318,7 +321,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
                   float conf[DRAFTER_BLOCK], char err[FORWARD_ERR])
 {
   Forward *f = d ? d->f : NULL;
-  if (!f || !s || s->f != f || !s->dring || y < 0 || y >= f->g->n_vocab)
+  if (!f || !s || s->f != f || !s->dring || !s->dseeded || y < 0 || y >= f->g->n_vocab)
     return fail(err, "no drafter, an unseeded sequence or a token outside the vocabulary"), -1;
   const Geometry *g = f->g;
   const uint32_t D = g->n_embd, V = (uint32_t)g->n_vocab, T = DRAFTER_BLOCK;
