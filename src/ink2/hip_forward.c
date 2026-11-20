@@ -195,7 +195,7 @@ static bool up_conv_static(Ink2Forward *f, const GgufTensor *t, float **out)
   if (!v)
     return false;
   const uint32_t taps = (uint32_t)f->w->geo.conv;
-  if (f->w->geo.llama_names)
+  if (f->w->geo.keys != INK2_KEYS_OURS)
   {
     float *tw = malloc(n * 4);
     if (!tw)
@@ -824,10 +824,10 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   const uint32_t C = (uint32_t)g->n_embd, H = (uint32_t)g->n_heads, KV = (uint32_t)g->n_kv_heads,
                  D = (uint32_t)g->head_dim, R = (uint32_t)g->d_rel, taps = (uint32_t)g->conv, maxb = f->maxb,
                  pos = (uint32_t)s->pos;
-  const bool llama = g->llama_names;
-  const float res_scale = 1.0f / sqrtf((float)C), conv_res = llama ? 0.0f : 1.0f,
-              conv_scale = llama ? 1.0f : 1.0f / sqrtf((float)taps + 1),
-              dyn_scale = llama ? 1.0f : 1.0f / sqrtf(2.0f * taps + 1);
+  const bool bare = g->keys == INK2_KEYS_UNSLOTH_SMALL; /* its convs' residual and scale not applied */
+  const float res_scale = 1.0f / sqrtf((float)C), conv_res = bare ? 0.0f : 1.0f,
+              conv_scale = bare ? 1.0f : 1.0f / sqrtf((float)taps + 1),
+              dyn_scale = bare ? 1.0f : 1.0f / sqrtf(2.0f * taps + 1);
 #define GPU(x)                                                                                                         \
   do                                                                                                                   \
   {                                                                                                                    \

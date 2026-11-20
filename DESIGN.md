@@ -2030,17 +2030,26 @@ the forward 2M-capable for a model trained past it (a retrain, or vibes27b).
 
 ## 0.12.0: Inkling-2-Mini - the looped Inkling (design, 2026-11-20)
 
-the operator's: Thinking Machines' Inkling-2-Mini (26B, ~2B routed active, 5.4B effective with its passes) served
-from unsloth's UD-Q8_K_XL GGUF, with the release's own block drafter (unsloth's dspark Q8_0). the family's code
-(src/ink2, osmos_ink2) carries it; what is new is its loop.
+the operator's: Thinking Machines' Inkling-2-Mini (26B, ~2B routed active, 5.4B effective with its passes), served
+from the release itself - tools/convert/ink2_ref_gguf.py --name Inkling-2-Mini, as Inkling-2-Small's reference - with
+its own block drafter. the family's code (src/ink2, osmos_ink2) carries it; what is new is its loop.
 
-**the file** (verified against the release, tools: gguf-py, upstream llama.cpp's converter): unsloth's is the
-release's values - 508 BF16 / F32 tensors bit-identical to upstream's conversion of the release, the routed experts
-of layers 0-19 NVFP4 with a per-expert `.scale` (the release's NVFP4 times its outer scale), of layers 20-23 BF16
-(the release's MXFP8, exactly), the loop's tensors identical once renamed. 22.9 GB (the release 19.5: its MXFP8 tail
-the difference). its keys are another dialect than Inkling-2-Small's (`attention.relative_length`,
-`attention.relative_extent`, `attention.log_scale_floor`, `shortconv.l_cache`; head counts an array a slot), and
-`block_count` 48 counts the unrolled slots, the physical layers 24.
+**the file**: the release converted, no value changed (ink2_ref_gguf.py --check on layers 0, 6, 19, 20, 23: every
+sampled value the checkpoint's): the routed experts of layers 0-19 NVFP4 with a scale an expert, of 20-23 MXFP8 -
+both paths osmos has (Inkling-2-Small's tail MXFP8 too) - 19.6 GB. Mini's checkpoint is Small's names plus the loop's
+(a core layer's 12 controllers, the two cross-pass query tables); its MXFP8 scales a row's every 32 values, as Small's
+(hf_quant_config's [32, 32] block not the stored layout). the loop's keys and names unsloth's (inkling2.num_loops,
+inkling2.loop.*, loop_*), block_count the 48 cache slots.
+
+**unsloth's GGUF, why not**: first chosen (2026-11-20), then dropped the same day: it is the release's values
+(checked: 508 BF16 / F32 tensors bit-identical to upstream's conversion, NVFP4 x .scale the release's), but its layers
+20-23 BF16 - and no expert path reads BF16 (no QTYPE_MV_TOK / QTYPE_MM: I had said otherwise, wrongly); new kernels
+for a tail the release holds as MXFP8, which osmos reads. its keys are upstream llama.cpp's merged inkling2's
+(#32694: attention.relative_length, shortconv.l_cache, SiTU's betas the softcaps, head counts an array a slot, gate
+and up fused - gate rows first - with one scale) except its loop's, a pre-merge fork's (upstream's own is
+inkling2_loop, loop.start / .end / .count: it refuses unsloth's file at blk.24). osmos reads that dialect
+(INK2_KEYS_UPSTREAM) as far as its BF16 experts, which it refuses by name. upstream's merged convolve applies the
+residual and the 1/sqrt(taps + 1) scales (ours), Small's unsloth GGUF did not (INK2_KEYS_UNSLOTH_SMALL).
 
 **the loop** (upstream llama.cpp's src/models/inkling2-loop.cpp, the one implementation; transformers has none):
 24 physical layers - a prelude 0-5, a core 6-17, a tail 18-23 (`loop.core_start` 6, `loop.core_end` 18, `num_loops`
@@ -2057,13 +2066,14 @@ loop_kv_res_query[2i], v = loop_kv_res_query[2i + 1], ffn = loop_res_query[2i + 
 checked: unsloth's tables against upstream's per-layer loop_msg_query, every column equal). unsloth's loop_attn is
 upstream's q controller, loop_mlp its ffn's.
 
-**the work, in order**: (1) the schema - Ink2Geometry's loop (core start / end, passes, gate rank, slots) and the
-Mini dialect; Ink2Weights' loop tensors (12 controllers x 3 matrices a core layer, the two query tables) - refused
-by name where absent or misshapen, as every role. (2) its tests first: test_ink2_weights on the Mini file (the
+**the work, in order**: (1) the schema - Ink2Geometry's loop (core start / end, passes, gate rank, slots) and its
+keys (Ink2Keys: ours, unsloth's Small's, upstream's); Ink2Weights' loop tensors (12 controllers a core layer: down,
+gain, forget for q, k, v and the MoE; the two query tables) - refused by name where absent or misshapen, as every
+role; each role spelled in each dialect (one table). done: test_ink2_mini_weights. (2) its tests first: test_ink2_weights on the Mini file (the
 geometry, every loop role, a broken copy refused); test_ink2_loop_gpu against upstream llama.cpp's own taps
 (llama-eval-callback on its conversion of the release: each slot's output and the logits at 64 and ~2K tokens,
-held within the experts' BF16 rounding - the oracle's experts are the release's NVFP4 and MXFP8 rounded once to BF16
-by the converter, ~2e-3 relative, osmos's the exact values); a pass split across steps the same bits. (3) the
+held within the experts' BF16 rounding - the oracle's experts are the release's NVFP4 rounded once to BF16 by its
+converter, ~2e-3 relative (its MXFP8 exact in BF16), osmos's the exact values); a pass split across steps the same bits. (3) the
 forward - the slots, the prelude's output and blocks kept for each pass, the bank, the control (one kernel: the two
 norms, the rank-64 down, tanh gain and forget, the mix). (4) the drafter (`dflash` + a DSpark Markov head, taps at
 unrolled slots 5, 23, 41, 48 - a new kind: its own loader and driver, the shared DFlash core's where its math is
@@ -2073,8 +2083,8 @@ the same). (5) the pack, numbers, needles.
 operator's: upstream cloned for this), on its converter's GGUF of the release (52 GB, experts BF16; a context of
 4,096 - its default, the trained 1M, does not fit beside it). it answers ("The user asks: ..."), 12.9 tok/s.
 
-**not now**: the release's own checkpoint (NVFP4 + its MXFP8 tail, 3.4 GB smaller, ~0.3 ms a token: a safetensors
-model loader and an MXFP8 expert path osmos does not have) - a size option after the loop is right on the GGUF.
+**not now**: unsloth's GGUF served (BF16 expert kernels for its tail); upstream's inkling2_loop names (its own
+conversion: per-layer loop_msg_query, loop_*_ctrl_*).
 
 ## 0.11.2: the audit - correctness, then the families' shared code (2026-11-20)
 
