@@ -697,7 +697,9 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
                                                             float* scores) {
   // a tile's keys once for every token of the step (a verify's 6 read them once, not 6 times), each token's query in
   // turn
-  __shared__ float qs[kIxDim * 16], ws[16], ks[kIxTile][kIxDim + 1], ds[kIxTile][16];
+  // (qs's rows padded too: a wave's 32 threads are 2 groups x 16 heads, so unpadded its heads' rows 512 bytes apart
+  // read one bank - a 16-way conflict every term; 1M, a token: 5.45 ms a layer before)
+  __shared__ float qs[(kIxDim + 1) * 16], ws[16], ks[kIxTile][kIxDim + 1], ds[kIxTile][16];
   const uint32_t g0 = blockIdx.x * kIxTile;
   uint32_t most = 0;
   for (uint32_t t = 0; t < n_tok; t++) {
@@ -712,13 +714,13 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
     if (own < top || g0 >= own) continue;
     const uint32_t n = own - g0 < kIxTile ? own - g0 : kIxTile;
     __syncthreads();
-    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
+    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i / dim * (kIxDim + 1) + i % dim] = q[(uint64_t) t * heads * dim + i];
     for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
     __syncthreads();
     for (uint32_t e = threadIdx.x; e < n * heads; e += kThreads) {
       const uint32_t gl = e / heads, h = e % heads;
       float d = 0;
-      for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * dim + i], ks[gl][i], d);
+      for (uint32_t i = 0; i < dim; i++) d = fmaf(qs[h * (kIxDim + 1) + i], ks[gl][i], d);
       ds[gl][h] = d;
     }
     __syncthreads();
@@ -799,7 +801,7 @@ __global__ __launch_bounds__(kThreads) void ix_select_kernel(const float* q, con
   if (dense_only) return;  // (the spread selection's tokens: ix_wide_*)
   float* sc = scores + (uint64_t) t * max_groups;
   if (!scored) {
-    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i] = q[(uint64_t) t * heads * dim + i];
+    for (uint32_t i = threadIdx.x; i < heads * dim; i += kThreads) qs[i / dim * (kIxDim + 1) + i % dim] = q[(uint64_t) t * heads * dim + i];
     for (uint32_t h = threadIdx.x; h < heads; h += kThreads) ws[h] = w[(uint64_t) t * heads + h];
     __syncthreads();
     for (uint32_t g = threadIdx.x; g < own; g += kThreads) {
