@@ -159,7 +159,8 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
   return true;
 }
 
-uint32_t q4x_seq_reach(const Q4xSeq *s) { return s ? s->back : 0; }
+uint32_t q4x_seq_reach(const Q4xSeq *s) { return s && !s->broken ? s->back : 0; } /* (a broken one's rollback refused:
+                                                                                       its reach none - 0.11.2) */
 
 void q4x_seq_fail(Q4xSeq *s)
 {

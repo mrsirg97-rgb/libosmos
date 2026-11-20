@@ -61,7 +61,7 @@ int32_t lfm3_seq_position(const Lfm3Seq *s) { return s ? s->pos : -1; }
 
 bool lfm3_seq_prompt(Lfm3Seq *s, uint32_t end)
 {
-  if (!s || s->broken)
+  if (!s || s->broken || end > s->f->max_ctx) /* (0.11.2: an end past the context taken - the other families' refused) */
     return false;
   s->prompt_end = end;
   return true;

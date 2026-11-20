@@ -49,7 +49,7 @@ int32_t hy4_seq_position(const Hy4Seq *s) { return s ? s->pos : -1; }
 
 bool hy4_seq_prompt(Hy4Seq *s, uint32_t end)
 {
-  if (!s || s->broken)
+  if (!s || s->broken || end > s->f->max_ctx) /* (0.11.2: an end past the context taken - the other families' refused) */
     return false;
   s->prompt_end = end;
   return true;
