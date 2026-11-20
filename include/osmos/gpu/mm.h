@@ -168,6 +168,9 @@ mm_group
   xts long: its first token at a tile, xoff[m] = tile * 16 xts + its first column * 16), its first cnt[m] (at most
   max_cnt <= MM_MAX_TOKENS) tokens' rows into y + yoff[m] + t * ys - a step's distinct experts (each its own gathered
   tokens),
-  or a layer's wo_a groups (each a slice of the same tokens). each tile the same sums as mm_run's: the same bits.
+  or a layer's wo_a groups (each a slice of the same tokens). each tile the same sums as mm_run's: the same bits -
+  but for Q6_K under 2,048 columns (mm_run's short shape, 64-value slabs; mm_group's its tuned 128: another K split,
+  other bits - 0.11.2, the claim corrected, no shape changed: a pack's bits stay). a token's bits its own either way.
+  false for cols not a multiple of 128 (mm_fits takes some: Q8_0 at 320, Q6_K at 1,344 - mm_run then, not this).
   `w`, `cnt`, `xoff`, `yoff` on the device.
 */

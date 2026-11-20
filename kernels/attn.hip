@@ -722,7 +722,8 @@ extern "C" bool ops_topk(const float* score, uint32_t stride, const int32_t* pos
                          const uint32_t* keep, uint32_t block, uint32_t keep_words, uint32_t n_tok, int32_t* sel,
                          uint32_t sel_stride, int32_t* n_sel, void* stream) {
   if (!ratio || !k || k > OPS_MAX_SELECT || k > sel_stride || !n_tok ||
-      (keep && (!block || keep_words < (stride / block + 31) / 32)))
+      (keep && (!block || keep_words < ((stride + block - 1) / block + 31) / 32)))  // (its blocks rounded up: the
+                                                                                  // last part one - 0.11.2)
     return false;
   if (chunked(n_tok, stride, k)) {
     chunk_kernel<false><<<dim3(kChunks, n_tok), kSelectThreads, 0, st(stream)>>>(score, stride, pos, ratio, k, keep,
