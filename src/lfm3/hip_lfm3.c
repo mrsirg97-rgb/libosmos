@@ -14,6 +14,7 @@
 #include "osmos/gpu/lfm3_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "lfm3_impl.h"
@@ -318,23 +319,13 @@ const float *lfm3_logits(const Lfm3Forward *f) { return f ? f->pin_logits : NULL
 
 const float *lfm3_row_logits(const Lfm3Forward *f, uint32_t row)
 {
-  return f && row < f->rows && f->slot[row] >= 0 ? f->logits + (uint64_t)f->slot[row] * f->w->geo.n_vocab : NULL;
+  return f ? kept_row(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row) : NULL;
 }
 
 bool lfm3_greedy(Lfm3Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[LFM3_ERR])
 {
-  if (!f || !ids || !rows || row0 + rows > f->rows)
-    return lfm3_fail(err, "no forward or ids, or rows past the last step's");
-  for (uint32_t r = 0; r < rows; r++)
-    if (f->slot[row0 + r] < 0 || f->slot[row0 + r] != f->slot[row0] + (int32_t)r)
-      return lfm3_fail(err, "a row the last step kept no logits of");
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab;
-  if (!ops_argmax(f->logits + (uint64_t)f->slot[row0] * V, V, rows, V, f->ids, f->argmax, f->st) ||
-      hipMemcpyAsync(ids, f->ids, rows * 4, hipMemcpyDeviceToHost, f->st) != hipSuccess ||
-      hipStreamSynchronize((hipStream_t)f->st) != hipSuccess)
-    return lfm3_fail(err, "a GPU call failed (the greedy pick)");
-  for (uint32_t r = 0; r < rows; r++)
-    if (ids[r] < 0)
-      return lfm3_fail(err, "a NaN in a row's logits");
-  return true;
+  const char *why = f ? kept_greedy(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row0, rows, f->ids,
+                                    f->argmax, f->st, ids)
+                      : "no forward or ids, or rows past the last step's";
+  return !why || lfm3_fail(err, why);
 }

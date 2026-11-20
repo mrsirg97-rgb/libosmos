@@ -7,6 +7,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/hy4_ops.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/model/qtype.h"
@@ -164,22 +165,13 @@ const float *hy4_logits(const Hy4Forward *f) { return f ? f->pin_logits : NULL; 
 
 const float *hy4_row_logits(const Hy4Forward *f, uint32_t row)
 {
-  return f && row < f->rows && f->slot[row] >= 0 ? f->logits + (uint64_t)f->slot[row] * f->w->geo.n_vocab : NULL;
+  return f ? kept_row(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row) : NULL;
 }
 
 bool hy4_greedy(Hy4Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[HY4_ERR])
 {
-  if (!f || !ids || !rows || row0 + rows > f->rows)
-    return hy4_fail(err, "no forward or ids, or rows past the last step's");
-  for (uint32_t r = 0; r < rows; r++)
-    if (f->slot[row0 + r] < 0 || f->slot[row0 + r] != f->slot[row0] + (int32_t)r)
-      return hy4_fail(err, "a row the last step kept no logits of");
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab;
-  if (!ops_argmax(f->logits + (uint64_t)f->slot[row0] * V, V, rows, V, f->ids, f->argmax, f->st) ||
-      hipMemcpy(ids, f->ids, rows * 4, hipMemcpyDeviceToHost) != hipSuccess)
-    return hy4_fail(err, "a GPU call failed (the greedy pick)");
-  for (uint32_t r = 0; r < rows; r++)
-    if (ids[r] < 0)
-      return hy4_fail(err, "a NaN in a row's logits");
-  return true;
+  const char *why = f ? kept_greedy(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row0, rows, f->ids,
+                                    f->argmax, f->st, ids)
+                      : "no forward or ids, or rows past the last step's";
+  return !why || hy4_fail(err, why);
 }

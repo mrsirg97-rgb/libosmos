@@ -15,6 +15,7 @@
 #include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -325,22 +326,13 @@ const float *q35_logits(const Q35Forward *f) { return f ? f->pin_logits : NULL; 
 
 const float *q35_row_logits(const Q35Forward *f, uint32_t row)
 {
-  return f && row < f->rows && f->slot[row] >= 0 ? f->logits + (uint64_t)f->slot[row] * f->w->geo.n_vocab : NULL;
+  return f ? kept_row(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row) : NULL;
 }
 
 bool q35_greedy(Q35Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q35_ERR])
 {
-  if (!f || !ids || !rows || row0 + rows > f->rows)
-    return fail(err, "no forward or ids, or rows past the last step's");
-  for (uint32_t r = 0; r < rows; r++) /* kept rows' slots in their order: rows row0 .. one run of slots */
-    if (f->slot[row0 + r] < 0 || f->slot[row0 + r] != f->slot[row0] + (int32_t)r)
-      return fail(err, "a row the last step kept no logits of");
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab;
-  if (!ops_argmax(f->logits + (uint64_t)f->slot[row0] * V, V, rows, V, f->ids, f->argmax, NULL) ||
-      hipMemcpy(ids, f->ids, rows * 4, hipMemcpyDeviceToHost) != hipSuccess)
-    return fail(err, "a GPU call failed (the greedy pick)");
-  for (uint32_t r = 0; r < rows; r++)
-    if (ids[r] < 0)
-      return fail(err, "a NaN in a row's logits");
-  return true;
+  const char *why = f ? kept_greedy(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row0, rows, f->ids,
+                                    f->argmax, NULL, ids)
+                      : "no forward or ids, or rows past the last step's";
+  return !why || fail(err, why);
 }
