@@ -152,6 +152,12 @@ static void sweep_hy4() {  // Hy4-flash's experts (Q3_K's file): gate / up 1536 
   SWEEP_G(quant::kQ4_K, NT, "Q4_K", 1536, 1536);
   SWEEP_D(quant::kQ8_0, NT, "Q8_0", 16384, 3072);  // (a sliding layer's gate / out: 64 x 256 wide)
   SWEEP_D(quant::kQ8_0, NT, "Q8_0", 3072, 16384);
+  SWEEP_D(quant::kQ6_K, NT, "Q6_K", 16384, 3072);  // (the gate and output requantized: tools/evo/requant_hy4.py)
+  SWEEP_D(quant::kQ6_K, NT, "Q6_K", 3072, 16384);
+  SWEEP_D(quant::kQ5_K, NT, "Q5_K", 16384, 3072);
+  SWEEP_D(quant::kQ5_K, NT, "Q5_K", 3072, 16384);
+  SWEEP_D(quant::kQ4_K, NT, "Q4_K", 16384, 3072);
+  SWEEP_D(quant::kQ4_K, NT, "Q4_K", 3072, 16384);
   SWEEP_D(quant::kQ8_0, NT, "Q8_0", 120832, 3072);  // (DFly2's head, Q8_0)
   SWEEP_D(quant::kQ8_0, NT, "Q8_0", 3072, 6144);    // (DFly2's fusion)
   SWEEP_D(quant::kQ8_0, NT, "Q8_0", 1024, 3072);   // (q_a)

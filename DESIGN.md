@@ -2279,6 +2279,14 @@ ids 0.061 F32 / 0.097 Q8_0 against the reference in BF16's own 0.151; DFly2's dr
   3072 305.8 -> 244.1 us), Q3_K's experts 2 rows and 2 in flight (72.8 -> 67.4), Q4_K's 2 in flight (and Qwen3.8's
   UD-Q4_K_XL shapes, 51.9 -> 49.4): 63.5 -> 60.7 ms a token, the same bits.
 - 32K prefill, all of it: 166 (step 3) -> 210 -> 393 tok/s.
+- **a requant of the attention's gate and output measured, not shipped** (the operator's, 2026-11-19: DFly2 as it
+  is, Tencent's Q3_K as it ships). they are 3.85 GB of a token's ~9.6 (Q8_0); tools/evo/requant_hy4.py (ggml's
+  quantizers on the file's own Q8_0 values, no imatrix) + gguf_assemble (btrfs clones). KL against the reference,
+  the read, Q8_0 cache, 64 / 2,600 ids: Q8_0 0.056 / 0.142 (top-1 56, 58); Q6_K 0.044 / 0.166 (54, 57); Q5_K 0.074 /
+  0.257 (55, 54); Q4_K 0.143 / 0.480, max 11.8 (49, 53) - while Q4_K's WikiText NLL read lower (8 windows' mean 3.651
+  against 3.717): NLL on raw text is not fidelity. decode once tuned (mvsweep hy4: every type 180-230 GB/s at the
+  best R / U) ~4 / 5.5 / 7 ms a token of 59 - none the 30 tok/s bar's lever (a token's floor ~45 ms at the bus: that
+  bar is DFly2's rounds). a real candidate would start from the BF16 release with an imatrix.
 
 ## 0.9.0: q35 behind the engine - vibes27b served (design, 2026-11-16)
 
