@@ -1,5 +1,7 @@
 /* osmos/gpu/upload.h: a tensor read into GPU memory through a pinned piece */
 #include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <hip/hip_runtime_api.h>
 #include <unistd.h>
 
@@ -21,4 +23,36 @@ const char *gpu_read_tensor(const Gguf *g, const GgufTensor *t, void *pin, uint6
   }
   close(fd);
   return why;
+}
+
+bool gpu_upload_table(const Gguf *g, uint64_t piece, gpu_upload_skip skip, void *arg, void ***dev, char *err,
+                      size_t err_n)
+{
+  void *pin = NULL;
+  if (!(*dev = calloc(g->n_tensors ? g->n_tensors : 1, sizeof **dev)) || hipHostMalloc(&pin, piece, 0) != hipSuccess)
+  {
+    if (err)
+      snprintf(err, err_n, "%s", "out of memory (the weights' table, or a pinned piece)");
+    return false;
+  }
+  bool ok = true;
+  for (size_t i = 0; ok && i < g->n_tensors; i++)
+  {
+    const GgufTensor *t = &g->tensors[i];
+    if (skip && skip(t, arg))
+      continue;
+    const char *why = gpu_read_tensor(g, t, pin, piece, &(*dev)[i]);
+    if ((ok = !why) == false && err)
+      snprintf(err, err_n, "%s: not read into GPU memory (%s)", t->name, why);
+  }
+  hipHostFree(pin);
+  return ok;
+}
+
+void gpu_free_table(const Gguf *g, void **dev, const bool *shared)
+{
+  for (size_t i = 0; dev && i < g->n_tensors; i++)
+    if (!shared || !shared[i])
+      hipFree(dev[i]);
+  free(dev);
 }

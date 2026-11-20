@@ -157,32 +157,27 @@ static bool experts_whole(Q4xForward *f, char *err)
   return ok;
 }
 
-static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
+/* a tensor not read: one the overlay stands in for, the one skipped, or one on the experts' membrane */
+typedef struct UploadSkip
 {
-  void *pin = NULL;
-  if (!(*dev = calloc(g->n_tensors, sizeof **dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
-    return q4x_fail(err, "out of memory (the weights' table, or a pinned piece)");
-  bool ok = true;
-  for (size_t i = 0; ok && i < g->n_tensors; i++)
-  {
-    const GgufTensor *t = &g->tensors[i];
-    if ((shadow && gguf_tensor(shadow, t->name)) || t == skip || on_membrane(f, t))
-      continue;
-    const char *why = gpu_read_tensor(g, t, pin, READ_PIECE, &(*dev)[i]);
-    ok = !why;
-    if (!ok && err)
-      snprintf(err, Q4X_FWD_ERR, "%s: not read into GPU memory (%s)", t->name, why);
-  }
-  hipHostFree(pin);
-  return ok;
+  const Q4xForward *f;
+  const Gguf *shadow;
+  const GgufTensor *skip;
+} UploadSkip;
+
+static bool not_uploaded(const GgufTensor *t, void *arg)
+{
+  const UploadSkip *u = arg;
+  return (u->shadow && gguf_tensor(u->shadow, t->name)) || t == u->skip || on_membrane(u->f, t);
 }
 
-static void free_table(const Gguf *g, void **dev)
+static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
 {
-  for (size_t i = 0; dev && i < g->n_tensors; i++)
-    hipFree(dev[i]);
-  free(dev);
+  UploadSkip u = {f, shadow, skip};
+  return gpu_upload_table(g, READ_PIECE, not_uploaded, &u, dev, err, err ? Q4X_FWD_ERR : 0);
 }
+
+static void free_table(const Gguf *g, void **dev) { gpu_free_table(g, dev, NULL); }
 
 /* the MTP head's buffers */
 static bool mtp_buffers(Q4xForward *f, char *err)

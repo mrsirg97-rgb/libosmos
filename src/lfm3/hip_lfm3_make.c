@@ -30,19 +30,7 @@ bool lfm3_alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? 
 /* every tensor of g into GPU memory, its device pointer at its index in *table */
 static bool upload_file(const Gguf *g, void ***table, char *err)
 {
-  void *pin = NULL;
-  if (!(*table = calloc(g->n_tensors ? g->n_tensors : 1, sizeof **table)) ||
-      hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
-    return lfm3_fail(err, "out of memory (the weights' table, or a pinned piece)");
-  bool ok = true;
-  for (size_t i = 0; ok && i < g->n_tensors; i++)
-  {
-    const char *why = gpu_read_tensor(g, &g->tensors[i], pin, READ_PIECE, &(*table)[i]);
-    if ((ok = !why) == false && err)
-      snprintf(err, LFM3_ERR, "%s: not read into GPU memory (%s)", g->tensors[i].name, why);
-  }
-  hipHostFree(pin);
-  return ok;
+  return gpu_upload_table(g, READ_PIECE, NULL, NULL, table, err, err ? LFM3_ERR : 0);
 }
 
 static bool upload(Lfm3Forward *f, char *err) { return upload_file(f->w->model, &f->dev, err); }
@@ -227,10 +215,7 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   free(f->h_ik), free(f->h_cent), free(f->h_mem);
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
-  for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
-    if (!f->in_joint || !f->in_joint[i])
-      hipFree(f->dev[i]);
-  free(f->dev);
+  gpu_free_table(f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
   for (uint32_t i = 0; i < f->n_joints; i++)
     hipFree(f->joints[i]);
   free(f->in_joint);
@@ -241,9 +226,8 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   hipHostFree(f->pin_tok), hipHostFree(f->pin_logits);
   hipFree(f->head_q8);
   free(f->slot);
-  for (size_t i = 0; f->df_dev && i < f->df->model->n_tensors; i++)
-    hipFree(f->df_dev[i]);
-  free(f->df_dev);
+  if (f->df)
+    gpu_free_table(f->df->model, f->df_dev, NULL);
   hipFree(f->taps);
   df_buffers_free(&f->d);
   free(f);

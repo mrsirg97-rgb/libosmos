@@ -21,34 +21,21 @@
 
 void q35_forward_tap(Q35Forward *f, q35_tap_fn fn, void *arg) { f->tap = fn, f->tap_arg = arg; }
 
+static bool past_layers(const GgufTensor *t, void *arg) /* the MTP head's layers: not this forward's */
+{
+  return strncmp(t->name, "blk.", 4) == 0 && atoi(t->name + 4) >= ((const Q35Forward *)arg)->w->geo.n_layers;
+}
+
 static bool upload(Q35Forward *f, char *err)
 {
-  const Gguf *g = f->w->model;
-  void *pin = NULL;
-  if (!(f->dev = calloc(g->n_tensors, sizeof *f->dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
-    return fail(err, "out of memory (the weights' table, or a pinned piece)");
-  bool ok = true;
-  for (size_t i = 0; ok && i < g->n_tensors; i++)
-  {
-    const GgufTensor *t = &g->tensors[i];
-    if (strncmp(t->name, "blk.", 4) == 0 && atoi(t->name + 4) >= f->w->geo.n_layers)
-      continue; /* the MTP head's layers: not this forward's */
-    const char *why = gpu_read_tensor(g, t, pin, READ_PIECE, &f->dev[i]);
-    ok = !why;
-    if (!ok && err)
-      snprintf(err, Q35_ERR, "%s: not read into GPU memory (%s)", t->name, why);
-  }
-  hipHostFree(pin);
-  return ok;
+  return gpu_upload_table(f->w->model, READ_PIECE, past_layers, f, &f->dev, err, err ? Q35_ERR : 0);
 }
 
 void q35_forward_destroy(Q35Forward *f)
 {
   if (!f)
     return;
-  for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
-    hipFree(f->dev[i]);
-  free(f->dev);
+  gpu_free_table(f->w->model, f->dev, NULL);
   void *b[] = {f->da, f->h,  f->xn, f->out, f->qkv, f->z,  f->al, f->be, f->g,  f->b,  f->cv,     f->qkn, f->ro,
                f->fo, f->qf, f->kr,  f->vr,  f->q,  f->gt, f->kq, f->ao, f->fa, f->ga,     f->up,  f->y,
                f->logits, f->tok, f->overflow, f->x16, f->hx, f->ids, f->argmax};

@@ -38,25 +38,11 @@ static bool resident(const Hy4Weights *w, const GgufTensor *t)
   return !(strncmp(t->name, "blk.", 4) == 0 && atoi(t->name + 4) >= w->geo.n_layers); /* the drafter's: not ours */
 }
 
+static bool not_resident(const GgufTensor *t, void *arg) { return !resident(((const Hy4Forward *)arg)->w, t); }
+
 static bool upload(Hy4Forward *f, char *err)
 {
-  const Gguf *g = f->w->model;
-  void *pin = NULL;
-  if (!(f->dev = calloc(g->n_tensors, sizeof *f->dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
-    return hy4_fail(err, "out of memory (the weights' table, or a pinned piece)");
-  bool ok = true;
-  for (size_t i = 0; ok && i < g->n_tensors; i++)
-  {
-    const GgufTensor *t = &g->tensors[i];
-    if (!resident(f->w, t))
-      continue;
-    const char *why = gpu_read_tensor(g, t, pin, READ_PIECE, &f->dev[i]);
-    ok = !why;
-    if (!ok && err)
-      snprintf(err, HY4_ERR, "%s: not read into GPU memory (%s)", t->name, why);
-  }
-  hipHostFree(pin);
-  return ok;
+  return gpu_upload_table(f->w->model, READ_PIECE, not_resident, f, &f->dev, err, err ? HY4_ERR : 0);
 }
 
 /* a joint of members (NULL ones skipped; rows each, cols alike): grouped by type in the members' order, each type's
@@ -193,10 +179,7 @@ void hy4_forward_destroy(Hy4Forward *f)
   hipFree(f->head8);
   hipFree(f->kb_tab), hipFree(f->vb_tab), hipFree(f->kb_xo), hipFree(f->kb_yo), hipFree(f->vb_xo), hipFree(f->vb_yo);
   hipFree(f->hcnt);
-  for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
-    if (!f->in_joint || !f->in_joint[i])
-      hipFree(f->dev[i]);
-  free(f->dev);
+  gpu_free_table(f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
   for (uint32_t i = 0; i < f->n_joints; i++)
     hipFree(f->joints[i]);
   free(f->joints), free(f->in_joint);
