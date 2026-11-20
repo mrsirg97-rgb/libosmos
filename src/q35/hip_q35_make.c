@@ -11,6 +11,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/quant.h"
+#include "osmos/gpu/bufs.h"
 #include "osmos/gpu/upload.h"
 #include "osmos/model/qtype.h"
 #include "q35_impl.h"
@@ -36,11 +37,7 @@ void q35_forward_destroy(Q35Forward *f)
   if (!f)
     return;
   gpu_free_table(f->w->model, f->dev, NULL);
-  void *b[] = {f->da, f->h,  f->xn, f->out, f->qkv, f->z,  f->al, f->be, f->g,  f->b,  f->cv,     f->qkn, f->ro,
-               f->fo, f->qf, f->kr,  f->vr,  f->q,  f->gt, f->kq, f->ao, f->fa, f->ga,     f->up,  f->y,
-               f->logits, f->tok, f->overflow, f->x16, f->hx, f->ids, f->argmax};
-  for (size_t i = 0; i < sizeof b / sizeof *b; i++)
-    hipFree(b[i]);
+  gpu_bufs_free(&f->bufs); /* the step's buffers: the table's */
   hipHostFree(f->pin_logits), hipHostFree(f->pin_tok);
   free(f->slot);
   for (int l = 0; l < Q35_MAX_LAYERS; l++)
@@ -151,11 +148,7 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
   const uint64_t in = (uint64_t)g->ssm_inner, ch = 2ull * g->ssm_groups * g->ssm_state + in;
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
   const uint64_t wide = ff > ch ? ff : ch; /* mm's widest input: the SwiGLU's down */
-  const struct
-  {
-    void *p;
-    uint64_t bytes;
-  } want[] = {
+  const GpuWant want[] = {
       {&f->h, n * D * F},       {&f->xn, n * D * F},  {&f->out, n * D * F},     {&f->qkv, n * ch * F},
       {&f->z, n * in * F},      {&f->al, n * vh * F}, {&f->be, n * vh * F},     {&f->g, n * vh * F},
       {&f->b, n * vh * F},      {&f->cv, n * ch * F}, {&f->qkn, n * 2 * g->ssm_groups * g->ssm_state * F},
@@ -168,8 +161,8 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
       {&f->tok, n * 4},         {&f->overflow, 4},    {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2},
   };
   bool ok = q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, max_ctx, Q4X_THETA_GGML, &f->rope) && upload(f, err);
-  for (size_t i = 0; ok && i < sizeof want / sizeof *want; i++)
-    ok = alloc(want[i].p, want[i].bytes) || fail(err, "GPU memory refused (a step's buffers)");
+  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
+              fail(err, "GPU memory refused (a step's buffers)"));
   f->head_type = w->output->type;
   ok = ok && head_q8(f, err) && hipMemset(f->overflow, 0, 4) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess &&

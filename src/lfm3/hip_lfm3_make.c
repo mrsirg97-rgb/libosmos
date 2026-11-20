@@ -6,6 +6,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/gpu/bufs.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
@@ -219,10 +220,7 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   for (uint32_t i = 0; i < f->n_joints; i++)
     hipFree(f->joints[i]);
   free(f->in_joint);
-  void *b[] = {f->tok, f->h, f->xn, f->y, f->bcx, f->u, f->qf, f->kf, f->vf, f->qr, f->kr, f->g, f->att, f->ga,
-               f->up, f->act, f->attn_scratch, f->xf, f->logits, f->hk, f->ids, f->argmax, f->jo, f->x16, f->overflow, f->fa_scratch};
-  for (size_t i = 0; i < sizeof b / sizeof *b; i++)
-    hipFree(b[i]);
+  gpu_bufs_free(&f->bufs); /* the step's buffers: the table's */
   hipHostFree(f->pin_tok), hipHostFree(f->pin_logits);
   hipFree(f->head_q8);
   free(f->slot);
@@ -326,11 +324,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
     f->head = lfm3_dev(f, w->embd), f->head_type = w->embd->type;
   ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || lfm3_fail(err, "a head this build does not make")) &&
        (o->head == LFM3_HEAD_FILE || head_q8(f, err));
-  const struct
-  {
-    void *p;
-    uint64_t bytes;
-  } want[] = {
+  const GpuWant want[] = {
       {&f->tok, n * 4},          {&f->h, n * D * F},       {&f->xn, n * D * F},    {&f->y, n * D * F},
       {&f->bcx, n * 3 * D * F},  {&f->u, n * D * F},       {&f->qf, n * q * F},    {&f->kf, n * kv * F},
       {&f->vf, n * kv * F},      {&f->qr, n * q * F},      {&f->kr, n * kv * F},   {&f->g, n * g->n_heads * F},
@@ -342,8 +336,8 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
       {&f->x16, (uint64_t)MM_MAX_TOKENS * (ff > 3 * D ? ff : 3 * D) * 2}, {&f->overflow, 4},
       {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
-  for (size_t i = 0; ok && i < sizeof want / sizeof *want; i++)
-    ok = lfm3_alloc(want[i].p, want[i].bytes) || lfm3_fail(err, "GPU memory refused (a step's buffers)");
+  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
+              lfm3_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&
        hipMemset(f->overflow, 0, 4) == hipSuccess && hipDeviceSynchronize() == hipSuccess;

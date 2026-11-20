@@ -2,6 +2,7 @@
    its rings, rollback, prompt, state and marks) */
 #pragma once
 
+#include "osmos/gpu/bufs.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -43,6 +44,7 @@ struct Q35Forward
   uint32_t *list, *list_n; /* a read and its count (device) */
   float *h_ik, *h_cent;
   int32_t *h_mem;
+  GpuBufs bufs; /* the step's buffers (want[]'s): freed from it */
 };
 
 struct Q35Seq

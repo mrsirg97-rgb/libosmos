@@ -13,6 +13,7 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/quant.h"
+#include "osmos/gpu/bufs.h"
 #include "osmos/gpu/upload.h"
 #include "osmos/model/fnv.h"
 #include "osmos/model/qtype.h"
@@ -185,12 +186,10 @@ void hy4_forward_destroy(Hy4Forward *f)
   free(f->joints), free(f->in_joint);
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     hipFree(f->fn_attn[l]), hipFree(f->fn_ffn[l]);
-  void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->h, f->xn, f->y, f->post, f->hcs, f->table, f->attn_part, f->wtok, f->qr,
-               f->qres, f->q, f->kva, f->gt, f->qa, f->olat, f->ao, f->out, f->ixk, f->ixkn, f->jo_attn, f->jo_ffn, f->ixq, f->ixw, f->scores, f->sel,
-               f->n_sel, f->x16, f->xe16, f->overflow, f->rx, f->ry, f->rxd, f->ryd, f->rcnt, f->rw, f->rgidx, f->rhidx,
-               f->emb, f->ekv, f->ga, f->up, f->act, f->logit_r, f->rin, f->xg, f->eg_g, f->eg_u, f->eg_h,
-               f->eg_y, f->wsel, f->rsum, f->sh, f->idx, f->gidx, f->sidx, f->cnt, f->xrow, f->wptr, f->tok, f->pos,
-               f->hx, f->logits, f->ids, f->argmax};
+  gpu_bufs_free(&f->bufs); /* the step's buffers: the table's */
+  void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->jo_attn, f->jo_ffn, /* (allocated  */
+               f->x16,    f->xe16,      f->overflow,     f->rx,     f->ry,      f->rxd,     f->ryd,    /* outside the */
+               f->rcnt,   f->rw,        f->rgidx,        f->rhidx};                                    /* table)      */
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     hipFree(b[i]);
   hipHostFree(f->eg_stage), hipHostFree(f->pin_tok), hipHostFree(f->pin_pos), hipHostFree(f->pin_logits), hipHostFree(f->pin_flags);
@@ -265,11 +264,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   const uint64_t eg_in = (uint64_t)(g->engram_ngram - 1) * g->engram_heads * g->engram_dim;
   const uint64_t entries = n * K; /* mv_group_tok's entries at most: a token's picks each its own at worst */
   /* (xg and eg_h a chunk's rows past the last: mv_group_tok reads an entry's MV_MAX_TOKENS rows, uses its count) */
-  const struct
-  {
-    void *p;
-    uint64_t bytes;
-  } want[] = {
+  const GpuWant want[] = {
       {&f->h, n * hc * D * F}, {&f->xn, n * D * F}, {&f->y, n * D * F}, {&f->post, n * hc * F}, {&f->hcs, hy4_hc_scratch((uint32_t)n) * F},
       {&f->table, hy4_mla_table_bytes((uint32_t)n, (uint32_t)H)}, {&f->attn_part, hy4_mla_attn_scratch((uint32_t)H) * F},
       {&f->qr, n * g->q_lora * F}, {&f->qres, n * g->q_lora * F}, {&f->q, n * H * qk * F}, {&f->kva, n * row * F},
@@ -339,8 +334,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
          freqs(g->rope_base, (uint32_t)g->rope_dim, &f->freqs_sparse)) ||
         hy4_fail(err, "the ropes' tables not made")) &&
        engram_reader(f, fds, err);
-  for (size_t i = 0; ok && i < sizeof want / sizeof *want; i++)
-    ok = hy4_alloc(want[i].p, want[i].bytes) || hy4_fail(err, "GPU memory refused (a step's buffers)");
+  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
+              hy4_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_pos, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&

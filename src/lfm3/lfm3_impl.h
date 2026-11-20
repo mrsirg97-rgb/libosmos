@@ -4,6 +4,7 @@
 /* the lfm3 forward's state (osmos/lfm3/forward.h), shared by hip_lfm3_make.c (the weights, buffers, sequences) and
    hip_lfm3.c (the step) */
 
+#include "osmos/gpu/bufs.h"
 #include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/lsa.h"
@@ -77,6 +78,7 @@ struct Lfm3Forward
   uint32_t df_ring;
   uint64_t steps; /* the steps run: a sequence's taps its last step's (Lfm3Seq.step_id) */
   Lfm3DfBuf d;
+  GpuBufs bufs; /* the step's buffers (want[]'s): freed from it */
 };
 
 struct Lfm3Seq
