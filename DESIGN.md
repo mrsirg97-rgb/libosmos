@@ -2028,6 +2028,54 @@ table (Lfm3Stage {from, factor}, YaRN over the native 262,144), each boundary it
 prompt 1.04M tokens in 488 s). the pack 512K (the operator's, 2026-11-19): 6/6 needles to 524K (10/50/90% depth),
 the forward 2M-capable for a model trained past it (a retrain, or vibes27b).
 
+## 0.12.0: Inkling-2-Mini - the looped Inkling (design, 2026-11-20)
+
+the operator's: Thinking Machines' Inkling-2-Mini (26B, ~2B routed active, 5.4B effective with its passes) served
+from unsloth's UD-Q8_K_XL GGUF, with the release's own block drafter (unsloth's dspark Q8_0). the family's code
+(src/ink2, osmos_ink2) carries it; what is new is its loop.
+
+**the file** (verified against the release, tools: gguf-py, upstream llama.cpp's converter): unsloth's is the
+release's values - 508 BF16 / F32 tensors bit-identical to upstream's conversion of the release, the routed experts
+of layers 0-19 NVFP4 with a per-expert `.scale` (the release's NVFP4 times its outer scale), of layers 20-23 BF16
+(the release's MXFP8, exactly), the loop's tensors identical once renamed. 22.9 GB (the release 19.5: its MXFP8 tail
+the difference). its keys are another dialect than Inkling-2-Small's (`attention.relative_length`,
+`attention.relative_extent`, `attention.log_scale_floor`, `shortconv.l_cache`; head counts an array a slot), and
+`block_count` 48 counts the unrolled slots, the physical layers 24.
+
+**the loop** (upstream llama.cpp's src/models/inkling2-loop.cpp, the one implementation; transformers has none):
+24 physical layers - a prelude 0-5, a core 6-17, a tail 18-23 (`loop.core_start` 6, `loop.core_end` 18, `num_loops`
+3, attn_res's block 6: the core whole blocks). a token runs the prelude once, the core three passes - each pass from
+the prelude's output and its attn_res blocks, not the pass before's - then the tail once on the last pass's output.
+each pass of a core layer its own cache slot (KV, the short convolutions' states): 24 + 2 x 12 = 48, the file's
+`block_count`; the weights the physical layer's. in a pass after the first, a core layer's inputs are controlled by
+a message from the pass before: message c (q, k, v, ffn) = mix(bank, bank_out, query c) - attn_res's depth attention
+(the operator osmos has) over the previous pass's core blocks after its first and its output, with the layer's four
+queries; then input' = (1 - forget) input + gain message, gate = down(concat(rms(input), rms(message))) (rank 64),
+gain, forget = tanh(their matrices of gate). a sliding layer's attention takes one mixed input (its q's control
+only), a full layer's one each for q, k and v. the four queries a core layer i (from 6): q = loop_res_query[2i], k =
+loop_kv_res_query[2i], v = loop_kv_res_query[2i + 1], ffn = loop_res_query[2i + 1] (upstream's converter's order,
+checked: unsloth's tables against upstream's per-layer loop_msg_query, every column equal). unsloth's loop_attn is
+upstream's q controller, loop_mlp its ffn's.
+
+**the work, in order**: (1) the schema - Ink2Geometry's loop (core start / end, passes, gate rank, slots) and the
+Mini dialect; Ink2Weights' loop tensors (12 controllers x 3 matrices a core layer, the two query tables) - refused
+by name where absent or misshapen, as every role. (2) its tests first: test_ink2_weights on the Mini file (the
+geometry, every loop role, a broken copy refused); test_ink2_loop_gpu against upstream llama.cpp's own taps
+(llama-eval-callback on its conversion of the release: each slot's output and the logits at 64 and ~2K tokens,
+held within the experts' BF16 rounding - the oracle's experts are the release's NVFP4 and MXFP8 rounded once to BF16
+by the converter, ~2e-3 relative, osmos's the exact values); a pass split across steps the same bits. (3) the
+forward - the slots, the prelude's output and blocks kept for each pass, the bank, the control (one kernel: the two
+norms, the rank-64 down, tanh gain and forget, the mix). (4) the drafter (`dflash` + a DSpark Markov head, taps at
+unrolled slots 5, 23, 41, 48 - a new kind: its own loader and driver, the shared DFlash core's where its math is
+the same). (5) the pack, numbers, needles.
+
+**the oracle**: upstream llama.cpp (29b52d3, "model : Inkling 2 Mini") built for gfx1151 at ~/Projects/ref (the
+operator's: upstream cloned for this), on its converter's GGUF of the release (52 GB, experts BF16; a context of
+4,096 - its default, the trained 1M, does not fit beside it). it answers ("The user asks: ..."), 12.9 tok/s.
+
+**not now**: the release's own checkpoint (NVFP4 + its MXFP8 tail, 3.4 GB smaller, ~0.3 ms a token: a safetensors
+model loader and an MXFP8 expert path osmos does not have) - a size option after the loop is right on the GGUF.
+
 ## 0.11.2: the audit - correctness, then the families' shared code (2026-11-20)
 
 the operator's: a full sweep after six families in a few weeks - the engine and kernels first (correctness, then
