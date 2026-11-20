@@ -13,7 +13,7 @@
    experts and the lane contract's ids take it exactly when its row names that path; the rows' own invariants.
    test_qtype_gpu holds the kernels to the same table */
 
-#define ID_SWEEP 256 /* past every ggml type id (GGML_TYPE_COUNT 43 at llama.cpp 3cf03257, maya's pin): any id a file names */
+#define ID_SWEEP 0x200 /* past every ggml type id (GGML_TYPE_COUNT 44 upstream) and osmos's own (0x100 | id): any id */
 #define COLS 256     /* one block of a 256-value type; whole blocks of every type in the table */
 #define ROWS 2
 
@@ -58,7 +58,7 @@ static void rows_and_ids(void)
   for (uint32_t id = 0; id < ID_SWEEP; id++) /* each row found by its name, and only it */
     if (qtype_info(id))
       check(qtype_named(qtype_info(id)->name) == qtype_info(id), id, "its name finds another row");
-  check(!qtype_named("Q3_K") && !qtype_named(NULL) && !qtype_named(""), 0, "a name no row has found");
+  check(!qtype_named("Q5_0") && !qtype_named(NULL) && !qtype_named(""), 0, "a name no row has found");
   SAID_IF_CLEAN(before, "  %zu rows, ids unique and below %d\n", n, ID_SWEEP);
 }
 

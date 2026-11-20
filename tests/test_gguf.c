@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "osmos/model/gguf.h"
+#include "osmos/model/qtype.h"
 
 /* a GGUF written by hand, byte by byte, as the format has it (version 3, little-endian) */
 typedef struct
@@ -341,27 +342,42 @@ static void test_corrupt(void)
   printf("  corrupt: %zu patches and a duplicate name refused\n", sizeof patches / sizeof patches[0]);
 }
 
-/* type 43: unsloth's MXFP8 (33 bytes a 32 values) read; upstream's F8_E4M3 (a byte a value) refused - the bytes a
-   tensor of it holds too few for MXFP8's, it runs into the next tensor or out of the file */
+/* type 43: unsloth's MXFP8 (33 bytes a 32 values) read as it; upstream's F8_E4M3 (a byte a value - AngelSlim's
+   Hy4-flash Engram table) read as F8_E4M3 (0x100 | 43) - its MXFP8 bytes more than its room (the next tensor's offset or
+   the file's end), its own bytes not; a 43 its room holds neither way refused */
 static void test_mxfp8(void)
 {
   const uint64_t vals = 64 * 32; /* (past 1,024 values: a 32nd of them more than an alignment's padding) */
   const Spec mx[] = {{"e.mxfp8", 43, 2, {64, 32}, vals / 32 * 33}, three[0]};
   const Spec f8[] = {{"e.f8_e4m3", 43, 2, {64, 32}, vals}, three[0]};
+  const Spec small[] = {{"e.short", 43, 2, {64, 32}, vals / 2}, {"z.f32", 0, 1, {1024}, 4096}}; /* (past its MXFP8) */
   char err[GGUF_ERR] = "";
   Buf w = model(mx, 2, 0, 0, 0, NULL, 0);
   Gguf *g = gguf_create(write_file("mxfp8.gguf", &w), err);
-  assert(g && g->tensors[0].bytes == vals / 32 * 33);
+  assert(g && g->tensors[0].type == QTYPE_MXFP8 && g->tensors[0].bytes == vals / 32 * 33);
   check_whole(g);
   gguf_destroy(g);
   free(w.b);
-  w = model(f8, 2, 0, 0, 0, NULL, 0);
-  assert(!gguf_create(write_file("f8.gguf", &w), err) && strstr(err, "overlap"));
+  for (size_t n = 1; n <= 2; n++)
+  {
+    w = model(f8, n, 0, 0, 0, NULL, 0);
+    g = gguf_create(write_file("f8.gguf", &w), err);
+    assert(g && g->tensors[0].type == QTYPE_F8_E4M3 && g->tensors[0].bytes == vals);
+    check_whole(g);
+    gguf_destroy(g);
+    free(w.b);
+  }
+  const Spec own[] = {{"e.own", QTYPE_F8_E4M3, 2, {64, 32}, vals}}; /* osmos's id named by a file */
+  w = model(own, 1, 0, 0, 0, NULL, 0);
+  assert(!gguf_create(write_file("f8own.gguf", &w), err) && strstr(err, "does not know"));
   free(w.b);
-  w = model(f8, 1, 0, 0, 0, NULL, 0);
-  assert(!gguf_create(write_file("f8one.gguf", &w), err) && strstr(err, "leave"));
+  w = model(small, 2, 0, 0, 0, NULL, 0);
+  assert(!gguf_create(write_file("f8short.gguf", &w), err) && strstr(err, "overlap"));
   free(w.b);
-  printf("  type 43: MXFP8's blocks read; a byte a value (upstream's F8_E4M3) refused, before a tensor or alone\n");
+  w = model(small, 1, 0, 0, 0, NULL, 0);
+  assert(!gguf_create(write_file("f8shortone.gguf", &w), err) && strstr(err, "leave"));
+  free(w.b);
+  printf("  type 43: MXFP8's blocks read; a byte a value read as F8_E4M3, before a tensor or alone; neither, or the id 0x12B, refused\n");
 }
 
 /* type 40: NVFP4 (36 bytes a 64 values: 4 UE4M3 scales, 32 bytes of codes) read, as Inkling-2's experts are written

@@ -54,7 +54,8 @@ template <> struct Tuned<quant::kIQ4_NL> { using S = mm::Shape<64, 4, 4>; static
 template <> struct Tuned<quant::kIQ4_XS> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ4_0> : Tuned<quant::kIQ4_NL> {};  // not measured: IQ4_NL's (its layout, its block)
 template <> struct Tuned<quant::kQ2_0> { using S = mm::Shape<64, 8, 4>; static constexpr int kMaxCt = 8; };
-template <> struct Tuned<quant::kQ2_K> : Tuned<quant::kQ2_0> {};  // not measured: Q2_0's (its shape its bits: fixed before a pack)
+template <> struct Tuned<quant::kQ2_K> : Tuned<quant::kQ2_0> {};
+template <> struct Tuned<quant::kQ3_K> : Tuned<quant::kQ2_0> {};  // not measured: Q2_K's (a 256-value K block)  // not measured: Q2_0's (its shape its bits: fixed before a pack)
 // NVFP4 (Inkling-2's experts: 4,608 and 2,304 columns, whole 64-value slabs) not measured: Q2_0's, a 64-value block too.
 // its values exact in f16 (6 significant bits, 2^-10 .. 2,688: decode_h rounds none); a tensor's own scale its role's
 template <> struct Tuned<quant::kNVFP4> : Tuned<quant::kQ2_0> {};
@@ -78,6 +79,27 @@ __global__ void x16_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t col
   const uint32_t t = (uint32_t) (i / cols), c = (uint32_t) (i % cols);
   if (t >= (n + mm::kTile - 1) / mm::kTile * mm::kTile) return;
   mm::x16_put(x16, t, c, cols, t < n ? x[(uint64_t) t * xs + c] : 0.0f, overflow);  // past f16: refused at the end
+}
+
+// the same values 8 a thread (x 16-byte aligned, xs a whole float4s): two float4 loads, the 8 halves one 16-byte
+// store (a fragment row's half: contiguous in the tiled layout), 32-bit indices, the overflow flag once - each value
+// x16_put's conversion: the same bits. (one a thread, a 64-bit divide each: ~15 GB/s, the prompt's 6.9 s at 32K)
+constexpr uint32_t kX16Vec = 8;
+__global__ void x16_vec_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t cols, _Float16* x16, int32_t* overflow) {
+  const uint32_t i = blockIdx.x * kThreads + threadIdx.x, per = cols / kX16Vec, t = i / per, c = i % per * kX16Vec;
+  if (t >= (n + mm::kTile - 1) / mm::kTile * mm::kTile) return;
+  float4 a = make_float4(0, 0, 0, 0), b = a;
+  if (t < n) {
+    const float4* p = (const float4*) (x + (uint64_t) t * xs + c);
+    a = p[0], b = p[1];
+  }
+  const float v[kX16Vec] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+  __attribute__((aligned(16))) _Float16 h[kX16Vec];
+  bool bad = false;
+#pragma unroll
+  for (uint32_t e = 0; e < kX16Vec; e++) bad |= !(fabsf(v[e]) <= mm::kF16Max), h[e] = (_Float16) v[e];
+  if (bad) atomicOr(overflow, 1);
+  *(uint4*) (x16 + mm::x16_at(t, c, cols)) = *(const uint4*) h;
 }
 
 // the attention's output to f16 on the way to wo_a: a wave an FP8 block of a token's row, a lane a value - each
@@ -166,9 +188,9 @@ bool group_ct(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t
 // shape (not taken); Qwen's IQ3_XXS gate level (-1%). the other types not measured: group_ct's
 template <quant::Type T>
 struct GroupPlan {
-  static constexpr bool kRm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_XS || T == quant::kQ2_K;
+  static constexpr bool kRm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_XS || T == quant::kQ2_K || T == quant::kQ3_K;
   static constexpr bool kGemm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_NL || T == quant::kQ4_0 || T == quant::kQ2_0 || T == quant::kNVFP4 ||
-                                T == quant::kIQ3_XXS || T == quant::kQ2_K || T == quant::kIQ2_S || T == quant::kIQ1_S;
+                                T == quant::kIQ3_XXS || T == quant::kQ2_K || T == quant::kQ3_K || T == quant::kIQ2_S || T == quant::kIQ1_S;
 };
 constexpr int kGroupRm = 2, kGroupGemmRm = 2, kGroupGemmRn = 2, kGroupGemmWr = 2, kGroupGemmWc = 4;
 
@@ -393,6 +415,7 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
     case quant::kIQ2_S: return launch<quant::kIQ2_S>(m, cols, x16, n, s);
     case quant::kIQ3_XXS: return launch<quant::kIQ3_XXS>(m, cols, x16, n, s);
     case quant::kQ2_K: return launch<quant::kQ2_K>(m, cols, x16, n, s);
+    case quant::kQ3_K: return launch<quant::kQ3_K>(m, cols, x16, n, s);
     case quant::kIQ4_NL: return launch<quant::kIQ4_NL>(m, cols, x16, n, s);
     case quant::kQ4_0: return launch<quant::kQ4_0>(m, cols, x16, n, s);
     case quant::kIQ4_XS: return launch<quant::kIQ4_XS>(m, cols, x16, n, s);
@@ -422,7 +445,7 @@ extern "C" bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols) {
 #define FITS(t) \
   case quant::t: return fits<quant::t>(rows, cols);
     FITS(kQ8_0) FITS(kQ5_K) FITS(kQ5_KR) FITS(kQ6_K) FITS(kIQ1_M) FITS(kIQ2_XXS) FITS(kIQ2_XS) FITS(kIQ1_S)
-    FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kQ4_0) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K) FITS(kQ4_K) FITS(kQ5_1)
+    FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kQ4_0) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K) FITS(kQ3_K) FITS(kQ4_K) FITS(kQ5_1)
     FITS(kMXFP4) FITS(kMXFP8) FITS(kNVFP4)
 #undef FITS
     default: return false;
@@ -434,7 +457,7 @@ extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
 #define TILES(t) \
   case quant::t: return col_tiles<quant::t>(n);
     TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS) TILES(kIQ1_S)
-    TILES(kIQ2_S) TILES(kIQ3_XXS) TILES(kIQ4_NL) TILES(kQ4_0) TILES(kIQ4_XS) TILES(kQ2_0) TILES(kQ2_K) TILES(kQ4_K) TILES(kQ5_1)
+    TILES(kIQ2_S) TILES(kIQ3_XXS) TILES(kIQ4_NL) TILES(kQ4_0) TILES(kIQ4_XS) TILES(kQ2_0) TILES(kQ2_K) TILES(kQ3_K) TILES(kQ4_K) TILES(kQ5_1)
     TILES(kMXFP4) TILES(kMXFP8) TILES(kNVFP4)
 #undef TILES
     default: return 0;
@@ -445,8 +468,12 @@ extern "C" bool mm_x16(const float* x, uint32_t xs, uint32_t n, uint32_t cols, v
                        void* stream) {
   if (!n || n > MM_MAX_TOKENS || !cols || cols % mm::kTile || (n > 1 && xs < cols)) return false;
   const uint64_t work = (uint64_t) (n + mm::kTile - 1) / mm::kTile * mm::kTile * cols;  // whole tiles: past n, zero
-  x16_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
-      x, xs, n, cols, (_Float16*) x16, overflow);
+  if ((uintptr_t) x % 16 == 0 && xs % 4 == 0 && (uintptr_t) x16 % 16 == 0 && work / kX16Vec < (1ull << 32))
+    x16_vec_kernel<<<(unsigned) ((work / kX16Vec + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+        x, xs, n, cols, (_Float16*) x16, overflow);
+  else
+    x16_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+        x, xs, n, cols, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
 }
 
@@ -555,6 +582,41 @@ extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* 
                           ready, stream);
 }
 
+// every head's slice of x's rows to its own tiled x16 in one pass (x read along its rows: a head's slice converted
+// alone reads 2,048 rows 64 KB apart, a page each - ~15 GB/s): token t's head h, column c (c < cols, at h hs + c of
+// its row) to x16 + h n16 cols at x16_at(t, c, cols), n16 n in whole tiles (the rows past n zero). x16_put's
+// conversion: the same bits as mm_x16 a head at a time
+__global__ void x16_heads_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t heads, uint32_t hs, uint32_t cols,
+                                 _Float16* x16, int32_t* overflow) {
+  const uint32_t per = cols / kX16Vec, i = blockIdx.x * kThreads + threadIdx.x, t = i / (heads * per);
+  const uint32_t h = i / per % heads, c = i % per * kX16Vec, n16 = (n + mm::kTile - 1) / mm::kTile * mm::kTile;
+  if (t >= n16) return;
+  float4 a = make_float4(0, 0, 0, 0), b = a;
+  if (t < n) {
+    const float4* p = (const float4*) (x + (uint64_t) t * xs + (uint64_t) h * hs + c);
+    a = p[0], b = p[1];
+  }
+  const float v[kX16Vec] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+  __attribute__((aligned(16))) _Float16 o[kX16Vec];
+  bool bad = false;
+#pragma unroll
+  for (uint32_t e = 0; e < kX16Vec; e++) bad |= !(fabsf(v[e]) <= mm::kF16Max), o[e] = (_Float16) v[e];
+  if (bad) atomicOr(overflow, 1);
+  *(uint4*) (x16 + (uint64_t) h * n16 * cols + mm::x16_at(t, c, cols)) = *(const uint4*) o;
+}
+
+extern "C" bool mm_x16_heads(const float* x, uint32_t xs, uint32_t n, uint32_t heads, uint32_t hs, uint32_t cols,
+                             void* x16, int32_t* overflow, void* stream) {
+  if (!n || n > MM_MAX_TOKENS || !heads || !cols || cols % mm::kTile || hs % 4 || xs % 4 || (uintptr_t) x % 16 ||
+      (uintptr_t) x16 % 16 || (heads - 1) * (uint64_t) hs + cols > xs)
+    return false;
+  const uint64_t work = (uint64_t) (n + mm::kTile - 1) / mm::kTile * mm::kTile * heads * (cols / kX16Vec);
+  if (work >= (1ull << 32)) return false;
+  x16_heads_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+      x, xs, n, heads, hs, cols, (_Float16*) x16, overflow);
+  return hipGetLastError() == hipSuccess;
+}
+
 extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,
                             int32_t* overflow, void* stream) {
   // a run's two float4 loads: x's rows 16-byte aligned (hipMalloc's, a stride of 4s)
@@ -575,7 +637,7 @@ extern "C" bool mm_group(uint32_t type, const void* const* w, const int32_t* cnt
   case quant::t:                                                                                                     \
     return group_launch<quant::t>(w, cnt, n_mat, max_cnt, rows, cols, x16, xoff, xts, y, yoff, ys, s);
     GROUP(kQ8_0) GROUP(kQ5_K) GROUP(kQ5_KR) GROUP(kQ6_K) GROUP(kIQ1_M) GROUP(kIQ2_XXS) GROUP(kIQ2_XS) GROUP(kIQ1_S)
-    GROUP(kIQ2_S) GROUP(kIQ3_XXS) GROUP(kIQ4_NL) GROUP(kQ4_0) GROUP(kIQ4_XS) GROUP(kQ2_0) GROUP(kQ2_K) GROUP(kQ4_K) GROUP(kQ5_1)
+    GROUP(kIQ2_S) GROUP(kIQ3_XXS) GROUP(kIQ4_NL) GROUP(kQ4_0) GROUP(kIQ4_XS) GROUP(kQ2_0) GROUP(kQ2_K) GROUP(kQ3_K) GROUP(kQ4_K) GROUP(kQ5_1)
     GROUP(kMXFP4) GROUP(kMXFP8) GROUP(kNVFP4)
 #undef GROUP
     default: return false;

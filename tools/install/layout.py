@@ -193,7 +193,7 @@ def lay(m, pid, models, have, trust_size, abliterated, fetch, found=None, npu=Fa
         src, _ = _resolve(m, pack["picks"], have, trust_size, fetch, found)
         cfg["picks"] = os.path.join(out, "osmos-picks.bin")
         _link(src, cfg["picks"])
-    if pack.get("drafter") and pack.get("drafter_kind", "dspark") == "mtp":  # the head's GGUF: osmos.json names it
+    if pack.get("drafter") and pack.get("drafter_kind", "dspark") in ("mtp", "dfly"):  # one file: osmos.json names it
         fid = pack["drafter"][0]
         src, _ = _resolve(m, fid, have, trust_size, fetch, found)
         cfg["drafter"] = os.path.join(out, os.path.basename(m["files"][fid]["path"]))

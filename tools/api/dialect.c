@@ -2,6 +2,7 @@
 
 #include "chat_impl.h"
 #include "dialect.h"
+#include "osmos/text/chat_hy4.h"
 #include "osmos/text/chat_ink2.h"
 #include "osmos/text/chat_lfm3.h"
 #include "osmos/text/chat_qwen.h"
@@ -89,6 +90,45 @@ static long ink2_header(const char *p, size_t n, DialectField *field)
   return h;
 }
 
+/* Hy4-flash's (osmos/text/chat_hy4.h): its special tokens and efforts its template's, set once by dialect_of */
+static HchatTokens hy4_t;
+static const char *hy4_refused[HCHAT_REFUSED + 1];
+
+static const char *hy4_effort(const Request *r) { return r->mode == CHAT_PLAIN ? "no_think" : r->level[0] ? r->level : NULL; }
+
+static bool hy4_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
+{
+  return hchat_render(r->messages, r->tools, hy4_effort(r), r->preserve_given ? r->preserve : -1, &hy4_t, out, err);
+}
+
+static bool hy4_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
+                      char err[CHAT_ERR])
+{
+  return hchat_parse_shaped(text, shape, n, r->mode == CHAT_THINKING, r->tools, &hy4_t, out, err);
+}
+
+/* Hy4's template drops it unless preserved_thinking (given, or on with tools) */
+static bool hy4_drops(const Request *r)
+{
+  const bool keep = r->preserve_given ? r->preserve : r->tools && r->tools->n;
+  return r->mode == CHAT_THINKING && !keep && past_user(r);
+}
+
+static Dialect hy4_dialect = {"hy_v4_flash", NULL, NULL, NULL, false, hy4_refused, request_hy4, hy4_render, hy4_parse,
+                              hy4_drops, NULL, NULL, NULL, NULL};
+
+/* the hy4 dialect's markers from the model's template, or NULL: not Hy4-flash's template */
+static const Dialect *hy4_of(const char *tmpl)
+{
+  char err[CHAT_ERR];
+  if (!tmpl || !hchat_from_template(tmpl, &hy4_t, err))
+    return NULL;
+  hchat_refused(&hy4_t, hy4_refused);
+  hy4_dialect.eos = hy4_t.end, hy4_dialect.think_end = hy4_t.think_end, hy4_dialect.calls_open = hy4_t.calls;
+  hy4_dialect.answer_after = hy4_t.think_end;
+  return &hy4_dialect;
+}
+
 static const Dialect kDialects[] = {
     {"deepseek41", CHAT_EOS, CHAT_THINK_END, CHAT_CALLS_START, false, chat_refused, request_ds, ds_render, ds_parse,
      ds_drops, CHAT_THINK_END, NULL, NULL, NULL},
@@ -108,8 +148,10 @@ static const Dialect kDialects[] = {
      ink2_drops, NULL, ink2_header, ICHAT_END, ichat_loose},
 };
 
-const Dialect *dialect_of(const char *arch)
+const Dialect *dialect_of(const char *arch, const char *tmpl)
 {
+  if (arch && !strcmp(arch, "hy_v4_flash"))
+    return hy4_of(tmpl);
   for (size_t i = 0; arch && i < sizeof kDialects / sizeof *kDialects; i++)
     if (!strcmp(arch, kDialects[i].arch))
     {

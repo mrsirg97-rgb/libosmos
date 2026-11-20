@@ -4,7 +4,7 @@ a file: repo, revision (a commit, 40 hex - or null: ours, not yet published), pa
 (optional: [no, count], the split stamp it is published with). a release asset (osmos's own GitHub release: 0.7.0's
 NPU kernels): release (its tag, vX.Y.Z), path (the asset's name), bytes, sha256 - no repo nor revision. a pack: title, shards (file ids, in order), table
 (null, or {file, slot: [no, count]}), picks, drafter (file ids), drafter_kind (dspark: a directory of its files - the
-default; mtp: one GGUF, the model's MTP head), overlay (a file id or null), lsa (optional: a file id - latent sparse
+default; mtp: one GGUF, the model's MTP head; dfly: one safetensors, Hy4-flash's DFly2 as its release ships it), overlay (a file id or null), lsa (optional: a file id - latent sparse
 attention's maps, osmos.json's "lsa"), npu (optional: a release asset's id,
 a tarball of the NPU's kernels - a directory a format and kind), rig (its row's: max_tokens, reserve, efforts, effort -
 one of them - and aliases), settings. aliases (optional): {an old pack id: the pack it names now} - osmos-evo-a,
@@ -21,7 +21,7 @@ import re
 import overlay_q4x
 
 VERSION = 1
-DRAFTER_KINDS = ("dspark", "mtp")
+DRAFTER_KINDS = ("dspark", "mtp", "dfly")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -189,8 +189,8 @@ def check(m):
         kind = p.get("drafter_kind", "dspark")
         if kind not in DRAFTER_KINDS:
             raise ManifestError(f"pack {pid}: drafter_kind {kind!r} is not one of {DRAFTER_KINDS}")
-        if kind == "mtp" and len(p.get("drafter") or []) != 1:
-            raise ManifestError(f"pack {pid}: an mtp drafter is one file (the head's GGUF)")
+        if kind in ("mtp", "dfly") and len(p.get("drafter") or []) != 1:
+            raise ManifestError(f"pack {pid}: an {kind} drafter is one file (the head's GGUF; DFly2's safetensors)")
         _rig(pid, p.get("rig"))
         if not isinstance(p.get("settings"), dict):
             raise ManifestError(f"pack {pid}: no settings")

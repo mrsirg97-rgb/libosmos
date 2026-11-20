@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.11.0]: Hy4-flash - Tencent's 220B MoE, with its own drafter
+
+A fifth family: **Hy4-flash** (`hy_v4_flash`): Tencent's 220B MoE (155.5B backbone + 63.5B Engram, ~11.3B active a
+token), served from the official GGUF - [AngelSlim/Hy4-flash-GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF)'s
+Q3_K (their benchmarks: Q4_K_M's and BF16's within a point, 12 GB smaller) - with the release's own drafter, DFly2. DeepSeek, Qwen, Inkling, Qwen3.5 and LFM3 give 0.10.1's bits (the GPU
+suite; Qwen3.5's `test_q35_*` against vibes27b's references).
+
+- **The pack `hy4-flash`**: 1M context, rig's row `hy4-flash` (`none` / `low` / `high` / `max`: the template's
+  reasoning levels). The backbone's ~79 GiB resident in GPU memory, the 63 GB Engram table read from the SSD a step
+  at a time; ~98 GiB in all at 1M. `performance`, 1K context: decode 17.0 tok/s plain, 24.8 with DFly2 on code
+  (29.9 on prose); prompts ~430 tok/s, 448 at 32K, 414 at 128K; a 913K-token book read in 45 minutes (its needle
+  found), then 17 tok/s drafted.
+- **A small context**: MLA's latent rows Q8_0 (the rope part F32) and the indexer's keys a ring - ~11 KB a token
+  against 34 (1M in ~12 GB); the teacher-forced NLL no worse than an F32 cache's. A decode's indexer at long
+  context from persistent blocks and its selection spread over the GPU (1M: 0.9 s -> 9.5 ms a token); a prompt's
+  scores on the matrix cores and its selection by radix passes.
+- **The forward against Tencent's reference** (the transformers PR's modeling code, run on the GGUF's own values):
+  every piece within ~1e-6; 64 tokens KL 1.2e-11. At 2,600 tokens a router near-tie (two experts' scores 3e-8 apart)
+  flips and spreads, so each layer is checked on osmos's own input (within 5e-7 on every other row) and the logits
+  bounded by the reference against itself in BF16.
+- **DFly2**: the release's five-layer drafter (0.85B), read from Tencent's own `model-00148-of-00148.safetensors` -
+  each draft layer reads a target sparse layer's KV and its indexer's picks (no KV of its own), then a hidden
+  correction chains the five drafts through the target's head. Its drafts are vLLM's (the speculator transcribed:
+  the same tokens at 600 and 2,600 tokens); a round's tokens always the plain decode's.
+- **New types**: upstream llama.cpp's `F8_E4M3` (ggml 43 - the Engram table; osmos's 43 was unsloth's MXFP8, the two
+  told apart by size), Q3_K, and Q6_K experts.
+- **The installer**: a file past 50 GB fetched over HTTPS at its pinned revision and resumed (the hub's CLI refuses
+  one without Xet, and Xet's download holds what it fetched in memory); `drafter_kind` `dfly`.
+- **Removed**: the NVFP4 (SPARK-4Bit) build's own paths for Hy4 (`mv_fp4_rows`).
+
 ## [0.10.1]: an installed pack's rig row on its release
 
 - **A fix: `osmos_install.py --rig` registered a row `--upgrade` could not move.** A fresh install named the

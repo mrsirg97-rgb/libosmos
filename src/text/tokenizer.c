@@ -54,9 +54,12 @@ Tokenizer *tokenizer_create(const Gguf *g, char err[TOKENIZER_ERR])
   const bool qwen = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "qwen35");
   const bool o200k = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "inkling");
   const bool llama3 = pre && pre->type == GGUF_STRING && !strcmp(pre->v.s, "lfm2"); /* llama.cpp's LLAMA3 split */
+  /* hy_v4 (Hy4-flash's tokenizer.json): DeepSeek-V3's three expressions, the same in turn - its own vocabulary */
   if (!pre || pre->type != GGUF_STRING ||
-      (strcmp(pre->v.s, "deepseek-v3") && strcmp(pre->v.s, "joyai-llm") && !qwen && !o200k && !llama3))
-    return fail(err, "a pre-tokenizer this build does not split by (deepseek-v3, joyai-llm, qwen35, inkling, lfm2)"), NULL;
+      (strcmp(pre->v.s, "deepseek-v3") && strcmp(pre->v.s, "joyai-llm") && strcmp(pre->v.s, "hy_v4") && !qwen &&
+       !o200k && !llama3))
+    return fail(err, "a pre-tokenizer this build does not split by (deepseek-v3, joyai-llm, hy_v4, qwen35, inkling, lfm2)"),
+           NULL;
   if (!tok || !mer || !typ || typ->type != GGUF_ARRAY || typ->n != tok->n || tok->n > INT32_MAX)
     return fail(err, "no tokens, token types or merges, or of unequal lengths"), NULL;
   Tokenizer *t = calloc(1, sizeof *t);

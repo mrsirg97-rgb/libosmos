@@ -242,6 +242,19 @@ int main(void)
   }
   else
     printf("  LFM3 skipped: no vibes1.7b Q4_0 file\n");
+  t = of("hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf");
+  if (t)
+  {
+    const int32_t end = tokenizer_find(t, "<｜hy_end:6124c78e｜>");
+    assert(tokenizer_vocab(t) == 120832 && end == 120025 && tokenizer_find(t, "<｜hy_start:6124c78e｜>") == 120000);
+    const int n = cases_of(t, "tests/fixtures/tokenizer_hy4.txt");
+    assert(tokenizer_piece(t, end, false, piece) == 0 && tokenizer_piece(t, tokenizer_vocab(t), true, piece) == -1);
+    long_words(t);
+    tokenizer_destroy(t);
+    printf("  Hy4-flash's: %d cases, every id its tokenizer.json's, every case's pieces its bytes\n", n);
+  }
+  else
+    printf("  Hy4 skipped: no Hy4-flash Q3_K first shard\n");
   printf("[test_tokenizer] ok\n");
   return 0;
 }

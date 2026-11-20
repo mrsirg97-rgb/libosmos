@@ -20,6 +20,11 @@ bool mv_strided(uint32_t type, const void *w, uint32_t rows, uint32_t cols, cons
    not mv_strided's. cols whole 64-value blocks, xs a multiple of 4 */
 bool mv_fp4(const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t xs, uint32_t n, float *y,
             uint32_t ys, float scale, void *stream);
+/* NVFP4 matrices each over its own 1 .. 4 tokens (mv_group_tok's table: matrix m at w[m] on cnt[m] rows of x from
+   xrow[m], into y's rows from xrow[m]; cnt 0 skipped) - a short row's blocks over 8, 16 or 32 lanes: its own sums, a
+   token's the same at every count (a step's split). no tensor scale (ggml's blocks alone). xs a multiple of 4 */
+bool mv_fp4_tok(const void *const *w, const int32_t *cnt, const int32_t *xrow, uint32_t n, uint32_t rows,
+                uint32_t cols, const float *x, uint32_t xs, float *y, uint32_t ys, void *stream);
 
 #endif
 

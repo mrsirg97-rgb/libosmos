@@ -24,7 +24,7 @@ extern "C" {
     }                                                                            \
   } while (0)
 
-constexpr uint32_t kSweep = 256;  // past every ggml type id, as test_qtype's
+constexpr uint32_t kSweep = 0x200;  // past every ggml type id and osmos's own (0x100 | id), as test_qtype's
 constexpr uint32_t kRows = 16;    // mm_run's rows: a multiple of 16
 constexpr uint32_t kCols = 512;   // mm_run's cols a multiple of 128; whole blocks of every type; two lanes' blocks
 constexpr uint32_t kHc = 4;       // the model's hyper-connection streams (ops_embed's h)
@@ -85,6 +85,7 @@ int main() {
   CHECK(hipDeviceSynchronize() == hipSuccess);
 
   for (uint32_t id = 0; id < kSweep; id++) {
+    if (id == QUANT_Q5_KR) continue;  // the forward's repack, made at load (quant_repack_q5k): mm's and mv's alone
     agree(quant_known(id), id, QTYPE_DECODE, "quant_known");
     agree(quant_dequant(id, w, kCols, dec, nullptr), id, QTYPE_DECODE, "quant_dequant");
     agree(quant_dequant_f16(id, w, kCols, dec16, nullptr), id, QTYPE_DECODE, "quant_dequant_f16");

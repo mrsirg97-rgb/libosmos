@@ -199,10 +199,13 @@ int main(int argc, char **argv)
   snprintf(api.model, sizeof api.model, "osmos-%s", c.pack);
   Gguf *g = gguf_header(c.model, err); /* the tokenizer and the family alone: osmos-serve opens the model */
   const GgufKv *arch = g ? gguf_kv(g, "general.architecture") : NULL;
-  api.d = arch && arch->type == GGUF_STRING ? dialect_of(arch->v.s) : NULL;
+  const GgufKv *tmpl = g ? gguf_kv(g, "tokenizer.chat_template") : NULL;
+  api.d = arch && arch->type == GGUF_STRING
+              ? dialect_of(arch->v.s, tmpl && tmpl->type == GGUF_STRING ? tmpl->v.s : NULL)
+              : NULL;
   api.tok = g && api.d ? tokenizer_create(g, err) : NULL;
   if (g && !api.d)
-    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp, qwen35, inkling2)", arch && arch->type == GGUF_STRING ? arch->v.s : "(none)");
+    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp, qwen35, inkling2, hy_v4_flash)", arch && arch->type == GGUF_STRING ? arch->v.s : "(none)");
   gguf_destroy(g);
   if (!api.tok)
     return die(err);

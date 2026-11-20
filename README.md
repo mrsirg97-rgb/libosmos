@@ -41,16 +41,16 @@ pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on the
   `/tmp` as RAM, direct reads on the models' folder, an SSD under it, and a wireless download.
 - `--rig` registers the pack in [rig](https://github.com/mrsirg97-rgb/rig) instead of serving it, as
   `deepseek-1017-evo`, `deepseek-1017-ud-s` / `-m` / `-l` (UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS), `qwen3.8-flash-next`
-  (`-l`: UD-Q4_K_XL), `inkling-2-small-evo` or `vibes1.7b` - its row on this version's release, built under
+  (`-l`: UD-Q4_K_XL), `inkling-2-small-evo`, `vibes1.7b` or `hy4-flash` - its row on this version's release, built under
   `~/.local/share/osmos/<version>` (so `--upgrade` moves it later; `--rig-dev`: this checkout's own build, to test a
   branch).
 
-**Upgrading** (0.10.1): each osmos version is built from its tag beside the others, in `~/.local/share/osmos/<version>`,
+**Upgrading** (0.11.0): each osmos version is built from its tag beside the others, in `~/.local/share/osmos/<version>`,
 and rig's rows move between them by their command alone - their ports and settings stay yours.
 
 ```sh
 python3 tools/install/osmos_install.py --upgrade            # the newest release, for the rows on the newest version here
-python3 tools/install/osmos_install.py --upgrade 0.10.1 --rows deepseek-1017-evo,inkling-2-small-evo   # or --rows all
+python3 tools/install/osmos_install.py --upgrade 0.11.0 --rows deepseek-1017-evo,inkling-2-small-evo   # or --rows all
 python3 tools/install/osmos_install.py --rollback           # the last upgrade's rows back where they were
 python3 tools/install/osmos_install.py --versions           # the versions built here, the rows on each
 python3 tools/install/osmos_install.py --prune [--yes]      # the versions no row runs (removed with --yes)
@@ -77,6 +77,7 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 | `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant: slower than UD-IQ3_XXS, no better perplexity on our text |
 | `osmos-evo-inkling` | 158 GB (unsloth's UD-IQ1_S files + a 55.5 GB delta in two parts, made where you install it) + 1.3 GB drafter | 256K | Inkling-2-Small: UD-IQ1_S with its experts' down projections IQ2_S / IQ3_XXS and its attention and head Q5_K |
 | `vibes1.7b` | 1.36 GB + 0.8 MB of LSA maps | 512K | a small, fast agent model: LFM3-1.7B, its long contexts read sparse |
+| `hy4-flash` | 92 GB (~79 GiB in GPU memory) + 63 GB Engram table + 1.7 GB DFly2 drafter | 1M | Tencent's Hy4-flash: 220B, ~11B active a token, its own drafter - AngelSlim's Q3_K |
 
 ## osmos-evo-1017 in numbers
 
@@ -171,6 +172,31 @@ forward runs to 2M (a 2M prompt in 16.3 minutes, decode 55 tok/s) for a model tr
 past 160K, x8 past 384K, each boundary where the next factor's loss crossed below (DESIGN.md, "vibes-flash: rope");
 crossing one turns the cached keys. Prompts read sparse past 4,612 tokens (the first position a read can leave a key
 out), as the model was trained; every token's bits are the same however its prompt is split into steps.
+
+## hy4-flash in numbers
+
+Tencent's [Hy4-flash](https://huggingface.co/tencent/Hy4-flash): 220B (155.5B backbone + 63.5B of Engram n-gram
+tables), ~11.3B active a token, 1M context - DeepSeek's MLA and sparse indexer, a latent MoE, 30 of its 42 layers a
+512-token window. served from AngelSlim's official [Q3_K](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) (Tencent's
+compression team: on their agent benchmarks Q3_K matches Q4_K_M and BF16 within a point): the backbone in GPU memory,
+the Engram table read from the SSD a step at a time, and the release's own drafter, **DFly2**, which reads the target's
+KV cache and indexer picks rather than keeping its own. osmos 0.11.0, the `performance` profile, one conversation:
+
+| | |
+| --- | ---: |
+| Decode, a short context, plain / with DFly2 (code / prose) | 17.0 / **24.8 / 29.9** tok/s |
+| Decode with DFly2, served: a 128K / a 913K prompt | 18.8 / 17.0 tok/s |
+| Prompt, 1K / 32K / 128K tokens | ~430 / 448 / 414 tok/s |
+| Prompt, 913K tokens (a book, its needle found) | 45 minutes |
+| GPU memory at 1M context (weights, drafter, a conversation's cache) | ~98 GiB |
+| KL against Tencent's reference (64 tokens; F32 cache / the Q8_0 cache osmos runs) | 1e-11 / 0.033 |
+
+The context costs ~11 KB a token: MLA's latent rows Q8_0 (the rope part F32, as vLLM's `fp8_ds_mla`), the
+indexer's keys a small ring, its pooled groups F32 - the Q8_0 cache's teacher-forced NLL over 8K tokens no worse than
+F32's. DFly2's drafts are vLLM's (its speculator transcribed and checked token for token), and a drafted round's
+tokens are always the plain decode's; it accepts ~2.4 drafts a round on code, ~3 on prose. A long prompt's prefill is the limit: the indexer's scores
+and selection grow with the square of its length (on the matrix cores; at 913K ~9 of its 45 minutes) - a
+conversation's cached prefix is not read again.
 
 ## Performance
 

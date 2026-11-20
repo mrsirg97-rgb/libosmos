@@ -173,7 +173,7 @@ static void shape(const Gguf* g, const Shape& s) {
 
   // matrices each over their own tokens (mv_group_tok): the same matrix as 8 entries of 1 .. 8 tokens (a verify's
   // experts), each row the bits its token takes alone
-  if (t->type != 0 && t->type != 30 && t->type != 14) {  // (the experts' types: Q5_K UD-Q4_K_XL's too, and Q8_0)
+  if (t->type != 0 && t->type != 30) {  // (the experts' types: Q5_K UD-Q4_K_XL's too, Q6_K Hy4-flash Q4_K_M's down, and Q8_0)
     constexpr int kEntries = 8;
     std::vector<int32_t> cnt(kEntries), xrow(kEntries);
     int rows_n = 0;

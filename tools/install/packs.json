@@ -201,7 +201,16 @@
                        "sha256": "c710667d6f63b56d33fe0e9e54df1447feb9d7e0a7d541d1dd40da4dfd58f0d8"},
     "vibes1.7b-lsa": {"repo": "mrsirg97-rgb/vibes1.7b", "revision": "da7e41c80dc8f5cee4f3d06cbb4e04a235926a51",
                       "path": "vibes1.7b-lsa-maps.safetensors", "bytes": 787752,
-                      "sha256": "3f4afec61cd04fee8943770e7cbf5aa2f6e51a6688927c7872e1d81e6b1080ad"}
+                      "sha256": "3f4afec61cd04fee8943770e7cbf5aa2f6e51a6688927c7872e1d81e6b1080ad"},
+    "hy4-q3k-1": {"repo": "AngelSlim/Hy4-flash-GGUF", "revision": "65acb8ae7f59847fe03a17291f1b72b89b141a9e",
+                  "path": "Hy4-flash-Q3_K-00001-of-00002.gguf", "bytes": 92010389504,
+                  "sha256": "987b2902813ad94919e3e46e375bd8144d36113cced62d25f13013ccc88a3abb"},
+    "hy4-q3k-2": {"repo": "AngelSlim/Hy4-flash-GGUF", "revision": "65acb8ae7f59847fe03a17291f1b72b89b141a9e",
+                  "path": "Hy4-flash-Q3_K-00002-of-00002.gguf", "bytes": 63360616128,
+                  "sha256": "ecd6a0ecd7f258b1ee9211bf566261ae33efc1743ad40f58cb5004cf7b051839"},
+    "hy4-dfly2": {"repo": "tencent/Hy4-flash", "revision": "b2498eba6a1a3f9bbcab4190bc1313a3c7010c2f",
+                  "path": "model-00148-of-00148.safetensors", "bytes": 1691383434,
+                  "sha256": "9e65e4e71345913784004a081ea3831b34d666e46bb6ba36dc3c6d3798b76ac3"}
   },
   "aliases": {"osmos-evo": "osmos-evo-1017", "osmos-evo-a": "osmos-evo-1017"},
   "packs": {
@@ -276,6 +285,13 @@
       "table": null, "picks": null, "drafter": [], "overlay": null, "lsa": "vibes1.7b-lsa",
       "rig": {"id": "vibes1.7b", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "high"], "effort": "high", "aliases": ["vibes"]},
       "settings": {"max_context": 524288, "max_tokens": 4096}
+    },
+    "hy4-flash": {
+      "title": "Tencent Hy4-flash (AngelSlim's Q3_K) with its DFly2 drafter, 1M context",
+      "shards": ["hy4-q3k-1", "hy4-q3k-2"],
+      "table": null, "picks": null, "drafter": ["hy4-dfly2"], "drafter_kind": "dfly", "overlay": null,
+      "rig": {"id": "hy4-flash", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "low", "high", "max"], "effort": "high", "aliases": ["hy4"]},
+      "settings": {"max_context": 1048576, "max_tokens": 4096}
     }
   }
 }
