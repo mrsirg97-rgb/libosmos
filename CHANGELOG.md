@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.11.1]: osmos1.7b - vibes1.7b retrained and renamed, its rope native
+
+vibes1.7b becomes **osmos1.7b** ([mrsirg97-rgb/osmos1.7b](https://huggingface.co/mrsirg97-rgb/osmos1.7b)): the same
+LFM3-1.7B tensors and template, fine-tuned again on 32K-token examples (recipe v-r10), its LSA maps the same bytes.
+Every other family gives 0.11.0's bits (the GPU suite).
+
+- **The pack `osmos1.7b`**, 512K; `vibes1.7b` an alias of it (an install or a rig row by the old name finds it).
+  `performance`: decode 153 tok/s short, 97 at 128K, 85 at 512K; prompts 6,479 tok/s at
+  2K, 3,591 at 128K, 3,128 at 512K.
+- **Its rope native at every length** (one stage; vibes1.7b's four - x2 from 32K to x8 from 384K - gone). Its loss
+  held native to ~160K where vibes1.7b's left it at 32K; past that YaRN x4 read the last tokens' loss best, but lost a
+  code 52K from a 524K prompt's end that native found. On native: 3 of 3 codes at 524K, 4 of 5 at 1.04M (`--ctx 1m`;
+  the miss YaRN's too). No cached key is ever turned. `OSMOS_LFM3_STAGES` (`from:factor,...`) tries another table.
+- **DFlash2 on LFM3** (`lfm3_dflash_*`, the engine's for a drafter the pack does not name yet: osmos1.7b's own
+  ships when its fix lands): Qwen's DFlash2 drafter and kernels on LFM3's taps (the outputs of layers 1,
+  6, 11, 16 and 21, every step's), embedding and tied head; a drafted round's tokens are the plain decode's. A
+  round's drafts stop short of an LSA block's close or a rope stage's crossing, so every draft the verify drops is
+  within the rollback's reach. The DFlash2 loader takes any target's shape (`q4x_dflash_create_for`).
+- **Checked again**: the forward against Liquid's reference on osmos1.7b's own weights (KL 3.1e-5 / 2.0e-5 / 3.2e-5
+  at 64, 2,048 and 24,576 tokens).
+- **README**: Hy4-flash in the intro, the context lengths and the credits (0.11.0 left them out).
+
 ## [0.11.0]: Hy4-flash - Tencent's 220B MoE, with its own drafter
 
 A fifth family: **Hy4-flash** (`hy_v4_flash`): Tencent's 220B MoE (155.5B backbone + 63.5B Engram, ~11.3B active a
