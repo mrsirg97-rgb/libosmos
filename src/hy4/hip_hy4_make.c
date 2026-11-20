@@ -147,9 +147,11 @@ static bool as_f32(Hy4Forward *f, const GgufTensor *t, float **out)
 static bool freqs(float base, uint32_t dim, float **out)
 {
   float h[256];
+  if (dim / 2 > 256) /* (before the writes: a file's rope_dim past 512 wrote past h - 0.11.2) */
+    return false;
   for (uint32_t i = 0; i < dim / 2; i++)
     h[i] = 1.0f / powf(base, (float)(2 * i) / (float)dim);
-  return dim / 2 <= 256 && hy4_alloc(out, dim / 2 * F) && hipMemcpy(*out, h, dim / 2 * F, hipMemcpyHostToDevice) == hipSuccess;
+  return hy4_alloc(out, dim / 2 * F) && hipMemcpy(*out, h, dim / 2 * F, hipMemcpyHostToDevice) == hipSuccess;
 }
 
 static bool engram_reader(Hy4Forward *f, const int *fds, char *err)
