@@ -9,11 +9,13 @@ suite; Qwen3.5's `test_q35_*` against vibes27b's references).
 
 - **The pack `hy4-flash`**: 1M context, rig's row `hy4-flash` (`none` / `low` / `high` / `max`: the template's
   reasoning levels). The backbone's ~79 GiB resident in GPU memory, the 63 GB Engram table read from the SSD a step
-  at a time; ~98 GiB in all at 1M. `performance`, 1K context: decode 15.8 tok/s plain, 24.5 with DFly2 on code;
-  prompts ~270 tok/s, ~177 at 32K. LONGNUMBERS
+  at a time; ~98 GiB in all at 1M. `performance`, 1K context: decode 17.0 tok/s plain, 24.8 with DFly2 on code
+  (29.9 on prose); prompts ~430 tok/s, 448 at 32K, 414 at 128K; a 913K-token book read in 45 minutes (its needle
+  found), then 17 tok/s drafted.
 - **A small context**: MLA's latent rows Q8_0 (the rope part F32) and the indexer's keys a ring - ~11 KB a token
   against 34 (1M in ~12 GB); the teacher-forced NLL no worse than an F32 cache's. A decode's indexer at long
-  context its scores tiled and its selection spread over the GPU (1M: 0.9 s -> 66 ms a token).
+  context from persistent blocks and its selection spread over the GPU (1M: 0.9 s -> 9.5 ms a token); a prompt's
+  scores on the matrix cores and its selection by radix passes.
 - **The forward against Tencent's reference** (the transformers PR's modeling code, run on the GGUF's own values):
   every piece within ~1e-6; 64 tokens KL 1.2e-11. At 2,600 tokens a router near-tie (two experts' scores 3e-8 apart)
   flips and spreads, so each layer is checked on osmos's own input (within 5e-7 on every other row) and the logits

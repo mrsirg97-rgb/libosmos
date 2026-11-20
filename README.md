@@ -184,18 +184,19 @@ KV cache and indexer picks rather than keeping its own. osmos 0.11.0, the `perfo
 
 | | |
 | --- | ---: |
-| Decode, a short context, plain / with DFly2 (code) | 15.8 / **24.5** tok/s |
-| Decode at 128K / 1M, plain | LONGDEC |
-| Prompt, 1K / 32K / 128K tokens | 270 / 177 / 124 tok/s |
+| Decode, a short context, plain / with DFly2 (code / prose) | 17.0 / **24.8 / 29.9** tok/s |
+| Decode with DFly2, served: a 128K / a 913K prompt | 18.8 / 17.0 tok/s |
+| Prompt, 1K / 32K / 128K tokens | ~430 / 448 / 414 tok/s |
+| Prompt, 913K tokens (a book, its needle found) | 45 minutes |
 | GPU memory at 1M context (weights, drafter, a conversation's cache) | ~98 GiB |
 | KL against Tencent's reference (64 tokens; F32 cache / the Q8_0 cache osmos runs) | 1e-11 / 0.033 |
 
 The context costs ~11 KB a token: MLA's latent rows Q8_0 (the rope part F32, as vLLM's `fp8_ds_mla`), the
 indexer's keys a small ring, its pooled groups F32 - the Q8_0 cache's teacher-forced NLL over 8K tokens no worse than
 F32's. DFly2's drafts are vLLM's (its speculator transcribed and checked token for token), and a drafted round's
-tokens are always the plain decode's; it accepts ~2.6 drafts a round on code. A long prompt's prefill is the limit:
-its sparse attention runs a token at a time and the indexer's scoring grows with the square of its length (a 1M
-prompt ~1.5-2 hours) - a conversation's cached prefix is not read again.
+tokens are always the plain decode's; it accepts ~2.4 drafts a round on code, ~3 on prose. A long prompt's prefill is the limit: the indexer's scores
+and selection grow with the square of its length (on the matrix cores; at 913K ~9 of its 45 minutes) - a
+conversation's cached prefix is not read again.
 
 ## Performance
 
