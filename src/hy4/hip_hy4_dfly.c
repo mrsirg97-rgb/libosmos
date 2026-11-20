@@ -43,6 +43,7 @@ struct Hy4Dfly
   uint32_t wtype;    /* the layers' and the correction's matrices' type: QTYPE_Q8_0 or QTYPE_BF16 */
   uint32_t ehtype;   /* the fusion's: QTYPE_Q8_0 or QTYPE_F32 */
   void *head8;       /* q8: the target's head as Q8_0 for the drafts' picks (NULL: the target's own) */
+  void *head4;       /* the drafts' head as Q4_0 (half head8's reads; NULL: head8's or the target's) */
   void **dev; /* the file's tensors on the GPU, by index (the matrices alone) */
   Layer layer[HY4_DFLY_LAYERS];
   float *eh;  /* the fusion's eh_proj, its rows times its gate (F32: gate * (W x) = (gate W) x) */
@@ -171,6 +172,36 @@ bool hy4_q8_up(const float *x, uint64_t rows, uint32_t cols, void **dev)
   return ok;
 }
 
+/* an F32 matrix [rows][cols] as Q4_0 on the GPU (ggml's quantize_row_q4_0_ref: d = the block's signed largest / -8,
+   a code min(15, x / d + 8.5), codes j and j + 16 a byte) - the drafts' head: its rounding moves their acceptance,
+   never the output */
+static bool q4_up(const float *x, uint64_t rows, uint32_t cols, void **dev)
+{
+  const uint64_t rb = cols / 32 * 18;
+  uint8_t *q = x && cols % 32 == 0 ? malloc(rows * rb) : NULL;
+  for (uint64_t r = 0; q && r < rows; r++)
+    for (uint32_t b = 0; b < cols / 32; b++)
+    {
+      const float *v = x + r * cols + b * 32;
+      float amax = 0.0f, max = 0.0f;
+      for (int i = 0; i < 32; i++)
+        if (fabsf(v[i]) > amax)
+          amax = fabsf(v[i]), max = v[i];
+      const float dd = max / -8.0f, id = dd ? 1.0f / dd : 0.0f;
+      uint8_t *o = q + r * rb + b * 18;
+      const _Float16 h = (_Float16)dd;
+      memcpy(o, &h, 2);
+      for (int i = 0; i < 16; i++)
+      {
+        const int a = (int)(v[i] * id + 8.5f), c = (int)(v[i + 16] * id + 8.5f);
+        o[2 + i] = (uint8_t)((a > 15 ? 15 : a) | (c > 15 ? 15 : c) << 4);
+      }
+    }
+  const bool ok = q && hy4_alloc(dev, rows * rb) && hipMemcpy(*dev, q, rows * rb, hipMemcpyHostToDevice) == hipSuccess;
+  free(q);
+  return ok;
+}
+
 /* a matrix of the file to the GPU: as it is (BF16), or q8 its Q8_0 */
 static bool matrix(struct Hy4Dfly *d, const GgufTensor *t, void *pin, const void **dev)
 {
@@ -212,7 +243,7 @@ void hy4_dfly_free(Hy4Forward *f)
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     hipFree(b[i]);
   hipHostFree(d->pin_ids), hipHostFree(d->pin_pos), hipHostFree(d->pin_pick), hipHostFree(d->pin_prob);
-  hipFree(d->head8);
+  hipFree(d->head8), hipFree(d->head4);
   gguf_destroy(d->st);
   free(d);
   f->dfly = NULL;
@@ -311,6 +342,14 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
     float *x = out->type == QTYPE_BF16 ? hy4_host_f32(f->w->model, out) : NULL;
     ok = (x && hy4_q8_up(x, out->dims[1], (uint32_t)out->dims[0], &d->head8)) ||
          fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
+    free(x);
+  }
+  if (ok && q8 && !getenv("HY4_DFLY_HEAD8") && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
+  { /* the engine's (q8) drafts' head Q4_0 (a round reads it a draft: 5 x 0.39 GB at Q8_0). Q3_K at 1K, 128 tokens, A/B in one
+       session (2026-11-19): code 24.1-24.6 -> 25.6-26.2 tok/s (the same 87 accepted, 106 drafts against 112), prose
+       27.5-28.1 -> 28.3-29.0 (the same 96); +209 MB. HY4_DFLY_HEAD8=1: head8's / the target's */
+    float *x = out->type == QTYPE_BF16 ? hy4_host_f32(f->w->model, out) : NULL;
+    ok = (x && q4_up(x, out->dims[1], (uint32_t)out->dims[0], &d->head4)) || fail(err, "DFly2: the head's Q4_0 copy");
     free(x);
   }
   /* the buffers: ROWS rows each */
@@ -417,7 +456,8 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          ops_swiglu(d->ga, d->up, d->corr_ff, INFINITY, NULL, 1, d->act, f->st) &&
          mat(f, d->wtype, d->corr_down, D, d->corr_ff, d->act, 1, d->c) &&
          ops_add(d->c, d->z + (uint64_t)j * D, D, f->st) &&
-         (d->head8 || f->head8 ? mat(f, QTYPE_Q8_0, d->head8 ? d->head8 : f->head8, V, D, d->c, 1, d->logits)
+         (d->head4 ? mat(f, QTYPE_Q4_0, d->head4, V, D, d->c, 1, d->logits)
+          : d->head8 || f->head8 ? mat(f, QTYPE_Q8_0, d->head8 ? d->head8 : f->head8, V, D, d->c, 1, d->logits)
                    : hy4_mat(f, f->w->output, V, D, d->c, 1, d->logits, false)) &&
          hy4_dfly_pick(d->logits, V, d->pick + (j - 1), d->prob + (j - 1), f->st);
   }
