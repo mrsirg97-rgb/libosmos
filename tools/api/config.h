@@ -16,6 +16,9 @@ typedef struct Config
   double fill_gib;
   bool no_guess;
   bool fill_orphans; /* 0.7.3 (#47): an orphaned tool call given LOOP_ORPHAN_TEXT as its result (loop.h); else flagged */
+  bool preserve_thinking; /* 0.11.3: a request's chat_template_kwargs.preserve_thinking unset, this (LFM3's: its
+                             template drops an earlier turn's reasoning - a long tool loop then read again at the
+                             next user turn; a pack's own choice, its training's) */
   bool stream_ngram; /* osmos-serve's --stream-ngram */
   char npu[PATH_MAX]; /* the NPU's kernels' directory (osmos-serve's --npu): "" none */
   double npu_share;   /* its share of a layer's pairs (--npu-share): 0 osmos-serve's own */

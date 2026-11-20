@@ -284,7 +284,7 @@
       "shards": ["osmos1.7b-q4_0"],
       "table": null, "picks": null, "drafter": [], "overlay": null, "lsa": "osmos1.7b-lsa",
       "rig": {"id": "osmos1.7b", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "high"], "effort": "high", "aliases": ["vibes1.7b", "vibes"]},
-      "settings": {"max_context": 524288, "max_tokens": 4096}
+      "settings": {"max_context": 524288, "max_tokens": 4096, "preserve_thinking": true}
     },
     "hy4-flash": {
       "title": "Tencent Hy4-flash (AngelSlim's Q3_K) with its DFly2 drafter, 1M context",

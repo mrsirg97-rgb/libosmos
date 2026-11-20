@@ -270,10 +270,12 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   if (!back_to_prompt(c, sv)) /* a decoded answer read again, never continued on (0.7.1) */
     return false;
   const uint32_t k = common(&c->held, p, n - 1);
+  c->via = "held";
   if (k == c->held.n && k)
     return true;
   if (k && c->held.n - k <= oseq_reach(c->s) && oseq_rollback(c->s, c->held.n - k))
   {
+    c->via = "rollback";
     c->held.n = k;
     drop_past(c, k);
     return true;
@@ -282,20 +284,22 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
      turn's, before reasoning the template now drops */
   Point *pt = c->prompt.n && c->prompt.n <= k ? &c->prompt : c->user.n && c->user.n <= k ? &c->user : NULL;
   if (pt)
-    return go_back(c, sv, pt);
+    return c->via = pt == &c->prompt ? "prompt-point" : "user-point", go_back(c, sv, pt);
   conv_set_aside(c, sv);
   uint32_t len = 0;
   const int64_t id = sv->slots ? slots_find(sv->slots, p, n - 1, 0, &len) : -1;
+  c->via = "none";
   if (!conv_restart(c, sv))
     return false;
   if (id < 0)
     return true;
+  c->via = "slot";
   char serr[SLOTS_ERR] = "";
   c->err[0] = '\0';
   if (!slots_take_stream(sv->slots, id, conv_load, c, serr)) /* (a failed load leaves the sequence empty) */
   {
     out("NOTE slots: a kept conversation of %u tokens not taken back (%s%s)\n", len, serr, c->err);
-    return conv_restart(c, sv);
+    return c->via = "none", conv_restart(c, sv);
   }
   for (uint32_t i = 0; i < len; i++)
     if (!ids_push(&c->held, p[i]))

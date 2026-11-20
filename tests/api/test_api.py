@@ -1229,6 +1229,25 @@ class Lfm3Api(Served, unittest.TestCase):
             self.assertIn("reasoning_effort", r.read().decode())
 
 
+@unittest.skipUnless(os.path.exists(LFM3), "no osmos1.7b Q4_0 (the tokenizer's)")
+class Lfm3Preserve(Lfm3Api):
+    """0.11.3: osmos.json's preserve_thinking the pack's default - an earlier turn's reasoning kept unless the request
+    says false (its template drops it: a tool loop's reasoning dropped at the next user turn, the loop read again)"""
+    settings = {"preserve_thinking": True}
+
+    def test_2_the_pack_keeps_earlier_reasoning(self):
+        self.ready()
+        msgs = [{"role": "user", "content": "2+2?"},
+                {"role": "assistant", "content": "4", "reasoning_content": "two and two make four"},
+                {"role": "user", "content": "3+3?"}]
+        kept = self.ok({"messages": msgs})
+        dropped = self.ok({"messages": msgs, "chat_template_kwargs": {"preserve_thinking": False}})
+        self.assertGreater(len(kept.split(",")), len(dropped.split(",")))  # its reasoning's tokens in the prompt
+        self.assertEqual(self.ok({"messages": msgs, "chat_template_kwargs": {"preserve_thinking": True}}), kept)
+
+    test_0_high_is_thinking_on = test_1_other_levels_refused = None
+
+
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
 class Shutdown(Served, unittest.TestCase):
     def test_sigterm_quits_the_engine(self):  # 0.7.1: rig's stop (SIGTERM) left the engine to its PDEATHSIG - killed,

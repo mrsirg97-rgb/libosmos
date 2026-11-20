@@ -187,7 +187,7 @@ int main(int argc, char **argv)
   Config c;
   if (!config_read(cfg_path, &c, err))
     return die(err);
-  api.fill_orphans = c.fill_orphans;
+  api.fill_orphans = c.fill_orphans, api.preserve_thinking = c.preserve_thinking;
   if (opt(argc, argv, "--ctx", NULL)) /* the pack's max_context, overridden: a shorter context (less memory) or 1M */
   {
     const unsigned ctx = ctx_of(opt(argc, argv, "--ctx", NULL));

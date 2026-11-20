@@ -62,15 +62,21 @@ static void run_line(Run *r, const char *what, const char *l)
   int tok;
   unsigned held, total, reused, prompt;
   double ms, rate, pms, dms;
+  char via[16] = "?";
   char finish[16] = "stop";
   if (!strcmp(what, "T") && sscanf(l, "T %lld %d", &rid, &tok) == 2)
     token(r, tok);
   else if (!strcmp(what, "PP") &&
-           sscanf(l, "PP %lld %u %u %lf %lf %u", &rid, &held, &total, &ms, &rate, &reused) == 6)
+           sscanf(l, "PP %lld %u %u %lf %lf %u %15s", &rid, &held, &total, &ms, &rate, &reused, via) >= 6)
   {
     pthread_mutex_lock(&r->mu);
     r->prompt_n = total, r->prompt_ms = ms, r->reused = reused;
     pthread_mutex_unlock(&r->mu);
+    /* a request's prompt: what it reused and from where, what it read (0.11.3: a long wait's cause in the log -
+       held: the conversation as kept; rollback, prompt-point, user-point: back to there; slot: a kept one taken
+       back; none: read whole) */
+    fprintf(stderr, "osmos-api: request %lld: a %u-token prompt, %u reused (%s), %u read in %.1f s\n", rid, total,
+            reused, via, total > reused ? total - reused : 0, ms / 1e3);
   }
   else if (!strcmp(what, "DONE"))
   {

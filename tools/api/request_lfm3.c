@@ -5,7 +5,7 @@
 #include "dialect.h"
 
 /* LFM3's reader: the messages as its template takes them (request_messages) - the tools apart, preserve_thinking
-   (off unless true: the template's default). its template names no reasoning effort, only thinking on or off: "none"
+   (the request's, else the pack's osmos.json preserve_thinking, else off: the template's default). its template names no reasoning effort, only thinking on or off: "none"
    off, "high" on (rig's row's two: tools/install/packs.json), any other level refused, not dropped */
 
 bool request_lfm3(const Json *body, Request *r, char err[API_ERR])
@@ -23,7 +23,7 @@ bool request_lfm3(const Json *body, Request *r, char err[API_ERR])
     return request_fail(err, "reasoning_effort: LFM3's template has no effort levels (high: thinking on, none: off)");
   if (pt && pt->type != JSON_TRUE && pt->type != JSON_FALSE && pt->type != JSON_NULL)
     return request_fail(err, "chat_template_kwargs.preserve_thinking: true or false");
-  r->preserve = pt && pt->type == JSON_TRUE;
+  r->preserve = pt && pt->type != JSON_NULL ? pt->type == JSON_TRUE : r->preserve_default; /* (the pack's: osmos.json) */
   if (!request_messages(msgs, &r->messages, err))
     return false;
   r->tools = request_tools(body);

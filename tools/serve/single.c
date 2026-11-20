@@ -241,7 +241,8 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
       return;
     }
     const double ms = now_ms() - t0;
-    out("PP %u %u %.1f %.1f %u\n", c->held.n, n, ms, (c->held.n - reused) / (ms / 1e3), reused);
+    out("PP %u %u %.1f %.1f %u %s\n", c->held.n, n, ms, (c->held.n - reused) / (ms / 1e3), reused,
+        c->via ? c->via : "none");
     pump(l, ctl);
     if (ctl->cancel && c->held.n < n) /* a prompt read part-way: its end past the state - back to its furthest point */
     {
