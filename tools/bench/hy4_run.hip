@@ -9,6 +9,7 @@
 //              its drafts accepted a round; the tokens the plain decode's (the same hash). CUM=x: a round's drafts
 //              kept while their probabilities' product is at least x (the engine's cum_min)
 //   HEAD_Q8=1  the head read as its Q8_0 copy (Hy4Options' head_q8)
+//   STATS=1    with DFLY: each draft reached (all before it accepted) - its acceptance by place and by probability
 //   NLL=1      the prompt's every row kept: the mean NLL of each next id (teacher-forced), a cache's or a math's cost
 //              over the whole text (KV_F32: the reference's F32 cache against the engine's Q8_0)
 #include <fcntl.h>
@@ -94,6 +95,8 @@ int main(int argc, char** argv) {
   CHECK(hy4_greedy(f, n - 1, 1, &next, err));  /* the step's last row: its one kept */
   const double t3 = now();
   uint32_t rounds = 0, accepted = 0, drafted = 0;
+  const bool stats = getenv("STATS") != nullptr;  // (each draft reached: its acceptance by place and by probability)
+  uint32_t reach[HY4_DFLY_DRAFTS] = {}, hit[HY4_DFLY_DRAFTS] = {}, bin_n[10] = {}, bin_hit[10] = {};
   for (uint32_t d = 0; d < D;) {
     if (!dfly) {
       CHECK(hy4_step(f, s, &next, 1, 1, err) && hy4_greedy(f, 0, 1, &next, err));
@@ -110,12 +113,20 @@ int main(int argc, char** argv) {
     CHECK(hy4_step_runs(f, &s, &len, 1, tok, err) && hy4_greedy(f, 0, len, pick, err));
     int a = 0;
     while (a < k && tok[1 + a] == pick[a]) a++;
+    for (int j = 0; stats && j < k && j <= a; j++) {  // draft j reached (every one before it accepted)
+      const int b = conf[j] >= 1.0f ? 9 : (int) (conf[j] * 10);
+      reach[j]++, hit[j] += j < a, bin_n[b]++, bin_hit[b] += j < a;
+    }
     if (k > a) CHECK(hy4_seq_rollback(s, (uint32_t) (k - a)));
     for (int j = 0; j <= a && d < D; j++, d++) hash = (hash ^ (uint64_t) pick[j]) * 1099511628211ull;
     next = pick[a];
     rounds++, accepted += (uint32_t) a, drafted += (uint32_t) k;
   }
   const double t4 = now();
+  for (int j = 0; stats && j < HY4_DFLY_DRAFTS; j++)
+    std::printf("draft %d: reached %u, accepted %u (%.0f%%)\n", j + 1, reach[j], hit[j], 100.0 * hit[j] / (reach[j] ? reach[j] : 1));
+  for (int b = 0; stats && b < 10; b++)
+    if (bin_n[b]) std::printf("p %.1f-%.1f: %u reached, %.0f%% accepted\n", b / 10.0, (b + 1) / 10.0, bin_n[b], 100.0 * bin_hit[b] / bin_n[b]);
   if (dfly)
     std::printf("drafted: %u rounds, %u drafts, %u accepted (%.2f a round, %.0f%%)\n", rounds, drafted, accepted,
                 (double) accepted / rounds, 100.0 * accepted / (drafted ? drafted : 1));

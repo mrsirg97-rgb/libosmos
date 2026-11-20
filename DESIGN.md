@@ -2279,6 +2279,15 @@ ids 0.061 F32 / 0.097 Q8_0 against the reference in BF16's own 0.151; DFly2's dr
   3072 305.8 -> 244.1 us), Q3_K's experts 2 rows and 2 in flight (72.8 -> 67.4), Q4_K's 2 in flight (and Qwen3.8's
   UD-Q4_K_XL shapes, 51.9 -> 49.4): 63.5 -> 60.7 ms a token, the same bits.
 - 32K prefill, all of it: 166 (step 3) -> 210 -> 393 tok/s.
+- **DFly2's acceptance**: hy4_run STATS=1 (each draft reached, by place and probability; CUM=0: all five made).
+  calibration differs by text - prose's p 0.3-0.5 drafts accepted 62-83%, code's p 0.3-0.4 33% - and the floor's
+  sweep at 1K, 256 tokens: code 21.3 / 23.4 / 25.3 tok/s at 0 / 0.2 / 0.45, prose 25.9 / 29.1 / 30.2, WikiText 28.0 /
+  30.4 / 29.8: 0.45 near the best for all. by context (WikiText, a different place of the text each): 3.03 a round at
+  2K, 2.45 at 4K, 1.93 at 32K - but the 32K prompt's last 1K alone accepts 1.56, its 32K context 1.93: the text's,
+  not the context's. vLLM's inputs re-read (dfly_inputs.py, dfly_target_reuse.py on main): the history the target's
+  top-k for the last accepted token's row (source_row), a local window only if dfly_context_local_window (the
+  release's config: None), then the block - osmos's; at 8K osmos's drafts the reference's (the same five, within
+  0.004). test_hy4_dfly_gpu OSMOS_TEST_DFLY_IDS: a prompt from an ids file (past the fixture's 2,600).
 - **a requant of the attention's gate and output measured, not shipped** (the operator's, 2026-11-19: DFly2 as it
   is, Tencent's Q3_K as it ships). they are 3.85 GB of a token's ~9.6 (Q8_0); tools/evo/requant_hy4.py (ggml's
   quantizers on the file's own Q8_0 values, no imatrix) + gguf_assemble (btrfs clones). KL against the reference,

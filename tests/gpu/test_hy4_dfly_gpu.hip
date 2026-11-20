@@ -61,7 +61,15 @@ int main() {
   for (int i = 0; i < g->n_files; i++) CHECK((fds[i] = open(g->paths[i], O_RDONLY)) >= 0);
   const uint32_t kPrompt = getenv("OSMOS_TEST_DFLY_PROMPT") ? (uint32_t) atoi(getenv("OSMOS_TEST_DFLY_PROMPT"))
                                                              : kPromptDefault;
-  const std::vector<float>& fid = A("ids");
+  std::vector<float> fid = A("ids");
+  if (const char* ip = getenv("OSMOS_TEST_DFLY_IDS")) {  // (a longer prompt's ids, int32: the drafts past 2,600 tokens)
+    FILE* fi = std::fopen(ip, "rb");
+    CHECK(fi);
+    std::vector<int32_t> v(kPrompt);
+    CHECK(std::fread(v.data(), 4, kPrompt, fi) == kPrompt);
+    std::fclose(fi);
+    fid.assign(v.begin(), v.end());
+  }
   CHECK(kPrompt > 0 && fid.size() >= kPrompt);
   const Hy4Options o = {kPrompt, kPrompt + kGen + 64, HY4_DFLY_DRAFTS + 1, getenv("OSMOS_TEST_HY4_KV8") == nullptr};
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
