@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "osmos/run/engine.h" /* (OSMOS_MAX_LANES: osmos-serve's lanes at most) */
 #include "config.h"
 
 /* osmos.json read whole and checked: a field of the wrong type, or one this reader does not know, refused by name
@@ -81,6 +82,8 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   {
     if (v->type != JSON_INT || !num(v, &x, k, err) || x > 1e7)
       return fail(err, "a positive integer", k);
+    if (!strcmp(k, "parallel") && (x < 1 || x > OSMOS_MAX_LANES)) /* (osmos-serve's bound: refused here, at start) */
+      return fail(err, "1 to 64 (osmos-serve's lanes at most)", k);
     *(!strcmp(k, "max_context") ? &c->max_context : !strcmp(k, "parallel") ? &c->parallel : &c->max_tokens) =
         (unsigned)x;
     return true;
