@@ -9,6 +9,7 @@
 #include "osmos/gpu/hy4_ops.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/model/qtype.h"
 #include "hy4_impl.h"
 
 /* the tokens' embedding rows (decoded, unrounded: the file's values) copied into each of the hc streams */
@@ -56,7 +57,8 @@ static bool launches(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n
                             hipMemcpyDeviceToDevice, f->st) == hipSuccess;
     }
   }
-  return ok && (!kept || hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read));
+  return ok && (!kept || (f->head8 ? hy4_mat_raw(f, QTYPE_Q8_0, f->head8, V, D, f->xn, kept, f->logits, read)
+                                   : hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read)));
 }
 
 /* the step (hy4_step_runs); keep_from: rows below it not kept whatever the prompts say (hy4_step's: its last rows) */

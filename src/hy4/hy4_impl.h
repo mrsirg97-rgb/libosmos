@@ -37,6 +37,7 @@ struct Hy4Forward
   const Hy4Weights *w;
   uint32_t max_tokens, max_ctx, logit_rows, ring; /* ring: a sliding layer's rows (its window, a step, the reach) */
   bool kv8;                                       /* MLA's cache rows Q8_0 (Hy4Options' kv_f32 not set) */
+  void *head8;                                    /* Hy4Options' head_q8: the head's Q8_0 copy (NULL: the file's) */
   uint32_t kring;    /* a sparse layer's token keys a ring of this many (a step's, a pool's and the reach: a key is
                         read only when its group completes - 0.11.0; was a row a position, 6 KB a token) */
   void **dev;                                     /* the model's tensors on the GPU, by index in its table */
@@ -131,6 +132,13 @@ bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int 
 /* a joint's launches over a token's x into out (its members at their offsets) */
 bool hy4_joint(Hy4Forward *f, const Hy4Joint *j, uint32_t cols, const float *x, float *out);
 
+/* y = W x for a matrix by its pointer and type (hy4_mat's math) */
+bool hy4_mat_raw(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
+                 float *y, bool read);
+/* a BF16 tensor's values as F32 on the host (read from its file; NULL on failure), an F32 matrix [rows][cols] as Q8_0
+   on the GPU (ggml's rounding) - hip_hy4_dfly.c's */
+float *hy4_host_f32(const Gguf *g, const GgufTensor *t);
+bool hy4_q8_up(const float *x, uint64_t rows, uint32_t cols, void **dev);
 /* DFly2's weights and buffers freed (hip_hy4_dfly.c; none loaded: nothing) */
 void hy4_dfly_free(Hy4Forward *f);
 

@@ -75,7 +75,7 @@ static const GgufTensor *need(const Gguf *g, const char *name, uint64_t d0, uint
 }
 
 /* a tensor's BF16 values as F32 on the host (read from its file) */
-static float *host_f32(const Gguf *g, const GgufTensor *t)
+float *hy4_host_f32(const Gguf *g, const GgufTensor *t)
 {
   const uint64_t n = t->bytes / 2;
   uint16_t *b = malloc(t->bytes);
@@ -108,7 +108,7 @@ static bool up_f32(const float *x, uint64_t n, float **dev)
 /* a small BF16 tensor to the GPU as F32 */
 static bool small(const Gguf *g, const GgufTensor *t, float **dev)
 {
-  float *x = t ? host_f32(g, t) : NULL;
+  float *x = t ? hy4_host_f32(g, t) : NULL;
   const bool ok = up_f32(x, t ? t->bytes / 2 : 0, dev);
   free(x);
   return ok;
@@ -135,7 +135,7 @@ static void q8_row(const float *x, uint32_t n, uint8_t *out)
 static bool split_kvb(const Gguf *g, const GgufTensor *t, uint32_t H, uint32_t nope, uint32_t vd, uint32_t lat,
                       void **k_b, void **v_b)
 {
-  float *kv = host_f32(g, t);
+  float *kv = hy4_host_f32(g, t);
   const uint64_t kb_row = nope / 32 * 34, vb_row = lat / 32 * 34;
   const uint64_t kb = (uint64_t)H * lat * kb_row, vb = (uint64_t)H * vd * vb_row;
   uint8_t *hk = malloc(kb), *hv = malloc(vb);
@@ -160,7 +160,7 @@ static bool split_kvb(const Gguf *g, const GgufTensor *t, uint32_t H, uint32_t n
 }
 
 /* an F32 matrix [rows][cols] as Q8_0 on the GPU */
-static bool q8_up(const float *x, uint64_t rows, uint32_t cols, void **dev)
+bool hy4_q8_up(const float *x, uint64_t rows, uint32_t cols, void **dev)
 {
   const uint64_t rb = cols / 32 * 34;
   uint8_t *q = x && cols % 32 == 0 ? malloc(rows * rb) : NULL;
@@ -179,8 +179,8 @@ static bool matrix(struct Hy4Dfly *d, const GgufTensor *t, void *pin, const void
   {
     if (d->q8)
     {
-      float *x = host_f32(d->st, t);
-      const bool ok = q8_up(x, t->dims[1], (uint32_t)t->dims[0], slot);
+      float *x = hy4_host_f32(d->st, t);
+      const bool ok = hy4_q8_up(x, t->dims[1], (uint32_t)t->dims[0], slot);
       free(x);
       if (!ok)
         return false;
@@ -291,11 +291,11 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
   ok = ok && eh && eg && en && hn && fnm && chn && cen && cg && cu && cd;
   if (ok)
   { /* the fusion's matrix with its gate folded in: row r times gate[r] */
-    float *w = host_f32(d->st, eh), *gv = host_f32(d->st, eg);
+    float *w = hy4_host_f32(d->st, eh), *gv = hy4_host_f32(d->st, eg);
     for (uint64_t r = 0; w && gv && r < D; r++)
       for (uint64_t c = 0; c < 2ull * D; c++)
         w[r * 2 * D + c] *= gv[r];
-    ok = (w && gv && (q8 ? q8_up(w, D, 2 * D, (void **)&d->eh) : up_f32(w, (uint64_t)D * 2 * D, &d->eh))) ||
+    ok = (w && gv && (q8 ? hy4_q8_up(w, D, 2 * D, (void **)&d->eh) : up_f32(w, (uint64_t)D * 2 * D, &d->eh))) ||
          fail(err, "DFly2: the fusion not made");
     free(w), free(gv);
   }
@@ -306,10 +306,10 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
               fail(err, "DFly2: its shared tensors not read into GPU memory"));
   hipHostFree(pin);
   const GgufTensor *out = f->w->output;
-  if (ok && q8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
+  if (ok && q8 && !f->head8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
   { /* the drafts' head: the target's own as Q8_0 (a draft's precision moves its acceptance, never the output) */
-    float *x = out->type == QTYPE_BF16 ? host_f32(f->w->model, out) : NULL;
-    ok = (x && q8_up(x, out->dims[1], (uint32_t)out->dims[0], &d->head8)) ||
+    float *x = out->type == QTYPE_BF16 ? hy4_host_f32(f->w->model, out) : NULL;
+    ok = (x && hy4_q8_up(x, out->dims[1], (uint32_t)out->dims[0], &d->head8)) ||
          fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
     free(x);
   }
@@ -417,7 +417,7 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          ops_swiglu(d->ga, d->up, d->corr_ff, INFINITY, NULL, 1, d->act, f->st) &&
          mat(f, d->wtype, d->corr_down, D, d->corr_ff, d->act, 1, d->c) &&
          ops_add(d->c, d->z + (uint64_t)j * D, D, f->st) &&
-         (d->head8 ? mat(f, QTYPE_Q8_0, d->head8, V, D, d->c, 1, d->logits)
+         (d->head8 || f->head8 ? mat(f, QTYPE_Q8_0, d->head8 ? d->head8 : f->head8, V, D, d->c, 1, d->logits)
                    : hy4_mat(f, f->w->output, V, D, d->c, 1, d->logits, false)) &&
          hy4_dfly_pick(d->logits, V, d->pick + (j - 1), d->prob + (j - 1), f->st);
   }

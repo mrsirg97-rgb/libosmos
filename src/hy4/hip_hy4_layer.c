@@ -23,6 +23,12 @@ static bool mat(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uint
   return mv_strided(type, w, rows, cols, x, cols, n, y, rows, f->st);
 }
 
+bool hy4_mat_raw(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
+                 float *y, bool read)
+{
+  return mat(f, type, w, rows, cols, x, n, y, read);
+}
+
 bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
              bool read)
 {

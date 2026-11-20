@@ -188,6 +188,7 @@ void hy4_forward_destroy(Hy4Forward *f)
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   hy4_dfly_free(f);
+  hipFree(f->head8);
   for (size_t i = 0; f->dev && i < f->w->model->n_tensors; i++)
     if (!f->in_joint || !f->in_joint[i])
       hipFree(f->dev[i]);
@@ -281,6 +282,19 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || hy4_fail(err, "more heads than this build's tables");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || hy4_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err);
+  if (ok && o->head_q8 && f->w->output->type == QTYPE_BF16)
+  { /* the head's Q8_0 copy (Hy4Options' head_q8): its BF16 freed */
+    const GgufTensor *out = f->w->output;
+    float *x = hy4_host_f32(f->w->model, out);
+    ok = (x && hy4_q8_up(x, out->dims[1], (uint32_t)out->dims[0], &f->head8)) ||
+         hy4_fail(err, "the head's Q8_0 copy not made");
+    free(x);
+    if (ok)
+    {
+      const size_t i = (size_t)(out - f->w->model->tensors);
+      hipFree(f->dev[i]), f->dev[i] = NULL;
+    }
+  }
   uint32_t joint_most = 0;
   ok = ok && (((f->in_joint = calloc(w->model->n_tensors, sizeof *f->in_joint)) && joints_make(f, &joint_most) &&
                hy4_alloc(&f->jo_attn, (uint64_t)joint_most * F) && hy4_alloc(&f->jo_ffn, (uint64_t)joint_most * F)) ||
