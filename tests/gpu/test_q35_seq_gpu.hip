@@ -7,6 +7,7 @@
 // the model Q35_MODEL, the tokens Q35_REF's ids.i32 (a held session's); skipped (77) without them
 #include <hip/hip_runtime.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -59,6 +60,13 @@ static bool source(void* c, void* p, uint64_t n) {
   if (x->at + n > x->b.size()) return false;
   std::memcpy(p, x->b.data() + x->at, n), x->at += n;
   return true;
+}
+
+// a tap that makes layer 0's residual NaN (a norm keeps it NaN: the next layer's f16 inputs past range, flagged)
+static void poison(void* arg, int layer, const float* h, uint32_t n, uint32_t dim) {
+  if (!*(bool*) arg || layer != 0) return;
+  const std::vector<float> big((size_t) n * dim, std::nanf(""));
+  CHECK(hipMemcpy((void*) h, big.data(), big.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
 }
 
 int main() {
@@ -146,6 +154,21 @@ int main() {
   OK(q35_seq_mark_load(b, mark.data(), mark.size(), err));
   CHECK(q35_seq_position(b) == at && same(feed(f, b, t + at, 1), m0) && same(feed(f, b, t + at + 1, 1), m1));
   std::printf("  mark: %.1f MB, the 2 tokens after it the same bits\n", mark.size() / 1e6);
+
+  // an overflowing read refused, the forward's next step a new sequence's as ever (0.11.2: the f16 flag stayed set -
+  // every step after refused, every sequence's, until a restart)
+  {
+    bool on = true;
+    q35_forward_tap(f, poison, &on);
+    Q35Seq *e = q35_seq_create(f, err), *h = q35_seq_create(f, err);
+    OK(e && h);
+    CHECK(!q35_step(f, e, t, 16, 1, err) && std::strstr(err, "f16"));
+    on = false;
+    q35_forward_tap(f, nullptr, nullptr);
+    OK(q35_step(f, h, t, 16, 1, err));
+    std::printf("  an overflowing read refused, the next step another sequence's as ever\n");
+    q35_seq_destroy(e), q35_seq_destroy(h);
+  }
 
   for (Q35Seq* s : {a, b, c, d}) q35_seq_destroy(s);
   q35_forward_destroy(f);
