@@ -248,8 +248,12 @@ int main() {
   CHECK(!forward_batch(r.f, many_s.data(), many.data(), 0, ferr));
   int32_t bad = (int32_t) r.V;
   CHECK(!forward_batch(r.f, many_s.data(), &bad, 1, ferr));
+  // a refusal before the work leaves the sequence as it was: its next step runs (0.11.2 - a refused token marked
+  // it broken, every step after refused)
+  CHECK(forward_batch(r.f, many_s.data(), all.data(), 1, ferr));
   seq_destroy(s0);
-  std::printf("  refusals: %d tokens, 0 tokens, a token past the vocabulary\n", FORWARD_MAX_TOKENS + 1);
+  std::printf("  refusals: %d tokens, 0 tokens, a token past the vocabulary - the sequence's next step as ever\n",
+              FORWARD_MAX_TOKENS + 1);
 
   rollback(r.f, r.V, all);
   play(&r, alone());  // twice: warm the pool, then the reference

@@ -182,7 +182,7 @@ static void leave(Forward *f, uint32_t k)
 /* the batch's tokens checked and placed: each at its sequence's next free position (a sequence's tokens in the
    batch's order), its last tokens for Engram's hash updated, its rows hashed - token i to sub-batch i / FWD_MAX_BATCH.
    nothing of a sequence changes before every token has passed */
-static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char *err)
+static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char *err)
 {
   const Geometry *g = f->g;
   const int ng = engram_ngram(f->hash);
@@ -199,6 +199,7 @@ static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
       return fwd_fail(err, "a sequence past max_ctx");
   for (uint32_t i = 0; i < n; i++)
     seqs[i]->staged = 0;
+  *placed = true; /* from here a sequence's history moves (a refusal before: every sequence as it was - 0.11.2) */
   f->n_sub = (n + FWD_MAX_BATCH - 1) / FWD_MAX_BATCH;
   for (uint32_t i = 0; i < n; i++)
   {
@@ -272,8 +273,7 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     return false;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
-  *placed = true; /* (place may fail part-way through its histories: placed either way) */
-  if (!place(f, seqs, tokens, n, err) || !fwd_engram_issue(f, err))
+  if (!place(f, seqs, tokens, n, placed, err) || !fwd_engram_issue(f, err)) /* (placed: past its checks) */
     return false;
   f->hcp_next = false;
   bool ok = true;
