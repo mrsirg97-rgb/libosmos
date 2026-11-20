@@ -105,22 +105,11 @@ static bool head_q8(Q35Forward *f, char *err)
   const char *keep = getenv("Q35_HEAD");
   if (t->type != QTYPE_BF16 || (keep && strcmp(keep, "bf16") == 0))
     return true;
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd, chunk = 4096;
-  const uint64_t rb = q4x_kv_row_bytes(D);
+  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd;
   void **slot = &f->dev[t - f->w->model->tensors];
-  void *q = NULL, *spare = NULL;
-  float *tmp = NULL;
-  bool ok = alloc(&q, (uint64_t)V * rb) && alloc(&spare, (uint64_t)chunk * rb) && alloc(&tmp, (uint64_t)chunk * D * F);
-  for (uint32_t r = 0; ok && r < V; r += chunk)
-  {
-    const uint32_t m = V - r < chunk ? V - r : chunk;
-    ok = quant_dequant(QTYPE_BF16, (const uint8_t *)*slot + (uint64_t)r * D * 2, (uint64_t)m * D, tmp, NULL) &&
-         q4x_kv_put(tmp, tmp, m, D, (uint8_t *)q + (uint64_t)r * rb, spare, NULL);
-  }
-  ok = ok && hipDeviceSynchronize() == hipSuccess;
-  hipFree(spare), hipFree(tmp);
-  if (!ok)
-    return hipFree(q), fail(err, "the LM head's Q8_0 not made (GPU memory, or a launch)");
+  void *q = NULL;
+  if (!gpu_q8_rows(QTYPE_BF16, *slot, (uint64_t)D * 2, V, D, &q))
+    return fail(err, "the LM head's Q8_0 not made (GPU memory, or a launch)");
   hipFree(*slot);
   *slot = q, f->head_type = QTYPE_Q8_0;
   return true;

@@ -6,6 +6,8 @@
 #include <unistd.h>
 
 #include "osmos/gpu/upload.h"
+#include "osmos/gpu/q4x_ops.h"
+#include "osmos/gpu/quant.h"
 
 const char *gpu_read_tensor(const Gguf *g, const GgufTensor *t, void *pin, uint64_t piece, void **dev)
 {
@@ -55,4 +57,26 @@ void gpu_free_table(const Gguf *g, void **dev, const bool *shared)
     if (!shared || !shared[i])
       hipFree(dev[i]);
   free(dev);
+}
+
+bool gpu_q8_rows(uint32_t type, const void *src, uint64_t row_bytes, uint32_t V, uint32_t D, void **out)
+{
+  const uint32_t chunk = 4096;
+  const uint64_t rb = q4x_kv_row_bytes(D);
+  void *q = NULL, *spare = NULL;
+  float *tmp = NULL;
+  bool ok = hipMalloc(&q, (uint64_t)V * rb) == hipSuccess && hipMalloc(&spare, (uint64_t)chunk * rb) == hipSuccess &&
+            hipMalloc((void **)&tmp, (uint64_t)chunk * D * sizeof(float)) == hipSuccess;
+  for (uint32_t r = 0; ok && r < V; r += chunk)
+  {
+    const uint32_t m = V - r < chunk ? V - r : chunk;
+    ok = quant_dequant(type, (const uint8_t *)src + (uint64_t)r * row_bytes, (uint64_t)m * D, tmp, NULL) &&
+         q4x_kv_put(tmp, tmp, m, D, (uint8_t *)q + (uint64_t)r * rb, spare, NULL);
+  }
+  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  hipFree(spare), hipFree(tmp);
+  if (!ok)
+    hipFree(q), q = NULL;
+  *out = q;
+  return ok;
 }

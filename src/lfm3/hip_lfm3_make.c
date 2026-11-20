@@ -113,22 +113,8 @@ static bool joints(Lfm3Forward *f, char *err)
 static bool head_q8(Lfm3Forward *f, char *err)
 {
   const GgufTensor *t = f->w->embd;
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd, chunk = 4096;
-  const uint64_t rb = q4x_kv_row_bytes(D);
-  void *spare = NULL;
-  float *tmp = NULL;
-  bool ok = lfm3_alloc(&f->head_q8, (uint64_t)V * rb) && lfm3_alloc(&spare, (uint64_t)chunk * rb) &&
-            lfm3_alloc(&tmp, (uint64_t)chunk * D * F);
-  for (uint32_t r = 0; ok && r < V; r += chunk)
-  {
-    const uint32_t m = V - r < chunk ? V - r : chunk;
-    ok = quant_dequant(t->type, (const uint8_t *)lfm3_dev(f, t) + (uint64_t)r * (t->bytes / V), (uint64_t)m * D, tmp,
-                       NULL) &&
-         q4x_kv_put(tmp, tmp, m, D, (uint8_t *)f->head_q8 + (uint64_t)r * rb, spare, NULL);
-  }
-  ok = ok && hipDeviceSynchronize() == hipSuccess;
-  hipFree(spare), hipFree(tmp);
-  if (!ok)
+  const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd;
+  if (!gpu_q8_rows(t->type, lfm3_dev(f, t), t->bytes / V, V, D, &f->head_q8))
     return lfm3_fail(err, "the head's Q8_0 not made (GPU memory, or a launch)");
   f->head = f->head_q8, f->head_type = QTYPE_Q8_0;
   return true;
