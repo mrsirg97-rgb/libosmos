@@ -1,3 +1,4 @@
+#include <cstdlib>
 // mv_run (include/osmos/gpu/mv.h): the kernel is mv.h's, its shape picked here
 #include "mv.h"
 
@@ -82,6 +83,18 @@ bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_
   // -> 18.3; under 8M values level or a few % slower: 1). the same bits (a lane's chunks summed in the same order)
   if constexpr (T == quant::kQ8_0 && NT == 1)
     if ((uint64_t) rows * cols >= kQ8Wide) return mv::launch<T, NT, 1, 4>(w, rows, cols, x, xs, y, ys, s);
+  // a verify's few tokens on a large Q8_0 matrix (mvsweep hy4 3-6, cold, 2026-11-19): tall (Hy4-flash's sliding gate
+  // 16384 x 3072) 1 row 2 in flight to 4 tokens (294.3 -> 243.3 us at 3, 296.8 -> 249.3 at 4), tune's past them; wide
+  // (its output 3072 x 16384, DFly2's fusion 3072 x 6144) 4 rows 1 to 4 tokens (280.4 -> 253.8 at 3, 283.8 -> 259.3 at
+  // 4), 1 and 1 at 5 (334.3 -> 296.1), 2 and 2 at 6 (324.3 -> 287.7). the same bits
+  if constexpr (T == quant::kQ8_0 && NT > 1)
+    if ((uint64_t) rows * cols >= kQ8Wide) {
+      if (rows >= cols) {
+        if constexpr (NT <= 4) return mv::launch<T, NT, 1, 2>(w, rows, cols, x, xs, y, ys, s);
+      } else if constexpr (NT <= 4) return mv::launch<T, NT, 4, 1>(w, rows, cols, x, xs, y, ys, s);
+      else if constexpr (NT == 5) return mv::launch<T, NT, 1, 1>(w, rows, cols, x, xs, y, ys, s);
+      else if constexpr (NT == 6) return mv::launch<T, NT, 2, 2>(w, rows, cols, x, xs, y, ys, s);
+    }
   return mv::launch<T, NT, k.r, k.u>(w, rows, cols, x, xs, y, ys, s);
 }
 

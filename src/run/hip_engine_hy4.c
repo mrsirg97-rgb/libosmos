@@ -186,10 +186,11 @@ static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ER
   return true; /* DFly2 reads the target's own state (every step keeps its snapshot): nothing to seed */
 }
 
-/* a round's drafts while their probabilities' product is at least this: a verified token reads its own experts (~14
-   ms of a step's 63), so an unlikely one costs more than it brings - 0.3 between code's best (0.4: 24.4 tok/s, plain
-   15.8) and prose's (0.25: 22.5), 2026-11-19, Q4_K_M at 1K */
-#define HY4_DRAFT_CUM_MIN 0.3f
+/* a round's drafts while their probabilities' product is at least this: a verified token reads its own experts (~10
+   ms of a round's ~146), so an unlikely one costs more than it brings - Q3_K at 1K, 128 tokens (2026-11-19, the
+   prompt on the matrix cores): 0.15 / 0.3 / 0.45 / 0.6 / 0.75 code 21.9 / 23.2 / 24.0 / 23.4 / 23.4 tok/s, prose
+   26.0 / 26.2 / 27.7 / 26.2 / 26.0 (on Q4_K_M 0.3 had been between code's 0.4 and prose's 0.25) */
+#define HY4_DRAFT_CUM_MIN 0.45f
 
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                    char err[OSMOS_ERR])

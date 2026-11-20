@@ -195,8 +195,11 @@ int main(int argc, char** argv) {
   if (!std::strcmp(which, "hy4")) {
     switch (nt) {
       case 1: sweep_hy4<1>(); break;
+      case 3: sweep_hy4<3>(); break;
+      case 4: sweep_hy4<4>(); break;
+      case 5: sweep_hy4<5>(); break;
       case 6: sweep_hy4<6>(); break;
-      default: return std::printf("hy4 tokens: 1, 6\n"), 2;
+      default: return std::printf("hy4 tokens: 1, 3, 4, 5, 6\n"), 2;
     }
     return 0;
   }
