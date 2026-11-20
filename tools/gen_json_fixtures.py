@@ -6,6 +6,7 @@ run: python3 tools/gen_json_fixtures.py > tests/fixtures/json.txt
 
 a case a line: `O <input hex> <output hex>` (read and written back) or `X <input hex>` (refused)."""
 import json
+import re
 import sys
 
 GOOD = [
@@ -17,14 +18,22 @@ GOOD = [
     '[1,2,3]', '[ 1 , [ 2 , [ 3 ] ] ]', '{"a":1,"b":[true,null],"c":{"d":"e"}}', '{"a":1,"a":2,"b":3}',
     '{"z":1,"y":2}', '{"ü":"√","emoji":"😀"}', ' \n\t {"k" : "v"} \r\n', '[1.0, 2, -0, 1e2, 2.5e-3]',
 ]
-BAD = ['', '{', '[1,]', '{"a":}', '01', '1.', '.5', '+1', '"\\x41"', '"\\ud800"', '"a\nb"',
+BAD = ['', '{', '[1,]', '{"a":}', '01', '1.', '.5', '+1', '"\\x41"', '"a\nb"',
        '"raw\ttab"', "'single'", 'tru', '[1] 2', '{"a" 1}', '"\\u12"', '{1:2}']
+
+
+# a lone surrogate (a JS string cut between a pair's halves): read as one U+FFFD
+# (0.11.2: refused - a conversation holding one refused at every later request). each beside what it writes back
+LONE = ['"\\ud800"', '"\\udc00x"', '"a\\ud83dx"', '"\\ud83d\\u0041"']
 
 
 def main():
     out = []
     for s in GOOD:
         out.append("O " + s.encode().hex() + " " + json.dumps(json.loads(s), ensure_ascii=False).encode().hex())
+    for s in LONE:
+        v = re.sub("[\ud800-\udfff]", "\ufffd", json.loads(s))  # each lone surrogate one U+FFFD
+        out.append("O " + s.encode().hex() + " " + json.dumps(v, ensure_ascii=False).encode().hex())
     for s in BAD:
         try:
             v = json.loads(s)

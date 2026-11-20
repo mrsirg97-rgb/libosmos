@@ -175,8 +175,9 @@ static void fail_at(int fd, int status, bool stream, const char *why, const Json
   }
   else if (stream)
     http_stream_event(fd, e.p, e.n);
-  else
-    http_send(fd, status, "application/json", e.p, e.n);
+  else /* the model's answer attached (it did not parse): the same request the same answer - an OpenAI client told
+          not to retry it (x-should-retry: theirs - 0.11.2, a whole answer generated three times for one error) */
+    http_send_h(fd, status, "application/json", e.p, e.n, completion ? "x-should-retry: false\r\n" : NULL);
   free(e.p);
 }
 
@@ -474,7 +475,8 @@ void api_chat(Api *a, Http *h)
     if (over)
       http_error_code(h->fd, 400, err, "messages", "context_length_exceeded");
     else
-      http_error(h->fd, loading ? 503 : 400, err);
+      http_error_head(h->fd, loading ? 503 : 400, err, NULL, NULL,
+                      loading ? "Retry-After: 10\r\n" : NULL); /* (a load takes minutes: a client's retries spaced) */
     request_free(&rq);
     return;
   }

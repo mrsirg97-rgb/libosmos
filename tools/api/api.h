@@ -75,6 +75,8 @@ bool http_stream_event(int fd, const char *data, size_t n);
 bool http_stream_comment(int fd);
 bool http_error(int fd, int status, const char *message);
 bool http_error_code(int fd, int status, const char *message, const char *param, const char *code);
+/* the same with header lines of its own ("Name: value\r\n" each, or NULL): a 503's Retry-After (0.11.2) */
+bool http_error_head(int fd, int status, const char *message, const char *param, const char *code, const char *head);
 void http_linger(int fd, bool wait);
 
 /* the server: what a request needs */

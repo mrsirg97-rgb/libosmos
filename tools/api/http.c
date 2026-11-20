@@ -145,6 +145,11 @@ bool http_error(int fd, int status, const char *message) { return http_error_cod
    harnesses compact a conversation on (0.9.2) */
 bool http_error_code(int fd, int status, const char *message, const char *param, const char *code)
 {
+  return http_error_head(fd, status, message, param, code, NULL);
+}
+
+bool http_error_head(int fd, int status, const char *message, const char *param, const char *code, const char *head)
+{
   JsonBuf b = {0};
   json_puts(&b, "{\"error\": {\"message\": ");
   json_dump_string(&b, message, strlen(message));
@@ -154,7 +159,7 @@ bool http_error_code(int fd, int status, const char *message, const char *param,
   if (code)
     json_puts(&b, ", \"code\": "), json_dump_string(&b, code, strlen(code));
   json_puts(&b, "}}");
-  const bool ok = !b.oom && http_send(fd, status, "application/json", b.p, b.n);
+  const bool ok = !b.oom && http_send_h(fd, status, "application/json", b.p, b.n, head);
   free(b.p);
   return ok;
 }

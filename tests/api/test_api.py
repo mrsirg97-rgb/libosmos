@@ -155,7 +155,8 @@ class Api(Served, unittest.TestCase):
     settings = {"max_tokens": 8192}  # a DeepSeek pack's prompt step
     def test_0_health_while_loading(self):
         self.assertEqual(self.get("/health")[0], 503)
-        self.assertEqual(self.post({"messages": [{"role": "user", "content": "hi"}]}).status, 503)
+        r = self.post({"messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual((r.status, r.getheader("Retry-After")), (503, "10"))  # 0.11.2: a client's retries spaced
         loading = json.loads(self.get("/v1/models")[1])["data"][0]  # 0.9.2: listed, said loading, no context yet
         self.assertEqual((loading["osmos"]["ready"], "context_length" in loading), (False, False))
         r = self.post({"messages": [{"role": "critic", "content": "hi"}]})  # its own fault: 400 even while loading
@@ -623,6 +624,7 @@ class Api(Served, unittest.TestCase):
         self.reply(BAD_CALLS)
         r = self.post(body)
         self.assertEqual(r.status, 500)
+        self.assertEqual(r.getheader("x-should-retry"), "false")  # 0.11.2: the same answer again - not retried
         msg = json.loads(r.read())["error"]["message"]
         self.assertIn("tool call", msg)
         self.assertIn("not '>\\n' before it", msg)  # the parse's why

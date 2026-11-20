@@ -125,16 +125,18 @@ static char *string(Cur *c, size_t *len)
       return free(o), fail(c, "an invalid escape"), NULL;
     c->p += 4;
     uint32_t cp = (uint32_t)u;
-    if (cp >= 0xD800 && cp <= 0xDBFF) /* a high surrogate: its low one next, or a lone surrogate */
+    if (cp >= 0xD800 && cp <= 0xDBFF) /* a high surrogate: its low one next - or a lone one, U+FFFD */
     {
       const int lo = c->end - c->p >= 6 && c->p[0] == '\\' && c->p[1] == 'u' ? hex4(c->p + 2) : -1;
-      if (lo < 0xDC00 || lo > 0xDFFF)
-        return free(o), fail(c, "a lone surrogate"), NULL;
-      cp = 0x10000 + ((cp - 0xD800) << 10) + (uint32_t)(lo - 0xDC00);
-      c->p += 6;
+      if (lo >= 0xDC00 && lo <= 0xDFFF)
+        cp = 0x10000 + ((cp - 0xD800) << 10) + (uint32_t)(lo - 0xDC00), c->p += 6;
+      else
+        cp = 0xFFFD;
     }
-    else if (cp >= 0xDC00 && cp <= 0xDFFF)
-      return free(o), fail(c, "a lone surrogate"), NULL;
+    else if (cp >= 0xDC00 && cp <= 0xDFFF) /* a lone surrogate (a JS string cut between a pair's halves, as
+                                              JSON.stringify writes it): U+FFFD, as lenient decoders take it - 0.11.2,
+                                              refused: the conversation's every later request refused with it */
+      cp = 0xFFFD;
     n += put_utf8(o + n, cp);
   }
   if (c->p >= c->end)
