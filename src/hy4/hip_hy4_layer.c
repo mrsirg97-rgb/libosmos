@@ -46,16 +46,22 @@ bool hy4_joint(Hy4Forward *f, const Hy4Joint *j, uint32_t cols, const float *x, 
 /* a read's per-head matvecs on the matrix cores: head h's matrix (base + h head_bytes) over x's columns h xh ..
    (rows xs apart: mm_tokens' strided x) into y + h yh (rows ys apart) - mm_tokens a head (mm_group's tiles want rows
    of a whole slab: k_b's 192 columns are not), a token's sums its own */
-/* y = W x a head at a time (a read: mm_tokens, each head's slice converted on its own) - k_b's: its 192 columns
-   (q_nope) not a whole number of mm_group's slabs */
+/* y = W x a head at a time (a read: every head's slice to its own x16 in one pass - mm_x16_heads - then mm_tokens
+   on each, ready) - k_b's: its 192 columns (q_nope) not a whole number of mm_group's slabs */
 static bool heads_each(Hy4Forward *f, uint32_t heads, const void *base, uint64_t head_bytes, uint32_t rows,
                        uint32_t cols, const float *x, uint32_t xs, uint32_t xh, uint32_t n, float *y, uint32_t ys,
                        uint32_t yh)
 {
   bool ok = true;
-  for (uint32_t h = 0; ok && h < heads; h++)
-    ok = mm_tokens(QTYPE_Q8_0, (const uint8_t *)base + h * head_bytes, rows, y + (uint64_t)h * yh, ys, NULL, 0, NULL, 0,
-                   cols, x + (uint64_t)h * xh, xs, n, f->x16, f->overflow, false, f->st);
+  for (uint32_t a = 0; ok && a < n; a += MM_MAX_TOKENS)
+  {
+    const uint32_t c = n - a < MM_MAX_TOKENS ? n - a : MM_MAX_TOKENS, c16 = (c + MM_TILE - 1) / MM_TILE * MM_TILE;
+    ok = mm_x16_heads(x + (uint64_t)a * xs, xs, c, heads, xh, cols, f->x16, f->overflow, f->st);
+    for (uint32_t h = 0; ok && h < heads; h++)
+      ok = mm_tokens(QTYPE_Q8_0, (const uint8_t *)base + h * head_bytes, rows, y + (uint64_t)a * ys + (uint64_t)h * yh,
+                     ys, NULL, 0, NULL, 0, cols, NULL, xs, c, (_Float16 *)f->x16 + (uint64_t)h * c16 * cols,
+                     f->overflow, true, f->st);
+  }
   return ok;
 }
 

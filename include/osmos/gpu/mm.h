@@ -33,6 +33,8 @@ bool mm_run_gated_mean(uint32_t type, const void *w, uint32_t hc, uint32_t dim, 
                        void *stream);
 bool mm_x16_rows(const float *x, uint32_t xs, const int32_t *idx, uint32_t slots, uint32_t cols, void *x16,
                  int32_t *overflow, void *stream);
+bool mm_x16_heads(const float *x, uint32_t xs, uint32_t n, uint32_t heads, uint32_t hs, uint32_t cols, void *x16,
+                  int32_t *overflow, void *stream);
 bool mm_group(uint32_t type, const void *const *w, const int32_t *cnt, uint32_t n_mat, uint32_t max_cnt, uint32_t rows,
               uint32_t cols, const void *x16, const uint32_t *xoff, uint32_t xts, float *y, const uint32_t *yoff,
               uint32_t ys, void *stream);
@@ -154,6 +156,12 @@ mm_run_gated_mean
   bits - and its f16 into out16 (dim wide, token t at row row0 + t; NULL: none) for the next matmul; up's F32 output
   never stored. out16 must not be x16 (other blocks still read it). false - nothing launched, the caller's two calls
   then - for a matrix the gemm would take or a type it has no epilogue for (Q8_0 alone: the mixers' up).
+
+mm_x16_heads
+  every head's slice of n rows (row t at x + t xs; head h's cols values at h hs of it) to its own tiled x16, in one
+  pass along the rows: head h's at x16 + h n16 cols halves (n16: n in whole tiles) - each as mm_x16(x + h hs, xs, n,
+  cols) would put it, the same bits; mm_tokens(..., ready) a head at a time on them. n at most MM_MAX_TOKENS; x 16-
+  byte aligned, xs and hs whole float4s.
 
 mm_group
   n_mat matrices of one type and shape at once: matrix m (w[m]) over the tiled x16 from x16 + xoff[m] (halves; rows

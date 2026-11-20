@@ -81,6 +81,27 @@ __global__ void x16_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t col
   mm::x16_put(x16, t, c, cols, t < n ? x[(uint64_t) t * xs + c] : 0.0f, overflow);  // past f16: refused at the end
 }
 
+// the same values 8 a thread (x 16-byte aligned, xs a whole float4s): two float4 loads, the 8 halves one 16-byte
+// store (a fragment row's half: contiguous in the tiled layout), 32-bit indices, the overflow flag once - each value
+// x16_put's conversion: the same bits. (one a thread, a 64-bit divide each: ~15 GB/s, the prompt's 6.9 s at 32K)
+constexpr uint32_t kX16Vec = 8;
+__global__ void x16_vec_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t cols, _Float16* x16, int32_t* overflow) {
+  const uint32_t i = blockIdx.x * kThreads + threadIdx.x, per = cols / kX16Vec, t = i / per, c = i % per * kX16Vec;
+  if (t >= (n + mm::kTile - 1) / mm::kTile * mm::kTile) return;
+  float4 a = make_float4(0, 0, 0, 0), b = a;
+  if (t < n) {
+    const float4* p = (const float4*) (x + (uint64_t) t * xs + c);
+    a = p[0], b = p[1];
+  }
+  const float v[kX16Vec] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+  __attribute__((aligned(16))) _Float16 h[kX16Vec];
+  bool bad = false;
+#pragma unroll
+  for (uint32_t e = 0; e < kX16Vec; e++) bad |= !(fabsf(v[e]) <= mm::kF16Max), h[e] = (_Float16) v[e];
+  if (bad) atomicOr(overflow, 1);
+  *(uint4*) (x16 + mm::x16_at(t, c, cols)) = *(const uint4*) h;
+}
+
 // the attention's output to f16 on the way to wo_a: a wave an FP8 block of a token's row, a lane a value - each
 // head's last rope_dim values rotated back (a pair's lanes trading theirs), the block rounded to FP8, then to f16.
 // ops_rope's, ops_fp8_round's and x16_kernel's expressions in their order, so the same bits as the three (the rows
@@ -447,8 +468,12 @@ extern "C" bool mm_x16(const float* x, uint32_t xs, uint32_t n, uint32_t cols, v
                        void* stream) {
   if (!n || n > MM_MAX_TOKENS || !cols || cols % mm::kTile || (n > 1 && xs < cols)) return false;
   const uint64_t work = (uint64_t) (n + mm::kTile - 1) / mm::kTile * mm::kTile * cols;  // whole tiles: past n, zero
-  x16_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
-      x, xs, n, cols, (_Float16*) x16, overflow);
+  if ((uintptr_t) x % 16 == 0 && xs % 4 == 0 && (uintptr_t) x16 % 16 == 0 && work / kX16Vec < (1ull << 32))
+    x16_vec_kernel<<<(unsigned) ((work / kX16Vec + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+        x, xs, n, cols, (_Float16*) x16, overflow);
+  else
+    x16_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+        x, xs, n, cols, (_Float16*) x16, overflow);
   return hipGetLastError() == hipSuccess;
 }
 
@@ -555,6 +580,41 @@ extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* 
                           uint32_t n, void* x16, int32_t* overflow, bool ready, void* stream) {
   return mm_tokens_scaled(type, w0, rows0, y0, ys0, 1.0f, w1, rows1, y1, ys1, 1.0f, cols, x, xs, n, x16, overflow,
                           ready, stream);
+}
+
+// every head's slice of x's rows to its own tiled x16 in one pass (x read along its rows: a head's slice converted
+// alone reads 2,048 rows 64 KB apart, a page each - ~15 GB/s): token t's head h, column c (c < cols, at h hs + c of
+// its row) to x16 + h n16 cols at x16_at(t, c, cols), n16 n in whole tiles (the rows past n zero). x16_put's
+// conversion: the same bits as mm_x16 a head at a time
+__global__ void x16_heads_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t heads, uint32_t hs, uint32_t cols,
+                                 _Float16* x16, int32_t* overflow) {
+  const uint32_t per = cols / kX16Vec, i = blockIdx.x * kThreads + threadIdx.x, t = i / (heads * per);
+  const uint32_t h = i / per % heads, c = i % per * kX16Vec, n16 = (n + mm::kTile - 1) / mm::kTile * mm::kTile;
+  if (t >= n16) return;
+  float4 a = make_float4(0, 0, 0, 0), b = a;
+  if (t < n) {
+    const float4* p = (const float4*) (x + (uint64_t) t * xs + (uint64_t) h * hs + c);
+    a = p[0], b = p[1];
+  }
+  const float v[kX16Vec] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+  __attribute__((aligned(16))) _Float16 o[kX16Vec];
+  bool bad = false;
+#pragma unroll
+  for (uint32_t e = 0; e < kX16Vec; e++) bad |= !(fabsf(v[e]) <= mm::kF16Max), o[e] = (_Float16) v[e];
+  if (bad) atomicOr(overflow, 1);
+  *(uint4*) (x16 + (uint64_t) h * n16 * cols + mm::x16_at(t, c, cols)) = *(const uint4*) o;
+}
+
+extern "C" bool mm_x16_heads(const float* x, uint32_t xs, uint32_t n, uint32_t heads, uint32_t hs, uint32_t cols,
+                             void* x16, int32_t* overflow, void* stream) {
+  if (!n || n > MM_MAX_TOKENS || !heads || !cols || cols % mm::kTile || hs % 4 || xs % 4 || (uintptr_t) x % 16 ||
+      (uintptr_t) x16 % 16 || (heads - 1) * (uint64_t) hs + cols > xs)
+    return false;
+  const uint64_t work = (uint64_t) (n + mm::kTile - 1) / mm::kTile * mm::kTile * heads * (cols / kX16Vec);
+  if (work >= (1ull << 32)) return false;
+  x16_heads_kernel<<<(unsigned) ((work + kThreads - 1) / kThreads), kThreads, 0, (hipStream_t) stream>>>(
+      x, xs, n, heads, hs, cols, (_Float16*) x16, overflow);
+  return hipGetLastError() == hipSuccess;
 }
 
 extern "C" bool mm_x16_rows(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols, void* x16,
