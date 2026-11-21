@@ -361,9 +361,17 @@ template <int O>
 __device__ inline float fa_xor(float v) {
   return __builtin_bit_cast(float, __builtin_amdgcn_update_dpp(0, __builtin_bit_cast(int, v), 0x160 + O, 0xF, 0xF, false));
 }
+// the max a v_max_f32 with its DPP operand: one instruction a step, not fmaxf's move, canonicalize and max (the
+// scores never NaN - a finite value or -inf - so the canonicalize kept nothing: the same values)
+template <int O>
+__device__ inline float fa_max_xor(float v) {
+  float r;
+  asm volatile("v_max_f32_dpp %0, %1, %1 row_xmask:%2 row_mask:0xf bank_mask:0xf bound_ctrl:1" : "=v"(r) : "v"(v), "i"(O));
+  return r;
+}
 __device__ inline float fa_row_max(float v) {
-  v = fmaxf(v, fa_xor<1>(v)), v = fmaxf(v, fa_xor<2>(v)), v = fmaxf(v, fa_xor<4>(v));
-  return fmaxf(v, fa_xor<8>(v));
+  v = fa_max_xor<1>(v), v = fa_max_xor<2>(v), v = fa_max_xor<4>(v);
+  return fa_max_xor<8>(v);
 }
 __device__ inline float fa_row_sum(float v) {
   v += fa_xor<1>(v), v += fa_xor<2>(v), v += fa_xor<4>(v);
@@ -473,7 +481,12 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       for (int e = 0; e < kFaTile; e++) qa[g][e] = (_Float16) (t < n_tok ? qr[g * kFaTile + e] : 0.0f);
   }
   // the running softmax: the sink a logit of its own, its value zero (gm, gl, go); the unit's from nothing (m, l, o)
-  float m[8], l[8], gm[8], gl[8];
+  float m[8], l[8];
+  // the running fold's (gm, gl) a row's in LDS: read at a unit's end alone (every 16 tiles), not 16 registers a lane
+  // (a row's 16 lanes the same values; its lane 0 writes) - fewer spills
+  __shared__ float gml[W][kFaTile][2];
+  auto gm = [&](int j) -> float& { return gml[wave][2 * j + half][0]; };
+  auto gl = [&](int j) -> float& { return gml[wave][2 * j + half][1]; };
   // the unit's (m, l, o) in registers; the prompt's running fold's o in its out rows (each lane its own elements: zero
   // first, a unit's end its read and write, the end its division) - not 64 more registers a wave, so fewer spills
   fa_f8 o[kFaHead / kFaTile] = {};
@@ -484,7 +497,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         for (int nt = 0; nt < kFaHead / kFaTile; nt++) out[out_at(rtok(2 * j + half), nt)] = 0.0f;
   for (int j = 0; j < 8; j++) {
     const uint32_t t = rtok(2 * j + half);
-    gm[j] = t < n_tok ? sink[(uint64_t) t * H + rhead(2 * j + half)] : 0.0f, gl[j] = 1.0f, m[j] = -INFINITY, l[j] = 0.0f;
+    gm(j) = t < n_tok ? sink[(uint64_t) t * H + rhead(2 * j + half)] : 0.0f, gl(j) = 1.0f, m[j] = -INFINITY, l[j] = 0.0f;
   }
   // the block's key range (its first row tile's lowest to its last's highest); a wave's own rows masked within it
   const uint32_t last = tb + kFaTile * RT - 1 < n_tok - 1 ? tb + kFaTile * RT - 1 : n_tok - 1;
@@ -591,6 +604,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       if (kb + kFaTile <= khi) fetch_k(kb + kFaTile);
     const uint32_t key = kb + col;
     float alpha[8];
+#pragma unroll  // (the rows' registers named: not m0's indirect moves and a branch a row)
     for (int j = 0; j < 8; j++) {
       const uint32_t t = rtok(2 * j + half), qi = base + t;
       const bool valid = t < n_tok && key <= qi && (!a.window || qi - key < a.window);
@@ -619,6 +633,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     const uint32_t tlo = rtok(0), thi = rtok(kFaTile - 1) < n_tok - 1 ? rtok(kFaTile - 1) : n_tok - 1;
     const int64_t c_lo = (int64_t) (base + tlo) - kb, c_last = (int64_t) (base + thi) - kb;
     const int cmin = c_lo > 0 ? (int) c_lo : 0, cmax = c_last < kFaTile - 2 ? (int) c_last : kFaTile - 2;
+#pragma unroll
     for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
       for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
       const fa_h16 bv = *(const fa_h16*) (vt + (nt * kFaTile + col) * kFaKey);
@@ -636,8 +651,10 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     if constexpr (!SPLIT)
       if ((pos0 + kb + kFaTile) % kFaUnit == 0 || kb + kFaTile > khi) {  // a unit's end: folded, the next from nothing
         for (int j = 0; j < 8; j++) {
-          float ca, cb;
-          fa_fold_coef(gm[j], gl[j], m[j], l[j], ca, cb);
+          float ca, cb, fgm = gm(j), fgl = gl(j);
+          fa_fold_coef(fgm, fgl, m[j], l[j], ca, cb);
+          __builtin_amdgcn_wave_barrier();
+          if (col == 0) gm(j) = fgm, gl(j) = fgl;
           const uint32_t t = rtok(2 * j + half);
           for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
             if (t < n_tok) out[out_at(t, nt)] = out[out_at(t, nt)] * ca + o[nt][j] * cb;
@@ -657,7 +674,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     } else
       for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
         const uint64_t i = out_at(t, nt);
-        out[i] = out[i] / gl[j] * (gate ? sigmoid(gate[i]) : 1.0f);
+        out[i] = out[i] / gl(j) * (gate ? sigmoid(gate[i]) : 1.0f);
       }
   }
 }
