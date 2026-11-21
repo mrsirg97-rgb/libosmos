@@ -453,11 +453,13 @@ static uint64_t table_bytes(uint64_t P, uint64_t E)
   return table_entries(P, E) * (3 * sizeof(void *) + 5 * 4) + table_slots(P, E) * 2 * 4 + P * 4 * 4;
 }
 
-/* mm's: its table's types, and BF16 (Mini's dense weights as released: mm's by name, not its table's - the other
-   families' BF16 matrices their matvec's as before). by type and shape alone, a decode's and a prompt's the same */
-static bool mm_takes(uint32_t type, uint32_t rows, uint32_t cols)
+/* mm's: its table's types, and BF16 where the model's dense weights are BF16 (f->bf16_mm: Mini's, as released) - mm's
+   by name, not its table's. a model whose BF16 is a side tensor (Inkling-2-Small's sliding layers' sink projections)
+   keeps its matvec, its bits 0.11's; the other families' BF16 matrices their matvec's as before. by the model, the
+   type and the shape alone: a decode's and a prompt's the same */
+static bool mm_takes(const Ink2Forward *f, uint32_t type, uint32_t rows, uint32_t cols)
 {
-  return (mm_known(type) || type == QTYPE_BF16) && mm_fits(type, rows, cols);
+  return (mm_known(type) || (type == QTYPE_BF16 && f->bf16_mm)) && mm_fits(type, rows, cols);
 }
 
 /* INK2_MEM: what the build takes, a stage at a time (the GPU's free memory before and after) */
@@ -488,7 +490,7 @@ static bool buffers(Ink2Forward *f)
                  CH0 = H * D > C ? H * D : C, CH = g->loop.passes && 2 * C > CH0 ? 2 * C : CH0,
                  X16 = ((T < MM_MAX_TOKENS ? T : MM_MAX_TOKENS) + MM_TILE - 1) / MM_TILE * MM_TILE;
   const uint32_t head = ink2_type(f->w->output);
-  f->head_rows = mm_takes(head, (uint32_t)VR, (uint32_t)C) ? MM_TILE * mm_col_tiles(head, MM_MAX_TOKENS) : MV_MAX_TOKENS;
+  f->head_rows = mm_takes(f, head, (uint32_t)VR, (uint32_t)C) ? MM_TILE * mm_col_tiles(head, MM_MAX_TOKENS) : MV_MAX_TOKENS;
   /* the experts' down rows and a decode's split attention share one buffer: the attention's partials are dead before
      the layer's MoE writes the down rows, and those are summed before the next layer's attention */
   const uint64_t fa_bytes = ink2_fa_scratch((uint32_t)H, f->max_ctx), down_bytes = T * K * C * 4,
@@ -567,6 +569,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   Ink2Forward *f = calloc(1, sizeof *f);
   if (!f)
     return ink2_fail(err, "out of memory"), NULL;
+  f->bf16_mm = w->layer[0].q && ink2_type(w->layer[0].q) == QTYPE_BF16; /* (mm_takes': BF16 the model's dense weights) */
   f->w = w, f->v8 = o->values_q8, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
   f->maxb = (uint32_t)((w->geo.n_layers + w->geo.res_block - 1) / w->geo.res_block);
@@ -574,7 +577,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   for (int l = 0; l < w->geo.n_layers; l++) /* the experts on mm at every step (moe) */
   {
     const Ink2Layer *L = &w->layer[l];
-    if (!mm_takes(L->exp_gate->type, F, C) || !mm_takes(L->exp_up->type, F, C) || !mm_takes(L->exp_down->type, C, F))
+    if (!mm_takes(f, L->exp_gate->type, F, C) || !mm_takes(f, L->exp_up->type, F, C) || !mm_takes(f, L->exp_down->type, C, F))
       return ink2_fail(err, "inkling2: an expert tensor of a type or shape mm has no kernel for"),
              ink2_forward_destroy(f), NULL;
   }
@@ -725,7 +728,7 @@ bool ink2_mv(const GgufTensor *t, const void *w, const float *x, uint32_t n, flo
 static bool mat(Ink2Forward *f, const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y)
 {
   const uint32_t rows = (uint32_t)t->dims[1], cols = (uint32_t)t->dims[0], type = ink2_type(t);
-  if (!mm_takes(type, rows, cols))
+  if (!mm_takes(f, type, rows, cols))
     return mv_strided(type, w, rows, cols, x, cols, n, y, rows, NULL);
   return mm_tokens(type, w, rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow, false, NULL);
 }
@@ -737,8 +740,8 @@ static bool mat2(Ink2Forward *f, const GgufTensor *t0, const void *w0, float *y0
 {
   const uint32_t cols = (uint32_t)t0->dims[0], type = ink2_type(t0), r0 = (uint32_t)t0->dims[1],
                  r1 = t1 ? (uint32_t)t1->dims[1] : 0;
-  if (!mm_takes(type, r0, cols) || (t1 && (ink2_type(t1) != type || (uint32_t)t1->dims[0] != cols ||
-                                           !mm_takes(type, r1, cols))))
+  if (!mm_takes(f, type, r0, cols) || (t1 && (ink2_type(t1) != type || (uint32_t)t1->dims[0] != cols ||
+                                           !mm_takes(f, type, r1, cols))))
     return mat(f, t0, w0, x, n, y0) && (!t1 || mat(f, t1, w1, x, n, y1));
   return mm_tokens(type, w0, r0, y0, r0, t1 ? w1 : NULL, r1, y1, r1, cols, x, cols, n, f->x16, f->overflow, ready,
                    NULL);
@@ -751,7 +754,7 @@ static bool rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const f
 {
   const uint32_t C = (uint32_t)f->w->geo.n_embd;
   const float eps = f->w->geo.rms_eps;
-  *ready = n <= MM_MAX_TOKENS && mm_takes(ink2_type(t), (uint32_t)t->dims[1], (uint32_t)t->dims[0]);
+  *ready = n <= MM_MAX_TOKENS && mm_takes(f, ink2_type(t), (uint32_t)t->dims[1], (uint32_t)t->dims[0]);
   return *ready ? ops_rms_x16(x, C, C, w, eps, n, y, C, f->x16, f->overflow, NULL)
                 : ops_rms(x, C, C, w, eps, n, y, C, NULL);
 }
@@ -998,7 +1001,7 @@ static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c,
   const uint32_t C = (uint32_t)f->w->geo.n_embd;
   const float eps = f->w->geo.rms_eps;
   /* the two norms' f16 side by side in x16 where down is mm's: its input's, not converted again (ops_rms's bits) */
-  const bool r16 = n <= MM_MAX_TOKENS && mm_takes(ink2_type(L->ctrl_down[c]), (uint32_t)L->ctrl_down[c]->dims[1],
+  const bool r16 = n <= MM_MAX_TOKENS && mm_takes(f, ink2_type(L->ctrl_down[c]), (uint32_t)L->ctrl_down[c]->dims[1],
                                                   (uint32_t)L->ctrl_down[c]->dims[0]);
   const bool normed = r16 ? ops_rms_x16_at(x, C, C, NULL, eps, n, f->ccat, 2 * C, f->x16, 2 * C, 0, f->overflow, NULL) &&
                                 ops_rms_x16_at(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, f->x16, 2 * C, C, f->overflow,
@@ -1122,7 +1125,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     /* the keys: a full layer's every row to its position, a sliding layer's window (its last window - 1 and these) */
     /* a decode's split attention: its fold writes the out matrix's f16 too (an mm one's) */
     const bool att16 = n <= INK2_FA_TILE && L->out->dims[0] == (uint64_t)H * D &&
-                       mm_takes(ink2_type(L->out), (uint32_t)L->out->dims[1], H * D);
+                       mm_takes(f, ink2_type(L->out), (uint32_t)L->out->dims[1], H * D);
     const Ink2Attn at = {H,
                          KV,
                          D,
