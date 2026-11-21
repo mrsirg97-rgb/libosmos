@@ -1,8 +1,8 @@
 /* a Hy4 read's routing (hy4_read_route) against the loop it replaced (an expert at a time over every pick: 0.12.2's
    route): the same tables for random picks - repeated experts in a token, experts no token picked, runs past a
    chunk - at Hy4-flash's 512 experts; a pick out of range refused; and its time at a 4,096-token read (8 picks a
-   token) under kBoundMs - 0.12.2's loop took ~10 ms a layer there, the read's host stall between the router and the
-   experts */
+   token) kFaster times under the old loop's in the same run (a sanitizer's build too) - 0.12.2's loop took ~10 ms
+   a layer there, the read's host stall between the router and the experts */
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +15,7 @@
 #define LAT 1536
 #define FFE 1536
 #define TILE 16
-static const double kBoundMs = 2.0;
+static const double kFaster = 5.0; /* the old loop's time over the sort's at least (measured ~90x) */
 
 static uint64_t g_rng = 1017;
 static uint32_t draw(uint32_t m)
@@ -119,18 +119,22 @@ int main(void)
     same(&got.r, &want.r, picks);
     printf("  %u tokens x %u picks (experts of %u, chunk %u): %u entries, %u slots - the reference's tables\n", n, k,
            from, chunk, got.r.entries, got.r.slots);
-    if (n == 4096)
+    if (n == 4096) /* its time against the old loop's in the same run (a sanitizer's build, a slow runner: both) */
     {
-      double best = 1e9;
+      double best = 1e9, ref = 1e9;
       for (int rep = 0; rep < 5; rep++)
       {
-        const double t0 = now_ms();
+        double t0 = now_ms();
         assert(hy4_read_route(idx, w, n, k, E, chunk, TILE, LAT, FFE, &got.r));
         const double t = now_ms() - t0;
         best = t < best ? t : best;
+        t0 = now_ms();
+        reference(idx, w, n, k, chunk, &want.r);
+        const double tr = now_ms() - t0;
+        ref = tr < ref ? tr : ref;
       }
-      printf("  %u tokens: %.3f ms (bound %.1f)\n", n, best, kBoundMs);
-      assert(best < kBoundMs);
+      printf("  %u tokens: %.3f ms, the old loop %.3f (at least %.0fx: %.1fx)\n", n, best, ref, kFaster, ref / best);
+      assert(best * kFaster < ref);
     }
     idx[picks / 2] = E; /* a pick out of range: refused */
     assert(!hy4_read_route(idx, w, n, k, E, chunk, TILE, LAT, FFE, &got.r));
