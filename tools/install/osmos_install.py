@@ -128,6 +128,12 @@ def fetch_bytes(m, fetch_ids, models):
     return sum(m["files"][f]["bytes"] - fetch.on_disk(models, m["files"][f]) for f in fetch_ids)
 
 
+def gpu_need(m, packs):
+    """the GPU memory the packs need to start (GiB): the largest of their gpu_gib, one never measured the measured
+    machine's (host.GPU_GIB_MEASURED)"""
+    return max(m["packs"][p].get("gpu_gib", host.GPU_GIB_MEASURED) for p in packs)
+
+
 def check(ok_why):
     ok, why = ok_why
     print(f"  {'ok  ' if ok else 'FAIL'} {why}")
@@ -295,7 +301,7 @@ def run():
     if a.rig:
         rig_rooms(m, a.packs, a.ctx)
     print("the machine:")
-    if not (check(host.gpu()) & check(host.gpu_memory())):
+    if not (check(host.gpu()) & check(host.gpu_memory(gpu_need(m, a.packs)))):
         raise SystemExit("not a machine osmos runs on as it is: the lines above say why")
     if a.npu:
         if not check(host.npu()):

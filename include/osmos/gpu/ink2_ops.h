@@ -55,6 +55,7 @@ bool ink2_axpy(float *y, const float *x, uint64_t n, float a, void *stream);
 #define INK2_FA_MAX_GROUP 8  /* ink2_fa's query heads a KV head at most (Inkling's 6): its waves */
 #define INK2_FA_TILE 16      /* ink2_fa's keys a tile (WMMA's 16): a window's keys handed in from a multiple of it */
 #define INK2_FA_UNIT 256     /* its keys a unit (absolute): each its own softmax, folded in order - a decode's in parallel */
+#define INK2_FA_REL 16       /* ink2_fa's relative states a head (Inkling's): its bias's sum unrolled, another refused */
 typedef struct Ink2Tau
 {
   uint32_t pos0;     /* the step's first token's position */
@@ -207,7 +208,8 @@ ink2_fa
   q . k and p . v on WMMA (f16 in, f32 sums), the relative bias, mask, sink and online softmax in f32. a window's
   first tile at a multiple of INK2_FA_TILE: a query's keys always the same tiles (the rounding of p to f16 against
   the running max is a tile's), so its bits are the same in any block - and in any step, given keys whose index mod
-  INK2_FA_TILE is their position's (a sequence's window handed in from such a position).
+  INK2_FA_TILE is their position's (a sequence's window handed in from such a position). d_rel INK2_FA_REL, else
+  refused: the bias's products summed in order, unrolled - their loads in flight together, not one a term.
 
 units: a query's keys cut at absolute multiples of INK2_FA_UNIT (pos0: key 0's position, a multiple of
   INK2_FA_TILE), each unit's online softmax from nothing, folded into the sink's start in order. given scratch

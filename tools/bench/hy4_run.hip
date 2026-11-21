@@ -1,6 +1,7 @@
 // hy4_run - Hy4-flash's forward timed (osmos/hy4/forward.h): a prompt of P ids (the oracle's wiki ids, or 1 .. P)
 // in steps of S, then D greedy decode steps of one token - each phase's wall time and rate, and the decode's tokens'
-// hash (two runs the same model the same ids). under rocprofv3 --kernel-trace --stats each kernel's share.
+// hash (two runs the same model the same ids) and its rows' logits' (FNV-1a 64 over their bytes: the prompt's cache's
+// bits too). under rocprofv3 --kernel-trace --stats each kernel's share.
 //
 //   hy4_run <GGUF> [P=2048] [S=2048] [D=32]
 //   IDS=path   the prompt's ids: a file of int32 (the first P), else 1000 + i * 7919 % 50000
@@ -91,7 +92,7 @@ int main(int argc, char** argv) {
                             getenv("KV_F32") ? "F32" : "Q8_0");
   const double t2 = now();
   int32_t next = 0;
-  uint64_t hash = 1469598103934665603ull;
+  uint64_t hash = 1469598103934665603ull, lhash = hash;
   CHECK(hy4_greedy(f, n - 1, 1, &next, err));  /* the step's last row: its one kept */
   const double t3 = now();
   uint32_t rounds = 0, accepted = 0, drafted = 0;
@@ -101,6 +102,8 @@ int main(int argc, char** argv) {
     if (!dfly) {
       CHECK(hy4_step(f, s, &next, 1, 1, err) && hy4_greedy(f, 0, 1, &next, err));
       hash = (hash ^ (uint64_t) next) * 1099511628211ull, d++;
+      const uint8_t* lb = (const uint8_t*) hy4_logits(f);  // (the row's logits' bytes: its prompt's cache's bits too)
+      for (uint64_t i = 0; i < (uint64_t) V * 4; i++) lhash = (lhash ^ lb[i]) * 1099511628211ull;
       continue;
     }
     int32_t tok[1 + HY4_DFLY_DRAFTS], pick[1 + HY4_DFLY_DRAFTS];
@@ -133,6 +136,7 @@ int main(int argc, char** argv) {
   std::printf("prompt: %u tokens in %.2f s (%.1f tok/s)\ndecode: %u tokens in %.2f s (%.2f tok/s, %.1f ms a token); "
               "ids hash %016llx\n", P, t2 - t1, P / (t2 - t1), D, t4 - t3, D / (t4 - t3), 1000 * (t4 - t3) / D,
               (unsigned long long) hash);
+  if (!dfly) std::printf("logits hash %016llx (the plain decode's rows)\n", (unsigned long long) lhash);
   hy4_seq_destroy(s);
   hy4_forward_destroy(f);
   hy4_weights_destroy(w);

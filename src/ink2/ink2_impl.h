@@ -17,6 +17,8 @@
 
 /* a layer's resident tensors on the device: its vectors as F32 (the norms, clips, convs, queries, the router's
    bias), its matrices as stored (mv_run reads their type) */
+#define INK2_BX16 8 /* a decode's batches' f16 inputs (Ink2Forward.bx16) */
+
 typedef struct Ink2Dev
 {
   float *attn_res_q, *ffn_res_q, *attn_norm, *q_norm, *k_norm, *v_norm, *ffn_norm;
@@ -96,6 +98,10 @@ struct Ink2Forward
      the first, [row][maxbank][C]) and output, the messages [ctrl][row][C], the controlled q / k / v [3][row][C], a
      control's concat [row][2C], gate [row][rank], gain and forget (pre-tanh) [row][C] */
   float *pre_h, *bank, *bank_out, *msg, *ctl, *ccat, *cgate, *cgain, *cforget;
+  /* a decode's batches (n <= MM_BATCH_TOKENS: mm_batch): INK2_BX16 f16 inputs of MM_BATCH_TOKENS rows of the widest
+     (bx16_at's), and the three controls' concats, gates, gains and forgets side by side ([3][MM_BATCH_TOKENS][...]) */
+  void *bx16; /* INK2_BX16 of them: k's and v's norms (0, 1), the controls' concats (2 .. 4) and gates (5 .. 7) */
+  float *ccat3, *cgate3, *cgain3, *cforget3;
   uint32_t maxbank;
   void *tap_arg;
   Ink2MtpDev md;

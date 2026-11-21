@@ -49,15 +49,16 @@ __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* 
 // x16 (when not NULL): y as mm_x16 would put it, rows past `rows` (a block each) zero to a whole tile
 constexpr uint32_t kRmsRun = 8;  // a 6144-wide row's 24 values a thread in 3 runs
 // x16 (with it): row t's values at columns c0 .. c0 + n of an xts-wide tile (ops_rms_x16's: c0 0, xts n)
-__global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
-                           uint32_t rows, _Float16* x16, int32_t* overflow, uint32_t xts, uint32_t c0) {
-  __shared__ float lds[kThreads];
-  if (blockIdx.x >= rows) {  // a pad row of x16's last tile
-    for (uint32_t i = threadIdx.x; i < n; i += kThreads) mm::x16_put(x16, blockIdx.x, c0 + i, xts, 0.0f, overflow);
+// row `row` of a norm (rms_kernel's block, rms_many_kernel's): its sums and each value's ops in one order
+__device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
+                               uint32_t rows, _Float16* x16, int32_t* overflow, uint32_t xts, uint32_t c0,
+                               uint32_t row, float* lds) {
+  if (row >= rows) {  // a pad row of x16's last tile
+    for (uint32_t i = threadIdx.x; i < n; i += kThreads) mm::x16_put(x16, row, c0 + i, xts, 0.0f, overflow);
     return;
   }
-  const float* xr = x + (uint64_t) blockIdx.x * xs;
-  float* yr = y + (uint64_t) blockIdx.x * ys;
+  const float* xr = x + (uint64_t) row * xs;
+  float* yr = y + (uint64_t) row * ys;
   // a thread's values kRmsRun at a time, their loads in flight together (a block a row: its latency), each sum's
   // adds and each value's ops in rms_kernel's order as ever - y may be x, so a run's loads before its stores
   float ss = 0;
@@ -75,9 +76,29 @@ __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float*
       if (i >= n) break;
       const float o = w ? (v[u] * r) * g[u] : v[u] * r;
       yr[i] = o;
-      if (x16) mm::x16_put(x16, blockIdx.x, c0 + i, xts, o, overflow);
+      if (x16) mm::x16_put(x16, row, c0 + i, xts, o, overflow);
     }
   }
+}
+
+__global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
+                           uint32_t rows, _Float16* x16, int32_t* overflow, uint32_t xts, uint32_t c0) {
+  __shared__ float lds[kThreads];
+  rms_row(x, n, xs, w, eps, y, ys, rows, x16, overflow, xts, c0, blockIdx.x, lds);
+}
+
+// ops_rms_x16_many's parts: blockIdx.y the part, blockIdx.x its row
+struct RmsParts {
+  const float* x[OPS_RMS_MANY];
+  const float* w[OPS_RMS_MANY];
+  float* y[OPS_RMS_MANY];
+  _Float16* x16[OPS_RMS_MANY];
+  uint32_t xs[OPS_RMS_MANY], ys[OPS_RMS_MANY], xts[OPS_RMS_MANY], c0[OPS_RMS_MANY];
+};
+__global__ void rms_many_kernel(RmsParts p, uint32_t n, float eps, uint32_t rows, int32_t* overflow) {
+  __shared__ float lds[kThreads];
+  const uint32_t b = blockIdx.y;
+  rms_row(p.x[b], n, p.xs[b], p.w[b], eps, p.y[b], p.ys[b], rows, p.x16[b], overflow, p.xts[b], p.c0[b], blockIdx.x, lds);
 }
 
 // the hc mixes' dots and the stream's sum of squares, a block a part of 64 tokens: block (p, tt) the part p of every
@@ -685,6 +706,21 @@ extern "C" bool ops_rms_x16_at(const float* x, uint32_t n, uint32_t xs, const fl
     return false;
   rms_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, (_Float16*) x16, overflow, xts,
                                                        c0);
+  return ok();
+}
+
+extern "C" bool ops_rms_x16_many(const OpsRmsPart* parts, uint32_t count, uint32_t n, float eps, uint32_t rows,
+                                 int32_t* overflow, void* stream) {
+  if (!parts || !count || count > OPS_RMS_MANY || !n || n % mm::kTile || !rows || rows > MM_MAX_TOKENS || !overflow)
+    return false;
+  RmsParts p = {};
+  for (uint32_t i = 0; i < count; i++) {  // (ops_rms_x16_at's refusals, each part)
+    const OpsRmsPart& q = parts[i];
+    if (!q.x || !q.y || !q.x16 || q.c0 % mm::kTile || q.c0 + n > q.xts) return false;
+    p.x[i] = q.x, p.w[i] = q.w, p.y[i] = q.y, p.x16[i] = (_Float16*) q.x16;
+    p.xs[i] = q.x_stride, p.ys[i] = q.y_stride, p.xts[i] = q.xts, p.c0[i] = q.c0;
+  }
+  rms_many_kernel<<<dim3(tiles(rows), count), kThreads, 0, st(stream)>>>(p, n, eps, rows, overflow);
   return ok();
 }
 

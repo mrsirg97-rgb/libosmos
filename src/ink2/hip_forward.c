@@ -513,7 +513,7 @@ static bool buffers(Ink2Forward *f)
       {&f->xe16, table_slots(T * K, E) * C * 2}, {(void **)&f->overflow, 4},
       {(void **)&f->head, f->head_rows * VR * 4}, {(void **)&f->logits, (uint64_t)f->logit_rows * f->vocab * 4},
       {(void **)&f->gid, T * 4}, {&f->amax, ops_argmax_scratch((uint32_t)T)},
-      {(void **)&f->res_sc, INK2_RES_SCRATCH * 4},
+      {(void **)&f->res_sc, INK2_RES_SCRATCH * 4}, {&f->bx16, INK2_BX16 * MM_BATCH_TOKENS * CH * 2},
   };
   uint64_t sum = 0;
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
@@ -536,6 +536,8 @@ static bool buffers(Ink2Forward *f)
         {&f->pre_h, T * C * 4}, {&f->bank, T * f->maxbank * C * 4}, {&f->bank_out, T * C * 4},
         {&f->msg, INK2_CTRLS * T * C * 4}, {&f->ctl, 3 * T * C * 4}, {&f->ccat, 2 * T * C * 4},
         {&f->cgate, T * rank * 4}, {&f->cgain, T * C * 4}, {&f->cforget, T * C * 4},
+        {&f->ccat3, 3 * MM_BATCH_TOKENS * 2 * C * 4}, {&f->cgate3, 3 * MM_BATCH_TOKENS * rank * 4},
+        {&f->cgain3, 3 * MM_BATCH_TOKENS * C * 4}, {&f->cforget3, 3 * MM_BATCH_TOKENS * C * 4},
     };
     for (size_t i = 0; i < sizeof lb / sizeof *lb; i++)
     {
@@ -993,6 +995,60 @@ static bool conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint3
 
 /* a run: n tokens of s at its next positions through the model, their logits at rows row0 .. (those before the
    prompt's end - 1 not) */
+/* f->bx16's input i: MM_BATCH_TOKENS rows of the widest input (buffers' CH) */
+static void *bx16_at(const Ink2Forward *f, int i)
+{
+  const Ink2Geometry *g = &f->w->geo;
+  const uint64_t C = (uint64_t)g->n_embd, HD = (uint64_t)g->n_heads * (uint64_t)g->head_dim,
+                 CH0 = HD > C ? HD : C, CH = g->loop.passes && 2 * C > CH0 ? 2 * C : CH0;
+  return (uint8_t *)f->bx16 + (uint64_t)i * MM_BATCH_TOKENS * CH * 2;
+}
+
+/* matrices of one type and cols on mm (mm_takes): an mm_batch's */
+static bool batchable(const Ink2Forward *f, const GgufTensor *const *t, int count, uint32_t cols)
+{
+  const uint32_t type = ink2_type(t[0]);
+  for (int i = 0; i < count; i++)
+    if (t[i] && (ink2_type(t[i]) != type || (uint32_t)t[i]->dims[0] != cols ||
+                 !mm_takes(f, type, (uint32_t)t[i]->dims[1], cols)))
+      return false;
+  return true;
+}
+
+/* a decode's (n <= MM_BATCH_TOKENS) norms in one launch (q's into xn and f->x16; apart: k's into kn and bx16 0,
+   v's into vn and bx16 1 - each rms_for's bits) and its projections on them in one mm_batch: q, gate and rel on q's
+   norm, k and v on theirs (else q's), a full layer's conv projections on k's and v's - each matrix's bits mat2's
+   (mm_run's tiles; the norms' f16 mm_x16's bytes). false: not taken (a matrix not the batch's type on mm), nothing
+   launched; *ok the launches' */
+static bool proj_batch(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, bool full, bool apart, const float *aq,
+                       const float *ak, const float *av, const float *q_norm, const float *k_norm,
+                       const float *v_norm, uint32_t n, float *dyn_k, float *dyn_v, bool *ok)
+{
+  const uint32_t C = (uint32_t)f->w->geo.n_embd;
+  const GgufTensor *t[7] = {L->q, L->gate, L->rel, L->k, L->v, full ? L->k_conv_proj : NULL,
+                            full ? L->v_conv_proj : NULL};
+  if (n > MM_BATCH_TOKENS || !batchable(f, t, 7, C))
+    return false;
+  void *x16k = apart ? bx16_at(f, 0) : f->x16, *x16v = apart ? bx16_at(f, 1) : f->x16;
+  const OpsRmsPart norms[3] = {{aq, q_norm, f->xn, f->x16, C, C, C, 0},
+                               {ak, k_norm, f->kn, x16k, C, C, C, 0},
+                               {av, v_norm, f->vn, x16v, C, C, C, 0}};
+  *ok = ops_rms_x16_many(norms, apart ? 3 : 1, C, f->w->geo.rms_eps, n, f->overflow, NULL);
+  const void *w[7] = {d->q, d->gate, d->rel, d->k, d->v, d->k_conv_proj, d->v_conv_proj};
+  const void *x[7] = {f->x16, f->x16, f->x16, x16k, x16v, x16k, x16v};
+  float *y[7] = {f->q, f->gate, f->rel, f->k, f->v, dyn_k, dyn_v};
+  MmPart p[7];
+  uint32_t count = 0;
+  for (int i = 0; i < 7; i++)
+    if (t[i])
+    {
+      const uint32_t rows = (uint32_t)t[i]->dims[1];
+      p[count++] = (MmPart){w[i], rows, x[i], y[i], rows};
+    }
+  *ok = *ok && mm_batch(ink2_type(L->q), C, p, count, n, NULL);
+  return true;
+}
+
 /* a loop's control of input x by message m (upstream's control): gate = down(concat(rms(x), rms(m))), out = x -
    tanh(forget(gate)) x + tanh(gain(gate)) m; out may be x */
 static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, const float *x, const float *m,
@@ -1003,9 +1059,9 @@ static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c,
   /* the two norms' f16 side by side in x16 where down is mm's: its input's, not converted again (ops_rms's bits) */
   const bool r16 = n <= MM_MAX_TOKENS && mm_takes(f, ink2_type(L->ctrl_down[c]), (uint32_t)L->ctrl_down[c]->dims[1],
                                                   (uint32_t)L->ctrl_down[c]->dims[0]);
-  const bool normed = r16 ? ops_rms_x16_at(x, C, C, NULL, eps, n, f->ccat, 2 * C, f->x16, 2 * C, 0, f->overflow, NULL) &&
-                                ops_rms_x16_at(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, f->x16, 2 * C, C, f->overflow,
-                                               NULL)
+  const OpsRmsPart norms[2] = {{x, NULL, f->ccat, f->x16, C, 2 * C, 2 * C, 0},
+                               {m, NULL, f->ccat + C, f->x16, C, 2 * C, 2 * C, C}};
+  const bool normed = r16 ? ops_rms_x16_many(norms, 2, C, eps, n, f->overflow, NULL)
                           : ops_rms(x, C, C, NULL, eps, n, f->ccat, 2 * C, NULL) &&
                                 ops_rms(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, NULL);
   return normed &&
@@ -1013,6 +1069,44 @@ static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c,
          mat2(f, L->ctrl_gain[c], d->ctrl_gain[c], f->cgain, L->ctrl_forget[c], d->ctrl_forget[c], f->cforget,
               f->cgate, n, false) &&
          ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL);
+}
+
+/* a decode's three controls (q, k, v: control's for each) in batches: their norms each control's (x16s bx16 2 .. 4),
+   the three downs one mm_batch, their gates' f16 (bx16 5 .. 7), the gains and forgets one mm_batch, the three
+   ink2_loop_ctrl - each value control's bits. false: not taken (n past MM_BATCH_TOKENS, a matrix not on mm) */
+static bool controls3(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, const float *const *x, const float *m,
+                      uint32_t n, float *out, bool *ok)
+{
+  const uint32_t C = (uint32_t)f->w->geo.n_embd, G = (uint32_t)f->w->geo.loop.gate_rank;
+  const float eps = f->w->geo.rms_eps;
+  const uint64_t nC = (uint64_t)n * C;
+  const GgufTensor *down[3] = {L->ctrl_down[INK2_CTRL_Q], L->ctrl_down[INK2_CTRL_K], L->ctrl_down[INK2_CTRL_V]};
+  const GgufTensor *gf[6] = {L->ctrl_gain[INK2_CTRL_Q],   L->ctrl_forget[INK2_CTRL_Q], L->ctrl_gain[INK2_CTRL_K],
+                             L->ctrl_forget[INK2_CTRL_K], L->ctrl_gain[INK2_CTRL_V],   L->ctrl_forget[INK2_CTRL_V]};
+  if (n > MM_BATCH_TOKENS || !batchable(f, down, 3, 2 * C) || !batchable(f, gf, 6, G))
+    return false;
+  MmPart pd[3], pg[6];
+  OpsRmsPart norms[6];
+  for (int c = 0; c < 3; c++)
+  {
+    const int k = INK2_CTRL_Q + c;
+    float *cat = f->ccat3 + (uint64_t)c * MM_BATCH_TOKENS * 2 * C, *gate = f->cgate3 + (uint64_t)c * MM_BATCH_TOKENS * G;
+    void *x16c = bx16_at(f, 2 + c), *x16g = bx16_at(f, 5 + c);
+    norms[2 * c] = (OpsRmsPart){x[c], NULL, cat, x16c, C, 2 * C, 2 * C, 0};
+    norms[2 * c + 1] = (OpsRmsPart){m + c * nC, NULL, cat + C, x16c, C, 2 * C, 2 * C, C};
+    pd[c] = (MmPart){d->ctrl_down[k], G, x16c, gate, G};
+    float *gain = f->cgain3 + (uint64_t)c * MM_BATCH_TOKENS * C, *forget = f->cforget3 + (uint64_t)c * MM_BATCH_TOKENS * C;
+    pg[2 * c] = (MmPart){d->ctrl_gain[k], C, x16g, gain, C};
+    pg[2 * c + 1] = (MmPart){d->ctrl_forget[k], C, x16g, forget, C};
+  }
+  *ok = ops_rms_x16_many(norms, 6, C, eps, n, f->overflow, NULL) && mm_batch(ink2_type(down[0]), 2 * C, pd, 3, n, NULL);
+  for (int c = 0; c < 3 && *ok; c++)
+    *ok = mm_x16(f->cgate3 + (uint64_t)c * MM_BATCH_TOKENS * G, G, n, G, bx16_at(f, 5 + c), f->overflow, NULL);
+  *ok = *ok && mm_batch(ink2_type(gf[0]), G, pg, 6, n, NULL);
+  for (int c = 0; c < 3 && *ok; c++)
+    *ok = ink2_loop_ctrl(x[c], m + c * nC, f->cgain3 + (uint64_t)c * MM_BATCH_TOKENS * C,
+                         f->cforget3 + (uint64_t)c * MM_BATCH_TOKENS * C, nC, out + c * nC, NULL);
+  return true;
 }
 
 static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint32_t row0, char *err)
@@ -1092,35 +1186,46 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     }
     if (looped) /* each input by its message: a sliding layer's q, k and v then apart */
     {
-      GPU(control(f, L, d, INK2_CTRL_Q, aq, f->msg, n, f->ctl) &&
-          control(f, L, d, INK2_CTRL_K, ak, f->msg + nC, n, f->ctl + nC) &&
-          control(f, L, d, INK2_CTRL_V, av, f->msg + 2 * nC, n, f->ctl + 2 * nC));
+      const float *const xs[3] = {aq, ak, av};
+      bool cok = false;
+      if (controls3(f, L, d, xs, f->msg, n, f->ctl, &cok))
+        GPU(cok);
+      else
+        GPU(control(f, L, d, INK2_CTRL_Q, aq, f->msg, n, f->ctl) &&
+            control(f, L, d, INK2_CTRL_K, ak, f->msg + nC, n, f->ctl + nC) &&
+            control(f, L, d, INK2_CTRL_V, av, f->msg + 2 * nC, n, f->ctl + 2 * nC));
       aq = f->ctl, ak = f->ctl + nC, av = f->ctl + 2 * nC;
     }
     const bool apart = full || looped; /* q, k and v each their own norm's */
     const float *k_norm = full ? d->k_norm : d->attn_norm, *v_norm = full ? d->v_norm : d->attn_norm;
-    bool ready;
-    GPU(rms_for(f, L->q, aq, full ? d->q_norm : d->attn_norm, n, f->xn, &ready));
+    bool ready, pok = false;
+    const float *q_norm = full ? d->q_norm : d->attn_norm;
     const float *xk = apart ? f->kn : f->xn, *xv = apart ? f->vn : f->xn;
-    /* the projections on xn in pairs through its one f16 (the norm's; a sliding layer's k and v too: xn theirs),
-       then a full layer's k on kn and v on vn, each its norm's f16 - each matrix's bits its own launch's */
-    GPU(mat2(f, L->q, d->q, f->q, L->gate, d->gate, f->gate, f->xn, n, ready) &&
-        mat2(f, L->rel, d->rel, f->rel, NULL, NULL, NULL, f->xn, n, true));
-    if (apart)
-    {
-      GPU(rms_for(f, L->k, ak, k_norm, n, f->kn, &ready) &&
-          mat2(f, L->k, d->k, f->k, NULL, NULL, NULL, xk, n, ready));
-      GPU(rms_for(f, L->v, av, v_norm, n, f->vn, &ready) &&
-          mat2(f, L->v, d->v, f->v, NULL, NULL, NULL, xv, n, ready));
-    }
-    else
-      GPU(mat2(f, L->k, d->k, f->k, L->v, d->v, f->v, f->xn, n, true));
-    GPU(mat(f, L->sink, d->sink, f->xn, n, f->sink));
     float *dyn_k = full ? f->dyn : NULL, *dyn_v = full ? f->dyn + (uint64_t)n * KV * taps : NULL;
-    if (full)
+    if (proj_batch(f, L, d, full, apart, aq, ak, av, q_norm, k_norm, v_norm, n, dyn_k, dyn_v, &pok))
+      GPU(pok && mat(f, L->sink, d->sink, f->xn, n, f->sink));
+    else
     {
-      GPU(mat(f, L->k_conv_proj, d->k_conv_proj, xk, n, dyn_k));
-      GPU(mat(f, L->v_conv_proj, d->v_conv_proj, xv, n, dyn_v));
+      GPU(rms_for(f, L->q, aq, q_norm, n, f->xn, &ready));
+      /* the projections on xn in pairs through its one f16 (the norm's; a sliding layer's k and v too: xn theirs),
+         then a full layer's k on kn and v on vn, each its norm's f16 - each matrix's bits its own launch's */
+      GPU(mat2(f, L->q, d->q, f->q, L->gate, d->gate, f->gate, f->xn, n, ready) &&
+          mat2(f, L->rel, d->rel, f->rel, NULL, NULL, NULL, f->xn, n, true));
+      if (apart)
+      {
+        GPU(rms_for(f, L->k, ak, k_norm, n, f->kn, &ready) &&
+            mat2(f, L->k, d->k, f->k, NULL, NULL, NULL, xk, n, ready));
+        GPU(rms_for(f, L->v, av, v_norm, n, f->vn, &ready) &&
+            mat2(f, L->v, d->v, f->v, NULL, NULL, NULL, xv, n, ready));
+      }
+      else
+        GPU(mat2(f, L->k, d->k, f->k, L->v, d->v, f->v, f->xn, n, true));
+      GPU(mat(f, L->sink, d->sink, f->xn, n, f->sink));
+      if (full)
+      {
+        GPU(mat(f, L->k_conv_proj, d->k_conv_proj, xk, n, dyn_k));
+        GPU(mat(f, L->v_conv_proj, d->v_conv_proj, xv, n, dyn_v));
+      }
     }
     /* the keys: a full layer's every row to its position, a sliding layer's window (its last window - 1 and these) */
     /* a decode's split attention: its fold writes the out matrix's f16 too (an mm one's) */

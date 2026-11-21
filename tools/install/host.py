@@ -8,9 +8,12 @@ import shutil
 
 GFX = "gfx1151"
 PAGE = 4096
-# the GPU memory the packs were measured on (ttm's limit raised to ~113 GiB); the engine sizes its expert budget to
-# what is free (osmos-serve --budget auto), so less runs - with fewer experts resident, slower, and not measured
-GPU_GIB_NEEDED = 113
+# the GPU memory the packs were measured on (ttm's limit raised to ~113 GiB). a pack's own start (packs.json's
+# gpu_gib, measured: what its engine builds before any conversation) is what it needs; between the two the engine sizes
+# its expert budget to what is free (osmos-serve --budget auto) - fewer experts resident, slower. a pack never
+# measured needs this
+GPU_GIB_MEASURED = 113
+PAGES_LIMIT = "/sys/module/ttm/parameters/pages_limit"
 
 
 AMD = 0x1002
@@ -42,16 +45,21 @@ def gpu(sys_root="/sys"):
     return False, f"no {GFX} (Ryzen AI MAX+'s Radeon, PCI 1002:1586): AMD devices {', '.join(amd)} - osmos runs on Strix Halo"
 
 
-def gpu_memory():
+def gpu_memory(need=None, path=PAGES_LIMIT):
+    """the GPU's mappable memory (ttm's pages_limit) against `need` GiB (the packs' gpu_gib; None: GPU_GIB_MEASURED)"""
+    need = GPU_GIB_MEASURED if need is None else need
     try:
-        with open("/sys/module/ttm/parameters/pages_limit") as f:
+        with open(path) as f:
             gib = int(f.read()) * PAGE / (1 << 30)
     except (OSError, ValueError):
         return False, "ttm's pages_limit unreadable: is the amdgpu driver loaded?"
-    if gib < GPU_GIB_NEEDED:
-        pages = GPU_GIB_NEEDED * (1 << 30) // PAGE
-        return False, (f"the GPU may map {gib:.0f} GiB; the packs need ~{GPU_GIB_NEEDED}: add `options ttm "
+    if gib < need:
+        pages = need * (1 << 30) // PAGE
+        return False, (f"the GPU may map {gib:.0f} GiB; the packs need ~{need} to start: add `options ttm "
                        f"pages_limit={pages}` to /etc/modprobe.d/ttm.conf and reboot (a system setting: yours)")
+    if gib < GPU_GIB_MEASURED:
+        return True, (f"the GPU may map {gib:.0f} GiB: the packs start in ~{need}, but were measured at "
+                      f"~{GPU_GIB_MEASURED} - fewer experts resident, slower; a conversation's cache on top")
     return True, f"the GPU may map {gib:.0f} GiB"
 
 

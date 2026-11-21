@@ -653,6 +653,23 @@ __global__ __launch_bounds__(kWave* S::kWaves) void kernel(const uint8_t* __rest
                  blockIdx.y ? ys1 : ys0, lds, Silu{}, StoreY{blockIdx.y ? sc1 : sc0});
 }
 
+// a batch's matrices (mm_batch): one type and cols, each its own x16 - blockIdx.y the part, each tile as alone
+constexpr int kBatch = 8;
+struct Parts {
+  const uint8_t* w[kBatch];
+  const _Float16* x16[kBatch];
+  float* y[kBatch];
+  uint32_t rows[kBatch], ys[kBatch];
+};
+template <quant::Type T, class S, int CT>
+__global__ __launch_bounds__(kWave* S::kWaves) void batch_kernel(Parts p, uint32_t cols, uint32_t n) {
+  __shared__ __attribute__((aligned(32))) _Float16 lds[S::kLdsHalves];
+  const uint32_t b = blockIdx.y, row0 = blockIdx.x * kTile;
+  if (row0 >= p.rows[b]) return;  // the whole block
+  tile<T, S, CT>(p.w[b], row0, cols, p.x16[b], cols, blockIdx.z * kTile * CT, n, p.y[b], p.ys[b], lds, Silu{},
+                 StoreY{});
+}
+
 // one matrix with the silu epilogue (mm_run_silu)
 template <quant::Type T, class S, int CT>
 __global__ __launch_bounds__(kWave* S::kWaves) void kernel_silu(const uint8_t* __restrict__ w, uint32_t rows,

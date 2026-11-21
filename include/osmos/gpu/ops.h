@@ -30,6 +30,19 @@ bool ops_rms_x16(const float *x, uint32_t n, uint32_t x_stride, const float *w, 
    loop controls); c0 and n multiples of 16 */
 bool ops_rms_x16_at(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
                     uint32_t y_stride, void *x16, uint32_t xts, uint32_t c0, int32_t *overflow, void *stream);
+/* several ops_rms_x16_at in one launch (a decode's norms of a layer: one launch, not one a norm): each part its x
+   (rows x_stride apart) normed (times w; NULL none) into y and into columns c0 .. c0 + n of its xts-wide x16 - every
+   value ops_rms_x16_at's bits. at most OPS_RMS_MANY parts, one n, eps and rows */
+#define OPS_RMS_MANY 8
+typedef struct OpsRmsPart
+{
+  const float *x, *w;
+  float *y;
+  void *x16;
+  uint32_t x_stride, y_stride, xts, c0;
+} OpsRmsPart;
+bool ops_rms_x16_many(const OpsRmsPart *parts, uint32_t count, uint32_t n, float eps, uint32_t rows,
+                      int32_t *overflow, void *stream);
 #define OPS_HC_PARTS 64
 bool ops_hc_dot(const float *fn, const float *h, uint32_t hc, uint32_t dim, uint32_t n_tok, float *partial,
                 void *stream);

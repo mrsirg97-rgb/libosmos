@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.12.3]: faster prompts and decode for Hy4-flash, Inkling-2-Small and Inkling-2-Mini, every bit the same
+
+A performance pass on three models: each change does less work a token or fewer launches, and every model's output
+is 0.12.2's bit for bit (Inkling-2-Small's logits hashes still 0.11.3's; Hy4-flash's and Mini's rows' logits hashed
+against 0.12.2's). Low-power, interleaved against 0.12.2:
+
+- **Hy4-flash prompts +15%** (a 4K prompt ~385 -> ~442 tok/s). A read's expert tables were built on the host one
+  expert at a time over every pick - ~10 ms a layer with the GPU idle; now one counting sort (0.16 ms), the same
+  tables. Its projections on one input go in pairs on one f16 conversion, and its Q8_0 rows under 2,048 columns run
+  on the prompt's gemm.
+- **Inkling-2-Mini decode +10%** (24.4 -> 27.0 tok/s plain; a draft's 7-token verify steps 170 -> 185 tok/s) and
+  **prompts +4.5%** (8K: 1,082 -> 1,130 tok/s). The attention's relative bias was a loop the compiler could not
+  unroll - one memory round trip a term; unrolled, a sliding layer's attention is 25% faster in a prompt and 35% in
+  a decode. A decode's norms, projections and loop controls go in batches: 1,964 -> 1,512 launches a token.
+- **Inkling-2-Small prompts +5%** (an 8,448-token prompt through osmos-serve 32.9 -> 31.2 s; 64 tokens after it 8.6
+  -> 8.35 s): the attention's bias as Mini's, its Q5_K projections on the prompt's gemm, its decode's projections in
+  one launch.
+- **The installer on less GPU memory**: it refused every pack below ~113 GiB of GPU memory (the machine the packs were
+  measured on). Now each pack names its own start (packs.json's `gpu_gib`: what its engine builds before a
+  conversation, measured - inkling-2-mini 23 GiB, osmos-evo-inkling 21, osmos1.7b and osmos-evo-1017 7, ...) and the
+  installer refuses only below it; under 113 it says the pack runs with fewer experts resident, slower. A pack never
+  measured still needs 113. (A community request: a 64 GB machine had to edit host.py to install.)
+- At the `performance` profile (the same tools, against 0.12.2): Hy4-flash's 4K prompt ~467 -> ~498 tok/s (the
+  host's routing a smaller share with the CPU's clocks up), Mini's decode 25.0 -> 27.5 tok/s and 8K prompt 1,167 ->
+  1,226, Small's 8,448-token prompt 29.7 -> 27.6 s.
+- Measured, no change: Hy4-flash's decode matvecs already at ~219 GB/s (the bus); Inkling-2-Small's decode is bound
+  by its experts' SSD reads.
+
 ## [0.12.2]: the installer's --dry-run writes nothing, with --upgrade too
 
 - **`osmos_install.py --upgrade VERSION --dry-run`** built the version and moved rig's rows - the upgrade ran before

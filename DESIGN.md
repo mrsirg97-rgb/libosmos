@@ -2141,6 +2141,43 @@ prompt is the full layers' attention's: the dense matrices' 2x is a shallow prom
 25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
 2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
 
+### 0.12.3: less work a token, fewer launches (2026-11-21, low-power, interleaved against 0.12.2)
+
+**where the time went** (rocprofv3 --kernel-trace, ~/bench/perf123/tools/rpstat.py: a step's kernels by time,
+launches and the gaps between them): Mini's decode 44.4 ms a step, the GPU busy 38.2 of it, 1,964 launches (each a
+~1.9 us dispatch gap); its sliding layers' attention 121 us a layer at 2K keys. Hy4-flash's 2,048-token read 4.84 s,
+busy 4.46 - and a 9-12 ms gap in every MoE layer between the router and the experts. Small's prompt step at budget
+auto 70% MoE (23% of it its SSD waits), 14% its Q5_K projections and norms.
+
+**the attention's bias** (cd5d645): `b += rr[r] * rel_proj[r][dist]` over `a.d_rel` terms - a runtime bound, so a
+loop, a load's round trip a term, 8 rows a tile. A bound of the attention's own (INK2_FA_REL, 16; another refused)
+unrolls it: the 16 loads in flight together, the products summed in the same order. The bound measured first (the
+bias skipped): a sliding layer half its time. Unrolled: 4,096-token sliding layers Mini 20.5 -> 15.5 ms, Small 34.1
+-> 25.4; a decode's 94 -> 61 us. Tried and dropped: the bias branchless (the full layers' keys past the extent loaded
+anyway: slower), the relative states as float4 loads (level).
+
+**Hy4's read routing** (bb7daac): route() found each expert's picks by scanning all of them (experts x tokens x
+picks: 512 x 2,048 x 8 a layer, ~10 ms of host time while the GPU waited). hy4_read_route is one counting sort -
+each expert's start, then the picks placed in (token, slot) order, so each expert's rows stay token-ascending: the
+old tables exactly (test_hy4_route against the old loop; 15.3 -> 0.16 ms at 4,096 tokens). Beside it, a read's
+matrices on one input as pairs with that input's f16 made once (mm_tokens' ready), and mm's gemm on a short row's
+own shape (Short<T>: the tile's, so its sums' order) - Hy4's 1,024 / 1,536-column Q8_0 rows off the 4-tile kernel.
+
+**Small's dense** (7f9bb64): Q5_K on the gemm (a slab decoded once for 256 tokens): its 2,048-token step's
+projections 1,058 -> 1,012 ms. A GemmPlan sweep was not worth it: the projections already ~18 TFLOP/s.
+
+**a decode's launches** (23b2726): mm_batch - up to 8 matrices of one type and width, each on its own x16, one
+launch (the tile kernel with blockIdx.y the part: each part mm_run's bits); ops_rms_x16_many - up to 8 norms in one
+launch (rms_kernel's row body shared). At most 64 tokens (a decode, a draft's verify): a layer's q / k / v norms one
+launch, q / gate / rel / k / v and a full layer's conv projections one batch, a looped slot's three controls' six
+norms, three downs and six gains / forgets three launches, not 18. Mini 1,964 -> 1,512 launches a token, 44.4 ->
+39.9 ms a step under rocprofv3. Left: the attention residual's dots and mix (split on purpose: a few tokens'
+parallelism), the MoE's small table kernels, the controls' gate conversions and loop_ctrl - ~2 us of gap each.
+
+**measured, left alone**: Hy4's decode matvecs at ~219 GB/s (mv tuned for its shapes in 0.11.0); its head's Q8_0
+copy (HEAD_Q8) would save 1.6 ms a token but changes its logits - not this pass's. Small's decode waits on its
+experts' SSD reads.
+
 ## 0.11.2: the audit - correctness, then the families' shared code (2026-11-20)
 
 the operator's: a full sweep after six families in a few weeks - the engine and kernels first (correctness, then

@@ -72,6 +72,14 @@ static const Shape kQwenShapes[] = {
     {"blk.47.ffn_gate_exps.weight", 7}, {"blk.14.ffn_gate_exps.weight", 7}};
 // DeepSeek UD-IQ2_XXS's expert types UD-IQ1_M lacks: Q2_K and IQ3_XXS downs
 constexpr const char* kUdX2 = "%s/Models/ds1017/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf";
+// Hy4-flash's Q8_0 rows short of kShortCols (1,024: q_b, the indexer's q_b; 1,536: the shared expert's down, the
+// latent's up): a prompt's on the gemm at their Short shape - its bits the tile's at every count
+constexpr const char* kHy4 = "%s/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf";
+static const Shape kHy4Shapes[] = {
+  {"blk.5.attn_q_b.weight", -1},  {"blk.5.indexer.attn_q_b.weight", -1},  {"blk.5.ffn_down_shexp.weight", -1},
+  {"blk.5.ffn_routed_up.weight", -1},
+};
+
 static const Shape kUdX2Shapes[] = {{"blk.0.ffn_down_exps.weight", 7}, {"blk.20.ffn_down_exps.weight", 7}};
 // the reference's experts as deepseek-ai stores them (tools/convert/ds4_experts_mxfp4.py): MXFP4 gate / up and down,
 // its first shard alone (gguf_header: layers 0-4)
@@ -282,6 +290,11 @@ static void shape(const Gguf* g, const Shape& s) {
             hipFree(xo2) == hipSuccess && hipFree(x16w) == hipSuccess && hipFree(xd) == hipSuccess);
       std::printf("  %s: mm_run_silu the bits of mm_run then q4x_scale_silu (y and its f16), 1 / 16 / 64 tokens\n", s.tensor);
     }
+    {  // the pair as an mm_batch (each its own x16: the same one here), at 1 and kT tokens: mm_run2's bits
+      const MmPart parts[2] = {{w, r0, x16, y, rows}, {w1, r1, x16, y2, r1}};
+      CHECK(mm_batch(t->type, cols, parts, 2, kT, nullptr));
+      CHECK(host_of(y, (size_t) kT * rows) == p0 && host_of(y2, (size_t) kT * r1) == p1);
+    }
     CHECK(!mm_run2(t->type, w, r0, y, rows, nullptr, r1, y2, r1, cols, x16, kT, nullptr));
     CHECK(!mm_run2(t->type, w, r0, y, rows, w1, r1, y2, r1 - 1, cols, x16, kT, nullptr));  // y1's rows too short
     CHECK(hipFree(y2) == hipSuccess);
@@ -302,6 +315,23 @@ static void shape(const Gguf* g, const Shape& s) {
           mm_run(QUANT_Q5_KR, wr, rows, cols, x16, 1, y1, rows, nullptr));
     CHECK(hipMemcpy(one.data(), y1, rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(std::memcmp(one.data(), &a[(size_t) 5 * rows], rows * 4) == 0);
+    {  // a prompt's step on the gemm (past 64 tokens; not at 64): its first 16 tokens' rows the 16's bits
+      CHECK(mm_gemm(QUANT_Q5_KR, rows, cols, kBig) && mm_gemm(13, rows, cols, kBig) && !mm_gemm(QUANT_Q5_KR, rows, cols, 64));
+      std::vector<float> big((size_t) kBig * cols);
+      for (size_t i = 0; i < big.size(); i++) big[i] = uniform();
+      std::memcpy(big.data(), xh.data(), xh.size() * 4);
+      float *xb, *yb;
+      void* x16b;
+      CHECK(hipMalloc(&xb, big.size() * 4) == hipSuccess && hipMalloc(&yb, (size_t) kBig * rows * 4) == hipSuccess &&
+            hipMalloc(&x16b, (size_t) kBig * cols * 2) == hipSuccess);
+      CHECK(hipMemcpy(xb, big.data(), big.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+      CHECK(mm_x16(xb, cols, kBig, cols, x16b, over, nullptr) &&
+            mm_run(QUANT_Q5_KR, wr, rows, cols, x16b, kBig, yb, rows, nullptr));
+      std::vector<float> yh((size_t) kT * rows);
+      CHECK(hipMemcpy(yh.data(), yb, yh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      CHECK(std::memcmp(yh.data(), a.data(), yh.size() * 4) == 0);
+      CHECK(hipFree(xb) == hipSuccess && hipFree(yb) == hipSuccess && hipFree(x16b) == hipSuccess);
+    }
     CHECK(mv_strided(13, w, rows, cols, x, cols, 3, y, rows, nullptr) &&
           hipMemcpy(ref.data(), y, (size_t) 3 * rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(mv_strided(QUANT_Q5_KR, wr, rows, cols, x, cols, 3, y, rows, nullptr) &&
@@ -466,6 +496,64 @@ static void bf16_case() {
   }
 }
 
+// mm_batch (a decode's projections in one launch): three BF16 matrices of different rows, each on its own x16 -
+// every part's rows the bits mm_run gives it alone at 1 .. 64 tokens (one launch) and past (each its own: the gemm's)
+// at Inkling-2-Mini's widths; a part's rows not whole tiles, no parts or past MM_BATCH_MAX refused
+static void batch_case() {
+  constexpr uint32_t kParts = 3, kRows[kParts] = {96, 32, 64}, kN = 300;
+  for (uint32_t cols : {64u, 2304u, 3072u}) {
+    void* w[kParts];
+    void* x16[kParts];
+    float* y[kParts];
+    float* yr;
+    int32_t* ovf;
+    for (uint32_t p = 0; p < kParts; p++) {
+      std::vector<uint16_t> wh((size_t) kRows[p] * cols);
+      for (auto& v : wh) {
+        const float f = uniform() * 0.25f;
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        v = (uint16_t) (u >> 16);
+      }
+      std::vector<float> xh((size_t) kN * cols);
+      for (float& v : xh) v = uniform();
+      float* x;
+      CHECK(hipMalloc(&w[p], wh.size() * 2) == hipSuccess && hipMalloc(&x, xh.size() * 4) == hipSuccess &&
+            hipMalloc(&x16[p], (size_t) kN * cols * 2) == hipSuccess &&
+            hipMalloc(&y[p], (size_t) kN * kRows[p] * 4) == hipSuccess);
+      CHECK(hipMemcpy(w[p], wh.data(), wh.size() * 2, hipMemcpyHostToDevice) == hipSuccess &&
+            hipMemcpy(x, xh.data(), xh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+      CHECK(hipMalloc(&ovf, 4) == hipSuccess && hipMemset(ovf, 0, 4) == hipSuccess);
+      CHECK(mm_x16(x, cols, kN, cols, x16[p], ovf, nullptr));
+      CHECK(hipFree(x) == hipSuccess && hipFree(ovf) == hipSuccess);
+    }
+    CHECK(hipMalloc(&yr, (size_t) kN * 96 * 4) == hipSuccess);
+    int checked = 0;
+    for (uint32_t n : {1u, 5u, 16u, 33u, 64u, 65u, kN}) {
+      MmPart parts[kParts];
+      for (uint32_t p = 0; p < kParts; p++) parts[p] = {w[p], kRows[p], x16[p], y[p], kRows[p]};
+      CHECK(mm_batch(30, cols, parts, kParts, n, nullptr));
+      for (uint32_t p = 0; p < kParts; p++) {
+        CHECK(mm_run(30, w[p], kRows[p], cols, x16[p], n, yr, kRows[p], nullptr));
+        const std::vector<float> got = host_of(y[p], (size_t) n * kRows[p]), want = host_of(yr, (size_t) n * kRows[p]);
+        CHECK(std::memcmp(got.data(), want.data(), got.size() * 4) == 0 ||
+              (std::printf("  %u columns, %u tokens: part %u not mm_run's bits\n", cols, n, p), false));
+        checked++;
+      }
+    }
+    MmPart bad[MM_BATCH_MAX + 1];
+    for (auto& b : bad) b = {w[0], kRows[0], x16[0], y[0], kRows[0]};
+    CHECK(!mm_batch(30, cols, bad, 0, 1, nullptr) && !mm_batch(30, cols, bad, MM_BATCH_MAX + 1, 1, nullptr));
+    bad[1].rows = 40;  // not whole tiles
+    CHECK(!mm_batch(30, cols, bad, 2, 1, nullptr));
+    std::printf("  mm_batch BF16 %4u columns: %d parts (3 matrices, 1 .. %u tokens) each mm_run's bits; refusals\n",
+                cols, checked, kN);
+    for (uint32_t p = 0; p < kParts; p++)
+      CHECK(hipFree(w[p]) == hipSuccess && hipFree(x16[p]) == hipSuccess && hipFree(y[p]) == hipSuccess);
+    CHECK(hipFree(yr) == hipSuccess);
+  }
+}
+
 int main() {
   std::printf("[test_mm_gpu] start\n");
   char path[512];
@@ -483,6 +571,7 @@ int main() {
   std::printf("  refusals: F32 and BF16 (the matvec's), rows not a multiple of 16, %d tokens\n", MM_MAX_TOKENS + 1);
   attn_x16();
   bf16_case();
+  batch_case();
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
@@ -529,6 +618,14 @@ int main() {
     gguf_destroy(q);
   } else {
     std::printf("  DeepSeek UD-IQ2_XXS's shapes skipped: no %s\n", qpath);
+  }
+  std::snprintf(qpath, sizeof qpath, kHy4, std::getenv("HOME") ? std::getenv("HOME") : "");
+  if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_create(qpath, err)) {
+    std::printf("  Hy4-flash (Q8_0 short rows):\n");
+    for (const Shape& sh : kHy4Shapes) shape(q, sh);
+    gguf_destroy(q);
+  } else {
+    std::printf("  Hy4-flash's shapes skipped: no %s\n", qpath);
   }
   std::snprintf(qpath, sizeof qpath, kRef, std::getenv("HOME") ? std::getenv("HOME") : "");
   if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_header(qpath, err)) {

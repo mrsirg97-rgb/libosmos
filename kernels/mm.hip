@@ -328,13 +328,14 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
   return hipGetLastError() == hipSuccess;
 }
 
-// a prompt's matrix on mm.h's gemm_kernel: Q6_K and Q8_0 (both models' dense), rows of at least kShortCols (tile's
-// shape, every partition a slab) and more than 64 tokens (CT 8's: below, tile's own); the same bits as tile at every
-// count (test_mm_gpu: 2,048, 64 and 33 tokens against 16). 64 rows x 256 tokens a block, a wave 32 x 64: 10240 x
+// a prompt's matrix on mm.h's gemm_kernel: Q6_K, Q8_0 and Q5_K (the models' dense), on its rows' own shape (tile's: Short
+// below kShortCols; every partition a slab) and more than 64 tokens (CT 8's: below, tile's own); the same bits as tile
+// at every count (test_mm_gpu: 2,048, 64 and 33 tokens against 16; Hy4-flash's 1,024 / 1,536-column Q8_0 rows). 64 rows x 256 tokens a block, a wave 32 x 64: 10240 x
 // 2560 Q6_K at 2,048 tokens 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 (low-power; 64 x 128: 22.8, 32 x 256: 22.4,
 // 128 x 128: past the LDS; without the second slab's LDS 25.5)
 template <quant::Type T>
-constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4 || T == quant::kBF16;
+constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4 || T == quant::kBF16 ||
+                       T == quant::kQ5_K || T == quant::kQ5_KR;  // (Q5_K: Inkling-2-Small's dense, 2,048 tokens 1,058 -> 1,012 ms)
 constexpr int kGemmRm = 2, kGemmRn = 4, kGemmWr = 2, kGemmWc = 4;
 // a type's gemm blocks (kGemm*'s but where measured): its rows and tokens a wave in tiles, its waves' grid
 template <quant::Type T> struct GemmPlan { static constexpr int Rm = kGemmRm, Rn = kGemmRn, Wr = kGemmWr, Wc = kGemmWc; };
@@ -345,8 +346,12 @@ constexpr uint32_t kGemmMinTokens = 4 * mm::kTile;  // past it: CT 8's counts
 
 template <quant::Type T, class S = typename Tuned<T>::S>
 bool gemm_takes(const Mats& m, uint32_t cols, uint32_t n) {
-  return kGemm<T> && n > kGemmMinTokens && !odd<T>(cols) && cols >= kShortCols &&
-         cols / S::kSlab >= (uint32_t) S::kWaves;
+  return kGemm<T> && n > kGemmMinTokens && !odd<T>(cols) && cols / S::kSlab >= (uint32_t) S::kWaves;
+}
+// the gemm on a row's own shape (the tile's: a short row's Short, else Tuned) - its sums' order at every count
+template <quant::Type T>
+bool gemm_on(const Mats& m, uint32_t cols, uint32_t n) {
+  return cols < kShortCols ? gemm_takes<T, typename Short<T>::S>(m, cols, n) : gemm_takes<T>(m, cols, n);
 }
 
 template <quant::Type T, class S = typename Tuned<T>::S>
@@ -370,7 +375,9 @@ bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStr
       return launch_shape<T, CT, S9>(m, cols, x16, n, s);
     }
   if constexpr (kGemm<T>)
-    if (gemm_takes<T>(m, cols, n)) return launch_gemm<T>(m, cols, x16, n, s);
+    if (gemm_on<T>(m, cols, n))
+      return cols < kShortCols ? launch_gemm<T, typename Short<T>::S>(m, cols, x16, n, s)
+                               : launch_gemm<T>(m, cols, x16, n, s);
   if (odd<T>(cols)) return launch_shape<T, CT, typename Odd<T>::S>(m, cols, x16, n, s);
   return cols < kShortCols ? launch_shape<T, CT, typename Short<T>::S>(m, cols, x16, n, s)
                            : launch_shape<T, CT, typename Tuned<T>::S>(m, cols, x16, n, s);
@@ -407,7 +414,7 @@ bool silu_ct(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint3
              mm::Silu ep, hipStream_t s) {
   const Mats m = {{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}};
   if constexpr (kGemm<T>)
-    if (gemm_takes<T>(m, cols, n)) return false;
+    if (gemm_on<T>(m, cols, n)) return false;
   if (odd<T>(cols)) return silu_shape<T, CT, typename Odd<T>::S>(w, rows, cols, x16, n, y, ys, ep, s);
   return cols < kShortCols ? silu_shape<T, CT, typename Short<T>::S>(w, rows, cols, x16, n, y, ys, ep, s)
                            : silu_shape<T, CT, typename Tuned<T>::S>(w, rows, cols, x16, n, y, ys, ep, s);
@@ -423,6 +430,40 @@ bool silu_launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, u
     case 2: return silu_ct<T, 2>(w, rows, cols, x16, n, y, ys, ep, s);
     case 4: return silu_ct<T, 4>(w, rows, cols, x16, n, y, ys, ep, s);
     default: return silu_ct<T, Tuned<T>::kMaxCt>(w, rows, cols, x16, n, y, ys, ep, s);
+  }
+}
+
+// mm_batch's launch: the shape launch_ct takes at its counts (n <= kGemmMinTokens: the tile's, never the gemm)
+template <quant::Type T, int CT, typename S>
+bool batch_shape(const mm::Parts& p, uint32_t count, uint32_t rows, uint32_t cols, uint32_t n, hipStream_t s) {
+  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::batch_kernel<T, S, CT><<<dim3(rows / mm::kTile, count, z), mm::kWave * S::kWaves, 0, s>>>(p, cols, n);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T, int CT>
+bool batch_ct(const mm::Parts& p, uint32_t count, uint32_t rows, uint32_t cols, uint32_t n, hipStream_t s) {
+  if constexpr (T == quant::kBF16)
+    if (bf16_nine(cols)) return batch_shape<T, CT, Bf16Nine::S>(p, count, rows, cols, n, s);
+  if (odd<T>(cols)) return batch_shape<T, CT, typename Odd<T>::S>(p, count, rows, cols, n, s);
+  return cols < kShortCols ? batch_shape<T, CT, typename Short<T>::S>(p, count, rows, cols, n, s)
+                           : batch_shape<T, CT, typename Tuned<T>::S>(p, count, rows, cols, n, s);
+}
+
+template <quant::Type T>
+bool batch(const mm::Parts& p, uint32_t count, uint32_t cols, uint32_t n, hipStream_t s) {
+  uint32_t rows = 0;
+  for (uint32_t i = 0; i < count; i++) {  // launch()'s refusals, each part
+    if (!p.rows[i] || p.rows[i] % mm::kTile || (n > 1 && p.ys[i] < p.rows[i]) || !p.w[i] || !p.x16[i]) return false;
+    rows = p.rows[i] > rows ? p.rows[i] : rows;
+  }
+  const int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  if (cols % quant::Block<T>::values || cols % slab) return false;
+  switch (col_tiles<T>(n)) {
+    case 1: return batch_ct<T, 1>(p, count, rows, cols, n, s);
+    case 2: return batch_ct<T, 2>(p, count, rows, cols, n, s);
+    case 4: return batch_ct<T, 4>(p, count, rows, cols, n, s);
+    default: return batch_ct<T, Tuned<T>::kMaxCt>(p, count, rows, cols, n, s);
   }
 }
 
@@ -474,6 +515,26 @@ extern "C" bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols) {
     FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kQ4_0) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K) FITS(kQ3_K) FITS(kQ4_K) FITS(kQ5_1)
     FITS(kMXFP4) FITS(kMXFP8) FITS(kNVFP4) FITS(kBF16)
 #undef FITS
+    default: return false;
+  }
+}
+
+template <quant::Type T>
+bool gemm_runs(uint32_t rows, uint32_t cols, uint32_t n) {
+  const Mats m = {{nullptr, nullptr}, {rows, 0}, {nullptr, nullptr}, {rows, 0}};
+  if (!fits<T>(rows, cols) || n > MM_MAX_TOKENS) return false;
+  if constexpr (T == quant::kBF16)
+    if (bf16_nine(cols)) return gemm_takes<T, Bf16Nine::S>(m, cols, n);
+  if constexpr (kGemm<T>) return gemm_on<T>(m, cols, n);
+  return false;
+}
+
+extern "C" bool mm_gemm(uint32_t type, uint32_t rows, uint32_t cols, uint32_t n) {
+  switch (type) {
+#define GEMM(t) \
+  case quant::t: return gemm_runs<quant::t>(rows, cols, n);
+    GEMM(kQ8_0) GEMM(kQ5_K) GEMM(kQ5_KR) GEMM(kQ6_K) GEMM(kNVFP4) GEMM(kBF16)
+#undef GEMM
     default: return false;
   }
 }
@@ -541,7 +602,7 @@ bool gm_ct(const void* w, uint32_t cols, const void* x16, uint32_t n, const mm::
   const uint32_t rows = gm.hc * gm.dim;
   const Mats m = {{w, nullptr}, {rows, 0}, {nullptr, nullptr}, {rows, 0}};
   if constexpr (kGemm<T>)
-    if (gemm_takes<T>(m, cols, n)) return false;
+    if (gemm_on<T>(m, cols, n)) return false;
   if (odd<T>(cols)) return gm_shape<T, CT, typename Odd<T>::S>(w, cols, x16, n, gm, s);
   return cols < kShortCols ? gm_shape<T, CT, typename Short<T>::S>(w, cols, x16, n, gm, s)
                            : gm_shape<T, CT, typename Tuned<T>::S>(w, cols, x16, n, gm, s);
@@ -575,6 +636,33 @@ extern "C" bool mm_run_gated_mean(uint32_t type, const void* w, uint32_t hc, uin
 extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
                        float* y, uint32_t ys, void* stream) {
   return run(type, Mats{{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}}, cols, x16, n, (hipStream_t) stream);
+}
+
+extern "C" bool mm_batch(uint32_t type, uint32_t cols, const MmPart* parts, uint32_t count, uint32_t n,
+                         void* stream) {
+  static_assert(MM_BATCH_MAX == mm::kBatch && MM_BATCH_TOKENS == kGemmMinTokens, "mm.h's batch: its parts, its counts");
+  if (!parts || !count || count > MM_BATCH_MAX || !n || n > MM_MAX_TOKENS) return false;
+  const hipStream_t s = (hipStream_t) stream;
+  if (n > kGemmMinTokens) {  // (the gemm's counts: each part its own launch, the gemm where it takes it)
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < count; i++)
+      ok = run(type, Mats{{parts[i].w, nullptr}, {parts[i].rows, 0}, {parts[i].y, nullptr}, {parts[i].ys, 0}}, cols,
+               parts[i].x16, n, s);
+    return ok;
+  }
+  mm::Parts p = {};
+  for (uint32_t i = 0; i < count; i++)
+    p.w[i] = (const uint8_t*) parts[i].w, p.x16[i] = (const _Float16*) parts[i].x16, p.y[i] = parts[i].y,
+    p.rows[i] = parts[i].rows, p.ys[i] = parts[i].ys;
+  switch (type) {
+#define BATCH(t) \
+  case quant::t: return batch<quant::t>(p, count, cols, n, s);
+    BATCH(kQ8_0) BATCH(kQ5_K) BATCH(kQ5_KR) BATCH(kQ6_K) BATCH(kIQ1_M) BATCH(kIQ2_XXS) BATCH(kIQ2_XS) BATCH(kIQ1_S)
+    BATCH(kIQ2_S) BATCH(kIQ3_XXS) BATCH(kQ2_K) BATCH(kQ3_K) BATCH(kIQ4_NL) BATCH(kQ4_0) BATCH(kIQ4_XS) BATCH(kQ2_0)
+    BATCH(kNVFP4) BATCH(kQ4_K) BATCH(kQ5_1) BATCH(kMXFP4) BATCH(kMXFP8) BATCH(kBF16)
+#undef BATCH
+    default: return false;
+  }
 }
 
 extern "C" bool mm_run2(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,

@@ -152,6 +152,9 @@ pack's 256K and 4,096-token steps, its Q5_K drafter):
 | Prompt, 8,192 / 65,536 / 253,952 tokens | **355** / 302 / 185 tok/s |
 | KL against Inkling-2-Small in BF16 (Wiki, 10,239 tokens) | 0.197, top-1 85.8% |
 
+0.12.3 against 0.12.2 (the `performance` profile, osmos-serve, the same answers bit for bit): an 8,448-token prompt
+29.7 -> 27.6 s, 64 tokens after it 7.8 -> 7.6 s.
+
 Every token is the bits of the same tokens read as a prompt, drafted or not, at any steps. 87 GB of the 143 GB of
 experts (61%) stay in memory and the rest stream from the SSD; a full-attention layer's keys are cached Q8 and its
 values Q5 (KL +0.001 against f16), so a 256K context's cache is 3.5 GB. Drafted runs vary by about ±8% from run to
@@ -171,6 +174,9 @@ and its own DSpark drafter (Q8_0). osmos 0.12.0, the `performance` profile, osmo
 | Decode after a 131K prompt | **24.2** / 17.0 tok/s |
 | Prompt, 3K / 37K / 131K tokens (plain) | **1,001** / **1,045** / 775 tok/s |
 | KL against upstream llama.cpp's own run of the release (64 / 2,048 tokens) | 2.9e-3 / 1.1e-3 (its own GPU against CPU: 3.0e-3 / 1.2e-3) |
+
+0.12.3 against 0.12.2 (the `performance` profile, ink2_engine, every row's logits the same bits): decode 25.0 -> 27.5
+tok/s plain, an 8K prompt 1,167 -> 1,226 tok/s.
 
 Each pass of a looped layer keeps its own cache (48 slots for 24 layers); a full-attention layer's keys and values
 are cached Q8 (the pack's `kv_q8`), 17 KiB a token, so a 1M context's cache is 17 GiB beside the 19.6 GB model.
@@ -218,6 +224,9 @@ KV cache and indexer picks rather than keeping its own. osmos 0.11.0, the `perfo
 | Prompt, 913K tokens (a book, its needle found) | 45 minutes |
 | GPU memory at 1M context (weights, drafter, a conversation's cache) | ~98 GiB |
 | KL against Tencent's reference (64 tokens; F32 cache / the Q8_0 cache osmos runs) | 1e-11 / 0.033 |
+
+0.12.3 against 0.12.2 (the `performance` profile, hy4_run, its logits the same bits): a 4K prompt ~467 -> ~498 tok/s
+(~390 -> ~440 at `low-power`, where the host's share is larger); decode unchanged.
 
 The context costs ~11 KB a token: MLA's latent rows Q8_0 (the rope part F32, as vLLM's `fp8_ds_mla`), the
 indexer's keys a small ring, its pooled groups F32 - the Q8_0 cache's teacher-forced NLL over 8K tokens no worse than
@@ -354,10 +363,14 @@ no-drafter speed here, and its DeepSeek engine is not shipped for Strix Halo on 
 
 ## Requirements
 
-- A Ryzen AI MAX+ 395 (gfx1151) with 128 GB, and Linux with ROCm 7.x (developed on HIP 7.15, kernel 7.2, gcc 14).
-  The optional CPU lane needs AVX-512 VNNI and VBMI.
-- GPU memory raised to ~113 GiB: `options ttm pages_limit=29637704` in `/etc/modprobe.d/ttm.conf`. This is a system
-  setting, so it's yours to make.
+- A Ryzen AI MAX+ 395 (gfx1151), and Linux with ROCm 7.x (developed on HIP 7.15, kernel 7.2, gcc 14). The optional
+  CPU lane needs AVX-512 VNNI and VBMI.
+- GPU memory: every number here is from a 128 GB machine with its GPU memory raised to ~113 GiB (`options ttm
+  pages_limit=29637704` in `/etc/modprobe.d/ttm.conf`; a system setting, so it's yours to make). Less runs: each pack
+  needs what its engine builds before a conversation (measured: osmos1.7b and osmos-evo-1017 ~7 GiB, ud-iq1_m ~8,
+  osmos-evo-inkling ~21, inkling-2-mini ~23, qwen38-ud-iq3_xxs ~95, hy4-flash ~98), a conversation's cache on top
+  (inkling-2-mini: ~17 GiB at 1M tokens); past that the engine holds fewer experts and is slower. The installer checks
+  a pack's own need, and the measured machine's for a pack not measured.
 - The model on an NVMe SSD, on a filesystem that takes `O_DIRECT` reads (ext4, btrfs and xfs do; osmos refuses one that
   doesn't, and names it). The faster the SSD's random reads, the faster DeepSeek decodes. The numbers here are from a
   Micron 4600 on a PCIe 4.0 x4 link ("The machine", above).
