@@ -223,17 +223,20 @@ def versions_mode(a):
                                   text=True).stdout.strip() or versions.REPO
             ver = versions.latest(repo) if a.upgrade == "latest" else a.upgrade.lstrip("v")
             print(f"osmos {ver}:")
-            versions.build(h, ver, repo)
+            versions.build(h, ver, repo, dry=a.dry_run)
             print("rig:")
-            moved = versions.upgrade(a.rig_home, h, ver, a.rows)
-            print(f"  {len(moved)} row(s) moved; rig starts them on {ver} at their next launch (a running one: restart "
-                  f"it)" if moved else "  no row moved (--rows names them, or all)")
+            moved = versions.upgrade(a.rig_home, h, ver, a.rows, dry=a.dry_run)
+            if a.dry_run:  # (0.12.2: --upgrade --dry-run had built the version and moved the rows)
+                print(f"  {len(moved)} row(s) would move to {ver} - a dry run, nothing built or written")
+            else:
+                print(f"  {len(moved)} row(s) moved; rig starts them on {ver} at their next launch (a running one: "
+                      f"restart it)" if moved else "  no row moved (--rows names them, or all)")
         if a.rollback:
             print("rig:")
-            versions.rollback(a.rig_home, h)
+            versions.rollback(a.rig_home, h, dry=a.dry_run)
         if a.prune:
             print(f"versions no rig row runs ({h}):")
-            versions.prune(a.rig_home, h, a.yes)
+            versions.prune(a.rig_home, h, a.yes and not a.dry_run)
     except (versions.VersionError, rig.RigError) as x:
         raise SystemExit(str(x))
     return 0

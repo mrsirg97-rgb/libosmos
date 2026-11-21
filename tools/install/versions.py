@@ -71,9 +71,10 @@ def latest(repo, run=subprocess.run):
     return max(tags, key=key)
 
 
-def build(h, ver, repo, run=subprocess.run, log=print):
+def build(h, ver, repo, run=subprocess.run, log=print, dry=False):
     """<h>/<ver> built from its tag: kept as it is when its osmos-api already says it is that version, else cloned
-    beside it and built, its osmos-api's --version checked, then moved into place (nothing half-built left there)"""
+    beside it and built, its osmos-api's --version checked, then moved into place (nothing half-built left there).
+    dry: what it would do said, nothing cloned, built or written (0.12.2: --upgrade's --dry-run built it)"""
     at = os.path.join(h, ver)
     api = os.path.join(at, "bin", "osmos-api")
 
@@ -86,6 +87,9 @@ def build(h, ver, repo, run=subprocess.run, log=print):
     if os.path.exists(at):
         raise VersionError(f"{at}: there, but not osmos {ver}'s build - moved aside by hand first")
     tmp = at + ".osmos-tmp"
+    if dry:
+        log(f"  {ver}: would clone v{ver} and build it ({at}) - a dry run, nothing built")
+        return at
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(h, exist_ok=True)
     log(f"  {ver}: cloning v{ver} and building it ({tmp})")
@@ -162,9 +166,15 @@ def pick(rows, which, vs):
     return list(on.get(newest, []))
 
 
-def upgrade(rig_home, h, ver, which=None, log=print):
+def frozen(cfg, ver):
+    """the path freeze() writes (osmos.<ver>.json beside cfg), not written"""
+    return os.path.join(os.path.dirname(cfg), f"osmos.{ver}.json")
+
+
+def upgrade(rig_home, h, ver, which=None, log=print, dry=False):
     """rig's chosen rows moved to <h>/<ver> (built already: build()): each row's command alone changed, its config
-    frozen for both versions (the one it leaves, the one it takes); the move journaled. the rows moved"""
+    frozen for both versions (the one it leaves, the one it takes); the move journaled. the rows moved - dry: the
+    rows it would move, nothing written (no row, no frozen config, no journal)"""
     mpath = os.path.join(rig_home, "models.json")
     rows = rig._read(mpath, [])
     ids = pick(rows, which, installed(h))
@@ -179,12 +189,14 @@ def upgrade(rig_home, h, ver, which=None, log=print):
             log(f"  {r['id']}: on {ver} already")
             continue
         shared = os.path.join(os.path.dirname(cfg), "osmos.json")
-        was = f"{d}/bin/osmos-api --config {freeze(cfg, old)}{rest}"  # the row as it was, its config frozen
-        now = f"{api} --config {freeze(shared if os.path.exists(shared) else cfg, ver)}{rest}"
+        src = shared if os.path.exists(shared) else cfg
+        fz = (lambda c, v: frozen(c, v)) if dry else freeze  # noqa: E731
+        was = f"{d}/bin/osmos-api --config {fz(cfg, old)}{rest}"  # the row as it was, its config frozen
+        now = f"{api} --config {fz(src, ver)}{rest}"
         moves.append({"id": r["id"], "from": was, "to": now, "from_version": old})
         r["command"] = now
-        log(f"  {r['id']}: {old} -> {ver}")
-    if moves:
+        log(f"  {r['id']}: {old} -> {ver}" + (" (a dry run: not moved)" if dry else ""))
+    if moves and not dry:
         rig._write(mpath, rows)
         j = _read_journal(h)
         j.append({"when": time.strftime("%Y-%m-%dT%H:%M:%S"), "version": ver, "rows": moves})
@@ -192,7 +204,7 @@ def upgrade(rig_home, h, ver, which=None, log=print):
     return moves
 
 
-def rollback(rig_home, h, log=print):
+def rollback(rig_home, h, log=print, dry=False):
     """the last upgrade undone: each row it moved, still on the command it left, back to the one it had (its config
     the frozen one) - a row changed since left as it is, said so. the journal's last entry dropped"""
     j = _read_journal(h)
@@ -214,9 +226,10 @@ def rollback(rig_home, h, log=print):
             continue
         r["command"] = mv["from"]
         back.append(mv["id"])
-        log(f"  {mv['id']}: {last['version']} -> {mv['from_version']}")
-    rig._write(mpath, rows)
-    _write_json(_journal(h), j[:-1])
+        log(f"  {mv['id']}: {last['version']} -> {mv['from_version']}" + (" (a dry run: not moved)" if dry else ""))
+    if not dry:  # (dry: the rows it would move back, nothing written)
+        rig._write(mpath, rows)
+        _write_json(_journal(h), j[:-1])
     return back
 
 

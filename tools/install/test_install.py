@@ -1419,6 +1419,41 @@ class Versions(unittest.TestCase):
             with self.assertRaises(versions.VersionError):  # nothing left to roll back
                 versions.rollback(rig_home, h, log=lambda m: None)
 
+    def test_dry_run_writes_nothing(self):  # 0.12.2: --upgrade --dry-run built the version and moved the rows
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            mpath = os.path.join(rig_home, "models.json")
+            before = open(mpath, "rb").read()
+            ran = []
+            at = versions.build(h, "0.9.2", "repo", run=lambda *a, **k: ran.append(a), log=lambda m: None, dry=True)
+            self.assertEqual((ran, os.path.exists(at), os.path.exists(at + ".osmos-tmp")), ([], False, False))
+            moved = versions.upgrade(rig_home, h, "0.9.2", "all", log=lambda m: None, dry=True)
+            self.assertEqual(sorted(m["id"] for m in moved), ["new", "old"])  # what it would move, said
+            self.assertEqual(open(mpath, "rb").read(), before)  # but no row moved,
+            self.assertEqual(sorted(os.listdir(pack)), ["osmos.json"])  # no config frozen,
+            self.assertFalse(os.path.exists(os.path.join(h, "upgrades.json")))  # no journal
+            self.fake_build(h, "0.9.2")
+            versions.upgrade(rig_home, h, "0.9.2", log=lambda m: None)  # a real one, then its rollback dry
+            after, journal = open(mpath, "rb").read(), open(os.path.join(h, "upgrades.json"), "rb").read()
+            self.assertEqual(versions.rollback(rig_home, h, log=lambda m: None, dry=True), ["new"])
+            self.assertEqual((open(mpath, "rb").read(), open(os.path.join(h, "upgrades.json"), "rb").read()),
+                             (after, journal))
+
+    def test_dry_run_cli(self):  # the installer's own --upgrade --dry-run: the plan said, nothing built or written
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            mpath = os.path.join(rig_home, "models.json")
+            before = open(mpath, "rb").read()
+            p = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "osmos_install.py"),
+                                "--upgrade", "0.9.2", "--rows", "all", "--dry-run", "--rig-home", rig_home],
+                               capture_output=True, text=True, env=dict(os.environ, OSMOS_VERSIONS=h), timeout=120)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertIn("would clone v0.9.2", p.stdout)
+            self.assertIn("2 row(s) would move to 0.9.2", p.stdout)
+            self.assertEqual(open(mpath, "rb").read(), before)
+            self.assertEqual(sorted(os.listdir(h)), ["0.5.12", "0.9.1"])
+            self.assertEqual(sorted(os.listdir(pack)), ["osmos.json"])
+
     def test_a_fresh_rows_versioned(self):  # 0.10.1: --rig registers on <home>/<version>, so --upgrade moves it
         with tempfile.TemporaryDirectory() as d:
             h, rig_home, pack = self.layout(d)
