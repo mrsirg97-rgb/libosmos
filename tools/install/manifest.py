@@ -7,7 +7,8 @@ NPU kernels): release (its tag, vX.Y.Z), path (the asset's name), bytes, sha256 
 default; mtp: one GGUF, the model's MTP head; dfly: one safetensors, Hy4-flash's DFly2 as its release ships it), overlay (a file id or null), lsa (optional: a file id - latent sparse
 attention's maps, osmos.json's "lsa"), npu (optional: a release asset's id,
 a tarball of the NPU's kernels - a directory a format and kind), rig (its row's: max_tokens, reserve, efforts, effort -
-one of them - and aliases), settings. aliases (optional): {an old pack id: the pack it names now} - osmos-evo-a,
+one of them - and aliases), settings, gpu_gib (optional: the GPU memory its engine builds before a conversation,
+measured - the installer's need; without, host.GPU_GIB_MEASURED). aliases (optional): {an old pack id: the pack it names now} - osmos-evo-a,
 osmos-evo since 0.7.6.
 
 a derived file: made, not downloaded - derive {with: the converter, its inputs (file ids of published files), mode},
@@ -19,6 +20,7 @@ import json
 import re
 
 import overlay_q4x
+from host import GPU_GIB_MEASURED
 
 VERSION = 1
 DRAFTER_KINDS = ("dspark", "mtp", "dfly")
@@ -180,6 +182,8 @@ def check(m):
         for k in ("picks", "overlay", "lsa"):
             if p.get(k) is not None:
                 _ref(m, pid, k, p[k])
+        if "gpu_gib" in p and not (type(p["gpu_gib"]) is int and 0 < p["gpu_gib"] <= GPU_GIB_MEASURED):
+            raise ManifestError(f"pack {pid}: gpu_gib {p['gpu_gib']!r}: a measured start, 1 .. {GPU_GIB_MEASURED} GiB")
         if p.get("npu") is not None:
             _ref(m, pid, "npu", p["npu"])
             if "release" not in m["files"][p["npu"]]:

@@ -225,7 +225,7 @@
   "packs": {
     "osmos-evo-1017": {
       "title": "DeepSeek-V4.1-Flash-1017 osmos-evo-1017 (the default): halfway from UD-IQ1_M's quality to UD-IQ2_XXS's, faster than either, 1M context (shorter: --ctx 512k)", "quality": {"wiki_kld": 0.1578, "agent_kld": 0.0422},
-      "shards": ["evo-a2-1", "evo-a2-2", "evo-a2-3", "evo-a2-4"],
+      "shards": ["evo-a2-1", "evo-a2-2", "evo-a2-3", "evo-a2-4"], "gpu_gib": 7,
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-evo", "max_tokens": 262144, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "max",
@@ -243,7 +243,7 @@
     },
     "ud-iq1_m": {
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality), 1M context (shorter: --ctx 512k)", "quality": {"wiki_kld": 0.1895, "agent_kld": 0.0479},
-      "shards": ["ud-iq1_m-1", "ud-iq1_m-2", "ud-iq1_m-3", "ud-iq1_m-4"],
+      "shards": ["ud-iq1_m-1", "ud-iq1_m-2", "ud-iq1_m-3", "ud-iq1_m-4"], "gpu_gib": 8,
       "table": {"file": "engram-mxfp8", "slot": [5, 5]},
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-ud-m", "max_tokens": 262144, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "max",
@@ -261,7 +261,7 @@
     },
     "qwen38-ud-iq3_xxs": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS (drafted by its MTP head), 512K context (1M: --ctx 1m, YaRN: slightly weaker on short text)",
-      "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"],
+      "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"], "gpu_gib": 95,
       "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-iq3_xxs", "npu": "npu-qwen",
       "rig": {"id": "qwen3.8-flash-next", "max_tokens": 131072, "reserve": 131072, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
               "aliases": ["qwen"]},
@@ -278,7 +278,7 @@
     "osmos-evo-inkling": {
       "title": "Inkling-2-Small osmos-evo-inkling: UD-IQ1_S with its downs IQ2_S / IQ3_XXS and its attention and head Q5_K, drafted by its DSpark head, 256K context (longer: --ctx 1m)",
       "quality": {"wiki_kld": 0.1959},
-      "shards": ["evo-inkling-1", "evo-inkling-2", "evo-inkling-3", "evo-inkling-4", "evo-inkling-5"],
+      "shards": ["evo-inkling-1", "evo-inkling-2", "evo-inkling-3", "evo-inkling-4", "evo-inkling-5"], "gpu_gib": 21,
       "table": null,
       "picks": "picks-evo-inkling",
       "drafter": ["ink2-mtp"],
@@ -290,21 +290,21 @@
     },
     "osmos1.7b": {
       "title": "osmos1.7b (LFM3-1.7B, Q4_0; was vibes1.7b) with latent sparse attention, 512K context",
-      "shards": ["osmos1.7b-q4_0"],
+      "shards": ["osmos1.7b-q4_0"], "gpu_gib": 7,
       "table": null, "picks": null, "drafter": [], "overlay": null, "lsa": "osmos1.7b-lsa",
       "rig": {"id": "osmos1.7b", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "high"], "effort": "high", "aliases": ["vibes1.7b", "vibes"]},
       "settings": {"max_context": 524288, "max_tokens": 4096, "preserve_thinking": true}
     },
     "hy4-flash": {
       "title": "Tencent Hy4-flash (AngelSlim's Q3_K) with its DFly2 drafter, 1M context",
-      "shards": ["hy4-q3k-1", "hy4-q3k-2"],
+      "shards": ["hy4-q3k-1", "hy4-q3k-2"], "gpu_gib": 98,
       "table": null, "picks": null, "drafter": ["hy4-dfly2"], "drafter_kind": "dfly", "overlay": null,
       "rig": {"id": "hy4-flash", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "low", "high", "max"], "effort": "high", "aliases": ["hy4"]},
       "settings": {"max_context": 1048576, "max_tokens": 4096}
     },
     "inkling-2-mini": {
       "title": "Inkling-2-Mini (Thinking Machines' release: NVFP4 / MXFP8 experts, BF16 dense) with its DSpark head, every expert in memory, 1M context",
-      "shards": ["ink2-mini-1", "ink2-mini-2"],
+      "shards": ["ink2-mini-1", "ink2-mini-2"], "gpu_gib": 23,
       "table": null, "picks": null, "drafter": ["ink2-mini-mtp"], "drafter_kind": "mtp", "overlay": null,
       "rig": {"id": "inkling-2-mini", "max_tokens": 131072, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "high", "aliases": ["mini"]},
       "settings": {"max_context": 1048576, "max_tokens": 4096, "kv_q8": true}

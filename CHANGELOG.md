@@ -17,6 +17,11 @@ against 0.12.2's). Low-power, interleaved against 0.12.2:
 - **Inkling-2-Small prompts +5%** (an 8,448-token prompt through osmos-serve 32.9 -> 31.2 s; 64 tokens after it 8.6
   -> 8.35 s): the attention's bias as Mini's, its Q5_K projections on the prompt's gemm, its decode's projections in
   one launch.
+- **The installer on less GPU memory**: it refused every pack below ~113 GiB of GPU memory (the machine the packs were
+  measured on). Now each pack names its own start (packs.json's `gpu_gib`: what its engine builds before a
+  conversation, measured - inkling-2-mini 23 GiB, osmos-evo-inkling 21, osmos1.7b and osmos-evo-1017 7, ...) and the
+  installer refuses only below it; under 113 it says the pack runs with fewer experts resident, slower. A pack never
+  measured still needs 113. (A community request: a 64 GB machine had to edit host.py to install.)
 - At the `performance` profile (the same tools, against 0.12.2): Hy4-flash's 4K prompt ~467 -> ~498 tok/s (the
   host's routing a smaller share with the CPU's clocks up), Mini's decode 25.0 -> 27.5 tok/s and 8K prompt 1,167 ->
   1,226, Small's 8,448-token prompt 29.7 -> 27.6 s.

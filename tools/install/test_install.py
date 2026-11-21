@@ -872,6 +872,47 @@ class DerivedChain(unittest.TestCase):
 
 
 class Host(unittest.TestCase):
+    def test_gpu_memory_by_the_pack(self):
+        """the GPU's mappable memory against the packs': below a pack's measured start refused (ttm's line to raise
+        it), under GPU_GIB_MEASURED a pass with its cost named, a pack never measured below it the old refusal"""
+        with tempfile.TemporaryDirectory() as d:
+            limit = os.path.join(d, "pages_limit")
+            def at(gib, need):
+                with open(limit, "w") as f:
+                    f.write(str(int(gib * (1 << 30) // host.PAGE)))
+                return host.gpu_memory(need, limit)
+            ok, why = at(32, 40)
+            self.assertFalse(ok)
+            self.assertIn("pages_limit=", why)                            # how to raise it, at the pack's need
+            self.assertIn(str(40 * (1 << 30) // host.PAGE), why)
+            ok, why = at(48, 40)
+            self.assertTrue(ok)
+            self.assertIn("slower", why)                                  # under the measured: said, not refused
+            ok, why = at(120, 40)
+            self.assertTrue(ok)
+            self.assertNotIn("slower", why)
+            self.assertFalse(at(64, None)[0])                             # a pack never measured: GPU_GIB_MEASURED
+            self.assertTrue(at(host.GPU_GIB_MEASURED, None)[0])
+            self.assertFalse(host.gpu_memory(40, os.path.join(d, "none"))[0])  # unreadable: refused
+
+    def test_pack_gpu_gib(self):
+        """osmos_install's need: the largest of the packs' gpu_gib, an unmeasured pack GPU_GIB_MEASURED"""
+        m = {"packs": {"a": {"gpu_gib": 23}, "b": {"gpu_gib": 7}, "c": {}}}
+        self.assertEqual(osmos_install.gpu_need(m, ["a", "b"]), 23)
+        self.assertEqual(osmos_install.gpu_need(m, ["b"]), 7)
+        self.assertEqual(osmos_install.gpu_need(m, ["b", "c"]), host.GPU_GIB_MEASURED)
+
+    def test_manifest_gpu_gib(self):
+        """the shipped manifest's gpu_gib each a measured start under GPU_GIB_MEASURED; a bad one refused"""
+        m = manifest.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs.json"))
+        self.assertEqual(m["packs"]["inkling-2-mini"]["gpu_gib"], 23)
+        for bad in (0, -1, "23", host.GPU_GIB_MEASURED + 1):
+            b = json.loads(json.dumps(m))
+            b["packs"]["inkling-2-mini"]["gpu_gib"] = bad
+            with self.assertRaises(manifest.ManifestError) as e:
+                manifest.check(b)
+            self.assertIn("gpu_gib", str(e.exception))
+
     def test_tools_named_before_anything_runs(self):
         have = {"git", "make", "gcc", "hipcc", "hf"}
         which = lambda n: f"/usr/bin/{n}" if n in have else None          # noqa: E731
