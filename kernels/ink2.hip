@@ -702,8 +702,11 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
 #undef FSW
     return false;
   }
-  static const int rt = std::getenv("INK2_FA_RT") ? std::atoi(std::getenv("INK2_FA_RT")) : kFaRowTiles;
-  const uint32_t R = rt == 1 || rt == 2 || rt == 4 ? (uint32_t) rt : kFaRowTiles;
+  static const int rt = std::getenv("INK2_FA_RT") ? std::atoi(std::getenv("INK2_FA_RT")) : 0;  // (0: the group's)
+  // a block's waves G R: Mini's 3 heads a KV head 8 row tiles (24 waves, Small's 6 x 4) - every key tile decoded once
+  // for twice the rows (HEADS=24 PREFILL=1 ink2_fabench, low-power, 2026-11-20: 512K keys 920 -> 684 us a token, 128K
+  // 221 -> 166); the tiles a query's keys are cut into are the same in any block, so R changes no bit (DUMP: 1, 2, 4, 8)
+  const uint32_t R = rt == 1 || rt == 2 || rt == 4 || rt == 8 ? (uint32_t) rt : G == 3 ? 8u : kFaRowTiles;
   const dim3 grid_fa((n_tok + kFaTile * R - 1) / (kFaTile * R), a->kv_heads);
 #define FA(g, r)                                                                                                    \
   if (G == g && R == r) {                                                                                           \
@@ -712,7 +715,7 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
     return ok();                                                                                                    \
   }
   FA(1, 1) FA(2, 1) FA(3, 1) FA(4, 1) FA(6, 1) FA(8, 1) FA(1, 2) FA(2, 2) FA(3, 2) FA(4, 2) FA(6, 2) FA(8, 2) FA(1, 4)
-  FA(2, 4) FA(3, 4) FA(4, 4) FA(6, 4)
+  FA(2, 4) FA(3, 4) FA(4, 4) FA(6, 4) FA(3, 8)
 #undef FA
   return false;
 }

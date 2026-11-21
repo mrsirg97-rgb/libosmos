@@ -1,11 +1,14 @@
 // ink2_fabench: the prompt attention's time - ink2_fa (WMMA) against ink2_attn (F32, a block a token and head) on
 // random q, k, v at Inkling's shapes, a full layer (causal over all) and a sliding one (window 1,024), T tokens.
 //   ink2_fabench [T ...]   (default 4096 16384)
+//   HEADS=n: the query heads (default Small's 48; Mini's 24); DUMP=path: PREFILL's outputs written (path.T.kind)
 //   DECODE=1: a decode's attention instead - one query over T keys stored f16 (ink2_fa16, the engine's), 20 calls
 #include <hip/hip_runtime.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -17,9 +20,10 @@ extern "C" {
     if (!(x)) std::fprintf(stderr, "failed: %s\n", #x), std::exit(1);   \
   } while (0)
 
+static uint64_t g_rng = 1017;  // the inputs' own generator: std::rand is reseeded by the HIP runtime's start
 static float* rnd(size_t n, float s) {
   std::vector<float> h(n);
-  for (auto& x : h) x = s * ((float) std::rand() / RAND_MAX - 0.5f);
+  for (auto& x : h) g_rng = g_rng * 6364136223846793005ull + 1442695040888963407ull, x = s * ((float) (g_rng >> 40) / 16777216.0f - 0.5f);
   float* d;
   CHECK(hipMalloc(&d, n * 4) == hipSuccess && hipMemcpy(d, h.data(), n * 4, hipMemcpyHostToDevice) == hipSuccess);
   return d;
@@ -29,7 +33,8 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> Ts;
   for (int i = 1; i < argc; i++) Ts.push_back((uint32_t) std::atoi(argv[i]));
   if (Ts.empty()) Ts = {4096, 16384};
-  const uint32_t H = 48, KV = 8, D = 128, R = 16, E = 1024;
+  const uint32_t H = std::getenv("HEADS") ? (uint32_t) std::atoi(std::getenv("HEADS")) : 48, KV = 8, D = 128, R = 16,
+                 E = 1024;  // HEADS: the query heads (Small's 48, Mini's 24: 6 or 3 a KV head)
   if (std::getenv("DECODE")) {
     for (uint32_t T : Ts)
       for (int full = 1; full >= 0; full--) {
@@ -111,6 +116,29 @@ int main(int argc, char** argv) {
         hipEventElapsedTime(&ms, a, b);
         std::printf("prefill %7u keys %-5s %9.2f ms a 4,096-token step   %6.1f us a token\n", T, f ? "f16" : "q8q5",
                     ms / 5, ms / 5 * 1000 / n);
+        if (std::getenv("DET")) {  // the same call twice in one process: the same bytes? and the inputs' checksum
+          std::vector<float> h1((size_t) n * H * D), h2(h1.size()), qh((size_t) n * H * D);
+          CHECK(call() && hipMemcpy(h1.data(), out, h1.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+          CHECK(call() && hipMemcpy(h2.data(), out, h2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+          auto sum = [](const float* d, size_t m) {
+            std::vector<float> x(m);
+            CHECK(hipMemcpy(x.data(), d, m * 4, hipMemcpyDeviceToHost) == hipSuccess);
+            double c = 0;
+            for (float y : x) c += y;
+            return c;
+          };
+          std::printf("  in-process repeat %s; checksums q %.9g k %.9g v %.9g rel %.9g sink %.9g rp %.9g\n",
+                      std::memcmp(h1.data(), h2.data(), h1.size() * 4) ? "DIFFERENT" : "the same",
+                      sum(q, qh.size()), sum(k, (size_t) T * KV * D), sum(v, (size_t) T * KV * D),
+                      sum(rel, (size_t) n * H * R), sum(sink, (size_t) n * H), sum(rp, (size_t) R * E));
+        }
+        if (const char* dump = std::getenv("DUMP")) {  // the output's bytes (a shape's bits against another's: cmp)
+          std::vector<float> h((size_t) n * H * D);
+          CHECK(hipMemcpy(h.data(), out, h.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+          FILE* o = std::fopen((std::string(dump) + "." + std::to_string(T) + (f ? ".f16" : ".q8q5")).c_str(), "wb");
+          CHECK(o && std::fwrite(h.data(), 4, h.size(), o) == h.size());
+          std::fclose(o);
+        }
       }
       for (void* p : {(void*) q, (void*) k, (void*) v, (void*) rel, (void*) sink, (void*) rp, (void*) out, (void*) k8,
                       (void*) v5, (void*) k16, (void*) v16})
