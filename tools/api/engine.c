@@ -74,9 +74,10 @@ static void run_line(Run *r, const char *what, const char *l)
     pthread_mutex_unlock(&r->mu);
     /* a request's prompt: what it reused and from where, what it read (0.11.3: a long wait's cause in the log -
        held: the conversation as kept; rollback, prompt-point, user-point: back to there; slot: a kept one taken
-       back; none: read whole) */
-    fprintf(stderr, "osmos-api: request %lld: a %u-token prompt, %u reused (%s), %u read in %.1f s\n", rid, total,
-            reused, via, total > reused ? total - reused : 0, ms / 1e3);
+       back; none: read whole) - a line a step, how far it is (held: the tokens in the state so far) */
+    const unsigned to_read = total > reused ? total - reused : 0, done = held > reused ? held - reused : 0;
+    fprintf(stderr, "osmos-api: request %lld: a %u-token prompt, %u reused (%s), %u of %u read in %.1f s\n", rid,
+            total, reused, via, done < to_read ? done : to_read, to_read, ms / 1e3);
   }
   else if (!strcmp(what, "DONE"))
   {

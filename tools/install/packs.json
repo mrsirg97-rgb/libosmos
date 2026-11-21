@@ -210,7 +210,16 @@
                   "sha256": "ecd6a0ecd7f258b1ee9211bf566261ae33efc1743ad40f58cb5004cf7b051839"},
     "hy4-dfly2": {"repo": "tencent/Hy4-flash", "revision": "b2498eba6a1a3f9bbcab4190bc1313a3c7010c2f",
                   "path": "model-00148-of-00148.safetensors", "bytes": 1691383434,
-                  "sha256": "9e65e4e71345913784004a081ea3831b34d666e46bb6ba36dc3c6d3798b76ac3"}
+                  "sha256": "9e65e4e71345913784004a081ea3831b34d666e46bb6ba36dc3c6d3798b76ac3"},
+    "ink2-mini-1": {"repo": "mrsirg97-rgb/osmos-evo-inkling-mini", "revision": "88b0dcf07777c7a8489b7ec0d14a9734817b6661",
+                    "path": "Inkling-2-Mini-00001-of-00002.gguf", "bytes": 2527518496,
+                    "sha256": "115e06bba202be19c16698e9b366f782621c8cf5962c6a6dc82ed684ffa52167"},
+    "ink2-mini-2": {"repo": "mrsirg97-rgb/osmos-evo-inkling-mini", "revision": "88b0dcf07777c7a8489b7ec0d14a9734817b6661",
+                    "path": "Inkling-2-Mini-00002-of-00002.gguf", "bytes": 17035808928,
+                    "sha256": "45a60945c9a91f506fb050b8c5b1051bfa5faa3503a78da9a2c9d902f4ffdf1f"},
+    "ink2-mini-mtp": {"repo": "mrsirg97-rgb/osmos-evo-inkling-mini", "revision": "88b0dcf07777c7a8489b7ec0d14a9734817b6661",
+                      "path": "mtp/ink2-mini-mtp-q8.gguf", "bytes": 399393696,
+                      "sha256": "5bee2b62fd41797d19a4b2d95c827278650562ae2c4f68d57636c14eef9e8aba"}
   },
   "aliases": {"osmos-evo": "osmos-evo-1017", "osmos-evo-a": "osmos-evo-1017", "vibes1.7b": "osmos1.7b"},
   "packs": {
@@ -292,6 +301,13 @@
       "table": null, "picks": null, "drafter": ["hy4-dfly2"], "drafter_kind": "dfly", "overlay": null,
       "rig": {"id": "hy4-flash", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "low", "high", "max"], "effort": "high", "aliases": ["hy4"]},
       "settings": {"max_context": 1048576, "max_tokens": 4096}
+    },
+    "inkling-2-mini": {
+      "title": "Inkling-2-Mini (Thinking Machines' release: NVFP4 / MXFP8 experts, BF16 dense) with its DSpark head, every expert in memory, 1M context",
+      "shards": ["ink2-mini-1", "ink2-mini-2"],
+      "table": null, "picks": null, "drafter": ["ink2-mini-mtp"], "drafter_kind": "mtp", "overlay": null,
+      "rig": {"id": "inkling-2-mini", "max_tokens": 131072, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "high", "aliases": ["mini"]},
+      "settings": {"max_context": 1048576, "max_tokens": 4096, "kv_q8": true}
     }
   }
 }

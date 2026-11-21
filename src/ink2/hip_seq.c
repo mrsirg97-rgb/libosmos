@@ -96,15 +96,15 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
   /* a window keeps window - 1 + INK2_FA_TILE - 1 (its keys handed in from a tile's start) and a rollback's */
   const uint32_t ck = conv_need(f) + INK2_MAX_BACK, wk = (uint32_t)g->window - 1 + INK2_FA_TILE - 1 + INK2_MAX_BACK;
   bool ok = true;
-  for (int l = 0; ok && l < g->n_layers; l++)
+  for (int l = 0; ok && l < g->n_slots; l++)
   {
     for (int c = 0; ok && c < INK2_CONVS; c++)
       ok = tail_make(&s->conv[l][c], conv_row(f, c), 4, ck, 2 * ck + INK2_TAIL_STEP, conv_need(f));
-    if (ok && g->sliding[l])
+    if (ok && ink2_slot_sliding(g, l))
       ok = tail_make(&s->kw[l], kd, 2, wk, 2 * wk + T, 0) && tail_make(&s->vw[l], kd, 2, wk, 2 * wk + T, 0);
     else if (ok)
       ok = tail_make(&s->kw[l], kv, INK2_KV8_RECORD, f->max_ctx, f->max_ctx, 0) &&
-           tail_make(&s->vw[l], kv, INK2_KV5_RECORD, f->max_ctx, f->max_ctx, 0);
+           tail_make(&s->vw[l], kv, f->v8 ? INK2_KV8_RECORD : INK2_KV5_RECORD, f->max_ctx, f->max_ctx, 0);
   }
   if (ok && f->mtp)
     ok = ink2_mtp_seq_make(s);
@@ -113,13 +113,13 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
   if (getenv("INK2_MEM") && atoi(getenv("INK2_MEM")))
   {
     uint64_t conv = 0, win = 0, full = 0;
-    for (int l = 0; l < g->n_layers; l++)
+    for (int l = 0; l < g->n_slots; l++)
     {
       for (int c = 0; c < INK2_CONVS; c++)
         conv += (uint64_t)s->conv[l][c].cap * s->conv[l][c].row * s->conv[l][c].esize;
       const uint64_t kv = (uint64_t)s->kw[l].cap * s->kw[l].row * s->kw[l].esize +
-                          (uint64_t)s->vw[l].cap * s->vw[l].row * s->vw[l].esize; /* (keys Q8, values Q5: apart) */
-      *(g->sliding[l] ? &win : &full) += kv;
+                          (uint64_t)s->vw[l].cap * s->vw[l].row * s->vw[l].esize; /* (keys Q8, values Q5 or Q8: apart) */
+      *(ink2_slot_sliding(g, l) ? &win : &full) += kv;
     }
     fprintf(stderr, "ink2 mem: a sequence: full layers' keys and values %.3f GiB, windows' %.3f GiB, conv tails %.3f GiB\n",
             full / 1073741824.0, win / 1073741824.0, conv / 1073741824.0);
@@ -167,7 +167,7 @@ bool ink2_seq_rollback(Ink2Seq *s, uint32_t n)
   if (!s || s->failed || n > s->reach)
     return false;
   const Ink2Geometry *g = &s->f->w->geo;
-  for (int l = 0; l < g->n_layers; l++)
+  for (int l = 0; l < g->n_slots; l++)
   {
     for (int c = 0; c < INK2_CONVS; c++)
       s->conv[l][c].held -= n;
@@ -187,9 +187,15 @@ uint64_t ink2_identity(const Ink2Forward *f)
   uint64_t h = fnv_u64(STATE_VERSION, fnv_u64(STATE_MAGIC, FNV_SEED));
   const uint64_t dims[] = {(uint64_t)g->n_layers, (uint64_t)g->n_embd, (uint64_t)g->n_kv_heads,
                            (uint64_t)g->head_dim, (uint64_t)g->window, (uint64_t)g->conv};
+  const uint64_t loop[] = {(uint64_t)g->n_slots, (uint64_t)g->loop.start, (uint64_t)g->loop.end,
+                           (uint64_t)g->loop.passes};
   h = fnv(dims, sizeof dims, h);
-  for (int l = 0; l < g->n_layers; l++)
-    h = fnv_u64(g->sliding[l], h);
+  if (g->loop.passes) /* (an unlooped model's identity as it was) */
+    h = fnv(loop, sizeof loop, h);
+  if (f->v8) /* a full layer's values Q8: another cache's bytes (Q5's identity as it was) */
+    h = fnv_u64(0x7638, h);
+  for (int l = 0; l < g->n_slots; l++)
+    h = fnv_u64(ink2_slot_sliding(g, l), h);
   const Gguf *m = f->w->model;
   for (int i = 0; i < m->n_files; i++) /* each file: fnv.h's fnv_file (its patched shards another identity) */
     h = fnv_file(m->paths[i], h);
@@ -215,7 +221,7 @@ static int parts(const Ink2Seq *s, int32_t pos, bool mark, bool load, Part *p)
   const Ink2Geometry *g = &f->w->geo;
   int n = 0;
   const uint32_t cn = conv_need(f), wn = win_need(f, pos);
-  for (int l = 0; l < g->n_layers; l++)
+  for (int l = 0; l < g->n_slots; l++)
   {
     for (int c = 0; c < INK2_CONVS; c++)
     {
@@ -224,7 +230,7 @@ static int parts(const Ink2Seq *s, int32_t pos, bool mark, bool load, Part *p)
       p[n++] = (Part){load ? t->d : (void *)ink2_tail_last(t, cn), (uint64_t)cn * t->row * t->esize};
     }
     const Ink2Tail *k = &s->kw[l], *v = &s->vw[l];
-    if (g->sliding[l])
+    if (ink2_slot_sliding(g, l))
     {
       p[n++] = (Part){load ? k->d : (void *)ink2_tail_last(k, wn), (uint64_t)wn * k->row * k->esize};
       p[n++] = (Part){load ? v->d : (void *)ink2_tail_last(v, wn), (uint64_t)wn * v->row * v->esize};
@@ -248,11 +254,11 @@ static uint64_t bytes_at(const Ink2Seq *s, int32_t pos, bool mark)
 static void settle(Ink2Seq *s, int32_t pos, bool mark)
 {
   const Ink2Geometry *g = &s->f->w->geo;
-  for (int l = 0; l < g->n_layers; l++)
+  for (int l = 0; l < g->n_slots; l++)
   {
     for (int c = 0; c < INK2_CONVS; c++)
       s->conv[l][c].held = conv_need(s->f);
-    if (g->sliding[l])
+    if (ink2_slot_sliding(g, l))
       s->kw[l].held = s->vw[l].held = win_need(s->f, pos);
     else if (!mark)
       s->kw[l].held = s->vw[l].held = (uint32_t)pos;
@@ -336,8 +342,8 @@ bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[INK
     return s->failed = true, ink2_fail(err, "inkling2: a GPU copy failed (the mark's load)");
   /* a full layer's rows below the mark are the sequence's still: held the mark's position */
   const Ink2Geometry *g = &s->f->w->geo;
-  for (int l = 0; l < g->n_layers; l++)
-    if (!g->sliding[l])
+  for (int l = 0; l < g->n_slots; l++)
+    if (!ink2_slot_sliding(g, l))
       s->kw[l].held = s->vw[l].held = (uint32_t)h.pos;
   settle(s, h.pos, true);
   return true;

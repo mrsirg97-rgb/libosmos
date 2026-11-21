@@ -26,6 +26,10 @@ bool ops_rms_add_rms(float *h, float *y, const float *w_post, const float *w_nex
                      float *xn, void *stream);
 bool ops_rms_x16(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
                  uint32_t y_stride, void *x16, int32_t *overflow, void *stream);
+/* ops_rms_x16 into columns c0 .. c0 + n of an xts-wide x16 (two norms side by side, one matrix's input: Inkling's
+   loop controls); c0 and n multiples of 16 */
+bool ops_rms_x16_at(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
+                    uint32_t y_stride, void *x16, uint32_t xts, uint32_t c0, int32_t *overflow, void *stream);
 #define OPS_HC_PARTS 64
 bool ops_hc_dot(const float *fn, const float *h, uint32_t hc, uint32_t dim, uint32_t n_tok, float *partial,
                 void *stream);

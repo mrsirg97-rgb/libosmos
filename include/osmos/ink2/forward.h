@@ -29,12 +29,17 @@ typedef struct Ink2Options
                             step's buffers, the drafter and the stream leave of it (room then unread); 0: room's */
   uint32_t logit_rows;   /* the logits' rows a step keeps at most, slots in the order computed (a prompt's last row,
                             a decode's or a drafted round's every row, each lane's); 0: max_tokens (every row) */
+  bool values_q8;        /* a full layer's cached values Q8 records (ink2_fa8), not Q5 (ink2_fa85): a value's bytes
+                            its key's - for a model with the room (osmos-serve's --kv-q8) */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR]);
 void ink2_forward_destroy(Ink2Forward *f);
 uint64_t ink2_forward_bytes(const Ink2Forward *f);
 const uint64_t *ink2_forward_picks(const Ink2Forward *f);
+/* every expert in memory (the experts' membrane whole): the MoE's tables built on the GPU, the picks never on the host -
+   the same bits as the host's tables */
+bool ink2_forward_whole(const Ink2Forward *f);
 uint64_t ink2_identity(const Ink2Forward *f);
 
 Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR]);
@@ -54,6 +59,12 @@ bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[INK
 bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                char err[INK2_FWD_ERR]);
 const float *ink2_logits(const Ink2Forward *f);
+
+/* the per-slot checks' (oracle/qwen_dump.cpp's l_out-<slot>, upstream llama.cpp's tensors): a tap, when set, gets
+   each cache slot's output - "l_out", the layer's stream after its MoE (its attn_res block's partial: a block's first
+   layer's its own outputs alone), n x n_embd, the GPU's - a step's run of rows at a time */
+typedef void (*ink2_tap_fn)(void *arg, int slot, const char *what, const float *dev, uint32_t n, uint32_t dim);
+void ink2_forward_tap(Ink2Forward *f, ink2_tap_fn fn, void *arg);
 const float *ink2_row_logits(const Ink2Forward *f, uint32_t row);
 bool ink2_kept(const Ink2Forward *f, uint32_t row);
 bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[INK2_FWD_ERR]);

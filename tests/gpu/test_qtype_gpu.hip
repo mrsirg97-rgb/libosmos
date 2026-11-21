@@ -93,8 +93,13 @@ int main() {
     agree(mv_group_tok(id, wtab, cnt, xrow, 1, 1, kRows, kCols, x, kCols, y, kRows, nullptr), id, QTYPE_MV_TOK,
           "mv_group_tok");
     agree(mm_known(id), id, QTYPE_MM, "mm_known");
-    agree(mm_col_tiles(id, 1) > 0, id, QTYPE_MM, "mm_col_tiles");
-    agree(mm_run(id, w, kRows, kCols, x16, 1, y, kRows, nullptr), id, QTYPE_MM, "mm_run");
+    if (id == QTYPE_BF16) {  // mm's kernels take BF16 by name (Inkling's dense weights), its table does not: the
+                             // other families' BF16 matrices their matvec's (mm_known false above)
+      CHECK(mm_col_tiles(id, 1) > 0 && mm_run(id, w, kRows, kCols, x16, 1, y, kRows, nullptr));
+    } else {
+      agree(mm_col_tiles(id, 1) > 0, id, QTYPE_MM, "mm_col_tiles");
+      agree(mm_run(id, w, kRows, kCols, x16, 1, y, kRows, nullptr), id, QTYPE_MM, "mm_run");
+    }
     agree(q8_group_tok(id, wtab, cnt, xrow, nullptr, 1, 1, kRows, kCols, q, d, y, kRows, nullptr), id, QTYPE_Q8,
           "q8_group_tok");
     agree(q8_gate_up(id, wtab, wtab, cnt, xrow, nullptr, nullptr, 1, 1, kRows, kCols, q, d, scale, kLim, h, kRows, nullptr), id,

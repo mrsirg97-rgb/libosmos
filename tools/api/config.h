@@ -4,7 +4,7 @@
 
 #include "api.h"
 
-#define CONFIG_ARGS_MAX 32
+#define CONFIG_ARGS_MAX 40 /* config_argv's every flag and its NULL (33 with all: room past it) */
 
 /* a pack's osmos.json (the installer's: tools/install/layout.py) - what the engine is started with */
 typedef struct Config
@@ -20,6 +20,7 @@ typedef struct Config
                              template drops an earlier turn's reasoning - a long tool loop then read again at the
                              next user turn; a pack's own choice, its training's) */
   bool stream_ngram; /* osmos-serve's --stream-ngram */
+  bool kv_q8;        /* osmos-serve's --kv-q8 (Inkling's full layers' cached values Q8, not Q5) */
   char npu[PATH_MAX]; /* the NPU's kernels' directory (osmos-serve's --npu): "" none */
   double npu_share;   /* its share of a layer's pairs (--npu-share): 0 osmos-serve's own */
   unsigned max_context, parallel;

@@ -2,7 +2,9 @@
 // step - a seed after another sequence's step, or after a load, refused (it was accepted, its rings built from the
 // other's rows); its own step's again accepted. then a drafted decode the bits of the plain one (the server's rounds:
 // drafts after y, [y, drafts] one step, the agreeing prefix kept, the rest rolled back, the kept positions seeded).
-// needs a gfx1151 and the osmos-evo-inkling pack (OSMOS_INK2_PACK: its folder); skipped (77) without them.
+// on Inkling-2-Small's osmos-evo-inkling pack (OSMOS_INK2_PACK: its folder) and on Inkling-2-Mini's reference with its
+// drafter (OSMOS_INK2_MINI: the folder of ink2_ref_gguf.py's and ink2_mtp_gguf.py's GGUFs - a loop: the taps its steps,
+// the slots in the order they run), each where it is; needs a gfx1151, skipped (77) without it or both.
 #include <hip/hip_runtime.h>
 #include <unistd.h>
 
@@ -46,22 +48,16 @@ static int32_t read(Osmos* e, OsmosSeq* s, const std::vector<int32_t>& p) {
   return y;
 }
 
-int main() {
-  std::printf("[test_ink2_seed_gpu] start\n");
-  const char* home = std::getenv("HOME");
-  const std::string dir = std::getenv("OSMOS_INK2_PACK") ? std::getenv("OSMOS_INK2_PACK")
-                                                         : std::string(home ? home : "") + "/Models/osmos/osmos-evo-inkling";
-  const std::string model = dir + "/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf", mtp = dir + "/ink2-mtp-q5k.gguf",
-                    picks = dir + "/osmos-picks.bin";
-  int ndev = 0;
-  if (access(model.c_str(), R_OK) || access(mtp.c_str(), R_OK) || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
-    std::printf("[test_ink2_seed_gpu] skipped: no osmos-evo-inkling pack (%s) or no GPU\n", dir.c_str());
-    return 77;
+static bool pack(const char* name, const std::string& model, const std::string& mtp, const std::string& picks) {
+  if (access(model.c_str(), R_OK) || access(mtp.c_str(), R_OK)) {
+    std::printf("  %s: not on this machine (%s), skipped\n", name, model.c_str());
+    return false;
   }
+  std::printf("  %s:\n", name);
   const OsmosFiles files = {model.c_str(), nullptr, nullptr};
   OsmosModel* m = osmos_open(&files, g_err);
   CHECK(m);
-  const OsmosOptions o = {kCtx, kStep, kBudget, access(picks.c_str(), R_OK) ? nullptr : picks.c_str(), true,
+  const OsmosOptions o = {kCtx, kStep, kBudget, picks.empty() || access(picks.c_str(), R_OK) ? nullptr : picks.c_str(), true,
                           mtp.c_str(), false, 0, false, nullptr, 0.0f};
   Osmos* e = osmos_create(m, &o, g_err);
   if (!e) std::fprintf(stderr, "  %s\n", g_err);
@@ -118,6 +114,27 @@ int main() {
   oseq_destroy(s);
   osmos_destroy(e);
   osmos_close(m);
+  return true;
+}
+
+int main() {
+  std::printf("[test_ink2_seed_gpu] start\n");
+  int ndev = 0;
+  if (hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
+    std::printf("[test_ink2_seed_gpu] skipped: no GPU\n");
+    return 77;
+  }
+  const char* home = std::getenv("HOME");
+  const std::string h = home ? home : "";
+  const std::string small = std::getenv("OSMOS_INK2_PACK") ? std::getenv("OSMOS_INK2_PACK") : h + "/Models/osmos/osmos-evo-inkling",
+                    mini = std::getenv("OSMOS_INK2_MINI") ? std::getenv("OSMOS_INK2_MINI") : h + "/Models/inkling2-mini/osmos";
+  const bool a = pack("Inkling-2-Small", small + "/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf",
+                      small + "/ink2-mtp-q5k.gguf", small + "/osmos-picks.bin");
+  const bool b = pack("Inkling-2-Mini", mini + "/ink2-mini-00001-of-00002.gguf", mini + "/ink2-mini-mtp-bf16.gguf", "");
+  if (!a && !b) {
+    std::printf("[test_ink2_seed_gpu] skipped: neither model here\n");
+    return 77;
+  }
   std::printf("[test_ink2_seed_gpu] ok\n");
   return 0;
 }

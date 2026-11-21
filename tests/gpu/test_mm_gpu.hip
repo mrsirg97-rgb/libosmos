@@ -408,6 +408,64 @@ static void attn_x16() {
               " calls\n", kN, kCols);
 }
 
+// BF16 (Inkling-2-Mini's dense weights: mm by name, not mm_known's table): at its columns (64: the short slab; 2,304
+// and 4,608: 9 waves; 3,072: 8), a token's row the same bits at 1, 16, 65 and 2,048 tokens (the tile's and the
+// gemm's), and within its order's rounding of a double sum over the f16 values it reads (a bf16 weight's f16, x's)
+static void bf16_case() {
+  constexpr uint32_t kRows = 64;
+  const uint32_t counts[] = {1, 16, 65, (uint32_t) kBig};
+  for (uint32_t cols : {64u, 2304u, 3072u, 4608u}) {
+    std::vector<uint16_t> wh((size_t) kRows * cols);
+    for (auto& v : wh) {  // a bf16 of a value 2^-12 .. 2^-2, either sign; some below f16's normal range
+      const float f = uniform() * std::ldexp(1.0f, (int) ((uniform() + 1) * 5) - 12) * (uniform() > 0.98f ? 1e-4f : 1.0f);
+      uint32_t u;
+      std::memcpy(&u, &f, 4);
+      v = (uint16_t) (u >> 16);
+    }
+    std::vector<float> xh((size_t) kBig * cols);
+    for (float& v : xh) v = uniform();
+    void *w = nullptr, *x16 = nullptr;
+    float *x = nullptr, *y = nullptr;
+    int32_t* ovf = nullptr;
+    CHECK(hipMalloc(&w, wh.size() * 2) == hipSuccess && hipMalloc(&x, xh.size() * 4) == hipSuccess &&
+          hipMalloc(&y, (size_t) kBig * kRows * 4) == hipSuccess && hipMalloc(&x16, (size_t) kBig * cols * 2) == hipSuccess &&
+          hipMalloc(&ovf, 4) == hipSuccess);
+    CHECK(hipMemcpy(w, wh.data(), wh.size() * 2, hipMemcpyHostToDevice) == hipSuccess &&
+          hipMemcpy(x, xh.data(), xh.size() * 4, hipMemcpyHostToDevice) == hipSuccess && hipMemset(ovf, 0, 4) == hipSuccess);
+    std::vector<float> first;  // token 0's row at 1 token; token 13's at 16
+    std::vector<float> t13;
+    double worst = 0;
+    for (uint32_t n : counts) {
+      CHECK(mm_tokens(30, w, kRows, y, kRows, nullptr, 0, nullptr, 0, cols, x, cols, n, x16, ovf, false, nullptr));
+      std::vector<float> yh((size_t) n * kRows);
+      CHECK(hipMemcpy(yh.data(), y, yh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      if (n == 1) first.assign(yh.begin(), yh.begin() + kRows);
+      else CHECK(std::memcmp(first.data(), yh.data(), kRows * 4) == 0);
+      if (n == 16) t13.assign(yh.begin() + 13 * kRows, yh.begin() + 14 * kRows);
+      else if (n > 16) CHECK(std::memcmp(t13.data(), yh.data() + 13 * kRows, kRows * 4) == 0);
+      if (n == kBig)
+        for (uint32_t t : {0u, 13u, 1000u, (uint32_t) kBig - 1})
+          for (uint32_t r = 0; r < kRows; r++) {
+            double ref = 0, mag = 0;
+            for (uint32_t c = 0; c < cols; c++) {
+              uint32_t u = (uint32_t) wh[(size_t) r * cols + c] << 16;
+              float wf;
+              std::memcpy(&wf, &u, 4);
+              const double p = (double) (float) (_Float16) wf * (double) (float) (_Float16) xh[(size_t) t * cols + c];
+              ref += p, mag += std::fabs(p);
+            }
+            const double e = std::fabs(yh[(size_t) t * kRows + r] - ref) / (mag * kU);
+            worst = std::max(worst, e);
+          }
+    }
+    CHECK(worst <= 2.0 * cols / 16);  // (an F32 sum of cols / 16 WMMA steps: a rounding a step at most)
+    std::printf("  BF16 %4u columns: a token's row the same bits at 1, 16, 65 and %d tokens; %.1f u|wx| from a double sum\n",
+                cols, kBig, worst);
+    CHECK(hipFree(w) == hipSuccess && hipFree(x) == hipSuccess && hipFree(y) == hipSuccess && hipFree(x16) == hipSuccess &&
+          hipFree(ovf) == hipSuccess);
+  }
+}
+
 int main() {
   std::printf("[test_mm_gpu] start\n");
   char path[512];
@@ -424,6 +482,7 @@ int main() {
   CHECK(!mm_run(13, nullptr, 32, 256, nullptr, MM_MAX_TOKENS + 1, nullptr, 32, nullptr));  // too many tokens
   std::printf("  refusals: F32 and BF16 (the matvec's), rows not a multiple of 16, %d tokens\n", MM_MAX_TOKENS + 1);
   attn_x16();
+  bf16_case();
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);

@@ -80,7 +80,8 @@ if __name__ == "__main__":
             print(r["err"], flush=True)
             continue
         print(f"{path}: {len(r['tokens'])} tokens, hash {hash_tokens(r['tokens']):016x}, reused {r['reused']}, "
-              f"finish {r['finish']}, first token {r['first_s']:.2f} s, all {r['s']:.1f} s", flush=True)
+              f"finish {r['finish']}, first token {r['first_s']:.2f} s, all {r['s']:.1f} s"
+              + (f", drafted {r['done'][7]}, accepted {r['done'][6]}" if int(r['done'][7]) else ""), flush=True)
     e.quit()
 
 

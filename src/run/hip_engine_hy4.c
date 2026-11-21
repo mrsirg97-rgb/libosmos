@@ -88,8 +88,8 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess || o->npu)
-    return fail(err, "hy_v4_flash: every weight resident - no budget, picks, no_guess or NPU"), NULL;
+  if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8)
+    return fail(err, "hy_v4_flash: every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;

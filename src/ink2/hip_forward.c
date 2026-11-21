@@ -15,6 +15,7 @@
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/q4x_ops.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/mem/arena.h"
 
@@ -22,7 +23,8 @@
 enum
 {
   PF_IN,     /* the layer's inputs: attention residuals, norms, q / k / v / rel / gate / sink, convs, clips */
-  PF_ATTN,   /* the attention */
+  PF_ATTN,   /* a sliding layer's attention (its window's keys) */
+  PF_FULL,   /* a full layer's attention (every key so far) */
   PF_MID,    /* the output's matrix and conv, the residual, the MoE's input; the MoE's conv and residual */
   PF_MOE,    /* the router, the experts (their waits apart: PF_WAIT) */
   PF_WAIT,   /* the experts' holds and waits (the membrane's reads), inside PF_MOE */
@@ -31,7 +33,7 @@ enum
   PF_HEAD,   /* the embedding, the head */
   PF_N
 };
-static const char *const kPfName[PF_N] = {"inputs",         "attention",     "mid",           "moe",
+static const char *const kPfName[PF_N] = {"inputs",         "attn sliding",  "attn full",     "mid",           "moe",
                                           "  of it waits", "  of it router", "  of it kernels", "head"};
 /* the totals of decode steps (MV_MAX_TOKENS tokens at most) and of prompt steps (more); this step's */
 static double g_pf[2][PF_N], g_step[PF_N], g_pf_at;
@@ -195,7 +197,7 @@ static bool up_conv_static(Ink2Forward *f, const GgufTensor *t, float **out)
   if (!v)
     return false;
   const uint32_t taps = (uint32_t)f->w->geo.conv;
-  if (f->w->geo.llama_names)
+  if (f->w->geo.keys != INK2_KEYS_OURS)
   {
     float *tw = malloc(n * 4);
     if (!tw)
@@ -208,6 +210,36 @@ static bool up_conv_static(Ink2Forward *f, const GgufTensor *t, float **out)
   }
   const bool ok = ink2_up_host(f, v, n, out);
   free(v);
+  return ok;
+}
+
+/* the loop's: each core layer's controls, and its four message queries from the two tables (core layer i's q the
+   first table's column 2i, ffn its 2i + 1; k the second's 2i, v its 2i + 1) as [q, k, v, ffn][C] */
+static bool up_loop(Ink2Forward *f)
+{
+  const Ink2Weights *w = f->w;
+  const Ink2Geometry *g = &w->geo;
+  if (!g->loop.passes)
+    return true;
+  const uint64_t C = (uint64_t)g->n_embd, core = (uint64_t)(g->loop.end - g->loop.start);
+  uint64_t nq = 0, nk = 0;
+  float *q = ink2_host_f32(w->model, w->loop_query, &nq), *kv = ink2_host_f32(w->model, w->loop_kv_query, &nk),
+        *four = malloc(INK2_CTRLS * C * 4);
+  bool ok = q && kv && four && nq == 2 * core * C && nk == 2 * core * C;
+  for (int l = g->loop.start; ok && l < g->loop.end; l++)
+  {
+    const uint64_t i = (uint64_t)(l - g->loop.start);
+    const float *col[INK2_CTRLS] = {q + 2 * i * C, kv + 2 * i * C, kv + (2 * i + 1) * C, q + (2 * i + 1) * C};
+    for (int c = 0; c < INK2_CTRLS; c++)
+      memcpy(four + c * C, col[c], C * 4);
+    Ink2Dev *d = &f->L[l];
+    const Ink2Layer *L = &w->layer[l];
+    ok = ink2_up_host(f, four, INK2_CTRLS * C, &d->msg_q);
+    for (int c = 0; ok && c < INK2_CTRLS; c++)
+      ok = up_raw(f, L->ctrl_down[c], &d->ctrl_down[c]) && up_raw(f, L->ctrl_gain[c], &d->ctrl_gain[c]) &&
+           up_raw(f, L->ctrl_forget[c], &d->ctrl_forget[c]);
+  }
+  free(q), free(kv), free(four);
   return ok;
 }
 
@@ -246,7 +278,7 @@ static bool upload(Ink2Forward *f)
         d->scale[k][e] = 1.0f;
     }
   }
-  return ok;
+  return ok && up_loop(f);
 }
 
 static bool copy_host(void *dst, const void *src, uint64_t bytes, void *ctx)
@@ -372,13 +404,63 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
    pointers, a count and 4 offsets; its slots its rows padded to whole tiles - P + E (MM_TILE - 1) at most, each 2
    int32; each pair's row and 3 floats */
 static uint64_t table_entries(uint64_t P, uint64_t E) { return P + E; }
+
+/* every expert in memory (membrane_whole): their addresses held for the membrane's life - a table of them written
+   once, the layers' scales beside it, and the GPU's tables for the step's most picks (moe_whole) */
+static bool whole_tables(Ink2Forward *f, char *err)
+{
+  const Ink2Geometry *g = &f->w->geo;
+  if (!(f->whole = membrane_whole(f->mem)))
+    return true;
+  const uint64_t L = (uint64_t)g->n_layers, E = (uint64_t)g->n_experts, P = (uint64_t)f->max_tokens * g->n_used;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds((uint32_t)P, (uint32_t)E, &bd);
+  const void **tab = malloc(L * 3 * E * sizeof *tab);
+  float *sc = malloc(L * 3 * E * sizeof *sc);
+  bool ok = tab && sc;
+  for (uint64_t u = 0; ok && u < L * E; u++)
+  {
+    const void *dev[POOL_PARTS];
+    ok = membrane_ready(f->mem, (uint32_t)u, dev);
+    for (int k = 0; ok && k < 3; k++)
+      tab[((u / E) * 3 + (uint64_t)k) * E + u % E] = dev[k], sc[((u / E) * 3 + (uint64_t)k) * E + u % E] =
+                                                                 f->L[u / E].scale[k][u % E];
+  }
+  f->t_entries = bd.entries;
+  struct
+  {
+    void **p;
+    uint64_t bytes;
+  } b[] = {
+      {(void **)&f->exp_tab, L * 3 * E * sizeof *tab}, {(void **)&f->scale_tab, L * 3 * E * 4},
+      {(void **)&f->picks_d, L * E * 4}, {(void **)&f->t_ptr, 3ull * bd.entries * sizeof(void *)},
+      {(void **)&f->t_cnt, bd.entries * 4}, {(void **)&f->t_xg, bd.entries * 4}, {(void **)&f->t_yg, bd.entries * 4},
+      {(void **)&f->t_xd, bd.entries * 4}, {(void **)&f->t_yd, bd.entries * 4}, {(void **)&f->t_gidx, bd.slots * 4},
+      {(void **)&f->t_hidx, bd.slots * 4}, {(void **)&f->t_where, P * 4}, {(void **)&f->t_off, 3 * E * 4},
+      {(void **)&f->t_sg, P * 4}, {(void **)&f->t_su, P * 4}, {(void **)&f->t_a, P * 4},
+  };
+  for (size_t i = 0; ok && i < sizeof b / sizeof *b; i++)
+    ok = ink2_dalloc(f, b[i].p, b[i].bytes);
+  ok = ok && hipMemcpy(f->exp_tab, tab, L * 3 * E * sizeof *tab, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(f->scale_tab, sc, L * 3 * E * 4, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemset(f->picks_d, 0, L * E * 4) == hipSuccess && (f->picks_all = calloc(L * E, sizeof *f->picks_all));
+  free(tab), free(sc);
+  return ok || ink2_fail(err, "inkling2: GPU memory refused (the experts' tables on the GPU)");
+}
 static uint64_t table_slots(uint64_t P, uint64_t E) { return P + E * (MM_TILE - 1); }
 static uint64_t table_bytes(uint64_t P, uint64_t E)
 {
   return table_entries(P, E) * (3 * sizeof(void *) + 5 * 4) + table_slots(P, E) * 2 * 4 + P * 4 * 4;
 }
 
-static bool mm_takes(uint32_t type, uint32_t rows, uint32_t cols) { return mm_known(type) && mm_fits(type, rows, cols); }
+/* mm's: its table's types, and BF16 where the model's dense weights are BF16 (f->bf16_mm: Mini's, as released) - mm's
+   by name, not its table's. a model whose BF16 is a side tensor (Inkling-2-Small's sliding layers' sink projections)
+   keeps its matvec, its bits 0.11's; the other families' BF16 matrices their matvec's as before. by the model, the
+   type and the shape alone: a decode's and a prompt's the same */
+static bool mm_takes(const Ink2Forward *f, uint32_t type, uint32_t rows, uint32_t cols)
+{
+  return (mm_known(type) || (type == QTYPE_BF16 && f->bf16_mm)) && mm_fits(type, rows, cols);
+}
 
 /* INK2_MEM: what the build takes, a stage at a time (the GPU's free memory before and after) */
 static bool mem_on(void)
@@ -404,10 +486,11 @@ static bool buffers(Ink2Forward *f)
   const uint64_t T = f->max_tokens, C = (uint64_t)g->n_embd, H = (uint64_t)g->n_heads,
                  KV = (uint64_t)g->n_kv_heads, D = (uint64_t)g->head_dim, R = (uint64_t)g->d_rel,
                  taps = (uint64_t)g->conv, E = (uint64_t)g->n_experts, K = (uint64_t)g->n_used,
-                 F = (uint64_t)g->ff_exp, VR = f->w->output->dims[1], CH = H * D > C ? H * D : C,
+                 F = (uint64_t)g->ff_exp, VR = f->w->output->dims[1],
+                 CH0 = H * D > C ? H * D : C, CH = g->loop.passes && 2 * C > CH0 ? 2 * C : CH0,
                  X16 = ((T < MM_MAX_TOKENS ? T : MM_MAX_TOKENS) + MM_TILE - 1) / MM_TILE * MM_TILE;
   const uint32_t head = ink2_type(f->w->output);
-  f->head_rows = mm_takes(head, (uint32_t)VR, (uint32_t)C) ? MM_TILE * mm_col_tiles(head, MM_MAX_TOKENS) : MV_MAX_TOKENS;
+  f->head_rows = mm_takes(f, head, (uint32_t)VR, (uint32_t)C) ? MM_TILE * mm_col_tiles(head, MM_MAX_TOKENS) : MV_MAX_TOKENS;
   /* the experts' down rows and a decode's split attention share one buffer: the attention's partials are dead before
      the layer's MoE writes the down rows, and those are summed before the next layer's attention */
   const uint64_t fa_bytes = ink2_fa_scratch((uint32_t)H, f->max_ctx), down_bytes = T * K * C * 4,
@@ -441,6 +524,26 @@ static bool buffers(Ink2Forward *f)
     if (mem_on() && b[i].bytes >= (256ull << 20))
       fprintf(stderr, "ink2 mem:   step buffer %2zu %8.3f GiB\n", i, b[i].bytes / 1073741824.0);
   }
+  if (g->loop.passes) /* the loop's */
+  {
+    const uint64_t core = (uint64_t)(g->loop.end - g->loop.start), rank = (uint64_t)g->loop.gate_rank;
+    f->maxbank = core / (uint64_t)g->res_block > 1 ? (uint32_t)(core / (uint64_t)g->res_block - 1) : 1;
+    struct
+    {
+      float **p;
+      uint64_t bytes;
+    } lb[] = {
+        {&f->pre_h, T * C * 4}, {&f->bank, T * f->maxbank * C * 4}, {&f->bank_out, T * C * 4},
+        {&f->msg, INK2_CTRLS * T * C * 4}, {&f->ctl, 3 * T * C * 4}, {&f->ccat, 2 * T * C * 4},
+        {&f->cgate, T * rank * 4}, {&f->cgain, T * C * 4}, {&f->cforget, T * C * 4},
+    };
+    for (size_t i = 0; i < sizeof lb / sizeof *lb; i++)
+    {
+      if (!ink2_dalloc(f, (void **)lb[i].p, lb[i].bytes))
+        return false;
+      sum += lb[i].bytes;
+    }
+  }
   if (mem_on())
     fprintf(stderr, "ink2 mem:   step buffers, all %zu: %.3f GiB\n", sizeof b / sizeof *b, sum / 1073741824.0);
   f->fa_part = (float *)f->ed; /* (the down rows' buffer: ed_bytes) */
@@ -466,14 +569,15 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   Ink2Forward *f = calloc(1, sizeof *f);
   if (!f)
     return ink2_fail(err, "out of memory"), NULL;
-  f->w = w, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
+  f->bf16_mm = w->layer[0].q && ink2_type(w->layer[0].q) == QTYPE_BF16; /* (mm_takes': BF16 the model's dense weights) */
+  f->w = w, f->v8 = o->values_q8, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
   f->maxb = (uint32_t)((w->geo.n_layers + w->geo.res_block - 1) / w->geo.res_block);
   const uint32_t C = (uint32_t)w->geo.n_embd, F = (uint32_t)w->geo.ff_exp;
   for (int l = 0; l < w->geo.n_layers; l++) /* the experts on mm at every step (moe) */
   {
     const Ink2Layer *L = &w->layer[l];
-    if (!mm_takes(L->exp_gate->type, F, C) || !mm_takes(L->exp_up->type, F, C) || !mm_takes(L->exp_down->type, C, F))
+    if (!mm_takes(f, L->exp_gate->type, F, C) || !mm_takes(f, L->exp_up->type, F, C) || !mm_takes(f, L->exp_down->type, C, F))
       return ink2_fail(err, "inkling2: an expert tensor of a type or shape mm has no kernel for"),
              ink2_forward_destroy(f), NULL;
   }
@@ -497,7 +601,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   if (hipMemGetInfo(&free1, &total) != hipSuccess)
     return ink2_fail(err, "inkling2: the GPU's free memory not read"), ink2_forward_destroy(f), NULL;
   f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : f->dense_bytes;
-  if (!experts(f, o->room, o->budget, o->picks, err))
+  if (!experts(f, o->room, o->budget, o->picks, err) || !whole_tables(f, err))
     return ink2_forward_destroy(f), NULL;
   mem_note("experts' slots", &at);
   if (mem_on())
@@ -547,7 +651,9 @@ void ink2_forward_destroy(Ink2Forward *f)
                  f->xn, f->kn, f->vn, f->q, f->k, f->v, f->kc, f->vc, f->rel, f->gate, f->sink, f->att, f->dyn,
                  f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->eg, f->eu, f->ed, f->head,
                  f->logits, f->gid, f->amax, f->m_dev, f->gpick, f->gw, f->x16, f->xe16, f->overflow,
-                 f->res_sc};
+                 f->res_sc, f->pre_h, f->bank, f->bank_out, f->msg, f->ctl, f->ccat, f->cgate, f->cgain,
+                 f->cforget, (void *)f->exp_tab, f->scale_tab, f->picks_d, (void *)f->t_ptr, f->t_cnt, f->t_gidx,
+                 f->t_hidx, f->t_where, f->t_off, f->t_xg, f->t_yg, f->t_xd, f->t_yd, f->t_sg, f->t_su, f->t_a};
   for (size_t i = 0; i < sizeof dev / sizeof *dev; i++)
     if (dev[i])
       hipFree(dev[i]);
@@ -557,10 +663,17 @@ void ink2_forward_destroy(Ink2Forward *f)
     void *p[] = {d->attn_res_q, d->ffn_res_q, d->attn_norm, d->q_norm, d->k_norm, d->v_norm, d->ffn_norm, d->q,
                  d->k, d->v, d->rel, d->out, d->gate, d->sink, d->router, d->k_conv_proj, d->v_conv_proj,
                  d->q_clip, d->rel_clip, d->rel_proj, d->router_bias, d->k_conv, d->v_conv, d->out_conv,
-                 d->ffn_out_conv};
+                 d->ffn_out_conv, d->msg_q};
     for (size_t i = 0; i < sizeof p / sizeof *p; i++)
       if (p[i])
         hipFree(p[i]);
+    for (int c = 0; c < INK2_CTRLS; c++)
+    {
+      void *q[] = {d->ctrl_down[c], d->ctrl_gain[c], d->ctrl_forget[c]};
+      for (int i = 0; i < 3; i++)
+        if (q[i])
+          hipFree(q[i]);
+    }
     for (int k = 0; k < 3; k++)
       free(d->scale[k]);
   }
@@ -568,14 +681,29 @@ void ink2_forward_destroy(Ink2Forward *f)
   for (size_t i = 0; i < sizeof pinned / sizeof *pinned; i++)
     if (pinned[i])
       hipHostFree(pinned[i]);
-  free(f->picks), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
+  free(f->picks), free(f->picks_all), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
   free(f->m_key), free(f->m_build);
   free(f);
 }
 
 uint64_t ink2_forward_bytes(const Ink2Forward *f) { return f ? f->fixed_bytes + f->pinned_bytes : 0; }
 
-const uint64_t *ink2_forward_picks(const Ink2Forward *f) { return f ? f->picks : NULL; }
+bool ink2_forward_whole(const Ink2Forward *f) { return f && f->whole; }
+
+/* the host's counts, plus (a whole membrane's) the GPU's: copied at the call */
+const uint64_t *ink2_forward_picks(const Ink2Forward *f)
+{
+  if (!f || !f->whole)
+    return f ? f->picks : NULL;
+  const size_t n = (size_t)f->w->geo.n_layers * f->w->geo.n_experts;
+  uint32_t *d = malloc(n * 4);
+  if (!d || hipMemcpy(d, f->picks_d, n * 4, hipMemcpyDeviceToHost) != hipSuccess)
+    return free(d), NULL;
+  for (size_t u = 0; u < n; u++)
+    f->picks_all[u] = f->picks[u] + d[u];
+  free(d);
+  return f->picks_all;
+}
 
 uint32_t ink2_type(const GgufTensor *t) { return t->type == QUANT_Q5_K ? QUANT_Q5_KR : t->type; }
 
@@ -600,7 +728,7 @@ bool ink2_mv(const GgufTensor *t, const void *w, const float *x, uint32_t n, flo
 static bool mat(Ink2Forward *f, const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y)
 {
   const uint32_t rows = (uint32_t)t->dims[1], cols = (uint32_t)t->dims[0], type = ink2_type(t);
-  if (!mm_takes(type, rows, cols))
+  if (!mm_takes(f, type, rows, cols))
     return mv_strided(type, w, rows, cols, x, cols, n, y, rows, NULL);
   return mm_tokens(type, w, rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow, false, NULL);
 }
@@ -612,8 +740,8 @@ static bool mat2(Ink2Forward *f, const GgufTensor *t0, const void *w0, float *y0
 {
   const uint32_t cols = (uint32_t)t0->dims[0], type = ink2_type(t0), r0 = (uint32_t)t0->dims[1],
                  r1 = t1 ? (uint32_t)t1->dims[1] : 0;
-  if (!mm_takes(type, r0, cols) || (t1 && (ink2_type(t1) != type || (uint32_t)t1->dims[0] != cols ||
-                                           !mm_takes(type, r1, cols))))
+  if (!mm_takes(f, type, r0, cols) || (t1 && (ink2_type(t1) != type || (uint32_t)t1->dims[0] != cols ||
+                                           !mm_takes(f, type, r1, cols))))
     return mat(f, t0, w0, x, n, y0) && (!t1 || mat(f, t1, w1, x, n, y1));
   return mm_tokens(type, w0, r0, y0, r0, t1 ? w1 : NULL, r1, y1, r1, cols, x, cols, n, f->x16, f->overflow, ready,
                    NULL);
@@ -626,7 +754,7 @@ static bool rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const f
 {
   const uint32_t C = (uint32_t)f->w->geo.n_embd;
   const float eps = f->w->geo.rms_eps;
-  *ready = n <= MM_MAX_TOKENS && mm_takes(ink2_type(t), (uint32_t)t->dims[1], (uint32_t)t->dims[0]);
+  *ready = n <= MM_MAX_TOKENS && mm_takes(f, ink2_type(t), (uint32_t)t->dims[1], (uint32_t)t->dims[0]);
   return *ready ? ops_rms_x16(x, C, C, w, eps, n, y, C, f->x16, f->overflow, NULL)
                 : ops_rms(x, C, C, w, eps, n, y, C, NULL);
 }
@@ -660,8 +788,56 @@ static int cmp_u64(const void *a, const void *b)
    the tokens that picked it (mm_group at every step: an entry an expert's part of up to MM_MAX_TOKENS of its rows,
    a token's sums its own whatever the others) - gate and up, their scales and the swiglu, down - and each token's
    summed in its slot order (ink2_moe_sum) */
+/* moe with every expert in memory: the router's picks never on the host - the tables built on the GPU
+   (q4x_expert_tiles: the picks by expert, a part of up to 128 an entry, the entries in runs of their tiles;
+   ink2_moe_scales: the scales and weights moe's host loop writes), each run a launch (its entries past the live ones
+   none). which picks share a part, and where, changes no bit: the same sums as moe's tables */
+static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
+{
+  const Ink2Geometry *g = &f->w->geo;
+  const Ink2Layer *L = &f->w->layer[l];
+  const Ink2Dev *d = &f->L[l];
+  const uint32_t C = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, K = (uint32_t)g->n_used,
+                 F = (uint32_t)g->ff_exp, P = n * K;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds(P, E, &bd);
+  Q4xExpertTiles et = {.cnt = f->t_cnt, .gidx = f->t_gidx, .hidx = f->t_hidx, .xg = f->t_xg, .yg = f->t_yg,
+                       .xd = f->t_xd, .yd = f->t_yd, .where = f->t_where, .off = f->t_off};
+  for (int i = 0; i < 3; i++)
+    et.ptr[i] = f->t_ptr + (uint64_t)i * f->t_entries, et.tab[i] = f->exp_tab + ((uint64_t)l * 3 + (uint64_t)i) * E;
+  const GgufTensor *t[3] = {L->exp_gate, L->exp_up, L->exp_down};
+  const uint32_t rows[3] = {F, F, C}, cols[3] = {C, C, F};
+  float *const y[3] = {f->eg, f->eu, f->ed};
+  const uint32_t *xo[3] = {f->t_xg, f->t_xg, f->t_xd}, *yo[3] = {f->t_yg, f->t_yg, f->t_yd};
+  float *pw = (float *)(f->pick + P);
+  bool ok = mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) &&
+            ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw,
+                              NULL) &&
+            q4x_expert_tiles(f->pick, P, K, E, C, F, &et, NULL) &&
+            ink2_moe_scales(f->pick, pw, f->t_where, f->scale_tab + (uint64_t)l * 3 * E, E, P, f->t_sg, f->t_su,
+                            f->t_a, f->picks_d + (uint64_t)l * E, NULL) &&
+            mm_x16_rows(f->xn, C, f->t_gidx, bd.slots, C, f->xe16, f->overflow, NULL);
+  for (int k = 0; ok && k < 3; k++)
+  {
+    if (k == 2)
+      ok = ink2_swiglu_x16(f->eg, f->eu, f->t_sg, f->t_su, F, g->gate_softcap, g->up_softcap, f->t_hidx, bd.slots,
+                           f->xe16, f->overflow, NULL);
+    for (int r = 0; ok && r < Q4X_TILE_RUNS; r++)
+      if (bd.count[r])
+      {
+        const uint32_t at = bd.first[r];
+        ok = mm_group(t[k]->type, et.ptr[k] + at, f->t_cnt + at, bd.count[r], MM_TILE << r, rows[k], cols[k],
+                      f->xe16, xo[k] + at, cols[k], y[k], yo[k] + at, rows[k], NULL);
+      }
+  }
+  f->m_a = f->t_a, f->m_row = f->t_where;
+  return ok || ink2_fail(err, "inkling2: a GPU call failed (the experts, their tables on the GPU)");
+}
+
 static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
 {
+  if (f->whole)
+    return moe_whole(f, l, n, err);
   const Ink2Geometry *g = &f->w->geo;
   const Ink2Layer *L = &f->w->layer[l];
   const Ink2Dev *d = &f->L[l];
@@ -677,7 +853,7 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   const Ink2Layer *L1 = next ? &f->w->layer[l + 1] : NULL;
   /* the picks' weights after them (pick + P): the two in one copy to the host */
   float *pw = (float *)(f->pick + P), *hw = (float *)(f->hpick + P);
-  if (!mat(f, L->router, d->router, f->xn, n, f->logit) ||
+  if (!mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) ||
       !ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw, NULL) ||
       (next && (!mat(f, L1->router, f->L[l + 1].router, f->xn, n, f->logit) ||
                 !ops_router_scored(f->logit, f->L[l + 1].router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n,
@@ -817,6 +993,28 @@ static bool conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint3
 
 /* a run: n tokens of s at its next positions through the model, their logits at rows row0 .. (those before the
    prompt's end - 1 not) */
+/* a loop's control of input x by message m (upstream's control): gate = down(concat(rms(x), rms(m))), out = x -
+   tanh(forget(gate)) x + tanh(gain(gate)) m; out may be x */
+static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, const float *x, const float *m,
+                    uint32_t n, float *out)
+{
+  const uint32_t C = (uint32_t)f->w->geo.n_embd;
+  const float eps = f->w->geo.rms_eps;
+  /* the two norms' f16 side by side in x16 where down is mm's: its input's, not converted again (ops_rms's bits) */
+  const bool r16 = n <= MM_MAX_TOKENS && mm_takes(f, ink2_type(L->ctrl_down[c]), (uint32_t)L->ctrl_down[c]->dims[1],
+                                                  (uint32_t)L->ctrl_down[c]->dims[0]);
+  const bool normed = r16 ? ops_rms_x16_at(x, C, C, NULL, eps, n, f->ccat, 2 * C, f->x16, 2 * C, 0, f->overflow, NULL) &&
+                                ops_rms_x16_at(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, f->x16, 2 * C, C, f->overflow,
+                                               NULL)
+                          : ops_rms(x, C, C, NULL, eps, n, f->ccat, 2 * C, NULL) &&
+                                ops_rms(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, NULL);
+  return normed &&
+         mat2(f, L->ctrl_down[c], d->ctrl_down[c], f->cgate, NULL, NULL, NULL, f->ccat, n, r16) &&
+         mat2(f, L->ctrl_gain[c], d->ctrl_gain[c], f->cgain, L->ctrl_forget[c], d->ctrl_forget[c], f->cforget,
+              f->cgate, n, false) &&
+         ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL);
+}
+
 static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint32_t row0, char *err)
 {
   const Ink2Weights *W = f->w;
@@ -824,10 +1022,10 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   const uint32_t C = (uint32_t)g->n_embd, H = (uint32_t)g->n_heads, KV = (uint32_t)g->n_kv_heads,
                  D = (uint32_t)g->head_dim, R = (uint32_t)g->d_rel, taps = (uint32_t)g->conv, maxb = f->maxb,
                  pos = (uint32_t)s->pos;
-  const bool llama = g->llama_names;
-  const float res_scale = 1.0f / sqrtf((float)C), conv_res = llama ? 0.0f : 1.0f,
-              conv_scale = llama ? 1.0f : 1.0f / sqrtf((float)taps + 1),
-              dyn_scale = llama ? 1.0f : 1.0f / sqrtf(2.0f * taps + 1);
+  const bool bare = g->keys == INK2_KEYS_UNSLOTH_SMALL; /* its convs' residual and scale not applied */
+  const float res_scale = 1.0f / sqrtf((float)C), conv_res = bare ? 0.0f : 1.0f,
+              conv_scale = bare ? 1.0f : 1.0f / sqrtf((float)taps + 1),
+              dyn_scale = bare ? 1.0f : 1.0f / sqrtf(2.0f * taps + 1);
 #define GPU(x)                                                                                                         \
   do                                                                                                                   \
   {                                                                                                                    \
@@ -839,20 +1037,51 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   GPU(ops_embed(W->embed->type, f->embed, C, f->ids_d, n, 1, f->h, NULL));
   GPU(ops_rms(f->h, C, C, f->embed_norm, g->rms_eps, n, f->h, C, NULL));
   for (int c = 0; c < INK2_CONVS; c++) /* every tail's room first: the step's reads and writes in one place */
-    for (int l = 0; l < g->n_layers; l++)
-      GPU(ink2_tail_room(&s->conv[l][c], n));
+    for (int sl = 0; sl < g->n_slots; sl++)
+      GPU(ink2_tail_room(&s->conv[sl][c], n));
   uint32_t nb = 0;
   pf(PF_HEAD);
   if (f->mtp) /* the drafter's taps: this run's rows of the step's */
     s->tap_row0 = row0, s->tap_pos0 = (int32_t)pos, s->tap_step = f->steps;
-  for (int l = 0; l < g->n_layers; l++)
+  /* the slots in their order: the prelude, the core `passes` times (each from the prelude's output and blocks; a pass
+     after the first its own slots and its layers' messages from the pass before's bank), the tail */
+  const int core = g->loop.passes ? g->loop.end - g->loop.start : 0, passes = core ? g->loop.passes : 1,
+            cs = core ? g->loop.start : g->n_layers;
+  const uint64_t nC = (uint64_t)n * C;
+  uint32_t pre_nb = 0, nbank = 0;
+  for (int step = 0; step < g->n_slots; step++)
   {
+    const int in = step - cs, pass = core && in >= 0 && in < passes * core ? in / core : -1;
+    const int l = pass >= 0 ? cs + in % core : step < cs ? step : step - (passes - 1) * core;
+    const int slot = pass > 0 ? g->n_layers + (pass - 1) * core + in % core : l;
+    const bool looped = pass > 0;
+    if (core && step == cs) /* the prelude's output and blocks: each pass's start */
+    {
+      GPU(hipMemcpyAsync(f->pre_h, f->h, nC * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess);
+      pre_nb = nb;
+    }
+    if (looped && l == cs) /* the pass before's bank (its blocks after its first) and output; then the prelude's */
+    {
+      nbank = nb - pre_nb - 1;
+      if (nbank > f->maxbank)
+        return ink2_fail(err, "inkling2: a pass's blocks past the loop's bank");
+      if (nbank)
+        GPU(hipMemcpy2DAsync(f->bank, (uint64_t)f->maxbank * C * 4, f->blocks + (uint64_t)(pre_nb + 1) * C,
+                             (uint64_t)maxb * C * 4, (uint64_t)nbank * C * 4, n, hipMemcpyDeviceToDevice,
+                             NULL) == hipSuccess);
+      GPU(hipMemcpyAsync(f->bank_out, f->h, nC * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess &&
+          hipMemcpyAsync(f->h, f->pre_h, nC * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess);
+      nb = pre_nb;
+    }
     const Ink2Layer *L = &W->layer[l];
     const Ink2Dev *d = &f->L[l];
     const bool full = !g->sliding[l], boundary = l % g->res_block == 0;
+    if (looped) /* the layer's messages: q, k, v, ffn */
+      GPU(ink2_attn_res(d->msg_q, INK2_CTRLS, f->bank, nbank, f->maxbank, f->bank_out, n, C, g->rms_eps, res_scale,
+                        f->msg, f->res_sc, NULL));
     for (int k = 0; f->mtp && k + 1 < f->mtp->n_taps; k++) /* h entering a target layer: the attention residual's
                                                               running partial */
-      if (f->mtp->targets[k] == l)
+      if (f->mtp->targets[k] == step) /* (a step of the slots' order: unlooped, the layer) */
         GPU(ink2_mtp_tap(f, k, f->h, n, row0));
     const float *aq = f->h, *ak = f->h, *av = f->h;
     if (d->attn_res_q)
@@ -861,18 +1090,27 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                         f->res_sc, NULL));
       aq = f->a3, ak = full ? f->a3 + (uint64_t)n * C : f->a3, av = full ? f->a3 + (uint64_t)2 * n * C : f->a3;
     }
+    if (looped) /* each input by its message: a sliding layer's q, k and v then apart */
+    {
+      GPU(control(f, L, d, INK2_CTRL_Q, aq, f->msg, n, f->ctl) &&
+          control(f, L, d, INK2_CTRL_K, ak, f->msg + nC, n, f->ctl + nC) &&
+          control(f, L, d, INK2_CTRL_V, av, f->msg + 2 * nC, n, f->ctl + 2 * nC));
+      aq = f->ctl, ak = f->ctl + nC, av = f->ctl + 2 * nC;
+    }
+    const bool apart = full || looped; /* q, k and v each their own norm's */
+    const float *k_norm = full ? d->k_norm : d->attn_norm, *v_norm = full ? d->v_norm : d->attn_norm;
     bool ready;
     GPU(rms_for(f, L->q, aq, full ? d->q_norm : d->attn_norm, n, f->xn, &ready));
-    const float *xk = full ? f->kn : f->xn, *xv = full ? f->vn : f->xn;
+    const float *xk = apart ? f->kn : f->xn, *xv = apart ? f->vn : f->xn;
     /* the projections on xn in pairs through its one f16 (the norm's; a sliding layer's k and v too: xn theirs),
        then a full layer's k on kn and v on vn, each its norm's f16 - each matrix's bits its own launch's */
     GPU(mat2(f, L->q, d->q, f->q, L->gate, d->gate, f->gate, f->xn, n, ready) &&
         mat2(f, L->rel, d->rel, f->rel, NULL, NULL, NULL, f->xn, n, true));
-    if (full)
+    if (apart)
     {
-      GPU(rms_for(f, L->k, ak, d->k_norm, n, f->kn, &ready) &&
+      GPU(rms_for(f, L->k, ak, k_norm, n, f->kn, &ready) &&
           mat2(f, L->k, d->k, f->k, NULL, NULL, NULL, xk, n, ready));
-      GPU(rms_for(f, L->v, av, d->v_norm, n, f->vn, &ready) &&
+      GPU(rms_for(f, L->v, av, v_norm, n, f->vn, &ready) &&
           mat2(f, L->v, d->v, f->v, NULL, NULL, NULL, xv, n, ready));
     }
     else
@@ -887,7 +1125,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     /* the keys: a full layer's every row to its position, a sliding layer's window (its last window - 1 and these) */
     /* a decode's split attention: its fold writes the out matrix's f16 too (an mm one's) */
     const bool att16 = n <= INK2_FA_TILE && L->out->dims[0] == (uint64_t)H * D &&
-                       mm_takes(ink2_type(L->out), (uint32_t)L->out->dims[1], H * D);
+                       mm_takes(f, ink2_type(L->out), (uint32_t)L->out->dims[1], H * D);
     const Ink2Attn at = {H,
                          KV,
                          D,
@@ -897,7 +1135,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                          1.0f / sqrtf((float)D),
                          att16 ? f->x16 : NULL,
                          att16 ? f->overflow : NULL};
-    Ink2Tail *tk = &s->kw[l], *tv = &s->vw[l];
+    Ink2Tail *tk = &s->kw[slot], *tv = &s->vw[slot];
     uint32_t n_keys = pos + n;
     if (full)
       tk->held = tv->held = pos; /* the rows to its position, then these */
@@ -910,7 +1148,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     }
     /* the convs, clips, v's norm and the caches' rows in one launch (ink2_attn_prep); a conv tail past its room
        takes its rows after (ink2_tail_put) */
-    Ink2Tail *ck = &s->conv[l][INK2_CONV_K], *cv = &s->conv[l][INK2_CONV_V];
+    Ink2Tail *ck = &s->conv[slot][INK2_CONV_K], *cv = &s->conv[slot][INK2_CONV_V];
     const float *hk = ink2_tail_last(ck, taps - 1), *hv = ink2_tail_last(cv, taps - 1);
     float *keep_k = ink2_tail_claim(ck, n), *keep_v = ink2_tail_claim(cv, n);
     void *store_k = ink2_tail_claim(tk, n), *store_v = ink2_tail_claim(tv, n);
@@ -918,7 +1156,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       return ink2_fail(err, "inkling2: a layer's keys past its cache's room");
     const Ink2Prep prep = {n, H, KV, D, R, taps, f->q, f->rel, d->q_clip, d->rel_clip, g->q_clip, g->rel_clip,
                            g->k_clip, g->rms_eps, conv_res, full ? dyn_scale : conv_scale,
-                           (Ink2Tau){pos, full ? g->log_alpha : 0.0f, (float)g->log_floor}, full,
+                           (Ink2Tau){pos, full ? g->log_alpha : 0.0f, (float)g->log_floor}, full, f->v8,
                            {f->k, d->k_conv, dyn_k, hk, f->kc, keep_k, store_k},
                            {f->v, d->v_conv, dyn_v, hv, f->vc, keep_v, store_v}};
     GPU(ink2_attn_prep(&prep, NULL));
@@ -927,16 +1165,19 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     /* key 0's position: a full layer's 0, a window's its first's (a tile's start); a decode's units split */
     const uint32_t pos0 = full ? 0 : pos + n - n_keys;
     pf(PF_IN);
-    /* a full layer's cache: keys Q8 records, values Q5 (ink2_fa85); a window's f16 */
+    /* a full layer's cache: keys Q8 records, values Q5 (ink2_fa85) or Q8 (ink2_fa8: Ink2Options' values_q8); a
+       window's f16 */
     const bool attended =
-        full ? ink2_fa85(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
+        full && f->v8 ? ink2_fa8(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
+                                 f->fa_part, NULL)
+        : full ? ink2_fa85(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
                          f->fa_part, NULL)
              : ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
                          f->fa_part, NULL);
     GPU(attended);
-    pf(PF_ATTN);
+    pf(full ? PF_FULL : PF_ATTN);
     GPU(mat2(f, L->out, d->out, f->o, NULL, NULL, NULL, f->att, n, att16));
-    Ink2Tail *co = &s->conv[l][INK2_CONV_OUT], *cf = &s->conv[l][INK2_CONV_FFN];
+    Ink2Tail *co = &s->conv[slot][INK2_CONV_OUT], *cf = &s->conv[slot][INK2_CONV_FFN];
     /* r: the output's conv, plus h within a block (a block's first layer's h a block state of its own) */
     if (boundary)
     {
@@ -949,7 +1190,9 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     GPU(conv_put(co, f->o, n, C, taps, d->out_conv, 0, NULL, conv_res, conv_scale, boundary ? NULL : f->h, f->r));
     GPU(ink2_attn_res(d->ffn_res_q, 1, f->blocks, nb, maxb, f->r, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
                       NULL));
-    GPU(ops_rms(f->tmp, C, C, d->ffn_norm, g->rms_eps, n, f->xn, C, NULL));
+    if (looped)
+      GPU(control(f, L, d, INK2_CTRL_FFN, f->tmp, f->msg + 3 * nC, n, f->tmp));
+    GPU(rms_for(f, L->router, f->tmp, d->ffn_norm, n, f->xn, &f->router16)); /* (the router's x16: moe's first) */
     pf(PF_MID);
     if (!moe(f, l, n, err))
       return false;
@@ -967,6 +1210,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
         GPU(ink2_moe_sum(f->moe, f->ed, f->m_a, f->m_row, K, n, C, NULL) &&
             conv_put(cf, f->moe, n, C, taps, d->ffn_out_conv, 0, NULL, conv_res, conv_scale, f->r, f->h));
     }
+    if (f->tap)
+      f->tap(f->tap_arg, slot, "l_out", f->h, n, C);
   }
   pf(PF_MID);
   /* the head: the rows from the prompt's end - 1 on */
@@ -1004,6 +1249,12 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   s->pos += (int32_t)n;
   s->reach = s->reach + n < INK2_MAX_BACK ? s->reach + n : INK2_MAX_BACK;
   return true;
+}
+
+void ink2_forward_tap(Ink2Forward *f, ink2_tap_fn fn, void *arg)
+{
+  if (f)
+    f->tap = fn, f->tap_arg = arg;
 }
 
 bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,

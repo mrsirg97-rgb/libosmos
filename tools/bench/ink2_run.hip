@@ -241,8 +241,8 @@ int main(int argc, char** argv) {
   };
   auto conv = [&](const GgufTensor* w, const float* x, uint32_t ch, float* y) {
     float* dw = dev_tf(w);
-    // (llama.cpp's weights: the residual and the scale folded in - res 0, scale 1)
-    CHECK(ink2_conv(x, T, ch, taps, dw, nullptr, G.llama_names ? 0.0f : 1.0f, G.llama_names ? 1.0f : conv_scale, y,
+    // (unsloth's Inkling-2-Small: the residual and the scale not applied - res 0, scale 1)
+    CHECK(ink2_conv(x, T, ch, taps, dw, nullptr, (G.keys == INK2_KEYS_UNSLOTH_SMALL) ? 0.0f : 1.0f, (G.keys == INK2_KEYS_UNSLOTH_SMALL) ? 1.0f : conv_scale, y,
                     nullptr));
     CHECK(hipDeviceSynchronize() == hipSuccess);
     hipFree(dw);
@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
         const GgufTensor *st = z ? L.v_conv_static : L.k_conv_static, *pr = z ? L.v_conv_proj : L.k_conv_proj;
         matt(pr, z ? xv : xk, T, dyn);
         std::vector<float> sw = f32_of(st);
-        if (G.llama_names) {  // (llama.cpp's: [ch][taps], tap 0 last - the kernel's [taps][ch], tap 0 first)
+        if (G.keys != INK2_KEYS_OURS) {  // (llama.cpp's: [ch][taps], tap 0 last - the kernel's [taps][ch], tap 0 first)
           std::vector<float> tw(sw.size());
           const size_t ch = KV * D;
           for (size_t c = 0; c < ch; c++)
@@ -293,8 +293,8 @@ int main(int argc, char** argv) {
           sw.swap(tw);
         }
         float* dw = dev_f(sw);
-        CHECK(ink2_conv_dyn(z ? v : k, T, KV * D, taps, KV, dw, dyn, nullptr, G.llama_names ? 0.0f : 1.0f,
-                            G.llama_names ? 1.0f : 1.0f / std::sqrt(2.0f * taps + 1), z ? vc : kc, nullptr));
+        CHECK(ink2_conv_dyn(z ? v : k, T, KV * D, taps, KV, dw, dyn, nullptr, (G.keys == INK2_KEYS_UNSLOTH_SMALL) ? 0.0f : 1.0f,
+                            (G.keys == INK2_KEYS_UNSLOTH_SMALL) ? 1.0f : 1.0f / std::sqrt(2.0f * taps + 1), z ? vc : kc, nullptr));
         CHECK(hipDeviceSynchronize() == hipSuccess);
         hipFree(dw);
       }

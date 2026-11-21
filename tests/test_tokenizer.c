@@ -212,7 +212,13 @@ int main(void)
   }
   else
     printf("  Qwen skipped: no Qwen3.8 UD-IQ3_XXS first shard\n");
-  t = of("inkling2/ud-iq1_s/UD-IQ1_S/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf");
+  /* Inkling-2-Small's unsloth GGUF (pre inkling) and Mini's reference (ink2_ref_gguf.py --vocab-from: llama.cpp's
+     arrays, pre inkling2): one tokenizer.json, one split */
+  const char *inkling[] = {"inkling2/ud-iq1_s/UD-IQ1_S/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf",
+                           "inkling2-mini/osmos/ink2-mini-00001-of-00002.gguf"};
+  for (int k = 0; k < 2; k++)
+  {
+  t = of(inkling[k]);
   if (t)
   {
     const int32_t end = tokenizer_find(t, "<|end_message|>");
@@ -223,10 +229,12 @@ int main(void)
            "<|end_message|><|message_model|>");
     long_words(t);
     tokenizer_destroy(t);
-    printf("  Inkling-2's: %d cases, every id its tokenizer.json's, every case's pieces its bytes\n", n);
+    printf("  Inkling-2's (%s): %d cases, every id its tokenizer.json's, every case's pieces its bytes\n",
+           k ? "Mini's reference" : "Small's UD-IQ1_S", n);
   }
   else
-    printf("  Inkling skipped: no Inkling-2-Small UD-IQ1_S first shard\n");
+    printf("  Inkling skipped: no %s\n", inkling[k]);
+  }
   t = of("osmos1.7b/osmos1.7b-Q4_0.gguf");
   if (t)
   {

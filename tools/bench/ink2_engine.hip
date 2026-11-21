@@ -5,6 +5,7 @@
 //   ink2_engine <first shard> <ids> <steps> [ref.f32]   steps: "200,64*30,1*10" - a step's tokens, *k for k of them
 //                                                     (the last one repeated to the ids' end)
 //   ROOM=GiB      the experts' cache (default 32)
+//   KVQ8=1        a full layer's values cached Q8 (Ink2Options' values_q8), not Q5
 //   PICKS=path    a picks profile to warm by (the most picked experts first); PICKS_OUT=path: this run's written
 //   DRAFT=gguf    the drafter (ink2_mtp_gguf.py's): after each step its context seeded, a draft at the next anchor
 //                 (the token after the step's, no floors) printed beside the text's - its acceptance
@@ -112,7 +113,7 @@ int main(int argc, char** argv) {
     CHECK(mtp);
   }
   const Ink2Options o = {T + 16, maxs, (uint64_t) (room * (double) (1ull << 30)), picks.empty() ? nullptr : picks.data(),
-                         mtp};
+                         mtp, 0, 0, std::getenv("KVQ8") && std::atoi(std::getenv("KVQ8"))};
   uint32_t drafted = 0, accepted = 0, rounds = 0;
   auto t0 = std::chrono::steady_clock::now();
   Ink2Forward* f = ink2_forward_create(W, &o, err);

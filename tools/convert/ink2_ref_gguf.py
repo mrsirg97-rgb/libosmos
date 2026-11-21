@@ -1,11 +1,12 @@
-"""ink2_ref_gguf.py - thinkingmachines/Inkling-2-Small as a reference GGUF: every weight the original's, no value changed.
+"""ink2_ref_gguf.py - thinkingmachines/Inkling-2-Small (or -Mini) as a reference GGUF: every weight the original's, no
+value changed.
 
     PYTHONPATH=<llama.cpp>/gguf-py python tools/convert/ink2_ref_gguf.py --src ~/Models/inkling2/Inkling-2-Small \
         --out ~/Models/inkling2/ref/ink2-ref [--layers 0,1]       (shards of whole layers, ~48 GB, 393 GB)
     ... --check 0,40          (decode sampled expert rows both ways, compare the bits)
 
-- the routed experts of layers 0-39: NVFP4 (ggml type 40). The checkpoint's E2M1 codes two to a byte (the even column
-  the low nibble), an E4M3 scale every 16, and an outer scale a expert, amax[e] / denominator (vLLM's Inkling2MoE: the
+- the routed experts of layers 0-39 (Small's; Mini's 0-19 - by the checkpoint's dtype): NVFP4 (ggml type 40). The
+  checkpoint's E2M1 codes two to a byte (the even column the low nibble), an E4M3 scale every 16, and an outer scale a expert, amax[e] / denominator (vLLM's Inkling2MoE: the
   weight's share of the GEMM's (x_amax * w_amax) / (1536 * denominator)). In ggml's layout a block is 64 values: 4
   scales as UE4M3 (the E4M3 bits, which must have no sign and no NaN), then 32 bytes, sub-block s's value j in byte
   8s + j's low nibble and j + 8 in its high one. The outer scale is a tensor of its own, `<name>.scale` (F32, one a
@@ -22,6 +23,11 @@
 - --delete-source (0.8.0: a disk that holds the checkpoint or the reference, not both): each source shard removed once
   every tensor it holds is in a finished output shard; the plan written first (<out>.plan.json), so a resumed run
   needs no header of a removed file. the whole model only (not --layers or --check).
+- Inkling-2-Mini's loop (its loop_config): the keys inkling2.num_loops and inkling2.loop.* (unsloth's), block_count
+  the cache slots (24 layers + 2 more passes of the 12-layer core: 48); each core layer's controllers and the two
+  cross-pass query tables as stored (BF16, F32), under unsloth's GGUF's names. --name Inkling-2-Mini.
+- --vocab-from: llama.cpp's tokenizer arrays (tokenizer.ggml.*: what osmos's tokenizer reads) copied from a GGUF it
+  converted from the same tokenizer.json (unsloth's), its tokens checked against the checkpoint's first.
 - names: GGUF style where one fits (blk.N.attn_q ...), Inkling's own words where none does; the map is NAMES below.
 """
 from __future__ import annotations
@@ -45,6 +51,10 @@ SIZES = {NVFP4: (64, 36), MXFP8: (32, 33), gguf.GGMLQuantizationType.BF16: (1, 2
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--src", required=True)
+ap.add_argument("--vocab-from", default="",
+                help="a GGUF llama.cpp converted from the same tokenizer.json (unsloth's): its tokenizer.ggml.* copied, "
+                     "checked against the checkpoint's tokenizer.json first")
+ap.add_argument("--name", default="Inkling-2-Small", help="the model's name (general.name: <name> (reference: ...))")
 ap.add_argument("--out", default="", help="the output's path prefix: <prefix>-0000N-of-0000M.gguf")
 ap.add_argument("--layers", default="", help="only these layers (a test), comma-separated")
 ap.add_argument("--split-gb", type=float, default=48.0)
@@ -83,6 +93,10 @@ NAMES = [
     (r"model\.llm\.layers\.(\d+)\.mlp_norm\.weight", "blk.{0}.ffn_norm.weight"),
     (r"model\.llm\.layers\.(\d+)\.mlp\.gate\.weight", "blk.{0}.ffn_gate_inp.weight"),
     (r"model\.llm\.layers\.(\d+)\.mlp\.gate\.bias", "blk.{0}.exp_probs_b.bias"),
+    # the loop's (Inkling-2-Mini): a core layer's controls, the message queries (unsloth's GGUF's names)
+    (r"model\.llm\.layers\.(\d+)\.controllers\.(attn|k|v|mlp)\.(down|gain|forget)_weight", "blk.{0}.loop_{1}_{2}.weight"),
+    (r"model\.llm\.middle_cycle_cross_pass_queries", "loop_res_query.weight"),
+    (r"model\.llm\.middle_cycle_cross_pass_kv_queries", "loop_kv_res_query.weight"),
     # the drafter (mtp.safetensors)
     (r"layers\.(\d+)\.(.+)", "mtp.blk.{0}.{1}"),
     (r"markov_head\.(.+)", "mtp.markov.{0}"),
@@ -235,6 +249,21 @@ def check(src, L, rows=8):
                       "expert0_amax": amax, "expert0_decoded_max": dec}))
 
 
+def vocab(w, tc):
+    """llama.cpp's tokenizer arrays (osmos's tokenizer reads them: src/text/tokenizer.c) from --vocab-from, as written
+    there - after its tokens are checked: the unpadded vocabulary's count, each of tokenizer.json's BPE tokens at its id"""
+    r = gguf.GGUFReader(a.vocab_from)
+    toks = r.fields["tokenizer.ggml.tokens"].contents()
+    tj = json.load(open(os.path.join(a.src, "tokenizer.json"), encoding="utf-8"))
+    assert len(toks) == tc["unpadded_vocab_size"], f"{len(toks)} tokens, the vocabulary {tc['unpadded_vocab_size']}"
+    bad = [t for t, i in tj["model"]["vocab"].items() if toks[i] != t]
+    assert not bad, f"{len(bad)} of tokenizer.json's tokens not at their ids (first {bad[:3]})"
+    for k, f in r.fields.items():
+        if k.startswith("tokenizer.ggml."):
+            sub = f.types[1] if f.types[0] == gguf.GGUFValueType.ARRAY else None
+            w.add_key_value(k, f.contents(), f.types[0], sub_type=sub)
+
+
 def meta(w, tc):
     """the text model's shape as llama.cpp-style keys (src/ink2/geo.c reads them). what this build implements is
     asserted, not written: the sliding layers' heads the full ones', no q / o bias, no pre-affine norms, the value norm
@@ -250,7 +279,16 @@ def meta(w, tc):
         assert tc.get(k, v) == v, f"{k} = {tc.get(k)}: not what the code implements ({v})"
     A, L = "inkling2", tc["num_hidden_layers"]
     local = tc.get("local_layer_ids") or [i for i in range(L) if (i + 1) % 6 != 0]
-    u32 = {"block_count": L, "embedding_length": tc["hidden_size"], "context_length": tc["model_max_length"],
+    slots = L
+    lc = tc.get("loop_config")
+    if lc:   # (the loop: block_count its cache slots, a core layer's passes after the first one each - geo.c's loop())
+        assert set(lc) == {"core_start", "core_end", "num_passes", "gate_rank", "is_varloop"}, f"loop_config {lc}"
+        assert not lc["is_varloop"], "a variable loop: not what the code implements"
+        blk = tc["n_layers_per_attn_res_block"]
+        assert 0 < lc["core_start"] < lc["core_end"] <= L and lc["core_start"] % blk == 0 == lc["core_end"] % blk
+        assert lc["num_passes"] >= 2 and lc["gate_rank"] >= 1, f"loop_config {lc}"
+        slots = L + (lc["num_passes"] - 1) * (lc["core_end"] - lc["core_start"])
+    u32 = {"block_count": slots, "embedding_length": tc["hidden_size"], "context_length": tc["model_max_length"],
            "vocab_size": tc["unpadded_vocab_size"], "attention.head_count": tc["num_attention_heads"],
            "attention.head_count_kv": tc["num_key_value_heads"], "attention.key_length": tc["head_dim"],
            "attention.value_length": tc["head_dim"], "attention.sliding_window": tc["sliding_window_size"],
@@ -264,6 +302,9 @@ def meta(w, tc):
            "attention.relative_clip": tc["rel_l2_clip_threshold"], "expert_weights_scale": tc["route_scale"],
            "expert_gate_softcap": tc["mlp_gate_softcap"], "expert_up_softcap": tc["mlp_up_softcap"],
            "final_logit_softcapping": tc["final_logit_softcapping"]}
+    if lc:
+        u32.update({"num_loops": lc["num_passes"], "loop.core_start": lc["core_start"],
+                    "loop.core_end": lc["core_end"], "loop.gate_rank": lc["gate_rank"]})
     for k, v in u32.items():
         w.add_uint32(f"{A}.{k}", int(v))
     for k, v in f32.items():
@@ -371,9 +412,11 @@ def write(src, tc, shards):
         w.add_uint16("split.count", count)
         w.add_int32("split.tensors.count", sum(map(len, shards)))
         if no == 0:
-            w.add_name("Inkling-2-Small (reference: the original weights)")
+            w.add_name(f"{a.name} (reference: the original weights)")
             w.add_string("general.quantized_by", "osmos ink2_ref_gguf.py: no value changed")
             meta(w, tc)
+            if a.vocab_from:
+                vocab(w, tc)
             w.add_string("inkling2.mtp_config.json", json.dumps(src.cfg.get("mtp_config", {})))
             for key, f in (("tokenizer.huggingface.json", "tokenizer.json"), ("tokenizer.chat_template", "chat_template.jinja")):
                 if os.path.exists(os.path.join(a.src, f)):

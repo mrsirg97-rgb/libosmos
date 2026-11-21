@@ -1,5 +1,5 @@
 // the prompt kernels' f16 decodes (kernels/quant.h): each type's decode_h the bits of decode then f16 (Q4_K's one
-// fma, (d sc) q exact in F32; IQ4_NL / IQ4_XS's values by v_perm_b32), and decode_hn's runs of 2 and 4 chunks (a
+// fma, (d sc) q exact in F32; IQ4_NL / IQ4_XS's values by v_perm_b32; MXFP8's and NVFP4's codes as f16 by bits), and decode_hn's runs of 2 and 4 chunks (a
 // group's scales once) decode_h's chunk by chunk - on random blocks (their f16 scales any finite value, subnormals
 // and the largest among them). needs a GPU; skipped
 // (77) without one.
@@ -114,6 +114,8 @@ int main() {
   check<quant::kIQ4_NL>("IQ4_NL", {0});
   check<quant::kIQ4_XS>("IQ4_XS", {0});
   check<quant::kIQ3_XXS>("IQ3_XXS", {0});
+  check<quant::kMXFP8>("MXFP8", {});  // every byte random: each E8M0 scale, each E4M3 code (NaN's among them)
+  check<quant::kNVFP4>("NVFP4", {});
   std::printf("[test_decode_run_gpu] ok\n");
   return 0;
 }
