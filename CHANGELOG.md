@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.12.0]: Inkling-2-Mini, and prompts twice as fast on the Inkling family
+
+- **Inkling-2-Mini** (`inkling-2-mini`, 19.6 GB + a 0.4 GB drafter, 1M context): Thinking Machines' release served
+  as it ships - its experts NVFP4 and MXFP8, its dense weights BF16, no value changed - with its own DSpark drafter.
+  Its looped middle layers (6-17, three passes a token) run as upstream llama.cpp's implementation does, each pass
+  its own cache slot (48 for 24 layers); against llama.cpp's own run of the release the logits' KL is inside
+  llama.cpp's own GPU-against-CPU spread. On performance: drafted decode 33-50 tok/s, plain ~26; prompts ~1,000
+  tok/s to 37K tokens, 775 at 131K. Every expert stays in GPU memory.
+- **Faster prompts for Inkling**: Mini's dense BF16 matrices now run on the matrix cores (the weights still BF16 on
+  disk; each one's f16 in the kernel, exact for all but 0.017% of them, those within 2^-25) - an 8K prompt 500 ->
+  1,028 tok/s at low-power, decode no slower. The prompt attention's kernel does the same work in less time with the
+  same output bits: a full layer at 512K keys 920 -> 548 us a token (Mini), 1,409 -> 1,199 (Small).
+- **`kv_q8`**, a pack setting (osmos.json; osmos-serve's `--kv-q8`): an Inkling full layer's cached values Q8 like its
+  keys, not Q5. Mini has it on (17 KiB a token, 17 GiB at 1M); Inkling-2-Small keeps Q5 (its 256K fit). The other
+  families refuse it.
+- osmos-api's prompt progress line says how far it has read (`327680 of 524355 read in 786.3 s`), not the whole
+  length every step.
+- Inkling-2-Small's output is unchanged: its bits are 0.11.3's (its pack's tokens' hashes after an 8K and a 2K
+  prompt, plain and drafted, against 0.11.3's and 0.11.2's engines). Only a model whose dense weights are BF16 takes
+  the new BF16 path; Small's one BF16 matrix, its sliding layers' sink projection, stays on the matvec.
+
 ## [0.11.3]: a long wait's cause in the log, and osmos1.7b's tool loops kept
 
 - **A request's prefix reuse in osmos-api's log** (rig's row log): `request N: a P-token prompt, R reused (via), K

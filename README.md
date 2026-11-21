@@ -1,6 +1,6 @@
 # libosmos
 
-An inference engine for four big mixture-of-experts models, and one small long-context one, on one **AMD Strix Halo**
+An inference engine for five mixture-of-experts models, and one small long-context one, on one **AMD Strix Halo**
 (Ryzen AI MAX+ 395, Radeon 8060S / gfx1151, 128 GB):
 
 - **DeepSeek-V4.1-Flash** (~768B parameters, ~250 GB quantized), more than fits in memory: the experts it needs are
@@ -10,6 +10,9 @@ An inference engine for four big mixture-of-experts models, and one small long-c
   the ~84 GB osmos keeps in memory, drafted by its own multi-token-prediction head.
 - **Hy4-flash** (Tencent; 220B, ~11B active a token, AngelSlim's Q3_K), its backbone in GPU memory and its 63 GB
   Engram table read from the SSD, drafted by the release's own DFly2, to a 1M context.
+- **Inkling-2-Mini** (Thinking Machines; 26B, its middle layers looped three times a token), the release's own
+  NVFP4 / MXFP8 / BF16 weights - 19.6 GB, all of it in GPU memory - drafted by its own head, to a 1M context:
+  prompts at ~1,000 tokens a second.
 - **osmos1.7b** (LFM3-1.7B, 1.36 GB in Q4_0), its full-attention layers reading a 512K context through latent sparse
   attention: prompts at thousands of tokens a second, each token's attention ~4,600 keys however long the context.
 
@@ -64,7 +67,7 @@ A running row takes the new version at its next start.
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
 header - turns since the last tool call, the most repeated recent call, orphaned calls and results (a client's
 history compaction can drop one side), and `stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
-true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling 256K, Hy4-flash 1M, osmos1.7b 512K), or
+true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling-2-Small 256K, Inkling-2-Mini 1M, Hy4-flash 1M, osmos1.7b 512K), or
 `--ctx` (installer or osmos-api: `512k`, `1m`, ...).
 
 ## The packs
@@ -80,6 +83,7 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 | `osmos-evo-inkling` | 158 GB (unsloth's UD-IQ1_S files + a 55.5 GB delta in two parts, made where you install it) + 1.3 GB drafter | 256K | Inkling-2-Small: UD-IQ1_S with its experts' down projections IQ2_S / IQ3_XXS and its attention and head Q5_K |
 | `osmos1.7b` | 1.36 GB + 0.8 MB of LSA maps | 512K | a small, fast agent model: LFM3-1.7B, its long contexts read sparse (`vibes1.7b`: its old name) |
 | `hy4-flash` | 92 GB (~79 GiB in GPU memory) + 63 GB Engram table + 1.7 GB DFly2 drafter | 1M | Tencent's Hy4-flash: 220B, ~11B active a token, its own drafter - AngelSlim's Q3_K |
+| `inkling-2-mini` | 19.6 GB (all in GPU memory) + 0.4 GB drafter | 1M | Inkling-2-Mini as released: fast prompts, long contexts, the most room to spare |
 
 ## osmos-evo-1017 in numbers
 
@@ -152,6 +156,26 @@ Every token is the bits of the same tokens read as a prompt, drafted or not, at 
 experts (61%) stay in memory and the rest stream from the SSD; a full-attention layer's keys are cached Q8 and its
 values Q5 (KL +0.001 against f16), so a 256K context's cache is 3.5 GB. Drafted runs vary by about ±8% from run to
 run at the same acceptance (which experts are resident when); plain decode and prompts within ~2%.
+
+## inkling-2-mini in numbers
+
+[Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) (Thinking Machines; 26.4B, 3.4B active, its
+middle layers 6-17 run three times a token) served from the release itself: its routed experts NVFP4 (layers 0-19)
+and MXFP8 (20-23), its dense weights BF16 as released - on the GPU's matrix cores, each weight's f16 in the kernel -
+and its own DSpark drafter (Q8_0). osmos 0.12.0, the `performance` profile, osmos-api, one conversation:
+
+| | drafted / plain |
+| --- | ---: |
+| Decode, three short questions | **33.5** / 25.7, **42.4** / 26.6, **35.1** / 25.7 tok/s |
+| Decode, a coding task | **49.6** / 25.2 tok/s |
+| Decode after a 131K prompt | **24.2** / 17.0 tok/s |
+| Prompt, 3K / 37K / 131K tokens (plain) | **1,001** / **1,045** / 775 tok/s |
+| KL against upstream llama.cpp's own run of the release (64 / 2,048 tokens) | 2.9e-3 / 1.1e-3 (its own GPU against CPU: 3.0e-3 / 1.2e-3) |
+
+Each pass of a looped layer keeps its own cache (48 slots for 24 layers); a full-attention layer's keys and values
+are cached Q8 (the pack's `kv_q8`), 17 KiB a token, so a 1M context's cache is 17 GiB beside the 19.6 GB model.
+A fact hidden in a 1,000,652-token prompt, 900K tokens before the question, was found (read in 79 minutes, 212
+tok/s); 128K and 512K needles at 10 / 50 / 90% likewise.
 
 ## osmos1.7b in numbers
 

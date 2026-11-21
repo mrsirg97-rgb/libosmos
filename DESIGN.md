@@ -2086,6 +2086,61 @@ operator's: upstream cloned for this), on its converter's GGUF of the release (5
 **not now**: unsloth's GGUF served (BF16 expert kernels for its tail); upstream's inkling2_loop names (its own
 conversion: per-layer loop_msg_query, loop_*_ctrl_*).
 
+### 0.12.0: the prompt, measured and made faster (2026-11-21, low-power unless named)
+
+**where a prompt's time went** (rocprofv3 --kernel-trace over a 37K-token prompt in 4,096-token steps, Mini, the
+whole membrane): the dense BF16 matrices 43% (mv's wide kernel - no mm path read BF16), the full layers' attention
+25%, the experts 17%, the rest the attention residuals, norms, convs and the loop's controls. INK2_PROFILE now times
+a sliding layer's attention and a full layer's apart.
+
+**the attention, the same bits** (ac9ef82, f322ba7, 65be898): a block 8 row tiles for G = 3 (24 waves: each decoded
+K / V tile serves 24 rows of 16, not 12); a row's max and sum by DPP row_xmask (__shfl_xor's partners in registers,
+not ds_bpermute through LDS); a Q8 / Q5 tile decoded by f16 products (the F32 product exact, its one rounding the
+same); the tile's threads key-major (V^T's stores no 16-way bank conflict); the running fold's (gm, gl) in LDS (read
+at a unit's end only: spills 116 -> 72 bytes a lane); the softmax's rows and the P.V slices unrolled (the compiler had
+indexed m[], l[] by m0 with a branch a row); a row's max one v_max_f32_dpp a step (fmaxf's move, canonicalize, max:
+the scores are never NaN). Mini's full-layer attention a prompt token at 128K / 512K / 1M keys: 221 / 920 / 1,870 us
+-> 126 / 548 / 1,122; Small's 512K 1,409 -> 1,199. DUMP's bits the same (Mini, Small; Q8 / Q5 and f16; 16K, 128K,
+512K, 1M). **the bit-changing redesign, not taken**: upper bounds by switching parts off (-DFA_P, a variant library
+each): the whole softmax gone (reductions, rescale) only ~20% at 512K, exp2 for expf ~5%; with Q's fragments not
+spilled (most of QK dropped) 385 us against ~600 - the spills around QK the cost, not the softmax. a 32-key softmax
+adds a second score fragment (more spills). the next lever Q in LDS: 96 KB at 8 row tiles, past the 64.
+
+**the cache's values Q8** (0a40933): a pack's `kv_q8` (osmos.json; osmos-serve's --kv-q8; Ink2Options' values_q8):
+a full layer's values Q8 records as its keys (ink2_fa8), not Q5 - Mini's 14 -> 17 KiB a token, 1M 14 -> 17 GiB
+(8 full-layer slots: layers 5, 11, 17, 23, the core's 11 and 17 three passes). against llama.cpp's F16 cache: Q8 /
+Q5 KL 2.9e-3 / 2.7e-3 at 64 ids, 1.3e-3 / 1.4e-3 at 2,048 (its own GPU / CPU 3.0e-3 / 1.2e-3) - no difference
+measurable at these lengths; taken for Mini because it has the room (~40 GB at 1M of 128) and Q5 was never tried on
+code with it. Small keeps Q5 (256K's fit). the other families refuse the flag.
+
+**the dense matrices on WMMA** (784938f): Mini's dense weights are BF16 as released (q, gate, out, k, v, rel, the
+router, the head, the loop's controls). mm takes BF16 by name - ink2's mm_takes, not mm_known's table, so Hy4's and
+osmos1.7b's BF16 matrices stay the matvec's - each weight its f16 in the kernel: all but those below f16's normal
+range, 322,439 of 1.93 G (0.017%), each within 2^-25 of its value. mmsweep bf16, 2,048 tokens: q / gate 5,839 ->
+1,008 us, out 6,153 -> 1,661, k / v 2,111 -> 332 (5-6x); at a token the default 128 x 8 x 8 197 / 217 / 190 GB/s
+against the matvec's 209 / 205 / 176 - so a 2,304-column row (18 slabs of 128) takes 9 waves (228 / 200 GB/s), 3,072
+columns keep 8, a 64-column row (the gains, forgets) one 64-value slab; the gemm takes the tile's shape, so a row's
+bits are its own at every count (test_mm_gpu's BF16 case: 1, 16, 65, 2,048 tokens). the WMMA path wants f16 inputs:
+the loop controls' two norms and the MoE's write their matrix's f16 beside them (ops_rms_x16_at), not a conversion
+launch each (353 -> ~160 a token; the same bits: the logits' hashes, prompt and decode rows). an 8K prompt 500 ->
+1,028 tok/s, 32K 604 -> 954; decode 23.7 -> 23.9. against llama.cpp (values Q8): KL 2.9e-3 / 1.1e-3 at 64 / 2,048
+ids; Q5's 64-id max 7.3e-2 (bound 8e-2: one sharp row, the f16 inputs' rounding). **Small's bits**: caught at the
+release check (Small's pack through 0.11.2's, 0.11.3's and this engine: an 8K prompt's 64 tokens another hash; a
+bisect named 784938f) - Small's sliding layers' sink projections are BF16 (4,608 x 48: 48 rows tile), so they had
+moved to mm too. the BF16 path is now the model's (f->bf16_mm: its attention's q BF16 - Mini's dense weights), not
+a matrix's: Small's sink stays the matvec's, its hashes 0.11.3's again (8K and 2K, plain and drafted); Mini's
+logits the same bits as before the fix (test_ink2_loop_gpu's KL to the digit).
+
+**the needles** (performance): on the earlier build (Q5 values, the dense matvec) 128K and 512K at 10 / 50 / 90% all
+found (512K read at 317-319 tok/s, 28 minutes each); on the release's (784938f: kv_q8, the dense matrices on WMMA)
+512K at 10% found (355 tok/s, 25 minutes) and 1M at 10% - 1,000,652 tokens, the fact 900K before the question -
+found (212 tok/s, 79 minutes). 1M at 50 / 90% not run (the operator's call: the farthest recall the one). a deep
+prompt is the full layers' attention's: the dense matrices' 2x is a shallow prompt's, 512K +12%.
+
+**the numbers** (performance, osmos-api, one conversation; drafted / plain): decode, three short questions 33.5 /
+25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
+2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
+
 ## 0.11.2: the audit - correctness, then the families' shared code (2026-11-20)
 
 the operator's: a full sweep after six families in a few weeks - the engine and kernels first (correctness, then

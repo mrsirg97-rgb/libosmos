@@ -70,7 +70,8 @@ class Manifest(unittest.TestCase):
         m = manifest.load(REAL)
         self.assertRegex(m["rig"]["version"], r"^v[0-9]+\.[0-9]+\.[0-9]+$")
         self.assertEqual(set(m["packs"]), {"osmos-evo-1017", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
-                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "osmos1.7b", "hy4-flash"})  # 0.6.10: one Qwen context, 512K - no 1M pack
+                                           "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "osmos1.7b", "hy4-flash",
+                                           "inkling-2-mini"})  # 0.6.10: one Qwen context, 512K - no 1M pack
         v = m["packs"]["osmos1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 512K (its needles: DESIGN.md, "rope")
         self.assertEqual((v["lsa"], v["settings"]), ("osmos1.7b-lsa", {"max_context": 524288, "max_tokens": 4096,
                                                                         "preserve_thinking": True}))  # 0.11.3
@@ -1269,7 +1270,7 @@ class Rig(unittest.TestCase):
                                "ud-iq2_xxs": "deepseek-1017-ud-l", "qwen38-ud-iq3_xxs": "qwen3.8-flash-next",
                                "qwen38-ud-q4_k_xl": "qwen3.8-flash-next-l",
                            "osmos-evo-inkling": "inkling-2-small-evo", "osmos1.7b": "osmos1.7b",
-                       "hy4-flash": "hy4-flash"})
+                       "hy4-flash": "hy4-flash", "inkling-2-mini": "inkling-2-mini"})
         aliases = [a for p in self.PACKS.values() for a in p["rig"]["aliases"]]
         self.assertEqual(len(aliases), len(set(aliases)))  # no alias two rows'
 
