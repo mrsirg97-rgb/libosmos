@@ -29,8 +29,10 @@ typedef struct Ink2Mtp
   int n_layers, n_embd, n_heads, n_kv_heads, ff, window, block, rank, n_taps;
   float eps, rope_base;
   bool local[INK2_MTP_MAX_LAYERS];   /* a layer's attention over its window (else every position) */
-  int32_t targets[INK2_MTP_MAX_TAPS]; /* the target's layers each tap is the entry of; the last its n_layers: the
-                                         final hidden (the head's input) */
+  int32_t targets[INK2_MTP_MAX_TAPS]; /* the target's steps each tap is the entry of - its slots in the order they
+                                         run (a loop's passes unrolled: Mini's 5, 23, 41 the prelude's layer 5, pass
+                                         2's 11, pass 3's 17; unlooped, its layers); the last its n_slots: the final
+                                         hidden (the head's input) */
   Ink2MtpLayer layer[INK2_MTP_MAX_LAYERS];
   const GgufTensor *fuse, *mask, *norm, *m_dflare, *m_hidden_w, *m_hidden_b, *m_w1, *m_rnn_w, *m_rnn_b;
 } Ink2Mtp;
@@ -43,7 +45,7 @@ void ink2_mtp_destroy(Ink2Mtp *m);
 /*
 ink2_mtp_create
   the drafter in g for the target: its geometry from its metadata (inkling2_mtp.*) - its width the target's, its
-  taps the target's layers ascending and the last the target's n_layers, its heads of INK2_MTP_HEAD, a block of at
+  taps the target's steps (its slots in the order they run) ascending and the last the target's n_slots, its heads of INK2_MTP_HEAD, a block of at
   most INK2_MTP_BLOCK, its rank INK2_MTP_RANK - then every tensor given its role and checked: its dims, a type its
   reader takes (a matrix the matvec's, markov_w1 BF16 rows, the rest F32). NULL with why, naming the key or tensor.
   the drafter points into g: g outlives it.

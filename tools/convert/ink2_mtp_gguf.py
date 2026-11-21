@@ -1,4 +1,4 @@
-"""ink2_mtp_gguf.py - Inkling-2-Small's drafter (the checkpoint's mtp.safetensors: DSpark, the RNN Markov head) as a
+"""ink2_mtp_gguf.py - Inkling-2's drafter (Small's, Mini's) (the checkpoint's mtp.safetensors: DSpark, the RNN Markov head) as a
 GGUF osmos reads (general.architecture inkling2_mtp): every tensor under its checkpoint name, the matrices BF16 (the
 checkpoint's values) or Q8_0, the norms, mask, fuse weights and the Markov head's small tensors F32, and mtp_config's
 geometry as inkling2_mtp.* keys. the drafter's forward: tools/convert/ink2_mtp_oracle.py (TokenSpeed's math).
@@ -22,11 +22,12 @@ ap.add_argument("mtp")
 ap.add_argument("config")
 ap.add_argument("out")
 ap.add_argument("--q8", action="store_true")
+ap.add_argument("--source", default="thinkingmachines/Inkling-2-Small", help="the checkpoint's name (provenance)")
 a = ap.parse_args()
 cfg = json.load(open(a.config))
 m = cfg["mtp_config"]
-need = {"hidden_size": 4608, "num_attention_heads": 48, "num_key_value_heads": 8, "head_dim": 128, "block_size": 8,
-        "markov_rank": 256, "markov_head_type": "rnn_hidden", "sliding_window_size": 1024}
+need = {"head_dim": 128, "block_size": 8, "markov_rank": 256, "markov_head_type": "rnn_hidden",
+        "sliding_window_size": 1024}   # (the kernels'; its width and heads osmos checks against the target's)
 for k, v in need.items():
     if m.get(k) != v:
         sys.exit(f"mtp_config.{k} {m.get(k)!r}: this converter writes {v!r} (osmos's drafter's shapes)")
@@ -46,7 +47,7 @@ w.add_array("inkling2_mtp.local_layers", [int(x) for x in m["local_layer_ids"]])
 w.add_uint32("inkling2_mtp.block_size", m["block_size"])
 w.add_uint32("inkling2_mtp.markov_rank", m["markov_rank"])
 w.add_array("inkling2_mtp.target_layers", [int(x) for x in m["target_layer_ids"]])
-w.add_string("inkling2_mtp.source", "thinkingmachines/Inkling-2-Small mtp.safetensors")
+w.add_string("inkling2_mtp.source", f"{a.source} mtp.safetensors")
 n_bytes = 0
 for name in sorted(W):
     t = W[name].float().numpy()

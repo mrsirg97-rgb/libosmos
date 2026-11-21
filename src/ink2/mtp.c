@@ -83,9 +83,9 @@ Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[INK2
   {
     m->targets[i] = (int32_t)taps[i];
     const bool last = i + 1 == n_taps;
-    if ((last && taps[i] != tg->n_layers) || (!last && (taps[i] < 0 || taps[i] >= tg->n_layers)) ||
+    if ((last && taps[i] != tg->n_slots) || (!last && (taps[i] < 0 || taps[i] >= tg->n_slots)) ||
         (i && taps[i] <= taps[i - 1]))
-      ok = fail(err, ARCH ".target_layers", "not the target's layers ascending, the last its n_layers");
+      ok = fail(err, ARCH ".target_layers", "not the target's steps ascending, the last its n_slots");
   }
   for (size_t i = 0; ok && i < n_local; i++)
     if (local[i] < 0 || local[i] >= m->n_layers)

@@ -558,8 +558,6 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
 {
   if (!w || !o || !o->max_ctx || !o->max_tokens)
     return ink2_fail(err, "inkling2: no weights, or max_ctx / max_tokens 0"), NULL;
-  if (w->geo.loop.passes && o->mtp)
-    return ink2_fail(err, "inkling2: a drafter beside a loop (Inkling-2-Mini's): not implemented"), NULL;
   Ink2Forward *f = calloc(1, sizeof *f);
   if (!f)
     return ink2_fail(err, "out of memory"), NULL;
@@ -1067,7 +1065,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                         f->msg, f->res_sc, NULL));
     for (int k = 0; f->mtp && k + 1 < f->mtp->n_taps; k++) /* h entering a target layer: the attention residual's
                                                               running partial */
-      if (f->mtp->targets[k] == l)
+      if (f->mtp->targets[k] == step) /* (a step of the slots' order: unlooped, the layer) */
         GPU(ink2_mtp_tap(f, k, f->h, n, row0));
     const float *aq = f->h, *ak = f->h, *av = f->h;
     if (d->attn_res_q)
