@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.12.2]: the installer's --dry-run writes nothing, with --upgrade too
+
+- **`osmos_install.py --upgrade VERSION --dry-run`** built the version and moved rig's rows - the upgrade ran before
+  the dry-run check, though `--dry-run` promises nothing written. Now it says what it would do: the version it would
+  clone and build (or that it is built already), each row it would move, and nothing is cloned, built or written - no
+  row, no frozen config, no journal. `--rollback --dry-run` likewise names the rows it would move back, and
+  `--prune --yes --dry-run` names the folders it would remove. Tests: versions' build, upgrade and rollback dry, and
+  the installer's own `--upgrade --dry-run` against a scratch versions folder and rig home (both failed before).
+- No engine change: every model's bits are 0.12.1's.
+
 ## [0.12.1]: Inkling-2-Small's output held to 0.11.3's by a test
 
 - **test_ink2_small_ref_gpu**: Inkling-2-Small's pack through the engine as osmos-serve runs it - an 8,448- and a
