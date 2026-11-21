@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.12.1]: Inkling-2-Small's output held to 0.11.3's by a test
+
+- **test_ink2_small_ref_gpu**: Inkling-2-Small's pack through the engine as osmos-serve runs it - an 8,448- and a
+  2,099-token prompt in 4,096-token steps, then 16 greedy steps - every row's logits hashed against 0.11.3's (the
+  test built on 0.11.3's own library gives the same hashes). 0.12.0's release check found by hand that its BF16 path
+  had reached Small's sink projections (fixed before it shipped); this test fails on that change, both prompts, even
+  where the greedy tokens did not move. Skipped without the pack.
+- No engine change: every model's bits are 0.12.0's.
+
 ## [0.12.0]: Inkling-2-Mini, and prompts twice as fast on the Inkling family
 
 - **Inkling-2-Mini** (`inkling-2-mini`, 19.6 GB + a 0.4 GB drafter, 1M context): Thinking Machines' release served
