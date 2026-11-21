@@ -414,6 +414,13 @@ int main() {
     held((w + "flash attention, ungated").c_str(), host_of(dout, qr.v.size()), in(c, "ungated"), 1.0, kF16Rel);
     CHECK(ink2_fa(&at, dq, dr, ds, dg, n, dk, dv, n, 0, drp, dout, nullptr, nullptr));
     held((w + "flash attention, gated").c_str(), host_of(dout, qr.v.size()), in(c, "out"), 1.0, kF16Rel);
+    {  // its relative bias INK2_FA_REL states a head, unrolled: another count refused, not summed short
+      CHECK(R == INK2_FA_REL);
+      Ink2Attn half = at;
+      half.d_rel = R / 2;
+      CHECK(!ink2_fa(&half, dq, dr, ds, dg, n, dk, dv, n, 0, drp, dout, nullptr, nullptr));
+      std::printf("  %s: flash attention's relative states %u a head (INK2_FA_REL), %u refused\n", c, R, R / 2);
+    }
     {  // a step's rows the prompt's bits: queries s .. e - 1 over the keys to e, a window's from a tile's start - a
        // prompt's later chunk, one ending inside it, a decode's single token
       const std::vector<float> whole = host_of(dout, qr.v.size());

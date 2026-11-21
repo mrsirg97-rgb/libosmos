@@ -615,7 +615,8 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         if (dist < a.extent) {
           const float* rr = rel + ((uint64_t) t * H + rhead(2 * j + half)) * a.d_rel;
           float b = 0;
-          for (uint32_t r = 0; r < a.d_rel; r++) b += rr[r] * rel_proj[(uint64_t) r * a.extent + dist];
+#pragma unroll  // (fa_launch's INK2_FA_REL: the 16 terms' loads in flight together, the sum in their order)
+          for (uint32_t r = 0; r < INK2_FA_REL; r++) b += rr[r] * rel_proj[(uint64_t) r * a.extent + dist];
           s += b;
         }
       }
@@ -706,7 +707,7 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
                       float* out, float* scratch, void* stream) {
   if (!a || !q || !rel || !sink || !k || !v || !rel_proj || !out || !n_tok || n_tok > n_keys ||
       a->head_dim != INK2_MAX_HEAD || !a->kv_heads || a->heads % a->kv_heads ||
-      a->heads / a->kv_heads > INK2_FA_MAX_GROUP || !a->d_rel || a->d_rel > INK2_MAX_REL || !a->extent ||
+      a->heads / a->kv_heads > INK2_FA_MAX_GROUP || a->d_rel != INK2_FA_REL || !a->extent ||
       a->extent > INK2_MAX_EXTENT || pos0 % kFaTile)
     return false;
   const uint32_t G = a->heads / a->kv_heads;
