@@ -26,6 +26,8 @@ value changed.
 - Inkling-2-Mini's loop (its loop_config): the keys inkling2.num_loops and inkling2.loop.* (unsloth's), block_count
   the cache slots (24 layers + 2 more passes of the 12-layer core: 48); each core layer's controllers and the two
   cross-pass query tables as stored (BF16, F32), under unsloth's GGUF's names. --name Inkling-2-Mini.
+- --vocab-from: llama.cpp's tokenizer arrays (tokenizer.ggml.*: what osmos's tokenizer reads) copied from a GGUF it
+  converted from the same tokenizer.json (unsloth's), its tokens checked against the checkpoint's first.
 - names: GGUF style where one fits (blk.N.attn_q ...), Inkling's own words where none does; the map is NAMES below.
 """
 from __future__ import annotations
@@ -49,6 +51,9 @@ SIZES = {NVFP4: (64, 36), MXFP8: (32, 33), gguf.GGMLQuantizationType.BF16: (1, 2
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--src", required=True)
+ap.add_argument("--vocab-from", default="",
+                help="a GGUF llama.cpp converted from the same tokenizer.json (unsloth's): its tokenizer.ggml.* copied, "
+                     "checked against the checkpoint's tokenizer.json first")
 ap.add_argument("--name", default="Inkling-2-Small", help="the model's name (general.name: <name> (reference: ...))")
 ap.add_argument("--out", default="", help="the output's path prefix: <prefix>-0000N-of-0000M.gguf")
 ap.add_argument("--layers", default="", help="only these layers (a test), comma-separated")
@@ -244,6 +249,21 @@ def check(src, L, rows=8):
                       "expert0_amax": amax, "expert0_decoded_max": dec}))
 
 
+def vocab(w, tc):
+    """llama.cpp's tokenizer arrays (osmos's tokenizer reads them: src/text/tokenizer.c) from --vocab-from, as written
+    there - after its tokens are checked: the unpadded vocabulary's count, each of tokenizer.json's BPE tokens at its id"""
+    r = gguf.GGUFReader(a.vocab_from)
+    toks = r.fields["tokenizer.ggml.tokens"].contents()
+    tj = json.load(open(os.path.join(a.src, "tokenizer.json"), encoding="utf-8"))
+    assert len(toks) == tc["unpadded_vocab_size"], f"{len(toks)} tokens, the vocabulary {tc['unpadded_vocab_size']}"
+    bad = [t for t, i in tj["model"]["vocab"].items() if toks[i] != t]
+    assert not bad, f"{len(bad)} of tokenizer.json's tokens not at their ids (first {bad[:3]})"
+    for k, f in r.fields.items():
+        if k.startswith("tokenizer.ggml."):
+            sub = f.types[1] if f.types[0] == gguf.GGUFValueType.ARRAY else None
+            w.add_key_value(k, f.contents(), f.types[0], sub_type=sub)
+
+
 def meta(w, tc):
     """the text model's shape as llama.cpp-style keys (src/ink2/geo.c reads them). what this build implements is
     asserted, not written: the sliding layers' heads the full ones', no q / o bias, no pre-affine norms, the value norm
@@ -395,6 +415,8 @@ def write(src, tc, shards):
             w.add_name(f"{a.name} (reference: the original weights)")
             w.add_string("general.quantized_by", "osmos ink2_ref_gguf.py: no value changed")
             meta(w, tc)
+            if a.vocab_from:
+                vocab(w, tc)
             w.add_string("inkling2.mtp_config.json", json.dumps(src.cfg.get("mtp_config", {})))
             for key, f in (("tokenizer.huggingface.json", "tokenizer.json"), ("tokenizer.chat_template", "chat_template.jinja")):
                 if os.path.exists(os.path.join(a.src, f)):
