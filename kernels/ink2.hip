@@ -882,7 +882,7 @@ __global__ void attn_prep_kernel(Ink2Prep p) {
   for (uint32_t d = threadIdx.x; d < D; d += kThreads) s.y[at * D + d] = row[d];
   if (!p.records)
     for (uint32_t d = threadIdx.x; d < D; d += kThreads) ((_Float16*) s.store)[at * D + d] = (_Float16) row[d];
-  else if (threadIdx.x < kPrepBlocks && key)
+  else if (threadIdx.x < kPrepBlocks && (key || p.v8))
     kv8_block(row, threadIdx.x, (uint8_t*) s.store + at * INK2_KV8_RECORD);
   else if (threadIdx.x < kPrepBlocks)
     kv5_block(row, threadIdx.x, (uint8_t*) s.store + at * INK2_KV5_RECORD);

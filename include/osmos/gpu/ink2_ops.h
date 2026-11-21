@@ -108,6 +108,7 @@ typedef struct Ink2Prep
   float q_clip, rel_clip, k_clip, eps, conv_res, conv_scale;
   Ink2Tau tau;  /* q's and rel's */
   bool records; /* the stores keys Q8, values Q5 records (a full layer's); else f16 (a window's) */
+  bool v8;      /* with records, the values Q8 records too (ink2_fa8's), not Q5 */
   Ink2PrepKv k, v;
 } Ink2Prep;
 bool ink2_attn_prep(const Ink2Prep *p, void *stream);

@@ -23,7 +23,8 @@
 enum
 {
   PF_IN,     /* the layer's inputs: attention residuals, norms, q / k / v / rel / gate / sink, convs, clips */
-  PF_ATTN,   /* the attention */
+  PF_ATTN,   /* a sliding layer's attention (its window's keys) */
+  PF_FULL,   /* a full layer's attention (every key so far) */
   PF_MID,    /* the output's matrix and conv, the residual, the MoE's input; the MoE's conv and residual */
   PF_MOE,    /* the router, the experts (their waits apart: PF_WAIT) */
   PF_WAIT,   /* the experts' holds and waits (the membrane's reads), inside PF_MOE */
@@ -32,7 +33,7 @@ enum
   PF_HEAD,   /* the embedding, the head */
   PF_N
 };
-static const char *const kPfName[PF_N] = {"inputs",         "attention",     "mid",           "moe",
+static const char *const kPfName[PF_N] = {"inputs",         "attn sliding",  "attn full",     "mid",           "moe",
                                           "  of it waits", "  of it router", "  of it kernels", "head"};
 /* the totals of decode steps (MV_MAX_TOKENS tokens at most) and of prompt steps (more); this step's */
 static double g_pf[2][PF_N], g_step[PF_N], g_pf_at;
@@ -561,7 +562,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   Ink2Forward *f = calloc(1, sizeof *f);
   if (!f)
     return ink2_fail(err, "out of memory"), NULL;
-  f->w = w, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
+  f->w = w, f->v8 = o->values_q8, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
   f->maxb = (uint32_t)((w->geo.n_layers + w->geo.res_block - 1) / w->geo.res_block);
   const uint32_t C = (uint32_t)w->geo.n_embd, F = (uint32_t)w->geo.ff_exp;
@@ -1140,7 +1141,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       return ink2_fail(err, "inkling2: a layer's keys past its cache's room");
     const Ink2Prep prep = {n, H, KV, D, R, taps, f->q, f->rel, d->q_clip, d->rel_clip, g->q_clip, g->rel_clip,
                            g->k_clip, g->rms_eps, conv_res, full ? dyn_scale : conv_scale,
-                           (Ink2Tau){pos, full ? g->log_alpha : 0.0f, (float)g->log_floor}, full,
+                           (Ink2Tau){pos, full ? g->log_alpha : 0.0f, (float)g->log_floor}, full, f->v8,
                            {f->k, d->k_conv, dyn_k, hk, f->kc, keep_k, store_k},
                            {f->v, d->v_conv, dyn_v, hv, f->vc, keep_v, store_v}};
     GPU(ink2_attn_prep(&prep, NULL));
@@ -1149,14 +1150,17 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     /* key 0's position: a full layer's 0, a window's its first's (a tile's start); a decode's units split */
     const uint32_t pos0 = full ? 0 : pos + n - n_keys;
     pf(PF_IN);
-    /* a full layer's cache: keys Q8 records, values Q5 (ink2_fa85); a window's f16 */
+    /* a full layer's cache: keys Q8 records, values Q5 (ink2_fa85) or Q8 (ink2_fa8: Ink2Options' values_q8); a
+       window's f16 */
     const bool attended =
-        full ? ink2_fa85(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
+        full && f->v8 ? ink2_fa8(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
+                                 f->fa_part, NULL)
+        : full ? ink2_fa85(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
                          f->fa_part, NULL)
              : ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
                          f->fa_part, NULL);
     GPU(attended);
-    pf(PF_ATTN);
+    pf(full ? PF_FULL : PF_ATTN);
     GPU(mat2(f, L->out, d->out, f->o, NULL, NULL, NULL, f->att, n, att16));
     Ink2Tail *co = &s->conv[slot][INK2_CONV_OUT], *cf = &s->conv[slot][INK2_CONV_FFN];
     /* r: the output's conv, plus h within a block (a block's first layer's h a block state of its own) */

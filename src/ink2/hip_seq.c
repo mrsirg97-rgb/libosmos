@@ -104,7 +104,7 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
       ok = tail_make(&s->kw[l], kd, 2, wk, 2 * wk + T, 0) && tail_make(&s->vw[l], kd, 2, wk, 2 * wk + T, 0);
     else if (ok)
       ok = tail_make(&s->kw[l], kv, INK2_KV8_RECORD, f->max_ctx, f->max_ctx, 0) &&
-           tail_make(&s->vw[l], kv, INK2_KV5_RECORD, f->max_ctx, f->max_ctx, 0);
+           tail_make(&s->vw[l], kv, f->v8 ? INK2_KV8_RECORD : INK2_KV5_RECORD, f->max_ctx, f->max_ctx, 0);
   }
   if (ok && f->mtp)
     ok = ink2_mtp_seq_make(s);
@@ -118,7 +118,7 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
       for (int c = 0; c < INK2_CONVS; c++)
         conv += (uint64_t)s->conv[l][c].cap * s->conv[l][c].row * s->conv[l][c].esize;
       const uint64_t kv = (uint64_t)s->kw[l].cap * s->kw[l].row * s->kw[l].esize +
-                          (uint64_t)s->vw[l].cap * s->vw[l].row * s->vw[l].esize; /* (keys Q8, values Q5: apart) */
+                          (uint64_t)s->vw[l].cap * s->vw[l].row * s->vw[l].esize; /* (keys Q8, values Q5 or Q8: apart) */
       *(ink2_slot_sliding(g, l) ? &win : &full) += kv;
     }
     fprintf(stderr, "ink2 mem: a sequence: full layers' keys and values %.3f GiB, windows' %.3f GiB, conv tails %.3f GiB\n",
@@ -192,6 +192,8 @@ uint64_t ink2_identity(const Ink2Forward *f)
   h = fnv(dims, sizeof dims, h);
   if (g->loop.passes) /* (an unlooped model's identity as it was) */
     h = fnv(loop, sizeof loop, h);
+  if (f->v8) /* a full layer's values Q8: another cache's bytes (Q5's identity as it was) */
+    h = fnv_u64(0x7638, h);
   for (int l = 0; l < g->n_slots; l++)
     h = fnv_u64(ink2_slot_sliding(g, l), h);
   const Gguf *m = f->w->model;

@@ -2,7 +2,8 @@
 // converter's GGUF of the release: ~/osmos-oracle/ink2-mini-dump-<n>, its ids, every cache slot's l_out, the logits):
 // the ids through one step (every expert in memory: the MoE's tables on the GPU) - each slot's output (the prelude, the core's three passes, the tail) against the
 // reference's, the logits (KL against the reference's, its top-1) - then the same ids in uneven steps, the last row's
-// logits the same bits; then half the experts streamed (the host's tables), every row's logits the same bits. the
+// logits the same bits; then half the experts streamed (the host's tables), every row's logits the same bits; then a
+// full layer's values Q8 (values_q8): the logits' bounds, its steps' bits. the
 // reference GGUF (tools/convert/ink2_ref_gguf.py --name Inkling-2-Mini;
 // OSMOS_TEST_INK2_MINI its first shard); the 64-id dump, and the 2,048-id one past the sliding window where it is
 // there; skipped (77) without the model, the 64-id dump or a GPU
@@ -76,11 +77,11 @@ static uint32_t argmax(const float* v, uint32_t V) { return (uint32_t) (std::max
 
 // whole: every expert in memory (room past theirs: the forward takes their all), its MoE's tables on the GPU; else
 // half of them (the rest streamed), the tables the host's
-static Ink2Forward* forward(const Ink2Weights* w, uint32_t n, bool whole) {
+static Ink2Forward* forward(const Ink2Weights* w, uint32_t n, bool whole, bool v8 = false) {
   uint64_t experts = 0;
   for (int l = 0; l < w->geo.n_layers; l++)
     experts += w->layer[l].exp_gate->bytes + w->layer[l].exp_up->bytes + w->layer[l].exp_down->bytes;
-  const Ink2Options o = {n + 64, n, whole ? 2 * experts : experts / 2, nullptr, nullptr, 0, n};
+  const Ink2Options o = {n + 64, n, whole ? 2 * experts : experts / 2, nullptr, nullptr, 0, n, v8};
   char err[INK2_FWD_ERR] = "";
   Ink2Forward* f = ink2_forward_create(w, &o, err);
   if (!f) std::fprintf(stderr, "  ink2_forward_create: %s\n", err);
@@ -170,6 +171,41 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   std::printf("  half the experts streamed (the host's tables): every row's logits the same bits\n");
   ink2_seq_destroy(hs);
   ink2_forward_destroy(hf);
+
+  // a full layer's values Q8 (values_q8, ink2_fa8): the logits within the same bounds, its uneven steps' last row
+  // the one step's bits (a decode's split units over Q8 values)
+  Ink2Forward* qf = forward(w, n, true, true);
+  Ink2Seq* qs = ink2_seq_create(qf, err);
+  CHECK(qs && (ink2_step(qf, &qs, &n, 1, ids.data(), err) || (std::fprintf(stderr, "  %s\n", err), false)));
+  const std::vector<float> ql = host_of(ink2_logits(qf), (size_t) n * V);
+  ink2_seq_destroy(qs);
+  double qsum = 0, qmax = 0;
+  uint32_t qmiss = 0;
+  for (uint32_t r = 0; r < rows; r++) {
+    const float *want = lr.v.data() + (size_t) r * V, *got = ql.data() + (size_t) (row0 + r) * V;
+    const double k = kl(want, got, V);
+    qsum += k, qmax = std::max(qmax, k), qmiss += argmax(want, V) != argmax(got, V);
+  }
+  std::printf("  values Q8: the logits (%u rows) KL mean %.3e, max %.3e; top-1 %u / %u\n", rows, qsum / rows, qmax,
+              rows - qmiss, rows);
+  CHECK(qsum / rows <= kKlMean && qmax <= kKlMax && qmiss <= kTop1Miss * rows);
+  CHECK(ql != logits);  // (another cache: other bits)
+  {
+    Ink2Seq* u = ink2_seq_create(qf, err);
+    CHECK(u);
+    uint32_t at = 0, len = std::min(kSplits[1], n);
+    for (;;) {
+      CHECK(ink2_step(qf, &u, &len, 1, ids.data() + at, err) || (std::fprintf(stderr, "  %s\n", err), false));
+      at += len;
+      if (at == n) break;
+      len = n - at;
+    }
+    CHECK(std::memcmp(host_of(ink2_logits(qf) + (size_t) (len - 1) * V, V).data(), ql.data() + (size_t) (n - 1) * V,
+                      (size_t) V * 4) == 0);
+    ink2_seq_destroy(u);
+  }
+  std::printf("  values Q8: in steps of %u then the rest, the last row's logits the same bits\n", kSplits[1]);
+  ink2_forward_destroy(qf);
 }
 
 int main() {

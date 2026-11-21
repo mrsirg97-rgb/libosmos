@@ -75,8 +75,8 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess || o->npu)
-    return fail(err, "qwen35: every weight resident - no budget, picks, no_guess or NPU"), NULL;
+  if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8)
+    return fail(err, "qwen35: every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
   if (o->drafter)
     return fail(err, "qwen35: no drafter yet (its MTP head and DFlash: 0.9.0's next step)"), NULL;
   Eng *e = calloc(1, sizeof *e);

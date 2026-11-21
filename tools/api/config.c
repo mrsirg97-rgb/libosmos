@@ -81,6 +81,9 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "stream_ngram"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->stream_ngram = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
+  if (!strcmp(k, "kv_q8"))
+    return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->kv_q8 = v->type == JSON_TRUE, true
+                                                         : fail(err, "true or false", k);
   if (!strcmp(k, "max_context") || !strcmp(k, "parallel") || !strcmp(k, "max_tokens"))
   {
     if (v->type != JSON_INT || !num(v, &x, k, err) || x > 1e7)
@@ -154,6 +157,8 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
     argv[n++] = "--no-guess";
   if (c->stream_ngram)
     argv[n++] = "--stream-ngram";
+  if (c->kv_q8)
+    argv[n++] = "--kv-q8";
   if (c->npu[0])
     argv[n++] = "--npu", argv[n++] = c->npu;
   if (c->npu[0] && c->npu_share > 0)

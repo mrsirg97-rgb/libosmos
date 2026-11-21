@@ -29,6 +29,8 @@ typedef struct Ink2Options
                             step's buffers, the drafter and the stream leave of it (room then unread); 0: room's */
   uint32_t logit_rows;   /* the logits' rows a step keeps at most, slots in the order computed (a prompt's last row,
                             a decode's or a drafted round's every row, each lane's); 0: max_tokens (every row) */
+  bool values_q8;        /* a full layer's cached values Q8 records (ink2_fa8), not Q5 (ink2_fa85): a value's bytes
+                            its key's - for a model with the room (osmos-serve's --kv-q8) */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR]);

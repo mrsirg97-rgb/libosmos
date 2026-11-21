@@ -79,7 +79,7 @@ static void attn_prep_case(bool full, uint32_t n, bool hist) {
   float *vc1 = dev_alloc<float>((size_t) n * ch), *kk1 = dev_alloc<float>((size_t) n * ch);
   float *kv1 = dev_alloc<float>((size_t) n * ch);
   uint8_t *sk1 = dev_alloc<uint8_t>(kb), *sv1 = dev_alloc<uint8_t>(vb);
-  const Ink2Prep p = {n, H, KV, D, R, taps, q1, r1, dqw, drw, q_clip, rel_clip, k_clip, eps, res, scale, tau, full,
+  const Ink2Prep p = {n, H, KV, D, R, taps, q1, r1, dqw, drw, q_clip, rel_clip, k_clip, eps, res, scale, tau, full, false,
                       {dkx, dwk, full ? ddk : nullptr, dhk, kc1, kk1, sk1},
                       {dvx, dwv, full ? ddv : nullptr, dhv, vc1, kv1, sv1}};
   CHECK(ink2_attn_prep(&p, nullptr) && hipDeviceSynchronize() == hipSuccess);

@@ -770,6 +770,25 @@ class StreamNgram(Served, unittest.TestCase):
         self.assertIn("stream_ngram", r.stderr)
 
 
+class KvQ8(Served, unittest.TestCase):
+    """osmos.json's kv_q8: osmos-serve's --kv-q8 (Inkling's full layers' cached values Q8, not Q5); a bool alone"""
+    settings = {"kv_q8": True}
+
+    def test_0_passed_on(self):
+        self.ready()
+        self.assertIn("--kv-q8", self.log()[0].split())
+
+    def test_1_refused(self):
+        d = tempfile.mkdtemp()
+        cfg = os.path.join(d, "osmos.json")
+        with open(cfg, "w") as f:
+            json.dump({"pack": "test", "model": MODEL, "max_context": 4096, "kv_q8": 1}, f)
+        r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                           capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("kv_q8", r.stderr)
+
+
 class Npu(Served, unittest.TestCase):
     """osmos.json's npu (the NPU's kernels' directory) and npu_share: osmos-serve's --npu and --npu-share (0.7.0:
     forward_npu); a share in (0, 1) alone, the directory a string, the share nothing without it"""

@@ -92,8 +92,8 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess)
-    return fail(err, "qwen4exp: every weight resident - no budget, picks or no_guess"), NULL;
+  if (o->budget || o->picks || o->no_guess || o->kv_q8)
+    return fail(err, "qwen4exp: every weight resident - no budget, picks, no_guess or kv_q8"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;

@@ -184,7 +184,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   }
   const uint32_t T = o->max_tokens ? o->max_tokens : INK2_STEP_TOKENS;
   const Ink2Options io = {o->max_ctx, T < o->max_ctx ? T : o->max_ctx, 0, e->picks, e->mtp, o->budget,
-                          INK2_LOGIT_ROWS};
+                          INK2_LOGIT_ROWS, o->kv_q8};
   if (!(e->f = ink2_forward_create(m->w, &io, err)))
     return e_destroy(e), NULL;
   return e;

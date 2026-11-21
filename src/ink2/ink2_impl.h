@@ -109,6 +109,7 @@ struct Ink2Forward
   /* every expert in memory (membrane_whole): the MoE's tables built on the GPU - the experts' addresses [layer][gate,
      up, down][expert] and scales (the same shape), the picks counted there; the tables (q4x_expert_tiles' and
      ink2_moe_scales'), sized for the step's most picks */
+  bool v8; /* a full layer's values Q8 records (Ink2Options' values_q8), else Q5 */
   bool whole;
   const void **exp_tab;
   float *scale_tab;
