@@ -355,13 +355,19 @@ constexpr uint32_t kFaUnit = INK2_FA_UNIT;  // a block's row tiles (INK2_FA_RT 1
 typedef _Float16 fa_h16 __attribute__((ext_vector_type(16)));
 typedef float fa_f8 __attribute__((ext_vector_type(8)));
 
+// a row's 16 lanes' max and sum, each a butterfly over lane ^ 1, 2, 4, 8 - by DPP's row_xmask (within a row of 16:
+// the same partners as __shfl_xor's, so the same values in the same order; not ds_bpermute's trip through LDS)
+template <int O>
+__device__ inline float fa_xor(float v) {
+  return __builtin_bit_cast(float, __builtin_amdgcn_update_dpp(0, __builtin_bit_cast(int, v), 0x160 + O, 0xF, 0xF, false));
+}
 __device__ inline float fa_row_max(float v) {
-  for (int o = 1; o < kFaTile; o <<= 1) v = fmaxf(v, __shfl_xor(v, o, 32));
-  return v;
+  v = fmaxf(v, fa_xor<1>(v)), v = fmaxf(v, fa_xor<2>(v)), v = fmaxf(v, fa_xor<4>(v));
+  return fmaxf(v, fa_xor<8>(v));
 }
 __device__ inline float fa_row_sum(float v) {
-  for (int o = 1; o < kFaTile; o <<= 1) v += __shfl_xor(v, o, 32);
-  return v;
+  v += fa_xor<1>(v), v += fa_xor<2>(v), v += fa_xor<4>(v);
+  return v + fa_xor<8>(v);
 }
 
 // a unit's online softmax folded into the running one (the sink's start): M the max, each side scaled to it - the
@@ -387,11 +393,17 @@ struct Kv8Raw {
 __device__ inline Kv8Raw kv8_raw(const uint8_t* rec, uint32_t d) {
   return {*(const uint2*) (rec + d), *(const _Float16*) (rec + INK2_MAX_HEAD + d / INK2_KV8_BLOCK * 2)};
 }
+// (the product in f16: an int8 and an f16 exact in it, their F32 product exact - 19 significant bits - so the f16
+// multiply's one rounding is the F32 product's to f16: the same bits, two values a packed multiply)
+typedef _Float16 fa_h2 __attribute__((ext_vector_type(2)));
 __device__ inline fa_h8 kv8_vals(const Kv8Raw& r) {
-  const float scale = (float) r.s;
+  const fa_h2 s2 = {r.s, r.s};
   const int8_t* q = (const int8_t*) &r.q;
   fa_h8 out;
-  for (int e = 0; e < 8; e++) out[e] = (_Float16) ((float) q[e] * scale);
+  for (int e = 0; e < 8; e += 2) {
+    const fa_h2 p = fa_h2{(_Float16) q[e], (_Float16) q[e + 1]} * s2;
+    out[e] = p[0], out[e + 1] = p[1];
+  }
   return out;
 }
 
@@ -411,12 +423,14 @@ __device__ inline Kv5Raw kv5_raw(const uint8_t* rec, uint32_t d) {
   return {*(const uint32_t*) (rec + d / 2), rec[H / 2 + d / 8],
           *(const _Float16*) (rec + H / 2 + H / 8 + d / INK2_KV8_BLOCK * 2)};
 }
-__device__ inline fa_h8 kv5_vals(const Kv5Raw& r) {
-  const float scale = (float) r.s;
+__device__ inline fa_h8 kv5_vals(const Kv5Raw& r) {  // (kv8_vals' f16 product: q - 16 exact in f16 too)
+  const fa_h2 s2 = {r.s, r.s};
   fa_h8 out;
-  for (int e = 0; e < 8; e++) {
-    const int q = (int) ((r.nib >> (4 * e) & 15u) | (r.hi >> e & 1u) << 4);
-    out[e] = (_Float16) ((float) (q - 16) * scale);
+  for (int e = 0; e < 8; e += 2) {
+    const int q0 = (int) ((r.nib >> (4 * e) & 15u) | (r.hi >> e & 1u) << 4),
+              q1 = (int) ((r.nib >> (4 * e + 4) & 15u) | (r.hi >> (e + 1) & 1u) << 4);
+    const fa_h2 p = fa_h2{(_Float16) (q0 - 16), (_Float16) (q1 - 16)} * s2;
+    out[e] = p[0], out[e + 1] = p[1];
   }
   return out;
 }
@@ -507,7 +521,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   auto fetch = [&](uint32_t kb) {
     if constexpr (kQ8)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
         const uint64_t at = (uint64_t) (kb + r) * a.kv_heads + kvh;
         if constexpr (!kKD) k8[it] = in ? kv8_raw((const uint8_t*) k + at * INK2_KV8_RECORD, d) : Kv8Raw{};
@@ -518,7 +532,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       }
     else if constexpr (kHalf)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
         const uint64_t at = ((uint64_t) (kb + r) * a.kv_heads + kvh) * kFaHead + d;
         kh[it] = in ? *(const fa_h8*) (k + at) : fa_h8{}, vh[it] = in ? *(const fa_h8*) (v + at) : fa_h8{};
@@ -539,7 +553,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     __syncthreads();  // the last tile's K, V read by every wave
     if constexpr (kHalf)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i / (kFaHead / kVec), d = i % (kFaHead / kVec) * kVec;
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
         if (i >= (uint32_t) kVecs) continue;
         fa_h8 kv, vv;  // a Q8 / Q5 tile's values now (a missing key's raw zeros: 0 x 0, f16's +0 as before)
         if constexpr (kQ8) {
