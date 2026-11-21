@@ -23,6 +23,17 @@ bool mm_tokens(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_
 bool mm_tokens_scaled(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, float s0, const void *w1,
                       uint32_t rows1, float *y1, uint32_t ys1, float s1, uint32_t cols, const float *x, uint32_t xs,
                       uint32_t n, void *x16, int32_t *overflow, bool ready, void *stream);
+#define MM_BATCH_MAX 8     /* mm_batch's most matrices */
+#define MM_BATCH_TOKENS 64 /* its most tokens in one launch (past them, the gemm's counts: a launch a part) */
+typedef struct MmPart
+{
+  const void *w;     /* the matrix */
+  uint32_t rows;     /* its rows */
+  const void *x16;   /* its input (mm_x16's) */
+  float *y;          /* its output: token t's rows at y + t * ys */
+  uint32_t ys;
+} MmPart;
+bool mm_batch(uint32_t type, uint32_t cols, const MmPart *parts, uint32_t count, uint32_t n, void *stream);
 bool mm_run2(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
              float *y1, uint32_t ys1, uint32_t cols, const void *x16, uint32_t n, void *stream);
 #define MM_SILU_MAX_TOKENS 64 /* mm_run_silu's most tokens (past them, the gemm's counts) */
@@ -126,6 +137,12 @@ mm_run2
   two matrices of one type and cols on the same x16, in one launch: y0 (rows0, row length ys0) from w0, y1 from w1,
   each the bits mm_run gives it alone (the same tiles; the pair's blocks side by side - more blocks to fill the GPU at
   one token: the shared expert's gate and up, q_a and kv). false as mm_run's for either, or a matrix NULL.
+
+mm_batch
+  count matrices of one type and cols (at most MM_BATCH_MAX), each on its own x16, in one launch: each part's y the
+  bits mm_run gives it alone (the same tiles side by side - a decode's projections of a layer, launches fewer and
+  blocks to fill the GPU). n tokens; past MM_BATCH_TOKENS (the gemm's counts) each part its own mm_run. false as
+  mm_run's for any part, or count 0 or past MM_BATCH_MAX.
 
 mm_tokens
   a matrix (w1 NULL), or two of one type (mm_run2's pair), over any n tokens of F32 x (row t at x + t * xs): MM_MAX_TOKENS

@@ -433,6 +433,40 @@ bool silu_launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, u
   }
 }
 
+// mm_batch's launch: the shape launch_ct takes at its counts (n <= kGemmMinTokens: the tile's, never the gemm)
+template <quant::Type T, int CT, typename S>
+bool batch_shape(const mm::Parts& p, uint32_t count, uint32_t rows, uint32_t cols, uint32_t n, hipStream_t s) {
+  const uint32_t z = (n + mm::kTile * CT - 1) / (mm::kTile * CT);
+  mm::batch_kernel<T, S, CT><<<dim3(rows / mm::kTile, count, z), mm::kWave * S::kWaves, 0, s>>>(p, cols, n);
+  return hipGetLastError() == hipSuccess;
+}
+
+template <quant::Type T, int CT>
+bool batch_ct(const mm::Parts& p, uint32_t count, uint32_t rows, uint32_t cols, uint32_t n, hipStream_t s) {
+  if constexpr (T == quant::kBF16)
+    if (bf16_nine(cols)) return batch_shape<T, CT, Bf16Nine::S>(p, count, rows, cols, n, s);
+  if (odd<T>(cols)) return batch_shape<T, CT, typename Odd<T>::S>(p, count, rows, cols, n, s);
+  return cols < kShortCols ? batch_shape<T, CT, typename Short<T>::S>(p, count, rows, cols, n, s)
+                           : batch_shape<T, CT, typename Tuned<T>::S>(p, count, rows, cols, n, s);
+}
+
+template <quant::Type T>
+bool batch(const mm::Parts& p, uint32_t count, uint32_t cols, uint32_t n, hipStream_t s) {
+  uint32_t rows = 0;
+  for (uint32_t i = 0; i < count; i++) {  // launch()'s refusals, each part
+    if (!p.rows[i] || p.rows[i] % mm::kTile || (n > 1 && p.ys[i] < p.rows[i]) || !p.w[i] || !p.x16[i]) return false;
+    rows = p.rows[i] > rows ? p.rows[i] : rows;
+  }
+  const int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
+  if (cols % quant::Block<T>::values || cols % slab) return false;
+  switch (col_tiles<T>(n)) {
+    case 1: return batch_ct<T, 1>(p, count, rows, cols, n, s);
+    case 2: return batch_ct<T, 2>(p, count, rows, cols, n, s);
+    case 4: return batch_ct<T, 4>(p, count, rows, cols, n, s);
+    default: return batch_ct<T, Tuned<T>::kMaxCt>(p, count, rows, cols, n, s);
+  }
+}
+
 bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   if (!n || n > MM_MAX_TOKENS || !m.rows[0] || (m.w[1] && !m.rows[1])) return false;
   switch (type) {
@@ -602,6 +636,33 @@ extern "C" bool mm_run_gated_mean(uint32_t type, const void* w, uint32_t hc, uin
 extern "C" bool mm_run(uint32_t type, const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n,
                        float* y, uint32_t ys, void* stream) {
   return run(type, Mats{{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}}, cols, x16, n, (hipStream_t) stream);
+}
+
+extern "C" bool mm_batch(uint32_t type, uint32_t cols, const MmPart* parts, uint32_t count, uint32_t n,
+                         void* stream) {
+  static_assert(MM_BATCH_MAX == mm::kBatch && MM_BATCH_TOKENS == kGemmMinTokens, "mm.h's batch: its parts, its counts");
+  if (!parts || !count || count > MM_BATCH_MAX || !n || n > MM_MAX_TOKENS) return false;
+  const hipStream_t s = (hipStream_t) stream;
+  if (n > kGemmMinTokens) {  // (the gemm's counts: each part its own launch, the gemm where it takes it)
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < count; i++)
+      ok = run(type, Mats{{parts[i].w, nullptr}, {parts[i].rows, 0}, {parts[i].y, nullptr}, {parts[i].ys, 0}}, cols,
+               parts[i].x16, n, s);
+    return ok;
+  }
+  mm::Parts p = {};
+  for (uint32_t i = 0; i < count; i++)
+    p.w[i] = (const uint8_t*) parts[i].w, p.x16[i] = (const _Float16*) parts[i].x16, p.y[i] = parts[i].y,
+    p.rows[i] = parts[i].rows, p.ys[i] = parts[i].ys;
+  switch (type) {
+#define BATCH(t) \
+  case quant::t: return batch<quant::t>(p, count, cols, n, s);
+    BATCH(kQ8_0) BATCH(kQ5_K) BATCH(kQ5_KR) BATCH(kQ6_K) BATCH(kIQ1_M) BATCH(kIQ2_XXS) BATCH(kIQ2_XS) BATCH(kIQ1_S)
+    BATCH(kIQ2_S) BATCH(kIQ3_XXS) BATCH(kQ2_K) BATCH(kQ3_K) BATCH(kIQ4_NL) BATCH(kQ4_0) BATCH(kIQ4_XS) BATCH(kQ2_0)
+    BATCH(kNVFP4) BATCH(kQ4_K) BATCH(kQ5_1) BATCH(kMXFP4) BATCH(kMXFP8) BATCH(kBF16)
+#undef BATCH
+    default: return false;
+  }
 }
 
 extern "C" bool mm_run2(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,

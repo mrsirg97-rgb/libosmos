@@ -290,6 +290,11 @@ static void shape(const Gguf* g, const Shape& s) {
             hipFree(xo2) == hipSuccess && hipFree(x16w) == hipSuccess && hipFree(xd) == hipSuccess);
       std::printf("  %s: mm_run_silu the bits of mm_run then q4x_scale_silu (y and its f16), 1 / 16 / 64 tokens\n", s.tensor);
     }
+    {  // the pair as an mm_batch (each its own x16: the same one here), at 1 and kT tokens: mm_run2's bits
+      const MmPart parts[2] = {{w, r0, x16, y, rows}, {w1, r1, x16, y2, r1}};
+      CHECK(mm_batch(t->type, cols, parts, 2, kT, nullptr));
+      CHECK(host_of(y, (size_t) kT * rows) == p0 && host_of(y2, (size_t) kT * r1) == p1);
+    }
     CHECK(!mm_run2(t->type, w, r0, y, rows, nullptr, r1, y2, r1, cols, x16, kT, nullptr));
     CHECK(!mm_run2(t->type, w, r0, y, rows, w1, r1, y2, r1 - 1, cols, x16, kT, nullptr));  // y1's rows too short
     CHECK(hipFree(y2) == hipSuccess);
@@ -491,6 +496,64 @@ static void bf16_case() {
   }
 }
 
+// mm_batch (a decode's projections in one launch): three BF16 matrices of different rows, each on its own x16 -
+// every part's rows the bits mm_run gives it alone at 1 .. 64 tokens (one launch) and past (each its own: the gemm's)
+// at Inkling-2-Mini's widths; a part's rows not whole tiles, no parts or past MM_BATCH_MAX refused
+static void batch_case() {
+  constexpr uint32_t kParts = 3, kRows[kParts] = {96, 32, 64}, kN = 300;
+  for (uint32_t cols : {64u, 2304u, 3072u}) {
+    void* w[kParts];
+    void* x16[kParts];
+    float* y[kParts];
+    float* yr;
+    int32_t* ovf;
+    for (uint32_t p = 0; p < kParts; p++) {
+      std::vector<uint16_t> wh((size_t) kRows[p] * cols);
+      for (auto& v : wh) {
+        const float f = uniform() * 0.25f;
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        v = (uint16_t) (u >> 16);
+      }
+      std::vector<float> xh((size_t) kN * cols);
+      for (float& v : xh) v = uniform();
+      float* x;
+      CHECK(hipMalloc(&w[p], wh.size() * 2) == hipSuccess && hipMalloc(&x, xh.size() * 4) == hipSuccess &&
+            hipMalloc(&x16[p], (size_t) kN * cols * 2) == hipSuccess &&
+            hipMalloc(&y[p], (size_t) kN * kRows[p] * 4) == hipSuccess);
+      CHECK(hipMemcpy(w[p], wh.data(), wh.size() * 2, hipMemcpyHostToDevice) == hipSuccess &&
+            hipMemcpy(x, xh.data(), xh.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+      CHECK(hipMalloc(&ovf, 4) == hipSuccess && hipMemset(ovf, 0, 4) == hipSuccess);
+      CHECK(mm_x16(x, cols, kN, cols, x16[p], ovf, nullptr));
+      CHECK(hipFree(x) == hipSuccess && hipFree(ovf) == hipSuccess);
+    }
+    CHECK(hipMalloc(&yr, (size_t) kN * 96 * 4) == hipSuccess);
+    int checked = 0;
+    for (uint32_t n : {1u, 5u, 16u, 33u, 64u, 65u, kN}) {
+      MmPart parts[kParts];
+      for (uint32_t p = 0; p < kParts; p++) parts[p] = {w[p], kRows[p], x16[p], y[p], kRows[p]};
+      CHECK(mm_batch(30, cols, parts, kParts, n, nullptr));
+      for (uint32_t p = 0; p < kParts; p++) {
+        CHECK(mm_run(30, w[p], kRows[p], cols, x16[p], n, yr, kRows[p], nullptr));
+        const std::vector<float> got = host_of(y[p], (size_t) n * kRows[p]), want = host_of(yr, (size_t) n * kRows[p]);
+        CHECK(std::memcmp(got.data(), want.data(), got.size() * 4) == 0 ||
+              (std::printf("  %u columns, %u tokens: part %u not mm_run's bits\n", cols, n, p), false));
+        checked++;
+      }
+    }
+    MmPart bad[MM_BATCH_MAX + 1];
+    for (auto& b : bad) b = {w[0], kRows[0], x16[0], y[0], kRows[0]};
+    CHECK(!mm_batch(30, cols, bad, 0, 1, nullptr) && !mm_batch(30, cols, bad, MM_BATCH_MAX + 1, 1, nullptr));
+    bad[1].rows = 40;  // not whole tiles
+    CHECK(!mm_batch(30, cols, bad, 2, 1, nullptr));
+    std::printf("  mm_batch BF16 %4u columns: %d parts (3 matrices, 1 .. %u tokens) each mm_run's bits; refusals\n",
+                cols, checked, kN);
+    for (uint32_t p = 0; p < kParts; p++)
+      CHECK(hipFree(w[p]) == hipSuccess && hipFree(x16[p]) == hipSuccess && hipFree(y[p]) == hipSuccess);
+    CHECK(hipFree(yr) == hipSuccess);
+  }
+}
+
 int main() {
   std::printf("[test_mm_gpu] start\n");
   char path[512];
@@ -508,6 +571,7 @@ int main() {
   std::printf("  refusals: F32 and BF16 (the matvec's), rows not a multiple of 16, %d tokens\n", MM_MAX_TOKENS + 1);
   attn_x16();
   bf16_case();
+  batch_case();
   char err[GGUF_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);

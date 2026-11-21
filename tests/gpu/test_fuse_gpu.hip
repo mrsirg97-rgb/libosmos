@@ -139,6 +139,46 @@ static void x16_ops(uint32_t n, bool overflow) {
     CHECK(hipFree(p) == hipSuccess);
 }
 
+// ops_rms_x16_many: several norms in one launch - three parts (weighted, unweighted, a concat's two halves side by
+// side in one x16: Inkling's loop controls) each ops_rms_x16_at's F32, x16 (the pad rows too) and overflow flag
+static void rms_many(uint32_t n) {
+  constexpr uint32_t kD = 1024, kParts = 4;
+  std::vector<float> x((size_t) kParts * n * kD), w(kD);
+  for (float& v : x) v = uniform() * 3.0f;
+  for (float& v : w) v = 1.0f + uniform() * 0.5f;
+  const size_t xl = (size_t) (n + MM_TILE - 1) / MM_TILE * MM_TILE * 2 * kD;  // a concat's x16 (2 kD wide)
+  float *dx = dev(x), *dw = dev(w), *ya, *yb;
+  uint16_t *xa, *xb;
+  int32_t *oa, *ob;
+  CHECK(hipMalloc(&ya, x.size() * 4) == hipSuccess && hipMalloc(&yb, x.size() * 4) == hipSuccess &&
+        hipMalloc(&xa, 3 * xl * 2) == hipSuccess && hipMalloc(&xb, 3 * xl * 2) == hipSuccess &&
+        hipMalloc(&oa, 4) == hipSuccess && hipMalloc(&ob, 4) == hipSuccess);
+  CHECK(hipMemset(xa, 0xA5, 3 * xl * 2) == hipSuccess && hipMemset(xb, 0xA5, 3 * xl * 2) == hipSuccess &&
+        hipMemset(oa, 0, 4) == hipSuccess && hipMemset(ob, 0, 4) == hipSuccess);  // (the same fill: unwritten halves alike)
+  // part p: x part p, into y part p and x16 region (p < 2: its own, 2 kD wide, cols 0; 2, 3: one, cols 0 and kD)
+  const float* wp[kParts] = {dw, nullptr, dw, nullptr};
+  const uint32_t region[kParts] = {0, 1, 2, 2}, c0[kParts] = {0, 0, 0, kD};
+  OpsRmsPart parts[kParts];
+  for (uint32_t p = 0; p < kParts; p++) {
+    const size_t o = (size_t) p * n * kD;
+    CHECK(ops_rms_x16_at(dx + o, kD, kD, wp[p], 1e-6f, n, ya + o, kD, xa + region[p] * xl, 2 * kD, c0[p], oa, nullptr));
+    parts[p] = {dx + o, wp[p], yb + o, xb + region[p] * xl, kD, kD, 2 * kD, c0[p]};
+  }
+  CHECK(ops_rms_x16_many(parts, kParts, kD, 1e-6f, n, ob, nullptr) && hipDeviceSynchronize() == hipSuccess);
+  CHECK(std::memcmp(host(ya, x.size()).data(), host(yb, x.size()).data(), x.size() * 4) == 0);
+  CHECK(host(xa, 3 * xl) == host(xb, 3 * xl));  // every region's columns and pad rows
+  CHECK(host(oa, 1) == host(ob, 1));
+  OpsRmsPart bad = parts[0];
+  bad.c0 = 8;  // not a tile's column
+  OpsRmsPart many[OPS_RMS_MANY + 1];
+  for (auto& m : many) m = parts[0];
+  CHECK(!ops_rms_x16_many(&bad, 1, kD, 1e-6f, n, ob, nullptr) && !ops_rms_x16_many(parts, 0, kD, 1e-6f, n, ob, nullptr) &&
+        !ops_rms_x16_many(many, OPS_RMS_MANY + 1, kD, 1e-6f, n, ob, nullptr));
+  for (void* p : {(void*) dx, (void*) dw, (void*) ya, (void*) yb, (void*) xa, (void*) xb, (void*) oa, (void*) ob})
+    CHECK(hipFree(p) == hipSuccess);
+  std::printf("  rms_x16_many: %u rows, %u parts in one launch - each ops_rms_x16_at's F32, x16 and flag\n", n, kParts);
+}
+
 static void gather_sum_add() {
   constexpr uint32_t kD = 1024, kTok = 3, kK = 6, kRows = kTok * kK;
   std::vector<float> src((size_t) kRows * kD), add((size_t) kTok * kD);
@@ -268,6 +308,7 @@ int main() {
   kv_finish();
   x16_ops(3, false);   // a tile's 13 pad rows
   x16_ops(16, true);   // a whole tile, and the overflow flag
+  rms_many(1), rms_many(16), rms_many(37);
   gather_sum_add();
   for (uint32_t n : {1u, 3u, 9u, 70u}) hc_post_dot(n);  // 70: a tile's worth, the two launches
   hc_mix_pre_rms(1, false, false);
