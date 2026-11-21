@@ -198,7 +198,7 @@ void hy4_forward_destroy(Hy4Forward *f)
   free(f->eg_off), free(f->slot), free(f->h_idx), free(f->h_gidx), free(f->h_sidx);
   free(f->h_w), free(f->h_wsel);
   free(f->h_rx), free(f->h_ry), free(f->h_rxd), free(f->h_ryd), free(f->h_rcnt), free(f->h_rw), free(f->rkey);
-  free(f->h_rgidx), free(f->h_rhidx), free(f->h_stage);
+  free(f->h_rgidx), free(f->h_rhidx), free(f->h_stage), free(f->h_estart), free(f->h_rexp);
   free(f);
 }
 
@@ -325,7 +325,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
        (f->h_rxd = malloc(ecap * 4)) && (f->h_ryd = malloc(ecap * 4)) && (f->h_rcnt = malloc(ecap * 4)) &&
        (f->h_rw = malloc(3 * ecap * sizeof(void *))) && (f->rkey = malloc(ecap * 8)) &&
        (f->h_rgidx = malloc(scap * 4)) && (f->h_rhidx = malloc(scap * 4)) &&
-       (f->h_stage = malloc(3 * ecap * sizeof(void *) + 5 * ecap * 4));
+       (f->h_stage = malloc(3 * ecap * sizeof(void *) + 5 * ecap * 4)) &&
+       (f->h_estart = malloc(((size_t)g->n_experts + 1) * 4)) && (f->h_rexp = malloc(ecap * 4));
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = (as_f32(f, w->layer[l].hc_attn_fn, &f->fn_attn[l]) && as_f32(f, w->layer[l].hc_ffn_fn, &f->fn_ffn[l])) ||
          hy4_fail(err, "iHC's mixes not made F32");

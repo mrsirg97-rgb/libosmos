@@ -72,6 +72,14 @@ static const Shape kQwenShapes[] = {
     {"blk.47.ffn_gate_exps.weight", 7}, {"blk.14.ffn_gate_exps.weight", 7}};
 // DeepSeek UD-IQ2_XXS's expert types UD-IQ1_M lacks: Q2_K and IQ3_XXS downs
 constexpr const char* kUdX2 = "%s/Models/ds1017/UD-IQ2_XXS/DeepSeek-V4.1-Flash-1017-UD-IQ2_XXS-00001-of-00006.gguf";
+// Hy4-flash's Q8_0 rows short of kShortCols (1,024: q_b, the indexer's q_b; 1,536: the shared expert's down, the
+// latent's up): a prompt's on the gemm at their Short shape - its bits the tile's at every count
+constexpr const char* kHy4 = "%s/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf";
+static const Shape kHy4Shapes[] = {
+  {"blk.5.attn_q_b.weight", -1},  {"blk.5.indexer.attn_q_b.weight", -1},  {"blk.5.ffn_down_shexp.weight", -1},
+  {"blk.5.ffn_routed_up.weight", -1},
+};
+
 static const Shape kUdX2Shapes[] = {{"blk.0.ffn_down_exps.weight", 7}, {"blk.20.ffn_down_exps.weight", 7}};
 // the reference's experts as deepseek-ai stores them (tools/convert/ds4_experts_mxfp4.py): MXFP4 gate / up and down,
 // its first shard alone (gguf_header: layers 0-4)
@@ -529,6 +537,14 @@ int main() {
     gguf_destroy(q);
   } else {
     std::printf("  DeepSeek UD-IQ2_XXS's shapes skipped: no %s\n", qpath);
+  }
+  std::snprintf(qpath, sizeof qpath, kHy4, std::getenv("HOME") ? std::getenv("HOME") : "");
+  if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_create(qpath, err)) {
+    std::printf("  Hy4-flash (Q8_0 short rows):\n");
+    for (const Shape& sh : kHy4Shapes) shape(q, sh);
+    gguf_destroy(q);
+  } else {
+    std::printf("  Hy4-flash's shapes skipped: no %s\n", qpath);
   }
   std::snprintf(qpath, sizeof qpath, kRef, std::getenv("HOME") ? std::getenv("HOME") : "");
   if (Gguf* q = access(qpath, R_OK) ? nullptr : gguf_header(qpath, err)) {

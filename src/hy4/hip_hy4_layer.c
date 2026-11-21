@@ -35,6 +35,33 @@ bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
   return mat(f, t->type, hy4_dev(f, t), rows, cols, x, n, y, read);
 }
 
+/* a read's matrices on one x (t1 NULL: one): a pair of one type in one launch where mm takes both, x's f16 made once
+   for a run of them (ready: f->x16 holds x's already - set after a call whose x16 is x's whole, a step of at most
+   MM_MAX_TOKENS), else each its own mat - every matrix's sums its own, the same bits either way */
+static bool mat_on(Hy4Forward *f, const GgufTensor *t, uint32_t rows, float *y, const float *x, uint32_t cols,
+                   uint32_t n, bool read, bool *ready)
+{
+  if (!(read && mm_known(t->type) && mm_fits(t->type, rows, cols)))
+    return mat(f, t->type, hy4_dev(f, t), rows, cols, x, n, y, read);
+  const bool ok = mm_tokens(t->type, hy4_dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16,
+                            f->overflow, *ready, f->st);
+  *ready = ok && n <= MM_MAX_TOKENS;
+  return ok;
+}
+
+bool hy4_mat_pair(Hy4Forward *f, const GgufTensor *t0, uint32_t rows0, float *y0, const GgufTensor *t1, uint32_t rows1,
+                  float *y1, const float *x, uint32_t cols, uint32_t n, bool read, bool *ready)
+{
+  const bool both = t1 && read && t1->type == t0->type && mm_known(t0->type) && mm_fits(t0->type, rows0, cols) &&
+                    mm_fits(t1->type, rows1, cols);
+  if (!both)
+    return mat_on(f, t0, rows0, y0, x, cols, n, read, ready) && (!t1 || mat_on(f, t1, rows1, y1, x, cols, n, read, ready));
+  const bool ok = mm_tokens(t0->type, hy4_dev(f, t0), rows0, y0, rows0, hy4_dev(f, t1), rows1, y1, rows1, cols, x, cols,
+                            n, f->x16, f->overflow, *ready, f->st);
+  *ready = ok && n <= MM_MAX_TOKENS;
+  return ok;
+}
+
 bool hy4_joint(Hy4Forward *f, const Hy4Joint *j, uint32_t cols, const float *x, float *out)
 {
   bool ok = true;
@@ -165,16 +192,15 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
   float *qr = joint ? f->jo_attn + J->off[0] : f->qr, *kva = joint ? f->jo_attn + J->off[1] : f->kva;
   float *gt = joint ? f->jo_attn + J->off[2] : f->gt, *ixk = joint ? f->jo_attn + J->off[3] : f->ixk;
   float *ixw = joint ? f->jo_attn + J->off[4] : f->ixw;
+  bool on_xn = false, on_qres = false; /* (each input's f16 made once: hy4_mat_pair's ready) */
   bool ok = joint ? hy4_joint(f, J, D, f->xn, f->jo_attn)
-                  : hy4_mat(f, L->q_a, ql, D, f->xn, n, qr, read) && hy4_mat(f, L->kv_a, row, D, f->xn, n, kva, read) &&
-                        hy4_mat(f, L->gate, H * vd, D, f->xn, n, gt, read) &&
-                        (sw || (hy4_mat(f, L->ix_k, ID, D, f->xn, n, ixk, read) &&
-                                hy4_mat(f, L->ix_proj, IH, D, f->xn, n, ixw, read)));
+                  : hy4_mat_pair(f, L->q_a, ql, qr, L->kv_a, row, kva, f->xn, D, n, read, &on_xn) &&
+                        hy4_mat_pair(f, L->gate, H * vd, gt, sw ? NULL : L->ix_k, ID, ixk, f->xn, D, n, read, &on_xn) &&
+                        (sw || hy4_mat(f, L->ix_proj, IH, D, f->xn, n, ixw, read));
   ok = ok && ops_rms(qr, ql, ql, hy4_fv(f, L->q_a_norm), g->rms_eps, n, f->qres, ql, f->st) &&
-       hy4_mat(f, L->q_b, H * qk, ql, f->qres, n, f->q, read);
+       hy4_mat_pair(f, L->q_b, H * qk, f->q, sw ? NULL : L->ix_q_b, IH * ID, f->ixq, f->qres, ql, n, read, &on_qres);
   if (ok && !sw)
-    ok = hy4_mat(f, L->ix_q_b, IH * ID, ql, f->qres, n, f->ixq, read) &&
-         hy4_ix_query(f->ixq, ixw, IH, ID, rd, f->freqs_sparse, f->pos, n, f->st);
+    ok = hy4_ix_query(f->ixq, ixw, IH, ID, rd, f->freqs_sparse, f->pos, n, f->st);
   for (uint32_t r = 0; ok && r < runs; r++)
   {
     const uint64_t o = run[r].off;
@@ -210,8 +236,9 @@ static bool dense(Hy4Forward *f, uint32_t n, int l, bool read)
   const uint32_t D = (uint32_t)g->n_embd, ff = (uint32_t)g->n_ff;
   const bool joint = n == 1 && !read; /* gate and up on xn: a token's one joint */
   float *ga = joint ? f->jo_ffn + f->j_ffn[l].off[0] : f->ga, *up = joint ? f->jo_ffn + f->j_ffn[l].off[1] : f->up;
+  bool on_xn = false;
   return (joint ? hy4_joint(f, &f->j_ffn[l], D, f->xn, f->jo_ffn)
-                : hy4_mat(f, L->ffn_gate, ff, D, f->xn, n, ga, read) && hy4_mat(f, L->ffn_up, ff, D, f->xn, n, up, read)) &&
+                : hy4_mat_pair(f, L->ffn_gate, ff, ga, L->ffn_up, ff, up, f->xn, D, n, read, &on_xn)) &&
          ops_swiglu(ga, up, ff, INFINITY, NULL, n, f->act, f->st) &&
          hy4_mat(f, L->ffn_down, D, ff, f->act, n, f->out, read) &&
          ops_rms(f->out, D, D, hy4_fv(f, L->post_ffn_norm), g->rms_eps, n, f->y, D, f->st) &&

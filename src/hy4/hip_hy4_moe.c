@@ -9,6 +9,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/hy4_ops.h"
+#include "osmos/hy4/route.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -26,10 +27,10 @@ uint64_t hy4_read_slots(uint64_t n, const Hy4Geometry *g)
   return n * (uint64_t)g->n_used + (uint64_t)g->n_experts * (MM_TILE - 1); /* each expert's padded to a tile */
 }
 
-/* a read's picks grouped by expert on the host (ascending; within one, its tokens ascending): each sorted row's token
-   and weight, each (token, slot)'s row; mm_group's entries (chunks of MM_MAX_TOKENS, each expert's slots a whole
-   number of tiles, the entries ordered by count so a launch is a run of the same column tiles). a decode's tables
-   are the GPU's (hy4_route: no host between the router and the experts) */
+/* a read's picks grouped by expert on the host (hy4_read_route: ascending; within one, its tokens ascending): each
+   sorted row's token and weight, each (token, slot)'s row; mm_group's entries (chunks of MM_MAX_TOKENS, each expert's
+   slots a whole number of tiles, the entries ordered by count so a launch is a run of the same column tiles). a
+   decode's tables are the GPU's (hy4_route: no host between the router and the experts) */
 static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t *slots)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -39,38 +40,20 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t 
   if (hipMemcpy(f->h_idx, f->idx, (size_t)nk * 4, hipMemcpyDeviceToHost) != hipSuccess ||
       hipMemcpy(f->h_w, f->wtok, (size_t)nk * F, hipMemcpyDeviceToHost) != hipSuccess)
     return false;
-  const uint64_t bytes_g = L->exp_gate->bytes / E, bytes_u = L->exp_up->bytes / E, bytes_d = L->exp_down->bytes / E;
-  const uint8_t *bg = hy4_dev(f, L->exp_gate), *bu = hy4_dev(f, L->exp_up), *bd = hy4_dev(f, L->exp_down);
-  const uint32_t chunk = MM_MAX_TOKENS;
-  uint32_t r = 0, e_n = 0, s_n = 0;
-  for (uint32_t e = 0; e < E; e++)
-  {
-    const uint32_t first = r;
-    for (uint32_t t = 0; t < n; t++)
-      for (uint32_t s = 0; s < K; s++)
-        if ((uint32_t)f->h_idx[t * K + s] == e)
-          f->h_gidx[r] = (int32_t)t, f->h_sidx[t * K + s] = (int32_t)r, f->h_wsel[r] = f->h_w[t * K + s], r++;
-    if (r == first)
-      continue;
-    for (uint32_t c = first; c < r; c += chunk, e_n++)
-    {
-      const uint32_t cnt = r - c < chunk ? r - c : chunk;
-      const uint32_t slot = s_n + (c - first);
-      f->h_rcnt[e_n] = (int32_t)cnt;
-      f->h_rx[e_n] = slot * lat, f->h_ry[e_n] = c * ffe, f->h_rxd[e_n] = slot * ffe, f->h_ryd[e_n] = c * lat;
-      f->h_rw[3 * e_n] = bg + e * bytes_g, f->h_rw[3 * e_n + 1] = bu + e * bytes_u, f->h_rw[3 * e_n + 2] = bd + e * bytes_d;
-      f->rkey[e_n] = (uint64_t)cnt << 32 | e_n;
-    }
-    for (uint32_t q = first; q < r; q++)
-      f->h_rgidx[s_n + (q - first)] = f->h_gidx[q], f->h_rhidx[s_n + (q - first)] = (int32_t)q;
-    const uint32_t padded = (r - first + MM_TILE - 1) / MM_TILE * MM_TILE;
-    for (uint32_t s = s_n + (r - first); s < s_n + padded; s++)
-      f->h_rgidx[s] = f->h_rhidx[s] = -1;
-    s_n += padded;
-  }
-  *entries = e_n, *slots = s_n;
-  if (r != nk)
+  const uint64_t bytes[3] = {L->exp_gate->bytes / E, L->exp_up->bytes / E, L->exp_down->bytes / E};
+  const uint8_t *base[3] = {hy4_dev(f, L->exp_gate), hy4_dev(f, L->exp_up), hy4_dev(f, L->exp_down)};
+  Hy4ReadRoute rt = {f->h_gidx, f->h_sidx, f->h_wsel, f->h_rcnt, f->h_rexp, f->h_rx, f->h_ry, f->h_rxd, f->h_ryd,
+                     f->h_rgidx, f->h_rhidx, f->h_estart, 0, 0};
+  if (!hy4_read_route(f->h_idx, f->h_w, n, K, E, MM_MAX_TOKENS, MM_TILE, lat, ffe, &rt))
     return false;
+  const uint32_t e_n = rt.entries;
+  *entries = e_n, *slots = rt.slots;
+  for (uint32_t i = 0; i < e_n; i++)
+  {
+    for (int m = 0; m < 3; m++)
+      f->h_rw[3 * i + m] = base[m] + rt.expert[i] * bytes[m];
+    f->rkey[i] = (uint64_t)rt.cnt[i] << 32 | i;
+  }
   bool ok = hipMemcpy(f->sidx, f->h_sidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
             hipMemcpy(f->wsel, f->h_wsel, (size_t)nk * F, hipMemcpyHostToDevice) == hipSuccess &&
             hipMemcpy(f->gidx, f->h_gidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess;
@@ -100,8 +83,8 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t 
          hipMemcpy(f->ry, pu + 2 * ecap, (size_t)e_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
          hipMemcpy(f->rxd, pu + 3 * ecap, (size_t)e_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
          hipMemcpy(f->ryd, pu + 4 * ecap, (size_t)e_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(f->rgidx, f->h_rgidx, (size_t)s_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(f->rhidx, f->h_rhidx, (size_t)s_n * 4, hipMemcpyHostToDevice) == hipSuccess;
+         hipMemcpy(f->rgidx, f->h_rgidx, (size_t)rt.slots * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->rhidx, f->h_rhidx, (size_t)rt.slots * 4, hipMemcpyHostToDevice) == hipSuccess;
 }
 
 /* a decode's experts' matvec over the entries (chunk of an expert's tokens an entry at most: the step's tokens, up to
@@ -176,11 +159,11 @@ bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)
   const Hy4Joint *J = &f->j_ffn[l];
   float *logit = joint ? f->jo_ffn + J->off[0] : f->logit_r, *rin = joint ? f->jo_ffn + J->off[1] : f->rin;
   float *ga = joint ? f->jo_ffn + J->off[2] : f->ga, *up = joint ? f->jo_ffn + J->off[3] : f->up;
+  bool on_xn = false;
   const bool on_x = joint ? hy4_joint(f, J, D, f->xn, f->jo_ffn)
                           : hy4_mat(f, L->router, E, D, f->xn, n, logit, read) &&
-                                hy4_mat(f, L->routed_down, lat, D, f->xn, n, rin, read) &&
-                                hy4_mat(f, L->sh_gate, sh, D, f->xn, n, ga, read) &&
-                                hy4_mat(f, L->sh_up, sh, D, f->xn, n, up, read);
+                                hy4_mat_pair(f, L->routed_down, lat, rin, L->sh_gate, sh, ga, f->xn, D, n, read, &on_xn) &&
+                                hy4_mat_pair(f, L->sh_up, sh, up, NULL, 0, NULL, f->xn, D, n, read, &on_xn);
   return on_x &&
          ops_router_scored(logit, hy4_fv(f, L->router_bias), E, K, g->expert_scale, OPS_SCORE_SIGMOID, n, f->idx,
                            f->wtok, f->st) &&

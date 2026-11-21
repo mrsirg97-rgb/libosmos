@@ -77,6 +77,7 @@ struct Hy4Forward
   int32_t *rgidx, *rhidx, *h_rgidx, *h_rhidx, *rcnt, *h_rcnt;
   const void **rw, **h_rw;    /* the entries' gate, up, down (3 x entries) */
   uint64_t *rkey;             /* the entries' sort keys (count, then build order) */
+  uint32_t *h_estart, *h_rexp; /* a read's routing (hy4_read_route): its sort's scratch (n_experts + 1), an entry's expert */
   void *h_stage;              /* the sorted tables' staging (host) */
 
   float *qr, *qres, *q, *kva, *gt, *qa, *olat, *ao, *out;
@@ -130,6 +131,10 @@ bool hy4_alloc(void *p, uint64_t bytes);
 /* y = W x for n tokens (W the tensor on the GPU, any type the matvec reads): a token's sums its own */
 bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
              bool read);
+/* a read's two matrices on one x (t1 NULL: one) - one launch where mm takes both, x's f16 made once a run of them
+   (ready: f->x16 holds x's; in and out); else each hy4_mat's. every matrix's sums its own: the same bits */
+bool hy4_mat_pair(Hy4Forward *f, const GgufTensor *t0, uint32_t rows0, float *y0, const GgufTensor *t1, uint32_t rows1,
+                  float *y1, const float *x, uint32_t cols, uint32_t n, bool read, bool *ready);
 /* the step's Engram rows read and decoded (f->eg_rows), the runs' tokens already in their sequences' histories */
 bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n);
 /* layer l's blocks on the step's streams */

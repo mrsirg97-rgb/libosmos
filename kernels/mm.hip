@@ -328,9 +328,9 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
   return hipGetLastError() == hipSuccess;
 }
 
-// a prompt's matrix on mm.h's gemm_kernel: Q6_K and Q8_0 (both models' dense), rows of at least kShortCols (tile's
-// shape, every partition a slab) and more than 64 tokens (CT 8's: below, tile's own); the same bits as tile at every
-// count (test_mm_gpu: 2,048, 64 and 33 tokens against 16). 64 rows x 256 tokens a block, a wave 32 x 64: 10240 x
+// a prompt's matrix on mm.h's gemm_kernel: Q6_K and Q8_0 (both models' dense), on its rows' own shape (tile's: Short
+// below kShortCols; every partition a slab) and more than 64 tokens (CT 8's: below, tile's own); the same bits as tile
+// at every count (test_mm_gpu: 2,048, 64 and 33 tokens against 16; Hy4-flash's 1,024 / 1,536-column Q8_0 rows). 64 rows x 256 tokens a block, a wave 32 x 64: 10240 x
 // 2560 Q6_K at 2,048 tokens 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 (low-power; 64 x 128: 22.8, 32 x 256: 22.4,
 // 128 x 128: past the LDS; without the second slab's LDS 25.5)
 template <quant::Type T>
@@ -345,8 +345,12 @@ constexpr uint32_t kGemmMinTokens = 4 * mm::kTile;  // past it: CT 8's counts
 
 template <quant::Type T, class S = typename Tuned<T>::S>
 bool gemm_takes(const Mats& m, uint32_t cols, uint32_t n) {
-  return kGemm<T> && n > kGemmMinTokens && !odd<T>(cols) && cols >= kShortCols &&
-         cols / S::kSlab >= (uint32_t) S::kWaves;
+  return kGemm<T> && n > kGemmMinTokens && !odd<T>(cols) && cols / S::kSlab >= (uint32_t) S::kWaves;
+}
+// the gemm on a row's own shape (the tile's: a short row's Short, else Tuned) - its sums' order at every count
+template <quant::Type T>
+bool gemm_on(const Mats& m, uint32_t cols, uint32_t n) {
+  return cols < kShortCols ? gemm_takes<T, typename Short<T>::S>(m, cols, n) : gemm_takes<T>(m, cols, n);
 }
 
 template <quant::Type T, class S = typename Tuned<T>::S>
@@ -370,7 +374,9 @@ bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStr
       return launch_shape<T, CT, S9>(m, cols, x16, n, s);
     }
   if constexpr (kGemm<T>)
-    if (gemm_takes<T>(m, cols, n)) return launch_gemm<T>(m, cols, x16, n, s);
+    if (gemm_on<T>(m, cols, n))
+      return cols < kShortCols ? launch_gemm<T, typename Short<T>::S>(m, cols, x16, n, s)
+                               : launch_gemm<T>(m, cols, x16, n, s);
   if (odd<T>(cols)) return launch_shape<T, CT, typename Odd<T>::S>(m, cols, x16, n, s);
   return cols < kShortCols ? launch_shape<T, CT, typename Short<T>::S>(m, cols, x16, n, s)
                            : launch_shape<T, CT, typename Tuned<T>::S>(m, cols, x16, n, s);
@@ -407,7 +413,7 @@ bool silu_ct(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint3
              mm::Silu ep, hipStream_t s) {
   const Mats m = {{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}};
   if constexpr (kGemm<T>)
-    if (gemm_takes<T>(m, cols, n)) return false;
+    if (gemm_on<T>(m, cols, n)) return false;
   if (odd<T>(cols)) return silu_shape<T, CT, typename Odd<T>::S>(w, rows, cols, x16, n, y, ys, ep, s);
   return cols < kShortCols ? silu_shape<T, CT, typename Short<T>::S>(w, rows, cols, x16, n, y, ys, ep, s)
                            : silu_shape<T, CT, typename Tuned<T>::S>(w, rows, cols, x16, n, y, ys, ep, s);
@@ -541,7 +547,7 @@ bool gm_ct(const void* w, uint32_t cols, const void* x16, uint32_t n, const mm::
   const uint32_t rows = gm.hc * gm.dim;
   const Mats m = {{w, nullptr}, {rows, 0}, {nullptr, nullptr}, {rows, 0}};
   if constexpr (kGemm<T>)
-    if (gemm_takes<T>(m, cols, n)) return false;
+    if (gemm_on<T>(m, cols, n)) return false;
   if (odd<T>(cols)) return gm_shape<T, CT, typename Odd<T>::S>(w, cols, x16, n, gm, s);
   return cols < kShortCols ? gm_shape<T, CT, typename Short<T>::S>(w, cols, x16, n, gm, s)
                            : gm_shape<T, CT, typename Tuned<T>::S>(w, cols, x16, n, gm, s);
