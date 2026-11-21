@@ -15,6 +15,7 @@
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/q4x_ops.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/mem/arena.h"
 
@@ -402,6 +403,49 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
    pointers, a count and 4 offsets; its slots its rows padded to whole tiles - P + E (MM_TILE - 1) at most, each 2
    int32; each pair's row and 3 floats */
 static uint64_t table_entries(uint64_t P, uint64_t E) { return P + E; }
+
+/* every expert in memory (membrane_whole): their addresses held for the membrane's life - a table of them written
+   once, the layers' scales beside it, and the GPU's tables for the step's most picks (moe_whole) */
+static bool whole_tables(Ink2Forward *f, char *err)
+{
+  const Ink2Geometry *g = &f->w->geo;
+  if (!(f->whole = membrane_whole(f->mem)))
+    return true;
+  const uint64_t L = (uint64_t)g->n_layers, E = (uint64_t)g->n_experts, P = (uint64_t)f->max_tokens * g->n_used;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds((uint32_t)P, (uint32_t)E, &bd);
+  const void **tab = malloc(L * 3 * E * sizeof *tab);
+  float *sc = malloc(L * 3 * E * sizeof *sc);
+  bool ok = tab && sc;
+  for (uint64_t u = 0; ok && u < L * E; u++)
+  {
+    const void *dev[POOL_PARTS];
+    ok = membrane_ready(f->mem, (uint32_t)u, dev);
+    for (int k = 0; ok && k < 3; k++)
+      tab[((u / E) * 3 + (uint64_t)k) * E + u % E] = dev[k], sc[((u / E) * 3 + (uint64_t)k) * E + u % E] =
+                                                                 f->L[u / E].scale[k][u % E];
+  }
+  f->t_entries = bd.entries;
+  struct
+  {
+    void **p;
+    uint64_t bytes;
+  } b[] = {
+      {(void **)&f->exp_tab, L * 3 * E * sizeof *tab}, {(void **)&f->scale_tab, L * 3 * E * 4},
+      {(void **)&f->picks_d, L * E * 4}, {(void **)&f->t_ptr, 3ull * bd.entries * sizeof(void *)},
+      {(void **)&f->t_cnt, bd.entries * 4}, {(void **)&f->t_xg, bd.entries * 4}, {(void **)&f->t_yg, bd.entries * 4},
+      {(void **)&f->t_xd, bd.entries * 4}, {(void **)&f->t_yd, bd.entries * 4}, {(void **)&f->t_gidx, bd.slots * 4},
+      {(void **)&f->t_hidx, bd.slots * 4}, {(void **)&f->t_where, P * 4}, {(void **)&f->t_off, 3 * E * 4},
+      {(void **)&f->t_sg, P * 4}, {(void **)&f->t_su, P * 4}, {(void **)&f->t_a, P * 4},
+  };
+  for (size_t i = 0; ok && i < sizeof b / sizeof *b; i++)
+    ok = ink2_dalloc(f, b[i].p, b[i].bytes);
+  ok = ok && hipMemcpy(f->exp_tab, tab, L * 3 * E * sizeof *tab, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(f->scale_tab, sc, L * 3 * E * 4, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemset(f->picks_d, 0, L * E * 4) == hipSuccess && (f->picks_all = calloc(L * E, sizeof *f->picks_all));
+  free(tab), free(sc);
+  return ok || ink2_fail(err, "inkling2: GPU memory refused (the experts' tables on the GPU)");
+}
 static uint64_t table_slots(uint64_t P, uint64_t E) { return P + E * (MM_TILE - 1); }
 static uint64_t table_bytes(uint64_t P, uint64_t E)
 {
@@ -550,7 +594,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   if (hipMemGetInfo(&free1, &total) != hipSuccess)
     return ink2_fail(err, "inkling2: the GPU's free memory not read"), ink2_forward_destroy(f), NULL;
   f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : f->dense_bytes;
-  if (!experts(f, o->room, o->budget, o->picks, err))
+  if (!experts(f, o->room, o->budget, o->picks, err) || !whole_tables(f, err))
     return ink2_forward_destroy(f), NULL;
   mem_note("experts' slots", &at);
   if (mem_on())
@@ -601,7 +645,8 @@ void ink2_forward_destroy(Ink2Forward *f)
                  f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->eg, f->eu, f->ed, f->head,
                  f->logits, f->gid, f->amax, f->m_dev, f->gpick, f->gw, f->x16, f->xe16, f->overflow,
                  f->res_sc, f->pre_h, f->bank, f->bank_out, f->msg, f->ctl, f->ccat, f->cgate, f->cgain,
-                 f->cforget};
+                 f->cforget, (void *)f->exp_tab, f->scale_tab, f->picks_d, (void *)f->t_ptr, f->t_cnt, f->t_gidx,
+                 f->t_hidx, f->t_where, f->t_off, f->t_xg, f->t_yg, f->t_xd, f->t_yd, f->t_sg, f->t_su, f->t_a};
   for (size_t i = 0; i < sizeof dev / sizeof *dev; i++)
     if (dev[i])
       hipFree(dev[i]);
@@ -629,14 +674,29 @@ void ink2_forward_destroy(Ink2Forward *f)
   for (size_t i = 0; i < sizeof pinned / sizeof *pinned; i++)
     if (pinned[i])
       hipHostFree(pinned[i]);
-  free(f->picks), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
+  free(f->picks), free(f->picks_all), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
   free(f->m_key), free(f->m_build);
   free(f);
 }
 
 uint64_t ink2_forward_bytes(const Ink2Forward *f) { return f ? f->fixed_bytes + f->pinned_bytes : 0; }
 
-const uint64_t *ink2_forward_picks(const Ink2Forward *f) { return f ? f->picks : NULL; }
+bool ink2_forward_whole(const Ink2Forward *f) { return f && f->whole; }
+
+/* the host's counts, plus (a whole membrane's) the GPU's: copied at the call */
+const uint64_t *ink2_forward_picks(const Ink2Forward *f)
+{
+  if (!f || !f->whole)
+    return f ? f->picks : NULL;
+  const size_t n = (size_t)f->w->geo.n_layers * f->w->geo.n_experts;
+  uint32_t *d = malloc(n * 4);
+  if (!d || hipMemcpy(d, f->picks_d, n * 4, hipMemcpyDeviceToHost) != hipSuccess)
+    return free(d), NULL;
+  for (size_t u = 0; u < n; u++)
+    f->picks_all[u] = f->picks[u] + d[u];
+  free(d);
+  return f->picks_all;
+}
 
 uint32_t ink2_type(const GgufTensor *t) { return t->type == QUANT_Q5_K ? QUANT_Q5_KR : t->type; }
 
@@ -721,8 +781,56 @@ static int cmp_u64(const void *a, const void *b)
    the tokens that picked it (mm_group at every step: an entry an expert's part of up to MM_MAX_TOKENS of its rows,
    a token's sums its own whatever the others) - gate and up, their scales and the swiglu, down - and each token's
    summed in its slot order (ink2_moe_sum) */
+/* moe with every expert in memory: the router's picks never on the host - the tables built on the GPU
+   (q4x_expert_tiles: the picks by expert, a part of up to 128 an entry, the entries in runs of their tiles;
+   ink2_moe_scales: the scales and weights moe's host loop writes), each run a launch (its entries past the live ones
+   none). which picks share a part, and where, changes no bit: the same sums as moe's tables */
+static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
+{
+  const Ink2Geometry *g = &f->w->geo;
+  const Ink2Layer *L = &f->w->layer[l];
+  const Ink2Dev *d = &f->L[l];
+  const uint32_t C = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, K = (uint32_t)g->n_used,
+                 F = (uint32_t)g->ff_exp, P = n * K;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds(P, E, &bd);
+  Q4xExpertTiles et = {.cnt = f->t_cnt, .gidx = f->t_gidx, .hidx = f->t_hidx, .xg = f->t_xg, .yg = f->t_yg,
+                       .xd = f->t_xd, .yd = f->t_yd, .where = f->t_where, .off = f->t_off};
+  for (int i = 0; i < 3; i++)
+    et.ptr[i] = f->t_ptr + (uint64_t)i * f->t_entries, et.tab[i] = f->exp_tab + ((uint64_t)l * 3 + (uint64_t)i) * E;
+  const GgufTensor *t[3] = {L->exp_gate, L->exp_up, L->exp_down};
+  const uint32_t rows[3] = {F, F, C}, cols[3] = {C, C, F};
+  float *const y[3] = {f->eg, f->eu, f->ed};
+  const uint32_t *xo[3] = {f->t_xg, f->t_xg, f->t_xd}, *yo[3] = {f->t_yg, f->t_yg, f->t_yd};
+  float *pw = (float *)(f->pick + P);
+  bool ok = mat(f, L->router, d->router, f->xn, n, f->logit) &&
+            ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw,
+                              NULL) &&
+            q4x_expert_tiles(f->pick, P, K, E, C, F, &et, NULL) &&
+            ink2_moe_scales(f->pick, pw, f->t_where, f->scale_tab + (uint64_t)l * 3 * E, E, P, f->t_sg, f->t_su,
+                            f->t_a, f->picks_d + (uint64_t)l * E, NULL) &&
+            mm_x16_rows(f->xn, C, f->t_gidx, bd.slots, C, f->xe16, f->overflow, NULL);
+  for (int k = 0; ok && k < 3; k++)
+  {
+    if (k == 2)
+      ok = ink2_swiglu_x16(f->eg, f->eu, f->t_sg, f->t_su, F, g->gate_softcap, g->up_softcap, f->t_hidx, bd.slots,
+                           f->xe16, f->overflow, NULL);
+    for (int r = 0; ok && r < Q4X_TILE_RUNS; r++)
+      if (bd.count[r])
+      {
+        const uint32_t at = bd.first[r];
+        ok = mm_group(t[k]->type, et.ptr[k] + at, f->t_cnt + at, bd.count[r], MM_TILE << r, rows[k], cols[k],
+                      f->xe16, xo[k] + at, cols[k], y[k], yo[k] + at, rows[k], NULL);
+      }
+  }
+  f->m_a = f->t_a, f->m_row = f->t_where;
+  return ok || ink2_fail(err, "inkling2: a GPU call failed (the experts, their tables on the GPU)");
+}
+
 static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
 {
+  if (f->whole)
+    return moe_whole(f, l, n, err);
   const Ink2Geometry *g = &f->w->geo;
   const Ink2Layer *L = &f->w->layer[l];
   const Ink2Dev *d = &f->L[l];

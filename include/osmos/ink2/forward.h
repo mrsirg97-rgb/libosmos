@@ -35,6 +35,9 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
 void ink2_forward_destroy(Ink2Forward *f);
 uint64_t ink2_forward_bytes(const Ink2Forward *f);
 const uint64_t *ink2_forward_picks(const Ink2Forward *f);
+/* every expert in memory (the experts' membrane whole): the MoE's tables built on the GPU, the picks never on the host -
+   the same bits as the host's tables */
+bool ink2_forward_whole(const Ink2Forward *f);
 uint64_t ink2_identity(const Ink2Forward *f);
 
 Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR]);

@@ -105,7 +105,20 @@ struct Ink2Forward
   float *embed_norm, *out_res_q, *out_norm;
   uint64_t dense_bytes, pinned_bytes;
   uint64_t fixed_bytes; /* the GPU memory the dense weights, buffers and drafter took (create's measure) */
-  uint64_t *picks; /* each unit's picks so far (ink2_forward_picks) */
+  uint64_t *picks; /* each unit's picks so far, the host's tables' (ink2_forward_picks: with picks_d's) */
+  /* every expert in memory (membrane_whole): the MoE's tables built on the GPU - the experts' addresses [layer][gate,
+     up, down][expert] and scales (the same shape), the picks counted there; the tables (q4x_expert_tiles' and
+     ink2_moe_scales'), sized for the step's most picks */
+  bool whole;
+  const void **exp_tab;
+  float *scale_tab;
+  uint32_t *picks_d;
+  uint64_t *picks_all;
+  const void **t_ptr;
+  int32_t *t_cnt, *t_gidx, *t_hidx, *t_where, *t_off;
+  uint32_t *t_xg, *t_yg, *t_xd, *t_yd;
+  float *t_sg, *t_su, *t_a;
+  uint32_t t_entries; /* the tables' entries, for t_ptr's three runs of them */
   /* the experts */
   int *fds;
   HostSlots *slots, *stream;

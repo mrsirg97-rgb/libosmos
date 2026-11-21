@@ -17,6 +17,17 @@ using launches::grid;
 using launches::st;
 using launches::ok;
 
+// the experts' tables' scales on the GPU (a whole membrane's MoE): pick m of expert e at place q = where[m] - the place's
+// gate and up scales, the pick's weight times the down's scale (moe's host products: the same bits), its picks counted
+__global__ void moe_scales_kernel(const int32_t* ids, const float* w, const int32_t* where, const float* scale,
+                                  uint32_t n_exp, uint32_t n, float* sg, float* su, float* a, uint32_t* picks) {
+  const uint32_t m = blockIdx.x * kThreads + threadIdx.x;
+  if (m >= n) return;
+  const int32_t e = ids[m], q = where[m];
+  sg[q] = scale[e], su[q] = scale[n_exp + e], a[m] = w[m] * scale[2 * n_exp + e];
+  atomicAdd(picks + e, 1u);
+}
+
 // a loop's control: x - tanh(forget) x + tanh(gain) m, upstream's order (inkling2.cpp's control: sub, then add)
 __global__ void loop_ctrl_kernel(const float* x, const float* m, const float* gain, const float* forget, uint64_t n,
                                  float* out) {
@@ -869,6 +880,14 @@ extern "C" bool ink2_attn(const Ink2Attn* a, const float* q, const float* rel, c
     return false;
   attn_kernel<<<n_tok * a->heads, a->head_dim, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj,
                                                                 out);
+  return ok();
+}
+
+extern "C" bool ink2_moe_scales(const int32_t* ids, const float* w, const int32_t* where, const float* scale,
+                                uint32_t n_exp, uint32_t n, float* sg, float* su, float* a, uint32_t* picks, void* stream) {
+  if (!ids || !w || !where || !scale || !n_exp || !n || !sg || !su || !a || !picks) return false;
+  moe_scales_kernel<<<(n + kThreads - 1) / kThreads, kThreads, 0, st(stream)>>>(ids, w, where, scale, n_exp, n, sg, su,
+                                                                                a, picks);
   return ok();
 }
 

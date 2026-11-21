@@ -1,8 +1,9 @@
 // Inkling-2-Mini's looped forward (osmos/ink2/forward.h) against upstream llama.cpp's own (oracle/qwen_dump.cpp on its
 // converter's GGUF of the release: ~/osmos-oracle/ink2-mini-dump-<n>, its ids, every cache slot's l_out, the logits):
-// the ids through one step - each slot's output (the prelude, the core's three passes, the tail) against the
+// the ids through one step (every expert in memory: the MoE's tables on the GPU) - each slot's output (the prelude, the core's three passes, the tail) against the
 // reference's, the logits (KL against the reference's, its top-1) - then the same ids in uneven steps, the last row's
-// logits the same bits. the reference GGUF (tools/convert/ink2_ref_gguf.py --name Inkling-2-Mini;
+// logits the same bits; then half the experts streamed (the host's tables), every row's logits the same bits. the
+// reference GGUF (tools/convert/ink2_ref_gguf.py --name Inkling-2-Mini;
 // OSMOS_TEST_INK2_MINI its first shard); the 64-id dump, and the 2,048-id one past the sliding window where it is
 // there; skipped (77) without the model, the 64-id dump or a GPU
 extern "C" {
@@ -73,15 +74,17 @@ static double kl(const float* ref, const float* got, uint32_t V) {
 
 static uint32_t argmax(const float* v, uint32_t V) { return (uint32_t) (std::max_element(v, v + V) - v); }
 
-static Ink2Forward* forward(const Ink2Weights* w, uint32_t n) {
-  uint64_t experts = 0;  // every expert resident: Mini's fit
+// whole: every expert in memory (room past theirs: the forward takes their all), its MoE's tables on the GPU; else
+// half of them (the rest streamed), the tables the host's
+static Ink2Forward* forward(const Ink2Weights* w, uint32_t n, bool whole) {
+  uint64_t experts = 0;
   for (int l = 0; l < w->geo.n_layers; l++)
     experts += w->layer[l].exp_gate->bytes + w->layer[l].exp_up->bytes + w->layer[l].exp_down->bytes;
-  const Ink2Options o = {n + 64, n, experts, nullptr, nullptr, 0, n};
+  const Ink2Options o = {n + 64, n, whole ? 2 * experts : experts / 2, nullptr, nullptr, 0, n};
   char err[INK2_FWD_ERR] = "";
   Ink2Forward* f = ink2_forward_create(w, &o, err);
   if (!f) std::fprintf(stderr, "  ink2_forward_create: %s\n", err);
-  CHECK(f);
+  CHECK(f && ink2_forward_whole(f) == whole);
   return f;
 }
 
@@ -96,7 +99,7 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   CHECK(ids.size() == n);
   const Ink2Geometry* g = &w->geo;
   const uint32_t V = (uint32_t) g->n_vocab, C = (uint32_t) g->n_embd;
-  Ink2Forward* f = forward(w, n);
+  Ink2Forward* f = forward(w, n, true);
   Taps t;
   t.n = n, t.slot.resize((size_t) g->n_slots);
   ink2_forward_tap(f, tap, &t);
@@ -158,6 +161,15 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   std::printf("  the same ids in steps of %u, %u and %u then the rest: the last row's logits the same bits\n",
               kSplits[0], kSplits[1], kSplits[2]);
   ink2_forward_destroy(f);
+
+  // half the experts in memory (the rest streamed): the tables the host's, every row's logits the same bits
+  Ink2Forward* hf = forward(w, n, false);
+  Ink2Seq* hs = ink2_seq_create(hf, err);
+  CHECK(hs && (ink2_step(hf, &hs, &n, 1, ids.data(), err) || (std::fprintf(stderr, "  %s\n", err), false)));
+  CHECK(host_of(ink2_logits(hf), (size_t) n * V) == logits);
+  std::printf("  half the experts streamed (the host's tables): every row's logits the same bits\n");
+  ink2_seq_destroy(hs);
+  ink2_forward_destroy(hf);
 }
 
 int main() {

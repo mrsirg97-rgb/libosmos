@@ -14,6 +14,11 @@
 #define INK2_RES_SCRATCH (INK2_RES_SPLIT_TOKENS * (1 + INK2_MAX_QUERIES) * INK2_MAX_RES) /* its floats */
 
 bool ink2_softcap(float *x, uint64_t n, float cap, void *stream);
+/* a whole membrane's MoE tables' scales (q4x_expert_tiles the rest): n picks (ids, their weights w, their places
+   where), scale [gate, up, down][n_exp] - sg[place], su[place] the pick's expert's gate and up scales, a[pick] its
+   weight times the down's; picks[expert] counted (a layer's n_exp counters) */
+bool ink2_moe_scales(const int32_t *ids, const float *w, const int32_t *where, const float *scale, uint32_t n_exp,
+                     uint32_t n, float *sg, float *su, float *a, uint32_t *picks, void *stream);
 /* a loop's control of a core layer's input x by its message m: out = x - tanh(forget) x + tanh(gain) m, n values
    (gain and forget their matrices of the gate, pre-tanh); out may be x */
 bool ink2_loop_ctrl(const float *x, const float *m, const float *gain, const float *forget, uint64_t n, float *out,
