@@ -416,6 +416,39 @@ template <> __device__ inline h8 decode_h<kNVFP4>(const uint8_t* b, int k) {
   return nvfp4_h(Nvfp4Raw{b[k / 2], ld32(qs), ld32(qs + 4), k});
 }
 
+// MXFP8 as f16, decode<kMXFP8>'s bits with fewer operations: an E4M3 code's 7 low bits shifted 7 into an f16 (its
+// sign at 15) are its value times 2^-8 exactly, a subnormal code an f16 subnormal; times the block's scale as an f16,
+// 2^(e - 119), one product rounded once - decode's exact F32 product rounded to f16, the same bits. a chunk with a
+// NaN code (0x7F, 0xFF), or a scale not a normal f16 (e outside 105 .. 134), the generic's
+template <> __device__ inline h8 decode_h<kMXFP8>(const uint8_t* b, int k) {
+  const uint8_t* qs = b + 1 + k * kChunk;
+  const uint32_t q0 = ld32(qs), q1 = ld32(qs + 4), e = b[0];
+  const uint32_t nan = (((q0 & 0x7F7F7F7Fu) + 0x01010101u) | ((q1 & 0x7F7F7F7Fu) + 0x01010101u)) & 0x80808080u;
+  if (nan || e < 105 || e > 134) {
+    float v[kChunk];
+    decode<kMXFP8>(b, k, v);
+    h8 h;
+    for (int j = 0; j < kChunk; j++) {
+      osmos_keep(v[j]);
+      h[j] = (_Float16) v[j];
+    }
+    return h;
+  }
+  typedef _Float16 h2v __attribute__((ext_vector_type(2)));
+  const _Float16 d = __builtin_bit_cast(_Float16, (uint16_t) ((e - 104) << 10));
+  const h2v dd = {d, d};
+  u4 out;
+  for (int w = 0; w < 2; w++) {
+    const uint32_t q = w ? q1 : q0;
+    for (int p = 0; p < 2; p++) {
+      const uint32_t u = osmos_perm(0, q, p ? 0x0C030C02u : 0x0C010C00u);  // two codes, each its lane's low byte
+      const uint32_t h = ((u << 8) & 0x80008000u) | ((u << 7) & 0x3F803F80u);
+      out[2 * w + p] = __builtin_bit_cast(uint32_t, __builtin_bit_cast(h2v, h) * dd);
+    }
+  }
+  return __builtin_bit_cast(h8, out);
+}
+
 // Q4_K as f16, decode<kQ4_K>'s bits with fewer operations: (d sc) q exact in F32 (an f16's 11 bits times a 6-bit
 // scale times a 4-bit code: 21 bits), so one fma rounds as the product then the difference did; a chunk's 8 codes
 // masked 4 at a time (each a byte, converted as one); the 6-bit scales from 3 words shifted by the group's byte

@@ -59,9 +59,12 @@ template <> struct Tuned<quant::kQ3_K> : Tuned<quant::kQ2_0> {};  // not measure
 // NVFP4 (Inkling-2's experts: 4,608 and 2,304 columns, whole 64-value slabs) not measured: Q2_0's, a 64-value block too.
 // its values exact in f16 (6 significant bits, 2^-10 .. 2,688: decode_h rounds none); a tensor's own scale its role's
 template <> struct Tuned<quant::kNVFP4> : Tuned<quant::kQ2_0> {};
-// MXFP8 (Inkling-2's experts of layers 40-47; first unsloth's Engram tables, decode alone) not measured: the default
-// shape, MXFP4's. its values exact in f16 where e4m3 x 2^(e - 127) is one: Inkling's (e -15 .. -10, |w| 2^-22 ..
-// 0.375) all are - ink2_ref_gguf.py checks every expert's
+// MXFP8 (Inkling-2's experts: Small's layers 40-47, Mini's 20-23; first unsloth's Engram tables, decode alone). its
+// values exact in f16 where e4m3 x 2^(e - 127) is one: Inkling's (e -15 .. -10, |w| 2^-22 .. 0.375) all are -
+// ink2_ref_gguf.py checks every expert's. measured (mmsweep mini, low-power, 2026-11-20; decode_h<kMXFP8> by bits): 8
+// experts at one token, Mini's 1,152 x 2,304 gate / up and 2,304 x 1,152 down - the default 128 x 8 x 8 95 / 89 GB/s
+// (the generic decode_h's 57 / 48), 64 x 4 x 4 155 / 151 (a plain read 224)
+template <> struct Tuned<quant::kMXFP8> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 // UD-Q4_K_XL's expert types, on the register-A path (mm.h's kRegA), a token's 10 experts cold (mmsweep q4, low-power,
 // 2026-11-09, two runs): Q4_K's 2,560-column gate / up 78-80 us at 128 x 8 x 8 -> 58-60 at 32 x 16 x 2 (80 slabs of
 // 32 for 16 waves to share: the decode's latency hidden; a 32-value slab's lane holds 2 chunks, so U 2 at most), Q5_1's
