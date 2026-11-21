@@ -328,13 +328,14 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
   return hipGetLastError() == hipSuccess;
 }
 
-// a prompt's matrix on mm.h's gemm_kernel: Q6_K and Q8_0 (both models' dense), on its rows' own shape (tile's: Short
+// a prompt's matrix on mm.h's gemm_kernel: Q6_K, Q8_0 and Q5_K (the models' dense), on its rows' own shape (tile's: Short
 // below kShortCols; every partition a slab) and more than 64 tokens (CT 8's: below, tile's own); the same bits as tile
 // at every count (test_mm_gpu: 2,048, 64 and 33 tokens against 16; Hy4-flash's 1,024 / 1,536-column Q8_0 rows). 64 rows x 256 tokens a block, a wave 32 x 64: 10240 x
 // 2560 Q6_K at 2,048 tokens 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 (low-power; 64 x 128: 22.8, 32 x 256: 22.4,
 // 128 x 128: past the LDS; without the second slab's LDS 25.5)
 template <quant::Type T>
-constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4 || T == quant::kBF16;
+constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4 || T == quant::kBF16 ||
+                       T == quant::kQ5_K || T == quant::kQ5_KR;  // (Q5_K: Inkling-2-Small's dense, 2,048 tokens 1,058 -> 1,012 ms)
 constexpr int kGemmRm = 2, kGemmRn = 4, kGemmWr = 2, kGemmWc = 4;
 // a type's gemm blocks (kGemm*'s but where measured): its rows and tokens a wave in tiles, its waves' grid
 template <quant::Type T> struct GemmPlan { static constexpr int Rm = kGemmRm, Rn = kGemmRn, Wr = kGemmWr, Wc = kGemmWc; };
@@ -480,6 +481,26 @@ extern "C" bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols) {
     FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kQ4_0) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K) FITS(kQ3_K) FITS(kQ4_K) FITS(kQ5_1)
     FITS(kMXFP4) FITS(kMXFP8) FITS(kNVFP4) FITS(kBF16)
 #undef FITS
+    default: return false;
+  }
+}
+
+template <quant::Type T>
+bool gemm_runs(uint32_t rows, uint32_t cols, uint32_t n) {
+  const Mats m = {{nullptr, nullptr}, {rows, 0}, {nullptr, nullptr}, {rows, 0}};
+  if (!fits<T>(rows, cols) || n > MM_MAX_TOKENS) return false;
+  if constexpr (T == quant::kBF16)
+    if (bf16_nine(cols)) return gemm_takes<T, Bf16Nine::S>(m, cols, n);
+  if constexpr (kGemm<T>) return gemm_on<T>(m, cols, n);
+  return false;
+}
+
+extern "C" bool mm_gemm(uint32_t type, uint32_t rows, uint32_t cols, uint32_t n) {
+  switch (type) {
+#define GEMM(t) \
+  case quant::t: return gemm_runs<quant::t>(rows, cols, n);
+    GEMM(kQ8_0) GEMM(kQ5_K) GEMM(kQ5_KR) GEMM(kQ6_K) GEMM(kNVFP4) GEMM(kBF16)
+#undef GEMM
     default: return false;
   }
 }

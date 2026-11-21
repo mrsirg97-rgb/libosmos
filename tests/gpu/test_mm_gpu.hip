@@ -310,6 +310,23 @@ static void shape(const Gguf* g, const Shape& s) {
           mm_run(QUANT_Q5_KR, wr, rows, cols, x16, 1, y1, rows, nullptr));
     CHECK(hipMemcpy(one.data(), y1, rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(std::memcmp(one.data(), &a[(size_t) 5 * rows], rows * 4) == 0);
+    {  // a prompt's step on the gemm (past 64 tokens; not at 64): its first 16 tokens' rows the 16's bits
+      CHECK(mm_gemm(QUANT_Q5_KR, rows, cols, kBig) && mm_gemm(13, rows, cols, kBig) && !mm_gemm(QUANT_Q5_KR, rows, cols, 64));
+      std::vector<float> big((size_t) kBig * cols);
+      for (size_t i = 0; i < big.size(); i++) big[i] = uniform();
+      std::memcpy(big.data(), xh.data(), xh.size() * 4);
+      float *xb, *yb;
+      void* x16b;
+      CHECK(hipMalloc(&xb, big.size() * 4) == hipSuccess && hipMalloc(&yb, (size_t) kBig * rows * 4) == hipSuccess &&
+            hipMalloc(&x16b, (size_t) kBig * cols * 2) == hipSuccess);
+      CHECK(hipMemcpy(xb, big.data(), big.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
+      CHECK(mm_x16(xb, cols, kBig, cols, x16b, over, nullptr) &&
+            mm_run(QUANT_Q5_KR, wr, rows, cols, x16b, kBig, yb, rows, nullptr));
+      std::vector<float> yh((size_t) kT * rows);
+      CHECK(hipMemcpy(yh.data(), yb, yh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+      CHECK(std::memcmp(yh.data(), a.data(), yh.size() * 4) == 0);
+      CHECK(hipFree(xb) == hipSuccess && hipFree(yb) == hipSuccess && hipFree(x16b) == hipSuccess);
+    }
     CHECK(mv_strided(13, w, rows, cols, x, cols, 3, y, rows, nullptr) &&
           hipMemcpy(ref.data(), y, (size_t) 3 * rows * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(mv_strided(QUANT_Q5_KR, wr, rows, cols, x, cols, 3, y, rows, nullptr) &&

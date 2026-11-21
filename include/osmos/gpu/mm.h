@@ -10,6 +10,7 @@
 
 bool mm_known(uint32_t type);
 bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols);
+bool mm_gemm(uint32_t type, uint32_t rows, uint32_t cols, uint32_t n);
 uint32_t mm_col_tiles(uint32_t type, uint32_t n);
 bool mm_x16(const float *x, uint32_t xs, uint32_t n, uint32_t cols, void *x16, int32_t *overflow, void *stream);
 bool mm_x16_attn(const float *x, uint32_t xs, uint32_t n, uint32_t cols, uint32_t head_dim, uint32_t rope_dim,
@@ -99,6 +100,10 @@ mm_known
 mm_fits
   whether a rows x cols matrix of `type` tiles: rows a multiple of MM_TILE, cols whole blocks and whole slabs (the
   type's for that width) - mm_run and mm_group take it; else the matvec.
+
+mm_gemm
+  whether mm_run of n tokens on a rows x cols matrix of `type` runs on the prompt's gemm (a slab decoded once for 256
+  tokens; past 64 tokens, the matrix's shape the tile's) - its bits the tile's either way.
 
 mm_x16
   the activations an mm reads: n rows of cols F32 (row t at x + t * xs) into x16 (n rounded up to a multiple of
