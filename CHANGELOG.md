@@ -17,6 +17,9 @@ against 0.12.2's). Low-power, interleaved against 0.12.2:
 - **Inkling-2-Small prompts +5%** (an 8,448-token prompt through osmos-serve 32.9 -> 31.2 s; 64 tokens after it 8.6
   -> 8.35 s): the attention's bias as Mini's, its Q5_K projections on the prompt's gemm, its decode's projections in
   one launch.
+- At the `performance` profile (the same tools, against 0.12.2): Hy4-flash's 4K prompt ~467 -> ~498 tok/s (the
+  host's routing a smaller share with the CPU's clocks up), Mini's decode 25.0 -> 27.5 tok/s and 8K prompt 1,167 ->
+  1,226, Small's 8,448-token prompt 29.7 -> 27.6 s.
 - Measured, no change: Hy4-flash's decode matvecs already at ~219 GB/s (the bus); Inkling-2-Small's decode is bound
   by its experts' SSD reads.
 

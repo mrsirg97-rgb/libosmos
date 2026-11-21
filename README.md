@@ -152,6 +152,9 @@ pack's 256K and 4,096-token steps, its Q5_K drafter):
 | Prompt, 8,192 / 65,536 / 253,952 tokens | **355** / 302 / 185 tok/s |
 | KL against Inkling-2-Small in BF16 (Wiki, 10,239 tokens) | 0.197, top-1 85.8% |
 
+0.12.3 against 0.12.2 (the `performance` profile, osmos-serve, the same answers bit for bit): an 8,448-token prompt
+29.7 -> 27.6 s, 64 tokens after it 7.8 -> 7.6 s.
+
 Every token is the bits of the same tokens read as a prompt, drafted or not, at any steps. 87 GB of the 143 GB of
 experts (61%) stay in memory and the rest stream from the SSD; a full-attention layer's keys are cached Q8 and its
 values Q5 (KL +0.001 against f16), so a 256K context's cache is 3.5 GB. Drafted runs vary by about ±8% from run to
@@ -171,6 +174,9 @@ and its own DSpark drafter (Q8_0). osmos 0.12.0, the `performance` profile, osmo
 | Decode after a 131K prompt | **24.2** / 17.0 tok/s |
 | Prompt, 3K / 37K / 131K tokens (plain) | **1,001** / **1,045** / 775 tok/s |
 | KL against upstream llama.cpp's own run of the release (64 / 2,048 tokens) | 2.9e-3 / 1.1e-3 (its own GPU against CPU: 3.0e-3 / 1.2e-3) |
+
+0.12.3 against 0.12.2 (the `performance` profile, ink2_engine, every row's logits the same bits): decode 25.0 -> 27.5
+tok/s plain, an 8K prompt 1,167 -> 1,226 tok/s.
 
 Each pass of a looped layer keeps its own cache (48 slots for 24 layers); a full-attention layer's keys and values
 are cached Q8 (the pack's `kv_q8`), 17 KiB a token, so a 1M context's cache is 17 GiB beside the 19.6 GB model.
@@ -218,6 +224,9 @@ KV cache and indexer picks rather than keeping its own. osmos 0.11.0, the `perfo
 | Prompt, 913K tokens (a book, its needle found) | 45 minutes |
 | GPU memory at 1M context (weights, drafter, a conversation's cache) | ~98 GiB |
 | KL against Tencent's reference (64 tokens; F32 cache / the Q8_0 cache osmos runs) | 1e-11 / 0.033 |
+
+0.12.3 against 0.12.2 (the `performance` profile, hy4_run, its logits the same bits): a 4K prompt ~467 -> ~498 tok/s
+(~390 -> ~440 at `low-power`, where the host's share is larger); decode unchanged.
 
 The context costs ~11 KB a token: MLA's latent rows Q8_0 (the rope part F32, as vLLM's `fp8_ds_mla`), the
 indexer's keys a small ring, its pooled groups F32 - the Q8_0 cache's teacher-forced NLL over 8K tokens no worse than
