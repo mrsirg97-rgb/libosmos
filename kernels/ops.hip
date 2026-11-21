@@ -48,11 +48,12 @@ __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* 
 
 // x16 (when not NULL): y as mm_x16 would put it, rows past `rows` (a block each) zero to a whole tile
 constexpr uint32_t kRmsRun = 8;  // a 6144-wide row's 24 values a thread in 3 runs
+// x16 (with it): row t's values at columns c0 .. c0 + n of an xts-wide tile (ops_rms_x16's: c0 0, xts n)
 __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
-                           uint32_t rows, _Float16* x16, int32_t* overflow) {
+                           uint32_t rows, _Float16* x16, int32_t* overflow, uint32_t xts, uint32_t c0) {
   __shared__ float lds[kThreads];
   if (blockIdx.x >= rows) {  // a pad row of x16's last tile
-    for (uint32_t i = threadIdx.x; i < n; i += kThreads) mm::x16_put(x16, blockIdx.x, i, n, 0.0f, overflow);
+    for (uint32_t i = threadIdx.x; i < n; i += kThreads) mm::x16_put(x16, blockIdx.x, c0 + i, xts, 0.0f, overflow);
     return;
   }
   const float* xr = x + (uint64_t) blockIdx.x * xs;
@@ -74,7 +75,7 @@ __global__ void rms_kernel(const float* x, uint32_t n, uint32_t xs, const float*
       if (i >= n) break;
       const float o = w ? (v[u] * r) * g[u] : v[u] * r;
       yr[i] = o;
-      if (x16) mm::x16_put(x16, blockIdx.x, i, n, o, overflow);
+      if (x16) mm::x16_put(x16, blockIdx.x, c0 + i, xts, o, overflow);
     }
   }
 }
@@ -664,7 +665,7 @@ extern "C" bool ops_rms_add_rms(float* h, float* y, const float* w_post, const f
 extern "C" bool ops_rms(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, uint32_t rows, float* y,
                         uint32_t ys, void* stream) {
   if (!n || !rows) return false;
-  rms_kernel<<<rows, kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, nullptr, nullptr);
+  rms_kernel<<<rows, kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, nullptr, nullptr, n, 0);
   return ok();
 }
 
@@ -673,7 +674,17 @@ static uint32_t tiles(uint32_t n) { return (n + mm::kTile - 1) / mm::kTile * mm:
 extern "C" bool ops_rms_x16(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, uint32_t rows,
                             float* y, uint32_t ys, void* x16, int32_t* overflow, void* stream) {
   if (!n || n % mm::kTile || !rows || rows > MM_MAX_TOKENS || !x16 || !overflow) return false;
-  rms_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, (_Float16*) x16, overflow);
+  rms_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, (_Float16*) x16, overflow, n, 0);
+  return ok();
+}
+
+extern "C" bool ops_rms_x16_at(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, uint32_t rows,
+                               float* y, uint32_t ys, void* x16, uint32_t xts, uint32_t c0, int32_t* overflow,
+                               void* stream) {
+  if (!n || n % mm::kTile || c0 % mm::kTile || c0 + n > xts || !rows || rows > MM_MAX_TOKENS || !x16 || !overflow)
+    return false;
+  rms_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, (_Float16*) x16, overflow, xts,
+                                                       c0);
   return ok();
 }
 

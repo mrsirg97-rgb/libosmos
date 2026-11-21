@@ -453,7 +453,12 @@ static uint64_t table_bytes(uint64_t P, uint64_t E)
   return table_entries(P, E) * (3 * sizeof(void *) + 5 * 4) + table_slots(P, E) * 2 * 4 + P * 4 * 4;
 }
 
-static bool mm_takes(uint32_t type, uint32_t rows, uint32_t cols) { return mm_known(type) && mm_fits(type, rows, cols); }
+/* mm's: its table's types, and BF16 (Mini's dense weights as released: mm's by name, not its table's - the other
+   families' BF16 matrices their matvec's as before). by type and shape alone, a decode's and a prompt's the same */
+static bool mm_takes(uint32_t type, uint32_t rows, uint32_t cols)
+{
+  return (mm_known(type) || type == QTYPE_BF16) && mm_fits(type, rows, cols);
+}
 
 /* INK2_MEM: what the build takes, a stage at a time (the GPU's free memory before and after) */
 static bool mem_on(void)
@@ -802,7 +807,7 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
   float *const y[3] = {f->eg, f->eu, f->ed};
   const uint32_t *xo[3] = {f->t_xg, f->t_xg, f->t_xd}, *yo[3] = {f->t_yg, f->t_yg, f->t_yd};
   float *pw = (float *)(f->pick + P);
-  bool ok = mat(f, L->router, d->router, f->xn, n, f->logit) &&
+  bool ok = mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) &&
             ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw,
                               NULL) &&
             q4x_expert_tiles(f->pick, P, K, E, C, F, &et, NULL) &&
@@ -845,7 +850,7 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   const Ink2Layer *L1 = next ? &f->w->layer[l + 1] : NULL;
   /* the picks' weights after them (pick + P): the two in one copy to the host */
   float *pw = (float *)(f->pick + P), *hw = (float *)(f->hpick + P);
-  if (!mat(f, L->router, d->router, f->xn, n, f->logit) ||
+  if (!mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) ||
       !ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw, NULL) ||
       (next && (!mat(f, L1->router, f->L[l + 1].router, f->xn, n, f->logit) ||
                 !ops_router_scored(f->logit, f->L[l + 1].router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n,
@@ -992,9 +997,16 @@ static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c,
 {
   const uint32_t C = (uint32_t)f->w->geo.n_embd;
   const float eps = f->w->geo.rms_eps;
-  return ops_rms(x, C, C, NULL, eps, n, f->ccat, 2 * C, NULL) &&
-         ops_rms(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, NULL) &&
-         mat(f, L->ctrl_down[c], d->ctrl_down[c], f->ccat, n, f->cgate) &&
+  /* the two norms' f16 side by side in x16 where down is mm's: its input's, not converted again (ops_rms's bits) */
+  const bool r16 = n <= MM_MAX_TOKENS && mm_takes(ink2_type(L->ctrl_down[c]), (uint32_t)L->ctrl_down[c]->dims[1],
+                                                  (uint32_t)L->ctrl_down[c]->dims[0]);
+  const bool normed = r16 ? ops_rms_x16_at(x, C, C, NULL, eps, n, f->ccat, 2 * C, f->x16, 2 * C, 0, f->overflow, NULL) &&
+                                ops_rms_x16_at(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, f->x16, 2 * C, C, f->overflow,
+                                               NULL)
+                          : ops_rms(x, C, C, NULL, eps, n, f->ccat, 2 * C, NULL) &&
+                                ops_rms(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, NULL);
+  return normed &&
+         mat2(f, L->ctrl_down[c], d->ctrl_down[c], f->cgate, NULL, NULL, NULL, f->ccat, n, r16) &&
          mat2(f, L->ctrl_gain[c], d->ctrl_gain[c], f->cgain, L->ctrl_forget[c], d->ctrl_forget[c], f->cforget,
               f->cgate, n, false) &&
          ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL);
@@ -1177,7 +1189,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                       NULL));
     if (looped)
       GPU(control(f, L, d, INK2_CTRL_FFN, f->tmp, f->msg + 3 * nC, n, f->tmp));
-    GPU(ops_rms(f->tmp, C, C, d->ffn_norm, g->rms_eps, n, f->xn, C, NULL));
+    GPU(rms_for(f, L->router, f->tmp, d->ffn_norm, n, f->xn, &f->router16)); /* (the router's x16: moe's first) */
     pf(PF_MID);
     if (!moe(f, l, n, err))
       return false;

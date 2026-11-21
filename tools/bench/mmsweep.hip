@@ -1,4 +1,4 @@
-// mmsweep [experts|dense|q4|ink2|mini]: mm's tile shapes (kernels/mm.h's Shape: SL values a slab, W waves a block, U chunks in
+// mmsweep [experts|dense|q4|ink2|mini|bf16]: mm's tile shapes (kernels/mm.h's Shape: SL values a slab, W waves a block, U chunks in
 // flight a lane) timed at one token on Qwen3.8-Flash-Next's shapes - each expert type's gate / up (640 x 2560) and
 // down (2560 x 640), 10 experts a launch (mm_group), and the dense Q6_K / Q8_0 - every call reading cold memory (its
 // matrices rotated through 1 GiB). a shape is a K split, so it is the sums' order: a type's for every token count
@@ -14,6 +14,7 @@
 
 extern "C" {
 #include "osmos/gpu/mm.h"
+#include "osmos/gpu/mv.h"
 }
 
 constexpr uint64_t kPool = 1ull << 30;
@@ -228,7 +229,64 @@ static int mini() {
   return 0;
 }
 
+// bf16: Inkling-2-Mini's dense BF16 at its shapes (q / gate 3,072 x 2,304, out 2,304 x 3,072, k / v 1,024 x
+// 2,304): mm's shapes at one token against the matvec (mv_strided, the path it replaces) and a plain read; then a
+// 2,048-token step, mm_run (its gemm) against mv_strided's wide tiles - cold, the weights random finite halves
+static void bf16_read(uint32_t rows, uint32_t cols) {
+  const uint64_t mat = (uint64_t) rows * cols * 2, n_mats = kPool / mat;
+  const uint32_t rb = cols * 2;
+  std::vector<const void*> host(kCalls);
+  for (int c = 0; c < kCalls; c++) host[c] = pool + (c % n_mats) * mat;
+  hipMemcpy(ptrs, host.data(), host.size() * sizeof(void*), hipMemcpyHostToDevice);
+  const double rd = time_us([&](int c) { read_kernel<<<dim3(rows / mm::kTile, 1), 128>>>((const uint8_t* const*) (ptrs + c), rb, y); });
+  float* xf = (float*) (x16 + mm::kTile * 4608);
+  const double mv = time_us([&](int c) { mv_strided(quant::kBF16, pool + (c % n_mats) * mat, rows, cols, xf, cols, 1, y, rows, nullptr); });
+  std::printf("  BF16 %5u x %-5u  read %6.1f GB/s  mv_strided %7.1f us %6.1f GB/s\n", rows, cols, mat / rd / 1e3, mv, mat / mv / 1e3);
+}
+static int bf16() {
+  g_passes = 20;
+  HIP(hipMalloc(&pool, kPool));
+  HIP(hipMalloc(&x16, (size_t) mm::kTile * 4608 * 2 + (size_t) 2048 * 3072 * 4));
+  HIP(hipMalloc(&y, (size_t) 2048 * 3072 * 4));
+  HIP(hipMalloc(&ptrs, kCalls * sizeof(void*)));
+  fill<<<4096, 256>>>((uint32_t*) pool, kPool / 4);
+  fill<<<64, 256>>>((uint32_t*) x16, mm::kTile * 4608 / 2);
+  HIP(hipMemset(x16 + mm::kTile * 4608, 0, (size_t) 2048 * 3072 * 4));
+  HIP(hipDeviceSynchronize());
+  const std::pair<uint32_t, uint32_t> shapes[] = {{3072, 2304}, {2304, 3072}, {1024, 2304}};
+  for (auto [r, c] : shapes) {
+    bf16_read(r, c);
+    SHAPES(dense, quant::kBF16, "BF16", r, c);
+    SHAPES16(dense, quant::kBF16, "BF16", r, c);
+    // the waves a 2,304-column row's slabs divide among evenly (18 of 128, 36 of 64)
+    dense<quant::kBF16, 128, 6, 8>("BF16", r, c), dense<quant::kBF16, 128, 6, 4>("BF16", r, c);
+    dense<quant::kBF16, 128, 9, 8>("BF16", r, c), dense<quant::kBF16, 128, 9, 4>("BF16", r, c);
+    dense<quant::kBF16, 128, 3, 8>("BF16", r, c), dense<quant::kBF16, 64, 6, 4>("BF16", r, c);
+    dense<quant::kBF16, 64, 9, 4>("BF16", r, c), dense<quant::kBF16, 64, 12, 4>("BF16", r, c);
+    dense<quant::kBF16, 64, 12, 2>("BF16", r, c), dense<quant::kBF16, 128, 12, 8>("BF16", r, c);
+  }
+  // a prompt step: 2,048 tokens (x16 one tile's worth reused: the timing's, not the values')
+  _Float16* xp;
+  float* xf;
+  HIP(hipMalloc(&xp, (size_t) 2048 * 3072 * 2));
+  HIP(hipMalloc(&xf, (size_t) 2048 * 3072 * 4));
+  fill<<<1024, 256>>>((uint32_t*) xp, (uint64_t) 2048 * 3072 / 2);
+  HIP(hipMemset(xf, 0, (size_t) 2048 * 3072 * 4));
+  HIP(hipDeviceSynchronize());
+  g_passes = 3;
+  for (auto [r, c] : shapes) {
+    const uint64_t mat = (uint64_t) r * c * 2;
+    const double a = time_us([&](int k) { mm_run(quant::kBF16, pool + (k % 8) * mat, r, c, xp, 2048, y, r, nullptr); }),
+                 b = time_us([&](int k) { mv_strided(quant::kBF16, pool + (k % 8) * mat, r, c, xf, c, 2048, y, r, nullptr); });
+    const double fl = 2.0 * r * c * 2048;
+    std::printf("  2,048 tokens BF16 %5u x %-5u  mm_run %8.1f us %5.1f TFLOP/s   mv_strided %8.1f us %5.1f TFLOP/s\n", r, c,
+                a, fl / a / 1e6, b, fl / b / 1e6);
+  }
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  if (argc > 1 && !std::strcmp(argv[1], "bf16")) return bf16();
   if (argc > 1 && !std::strcmp(argv[1], "ink2")) return ink2();
   if (argc > 1 && !std::strcmp(argv[1], "mini")) return mini();
   if (argc > 1 && !std::strcmp(argv[1], "tall")) {

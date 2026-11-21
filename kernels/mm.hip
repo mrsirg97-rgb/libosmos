@@ -30,6 +30,11 @@ template <quant::Type T> struct Tuned { using S = mm::Shape<128, 8, 8>; static c
 constexpr uint32_t kShortCols = 2048;
 template <quant::Type T> struct Short { using S = typename Tuned<T>::S; };
 template <> struct Short<quant::kQ6_K> { using S = mm::Shape<64, 8, 4>; };
+// BF16's short rows (Mini's loop gains and forgets: 64 columns, one slab - its one wave the row's sum)
+#ifndef MM_BF16_SHORT
+#define MM_BF16_SHORT 64, 1, 4
+#endif
+template <> struct Short<quant::kBF16> { using S = mm::Shape<MM_BF16_SHORT>; };
 // a width the type's slab does not divide (Qwen3.8's mixers' up: 320 columns of Q8_0): 64-value slabs - a shape only
 // such a width takes, so no matrix that tiled before changes
 template <quant::Type T> struct Odd { using S = typename Short<T>::S; };
@@ -65,6 +70,19 @@ template <> struct Tuned<quant::kNVFP4> : Tuned<quant::kQ2_0> {};
 // experts at one token, Mini's 1,152 x 2,304 gate / up and 2,304 x 1,152 down - the default 128 x 8 x 8 95 / 89 GB/s
 // (the generic decode_h's 57 / 48), 64 x 4 x 4 155 / 151 (a plain read 224)
 template <> struct Tuned<quant::kMXFP8> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
+// BF16 (Inkling-2-Mini's dense weights, as released): a value f16's where it is one - all but those below f16's
+// normal range (Mini's: 322,439 of 1.93 G, each within 2^-25 of its own); not in mm_known's table (QTYPE_MM): a
+// family takes it by name (ink2's mm_takes), the others' BF16 matrices their matvec's as before
+#ifndef MM_BF16_SHAPE
+#define MM_BF16_SHAPE 128, 8, 8
+#endif
+template <> struct Tuned<quant::kBF16> { using S = mm::Shape<MM_BF16_SHAPE>; static constexpr int kMaxCt = 8; };
+// a long BF16 row whose 128-value slabs 9 waves divide evenly (Mini's 2,304 columns: q, gate, k, v, rel, the router,
+// the head; the loop controls' down 4,608): 9 waves, each 2 slabs (4 for down) - mmsweep bf16 at a token, low-power:
+// q / gate 3,072 x 2,304 197 -> 228 GB/s (the matvec's 210), k / v 1,024 x 2,304 190 -> 200 (173); 3,072 columns
+// (24 slabs: the output) keep 128 x 8 x 8 (217; 9 waves 204). by its columns alone, so a matrix's every count
+struct Bf16Nine { using S = mm::Shape<128, 9, 8>; };
+constexpr bool bf16_nine(uint32_t cols) { return cols >= kShortCols && cols % (128 * 9) == 0; }
 // UD-Q4_K_XL's expert types, on the register-A path (mm.h's kRegA), a token's 10 experts cold (mmsweep q4, low-power,
 // 2026-11-09, two runs): Q4_K's 2,560-column gate / up 78-80 us at 128 x 8 x 8 -> 58-60 at 32 x 16 x 2 (80 slabs of
 // 32 for 16 waves to share: the decode's latency hidden; a 32-value slab's lane holds 2 chunks, so U 2 at most), Q5_1's
@@ -316,7 +334,7 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
 // 2560 Q6_K at 2,048 tokens 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 (low-power; 64 x 128: 22.8, 32 x 256: 22.4,
 // 128 x 128: past the LDS; without the second slab's LDS 25.5)
 template <quant::Type T>
-constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4;
+constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4 || T == quant::kBF16;
 constexpr int kGemmRm = 2, kGemmRn = 4, kGemmWr = 2, kGemmWc = 4;
 // a type's gemm blocks (kGemm*'s but where measured): its rows and tokens a wave in tiles, its waves' grid
 template <quant::Type T> struct GemmPlan { static constexpr int Rm = kGemmRm, Rn = kGemmRn, Wr = kGemmWr, Wc = kGemmWc; };
@@ -325,16 +343,14 @@ template <> struct GemmPlan<quant::kNVFP4> { static constexpr int Rm = GEMM_RM, 
 #endif
 constexpr uint32_t kGemmMinTokens = 4 * mm::kTile;  // past it: CT 8's counts
 
-template <quant::Type T>
+template <quant::Type T, class S = typename Tuned<T>::S>
 bool gemm_takes(const Mats& m, uint32_t cols, uint32_t n) {
-  using S = typename Tuned<T>::S;
   return kGemm<T> && n > kGemmMinTokens && !odd<T>(cols) && cols >= kShortCols &&
          cols / S::kSlab >= (uint32_t) S::kWaves;
 }
 
-template <quant::Type T>
+template <quant::Type T, class S = typename Tuned<T>::S>
 bool launch_gemm(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
-  using S = typename Tuned<T>::S;
   using P = GemmPlan<T>;
   constexpr uint32_t BM = mm::kTile * P::Rm * P::Wr, BN = mm::kTile * P::Rn * P::Wc;
   const uint32_t rows = m.rows[0] > m.rows[1] ? m.rows[0] : m.rows[1];
@@ -347,6 +363,12 @@ bool launch_gemm(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipS
 
 template <quant::Type T, int CT>
 bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
+  if constexpr (T == quant::kBF16)
+    if (bf16_nine(cols)) {  // (the gemm and the tile the same shape: its sums' order at every count)
+      using S9 = Bf16Nine::S;
+      if (gemm_takes<T, S9>(m, cols, n)) return launch_gemm<T, S9>(m, cols, x16, n, s);
+      return launch_shape<T, CT, S9>(m, cols, x16, n, s);
+    }
   if constexpr (kGemm<T>)
     if (gemm_takes<T>(m, cols, n)) return launch_gemm<T>(m, cols, x16, n, s);
   if (odd<T>(cols)) return launch_shape<T, CT, typename Odd<T>::S>(m, cols, x16, n, s);
@@ -428,6 +450,7 @@ bool run(uint32_t type, const Mats& m, uint32_t cols, const void* x16, uint32_t 
     case quant::kQ5_1: return launch<quant::kQ5_1>(m, cols, x16, n, s);
     case quant::kMXFP4: return launch<quant::kMXFP4>(m, cols, x16, n, s);
     case quant::kMXFP8: return launch<quant::kMXFP8>(m, cols, x16, n, s);
+    case quant::kBF16: return launch<quant::kBF16>(m, cols, x16, n, s);
     default: return false;
   }
 }
@@ -449,7 +472,7 @@ extern "C" bool mm_fits(uint32_t type, uint32_t rows, uint32_t cols) {
   case quant::t: return fits<quant::t>(rows, cols);
     FITS(kQ8_0) FITS(kQ5_K) FITS(kQ5_KR) FITS(kQ6_K) FITS(kIQ1_M) FITS(kIQ2_XXS) FITS(kIQ2_XS) FITS(kIQ1_S)
     FITS(kIQ2_S) FITS(kIQ3_XXS) FITS(kIQ4_NL) FITS(kQ4_0) FITS(kIQ4_XS) FITS(kQ2_0) FITS(kQ2_K) FITS(kQ3_K) FITS(kQ4_K) FITS(kQ5_1)
-    FITS(kMXFP4) FITS(kMXFP8) FITS(kNVFP4)
+    FITS(kMXFP4) FITS(kMXFP8) FITS(kNVFP4) FITS(kBF16)
 #undef FITS
     default: return false;
   }
@@ -461,7 +484,7 @@ extern "C" uint32_t mm_col_tiles(uint32_t type, uint32_t n) {
   case quant::t: return col_tiles<quant::t>(n);
     TILES(kQ8_0) TILES(kQ5_K) TILES(kQ5_KR) TILES(kQ6_K) TILES(kIQ1_M) TILES(kIQ2_XXS) TILES(kIQ2_XS) TILES(kIQ1_S)
     TILES(kIQ2_S) TILES(kIQ3_XXS) TILES(kIQ4_NL) TILES(kQ4_0) TILES(kIQ4_XS) TILES(kQ2_0) TILES(kQ2_K) TILES(kQ3_K) TILES(kQ4_K) TILES(kQ5_1)
-    TILES(kMXFP4) TILES(kMXFP8) TILES(kNVFP4)
+    TILES(kMXFP4) TILES(kMXFP8) TILES(kNVFP4) TILES(kBF16)
 #undef TILES
     default: return 0;
   }

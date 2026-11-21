@@ -110,6 +110,7 @@ struct Ink2Forward
      up, down][expert] and scales (the same shape), the picks counted there; the tables (q4x_expert_tiles' and
      ink2_moe_scales'), sized for the step's most picks */
   bool v8; /* a full layer's values Q8 records (Ink2Options' values_q8), else Q5 */
+  bool router16; /* f->x16 the MoE's input's (rms_for's): the router's, read first */
   bool whole;
   const void **exp_tab;
   float *scale_tab;
