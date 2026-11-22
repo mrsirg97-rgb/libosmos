@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.15.1]: an upgrade takes a release's new pack settings
+
+- **`--upgrade` now brings a pack's new default settings.** Each version reads its own frozen copy of a pack's config,
+  and an upgrade made that copy from the pack's `osmos.json` as it was installed - so a setting a later release added
+  never arrived. Most visibly, **inkling-2-mini installed before 0.14.0 and upgraded stayed greedy** (the release's
+  temperature 1.0, the fix for its repeated tool calls, never reached it), and osmos1.7b's `preserve_thinking` (0.11.3)
+  likewise. An upgrade now adds every setting the new version's pack gives that your config does not have; a key you
+  set yourself (`"temperature": 0`) is kept. Upgrade to 0.15.1 (`osmos_install.py --upgrade`) to pick them up.
+
 ## [0.15.0]: a sizing that cannot run the machine out of memory, fewer launches, every pack measured again
 
 - **Sizing fix (an out-of-memory at startup).** A streaming pack sizes its expert budget by building at a few budgets

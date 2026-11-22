@@ -2141,6 +2141,17 @@ prompt is the full layers' attention's: the dense matrices' 2x is a shallow prom
 25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
 2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
 
+### 0.15.1: an upgrade's frozen config takes the release's new settings (2026-11-22)
+
+found upgrading the rig to 0.15.0: inkling-2-mini's osmos.0.15.0.json had no temperature. versions.freeze copied the
+pack's shared osmos.json - written by the release that installed the pack - so a setting a later release's packs.json
+added (Mini's temperature 1.0 from 0.14.0, osmos1.7b's preserve_thinking from 0.11.3, ud-iq1_m's max_tokens) reached
+fresh installs alone. upgrade() now gives freeze the target version's own pack settings (versions.settings_of: its
+built tree's packs.json, an old pack id through its aliases) and each is taken where the config has not the key; the
+version left is frozen as before, and a user's own value kept (test_install's
+test_upgrade_takes_the_versions_new_settings). a version is frozen once: rows already on a version keep its file as
+written - 0.15.1 itself is the next upgrade that carries them.
+
 ### 0.15.0: drafting at temperature 1, and a step's launches (2026-11-22, low-power unless named)
 
 **where a sampled round goes** (Mini, temperature 1, osmos-api's code / explanation requests, round phases timed in
