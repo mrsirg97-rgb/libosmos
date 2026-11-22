@@ -266,7 +266,12 @@ class Api(Served, unittest.TestCase):
 
     def test_5_refusals(self):
         self.ready()
-        for body, word in [({"messages": [{"role": "user", "content": "x"}], "temperature": 0.7}, "temperature"),
+        for body, word in [({"messages": [{"role": "user", "content": "x"}], "temperature": -0.5}, "temperature"),
+                           ({"messages": [{"role": "user", "content": "x"}], "temperature": "hot"}, "temperature"),
+                           ({"messages": [{"role": "user", "content": "x"}], "top_p": 0}, "top_p"),
+                           ({"messages": [{"role": "user", "content": "x"}], "top_p": 1.5}, "top_p"),
+                           ({"messages": [{"role": "user", "content": "x"}], "seed": -3}, "seed"),
+                           ({"messages": [{"role": "user", "content": "x"}], "seed": 1.5}, "seed"),
                            ({"messages": []}, "messages"),
                            ({"messages": [{"role": "user", "content": "x"}], "stop": ["\n"]}, "stop"),
                            ({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "huge"},
@@ -277,7 +282,8 @@ class Api(Served, unittest.TestCase):
                             "response_format"),
                            ({"messages": [{"role": "user", "content": "x"}],
                              "response_format": {"type": "json_schema", "json_schema": {"name": "a"}}}, "its schema")] + [
-                # 0.7.1: sampling's other fields refused by name as temperature is, not ignored; their greedy values
+                # 0.7.1: sampling's other fields refused by name, not ignored (0.14.0: temperature, top_p and seed
+                # built - out of range refused); their greedy values
                 # (0, 1, {}, false) taken - as a client's defaults
                 ({"messages": [{"role": "user", "content": "x"}], k: v}, k) for k, v in (
                     ("presence_penalty", 0.5), ("frequency_penalty", 1), ("repetition_penalty", 1.1),
@@ -1293,6 +1299,64 @@ class FillOrphans(Served, unittest.TestCase):
             r = self.post(dict({"messages": msgs, "tools": TOOLS, "reasoning_effort": "none"}, **extra))
             self.assertEqual(r.status, 200)
             self.assertEqual(json.loads(r.read())["osmos"]["loop"]["orphans_filled"], want)
+
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class Sampling(Served, unittest.TestCase):
+    """0.14.0: temperature, top_p and seed - GEN's temp= top_p= seed= when sampled (temperature above 0), none greedy;
+    a seed as asked, else drawn, in x-osmos-seed; a request's unset the pack's (osmos.json's temperature, top_p)"""
+    settings = {"temperature": 1.0, "top_p": 0.95}
+
+    def gen_keys(self):
+        return {k: v for k, v in (f.split("=", 1) for f in self.last_gen() if "=" in f)}
+
+    def ask(self, **extra):
+        self.reply("ok" + EOS)
+        r = self.post(dict({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none"}, **extra))
+        self.assertEqual(r.status, 200)
+        r.read()
+        return r, self.gen_keys()
+
+    def test_0_pack_default_and_drawn_seed(self):
+        self.ready()
+        r, k = self.ask()
+        self.assertEqual((k["temp"], k["top_p"]), ("1", "0.95"))
+        self.assertEqual(r.getheader("x-osmos-seed"), k["seed"])
+        self.assertLess(int(k["seed"]), 2 ** 53)
+        _, k2 = self.ask()
+        self.assertNotEqual(k2["seed"], k["seed"])  # (drawn each request)
+
+    def test_1_request_overrides(self):
+        self.ready()
+        r, k = self.ask(temperature=0.6, top_p=0.8, seed=1234)
+        self.assertEqual((k["temp"], k["top_p"], k["seed"]), ("0.6", "0.8", "1234"))
+        self.assertEqual(r.getheader("x-osmos-seed"), "1234")
+        r, k = self.ask(temperature=0)  # greedy: no keys, no seed header
+        self.assertNotIn("temp", k)
+        self.assertNotIn("seed", k)
+        self.assertIsNone(r.getheader("x-osmos-seed"))
+        self.ask(temperature=None, top_p=None)  # null: the pack's
+        self.assertEqual(self.gen_keys()["temp"], "1")
+
+    def test_2_stream_header(self):
+        self.ready()
+        self.reply("ok" + EOS)
+        r = self.post({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none", "seed": 77,
+                       "stream": True})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(r.getheader("x-osmos-seed"), "77")
+        r.read()
+
+    def test_3_pack_refused(self):
+        for bad in ({"temperature": -1}, {"top_p": 0}, {"top_p": 2}):
+            d = tempfile.mkdtemp()
+            cfg = os.path.join(d, "osmos.json")
+            with open(cfg, "w") as f:
+                json.dump(dict({"pack": "test", "model": self.model, "max_context": 4096}, **bad), f)
+            r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                               capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn(next(iter(bad)), r.stderr)
 
 if __name__ == "__main__":
     sys.exit(not unittest.main(exit=False, verbosity=2).result.wasSuccessful())

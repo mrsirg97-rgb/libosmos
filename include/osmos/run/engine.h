@@ -86,6 +86,16 @@ bool osmos_reads_apart(const Osmos *e);
 const float *osmos_logits(const Osmos *e, uint32_t row);
 bool osmos_greedy(Osmos *e, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t n, int32_t *id, char err[OSMOS_ERR]);
+/* a request's sampling: temperature 0 greedy (the family's pick, the bits as ever); top_p 1 every token */
+typedef struct OsmosSampling
+{
+  float temperature, top_p;
+  uint64_t seed;
+} OsmosSampling;
+bool osmos_sampled(const OsmosSampling *s);
+bool osmos_sample(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_t position, int32_t *id, char err[OSMOS_ERR]);
+bool osmos_sample_except(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_t position, const int32_t *except,
+                         uint32_t n, int32_t *id, char err[OSMOS_ERR]);
 
 OsmosSeq *oseq_create(Osmos *e, char err[OSMOS_ERR]);
 void oseq_destroy(OsmosSeq *s);
@@ -164,6 +174,14 @@ osmos_greedy_except
   row's greatest token among those not in `except` (osmos/text/answer.h's answer_best: ties to the lower id, NaNs
   never), from its logits copied to the host - osmos-serve's pick where an end is not taken (the answer rule). false
   with why: a row not kept, a GPU call failed, every token excepted.
+
+osmos_sample, osmos_sample_except, osmos_sampled
+  row's token drawn as s says (ops_sample: temperature, top-p, the inverse CDF at ops_draw_uniform(seed, position)) -
+  position the drawn token's in its sequence, so a token's draw is its row's bits and (seed, position) alone: a drafted
+  round's row and a plain step's at one position the same token (0.14.0). _except: the draw among the tokens not in
+  except (theirs -inf in a copy of the row). osmos_sampled: s names a temperature above 0 (NULL, or 0: greedy -
+  osmos_greedy's / osmos_greedy_except's pick exactly). false with why: a row not kept, a NaN or +inf in it, a GPU
+  call failed, s's numbers out of range (temperature not finite, top_p not in (0, 1]).
 
 oseq_create .. oseq_load
   a sequence: its position (tokens it holds), oseq_prompt (its prompt ends at end: the family may skip work no later

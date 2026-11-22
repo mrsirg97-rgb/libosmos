@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.0]: sampling - temperature, top_p and seed - and inkling-2-mini sampled as released
+
+- **Sampling.** osmos-api takes `temperature`, `top_p` and `seed` (OpenAI's names; no top-k), and a pack may set its
+  own defaults in `osmos.json`. Until now osmos decoded greedily only, and a greedy model can fall into repeating
+  itself: an agent session on inkling-2-mini made one identical tool call 100+ times. Replayed from that session's
+  request, temperature 1.0 never repeated the call where greedy did.
+- **inkling-2-mini is sampled at temperature 1.0**, its release's setting. Other packs stay greedy unless a request
+  asks; `temperature: 0` is greedy exactly.
+- **A seed reproduces an answer.** Each token is drawn from (seed, position) alone, so the same seed gives the same
+  tokens with drafting on or off, at any batch. A request without a seed gets one, returned in `x-osmos-seed`.
+- **Drafting gains less when sampling**: Mini's drafter is taken less often at temperature 1, so drafted decode is
+  ~30 tok/s against ~51 greedy (plain ~27 either way; low-power). Drafted output stays exactly the plain output.
+- **Inkling decode attention** at short context takes more of the GPU: a sliding layer 30% faster, Mini plain decode
+  +3%, every token the same.
+
 ## [0.13.0]: every MoE family through the one membrane, every pack sized to the machine
 
 A consolidation: what each family did its own way is one module each, and every expert path goes through the

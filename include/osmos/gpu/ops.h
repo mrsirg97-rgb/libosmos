@@ -137,6 +137,8 @@ bool ops_add(float *y, const float *a, uint64_t n, void *stream);
 bool ops_copy(void *dst, const void *src, uint64_t bytes, void *stream);
 uint64_t ops_argmax_scratch(uint32_t rows);
 bool ops_argmax(const float *x, uint32_t n, uint32_t rows, uint32_t stride, int32_t *out, void *scratch, void *stream);
+float ops_draw_uniform(uint64_t seed, uint64_t position);
+bool ops_sample(const float *x, uint32_t n, float temperature, float top_p, float u, int32_t *out, void *stream);
 bool ops_wait(const uint32_t *flag, uint32_t value, void *stream);
 bool ops_copy_rows(float *dst, const float *src, const int32_t *idx, uint32_t n, uint32_t len, void *stream);
 
@@ -353,6 +355,17 @@ ops_argmax, ops_argmax_scratch
   caller refuses, never the greatest of what is left. both families' greedy pick (DESIGN.md, "0.6.2: what the two
   families share"). scratch: ops_argmax_scratch(rows) bytes of device memory (the row's slices' bests: two launches).
   false for no x, out or scratch, n 0 or past 2^31 - 2, no rows, or a stride under n.
+
+ops_draw_uniform
+  a sampled token's uniform in [0, 1): a counter-based hash (splitmix64) of the seed and the token's position in its
+  sequence alone, 24 bits - the same draw however the steps that reach the position are cut, drafted or batched.
+
+ops_sample
+  out[0] = a token drawn from one row of n logits (device): p_i = exp((x_i - max) / temperature), kept those with
+  p_i >= tau, tau the greatest whose kept mass is at least top_p of the whole (top_p 1: every token; ties all kept),
+  then the first id in id order whose running sum of the kept p passes u times their sum - an inverse CDF, every sum
+  in one fixed order (one block, its threads' contiguous slices), so a row's bits give one token. -inf a token never
+  drawn; a row with a NaN or +inf, or all -inf: -1. false for no x or out, n 0 or past 2^31 - 2, temperature not > 0, top_p not in (0, 1], u not in [0, 1).
 
 ops_wait
   the stream held until *flag - host memory the GPU maps (hipHostMalloc's) - holds value, or value with its top bit

@@ -152,6 +152,7 @@ void round_all(Multi *m)
   if (!total)
     return;
   char err[OSMOS_ERR];
+  /* every row's greedy pick in one launch (lanes greedy and sampled mixed): a sampled lane's rows drawn again below */
   if (!osmos_batch(sv->e, seqs, toks, (uint32_t)total, err) || !osmos_greedy(sv->e, 0, (uint32_t)total, picks, err))
   {
     for (int j = 0; j < nin; j++)
@@ -161,8 +162,8 @@ void round_all(Multi *m)
   bool failed[MAX_LANES] = {false};
   for (int j = 0; j < nin; j++) /* a lane's row i: its held, then its toks[off .. off + i] */
     for (int i = 0; i <= in[j].k && !failed[j]; i++)
-      if (!server_answer(sv, &in[j].ln->c.held, toks + in[j].off, (uint32_t)i + 1, (uint32_t)(in[j].off + i),
-                         &picks[in[j].off + i], in[j].ln->c.err))
+      if (!server_answer(sv, &in[j].ln->g.samp, &in[j].ln->c.held, toks + in[j].off, (uint32_t)i + 1,
+                         (uint32_t)(in[j].off + i), &picks[in[j].off + i], in[j].ln->c.err))
         failed[j] = true, lane_fail(m, in[j].ln);
   for (int j = 0; j < nin; j++)
   {

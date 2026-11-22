@@ -620,6 +620,104 @@ __global__ void add_kernel(float* y, const float* a, uint64_t n) {
   if (i < n) y[i] += a[i];
 }
 
+// a token drawn from one row (ops_sample, 0.14.0): one block, each thread a contiguous slice in id order, every sum
+// in one fixed order (a thread's slice in order, then a fixed tree, or the threads' sums in order for the draw's
+// prefix) - so a row's bits give one token at every launch. p_i = exp((x_i - max) / T); top-p's threshold tau the
+// greatest float whose kept mass (p_i >= tau) reaches top_p of the whole, by bisection over the floats' bits
+// (positive floats order as their bits); then the first kept id whose running sum passes u times the kept sum
+constexpr int kSampThreads = 1024;
+__device__ float samp_sum(float v, float* lds) {
+  const int t = threadIdx.x;
+  lds[t] = v;
+  __syncthreads();
+  for (int h = kSampThreads / 2; h > 0; h >>= 1) {
+    if (t < h) lds[t] += lds[t + h];
+    __syncthreads();
+  }
+  const float r = lds[0];
+  __syncthreads();
+  return r;
+}
+__global__ __launch_bounds__(kSampThreads) void sample_kernel(const float* x, uint32_t n, float temp, float top_p,
+                                                              float u, int32_t* out) {
+  __shared__ float lds[kSampThreads];
+  __shared__ float pre[kSampThreads + 1];
+  __shared__ int bad;
+  const int t = threadIdx.x;
+  const uint32_t per = (n + kSampThreads - 1) / kSampThreads;
+  const uint32_t lo = (uint64_t) t * per < n ? t * per : n, hi = lo + per < n ? lo + per : n;
+  if (!t) bad = 0;
+  __syncthreads();
+  float m = -INFINITY;
+  for (uint32_t i = lo; i < hi; i++) {
+    const float c = x[i];
+    if (!(c < INFINITY)) bad = 1;  // a NaN or +inf (-inf: a token never drawn)
+    else m = fmaxf(m, c);
+  }
+  lds[t] = m;
+  __syncthreads();
+  for (int h = kSampThreads / 2; h > 0; h >>= 1) {
+    if (t < h) lds[t] = fmaxf(lds[t], lds[t + h]);
+    __syncthreads();
+  }
+  m = lds[0];
+  __syncthreads();
+  if (bad || m == -INFINITY) {
+    if (!t) *out = -1;
+    return;
+  }
+  uint32_t tb = 0;  // tau's bits: 0, every token, at top_p 1
+  if (top_p < 1.0f) {
+    float s = 0;
+    for (uint32_t i = lo; i < hi; i++) s += expf((x[i] - m) / temp);
+    const float target = top_p * samp_sum(s, lds);
+    uint32_t a = 0, b = 0x3F800001u;  // mass(a) >= target (every token), mass(b) < target (past the greatest, 1)
+    while (b - a > 1) {
+      const uint32_t mid = a + (b - a) / 2;
+      const float tau = __uint_as_float(mid);
+      float k = 0;
+      for (uint32_t i = lo; i < hi; i++) {
+        const float v = expf((x[i] - m) / temp);
+        if (v >= tau) k += v;
+      }
+      if (samp_sum(k, lds) >= target) a = mid;
+      else b = mid;
+    }
+    tb = a;
+  }
+  const float tau = __uint_as_float(tb);
+  float s = 0;
+  for (uint32_t i = lo; i < hi; i++) {
+    const float v = expf((x[i] - m) / temp);
+    if (v >= tau) s += v;
+  }
+  lds[t] = s;
+  __syncthreads();
+  if (!t) {
+    float acc = 0;
+    pre[0] = 0;
+    for (int k = 0; k < kSampThreads; k++) pre[k + 1] = acc += lds[k];
+  }
+  __syncthreads();
+  const float kept = pre[kSampThreads];  // >= 1: the greatest token's p, kept
+  float r = u * kept;
+  if (r >= kept) r = nextafterf(kept, 0.0f);
+  if (!(pre[t] <= r && r < pre[t + 1])) return;  // the one thread whose slice holds r
+  float c = pre[t];
+  int32_t last = -1;
+  for (uint32_t i = lo; i < hi; i++) {
+    const float v = expf((x[i] - m) / temp);
+    if (v >= tau && v > 0) {
+      last = (int32_t) i;
+      if ((c += v) > r) {
+        *out = (int32_t) i;
+        return;
+      }
+    }
+  }
+  *out = last;  // the slice's sum past r, its running sum short of it by rounding: its last kept token
+}
+
 
 }  // namespace
 
@@ -989,5 +1087,24 @@ extern "C" bool ops_argmax(const float* x, uint32_t n, uint32_t rows, uint32_t s
   argmax_part_kernel<<<dim3(rows, kArgSplit), kArgThreads, 0, st(stream)>>>(x, n, stride, pv, pi);
   if (!ok()) return false;
   argmax_merge_kernel<<<rows, kArgSplit, 0, st(stream)>>>(pv, pi, out);
+  return ok();
+}
+
+extern "C" float ops_draw_uniform(uint64_t seed, uint64_t position) {
+  auto mix = [](uint64_t z) {  // splitmix64's finalizer
+    z += 0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+  };
+  return (float) (mix(seed ^ mix(position)) >> 40) * 0x1p-24f;
+}
+
+extern "C" bool ops_sample(const float* x, uint32_t n, float temperature, float top_p, float u, int32_t* out,
+                           void* stream) {
+  if (!x || !out || !n || n >= (uint32_t) INT32_MAX || !(temperature > 0) || !(top_p > 0 && top_p <= 1) ||
+      !(u >= 0 && u < 1))
+    return false;
+  sample_kernel<<<1, kSampThreads, 0, st(stream)>>>(x, n, temperature, top_p, u, out);
   return ok();
 }

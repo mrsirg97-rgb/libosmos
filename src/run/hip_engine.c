@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "engine_impl.h"
+#include "osmos/gpu/ops.h"
 #include "osmos/model/gguf.h"
 #include "osmos/text/answer.h"
 
@@ -26,6 +27,8 @@ struct Osmos
   void *impl;
   uint32_t vocab; /* a logits row's floats (osmos_greedy_except) */
   float *row;     /* [vocab], a row copied out */
+  float *drow;    /* [vocab] device: a row's copy, its excepted tokens -inf (osmos_sample_except), at first use */
+  int32_t *dpick; /* device: a drawn token */
 };
 
 struct OsmosSeq
@@ -109,6 +112,10 @@ void osmos_destroy(Osmos *e)
   if (!e)
     return;
   e->fam->destroy(e->impl);
+  if (e->drow)
+    (void)hipFree(e->drow);
+  if (e->dpick)
+    (void)hipFree(e->dpick);
   free(e->row), free(e);
 }
 
@@ -168,6 +175,58 @@ bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t
     return fail(err, "a GPU call failed (a row's logits)");
   *id = answer_best(e->row, e->vocab, except, n);
   return *id >= 0 || fail(err, "every token of the row excepted or NaN");
+}
+
+bool osmos_sampled(const OsmosSampling *s) { return s && s->temperature > 0; }
+
+static bool draw(Osmos *e, const float *dev, const OsmosSampling *s, uint64_t position, int32_t *id,
+                 char err[OSMOS_ERR])
+{
+  if (!(s->temperature < 1e30f) || !(s->top_p > 0 && s->top_p <= 1))
+    return fail(err, "sampling: temperature finite and above 0, top_p in (0, 1]");
+  if (!e->dpick && hipMalloc((void **)&e->dpick, sizeof *e->dpick) != hipSuccess)
+    return e->dpick = NULL, fail(err, "a GPU call failed (sampling's pick)");
+  if (!ops_sample(dev, e->vocab, s->temperature, s->top_p, ops_draw_uniform(s->seed, position), e->dpick, NULL) ||
+      hipMemcpy(id, e->dpick, sizeof *id, hipMemcpyDeviceToHost) != hipSuccess)
+    return fail(err, "a GPU call failed (a sampled token)");
+  return *id >= 0 || fail(err, "a sampled row with a NaN or +inf (or every token excepted)");
+}
+
+bool osmos_sample(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_t position, int32_t *id, char err[OSMOS_ERR])
+{
+  if (!osmos_sampled(s))
+    return osmos_greedy(e, row, 1, id, err);
+  if (!e || !id)
+    return fail(err, "no engine");
+  const float *dev = e->fam->logits(e->impl, row);
+  if (!dev)
+    return fail(err, "the row's logits not kept");
+  if (hipDeviceSynchronize() != hipSuccess)
+    return fail(err, "a GPU call failed (a row's logits)");
+  return draw(e, dev, s, position, id, err);
+}
+
+bool osmos_sample_except(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_t position, const int32_t *except,
+                         uint32_t n, int32_t *id, char err[OSMOS_ERR])
+{
+  if (!osmos_sampled(s))
+    return osmos_greedy_except(e, row, except, n, id, err);
+  if (!e || !id)
+    return fail(err, "no engine");
+  const float *dev = e->fam->logits(e->impl, row);
+  if (!dev)
+    return fail(err, "the row's logits not kept");
+  const size_t bytes = (size_t)e->vocab * sizeof *e->drow;
+  if (!e->drow && hipMalloc((void **)&e->drow, bytes) != hipSuccess)
+    return e->drow = NULL, fail(err, "a GPU call failed (a row's copy)");
+  const float ninf = -__builtin_inff();
+  if (hipDeviceSynchronize() != hipSuccess || hipMemcpy(e->drow, dev, bytes, hipMemcpyDeviceToDevice) != hipSuccess)
+    return fail(err, "a GPU call failed (a row's copy)");
+  for (uint32_t i = 0; i < n; i++)
+    if (except[i] >= 0 && (uint32_t)except[i] < e->vocab &&
+        hipMemcpy(e->drow + except[i], &ninf, sizeof ninf, hipMemcpyHostToDevice) != hipSuccess)
+      return fail(err, "a GPU call failed (a row's copy)");
+  return draw(e, e->drow, s, position, id, err);
 }
 
 uint32_t osmos_block(const Osmos *e) { return e ? e->fam->block(e->impl) : 0; }

@@ -1687,7 +1687,7 @@ caller's, no server. this ports both, as one binary that speaks maya's line prot
 - ready: `READY <max_ctx> stop[ multi=<N>]`.
 - in: `GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>`, `STOP [<rid>]`, `QUIT`. maya's other keys
   (sampling, penalties, thinking budgets, logprobs, GENI's pictures) are refused with `ERR` naming the key: greedy is
-  the engine's one mode.
+  the engine's one mode. (0.14.0: `temp=`, `top_p=` and `seed=` sample; see 0.14.0 below.)
 - out: `T [<rid>] <token>`; `PP[ <rid>] <done> <total> <ms> <tok/s> <reused>`; `DONE [<rid>] <produced> <prompt>
   <prompt_ms> <decode_ms> <finish> <accepted> <drafted> <reused> <hits> <lookups>`; `ERR [<rid>] <reason>`; `NOTE`.
   each field's meaning maya's, so its harnesses read ours.
@@ -2140,6 +2140,49 @@ prompt is the full layers' attention's: the dense matrices' 2x is a shallow prom
 **the numbers** (performance, osmos-api, one conversation; drafted / plain): decode, three short questions 33.5 /
 25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
 2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
+
+### 0.14.0: sampling, and a drafted answer still the plain one (2026-11-22)
+
+**why**: an agent session on inkling-2-mini (0.13.0) repeated one identical tool call for 100+ requests (47K -> 114K
+tokens), and another user hit the same. the pack was configured as intended; osmos decoded greedily only, and
+Thinking Machines ship Mini sampled (generation_config: do_sample, temperature 1.0). replayed from the session's own
+request (system prompt and tools captured, history rebuilt): at message 356 greedy made the session's duplicate call;
+temperature 1.0, seeds 1-4, never did. at 360 (four duplicates already in the history) one call in five still did -
+sampling lowers the odds, it does not undo a history that already loops.
+
+**the draw** (ops_sample): temperature's softmax, top-p's kept set (the fewest greatest tokens whose mass reaches
+top_p, ties kept: the threshold bisected over the floats' bits), then the inverse CDF in id order - every sum in one
+fixed order in one block, so a row and a uniform give one token on any launch. no top-k (operator's call). the
+uniform is a counter hash, splitmix64(seed ^ mix(position)): a function of (seed, position) alone, no running RNG.
+
+**drafted == plain**: the token at position p is drawn with p's uniform whether p comes from a plain step or a verify
+round; a draft is accepted iff it equals that token. our drafters propose argmax (a deterministic q), so standard
+speculative sampling's acceptance (p_target of the draft) is this rule's: nothing is lost, and the same seed gives the
+same answer drafted or not, at any step size, split or batch (tools/serve/sample_test.py). temperature 0 is greedy
+exactly.
+
+**the cost**: Mini's drafts are taken less at temperature 1 (54-64% against greedy's), so drafted decode at T1 is
+~30 tok/s against greedy's ~51 (plain 27 either way; low-power) - inherent to sampling at 1, not the draw (plain T1
+27.1 against greedy 27.2). a Gumbel-max coupling of the drafter to the target's noise (branch proto-coupled-draft)
+moved acceptance 54 -> 59% and decode 29.8 -> 30.0: not kept. vLLM's probabilistic drafting (min(1, p / q)) would take
+more, but its answers are not the plain ones: not taken.
+
+**osmos-api**: temperature, top_p, seed (OpenAI's names); the pack's `temperature` / `top_p` (osmos.json) where a
+request leaves them unset, greedy for a pack without; no seed -> one drawn per request (53 bits, getrandom) and sent
+back in `x-osmos-seed`. osmos-serve's GEN takes `temp=`, `top_p=`, `seed=`. inkling-2-mini's pack: temperature 1.0.
+
+**decode attention** (Inkling): a split decode ran 16-40 one-wave blocks at short context, each 80-89% waiting
+(SQ_WAIT_ANY). a block now takes 1, 2, 4 or 8 waves while the call's blocks x waves stay within 256
+(kFaDecodeWaves, measured at Mini's shape: each length's fastest within 7%) - the same tiles in the same order, the same
+bits. a sliding layer 62 -> 43 us, a full one at 512 / 2K / 4K keys 60 / 79 / 92 -> 38 / 54 / 67; 8K and past
+unchanged. Mini plain decode 27.2 -> 28.1 tok/s (low-power), the same tokens. two tiles in flight a wave measured
+slower (spills).
+
+**tried, not kept: the experts' one-tile kernel** (NVFP4 / MXFP8 at a token: mm::group_kernel 167-173 / 151-154 GB/s
+against a plain read's 222-227, mmsweep mini). a wave a 16-row tile with tile's W partitions as W accumulators (the
+same bits) was 1.3-2x slower whatever its loads (buffer or global, all W slabs in flight or one ahead, blocks of 1 or 4
+waves): 576 waves a call are too few - the K split over a block's waves is what keeps the reads in flight. NVFP4's
+row words in two 16-byte loads instead of nine dwords: level. parked on branch proto-wave-tile.
 
 ### 0.13.0: one membrane for every MoE, every pack sized to the machine (2026-11-21)
 

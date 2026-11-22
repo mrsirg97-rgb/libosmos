@@ -125,10 +125,10 @@ class Multi:
                     r.update(err=line.strip(), s=time.monotonic() - r["t0"])
                 self.cv.notify_all()
 
-    def send(self, rid, ids, max_new, spec=0):
+    def send(self, rid, ids, max_new, spec=0, extra=""):
         with self.cv:
             self.req[rid] = {"tokens": [], "pp": [], "t0": time.monotonic()}
-        self.p.stdin.write(f"GEN {max_new} rid={rid} spec={spec} {','.join(map(str, ids))}\n")
+        self.p.stdin.write(f"GEN {max_new} rid={rid} spec={spec}{extra} {','.join(map(str, ids))}\n")
         self.p.stdin.flush()
 
     def stop(self, rid):
