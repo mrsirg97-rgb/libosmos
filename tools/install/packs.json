@@ -307,7 +307,7 @@
       "shards": ["ink2-mini-1", "ink2-mini-2"], "gpu_gib": 10,
       "table": null, "picks": null, "drafter": ["ink2-mini-mtp"], "drafter_kind": "mtp", "overlay": null,
       "rig": {"id": "inkling-2-mini", "max_tokens": 131072, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "high", "aliases": ["mini"]},
-      "settings": {"max_context": 1048576, "max_tokens": 4096, "kv_q8": true}
+      "settings": {"max_context": 1048576, "max_tokens": 4096, "kv_q8": true, "temperature": 1.0}
     }
   }
 }

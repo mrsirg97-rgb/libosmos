@@ -78,6 +78,9 @@ class Manifest(unittest.TestCase):
         self.assertEqual((v["rig"]["efforts"], v["rig"]["effort"]), (["none", "high"], "high"))  # thinking off, on
         self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/osmos1.7b"})
         self.assertEqual((manifest.pack_id(m, "vibes1.7b"), v["rig"]["aliases"]), ("osmos1.7b", ["vibes1.7b", "vibes"]))  # 0.11.1: renamed
+        self.assertEqual(m["packs"]["inkling-2-mini"]["settings"],  # 0.14.0: sampled at its release's temperature
+                         {"max_context": 1048576, "max_tokens": 4096, "kv_q8": True, "temperature": 1.0})
+        self.assertNotIn("temperature", m["packs"]["hy4-flash"]["settings"])  # (the others greedy, as ever)
         h = m["packs"]["hy4-flash"]  # 0.11.0: AngelSlim's Q3_K (the Engram table its shard 2), Tencent's own DFly2
         self.assertEqual((h["drafter"], h["drafter_kind"], h["table"]), (["hy4-dfly2"], "dfly", None))
         self.assertEqual({m["files"][f]["repo"] for f in h["shards"]}, {"AngelSlim/Hy4-flash-GGUF"})
