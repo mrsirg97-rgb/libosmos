@@ -50,9 +50,11 @@ __global__ void embed_kernel(const uint8_t* table, uint32_t dim, const int32_t* 
 constexpr uint32_t kRmsRun = 8;  // a 6144-wide row's 24 values a thread in 3 runs
 // x16 (with it): row t's values at columns c0 .. c0 + n of an xts-wide tile (ops_rms_x16's: c0 0, xts n)
 // row `row` of a norm (rms_kernel's block, rms_many_kernel's): its sums and each value's ops in one order
+// ctl (when not NULL, x its out, xs n): row's values first the loop control's (ops_rms_x16_ctrl), each written to out
+// by the thread that sums it and reads it back - the norm's sums and ops on the values as ever
 __device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
                                uint32_t rows, _Float16* x16, int32_t* overflow, uint32_t xts, uint32_t c0,
-                               uint32_t row, float* lds) {
+                               uint32_t row, float* lds, const OpsCtrl* ctl = nullptr) {
   if (row >= rows) {  // a pad row of x16's last tile
     for (uint32_t i = threadIdx.x; i < n; i += kThreads) mm::x16_put(x16, row, c0 + i, xts, 0.0f, overflow);
     return;
@@ -62,8 +64,18 @@ __device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const fl
   // a thread's values kRmsRun at a time, their loads in flight together (a block a row: its latency), each sum's
   // adds and each value's ops in rms_kernel's order as ever - y may be x, so a run's loads before its stores
   float ss = 0;
+  if (ctl) {
+    const uint64_t o = (uint64_t) row * n;
+    const float *cx = ctl->x + o, *cm = ctl->m + o, *cg = ctl->gain + o, *cf = ctl->forget + o;
+    float* co = ctl->out + o;
 #pragma unroll kRmsRun
-  for (uint32_t i = threadIdx.x; i < n; i += kThreads) ss += xr[i] * xr[i];
+    for (uint32_t i = threadIdx.x; i < n; i += kThreads) {
+      const float v = (cx[i] - tanhf(cf[i]) * cx[i]) + tanhf(cg[i]) * cm[i];  // ink2's loop_ctrl_kernel's
+      co[i] = v, ss += v * v;
+    }
+  } else
+#pragma unroll kRmsRun
+    for (uint32_t i = threadIdx.x; i < n; i += kThreads) ss += xr[i] * xr[i];
   const float r = 1.0f / sqrtf(block_sum<kThreads>(ss, lds) / (float) n + eps);
   for (uint32_t i0 = threadIdx.x; i0 < n; i0 += kRmsRun * kThreads) {
     float v[kRmsRun], g[kRmsRun];
@@ -794,6 +806,21 @@ extern "C" bool ops_rms_x16(const float* x, uint32_t n, uint32_t xs, const float
                             float* y, uint32_t ys, void* x16, int32_t* overflow, void* stream) {
   if (!n || n % mm::kTile || !rows || rows > MM_MAX_TOKENS || !x16 || !overflow) return false;
   rms_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, (_Float16*) x16, overflow, n, 0);
+  return ok();
+}
+
+__global__ void rms_ctrl_kernel(OpsCtrl c, uint32_t n, const float* w, float eps, float* y, uint32_t ys, uint32_t rows,
+                                _Float16* x16, int32_t* overflow) {
+  __shared__ float lds[kThreads];
+  rms_row(c.out, n, n, w, eps, y, ys, rows, x16, overflow, n, 0, blockIdx.x, lds, &c);
+}
+
+extern "C" bool ops_rms_x16_ctrl(const OpsCtrl* c, uint32_t n, const float* w, float eps, uint32_t rows, float* y,
+                                 uint32_t ys, void* x16, int32_t* overflow, void* stream) {
+  if (!c || !c->x || !c->m || !c->gain || !c->forget || !c->out || !y || !n || n % mm::kTile || !rows ||
+      rows > MM_MAX_TOKENS || !x16 || !overflow)
+    return false;
+  rms_ctrl_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(*c, n, w, eps, y, ys, rows, (_Float16*) x16, overflow);
   return ok();
 }
 

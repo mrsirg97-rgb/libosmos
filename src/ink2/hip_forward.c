@@ -965,7 +965,8 @@ static bool proj_batch(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, boo
 }
 
 /* a loop's control of input x by message m (upstream's control): gate = down(concat(rms(x), rms(m))), out = x -
-   tanh(forget(gate)) x + tanh(gain(gate)) m; out may be x */
+   tanh(forget(gate)) x + tanh(gain(gate)) m; out may be x, NULL: the gain and forget alone (the caller applies them:
+   ops_rms_x16_ctrl) */
 static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, const float *x, const float *m,
                     uint32_t n, float *out)
 {
@@ -990,11 +991,11 @@ static bool control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c,
       mm_run_x16(ink2_type(L->ctrl_down[c]), d->ctrl_down[c], G, 2 * C, f->x16, n, f->cgate, G, g16, f->overflow, NULL))
     return mm_tokens(ink2_type(gf[0]), d->ctrl_gain[c], C, f->cgain, C, d->ctrl_forget[c], C, f->cforget, C, G,
                      f->cgate, G, n, g16, f->overflow, true, NULL) &&
-           ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL);
+           (!out || ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL));
   return mat2(f, L->ctrl_down[c], d->ctrl_down[c], f->cgate, NULL, NULL, NULL, f->ccat, n, r16) &&
          mat2(f, L->ctrl_gain[c], d->ctrl_gain[c], f->cgain, L->ctrl_forget[c], d->ctrl_forget[c], f->cforget,
               f->cgate, n, false) &&
-         ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL);
+         (!out || ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL));
 }
 
 /* a decode's three controls (q, k, v: control's for each) in batches: their norms each control's (x16s bx16 2 .. 4),
@@ -1225,9 +1226,20 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     GPU(conv_put(co, f->o, n, C, taps, d->out_conv, 0, NULL, conv_res, conv_scale, boundary ? NULL : f->h, f->r));
     GPU(ink2_attn_res(d->ffn_res_q, 1, f->blocks, nb, maxb, f->r, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
                       NULL));
+    /* a looped layer's FFN control, its last step (x - tanh(forget) x + tanh(gain) m) in the router's norm's launch
+       where the router is mm's (ops_rms_x16_ctrl: ink2_loop_ctrl then rms_for's bits) */
+    const bool ctl16 = looped && n <= MM_MAX_TOKENS &&
+                       mm_takes(f, ink2_type(L->router), (uint32_t)L->router->dims[1], (uint32_t)L->router->dims[0]);
     if (looped)
-      GPU(control(f, L, d, INK2_CTRL_FFN, f->tmp, f->msg + 3 * nC, n, f->tmp));
-    GPU(rms_for(f, L->router, f->tmp, d->ffn_norm, n, f->xn, &f->router16)); /* (the router's x16: moe's first) */
+      GPU(control(f, L, d, INK2_CTRL_FFN, f->tmp, f->msg + 3 * nC, n, ctl16 ? NULL : f->tmp));
+    if (ctl16)
+    {
+      const OpsCtrl ctl = {f->tmp, f->msg + 3 * nC, f->cgain, f->cforget, f->tmp};
+      GPU(ops_rms_x16_ctrl(&ctl, C, d->ffn_norm, g->rms_eps, n, f->xn, C, f->x16, f->overflow, NULL));
+      f->router16 = true;
+    }
+    else
+      GPU(rms_for(f, L->router, f->tmp, d->ffn_norm, n, f->xn, &f->router16)); /* (the router's x16: moe's first) */
     pf(PF_MID);
     if (!moe(f, l, n, err))
       return false;
