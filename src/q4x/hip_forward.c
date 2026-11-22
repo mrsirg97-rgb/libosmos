@@ -426,7 +426,10 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   /* the weights' bytes - every file's tensors (but an overlay's stand-ins' and a streamed table) - against the
      memory left, before any is read: a forward that cannot fit takes nothing */
   f->exp_units = q4x_weights_experts(w, NULL, NULL, 0) > 0;
-  uint64_t weights = 0, experts_bytes = 0; /* (under a budget the experts' its, not all of them) */
+  uint64_t weights = 0, experts_bytes = 0; /* (the experts the membrane's, sized after: by the budget, or by the room
+                                               the build leaves - not all of them; 0.15.0: a budget of 0 counted every
+                                               expert here, so a machine short of the whole model was refused rather
+                                               than streamed) */
   for (int l = 0; f->exp_units && l < w->geo.n_layers; l++)
     experts_bytes += w->layer[l].exp_gate->bytes + w->layer[l].exp_up->bytes + w->layer[l].exp_down->bytes;
   for (size_t i = 0; i < w->model->n_tensors; i++)
@@ -436,7 +439,7 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   for (size_t k = 0; k < sizeof more / sizeof *more; k++)
     for (size_t i = 0; more[k] && i < more[k]->n_tensors; i++)
       weights += more[k]->tensors[i].bytes;
-  if (!room_left_past(f->exp_units && o->budget ? weights - experts_bytes : weights, "the forward", err))
+  if (!room_left_past(f->exp_units ? weights - experts_bytes : weights, "the forward", err))
     return q4x_forward_destroy(f), NULL;
   size_t free0 = 0, total0 = 0;
   if (hipMemGetInfo(&free0, &total0) != hipSuccess || !upload(f, w->model, w->overlay, skip, &f->dev, err) ||
