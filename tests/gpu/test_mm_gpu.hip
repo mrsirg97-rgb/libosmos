@@ -489,7 +489,28 @@ static void bf16_case() {
           }
     }
     CHECK(worst <= 2.0 * cols / 16);  // (an F32 sum of cols / 16 WMMA steps: a rounding a step at most)
-    std::printf("  BF16 %4u columns: a token's row the same bits at 1, 16, 65 and %d tokens; %.1f u|wx| from a double sum\n",
+    {  // mm_run_x16: mm_run then mm_x16 of its y - y and the f16 the same bytes - at 1, 3 and 16 tokens
+      float* y2 = nullptr;
+      void *xo1 = nullptr, *xo2 = nullptr;
+      CHECK(hipMalloc(&y2, (size_t) 16 * kRows * 4) == hipSuccess && hipMalloc(&xo1, (size_t) 16 * kRows * 2) == hipSuccess &&
+            hipMalloc(&xo2, (size_t) 16 * kRows * 2) == hipSuccess);
+      for (uint32_t n : {1u, 3u, 16u}) {
+        CHECK(mm_x16(x, cols, n, cols, x16, ovf, nullptr));
+        CHECK(hipMemset(xo1, 0x55, (size_t) 16 * kRows * 2) == hipSuccess && hipMemset(xo2, 0x55, (size_t) 16 * kRows * 2) == hipSuccess);
+        CHECK(mm_run_x16(30, w, kRows, cols, x16, n, y2, kRows, xo1, ovf, nullptr));
+        CHECK(mm_run(30, w, kRows, cols, x16, n, y, kRows, nullptr) && mm_x16(y, kRows, n, kRows, xo2, ovf, nullptr));
+        CHECK(host_of(y2, (size_t) n * kRows) == host_of(y, (size_t) n * kRows));
+        std::vector<uint16_t> h1((size_t) 16 * kRows), h2(h1.size());
+        CHECK(hipMemcpy(h1.data(), xo1, h1.size() * 2, hipMemcpyDeviceToHost) == hipSuccess &&
+              hipMemcpy(h2.data(), xo2, h2.size() * 2, hipMemcpyDeviceToHost) == hipSuccess);
+        CHECK(h1 == h2);
+      }
+      CHECK(!mm_run_x16(30, w, kRows, cols, x16, MM_SILU_MAX_TOKENS + 1, y2, kRows, xo1, ovf, nullptr));  // past its most
+      CHECK(!mm_run_x16(30, w, kRows, cols, x16, 1, y2, kRows, x16, ovf, nullptr));                     // its own x16
+      CHECK(hipFree(y2) == hipSuccess && hipFree(xo1) == hipSuccess && hipFree(xo2) == hipSuccess);
+    }
+    std::printf("  BF16 %4u columns: a token's row the same bits at 1, 16, 65 and %d tokens; %.1f u|wx| from a double sum; "
+                "mm_run_x16 mm_run then mm_x16's bytes\n",
                 cols, kBig, worst);
     CHECK(hipFree(w) == hipSuccess && hipFree(x) == hipSuccess && hipFree(y) == hipSuccess && hipFree(x16) == hipSuccess &&
           hipFree(ovf) == hipSuccess);
