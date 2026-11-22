@@ -2141,6 +2141,84 @@ prompt is the full layers' attention's: the dense matrices' 2x is a shallow prom
 25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
 2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
 
+### 0.15.0: drafting at temperature 1, and a step's launches (2026-11-22, low-power unless named)
+
+**where a sampled round goes** (Mini, temperature 1, osmos-api's code / explanation requests, round phases timed in
+osmos-serve's round_all): ~55 ms a round - the drafter 8.5 (its head - the target's BF16 output over 7 rows - 4.5, its
+layers 2.1, the 7 Markov steps 2.3), the verify ~45.5 at ~2.9 rows, the draws 0.4, the rollback and seed 0.25.
+a verify step by rows (a 400-token prompt, then steps of n restored by save / load, all experts resident): 1 / 2 / 4 /
+8 / 16 / 32 / 64 rows 36.1 / 41.6 / 51.6 / 65.0 / 83.8 / 119 / 165 ms. the kernel trace at 1 / 3 / 8 rows: the experts
+10.6 / 20.6 / 36.5 ms (each row more experts' bytes: the step reads each expert once), the dense BF16 flat (16.5 /
+16.7 / 17.2, at roofline), attention ~2.7-3.9, ~900 small kernels 3.0-4.5, the gaps between launches 3.1-3.9.
+
+**the drafts at temperature 1, measured before building** (draftlog-140, not merged: at every drafted position up to
+the first rejection - where the drafter's context is the true one - the target's and the drafter's rows softmaxed at
+T; 4,332 positions over 15 requests: the stuck session's two agent requests, code, an explanation, short questions):
+the expected accepted drafts a round (all 7 drafted) argmax 2.51, speculative sampling's min(1, p / q) 2.71 (+8%: the
+drafter's q is sharp, near its argmax), a candidate set of the drafter's top 2 / top 4 (the target's sampled token in
+it: drafted == plain still) 3.59 / 4.45 (+43 / +77%) - but at ~5 ms a verify row a tree's rows cost what it gains (top 2
+or 4 at the first position, a chain after: +18 / +29% drafts for ~7 rows more). the realized rounds: 2.65 drafts, 1.47
+taken (55%), all of them taken in 42%; position 0 66% (code 72%, prose 59-60%). the hits matched the logged top-1
+mass (65.3 / 65.8%). speculative sampling not taken: its answers are not the plain one's, for +8%.
+**the draft length** (Inkling's cumulative floor INK2_DRAFT_CUM_MIN_WHOLE, the engine's own over the server's 0.1;
+the same seeds the same tokens at every floor): 0.1 / 0.2 / 0.3 / 0.5 / 0.7 - code T1 42.5 / 44.1 / 45.4 / **46.3** /
+45.8 tok/s, prose T1 29.8 / 32.0 / 32.9 / **33.2** / 31.6, rows a round 5.42 / 4.47 / 3.82 / 2.89 / 2.29: 0.5 stays (a
+row's ~5 ms makes short rounds pay; "all taken in 42%" does not mean the next draft would have been).
+**HIP graphs not tried again**: three families measured no faster (DeepSeek 2.02 -> 1.87 us a kernel; Qwen 23.42 /
+23.54 against 23.56 / 23.63 tok/s; Hy4) - the ~2 us between two dependent kernels is the GPU's. only fewer kernels.
+
+**fewer launches** (a 3-row verify 1,755 -> ~1,467, a plain step 1,520 -> ~1,376; each commit's tokens hashed against
+0.14.0's at greedy and temperature 1, plain and drafted, three prompts):
+- a decode's three loop controls (q, k, v) one launch (ink2_loop_ctrl_many): -48.
+- their three gates side by side, the f16s one mm_x16_heads: -48.
+- a step's expert runs past its tokens not launched: q4x_expert_bounds sizes the runs by pairs (n K), so a 2-16
+  token verify launched the 32- / 64-token tile runs empty, 3 a pass - an expert holds a step's tokens at most: -144
+  at 2-16 rows, none at 1. (Qwen shares the bounds: the same fix is its own change.)
+- the FFN control's down writing its gate's f16 (mm_run_x16: tile's epilogue, plain - mm_run then mm_x16's bytes,
+  the tile's rows past n zero as mm_x16's): -24.
+- the FFN control's last step in the router's norm (ops_rms_x16_ctrl: rms_row's first pass computes the control's
+  values, writes them and sums them in its order): -24.
+measured after the first three (vcost, alternated, two rounds): 1 / 2 / 4 / 8 / 16 rows 36.2 / 41.7 / 51.7 / 65.1 /
+84.2 -> 36.0 / 41.3 / 50.9 / 64.0 / 82.6 ms (-0.6 .. -2.0%).
+- **tried, not kept: the attention residual's dots and mix in one launch** (a token's last dots block mixing, the same
+  bits): 8.5 us a call against 3.1 + 2.4 and the ~2 us gap - one block's mix is serial where nine shared it (branch
+  proto-fused-res). a fusion pays where the second kernel's work already sits in the first's block.
+
+**the experts at a token, tried, not kept** (mmsweep mini, NVFP4 gate / up 167-177 GB/s, down 164-174, MXFP8 151-158;
+a plain read 222-227):
+- a wave a 16-row tile, tile's W partitions as W accumulators (the same bits): 1.3-2x slower with buffer or global
+  loads, all W slabs in flight or one ahead, blocks of 1 or 4 waves - 576 waves a call are too few (proto-wave-tile).
+- NVFP4's row words as two 16-byte loads and one dword (not nine dwords): level.
+- NVFP4's LDS the part sums' alone (its one-tile path never stages a slab): 14 -> 16 waves a SIMD, 10% slower -
+  more waves read a line's blocks further apart (proto-gk-occupancy).
+- a 16-row tile's blocks side by side (timing only, random weights): gate / up +6-8%, down level - a load-time repack
+  as Q5_KR's for ~0.4 ms a step: not built (proto-nvfp4-tiled).
+the experts' cost at 1-3 rows is the distinct experts' bytes at ~172 GB/s; the dense is at its roofline.
+
+**the release's serve tests on every pack** (kept conversations, parallel lanes, turns; each family's own tokens -
+~/bench/prompts150, osmos-api --tokenize over the calibration text and the GPL-3): three findings, none the engine's:
+- **reads apart** (DeepSeek, Hy4-flash, osmos1.7b, q35: prompt and decode two maths) - a next turn goes back to its
+  prompt's point and reads its earlier answer again (0.7.1); slot_test and parallel_test knew it of DeepSeek alone
+  (its name in the file), so osmos1.7b's and Hy4-flash's correct rollback (11,999 of 12,031 reused; main's the same)
+  failed them. osmos-serve now says `NOTE reads apart` at start and the tests take it from there.
+- Qwen's old token set's p8192 was calib16k's first 8,192 tokens (B began as A): a kept turn rightly reused it. its
+  texts now apart (other8192 as p8192); every set checked for a shared start.
+- the kept conversations' folder in /tmp (RAM here), and Small at 4 lanes ~0.65 GiB under the 8 GiB kept free
+  (0.14.0's 7,528 MiB, 0.15.0's 7,493): the operator's tolerance is 8 GiB +/- 0.5 - the guard's 7,680 MiB floor sat
+  inside it; serve tests with TMPDIR on the SSD.
+
+**the sizing's out-of-memory** (2026-11-22: the box OOM'd during DeepSeek's start, systemd's OOMPolicy took the user's
+tmux scope with it). traced in a scope of its own (systemd-run --scope -p OOMPolicy=stop, choom 1000), every 0.1-0.6 s
+MemAvailable / GTT / osmos-serve's RSS: the experts' pool is registered host RAM (mmap MAP_POPULATE, hipHostRegister:
+filled before osmos_room reads), GTT ~18.5 GiB, each probe's memory freed before the next - no overlap, no late commit.
+the cause was fit_sized's step: its cost a byte of budget measured from two builds, and MemAvailable's wobble made
+98.67 -> 98.99 GiB read 1.41 -> 1.39 GiB of room (a cost ~0.06), so the next step went 5 GiB past the target: 104.06
+GiB, 2.79 GiB of RAM left (the failed start's had less to spare). the fix: the cost never under 1 (a byte of budget takes
+a byte of both bounds, the units' padding past it), and the first step's FIT_FIRST_COST 1.125 (the units' padding seen
+6-12%: at 1 a 90 GiB step went ~5 GiB past). test_fit models the room's measure wobbling 0.05-0.25 GiB and holds every
+probe (it failed before: a build left 0.18 GiB of a 1 GiB headroom). DeepSeek's five starts after: 0 -> 84.5 -> 98.7 ->
+99.0 -> 99.3 GiB at most, the budget ~98.9-99.0 GiB as before, the least MemAvailable 7.8-8.5 GiB.
+
 ### 0.14.0: sampling, and a drafted answer still the plain one (2026-11-22)
 
 **why**: an agent session on inkling-2-mini (0.13.0) repeated one identical tool call for 100+ requests (47K -> 114K
