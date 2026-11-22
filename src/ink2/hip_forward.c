@@ -13,6 +13,7 @@
 #include "ink2_impl.h"
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/mem/experts.h"
 #include "osmos/model/moe_route.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -316,13 +317,7 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
     ok = (f->fds[i] = open(m->paths[i], O_RDONLY | O_DIRECT)) >= 0;
   if (!ok)
     return free(units), free(warm), ink2_fail(err, "out of memory, or a model file not opened O_DIRECT");
-  uint64_t all = 0, largest = 0;
   ok = ink2_weights_experts(w, f->fds, units, n) == n;
-  for (size_t u = 0; ok && u < n; u++)
-  {
-    const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
-    all += b, largest = b > largest ? b : largest;
-  }
   /* the warm set, the most wanted first: by picks counted on calibration text (most first, then the lower unit), else
      an expert of every layer at a time (expert 0 of each layer, then 1, ...) */
   for (size_t u = 0; u < n; u++)
@@ -332,70 +327,20 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
     g_rank = picks;
     qsort(warm, n, sizeof *warm, by_picks);
   }
-  /* the stream (hip_forward.c's stream_budget): two of a layer's experts not warm - a prompt step's holds of one and
-     its read ahead of the next - and never under a whole layer's, so a layer promotion left cold still fits. under a
-     budget, room and stream settle together: more room, fewer cold, a smaller stream - each pass's stream at most the
-     one its room was sized by, so the build stays in the budget */
-  uint64_t stream_room = 2 * (uint64_t)E * largest;
-  const uint64_t given = room;
-  size_t n_warm = 0;
-  for (int pass = 0; ok && pass < INK2_STREAM_PASSES; pass++)
-  {
-    room = given;
-    if (budget) /* osmos's budget the whole build: the experts' slots what the rest leaves (their 2 units' slack too) */
-    {
-      const uint64_t rest = f->fixed_bytes + stream_room + 4 * largest;
-      room = budget > rest ? budget - rest : 0;
-    }
-    if (room > all)
-      room = all;
-    if (room < (uint64_t)E * largest) /* a decode's holds and a passing visit's in the stream: a layer's at most - and
-                                         room 0's, the smallest build (osmos's budget 0: auto-sizing's first build) */
-      room = (uint64_t)E * largest;
-    n_warm = 0;
-    for (uint64_t took = 0; n_warm < n; n_warm++)
-    {
-      const uint64_t b = pool_unit_bytes(&units[warm[n_warm]], ARENA_GRAIN);
-      if (took + b > room)
-        break;
-      took += b;
-    }
-    uint64_t *cold = calloc(L, sizeof *cold), *layer = calloc(L, sizeof *layer);
-    if (!(ok = cold && layer))
-    {
-      free(cold), free(layer);
-      break;
-    }
-    for (size_t r = 0; r < n; r++)
-    {
-      const uint32_t u = warm[r], l = u / E;
-      const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
-      layer[l] += b, cold[l] += r < n_warm ? 0 : b;
-    }
-    uint64_t worst = 0, whole = 0;
-    for (uint32_t l = 0; l < L; l++)
-      worst = cold[l] > worst ? cold[l] : worst, whole = layer[l] > whole ? layer[l] : whole;
-    free(cold), free(layer);
-    const uint64_t want = 2 * worst > whole ? 2 * worst : whole;
-    const bool settled = want >= stream_room;
-    stream_room = want < stream_room ? want : stream_room;
-    if (settled || !budget)
-      break;
-  }
-  char perr[POOL_ERR] = "", merr[MEMBRANE_ERR] = "";
-  /* the stream two layers: a prompt step's holds of one and its read ahead of the next (one alone: the next one's reads
-     wait for this one's holds to end - the SSD idle under the layer's kernels) */
-  if (ok && !((f->slots = host_slots_create(room + 2 * largest, perr)) &&
-              (f->stream = host_slots_create(stream_room + 2 * largest, perr))))
-    ok = ink2_fail(err, perr[0] ? perr : "inkling2: the experts' memory refused");
+  /* the room, stream and warm set for the budget (experts_plan: the build's whole budget, the rest taken first - its
+     fixed bytes, the stream, the slack), then the slots and membrane over them (experts_create) */
+  ExpertsPlan plan;
+  Experts ex;
+  char merr[MEMBRANE_ERR] = "";
+  if (ok && !experts_plan(units, L, E, warm, room, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
+    ok = ink2_fail(err, "inkling2: the experts' plan refused");
+  if (ok && !experts_create(units, L, E, warm, &plan, ARENA_GRAIN, INK2_EXPERT_READERS, copy_host, NULL, 0, true, &ex,
+                            merr))
+    ok = ink2_fail(err, merr[0] ? merr : "inkling2: the experts' membrane refused");
   if (ok)
   {
+    f->mem = ex.mem, f->slots = ex.slots, f->stream = ex.stream;
     f->pinned_bytes = host_slots_bytes(f->slots) + host_slots_bytes(f->stream);
-    const MembraneOptions mo = {units, L, E, room, stream_room, host_slots(f->slots), host_slots(f->stream),
-                                ARENA_GRAIN, INK2_EXPERT_READERS, warm, n_warm, copy_host, NULL, 0};
-    ok = (f->mem = membrane_create(&mo, merr)) && membrane_warm(f->mem, merr);
-    if (!ok)
-      ink2_fail(err, merr[0] ? merr : "inkling2: the experts' membrane refused");
   }
   free(units), free(warm);
   return ok;

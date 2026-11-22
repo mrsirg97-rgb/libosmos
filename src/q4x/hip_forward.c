@@ -9,6 +9,7 @@
 #include "osmos/gpu/mm.h"
 #include "osmos/mem/arena.h"
 #include "osmos/mem/host_slots.h"
+#include "osmos/mem/experts.h"
 #include "osmos/mem/membrane.h"
 #include "osmos/run/fit.h"
 #include "q4x_impl.h"
@@ -122,25 +123,22 @@ static bool experts_whole(Q4xForward *f, char *err)
     ok = (f->exp_fds[i] = open(m->paths[i], O_RDONLY | O_DIRECT)) >= 0;
   if (!ok)
     q4x_fail(err, "out of memory, or a model file not opened O_DIRECT (the experts' reads)");
-  uint64_t room = 0, largest = 0;
-  if (ok && (ok = q4x_weights_experts(w, f->exp_fds, units, n) == n))
-    for (size_t u = 0; u < n; u++)
-    {
-      const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
-      room += b, largest = b > largest ? b : largest, warm[u] = (uint32_t)u;
-    }
-  char perr[POOL_ERR] = "", merr[MEMBRANE_ERR] = "";
-  if (ok && !((f->exp_slots = host_slots_create(room + 2 * largest, perr)) &&
-              (f->exp_stream = host_slots_create(3 * largest, perr))))
-    ok = q4x_fail(err, perr[0] ? perr : "the experts' memory refused");
+  ok = ok && q4x_weights_experts(w, f->exp_fds, units, n) == n;
+  for (size_t u = 0; ok && u < n; u++)
+    warm[u] = (uint32_t)u;
+  /* every expert warm (experts_plan: a room past them all), read at once into memory the GPU reads in place */
+  ExpertsPlan plan;
+  Experts ex;
+  char merr[MEMBRANE_ERR] = "";
+  if (ok && !experts_plan(units, L, E, warm, UINT64_MAX, 0, 0, ARENA_GRAIN, &plan))
+    ok = q4x_fail(err, "the experts' plan refused");
+  if (ok && !experts_create(units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, no_copy, NULL, 0, true, &ex,
+                            merr))
+    ok = q4x_fail(err, merr[0] ? merr : "the experts' membrane refused");
   if (ok)
   {
-    const MembraneOptions mo = {units, L, E, room, largest, host_slots(f->exp_slots), host_slots(f->exp_stream),
-                                ARENA_GRAIN, Q4X_EXPERT_READERS, warm, n, no_copy, NULL, 0};
-    ok = (f->mem = membrane_create(&mo, merr)) && membrane_warm(f->mem, merr);
-    if (!ok)
-      q4x_fail(err, merr[0] ? merr : "the experts' membrane refused");
-    else if (!(ok = membrane_whole(f->mem)))
+    f->mem = ex.mem, f->exp_slots = ex.slots, f->exp_stream = ex.stream;
+    if (!(ok = membrane_whole(f->mem)))
       q4x_fail(err, "the experts not whole in memory after their read");
   }
   for (size_t u = 0; ok && u < n; u++) /* [layer][tensor][expert]: a layer's tensor's E addresses side by side */
