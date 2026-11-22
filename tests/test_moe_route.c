@@ -33,8 +33,9 @@ static Tabs tabs(uint32_t picks, uint32_t experts)
 {
   const uint64_t slots = moe_route_slots(picks, experts, TILE), ents = picks + experts;
   Tabs t;
-  char *p = t.mem = calloc(1, (size_t)picks * 8 + (size_t)experts * 20 + 4 + (size_t)slots * 8 + (size_t)ents * 20);
-  assert(p);
+  char *p = t.mem = calloc(1, (size_t)picks * 8 + (size_t)experts * 20 + 4 + (size_t)slots * 8 + (size_t)ents * 12);
+  t.key = calloc(ents, sizeof *t.key); /* (its own: 8-byte keys aligned, not carved after 12-byte entries) */
+  assert(p && t.key);
   t.r.by = (uint32_t *)p, p += picks * 4;
   t.r.row = (uint32_t *)p, p += picks * 4;
   t.r.expert = (uint32_t *)p, p += experts * 4;
@@ -44,8 +45,7 @@ static Tabs tabs(uint32_t picks, uint32_t experts)
   t.r.estart = (uint32_t *)p, p += (experts + 1) * 4;
   t.r.gidx = (int32_t *)p, p += slots * 4;
   t.r.hidx = (int32_t *)p, p += slots * 4;
-  t.e = (MoeEntry *)p, p += ents * sizeof(MoeEntry);
-  t.key = (uint64_t *)p;
+  t.e = (MoeEntry *)p;
   return t;
 }
 
@@ -147,7 +147,7 @@ int main(void)
     assert(!moe_route(idx, picks, k, E, TILE, &got.r));
     idx[picks / 2] = -1;
     assert(!moe_route(idx, picks, k, E, TILE, &got.r));
-    free(got.mem), free(want.mem), free(idx);
+    free(got.mem), free(want.mem), free(got.key), free(want.key), free(idx);
   }
   printf("[test_moe_route] ok\n");
   return 0;
