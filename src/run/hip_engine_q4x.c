@@ -204,12 +204,20 @@ static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ER
   return e->df ? q4x_dflash_seed(e->f, s, from, to, err) : q4x_mtp_seed(e->f, s, from, to, err);
 }
 
+/* the MTP head's round ends at a product of confidences at least this, past the server's floor (0.15.2): its
+   release's sampling (temperature 1.0, top_p 0.95, top_k 20) takes fewer drafts than greedy did, so shorter rounds
+   pay - measured (low-power, osmos-api, code / prose, 500 tokens, seed 1, every floor the same tokens): 0.1 32.2 /
+   26.1 and 32.1 / 26.0 tok/s, 0.3 36.3 / 30.6, 0.5 36.9 / 31.5, 0.7 37.1 / 30.7; greedy's best was 0.1 (53.7 / 43.7,
+   0.5 48.9 / 41.3). DFlash2's (a pack's other drafter) not measured: the server's floor as before */
+#define Q4X_MTP_CUM_MIN 0.5f
+static float mtp_cum(float cum_min) { return cum_min < Q4X_MTP_CUM_MIN ? Q4X_MTP_CUM_MIN : cum_min; }
+
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                    char err[OSMOS_ERR])
 {
   Eng *e = p;
   return e->df ? q4x_dflash_draft(e->f, s, y, e_block(e), conf_min, cum_min, drafts, conf, err)
-               : q4x_mtp_draft(e->f, s, y, Q4X_MTP_BLOCK, conf_min, cum_min, drafts, conf, err);
+               : q4x_mtp_draft(e->f, s, y, Q4X_MTP_BLOCK, conf_min, mtp_cum(cum_min), drafts, conf, err);
 }
 
 /* the sequences' drafts together: DFlash2's a block a sequence, one after another; the MTP head's Q4X_MAX_RUNS at a
@@ -230,7 +238,7 @@ static bool s_draft_all(void *p, OsmosSeq *const *seqs, const int32_t *y, uint32
     const uint32_t k = n - at < Q4X_MAX_RUNS ? n - at : Q4X_MAX_RUNS;
     for (uint32_t i = 0; i < k; i++)
       s[i] = oseq_impl(seqs[at + i]);
-    if (!q4x_mtp_draft_all(((Eng *)p)->f, s, y + at, k, Q4X_MTP_BLOCK, conf_min, cum_min, drafts[at], conf[at],
+    if (!q4x_mtp_draft_all(((Eng *)p)->f, s, y + at, k, Q4X_MTP_BLOCK, conf_min, mtp_cum(cum_min), drafts[at], conf[at],
                            OSMOS_MAX_BLOCK, counts + at, err))
       return false;
   }
