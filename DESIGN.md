@@ -2219,6 +2219,14 @@ a byte of both bounds, the units' padding past it), and the first step's FIT_FIR
 probe (it failed before: a build left 0.18 GiB of a 1 GiB headroom). DeepSeek's five starts after: 0 -> 84.5 -> 98.7 ->
 99.0 -> 99.3 GiB at most, the budget ~98.9-99.0 GiB as before, the least MemAvailable 7.8-8.5 GiB.
 
+**Qwen's forward sized to the machine** (found by the suite: test_q4x_headroom_gpu failed, 0.14.0's build too): the
+test set its edge half a GiB past the forward's measure, and the measure's RAM side moves with the page cache (80.45 GiB
+one run, 79.1 the next). set 2 GiB clear, the test then showed a real bug: q4x_forward_create at budget 0 checked the room
+against every weight, experts included (`f->exp_units && o->budget ? weights - experts_bytes : weights`), though the
+membrane's experts are sized after to the room the build leaves - a machine short of the whole model refused, not
+streamed (-0.70 GiB in a room of ~77). the check is the uploaded weights' wherever the experts are the membrane's; the
+sized build in that room streams and leaves 1.86-1.94 GiB. osmos-serve passes a budget always (fit_sized): not hit.
+
 ### 0.14.0: sampling, and a drafted answer still the plain one (2026-11-22)
 
 **why**: an agent session on inkling-2-mini (0.13.0) repeated one identical tool call for 100+ requests (47K -> 114K

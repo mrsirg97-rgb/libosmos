@@ -8,6 +8,10 @@
   once ran it out - the kernel's OOM killer then took the user's whole session. A byte of budget now never counts as
   costing less than a byte of room, and the first, longest step assumes the units' padding, so every step lands short
   of the target. DeepSeek's five starts since: the same ~99 GiB budget, the RAM never under ~7.8 GiB.
+- **Qwen streams where it cannot hold the whole model**, built through the library sized to the machine (a budget of
+  0): its room check counted every expert, and refused, where its experts are streamed to fit the room. osmos-serve
+  (which always passes a budget) was not affected. Its memory test no longer sets an edge within what the page cache
+  moves.
 - **Fewer launches on Inkling-2-Mini** (each a fusion with the same bits): a decode's three loop controls in one
   launch, their gates' f16 in one, the FFN control's down writing its own f16 (`mm_run_x16`) and its last step inside
   the router's norm (`ops_rms_x16_ctrl`), and a verify step's empty expert launches skipped: 1,755 -> ~1,467 launches
