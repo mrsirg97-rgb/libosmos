@@ -19,6 +19,7 @@ extern "C" {
 #include "osmos/run/forward.h"
 }
 #include "test_model.h"
+#include "test_fit.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -83,9 +84,16 @@ int main() {
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
   char err[FORWARD_ERR] = "";
-  const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, 100ull << 30, nullptr, kMaxTokens};
-  Forward* f = forward_create_with(w, &o, err);
-  CHECK(f && forward_lane(f, 0, NULL, err));
+  ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, 100ull << 30, nullptr, kMaxTokens};
+  Forward* f = nullptr;
+  TestFit fit = {[&](uint64_t b) {
+                   o.budget = b;
+                   return (f = forward_create_with(w, &o, err)) && forward_lane(f, 0, NULL, err);
+                 },
+                 [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
+                 [&] { forward_destroy(f), f = nullptr; }};
+  uint64_t budget = 0;  // (test_fit: its experts mostly held, or this machine's fill where it is smaller)
+  CHECK(test_fit(fit, 100ull << 30, &budget));
   Probe p;
   p.block = (uint32_t) w->geo.cand_block;
   p.words = ((kMaxCtx / 1 + p.block - 1) / p.block + 31) / 32;  // (the forward's: its smallest ratio 1)

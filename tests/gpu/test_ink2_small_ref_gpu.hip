@@ -19,6 +19,8 @@ extern "C" {
 #include "osmos/run/engine.h"
 }
 
+#include "test_fit.h"
+
 #define CHECK(x)                                                                 \
   do {                                                                           \
     if (!(x)) {                                                                  \
@@ -66,7 +68,7 @@ int main() {
   CHECK(m);
   OsmosOptions o = {};
   o.max_ctx = kCtx, o.max_tokens = kStep, o.budget = kBudget;
-  Osmos* e = osmos_create(m, &o, err);
+  Osmos* e = test_osmos(m, o, err);  // (its bits any budget's: the test's own, or this machine's fill)
   if (!e) std::fprintf(stderr, "  %s\n", err);
   CHECK(e);
   const uint32_t V = osmos_facts(m).vocab;

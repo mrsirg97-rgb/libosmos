@@ -442,7 +442,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   size_t free1 = 0, total1 = 0;
   if (ok && hipMemGetInfo(&free1, &total1) == hipSuccess) /* the fixed part: what the build took before its experts */
     f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
-  ok = ok && experts(f, o->budget, err);
+  ok = ok && experts(f, o->budget ? o->budget : experts_fit_now(f->fixed_bytes), err); /* (0: this machine's room) */
   if (!ok)
     return hy4_forward_destroy(f), (err && !*err ? hy4_fail(err, "the forward not made") : false), NULL;
   return f;

@@ -5,6 +5,9 @@
 
 #include "osmos/mem/experts.h"
 #include "osmos/mem/host_slots.h"
+#include "osmos/run/fit.h"
+
+#include <hip/hip_runtime_api.h>
 
 bool experts_create(const PoolUnit *units, uint32_t layers, uint32_t experts, const uint32_t *order,
                     const ExpertsPlan *p, uint64_t grain, int readers, membrane_copy_fn copy, void *copy_ctx,
@@ -30,4 +33,13 @@ void experts_destroy(Experts *e)
   membrane_destroy(e->mem); /* its readers stopped, then its memory */
   host_slots_destroy(e->stream), host_slots_destroy(e->slots);
   memset(e, 0, sizeof *e);
+}
+
+uint64_t experts_fit_now(uint64_t fixed)
+{
+  size_t gpu_free = 0, total = 0;
+  if (hipMemGetInfo(&gpu_free, &total) != hipSuccess)
+    return 1;
+  const uint64_t room = fit_room((uint64_t)gpu_free, fit_ram_available(), FIT_RAM_FREE);
+  return room > FIT_HEADROOM ? fixed + room - FIT_HEADROOM : 1;
 }

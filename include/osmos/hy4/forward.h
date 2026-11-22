@@ -29,7 +29,8 @@ typedef struct Hy4Options
                           the rope part F32 - 800 bytes a row against 2,304 (hy4_mla_row_bytes) */
   bool head_q8;        /* a BF16 head read as its Q8_0 copy (ggml's rounding, made at load): half its reads */
   uint64_t budget;     /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
-                          through the membrane past it; 0 every expert resident */
+                          through the membrane past it; 0 sized to this machine as it stands (experts_fit_now: every
+                          expert resident where there is room) */
 } Hy4Options;
 
 /* the weights to the GPU (every tensor but the Engram table, read from `fds`' files as the step needs its rows: the

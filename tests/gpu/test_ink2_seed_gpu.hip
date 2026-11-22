@@ -19,6 +19,8 @@ extern "C" {
 #include "osmos/run/engine.h"
 }
 
+#include "test_fit.h"
+
 #define CHECK(x)                                                                 \
   do {                                                                           \
     if (!(x)) {                                                                  \
@@ -59,7 +61,7 @@ static bool pack(const char* name, const std::string& model, const std::string& 
   CHECK(m);
   const OsmosOptions o = {kCtx, kStep, kBudget, picks.empty() || access(picks.c_str(), R_OK) ? nullptr : picks.c_str(), true,
                           mtp.c_str(), false, 0, false, nullptr, 0.0f};
-  Osmos* e = osmos_create(m, &o, g_err);
+  Osmos* e = test_osmos(m, o, g_err);  // (the test's budget, or this machine's fill where it is smaller)
   if (!e) std::fprintf(stderr, "  %s\n", g_err);
   CHECK(e && osmos_block(e) > 0);
   const OsmosFacts facts = osmos_facts(m);

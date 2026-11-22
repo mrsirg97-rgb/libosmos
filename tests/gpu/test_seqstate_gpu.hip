@@ -24,6 +24,7 @@ extern "C" {
 #include "osmos/run/forward.h"
 }
 #include "test_model.h"
+#include "test_fit.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -36,7 +37,7 @@ extern "C" {
 constexpr uint32_t kMaxTokens = 512, kMaxCtx = 4096;
 constexpr uint32_t kPromptA = 301, kPromptB = 230;  // 301: 301 % 4 = 1, 301 % 128 = 45 positions not yet a row
 constexpr int kNew = 24, kNewB = 8;
-constexpr uint64_t kBudget = 100ull << 30;
+constexpr uint64_t kBudget = 100ull << 30;  // (its experts mostly held: test_fit's, sized down where the machine is smaller)
 
 static Forward* g_f;
 static uint32_t g_vocab;
@@ -136,11 +137,20 @@ int main() {
   FILE* pf = std::fopen((dir + "osmos-picks.bin").c_str(), "rb");
   const bool ranked = pf && std::fread(picks.data(), 8, picks.size(), pf) == picks.size();
   if (pf) std::fclose(pf);
-  const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, ranked ? picks.data() : nullptr, kMaxTokens};
-  CHECK((g_f = forward_create_with(w, &o, g_err)) && forward_lane(g_f, 0, NULL, g_err));
+  ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, ranked ? picks.data() : nullptr, kMaxTokens};
   const char* home = std::getenv("HOME");
   const std::string ddir = std::string(home ? home : "") + "/Models/ds1017/dspark-iq2xs";
-  Drafter* d = access((ddir + "/dspark.bin").c_str(), R_OK) == 0 ? drafter_create(g_f, ddir.c_str(), g_err) : nullptr;
+  const bool with_drafter = access((ddir + "/dspark.bin").c_str(), R_OK) == 0;
+  Drafter* d = nullptr;
+  TestFit fit = {[&](uint64_t b) {  // (the forward, its lane and the drafter: everything the test holds)
+                   o.budget = b;
+                   return (g_f = forward_create_with(w, &o, g_err)) && forward_lane(g_f, 0, NULL, g_err) &&
+                          (!with_drafter || (d = drafter_create(g_f, ddir.c_str(), g_err)));
+                 },
+                 [&] { return forward_budget(g_f); }, [&](uint64_t* r) { return forward_room(g_f, r); },
+                 [&] { drafter_destroy(d), d = nullptr, forward_destroy(g_f), g_f = nullptr; }};
+  uint64_t budget = 0;
+  CHECK(test_fit(fit, kBudget, &budget));
   const std::vector<int32_t> pa = ids(kPromptA, 1017), pb = ids(kPromptB, 4242);
 
   for (int draft = 0; draft < (d ? 2 : 1); draft++) {

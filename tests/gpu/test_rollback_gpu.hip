@@ -20,6 +20,7 @@ extern "C" {
 #include "osmos/run/forward.h"
 }
 #include "test_model.h"
+#include "test_fit.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -75,8 +76,15 @@ int main() {
   FILE* pf = std::fopen((dir + "osmos-picks.bin").c_str(), "rb");
   const bool ranked = pf && std::fread(picks.data(), 8, picks.size(), pf) == picks.size();
   if (pf) std::fclose(pf);
-  const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, ranked ? picks.data() : nullptr, kMaxTokens};
-  CHECK((g_f = forward_create_with(w, &o, g_err)) && forward_lane(g_f, 0, NULL, g_err));
+  ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, ranked ? picks.data() : nullptr, kMaxTokens};
+  TestFit fit = {[&](uint64_t b) {
+                   o.budget = b;
+                   return (g_f = forward_create_with(w, &o, g_err)) && forward_lane(g_f, 0, NULL, g_err);
+                 },
+                 [&] { return forward_budget(g_f); }, [&](uint64_t* r) { return forward_room(g_f, r); },
+                 [&] { forward_destroy(g_f), g_f = nullptr; }};
+  uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
+  CHECK(test_fit(fit, kBudget, &budget));
 
   const std::vector<int32_t> pa = ids(kPromptA, 1017);
   // seq_reach after a rollback: every rollback it allows, back to back with no step between, then the same tokens

@@ -448,7 +448,8 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   size_t free1 = 0, total1 = 0; /* the fixed part: what the build took before its experts (experts_plan's) */
   if (hipMemGetInfo(&free1, &total1) == hipSuccess)
     f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
-  if (!experts(f, o->budget, err) || !room_left("the forward", err))
+  if (!experts(f, o->budget ? o->budget : experts_fit_now(f->fixed_bytes), err) || /* (0: this machine's room) */
+      !room_left("the forward", err))
     return q4x_forward_destroy(f), NULL;
   return f;
 }

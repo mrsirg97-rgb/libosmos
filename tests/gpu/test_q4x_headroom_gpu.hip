@@ -1,5 +1,6 @@
 // a Qwen forward or sequence that would leave less than FIT_HEADROOM of the GPU's memory is refused with why (the
-// runtime loads a kernel's code at its first launch: with no memory left it segfaulted), never built to crash later.
+// runtime loads a kernel's code at its first launch: with no memory left it segfaulted), never built to crash later -
+// or, sized to the machine (its budget 0), built smaller: its experts streamed past the room it has.
 // the memory taken here to put each at its edge: what a forward (then a sequence) takes measured, then all but that
 // and half a GiB held - the build refused, its own memory given back - and with the memory returned, both built.
 // needs a gfx1151 and ~/Models/qwen38/UD-IQ3_XXS; skipped (77) without them.
@@ -109,14 +110,23 @@ int main() {
   CHECK(s);
   q4x_seq_destroy(s);
   q4x_forward_destroy(f);
-  // a forward that would leave half a GiB: refused, its memory given back
+  // where the whole forward would leave half a GiB: at its whole budget (every expert's bytes) refused, its memory
+  // given back; sized to the machine as it stands (Q4xOptions' budget 0, 0.13.0) built - its experts streamed past
+  // the room - and leaving the headroom
   {
     Hog hog(fwd + kUnder);
     const uint64_t before = settled(), dev = device_free();
-    CHECK(!q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err) && std::strstr(err, "GPU memory") &&
+    const Q4xOptions whole = {kCtx, kMaxTokens, false, nullptr, 0, nullptr, fwd};
+    CHECK(!q4x_forward_create_with(w, nullptr, &whole, err) && std::strstr(err, "GPU memory") &&
           std::strstr(err, "the forward"));
     CHECK(device_free() + (1ull << 20) >= dev);
-    std::printf("  a forward leaving %.2f GiB: refused (%s)\n", (double) (before - fwd) / kGiB, err);
+    std::printf("  a forward at its whole budget leaving %.2f GiB: refused (%s)\n", (double) (before - fwd) / kGiB, err);
+    f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
+    CHECK(f && !q4x_forward_whole(f));
+    const uint64_t left = settled();
+    CHECK(left >= FIT_HEADROOM);
+    std::printf("  sized to the machine: built, its experts streamed, %.2f GiB left\n", (double) left / kGiB);
+    q4x_forward_destroy(f);
   }
   f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
   CHECK(f && (s = q4x_seq_create(f, err)));

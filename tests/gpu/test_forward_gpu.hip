@@ -37,6 +37,8 @@ extern "C" {
 #include "osmos/run/forward.h"
 }
 
+#include "test_fit.h"
+
 #define CHECK(x)                                                                 \
   do {                                                                           \
     if (!(x)) {                                                                  \
@@ -256,9 +258,12 @@ int main() {
   CHECK(kLayers <= w->geo.n_layers);
   CHECK(!forward_create(w, 0, 64, kBudget, ferr) && !forward_create(w, kLayers, 64, 64ull << 20, ferr));
   std::printf("  refusals: 0 layers; a budget below the layers' weights (%s)\n", ferr);
-  Forward* f = forward_create(w, kLayers, 64, kBudget, ferr);
-  if (!f) std::printf("  forward_create: %s\n", ferr);
-  CHECK(f);
+  Forward* f = nullptr;
+  TestFit fit = {[&](uint64_t b) { return (f = forward_create(w, kLayers, 64, b, ferr)) != nullptr; },
+                 [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
+                 [&] { forward_destroy(f), f = nullptr; }};
+  uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
+  CHECK(test_fit(fit, kBudget, &budget));
   Probe P;
   P.g = g;
   P.wts = w;

@@ -36,7 +36,8 @@ typedef struct Q4xOptions
   uint32_t n_taps;           /* how many (Q4X_MAX_TAPS at most); 0: none */
   const Q4xDflash *dflash;   /* a DFlash2 drafter (q4x_dflash_*), its taps the step's; NULL: none */
   uint64_t budget;           /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
-                                through the membrane past it; 0 every expert resident */
+                                through the membrane past it; 0 sized to this machine as it stands (experts_fit_now:
+                                every expert resident where there is room) */
 } Q4xOptions;
 
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,

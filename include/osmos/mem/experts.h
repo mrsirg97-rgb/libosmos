@@ -54,3 +54,12 @@ bool experts_create(const PoolUnit *units, uint32_t layers, uint32_t experts, co
                     const ExpertsPlan *p, uint64_t grain, int readers, membrane_copy_fn copy, void *copy_ctx,
                     uint64_t ahead_limit, bool warm_now, Experts *out, char err[MEMBRANE_ERR]);
 void experts_destroy(Experts *e);
+
+/*
+experts_fit_now
+  a build's budget sized to this machine as it stands: its fixed part (what it has built, bytes) and the room it
+  leaves (fit_room: the GPU's free memory, or the RAM past FIT_RAM_FREE) less FIT_HEADROOM - experts_plan's budget for
+  as many experts as fit, every one on a machine with the room; 1 (the smallest build) when there is none. a forward's
+  own sizing in one build (a test's, a bench's); osmos-serve sizes the whole engine over builds (fit_sized)
+*/
+uint64_t experts_fit_now(uint64_t fixed);
