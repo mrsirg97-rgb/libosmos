@@ -351,6 +351,10 @@ constexpr int kFaHead = INK2_MAX_HEAD;
 constexpr int kFaRow = kFaHead + 8;  // f16s a row in LDS, then a pad
 constexpr int kFaKey = kFaTile + 8;
 constexpr int kFaRowTiles = 4;
+// a split decode's waves past which a call's blocks keep one wave (more waves then slower: the GPU full, and only a
+// one-wave block reads Q8 keys straight into registers): measured on gfx1151 at Mini's shape (ink2_fabench DECODE=1,
+// HEADS=24, W 1 / 2 / 4 / 8 over 512 .. 131,072 keys, low-power, 2026-11-22) - each length's fastest W within 7%
+constexpr uint32_t kFaDecodeWaves = 256;
 constexpr uint32_t kFaUnit = INK2_FA_UNIT;  // a block's row tiles (INK2_FA_RT 1 / 2 / 4 for a sweep; 16K full: 756 / 716 / 638 ms)
 typedef _Float16 fa_h16 __attribute__((ext_vector_type(16)));
 typedef float fa_f8 __attribute__((ext_vector_type(8)));
@@ -718,8 +722,12 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
     const uint32_t u0 = (pos0 + klo) / kFaUnit, units = (pos0 + qhi) / kFaUnit - u0 + 1;
     const dim3 grid(1, a->kv_heads, units);
     const uint32_t rows = a->x16 ? (n_tok + mm::kTile - 1) / mm::kTile * mm::kTile : n_tok;  // x16's: a whole tile
-    // the waves the (token, head) rows fill: n_tok G of them, 16 a wave, the fewest of 1 / 2 / 4 / 8
-    const uint32_t need = (n_tok * G + kFaTile - 1) / kFaTile, W = need <= 1 ? 1 : need <= 2 ? 2 : need <= 4 ? 4 : 8;
+    // the waves the (token, head) rows fill (n_tok G of them, 16 a wave), then more while the call's blocks leave
+    // the GPU idle: a decode's blocks are latency-bound (80-89% of their cycles waiting on memory at one wave), and a
+    // block's waves past its rows only load its tiles - each row's sums its own, so the same bits at any W
+    const uint32_t need = (n_tok * G + kFaTile - 1) / kFaTile, blocks = a->kv_heads * units;
+    uint32_t W = need <= 1 ? 1 : need <= 2 ? 2 : need <= 4 ? 4 : 8;
+    while (W < 8 && blocks * W * 2 <= kFaDecodeWaves) W *= 2;
 #define FSW(g, w)                                                                                                    \
   if (G == g && W == w) {                                                                                            \
     fa_kernel<g, 1, KV, true, w><<<grid, w * 32, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, pos0,  \
