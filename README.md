@@ -71,8 +71,9 @@ drawn from (seed, position) alone, so a seed reproduces an answer, drafted or no
 returned in `x-osmos-seed`.
 
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
-header - turns since the last tool call, the most repeated recent call, orphaned calls and results (a client's
-history compaction can drop one side), and `stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
+header - turns since the last tool call, the most repeated recent call, how many times in a row the last call was
+made again after the same result, orphaned calls and results (a client's history compaction can drop one side), and
+`stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
 true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling-2-Small 256K, Inkling-2-Mini 1M, Hy4-flash 1M, osmos1.7b 512K), or
 `--ctx` (installer or osmos-api: `512k`, `1m`, ...).
 

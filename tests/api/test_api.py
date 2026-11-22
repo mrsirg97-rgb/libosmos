@@ -529,8 +529,36 @@ class Api(Served, unittest.TestCase):
         msgs += [self.call("c9", "get_weather", '{"city": "Rome"}'), {"role": "tool", "tool_call_id": "c9", "content": "sun"}]
         loop, head = self.loop_of({"messages": msgs, "tools": TOOLS})
         self.assertEqual((loop["repeated_call"]["name"], loop["repeated_call"]["count"]), ("get_weather", 3))
-        self.assertTrue(loop["stuck"])
+        self.assertEqual(loop["unchanged_repeats"], 1)  # (the last call Rome's, once)
+        self.assertFalse(loop["stuck"])  # 0.15.2: three among sixteen, their result the same, then another call
         self.assertIn("repeated-call=3 get_weather", head)
+
+    def test_6p_loop_unchanged_repeats(self):  # 0.15.2: a call again after the same call had the same result
+        self.ready()
+        def turn(i, args, result):
+            return [self.call(f"c{i}", "read", args), {"role": "tool", "tool_call_id": f"c{i}", "content": result}]
+        # Inkling-2-Mini's loop (2026-11-22): go.mod read, its same content back, read again - stuck at two
+        msgs = [{"role": "user", "content": "fix the build"}] + turn(0, '{"path": "go.mod"}', "module x\ngo 1.22")
+        loop, _ = self.loop_of({"messages": msgs, "tools": TOOLS})
+        self.assertEqual((loop["unchanged_repeats"], loop["stuck"]), (1, False))
+        msgs += turn(1, '{"path": "go.mod"}', "module x\ngo 1.22")
+        loop, head = self.loop_of({"messages": msgs, "tools": TOOLS})
+        self.assertEqual((loop["unchanged_repeats"], loop["stuck"]), (2, True))
+        self.assertIn("unchanged-repeats=2", head)
+        # the arguments' keys in another order: the same call
+        msgs2 = msgs[:3] + turn(1, '{"limit": 50, "path": "go.mod"}', "a")[0:0] + \
+            turn(1, '{"path":"go.mod",  "limit":50}', "x") + turn(2, '{"limit": 50, "path": "go.mod"}', "x")
+        loop, _ = self.loop_of({"messages": msgs2, "tools": TOOLS})
+        self.assertEqual(loop["unchanged_repeats"], 2)
+        # polling: the same call, its result changed each time - not stuck however often (under the backstop)
+        poll = [{"role": "user", "content": "watch it"}]
+        for i in range(5):
+            poll += turn(i, '{"cmd": "git status"}', f"{i} files changed")
+        loop, _ = self.loop_of({"messages": poll, "tools": TOOLS})
+        self.assertEqual((loop["repeated_call"]["count"], loop["unchanged_repeats"], loop["stuck"]), (5, 1, False))
+        poll += turn(9, '{"cmd": "git status"}', "9 files changed")  # the sixth: LOOP_REPEAT_ANY's backstop
+        loop, _ = self.loop_of({"messages": poll, "tools": TOOLS})
+        self.assertEqual((loop["repeated_call"]["count"], loop["stuck"]), (6, True))
 
     def test_6m_orphans_flagged_not_filled(self):  # a compaction's lost pair: reported; the prompt the client's own
         self.ready()
