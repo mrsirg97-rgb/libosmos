@@ -81,6 +81,16 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "stream_ngram"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->stream_ngram = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
+  if (!strcmp(k, "temperature")) /* 0.14.0: 0 greedy */
+    return (v->type == JSON_INT || v->type == JSON_FLOAT) &&
+                   (c->temperature = v->type == JSON_INT ? atof(v->s) : v->f) >= 0 && c->temperature < 100
+               ? true
+               : fail(err, "a number, 0 or more", k);
+  if (!strcmp(k, "top_p"))
+    return (v->type == JSON_INT || v->type == JSON_FLOAT) && (c->top_p = v->type == JSON_INT ? atof(v->s) : v->f) > 0 &&
+                   c->top_p <= 1
+               ? true
+               : fail(err, "a share above 0, 1 at most", k);
   if (!strcmp(k, "kv_q8"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->kv_q8 = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
@@ -100,7 +110,7 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
 bool config_read(const char *path, Config *c, char err[API_ERR])
 {
   memset(c, 0, sizeof *c);
-  c->parallel = 1;
+  c->parallel = 1, c->top_p = 1;
   FILE *f = fopen(path, "rb");
   if (!f)
     return snprintf(err, API_ERR, "%s: could not be opened", path), false;

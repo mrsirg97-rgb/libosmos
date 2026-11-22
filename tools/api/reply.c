@@ -209,11 +209,13 @@ static void fail(int fd, bool stream, const char *why, const JsonBuf *completion
 }
 
 /* the x-osmos-loop header line (loop.h's value, "\r\n" ended) */
-static void loop_head(char *out, size_t cap, const Loop *l)
+static void loop_head(char *out, size_t cap, const Answer *s)
 {
   char v[400];
-  loop_header(v, sizeof v, l);
-  snprintf(out, cap, "x-osmos-loop: %s\r\n", v);
+  loop_header(v, sizeof v, s->loop);
+  const int w = snprintf(out, cap, "x-osmos-loop: %s\r\n", v);
+  if (s->sampled && w > 0 && (size_t)w < cap)
+    snprintf(out + w, cap - (size_t)w, "x-osmos-seed: %llu\r\n", s->seed);
 }
 
 /* usage and timings, as fields after a response's choices (", ...") */
@@ -294,7 +296,7 @@ static void whole(Answer *s, const Run *r, const Json *m, size_t prompt_n)
   loop_json(&b, s->loop);
   json_puts(&b, "}");
   char head[512];
-  loop_head(head, sizeof head, s->loop);
+  loop_head(head, sizeof head, s);
   if (b.oom)
     http_error(s->fd, 500, "out of memory");
   else
@@ -473,7 +475,7 @@ void api_chat(Api *a, Http *h)
     return;
   }
   Request rq;
-  const bool ok = request_read(body, a->d, a->fill_orphans, a->preserve_thinking, &rq, err);
+  const bool ok = request_read(body, a->d, a->fill_orphans, a->preserve_thinking, a->temperature, a->top_p, &rq, err);
   json_free(body);
   if (!ok)
   {
@@ -490,7 +492,8 @@ void api_chat(Api *a, Http *h)
     snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL, over = true;
   if (ids && rq.max_tokens && n + rq.max_tokens > ctx)
     rq.max_tokens = (unsigned)(ctx - n); /* past the context: as many as it leaves (finish "length") */
-  Run *r = ids ? engine_run(&a->engine, ids, n, rq.max_tokens, next_mark(a, &rq, ids, n), err) : NULL;
+  const Sampling samp = {rq.temperature, rq.top_p, rq.seed};
+  Run *r = ids ? engine_run(&a->engine, ids, n, rq.max_tokens, next_mark(a, &rq, ids, n), &samp, err) : NULL;
   free(ids);
   if (!r) /* 503 for loading alone (a request's own fault - its template's - a 400 then too: 0.9.2's, retried) */
   {
@@ -504,10 +507,11 @@ void api_chat(Api *a, Http *h)
   }
   Answer s = {.fd = h->fd, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
               .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT, .loop = &rq.loop,
+              .sampled = rq.sampled, .seed = rq.seed,
               .boundary = a->d->header != NULL};
   snprintf(s.id, sizeof s.id, "chatcmpl-osmos-%s%lld", boot_tag(), r->rid);
   char head[512];
-  loop_head(head, sizeof head, &rq.loop);
+  loop_head(head, sizeof head, &s);
   if (rq.stream && !http_stream_open_h(h->fd, head))
     s.gone = true;
   answer_chunk(&s, "{\"role\": \"assistant\", \"content\": \"\"}", NULL, "");

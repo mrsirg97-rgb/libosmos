@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
+#include <time.h>
 
 #include "dialect.h"
 
@@ -76,8 +78,30 @@ static bool sampled(const Json *v, double greedy)
   return x != greedy;
 }
 
-bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool preserve_default, Request *r,
-                  char err[API_ERR])
+/* a number field: absent or null keeps *x; else a number in [lo, hi] (lo_open: above lo) */
+static bool number(const Json *v, double lo, bool lo_open, double hi, double *x)
+{
+  if (!v || v->type == JSON_NULL)
+    return true;
+  if (v->type != JSON_INT && v->type != JSON_FLOAT)
+    return false;
+  const double y = v->type == JSON_INT ? atof(v->s) : v->f;
+  if (!(lo_open ? y > lo : y >= lo) || !(y <= hi))
+    return false;
+  return *x = y, true;
+}
+
+/* a seed for a request that names none: 53 bits (a client's JSON number holds it exactly, to send it back) */
+static unsigned long long drawn_seed(void)
+{
+  unsigned long long s = 0;
+  if (getrandom(&s, sizeof s, 0) != (ssize_t)sizeof s)
+    s = (unsigned long long)time(NULL) * 0x9E3779B97F4A7C15ull ^ (unsigned long long)clock();
+  return s & ((1ull << 53) - 1);
+}
+
+bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool preserve_default, double temperature,
+                  double top_p, Request *r, char err[API_ERR])
 {
   memset(r, 0, sizeof *r);
   r->preserve = true, r->preserve_default = preserve_default;
@@ -87,8 +111,17 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool pr
   for (size_t i = 0; i < msgs->n; i++)
     if (msgs->item[i]->type != JSON_OBJECT)
       return request_fail(err, "messages: each an object");
-  if (sampled(json_get(body, "temperature"), 0) || sampled(json_get(body, "top_p"), 1))
-    return request_fail(err, "temperature / top_p: osmos decodes greedily (temperature 0, top_p 1) - sampling is not built");
+  /* 0.14.0: sampling - as asked, else the pack's (temperature 0 greedy); a seed as asked, else drawn */
+  r->temperature = temperature, r->top_p = top_p;
+  if (!number(json_get(body, "temperature"), 0, false, 100, &r->temperature))
+    return request_fail(err, "temperature: a number, 0 (greedy) or more");
+  if (!number(json_get(body, "top_p"), 0, true, 1, &r->top_p))
+    return request_fail(err, "top_p: a number above 0, 1 at most");
+  const Json *seed = json_get(body, "seed");
+  if (seed && seed->type != JSON_NULL && (seed->type != JSON_INT || seed->s[0] == '-' || strlen(seed->s) > 19))
+    return request_fail(err, "seed: an integer, 0 or more");
+  r->seed = seed && seed->type == JSON_INT ? strtoull(seed->s, NULL, 10) : drawn_seed();
+  r->sampled = r->temperature > 0;
   const Json *stop = json_get(body, "stop"), *n = json_get(body, "n"), *choice = json_get(body, "tool_choice");
   if (stop && stop->type != JSON_NULL && !(stop->type == JSON_ARRAY && !stop->n))
     return request_fail(err, "stop: stop strings are not built (the model's own end of turn ends it)");

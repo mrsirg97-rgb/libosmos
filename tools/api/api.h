@@ -49,7 +49,14 @@ typedef struct Engine
 } Engine;
 
 bool engine_start(Engine *e, char *const argv[], bool spec, char err[API_ERR]);
-Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsigned mark, char err[API_ERR]);
+/* a run's sampling (GEN temp= top_p= seed=): temperature 0 greedy, the keys not written */
+typedef struct Sampling
+{
+  double temperature, top_p;
+  unsigned long long seed;
+} Sampling;
+Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsigned mark, const Sampling *s,
+                char err[API_ERR]);
 void engine_stop(Engine *e, Run *r);
 void engine_release(Engine *e, Run *r);
 bool engine_ready(Engine *e);
@@ -89,6 +96,7 @@ typedef struct Api
   int32_t eos;
   bool fill_orphans; /* the pack's fill_orphans: a request's osmos.fill_orphans unset, this */
   bool preserve_thinking; /* the pack's preserve_thinking: a request's unset, this (LFM3's reader) */
+  double temperature, top_p; /* the pack's sampling: a request's unset, these (0.14.0; temperature 0 greedy) */
 } Api;
 
 void api_chat(Api *a, Http *h);
