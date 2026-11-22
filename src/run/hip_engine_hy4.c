@@ -6,6 +6,7 @@
 
 #include "engine_impl.h"
 #include "osmos/hy4/forward.h"
+#include "osmos/run/fit.h"
 #include "osmos/model/gguf.h"
 
 /* Tencent's Hy4-flash (hy_v4_flash) behind the engine: every weight resident but the Engram table (its rows read from
@@ -32,6 +33,7 @@ typedef struct Eng
 {
   Hy4Forward *f;
   uint32_t drafts; /* a round's drafts (DFly2's), 0 without a drafter */
+  uint64_t ram_kept; /* the system's RAM kept free (--fill, else FIT_RAM_FREE): the room's other bound */
 } Eng;
 
 static bool fail(char err[OSMOS_ERR], const char *what)
@@ -72,7 +74,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
     if ((m->fds[i] = open(m->g->paths[i], O_RDONLY)) < 0)
       return fail(err, "hy_v4_flash: a model file not opened (its Engram rows' reads)"), m_close(m), NULL;
   const Hy4Geometry *geo = &m->w->geo;
-  *facts = (OsmosFacts){"hy_v4_flash", (uint32_t)geo->n_vocab, geo->native_ctx, HY4_LOGIT_ROWS, 0, false};
+  *facts = (OsmosFacts){"hy_v4_flash", (uint32_t)geo->n_vocab, geo->native_ctx, HY4_LOGIT_ROWS, 0, true};
   return m;
 }
 
@@ -88,13 +90,17 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8)
-    return fail(err, "hy_v4_flash: every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
+  if (o->picks || o->no_guess || o->npu || o->kv_q8)
+    return fail(err, "hy_v4_flash: no picks, no_guess, NPU or kv_q8"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;
+  e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
   const uint32_t steps = o->max_tokens ? o->max_tokens : HY4_STEP_TOKENS;
-  const Hy4Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, HY4_LOGIT_ROWS, false, true};
+  /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Hy4Options' 0,
+     every expert resident) */
+  const Hy4Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, HY4_LOGIT_ROWS, false, true,
+                         o->budget ? o->budget : 1};
   if (!(e->f = hy4_forward_create(m->w, m->fds, &ho, err)))
     return e_destroy(e), NULL;
   if (o->drafter && !hy4_dfly_load(e->f, o->drafter, true, err)) /* (Q8_0: half the draft's reads) */
@@ -105,13 +111,18 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 
 static uint64_t e_identity(const void *p) { return hy4_identity(((const Eng *)p)->f); }
 
+/* the room a build left: the GPU's free memory, or the RAM past ram_kept - the experts' pinned host slots in RAM, not
+   in the GPU's free count (Inkling's, DeepSeek's) */
 static bool e_room(const void *p, uint64_t *bytes)
 {
-  (void)p;
-  return osmos_gpu_room(bytes);
+  uint64_t free_b = 0;
+  if (!osmos_gpu_room(&free_b))
+    return false;
+  *bytes = fit_room(free_b, fit_ram_available(), ((const Eng *)p)->ram_kept);
+  return true;
 }
 
-static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
+static void e_stats(const void *p, OsmosStats *s) { s->budget = hy4_forward_bytes(((const Eng *)p)->f); }
 
 /* the batch's sequences one step (each one's consecutive tokens a run), HY4_MAX_RUNS at a time */
 static bool batch(Eng *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, bool read, char err[OSMOS_ERR])

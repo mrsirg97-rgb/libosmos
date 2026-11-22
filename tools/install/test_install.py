@@ -905,7 +905,7 @@ class Host(unittest.TestCase):
     def test_manifest_gpu_gib(self):
         """the shipped manifest's gpu_gib each a measured start under GPU_GIB_MEASURED; a bad one refused"""
         m = manifest.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "packs.json"))
-        self.assertEqual(m["packs"]["inkling-2-mini"]["gpu_gib"], 23)
+        self.assertEqual(m["packs"]["inkling-2-mini"]["gpu_gib"], 10)  # (0.13.0: its smallest build, experts streamed)
         for bad in (0, -1, "23", host.GPU_GIB_MEASURED + 1):
             b = json.loads(json.dumps(m))
             b["packs"]["inkling-2-mini"]["gpu_gib"] = bad

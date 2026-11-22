@@ -158,7 +158,8 @@ struct Forward
   uint64_t ram_kept;       /* the system's RAM a build leaves free: ForwardOptions' fill, else FIT_RAM_FREE */
   uint64_t pool_room;      /* the membrane's room: the budget's experts' bytes, taken at create */
   uint8_t *r_up;
-  uint32_t *m_by, *m_row, *m_base, *m_slot0;
+  uint32_t *m_by, *m_row, *m_base, *m_slot0; /* a layer's routing (moe_route): sorted rows' pairs, pairs' rows, runs */
+  int32_t *m_gidx, *m_hidx;                  /* its slots' tokens and rows (FWD_MAX_SLOTS), then carved */
   /* forward_lane's: on, its CPU threads (0: every expert on the GPU, in the order the CPU would sum it), and a small
      step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in ascending expert id */
   /* 0.7.0: the NPU beside the GPU (npu.h; forward_npu): a prompt step's hottest experts' gate and up, a fixed

@@ -10,6 +10,7 @@
 //              its drafts accepted a round; the tokens the plain decode's (the same hash). CUM=x: a round's drafts
 //              kept while their probabilities' product is at least x (the engine's cum_min)
 //   HEAD_Q8=1  the head read as its Q8_0 copy (Hy4Options' head_q8)
+//   BUDGET=GiB the build's budget (Hy4Options' budget: the routed experts streamed past it); else every one resident
 //   STATS=1    with DFLY: each draft reached (all before it accepted) - its acceptance by place and by probability
 //   NLL=1      the prompt's every row kept: the mean NLL of each next id (teacher-forced), a cache's or a math's cost
 //              over the whole text (KV_F32: the reference's F32 cache against the engine's Q8_0)
@@ -64,7 +65,8 @@ int main(int argc, char** argv) {
   const bool nll_mode = getenv("NLL") != nullptr;
   const Hy4Options o = {S, P + D + 2 * HY4_DFLY_DRAFTS + HY4_MAX_BACK,
                         nll_mode ? S : dfly ? (uint32_t) HY4_DFLY_DRAFTS + 1 : 1u,
-                       getenv("KV_F32") != nullptr, getenv("HEAD_Q8") != nullptr};  // (KV_F32: the reference's F32 cache; else the engine's Q8_0)
+                       getenv("KV_F32") != nullptr, getenv("HEAD_Q8") != nullptr,
+                       getenv("BUDGET") ? (uint64_t) (atof(getenv("BUDGET")) * (1ull << 30)) : 0};  // (KV_F32: the reference's F32 cache; else the engine's Q8_0)
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::fprintf(stderr, "%s\n", err);
   CHECK(f);

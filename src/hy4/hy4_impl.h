@@ -1,6 +1,8 @@
 /* the hy4 forward's and sequence's insides (hip_hy4_make.c: the forward made; hip_hy4.c: its step; hip_hy4_layer.c: a
    layer's blocks; hip_hy4_seq.c: a sequence) */
 #pragma once
+#include "osmos/mem/experts.h"
+#include "osmos/model/moe_route.h"
 
 #include "osmos/gpu/bufs.h"
 #include <stdbool.h>
@@ -77,7 +79,19 @@ struct Hy4Forward
   int32_t *rgidx, *rhidx, *h_rgidx, *h_rhidx, *rcnt, *h_rcnt;
   const void **rw, **h_rw;    /* the entries' gate, up, down (3 x entries) */
   uint64_t *rkey;             /* the entries' sort keys (count, then build order) */
-  uint32_t *h_estart, *h_rexp; /* a read's routing (hy4_read_route): its sort's scratch (n_experts + 1), an entry's expert */
+  /* the routed experts behind the membrane (experts.h): units [MoE layer][expert], a MoE layer l - n_dense; their own
+     O_DIRECT descriptors; every one resident (whole): their addresses' device table [MoE layer][gate, up, down][expert]
+     (hy4_route's), else decode's tables the host's; the fixed bytes (GPU memory before them) and their pinned */
+  Experts ex;
+  int *xfds;
+  bool whole;
+  const void **exp_tab, **h_tab;        /* (h_tab: its host copy, a read's) */
+  const void *(*h_ex)[POOL_PARTS];      /* a step's runs' experts' addresses (n_experts of them) */
+  uint64_t fixed_bytes, pinned_bytes;
+  /* a read's routing (moe_route): the sort's scratch (n_experts + 1), each sorted row's pick, the runs' expert /
+     start / count / slot0 (4 x n_experts), the entries (moe_entries) */
+  uint32_t *h_estart, *h_by, *h_run;
+  MoeEntry *h_ent;
   void *h_stage;              /* the sorted tables' staging (host) */
 
   float *qr, *qres, *q, *kva, *gt, *qa, *olat, *ao, *out;

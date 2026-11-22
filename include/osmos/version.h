@@ -1,7 +1,7 @@
 #ifndef OSMOS_VERSION_H
 #define OSMOS_VERSION_H
 
-#define OSMOS_VERSION "0.12.3"
+#define OSMOS_VERSION "0.13.0"
 
 #endif
 

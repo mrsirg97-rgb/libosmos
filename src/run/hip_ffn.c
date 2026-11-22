@@ -9,6 +9,7 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/quant.h"
+#include "osmos/model/moe_route.h"
 
 /* every Engram row the step reads - each sub-batch's tokens' rows for each of its Engram layers (the layers ascending:
    fwd_engram's nth) - begun at the step's start on Engram's readers, into the stage one after another, so they read
@@ -243,27 +244,19 @@ bool fwd_moe(Forward *f, int l, char *err)
   fwd_guess_want(f, l);
   fwd_probe(f, "route_idx", l, f->at, b->ridx, P, true);
   fwd_probe(f, "route_w", l, f->at, b->rw, P, false);
-  /* the distinct experts in ascending id, each with its pairs (in token order: at most one a token): an expert's
-     rows base .. base + cnt, its slots those tokens; one launch of mm_group reads each once for all of its tokens */
-  uint32_t nd = 0, *by = f->m_by, at[OPS_MAX_EXPERTS + 1] = {0};
+  /* the distinct experts in ascending id (moe_route), each with its pairs (in token order: at most one a token): an
+     expert's rows start .. start + count, its slots those tokens; one launch of mm_group reads each once for all of
+     its tokens */
+  uint32_t at[OPS_MAX_EXPERTS + 1], rexp[OPS_MAX_EXPERTS], rcnt[OPS_MAX_EXPERTS];
+  MoeRoute rt = {f->m_by, f->m_row, rexp, f->m_base, rcnt, f->m_slot0, f->m_gidx, f->m_hidx, at, 0, 0};
+  if (E > OPS_MAX_EXPERTS || !moe_route(ids, P, K, E, MM_TILE, &rt))
+    return fwd_fail(err, "the router picked an expert the model does not have");
   for (uint32_t m = 0; m < P; m++)
-  {
-    if (ids[m] < 0 || (uint32_t)ids[m] >= E)
-      return fwd_fail(err, "the router picked an expert the model does not have");
-    at[ids[m] + 1]++;
     f->picks[(uint32_t)l * E + (uint32_t)ids[m]]++;
-  }
-  for (uint32_t e = 0; e < E; e++) /* by expert, then pair: a counting sort, each expert's pairs in pair order */
-    at[e + 1] += at[e];
-  for (uint32_t m = 0; m < P; m++)
-    by[at[ids[m]]++] = m;
+  const uint32_t nd = rt.runs, slots = rt.slots, *base = rt.start, *slot0 = rt.slot0, *row_of = rt.row;
   uint32_t ne = 0; /* the tables' entries: an expert a part of at most MM_MAX_TOKENS of its pairs (mm_group's) */
-  for (uint32_t r = 0, run = 0; r < P; r++)
-  {
-    const bool first = r == 0 || ids[by[r]] != ids[by[r - 1]];
-    nd += first, run = first ? 1 : run + 1;
-    ne += run % MM_MAX_TOKENS == 1 || MM_MAX_TOKENS == 1;
-  }
+  for (uint32_t j = 0; j < nd; j++)
+    ne += (rt.count[j] + MM_MAX_TOKENS - 1) / MM_MAX_TOKENS;
   /* the layer's tables, carved from one pinned region and sent in one copy */
   Carve c = {f->r_up, (uint8_t *)b->up, 0};
   const void **tab, **dtab;
@@ -272,39 +265,22 @@ bool fwd_moe(Forward *f, int l, char *err)
   tab = carve(&c, 3 * ne * sizeof *tab, (void **)&dtab), cnt = carve(&c, ne * 4, (void **)&dcnt);
   order = carve(&c, P * 4, (void **)&dorder), pidx = carve(&c, P * 4, (void **)&dpidx);
   /* an expert's slots: its tokens, padded to whole tiles - at most P + (MM_TILE - 1) an expert */
-  uint32_t slots = 0;
-  for (uint32_t r = 0, c_ = 0; r < P; r++)
-  {
-    c_ = (r == 0 || ids[by[r]] != ids[by[r - 1]]) ? 1 : c_ + 1;
-    const bool last = r + 1 == P || ids[by[r + 1]] != ids[by[r]];
-    if (last)
-      slots += (c_ + MM_TILE - 1) / MM_TILE * MM_TILE;
-  }
   gidx = carve(&c, slots * 4, (void **)&dgidx), hidx = carve(&c, slots * 4, (void **)&dhidx);
   xg = carve(&c, ne * 4, (void **)&dxg), yg = carve(&c, ne * 4, (void **)&dyg);
   xd = carve(&c, ne * 4, (void **)&dxd), yd = carve(&c, ne * 4, (void **)&dyd);
-  for (uint32_t s = 0; s < slots; s++)
-    gidx[s] = -1, hidx[s] = -1;
-  uint32_t *row_of = f->m_row, *base = f->m_base, *slot0 = f->m_slot0, unit_of[OPS_MAX_EXPERTS];
-  for (uint32_t r = 0, j = 0, next_slot = 0; r < P; r++)
+  memcpy(gidx, rt.gidx, slots * 4), memcpy(hidx, rt.hidx, slots * 4);
+  for (uint32_t r = 0; r < P; r++)
+    pidx[r] = (int32_t)rt.by[r];
+  uint32_t unit_of[OPS_MAX_EXPERTS];
+  for (uint32_t j = 0; j < nd; j++)
   {
-    const uint32_t m = by[r];
-    if (r == 0 || ids[m] != ids[by[r - 1]])
-    {
-      if (r)
-        j++, next_slot += (uint32_t)(cnt[j - 1] + MM_TILE - 1) / MM_TILE * MM_TILE;
-      base[j] = r, cnt[j] = 0, slot0[j] = next_slot;
-      const uint32_t unit = (uint32_t)l * E + (uint32_t)ids[m];
-      unit_of[j] = unit;
-      if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the membrane
-                                        begun and held, not waited for (in memory at a later visit) */
-        f->on_cpu[unit] = membrane_clock(f->mem), (void)membrane_begin(f->mem, unit);
-      else if (!membrane_hold(f->mem, unit, err)) /* once for the sub-batches */
-        return false;
-    }
-    const uint32_t slot = slot0[j] + (uint32_t)cnt[j]++;
-    gidx[slot] = (int32_t)(m / K), hidx[slot] = (int32_t)r;
-    pidx[r] = (int32_t)m, row_of[m] = r;
+    const uint32_t unit = (uint32_t)l * E + rt.expert[j];
+    unit_of[j] = unit;
+    if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the membrane begun
+                                      and held, not waited for (in memory at a later visit) */
+      f->on_cpu[unit] = membrane_clock(f->mem), (void)membrane_begin(f->mem, unit);
+    else if (!membrane_hold(f->mem, unit, err)) /* once for the sub-batches */
+      return false;
   }
   prefetch(f, l, P);
   if (fwd_small(f, P)) /* the lane's small step: every expert in the matvec's order (hip_lane.c) */
@@ -318,30 +294,27 @@ bool fwd_moe(Forward *f, int l, char *err)
   /* the entries (an expert's parts of MM_MAX_TOKENS: its slots and rows from part q's first) in ascending count,
      then expert, then part: group()'s runs of the same column tiles contiguous */
   int32_t cnt_j[OPS_MAX_EXPERTS];
-  memcpy(cnt_j, cnt, nd * sizeof *cnt);
+  for (uint32_t j = 0; j < nd; j++)
+    cnt_j[j] = (int32_t)rt.count[j];
   /* 0.7.0: the NPU's parts (forward_npu): an expert's first nq[j] x NPU_TOKENS rows - their gate and up the NPU's
      where it has the layer's kernel (npu_gu), their down where it has that one (npu_dn); the rest's the GPU's in
      entries of their own */
   const uint32_t takes = fwd_npu_layer(f, l, P);
   const bool npu_gu = takes & 1, npu_dn = takes & 2;
   uint32_t nq[OPS_MAX_EXPERTS], parts = takes ? fwd_npu_pick(f, P, cnt_j, nd, nq) : 0;
-  uint64_t key[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS]; /* part's count, expert, part */
-  for (uint32_t j = 0, e = 0; j < nd; j++)
-    for (uint32_t q = 0; q * MM_MAX_TOKENS < (uint32_t)cnt_j[j]; q++, e++)
-    {
-      const uint32_t left = (uint32_t)cnt_j[j] - q * MM_MAX_TOKENS;
-      key[e] = (uint64_t)(left < MM_MAX_TOKENS ? left : MM_MAX_TOKENS) << 40 | (uint64_t)j << 16 | q;
-    }
-  qsort(key, ne, sizeof *key, cmp_u64);
+  /* (moe_entries: in ascending count, then expert, then part - group()'s runs of one column-tile count) */
+  uint64_t key[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS];
+  MoeEntry ent[OPS_MAX_EXPERTS + FWD_MAX_STEP * OPS_MAX_TOPK / MM_MAX_TOKENS];
+  uint32_t ne2 = 0;
+  ok = ok && moe_entries(&rt, MM_MAX_TOKENS, ent, key, &ne2) && ne2 == ne;
   const void *ex_g[OPS_MAX_EXPERTS], *ex_u[OPS_MAX_EXPERTS], *ex_d[OPS_MAX_EXPERTS];
   for (uint32_t p = 0; ok && p < ne; p++)
   {
-    const uint32_t j = (uint32_t)(key[p] >> 16 & 0xFFFFFF), q = (uint32_t)(key[p] & 0xFFFF);
-    const uint32_t s0 = slot0[j] + q * MM_MAX_TOKENS, r0 = base[j] + q * MM_MAX_TOKENS;
+    const uint32_t j = ent[p].run, s0 = slot0[j] + ent[p].off, r0 = base[j] + ent[p].off;
     const void *ex[POOL_PARTS];
     ok = membrane_wait(f->mem, unit_of[j], ex, err);
     ex_g[j] = ex[0], ex_u[j] = ex[1], ex_d[j] = ex[2];
-    tab[p] = ex[0], tab[ne + p] = ex[1], tab[2 * ne + p] = ex[2], cnt[p] = (int32_t)(key[p] >> 40);
+    tab[p] = ex[0], tab[ne + p] = ex[1], tab[2 * ne + p] = ex[2], cnt[p] = (int32_t)ent[p].cnt;
     xg[p] = s0 * D, yg[p] = r0 * FF, xd[p] = s0 * FF, yd[p] = r0 * D;
   }
   for (uint32_t i = 0; i < n; i++) /* each token's rows in ascending expert id */

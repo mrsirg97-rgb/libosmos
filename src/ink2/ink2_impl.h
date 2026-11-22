@@ -1,6 +1,7 @@
 /* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h): src/ink2/hip_forward.c the weights, the membrane and
    the step; src/ink2/hip_seq.c a sequence's tails, its saves and marks */
 #pragma once
+#include "osmos/model/moe_route.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,7 +14,6 @@
 /* a conv tail's rows past its 2 keep: a step of at most these appended in place (a decode's, a drafted round's); a
    larger step's inputs read from the step's buffer, the tail keeping their last keep rows (ink2_tail_put) */
 #define INK2_TAIL_STEP 64
-#define INK2_STREAM_PASSES 8 /* experts()'s room and stream settled at most this many times (each smaller: a few) */
 
 /* a layer's resident tensors on the device: its vectors as F32 (the norms, clips, convs, queries, the router's
    bias), its matrices as stored (mv_run reads their type) */
@@ -146,8 +146,10 @@ struct Ink2Forward
   uint32_t head_rows; /* the head's rows a launch (f->head's) */
   float *fa_part; /* a split decode's attention units (ink2_fa_scratch) */
   /* moe's tables: the counting sort's, the entries' keys, the region built on the host and its device copy */
-  uint32_t *m_at, *m_by;
+  uint32_t *m_at, *m_by, *m_run; /* the read's routing (moe_route): its scratch, sorted rows' pairs, runs */
   uint64_t *m_key;
+  MoeEntry *m_ent;                   /* its entries (moe_entries) */
+  const void *(*m_ex)[POOL_PARTS];   /* each run's expert's parts in memory (membrane_wait's) */
   uint8_t *m_host, *m_build;
   void *m_dev;
   void *amax;

@@ -40,8 +40,8 @@ bool hy4_mla_attn(const float *qa, const void *cache, uint32_t slots, bool q8, c
 #define HY4_ROUTE_MAX_EXPERTS 1024
 #define HY4_ROUTE_MAX_K 64
 bool hy4_route(const int32_t *idx, const float *wtok, uint32_t n_tok, uint32_t k, uint32_t n_exp, uint32_t chunk,
-               const void *const base[3], const uint64_t bytes[3], int32_t *gidx, int32_t *sidx, float *wsel,
-               int32_t *cnt, int32_t *xrow, const void **wptr, int32_t *fault, void *stream);
+               const void *const *tab, int32_t *gidx, int32_t *sidx, float *wsel, int32_t *cnt, int32_t *xrow,
+               const void **wptr, int32_t *fault, void *stream);
 bool hy4_mla_qrope(const float *q, uint32_t heads, uint32_t qk, uint32_t row, uint32_t rope_dim, const float *freqs,
                    const int32_t *pos, uint32_t n_tok, float *qa, void *stream);
 bool hy4_gate_mul(float *out, const float *gate, uint64_t n, void *stream);
@@ -132,7 +132,8 @@ hy4_route
   a decode's routed picks (idx/wtok: n_tok x k, each token's k experts distinct, < n_exp) as the expert matvecs'
   tables, no host between: the picks by expert ascending, an expert's tokens ascending - row r's token gidx[r] and
   weight wsel[r], pick m's row sidx[m]; the entries (each expert's rows in chunks of `chunk`, experts ascending) cnt,
-  xrow (its first row) and wptr (3 tables, n_tok x k apart: base[i] + e * bytes[i] - gate, up, down), then count 0 to
+  xrow (its first row) and wptr (3 tables, n_tok x k apart: tab[i n_exp + e] - the membrane's addresses of expert
+  e's gate, up, down, a device table [3][n_exp]), then count 0 to
   n_tok x k (mv_group_tok's skipped entries: a launch to that bound). a pick out of range or twice
   in a token: *fault = 1 (the tables then not used). false, nothing queued, for k 0 or past HY4_ROUTE_MAX_K, n_exp
   past HY4_ROUTE_MAX_EXPERTS, chunk 0, n_tok 0.

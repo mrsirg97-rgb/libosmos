@@ -13,6 +13,8 @@
 #include "ink2_impl.h"
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/mem/experts.h"
+#include "osmos/model/moe_route.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -315,13 +317,7 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
     ok = (f->fds[i] = open(m->paths[i], O_RDONLY | O_DIRECT)) >= 0;
   if (!ok)
     return free(units), free(warm), ink2_fail(err, "out of memory, or a model file not opened O_DIRECT");
-  uint64_t all = 0, largest = 0;
   ok = ink2_weights_experts(w, f->fds, units, n) == n;
-  for (size_t u = 0; ok && u < n; u++)
-  {
-    const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
-    all += b, largest = b > largest ? b : largest;
-  }
   /* the warm set, the most wanted first: by picks counted on calibration text (most first, then the lower unit), else
      an expert of every layer at a time (expert 0 of each layer, then 1, ...) */
   for (size_t u = 0; u < n; u++)
@@ -331,70 +327,20 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
     g_rank = picks;
     qsort(warm, n, sizeof *warm, by_picks);
   }
-  /* the stream (hip_forward.c's stream_budget): two of a layer's experts not warm - a prompt step's holds of one and
-     its read ahead of the next - and never under a whole layer's, so a layer promotion left cold still fits. under a
-     budget, room and stream settle together: more room, fewer cold, a smaller stream - each pass's stream at most the
-     one its room was sized by, so the build stays in the budget */
-  uint64_t stream_room = 2 * (uint64_t)E * largest;
-  const uint64_t given = room;
-  size_t n_warm = 0;
-  for (int pass = 0; ok && pass < INK2_STREAM_PASSES; pass++)
-  {
-    room = given;
-    if (budget) /* osmos's budget the whole build: the experts' slots what the rest leaves (their 2 units' slack too) */
-    {
-      const uint64_t rest = f->fixed_bytes + stream_room + 4 * largest;
-      room = budget > rest ? budget - rest : 0;
-    }
-    if (room > all)
-      room = all;
-    if (room < (uint64_t)E * largest) /* a decode's holds and a passing visit's in the stream: a layer's at most - and
-                                         room 0's, the smallest build (osmos's budget 0: auto-sizing's first build) */
-      room = (uint64_t)E * largest;
-    n_warm = 0;
-    for (uint64_t took = 0; n_warm < n; n_warm++)
-    {
-      const uint64_t b = pool_unit_bytes(&units[warm[n_warm]], ARENA_GRAIN);
-      if (took + b > room)
-        break;
-      took += b;
-    }
-    uint64_t *cold = calloc(L, sizeof *cold), *layer = calloc(L, sizeof *layer);
-    if (!(ok = cold && layer))
-    {
-      free(cold), free(layer);
-      break;
-    }
-    for (size_t r = 0; r < n; r++)
-    {
-      const uint32_t u = warm[r], l = u / E;
-      const uint64_t b = pool_unit_bytes(&units[u], ARENA_GRAIN);
-      layer[l] += b, cold[l] += r < n_warm ? 0 : b;
-    }
-    uint64_t worst = 0, whole = 0;
-    for (uint32_t l = 0; l < L; l++)
-      worst = cold[l] > worst ? cold[l] : worst, whole = layer[l] > whole ? layer[l] : whole;
-    free(cold), free(layer);
-    const uint64_t want = 2 * worst > whole ? 2 * worst : whole;
-    const bool settled = want >= stream_room;
-    stream_room = want < stream_room ? want : stream_room;
-    if (settled || !budget)
-      break;
-  }
-  char perr[POOL_ERR] = "", merr[MEMBRANE_ERR] = "";
-  /* the stream two layers: a prompt step's holds of one and its read ahead of the next (one alone: the next one's reads
-     wait for this one's holds to end - the SSD idle under the layer's kernels) */
-  if (ok && !((f->slots = host_slots_create(room + 2 * largest, perr)) &&
-              (f->stream = host_slots_create(stream_room + 2 * largest, perr))))
-    ok = ink2_fail(err, perr[0] ? perr : "inkling2: the experts' memory refused");
+  /* the room, stream and warm set for the budget (experts_plan: the build's whole budget, the rest taken first - its
+     fixed bytes, the stream, the slack), then the slots and membrane over them (experts_create) */
+  ExpertsPlan plan;
+  Experts ex;
+  char merr[MEMBRANE_ERR] = "";
+  if (ok && !experts_plan(units, L, E, warm, room, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
+    ok = ink2_fail(err, "inkling2: the experts' plan refused");
+  if (ok && !experts_create(units, L, E, warm, &plan, ARENA_GRAIN, INK2_EXPERT_READERS, copy_host, NULL, 0, true, &ex,
+                            merr))
+    ok = ink2_fail(err, merr[0] ? merr : "inkling2: the experts' membrane refused");
   if (ok)
   {
+    f->mem = ex.mem, f->slots = ex.slots, f->stream = ex.stream;
     f->pinned_bytes = host_slots_bytes(f->slots) + host_slots_bytes(f->stream);
-    const MembraneOptions mo = {units, L, E, room, stream_room, host_slots(f->slots), host_slots(f->stream),
-                                ARENA_GRAIN, INK2_EXPERT_READERS, warm, n_warm, copy_host, NULL, 0};
-    ok = (f->mem = membrane_create(&mo, merr)) && membrane_warm(f->mem, merr);
-    if (!ok)
-      ink2_fail(err, merr[0] ? merr : "inkling2: the experts' membrane refused");
   }
   free(units), free(warm);
   return ok;
@@ -560,8 +506,11 @@ static bool buffers(Ink2Forward *f)
   f->kept = calloc(T, 1), f->slot = malloc(T * sizeof *f->slot);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
   f->m_key = malloc(table_entries(T * K, E) * sizeof *f->m_key);
+  f->m_ent = malloc(table_entries(T * K, E) * sizeof *f->m_ent), f->m_run = malloc(4 * E * sizeof *f->m_run);
+  f->m_ex = malloc(E * sizeof *f->m_ex);
   f->m_build = malloc(table_bytes(T * K, E)); /* the tables built in cached memory, then one copy into the pinned */
-  return f->hpick && f->kept && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build;
+  return f->hpick && f->kept && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build &&
+         f->m_ent && f->m_run && f->m_ex;
 }
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR])
@@ -684,7 +633,7 @@ void ink2_forward_destroy(Ink2Forward *f)
     if (pinned[i])
       hipHostFree(pinned[i]);
   free(f->picks), free(f->picks_all), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
-  free(f->m_key), free(f->m_build);
+  free(f->m_key), free(f->m_build), free(f->m_ent), free(f->m_run), free(f->m_ex);
   free(f);
 }
 
@@ -780,12 +729,6 @@ static bool group(uint32_t type, const void *const *dtab, const int32_t *cnt, co
   return ok;
 }
 
-static int cmp_u64(const void *a, const void *b)
-{
-  const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-  return (x > y) - (x < y);
-}
-
 /* the routed experts of layer l for the run's n tokens: each distinct pick held (its read begun), then read once for
    the tokens that picked it (mm_group at every step: an entry an expert's part of up to MM_MAX_TOKENS of its rows,
    a token's sums its own whatever the others) - gate and up, their scales and the swiglu, down - and each token's
@@ -871,23 +814,25 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
     return false;
   for (uint32_t m = 0; P < E && m < P; m++) /* a decode's picks counted: in memory or not (the stats') */
     membrane_score(f->mem, (uint32_t)l * E + (uint32_t)f->hpick[m]);
-  /* the pairs by expert, then pair order (a counting sort): sorted row r is pair by[r] */
-  uint32_t *at = f->m_at, *by = f->m_by;
-  memset(at, 0, (E + 1) * sizeof *at);
+  /* the tables, one region sent in one copy, each table's place fixed by the step's most pairs: the entries' gate, up
+     and down pointers, counts, their slots' and rows' offsets (gate and up's x and y, down's); each slot's token and
+     sorted row (-1: a tile's padding); each pair's sorted row and weight, each sorted row's scales */
+  const uint64_t ecap = table_entries((uint64_t)f->max_tokens * K, E), scap = table_slots((uint64_t)f->max_tokens * K, E);
+  uint8_t *h = f->m_build; /* (cached: built here, then one copy into the pinned) */
+  const void **tg = (const void **)h, **tu = tg + ecap, **td = tu + ecap;
+  int32_t *cnt = (int32_t *)(td + ecap);
+  uint32_t *xg = (uint32_t *)(cnt + ecap), *yg = xg + ecap, *xd = yg + ecap, *yd = xd + ecap;
+  int32_t *gidx = (int32_t *)(yd + ecap), *hidx = gidx + scap, *row = hidx + scap;
+  float *a = (float *)(row + P), *sg = a + P, *su = sg + P;
+  /* the pairs by expert, then pair order (moe_route: sorted row r is pair by[r]), each slot's token and row */
+  MoeRoute rt = {f->m_by, (uint32_t *)row, f->m_run, f->m_run + E, f->m_run + 2 * E, f->m_run + 3 * E, gidx, hidx,
+                 f->m_at, 0, 0};
+  if (!moe_route(f->hpick, P, K, E, MM_TILE, &rt))
+    return ink2_fail(err, "inkling2: the router picked an expert the model does not have");
   for (uint32_t m = 0; m < P; m++)
-  {
-    if (f->hpick[m] < 0 || (uint32_t)f->hpick[m] >= E)
-      return ink2_fail(err, "inkling2: the router picked an expert the model does not have");
-    at[f->hpick[m] + 1]++;
     f->picks[(uint32_t)l * E + (uint32_t)f->hpick[m]]++;
-  }
-  for (uint32_t e = 0; e < E; e++)
-    at[e + 1] += at[e];
-  for (uint32_t m = 0; m < P; m++)
-    by[at[f->hpick[m]]++] = m;
-  for (uint32_t r = 0; r < P; r++) /* every distinct pick held first: the cold ones' reads under way together */
-    if ((r == 0 || f->hpick[by[r]] != f->hpick[by[r - 1]]) &&
-        !membrane_hold(f->mem, (uint32_t)l * E + (uint32_t)f->hpick[by[r]], err))
+  for (uint32_t j = 0; j < rt.runs; j++) /* every distinct pick held first: the cold ones' reads under way together */
+    if (!membrane_hold(f->mem, (uint32_t)l * E + rt.expert[j], err))
       return false;
   /* then the next layer's named: this layer's reads queued first, the stream's room theirs before the guess's */
   for (uint32_t m = 0; next && m < P; m++)
@@ -896,65 +841,33 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
       const uint32_t unit = (uint32_t)(l + 1) * E + (uint32_t)f->hgpick[m];
       membrane_ahead(f->mem, unit);
     }
-  /* the tables, one region sent in one copy, each table's place fixed by the step's most pairs: the entries' gate, up
-     and down pointers, counts, their slots' and rows' offsets (gate and up's x and y, down's); each slot's token and
-     sorted row (-1: a tile's padding); each pair's sorted row and weight, each sorted row's scales */
-  const uint64_t ecap = table_entries((uint64_t)f->max_tokens * K, E), scap = table_slots((uint64_t)f->max_tokens * K, E);
-  uint8_t *h = f->m_build; /* (cached: the sort pass reads it back; pinned host memory is the host's uncached) */
-  const void **tg = (const void **)h, **tu = tg + ecap, **td = tu + ecap;
-  int32_t *cnt = (int32_t *)(td + ecap);
-  uint32_t *xg = (uint32_t *)(cnt + ecap), *yg = xg + ecap, *xd = yg + ecap, *yd = xd + ecap;
-  int32_t *gidx = (int32_t *)(yd + ecap), *hidx = gidx + scap, *row = hidx + scap;
-  float *a = (float *)(row + P), *sg = a + P, *su = sg + P;
-  /* the entries in build order first (expert, then part), each keyed by its count, then that order */
-  uint64_t *key = f->m_key;
-  uint32_t ne = 0, slots = 0;
-  for (uint32_t r = 0; r < P;)
+  /* each run's expert in memory (its parts' addresses), its rows' scales; the entries by count (moe_entries: group's
+     runs of the same column tiles contiguous, each count's in build order) */
+  for (uint32_t j = 0; j < rt.runs; j++)
   {
-    const uint32_t e = (uint32_t)f->hpick[by[r]], unit = (uint32_t)l * E + e;
-    uint32_t end = r;
-    while (end < P && (uint32_t)f->hpick[by[end]] == e)
-      end++;
-    const void *ex[POOL_PARTS];
+    const uint32_t e = rt.expert[j], unit = (uint32_t)l * E + e;
     const double wt = pf_on() ? pf_now() : 0;
-    if (!membrane_wait(f->mem, unit, ex, err))
+    if (!membrane_wait(f->mem, unit, f->m_ex[j], err))
       return false;
     if (pf_on())
       g_step[PF_WAIT] += pf_now() - wt;
-    for (uint32_t q = r; q < end; q += MM_MAX_TOKENS, ne++)
+    for (uint32_t q = rt.start[j]; q < rt.start[j] + rt.count[j]; q++)
     {
-      const uint32_t c = end - q < MM_MAX_TOKENS ? end - q : MM_MAX_TOKENS, s0 = slots + (q - r);
-      tg[ne] = ex[0], tu[ne] = ex[1], td[ne] = ex[2], cnt[ne] = (int32_t)c;
-      xg[ne] = s0 * C, yg[ne] = q * F, xd[ne] = s0 * F, yd[ne] = q * C;
-      key[ne] = (uint64_t)c << 32 | ne;
-    }
-    for (uint32_t q = r; q < end; q++)
-    {
-      const uint32_t m = by[q], s = slots + (q - r);
-      gidx[s] = (int32_t)(m / K), hidx[s] = (int32_t)q, row[m] = (int32_t)q;
+      const uint32_t m = rt.by[q];
       sg[q] = d->scale[0][e], su[q] = d->scale[1][e], a[m] = hw[m] * d->scale[2][e];
     }
-    const uint32_t padded = (end - r + MM_TILE - 1) / MM_TILE * MM_TILE;
-    for (uint32_t s = slots + (end - r); s < slots + padded; s++)
-      gidx[s] = hidx[s] = -1;
-    slots += padded, r = end;
   }
-  /* the entries by count (group's runs of the same column tiles contiguous), each count's in build order */
-  qsort(key, ne, sizeof *key, cmp_u64);
+  uint32_t ne = 0;
+  if (!moe_entries(&rt, MM_MAX_TOKENS, f->m_ent, f->m_key, &ne))
+    return ink2_fail(err, "inkling2: the experts' entries refused");
+  for (uint32_t k = 0; k < ne; k++)
   {
-    const void **pt = (const void **)f->m_host; /* (staging: the region is copied over it after) */
-    uint32_t *pu = (uint32_t *)(pt + 3 * ne);
-    for (uint32_t k = 0; k < ne; k++)
-    {
-      const uint32_t i = (uint32_t)key[k];
-      pt[k] = tg[i], pt[ne + k] = tu[i], pt[2 * ne + k] = td[i];
-      pu[k] = (uint32_t)cnt[i], pu[ne + k] = xg[i], pu[2 * ne + k] = yg[i], pu[3 * ne + k] = xd[i],
-      pu[4 * ne + k] = yd[i];
-    }
-    for (uint32_t k = 0; k < ne; k++)
-      tg[k] = pt[k], tu[k] = pt[ne + k], td[k] = pt[2 * ne + k], cnt[k] = (int32_t)pu[k], xg[k] = pu[ne + k],
-      yg[k] = pu[2 * ne + k], xd[k] = pu[3 * ne + k], yd[k] = pu[4 * ne + k];
+    const MoeEntry *en = &f->m_ent[k];
+    const uint32_t s0 = rt.slot0[en->run] + en->off, q = rt.start[en->run] + en->off;
+    tg[k] = f->m_ex[en->run][0], tu[k] = f->m_ex[en->run][1], td[k] = f->m_ex[en->run][2], cnt[k] = (int32_t)en->cnt;
+    xg[k] = s0 * C, yg[k] = q * F, xd[k] = s0 * F, yd[k] = q * C;
   }
+  const uint32_t slots = rt.slots;
   const uint64_t bytes = (uint64_t)((uint8_t *)(su + P) - h);
   uint8_t *dv = f->m_dev;
   const void **dg = (const void **)dv, **du = dg + ecap, **dd = du + ecap;

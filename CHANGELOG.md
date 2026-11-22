@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.13.0]: every MoE family through the one membrane, every pack sized to the machine
+
+A consolidation: what each family did its own way is one module each, and every expert path goes through the
+membrane. Every model's output is 0.12.3's bit for bit (Small's logits hashes still 0.11.3's; Hy4-flash's, Qwen3.8's,
+DeepSeek's and Mini's hashed against 0.12.3's runs), at every budget.
+
+- **Hy4-flash and Qwen3.8 stream.** Both held every weight resident and refused a budget; their experts are now the
+  membrane's, sized to the machine and streamed from the SSD past what fits. Their smallest builds: Hy4-flash 17 GiB
+  (was ~98), Qwen3.8 40 GiB (was ~95). Resident they are as fast as before; on less memory, slower (Hy4-flash at 60 GiB
+  ~10 tok/s decode, at 40 GiB ~8, against 15.8 resident, low-power). Qwen's NPU share needs every expert resident and
+  says so.
+- **Every pack runs on a smaller machine.** Each engine sizes itself (osmos-serve's `--budget auto`, 8 GB of RAM kept
+  free); the installer's per-pack need is now its engine's smallest build: inkling-2-mini 10 GiB, hy4-flash 17,
+  osmos-evo-inkling 21, qwen38-ud-iq3_xxs 40, the DeepSeek packs 7-8, osmos1.7b 7 (a conversation's cache on top).
+- **One of each, not three:** the routing tables a step's picks make (`osmos/model/moe_route.h`: DeepSeek, Inkling
+  and Hy4-flash had their own), the experts' membrane sized to a budget (`osmos/mem/experts.h`: three constructions
+  and their sizing), and the expert tensors cut into its units (`osmos/model/expert_units.h`). Inkling-2-Mini's
+  all-resident build holds ~1 GB less pinned host memory it never read through (21.5 GiB, was 22.5).
+- **Tests size themselves to the machine** they run on, as the engine does (`tests/gpu/test_fit.h`), never a 128 GB
+  box's fixed budget; a run leaves the 8 GB the engine keeps free.
+
 ## [0.12.3]: faster prompts and decode for Hy4-flash, Inkling-2-Small and Inkling-2-Mini, every bit the same
 
 A performance pass on three models: each change does less work a token or fewer launches, and every model's output

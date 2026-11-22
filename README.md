@@ -5,11 +5,12 @@ An inference engine for five mixture-of-experts models, and one small long-conte
 
 - **DeepSeek-V4.1-Flash** (~768B parameters, ~250 GB quantized), more than fits in memory: the experts it needs are
   streamed from the SSD as it runs.
-- **Qwen3.8-Flash-Next** (~177B, 512 experts, the Qwen4 architecture's preview), fully resident in GPU memory.
+- **Qwen3.8-Flash-Next** (~177B, 512 experts, the Qwen4 architecture's preview), resident in GPU memory on this
+  machine (on less, its experts streamed from the SSD).
 - **Inkling-2-Small** (Thinking Machines; 384 experts a layer, a 158 GB pack), its experts streamed from the SSD beside
   the ~84 GB osmos keeps in memory, drafted by its own multi-token-prediction head.
-- **Hy4-flash** (Tencent; 220B, ~11B active a token, AngelSlim's Q3_K), its backbone in GPU memory and its 63 GB
-  Engram table read from the SSD, drafted by the release's own DFly2, to a 1M context.
+- **Hy4-flash** (Tencent; 220B, ~11B active a token, AngelSlim's Q3_K), its backbone in GPU memory (on less, its
+  experts streamed) and its 63 GB Engram table read from the SSD, drafted by the release's own DFly2, to a 1M context.
 - **Inkling-2-Mini** (Thinking Machines; 26B, its middle layers looped three times a token), the release's own
   NVFP4 / MXFP8 / BF16 weights - 19.6 GB, all of it in GPU memory - drafted by its own head, to a 1M context:
   prompts at ~1,000 tokens a second.
@@ -347,7 +348,7 @@ no-drafter speed here, and its DeepSeek engine is not shipped for Strix Halo on 
 - **Engram** rows (about 7 KB a token) are read from their file at each step.
 - **DSpark** drafts up to 5 tokens a round, and one batched forward checks them.
 
-**Qwen** is fully resident:
+**Qwen** is resident where the machine has the room (on less, its experts streamed through the membrane):
 - **Matmuls** run on the matrix cores, with f16 activations and F32 sums at every batch size, so a token's bits don't
   depend on its batch.
 - **The cache** is Q8_0: 6.8 GB for 512K tokens.
@@ -366,11 +367,12 @@ no-drafter speed here, and its DeepSeek engine is not shipped for Strix Halo on 
 - A Ryzen AI MAX+ 395 (gfx1151), and Linux with ROCm 7.x (developed on HIP 7.15, kernel 7.2, gcc 14). The optional
   CPU lane needs AVX-512 VNNI and VBMI.
 - GPU memory: every number here is from a 128 GB machine with its GPU memory raised to ~113 GiB (`options ttm
-  pages_limit=29637704` in `/etc/modprobe.d/ttm.conf`; a system setting, so it's yours to make). Less runs: each pack
-  needs what its engine builds before a conversation (measured: osmos1.7b and osmos-evo-1017 ~7 GiB, ud-iq1_m ~8,
-  osmos-evo-inkling ~21, inkling-2-mini ~23, qwen38-ud-iq3_xxs ~95, hy4-flash ~98), a conversation's cache on top
-  (inkling-2-mini: ~17 GiB at 1M tokens); past that the engine holds fewer experts and is slower. The installer checks
-  a pack's own need, and the measured machine's for a pack not measured.
+  pages_limit=29637704` in `/etc/modprobe.d/ttm.conf`; a system setting, so it's yours to make). Less runs: every
+  engine sizes itself to the machine (osmos-serve's `--budget auto`, 8 GB of RAM kept free), the experts it cannot hold
+  streamed from the SSD - slower. A pack starts in its engine's smallest build (measured: osmos1.7b and osmos-evo-1017
+  ~7 GiB, ud-iq1_m ~8, inkling-2-mini ~10, hy4-flash ~17, osmos-evo-inkling ~21, qwen38-ud-iq3_xxs ~40), a
+  conversation's cache on top (inkling-2-mini: ~17 GiB at 1M tokens). The installer checks a pack's own need, and the
+  measured machine's for a pack not measured.
 - The model on an NVMe SSD, on a filesystem that takes `O_DIRECT` reads (ext4, btrfs and xfs do; osmos refuses one that
   doesn't, and names it). The faster the SSD's random reads, the faster DeepSeek decodes. The numbers here are from a
   Micron 4600 on a PCIe 4.0 x4 link ("The machine", above).

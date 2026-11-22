@@ -9,6 +9,7 @@
 
 #include "osmos/run/fit.h"
 #include "forward_impl.h"
+#include "osmos/mem/experts.h"
 #include "osmos/mem/arena.h"
 #include "osmos/mem/hip_slots.h"
 #include "osmos/gpu/kvfmt.h"
@@ -160,28 +161,6 @@ static size_t choose(Forward *f, int32_t *rix, const PoolUnit *ex, PoolUnit *res
   return n;
 }
 
-/* the stream's room: two layers' experts not warm at load (the one the GPU is in, the next one's reads) - and never
-   under a whole layer's. the membrane's room is shared by every layer, so decode misses on some layers evict another's
-   stale units (pool.c's furthest): its cold set grows past the load's, and a prompt step (passing) holds every cold
-   pick of a layer in the stream at once - under the whole layer, "an expert the pool cannot hold" (Inkling's rule,
-   ink2/hip_forward.c). each unit at its size in the pool: pool_unit_bytes at the arena's grain, its reads' padding */
-static uint64_t stream_budget(const Forward *f, const int32_t *rix, const PoolUnit *ex)
-{
-  const uint32_t E = (uint32_t)f->g->n_experts;
-  uint64_t most = 0, whole = 0;
-  for (int l = 0; l < f->n_layers; l++)
-  {
-    uint64_t layer = 0, cold = 0;
-    for (uint32_t e = 0; e < E; e++)
-    {
-      const uint64_t b = pool_unit_bytes(&ex[l * E + e], ARENA_GRAIN);
-      layer += b, cold += rix[l * E + e] < 0 ? b : 0;
-    }
-    most = cold > most ? cold : most, whole = layer > whole ? layer : whole;
-  }
-  return 2 * most > whole ? 2 * most : whole;
-}
-
 /* a resident Q5_K matrix the matmuls read (all but the embedding's rows, which ops_embed reads a token at a time):
    repacked at load (quant_repack_q5k), its unit the file's bytes and room after them for the larger layout */
 static bool repacks(const Weights *w, const GgufTensor *t, uint32_t *rows, uint32_t *cols)
@@ -279,29 +258,40 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   char perr[POOL_ERR] = "";
   if (!n_res || (n_warm && !warm))
     ok = n_res ? fwd_fail(err, "out of memory") : false;
-  uint64_t stream_room = 0;
+  /* the stream's room (experts_stream_room: two layers' experts not warm at load, never under a whole layer's - the
+     membrane's room is shared by every layer, so decode misses evict another layer's stale units and a prompt step
+     holds every cold pick of a layer in the stream at once) */
+  ExpertsPlan plan = {0};
   if (ok)
   {
-    stream_room = stream_budget(f, rix, all), f->pool_room = 0;
-    for (uint32_t i = 0; i < f->n_expert_units; i++)
-      if (rix[i] >= 0)
-        warm[(size_t)rix[i] - n_t] = i, f->pool_room += pool_unit_bytes(&all[i], ARENA_GRAIN);
+    bool *hot = calloc(f->n_expert_units, 1);
+    ok = hot != NULL;
+    for (uint32_t i = 0; ok && i < f->n_expert_units; i++)
+    {
+      const uint64_t b = pool_unit_bytes(&all[i], ARENA_GRAIN);
+      plan.all += b;
+      if ((hot[i] = rix[i] >= 0))
+        warm[(size_t)rix[i] - n_t] = i, plan.room += b;
+    }
+    if (ok) /* (the slots' slack the pool's own layout's largest: each part's read range and two grains) */
+      plan.stream_room = experts_stream_room(all, (uint32_t)f->n_layers, E, hot, ARENA_GRAIN), plan.n_warm = n_warm,
+      plan.largest = largest_unit(f, all);
+    free(hot);
+    f->pool_room = plan.room;
   }
   free(rix);
   if (!ok)
     ;
   else if (!(f->res = resident_create(res, n_t, hip_slots(), FWD_FETCH_THREADS, perr)))
     ok = fwd_fail(err, perr);
-  else if (!direct_units(f, all) || !f->pool_room ||
-           !(f->hs = host_slots_create(f->pool_room + 2 * largest_unit(f, all), perr)) ||
-           !(f->hs_stream = host_slots_create(stream_room + 2 * largest_unit(f, all), perr)))
-    ok = fwd_fail(err, perr[0] ? perr : "out of memory (the pools' units), or a budget with no experts");
+  else if (!direct_units(f, all) || !f->pool_room)
+    ok = fwd_fail(err, "out of memory (the pools' units), or a budget with no experts");
   else /* the budget's experts its warm start: read at the first step (membrane_warm), not here - fit.h's builds */
   {
-    const MembraneOptions mo = {all,       (uint32_t)f->n_layers,    E,           f->pool_room,      stream_room,
-                                host_slots(f->hs), host_slots(f->hs_stream), ARENA_GRAIN, FWD_FETCH_THREADS, warm,
-                                n_warm,    copy_on_stream,           NULL,        f->ahead_limit};
-    ok = (f->mem = membrane_create(&mo, err)) != NULL;
+    Experts ex;
+    ok = experts_create(all, (uint32_t)f->n_layers, E, warm, &plan, ARENA_GRAIN, FWD_FETCH_THREADS, copy_on_stream,
+                        NULL, f->ahead_limit, false, &ex, err);
+    f->mem = ex.mem, f->hs = ex.slots, f->hs_stream = ex.stream;
   }
   free(warm);
   for (size_t i = 0; ok && i < n_t; i++)
@@ -508,6 +498,8 @@ static bool scratch(Forward *f)
          hipHostMalloc((void **)&f->r_up, FWD_UP_BYTES(P), 0) == hipSuccess &&
          (f->m_by = malloc(P * 4)) && (f->m_row = malloc(P * 4)) && (f->m_base = malloc(P * 4)) &&
          (f->m_slot0 = malloc(P * 4)) &&
+         (f->m_gidx = malloc(FWD_MAX_SLOTS(P, g->n_experts) * 4)) &&
+         (f->m_hidx = malloc(FWD_MAX_SLOTS(P, g->n_experts) * 4)) &&
          hipHostMalloc((void **)&f->stage, NS * B * (uint64_t)(f->n_eg = n_eg ? n_eg : 1) * cols * row, 0) ==
              hipSuccess &&
          hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess && subs(f) &&
@@ -666,7 +658,7 @@ void forward_destroy(Forward *f)
   hipHostFree(f->r_ids);
   hipHostFree(f->r_guess);
   hipHostFree(f->r_up);
-  free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0);
+  free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0), free(f->m_gidx), free(f->m_hidx);
   free(f->picks), free(f->units);
   fwd_cpu_destroy(f);
   fwd_npu_destroy(f);

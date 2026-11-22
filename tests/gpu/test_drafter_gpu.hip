@@ -20,6 +20,7 @@ extern "C" {
 #include "osmos/run/forward.h"
 }
 #include "test_model.h"
+#include "test_fit.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -64,12 +65,17 @@ int main() {
   CHECK(w);
   V = (uint32_t) w->geo.n_vocab;
   lg.resize(V);
-  Forward* f = forward_create(w, w->geo.n_layers, 4096, kBudget, ferr);
-  CHECK(f);
+  Forward* f = nullptr;
+  Drafter* d = nullptr;
+  TestFit fit = {[&](uint64_t b) {  // (the forward and its drafter: everything the test holds)
+                   return (f = forward_create(w, w->geo.n_layers, 4096, b, ferr)) && (d = drafter_create(f, ddir.c_str(), ferr));
+                 },
+                 [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
+                 [&] { drafter_destroy(d), d = nullptr, forward_destroy(f), f = nullptr; }};
+  uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
+  if (!test_fit(fit, kBudget, &budget)) std::printf("  %s\n", ferr);
+  CHECK(f && d);
   CHECK(!drafter_create(f, "/nonexistent", ferr));
-  Drafter* d = drafter_create(f, ddir.c_str(), ferr);
-  if (!d) std::printf("  %s\n", ferr);
-  CHECK(d);
   const auto prompt = [&](Seq* s) {
     std::vector<Seq*> ss(kPrompt, s);
     const bool ok = forward_batch(f, ss.data(), ids.data(), kPrompt, ferr);

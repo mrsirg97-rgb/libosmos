@@ -22,6 +22,7 @@ extern "C" {
 #include "osmos/run/forward.h"
 }
 #include "test_model.h"
+#include "test_fit.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -150,11 +151,18 @@ int main() {
     CHECK(std::strcmp(fx.family, "deepseek41") == 0 && fx.vocab == (uint32_t) w->geo.n_vocab &&
           fx.round_tokens == (uint32_t) ((w->geo.n_experts - 1) / w->geo.n_used) &&
           fx.seed_window == (uint32_t) w->geo.window && fx.native_ctx > 0);
-    const ForwardOptions fo = {(int) w->geo.n_layers, kCtx, kBudget, nullptr, 0, true};
-    Forward* f = forward_create_with(w, &fo, ferr);
-    CHECK(f && forward_lane(f, 0, NULL, ferr));
-    Drafter* d = drafter_create(f, ddir.c_str(), ferr);
-    CHECK(d);
+    ForwardOptions fo = {(int) w->geo.n_layers, kCtx, kBudget, nullptr, 0, true};
+    Forward* f = nullptr;
+    Drafter* d = nullptr;
+    TestFit fit = {[&](uint64_t b) {  // (the forward, its lane and drafter: everything this part holds)
+                     fo.budget = b;
+                     return (f = forward_create_with(w, &fo, ferr)) && forward_lane(f, 0, NULL, ferr) &&
+                            (d = drafter_create(f, ddir.c_str(), ferr));
+                   },
+                   [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
+                   [&] { drafter_destroy(d), d = nullptr, forward_destroy(f), f = nullptr; }};
+    uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
+    CHECK(test_fit(fit, kBudget, &budget));
     Seq* s = seq_create(f, ferr);
     CHECK(s);
     std::vector<Seq*> ss(OSMOS_MAX_BLOCK + 1 > kPrompt ? OSMOS_MAX_BLOCK + 1 : kPrompt, s);
@@ -184,7 +192,7 @@ int main() {
   OsmosOptions o = {kCtx, 0, kBudget, nullptr, true, "/nonexistent-drafter", false, 0, false};
   CHECK(!osmos_create(m, &o, err) && err[0]);  // a drafter that is not there: refused, not built without
   o.drafter = ddir.c_str();
-  Osmos* e = osmos_create(m, &o, err);
+  Osmos* e = test_osmos(m, o, err);  // (the test's budget, or this machine's fill where it is smaller)
   if (!e) std::fprintf(stderr, "  %s\n", err);
   CHECK(e);
   CHECK(osmos_block(e) == DRAFTER_BLOCK && osmos_identity(e) != 0);
@@ -273,7 +281,7 @@ int main() {
 
   // no drafter: no block, and drafting refused
   o.drafter = nullptr;
-  e = osmos_create(m, &o, err);
+  e = test_osmos(m, o, err);
   CHECK(e && osmos_block(e) == 0);
   s = oseq_create(e, err);
   int32_t dr[OSMOS_MAX_BLOCK];

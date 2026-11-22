@@ -29,6 +29,7 @@ extern "C" {
 #include "osmos/run/forward.h"
 }
 #include "test_model.h"
+#include "test_fit.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -237,8 +238,13 @@ int main() {
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
-  Run r{forward_create(w, w->geo.n_layers, kCtx, kBudget, ferr), (size_t) w->geo.n_vocab, {}, {}};
-  CHECK(r.f);
+  Forward* f0 = nullptr;
+  TestFit fit = {[&](uint64_t b) { return (f0 = forward_create(w, w->geo.n_layers, kCtx, b, ferr)) != nullptr; },
+                 [&] { return forward_budget(f0); }, [&](uint64_t* r) { return forward_room(f0, r); },
+                 [&] { forward_destroy(f0), f0 = nullptr; }};
+  uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
+  CHECK(test_fit(fit, kBudget, &budget));
+  Run r{f0, (size_t) w->geo.n_vocab, {}, {}};
   for (int k = 0; k < kSeqs; k++)  // 4 windows of the real ids: different sequences, real text
     r.ids.push_back(std::vector<int32_t>(all.begin() + 5 * k, all.begin() + 5 * k + kLen));
   Seq* s0 = seq_create(r.f, ferr);

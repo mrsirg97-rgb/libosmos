@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "test_model.h"
+#include "test_fit.h"
 
 extern "C" {
 #include "osmos/model/gguf.h"
@@ -145,9 +146,12 @@ int main() {
   if (!w) std::printf("  weights_create: %s\n", werr);
   CHECK(w);
   const auto t0 = std::chrono::steady_clock::now();
-  Forward* f = forward_create(w, w->geo.n_layers, 4096, kBudget, ferr);
-  if (!f) std::printf("  forward_create: %s\n", ferr);
-  CHECK(f);
+  Forward* f = nullptr;
+  TestFit fit = {[&](uint64_t b) { return (f = forward_create(w, w->geo.n_layers, 4096, b, ferr)) != nullptr; },
+                 [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
+                 [&] { forward_destroy(f), f = nullptr; }};
+  uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
+  CHECK(test_fit(fit, kBudget, &budget));
   std::printf("  the forward made (the layers' weights pinned) in %.1f s\n",
               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
   const int L = w->geo.n_layers;
@@ -241,7 +245,7 @@ int main() {
   CHECK(picks == 3ull * T * L * w->geo.n_used);
   for (size_t i = 0; i < nu; i++) least[i] = most - forward_picks(f)[i];
   forward_destroy(f);
-  f = forward_create_ranked(w, L, 4096, kBudget, least.data(), ferr);
+  f = forward_create_ranked(w, L, 4096, budget, least.data(), ferr);
   if (!f) std::printf("  forward_create_ranked: %s\n", ferr);
   CHECK(f);
   std::vector<float> ranked((size_t) T * V);

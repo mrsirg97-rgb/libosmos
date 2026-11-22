@@ -41,6 +41,9 @@ bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[Q4X_F
   const Q4xGeometry *g = &f->w->geo;
   if (!dir || !(share > 0.0f && share < 1.0f))
     return q4x_fail(err, "q4x_forward_npu: a directory and a share in (0, 1)");
+  if (f->mem && !q4x_forward_whole(f)) /* its weights read in place: every expert's pages fixed */
+    return q4x_fail(err, "q4x_forward_npu: the experts streamed (a budget under every expert's) - the NPU reads every "
+                         "one in place");
   /* the kernels' shapes (fused_ds.py MODEL=qwen): 2560 -> 640 -> 2560 */
   if (g->n_embd != 2560 || g->ff_exp != 640)
     return q4x_fail(err, "q4x_forward_npu: the kernels are Qwen3.8-Flash-Next's (2560 -> 640 -> 2560)");

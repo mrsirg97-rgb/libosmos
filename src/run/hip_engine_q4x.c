@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "osmos/run/fit.h"
 #include "engine_impl.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/model/gguf.h"
@@ -35,6 +36,7 @@ typedef struct Eng
   Q4xMtp *mtp;   /* the MTP head, or NULL */
   Q4xDflash *df; /* DFlash2, or NULL */
   uint32_t vocab, n; /* a logits row; the last batch's rows (every one kept) */
+  uint64_t ram_kept; /* the system's RAM kept free (--fill, else FIT_RAM_FREE): the room's other bound */
 } Eng;
 
 static bool fail(char err[OSMOS_ERR], const char *what)
@@ -70,7 +72,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   /* a decode round's most tokens: below every expert's read (a step past it reads them all, as a prompt's) */
   *facts = (OsmosFacts){"qwen4exp", (uint32_t)geo->n_vocab,
                         ctx && ctx->type == GGUF_UINT32 ? (uint32_t)ctx->v.u : 0,
-                        (uint32_t)((geo->n_experts - 1) / geo->n_used), 0, false};
+                        (uint32_t)((geo->n_experts - 1) / geo->n_used), 0, true};
   facts->seed_window = facts->native_ctx; /* the MTP head's cache: every position seeded, as llama.cpp's process() */
   if (!facts->native_ctx)
     return fail(err, "qwen4exp.context_length: missing"), m_close(m), NULL;
@@ -92,11 +94,12 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess || o->kv_q8)
-    return fail(err, "qwen4exp: every weight resident - no budget, picks, no_guess or kv_q8"), NULL;
+  if (o->picks || o->no_guess || o->kv_q8)
+    return fail(err, "qwen4exp: no picks, no_guess or kv_q8"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;
+  e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->drafter && !(e->mg = gguf_create(o->drafter, err)))
     return e_destroy(e), NULL;
@@ -104,7 +107,10 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   const bool dflash = arch && arch->type == GGUF_STRING && !strcmp(arch->v.s, "dflash2");
   if (e->mg && (dflash ? !(e->df = q4x_dflash_create(e->mg, m->w, err)) : !(e->mtp = q4x_mtp_create(e->mg, m->w, err))))
     return e_destroy(e), NULL;
-  const Q4xOptions qo = {o->max_ctx, o->max_tokens ? o->max_tokens : o->max_ctx, o->stream_ngram, NULL, 0, e->df};
+  /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Q4xOptions' 0, every
+     expert resident) */
+  const Q4xOptions qo = {o->max_ctx, o->max_tokens ? o->max_tokens : o->max_ctx, o->stream_ngram, NULL, 0, e->df,
+                         o->budget ? o->budget : 1};
   if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)) ||
       (o->npu && !q4x_forward_npu(e->f, o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_QWEN, err)))
     return e_destroy(e), NULL;
@@ -113,13 +119,18 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 
 static uint64_t e_identity(const void *p) { return q4x_identity(((const Eng *)p)->f); }
 
+/* the room a build left: the GPU's free memory, or the RAM past ram_kept - the experts' pinned host slots in RAM, not
+   in the GPU's free count (Inkling's, DeepSeek's) */
 static bool e_room(const void *p, uint64_t *bytes)
 {
-  (void)p;
-  return osmos_gpu_room(bytes);
+  uint64_t free_b = 0;
+  if (!osmos_gpu_room(&free_b))
+    return false;
+  *bytes = fit_room(free_b, fit_ram_available(), ((const Eng *)p)->ram_kept);
+  return true;
 }
 
-static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
+static void e_stats(const void *p, OsmosStats *s) { s->budget = q4x_forward_bytes(((const Eng *)p)->f); }
 
 /* the batch's sequences one step (each one's consecutive tokens a run, at their rows), Q4X_MAX_RUNS at a time; a
    sequence met again after another's refused */

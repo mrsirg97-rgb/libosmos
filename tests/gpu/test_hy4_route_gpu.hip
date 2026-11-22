@@ -1,7 +1,8 @@
 // hy4_route (osmos/gpu/hy4_ops.h): a decode's expert tables built on the GPU, against the host's grouping (the step's
 // until now: experts ascending, an expert's tokens ascending, its rows in chunks): random picks (each token's k
 // distinct) at Hy4-flash's shape (512 experts, 16 picks) and others, every table bit for bit, the padding count 0 to
-// n_tok x k; a pick out of range or twice in a token faults; shapes it does not take refused.
+// n_tok x k; the experts' matrices from a table of their addresses (the membrane's); a pick out of range or twice in
+// a token faults; shapes it does not take refused.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -92,8 +93,14 @@ static void check(std::mt19937& rng, uint32_t n, uint32_t k, uint32_t E, uint32_
   CHECK(hipMemset(fault, 0, 4) == hipSuccess);
   CHECK(hipMemcpy(d_idx, idx.data(), nk * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(d_w, w.data(), nk * 4, hipMemcpyHostToDevice) == hipSuccess);
-  const void* b[3] = {(const void*) base[0], (const void*) base[1], (const void*) base[2]};
-  CHECK(hy4_route(d_idx, d_w, n, k, E, chunk, b, bytes, gidx, sidx, wsel, cnt, xrow, wptr, fault, nullptr));
+  // the experts' addresses as the membrane holds them: a table [gate, up, down][expert] (here each tensor's base and
+  // an expert's stride: the host's tables' pointers)
+  std::vector<const void*> tab_h(3 * (size_t) E);
+  for (int q = 0; q < 3; q++)
+    for (uint32_t e = 0; e < E; e++) tab_h[(size_t) q * E + e] = (const void*) (base[q] + (uint64_t) e * bytes[q]);
+  const void** tab = dev<const void*>(3 * (size_t) E);
+  CHECK(hipMemcpy(tab, tab_h.data(), tab_h.size() * sizeof(void*), hipMemcpyHostToDevice) == hipSuccess);
+  CHECK(hy4_route(d_idx, d_w, n, k, E, chunk, tab, gidx, sidx, wsel, cnt, xrow, wptr, fault, nullptr));
   CHECK(hipDeviceSynchronize() == hipSuccess);
   const int32_t f = down(fault, 1)[0];
   if (fault_kind) {
@@ -113,7 +120,7 @@ static void check(std::mt19937& rng, uint32_t n, uint32_t k, uint32_t E, uint32_
       }
   }
   for (void* p : {(void*) d_idx, (void*) gidx, (void*) sidx, (void*) cnt, (void*) xrow, (void*) fault, (void*) d_w,
-                  (void*) wsel, (void*) wptr})
+                  (void*) wsel, (void*) wptr, (void*) tab})
     CHECK(hipFree(p) == hipSuccess);
 }
 
@@ -123,14 +130,13 @@ int main() {
     std::printf("[test_hy4_route_gpu] skipped: no GPU\n");
     return 77;
   }
-  const void* b[3] = {nullptr, nullptr, nullptr};
-  const uint64_t by[3] = {1, 1, 1};
+  const void** t = nullptr;
   int32_t* p = nullptr;
-  CHECK(!hy4_route(p, nullptr, 1, 0, 512, 4, b, by, p, p, nullptr, p, p, nullptr, p, nullptr));
-  CHECK(!hy4_route(p, nullptr, 1, HY4_ROUTE_MAX_K + 1, 512, 4, b, by, p, p, nullptr, p, p, nullptr, p, nullptr));
-  CHECK(!hy4_route(p, nullptr, 1, 16, HY4_ROUTE_MAX_EXPERTS + 1, 4, b, by, p, p, nullptr, p, p, nullptr, p, nullptr));
-  CHECK(!hy4_route(p, nullptr, 1, 16, 512, 0, b, by, p, p, nullptr, p, p, nullptr, p, nullptr));
-  CHECK(!hy4_route(p, nullptr, 0, 16, 512, 4, b, by, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!hy4_route(p, nullptr, 1, 0, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!hy4_route(p, nullptr, 1, HY4_ROUTE_MAX_K + 1, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!hy4_route(p, nullptr, 1, 16, HY4_ROUTE_MAX_EXPERTS + 1, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!hy4_route(p, nullptr, 1, 16, 512, 0, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!hy4_route(p, nullptr, 0, 16, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
   std::mt19937 rng(20261118);
   uint32_t cases = 0;
   for (uint32_t n : {1u, 2u, 3u, 9u, 64u, 65u, 300u, 2600u})

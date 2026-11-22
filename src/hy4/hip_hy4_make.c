@@ -1,3 +1,6 @@
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <fcntl.h>
 /* the hy4 forward made (osmos/hy4/forward.h): the model's tensors read into GPU memory but the Engram table (its rows
    read a step at a time) and the drafter's layers, iHC's mixes as F32, the ropes' tables, a step's buffers - and
    unmade */
@@ -15,6 +18,9 @@
 #include "osmos/gpu/quant.h"
 #include "osmos/gpu/bufs.h"
 #include "osmos/gpu/upload.h"
+#include "osmos/mem/arena.h"
+#include "osmos/mem/host_slots.h"
+#include "osmos/model/expert_units.h"
 #include "osmos/model/fnv.h"
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
@@ -39,7 +45,86 @@ static bool resident(const Hy4Weights *w, const GgufTensor *t)
   return !(strncmp(t->name, "blk.", 4) == 0 && atoi(t->name + 4) >= w->geo.n_layers); /* the drafter's: not ours */
 }
 
-static bool not_resident(const GgufTensor *t, void *arg) { return !resident(((const Hy4Forward *)arg)->w, t); }
+/* a MoE layer's routed experts: the membrane's (experts()), not the upload's */
+static bool routed_expert(const Hy4Weights *w, const GgufTensor *t)
+{
+  for (int l = w->geo.n_dense; l < w->geo.n_layers; l++)
+    if (t == w->layer[l].exp_gate || t == w->layer[l].exp_up || t == w->layer[l].exp_down)
+      return true;
+  return false;
+}
+
+static bool not_resident(const GgufTensor *t, void *arg)
+{
+  const Hy4Weights *w = ((const Hy4Forward *)arg)->w;
+  return !resident(w, t) || routed_expert(w, t);
+}
+
+/* a promotion's copy, the stream's slot to the pool's (both pinned host memory the GPU reads in place) */
+static bool copy_host(void *dst, const void *src, uint64_t bytes, void *ctx)
+{
+  (void)ctx;
+  memcpy(dst, src, bytes);
+  return true;
+}
+
+/* the routed experts behind the membrane: the MoE layers' units (expert_units), the warm set an expert of every layer
+   at a time, sized to the budget (experts_plan: 0 every one), read in (experts_create); every one resident: their
+   addresses' device table for the decode's GPU tables (hy4_route) */
+static bool experts(Hy4Forward *f, uint64_t budget, char *err)
+{
+  const Hy4Weights *w = f->w;
+  const Gguf *m = w->model;
+  const uint32_t E = (uint32_t)w->geo.n_experts, D0 = (uint32_t)w->geo.n_dense, ML = (uint32_t)w->geo.n_layers - D0;
+  if (!ML)
+    return true;
+  ExpertTensors t[HY4_MAX_LAYERS];
+  for (uint32_t l = 0; l < ML; l++)
+  {
+    const Hy4Layer *L = &w->layer[D0 + l];
+    t[l] = (ExpertTensors){L->exp_gate, L->exp_up, L->exp_down, false};
+  }
+  const size_t n = (size_t)ML * E;
+  PoolUnit *units = calloc(n, sizeof *units);
+  uint32_t *order = malloc(n * sizeof *order);
+  bool ok = units && order && (f->xfds = malloc((size_t)m->n_files * sizeof *f->xfds));
+  for (int i = 0; ok && i < m->n_files; i++)
+    f->xfds[i] = -1;
+  for (int i = 0; ok && i < m->n_files; i++)
+    ok = (f->xfds[i] = open(m->paths[i], O_RDONLY | O_DIRECT)) >= 0;
+  ok = (ok && expert_units(t, ML, E, f->xfds, units, n) == n) ||
+       hy4_fail(err, "out of memory, a model file not opened O_DIRECT, or the experts not n_experts equal slices");
+  for (size_t u = 0; ok && u < n; u++) /* expert 0 of every layer, then 1, ... */
+    order[u] = (uint32_t)((u % ML) * E + u / ML);
+  ExpertsPlan plan;
+  char merr[MEMBRANE_ERR] = "";
+  ok = ok && (experts_plan(units, ML, E, order, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan) ||
+              hy4_fail(err, "the experts' plan refused"));
+  ok = ok && (experts_create(units, ML, E, order, &plan, ARENA_GRAIN, HY4_EXPERT_READERS, copy_host, NULL, 0, true,
+                             &f->ex, merr) ||
+              hy4_fail(err, merr[0] ? merr : "the experts' membrane refused"));
+  if (ok)
+    f->pinned_bytes = host_slots_bytes(f->ex.slots) + host_slots_bytes(f->ex.stream);
+  if (ok && (f->whole = membrane_whole(f->ex.mem)))
+  {
+    const void **tab = malloc(n * 3 * sizeof *tab);
+    ok = tab != NULL;
+    for (size_t u = 0; ok && u < n; u++)
+    {
+      const void *dev[POOL_PARTS];
+      ok = membrane_ready(f->ex.mem, (uint32_t)u, dev);
+      for (int k = 0; ok && k < 3; k++)
+        tab[((u / E) * 3 + (size_t)k) * E + u % E] = dev[k];
+    }
+    ok = (ok && hy4_alloc(&f->exp_tab, n * 3 * sizeof *tab) &&
+          hipMemcpy(f->exp_tab, tab, n * 3 * sizeof *tab, hipMemcpyHostToDevice) == hipSuccess) ||
+         hy4_fail(err, "the experts' address table not made");
+    f->h_tab = tab;
+  }
+  ok = ok && ((f->h_ex = malloc(E * sizeof *f->h_ex)) || hy4_fail(err, "out of memory"));
+  free(units), free(order);
+  return ok;
+}
 
 static bool upload(Hy4Forward *f, char *err)
 {
@@ -177,6 +262,12 @@ void hy4_forward_destroy(Hy4Forward *f)
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   hy4_dfly_free(f);
+  experts_destroy(&f->ex); /* its readers stopped, then its memory */
+  for (int i = 0; f->xfds && i < f->w->model->n_files; i++)
+    if (f->xfds[i] >= 0)
+      close(f->xfds[i]);
+  free(f->xfds);
+  hipFree((void *)f->exp_tab), free((void *)f->h_tab), free(f->h_ex);
   hipFree(f->head8);
   hipFree(f->kb_tab), hipFree(f->vb_tab), hipFree(f->kb_xo), hipFree(f->kb_yo), hipFree(f->vb_xo), hipFree(f->vb_yo);
   hipFree(f->hcnt);
@@ -198,7 +289,7 @@ void hy4_forward_destroy(Hy4Forward *f)
   free(f->eg_off), free(f->slot), free(f->h_idx), free(f->h_gidx), free(f->h_sidx);
   free(f->h_w), free(f->h_wsel);
   free(f->h_rx), free(f->h_ry), free(f->h_rxd), free(f->h_ryd), free(f->h_rcnt), free(f->h_rw), free(f->rkey);
-  free(f->h_rgidx), free(f->h_rhidx), free(f->h_stage), free(f->h_estart), free(f->h_rexp);
+  free(f->h_rgidx), free(f->h_rhidx), free(f->h_stage), free(f->h_estart), free(f->h_by), free(f->h_run), free(f->h_ent);
   free(f);
 }
 
@@ -243,6 +334,9 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
     return hy4_fail(err, "no weights, files or options, or a step past the context"), NULL;
   if (w->geo.engram_ngram - 1 > HY4_STATE_HISTORY)
     return hy4_fail(err, "an n-gram longer than a saved state's history keeps"), NULL;
+  size_t free0 = 0, total0 = 0;
+  if (hipMemGetInfo(&free0, &total0) != hipSuccess)
+    return hy4_fail(err, "the GPU's free memory not read"), NULL;
   Hy4Forward *f = calloc(1, sizeof *f);
   if (!f)
     return hy4_fail(err, "out of memory"), NULL;
@@ -326,7 +420,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
        (f->h_rw = malloc(3 * ecap * sizeof(void *))) && (f->rkey = malloc(ecap * 8)) &&
        (f->h_rgidx = malloc(scap * 4)) && (f->h_rhidx = malloc(scap * 4)) &&
        (f->h_stage = malloc(3 * ecap * sizeof(void *) + 5 * ecap * 4)) &&
-       (f->h_estart = malloc(((size_t)g->n_experts + 1) * 4)) && (f->h_rexp = malloc(ecap * 4));
+       (f->h_estart = malloc(((size_t)g->n_experts + 1) * 4)) && (f->h_run = malloc((size_t)g->n_experts * 16)) &&
+       (f->h_ent = malloc(ecap * sizeof *f->h_ent));
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = (as_f32(f, w->layer[l].hc_attn_fn, &f->fn_attn[l]) && as_f32(f, w->layer[l].hc_ffn_fn, &f->fn_ffn[l])) ||
          hy4_fail(err, "iHC's mixes not made F32");
@@ -341,12 +436,21 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
        hipHostMalloc((void **)&f->pin_pos, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&
        (f->h_idx = malloc(n * K * 4)) && (f->h_gidx = malloc(n * K * 4)) && (f->h_sidx = malloc(n * K * 4)) &&
+       (f->h_by = malloc(n * K * 4)) &&
        (f->h_w = malloc(n * K * F)) &&
        (f->h_wsel = malloc(n * K * F)) && hipDeviceSynchronize() == hipSuccess;
+  size_t free1 = 0, total1 = 0;
+  if (ok && hipMemGetInfo(&free1, &total1) == hipSuccess) /* the fixed part: what the build took before its experts */
+    f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
+  ok = ok && experts(f, o->budget ? o->budget : experts_fit_now(f->fixed_bytes), err); /* (0: this machine's room) */
   if (!ok)
     return hy4_forward_destroy(f), (err && !*err ? hy4_fail(err, "the forward not made") : false), NULL;
   return f;
 }
+
+uint64_t hy4_forward_bytes(const Hy4Forward *f) { return f ? f->fixed_bytes + f->pinned_bytes : 0; }
+
+bool hy4_forward_whole(const Hy4Forward *f) { return f && f->whole; }
 
 uint64_t hy4_identity(const Hy4Forward *f)
 {

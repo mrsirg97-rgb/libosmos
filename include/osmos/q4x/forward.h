@@ -35,6 +35,9 @@ typedef struct Q4xOptions
   const int32_t *tap_layers; /* layers whose output a step keeps (q4x_taps: a drafter's features), ascending */
   uint32_t n_taps;           /* how many (Q4X_MAX_TAPS at most); 0: none */
   const Q4xDflash *dflash;   /* a DFlash2 drafter (q4x_dflash_*), its taps the step's; NULL: none */
+  uint64_t budget;           /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
+                                through the membrane past it; 0 sized to this machine as it stands (experts_fit_now:
+                                every expert resident where there is room) */
 } Q4xOptions;
 
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
@@ -42,6 +45,8 @@ Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t 
 Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, const Q4xOptions *o, char err[Q4X_FWD_ERR]);
 void q4x_forward_destroy(Q4xForward *f);
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
+/* the build's bytes (its fixed part and its experts' pinned host slots) */
+uint64_t q4x_forward_bytes(const Q4xForward *f);
 bool q4x_forward_whole(const Q4xForward *f);
 void q4x_forward_side_spin(Q4xForward *f, uint32_t us);
 /* 0.7.0: the NPU beside the GPU (src/q4x/hip_npu.c): dir its kernels (npu_open's: iq3xxs/, iq2s/, iq4nl-down/), share

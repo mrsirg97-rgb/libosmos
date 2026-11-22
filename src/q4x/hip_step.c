@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "osmos/mem/membrane.h"
 #include "osmos/q4x/ple.h"
 #include "osmos/gpu/mm.h"
 #include "q4x_impl.h"
@@ -243,7 +244,11 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
                                hipMemcpyDeviceToDevice, NULL) != hipSuccess)
     return q4x_fail(err, "a GPU call failed (the MTP head's rows)");
   q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
-  if (!head(f, r, runs, n, row0) || !q4x_overflow_read(f) || hipStreamSynchronize(NULL) != hipSuccess)
+  const bool done = head(f, r, runs, n, row0) && q4x_overflow_read(f) && hipStreamSynchronize(NULL) == hipSuccess;
+  hipDeviceSynchronize();
+  if (f->mem)
+    membrane_end(f->mem); /* the step's holds ended (its experts' kernels done) */
+  if (!done)
     return q4x_fail(err, "a GPU call failed (the logits)");
   if (!q4x_overflow_ok(f, err))
     return false;
