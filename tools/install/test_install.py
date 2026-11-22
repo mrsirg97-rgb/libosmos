@@ -1463,6 +1463,33 @@ class Versions(unittest.TestCase):
             with self.assertRaises(versions.VersionError):  # nothing left to roll back
                 versions.rollback(rig_home, h, log=lambda m: None)
 
+    def test_upgrade_takes_the_versions_new_settings(self):  # 0.15.1: an upgrade froze the pack's old osmos.json
+        # alone, so a setting the new version's pack added (inkling-2-mini's temperature 1.0, 0.14.0) never reached a
+        # row installed before it - the frozen config takes each setting of the target's packs.json the pack's config
+        # has not, and keeps every key it has (a user's own temperature 0 stays 0)
+        with tempfile.TemporaryDirectory() as d:
+            h, rig_home, pack = self.layout(d)
+            self.fake_build(h, "0.9.2")
+            tgt = os.path.join(h, "0.9.2", "tools", "install")
+            os.makedirs(tgt)
+            with open(os.path.join(tgt, "packs.json"), "w") as f:
+                json.dump({"packs": {"p": {"settings": {"max_context": 1048576, "temperature": 1.0, "kv_q8": True}}}}, f)
+            versions.upgrade(rig_home, h, "0.9.2", log=lambda m: None)
+            with open(os.path.join(pack, "osmos.0.9.2.json")) as f:
+                got = json.load(f)
+            self.assertEqual((got["temperature"], got["kv_q8"]), (1.0, True))  # the new settings taken
+            self.assertEqual(got["max_context"], 4096)  # the pack's own value kept
+            with open(os.path.join(pack, "osmos.0.9.1.json")) as f:
+                self.assertNotIn("temperature", json.load(f))  # the version left: as it was
+            # a user's own value kept, and a target without packs.json (an older build) frozen as before
+            versions.rollback(rig_home, h, log=lambda m: None)
+            os.remove(os.path.join(pack, "osmos.0.9.2.json"))
+            with open(os.path.join(pack, "osmos.json"), "w") as f:
+                json.dump({"pack": "p", "model": "/m.gguf", "max_context": 4096, "temperature": 0}, f)
+            versions.upgrade(rig_home, h, "0.9.2", log=lambda m: None)
+            with open(os.path.join(pack, "osmos.0.9.2.json")) as f:
+                self.assertEqual(json.load(f)["temperature"], 0)
+
     def test_dry_run_writes_nothing(self):  # 0.12.2: --upgrade --dry-run built the version and moved the rows
         with tempfile.TemporaryDirectory() as d:
             h, rig_home, pack = self.layout(d)

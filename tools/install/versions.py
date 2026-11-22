@@ -106,16 +106,33 @@ def build(h, ver, repo, run=subprocess.run, log=print, dry=False):
     return at
 
 
-def freeze(cfg, ver, own=False):
+def settings_of(h, ver, pack):
+    """the settings version ver's own packs.json gives `pack` (an old id through its aliases), {} for a build without
+    one or a pack it does not know - the defaults its config is frozen with (freeze's `adds`)"""
+    p = os.path.join(h, ver, "tools", "install", "packs.json")
+    if not pack or not os.path.exists(p):
+        return {}
+    with open(p, encoding="utf-8") as f:
+        m = json.load(f)
+    pid = m.get("aliases", {}).get(pack, pack)
+    return dict(m.get("packs", {}).get(pid, {}).get("settings", {}))
+
+
+def freeze(cfg, ver, own=False, adds=None):
     """the pack's config for version ver: osmos.<ver>.json beside it - written once, from the shared osmos.json (or
     the frozen file given), never rewritten: a later installer's keys never reach a version that does not know them.
     own: ver the installer's own (--rig: its osmos.json this version's keys) - written again, so a --rig run again
-    with other options (--ctx, --abliterated, --npu) reaches the row (0.11.2: the first run's kept)"""
+    with other options (--ctx, --abliterated, --npu) reaches the row (0.11.2: the first run's kept). adds: the settings
+    ver's pack gives (settings_of), each taken where the config has not the key - every key it has kept (0.15.1: the
+    shared osmos.json is the installing release's, so a setting a later one added - inkling-2-mini's temperature 1.0,
+    osmos1.7b's preserve_thinking - never reached a row upgraded to it)"""
     d = os.path.dirname(cfg)
     out = os.path.join(d, f"osmos.{ver}.json")
     if own or not os.path.exists(out):
         with open(cfg, encoding="utf-8") as f:
             body = json.load(f)
+        for k, v in (adds or {}).items():
+            body.setdefault(k, v)
         tmp = out + ".osmos-tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(body, f, indent=2)
@@ -190,9 +207,11 @@ def upgrade(rig_home, h, ver, which=None, log=print, dry=False):
             continue
         shared = os.path.join(os.path.dirname(cfg), "osmos.json")
         src = shared if os.path.exists(shared) else cfg
-        fz = (lambda c, v: frozen(c, v)) if dry else freeze  # noqa: E731
+        fz = (lambda c, v, adds=None: frozen(c, v)) if dry else freeze  # noqa: E731
+        with open(src, encoding="utf-8") as f:
+            pack = json.load(f).get("pack")
         was = f"{d}/bin/osmos-api --config {fz(cfg, old)}{rest}"  # the row as it was, its config frozen
-        now = f"{api} --config {fz(src, ver)}{rest}"
+        now = f"{api} --config {fz(src, ver, adds=settings_of(h, ver, pack))}{rest}"  # the version's new settings in
         moves.append({"id": r["id"], "from": was, "to": now, "from_version": old})
         r["command"] = now
         log(f"  {r['id']}: {old} -> {ver}" + (" (a dry run: not moved)" if dry else ""))
