@@ -1016,9 +1016,11 @@ static bool controls3(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, cons
   for (int c = 0; c < 3 && *ok; c++)
     *ok = mm_x16(f->cgate3 + (uint64_t)c * MM_BATCH_TOKENS * G, G, n, G, bx16_at(f, 5 + c), f->overflow, NULL);
   *ok = *ok && mm_batch(ink2_type(gf[0]), G, pg, 6, n, NULL);
-  for (int c = 0; c < 3 && *ok; c++)
-    *ok = ink2_loop_ctrl(x[c], m + c * nC, f->cgain3 + (uint64_t)c * MM_BATCH_TOKENS * C,
-                         f->cforget3 + (uint64_t)c * MM_BATCH_TOKENS * C, nC, out + c * nC, NULL);
+  Ink2LoopCtrlPart lc[3];
+  for (int c = 0; c < 3; c++)
+    lc[c] = (Ink2LoopCtrlPart){x[c], m + c * nC, f->cgain3 + (uint64_t)c * MM_BATCH_TOKENS * C,
+                               f->cforget3 + (uint64_t)c * MM_BATCH_TOKENS * C, out + c * nC};
+  *ok = *ok && ink2_loop_ctrl_many(lc, 3, nC, NULL);
   return true;
 }
 
