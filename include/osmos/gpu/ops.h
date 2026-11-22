@@ -26,6 +26,15 @@ bool ops_rms_add_rms(float *h, float *y, const float *w_post, const float *w_nex
                      float *xn, void *stream);
 bool ops_rms_x16(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,
                  uint32_t y_stride, void *x16, int32_t *overflow, void *stream);
+/* Inkling's loop control then a norm in one launch: row t's values out = x - tanh(forget) x + tanh(gain) m
+   (ink2_loop_ctrl's expression; out may be x), then ops_rms_x16 of out - each part's bits; rows of n values */
+typedef struct OpsCtrl
+{
+  const float *x, *m, *gain, *forget;
+  float *out;
+} OpsCtrl;
+bool ops_rms_x16_ctrl(const OpsCtrl *c, uint32_t n, const float *w, float eps, uint32_t rows, float *y, uint32_t ys,
+                      void *x16, int32_t *overflow, void *stream);
 /* ops_rms_x16 into columns c0 .. c0 + n of an xts-wide x16 (two norms side by side, one matrix's input: Inkling's
    loop controls); c0 and n multiples of 16 */
 bool ops_rms_x16_at(const float *x, uint32_t n, uint32_t x_stride, const float *w, float eps, uint32_t rows, float *y,

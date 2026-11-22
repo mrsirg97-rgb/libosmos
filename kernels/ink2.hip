@@ -36,6 +36,16 @@ __global__ void loop_ctrl_kernel(const float* x, const float* m, const float* ga
   out[i] = (x[i] - tanhf(forget[i]) * x[i]) + tanhf(gain[i]) * m[i];
 }
 
+struct LoopCtrlParts {
+  Ink2LoopCtrlPart p[INK2_LOOP_CTRL_PARTS];
+};
+__global__ void loop_ctrl_many_kernel(LoopCtrlParts ps, uint64_t n) {  // part blockIdx.y: loop_ctrl_kernel's expression
+  const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
+  if (i >= n) return;
+  const Ink2LoopCtrlPart& p = ps.p[blockIdx.y];
+  p.out[i] = (p.x[i] - tanhf(p.forget[i]) * p.x[i]) + tanhf(p.gain[i]) * p.m[i];
+}
+
 __global__ void softcap_kernel(float* x, uint64_t n, float cap) {
   const uint64_t i = (uint64_t) blockIdx.x * kThreads + threadIdx.x;
   if (i < n) x[i] = cap * tanhf(x[i] / cap);
@@ -938,6 +948,18 @@ extern "C" bool ink2_loop_ctrl(const float* x, const float* m, const float* gain
                                float* out, void* stream) {
   if (!x || !m || !gain || !forget || !out || !n) return false;
   loop_ctrl_kernel<<<grid(n), kThreads, 0, st(stream)>>>(x, m, gain, forget, n, out);
+  return ok();
+}
+
+extern "C" bool ink2_loop_ctrl_many(const Ink2LoopCtrlPart* parts, uint32_t count, uint64_t n, void* stream) {
+  if (!parts || !count || count > INK2_LOOP_CTRL_PARTS || !n) return false;
+  LoopCtrlParts ps = {};
+  for (uint32_t c = 0; c < count; c++) {
+    const Ink2LoopCtrlPart& p = parts[c];
+    if (!p.x || !p.m || !p.gain || !p.forget || !p.out) return false;
+    ps.p[c] = p;
+  }
+  loop_ctrl_many_kernel<<<dim3(grid(n), count), kThreads, 0, st(stream)>>>(ps, n);
   return ok();
 }
 

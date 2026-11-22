@@ -46,7 +46,10 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
   uint64_t ok = dense, over = UINT64_MAX; /* the largest budget that left the headroom (or the floor), the smallest
                                             that did not or was refused */
   uint64_t last = built, last_room = room;
-  double cost = 1.0; /* GPU memory a byte of budget takes: measured from two builds, 1 until then */
+  /* GPU memory a byte of budget takes: measured from two builds, at least 1 - until then FIT_FIRST_COST, the most the
+     units' padding has been (the box's 6%, the 12% test_fit models), so the first step, the longest, lands short of
+     the target, not past it into the RAM kept free (at 1: 90 GiB over 6% padding went 5 GiB past) */
+  double cost = FIT_FIRST_COST;
   bool live = true;
   for (int i = 1; i < FIT_BUILDS; i++)
   {
@@ -69,8 +72,11 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
     }
     if (built != last && room != last_room)
     {
+      /* a byte of budget takes at least a byte of the room (both its bounds: the GPU's and the RAM's; the units'
+         padding past it): a measure under 1 is the room's own wobble (MemAvailable's), and a step over it would go
+         past the target by the wobble over the cost - the box's 98.99 -> 104.06 GiB, 2.79 GiB of RAM left (0.15.0) */
       const double c = ((double)last_room - (double)room) / ((double)built - (double)last);
-      cost = c > 0 ? c : cost; /* a nonsensical measure (the room the wrong way) keeps the last */
+      cost = c >= 1.0 ? c : 1.0;
     }
     last = built, last_room = room;
     if (room >= headroom)

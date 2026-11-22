@@ -23,6 +23,14 @@ bool ink2_moe_scales(const int32_t *ids, const float *w, const int32_t *where, c
    (gain and forget their matrices of the gate, pre-tanh); out may be x */
 bool ink2_loop_ctrl(const float *x, const float *m, const float *gain, const float *forget, uint64_t n, float *out,
                     void *stream);
+/* several controls of n values each in one launch (a decode's q, k and v): each part ink2_loop_ctrl's, its bits */
+#define INK2_LOOP_CTRL_PARTS 4
+typedef struct Ink2LoopCtrlPart
+{
+  const float *x, *m, *gain, *forget;
+  float *out;
+} Ink2LoopCtrlPart;
+bool ink2_loop_ctrl_many(const Ink2LoopCtrlPart *parts, uint32_t count, uint64_t n, void *stream);
 bool ink2_swiglu(const float *g, const float *u, uint32_t n, float gcap, float ucap, uint32_t n_tok, float *h,
                  void *stream);
 bool ink2_swiglu_rows(const float *g, const float *u, const float *sg, const float *su, uint32_t n, float gcap,

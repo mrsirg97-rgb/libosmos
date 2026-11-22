@@ -91,17 +91,77 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 | `hy4-flash` | 92 GB (~79 GiB in GPU memory) + 63 GB Engram table + 1.7 GB DFly2 drafter | 1M | Tencent's Hy4-flash: 220B, ~11B active a token, its own drafter - AngelSlim's Q3_K |
 | `inkling-2-mini` | 19.6 GB (all in GPU memory) + 0.4 GB drafter | 1M | Inkling-2-Mini as released: fast prompts, long contexts, the most room to spare |
 
-## osmos-evo-1017 in numbers
+## Speed
 
-The default DeepSeek pack, on one Strix Halo (osmos 0.9.0, the `performance` profile, nothing else running; greedy,
-the pack's 4,096-token steps; a warm room - see "Let your Strix breathe" below):
+osmos 0.15.0 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
+`osmos-api` with the pack's own `osmos.json` (its context, its drafter, its budget sized to the machine), a fresh
+process, a warm-up request, then each request alone; decode is the answer's own rate from the server's timings. Drafted
+and plain answers are the same tokens, bit for bit (their hashes compared); drafting moves only the speed.
+
+| Pack | Prompt, ~3K tokens | Decode, drafted: code / prose | Decode, plain |
+| --- | ---: | ---: | ---: |
+| `inkling-2-mini` | 1,018 tok/s | **45.7** / **42.2** tok/s | 28.8 tok/s |
+| `qwen38-ud-iq3_xxs` | 921 | **50.3** / **44.4** | 28.7 / 29.2 |
+| `osmos-evo-1017` | 385 | **28.4** / **24.1** | 18.8 / 19.3 |
+| `hy4-flash` | 412 | **23.3** / **20.4** | 17.4 / 17.4 |
+| `osmos-evo-inkling` | 339 | 13.7 / 13.7 | 12.3 / 13.0 |
+| `osmos1.7b` (no drafter) | **4,781** | | **126.3** / **126.2** |
+
+Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
+`inkling-2-mini` samples at its release's temperature 1.0 by default: the same code question at its default draws
+45.4 tok/s drafted (28.6 plain).
+
+**Maya's three bench questions** (a CSV parser, photosynthesis for a student, a bouncing-ball web page; 256 tokens,
+temperature 0, drafted / plain):
+
+| Pack | Code | Explanation | Web page | Plain |
+| --- | ---: | ---: | ---: | ---: |
+| `inkling-2-mini` | **57.5** | 36.9 | 38.7 | 28.9 |
+| `qwen38-ud-iq3_xxs` | **57.3** | **51.2** | **45.2** | 29.1 |
+| `osmos-evo-1017` | 31.4 | 25.3 | 30.9 | 18.3-18.5 |
+| `hy4-flash` | 21.4 | 21.4 | 20.2 | 17.5 |
+| `osmos-evo-inkling` | 14.0 | 13.0 | 12.5 | 12.1-12.9 |
+| `osmos1.7b` | 126.1 | 126.4 | 122.4 | |
+
+**Agents** (`tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system
+prompt and task, then tool results of 150-2,000 tokens (one in ten a 5K-20K file read) and 0.5-5 s of tool time
+between turns: 98,757 new prompt tokens against up to 8,003 answer tokens, each model's own tokens, at a 131K
+context, every turn drafted where the pack has a drafter.
+
+| | `osmos1.7b` | `qwen38-ud-iq3_xxs` | `inkling-2-mini` | `osmos-evo-1017` | `hy4-flash` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Wall time, all 32 turns | **90.2 s** | 200.2 s | 207.7 s | 463.1 s | 520.1 s |
+| First token, p50 / p95 | **0.87 / 6.2 s** | 1.93 / 25.5 s | 1.56 / 18.9 s | 7.52 / 53.9 s | 4.90 / 48.3 s |
+| Turn done, p50 / p95 | **8.8 / 13.9 s** | 17.2 / 43.2 s | 19.6 / 43.4 s | 49.5 / 95.0 s | 53.3 / 111.6 s |
+
+Every turn answered, and every later turn continued its conversation in place. osmos sizes itself to leave 8 GiB of
+RAM free beside the model (`"fill_gib"` in `osmos.json`, osmos-serve `--fill`: the output the same at any value).
+
+### The machine
 
 | | |
-| --- | ---: |
-| Decode, drafted / plain (64K context, three questions) | **35.0** / 18.9, **30.5** / 18.6, **40.4** / 18.3 tok/s |
-| Decode after a 65K / 131K prompt, drafted / plain | **29.4** / 18.2, 14.9 / 13.7 tok/s |
-| Prompt, 2,048 / 8,192 / 65,536 / 131,072 tokens | 388 / **630** / 711 / 659 tok/s |
-| Facts recalled from up to 985K tokens back | **11 of 11**, every token the model's first choice |
+| --- | --- |
+| System | AMD Ryzen AI Halo (RAH-001), BIOS 04.01 |
+| APU | Ryzen AI MAX+ 395: 16 Zen 5 cores, Radeon 8060S (gfx1151, 40 CUs) |
+| Memory | 128 GB LPDDR5X, shared by CPU and GPU; GPU memory raised to ~113 GiB (`ttm pages_limit=29637704`) |
+| SSD | Micron 4600 2 TB (MTFDLBA2T0THJ, firmware PBMA002): a PCIe 5.0 drive, linked at PCIe 4.0 x4 here; btrfs |
+| Software | Linux 7.2.7, ROCm with HIP 7.15, gcc 14.2 |
+| Placement | raised off its surface, open air beneath it |
+
+DeepSeek streams its experts from the SSD, so the drive is part of its numbers: a prompt reads at ~7.1 GB/s (near
+the PCIe 4.0 x4 ceiling); decode reads experts a few MB at a time (`O_DIRECT`), where random-read latency counts.
+
+**NOTE - let your Strix breathe.** On a warm table beside another machine, a sustained
+DeepSeek run took the GPU to 102 °C and its clock down to 925 MHz, and drafted decode after a 64K prompt read 17 tok/s
+against 29 raised in open air (the same code, the same tokens). These numbers are from a warm room: under sustained
+load the GPU still runs 95-100 °C with its clock near 2.6 GHz.
+
+The `low-power` profile costs decode little - it is bound by memory, not clocks (inkling-2-mini's plain decode 28.1
+tok/s there against 28.8) - and prompts more.
+
+## The packs in detail
+
+### osmos-evo-1017
 
 **Recall to the window's edge.** An agent conversation built from our own rig sessions (1,038,695 tokens) with 11 facts
 planted in user turns ("the access code for the red locker is RW-6315-KD"), each asked for at the end, plus a locker
@@ -114,13 +174,6 @@ never mentioned. Each answer scored teacher-forced - the probability of the whol
 
 A session rarely reads 1M at once - a cached prompt reads only what a turn adds; a full read follows a client's
 compaction.
-
-**Qwen3.8 UD-IQ3_XXS at its 512K** (YaRN past its native 262K; the same sessions in its own template, 457,506 tokens),
-recalled the same way: the facts 10K-418K back (all 11, every token its first choice; never planted 0.0000):
-
-| Distance back | 418K | 375K | 344K | 298K | 255K | 210K | 159K | 110K | 60K | 20K | 10K | never planted |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Qwen3.8 UD-IQ3_XXS | 0.988 | 0.991 | 0.998 | 0.995 | 0.995 | 0.994 | 0.964 | 0.994 | 0.982 | 0.997 | 0.993 | 0.0000 |
 
 **How close each DeepSeek pack is to the model itself** - the KL divergence from DeepSeek's own weights (MXFP4
 experts, BF16 dense) over the whole vocabulary, against a reference that runs the original 296 GB of experts
@@ -142,64 +195,62 @@ found by probing the one fact the layers-20-39 pack wavered on and bisecting its
 cloned on btrfs or XFS, each shard SHA-256 checked.
 
 The UD packs are [unsloth's quants](https://huggingface.co/unsloth/DeepSeek-V4.1-Flash-1017-GGUF) with the lossless
-MXFP8 Engram table, our 4.7 GB DSpark drafter and expert pick profile. Qwen is
-[unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (or UD-Q4_K_XL) and its MTP head. The
-abliteration (huihui-ai's) costs 0.2-0.5% perplexity at the same speed.
+MXFP8 Engram table, our 4.7 GB DSpark drafter and expert pick profile. The abliteration (huihui-ai's) costs 0.2-0.5%
+perplexity at the same speed.
 
-## osmos-evo-inkling in numbers
+### qwen38-ud-iq3_xxs
 
-Inkling-2-Small on one Strix Halo (osmos 0.9.0, the `performance` profile, nothing else running; osmos-serve at the
-pack's 256K and 4,096-token steps, its Q5_K drafter):
+[Unsloth's UD-IQ3_XXS](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) (or UD-Q4_K_XL) of Qwen3.8-Flash-Next and
+its MTP head, every weight in GPU memory on this machine.
+
+**Recall at its 512K** (YaRN past its native 262K; osmos-evo-1017's rig sessions in its own template, 457,506
+tokens), recalled the same way: the facts 10K-418K back (all 11, every token its first choice; never planted 0.0000):
+
+| Distance back | 418K | 375K | 344K | 298K | 255K | 210K | 159K | 110K | 60K | 20K | 10K | never planted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen3.8 UD-IQ3_XXS | 0.988 | 0.991 | 0.998 | 0.995 | 0.995 | 0.994 | 0.964 | 0.994 | 0.982 | 0.997 | 0.993 | 0.0000 |
+
+### osmos-evo-inkling
+
+Inkling-2-Small, its experts streamed from the SSD; its long prompts and quality (osmos 0.9.0, the `performance`
+profile, osmos-serve at the pack's 256K and 4,096-token steps, its Q5_K drafter):
 
 | | |
 | --- | ---: |
-| Decode, drafted / plain (three short questions) | **16.6** / 10.6, 15.1 / 13.3, 18.3 / 17.9 tok/s |
 | Decode after a 64K / 248K prompt, drafted / plain | **18.1** / 9.2, **22.0** / 7.3 tok/s (the 248K text one its drafter predicts: 94% accepted) |
 | Prompt, 8,192 / 65,536 / 253,952 tokens | **355** / 302 / 185 tok/s |
 | KL against Inkling-2-Small in BF16 (Wiki, 10,239 tokens) | 0.197, top-1 85.8% |
 
-0.12.3 against 0.12.2 (the `performance` profile, osmos-serve, the same answers bit for bit): an 8,448-token prompt
-29.7 -> 27.6 s, 64 tokens after it 7.8 -> 7.6 s.
-
-Every token is the bits of the same tokens read as a prompt, drafted or not, at any steps. 87 GB of the 143 GB of
-experts (61%) stay in memory and the rest stream from the SSD; a full-attention layer's keys are cached Q8 and its
-values Q5 (KL +0.001 against f16), so a 256K context's cache is 3.5 GB. Drafted runs vary by about ±8% from run to
-run at the same acceptance (which experts are resident when); plain decode and prompts within ~2%.
-
-## inkling-2-mini in numbers
+### inkling-2-mini
 
 [Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) (Thinking Machines; 26.4B, 3.4B active, its
 middle layers 6-17 run three times a token) served from the release itself: its routed experts NVFP4 (layers 0-19)
 and MXFP8 (20-23), its dense weights BF16 as released - on the GPU's matrix cores, each weight's f16 in the kernel -
-and its own DSpark drafter (Q8_0). osmos 0.12.0, the `performance` profile, osmos-api, one conversation:
+and its own DSpark drafter (Q8_0). Sampled at temperature 1.0, the release's own setting (greedy decoding looped on one
+tool call in long agent sessions); a request's `temperature`, `top_p` and `seed` override it, and a seed reproduces an
+answer, drafted or not.
 
-| | drafted / plain |
+| | |
 | --- | ---: |
-| Decode, three short questions | **33.5** / 25.7, **42.4** / 26.6, **35.1** / 25.7 tok/s |
-| Decode, a coding task | **49.6** / 25.2 tok/s |
-| Decode after a 131K prompt | **24.2** / 17.0 tok/s |
-| Prompt, 3K / 37K / 131K tokens (plain) | **1,001** / **1,045** / 775 tok/s |
+| Decode after a 131K prompt, drafted / plain (0.12.0) | **24.2** / 17.0 tok/s |
+| Prompt, 37K / 131K tokens (0.12.0) | **1,045** / 775 tok/s |
 | KL against upstream llama.cpp's own run of the release (64 / 2,048 tokens) | 2.9e-3 / 1.1e-3 (its own GPU against CPU: 3.0e-3 / 1.2e-3) |
-
-0.12.3 against 0.12.2 (the `performance` profile, ink2_engine, every row's logits the same bits): decode 25.0 -> 27.5
-tok/s plain, an 8K prompt 1,167 -> 1,226 tok/s.
 
 Each pass of a looped layer keeps its own cache (48 slots for 24 layers); a full-attention layer's keys and values
 are cached Q8 (the pack's `kv_q8`), 17 KiB a token, so a 1M context's cache is 17 GiB beside the 19.6 GB model.
 A fact hidden in a 1,000,652-token prompt, 900K tokens before the question, was found (read in 79 minutes, 212
 tok/s); 128K and 512K needles at 10 / 50 / 90% likewise.
 
-## osmos1.7b in numbers
+### osmos1.7b
 
 [osmos1.7b](https://huggingface.co/mrsirg97-rgb/osmos1.7b) (vibes1.7b until 0.11.1): LFM3-1.7B (Liquid's hybrid: 13
 short-convolution, 5 sliding and 6 full-attention layers) fine-tuned on 32K-token examples and trained on the Q4_0 grid
 it ships in, its full layers reading through its latent sparse attention maps - a token's read its 1,024 best buckets
-of the closed 512-key blocks, then the window and the sinks: ~4,600 keys, however long the context. osmos 0.11.1, the
-`performance` profile, one conversation:
+of the closed 512-key blocks, then the window and the sinks: ~4,600 keys, however long the context. Its long contexts
+(osmos 0.11.1, the `performance` profile, one conversation):
 
 | | |
 | --- | ---: |
-| Decode, a short context | **153** tok/s |
 | Decode at 32K / 128K / 512K | 100 / 97 / 85 tok/s |
 | Prompt, 2K / 32K / 128K / 512K tokens | **6,479** / 3,948 / 3,591 / 3,128 tok/s |
 | A code placed at 10 / 50 / 90% of a 524K prompt (source code), asked at its end | 3 of 3 |
@@ -213,26 +264,23 @@ answered with a path from the source beside it, as YaRN did). Prompts read spars
 position a read can leave a key out), as the model was trained; every token's bits are the same however its prompt
 is split into steps.
 
-## hy4-flash in numbers
+### hy4-flash
 
 Tencent's [Hy4-flash](https://huggingface.co/tencent/Hy4-flash): 220B (155.5B backbone + 63.5B of Engram n-gram
 tables), ~11.3B active a token, 1M context - DeepSeek's MLA and sparse indexer, a latent MoE, 30 of its 42 layers a
-512-token window. served from AngelSlim's official [Q3_K](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) (Tencent's
+512-token window. Served from AngelSlim's official [Q3_K](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) (Tencent's
 compression team: on their agent benchmarks Q3_K matches Q4_K_M and BF16 within a point): the backbone in GPU memory,
 the Engram table read from the SSD a step at a time, and the release's own drafter, **DFly2**, which reads the target's
-KV cache and indexer picks rather than keeping its own. osmos 0.11.0, the `performance` profile, one conversation:
+KV cache and indexer picks rather than keeping its own. Its long contexts (osmos 0.11.0, the `performance` profile, one
+conversation):
 
 | | |
 | --- | ---: |
-| Decode, a short context, plain / with DFly2 (code / prose) | 17.0 / **24.8 / 29.9** tok/s |
 | Decode with DFly2, served: a 128K / a 913K prompt | 18.8 / 17.0 tok/s |
-| Prompt, 1K / 32K / 128K tokens | ~430 / 448 / 414 tok/s |
+| Prompt, 32K / 128K tokens | 448 / 414 tok/s |
 | Prompt, 913K tokens (a book, its needle found) | 45 minutes |
 | GPU memory at 1M context (weights, drafter, a conversation's cache) | ~98 GiB |
 | KL against Tencent's reference (64 tokens; F32 cache / the Q8_0 cache osmos runs) | 1e-11 / 0.033 |
-
-0.12.3 against 0.12.2 (the `performance` profile, hy4_run, its logits the same bits): a 4K prompt ~467 -> ~498 tok/s
-(~390 -> ~440 at `low-power`, where the host's share is larger); decode unchanged.
 
 The context costs ~11 KB a token: MLA's latent rows Q8_0 (the rope part F32, as vLLM's `fp8_ds_mla`), the
 indexer's keys a small ring, its pooled groups F32 - the Q8_0 cache's teacher-forced NLL over 8K tokens no worse than
@@ -241,29 +289,10 @@ tokens are always the plain decode's; it accepts ~2.4 drafts a round on code, ~3
 and selection grow with the square of its length (on the matrix cores; at 913K ~9 of its 45 minutes) - a
 conversation's cached prefix is not read again.
 
-## Performance
+## Against other engines
 
-### The machine
-
-| | |
-| --- | --- |
-| System | AMD Ryzen AI Halo (RAH-001), BIOS 04.01 |
-| APU | Ryzen AI MAX+ 395: 16 Zen 5 cores, Radeon 8060S (gfx1151, 40 CUs) |
-| Memory | 128 GB LPDDR5X, shared by CPU and GPU; GPU memory raised to ~113 GiB (`ttm pages_limit=29637704`) |
-| SSD | Micron 4600 2 TB (MTFDLBA2T0THJ, firmware PBMA002): a PCIe 5.0 drive, linked at PCIe 4.0 x4 here; btrfs |
-| Software | Linux 7.2.7, ROCm with HIP 7.15, gcc 14.2 |
-| Placement | raised off its surface, open air beneath it |
-
-DeepSeek streams its experts from the SSD, so the drive is part of its numbers: a prompt reads at ~7.1 GB/s (near
-the PCIe 4.0 x4 ceiling); decode reads experts a few MB at a time (`O_DIRECT`), where random-read latency counts.
-
-**NOTE - let your Strix breathe.** On a warm table beside another machine, a sustained
-DeepSeek run took the GPU to 102 °C and its clock down to 925 MHz, and drafted decode after a 64K prompt read 17 tok/s
-against 29 raised in open air (the same code, the same tokens). These numbers are from a warm room: under sustained
-load the GPU still runs 95-100 °C with its clock near 2.6 GHz.
-
-The comparisons below are 0.9.0's, at the `performance` profile, every run a fresh process, greedy, one run each;
-DeepSeek at 64K context in the packs' 4,096-token steps.
+Measured with osmos 0.9.0, the `performance` profile, every run a fresh process, greedy, one run each; DeepSeek at
+64K context in the packs' 4,096-token steps.
 
 ### DeepSeek against Maya
 
@@ -280,21 +309,6 @@ Both engines at 64K context; Maya's own `--bench`, osmos's `dbench` on the same 
 
 osmos reads prompts 1.3-1.5x as fast as Maya and decodes 30% faster plain and 2.0x drafted: osmos's one cache keeps
 the experts decode comes back to.
-
-**Agents.** Maya's agent bench: 4 agents at once, 8 turns each, about 99K new prompt tokens against 6-8K answer
-tokens, at 131K context with drafting on (DeepSeek its DSpark, Qwen its MTP head). Power is the APU package's (CPU +
-GPU + NPU, not the wall).
-
-| | osmos-evo-1017 | Qwen UD-IQ3_XXS |
-| --- | ---: | ---: |
-| Wall time, all 32 turns | 462.8 s | **185.2 s** |
-| First token, p50 / p95 | 8.46 / 53.6 s | **2.06 / 25.8 s** |
-| Turn done, p50 / p95 | 49.2 / 92.5 s | **15.3 / 45.0 s** |
-| Package power, mean | **114.6 W** | 123.7 W |
-| Energy per answer token | 7.10 J | **4.26 J** |
-
-Every turn answered, every later turn continued its conversation in place. osmos sizes itself to leave 8 GiB of RAM
-free beside the model (`"fill_gib"` in `osmos.json`, osmos-serve `--fill`: the output the same at any value).
 
 ### Qwen3.8 against llama.cpp
 
@@ -402,8 +416,25 @@ and its drafter is `osmos/run/drafter.h`. Each header's contract is in a comment
 
 ## Reproduce the numbers
 
+The Speed tables: each pack through `osmos-api` on its own `osmos.json`, a fresh process each, one request at a time
+(prefix reuse off, so every prompt is read whole), the timings osmos-api returns:
+
 ```sh
 powerprofilesctl set performance
+OSMOS_SLOT_KEEP=0 bin/osmos-api --config ~/Models/osmos/<pack>/osmos.json --port 8241 &
+curl -s localhost:8241/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 16}' > /dev/null   # the warm-up
+curl -s localhost:8241/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages": [{"role": "user",
+  "content": "Explain how photosynthesis works, step by step, for a high-school student."}], "max_tokens": 256,
+  "temperature": 0}' | python3 -c "import json,sys; print(json.load(sys.stdin)['timings'])"   # (plain: the pack without "drafter")
+python3 tools/serve/agent_bench.py --only osmos --model <first shard> [--picks <file>] [--dspark <drafter>] \
+  --budget auto --max-tokens 4096 --prompts <the model's own tokens: calib16k.txt, p8192.txt>          # agents
+```
+
+`osmos-api --tokenize --model <first shard> < text` writes a text's token ids for a model (the agents' and the serve
+tests' token files). The older measurements, per engine:
+
+```sh
 # DeepSeek (token ids from Maya's tokenizer: tools/bench/prompts.py)
 cfg() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])" ~/Models/osmos/osmos-evo-1017/osmos.json $1; }
 export MODEL=$(cfg model) PICKS=$(cfg picks) DSPARK=$(cfg drafter) MAX_CTX=65536 NO_GUESS=1   # the installed pack's own paths
@@ -438,7 +469,9 @@ is the guarantee (the NPU's is its own).
 | --- | --- |
 | `include/osmos/` | public headers, each with its contract in a comment at the end |
 | `src/model/`, `src/mem/` | GGUF, weights, Engram; the expert cache and the file readers |
-| `src/run/`, `src/q4x/` | DeepSeek's forward and the engine interface; Qwen's forward |
+| `src/run/`, `src/q4x/` | DeepSeek's forward and the engine interface (every family's); Qwen's forward |
+| `src/ink2/`, `src/hy4/`, `src/lfm3/`, `src/lsa/` | Inkling-2's forward and drafter; Hy4-flash's; osmos1.7b's (LFM3) and its sparse attention |
+| `src/serve/` | the kept conversations (osmos-serve's slots) |
 | `src/text/`, `src/cpu/` | tokenizers and chat encodings; the CPU lane |
 | `kernels/` | HIP kernels and the shared arithmetic contracts (`lane.h`, `quant.h`) |
 | `tests/`, `tests/gpu/` | CPU tests; GPU and whole-model tests |
@@ -460,7 +493,8 @@ is the guarantee (the NPU's is its own).
   - the IQ grid tables (generated from its `gguf-py`)
   - `qwen4exp`, the reference Qwen's forward is held to
 - [DeepSeek](https://github.com/deepseek-ai), [Qwen](https://huggingface.co/Qwen) and
-  [Thinking Machines](https://huggingface.co/thinkingmachines) (Inkling-2-Small, Apache 2.0): the models.
+  [Thinking Machines](https://huggingface.co/thinkingmachines) (Inkling-2-Small and Inkling-2-Mini, Apache 2.0): the
+  models.
 - [Liquid AI](https://huggingface.co/LiquidAI) (LFM3-1.7B, the LFM Open License v1.0): osmos1.7b's base model, and its
   modeling code the reference LFM3's forward is held to (`oracle/lfm3_forward.py`).
 - [osmos1.7b](https://huggingface.co/mrsirg97-rgb/osmos1.7b) (the same author): the fine-tune and its LSA maps.

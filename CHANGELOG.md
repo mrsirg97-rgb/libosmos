@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.15.0]: a sizing that cannot run the machine out of memory, fewer launches, every pack measured again
+
+- **Sizing fix (an out-of-memory at startup).** A streaming pack sizes its expert budget by building at a few budgets
+  and stepping toward the room it must leave. A noisy reading of free RAM could make a step look nearly free, and the
+  next one leap past the target: DeepSeek once stepped 98.99 -> 104.06 GiB and left the machine 2.79 GiB of RAM, and
+  once ran it out - the kernel's OOM killer then took the user's whole session. A byte of budget now never counts as
+  costing less than a byte of room, and the first, longest step assumes the units' padding, so every step lands short
+  of the target. DeepSeek's five starts since: the same ~99 GiB budget, the RAM never under ~7.8 GiB.
+- **Qwen streams where it cannot hold the whole model**, built through the library sized to the machine (a budget of
+  0): its room check counted every expert, and refused, where its experts are streamed to fit the room. osmos-serve
+  (which always passes a budget) was not affected. Its memory test no longer sets an edge within what the page cache
+  moves.
+- **Fewer launches on Inkling-2-Mini** (each a fusion with the same bits): a decode's three loop controls in one
+  launch, their gates' f16 in one, the FFN control's down writing its own f16 (`mm_run_x16`) and its last step inside
+  the router's norm (`ops_rms_x16_ctrl`), and a verify step's empty expert launches skipped: 1,755 -> ~1,467 launches
+  a 3-row verify step, verify steps 1-2% faster, every token the same.
+- **The tests now know every family that reads prompts and decode two ways.** DeepSeek, Hy4-flash and osmos1.7b go
+  back to a prompt's end and read an earlier answer again, so the next answer is exactly a whole read's bits;
+  osmos-serve now says so at start (`NOTE reads apart`), and the kept-conversation and parallel tests take it from
+  there (they had known DeepSeek's alone).
+- **Every pack measured again, one way** (README: Speed): prompt, code and prose, drafted and plain, Maya's three
+  questions, and the agent bench, through osmos-api on each pack's own settings. Every answer the same bits as
+  0.14.0's.
+- `agent_bench.py` runs a pack without a drafter (osmos1.7b).
+
 ## [0.14.0]: sampling - temperature, top_p and seed - and inkling-2-mini sampled as released
 
 - **Sampling.** osmos-api takes `temperature`, `top_p` and `seed` (OpenAI's names; no top-k), and a pack may set its

@@ -95,6 +95,7 @@ struct Silu {
   _Float16* x16;
   int32_t* overflow;
   uint32_t cols;
+  bool plain;  // no silu: y as the tile stores it and its f16 (mm_run_x16: mm_run then mm_x16's bytes)
 };
 
 // the chunks a lane decodes together (quant::decode_hn, a group's scales or codes once) for the kRuns types: RUN_MAX of
@@ -263,9 +264,13 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
         float s = part[j * kWave + lane];
         for (int v = 1; v < S::kWaves; v++) s += part[(v * 8 + j) * kWave + lane];
         if constexpr (E) {
-          const float u = s * ep.scale;
-          s = silu(u);
-          if (t < n) x16_put(ep.x16, t, row0 + osmos_acc_row(j), ep.cols, s, ep.overflow);
+          if (!ep.plain) {
+            const float u = s * ep.scale;
+            s = silu(u);
+          }
+          if (t < n) x16_put(ep.x16, t, row0 + osmos_acc_row(j), ep.cols, s * take.scale, ep.overflow);
+          else if (ep.plain) ep.x16[x16_at(t, row0 + osmos_acc_row(j), ep.cols)] = (_Float16) 0.0f;  // mm_x16's tile
+                                                                                                 // past n: zero
         }
         if constexpr (__is_same(Take, StoreY)) {
           if (t < n) y[(uint64_t) t * ys + row0 + osmos_acc_row(j)] = s * take.scale;

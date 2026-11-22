@@ -699,6 +699,55 @@ int main() {
       for (void* d : {(void*) dq, (void*) dkb, (void*) dvb, (void*) dout, (void*) dscr, (void*) dkr, (void*) dvr}) hipFree(d);
     }
   }
+  {  // the loop's controls in one launch (a decode's q, k and v): each part ink2_loop_ctrl's bits; out may be x
+    const uint64_t n = 3 * 2304 + 5;  // a token's rows and a few past a block
+    std::vector<float*> dx, dm, dg, df, d1, dn;
+    Ink2LoopCtrlPart parts[INK2_LOOP_CTRL_PARTS];
+    for (uint32_t c = 0; c < 3; c++) {
+      dx.push_back(dev_from(normals(n, 11 + c, 1.0f))), dm.push_back(dev_from(normals(n, 21 + c, 1.0f)));
+      dg.push_back(dev_from(normals(n, 31 + c, 2.0f))), df.push_back(dev_from(normals(n, 41 + c, 2.0f)));
+      d1.push_back(dev_alloc<float>(n)), dn.push_back(dev_alloc<float>(n));
+      CHECK(ink2_loop_ctrl(dx[c], dm[c], dg[c], df[c], n, d1[c], nullptr));
+      parts[c] = Ink2LoopCtrlPart{dx[c], dm[c], dg[c], df[c], dn[c]};
+    }
+    CHECK(ink2_loop_ctrl_many(parts, 3, n, nullptr));
+    for (uint32_t c = 0; c < 3; c++) CHECK(same_bits(host_of(d1[c], n), host_of(dn[c], n)));
+    parts[0].out = dx[0];  // in place
+    CHECK(ink2_loop_ctrl_many(parts, 1, n, nullptr) && same_bits(host_of(dx[0], n), host_of(d1[0], n)));
+    CHECK(!ink2_loop_ctrl_many(parts, 0, n, nullptr) && !ink2_loop_ctrl_many(parts, INK2_LOOP_CTRL_PARTS + 1, n, nullptr) &&
+          !ink2_loop_ctrl_many(parts, 3, 0, nullptr) && !ink2_loop_ctrl_many(nullptr, 3, n, nullptr));
+    for (uint32_t c = 0; c < 3; c++)
+      for (float* d : {dx[c], dm[c], dg[c], df[c], d1[c], dn[c]}) hipFree(d);
+    std::printf("  loop_ctrl_many: 3 parts in one launch, each ink2_loop_ctrl's bits (in place too); refusals\n");
+  }
+  {  // a loop's FFN control then the router's norm in one launch: ink2_loop_ctrl then ops_rms_x16's bits (its out, the
+     // norm's y and x16), out in place of x too; 1, 3 and 16 rows
+    const uint32_t C = 2304;
+    const std::vector<float> nw = normals(C, 7, 0.3f, 1.0f);
+    float* dw = dev_from(nw);
+    int32_t* ovf = dev_alloc<int32_t>(1);
+    for (uint32_t rows : {1u, 3u, 16u}) {
+      const uint64_t n = (uint64_t) rows * C;
+      float *dx = dev_from(normals(n, 51, 1.0f)), *dm = dev_from(normals(n, 52, 1.0f)), *dg = dev_from(normals(n, 53, 2.0f)),
+            *df = dev_from(normals(n, 54, 2.0f));
+      float *o1 = dev_alloc<float>(n), *y1 = dev_alloc<float>(n), *y2 = dev_alloc<float>(n), *x2 = dev_alloc<float>(n);
+      void *h1 = dev_alloc<uint16_t>((size_t) 16 * C), *h2 = dev_alloc<uint16_t>((size_t) 16 * C);
+      CHECK(ink2_loop_ctrl(dx, dm, dg, df, n, o1, nullptr) &&
+            ops_rms_x16(o1, C, C, dw, 1e-6f, rows, y1, C, h1, ovf, nullptr));
+      CHECK(hipMemcpy(x2, dx, n * 4, hipMemcpyDeviceToDevice) == hipSuccess);
+      const OpsCtrl ctl = {x2, dm, dg, df, x2};  // in place
+      CHECK(ops_rms_x16_ctrl(&ctl, C, dw, 1e-6f, rows, y2, C, h2, ovf, nullptr));
+      CHECK(same_bits(host_of(o1, n), host_of(x2, n)) && same_bits(host_of(y1, n), host_of(y2, n)));
+      CHECK(bytes_of(h1, (size_t) 16 * C * 2) == bytes_of(h2, (size_t) 16 * C * 2));
+      for (void* d : {(void*) dx, (void*) dm, (void*) dg, (void*) df, (void*) o1, (void*) y1, (void*) y2, (void*) x2, h1, h2})
+        hipFree(d);
+    }
+    const OpsCtrl none = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    CHECK(!ops_rms_x16_ctrl(&none, C, dw, 1e-6f, 1, dw, C, dw, ovf, nullptr) &&
+          !ops_rms_x16_ctrl(nullptr, C, dw, 1e-6f, 1, dw, C, dw, ovf, nullptr));
+    hipFree(dw), hipFree(ovf);
+    std::printf("  rms_x16_ctrl: the loop's control then the norm in one launch, their bits (1 / 3 / 16 rows, in place)\n");
+  }
   std::printf("[test_ink2_ops_gpu] ok\n");
   return 0;
 }

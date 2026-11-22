@@ -31,6 +31,7 @@ extern "C" {
 
 constexpr uint32_t kCtx = 4096, kMaxTokens = 512;
 constexpr uint64_t kGiB = 1ull << 30, kUnder = kGiB / 2;  // left past a build: under FIT_HEADROOM
+constexpr uint64_t kShort = 2 * kGiB;  // the room short of the forward: past the measure's drift (~1.3 GiB seen)
 
 // the memory a build can still take, the forward's own measure (fit_room): the GPU's free, or the system's RAM past
 // what a build leaves it where that is less (the experts lie in host memory the GPU reads in place)
@@ -110,18 +111,23 @@ int main() {
   CHECK(s);
   q4x_seq_destroy(s);
   q4x_forward_destroy(f);
-  // where the whole forward would leave half a GiB: at its whole budget (every expert's bytes) refused, its memory
-  // given back; sized to the machine as it stands (Q4xOptions' budget 0, 0.13.0) built - its experts streamed past
-  // the room - and leaving the headroom
+  // where the whole forward would not fit: at its whole budget (every expert's bytes) refused before it allocates (the
+  // forward's check: the room against its weights' bytes, under FIT_HEADROOM past them), its memory given back; sized
+  // to the machine as it stands (Q4xOptions' budget 0, 0.13.0) built - its experts streamed past the room - and
+  // leaving the headroom. the room set kShort under the forward's measure, not half a GiB past it: the measure's RAM
+  // side moves with the page cache (80.45 GiB one run, 79.1 the next), and an edge set within that was the cache's
   {
-    Hog hog(fwd + kUnder);
-    const uint64_t before = settled(), dev = device_free();
+    Hog hog(fwd - kShort);
+    settled();  // (the memory still before the build)
+    const uint64_t dev = device_free();
     const Q4xOptions whole = {kCtx, kMaxTokens, false, nullptr, 0, nullptr, fwd};
     CHECK(!q4x_forward_create_with(w, nullptr, &whole, err) && std::strstr(err, "GPU memory") &&
           std::strstr(err, "the forward"));
     CHECK(device_free() + (1ull << 20) >= dev);
-    std::printf("  a forward at its whole budget leaving %.2f GiB: refused (%s)\n", (double) (before - fwd) / kGiB, err);
+    std::printf("  a forward at its whole budget, the room %.2f GiB short of it: refused (%s)\n",
+                (double) kShort / kGiB, err);
     f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
+    if (!f) std::fprintf(stderr, "  sized to the machine refused: %s\n", err);
     CHECK(f && !q4x_forward_whole(f));
     const uint64_t left = settled();
     CHECK(left >= FIT_HEADROOM);

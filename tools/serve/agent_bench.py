@@ -12,8 +12,8 @@ every agent at once. per turn: its first token and its last from its send.
   answers     64-400 tokens;  tool time 0.5-5 s between an answer and the next turn
 
 the text: real text (the bench's token files, ~/bench/osmos-prompts), each agent's and turn's its own slice
-(maya's: its pack's tokenizer over a corpus). every turn drafts (spec=1) on both engines; a conversation stays in its
-lane, so a turn reads only its new tokens. exit 0: every turn of every run answered.
+(maya's: its pack's tokenizer over a corpus). every turn drafts (spec=1) on both engines (without --dspark, plain);
+a conversation stays in its lane, so a turn reads only its new tokens. exit 0: every turn of every run answered.
 """
 import argparse
 import os
@@ -58,7 +58,7 @@ class Text:
         return [self.ids[(at + i) % len(self.ids)] for i in range(n)]
 
 
-def run(label, exe, args, env, plan, text):
+def run(label, exe, args, env, plan, text, spec=1):
     eng = Multi(exe, args, env)
     for n in eng.notes:  # the engine's start: its budget (osmos-serve --budget auto's sizing) among them
         print(f"  {n}", flush=True)
@@ -77,7 +77,7 @@ def run(label, exe, args, env, plan, text):
             with send_mu:
                 rid = rid_next[0] = rid_next[0] + 1
                 ts = time.monotonic()
-                eng.send(rid, prompt, t["max_new"], spec=1)
+                eng.send(rid, prompt, t["max_new"], spec=spec)
             r = eng.wait(rid)
             if "err" in r or not r["tokens"]:
                 errors.append(f"agent {i} turn {k}: {r.get('err', 'no tokens')}")
@@ -136,7 +136,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--picks")
-    ap.add_argument("--dspark", required=True)
+    ap.add_argument("--dspark", help="the drafter (none: every turn plain - a pack without one, osmos1.7b)")
     ap.add_argument("--exe", default="bin/osmos-serve")
     ap.add_argument("--budget", default="96")
     ap.add_argument("--max-tokens", default="2048")
@@ -163,14 +163,15 @@ def main():
           flush=True)
     ok = True
     if a.only in ("both", "osmos"):
-        args = ["--model", a.model, "--dspark", a.dspark, "--budget", a.budget, "--max-tokens", a.max_tokens,
+        args = ["--model", a.model] + (["--dspark", a.dspark] if a.dspark else []) + ["--budget", a.budget, "--max-tokens", a.max_tokens,
                 "--max-context", str(a.ctx), "--parallel", str(a.lanes or a.agents)] + (["--picks", a.picks] if a.picks else []) + \
             a.osmos_flag
         slots = tempfile.mkdtemp(prefix="osmos-bench-slots-", dir=a.slot_parent)  # on the SSD (/tmp: RAM here)
         env = dict(os.environ, OSMOS_SLOT_KEEP="1" if a.slots == "on" else "0", OSMOS_SLOT_DIR=slots)
         try:
             ok &= report(run(f"osmos-serve (budget {a.budget} GiB, {a.max_tokens}-token steps, "
-                             f"{a.lanes or a.agents} lanes, slots {a.slots})", a.exe, args, env, plan, text), total)
+                             f"{a.lanes or a.agents} lanes, slots {a.slots})", a.exe, args, env, plan, text,
+                             1 if a.dspark else 0), total)
         finally:
             shutil.rmtree(slots, ignore_errors=True)
     if a.only in ("both", "maya") and a.maya_exe:
