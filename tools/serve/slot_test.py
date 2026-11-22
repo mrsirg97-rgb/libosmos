@@ -84,9 +84,9 @@ def main():
         ra = e.gen(A, 32)
         turn = A + ra["tokens"] + new
         # in place: Qwen continues on A and its answer, all but its last token (printed, never fed); a family that
-        # reads apart (DeepSeek) from A's point. kept (set aside, every family since 0.7.5): A's point, one token
-        # short of its end - a decoded answer is what a client writes back otherwise
-        apart = b"deepseek41" in open(a.model, "rb").read(1 << 20)
+        # reads apart (its NOTE: DeepSeek, Hy4-flash, osmos1.7b) from A's point. kept (set aside, every family since
+        # 0.7.5): A's point, one token short of its end - a decoded answer is what a client writes back otherwise
+        apart = any(n.startswith("NOTE reads apart") for n in e.notes)
         held = len(A) - 1 if apart else len(A) + len(ra["tokens"]) - 1
         point = len(A) - 1
         rt = e.gen(turn, 32)

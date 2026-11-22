@@ -8,7 +8,8 @@
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [temp=<t>] [top_p=<p>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
    out: READY <max_ctx> stop[ multi=N] / T [<rid>] <token> / PP [<rid>] <done> <total> <ms> <tok/s> <reused> /
         DONE [<rid>] <produced> <prompt> <prompt_ms> <decode_ms> <finish> <accepted> <drafted> <reused> 0 0 /
-        ERR [<rid>] <reason> / NOTE <text>
+        ERR [<rid>] <reason> / NOTE <text> (before READY, `NOTE reads apart: ...` where the family's prompt and decode
+        are two maths: a next turn then reuses its prompt's point, its earlier answer read again)
 
    one conversation (single.c), or --parallel N at once (multi.c: GEN then needs rid=, every line carries it).
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
@@ -183,6 +184,8 @@ int main(int argc, char **argv)
     return die("out of memory");
   if (!serve_build(&sv, conv, lanes, m, o, err))
     return die(err);
+  if (osmos_reads_apart(sv.e)) /* (a client's - a test's - what a next turn reuses: its prompt's point, not its answer) */
+    out("NOTE reads apart: a turn's earlier answer is read again from its prompt's point, never continued on\n");
   if (env_num("OSMOS_SLOT_KEEP", 1) != 0 && !open_slots(&sv, model, err, sizeof err))
     return die(err);
   const int rc = par ? serve_multi(&sv, conv, lanes) : serve_single(&sv, conv);
