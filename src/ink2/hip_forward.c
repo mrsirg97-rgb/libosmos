@@ -767,8 +767,10 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
     if (k == 2)
       ok = ink2_swiglu_x16(f->eg, f->eu, f->t_sg, f->t_su, F, g->gate_softcap, g->up_softcap, f->t_hidx, bd.slots,
                            f->xe16, f->overflow, NULL);
+    /* run r's experts more than MM_TILE << (r - 1) tokens each (its bound the pairs'): none in a step of fewer
+       tokens (a token picks an expert once) - a decode's verify launched them empty, 3 a pass */
     for (int r = 0; ok && r < Q4X_TILE_RUNS; r++)
-      if (bd.count[r])
+      if (bd.count[r] && (r == 0 || n > (uint32_t)MM_TILE << (r - 1)))
       {
         const uint32_t at = bd.first[r];
         ok = mm_group(t[k]->type, et.ptr[k] + at, f->t_cnt + at, bd.count[r], MM_TILE << r, rows[k], cols[k],
