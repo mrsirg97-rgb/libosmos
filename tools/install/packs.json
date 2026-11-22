@@ -261,7 +261,7 @@
     },
     "qwen38-ud-iq3_xxs": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS (drafted by its MTP head), 512K context (1M: --ctx 1m, YaRN: slightly weaker on short text)",
-      "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"], "gpu_gib": 95,
+      "shards": ["qwen38-iq3xxs-1", "qwen38-iq3xxs-2", "qwen38-iq3xxs-3", "qwen38-iq3xxs-4"], "gpu_gib": 40,
       "table": null, "picks": null, "drafter": ["qwen38-mtp"], "drafter_kind": "mtp", "overlay": "abl-qwen38-ud-iq3_xxs", "npu": "npu-qwen",
       "rig": {"id": "qwen3.8-flash-next", "max_tokens": 131072, "reserve": 131072, "efforts": ["low", "medium", "xhigh"], "effort": "xhigh",
               "aliases": ["qwen"]},
@@ -297,14 +297,14 @@
     },
     "hy4-flash": {
       "title": "Tencent Hy4-flash (AngelSlim's Q3_K) with its DFly2 drafter, 1M context",
-      "shards": ["hy4-q3k-1", "hy4-q3k-2"], "gpu_gib": 98,
+      "shards": ["hy4-q3k-1", "hy4-q3k-2"], "gpu_gib": 17,
       "table": null, "picks": null, "drafter": ["hy4-dfly2"], "drafter_kind": "dfly", "overlay": null,
       "rig": {"id": "hy4-flash", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "low", "high", "max"], "effort": "high", "aliases": ["hy4"]},
       "settings": {"max_context": 1048576, "max_tokens": 4096}
     },
     "inkling-2-mini": {
       "title": "Inkling-2-Mini (Thinking Machines' release: NVFP4 / MXFP8 experts, BF16 dense) with its DSpark head, every expert in memory, 1M context",
-      "shards": ["ink2-mini-1", "ink2-mini-2"], "gpu_gib": 23,
+      "shards": ["ink2-mini-1", "ink2-mini-2"], "gpu_gib": 10,
       "table": null, "picks": null, "drafter": ["ink2-mini-mtp"], "drafter_kind": "mtp", "overlay": null,
       "rig": {"id": "inkling-2-mini", "max_tokens": 131072, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "high", "aliases": ["mini"]},
       "settings": {"max_context": 1048576, "max_tokens": 4096, "kv_q8": true}

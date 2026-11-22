@@ -9,7 +9,7 @@ import shutil
 GFX = "gfx1151"
 PAGE = 4096
 # the GPU memory the packs were measured on (ttm's limit raised to ~113 GiB). a pack's own start (packs.json's
-# gpu_gib, measured: what its engine builds before any conversation) is what it needs; between the two the engine sizes
+# gpu_gib, measured: its engine's smallest build - every expert streamed - before any conversation) is what it needs; between the two the engine sizes
 # its expert budget to what is free (osmos-serve --budget auto) - fewer experts resident, slower. a pack never
 # measured needs this
 GPU_GIB_MEASURED = 113

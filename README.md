@@ -366,11 +366,12 @@ no-drafter speed here, and its DeepSeek engine is not shipped for Strix Halo on 
 - A Ryzen AI MAX+ 395 (gfx1151), and Linux with ROCm 7.x (developed on HIP 7.15, kernel 7.2, gcc 14). The optional
   CPU lane needs AVX-512 VNNI and VBMI.
 - GPU memory: every number here is from a 128 GB machine with its GPU memory raised to ~113 GiB (`options ttm
-  pages_limit=29637704` in `/etc/modprobe.d/ttm.conf`; a system setting, so it's yours to make). Less runs: each pack
-  needs what its engine builds before a conversation (measured: osmos1.7b and osmos-evo-1017 ~7 GiB, ud-iq1_m ~8,
-  osmos-evo-inkling ~21, inkling-2-mini ~23, qwen38-ud-iq3_xxs ~95, hy4-flash ~98), a conversation's cache on top
-  (inkling-2-mini: ~17 GiB at 1M tokens); past that the engine holds fewer experts and is slower. The installer checks
-  a pack's own need, and the measured machine's for a pack not measured.
+  pages_limit=29637704` in `/etc/modprobe.d/ttm.conf`; a system setting, so it's yours to make). Less runs: every
+  engine sizes itself to the machine (osmos-serve's `--budget auto`, 8 GB of RAM kept free), the experts it cannot hold
+  streamed from the SSD - slower. A pack starts in its engine's smallest build (measured: osmos1.7b and osmos-evo-1017
+  ~7 GiB, ud-iq1_m ~8, inkling-2-mini ~10, hy4-flash ~17, osmos-evo-inkling ~21, qwen38-ud-iq3_xxs ~40), a
+  conversation's cache on top (inkling-2-mini: ~17 GiB at 1M tokens). The installer checks a pack's own need, and the
+  measured machine's for a pack not measured.
 - The model on an NVMe SSD, on a filesystem that takes `O_DIRECT` reads (ext4, btrfs and xfs do; osmos refuses one that
   doesn't, and names it). The faster the SSD's random reads, the faster DeepSeek decodes. The numbers here are from a
   Micron 4600 on a PCIe 4.0 x4 link ("The machine", above).
