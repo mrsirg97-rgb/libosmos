@@ -116,6 +116,8 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   ok = ok && launches(f, run, runs, n, kept, read);
   ok = ok && hipMemcpyAsync(f->pin_flags, f->overflow, 8, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
        hipStreamSynchronize(f->st) == hipSuccess;
+  hipStreamSynchronize(f->st);
+  membrane_end(f->ex.mem); /* the step's holds ended (its experts' kernels done) */
   const int32_t over = ok ? f->pin_flags[0] : 0, fault = ok ? f->pin_flags[1] : 0;
   f->rows = ok && !over && !fault ? n : 0;
   if (!ok || over || fault)

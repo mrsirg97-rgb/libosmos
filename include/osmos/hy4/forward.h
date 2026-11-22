@@ -15,6 +15,7 @@
 
 #define HY4_MAX_BACK 8                 /* the tokens a sequence can drop (a drafted round's) */
 #define HY4_MAX_RUNS 64                /* a step's sequences at most */
+#define HY4_EXPERT_READERS 12          /* the experts' membrane's readers: DeepSeek's and Inkling's (FWD_FETCH_THREADS) */
 
 typedef struct Hy4Forward Hy4Forward;
 typedef struct Hy4Seq Hy4Seq;
@@ -27,12 +28,18 @@ typedef struct Hy4Options
   bool kv_f32;         /* MLA's cache rows F32 (the reference's checks); else (0.11.0's default) the latent Q8_0 and
                           the rope part F32 - 800 bytes a row against 2,304 (hy4_mla_row_bytes) */
   bool head_q8;        /* a BF16 head read as its Q8_0 copy (ggml's rounding, made at load): half its reads */
+  uint64_t budget;     /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
+                          through the membrane past it; 0 every expert resident */
 } Hy4Options;
 
 /* the weights to the GPU (every tensor but the Engram table, read from `fds`' files as the step needs its rows: the
    model's open descriptors, by file), a step's buffers; NULL and err for a model refused, memory the GPU refuses */
 Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Options *o, char err[HY4_ERR]);
 void hy4_forward_destroy(Hy4Forward *f);
+/* the build's bytes (its fixed part - weights, buffers - and its experts' pinned host slots), and whether every expert
+   is resident (decode's tables then the GPU's) */
+uint64_t hy4_forward_bytes(const Hy4Forward *f);
+bool hy4_forward_whole(const Hy4Forward *f);
 
 Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR]);
 void hy4_seq_destroy(Hy4Seq *s);

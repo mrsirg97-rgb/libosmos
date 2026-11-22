@@ -1365,13 +1365,9 @@ extern "C" bool hy4_gate_mul(float* out, const float* gate, uint64_t n, void* st
 constexpr int kRouteThreads = 1024;
 static_assert(kRouteThreads == HY4_ROUTE_MAX_EXPERTS, "the prefix sums: a thread an expert");
 
-struct RouteBase {
-  const uint8_t* p[3];
-  uint64_t bytes[3];
-};
-
 __global__ __launch_bounds__(kRouteThreads) void route_kernel(const int32_t* idx, const float* wtok, uint32_t n,
-                                                              uint32_t k, uint32_t E, uint32_t chunk, RouteBase base,
+                                                              uint32_t k, uint32_t E, uint32_t chunk,
+                                                              const void* const* tab,
                                                               int32_t* gidx, int32_t* sidx, float* wsel, int32_t* cnt,
                                                               int32_t* xrow, const void** wptr, int32_t* fault) {
   __shared__ int32_t count[HY4_ROUTE_MAX_EXPERTS], start[HY4_ROUTE_MAX_EXPERTS], ent[HY4_ROUTE_MAX_EXPERTS];
@@ -1429,21 +1425,18 @@ __global__ __launch_bounds__(kRouteThreads) void route_kernel(const int32_t* idx
     for (int32_t j = 0, c = count[e]; j * (int32_t) chunk < c; j++) {
       const uint32_t i = (uint32_t) (ent[e] + j);
       cnt[i] = min((int32_t) chunk, c - j * (int32_t) chunk), xrow[i] = start[e] + j * (int32_t) chunk;
-      for (int q = 0; q < 3; q++) wptr[(uint64_t) q * nk + i] = base.p[q] + (uint64_t) e * base.bytes[q];
+      for (int q = 0; q < 3; q++) wptr[(uint64_t) q * nk + i] = tab[(uint64_t) q * E + e];
     }
   for (uint32_t i = (uint32_t) total + tid; i < nk; i += kRouteThreads) cnt[i] = 0;
 }
 
 extern "C" bool hy4_route(const int32_t* idx, const float* wtok, uint32_t n_tok, uint32_t k, uint32_t n_exp,
-                          uint32_t chunk, const void* const base[3], const uint64_t bytes[3], int32_t* gidx,
-                          int32_t* sidx, float* wsel, int32_t* cnt, int32_t* xrow, const void** wptr, int32_t* fault,
-                          void* stream) {
-  if (!k || k > HY4_ROUTE_MAX_K || !n_exp || n_exp > HY4_ROUTE_MAX_EXPERTS || !chunk || !n_tok || !base || !bytes ||
-      !idx || !wtok || !gidx || !sidx || !wsel || !cnt || !xrow || !wptr || !fault)
+                          uint32_t chunk, const void* const* tab, int32_t* gidx, int32_t* sidx, float* wsel,
+                          int32_t* cnt, int32_t* xrow, const void** wptr, int32_t* fault, void* stream) {
+  if (!k || k > HY4_ROUTE_MAX_K || !n_exp || n_exp > HY4_ROUTE_MAX_EXPERTS || !chunk || !n_tok || !tab || !idx ||
+      !wtok || !gidx || !sidx || !wsel || !cnt || !xrow || !wptr || !fault)
     return false;
-  RouteBase b;
-  for (int q = 0; q < 3; q++) b.p[q] = (const uint8_t*) base[q], b.bytes[q] = bytes[q];
-  route_kernel<<<1, kRouteThreads, 0, st(stream)>>>(idx, wtok, n_tok, k, n_exp, chunk, b, gidx, sidx, wsel, cnt, xrow,
+  route_kernel<<<1, kRouteThreads, 0, st(stream)>>>(idx, wtok, n_tok, k, n_exp, chunk, tab, gidx, sidx, wsel, cnt, xrow,
                                                     wptr, fault);
   return ok();
 }

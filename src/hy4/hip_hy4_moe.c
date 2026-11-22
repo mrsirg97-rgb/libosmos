@@ -27,6 +27,35 @@ uint64_t hy4_read_slots(uint64_t n, const Hy4Geometry *g)
   return n * (uint64_t)g->n_used + (uint64_t)g->n_experts * (MM_TILE - 1); /* each expert's padded to a tile */
 }
 
+/* each run's expert in memory, its parts' addresses into f->h_ex[run]: every expert resident - the address table's
+   host copy; else the membrane's (the layer visited - the GPU past the last one's experts: the picks' copy waited for
+   it - a decode's picks scored, each run's expert held, then waited for) */
+static bool in_memory(Hy4Forward *f, int l, const MoeRoute *rt, uint32_t picks)
+{
+  const uint32_t E = (uint32_t)f->w->geo.n_experts, ml = (uint32_t)(l - f->w->geo.n_dense);
+  if (f->whole)
+  {
+    for (uint32_t j = 0; j < rt->runs; j++)
+      for (int k = 0; k < 3; k++)
+        f->h_ex[j][k] = f->h_tab[((uint64_t)ml * 3 + (uint64_t)k) * E + rt->expert[j]];
+    return true;
+  }
+  char merr[MEMBRANE_ERR] = "";
+  Membrane *m = f->ex.mem;
+  if (!membrane_visit(m, ml, picks >= E, merr))
+    return false;
+  for (uint32_t j = 0; picks < E && j < rt->runs; j++)
+    for (uint32_t q = 0; q < rt->count[j]; q++)
+      membrane_score(m, ml * E + rt->expert[j]);
+  for (uint32_t j = 0; j < rt->runs; j++) /* every distinct pick held first: the cold ones' reads under way together */
+    if (!membrane_hold(m, ml * E + rt->expert[j], merr))
+      return false;
+  for (uint32_t j = 0; j < rt->runs; j++)
+    if (!membrane_wait(m, ml * E + rt->expert[j], f->h_ex[j], merr))
+      return false;
+  return true;
+}
+
 /* a read's picks grouped by expert on the host (moe_route: ascending; within one, its tokens ascending): each sorted
    row's token and weight, each (token, slot)'s row; mm_group's entries (moe_entries: chunks of MM_MAX_TOKENS, each
    expert's slots a whole number of tiles, the entries ordered by count so a launch is a run of the same column
@@ -34,7 +63,6 @@ uint64_t hy4_read_slots(uint64_t n, const Hy4Geometry *g)
 static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t *slots)
 {
   const Hy4Geometry *g = &f->w->geo;
-  const Hy4Layer *L = &f->w->layer[l];
   const uint32_t K = (uint32_t)g->n_used, E = (uint32_t)g->n_experts, nk = n * K;
   const uint32_t lat = (uint32_t)g->latent, ffe = (uint32_t)g->ff_exp;
   if (hipMemcpy(f->h_idx, f->idx, (size_t)nk * 4, hipMemcpyDeviceToHost) != hipSuccess ||
@@ -45,11 +73,11 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t 
   uint32_t e_n = 0;
   if (!moe_route(f->h_idx, nk, K, E, MM_TILE, &rt) || !moe_entries(&rt, MM_MAX_TOKENS, f->h_ent, f->rkey, &e_n))
     return false;
+  if (!in_memory(f, l, &rt, nk))
+    return false;
   for (uint32_t q = 0; q < nk; q++)
     f->h_gidx[q] = (int32_t)(rt.by[q] / K), f->h_wsel[q] = f->h_w[rt.by[q]];
   *entries = e_n, *slots = rt.slots;
-  const uint64_t bytes[3] = {L->exp_gate->bytes / E, L->exp_up->bytes / E, L->exp_down->bytes / E};
-  const uint8_t *base[3] = {hy4_dev(f, L->exp_gate), hy4_dev(f, L->exp_up), hy4_dev(f, L->exp_down)};
   const uint64_t ecap = hy4_read_entries(f->max_tokens, g);
   const void **pw = (const void **)f->h_stage; /* the sorted tables: 3 x ecap pointers, then 5 x ecap counts */
   uint32_t *pu = (uint32_t *)(pw + 3 * ecap);
@@ -58,7 +86,7 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t 
     const MoeEntry *en = &f->h_ent[k];
     const uint32_t slot = rt.slot0[en->run] + en->off, row = rt.start[en->run] + en->off;
     for (int m = 0; m < 3; m++)
-      pw[(uint64_t)m * ecap + k] = base[m] + rt.expert[en->run] * bytes[m];
+      pw[(uint64_t)m * ecap + k] = f->h_ex[en->run][m];
     f->h_rcnt[k] = (int32_t)en->cnt, pu[ecap + k] = slot * lat, pu[2 * ecap + k] = row * ffe;
     pu[3 * ecap + k] = slot * ffe, pu[4 * ecap + k] = row * lat;
   }
@@ -101,6 +129,47 @@ static bool mm_experts(uint32_t type, const void *const *w, const int32_t *h_cnt
   return ok;
 }
 
+/* a decode's tables on the host (some experts not resident: the membrane's addresses), hy4_route's: the picks by
+   expert ascending, an expert's tokens ascending - row r's token and weight, pick m's row; the entries each expert's
+   rows in chunks (experts ascending), the count 0 past them to n_tok x k. a pick out of range or twice in a token
+   refused (hy4_route's fault) */
+static bool decode_tables(Hy4Forward *f, int l, uint32_t n, uint32_t chunk)
+{
+  const Hy4Geometry *g = &f->w->geo;
+  const uint32_t K = (uint32_t)g->n_used, E = (uint32_t)g->n_experts, nk = n * K;
+  if (hipMemcpy(f->h_idx, f->idx, (size_t)nk * 4, hipMemcpyDeviceToHost) != hipSuccess ||
+      hipMemcpy(f->h_w, f->wtok, (size_t)nk * F, hipMemcpyDeviceToHost) != hipSuccess)
+    return false;
+  for (uint32_t m = 0; m < nk; m++)
+    for (uint32_t s = m - m % K; s < m; s++)
+      if (f->h_idx[s] == f->h_idx[m])
+        return false;
+  MoeRoute rt = {f->h_by, (uint32_t *)f->h_sidx, f->h_run, f->h_run + E, f->h_run + 2 * E, f->h_run + 3 * E,
+                 f->h_rgidx, f->h_rhidx, f->h_estart, 0, 0};
+  if (!moe_route(f->h_idx, nk, K, E, MM_TILE, &rt) || !in_memory(f, l, &rt, nk))
+    return false;
+  for (uint32_t q = 0; q < nk; q++)
+    f->h_gidx[q] = (int32_t)(rt.by[q] / K), f->h_wsel[q] = f->h_w[rt.by[q]];
+  int32_t *cnt = f->h_rcnt, *xrow = (int32_t *)f->h_rx;
+  const void **wptr = f->h_rw;
+  uint32_t ne = 0;
+  for (uint32_t j = 0; j < rt.runs; j++)
+    for (uint32_t off = 0; off < rt.count[j]; off += chunk, ne++)
+    {
+      cnt[ne] = (int32_t)(rt.count[j] - off < chunk ? rt.count[j] - off : chunk), xrow[ne] = (int32_t)(rt.start[j] + off);
+      for (int k = 0; k < 3; k++)
+        wptr[(uint64_t)k * nk + ne] = f->h_ex[j][k];
+    }
+  for (uint32_t i = ne; i < nk; i++)
+    cnt[i] = 0;
+  return hipMemcpy(f->gidx, f->h_gidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->sidx, f->h_sidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->wsel, f->h_wsel, (size_t)nk * F, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->cnt, cnt, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->xrow, xrow, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->wptr, wptr, 3 * (size_t)nk * sizeof *wptr, hipMemcpyHostToDevice) == hipSuccess;
+}
+
 static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -109,12 +178,12 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin
   const uint32_t lat = (uint32_t)g->latent, ffe = (uint32_t)g->ff_exp;
   if (!read)
   {
-    const void *base[3] = {hy4_dev(f, L->exp_gate), hy4_dev(f, L->exp_up), hy4_dev(f, L->exp_down)};
-    const uint64_t bytes[3] = {L->exp_gate->bytes / E, L->exp_up->bytes / E, L->exp_down->bytes / E};
     const void **wg = (const void **)f->wptr, **wu = wg + nk, **wd = wg + 2 * nk;
     const uint32_t chunk = n < MV_MAX_TOKENS ? n : MV_MAX_TOKENS;
-    return hy4_route(f->idx, f->wtok, n, K, E, chunk, base, bytes, f->gidx, f->sidx, f->wsel, f->cnt, f->xrow, wg,
-                     f->fault, f->st) &&
+    const void *const *tab = f->exp_tab + (uint64_t)(l - g->n_dense) * 3 * E; /* (every expert resident) */
+    return (f->whole ? hy4_route(f->idx, f->wtok, n, K, E, chunk, tab, f->gidx, f->sidx, f->wsel, f->cnt, f->xrow, wg,
+                                 f->fault, f->st)
+                     : decode_tables(f, l, n, chunk)) &&
            ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) &&
            mv_experts(L->exp_gate, wg, f, nk, chunk, ffe, lat, f->xg, f->eg_g) &&
            mv_experts(L->exp_up, wu, f, nk, chunk, ffe, lat, f->xg, f->eg_u) &&
