@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "osmos/model/expert_units.h"
 #include "osmos/model/qtype.h"
 #include "weights_geo.h"
 
@@ -395,19 +396,10 @@ void weights_destroy(Weights *w)
 
 size_t weights_experts(const Weights *w, const int *model_fds, PoolUnit *units, size_t cap)
 {
-  if (!w)
+  if (!w || w->geo.n_layers > WEIGHTS_MAX_LAYERS)
     return 0;
-  const size_t n_exp = (size_t)w->geo.n_experts, n = (size_t)w->geo.n_layers * n_exp;
-  for (size_t i = 0; units && model_fds && i < n && i < cap; i++)
-  {
-    const LayerWeights *l = &w->layer[i / n_exp];
-    const GgufTensor *t[EXPERT_PARTS] = {l->exp_gate, l->exp_up, l->exp_down};
-    units[i] = (PoolUnit){.n_parts = EXPERT_PARTS};
-    for (int k = 0; k < EXPERT_PARTS; k++)
-    {
-      const uint64_t slice = t[k]->bytes / n_exp;
-      units[i].part[k] = (PoolRange){model_fds[t[k]->file], t[k]->offset + (i % n_exp) * slice, slice};
-    }
-  }
-  return n;
+  ExpertTensors t[WEIGHTS_MAX_LAYERS];
+  for (int l = 0; l < w->geo.n_layers; l++)
+    t[l] = (ExpertTensors){w->layer[l].exp_gate, w->layer[l].exp_up, w->layer[l].exp_down, false};
+  return expert_units(t, (uint32_t)w->geo.n_layers, (uint32_t)w->geo.n_experts, model_fds, units, cap);
 }

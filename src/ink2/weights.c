@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "osmos/ink2/weights.h"
+#include "osmos/model/expert_units.h"
 #include "osmos/model/qtype.h"
 
 /* a role's types: a mask of the table's ids (qtype.h), or any type its path reads */
@@ -319,28 +320,13 @@ Ink2Weights *ink2_weights_create(const Gguf *model, char err[INK2_ERR])
 /* an expert's three parts: its slice of gate, up and down - a fused gate and up's slice halved, its gate rows first */
 size_t ink2_weights_experts(const Ink2Weights *w, const int *model_fds, PoolUnit *units, size_t cap)
 {
-  if (!w)
+  if (!w || w->geo.n_layers > INK2_MAX_LAYERS)
     return 0;
-  const size_t E = (size_t)w->geo.n_experts, n = (size_t)w->geo.n_layers * E;
-  for (int l = 0; l < w->geo.n_layers; l++) /* every layer's three first: nothing written for a model refused */
+  ExpertTensors t[INK2_MAX_LAYERS];
+  for (int l = 0; l < w->geo.n_layers; l++)
   {
     const Ink2Layer *L = &w->layer[l];
-    const GgufTensor *t[POOL_PARTS] = {L->exp_gate, L->exp_up, L->exp_down};
-    for (int k = 0; k < POOL_PARTS; k++)
-      if (!t[k] || t[k]->bytes % E || (L->exp_fused && k < 2 && t[k]->bytes / E % 2))
-        return 0;
+    t[l] = (ExpertTensors){L->exp_gate, L->exp_up, L->exp_down, L->exp_fused};
   }
-  for (size_t i = 0; units && model_fds && i < n && i < cap; i++)
-  {
-    const Ink2Layer *l = &w->layer[i / E];
-    const GgufTensor *t[POOL_PARTS] = {l->exp_gate, l->exp_up, l->exp_down};
-    units[i] = (PoolUnit){.n_parts = POOL_PARTS};
-    for (int k = 0; k < POOL_PARTS; k++)
-    {
-      const uint64_t slice = t[k]->bytes / E, half = l->exp_fused && k < 2 ? slice / 2 : 0;
-      units[i].part[k] = (PoolRange){model_fds[t[k]->file], t[k]->offset + (i % E) * slice + (k == 1 ? half : 0),
-                                     half ? half : slice};
-    }
-  }
-  return n;
+  return expert_units(t, (uint32_t)w->geo.n_layers, (uint32_t)w->geo.n_experts, model_fds, units, cap);
 }

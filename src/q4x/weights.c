@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/model/expert_units.h"
 #include "osmos/model/qtype.h"
 #include "../model/gguf_meta.h"
 #include "q4x_geo.h"
@@ -252,28 +253,18 @@ static bool models(const Q4xWeights *w, const GgufTensor *t)
 
 size_t q4x_weights_experts(const Q4xWeights *w, const int *model_fds, PoolUnit *units, size_t cap)
 {
-  if (!w)
+  if (!w || w->geo.n_layers > Q4X_MAX_LAYERS)
     return 0;
-  const size_t E = (size_t)w->geo.n_experts, n = (size_t)w->geo.n_layers * E;
-  for (int l = 0; l < w->geo.n_layers; l++) /* every layer's three first: nothing written for a model refused */
+  ExpertTensors t[Q4X_MAX_LAYERS];
+  for (int l = 0; l < w->geo.n_layers; l++) /* (an overlay's expert tensor not the model's file: not units) */
   {
-    const GgufTensor *t[POOL_PARTS] = {w->layer[l].exp_gate, w->layer[l].exp_up, w->layer[l].exp_down};
+    const Q4xLayer *L = &w->layer[l];
+    t[l] = (ExpertTensors){L->exp_gate, L->exp_up, L->exp_down, false};
     for (int k = 0; k < POOL_PARTS; k++)
-      if (!t[k] || !models(w, t[k]) || t[k]->bytes % E)
+      if (!(&t[l].gate)[k] || !models(w, (&t[l].gate)[k]))
         return 0;
   }
-  for (size_t i = 0; units && model_fds && i < n && i < cap; i++)
-  {
-    const Q4xLayer *l = &w->layer[i / E];
-    const GgufTensor *t[POOL_PARTS] = {l->exp_gate, l->exp_up, l->exp_down};
-    units[i] = (PoolUnit){.n_parts = POOL_PARTS};
-    for (int k = 0; k < POOL_PARTS; k++)
-    {
-      const uint64_t slice = t[k]->bytes / E;
-      units[i].part[k] = (PoolRange){model_fds[t[k]->file], t[k]->offset + (i % E) * slice, slice};
-    }
-  }
-  return n;
+  return expert_units(t, (uint32_t)w->geo.n_layers, (uint32_t)w->geo.n_experts, model_fds, units, cap);
 }
 
 void q4x_mtp_destroy(Q4xMtp *m) { free(m); }
