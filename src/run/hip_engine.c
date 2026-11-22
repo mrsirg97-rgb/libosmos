@@ -186,7 +186,8 @@ static bool draw(Osmos *e, const float *dev, const OsmosSampling *s, uint64_t po
     return fail(err, "sampling: temperature finite and above 0, top_p in (0, 1]");
   if (!e->dpick && hipMalloc((void **)&e->dpick, sizeof *e->dpick) != hipSuccess)
     return e->dpick = NULL, fail(err, "a GPU call failed (sampling's pick)");
-  if (!ops_sample(dev, e->vocab, s->temperature, s->top_p, ops_draw_uniform(s->seed, position), e->dpick, NULL) ||
+  if (!ops_sample(dev, e->vocab, s->temperature, s->top_p, s->top_k, ops_draw_uniform(s->seed, position), e->dpick,
+                  NULL) ||
       hipMemcpy(id, e->dpick, sizeof *id, hipMemcpyDeviceToHost) != hipSuccess)
     return fail(err, "a GPU call failed (a sampled token)");
   return *id >= 0 || fail(err, "a sampled row with a NaN or +inf (or every token excepted)");

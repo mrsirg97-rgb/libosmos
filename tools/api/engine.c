@@ -211,7 +211,11 @@ Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsig
   if (mark) /* a point osmos-serve keeps besides the prompt's (its last user turn's) */
     w += (size_t)snprintf(msg + w, cap - w, "mark=%u ", mark);
   if (s && s->temperature > 0) /* sampled (0.14.0): the tokens of (seed, position) - the same seed, the same answer */
+  {
     w += (size_t)snprintf(msg + w, cap - w, "temp=%.9g top_p=%.9g seed=%llu ", s->temperature, s->top_p, s->seed);
+    if (s->top_k) /* 0.15.2 */
+      w += (size_t)snprintf(msg + w, cap - w, "top_k=%u ", s->top_k);
+  }
   for (size_t i = 0; i < n; i++)
     w += (size_t)snprintf(msg + w, cap - w, i ? ",%d" : "%d", ids[i]);
   msg[w++] = '\n';

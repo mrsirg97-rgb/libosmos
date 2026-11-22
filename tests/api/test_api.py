@@ -1347,8 +1347,23 @@ class Sampling(Served, unittest.TestCase):
         self.assertEqual(r.getheader("x-osmos-seed"), "77")
         r.read()
 
+    def test_4_top_k(self):  # 0.15.2: GEN's top_k= as asked; 0 or -1 every token (no key); a bad one refused
+        self.ready()
+        _, k = self.ask(top_k=20)
+        self.assertEqual(k["top_k"], "20")
+        for off in (0, -1, None):
+            _, k = self.ask(top_k=off)
+            self.assertNotIn("top_k", k)
+        _, k = self.ask(temperature=0, top_k=20)  # greedy: no sampling keys at all
+        self.assertNotIn("top_k", k)
+        for bad in (-2, 1.5, "20"):
+            self.reply("ok" + EOS)
+            r = self.post({"messages": [{"role": "user", "content": "x"}], "top_k": bad})
+            self.assertEqual(r.status, 400)
+            self.assertIn("top_k", r.read().decode())
+
     def test_3_pack_refused(self):
-        for bad in ({"temperature": -1}, {"top_p": 0}, {"top_p": 2}):
+        for bad in ({"temperature": -1}, {"top_p": 0}, {"top_p": 2}, {"top_k": -1}, {"top_k": 2.5}):
             d = tempfile.mkdtemp()
             cfg = os.path.join(d, "osmos.json")
             with open(cfg, "w") as f:
@@ -1357,6 +1372,24 @@ class Sampling(Served, unittest.TestCase):
                                capture_output=True, text=True, timeout=30)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn(next(iter(bad)), r.stderr)
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class SamplingTopK(Sampling):
+    """0.15.2: the pack's top_k (osmos.json) a request's unset; a request's top_k over it"""
+    settings = {"temperature": 1.0, "top_p": 0.95, "top_k": 50}
+
+    def test_5_pack_top_k(self):
+        self.ready()
+        _, k = self.ask()
+        self.assertEqual(k["top_k"], "50")
+        _, k = self.ask(top_k=20)
+        self.assertEqual(k["top_k"], "20")
+        _, k = self.ask(top_k=0)  # every token, over the pack's
+        self.assertNotIn("top_k", k)
+
+    def test_4_top_k(self):  # (the base's asks a request's top_k: none sent means the pack's 50 here)
+        pass
+
 
 if __name__ == "__main__":
     sys.exit(not unittest.main(exit=False, verbosity=2).result.wasSuccessful())

@@ -101,8 +101,11 @@ bool parse_gen(char *line, Gen *g, char *why, size_t wn)
       g->samp.top_p = strtof(eq + 1, NULL);
     else if (!strcmp(tok, "seed"))
       g->samp.seed = strtoull(eq + 1, NULL, 10);
+    else if (!strcmp(tok, "top_k")) /* 0.15.2: 0 every token */
+      g->samp.top_k = (uint32_t)strtoul(eq + 1, NULL, 10);
     else
-      return snprintf(why, wn, "the key '%s' is not this engine's (rid, spec, mark, temp, top_p, seed)", tok), false;
+      return snprintf(why, wn, "the key '%s' is not this engine's (rid, spec, mark, temp, top_p, top_k, seed)", tok),
+             false;
   }
   if (!(g->samp.temperature >= 0 && g->samp.temperature < 1e30f) || !(g->samp.top_p > 0 && g->samp.top_p <= 1))
     return snprintf(why, wn, "temp= finite and at least 0, top_p= in (0, 1]"), false;

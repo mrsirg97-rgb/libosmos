@@ -188,7 +188,7 @@ int main(int argc, char **argv)
   if (!config_read(cfg_path, &c, err))
     return die(err);
   api.fill_orphans = c.fill_orphans, api.preserve_thinking = c.preserve_thinking;
-  api.temperature = c.temperature, api.top_p = c.top_p;
+  api.temperature = c.temperature, api.top_p = c.top_p, api.top_k = c.top_k;
   if (opt(argc, argv, "--ctx", NULL)) /* the pack's max_context, overridden: a shorter context (less memory) or 1M */
   {
     const unsigned ctx = ctx_of(opt(argc, argv, "--ctx", NULL));

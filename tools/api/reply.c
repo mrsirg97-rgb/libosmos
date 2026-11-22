@@ -475,7 +475,7 @@ void api_chat(Api *a, Http *h)
     return;
   }
   Request rq;
-  const bool ok = request_read(body, a->d, a->fill_orphans, a->preserve_thinking, a->temperature, a->top_p, &rq, err);
+  const bool ok = request_read(body, a->d, a->fill_orphans, a->preserve_thinking, a->temperature, a->top_p, a->top_k, &rq, err);
   json_free(body);
   if (!ok)
   {
@@ -492,7 +492,7 @@ void api_chat(Api *a, Http *h)
     snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL, over = true;
   if (ids && rq.max_tokens && n + rq.max_tokens > ctx)
     rq.max_tokens = (unsigned)(ctx - n); /* past the context: as many as it leaves (finish "length") */
-  const Sampling samp = {rq.temperature, rq.top_p, rq.seed};
+  const Sampling samp = {rq.temperature, rq.top_p, rq.seed, rq.top_k};
   Run *r = ids ? engine_run(&a->engine, ids, n, rq.max_tokens, next_mark(a, &rq, ids, n), &samp, err) : NULL;
   free(ids);
   if (!r) /* 503 for loading alone (a request's own fault - its template's - a 400 then too: 0.9.2's, retried) */

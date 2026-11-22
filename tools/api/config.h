@@ -23,6 +23,7 @@ typedef struct Config
   bool kv_q8;        /* osmos-serve's --kv-q8 (Inkling's full layers' cached values Q8, not Q5) */
   double temperature, top_p; /* 0.14.0: the pack's sampling, a request's unset (its release's: Inkling-2-Mini's 1.0);
                                 temperature 0 greedy (the default), top_p 1 */
+  unsigned top_k;            /* 0.15.2: likewise (Qwen3.8's 20, osmos1.7b's 50); 0 every token */
   char npu[PATH_MAX]; /* the NPU's kernels' directory (osmos-serve's --npu): "" none */
   double npu_share;   /* its share of a layer's pairs (--npu-share): 0 osmos-serve's own */
   unsigned max_context, parallel;

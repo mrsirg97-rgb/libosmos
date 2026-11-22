@@ -1,5 +1,5 @@
-// a sampled token (ops_sample, ops_draw_uniform: 0.14.0's sampling) against the definition on the host in double:
-// temperature's softmax, top-p's kept set (every token at least the threshold whose kept mass reaches top_p, ties
+// a sampled token (ops_sample, ops_draw_uniform: 0.14.0's sampling, top-k 0.15.2's) against the definition on the host
+// in double: temperature's softmax, top-k's kept set (the k most likely, ties to the k-th kept), top-p's within it (every token at least the threshold whose kept mass reaches top_p, ties
 // kept), the inverse CDF in id order at u - on random rows at Qwen's and Inkling's vocabularies and small ones, at
 // temperatures 0.5 to 1.5 and top_p 0.05 to 1 (a draw near a CDF or kept-set edge, within the F32 sums' rounding,
 // not judged); the same row and u the same token every launch; a small row's tokens at N evenly spaced u each its
@@ -51,30 +51,39 @@ static int32_t at_cut(const std::vector<double>& p, double tau, double u, double
 // the definition: the token, or -2 when the F32 sums' rounding could decide it (within 1e-6 of the mass: probed, no
 // mismatch down to it) - u at a CDF edge, or the top-p cut (the fewest greatest reaching top_p of the mass, ties
 // kept) within rounding of the target and one place either way giving another token
-static int32_t reference(const std::vector<float>& x, double T, double top_p, double u, double eps) {
+static int32_t reference(const std::vector<float>& x, double T, double top_p, uint32_t top_k, double u, double eps) {
   const size_t n = x.size();
   double m = -INFINITY;
   for (float v : x) m = std::max(m, (double) v);
   std::vector<double> p(n);
-  double z = 0;
-  for (size_t i = 0; i < n; i++) z += p[i] = std::exp(((double) x[i] - m) / T);
-  if (top_p >= 1) return at_cut(p, 0, u, eps);
+  for (size_t i = 0; i < n; i++) p[i] = std::exp(((double) x[i] - m) / T);
   std::vector<double> s(p);
   std::sort(s.begin(), s.end(), std::greater<double>());
+  // top-k: the k greatest kept, every token tied with the k-th; its edge within rounding of the next: not judged
+  double tk = 0;
+  if (top_k && top_k < n) {
+    tk = s[top_k - 1];
+    if (s[top_k] >= tk * (1 - eps)) return -2;
+  }
+  double z = 0;
+  for (double v : p) z += v >= tk ? v : 0;
+  if (top_p >= 1) return at_cut(p, tk, u, eps);
+  while (!s.empty() && s.back() < tk) s.pop_back();  // top-p over the top-k's kept alone, its mass their sum
   const double target = top_p * z;
   double before = 0;  // the mass of s[0 .. k), short of the target
   size_t k = 0;
-  while (k + 1 < n && before + s[k] < target) before += s[k++];
+  const size_t ns = s.size();
+  while (k + 1 < ns && before + s[k] < target) before += s[k++];
   const int32_t want = at_cut(p, s[k], u, eps);
   if (want == -2) return -2;
   // the cut moved by the sums' rounding: one place in (its mass short of the target within it), or one out
   if (k && before >= target - eps * z && at_cut(p, s[k - 1], u, eps) != want) return -2;
-  if (k + 1 < n && before + s[k] < target + eps * z && at_cut(p, s[k + 1], u, eps) != want) return -2;
+  if (k + 1 < ns && before + s[k] < target + eps * z && at_cut(p, s[k + 1], u, eps) != want) return -2;
   return want;
 }
 
-static int32_t draw(const float* dx, uint32_t n, float T, float top_p, float u, int32_t* dout) {
-  CHECK(ops_sample(dx, n, T, top_p, u, dout, nullptr));
+static int32_t draw(const float* dx, uint32_t n, float T, float top_p, uint32_t top_k, float u, int32_t* dout) {
+  CHECK(ops_sample(dx, n, T, top_p, top_k, u, dout, nullptr));
   int32_t t = 0;
   CHECK(hipMemcpy(&t, dout, 4, hipMemcpyDeviceToHost) == hipSuccess);
   return t;
@@ -101,19 +110,21 @@ int main() {
       CHECK(hipMemcpy(dx, x.data(), (size_t) n * 4, hipMemcpyHostToDevice) == hipSuccess);
       for (float T : {0.5f, 0.7f, 1.0f, 1.5f})
         for (float top_p : {0.05f, 0.5f, 0.9f, 0.95f, 1.0f})
-          for (int k = 0; k < 6; k++) {
-            const float u = (float) unit();
-            const int32_t want = reference(x, T, top_p, u, 1e-6), got = draw(dx, n, T, top_p, u, dout);
-            CHECK(got >= 0 && (uint32_t) got < n && got == draw(dx, n, T, top_p, u, dout));
-            if (want == -2) {
-              edges++;
-              continue;
+          for (uint32_t top_k : {0u, 1u, 20u, 50u})  // (0.15.2: Qwen's 20, osmos1.7b's 50; 1 the greedy pick)
+            for (int k = 0; k < 3; k++) {
+              const float u = (float) unit();
+              const int32_t want = reference(x, T, top_p, top_k, u, 1e-6), got = draw(dx, n, T, top_p, top_k, u, dout);
+              CHECK(got >= 0 && (uint32_t) got < n && got == draw(dx, n, T, top_p, top_k, u, dout));
+              if (want == -2) {
+                edges++;
+                continue;
+              }
+              if (got != want)
+                std::fprintf(stderr, "  n %u T %g top_p %g top_k %u u %.7f: %d, the definition's %d\n", n, T, top_p,
+                             top_k, u, got, want);
+              CHECK(got == want);
+              judged++;
             }
-            if (got != want)
-              std::fprintf(stderr, "  n %u T %g top_p %g u %.7f: %d, the definition's %d\n", n, T, top_p, u, got, want);
-            CHECK(got == want);
-            judged++;
-          }
     }
     CHECK(hipFree(dx) == hipSuccess);
   }
@@ -126,15 +137,18 @@ int main() {
     float* dx;
     CHECK(hipMalloc(&dx, n * 4) == hipSuccess && hipMemcpy(dx, x.data(), n * 4, hipMemcpyHostToDevice) == hipSuccess);
     for (float T : {0.6f, 1.0f})
-      for (float top_p : {1.0f, 0.8f}) {
+      for (float top_p : {1.0f, 0.8f})
+        for (uint32_t top_k : {0u, 3u}) {
         std::vector<int> count(n, 0);
-        for (uint32_t k = 0; k < N; k++) count[(size_t) draw(dx, n, T, top_p, (k + 0.5f) / N, dout)]++;
+        for (uint32_t k = 0; k < N; k++) count[(size_t) draw(dx, n, T, top_p, top_k, (k + 0.5f) / N, dout)]++;
         double m = -INFINITY, z = 0;
         for (float v : x) m = std::max(m, (double) v);
         std::vector<double> p(n);
-        for (uint32_t i = 0; i < n; i++) z += p[i] = std::exp(((double) x[i] - m) / T);
+        for (uint32_t i = 0; i < n; i++) p[i] = std::exp(((double) x[i] - m) / T);
         std::vector<double> s(p);
         std::sort(s.begin(), s.end(), std::greater<double>());
+        if (top_k && top_k < n) s.resize(top_k);  // the top-k's kept (no ties in this row), then top-p within them
+        for (double v : s) z += v;
         double tau = 0, acc = 0;
         for (double v : s)
           if ((acc += v) >= top_p * z) {
@@ -150,7 +164,7 @@ int main() {
       }
     CHECK(hipFree(dx) == hipSuccess);
     std::printf("  a row's tokens at %u evenly spaced u: each its probability's share within 1 / %u (T 0.6, 1; top_p "
-                "1, 0.8: the cut tokens never)\n", N, N);
+                "1, 0.8; top_k 0, 3: the cut tokens never)\n", N, N);
   }
   // a NaN or an inf: -1; refusals
   {
@@ -158,13 +172,13 @@ int main() {
     x[37] = NAN;
     float* dx;
     CHECK(hipMalloc(&dx, 400) == hipSuccess && hipMemcpy(dx, x.data(), 400, hipMemcpyHostToDevice) == hipSuccess);
-    CHECK(draw(dx, 100, 1.0f, 1.0f, 0.5f, dout) == -1);
+    CHECK(draw(dx, 100, 1.0f, 1.0f, 0, 0.5f, dout) == -1);
     x[37] = INFINITY;
-    CHECK(hipMemcpy(dx, x.data(), 400, hipMemcpyHostToDevice) == hipSuccess && draw(dx, 100, 1.0f, 1.0f, 0.5f, dout) == -1);
-    CHECK(!ops_sample(nullptr, 100, 1, 1, 0.5f, dout, nullptr) && !ops_sample(dx, 0, 1, 1, 0.5f, dout, nullptr) &&
-          !ops_sample(dx, 100, 0, 1, 0.5f, dout, nullptr) && !ops_sample(dx, 100, 1, 0, 0.5f, dout, nullptr) &&
-          !ops_sample(dx, 100, 1, 1.5f, 0.5f, dout, nullptr) && !ops_sample(dx, 100, 1, 1, 1.0f, dout, nullptr) &&
-          !ops_sample(dx, 100, 1, 1, -0.1f, dout, nullptr));
+    CHECK(hipMemcpy(dx, x.data(), 400, hipMemcpyHostToDevice) == hipSuccess && draw(dx, 100, 1.0f, 1.0f, 0, 0.5f, dout) == -1);
+    CHECK(!ops_sample(nullptr, 100, 1, 1, 0, 0.5f, dout, nullptr) && !ops_sample(dx, 0, 1, 1, 0, 0.5f, dout, nullptr) &&
+          !ops_sample(dx, 100, 0, 1, 0, 0.5f, dout, nullptr) && !ops_sample(dx, 100, 1, 0, 0, 0.5f, dout, nullptr) &&
+          !ops_sample(dx, 100, 1, 1.5f, 0, 0.5f, dout, nullptr) && !ops_sample(dx, 100, 1, 1, 0, 1.0f, dout, nullptr) &&
+          !ops_sample(dx, 100, 1, 1, 0, -0.1f, dout, nullptr));
     CHECK(hipFree(dx) == hipSuccess);
     std::printf("  a NaN or an inf: -1; no row, temperature 0, top_p 0 or past 1, u past [0, 1): refused\n");
   }

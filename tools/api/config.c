@@ -91,6 +91,9 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
                    c->top_p <= 1
                ? true
                : fail(err, "a share above 0, 1 at most", k);
+  if (!strcmp(k, "top_k")) /* 0.15.2: 0 every token */
+    return v->type == JSON_INT && v->s[0] != '-' && strlen(v->s) <= 9 ? (c->top_k = (unsigned)atol(v->s), true)
+                                                                         : fail(err, "an integer, 0 (every token) or more", k);
   if (!strcmp(k, "kv_q8"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->kv_q8 = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
