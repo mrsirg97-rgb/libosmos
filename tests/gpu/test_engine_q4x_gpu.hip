@@ -57,13 +57,13 @@ int main() {
   CHECK(m);
   const OsmosFacts fx = osmos_facts(m);
   CHECK(!std::strcmp(fx.family, "qwen4exp") && fx.vocab == 248320 && fx.native_ctx == 262144 && fx.seed_window == fx.native_ctx &&
-        !fx.streams);
+        fx.streams);  // (0.13.0: its experts the membrane's, sized to a budget)
   CHECK(fx.round_tokens == (512 - 1) / 10);  // a decode round's tokens: under every expert's read (512 of them, 10 a token)
   const uint32_t V = fx.vocab;
 
-  // the options it refuses: a budget, picks, a drafter, no_guess, a context past the dense attention's
-  const OsmosOptions bad[] = {{kCtx, kStep, 1ull << 30, nullptr, false, nullptr},
-                              {kCtx, kStep, 0, "/tmp/picks", false, nullptr},
+  // the options it refuses: picks, a drafter, no_guess, a context past the dense attention's (a budget taken: its
+  // experts streamed past it - budget 0, below, the smallest build's)
+  const OsmosOptions bad[] = {{kCtx, kStep, 0, "/tmp/picks", false, nullptr},
                               {kCtx, kStep, 0, nullptr, false, "/tmp/drafter"},
                               {kCtx, kStep, 0, nullptr, true, nullptr},
                               {OPS_Q4X_MAX_KEYS + 1, kStep, 0, nullptr, false, nullptr}};

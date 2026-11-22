@@ -1,3 +1,5 @@
+#include "osmos/mem/membrane.h"
+#include "osmos/model/moe_route.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/model/qtype.h"
 #include "q4x_impl.h"
@@ -328,6 +330,61 @@ static bool experts(const GgufTensor *t, const void **ptr, const Q4xBuf *b, cons
   return ok;
 }
 
+/* a streamed layer's tables on the host, q4x_expert_tiles' layout (its bounds' runs: an entry a part of at most 128
+   of an expert's rows, in the run of its tiles, experts ascending in each; counts 0 past the live ones, slots -1): the
+   picks by expert (moe_route), each run's expert from the membrane (visited - the GPU past the last layer's experts:
+   the picks' copy waited for it - scored at a decode, held, waited for). false for a pick out of range, a refusal */
+static int run_of(uint32_t c) { return c <= MM_TILE ? 0 : c <= 2 * MM_TILE ? 1 : c <= 4 * MM_TILE ? 2 : 3; }
+
+static bool host_tiles(Q4xForward *f, int l, uint32_t e, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff)
+{
+  Q4xBuf *b = &f->b;
+  const uint32_t E = (uint32_t)f->w->geo.n_experts, k = (uint32_t)f->w->geo.n_used, part = MM_TILE << (Q4X_TILE_RUNS - 1);
+  if (hipMemcpy(f->h_ids, b->ids, (size_t)e * 4, hipMemcpyDeviceToHost) != hipSuccess)
+    return false;
+  MoeRoute rt = {f->h_by, f->h_row, f->h_run, f->h_run + E, f->h_run + 2 * E, f->h_run + 3 * E, f->h_gidx, f->h_hidx,
+                 f->h_est, 0, 0};
+  char merr[MEMBRANE_ERR] = "";
+  if (!moe_route(f->h_ids, e, k, E, MM_TILE, &rt) || !membrane_visit(f->mem, (uint32_t)l, e >= E, merr))
+    return false;
+  for (uint32_t m = 0; e < E && m < e; m++)
+    membrane_score(f->mem, (uint32_t)l * E + (uint32_t)f->h_ids[m]);
+  for (uint32_t j = 0; j < rt.runs; j++) /* every distinct pick held first: the cold ones' reads under way together */
+    if (!membrane_hold(f->mem, (uint32_t)l * E + rt.expert[j], merr))
+      return false;
+  uint32_t at[Q4X_TILE_RUNS];
+  for (int r = 0; r < Q4X_TILE_RUNS; r++)
+    at[r] = bd->first[r];
+  for (uint32_t i = 0; i < bd->entries; i++)
+    f->h_cnt[i] = 0;
+  for (uint32_t j = 0; j < rt.runs; j++)
+  {
+    if (!membrane_wait(f->mem, (uint32_t)l * E + rt.expert[j], f->h_ex[j], merr))
+      return false;
+    for (uint32_t off = 0; off < rt.count[j]; off += part)
+    {
+      const uint32_t c = rt.count[j] - off < part ? rt.count[j] - off : part, en = at[run_of(c)]++;
+      const uint32_t slot = rt.slot0[j] + off, place = rt.start[j] + off;
+      f->h_cnt[en] = (int32_t)c, f->h_xg[en] = slot * D, f->h_xd[en] = slot * ff, f->h_yg[en] = place * ff,
+      f->h_yd[en] = place * D;
+      for (int t = 0; t < Q4X_GROUP_TENSORS; t++)
+        f->h_ptr[(uint64_t)t * bd->entries + en] = f->h_ex[j][t];
+    }
+  }
+  for (uint32_t s = rt.slots; s < bd->slots; s++)
+    f->h_gidx[s] = f->h_hidx[s] = -1;
+  const uint64_t ne = bd->entries;
+  return hipMemcpy(b->cnt, f->h_cnt, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->xg, f->h_xg, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->yg, f->h_yg, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->xd, f->h_xd, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->yd, f->h_yd, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->ptr, f->h_ptr, Q4X_GROUP_TENSORS * ne * sizeof *f->h_ptr, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->gidx, f->h_gidx, (uint64_t)bd->slots * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->hidx, f->h_hidx, (uint64_t)bd->slots * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->where, f->h_row, (uint64_t)e * 4, hipMemcpyHostToDevice) == hipSuccess;
+}
+
 bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
@@ -341,18 +398,19 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
                        .yd = b->yd, .where = b->where, .off = b->eoff};
   /* a layer of the model's with its experts on the membrane: their addresses the table's (the MTP head's layer, or a
      forward without one: its tensors' own) */
-  const bool tab = f->exp_tab && L >= f->w->layer && L < f->w->layer + g->n_layers;
+  const bool model_layer = L >= f->w->layer && L < f->w->layer + g->n_layers;
+  const bool tab = f->exp_tab && model_layer, streamed = f->mem && !f->exp_tab && model_layer;
   for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
   {
     et.ptr[i] = b->ptr + (uint64_t)i * bd.entries;
     if (tab)
       et.tab[i] = (const void *const *)f->exp_tab + ((uint64_t)(L - f->w->layer) * Q4X_GROUP_TENSORS + (uint64_t)i) * E;
-    else
+    else if (!streamed)
       et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E;
   }
   /* each expert read once for up to 128 of the step's tokens that picked it (q4x_expert_tiles, mm_group) */
   if (!mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) || !q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) ||
-      !q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL))
+      (streamed ? !host_tiles(f, (int)(L - f->w->layer), e, &bd, D, ff) : !q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL)))
     return false;
   /* 0.7.0: the NPU's share of a prompt step's whole entries, taken from the tables (hip_npu.c): each kind's packed
      before the GPU's matmuls of it are queued, run beside them, its rows where theirs go */
