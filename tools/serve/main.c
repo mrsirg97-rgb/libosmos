@@ -5,7 +5,7 @@
                      [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
                      [--stream-ngram] [--kv-q8] [--overlay <gguf>] [--lsa <maps>] [--answer-after <text>] [--serve]
 
-   in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
+   in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [temp=<t>] [top_p=<p>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
    out: READY <max_ctx> stop[ multi=N] / T [<rid>] <token> / PP [<rid>] <done> <total> <ms> <tok/s> <reused> /
         DONE [<rid>] <produced> <prompt> <prompt_ms> <decode_ms> <finish> <accepted> <drafted> <reused> 0 0 /
         ERR [<rid>] <reason> / NOTE <text>

@@ -65,6 +65,7 @@ typedef struct Gen
   int32_t *ids; /* malloc'd */
   uint32_t n;
   uint32_t mark; /* mark=: a point besides the prompt's (Conv.user), 0 none */
+  OsmosSampling samp; /* temp=, top_p=, seed= (0.14.0): temperature 0 (not given) greedy */
 } Gen;
 
 double now_ms(void);
@@ -72,7 +73,9 @@ void out(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 bool ids_push(Ids *a, int32_t x);
 bool parse_gen(char *line, Gen *g, char *why, size_t wn);
 bool server_eos(const Server *sv, int32_t t);
-bool server_answer(Server *sv, const Ids *held, const int32_t *extra, uint32_t n, uint32_t row, int32_t *pick,
+bool server_greedy(Server *sv, const OsmosSampling *samp, uint32_t row0, uint32_t rows, int32_t *picks,
+                   char err[OSMOS_ERR]);
+bool server_answer(Server *sv, const OsmosSampling *samp, const Ids *held, const int32_t *extra, uint32_t n, uint32_t row, int32_t *pick,
                    char err[OSMOS_ERR]);
 bool server_spec(const Server *sv, const Gen *g);
 

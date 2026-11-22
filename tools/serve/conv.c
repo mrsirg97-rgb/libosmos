@@ -51,21 +51,34 @@ bool server_eos(const Server *sv, int32_t t)
   return false;
 }
 
-/* row's pick, the row's tokens the held then extra[0 .. n): an end while the turn's answer has not begun (the reasoning
-   closed, whitespace alone since: --answer-after's rule) is not taken - the row's best other token is. the same
-   rule for a plain step's row and a drafted round's, so drafting keeps the bits */
-bool server_answer(Server *sv, const Ids *held, const int32_t *extra, uint32_t n, uint32_t row, int32_t *pick,
+/* rows row0 .. row0 + rows - 1's greedy picks, one launch - nothing for a sampled request (server_answer draws each) */
+bool server_greedy(Server *sv, const OsmosSampling *samp, uint32_t row0, uint32_t rows, int32_t *picks,
                    char err[OSMOS_ERR])
 {
+  return osmos_sampled(samp) || osmos_greedy(sv->e, row0, rows, picks, err);
+}
+
+/* row's pick, the row's tokens the held then extra[0 .. n): sampled, drawn at the token's position (held->n + n: the
+   same key a plain step's row and a drafted round's give one position - 0.14.0); then an end while the turn's answer
+   has not begun (the reasoning closed, whitespace alone since: --answer-after's rule) is not taken - the row's best
+   other token is (or drawn among the others, at the same key). the same rule for a plain step's row and a drafted
+   round's, so drafting keeps the bits */
+bool server_answer(Server *sv, const OsmosSampling *samp, const Ids *held, const int32_t *extra, uint32_t n,
+                   uint32_t row, int32_t *pick, char err[OSMOS_ERR])
+{
+  const uint64_t at = (uint64_t)held->n + n;
+  if (osmos_sampled(samp) && !osmos_sample(sv->e, row, samp, at, pick, err))
+    return false;
   if (!sv->answer.blank || !server_eos(sv, *pick) || !answer_unbegun(&sv->answer, held->v, held->n, extra, n))
     return true;
-  return osmos_greedy_except(sv->e, row, sv->eos, (uint32_t)sv->n_eos, pick, err);
+  return osmos_sample_except(sv->e, row, samp, at, sv->eos, (uint32_t)sv->n_eos, pick, err);
 }
 
 bool parse_gen(char *line, Gen *g, char *why, size_t wn)
 {
   memset(g, 0, sizeof *g);
   g->spec = -1;
+  g->samp.top_p = 1;
   char *save = NULL, *tok = strtok_r(line + 4, " ", &save);
   if (!tok)
     return snprintf(why, wn, "expected: GEN <max_new> [keys] <id,id,...>"), false;
@@ -82,9 +95,17 @@ bool parse_gen(char *line, Gen *g, char *why, size_t wn)
       g->rid = atoll(eq + 1), g->has_rid = true;
     else if (!strcmp(tok, "mark"))
       g->mark = (uint32_t)strtoul(eq + 1, NULL, 10);
-    else if (strcmp(tok, "seed") != 0) /* (greedy: a seed changes nothing) */
-      return snprintf(why, wn, "the key '%s' is not this engine's (greedy: rid, spec, seed, mark)", tok), false;
+    else if (!strcmp(tok, "temp"))
+      g->samp.temperature = strtof(eq + 1, NULL);
+    else if (!strcmp(tok, "top_p"))
+      g->samp.top_p = strtof(eq + 1, NULL);
+    else if (!strcmp(tok, "seed"))
+      g->samp.seed = strtoull(eq + 1, NULL, 10);
+    else
+      return snprintf(why, wn, "the key '%s' is not this engine's (rid, spec, mark, temp, top_p, seed)", tok), false;
   }
+  if (!(g->samp.temperature >= 0 && g->samp.temperature < 1e30f) || !(g->samp.top_p > 0 && g->samp.top_p <= 1))
+    return snprintf(why, wn, "temp= finite and at least 0, top_p= in (0, 1]"), false;
   if (!tok)
     return snprintf(why, wn, "a GEN with no ids"), false;
   uint32_t cap = 1;

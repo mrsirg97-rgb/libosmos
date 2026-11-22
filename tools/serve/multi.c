@@ -212,8 +212,8 @@ static void piece(Multi *m)
       ln->reused, ln->c.via ? ln->c.via : "none");
   if (ln->c.held.n < n)
     return;
-  if (!osmos_greedy(sv->e, row, 1, &ln->t, ln->c.err) || !server_answer(sv, &ln->c.held, NULL, 0, row, &ln->t,
-                                                                          ln->c.err))
+  if (!server_greedy(sv, &ln->g.samp, row, 1, &ln->t, ln->c.err) ||
+      !server_answer(sv, &ln->g.samp, &ln->c.held, NULL, 0, row, &ln->t, ln->c.err))
   {
     lane_fail(m, ln);
     return;
