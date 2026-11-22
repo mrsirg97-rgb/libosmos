@@ -1000,21 +1000,23 @@ static bool controls3(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, cons
     return false;
   MmPart pd[3], pg[6];
   OpsRmsPart norms[6];
+  const uint64_t n16 = (n + MM_TILE - 1) / MM_TILE * MM_TILE;
   for (int c = 0; c < 3; c++)
   {
     const int k = INK2_CTRL_Q + c;
-    float *cat = f->ccat3 + (uint64_t)c * MM_BATCH_TOKENS * 2 * C, *gate = f->cgate3 + (uint64_t)c * MM_BATCH_TOKENS * G;
-    void *x16c = bx16_at(f, 2 + c), *x16g = bx16_at(f, 5 + c);
+    /* the gates side by side in a row (gate c at c G, rows 3 G apart): one mm_x16_heads their three f16s, gate c's at
+       c n16 G halves of bx16 5's (each mm_x16's bits) */
+    float *cat = f->ccat3 + (uint64_t)c * MM_BATCH_TOKENS * 2 * C, *gate = f->cgate3 + (uint64_t)c * G;
+    void *x16c = bx16_at(f, 2 + c), *x16g = (uint8_t *)bx16_at(f, 5) + (uint64_t)c * n16 * G * 2;
     norms[2 * c] = (OpsRmsPart){x[c], NULL, cat, x16c, C, 2 * C, 2 * C, 0};
     norms[2 * c + 1] = (OpsRmsPart){m + c * nC, NULL, cat + C, x16c, C, 2 * C, 2 * C, C};
-    pd[c] = (MmPart){d->ctrl_down[k], G, x16c, gate, G};
+    pd[c] = (MmPart){d->ctrl_down[k], G, x16c, gate, 3 * G};
     float *gain = f->cgain3 + (uint64_t)c * MM_BATCH_TOKENS * C, *forget = f->cforget3 + (uint64_t)c * MM_BATCH_TOKENS * C;
     pg[2 * c] = (MmPart){d->ctrl_gain[k], C, x16g, gain, C};
     pg[2 * c + 1] = (MmPart){d->ctrl_forget[k], C, x16g, forget, C};
   }
   *ok = ops_rms_x16_many(norms, 6, C, eps, n, f->overflow, NULL) && mm_batch(ink2_type(down[0]), 2 * C, pd, 3, n, NULL);
-  for (int c = 0; c < 3 && *ok; c++)
-    *ok = mm_x16(f->cgate3 + (uint64_t)c * MM_BATCH_TOKENS * G, G, n, G, bx16_at(f, 5 + c), f->overflow, NULL);
+  *ok = *ok && mm_x16_heads(f->cgate3, 3 * G, n, 3, G, G, bx16_at(f, 5), f->overflow, NULL);
   *ok = *ok && mm_batch(ink2_type(gf[0]), G, pg, 6, n, NULL);
   Ink2LoopCtrlPart lc[3];
   for (int c = 0; c < 3; c++)
