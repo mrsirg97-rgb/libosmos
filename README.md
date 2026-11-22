@@ -5,11 +5,12 @@ An inference engine for five mixture-of-experts models, and one small long-conte
 
 - **DeepSeek-V4.1-Flash** (~768B parameters, ~250 GB quantized), more than fits in memory: the experts it needs are
   streamed from the SSD as it runs.
-- **Qwen3.8-Flash-Next** (~177B, 512 experts, the Qwen4 architecture's preview), fully resident in GPU memory.
+- **Qwen3.8-Flash-Next** (~177B, 512 experts, the Qwen4 architecture's preview), resident in GPU memory on this
+  machine (on less, its experts streamed from the SSD).
 - **Inkling-2-Small** (Thinking Machines; 384 experts a layer, a 158 GB pack), its experts streamed from the SSD beside
   the ~84 GB osmos keeps in memory, drafted by its own multi-token-prediction head.
-- **Hy4-flash** (Tencent; 220B, ~11B active a token, AngelSlim's Q3_K), its backbone in GPU memory and its 63 GB
-  Engram table read from the SSD, drafted by the release's own DFly2, to a 1M context.
+- **Hy4-flash** (Tencent; 220B, ~11B active a token, AngelSlim's Q3_K), its backbone in GPU memory (on less, its
+  experts streamed) and its 63 GB Engram table read from the SSD, drafted by the release's own DFly2, to a 1M context.
 - **Inkling-2-Mini** (Thinking Machines; 26B, its middle layers looped three times a token), the release's own
   NVFP4 / MXFP8 / BF16 weights - 19.6 GB, all of it in GPU memory - drafted by its own head, to a 1M context:
   prompts at ~1,000 tokens a second.
@@ -347,7 +348,7 @@ no-drafter speed here, and its DeepSeek engine is not shipped for Strix Halo on 
 - **Engram** rows (about 7 KB a token) are read from their file at each step.
 - **DSpark** drafts up to 5 tokens a round, and one batched forward checks them.
 
-**Qwen** is fully resident:
+**Qwen** is resident where the machine has the room (on less, its experts streamed through the membrane):
 - **Matmuls** run on the matrix cores, with f16 activations and F32 sums at every batch size, so a token's bits don't
   depend on its batch.
 - **The cache** is Q8_0: 6.8 GB for 512K tokens.

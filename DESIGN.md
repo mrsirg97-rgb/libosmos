@@ -2141,6 +2141,38 @@ prompt is the full layers' attention's: the dense matrices' 2x is a shallow prom
 25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
 2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
 
+### 0.13.0: one membrane for every MoE, every pack sized to the machine (2026-11-21)
+
+**the duplicates** (found reading the families side by side, after a 64 GB Halo's owner had to edit the installer):
+the host's routing tables (a step's picks by expert, each expert's run, its tile-padded slots, the entries in launch
+order) three times - DeepSeek's run/hip_ffn.c, Inkling's moe(), Hy4-flash's 0.12.3 route.c; the experts' membrane
+built and sized three times (DeepSeek's units() and stream_budget, Inkling's experts() loop, Qwen's whole-only one -
+the stream rule the same formula in two of them); the expert tensors cut into units three times. Hy4-flash had no
+membrane at all (every tensor uploaded), Qwen's refused anything but every expert resident.
+
+**one of each**: moe_route (a counting sort, then runs, slots, entries - the families keep their own membrane holds and
+waits, DeepSeek its CPU lane and NPU parts), experts_plan / experts_create (Inkling's sizing: the budget less the fixed
+part, the stream and four units' slack, settled over passes; every unit warm, the stream three units - Qwen's - not a
+whole layer), expert_units (Inkling's fused gate-up halves kept). each against the code it replaced: the same tables,
+plans and units (test_moe_route, test_experts_plan, test_expert_units), the same sizing (osmos-serve's builds).
+
+**Hy4-flash and Qwen through it**: their experts out of the upload, units of the membrane sized to the budget. a read's
+tables take each run's expert from the membrane (visited, held, waited - Inkling's way); a decode's with every expert
+resident stay on the GPU (hy4_route over the experts' address table, its argument now; q4x_expert_tiles as before),
+else the host builds them in the GPU builder's layout from moe_route. bits do not move: a row's sums are its own
+whatever the table order or the expert's place, so every budget's logits are the resident build's (hy4_run's hash
+0216c5be984c5167 at every budget; Qwen's answers f85b304b78337b76 at auto, 60 and 40 GiB and 0.12.2's).
+
+**sized to the machine**: the engines take a budget (osmos-serve's fit_sized over builds), and a forward's budget 0 is
+this machine's room as it stands (experts_fit_now: the fixed part built, the room left less the headroom) - every
+expert resident where there is room, as before here. the tests do the same (tests/gpu/test_fit.h: a first build at 0,
+fit_budget's fill, then the test's own budget where it fits, else fit_sized) - a run leaves the 8 GB the engine keeps
+free (test_seqstate_gpu's fixed 100 GiB left 0.4).
+
+**left as is**: Hy4-flash's decode GPU tables (hy4_route) and q4x_expert_tiles are not one: matvec rows against matrix
+cores' padded tiles, different consumers. the small budgets some tests compare (a loose against a tight, misses
+counted) fit any machine's room.
+
 ### 0.12.3: less work a token, fewer launches (2026-11-21, low-power, interleaved against 0.12.2)
 
 **where the time went** (rocprofv3 --kernel-trace, ~/bench/perf123/tools/rpstat.py: a step's kernels by time,
