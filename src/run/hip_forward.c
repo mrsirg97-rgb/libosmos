@@ -508,6 +508,8 @@ static bool scratch(Forward *f)
          hipHostMalloc((void **)&f->r_up, FWD_UP_BYTES(P), 0) == hipSuccess &&
          (f->m_by = malloc(P * 4)) && (f->m_row = malloc(P * 4)) && (f->m_base = malloc(P * 4)) &&
          (f->m_slot0 = malloc(P * 4)) &&
+         (f->m_gidx = malloc(FWD_MAX_SLOTS(P, g->n_experts) * 4)) &&
+         (f->m_hidx = malloc(FWD_MAX_SLOTS(P, g->n_experts) * 4)) &&
          hipHostMalloc((void **)&f->stage, NS * B * (uint64_t)(f->n_eg = n_eg ? n_eg : 1) * cols * row, 0) ==
              hipSuccess &&
          hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess && subs(f) &&
@@ -666,7 +668,7 @@ void forward_destroy(Forward *f)
   hipHostFree(f->r_ids);
   hipHostFree(f->r_guess);
   hipHostFree(f->r_up);
-  free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0);
+  free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0), free(f->m_gidx), free(f->m_hidx);
   free(f->picks), free(f->units);
   fwd_cpu_destroy(f);
   fwd_npu_destroy(f);

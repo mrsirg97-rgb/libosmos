@@ -13,6 +13,7 @@
 #include "ink2_impl.h"
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/model/moe_route.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -560,8 +561,11 @@ static bool buffers(Ink2Forward *f)
   f->kept = calloc(T, 1), f->slot = malloc(T * sizeof *f->slot);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
   f->m_key = malloc(table_entries(T * K, E) * sizeof *f->m_key);
+  f->m_ent = malloc(table_entries(T * K, E) * sizeof *f->m_ent), f->m_run = malloc(4 * E * sizeof *f->m_run);
+  f->m_ex = malloc(E * sizeof *f->m_ex);
   f->m_build = malloc(table_bytes(T * K, E)); /* the tables built in cached memory, then one copy into the pinned */
-  return f->hpick && f->kept && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build;
+  return f->hpick && f->kept && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build &&
+         f->m_ent && f->m_run && f->m_ex;
 }
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR])
@@ -684,7 +688,7 @@ void ink2_forward_destroy(Ink2Forward *f)
     if (pinned[i])
       hipHostFree(pinned[i]);
   free(f->picks), free(f->picks_all), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
-  free(f->m_key), free(f->m_build);
+  free(f->m_key), free(f->m_build), free(f->m_ent), free(f->m_run), free(f->m_ex);
   free(f);
 }
 
@@ -780,12 +784,6 @@ static bool group(uint32_t type, const void *const *dtab, const int32_t *cnt, co
   return ok;
 }
 
-static int cmp_u64(const void *a, const void *b)
-{
-  const uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
-  return (x > y) - (x < y);
-}
-
 /* the routed experts of layer l for the run's n tokens: each distinct pick held (its read begun), then read once for
    the tokens that picked it (mm_group at every step: an entry an expert's part of up to MM_MAX_TOKENS of its rows,
    a token's sums its own whatever the others) - gate and up, their scales and the swiglu, down - and each token's
@@ -871,23 +869,25 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
     return false;
   for (uint32_t m = 0; P < E && m < P; m++) /* a decode's picks counted: in memory or not (the stats') */
     membrane_score(f->mem, (uint32_t)l * E + (uint32_t)f->hpick[m]);
-  /* the pairs by expert, then pair order (a counting sort): sorted row r is pair by[r] */
-  uint32_t *at = f->m_at, *by = f->m_by;
-  memset(at, 0, (E + 1) * sizeof *at);
+  /* the tables, one region sent in one copy, each table's place fixed by the step's most pairs: the entries' gate, up
+     and down pointers, counts, their slots' and rows' offsets (gate and up's x and y, down's); each slot's token and
+     sorted row (-1: a tile's padding); each pair's sorted row and weight, each sorted row's scales */
+  const uint64_t ecap = table_entries((uint64_t)f->max_tokens * K, E), scap = table_slots((uint64_t)f->max_tokens * K, E);
+  uint8_t *h = f->m_build; /* (cached: built here, then one copy into the pinned) */
+  const void **tg = (const void **)h, **tu = tg + ecap, **td = tu + ecap;
+  int32_t *cnt = (int32_t *)(td + ecap);
+  uint32_t *xg = (uint32_t *)(cnt + ecap), *yg = xg + ecap, *xd = yg + ecap, *yd = xd + ecap;
+  int32_t *gidx = (int32_t *)(yd + ecap), *hidx = gidx + scap, *row = hidx + scap;
+  float *a = (float *)(row + P), *sg = a + P, *su = sg + P;
+  /* the pairs by expert, then pair order (moe_route: sorted row r is pair by[r]), each slot's token and row */
+  MoeRoute rt = {f->m_by, (uint32_t *)row, f->m_run, f->m_run + E, f->m_run + 2 * E, f->m_run + 3 * E, gidx, hidx,
+                 f->m_at, 0, 0};
+  if (!moe_route(f->hpick, P, K, E, MM_TILE, &rt))
+    return ink2_fail(err, "inkling2: the router picked an expert the model does not have");
   for (uint32_t m = 0; m < P; m++)
-  {
-    if (f->hpick[m] < 0 || (uint32_t)f->hpick[m] >= E)
-      return ink2_fail(err, "inkling2: the router picked an expert the model does not have");
-    at[f->hpick[m] + 1]++;
     f->picks[(uint32_t)l * E + (uint32_t)f->hpick[m]]++;
-  }
-  for (uint32_t e = 0; e < E; e++)
-    at[e + 1] += at[e];
-  for (uint32_t m = 0; m < P; m++)
-    by[at[f->hpick[m]]++] = m;
-  for (uint32_t r = 0; r < P; r++) /* every distinct pick held first: the cold ones' reads under way together */
-    if ((r == 0 || f->hpick[by[r]] != f->hpick[by[r - 1]]) &&
-        !membrane_hold(f->mem, (uint32_t)l * E + (uint32_t)f->hpick[by[r]], err))
+  for (uint32_t j = 0; j < rt.runs; j++) /* every distinct pick held first: the cold ones' reads under way together */
+    if (!membrane_hold(f->mem, (uint32_t)l * E + rt.expert[j], err))
       return false;
   /* then the next layer's named: this layer's reads queued first, the stream's room theirs before the guess's */
   for (uint32_t m = 0; next && m < P; m++)
@@ -896,65 +896,33 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
       const uint32_t unit = (uint32_t)(l + 1) * E + (uint32_t)f->hgpick[m];
       membrane_ahead(f->mem, unit);
     }
-  /* the tables, one region sent in one copy, each table's place fixed by the step's most pairs: the entries' gate, up
-     and down pointers, counts, their slots' and rows' offsets (gate and up's x and y, down's); each slot's token and
-     sorted row (-1: a tile's padding); each pair's sorted row and weight, each sorted row's scales */
-  const uint64_t ecap = table_entries((uint64_t)f->max_tokens * K, E), scap = table_slots((uint64_t)f->max_tokens * K, E);
-  uint8_t *h = f->m_build; /* (cached: the sort pass reads it back; pinned host memory is the host's uncached) */
-  const void **tg = (const void **)h, **tu = tg + ecap, **td = tu + ecap;
-  int32_t *cnt = (int32_t *)(td + ecap);
-  uint32_t *xg = (uint32_t *)(cnt + ecap), *yg = xg + ecap, *xd = yg + ecap, *yd = xd + ecap;
-  int32_t *gidx = (int32_t *)(yd + ecap), *hidx = gidx + scap, *row = hidx + scap;
-  float *a = (float *)(row + P), *sg = a + P, *su = sg + P;
-  /* the entries in build order first (expert, then part), each keyed by its count, then that order */
-  uint64_t *key = f->m_key;
-  uint32_t ne = 0, slots = 0;
-  for (uint32_t r = 0; r < P;)
+  /* each run's expert in memory (its parts' addresses), its rows' scales; the entries by count (moe_entries: group's
+     runs of the same column tiles contiguous, each count's in build order) */
+  for (uint32_t j = 0; j < rt.runs; j++)
   {
-    const uint32_t e = (uint32_t)f->hpick[by[r]], unit = (uint32_t)l * E + e;
-    uint32_t end = r;
-    while (end < P && (uint32_t)f->hpick[by[end]] == e)
-      end++;
-    const void *ex[POOL_PARTS];
+    const uint32_t e = rt.expert[j], unit = (uint32_t)l * E + e;
     const double wt = pf_on() ? pf_now() : 0;
-    if (!membrane_wait(f->mem, unit, ex, err))
+    if (!membrane_wait(f->mem, unit, f->m_ex[j], err))
       return false;
     if (pf_on())
       g_step[PF_WAIT] += pf_now() - wt;
-    for (uint32_t q = r; q < end; q += MM_MAX_TOKENS, ne++)
+    for (uint32_t q = rt.start[j]; q < rt.start[j] + rt.count[j]; q++)
     {
-      const uint32_t c = end - q < MM_MAX_TOKENS ? end - q : MM_MAX_TOKENS, s0 = slots + (q - r);
-      tg[ne] = ex[0], tu[ne] = ex[1], td[ne] = ex[2], cnt[ne] = (int32_t)c;
-      xg[ne] = s0 * C, yg[ne] = q * F, xd[ne] = s0 * F, yd[ne] = q * C;
-      key[ne] = (uint64_t)c << 32 | ne;
-    }
-    for (uint32_t q = r; q < end; q++)
-    {
-      const uint32_t m = by[q], s = slots + (q - r);
-      gidx[s] = (int32_t)(m / K), hidx[s] = (int32_t)q, row[m] = (int32_t)q;
+      const uint32_t m = rt.by[q];
       sg[q] = d->scale[0][e], su[q] = d->scale[1][e], a[m] = hw[m] * d->scale[2][e];
     }
-    const uint32_t padded = (end - r + MM_TILE - 1) / MM_TILE * MM_TILE;
-    for (uint32_t s = slots + (end - r); s < slots + padded; s++)
-      gidx[s] = hidx[s] = -1;
-    slots += padded, r = end;
   }
-  /* the entries by count (group's runs of the same column tiles contiguous), each count's in build order */
-  qsort(key, ne, sizeof *key, cmp_u64);
+  uint32_t ne = 0;
+  if (!moe_entries(&rt, MM_MAX_TOKENS, f->m_ent, f->m_key, &ne))
+    return ink2_fail(err, "inkling2: the experts' entries refused");
+  for (uint32_t k = 0; k < ne; k++)
   {
-    const void **pt = (const void **)f->m_host; /* (staging: the region is copied over it after) */
-    uint32_t *pu = (uint32_t *)(pt + 3 * ne);
-    for (uint32_t k = 0; k < ne; k++)
-    {
-      const uint32_t i = (uint32_t)key[k];
-      pt[k] = tg[i], pt[ne + k] = tu[i], pt[2 * ne + k] = td[i];
-      pu[k] = (uint32_t)cnt[i], pu[ne + k] = xg[i], pu[2 * ne + k] = yg[i], pu[3 * ne + k] = xd[i],
-      pu[4 * ne + k] = yd[i];
-    }
-    for (uint32_t k = 0; k < ne; k++)
-      tg[k] = pt[k], tu[k] = pt[ne + k], td[k] = pt[2 * ne + k], cnt[k] = (int32_t)pu[k], xg[k] = pu[ne + k],
-      yg[k] = pu[2 * ne + k], xd[k] = pu[3 * ne + k], yd[k] = pu[4 * ne + k];
+    const MoeEntry *en = &f->m_ent[k];
+    const uint32_t s0 = rt.slot0[en->run] + en->off, q = rt.start[en->run] + en->off;
+    tg[k] = f->m_ex[en->run][0], tu[k] = f->m_ex[en->run][1], td[k] = f->m_ex[en->run][2], cnt[k] = (int32_t)en->cnt;
+    xg[k] = s0 * C, yg[k] = q * F, xd[k] = s0 * F, yd[k] = q * C;
   }
+  const uint32_t slots = rt.slots;
   const uint64_t bytes = (uint64_t)((uint8_t *)(su + P) - h);
   uint8_t *dv = f->m_dev;
   const void **dg = (const void **)dv, **du = dg + ecap, **dd = du + ecap;

@@ -9,7 +9,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/hy4_ops.h"
-#include "osmos/hy4/route.h"
+#include "osmos/model/moe_route.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -27,10 +27,10 @@ uint64_t hy4_read_slots(uint64_t n, const Hy4Geometry *g)
   return n * (uint64_t)g->n_used + (uint64_t)g->n_experts * (MM_TILE - 1); /* each expert's padded to a tile */
 }
 
-/* a read's picks grouped by expert on the host (hy4_read_route: ascending; within one, its tokens ascending): each
-   sorted row's token and weight, each (token, slot)'s row; mm_group's entries (chunks of MM_MAX_TOKENS, each expert's
-   slots a whole number of tiles, the entries ordered by count so a launch is a run of the same column tiles). a
-   decode's tables are the GPU's (hy4_route: no host between the router and the experts) */
+/* a read's picks grouped by expert on the host (moe_route: ascending; within one, its tokens ascending): each sorted
+   row's token and weight, each (token, slot)'s row; mm_group's entries (moe_entries: chunks of MM_MAX_TOKENS, each
+   expert's slots a whole number of tiles, the entries ordered by count so a launch is a run of the same column
+   tiles). a decode's tables are the GPU's (hy4_route: no host between the router and the experts) */
 static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t *slots)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -40,44 +40,32 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t 
   if (hipMemcpy(f->h_idx, f->idx, (size_t)nk * 4, hipMemcpyDeviceToHost) != hipSuccess ||
       hipMemcpy(f->h_w, f->wtok, (size_t)nk * F, hipMemcpyDeviceToHost) != hipSuccess)
     return false;
+  MoeRoute rt = {f->h_by, (uint32_t *)f->h_sidx, f->h_run, f->h_run + E, f->h_run + 2 * E, f->h_run + 3 * E,
+                 f->h_rgidx, f->h_rhidx, f->h_estart, 0, 0};
+  uint32_t e_n = 0;
+  if (!moe_route(f->h_idx, nk, K, E, MM_TILE, &rt) || !moe_entries(&rt, MM_MAX_TOKENS, f->h_ent, f->rkey, &e_n))
+    return false;
+  for (uint32_t q = 0; q < nk; q++)
+    f->h_gidx[q] = (int32_t)(rt.by[q] / K), f->h_wsel[q] = f->h_w[rt.by[q]];
+  *entries = e_n, *slots = rt.slots;
   const uint64_t bytes[3] = {L->exp_gate->bytes / E, L->exp_up->bytes / E, L->exp_down->bytes / E};
   const uint8_t *base[3] = {hy4_dev(f, L->exp_gate), hy4_dev(f, L->exp_up), hy4_dev(f, L->exp_down)};
-  Hy4ReadRoute rt = {f->h_gidx, f->h_sidx, f->h_wsel, f->h_rcnt, f->h_rexp, f->h_rx, f->h_ry, f->h_rxd, f->h_ryd,
-                     f->h_rgidx, f->h_rhidx, f->h_estart, 0, 0};
-  if (!hy4_read_route(f->h_idx, f->h_w, n, K, E, MM_MAX_TOKENS, MM_TILE, lat, ffe, &rt))
-    return false;
-  const uint32_t e_n = rt.entries;
-  *entries = e_n, *slots = rt.slots;
-  for (uint32_t i = 0; i < e_n; i++)
-  {
-    for (int m = 0; m < 3; m++)
-      f->h_rw[3 * i + m] = base[m] + rt.expert[i] * bytes[m];
-    f->rkey[i] = (uint64_t)rt.cnt[i] << 32 | i;
-  }
-  bool ok = hipMemcpy(f->sidx, f->h_sidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
-            hipMemcpy(f->wsel, f->h_wsel, (size_t)nk * F, hipMemcpyHostToDevice) == hipSuccess &&
-            hipMemcpy(f->gidx, f->h_gidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess;
-  /* the entries by count (each count's in build order): mm_group's launches runs of the same column tiles */
-  for (uint32_t i = 1; i < e_n; i++) /* (insertion sort: a layer's entries are a few hundred) */
-    for (uint32_t j = i; j > 0 && f->rkey[j - 1] > f->rkey[j]; j--)
-    {
-      const uint64_t k = f->rkey[j];
-      f->rkey[j] = f->rkey[j - 1], f->rkey[j - 1] = k;
-    }
   const uint64_t ecap = hy4_read_entries(f->max_tokens, g);
   const void **pw = (const void **)f->h_stage; /* the sorted tables: 3 x ecap pointers, then 5 x ecap counts */
   uint32_t *pu = (uint32_t *)(pw + 3 * ecap);
   for (uint32_t k = 0; k < e_n; k++)
   {
-    const uint32_t i = (uint32_t)f->rkey[k];
+    const MoeEntry *en = &f->h_ent[k];
+    const uint32_t slot = rt.slot0[en->run] + en->off, row = rt.start[en->run] + en->off;
     for (int m = 0; m < 3; m++)
-      pw[(uint64_t)m * ecap + k] = f->h_rw[3 * i + m];
-    pu[k] = (uint32_t)f->h_rcnt[i], pu[ecap + k] = f->h_rx[i], pu[2 * ecap + k] = f->h_ry[i];
-    pu[3 * ecap + k] = f->h_rxd[i], pu[4 * ecap + k] = f->h_ryd[i];
+      pw[(uint64_t)m * ecap + k] = base[m] + rt.expert[en->run] * bytes[m];
+    f->h_rcnt[k] = (int32_t)en->cnt, pu[ecap + k] = slot * lat, pu[2 * ecap + k] = row * ffe;
+    pu[3 * ecap + k] = slot * ffe, pu[4 * ecap + k] = row * lat;
   }
-  for (uint32_t k = 0; k < e_n; k++)
-    f->h_rcnt[k] = (int32_t)pu[k];
-  return ok && hipMemcpy(f->rw, pw, 3 * ecap * sizeof(void *), hipMemcpyHostToDevice) == hipSuccess &&
+  return hipMemcpy(f->sidx, f->h_sidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->wsel, f->h_wsel, (size_t)nk * F, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->gidx, f->h_gidx, (size_t)nk * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(f->rw, pw, 3 * ecap * sizeof(void *), hipMemcpyHostToDevice) == hipSuccess &&
          hipMemcpy(f->rcnt, f->h_rcnt, (size_t)e_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
          hipMemcpy(f->rx, pu + ecap, (size_t)e_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
          hipMemcpy(f->ry, pu + 2 * ecap, (size_t)e_n * 4, hipMemcpyHostToDevice) == hipSuccess &&
