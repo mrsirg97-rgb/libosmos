@@ -11,17 +11,24 @@ extern "C" {
 
 struct SmallPack {
   const char* name;
-  const char* path;  // under $HOME
+  const char* path;     // under $HOME
+  const char* drafter;  // under $HOME, or NULL: the pack has none
 };
 
 static const SmallPack kSmallPacks[] = {
-    {"osmos1.7b", "/Models/osmos/osmos1.7b/osmos1.7b-Q4_0.gguf"},
-    {"inkling-2-mini", "/Models/osmos/inkling-2-mini/Inkling-2-Mini-00001-of-00002.gguf"},
+    {"osmos1.7b", "/Models/osmos/osmos1.7b/osmos1.7b-Q4_0.gguf", nullptr},
+    {"inkling-2-mini", "/Models/osmos/inkling-2-mini/Inkling-2-Mini-00001-of-00002.gguf",
+     "/Models/osmos/inkling-2-mini/ink2-mini-mtp-q8.gguf"},
 };
 
 static std::string small_pack_path(const SmallPack& p) {
   const char* home = std::getenv("HOME");
   return std::string(home ? home : "") + p.path;
+}
+
+static std::string small_pack_drafter(const SmallPack& p) {
+  const char* home = std::getenv("HOME");
+  return p.drafter ? std::string(home ? home : "") + p.drafter : std::string();
 }
 
 static bool small_pack_here(const SmallPack& p) { return access(small_pack_path(p).c_str(), R_OK) == 0; }

@@ -17,7 +17,7 @@
   } while (0)
 
 static const SmallPack kPacks[] = {kSmallPacks[0], kSmallPacks[1],
-                                   {"qwen38-ud-iq3_xxs", "/Models/osmos/qwen38-ud-iq3_xxs/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf"}};
+                                   {"qwen38-ud-iq3_xxs", "/Models/osmos/qwen38-ud-iq3_xxs/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf", nullptr}};
 
 static bool one(const SmallPack& p) {
   if (!small_pack_here(p)) return std::printf("  %s: no pack, skipped\n", p.name), false;

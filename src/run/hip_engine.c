@@ -357,6 +357,8 @@ int oseq_draft(OsmosSeq *s, int32_t y, float conf_min, float cum_min, int32_t dr
 {
   if (!s || !drafts || !conf || !osmos_block(s->e))
     return fail(err, "no drafter"), -1;
+  if (y < 0 || (uint32_t)y >= s->e->vocab) /* every family's (Hy4's drafter returned 0, no drafts) */
+    return fail(err, "a draft after a token outside the vocabulary"), -1;
   return s->e->fam->draft(s->e->impl, s->impl, y, conf_min, cum_min, drafts, conf, err);
 }
 
@@ -371,6 +373,8 @@ bool oseq_draft_all(OsmosSeq *const *s, const int32_t *y, uint32_t n, float conf
   {
     if (!s[i] || s[i]->e != e)
       return fail(err, "a sequence not this engine's");
+    if (y[i] < 0 || (uint32_t)y[i] >= e->vocab)
+      return fail(err, "a draft after a token outside the vocabulary");
     for (uint32_t j = 0; j < i; j++)
       if (s[j] == s[i])
         return fail(err, "a sequence twice");
