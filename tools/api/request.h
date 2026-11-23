@@ -29,15 +29,14 @@ typedef struct Request
 } Request;
 
 bool request_read(const Json *body, const struct Dialect *d, bool fill_orphans, bool preserve_default,
-                  double temperature, double top_p, unsigned top_k, Request *r, char err[API_ERR]);
+                  double temperature, double top_p, unsigned top_k, Request *r, char err[OSMOS_ERR]);
 void request_free(Request *r);
 
 /* shared by the readers: the effort asked (reasoning_effort, else chat_template_kwargs'), a failure, the tools as
    OpenAI function tools (each in its {"type": "function", "function"} wrapper; NULL: none) */
 const Json *request_effort(const Json *body);
-bool request_fail(char *err, const char *what);
 Json *request_tools(const Json *body);
-bool request_format(const Json *body, JsonBuf *out, char err[API_ERR]);
+bool request_format(const Json *body, JsonBuf *out, char err[OSMOS_ERR]);
 /* the messages as Qwen's and Inkling's templates take them (request_messages.c): `reasoning` as reasoning_content,
    a call's arguments given as a JSON string parsed into an object - *out owned, NULL with why on a refusal */
-bool request_messages(const Json *msgs, Json **out, char err[API_ERR]);
+bool request_messages(const Json *msgs, Json **out, char err[OSMOS_ERR]);

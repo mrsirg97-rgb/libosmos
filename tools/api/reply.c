@@ -8,6 +8,7 @@
 
 #include "answer.h"
 #include "osmos/text/chat_qwen.h"
+#include "osmos/err.h"
 
 /* POST /v1/chat/completions: the request rendered (the chat encoding), tokenized, run on the engine; its tokens
    streamed as they land (answer.c) or answered whole; at DONE the completion parsed for its tool calls, then the
@@ -110,9 +111,9 @@ static bool more(Api *a, Run *r, size_t *seen, Answer *s)
 
 /* the message parsed - tool calls given their ids - or, out of the format, its text as it streamed (*parsed false,
    err the parse's why) */
-static Json *message(const Answer *s, const Request *rq, long long rid, bool *parsed, char err[CHAT_ERR])
+static Json *message(const Answer *s, const Request *rq, long long rid, bool *parsed, char err[OSMOS_ERR])
 {
-  char jerr[JSON_ERR];
+  char jerr[OSMOS_ERR] = "";
   JsonBuf b = {0};
   const ChatMode mode = rq->mode;
   if ((*parsed = s->d->parse(rq, s->text.p, s->shape.p, s->text.n, &b, err)))
@@ -372,7 +373,7 @@ static size_t defuse(Json *j, const Tokenizer *t)
     Json *v = j->item[i];
     if (j->key && !strcmp(j->key[i], "arguments") && v->type == JSON_STRING)
     {
-      char jerr[JSON_ERR];
+      char jerr[OSMOS_ERR] = "";
       Json *o = NULL;
       for (int d = 0; d < 2 && (o ? o : v)->type == JSON_STRING; d++)
       {
@@ -399,12 +400,12 @@ static size_t defuse(Json *j, const Tokenizer *t)
    holds a special token's text (a tool's result quoting a chat's markup) is that text: the request rendered again
    from its strings defused is the shape (tokenizer_encode_shaped), and the two renders must differ only in the
    bytes defused - else refused, never guessed */
-static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[API_ERR])
+static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[OSMOS_ERR])
 {
-  char cerr[CHAT_ERR];
+  char cerr[OSMOS_ERR] = "";
   JsonBuf text = {0}, shape = {0};
   if (!a->d->render(rq, &text, cerr))
-    return free(text.p), snprintf(err, API_ERR, "%s", cerr), NULL;
+    return free(text.p), osmos_fail(err, "%s", cerr), NULL;
   size_t changed = 0;
   bool oom = text.oom;
   Request sh = *rq;
@@ -426,7 +427,7 @@ static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[API_ER
   free(text.p), free(shape.p);
   if (k < 0 || (size_t)k > text.n + 1) /* (encode_shaped's -1: a shape not the text defused) */
     return free(ids),
-           snprintf(err, API_ERR, "%s", why ? why : ids ? "the prompt's own special tokens could not be told from its "
+           osmos_fail(err, "%s", why ? why : ids ? "the prompt's own special tokens could not be told from its "
                                                           "strings' text" : "out of memory"), NULL;
   *n = (size_t)k;
   return ids;
@@ -441,7 +442,7 @@ static unsigned next_mark(Api *a, const Request *rq, const int32_t *ids, size_t 
     return 0;
   JsonBuf b = {0};
   json_dump(&b, rq->messages);
-  char jerr[JSON_ERR], err[API_ERR];
+  char jerr[OSMOS_ERR] = "", err[OSMOS_ERR] = "";
   Json *next = NULL;
   if (!b.oom && b.n > 1 && b.p[b.n - 1] == ']')
   {
@@ -466,11 +467,11 @@ static unsigned next_mark(Api *a, const Request *rq, const int32_t *ids, size_t 
 
 void api_chat(Api *a, Http *h)
 {
-  char err[API_ERR], jerr[JSON_ERR];
+  char err[OSMOS_ERR] = "", jerr[OSMOS_ERR] = "";
   Json *body = json_parse(h->body, h->body_n, jerr);
   if (!body || body->type != JSON_OBJECT)
   {
-    snprintf(err, sizeof err, "the body is not a JSON object%s%s", body ? "" : ": ", body ? "" : jerr);
+    osmos_fail(err, "the body is not a JSON object%s%s", body ? "" : ": ", body ? "" : jerr);
     json_free(body), http_error(h->fd, 400, err);
     return;
   }
@@ -533,7 +534,7 @@ void api_chat(Api *a, Http *h)
   else
   {
     answer_advance(&s);
-    char perr[CHAT_ERR] = "";
+    char perr[OSMOS_ERR] = "";
     bool parsed;
     Json *m = message(&s, &rq, r->rid, &parsed, perr);
     if (m && !parsed && !strcmp(r->finish, "stop"))

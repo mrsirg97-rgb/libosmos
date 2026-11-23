@@ -35,7 +35,7 @@ static void identity(const Json *call, JsonBuf *b)
   json_puts(b, name ? name : ""), json_puts(b, "\n");
   if (a && a->type == JSON_STRING)
   {
-    char jerr[JSON_ERR];
+    char jerr[OSMOS_ERR] = "";
     Json *o = json_parse(a->s, a->len, jerr);
     if (o)
       json_dump_with(b, o, kCanon), json_free(o);

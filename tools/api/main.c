@@ -82,7 +82,7 @@ static bool host_ours(const char *host)
 
 static void answer(Http *h)
 {
-  char err[API_ERR];
+  char err[OSMOS_ERR] = "";
   const int status = http_read(h, err);
   if (status)
   {
@@ -165,7 +165,7 @@ static int listen_on(const char *host, int port)
 
 static int tokenize(const char *model)
 {
-  char err[TOKENIZER_ERR];
+  char err[OSMOS_ERR] = "";
   Gguf *g = gguf_header(model, err); /* the tokenizer: the first shard's metadata */
   Tokenizer *t = g ? tokenizer_create(g, err) : NULL;
   gguf_destroy(g);
@@ -209,7 +209,7 @@ int main(int argc, char **argv)
   if (!cfg_path)
     return die("usage: osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>] "
                "[--ctx N|Nk|Nm]");
-  char err[API_ERR], self[PATH_MAX], engine[PATH_MAX];
+  char err[OSMOS_ERR], self[PATH_MAX], engine[PATH_MAX];
   const ssize_t sn = readlink("/proc/self/exe", self, sizeof self - 1);
   self[sn > 0 ? sn : 0] = 0;
   char *slash = strrchr(self, '/');

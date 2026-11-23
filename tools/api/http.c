@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "api.h"
+#include "osmos/err.h"
 
 /* HTTP/1.1, as little as a local OpenAI client needs: one request a connection (Connection: close), its body by
    Content-Length (a chunked one refused), headers and body each capped; answers whole or as server-sent events */
@@ -44,26 +45,26 @@ static const char *reason(int status)
 }
 
 /* the request read: 0, or the status to answer with (err why) */
-int http_read(Http *h, char err[API_ERR])
+int http_read(Http *h, char err[OSMOS_ERR])
 {
   char *head = malloc(API_HEAD_MAX + 1);
   size_t n = 0;
   char *end = NULL;
   if (!head)
-    return snprintf(err, API_ERR, "out of memory"), 500;
+    return osmos_fail(err, "out of memory"), 500;
   while (!end)
   {
     if (n == API_HEAD_MAX)
-      return free(head), snprintf(err, API_ERR, "headers past %u bytes", API_HEAD_MAX), 431;
+      return free(head), osmos_fail(err, "headers past %u bytes", API_HEAD_MAX), 431;
     const ssize_t k = recv(h->fd, head + n, API_HEAD_MAX - n, 0);
     if (k <= 0)
-      return free(head), snprintf(err, API_ERR, "the connection closed in the headers"), 400;
+      return free(head), osmos_fail(err, "the connection closed in the headers"), 400;
     n += (size_t)k, head[n] = 0;
     end = strstr(head, "\r\n\r\n");
   }
   char version[16];
   if (sscanf(head, "%7s %255s %15s", h->method, h->path, version) != 3 || strncmp(version, "HTTP/1.", 7))
-    return free(head), snprintf(err, API_ERR, "not an HTTP/1.x request line"), 400;
+    return free(head), osmos_fail(err, "not an HTTP/1.x request line"), 400;
   size_t length = 0;
   bool has_length = false, cont = false;
   for (char *l = strstr(head, "\r\n") + 2; l < end; l = strstr(l, "\r\n") + 2)
@@ -77,9 +78,9 @@ int http_read(Http *h, char err[API_ERR])
       char *e;
       const unsigned long long v = *d >= '0' && *d <= '9' ? strtoull(d, &e, 10) : 0;
       if (*d < '0' || *d > '9' || (strspn(e, " \t") + e)[0] != '\r' || (has_length && v != length))
-        return free(head), snprintf(err, API_ERR, "a Content-Length not one number of bytes"), 400;
+        return free(head), osmos_fail(err, "a Content-Length not one number of bytes"), 400;
       if (v > API_BODY_MAX)
-        return free(head), snprintf(err, API_ERR, "a body past %u bytes", API_BODY_MAX), 413;
+        return free(head), osmos_fail(err, "a body past %u bytes", API_BODY_MAX), 413;
       length = (size_t)v, has_length = true;
     }
     else if (!strncasecmp(l, "Origin:", 7))
@@ -92,19 +93,19 @@ int http_read(Http *h, char err[API_ERR])
       while (e > v && (e[-1] == ' ' || e[-1] == '\t'))
         e--;
       if ((size_t)(e - v) >= sizeof h->host || h->host[0])
-        return free(head), snprintf(err, API_ERR, "a Host header too long, or two"), 400;
+        return free(head), osmos_fail(err, "a Host header too long, or two"), 400;
       memcpy(h->host, v, (size_t)(e - v)), h->host[e - v] = 0;
     }
     else if (!strncasecmp(l, "Transfer-Encoding:", 18))
-      return free(head), snprintf(err, API_ERR, "a chunked body (send its Content-Length)"), 411;
+      return free(head), osmos_fail(err, "a chunked body (send its Content-Length)"), 411;
     else if (!strncasecmp(l, "Expect:", 7) && strcasestr(l, "100-continue") && strcasestr(l, "100-continue") < strstr(l, "\r\n"))
       cont = true;
   }
   if (strcmp(h->method, "POST") == 0 && !has_length)
-    return free(head), snprintf(err, API_ERR, "a POST without Content-Length"), 411;
+    return free(head), osmos_fail(err, "a POST without Content-Length"), 411;
   h->body = malloc(length + 1);
   if (!h->body)
-    return free(head), snprintf(err, API_ERR, "out of memory"), 500;
+    return free(head), osmos_fail(err, "out of memory"), 500;
   const size_t have = n - (size_t)(end + 4 - head);
   h->body_n = have < length ? have : length;
   memcpy(h->body, end + 4, h->body_n);
@@ -116,7 +117,7 @@ int http_read(Http *h, char err[API_ERR])
   {
     const ssize_t k = recv(h->fd, h->body + h->body_n, length - h->body_n, 0);
     if (k <= 0)
-      return snprintf(err, API_ERR, "the connection closed in the body"), 400;
+      return osmos_fail(err, "the connection closed in the body"), 400;
     h->body_n += (size_t)k;
   }
   h->body[h->body_n] = 0;

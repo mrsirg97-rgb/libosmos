@@ -10,24 +10,24 @@
 /* each family's chat: DeepSeek's encoding (osmos/text/chat.h), Qwen's template (osmos/text/chat_qwen.h), Inkling's
    (osmos/text/chat_ink2.h) */
 
-static bool ds_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
+static bool ds_render(const Request *r, JsonBuf *out, char err[OSMOS_ERR])
 {
   return chat_render(r->messages, r->mode, r->effort, out, err);
 }
 
-static bool ds_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out, char err[CHAT_ERR])
+static bool ds_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out, char err[OSMOS_ERR])
 {
   return chat_parse_shaped(text, shape, n, r->mode, out, err);
 }
 
-static bool qwen_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
+static bool qwen_render(const Request *r, JsonBuf *out, char err[OSMOS_ERR])
 {
   return qchat_render_with(r->messages, r->branch ? r->branch : r->messages, r->tools, r->mode,
                            r->level[0] ? r->level : NULL, r->preserve, out, err);
 }
 
 static bool qwen_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
-                       char err[CHAT_ERR])
+                       char err[OSMOS_ERR])
 {
   return qchat_parse_shaped(text, shape, n, r->mode, r->tools, out, err);
 }
@@ -56,24 +56,24 @@ static bool ds_drops(const Request *r)
 /* Qwen's template drops it unless preserve_thinking (the request's, on unless false) */
 static bool qwen_drops(const Request *r) { return r->mode == CHAT_THINKING && !r->preserve && past_user(r); }
 
-static bool lfm3_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
+static bool lfm3_render(const Request *r, JsonBuf *out, char err[OSMOS_ERR])
 {
   return lchat_render(r->messages, r->tools, r->mode, r->preserve, out, err);
 }
 
 static bool lfm3_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
-                       char err[CHAT_ERR])
+                       char err[OSMOS_ERR])
 {
   return lchat_parse_shaped(text, shape, n, r->mode, r->tools, out, err);
 }
 
-static bool ink2_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
+static bool ink2_render(const Request *r, JsonBuf *out, char err[OSMOS_ERR])
 {
   return ichat_render(r->messages, r->tools, r->effort_value, out, err);
 }
 
 static bool ink2_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
-                       char err[CHAT_ERR])
+                       char err[OSMOS_ERR])
 {
   (void)r;
   return ichat_parse_shaped(text, shape, n, out, err);
@@ -96,13 +96,13 @@ static const char *hy4_refused[HCHAT_REFUSED + 1];
 
 static const char *hy4_effort(const Request *r) { return r->mode == CHAT_PLAIN ? "no_think" : r->level[0] ? r->level : NULL; }
 
-static bool hy4_render(const Request *r, JsonBuf *out, char err[CHAT_ERR])
+static bool hy4_render(const Request *r, JsonBuf *out, char err[OSMOS_ERR])
 {
   return hchat_render(r->messages, r->tools, hy4_effort(r), r->preserve_given ? r->preserve : -1, &hy4_t, out, err);
 }
 
 static bool hy4_parse(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
-                      char err[CHAT_ERR])
+                      char err[OSMOS_ERR])
 {
   return hchat_parse_shaped(text, shape, n, r->mode == CHAT_THINKING, r->tools, &hy4_t, out, err);
 }
@@ -120,7 +120,7 @@ static Dialect hy4_dialect = {"hy_v4_flash", NULL, NULL, NULL, false, hy4_refuse
 /* the hy4 dialect's markers from the model's template, or NULL: not Hy4-flash's template */
 static const Dialect *hy4_of(const char *tmpl)
 {
-  char err[CHAT_ERR];
+  char err[OSMOS_ERR] = "";
   if (!tmpl || !hchat_from_template(tmpl, &hy4_t, err))
     return NULL;
   hchat_refused(&hy4_t, hy4_refused);

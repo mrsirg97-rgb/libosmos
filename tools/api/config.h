@@ -32,6 +32,6 @@ typedef struct Config
   char eng[PATH_MAX];
 } Config;
 
-bool config_read(const char *path, Config *c, char err[API_ERR]);
+bool config_read(const char *path, Config *c, char err[OSMOS_ERR]);
 bool config_argv(Config *c, const char *engine, int eos, const char *answer_after, char *argv[CONFIG_ARGS_MAX],
-                 char err[API_ERR]);
+                 char err[OSMOS_ERR]);

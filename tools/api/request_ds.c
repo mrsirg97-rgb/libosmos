@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "dialect.h"
+#include "osmos/err.h"
 
 /* DeepSeek's reader (maya's frontend.py for DeepSeek): tools and the response format's schema (the encoding's
    response_format) onto the first system message, an empty one put first if none; the reasoning effort as the
@@ -17,12 +18,12 @@ static int effort_of(const Json *v, char *err)
     for (int i = 0; i < 6; i++)
       if (!strcmp(v->s, names[i]))
         return budget[i];
-    return request_fail(err, "reasoning_effort: minimal, low, medium, high, xhigh, max, none or 1-100"), -1;
+    return osmos_fail(err, "reasoning_effort: minimal, low, medium, high, xhigh, max, none or 1-100"), -1;
   }
-  char cerr[CHAT_ERR];
+  char cerr[OSMOS_ERR] = "";
   const int e = chat_effort(v, cerr);
   if (e < 0)
-    request_fail(err, "reasoning_effort: an integer 1-100 or a level's name");
+    osmos_fail(err, "reasoning_effort: an integer 1-100 or a level's name");
   return e;
 }
 
@@ -62,7 +63,7 @@ static bool system_role(const Json *m)
   return r && (!strcmp(r, "system") || !strcmp(r, "developer"));
 }
 
-bool request_ds(const Json *body, Request *r, char err[API_ERR])
+bool request_ds(const Json *body, Request *r, char err[OSMOS_ERR])
 {
   const Json *msgs = json_get(body, "messages");
   JsonBuf rf = {0};
@@ -71,7 +72,7 @@ bool request_ds(const Json *body, Request *r, char err[API_ERR])
   Json *tl = request_tools(body);
   const bool has_rf = rf.n > 0, head = tl || has_rf, first = head && system_role(msgs->item[0]);
   JsonBuf b = {0};
-  char jerr[JSON_ERR];
+  char jerr[OSMOS_ERR] = "";
   json_puts(&b, "[");
   if (head && !first)
   {
@@ -95,7 +96,7 @@ bool request_ds(const Json *body, Request *r, char err[API_ERR])
   r->messages = b.oom ? NULL : json_parse(b.p, b.n, jerr);
   free(b.p);
   if (!r->messages)
-    return request_fail(err, "out of memory");
+    return osmos_fail(err, "out of memory");
   r->effort = r->mode == CHAT_PLAIN ? 75 : effort_of(request_effort(body), err);
   return r->effort >= 0;
 }

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "api.h"
+#include "osmos/err.h"
 
 /* osmos-serve as the child: started with --parallel (every line carries its rid), its lines read by one thread and
    handed to the run they name; a run's GEN written under the lock. the child gone: every run ends with why */
@@ -152,18 +153,18 @@ static void *reader(void *arg)
   return NULL;
 }
 
-bool engine_start(Engine *e, char *const argv[], bool spec, char err[API_ERR])
+bool engine_start(Engine *e, char *const argv[], bool spec, char err[OSMOS_ERR])
 {
   int in[2], out[2];
   if (pipe2(in, O_CLOEXEC) || pipe2(out, O_CLOEXEC))
-    return snprintf(err, API_ERR, "pipes: %s", strerror(errno)), false;
+    return osmos_fail(err, "pipes: %s", strerror(errno)), false;
   pthread_mutex_init(&e->mu, NULL);
   pthread_mutex_init(&e->wmu, NULL);
   pthread_cond_init(&e->ready_cv, NULL);
   e->spec = spec, e->next_rid = 1;
   e->pid = fork();
   if (e->pid < 0)
-    return snprintf(err, API_ERR, "fork: %s", strerror(errno)), false;
+    return osmos_fail(err, "fork: %s", strerror(errno)), false;
   if (e->pid == 0)
   {
     prctl(PR_SET_PDEATHSIG, SIGTERM); /* this server gone (rig's stop): the engine with it */
@@ -176,7 +177,7 @@ bool engine_start(Engine *e, char *const argv[], bool spec, char err[API_ERR])
   e->in_fd = in[1], e->out_fd = out[0];
   signal(SIGPIPE, SIG_IGN); /* a write to a closed connection or a dead child: an error, not the end */
   if (pthread_create(&e->reader, NULL, reader, e))
-    return snprintf(err, API_ERR, "the engine's reader did not start"), false;
+    return osmos_fail(err, "the engine's reader did not start"), false;
   return true;
 }
 
@@ -189,20 +190,20 @@ bool engine_ready(Engine *e)
 }
 
 Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsigned mark, const Sampling *s,
-                char err[API_ERR])
+                char err[OSMOS_ERR])
 {
   Run *r = calloc(1, sizeof *r);
   size_t cap = 64 + 12 * n;
   char *msg = malloc(cap);
   if (!r || !msg)
-    return free(r), free(msg), snprintf(err, API_ERR, "out of memory"), NULL;
+    return free(r), free(msg), osmos_fail(err, "out of memory"), NULL;
   pthread_mutex_init(&r->mu, NULL);
   pthread_cond_init(&r->cv, NULL);
   pthread_mutex_lock(&e->mu);
   if (!e->ready || e->dead)
   {
     pthread_mutex_unlock(&e->mu);
-    return free(r), free(msg), snprintf(err, API_ERR, "the engine is not ready"), NULL;
+    return free(r), free(msg), osmos_fail(err, "the engine is not ready"), NULL;
   }
   r->rid = e->next_rid++;
   r->next = e->runs, e->runs = r; /* registered before its GEN: no line of it comes unclaimed */

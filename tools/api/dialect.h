@@ -24,10 +24,10 @@ typedef struct Dialect
   const char *calls_open; /* a tool calls block's start, as the parse cuts the content there */
   bool trims;             /* its parse trims the reasoning and the content: their streams start past whitespace */
   const char *const *refused; /* special tokens' text its parse refuses in a completion: never streamed */
-  bool (*read)(const Json *body, Request *r, char err[API_ERR]);
-  bool (*render)(const Request *r, JsonBuf *out, char err[CHAT_ERR]);
+  bool (*read)(const Json *body, Request *r, char err[OSMOS_ERR]);
+  bool (*render)(const Request *r, JsonBuf *out, char err[OSMOS_ERR]);
   bool (*parse)(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
-                char err[CHAT_ERR]); /* markers read from shape (the said special tokens' text defused) */
+                char err[OSMOS_ERR]); /* markers read from shape (the said special tokens' text defused) */
   /* the template drops this prompt's latest reasoning when a user message follows (0.7.5: a point kept before it) */
   bool (*drops)(const Request *r);
   const char *answer_after; /* osmos-serve's --answer-after (no end while the answer past it is blank), or NULL */
@@ -45,8 +45,8 @@ typedef struct Dialect
 const Dialect *dialect_of(const char *arch, const char *tmpl);
 
 /* request_ds.c, request_qwen.c: a request's messages, tools and effort as the family's template takes them */
-bool request_ds(const Json *body, Request *r, char err[API_ERR]);
-bool request_qwen(const Json *body, Request *r, char err[API_ERR]);
-bool request_ink2(const Json *body, Request *r, char err[API_ERR]);
-bool request_lfm3(const Json *body, Request *r, char err[API_ERR]);
-bool request_hy4(const Json *body, Request *r, char err[API_ERR]);
+bool request_ds(const Json *body, Request *r, char err[OSMOS_ERR]);
+bool request_qwen(const Json *body, Request *r, char err[OSMOS_ERR]);
+bool request_ink2(const Json *body, Request *r, char err[OSMOS_ERR]);
+bool request_lfm3(const Json *body, Request *r, char err[OSMOS_ERR]);
+bool request_hy4(const Json *body, Request *r, char err[OSMOS_ERR]);

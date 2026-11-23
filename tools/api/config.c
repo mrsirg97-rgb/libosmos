@@ -4,6 +4,7 @@
 
 #include "osmos/run/engine.h" /* (OSMOS_MAX_LANES: osmos-serve's lanes at most) */
 #include "config.h"
+#include "osmos/err.h"
 
 /* osmos.json read whole and checked: a field of the wrong type, or one this reader does not know, refused by name
    (a misspelt setting is not silently its default) */
@@ -12,7 +13,7 @@
 
 static bool fail(char *err, const char *what, const char *key)
 {
-  snprintf(err, API_ERR, "osmos.json: %s%s%s", key ? key : "", key ? ": " : "", what);
+  osmos_fail(err, "osmos.json: %s%s%s", key ? key : "", key ? ": " : "", what);
   return false;
 }
 
@@ -110,17 +111,17 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   return fail(err, "not a setting osmos-api knows", k);
 }
 
-bool config_read(const char *path, Config *c, char err[API_ERR])
+bool config_read(const char *path, Config *c, char err[OSMOS_ERR])
 {
   memset(c, 0, sizeof *c);
   c->parallel = 1, c->top_p = 1;
   FILE *f = fopen(path, "rb");
   if (!f)
-    return snprintf(err, API_ERR, "%s: could not be opened", path), false;
+    return osmos_fail(err, "%s: could not be opened", path), false;
   char *text = malloc(CONFIG_MAX);
   const size_t n = text ? fread(text, 1, CONFIG_MAX, f) : 0;
   fclose(f);
-  char jerr[JSON_ERR];
+  char jerr[OSMOS_ERR] = "";
   Json *j = n && n < CONFIG_MAX ? json_parse(text, n, jerr) : NULL;
   free(text);
   if (!j || j->type != JSON_OBJECT)
@@ -137,7 +138,7 @@ bool config_read(const char *path, Config *c, char err[API_ERR])
 }
 
 bool config_argv(Config *c, const char *engine, int eos, const char *answer_after, char *argv[CONFIG_ARGS_MAX],
-                 char err[API_ERR])
+                 char err[OSMOS_ERR])
 {
   int n = 0;
   snprintf(c->eng, sizeof c->eng, "%s", engine);
