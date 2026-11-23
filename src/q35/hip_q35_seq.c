@@ -210,14 +210,16 @@ bool q35_seq_load_from(Q35Seq *s, uint64_t bytes, StateSource src, void *ctx, ch
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");
-  if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != q35_identity(s->f))
-    return refuse(s, err, "a state of another format or model (its identity)");
+  const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, q35_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx)))
+    return refuse(s, err, bad);
+  if ((uint64_t)h.closed * LSA_WINDOW > (uint64_t)h.pos) /* (before its parts are sized from it: 0.16.0 after) */
+    return refuse(s, err, "a state whose closed blocks are past its position");
   StatePart p[MAX_PARTS];
   s->cur = 0; /* the parts' DeltaNet slots: 0 */
   const int n = parts(s, h.pos, h.closed, false, p);
-  if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || (uint64_t)h.closed * LSA_WINDOW > (uint64_t)h.pos ||
-      bytes != state_parts_bytes(sizeof h, p, n))
-    return refuse(s, err, "a state past this context, or not its position's size");
+  if (bytes != state_parts_bytes(sizeof h, p, n))
+    return refuse(s, err, "a state not its position's size");
   const char *why = state_parts_load(&h, sizeof h, p, n, src, ctx);
   if (why) /* the parts part written: the reset makes the sequence empty */
     return refuse(s, err, why);
@@ -257,9 +259,9 @@ bool q35_seq_mark_load(Q35Seq *s, const void *in, uint64_t bytes, char err[OSMOS
     return osmos_fail(err, "no sequence, or a mark not its size");
   Header h;
   memcpy(&h, in, sizeof h);
-  if (h.magic != MARK_MAGIC || h.version != STATE_VERSION || h.identity != q35_identity(s->f) || h.pos < 0 ||
-      h.pos > s->pos)
-    return osmos_fail(err, "not this model's mark, or one past the sequence's position");
+  const char *bad = state_head_check(h.magic, MARK_MAGIC, h.version, STATE_VERSION, h.identity, q35_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, (uint32_t)s->pos))) /* (a mark at or below the sequence's position) */
+    return osmos_fail(err, "%s", bad);
   if (h.closed != closed_blocks(s)) /* LSA's blocks closed since: their buckets of keys a mark's sequence lacks */
     return osmos_fail(err, "a mark below a block LSA has closed since");
   if (s->broken)

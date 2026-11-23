@@ -7,6 +7,7 @@
 
 #include "drafter_impl.h"
 #include "forward_impl.h"
+#include "osmos/gpu/state_parts.h"
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/model/fnv.h"
 #include "osmos/err.h"
@@ -210,13 +211,14 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
     return refuse(s, err, "a state shorter than its header");
   if (!src(ctx, &h, sizeof h))
     return refuse(s, err, "the source failed (the state's header)");
-  if (h.magic != STATE_MAGIC || h.version != SEQ_STATE_VERSION)
-    return refuse(s, err, "not a sequence's state, or another version's");
-  if (h.identity != forward_identity(f))
-    return refuse(s, err, "a state of another model or geometry (its identity)");
-  if (h.pos < 0 || (uint32_t)h.pos > f->max_ctx || h.prompt_end < 0 || (uint32_t)h.prompt_end > f->max_ctx || h.dec_from < 0 ||
-      h.n_last < 0 || h.n_last > STATE_LAST || h.has_dring > 1 || h.ahead > SEQ_MAX_BACK)
-    return refuse(s, err, "a state's position past this forward's context, or its fields out of range");
+  const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, SEQ_STATE_VERSION, h.identity, forward_identity(f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, f->max_ctx)))
+    return refuse(s, err, bad);
+  if (h.prompt_end < 0 || (uint32_t)h.prompt_end > f->max_ctx || h.dec_from < 0 || h.n_last < 0 ||
+      h.n_last > STATE_LAST || h.has_dring > 1 || h.ahead > SEQ_MAX_BACK)
+    return refuse(s, err, "a state whose fields are out of range");
+  if ((bad = state_tokens_check(h.last, h.n_last, (uint32_t)f->g->n_vocab))) /* (the Engram's n-grams: 0.16.0 any) */
+    return refuse(s, err, bad);
   /* the parts as the state laid them out: the sequence at its position (and a drafter's rings to fill) */
   /* (the drafter's rings the sequence's from its making: a state's rings read into them) */
   s->pos = h.pos;

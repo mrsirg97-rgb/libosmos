@@ -153,13 +153,11 @@ bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, ch
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");
-  if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != hy4_identity(s->f))
-    return refuse(s, err, "a state of another format or model (its identity)");
-  if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx)
-    return refuse(s, err, "a state past this context");
-  for (int j = 0; j < HISTORY; j++)
-    if (h.pos > j && (h.last[j] < 0 || h.last[j] >= s->f->w->geo.n_vocab))
-      return refuse(s, err, "a state whose last tokens are outside the vocabulary");
+  const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, hy4_identity(s->f));
+  bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx);
+  bad = bad ? bad : state_tokens_check(h.last, h.pos < HISTORY ? h.pos : HISTORY, (uint32_t)s->f->w->geo.n_vocab);
+  if (bad)
+    return refuse(s, err, bad);
   StatePart p[MAX_PARTS];
   const int n = parts(s, h.pos, p);
   if (bytes != state_parts_bytes(sizeof h, p, n))

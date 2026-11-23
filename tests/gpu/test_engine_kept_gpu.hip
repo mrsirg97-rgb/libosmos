@@ -29,7 +29,7 @@ static const SmallPack kPacks[] = {
     {"hy4-flash", "/Models/osmos/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf", nullptr},
     {"osmos-evo-inkling", "/Models/osmos/osmos-evo-inkling/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf", nullptr},
     {"osmos-evo", "/Models/osmos/osmos-evo/DeepSeek-V4.1-Flash-1017-osmos-evo-A2-00001-of-00005.gguf", nullptr},
-    {"coder27", "/Models/coder27/Huihui-Qwen3.8-27B-Coder390-EfficientThink-abliterated-IQ3_S3.gguf", nullptr},
+    {"coder27", "/Models/coder390-halo/models/osmos-vibes-nvfp4.gguf", nullptr},
 };
 constexpr uint32_t kN = 12;
 

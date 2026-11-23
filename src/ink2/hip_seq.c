@@ -303,10 +303,11 @@ bool ink2_seq_load_from(Ink2Seq *s, uint64_t bytes, StateSource src, void *ctx, 
   Head h;
   if (bytes < sizeof h || !src(ctx, &h, sizeof h))
     return settle(s, 0, false), osmos_fail(err, "a state too short, or its source failed");
-  if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != ink2_identity(s->f))
-    return settle(s, 0, false), osmos_fail(err, "a state of another format, model or build");
-  if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || bytes != bytes_at(s, h.pos, false))
-    return settle(s, 0, false), osmos_fail(err, "a state past max_ctx, or not its position's size");
+  const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, ink2_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx)))
+    return settle(s, 0, false), osmos_fail(err, "%s", bad);
+  if (bytes != bytes_at(s, h.pos, false))
+    return settle(s, 0, false), osmos_fail(err, "a state not its position's size");
   Part p[MAX_PARTS];
   const bool ok = !state_parts_load(&h, sizeof h, p, parts(s, h.pos, false, true, p), src, ctx);
   settle(s, ok ? h.pos : 0, false);
@@ -341,9 +342,11 @@ bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[OSM
   if (bytes < sizeof h + 8)
     return osmos_fail(err, "a mark too short");
   memcpy(&h, in, sizeof h);
-  if (h.magic != MARK_MAGIC || h.version != STATE_VERSION || h.identity != ink2_identity(s->f) || h.pos < 0 ||
-      h.pos > s->pos || bytes != bytes_at(s, h.pos, true))
-    return osmos_fail(err, "a mark of another sequence, past its position, or of another size");
+  const char *bad = state_head_check(h.magic, MARK_MAGIC, h.version, STATE_VERSION, h.identity, ink2_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, (uint32_t)s->pos))) /* (a mark at or below the sequence's position) */
+    return osmos_fail(err, "%s", bad);
+  if (bytes != bytes_at(s, h.pos, true))
+    return osmos_fail(err, "a mark not its position's size");
   uint64_t sum;
   memcpy(&sum, (const uint8_t *)in + bytes - 8, 8);
   if (sum != fnv(in, bytes - 8, FNV_SEED))

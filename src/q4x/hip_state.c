@@ -147,11 +147,13 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
     return refuse(s, err, "a state shorter than its header");
   if (!src(ctx, &h, sizeof h))
     return refuse(s, err, "the source failed (the state's header)");
-  if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != q4x_identity(s->f))
-    return refuse(s, err, "a state of another format or model (its identity)");
-  if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM ||
-      h.pend_pos < -1 || h.pend_pos >= h.pos || bytes != bytes_at(s, h.pos))
-    return refuse(s, err, "a state past this context, or not its position's size");
+  const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, q4x_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx)))
+    return refuse(s, err, bad);
+  if (h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM || h.pend_pos < -1 || h.pend_pos >= h.pos || bytes != bytes_at(s, h.pos))
+    return refuse(s, err, "a state whose fields are out of range, or not its position's size");
+  if ((bad = state_tokens_check(h.last, h.n_last, (uint32_t)s->f->w->geo.n_vocab))) /* (0.16.0: any loaded) */
+    return refuse(s, err, bad);
   Part p[MAX_PARTS];
   s->cur = 0, s->back = 0; /* loaded into slot 0, nothing behind it */
   const char *why = state_parts_load(&h, sizeof h, p, parts(s, h.pos, p), src, ctx);
@@ -194,7 +196,8 @@ bool q4x_seq_rollback(Q4xSeq *s, uint32_t n)
 
 typedef struct MarkHeader
 {
-  uint32_t magic;
+  uint32_t magic, version; /* (0.16.0: a mark the model's, as every family's - its magic alone before) */
+  uint64_t identity;
   int32_t pos, n_last;
   int32_t last[Q4X_MAX_NGRAM];
   int32_t pend_pos; /* the head's pending h's (-1: none) */
@@ -236,7 +239,8 @@ bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[OSMO
     return osmos_fail(err, "a GPU call failed (before the mark's save)");
   MarkHeader h;
   memset(&h, 0, sizeof h);
-  h.magic = MARK_MAGIC, h.pos = s->pos, h.n_last = s->n_last < Q4X_MAX_NGRAM ? s->n_last : Q4X_MAX_NGRAM;
+  h.magic = MARK_MAGIC, h.version = STATE_VERSION, h.identity = q4x_identity(s->f), h.pos = s->pos;
+  h.n_last = s->n_last < Q4X_MAX_NGRAM ? s->n_last : Q4X_MAX_NGRAM;
   h.pend_pos = s->mkc ? s->pend_pos : -1;
   memcpy(h.last, s->last, sizeof h.last);
   memcpy(out, &h, sizeof h);
@@ -251,8 +255,11 @@ bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[OSMOS
     return osmos_fail(err, "no sequence, or a mark not its size");
   MarkHeader h;
   memcpy(&h, in, sizeof h);
-  if (h.magic != MARK_MAGIC || h.pos < 0 || h.pos > s->pos || h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM)
-    return osmos_fail(err, "not a mark, or one past the sequence's position");
+  const char *bad = state_head_check(h.magic, MARK_MAGIC, h.version, STATE_VERSION, h.identity, q4x_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, (uint32_t)s->pos))) /* (a mark at or below the sequence's position) */
+    return osmos_fail(err, "%s", bad);
+  if (h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM || (bad = state_tokens_check(h.last, h.n_last, (uint32_t)s->f->w->geo.n_vocab)))
+    return osmos_fail(err, "%s", bad ? bad : "a mark whose fields are out of range");
   if (s->broken)
     return osmos_fail(err, "a sequence after a failed step: its rows below the mark not known (load a state)");
   if (hipDeviceSynchronize() != hipSuccess) /* its states not still being read */

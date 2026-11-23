@@ -201,11 +201,11 @@ bool lfm3_seq_load_from(Lfm3Seq *s, uint64_t bytes, StateSource src, void *ctx, 
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");
-  if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != lfm3_identity(s->f))
-    return refuse(s, err, "a state of another format or model (its identity)");
-  if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || h.closed > (uint32_t)h.pos / LSA_WINDOW ||
-      (!s->f->lsa && h.closed) || h.stage >= s->f->stages)
-    return refuse(s, err, "a state past this context, or its closed blocks past its position");
+  const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, lfm3_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx)))
+    return refuse(s, err, bad);
+  if (h.closed > (uint32_t)h.pos / LSA_WINDOW || (!s->f->lsa && h.closed) || h.stage >= s->f->stages)
+    return refuse(s, err, "a state whose closed blocks are past its position, or its stage past this forward's");
   StatePart p[MAX_PARTS];
   const int n = parts(s, h.pos, 0, h.closed, p);
   if (bytes != state_parts_bytes(sizeof h, p, n))
