@@ -39,23 +39,31 @@ struct OsmosSeq
   void *impl;
 };
 
-static bool fail(char err[OSMOS_ERR], const char *what)
+void *oseq_impl(const OsmosSeq *s) { return s ? s->impl : NULL; }
+
+/* a family's failure named once, by the family (osmos_context: its own cause kept, "<arch>: " before it) */
+static bool named(const OsmosFamily *fam, char err[OSMOS_ERR], bool ok)
 {
-  if (err)
-    snprintf(err, OSMOS_ERR, "%s", what);
-  return false;
+  if (!ok)
+    osmos_context(err, fam->arch);
+  return ok;
 }
 
-void *oseq_impl(const OsmosSeq *s) { return s ? s->impl : NULL; }
+static int named_count(const OsmosFamily *fam, char err[OSMOS_ERR], int got)
+{
+  if (got < 0)
+    osmos_context(err, fam->arch);
+  return got;
+}
 
 OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR])
 {
   if (!files || !files->model)
-    return fail(err, "no model file named"), NULL;
+    return osmos_fail(err, "no model file named"), NULL;
   char gerr[GGUF_ERR] = "";
   Gguf *h = gguf_header(files->model, gerr);
   if (!h)
-    return fail(err, gerr), NULL;
+    return osmos_fail(err, "%s", gerr), NULL;
   const GgufKv *a = gguf_kv(h, "general.architecture");
   char arch[64] = "";
   if (a && a->type == GGUF_STRING)
@@ -66,16 +74,17 @@ OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR])
     if (!strcmp(arch, families[i]->arch))
       fam = families[i];
   if (!fam)
-  {
-    if (err)
-      snprintf(err, OSMOS_ERR, "the architecture %s: no family here runs it (deepseek41, qwen4exp, inkling2)", arch[0] ? arch : "(none)");
-    return NULL;
+  { /* the families named from the table itself: a list kept by hand went stale (three of six) */
+    char known[OSMOS_ERR / 2] = "";
+    for (size_t i = 0, at = 0; i < sizeof families / sizeof *families && at < sizeof known; i++)
+      at += (size_t)snprintf(known + at, sizeof known - at, "%s%s", i ? ", " : "", families[i]->arch);
+    return osmos_fail(err, "the architecture %s: no family here runs it (%s)", arch[0] ? arch : "(none)", known), NULL;
   }
   OsmosModel *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   m->fam = fam;
-  if (!(m->impl = fam->open(files, &m->facts, err)))
+  if (!named(fam, err, (m->impl = fam->open(files, &m->facts, err)) != NULL))
     return free(m), NULL;
   return m;
 }
@@ -97,15 +106,15 @@ OsmosFacts osmos_facts(const OsmosModel *m)
 Osmos *osmos_create(const OsmosModel *m, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   if (!m || !o)
-    return fail(err, "no model or options"), NULL;
+    return osmos_fail(err, "no model or options"), NULL;
   Osmos *e = calloc(1, sizeof *e);
   if (!e)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   e->fam = m->fam, e->vocab = (uint32_t)m->facts.vocab;
   if (!(e->row = malloc((size_t)e->vocab * sizeof *e->row)))
-    return free(e), fail(err, "out of memory"), NULL;
+    return free(e), osmos_fail(err, "out of memory"), NULL;
   e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
-  if (!(e->impl = m->fam->create(m->impl, o, err)))
+  if (!named(m->fam, err, (e->impl = m->fam->create(m->impl, o, err)) != NULL))
     return free(e->row), free(e), NULL;
   return e;
 }
@@ -150,11 +159,11 @@ bool osmos_read(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t
   if (!e || !e->fam->read)
     return osmos_batch(e, seqs, tokens, n, err);
   if (!seqs || !tokens || !n)
-    return fail(err, "a batch of no tokens");
+    return osmos_fail(err, "a batch of no tokens");
   for (uint32_t i = 0; i < n; i++)
     if (!seqs[i] || seqs[i]->e != e)
-      return fail(err, "a batch's sequence not this engine's");
-  return e->fam->read(e->impl, seqs, tokens, n, err);
+      return osmos_fail(err, "a batch's sequence not this engine's");
+  return named(e->fam, err, e->fam->read(e->impl, seqs, tokens, n, err));
 }
 
 bool osmos_reads_apart(const Osmos *e) { return e && e->fam->read; }
@@ -162,35 +171,35 @@ bool osmos_reads_apart(const Osmos *e) { return e && e->fam->read; }
 bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {
   if (!e || !seqs || !tokens || !n)
-    return fail(err, "a batch of no tokens");
+    return osmos_fail(err, "a batch of no tokens");
   for (uint32_t i = 0; i < n; i++)
     if (!seqs[i] || seqs[i]->e != e)
-      return fail(err, "a batch's sequence not this engine's");
+      return osmos_fail(err, "a batch's sequence not this engine's");
   for (uint32_t i = 0; i < n; i++) /* every family's, before any reads one (Inkling, the 27B and Qwen embedded any) */
     if (tokens[i] < 0 || (uint32_t)tokens[i] >= e->vocab)
-      return fail(err, "a token outside the vocabulary");
-  return e->fam->batch(e->impl, seqs, tokens, n, err);
+      return osmos_fail(err, "a token outside the vocabulary");
+  return named(e->fam, err, e->fam->batch(e->impl, seqs, tokens, n, err));
 }
 
 const float *osmos_logits(const Osmos *e, uint32_t row) { return e ? e->fam->logits(e->impl, row) : NULL; }
 
 bool osmos_greedy(Osmos *e, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
-  return e && ids ? e->fam->greedy(e->impl, row0, rows, ids, err) : fail(err, "no engine");
+  return e && ids ? named(e->fam, err, e->fam->greedy(e->impl, row0, rows, ids, err)) : osmos_fail(err, "no engine");
 }
 
 bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t n, int32_t *id, char err[OSMOS_ERR])
 {
   if (!e || !id)
-    return fail(err, "no engine");
+    return osmos_fail(err, "no engine");
   const float *dev = e->fam->logits(e->impl, row);
   if (!dev)
-    return fail(err, "the row's logits not kept");
+    return osmos_fail(err, "the row's logits not kept");
   if (hipDeviceSynchronize() != hipSuccess ||
       hipMemcpy(e->row, dev, (size_t)e->vocab * sizeof *e->row, hipMemcpyDeviceToHost) != hipSuccess)
-    return fail(err, "a GPU call failed (a row's logits)");
+    return osmos_fail(err, "a GPU call failed (a row's logits)");
   *id = answer_best(e->row, e->vocab, except, n);
-  return *id >= 0 || fail(err, "every token of the row excepted or NaN");
+  return *id >= 0 || osmos_fail(err, "every token of the row excepted or NaN");
 }
 
 bool osmos_sampled(const OsmosSampling *s) { return s && s->temperature > 0; }
@@ -199,14 +208,14 @@ static bool draw(Osmos *e, const float *dev, const OsmosSampling *s, uint64_t po
                  char err[OSMOS_ERR])
 {
   if (!(s->temperature < 1e30f) || !(s->top_p > 0 && s->top_p <= 1))
-    return fail(err, "sampling: temperature finite and above 0, top_p in (0, 1]");
+    return osmos_fail(err, "sampling: temperature finite and above 0, top_p in (0, 1]");
   if (!e->dpick && hipMalloc((void **)&e->dpick, sizeof *e->dpick) != hipSuccess)
-    return e->dpick = NULL, fail(err, "a GPU call failed (sampling's pick)");
+    return e->dpick = NULL, osmos_fail(err, "a GPU call failed (sampling's pick)");
   if (!ops_sample(dev, e->vocab, s->temperature, s->top_p, s->top_k, ops_draw_uniform(s->seed, position), e->dpick,
                   NULL) ||
       hipMemcpy(id, e->dpick, sizeof *id, hipMemcpyDeviceToHost) != hipSuccess)
-    return fail(err, "a GPU call failed (a sampled token)");
-  return *id >= 0 || fail(err, "a sampled row with a NaN or +inf (or every token excepted)");
+    return osmos_fail(err, "a GPU call failed (a sampled token)");
+  return *id >= 0 || osmos_fail(err, "a sampled row with a NaN or +inf (or every token excepted)");
 }
 
 bool osmos_sample(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_t position, int32_t *id, char err[OSMOS_ERR])
@@ -214,12 +223,12 @@ bool osmos_sample(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_t posit
   if (!osmos_sampled(s))
     return osmos_greedy(e, row, 1, id, err);
   if (!e || !id)
-    return fail(err, "no engine");
+    return osmos_fail(err, "no engine");
   const float *dev = e->fam->logits(e->impl, row);
   if (!dev)
-    return fail(err, "the row's logits not kept");
+    return osmos_fail(err, "the row's logits not kept");
   if (hipDeviceSynchronize() != hipSuccess)
-    return fail(err, "a GPU call failed (a row's logits)");
+    return osmos_fail(err, "a GPU call failed (a row's logits)");
   return draw(e, dev, s, position, id, err);
 }
 
@@ -229,20 +238,20 @@ bool osmos_sample_except(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_
   if (!osmos_sampled(s))
     return osmos_greedy_except(e, row, except, n, id, err);
   if (!e || !id)
-    return fail(err, "no engine");
+    return osmos_fail(err, "no engine");
   const float *dev = e->fam->logits(e->impl, row);
   if (!dev)
-    return fail(err, "the row's logits not kept");
+    return osmos_fail(err, "the row's logits not kept");
   const size_t bytes = (size_t)e->vocab * sizeof *e->drow;
   if (!e->drow && hipMalloc((void **)&e->drow, bytes) != hipSuccess)
-    return e->drow = NULL, fail(err, "a GPU call failed (a row's copy)");
+    return e->drow = NULL, osmos_fail(err, "a GPU call failed (a row's copy)");
   const float ninf = -__builtin_inff();
   if (hipDeviceSynchronize() != hipSuccess || hipMemcpy(e->drow, dev, bytes, hipMemcpyDeviceToDevice) != hipSuccess)
-    return fail(err, "a GPU call failed (a row's copy)");
+    return osmos_fail(err, "a GPU call failed (a row's copy)");
   for (uint32_t i = 0; i < n; i++)
     if (except[i] >= 0 && (uint32_t)except[i] < e->vocab &&
         hipMemcpy(e->drow + except[i], &ninf, sizeof ninf, hipMemcpyHostToDevice) != hipSuccess)
-      return fail(err, "a GPU call failed (a row's copy)");
+      return osmos_fail(err, "a GPU call failed (a row's copy)");
   return draw(e, e->drow, s, position, id, err);
 }
 
@@ -251,12 +260,12 @@ uint32_t osmos_block(const Osmos *e) { return e ? e->fam->block(e->impl) : 0; }
 OsmosSeq *oseq_create(Osmos *e, char err[OSMOS_ERR])
 {
   if (!e)
-    return fail(err, "no engine"), NULL;
+    return osmos_fail(err, "no engine"), NULL;
   OsmosSeq *s = calloc(1, sizeof *s);
   if (!s)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   s->e = e;
-  if (!(s->impl = e->fam->seq_create(e->impl, err)))
+  if (!named(e->fam, err, (s->impl = e->fam->seq_create(e->impl, err)) != NULL))
     return free(s), NULL;
   return s;
 }
@@ -277,12 +286,12 @@ uint64_t oseq_state_bytes(const OsmosSeq *s) { return s ? s->e->fam->state_bytes
 
 bool oseq_save_to(const OsmosSeq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
-  return s && sink ? s->e->fam->save_to(s->impl, sink, ctx, err) : fail(err, "no sequence or sink");
+  return s && sink ? named(s->e->fam, err, s->e->fam->save_to(s->impl, sink, ctx, err)) : osmos_fail(err, "no sequence or sink");
 }
 
 bool oseq_load_from(OsmosSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
-  return s && src ? s->e->fam->load_from(s->impl, bytes, src, ctx, err) : fail(err, "no sequence or source");
+  return s && src ? named(s->e->fam, err, s->e->fam->load_from(s->impl, bytes, src, ctx, err)) : osmos_fail(err, "no sequence or source");
 }
 
 /* one buffer as the pieces' sink and source: its bytes in order, never past its end */
@@ -313,17 +322,17 @@ static bool mem_source(void *ctx, void *bytes, uint64_t n)
 bool oseq_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || !out)
-    return fail(err, "no sequence or buffer");
+    return osmos_fail(err, "no sequence or buffer");
   if (bytes != oseq_state_bytes(s))
-    return fail(err, "a buffer not the state's size (oseq_state_bytes)");
+    return osmos_fail(err, "a buffer not the state's size (oseq_state_bytes)");
   Mem m = {out, 0, bytes};
-  return oseq_save_to(s, mem_sink, &m, err) && (m.at == bytes || fail(err, "a state shorter than its size"));
+  return oseq_save_to(s, mem_sink, &m, err) && (m.at == bytes || osmos_fail(err, "a state shorter than its size"));
 }
 
 bool oseq_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
 {
   Mem m = {(uint8_t *)in, 0, bytes};
-  return s && in ? oseq_load_from(s, bytes, mem_source, &m, err) : fail(err, "no sequence or state");
+  return s && in ? oseq_load_from(s, bytes, mem_source, &m, err) : osmos_fail(err, "no sequence or state");
 }
 
 uint64_t oseq_mark_bytes(const OsmosSeq *s)
@@ -334,32 +343,32 @@ uint64_t oseq_mark_bytes(const OsmosSeq *s)
 bool oseq_mark_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || !out)
-    return fail(err, "no sequence or buffer");
-  return s->e->fam->mark_save ? s->e->fam->mark_save(s->impl, out, bytes, err) : oseq_save(s, out, bytes, err);
+    return osmos_fail(err, "no sequence or buffer");
+  return s->e->fam->mark_save ? named(s->e->fam, err, s->e->fam->mark_save(s->impl, out, bytes, err)) : oseq_save(s, out, bytes, err);
 }
 
 bool oseq_mark_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || !in)
-    return fail(err, "no sequence or mark");
-  return s->e->fam->mark_load ? s->e->fam->mark_load(s->impl, in, bytes, err) : oseq_load(s, in, bytes, err);
+    return osmos_fail(err, "no sequence or mark");
+  return s->e->fam->mark_load ? named(s->e->fam, err, s->e->fam->mark_load(s->impl, in, bytes, err)) : oseq_load(s, in, bytes, err);
 }
 
 bool oseq_seed(OsmosSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
   if (!s || !osmos_block(s->e))
-    return fail(err, "no drafter");
-  return s->e->fam->seed(s->e->impl, s->impl, from, to, err);
+    return osmos_fail(err, "no drafter");
+  return named(s->e->fam, err, s->e->fam->seed(s->e->impl, s->impl, from, to, err));
 }
 
 int oseq_draft(OsmosSeq *s, int32_t y, float conf_min, float cum_min, int32_t drafts[OSMOS_MAX_BLOCK],
                float conf[OSMOS_MAX_BLOCK], char err[OSMOS_ERR])
 {
   if (!s || !drafts || !conf || !osmos_block(s->e))
-    return fail(err, "no drafter"), -1;
+    return osmos_fail(err, "no drafter"), -1;
   if (y < 0 || (uint32_t)y >= s->e->vocab) /* every family's (Hy4's drafter returned 0, no drafts) */
-    return fail(err, "a draft after a token outside the vocabulary"), -1;
-  return s->e->fam->draft(s->e->impl, s->impl, y, conf_min, cum_min, drafts, conf, err);
+    return osmos_fail(err, "a draft after a token outside the vocabulary"), -1;
+  return named_count(s->e->fam, err, s->e->fam->draft(s->e->impl, s->impl, y, conf_min, cum_min, drafts, conf, err));
 }
 
 bool oseq_draft_all(OsmosSeq *const *s, const int32_t *y, uint32_t n, float conf_min, float cum_min,
@@ -367,22 +376,22 @@ bool oseq_draft_all(OsmosSeq *const *s, const int32_t *y, uint32_t n, float conf
                     char err[OSMOS_ERR])
 {
   if (!s || !y || !n || !drafts || !conf || !counts || !s[0] || !osmos_block(s[0]->e))
-    return fail(err, "no sequences, room or drafter");
+    return osmos_fail(err, "no sequences, room or drafter");
   Osmos *e = s[0]->e;
   for (uint32_t i = 0; i < n; i++)
   {
     if (!s[i] || s[i]->e != e)
-      return fail(err, "a sequence not this engine's");
+      return osmos_fail(err, "a sequence not this engine's");
     if (y[i] < 0 || (uint32_t)y[i] >= e->vocab)
-      return fail(err, "a draft after a token outside the vocabulary");
+      return osmos_fail(err, "a draft after a token outside the vocabulary");
     for (uint32_t j = 0; j < i; j++)
       if (s[j] == s[i])
-        return fail(err, "a sequence twice");
+        return osmos_fail(err, "a sequence twice");
   }
   if (e->fam->draft_all)
-    return e->fam->draft_all(e->impl, s, y, n, conf_min, cum_min, drafts, conf, counts, err);
+    return named(e->fam, err, e->fam->draft_all(e->impl, s, y, n, conf_min, cum_min, drafts, conf, counts, err));
   for (uint32_t i = 0; i < n; i++)
-    if ((counts[i] = e->fam->draft(e->impl, s[i]->impl, y[i], conf_min, cum_min, drafts[i], conf[i], err)) < 0)
+    if ((counts[i] = named_count(e->fam, err, e->fam->draft(e->impl, s[i]->impl, y[i], conf_min, cum_min, drafts[i], conf[i], err))) < 0)
       return false;
   return true;
 }

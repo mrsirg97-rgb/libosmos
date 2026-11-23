@@ -40,12 +40,6 @@ typedef struct Eng
   uint32_t vocab, n; /* a logits row; the last batch's rows (every one kept) */
 } Eng;
 
-static bool fail(char err[OSMOS_ERR], const char *what)
-{
-  snprintf(err, OSMOS_ERR, "%s", what);
-  return false;
-}
-
 static void m_close(void *p)
 {
   Model *m = p;
@@ -59,12 +53,12 @@ static void m_close(void *p)
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
   if (files->lsa)
-    return snprintf(err, OSMOS_ERR, "%s", "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
+    return osmos_fail(err, "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
   if (files->table)
-    return fail(err, "qwen4exp: no Engram table is read for this family"), NULL;
+    return osmos_fail(err, "qwen4exp: no Engram table is read for this family"), NULL;
   Model *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   if (!(m->g = gguf_create(files->model, err)) || (files->overlay && !(m->ov = gguf_create(files->overlay, err))) ||
       !(m->w = q4x_weights_create(m->g, m->ov, err)))
     return m_close(m), NULL;
@@ -76,7 +70,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
                         (uint32_t)((geo->n_experts - 1) / geo->n_used), 0, true};
   facts->seed_window = facts->native_ctx; /* the MTP head's cache: every position seeded, as llama.cpp's process() */
   if (!facts->native_ctx)
-    return fail(err, "qwen4exp.context_length: missing"), m_close(m), NULL;
+    return osmos_fail(err, "qwen4exp.context_length: missing"), m_close(m), NULL;
   return m;
 }
 
@@ -96,10 +90,10 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 {
   const Model *m = pm;
   if (o->picks || o->no_guess || o->kv_q8)
-    return fail(err, "qwen4exp: no picks, no_guess or kv_q8"), NULL;
+    return osmos_fail(err, "qwen4exp: no picks, no_guess or kv_q8"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->drafter && !(e->mg = gguf_create(o->drafter, err)))
     return e_destroy(e), NULL;
@@ -159,7 +153,7 @@ static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char e
 {
   Eng *e = p;
   if (!rows || (uint64_t)row0 + rows > e->n)
-    return fail(err, "a row the last step kept no logits of");
+    return osmos_fail(err, "a row the last step kept no logits of");
   return q4x_greedy(e->f, row0, rows, ids, err);
 }
 

@@ -2218,7 +2218,10 @@ destroyed in osmos_destroy, borrowed by each family's constructor (its options),
 tree counted against it, later sequences too; no open / close bracket, nesting or generation ids (0.15.2's version:
 sweep-152-with-ledger - its measured settle, the plan's whole grains and its tests carried over). oseq_reset - a
 sequence emptied in place, its memory kept - one per family, replacing five private 'refuse' copies; osmos-serve's
-conversation restart uses it, so a restart never allocates (0.15.2's ledger met a free-and-reallocate there). Built
+conversation restart uses it, so a restart never allocates (0.15.2's ledger met a free-and-reallocate there). A
+sequence's broken state, one contract: a step refused before any work (its checks) leaves the sequence as it was -
+Inkling's marked it failed ("a sequence of another forward or failed"), osmos1.7b's did not (phase 2's
+test_engine_errors_gpu found it); a step failed partway through breaks it, and a reset mends it. Built
 whole: the engine's sampling buffers at create, not first use; taps, lanes, the NPU and Hy4's drafter as constructor
 options, not attached after; the environment knobs that change bits or memory (Q35_HEAD, HY4_DFLY_HEAD8,
 OSMOS_LFM3_STAGES, INK2_MEM) options or gone. --fill past the machine fails closed (the operator's call, 0.15.2).

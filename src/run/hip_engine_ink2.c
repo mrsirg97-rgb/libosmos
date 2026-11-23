@@ -22,13 +22,6 @@ typedef struct Model
   Ink2Weights *w;
 } Model;
 
-static bool fail(char err[OSMOS_ERR], const char *why)
-{
-  if (err)
-    snprintf(err, OSMOS_ERR, "inkling2: %s", why);
-  return false;
-}
-
 static void m_close(void *p)
 {
   Model *m = p;
@@ -42,19 +35,19 @@ static void m_close(void *p)
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
   if (files->lsa)
-    return snprintf(err, OSMOS_ERR, "%s", "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
+    return osmos_fail(err, "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
   if (files->table)
-    return fail(err, "no Engram table is read for this family"), NULL;
+    return osmos_fail(err, "no Engram table is read for this family"), NULL;
   if (files->overlay)
-    return fail(err, "no overlay is taken yet (a pack's patch is assembled into its shards)"), NULL;
+    return osmos_fail(err, "no overlay is taken yet (a pack's patch is assembled into its shards)"), NULL;
   Model *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   char werr[INK2_ERR > GGUF_ERR ? INK2_ERR : GGUF_ERR] = "";
   if (!(m->g = gguf_create(files->model, werr)) || !(m->w = ink2_weights_create(m->g, werr)))
   {
     if (err)
-      snprintf(err, OSMOS_ERR, "inkling2: %s", werr);
+      osmos_fail(err, "%s", werr);
     return m_close(m), NULL;
   }
   const Ink2Geometry *geo = &m->w->geo;
@@ -152,10 +145,10 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 {
   const Model *m = pm;
   if (o->npu)
-    return fail(err, "no NPU kernels for this family"), NULL;
+    return osmos_fail(err, "no NPU kernels for this family"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->picks) /* a picks file: the router's picks [layer][expert] as uint64, nothing after (DeepSeek's layout) */
   {
@@ -166,7 +159,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
     if (pf)
       fclose(pf);
     if (!ok)
-      return fail(err, "the picks file could not be read, or is not this model's"), e_destroy(e), NULL;
+      return osmos_fail(err, "the picks file could not be read, or is not this model's"), e_destroy(e), NULL;
   }
   /* the drafter: its GGUF (tools/convert/ink2_mtp_gguf.py's) - a directory holding one, or the file */
   if (o->drafter)
@@ -181,7 +174,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
     if (!(e->mg = gguf_create(path, err)))
       return e_destroy(e), NULL;
     if (!(e->mtp = ink2_mtp_create(e->mg, m->w, ierr)))
-      return snprintf(err, OSMOS_ERR, "%s", ierr), e_destroy(e), NULL;
+      return osmos_fail(err, "%s", ierr), e_destroy(e), NULL;
   }
   const Ink2Options io = {o->max_ctx, osmos_step_tokens(o, INK2_STEP_TOKENS), 0, e->picks, e->mtp, o->budget,
                           INK2_LOGIT_ROWS, o->kv_q8};
@@ -206,12 +199,12 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
   Ink2Seq *run[INK2_MAX_RUNS];
   uint32_t first[INK2_MAX_RUNS], len[INK2_MAX_RUNS], runs;
   if (osmos_runs(seqs, n, 0, first, len, &runs) < n) /* the runs counted before any step: a batch of more refused whole */
-    return fail(err, "inkling2: a batch of more than INK2_MAX_RUNS sequences");
+    return osmos_fail(err, "a batch of more than INK2_MAX_RUNS sequences");
   for (uint32_t r = 0; r < runs; r++)
     run[r] = oseq_impl(seqs[first[r]]);
   const double t0 = rp_on() ? now_s() : 0;
   if (!n || !ink2_step(e->f, run, len, runs, tokens, err))
-    return n ? false : fail(err, "an empty batch");
+    return n ? false : osmos_fail(err, "an empty batch");
   if (rp_on()) /* (ink2_step synchronizes: its time the step's) */
   {
     const int k = n < PROF_N - 1 ? (int)n : PROF_N - 1;
@@ -231,7 +224,7 @@ static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char e
 {
   Eng *e = p;
   if (!rows || (uint64_t)row0 + rows > e->n)
-    return fail(err, "a row the last step kept no logits of");
+    return osmos_fail(err, "a row the last step kept no logits of");
   return ink2_greedy(e->f, row0, rows, ids, err);
 }
 

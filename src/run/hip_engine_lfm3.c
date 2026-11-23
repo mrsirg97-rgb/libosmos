@@ -35,12 +35,6 @@ typedef struct Eng
   Q4xDflash *df; /* its DFlash2, or NULL */
 } Eng;
 
-static bool fail(char err[OSMOS_ERR], const char *what)
-{
-  snprintf(err, OSMOS_ERR, "%s", what);
-  return false;
-}
-
 static void m_close(void *p)
 {
   Model *m = p;
@@ -55,14 +49,14 @@ static void m_close(void *p)
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
   if (files->table || files->overlay)
-    return fail(err, "lfm3: no table file or overlay is read"), NULL;
+    return osmos_fail(err, "no table file or overlay is read"), NULL;
   Model *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   if (!(m->g = gguf_create(files->model, err)) || !(m->w = lfm3_weights_create(m->g, err)))
     return m_close(m), NULL;
   if (files->lsa && !(m->lsa = strdup(files->lsa)))
-    return fail(err, "out of memory"), m_close(m), NULL;
+    return osmos_fail(err, "out of memory"), m_close(m), NULL;
   const Lfm3Geometry *geo = &m->w->geo;
   /* seed_window: a DFlash2 drafter's context the prompt's last Q4X_DFLASH_WINDOW_MAX positions (its sliding window at
      most, the loader's check) - 0 left every prompt unseeded, a drafted turn refused (0.11.2) */
@@ -85,17 +79,17 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 {
   const Model *m = pm;
   if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8)
-    return fail(err, "lfm3: every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
+    return osmos_fail(err, "every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   if (o->drafter)
   {
     if (!(e->dg = gguf_create(o->drafter, err)))
       return e_destroy(e), NULL;
     const GgufKv *arch = gguf_kv(e->dg, "general.architecture");
     if (!arch || arch->type != GGUF_STRING || strcmp(arch->v.s, "dflash2"))
-      return fail(err, "lfm3: a drafter not a DFlash2 (general.architecture dflash2)"), e_destroy(e), NULL;
+      return osmos_fail(err, "a drafter not a DFlash2 (general.architecture dflash2)"), e_destroy(e), NULL;
     const Lfm3Geometry *geo = &m->w->geo;
     const Q4xDflashTarget t = {geo->n_embd, geo->n_vocab, geo->n_layers};
     if (!(e->df = q4x_dflash_create_for(e->dg, &t, err)))
@@ -124,7 +118,7 @@ static bool batch(Eng *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t
   {
     const uint32_t k = osmos_runs(seqs, n, at, first, len, &runs);
     if (at + k < n)
-      return fail(err, "lfm3: a batch past LFM3_MAX_RUNS sequences"); /* its logits one step's: never split */
+      return osmos_fail(err, "a batch past LFM3_MAX_RUNS sequences"); /* its logits one step's: never split */
     for (uint32_t r = 0; r < runs; r++)
       run[r] = oseq_impl(seqs[first[r]]);
     if (!(read ? lfm3_step_read : lfm3_step_runs)(e->f, run, len, runs, tokens + at, err))

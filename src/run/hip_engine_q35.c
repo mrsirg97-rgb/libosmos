@@ -29,12 +29,6 @@ typedef struct Eng
   Q35Forward *f;
 } Eng;
 
-static bool fail(char err[OSMOS_ERR], const char *what)
-{
-  snprintf(err, OSMOS_ERR, "%s", what);
-  return false;
-}
-
 static void m_close(void *p)
 {
   Model *m = p;
@@ -48,18 +42,18 @@ static void m_close(void *p)
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
   if (files->lsa)
-    return snprintf(err, OSMOS_ERR, "%s", "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
+    return osmos_fail(err, "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
   if (files->table || files->overlay)
-    return fail(err, "qwen35: no Engram table or overlay is read for this family"), NULL;
+    return osmos_fail(err, "qwen35: no Engram table or overlay is read for this family"), NULL;
   Model *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   if (!(m->g = gguf_create(files->model, err)) || !(m->w = q35_weights_create(m->g, err)))
     return m_close(m), NULL;
   const Q35Geometry *geo = &m->w->geo;
   *facts = (OsmosFacts){"qwen35", (uint32_t)geo->n_vocab, geo->native_ctx, Q35_LOGIT_ROWS, 0, false};
   if (!facts->native_ctx)
-    return fail(err, "qwen35.context_length: missing"), m_close(m), NULL;
+    return osmos_fail(err, "qwen35.context_length: missing"), m_close(m), NULL;
   return m;
 }
 
@@ -76,12 +70,12 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 {
   const Model *m = pm;
   if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8)
-    return fail(err, "qwen35: every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
+    return osmos_fail(err, "qwen35: every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
   if (o->drafter)
-    return fail(err, "qwen35: no drafter yet (its MTP head and DFlash: 0.9.0's next step)"), NULL;
+    return osmos_fail(err, "qwen35: no drafter yet (its MTP head and DFlash: 0.9.0's next step)"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   const uint32_t steps = osmos_step_tokens(o, Q35_STEP_TOKENS);
   const Q35Options qo = {steps, o->max_ctx, Q35_LOGIT_ROWS};
   if (!(e->f = q35_forward_create_with(m->w, &qo, err)))
@@ -106,7 +100,7 @@ static bool batch(Eng *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t
   {
     const uint32_t k = osmos_runs(seqs, n, at, first, len, &runs);
     if (at + k < n)
-      return fail(err, "qwen35: a batch past Q35_MAX_RUNS sequences"); /* its logits one step's: never split */
+      return osmos_fail(err, "qwen35: a batch past Q35_MAX_RUNS sequences"); /* its logits one step's: never split */
     for (uint32_t r = 0; r < runs; r++)
       run[r] = oseq_impl(seqs[first[r]]);
     if (!(read ? q35_step_read : q35_step_runs)(e->f, run, len, runs, tokens + at, err))

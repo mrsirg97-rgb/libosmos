@@ -32,12 +32,6 @@ typedef struct Eng
   uint32_t rows;    /* the forward's logit_rows: a decode step's most tokens (the facts' round_tokens) */
 } Eng;
 
-static bool fail(char err[OSMOS_ERR], const char *what)
-{
-  snprintf(err, OSMOS_ERR, "%s", what);
-  return false;
-}
-
 static void m_close(void *p)
 {
   Model *m = p;
@@ -53,14 +47,14 @@ static void m_close(void *p)
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
   if (files->lsa)
-    return snprintf(err, OSMOS_ERR, "%s", "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
+    return osmos_fail(err, "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
   Model *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   char gerr[GGUF_ERR] = "";
   if (!(m->g = gguf_create(files->model, gerr)) || (files->table && !(m->table = gguf_create(files->table, gerr))) ||
       (files->overlay && !(m->overlay = gguf_create(files->overlay, gerr))))
-    return fail(err, gerr), m_close(m), NULL;
+    return osmos_fail(err, "%s", gerr), m_close(m), NULL;
   const WeightsOptions wo = {m->g, m->table, m->overlay};
   if (!(m->w = weights_create_with(&wo, err)))
     return m_close(m), NULL;
@@ -70,7 +64,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
                          ctx && ctx->type == GGUF_UINT32 ? (uint32_t)ctx->v.u : 0,
                          (uint32_t)((geo->n_experts - 1) / geo->n_used), (uint32_t)geo->window, true};
   if (!facts->native_ctx)
-    return fail(err, "deepseek41.context_length: missing"), m_close(m), NULL;
+    return osmos_fail(err, "deepseek41.context_length: missing"), m_close(m), NULL;
   return m;
 }
 
@@ -96,7 +90,7 @@ static uint64_t *read_picks(const char *path, const Geometry *geo, char err[OSMO
   if (pf)
     fclose(pf);
   if (!ok)
-    return free(p), fail(err, "the picks file could not be read, or is not this model's"), NULL;
+    return free(p), osmos_fail(err, "the picks file could not be read, or is not this model's"), NULL;
   return p;
 }
 
@@ -105,13 +99,13 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   const Model *m = pm;
   Eng *e = calloc(1, sizeof *e);
   if (!e || !(e->seqs = malloc(FORWARD_MAX_TOKENS * sizeof *e->seqs)))
-    return free(e), fail(err, "out of memory"), NULL;
+    return free(e), osmos_fail(err, "out of memory"), NULL;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->picks && !(e->picks = read_picks(o->picks, &m->w->geo, err)))
     return e_destroy(e), NULL;
   e->rows = (uint32_t)((m->w->geo.n_experts - 1) / m->w->geo.n_used); /* m_open's round_tokens */
   if (o->kv_q8)
-    return e_destroy(e), fail(err, "deepseek: kv_q8 is Inkling's alone"), NULL;
+    return e_destroy(e), osmos_fail(err, "kv_q8 is Inkling's alone"), NULL;
   const ForwardOptions fo = {m->w->geo.n_layers, o->max_ctx,  o->budget,     e->picks,
                              osmos_step_tokens(o, FORWARD_MAX_TOKENS), o->no_guess, o->fill_set, o->fill, 0, e->rows};
   if (!(e->f = forward_create_with(m->w, &fo, err)) || !forward_lane(e->f, 0, NULL, err) ||
@@ -135,7 +129,7 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
 {
   Eng *e = p;
   if (n > FORWARD_MAX_TOKENS)
-    return fail(err, "a batch of more than the forward's max_tokens");
+    return osmos_fail(err, "a batch of more than the forward's max_tokens");
   for (uint32_t i = 0; i < n; i++)
     e->seqs[i] = oseq_impl(seqs[i]);
   e->n = e->kept = 0;
@@ -174,7 +168,7 @@ static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char e
   Eng *e = p;
   const int64_t k = kept_row(e, row0);
   if (!rows || k < 0 || kept_row(e, row0 + rows - 1) < 0)
-    return fail(err, "a row the last step kept no logits of");
+    return osmos_fail(err, "a row the last step kept no logits of");
   return forward_greedy(e->f, (uint32_t)k, rows, ids, err);
 }
 

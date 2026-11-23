@@ -35,12 +35,6 @@ typedef struct Eng
   uint32_t drafts; /* a round's drafts (DFly2's), 0 without a drafter */
 } Eng;
 
-static bool fail(char err[OSMOS_ERR], const char *what)
-{
-  snprintf(err, OSMOS_ERR, "%s", what);
-  return false;
-}
-
 static void m_close(void *p)
 {
   Model *m = p;
@@ -57,21 +51,21 @@ static void m_close(void *p)
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
   if (files->lsa) /* (0.11.2: taken and ignored) */
-    return fail(err, "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
+    return osmos_fail(err, "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
   if (files->table || files->overlay)
-    return fail(err, "hy_v4_flash: its Engram table is the model's own; no table file or overlay is read"), NULL;
+    return osmos_fail(err, "hy_v4_flash: its Engram table is the model's own; no table file or overlay is read"), NULL;
   Model *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   for (int i = 0; i < HY4_MAX_FILES; i++)
     m->fds[i] = -1;
   if (!(m->g = gguf_create(files->model, err)) || !(m->w = hy4_weights_create(m->g, err)))
     return m_close(m), NULL;
   if (m->g->n_files > HY4_MAX_FILES)
-    return fail(err, "hy_v4_flash: more files than this build opens"), m_close(m), NULL;
+    return osmos_fail(err, "hy_v4_flash: more files than this build opens"), m_close(m), NULL;
   for (int i = 0; i < m->g->n_files; i++)
     if ((m->fds[i] = open(m->g->paths[i], O_RDONLY)) < 0)
-      return fail(err, "hy_v4_flash: a model file not opened (its Engram rows' reads)"), m_close(m), NULL;
+      return osmos_fail(err, "hy_v4_flash: a model file not opened (its Engram rows' reads)"), m_close(m), NULL;
   const Hy4Geometry *geo = &m->w->geo;
   *facts = (OsmosFacts){"hy_v4_flash", (uint32_t)geo->n_vocab, geo->native_ctx, HY4_LOGIT_ROWS, 0, true};
   return m;
@@ -90,10 +84,10 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 {
   const Model *m = pm;
   if (o->picks || o->no_guess || o->npu || o->kv_q8)
-    return fail(err, "hy_v4_flash: no picks, no_guess, NPU or kv_q8"), NULL;
+    return osmos_fail(err, "hy_v4_flash: no picks, no_guess, NPU or kv_q8"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   const uint32_t steps = osmos_step_tokens(o, HY4_STEP_TOKENS);
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Hy4Options' 0,
      every expert resident) */
@@ -123,7 +117,7 @@ static bool batch(Eng *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t
   {
     const uint32_t k = osmos_runs(seqs, n, at, first, len, &runs);
     if (at + k < n)
-      return fail(err, "hy_v4_flash: a batch past HY4_MAX_RUNS sequences"); /* its logits one step's: never split */
+      return osmos_fail(err, "hy_v4_flash: a batch past HY4_MAX_RUNS sequences"); /* its logits one step's: never split */
     for (uint32_t r = 0; r < runs; r++)
       run[r] = oseq_impl(seqs[first[r]]);
     if (!(read ? hy4_step_read : hy4_step_runs)(e->f, run, len, runs, tokens + at, err))

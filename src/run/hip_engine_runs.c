@@ -11,7 +11,7 @@ bool osmos_runs_consecutive(OsmosSeq *const *seqs, uint32_t n, char err[OSMOS_ER
     if (seqs[i - 1] != seqs[i])
       for (uint32_t j = 0; j + 1 < i; j++)
         if (seqs[j] == seqs[i])
-          return snprintf(err, OSMOS_ERR, "%s", "a sequence's tokens not consecutive in the batch"), false;
+          return osmos_fail(err, "a sequence's tokens not consecutive in the batch"), false;
   return true;
 }
 
