@@ -9,17 +9,18 @@
 #include "osmos/gpu/state_parts.h"
 #include "osmos/model/fnv.h"
 #include "lfm3_impl.h"
+#include "osmos/err.h"
 
 static uint64_t conv_bytes(const Lfm3Geometry *g) { return (uint64_t)(g->conv_taps - 1) * (uint64_t)g->n_embd * F; }
 static uint64_t kv_row(const Lfm3Geometry *g) { return q4x_kv_row_bytes((uint32_t)(g->n_kv_heads * g->head_dim)); }
 
-Lfm3Seq *lfm3_seq_create(Lfm3Forward *f, char err[LFM3_ERR])
+Lfm3Seq *lfm3_seq_create(Lfm3Forward *f, char err[OSMOS_ERR])
 {
   if (!f)
-    return lfm3_fail(err, "no forward"), NULL;
+    return osmos_fail(err, "no forward"), NULL;
   Lfm3Seq *s = calloc(1, sizeof *s);
   if (!s)
-    return lfm3_fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   s->f = f;
   const Lfm3Geometry *g = &f->w->geo;
   const uint64_t conv = LFM3_CONV_SLOTS * conv_bytes(g), row = kv_row(g);
@@ -41,7 +42,7 @@ Lfm3Seq *lfm3_seq_create(Lfm3Forward *f, char err[LFM3_ERR])
   for (int l = 0; ok && f->df && l < f->df->geo.n_layers; l++) /* the drafter's rings (its context's keys, values) */
     ok = lfm3_alloc(&s->dk[l], ring) && lfm3_alloc(&s->dv[l], ring);
   if (!ok)
-    return lfm3_seq_destroy(s), lfm3_fail(err, "GPU memory refused (a sequence's state)"), NULL;
+    return lfm3_seq_destroy(s), osmos_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
 }
 
@@ -158,16 +159,16 @@ uint64_t lfm3_seq_state_bytes(const Lfm3Seq *s)
   return state_parts_bytes(sizeof(Header), p, parts(s, s->pos, s->cur, s->closed, p));
 }
 
-bool lfm3_seq_save_to(const Lfm3Seq *s, StateSink sink, void *ctx, char err[LFM3_ERR])
+bool lfm3_seq_save_to(const Lfm3Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !sink)
-    return lfm3_fail(err, "no sequence or sink");
+    return osmos_fail(err, "no sequence or sink");
   if (s->broken)
-    return lfm3_fail(err, "a sequence after a failed step (its state part written): load it, or make another");
+    return osmos_fail(err, "a sequence after a failed step (its state part written): load it, or make another");
   Header h = {STATE_MAGIC, STATE_VERSION, lfm3_identity(s->f), s->pos, s->closed, s->stage};
   StatePart p[MAX_PARTS];
   const char *why = state_parts_save(&h, sizeof h, p, parts(s, s->pos, s->cur, s->closed, p), sink, ctx);
-  return !why || lfm3_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
 }
 
 static bool refuse(Lfm3Seq *s, char *err, const char *why)
@@ -178,13 +179,13 @@ static bool refuse(Lfm3Seq *s, char *err, const char *why)
   for (int l = 0; l < g->n_layers; l++)
     if (g->kind[l] == LFM3_CONV)
       hipMemset(s->conv[l], 0, LFM3_CONV_SLOTS * conv_bytes(g)); /* a new sequence's: zeros (the conv's from 0) */
-  return lfm3_fail(err, why);
+  return osmos_fail(err, "%s", why);
 }
 
-bool lfm3_seq_load_from(Lfm3Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[LFM3_ERR])
+bool lfm3_seq_load_from(Lfm3Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !src)
-    return lfm3_fail(err, "no sequence or source");
+    return osmos_fail(err, "no sequence or source");
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");

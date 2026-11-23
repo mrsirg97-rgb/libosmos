@@ -35,7 +35,7 @@ static double now() {
 }
 
 int main(int argc, char** argv) {
-  char err[LFM3_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
   if (argc < 2) return std::fprintf(stderr, "usage: lfm3_run <GGUF> [prompt=512] [step=512] [decode=64] [file: the BF16 head]\n"), 2;
   const uint32_t P = argc > 2 ? (uint32_t) atoi(argv[2]) : 512, S = argc > 3 ? (uint32_t) atoi(argv[3]) : 512;
   const uint32_t Dn = argc > 4 ? (uint32_t) atoi(argv[4]) : 64;

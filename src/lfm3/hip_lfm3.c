@@ -18,6 +18,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q35_ops.h"
 #include "lfm3_impl.h"
+#include "osmos/err.h"
 
 /* y = W x: a decode's the matvec (mv_strided: a token's sums its own), a read's the matrix cores where mm takes the
    type and shape (mm_tokens, f16 x: a token's sums its own), else the matvec */
@@ -192,7 +193,7 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
                  bool read, uint32_t keep_from, char *err)
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > LFM3_MAX_RUNS)
-    return lfm3_fail(err, "no forward, sequences or tokens, or past LFM3_MAX_RUNS runs");
+    return osmos_fail(err, "no forward, sequences or tokens, or past LFM3_MAX_RUNS runs");
   f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
                   half-rewritten slot table (0.11.2) */
   Lfm3Run run[LFM3_MAX_RUNS];
@@ -201,14 +202,14 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   {
     Lfm3Seq *s = seqs[r];
     if (!s || s->f != f || !lens[r])
-      return lfm3_fail(err, "a run of no sequence, of another forward, or of no tokens");
+      return osmos_fail(err, "a run of no sequence, of another forward, or of no tokens");
     if (s->broken)
-      return lfm3_fail(err, "a sequence after a failed step: load it, or make another");
+      return osmos_fail(err, "a sequence after a failed step: load it, or make another");
     for (uint32_t k = 0; k < r; k++)
       if (seqs[k] == s)
-        return lfm3_fail(err, "a sequence twice in one step");
+        return osmos_fail(err, "a sequence twice in one step");
     if ((uint64_t)n + lens[r] > f->max_tokens || (uint64_t)s->pos + lens[r] > f->max_ctx)
-      return lfm3_fail(err, "the tokens past the forward's step, or a sequence past its context");
+      return osmos_fail(err, "the tokens past the forward's step, or a sequence past its context");
     run[r] = (Lfm3Run){s, n, lens[r]};
     for (uint32_t t = 0; t < lens[r]; t++)
     {
@@ -219,7 +220,7 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
     n += lens[r];
   }
   if (kept > f->logit_rows)
-    return lfm3_fail(err, "a step's kept rows past the logits' (Lfm3Options' logit_rows)");
+    return osmos_fail(err, "a step's kept rows past the logits' (Lfm3Options' logit_rows)");
   const Lfm3Geometry *g = &f->w->geo;
   uint32_t stage[LFM3_MAX_RUNS]; /* each run's stage after the step: the least whose span holds its positions */
   for (uint32_t r = 0; r < runs; r++)
@@ -231,7 +232,7 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   }
   for (uint32_t i = 0; i < n; i++)
     if (tokens[i] < 0 || tokens[i] >= g->n_vocab)
-      return lfm3_fail(err, "a token outside the vocabulary");
+      return osmos_fail(err, "a token outside the vocabulary");
   const uint32_t D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab;
   bool ok = true;
   for (uint32_t r = 0; r < runs; r++) /* a crossing: the full layers' cached keys turned to the new stage first */
@@ -276,8 +277,8 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
       run[r].s->broken = true;
     if (over)
       hipMemset(f->overflow, 0, 4);
-    return lfm3_fail(err, over ? "an activation past f16's range in a read (the step refused)"
-                               : "a GPU call failed in the step (its sequences refused until a load)");
+    return osmos_fail(err, "%s", over ? "an activation past f16's range in a read (the step refused)"
+                                       : "a GPU call failed in the step (its sequences refused until a load)");
   }
   f->steps++;
   for (uint32_t r = 0; r < runs; r++)
@@ -293,26 +294,26 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
 }
 
 bool lfm3_step_runs(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                    char err[LFM3_ERR])
+                    char err[OSMOS_ERR])
 {
   return step(f, seqs, lens, runs, tokens, false, 0, err);
 }
 
 bool lfm3_step_read(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                    char err[LFM3_ERR])
+                    char err[OSMOS_ERR])
 {
   return step(f, seqs, lens, runs, tokens, true, 0, err);
 }
 
-bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[LFM3_ERR])
+bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR])
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
-    return lfm3_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
+    return osmos_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
   if (!step(f, &s, &n, 1, tokens, n > LFM3_MV_TOKENS, n - rows, err))
     return false;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||
-         lfm3_fail(err, "a GPU call failed (the logits' copy)");
+         osmos_fail(err, "a GPU call failed (the logits' copy)");
 }
 
 const float *lfm3_logits(const Lfm3Forward *f) { return f ? f->pin_logits : NULL; }
@@ -322,10 +323,10 @@ const float *lfm3_row_logits(const Lfm3Forward *f, uint32_t row)
   return f ? kept_row(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row) : NULL;
 }
 
-bool lfm3_greedy(Lfm3Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[LFM3_ERR])
+bool lfm3_greedy(Lfm3Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
   const char *why = f ? kept_greedy(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row0, rows, f->ids,
                                     f->argmax, f->st, ids)
                       : "no forward or ids, or rows past the last step's";
-  return !why || lfm3_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
 }

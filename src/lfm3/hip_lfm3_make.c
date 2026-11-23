@@ -16,22 +16,16 @@
 #include "osmos/model/fnv.h"
 #include "osmos/text/json.h"
 #include "lfm3_impl.h"
+#include "osmos/err.h"
 
 #define READ_PIECE (64ull << 20)
-
-bool lfm3_fail(char *err, const char *why)
-{
-  if (err)
-    snprintf(err, LFM3_ERR, "%s", why);
-  return false;
-}
 
 bool lfm3_alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
 
 /* every tensor of g into GPU memory, its device pointer at its index in *table */
 static bool upload_file(const Gguf *g, void ***table, char *err)
 {
-  return gpu_upload_table(g, READ_PIECE, NULL, NULL, table, err, err ? LFM3_ERR : 0);
+  return gpu_upload_table(g, READ_PIECE, NULL, NULL, table, err, err ? OSMOS_ERR : 0);
 }
 
 static bool upload(Lfm3Forward *f, char *err) { return upload_file(f->w->model, &f->dev, err); }
@@ -41,7 +35,7 @@ static bool lfm3_df_buffers(Lfm3Forward *f, char *err)
 {
   const uint64_t T = (uint64_t)f->df->geo.n_taps * (uint64_t)f->df->geo.n_embd;
   return (lfm3_alloc(&f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, &f->df->geo, f->max_tokens, f->max_ctx)) ||
-         lfm3_fail(err, "GPU memory refused (the drafter's buffers)");
+         osmos_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 
 /* the drafter: its geometry these weights' (its taps their layers'), its tensors uploaded, its buffers */
@@ -54,11 +48,11 @@ static bool df_make(Lfm3Forward *f, const Q4xDflash *df, char *err)
     return true;
   const Q4xDflashGeometry *dg = &df->geo;
   if (dg->n_embd != g->n_embd || dg->n_vocab != g->n_vocab || dg->n_taps < 1)
-    return lfm3_fail(err, "a drafter not of these weights (its width, its vocabulary, no taps)");
+    return osmos_fail(err, "a drafter not of these weights (its width, its vocabulary, no taps)");
   for (int i = 0; i < dg->n_taps; i++)
   {
     if (dg->taps[i] < 0 || dg->taps[i] >= g->n_layers)
-      return lfm3_fail(err, "a drafter's tap past the model's layers");
+      return osmos_fail(err, "a drafter's tap past the model's layers");
     f->tap_of[dg->taps[i]] = i;
   }
   f->df = df;
@@ -105,7 +99,7 @@ static bool joints(Lfm3Forward *f, char *err)
     if (ok && g->kind[l] != LFM3_CONV)
       f->j_attn[l] = join(f, att, 4, &ok);
   }
-  return ok || lfm3_fail(err, "the joints not made (GPU memory)");
+  return ok || osmos_fail(err, "the joints not made (GPU memory)");
 }
 
 /* the tied head's Q8_0 copy (q35's head_q8: ggml's quantizer through q4x_kv_put, a chunk of rows at a time) - the
@@ -115,7 +109,7 @@ static bool head_q8(Lfm3Forward *f, char *err)
   const GgufTensor *t = f->w->embd;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd;
   if (!gpu_q8_rows(t->type, lfm3_dev(f, t), t->bytes / V, V, D, &f->head_q8))
-    return lfm3_fail(err, "the head's Q8_0 not made (GPU memory, or a launch)");
+    return osmos_fail(err, "the head's Q8_0 not made (GPU memory, or a launch)");
   f->head = f->head_q8, f->head_type = QTYPE_Q8_0;
   return true;
 }
@@ -128,14 +122,14 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
   const LsaDims fd = lfm3_free_dims(g);
   f->lsa_in = (uint32_t)g->n_kv_heads * ((fd.hi0 - fd.lo0) + (fd.hi1 - fd.lo1));
   if (f->lsa_in > LSA_IN_MAX)
-    return lfm3_fail(err, "LSA: the index's input past LSA_IN_MAX");
+    return osmos_fail(err, "LSA: the index's input past LSA_IN_MAX");
   FILE *fp = fopen(path, "rb");
   uint64_t hn = 0;
   if (!fp || fread(&hn, 8, 1, fp) != 1 || hn > (64u << 20))
   {
     if (fp)
       fclose(fp);
-    return lfm3_fail(err, "LSA: the maps file not read (a safetensors file)");
+    return osmos_fail(err, "LSA: the maps file not read (a safetensors file)");
   }
   char *head = malloc(hn + 1);
   char jerr[JSON_ERR] = "";
@@ -159,7 +153,7 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
            off->type == JSON_ARRAY && off->n == 2 && off->item[0]->type == JSON_INT;
       if (!ok)
       {
-        snprintf(err, LFM3_ERR, "LSA: %s missing, or not F32 [%u x %u]", name, f->lsa_in, LSA_DIM);
+        snprintf(err, OSMOS_ERR, "LSA: %s missing, or not F32 [%u x %u]", name, f->lsa_in, LSA_DIM);
         break;
       }
       float **dst = w ? &f->wk[l] : &f->wq[l];
@@ -167,12 +161,12 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
            fread(buf, F, m, fp) == m && lfm3_alloc(dst, m * F) &&
            hipMemcpy(*dst, buf, m * F, hipMemcpyHostToDevice) == hipSuccess;
       if (!ok)
-        lfm3_fail(err, "LSA: a map not read (its bytes, or GPU memory)");
+        osmos_fail(err, "LSA: a map not read (its bytes, or GPU memory)");
     }
   }
   fclose(fp), free(head), free(buf), json_free(j);
   if (!ok)
-    return err && !*err ? lfm3_fail(err, "LSA: the maps not read") : false;
+    return err && !*err ? osmos_fail(err, "LSA: the maps not read") : false;
   ok = (f->lsa_s = lsa_scratch_create(f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && lfm3_alloc(&f->iq, LSA_DIM * F) &&
        lfm3_alloc(&f->list, LSA_READ_MAX * 4) && lfm3_alloc(&f->list_n, 4) &&
        (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) && (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) &&
@@ -187,7 +181,7 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
        lfm3_alloc(&f->lists, (uint64_t)f->max_tokens * LSA_READ_MAX * 4) &&
        lfm3_alloc(&f->counts, (uint64_t)f->max_tokens * 4) &&
        lfm3_alloc(&f->lsa_sc, lsa_batch_scratch(f->sub_n, f->max_buckets) * F);
-  return (f->lsa = ok) || lfm3_fail(err, "LSA: out of memory (the read's scratch)");
+  return (f->lsa = ok) || osmos_fail(err, "LSA: out of memory (the read's scratch)");
 }
 
 void lfm3_forward_destroy(Lfm3Forward *f)
@@ -259,13 +253,13 @@ static bool stages_ok(const Lfm3Stage *t, uint32_t n)
   return true;
 }
 
-Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[LFM3_ERR])
+Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[OSMOS_ERR])
 {
   if (!w || !o || !o->max_tokens || !o->max_ctx || o->max_tokens > o->max_ctx || o->max_ctx > LFM3_MAX_CTX)
-    return lfm3_fail(err, "no weights or options, a step past the context, or a context past LFM3_MAX_CTX"), NULL;
+    return osmos_fail(err, "no weights or options, a step past the context, or a context past LFM3_MAX_CTX"), NULL;
   Lfm3Forward *f = calloc(1, sizeof *f);
   if (!f)
-    return lfm3_fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   const Lfm3Geometry *g = &w->geo;
   f->w = w, f->max_tokens = o->max_tokens, f->max_ctx = o->max_ctx;
   f->logit_rows = o->logit_rows ? o->logit_rows : o->max_tokens;
@@ -284,10 +278,10 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   bool env_ok = true;
   if (env && *env)
     env_ok = parse_stages(env, env_table, &nt), table = env_table;
-  bool ok = (env_ok || lfm3_fail(err, "OSMOS_LFM3_STAGES: not from:factor,... (at most LFM3_MAX_STAGES, each a 32-bit "
+  bool ok = (env_ok || osmos_fail(err, "OSMOS_LFM3_STAGES: not from:factor,... (at most LFM3_MAX_STAGES, each a 32-bit "
                                       "integer)")) &&
             (o->yarn_static_ctx || stages_ok(table, nt) ||
-            lfm3_fail(err, "the YaRN stages: none, past LFM3_MAX_STAGES, not from 0, out of order, or a factor not 1-64"));
+            osmos_fail(err, "the YaRN stages: none, past LFM3_MAX_STAGES, not from 0, out of order, or a factor not 1-64"));
   f->yarn_static_ctx = o->yarn_static_ctx;
   if (ok && o->yarn_static_ctx) /* one stage: every position YaRN at yarn_static_ctx over yarn_from */
     f->stages = 1, f->stage[0] = (Lfm3Stage){0, 0},
@@ -300,15 +294,15 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   ok = ok && q4x_rope((uint32_t)g->head_dim, (uint32_t)g->head_dim / 2, g->rope_base_swa, g->native_ctx, g->native_ctx,
                      Q4X_THETA_HF, &f->rope_swa);
   if (!ok && !err[0]) /* a refusal before keeps its own message */
-    lfm3_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
-  ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || lfm3_fail(err, "the step's stream not made"));
+    osmos_fail(err, "the ropes refused (their shape, or a context past YaRN's reach)");
+  ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || osmos_fail(err, "the step's stream not made"));
   ok = ok && upload(f, err) && df_make(f, o->dflash, err);
   ok = ok && joints(f, err) && (!o->lsa || lsa_load(f, o->lsa, err));
   if (ok && o->lsa)
     f->lsa_id = fnv_file(o->lsa, FNV_SEED);
   if (ok)
     f->head = lfm3_dev(f, w->embd), f->head_type = w->embd->type;
-  ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || lfm3_fail(err, "a head this build does not make")) &&
+  ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || osmos_fail(err, "a head this build does not make")) &&
        (o->head == LFM3_HEAD_FILE || head_q8(f, err));
   const GpuWant want[] = {
       {&f->tok, n * 4},          {&f->h, n * D * F},       {&f->xn, n * D * F},    {&f->y, n * D * F},
@@ -323,12 +317,12 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
       {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
   ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
-              lfm3_fail(err, "GPU memory refused (a step's buffers)"));
+              osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&
        hipMemset(f->overflow, 0, 4) == hipSuccess && hipDeviceSynchronize() == hipSuccess;
   if (!ok)
-    return lfm3_forward_destroy(f), (err && !*err ? lfm3_fail(err, "the forward not made") : false), NULL;
+    return lfm3_forward_destroy(f), (err && !*err ? osmos_fail(err, "the forward not made") : false), NULL;
   return f;
 }
 

@@ -14,7 +14,6 @@
    DFlash2 (lfm3_dflash_*: q4x's drafter on LFM3's taps), or none: block 0 */
 _Static_assert(LFM3_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 _Static_assert(Q4X_DFLASH_BLOCK_MAX - 1 <= OSMOS_MAX_BLOCK, "a DFlash block's drafts within the engine's");
-_Static_assert(OSMOS_ERR >= LFM3_ERR && OSMOS_ERR >= GGUF_ERR, "one error buffer for the engine and the family's calls");
 
 /* a step's most tokens when the server names none (a prompt's chunk), and a round's most kept rows */
 #define LFM3_STEP_TOKENS 2048

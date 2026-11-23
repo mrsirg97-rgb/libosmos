@@ -35,7 +35,7 @@ static uint32_t argmax(const float* x, uint32_t V) {
 }
 
 int main(int argc, char** argv) {
-  char err[LFM3_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
   if (argc < 4) return std::fprintf(stderr, "usage: lfm3_yarn_check <GGUF> <fixture> <ctx>...\n"), 2;
   Gguf* g = gguf_create(argv[1], gerr);
   CHECK(g && load(argv[2]));

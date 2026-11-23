@@ -120,7 +120,6 @@ static inline LsaDims lfm3_free_dims(const Lfm3Geometry *g)
   return (LsaDims){p, half, half + p, (uint32_t)g->head_dim};
 }
 
-bool lfm3_fail(char *err, const char *why);
 bool lfm3_alloc(void *p, uint64_t bytes);
 static inline const void *lfm3_dev(const Lfm3Forward *f, const GgufTensor *t)
 {

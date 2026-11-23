@@ -4,6 +4,7 @@
 // bits. osmos1.7b's Q4_0 file (OSMOS_TEST_LFM3) and ~/osmos-oracle/lfm3_forward_64_kvq8.bin (OSMOS_TEST_LFM3_REF:
 // another, lfm3_forward_2048_kvq8.bin past the window); skipped (77) without.
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/lfm3/forward.h"
 #include "osmos/model/gguf.h"
 }
@@ -65,7 +66,7 @@ static uint32_t argmax(const float* x, uint32_t V) {
 
 int main() {
   const char* home = getenv("HOME") ? getenv("HOME") : "";
-  char model_path[512], ref_path[512], err[LFM3_ERR] = "", gerr[GGUF_ERR] = "";
+  char model_path[512], ref_path[512], err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
   std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_LFM3") ? getenv("OSMOS_TEST_LFM3") : "");
   if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/osmos1.7b/osmos1.7b-Q4_0.gguf", home);
   std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_LFM3_REF") ? getenv("OSMOS_TEST_LFM3_REF") : "");
@@ -77,6 +78,7 @@ int main() {
                 gerr);
     return 77;
   }
+  osmos_clear(err);
   Lfm3Weights* w = lfm3_weights_create(g, err);
   if (!w) std::printf("  refused: %s\n", err);
   CHECK(w);
@@ -85,6 +87,7 @@ int main() {
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
   const Lfm3Options o = {T, T, last, LFM3_HEAD_FILE, nullptr, 0, nullptr, 0, 0, 0};  // the reference's head: the file's BF16
+  osmos_clear(err);
   Lfm3Forward* f = lfm3_forward_create(w, &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -94,6 +97,7 @@ int main() {
   for (float r : A("rows")) taps.rows.push_back((int32_t) r);
   taps.layers = (uint32_t) w->geo.n_layers;
   lfm3_forward_tap(f, tap, &taps);
+  osmos_clear(err);
   Lfm3Seq* s = lfm3_seq_create(f, err);
   CHECK(s);
   if (!lfm3_step(f, s, ids.data(), T, last, err)) std::printf("  step refused: %s\n", err);
@@ -130,21 +134,26 @@ int main() {
 
   // the bits a token's own: the ids in three reads (each past LFM3_MV_TOKENS: lfm3_step's prompt math) - the last
   // step's rows the one step's, bit for bit
+  osmos_clear(err);
   Lfm3Seq* s2 = lfm3_seq_create(f, err);
   CHECK(s2);
   const uint32_t a = T / 3, b = T / 3, c = T - a - b, tail = c < last ? c : last;
   CHECK(a > LFM3_MV_TOKENS && b > LFM3_MV_TOKENS && c > LFM3_MV_TOKENS);
+  osmos_clear(err);
   CHECK(lfm3_step(f, s2, ids.data(), a, 1, err) && lfm3_step(f, s2, ids.data() + a, b, 1, err));
+  osmos_clear(err);
   CHECK(lfm3_step(f, s2, ids.data() + a + b, c, tail, err));
   CHECK(std::memcmp(lfm3_logits(f), got.data() + (size_t) (last - tail) * V, (size_t) tail * V * sizeof(float)) == 0);
   std::printf("  in read steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c, tail);
 
   // a decode's math over the same ids, one step (lfm3_step_runs, its prompt's last rows kept): within the same bounds
   {
+    osmos_clear(err);
     Lfm3Seq* d = lfm3_seq_create(f, err);
     CHECK(d && lfm3_seq_prompt(d, T - last + 1));
     Lfm3Seq* const one[1] = {d};
     const uint32_t len1[1] = {T};
+    osmos_clear(err);
     CHECK(lfm3_step_runs(f, one, len1, 1, ids.data(), err));
     std::vector<float> row(V);
     double ks = 0, km = 0;
@@ -165,7 +174,9 @@ int main() {
   // two sequences in one step (each its prompt's last row kept), each the bits of its own step alone
   {
     const uint32_t P = T / 4 > 8 ? T / 4 : 8;
+    osmos_clear(err);
     Lfm3Seq *a1 = lfm3_seq_create(f, err), *b1 = lfm3_seq_create(f, err), *a2 = lfm3_seq_create(f, err);
+    osmos_clear(err);
     Lfm3Seq* b2 = lfm3_seq_create(f, err);
     CHECK(a1 && b1 && a2 && b2);
     std::vector<int32_t> both(ids.begin(), ids.begin() + P);
@@ -173,15 +184,19 @@ int main() {
     CHECK(lfm3_seq_prompt(a1, P) && lfm3_seq_prompt(b1, P));
     Lfm3Seq* const pair[2] = {a1, b1};
     const uint32_t lens[2] = {P, P};
+    osmos_clear(err);
     CHECK(lfm3_step_read(f, pair, lens, 2, both.data(), err));  // a read: lfm3_step's math for P tokens
     std::vector<float> ra(V), rb(V);
     CHECK(lfm3_row_logits(f, P - 1) && lfm3_row_logits(f, 2 * P - 1) && !lfm3_row_logits(f, 0));
     CHECK(hipMemcpy(ra.data(), lfm3_row_logits(f, P - 1), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(hipMemcpy(rb.data(), lfm3_row_logits(f, 2 * P - 1), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
     int32_t ga[1], gb[1];
+    osmos_clear(err);
     CHECK(lfm3_greedy(f, P - 1, 1, ga, err) && lfm3_greedy(f, 2 * P - 1, 1, gb, err));
+    osmos_clear(err);
     CHECK(lfm3_step(f, a2, ids.data(), P, 1, err) && std::memcmp(lfm3_logits(f), ra.data(), V * 4) == 0);
     CHECK(ga[0] == (int32_t) argmax(ra.data(), V));
+    osmos_clear(err);
     CHECK(lfm3_step(f, b2, ids.data() + 7, P, 1, err) && std::memcmp(lfm3_logits(f), rb.data(), V * 4) == 0);
     CHECK(gb[0] == (int32_t) argmax(rb.data(), V));
     std::printf("  two sequences of %u in one step: each the bits of its own step alone; the greedy ids the argmax's\n",
@@ -189,10 +204,12 @@ int main() {
 
     // a rollback: 4 more tokens, 3 of them dropped and run again - the same bits
     const int32_t more[4] = {ids[1], ids[2], ids[3], ids[4]};
+    osmos_clear(err);
     CHECK(lfm3_step(f, a2, more, 4, 4, err));
     const std::vector<float> first(lfm3_logits(f), lfm3_logits(f) + (size_t) 4 * V);
     CHECK(lfm3_seq_reach(a2) >= 4 && lfm3_seq_rollback(a2, 3) && lfm3_seq_position(a2) == (int32_t) P + 1);
     CHECK(!lfm3_seq_rollback(a2, LFM3_MAX_BACK + 1));
+    osmos_clear(err);
     CHECK(lfm3_step(f, a2, more + 1, 3, 3, err));
     CHECK(std::memcmp(lfm3_logits(f), first.data() + V, (size_t) 3 * V * 4) == 0);
     std::printf("  4 tokens, 3 rolled back and run again: the same bits\n");
@@ -205,6 +222,7 @@ int main() {
       v->insert(v->end(), (const uint8_t*) bytes, (const uint8_t*) bytes + n);
       return true;
     };
+    osmos_clear(err);
     CHECK(lfm3_seq_save_to(a2, sink, &saved, err) && saved.size() == lfm3_seq_state_bytes(a2));
     struct Src {
       const std::vector<uint8_t>* v;
@@ -216,12 +234,16 @@ int main() {
       std::memcpy(bytes, q->v->data() + q->at, n), q->at += n;
       return true;
     };
+    osmos_clear(err);
     Lfm3Seq* c = lfm3_seq_create(f, err);
+    osmos_clear(err);
     CHECK(c && lfm3_seq_load_from(c, saved.size(), source, &src, err) && lfm3_seq_position(c) == (int32_t) P);
+    osmos_clear(err);
     CHECK(lfm3_seq_reach(c) == 0 && lfm3_step(f, c, more, 4, 4, err));
     CHECK(std::memcmp(lfm3_logits(f), first.data(), first.size() * 4) == 0);
     saved[saved.size() / 2] ^= 1;
     src.at = 0;
+    osmos_clear(err);
     CHECK(!lfm3_seq_load_from(c, saved.size(), source, &src, err) && lfm3_seq_position(c) == 0);
     std::printf("  saved (%zu KB) and loaded into another sequence: its next step the same bits; damaged, refused\n",
                 saved.size() >> 10);
@@ -233,12 +255,15 @@ int main() {
   {
     const uint32_t S = 300 < T ? 300 : T;
     const Lfm3Options o2 = {S, T, last, LFM3_HEAD_FILE, nullptr, 0, nullptr, 0, 0, 0};
+    osmos_clear(err);
     Lfm3Forward* f2 = lfm3_forward_create(w, &o2, err);
     CHECK(f2);
+    osmos_clear(err);
     Lfm3Seq* r = lfm3_seq_create(f2, err);
     CHECK(r);
     for (uint32_t at = 0; at < T; at += S) {
       const uint32_t n = T - at < S ? T - at : S, keep = T - at - n == 0 ? (n < last ? n : last) : 1;
+      osmos_clear(err);
       CHECK(lfm3_step(f2, r, ids.data() + at, n, keep, err));
       if (at + n == T)
         CHECK(std::memcmp(lfm3_logits(f2), got.data() + (size_t) (last - keep) * V, (size_t) keep * V * 4) == 0);
@@ -252,9 +277,12 @@ int main() {
   // own cost, measured (2026-11-18): see kHeadKl
   {
     const Lfm3Options oq = {T, T, last, LFM3_HEAD_Q8_0, nullptr, 0, nullptr, 0, 0, 0};
+    osmos_clear(err);
     Lfm3Forward* fq = lfm3_forward_create(w, &oq, err);
     CHECK(fq);
+    osmos_clear(err);
     Lfm3Seq* q = lfm3_seq_create(fq, err);
+    osmos_clear(err);
     CHECK(q && lfm3_step(fq, q, ids.data(), T, last, err));
     double ks = 0, km = 0;
     uint32_t agree = 0;
@@ -280,9 +308,12 @@ int main() {
     if (T == 2048 && mf) {
       std::fclose(mf);
       const Lfm3Options os = {T, T, last, LFM3_HEAD_FILE, maps.c_str(), 0, nullptr, 0, 0, 1024};
+      osmos_clear(err);
       Lfm3Forward* fs = lfm3_forward_create(w, &os, err);
       CHECK(fs);
+      osmos_clear(err);
       Lfm3Seq *one = lfm3_seq_create(fs, err), *three = lfm3_seq_create(fs, err);
+      osmos_clear(err);
       CHECK(one && three && lfm3_step(fs, one, ids.data(), T, last, err));
       const std::vector<float> sp(lfm3_logits(fs), lfm3_logits(fs) + (size_t) last * V);
       double ks = 0, km = 0;
@@ -296,7 +327,9 @@ int main() {
                   "%.3g; top-1 %u of %u\n", ks / last, km, agree, last);
       CHECK(ks / last <= kKlMean && km <= kKlMax && agree + kTop1Miss >= last);
       CHECK(std::memcmp(sp.data(), got.data(), sp.size() * 4) != 0);  // the read's path, not the dense one's
+      osmos_clear(err);
       CHECK(lfm3_step(fs, three, ids.data(), a, 1, err) && lfm3_step(fs, three, ids.data() + a, b, 1, err));
+      osmos_clear(err);
       CHECK(lfm3_step(fs, three, ids.data() + a + b, c, tail, err));
       CHECK(std::memcmp(lfm3_logits(fs), sp.data() + (size_t) (last - tail) * V, (size_t) tail * V * 4) == 0);
       std::printf("  sparse, in read steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c,
@@ -320,9 +353,12 @@ int main() {
       const std::vector<float> yref = A("logits");
       const Lfm3Stage two_stages[] = {{0, 1}, {1024, 2}};  // native, then x2 past 1,024
       const Lfm3Options oy = {T, 4 * 1024, last, LFM3_HEAD_FILE, nullptr, 1024, two_stages, 2, 0, 0};
+      osmos_clear(err);
       Lfm3Forward* fy = lfm3_forward_create(w, &oy, err);
       CHECK(fy);
+      osmos_clear(err);
       Lfm3Seq *one = lfm3_seq_create(fy, err), *two = lfm3_seq_create(fy, err);
+      osmos_clear(err);
       CHECK(one && two && lfm3_step(fy, one, ids.data(), T, last, err) && lfm3_seq_stage(one) == 1);
       const std::vector<float> y1(lfm3_logits(fy), lfm3_logits(fy) + (size_t) last * V);
       double ks = 0, km = 0;
@@ -336,12 +372,15 @@ int main() {
                   "of %u\n", ks / last, km, agree, last);
       CHECK(ks / last <= kKlMean && km <= kKlMax && agree + kTop1Miss >= last);
       const uint32_t a = 1020, b = 8;  // under the base (plain rope), a step across it (the cache turned), the rest
+      osmos_clear(err);
       CHECK(lfm3_step(fy, two, ids.data(), a, 1, err) && lfm3_seq_stage(two) == 0);
+      osmos_clear(err);
       CHECK(lfm3_step(fy, two, ids.data() + a, b, 1, err) && lfm3_seq_stage(two) == 1);
       // never back to the stage's from or below (0.11.2: the crossing step's own tokens were within reach - 1,020 in
       // stage 1, where a sequence fed the same tokens is stage 0's): its reach to 1,025
       CHECK(lfm3_seq_reach(two) == a + b - 1024 - 1 && !lfm3_seq_rollback(two, a + b - 1024));
       std::printf("  a rollback to the stage's from refused (its reach %u: back to 1,025)\n", lfm3_seq_reach(two));
+      osmos_clear(err);
       CHECK(lfm3_step(fy, two, ids.data() + a + b, T - a - b, last, err) && lfm3_seq_stage(two) == 1);
       double kc = 0, kcm = 0;
       uint32_t same = 0;
@@ -356,9 +395,12 @@ int main() {
       // it) against Liquid's x2 within the forward's bounds - no crossing, no turn
       {
         const Lfm3Options ox = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, nullptr, 0, 2 * 1024, 0};
+        osmos_clear(err);
         Lfm3Forward* fx = lfm3_forward_create(w, &ox, err);
         CHECK(fx);
+        osmos_clear(err);
         Lfm3Seq* sx = lfm3_seq_create(fx, err);
+        osmos_clear(err);
         CHECK(sx && lfm3_step(fx, sx, ids.data(), 1000, 1, err) && lfm3_step(fx, sx, ids.data() + 1000, T - 1000, last, err));
         double kx = 0, kxm = 0;
         uint32_t ax = 0;
@@ -378,17 +420,26 @@ int main() {
       {
         const Lfm3Stage three[] = {{0, 1}, {1500, 2}, {1900, 4}};
         const Lfm3Options o3 = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, three, 3, 0, 0};
+        osmos_clear(err);
         Lfm3Forward* f3 = lfm3_forward_create(w, &o3, err);
         CHECK(f3);
+        osmos_clear(err);
         Lfm3Seq *a3 = lfm3_seq_create(f3, err), *b3 = lfm3_seq_create(f3, err);
+        osmos_clear(err);
         CHECK(a3 && b3 && lfm3_step(f3, a3, ids.data(), T, 1, err) && lfm3_seq_stage(a3) == 2);
+        osmos_clear(err);
         CHECK(lfm3_step(f3, b3, ids.data(), 1400, 1, err) && lfm3_seq_stage(b3) == 0);
+        osmos_clear(err);
         CHECK(lfm3_step(f3, b3, ids.data() + 1400, 300, 1, err) && lfm3_seq_stage(b3) == 1);
+        osmos_clear(err);
         CHECK(lfm3_step(f3, b3, ids.data() + 1700, T - 1700, 1, err) && lfm3_seq_stage(b3) == 2);
         // a crossing step's own tokens not rolled back past the stage's from (0.11.2): 1,898 then 4 - at 1,902 in
         // stage 2 (from 1,900), its reach 1 (back to 1,901), not the step's 4
+        osmos_clear(err);
         Lfm3Seq* c3 = lfm3_seq_create(f3, err);
+        osmos_clear(err);
         CHECK(c3 && lfm3_step(f3, c3, ids.data(), 1898, 1, err) && lfm3_seq_stage(c3) == 1);
+        osmos_clear(err);
         CHECK(lfm3_step(f3, c3, ids.data() + 1898, 4, 1, err) && lfm3_seq_stage(c3) == 2);
         CHECK(lfm3_seq_reach(c3) == 1 && !lfm3_seq_rollback(c3, 2) && lfm3_seq_rollback(c3, 1));
         lfm3_seq_destroy(c3), lfm3_seq_destroy(a3), lfm3_seq_destroy(b3), lfm3_forward_destroy(f3);
@@ -397,20 +448,25 @@ int main() {
         for (const auto& bad : {std::make_pair(desc, 3u), std::make_pair(late, 2u), std::make_pair(zero, 1u),
                                 std::make_pair(big, 2u)}) {
           const Lfm3Options ob = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, bad.first, bad.second, 0, 0};
+          osmos_clear(err);
           CHECK(!lfm3_forward_create(w, &ob, err));
         }
         // OSMOS_LFM3_STAGES (a table without a build): a well-formed one taken, any malformed refused (0.11.2: a bad
         // string used whatever parsed before it)
         const Lfm3Options oe = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, nullptr, 0, 0, 0};
         setenv("OSMOS_LFM3_STAGES", "0:1,1500:2,1900:4", 1);
+        osmos_clear(err);
         Lfm3Forward* fe = lfm3_forward_create(w, &oe, err);
         CHECK(fe);
+        osmos_clear(err);
         Lfm3Seq* e3 = lfm3_seq_create(fe, err);
+        osmos_clear(err);
         CHECK(e3 && lfm3_step(fe, e3, ids.data(), T, 1, err) && lfm3_seq_stage(e3) == 2);
         lfm3_seq_destroy(e3), lfm3_forward_destroy(fe);
         for (const char* bad : {"0:1,160000:4x", "0:1;160000:4", "0:1 160000:4", "0:1,4294967396:4", ":1", "0:",
                                 "0:1,", "0:1,1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1"}) {
           setenv("OSMOS_LFM3_STAGES", bad, 1);
+          osmos_clear(err);
           CHECK(!lfm3_forward_create(w, &oe, err));
         }
         unsetenv("OSMOS_LFM3_STAGES");
