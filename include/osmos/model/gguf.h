@@ -1,11 +1,11 @@
 #ifndef GGUF_H
 #define GGUF_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define GGUF_ERR 256
 #define GGUF_MAX_DIMS 4
 
 typedef enum GgufValueType
@@ -63,8 +63,8 @@ typedef struct Gguf
   size_t n_tensors;
 } Gguf;
 
-Gguf *gguf_create(const char *path, char err[GGUF_ERR]);
-Gguf *gguf_header(const char *path, char err[GGUF_ERR]);
+Gguf *gguf_create(const char *path, char err[OSMOS_ERR]);
+Gguf *gguf_header(const char *path, char err[OSMOS_ERR]);
 void gguf_destroy(Gguf *g);
 
 const GgufTensor *gguf_tensor(const Gguf *g, const char *name);

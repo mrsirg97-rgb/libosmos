@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "osmos/err.h"
 #include "osmos/model/engram.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
@@ -18,9 +19,10 @@
    a map entry past the compressed vocabulary and an even multiplier refused */
 static void test_own(void)
 {
-  char p[512], err[GGUF_ERR], werr[WEIGHTS_ERR], eerr[ENGRAM_ERR] = "";
+  char p[512], err[OSMOS_ERR], werr[OSMOS_ERR], eerr[OSMOS_ERR] = "";
   const char *home = getenv("HOME");
   snprintf(p, sizeof p, "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf", home);
+  osmos_clear(err);
   Gguf *g = gguf_create(p, err);
   snprintf(p, sizeof p, "%s/osmos-oracle/engram_rows_ud.bin", home);
   FILE *ref = fopen(p, "rb");
@@ -41,11 +43,13 @@ static void test_own(void)
   assert(ids && want && fread(ids, sizeof *ids, n, ref) == n &&
          fread(want, sizeof *want, (size_t)n * LAYERS * COLS, ref) == (size_t)n * LAYERS * COLS);
   fclose(ref);
+  osmos_clear(werr);
   Weights *w = weights_create(g, NULL, werr);
   assert(w && w->geo.engram_own);
   int fds[8];
   for (int f = 0; f < g->n_files; f++)
     assert((fds[f] = open(g->paths[f], O_RDONLY)) >= 0);
+  osmos_clear(eerr);
   Engram *e = engram_create(w, fds, eerr);
   if (!e)
     printf("  refused: %s\n", eerr);
@@ -71,23 +75,28 @@ static void test_own(void)
   GgufKv *map = (GgufKv *)gguf_kv(g, "deepseek41.engram.token_map");
   int32_t *m = map->v.items, was = m[1000];
   m[1000] = (int32_t)w->geo.engram_vocab;
+  osmos_clear(eerr);
   assert(!engram_create(w, fds, eerr) && strstr(eerr, "map"));
   printf("    a map entry past the compressed vocabulary -> %s\n", eerr);
   m[1000] = was;
   GgufKv *mult = (GgufKv *)gguf_kv(g, "deepseek41.ple.layer_multipliers");
   uint64_t *mu = mult->v.items, mwas = mu[5];
   mu[5] = mwas + 1;
+  osmos_clear(eerr);
   assert(!engram_create(w, fds, eerr) && strstr(eerr, "multiplier"));
   printf("    an even multiplier -> %s\n", eerr);
   mu[5] = mwas;
+  osmos_clear(eerr);
   assert((e = engram_create(w, fds, eerr)));
   engram_destroy(e);
   /* no compressed vocabulary named (ISTA's GGUFs): the map's own (its greatest entry + 1) - the same rows */
   GgufKv *cv = (GgufKv *)gguf_kv(g, "deepseek41.engram.compressed_vocab_size");
   assert(cv);
   cv->key[0] = 'X';
+  osmos_clear(werr);
   Weights *w2 = weights_create(g, NULL, werr);
   assert(w2 && w2->geo.engram_vocab == 0);
+  osmos_clear(eerr);
   assert((e = engram_create(w2, fds, eerr)));
   for (uint32_t t = 0; t < n; t++)
   {
@@ -116,11 +125,13 @@ int main(void)
 {
   printf("[test_engram] start\n");
   test_own();
-  char p[512], err[GGUF_ERR], werr[WEIGHTS_ERR], eerr[ENGRAM_ERR] = "";
+  char p[512], err[OSMOS_ERR], werr[OSMOS_ERR], eerr[OSMOS_ERR] = "";
   const char *home = getenv("HOME");
   snprintf(p, sizeof p, "%s/models/ds1017/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf", home);
+  osmos_clear(err);
   Gguf *g = gguf_create(p, err);
   snprintf(p, sizeof p, "%s/models/ds1017/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf", home);
+  osmos_clear(err);
   Gguf *eg = gguf_create(p, err);
   snprintf(p, sizeof p, "%s/osmos-oracle/engram_hash32.i64", home);
   FILE *ref = fopen(p, "rb");
@@ -131,12 +142,15 @@ int main(void)
     printf("  ds1017 or the oracle's hashes not on this machine, skipped\n[test_engram] ok\n");
     return 0;
   }
+  osmos_clear(werr);
   Weights *w = weights_create(g, eg, werr);
   assert(w);
   int fds[8];
   for (int f = 0; f < g->n_files; f++)
     assert((fds[f] = open(g->paths[f], O_RDONLY)) >= 0);
+  osmos_clear(eerr);
   assert(engram_create(NULL, fds, eerr) == NULL && eerr[0]);
+  osmos_clear(eerr);
   Engram *e = engram_create(w, fds, eerr);
   if (!e)
     printf("  refused: %s\n", eerr);

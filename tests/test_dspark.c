@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "osmos/err.h"
 #include "osmos/model/dspark.h"
 
 /* the index on the real drafter (the packs', ~/Models/ds1017/dspark-iq2xs: skipped without it): its tensors as the pack has them; and
@@ -28,7 +29,8 @@ static void write(const char *name, const char *text, size_t bin_bytes)
 static void refused(const char *json, const char *why)
 {
   write("dspark.json", json, 0);
-  char err[DSPARK_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   assert(dspark_index(dir, err) == NULL && err[0]);
   printf("  refused (%s): %s\n", why, err);
 }
@@ -49,7 +51,8 @@ static void test_malformed(void)
   refused("{\"tensors\": [[\"a\", \"F32\", 0, 0, [0, 4]]]}", "a dim of 0");
   refused("{\"tensors\": [[\"a\", \"F32\", 0, 4, [18446744073709551617]]]}", "a number past 64 bits");
   write("dspark.json", "{\"tensors\": [[\"a.w\", \"MXFP4\", 17, 34, [2, 32]], [\"b\", \"BF16\", 64, 8, [4]]]}", 0);
-  char err[DSPARK_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   DsparkIndex *x = dspark_index(dir, err);
   assert(x && x->n == 2 && dspark_tensor(x, "b")->type == 30 && dspark_tensor(x, "a.w")->dims[1] == 32);
   assert(x->n_targets == 0); /* none named: the model's, then */
@@ -57,6 +60,7 @@ static void test_malformed(void)
   dspark_index_destroy(x);
   /* the trunk's layers it taps, named beside the tensors (a model whose GGUF does not: ISTA's) */
   write("dspark.json", "{\"target_layers\": [37, 38, 39], \"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", 0);
+  osmos_clear(err);
   x = dspark_index(dir, err);
   assert(x && x->n == 1 && x->n_targets == 3 && x->targets[0] == 37 && x->targets[2] == 39);
   dspark_index_destroy(x);
@@ -67,6 +71,7 @@ static void test_malformed(void)
           "\"tensors\": [[\"b\", \"BF16\", 0, 8, [4]]]}", "more targets than a list holds");
   /* a drafter's experts requantized to the trunk's types: the type table's sizes */
   write("dspark.json", "{\"tensors\": [[\"e\", \"IQ2_XS\", 0, 74, [1, 256]]]}", 0);
+  osmos_clear(err);
   x = dspark_index(dir, err);
   assert(x && x->n == 1 && dspark_tensor(x, "e")->type == 17);
   dspark_index_destroy(x);
@@ -78,7 +83,7 @@ static void test_malformed(void)
 
 static void test_real(void)
 {
-  char path[512], err[DSPARK_ERR] = "";
+  char path[512], err[OSMOS_ERR] = "";
   snprintf(path, sizeof path, "%s/Models/ds1017/dspark-iq2xs", getenv("HOME") ? getenv("HOME") : "");
   struct stat st;
   char json[600];
@@ -88,6 +93,7 @@ static void test_real(void)
     printf("  the real index: skipped (no ~/Models/ds1017/dspark-iq2xs)\n");
     return;
   }
+  osmos_clear(err);
   DsparkIndex *x = dspark_index(path, err);
   if (!x)
     printf("  %s\n", err);

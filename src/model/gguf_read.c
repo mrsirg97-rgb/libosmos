@@ -3,12 +3,11 @@
 #include <inttypes.h>
 
 #include "gguf_read.h"
+#include "osmos/err.h"
 
 bool gguf_fail(Reader *r, const char *what)
 {
-  if (r->err && !r->err[0])
-    snprintf(r->err, GGUF_ERR, "%s: offset %" PRIu64 ": %s", r->path, r->pos, what);
-  return false;
+  return osmos_fail(r->err, "%s: offset %" PRIu64 ": %s", r->path, r->pos, what);
 }
 
 bool gguf_take(Reader *r, void *dst, uint64_t n)

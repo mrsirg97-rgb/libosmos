@@ -6,6 +6,7 @@
 #include "osmos/model/expert_units.h"
 #include "osmos/model/qtype.h"
 #include "weights_geo.h"
+#include "osmos/err.h"
 
 /* a role's types, a mask of the table's ids (qtype.h): TY by name, TY_ID by a tensor's id (below 32: a mask's bits) */
 #define TY_ID(id) (1u << (id))
@@ -183,11 +184,7 @@ static bool has(const Geometry *g, When when, int l)
   }
 }
 
-static bool fail(Check *c, const char *name, const char *why)
-{
-  snprintf(c->err, WEIGHTS_ERR, "%s: %s", name, why);
-  return false;
-}
+static bool fail(Check *c, const char *name, const char *why) { return osmos_fail(c->err, "%s: %s", name, why); }
 
 /* the role's dims (or their other spelling), the tensor's values counted into *values */
 static bool shaped(const Check *c, const GgufTensor *t, const Dim *dims, int l, uint64_t *values)
@@ -339,16 +336,16 @@ static bool check(Check *c)
   return true;
 }
 
-Weights *weights_create(const Gguf *model, const Gguf *engram, char err[WEIGHTS_ERR])
+Weights *weights_create(const Gguf *model, const Gguf *engram, char err[OSMOS_ERR])
 {
   return weights_create_with(&(WeightsOptions){model, engram, NULL}, err);
 }
 
-Weights *weights_create_with(const WeightsOptions *o, char err[WEIGHTS_ERR])
+Weights *weights_create_with(const WeightsOptions *o, char err[OSMOS_ERR])
 {
   if (!o || !o->model)
   {
-    snprintf(err, WEIGHTS_ERR, "no model");
+    osmos_fail(err, "no model");
     return NULL;
   }
   Weights *w = calloc(1, sizeof *w);
@@ -361,10 +358,10 @@ Weights *weights_create_with(const WeightsOptions *o, char err[WEIGHTS_ERR])
     c.taken[1] = calloc((o->engram ? o->engram->n_tensors : 0) + 1, sizeof(bool));
     c.taken[2] = calloc((o->overlay ? o->overlay->n_tensors : 0) + 1, sizeof(bool));
     ok = (c.taken[0] && c.taken[1] && c.taken[2]) ? files(&c) && check(&c)
-                                                    : (snprintf(err, WEIGHTS_ERR, "out of memory"), false);
+                                                    : (osmos_fail(err, "out of memory"), false);
   }
   else if (!w)
-    snprintf(err, WEIGHTS_ERR, "out of memory");
+    osmos_fail(err, "out of memory");
   free(c.taken[0]);
   free(c.taken[1]);
   free(c.taken[2]);

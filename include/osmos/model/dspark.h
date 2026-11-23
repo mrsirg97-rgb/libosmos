@@ -1,10 +1,10 @@
 #ifndef DSPARK_H
 #define DSPARK_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
-#define DSPARK_ERR 256
 #define DSPARK_NAME_MAX 64
 #define DSPARK_MAX_DIMS 4
 #define DSPARK_MAX_TARGETS 16 /* a target_layers list's bound (DeepSeek's: 3) */
@@ -27,7 +27,7 @@ typedef struct DsparkIndex
   uint32_t n_targets;
 } DsparkIndex;
 
-DsparkIndex *dspark_index(const char *dir, char err[DSPARK_ERR]);
+DsparkIndex *dspark_index(const char *dir, char err[OSMOS_ERR]);
 void dspark_index_destroy(DsparkIndex *x);
 const DsparkTensor *dspark_tensor(const DsparkIndex *x, const char *name);
 

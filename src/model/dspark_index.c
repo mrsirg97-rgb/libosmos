@@ -5,15 +5,11 @@
 
 #include "osmos/model/dspark.h"
 #include "osmos/model/qtype.h"
+#include "osmos/err.h"
 
 /* dspark.json's keys the index reads: "tensors": [[name, type, offset, bytes, [dims ...]], ...] and, if there,
    "target_layers": [layer, ...] - a reader of just those shapes: strings without escapes, unsigned integers */
 
-static bool fail(char *err, const char *why)
-{
-  snprintf(err, DSPARK_ERR, "dspark: %s", why);
-  return false;
-}
 
 typedef struct Cur
 {
@@ -84,24 +80,24 @@ static bool entry(Cur *c, DsparkTensor *t, uint64_t file_bytes, char *err)
   if (!eat(c, '[') || !string(c, t->name, sizeof t->name) || !eat(c, ',') || !string(c, type, sizeof type) ||
       !eat(c, ',') || !number(c, &t->offset) || !eat(c, ',') || !number(c, &t->bytes) || !eat(c, ',') ||
       !eat(c, '['))
-    return fail(err, "dspark.json: a tensor entry it cannot read");
+    return osmos_fail(err, "dspark.json: a tensor entry it cannot read");
   if (!type_of(type, &t->type, &per_block, &block_bytes))
-    return fail(err, "dspark.json: a tensor of a type it does not know");
+    return osmos_fail(err, "dspark.json: a tensor of a type it does not know");
   t->n_dims = 0;
   do
   {
     if (t->n_dims == DSPARK_MAX_DIMS || !number(c, &t->dims[t->n_dims]))
-      return fail(err, "dspark.json: a tensor's dims it cannot read");
+      return osmos_fail(err, "dspark.json: a tensor's dims it cannot read");
     if (!t->dims[t->n_dims] || values > UINT64_MAX / t->dims[t->n_dims]) /* (0.7.1: a product wrapping 64 bits) */
-      return fail(err, "dspark.json: a tensor's dims of 0, or more values than 64 bits count");
+      return osmos_fail(err, "dspark.json: a tensor's dims of 0, or more values than 64 bits count");
     values *= t->dims[t->n_dims++];
   } while (eat(c, ','));
   if (!eat(c, ']') || !eat(c, ']'))
-    return fail(err, "dspark.json: a tensor entry it cannot read");
+    return osmos_fail(err, "dspark.json: a tensor entry it cannot read");
   if (values % per_block || values / per_block * block_bytes != t->bytes)
-    return fail(err, "dspark.json: a tensor's bytes are not its type's for its dims");
+    return osmos_fail(err, "dspark.json: a tensor's bytes are not its type's for its dims");
   if (t->offset > file_bytes || t->bytes > file_bytes - t->offset)
-    return fail(err, "dspark.json: a tensor past the end of dspark.bin");
+    return osmos_fail(err, "dspark.json: a tensor past the end of dspark.bin");
   return true;
 }
 
@@ -113,29 +109,29 @@ static bool targets(const char *text, const char *end, DsparkIndex *x, char *err
     return true;
   Cur c = {key + strlen("\"target_layers\""), end};
   if (!eat(&c, ':') || !eat(&c, '['))
-    return fail(err, "dspark.json: target_layers is not a list");
+    return osmos_fail(err, "dspark.json: target_layers is not a list");
   do
   {
     uint64_t v;
     if (x->n_targets == DSPARK_MAX_TARGETS || !number(&c, &v) || v > UINT32_MAX ||
         (x->n_targets && v <= x->targets[x->n_targets - 1]))
-      return fail(err, "dspark.json: target_layers is not a list of ascending layers");
+      return osmos_fail(err, "dspark.json: target_layers is not a list of ascending layers");
     x->targets[x->n_targets++] = (uint32_t)v;
   } while (eat(&c, ','));
-  return eat(&c, ']') || fail(err, "dspark.json: target_layers is not a list");
+  return eat(&c, ']') || osmos_fail(err, "dspark.json: target_layers is not a list");
 }
 
-DsparkIndex *dspark_index(const char *dir, char err[DSPARK_ERR])
+DsparkIndex *dspark_index(const char *dir, char err[OSMOS_ERR])
 {
   char path[4096];
   struct stat st;
   DsparkIndex *x = calloc(1, sizeof *x);
   char *text = NULL;
-  bool ok = x != NULL || fail(err, "out of memory");
+  bool ok = x != NULL || osmos_fail(err, "out of memory");
   if (ok)
   {
     snprintf(path, sizeof path, "%s/dspark.bin", dir);
-    ok = (stat(path, &st) == 0 && (x->bin = strdup(path))) || fail(err, "no dspark.bin");
+    ok = (stat(path, &st) == 0 && (x->bin = strdup(path))) || osmos_fail(err, "no dspark.bin");
   }
   FILE *f = NULL;
   long len = 0;
@@ -145,7 +141,7 @@ DsparkIndex *dspark_index(const char *dir, char err[DSPARK_ERR])
     f = fopen(path, "rb");
     ok = (f && fseek(f, 0, SEEK_END) == 0 && (len = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
           (text = malloc((size_t)len + 1)) && fread(text, 1, (size_t)len, f) == (size_t)len) ||
-         fail(err, "dspark.json could not be read");
+         osmos_fail(err, "dspark.json could not be read");
   }
   if (f)
     fclose(f);
@@ -154,16 +150,16 @@ DsparkIndex *dspark_index(const char *dir, char err[DSPARK_ERR])
   ok = ok && targets(text, text + len, x, err);
   const char *key = ok ? strstr(text, "\"tensors\"") : NULL;
   if (ok && !key)
-    ok = fail(err, "dspark.json has no tensors");
+    ok = osmos_fail(err, "dspark.json has no tensors");
   Cur c = {key ? key + strlen("\"tensors\"") : NULL, text + len};
   uint32_t cap = 0;
   if (ok && (!eat(&c, ':') || !eat(&c, '[')))
-    ok = fail(err, "dspark.json: tensors is not a list");
+    ok = osmos_fail(err, "dspark.json: tensors is not a list");
   while (ok && !eat(&c, ']'))
   {
     if (x->n && !eat(&c, ','))
     {
-      ok = fail(err, "dspark.json: tensors is not a list");
+      ok = osmos_fail(err, "dspark.json: tensors is not a list");
       break;
     }
     if (x->n == cap)
@@ -171,7 +167,7 @@ DsparkIndex *dspark_index(const char *dir, char err[DSPARK_ERR])
       DsparkTensor *grown = realloc(x->t, (cap = cap ? cap * 2 : 256) * sizeof *grown);
       if (!grown)
       {
-        ok = fail(err, "out of memory");
+        ok = osmos_fail(err, "out of memory");
         break;
       }
       x->t = grown;

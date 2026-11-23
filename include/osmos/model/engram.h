@@ -1,11 +1,11 @@
 #ifndef ENGRAM_H
 #define ENGRAM_H
 
+#include "osmos/err.h"
 #include <stdint.h>
 
 #include "osmos/model/weights.h"
 
-#define ENGRAM_ERR 256
 #define ENGRAM_MAX_NGRAM 8
 
 typedef struct Engram Engram;
@@ -25,8 +25,8 @@ typedef struct EngramShape
   const uint64_t *rows;      /* each Engram layer's table rows */
 } EngramShape;
 
-Engram *engram_create(const Weights *w, const int *model_fds, char err[ENGRAM_ERR]);
-Engram *engram_create_shape(const EngramShape *s, char err[ENGRAM_ERR]);
+Engram *engram_create(const Weights *w, const int *model_fds, char err[OSMOS_ERR]);
+Engram *engram_create_shape(const EngramShape *s, char err[OSMOS_ERR]);
 void engram_destroy(Engram *e);
 
 int engram_cols(const Engram *e);

@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "osmos/model/engram.h"
+#include "osmos/err.h"
 
 
 struct Engram
@@ -22,11 +23,7 @@ struct Engram
   int64_t *off;    /* [layer][cols] */
 };
 
-static bool fail(char *err, const char *why)
-{
-  snprintf(err, ENGRAM_ERR, "engram: %s", why);
-  return false;
-}
+static bool fail(char *err, const char *why) { return osmos_fail(err, "the Engram table: %s", why); }
 
 /* a whole tensor into memory of its own */
 static void *slurp(const GgufTensor *t, const int *fds)
@@ -146,7 +143,7 @@ static Engram *finish(Engram *e, bool ok, uint64_t covered, int32_t pad, const u
   return e;
 }
 
-Engram *engram_create_shape(const EngramShape *s, char err[ENGRAM_ERR])
+Engram *engram_create_shape(const EngramShape *s, char err[OSMOS_ERR])
 {
   if (!s || !s->model || !s->arch || !s->rows || s->n_layers <= 0 || s->ngram < 2 || s->heads <= 0)
     return fail(err, "no shape"), NULL;
@@ -164,7 +161,7 @@ Engram *engram_create_shape(const EngramShape *s, char err[ENGRAM_ERR])
   return finish(e, ok, ok ? s->covered : 0, s->pad, s->rows, err);
 }
 
-Engram *engram_create(const Weights *w, const int *fds, char err[ENGRAM_ERR])
+Engram *engram_create(const Weights *w, const int *fds, char err[OSMOS_ERR])
 {
   if (!w || !fds)
     return fail(err, "no weights"), NULL;

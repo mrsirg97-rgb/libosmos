@@ -1,6 +1,7 @@
 #ifndef WEIGHTS_H
 #define WEIGHTS_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -8,7 +9,6 @@
 #include "osmos/mem/pool.h"
 #include "osmos/model/gguf.h"
 
-#define WEIGHTS_ERR 256
 #define WEIGHTS_MAX_LAYERS 64
 #define WEIGHTS_SLICE_NAME 64
 #define WEIGHTS_MAX_FILES 16 /* the model's files and an overlay's together */
@@ -98,8 +98,8 @@ typedef struct Weights
   char eg_slice_name[WEIGHTS_MAX_LAYERS][WEIGHTS_SLICE_NAME];
 } Weights;
 
-Weights *weights_create(const Gguf *model, const Gguf *engram, char err[WEIGHTS_ERR]);
-Weights *weights_create_with(const WeightsOptions *o, char err[WEIGHTS_ERR]);
+Weights *weights_create(const Gguf *model, const Gguf *engram, char err[OSMOS_ERR]);
+Weights *weights_create_with(const WeightsOptions *o, char err[OSMOS_ERR]);
 void weights_destroy(Weights *w);
 
 size_t weights_experts(const Weights *w, const int *model_fds, PoolUnit *units, size_t cap);

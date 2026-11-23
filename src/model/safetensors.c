@@ -9,12 +9,13 @@
 #include "osmos/model/qtype.h"
 #include "osmos/model/safetensors.h"
 #include "osmos/text/json.h"
+#include "osmos/err.h"
 
 #define ST_MAX_HEADER (100u << 20) /* the header's bytes at most (the format's own limit: 100 MB) */
 
 static Gguf *fail(Gguf *g, char *err, const char *path, const char *why)
 {
-  snprintf(err, GGUF_ERR, "%s: %s", path, why);
+  osmos_fail(err, "%s: %s", path, why);
   gguf_destroy(g);
   return NULL;
 }
@@ -42,7 +43,7 @@ static bool uint_of(const Json *j, uint64_t *v)
   return errno == 0 && end == j->s + j->len;
 }
 
-Gguf *st_create(const char *path, char err[GGUF_ERR])
+Gguf *st_create(const char *path, char err[OSMOS_ERR])
 {
   err[0] = 0;
   Gguf *g = calloc(1, sizeof *g);

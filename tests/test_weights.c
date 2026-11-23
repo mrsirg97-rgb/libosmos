@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/qtype.h"
 #include "osmos/model/weights.h"
@@ -17,7 +18,7 @@ static Gguf *model, *engram;
 
 static Gguf *open_model(const char *name)
 {
-  char p[512], err[GGUF_ERR];
+  char p[512], err[OSMOS_ERR];
   snprintf(p, sizeof p, "%s/models/ds1017/%s", getenv("HOME"), name);
   return gguf_create(p, err);
 }
@@ -27,7 +28,8 @@ static GgufKv *kv(const char *key) { return (GgufKv *)gguf_kv(model, key); }
 
 static bool accepted(void)
 {
-  char err[WEIGHTS_ERR];
+  char err[OSMOS_ERR];
+  osmos_clear(err);
   Weights *w = weights_create(model, engram, err);
   weights_destroy(w);
   return w != NULL;
@@ -36,7 +38,8 @@ static bool accepted(void)
 /* refused, and why names `needle` */
 static void refused(const char *what, const char *needle)
 {
-  char err[WEIGHTS_ERR] = {0};
+  char err[OSMOS_ERR] = {0};
+  osmos_clear(err);
   Weights *w = weights_create(model, engram, err);
   if (w || !strstr(err, needle))
   {
@@ -48,7 +51,8 @@ static void refused(const char *what, const char *needle)
 
 static void test_null(void)
 {
-  char err[WEIGHTS_ERR];
+  char err[OSMOS_ERR];
+  osmos_clear(err);
   assert(weights_create(NULL, NULL, err) == NULL && err[0]);
   weights_destroy(NULL);
   printf("  null: no model refused; destroy(NULL) nothing\n");
@@ -56,9 +60,10 @@ static void test_null(void)
 
 static void test_real(void)
 {
-  char err[WEIGHTS_ERR];
+  char err[OSMOS_ERR];
   struct timespec a, b;
   clock_gettime(CLOCK_MONOTONIC, &a);
+  osmos_clear(err);
   Weights *w = weights_create(model, engram, err);
   clock_gettime(CLOCK_MONOTONIC, &b);
   if (!w)
@@ -214,7 +219,8 @@ static void test_kv(void)
   refused("an Engram file of another model", "engram.source");
   k->v.s[0] ^= 1;
 
-  char err[WEIGHTS_ERR];
+  char err[OSMOS_ERR];
+  osmos_clear(err);
   assert(weights_create(model, NULL, err) == NULL && strstr(err, "engram"));
   printf("    %-44s -> %s\n", "no Engram file", err);
   assert(accepted());
@@ -254,7 +260,8 @@ static void test_fuzz(void)
     case 2: t->type = t->type == T_BF16 ? T_Q8_0 : T_BF16; break;
     default: t->n_dims = t->n_dims == 1 ? 2 : t->n_dims - 1; break;
     }
-    char err[WEIGHTS_ERR];
+    char err[OSMOS_ERR];
+    osmos_clear(err);
     Weights *w = weights_create(model, engram, err);
     if (w)
       printf("  fuzz %d: ACCEPTED a changed %s\n", i, keep.name);
@@ -270,9 +277,10 @@ static void test_fuzz(void)
    that reads it (DESIGN.md, step 4b) */
 static void test_ud(void)
 {
-  char p[512], err[WEIGHTS_ERR];
+  char p[512], err[OSMOS_ERR];
   snprintf(p, sizeof p, "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf",
            getenv("HOME"));
+  osmos_clear(err);
   Gguf *ud = gguf_create(p, err);
   if (!ud)
   {
@@ -280,6 +288,7 @@ static void test_ud(void)
     return;
   }
   model = ud, engram = NULL;
+  osmos_clear(err);
   Weights *w = weights_create(model, NULL, err);
   if (!w)
     printf("  UD-IQ1_M: refused: %s\n", err);
@@ -343,6 +352,7 @@ static void test_ud(void)
   GgufKv *dt = kv("deepseek41.dspark.target_layers");
   assert(dt);
   dt->key[0] = 'X';
+  osmos_clear(err);
   Weights *nt = weights_create(model, NULL, err);
   assert(nt);
   for (int i = 0; i < nt->geo.n_layers; i++)
@@ -359,12 +369,14 @@ static void test_ud(void)
    not take */
 static void test_overlay(void)
 {
-  char p[512], err[WEIGHTS_ERR];
+  char p[512], err[OSMOS_ERR];
   const char *home = getenv("HOME");
   snprintf(p, sizeof p, "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf", home);
+  osmos_clear(err);
   Gguf *ud = gguf_create(p, err);
   snprintf(p, sizeof p, "%s/Models/ds1017/huihui/unsloth/patch-UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-patch.gguf",
            home);
+  osmos_clear(err);
   Gguf *ov = gguf_create(p, err);
   if (!ud || !ov)
   {
@@ -373,10 +385,12 @@ static void test_overlay(void)
     gguf_destroy(ov);
     return;
   }
+  osmos_clear(err);
   Weights *plain = weights_create(ud, NULL, err);
   assert(plain && plain->n_files == ud->n_files && !plain->overlay);
   for (int f = 0; f < ud->n_files; f++)
     assert(strcmp(plain->paths[f], ud->paths[f]) == 0);
+  osmos_clear(err);
   Weights *w = weights_create_with(&(WeightsOptions){ud, NULL, ov}, err);
   if (!w)
     printf("  overlay refused: %s\n", err);
@@ -405,18 +419,22 @@ static void test_overlay(void)
   GgufTensor *t = (GgufTensor *)&ov->tensors[0];
   char keep = t->name[4];
   t->name[4] = 'x'; /* blk.x...: no such tensor in the model */
+  osmos_clear(err);
   assert(!weights_create_with(&(WeightsOptions){ud, NULL, ov}, err) && strstr(err, t->name));
   printf("    a tensor the model does not have -> %s\n", err);
   t->name[4] = keep;
   t->dims[0] /= 2;
+  osmos_clear(err);
   assert(!weights_create_with(&(WeightsOptions){ud, NULL, ov}, err) && strstr(err, t->name));
   printf("    other dims -> %s\n", err);
   t->dims[0] *= 2;
   const uint32_t ty = t->type;
   t->type = QTYPE_I32;
+  osmos_clear(err);
   assert(!weights_create_with(&(WeightsOptions){ud, NULL, ov}, err) && strstr(err, t->name));
   printf("    a type the role does not take -> %s\n", err);
   t->type = ty;
+  osmos_clear(err);
   assert((w = weights_create_with(&(WeightsOptions){ud, NULL, ov}, err)));
   weights_destroy(w);
   weights_destroy(plain);

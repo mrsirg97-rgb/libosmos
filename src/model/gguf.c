@@ -8,6 +8,7 @@
 #include "osmos/model/gguf.h"
 #include "osmos/model/qtype.h"
 #include "gguf_read.h"
+#include "osmos/err.h"
 
 #define GGUF_MAGIC 0x46554747u
 #define GGUF_VERSION 3
@@ -215,7 +216,7 @@ static bool open_file(Gguf *g, int file, const char *path, char *err, uint64_t *
   return ok;
 }
 
-static Gguf *create(const char *path, bool siblings, char err[GGUF_ERR])
+static Gguf *create(const char *path, bool siblings, char err[OSMOS_ERR])
 {
   if (err)
     err[0] = 0;
@@ -263,7 +264,7 @@ static Gguf *create(const char *path, bool siblings, char err[GGUF_ERR])
       if (!g->paths[i])
       {
         if (err)
-          snprintf(err, GGUF_ERR, "%s: a split model's first shard is named -00001-of-%05d", path, (int)count);
+          osmos_fail(err, "%s: a split model's first shard is named -00001-of-%05d", path, (int)count);
         gguf_destroy(g);
         return NULL;
       }
@@ -293,12 +294,12 @@ static Gguf *create(const char *path, bool siblings, char err[GGUF_ERR])
   return g;
 }
 
-Gguf *gguf_create(const char *path, char err[GGUF_ERR])
+Gguf *gguf_create(const char *path, char err[OSMOS_ERR])
 {
   return create(path, true, err);
 }
 
-Gguf *gguf_header(const char *path, char err[GGUF_ERR])
+Gguf *gguf_header(const char *path, char err[OSMOS_ERR])
 {
   return create(path, false, err);
 }

@@ -2,12 +2,9 @@
 #include <string.h>
 
 #include "gguf_meta.h"
+#include "osmos/err.h"
 
-bool meta_fail(GgufMeta *m, const char *key, const char *why)
-{
-  snprintf(m->err, GGUF_META_ERR, "%s: %s", key, why);
-  return false;
-}
+bool meta_fail(GgufMeta *m, const char *key, const char *why) { return osmos_fail(m->err, "%s: %s", key, why); }
 
 /* the key's other spelling (the family's aliases), or NULL */
 static const char *alias(const GgufMeta *m, const char *key)
