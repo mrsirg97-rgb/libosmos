@@ -153,6 +153,9 @@ bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_
   for (uint32_t i = 0; i < n; i++)
     if (!seqs[i] || seqs[i]->e != e)
       return fail(err, "a batch's sequence not this engine's");
+  for (uint32_t i = 0; i < n; i++) /* every family's, before any reads one (Inkling, the 27B and Qwen embedded any) */
+    if (tokens[i] < 0 || (uint32_t)tokens[i] >= e->vocab)
+      return fail(err, "a token outside the vocabulary");
   return e->fam->batch(e->impl, seqs, tokens, n, err);
 }
 

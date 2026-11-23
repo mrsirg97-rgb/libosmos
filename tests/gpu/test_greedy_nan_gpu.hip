@@ -12,9 +12,7 @@
 #include <unistd.h>
 #include <vector>
 
-extern "C" {
-#include "osmos/run/engine.h"
-}
+#include "small_packs.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -26,25 +24,16 @@ extern "C" {
 
 constexpr uint32_t kCtx = 1024, kPrompt = 16;
 
-// a pack's first shard; its budget every weight (the small packs: all resident)
-struct Pack {
-  const char* name;
-  const char* path;
-};
-
-static bool one(const Pack& p) {
-  const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
-  const std::string path = home + p.path;
-  if (access(path.c_str(), R_OK)) return std::printf("  %s: no pack, skipped\n", p.name), false;
+static bool one(const SmallPack& p) {
+  if (!small_pack_here(p)) return std::printf("  %s: no pack, skipped\n", p.name), false;
+  const std::string path = small_pack_path(p);
   char err[OSMOS_ERR] = "";
   OsmosFiles files = {path.c_str(), nullptr, nullptr, nullptr};
   OsmosModel* m = osmos_open(&files, err);
   if (!m) std::fprintf(stderr, "  %s\n", err);
   CHECK(m);
   const uint32_t V = osmos_facts(m).vocab;
-  OsmosOptions o = {};
-  o.max_ctx = kCtx, o.budget = osmos_facts(m).streams ? 1ull << 40 : 0;  // (a streaming family: past the pack, every
-                                                                         //  expert resident; the others take none)
+  const OsmosOptions o = small_pack_options(m, kCtx);
   Osmos* e = osmos_create(m, &o, err);
   if (!e) std::fprintf(stderr, "  %s\n", err);
   CHECK(e);
@@ -76,10 +65,8 @@ int main() {
   std::printf("[test_greedy_nan_gpu] start\n");
   int ndev = 0;
   if (hipGetDeviceCount(&ndev) != hipSuccess || !ndev) return std::printf("[test_greedy_nan_gpu] skipped: no GPU\n"), 77;
-  const Pack packs[] = {{"osmos1.7b", "/Models/osmos/osmos1.7b/osmos1.7b-Q4_0.gguf"},
-                        {"inkling-2-mini", "/Models/osmos/inkling-2-mini/Inkling-2-Mini-00001-of-00002.gguf"}};
   int ran = 0;
-  for (const Pack& p : packs) ran += one(p);
+  for (const SmallPack& p : kSmallPacks) ran += one(p);
   if (!ran) return std::printf("[test_greedy_nan_gpu] skipped: no pack\n"), 77;
   std::printf("[test_greedy_nan_gpu] ok\n");
   return 0;
