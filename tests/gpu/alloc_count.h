@@ -1,7 +1,7 @@
 // every byte the library's own code takes from HIP and HSA, counted by the linker's --wrap (the Makefile's
 // ALLOC_COUNT_WRAP on a test that includes this): hipMalloc / hipHostMalloc / hipHostRegister /
 // hsa_amd_memory_pool_allocate and their frees. what the runtime allocates for itself is not seen - only the calls
-// the engine makes, which is what its ledger must count (0.15.3: an engine's every allocation through its ledger)
+// the engine makes, which is what its ledger must count (0.16.0: an engine's every allocation through its ledger)
 #pragma once
 #include <hip/hip_runtime.h>
 #include <hsa/hsa_ext_amd.h>

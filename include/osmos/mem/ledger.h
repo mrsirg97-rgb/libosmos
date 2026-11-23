@@ -1,6 +1,6 @@
 #ifndef OSMOS_MEM_LEDGER_H
 #define OSMOS_MEM_LEDGER_H
-/* the ledger: the memory an engine holds, one count every family's build shares (DESIGN.md, "0.15.3: the ledger, a
+/* the ledger: the memory an engine holds, one count every family's build shares (DESIGN.md, "0.16.0: the ledger, a
    component"). an engine owns one for its life (osmos_create to osmos_destroy); each family's forward borrows it, its
    sequences through their forward. every allocation of the engine's tree goes through it - counted, and one that would
    leave under FIT_HEADROOM of the room refused before it is taken; every free given back. the room: this machine's

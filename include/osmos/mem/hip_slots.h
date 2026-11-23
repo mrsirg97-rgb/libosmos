@@ -16,7 +16,7 @@ Slots hip_slots(HipSlots *h);
 /*
 hip_slots_create
   the GPU's coarse-grained pool and the CPU agent found (the runtime up first), each allocation from it counted in l
-  (osmos/mem/ledger.h: borrowed; NULL counts nothing); NULL, why said, without the memory for it. 0.15.3: the pool
+  (osmos/mem/ledger.h: borrowed; NULL counts nothing); NULL, why said, without the memory for it. 0.16.0: the pool
   and agent were a process's static, found at a first use - now its owner's, from create to destroy.
 hip_slots_destroy
   gone: its owner's part, after every Pool and Resident given its Slots (their memory released through it). NULL is

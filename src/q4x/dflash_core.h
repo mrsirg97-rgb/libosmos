@@ -14,7 +14,7 @@
 #include "osmos/q4x/dflash.h"
 
 /* the drafter's buffers: a seed's max_tokens context rows, a block's, the selector's, pinned copies out - each made
-   through one ledger and freed by name (0.15.3: freed as an array of the struct's first pointers) */
+   through one ledger and freed by name (0.16.0: freed as an array of the struct's first pointers) */
 typedef struct DfBuf
 {
   float *th;            /* [max_tokens][n_embd]: the context's taps through fc, then its hidden norm */

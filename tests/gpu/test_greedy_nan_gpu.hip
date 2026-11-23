@@ -1,5 +1,5 @@
 // the engine's greedy pick refuses a row of NaN logits (osmos/run/engine.h: osmos_greedy) on every family here - its
-// argmax's -1 never handed on as a token (0.15.3: Inkling's own pick returned true with id -1; the others refused).
+// argmax's -1 never handed on as a token (0.16.0: Inkling's own pick returned true with id -1; the others refused).
 // each family's pack a step, then its last row's logits set to NaN in place: the pick refused, saying so; the row's
 // own pick before it a token in the vocabulary. needs a gfx1151; a family whose pack is not here skipped, 77 if none.
 #include <hip/hip_runtime.h>

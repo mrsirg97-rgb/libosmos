@@ -1,7 +1,7 @@
 // the overflow flag's reset, one shape every family's step shares (osmos/gpu/overflow.h): after a step that went past
 // f16's range the flag zeroed for the next; a reset that fails (through the fault seam, osmos/err_hip.h) owed - the
 // step's own cause said, the next step's start trying it again and refusing with that cause while it fails, running
-// once it holds (0.15.3: nine unchecked resets - a failed one left the flag set, every later step refused as "an
+// once it holds (0.16.0: nine unchecked resets - a failed one left the flag set, every later step refused as "an
 // activation past f16's range" forever). needs a GPU; 77 without.
 #include <hip/hip_runtime.h>
 

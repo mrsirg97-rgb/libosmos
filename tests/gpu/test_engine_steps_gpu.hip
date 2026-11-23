@@ -1,5 +1,5 @@
 // a step's most tokens one rule on every family (osmos/run/engine.h OsmosOptions.max_tokens): 0 the family's own, and
-// never more than the context - a build at max_tokens past max_ctx made, its step the context's (0.15.3: Qwen alone
+// never more than the context - a build at max_tokens past max_ctx made, its step the context's (0.16.0: Qwen alone
 // refused it, and at 0 sized its step to the whole context - a 512K step's buffers). each pack here; 77 if none.
 #include <hip/hip_runtime.h>
 

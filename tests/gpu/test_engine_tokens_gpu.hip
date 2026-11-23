@@ -1,5 +1,5 @@
 // the engine refuses a token outside the vocabulary before any family reads it (osmos/run/engine.h: osmos_batch) -
-// past the last id, at it, and negative: refused, saying so, the sequence where it was; a token inside, read (0.15.3:
+// past the last id, at it, and negative: refused, saying so, the sequence where it was; a token inside, read (0.16.0:
 // Inkling, the 27B and Qwen embedded any id - a read past the table on the GPU). each small pack here; 77 if none.
 #include <hip/hip_runtime.h>
 

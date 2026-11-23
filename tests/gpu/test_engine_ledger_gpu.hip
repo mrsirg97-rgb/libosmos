@@ -2,7 +2,7 @@
 // through its ledger - what the library's own code holds from HIP and HSA (alloc_count.h: the linker's --wrap) the
 // ledger's count, byte for byte, after osmos_create, with sequences, after a step and a drafted round, after a
 // sequence's destroy; and after osmos_destroy and osmos_close nothing held at all. each pack its family's commit puts
-// in kLedgered (0.15.3 phase 3, stage 4: one family a commit); 77 if none here.
+// in kLedgered (0.16.0 phase 3, stage 4: one family a commit); 77 if none here.
 #include <hip/hip_runtime.h>
 
 #include <cstdio>

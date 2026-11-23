@@ -80,7 +80,7 @@ static unsigned long long gpu_sum(const void* dev, size_t n, unsigned long long*
   return got;
 }
 
-// every slot here counted in one ledger (0.15.3: HSA's and the host slots' memory counted; all of it back at the end)
+// every slot here counted in one ledger (0.16.0: HSA's and the host slots' memory counted; all of it back at the end)
 static OsmosLedger* g_ledger;
 static HipSlots* g_slots;
 

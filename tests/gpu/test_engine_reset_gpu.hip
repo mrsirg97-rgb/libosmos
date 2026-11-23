@@ -2,7 +2,7 @@
 //   a reset sequence is a new one - after a prompt and a reset, a second prompt's logits the bits of a new sequence's
 //     on it (its memory kept: a conversation's restart allocates nothing);
 //   a step refused by its checks (before any work) leaves its sequence as it was - its next step the bits of one that
-//     never saw it (0.15.3: Inkling's left it failed, osmos1.7b's as it was);
+//     never saw it (0.16.0: Inkling's left it failed, osmos1.7b's as it was);
 //   a broken sequence's steps refused until a reset holds - which mends it (osmos1.7b's reset failed through the fault
 //     seam, osmos/err_hip.h).
 // each pack here (the streaming ones at their smallest build); 77 if none.

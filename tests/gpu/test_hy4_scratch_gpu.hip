@@ -1,6 +1,6 @@
 // Hy4's indexer scratch (the spread selection's) the forward's own, made whole when it is built (SCOPE.md): its
 // allocation failing (the fault seam, osmos/err_hip.h) refuses the build, saying so - never a forward made without it,
-// never an op launched over half of it (0.15.3: function statics in kernels/hy4.hip, made at first use - the first
+// never an op launched over half of it (0.16.0: function statics in kernels/hy4.hip, made at first use - the first
 // allocation held and the second refused, the next call launched with a null; never freed; shared by two engines).
 // needs a gfx1151 and the hy4-flash pack; 77 without.
 #include <hip/hip_runtime.h>

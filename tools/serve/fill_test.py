@@ -4,7 +4,7 @@
 
   --fill 4     ready; its sizing NOTE and its slots NOTE each keep 4.00 GiB free, and the budget 3 GiB or more past
                the default's (8 GiB kept free: one more start, the default's NOTE 8.00)
-  --fill 1000  more than any machine can keep free: refused, loud - not started, why and the levers said (0.15.3:
+  --fill 1000  more than any machine can keep free: refused, loud - not started, why and the levers said (0.16.0:
                the ledger never takes the RAM --fill keeps; before, it started on the smallest build anyway)
 
     python tools/serve/fill_test.py --model <first shard> [--picks <file>] [--exe bin/osmos-serve]

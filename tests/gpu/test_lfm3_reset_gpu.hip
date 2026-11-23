@@ -1,6 +1,6 @@
 // osmos1.7b's sequence after a refused load (osmos/run/engine.h: "load refuses ... the sequence then empty"): its
 // convolutions' states zeroed - and where that reset fails (the fault seam, osmos/err_hip.h), the sequence broken, its
-// next step refused with the cause, never "empty" over the last conversation's states (0.15.3: the reset's memsets
+// next step refused with the cause, never "empty" over the last conversation's states (0.16.0: the reset's memsets
 // unchecked). needs a gfx1151 and osmos1.7b's pack; 77 without.
 #include <hip/hip_runtime.h>
 

@@ -68,7 +68,7 @@ static bool mem_left(uint64_t *left)
 static bool room_left_past(Q4xForward *f, uint64_t more, const char *after, char *err)
 {
   uint64_t left = 0;
-  if (f->ledger) /* the engine's: its room, --fill's RAM kept (0.15.3: the machine read with 8 GiB kept, whatever --fill) */
+  if (f->ledger) /* the engine's: its room, --fill's RAM kept (0.16.0: the machine read with 8 GiB kept, whatever --fill) */
     left = ledger_left_settled(f->ledger) + FIT_HEADROOM;
   else if (!mem_left(&left))
     return osmos_fail(err, "a GPU call failed (the memory left)");

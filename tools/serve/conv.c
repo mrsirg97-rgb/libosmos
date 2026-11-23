@@ -141,7 +141,7 @@ bool conv_restart(Conv *c, const Server *sv)
 {
   (void)sv;
   c->held.n = 0, c->prompt.n = 0, c->user.n = 0; /* (the points' memory kept for the next) */
-  return oseq_reset(c->s, c->err); /* a new sequence in its own memory: a restart allocates nothing (0.15.3; destroyed
+  return oseq_reset(c->s, c->err); /* a new sequence in its own memory: a restart allocates nothing (0.16.0; destroyed
                                       and made again, it could be refused the memory it had just given back) */
 }
 

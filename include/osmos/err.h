@@ -1,6 +1,6 @@
 #ifndef OSMOS_ERR_H
 #define OSMOS_ERR_H
-/* the error shape every module shares (DESIGN.md, "0.15.3: the consolidation"): a failure is false with its cause in
+/* the error shape every module shares (DESIGN.md, "0.16.0: the consolidation"): a failure is false with its cause in
    a caller's OSMOS_ERR buffer, handed down empty - the first cause in it kept, so a call given a buffer with an
    earlier failure's in it would report that one: the engine's entry points (osmos/run/engine.h) empty theirs on entry,
    and a caller of a family's own calls passes an empty one (osmos_clear) */

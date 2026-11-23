@@ -1,7 +1,7 @@
 // the engine's room one rule on every family (osmos/run/engine.h: osmos_room): the GPU's free memory, or the system's
 // RAM past what --fill keeps free, the less - no fill the most room; and a fill more than the machine has refuses the
 // build, saying why (the engine's ledger: no allocation past the RAM --fill keeps - the operator's fail-closed
-// --fill) (0.15.3: osmos1.7b and the 27B reported the GPU's free memory alone: no RAM bound, no --fill). each small
+// --fill) (0.16.0: osmos1.7b and the 27B reported the GPU's free memory alone: no RAM bound, no --fill). each small
 // pack here; 77 if none.
 #include <hip/hip_runtime.h>
 

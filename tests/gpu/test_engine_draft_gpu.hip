@@ -1,6 +1,6 @@
 // the engine's draft refuses a token outside the vocabulary, every family alike (osmos/run/engine.h: oseq_draft -
 // "the count, or -1 with why"): after a step, y at the vocabulary's size, past it and negative: -1, saying so; y inside
-// the vocabulary: a count (0.15.3: Hy4's drafter returned 0, no drafts, where Inkling's refused). each small pack with
+// the vocabulary: a count (0.16.0: Hy4's drafter returned 0, no drafts, where Inkling's refused). each small pack with
 // a drafter here; 77 if none.
 #include <hip/hip_runtime.h>
 

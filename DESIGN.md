@@ -2141,7 +2141,7 @@ prompt is the full layers' attention's: the dense matrices' 2x is a shallow prom
 25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
 2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
 
-### 0.15.3: the consolidation (plan, 2026-11-23)
+### 0.16.0: the consolidation (plan, 2026-11-23)
 
 **the bar**: AGENTS.md and SCOPE.md, across the engine. Two of three 0.15.x memory bugs lived in a private copy of a
 shared concept (Qwen's room check), where a fix to the shared code never reached; this pass makes one shape for each

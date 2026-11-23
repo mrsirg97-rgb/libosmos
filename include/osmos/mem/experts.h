@@ -63,7 +63,7 @@ experts_fit_now
   a build's budget sized to this machine as it stands: its fixed part (what it has built, bytes) and what l leaves
   (ledger_left_settled: the room - the GPU's free memory, or the RAM past what l keeps, --fill - less FIT_HEADROOM, read
   once it stands still) - experts_plan's budget for as many experts as fit, every one on a machine with the room; 1
-  (the smallest build) when there is none. a NULL l: the machine read as a ledger keeping FIT_RAM_FREE would (0.15.3:
+  (the smallest build) when there is none. a NULL l: the machine read as a ledger keeping FIT_RAM_FREE would (0.16.0:
   it read FIT_RAM_FREE whatever --fill said). a forward's own sizing in one build (a test's, a bench's); osmos-serve
   sizes the whole engine over builds (fit_sized)
 */

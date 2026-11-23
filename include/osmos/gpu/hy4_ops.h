@@ -174,7 +174,7 @@ hy4_ix_select
   lower group - an exact selection (the score's k-th greatest by its bits), any C - then its own: sel[t * top ..]
   ascending, n_sel[t] how many. scores: scratch for n_tok x max_groups (C at most max_groups). spread_scratch: the
   caller's, hy4_ix_spread_bytes() of it (the selection spread over a token's groups: its state and blocks' counts) -
-  the forward's own, made when it is built (not the op's: 0.15.3's statics, made at first use, never freed, shared).
+  the forward's own, made when it is built (not the op's: 0.16.0's statics, made at first use, never freed, shared).
   read (a prompt's step) past 16 tokens: the scores on the matrix cores (f16 inputs, F32 sums: a near-tie at the
   511th group may swap; env HY4_IX_F32 set: the F32 loop's)
 
