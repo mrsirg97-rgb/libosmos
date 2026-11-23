@@ -95,28 +95,25 @@ size_t pool_reading(const Pool *p);
 
 /*
 Pool
-  where the model's experts are: copies in GPU memory, a unit's own, read from the files straight into it (DESIGN.md,
-  "the memory"). a unit is cold (in its files), reading (its memory taken, its read under way) or pinned (its memory
-  holds its bytes; the GPU reads them there). the pool knows units and file ranges, not experts or layers: the model
-  builds the units, the pool decides which are in GPU memory. nothing in it blocks: a read is the fetcher's, and its
-  end comes back as pool_ready. the scheduler's consumer is its only caller (libevt: one consumer, so nothing locks).
+  where the model's experts are: copies in GPU memory, read from the files straight into it. a unit is cold (in its
+  files), reading (its memory taken, its read under way) or pinned (its memory holds its bytes; the GPU reads them
+  there). the pool knows units and file ranges, not experts or layers. nothing in it blocks: a read is the fetcher's,
+  and its end comes back as pool_ready. the scheduler's consumer is its only caller, so nothing locks.
 
 pool_create
   `units`: what can be pinned, a unit up to POOL_PARTS ranges of open, read-only files (an expert's gate, up, down);
   copied. a unit's memory holds its parts back to back, each from a POOL_ALIGN boundary. `budget`: the bytes of GPU
   memory the pool may hold - its units' and the spare memory it keeps to reuse - the caller's plan of the machine.
   `slots`: the memory, injected: alloc(bytes) GPU memory the CPU can write and the GPU reads (NULL refused), free(dev)
-  at once, with no wait for the GPU (hip_slots.h in the binary; malloc in the tests). `fetcher`: begins reading a
-  unit's parts into `dst` (a part's place in its memory, in part order) and returns at once; when the read is done,
-  whoever wired it arranges pool_ready(unit, ok) on the consumer (the binary: reads.h - fetchq's workers, the end an
-  event the forward's thread runs; the tests: by hand). a read carries its `need`, when it is wanted on pool_release's
-  clock: a pin's 0 (waited on now), a want's its `next` + 1 (0 is a pin's alone); `need(unit, need)`, when given, is told a reading unit's need
-  moved - pinned (0), or a want's `next` corrected - so the reads' order follows it. `read_align`: 0, a part read as
-  its range is, laid out from a POOL_ALIGN boundary; a power of two (a direct read's 4 KiB: DESIGN.md, "0.3.0", target
-  1), a part read as the aligned range around it - its offset rounded down, its end up - into memory at that alignment
-  (`slots` must give it), the part's pointer the slice inside it; a part at its file's end keeps the aligned range past it - the
-  readers end such a read at the file's end (fetchq.h), the part itself within the file. `on_event`: every state
-  change as a PoolEvent, in order (the event log), or NULL.
+  at once, with no wait for the GPU. `fetcher`: begins reading a unit's parts into `dst` (a part's place in its
+  memory, in part order) and returns at once; whoever wired it arranges pool_ready(unit, ok) on the consumer when the
+  read is done. a read carries its `need` on pool_release's clock: a pin's 0 (waited on now), a want's its `next` + 1
+  (0 is a pin's alone); `need(unit, need)`, when given, is told a reading unit's need moved - pinned (0), or a want's
+  `next` corrected - so the reads' order follows it. `read_align`: 0, a part read as its range is, laid out from a
+  POOL_ALIGN boundary; a power of two (a direct read's 4 KiB), a part read as the aligned range around it - its offset
+  rounded down, its end up - into memory at that alignment (`slots` must give it), the part's pointer the slice inside
+  it; a part at its file's end keeps the aligned range past it - the readers end such a read at the file's end
+  (fetchq.h). `on_event`: every state change as a PoolEvent, in order, or NULL.
   refuses (NULL, the reason in `err`) a unit with no parts or more than POOL_PARTS, a range of 0 bytes or past its
   file, or a unit larger than the budget.
 
@@ -138,8 +135,8 @@ pool_pin
 
 pool_place
   a cold unit given memory (room made as a pin's) and held, pinned with no read: its bytes the caller's to write
-  before anything reads them - a copy of the unit held elsewhere (the forward's: an expert a decode takes from the
-  stream's memory into the membrane's, DESIGN.md "0.5.8"). POOL_OK, `dev` its parts' memory (a PIN event); POOL_FULL
+  before anything reads them - a copy of the unit held elsewhere (a promotion from the stream's memory into the
+  membrane's). POOL_OK, `dev` its parts' memory (a PIN event); POOL_FULL
   when no room can be made, or the unit is not cold - nothing changed.
 
 pool_drop
@@ -151,9 +148,9 @@ pool_drop
 pool_want
   the unit, no hold on it, is wanted at `next` (pool_release's clock): a cold one's read begins (its memory taken: a
   READ event) if room can be made from units wanted later than it - spares, the allocator's, unheld units stale or
-  wanted after `next` - and nothing happens if not; a reading or pinned one is wanted at `next` from now on (an old guess
-  the caller corrects). a held unit is nothing to do: its release says when. the prefetch: the units the caller
-  expects to pin soon read before it does, never in place of ones wanted sooner.
+  wanted after `next` - and nothing happens if not; a reading or pinned one is wanted at `next` from now on (an old
+  guess the caller corrects). a held unit is nothing to do: its release says when. a prefetch never takes the place
+  of units wanted sooner.
 
 pool_ready
   a read is done. ok: the unit is pinned (PIN), the waiters' cue to take its pointers with pool_dev. not ok: its
@@ -166,23 +163,22 @@ pool_dev
 pool_release
   one hold ends. at none, a pinned unit stays pinned, a candidate for room: `next` is when the caller expects to want
   it again, on the caller's own clock (any order it keeps - the forward's: the layer's next visit), and the unit
-  wanted furthest ahead goes first. the forward's layers come round in a fixed order, so least recently used would
-  free exactly the units wanted soonest; furthest ahead is the best a cycle allows. the caller's part: the GPU is past
+  wanted furthest ahead goes first: the layers come round in a fixed order, so least recently used would free exactly
+  the units wanted soonest. the caller's part: the GPU is past
   the unit when its last hold ends - its memory may be written again at once. a release with no hold is nothing to do.
 
 pool_pass
   one hold ends as pool_release's, but the unit keeps its place: a unit pinned before this hold its `next` and its
   recency as they were; a unit read for this hold (since it was last released) stale at once and the least recently
   released - the first to go. a prompt's step passes its experts through: it touches most of every layer's, and
-  releasing them would put the prompt's in place of the experts the decode wants back (DESIGN.md, "0.5.8"). a pass
-  with no hold is nothing to do.
+  releasing them would put the prompt's in place of the experts the decode wants back. a pass with no hold is nothing
+  to do.
 
 pool_now
   the caller's clock now (pool_release's and pool_want's; 0 at create). a pinned unit whose `next` is before it was not
   wanted when it said - a decode's expert not picked again on the next token - and is stale: it goes before every
   unit still wanted, so the units wanted soonest are never kept behind ones whose time passed (furthest ahead alone
-  holds those as "soonest" forever: on UD-IQ2_XXS 28% of the guess's reads found no room). a unit wanted at `now`
-  is not stale.
+  holds those as "soonest" forever). a unit wanted at `now` is not stale.
 
 pool_unit_bytes
   the memory a unit takes in a pool of `read_align` (pool_create's): each part its read's range (the alignment's

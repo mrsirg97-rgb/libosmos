@@ -26,8 +26,7 @@ static const Json *fn_of(const Json *call)
 }
 
 /* a call's identity: its name and its arguments as their JSON - a string of JSON parsed and written again, compact,
-   its keys sorted at every depth (0.15.2: in their order before, so a client writing them back in another order made
-   two calls of one) - into b */
+   its keys sorted at every depth (a client writing them back in another order makes one call, not two) - into b */
 static const JsonStyle kCanon = {true, true};
 static void identity(const Json *call, JsonBuf *b)
 {

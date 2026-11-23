@@ -2,9 +2,8 @@
 #define OSMOS_GPU_BUFS_H
 
 /* a component's buffers recorded as they are made and freed from the record (src/mem/hip_bufs.c) - one list a buffer,
-   never an allocation's and a teardown's kept in step by hand (0.11.2's rule; 0.16.0: Mini's hand-kept list had
-   lost five of its buffers - 11.3 MiB an engine, test_engine_ledger_gpu). device memory or pinned host memory, each
-   through one ledger, freed in reverse */
+   never an allocation's and a teardown's kept in step by hand. device memory or pinned host memory, each through one
+   ledger, freed in reverse */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -12,8 +11,7 @@
 
 #include "osmos/mem/ledger.h"
 
-/* every buffer zeroed and GPU_BUFS_PAD bytes past its end - one policy every family's (0.16.0: DeepSeek's zeroed, Inkling's
-   padded 16 since its first engine, the others neither) */
+/* every buffer zeroed and GPU_BUFS_PAD bytes past its end, every family's */
 #define GPU_BUFS_PAD 16
 
 typedef struct GpuWant

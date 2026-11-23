@@ -110,8 +110,7 @@ static bool heads_mm(Hy4Forward *f, const void *const *tab, uint32_t heads, uint
 }
 
 /* Engram's residual. its projection on the matvec in a read too: its gate a signed square root of a normed dot - a
-   dot near 0 magnifies its input's rounding (the matrix cores' f16: layer 1 6.3e-3 of its largest against the
-   reference on osmos's own input, 2.3e-4 in F32 - the other layers' f16 error) */
+   dot near 0 magnifies its input's rounding (the matrix cores' f16 too coarse there) */
 static bool engram(Hy4Forward *f, uint32_t n, int l)
 {
   const Hy4Geometry *g = &f->w->geo;

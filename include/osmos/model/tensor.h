@@ -1,7 +1,6 @@
 #ifndef OSMOS_MODEL_TENSOR_H
 #define OSMOS_MODEL_TENSOR_H
-/* a tensor read from its file on the host (src/model/tensor.c) - one copy every family's (0.16.0: Inkling's
-   ink2_read_tensor / ink2_host_f32, Hy4's hy4_host_f32, DeepSeek's read_all and the Engram's own each read alike) */
+/* a tensor read from its file on the host: every family's one copy */
 #include <stdbool.h>
 #include <stdint.h>
 

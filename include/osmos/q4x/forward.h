@@ -11,17 +11,14 @@
 #include "osmos/q4x/weights.h"
 
 /* a sequence's states kept behind its latest: a rollback's reach - a drafter's most drafts a round (OSMOS_MAX_BLOCK,
-   the engine's), each a DeltaNet layer's S (3.1 MB) a slot: ~1 GB a sequence at 8 */
+   the engine's), each a DeltaNet layer's S a slot */
 #define Q4X_MAX_BACK 8
-/* the MTP head's most drafts a round: measured 2-7 on mm (q4x_bench, 192 tokens: 33.6 34.1 35.2 35.7 34.6 34.8 tok/s;
-   the engine's confidence floors end most rounds before 6) */
+/* the MTP head's most drafts a round */
 #define Q4X_MTP_BLOCK 5
-/* the MTP head's draft scored over the vocabulary's first ids alone (BPE's order: the frequent first - 97.8% of a
-   text's tokens below it): its output projection 521 -> 137 MB a draft, drafted decode 35.7 -> 40.5 tok/s, the
-   acceptance the same (q4x_bench, 192 tokens; 32,768: 39.3, 100,000: 38.5). a draft is a proposal: the answer's bits
-   are the verify step's, whatever the drafts */
+/* the MTP head's draft scored over the vocabulary's first ids alone (BPE's order: the frequent first). a draft is a
+   proposal: the answer's bits are the verify step's, whatever the drafts */
 #define Q4X_MTP_VOCAB 65536
-#define Q4X_MAX_TAPS 8 /* Q4xOptions' tap layers at most (DFlash2's 5) */
+#define Q4X_MAX_TAPS 8 /* Q4xOptions' tap layers at most */
 
 typedef struct Q4xForward Q4xForward;
 typedef struct Q4xSeq Q4xSeq;
@@ -39,12 +36,11 @@ typedef struct Q4xOptions
   const Q4xDflash *dflash;   /* a DFlash2 drafter (q4x_dflash_*), its taps the step's; NULL: none */
   uint64_t budget;           /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
                                 through the membrane past it; 0 the least (a layer's experts); FIT_BUDGET_NOW this
-                                machine's room as it stands (experts_fit_now) - q4x_forward_create's */
-  struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
-                                 borrowed - the engine's, outliving the forward); NULL counts nothing */
-  const char *npu; /* 0.7.0: the NPU beside the GPU (src/q4x/hip_q4x_npu.c), made with the forward: its kernels' directory
-                      (npu_open's: iq3xxs/, iq2s/, iq4nl-down/), or NULL - another forward's bits (q4x_identity tells
-                      them apart); 0.16.0: q4x_forward_npu, attached after */
+                                machine's room as it stands (experts_fit_now) */
+  struct OsmosLedger *ledger; /* every allocation of the forward and its sequences counted in it; borrowed, outlives
+                                 the forward; NULL counts nothing */
+  const char *npu; /* the NPU beside the GPU, made with the forward: its kernels' directory (npu_open's), or NULL. its
+                      bits are another forward's (q4x_identity tells them apart) */
   float npu_share; /* the part of an eligible layer's prompt picks it takes, in (0, 1) (whole 128-token entries; an
                       IQ2_S layer's scaled by its cost) */
 } Q4xOptions;
@@ -104,21 +100,20 @@ int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float co
 
 /*
 Q4xForward
-  Qwen3.8-Flash-Next's forward on the GPU (DESIGN.md, "Qwen's forward, op by op"): every weight resident (the file's
-  bytes, ~78 GB), its steps the kernels q4x_ops.h names, F32 between them. the attention dense over every position
-  below OPS_Q4X_MAX_KEYS (llama.cpp's QSA keeps every token below its 2,048-token budget, a selection past it: dense
-  past it measured its equal - 2.7136 over 8,192 tokens, QSA's 2.7193 - the selection not built).
+  Qwen3.8-Flash-Next's forward on the GPU: every weight resident, its steps the kernels q4x_ops.h names, F32 between
+  them. the attention dense over every position below OPS_Q4X_MAX_KEYS (QSA's selection not built: dense is its
+  equal).
 
 q4x_forward_create, q4x_forward_create_with
   the weights uploaded and the step's buffers for max_tokens tokens; NULL with why where the GPU's memory or a read
   refuses. max_ctx: a sequence's most positions (at most OPS_Q4X_MAX_KEYS). create is create_with's held table
-  (stream_ngram false). stream_ngram: the n-gram layer's table (per_layer_token_embd, 28.8 GB of UD-IQ3_XXS) stays in
-  its file - a step's rows (its tokens' ple_heads each, ~1.4 KB a token) read at its start by rowread's workers into a
-  pinned stage while the GPU runs the layers before the n-gram layer, copied in and gathered as the held table's: the
-  same bits; its bytes of GPU memory left to the system. tap_layers: each layer's output (its residual's hc streams'
+  (stream_ngram false). stream_ngram: the n-gram layer's table (per_layer_token_embd) stays in its file - a step's
+  rows (its tokens' ple_heads each) read at its start by rowread's workers into a pinned stage while the GPU runs the
+  layers before the n-gram layer, copied in and gathered as the held table's: the same bits. tap_layers: each layer's
+  output (its residual's hc streams'
   mean, q4x_tap) kept for every token of a step (q4x_taps); NULL with why for a layer past the model's, out of order,
   or more than Q4X_MAX_TAPS. taking them changes no bit of the step's logits. dflash: the drafter's buffers, its
-  weights uploaded (~0.6 GB at Q8_0), each sequence its rings; its taps the step's (tap_layers then NULL, or the
+  weights uploaded, each sequence its rings; its taps the step's (tap_layers then NULL, or the
   drafter's own); NULL with why for a drafter not of these weights (q4x_dflash_create's) or its codebooks not Q8_0.
 
 q4x_taps
@@ -162,33 +157,33 @@ q4x_seq_state_bytes .. q4x_seq_load_from
   sequence then empty, position 0 (never part one state and part another).
 
 q4x_seq_mark_bytes .. q4x_seq_mark_load
-  a point the sequence goes back to (0.7.5: a conversation's prompt end, osmos-serve's): what a later token changes -
+  a point the sequence goes back to (a conversation's prompt end): what a later token changes -
   the position and last tokens, the n-gram conv history, each DeltaNet layer's state and conv history, each attention
   layer's raw keys' ring - not the attention rows and pooled keys below the position, which only grow. so a mark is
   the sequence's own while it holds the same tokens below the mark's position (no load, reset or rollback under it
   since): load refuses a mark past the position or of another sequence's size, a broken sequence; the caller keeps
-  the tokens. ~118 MB for Qwen3.8-Flash-Next, whatever the position (a whole state: 2.9 GB at 190K).
+  the tokens. a mark's size is the same whatever the position.
 
 q4x_step
   runs sequences' tokens in one step (seqs[i] the next lens[i] tokens, consecutive; each sequence once, runs 1 ..
   Q4X_MAX_RUNS): every weight read once for all of them (the matmuls and the experts on the step's tokens; each
   sequence's own - its n-gram history, conv histories, DeltaNet state, rotation, cache and attention - on its tokens
   alone), the logits at rows row0 .. in the tokens' order (a sequence told its prompt's end: q4x_seq_prompt's rows
-  alone). each sequence as a q4x_batch of its tokens: the same bits,
-  however the sequences share the step. false with why - every sequence then unchanged in position - for no runs, a
+  alone). each sequence as a q4x_batch of its tokens: the same bits, however the sequences share the step. false with
+  why - every sequence then unchanged in position - for no runs, a
   run of no tokens, a sequence twice or of another forward, the tokens past max_tokens or a sequence past max_ctx.
   false after its work began (a GPU call failed, an activation past f16's range): its sequences' DeltaNet and n-gram
   rings part written, so each is refused from then on - every step, rollback, save and draft - until a state is
   loaded into it (or another sequence is made), never read on from a half-written state.
 
 q4x_batch
-  q4x_step of one sequence: n tokens (1 .. max_tokens) of it at its next positions; the logits of every one of them after it, rows
-  row0 .. row0 + n - 1 of q4x_logits ([max_tokens][vocab] on the device: the rows outside left as they were - several
-  sequences' steps one after another fill one table, row0 + n at most max_tokens). a token's results are the same bits
-  however its sequence's tokens are split into batches. false with why for n out of range or past max_ctx; the
-  sequence then unchanged in position (its state not to be read on: a refusal before any step runs).
+  q4x_step of one sequence: n tokens (1 .. max_tokens) of it at its next positions; the logits of every one of them
+  after it, rows row0 .. row0 + n - 1 of q4x_logits ([max_tokens][vocab] on the device: the rows outside left as they
+  were - several sequences' steps one after another fill one table, row0 + n at most max_tokens). a token's results
+  are the same bits however its sequence's tokens are split into batches. false with why for n out of range or past
+  max_ctx; the sequence then unchanged in position (its state not to be read on: a refusal before any step runs).
 
-q4x_forward_whole (DESIGN.md, "0.6.5: Qwen on the membrane")
+q4x_forward_whole
   the forward's experts are a membrane's units, every one in memory and none to be evicted (membrane_whole): read
   from the model's files O_DIRECT into memory the GPU reads in place, their addresses a table on the device the MoE's
   entries are made from (q4x_expert_tiles' tab) - written once, a step asks the membrane nothing. false for a
@@ -198,7 +193,7 @@ q4x_seq_prompt, q4x_kept
   q4x_seq_prompt: the sequence's prompt ends at position end (its last token end - 1; 0, a new sequence's: none).
   the caller reads no logits before end - 1: from then on a step leaves its tokens' rows at positions before end - 1
   as they were (the output head not run for them - a server reads a prompt's last row alone), and writes those at
-  end - 1 and later, the bits of a run never told (DESIGN.md, "0.6.3"). nothing of the sequence's state reads it: any
+  end - 1 and later, the bits of a run never told. nothing of the sequence's state reads it: any
   end up to max_ctx is taken, lower than the last too; not saved, cleared by a load or a refused one. false for no
   sequence or an end past max_ctx.
   q4x_kept: whether row's logits are its last step's - false for a row whose token was before its prompt's end - 1
@@ -208,7 +203,7 @@ q4x_greedy
   rows row0 .. row0 + rows - 1's greatest token each (ops_argmax's: the lowest among equals). false for a row not
   kept (q4x_kept).
 
-q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head; DESIGN.md, "Qwen's MTP head")
+q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head)
   seed: the head's cache at positions from .. to - 1, of the sequence's last step (its rows, read before another
   step): position p's row from its token and the main model's h of p - 1 (the step's row before it, or the pending h -
   zeros when none is held: a load, a first step) - only what the cache reads (eh_proj, the attention's mixer, k and
@@ -220,8 +215,7 @@ q4x_mtp_seed, q4x_mtp_draft (a forward built with an MTP head; DESIGN.md, "Qwen'
   and confidences at row i (stride apart), its count counts[i] - each the bits of its q4x_mtp_draft: a draft's depth
   one head step for the sequences still drafting (the head's weights read once for all). false with why.
 
-q4x_dflash_seed, q4x_dflash_draft (a forward built with Q4xOptions' dflash; DESIGN.md, "DFlash2: a block drafter
-  for Qwen")
+q4x_dflash_seed, q4x_dflash_draft (a forward built with Q4xOptions' dflash)
   seed: the drafter's context at positions from .. to - 1 from the sequence's last step's taps (its rows of that
   step, below the sequence's position: a rollback's dropped tokens refused) - each through the drafter's fc and hidden
   norm, then each layer's k (normed, rotated) and v into the sequence's rings (the window's rows, position p at

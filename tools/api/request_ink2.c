@@ -9,8 +9,7 @@
 /* Inkling's reader: the messages as its template takes them (request_messages: a call's arguments an object, as it
    asks; a developer message a system one, as DeepSeek's and Qwen's readers take it - the template knows no other) -
    the tools apart, the reasoning effort as asked (a name or a number: its template names and bounds them). thinking
-   off (enable_thinking false, thinking disabled) is the template's "none" - effort 0, its only off; 0.9.2: ignored,
-   the default 0.9 */
+   off (enable_thinking false, thinking disabled) is the template's "none" - effort 0, its only off */
 
 bool request_ink2(const Json *body, Request *r, char err[OSMOS_ERR])
 {

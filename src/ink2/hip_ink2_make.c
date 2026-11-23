@@ -46,8 +46,8 @@ void ink2_pf(Ink2Forward *f, int b)
 
 /* mm's: its table's types, and BF16 where the model's dense weights are BF16 (f->bf16_mm: Mini's, as released) - mm's
    by name, not its table's. a model whose BF16 is a side tensor (Inkling-2-Small's sliding layers' sink projections)
-   keeps its matvec, its bits 0.11's; the other families' BF16 matrices their matvec's as before. by the model, the
-   type and the shape alone: a decode's and a prompt's the same */
+   keeps its matvec and its bits; the other families' BF16 matrices their matvec's. by the model, the type and the
+   shape alone: a decode's and a prompt's the same */
 bool ink2_mm_takes(const Ink2Forward *f, uint32_t type, uint32_t rows, uint32_t cols)
 {
   return (mm_known(type) || (type == QTYPE_BF16 && f->bf16_mm)) && mm_fits(type, rows, cols);
@@ -161,8 +161,8 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
     return ink2_forward_destroy(f), NULL;
   if (!(f->picks = calloc((size_t)w->geo.n_layers * w->geo.n_experts, sizeof *f->picks)))
     return osmos_fail(err, "out of memory"), ink2_forward_destroy(f), NULL;
-  f->fixed_bytes = f->bufs.bytes; /* the fixed part, counted: its record (the dense weights, the buffers, the drafter -
-                                     0.16.0: the GPU's free memory read before and after, anything else's moving it) */
+  f->fixed_bytes = f->bufs.bytes; /* the fixed part, counted: its record (the dense weights, the buffers, the drafter) -
+                                     not the GPU's free memory before and after, which anything else moves */
   if (!ink2_experts(f, o->room, o->budget, o->picks, err) || !ink2_whole_tables(f, err))
     return ink2_forward_destroy(f), NULL;
   return f;

@@ -25,8 +25,7 @@ int32_t answer_best(const float *row, uint32_t vocab, const int32_t *except, uin
 /*
 AnswerRule
   a turn's answer not yet begun: osmos-serve's rule that a turn which closed its reasoning does not end before it
-  has said anything (DESIGN.md, "0.5.10"). Qwen3.8 at small talk closed its thinking and ended the turn at once,
-  greedily, so every retry of rig's was the same empty turn.
+  has said anything (a greedy model can close its thinking and end at once, every retry the same empty turn).
 
 answer_rule_create
   the rule for the tokenizer's vocabulary: a token blank when its text (special tokens as their text) is not empty

@@ -60,14 +60,13 @@ static bool mem_left(uint64_t *left)
 }
 
 /* the memory left after a build (the forward's, a sequence's) at least FIT_HEADROOM: the runtime loads a kernel's
-   code at its first launch and takes the memory then - with none left it segfaulted in hipLaunchKernel (UD-Q4_K_XL, its
-   n-gram table resident, an 8K context in 4096-token steps: 0.02 GiB left after its sequence) - and a system with no
-   RAM left kills the process. `more`: bytes about to be taken (0: the build done) - refused before they are, so a
-   build that cannot fit takes none of it. false with why */
+   code at its first launch and takes the memory then (with none left, a segfault in hipLaunchKernel) - and a system
+   with no RAM left kills the process. `more`: bytes about to be taken (0: the build done) - refused before they are,
+   so a build that cannot fit takes none of it. false with why */
 bool q4x_room_left_past(Q4xForward *f, uint64_t more, const char *after, char *err)
 {
   uint64_t left = 0;
-  if (f->ledger) /* the engine's: its room, --fill's RAM kept (0.16.0: the machine read with 8 GiB kept, whatever --fill) */
+  if (f->ledger) /* the engine's: its room, --fill's RAM kept */
     left = ledger_left_settled(f->ledger) + FIT_HEADROOM;
   else if (!mem_left(&left))
     return osmos_fail(err, "a GPU call failed (the memory left)");
@@ -197,7 +196,6 @@ bool q4x_upload(OsmosLedger *l, const Q4xForward *f, const Gguf *g, const Gguf *
 
 void q4x_free_table(Q4xForward *f, const Gguf *g, void **dev) { gpu_free_table(f->ledger, g, dev, NULL); }
 
-/* the MTP head's buffers */
 bool q4x_mtp_buffers(Q4xForward *f, char *err)
 {
   const Q4xGeometry *g = &f->w->geo;

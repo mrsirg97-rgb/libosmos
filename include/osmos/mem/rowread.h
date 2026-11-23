@@ -21,10 +21,9 @@ uint32_t rowread_take(uint32_t n, int threads);
 
 /*
 Rowread
-  many small reads at once: Engram's rows, 144 B each, ~49,000 a 2,048-token step an Engram layer, at random places
-  in a 110 GB file the page cache mostly does not hold. one at a time they are the SSD's latency each: 16,700 reads/s,
-  ~5.9 s a step. measured on this box (DESIGN.md, "Engram's reads"): 64 threads 832,000 reads/s, 128 no more. the
-  workers live for the reader's life; a call hands them its rows and waits for all of them.
+  many small reads at once (Engram's rows: small, at random places in a file the page cache mostly does not hold,
+  each the SSD's latency alone). the workers live for the reader's life; a call hands them its rows and waits for all
+  of them.
 
 rowread_create
   `threads` workers (1 to ROWREAD_MAX_THREADS), started now. NULL when one cannot start (those started are stopped).
@@ -42,9 +41,8 @@ rowread_start
   begun, for no reader or a batch still pending (one at a time). no rows: nothing pending.
 
 rowread_take
-  the rows a worker takes at a time for a batch of n among `threads` readers: n spread over all of them (a decode
-  step's 48 rows one a worker - every read in flight at once, not 3 workers' 16 one after another, ~1 ms of the GPU
-  idle a token), at most ROWREAD_TAKE (a long step's), at least 1.
+  the rows a worker takes at a time for a batch of n among `threads` readers: n spread over all of them (a small
+  batch's every read in flight at once), at most ROWREAD_TAKE, at least 1.
 
 rowread_wait
   the pending batch done (the caller reads its rows too, rather than only wait); false if any of its reads failed or

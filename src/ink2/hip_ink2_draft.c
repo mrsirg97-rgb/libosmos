@@ -110,8 +110,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
     free(sp), free(hf);
   }
   /* the fold: the target's head through hidden_out - its rank columns as tokens (the head's own quantized values,
-     the base logits' head), transposed to [rows][rank] Q8_0 for the matvec (a step reads it whole: 55 MB, BF16's
-     103); and the bias's */
+     the base logits' head), transposed to [rows][rank] Q8_0 for the matvec (a step reads it whole); and the bias's */
   ok = ok && (hw = tensor_f32(g, m->m_hidden_w, &n)) != NULL && (hb = tensor_f32(g, m->m_hidden_b, &n)) != NULL;
   float *cols = NULL, *dcols = NULL, *dt = NULL, *db = NULL;
   if (ok)
@@ -219,8 +218,8 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
     return true;
   if (from < s->tap_pos0 || to > s->pos || (uint32_t)(to - s->tap_pos0) > f->max_tokens)
     return osmos_fail(err, "positions not of the sequence's last step, or past its position");
-  if (!s->tap_step || s->tap_step != f->steps) /* 0.9.2: the taps every step overwrites - another sequence's step since,
-                                                 or a load (none since): its rings built from another's rows */
+  if (!s->tap_step || s->tap_step != f->steps) /* the taps every step overwrites - another sequence's step since, or a
+                                                 load (none since): its rings built from another's rows */
     return osmos_fail(err, "a seed after another step, or a load: the taps are not this sequence's (step it first)");
   const Ink2Mtp *m = f->mtp;
   Ink2MtpDev *d = &f->md;
@@ -230,7 +229,7 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
   if (from > s->mend || from < s->mfrom)
     s->mfrom = from;
   bool ok = true;
-  const uint32_t B = (uint32_t)m->block; /* the buffers' rows: the drafter's block (0.9.2: INK2_MTP_BLOCK, past a block of
+  const uint32_t B = (uint32_t)m->block; /* the buffers' rows: the drafter's block (INK2_MTP_BLOCK runs past a block of
                                             2 or 3's buffers) */
   for (int32_t at = 0; ok && at < (int32_t)n; at += (int32_t)B) /* the rope's positions a block at a time */
   {

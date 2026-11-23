@@ -20,10 +20,9 @@ static inline uint64_t fnv(const void *p, uint64_t n, uint64_t h)
 static inline uint64_t fnv_u64(uint64_t v, uint64_t h) { return fnv(&v, sizeof v, h); }
 
 /* a weights file in an identity (a kept conversation's, slots.h): its name, size, and which file it is now - device,
-   inode, modification time to the nanosecond (a link's target's). name and size alone took a file rewritten in place
-   at the same size (an overlay made again at another strength, a pack's shards patched) for the one a state was
-   read with: its old KV continued under new weights (0.9.2). a file moved or copied (cp without -p) another: its
-   kept states read again once, never another file's bits */
+   inode, modification time to the nanosecond (a link's target's) - so a file rewritten in place at the same size never
+   passes for the one a state was read with. a file moved or copied (cp without -p) is another: its kept states are
+   read again once, never another file's bits */
 static inline uint64_t fnv_file(const char *path, uint64_t h)
 {
   const char *base = strrchr(path, '/');

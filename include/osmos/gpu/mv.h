@@ -49,10 +49,10 @@ mv_group
 
 mv_group_tok
   n matrices of one type and shape, each over its own tokens: matrix m (w[m]) on cnt[m] (1 .. max_cnt <= MV_MAX_TOKENS;
-  0: the entry skipped, nothing read or written - a table launched to its bound) rows of x from row xrow[m] (rows xs floats apart), into y's rows from xrow[m] (ys apart) - an expert read once for
-  the tokens that picked it. each row mv_run's sums: a token's bits are those it takes alone. `w`, `cnt`, `xrow` on
-  the device; x's rows past a matrix's are read, not used (rows up to xrow[m] + max_cnt must be readable). the routed
-  experts' types and Q8_0, MXFP4.
+  0: the entry skipped, nothing read or written - a table launched to its bound) rows of x from row xrow[m] (rows xs
+  floats apart), into y's rows from xrow[m] (ys apart) - an expert read once for the tokens that picked it. each row
+  mv_run's sums: a token's bits are those it takes alone. `w`, `cnt`, `xrow` on the device; x's rows past a matrix's are
+  read, not used (rows up to xrow[m] + max_cnt must be readable). the routed experts' types and Q8_0, MXFP4.
 
 mv_strided
   mv_run with token t's x at x + t * x_stride and its y at y + t * y_stride (a slice of a wider row: the attention's

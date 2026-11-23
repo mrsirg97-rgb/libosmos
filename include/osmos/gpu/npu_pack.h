@@ -18,8 +18,9 @@ static inline uint64_t npu_a_bytes(uint32_t K) { return (uint64_t)NPU_TOKENS * K
    one where a mantissa would round past 127 (as the core converts) */
 bool npu_pack_a(const float *x, uint32_t K, const int32_t *tok, uint32_t parts, uint8_t *dst, void *stream);
 
-/* parts' A from mm's f16 activations (tiled as WMMA reads them, mm.h's x16_at: Qwen's swiglu output, its down's
-   input - x16 slots, rows[] each part's), halves: the pieces in 128-value K halves ([K half][token half]: its down's K 640 no whole 256), else as npu_pack_a's */
+/* parts' A from mm's f16 activations (tiled as WMMA reads them, mm.h's x16_at: Qwen's swiglu output, its down's input -
+   x16 slots, rows[] each part's), halves: the pieces in 128-value K halves ([K half][token half]: its down's K 640 no
+   whole 256), else as npu_pack_a's */
 bool npu_pack_a_x16(const void *x16, uint32_t K, const int32_t *rows, uint32_t parts, bool halves, uint8_t *dst,
                     void *stream);
 
@@ -32,9 +33,9 @@ typedef struct NpuPart
 } NpuPart;
 #define NPU_SELECT_MAX 64u /* a layer's most parts (the NPU's share of a 4,096-token step's: ~32 at 10%) */
 
-/* the first `want` whole (NPU_TOKENS) entries of the tables' 128-token run [first, first + count), in table order: their
-   counts zeroed (mm_group skips them), each's weights and offsets to sel (the host's), their count to n_sel, their
-   tokens' rows (gidx, the gate's and up's input) to tok and their slots (the down's input, x16's) to slot - each
+/* the first `want` whole (NPU_TOKENS) entries of the tables' 128-token run [first, first + count), in table order:
+   their counts zeroed (mm_group skips them), each's weights and offsets to sel (the host's), their count to n_sel,
+   their tokens' rows (gidx, the gate's and up's input) to tok and their slots (the down's input, x16's) to slot - each
    [part][NPU_TOKENS], the parts past them to want -1 (zero rows: a pack of want parts, before the host knows n_sel).
    ptr the tables' weights ([gate, up, down][entries]); D, ff the tokens' and slots' widths */
 bool npu_select_q4x(int32_t *cnt, uint32_t first, uint32_t count, uint32_t want, const void *const *ptr,

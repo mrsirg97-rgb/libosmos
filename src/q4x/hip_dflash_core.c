@@ -2,7 +2,7 @@
    and a norm into each layer's keys and values; a block (the anchor and masks, the target's embedding) through its
    layers (a dynamic convolution before and after the attention and the MLP), a norm, the target's output head, the
    candidate selector's greedy path. the target's calls through its DfHost (q4x's, LFM3's: each its own matrices'
-   path and stream - the core's sequence of calls each one's before it, 0.11.2) */
+   path and stream) */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>

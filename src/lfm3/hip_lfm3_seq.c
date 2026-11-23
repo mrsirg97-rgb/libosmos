@@ -59,7 +59,7 @@ int32_t lfm3_seq_position(const Lfm3Seq *s) { return s ? s->pos : -1; }
 
 bool lfm3_seq_prompt(Lfm3Seq *s, uint32_t end)
 {
-  if (!s || s->broken || end > s->f->max_ctx) /* (0.11.2: an end past the context taken - the other families' refused) */
+  if (!s || s->broken || end > s->f->max_ctx) /* (an end past the context refused, as the other families') */
     return false;
   s->prompt_end = end;
   return true;
@@ -73,8 +73,8 @@ uint32_t lfm3_seq_reach(const Lfm3Seq *s)
     return 0;
   const int64_t past_close = (int64_t)s->pos - (int64_t)s->closed * LSA_WINDOW; /* a rollback never un-closes */
   uint32_t r = !s->f->lsa || past_close >= (int64_t)s->back ? s->back : (uint32_t)(past_close > 0 ? past_close : 0);
-  if (s->stage) /* never back to the stage's from or below: a sequence there is the stage before's (0.11.2 - a
-                   crossing step's own tokens rolled back past it, its rope then the new stage's at an old position) */
+  if (s->stage) /* never back to the stage's from or below: a sequence there is the stage before's (a
+                   crossing step's own tokens rolled back past it would keep the new stage's rope at an old position) */
   {
     const int64_t past_from = (int64_t)s->pos - (int64_t)s->f->stage[s->stage].from - 1;
     r = past_from < (int64_t)r ? (uint32_t)(past_from > 0 ? past_from : 0) : r;

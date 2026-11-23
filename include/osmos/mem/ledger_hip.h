@@ -1,6 +1,6 @@
 #ifndef OSMOS_MEM_LEDGER_HIP_H
 #define OSMOS_MEM_LEDGER_HIP_H
-/* the ledger's HIP allocations (osmos/mem/ledger.h: the ledger; this, the calls that take or give HIP's memory) */
+/* the ledger's HIP allocations */
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/mem/ledger.h"

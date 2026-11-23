@@ -10,10 +10,10 @@
 #include "osmos/model/gguf.h"
 
 /* Tencent's Hy4-flash (hy_v4_flash) behind the engine: every weight resident but the Engram table (its rows read from
-   the model's file a step at a time), hy4's sequence (DESIGN.md, "0.10.0 step 2"). a batch is a decode's math, a
-   prompt's read the matrix cores' (two maths, as DeepSeek's and q35's), each a token's bits however its step is split
-   or shared; the logits of the kept rows alone. the drafter, when named, DFly2 (the release's
-   model-00148-of-00148.safetensors): HY4_DFLY_DRAFTS a round, verified in a decode's step */
+   the model's file a step at a time), hy4's sequence. a batch is a decode's math, a prompt's read the matrix cores'
+   (two maths, as DeepSeek's and q35's), each a token's bits however its step is split or shared; the logits of the
+   kept rows alone. the drafter, when named, DFly2 (the release's model-00148-of-00148.safetensors): HY4_DFLY_DRAFTS
+   a round, verified in a decode's step */
 _Static_assert(HY4_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 
 /* a step's most tokens when the server names none (a prompt's chunk), and a round's most kept rows */
@@ -50,7 +50,7 @@ static void m_close(void *p)
 
 static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR])
 {
-  if (files->lsa) /* (0.11.2: taken and ignored) */
+  if (files->lsa)
     return osmos_fail(err, "this family reads no LSA maps (--lsa: LFM3's)"), NULL;
   if (files->table || files->overlay)
     return osmos_fail(err, "hy_v4_flash: its Engram table is the model's own; no table file or overlay is read"), NULL;
@@ -139,10 +139,8 @@ static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ER
   return true; /* DFly2 reads the target's own state (every step keeps its snapshot): nothing to seed */
 }
 
-/* a round's drafts while their probabilities' product is at least this: a verified token reads its own experts (~10
-   ms of a round's ~146), so an unlikely one costs more than it brings - Q3_K at 1K, 128 tokens (2026-11-19, the
-   prompt on the matrix cores): 0.15 / 0.3 / 0.45 / 0.6 / 0.75 code 21.9 / 23.2 / 24.0 / 23.4 / 23.4 tok/s, prose
-   26.0 / 26.2 / 27.7 / 26.2 / 26.0 (on Q4_K_M 0.3 had been between code's 0.4 and prose's 0.25) */
+/* a round's drafts while their probabilities' product is at least this: a verified token reads its own experts, so
+   an unlikely one costs more than it brings */
 #define HY4_DRAFT_CUM_MIN 0.45f
 
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,

@@ -7,7 +7,7 @@
 
 #include "osmos/mem/pool.h"
 
-#define READS_POOLS 2 /* the pools one Reads reads for: the forward's membrane and its stream (DESIGN.md, "0.5.8") */
+#define READS_POOLS 2 /* the pools one Reads reads for: the membrane and its stream */
 
 typedef struct Reads Reads;
 
@@ -24,15 +24,13 @@ void reads_ahead_limit(Reads *r, uint64_t bytes);
 
 /*
 Reads
-  the pool's reads on libevt (DESIGN.md, "0.2.0: the forward's reads on libevt"): given to the readers at their need,
-  and their ends coming back as events. one thread is the consumer - the forward's, the pool's only caller; fetchq's
-  `threads` workers pread. a read is a unit's (the pool never has two of one unit out), its record the unit's own:
-  nothing is allocated a read but the event that brings its end back.
-  - the order: each read goes to the readers at once with its need (the pool's clock: a pin's 0, a want's next + 1),
-    and the readers take the job needed soonest (fetchq: libevt's queue). a need that moves (Fetcher.need: a want then
-    a pin) moves the read's jobs not yet begun (fetchq_need: libevt's queue_update) - 0.1.3's hurry, general. no read
-    is held back from the readers: holding them back (0.2.0's first build, a cap) left the SSD idle between the
-    consumer's pumps.
+  the pool's reads on libevt: given to the readers at their need, their ends coming back as events. one thread is the
+  consumer - the forward's, the pool's only caller; fetchq's `threads` workers pread. a read is a unit's (the pool
+  never has two of one unit out), its record the unit's own: nothing is allocated a read but the event that brings its
+  end back.
+  - the order: each read goes to the readers at once with its need (a pin's 0, a want's next + 1), and the readers
+    take the job needed soonest. a need that moves (Fetcher.need) moves the read's jobs not yet begun. no read is held
+    back from the readers: holding them back leaves the SSD idle between the consumer's pumps.
   - the batch: a pin (waited on) is split across the readers unless another pin is out; a read ahead is split only
     alone (none other out) - reads side by side read whole keep the file's readahead.
   - the ends: a reader's last chunk posts an event to the consumer's libevt Engine; reads_pump runs them there -
@@ -54,10 +52,9 @@ reads_fetcher
 
 reads_pump
   the consumer: the reads that ended handed to their pools (pools[k] pool k's: pool_ready, in the order they ended;
-  NULL for a pool not in use - a read's end for one fails the pump closed). wait false: those ended so
-  far, no wait (fwd_drain: each layer's routing); true: at least one, waiting for it (fwd_wait_read: a pin waited
-  on). false, the reason in `err`, when an end could not be posted (the engine refused it: no memory) - the forward
-  fails closed from then on.
+  NULL for a pool not in use - a read's end for one fails the pump closed). wait false: those ended so far, no wait;
+  true: at least one, waiting for it. false, the reason in `err`, when an end could not be posted (no memory) - the
+  forward fails closed from then on.
 
 reads_out / reads_split
   the reads out now (given to the readers, their ends not yet pumped); those given out split, so far.

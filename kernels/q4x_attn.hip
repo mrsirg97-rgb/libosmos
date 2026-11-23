@@ -68,8 +68,8 @@ __global__ __launch_bounds__(H) void qk_kernel(const float* qfull, const float* 
 // (G <= 16 rows) over one chunk of kChunk keys, a block of 16 keys at a time: S = Q K^T (f16 q and k), each row's
 // running max and sum (fixed shuffle trees in its lane half), P = exp(S - max) to f16, O += P V (f16 v); its rows'
 // (max, sum, O) into the chunk's scratch. a tile one token's: its keys past the token's position loaded as zeros in
-// every batch - the WMMA's sum is not blind to a value its weight zeroes (measured: a masked key's v moved the last
-// bit), so a row's keys must be the same whatever it is batched with. then a row's bits are its own: its q, its keys,
+// every batch - the WMMA's sum is not blind to a value its weight zeroes (a masked key's v moves the last bit), so a
+// row's keys must be the same whatever it is batched with. then a row's bits are its own: its q, its keys,
 // its position; and whichever chunks its batch computed past its own, it merges only its own
 constexpr int kTile = Q4X_GQA_MAX; /* a key head's query heads at most (and the tile's rows) */
 constexpr int kWaves = 4;                   // a wave a quarter of O's columns
@@ -121,7 +121,7 @@ struct Raw {
 };
 
 // an item's key and first dim: K's lanes along a key's dims (its LDS rows written whole), V's along the keys (V^T's
-// columns: a wave's stores across the banks - along the dims they were 16-way on one bank pair)
+// columns: a wave's stores across the banks - along the dims they would be 16-way on one bank pair)
 template <int HD>
 __device__ inline void item_k(uint32_t it, uint32_t* r, uint32_t* d) {
   const uint32_t i = threadIdx.x + it * kWaves * 32;
@@ -275,8 +275,8 @@ __global__ __launch_bounds__(kWaves * 32) void fa_kernel(const float* q, const u
 // kWholeRows), the chunk's K and V read once for the group, not a token at a time. a wave a 16-row tile and half of
 // O's columns (its pair the other half: both the tile's scores, as fa_kernel's waves - 128 accumulators a lane spilled).
 // each row's sums fa_kernel's: its keys all the chunk's (none masked, none zeroed), the same WMMAs in the same order,
-// the same softmax (a WMMA's row its own: the tile's other rows another token's, or zeros, change none of its bits -
-// test_q35_gpu's dump, steps of 64, 100 and 2,048), its partials at the same (chunk, kvh, row). a block kWholeChunks
+// the same softmax (a WMMA's row its own: the tile's other rows another token's, or zeros, change none of its bits),
+// its partials at the same (chunk, kvh, row). a block kWholeChunks
 // chunks (its q read once), each chunk's partials its own
 constexpr int kWholeTiles = 4, kWholeWaves = 2 * kWholeTiles, kWholeRows = kWholeTiles * kTile;
 #ifndef WHOLE_CHUNKS
@@ -444,7 +444,7 @@ extern "C" uint64_t q4x_kv_row_bytes(uint32_t values) {
 // with one running (max, sum, O) a row across the span, one partial a (span, row): the merge's reads a span's, not a
 // chunk's (a 2M context's 1,024, not 16,384). a row's keys past its position masked (-inf: weight 0); the tile's keys
 // past the group's last position loaded as zeros. a row's bits its own: its tiles' values its position's (the
-// masked keys' weights 0 exactly), whichever group it is in (test_lfm3_attn_gpu: a step in pieces the same bits)
+// masked keys' weights 0 exactly), whichever group it is in
 #ifndef SPAN_WAVES
 #define SPAN_WAVES 8
 #endif

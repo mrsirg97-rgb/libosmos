@@ -1,4 +1,4 @@
-/* several conversations at once (maya #587's, the operator's): N lanes, each a conversation; the loop libevt's - stdin's
+/* several conversations at once: N lanes, each a conversation; the loop libevt's - stdin's
    lines and the turns are its events, a line outranking a turn. a turn is a round (every answering lane's next token
    in one osmos_batch: a decode step, each token's bits its own) or a piece of one prompt (a step of max_tokens,
    alone: a prompt's step) - never both in one step, so neither changes the other's bits. pieces and rounds take turns;
@@ -180,7 +180,7 @@ static void on_line(void *scope)
   else if (!strncmp(line, "STOP ", 5))
   {
     long long rid = 0;
-    if (gen_rid(line + 5, &rid)) /* (whole: 0.16.0, "STOP 7x" stopped 7) */
+    if (gen_rid(line + 5, &rid)) /* (whole: "STOP 7x" refused, not 7) */
       stop(m, false, rid);
     else
       out("ERR STOP's rid not a whole number (%.24s)\n", line + 5);

@@ -9,7 +9,8 @@
 //                  trace's assistant tokens alone; every row without it
 // prints the mean KL, its median and 99th percentile, the top-1 agreement and the perplexity over the scored rows;
 // the per-row dumps are tools/bench/kld_compare.py's (paired differences, splits by row).
-// environment: MODEL (a first shard), PICKS (forward_create_ranked's profile), OVERLAY (weights_create_with's).
+// environment: MODEL (a first shard), PICKS (forward_create_ranked's profile), OVERLAY (weights_create_with's); BIG,
+// FILL, NPU / NPU_SHARE where they are read.
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/kld.hip -Llib -losmos_hip -losmos
 //        -lhsa-runtime64 -o bin/kld   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
@@ -61,7 +62,7 @@ static std::vector<int32_t> read_list(const char* path) {
 
 int main(int argc, char** argv) {
   if (argc != 5) return std::fprintf(stderr, "usage: kld budget_gib step n ids.txt (MODEL, PICKS, OVERLAY, REF_OUT | REF, DUMP, MASK)\n"), 2;
-  // budget "auto" (0.7.3): sized as osmos-serve sizes it (fit_sized: the GPU's headroom and FIT_RAM_FREE kept)
+  // budget "auto": sized as osmos-serve sizes it (fit_sized: the GPU's headroom and FIT_RAM_FREE kept)
   const bool auto_budget = !std::strcmp(argv[1], "auto");
   const uint64_t budget = auto_budget ? 0 : (uint64_t) (std::atof(argv[1]) * (double) (1ull << 30));
   const uint32_t step = (uint32_t) std::atoi(argv[2]), n = (uint32_t) std::atoi(argv[3]);
@@ -112,7 +113,7 @@ int main(int argc, char** argv) {
   CHECK(!big || (big >= step && big <= FORWARD_MAX_TOKENS));
   o.n_layers = (int) w->geo.n_layers, o.max_ctx = n, o.budget = budget, o.max_tokens = big ? big : step;
   /* the forward whole: its lane (as the engine's and ppl.hip's: a step under n_experts / n_used rows the engine's),
-     the NPU beside the GPU (0.7.0: NPU=<its kernels' dir>, NPU_SHARE of a layer's pairs) */
+     the NPU beside the GPU (NPU=<its kernels' dir>, NPU_SHARE of a layer's pairs) */
   o.lane = true, o.npu = std::getenv("NPU");
   o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;
   if (const char* fl = std::getenv("FILL"))  // GiB of RAM a build keeps free (osmos-serve --fill): this tool's own

@@ -4,9 +4,7 @@
 #include "osmos/err.h"
 #include <stdbool.h>
 
-#define SEQ_STATE_VERSION 3 /* seq_save's format or meaning: raised when it changes (forward_identity has it). 2 (0.7.1):
-                               a kept state is a prompt's alone - 1's held decoded answers, not taken back. 3
-                               (0.9.2): the header's rollback room (hi - pos) in its spare word */
+#define SEQ_STATE_VERSION 3 /* seq_save's format or meaning: raised when it changes (forward_identity has it) */
 #include <stdint.h>
 
 #include "osmos/gpu/mm.h"
@@ -14,8 +12,8 @@
 #include "osmos/model/state_io.h"
 #include "osmos/model/weights.h"
 
-/* a batch's sub-batches of MM_MAX_TOKENS: maya's 8,192-token chunk. each layer runs them all before the next, so the
-   experts it streams are read once for all of them (DESIGN.md, "the memory, revised") */
+/* a batch's sub-batches of MM_MAX_TOKENS: each layer runs them all before the next, so the experts it streams are
+   read once for all of them (DESIGN.md, "the memory, revised") */
 #define FORWARD_SUBS 4
 #define FORWARD_MAX_TOKENS (FORWARD_SUBS * MM_MAX_TOKENS)
 #define SEQ_MAX_BACK 16 /* seq_rollback's deepest: a verify's rejected drafts */
@@ -35,15 +33,15 @@ typedef struct ForwardOptions
   uint32_t max_tokens;   /* a step's most tokens: 0 FORWARD_MAX_TOKENS; below MM_MAX_TOKENS a step's buffers its size */
   bool no_guess;         /* no experts guessed a layer ahead (forward_guesses): for a model whose misses are few */
   bool fill_set;         /* fill given (osmos-serve's --fill); else the RAM kept free is FIT_RAM_FREE */
-  uint64_t fill;         /* the system's RAM a build leaves free, bytes: forward_room's (0: every byte past the headroom) */
+  uint64_t fill;         /* bytes of system RAM a build leaves free, forward_room's (0: every byte past the headroom) */
   uint64_t ahead_limit;  /* the membrane's: the most bytes of reads ahead read at once (0: no bound) */
   uint32_t logit_rows;   /* a step's last rows whose logits are kept (forward_logit_rows); 0: its every row */
   struct OsmosLedger *ledger; /* the forward's, its sequences' and its drafter's every allocation counted in it
                                  (osmos/mem/ledger.h: borrowed - the engine's, outliving the forward); NULL nothing */
-  /* the forward made whole with these (0.16.0: forward_lane, forward_npu and drafter_create, each attached after) */
+  /* made with the forward, never attached after */
   bool lane;             /* a decode's order the lane's from the first step (below: "lane"; forward_lane_mode moves it):
                             every engine's */
-  int cpu_threads;       /* the lane's CPU half: its threads (0: every expert on the GPU; at most CPU_LANE_THREADS_MAX) */
+  int cpu_threads;       /* the lane's CPU threads (0: every expert on the GPU; at most CPU_LANE_THREADS_MAX) */
   const int *cpu_cores;  /* the cores they are pinned to, cpu_threads of them, or NULL */
   const char *npu;       /* the NPU's kernels' directory (below: "npu"), or NULL: the GPU alone */
   float npu_share;       /* its share of an eligible layer's pairs, in (0, 1) */
@@ -103,8 +101,7 @@ Forward
   ahead first, when it needs the room. the quantized weights' products are mm's (WMMA over f16 activations, one
   kernel for 1 .. 16 tokens), the F32 and BF16 weights' the matvec's. `budget` is the GPU memory of the resident set
   (the pool's own room is two layers' streamed experts). the Engram rows are read from the Engram file a position at
-  a time (pread). `max_ctx` bounds a sequence: its
-  compressed rows and indexer keys are held for that many positions.
+  a time (pread). `max_ctx` bounds a sequence: its compressed rows and indexer keys are held for that many positions.
 
 forward_create
   NULL, with why in err, for a model or a size it cannot run: n_layers outside 1 .. the model's, max_ctx 0, the
@@ -117,12 +114,11 @@ forward_create_ranked
   are read from their files at the first step (forward_batch), not here: a forward built and let go (a sizing's,
   osmos/run/fit.h) reads its dense weights alone; the first step's err names an expert's failed read.
 
-forward_create_with
-  forward_create_ranked with a step's most tokens its own (max_tokens, at most FORWARD_MAX_TOKENS): the buffers a
-  step's experts take for all its sub-batches at once (~1 GB a sub-batch of MM_MAX_TOKENS) sized to it, and below
-  MM_MAX_TOKENS every buffer a step's tokens take - the head's logits, the attention's, the streams', a sequence's
-  window (~3.9 GB at 2,048 tokens, ~1 at 512) - a decode's server gives that memory to the resident experts (a
-  smaller step, a larger budget: a prompt then in more steps); forward_batch refuses a batch past it. the bits are
+forward_create_with forward_create_ranked with a step's most tokens its own (max_tokens, at most FORWARD_MAX_TOKENS):
+  the buffers a step's experts take for all its sub-batches at once sized to it, and below MM_MAX_TOKENS every buffer a
+  step's tokens take - the head's logits, the attention's, the streams', a sequence's window - a decode's server gives
+  that memory to the resident experts (a smaller step, a larger budget: a prompt then in more steps); forward_batch
+  refuses a batch past it. the bits are
   not the step's size's. NULL o: as forward_create with no weights.
 
 forward_budget
@@ -198,11 +194,12 @@ seq_state_bytes / seq_save_to / seq_load_from
   identity, the fields above), the rows, a trailing 64-bit FNV-1a of everything before it.
 
 npu (ForwardOptions' npu, npu_share)
-  0.7.0: the NPU (npu.h; built with NPU=1) beside the GPU in a prompt step's routed experts - dir its kernel's
-  xclbin and instruction stream; share the part of an eligible layer's pairs (gate and up one format it has a kernel for, or a down it has one for: IQ2_XXS, IQ1_S) it takes, in whole
-  parts of 128 tokens of the layer's most-picked experts, chosen from the routing alone. its sums are not the GPU's
-  (bfp16 inputs, f32 sums): on, another forward_identity; the same prompt the same bits. the forward refused, why
-  said: not built, no NPU, another model's shape, a share not in (0, 1). a layer's down goes to the NPU too where it has the down's format's kernel.
+  the NPU (npu.h; built with NPU=1) beside the GPU in a prompt step's routed experts - dir its kernel's xclbin and
+  instruction stream; share the part of an eligible layer's pairs (gate and up one format it has a kernel for, or a
+  down it has one for: IQ2_XXS, IQ1_S) it takes, in whole parts of 128 tokens of the layer's most-picked experts,
+  chosen from the routing alone. its sums are not the GPU's (bfp16 inputs, f32 sums): on, another forward_identity;
+  the same prompt the same bits. the forward refused, why said: not built, no NPU, another model's shape, a share not
+  in (0, 1). a layer's down goes to the NPU too where it has the down's format's kernel.
   forward_npu_stats: its calls (a layer's gate + up or down each), launches and the host's time waiting on them so
   far; the GPU's time idle waiting for the NPU (all but the last call's), and the calls the GPU's own rows outlasted
   the NPU's (zeros when off).
@@ -214,15 +211,15 @@ forward_reading
 
 lane (ForwardOptions' lane, cpu_threads, cpu_cores; forward_lane_mode)
   its tables made with every forward, its CPU half with cpu_threads; the order a mode, the lane's from the first step
-  with lane, moved by forward_lane_mode (as forward_reading moves a prompt's). a decode's mode: a step that picks fewer experts than a layer has (a decode's, a verify's) takes its routed experts
-  in the matvec's order (F32 sums, an expert's rows each lane's chunks in turn, then a fixed tree; kernels/lane.h's
-  activation) - the order the CPU repeats, so an expert gives the same bits on either, and which one runs it, or
-  whether it is resident, changes none. a prompt's steps keep the matmul's (WMMA): in this mode a token's bits
-  depend on whether its step was small (determinism's rule 2 relaxed there; rule 1 kept). cpu_threads 0: every
-  expert on the GPU. cpu_threads > 0 (at most CPU_LANE_THREADS_MAX; a CPU with AVX-512 VNNI): a small step's experts
-  not in GPU memory (neither resident nor in the pool) are computed by that many CPU threads from the model's files
-  (osmos/cpu/lane.h: the GPU's bits), while the GPU runs the others; it waits for their rows before the sum. the
-  forward refused, why said, for a count it does not take.
+  with lane, moved by forward_lane_mode (as forward_reading moves a prompt's). a decode's mode: a step that picks fewer
+  experts than a layer has (a decode's, a verify's) takes its routed experts in the matvec's order (F32 sums, an
+  expert's rows each lane's chunks in turn, then a fixed tree; kernels/lane.h's activation) - the order the CPU repeats,
+  so an expert gives the same bits on either, and which one runs it, or whether it is resident, changes none. a prompt's
+  steps keep the matmul's (WMMA): in this mode a token's bits depend on whether its step was small (determinism's rule 2
+  relaxed there; rule 1 kept). cpu_threads 0: every expert on the GPU. cpu_threads > 0 (at most CPU_LANE_THREADS_MAX; a
+  CPU with AVX-512 VNNI): a small step's experts not in GPU memory (neither resident nor in the pool) are computed by
+  that many CPU threads from the model's files (osmos/cpu/lane.h: the GPU's bits), while the GPU runs the others; it
+  waits for their rows before the sum. the forward refused, why said, for a count it does not take.
 
 forward_step
   forward_batch of one: the token at the sequence's next position through the layers; the stream out in
@@ -231,14 +228,14 @@ forward_step
   is not built), a GPU call that failed, or an expert the budget cannot hold - the sequence is then not to be
   stepped again.
 
-forward_batch
-  n tokens (1 .. FORWARD_MAX_TOKENS, or the forward's max_tokens) at once, token i at seqs[i]'s next position: a sequence may be given several times,
-  its tokens then at its next positions in the order given (a chunk of its prompt, or drafts to verify), each seeing
-  the ones before it. a token's results are the same bits however it is batched - alone, beside other sequences, or
-  in a chunk of its own: every step a token takes is summed in an order of its own, never the batch's. past
-  MM_MAX_TOKENS the batch runs as sub-batches of MM_MAX_TOKENS (the last the rest), each layer for every one of them
-  in turn before the next layer - the same bits as a step a sub-batch, the experts read once a layer. false, with
-  why, as forward_step, for a batch of 0 or more than FORWARD_MAX_TOKENS tokens, or a sequence of another forward; on
+forward_batch n tokens (1 .. FORWARD_MAX_TOKENS, or the forward's max_tokens) at once, token i at seqs[i]'s next
+  position: a sequence may be given several times, its tokens then at its next positions in the order given (a chunk of
+  its prompt, or drafts to verify), each seeing the ones before it. a token's results are the same bits however it is
+  batched - alone, beside other sequences, or in a chunk of its own: every step a token takes is summed in an order of
+  its own, never the batch's. past MM_MAX_TOKENS the batch runs as sub-batches of MM_MAX_TOKENS (the last the rest),
+  each layer for every one of them in turn before the next layer - the same bits as a step a sub-batch, the experts read
+  once a layer. false, with why, as forward_step, for a batch of 0 or more than FORWARD_MAX_TOKENS tokens, or a sequence
+  of another forward; on
   a refusal no sequence has moved. probes see a sub-batch at a time (its rows; index: its first token's position).
 
 forward_picks
@@ -270,7 +267,7 @@ forward_logits
   MM_MAX_TOKENS: the head over the stream, when n_layers is all of the model's (else not computed); a token before its
   sequence's prompt end - 1 (seq_prompt): its row not computed. with ForwardOptions' logit_rows, a sub-batch of
   more rows keeps its last logit_rows alone: row r at slot r - (rows - logit_rows), the rows before them not
-  computed, the buffer logit_rows rows (DESIGN.md, "0.6.5": the logits' rows).
+  computed, the buffer logit_rows rows.
 
 forward_logit_rows
   the slots of forward_logits the last step filled: its last sub-batch's rows, logit_rows at most where that is
@@ -281,6 +278,5 @@ forward_kept_view, forward_greedy
   last sub-batch's last ones at most), each at its slot of forward_logits - and the greedy picks of the batch's rows
   row0 .. row0 + rows through them (osmos/gpu/kept.h: ops_argmax, the greatest, the lowest token among equals - what a
   scan of the row in order picks - the ids through pinned memory, the forward's own wait). false with why for a row
-  its head did not compute (it ran none: n_layers not the model's, or no token left) or a row with a NaN. 0.16.0: the
-  rows were the logits' slots, and a step's last vocab_rows taken as kept - those the head skipped too.
+  its head did not compute (it ran none: n_layers not the model's, or no token left) or a row with a NaN.
 */

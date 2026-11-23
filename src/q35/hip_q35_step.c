@@ -1,7 +1,6 @@
 /* the qwen35 forward (osmos/q35/forward.h) on one GPU: q4x's kernels, a layer's blocks in HF's order - the input norm,
    the mixer (Gated DeltaNet or gated attention) into the residual, the post norm, the SwiGLU into the residual. a
-   matrix's own scale (NVFP4's) applied to its output, as the role reading it (quant.h). one stream, no side work: the
-   first version, the reference's bits checked layer by layer before any of q4x's overlap is taken over */
+   matrix's own scale (NVFP4's) applied to its output, as the role reading it (quant.h). one stream, no side work */
 #include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
@@ -215,7 +214,7 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
   if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
     return false;
   f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
-                  half-rewritten slot table (0.11.2) */
+                  half-rewritten slot table */
   Run run[Q35_MAX_RUNS];
   uint32_t n = 0, kept = 0;
   for (uint32_t r = 0; r < runs; r++)

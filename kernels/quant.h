@@ -368,8 +368,7 @@ typedef uint32_t u4 __attribute__((ext_vector_type(4)));
 
 // the F32 value first, then f16: the compiler would fuse decode's last product and the rounding into one
 // v_fma_mixlo_f16 (a * b + 0, rounded once to f16), which is a value of its own - +0 for a -0, and for Q6_K's 25-bit
-// products not round(round(x)) (measured: 40690 of test_quant_gpu's 3670016 Q6_K values). the empty asm keeps them
-// two; not volatile, so the schedule around it stays free (a volatile one: a decode token 74 -> 85 ms)
+// products not round(round(x)). the empty asm keeps them two; not volatile, so the schedule around it stays free
 template <Type T>
 __device__ inline h8 decode_h(const uint8_t* b, int k) {
   float v[kChunk];
@@ -513,7 +512,7 @@ template <> __device__ inline h8 decode_h<kIQ4_XS>(const uint8_t* b, int k) {
 }
 
 // kKsigns' 128 patterns as f16 sign bits: pattern i's value j negative - bit 15 of half j. kKsigns[i] is i with an
-// eighth bit that makes its ones even (built here from that rule; test_quant_gpu checks every value against gguf-py)
+// eighth bit that makes its ones even (built here from that rule)
 struct SignMasks {
   uint32_t m[128][kChunk / 2];
 };
@@ -532,10 +531,10 @@ static __constant__ SignMasks kSignMasks = make_sign_masks();
 
 // IQ2's values as f16: each |value| rounded (db * grid, exact in F32, then to f16), its sign then one xor a pair -
 // rounding to nearest is symmetric, so round(-x) = -round(x): decode<T>'s bits, and per value a compare and a select
-// fewer (the decode's VALU 268 -> 172 a slab, measured)
+// fewer
 // the magnitude |db| grid rounded (never -0: the fused product and rounding the same bits), then the sign - db's
-// and the pattern's - one xor: a -0 scale's values -0 as gguf-py's (UD-IQ2_XXS's IQ2_XS: a product fused with its
-// rounding gave +0 for 256 of 3.67 M values; test_quant_gpu), with no barrier between them
+// and the pattern's - one xor: a -0 scale's values -0 as gguf-py's (a product fused with its rounding gives +0), with
+// no barrier between them
 __device__ inline h8 iq2_h(uint64_t grid, float db, uint32_t pattern) {
   h8 h;
   const float a = __builtin_fabsf(db);
@@ -665,10 +664,8 @@ __device__ inline void decode_hn(const uint8_t* b, int k, h8* out) {
 // exact F32 product (g + delta: k/8, 4 bits; dl: an f16 times an odd 1..15, 15 bits) rounded once, as decode<T> rounds
 // it. the three made once, then each value's f16 bits copied by byte permutes: a grid byte c (0x00, 0x01, 0xFF) gives
 // its half's byte offset (c << 1) & 6 - 0: g 0 (s1's low half), 2: g 1 (s1's high), 6: g -1 (s0's high) - a pair's
-// selector one permute and an or, its halves a second permute. decode<T>'s bits (test_quant_gpu), fewer VALU a value
-// (0.8.1: IQ1_S, the slowest decoder a value - 60 GB/s against IQ2_XXS's 115 - took decode_h's generic F32 path).
-// IQ1_M the same math, but no model here holds it (test_quant_gpu: no reference): it keeps the generic path until one
-// is checked
+// selector one permute and an or, its halves a second permute. decode<T>'s bits, fewer VALU a value. IQ1_M the same
+// math, but no model here holds it (no reference to check): it keeps the generic path until one is checked
 struct Iq1Halves {
   uint32_t s0, s1;  // the permutes' sources: s0 = hm << 16, s1 = hz | hp << 16
 };

@@ -180,9 +180,9 @@ uint64_t ink2_identity(const Ink2Forward *f)
   const uint64_t loop[] = {(uint64_t)g->n_slots, (uint64_t)g->loop.start, (uint64_t)g->loop.end,
                            (uint64_t)g->loop.passes};
   h = fnv(dims, sizeof dims, h);
-  if (g->loop.passes) /* (an unlooped model's identity as it was) */
+  if (g->loop.passes) /* (an unlooped model's identity unchanged: its saves still load) */
     h = fnv(loop, sizeof loop, h);
-  if (f->v8) /* a full layer's values Q8: another cache's bytes (Q5's identity as it was) */
+  if (f->v8) /* a full layer's values Q8: another cache's bytes (Q5's identity unchanged) */
     h = fnv_u64(0x7638, h);
   for (int l = 0; l < g->n_slots; l++)
     h = fnv_u64(ink2_slot_sliding(g, l), h);

@@ -6,7 +6,7 @@
 #include "osmos/err.h"
 #include "api.h"
 
-/* DeepSeek's reader (maya's frontend.py for DeepSeek): tools and the response format's schema (the encoding's
+/* DeepSeek's reader: tools and the response format's schema (the encoding's
    response_format) onto the first system message, an empty one put first if none; the reasoning effort as the
    encoding's budget (DESIGN.md, "osmos-api: the mapping") */
 

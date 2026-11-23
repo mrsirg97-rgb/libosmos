@@ -35,15 +35,15 @@ typedef struct Ink2Options
   struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
                                  borrowed - the engine's, outliving the forward); NULL counts nothing */
   bool profile;          /* a step's sections timed, each after a synchronize (its bits the same), their totals said
-                            at its destroy (stderr) - a measurement's build (0.16.0: INK2_PROFILE) */
+                            at its destroy (stderr) - a measurement's build */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[OSMOS_ERR]);
 void ink2_forward_destroy(Ink2Forward *f);
 uint64_t ink2_forward_bytes(const Ink2Forward *f);
 const uint64_t *ink2_forward_picks(const Ink2Forward *f);
-/* every expert in memory (the experts' membrane whole): the MoE's tables built on the GPU, the picks never on the host -
-   the same bits as the host's tables */
+/* every expert in memory (the experts' membrane whole): the MoE's tables built on the GPU, the picks never on the host
+   - the same bits as the host's tables */
 bool ink2_forward_whole(const Ink2Forward *f);
 uint64_t ink2_identity(const Ink2Forward *f);
 
@@ -84,10 +84,10 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
 #endif
 
 /*
-Ink2Forward (DESIGN.md, "0.8.0: Inkling's engine")
+Ink2Forward
   Inkling-2-Small's forward with a cache: tools/bench/ink2_run's math (transformers' modeling_inkling2.py, held to its
   oracle) a step's tokens at a time - every weight but the routed experts resident (the attention's, the router's, the
-  convs', the embedding and head: ~6 GB), the experts a membrane's units (osmos/mem/membrane.h) read from the model's
+  convs', the embedding and head), the experts a membrane's units (osmos/mem/membrane.h) read from the model's
   files O_DIRECT into pinned host memory the GPU reads in place, `room` of them kept. the attention ink2_fa's, the
   matrices mm's where it has their type (WMMA, f16 in: the experts and the quantized dense) and the matvec's for the
   rest (F32, BF16) - at every step size, so a token's bits are the same however its sequence's tokens are split into
@@ -127,22 +127,23 @@ ink2_seq_state_bytes .. ink2_seq_load_from
   identity, a position past max_ctx, a size not its position's, a damaged state - the sequence then empty.
 
 ink2_seq_mark_bytes .. ink2_seq_mark_load
-  a point the sequence goes back to (osmos-serve's prompt end, 0.7.5): the position, the conv tails and the sliding
+  a point the sequence goes back to (osmos-serve's prompt end): the position, the conv tails and the sliding
   windows - not the full layers' rows below the position, which only grow. load refuses a mark past the position or
   of another size; the caller keeps the tokens.
 
 ink2_step
-  sequences' tokens (seqs[i] the next lens[i] tokens, each sequence once, 1 .. INK2_MAX_RUNS runs, their tokens at
-  most max_tokens), each run through the model in turn: its kept rows' logits (a run's rows from its prompt's end - 1)
-  in slots in the order computed (ink2_row_logits: a row's, on the device, softcapped; ink2_logits the slots'
-  [logit_rows][n_vocab] - with logit_rows 0 and every row kept, row r's slot r). false with why - the sequences unchanged - for a sequence twice,
-  of another forward or failed, or past max_ctx; false after work began: the step's sequences failed.
+  sequences' tokens (seqs[i] the next lens[i] tokens, each sequence once, 1 .. INK2_MAX_RUNS runs, their tokens at most
+  max_tokens), each run through the model in turn: its kept rows' logits (a run's rows from its prompt's end - 1) in
+  slots in the order computed (ink2_row_logits: a row's, on the device, softcapped; ink2_logits the slots'
+  [logit_rows][n_vocab] - with logit_rows 0 and every row kept, row r's slot r). false with why - the sequences
+  unchanged - for a sequence twice, of another forward or failed, or past max_ctx; false after work began: the step's
+  sequences failed.
 
 ink2_greedy
   rows row0 .. row0 + rows - 1's greatest token (the lowest among equals). false for a row not kept, or rows not
   one run's (their slots not consecutive).
 
-ink2_seq_seed, ink2_seq_draft (a forward built with a drafter: DSpark with the RNN Markov head, src/ink2/hip_ink2_draft.c)
+ink2_seq_seed, ink2_seq_draft (built with a drafter: DSpark, the RNN Markov head; src/ink2/hip_ink2_draft.c)
   seed: the drafter's context at positions from .. to - 1 from the sequence's last step's taps (its rows of that
   step) - each drafter layer's mixture of them normed, its ctx keys and values into the sequence's rings. the
   context is the positions seeded since the last gap (a seed past where it reaches starts it over; a load or a

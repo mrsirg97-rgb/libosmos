@@ -1,6 +1,4 @@
-/* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h): src/ink2/hip_ink2_make.c the weights, the membrane and
-   the buffers; hip_ink2_moe.c a layer's MoE; hip_ink2_ctrl.c its controls; hip_ink2_step.c the step; hip_ink2_seq.c a
-   sequence's tails, its saves and marks */
+/* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h) */
 #pragma once
 #include "osmos/gpu/bufs.h"
 #include "osmos/gpu/mm.h" /* (MM_TILE: the experts' table sizes below) */
@@ -104,7 +102,7 @@ struct Ink2Forward
     bool on;                                /* Ink2Options' profile */
     double total[2][INK2_PF_N], step[INK2_PF_N], at; /* the sections' totals [decode, prompt], this step's, the last mark */
     uint64_t tokens[2], steps[2];
-  } pf;                /* the profile (PF_*'s sections): the forward's own - 0.16.0: a process's statics */
+  } pf;                /* the profile (PF_*'s sections): the forward's own, not a process's statics */
   GpuBufs bufs;        /* every GPU and pinned buffer of the forward and its drafter, recorded as made (ink2_dalloc,
                           osmos/gpu/bufs.h) - freed from the record, the last made first */
   uint64_t steps; /* ink2_step's calls: the drafter's taps the last one's, every sequence's in it (Ink2Seq.tap_step) */
@@ -199,9 +197,7 @@ void ink2_mtp_seq_free(Ink2Seq *s);
 bool ink2_mtp_tap(Ink2Forward *f, int slot, const float *x, uint32_t n, uint32_t row0);
 void *ink2_tail_row(const Ink2Tail *t, uint32_t r);
 
-/* the forward's parts (hip_ink2_make.c / _moe.c / _ctrl.c / _step.c, one file before 0.16.0): what one calls of
-   another. */
-/* Ink2Options' profile: a step's sections timed, each after a synchronize (the bits the same), totals at destroy */
+/* the forward's parts (hip_ink2_make.c / _moe.c / _ctrl.c / _step.c): what one calls of another */
 /* Ink2Options' profile: a step's sections timed, each after a synchronize (the bits the same), totals at destroy */
 enum
 {

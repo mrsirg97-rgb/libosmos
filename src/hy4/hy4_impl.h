@@ -18,8 +18,8 @@
 #define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
 #define HY4_MAX_HEADS 128   /* a layer's heads at most (the per-head tables' room) */
 #define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
-#define HY4_SCORE_ROWS 256 /* the indexer's score scratch's tokens: a longer run's selection in sub-batches of these (a step
-                              of 4,096 at 1M was 4.3 GB of scratch; a block a token, the same bits) */
+#define HY4_SCORE_ROWS 256 /* the indexer's score scratch's tokens: a longer run's selection in sub-batches of these (a
+                              block a token, the same bits) */
 #define HY4_DFLY_KEEP (HY4_MAX_BACK + 1) /* a step's last rows whose drafting snapshot a sequence keeps (a verify's) */
 
 /* matrices that read the same input (a layer's normed attention or FFN input), for a one-token step: each type's
@@ -48,7 +48,7 @@ struct Hy4Forward
   uint32_t *kb_xo, *kb_yo, *vb_xo, *vb_yo;        /* a head's x16 and y offsets (head h's slice of the rows) */
   int32_t *hcnt;                                  /* every head's token count (a chunk's) */
   uint32_t kring;    /* a sparse layer's token keys a ring of this many (a step's, a pool's and the reach: a key is
-                        read only when its group completes - 0.11.0; was a row a position, 6 KB a token) */
+                        read only when its group completes) */
   void **dev;                                     /* the model's tensors on the GPU, by index in its table */
   float *fn_attn[HY4_MAX_LAYERS], *fn_ffn[HY4_MAX_LAYERS], *fn_out; /* iHC's mixes, F32 (the file's, or decoded) */
   float *freqs_swa, *freqs_sparse;                                  /* the ropes' frequencies */
@@ -189,7 +189,7 @@ static inline const void *hy4_dev(const Hy4Forward *f, const GgufTensor *t)
 }
 static inline const float *hy4_fv(const Hy4Forward *f, const GgufTensor *t) { return (const float *)hy4_dev(f, t); }
 
-/* hip_hy4_resident.c's, for hip_hy4_make.c (one file before 0.16.0) */
+/* hip_hy4_resident.c's, for hip_hy4_make.c */
 bool hy4_as_f32(Hy4Forward *f, const GgufTensor *t, float **out);
 bool hy4_engram_reader(Hy4Forward *f, const int *fds, char *err);
 bool hy4_experts(Hy4Forward *f, uint64_t budget, char *err);

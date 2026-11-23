@@ -48,14 +48,10 @@ typedef struct Q4xLayer
   /* the hyper-connections before the mixer and before the MoE: a norm a stream, the rank's down and up, the inject */
   const GgufTensor *hc_attn_norm, *hc_attn_down, *hc_attn_up, *hc_attn_inject;
   const GgufTensor *hc_ffn_norm, *hc_ffn_down, *hc_ffn_up, *hc_ffn_inject;
-  /* the sparse attention */
   const GgufTensor *q, *k, *v, *out, *q_norm, *k_norm;
   const GgufTensor *ix_q, *ix_k, *ix_q_norm, *ix_k_norm;
-  /* the Gated DeltaNet */
   const GgufTensor *qkv, *gate, *conv, *dt, *a, *alpha, *beta, *ssm_norm, *ssm_out;
-  /* the n-gram table's layer */
   const GgufTensor *ple_key, *ple_value, *ple_norm_key, *ple_norm_query, *ple_norm_conv, *ple_conv;
-  /* the MoE */
   const GgufTensor *router, *exp_gate, *exp_up, *exp_down;
   const GgufTensor *sh_gate_inp, *sh_gate, *sh_up, *sh_down;
 } Q4xLayer;
@@ -87,7 +83,7 @@ size_t q4x_weights_experts(const Q4xWeights *w, const int *model_fds, PoolUnit *
 #endif
 
 /*
-q4x_weights_experts (DESIGN.md, "0.6.5: Qwen on the membrane")
+q4x_weights_experts
   the routed experts as the pool's units, unit = layer * n_experts + expert, each three parts - the expert's slice of
   the layer's exp_gate, exp_up and exp_down (gate, up, down), a tensor's bytes / n_experts each - in the model's files,
   `model_fds[file]` the caller's open descriptors of the model's paths. writes at most `cap` units; returns how many
@@ -108,6 +104,6 @@ q4x_weights_create
   another architecture, a key missing or out of range, a tensor missing, of another shape or a type the role does not
   read, or a tensor no role takes (a file of another layout is refused, not half read). the weights point into the
   model's tensors: the model outlives them. an overlay (or NULL): its tensors stand in for the model's of their names
-  (tools/install/overlay_q4x.py's: huihui-ai's abliteration), each checked against its role as the model's would be;
+  (tools/install/overlay_q4x.py's), each checked against its role as the model's would be;
   refused besides - an overlay tensor no role reads, or one the model has no tensor of. the overlay outlives them too.
 */

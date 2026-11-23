@@ -1,5 +1,5 @@
-/* Qwen's layer blocks (q4x_impl.h), each as its test holds it to llama.cpp's (tests/gpu/test_q4x_*_gpu): the
-   matrices, the mixer into b.mixed and b.inj, the DeltaNet and the attention (its index's keys and picks) */
+/* Qwen's layer blocks (q4x_impl.h), each llama.cpp's math: the matrices, the mixer into b.mixed and b.inj, the
+   DeltaNet and the attention (its index's keys and picks) */
 #include "osmos/mem/membrane.h"
 #include "osmos/model/moe_route.h"
 #include "osmos/gpu/mm.h"
@@ -27,7 +27,7 @@ static bool beside(const GgufTensor *const *ts, const uint32_t *rows, const uint
   return true;
 }
 
-/* s2 to wait for the main stream's work so far (its inputs written), then take the calls; a test's delay first */
+/* s2 to wait for the main stream's work so far (its inputs written), then take the calls; side_spin's delay first */
 static bool to_side(Q4xForward *f)
 {
   if (hipEventRecord(f->e_mix, NULL) != hipSuccess || hipStreamWaitEvent(f->s2, f->e_mix, 0) != hipSuccess)
@@ -106,9 +106,8 @@ static bool inject_of(Q4xForward *f, const GgufTensor *inject, uint32_t n, uint3
 }
 
 /* the mixer's up and gated mean (b.mixed, its f16 beside): mm_run_gated_mean - the mean the up's epilogue, the up's
-   F32 (b.gate, hc n_embd a token) neither written nor read back: at a 2K step 168 MB a mixer fewer (a 4K prompt's
-   up and mean 366 -> 281 ms, low-power) - from the silu's f16 at x16 (NULL: the two calls, the up from b.lo). the same
-   bits either way (test_gated_mean_gpu) */
+   F32 (b.gate, hc n_embd a token) neither written nor read back - from the silu's f16 at x16 (NULL: the two calls,
+   the up from b.lo). the same bits either way */
 static bool up_mean(Q4xForward *f, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t D, uint32_t r,
                     const void *x16)
 {
@@ -128,8 +127,7 @@ static bool up_mean(Q4xForward *f, const GgufTensor *up, uint32_t n, uint32_t hc
 /* the mixer's down, silu, then up_mean: a small step's down and silu one launch (mm_run_silu: its f16 into b.x16b -
    b.x16 the down's own input meanwhile), the same bits as the two; otherwise the two, the silu's f16 into b.xe16 -
    the routed experts' f16, theirs only after the mixer in the stream's order (a step past Q4X_SIDE_STEP is one
-   stream's), so no memory more: a 2K step's own buffer for it tipped UD-Q4_K_XL's 8K prompt in 4K steps past the
-   GPU's memory (a kernel's code then not loaded: HSA_STATUS_ERROR_OUT_OF_RESOURCES, the runtime's segfault) */
+   stream's), so no memory more: a buffer of its own can tip a big step past the GPU's memory */
 static bool down_up(Q4xForward *f, const GgufTensor *down, const GgufTensor *up, uint32_t n, uint32_t hc, uint32_t D,
                     uint32_t r, bool ready)
 {
@@ -157,8 +155,8 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
   if (!q4x_inj_wait(f)) /* the last inject done: b.inj read here, b.xn written */
     return false;
   /* a prompt's step: the norm and its inject one launch (q4x_hc_norm_inject: xn not read back, mv's bits) where the
-     inject is F32 - a 4K prompt's norms and injects 479 -> 361 ms, low-power. a small step keeps the two, the inject
-     beside on s2: a block a token there would be the one block (decode 27.4 -> 25.6 tok/s) */
+     inject is F32. a small step keeps the two, the inject beside on s2 (fused, a block a token would be the one
+     block: slower) */
   if (n > Q4X_SIDE_STEP && inject && TY(inject) == QTYPE_F32 && inject->dims[0] == hd && inject->dims[1] == hc &&
       q4x_hc_norm_inject(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, q4x_fv(f, norm), g->rms_eps, b->xn,
                          q4x_side(f, n, hd, &sd), q4x_fv(f, inject), b->inj, combine, NULL))

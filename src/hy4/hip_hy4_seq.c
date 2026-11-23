@@ -48,7 +48,7 @@ int32_t hy4_seq_position(const Hy4Seq *s) { return s ? s->pos : -1; }
 
 bool hy4_seq_prompt(Hy4Seq *s, uint32_t end)
 {
-  if (!s || s->broken || end > s->f->max_ctx) /* (0.11.2: an end past the context taken - the other families' refused) */
+  if (!s || s->broken || end > s->f->max_ctx) /* (an end past the context refused, as the other families') */
     return false;
   s->prompt_end = end;
   return true;
@@ -75,7 +75,7 @@ void hy4_seq_fail(Hy4Seq *s)
 /* a saved state: the header (its position and the two tokens before it - the next step's n-grams' history; the
    rest of it never read after a load, whose reach is 0), then the parts, then the sum (state_parts.h) */
 #define STATE_MAGIC 0x53345948u /* "HY4S" */
-#define STATE_VERSION 2u /* (2: 0.11.0's cache rows, hy4_mla_row_bytes - Q8_0 latents by default) */
+#define STATE_VERSION 2u /* (2: the cache rows hy4_mla_row_bytes' - Q8_0 latents by default) */
 #define HISTORY HY4_STATE_HISTORY
 
 typedef struct Header

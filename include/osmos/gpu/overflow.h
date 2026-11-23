@@ -2,8 +2,8 @@
 #define OSMOS_GPU_OVERFLOW_H
 /* a step's overflow flag (an activation past f16's range, set by a kernel), one shape every family's step shares:
    reset after a step that set it; a reset that fails owed - its cause said - and tried again at the next step's start,
-   which refuses with that cause while it fails (an unchecked reset left the flag set: every later step refused as
-   past f16's range, its cause misstated) */
+   which refuses with that cause while it fails (unchecked, a failed reset leaves the flag set: every later step
+   refused as past f16's range, its cause misstated) */
 #include <stdbool.h>
 #include <stddef.h>
 

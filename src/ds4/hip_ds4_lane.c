@@ -7,11 +7,11 @@
 #include "osmos/gpu/q8.h"
 #include "osmos/err.h"
 
-/* the lane's small steps (ForwardOptions' lane): the step's (token, routed expert) pairs in rows by expert (then token), each expert -
-   an entry, or a few of them past MV_MAX_TOKENS tokens - once for its rows through the matvec's group (gate and up
-   on the rows' FFN inputs, the lane's activation with each row's weight - over int8 inputs one launch - then down),
-   each token's rows then summed in ascending expert id (ref.py's index_add order), the shared expert after. a row's
-   sums are a token's alone */
+/* the lane's small steps (ForwardOptions' lane): the step's (token, routed expert) pairs in rows by expert (then
+   token), each expert - an entry, or a few of them past MV_MAX_TOKENS tokens - once for its rows through the matvec's
+   group (gate and up on the rows' FFN inputs, the lane's activation with each row's weight - over int8 inputs one
+   launch - then down), each token's rows then summed in ascending expert id (ref.py's index_add order), the shared
+   expert after. a row's sums are a token's alone */
 
 
 /* a step's tables: written by the host in lane_up (pinned, mapped), read by the kernels there (lane_dev, its device

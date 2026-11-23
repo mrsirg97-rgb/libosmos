@@ -1,4 +1,4 @@
-// qxbench: Qwen's QSA indexer (q4x_ix_pick: the scores and the pick) at a long context's shapes (0.7.3) - 4 heads x
+// qxbench: Qwen's QSA indexer (q4x_ix_pick: the scores and the pick) at a long context's shapes - 4 heads x
 // 128, blocks of 4, the top 512 blocks, a step's 256 tokens at positions near 64K, 256K, 512K; synthetic queries and
 // pooled keys. the median of 5 after a warm-up, a token's share in ms.
 //   qxbench
@@ -90,7 +90,7 @@ int main() {
       const uint32_t vis = (uint32_t) (ps + (int32_t) t + 1) / R;
       for (uint32_t j = 0; j < vis; j++, nsc++) diff += std::memcmp(&c0[(size_t) t * nv + j], &c1[(size_t) t * nv + j], 4) != 0;
     }
-    uint64_t hash = 1469598103934665603ull;  // (0.7.4) the picks' FNV-1a: the one-block selection's the same
+    uint64_t hash = 1469598103934665603ull;  // the picks' FNV-1a: the one-block selection's the same
     for (int32_t v : s1) hash = (hash ^ (uint32_t) v) * 1099511628211ull;
     std::printf("  at %6uK (%6u blocks): plain %8.2f ms, default %8.2f ms (%.1fx) a step of %u - %.3f ms a token a"
                 " layer; the picks %s (%016llx), %llu scores %llu bits differ\n", P / 1024, P / R, naive, blocked,

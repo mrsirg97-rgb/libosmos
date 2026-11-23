@@ -40,7 +40,7 @@ LANE_FN float lane_exp(float x)
   return ldexpf(p, (int)k);
 }
 
-/* the routed experts' int8 inputs (maya's approach, ds4_iq.cu, MIT; kernels/q8.h, src/cpu/expert.c): a block of
+/* the routed experts' int8 inputs (after ds4_iq.cu, MIT; kernels/q8.h, src/cpu/expert.c): a block of
    LANE_Q8_VALUES values rounded to int8 by its largest magnitude, q = rint(x * (127 / amax)), its scale amax / 127;
    a weight's half-block (16 values, one scale) against them an integer dot - exact, in any order - then
    lane_q8_part's products, the block's two halves added, each block's scale times that fmaf'd onto the lane's sum.

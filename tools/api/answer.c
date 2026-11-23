@@ -186,7 +186,7 @@ void answer_flush(Answer *s)
     s->phase = PHASE_CONTENT, s->sent += r, n -= r;
     const size_t skip = end ? strlen(s->d->think_end) : 0;
     s->sent += skip, n -= skip;
-    if (end && s->d->trims) /* and the content's leading whitespace (0.7.1: the flush sent it) */
+    if (end && s->d->trims) /* and the content's leading whitespace */
     {
       const size_t lead = qchat_space_lead(s->shape.p + s->sent, n);
       s->sent += lead, n -= lead;

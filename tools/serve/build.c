@@ -5,10 +5,10 @@
 #include "serve.h"
 #include "osmos/err.h"
 
-/* the engine whole - the model's forward and drafter (osmos_create), every lane's conversation - built at a budget, or sized to this
-   machine (osmos/run/fit.h's fit_sized): built with the dense weights alone, then again with the room each build
-   left, but the headroom, given to experts - each build holds everything but more experts, so what it leaves is what
-   they may take, on any machine, context, lane count or drafter */
+/* the engine whole - the model's forward and drafter (osmos_create), every lane's conversation - built at a budget,
+   or sized to this machine (osmos/run/fit.h's fit_sized): built with the dense weights alone, then again with the
+   room each build left, but the headroom, given to experts - each build holds everything but more experts, so what it
+   leaves is what they may take, on any machine, context, lane count or drafter */
 
 void serve_unbuild(Server *sv, Conv *conv, int lanes)
 {

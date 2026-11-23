@@ -27,14 +27,15 @@ q8_round
   shorter than a row, rows 0, or a launch refused.
 
 q8_group_tok
-  mv_group_tok (osmos/gpu/mv.h) over q8_round's rows: matrix m (w[m], `type` IQ2_XXS, IQ2_XS or IQ1_M; `rows`
-  rows of `cols`) on its cnt[m] (1 .. max_cnt <= MV_MAX_TOKENS) rows of q / d from row xrow[m], into y's rows from
-  xrow[m] (ys floats apart). a row's sum: its blocks to LANE_Q8_LANES(cols) lanes in turn, each block's two halves'
-  lane_q8_part added, times the block's scale fmaf'd onto the lane's sum, then the lanes' xor tree - so a token's bits
-  are its own alone, whatever max_cnt, the matrices beside it or the run. output row r's input: q / d row r (xin NULL),
-  else row xin[r] - the lane's rows by token, each token's row rounded once for all its experts, not a copy a pair.
-  the rows past cnt[m] are summed on the count's last input (not stored): no row nor xin entry past it is read. false, nothing queued, for a type it does not take, cols not whole blocks, n 0 or past
-  MV_MAX_GROUP, max_cnt 0 or past MV_MAX_TOKENS, or a launch refused.
+  mv_group_tok (osmos/gpu/mv.h) over q8_round's rows: matrix m (w[m], `type` IQ2_XXS, IQ2_XS or IQ1_M; `rows` rows of
+  `cols`) on its cnt[m] (1 .. max_cnt <= MV_MAX_TOKENS) rows of q / d from row xrow[m], into y's rows from xrow[m] (ys
+  floats apart). a row's sum: its blocks to LANE_Q8_LANES(cols) lanes in turn, each block's two halves' lane_q8_part
+  added, times the block's scale fmaf'd onto the lane's sum, then the lanes' xor tree - so a token's bits are its own
+  alone, whatever max_cnt, the matrices beside it or the run. output row r's input: q / d row r (xin NULL), else row
+  xin[r] - the lane's rows by token, each token's row rounded once for all its experts, not a copy a pair. the rows past
+  cnt[m] are summed on the count's last input (not stored): no row nor xin entry past it is read. false, nothing queued,
+  for a type it does not take, cols not whole blocks, n 0 or past MV_MAX_GROUP, max_cnt 0 or past MV_MAX_TOKENS, or a
+  launch refused.
 
 q8_gate_up
   an expert's gate and up and the activation in one launch: q8_group_tok's sums of wg[m] and of wu[m] (both `type`)

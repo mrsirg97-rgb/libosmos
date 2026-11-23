@@ -35,7 +35,7 @@ bool mmq_known(uint32_t type);
 #endif
 
 /*
-mmq (kernels/mmq.hip): the experts' matmul on the matrix cores' int8 (v_wmma_i32_16x16x16_iu8) - DESIGN.md, "0.6.0".
+mmq (kernels/mmq.hip): the experts' matmul on the matrix cores' int8 (v_wmma_i32_16x16x16_iu8).
 
 mmq_x8_rows
   slot s: row idx[s] of x (xs floats apart; -1: zeros) quantized a MMQ_GROUP columns at a time: dx[s][g] = max |x| /
@@ -44,13 +44,12 @@ mmq_x8_rows
   (slots rounded up). cols a multiple of MMQ_GROUP. false for a shape it refuses.
 
 mmq_group
-  n_mat matrices of one type and shape (Q4_K alone, so far: mmq_known): matrix m's w[m] over its first cnt[m] (at most
-  max_cnt) tokens - the slots soff[m] .. of x8 / dx / sx, soff[m] a multiple of MMQ_SLOTS (the slots past its count
-  read, their outputs not written) - into y + yoff[m] + t * ys. a weight d sc q - dmin m (Q4_K's
-  32-value group g), so a group's part of an output is (d sc) dx I - (dmin m) sx, I = sum of q x8 over the group (the
-  WMMA's, exact): in F32, the products and the sums in a fixed order - K split over 4 waves by 256-value blocks (wave
-  p's blocks p, p + 4, ...; each its groups in order: v = (d sc) dx, then acc = fma(v, I, acc), acc = fma(dmin m, -sx,
-  acc)), then the waves' partial sums in wave order - so a token's bits are the same whatever its batch (test_mmq_gpu: a host
-  reference of the same operations, and 1 / 16 / 37 / 64 tokens). rows a multiple of 16, cols of 256. w, cnt, soff,
-  yoff on the device.
+  n_mat matrices of one type and shape (Q4_K alone: mmq_known): matrix m's w[m] over its first cnt[m] (at most max_cnt)
+  tokens - the slots soff[m] .. of x8 / dx / sx, soff[m] a multiple of MMQ_SLOTS (the slots past its count read, their
+  outputs not written) - into y + yoff[m] + t * ys. a weight d sc q - dmin m (Q4_K's 32-value group g), so a group's
+  part of an output is (d sc) dx I - (dmin m) sx, I = sum of q x8 over the group (the WMMA's, exact): in F32, the
+  products and the sums in a fixed order - K split over 4 waves by 256-value blocks (wave p's blocks p, p + 4, ...; each
+  its groups in order: v = (d sc) dx, then acc = fma(v, I, acc), acc = fma(dmin m, -sx, acc)), then the waves' partial
+  sums in wave order - so a token's bits are the same whatever its batch. rows a multiple of 16, cols of 256. w, cnt,
+  soff, yoff on the device.
 */

@@ -34,7 +34,7 @@ __device__ inline void side_put(const Q4xX16& side, SideAt at, uint32_t d, float
 }
 
 // the norms' loops: a thread's values dim / kThreads apart, their loads issued together (the buffers apart:
-// __restrict__) - a decode step's block waits on DRAM once, not once a value (cn.hip: 5.7 -> 4.3 us warm)
+// __restrict__) - a decode step's block waits on DRAM once, not once a value
 constexpr int kNormUnroll = 10;
 
 // a block a (stream, token): its sum of squares by block_sum's tree, then each value normed and weighted

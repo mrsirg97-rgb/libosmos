@@ -1,5 +1,5 @@
 #pragma once
-/* POST /v1/chat/completions, its two halves (one file before 0.16.0): chat.c the request - its messages copied with
+/* POST /v1/chat/completions, its two halves: chat.c the request - its messages copied with
    their special tokens defused, its prompt's ids, its mark; reply.c the answer - its tokens streamed as they land or
    answered whole, its finish, usage and timings */
 #include <stdbool.h>
@@ -20,6 +20,5 @@ void reply_whole(Answer *s, const Run *r, const Json *m, size_t prompt_n);
 
 #define WAIT_MS 500 /* how often a waiting request looks whether its client went away */
 /* a stream silent this long gets an SSE comment: a long prompt's read (minutes past 100K tokens) not taken by a
-   client's idle timeout for a dead server - its retry then read the prompt from the start again, and timed out
-   again (0.11.2) */
+   client's idle timeout for a dead server (its retry would read the prompt from the start again) */
 #define KEEPALIVE_MS 15000

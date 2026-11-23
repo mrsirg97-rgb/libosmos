@@ -28,7 +28,7 @@ typedef struct Dialect
   bool (*render)(const Request *r, JsonBuf *out, char err[OSMOS_ERR]);
   bool (*parse)(const Request *r, const char *text, const char *shape, size_t n, JsonBuf *out,
                 char err[OSMOS_ERR]); /* markers read from shape (the said special tokens' text defused) */
-  /* the template drops this prompt's latest reasoning when a user message follows (0.7.5: a point kept before it) */
+  /* the template drops this prompt's latest reasoning when a user message follows (a point kept before it: mark=) */
   bool (*drops)(const Request *r);
   const char *answer_after; /* osmos-serve's --answer-after (no end while the answer past it is blank), or NULL */
   /* a block-shaped turn (Inkling's): each block's header says its field - header at a boundary returns the header's

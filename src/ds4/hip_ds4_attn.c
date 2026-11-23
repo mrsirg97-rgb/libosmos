@@ -134,8 +134,8 @@ static bool select_rows(Forward *f, int l, int src, char *err)
   {
     const uint32_t cn = n - c0 < f->score_rows ? n - c0 : f->score_rows;
     uint32_t *cand = W ? b->cand + (uint64_t)c0 * W : NULL; /* this chunk's bits (none: max_ctx under the blocks) */
-    /* a masked layer: only the kept blocks' rows scored (0.7.3; ops_topk reads no other row's score) - the chunk's
-       tokens' blocks listed from their bits, each kept row's score the bits the full scoring gives it */
+    /* a masked layer: only the kept blocks' rows scored (ops_topk reads no other row's score) - the chunk's tokens'
+       blocks listed from their bits, each kept row's score the bits the full scoring gives it */
     const uint32_t CB = (uint32_t)g->cand_blocks, blk = (uint32_t)g->cand_block;
     ok = ok && (!masked || ops_cand_list(cand, W, cn, b->clist, CB, b->clist_n, NULL));
     for (uint32_t i = c0, run; ok && i < c0 + cn; i += run) /* a launch a run of one sequence's tokens */
@@ -149,7 +149,7 @@ static bool select_rows(Forward *f, int l, int src, char *err)
                                           b->wix + (uint64_t)i * nh, b->pos + i, ratio,
                                           b->clist + (uint64_t)(i - c0) * CB, b->clist_n + (i - c0), CB, blk, nh, ih,
                                           run, sc, f->score_stride, NULL)
-                   : ih == 128 /* (0.7.4) the int8 dots' (ops_index_score_dot4): the same bits, 2.4x the speed */
+                   : ih == 128 /* the int8 dots' (ops_index_score_dot4): the same bits */
                    ? ops_index_score_dot4(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh,
                                           b->pos + i, ratio, max_n, nh, ih, run, sc, f->score_stride, NULL, NULL)
                    : ops_index_score_fp4(b->qix + (uint64_t)i * nh * ih, f->bs[i]->ik[src], b->wix + (uint64_t)i * nh,

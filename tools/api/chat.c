@@ -143,7 +143,7 @@ static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[OSMOS_
 
 /* where a turn after a new user message leaves this prompt, when the template then drops its latest reasoning
    (Dialect.drops): the tokens this prompt shares with its next turn rendered (one more user message) - a point
-   osmos-serve keeps (GEN mark=, 0.7.5). 0: none, or no shorter than the prompt's own point (n - 1) */
+   osmos-serve keeps (GEN mark=). 0: none, or no shorter than the prompt's own point (n - 1) */
 static unsigned next_mark(Api *a, const Request *rq, const int32_t *ids, size_t n)
 {
   if (!a->d->drops || !a->d->drops(rq))
@@ -204,7 +204,7 @@ void api_chat(Api *a, Http *h)
   const Sampling samp = {rq.temperature, rq.top_p, rq.seed, rq.top_k};
   Run *r = ids ? engine_run(&a->engine, ids, n, rq.max_tokens, next_mark(a, &rq, ids, n), &samp, err) : NULL;
   free(ids);
-  if (!r) /* 503 for loading alone (a request's own fault - its template's - a 400 then too: 0.9.2's, retried) */
+  if (!r) /* 503 for loading alone (a request's own fault - its template's - a 400 then too, never retried) */
   {
     if (over)
       http_error_code(h, 400, err, "messages", "context_length_exceeded");
@@ -236,7 +236,7 @@ void api_chat(Api *a, Http *h)
   else if (!strcmp(r->finish, "error"))
     reply_fail(h, rq.stream, r->err, NULL, NULL);
   else if (!strcmp(r->finish, "cancel")) /* cancelled with its client still here: the engine's QUIT (this server
-                                            stopping) - a cut answer, never a "stop" (0.9.2): a stream's error event,
+                                            stopping) - a cut answer, never a "stop": a stream's error event,
                                             no [DONE]; a whole answer's 503, its retry for the next server */
     reply_fail_at(h, 503, rq.stream, "the server stopped before the answer's end (osmos-api shutting down)", NULL, NULL);
   else
@@ -247,7 +247,7 @@ void api_chat(Api *a, Http *h)
     Json *m = reply_message(&s, &rq, r->rid, &parsed, perr);
     if (m && !parsed && !strcmp(r->finish, "stop"))
     { /* the turn ended out of the format (a calls block, a special token's text, no </think>): an error, never its
-         text as the answer (#25). cut by max_tokens ("length"), its text goes as it is */
+         text as the answer. cut by max_tokens ("length"), its text goes as it is */
       const bool called = memmem(s.shape.p, s.shape.n, a->d->calls_open, strlen(a->d->calls_open)) != NULL;
       snprintf(err, sizeof err, "the model's %s did not parse (%s)", called ? "tool call" : "answer", perr);
       reply_fail(h, rq.stream, err, &s.text, a->d->eos);

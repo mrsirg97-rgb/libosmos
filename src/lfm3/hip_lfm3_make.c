@@ -214,7 +214,7 @@ const Lfm3Stage lfm3_stages_default[] = {{0, 1}};
 const uint32_t lfm3_stages_default_n = sizeof lfm3_stages_default / sizeof lfm3_stages_default[0];
 
 /* (osmos/lfm3/forward.h) "from:factor,from:factor,..." - each a decimal of 32 bits, LFM3_MAX_STAGES at most, nothing
-   else (0.11.2: a malformed string used whatever parsed before it) */
+   else: a malformed string refused whole */
 bool lfm3_stages_parse(const char *c, Lfm3Stage t[LFM3_MAX_STAGES], uint32_t *n)
 {
   uint32_t m = 0;

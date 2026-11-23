@@ -24,10 +24,6 @@
 #include "osmos/mem/arena.h"
 #include "osmos/err.h"
 
-/* Inkling-2-Small's forward, its making (osmos/ink2/forward.h): the dense weights resident, the routed experts
-   the membrane's (their pool and order), the tables and buffers a step reads, freed in reverse; the profile's timer */
-
-
 #define T_F32 0u
 #define T_F16 1u
 #define T_BF16 30u

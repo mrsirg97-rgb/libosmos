@@ -101,7 +101,7 @@ static void sub_end(Q4xForward *f, const Q4xBuf *saved) { f->b = *saved; }
 /* a layer; *pending: the layer before's MoE output not yet in b.h (in, then this layer's: out). a step past
    MM_MAX_TOKENS: its part a sub-batch of MM_MAX_TOKENS at a time - a 2K step's activations stay in the cache, the
    bigger step's would not - then its experts over the step whole (each expert's weights read once for all its tokens:
-   more of them a read). the same bits as steps of MM_MAX_TOKENS (test_q4x_forward_gpu: a step of 3,000) */
+   more of them a read). the same bits as steps of MM_MAX_TOKENS */
 static bool layer(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n, bool *pending)
 {
   const Q4xGeometry *g = &f->w->geo;

@@ -52,7 +52,7 @@ OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR])
     if (!strcmp(arch, families[i]->arch))
       fam = families[i];
   if (!fam)
-  { /* the families named from the table itself: a list kept by hand went stale (three of six) */
+  { /* the families named from the table itself, never a hand-kept list */
     char known[OSMOS_ERR / 2] = "";
     for (size_t i = 0, at = 0; i < sizeof families / sizeof *families && at < sizeof known; i++)
       at += (size_t)snprintf(known + at, sizeof known - at, "%s%s", i ? ", " : "", families[i]->arch);
@@ -121,8 +121,7 @@ Osmos *osmos_create(const OsmosModel *m, const OsmosOptions *o, char err[OSMOS_E
   if (!(e->row = malloc((size_t)e->vocab * sizeof *e->row)))
     return free(e), osmos_fail(err, "out of memory"), NULL;
   e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
-  /* the ledger first (the family's build borrows it), then the engine's own buffers - made whole, here: sampling's row
-     and pick were made at their first use */
+  /* the ledger first (the family's build borrows it), then the engine's own buffers - made whole, here */
   if (!(e->ledger = ledger_create(e->ram_kept, err)) ||
       !ledger_check(e->ledger, ledger_malloc(e->ledger, (void **)&e->drow, (size_t)e->vocab * sizeof *e->drow), err,
                     "the engine's sampling row") ||
@@ -147,8 +146,7 @@ void osmos_destroy(Osmos *e)
 uint64_t osmos_identity(const Osmos *e) { return e ? e->fam->identity(e->impl) : 0; }
 
 /* the room a build left, every family's one rule: the GPU's free memory, or the system's RAM past what it keeps free,
-   the less (fit_room) - the experts' pinned host slots in RAM, not the GPU's count (osmos1.7b and the 27B reported the
-   GPU's free alone) */
+   the less (fit_room) - the experts' pinned host slots in RAM, not the GPU's count */
 bool osmos_room(const Osmos *e, uint64_t *bytes)
 {
   uint64_t free_b = 0;
@@ -169,9 +167,8 @@ void osmos_stats(const Osmos *e, OsmosStats *s)
     s->held = ledger_taken(e->ledger);
 }
 
-/* a batch's step, every family's one path (0.16.0: each family built its runs - Qwen split past 64 sequences, the
-   others refused - and osmos_read checked no token): the checks, the runs, the family's step; the rows the kept
-   view reads its batch's */
+/* a batch's step, every family's one path: the checks, the runs, the family's step; the rows the kept view reads its
+   batch's */
 static bool step(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, bool read, char err[OSMOS_ERR])
 {
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
@@ -181,7 +178,7 @@ static bool step(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_
   for (uint32_t i = 0; i < n; i++)
     if (!seqs[i] || seqs[i]->e != e)
       return osmos_fail(err, "a batch's sequence not this engine's");
-  for (uint32_t i = 0; i < n; i++) /* every family's, before any reads one (Inkling, the 27B and Qwen embedded any) */
+  for (uint32_t i = 0; i < n; i++) /* every family's, before any reads one */
     if (tokens[i] < 0 || (uint32_t)tokens[i] >= e->vocab)
       return osmos_fail(err, "a token outside the vocabulary");
   uint32_t first[OSMOS_MAX_RUNS], len[OSMOS_MAX_RUNS], runs = 0;

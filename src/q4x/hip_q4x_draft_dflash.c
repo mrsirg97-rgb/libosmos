@@ -53,7 +53,7 @@ bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char er
     return osmos_fail(err, "no forward with a drafter, or a sequence of another forward");
   if (s->broken)
     return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
-  if (s->step_n && s->step_id != f->steps) /* 0.9.2: b.taps a step's alone, from its row 0 - a batch of more than
+  if (s->step_n && s->step_id != f->steps) /* b.taps a step's alone, from its row 0 - a batch of more than
                                               Q4X_MAX_RUNS runs is several steps, the later ones' taps over its */
     return osmos_fail(err, "the drafter's taps another step's: seed right after the sequence's step (a batch of at most "
                          "64 sequences)");

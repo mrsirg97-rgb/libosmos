@@ -59,20 +59,18 @@ void membrane_stats(const Membrane *m, MembraneStats *s);
 #endif
 
 /*
-Membrane (DESIGN.md, "0.5.8: the membrane", "0.6.2: the membrane a module of its own")
+Membrane
   a streamed MoE's experts as one cache: every expert a unit (pool.h) of the membrane's pool - what a decode keeps -
-  with a second pool, the stream, that a prompt's step reads its misses and its read ahead into and leaves. the
-  membrane knows units, layers and visits, not kernels or routers: the model says which units a step picks and names
-  ahead, the membrane says where their bytes are. one thread calls it (the forward's: reads.h's consumer). nothing in
-  it touches the GPU: the memory is the caller's Slots, a promotion's copy the caller's function.
+  with a second pool, the stream, that a prompt's step reads its misses and its read ahead into and leaves. it knows
+  units, layers and visits, not kernels or routers. one thread calls it (reads.h's consumer). nothing in it touches
+  the GPU: the memory is the caller's Slots, a promotion's copy the caller's function.
 
 membrane_create
   the two pools (room, stream_room; each over its Slots, read_align both), their reads (`readers` threads), the
   units copied. NULL with why for no units, layers or copy, a warm unit out of range, or what pool_create and
   reads_create refuse (a unit larger than a room among them). no read is made: membrane_warm's. ahead_limit: the
-  readers' bound on reads ahead in flight (reads_ahead_limit) - a miss waited on then finds readers free and at
-  most that many bytes ahead of it; a warm start's reads and a hold's are waited reads, never bound, and a passing
-  visit lifts it until the next visit that is not (a prompt's reads ahead are its reads: the SSD's whole).
+  readers' bound on reads ahead in flight (reads_ahead_limit); a warm start's reads and a hold's are waited reads,
+  never bound, and a passing visit lifts it until the next visit that is not (a prompt's reads ahead are its reads).
 
 membrane_destroy
   the readers stopped, then the pools. the caller's part: the GPU past every unit. NULL is nothing to do.
@@ -123,7 +121,7 @@ membrane_end
   hold whose copy failed, past the copies queued before it: they write the unit's memory). a failed promotion's
   unit is then dropped (pool_drop): cold, read from its file when next picked, the stream's copy where it was.
 
-membrane_whole (DESIGN.md, "0.6.5: Qwen on the membrane")
+membrane_whole
   every unit in the membrane's pool now, and its room every unit's: nothing is left to read and nothing can be
   evicted, so a unit's pointers (membrane_ready) hold for the membrane's life - a caller may keep them and never
   visit, hold or wait (a model wholly in memory: a table of its experts written once). false before the warm start

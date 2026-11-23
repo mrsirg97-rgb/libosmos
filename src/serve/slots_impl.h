@@ -1,6 +1,6 @@
 #pragma once
 /* the kept conversations' insides (osmos/serve/slots.h): slots.c the store - its files, index and trims; slots_put.c
-   a conversation put, found and streamed (one file before 0.16.0) */
+   a conversation put, found and streamed */
 #include <stdbool.h>
 #include <stdint.h>
 

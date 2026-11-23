@@ -68,7 +68,7 @@ typedef enum
   hipDeviceAttributeComputeCapabilityMinor
 } hipDeviceAttribute_t;
 static inline hipError_t hipDeviceGetAttribute(int *v, hipDeviceAttribute_t a, int dev)
-{ /* the wall clock: %globaltimer, ns (1,000,000 kHz); a compute capability CUDA's own */
+{ /* a compute capability CUDA's own */
   if (a == hipDeviceAttributeComputeCapabilityMajor)
     return cudaDeviceGetAttribute(v, cudaDevAttrComputeCapabilityMajor, dev);
   if (a == hipDeviceAttributeComputeCapabilityMinor)

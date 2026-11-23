@@ -4,11 +4,13 @@
 // tok/s (past 256 tokens), the answer's tok/s and a hash of its tokens (the same hash: the same tokens). a prompt
 // file is token ids, comma separated (tools/bench/prompts.py writes them).
 // environment: MODEL (a first shard: unsloth's UD-IQ1_M, say; ENGRAM its Engram file where it has one) or MODEL_DIR
-// (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
-// osmos-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
-// CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
-// PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
-// a layer ahead: ForwardOptions' no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), OVERLAY=file (tensors standing in for the model's: weights_create_with).
+// (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's osmos-picks.bin),
+// GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json), CPU_THREADS (forward_lane's CPU
+// half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids), PICKS_OUT=file (every pick of the run,
+// [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed a layer ahead: ForwardOptions'
+// no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), OVERLAY=file (tensors standing in for
+// the model's: weights_create_with); CPU_CORES, ALL_ROWS, NPU / NPU_SHARE, DRAFT_CONF / DRAFT_CUM / DRAFT_MAX where
+// they are read.
 // prints "window prompt|decode <start> <end> <tokens>" (epoch seconds) for each prompt read and answer: energy by
 // tools/power.py's samples in them (tools/bench/energy.py).
 // ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
@@ -241,7 +243,7 @@ int main(int argc, char** argv) {
     Built* z = (Built*) ctx;
     char ferr[OSMOS_ERR] = "";
     z->o.budget = budget;
-    /* the forward whole: its lane, the NPU (0.7.0: NPU=<its kernels' dir>, NPU_SHARE), the drafter (DRAFT=<dir>) */
+    /* the forward whole: its lane, the NPU (NPU=<its kernels' dir>, NPU_SHARE), the drafter (DRAFT=<dir>) */
     z->o.lane = true, z->o.cpu_threads = z->cpu_threads, z->o.cpu_cores = z->cpu_pin;
     z->o.npu = std::getenv("NPU");
     z->o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;
@@ -285,8 +287,8 @@ int main(int argc, char** argv) {
   if (const char* ip = std::getenv("IDS")) CHECK((g_ids = std::fopen(ip, "w")));
   std::printf("loaded %.0fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - l0).count());
   uint64_t h = 1469598103934665603ull;
-  answer(f, w, read_ids(argv[4]), 64, &h, false);  // the warm-up, as maya's bench: no energy windows (0.7.1: energy.py
-                                                   // summed it into the questions', where q4x_bench has none)
+  answer(f, w, read_ids(argv[4]), 64, &h, false);  // the warm-up, as maya's bench: no energy windows (energy.py
+                                                   // would sum it into the questions')
   for (int i = 5; i < argc; i++) {
     h = 1469598103934665603ull;
     g_drafted = g_accepted = g_rounds = 0, g_draft_ms = g_verify_ms = 0;

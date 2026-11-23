@@ -73,7 +73,7 @@ static void run_line(Run *r, const char *what, const char *l)
     pthread_mutex_lock(&r->mu);
     r->prompt_n = total, r->prompt_ms = ms, r->reused = reused;
     pthread_mutex_unlock(&r->mu);
-    /* a request's prompt: what it reused and from where, what it read (0.11.3: a long wait's cause in the log -
+    /* a request's prompt: what it reused and from where, what it read (a long wait's cause in the log -
        held: the conversation as kept; rollback, prompt-point, user-point: back to there; slot: a kept one taken
        back; none: read whole) - a line a step, how far it is (held: the tokens in the state so far) */
     const unsigned to_read = total > reused ? total - reused : 0, done = held > reused ? held - reused : 0;
@@ -211,10 +211,10 @@ Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsig
   size_t w = (size_t)snprintf(msg, cap, "GEN %u rid=%lld spec=%d ", max_new, r->rid, e->spec ? 1 : 0);
   if (mark) /* a point osmos-serve keeps besides the prompt's (its last user turn's) */
     w += (size_t)snprintf(msg + w, cap - w, "mark=%u ", mark);
-  if (s && s->temperature > 0) /* sampled (0.14.0): the tokens of (seed, position) - the same seed, the same answer */
+  if (s && s->temperature > 0) /* sampled: the tokens of (seed, position) - the same seed, the same answer */
   {
     w += (size_t)snprintf(msg + w, cap - w, "temp=%.9g top_p=%.9g seed=%llu ", s->temperature, s->top_p, s->seed);
-    if (s->top_k) /* 0.15.2 */
+    if (s->top_k)
       w += (size_t)snprintf(msg + w, cap - w, "top_k=%u ", s->top_k);
   }
   for (size_t i = 0; i < n; i++)
@@ -260,7 +260,7 @@ void engine_release(Engine *e, Run *r)
 }
 
 /* the end: QUIT sent (osmos-serve sets every conversation aside and writes its RAM's to their folder) and the engine's
-   exit awaited, wait_s at most - then killed. true when it exited by itself (0.7.1: a stop killed it, by PDEATHSIG) */
+   exit awaited, wait_s at most - then killed. true when it exited by itself */
 bool engine_quit(Engine *e, int wait_s)
 {
   pthread_mutex_lock(&e->wmu);

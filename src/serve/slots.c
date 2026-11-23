@@ -197,7 +197,7 @@ bool slots_trim_ram(Slots *s)
 
 /* a .meta read and checked: its tokens (malloc'd) and fixed part; false for anything not this store's or damaged -
    *foreign for a whole one of another identity (another model's, or this one's with other options: another server's,
-   left alone - 0.11.2) */
+   left alone) */
 static bool read_meta(const Slots *s, const char *p, Meta *m, int32_t **tokens, bool *foreign)
 {
   *foreign = false;
@@ -242,8 +242,7 @@ static bool stale(const char *p, uint64_t now)
 }
 
 /* the folder indexed: each .meta checked against its .bin and the clock; this store's broken or old slots removed -
-   another identity's left, and a write's files left until stale (0.11.2: two servers on one folder - another
-   --max-tokens, --lsa or not, another quant beside - removed each other's conversations and in-flight writes) */
+   another identity's left, and a write's files left until stale (two servers may share one folder) */
 static bool index_dir(Slots *s, char *err)
 {
   DIR *d = opendir(s->dir);

@@ -25,11 +25,6 @@
 #include "osmos/err.h"
 #include "osmos/err_hip.h"
 
-/* the hy4 forward made (osmos/hy4/forward.h): the model's tensors read into GPU memory but the Engram table (its rows
-   read a step at a time) and the drafter's layers, iHC's mixes as F32, the ropes' tables, a step's buffers - and
-   unmade */
-
-
 
 #define READ_PIECE (64ull << 20)
 
@@ -203,7 +198,7 @@ bool hy4_joints_make(Hy4Forward *f, uint32_t *most)
   return true;
 }
 
-/* a matrix the kernels read as F32 (iHC's mixes: Q4_K_M's F32, copied; SPARK-4Bit's were Q8_0, decoded) */
+/* a matrix the kernels read as F32 (iHC's mixes: Q4_K_M's F32, copied; SPARK-4Bit's Q8_0, decoded) */
 bool hy4_as_f32(Hy4Forward *f, const GgufTensor *t, float **out)
 {
   const uint64_t n = t->dims[0] * t->dims[1];
@@ -218,7 +213,7 @@ bool hy4_as_f32(Hy4Forward *f, const GgufTensor *t, float **out)
 bool hy4_freqs(Hy4Forward *f, float base, uint32_t dim, float **out)
 {
   float h[256];
-  if (dim / 2 > 256) /* (before the writes: a file's rope_dim past 512 wrote past h - 0.11.2) */
+  if (dim / 2 > 256) /* (before the writes: a file's rope_dim past 512 writes past h) */
     return false;
   for (uint32_t i = 0; i < dim / 2; i++)
     h[i] = 1.0f / powf(base, (float)(2 * i) / (float)dim);

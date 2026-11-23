@@ -45,8 +45,8 @@ __device__ inline Keys keys_of(uint32_t pos, uint32_t window, const uint32_t* li
 }
 
 // a token's keys a part (at least 16) and its parts (at most Q35_ATTN_PARTS) from its own key count - not the call's
-// last token's: a token's split its own, its bits whatever the step (0.11.2 - past 8,192 keys a step's first tokens
-// took its last's split). len_t: min(its position + 1, the window), or a list's length (a one-token call)
+// last token's: a token's split its own, its bits whatever the step. len_t: min(its position + 1, the window), or a
+// list's length (a one-token call)
 __device__ inline uint32_t part_keys(uint32_t len_t) {
   const uint32_t per = (len_t + Q35_ATTN_PARTS - 1) / Q35_ATTN_PARTS;
   return per < 16 ? 16 : per;

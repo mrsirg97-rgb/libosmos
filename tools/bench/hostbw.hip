@@ -1,5 +1,5 @@
-// 0.6.10: can a long step's buffers live in the expert cache's own host memory, with no memory swapped (the lend's
-// churn: DESIGN.md "0.6.10")? the GPU's write, read and read-write bandwidth on 1 GiB of each kind, against hipMalloc:
+// can a long step's buffers live in the expert cache's own host memory, with no memory swapped (the lend's churn:
+// DESIGN.md "0.6.10")? the GPU's write, read and read-write bandwidth on 1 GiB of each kind, against hipMalloc:
 //   malloc    hipMalloc (the lent block's kind)
 //   register  mmap + hipHostRegister (the cache's kind now: coherent, the GPU's writes not cached)
 //   nc        hipHostMalloc(hipHostMallocNonCoherent)

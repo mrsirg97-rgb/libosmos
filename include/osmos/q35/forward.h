@@ -1,10 +1,9 @@
 #ifndef OSMOS_Q35_FORWARD_H
 #define OSMOS_Q35_FORWARD_H
 
-/* Qwen3.5 / 3.8's dense models (general.architecture qwen35: Qwen3.8-27B, the 10M flagship's family - DESIGN.md,
-   "the 10M agent"): every attn_interval-th layer gated attention, the rest Gated DeltaNet, each followed by a dense
-   SwiGLU. the q4x family's kernels (q4x_ops.h) on one GPU, the weights whole in its memory; a sequence's state its
-   attention layers' cache (Q8_0) and its DeltaNets' conv history and recurrent state */
+/* Qwen3.5 / 3.8's dense models (general.architecture qwen35): every attn_interval-th layer gated attention, the rest
+   Gated DeltaNet, each followed by a dense SwiGLU, on one GPU with the weights whole in its memory. a sequence's state
+   is its attention layers' Q8_0 cache and its DeltaNets' conv history and recurrent state */
 
 #include "osmos/err.h"
 #include <stdbool.h>
@@ -35,10 +34,8 @@ typedef struct Q35Layer
 {
   const GgufTensor *attn_norm, *post_norm, *ffn_gate, *ffn_up, *ffn_down;
   float s_ffn_gate, s_ffn_up, s_ffn_down;
-  /* Gated DeltaNet */
   const GgufTensor *qkv, *z, *alpha, *beta, *conv, *dt, *a, *ssm_norm, *ssm_out;
   float s_qkv, s_z, s_alpha, s_beta, s_ssm_out;
-  /* gated attention */
   const GgufTensor *q, *k, *v, *q_norm, *k_norm, *out;
   float s_q, s_k, s_v, s_out;
 } Q35Layer;
@@ -52,7 +49,8 @@ typedef struct Q35Weights
   Q35Layer layer[Q35_MAX_LAYERS];
 } Q35Weights;
 
-/* every tensor the forward reads, found and its shape checked against the geometry; NULL and err otherwise */
+/* every tensor the forward reads, found and its shape checked against the geometry; NULL and err otherwise. the
+   weights point into the model: it outlives them */
 Q35Weights *q35_weights_create(const Gguf *model, char err[OSMOS_ERR]);
 void q35_weights_destroy(Q35Weights *w);
 
@@ -62,21 +60,19 @@ typedef struct Q35Forward Q35Forward;
 typedef struct Q35Seq Q35Seq;
 
 Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_t max_ctx, char err[OSMOS_ERR]);
-/* the same, logit_rows the logits' rows a step keeps at most (0: max_tokens, every row) - a server's prompt step keeps
-   its last row alone (q35_seq_prompt), so its table is a round's rows, not max_tokens x 248K floats */
+/* the same, logit_rows the logits' rows a step keeps at most (0: max_tokens, every row) */
 typedef struct Q35Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;
-  struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
-                                 borrowed - the engine's, outliving the forward); NULL counts nothing */
+  struct OsmosLedger *ledger; /* every allocation of the forward and its sequences counted in it; borrowed, outlives
+                                 the forward; NULL counts nothing */
 } Q35Options;
 Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, char err[OSMOS_ERR]);
 void q35_forward_destroy(Q35Forward *f);
 /* latent sparse attention (osmos/lsa.h): the maps file (tools/convert/lsa_maps.py's: W_Q and W_K an attention layer),
-   before any sequence; from then every attention layer's keys indexed and each closed block bucketed (a prompt's
-   steps and a decode's), a decode step's (n <= Q35_ATTN_DECODE_MAX) attention its read's alone, a prompt's dense (as
-   lsa.py's quality: the read's cost measured on what follows a prompt). the rotation YaRN's at yarn x native, the
-   maps' own (-vibes': 40). maps NULL: the rotation alone, the read off (the dense model it is measured against) */
+   before any sequence; from then every attention layer's keys indexed and each closed block bucketed, a decode step's
+   (n <= Q35_ATTN_DECODE_MAX) attention its read's alone, a prompt's dense. the rotation YaRN's at yarn x native, the
+   maps' own. maps NULL: the rotation alone, the read off */
 bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS_ERR]);
 Q35Seq *q35_seq_create(Q35Forward *f, char err[OSMOS_ERR]);
 void q35_seq_destroy(Q35Seq *s);
@@ -90,7 +86,7 @@ void q35_forward_tap(Q35Forward *f, q35_tap_fn fn, void *arg);
 bool q35_step(Q35Forward *f, Q35Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR]);
 const float *q35_logits(const Q35Forward *f);
 
-/* the engine's (DESIGN.md, "0.9.0: q35 behind the engine"): q4x's contracts (osmos/q4x/forward.h) on q35's state */
+/* the engine's: q4x's contracts (osmos/q4x/forward.h) on q35's state */
 #define Q35_MAX_BACK 8                 /* the tokens a sequence can drop (a drafted round's) */
 #define Q35_SLOTS (Q35_MAX_BACK + 1)   /* a DeltaNet's states and conv histories kept: a ring */
 #define Q35_MAX_RUNS 64                /* a step's sequences at most */
@@ -102,13 +98,12 @@ const float *q35_logits(const Q35Forward *f);
    refused from then on (q35_seq_fail's), until a load */
 bool q35_step_runs(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                    char err[OSMOS_ERR]);
-/* the same step in a prompt's math (the engine's read: the matmul at any size, attention dense), its bits a prompt's
-   however it is split - not a decode's (two maths, as DeepSeek's: DESIGN.md) */
+/* the same step in a prompt's math (the matmul at any size, attention dense), its bits the same however it is split
+   but not a decode's */
 bool q35_step_read(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                    char err[OSMOS_ERR]);
-/* row's logits (device, n_vocab floats) of the last q35_step_runs, NULL for a row not kept */
-/* the last step's kept rows (osmos/gpu/kept.h): the engine reads and picks a row through it */
 void q35_kept(const Q35Forward *f, KeptView *k);
+/* a row's logits (device, n_vocab floats) of the last q35_step_runs, NULL for a row not kept */
 const float *q35_row_logits(const Q35Forward *f, uint32_t row);
 /* the greatest token of each of rows row0 .. row0 + rows - 1 (the lowest among equals); false for a row not kept */
 bool q35_greedy(Q35Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);

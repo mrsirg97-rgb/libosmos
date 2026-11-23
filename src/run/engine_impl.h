@@ -6,8 +6,7 @@
 #include "osmos/gpu/kept.h"
 #include "osmos/run/engine.h"
 
-/* a build's step: max_tokens, or the family's own at 0 - never past the context (every family's one rule; Qwen alone
-   refused a step past it, and at 0 sized its step to the whole context) */
+/* a build's step: max_tokens, or the family's own at 0 - never past the context (every family's one rule) */
 static inline uint32_t osmos_step_tokens(const OsmosOptions *o, uint32_t family_default)
 {
   const uint32_t t = o->max_tokens ? o->max_tokens : family_default;
@@ -15,8 +14,7 @@ static inline uint32_t osmos_step_tokens(const OsmosOptions *o, uint32_t family_
 }
 
 /* the options a family takes (OsmosFamily's takes): one set past the family's refused by osmos_create, the option
-   named - never ignored (0.16.0: five hand-kept lists; stream_ngram taken silently by every family but Qwen's,
-   no_guess by Inkling's). max_ctx, max_tokens and fill every family's */
+   named - never ignored. max_ctx, max_tokens and fill every family's */
 enum
 {
   OSMOS_TAKES_BUDGET = 1u << 0,
@@ -45,7 +43,7 @@ typedef struct OsmosFamily
   bool (*step)(void *eng, void *const *runs, const uint32_t *len, uint32_t n_runs, const int32_t *tokens, bool read,
                char err[OSMOS_ERR]);
   void (*kept)(const void *eng, KeptView *k); /* the last step's kept rows (osmos/gpu/kept.h): the engine reads and
-                                                 picks every family's rows through it - 0.16.0: six copies */
+                                                 picks every family's rows through it */
   uint32_t (*block)(const void *eng);
   void *(*seq_create)(void *eng, char err[OSMOS_ERR]);
   void (*seq_destroy)(void *seq);
@@ -89,7 +87,7 @@ bool osmos_gpu_room(uint64_t *bytes);
 extern const OsmosFamily osmos_ds4, osmos_q4x, osmos_ink2, osmos_q35, osmos_lfm3, osmos_hy4;
 
 
-/* the engine's handles (hip_engine.c the engine's calls, hip_engine_seq.c a sequence's; one file before 0.16.0) */
+/* the engine's handles (hip_engine.c the engine's calls, hip_engine_seq.c a sequence's) */
 struct OsmosModel
 {
   const OsmosFamily *fam;

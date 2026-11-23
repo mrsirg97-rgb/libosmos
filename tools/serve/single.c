@@ -115,8 +115,8 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
   int32_t dr[OSMOS_MAX_BLOCK], picks[OSMOS_MAX_BLOCK + 1], toks[OSMOS_MAX_BLOCK + 1];
   float cf[OSMOS_MAX_BLOCK];
   if (server_eos(sv, *t) || a->produced + 1 >= a->limit) /* t the answer's last: printed, not fed (a greedy token's
-                                                            end) - its verify was work for nothing, and its rollback
-                                                            past a block's close refused, the turn failed (0.11.2) */
+                                                            end) - its verify would be work for nothing, and its
+                                                            rollback past a block's close refused */
   {
     out("T %d\n", *t), a->produced++;
     if (server_eos(sv, *t))
@@ -171,7 +171,7 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
       return -1;
   *t = picks[m];
   if (!end && (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx) /* the context's last position: its pick printed, not
-                                                                    fed, as step_greedy's last (0.9.2: dropped) */
+                                                                    fed, as step_greedy's last */
   {
     out("T %d\n", *t), a->produced++;
     if (server_eos(sv, *t))
@@ -223,8 +223,8 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
   }
   if (!conv_continue(c, sv, g->ids, n))
   {
-    fail(sv, c); /* its state and held ids restarted as one (0.11.2: a slot's load short of memory part way left them
-                    apart - the next turn read on at the wrong position); multi.c's lane_fail as ever */
+    fail(sv, c); /* its state and held ids restarted as one (a slot's load failed part way leaves them apart);
+                    multi.c's lane_fail the same */
     return;
   }
   const uint32_t reused = c->held.n;

@@ -80,7 +80,7 @@ bool gen_parse(char *line, Gen *g, char *why, size_t wn)
       ok = real(x, &g->samp.top_p);
     else if (!strcmp(tok, "seed"))
       ok = whole(x, UINT64_MAX, &v), g->samp.seed = (uint64_t)v;
-    else if (!strcmp(tok, "top_k")) /* 0.15.2: 0 every token */
+    else if (!strcmp(tok, "top_k")) /* 0: every token */
       ok = whole(x, UINT32_MAX, &v), g->samp.top_k = (uint32_t)v;
     else
       return snprintf(why, wn, "the key '%s' is not this engine's (rid, spec, mark, temp, top_p, top_k, seed)", tok),

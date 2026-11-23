@@ -188,8 +188,8 @@ static bool shared(Forward *f, int l)
 
 /* the next layer's experts a prompt's step will pick read into the stream while this one runs (a decode's few would
    make the reads waste): the union of the next router's picks for its tokens (fwd_guess_queue's; ahead.h) - not every
-   expert of the layer, 41% of which it never picks, each read the SSD's time a prompt waits on. those read and not
-   picked are stale once the next layer is past (pool_now): the first to go */
+   expert of the layer, many of which it never picks. those read and not picked are stale once the next layer is past
+   (pool_now): the first to go */
 static void prefetch(Forward *f, int l, uint32_t picks)
 {
   const uint32_t E = (uint32_t)f->g->n_experts;
@@ -297,9 +297,9 @@ bool fwd_moe(Forward *f, int l, char *err)
   int32_t cnt_j[OPS_MAX_EXPERTS];
   for (uint32_t j = 0; j < nd; j++)
     cnt_j[j] = (int32_t)rt.count[j];
-  /* 0.7.0: the NPU's parts (forward_npu): an expert's first nq[j] x NPU_TOKENS rows - their gate and up the NPU's
-     where it has the layer's kernel (npu_gu), their down where it has that one (npu_dn); the rest's the GPU's in
-     entries of their own */
+  /* the NPU's parts (forward_npu): an expert's first nq[j] x NPU_TOKENS rows - their gate and up the NPU's where it
+     has the layer's kernel (npu_gu), their down where it has that one (npu_dn); the rest's the GPU's in entries of
+     their own */
   const uint32_t takes = fwd_npu_layer(f, l, P);
   const bool npu_gu = takes & 1, npu_dn = takes & 2;
   uint32_t nq[OPS_MAX_EXPERTS], parts = takes ? fwd_npu_pick(f, P, cnt_j, nd, nq) : 0;

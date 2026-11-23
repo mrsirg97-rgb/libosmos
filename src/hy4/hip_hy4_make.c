@@ -198,8 +198,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
        (f->h_w = malloc(n * K * F)) &&
        (f->h_wsel = malloc(n * K * F)) && hipDeviceSynchronize() == hipSuccess;
   ok = ok && (!o->dfly || hy4_dfly_load(f, o->dfly, o->dfly_q8, err)); /* (whole: its drafter part of the build) */
-  /* the fixed part, counted (experts_plan's): the table read, the records' buffers, DFly2's - 0.16.0: the GPU's free
-     memory read before and after, anything else's moving it (DFly2 loaded after the experts: outside the budget) */
+  /* the fixed part, counted (experts_plan's): the table read, the records' buffers, DFly2's - not the GPU's free
+     memory before and after, which anything else moves (DFly2 loaded after the experts: outside the budget) */
   if (ok)
     f->fixed_bytes = gpu_table_bytes(w->model, f->dev, f->in_joint) + f->bufs.bytes + hy4_dfly_bytes(f);
   ok = ok && hy4_experts(f, o->budget == FIT_BUDGET_NOW ? experts_fit_now(f->ledger, f->fixed_bytes) : o->budget, err);

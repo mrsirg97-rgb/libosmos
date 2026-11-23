@@ -1,11 +1,10 @@
 #ifndef OSMOS_HY4_FORWARD_H
 #define OSMOS_HY4_FORWARD_H
 
-/* Hy4-flash's forward on one GPU (DESIGN.md, "0.10.0 step 2"): the weights whole in its memory but the Engram table,
-   whose rows come from the SSD a step at a time; a sequence's state its sparse layers' latent cache, token keys and
-   pooled groups, its sliding layers' rings, its last tokens (the next step's n-grams). two maths, each a
-   token's bits however its sequence is split into steps: a prompt's (hy4_step_read) the matrix cores', a decode's
-   (hy4_step_runs) the matvecs' */
+/* Hy4-flash's forward on one GPU: the weights whole in its memory but the Engram table, whose rows come from the SSD
+   a step at a time; a sequence's state its sparse layers' latent cache, token keys and pooled groups, its sliding
+   layers' rings, its last tokens (the next step's n-grams). two maths, each a token's bits however its sequence is
+   split into steps: a prompt's (hy4_step_read) the matrix cores', a decode's (hy4_step_runs) the matvecs' */
 
 #include "osmos/err.h"
 #include <stdbool.h>
@@ -19,7 +18,7 @@
 #define HY4_MAX_BACK 8                 /* the tokens a sequence can drop (a drafted round's) */
 #define HY4_IX_SPREAD "the indexer's spread scratch" /* its allocation's name (osmos_hip: the fault seam's too) */
 #define HY4_MAX_RUNS 64                /* a step's sequences at most */
-#define HY4_EXPERT_READERS 12          /* the experts' membrane's readers: DeepSeek's and Inkling's (FWD_FETCH_THREADS) */
+#define HY4_EXPERT_READERS 12          /* the experts' membrane's readers (DeepSeek's, Inkling's FWD_FETCH_THREADS) */
 
 typedef struct Hy4Forward Hy4Forward;
 typedef struct Hy4Seq Hy4Seq;
@@ -29,16 +28,15 @@ typedef struct Hy4Options
   uint32_t max_tokens; /* a step's tokens at most */
   uint32_t max_ctx;    /* a sequence's positions at most (its state sized for them) */
   uint32_t logit_rows; /* the logits' rows a step keeps at most (0: max_tokens) */
-  bool kv_f32;         /* MLA's cache rows F32 (the reference's checks); else (0.11.0's default) the latent Q8_0 and
-                          the rope part F32 - 800 bytes a row against 2,304 (hy4_mla_row_bytes) */
+  bool kv_f32;         /* MLA's cache rows F32 (the reference's checks); else the latent Q8_0 and the rope part F32
+                          (hy4_mla_row_bytes) */
   bool head_q8;        /* a BF16 head read as its Q8_0 copy (ggml's rounding, made at load): half its reads */
   uint64_t budget;     /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
                           through the membrane past it; 0 the least (a layer's experts); FIT_BUDGET_NOW this
                           machine's room as it stands (experts_fit_now) - a test's, a bench's */
   struct OsmosLedger *ledger; /* the forward's, its sequences' and its drafter's every allocation counted in it
                                  (osmos/mem/ledger.h: borrowed - the engine's, outliving the forward); NULL nothing */
-  const char *dfly; /* DFly2, the drafter (below), made with the forward: its safetensors' path, or NULL - 0.16.0:
-                       hy4_dfly_load, attached after */
+  const char *dfly; /* DFly2, the drafter (below), made with the forward: its safetensors' path, or NULL */
   bool dfly_q8;     /* its matrices and the drafts' head Q8_0 (ggml's rounding of the BF16): half the reads */
 } Hy4Options;
 
@@ -74,9 +72,9 @@ bool hy4_step_read(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uin
 #define HY4_MV_TOKENS 4
 bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR]);
 const float *hy4_logits(const Hy4Forward *f);
-/* row's logits (device, n_vocab floats) of the last hy4_step_runs, NULL for a row not kept */
 /* the last step's kept rows (osmos/gpu/kept.h): the engine reads and picks a row through it */
 void hy4_kept(const Hy4Forward *f, KeptView *k);
+/* row's logits (device, n_vocab floats) of the last hy4_step_runs, NULL for a row not kept */
 const float *hy4_row_logits(const Hy4Forward *f, uint32_t row);
 /* the greatest token of each of rows row0 .. row0 + rows - 1 (the lowest among equals); false for a row not kept */
 bool hy4_greedy(Hy4Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
@@ -95,26 +93,26 @@ bool hy4_seq_rollback(Hy4Seq *s, uint32_t n);
 void hy4_seq_fail(Hy4Seq *s);
 /* a 64-bit key of what a saved state depends on (its format, the geometry, the model's files) */
 uint64_t hy4_identity(const Hy4Forward *f);
-/* a sequence as one byte string (a header, every layer's rows below the position, the rings, the last tokens, then a
-   sum) - load refuses another identity or format, a size not its position's, a damaged string: the sequence then
-   empty */
-/* DFly2, the release's drafter (0.11.0; DESIGN.md, "0.11.0: DFly2"): its five layers read from the release's own
-   safetensors (model-00148-of-00148.safetensors, BF16) onto the GPU beside the forward; a draft block the anchor (the
-   sampled token, at the sequence's position) and HY4_DFLY_DRAFTS mask tokens, each layer attending to its target
-   sparse layer's keys for the last accepted token (that layer's indexer picks, kept by every step) and the block's
-   own rows (written into that layer's cache past the position: a verify's step writes its own over them) - then the
-   hidden correction's chain, each draft through the target's head. made with the forward (Hy4Options' dfly): the
-   forward refused, err said, for a file not the drafter or not this model's shapes. dfly_q8: its matrices and the
-   drafts' head (the target's, copied) Q8_0 (ggml's rounding of the BF16) - half the reads; a draft's precision moves
-   how many are accepted, never the tokens. hy4_seq_draft: up to `most` drafts after
-   y (HY4_DFLY_DRAFTS at most), each kept while its probability under the draft's own logits is at least conf_min and
-   their product at least cum_min - the count; 0 when the last step kept no snapshot of the position before (a load,
-   a prompt not run to its end) or the block would pass max_ctx; -1 with why on a GPU failure */
+/* DFly2, the release's drafter: its five layers read from the release's own safetensors
+   (model-00148-of-00148.safetensors, BF16) onto the GPU beside the forward; a draft block the anchor (the sampled
+   token, at the sequence's position) and HY4_DFLY_DRAFTS mask tokens, each layer attending to its target sparse layer's
+   keys for the last accepted token (that layer's indexer picks, kept by every step) and the block's own rows (written
+   into that layer's cache past the position: a verify's step writes its own over them) - then the hidden correction's
+   chain, each draft through the target's head. made with the forward (Hy4Options' dfly): the forward refused, err said,
+   for a file not the drafter or not this model's shapes. dfly_q8: its matrices and the drafts' head (the target's,
+   copied) Q8_0 (ggml's rounding of the BF16) - half the reads; a draft's precision moves how many are accepted, never
+   the tokens. hy4_seq_draft: up to `most` drafts after y (HY4_DFLY_DRAFTS at most), each kept while its probability
+   under the draft's own logits is at least conf_min and their product at least cum_min - the count; 0 when the last
+   step kept no snapshot of the position before (a load, a prompt not run to its end) or the block would pass max_ctx;
+   -1 with why on a GPU failure */
 #define HY4_DFLY_DRAFTS 5
 #define HY4_DFLY_LAYERS 5
 int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf_min, float cum_min, int32_t *drafts,
                   float *conf, char err[OSMOS_ERR]);
 
+/* a sequence as one byte string (a header, every layer's rows below the position, the rings, the last tokens, then a
+   sum) - load refuses another identity or format, a size not its position's, a damaged string: the sequence then
+   empty */
 uint64_t hy4_seq_state_bytes(const Hy4Seq *s);
 bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
 bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);

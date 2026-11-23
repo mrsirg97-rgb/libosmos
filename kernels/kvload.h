@@ -12,8 +12,7 @@ namespace kv {
 typedef float f4 __attribute__((ext_vector_type(4)));
 
 // four values' bytes as fetched, decoded later (a kernel's next stage fetched before this one's sums, decoded when
-// staged: the fetch's latency hidden as an F32 load's was): F32 its 16 bytes; packed, the codes in a and the scale's
-// byte in b
+// staged: the fetch's latency hidden): F32 its 16 bytes; packed, the codes in a and the scale's byte in b
 struct Raw {
   uint32_t a, b, c, d;
 };

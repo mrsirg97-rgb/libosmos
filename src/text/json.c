@@ -101,8 +101,7 @@ size_t json_utf8_len(const unsigned char *p, size_t left)
 }
 
 /* a string's text (after its opening quote) into a new buffer of its own bytes: *len them. its span to the closing
-   quote first (an escape only shrinks it) - 0.16.0: the input's whole rest each, a million short strings reserving
-   terabytes of address space */
+   quote sized first (an escape only shrinks it), never the input's whole rest */
 static char *string(Cur *c, size_t *len)
 {
   const char *q = c->p;
@@ -151,8 +150,8 @@ static char *string(Cur *c, size_t *len)
         cp = 0xFFFD;
     }
     else if (cp >= 0xDC00 && cp <= 0xDFFF) /* a lone surrogate (a JS string cut between a pair's halves, as
-                                              JSON.stringify writes it): U+FFFD, as lenient decoders take it - 0.11.2,
-                                              refused: the conversation's every later request refused with it */
+                                              JSON.stringify writes it): U+FFFD, as lenient decoders take it - refused,
+                                              the conversation's every later request would be */
       cp = 0xFFFD;
     n += put_utf8(o + n, cp);
   }
@@ -272,8 +271,7 @@ static void merge_sort(const Json *j, size_t *x, size_t *tmp, size_t n)
 }
 
 /* an object's duplicate keys made one (Python's dict: the first's place, the last's value) once it closes - by a
-   merge sort of its keys, n log n whatever the keys (a key compared with every earlier one was n^2: one 1 MB body
-   held a core 67 s) */
+   merge sort of its keys, n log n whatever the keys (a client's body bounds no key count) */
 static bool dedupe(Json *j)
 {
   if (j->n < 2)

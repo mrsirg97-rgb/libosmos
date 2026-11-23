@@ -6808,3 +6808,338 @@ switch wants its baseline rerun.
   are outside it); a headline claim per watt uses a wall meter, with PPT beside it.
 - what was tried and did not work is written down, with its numbers.
 - what was not tested is said.
+
+### 0.16.0: what the code's comments held
+
+The comment pass (phase 6, AGENTS.md's sparse comments): the history and measurements the code's comments carried, kept here by the file they were in. The comments kept their load-bearing statements - an invariant, a unit, a layout, a bit-exactness rule, a contract.
+
+**public headers (include/osmos, first half)**
+
+- include/osmos/ds4/ahead.h (ahead_union): 0.5.8, UD-IQ2_XXS, a 2,048-token step: every token's 6 guessed experts name 98.9% of the not-in-memory experts it picks; the experts not named are 41% of a read ahead of all (DESIGN.md "0.5.8").
+- include/osmos/ds4/drafter.h (Drafter): dir/dspark.bin is ~4.7 GB as the packs ship it (experts IQ2_XS); the reference is maya's tools/ds4/dspark_ref.py.
+- include/osmos/ds4/drafter.h (Drafter): before 0.16.0 drafter_create attached a drafter to a built forward and turned its taps on then; 0.16.0 made it the forward's own (ForwardOptions' drafter).
+- include/osmos/err.h: the error shape is DESIGN.md "0.16.0: the consolidation".
+- include/osmos/gpu/bufs.h (GpuBufs): one recorded list a buffer is 0.11.2's rule; in 0.16.0 Mini's hand-kept list had lost five buffers (11.3 MiB an engine, found by test_engine_ledger_gpu).
+- include/osmos/gpu/bufs.h (GPU_BUFS_PAD): 0.16.0 made zero + 16-byte pad one policy; before, DeepSeek's buffers were zeroed, Inkling's padded 16 since its first engine, the others neither.
+- include/osmos/ds4/forward.h (SEQ_STATE_VERSION): 2 (0.7.1): a kept state is a prompt's alone - 1's held decoded answers, not taken back; 3 (0.9.2): the header's rollback room (hi - pos) in its spare word.
+- include/osmos/ds4/forward.h (FORWARD_SUBS): 4 x MM_MAX_TOKENS is maya's 8,192-token chunk.
+- include/osmos/ds4/forward.h (ForwardOptions lane/cpu/npu/drafter): before 0.16.0 forward_lane, forward_npu and drafter_create each attached to a built forward; 0.16.0 makes the forward whole with them.
+- include/osmos/ds4/forward.h (forward_create_with): a step's experts take ~1 GB a sub-batch of MM_MAX_TOKENS; a sequence's window and the step's other buffers ~3.9 GB at 2,048 tokens, ~1 GB at 512.
+- include/osmos/ds4/forward.h (npu): the NPU beside the GPU in a prompt's routed experts is 0.7.0's.
+- include/osmos/ds4/forward.h (forward_logits): logit_rows is DESIGN.md "0.6.5": the logits' rows.
+- include/osmos/ds4/forward.h (forward_kept_view): before 0.16.0 the kept rows were the logits' slots and a step's last vocab_rows taken as kept, including those the head skipped.
+- include/osmos/gpu/hy4_ops.h: the ops are DESIGN.md "0.10.0: Hy4-flash (hy4)"; DFly2's draft block is 0.11.0's.
+- include/osmos/gpu/hy4_ops.h (hy4_mla_kv): the q8 cache row is 800 bytes for Hy4's 512 + 64 against 2,304 F32 (0.11.0: the context's memory a quarter). The F32 row was "the step's form", the sequence's cache arriving with step 2 of that work.
+- include/osmos/gpu/hy4_ops.h (hy4_ix_select): spread_scratch is the forward's, made at build; before 0.16.0 it was the op's statics, made at first use, never freed, shared.
+- include/osmos/gpu/kept.h (KeptView): before 0.16.0 four families used kept rows, Qwen a row of flags, DeepSeek its last rows by arithmetic, each with its own pick; 0.16.0 made one view every family's.
+- include/osmos/gpu/kept.h (KeptView.settle): DeepSeek's settle spins on a decode's stream because that measured faster than hipStreamSynchronize.
+- include/osmos/gpu/mm.h (mm_col_tiles): measured, a one-tile expert under an 8-tile mm_group launch runs 37% slower - why groups of very different counts launch apart.
+- include/osmos/gpu/mm.h (mm_group): 0.11.2 corrected the claim that mm_group gives mm_run's bits for every shape: Q6_K under 2,048 columns differs (another K split); no shape was changed, so a pack's bits stayed.
+- include/osmos/gpu/mmq.h (mmq): the int8 experts' matmul is DESIGN.md "0.6.0"; test_mmq_gpu holds mmq_group's batch invariance against a host reference of the same operations at 1 / 16 / 37 / 64 tokens.
+- include/osmos/gpu/ops.h (ops_index_score_fp4, _dot4, _rows, ops_cand_list, ops_topk_rows, ops_cand_blocks_max): all 0.7.3's.
+- include/osmos/gpu/ops.h (ops_index_score_dot4): 2.45x the fused (fp4) kernel's speed at 1M rows (ixbench), 0.7.3; the one-token tile and the idle waves skipping their sums are 0.7.4's.
+- include/osmos/gpu/ops.h (ops_argmax): the shared greedy pick is DESIGN.md "0.6.2: what the two families share".
+- include/osmos/gpu/q4x_ops.h (OPS_Q4X_MAX_KEYS): at 1M keys Qwen's Q8_0 cache is ~13 KB a token a sequence (~13.6 GB at 1M), its pooled keys ~1.5 KB a token.
+- include/osmos/gpu/q4x_ops.h (Q4xRope.inv_freq): the device's powf differing by an ulp moved the rotation ~1e-3 at 8K positions - why inv_freq is formed on the host.
+- include/osmos/gpu/q4x_ops.h (q4x_expert_tiles): tab[i] (experts wherever a membrane put them) is DESIGN.md "0.6.5: Qwen on the membrane".
+- include/osmos/gpu/state_parts.h (state_head_check, state_pos_check, state_tokens_check): 0.16.0 made seven copies one; before, Qwen loaded any token in its history while Hy4 refused one, and the 27B sized its parts from a header before checking it.
+- include/osmos/gpu/upload.h (gpu_upload_table, gpu_q8_rows): 0.11.2 made one of four upload copies and one of two Q8_0 head copies (Qwen3.5's, LFM3's).
+- include/osmos/hy4/forward.h (Hy4Forward): DESIGN.md "0.10.0 step 2".
+- include/osmos/hy4/forward.h (Hy4Options.kv_f32): the Q8_0 latent cache is the default since 0.11.0: 800 bytes a row against F32's 2,304.
+- include/osmos/hy4/forward.h (Hy4Options.dfly): before 0.16.0 the drafter was hy4_dfly_load, attached after the forward was built.
+- include/osmos/hy4/forward.h (hy4_seq_draft): DFly2 is 0.11.0's (DESIGN.md "0.11.0: DFly2").
+- include/osmos/hy4/weights.h (Hy4Geometry): the keys are llama.cpp PR #32517's; DESIGN.md "0.10.0: Hy4-flash (hy4)".
+- include/osmos/ink2/forward.h (Ink2Options.profile): before 0.16.0 the section timing was the INK2_PROFILE environment variable.
+- include/osmos/ink2/forward.h (Ink2Forward): DESIGN.md "0.8.0: Inkling's engine"; the resident dense weights (attention, router, convs, embedding, head) are ~6 GB.
+- include/osmos/ink2/forward.h (ink2_seq_mark_*): the mark (osmos-serve's prompt end) is 0.7.5's.
+
+**public headers (include/osmos, second half)**
+
+- include/osmos/ink2/weights.h (Ink2Keys): INK2_KEYS_UPSTREAM is upstream llama.cpp's inkling2 as of its PR #32694.
+- include/osmos/lfm3/forward.h (lfm3_stages_default): osmos1.7b's default is native rope throughout (DESIGN.md "osmos1.7b: rope"): YaRN x4 from 160K read the last tokens' NLL best past 192K but lost a needle 50K back at 512K that native found; native found 8 of 8 to 512K, 4 of 5 at 1M (the miss x4's too).
+- include/osmos/lfm3/forward.h (Lfm3Head): the Q8_0 head copy halves the BF16 table's bytes a token reads.
+- include/osmos/lfm3/forward.h (Lfm3Options.lsa): the release's maps file is vibes1.7b-lsa-maps.safetensors (each full layer's 4 KV heads' zero-tail dims); a decode reads incarnate's served read, a prompt stays dense (lsa.py's); design in DESIGN.md "vibes-flash: 2M" / "the 10M agent".
+- include/osmos/lfm3/forward.h (lfm3_step_read): prompt math vs decode math are two maths, as q35's and hy4's (DESIGN.md); contracts in DESIGN.md "LFM3 step 2"; DFlash2 on LFM3 in "osmos1.7b: DFlash2".
+- include/osmos/mem/arena.h (Arena): the arena exists for DESIGN.md "0.3.0: energy a token", target 1 (the pool's units in host_slots' registered memory); ARENA_GRAIN 4096 is O_DIRECT's sector on btrfs.
+- include/osmos/mem/experts.h (experts_fit_now): before 0.16.0 a NULL ledger read FIT_RAM_FREE whatever --fill said.
+- include/osmos/mem/fetchq.h (Fetchq): measured (DESIGN.md "the fetcher"): 4 workers read 600 cold 3 MiB ranges at 6.85 GB/s, the SSD's ceiling, p50 1.8 ms a range; more workers add only queueing.
+- include/osmos/mem/fetchq.h (fetchq_read): the need clamp where an int ends is ~53M forward steps of the visit clock (DESIGN.md).
+- include/osmos/mem/fetchq.h (fetchq_ahead_limit): introduced in 0.6.5 (DESIGN.md "0.6.5: ... reads ahead in the background").
+- include/osmos/mem/hip_slots.h (hip_slots_create): 0.16.0 made the HSA pool and CPU agent the HipSlots owner's (create to destroy); before they were a process static found at first use.
+- include/osmos/mem/hip_slots.h (hip_slots): measured (DESIGN.md "the memory"): readers pread in at 25 GB/s from the page cache with 4 workers, 6.96 GB/s cold; the GPU reads the memory at 221-239 GB/s; alloc ~0.18 ms, free ~0.11 ms.
+- include/osmos/mem/host_slots.h (HostSlots): DESIGN.md "0.3.0: energy a token", target 1. O_DIRECT into registered pages measured 6.14 GB/s a reader at 13% of its core vs 3.63 GB/s at 76% buffered into hip_slots' memory; the GPU reads it at 237.5 vs 239.7 GB/s for its own memory ("in place").
+- include/osmos/mem/ledger.h (OsmosLedger): DESIGN.md "0.16.0: the ledger, a component"; the engine's tests hold the leak at destroy to zero.
+- include/osmos/mem/membrane.h (Membrane): design history in DESIGN.md "0.5.8: the membrane", "0.6.2: the membrane a module of its own"; membrane_whole from "0.6.5: Qwen on the membrane".
+- include/osmos/mem/pool.h (pool_now): without stale units going first, furthest-ahead alone left 28% of the guess's reads finding no room on UD-IQ2_XXS.
+- include/osmos/mem/pool.h (pool_place, pool_pass): the promotion and pass-through design is DESIGN.md "0.5.8"; read_align's 4 KiB direct read from "0.3.0", target 1; the memory in "the memory".
+- include/osmos/mem/reads.h (Reads): DESIGN.md "0.2.0: the forward's reads on libevt"; need-moves generalize 0.1.3's hurry; 0.2.0's first build capped reads given out and left the SSD idle between pumps.
+- include/osmos/mem/resident.h (Resident): registered file pages were reclaimed under page-cache pressure and the driver's restore stalled a long prompt's step for minutes - why resident units are driver memory (DESIGN.md "the memory"). fd -1 parts serve the forward's repacked Q5_K.
+- include/osmos/mem/rowread.h (Rowread): Engram rows are 144 B, ~49,000 a 2,048-token step an Engram layer, in a 110 GB file; one at a time 16,700 reads/s, ~5.9 s a step; measured (DESIGN.md "Engram's reads") 64 threads 832,000 reads/s, 128 no more.
+- include/osmos/mem/rowread.h (rowread_take): a decode step's 48 rows one a worker, not 3 workers' 16 in series, saves ~1 ms of GPU idle a token.
+- include/osmos/model/dspark.h (DsparkIndex): drafter_pack.py is Maya's; DeepSeek's target_layers are [37, 38, 39].
+- include/osmos/model/fnv.h (fnv_file): 0.9.2 added device/inode/mtime: name and size alone took a file rewritten in place at the same size (an overlay remade at another strength, a pack's shards patched) for the one a state was read with, its old KV continuing under new weights.
+- include/osmos/model/gguf.h (gguf_arch): 0.16.0 made it the one reader of general.architecture; six readers each read the key and checked its type before.
+- include/osmos/model/qtype.h (QTYPES): NVFP4's separate tensor scale is Inkling-2's experts' (as their checkpoint holds them); Q4_0 is vibes1.7b's file (DESIGN.md "vibes-flash: LFM3"); unsloth's MXFP8 43 is its GGUFs' Engram tables, upstream's F8_E4M3 43 is AngelSlim's Hy4-flash Engram table; roles by capability in DESIGN.md "roles by capability".
+- include/osmos/model/safetensors.h (st_create): added in 0.11.0 for Hy4-flash's DFly2 drafter, the release's model-00148-of-00148.safetensors, read as it ships.
+- include/osmos/model/state_io.h (STATE_CHUNK): 4 MiB from DESIGN.md "0.5.6: conversations kept in pieces": 2.42 GB/s written and fsync'd, 7.1 read; 1 MiB 1.98 / 7.0, 16 MiB 2.40, 64 MiB 2.28 / 6.5.
+- include/osmos/model/tensor.h: 0.16.0 merged Inkling's ink2_read_tensor / ink2_host_f32, Hy4's hy4_host_f32, DeepSeek's read_all and the Engram's own reader into tensor.c.
+- include/osmos/model/weights.h (Weights): borrowing follows libtrdr's scope rule; ISTA's GGUFs name neither engram_vocab nor dspark.target_layers; dspark.bin is maya's.
+- include/osmos/npu/npu.h: the NPU lane came in 0.7.0; kernels from spikes/npu/fused/fused_ds.py, impl src/npu/npu_xrt.cpp. kernel sets: DeepSeek iq2xxs/, iq1s/, iq2xs/ gate+up and iq2xxs-down/, iq1s-down/, iq2xs-down/, iq2s-down/; Qwen iq3xxs/, iq2s/, iq4nl-down/. switching hardware contexts ~2.7 ms. npu_region is DeepSeek's expert cache; npu_device is Qwen's resident weights and every engine's outputs.
+- include/osmos/q35/forward.h: Qwen3.8-27B is the 10M flagship (DESIGN.md "the 10M agent"); behind the engine since 0.9.0 ("0.9.0: q35 behind the engine"). logit_rows exists so a server's prompt step keeps a round's rows, not max_tokens x 248K floats. LSA prompts stay dense as lsa.py's quality measured; -vibes' maps' yarn is 40.
+- include/osmos/q4x/dflash.h (Q4X_DFLASH_*): DFlash2 (incoai's Qwen3.8-Flash-Next-DFlash2) has 5 layers, a block of 8, top-k 16, a 2,048 window; q4x_dflash_create_for serves LFM3 (lfm3_dflash_*).
+- include/osmos/q4x/weights.h (q4x_weights_experts, q4x_weights_create): Qwen on the membrane from 0.6.5 (DESIGN.md); the q4x overlay is huihui-ai's abliteration; PLE rows in DESIGN.md "Qwen's forward".
+- include/osmos/q4x/forward.h (Q4X_MAX_BACK): each DeltaNet layer's S is 3.1 MB a slot: ~1 GB a sequence at 8.
+- include/osmos/q4x/forward.h (Q4X_MTP_BLOCK): blocks 2-7 measured on mm (q4x_bench, 192 tokens): 33.6 34.1 35.2 35.7 34.6 34.8 tok/s; the engine's confidence floors end most rounds before 6.
+- include/osmos/q4x/forward.h (Q4X_MTP_VOCAB): 97.8% of a text's tokens fall below 65,536; output projection 521 -> 137 MB a draft, drafted decode 35.7 -> 40.5 tok/s, acceptance unchanged (q4x_bench, 192 tokens; 32,768: 39.3, 100,000: 38.5). DFlash2 has 5 taps.
+- include/osmos/q4x/forward.h (Q4xOptions.npu): the NPU lane is 0.7.0 (src/q4x/hip_q4x_npu.c, kernels iq3xxs/, iq2s/, iq4nl-down/); 0.16.0 moved attaching it to q4x_forward_npu after create.
+- include/osmos/q4x/forward.h (Q4xForward): DESIGN.md "Qwen's forward, op by op"; weights ~78 GB resident. dense attention past QSA's 2,048-token budget measured its equal: 2.7136 over 8,192 tokens vs QSA's 2.7193, so the selection was not built.
+- include/osmos/q4x/forward.h (stream_ngram): per_layer_token_embd is 28.8 GB of UD-IQ3_XXS, ~1.4 KB a token read; DFlash2 weights ~0.6 GB at Q8_0.
+- include/osmos/q4x/forward.h (q4x_seq_mark_*): marks came in 0.7.5 for osmos-serve's conversation prompt end; ~118 MB for Qwen3.8-Flash-Next whatever the position vs a whole state's 2.9 GB at 190K.
+- include/osmos/q4x/forward.h (q4x_seq_prompt / forward_whole / mtp / dflash): DESIGN.md "0.6.3", "0.6.5: Qwen on the membrane", "Qwen's MTP head", "DFlash2: a block drafter for Qwen".
+- include/osmos/run/engine.h (OSMOS_DRAFT_CONF_MIN / CUM_MIN): swept for energy at low-power (DESIGN.md "0.3.x: drafting for joules"): 0.1 the least J a token, 0.5 (maya's) 6% more, 0.0 as much (the early stop gone).
+- include/osmos/run/engine.h (OSMOS_NPU_SHARE_*): best measured, 8K prompts at performance (DESIGN.md "0.7.0"): DeepSeek 0.10 / 0.15 / 0.20 = 641 / 642.5 / 635.5 tok/s (GPU 626); Qwen UD-IQ3_XXS 0.05 / 0.10 / 0.15 = 954.8 / 947.1 / 919 (GPU 929.9; means of 5, 5 and 2 rounds).
+- include/osmos/run/engine.h (OsmosOptions): profile and rope_stages replaced the env vars INK2_PROFILE and OSMOS_LFM3_STAGES in 0.16.0; npu is 0.7.0; top_k came in 0.15.2; position-keyed draws in 0.14.0; marks in 0.7.5; one engine interface from 0.4.0 (DESIGN.md "0.4.0: one engine interface").
+- include/osmos/run/fit.h (FIT_HEADROOM): DESIGN.md "the budgets at 1M": every edge started at 1 GiB; under it, runs failed.
+- include/osmos/run/fit.h (FIT_RAM_FREE): the operator's rule: one box runs the model beside an editor, a browser, language servers and the agent harness.
+- include/osmos/run/fit.h (FIT_BUDGET_NOW): before 0.16.0 budget 0 meant "fit now" to Qwen and Hy4, the smallest to Inkling, the dense weights alone to DeepSeek.
+- include/osmos/run/fit.h (FIT_CHUNK, FIT_FIRST_COST, FIT_BUILDS): memory is taken ~0.93 GiB at once on this box (DESIGN.md, 0.16.0's flat); units' padding seen 6-12% (~6% on UD-IQ1_S at 1M); a sizing took 3-6 builds here.
+- include/osmos/run/gpu.h (gpu_sleep_on_waits): DESIGN.md "0.3.0: energy a token", target 2: a 300 ms wait was 300 ms of a core spinning, 7 ms asleep; the event flag is not honoured on ROCm 7.15; osmos-serve and dbench call it at the top of main.
+- include/osmos/serve/gen.h (GEN line): before 0.16.0 each number was read as its prefix ("12x" as 12, an id of -5 a huge index, 99999999999 wrapped). top_k is 0.15.2, seed 0.14.0; spec drafting is maya's.
+- include/osmos/serve/slots.h (Slots): kept conversations are maya #356's, the operator's.
+- include/osmos/text/answer.h (AnswerRule): DESIGN.md "0.5.10": Qwen3.8 at small talk closed its thinking and ended the turn at once, greedily, so every retry of rig's was the same empty turn.
+- include/osmos/text/chat.h: maya vendors encoding.py unchanged as serve/ds41_encoding.py; tests/test_chat.c holds the port byte for byte (tools/gen_chat_fixtures.py); the shaped parse is #34.
+- include/osmos/text/chat_hy4.h: held byte for byte by tests/test_chat_hy4.c (tools/gen_chat_fixtures_hy4.py); the release's efforts are no_think / high / max, AngelSlim's GGUF (from an internal checkpoint) adds low.
+- include/osmos/text/chat_ink2.h: unsloth's GGUF carries a longer reconstruction of a reference server's renderer, not the checkpoint's template; held by tests/test_chat_ink2.c (tools/gen_chat_fixtures_ink2.py).
+- include/osmos/text/chat_lfm3.h: the template is vibes1.7b's GGUF's tokenizer.chat_template (LFM3-1.7B's); held by tests/test_chat_lfm3.c (tools/gen_chat_fixtures_lfm3.py).
+- include/osmos/text/chat_qwen.h (qchat_render_with): 0.7.1: a user turn of tool responses as text, defused, stopped looking like one - the renders differed, a 400; held by tests/test_chat_qwen.c (tools/gen_chat_fixtures_qwen.py).
+- include/osmos/text/json.h (json_parse_within): added in 0.16.0 for osmos-api's untrusted request bodies.
+- include/osmos/text/tokenizer.h (Tokenizer): tests/test_tokenizer.c holds it against llama.cpp's llama-tokenize token for token.
+- include/osmos/lsa.h: design in DESIGN.md "the 10M agent"; the maps trained on -vibes (qwen/lsa.py).
+
+**DeepSeek (src/ds4), the engine (src/run), q35, lfm3, cpu, npu, lsa**
+
+- src/ds4/ds4_impl.h (FWD_SCORE_BYTES): 512 MiB of indexer scores is 2,048 tokens a chunk at a 64K context, 128 at 1M.
+- src/ds4/ds4_impl.h (FWD_CKV_F32_ROWS): 32,768 rows is 64 MB at 512 values.
+- src/ds4/ds4_impl.h (Forward.dfds, mem): the O_DIRECT pool reads date from 0.3.0; the membrane's design is DESIGN.md "0.5.8" and "0.6.2".
+- src/ds4/ds4_impl.h (Forward NPU fields): the NPU beside the GPU came in 0.7.0.
+- src/ds4/ds4_impl.h (reading, lane_on / Seq.failed): a prompt's read takes the large steps' math at any size since 0.7.1 (a short read after a reused prefix took the lane's and its bits differed); a failed placed step refused until reset/load since 0.7.1.
+- src/ds4/ds4_impl.h (Seq.slot): 0.16.0 - the engine took a step's last vocab_rows as kept, those the head skipped too; slot[] now names the rows the head computed.
+- src/ds4/ds4_impl.h (Seq.hi): 0.9.2 - rollbacks back to back with no step between each took SEQ_MAX_BACK, so 6 then 16 left the ring's slots and last[]'s n-gram short; hi counts the depth since then.
+- src/ds4/ds4_impl.h (Seq.dring): its comment said 0.16.0 makes the drafter's rings at first use (a first draft or a state's load, SCOPE.md) but seq_create still makes them with the sequence (~0.2 MiB) - check; 0.11.2 - a reset or load without rings left the rows and a draft read the last conversation's.
+- src/ds4/ds4_impl.h (fwd_dense ..): hip_ds4_resident.c and hip_ds4_make.c were one file before 0.16.0.
+- src/ds4/hip_ds4_attn.c (the masked index scoring): only the kept blocks' rows scored on a masked layer since 0.7.3.
+- src/ds4/hip_ds4_attn.c (ops_index_score_dot4): the int8 indexer dots came in 0.7.4, the same bits at 2.4x the speed of the F32 scoring.
+- src/ds4/hip_ds4_draft.c (widen): a BF16 vector's n values checked, no fewer, since 0.7.1.
+- src/ds4/hip_ds4_draft.c (drafter destroy): its buffers freed from the ledger's record since 0.16.0 (four hand-kept lists before).
+- src/ds4/hip_ds4_ffn.c (the prompt's read ahead): a prompt's next-layer union read, not the whole layer - 41% of a layer's experts are never picked, each read the SSD's time a prompt waits on.
+- src/ds4/hip_ds4_ffn.c, src/ds4/hip_ds4_npu.c (NPU parts): the NPU beside the GPU came in 0.7.0.
+- src/ds4/hip_ds4_make.c (FWD_ROW_THREADS): Engram's reads measured at 64 threads 832,000 random rows/s, 128 no more (DESIGN.md).
+- src/ds4/hip_ds4_make.c (forward_create_with): 0.16.0 - the lane, drafter and NPU made whole inside the build (attached after, by their own calls, before); Scratch freed from the ledger record (an array of its pointers before).
+- src/ds4/hip_ds4_resident.c (FWD_FETCH_THREADS): 12 fetcher threads - 4 reach the SSD's ceiling, 12 serve a decode's miss sooner (DESIGN.md, UD, step 5).
+- src/ds4/hip_ds4_resident.c (fwd_guess_routers): the guess's BF16 router copy halves its bytes a layer (unsloth's UD: 7.9 -> 3.9 MB).
+- src/ds4/hip_ds4_seq.c (seq_load): a state's n-gram tokens checked for any model since 0.16.0; part-way prompt states (osmos-serve's points) since 0.7.5.
+- src/ds4/hip_ds4_step.c (taps): a prompt piece of 2,125 tokens runs sub-batches of 2,048 and 77 - why the taps take the layer's last rows across sub-batches.
+- src/ds4/hip_ds4_step.c (forward_batch): a refusal before the history moves leaves every sequence as it was since 0.11.2; a failed placed step breaks the sequence (refused until reset/load) since 0.7.1.
+- src/ds4/hip_ds4_wait.c (fwd_wait): DESIGN.md "0.3.0: energy a token", target 2 - a decode waits 40 times a step, a sleep's wake costs ~0.2 ms (plain decode 14.7 -> 13.2 tok/s asleep), so decode spins.
+- src/lfm3/hip_lfm3_make.c (lfm3_stages_parse): 0.11.2 - a malformed stage string used whatever parsed before it; now refused.
+- src/lfm3/hip_lfm3_seq.c (lfm3_seq_prompt, lfm3_seq_rollback): 0.11.2 - an end past the context was taken (the other families refused it); a crossing step's tokens rolled back past the stage's from left the new stage's rope at an old position.
+- src/lfm3/hip_lfm3_step.c (lfm3_step_runs): 0.11.2 - a refused step left the step before's rows readable through a half-rewritten slot table.
+- src/lfm3/lfm3_impl.h (lsa_id): the maps file's hash in lfm3_identity since 0.11.2.
+- src/lsa/lsa.c (file head): the host read's agreement with lsa.py's sets is measured in tests/test_lsa.
+- src/q35/hip_q35_make.c (forward destroy): buffers freed from the ledger record since 0.16.0 (three hand-kept lists before).
+- src/q35/hip_q35_make.c (head_q8): the BF16 LM head is 2.54 GB a decode token reads; as Q8_0 1.35 GB.
+- src/q35/hip_q35_seq.c (file head): q35 behind the engine is DESIGN.md "0.9.0: q35 behind the engine".
+- src/q35/hip_q35_seq.c (q35_seq_load): the closed-blocks check moved before the parts are sized in 0.16.0 (it ran after).
+- src/q35/hip_q35_step.c (file head): one stream, no side work - the first version, the reference's bits checked layer by layer before any of q4x's overlap is taken over.
+- src/q35/hip_q35_step.c (q35_step_runs): 0.11.2 - a refused step left the step before's rows readable through a half-rewritten slot table.
+- src/run/fit.c (FIT_FIRST_COST): the first cost is the most the units' padding has been - the box's 6%, test_fit's models 12%; at 1, 90 GiB over 6% padding went 5 GiB past the target. Re-check it if the padding grows.
+- src/run/fit.c (fit_next, the flat): 0.16.0 - a fractional creep across a flat: 99.63 / 99.47 / 99.25 / 99.02 GiB all left ~0.8-0.96, the builds ran out, 84.98 kept against 98.88; now stepped below the flat by one step.
+- src/run/fit.c (the cost floor of 1): 0.15.0 - a measure under 1 (MemAvailable's wobble) stepped the box 98.99 -> 104.06 GiB, 2.79 GiB of RAM left.
+- src/run/hip_engine.c (the family list): the families named from the table since a hand-kept list went stale (three of six).
+- src/run/hip_engine.c (osmos_create): sampling's row and pick made whole at create since 0.16.0 (made at their first use before).
+- src/run/hip_engine.c (osmos_room): one room rule since 0.16.0 - osmos1.7b and the 27B reported the GPU's free memory alone.
+- src/run/hip_engine.c (osmos_batch): 0.16.0 - one path for every family's runs: before, each family built its runs (Qwen split past 64 sequences, the others refused) and osmos_read checked no token; Inkling, the 27B and Qwen embedded any token.
+- src/run/hip_engine_ds4.c (file head): each call as osmos-serve made them before 0.4.0; a prompt's read in the large steps' math since 0.7.1.
+- src/run/hip_engine_hy4.c (file head): hy4's sequence is DESIGN.md "0.10.0 step 2".
+- src/run/hip_engine_hy4.c (m_open): --lsa was taken and ignored until 0.11.2; now refused.
+- src/run/hip_engine_hy4.c (HY4_DRAFT_CUM_MIN 0.45): a verified token's experts ~10 ms of a round's ~146; Q3_K at 1K, 128 tokens (2026-11-19, prompt on the matrix cores): floor 0.15 / 0.3 / 0.45 / 0.6 / 0.75 code 21.9 / 23.2 / 24.0 / 23.4 / 23.4 tok/s, prose 26.0 / 26.2 / 27.7 / 26.2 / 26.0 (on Q4_K_M 0.3 had been between code's 0.4 and prose's 0.25).
+- src/run/hip_engine_ink2.c (file head): Inkling-2-Small the third family, 0.8.0.
+- src/run/hip_engine_ink2.c (INK2_STEP_TOKENS 8192): an 8K prompt (a 40 GiB room) 115 / 238 / 321-333 tok/s at 2,048 / 4,096 / 8,192 tokens a step, the forward 54.8 / 58.0 / 64.5 GiB with the room (the logits' [max_tokens][n_vocab] 6.6 GB of 8,192's).
+- src/run/hip_engine_ink2.c (INK2_LOGIT_ROWS): 1,024 rows x the vocabulary's 201,024 F32 = 0.77 GiB (every row of an 8,192 step: 6.1 GiB).
+- src/run/hip_engine_ink2.c (INK2_DRAFT_CUM_MIN 0.5): 0.15.2, low-power, osmos-api, code / prose at temperature 0, 500 tokens: 0.95 11.5 / 11.1 tok/s, 0.9 (0.8.x's) 11.8 / 11.3 and 11.8 / 11.5, 0.7 12.5 / 12.0, 0.5 12.7 / 12.4, 0.3 12.6 / 12.1 - the verify cheaper than when 0.9 won, shorter rounds now pay.
+- src/run/hip_engine_ink2.c (INK2_DRAFT_CUM_MIN_WHOLE 0.5): Inkling-2-Mini, BF16 drafter, low-power, 2026-11-20, 2,048-token code prompt / 64-token one, 256 tokens: 0.9 43.4 / 29.2 tok/s, 0.7 47.6 / 32.7, 0.5 48.6 / 32.8, 0.3 48.7 / 32.1, 0.1 48.7 / 29.9 (plain 24.2 / 25.6).
+- src/run/hip_engine_ink2.c (s_draft): a verified token reads ~0.4-0.6 of a step's experts; 0.8.x picked 0.9 with a ~12 ms draft (p2 13.8 -> 14.5 tok/s, plain 9.1; p1 13.5 -> 13.4, plain 11.5; p3 14.2 -> 16.9, plain 14.3; 0.5, 0.6 below 0.7, 0.8 its tie with p1 4% under); 0.5 since 0.15.2.
+- src/run/hip_engine_lfm3.c (seed_window): 0.11.2 - a seed_window of 0 left every prompt unseeded and a drafted turn refused.
+- src/run/hip_engine_q35.c (file head, Q35 logit rows): q35 behind the engine is DESIGN.md "0.9.0: q35 behind the engine"; OSMOS_MAX_LANES x 9 rows of 248,320 floats is 0.57 GB.
+- src/run/hip_engine_q4x.c (reads_apart): one math for a prompt's small and large steps since 0.7.1's replay.
+- src/run/hip_engine_seq.c (oseq_draft): the vocabulary check every family's since Hy4's drafter returned 0 drafts on a bad token.
+- src/run/engine_impl.h (the step, takes, kept, handles): 0.16.0 - Qwen alone refused a step past the context and at 0 sized its step to the whole context; five hand-kept option lists (stream_ngram taken silently by every family but Qwen's, no_guess by Inkling's); six copies of the kept view; hip_engine.c and hip_engine_seq.c one file before.
+- src/cpu/lane.c (the pool): a phase is tens of microseconds, so the barrier spins; any split's bits held by test_cpu_lane.
+
+**Qwen (src/q4x), Inkling (src/ink2), Hy4, memory (src/mem), model files (src/model)**
+
+- src/q4x/q4x_impl.h (Q4xBuf): freeing Q4xBuf as an array of its first pointers was 0.15.2's double free; its buffers are freed from the forward's record only.
+- src/q4x/q4x_impl.h (Q4X_ROW_THREADS): 64 readers is DeepSeek's Engram measure: 832,000 random rows/s, 128 readers no faster.
+- src/q4x/q4x_impl.h (Q4X_EXPERT_READERS): 12 is DeepSeek's experts' reader count.
+- src/q4x/q4x_impl.h (q4x_pin_wait): without the wait, 0.5.10's drafts came a run apart (a seed's copy queued behind a busy GPU read the next draft's tokens).
+- src/q4x/q4x_impl.h (Q4xForward.npu): the NPU beside the GPU came in 0.7.0.
+- src/q4x/dflash.c (sel_rank check): before the sel_rank % 32 check (0.11.2), a selector rank off Q8_0's 32-row block refused every draft.
+- src/q4x/dflash_core.h (DfHost): the DFlash2 core was split out in 0.11.2; q4x's and LFM3's drafts kept their bits as before the core, the core's call sequence each host's before it.
+- src/q4x/dflash_core.h (DfBuf): 0.16.0 stopped freeing DfBuf as an array of its first pointers; freed by name through one ledger.
+- src/q4x/hip_q4x_draft_dflash.c (q4x_dflash_seed): the step_id guard on b.taps came in 0.9.2 (a batch past Q4X_MAX_RUNS is several steps).
+- src/q4x/hip_q4x_draft_mtp.c (pending h): 0.5.10 read s.pend unwritten at position 0; now zeros.
+- src/q4x/hip_q4x_draft_mtp.c (q4x_mtp_seed): the step_id guard on m.hid came in 0.11.2, after another sequence's h was read as its own.
+- src/q4x/hip_q4x_layers.c (up_mean, mm_run_gated_mean): the up's F32 neither written nor read: 168 MB a mixer fewer at a 2K step; a 4K prompt's up and mean 366 -> 281 ms, low-power. bits held by test_gated_mean_gpu.
+- src/q4x/hip_q4x_layers.c (q4x_mix, the silu's f16 in b.xe16): a 2K step's own buffer for it tipped UD-Q4_K_XL's 8K prompt in 4K steps past the GPU's memory (a kernel's code then not loaded: HSA_STATUS_ERROR_OUT_OF_RESOURCES, the runtime's segfault).
+- src/q4x/hip_q4x_layers.c (q4x_mix, q4x_hc_norm_inject): fused norm + inject on a prompt: a 4K prompt's norms and injects 479 -> 361 ms, low-power; fused on a small step instead would cost decode 27.4 -> 25.6 tok/s.
+- src/q4x/hip_q4x_make.c (df_ring): the ring is window + Q4X_SLOTS since 0.9.2; a ring of the window alone let a rollback then a shorter seed read up to 6 dropped positions' keys as the window's oldest.
+- src/q4x/hip_q4x_make.c (q4x_forward_create): streams/events refused go through q4x_forward_destroy; 0.7.1's free(f) leaked them.
+- src/q4x/hip_q4x_make.c (experts_bytes): 0.15.0 counted every expert when the budget was 0, so a machine short of the whole model was refused rather than streamed.
+- src/q4x/hip_q4x_make.c (fixed_bytes): since 0.16.0 the fixed part is counted from the tables and records, not read as the GPU's free memory before and after.
+- src/q4x/hip_q4x_moe.c (q4x_moe_shared): the shared expert on s2 beside the routed ones: plain decode 23.9 -> 25.8 tok/s, drafted 40.1 -> 43.6, low-power. the NPU's share came in 0.7.0.
+- src/q4x/hip_q4x_npu.c (file): the NPU beside the GPU came in 0.7.0; the 128-token part's three names (npu_pack.h, q4x_ops.h, kPart) tied by a static assert in 0.7.1.
+- src/q4x/hip_q4x_npu.c (cost): spikes/npu/RESEARCH.md's NPU times, gate + up then the down: IQ3_XXS 281 + 139 us, IQ2_S 603 + 139 us.
+- src/q4x/hip_q4x_resident.c (q4x_room_left_past): FIT_HEADROOM exists because UD-Q4_K_XL (n-gram table resident, 8K context in 4096-token steps) left 0.02 GiB after its sequence and segfaulted in hipLaunchKernel loading a kernel's code.
+- src/q4x/hip_q4x_resident.c (q4x_room_left_past): before 0.16.0 the machine was read with 8 GiB kept whatever --fill; now the ledger's room with --fill's RAM kept.
+- src/q4x/hip_q4x_seq.c (STATE_VERSION): version 4 (the MTP head's cache, indexer, pending h) came in 0.9.2; before it the head's attention read rows another conversation's seeding left.
+- src/q4x/hip_q4x_seq.c (q4x_seq_load): every load's tokens checked since 0.16.0; a broken sequence's reach is 0 since 0.11.2.
+- src/q4x/hip_q4x_seq.c (MarkHeader): 0.16.0 gave the mark a version and identity like every family's; its magic alone before.
+- src/ink2/ink2_impl.h (Ink2Forward.pf): the profile moved from a process's statics into the forward in 0.16.0; the forward's parts split from one file in 0.16.0.
+- src/ink2/geo.c (upstream keys): upstream llama.cpp's Inkling-2 keys are its PR #32694's.
+- src/ink2/hip_ink2_draft.c (the fold): the folded head is 55 MB as Q8_0, 103 MB as BF16; a step reads it whole.
+- src/ink2/hip_ink2_draft.c (ink2_seq_seed): the tap_step guard came in 0.9.2; so did sizing the buffers by the drafter's block, not INK2_MTP_BLOCK (which ran past a block of 2 or 3's buffers).
+- src/ink2/hip_ink2_make.c (mm_takes_bf16): a model whose BF16 is a side tensor (Inkling-2-Small's sink projections) keeps its matvec and 0.11's bits; other families' BF16 matrices keep their matvec as before.
+- src/ink2/hip_ink2_make.c (fixed_bytes): since 0.16.0 counted from the record, not read as the GPU's free memory before and after.
+- src/ink2/hip_ink2_moe.c (moe, run bounds): before the bound on a run's launch, a decode's verify launched empty experts' kernels, 3 a pass.
+- src/ink2/hip_ink2_moe.c (moe, read ahead): a prompt's read ahead: 27.0 against 31.5 s of prompt steps, 900 tokens. on a decode the guess named 26% of its misses and read ~80 experts a token never picked: 4.25 against 4.6 tok/s, so decode doesn't read ahead.
+- src/hy4/hy4_impl.h (HY4_SCORE_ROWS): unbounded, a step of 4,096 at a 1M context took 4.3 GB of score scratch; now sub-batches of 256.
+- src/hy4/hy4_impl.h (Hy4Forward.kring): the token keys a ring since 0.11.0; before, a row a position (6 KB a token).
+- src/hy4/hip_hy4_draft.c (hy4_dfly_load): the max_tokens >= ROWS check came in 0.11.2 (the MLA table is max_tokens x heads).
+- src/hy4/hip_hy4_draft.c (head4): the drafts' head Q4_0 instead of Q8_0 (a round reads it a draft: 5 x 0.39 GB at Q8_0). Q3_K at 1K, 128 tokens, A/B in one session (2026-11-19): code 24.1-24.6 -> 25.6-26.2 tok/s (the same 87 accepted, 106 drafts against 112), prose 27.5-28.1 -> 28.3-29.0 (the same 96); +209 MB.
+- src/hy4/hip_hy4_layer.c (engram): Engram's projection stays on the matvec in a read: on the matrix cores' f16, layer 1 was 6.3e-3 of its largest off the reference on osmos's own input, 2.3e-4 in F32 (the other layers' f16 error).
+- src/hy4/hip_hy4_make.c (fixed_bytes): since 0.16.0 counted from the records, not read as the GPU's free memory before and after.
+- src/hy4/hip_hy4_moe.c (mv_experts): a one-token decode on the single-token kernel: Q4_K_M's experts 32 -> 14 ms a token (2026-11-19).
+- src/hy4/hip_hy4_resident.c (rope frequencies): the dim / 2 > 256 check came in 0.11.2, after a file's rope_dim past 512 wrote past h.
+- src/hy4/hip_hy4_seq.c (hy4_seq_prompt): before 0.11.2 an end past the context was taken (the other families refused it). STATE_VERSION 2 is 0.11.0's cache rows (Q8_0 latents by default).
+- src/hy4/hip_hy4_step.c (f->rows = 0): came in 0.11.2; a refused step left the step before's rows through a half-rewritten slot table.
+- src/mem/cuda_slots.c (file): on the discrete card the GPU's reads of pinned host memory cross PCIe: GPU0 x16 Gen5 ~54 GB/s, against VRAM's ~1.8 TB/s.
+- src/mem/experts_plan.c (file): the plan is 0.12.3's Inkling sizing, shared by every family; the slots' round-up to whole grains counted since 0.16.0.
+- src/mem/fetchq.c (fetchq_read, split): chunks of many units side by side defeat the file's readahead: a load measured 16 -> 22 s.
+- src/mem/hip_ledger.c (LEDGER_*): the ledger's reading is DESIGN.md's 0.15.2 section; the count-back figures (~1.25 ms a GiB, 32 GiB in 40 ms, steps of 1.9-6.7 GiB a 10 ms, idle steps 7 MiB at most, the GPU's 115 GiB) size LEDGER_NAP_MS, LEDGER_STILL and LEDGER_WAIT_NAPS: re-check on a driver change.
+- src/mem/membrane.c (pend): a failed read's hold stays its pool's since 0.11.2; looked up again it was the membrane's and the stream's slot was held for good.
+- src/mem/membrane.c (warm start): a refusal kept the warm start's holds before 0.7.1, the room held for good.
+- src/mem/resident.c (place): the part offset an int before 0.7.1, wrapped by a first part of 2 GiB or more.
+- src/model/dspark_index.c (number, dims product): the 64-bit overflow refusals came in 0.7.1 (a product wrapped 64 bits before).
+- src/model/gguf.c (split count key): before 0.7.1 a string-typed count had its pointer bits read as the integer.
+- src/model/gguf.c (shard_path): before 0.7.1 a shorter name's tail was written past, and a count spelt otherwise opened siblings of another name.
+
+**the kernels**
+
+- kernels/q4x.hip (norm loops, loads issued together): a decode step's norm went 5.7 -> 4.3 us warm (cn.hip scratch bench) once a thread's dim / kThreads-apart loads were issued together under __restrict__.
+- kernels/q35_attn.hip (part_keys): 0.11.2 made a token's split its own; before it, past 8,192 keys a step's first tokens took the last token's split, so a token's bits depended on the step.
+- kernels/select.h (select_core): 0.7.3 added the LDS gather of the first pass's bin and the one coalesced emit pass; 0.7.4 made DeepSeek's and Qwen's selection one shape and added the chunked small-step selection (its picks the one-block selection's, bit for bit).
+- kernels/mm.h (x16 layout): the tiled x16 (a wave's fragment 512 contiguous bytes, 4 lines a load not 16) was measured: the activations' loads were what bound many-token steps.
+- kernels/mm.h (kPipe): x double-buffered at G 2 (Q5_K's 32-value slabs): wo_a 7.24 -> 5.69 ms at 2048 tokens, the shared expert's gate 2.01 -> 1.87 ms; at G 8 (the IQ experts' 128-value slabs) a real layer 15.2 -> 22.0 ms - hence G <= 2.
+- kernels/mm.h (kRegA, the A operand from the decode at one column tile): against the slab through LDS at a token, each matrix from DRAM (dec1 / dec_ds / exp1, low-power, 2026-11-07): Q6_K long rows +6-16% (Qwen DeltaNet pair 183 -> 207 GB/s, attn_q 172 -> 200, logits 179 -> 203; DeepSeek wo_b 193 -> 204, wo_a 191 -> 207), Q8_0 +13% (Qwen hc mixers 156 / 147 -> 178 / 166), IQ4_NL +7% (142 -> 151), IQ4_XS +5%; Q6_K short rows (64-value slabs: DeepSeek q_b, 1,280 columns) -7%, IQ2_S -10%, IQ3_XXS and Q2_0 level. a token's dense reads Qwen 23.2 -> 20.7 ms, DeepSeek 34.2 -> 33.1 (Q5_K: m1.hip's q_b 181 -> 143 us). UD-Q4_K_XL expert types (mmsweep q4, 10 experts cold, low-power, 2026-11-09): Q4_K at 128 x 8 x 8 103-107 -> 78-80 us, Q5_1 111 -> 72-75; a 512-token prompt 247 -> 409 tok/s, ids hash the same.
+- kernels/mm.h (kLockstep / kLockstepSlabs): down's 17,408 columns (34 slabs a wave) read 1.6x its bytes from DRAM with the waves drifting apart; in step 156 -> 177 GB/s. rows of 10-12 slabs a wave lose 3-8% to the barriers (gate / up, qkv, ssm_out: fp4bench MM, performance profile), so kLockstepSlabs 16 sits between the two measured. the loop is compiled twice because a runtime barrier branch cost the others 5-8%.
+- kernels/mm.h (gemm_kernel dead tile): 0.11.2 bounded a dead tile's reads to the x16's round16(n); before it they read up to the block's 256 tokens, past a buffer sized to the step.
+- kernels/mm.h (kOneTile group kernel): a token's 8 experts (mmsweep ink2, low-power, Inkling-2 shapes): IQ1_S gate 285 -> 190 us, IQ2_XXS 222 -> 201, IQ2_S down 251 -> 232-248; IQ3_XXS down 250 -> 268-304 (slower: not taken).
+- kernels/mm.hip (Tuned): shapes measured on gfx1151 2026-10-29. Q5_K's small slabs + more waves: q_b 88 -> 163 GB/s, the head 123 -> 157; Q8_0 and Q6_K near their matvec's at SL 128. IQ experts at 4 waves of 128 (16 waves of 64 ran 5 slabs a wave to 5120 columns then a 16-way LDS sum; counters: waves 52-76% waiting, 14% at the barrier): blk.24 gate 17.6 -> 13.9 ms, blk.10 down 22.6 -> 15.7, a decode token 74.0 -> 71.6 ms, a 4096-token prompt ~294 -> ~314 tok/s. column tiles at 1024 tokens (4096 x 4096): 8 for all but Q8_0, whose 4 is 1.30 ms to 8's 1.62 (kMaxCt 4).
+- kernels/mm.hip (Short<kQ6_K>): unsloth UD q_b's 1,280 columns (2026-11-03): 8 waves of 64-value slabs 170.8 -> 197.0 GB/s at a token, error 1.6 -> 1.4 u|wx| (4 waves of 128: 200.0 GB/s but 2.9 u|wx|); long rows keep 128 x 8 (out_b's 8,192 columns: 202.4 GB/s against 144.1 at 64 x 8).
+- kernels/mm.hip (Odd<kQ8_0>): 10240 x 320 at a token 32.4 -> 22.2 us (mmsweep).
+- kernels/mm.hip (Tuned, Qwen3.8 expert types): 10 experts cold (mmsweep 2026-11-06; SL 64-256, W 4-8, U 2-8): IQ4_NL down 69.5 -> 57.7 us at 64 x 4 x 4, IQ4_XS 68.7 -> 53.0, IQ3_XXS gate / up 58.7 -> 53.5 at 128 x 8 x 8, Q2_0 45.3 -> 39.9 at 64 x 8 x 4.
+- kernels/mm.hip (Tuned<kMXFP8>): mmsweep mini, low-power, 2026-11-20, 8 experts at one token, Mini's 1,152 x 2,304 gate / up and 2,304 x 1,152 down: default 128 x 8 x 8 95 / 89 GB/s (generic decode_h 57 / 48), 64 x 4 x 4 155 / 151 (a plain read 224).
+- kernels/mm.hip (Tuned<kBF16>): Mini's BF16 values below f16's normal range: 322,439 of 1.93 G.
+- kernels/mm.hip (Bf16Nine): mmsweep bf16 at a token, low-power: q / gate 3,072 x 2,304 197 -> 228 GB/s (matvec 210), k / v 1,024 x 2,304 190 -> 200 (matvec 173); the 3,072-column output at 128 x 8 x 8 217 GB/s, 9 waves 204.
+- kernels/mm.hip (Tuned<kQ4_K>, <kQ5_1>): mmsweep q4, low-power, 2026-11-09, 10 experts cold: Q4_K gate / up 78-80 us at 128 x 8 x 8 -> 58-60 at 32 x 16 x 2; Q5_1 down 72-75 -> 63-64 at 32 x 8 x 2 (16 waves slower). a 512-token prompt 409 -> 507 tok/s, decode 22.0 -> 23.2. perplexity within scatter (2K 6.9661 vs 6.9754, 8K 2.7434 vs 2.7354); 64-value slabs through LDS (64 x 8 x 4 / 64 x 4 x 4) moved it up +0.5% / +1.3%, not taken.
+- kernels/mm.hip (x16 vectorized kernel): one value a thread with a 64-bit divide each ran ~15 GB/s, the prompt's 6.9 s at 32K.
+- kernels/mm.hip (slot gather to x16): a value a thread's scattered 2-byte stores vs 8 a thread: a 2048-token step on the IQ3 pack 2.51 -> 1.09 ms a layer (low-power, 2026-11-10).
+- kernels/mm.hip (GroupPlan): mmsweep experts, real blocks, 160 experts cold, low-power, 2026-11-09, vs group_ct: Q4_K +22 / +42 / +17% at 24 / 37 / 64 tokens, +13% at 128; Q5_1 +6 / +28 / +8%, +42%; IQ4_XS +7 / +6 / +9% (128 level); IQ4_NL and Q2_0 level at 24-64, +16% and +60% at 128. DeepSeek (2,304 x 5,120, 64 experts): 2 row tiles 25-68% slower for every codebook type (IQ2_XXS / XS / S, IQ1_S), Q2_K +30 / +7 / +7%; the gemm at 128 IQ3_XXS +41%, Q2_K +35%, IQ2_S +16%, IQ1_S +6-10%, IQ2_XXS and IQ2_XS -4 .. +6% by shape (not taken); Qwen's IQ3_XXS gate level (-1%). bits checked by test_mm_gpu's mm_group at 24 / 37 / 64 / 100 / 128 tokens against mm_run.
+- kernels/mm.hip (resident_blocks): IQ1_S one block a tile 204 us vs the persistent grid 188 us (mmsweep ink2); sizing by the runtime's one-CU 64 KB LDS gave 7 blocks a WGP, 211 us, against the 12 the VGPRs allow, 190 us - hence the 2x for WGP mode.
+- kernels/mm.hip (kGemm): 10240 x 2560 at 2,048 tokens, low-power: Q6_K 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 at 64 x 256 blocks (64 x 128: 22.8, 32 x 256: 22.4, without the second slab's LDS 25.5). Q5_K (Inkling-2-Small's dense) 2,048 tokens 1,058 -> 1,012 ms. bits checked by test_mm_gpu at 2,048, 64 and 33 tokens against 16, and Hy4-flash's 1,024 / 1,536-column Q8_0 rows.
+- kernels/mm.hip (per-head x16 pass): a head's slice converted alone reads 2,048 rows 64 KB apart, ~15 GB/s.
+- kernels/mv.hip (tune): R 1-2, U 1-8 swept on gfx1151 on ds1017's shapes (2026-10-28: an expert's 5120 x 2304 and 2304 x 5120, q_b, out_b, q_a, shexp).
+- kernels/mv.hip (tune, F32 / BF16): unsloth's F32 router 384 x 5120 at one token, 4 in flight: F32 53.5 -> 38.8 us (147 -> 202 GB/s), BF16 copy 22.8 -> 19.5 (2026-11-04, 40 routers cold; R 1-4, U 1-8). 2-6 tokens (Qwen3.8 verify, mvsweep f32, low-power, 2026-11-09), 2 in flight: the mixers' inject 4 x 10240 13.2 -> 9.1 us at 4 tokens, 14.2 -> 12.7 at 6; alpha / beta 32 x 2560 7.1 -> 5.6 at 4; the router 512 x 2560 level.
+- kernels/mv.hip (tune, Qwen3.8 expert types several tokens): mvsweep 2026-11-06, 10 experts cold, 2 and 2: at 2 tokens IQ3_XXS 73.2 -> 45.1 us, IQ4_NL 76.6 -> 55.0; at 4 86.6 -> 65.4, 92.7 -> 71.7.
+- kernels/mv.hip (kWide): R 1-8, NW 4-32 on ds1017's BF16 5120 x 384 router at 8,192 tokens: 15.2 ms in chunks of 8, 5.5 at 4 x 8; R 3 NW 12 5.1, 6 or 8 rows 6.6-7.1, 16+ tokens 6.3-16.
+- kernels/mv.hip (kWideF32, kNarrow): Qwen3.8 router 512 x 2560 at 2,048 tokens (low-power, 2026-11-10): R 3 NW 12 1.27-1.34 ms vs 4 x 8's 1.52-1.55 (R 3 NW 8-20 1.38-1.57, R 5 NW 12 1.42, R 2 or 8 slower). narrow tile: the mixers' inject 4 x 10240 520 -> 456 us; shared expert gate 1 x 2560 68 -> 30.
+- kernels/mv.hip (kQ8Wide, one token): mvsweep hy4 / dense, cold, 2026-11-19: Hy4-flash sliding gate 16384 x 3072 305.8 -> 244.1 us, its output 3072 x 16384 281.2 -> 255.6, Qwen3.8 320 x 10240 21.5 -> 18.3; under 8M values level or a few % slower, hence the 8M floor.
+- kernels/mv.hip (kQ8Wide, verify tokens): mvsweep hy4 3-6, 2026-11-19: tall (sliding gate 16384 x 3072) 1 x 2 294.3 -> 243.3 us at 3, 296.8 -> 249.3 at 4; wide (output 3072 x 16384, DFly2 fusion 3072 x 6144) 4 x 1 280.4 -> 253.8 at 3, 283.8 -> 259.3 at 4; 1 x 1 at 5 334.3 -> 296.1; 2 x 2 at 6 324.3 -> 287.7.
+- kernels/mv.hip (tune_group1): 6 experts of ds1017's IQ types (2026-10-31, DESIGN.md): IQ2s at 2 x 4 gate 122.5 -> 110 us, down 149.8 -> 125.3; IQ1_M short rows (down's 2,304 columns) at 2 x 2 123.3 -> 118.5. Hy4-flash (mvsweep hy4, 16 cold, 2026-11-19): Q3_K 1536 x 1536 72.8 -> 67.4 us at 2 x 2; Q4_K 2 in flight at every shape (76.2 -> 72.2; Qwen3.8 UD-Q4_K_XL 640 x 2560 51.9 -> 49.4, 2560 x 640 69.6 -> 67.6). Qwen3.8 expert types (mvsweep 2026-11-06, R 1-8, U 1-4): IQ4_NL down 63.5 -> 53.3 us, IQ3_XXS gate / up 54.8 -> 40.1, IQ4_XS down 62.2 -> 43.1, Q2_0 32.3 -> 28.8 - 2 x 2 best or within noise.
+- kernels/mv_fp4.hip (CUDA LDS stage): a lane reading its own 36-byte block (a ninth of each line used) measured 290 GB/s on a 5090, slower than the LDS-staged kernel.
+- kernels/mv_fp4.hip (RDNA direct kernel): FFN gate / up 17408 x 5120, one token, low-power: fp4_kernel 41 GB/s (R 4, spilled), 139 (R 2); the direct kernel 228 (fp4exp). fp4bench SWEEP=1, GB/s: one token direct R 2 U 2 222; two R 4 U 1 211 (fp4_kernel R 2 96); three R 2 U 1 163 (fp4_kernel R 1 100); four fp4_kernel R 1 84 (direct's best 74: NT 4's registers).
+- kernels/q8.h (launch bounds, 16 waves a SIMD): 5 tokens and up took 98-107 registers and ran at 12 waves: gate+up 19 experts at 5 tokens 1,143 us against 704 at 4 (q8bench, low-power; DESIGN.md "0.3.2").
+- kernels/q4x_ssm.hip (conv run kernel): the plain conv_kernel ran ~100 GB/s on a 2048-token step's 10,240 channels, its loads a token's taps apart - why a channel's window is read once into registers.
+- kernels/q4x_ssm.hip (kDeltaSplit): 48 heads a block each left 8 of the 40 CUs two; 4 blocks a head: a 2048-token step 4.2-4.3 -> 3.8-3.9 ms (low-power); 2 blocks 4.1, 8 4.6.
+- kernels/q4x_ssm.hip (ring slots): slots - 1 kept because the oldest of the reach is never written; a rollback of all of it once read a stale slot.
+- kernels/q4x_moe.hip (route kernel, one-wave picks): replaced 0.5.11's block-wide argmax a pick (8 barriers each): Qwen3.8's 512 experts 19.3 -> 13.9 us median a decode token (rocprofv3, low-power, 2026-11-09), ids hash the same.
+- kernels/q4x_moe.hip (kPlaceInline): placing picks in tiles_kernel, one launch not two: decode 23.5 -> 23.8 tok/s; tables checked by test_q4x_moe_gpu (30 picks and 2,560 against a stable sort).
+- kernels/q4x_moe.hip (moe_sum vector kernel): the scalar kernel ran ~140 GB/s on a 2048-token step, 10 dependent 4-byte loads a value.
+- kernels/q4x_moe.hip (q4x_spin): 0.5.10's spin counted the shader clock (clock64) at 100 MHz's rate, ~20x short of `us`; hence wall_clock64 and its attribute rate.
+- kernels/q4x_qsa.hip (kBlockedFrom, kScoreTokens): 0.7.3 added the blocked scores; vs the plain kernel at 511K (qxbench QX_N): 1 token 0.8x the time, 16 0.9x, 32 1.4x, 64 2.1x. 0.7.3 raised the scratch to 128 tokens' rows: at 32 tokens (the old floor) a 256-token step at 511K took 31.6 ms, its 64-token tile half empty; 128 tokens 15.9 ms, 67 MB there. 0.7.4 added the small-step score kernel and the chunked pick (sel::select_core).
+- kernels/sparse_attn.hip (register tiles): measured on gfx1151 at 2,048 tokens x 640 keys (scratch sab.hip / sav.hip, all the same bits): scores 16 x 8 of a 64 x 128 block 8.9 ms (4 x 4 of 64 x 64 13.0, 8 x 8 9.4); values 8 x 16 of 64 x 256 9.8 ms (4 x 4 13.9, 8 x 8 of 128 dims 10.0).
+- kernels/sparse_attn.hip (small tiles): the large tiles gave one token ~5 blocks of scores, 2 of values. 64 heads a block, not the 16 of the F32-key kernel: one token x 640 keys 136 -> 70 us a call (16 / 32 / 64 heads; F32 keys at 16: 59). scores' keys a block (2026-11-04, decode trace, UD-IQ1_S): 64 / 32 / 16 / 8 / 4 keys 1.18 / 1.16 / 0.97 / 0.88 / 1.03 ms a token; 8 heads a thread 1.78.
+- kernels/sparse_attn.hip (row<F>): choosing the row size per key read it from the arguments at every load: 31 8-byte loads a values kernel, 28% slower than the F32 kernel before the packing - hence the F template.
+- kernels/quant.h (decode_h, osmos_keep): the fused v_fma_mixlo_f16 differed from round(round(x)) for 40690 of test_quant_gpu's 3670016 Q6_K values; a volatile asm instead of the plain one cost a decode token 74 -> 85 ms.
+- kernels/quant.h (iq2_h): the sign-by-xor decode took the decode's VALU 268 -> 172 a slab; a product fused with its rounding gave +0 for 256 of 3.67 M values of UD-IQ2_XXS's IQ2_XS (a -0 scale), caught by test_quant_gpu.
+- kernels/quant.h (iq1_h): before 0.8.1 IQ1_S, the slowest decoder a value (60 GB/s against IQ2_XXS's 115), took decode_h's generic F32 path; its permute decode is checked by test_quant_gpu. IQ1_M has no reference model here, so it stays generic.
+- kernels/attn.hip (index_score tile, kIx*): 1-4 tokens, 64-128 rows, 4-16 x 4-8 swept on gfx1151 at 2,048 tokens x 4,096 rows, 32 heads x 128: 47 ms a wave a row, 10.1 ms the tile (scratch ixb.hip).
+- kernels/attn.hip (kIxRcFp4, kIxTokFp4): 8 x 8 and 16 x 4 thread blocks measured 15x slower (spilled); 4 tokens the fastest of 1, 2, 4 (ixbench).
+- kernels/attn.hip (GATHER, FMA, dot4, Pick list / bmax, ops_block_max): added in 0.7.3; the one-token dot4 tile (TOK 1, kDTilesOne) and the dead-token skip in 0.7.4; ops_topk's keep_words bound rounded up to the last part in 0.11.2.
+- kernels/attn.hip (kDTiles): row tiles a block at 1M rows (scratch d4b): 8 (512 rows) 66 ms, 4 71, 2 82, 1 94, 16 66. kDTilesOne 2 from ixbench IX_T=1.
+- kernels/attn.hip (dot4 TOK): an 8-token tile of 512 threads for a verify's 5-8 tokens (keys read once) measured 1.0x the 4-token tile's two blocks: the kernel is ALU-bound, not read-bound; a verify's gain is the waves past its tokens skipping their sums, 1.22x at 6 tokens over 1M rows.
+- kernels/ops.hip (kHcAhead): hc_dot_few with loads in flight a thread: 24 -> 10.5 us (DESIGN.md).
+- kernels/ops.hip (router kernel): wave_pick replaced a block-wide argmax a pick (8 barriers each); test_router_gpu holds the new picks to that kernel's bits.
+- kernels/ops.hip (argmax, kArgSplit): a vocabulary in one block took ~160 us of one block's loads; split in kArgSplit slices ~10 us.
+- kernels/ops.hip (ops_sample): position-keyed sampling added in 0.14.0; top-k before top-p in 0.15.2.
+- kernels/ops.hip (ops_rms_add_rms, kRmsAddRegs): with the halves' re-reads a 2,048-wide row took 13 us (low-power); values held in registers between the halves instead.
+- kernels/ink2.hip (kFaDecodeWaves): measured on gfx1151 at Mini's shape (ink2_fabench DECODE=1, HEADS=24, W 1 / 2 / 4 / 8 over 512 .. 131,072 keys, low-power, 2026-11-22): each length's fastest W within 7% of the chosen rule.
+- kernels/ink2.hip (kFaUnit): row tiles a block swept with INK2_FA_RT 1 / 2 / 4 at 16K full: 756 / 716 / 638 ms.
+- kernels/ink2.hip (split decode W): a decode's blocks spent 80-89% of their cycles waiting on memory at one wave (profile), hence extra waves while the GPU is idle.
+- kernels/ink2.hip (prompt fa R): Mini's 8 row tiles a block (HEADS=24 PREFILL=1 ink2_fabench, low-power, 2026-11-20): 512K keys 920 -> 684 us a token, 128K 221 -> 166; R changes no bit (DUMP at R 1, 2, 4, 8).
+- kernels/hy4.hip (kSplitKeys, kTileKeys): mla_bench sweep (2026-11-18, low-power, a decode's 512-window and 1,024-key layers): 32 and 8 the fastest of 8..64 and 8..16 (64 us vs 64/16's 81, 16/8's 79).
+- kernels/hy4.hip (ix_score_kernel): a thread a group reading its own key once a head (512-byte strides, 16 times) took 113 ms a decode step at 128K (2026-11-19); the unpadded query rows' 16-way bank conflict cost 5.45 ms a layer at 1M, a token; the scores are latency-bound: at 1M a token 1.6 ms a layer against ~0.6 of bytes - hence the 4-way split sums and the spread kernel.
+- kernels/hy4.hip (ix_select_kernel): 0.11.2 removed its own F32 scoring loop (never called, its LDS rows at another stride than it read them); 0.11.2 also put a read's scores on the matrix cores at every step size (before, a read's step of kIxSpreadTokens or fewer took the F32 loop's, so a prompt's last chunk or a short turn got another math).
+- kernels/hy4.hip (ix_wide_*): a block a token's radix over 32K groups took 113 ms a step at 128K, 0.9 s at 1M (2026-11-19), hence the spread selection for a step's few tokens.
+- kernels/hy4.hip (DFly2 draft block): added in 0.11.0.
+
+**the tools (osmos-api, osmos-serve, benches, requant), text, serve**
+
+- src/serve/slots.c (index_dir, read_meta): 0.11.2 - two servers on one slot folder (another --max-tokens, --lsa or not, another quant beside) removed each other's conversations and in-flight writes; since then another identity's slots are left alone and a write's files are left until stale (an hour).
+- src/text/bpe.c (bpe_word): 0.7.1 replaced a rescan of the word on each merge (quadratic in its length) with llama.cpp's queue of pairs, stale ones skipped.
+- src/text/chat.c (truthy, the response_format / number rendering): 0.7.1 fixed a falsy response_format ([], false) rendering its section, and a number's str() rendering empty.
+- src/text/chat_read.c (placeholder, the last user turn): 0.7.1 - the image placeholder in text parts and tool content used to be taken, and an empty user turn was not merged into; both fixed to encoding.py's behavior. chat_parse.c refuses a completion holding the placeholder since 0.7.1.
+- src/text/chat_qwen_impl.h (qchat_name_ok): 0.7.1 - a client's name "f<|im_end|" plus the template's '>' made a special token; names with '<' or a newline are refused since.
+- src/text/json.c (string): 0.16.0 - each string reserved the input's whole rest; a million short strings reserved terabytes of address space. now sized to its closing quote first.
+- src/text/json.c (string, lone surrogates): 0.11.2 - a lone surrogate (a JS string cut between a pair's halves) was refused, and with it the conversation's every later request; now U+FFFD.
+- src/text/json.c (dedupe): comparing each key with every earlier one was n^2 - one 1 MB body held a core 67 s; now a merge sort, n log n.
+- tools/api/api.h (API_BODY_MAX): sized at twice the largest real body - 1M tokens x 2.98 bytes a token x 1.2 for escaping, ~3.6 MB; 0.16.0 cut it from 32 MB to 8 MB.
+- tools/api/api.h (API_TREE_MAX): the costliest real shape measured is an agent's history with tool calls, a tree 1.72x its body (a prompt's 1.00x), so 4x the body max leaves 2.3x headroom; a body of tiny values reaches ~65x and is refused.
+- tools/api/api.h (API_REQUEST_S, API_BODY_S_MB): 0.16.0 - a byte every 9 s, under the 10 s idle, held a connection for hours; now a whole-request deadline. this box's loopback and LAN run past 100 MB/s, the 1 MB/s floor is a slow tunnel's.
+- tools/api/chat.c (api_chat): 0.9.2 - a template's own refusal was a 503 and clients retried it; now a 400. 0.9.2 also made a QUIT-cancelled answer an error, never a "stop". #25: a turn ended out of the format is an error, never its text as the answer.
+- tools/api/config.h (Config): fill_orphans came in 0.7.3 (#47); preserve_thinking 0.11.3; temperature/top_p 0.14.0 (Inkling-2-Mini's release 1.0); top_k 0.15.2 (Qwen3.8's 20, osmos1.7b's 50); the slots options were the env knobs OSMOS_SLOT_* before 0.16.0. tools/api/config.c: npu 0.7.0.
+- tools/api/engine.c (engine_quit): 0.7.1 - a stop killed the engine by PDEATHSIG before it set its conversations aside; now QUIT and a wait. the prompt's reuse line in the log came in 0.11.3.
+- tools/api/http.c (http_read): 0.7.1 - Content-Length "-1" read as huge (a 413) and "12xyz" as 12. 0.11.2 - without the 100 Continue curl (past 1 KB) waited a second and a request was lost. 0.7.1 - a close with bytes unread reset the connection, the client never saw the status (http_linger). 0.9.2 - OpenAI's param/code added (context_length_exceeded).
+- tools/api/loop.c, loop.h (call identity, LOOP_UNCHANGED, stuck): the loop signals came from issue #47 (0.7.3). 0.15.2 - arguments' keys sorted at every depth (before, a client reordering them made two calls of one); LOOP_UNCHANGED added (Inkling-2-Mini re-reading go.mod, 2026-11-22); stuck moved from repeat_count >= LOOP_REPEATS to LOOP_REPEAT_ANY (polling counted as a loop).
+- tools/api/main.c: --allow-origin 0.16.0 (browser requests refused since 0.15.2); --ctx 0.7.3; /v1/models listed while loading 0.9.2; --keepalive-ms replaced OSMOS_API_KEEPALIVE_MS in 0.16.0; the idle close 0.7.1.
+- tools/api/reply.c, reply.h: 0.11.2 - the boot tag in ids (a conversation across a restart held two calls of one id); x-should-retry: false (a client generated a whole answer three times for one error); the SSE keep-alive (a long prompt's read timed out, the retry read it again and timed out again). 0.7.1 - a whole answer looks for its client's leaving as tokens land. #34: a refused completion goes back with the error. 0.16.0 split chat.c / reply.c.
+- tools/api/request.c (kFields, sampling, n, max_tokens): 0.16.0 - the fields became an allowlist (an unknown one was ignored: a misspelled max_token ran unbounded). 0.7.1 - n=2.0 was taken as one choice, and unknown sampling fields were ignored. 0.11.2 - max_tokens 4294967295 was refused as "a positive integer"; now as many as the context's room. sampling 0.14.0, top_k 0.15.2, loop signals 0.7.3 (#47).
+- tools/api/request_ink2.c: before 0.9.2 thinking off was ignored for Inkling and the default effort 0.9 ran.
+- tools/api/request_ds.c: the DeepSeek reader follows maya's frontend.py for DeepSeek.
+- tools/serve/main.c (usage): kept conversations came from maya #356; the --slot-* flags were the env's OSMOS_SLOT_* (read with atof) before 0.16.0. 0.16.0 - a --fill the machine cannot keep free is refused (the ledger's; it started on the smallest build before). --stream-ngram leaves Qwen's 26.8 GiB n-gram table (UD-IQ3_XXS) out of GPU memory. 0.7.1 - --max-tokens 0 read a prompt 0 tokens a step forever. 0.11.2 - --parallel past 64 overran a round's lane arrays, every batch refused.
+- tools/serve/multi.c: --parallel lanes came from maya #587 (the operator's). 0.16.0 - "STOP 7x" stopped 7; the rid is read whole since.
+- tools/serve/conv.c, serve.h (Point, conv_continue, conv_read): the prompt's and the user turn's points came in 0.7.5; a family that reads apart goes back to its prompt's point since 0.7.1 (0.7.0 continued on the decoded state). 0.7.1 - a conversation not kept still moved kept ones to make room, then was refused.
+- tools/serve/conv.c (conv_cancel_read): before 0.9.2 a cancelled read restarted the conversation every time, so a client's retry after a timeout read the whole conversation again (and, the read longer than the timeout, again).
+- tools/serve/conv.c (conv_take back, read_piece): 0.9.2 - a conversation taken back got no prompt point, so its next turn read the whole conversation again (DeepSeek: or continued on its decoded answer); and the drafter's rings were seeded from the whole prompt's window, so a turn gone back to the mark with a short tail drafted from rings with no rows for it.
+- tools/serve/conv.c (conv_restart): 0.16.0 - a restart resets the sequence in its own memory; destroyed and made again it could be refused the memory it had just given back.
+- tools/serve/round.c, single.c (the context's last position, the answer's last token): 0.9.2 - the last position's pick was dropped, a drafted answer a token short of the plain one. 0.11.2 - a drafting lane's last token was verified and its rollback past a block's close refused, the turn failed. 0.11.2 - a slot's load short of memory part way left state and held ids apart, the next turn read at the wrong position.
+- tools/bench/bench_common.h: 0.7.1 - copies of the shared bench code had drifted; kld.hip and q4x_kld.hip took sorted[n / 2] and sorted[floor(0.99 n)] where numpy interpolates (bench_quantile now numpy's linear).
+- tools/bench/dbench.hip: NPU / NPU_SHARE came in 0.7.0. 0.7.1 - energy.py summed the warm-up into the questions' energy (q4x_bench has no warm-up window); the warm-up prints no window since.
+- tools/bench/fp4bench.hip (mv_fp4 on Qwen3.8-27B's NVFP4 shapes): a plain read's ceiling 244 GB/s at low-power. measured, not kept: the blocks split at load (scales apart, the codes' 32-byte runs: two uint4 loads a block) - 224 GB/s against 225 on gate / up, 205-211 against 210-213 on the long rows; x copied to the workgroup's LDS once - 191-217 against 212-225 (its load and sync cost more than the L2 reads they save); many tokens a call with fp4_kernel's bits - 4 tokens 646 us, 16 1,820 against one's 226 (x from L2 once a row a token: 5.7 GB at 16 tokens - a matmul's job).
+- tools/bench/hostbw.hip: the experiment of 0.6.10 (DESIGN.md "0.6.10"): host memory kinds for a long step's buffers.
+- tools/bench/ixbench.hip: the fp4 score kernel's comparison came in 0.7.3, ops_index_score_dot4 and its one-token tile in 0.7.4. kld.hip: budget auto 0.7.3; NPU in kld/ppl/q4x_bench 0.7.0.
+- tools/bench/ink2_run.hip: 0.8.0's first whole-model check of Inkling-2-Small.
+- tools/bench/q4x_bench.hip: 0.7.1 - the prompt's time ran on through the step sweep (Q4X_STEP_SWEEP), so its window and rate were off.
+- tools/bench/mmsweep.hip (g_passes): ink2 takes 20 passes - a low-power clock swings ±15% a pass.
+- tools/bench/q4x_ppl.hip (Q4X_PPL_STREAM): the streamed n-gram table leaves UD-Q4_K_XL's 28.8 GB out of GPU memory. qxbench came in 0.7.3 (its picks' hash 0.7.4); selprobe was made for issue #47's trace.
+- tools/requant/requant_ink2_mtp.c: osmos-evo-inkling's drafter at q5_K q5_K is 1.18 GiB against q8_0 q8_0's 1.76, its drafts the same.

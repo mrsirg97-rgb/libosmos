@@ -88,7 +88,7 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
     if (strcmp(k->key, "general.alignment") == 0)
       align = k->type == GGUF_UINT32 ? k->v.u : 0;
     else if (strcmp(k->key, "split.count") == 0 || strcmp(k->key, "split.no") == 0)
-    { /* an unsigned integer (gguf-split's u16): another type refused by name (0.7.1: a string's pointer bits read) */
+    { /* an unsigned integer (gguf-split's u16): another type refused by name, never read as one */
       if (k->type != GGUF_UINT16 && k->type != GGUF_UINT32 && k->type != GGUF_UINT64)
       {
         ok = gguf_fail(r, "split.count or split.no not an unsigned integer");
@@ -185,8 +185,8 @@ static bool read_file(Gguf *g, int file, Reader *r, uint64_t *split_count, uint6
 }
 
 /* a split model's shard `no` (1-based) of `count`: the first shard's path with its -00001-of-NNNNN replaced (NNNNN the
-   header's count, as llama.cpp's gguf-split writes it); NULL for a first shard named otherwise (0.7.1: its name's tail
-   was written past when shorter, and a count spelt otherwise opened siblings of another name) */
+   header's count, as llama.cpp's gguf-split writes it); NULL for a first shard named otherwise (a count spelt otherwise
+   would open siblings of another name) */
 static char *shard_path(const char *first, int no, int count)
 {
   char want[32], num[32];

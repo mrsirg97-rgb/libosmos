@@ -1,5 +1,4 @@
-/* the Qwen forward's shapes (osmos/q4x/forward.h): its weights on the device, a step's buffers, a sequence's state.
-   hip_q4x_make.c builds them, hip_q4x_layers.c runs a layer's blocks on them, hip_q4x_step.c a step */
+/* the Qwen forward's shapes (osmos/q4x/forward.h): its weights on the device, a step's buffers, a sequence's state */
 #pragma once
 
 #include <hip/hip_runtime_api.h>
@@ -40,7 +39,7 @@ typedef struct Q4xBuf
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
   int32_t *slot; /* host, [max_tokens]: a row's logits slot (its own row), or -1 - its last step's (osmos/gpu/kept.h) */
-} Q4xBuf; /* (its buffers the forward's record's: never freed as an array of its first pointers - 0.15.2's double free) */
+} Q4xBuf; /* its buffers the forward's record's: never freed as an array of its first pointers */
 
 /* the MTP head's buffers (with a head): a step's hidden rows, a draft's inputs and logits */
 typedef struct Q4xMtpBuf
@@ -62,9 +61,9 @@ typedef DfBuf Q4xDfBuf; /* the drafter's buffers: the DFlash2 core's (dflash_cor
 
 #define Q4X_SIDE_STEP MM_TILE /* a step this small or smaller: the second stream (decode, a draft's verify) */
 #define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_q4x_make.c's table) */
-#define Q4X_ROW_THREADS 64 /* stream_ngram's readers: DeepSeek's Engram measure (832,000 random rows/s; 128 no more) */
+#define Q4X_ROW_THREADS 64 /* stream_ngram's readers */
 
-#define Q4X_EXPERT_READERS 12 /* the experts' membrane's readers: DeepSeek's (FWD_FETCH_THREADS: DESIGN.md, the fetcher) */
+#define Q4X_EXPERT_READERS 12 /* the experts' membrane's readers: FWD_FETCH_THREADS (DESIGN.md, the fetcher) */
 
 struct Q4xForward
 {
@@ -123,7 +122,7 @@ struct Q4xForward
   uint64_t *ple_off;
   uint32_t ple_n;
   hipEvent_t ple_copied;
-  uint32_t side_spin; /* q4x_forward_side_spin: a test's delay before the shared expert, on s2 (0: none) */
+  uint32_t side_spin; /* q4x_forward_side_spin: a delay before the shared expert, on s2 (0: none) */
   /* a step past MM_MAX_TOKENS (hip_q4x_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
      sub-batch's rows; and its runs' sequences at a sub-batch's start (their rings' cur and positions moved on) */
   struct
@@ -133,7 +132,7 @@ struct Q4xForward
   } rows[Q4X_ROW_BUFS];
   uint32_t n_rows;
   Q4xSeq *sub_seq; /* Q4X_MAX_RUNS of them */
-  /* 0.7.0: the NPU beside the GPU (Q4xOptions' npu, hip_q4x_npu.c): a prompt step's first whole 128-token entries of an
+  /* the NPU beside the GPU (Q4xOptions' npu, hip_q4x_npu.c): a prompt step's first whole 128-token entries of an
      eligible layer's - their gate, up and down the NPU's, the GPU's mm_group skipping them (their counts zeroed) */
   Npu *npu;
   float npu_share;                 /* the share of a layer's picks the NPU takes (a format's cost scaling it) */
@@ -198,8 +197,8 @@ bool q4x_seq_reset(Q4xSeq *s); /* hip_q4x_seq.c: empty, position 0 (its recurren
    (the call before made it); q4x_mat2: two matrices on one x, one launch when mm takes both (mm_run2: each the bits it
    takes alone) */
 /* the pinned host buffers (b.pin_tok, b.pin_rows) are read by copies queued, not done: before the host writes them
-   again, the last copy waited for (a seed's queued behind a busy GPU, the next draft's tokens written over its own -
-   0.5.10's drafts a run apart); after a copy from them, its end marked */
+   again, the last copy waited for (else a seed's copy queued behind a busy GPU reads the next draft's tokens); after a
+   copy from them, its end marked */
 bool q4x_pin_wait(Q4xForward *f);
 bool q4x_pin_sent(Q4xForward *f);
 /* the mixer's inject (hc rows: latency, not bandwidth) beside the rest of the mixer on s2, a small step's: b.inj its
@@ -252,7 +251,7 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n);
 bool q4x_ple(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n);
 bool q4x_ple_issue(Q4xForward *f, uint32_t n); /* stream_ngram: the step's n tokens' rows begun (b.pin_rows') */
 
-/* hip_q4x_resident.c's, for hip_q4x_make.c (one file before 0.16.0) */
+/* hip_q4x_resident.c's, for hip_q4x_make.c */
 bool q4x_buffers(Q4xForward *f, char *err);
 bool q4x_experts(Q4xForward *f, uint64_t budget, char *err);
 void q4x_free_table(Q4xForward *f, const Gguf *g, void **dev);
@@ -264,6 +263,6 @@ bool q4x_room_left_past(Q4xForward *f, uint64_t more, const char *after, char *e
 bool q4x_seq_alloc(Q4xSeq *s, void *p, uint64_t bytes);
 bool q4x_upload(OsmosLedger *l, const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err);
 
-/* hip_q4x_layers.c's, for hip_q4x_moe.c (one file before 0.16.0) */
+/* hip_q4x_layers.c's, for hip_q4x_moe.c */
 const float *q4x_fv(const Q4xForward *f, const GgufTensor *t);
 const Q4xX16 *q4x_side(Q4xForward *f, uint32_t n, uint32_t cols, Q4xX16 *s);

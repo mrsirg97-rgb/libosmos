@@ -1,5 +1,6 @@
-/* DeepSeek's forward made (osmos/ds4/forward.h): its scratch, sub-buffers and rope, the build in order (hip_ds4_resident.c's
-   parts), destroyed in reverse; its reads (budget, room, stream, picks, waits) and the kept rows' view */
+/* DeepSeek's forward made (osmos/ds4/forward.h): its scratch, sub-buffers and rope, the build in order
+   (hip_ds4_resident.c's parts), destroyed in reverse; its reads (budget, room, stream, picks, waits) and the kept rows'
+   view */
 #define _GNU_SOURCE /* O_DIRECT */
 #include <fcntl.h>
 #include <stdio.h>
@@ -22,7 +23,7 @@
 #include "osmos/err.h"
 #include "osmos/model/dspark.h"
 
-#define FWD_ROW_THREADS 64  /* DESIGN.md, Engram's reads: 64 threads 832,000 random rows/s, 128 no more */
+#define FWD_ROW_THREADS 64  /* Engram's readers: past 64 threads no faster (DESIGN.md) */
 
 static bool scratch(Forward *f)
 {
@@ -227,8 +228,8 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
         osmos_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
     ok = osmos_fail(err, "a GPU allocation refused");
-  /* made whole (ForwardOptions'; 0.16.0: attached after, by their own calls): the lane and the drafter, then the
-     experts in what the whole build's budget leaves past them, then the NPU (it maps the experts' host slots) */
+  /* made whole (ForwardOptions'): the lane and the drafter, then the experts in what the whole build's budget leaves
+     past them, then the NPU (it maps the experts' host slots) */
   ok = ok && fwd_lane_make(f, o->cpu_threads, o->cpu_cores, err);
   if (ok)
     f->lane = o->lane;
@@ -287,7 +288,7 @@ void forward_destroy(Forward *f)
   for (int k = 1; k < FWD_MAX_SUBS; k++)
     free(f->sub[k].rows);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer the forward made - Scratch's, the subs', the lane's, the taps',
-                              the tables': from the record (0.16.0: Scratch was freed as an array of its pointers) */
+                              the tables': from the record */
   if (f->routed)
     hipEventDestroy(f->routed);
   if (f->passed)

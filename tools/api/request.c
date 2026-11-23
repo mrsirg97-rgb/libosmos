@@ -9,8 +9,8 @@
 #include "api.h"
 
 /* an OpenAI chat request: what every family reads alike - thinking on or off, the tokens asked, streaming - and what
-   this server refuses by name rather than ignore (sampling: it decodes greedily; stop strings; several choices);
-   then the family's reader (dialect.h) its messages, tools and effort (DESIGN.md, "osmos-api: the mapping") */
+   this server refuses by name rather than ignore (stop strings, several choices, the penalties); then the family's
+   reader (dialect.h) its messages, tools and effort (DESIGN.md, "osmos-api: the mapping") */
 
 const Json *request_effort(const Json *body)
 {
@@ -96,10 +96,9 @@ static unsigned long long drawn_seed(void)
   return s & ((1ull << 53) - 1);
 }
 
-/* the request's fields an allowlist (0.16.0: one osmos did not know ignored - a misspelled max_token ran the request
-   unbounded): what it reads, what it refuses past a default (n, stop, the penalties, logit_bias, logprobs), and a
-   client's own labels it has nothing to do with (model, user - rig sends both - parallel_tool_calls, metadata, store
-   when false) */
+/* the request's fields an allowlist (an unknown one refused: a misspelled max_token would run unbounded): what it
+   reads, what it refuses past a default (n, stop, the penalties, logit_bias, logprobs), and a client's own labels it
+   has nothing to do with (model, user - rig sends both - parallel_tool_calls, metadata, store when false) */
 static const char *const kFields[] = {
     "messages",       "temperature",     "top_p",      "top_k",        "seed",           "stop",
     "n",              "presence_penalty", "frequency_penalty", "top_logprobs", "repetition_penalty", "logit_bias",
@@ -139,13 +138,13 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool pr
   for (size_t i = 0; i < msgs->n; i++)
     if (msgs->item[i]->type != JSON_OBJECT)
       return osmos_fail(err, "messages: each an object");
-  /* 0.14.0: sampling - as asked, else the pack's (temperature 0 greedy); a seed as asked, else drawn */
+  /* sampling - as asked, else the pack's (temperature 0 greedy); a seed as asked, else drawn */
   r->temperature = temperature, r->top_p = top_p;
   if (!number(json_get(body, "temperature"), 0, false, 100, &r->temperature))
     return osmos_fail(err, "temperature: a number, 0 (greedy) or more");
   if (!number(json_get(body, "top_p"), 0, true, 1, &r->top_p))
     return osmos_fail(err, "top_p: a number above 0, 1 at most");
-  r->top_k = top_k; /* 0.15.2: an integer; 0 or -1 (vLLM's, a client's default) every token */
+  r->top_k = top_k; /* an integer; 0 or -1 (vLLM's, a client's default) every token */
   const Json *tk = json_get(body, "top_k");
   if (tk && tk->type != JSON_NULL)
   {
@@ -161,10 +160,9 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool pr
   const Json *stop = json_get(body, "stop"), *n = json_get(body, "n"), *choice = json_get(body, "tool_choice");
   if (stop && stop->type != JSON_NULL && !(stop->type == JSON_ARRAY && !stop->n))
     return osmos_fail(err, "stop: stop strings are not built (the model's own end of turn ends it)");
-  if (n && n->type != JSON_NULL && sampled(n, 1)) /* (0.7.1: 2.0, a float, was taken as one) */
+  if (n && n->type != JSON_NULL && sampled(n, 1)) /* (2.0, a float, is not one) */
     return osmos_fail(err, "n: one choice a request");
-  /* sampling's other fields: their greedy values taken (a client's defaults), any other refused by name (0.7.1:
-     ignored, against this file's rule) */
+  /* sampling's other fields: their greedy values taken (a client's defaults), any other refused by name */
   const char *const zero[] = {"presence_penalty", "frequency_penalty", "top_logprobs"};
   for (size_t k = 0; k < sizeof zero / sizeof *zero; k++)
     if (sampled(json_get(body, zero[k]), 0))
@@ -188,7 +186,7 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool pr
   if ((et && et->type == JSON_FALSE) || (eff && eff->type == JSON_STRING && !strcmp(eff->s, "none")) ||
       (th && json_str(th, "type") && !strcmp(json_str(th, "type"), "disabled")))
     r->mode = CHAT_PLAIN;
-  /* 0.7.3 (#47): the history's loop signals; its orphaned calls given a placeholder result only when asked (the
+  /* the history's loop signals; its orphaned calls given a placeholder result only when asked (the
      request's osmos.fill_orphans, else the pack's) - else the prompt is the template's of what was sent */
   loop_read(msgs, &r->loop);
   const Json *os = json_get(body, "osmos"), *fo = json_get(os, "fill_orphans");
@@ -216,7 +214,7 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool pr
   if (!mt || mt->type == JSON_NULL)
     mt = json_get(body, "max_tokens");
   if (mt && mt->type == JSON_INT && mt->s[0] != '-' && mt->len > 9) /* past 999,999,999: as many as the context's room
-                                                                       (0.11.2: "a positive integer" for 4294967295) */
+                                                                       (4294967295 too) */
     r->max_tokens = 999999999u;
   else if (mt && mt->type == JSON_INT && mt->s[0] != '-' && mt->len <= 9 && atol(mt->s) > 0)
     r->max_tokens = (unsigned)atol(mt->s);

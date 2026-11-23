@@ -40,7 +40,7 @@ static bool tokens_in(Q4xForward *f, const int32_t *tokens, uint32_t n)
 }
 
 /* position p - 1's h for the head's first row: the pending one, or zeros. none pending is pend_pos -1, which at
-   position 0 is p - 1 too: s.pend never written then (its memory not cleared), so zeros (0.5.10 read it) */
+   position 0 is p - 1 too: s.pend never written then (its memory not cleared), so zeros */
 static bool first_h(Q4xForward *f, Q4xSeq *s, int32_t p, float *to)
 {
   const uint64_t hd = (uint64_t)f->w->geo.hc * f->w->geo.n_embd * F;
@@ -54,8 +54,8 @@ bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[O
     return osmos_fail(err, "no forward with an MTP head, or a sequence of another forward");
   if (s->broken)
     return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
-  if (s->step_n && s->step_id != f->steps) /* (DFlash's guard: m.hid a later step's rows - 0.11.2, another sequence's
-                                              h read as its own) */
+  if (s->step_n && s->step_id != f->steps) /* (DFlash's guard: m.hid a later step's rows, another sequence's h
+                                              else read as its own) */
     return osmos_fail(err, "the head's h another step's: seed right after the sequence's step (a batch of at most 64 "
                          "sequences)");
   if (!s->step_n || from < s->step_pos0 || from >= to || to > s->step_pos0 + (int32_t)s->step_n || to > s->pos)

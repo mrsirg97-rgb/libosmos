@@ -202,6 +202,6 @@ const OsmosFamily osmos_q4x = {
     m_open,     m_close,       e_create, e_destroy, e_identity, e_stats,
     e_step,     e_kept,      e_block,  s_create,  s_destroy, s_reset,  s_prompt,   s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft,    s_draft_all,
-    false, /* a prompt's read its batch: its small and large steps one math (0.7.1's replay: the same bits on every path) */
+    false, /* a prompt's read its batch: its small and large steps one math (the same bits on every path) */
     s_mark_bytes, s_mark_save, s_mark_load, /* a mark the states a later token changes (q4x_seq_mark_save) */
 };

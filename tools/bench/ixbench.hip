@@ -1,8 +1,8 @@
-// ixbench: the indexer's kernels at a long context's shapes (0.7.3) - ops_index_score against ops_index_score_fp4
-// and (0.7.4) ops_index_score_dot4 (128 tokens x 32 heads x 128, the forward's chunk at 1M: FWD_SCORE_BYTES / 4 MB),
-// and ops_topk under a 2,048-block mask against ops_topk_rows over the same blocks listed, at 256K, 512K and 1M rows;
+// ixbench: the indexer's kernels at a long context's shapes - ops_index_score against ops_index_score_fp4 and
+// ops_index_score_dot4 (128 tokens x 32 heads x 128, the forward's chunk at 1M: FWD_SCORE_BYTES / 4 MB), and
+// ops_topk under a 2,048-block mask against ops_topk_rows over the same blocks listed, at 256K, 512K and 1M rows;
 // synthetic FP4 rows. each timed as the median of 5 after a warm-up; the scores' bits compared (the plain kernel's).
-//   ixbench
+//   ixbench   (IX_T=n: a call's tokens, 128 by default; 1, 5: a decode, a verify)
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -106,7 +106,7 @@ int main() {
     const unsigned long long fdiff = differ();
     std::printf("  %7u rows: score plain %8.2f ms  fused (fp4) %8.2f ms (%.2fx, %llu bits differ)\n", R, plain, fma,
                 plain / fma, fdiff);
-    // 0.7.4: the int8 dots' (ops_index_score_dot4), its fallbacks counted on one more call
+    // the int8 dots' (ops_index_score_dot4), its fallbacks counted on one more call
     CHECK(hipMemset(sb, 0, (size_t) T * R * 4) == hipSuccess);
     const double d4 = time_ms([&] {
       CHECK(ops_index_score_dot4(q, kp, w, pos, 1, R, H, HD, T, sb, R, nullptr, nullptr));
@@ -119,7 +119,7 @@ int main() {
     CHECK(hipMemcpy(fb2.data(), sb, fb2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
     std::printf("  %7u rows: score int8 dots (dot4) %8.2f ms (%.2fx plain, %.2fx fused; %llu bits differ, %u fallbacks)\n",
                 R, d4, plain / d4, fma / d4, differ(), nfb);
-    if (T == 1) {  // 0.7.4: the one-token tile against the 4-token tile at one token
+    if (T == 1) {  // the one-token tile against the 4-token tile at one token
       ops_index_score_dot4_four(true);
       const double d4f = time_ms([&] {
         CHECK(ops_index_score_dot4(q, kp, w, pos, 1, R, H, HD, T, sb, R, nullptr, nullptr));
@@ -166,7 +166,7 @@ int main() {
     const double tkp = time_ms([&] {
       CHECK(ops_topk(sa, R, pos, 1, K, nullptr, BLOCK, wr, T, sel, OPS_MAX_SELECT, n_sel, nullptr));
     });
-    std::vector<int32_t> sh((size_t) T * OPS_MAX_SELECT);  // (0.7.4) the picks' FNV-1a: the one-block selection's the same
+    std::vector<int32_t> sh((size_t) T * OPS_MAX_SELECT);  // the picks' FNV-1a: the one-block selection's the same
     CHECK(hipMemcpy(sh.data(), sel, sh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
     uint64_t hs = 1469598103934665603ull, hb = hs;
     for (uint32_t t = 0; t < T; t++)

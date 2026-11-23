@@ -32,8 +32,8 @@ typedef struct Answer
   bool boundary; /* a block-shaped dialect's: the next bytes a block's header (its field theirs to say) */
   bool gone; /* the client stopped reading */
   uint32_t idle; /* a stream's waits with nothing new since its last bytes (a keep-alive comment past KEEPALIVE_MS) */
-  const Loop *loop; /* the request's loop signals: beside the answer's usage, its header (0.7.3) */
-  bool sampled;     /* 0.14.0: the answer drawn - its seed in x-osmos-seed (sent again, the same answer) */
+  const Loop *loop; /* the request's loop signals: beside the answer's usage, its header */
+  bool sampled;     /* the answer drawn - its seed in x-osmos-seed (sent again, the same answer) */
   unsigned long long seed;
 } Answer;
 

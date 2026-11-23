@@ -2,7 +2,7 @@
 // bytes of E2M1 - sub-block s's value j at byte 4 + 8s + j's low nibble, j + 8 its high one), R rows a warp. a warp's
 // 32 blocks of a row (1,152 bytes, 16-byte aligned: a row whole blocks of 4) read as 72 uint4s into its LDS, then each
 // lane its own block from there (a lane's 9 words: stride 9, every bank once) - a lane reading its block itself takes
-// one 36-byte stride a load, a ninth of each line used, measured 290 GB/s on a 5090 against this kernel's. x read once
+// one 36-byte stride a load, a ninth of each line used (slower there, on a 5090). x read once
 // a block for all R rows, the tensor's own scale on the sum. its sums are not mv_strided's order (a lane's
 // blocks, then the warp's tree): its own bits, every token's alone (q35's decode: DESIGN.md, "a second GPU")
 #include <hip/hip_runtime.h>
@@ -110,8 +110,7 @@ __global__ __launch_bounds__(32 * kWarps) void fp4_kernel(const uint8_t* __restr
 // RDNA's (gfx1151): no stage - a lane its own block's 9 words straight from memory (plain loads, U blocks' worth
 // before any sum), E2M1 by v_perm: codes 0..7's doubled values' f16 high bytes from an 8-entry table, a negative
 // code's sign or'd, the f16 to F32 (each the table's value: its -0 for code 8 a +0's sums - a part never -0). fp4_kernel's
-// sums in its order: its bits. FFN gate / up 17408 x 5120, one token, low-power: fp4_kernel 41 GB/s (R 4, spilled), 139
-// (R 2); this 228 (fp4exp)
+// sums in its order: its bits
 constexpr uint32_t kTabLo = 0x42403C00u, kTabHi = 0x4A484644u;  // 0, 1, 2, 3 | 4, 6, 8, 12 as f16 high bytes
 __device__ inline void e2m1x4(uint32_t codes, float* v) {  // bytes' low nibbles 0..3 as 4 values
   const uint32_t hb = osmos_perm(kTabHi, kTabLo, codes & 0x07070707u) | (codes & 0x08080808u) << 4;
@@ -289,16 +288,15 @@ __global__ __launch_bounds__(32 * kWarps) void tok_kernel(const void* const* w, 
 extern "C" bool mv_fp4(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_t xs, uint32_t n, float* y,
                        uint32_t ys, float scale, void* stream) {
   if (!w || !x || !y || !rows || !cols || cols % kBlock || xs % 4 || n < 1 || n > 4) return false;
-  // RDNA (fp4bench SWEEP=1, the FFN's gate / up, low-power, GB/s): one token direct R 2 U 2 222 (fp4_kernel R 4 41,
-  // R 2 139); two R 4 U 1 211 (fp4_kernel R 2 96); three R 2 U 1 163 (fp4_kernel R 1 100); four fp4_kernel R 1's 84
-  // (direct's best 74: NT 4's registers). every one fp4_kernel's bits
+  // RDNA (fp4bench SWEEP=1): one token direct R 2 U 2; two R 4 U 1; three R 2 U 1; four fp4_kernel R 1 (direct at NT
+  // 4 short of registers). every one fp4_kernel's bits
   if constexpr (!osmos_cuda) switch (n) {
       case 1: return run_direct<2, 1, 2>(w, rows, cols, x, xs, y, ys, scale, stream);
       case 2: return run_direct<4, 2, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
       case 3: return run_direct<2, 3, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
       default: return run<1, 4>(w, rows, cols, x, xs, y, ys, scale, stream);
     }
-  switch (n) {  // the 5090's: the LDS stage (a lane's own 36-byte stride measured slower there)
+  switch (n) {  // the 5090's: the LDS stage (a lane's own 36-byte stride slower there)
     case 1: return run<4, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
     case 2: return run<2, 2>(w, rows, cols, x, xs, y, ys, scale, stream);
     case 3: return run<1, 3>(w, rows, cols, x, xs, y, ys, scale, stream);

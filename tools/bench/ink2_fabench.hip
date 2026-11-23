@@ -3,6 +3,8 @@
 //   ink2_fabench [T ...]   (default 4096 16384)
 //   HEADS=n: the query heads (default Small's 48; Mini's 24); DUMP=path: PREFILL's outputs written (path.T.kind)
 //   DECODE=1: a decode's attention instead - one query over T keys stored f16 (ink2_fa16, the engine's), 20 calls
+//   PREFILL=1: a prompt's step at depth instead (4,096 queries after T keys); DET=1 with it: the same call twice, the
+//   same bytes
 #include <hip/hip_runtime.h>
 
 #include <cstdio>

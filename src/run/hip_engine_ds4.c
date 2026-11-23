@@ -8,8 +8,8 @@
 #include "osmos/ds4/drafter.h"
 #include "osmos/ds4/forward.h"
 
-/* DeepSeek-V4.1-Flash behind the engine: each call the forward's and the drafter's own, as osmos-serve made them
-   before 0.4.0 - its decode in the lane's order (ForwardOptions' lane, cpu_threads 0: every expert on the GPU) */
+/* DeepSeek-V4.1-Flash behind the engine: each call the forward's and the drafter's own - its decode in the lane's
+   order (ForwardOptions' lane, cpu_threads 0: every expert on the GPU) */
 
 _Static_assert(OSMOS_ERR == OSMOS_ERR && OSMOS_ERR >= OSMOS_ERR && OSMOS_ERR >= OSMOS_ERR,
                "one error buffer for the engine and the family's calls");
@@ -155,7 +155,7 @@ static bool e_step(void *p, void *const *run, const uint32_t *len, uint32_t runs
 }
 
 /* a prompt's read: osmos_batch with the forward reading (forward_reading) - its bits a prompt's, not a decode's, at
-   any step size, so a turn continued after a reused prefix reads its rest as a fresh read reads it (0.7.1) */
+   any step size, so a turn continued after a reused prefix reads its rest as a fresh read reads it */
 
 /* the batch's row r among the rows the forward keeps (the last kept of n), or -1 */
 static void e_kept(const void *p, KeptView *k) { forward_kept_view(((const Eng *)p)->f, k); }

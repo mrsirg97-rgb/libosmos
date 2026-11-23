@@ -1,4 +1,4 @@
-/* 0.7.0: the NPU beside the GPU in a Qwen prompt step's routed experts (forward.h's q4x_forward_npu; npu.h). Qwen's
+/* the NPU beside the GPU in a Qwen prompt step's routed experts (forward.h's q4x_forward_npu; npu.h). Qwen's
    tables are built on the GPU (q4x_expert_tiles), so the NPU's parts are chosen there too: npu_select_q4x takes the
    first whole 128-token entries of the tables' 128-token run - a layer's share of its picks, by the routing alone, so
    a prompt's bits are the same each run - zeroes their counts (mm_group skips them: their gate, up and down the
@@ -16,11 +16,11 @@
 #include "osmos/err.h"
 
 /* the NPU's part is the tables' 128-token run - npu_select_q4x takes that run's entries whole: one size, three names
-   (npu_pack.h, q4x_ops.h's runs, q4x_moe.hip's kPart), held together here (0.7.1) */
+   (npu_pack.h, q4x_ops.h's runs, q4x_moe.hip's kPart), held together here */
 _Static_assert(NPU_TOKENS == (unsigned)MM_TILE << (Q4X_TILE_RUNS - 1), "the NPU's part not the tables' last run");
 
-/* a part's NPU time by its gate / up format, against IQ3_XXS's (spikes/npu/RESEARCH.md: gate + up, then the down -
-   IQ3_XXS 281 + 139 us, IQ2_S 603 + 139): the share of an IQ2_S layer scaled down, the NPU no longer on either */
+/* a part's NPU time by its gate / up format, against IQ3_XXS's (spikes/npu/RESEARCH.md): the share of an IQ2_S layer
+   scaled down, the NPU no longer on either */
 static float cost(uint32_t gate_type)
 {
   return gate_type == QTYPE_IQ2_S ? 742.0f / 420.0f : 1.0f;

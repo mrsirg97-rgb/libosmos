@@ -55,7 +55,7 @@ static bool number(Cur *c, uint64_t *v)
   while (c->p < c->end && *c->p >= '0' && *c->p <= '9')
   {
     const uint64_t d = (uint64_t)(*c->p++ - '0');
-    if (*v > (UINT64_MAX - d) / 10) /* past 64 bits: refused, not wrapped (0.7.1) */
+    if (*v > (UINT64_MAX - d) / 10) /* past 64 bits: refused, not wrapped */
       return false;
     *v = *v * 10 + d;
   }
@@ -88,7 +88,7 @@ static bool entry(Cur *c, DsparkTensor *t, uint64_t file_bytes, char *err)
   {
     if (t->n_dims == DSPARK_MAX_DIMS || !number(c, &t->dims[t->n_dims]))
       return osmos_fail(err, "dspark.json: a tensor's dims it cannot read");
-    if (!t->dims[t->n_dims] || values > UINT64_MAX / t->dims[t->n_dims]) /* (0.7.1: a product wrapping 64 bits) */
+    if (!t->dims[t->n_dims] || values > UINT64_MAX / t->dims[t->n_dims]) /* (past 64 bits: refused) */
       return osmos_fail(err, "dspark.json: a tensor's dims of 0, or more values than 64 bits count");
     values *= t->dims[t->n_dims++];
   } while (eat(c, ','));

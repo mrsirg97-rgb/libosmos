@@ -16,7 +16,7 @@
 
 
 /* this run's tag in its ids (its start time, base 36): a run's request numbers start at 1 again after a restart, and
-   a conversation across one held two calls of one id (a harness matches a result to its call by it - 0.11.2) */
+   a conversation across one would hold two calls of one id (a harness matches a result to its call by it) */
 static char boot[16];
 static void boot_make(void)
 {
@@ -89,7 +89,7 @@ bool reply_more(Api *a, Run *r, size_t *seen, Answer *s)
   *seen = to;
   if (!done && !s->stream && !s->gone && closed(s->fd))
     s->gone = true; /* a whole answer writes nothing until its end: its client's leaving looked for as tokens land too,
-                       not only in a pause (0.7.1) */
+                       not only in a pause */
   return !done;
 }
 
@@ -161,7 +161,7 @@ Json *reply_message(const Answer *s, const Request *rq, long long rid, bool *par
 
 /* a run that gives no answer: a streamed one's error event (no [DONE]), or a 500. a completion its parse refused
    goes with it as its text (the EOS dropped): greedy, the same messages again are the same completion, so a client
-   can only get past one by showing the model what it wrote (#34) - sent back, a client's text is defused as any */
+   can only get past one by showing the model what it wrote - sent back, a client's text is defused as any */
 void reply_fail_at(const Http *h, int status, bool stream, const char *why, const JsonBuf *completion, const char *eos)
 {
   JsonBuf e = {0};
@@ -183,7 +183,7 @@ void reply_fail_at(const Http *h, int status, bool stream, const char *why, cons
   else if (stream)
     http_stream_event(h->fd, e.p, e.n);
   else /* the model's answer attached (it did not parse): the same request the same answer - an OpenAI client told
-          not to retry it (x-should-retry: theirs - 0.11.2, a whole answer generated three times for one error) */
+          not to retry it (x-should-retry: theirs) */
     http_send_h(h, status, "application/json", e.p, e.n, completion ? "x-should-retry: false\r\n" : NULL);
   free(e.p);
 }
@@ -252,7 +252,7 @@ void reply_stream_end(Answer *s, const Request *rq, const Run *r, const Json *m,
   JsonBuf u = {0};
   if (rq->usage)
     usage(&u, r, prompt_n);
-  loop_json(&u, &rq->loop); /* the history's loop signals, every stream's last chunk (0.7.3) */
+  loop_json(&u, &rq->loop); /* the history's loop signals, every stream's last chunk */
   answer_chunk(s, "{}", finish_of(r, m), u.p ? u.p : "");
   free(u.p);
   if (!s->gone)

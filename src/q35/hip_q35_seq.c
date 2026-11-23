@@ -1,5 +1,5 @@
-/* a q35 sequence (osmos/q35/forward.h, DESIGN.md "0.9.0: q35 behind the engine"): its rings of DeltaNet states and
-   conv histories, its attention caches, LSA's index - and what the engine asks of it: prompt, rollback, state, marks */
+/* a q35 sequence (osmos/q35/forward.h): its rings of DeltaNet states and conv histories, its attention caches, LSA's
+   index - and what the engine asks of it: prompt, rollback, state, marks */
 #include <hip/hip_runtime_api.h>
 #include <stdlib.h>
 #include <string.h>
@@ -213,7 +213,7 @@ bool q35_seq_load_from(Q35Seq *s, uint64_t bytes, StateSource src, void *ctx, ch
   const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, q35_identity(s->f));
   if ((bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx)))
     return refuse(s, err, bad);
-  if ((uint64_t)h.closed * LSA_WINDOW > (uint64_t)h.pos) /* (before its parts are sized from it: 0.16.0 after) */
+  if ((uint64_t)h.closed * LSA_WINDOW > (uint64_t)h.pos) /* (checked before its parts are sized from it) */
     return refuse(s, err, "a state whose closed blocks are past its position");
   StatePart p[MAX_PARTS];
   s->cur = 0; /* the parts' DeltaNet slots: 0 */

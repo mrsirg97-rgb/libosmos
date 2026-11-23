@@ -29,9 +29,9 @@ int32_t tokenizer_vocab(const Tokenizer *t);
 /*
 Tokenizer
   a model's own tokenizer, from its GGUF (tokenizer.ggml.tokens / token_type / merges): byte-level BPE (`model`
-  gpt2) after the pre-tokenizer `pre` names (deepseek-v3, or joyai-llm: the same split; qwen35, Qwen3.5 and 3.8's) - llama.cpp's
-  tokenization of the same file, token for token (tests/test_tokenizer.c against its llama-tokenize). its own copy
-  of the vocabulary: the Gguf may go after create.
+  gpt2) after the pre-tokenizer `pre` names (deepseek-v3, or joyai-llm: the same split; qwen35, Qwen3.5 and 3.8's) -
+  llama.cpp's tokenization of the same file, token for token. its own copy of the vocabulary: the Gguf may go after
+  create.
 
 tokenizer_create
   the tokenizer of g, or NULL with why: a model type, a pre-tokenizer, or tables it does not know (a missing or
@@ -57,8 +57,8 @@ tokenizer_defuse
   matches them) one bit of its first character's last byte flipped - '<' to '=', '｜' to '｝' - so s keeps its
   length, its characters' lengths and (for the special tokens these models have) its JSON escaping. returns how
   many bytes changed: 0, s as it was. (a flip that made another token's text - none can with these models' - is
-  refused by tokenizer_encode_shaped: the shape's token not the text's.) a client's strings defused, the prompt rendered from them is the
-  shape tokenizer_encode_shaped takes.
+  refused by tokenizer_encode_shaped: the shape's token not the text's.) a client's strings defused, the prompt
+  rendered from them is the shape tokenizer_encode_shaped takes.
 
 tokenizer_encode_shaped
   the ids of text (len bytes) with a special token only where shape (the same len bytes) has one: shape cut into

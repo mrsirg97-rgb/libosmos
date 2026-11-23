@@ -30,7 +30,7 @@ void slots_destroy(Slots *s);
 bool slots_room(Slots *s, uint64_t bytes, char err[OSMOS_ERR]);
 /* whether a conversation of n tokens would be kept (min_tokens): asked before slots_room, which moves others for it */
 bool slots_keeps(const Slots *s, uint32_t n);
-/* state: malloc'd, the store's from the call (kept, or freed: not kept or a failure) */
+/* tokens copied; state malloc'd and the store's from the call (kept, or freed: not kept or a failure) */
 bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_t bytes, bool *kept,
                char err[OSMOS_ERR]);
 /* a state given in pieces to a sink (a sequence's save: oseq_save_to), or taken from a source (its load) */
@@ -55,7 +55,7 @@ uint64_t slots_dir_bytes(const Slots *s);
 
 /*
 Slots
-  conversations set aside (maya #356's, the operator's): each a sequence's state (seq_save's bytes, opaque here) and
+  conversations set aside: each a sequence's state (seq_save's bytes, opaque here) and
   the tokens it holds, kept so a request that continues one takes it back and reads only the rest of its prompt.
   RAM first; past `cap` the least recently used is written to the folder and dropped from RAM; the folder's .bin bytes
   kept under `gb` (its least recently used removed - never the one just written, so one larger than the cap stays).
@@ -72,7 +72,7 @@ slots_destroy
   RAM's conversations freed - not written (slots_flush first to keep them); the folder's stay. NULL is nothing.
 
 slots_put
-  a conversation set aside: its n tokens and its state (both copied). n under min_tokens: not kept (*kept false,
+  a conversation set aside: its n tokens (copied) and its state (taken). n under min_tokens: not kept (*kept false,
   true returned). a kept conversation with the same tokens is replaced. then RAM past cap: the least recently used
   to the folder (without a folder, dropped); the folder past gb: its least recently used removed, not the one just
   written. false for a write that failed (the conversation then not kept).
@@ -80,11 +80,6 @@ slots_put
 slots_find
   the kept conversation (RAM or folder) whose tokens are a prefix of prompt[0 .. n) and longer than `beyond` (what
   the caller holds already), the longest; its id and its length in *len. -1 when none.
-
-slots_take
-  the conversation slots_find named, out of the store: its state in *state (malloc'd: the caller frees it) and its
-  bytes; a folder's read back and its files removed. false for an id not in the store or a .bin that cannot be read
-  (the conversation then dropped).
 
 slots_flush
   every conversation in RAM to the folder (the end of a run), then the folder under gb. false without a folder or for

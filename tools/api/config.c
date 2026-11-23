@@ -110,7 +110,7 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "no_guess"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->no_guess = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
-  if (!strcmp(k, "npu")) /* 0.7.0: the NPU beside the GPU (forward_npu) */
+  if (!strcmp(k, "npu")) /* the NPU beside the GPU (forward_npu) */
     return str(v, c->npu, sizeof c->npu, k, err);
   if (!strcmp(k, "npu_share"))
     return (v->type == JSON_INT || v->type == JSON_FLOAT) && (c->npu_share = v->type == JSON_INT ? atof(v->s) : v->f) > 0 &&
@@ -120,7 +120,7 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "stream_ngram"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->stream_ngram = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
-  if (!strcmp(k, "temperature")) /* 0.14.0: 0 greedy */
+  if (!strcmp(k, "temperature")) /* 0: greedy */
     return (v->type == JSON_INT || v->type == JSON_FLOAT) &&
                    (c->temperature = v->type == JSON_INT ? atof(v->s) : v->f) >= 0 && c->temperature < 100
                ? true
@@ -130,7 +130,7 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
                    c->top_p <= 1
                ? true
                : fail(err, "a share above 0, 1 at most", k);
-  if (!strcmp(k, "top_k")) /* 0.15.2: 0 every token */
+  if (!strcmp(k, "top_k")) /* 0: every token */
     return v->type == JSON_INT && v->s[0] != '-' && strlen(v->s) <= 9 ? (c->top_k = (unsigned)atol(v->s), true)
                                                                          : fail(err, "an integer, 0 (every token) or more", k);
   if (!strcmp(k, "kv_q8"))

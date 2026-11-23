@@ -1,9 +1,8 @@
 #ifndef OSMOS_LSA_H
 #define OSMOS_LSA_H
 
-/* latent sparse attention's read (DESIGN.md, "the 10M agent"; arXiv 2610.42147's D-LSA, the maps trained on -vibes:
-   qwen/lsa.py), the host's reference - the GPU's read is checked against it, its sets lsa.py's. per attention layer
-   and token one read, shared by the layer's heads:
+/* latent sparse attention's read (arXiv 2610.42147's D-LSA; lsa.py's sets), the host's reference the GPU's read is
+   checked against. per attention layer and token one read, shared by the layer's heads:
      index   a key's index vector: normalize(key_in W_K), rounded to BF16 (key_in: the layer's normed k past its rotary
              prefix, every KV head's, LSA_IN values); a query's normalize(q_in W_Q) (q_in: each KV group's query heads
              summed)

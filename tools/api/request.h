@@ -20,8 +20,8 @@ typedef struct Request
   bool preserve_default; /* the pack's preserve_thinking (LFM3's reader: a request's unset, this) */
   Json *effort_value;  /* Inkling's reasoning effort as asked - a name or a number (owned; NULL: the template's 0.9) */
   unsigned max_tokens; /* 0: as many as the context leaves */
-  double temperature, top_p; /* 0.14.0: as asked, else the pack's (temperature 0 greedy) */
-  unsigned top_k;            /* 0.15.2: as asked (0 or -1 every token), else the pack's */
+  double temperature, top_p; /* as asked, else the pack's (temperature 0 greedy) */
+  unsigned top_k;            /* as asked (0 or -1 every token), else the pack's */
   unsigned long long seed;   /* as asked, else drawn (sampled: returned in x-osmos-seed) */
   bool sampled;              /* temperature above 0 */
   bool stream, usage;

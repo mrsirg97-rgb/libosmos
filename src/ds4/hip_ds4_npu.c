@@ -1,9 +1,8 @@
-/* 0.7.0: the NPU beside the GPU in a prompt step's routed experts (forward.h's npu: ForwardOptions'; npu.h). a layer whose
+/* the NPU beside the GPU in a prompt step's routed experts (forward.h's npu: ForwardOptions'; npu.h). a layer whose
    gate and up share a format the NPU has a kernel for, or whose down has one, gives the NPU a fixed share of its pairs
    in whole NPU_TOKENS parts of its hottest experts - chosen from the routing alone (fwd_npu_pick), so a prompt's bits
-   are the same each run. for each matrix it takes the GPU packs the parts' rows (npu_pack_a: of xf for gate and up,
-   of hh for the down), and the NPU runs them while the GPU runs the layer's other rows - writing theirs where the GPU
-   reads them, a part's 128 rows of ga / upr (before the swiglu) or ye (before the sum): no copy back */
+   are the same each run. the GPU packs the parts' rows (npu_pack_a) and the NPU writes its rows where the GPU reads
+   them (ga / upr before the swiglu, ye before the sum): no copy back */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

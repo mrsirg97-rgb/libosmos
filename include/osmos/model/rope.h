@@ -27,6 +27,6 @@ Rope
 
 rope_freqs
   the dim / 2 frequencies into freqs, in F32 as ref.py's freqs_cis computes them (float32 pow, reciprocal and blend:
-  the same bits; tests/test_rope.c holds torch's). false for a dim not even, or past ROPE_MAX_DIM, a base not above 1,
+  the same bits). false for a dim not even, or past ROPE_MAX_DIM, a base not above 1,
   or YaRN with a factor or betas not positive.
 */

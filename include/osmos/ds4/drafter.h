@@ -24,20 +24,20 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
 
 /*
 Drafter
-  DeepSeek-V4.1-Flash's DSpark drafter beside a Forward (DeepSeek's inference/model.py DSparkBlock / forward_spec, as
-  maya's tools/ds4/dspark_ref.py writes it): three blocks - each the trunk's layer in small (hyper-connections, window
-  attention, 128 routed experts of which a row picks DRAFTER_TOPK, a shared one) - whose window is a ring of keys made
-  from the trunk's taps (the streams' mean entering its target layers, through main_proj and main_norm); a round runs
-  the block [y, noise x 4] at the sequence's next positions through them, then the trunk's head and a rank-256 markov
-  bias of each row's previous token give each row's draft (greedy), and a confidence head its confidence. its weights
-  (dir/dspark.bin, ~4.7 GB as the packs ship it: experts IQ2_XS) in GPU memory of their own, outside the Forward's
-  budget; its products the matvec's (F32 sums). drafts change no bit of the trunk's: they are only proposals, which a batched forward verifies.
+  DeepSeek-V4.1-Flash's DSpark drafter beside a Forward (DeepSeek's inference/model.py DSparkBlock / forward_spec):
+  three blocks - each the trunk's layer in small (hyper-connections, window attention, 128 routed experts of which a row
+  picks DRAFTER_TOPK, a shared one) - whose window is a ring of keys made from the trunk's taps (the streams' mean
+  entering its target layers, through main_proj and main_norm); a round runs the block [y, noise x 4] at the sequence's
+  next positions through them, then the trunk's head and a rank-256 markov bias of each row's previous token give each
+  row's draft (greedy), and a confidence head its confidence. its weights (dir/dspark.bin, experts IQ2_XS) in GPU memory
+  of their own, outside the Forward's budget; its products the matvec's (F32 sums). drafts change no bit of the trunk's:
+  they are only proposals, which a batched forward verifies.
 
 made with its forward (ForwardOptions' drafter: dir's dspark.json, dspark.bin), the forward's own - forward_drafter
-  borrows it, forward_destroy destroys it (0.16.0: drafter_create attached one to a built forward, its taps turned on
-  then). the forward taps from its first step - at the target layers the model's GGUF names, else those dspark.json
-  does, checked before the forward's GPU memory is taken: the forward refused, why said, for a drafter it cannot read,
-  target layers neither names (or both, unequal), taps its main_proj does not take, or GPU memory refused.
+  borrows it, forward_destroy destroys it. the forward taps from its first step - at the target layers the model's GGUF
+  names, else those dspark.json does, checked before the forward's GPU memory is taken: the forward refused, why said,
+  for a drafter it cannot read, target layers neither names (or both, unequal), taps its main_proj does not take, or GPU
+  memory refused.
 
 drafter_seed
   s's ring rows for its positions from .. to - 1 of f's last step (each one's taps, keys for every block): after a

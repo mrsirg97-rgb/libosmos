@@ -16,8 +16,7 @@ typedef struct Q4xX16
 } Q4xX16;
 
 /* a context's most keys: four times the model's native 262,144 (YaRN's factor 4, the model card's for 1M; q4x_rope)
-   - no kernel limit (QSA's picks a token's 2,051 keys at most), a context's: its Q8_0 cache ~13 KB a token a sequence
-   (1M: ~13.6 GB), its pooled keys ~1.5 KB */
+   - a context's bound, not a kernel's (QSA's picks a token's 2,051 keys at most) */
 #define OPS_Q4X_MAX_KEYS 1048576
 /* q4x_attn's own most keys (its offsets 64-bit, its chunks a grid's z under 65,536): LFM3's 2M context (its Qwen
    callers OPS_Q4X_MAX_KEYS') */
@@ -54,8 +53,8 @@ bool q4x_join(const float *e, const float *h, uint32_t n_tok, uint32_t hc, uint3
 
 /* a rotation (q4x_rope): its dims (a head's first), its angles' step, and YaRN's - none: ext_factor 0, freq_scale and
    mscale 1 (the plain rotation's bits) */
-/* a pair's angle step, as each model's reference forms it: ggml's (theta_scale^i, a running product - llama.cpp's, Qwen's
-   reference) or transformers' (1 / base^(2i / dim) in F32 - Liquid's modeling code, LFM3's) */
+/* a pair's angle step, as each model's reference forms it: ggml's (theta_scale^i, a running product - llama.cpp's,
+   Qwen's reference) or transformers' (1 / base^(2i / dim) in F32 - Liquid's modeling code, LFM3's) */
 #define Q4X_ROPE_PAIRS_MAX 128 /* a rotation's pairs at most (a 256 head's) */
 typedef enum Q4xTheta
 {
@@ -75,7 +74,7 @@ typedef struct Q4xRope
   float mscale;           /* a rotated pair's magnitude: 1 + 0.1 ln(factor) */
   Q4xTheta theta;         /* its angle step's form */
   float inv_freq[Q4X_ROPE_PAIRS_MAX]; /* Q4X_THETA_HF's: pair i's 1 / base^(2i / dim), formed on the host in F32 (the
-                                         reference's own powf: the device's may differ by an ulp, ~1e-3 at 8K) */
+                                         reference's own powf: the device's may differ by an ulp) */
 } Q4xRope;
 bool q4x_rope(uint32_t dim, uint32_t pairs, float base, uint32_t native_ctx, uint32_t ctx, Q4xTheta theta,
               Q4xRope *rope);
@@ -135,7 +134,7 @@ typedef struct Q4xExpertTiles
 {
   const void *base[Q4X_GROUP_TENSORS]; /* each tensor's bytes: its experts one after another */
   uint64_t bytes[Q4X_GROUP_TENSORS];   /* an expert's */
-  const void *const *tab[Q4X_GROUP_TENSORS]; /* or each tensor's experts' addresses, [n_exp] on the device (NULL: base's) */
+  const void *const *tab[Q4X_GROUP_TENSORS]; /* or each tensor's experts' addresses, [n_exp], device (NULL: base's) */
   const void **ptr[Q4X_GROUP_TENSORS]; /* out: each tensor's entries' matrices */
   int32_t *cnt;                        /* out: an entry's tokens (0: past the live ones) */
   int32_t *gidx, *hidx;                /* out: a slot's token (the gate's and up's rows), its place (down's); -1 pad */
@@ -307,8 +306,8 @@ q4x_qk
   qfull a token's attn_q: each head's q (dim) then its gate (dim), head after head. q[t][h] = rope(rms_norm(q) q_norm),
   gate[t][h] its gate; k_out[t][g] = rope(rms_norm(k[t][g]) k_norm) (k_out may be a cache's row pos0). rope: the first
   rope->dim of a head, pairs (i, i + dim / 2), angle (pos0 + t) theta_i, theta_i = theta_scale^i as ggml builds it (a
-  running product; YaRN's as q4x_rope says); IMRoPE's sections all the token's position (text) - this rotation. heads 0: the
-  keys alone (qfull, q and gate unread: the MTP head's cache seeding). gate NULL: qfull plain q, a head after a head
+  running product; YaRN's as q4x_rope says); IMRoPE's sections all the token's position (text) - this rotation. heads 0:
+  the keys alone (qfull, q and gate unread: the MTP head's cache seeding). gate NULL: qfull plain q, a head after a head
   (LFM3's: its gate its own matrix). a head Q4X_HEAD_DIM or Q4X_QK_HEAD_NARROW wide; the pairs past rope->pairs
   unrotated, times rope->mscale (LFM3's zero tail: Liquid's YaRN scales it too).
 
@@ -320,14 +319,14 @@ q4x_kv_row_bytes, q4x_kv_put
 
 q4x_attn
   out[t][h][d] = sigmoid(gate[t][h][d]) sum over p in K(t) of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
-  K(t) the token's keys: with no pick every position up to its own, pos0 + t; with one its key list - its picked
-  blocks' positions (ratio of them a block, in block order), then its tail (the positions past its visible blocks,
-  ratio nv .. pos0 + t, nv = (pos0 + t + 1) / ratio) - every block picked, the list 0 .. pos0 + t: the dense bits.
-  g = h / (heads / kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, Q8_0 rows of
-  kv_heads x dim (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_ATTN_MAX_KEYS keys. on the matrix cores: q, k, v and the softmax's
-  weights as f16, the sums F32; a token's key list in chunks of 128, a row's chunks merged in order - a row's bits
-  its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads, max_ctx) floats
-  (a step of more tokens taken in pieces).
+  K(t) the token's keys: with no pick every position up to its own, pos0 + t; with one its key list - its picked blocks'
+  positions (ratio of them a block, in block order), then its tail (the positions past its visible blocks, ratio nv ..
+  pos0 + t, nv = (pos0 + t + 1) / ratio) - every block picked, the list 0 .. pos0 + t: the dense bits. g = h / (heads /
+  kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, Q8_0 rows of kv_heads x dim
+  (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_ATTN_MAX_KEYS keys. on the matrix cores: q, k, v and
+  the softmax's weights as f16, the sums F32; a token's key list in chunks of 128, a row's chunks merged in order - a
+  row's bits its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads, max_ctx)
+  floats (a step of more tokens taken in pieces).
 
 QSA's indexer (llama.cpp's build_qsa_sel; DESIGN.md, "QSA"): a layer's keys pooled in blocks of `ratio` positions,
 a token's keys its top `blocks` of them by score and its tail.
@@ -359,17 +358,17 @@ q4x_route
   reads).
 
 q4x_expert_bounds, q4x_expert_tiles
-  a step's n picks (ids: n_tok x k, token t's slots t k ..) as mm_group's tables, so each expert picked is read once
-  for up to 128 of its tokens: the picks sorted by expert, then pick (stable) - where[pick] its place; each expert's
-  slots its places packed (from its first, rounded up to whole tiles of MM_TILE: gidx the token, hidx the place, -1
-  past them); its places in parts of at most 128, an entry each, in the run of its tiles (1 to 16 tokens: run 0, to
-  32: 1, to 64: 2, to 128: 3), each run's entries in expert order from bounds.first[r]: cnt[e] its tokens, xg / xd its
-  first slot times dim / ff (halves: its tiles of the x16), yg / yd its first place times ff / dim (y's rows in place
-  order), each tensor's matrix base[i] + expert bytes[i] - or, tab[i] given, tab[i][expert]: the experts wherever a
-  membrane put them (DESIGN.md, "0.6.5: Qwen on the membrane"), base[i] and bytes[i] then not read. a run's entries past its live ones cnt 0, to its bound
-  (q4x_expert_bounds: min(n, n_exp), min(n / 17, n_exp), min(n / 33, n_exp), n / 65), the slots past the live ones
-  -1, to n + 15 min(n, n_exp) - the launches' and the tables'. a launch a run (mm_group, max_cnt 16 << r): a part's
-  slab decoded once for its tiles. which picks share a part changes no bit: mm's tokens are their own.
+  a step's n picks (ids: n_tok x k, token t's slots t k ..) as mm_group's tables, so each expert picked is read once for
+  up to 128 of its tokens: the picks sorted by expert, then pick (stable) - where[pick] its place; each expert's slots
+  its places packed (from its first, rounded up to whole tiles of MM_TILE: gidx the token, hidx the place, -1 past
+  them); its places in parts of at most 128, an entry each, in the run of its tiles (1 to 16 tokens: run 0, to 32: 1, to
+  64: 2, to 128: 3), each run's entries in expert order from bounds.first[r]: cnt[e] its tokens, xg / xd its first slot
+  times dim / ff (halves: its tiles of the x16), yg / yd its first place times ff / dim (y's rows in place order), each
+  tensor's matrix base[i] + expert bytes[i] - or, tab[i] given, tab[i][expert]: the experts wherever a membrane put
+  them, base[i] and bytes[i] then not read. a run's entries past its live ones cnt 0, to its bound (q4x_expert_bounds:
+  min(n, n_exp), min(n / 17, n_exp), min(n / 33, n_exp), n / 65), the slots past the live ones -1, to n + 15 min(n,
+  n_exp) - the launches' and the tables'. a launch a run (mm_group, max_cnt 16 << r): a part's slab decoded once for its
+  tiles. which picks share a part changes no bit: mm's tokens are their own.
 
 q4x_swiglu
   y[i] = silu(g[i]) u[i].
@@ -380,8 +379,8 @@ q4x_swiglu_rows
   mm_x16_rows's bytes, without the F32 between them (overflow set past f16's range). ff a multiple of 16.
 
 q4x_moe_sum
-  out[t][d] = (sum over j, in order, of w[t][j] y[where[t k + j]][d]) + sigmoid(shared_logit[t]) shared[t][d]: the experts'
-  weighted sum and the shared expert, gated.
+  out[t][d] = (sum over j, in order, of w[t][j] y[where[t k + j]][d]) + sigmoid(shared_logit[t]) shared[t][d]: the
+  experts' weighted sum and the shared expert, gated.
 
 the n-gram table (PLE):
 

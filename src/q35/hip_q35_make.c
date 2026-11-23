@@ -37,7 +37,7 @@ void q35_forward_destroy(Q35Forward *f)
     return;
   gpu_free_table(f->ledger, f->w->model, f->dev, NULL);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer the forward made - the step's, LSA's maps and read, the
-                              pins: from the record (0.16.0: three hand-kept lists) */
+                              pins: from the record */
   free(f->slot);
   lsa_scratch_destroy(f->lsa_s);
   free(f->h_ik), free(f->h_cent), free(f->h_mem);
@@ -93,8 +93,8 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS
   return true;
 }
 
-/* the LM head (BF16 in the file: 2.54 GB a decode token reads) as Q8_0 on the GPU (ggml's quantizer, q4x_kv_put's:
-   a row's blocks of 32, d = amax / 127): 1.35 GB. Q35_HEAD=bf16 keeps the file's */
+/* the LM head (BF16 in the file, a decode token's largest read) as Q8_0 on the GPU (ggml's quantizer, q4x_kv_put's:
+   a row's blocks of 32, d = amax / 127). Q35_HEAD=bf16 keeps the file's */
 static bool head_q8(Q35Forward *f, char *err)
 {
   const GgufTensor *t = f->w->output;

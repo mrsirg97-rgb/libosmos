@@ -13,15 +13,14 @@
 #include "osmos/text/tokenizer.h"
 
 #define API_LINGER_MS 2000 /* a refused request's bytes drained this long at most (http_linger) */
-#define API_BODY_MAX (8u << 20) /* a request's body: twice the largest real one - 1M tokens (API_CTX_MAX) x 2.98 bytes a
-                                   token x 1.2 for escaping, ~3.6 MB (DESIGN.md, "phase 5, the design"; 0.16.0: 32 MB) */
-#define API_TREE_MAX (4 * API_BODY_MAX) /* a body's tree, or a call's arguments' parsed (one at a time, each freed): 2.3x
-                                           the costliest shape measured - an agent's history with tool calls, 1.72x its
-                                           body (a prompt's 1.00x); a body of tiny values ~65x: refused past it */
+#define API_BODY_MAX (8u << 20) /* a request's body: twice the largest real one - 1M tokens (API_CTX_MAX) x ~3 bytes a
+                                   token x 1.2 for escaping (DESIGN.md, "phase 5, the design") */
+#define API_TREE_MAX (4 * API_BODY_MAX) /* a body's tree, or a call's arguments' parsed (one at a time, each freed):
+                                           past any real shape's; a body of tiny values past it refused */
 #define API_HEAD_MAX (64u << 10) /* its request line and headers */
-/* a request whole within a deadline from its first byte (0.16.0: a byte every 9 s, under the 10 s idle, held a
-   connection for hours): API_REQUEST_S for its headers, API_BODY_S_MB a MB of its body past them - a slow tunnel's
-   1 MB/s (this box's loopback and LAN past 100 MB/s); past it 408, the connection closed */
+/* a request whole within a deadline from its first byte (a slow sender never holds a connection): API_REQUEST_S (s)
+   for its headers, API_BODY_S_MB (s) a MB of its body past them - a slow tunnel's 1 MB/s; past it 408, the connection
+   closed */
 #define API_REQUEST_S 10
 #define API_ORIGINS_MAX 16 /* --allow-origin's at most */
 #define API_BODY_S_MB 1
@@ -93,11 +92,11 @@ bool http_preflight(const Http *h);
 bool http_stream_open(const Http *h);
 bool http_stream_open_h(const Http *h, const char *head);
 bool http_stream_event(int fd, const char *data, size_t n);
-/* an SSE comment (": keep-alive"), every client's to pass over: a long prompt's read not silent (0.11.2) */
+/* an SSE comment (": keep-alive"), every client's to pass over: a long prompt's read not silent */
 bool http_stream_comment(int fd);
 bool http_error(const Http *h, int status, const char *message);
 bool http_error_code(const Http *h, int status, const char *message, const char *param, const char *code);
-/* the same with header lines of its own ("Name: value\r\n" each, or NULL): a 503's Retry-After (0.11.2) */
+/* the same with header lines of its own ("Name: value\r\n" each, or NULL): a 503's Retry-After */
 bool http_error_head(const Http *h, int status, const char *message, const char *param, const char *code,
                      const char *head);
 void http_linger(int fd, bool wait);
@@ -112,10 +111,10 @@ typedef struct Api
   int32_t eos;
   bool fill_orphans; /* the pack's fill_orphans: a request's osmos.fill_orphans unset, this */
   bool preserve_thinking; /* the pack's preserve_thinking: a request's unset, this (LFM3's reader) */
-  double temperature, top_p; /* the pack's sampling: a request's unset, these (0.14.0; temperature 0 greedy) */
-  unsigned top_k;            /* likewise (0.15.2; 0 every token) */
+  double temperature, top_p; /* the pack's sampling: a request's unset, these (temperature 0 greedy) */
+  unsigned top_k;            /* likewise (0 every token) */
   const char *allow[API_ORIGINS_MAX]; /* --allow-origin's: browsers' origins taken (CORS), any other refused */
-  uint32_t keepalive_ms; /* a stream's keep-alive comment past this quiet (--keepalive-ms; 0.16.0 an env knob) */
+  uint32_t keepalive_ms; /* a stream's keep-alive comment past this quiet (--keepalive-ms) */
   int n_allow;
 } Api;
 

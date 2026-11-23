@@ -75,7 +75,7 @@ static bool lay_out(Resident *r, char *err)
       r->arena[r->n_arena++] = a, r->bytes += cap, used = 0;
     }
     r->dev[i] = r->arena[r->n_arena - 1] + used;
-    uint64_t at = 0; /* (0.7.1: an int's, wrapped by a first part of 2 GiB or more) */
+    uint64_t at = 0; /* (not an int: a first part of 2 GiB or more wraps one) */
     for (int k = 0; k < r->u[i].n_parts; k++)
       r->off[i][k] = at, at += up(r->u[i].part[k].bytes);
     used += size;

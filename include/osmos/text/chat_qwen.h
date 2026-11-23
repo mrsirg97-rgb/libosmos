@@ -26,9 +26,9 @@ extern const char *const qchat_refused[]; /* special tokens' text a completion c
 #endif
 
 /*
-Qwen3.8-Flash-Next's chat template (the tokenizer.chat_template of its GGUF: Qwen's, with unsloth's fixes): the port
-held to it byte for byte as transformers renders it (tests/test_chat_qwen.c, tools/gen_chat_fixtures_qwen.py). text
-only: an image or a video part refused by name (the template would put a vision placeholder in).
+Qwen3.8-Flash-Next's chat template (its GGUF's tokenizer.chat_template: Qwen's, with unsloth's fixes), ported byte
+for byte as transformers renders it. text only: an image or a video part refused by name (the template would put a
+vision placeholder in).
 
 qchat_render
   messages (a JSON array: role system / developer / user / assistant / tool; content a string, text parts or null;
@@ -46,8 +46,7 @@ qchat_render
 qchat_render_with
   qchat_render, but the template's choices that read a message's text (the last real user query, for preserve false)
   made on branch's messages - the same count - not on messages': a render of the request's strings defused (osmos-api's
-  shape) takes the text's branches, its bytes then the text's but for those defused (0.7.1: a user turn of tool
-  responses as text, defused, stopped looking like one - the renders differed, a 400).
+  shape) takes the text's branches, so its bytes are the text's but for those defused.
 
 qchat_parse
   a completion - the model's text after the rendered prompt, through its end of turn (QCHAT_EOS) - as the assistant
@@ -56,14 +55,13 @@ qchat_parse
   each <tool_call> block's parameters: the text the template wrote (the newline it puts on each side dropped), read
   as JSON where that is a value other than a string of a type the tool's schema allows for it (its "type", or an
   anyOf / oneOf's) - else the text itself, as the template writes a string (no tool, parameter or type: a string,
-  as vLLM's qwen3coder parser reads it). false with why for a completion out of the format: no end
-  of turn, no </think> when thinking, a special token in the text, a malformed or repeated parameter, text after the
-  calls.
+  as vLLM's qwen3coder parser reads it). false with why for a completion out of the format: no end of turn, no
+  </think> when thinking, a special token in the text, a malformed or repeated parameter, text after the calls.
 
 qchat_space_lead / qchat_space_trail
   the bytes of whitespace Python's str.strip takes off p's start / end (str.isspace's code points): the parse's trim,
   and what osmos-api's stream holds or passes over so its text is the parse's.
 
 qchat_parse_shaped
-  qchat_parse with its markers read from shape and what it gives the text's, as chat_parse_shaped (#34).
+  qchat_parse with its markers read from shape and what it gives the text's, as chat_parse_shaped.
 */

@@ -1,4 +1,4 @@
-// selprobe budget_gib step ids.txt P out.txt: the indexer's picks at one position of a long text (issue #47's trace) -
+// selprobe budget_gib step ids.txt P out.txt: the indexer's picks at one position of a long text -
 // the text's first P tokens read in `step`-token batches (their end told: seq_prompt, the prompt skip's exact path),
 // then token P stepped with a probe on, every index layer's selected rows (its "sel": the compressed rows' indices,
 // sorted) a line of out.txt: "<layer> <count> <row> <row> ...". two builds' (or two packs') picks compared tell where

@@ -1,5 +1,4 @@
-/* osmos/model/expert_units.h - an MoE's experts as the membrane's units: every family's (DeepSeek's, Inkling's,
-   Qwen's, Hy4-flash's) one slicing of its expert tensors */
+/* an MoE's experts as the membrane's units: every family's one slicing of its expert tensors */
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>

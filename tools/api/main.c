@@ -3,12 +3,13 @@
      osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>] [--ctx N|Nk|Nm]
                [--allow-origin <origin>]... [--keepalive-ms N]
      osmos-api --tokenize --model <first shard>     (stdin's text as the prompt's ids, one line: for tests)
+     osmos-api --version
 
    POST /v1/chat/completions, GET /v1/models, GET /health (503 while the engine loads). osmos-serve - beside this
    binary unless --engine names another - runs as the child with the pack's settings (osmos.json, the installer's);
-   its exit ends this server (the launcher restarts it). --allow-origin (repeatable, 0.16.0): a web page's origin
-   whose requests are taken - its preflight answered, every response carrying CORS's headers for it; any other
-   browser's request (an Origin header) refused, as since 0.15.2 */
+   its exit ends this server (the launcher restarts it). --allow-origin (repeatable): a web page's origin whose
+   requests are taken - its preflight answered, every response carrying CORS's headers for it; any other browser's
+   request (an Origin header) refused. --ctx overrides the pack's max_context; --keepalive-ms a stream's keep-alive */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
@@ -33,9 +34,9 @@
 #define API_PORT 8091  /* the installer's first (tools/install/rig.py PORT_BASE) */
 #define API_CONNS 16   /* connections at once: past it a 503 (a local client's handful; the engine runs few) */
 #define API_POLL_MS 1000
-#define API_IDLE_S 10  /* a request's bytes awaited this long at most: an idle connection closed, not held (0.7.1) */
-#define API_STALL_S 60
-#define API_QUIT_S 120 /* the engine's end awaited this long on a stop: its conversations written to their folder */ /* a reply's send blocked this long: its client taken as gone (a stream's run STOPped) */
+#define API_IDLE_S 10  /* a request's bytes awaited this long at most: an idle connection closed, not held */
+#define API_STALL_S 60 /* a reply's send blocked this long: its client taken as gone (a stream's run STOPped) */
+#define API_QUIT_S 120 /* the engine's end awaited this long on a stop: its conversations written to their folder */
 
 static const char *opt(int argc, char **argv, const char *name, const char *dflt)
 {
@@ -93,7 +94,7 @@ static void answer(Http *h)
     http_linger(h->fd, true); /* its bytes unread: drained, so the client reads the status, not a reset */
     return;
   }
-  /* a web page's request refused before anything is read into the engine (0.15.2): any page can POST text/plain to
+  /* a web page's request refused before anything is read into the engine: any page can POST text/plain to
      localhost with no preflight - a browser says its Origin, and DNS rebinding a Host not this server's */
   if (h->origin[0]) /* a browser's: its origin named by --allow-origin taken (CORS), any other refused */
   {
@@ -128,7 +129,7 @@ static void answer(Http *h)
     json_dump_string(&b, api.model, strlen(api.model));
     json_puts(&b, ", \"object\": \"model\", \"owned_by\": \"osmos\"");
     char t[96];
-    const bool ready = engine_ready(&api.engine); /* 0.9.2: listed while loading, said so - and the context once known */
+    const bool ready = engine_ready(&api.engine); /* listed while loading, said so - and the context once known */
     if (ready)
       snprintf(t, sizeof t, ", \"context_length\": %u", api.engine.max_ctx), json_puts(&b, t);
     json_puts(&b, ready ? ", \"osmos\": {\"ready\": true}}]}" : ", \"osmos\": {\"ready\": false}}]}");
@@ -197,7 +198,7 @@ static int tokenize(const char *model)
   return n < 0;
 }
 
-/* --ctx (0.7.3): a context length as N, Nk (x 1,024) or Nm (x 1,048,576); 0 when it is not one, or outside API_CTX */
+/* --ctx: a context length as N, Nk (x 1,024) or Nm (x 1,048,576); 0 when it is not one, or outside API_CTX */
 #define API_CTX_MIN 4096u
 #define API_CTX_MAX 1048576u /* the largest any pack's model reads (DeepSeek-V4.1's 1M; Qwen's YaRN to it) */
 static unsigned ctx_of(const char *s)
@@ -258,7 +259,7 @@ int main(int argc, char **argv)
     return die(err);
   char dport[16];
   snprintf(dport, sizeof dport, "%d", API_PORT);
-  if (opt(argc, argv, "--keepalive-ms", NULL)) /* (a test's shorter one: 0.16.0 OSMOS_API_KEEPALIVE_MS) */
+  if (opt(argc, argv, "--keepalive-ms", NULL)) /* (a test's shorter one) */
   {
     char *e;
     const long v = strtol(opt(argc, argv, "--keepalive-ms", NULL), &e, 10);

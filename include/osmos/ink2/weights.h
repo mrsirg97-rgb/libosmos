@@ -17,7 +17,7 @@ typedef enum Ink2Keys
 {
   INK2_KEYS_OURS,          /* tools/convert/ink2_ref_gguf.py's */
   INK2_KEYS_UNSLOTH_SMALL, /* unsloth's Inkling-2-Small GGUFs': the convs' residual and scale not applied */
-  INK2_KEYS_UPSTREAM,      /* upstream llama.cpp's inkling2 (#32694), unsloth's Inkling-2-Mini's: gate and up fused */
+  INK2_KEYS_UPSTREAM,      /* upstream llama.cpp's inkling2, unsloth's Inkling-2-Mini's: gate and up fused */
   INK2_KEYS_N
 } Ink2Keys;
 
@@ -74,8 +74,8 @@ typedef struct Ink2Layer
   const GgufTensor *k_conv, *v_conv, *k_conv_static, *v_conv_static, *k_conv_proj, *v_conv_proj;
   const GgufTensor *out_conv, *ffn_out_conv; /* after the attention and after the MoE */
   /* the MoE: its norm, router and the router's bias, the experts, and each expert's own scale (NVFP4's: one an
-     expert, gate and up the same; NULL for a type whose blocks are its whole values - MXFP8's; in llama.cpp's layout
-     the checkpoint's NVFP4 scale beside a requantized expert too) */
+     expert, gate and up the same; NULL for a type whose blocks are its whole values; in llama.cpp's layout the
+     checkpoint's NVFP4 scale beside a requantized expert too) */
   const GgufTensor *ffn_norm, *router, *router_bias;
   const GgufTensor *exp_gate, *exp_up, *exp_down, *exp_gate_scale, *exp_up_scale, *exp_down_scale;
   /* gate and up one tensor (upstream's): exp_gate == exp_up, an expert's gate rows then its up rows, one scale */
@@ -118,21 +118,22 @@ ink2_geometry
   layers a list of distinct layers with at least one full layer among them). false with the key and why in err.
   n_vocab_rows is not metadata: ink2_weights_create sets it from the embedding. with a loop, block_count counts the
   slots: the layers are fewer (n_layers), a slot's values (heads, sliding) its layer's - refused if not; the core
-  whole attn_res blocks inside the layers, at least 2 passes, a gate rank. a value a slot (upstream's head counts) the
-  same in every slot - refused if not: one count implemented.
+  whole attn_res blocks inside the layers, at least 2 passes, a gate rank. a per-slot value (upstream's head counts)
+  must be the same in every slot - refused if not: one count implemented.
 
 ink2_weights_create
   the geometry, then every tensor given its role and checked: its name, its dims (the geometry's), its type (one the
-  role's reader takes), with a loop a core layer's controls and the two message tables - none without. NULL with why - the key or the tensor named - for a model of another architecture, a key
-  missing or out of range, a tensor missing, of another shape or a type its role does not read, an expert tensor of
+  role's reader takes), with a loop a core layer's controls and the two message tables - none without. NULL with why
+  - the key or the tensor named - for a model of another architecture, a key missing or out of range, a tensor
+  missing, of another shape or a type its role does not read, an expert tensor of
   a type that needs a scale with none beside it (NVFP4) or a scale beside one that has none, or a tensor no role
-  takes. the drafter's tensors (mtp.*: the DSpark head, its own roles to come) are left to it, not refused. the
+  takes. the drafter's tensors (mtp.*) are left to it, not refused. the
   weights point into the model's tensors: the model outlives them.
 
 ink2_weights_experts
   the routed experts as the pool's units, unit = layer * n_experts + expert, each three parts - the expert's slice of
   gate, up and down (a tensor's bytes / n_experts each) - in the model's files, `model_fds[file]` the caller's open
   descriptors of its paths; a fused gate and up the two halves of the expert's slice. an expert's scales are not
-  parts: a few bytes a layer, read with the layer. writes at most `cap` units; returns how many there are (n_layers * n_experts) - 0, nothing written, for no weights or a tensor whose
-  bytes are not n_experts equal slices.
+  parts: a few bytes a layer, read with the layer. writes at most `cap` units; returns how many there are (n_layers *
+  n_experts) - 0, nothing written, for no weights or a tensor whose bytes are not n_experts equal slices.
 */

@@ -19,7 +19,7 @@ Seq *seq_create(Forward *f, char err[OSMOS_ERR])
   s->f = f, s->bufs.ledger = f->ledger;
   const Geometry *g = f->g;
   const uint64_t F = sizeof(float), hd = (uint64_t)g->head_dim;
-  /* the drafter's rings made with it, whole (a drafter's seed fills them, a state's load reads them): ~0.2 MiB */
+  /* the drafter's rings made with it, whole (a drafter's seed fills them, a state's load reads them) */
   bool ok = fwd_alloc(&s->bufs, &s->dring, (uint64_t)DRAFTER_BLOCKS * g->window * kv_row_bytes(KV_FP8, (uint32_t)hd));
   for (int l = 0; ok && l < f->n_layers; l++)
   {
@@ -63,8 +63,8 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
   const uint32_t hc = g->hc, D = g->n_embd, n = f->n;
   const int p = f->at;
   /* a drafter's tap: the layer's last FWD_MAX_BATCH rows (f->taps' room), whichever sub-batches hold them - a seed
-     reads a sequence's last window of positions, which a short last sub-batch alone does not hold (a prompt piece of
-     2,125 tokens: sub-batches of 2,048 and 77). this sub-batch's rows from j0, at their place past the cut */
+     reads a sequence's last window of positions, which a short last sub-batch alone does not hold. this sub-batch's
+     rows from j0, at their place past the cut */
   if (f->taps && f->tapped[l])
   {
     const uint32_t r0 = f->sub[f->cur].xrow, cut = f->tap_rows > FWD_MAX_BATCH ? f->tap_rows - FWD_MAX_BATCH : 0;
@@ -194,7 +194,7 @@ static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
       return osmos_fail(err, "a sequence past max_ctx");
   for (uint32_t i = 0; i < n; i++)
     seqs[i]->staged = 0;
-  *placed = true; /* from here a sequence's history moves (a refusal before: every sequence as it was - 0.11.2) */
+  *placed = true; /* from here a sequence's history moves (a refusal before: every sequence as it was) */
   f->n_sub = (n + FWD_MAX_BATCH - 1) / FWD_MAX_BATCH;
   for (uint32_t i = 0; i < n; i++)
   {
@@ -246,7 +246,7 @@ static bool fail_held(Forward *f)
 static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[OSMOS_ERR]);
 
 /* a step; one that fails once its tokens are placed leaves each sequence's n-gram history (last[]) past its position:
-   the sequence broken - refused until it is reset or loaded - not stepped again on a phantom history (0.7.1) */
+   the sequence broken - refused until it is reset or loaded - not stepped again on a phantom history */
 bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {
   for (uint32_t i = 0; i < n; i++)

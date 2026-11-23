@@ -12,8 +12,7 @@
 #define HY4_MAX_HC 4      /* the residual's streams (Hy4-flash's iHC: 4) */
 #define HY4_MAX_ENGRAM 8  /* the Engram layers (Hy4-flash's: 4) */
 
-/* Tencent's Hy4-flash text model (general.architecture hy_v4_flash, llama.cpp PR #32517's keys), from its metadata.
-   DESIGN.md, "0.10.0: Hy4-flash (hy4)" */
+/* Tencent's Hy4-flash text model (general.architecture hy_v4_flash, llama.cpp's keys), from its metadata */
 typedef struct Hy4Geometry
 {
   int n_layers;  /* the trunk's (block_count less the drafter's nextn layers) */

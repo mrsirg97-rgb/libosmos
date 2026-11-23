@@ -1,4 +1,4 @@
-/* Qwen's MoE and PLE blocks (q4x_impl.h), as their tests hold them to llama.cpp's: the routed experts (the
+/* Qwen's MoE and PLE blocks (q4x_impl.h), llama.cpp's math: the routed experts (the
    membrane's, a host's tiles where a run is small), the shared expert, the n-gram layer's rows into b.h */
 #include "osmos/mem/membrane.h"
 #include "osmos/model/moe_route.h"
@@ -107,7 +107,7 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   if (!mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) || !q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) ||
       (streamed ? !host_tiles(f, (int)(L - f->w->layer), e, &bd, D, ff) : !q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL)))
     return false;
-  /* 0.7.0: the NPU's share of a prompt step's whole entries, taken from the tables (hip_q4x_npu.c): each kind's packed
+  /* the NPU's share of a prompt step's whole entries, taken from the tables (hip_q4x_npu.c): each kind's packed
      before the GPU's matmuls of it are queued, run beside them, its rows where theirs go */
   const bool npu = q4x_npu_take(f, L, n, &bd, D, ff) > 0;
   return mm_x16_rows(b->mixed, D, b->gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
@@ -129,16 +129,15 @@ bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   const uint32_t D = (uint32_t)g->n_embd, sff = (uint32_t)g->ff_shexp;
   Q4xX16 sd;
   /* a small step's (decode, a draft's verify): the shared expert on the second stream, beside the routed experts -
-     both latency-bound at a few tokens, together nearer the memory's bandwidth (plain decode 23.9 -> 25.8 tok/s,
-     drafted 40.1 -> 43.6, low-power). it reads the mixer's outputs alone (b.mixed, b.x16) and writes b.sh, b.sl and
-     its own f16 into b.x16, which the routed experts do not touch (theirs b.xe16); q4x_moe_sum waits for it. the same
-     kernels on the same inputs: the same bits */
+     both latency-bound at a few tokens, together nearer the memory's bandwidth. it reads the mixer's outputs alone
+     (b.mixed, b.x16) and writes b.sh, b.sl and its own f16 into b.x16, which the routed experts do not touch (theirs
+     b.xe16); q4x_moe_sum waits for it. the same kernels on the same inputs: the same bits */
   const bool side_stream = n <= Q4X_SIDE_STEP;
   if (side_stream && (hipEventRecord(f->e_in, NULL) != hipSuccess || hipStreamWaitEvent(f->s2, f->e_in, 0) != hipSuccess))
     return false;
   if (side_stream)
     f->st = f->s2;
-  if (side_stream && f->side_spin && !q4x_spin(f->side_spin, f->s2)) /* a test's: the shared expert last */
+  if (side_stream && f->side_spin && !q4x_spin(f->side_spin, f->s2)) /* side_spin: the shared expert last */
     return false;
   const bool ok = q4x_mat2(f, L->sh_gate, sff, b->shg, sff, L->sh_up, sff, b->shu, sff, D, b->mixed, D, n,
                            n <= MM_MAX_TOKENS) &&

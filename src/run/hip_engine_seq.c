@@ -138,7 +138,7 @@ int oseq_draft(OsmosSeq *s, int32_t y, float conf_min, float cum_min, int32_t dr
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
   if (!s || !drafts || !conf || !osmos_block(s->e))
     return osmos_fail(err, "no drafter"), -1;
-  if (y < 0 || (uint32_t)y >= s->e->vocab) /* every family's (Hy4's drafter returned 0, no drafts) */
+  if (y < 0 || (uint32_t)y >= s->e->vocab) /* every family's */
     return osmos_fail(err, "a draft after a token outside the vocabulary"), -1;
   return engine_named_count(s->e->fam, err, s->e->fam->draft(s->e->impl, s->impl, y, conf_min, cum_min, drafts, conf, err));
 }

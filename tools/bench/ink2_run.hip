@@ -1,6 +1,6 @@
-// ink2_run - Inkling-2-Small's forward on the GPU, a layer at a time (0.8.0's first whole-model check): every token of
-// one prompt through layer 0, then 1, ... - each layer's tensors uploaded, run, freed - so a model of any size runs in
-// a layer's memory (the reference's 384 GB: ~8 GB a layer). the definition is transformers' modeling_inkling2.py:
+// ink2_run - Inkling-2-Small's forward on the GPU, a layer at a time: every token of one prompt through layer 0, then
+// 1, ... - each layer's tensors uploaded, run, freed - so a model of any size runs in a layer's memory (the
+// reference's 384 GB: ~8 GB a layer). the definition is transformers' modeling_inkling2.py:
 // the normed embedding; each layer's attention residual over the block states (a block every res_block layers: its
 // first layer's input), the attention (sliding or full), its conv, the residual or a new block, the MoE's residual,
 // the MoE (sigmoid router, NVFP4 / MXFP8 experts with their scales), its conv; the final residual, norm, head, softcap.

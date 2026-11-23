@@ -101,7 +101,7 @@ static long last_user(const Msg *ms, size_t n)
 }
 
 /* a value as Python's `if value:` reads it (encoding.py's tests): null, false, 0, 0.0, "" and an empty list or object
-   false (0.7.1: a falsy response_format - [], false - rendered its section) */
+   false */
 static bool truthy(const Json *v)
 {
   if (!v)
@@ -156,7 +156,7 @@ static void put_blocks(JsonBuf *b, const Msg *m)
       else if (x->v && x->v->type == JSON_STRING)
         json_put(b, x->v->s, x->v->len);
       else if (x->v && (x->v->type == JSON_INT || x->v->type == JSON_FLOAT)) /* str(): Python's repr of a float, its
-                                                                                  digits of an int (0.7.1: empty) */
+                                                                                  digits of an int */
         json_dump(b, x->v);
       else if (x->v && (x->v->type == JSON_TRUE || x->v->type == JSON_FALSE))
         json_puts(b, x->v->type == JSON_TRUE ? "True" : "False");

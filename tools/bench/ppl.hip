@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     std::fclose(pf);
     o.picks = picks.data();
   }
-  /* the forward whole: its lane (as the engine's), the NPU beside the GPU (0.7.0: NPU=<its kernels' dir>, NPU_SHARE
+  /* the forward whole: its lane (as the engine's), the NPU beside the GPU (NPU=<its kernels' dir>, NPU_SHARE
      of a layer's pairs) */
   o.lane = true, o.npu = std::getenv("NPU");
   o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;

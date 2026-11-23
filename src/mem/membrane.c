@@ -25,8 +25,7 @@ struct Membrane
   uint32_t n_held;
   bool *is_held;
   uint32_t *pend; /* membrane_begin's units still reading, and the pool each was pinned in (a failed read leaves it
-                     cold there: its hold that pool's - 0.11.2, looked up again it was the membrane's, the stream's
-                     slot held for good) */
+                     cold there: its hold that pool's, not looked up again - else the stream's slot held for good) */
   Pool **pend_in;
   uint32_t n_pend;
   uint64_t *guessed; /* the visit a unit was guessed for */
@@ -136,8 +135,8 @@ bool membrane_warm(Membrane *m, char err[OSMOS_ERR])
   for (size_t k = 0; ok && k < n; k++)
     if (pool_state(m->pool, m->warm[k]) != POOL_PINNED)
       ok = osmos_fail(err, "an expert's read from its file failed");
-  for (size_t k = pinned; k-- > 0;) /* every hold the warm start took ended, refused or not (0.7.1: a refusal kept
-                                       them, the room held for good) */
+  for (size_t k = pinned; k-- > 0;) /* every hold the warm start took ended, refused or not (else the room held
+                                       for good) */
     pool_release(m->pool, m->warm[k], 0);
   return ok;
 }

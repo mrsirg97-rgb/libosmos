@@ -1,13 +1,11 @@
 #ifndef OSMOS_MEM_LEDGER_H
 #define OSMOS_MEM_LEDGER_H
-/* the ledger: the memory an engine holds, one count every family's build shares (DESIGN.md, "0.16.0: the ledger, a
-   component"). an engine owns one for its life (osmos_create to osmos_destroy); each family's forward borrows it, its
-   sequences through their forward. every allocation of the engine's tree goes through it - counted, and one that would
-   leave under FIT_HEADROOM of the room refused before it is taken; every free given back. the room: this machine's
-   (fit_room - the GPU's free memory, or the system's RAM past ram_kept, the less), read at the ledger's making and
-   again at a build's start (what others took since counted), and once it stands still before a refusal is final.
-   a NULL ledger counts nothing (a library caller sizing its own build). one thread's at a time: the engine's.
-   HIP's allocations through it: osmos/mem/ledger_hip.h (this header host code's too) */
+/* the ledger: the memory an engine holds, one count every family's build shares. an engine owns one for its life
+   (osmos_create to osmos_destroy); each forward borrows it, its sequences through their forward. every allocation of
+   the engine's tree goes through it, one that would leave under FIT_HEADROOM of the room refused before it is taken;
+   every free given back. the room (fit_room: the less of the GPU's free memory and the RAM past ram_kept) is read at
+   creation, again at a build's start, and once it stands still before a refusal is final. a NULL ledger counts
+   nothing. not thread-safe: one thread at a time. HIP's allocations: osmos/mem/ledger_hip.h */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -24,10 +22,10 @@ typedef struct OsmosLedger OsmosLedger;
 OsmosLedger *ledger_create(uint64_t ram_kept, char err[OSMOS_ERR]);
 /* made with this room, never read (a test's: a ledger's rules on any machine) */
 OsmosLedger *ledger_create_room(uint64_t room, uint64_t ram_kept);
-/* gone (what it still counts: its owner's leak - the engine's tests hold it at zero) */
+/* gone (what it still counts is its owner's leak) */
 void ledger_destroy(OsmosLedger *l);
 
-/* the room read again, what this ledger holds added back - a build's start: what others took since counted */
+/* the room read again, what this ledger holds added back: a build's start counts what others took since */
 void ledger_read(OsmosLedger *l);
 /* what an allocation may still take past FIT_HEADROOM (UINT64_MAX: a NULL ledger); _settled: read once it stands
    still first (a decision sized to the room: experts_fit_now's) */

@@ -8,9 +8,8 @@ extern "C" {
 
 namespace {
 
-// rows a wave (R) and chunks in flight a lane (U), by type and tokens: the best of R 1-2, U 1-8 measured on gfx1151
-// on ds1017's shapes (2026-10-28, an expert's 5120 x 2304 and 2304 x 5120, q_b, out_b, q_a, shexp); 3 tokens take
-// 2's, 5-7 take 8's. neither changes a bit (mv.h)
+// rows a wave (R) and chunks in flight a lane (U), by type and tokens, tuned on gfx1151; 3 tokens take 2's, 5-7 take
+// 8's. neither changes a bit (mv.h)
 struct Tune {
   int r, u;
 };
@@ -28,16 +27,11 @@ constexpr Tune tune(quant::Type t, int nt) {
     case quant::kQ5_K:
     case quant::kQ5_KR: return {2, 1};
     case quant::kQ8_0: return nt > 4 ? Tune{2, 1} : Tune{1, 1};
-    // an F32 router (unsloth's: 384 x 5120) and its guess's BF16 copy, one token: 4 chunks in flight a lane - F32
-    // 53.5 -> 38.8 us (147 -> 202 GB/s), BF16 22.8 -> 19.5 (2026-11-04, 40 routers cold; R 1-4, U 1-8 swept, the
-    // same bits each). 2 to 6 tokens (Qwen3.8's verify; mvsweep f32, cold, low-power, 2026-11-09): 2 in flight -
-    // the mixers' inject 4 x 10240 13.2 -> 9.1 us at 4 tokens, 14.2 -> 12.7 at 6; alpha / beta 32 x 2560 7.1 ->
-    // 5.6 at 4; the router 512 x 2560 level (27.5 / 28.3 against 28.0 / 28.5)
+    // an F32 router and its guess's BF16 copy: one token 4 chunks in flight a lane, 2 to 6 tokens (a verify's) 2
     case quant::kF32:
     case quant::kBF16: return nt == 1 ? Tune{1, 4} : Tune{1, 2};
-    // Qwen3.8's expert types read for several tokens (an expert two or more of a step's tokens picked; mvsweep,
-    // 10 experts cold, 2026-11-06): 2 and 2 at 2 tokens (IQ3_XXS 73.2 -> 45.1 us, IQ4_NL 76.6 -> 55.0) and at 4
-    // (86.6 -> 65.4, 92.7 -> 71.7). one token: tune_group1's
+    // Qwen3.8's expert types read for several tokens (an expert two or more of a step's tokens picked). one token:
+    // tune_group1's
     case quant::kIQ4_NL:
     case quant::kQ4_0:  // not measured: IQ4_NL's (its layout, its block)
     case quant::kQ2_0:
@@ -49,16 +43,13 @@ constexpr Tune tune(quant::Type t, int nt) {
   }
 }
 
-// the wide tile: R rows a wave, NW tokens a block - the best of R 1-8, NW 4-32 on ds1017's router (BF16 5120 x 384,
-// 8,192 tokens: 15.2 ms in chunks of 8, 5.5 here; R 3 NW 12 5.1, 6 or 8 rows 6.6-7.1, 16+ tokens 6.3-16)
+// the wide tile: R rows a wave, NW tokens a block
 struct Wide {
   int r, nw;
 };
 constexpr Wide kWide = {4, 8};
-// F32's (Qwen3.8's router, 512 x 2560 at 2,048 tokens, low-power, 2026-11-10): R 3 NW 12 1.27-1.34 ms against 4 x 8's
-// 1.52-1.55 (R 3 NW 8-20 1.38-1.57, R 5 NW 12 1.42, R 2 or 8 slower); and at most kNarrow.r rows (the mixers' inject,
-// 4 x 10240: 520 -> 456 us; the shared expert's gate, 1 x 2560: 68 -> 30) mv.h's narrow tile, a wave all the rows of
-// its own tokens. a tile's sums are its rows' and tokens' own: any of them the same bits
+// F32's own; and at most kNarrow.r rows (the mixers' inject, the shared expert's gate) mv.h's narrow tile, a wave all
+// the rows of its own tokens. a tile's sums are its rows' and tokens' own: any of them the same bits
 constexpr Wide kWideF32 = {3, 12}, kNarrow = {4, 1};
 
 constexpr uint64_t kQ8Wide = 8u << 20;  // a Q8_0 matrix's values from which a token's matvec takes 4 chunks in flight
@@ -78,15 +69,12 @@ bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_
   constexpr Tune k = tune(T, NT);
   if constexpr (T == quant::kF32)
     if (rows < (uint64_t) cus() * mv::kWavesPerBlock * k.r) return mv::launch<T, NT, k.r, k.u, 1>(w, rows, cols, x, xs, y, ys, s);
-  // a large Q8_0 matrix, one token: 4 chunks in flight a lane (mvsweep hy4 / dense, cold, 2026-11-19: Hy4-flash's
-  // sliding gate 16384 x 3072 305.8 -> 244.1 us, its output 3072 x 16384 281.2 -> 255.6, Qwen3.8's 320 x 10240 21.5
-  // -> 18.3; under 8M values level or a few % slower: 1). the same bits (a lane's chunks summed in the same order)
+  // a large Q8_0 matrix, one token: 4 chunks in flight a lane (under kQ8Wide: 1). the same bits (a lane's chunks
+  // summed in the same order)
   if constexpr (T == quant::kQ8_0 && NT == 1)
     if ((uint64_t) rows * cols >= kQ8Wide) return mv::launch<T, NT, 1, 4>(w, rows, cols, x, xs, y, ys, s);
-  // a verify's few tokens on a large Q8_0 matrix (mvsweep hy4 3-6, cold, 2026-11-19): tall (Hy4-flash's sliding gate
-  // 16384 x 3072) 1 row 2 in flight to 4 tokens (294.3 -> 243.3 us at 3, 296.8 -> 249.3 at 4), tune's past them; wide
-  // (its output 3072 x 16384, DFly2's fusion 3072 x 6144) 4 rows 1 to 4 tokens (280.4 -> 253.8 at 3, 283.8 -> 259.3 at
-  // 4), 1 and 1 at 5 (334.3 -> 296.1), 2 and 2 at 6 (324.3 -> 287.7). the same bits
+  // a verify's few tokens on a large Q8_0 matrix: tall 1 row 2 in flight to 4 tokens, tune's past them; wide 4 rows 1
+  // to 4 tokens, 1 and 1 at 5, 2 and 2 at 6. the same bits
   if constexpr (T == quant::kQ8_0 && NT > 1)
     if ((uint64_t) rows * cols >= kQ8Wide) {
       if (rows >= cols) {
@@ -135,25 +123,20 @@ bool group(const void* const* w, uint32_t n, uint32_t rows, uint32_t cols, const
   return mv::group_launch<T, k.r, k.u>(w, n, rows, cols, x, x_mat, x_div, y, s);
 }
 
-// the lane's one-token launches, several experts at once (mv_group_tok, 6 experts of ds1017's IQ types): the IQ2s
-// best at 2 rows a wave, 4 chunks in flight (gate 122.5 -> 110 us, down 149.8 -> 125.3); IQ1_M its short rows (the
-// down's 2,304 columns) at 2 and 2 (123.3 -> 118.5), its long as tune's (2026-10-31, DESIGN.md). no bit changes
+// the lane's one-token launches, several experts at once (mv_group_tok): the IQ2s 2 rows a wave, 4 chunks in flight;
+// IQ1_M its short rows at 2 and 2, its long as tune's. no bit changes
 constexpr uint32_t kShortCols = 4096;  // fewer than 16 chunks a lane
 constexpr Tune tune_group1(quant::Type t, bool short_row) {
   switch (t) {
     case quant::kIQ2_XXS:
     case quant::kIQ2_XS:
     case quant::kIQ2_S: return {2, 4};
-    // Hy4-flash's experts (mvsweep hy4, 16 cold, 2026-11-19): Q3_K's 1536 x 1536 72.8 -> 67.4 us at 2 and 2; Q4_K
-    // 2 in flight at every shape measured (76.2 -> 72.2; Qwen3.8 UD-Q4_K_XL's 640 x 2560 51.9 -> 49.4, 2560 x 640
-    // 69.6 -> 67.6)
+    // Hy4-flash's experts (mvsweep hy4)
     case quant::kQ3_K: return {2, 2};
     case quant::kQ4_K: return {1, 2};
     case quant::kIQ1_M:
     case quant::kIQ1_S: return short_row ? Tune{2, 2} : tune(t, 1);
-    // Qwen3.8's expert types, 10 experts cold (tools/bench/mvsweep, 2026-11-06; R 1-8, U 1-4): IQ4_NL down 63.5 ->
-    // 53.3 us, IQ3_XXS gate / up 54.8 -> 40.1, IQ4_XS down 62.2 -> 43.1, Q2_0 32.3 -> 28.8 - 2 and 2 the best or
-    // within its noise for each
+    // Qwen3.8's expert types (tools/bench/mvsweep)
     case quant::kIQ4_NL:
     case quant::kQ4_0:  // not measured: IQ4_NL's
     case quant::kIQ3_XXS:

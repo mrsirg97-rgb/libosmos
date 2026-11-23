@@ -35,11 +35,11 @@ const DsparkTensor *dspark_tensor(const DsparkIndex *x, const char *name);
 
 /*
 DsparkIndex
-  DeepSeek's DSpark drafter's tensors as Maya's drafter_pack.py wrote them: dir/dspark.json lists each one ([name,
-  type, offset, bytes, [dims]]) in dir/dspark.bin. the blocks mtp.0 .. mtp.2: their attention, hyper-connections and
-  128 routed experts (MXFP4) beside a shared one (Q8_0); mtp.0's main_proj and main_norm (the trunk's taps into the
+  DeepSeek's DSpark drafter's tensors as drafter_pack.py writes them: dir/dspark.json lists each one ([name, type,
+  offset, bytes, [dims]]) in dir/dspark.bin. the blocks mtp.0 .. mtp.2: their attention, hyper-connections and 128
+  routed experts (MXFP4) beside a shared one (Q8_0); mtp.0's main_proj and main_norm (the trunk's taps into the
   blocks' keys); mtp.2's final norm, markov and confidence heads. dspark.json may name the trunk's layers it taps
-  ("target_layers": [37, 38, 39], DeepSeek's config's dspark_target_layer_ids) for a model whose GGUF does not.
+  ("target_layers", the config's dspark_target_layer_ids) for a model whose GGUF does not.
 
 dspark_index
   the index read from dir/dspark.json; NULL, with why in err, for a file it cannot read or parse, a type it does not

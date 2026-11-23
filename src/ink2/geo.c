@@ -110,7 +110,7 @@ static bool unsloth_small_keys(GgufMeta *m, Ink2Geometry *g)
   return ok;
 }
 
-/* upstream llama.cpp's keys (#32694; unsloth's Inkling-2-Mini): the relative bias's sizes, the log scale and the
+/* upstream llama.cpp's keys (unsloth's Inkling-2-Mini): the relative bias's sizes, the log scale and the
    clips under attention., q's and k's clip one; the MoE's activation SiTU, its betas the softcaps (beta tanh(g / beta)
    sigmoid(g) * lb tanh(u / lb)); the router's sigmoid and normalized weights, the normalized values the architecture's
    (no keys); no RoPE; one head width for the sliding and the full layers */

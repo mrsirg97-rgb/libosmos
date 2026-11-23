@@ -1,4 +1,4 @@
-/* DFly2, Hy4-flash's drafter (osmos/hy4/forward.h: hy4_dfly_load, hy4_seq_draft; DESIGN.md, "0.11.0: DFly2"): the
+/* DFly2, Hy4-flash's drafter (osmos/hy4/forward.h: hy4_dfly_load, hy4_seq_draft; DESIGN.md, DFly2): the
    release's five draft layers read from its own safetensors (BF16 matrices, the small tensors as F32, kv_b split into
    the target's absorbed k_b / v_b as Q8_0), the draft block run as vLLM's HYV4DFlyQueryModel runs it - the anchor's
    embedding fused with the target's head input at the last accepted token, each layer reading its target sparse
@@ -234,7 +234,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
       return osmos_fail(err, "DFly2: a target layer not one of this model's sparse layers");
   if (MASK_TOKEN >= g->n_vocab)
     return osmos_fail(err, "DFly2: its mask token past this model's vocabulary");
-  if (f->max_tokens < ROWS) /* a draft's block in the step's buffers (its MLA table max_tokens x heads - 0.11.2) */
+  if (f->max_tokens < ROWS) /* a draft's block in the step's buffers (its MLA table max_tokens x heads) */
     return osmos_fail(err, "DFly2: a forward's step smaller than a draft block");
   const uint32_t H = (uint32_t)g->n_heads[TARGETS[0]];
   struct Hy4Dfly *d = calloc(1, sizeof *d);
@@ -316,9 +316,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
     free(x);
   }
   if (ok && q8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
-  { /* the engine's (q8) drafts' head Q4_0 (a round reads it a draft: 5 x 0.39 GB at Q8_0). Q3_K at 1K, 128 tokens, A/B in one
-       session (2026-11-19): code 24.1-24.6 -> 25.6-26.2 tok/s (the same 87 accepted, 106 drafts against 112), prose
-       27.5-28.1 -> 28.3-29.0 (the same 96); +209 MB */
+  { /* the engine's (q8) drafts' head Q4_0: a round reads it once a draft */
     float *x = out->type == QTYPE_BF16 ? tensor_f32(f->w->model, out, &(uint64_t){0}) : NULL;
     ok = (x && q4_up(&d->bufs, x, out->dims[1], (uint32_t)out->dims[0], &d->head4)) || osmos_fail(err, "DFly2: the head's Q4_0 copy");
     free(x);

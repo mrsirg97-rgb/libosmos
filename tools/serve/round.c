@@ -70,8 +70,8 @@ static void settle(Multi *m, const Entry *e, const int32_t *toks, const int32_t 
   if (end)
     lane_finish(m, ln, end);
   else if ((uint32_t)oseq_position(ln->c.s) + 1 >= m->sv->max_ctx) /* the context's last position: its pick printed,
-                                                                      not fed - a greedy lane's last (0.9.2: dropped, a
-                                                                      drafted answer a token short of the plain one) */
+                                                                      not fed - a greedy lane's last (a drafted answer
+                                                                      never a token short of the plain one) */
   {
     out("T %lld %d\n", ln->g.rid, ln->t), ln->produced++;
     lane_finish(m, ln, server_eos(m->sv, ln->t) ? "stop" : "length");
@@ -96,7 +96,7 @@ static int lanes_of(Multi *m, Lane **go, int *after, int32_t (*dr)[OSMOS_MAX_BLO
     if (!ln->g.spec && !greedy_goes_on(m, ln))
       continue;
     if (ln->g.spec && (server_eos(m->sv, ln->t) || ln->produced + 1 >= ln->limit)) /* its last token: printed and the
-        lane finished, not fed (greedy_goes_on's) - its verify's rollback past a block's close refused (0.11.2) */
+        lane finished, not fed (greedy_goes_on's) - its verify's rollback past a block's close would be refused */
     {
       greedy_goes_on(m, ln);
       continue;

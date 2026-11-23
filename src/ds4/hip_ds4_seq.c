@@ -217,7 +217,7 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
   if (h.prompt_end < 0 || (uint32_t)h.prompt_end > f->max_ctx || h.dec_from < 0 || h.n_last < 0 ||
       h.n_last > STATE_LAST || h.has_dring > 1 || h.ahead > SEQ_MAX_BACK)
     return refuse(s, err, "a state whose fields are out of range");
-  if ((bad = state_tokens_check(h.last, h.n_last, (uint32_t)f->g->n_vocab))) /* (the Engram's n-grams: 0.16.0 any) */
+  if ((bad = state_tokens_check(h.last, h.n_last, (uint32_t)f->g->n_vocab))) /* (the Engram's n-grams) */
     return refuse(s, err, bad);
   /* the parts as the state laid them out: the sequence at its position (and a drafter's rings to fill) */
   /* (the drafter's rings the sequence's from its making: a state's rings read into them) */
@@ -244,7 +244,7 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
     return refuse(s, err, "a GPU copy or the source failed (the load)");
   if (got != sum) /* (its rows already on the GPU: the reset makes them a fresh sequence's, rewritten before read) */
     return refuse(s, err, "a damaged state (its checksum)");
-  /* a state saved part-way through its prompt (osmos-serve's points, 0.7.5) loads with its prompt's end at its
+  /* a state saved part-way through its prompt (osmos-serve's points) loads with its prompt's end at its
      position: the next prompt's end told again (seq_prompt), nothing behind it to roll back into */
   s->prompt_end = h.prompt_end < h.pos ? h.prompt_end : h.pos;
   s->dec_from = h.dec_from, s->n_last = h.n_last, s->staged = 0, s->hi = h.pos + (int32_t)h.ahead;

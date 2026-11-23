@@ -20,7 +20,7 @@ static bool add_block(Msg *m, int kind, const Json *v, const char *id)
 }
 
 /* the image placeholder's text in a string, or in any text part of a list (by length: past a NUL too) - encoding.py
-   refuses it in a user's text and its parts and in a tool's content, string or parts (0.7.1: parts and tools taken) */
+   refuses it in a user's text and its parts and in a tool's content, string or parts */
 static bool placeholder(const Json *c)
 {
   if (c && c->type == JSON_STRING)
@@ -75,7 +75,7 @@ static bool text_of(Msg *m, const Json *c, char *err)
 static Msg *last_user_turn(Msg *ms, size_t n)
 {
   return n && strcmp(ms[n - 1].role, "user") == 0 ? &ms[n - 1] : NULL; /* encoding.py's: any user turn, its blocks
-                                                                           none or many (0.7.1: an empty one not) */
+                                                                           none or many */
 }
 
 Msg *chat_read(const Json *src, size_t *n_out, char *err)

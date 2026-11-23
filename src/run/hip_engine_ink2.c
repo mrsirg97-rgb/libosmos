@@ -1,8 +1,8 @@
-/* Inkling-2-Small, the third family (0.8.0): its model opened and every tensor checked (osmos/ink2/weights.h: the
-   reference's names or llama.cpp's, unsloth's packs), its engine osmos/ink2/forward.h's - the dense weights resident,
-   the experts streamed through the membrane at the budget's room, a sequence's caches and tails, a step a run at a
-   time; the drafter (--dspark: the checkpoint's mtp.safetensors as ink2_mtp_gguf.py's GGUF, DSpark with the RNN
-   Markov head) its seed and draft, block - 1 drafts a round */
+/* Inkling-2-Small: its model opened and every tensor checked (osmos/ink2/weights.h: the reference's names or
+   llama.cpp's, unsloth's packs), its engine osmos/ink2/forward.h's - the dense weights resident, the experts streamed
+   through the membrane at the budget's room, a sequence's caches and tails, a step a run at a time; the drafter
+   (--dspark: the checkpoint's mtp.safetensors as ink2_mtp_gguf.py's GGUF, DSpark with the RNN Markov head) its seed
+   and draft, block - 1 drafts a round */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,22 +61,16 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
 _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 
 /* a step's most tokens when the server names none: a prompt's chunk. a prompt step reads every expert not in memory
-   once, so its count is the prompt's speed: an 8K prompt (ours, a 40 GiB room) 115 / 238 / 321-333 tok/s at 2,048 /
-   4,096 / 8,192, the forward 54.8 / 58.0 / 64.5 GiB with the room (the logits' [max_tokens][n_vocab] 6.6 GB of
-   8,192's) */
+   once, so its count is the prompt's speed - against the forward's memory, the logits' [max_tokens][n_vocab] with it */
 #define INK2_STEP_TOKENS 8192
 
 /* the logits' rows a step keeps at most: a prompt's last row, a decode's or a drafted round's every row, each
-   --parallel lane's - 1,024 x the vocabulary's 201,024 F32 0.77 GiB (a step's every row at 8,192: 6.1 GiB) */
+   --parallel lane's */
 #define INK2_LOGIT_ROWS (OSMOS_MAX_LANES * (OSMOS_MAX_BLOCK + 1)) /* a round's most kept rows: each lane's drafts and its token */
-/* a streamed build's (Inkling-2-Small's): measured again (0.15.2, low-power, osmos-api, code / prose at temperature 0,
-   500 tokens, every floor the same tokens): 0.95 11.5 / 11.1 tok/s, 0.9 (0.8.x's) 11.8 / 11.3 and 11.8 / 11.5, 0.7
-   12.5 / 12.0, 0.5 12.7 / 12.4, 0.3 12.6 / 12.1 - the verify cheaper than when 0.9 won, the rounds shorter now pay */
+/* a streamed build's (Inkling-2-Small's) floor: swept at temperature 0, every floor the same tokens */
 #define INK2_DRAFT_CUM_MIN 0.5f
 /* every expert in memory (ink2_forward_whole): a verified token's experts read from memory, not streamed - the round
-   longer. measured (Inkling-2-Mini, its BF16 drafter, low-power, 2026-11-20; a 2,048-token code prompt / a 64-token
-   one, 256 tokens): 0.9 43.4 / 29.2 tok/s, 0.7 47.6 / 32.7, 0.5 48.6 / 32.8, 0.3 48.7 / 32.1, 0.1 48.7 / 29.9 (plain
-   24.2 / 25.6), every floor the same tokens */
+   longer; swept, every floor the same tokens */
 #define INK2_DRAFT_CUM_MIN_WHOLE 0.5f
 
 /* the profile's round accounting (OsmosOptions' profile, a measurement's): the steps' time by their tokens (1 .. 16,
@@ -221,10 +215,8 @@ static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ER
 static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, int32_t *drafts, float *conf,
                    char err[OSMOS_ERR])
 {
-  /* a verified token reads its own experts (~0.4-0.6 of a step's), not the engine's ~free one: a round ends at
-     a higher product of confidences than the engine's floor - 0.9 measured best with a ~12 ms draft (0.8.x: p2 13.8
-     -> 14.5 tok/s, plain 9.1; p1 13.5 -> 13.4, plain 11.5; p3 14.2 -> 16.9, plain 14.3; 0.5, 0.6 below 0.7,
-     0.8 its tie with p1 4% under); 0.5 since 0.15.2 (INK2_DRAFT_CUM_MIN's measure) */
+  /* a verified token reads its own experts, not the engine's ~free one: a round ends at a higher product of
+     confidences than the engine's floor */
   const float floor_ = ink2_forward_whole(((Eng *)p)->f) ? INK2_DRAFT_CUM_MIN_WHOLE : INK2_DRAFT_CUM_MIN;
   if (cum_min < floor_)
     cum_min = floor_;

@@ -12,21 +12,14 @@ namespace {
 
 constexpr int kThreads = 256;
 
-// a type's tile (mm.h's Shape) and its most column tiles: measured on gfx1151 (2026-10-29). a shape is a type's for
-// every token count - its K split is the sums' order, so a token's bits would otherwise depend on its batch. Q5_K's
-// decode is the heaviest: small slabs, so more waves hide it (q_b 88 -> 163 GB/s, the head 123 -> 157); Q8_0 and Q6_K
-// were near their matvec's at SL 128. the IQ experts: 4 waves of 128-value slabs, each wave a long run of slabs and a
-// 4-way sum at the end (16 waves of 64 ran 5 slabs a wave to 5120 columns, then a 16-way sum through LDS a tile; the
-// counters: the waves 52-76% waiting, 14% at the barrier). a real step's experts (each run of the same column tiles a
-// launch) 17.6 -> 13.9 ms (blk.24's gate), 22.6 -> 15.7 (blk.10's down); a decode token 74.0 -> 71.6 ms; a 4096-token
-// prompt ~294 -> ~314 tok/s. the column tiles at 1024 tokens (4096 x 4096, the tiled x16): 8 for all but Q8_0, whose
-// 4 is 1.30 ms to 8's 1.62
+// a type's tile (mm.h's Shape) and its most column tiles, tuned on gfx1151. a shape is a type's for every token count
+// - its K split is the sums' order, so a token's bits would otherwise depend on its batch. Q5_K's decode is the
+// heaviest: small slabs, so more waves hide it. the IQ experts: 4 waves of 128-value slabs, each wave a long run of
+// slabs and a 4-way sum at the end
 template <quant::Type T> struct Tuned { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 8; };
 // a short row's shape (fewer than kShortCols columns): a type's own where measured, else S. a matrix's shape is its
-// type's and its columns' alone, never its tokens' - the same sums at every count. Q6_K's (unsloth's UD: q_b's 1,280
-// columns, 2026-11-03, test_mm_gpu): 8 waves of 64-value slabs 170.8 -> 197.0 GB/s at a token, its error 1.6 ->
-// 1.4 u|wx| (4 waves of 128: 200.0 GB/s, but 2.9 u|wx| - a wave's longer run); its long rows keep 128 x 8 (out_b's
-// 8,192 columns: 202.4 GB/s against 144.1 at 64 x 8)
+// type's and its columns' alone, never its tokens' - the same sums at every count. Q6_K's: 8 waves of 64-value slabs,
+// not 4 of 128 (a wave's longer run, a larger error)
 constexpr uint32_t kShortCols = 2048;
 template <quant::Type T> struct Short { using S = typename Tuned<T>::S; };
 template <> struct Short<quant::kQ6_K> { using S = mm::Shape<64, 8, 4>; };
@@ -38,7 +31,7 @@ template <> struct Short<quant::kBF16> { using S = mm::Shape<MM_BF16_SHORT>; };
 // a width the type's slab does not divide (Qwen3.8's mixers' up: 320 columns of Q8_0): 64-value slabs - a shape only
 // such a width takes, so no matrix that tiled before changes
 template <quant::Type T> struct Odd { using S = typename Short<T>::S; };
-template <> struct Odd<quant::kQ8_0> { using S = mm::Shape<64, 2, 4>; };  // 10240 x 320 at a token: 32.4 -> 22.2 us (mmsweep)
+template <> struct Odd<quant::kQ8_0> { using S = mm::Shape<64, 2, 4>; };
 template <quant::Type T>
 constexpr bool odd(uint32_t cols) {
   return cols % (cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab) != 0;
@@ -51,45 +44,37 @@ template <> struct Tuned<quant::kIQ2_XXS> { using S = mm::Shape<128, 4, 8>; stat
 template <> struct Tuned<quant::kIQ2_XS> { using S = mm::Shape<128, 4, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ1_S> : Tuned<quant::kIQ1_M> {};   // not measured: the sibling's
 template <> struct Tuned<quant::kIQ2_S> : Tuned<quant::kIQ2_XS> {};  // not measured: the sibling's
-// Qwen3.8's expert types, a token's 10 experts cold (tools/bench/mmsweep, 2026-11-06; SL 64-256, W 4-8, U 2-8):
-// IQ4_NL down 69.5 -> 57.7 us at 64 x 4 x 4, IQ4_XS 68.7 -> 53.0 the same, IQ3_XXS gate / up 58.7 -> 53.5 at
-// 128 x 8 x 8, Q2_0 45.3 -> 39.9 at 64 x 8 x 4
+// Qwen3.8's expert types (tools/bench/mmsweep)
 template <> struct Tuned<quant::kIQ3_XXS> { using S = mm::Shape<128, 8, 8>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ4_NL> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kIQ4_XS> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ4_0> : Tuned<quant::kIQ4_NL> {};  // not measured: IQ4_NL's (its layout, its block)
 template <> struct Tuned<quant::kQ2_0> { using S = mm::Shape<64, 8, 4>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ2_K> : Tuned<quant::kQ2_0> {};
-template <> struct Tuned<quant::kQ3_K> : Tuned<quant::kQ2_0> {};  // not measured: Q2_K's (a 256-value K block)  // not measured: Q2_0's (its shape its bits: fixed before a pack)
+template <> struct Tuned<quant::kQ3_K> : Tuned<quant::kQ2_0> {};  // not measured: Q2_K's (a 256-value K block)
 // NVFP4 (Inkling-2's experts: 4,608 and 2,304 columns, whole 64-value slabs) not measured: Q2_0's, a 64-value block too.
 // its values exact in f16 (6 significant bits, 2^-10 .. 2,688: decode_h rounds none); a tensor's own scale its role's
 template <> struct Tuned<quant::kNVFP4> : Tuned<quant::kQ2_0> {};
 // MXFP8 (Inkling-2's experts: Small's layers 40-47, Mini's 20-23; first unsloth's Engram tables, decode alone). its
 // values exact in f16 where e4m3 x 2^(e - 127) is one: Inkling's (e -15 .. -10, |w| 2^-22 .. 0.375) all are -
-// ink2_ref_gguf.py checks every expert's. measured (mmsweep mini, low-power, 2026-11-20; decode_h<kMXFP8> by bits): 8
-// experts at one token, Mini's 1,152 x 2,304 gate / up and 2,304 x 1,152 down - the default 128 x 8 x 8 95 / 89 GB/s
-// (the generic decode_h's 57 / 48), 64 x 4 x 4 155 / 151 (a plain read 224)
+// ink2_ref_gguf.py checks every expert's
 template <> struct Tuned<quant::kMXFP8> { using S = mm::Shape<64, 4, 4>; static constexpr int kMaxCt = 8; };
 // BF16 (Inkling-2-Mini's dense weights, as released): a value f16's where it is one - all but those below f16's
-// normal range (Mini's: 322,439 of 1.93 G, each within 2^-25 of its own); not in mm_known's table (QTYPE_MM): a
-// family takes it by name (ink2's mm_takes), the others' BF16 matrices their matvec's as before
+// normal range (each within 2^-25 of its own); not in mm_known's table (QTYPE_MM): a family takes it by name (ink2's
+// mm_takes), the others' BF16 matrices their matvec's
 #ifndef MM_BF16_SHAPE
 #define MM_BF16_SHAPE 128, 8, 8
 #endif
 template <> struct Tuned<quant::kBF16> { using S = mm::Shape<MM_BF16_SHAPE>; static constexpr int kMaxCt = 8; };
 // a long BF16 row whose 128-value slabs 9 waves divide evenly (Mini's 2,304 columns: q, gate, k, v, rel, the router,
-// the head; the loop controls' down 4,608): 9 waves, each 2 slabs (4 for down) - mmsweep bf16 at a token, low-power:
-// q / gate 3,072 x 2,304 197 -> 228 GB/s (the matvec's 210), k / v 1,024 x 2,304 190 -> 200 (173); 3,072 columns
-// (24 slabs: the output) keep 128 x 8 x 8 (217; 9 waves 204). by its columns alone, so a matrix's every count
+// the head; the loop controls' down 4,608): 9 waves, each 2 slabs (4 for down); 3,072 columns (24 slabs: the output)
+// keep 128 x 8 x 8. by its columns alone, so a matrix's every count
 struct Bf16Nine { using S = mm::Shape<128, 9, 8>; };
 constexpr bool bf16_nine(uint32_t cols) { return cols >= kShortCols && cols % (128 * 9) == 0; }
-// UD-Q4_K_XL's expert types, on the register-A path (mm.h's kRegA), a token's 10 experts cold (mmsweep q4, low-power,
-// 2026-11-09, two runs): Q4_K's 2,560-column gate / up 78-80 us at 128 x 8 x 8 -> 58-60 at 32 x 16 x 2 (80 slabs of
-// 32 for 16 waves to share: the decode's latency hidden; a 32-value slab's lane holds 2 chunks, so U 2 at most), Q5_1's
-// 640-column down 72-75 -> 63-64 at 32 x 8 x 2 (16 waves slower: 20 slabs too few). a 512-token prompt 409 -> 507
-// tok/s, decode 22.0 -> 23.2. the perplexity the default order's within its scatter (2K 6.9661 against 6.9754, 8K
-// 2.7434 against 2.7354); the 64-value slabs' 64 x 8 x 4 / 64 x 4 x 4 (through LDS) moved it up at every length
-// (+0.5%, +1.3%) and were not taken (DESIGN.md, "UD-Q4_K_XL")
+// UD-Q4_K_XL's expert types, on the register-A path (mm.h's kRegA): Q4_K 32 x 16 x 2 (its 2,560-column rows' 80
+// slabs for 16 waves to share: the decode's latency hidden; a 32-value slab's lane holds 2 chunks, so U 2 at most),
+// Q5_1 32 x 8 x 2 (its 640-column down: 20 slabs too few for 16). the 64-value slabs through LDS were not taken: they
+// moved the perplexity up (DESIGN.md, "UD-Q4_K_XL")
 template <> struct Tuned<quant::kQ4_K> { using S = mm::Shape<32, 16, 2>; static constexpr int kMaxCt = 8; };
 template <> struct Tuned<quant::kQ5_1> { using S = mm::Shape<32, 8, 2>; static constexpr int kMaxCt = 8; };
 using mm::kF16Max;
@@ -104,7 +89,7 @@ __global__ void x16_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t col
 
 // the same values 8 a thread (x 16-byte aligned, xs a whole float4s): two float4 loads, the 8 halves one 16-byte
 // store (a fragment row's half: contiguous in the tiled layout), 32-bit indices, the overflow flag once - each value
-// x16_put's conversion: the same bits. (one a thread, a 64-bit divide each: ~15 GB/s, the prompt's 6.9 s at 32K)
+// x16_put's conversion: the same bits
 constexpr uint32_t kX16Vec = 8;
 __global__ void x16_vec_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t cols, _Float16* x16, int32_t* overflow) {
   const uint32_t i = blockIdx.x * kThreads + threadIdx.x, per = cols / kX16Vec, t = i / per, c = i % per * kX16Vec;
@@ -154,8 +139,7 @@ __global__ void x16_attn_kernel(const float* x, uint32_t xs, uint32_t n, uint32_
 
 // slot s: row idx[s] of x (-1: zero), to f16 - a thread 8 adjacent columns of a slot (half a fragment's row: 16
 // bytes, x16_at's contiguous run), threads in the tiled order so a wave's stores fill whole lines; each value
-// x16_put's rounding and flag, so the same bytes as a value a thread (its 2-byte stores scattered: a 2048-token
-// step on the IQ3 pack 2.51 -> 1.09 ms a layer, low-power, 2026-11-10)
+// x16_put's rounding and flag, so the same bytes as a value a thread (whose 2-byte stores scatter)
 constexpr uint32_t kRun = 8;
 __global__ void x16_rows_kernel(const float* x, uint32_t xs, const int32_t* idx, uint32_t slots, uint32_t cols,
                                 _Float16* x16, int32_t* overflow) {
@@ -198,15 +182,10 @@ bool group_ct(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32_t
   return hipGetLastError() == hipSuccess;
 }
 
-// the experts' multi-tile steps by type, each the bits of group_ct's (the sums in tile's order: test_mm_gpu's mm_group
-// at 24 / 37 / 64 / 100 / 128 tokens against mm_run): 2-4 column tiles with 2 row tiles a wave (tile_rm: an x fragment
-// two WMMAs), 8 as gemm_kernel's 64 x 128 blocks - measured a type at a time (tools/bench/mmsweep's experts, real
-// blocks, 160 experts cold, low-power, 2026-11-09): Q4_K +22 / +42 / +17% at 24 / 37 / 64 tokens, +13% at 128; Q5_1
-// +6 / +28 / +8%, +42%; IQ4_XS +7 / +6 / +9% (its 128s level: group_ct's); IQ4_NL and Q2_0 level at 24-64, +16% and
-// +60% at 128. IQ3_XXS's 128 x 8 shape takes no 2 row tiles (70 KB of LDS). DeepSeek's (2,304 x 5,120, 64 experts):
-// 2 row tiles 25-68% slower for every codebook type (IQ2_XXS / XS / S, IQ1_S: twice a lane's grid lookups), Q2_K
-// +30 / +7 / +7%; the gemm at 128 IQ3_XXS +41%, Q2_K +35%, IQ2_S +16%, IQ1_S +6-10%, IQ2_XXS and IQ2_XS -4 .. +6% by
-// shape (not taken); Qwen's IQ3_XXS gate level (-1%). the other types not measured: group_ct's
+// the experts' multi-tile steps by type, each the bits of group_ct's (the sums in tile's order): 2-4 column tiles
+// with 2 row tiles a wave (tile_rm: an x fragment two WMMAs), 8 as gemm_kernel's 64 x 128 blocks - chosen a type at a
+// time (tools/bench/mmsweep's experts). IQ3_XXS's 128 x 8 shape takes no 2 row tiles (70 KB of LDS); the codebook
+// types none (twice a lane's grid lookups). the types not listed: group_ct's
 template <quant::Type T>
 struct GroupPlan {
   static constexpr bool kRm = T == quant::kQ4_K || T == quant::kQ5_1 || T == quant::kIQ4_XS || T == quant::kQ2_K || T == quant::kQ3_K;
@@ -239,9 +218,8 @@ bool group_gemm(const void* const* w, const int32_t* cnt, uint32_t n_mat, uint32
 }
 
 // the codebook types' one-tile steps on mm.h's group_tile_kernel (group_ct<T, 1>'s bits): as many blocks as the GPU
-// holds at once, each taking tiles until none are left (IQ1_S, a block a tile: 204 against 188 us; mmsweep ink2).
-// what a WGP holds: its VGPRs' blocks or its LDS's, the fewer - the LDS both CUs' (WGP mode; the runtime's figure,
-// and its occupancy call, one CU's 64 KB: 7 blocks a WGP, 211 us, against the 12 the VGPRs allow, 190 us)
+// holds at once, each taking tiles until none are left. what a WGP holds: its VGPRs' blocks or its LDS's, the fewer -
+// the LDS both CUs' (WGP mode; the runtime's figure, and its occupancy call, are one CU's 64 KB)
 #if defined(__HIP__)  // mm.h's group_tile_kernel: RDNA's alone (kOneTile false on CUDA)
 template <quant::Type T, int W>
 uint32_t resident_blocks() {
@@ -330,12 +308,10 @@ bool launch_shape(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hip
 
 // a prompt's matrix on mm.h's gemm_kernel: Q6_K, Q8_0 and Q5_K (the models' dense), on its rows' own shape (tile's: Short
 // below kShortCols; every partition a slab) and more than 64 tokens (CT 8's: below, tile's own); the same bits as tile
-// at every count (test_mm_gpu: 2,048, 64 and 33 tokens against 16; Hy4-flash's 1,024 / 1,536-column Q8_0 rows). 64 rows x 256 tokens a block, a wave 32 x 64: 10240 x
-// 2560 Q6_K at 2,048 tokens 20.6 -> 27.0 TFLOP/s, Q8_0 20.5 -> 28.7 (low-power; 64 x 128: 22.8, 32 x 256: 22.4,
-// 128 x 128: past the LDS; without the second slab's LDS 25.5)
+// at every count. 64 rows x 256 tokens a block, a wave 32 x 64 (128 x 128: past the LDS)
 template <quant::Type T>
 constexpr bool kGemm = T == quant::kQ6_K || T == quant::kQ8_0 || T == quant::kNVFP4 || T == quant::kBF16 ||
-                       T == quant::kQ5_K || T == quant::kQ5_KR;  // (Q5_K: Inkling-2-Small's dense, 2,048 tokens 1,058 -> 1,012 ms)
+                       T == quant::kQ5_K || T == quant::kQ5_KR;
 constexpr int kGemmRm = 2, kGemmRn = 4, kGemmWr = 2, kGemmWc = 4;
 // a type's gemm blocks (kGemm*'s but where measured): its rows and tokens a wave in tiles, its waves' grid
 template <quant::Type T> struct GemmPlan { static constexpr int Rm = kGemmRm, Rn = kGemmRn, Wr = kGemmWr, Wc = kGemmWc; };
@@ -737,7 +713,7 @@ extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* 
 }
 
 // every head's slice of x's rows to its own tiled x16 in one pass (x read along its rows: a head's slice converted
-// alone reads 2,048 rows 64 KB apart, a page each - ~15 GB/s): token t's head h, column c (c < cols, at h hs + c of
+// alone reads 2,048 rows 64 KB apart, a page each): token t's head h, column c (c < cols, at h hs + c of
 // its row) to x16 + h n16 cols at x16_at(t, c, cols), n16 n in whole tiles (the rows past n zero). x16_put's
 // conversion: the same bits as mm_x16 a head at a time
 __global__ void x16_heads_kernel(const float* x, uint32_t xs, uint32_t n, uint32_t heads, uint32_t hs, uint32_t cols,

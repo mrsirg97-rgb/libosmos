@@ -9,12 +9,12 @@
 #include "osmos/q4x/weights.h"
 
 /* the drafter's kernels' fixed shapes: a file past them refused at load, by name (as geo.c's Q4X_* for the model) */
-#define Q4X_DFLASH_MAX_LAYERS 8    /* its layers at most (DFlash2's 5) */
+#define Q4X_DFLASH_MAX_LAYERS 8    /* its layers at most */
 #define Q4X_DFLASH_HEAD_DIM 128    /* its attention's head dim: the kernel's */
 #define Q4X_DFLASH_CONV 2          /* its dynamic convolutions' taps: the kernel's (the token and the one before) */
-#define Q4X_DFLASH_BLOCK_MAX 8     /* a block's tokens at most: the anchor and its drafts (DFlash2's 8) */
-#define Q4X_DFLASH_TOPK_MAX 16     /* the selector's candidates a position at most (DFlash2's 16) */
-#define Q4X_DFLASH_WINDOW_MAX 8192 /* its sliding window at most: a sequence's context ring (DFlash2's 2,048) */
+#define Q4X_DFLASH_BLOCK_MAX 8     /* a block's tokens at most: the anchor and its drafts */
+#define Q4X_DFLASH_TOPK_MAX 16     /* the selector's candidates a position at most */
+#define Q4X_DFLASH_WINDOW_MAX 8192 /* its sliding window at most: a sequence's context ring */
 
 typedef struct Q4xDflashGeometry
 {
@@ -45,7 +45,7 @@ typedef struct Q4xDflash
   Q4xDflashLayer layer[Q4X_DFLASH_MAX_LAYERS];
 } Q4xDflash;
 
-/* a target's shape the drafter is checked against (q4x_dflash_create_for: another family's - LFM3's) */
+/* a target's shape the drafter is checked against (q4x_dflash_create_for: another family's) */
 typedef struct Q4xDflashTarget
 {
   int n_embd, n_vocab, n_layers;
@@ -68,8 +68,7 @@ q4x_dflash_create
   takes refused. NULL with why, the key or the tensor named. the drafter points into g's tensors: g outlives it.
 
 q4x_dflash_create_for
-  the same against a target's width, vocabulary and layer count alone (q4x_dflash_create's from Qwen's weights; the
-  LFM3 forward's, lfm3_dflash_*).
+  the same against a target's width, vocabulary and layer count alone.
 
 q4x_dflash_destroy
   frees it. NULL is nothing to do.

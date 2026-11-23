@@ -2,8 +2,7 @@
 #define OSMOS_GPU_KEPT_H
 
 /* a step's kept rows (src/mem/hip_kept.c): which rows of a family's last step kept logits, and the one way to read a
-   row and pick its greatest token - every family's (0.16.0: four used this, Qwen a row of flags, DeepSeek its last
-   rows by arithmetic, each with its own pick; the engine reads a family's view, never its copies) */
+   row and pick its greatest token - every family's (the engine reads a family's view, never its copies) */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -18,7 +17,7 @@ typedef struct KeptView
   void *argmax;         /* ops_argmax's scratch */
   void *stream;         /* the stream the pick is queued on (NULL: the default) */
   int32_t *host_ids;    /* pinned host memory the picks are copied into, or NULL: straight into the caller's ids */
-  bool (*settle)(void *ctx); /* the family's wait for the stream's work (DeepSeek's spins on a decode's: measured), */
+  bool (*settle)(void *ctx); /* the family's wait for the stream's work (DeepSeek's spins on a decode's), */
   void *settle_ctx;          /* or NULL: hipStreamSynchronize */
 } KeptView;
 

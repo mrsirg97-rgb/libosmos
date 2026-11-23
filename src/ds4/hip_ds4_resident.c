@@ -23,7 +23,8 @@
 #include "osmos/model/dspark.h"
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_ds4_make.c) */
-#define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */
+/* the fetcher's readers (DESIGN.md): more than the SSD's ceiling needs, a decode's miss sooner */
+#define FWD_FETCH_THREADS 12
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
 _Static_assert(sizeof(LayerWeights) % sizeof(const GgufTensor *) == 0, "LayerWeights is its tensors and only them");
 _Static_assert(sizeof(Scratch) % sizeof(void *) == 0, "Scratch is its device buffers and only them");
@@ -326,8 +327,7 @@ bool fwd_gates(Forward *f, const Weights *w, char *err)
 }
 
 /* an F32 router (llama.cpp's GGUFs) rounded to BF16 (nearest, ties to even) for the guess alone: the guess picks the
-   experts read ahead, which change no bit - half its bytes a layer (unsloth's UD: 7.9 -> 3.9 MB). the routing itself
-   reads the F32 */
+   experts read ahead, which change no bit - half its bytes a layer. the routing itself reads the F32 */
 bool fwd_guess_routers(Forward *f, const Weights *w, char *err)
 {
   bool ok = true;

@@ -31,10 +31,10 @@
 #include "osmos/model/dspark.h"
 
 #define FWD_MAX_FILES WEIGHTS_MAX_FILES
-#define FWD_SCORE_BYTES (512ull << 20) /* the indexer's scores at most: a step scored in chunks of tokens past it (a
-                                          token's scores a row of score_stride: 2,048 tokens at 64K, 128 at 1M) */
-#define FWD_CKV_F32_ROWS 32768 /* a prompt's compressed rows unpacked once at most (64 MB at 512 values: a 128K
-                                  context at ratio 4; past it the attention reads them packed) */
+#define FWD_SCORE_BYTES (512ull << 20) /* the indexer's scores at most: past it a step is scored in chunks of
+                                          tokens (a token's scores a row of score_stride) */
+#define FWD_CKV_F32_ROWS 32768 /* a prompt's compressed rows unpacked once at most (a 128K context at
+                                  ratio 4); past it the attention reads them packed */
 #define FWD_MAX_BATCH MM_MAX_TOKENS                 /* a step's tokens: the matmul's */
 #define FWD_MAX_SUBS FORWARD_SUBS
 /* a ratio r source's pending positions a sequence: a step's and the r - 1 before them, each row's r all held */
@@ -44,9 +44,6 @@
 #define FWD_MAX_GROUPS 64                           /* a layer's wo_a groups */
 #define LANE_PAIRS OPS_MAX_EXPERTS             /* a small step's pairs (the lane's): fewer than a layer's experts */
 #define LANE_ROWS (LANE_PAIRS + MV_MAX_TOKENS) /* the lane's rows' buffers: an entry's rows past it read, not used */
-/* the resident set's following of the text (hip_adapt.c): an expert's heat halved every this many steps; a streamed
-   one takes a resident one's place when this much hotter; at most this many a layer a step (each a copy in GPU
-   memory) */
 #define FWD_GUESS_K 6 /* a token's next-layer experts guessed (hip_ds4_guess.c): the router's top this many */
 /* a layer's routing tables at most for `pairs` pairs: 3 matrix pointers, 4 offsets, a count an entry (an expert, or
    a part of MM_MAX_TOKENS of one: at most pairs entries); an order and a pair a pair; 2 x 16 slots an expert - with
@@ -109,8 +106,8 @@ typedef struct Scratch
    after the stream has passed the copy that read it last (the next routing event, or the step's end) */
 typedef struct Pinned
 {
-  int32_t tok[FWD_MAX_BATCH]; /* the step's tokens */
-  int32_t pos[FWD_MAX_BATCH]; /* and their positions */
+  int32_t tok[FWD_MAX_BATCH];
+  int32_t pos[FWD_MAX_BATCH];
   int32_t overflow;               /* an activation past f16: the step refused */
   int32_t oa_cnt[FWD_MAX_GROUPS]; /* each wo_a group's tokens: the step's */
   int32_t rpos[WEIGHTS_MAX_LAYERS][FWD_MAX_BATCH];
@@ -134,10 +131,10 @@ struct Forward
   uint32_t ckv_f_rows;   /* b.ckv_f's rows: score_stride, at most FWD_CKV_F32_ROWS */
   uint32_t slots;
   int fds[FWD_MAX_FILES];
-  int dfds[FWD_MAX_FILES]; /* the same files O_DIRECT: the pool's reads, straight into host_slots (DESIGN.md, 0.3.0) */
+  int dfds[FWD_MAX_FILES]; /* the same files O_DIRECT: the pool's reads, straight into host_slots */
   HostSlots *hs;           /* the membrane's memory: registered host pages an O_DIRECT read DMAs into */
   HostSlots *hs_stream;    /* the stream's */
-  Membrane *mem; /* every expert's cache and a prompt's stream (membrane.h; DESIGN.md, "0.5.8", "0.6.2") */
+  Membrane *mem; /* every expert's cache and a prompt's stream (membrane.h) */
   Resident *res;            /* the layers' tensors and a share of the experts, in GPU memory (resident.h) */
   HipSlots *gpu_slots;      /* res's memory (hip_slots.h): made before it, destroyed after */
   uint32_t n_expert_units;  /* the pool's units: layer * n_experts + expert */
@@ -164,17 +161,18 @@ struct Forward
      (hip_ds4_ffn.c's carve, one copy to Scratch's up); on the host, the pairs' by-expert order and places */
   int32_t *r_ids;         /* mapped and coherent: the router writes the picks here (r_ids_dev) - no copy kernel */
   int32_t *r_guess;       /* mapped and coherent: the next layer's guessed experts, [token][FWD_GUESS_K] */
-  int32_t *r_ids_dev, *r_guess_dev; /* their device addresses */
+  int32_t *r_ids_dev, *r_guess_dev;
   uint64_t ram_kept;       /* the system's RAM a build leaves free: ForwardOptions' fill, else FIT_RAM_FREE */
   uint64_t pool_room;      /* the membrane's room: the budget's experts' bytes, taken at create */
   uint8_t *r_up;
   uint32_t *m_by, *m_row, *m_base, *m_slot0; /* a layer's routing (moe_route): sorted rows' pairs, pairs' rows, runs */
   int32_t *m_gidx, *m_hidx;                  /* its slots' tokens and rows (FWD_MAX_SLOTS), then carved */
-  /* the lane's (ForwardOptions' lane): on, its CPU threads (0: every expert on the GPU, in the order the CPU would sum it), and a small
-     step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in ascending expert id */
-  /* 0.7.0: the NPU beside the GPU (npu.h; forward_npu): a prompt step's hottest experts' gate and up, a fixed
-     share of an eligible layer's pairs in whole NPU_TOKENS parts (hip_ds4_ffn.c's npu_pick) - by routing alone, so the
-     same prompt the same bits; on, another forward_identity */
+  /* the lane's (ForwardOptions' lane): on, its CPU threads (0: every expert on the GPU, in the order the CPU
+     would sum it), and a small step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in
+     ascending expert id */
+  /* the NPU beside the GPU (npu.h; forward_npu): a prompt step's hottest experts' gate and up, a fixed share of an
+     eligible layer's pairs in whole NPU_TOKENS parts (hip_ds4_ffn.c's npu_pick) - by routing alone, so the same
+     prompt the same bits; on, another forward_identity */
   Npu *npu;
   float npu_share;   /* the share of a layer's pairs the NPU takes */
   uint32_t npu_max;  /* its buffers' parts */
@@ -191,7 +189,7 @@ struct Forward
   uint64_t ahead_limit; /* ForwardOptions': the membrane's bound on reads ahead in flight */
   uint32_t logit_rows;  /* ForwardOptions': a step's last rows whose logits are kept (0: every row) */
   bool lane;
-  bool reading; /* forward_reading: a prompt's read - its steps the large steps' math whatever their size (0.7.1) */
+  bool reading; /* forward_reading: a prompt's read - its steps the large steps' math whatever their size */
   int lane_threads;
   uint8_t *lane_up;
   void *lane_dev; /* lane_up's device address (mapped: the kernels read the tables where the host wrote them) */
@@ -245,7 +243,7 @@ struct Forward
   bool xf_q8;  /* and its int8 in lane_xq / lane_xqd (the same launch: the lane's q8_round of it skipped) */
   bool hcp_next; /* the next layer's attention hc_dot partial in b.hcp (layer_out's ops_hc_post_dot wrote it) */
   int64_t *rows;  /* each token's Engram rows, every Engram layer's: [token][layer][col] */
-  uint32_t n;                    /* the step's tokens */
+  uint32_t n;
   Seq *bs[FWD_MAX_BATCH];        /* token i's sequence */
   int32_t at;                    /* the step's first position (the probes' index) */
   int dec;                       /* the decoder's first layer: its KV the only one past it (-1: none) */
@@ -254,8 +252,9 @@ struct Forward
   int32_t row[FWD_MAX_BATCH];    /* a kept token's row in the step (compacted row i: row[i]) */
   bool want[FWD_MAX_BATCH];      /* a token whose logits the caller may read */
   uint32_t vocab_rows;           /* the last step's logits rows (its head's; 0 when it ran none) */
-  int32_t *slot; /* host, [max_tokens]: a batch row's slot in b.vocab, or -1 - the rows its head computed (osmos/gpu/
-                    kept.h; 0.16.0: the engine took a step's last vocab_rows as kept, those the head skipped too) */
+  /* host, [max_tokens]: a batch row's slot in b.vocab, or -1 - the rows its head computed, not a step's last
+     vocab_rows (osmos/gpu/kept.h) */
+  int32_t *slot;
   forward_probe_fn probe;
   void *probe_arg;
 };
@@ -271,22 +270,21 @@ struct Seq
   int32_t last[ENGRAM_MAX_NGRAM + SEQ_MAX_BACK]; /* last[0] the newest: the n-gram's, and seq_rollback's depth */
   int n_last;
   /* the furthest position its steps wrote (one past it): hi - pos the positions a rollback left behind, still in the
-     window's ring and the compressors' pending rows - seq_rollback's depth since then (0.9.2: rollbacks back to back
-     with no step between each took SEQ_MAX_BACK, so 6 then 16 left the ring's slots and last[]'s n-gram short) */
+     window's ring and the compressors' pending rows - seq_rollback's depth since then, so rollbacks back to back count
+     whole */
   int32_t hi;
-  bool broken; /* a step that failed once placed: last[] its tokens, pos not - refused until reset or loaded (0.7.1) */
+  bool broken; /* a step that failed once placed: last[] its tokens, pos not - refused until reset or loaded */
   uint8_t *ring[WEIGHTS_MAX_LAYERS];                             /* KV_FP8 rows (kvfmt.h) */
   uint8_t *ckv[WEIGHTS_MAX_LAYERS], *ik[WEIGHTS_MAX_LAYERS];     /* KV_FP4_E4M3, KV_FP4_POW2 rows */
   float *pend_kvc[WEIGHTS_MAX_LAYERS], *pend_sc[WEIGHTS_MAX_LAYERS];
-  uint8_t *dring; /* a drafter's rings, [block][window] KV_FP8 rows - made with the sequence (0.16.0: at a first draft or a
-                     state's load: made at first use, SCOPE.md) */
+  uint8_t *dring; /* a drafter's rings, [block][window] KV_FP8 rows - made with the sequence */
   bool dseeded;   /* dring holds this sequence's context (drafter_seed's, or a state's): a reset or a load without
-                     rings leaves the buffer, not its rows (0.11.2 - a draft read the last conversation's) */
+                     rings leaves the buffer, not its rows - a draft never reads another conversation's */
 };
 
 /* a small step's routed experts the lane's (int8, the matvec's order): a step of `picks` under n_experts, the lane
    set, and not a prompt's read - which takes the large steps' (mm's) math at any size, so a prompt's bits are its
-   own however it is split and wherever its read began (0.7.1: a short read after a reused prefix took the lane's) */
+   own however it is split and wherever its read began */
 static inline bool fwd_small(const Forward *f, uint32_t picks)
 {
   return f->lane && !f->reading && picks < (uint32_t)f->g->n_experts;
@@ -381,7 +379,8 @@ bool fwd_cpu_submit(Forward *f, int l, uint32_t picks, uint32_t nc, const int32_
                     char *err);
 
 
-/* hip_ds4_resident.c's, for hip_ds4_make.c (one file before 0.16.0): the dense part, the experts' pool, the tables, Engram, the gates and the guess's routers made resident; the build's bytes so far */
+/* hip_ds4_resident.c's, for hip_ds4_make.c: the dense part, the experts' pool, the tables, Engram, the gates and the
+   guess's routers made resident; the build's bytes so far */
 bool fwd_dense(Forward *f, char *err);
 int fwd_engram_fd(const Forward *f, const Weights *w);
 size_t fwd_engram_layers(const Weights *w, int n_layers);

@@ -40,7 +40,7 @@ bool ink2_mv(const GgufTensor *t, const void *w, const float *x, uint32_t n, flo
 }
 
 /* the model's y [n][rows] = W x by the matrix's type and shape alone, never the step's: WMMA's sums are not the
-   matvec's (DESIGN.md, "0.5.5: ... WMMA's sums probed"), so a token's bits are the same in every step only if every
+   matvec's (DESIGN.md: WMMA's sums probed), so a token's bits are the same in every step only if every
    step takes the same kernel. mm where it has one and the shape tiles (mm_tokens: MM_MAX_TOKENS a launch through
    f->x16), else the matvec (mv_strided: past MV_MAX_TOKENS its wide tiles, each token's sums its own) */
 bool ink2_mat(Ink2Forward *f, const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y)
@@ -135,7 +135,7 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
       ok = ink2_swiglu_x16(f->eg, f->eu, f->t_sg, f->t_su, F, g->gate_softcap, g->up_softcap, f->t_hidx, bd.slots,
                            f->xe16, f->overflow, NULL);
     /* run r's experts more than MM_TILE << (r - 1) tokens each (its bound the pairs'): none in a step of fewer
-       tokens (a token picks an expert once) - a decode's verify launched them empty, 3 a pass */
+       tokens (a token picks an expert once): not launched empty */
     for (int r = 0; ok && r < Q4X_TILE_RUNS; r++)
       if (bd.count[r] && (r == 0 || n > (uint32_t)MM_TILE << (r - 1)))
       {
@@ -159,10 +159,10 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
                  F = (uint32_t)g->ff_exp, P = n * K;
   const double r0 = f->pf.on ? ink2_pf_now() : 0;
   /* a prompt's read ahead (its picks a layer's experts at least): the next layer's router on this layer's MoE input,
-     the union of its picks read into the stream while this layer's experts and the next attention run (27.0 against
-     31.5 s of prompt steps, 900 tokens). not a decode's: measured, the guess named 26% of its misses and read ~80
-     experts a token never picked - the next router's input is the attention residual's over the blocks, far from
-     this one's - their reads the misses' bandwidth (4.25 against 4.6 tok/s). which are read ahead changes no bit */
+     the union of its picks read into the stream while this layer's experts and the next attention run. not a
+     decode's: there the guess names few of its misses and reads experts a token never picks - the next router's input
+     is the attention residual's over the blocks, far from this one's - their reads the misses' bandwidth. which are
+     read ahead changes no bit */
   const bool next = l + 1 < g->n_layers && P >= E;
   const Ink2Layer *L1 = next ? &f->w->layer[l + 1] : NULL;
   /* the picks' weights after them (pick + P): the two in one copy to the host */

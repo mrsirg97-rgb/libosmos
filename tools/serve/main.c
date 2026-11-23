@@ -4,9 +4,13 @@
      osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
                      [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
                      [--stream-ngram] [--kv-q8] [--overlay <gguf>] [--lsa <maps>] [--answer-after <text>]
-                     [--profile] [--rope-stages <from:factor,...>] [--serve]
+                     [--profile] [--rope-stages <from:factor,...>] [--npu <dir> [--npu-share S]] [--stats]
+                     [--no-slots | --slot-cap N --slot-dir <dir> --slot-gb GB --slot-min N --slot-ram-gb GB
+                      --slot-days D] [--serve]
+     osmos-serve --version
 
-   in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [temp=<t>] [top_p=<p>] [top_k=<k>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
+   in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [mark=<n>] [temp=<t>] [top_p=<p>] [top_k=<k>] [seed=<s>] <id,id,...>
+        STOP [<rid>]   QUIT
    out: READY <max_ctx> stop[ multi=N] / T [<rid>] <token> / PP [<rid>] <done> <total> <ms> <tok/s> <reused> /
         DONE [<rid>] <produced> <prompt> <prompt_ms> <decode_ms> <finish> <accepted> <drafted> <reused> 0 0 /
         ERR [<rid>] <reason> / NOTE <text> (before READY, `NOTE reads apart: ...` where the family's prompt and decode
@@ -18,9 +22,10 @@
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
    --lsa: latent sparse attention's maps (LFM3's: osmos1.7b-lsa-maps.safetensors) - a decode's full layers read them.
    --stream-ngram: Qwen's n-gram table (per_layer_token_embd) read from its file each step, not held in GPU memory
-   (Q4xOptions' stream_ngram: the same bits, its 26.8 GiB of UD-IQ3_XXS left free); DeepSeek's Engram always is.
+   (Q4xOptions' stream_ngram: the same bits); DeepSeek's Engram always is.
    --kv-q8: Inkling's full layers' cached values Q8, as its keys, not Q5 (OsmosOptions' kv_q8: 17 KiB a token of
    Mini's cache, not 14 - another output; a pack with the room's choice); the other families refuse it.
+   --npu: the NPU's kernels' directory, the NPU beside the GPU; --npu-share its share of a layer's pairs (0 to 1).
    --profile: a measurement's build - a step's sections timed (each after a synchronize: the bits the same), their
    totals on stderr at the engine's destroy (OsmosOptions' profile: Inkling's; the others refuse it).
    --rope-stages: osmos1.7b's YaRN stages, "from:factor,..." (OsmosOptions' rope_stages: a table tried without a build;
@@ -28,17 +33,16 @@
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
    --fill: GiB of the system's RAM kept free - 8 by default (FIT_RAM_FREE: room for an editor, a browser, language
    servers and the agent harness beside the model), 0 or more: auto's sizing fills past it, and saved conversations'
-   RAM stops at it. more than the machine can keep free beside the smallest build: refused, not started (0.16.0: the
-   ledger's - it started on the smallest build). the output's bits the same at every value: only what stays in memory
-   moves.
+   RAM stops at it. more than the machine can keep free beside the smallest build: refused, not started. the output's
+   bits the same at every value: only what stays in memory moves.
    --answer-after: the reasoning's end token's text (</think>), or #<id>: no --eos token is taken while the turn's
    answer past it is whitespace alone - the row's best other token is (osmos/text/answer.h; osmos-api passes its
    dialect's text; tools/serve/answer_test.py an id).
-   conversations are kept (maya #356; --no-slots: not): --slot-cap (4) in RAM, past it --slot-dir (<the model's
-   folder>/slots) under --slot-gb (16), --slot-min (1024) tokens at least, RAM's room the available above --fill's
-   (--slot-ram-gb lowers it; past it a state streams to the folder in pieces), --slot-days (7) - 0.16.0: the env's
-   OSMOS_SLOT_*, options now (osmos.json's slots object). --stats: the forward's read counters on stderr at exit (the
-   reads it waited on, their time; the guess's). greedy: maya's sampling, penalty and thinking keys are refused, named */
+   conversations are kept (--no-slots: not): --slot-cap (4) in RAM, past it --slot-dir (<the model's folder>/slots)
+   under --slot-gb (16), --slot-min (1024) tokens at least, RAM's room the available above --fill's (--slot-ram-gb
+   lowers it; past it a state streams to the folder in pieces), --slot-days (7) - osmos.json's slots object.
+   --stats: the forward's read counters on stderr at exit (the reads it waited on, their time; the guess's).
+   --serve: maya's, taken and ignored. maya's penalty and thinking keys are refused, named */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <stdio.h>
@@ -70,7 +74,7 @@ static bool has(int argc, char **argv, const char *name)
 }
 
 /* a flag's number whole (a decimal and nothing after it, finite) in [lo, hi], or dflt when not given: false for
-   one given otherwise (0.16.0: the slots' were env knobs, read with atof) */
+   one given otherwise */
 static bool flag_num(int argc, char **argv, const char *name, double dflt, double lo, double hi, double *v)
 {
   const char *s = opt(argc, argv, name, NULL);
@@ -85,7 +89,7 @@ static bool flag_num(int argc, char **argv, const char *name, double dflt, doubl
   return true;
 }
 
-/* the slots' options (--slot-*: 0.16.0's, the env's before): their defaults the slots' own measures */
+/* the slots' options (--slot-*): their defaults the slots' own measures */
 typedef struct SlotFlags
 {
   const char *dir; /* NULL: the model's folder's slots/ */
@@ -168,7 +172,7 @@ int main(int argc, char **argv)
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
   sv.max_tokens = (uint32_t)atol(opt(argc, argv, "--max-tokens", "2048"));
-  if (atol(opt(argc, argv, "--max-tokens", "2048")) < 1) /* 0: a prompt read 0 tokens a step, forever (0.7.1) */
+  if (atol(opt(argc, argv, "--max-tokens", "2048")) < 1) /* 0: a prompt read 0 tokens a step, forever */
     return die("--max-tokens takes a step of 1 token or more");
   const char *budget_arg = opt(argc, argv, "--budget", "auto");
   const double budget = strcmp(budget_arg, "auto") ? atof(budget_arg) : 0; /* 0: sized to this GPU (build.c) */
@@ -181,7 +185,7 @@ int main(int argc, char **argv)
     sv.ram_kept = FIT_RAM_FREE;
   const char *par = opt(argc, argv, "--parallel", NULL);
   const int lanes = par ? atoi(par) : 1;
-  if (lanes < 1 || lanes > OSMOS_MAX_LANES) /* (0.11.2: past 64 a round's lane arrays overran, every batch refused) */
+  if (lanes < 1 || lanes > OSMOS_MAX_LANES) /* (a round's lane arrays hold 64) */
     return die("--parallel takes 1 to 64 (OSMOS_MAX_LANES)");
   char *list = strdup(opt(argc, argv, "--eos", "1")), *sv_ = NULL;
   for (char *x = strtok_r(list, ",", &sv_); x && sv.n_eos < SERVE_MAX_EOS; x = strtok_r(NULL, ",", &sv_))

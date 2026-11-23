@@ -76,8 +76,8 @@ bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]
   const PoolUnit *u = &f->units[unit];
   for (int p = 0; p < u->n_parts; p++)
   {
-    /* the part's file: its fd the model's buffered one or (the pool reads O_DIRECT since 0.3.0) its direct twin -
-       one of the model's or no part at all (refused: never a map past the files') */
+    /* the part's file: its fd the model's buffered one or (the pool reads O_DIRECT) its direct twin - one of the
+       model's or no part at all (refused: never a map past the files') */
     int i = 0;
     while (i < f->w->n_files && f->fds[i] != u->part[p].fd && f->dfds[i] != u->part[p].fd)
       i++;

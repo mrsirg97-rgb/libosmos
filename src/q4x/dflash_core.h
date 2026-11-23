@@ -3,8 +3,8 @@
 
 /* DFlash2's drafter for any target (hip_dflash_core.c: z-lab's DFlash2DraftModel on the q4x_df_* kernels): its
    buffers, its context's seed and its block's draft - the math one, the target's own calls (its matrices, its
-   embedding and head, its stream, its checks) through a DfHost. q4x's (src/q4x/hip_q4x_draft_dflash.c) and LFM3's
-   (src/lfm3/hip_lfm3_draft.c) each a host: their bits as before the core (0.11.2) */
+   embedding and head, its stream, its checks) through a DfHost: q4x's (src/q4x/hip_q4x_draft_dflash.c), LFM3's
+   (src/lfm3/hip_lfm3_draft.c) */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,7 +14,7 @@
 #include "osmos/q4x/dflash.h"
 
 /* the drafter's buffers: a seed's max_tokens context rows, a block's, the selector's, pinned copies out - each made
-   through one ledger and freed by name (0.16.0: freed as an array of the struct's first pointers) */
+   through one ledger and freed by name, never as an array of the struct's first pointers */
 typedef struct DfBuf
 {
   float *th;            /* [max_tokens][n_embd]: the context's taps through fc, then its hidden norm */

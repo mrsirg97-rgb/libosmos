@@ -36,9 +36,8 @@ extern const char *const ichat_refused[]; /* special tokens' text a block's body
 #endif
 
 /*
-Inkling-2-Small's chat template (the checkpoint's chat_template.jinja - its maker's; unsloth's GGUF carries a longer
-reconstruction of a reference server's renderer, not this one): the port held to it byte for byte as transformers
-renders it (tests/test_chat_ink2.c, tools/gen_chat_fixtures_ink2.py). text only: an image part refused by name.
+Inkling-2-Small's chat template (the checkpoint's chat_template.jinja, its maker's - not the GGUF's reconstruction),
+ported byte for byte as transformers renders it. text only: an image part refused by name.
 
 ichat_render
   messages (a JSON array: role system / user / assistant / tool; content a string, parts or null; an assistant's
@@ -67,7 +66,7 @@ ichat_parse
   a call's JSON not {name, args} of its header's name.
 
 ichat_parse_shaped
-  ichat_parse with its markers read from shape and what it gives the text's, as chat_parse_shaped (#34).
+  ichat_parse with its markers read from shape and what it gives the text's, as chat_parse_shaped.
 
 ichat_loose
   a completion out of the format (cut by max_tokens) as its message: the thinking and text blocks up to the first

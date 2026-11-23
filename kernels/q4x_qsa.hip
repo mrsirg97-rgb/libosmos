@@ -18,9 +18,9 @@ constexpr int kDim = Q4X_IX_DIM;  // a head's dim: a block's threads, a value a 
 constexpr int kMaxHeads = Q4X_IX_HEADS_MAX; // the score tile's query rows (attention.indexer.head_count)
 constexpr int kTT = 16, kTB = 32; // the score tile: tokens x blocks
 constexpr uint64_t kScoreBudget = 4u << 20;  // the scratch's scores at least: a piece's tokens x their blocks
-constexpr uint64_t kScoreTokens = 128;       // (0.7.3) and room for this many tokens' rows (q4x_ix_scratch)
-// (0.7.3) the blocked scores from a step of this many tokens: below it its 64-token tile mostly empty - 1 token 0.8x
-// the plain kernel's time at 511K, 16 0.9x, 32 1.4x, 64 2.1x (qxbench QX_N); the same bits either way
+constexpr uint64_t kScoreTokens = 128;       // and room for this many tokens' rows (q4x_ix_scratch)
+// the blocked scores from a step of this many tokens: below it its 64-token tile mostly empty, the plain kernel
+// faster; the same bits either way
 constexpr uint32_t kBlockedFrom = 32;
 
 
@@ -108,7 +108,7 @@ __global__ __launch_bounds__(256) void ix_score_kernel(const float* q, const flo
   }
 }
 
-// 0.7.3: the scores register-blocked - a tile of 64 tokens x 64 blocks, 256 threads, a thread 4 tokens x 4 blocks x
+// the scores register-blocked - a tile of 64 tokens x 64 blocks, 256 threads, a thread 4 tokens x 4 blocks x
 // the 4 heads' dot products (64 sums in registers), d staged 16 at a time: 20 LDS reads a thread for 64 products
 // (ix_score_kernel's 2 for 1). each (token, head, block) dot over d ascending, a multiply then an add; the heads
 // folded in order, s += relu(dot) / sqrt(kDim) (a head past `heads` 0: s + 0) - ix_score_kernel's bits
@@ -163,7 +163,7 @@ __global__ __launch_bounds__(kBThreads) void ix_score_blocked_kernel(const float
 }
 bool g_score_naive = false;  // (tests, qxbench: ix_score_kernel itself - q4x_ix_score_naive)
 
-// (0.7.4) a small step's scores (decode's, a verify's: up to kOneTok tokens): a block kOB pooled keys, a thread a
+// a small step's scores (decode's, a verify's: up to kOneTok tokens): a block kOB pooled keys, a thread a
 // (head, key) pair - every token's dot of it, d ascending, a multiply then an add (ix_score_kernel's) - then a thread
 // a (token, key) folding the heads in order, s += relu(dot) / sqrt(kDim): ix_score_kernel's bits, all 256 threads busy
 // (that tile's at one token 16 of them)
@@ -200,7 +200,7 @@ __global__ __launch_bounds__(256) void ix_score_small_kernel(const float* q, con
 }
 
 // a block a token: with more visible blocks than `blocks`, its top `blocks` by score (non-negative floats ordered as
-// their bits; the lower block among equals) written in block order - (0.7.4) sel::select_core, DeepSeek's selection
+// their bits; the lower block among equals) written in block order - sel::select_core, DeepSeek's selection
 __global__ __launch_bounds__(sel::kSelectThreads) void ix_pick_kernel(const float* score, int32_t p0, uint32_t ratio,
                                                                       uint32_t blocks, uint32_t stride, int32_t* out,
                                                                       int32_t* npick) {
@@ -215,7 +215,7 @@ __global__ __launch_bounds__(sel::kSelectThreads) void ix_pick_kernel(const floa
   if (threadIdx.x == 0) npick[t] = (int32_t) blocks;
 }
 
-// (0.7.4) a small step's pick on many blocks: each of sel::kChunks chunks' top `blocks` (ix_chunk_kernel), then the
+// a small step's pick on many blocks: each of sel::kChunks chunks' top `blocks` (ix_chunk_kernel), then the
 // top `blocks` of those (ix_merge_kernel) - the same blocks, in the same order (attn.hip's chunk_kernel)
 __global__ __launch_bounds__(sel::kSelectThreads) void ix_chunk_kernel(const float* score, int32_t p0, uint32_t ratio,
                                                                        uint32_t blocks, uint32_t stride) {
@@ -279,8 +279,7 @@ extern "C" bool q4x_ix_pool(const float* raw, uint32_t n_tok, int32_t pos0, uint
 }
 
 extern "C" uint64_t q4x_ix_scratch(uint32_t max_ctx, uint32_t ratio) {
-  // 0.7.3: room for kScoreTokens tokens' rows - a piece the blocked scores' tiles whole (32 tokens at 512K, from the
-  // old floor, left its 64-token tile half empty: 31.6 ms a 256-token step at 511K; 128 tokens 15.9, 67 MB there)
+  // room for kScoreTokens tokens' rows - a piece the blocked scores' tiles whole
   const uint64_t row = ratio ? max_ctx / ratio : 0, want = row * kScoreTokens;
   return want > kScoreBudget ? want : kScoreBudget;
 }
@@ -305,7 +304,7 @@ extern "C" bool q4x_ix_pick(const float* q, const float* pooled, uint32_t n_tok,
     const int32_t p0 = pos0 + (int32_t) t0;
     const uint32_t nv = (uint32_t) (p0 + (int32_t) n) / ratio;
     if (nv > blocks) {
-      if (!g_score_naive && n <= kOneTok)  // (0.7.4) decode's, a verify's: the small step's kernel
+      if (!g_score_naive && n <= kOneTok)  // decode's, a verify's: the small step's kernel
         ix_score_small_kernel<<<(nv + kOB - 1) / kOB, 256, 0, st(stream)>>>(q + (uint64_t) t0 * heads * kDim, pooled,
                                                                           n, heads, p0, ratio, nv, scratch);
       else if (g_score_naive || n < kBlockedFrom)  // a small step the plain kernel's: faster there than the blocked

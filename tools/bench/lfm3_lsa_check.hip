@@ -1,9 +1,10 @@
-// LSA's read against dense attention (osmos/lfm3/forward.h's lsa option): lfm3_lsa_check <GGUF> <maps> <text> [P=16384]
-// [D=64] [F=LFM3_LSA_SPARSE_FROM: the LSA prompt's sparse reads from position F] [LSA_ONLY=0: 1 skips the dense
-// forward (its prompt hours past 512K): each step's NLL and the LSA forward's times alone] - two forwards on the same weights, one dense, one with the maps; the text's first P tokens a prompt in
-// each (LSA's read sparse past LFM3_LSA_SPARSE_FROM, its buckets made as its blocks close), then its next D tokens one decode step at a time
-// (teacher-forced: the text's own) - each step's logits compared: the share whose top token is dense's (the card's
-// "same top token as dense"), the KL of LSA's from dense's, and each forward's mean NLL of the text's next token
+// LSA's read against dense attention (osmos/lfm3/forward.h's lsa option): lfm3_lsa_check <GGUF> <maps> <text>
+// [P=16384] [D=64] [F=LFM3_LSA_SPARSE_FROM: the LSA prompt's sparse reads from position F] [LSA_ONLY=0: 1 skips the
+// dense forward (its prompt hours past 512K): each step's NLL and the LSA forward's times alone] - two forwards on the
+// same weights, one dense, one with the maps; the text's first P tokens a prompt in each (LSA's read sparse past F,
+// its buckets made as its blocks close), then its next D tokens one decode step at a time (teacher-forced: the
+// text's own) - each step's logits compared: the share whose top token is dense's (the card's "same top token as
+// dense"), the KL of LSA's from dense's, and each forward's mean NLL of the text's next token
 #include <hip/hip_runtime.h>
 
 #include <chrono>

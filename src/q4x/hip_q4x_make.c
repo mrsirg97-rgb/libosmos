@@ -103,8 +103,8 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   f->n_taps = taps_ok ? nt : 0;
   f->df = taps_ok ? df : NULL;
   /* the window and the positions a rollback leaves seeded past the sequence (Q4X_SLOTS - 1 at most): theirs never a
-     window's slot (0.9.2: a ring of the window alone - a rollback, then a shorter seed, left up to 6 dropped
-     positions' keys read as the window's oldest) */
+     window's slot (a ring of the window alone: a rollback, then a shorter seed, reads dropped positions' keys as the
+     window's oldest) */
   f->df_ring = df && (uint32_t)df->geo.window + Q4X_SLOTS < max_ctx ? (uint32_t)df->geo.window + Q4X_SLOTS : max_ctx;
   f->ple_fd = -1;
   if (hipStreamCreateWithFlags(&f->s2, hipStreamNonBlocking) != hipSuccess ||
@@ -115,7 +115,7 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
       hipEventCreateWithFlags(&f->e_inj, hipEventDisableTiming) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_gates, hipEventDisableTiming) != hipSuccess ||
       hipEventCreateWithFlags(&f->e_ix, hipEventDisableTiming) != hipSuccess)
-    return osmos_fail(err, "a stream or event refused"), q4x_forward_destroy(f), NULL; /* (0.7.1: free(f) leaked them) */
+    return osmos_fail(err, "a stream or event refused"), q4x_forward_destroy(f), NULL;
   if (!df_ok)
     return osmos_fail(err, "a drafter not of these weights, its codebooks not Q8_0, or its taps not tap_layers"),
            q4x_forward_destroy(f), NULL;
@@ -131,9 +131,8 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
      memory left, before any is read: a forward that cannot fit takes nothing */
   f->exp_units = q4x_weights_experts(w, NULL, NULL, 0) > 0;
   uint64_t weights = 0, experts_bytes = 0; /* (the experts the membrane's, sized after: by the budget, or by the room
-                                               the build leaves - not all of them; 0.15.0: a budget of 0 counted every
-                                               expert here, so a machine short of the whole model was refused rather
-                                               than streamed) */
+                                               the build leaves - not counted here, or a machine short of the whole
+                                               model is refused rather than streamed) */
   for (int l = 0; f->exp_units && l < w->geo.n_layers; l++)
     experts_bytes += w->layer[l].exp_gate->bytes + w->layer[l].exp_up->bytes + w->layer[l].exp_down->bytes;
   for (size_t i = 0; i < w->model->n_tensors; i++)
@@ -151,8 +150,8 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
       (mtp && (!q4x_upload(f->ledger, NULL, mtp->model, NULL, NULL, &f->mtp_dev, err) || !q4x_mtp_buffers(f, err))) ||
       (f->df && (!q4x_upload(f->ledger, NULL, f->df->model, NULL, NULL, &f->df_dev, err) || !q4x_df_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;
-  /* the fixed part, counted (experts_plan's): the tables read, the records' buffers - 0.16.0: the GPU's free memory
-     read before and after, anything else's moving it */
+  /* the fixed part, counted (experts_plan's): the tables read, the records' buffers - not the GPU's free memory
+     before and after, which anything else moves */
   f->fixed_bytes = gpu_table_bytes(w->model, f->dev, NULL) + gpu_table_bytes(w->overlay, f->ov_dev, NULL) +
                    (mtp ? gpu_table_bytes(mtp->model, f->mtp_dev, NULL) : 0) +
                    (f->df ? gpu_table_bytes(f->df->model, f->df_dev, NULL) + f->d.bufs.bytes : 0) + f->bufs.bytes;

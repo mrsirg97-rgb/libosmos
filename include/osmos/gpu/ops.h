@@ -248,16 +248,17 @@ ops_engram_gate
   key_k) * rstd(h_k) * rstd(key_k) * dim^-0.5 (rounded to F32 from double, as python's).
 
 ops_sparse_attn
-  for each token and head: q against its keys - the window's (positions max(pos - window + 1, floor) .. pos, at ring
-  row position % slots, rows in ring_fmt - KV_FP8 as a sequence keeps them, or KV_F32 unpacked: floor the sequence's
-  first position with the layer's state, 0 for every position), then the n_sel[t] rows of ckv (format ckv_fmt: the compressed rows' KV_FP4_E4M3, or the drafter's
-  block's own KV_F32) that sel[t * sel_cap ..] names (ckv NULL: none) - each a latent that is the key and the value,
-  read as kvfmt.h's value (the F32 its rounding gave); scaled, softmax with the head's sink, the values summed in that order. slots
-  at least window + the step's tokens - 1, so no position a token reads is overwritten by the step. max_sel bounds
-  n_sel (the model's top k); scores the device's OPS_ATTN_SCRATCH(n_tok, heads, window + max_sel) floats (window
-  alone with no ckv); heads a multiple of 64, head_dim of 256. a score a sum over d ascending, an output over the
-  keys in their order: a token's bits do not depend on the other tokens, the heads' tiling, or the batch - nor on the
-  keys' formats (a packed row read is the F32 it unpacks to). every key F32 (ring and ckv): kernels with plain loads.
+  for each token and head: q against its keys - the window's (positions max(pos - window + 1, floor) .. pos, at ring row
+  position % slots, rows in ring_fmt - KV_FP8 as a sequence keeps them, or KV_F32 unpacked: floor the sequence's first
+  position with the layer's state, 0 for every position), then the n_sel[t] rows of ckv (format ckv_fmt: the compressed
+  rows' KV_FP4_E4M3, or the drafter's block's own KV_F32) that sel[t * sel_cap ..] names (ckv NULL: none) - each a
+  latent that is the key and the value, read as kvfmt.h's value (the F32 its rounding gave); scaled, softmax with the
+  head's sink, the values summed in that order. slots at least window + the step's tokens - 1, so no position a token
+  reads is overwritten by the step. max_sel bounds n_sel (the model's top k); scores the device's
+  OPS_ATTN_SCRATCH(n_tok, heads, window + max_sel) floats (window alone with no ckv); heads a multiple of 64, head_dim
+  of 256. a score a sum over d ascending, an output over the keys in their order: a token's bits do not depend on the
+  other tokens, the heads' tiling, or the batch - nor on the keys' formats (a packed row read is the F32 it unpacks to).
+  every key F32 (ring and ckv): kernels with plain loads.
 
 ops_compress
   for each token t whose position completes a compressed row ((pos[t] + 1) a multiple of ratio): the row from the
@@ -271,34 +272,34 @@ ops_put_rows
 
 ops_index_score
   for each token t (its q at q + t heads head_dim, its w at w + t heads) and its visible rows c < (pos[t] + 1) / ratio
-  of keys (format keys_fmt: the indexer's KV_FP4_POW2, or KV_F32): score[t stride + c] = sum over heads h of relu(q_h . keys_c) * w_h (heads at most 32, head_dim a multiple of
-  16; the heads summed as a 32-lane xor tree sums them). max_n bounds the visible rows (at most stride).
+  of keys (format keys_fmt: the indexer's KV_FP4_POW2, or KV_F32): score[t stride + c] = sum over heads h of relu(q_h .
+  keys_c) * w_h (heads at most 32, head_dim a multiple of 16; the heads summed as a 32-lane xor tree sums them). max_n
+  bounds the visible rows (at most stride).
 
-ops_index_score_fp4 (0.7.3)
+ops_index_score_fp4
   ops_index_score's scores (its bits) for q FP4-rounded (ops_fp4_round, a power of two a 32: the forward's) and keys
   KV_FP4_POW2: each product exact, so the sums fused (fma) - half the instructions. an element whose products could
   leave the normal range (its slot's smallest nonzero |q| x its row's smallest |k| under 2^-126, or its largest at
   2^127) summed as ops_index_score sums it (counted into fallbacks, when not NULL). ops_index_score_rows the same.
 
-ops_index_score_dot4 (0.7.3)
-  ops_index_score_fp4's scores (ops_index_score's bits; q FP4-rounded, keys KV_FP4_POW2, head_dim 128) on packed
-  int8 dots: a 32-value block's values I 2^E (I -12 .. 12; a key's E its scale's - 1, q's checked on the grid), its
-  dot an integer (v_dot4_i32_iu8, 4 codes a word: a quarter of the LDS reads a product) times 2^(Eq + Ek), the 4
-  blocks added in F32 - exact, so the sequential sum's bits, when the blocks both q and key code have Eq + Ek within
-  9 of each other and every E within +-55. an element outside (a spread past 9, a scale past the bounds or NaN's, a
-  q block off the grid) summed as ops_index_score sums it (counted into fallbacks, when not NULL). select_rows' scoring
-  of the unmasked index layers: 2.45x the fused kernel's speed at 1M rows (ixbench). (0.7.4) a one-token step on its
-  own tile (a block 256 rows of one token, where the 4-token tile at one token leaves 3/4 of it idle), and a tile's
-  waves past the step's tokens (a verify's 5 or 6: its second tile half empty) skip their sums - the same bits;
-  ops_index_score_dot4_four(true) keeps the 4-token tile at one token (tests, ixbench).
+ops_index_score_dot4
+  ops_index_score_fp4's scores (ops_index_score's bits; q FP4-rounded, keys KV_FP4_POW2, head_dim 128) on packed int8
+  dots: a 32-value block's values I 2^E (I -12 .. 12; a key's E its scale's - 1, q's checked on the grid), its dot an
+  integer (v_dot4_i32_iu8, 4 codes a word: a quarter of the LDS reads a product) times 2^(Eq + Ek), the 4 blocks added
+  in F32 - exact, so the sequential sum's bits, when the blocks both q and key code have Eq + Ek within 9 of each other
+  and every E within +-55. an element outside (a spread past 9, a scale past the bounds or NaN's, a q block off the
+  grid) summed as ops_index_score sums it (counted into fallbacks, when not NULL). select_rows' scoring of the unmasked
+  index layers. a one-token step on its own tile (a block 256 rows of one token, where the 4-token tile at one token
+  leaves 3/4 of it idle), and a tile's waves past the step's tokens (a verify's 5 or 6: its second tile half empty) skip
+  their sums - the same bits; ops_index_score_dot4_four(true) keeps the 4-token tile at one token (tests, ixbench).
 
-ops_index_score_rows (0.7.3)
-  ops_index_score_fp4 over only a token's listed blocks' rows (q FP4-rounded, as there) (list + t list_stride: n_list[t] block ids, each `block`
-  rows; ops_cand_list's): score[t stride + c] for each visible row c of them, the bits ops_index_score gives that row;
-  every other row's score left as it was. the candidate layers' scores (ops_topk under the same blocks' mask reads no
-  other row): 16,384 rows a token, not all it sees.
+ops_index_score_rows
+  ops_index_score_fp4 over only a token's listed blocks' rows (q FP4-rounded, as there) (list + t list_stride: n_list[t]
+  block ids, each `block` rows; ops_cand_list's): score[t stride + c] for each visible row c of them, the bits
+  ops_index_score gives that row; every other row's score left as it was. the candidate layers' scores (ops_topk under
+  the same blocks' mask reads no other row): 16,384 rows a token, not all it sees.
 
-ops_cand_list (0.7.3)
+ops_cand_list
   each token t's set bits of bits + t words, their indices ascending into list + t list_stride, how many into n_list[t]
   (at most list_stride: the rest dropped - ops_cand_blocks sets topk_blocks at most).
 
@@ -309,7 +310,7 @@ ops_topk
   j / 32) scores -inf - the candidate blocks' mask (ops_cand_blocks; the caller's kept rows at least k). deterministic:
   integer counts, a compaction in row order.
 
-ops_topk_rows (0.7.3)
+ops_topk_rows
   ops_topk under a mask, over the kept blocks' rows alone: list + t list_stride its n_list[t] blocks (ascending,
   ops_cand_list's), their visible rows the items - the rows ops_topk takes under those blocks' bits, in the same order
   (its masked rows -inf, never taken while the kept rows hold k: the candidate blocks' 16,384), without reading the
@@ -321,7 +322,7 @@ ops_cand_blocks
   highest blocks (ties to the lower block; all when there are no more) as bits into keep + t keep_words (bit j of word
   j / 32; the rest zero). keep_words at least the blocks of stride rows / 32, rounded up.
 
-ops_cand_blocks_max (0.7.3)
+ops_cand_blocks_max
   ops_cand_blocks (its bits), its blocks' keys - each block's highest score - folded once into bmax (bmax + t bstride:
   a block's, bstride at least the stride's blocks) before the selection reads them, not again in each of its passes
   (NULL bmax: ops_cand_blocks itself).
@@ -362,21 +363,20 @@ ops_copy
 ops_argmax, ops_argmax_scratch
   out[r] = the index of row r's greatest value (rows of n, stride floats apart), the lowest index among equals - the
   first maximum a scan in order finds (-0 and +0 equal; a row all -inf: 0); -1 for a row with a NaN - a pick the
-  caller refuses, never the greatest of what is left. both families' greedy pick (DESIGN.md, "0.6.2: what the two
-  families share"). scratch: ops_argmax_scratch(rows) bytes of device memory (the row's slices' bests: two launches).
-  false for no x, out or scratch, n 0 or past 2^31 - 2, no rows, or a stride under n.
-
-ops_draw_uniform
+  caller refuses, never the greatest of what is left. both families' greedy pick. scratch: ops_argmax_scratch(rows)
+  bytes of device memory (the row's slices' bests: two launches). false for no x, out or scratch, n 0 or past 2^31 - 2,
+  no rows, or a stride under n.  ops_draw_uniform
   a sampled token's uniform in [0, 1): a counter-based hash (splitmix64) of the seed and the token's position in its
   sequence alone, 24 bits - the same draw however the steps that reach the position are cut, drafted or batched.
 
 ops_sample
-  out[0] = a token drawn from one row of n logits (device): p_i = exp((x_i - max) / temperature); top_k's first (0
-  every token): the k greatest p kept, every token tied with the k-th; then of those, kept p_i >= tau, tau the
-  greatest whose kept mass is at least top_p of theirs (top_p 1: every one; ties all kept) - Hugging Face's order,
-  then the first id in id order whose running sum of the kept p passes u times their sum - an inverse CDF, every sum
-  in one fixed order (one block, its threads' contiguous slices), so a row's bits give one token. -inf a token never
-  drawn; a row with a NaN or +inf, or all -inf: -1. false for no x or out, n 0 or past 2^31 - 2, temperature not > 0, top_p not in (0, 1], u not in [0, 1).
+  out[0] = a token drawn from one row of n logits (device): p_i = exp((x_i - max) / temperature); top_k's first (0 every
+  token): the k greatest p kept, every token tied with the k-th; then of those, kept p_i >= tau, tau the greatest whose
+  kept mass is at least top_p of theirs (top_p 1: every one; ties all kept) - Hugging Face's order, then the first id in
+  id order whose running sum of the kept p passes u times their sum - an inverse CDF, every sum in one fixed order (one
+  block, its threads' contiguous slices), so a row's bits give one token. -inf a token never drawn; a row with a NaN or
+  +inf, or all -inf: -1. false for no x or out, n 0 or past 2^31 - 2, temperature not > 0, top_p not in (0, 1], u not in
+  [0, 1).
 
 ops_wait
   the stream held until *flag - host memory the GPU maps (hipHostMalloc's) - holds value, or value with its top bit

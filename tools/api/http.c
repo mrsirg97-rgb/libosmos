@@ -98,8 +98,8 @@ int http_read(Http *h, char err[OSMOS_ERR])
   for (char *l = strstr(head, "\r\n") + 2; l < end; l = strstr(l, "\r\n") + 2)
   {
     if (!strncasecmp(l, "Content-Length:", 15))
-    { /* digits alone, then the line's end (RFC 9110: 1*DIGIT; 0.7.1: "-1" read as huge - a 413 - and "12xyz" as 12);
-         a second one that says otherwise refused, not the last taken */
+    { /* digits alone, then the line's end (RFC 9110: 1*DIGIT: no "-1", no "12xyz"); a second one that says otherwise
+         refused, not the last taken */
       const char *d = l + 15;
       while (*d == ' ' || *d == '\t')
         d++;
@@ -146,8 +146,8 @@ int http_read(Http *h, char err[OSMOS_ERR])
   h->body_n = have < length ? have : length;
   memcpy(h->body, end + 4, h->body_n);
   free(head);
-  if (cont && h->body_n < length) /* the client waits for this before its body (curl's, past 1 KB: 0.11.2 - a second
-                                     lost a request, its wait for one never sent) */
+  if (cont && h->body_n < length) /* the client waits for this before its body (curl's, past 1 KB:
+                                     else a second lost a request) */
     send_all(h->fd, "HTTP/1.1 100 Continue\r\n\r\n", 25);
   deadline += (double)API_BODY_S_MB * ((double)length / (1u << 20)); /* (its body's time past the headers') */
   while (h->body_n < length)
@@ -214,7 +214,7 @@ bool http_stream_comment(int fd) { return send_all(fd, ": keep-alive\n\n", 14); 
 bool http_error(const Http *h, int status, const char *message) { return http_error_code(h, status, message, NULL, NULL); }
 
 /* with OpenAI's param and code (or NULL): a client's own handling keyed on them - context_length_exceeded the one
-   harnesses compact a conversation on (0.9.2) */
+   harnesses compact a conversation on */
 bool http_error_code(const Http *h, int status, const char *message, const char *param, const char *code)
 {
   return http_error_head(h, status, message, param, code, NULL);
@@ -239,7 +239,7 @@ bool http_error_head(const Http *h, int status, const char *message, const char 
 
 /* an answer sent before the request was read whole (a refusal: 413, 400, 503): this end's writing shut, the rest of
    the client's bytes read and dropped - API_LINGER_MS at most - then the close. a close with bytes unread is a reset,
-   and a client still sending sees that, never the status (0.7.1) */
+   and a client still sending sees that, never the status */
 void http_linger(int fd, bool wait)
 {
   (void)shutdown(fd, SHUT_WR);

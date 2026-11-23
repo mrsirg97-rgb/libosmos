@@ -12,7 +12,7 @@
    values, then its indexer's pooled keys below the position's blocks and its raw keys' ring - then a checksum */
 
 #define STATE_MAGIC 0x53583451u /* "Q4XS" */
-#define STATE_VERSION 4u /* 2: the attention cache in Q8_0; 3: QSA's pooled keys and ring; 4 (0.9.2): the MTP head's
+#define STATE_VERSION 4u /* 2: the attention cache in Q8_0; 3: QSA's pooled keys and ring; 4: the MTP head's
                             cache, indexer and pending h (a forward with a head: its identity says so) */
 
 typedef struct Header
@@ -42,9 +42,9 @@ static int parts(const Q4xSeq *s, int32_t pos, Part *p)
     else
       p[n++] = (Part){s->kc[l], (uint64_t)pos * sb.kv_row}, p[n++] = (Part){s->vc[l], (uint64_t)pos * sb.kv_row},
       p[n++] = (Part){s->ixk[l], (uint64_t)(pos / g->ix_ratio) * sb.ix_block}, p[n++] = (Part){s->ixr[l], sb.ix_ring};
-  /* the MTP head's (0.9.2): its cache, indexer and pending h - a state taken back drafts as the conversation never set
-     aside did. without them the head's attention read the rows another conversation's seeding left (it has no lower
-     bound: every position from 0) */
+  /* the MTP head's: its cache, indexer and pending h - a state taken back drafts as the conversation never set aside
+     did. without them the head's attention reads the rows another conversation's seeding left (it has no lower bound:
+     every position from 0) */
   if (s->mkc)
     p[n++] = (Part){s->mkc, (uint64_t)pos * sb.kv_row}, p[n++] = (Part){s->mvc, (uint64_t)pos * sb.kv_row},
     p[n++] = (Part){s->mixk, (uint64_t)(pos / g->ix_ratio) * sb.ix_block}, p[n++] = (Part){s->mixr, sb.ix_ring},
@@ -152,7 +152,7 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
     return refuse(s, err, bad);
   if (h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM || h.pend_pos < -1 || h.pend_pos >= h.pos || bytes != bytes_at(s, h.pos))
     return refuse(s, err, "a state whose fields are out of range, or not its position's size");
-  if ((bad = state_tokens_check(h.last, h.n_last, (uint32_t)s->f->w->geo.n_vocab))) /* (0.16.0: any loaded) */
+  if ((bad = state_tokens_check(h.last, h.n_last, (uint32_t)s->f->w->geo.n_vocab))) /* (any loaded) */
     return refuse(s, err, bad);
   Part p[MAX_PARTS];
   s->cur = 0, s->back = 0; /* loaded into slot 0, nothing behind it */
@@ -168,7 +168,7 @@ bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, ch
 }
 
 uint32_t q4x_seq_reach(const Q4xSeq *s) { return s && !s->broken ? s->back : 0; } /* (a broken one's rollback refused:
-                                                                                       its reach none - 0.11.2) */
+                                                                                       its reach none) */
 
 void q4x_seq_fail(Q4xSeq *s)
 {
@@ -196,7 +196,7 @@ bool q4x_seq_rollback(Q4xSeq *s, uint32_t n)
 
 typedef struct MarkHeader
 {
-  uint32_t magic, version; /* (0.16.0: a mark the model's, as every family's - its magic alone before) */
+  uint32_t magic, version; /* a mark the model's, as every family's */
   uint64_t identity;
   int32_t pos, n_last;
   int32_t last[Q4X_MAX_NGRAM];

@@ -1,4 +1,4 @@
-/* the experts' plan (osmos/mem/experts.h): room, stream and warm set for a budget - 0.12.3's Inkling sizing, shared */
+/* the experts' plan (osmos/mem/experts.h): room, stream and warm set for a budget, every family's */
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,7 +47,7 @@ bool experts_plan(const PoolUnit *units, uint32_t layers, uint32_t experts, cons
   {
     room = given;
     if (budget) /* the build's whole budget: the experts' pool what the rest leaves (fixed, the stream, the slack) - the
-                   budget a ceiling: the two slots' round-up to a whole grain each counted too (0.16.0) */
+                   budget a ceiling: the two slots' round-up to a whole grain each counted too */
     {
       const uint64_t rest = fixed + stream_room + 4 * largest + 2 * grain;
       room = budget > rest ? budget - rest : 0;

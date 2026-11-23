@@ -9,7 +9,7 @@
 #include "osmos/err_hip.h"
 #include "osmos/run/fit.h"
 
-/* the room's reading, measured (DESIGN.md, "0.15.2: the build ledger"): memory taken is counted at once - HIP's,
+/* the room's reading (DESIGN.md, "the build ledger"): memory taken is counted at once - HIP's,
    pinned, mapped slots alike - so a reading never overstates the room; memory freed from mapped slots is counted back
    over ~1.25 ms a GiB (32 GiB: 40 ms, in steps of 1.9-6.7 GiB a 10 ms), so a reading just after a free is short. a
    refusal is final only after the room is read again once it stands still */

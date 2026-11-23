@@ -32,8 +32,7 @@ constexpr float kSumFloor = 6.103515625e-5f; /* llama.cpp's clamp of the picked 
 // a block a token: its softmax (ggml's: exp(x - max), times 1 / their sum, the block's trees), then the k greatest by
 // its first wave alone - each lane its kRouteLane probabilities in registers (expert lane + 32 i), a pick the wave's
 // argmax of those not yet taken by shuffles (the lowest id among equals), no barrier between picks: the same picks in
-// the same order as a block-wide argmax a pick (0.5.11's, 8 barriers each), the same sum and weights. Qwen3.8's 512
-// experts: 19.3 -> 13.9 us median a decode token (rocprofv3, low-power, 2026-11-09); every ids hash the same
+// the same order as a block-wide argmax a pick (8 barriers each), the same sum and weights
 constexpr uint32_t kRouteLane = kMaxExperts / 32; /* a lane's experts at most (n_exp <= kMaxExperts) */
 __global__ void route_kernel(const float* logits, uint32_t n_exp, uint32_t k, int32_t* ids, float* w, int32_t* rows) {
   __shared__ float p[kMaxExperts], lds[kThreads];
@@ -69,8 +68,8 @@ __global__ void route_kernel(const float* logits, uint32_t n_exp, uint32_t k, in
 // same layout however it runs
 constexpr int kPart = MM_TILE << (Q4X_TILE_RUNS - 1);  // an entry's most tokens: the last run's 8 tiles (128)
 // a step's picks at most this many: each expert's thread places its own picks itself (a scan of the step's picks, cheap
-// when they are few: a decode token's 10, a draft's tens), not place_kernel - one launch, not two (decode 23.5 -> 23.8
-// tok/s). the same tables either way (test_q4x_moe_gpu: a step of 30 picks and one of 2,560 against a stable sort)
+// when they are few: a decode token's 10, a draft's tens), not place_kernel - one launch, not two. the same tables
+// either way
 constexpr uint32_t kPlaceInline = 256;
 __device__ inline int run_of(int c) { return c <= 16 ? 0 : c <= 32 ? 1 : c <= 64 ? 2 : 3; }
 
@@ -180,8 +179,7 @@ __global__ void moe_sum_kernel(const float* y, const int32_t* where, const float
 }
 
 // moe_sum_kernel's, 4 adjacent values a thread: each of a token's k rows one 16-byte load, not 4 - each value the
-// same products and sums in the same order, so its bits (a 2048-token step: ~140 GB/s, 10 dependent 4-byte loads a
-// value)
+// same products and sums in the same order, so its bits
 constexpr uint32_t kSumVec = 4;
 __global__ void moe_sum4_kernel(const float* y, const int32_t* where, const float* w, uint32_t n_tok, uint32_t k,
                                 uint32_t dim, const float* shared, const float* shared_logit, float* out) {
@@ -264,8 +262,8 @@ __global__ void spin_kernel(uint64_t ticks) {  // wall_clock64: a constant rate 
 }
 
 extern "C" bool q4x_spin(uint32_t us, void* stream) {
-  static int khz = 0;  // wall_clock64's rate (hipDeviceAttributeWallClockRate, kHz): 0.5.10's spin counted the shader
-                       // clock at 100 MHz's rate, ~20x short of `us`
+  static int khz = 0;  // wall_clock64's rate (hipDeviceAttributeWallClockRate, kHz), not the shader clock's: a spin
+                       // counted at the wrong rate falls short of `us`
   if (!khz && (hipDeviceGetAttribute(&khz, hipDeviceAttributeWallClockRate, 0) != hipSuccess || khz <= 0)) return false;
   spin_kernel<<<1, 32, 0, st(stream)>>>((uint64_t) us * (uint64_t) khz / 1000);
   return ok();

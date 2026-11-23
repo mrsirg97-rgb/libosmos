@@ -7,13 +7,13 @@
 #include "osmos/q35/forward.h"
 
 /* Qwen3.5 / 3.8's dense models (qwen35: Qwen3.8-27B, vibes27b) behind the engine: every weight resident (no budget,
-   picks or guess), q35's sequence (DESIGN.md, "0.9.0: q35 behind the engine"). a batch is a decode's math, a prompt's
-   read the matmul's (two maths, as DeepSeek's: the engine's read), each a token's bits however its step is split or
-   shared; the logits of the kept rows alone. no drafter yet: block 0 */
+   picks or guess), q35's sequence. a batch is a decode's math, a prompt's read the matmul's (two maths, as
+   DeepSeek's: the engine's read), each a token's bits however its step is split or shared; the logits of the kept
+   rows alone. no drafter yet: block 0 */
 _Static_assert(Q35_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 
 /* a step's most tokens when the server names none (a prompt's chunk), and a round's most kept rows: each lane's
-   token and its drafts (OSMOS_MAX_LANES x 9 rows of 248,320 floats: 0.57 GB) */
+   token and its drafts (OSMOS_MAX_LANES x 9 rows of the vocabulary's floats) */
 #define Q35_STEP_TOKENS 4096
 #define Q35_LOGIT_ROWS (OSMOS_MAX_LANES * (OSMOS_MAX_BLOCK + 1))
 

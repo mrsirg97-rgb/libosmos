@@ -5,11 +5,11 @@
 #include <stdint.h>
 
 /* Inkling-2-Small's own steps (DESIGN.md, "the forward, op by op"), F32 on the GPU, queued on `stream`: each held to
-   transformers' own module by tools/convert/ink2_cases.py's files (test_ink2_ops_gpu) */
+   transformers' own module (tools/convert/ink2_cases.py's files) */
 
 #define INK2_MAX_TAPS 8   /* a short conv's taps at most (Inkling's 4) */
 #define INK2_MAX_RES 16   /* attn_res's states a token at most (its blocks, then the partial one: Inkling's <= 9) */
-#define INK2_MAX_QUERIES 4 /* attn_res's queries at once (a full layer's q, k, v; a loop's messages: q, k, v, the MoE's) */
+#define INK2_MAX_QUERIES 4 /* attn_res's queries at once (a full layer's q, k, v; a loop's: q, k, v, the MoE's) */
 #define INK2_RES_SPLIT_TOKENS 64 /* attn_res's steps of at most these split (its scratch's) */
 #define INK2_RES_SCRATCH (INK2_RES_SPLIT_TOKENS * (1 + INK2_MAX_QUERIES) * INK2_MAX_RES) /* its floats */
 
@@ -62,8 +62,8 @@ bool ink2_axpy(float *y, const float *x, uint64_t n, float a, void *stream);
 #define INK2_MAX_REL 32      /* a head's relative states at most (Inkling's 16) */
 #define INK2_FA_MAX_GROUP 8  /* ink2_fa's query heads a KV head at most (Inkling's 6): its waves */
 #define INK2_FA_TILE 16      /* ink2_fa's keys a tile (WMMA's 16): a window's keys handed in from a multiple of it */
-#define INK2_FA_UNIT 256     /* its keys a unit (absolute): each its own softmax, folded in order - a decode's in parallel */
-#define INK2_FA_REL 16       /* ink2_fa's relative states a head (Inkling's): its bias's sum unrolled, another refused */
+#define INK2_FA_UNIT 256     /* its keys a unit (absolute): each its own softmax, folded in order */
+#define INK2_FA_REL 16       /* ink2_fa's relative states a head (Inkling's): its bias's sum unrolled */
 typedef struct Ink2Tau
 {
   uint32_t pos0;     /* the step's first token's position */
@@ -172,10 +172,10 @@ ink2_conv
   (w + 1 at the current tap) / sqrt(taps + 1) - res 0, scale 1. w [ch][taps] (GGUF ne taps, ch).
 
 ink2_conv_dyn
-  a full layer's k / v conv: y[t] = (sum_j (w[j, c] + dyn[t, h(c) taps + j]) x'[t + taps - 1 - j] + res x[t]) scale - tap 0
-  the current token, w [taps][ch] (ne ch, taps), dyn [n_tok][heads taps] (a head's taps a token, h(c) = c / (ch /
-  heads)). the checkpoint's: res 1, scale 1 / sqrt(2 taps + 1); llama.cpp's fold them into the static weights ((w + 1
-  at tap 0) / 3, stored [ch][taps] with tap 0 last) and the per-token ones (dyn / 3): res 0, scale 1.
+  a full layer's k / v conv: y[t] = (sum_j (w[j, c] + dyn[t, h(c) taps + j]) x'[t + taps - 1 - j] + res x[t]) scale -
+  tap 0 the current token, w [taps][ch] (ne ch, taps), dyn [n_tok][heads taps] (a head's taps a token, h(c) = c / (ch /
+  heads)). the checkpoint's: res 1, scale 1 / sqrt(2 taps + 1); llama.cpp's fold them into the static weights ((w + 1 at
+  tap 0) / 3, stored [ch][taps] with tap 0 last) and the per-token ones (dyn / 3): res 0, scale 1.
 
 ink2_conv_keep, ink2_conv_dyn_keep
   ink2_conv's and ink2_conv_dyn's y, and x's n_tok rows copied to keep as they are read (a tail's next rows: not
@@ -188,10 +188,10 @@ ink2_moe_conv
 
 ink2_attn_res
   the attention residual: a token's states (n_blocks rows of blocks [n_tok][b_stride][dim], then partial [n_tok][dim])
-  each RMS-normalized (no weight, eps); query q (query [queries][dim]) weights them softmax(q . s scale) and out[q][t]
-  = their weighted sum ([queries][n_tok][dim]). n_blocks + 1 <= INK2_MAX_RES, queries <= INK2_MAX_QUERIES, n_blocks <=
-  b_stride (the buffer's blocks a token: the block states so far, its room for more). scratch (INK2_RES_SCRATCH floats, or NULL): a step of
-  at most INK2_RES_SPLIT_TOKENS a block a sum, not a block a token - the same bits.
+  each RMS-normalized (no weight, eps); query q (query [queries][dim]) weights them softmax(q . s scale) and out[q][t] =
+  their weighted sum ([queries][n_tok][dim]). n_blocks + 1 <= INK2_MAX_RES, queries <= INK2_MAX_QUERIES, n_blocks <=
+  b_stride (the buffer's blocks a token: the block states so far, its room for more). scratch (INK2_RES_SCRATCH floats,
+  or NULL): a step of at most INK2_RES_SPLIT_TOKENS a block a sum, not a block a token - the same bits.
 
 ink2_scale, ink2_axpy
   x *= s; y += a x - an NVFP4 expert's scale on its gate and up rows, a routed expert's weighted sum.

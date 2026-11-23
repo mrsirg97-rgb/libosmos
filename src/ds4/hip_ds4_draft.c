@@ -50,7 +50,7 @@ static bool widen(Drafter *d, int b, const char *name, uint64_t n, float **out)
   uint32_t type = 0;
   uint64_t values = 0;
   const void *src = dev_of(d, b, name, &type, &values);
-  if (!src || values != n || !fwd_alloc(&d->bufs, out, n * sizeof(float))) /* its n values, no fewer (0.7.1) */
+  if (!src || values != n || !fwd_alloc(&d->bufs, out, n * sizeof(float))) /* its n values, no fewer */
     return false;
   return type == 0 ? fwd_copy(*out, src, n * sizeof(float)) : quant_dequant(type, src, n, *out, NULL);
 }
@@ -235,8 +235,7 @@ void fwd_drafter_destroy(Drafter *d)
 {
   if (!d)
     return;
-  gpu_bufs_free(&d->bufs); /* every GPU and pinned buffer the drafter made: from its record (0.16.0: four hand-kept
-                              lists) */
+  gpu_bufs_free(&d->bufs); /* every GPU and pinned buffer the drafter made: from its record */
   resident_destroy(d->res);
   hip_slots_destroy(d->slots); /* after the resident set: its memory released through it */
   if (d->fd >= 0)

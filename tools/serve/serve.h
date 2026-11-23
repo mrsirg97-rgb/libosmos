@@ -32,7 +32,7 @@ typedef struct Server
   AnswerRule answer; /* --answer-after's: no end before a turn's answer has begun (blank NULL: off) */
 } Server;
 
-/* a place the conversation goes back to (0.7.5): the sequence's mark (oseq_mark_save) at held.v's first n tokens - n 0:
+/* a place the conversation goes back to: the sequence's mark (oseq_mark_save) at held.v's first n tokens - n 0:
    none. the sequence's own while it holds those tokens: a rollback under it, a point before it gone back to, a
    restart or a kept conversation taken back drops it */
 typedef struct Point
@@ -50,7 +50,7 @@ typedef struct Conv
                       user-point, slot, none */
   /* its last prompt's point, one token short of its end: a family that reads apart (DeepSeek) goes back to it every
      turn (a decoded answer read again as the prompt's, never continued on: its answers the bits of their prompts
-     read whole, 0.7.1); every family where a turn leaves the decoded answer (a client writes it back otherwise) */
+     read whole); every family where a turn leaves the decoded answer (a client writes it back otherwise) */
   Point prompt;
   /* the last user turn's point (GEN mark=, osmos-api's): where a turn after a new user message leaves this prompt,
      the template dropping the reasoning since */
@@ -95,11 +95,11 @@ conv_reach
 
 conv_continue
   the conversation made a prefix of p: continued, rolled back to the common part, gone back to the furthest point p
-  continues (0.7.5: the prompt's, past an answer the client wrote back otherwise; the last user turn's, before
+  continues (the prompt's, past an answer the client wrote back otherwise; the last user turn's, before
   reasoning the template drops), or set aside and the longest kept conversation p continues taken back (else
   emptied). held.n: the tokens reused. a family that reads apart first goes back to its prompt's point: a turn's
   earlier answer read again as the prompt's, so the answer is the bits of its prompt read whole, whatever came
-  before it (0.7.1). conv_set_aside goes back to it too, every family: what the slots keep a prompt's state, never a
+  before it. conv_set_aside goes back to it too, every family: what the slots keep a prompt's state, never a
   decoded answer's (the next turn's history writes it otherwise).
 
 conv_prompt_end
@@ -108,7 +108,7 @@ conv_prompt_end
 
 conv_read
   k tokens of p (from held.n) through osmos_read, into the sequence and held; *row the last read's row of the last
-  token (its logits the answer's first). the read stops at the prompt's points (0.7.5), each kept: mark (the last
+  token (its logits the answer's first). the read stops at the prompt's points, each kept: mark (the last
   user turn's, when given: Conv.user) and n - 1 (Conv.prompt: the generation prompt's last token is one a later turn
   renders otherwise - DeepSeek's <think> becomes </think>), the rest then read - a prompt in pieces the bits of one
   read whole. with seed, the drafter's rings seeded from each piece's step - its part of the prompt's last window
