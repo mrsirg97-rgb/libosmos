@@ -96,10 +96,10 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   if (!e)
     return fail(err, "out of memory"), NULL;
   e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
-  const uint32_t steps = o->max_tokens ? o->max_tokens : HY4_STEP_TOKENS;
+  const uint32_t steps = osmos_step_tokens(o, HY4_STEP_TOKENS);
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Hy4Options' 0,
      every expert resident) */
-  const Hy4Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, HY4_LOGIT_ROWS, false, true,
+  const Hy4Options ho = {steps, o->max_ctx, HY4_LOGIT_ROWS, false, true,
                          o->budget ? o->budget : 1};
   if (!(e->f = hy4_forward_create(m->w, m->fds, &ho, err)))
     return e_destroy(e), NULL;

@@ -11,6 +11,8 @@
 #include "osmos/q4x/forward.h"
 #include "osmos/q4x/weights.h"
 
+#define Q4X_STEP_TOKENS 4096 /* a step's most tokens at max_tokens 0: the Qwen packs' own (packs.json) */
+
 /* Qwen3.8-Flash-Next behind the engine: every weight resident (no budget, no picks, nothing streamed); its drafter
    o->drafter's GGUF - DFlash2 (general.architecture dflash2: q4x_dflash_*) or the MTP head (q4x_mtp_*). a batch one
    step for its sequences (q4x_step: every weight read once for all of them; Q4X_MAX_RUNS sequences a step), each
@@ -109,7 +111,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
     return e_destroy(e), NULL;
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Q4xOptions' 0, every
      expert resident) */
-  const Q4xOptions qo = {o->max_ctx, o->max_tokens ? o->max_tokens : o->max_ctx, o->stream_ngram, NULL, 0, e->df,
+  const Q4xOptions qo = {o->max_ctx, osmos_step_tokens(o, Q4X_STEP_TOKENS), o->stream_ngram, NULL, 0, e->df,
                          o->budget ? o->budget : 1};
   if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)) ||
       (o->npu && !q4x_forward_npu(e->f, o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_QWEN, err)))

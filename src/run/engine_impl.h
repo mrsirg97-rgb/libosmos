@@ -4,6 +4,14 @@
 
 #include "osmos/run/engine.h"
 
+/* a build's step: max_tokens, or the family's own at 0 - never past the context (every family's one rule; Qwen alone
+   refused a step past it, and at 0 sized its step to the whole context) */
+static inline uint32_t osmos_step_tokens(const OsmosOptions *o, uint32_t family_default)
+{
+  const uint32_t t = o->max_tokens ? o->max_tokens : family_default;
+  return t < o->max_ctx ? t : o->max_ctx;
+}
+
 typedef struct OsmosFamily
 {
   const char *arch; /* general.architecture */

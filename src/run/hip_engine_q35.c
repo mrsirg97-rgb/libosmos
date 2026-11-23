@@ -82,8 +82,8 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;
-  const uint32_t steps = o->max_tokens ? o->max_tokens : Q35_STEP_TOKENS;
-  const Q35Options qo = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, Q35_LOGIT_ROWS};
+  const uint32_t steps = osmos_step_tokens(o, Q35_STEP_TOKENS);
+  const Q35Options qo = {steps, o->max_ctx, Q35_LOGIT_ROWS};
   if (!(e->f = q35_forward_create_with(m->w, &qo, err)))
     return e_destroy(e), NULL;
   return e;

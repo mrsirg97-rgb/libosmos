@@ -101,8 +101,8 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
     if (!(e->df = q4x_dflash_create_for(e->dg, &t, err)))
       return e_destroy(e), NULL;
   }
-  const uint32_t steps = o->max_tokens ? o->max_tokens : LFM3_STEP_TOKENS;
-  const Lfm3Options ho = {steps < o->max_ctx ? steps : o->max_ctx, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa, 0, NULL, 0, 0, 0, e->df};
+  const uint32_t steps = osmos_step_tokens(o, LFM3_STEP_TOKENS);
+  const Lfm3Options ho = {steps, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa, 0, NULL, 0, 0, 0, e->df};
   if (!(e->f = lfm3_forward_create(m->w, &ho, err)))
     return e_destroy(e), NULL;
   return e;
