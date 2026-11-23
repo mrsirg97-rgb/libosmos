@@ -43,7 +43,7 @@ static const Pack kPacks[] = {
      "/Models/osmos/hy4-flash/model-00148-of-00148.safetensors", true},
     {"osmos-evo", "/Models/osmos/osmos-evo/DeepSeek-V4.1-Flash-1017-osmos-evo-A2-00001-of-00005.gguf", nullptr, nullptr,
      false},
-    {"coder27", "/Models/coder27/Huihui-Qwen3.8-27B-Coder390-EfficientThink-abliterated-IQ3_S3.gguf", nullptr, nullptr,
+    {"coder27", "/Models/coder390-halo/models/osmos-vibes-nvfp4.gguf", nullptr, nullptr,
      false},  // (the 27B: no pack ships it, the engine still builds it)
 };
 
