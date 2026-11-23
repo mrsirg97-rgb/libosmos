@@ -40,7 +40,7 @@ typedef struct Q4xBuf
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
   bool *kept; /* host, [max_tokens]: a row's logits its last step's (q4x_kept) */
-} Q4xBuf;
+} Q4xBuf; /* (its buffers the forward's record's: never freed as an array of its first pointers - 0.15.2's double free) */
 
 /* the MTP head's buffers (with a head): a step's hidden rows, a draft's inputs and logits */
 typedef struct Q4xMtpBuf
@@ -68,6 +68,9 @@ typedef DfBuf Q4xDfBuf; /* the drafter's buffers: the DFlash2 core's (dflash_cor
 
 struct Q4xForward
 {
+  OsmosLedger *ledger; /* borrowed (Q4xOptions'): every allocation of the forward and its sequences */
+  GpuBufs bufs;        /* every GPU and pinned buffer of the forward, recorded as made (alloc, osmos/gpu/bufs.h) -
+                          freed from the record, the last made first */
   OverflowFlag ovf; /* b.overflow's reset (osmos/gpu/overflow.h): owed when one failed - here, not in Q4xBuf (its
                        destroy frees Q4xBuf's first members as an array of pointers) */
   uint64_t steps; /* q4x_step's calls: b.taps the last one's (a batch past Q4X_MAX_RUNS is several: Q4xSeq.step_id) */
@@ -149,6 +152,7 @@ struct Q4xForward
 
 struct Q4xSeq
 {
+  GpuBufs bufs; /* its GPU buffers, recorded as made (its forward's ledger's) */
   Q4xForward *f;
   int32_t pos;
   int32_t prompt_end; /* q4x_seq_prompt's: no logits for its tokens before prompt_end - 1 (0: none) */

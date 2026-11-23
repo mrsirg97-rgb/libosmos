@@ -31,8 +31,15 @@ void q4x_npu_destroy(Q4xForward *f)
   npu_close(f->npu), f->npu = NULL;
   if (f->npu_packed)
     (void)hipEventDestroy(f->npu_packed), f->npu_packed = NULL;
-  (void)hipHostFree(f->npu_sel), (void)hipHostFree(f->npu_nsel), f->npu_sel = NULL, f->npu_nsel = NULL;
-  (void)hipFree(f->npu_tok), (void)hipFree(f->npu_slot), f->npu_tok = f->npu_slot = NULL;
+  void *host[] = {f->npu_sel, f->npu_nsel}, *dev[] = {f->npu_tok, f->npu_slot};
+  for (int i = 0; i < 2; i++)
+  {
+    if (host[i])
+      (void)ledger_host_free(f->ledger, host[i]);
+    if (dev[i])
+      (void)ledger_free(f->ledger, dev[i]);
+  }
+  f->npu_sel = NULL, f->npu_nsel = NULL, f->npu_tok = f->npu_slot = NULL;
   free(f->npu_w0), free(f->npu_w1), free(f->npu_c0), free(f->npu_c1);
   f->npu_w0 = f->npu_w1 = NULL, f->npu_c0 = f->npu_c1 = NULL;
 }
@@ -85,9 +92,10 @@ bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[OSMOS
   }
   const unsigned mapped = hipHostMallocMapped | hipHostMallocCoherent;
   const size_t rows = (size_t)NPU_SELECT_MAX * NPU_TOKENS * sizeof(int32_t), m = NPU_SELECT_MAX;
-  if (hipHostMalloc((void **)&f->npu_sel, m * sizeof *f->npu_sel, mapped) != hipSuccess ||
-      hipHostMalloc((void **)&f->npu_nsel, sizeof *f->npu_nsel, mapped) != hipSuccess ||
-      hipMalloc((void **)&f->npu_tok, rows) != hipSuccess || hipMalloc((void **)&f->npu_slot, rows) != hipSuccess ||
+  if (ledger_host_malloc(f->ledger, (void **)&f->npu_sel, m * sizeof *f->npu_sel, mapped) != hipSuccess ||
+      ledger_host_malloc(f->ledger, (void **)&f->npu_nsel, sizeof *f->npu_nsel, mapped) != hipSuccess ||
+      ledger_malloc(f->ledger, (void **)&f->npu_tok, rows) != hipSuccess ||
+      ledger_malloc(f->ledger, (void **)&f->npu_slot, rows) != hipSuccess ||
       !(f->npu_w0 = malloc(m * sizeof *f->npu_w0)) || !(f->npu_w1 = malloc(m * sizeof *f->npu_w1)) ||
       !(f->npu_c0 = malloc(m * sizeof *f->npu_c0)) || !(f->npu_c1 = malloc(m * sizeof *f->npu_c1)) ||
       hipEventCreateWithFlags(&f->npu_packed, hipEventDisableTiming) != hipSuccess)

@@ -41,7 +41,11 @@ void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint
     f->probe(step, layer, dev, n, f->probe_arg);
 }
 
-static bool alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
+/* a GPU buffer of the forward's (its ledger's, recorded: freed at its destroy), and a pinned host one alike */
+static bool alloc(Q4xForward *f, void *p, uint64_t bytes) { return gpu_bufs_one(&f->bufs, f->ledger, p, bytes); }
+static bool pinned(Q4xForward *f, void *p, uint64_t bytes) { return gpu_bufs_host(&f->bufs, f->ledger, p, bytes); }
+/* a sequence's (its own record, its forward's ledger's) */
+static bool seq_alloc(Q4xSeq *s, void *p, uint64_t bytes) { return gpu_bufs_one(&s->bufs, s->f->ledger, p, bytes); }
 
 /* the memory a build can still take (fit.h's fit_room): the GPU's free, or the system's RAM available past what a
    build leaves the system (FIT_RAM_FREE, the headroom added back) where that is less - the experts lie in host memory
@@ -61,24 +65,26 @@ static bool mem_left(uint64_t *left)
    n-gram table resident, an 8K context in 4096-token steps: 0.02 GiB left after its sequence) - and a system with no
    RAM left kills the process. `more`: bytes about to be taken (0: the build done) - refused before they are, so a
    build that cannot fit takes none of it. false with why */
-static bool room_left_past(uint64_t more, const char *after, char *err)
+static bool room_left_past(Q4xForward *f, uint64_t more, const char *after, char *err)
 {
   uint64_t left = 0;
-  if (!mem_left(&left))
+  if (f->ledger) /* the engine's: its room, --fill's RAM kept (0.15.3: the machine read with 8 GiB kept, whatever --fill) */
+    left = ledger_left_settled(f->ledger) + FIT_HEADROOM;
+  else if (!mem_left(&left))
     return osmos_fail(err, "a GPU call failed (the memory left)");
   if (left >= more && left - more >= FIT_HEADROOM)
     return true;
   if (err)
     snprintf(err, OSMOS_ERR,
              "GPU memory: %.2f GiB left after %s, under the %.0f GiB its kernels need loaded as they first run (the "
-             "GPU's memory, or the system's RAM past the 8 GiB a build leaves it): stream the n-gram table, or a smaller max_tokens "
+             "GPU's memory, or the system's RAM past what --fill keeps): stream the n-gram table, or a smaller max_tokens "
              "or max_context",
              left >= more ? (double)(left - more) / (1ull << 30) : -(double)(more - left) / (1ull << 30), after,
              (double)FIT_HEADROOM / (1ull << 30));
   return false;
 }
 
-static bool room_left(const char *after, char *err) { return room_left_past(0, after, err); }
+static bool room_left(Q4xForward *f, const char *after, char *err) { return room_left_past(f, 0, after, err); }
 
 /* every tensor of g read into GPU memory through a pinned piece: *dev its table - but those `shadow` has a tensor of
    the name of (an overlay's stand-ins: their bytes never read), and `skip` (a table read from its file: stream_ngram) */
@@ -128,7 +134,7 @@ static bool experts(Q4xForward *f, uint64_t budget, char *err)
   char merr[OSMOS_ERR] = "";
   if (ok && !experts_plan(units, L, E, warm, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
-  if (ok && !experts_create(NULL /* ledger: stage 4 */, units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, host_copy, NULL, 0, true, &ex,
+  if (ok && !experts_create(f->ledger, units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, host_copy, NULL, 0, true, &ex,
                             merr))
     ok = osmos_fail(err, "%s", merr[0] ? merr : "the experts' membrane refused");
   if (ok)
@@ -145,7 +151,7 @@ static bool experts(Q4xForward *f, uint64_t budget, char *err)
       for (int k = 0; ok && k < Q4X_GROUP_TENSORS; k++)
         tab[((u / E) * Q4X_GROUP_TENSORS + (size_t)k) * E + u % E] = dev[k];
     }
-    ok = ok && ((alloc(&f->exp_tab, n * Q4X_GROUP_TENSORS * sizeof *tab) &&
+    ok = ok && ((alloc(f, &f->exp_tab, n * Q4X_GROUP_TENSORS * sizeof *tab) &&
                  hipMemcpy(f->exp_tab, tab, n * Q4X_GROUP_TENSORS * sizeof *tab, hipMemcpyHostToDevice) == hipSuccess) ||
                 osmos_fail(err, "GPU memory refused (the experts' table)"));
     free(tab);
@@ -182,13 +188,15 @@ static bool not_uploaded(const GgufTensor *t, void *arg)
   return (u->shadow && gguf_tensor(u->shadow, t->name)) || t == u->skip || on_membrane(u->f, t);
 }
 
-static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
+/* f: whose experts the membrane reads (NULL: a file of none - the overlay's, the heads'); l: the forward's ledger */
+static bool upload(OsmosLedger *l, const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip,
+                   void ***dev, char *err)
 {
   UploadSkip u = {f, shadow, skip};
-  return gpu_upload_table(NULL /* ledger: stage 4 */, g, READ_PIECE, not_uploaded, &u, dev, err);
+  return gpu_upload_table(l, g, READ_PIECE, not_uploaded, &u, dev, err);
 }
 
-static void free_table(const Gguf *g, void **dev) { gpu_free_table(NULL /* ledger: stage 4 */, g, dev, NULL); }
+static void free_table(Q4xForward *f, const Gguf *g, void **dev) { gpu_free_table(f->ledger, g, dev, NULL); }
 
 /* the MTP head's buffers */
 static bool mtp_buffers(Q4xForward *f, char *err)
@@ -198,11 +206,10 @@ static bool mtp_buffers(Q4xForward *f, char *err)
   /* a draft step's rows: a sequence each (q4x_mtp_draft_all), over the shortlist */
   const uint64_t rows = n < Q4X_MAX_RUNS ? n : Q4X_MAX_RUNS, dv = Q4X_MTP_VOCAB < g->n_vocab ? Q4X_MTP_VOCAB : g->n_vocab;
   Q4xMtpBuf *m = &f->m;
-  const bool ok = alloc(&m->hid, n * hd * F) && alloc(&m->hin, n * hd * F) && alloc(&m->emb, n * D * F) &&
-                  alloc(&m->hn, n * hd * F) && alloc(&m->join, 2 * n * hd * F) &&
-                  alloc(&m->logits, (uint64_t)rows * dv * F) && alloc(&m->top_id, rows * 4) &&
-                  alloc(&m->top_p, rows * 4) && hipHostMalloc((void **)&m->pin_id, rows * 4, 0) == hipSuccess &&
-                  hipHostMalloc((void **)&m->pin_p, rows * 4, 0) == hipSuccess;
+  const bool ok = alloc(f, &m->hid, n * hd * F) && alloc(f, &m->hin, n * hd * F) && alloc(f, &m->emb, n * D * F) &&
+                  alloc(f, &m->hn, n * hd * F) && alloc(f, &m->join, 2 * n * hd * F) &&
+                  alloc(f, &m->logits, (uint64_t)rows * dv * F) && alloc(f, &m->top_id, rows * 4) &&
+                  alloc(f, &m->top_p, rows * 4) && pinned(f, &m->pin_id, rows * 4) && pinned(f, &m->pin_p, rows * 4);
   return ok || osmos_fail(err, "GPU memory refused (the MTP head's buffers)");
 }
 
@@ -211,7 +218,7 @@ static bool mtp_buffers(Q4xForward *f, char *err)
 /* the drafter's buffers (the DFlash2 core's): a feed's max_tokens context rows, a block's */
 static bool q4x_df_buffers(Q4xForward *f, char *err)
 {
-  return df_buffers(&f->d, NULL /* ledger: stage 4 */, &f->df->geo, f->max_tokens, f->max_ctx) ||
+  return df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx) ||
          osmos_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 
@@ -225,7 +232,7 @@ static bool ple_stream(Q4xForward *f, char *err)
   const uint64_t rows = (uint64_t)f->max_tokens * f->w->geo.ple_heads;
   f->ple_fd = open(f->w->model->paths[t->file], O_RDONLY);
   if (f->ple_fd < 0 || !(f->ple_read = rowread_create(Q4X_ROW_THREADS)) || !(f->ple_off = malloc(rows * 8)) ||
-      hipHostMalloc((void **)&f->ple_stage, rows * ple_row_bytes(f), 0) != hipSuccess ||
+      !pinned(f, &f->ple_stage, rows * ple_row_bytes(f)) ||
       hipEventCreateWithFlags(&f->ple_copied, hipEventDisableTiming) != hipSuccess)
     return osmos_fail(err, "the n-gram table's file, its readers or their stage refused (stream_ngram)");
   return true;
@@ -282,7 +289,7 @@ static bool buffers(Q4xForward *f, char *err)
   if (xe16 < (n + MM_TILE - 1) / MM_TILE * MM_TILE * (uint64_t)g->hc_rank * 2)
     return osmos_fail(err, "the experts' f16 buffer smaller than a mixer's up's input (hc_rank past the experts' dims)");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
-    if (!alloc(want[i].p, want[i].bytes))
+    if (!alloc(f, want[i].p, want[i].bytes))
       return osmos_fail(err, "GPU memory refused (a step's buffers)");
   _Static_assert(sizeof want / sizeof *want <= Q4X_ROW_BUFS, "Q4X_ROW_BUFS: the table's");
   f->n_rows = 0;
@@ -299,9 +306,8 @@ static bool buffers(Q4xForward *f, char *err)
   free(iota);
   if (!put)
     return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
-  return (hipHostMalloc((void **)&b->pin_rows, n * g->ple_heads * 4, 0) == hipSuccess &&
-          hipHostMalloc((void **)&b->pin_tok, n * 4, 0) == hipSuccess &&
-          hipHostMalloc((void **)&b->pin_overflow, 4, 0) == hipSuccess && !(*b->pin_overflow = 0) &&
+  return (pinned(f, &b->pin_rows, n * g->ple_heads * 4) && pinned(f, &b->pin_tok, n * 4) &&
+          pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) &&
           (b->kept = calloc(n, sizeof *b->kept))) ||
          osmos_fail(err, "pinned memory refused (a step's tokens)");
 }
@@ -317,24 +323,17 @@ void q4x_forward_destroy(Q4xForward *f)
   for (int i = 0; f->exp_fds && i < f->w->model->n_files; i++)
     if (f->exp_fds[i] >= 0)
       close(f->exp_fds[i]);
-  free(f->exp_fds), hipFree(f->exp_tab);
+  free(f->exp_fds);
   free(f->h_ex), free(f->h_by), free(f->h_row), free(f->h_run), free(f->h_est), free(f->h_ids), free(f->h_gidx);
   free(f->h_hidx), free(f->h_cnt), free(f->h_xg), free(f->h_yg), free(f->h_xd), free(f->h_yd), free(f->h_ptr);
-  free_table(f->w->model, f->dev);
+  free_table(f, f->w->model, f->dev);
   if (f->w->overlay)
-    free_table(f->w->overlay, f->ov_dev);
+    free_table(f, f->w->overlay, f->ov_dev);
   if (f->mtp)
-    free_table(f->mtp->model, f->mtp_dev);
+    free_table(f, f->mtp->model, f->mtp_dev);
   if (f->df)
-    free_table(f->df->model, f->df_dev);
+    free_table(f, f->df->model, f->df_dev);
   df_buffers_free(&f->d);
-  Q4xMtpBuf *m = &f->m;
-  hipFree(m->hid), hipFree(m->hin), hipFree(m->emb), hipFree(m->hn), hipFree(m->join), hipFree(m->logits);
-  hipFree(m->top_id), hipFree(m->top_p), hipHostFree(m->pin_id), hipHostFree(m->pin_p);
-  void **bufs = (void **)&f->b;
-  for (size_t i = 0; i < offsetof(Q4xBuf, pin_rows) / sizeof(void *); i++)
-    hipFree(bufs[i]);
-  hipHostFree(f->b.pin_rows), hipHostFree(f->b.pin_tok), hipHostFree(f->b.pin_overflow), hipFree(f->b.logits);
   free(f->b.kept);
   if (f->s2)
     (void)hipStreamDestroy(f->s2);
@@ -356,9 +355,11 @@ void q4x_forward_destroy(Q4xForward *f)
     rowread_destroy(f->ple_read); /* (a pending step's rows waited for first) */
   if (f->ple_fd >= 0)
     close(f->ple_fd);
-  hipHostFree(f->ple_stage), free(f->ple_off);
+  free(f->ple_off);
   if (f->ple_copied)
     (void)hipEventDestroy(f->ple_copied);
+  gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer the forward made (the step's, the MTP head's, the experts'
+                              table, the n-gram stage): from the record - the readers of the stage stopped above */
   free(f->sub_seq);
   free(f);
 }
@@ -366,7 +367,7 @@ void q4x_forward_destroy(Q4xForward *f)
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[OSMOS_ERR])
 {
-  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL, 0};
+  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL, 0, NULL};
   return q4x_forward_create_with(w, mtp, &o, err);
 }
 
@@ -379,6 +380,7 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens, f->stream_ngram = o->stream_ngram;
+  f->ledger = o->ledger;
   const Q4xDflash *df = o->dflash;
   /* a drafter's: its geometry these weights' (q4x_dflash_create's checks), its codebooks the selector's Q8_0 */
   const bool df_ok = !df || (df->geo.n_embd == w->geo.n_embd && df->geo.n_vocab == w->geo.n_vocab &&
@@ -434,20 +436,20 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   for (size_t k = 0; k < sizeof more / sizeof *more; k++)
     for (size_t i = 0; more[k] && i < more[k]->n_tensors; i++)
       weights += more[k]->tensors[i].bytes;
-  if (!room_left_past(f->exp_units ? weights - experts_bytes : weights, "the forward", err))
+  if (!room_left_past(f, f->exp_units ? weights - experts_bytes : weights, "the forward", err))
     return q4x_forward_destroy(f), NULL;
   size_t free0 = 0, total0 = 0;
-  if (hipMemGetInfo(&free0, &total0) != hipSuccess || !upload(f, w->model, w->overlay, skip, &f->dev, err) ||
-      (w->overlay && !upload(NULL, w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
+  if (hipMemGetInfo(&free0, &total0) != hipSuccess || !upload(f->ledger, f, w->model, w->overlay, skip, &f->dev, err) ||
+      (w->overlay && !upload(f->ledger, NULL, w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
       (f->stream_ngram && !ple_stream(f, err)) ||
-      (mtp && (!upload(NULL, mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))) ||
-      (f->df && (!upload(NULL, f->df->model, NULL, NULL, &f->df_dev, err) || !q4x_df_buffers(f, err))))
+      (mtp && (!upload(f->ledger, NULL, mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))) ||
+      (f->df && (!upload(f->ledger, NULL, f->df->model, NULL, NULL, &f->df_dev, err) || !q4x_df_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;
   size_t free1 = 0, total1 = 0; /* the fixed part: what the build took before its experts (experts_plan's) */
   if (hipMemGetInfo(&free1, &total1) == hipSuccess)
     f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
-  if (!experts(f, o->budget ? o->budget : experts_fit_now(NULL /* ledger: stage 4 */, f->fixed_bytes), err) || /* (0: this machine's room) */
-      !room_left("the forward", err))
+  if (!experts(f, o->budget ? o->budget : experts_fit_now(f->ledger, f->fixed_bytes), err) || /* (0: this machine's room) */
+      !room_left(f, "the forward", err))
     return q4x_forward_destroy(f), NULL;
   return f;
 }
@@ -481,12 +483,7 @@ void q4x_seq_destroy(Q4xSeq *s)
 {
   if (!s)
     return;
-  for (int l = 0; l < Q4X_MAX_LAYERS; l++)
-    hipFree(s->ssm[l]), hipFree(s->conv[l]), hipFree(s->kc[l]), hipFree(s->vc[l]), hipFree(s->ixk[l]),
-        hipFree(s->ixr[l]);
-  for (int l = 0; l < Q4X_DFLASH_MAX_LAYERS; l++)
-    hipFree(s->dk[l]), hipFree(s->dv[l]);
-  hipFree(s->ple_hist), hipFree(s->mkc), hipFree(s->mvc), hipFree(s->mixk), hipFree(s->mixr), hipFree(s->pend);
+  gpu_bufs_free(&s->bufs); /* every GPU buffer it made: from its record */
   free(s->step_tok);
   free(s);
 }
@@ -502,21 +499,21 @@ Q4xSeq *q4x_seq_create(Q4xForward *f, char err[OSMOS_ERR])
   s->f = f;
   const Q4xSeqBytes sb = q4x_seq_bytes(g);
   const uint64_t pools = f->max_ctx / (uint64_t)g->ix_ratio + 1; /* an attention's pooled keys: its blocks */
-  bool ok = alloc(&s->ple_hist, Q4X_SLOTS * sb.ple);
+  bool ok = seq_alloc(s, &s->ple_hist, Q4X_SLOTS * sb.ple);
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = g->recurrent[l] ? alloc(&s->ssm[l], Q4X_SLOTS * sb.ssm) && alloc(&s->conv[l], Q4X_SLOTS * sb.conv)
-                         : alloc(&s->kc[l], f->max_ctx * sb.kv_row) && alloc(&s->vc[l], f->max_ctx * sb.kv_row) &&
-                               alloc(&s->ixk[l], pools * sb.ix_block) && alloc(&s->ixr[l], sb.ix_ring);
+    ok = g->recurrent[l] ? seq_alloc(s, &s->ssm[l], Q4X_SLOTS * sb.ssm) && seq_alloc(s, &s->conv[l], Q4X_SLOTS * sb.conv)
+                         : seq_alloc(s, &s->kc[l], f->max_ctx * sb.kv_row) && seq_alloc(s, &s->vc[l], f->max_ctx * sb.kv_row) &&
+                               seq_alloc(s, &s->ixk[l], pools * sb.ix_block) && seq_alloc(s, &s->ixr[l], sb.ix_ring);
   if (ok && f->mtp) /* the head's cache and indexer, its pending h, its last step's tokens */
-    ok = alloc(&s->mkc, f->max_ctx * sb.kv_row) && alloc(&s->mvc, f->max_ctx * sb.kv_row) &&
-         alloc(&s->mixk, pools * sb.ix_block) && alloc(&s->mixr, sb.ix_ring) &&
-         alloc(&s->pend, (uint64_t)g->hc * g->n_embd * F) && (s->step_tok = calloc(f->max_tokens, 4));
+    ok = seq_alloc(s, &s->mkc, f->max_ctx * sb.kv_row) && seq_alloc(s, &s->mvc, f->max_ctx * sb.kv_row) &&
+         seq_alloc(s, &s->mixk, pools * sb.ix_block) && seq_alloc(s, &s->mixr, sb.ix_ring) &&
+         seq_alloc(s, &s->pend, (uint64_t)g->hc * g->n_embd * F) && (s->step_tok = calloc(f->max_tokens, 4));
   const uint64_t ring = f->df ? (uint64_t)f->df_ring * f->df->geo.n_kv_heads * f->df->geo.head_dim * F : 0;
   for (int l = 0; ok && f->df && l < f->df->geo.n_layers; l++) /* the drafter's rings */
-    ok = alloc(&s->dk[l], ring) && alloc(&s->dv[l], ring);
+    ok = seq_alloc(s, &s->dk[l], ring) && seq_alloc(s, &s->dv[l], ring);
   if (!ok || !q4x_seq_reset(s))
     return q4x_seq_destroy(s), osmos_fail(err, "GPU memory refused (a sequence's state)"), NULL;
-  if (!room_left("the sequence", err))
+  if (!room_left(s->f, "the sequence", err))
     return q4x_seq_destroy(s), NULL;
   return s;
 }

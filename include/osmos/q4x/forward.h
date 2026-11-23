@@ -38,6 +38,8 @@ typedef struct Q4xOptions
   uint64_t budget;           /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
                                 through the membrane past it; 0 sized to this machine as it stands (experts_fit_now:
                                 every expert resident where there is room) */
+  struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
+                                 borrowed - the engine's, outliving the forward); NULL counts nothing */
 } Q4xOptions;
 
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,

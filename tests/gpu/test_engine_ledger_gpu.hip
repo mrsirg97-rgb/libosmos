@@ -37,9 +37,11 @@ static const Pack kPacks[] = {
      "/Models/osmos/inkling-2-mini/ink2-mini-mtp-q8.gguf"},
     {"osmos-evo-inkling", "/Models/osmos/osmos-evo-inkling/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf", nullptr,
      nullptr, true},
+    {"qwen38-ud-iq3_xxs", "/Models/osmos/qwen38-ud-iq3_xxs/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf", nullptr,
+     "/Models/qwen38/DFlash2/dflash2-Q8_0.gguf", true},
 };
 // the families whose builds go through the ledger (stage 4 adds one a commit; at its end every family, and this goes)
-static const std::set<std::string> kLedgered = {"lfm3", "inkling2"};
+static const std::set<std::string> kLedgered = {"lfm3", "inkling2", "qwen4exp"};
 
 static std::string home(const char* p) {
   const char* h = std::getenv("HOME");

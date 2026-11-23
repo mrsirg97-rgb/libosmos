@@ -104,7 +104,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Q4xOptions' 0, every
      expert resident) */
   const Q4xOptions qo = {o->max_ctx, osmos_step_tokens(o, Q4X_STEP_TOKENS), o->stream_ngram, NULL, 0, e->df,
-                         o->budget ? o->budget : 1};
+                         o->budget ? o->budget : 1, ledger};
   if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)) ||
       (o->npu && !q4x_forward_npu(e->f, o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_QWEN, err)))
     return e_destroy(e), NULL;
