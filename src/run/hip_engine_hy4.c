@@ -93,7 +93,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Hy4Options' 0,
      every expert resident) */
   const Hy4Options ho = {steps, o->max_ctx, HY4_LOGIT_ROWS, false, true,
-                         o->budget ? o->budget : 1};
+                         o->budget ? o->budget : 1, ledger};
   if (!(e->f = hy4_forward_create(m->w, m->fds, &ho, err)))
     return e_destroy(e), NULL;
   if (o->drafter && !hy4_dfly_load(e->f, o->drafter, true, err)) /* (Q8_0: half the draft's reads) */

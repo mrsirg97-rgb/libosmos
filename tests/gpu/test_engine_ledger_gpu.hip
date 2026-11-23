@@ -39,9 +39,11 @@ static const Pack kPacks[] = {
      nullptr, true},
     {"qwen38-ud-iq3_xxs", "/Models/osmos/qwen38-ud-iq3_xxs/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf", nullptr,
      "/Models/qwen38/DFlash2/dflash2-Q8_0.gguf", true},
+    {"hy4-flash", "/Models/osmos/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf", nullptr,
+     "/Models/osmos/hy4-flash/model-00148-of-00148.safetensors", true},
 };
 // the families whose builds go through the ledger (stage 4 adds one a commit; at its end every family, and this goes)
-static const std::set<std::string> kLedgered = {"lfm3", "inkling2", "qwen4exp"};
+static const std::set<std::string> kLedgered = {"lfm3", "inkling2", "qwen4exp", "hy_v4_flash"};
 
 static std::string home(const char* p) {
   const char* h = std::getenv("HOME");
@@ -118,11 +120,12 @@ static bool one(const Pack& p) {
   return true;
 }
 
-int main() {
+int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("[test_engine_ledger_gpu] start\n");
   int ran = 0;
-  for (const Pack& p : kPacks) ran += one(p);
+  for (const Pack& p : kPacks)  // (a pack named: that one alone - a family's commit checks its own)
+    if (argc < 2 || !std::strcmp(argv[1], p.name)) ran += one(p);
   if (!ran) return std::printf("[test_engine_ledger_gpu] skipped: no ledgered pack here\n"), 77;
   std::printf("[test_engine_ledger_gpu] ok\n");
   return 0;

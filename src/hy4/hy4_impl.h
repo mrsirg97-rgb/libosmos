@@ -1,6 +1,7 @@
 /* the hy4 forward's and sequence's insides (hip_hy4_make.c: the forward made; hip_hy4.c: its step; hip_hy4_layer.c: a
    layer's blocks; hip_hy4_seq.c: a sequence) */
 #pragma once
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/mem/experts.h"
 #include "osmos/model/moe_route.h"
 
@@ -38,6 +39,7 @@ typedef struct Hy4Joint
 
 struct Hy4Forward
 {
+  OsmosLedger *ledger; /* borrowed (Hy4Options'): every allocation of the forward, its sequences and its drafter */
   const Hy4Weights *w;
   uint32_t max_tokens, max_ctx, logit_rows, ring; /* ring: a sliding layer's rows (its window, a step, the reach) */
   bool kv8;                                       /* MLA's cache rows Q8_0 (Hy4Options' kv_f32 not set) */
@@ -115,11 +117,13 @@ struct Hy4Forward
   void *tap_arg;
   struct Hy4Dfly *dfly;                /* DFly2, when loaded (hip_hy4_dfly.c) */
   int dfly_slot[HY4_MAX_LAYERS];       /* a target layer's draft layer reading it, -1 none */
-  GpuBufs bufs; /* the step's buffers (want[]'s): freed from it */
+  GpuBufs bufs; /* every GPU and pinned buffer of the forward, recorded as made (hy4_alloc, the step's want[]) -
+                   freed from the record at its destroy, the last made first */
 };
 
 struct Hy4Seq
 {
+  GpuBufs bufs; /* its GPU buffers, recorded as made (its forward's ledger's) */
   Hy4Forward *f;
   int32_t pos;
   uint32_t back, prompt_end;
@@ -143,7 +147,10 @@ typedef struct Hy4Run
   uint32_t off, len;
 } Hy4Run;
 
-bool hy4_alloc(void *p, uint64_t bytes);
+/* a GPU buffer, or a pinned host one, recorded in b (its ledger's: the forward's, a sequence's or the drafter's
+   record - each freed from it at its owner's destroy) */
+bool hy4_alloc(GpuBufs *b, void *p, uint64_t bytes);
+bool hy4_pinned(GpuBufs *b, void *p, uint64_t bytes);
 /* y = W x for n tokens (W the tensor on the GPU, any type the matvec reads): a token's sums its own */
 bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
              bool read);
@@ -164,7 +171,7 @@ bool hy4_mat_raw(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uin
 /* a BF16 tensor's values as F32 on the host (read from its file; NULL on failure), an F32 matrix [rows][cols] as Q8_0
    on the GPU (ggml's rounding) - hip_hy4_dfly.c's */
 float *hy4_host_f32(const Gguf *g, const GgufTensor *t);
-bool hy4_q8_up(const float *x, uint64_t rows, uint32_t cols, void **dev);
+bool hy4_q8_up(GpuBufs *b, const float *x, uint64_t rows, uint32_t cols, void **dev);
 /* DFly2's weights and buffers freed (hip_hy4_dfly.c; none loaded: nothing) */
 void hy4_dfly_free(Hy4Forward *f);
 

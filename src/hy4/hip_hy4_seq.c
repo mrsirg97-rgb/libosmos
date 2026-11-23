@@ -18,18 +18,18 @@ Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[OSMOS_ERR])
   Hy4Seq *s = calloc(1, sizeof *s);
   if (!s)
     return osmos_fail(err, "out of memory"), NULL;
-  s->f = f;
+  s->f = f, s->bufs.ledger = f->ledger;
   const Hy4Geometry *g = &f->w->geo;
   const uint64_t row = hy4_mla_row_bytes((uint32_t)g->kv_lora, (uint32_t)g->rope_dim, f->kv8), ctx = f->max_ctx;
   bool ok = (s->tokens = malloc(ctx * 4)) != NULL;
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = g->sliding[l] ? hy4_alloc(&s->cache[l], f->ring * row)
-                       : hy4_alloc(&s->cache[l], ctx * row) && hy4_alloc(&s->keys[l], (uint64_t)f->kring * g->ix_dim * F) &&
-                             hy4_alloc(&s->groups[l], (ctx / g->ix_pool + 1) * g->ix_dim * F);
+    ok = g->sliding[l] ? hy4_alloc(&s->bufs, &s->cache[l], f->ring * row)
+                       : hy4_alloc(&s->bufs, &s->cache[l], ctx * row) && hy4_alloc(&s->bufs, &s->keys[l], (uint64_t)f->kring * g->ix_dim * F) &&
+                             hy4_alloc(&s->bufs, &s->groups[l], (ctx / g->ix_pool + 1) * g->ix_dim * F);
   const uint64_t top = (uint64_t)(g->ix_topk / g->ix_pool); /* DFly2's snapshot (small: always made) */
-  ok = ok && hy4_alloc(&s->dsel, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * top * 4) &&
-       hy4_alloc(&s->dn, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * 4) &&
-       hy4_alloc(&s->dhid, (uint64_t)HY4_DFLY_KEEP * g->n_embd * F);
+  ok = ok && hy4_alloc(&s->bufs, &s->dsel, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * top * 4) &&
+       hy4_alloc(&s->bufs, &s->dn, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * 4) &&
+       hy4_alloc(&s->bufs, &s->dhid, (uint64_t)HY4_DFLY_KEEP * g->n_embd * F);
   if (!ok)
     return hy4_seq_destroy(s), osmos_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
@@ -39,9 +39,7 @@ void hy4_seq_destroy(Hy4Seq *s)
 {
   if (!s)
     return;
-  for (int l = 0; l < HY4_MAX_LAYERS; l++)
-    hipFree(s->cache[l]), hipFree(s->keys[l]), hipFree(s->groups[l]);
-  hipFree(s->dsel), hipFree(s->dn), hipFree(s->dhid);
+  gpu_bufs_free(&s->bufs); /* every GPU buffer it made: from its record */
   free(s->tokens);
   free(s);
 }

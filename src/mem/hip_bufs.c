@@ -19,13 +19,13 @@ static bool room(GpuBufs *b)
   return true;
 }
 
-static bool one(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes, bool host)
+static bool one(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes, bool host, unsigned flags)
 {
   b->ledger = l;
   if (!room(b))
     return false;
   const size_t n = bytes ? (size_t)bytes : 1;
-  if ((host ? ledger_host_malloc(l, (void **)p, n, 0) : ledger_malloc(l, (void **)p, n)) != hipSuccess)
+  if ((host ? ledger_host_malloc(l, (void **)p, n, flags) : ledger_malloc(l, (void **)p, n)) != hipSuccess)
     return *(void **)p = NULL, false;
   b->slot[b->n++] = (GpuBuf){(void **)p, host};
   return true;
@@ -34,14 +34,27 @@ static bool one(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes, bool host)
 bool gpu_bufs_alloc(GpuBufs *b, OsmosLedger *l, const GpuWant *want, size_t n)
 {
   for (size_t i = 0; i < n; i++)
-    if (!one(b, l, want[i].p, want[i].bytes, false))
+    if (!one(b, l, want[i].p, want[i].bytes, false, 0))
       return false;
   return true;
 }
 
-bool gpu_bufs_one(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes) { return one(b, l, p, bytes, false); }
+bool gpu_bufs_one(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes) { return one(b, l, p, bytes, false, 0); }
 
-bool gpu_bufs_host(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes) { return one(b, l, p, bytes, true); }
+bool gpu_bufs_host(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes) { return one(b, l, p, bytes, true, 0); }
+
+bool gpu_bufs_mapped(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes)
+{
+  return one(b, l, p, bytes, true, hipHostMallocMapped | hipHostMallocCoherent);
+}
+
+bool gpu_bufs_adopt(GpuBufs *b, void *p)
+{
+  if (!room(b))
+    return false;
+  b->slot[b->n++] = (GpuBuf){(void **)p, false};
+  return true;
+}
 
 void gpu_bufs_free(GpuBufs *b)
 {

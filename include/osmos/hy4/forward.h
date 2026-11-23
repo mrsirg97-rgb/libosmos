@@ -33,6 +33,8 @@ typedef struct Hy4Options
   uint64_t budget;     /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
                           through the membrane past it; 0 sized to this machine as it stands (experts_fit_now: every
                           expert resident where there is room) */
+  struct OsmosLedger *ledger; /* the forward's, its sequences' and its drafter's every allocation counted in it
+                                 (osmos/mem/ledger.h: borrowed - the engine's, outliving the forward); NULL nothing */
 } Hy4Options;
 
 /* the weights to the GPU (every tensor but the Engram table, read from `fds`' files as the step needs its rows: the
