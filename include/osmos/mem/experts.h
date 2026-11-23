@@ -32,6 +32,7 @@ experts_stream_room
   its read ahead of the next), and never under a whole layer's (a layer's cold picks held at once).
 */
 #define EXPERTS_PASSES 8
+
 bool experts_plan(const PoolUnit *units, uint32_t layers, uint32_t experts, const uint32_t *order, uint64_t room,
                   uint64_t budget, uint64_t fixed, uint64_t grain, ExpertsPlan *p);
 uint64_t experts_stream_room(const PoolUnit *units, uint32_t layers, uint32_t experts, const bool *warm,

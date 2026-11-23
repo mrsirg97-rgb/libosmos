@@ -14,6 +14,7 @@
 #include "osmos/hy4/weights.h"
 #include "osmos/gpu/kept.h"
 #include "osmos/model/state_io.h"
+#include "osmos/run/fit.h"
 
 #define HY4_MAX_BACK 8                 /* the tokens a sequence can drop (a drafted round's) */
 #define HY4_IX_SPREAD "the indexer's spread scratch" /* its allocation's name (osmos_hip: the fault seam's too) */
@@ -32,8 +33,8 @@ typedef struct Hy4Options
                           the rope part F32 - 800 bytes a row against 2,304 (hy4_mla_row_bytes) */
   bool head_q8;        /* a BF16 head read as its Q8_0 copy (ggml's rounding, made at load): half its reads */
   uint64_t budget;     /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
-                          through the membrane past it; 0 sized to this machine as it stands (experts_fit_now: every
-                          expert resident where there is room) */
+                          through the membrane past it; 0 the least (a layer's experts); FIT_BUDGET_NOW this
+                          machine's room as it stands (experts_fit_now) - a test's, a bench's */
   struct OsmosLedger *ledger; /* the forward's, its sequences' and its drafter's every allocation counted in it
                                  (osmos/mem/ledger.h: borrowed - the engine's, outliving the forward); NULL nothing */
   const char *dfly; /* DFly2, the drafter (below), made with the forward: its safetensors' path, or NULL - 0.16.0:

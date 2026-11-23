@@ -33,6 +33,7 @@ static bool one(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes, bool host, 
   else if (hipMemset(*(void **)p, 0, n) != hipSuccess)
     return ledger_free(l, *(void **)p), *(void **)p = NULL, false;
   b->slot[b->n++] = (GpuBuf){(void **)p, host};
+  b->bytes += n;
   return true;
 }
 
@@ -71,5 +72,5 @@ void gpu_bufs_free(GpuBufs *b)
     *p = NULL;
   }
   free(b->slot);
-  b->slot = NULL, b->n = b->cap = 0;
+  b->slot = NULL, b->n = b->cap = 0, b->bytes = 0;
 }

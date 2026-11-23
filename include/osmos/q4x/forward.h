@@ -7,6 +7,7 @@
 
 #include "osmos/gpu/kept.h"
 #include "osmos/model/state_io.h"
+#include "osmos/run/fit.h"
 #include "osmos/q4x/weights.h"
 
 /* a sequence's states kept behind its latest: a rollback's reach - a drafter's most drafts a round (OSMOS_MAX_BLOCK,
@@ -37,8 +38,8 @@ typedef struct Q4xOptions
   uint32_t n_taps;           /* how many (Q4X_MAX_TAPS at most); 0: none */
   const Q4xDflash *dflash;   /* a DFlash2 drafter (q4x_dflash_*), its taps the step's; NULL: none */
   uint64_t budget;           /* the build's bytes, the routed experts' room what the rest leaves (experts_plan): streamed
-                                through the membrane past it; 0 sized to this machine as it stands (experts_fit_now:
-                                every expert resident where there is room) */
+                                through the membrane past it; 0 the least (a layer's experts); FIT_BUDGET_NOW this
+                                machine's room as it stands (experts_fit_now) - q4x_forward_create's */
   struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
                                  borrowed - the engine's, outliving the forward); NULL counts nothing */
   const char *npu; /* 0.7.0: the NPU beside the GPU (src/q4x/hip_npu.c), made with the forward: its kernels' directory

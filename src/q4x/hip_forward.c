@@ -132,7 +132,7 @@ static bool experts(Q4xForward *f, uint64_t budget, char *err)
   ExpertsPlan plan;
   Experts ex;
   char merr[OSMOS_ERR] = "";
-  if (ok && !experts_plan(units, L, E, warm, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
+  if (ok && !experts_plan(units, L, E, warm, 0, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
   if (ok && !experts_create(f->ledger, units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, host_copy, NULL, 0, true, &ex,
                             merr))
@@ -367,7 +367,7 @@ void q4x_forward_destroy(Q4xForward *f)
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[OSMOS_ERR])
 {
-  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL, 0, NULL, NULL, 0};
+  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL, FIT_BUDGET_NOW, NULL, NULL, 0}; /* (fit now) */
   return q4x_forward_create_with(w, mtp, &o, err);
 }
 
@@ -438,17 +438,19 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
       weights += more[k]->tensors[i].bytes;
   if (!room_left_past(f, f->exp_units ? weights - experts_bytes : weights, "the forward", err))
     return q4x_forward_destroy(f), NULL;
-  size_t free0 = 0, total0 = 0;
-  if (hipMemGetInfo(&free0, &total0) != hipSuccess || !upload(f->ledger, f, w->model, w->overlay, skip, &f->dev, err) ||
+  if (!upload(f->ledger, f, w->model, w->overlay, skip, &f->dev, err) ||
       (w->overlay && !upload(f->ledger, NULL, w->overlay, NULL, NULL, &f->ov_dev, err)) || !buffers(f, err) ||
       (f->stream_ngram && !ple_stream(f, err)) ||
       (mtp && (!upload(f->ledger, NULL, mtp->model, NULL, NULL, &f->mtp_dev, err) || !mtp_buffers(f, err))) ||
       (f->df && (!upload(f->ledger, NULL, f->df->model, NULL, NULL, &f->df_dev, err) || !q4x_df_buffers(f, err))))
     return q4x_forward_destroy(f), NULL;
-  size_t free1 = 0, total1 = 0; /* the fixed part: what the build took before its experts (experts_plan's) */
-  if (hipMemGetInfo(&free1, &total1) == hipSuccess)
-    f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
-  if (!experts(f, o->budget ? o->budget : experts_fit_now(f->ledger, f->fixed_bytes), err) || /* (0: this machine's room) */
+  /* the fixed part, counted (experts_plan's): the tables read, the records' buffers - 0.16.0: the GPU's free memory
+     read before and after, anything else's moving it */
+  f->fixed_bytes = gpu_table_bytes(w->model, f->dev, NULL) + gpu_table_bytes(w->overlay, f->ov_dev, NULL) +
+                   (mtp ? gpu_table_bytes(mtp->model, f->mtp_dev, NULL) : 0) +
+                   (f->df ? gpu_table_bytes(f->df->model, f->df_dev, NULL) + f->d.bufs.bytes : 0) + f->bufs.bytes;
+  const uint64_t budget = o->budget == FIT_BUDGET_NOW ? experts_fit_now(f->ledger, f->fixed_bytes) : o->budget;
+  if (!experts(f, budget, err) ||
       !room_left(f, "the forward", err) || (o->npu && !q4x_npu_make(f, o->npu, o->npu_share, err))) /* (whole) */
     return q4x_forward_destroy(f), NULL;
   return f;

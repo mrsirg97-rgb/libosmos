@@ -40,7 +40,7 @@ struct Run {
 };
 
 static Run run(const Q4xWeights* w, bool taps, bool with_probe, const std::vector<int32_t>& p, uint32_t vocab) {
-  const Q4xOptions o = {kCtx, kStep, false, taps ? kLayers : nullptr, taps ? 5u : 0u};
+  const Q4xOptions o = {kCtx, kStep, false, taps ? kLayers : nullptr, taps ? 5u : 0u, nullptr, FIT_BUDGET_NOW};
   char err[OSMOS_ERR] = "";
   Q4xForward* f = q4x_forward_create_with(w, nullptr, &o, err);
   if (!f) std::fprintf(stderr, "  create: %s\n", err);
@@ -69,7 +69,7 @@ static Run run(const Q4xWeights* w, bool taps, bool with_probe, const std::vecto
 }
 
 static bool refused(const Q4xWeights* w, const int32_t* layers, uint32_t n) {
-  const Q4xOptions o = {kCtx, kStep, false, layers, n};
+  const Q4xOptions o = {kCtx, kStep, false, layers, n, nullptr, FIT_BUDGET_NOW};
   char err[OSMOS_ERR] = "";
   Q4xForward* f = q4x_forward_create_with(w, nullptr, &o, err);
   if (f) q4x_forward_destroy(f);

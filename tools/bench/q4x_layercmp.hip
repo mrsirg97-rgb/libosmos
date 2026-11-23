@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
   Gguf* g = gguf_create(argv[1], gerr);
   Q4xWeights* w = g ? q4x_weights_create(g, nullptr, werr) : nullptr;
   if (!w) return std::fprintf(stderr, "q4x_layercmp: %s%s\n", gerr, werr), 1;
-  const Q4xOptions qo = {n, step, false, nullptr, 0, nullptr};
+  const Q4xOptions qo = {n, step, false, nullptr, 0, nullptr, FIT_BUDGET_NOW};
   Q4xForward* fw = q4x_forward_create_with(w, nullptr, &qo, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_layercmp: %s\n", ferr), 1;

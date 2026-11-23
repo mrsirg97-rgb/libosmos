@@ -51,14 +51,6 @@ void fwd_probe(const Forward *f, const char *step, int layer, int index, void *d
     f->probe(step, layer, index, dev, n, ints, f->probe_arg);
 }
 
-static uint64_t unit_bytes(const PoolUnit *u)
-{
-  uint64_t b = 0;
-  for (int k = 0; k < u->n_parts; k++)
-    b += (u->part[k].bytes + POOL_ALIGN - 1) / POOL_ALIGN * POOL_ALIGN;
-  return b;
-}
-
 /* the pool's units read O_DIRECT: each part's file its direct twin (the resident set keeps the buffered ones) */
 static bool direct_units(Forward *f, PoolUnit *all)
 {
@@ -75,88 +67,38 @@ static bool direct_units(Forward *f, PoolUnit *all)
   return true;
 }
 
-/* the largest unit as the pool lays it out (each part its read's aligned range, the slack of two grains at most): the
-   arena's margin for its memory in pieces is two of them (test_pool's arena room) */
-static uint64_t largest_unit(const Forward *f, const PoolUnit *all)
-{
-  uint64_t most = 0;
-  for (uint32_t u = 0; u < f->n_expert_units; u++)
-  {
-    uint64_t b = 0;
-    for (int k = 0; k < all[u].n_parts; k++)
-      b += (all[u].part[k].bytes + 2 * ARENA_GRAIN - 1) / ARENA_GRAIN * ARENA_GRAIN;
-    most = b > most ? b : most;
-  }
-  return most;
-}
-
-/* the resident set: every tensor the layers use but the routed experts, then experts while the budget lasts - expert
-   0 of each layer, then 1, ..: an equal share of each layer, so every layer's streaming is alike. rix: an
-   expert unit's place in the set, -1 for one the pool streams. the units past n_res are the experts chosen (units():
-   the membrane's warm start since 0.5.8 - rix its scratch, no expert resident) */
-typedef struct Layout
-{
-  uint64_t total, used, cap; /* the arenas' bytes; the last one's fill and size */
-} Layout;
-
-/* the GPU memory with a unit of `b` bytes added, laid out as resident_create lays it (a unit never spans arenas) */
-static uint64_t with(Layout a, uint64_t b)
-{
-  return a.used + b <= a.cap ? a.total : a.total + (b > RESIDENT_ARENA ? b : RESIDENT_ARENA);
-}
-
-static void add(Layout *a, uint64_t b)
-{
-  if (a->used + b > a->cap)
-    a->cap = b > RESIDENT_ARENA ? b : RESIDENT_ARENA, a->total += a->cap, a->used = 0;
-  a->used += b;
-}
-
-static const uint64_t *g_rank_picks; /* rank_cmp's: a layer's picks (qsort takes no context) */
-static int rank_cmp(const void *a, const void *b)
+static int rank_cmp(const void *a, const void *b, void *ctx) /* (qsort_r's: a layer's picks its context) */
 {
   const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
-  const uint64_t px = g_rank_picks[x], py = g_rank_picks[y];
+  const uint64_t *picks = ctx, px = picks[x], py = picks[y];
   return px != py ? (px < py) - (px > py) : (x > y) - (x < y); /* more picks first, then the lower id */
 }
 
 /* the resident experts: a rank at a time, each layer's expert of that rank while the budget holds it - by the
    picks counted on calibration text (forward_create_ranked's, most first), else by id. so each layer's share is
    about equal and its most-picked first */
-static size_t choose(Forward *f, int32_t *rix, const PoolUnit *ex, PoolUnit *res, size_t n_res, uint64_t budget,
-                     const uint64_t *picks, char *err)
+/* every expert unit, the most wanted first: rank by rank, a layer's at each (its most-picked first with picks: about
+   an equal share of each layer's), the shared plan's order (experts_plan) - NULL, out of memory */
+static uint32_t *expert_order(const Forward *f, const uint64_t *picks)
 {
-  const uint32_t E = (uint32_t)f->g->n_experts;
-  Layout a = {0, 0, 0};
-  for (size_t i = 0; i < n_res; i++)
-    add(&a, unit_bytes(&res[i]));
-  if (!budget)
-    budget = f->budget = a.total; /* 0: the dense weights alone (forward_budget says what they took) */
-  if (a.total > budget)
-    return osmos_fail(err, "the layers' weights are more than the budget"), 0;
-  uint32_t *order = malloc((size_t)f->n_layers * E * sizeof *order); /* [layer][rank]: the expert */
-  if (!order)
-    return osmos_fail(err, "out of memory"), 0;
-  for (int l = 0; l < f->n_layers; l++)
+  const uint32_t E = (uint32_t)f->g->n_experts, L = (uint32_t)f->n_layers;
+  uint32_t *rank = malloc((size_t)L * E * sizeof *rank), *order = malloc((size_t)L * E * sizeof *order);
+  if (!rank || !order)
+    return free(rank), free(order), NULL;
+  for (uint32_t l = 0; l < L; l++)
   {
-    uint32_t *o = order + (size_t)l * E;
+    uint32_t *o = rank + (size_t)l * E;
     for (uint32_t e = 0; e < E; e++)
       o[e] = e;
     if (picks)
-      g_rank_picks = picks + (size_t)l * E, qsort(o, E, sizeof *o, rank_cmp);
+      qsort_r(o, E, sizeof *o, rank_cmp, (void *)(picks + (size_t)l * E));
   }
-  size_t n = n_res;
-  for (uint32_t i = 0; i < f->n_expert_units; i++)
-    rix[i] = -1;
+  size_t n = 0;
   for (uint32_t r = 0; r < E; r++)
-    for (int l = 0; l < f->n_layers; l++)
-    {
-      const uint32_t i = (uint32_t)l * E + order[(size_t)l * E + r];
-      if (with(a, unit_bytes(&ex[i])) <= budget)
-        rix[i] = (int32_t)n, res[n++] = ex[i], add(&a, unit_bytes(&ex[i]));
-    }
-  free(order);
-  return n;
+    for (uint32_t l = 0; l < L; l++)
+      order[n++] = l * E + rank[(size_t)l * E + r];
+  free(rank);
+  return order;
 }
 
 /* a resident Q5_K matrix the matmuls read (all but the embedding's rows, which ops_embed reads a token at a time):
@@ -212,23 +154,24 @@ static bool copy_on_stream(void *dst, const void *src, uint64_t bytes, void *ctx
 
 /* the units: each layer's experts (the pool's, every one: the budget's read in first), then every other tensor the
    layers use - all of them resident (resident.h). Engram's tables are read a row at a time and are not units */
-static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
+/* the dense weights resident (every tensor the layers use but the routed experts and the Engram's own), and every
+   expert's unit - the experts' plan after the rest of the build (experts): a budget's one meaning, the whole build's */
+static bool dense(Forward *f, char *err)
 {
   const Weights *w = f->w;
   const uint32_t E = (uint32_t)f->g->n_experts;
   const size_t n_res_max = 3 + (size_t)f->n_layers * TENSORS_A_LAYER;
   f->n_expert_units = (uint32_t)f->n_layers * E;
   PoolUnit *all = calloc((size_t)w->geo.n_layers * E, sizeof *all);
-  PoolUnit *res = calloc(n_res_max + f->n_expert_units, sizeof *res);
+  PoolUnit *res = calloc(n_res_max, sizeof *res);
   const GgufTensor **t_res = calloc(n_res_max, sizeof *t_res);
   f->tdev = calloc(weights_tensors(w), sizeof *f->tdev);
   f->ttype = calloc(weights_tensors(w), sizeof *f->ttype);
-  int32_t *rix = calloc(f->n_expert_units, sizeof *rix);
-  bool ok = all && res && t_res && f->tdev && f->ttype && rix &&
+  bool ok = all && res && t_res && f->tdev && f->ttype &&
             weights_experts(w, f->fds, all, (size_t)w->geo.n_layers * E) == (size_t)w->geo.n_layers * E;
   if (!ok)
   {
-    free(all), free(res), free(t_res), free(rix);
+    free(all), free(res), free(t_res);
     return osmos_fail(err, "out of memory, or the experts' units");
   }
   size_t n_t = 0;
@@ -249,51 +192,10 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     if (repacks(w, t_res[i], &rows, &cols)) /* the room the repacked layout needs past the file's bytes */
       res[i].part[1] = (PoolRange){-1, 0, QUANT_Q5_KR_BYTES(rows, cols) - t_res[i]->bytes}, res[i].n_parts = 2;
   }
-  /* the budget's experts (choose's) the pool's first: the pool holds every expert - its room theirs and the stream's
-     (DESIGN.md, "0.5.8: the membrane"); the resident set the dense weights alone */
-  const size_t n_res = choose(f, rix, all, res, n_t, budget, picks, err);
-  const size_t n_warm = n_res > n_t ? n_res - n_t : 0;
-  uint32_t *warm = n_warm ? malloc(n_warm * sizeof *warm) : NULL;
   char perr[OSMOS_ERR] = "";
-  if (!n_res || (n_warm && !warm))
-    ok = n_res ? osmos_fail(err, "out of memory") : false;
-  /* the stream's room (experts_stream_room: two layers' experts not warm at load, never under a whole layer's - the
-     membrane's room is shared by every layer, so decode misses evict another layer's stale units and a prompt step
-     holds every cold pick of a layer in the stream at once) */
-  ExpertsPlan plan = {0};
-  if (ok)
-  {
-    bool *hot = calloc(f->n_expert_units, 1);
-    ok = hot != NULL;
-    for (uint32_t i = 0; ok && i < f->n_expert_units; i++)
-    {
-      const uint64_t b = pool_unit_bytes(&all[i], ARENA_GRAIN);
-      plan.all += b;
-      if ((hot[i] = rix[i] >= 0))
-        warm[(size_t)rix[i] - n_t] = i, plan.room += b;
-    }
-    if (ok) /* (the slots' slack the pool's own layout's largest: each part's read range and two grains) */
-      plan.stream_room = experts_stream_room(all, (uint32_t)f->n_layers, E, hot, ARENA_GRAIN), plan.n_warm = n_warm,
-      plan.largest = largest_unit(f, all);
-    free(hot);
-    f->pool_room = plan.room;
-  }
-  free(rix);
-  if (!ok)
-    ;
-  else if (!(f->gpu_slots = hip_slots_create(f->ledger, perr)) ||
-           !(f->res = resident_create(res, n_t, hip_slots(f->gpu_slots), FWD_FETCH_THREADS, perr)))
+  if (!(f->gpu_slots = hip_slots_create(f->ledger, perr)) ||
+      !(f->res = resident_create(res, n_t, hip_slots(f->gpu_slots), FWD_FETCH_THREADS, perr)))
     ok = osmos_fail(err, "%s", perr);
-  else if (!direct_units(f, all) || !f->pool_room)
-    ok = osmos_fail(err, "out of memory (the pools' units), or a budget with no experts");
-  else /* the budget's experts its warm start: read at the first step (membrane_warm), not here - fit.h's builds */
-  {
-    Experts ex;
-    ok = experts_create(f->ledger, all, (uint32_t)f->n_layers, E, warm, &plan, ARENA_GRAIN, FWD_FETCH_THREADS, copy_on_stream,
-                        NULL, f->ahead_limit, false, &ex, err);
-    f->mem = ex.mem, f->hs = ex.slots, f->hs_stream = ex.stream;
-  }
-  free(warm);
   for (size_t i = 0; ok && i < n_t; i++)
   {
     const void *dev[POOL_PARTS];
@@ -302,7 +204,38 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   }
   ok = ok && (repack_all(f, t_res, n_t) || osmos_fail(err, "the Q5_K matrices' repack failed"));
   free(res), free(t_res);
-  f->units = all; /* the CPU lane's parts and a promotion's copy */
+  f->units = all; /* the CPU lane's parts, a promotion's copy, the experts' plan */
+  return ok;
+}
+
+/* what the forward has built so far (its records' bytes, the resident set's, the drafter's): the plan's fixed part,
+   counted - not a reading of the GPU's free memory (others' work moves that) */
+static uint64_t built(const Forward *f) { return f->bufs.bytes + resident_bytes(f->res) + fwd_drafter_bytes(f->drafter); }
+
+/* the experts through the membrane (osmos/mem/experts.h): the shared plan, the whole build's budget - the experts'
+   room what the rest leaves (the build so far, the stream, the slack; budget 0 the least: a layer's) - their warm
+   start read at the first step (membrane_warm), not here: fit.h's builds */
+static bool experts(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
+{
+  const uint32_t E = (uint32_t)f->g->n_experts;
+  uint32_t *order = expert_order(f, picks);
+  ExpertsPlan plan = {0};
+  const uint64_t fixed = built(f);
+  bool ok = order || osmos_fail(err, "out of memory (the experts' order)");
+  ok = ok && (experts_plan(f->units, (uint32_t)f->n_layers, E, order, 0, budget, fixed, ARENA_GRAIN, &plan) ||
+              osmos_fail(err, "the experts' plan (their units, or their order)"));
+  ok = ok && (direct_units(f, f->units) || osmos_fail(err, "out of memory (the pools' units)"));
+  if (ok)
+  {
+    Experts ex;
+    f->pool_room = plan.room;
+    ok = experts_create(f->ledger, f->units, (uint32_t)f->n_layers, E, order, &plan, ARENA_GRAIN, FWD_FETCH_THREADS,
+                        copy_on_stream, NULL, f->ahead_limit, false, &ex, err);
+    f->mem = ex.mem, f->hs = ex.slots, f->hs_stream = ex.stream;
+  }
+  free(order);
+  if (ok) /* (forward_budget: the whole build's bytes, as made - the fixed part and the experts' host slots) */
+    f->budget = fixed + host_slots_bytes(f->hs) + host_slots_bytes(f->hs_stream);
   return ok;
 }
 
@@ -620,18 +553,20 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   else if (!(f->eg_read = rowread_create(FWD_ROW_THREADS)))
     ok = osmos_fail(err, "Engram's readers could not start");
   const size_t nu = (size_t)n_layers * w->geo.n_experts;
-  ok = ok && units(f, budget, picks, err) && oa_tables(f, err) &&
+  ok = ok && dense(f, err) && oa_tables(f, err) &&
        ((f->picks = calloc(nu, sizeof *f->picks)) ||
         osmos_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
     ok = osmos_fail(err, "a GPU allocation refused");
-  /* made whole: the lane, the NPU, the drafter (ForwardOptions'; 0.16.0: attached after, by their own calls) */
-  ok = ok && fwd_lane_make(f, o->cpu_threads, o->cpu_cores, err) && (!o->npu || fwd_npu_make(f, o->npu, o->npu_share, err));
+  /* made whole (ForwardOptions'; 0.16.0: attached after, by their own calls): the lane and the drafter, then the
+     experts in what the whole build's budget leaves past them, then the NPU (it maps the experts' host slots) */
+  ok = ok && fwd_lane_make(f, o->cpu_threads, o->cpu_cores, err);
   if (ok)
     f->lane = o->lane;
   if (ok && dix)
     ok = (f->drafter = fwd_drafter_make(f, dix, err)) != NULL, dix = NULL; /* (the drafter's: freed with it) */
   dspark_index_destroy(dix);
+  ok = ok && experts(f, budget, picks, err) && (!o->npu || fwd_npu_make(f, o->npu, o->npu_share, err));
   if (!ok)
   {
     forward_destroy(f);

@@ -204,6 +204,8 @@ static bool matrix(struct Hy4Dfly *d, const GgufTensor *t, void *pin, const void
   return true;
 }
 
+uint64_t hy4_dfly_bytes(const Hy4Forward *f) { return f && f->dfly ? f->dfly->bufs.bytes : 0; }
+
 void hy4_dfly_free(Hy4Forward *f)
 {
   struct Hy4Dfly *d = f ? f->dfly : NULL;

@@ -25,6 +25,8 @@ bool gpu_upload_table(OsmosLedger *l, const Gguf *g, uint64_t piece, gpu_upload_
                       char *err);
 /* a table's tensors freed (a shared one - shared[i], NULL none - left: its bytes another buffer's), then the table */
 void gpu_free_table(OsmosLedger *l, const Gguf *g, void **dev, const bool *shared);
+/* the bytes a table holds (each tensor read, a shared one - shared[i] - not its): a build's count of its upload */
+uint64_t gpu_table_bytes(const Gguf *g, void *const *dev, const bool *shared);
 
 /* a head's Q8_0 copy: V rows of D values (type, row_bytes apart on the device) dequantized and quantized again by
    ggml's Q8_0 (q4x_kv_put: blocks of 32, d = amax / 127) 4,096 rows at a time, into a new allocation *out - Qwen3.5's

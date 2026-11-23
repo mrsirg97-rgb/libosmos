@@ -53,6 +53,15 @@ bool gpu_upload_table(OsmosLedger *l, const Gguf *g, uint64_t piece, gpu_upload_
   return ok;
 }
 
+uint64_t gpu_table_bytes(const Gguf *g, void *const *dev, const bool *shared)
+{
+  uint64_t n = 0;
+  for (size_t i = 0; g && dev && i < g->n_tensors; i++)
+    if (dev[i] && (!shared || !shared[i]))
+      n += g->tensors[i].bytes ? g->tensors[i].bytes : 1; /* (gpu_read_tensor's: a 0-byte tensor one byte) */
+  return n;
+}
+
 void gpu_free_table(OsmosLedger *l, const Gguf *g, void **dev, const bool *shared)
 {
   for (size_t i = 0; dev && i < g->n_tensors; i++)

@@ -12,6 +12,10 @@
                                      operator's rule - on this APU the GPU's memory is the system's, and one box runs
                                      the model beside an editor, a browser, language servers and the agent harness */
 
+/* a family's budget asking for as many experts as this machine holds now (experts_fit_now): its own tests' and
+   benches' - a build's budget otherwise the whole build's bytes, 0 the least (a layer's experts) - one meaning every
+   family's (0.16.0: 0 was "fit now" to Qwen and Hy4, the smallest to Inkling, the dense weights alone to DeepSeek) */
+#define FIT_BUDGET_NOW UINT64_MAX
 #define FIT_SLACK (1ull << 28) /* room past the headroom a sizing stops at: 256 MiB, a few experts' units */
 #define FIT_CHUNK (1ull << 30) /* the room's steps: memory taken ~0.93 GiB at once on this box (DESIGN.md, 0.16.0's
                                   flat) - a build on a flat short of the headroom stepped below it by one */

@@ -431,9 +431,6 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
       return osmos_fail(err, "an expert tensor of a type or shape mm has no kernel for"),
              ink2_forward_destroy(f), NULL;
   }
-  size_t free0 = 0, free1 = 0, total = 0;
-  if (hipMemGetInfo(&free0, &total) != hipSuccess)
-    return osmos_fail(err, "the GPU's free memory not read"), ink2_forward_destroy(f), NULL;
   if (!upload(f))
     return osmos_fail(err, "a dense tensor not read or uploaded (GPU memory, or its file)"),
            ink2_forward_destroy(f), NULL;
@@ -444,9 +441,8 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
     return ink2_forward_destroy(f), NULL;
   if (!(f->picks = calloc((size_t)w->geo.n_layers * w->geo.n_experts, sizeof *f->picks)))
     return osmos_fail(err, "out of memory"), ink2_forward_destroy(f), NULL;
-  if (hipMemGetInfo(&free1, &total) != hipSuccess)
-    return osmos_fail(err, "the GPU's free memory not read"), ink2_forward_destroy(f), NULL;
-  f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : f->dense_bytes;
+  f->fixed_bytes = f->bufs.bytes; /* the fixed part, counted: its record (the dense weights, the buffers, the drafter -
+                                     0.16.0: the GPU's free memory read before and after, anything else's moving it) */
   if (!experts(f, o->room, o->budget, o->picks, err) || !whole_tables(f, err))
     return ink2_forward_destroy(f), NULL;
   return f;

@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
   const Hy4Options o = {S, P + D + 2 * HY4_DFLY_DRAFTS + HY4_MAX_BACK,
                         nll_mode ? S : dfly ? (uint32_t) HY4_DFLY_DRAFTS + 1 : 1u,
                        getenv("KV_F32") != nullptr, getenv("HEAD_Q8") != nullptr,
-                       getenv("BUDGET") ? (uint64_t) (atof(getenv("BUDGET")) * (1ull << 30)) : 0,  // (KV_F32: the reference's F32 cache; else the engine's Q8_0)
+                       getenv("BUDGET") ? (uint64_t) (atof(getenv("BUDGET")) * (1ull << 30)) : FIT_BUDGET_NOW,  // (KV_F32: the reference's F32 cache; else the engine's Q8_0)
                        nullptr, dfly, !getenv("DFLY_BF16")};  // (DFly2 made with the forward)
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::fprintf(stderr, "%s\n", err);

@@ -198,7 +198,7 @@ int main() {
   Q4xDflash* df = q4x_dflash_create(draft, w, werr);
   CHECK(df);
   const int32_t wrong[5] = {5, 15, 25, 35, 44};
-  Q4xOptions o = {kCtx, kStep, false, wrong, 5, df};
+  Q4xOptions o = {kCtx, kStep, false, wrong, 5, df, FIT_BUDGET_NOW};
   osmos_clear(err);
   CHECK(!q4x_forward_create_with(w, nullptr, &o, err) && std::strstr(err, "tap "));  // taps not the drafter's
   o.tap_layers = nullptr, o.n_taps = 0;
@@ -292,7 +292,7 @@ int main() {
   // positions dropped must not stand in for the window's oldest (a ring of the window alone aliased them: up to 6 stale
   // keys read as context). A: W + 100 seeded, 8 more seeded, rolled back, 1 seeded; B: the same W + 101 straight
   const uint32_t W = (uint32_t) df->geo.window, kBig = 2 * W;
-  Q4xOptions ob = {kBig, 512, false, nullptr, 0, df};
+  Q4xOptions ob = {kBig, 512, false, nullptr, 0, df, FIT_BUDGET_NOW};
   osmos_clear(err);
   Q4xForward* g = q4x_forward_create_with(w, nullptr, &ob, err);
   CHECK(g);

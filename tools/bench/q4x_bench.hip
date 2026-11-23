@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
   if (ctx < run) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_CTX below the run's %u\n", run), 2;
   // 0.7.0: the NPU beside the GPU, made with the forward: NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
   const float npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN;
-  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr, nullptr, 0, df, 0, nullptr, std::getenv("NPU"), npu_share};
+  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr, nullptr, 0, df, FIT_BUDGET_NOW, nullptr, std::getenv("NPU"), npu_share};
   Q4xForward* fw = q4x_forward_create_with(w, mtp, &qo, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;

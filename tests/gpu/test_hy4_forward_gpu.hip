@@ -206,7 +206,8 @@ int main() {
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
   const bool kv8 = getenv("OSMOS_TEST_HY4_KV8") != nullptr;  // (the engine's Q8_0 cache; default F32: strict)
-  const Hy4Options o = {T, T + HY4_MAX_BACK, last, !kv8};
+  Hy4Options o = {T, T + HY4_MAX_BACK, last, !kv8};
+  o.budget = FIT_BUDGET_NOW;
   osmos_clear(err);
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::printf("  refused: %s\n", err);

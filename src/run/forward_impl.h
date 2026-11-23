@@ -334,6 +334,7 @@ bool fwd_npu_make(Forward *f, const char *dir, float share, char *err);
 bool fwd_drafter_plan(const Forward *f, const char *dir, DsparkIndex **ix, bool *at, char *err);
 struct Drafter *fwd_drafter_make(Forward *f, DsparkIndex *ix, char *err);
 void fwd_drafter_destroy(struct Drafter *d);
+uint64_t fwd_drafter_bytes(const struct Drafter *d); /* what it holds (its buffers, its resident weights): 0 for none */
 
 bool fwd_attention(Forward *f, int l, char *err);
 /* a weight's product over n tokens (token t's x at x + t * xs, its y at y + t * ys; n up to FWD_MAX_STEP): mm for

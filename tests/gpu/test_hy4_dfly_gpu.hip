@@ -75,6 +75,7 @@ int main() {
   CHECK(kPrompt > 0 && fid.size() >= kPrompt);
   const bool q8 = getenv("OSMOS_TEST_DFLY_Q8") != nullptr;  // (the engine's: Q8_0; the reference's check strict in BF16)
   Hy4Options o = {kPrompt, kPrompt + kGen + 64, HY4_DFLY_DRAFTS + 1, getenv("OSMOS_TEST_HY4_KV8") == nullptr};
+  o.budget = FIT_BUDGET_NOW;
   o.dfly = dfly.c_str(), o.dfly_q8 = q8; /* (DFly2 made with the forward) */
   osmos_clear(err);
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);

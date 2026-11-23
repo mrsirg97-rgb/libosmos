@@ -95,7 +95,7 @@ static bool experts(Hy4Forward *f, uint64_t budget, char *err)
     order[u] = (uint32_t)((u % ML) * E + u / ML);
   ExpertsPlan plan;
   char merr[OSMOS_ERR] = "";
-  ok = ok && (experts_plan(units, ML, E, order, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan) ||
+  ok = ok && (experts_plan(units, ML, E, order, 0, budget, f->fixed_bytes, ARENA_GRAIN, &plan) ||
               osmos_fail(err, "the experts' plan refused"));
   ok = ok && (experts_create(f->ledger, units, ML, E, order, &plan, ARENA_GRAIN, HY4_EXPERT_READERS, copy_host, NULL, 0, true,
                              &f->ex, merr) ||
@@ -319,9 +319,6 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
     return osmos_fail(err, "no weights, files or options, or a step past the context"), NULL;
   if (w->geo.engram_ngram - 1 > HY4_STATE_HISTORY)
     return osmos_fail(err, "an n-gram longer than a saved state's history keeps"), NULL;
-  size_t free0 = 0, total0 = 0;
-  if (hipMemGetInfo(&free0, &total0) != hipSuccess)
-    return osmos_fail(err, "the GPU's free memory not read"), NULL;
   Hy4Forward *f = calloc(1, sizeof *f);
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
@@ -427,14 +424,14 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
        (f->h_by = malloc(n * K * 4)) &&
        (f->h_w = malloc(n * K * F)) &&
        (f->h_wsel = malloc(n * K * F)) && hipDeviceSynchronize() == hipSuccess;
-  size_t free1 = 0, total1 = 0;
-  if (ok && hipMemGetInfo(&free1, &total1) == hipSuccess) /* the fixed part: what the build took before its experts */
-    f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
-  ok = ok && experts(f, o->budget ? o->budget : experts_fit_now(f->ledger, f->fixed_bytes), err); /* (0: this machine's room) */
+  ok = ok && (!o->dfly || hy4_dfly_load(f, o->dfly, o->dfly_q8, err)); /* (whole: its drafter part of the build) */
+  /* the fixed part, counted (experts_plan's): the table read, the records' buffers, DFly2's - 0.16.0: the GPU's free
+     memory read before and after, anything else's moving it (DFly2 loaded after the experts: outside the budget) */
+  if (ok)
+    f->fixed_bytes = gpu_table_bytes(w->model, f->dev, f->in_joint) + f->bufs.bytes + hy4_dfly_bytes(f);
+  ok = ok && experts(f, o->budget == FIT_BUDGET_NOW ? experts_fit_now(f->ledger, f->fixed_bytes) : o->budget, err);
   if (!ok)
     return hy4_forward_destroy(f), (err && !*err ? osmos_fail(err, "the forward not made") : false), NULL;
-  if (o->dfly && !hy4_dfly_load(f, o->dfly, o->dfly_q8, err)) /* (whole: its drafter made with it) */
-    return hy4_forward_destroy(f), NULL;
   return f;
 }
 

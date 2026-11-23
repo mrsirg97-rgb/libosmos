@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
   /* Q4X_PPL_STREAM: the n-gram table read from its file (stream_ngram: the same bits; UD-Q4_K_XL's 28.8 GB left out) */
   // 0.7.0: the NPU beside the GPU, made with the forward: NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
   const float npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN;
-  const Q4xOptions qo = {ctx, step, getenv("Q4X_PPL_STREAM") != nullptr, nullptr, 0, nullptr, 0, nullptr, std::getenv("NPU"), npu_share};
+  const Q4xOptions qo = {ctx, step, getenv("Q4X_PPL_STREAM") != nullptr, nullptr, 0, nullptr, FIT_BUDGET_NOW, nullptr, std::getenv("NPU"), npu_share};
   Q4xForward* fw = q4x_forward_create_with(w, nullptr, &qo, ferr);
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_ppl: %s\n", ferr), 1;

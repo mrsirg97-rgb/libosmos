@@ -42,12 +42,9 @@ bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t m
       {&d->val, B * k * F},    {&d->idx, B * k * 4},    {&d->top_p, B * F},        {&d->path, B * 4},
       {&d->top_id, B * 4},     {&d->tok, B * 4},        {&d->iota, iota * 4},
   };
-  bool ok = gpu_bufs_alloc(&d->bufs, l, want, sizeof want / sizeof *want) &&
-            ledger_host_malloc(l, (void **)&d->pin_tok, B * 4, 0) == hipSuccess &&
-            ledger_host_malloc(l, (void **)&d->pin_path, B * 4, 0) == hipSuccess &&
-            ledger_host_malloc(l, (void **)&d->pin_idx, B * k * 4, 0) == hipSuccess &&
-            ledger_host_malloc(l, (void **)&d->pin_val, B * k * F, 0) == hipSuccess &&
-            ledger_host_malloc(l, (void **)&d->pin_p, B * F, 0) == hipSuccess;
+  bool ok = gpu_bufs_alloc(&d->bufs, l, want, sizeof want / sizeof *want) && gpu_bufs_host(&d->bufs, l, &d->pin_tok, B * 4) &&
+            gpu_bufs_host(&d->bufs, l, &d->pin_path, B * 4) && gpu_bufs_host(&d->bufs, l, &d->pin_idx, B * k * 4) &&
+            gpu_bufs_host(&d->bufs, l, &d->pin_val, B * k * F) && gpu_bufs_host(&d->bufs, l, &d->pin_p, B * F);
   int32_t *h = ok ? malloc(iota * 4) : NULL;
   for (uint64_t i = 0; h && i < iota; i++)
     h[i] = (int32_t)i;
@@ -61,12 +58,7 @@ bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t m
 
 void df_buffers_free(DfBuf *d)
 {
-  OsmosLedger *l = d->bufs.ledger;
-  gpu_bufs_free(&d->bufs);
-  void *pin[] = {d->pin_tok, d->pin_path, d->pin_idx, d->pin_val, d->pin_p};
-  for (size_t i = 0; i < sizeof pin / sizeof *pin; i++)
-    if (pin[i])
-      ledger_host_free(l, pin[i]);
+  gpu_bufs_free(&d->bufs); /* (its device and pinned buffers alike: the record's) */
   memset(d, 0, sizeof *d);
 }
 

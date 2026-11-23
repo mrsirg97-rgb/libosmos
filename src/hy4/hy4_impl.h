@@ -173,6 +173,7 @@ bool hy4_mat_raw(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uin
 bool hy4_q8_up(GpuBufs *b, const float *x, uint64_t rows, uint32_t cols, void **dev);
 /* DFly2's weights and buffers freed (hip_hy4_dfly.c; none loaded: nothing) */
 void hy4_dfly_free(Hy4Forward *f);
+uint64_t hy4_dfly_bytes(const Hy4Forward *f); /* what DFly2 holds (its record): 0 none */
 bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]); /* Hy4Options' dfly: create's */
 
 /* the latent MoE (hip_hy4_moe.c): the router, the experts (the matvecs, or read: the matrix cores), the shared

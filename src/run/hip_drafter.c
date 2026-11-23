@@ -229,6 +229,8 @@ Drafter *fwd_drafter_make(Forward *f, DsparkIndex *ix, char *err)
   return d;
 }
 
+uint64_t fwd_drafter_bytes(const Drafter *d) { return d ? d->bufs.bytes + resident_bytes(d->res) : 0; }
+
 void fwd_drafter_destroy(Drafter *d)
 {
   if (!d)

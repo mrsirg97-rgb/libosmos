@@ -32,6 +32,7 @@ typedef struct GpuBufs
 {
   GpuBuf *slot; /* the record, grown as it fills */
   uint32_t n, cap;
+  uint64_t bytes; /* the bytes it holds (pads included): a build's own count of what it made */
   OsmosLedger *ledger; /* what they were taken from (borrowed: the build's; every call on one GpuBufs the same) */
 } GpuBufs;
 
