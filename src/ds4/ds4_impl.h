@@ -380,4 +380,15 @@ bool fwd_cpu_parts(const Forward *f, uint32_t unit, const void *part[POOL_PARTS]
 bool fwd_cpu_submit(Forward *f, int l, uint32_t picks, uint32_t nc, const int32_t *tok, const int32_t *pair,
                     char *err);
 
+
+/* hip_ds4_resident.c's, for hip_ds4_make.c (one file before 0.16.0): the dense part, the experts' pool, the tables, Engram, the gates and the guess's routers made resident; the build's bytes so far */
+bool fwd_dense(Forward *f, char *err);
+int fwd_engram_fd(const Forward *f, const Weights *w);
+size_t fwd_engram_layers(const Weights *w, int n_layers);
+bool fwd_experts(Forward *f, uint64_t budget, const uint64_t *picks, char *err);
+bool fwd_gates(Forward *f, const Weights *w, char *err);
+bool fwd_guess_routers(Forward *f, const Weights *w, char *err);
+bool fwd_oa_tables(Forward *f, char *err);
+/* hip_ds4_make.c's, for the experts' pool (hip_ds4_resident.c): the step buffers' sub-views, made again */
+bool fwd_subs(Forward *f);
 #endif
