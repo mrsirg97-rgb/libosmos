@@ -40,7 +40,7 @@ double now_us() {
   return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-void say(char* err, const char* what, const char* why) { std::snprintf(err, NPU_ERR, "npu: %s%s%s", what, why ? ": " : "", why ? why : ""); }
+void say(char* err, const char* what, const char* why) { std::snprintf(err, OSMOS_ERR, "npu: %s%s%s", what, why ? ": " : "", why ? why : ""); }
 
 }  // namespace
 
@@ -87,7 +87,7 @@ static const struct {
     // Qwen's (its own shapes: a pack's npu/ names one model's set): IQ3_XXS 18, IQ2_S 22 gate + up, IQ4_NL 20 down
     {"iq3xxs", NPU_GATE_UP, 18},      {"iq2s", NPU_GATE_UP, 22},      {"iq4nl-down", NPU_DOWN, 20}};
 
-extern "C" Npu* npu_open(const char* dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[NPU_ERR]) {
+extern "C" Npu* npu_open(const char* dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[OSMOS_ERR]) {
   Npu* n = nullptr;
   try {
     n = new Npu();
@@ -141,7 +141,7 @@ extern "C" void npu_close(Npu* n) {
   delete n;
 }
 
-extern "C" bool npu_device(Npu* n, void* dev, uint64_t bytes, char err[NPU_ERR]) {
+extern "C" bool npu_device(Npu* n, void* dev, uint64_t bytes, char err[OSMOS_ERR]) {
   Dma o;
   uint64_t off = 0;
   if (hsa_amd_portable_export_dmabuf(dev, bytes, &o.fd, &off) != HSA_STATUS_SUCCESS || off)
@@ -156,7 +156,7 @@ extern "C" bool npu_device(Npu* n, void* dev, uint64_t bytes, char err[NPU_ERR])
   return true;
 }
 
-extern "C" bool npu_region(Npu* n, void* base, uint64_t bytes, char err[NPU_ERR]) {
+extern "C" bool npu_region(Npu* n, void* base, uint64_t bytes, char err[OSMOS_ERR]) {
   try {
     n->regions.push_back({(const uint8_t*) base, bytes, xrt::bo(n->dev, base, bytes, xrt::bo::flags::host_only, n->kern[0].k.group_id(3))});
     return true;
@@ -187,7 +187,7 @@ static bool view(Npu* n, const void* w, uint64_t bytes, xrt::bo& out) {
 }
 
 extern "C" bool npu_run(Npu* n, NpuKind kind, uint32_t qtype, uint32_t parts, const void* const* w0,
-                        const void* const* w1, uint64_t w_bytes, void* const* c0, void* const* c1, char err[NPU_ERR]) {
+                        const void* const* w1, uint64_t w_bytes, void* const* c0, void* const* c1, char err[OSMOS_ERR]) {
   if (parts > n->max_parts) return say(err, "more parts than its buffers", nullptr), false;
   Kern* kn = kern(n, kind, qtype);
   if (!kn) return say(err, "no kernel for the kind and format", nullptr), false;

@@ -36,7 +36,7 @@ static uint64_t next(uint64_t built, uint64_t room, uint64_t target, double cost
   return step >= 0 ? built + (uint64_t)step : (-step < (double)built ? built - (uint64_t)-step : 0);
 }
 
-bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget, char err[FIT_ERR])
+bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget, char err[OSMOS_ERR])
 {
   const uint64_t target = headroom + FIT_SLACK / 2; /* the window's middle: a step's error either side stays in it */
   uint64_t built = 0, room = 0;

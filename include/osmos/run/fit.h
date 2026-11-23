@@ -1,6 +1,7 @@
 #ifndef OSMOS_RUN_FIT_H
 #define OSMOS_RUN_FIT_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -15,18 +16,17 @@
 #define FIT_FIRST_COST 1.125 /* fit_sized's first step's cost a byte of budget: past the units' padding seen (6-12%) */
 #define FIT_BUILDS 6           /* builds at most past the dense one's first (and one more to keep the largest that
                                   left the headroom): a sizing took 3-6 on this box */
-#define FIT_ERR 256
 
 /* one whole build at a budget (0: the dense weights alone): what it took (forward_budget) and the room it left
    (forward_room); false with why in err */
-typedef bool (*FitBuild)(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, char err[FIT_ERR]);
+typedef bool (*FitBuild)(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, char err[OSMOS_ERR]);
 typedef void (*FitUnbuild)(void *ctx);
 
 uint64_t fit_budget(uint64_t built, uint64_t free_after, uint64_t headroom);
 uint64_t fit_room(uint64_t gpu_free, uint64_t ram_available, uint64_t ram_kept);
 uint64_t fit_ram_available(void);
 bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget,
-               char err[FIT_ERR]);
+               char err[OSMOS_ERR]);
 
 #endif
 

@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "osmos/serve/slots.h"
+#include "osmos/err.h"
 
 /* the kept conversations (slots.h): an array of entries, each in RAM (its state) or in the folder (its files), every
    one's tokens in memory for the prefix match. a few dozen at most: linear scans */
@@ -48,12 +49,7 @@ static uint64_t fnv(const void *p, uint64_t n, uint64_t h)
   return h;
 }
 
-static bool fail(char *err, const char *why)
-{
-  if (err)
-    snprintf(err, SLOTS_ERR, "slots: %s", why);
-  return false;
-}
+static bool fail(char *err, const char *why) { return osmos_fail(err, "slots: %s", why); }
 
 static uint64_t now_ns(void)
 {
@@ -347,7 +343,7 @@ static bool index_dir(Slots *s, char *err)
   return true;
 }
 
-Slots *slots_create(const SlotsOptions *o, char err[SLOTS_ERR])
+Slots *slots_create(const SlotsOptions *o, char err[OSMOS_ERR])
 {
   if (!o || !o->cap)
     return fail(err, "no options, or a cap of 0"), NULL;
@@ -385,7 +381,7 @@ static bool same(const Entry *e, const int32_t *t, uint32_t n)
 bool slots_keeps(const Slots *s, uint32_t n) { return s && n >= s->o.min_tokens; }
 
 bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_t bytes, bool *kept,
-               char err[SLOTS_ERR])
+               char err[OSMOS_ERR])
 {
   if (kept)
     *kept = false;
@@ -482,7 +478,7 @@ static bool mem_source(void *ctx, void *bytes, uint64_t n)
 }
 
 bool slots_put_stream(Slots *s, const int32_t *tokens, uint32_t n, uint64_t bytes, SlotsSave save, void *ctx,
-                      bool *kept, char err[SLOTS_ERR])
+                      bool *kept, char err[OSMOS_ERR])
 {
   if (kept)
     *kept = false;
@@ -527,7 +523,7 @@ bool slots_put_stream(Slots *s, const int32_t *tokens, uint32_t n, uint64_t byte
   return true;
 }
 
-bool slots_take_stream(Slots *s, int64_t id, SlotsLoad load, void *ctx, char err[SLOTS_ERR])
+bool slots_take_stream(Slots *s, int64_t id, SlotsLoad load, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || id < 0 || (uint64_t)id >= s->n || !load)
     return fail(err, "no such conversation, or no load");
@@ -552,7 +548,7 @@ bool slots_take_stream(Slots *s, int64_t id, SlotsLoad load, void *ctx, char err
   return ok || fail(err, "a kept conversation's state could not be taken back");
 }
 
-bool slots_flush(Slots *s, char err[SLOTS_ERR])
+bool slots_flush(Slots *s, char err[OSMOS_ERR])
 {
   if (!s || !s->dir)
     return fail(err, "no folder");
@@ -574,7 +570,7 @@ bool slots_flush(Slots *s, char err[SLOTS_ERR])
   return true;
 }
 
-bool slots_room(Slots *s, uint64_t bytes, char err[SLOTS_ERR])
+bool slots_room(Slots *s, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || bytes > s->o.ram_bytes)
     return fail(err, "a state larger than RAM's room for kept conversations");

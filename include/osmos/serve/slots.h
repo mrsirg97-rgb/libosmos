@@ -1,12 +1,12 @@
 #ifndef SLOTS_H
 #define SLOTS_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/model/state_io.h"
 
-#define SLOTS_ERR 256
 #define SLOTS_META_MAGIC 0x31544f4c53425553ull /* "SUBSLOT1" (little-endian): a .meta's first bytes */
 
 typedef struct Slots Slots;
@@ -23,16 +23,16 @@ typedef struct SlotsOptions
   uint64_t identity;   /* the model and build a state is for (forward_identity): another's is removed at start */
 } SlotsOptions;
 
-Slots *slots_create(const SlotsOptions *o, char err[SLOTS_ERR]);
+Slots *slots_create(const SlotsOptions *o, char err[OSMOS_ERR]);
 void slots_destroy(Slots *s);
 /* room in RAM for a state of `bytes` about to be saved (and put): RAM's least recently used to the folder (or dropped
    without one) until it fits under ram_bytes; false past ram_bytes alone (nothing moved), or a write that failed */
-bool slots_room(Slots *s, uint64_t bytes, char err[SLOTS_ERR]);
+bool slots_room(Slots *s, uint64_t bytes, char err[OSMOS_ERR]);
 /* whether a conversation of n tokens would be kept (min_tokens): asked before slots_room, which moves others for it */
 bool slots_keeps(const Slots *s, uint32_t n);
 /* state: malloc'd, the store's from the call (kept, or freed: not kept or a failure) */
 bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_t bytes, bool *kept,
-               char err[SLOTS_ERR]);
+               char err[OSMOS_ERR]);
 /* a state given in pieces to a sink (a sequence's save: oseq_save_to), or taken from a source (its load) */
 typedef bool (*SlotsSave)(void *ctx, StateSink sink, void *sink_ctx);
 typedef bool (*SlotsLoad)(void *ctx, uint64_t bytes, StateSource src, void *src_ctx);
@@ -40,12 +40,12 @@ typedef bool (*SlotsLoad)(void *ctx, uint64_t bytes, StateSource src, void *src_
    `bytes`, written under a temporary name then renamed, its .meta after. not kept (true, *kept false) with no folder
    or under min_tokens; false for a save or a write that failed (nothing left of it) */
 bool slots_put_stream(Slots *s, const int32_t *tokens, uint32_t n, uint64_t bytes, SlotsSave save, void *ctx,
-                      bool *kept, char err[SLOTS_ERR]);
+                      bool *kept, char err[OSMOS_ERR]);
 int64_t slots_find(const Slots *s, const int32_t *prompt, uint32_t n, uint32_t beyond, uint32_t *len);
 /* conversation id given to load in pieces of at most STATE_CHUNK (the folder's read from its file, RAM's from
    memory), then gone from the store (its files removed) whether or not load took it */
-bool slots_take_stream(Slots *s, int64_t id, SlotsLoad load, void *ctx, char err[SLOTS_ERR]);
-bool slots_flush(Slots *s, char err[SLOTS_ERR]);
+bool slots_take_stream(Slots *s, int64_t id, SlotsLoad load, void *ctx, char err[OSMOS_ERR]);
+bool slots_flush(Slots *s, char err[OSMOS_ERR]);
 uint32_t slots_in_ram(const Slots *s);
 uint64_t slots_ram_bytes(const Slots *s);
 uint32_t slots_in_dir(const Slots *s);
