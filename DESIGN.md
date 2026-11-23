@@ -2213,6 +2213,17 @@ in src/, 24 cast to (void), ~30 dropped as statements):
 - **the order**: err.h and its host test; each family moved to it, one commit a family (its messages' tests updated
   with it); then osmos_hip and the seam, and the four bugs, each a test through it first.
 
+**phase 2, as it went**: osmos/err.h (one size for 25, ~45 helpers to a few thin formats over osmos_fail, the family
+named once by the dispatch); the first cause kept asks a call's buffer to come empty - the 17 engine entry points and
+each osmos-serve request empty theirs, 57 buffers declared without a start now start empty (an uninitialized one's
+garbage read as a cause: osmos-api's refusals came back "\x01\x01"), the tests hand each refused call an empty one; the
+fault seam (osmos/err_hip.h). The GPU-failure candidates through it: the overflow flag's resets one shared, owed reset
+(osmos/gpu/overflow.h, every family and Inkling's drafter); osmos1.7b's refused-load reset checked (a failure breaks
+the sequence); Hy4's indexer scratch the forward's own, made whole. Not a bug, read whole: the "unchecked syncs before a
+release" - each step's own sync is checked; the second is the failed path's drain, where a failed sync is a faulted
+device with no kernel left to read what is released (osmos-serve exits on a lost GPU), and the rest are destroys'
+(exempt) and a profiler's.
+
 **phase 3 - memory ownership** (SCOPE.md): the build ledger as a component the engine owns - created in osmos_create,
 destroyed in osmos_destroy, borrowed by each family's constructor (its options), every allocation of the engine's
 tree counted against it, later sequences too; no open / close bracket, nesting or generation ids (0.15.2's version:
