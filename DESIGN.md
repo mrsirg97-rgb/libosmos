@@ -2237,6 +2237,22 @@ whole: the engine's sampling buffers at create, not first use; taps, lanes, the 
 options, not attached after; the environment knobs that change bits or memory (Q35_HEAD, HY4_DFLY_HEAD8,
 OSMOS_LFM3_STAGES, INK2_MEM) options or gone. --fill past the machine fails closed (the operator's call, 0.15.2).
 
+**phase 3's finish line** (the operator's: "everything should follow SCOPE.md's deterministic lifecycle for memory"):
+every allocation the engine makes owned by one component with its _create / _destroy; what a constructor is handed,
+borrowed and never freed by it; what it makes, freed by its destroy, by name, in reverse; no global or static holding
+memory, nothing made lazily at first use; one ownership tree from the engine - its destroy returning every byte its
+ledger counted (a test: the ledger's count back to zero at the engine's destroy, every family).
+
+**the ledger, a component** (the order of its commits, the build green after each): (1) osmos/mem/ledger.h -
+`OsmosLedger *ledger_create(uint64_t ram_kept)`, `ledger_create_room` (a test's room), `ledger_destroy`; its calls take
+it (ledger_malloc / host_malloc / free / host_free, reserve / keep / release for HSA's and mapped slots, left /
+left_settled / why); a NULL ledger counts nothing; its test the 0.15.2 one's, mutation-checked, its settle and the
+plan's whole grains measured there (sweep-152-with-ledger). (2) the engine makes one in osmos_create (the options'
+fill) and destroys it last in osmos_destroy; the family table's create given it. (3) the shared memory modules take it
+(upload, host / HSA slots, buffers, experts, experts_fit_now). (4) each family's forward borrows it - one commit a
+family, its sequences through their forward. (5) the pointer-walked destroys freed by name; --fill fails closed; the
+full GPU suite.
+
 **phase 4 - one module a concept** (the copies that drifted first): the greedy pick and kept rows (four shapes; two
 meanings of a family's logits, host or device); a family's room (osmos_room once, with fit_room and --fill); weight
 upload (Inkling's private whole-tensor path beside src/mem's); the engine adapters' copied batch / step-size / fail /
