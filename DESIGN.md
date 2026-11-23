@@ -2141,6 +2141,80 @@ prompt is the full layers' attention's: the dense matrices' 2x is a shallow prom
 25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
 2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
 
+### 0.15.3: the consolidation (plan, 2026-11-23)
+
+**the bar**: AGENTS.md and SCOPE.md, across the engine. Two of three 0.15.x memory bugs lived in a private copy of a
+shared concept (Qwen's room check), where a fix to the shared code never reached; this pass makes one shape for each
+concept and holds every module to its contract. No features ride along; behaviour changes only where a bug is fixed.
+Each change: design -> schema (the header) -> tests that fail first -> implementation. The inventory: four read-only
+audits (memory ownership; duplicated per-family code; errors, constants, contracts; structure and the untrusted
+boundary), each finding a candidate until a test reproduces it.
+
+**every phase's gate**: make tests, test_api, test_install; make gpu-tests (the guard's default floor; a test that
+needs another floor says why); every pack (Mini, osmos1.7b, Qwen, Hy4-flash, Small, DeepSeek) through osmos-serve
+--budget auto - slot, parallel and turn tests, Mini's sample test, DeepSeek's fill test - and one speed run each, its
+answers' hashes 0.15.2's; CI's host and sanitizer jobs (podman). A phase's commits land only behind its gate.
+
+**phase 1 - the bugs** (each a failing test first; small, independent):
+- Inkling's greedy pick (src/ink2/hip_forward.c ink2_greedy) never refuses a NaN row: it returns true with token -1;
+  every other family refuses (src/mem/hip_kept.c kept_greedy).
+- osmos1.7b's refused load (src/lfm3/hip_lfm3_seq.c refuse): an unchecked hipMemset, then "empty" - a sequence that
+  says it is empty may hold the last one's conv state. q35's and q4x's resets mark the sequence broken instead.
+- the overflow flag's reset unchecked at 9 sites (q4x, hy4, q35, lfm3, ink2 x3, ds4 x2): a failed reset leaves every
+  later step refused as "an activation past f16's range".
+- Hy4's kernel scratch (kernels/hy4.hip: wst / wcnt in function statics): one allocated and the other refused, the
+  next call launches with a null; never freed; shared by two engines.
+- token ids unchecked against the vocabulary on Inkling, the 27B and Qwen (an out-of-bounds GPU read); DeepSeek, Hy4
+  and osmos1.7b check - one check, in osmos_batch, for every family.
+- Qwen alone refuses max_tokens past max_ctx and sizes its step to the context at max_tokens 0; the others clamp.
+- osmos1.7b and the 27B report the GPU's free memory as their room: no RAM bound, no --fill.
+- hy4_seq_draft returns 0 for a broken sequence (the contract: -1 with why); Qwen's state load copies its header's
+  last tokens unchecked into the n-gram lookup (Hy4 checks them).
+- syncs unchecked before memory is released (hy4, q4x, ink2, ds4): a failed sync then frees what kernels may read.
+- osmos-serve's GEN line parsed by atoi / atol (garbage read as 0); its flags and env alike - one strict parser.
+
+**phase 2 - one error shape** (osmos/err.h): `bool osmos_fail(char err[OSMOS_ERR], const char *fmt, ...)` (the first
+cause kept, always false), `bool osmos_hip(hipError_t, char err[OSMOS_ERR], const char *what)` (the call's own
+reason), one OSMOS_ERR for every buffer; the family named once, by the engine's dispatch; a cut message ends visibly.
+Replaces 11 *_fail helpers with differing rules (prefix or none, first or last cause, NULL-safe or not) and 25 error
+sizes; a refusal says its cause (a memory refusal read "the Engram's gates could not be read").
+
+**phase 3 - memory ownership** (SCOPE.md): the build ledger as a component the engine owns - created in osmos_create,
+destroyed in osmos_destroy, borrowed by each family's constructor (its options), every allocation of the engine's
+tree counted against it, later sequences too; no open / close bracket, nesting or generation ids (0.15.2's version:
+sweep-152-with-ledger - its measured settle, the plan's whole grains and its tests carried over). oseq_reset - a
+sequence emptied in place, its memory kept - one per family, replacing five private 'refuse' copies; osmos-serve's
+conversation restart uses it, so a restart never allocates (0.15.2's ledger met a free-and-reallocate there). Built
+whole: the engine's sampling buffers at create, not first use; taps, lanes, the NPU and Hy4's drafter as constructor
+options, not attached after; the environment knobs that change bits or memory (Q35_HEAD, HY4_DFLY_HEAD8,
+OSMOS_LFM3_STAGES, INK2_MEM) options or gone. --fill past the machine fails closed (the operator's call, 0.15.2).
+
+**phase 4 - one module a concept** (the copies that drifted first): the greedy pick and kept rows (four shapes; two
+meanings of a family's logits, host or device); a family's room (osmos_room once, with fit_room and --fill); weight
+upload (Inkling's private whole-tensor path beside src/mem's); the engine adapters' copied batch / step-size / fail /
+passthroughs; drafter wiring (a directory or a file, by family; the dflash2 check twice); a state header's checks; the
+allocation helpers (one zeroes, one pads, four do neither). Last, the meaning of a budget: DeepSeek's the resident
+weights alone, the others' the whole build, budget 0 three meanings - one meaning, DeepSeek's sizing through the
+shared plan (the flagship's sizing: its own gate, --budget auto on every DeepSeek pack).
+
+**phase 5 - the untrusted boundary** (osmos-api, osmos-serve): a parse-memory budget (a 32 MB body is ~2 GB of tree,
+then copied again), a whole-request deadline (a byte every 9 s holds a connection for hours), the request's fields an
+allowlist (an unknown field refused, not ignored), --allow-origin with CORS, token ids and GEN numbers parsed strictly.
+Each limit derived from data (the largest real context's body, measured requests).
+
+**phase 6 - structure**: files past ~300 lines split by responsibility (Inkling's forward 1,385 lines: make / moe /
+ctrl / step, as Hy4's and osmos1.7b's already are); one name a role across families (<fam>_fail, hip_<fam>_make /
+step / seq / draft, DeepSeek under src/ds4); comments to their load-bearing statements - an invariant the code cannot
+say, a unit, a protocol, a security reason - with release history and measurements (~250 version-citing lines, ~90
+measurements) moved here. Last, as it moves the code every earlier phase edits.
+
+**phase 7 - graphs**: Qwen's graph capture lifted into a shared contract, a step's launches captured and replayed, so
+Inkling-2-Mini adopts it in 0.15.4 (launch overhead alone: ~1,467 launches a 3-row verify step; the same bits).
+
+**decisions for the operator**: (1) a budget's one meaning changes DeepSeek's sizing - its own gate; (2) the
+environment knobs: options, or deleted where nothing uses them; (3) the comment rule, applied by hand file by file;
+(4) DeepSeek's code moved to src/ds4.
+
 ### 0.15.2: each pack's floor and sampling, measured (2026-11-22, low-power)
 
 **the floors** (~/bench/sweep150: the cumulative-confidence floor swept per family, code / prose, 500 tokens, every
