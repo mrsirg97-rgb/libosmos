@@ -651,7 +651,7 @@ __device__ float samp_sum(float v, float* lds) {
   return r;
 }
 __global__ __launch_bounds__(kSampThreads) void sample_kernel(const float* x, uint32_t n, float temp, float top_p,
-                                                              float u, int32_t* out) {
+                                                              uint32_t top_k, float u, int32_t* out) {
   __shared__ float lds[kSampThreads];
   __shared__ float pre[kSampThreads + 1];
   __shared__ int bad;
@@ -678,12 +678,31 @@ __global__ __launch_bounds__(kSampThreads) void sample_kernel(const float* x, ui
     if (!t) *out = -1;
     return;
   }
-  uint32_t tb = 0;  // tau's bits: 0, every token, at top_p 1
+  // top-k first (0.15.2; Hugging Face's and vLLM's order: temperature, top-k, top-p): kb the k-th greatest p's bits -
+  // the greatest tau with at least k tokens at or past it (its ties kept), by the same bisection over a float's bits
+  uint32_t kb = 0;  // 0: every token (top_k 0, or k past the row)
+  if (top_k && top_k < n) {
+    uint32_t a = 0, b = 0x3F800001u;  // count(a) >= k (every token), count(b) < k (past the greatest, 1)
+    while (b - a > 1) {
+      const uint32_t mid = a + (b - a) / 2;
+      const float tau = __uint_as_float(mid);
+      float c = 0;  // (a count as a float: exact to 2^24 tokens)
+      for (uint32_t i = lo; i < hi; i++) c += expf((x[i] - m) / temp) >= tau ? 1.0f : 0.0f;
+      if (samp_sum(c, lds) >= (float) top_k) a = mid;
+      else b = mid;
+    }
+    kb = a;
+  }
+  uint32_t tb = kb;  // tau's bits: the top-k's at top_p 1; else top-p's within the top-k's kept
   if (top_p < 1.0f) {
+    const float tk = __uint_as_float(kb);
     float s = 0;
-    for (uint32_t i = lo; i < hi; i++) s += expf((x[i] - m) / temp);
+    for (uint32_t i = lo; i < hi; i++) {
+      const float v = expf((x[i] - m) / temp);
+      if (v >= tk) s += v;
+    }
     const float target = top_p * samp_sum(s, lds);
-    uint32_t a = 0, b = 0x3F800001u;  // mass(a) >= target (every token), mass(b) < target (past the greatest, 1)
+    uint32_t a = kb, b = 0x3F800001u;  // mass(a) >= target (the top-k's every token), mass(b) < target (none)
     while (b - a > 1) {
       const uint32_t mid = a + (b - a) / 2;
       const float tau = __uint_as_float(mid);
@@ -1127,11 +1146,11 @@ extern "C" float ops_draw_uniform(uint64_t seed, uint64_t position) {
   return (float) (mix(seed ^ mix(position)) >> 40) * 0x1p-24f;
 }
 
-extern "C" bool ops_sample(const float* x, uint32_t n, float temperature, float top_p, float u, int32_t* out,
+extern "C" bool ops_sample(const float* x, uint32_t n, float temperature, float top_p, uint32_t top_k, float u, int32_t* out,
                            void* stream) {
   if (!x || !out || !n || n >= (uint32_t) INT32_MAX || !(temperature > 0) || !(top_p > 0 && top_p <= 1) ||
       !(u >= 0 && u < 1))
     return false;
-  sample_kernel<<<1, kSampThreads, 0, st(stream)>>>(x, n, temperature, top_p, u, out);
+  sample_kernel<<<1, kSampThreads, 0, st(stream)>>>(x, n, temperature, top_p, top_k, u, out);
   return ok();
 }

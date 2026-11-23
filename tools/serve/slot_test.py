@@ -153,8 +153,11 @@ def main():
         rb2 = e.gen(B + rb["tokens"] + new, 8)  # B first: A's turn read after it sets B aside (into RAM, or the
         ra2 = e.gen(turn, 8)                    # folder when RAM has no room - where it would push B out first)
         e.quit()
-        check(f"evict: A gone (its turn reused {ra2['reused']}), B kept (its turn reused {rb2['reused']})",
-              ra2["reused"] == 0 and rb2["reused"] == len(B) - 1)
+        for name, r in (("B's turn", rb2), ("A's turn", ra2)):
+            check(f"evict: {name} answered{'' if 'err' not in r else ' - ' + r['err']}", "err" not in r)
+        if "err" not in ra2 and "err" not in rb2:
+            check(f"evict: A gone (its turn reused {ra2['reused']}), B kept (its turn reused {rb2['reused']})",
+                  ra2["reused"] == 0 and rb2["reused"] == len(B) - 1)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"{'every check passed' if not failed else f'{len(failed)} failed'}", flush=True)

@@ -147,7 +147,8 @@ bool ops_copy(void *dst, const void *src, uint64_t bytes, void *stream);
 uint64_t ops_argmax_scratch(uint32_t rows);
 bool ops_argmax(const float *x, uint32_t n, uint32_t rows, uint32_t stride, int32_t *out, void *scratch, void *stream);
 float ops_draw_uniform(uint64_t seed, uint64_t position);
-bool ops_sample(const float *x, uint32_t n, float temperature, float top_p, float u, int32_t *out, void *stream);
+bool ops_sample(const float *x, uint32_t n, float temperature, float top_p, uint32_t top_k, float u, int32_t *out,
+                void *stream);
 bool ops_wait(const uint32_t *flag, uint32_t value, void *stream);
 bool ops_copy_rows(float *dst, const float *src, const int32_t *idx, uint32_t n, uint32_t len, void *stream);
 
@@ -370,8 +371,9 @@ ops_draw_uniform
   sequence alone, 24 bits - the same draw however the steps that reach the position are cut, drafted or batched.
 
 ops_sample
-  out[0] = a token drawn from one row of n logits (device): p_i = exp((x_i - max) / temperature), kept those with
-  p_i >= tau, tau the greatest whose kept mass is at least top_p of the whole (top_p 1: every token; ties all kept),
+  out[0] = a token drawn from one row of n logits (device): p_i = exp((x_i - max) / temperature); top_k's first (0
+  every token): the k greatest p kept, every token tied with the k-th; then of those, kept p_i >= tau, tau the
+  greatest whose kept mass is at least top_p of theirs (top_p 1: every one; ties all kept) - Hugging Face's order,
   then the first id in id order whose running sum of the kept p passes u times their sum - an inverse CDF, every sum
   in one fixed order (one block, its threads' contiguous slices), so a row's bits give one token. -inf a token never
   drawn; a row with a NaN or +inf, or all -inf: -1. false for no x or out, n 0 or past 2^31 - 2, temperature not > 0, top_p not in (0, 1], u not in [0, 1).

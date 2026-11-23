@@ -86,11 +86,13 @@ bool osmos_reads_apart(const Osmos *e);
 const float *osmos_logits(const Osmos *e, uint32_t row);
 bool osmos_greedy(Osmos *e, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t n, int32_t *id, char err[OSMOS_ERR]);
-/* a request's sampling: temperature 0 greedy (the family's pick, the bits as ever); top_p 1 every token */
+/* a request's sampling: temperature 0 greedy (the family's pick, the bits as ever); top_p 1 every token; top_k 0
+   every token (0.15.2: the k most likely, then top_p within them) */
 typedef struct OsmosSampling
 {
   float temperature, top_p;
   uint64_t seed;
+  uint32_t top_k;
 } OsmosSampling;
 bool osmos_sampled(const OsmosSampling *s);
 bool osmos_sample(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_t position, int32_t *id, char err[OSMOS_ERR]);

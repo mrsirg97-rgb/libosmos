@@ -222,6 +222,73 @@ static bool grow(Json *j, size_t cap)
   return it != NULL;
 }
 
+/* an object's keys in order: bytes, then length, then where they came - each key's first place at its run's head */
+static bool key_before(const Json *j, size_t a, size_t b)
+{
+  const size_t n = j->klen[a] < j->klen[b] ? j->klen[a] : j->klen[b];
+  const int c = memcmp(j->key[a], j->key[b], n);
+  return c ? c < 0 : j->klen[a] != j->klen[b] ? j->klen[a] < j->klen[b] : a < b;
+}
+
+static void merge_sort(const Json *j, size_t *x, size_t *tmp, size_t n)
+{
+  if (n < 2)
+    return;
+  const size_t h = n / 2;
+  merge_sort(j, x, tmp, h), merge_sort(j, x + h, tmp, n - h);
+  size_t a = 0, b = h, o = 0;
+  while (a < h && b < n)
+    tmp[o++] = key_before(j, x[b], x[a]) ? x[b++] : x[a++];
+  while (a < h)
+    tmp[o++] = x[a++];
+  while (b < n)
+    tmp[o++] = x[b++];
+  memcpy(x, tmp, n * sizeof *x);
+}
+
+/* an object's duplicate keys made one (Python's dict: the first's place, the last's value) once it closes - by a
+   merge sort of its keys, n log n whatever the keys (a key compared with every earlier one was n^2: one 1 MB body
+   held a core 67 s) */
+static bool dedupe(Json *j)
+{
+  if (j->n < 2)
+    return true;
+  size_t *x = malloc(2 * j->n * sizeof *x);
+  if (!x)
+    return false;
+  for (size_t i = 0; i < j->n; i++)
+    x[i] = i;
+  merge_sort(j, x, x + j->n, j->n);
+  bool dup = false;
+  for (size_t r = 0; r < j->n;)
+  {
+    size_t e = r + 1;
+    while (e < j->n && j->klen[x[e]] == j->klen[x[r]] && !memcmp(j->key[x[e]], j->key[x[r]], j->klen[x[r]]))
+      e++;
+    if (e - r > 1) /* x[r] the first place, x[e - 1] the last value */
+    {
+      dup = true;
+      json_free(j->item[x[r]]), j->item[x[r]] = j->item[x[e - 1]];
+      for (size_t k = r + 1; k < e; k++)
+      {
+        if (k < e - 1)
+          json_free(j->item[x[k]]);
+        free(j->key[x[k]]), j->item[x[k]] = NULL, j->key[x[k]] = NULL;
+      }
+    }
+    r = e;
+  }
+  free(x);
+  if (!dup)
+    return true;
+  size_t o = 0;
+  for (size_t i = 0; i < j->n; i++)
+    if (j->key[i])
+      j->item[o] = j->item[i], j->key[o] = j->key[i], j->klen[o] = j->klen[i], o++;
+  j->n = o;
+  return true;
+}
+
 static Json *container(Cur *c, JsonType t)
 {
   const char close = t == JSON_ARRAY ? ']' : '}';
@@ -248,26 +315,17 @@ static Json *container(Cur *c, JsonType t)
     Json *v = value(c);
     if (!v)
       return free(key), json_free(j), NULL;
-    size_t at = j->n; /* a duplicate key: its value in the first's place (Python's dict) */
-    for (size_t i = 0; key && i < j->n; i++)
-      if (j->klen[i] == klen && memcmp(j->key[i], key, klen) == 0)
-        at = i;
-    if (at < j->n)
-      json_free(j->item[at]), j->item[at] = v, free(key);
-    else
-    {
-      if (j->n == cap && !grow(j, cap = cap ? 2 * cap : 4))
-        return free(key), json_free(v), json_free(j), fail(c, "out of memory");
-      j->item[j->n] = v;
-      if (key)
-        j->key[j->n] = key, j->klen[j->n] = klen;
-      j->n++;
-    }
+    if (j->n == cap && !grow(j, cap = cap ? 2 * cap : 4))
+      return free(key), json_free(v), json_free(j), fail(c, "out of memory");
+    j->item[j->n] = v;
+    if (key)
+      j->key[j->n] = key, j->klen[j->n] = klen;
+    j->n++;
     ws(c);
     if (take(c, ","))
       continue;
     if (c->p < c->end && *c->p == close)
-      return c->p++, j;
+      return c->p++, t == JSON_OBJECT && !dedupe(j) ? json_free(j), fail(c, "out of memory") : j;
     return json_free(j), fail(c, t == JSON_ARRAY ? "no ',' or ']'" : "no ',' or '}'");
   }
 }

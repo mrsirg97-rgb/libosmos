@@ -34,7 +34,9 @@ python3 tools/install/osmos_install.py osmos-evo-inkling --serve   # Inkling-2-S
 
 The installer builds the engine, downloads the pack's files at pinned commits, checks every SHA-256, writes the
 pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on the first free port from 8091, or
-`--port` (`/v1/chat/completions` streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
+`--port` (`/v1/chat/completions` streamed or whole, with tools and reasoning; `/v1/models`; `/health`). It serves
+local clients - SDKs, curl, agents - and refuses web pages: a request with an `Origin` header, or a `Host` that is not
+`localhost` / `127.0.0.1`, is refused (0.15.2). Options:
 
 - `--abliterated` adds huihui-ai's abliteration as an overlay (the DeepSeek and Qwen packs; the stock files stay as
   they are).
@@ -65,14 +67,16 @@ python3 tools/install/osmos_install.py --prune [--yes]      # the versions no ro
 Each version reads its own frozen `osmos.<version>.json`, so a newer installer's settings never break an older row.
 A running row takes the new version at its next start.
 
-**Sampling** (0.14.0): requests take `temperature`, `top_p` and `seed`; a pack's `osmos.json` may set
-`temperature` / `top_p` defaults (inkling-2-mini: temperature 1.0, as released; the others greedy). Each token is
-drawn from (seed, position) alone, so a seed reproduces an answer, drafted or not; without one a seed is drawn and
-returned in `x-osmos-seed`.
+**Sampling**: requests take `temperature`, `top_k`, `top_p` and `seed`, and each pack's `osmos.json` sets the default
+that measured best here (0.15.2: replayed on an agent session that looped, greedy and sampled). DeepSeek's packs sample
+at temperature 1.0 / top_p 1.0, inkling-2-mini and osmos-evo-inkling at 1.0, osmos1.7b at 0.1 / top_k 50; Qwen3.8 and
+hy4-flash decode greedily (they did not loop greedy, and draft faster). Each token is drawn from (seed, position)
+alone, so a seed reproduces an answer, drafted or not; without one a seed is drawn and returned in `x-osmos-seed`.
 
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
-header - turns since the last tool call, the most repeated recent call, orphaned calls and results (a client's
-history compaction can drop one side), and `stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
+header - turns since the last tool call, the most repeated recent call, how many times in a row the last call was
+made again after the same result, orphaned calls and results (a client's history compaction can drop one side), and
+`stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
 true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling-2-Small 256K, Inkling-2-Mini 1M, Hy4-flash 1M, osmos1.7b 512K), or
 `--ctx` (installer or osmos-api: `512k`, `1m`, ...).
 
@@ -93,7 +97,8 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 
 ## Speed
 
-osmos 0.15.0 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
+osmos 0.15.0 on one Strix Halo (osmos-evo-inkling: 0.15.2, its new draft floor), the `performance` profile, nothing
+else running. Every number from the same harness:
 `osmos-api` with the pack's own `osmos.json` (its context, its drafter, its budget sized to the machine), a fresh
 process, a warm-up request, then each request alone; decode is the answer's own rate from the server's timings. Drafted
 and plain answers are the same tokens, bit for bit (their hashes compared); drafting moves only the speed.
@@ -104,7 +109,7 @@ and plain answers are the same tokens, bit for bit (their hashes compared); draf
 | `qwen38-ud-iq3_xxs` | 921 | **50.3** / **44.4** | 28.7 / 29.2 |
 | `osmos-evo-1017` | 385 | **28.4** / **24.1** | 18.8 / 19.3 |
 | `hy4-flash` | 412 | **23.3** / **20.4** | 17.4 / 17.4 |
-| `osmos-evo-inkling` | 339 | 13.7 / 13.7 | 12.3 / 13.0 |
+| `osmos-evo-inkling` (0.15.2) | 317 | 14.3 / 14.3 | 12.6 / 13.2 |
 | `osmos1.7b` (no drafter) | **4,781** | | **126.3** / **126.2** |
 
 Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
@@ -120,7 +125,7 @@ temperature 0, drafted / plain):
 | `qwen38-ud-iq3_xxs` | **57.3** | **51.2** | **45.2** | 29.1 |
 | `osmos-evo-1017` | 31.4 | 25.3 | 30.9 | 18.3-18.5 |
 | `hy4-flash` | 21.4 | 21.4 | 20.2 | 17.5 |
-| `osmos-evo-inkling` | 14.0 | 13.0 | 12.5 | 12.1-12.9 |
+| `osmos-evo-inkling` (0.15.2) | 15.6 | 12.7 | 13.5 | 12.0-12.6 |
 | `osmos1.7b` | 126.1 | 126.4 | 122.4 | |
 
 **Agents** (`tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system

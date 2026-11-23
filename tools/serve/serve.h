@@ -65,7 +65,7 @@ typedef struct Gen
   int32_t *ids; /* malloc'd */
   uint32_t n;
   uint32_t mark; /* mark=: a point besides the prompt's (Conv.user), 0 none */
-  OsmosSampling samp; /* temp=, top_p=, seed= (0.14.0): temperature 0 (not given) greedy */
+  OsmosSampling samp; /* temp=, top_p=, top_k= (0.15.2), seed= (0.14.0): temperature 0 (not given) greedy */
 } Gen;
 
 double now_ms(void);

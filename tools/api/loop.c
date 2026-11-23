@@ -24,8 +24,10 @@ static const Json *fn_of(const Json *call)
   return f ? f : call;
 }
 
-/* a call's identity: its name and its arguments as their JSON (a string of JSON parsed and written again, so two
-   spellings of one object match), into b */
+/* a call's identity: its name and its arguments as their JSON - a string of JSON parsed and written again, compact,
+   its keys sorted at every depth (0.15.2: in their order before, so a client writing them back in another order made
+   two calls of one) - into b */
+static const JsonStyle kCanon = {true, true};
 static void identity(const Json *call, JsonBuf *b)
 {
   const Json *f = fn_of(call), *a = json_get(f, "arguments");
@@ -36,12 +38,63 @@ static void identity(const Json *call, JsonBuf *b)
     char jerr[JSON_ERR];
     Json *o = json_parse(a->s, a->len, jerr);
     if (o)
-      json_dump(b, o), json_free(o);
+      json_dump_with(b, o, kCanon), json_free(o);
     else
       json_put(b, a->s, a->len);
   }
   else if (a)
-    json_dump(b, a);
+    json_dump_with(b, a, kCanon);
+}
+
+/* a call's result: the tool message after its assistant answering it (by id; with none, the results in order), its
+   content as JSON - NULL when it has none */
+static const Json *result_of(const Json *ms, size_t at, size_t q)
+{
+  const Json *c = calls_of(ms->item[at]);
+  const char *cid = json_str(c->item[q], "id");
+  size_t k = 0;
+  for (size_t t = at + 1; t < ms->n && is_role(ms->item[t], "tool"); t++, k++)
+  {
+    const char *rid = json_str(ms->item[t], "tool_call_id");
+    if (cid && rid ? !strcmp(cid, rid) : k == q)
+      return json_get(ms->item[t], "content");
+  }
+  return NULL;
+}
+
+/* the last call's run (Loop's unchanged_repeats): back from the history's last call, each call before it its same
+   identity and its result the same as the one after it had */
+static unsigned unchanged_run(const Json *ms)
+{
+  JsonBuf want = {0}, wres = {0}; /* the last call's identity and result */
+  unsigned run = 0;
+  bool done = false;
+  for (size_t i = ms->n; !done && i-- > 0;)
+  {
+    const Json *c = calls_of(ms->item[i]);
+    for (size_t j = c ? c->n : 0; !done && j-- > 0;)
+    {
+      JsonBuf id = {0}, res = {0};
+      identity(c->item[j], &id);
+      const Json *r = result_of(ms, i, j);
+      if (r)
+        json_dump_with(&res, r, kCanon);
+      if (!run)
+      {
+        want = id, wres = res, run = 1;
+        continue;
+      }
+      const bool same = r && id.n == want.n && !memcmp(id.p, want.p, id.n) && res.n == wres.n &&
+                        !memcmp(res.p, wres.p, res.n);
+      free(id.p), free(res.p);
+      if (same)
+        run++;
+      else
+        done = true;
+    }
+  }
+  free(want.p), free(wres.p);
+  return run;
 }
 
 static void keep(char (*list)[LOOP_ID_MAX], unsigned *n, const char *id)
@@ -124,7 +177,9 @@ void loop_read(const Json *ms, Loop *l)
       if (!answered[q])
         keep(l->orphan_calls, &l->n_orphan_calls, json_str(c->item[q], "id"));
   }
-  l->stuck = l->turns_without_call >= LOOP_TURNS || l->repeat_count >= LOOP_REPEATS;
+  l->unchanged_repeats = unchanged_run(ms);
+  l->stuck = l->turns_without_call >= LOOP_TURNS || l->unchanged_repeats >= LOOP_UNCHANGED ||
+             l->repeat_count >= LOOP_REPEAT_ANY;
 }
 
 bool loop_fill(const Json *body, JsonBuf *out)
@@ -198,7 +253,8 @@ void loop_json(JsonBuf *b, const Loop *l)
   snprintf(t, sizeof t, ", \"osmos\": {\"loop\": {\"turns_without_call\": %u, \"repeated_call\": {\"name\": ",
            l->turns_without_call);
   json_puts(b, t), json_dump_string(b, l->repeat_name, strlen(l->repeat_name));
-  snprintf(t, sizeof t, ", \"count\": %u}, \"orphan_calls\": ", l->repeat_count);
+  snprintf(t, sizeof t, ", \"count\": %u}, \"unchanged_repeats\": %u, \"orphan_calls\": ", l->repeat_count,
+           l->unchanged_repeats);
   json_puts(b, t), ids(b, (char (*)[LOOP_ID_MAX])l->orphan_calls, l->n_orphan_calls);
   json_puts(b, ", \"orphan_results\": "), ids(b, (char (*)[LOOP_ID_MAX])l->orphan_results, l->n_orphan_results);
   snprintf(t, sizeof t, ", \"orphans_filled\": %s, \"stuck\": %s}}", l->filled ? "true" : "false",
@@ -214,7 +270,7 @@ void loop_header(char *out, size_t cap, const Loop *l)
     if (*p > ' ' && *p < 127 && *p != ';' && *p != ',')
       name[k++] = *p;
   name[k] = 0;
-  snprintf(out, cap, "turns-without-call=%u; repeated-call=%u%s%s; orphan-calls=%u; orphan-results=%u; "
-           "orphans-filled=%d; stuck=%d", l->turns_without_call, l->repeat_count, k ? " " : "", name,
-           l->n_orphan_calls, l->n_orphan_results, l->filled, l->stuck);
+  snprintf(out, cap, "turns-without-call=%u; repeated-call=%u%s%s; unchanged-repeats=%u; orphan-calls=%u; "
+           "orphan-results=%u; orphans-filled=%d; stuck=%d", l->turns_without_call, l->repeat_count, k ? " " : "", name,
+           l->unchanged_repeats, l->n_orphan_calls, l->n_orphan_results, l->filled, l->stuck);
 }

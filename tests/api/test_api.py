@@ -327,7 +327,7 @@ class Api(Served, unittest.TestCase):
         self.reply("a " * 50, finish="hold", pace=0.02)
         s = socket.create_connection(("127.0.0.1", self.port))
         body = json.dumps({"messages": [{"role": "user", "content": "x"}], "stream": True}).encode()
-        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         s.recv(4096)
         s.close()
         for _ in range(100):
@@ -344,7 +344,7 @@ class Api(Served, unittest.TestCase):
         self.reply("a " * 400, pace=0.02)
         s = socket.create_connection(("127.0.0.1", self.port))
         body = json.dumps({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none"}).encode()
-        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         time.sleep(0.3)
         s.close()
         t0 = time.time()
@@ -358,7 +358,7 @@ class Api(Served, unittest.TestCase):
         self.assertEqual(r.status, 413)
         for head in (b"Content-Length: -1", b"Content-Length: 12xyz", b"Content-Length: 2\r\nContent-Length: 3"):
             s = socket.create_connection(("127.0.0.1", self.port))
-            s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n" + head + b"\r\n\r\n{}")
+            s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n" + head + b"\r\n\r\n{}")
             got = s.recv(4096)
             s.close()
             self.assertTrue(got.startswith(b"HTTP/1.1 400"), (head, got[:60]))
@@ -529,8 +529,36 @@ class Api(Served, unittest.TestCase):
         msgs += [self.call("c9", "get_weather", '{"city": "Rome"}'), {"role": "tool", "tool_call_id": "c9", "content": "sun"}]
         loop, head = self.loop_of({"messages": msgs, "tools": TOOLS})
         self.assertEqual((loop["repeated_call"]["name"], loop["repeated_call"]["count"]), ("get_weather", 3))
-        self.assertTrue(loop["stuck"])
+        self.assertEqual(loop["unchanged_repeats"], 1)  # (the last call Rome's, once)
+        self.assertFalse(loop["stuck"])  # 0.15.2: three among sixteen, their result the same, then another call
         self.assertIn("repeated-call=3 get_weather", head)
+
+    def test_6p_loop_unchanged_repeats(self):  # 0.15.2: a call again after the same call had the same result
+        self.ready()
+        def turn(i, args, result):
+            return [self.call(f"c{i}", "read", args), {"role": "tool", "tool_call_id": f"c{i}", "content": result}]
+        # Inkling-2-Mini's loop (2026-11-22): go.mod read, its same content back, read again - stuck at two
+        msgs = [{"role": "user", "content": "fix the build"}] + turn(0, '{"path": "go.mod"}', "module x\ngo 1.22")
+        loop, _ = self.loop_of({"messages": msgs, "tools": TOOLS})
+        self.assertEqual((loop["unchanged_repeats"], loop["stuck"]), (1, False))
+        msgs += turn(1, '{"path": "go.mod"}', "module x\ngo 1.22")
+        loop, head = self.loop_of({"messages": msgs, "tools": TOOLS})
+        self.assertEqual((loop["unchanged_repeats"], loop["stuck"]), (2, True))
+        self.assertIn("unchanged-repeats=2", head)
+        # the arguments' keys in another order: the same call
+        msgs2 = msgs[:3] + turn(1, '{"limit": 50, "path": "go.mod"}', "a")[0:0] + \
+            turn(1, '{"path":"go.mod",  "limit":50}', "x") + turn(2, '{"limit": 50, "path": "go.mod"}', "x")
+        loop, _ = self.loop_of({"messages": msgs2, "tools": TOOLS})
+        self.assertEqual(loop["unchanged_repeats"], 2)
+        # polling: the same call, its result changed each time - not stuck however often (under the backstop)
+        poll = [{"role": "user", "content": "watch it"}]
+        for i in range(5):
+            poll += turn(i, '{"cmd": "git status"}', f"{i} files changed")
+        loop, _ = self.loop_of({"messages": poll, "tools": TOOLS})
+        self.assertEqual((loop["repeated_call"]["count"], loop["unchanged_repeats"], loop["stuck"]), (5, 1, False))
+        poll += turn(9, '{"cmd": "git status"}', "9 files changed")  # the sixth: LOOP_REPEAT_ANY's backstop
+        loop, _ = self.loop_of({"messages": poll, "tools": TOOLS})
+        self.assertEqual((loop["repeated_call"]["count"], loop["stuck"]), (6, True))
 
     def test_6m_orphans_flagged_not_filled(self):  # a compaction's lost pair: reported; the prompt the client's own
         self.ready()
@@ -642,7 +670,7 @@ class Api(Served, unittest.TestCase):
         self.reply("ok</think>fine" + EOS)
         body = json.dumps({"messages": [{"role": "user", "content": "x" * 2000}]}).encode()
         with socket.create_connection(("127.0.0.1", self.port), timeout=10) as c:
-            c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+            c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
                       b"Expect: 100-continue\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n")
             self.assertTrue(c.recv(64).startswith(b"HTTP/1.1 100 Continue\r\n\r\n"))
             c.sendall(body)
@@ -698,6 +726,60 @@ def qwen_template():
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import gen_chat_fixtures_qwen
     return gen_chat_fixtures_qwen.template(QWEN, GGUF_PY)
+
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class Browser(Served, unittest.TestCase):
+    """a web page's request refused (0.15.2): any page can POST text/plain to localhost with no preflight - an
+    Origin header is a browser's, refused; bound to loopback, a Host other than its names is DNS rebinding's, refused -
+    the engine never asked. SDKs, curl and agents send no Origin and a localhost Host"""
+
+    def send(self, headers, method="POST", path="/v1/chat/completions"):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
+        c.request(method, path, body=body if method == "POST" else None, headers=headers)
+        r = c.getresponse()
+        return r.status, r.read()
+
+    def gens(self):
+        return len([l for l in self.log() if l.startswith("GEN ")]) if os.path.exists(os.path.join(self.dir, "log")) else 0
+
+    def test_1_a_page_s_origin_refused(self):
+        self.ready()
+        before = self.gens()
+        for origin in ("https://evil.example", "null", "http://localhost:3000"):
+            st, b = self.send({"Content-Type": "text/plain", "Origin": origin})
+            self.assertEqual(st, 403, origin)
+            self.assertIn(b"browser", b)
+            st, _ = self.send({"Origin": origin}, "GET", "/health")
+            self.assertEqual(st, 403, origin)
+        self.assertEqual(self.gens(), before)  # the engine never asked
+
+    def test_2_a_rebinding_host_refused(self):
+        self.ready()
+        before = self.gens()
+        for host in ("evil.example", f"evil.example:{self.port}", "127.0.0.1.evil.example", "localhost.evil.example"):
+            st, b = self.send({"Host": host, "Content-Type": "application/json"})
+            self.assertEqual(st, 403, host)
+            self.assertIn(b"Host", b)
+        self.assertEqual(self.gens(), before)
+
+    def test_3_local_clients_served(self):
+        self.ready()
+        for host in ("localhost", f"localhost:{self.port}", f"127.0.0.1:{self.port}", "127.0.0.1", f"[::1]:{self.port}",
+                     f"LOCALHOST:{self.port}"):
+            self.reply("</think>Fine." + EOS)
+            st, _ = self.send({"Host": host, "Content-Type": "application/json"})
+            self.assertEqual(st, 200, host)
+        self.reply("</think>Fine." + EOS)
+        st, _ = self.send({"Content-Type": "application/json"})  # http.client's own Host: 127.0.0.1:<port>
+        self.assertEqual(st, 200)
+
+    def test_4_no_host_refused(self):
+        self.ready()
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:  # HTTP/1.1 requires Host (RFC 9112)
+            s.sendall(b"GET /health HTTP/1.1\r\n\r\n")
+            self.assertIn(b" 400 ", s.recv(4096).split(b"\r\n")[0] + b" ")
 
 
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
@@ -1347,8 +1429,23 @@ class Sampling(Served, unittest.TestCase):
         self.assertEqual(r.getheader("x-osmos-seed"), "77")
         r.read()
 
+    def test_4_top_k(self):  # 0.15.2: GEN's top_k= as asked; 0 or -1 every token (no key); a bad one refused
+        self.ready()
+        _, k = self.ask(top_k=20)
+        self.assertEqual(k["top_k"], "20")
+        for off in (0, -1, None):
+            _, k = self.ask(top_k=off)
+            self.assertNotIn("top_k", k)
+        _, k = self.ask(temperature=0, top_k=20)  # greedy: no sampling keys at all
+        self.assertNotIn("top_k", k)
+        for bad in (-2, 1.5, "20"):
+            self.reply("ok" + EOS)
+            r = self.post({"messages": [{"role": "user", "content": "x"}], "top_k": bad})
+            self.assertEqual(r.status, 400)
+            self.assertIn("top_k", r.read().decode())
+
     def test_3_pack_refused(self):
-        for bad in ({"temperature": -1}, {"top_p": 0}, {"top_p": 2}):
+        for bad in ({"temperature": -1}, {"top_p": 0}, {"top_p": 2}, {"top_k": -1}, {"top_k": 2.5}):
             d = tempfile.mkdtemp()
             cfg = os.path.join(d, "osmos.json")
             with open(cfg, "w") as f:
@@ -1357,6 +1454,24 @@ class Sampling(Served, unittest.TestCase):
                                capture_output=True, text=True, timeout=30)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn(next(iter(bad)), r.stderr)
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class SamplingTopK(Sampling):
+    """0.15.2: the pack's top_k (osmos.json) a request's unset; a request's top_k over it"""
+    settings = {"temperature": 1.0, "top_p": 0.95, "top_k": 50}
+
+    def test_5_pack_top_k(self):
+        self.ready()
+        _, k = self.ask()
+        self.assertEqual(k["top_k"], "50")
+        _, k = self.ask(top_k=20)
+        self.assertEqual(k["top_k"], "20")
+        _, k = self.ask(top_k=0)  # every token, over the pack's
+        self.assertNotIn("top_k", k)
+
+    def test_4_top_k(self):  # (the base's asks a request's top_k: none sent means the pack's 50 here)
+        pass
+
 
 if __name__ == "__main__":
     sys.exit(not unittest.main(exit=False, verbosity=2).result.wasSuccessful())

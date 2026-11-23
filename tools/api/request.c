@@ -101,7 +101,7 @@ static unsigned long long drawn_seed(void)
 }
 
 bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool preserve_default, double temperature,
-                  double top_p, Request *r, char err[API_ERR])
+                  double top_p, unsigned top_k, Request *r, char err[API_ERR])
 {
   memset(r, 0, sizeof *r);
   r->preserve = true, r->preserve_default = preserve_default;
@@ -117,6 +117,14 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool pr
     return request_fail(err, "temperature: a number, 0 (greedy) or more");
   if (!number(json_get(body, "top_p"), 0, true, 1, &r->top_p))
     return request_fail(err, "top_p: a number above 0, 1 at most");
+  r->top_k = top_k; /* 0.15.2: an integer; 0 or -1 (vLLM's, a client's default) every token */
+  const Json *tk = json_get(body, "top_k");
+  if (tk && tk->type != JSON_NULL)
+  {
+    if (tk->type != JSON_INT || strlen(tk->s) > 9 || atol(tk->s) < -1)
+      return request_fail(err, "top_k: an integer, 0 or -1 (every token) or more");
+    r->top_k = atol(tk->s) > 0 ? (unsigned)atol(tk->s) : 0;
+  }
   const Json *seed = json_get(body, "seed");
   if (seed && seed->type != JSON_NULL && (seed->type != JSON_INT || seed->s[0] == '-' || strlen(seed->s) > 19))
     return request_fail(err, "seed: an integer, 0 or more");

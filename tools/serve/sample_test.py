@@ -3,7 +3,8 @@
 drawn from its row with the uniform of (seed, t) alone, a draft accepted only where it is the token the row draws -
 so a drafted answer is the plain one, token for token, at any seed (osmos-serve's one guarantee, kept sampled).
 
-  drafted    a sampled answer plain and drafted the same (temperature 1, top_p 1 and 0.9), the drafts mostly taken
+  drafted    a sampled answer plain and drafted the same (temperature 1, top_p 1 and 0.9; top_p 0.95 with top_k 20),
+             the drafts mostly taken
   parallel   --parallel 2, one plain and one drafted at once: the one conversation's tokens
   seeds      the same seed the same tokens again; another seed other tokens; temp=0 the greedy answer exactly
   refused    a temperature or top_p out of range: ERR
@@ -31,8 +32,8 @@ def check(what, ok):
         failed.append(what)
 
 
-def keys(temp, top_p, seed):
-    return f" temp={temp} top_p={top_p} seed={seed}"
+def keys(temp, top_p, seed, top_k=0):
+    return f" temp={temp} top_p={top_p} seed={seed}" + (f" top_k={top_k}" if top_k else "")
 
 
 def main():
@@ -50,18 +51,19 @@ def main():
 
     e = Engine(a.exe, base, env=env)
     greedy = e.gen(prompt, ANSWER, spec=0)["tokens"]
-    for top_p in (1, 0.9):
-        k = keys(1.0, top_p, 1017)
+    for top_p, top_k in ((1, 0), (0.9, 0), (0.95, 20)):  # (0.15.2: Qwen's release sampling - top-k then top-p)
+        k = keys(1.0, top_p, 1017, top_k)
         plain = e.gen(prompt, ANSWER, spec=0, extra=k)
         drafted = e.gen(prompt, ANSWER, spec=1, extra=k)
         for r in (plain, drafted):
             if "err" in r:
                 print(f"  {r['err']}")
         acc, dr = (int(drafted["done"][6]), int(drafted["done"][7])) if "done" in drafted else (0, 0)
-        check(f"temperature 1, top_p {top_p}: drafted == plain ({len(plain['tokens'])} tokens; drafts {acc} of "
-              f"{dr} taken)", plain["tokens"] == drafted["tokens"] and len(plain["tokens"]) > 0)
-        check(f"temperature 1, top_p {top_p}: the drafts mostly right under sampling (> 25%)", dr and acc / dr > 0.25)
-        check(f"temperature 1, top_p {top_p}: not the greedy answer", plain["tokens"] != greedy)
+        what = f"temperature 1, top_p {top_p}" + (f", top_k {top_k}" if top_k else "")
+        check(f"{what}: drafted == plain ({len(plain['tokens'])} tokens; drafts {acc} of {dr} taken)",
+              plain["tokens"] == drafted["tokens"] and len(plain["tokens"]) > 0)
+        check(f"{what}: the drafts mostly right under sampling (> 25%)", dr and acc / dr > 0.25)
+        check(f"{what}: not the greedy answer", plain["tokens"] != greedy)
     k = keys(1.0, 1, 1017)
     again = e.gen(prompt, ANSWER, spec=1, extra=k)["tokens"]
     first = e.gen(prompt, ANSWER, spec=0, extra=k)["tokens"]
@@ -69,6 +71,8 @@ def main():
     check("the same seed: the same tokens again", again == first)
     check("another seed: other tokens", other != first)
     check("temp=0: the greedy answer exactly", e.gen(prompt, ANSWER, spec=1, extra=keys(0, 1, 5))["tokens"] == greedy)
+    check("temp=1 top_k=1: the greedy answer (the one most likely token kept: top_k reaches the draw)",
+          e.gen(prompt, ANSWER, spec=1, extra=keys(1.0, 1, 5, 1))["tokens"] == greedy)
     for bad in (keys(-1, 1, 1), keys(1, 0, 1), keys(1, 1.5, 1)):
         check(f"refused:{bad}", "err" in e.gen(prompt, 4, spec=0, extra=bad))
     e.quit()

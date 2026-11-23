@@ -21,6 +21,7 @@ typedef struct Request
   Json *effort_value;  /* Inkling's reasoning effort as asked - a name or a number (owned; NULL: the template's 0.9) */
   unsigned max_tokens; /* 0: as many as the context leaves */
   double temperature, top_p; /* 0.14.0: as asked, else the pack's (temperature 0 greedy) */
+  unsigned top_k;            /* 0.15.2: as asked (0 or -1 every token), else the pack's */
   unsigned long long seed;   /* as asked, else drawn (sampled: returned in x-osmos-seed) */
   bool sampled;              /* temperature above 0 */
   bool stream, usage;
@@ -28,7 +29,7 @@ typedef struct Request
 } Request;
 
 bool request_read(const Json *body, const struct Dialect *d, bool fill_orphans, bool preserve_default,
-                  double temperature, double top_p, Request *r, char err[API_ERR]);
+                  double temperature, double top_p, unsigned top_k, Request *r, char err[API_ERR]);
 void request_free(Request *r);
 
 /* shared by the readers: the effort asked (reasoning_effort, else chat_template_kwargs'), a failure, the tools as
