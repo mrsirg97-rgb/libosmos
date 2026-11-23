@@ -2173,11 +2173,18 @@ answers' hashes 0.15.2's; CI's host and sanitizer jobs (podman). A phase's commi
 - syncs unchecked before memory is released (hy4, q4x, ink2, ds4): a failed sync then frees what kernels may read.
 - osmos-serve's GEN line parsed by atoi / atol (garbage read as 0); its flags and env alike - one strict parser.
 
+**phase 1, as it went**: five fixed, each a test that failed first - Inkling's NaN pick (the shared kept_greedy),
+token ids (osmos_batch), a step's size (osmos_step_tokens), the room (osmos_room), a draft's token (oseq_draft /
+_all). Moved: the four a failed GPU call shows (osmos1.7b's reset memset, the overflow flag's resets, the unchecked
+syncs, Hy4's scratch) to phase 2, tested through its fault seam - a test can make no real HIP call fail; Qwen's state
+header to phase 4's shared check; GEN's parse to phase 5.
+
 **phase 2 - one error shape** (osmos/err.h): `bool osmos_fail(char err[OSMOS_ERR], const char *fmt, ...)` (the first
 cause kept, always false), `bool osmos_hip(hipError_t, char err[OSMOS_ERR], const char *what)` (the call's own
 reason), one OSMOS_ERR for every buffer; the family named once, by the engine's dispatch; a cut message ends visibly.
 Replaces 11 *_fail helpers with differing rules (prefix or none, first or last cause, NULL-safe or not) and 25 error
-sizes; a refusal says its cause (a memory refusal read "the Engram's gates could not be read").
+sizes; a refusal says its cause (a memory refusal read "the Engram's gates could not be read"). Its fault seam: a
+test build's osmos_hip fails the call it names, so a failed GPU call's path is tested, not assumed.
 
 **phase 3 - memory ownership** (SCOPE.md): the build ledger as a component the engine owns - created in osmos_create,
 destroyed in osmos_destroy, borrowed by each family's constructor (its options), every allocation of the engine's
