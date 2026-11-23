@@ -2189,6 +2189,30 @@ Replaces 11 *_fail helpers with differing rules (prefix or none, first or last c
 sizes; a refusal says its cause (a memory refusal read "the Engram's gates could not be read"). Its fault seam: a
 test build's osmos_hip fails the call it names, so a failed GPU call's path is tested, not assumed.
 
+**phase 2, the design** (the inventory: ~45 fail helpers - static `fail` in most files, `<fam>_fail` in six, a
+prefix in some, the first cause kept by gguf alone; 25 error sizes, 256 but JSON's 128 and ANSWER's 160; 596 HIP calls
+in src/, 24 cast to (void), ~30 dropped as statements):
+- **osmos/err.h** (host): `OSMOS_ERR 256`, every `<X>_ERR` its name (one size: a buffer handed down never cut);
+  `bool osmos_fail(char err[OSMOS_ERR], const char *fmt, ...)` - the first cause kept (a later wrap adds context, never
+  replaces it), NULL err allowed, a cut message ending "..."; `void osmos_context(char err[OSMOS_ERR], const char
+  *who)` - "who: " before the cause, once (the family named by the engine's dispatch, not by every helper). Every
+  helper above becomes osmos_fail; a site's message names its cause (a refused allocation "GPU memory refused (the
+  Engram's gates)", not "could not be read").
+- **osmos/err_hip.h**: `bool osmos_hip(hipError_t e, char err[OSMOS_ERR], const char *what)` - true on success, else
+  osmos_fail("<what>: <hipGetErrorString>"). Which calls go through it: every one whose failure leaves state the
+  code then relies on - a memset (the overflow flag's reset), a copy, a sync before memory is released or a result
+  read, a launch's error; a destroy's frees are exempt (nothing left to refuse), and say so where they are.
+- **the fault seam**: `bool osmos_hip_fault(const char *what)` - false in the library (a weak definition); a test
+  links its own, naming the call to fail, so osmos_hip reports that call failed without HIP failing. A link-time
+  seam: nothing installed at run time, nothing in a production build's path but one call.
+- **the tests** (each failing first): err.h's rules on the host (the first cause kept, the context once, a cut
+  message marked, NULL err); through the seam - a failed overflow-flag reset marks the forward broken and the next
+  step refuses with that cause (every family); osmos1.7b's failed reset leaves the sequence broken, not "empty"; a
+  failed sync before a release keeps the memory and fails the forward; Hy4's scratch half-allocated refused, never
+  launched with a null.
+- **the order**: err.h and its host test; each family moved to it, one commit a family (its messages' tests updated
+  with it); then osmos_hip and the seam, and the four bugs, each a test through it first.
+
 **phase 3 - memory ownership** (SCOPE.md): the build ledger as a component the engine owns - created in osmos_create,
 destroyed in osmos_destroy, borrowed by each family's constructor (its options), every allocation of the engine's
 tree counted against it, later sequences too; no open / close bracket, nesting or generation ids (0.15.2's version:
