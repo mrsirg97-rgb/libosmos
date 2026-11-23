@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/q4x/weights.h"
 
@@ -47,7 +48,8 @@ static int64_t set_item(GgufKv *k, size_t i, int64_t v)
 
 static bool accepted(void)
 {
-  char err[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Q4xWeights *w = q4x_weights_create(model, NULL, err);
   if (!w)
     printf("    refused: %s\n", err);
@@ -57,7 +59,8 @@ static bool accepted(void)
 
 static void refused(const char *what, const char *needle)
 {
-  char err[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Q4xWeights *w = q4x_weights_create(model, NULL, err);
   if (w || !strstr(err, needle))
   {
@@ -108,7 +111,8 @@ static void test_experts(const Q4xWeights *w)
 
 static void test_real(void)
 {
-  char err[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Q4xWeights *w = q4x_weights_create(model, NULL, err);
   if (!w)
     printf("  real: refused: %s\n", err), exit(1);
@@ -274,13 +278,14 @@ static void test_kv(void)
    self-contained head (its own embedding), a tensor missing - each refused */
 static void test_mtp(const Q4xWeights *w, const char *path)
 {
-  char err[Q4X_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
   Gguf *mtp = gguf_header(path, gerr);
   if (!mtp)
   {
     printf("  MTP: no head file, skipped\n");
     return;
   }
+  osmos_clear(err);
   Q4xMtp *m = q4x_mtp_create(mtp, w, err);
   if (!m)
     printf("  MTP refused: %s\n", err), exit(1);
@@ -288,6 +293,7 @@ static void test_mtp(const Q4xWeights *w, const char *path)
   assert(m->eh_proj->dims[0] == 2u * (uint64_t)w->geo.n_embd);
   q4x_mtp_destroy(m);
   printf("  MTP: blk.%d and the nextn tensors taken\n", w->geo.n_layers);
+  osmos_clear(err);
   assert(!q4x_mtp_create(model, w, err) && strstr(err, "nextn"));
   printf("    the model's own file as a head -> %s\n", err);
   struct
@@ -303,6 +309,7 @@ static void test_mtp(const Q4xWeights *w, const char *path)
     assert(k);
     const uint64_t old = k->v.u;
     k->v.u = keys[i].bad;
+    osmos_clear(err);
     assert(!q4x_mtp_create(mtp, w, err) && strstr(err, keys[i].needle));
     printf("    %-36s -> %s\n", keys[i].what, err);
     k->v.u = old;
@@ -310,12 +317,14 @@ static void test_mtp(const Q4xWeights *w, const char *path)
   GgufKv *shared = (GgufKv *)gguf_kv(mtp, "qwen4exp.nextn_shared_target_tensors");
   assert(shared);
   shared->v.u = 0;
+  osmos_clear(err);
   assert(!q4x_mtp_create(mtp, w, err) && strstr(err, "shared"));
   printf("    %-36s -> %s\n", "a self-contained head", err);
   shared->v.u = 1;
   GgufTensor *t = (GgufTensor *)gguf_tensor(mtp, "blk.48.nextn.eh_proj.weight");
   assert(t);
   t->name[0] = 'X';
+  osmos_clear(err);
   assert(!q4x_mtp_create(mtp, w, err) && strstr(err, "eh_proj"));
   printf("    %-36s -> %s\n", "its eh_proj missing", err);
   t->name[0] = 'b';
@@ -329,13 +338,14 @@ static void test_mtp(const Q4xWeights *w, const char *path)
    tensor of */
 static void test_overlay(const char *path)
 {
-  char err[Q4X_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
   Gguf *ov = gguf_create(path, gerr);
   if (!ov)
   {
     printf("  overlay: not on this machine, skipped (%s)\n", gerr);
     return;
   }
+  osmos_clear(err);
   Q4xWeights *w = q4x_weights_create(model, ov, err);
   if (!w)
     printf("  overlay refused: %s\n", err);
@@ -356,16 +366,19 @@ static void test_overlay(const char *path)
   GgufTensor *t = (GgufTensor *)gguf_tensor(ov, "blk.0.ssm_out.weight");
   assert(t);
   t->name[0] = 'X';
+  osmos_clear(err);
   w = q4x_weights_create(model, ov, err);
   assert(!w && strstr(err, "Xlk.0.ssm_out.weight")), printf("    an overlay tensor no role reads -> %s\n", err);
   t->name[0] = 'b';
   const uint64_t d0 = t->dims[0];
   t->dims[0] = d0 / 2;
+  osmos_clear(err);
   w = q4x_weights_create(model, ov, err);
   assert(!w && strstr(err, "blk.0.ssm_out.weight")), printf("    an overlay tensor of another shape -> %s\n", err);
   t->dims[0] = d0;
   GgufTensor *m = (GgufTensor *)gguf_tensor(model, "blk.0.ssm_out.weight");
   m->name[0] = 'X';
+  osmos_clear(err);
   w = q4x_weights_create(model, ov, err);
   assert(!w), printf("    an overlay tensor the model has none of -> %s\n", err);
   m->name[0] = 'b';
@@ -377,7 +390,8 @@ static void test_overlay(const char *path)
 int main(void)
 {
   printf("[test_q4x_weights] start\n");
-  char err[Q4X_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  osmos_clear(err);
   assert(!q4x_weights_create(NULL, NULL, err) && err[0]);
   q4x_weights_destroy(NULL);
   snprintf(path, sizeof path, QWEN, getenv("HOME") ? getenv("HOME") : "");
@@ -390,6 +404,7 @@ int main(void)
   test_real();
   test_tensors();
   test_kv();
+  osmos_clear(err);
   Q4xWeights *w = q4x_weights_create(model, NULL, err);
   assert(w);
   snprintf(path, sizeof path, QWEN_MTP, getenv("HOME") ? getenv("HOME") : "");

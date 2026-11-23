@@ -6,6 +6,7 @@
 #include "osmos/model/qtype.h"
 #include "osmos/q4x/dflash.h"
 #include "../model/gguf_meta.h"
+#include "osmos/err.h"
 
 /* DFlash2's GGUF (tools/convert/dflash2_gguf.py) read and checked: its keys against the target and its kernels' fixed
    shapes, its tensors each a role (q4x_weights_create's checks), none left over */
@@ -54,12 +55,6 @@ static const Role layers[] = {
     {"ffn_conv_proj.weight", LAY(ffn_conv_proj), MAT, {D_EMBD, D_CONV_PROJ}},
 };
 
-static bool fail(char *err, const char *name, const char *why)
-{
-  snprintf(err, Q4X_ERR, "%s: %s", name, why);
-  return false;
-}
-
 static uint64_t dim(const Q4xDflashGeometry *g, Dim d)
 {
   switch (d)
@@ -84,23 +79,23 @@ static const GgufTensor *claim(const Gguf *g, bool *taken, const Q4xDflashGeomet
 {
   const GgufTensor *t = gguf_tensor(g, name);
   if (!t)
-    return fail(err, name, "missing"), NULL;
+    return osmos_fail(err, "%s: %s", name, "missing"), NULL;
   int n = 0;
   while (n < 3 && r->dims[n] != D_NONE)
     n++;
   if (t->n_dims != (uint32_t)n)
-    return fail(err, name, "of another number of dims"), NULL;
+    return osmos_fail(err, "%s: %s", name, "of another number of dims"), NULL;
   uint64_t values = 1;
   for (int i = 0; i < n; i++)
   {
     if (t->dims[i] != dim(geo, r->dims[i]))
-      return fail(err, name, "of another shape"), NULL;
+      return osmos_fail(err, "%s: %s", name, "of another shape"), NULL;
     values *= t->dims[i];
   }
   if (r->path == F32 ? t->type != T_F32 : (qtype_paths(t->type) & r->path) != r->path)
-    return fail(err, name, "a type its reader does not take"), NULL;
+    return osmos_fail(err, "%s: %s", name, "a type its reader does not take"), NULL;
   if (t->bytes != gguf_bytes(t->type, values))
-    return fail(err, name, "its bytes not its type's for its shape"), NULL;
+    return osmos_fail(err, "%s: %s", name, "its bytes not its type's for its shape"), NULL;
   taken[t - g->tensors] = true;
   return t;
 }
@@ -165,22 +160,22 @@ static bool geometry(const Gguf *gg, const Q4xDflashTarget *t, Q4xDflashGeometry
   return true;
 }
 
-Q4xDflash *q4x_dflash_create(const Gguf *g, const Q4xWeights *target, char err[Q4X_ERR])
+Q4xDflash *q4x_dflash_create(const Gguf *g, const Q4xWeights *target, char err[OSMOS_ERR])
 {
   if (!target)
-    return fail(err, "q4x_dflash_create", "no drafter or no target"), NULL;
+    return osmos_fail(err, "%s: %s", "q4x_dflash_create", "no drafter or no target"), NULL;
   const Q4xDflashTarget t = {target->geo.n_embd, target->geo.n_vocab, target->geo.n_layers};
   return q4x_dflash_create_for(g, &t, err);
 }
 
-Q4xDflash *q4x_dflash_create_for(const Gguf *g, const Q4xDflashTarget *target, char err[Q4X_ERR])
+Q4xDflash *q4x_dflash_create_for(const Gguf *g, const Q4xDflashTarget *target, char err[OSMOS_ERR])
 {
   if (!g || !target)
-    return fail(err, "q4x_dflash_create", "no drafter or no target"), NULL;
+    return osmos_fail(err, "%s: %s", "q4x_dflash_create", "no drafter or no target"), NULL;
   Q4xDflash *d = calloc(1, sizeof *d);
   bool *taken = calloc(g->n_tensors ? g->n_tensors : 1, sizeof *taken);
   if (!d || !taken)
-    return free(d), free(taken), fail(err, "q4x_dflash_create", "out of memory"), NULL;
+    return free(d), free(taken), osmos_fail(err, "%s: %s", "q4x_dflash_create", "out of memory"), NULL;
   d->model = g;
   bool ok = geometry(g, target, &d->geo, err);
   for (size_t i = 0; ok && i < sizeof tops / sizeof *tops; i++)
@@ -194,7 +189,7 @@ Q4xDflash *q4x_dflash_create_for(const Gguf *g, const Q4xDflashTarget *target, c
     }
   for (size_t i = 0; ok && i < g->n_tensors; i++)
     if (!taken[i])
-      ok = fail(err, g->tensors[i].name, "a tensor no role of the drafter takes");
+      ok = osmos_fail(err, "%s: %s", g->tensors[i].name, "a tensor no role of the drafter takes");
   free(taken);
   if (!ok)
     return free(d), NULL;

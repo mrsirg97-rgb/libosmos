@@ -186,7 +186,6 @@ typedef struct Q4xSeqBytes
 Q4xSeqBytes q4x_seq_bytes(const Q4xGeometry *g);
 bool q4x_seq_reset(Q4xSeq *s); /* hip_state.c: empty, position 0 (its recurrent states and histories zeroed) */
 
-bool q4x_fail(char *err, const char *why);
 /* y = W x for n tokens (rows xs, ys apart): mm (f16 activations, WMMA) for a matrix it tiles, else the matvec - by the
    matrix alone, so a token's bits are its own whatever its batch (hip_layers.c). `ready`: b.x16 is this x's already
    (the call before made it); q4x_mat2: two matrices on one x, one launch when mm takes both (mm_run2: each the bits it

@@ -13,6 +13,7 @@
 #include "osmos/mem/host_slots.h"
 #include "osmos/model/qtype.h"
 #include "q4x_impl.h"
+#include "osmos/err.h"
 
 /* the NPU's part is the tables' 128-token run - npu_select_q4x takes that run's entries whole: one size, three names
    (npu_pack.h, q4x_ops.h's runs, q4x_moe.hip's kPart), held together here (0.7.1) */
@@ -36,17 +37,17 @@ void q4x_npu_destroy(Q4xForward *f)
   f->npu_w0 = f->npu_w1 = NULL, f->npu_c0 = f->npu_c1 = NULL;
 }
 
-bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[Q4X_FWD_ERR])
+bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[OSMOS_ERR])
 {
   const Q4xGeometry *g = &f->w->geo;
   if (!dir || !(share > 0.0f && share < 1.0f))
-    return q4x_fail(err, "q4x_forward_npu: a directory and a share in (0, 1)");
+    return osmos_fail(err, "q4x_forward_npu: a directory and a share in (0, 1)");
   if (f->mem && !q4x_forward_whole(f)) /* its weights read in place: every expert's pages fixed */
-    return q4x_fail(err, "q4x_forward_npu: the experts streamed (a budget under every expert's) - the NPU reads every "
+    return osmos_fail(err, "q4x_forward_npu: the experts streamed (a budget under every expert's) - the NPU reads every "
                          "one in place");
   /* the kernels' shapes (fused_ds.py MODEL=qwen): 2560 -> 640 -> 2560 */
   if (g->n_embd != 2560 || g->ff_exp != 640)
-    return q4x_fail(err, "q4x_forward_npu: the kernels are Qwen3.8-Flash-Next's (2560 -> 640 -> 2560)");
+    return osmos_fail(err, "q4x_forward_npu: the kernels are Qwen3.8-Flash-Next's (2560 -> 640 -> 2560)");
   q4x_npu_destroy(f);
   const uint64_t n = f->max_tokens, k = (uint64_t)g->n_used, D = (uint64_t)g->n_embd, ff = (uint64_t)g->ff_exp;
   char nerr[NPU_ERR] = "";
@@ -75,12 +76,12 @@ bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[Q4X_F
   if (!ok)
   {
     q4x_npu_destroy(f);
-    return q4x_fail(err, nerr);
+    return osmos_fail(err, "%s", nerr);
   }
   if (!layers)
   {
     q4x_npu_destroy(f);
-    return q4x_fail(err, "q4x_forward_npu: no layer's experts in formats the kernels take");
+    return osmos_fail(err, "q4x_forward_npu: no layer's experts in formats the kernels take");
   }
   const unsigned mapped = hipHostMallocMapped | hipHostMallocCoherent;
   const size_t rows = (size_t)NPU_SELECT_MAX * NPU_TOKENS * sizeof(int32_t), m = NPU_SELECT_MAX;
@@ -92,7 +93,7 @@ bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[Q4X_F
       hipEventCreateWithFlags(&f->npu_packed, hipEventDisableTiming) != hipSuccess)
   {
     q4x_npu_destroy(f);
-    return q4x_fail(err, "q4x_forward_npu: out of memory");
+    return osmos_fail(err, "q4x_forward_npu: out of memory");
   }
   f->npu_share = share;
   return true;

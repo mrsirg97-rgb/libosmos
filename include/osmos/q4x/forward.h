@@ -1,13 +1,13 @@
 #ifndef OSMOS_Q4X_FORWARD_H
 #define OSMOS_Q4X_FORWARD_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/model/state_io.h"
 #include "osmos/q4x/weights.h"
 
-#define Q4X_FWD_ERR 256
 /* a sequence's states kept behind its latest: a rollback's reach - a drafter's most drafts a round (OSMOS_MAX_BLOCK,
    the engine's), each a DeltaNet layer's S (3.1 MB) a slot: ~1 GB a sequence at 8 */
 #define Q4X_MAX_BACK 8
@@ -41,8 +41,8 @@ typedef struct Q4xOptions
 } Q4xOptions;
 
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
-                               char err[Q4X_FWD_ERR]);
-Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, const Q4xOptions *o, char err[Q4X_FWD_ERR]);
+                               char err[OSMOS_ERR]);
+Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, const Q4xOptions *o, char err[OSMOS_ERR]);
 void q4x_forward_destroy(Q4xForward *f);
 void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
 /* the build's bytes (its fixed part and its experts' pinned host slots) */
@@ -52,12 +52,12 @@ void q4x_forward_side_spin(Q4xForward *f, uint32_t us);
 /* 0.7.0: the NPU beside the GPU (src/q4x/hip_npu.c): dir its kernels (npu_open's: iq3xxs/, iq2s/, iq4nl-down/), share
    the part of an eligible layer's prompt picks it takes (whole 128-token entries; an IQ2_S layer's scaled by its
    cost). another forward's bits: q4x_identity tells them apart */
-bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[Q4X_FWD_ERR]);
+bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[OSMOS_ERR]);
 /* npu_run's calls, launches and the host's time in them; the parts wanted, and those the tables' whole entries gave */
 void q4x_forward_npu_stats(const Q4xForward *f, uint64_t *calls, uint64_t *parts, double *wait_us, uint64_t *wanted,
                            uint64_t *taken);
 
-Q4xSeq *q4x_seq_create(Q4xForward *f, char err[Q4X_FWD_ERR]);
+Q4xSeq *q4x_seq_create(Q4xForward *f, char err[OSMOS_ERR]);
 void q4x_seq_destroy(Q4xSeq *s);
 int32_t q4x_seq_position(const Q4xSeq *s);
 uint32_t q4x_seq_reach(const Q4xSeq *s);
@@ -66,31 +66,31 @@ bool q4x_seq_prompt(Q4xSeq *s, uint32_t end);
 void q4x_seq_fail(Q4xSeq *s);
 uint64_t q4x_identity(const Q4xForward *f);
 uint64_t q4x_seq_state_bytes(const Q4xSeq *s);
-bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FWD_ERR]);
-bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[Q4X_FWD_ERR]);
+bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
+bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
 uint64_t q4x_seq_mark_bytes(const Q4xSeq *s);
-bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR]);
-bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ERR]);
+bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
+bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 
 #define Q4X_MAX_RUNS 64 /* a step's sequences at most (q4x_step) */
 bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-              uint32_t row0, char err[Q4X_FWD_ERR]);
-bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[Q4X_FWD_ERR]);
+              uint32_t row0, char err[OSMOS_ERR]);
+bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[OSMOS_ERR]);
 const float *q4x_logits(const Q4xForward *f);
 bool q4x_kept(const Q4xForward *f, uint32_t row);
 const float *q4x_taps(const Q4xForward *f);
-bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR]);
+bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 
-bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR]);
+bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);
 int q4x_mtp_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
-                  float *conf, char err[Q4X_FWD_ERR]);
+                  float *conf, char err[OSMOS_ERR]);
 bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32_t n, uint32_t max, float conf_min,
                        float cum_min, int32_t *drafts, float *conf, uint32_t stride, int *counts,
-                       char err[Q4X_FWD_ERR]);
+                       char err[OSMOS_ERR]);
 
-bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR]);
+bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);
 int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
-                     float *conf, char err[Q4X_FWD_ERR]);
+                     float *conf, char err[OSMOS_ERR]);
 
 #endif
 

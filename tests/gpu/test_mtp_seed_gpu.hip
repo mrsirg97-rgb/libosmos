@@ -27,7 +27,7 @@ struct Drafted {
 };
 
 static Drafted run(Q4xForward* f, const std::vector<int32_t>& p, bool hold) {
-  char err[Q4X_FWD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Q4xSeq* s = q4x_seq_create(f, err);
   CHECK(s);
   CHECK(q4x_batch(f, s, p.data(), kPrompt, 0, err));
@@ -57,7 +57,7 @@ int main() {
     std::printf("[test_mtp_seed_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its MTP head, the dump's ids or a GPU\n");
     return 77;
   }
-  char gerr[GGUF_ERR] = "", werr[Q4X_ERR] = "", ferr[Q4X_FWD_ERR] = "";
+  char gerr[GGUF_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(first.c_str(), gerr);
   Gguf* mg = gguf_create(head.c_str(), gerr);
   CHECK(g && mg);

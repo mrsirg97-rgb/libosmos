@@ -22,8 +22,6 @@
 _Static_assert(Q4X_MTP_BLOCK <= OSMOS_MAX_BLOCK, "the head's drafts within the engine's");
 _Static_assert(Q4X_DFLASH_BLOCK_MAX - 1 <= OSMOS_MAX_BLOCK, "a DFlash block's drafts within the engine's");
 _Static_assert(Q4X_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
-_Static_assert(OSMOS_ERR >= Q4X_FWD_ERR && OSMOS_ERR >= Q4X_ERR && OSMOS_ERR >= GGUF_ERR,
-               "one error buffer for the engine and the family's calls");
 
 typedef struct Model
 {

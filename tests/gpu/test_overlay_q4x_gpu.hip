@@ -76,7 +76,7 @@ struct Run {
 };
 
 static Run run(const Gguf* g, const Gguf* ov, uint32_t vocab) {
-  char err[Q4X_FWD_ERR] = "", werr[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   Q4xWeights* w = q4x_weights_create(g, ov, werr);
   if (!w) std::fprintf(stderr, "  weights: %s\n", werr);
   CHECK(w);

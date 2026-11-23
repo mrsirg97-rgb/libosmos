@@ -1,13 +1,13 @@
 #ifndef OSMOS_Q4X_WEIGHTS_H
 #define OSMOS_Q4X_WEIGHTS_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/mem/pool.h"
 #include "osmos/model/gguf.h"
 
-#define Q4X_ERR 256
 #define Q4X_MAX_LAYERS 64
 #define Q4X_MAX_HC 8
 #define Q4X_MAX_NGRAM 4     /* the n-gram table's longest n-gram */
@@ -78,9 +78,9 @@ typedef struct Q4xMtp
   const GgufTensor *eh_proj, *enorm, *hnorm, *head_norm, *head_down, *head_up;
 } Q4xMtp;
 
-Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[Q4X_ERR]);
+Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[OSMOS_ERR]);
 void q4x_weights_destroy(Q4xWeights *w);
-Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[Q4X_ERR]);
+Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[OSMOS_ERR]);
 void q4x_mtp_destroy(Q4xMtp *m);
 size_t q4x_weights_experts(const Q4xWeights *w, const int *model_fds, PoolUnit *units, size_t cap);
 

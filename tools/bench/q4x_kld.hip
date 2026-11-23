@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
   CHECK(!(ref_out && ref_in));
   const char* mp = std::getenv("MODEL");
   CHECK(mp);
-  char gerr[GGUF_ERR] = "", werr[Q4X_ERR] = "", ferr[Q4X_FWD_ERR] = "";
+  char gerr[GGUF_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(mp, gerr);
   if (!g) std::fprintf(stderr, "gguf_create: %s\n", gerr), std::_Exit(1);
   const char* op = std::getenv("OVERLAY");

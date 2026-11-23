@@ -3,6 +3,7 @@
 #include "osmos/gpu/mm.h"
 #include "osmos/model/qtype.h"
 #include "q4x_impl.h"
+#include "osmos/err.h"
 
 /* a layer's blocks, each as its test holds it to llama.cpp's (tests/gpu/test_q4x_*_gpu): the mixer into b.mixed and
    b.inj, a block's output into b.out, the n-gram layer's into b.h itself */
@@ -77,7 +78,7 @@ bool q4x_overflow_ok(Q4xForward *f, char *err)
     return true;
   *f->b.pin_overflow = 0;
   hipMemset(f->b.overflow, 0, 4);
-  return q4x_fail(err, "an activation past f16's range (mm's): the step refused, its results not to be read");
+  return osmos_fail(err, "an activation past f16's range (mm's): the step refused, its results not to be read");
 }
 
 #define mat(f, t, rows, cols, x, xs, n, y, ys) q4x_mat(f, t, rows, cols, x, xs, n, y, ys, false)

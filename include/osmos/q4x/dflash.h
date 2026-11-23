@@ -1,6 +1,7 @@
 #ifndef OSMOS_Q4X_DFLASH_H
 #define OSMOS_Q4X_DFLASH_H
 
+#include "osmos/err.h"
 #include <stdint.h>
 
 #include "osmos/model/gguf.h"
@@ -50,8 +51,8 @@ typedef struct Q4xDflashTarget
   int n_embd, n_vocab, n_layers;
 } Q4xDflashTarget;
 
-Q4xDflash *q4x_dflash_create(const Gguf *g, const Q4xWeights *target, char err[Q4X_ERR]);
-Q4xDflash *q4x_dflash_create_for(const Gguf *g, const Q4xDflashTarget *target, char err[Q4X_ERR]);
+Q4xDflash *q4x_dflash_create(const Gguf *g, const Q4xWeights *target, char err[OSMOS_ERR]);
+Q4xDflash *q4x_dflash_create_for(const Gguf *g, const Q4xDflashTarget *target, char err[OSMOS_ERR]);
 void q4x_dflash_destroy(Q4xDflash *d);
 
 #endif

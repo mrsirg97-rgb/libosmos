@@ -112,7 +112,7 @@ int main(int argc, char** argv) {
   for (int32_t x; f && std::fscanf(f, "%d,", &x) == 1;) ids.push_back(x);
   if (f) std::fclose(f);
   CHECK(ids.size() >= n);
-  char gerr[GGUF_ERR] = "", werr[Q4X_ERR] = "", ferr[Q4X_FWD_ERR] = "";
+  char gerr[GGUF_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(argv[1], gerr);
   Q4xWeights* w = g ? q4x_weights_create(g, nullptr, werr) : nullptr;
   if (!w) return std::fprintf(stderr, "q4x_layercmp: %s%s\n", gerr, werr), 1;

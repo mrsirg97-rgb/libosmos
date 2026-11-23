@@ -5,6 +5,7 @@
 #include "osmos/gpu/state_parts.h"
 #include "osmos/model/fnv.h"
 #include "q4x_impl.h"
+#include "osmos/err.h"
 
 /* a sequence as one byte string (osmos/q4x/forward.h, q4x_seq_save): a header, the n-gram layer's conv history,
    each layer's own - a DeltaNet's state and conv history, an attention's cache rows below the position, keys then
@@ -107,12 +108,12 @@ bool q4x_seq_reset(Q4xSeq *s)
 
 uint64_t q4x_seq_state_bytes(const Q4xSeq *s) { return s ? bytes_at(s, s->pos) : 0; }
 
-bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FWD_ERR])
+bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !sink)
-    return q4x_fail(err, "no sequence or sink");
+    return osmos_fail(err, "no sequence or sink");
   if (s->broken)
-    return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+    return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   Header h;
   memset(&h, 0, sizeof h);
   h.magic = STATE_MAGIC, h.version = STATE_VERSION, h.identity = q4x_identity(s->f), h.pos = s->pos;
@@ -121,19 +122,19 @@ bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[Q4X_FW
   memcpy(h.last, s->last, sizeof h.last); /* the latest Q4X_MAX_NGRAM: what the n-gram layer reads */
   Part p[MAX_PARTS];
   const char *why = state_parts_save(&h, sizeof h, p, parts(s, s->pos, p), sink, ctx);
-  return !why || q4x_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
 }
 
 static bool refuse(Q4xSeq *s, char *err, const char *why)
 {
   q4x_seq_reset(s);
-  return q4x_fail(err, why);
+  return osmos_fail(err, "%s", why);
 }
 
-bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[Q4X_FWD_ERR])
+bool q4x_seq_load_from(Q4xSeq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !src)
-    return q4x_fail(err, "no sequence or source");
+    return osmos_fail(err, "no sequence or source");
   Header h;
   s->prompt_end = 0; /* the loaded conversation's prompt: told again (q4x_seq_prompt) */
   memset(s->last, 0, sizeof s->last);
@@ -220,14 +221,14 @@ uint64_t q4x_seq_mark_bytes(const Q4xSeq *s)
   return state_parts_bytes(sizeof(MarkHeader), p, mark_parts(s, p)) - sizeof(uint64_t); /* a mark has no sum */
 }
 
-bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_FWD_ERR])
+bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || !out || bytes != q4x_seq_mark_bytes(s))
-    return q4x_fail(err, "no sequence, or a mark's room not its size");
+    return osmos_fail(err, "no sequence, or a mark's room not its size");
   if (s->broken)
-    return q4x_fail(err, "a sequence after a failed step (its states part written): no mark of it");
+    return osmos_fail(err, "a sequence after a failed step (its states part written): no mark of it");
   if (hipDeviceSynchronize() != hipSuccess)
-    return q4x_fail(err, "a GPU call failed (before the mark's save)");
+    return osmos_fail(err, "a GPU call failed (before the mark's save)");
   MarkHeader h;
   memset(&h, 0, sizeof h);
   h.magic = MARK_MAGIC, h.pos = s->pos, h.n_last = s->n_last < Q4X_MAX_NGRAM ? s->n_last : Q4X_MAX_NGRAM;
@@ -236,27 +237,27 @@ bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[Q4X_
   memcpy(out, &h, sizeof h);
   Part p[MAX_PARTS];
   const char *why = state_parts_to_host(p, mark_parts(s, p), (uint8_t *)out + sizeof h);
-  return !why || q4x_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
 }
 
-bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[Q4X_FWD_ERR])
+bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || !in || bytes != q4x_seq_mark_bytes(s))
-    return q4x_fail(err, "no sequence, or a mark not its size");
+    return osmos_fail(err, "no sequence, or a mark not its size");
   MarkHeader h;
   memcpy(&h, in, sizeof h);
   if (h.magic != MARK_MAGIC || h.pos < 0 || h.pos > s->pos || h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM)
-    return q4x_fail(err, "not a mark, or one past the sequence's position");
+    return osmos_fail(err, "not a mark, or one past the sequence's position");
   if (s->broken)
-    return q4x_fail(err, "a sequence after a failed step: its rows below the mark not known (load a state)");
+    return osmos_fail(err, "a sequence after a failed step: its rows below the mark not known (load a state)");
   if (hipDeviceSynchronize() != hipSuccess) /* its states not still being read */
-    return q4x_fail(err, "a GPU call failed (before the mark's load)");
+    return osmos_fail(err, "a GPU call failed (before the mark's load)");
   s->cur = 0, s->back = 0; /* into slot 0, nothing behind it (as a load) */
   Part p[MAX_PARTS];
   if (state_parts_from_host(p, mark_parts(s, p), (const uint8_t *)in + sizeof h))
   {
     q4x_seq_reset(s);
-    return q4x_fail(err, "a GPU copy failed (the mark's load): the sequence emptied");
+    return osmos_fail(err, "a GPU copy failed (the mark's load): the sequence emptied");
   }
   s->pos = h.pos, s->n_last = h.n_last, s->prompt_end = 0;
   memcpy(s->last, h.last, sizeof h.last);

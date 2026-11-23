@@ -19,6 +19,7 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/q4x/forward.h"
 #include "osmos/q4x/weights.h"
@@ -73,24 +74,31 @@ static bool sink_none(void*, const void*, uint64_t) { return true; }
 static int32_t last_after = -1;  // after_steps's token, against the clean run's
 
 static Out run(const Gguf* g, const Gguf* ov, const std::vector<int32_t>& p) {
-  char err[Q4X_FWD_ERR] = "", werr[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
+  osmos_clear(werr);
   Q4xWeights* w = q4x_weights_create(g, ov, werr);
   CHECK(w);
+  osmos_clear(err);
   Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
   CHECK(f);
+  osmos_clear(err);
   Q4xSeq* s = q4x_seq_create(f, err);
   CHECK(s);
   Out o{false, -1, ""};
   o.ok = q4x_batch(f, s, p.data(), kPrompt, 0, err) && q4x_greedy(f, kPrompt - 1, 1, &o.t, err);
   o.err = err;
   if (!o.ok) {  // the refused step's sequence: refused until reset
-    char e2[Q4X_FWD_ERR] = "";
+    char e2[OSMOS_ERR] = "";
+    osmos_clear(e2);
     CHECK(!q4x_batch(f, s, p.data(), 1, 0, e2));
     o.after = e2;
     CHECK(!q4x_seq_rollback(s, 1));
+    osmos_clear(e2);
     CHECK(!q4x_seq_save_to(s, sink_none, nullptr, e2) && std::strstr(e2, "a failed step"));
     q4x_seq_destroy(s);  // another sequence: refused only for its own step's overflow
+    osmos_clear(e2);
     s = q4x_seq_create(f, e2);
+    osmos_clear(e2);
     CHECK(s && !q4x_batch(f, s, p.data(), kPrompt, 0, e2) && std::strstr(e2, "f16"));
   }
   q4x_seq_destroy(s);
@@ -111,12 +119,16 @@ static void blow_up(const char* step, int layer, float* dev, uint64_t n, void*) 
 // within its reach, a save - and a load of the state saved before the refusal makes it usable again, its next token
 // the clean run's
 static void after_steps(const Gguf* g, const std::vector<int32_t>& p) {
-  char err[Q4X_FWD_ERR] = "", werr[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
+  osmos_clear(werr);
   Q4xWeights* w = q4x_weights_create(g, nullptr, werr);
   CHECK(w);
+  osmos_clear(err);
   Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
   CHECK(f);
+  osmos_clear(err);
   Q4xSeq* s = q4x_seq_create(f, err);
+  osmos_clear(err);
   CHECK(s && q4x_batch(f, s, p.data(), kPrompt / 2, 0, err) && q4x_seq_reach(s) > 0);
   std::vector<uint8_t> saved;
   const auto sink = [](void* ctx, const void* b, uint64_t n) {
@@ -124,12 +136,16 @@ static void after_steps(const Gguf* g, const std::vector<int32_t>& p) {
     v->insert(v->end(), (const uint8_t*) b, (const uint8_t*) b + n);
     return true;
   };
+  osmos_clear(err);
   CHECK(q4x_seq_save_to(s, sink, &saved, err));
   q4x_forward_probe(f, blow_up, nullptr);
+  osmos_clear(err);
   CHECK(!q4x_batch(f, s, p.data() + kPrompt / 2, kPrompt / 2, 0, err) && std::strstr(err, "f16"));
   q4x_forward_probe(f, nullptr, nullptr);
+  osmos_clear(err);
   CHECK(!q4x_batch(f, s, p.data() + kPrompt / 2, 1, 0, err) && std::strstr(err, "a failed step"));
   CHECK(!q4x_seq_rollback(s, 1));  // within its reach: refused for the failure alone
+  osmos_clear(err);
   CHECK(!q4x_seq_save_to(s, sink_none, nullptr, err) && std::strstr(err, "a failed step"));
   size_t at = 0;
   const auto src = [](void* ctx, void* b, uint64_t n) {
@@ -139,14 +155,18 @@ static void after_steps(const Gguf* g, const std::vector<int32_t>& p) {
     return true;
   };
   std::pair<std::vector<uint8_t>*, size_t*> in{&saved, &at};
+  osmos_clear(err);
   CHECK(q4x_seq_load_from(s, saved.size(), src, &in, err));
   int32_t t = -1;
+  osmos_clear(err);
   CHECK(q4x_batch(f, s, p.data() + kPrompt / 2, kPrompt / 2, 0, err) && q4x_greedy(f, kPrompt / 2 - 1, 1, &t, err));
   std::printf("  a step refused part way after a clean one: another step, a rollback, a save refused; the saved state "
               "loaded, token %d\n", t);
   q4x_seq_fail(s);  // a caller's batch failed past it: refused the same way, a load clears it
+  osmos_clear(err);
   CHECK(!q4x_batch(f, s, p.data(), 1, 0, err) && std::strstr(err, "a failed step") && !q4x_seq_rollback(s, 1));
   at = 0;
+  osmos_clear(err);
   CHECK(q4x_seq_load_from(s, saved.size(), src, &in, err) && q4x_batch(f, s, p.data() + kPrompt / 2, 1, 0, err));
   std::printf("  q4x_seq_fail: refused the same way, a load clears it\n");
   q4x_seq_destroy(s);
@@ -159,22 +179,31 @@ static void after_steps(const Gguf* g, const std::vector<int32_t>& p) {
 // why, the rows beside it picked as before - never the greatest of what is left of the row
 static void nan_row(const Gguf* g, const std::vector<int32_t>& p, uint32_t vocab) {
   constexpr uint32_t kRows = 4, kBad = 2;
-  char err[Q4X_FWD_ERR] = "", werr[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
+  osmos_clear(werr);
   Q4xWeights* w = q4x_weights_create(g, nullptr, werr);
   CHECK(w);
+  osmos_clear(err);
   Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kMaxTokens, err);
   CHECK(f);
+  osmos_clear(err);
   Q4xSeq* s = q4x_seq_create(f, err);
+  osmos_clear(err);
   CHECK(s && q4x_batch(f, s, p.data(), kRows, 0, err));
   int32_t clean[kRows], got[kRows];
+  osmos_clear(err);
   CHECK(q4x_greedy(f, 0, kRows, clean, err));
   const float nan = NAN;
   float* row = const_cast<float*>(q4x_logits(f)) + (uint64_t) kBad * vocab;
   CHECK(hipMemcpy(row + (uint32_t) clean[kBad] / 2, &nan, 4, hipMemcpyHostToDevice) == hipSuccess);
   err[0] = '\0';
+  osmos_clear(err);
   CHECK(!q4x_greedy(f, 0, kRows, got, err) && std::strstr(err, "NaN"));
+  osmos_clear(err);
   CHECK(!q4x_greedy(f, kBad, 1, got, err));
+  osmos_clear(err);
   CHECK(q4x_greedy(f, 0, kBad, got, err) && got[0] == clean[0] && got[1] == clean[1]);
+  osmos_clear(err);
   CHECK(q4x_greedy(f, kBad + 1, 1, got, err) && got[0] == clean[kBad + 1]);
   std::printf("  a NaN in a row's logits: its pick refused (%s), the other rows' as before\n", err);
   q4x_seq_destroy(s);

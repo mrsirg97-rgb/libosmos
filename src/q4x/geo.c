@@ -8,7 +8,7 @@
 #define DIM_MAX (1 << 24)
 #define CTX_MAX (1 << 30)
 #define NGRAM_MIN 2
-_Static_assert(Q4X_ERR == GGUF_META_ERR && Q4X_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == GGUF_META_ERR && Q4X_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 /* layer l a Gated DeltaNet unless every attn_interval-th; the sparse attention's keys pooled in blocks of one ratio, a
    DeltaNet's none, the indexer's budget whole blocks of it */
@@ -89,7 +89,7 @@ static bool ple(GgufMeta *m, Q4xGeometry *g)
   return true;
 }
 
-bool q4x_geometry(const Gguf *model, Q4xGeometry *g, char err[Q4X_ERR])
+bool q4x_geometry(const Gguf *model, Q4xGeometry *g, char err[OSMOS_ERR])
 {
   GgufMeta m = {model, err, NULL, 0};
   memset(g, 0, sizeof *g);

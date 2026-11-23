@@ -2,6 +2,7 @@
 
 #include "dflash_core.h"
 #include "q4x_impl.h"
+#include "osmos/err.h"
 
 /* DFlash2's drafter on Qwen (osmos/q4x/forward.h, q4x_dflash_seed / q4x_dflash_draft): the core's math
    (dflash_core.h) through Qwen's calls - its matrices' path (q4x_mat, q4x_mat2: fused), its embedding's rows, its
@@ -46,41 +47,41 @@ static DfHost host(Q4xForward *f)
 
 static DfRings rings(const Q4xForward *f, Q4xSeq *s) { return (DfRings){s->dk, s->dv, f->df_ring}; }
 
-bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR])
+bool q4x_dflash_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
   if (!f || !s || s->f != f || !f->df)
-    return q4x_fail(err, "no forward with a drafter, or a sequence of another forward");
+    return osmos_fail(err, "no forward with a drafter, or a sequence of another forward");
   if (s->broken)
-    return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+    return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   if (s->step_n && s->step_id != f->steps) /* 0.9.2: b.taps a step's alone, from its row 0 - a batch of more than
                                               Q4X_MAX_RUNS runs is several steps, the later ones' taps over its */
-    return q4x_fail(err, "the drafter's taps another step's: seed right after the sequence's step (a batch of at most "
+    return osmos_fail(err, "the drafter's taps another step's: seed right after the sequence's step (a batch of at most "
                          "64 sequences)");
   if (from >= to || !s->step_n || from < s->step_pos0 || to > s->step_pos0 + (int32_t)s->step_n || to > s->pos)
-    return q4x_fail(err, "positions not of the sequence's last step, or past its position");
+    return osmos_fail(err, "positions not of the sequence's last step, or past its position");
   const uint32_t T = (uint32_t)f->df->geo.n_taps * (uint32_t)f->df->geo.n_embd;
   const float *taps = f->b.taps + (uint64_t)(s->step_t0 + (uint32_t)(from - s->step_pos0)) * T;
   const DfHost h = host(f);
   const DfRings r = rings(f, s);
   if (!df_seed(&h, f->df, &f->d, &r, taps, from, (uint32_t)(to - from)))
-    return q4x_fail(err, "a GPU call failed (the drafter's context)");
+    return osmos_fail(err, "a GPU call failed (the drafter's context)");
   s->df_lo = from > s->df_pos ? from : from < s->df_lo ? from : s->df_lo; /* past a gap: the context starts over */
   s->df_pos = to;
   return true;
 }
 
 int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
-                     float *conf, char err[Q4X_FWD_ERR])
+                     float *conf, char err[OSMOS_ERR])
 {
   if (!f || !s || s->f != f || !f->df || (max && (!drafts || !conf)))
-    return q4x_fail(err, "no forward with a drafter, a sequence of another forward, or no room"), -1;
+    return osmos_fail(err, "no forward with a drafter, a sequence of another forward, or no room"), -1;
   if (s->broken)
-    return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another"), -1;
+    return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another"), -1;
   const Q4xDflashGeometry *g = &f->df->geo;
   if (y < 0 || y >= g->n_vocab)
-    return q4x_fail(err, "a token not of the vocabulary"), -1;
+    return osmos_fail(err, "a token not of the vocabulary"), -1;
   if (s->df_pos != s->pos)
-    return q4x_fail(err, "the drafter's context not seeded to the sequence's position"), -1;
+    return osmos_fail(err, "the drafter's context not seeded to the sequence's position"), -1;
   const int32_t pos0 = s->pos, room = (int32_t)f->max_ctx - 1 - pos0; /* a draft's position below max_ctx */
   uint32_t n = (uint32_t)g->block - 1 < max ? (uint32_t)g->block - 1 : max;
   n = room <= 0 ? 0 : (uint32_t)room < n ? (uint32_t)room : n;
@@ -89,5 +90,5 @@ int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float co
   const int32_t lo = pos0 - (int32_t)g->window, ctx_from = lo > s->df_lo ? lo : s->df_lo; /* (the ring past it) */
   const DfHost h = host(f);
   const DfRings r = rings(f, s);
-  return df_draft(&h, f->df, &f->d, &r, y, pos0, ctx_from, n, conf_min, cum_min, drafts, conf, err, Q4X_FWD_ERR);
+  return df_draft(&h, f->df, &f->d, &r, y, pos0, ctx_from, n, conf_min, cum_min, drafts, conf, err, OSMOS_ERR);
 }

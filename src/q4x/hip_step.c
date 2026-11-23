@@ -4,6 +4,7 @@
 #include "osmos/q4x/ple.h"
 #include "osmos/gpu/mm.h"
 #include "q4x_impl.h"
+#include "osmos/err.h"
 
 /* a step: the tokens' embedding into hc streams, their n-gram rows, the layers, the end mixer, the logits - every
    sequence's tokens at once through the weights, each sequence's own through its own (its runs: Q4xRun) */
@@ -208,18 +209,18 @@ static bool head(Q4xForward *f, const Q4xRun *r, uint32_t runs, uint32_t n, uint
 }
 
 bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-              uint32_t row0, char err[Q4X_FWD_ERR])
+              uint32_t row0, char err[OSMOS_ERR])
 {
   Q4xRun r[Q4X_MAX_RUNS];
   if (!f || !seqs || !lens || !tokens || !runs || runs > Q4X_MAX_RUNS)
-    return q4x_fail(err, "no forward, sequences or tokens, or runs not 1 .. Q4X_MAX_RUNS");
+    return osmos_fail(err, "no forward, sequences or tokens, or runs not 1 .. Q4X_MAX_RUNS");
   for (uint32_t i = 0; i < runs; i++)
     if (seqs[i] && seqs[i]->broken)
-      return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+      return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   const uint32_t n = runs_of(f, seqs, lens, runs, r);
   f->steps++;
   if (!n || (uint64_t)row0 + n > f->max_tokens)
-    return q4x_fail(err, "a run of no tokens, a sequence twice, of another forward or past its context, or the rows "
+    return osmos_fail(err, "a run of no tokens, a sequence twice, of another forward or past its context, or the rows "
                          "past the forward's max_tokens");
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
@@ -228,28 +229,28 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
     r[i].s->broken = true;
   memset(b->kept + row0, 0, n * sizeof *b->kept); /* the step's rows: kept once it is whole */
   if (!embed(f, r, runs, tokens, n))
-    return q4x_fail(err, "a GPU call failed (the embedding)");
+    return osmos_fail(err, "a GPU call failed (the embedding)");
   bool pending = false;
   for (int l = 0; l < g->n_layers; l++)
   {
     if (!layer(f, r, runs, l, n, &pending))
-      return q4x_fail(err, "a GPU call failed (a layer)");
+      return osmos_fail(err, "a GPU call failed (a layer)");
     q4x_seen(f, "l_last", l, b->h, n * hd);
   }
   const Q4xWeights *w = f->w;
   if (!q4x_mix(f, w->out_hc_norm, w->out_hc_down, w->out_hc_up, NULL, n, pending)) /* the last MoE's into b.h */
-    return q4x_fail(err, "a GPU call failed (the end mixer)");
+    return osmos_fail(err, "a GPU call failed (the end mixer)");
   /* the head's h: the residual the end mixer read, at the step's rows (each sequence's place: advance) */
   if (f->mtp && hipMemcpyAsync(f->m.hid + (uint64_t)row0 * hd, b->h, (uint64_t)n * hd * sizeof(float),
                                hipMemcpyDeviceToDevice, NULL) != hipSuccess)
-    return q4x_fail(err, "a GPU call failed (the MTP head's rows)");
+    return osmos_fail(err, "a GPU call failed (the MTP head's rows)");
   q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
   const bool done = head(f, r, runs, n, row0) && q4x_overflow_read(f) && hipStreamSynchronize(NULL) == hipSuccess;
   hipDeviceSynchronize();
   if (f->mem)
     membrane_end(f->mem); /* the step's holds ended (its experts' kernels done) */
   if (!done)
-    return q4x_fail(err, "a GPU call failed (the logits)");
+    return osmos_fail(err, "a GPU call failed (the logits)");
   if (!q4x_overflow_ok(f, err))
     return false;
   for (uint32_t i = 0; i < runs; i++)
@@ -259,7 +260,7 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
   return true;
 }
 
-bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[Q4X_FWD_ERR])
+bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[OSMOS_ERR])
 {
   return q4x_step(f, &s, &n, 1, tokens, row0, err);
 }
@@ -276,20 +277,20 @@ bool q4x_seq_prompt(Q4xSeq *s, uint32_t end)
 }
 const float *q4x_taps(const Q4xForward *f) { return f && f->n_taps ? f->b.taps : NULL; }
 
-bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q4X_FWD_ERR])
+bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
   if (!f || !ids || !rows || row0 + rows > f->max_tokens)
-    return q4x_fail(err, "no forward or ids, or rows past a step's");
+    return osmos_fail(err, "no forward or ids, or rows past a step's");
   for (uint32_t r = 0; r < rows; r++)
     if (!f->b.kept[row0 + r])
-      return q4x_fail(err, "a row the last step kept no logits of");
+      return osmos_fail(err, "a row the last step kept no logits of");
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   int32_t *d = f->b.cnt; /* the MoE's table, free between steps */
   if (!ops_argmax(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, f->b.top_part, NULL) ||
       hipMemcpy(ids, d, rows * 4, hipMemcpyDeviceToHost) != hipSuccess)
-    return q4x_fail(err, "a GPU call failed (the greedy pick)");
+    return osmos_fail(err, "a GPU call failed (the greedy pick)");
   for (uint32_t r = 0; r < rows; r++)
     if (ids[r] < 0)
-      return q4x_fail(err, "a NaN in a row's logits");
+      return osmos_fail(err, "a NaN in a row's logits");
   return true;
 }

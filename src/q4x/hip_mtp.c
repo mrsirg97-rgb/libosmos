@@ -2,6 +2,7 @@
 
 #include "osmos/gpu/mm.h"
 #include "q4x_impl.h"
+#include "osmos/err.h"
 
 /* Qwen's MTP head (osmos/q4x/forward.h, q4x_mtp_seed / q4x_mtp_draft): llama.cpp's graph_mtp - h normed a stream, the
    token's embedding normed, both through eh_proj; then one attention layer and the MoE, hyper-connected; then its
@@ -47,18 +48,18 @@ static bool first_h(Q4xForward *f, Q4xSeq *s, int32_t p, float *to)
                                                    : hipMemsetAsync(to, 0, hd, NULL) == hipSuccess;
 }
 
-bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q4X_FWD_ERR])
+bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
   if (!f || !s || s->f != f || !f->mtp)
-    return q4x_fail(err, "no forward with an MTP head, or a sequence of another forward");
+    return osmos_fail(err, "no forward with an MTP head, or a sequence of another forward");
   if (s->broken)
-    return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+    return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   if (s->step_n && s->step_id != f->steps) /* (DFlash's guard: m.hid a later step's rows - 0.11.2, another sequence's
                                               h read as its own) */
-    return q4x_fail(err, "the head's h another step's: seed right after the sequence's step (a batch of at most 64 "
+    return osmos_fail(err, "the head's h another step's: seed right after the sequence's step (a batch of at most 64 "
                          "sequences)");
   if (!s->step_n || from < s->step_pos0 || from >= to || to > s->step_pos0 + (int32_t)s->step_n || to > s->pos)
-    return q4x_fail(err, "positions not of the sequence's last step");
+    return osmos_fail(err, "positions not of the sequence's last step");
   const Q4xGeometry *g = &f->w->geo;
   const Q4xLayer *L = &f->mtp->layer;
   Q4xMtpBuf *m = &f->m;
@@ -75,7 +76,7 @@ bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[Q
        q4x_attention_kv(f, L, &(Q4xCache){s->mkc, s->mvc, s->mixk, s->mixr, from, 0, n}, 1, n) &&
        copy(s->pend, rows + (uint64_t)(to - 1 - s->step_pos0) * hd, hd * F);
   if (!ok) /* its f16 overflow, if any, the next draft's or step's read finds (the flag accumulates) */
-    return q4x_fail(err, "a GPU call failed (the MTP head's seeding)");
+    return osmos_fail(err, "a GPU call failed (the MTP head's seeding)");
   s->pend_pos = to - 1;
   return true;
 }
@@ -114,20 +115,20 @@ static bool step(Q4xForward *f, Q4xSeq *const *s, const int32_t *tok, const int3
 
 bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32_t n, uint32_t max, float conf_min,
                        float cum_min, int32_t *drafts, float *conf, uint32_t stride, int *counts,
-                       char err[Q4X_FWD_ERR])
+                       char err[OSMOS_ERR])
 {
   if (!f || !f->mtp || !s || !y || !drafts || !conf || !counts || !n || n > Q4X_MAX_RUNS || n > f->max_tokens ||
       stride < max)
-    return q4x_fail(err, "no forward with an MTP head, no sequences or room, or not 1 .. Q4X_MAX_RUNS of them");
+    return osmos_fail(err, "no forward with an MTP head, no sequences or room, or not 1 .. Q4X_MAX_RUNS of them");
   for (uint32_t i = 0; i < n; i++)
   {
     if (s[i] && s[i]->broken)
-      return q4x_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+      return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
     if (!s[i] || s[i]->f != f)
-      return q4x_fail(err, "a sequence of another forward");
+      return osmos_fail(err, "a sequence of another forward");
     for (uint32_t j = 0; j < i; j++)
       if (s[j] == s[i])
-        return q4x_fail(err, "a sequence twice");
+        return osmos_fail(err, "a sequence twice");
   }
   const uint64_t hd = (uint64_t)f->w->geo.hc * f->w->geo.n_embd;
   Q4xSeq *as[Q4X_MAX_RUNS];
@@ -145,7 +146,7 @@ bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32
   while (ok && na)
   {
     if (!step(f, as, tok, pos, na, id, p))
-      return q4x_fail(err, "a GPU call failed (an MTP draft)");
+      return osmos_fail(err, "a GPU call failed (an MTP draft)");
     uint32_t kept = 0;
     for (uint32_t j = 0; ok && j < na; j++)
     {
@@ -162,11 +163,11 @@ bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32
     }
     na = kept;
   }
-  return ok || q4x_fail(err, "a GPU call failed (the MTP head's h)");
+  return ok || osmos_fail(err, "a GPU call failed (the MTP head's h)");
 }
 
 int q4x_mtp_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
-                  float *conf, char err[Q4X_FWD_ERR])
+                  float *conf, char err[OSMOS_ERR])
 {
   int n = 0;
   return q4x_mtp_draft_all(f, &s, &y, 1, max, conf_min, cum_min, drafts, conf, max, &n, err) ? n : -1;
