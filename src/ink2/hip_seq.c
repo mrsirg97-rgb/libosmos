@@ -8,6 +8,7 @@
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/state_parts.h"
 #include "osmos/model/fnv.h"
+#include "osmos/err.h"
 
 #define STATE_MAGIC 0x32474e494b4e49ull /* "INKLNG2" */
 #define MARK_MAGIC 0x4b52414d324b4e49ull
@@ -83,13 +84,13 @@ static uint32_t conv_row(const Ink2Forward *f, int c)
   return c == INK2_CONV_K || c == INK2_CONV_V ? (uint32_t)(g->n_kv_heads * g->head_dim) : (uint32_t)g->n_embd;
 }
 
-Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
+Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[OSMOS_ERR])
 {
   if (!f)
-    return ink2_fail(err, "inkling2: no forward"), NULL;
+    return osmos_fail(err, "no forward"), NULL;
   Ink2Seq *s = calloc(1, sizeof *s);
   if (!s)
-    return ink2_fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   s->f = f;
   const Ink2Geometry *g = &f->w->geo;
   const uint32_t kd = (uint32_t)(g->n_kv_heads * g->head_dim), kv = (uint32_t)g->n_kv_heads, T = f->max_tokens;
@@ -109,7 +110,7 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR])
   if (ok && f->mtp)
     ok = ink2_mtp_seq_make(s);
   if (!ok)
-    return ink2_fail(err, "inkling2: GPU memory refused (a sequence's caches)"), ink2_seq_destroy(s), NULL;
+    return osmos_fail(err, "GPU memory refused (a sequence's caches)"), ink2_seq_destroy(s), NULL;
   if (getenv("INK2_MEM") && atoi(getenv("INK2_MEM")))
   {
     uint64_t conv = 0, win = 0, full = 0;
@@ -271,48 +272,48 @@ static void settle(Ink2Seq *s, int32_t pos, bool mark)
 uint64_t ink2_seq_state_bytes(const Ink2Seq *s) { return s ? bytes_at(s, s->pos, false) : 0; }
 uint64_t ink2_seq_mark_bytes(const Ink2Seq *s) { return s ? bytes_at(s, s->pos, true) : 0; }
 
-bool ink2_seq_save_to(const Ink2Seq *s, StateSink sink, void *ctx, char err[INK2_FWD_ERR])
+bool ink2_seq_save_to(const Ink2Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || s->failed)
-    return ink2_fail(err, "inkling2: no sequence, or a failed one");
+    return osmos_fail(err, "no sequence, or a failed one");
   if (hipDeviceSynchronize() != hipSuccess)
-    return ink2_fail(err, "inkling2: a GPU call failed (the save)");
+    return osmos_fail(err, "a GPU call failed (the save)");
   const Head h = {STATE_MAGIC, ink2_identity(s->f), STATE_VERSION, s->pos};
   Part p[MAX_PARTS];
   return !state_parts_save(&h, sizeof h, p, parts(s, s->pos, false, false, p), sink, ctx) ||
-         ink2_fail(err, "inkling2: a GPU copy or the sink failed (the save)");
+         osmos_fail(err, "a GPU copy or the sink failed (the save)");
 }
 
-bool ink2_seq_load_from(Ink2Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[INK2_FWD_ERR])
+bool ink2_seq_load_from(Ink2Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
   if (!s)
-    return ink2_fail(err, "inkling2: no sequence");
+    return osmos_fail(err, "no sequence");
   Head h;
   if (bytes < sizeof h || !src(ctx, &h, sizeof h))
-    return settle(s, 0, false), ink2_fail(err, "inkling2: a state too short, or its source failed");
+    return settle(s, 0, false), osmos_fail(err, "a state too short, or its source failed");
   if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != ink2_identity(s->f))
-    return settle(s, 0, false), ink2_fail(err, "inkling2: a state of another format, model or build");
+    return settle(s, 0, false), osmos_fail(err, "a state of another format, model or build");
   if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || bytes != bytes_at(s, h.pos, false))
-    return settle(s, 0, false), ink2_fail(err, "inkling2: a state past max_ctx, or not its position's size");
+    return settle(s, 0, false), osmos_fail(err, "a state past max_ctx, or not its position's size");
   Part p[MAX_PARTS];
   const bool ok = !state_parts_load(&h, sizeof h, p, parts(s, h.pos, false, true, p), src, ctx);
   settle(s, ok ? h.pos : 0, false);
-  return ok || ink2_fail(err, "inkling2: a damaged state, or its source or a GPU copy failed (the load)");
+  return ok || osmos_fail(err, "a damaged state, or its source or a GPU copy failed (the load)");
 }
 
-bool ink2_seq_mark_save(const Ink2Seq *s, void *out, uint64_t bytes, char err[INK2_FWD_ERR])
+bool ink2_seq_mark_save(const Ink2Seq *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || s->failed || bytes != ink2_seq_mark_bytes(s))
-    return ink2_fail(err, "inkling2: no sequence, a failed one, or not its mark's size");
+    return osmos_fail(err, "no sequence, a failed one, or not its mark's size");
   if (hipDeviceSynchronize() != hipSuccess)
-    return ink2_fail(err, "inkling2: a GPU call failed (the mark)");
+    return osmos_fail(err, "a GPU call failed (the mark)");
   const Head h = {MARK_MAGIC, ink2_identity(s->f), STATE_VERSION, s->pos};
   uint8_t *o = out;
   memcpy(o, &h, sizeof h), o += sizeof h;
   Part p[MAX_PARTS];
   const int n = parts(s, s->pos, true, false, p);
   if (state_parts_to_host(p, n, o))
-    return ink2_fail(err, "inkling2: a GPU copy failed (the mark)");
+    return osmos_fail(err, "a GPU copy failed (the mark)");
   for (int i = 0; i < n; i++)
     o += p[i].bytes;
   const uint64_t sum = fnv(out, (uint64_t)(o - (uint8_t *)out), FNV_SEED);
@@ -320,26 +321,26 @@ bool ink2_seq_mark_save(const Ink2Seq *s, void *out, uint64_t bytes, char err[IN
   return true;
 }
 
-bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[INK2_FWD_ERR])
+bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || s->failed)
-    return ink2_fail(err, "inkling2: no sequence, or a failed one");
+    return osmos_fail(err, "no sequence, or a failed one");
   Head h;
   if (bytes < sizeof h + 8)
-    return ink2_fail(err, "inkling2: a mark too short");
+    return osmos_fail(err, "a mark too short");
   memcpy(&h, in, sizeof h);
   if (h.magic != MARK_MAGIC || h.version != STATE_VERSION || h.identity != ink2_identity(s->f) || h.pos < 0 ||
       h.pos > s->pos || bytes != bytes_at(s, h.pos, true))
-    return ink2_fail(err, "inkling2: a mark of another sequence, past its position, or of another size");
+    return osmos_fail(err, "a mark of another sequence, past its position, or of another size");
   uint64_t sum;
   memcpy(&sum, (const uint8_t *)in + bytes - 8, 8);
   if (sum != fnv(in, bytes - 8, FNV_SEED))
-    return ink2_fail(err, "inkling2: a damaged mark");
+    return osmos_fail(err, "a damaged mark");
   if (hipDeviceSynchronize() != hipSuccess)
-    return ink2_fail(err, "inkling2: a GPU call failed (the mark)");
+    return osmos_fail(err, "a GPU call failed (the mark)");
   Part p[MAX_PARTS];
   if (state_parts_from_host(p, parts(s, h.pos, true, true, p), (const uint8_t *)in + sizeof h))
-    return s->failed = true, ink2_fail(err, "inkling2: a GPU copy failed (the mark's load)");
+    return s->failed = true, osmos_fail(err, "a GPU copy failed (the mark's load)");
   /* a full layer's rows below the mark are the sequence's still: held the mark's position */
   const Ink2Geometry *g = &s->f->w->geo;
   for (int l = 0; l < g->n_slots; l++)

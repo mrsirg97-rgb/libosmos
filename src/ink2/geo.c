@@ -8,7 +8,7 @@
 #define CTX_MAX (1 << 30)
 #define PASSES_MAX 64
 #define GATING_SIGMOID 2 /* llama.cpp's LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID */
-_Static_assert(INK2_ERR == GGUF_META_ERR && INK2_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == GGUF_META_ERR && INK2_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 /* a value a slot - one integer, or an array of one a slot (upstream's): each slot's its layer's, every layer's the
    same (one count implemented) */
@@ -139,7 +139,7 @@ static bool upstream_keys(GgufMeta *m, Ink2Geometry *g)
 
 static bool ours(GgufMeta *m, Ink2Geometry *g);
 
-bool ink2_geometry(const Gguf *model, Ink2Geometry *g, char err[INK2_ERR])
+bool ink2_geometry(const Gguf *model, Ink2Geometry *g, char err[OSMOS_ERR])
 {
   GgufMeta m = {model, err, NULL, 0};
   memset(g, 0, sizeof *g);

@@ -5,18 +5,13 @@
 #include "gguf_meta.h"
 #include "osmos/ink2/mtp.h"
 #include "osmos/model/qtype.h"
+#include "osmos/err.h"
 
 /* the drafter's geometry and tensors (osmos/ink2/mtp.h), each checked */
 
 #define ARCH "inkling2_mtp"
 #define T_F32 0u
 #define T_BF16 30u
-
-static bool fail(char *err, const char *what, const char *why)
-{
-  snprintf(err, INK2_ERR, "inkling2_mtp: %s: %s", what, why);
-  return false;
-}
 
 /* a type the matvec reads (qtype.h's QTYPE_MV), its rows whole blocks */
 static bool is_mat(const GgufTensor *t)
@@ -33,22 +28,22 @@ static const GgufTensor *want(const Gguf *g, const char *name, uint64_t d0, uint
     if (!strcmp(g->tensors[i].name, name))
       t = &g->tensors[i];
   if (!t)
-    return fail(err, name, "missing"), NULL;
+    return osmos_fail(err, "the drafter: %s: %s", name, "missing"), NULL;
   const bool dims = t->dims[0] == d0 && (d1 ? t->n_dims == 2 && t->dims[1] == d1 : t->n_dims == 1);
   if (!dims)
-    return fail(err, name, "not the geometry's shape"), NULL;
+    return osmos_fail(err, "the drafter: %s: %s", name, "not the geometry's shape"), NULL;
   if (mat ? !is_mat(t) : t->type != T_F32)
-    return fail(err, name, mat ? "a type the matvec does not read" : "not F32"), NULL;
+    return osmos_fail(err, "the drafter: %s: %s", name, mat ? "a type the matvec does not read" : "not F32"), NULL;
   return t;
 }
 
-Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[INK2_ERR])
+Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[OSMOS_ERR])
 {
   if (!g || !target)
-    return fail(err, "create", "no drafter or no target"), NULL;
+    return osmos_fail(err, "the drafter: %s: %s", "create", "no drafter or no target"), NULL;
   Ink2Mtp *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "create", "out of memory"), NULL;
+    return osmos_fail(err, "the drafter: %s: %s", "create", "out of memory"), NULL;
   GgufMeta meta = {g, err, NULL, 0};
   int heads_dim = 0;
   int64_t local[INK2_MTP_MAX_LAYERS], taps[INK2_MTP_MAX_TAPS];
@@ -71,13 +66,13 @@ Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[INK2
     return ink2_mtp_destroy(m), NULL;
   const Ink2Geometry *tg = &target->geo;
   if (m->n_embd != tg->n_embd)
-    ok = fail(err, ARCH ".embedding_length", "not the target's width");
+    ok = osmos_fail(err, "the drafter: %s: %s", ARCH ".embedding_length", "not the target's width");
   else if (heads_dim != INK2_MTP_HEAD || m->n_heads % m->n_kv_heads)
-    ok = fail(err, ARCH ".attention.key_length", "heads not of 128 (the kernels'), or not a KV heads' multiple");
+    ok = osmos_fail(err, "the drafter: %s: %s", ARCH ".attention.key_length", "heads not of 128 (the kernels'), or not a KV heads' multiple");
   else if (m->block * (m->n_heads / m->n_kv_heads) > INK2_MTP_ATTN_ROWS)
-    ok = fail(err, ARCH ".block_size", "a block's queries times a KV head's heads past the attention's 48 rows");
+    ok = osmos_fail(err, "the drafter: %s: %s", ARCH ".block_size", "a block's queries times a KV head's heads past the attention's 48 rows");
   else if (m->rank != INK2_MTP_RANK)
-    ok = fail(err, ARCH ".markov_rank", "not 256 (the kernels')");
+    ok = osmos_fail(err, "the drafter: %s: %s", ARCH ".markov_rank", "not 256 (the kernels')");
   m->n_taps = (int)n_taps;
   for (size_t i = 0; ok && i < n_taps; i++)
   {
@@ -85,11 +80,11 @@ Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[INK2
     const bool last = i + 1 == n_taps;
     if ((last && taps[i] != tg->n_slots) || (!last && (taps[i] < 0 || taps[i] >= tg->n_slots)) ||
         (i && taps[i] <= taps[i - 1]))
-      ok = fail(err, ARCH ".target_layers", "not the target's steps ascending, the last its n_slots");
+      ok = osmos_fail(err, "the drafter: %s: %s", ARCH ".target_layers", "not the target's steps ascending, the last its n_slots");
   }
   for (size_t i = 0; ok && i < n_local; i++)
     if (local[i] < 0 || local[i] >= m->n_layers)
-      ok = fail(err, ARCH ".local_layers", "a layer not the drafter's");
+      ok = osmos_fail(err, "the drafter: %s: %s", ARCH ".local_layers", "a layer not the drafter's");
     else
       m->local[local[i]] = true;
   if (!ok)
@@ -128,7 +123,7 @@ Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[INK2
       if (!strcmp(g->tensors[i].name, "markov_head.markov_w1.weight"))
         w1 = &g->tensors[i];
     if (!w1 || w1->type != T_BF16 || w1->n_dims != 2 || w1->dims[0] != R || w1->dims[1] != V)
-      ok = fail(err, "markov_head.markov_w1.weight", "missing, not BF16, or not [the head's vocabulary][rank]");
+      ok = osmos_fail(err, "the drafter: %s: %s", "markov_head.markov_w1.weight", "missing, not BF16, or not [the head's vocabulary][rank]");
     m->m_w1 = w1;
   }
   if (!ok)

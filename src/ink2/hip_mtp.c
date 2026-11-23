@@ -18,12 +18,12 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/err.h"
 
 #define T_F32 0u
 #define T_Q8_0 8u
 #define Q8_0_BYTES(n) ((uint64_t)(n) / 32 * 34)
 
-static bool fail(char *err, const char *why) { return ink2_fail(err, why); }
 
 static uint32_t kvw(const Ink2Mtp *m) { return (uint32_t)m->n_kv_heads * INK2_MTP_HEAD; }
 static uint32_t qw(const Ink2Mtp *m) { return (uint32_t)m->n_heads * INK2_MTP_HEAD; }
@@ -78,7 +78,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
        ink2_up_f32_of(f, g, m->m_dflare, &d->m_dflare) && ink2_up_f32_of(f, g, m->m_rnn_b, &d->rnn_b) &&
        ink2_up_raw_of(f, g, m->m_w1, &d->w1);
   if (!ok)
-    return fail(err, "inkling2_mtp: a drafter tensor not read or uploaded");
+    return osmos_fail(err, "the drafter: a drafter tensor not read or uploaded");
   /* the mixtures: softmax over the taps, a stage a row */
   uint64_t n = 0;
   float *fw = ink2_host_f32(g, m->fuse, &n), *rnn = NULL, *hw = NULL, *hb = NULL;
@@ -136,7 +136,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
   if (db)
     hipFree(db);
   if (!ok)
-    return fail(err, "inkling2_mtp: the drafter's mixtures, Markov projections or fold not made");
+    return osmos_fail(err, "the drafter: the drafter's mixtures, Markov projections or fold not made");
   struct
   {
     void **p;
@@ -157,8 +157,8 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
   };
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     if (!ink2_dalloc(f, b[i].p, b[i].bytes))
-      return fail(err, "inkling2_mtp: GPU memory refused (the drafter's buffers)");
-  return hipMemset(d->overflow, 0, 4) == hipSuccess || fail(err, "inkling2_mtp: a GPU call failed (its overflow flag)");
+      return osmos_fail(err, "the drafter: GPU memory refused (the drafter's buffers)");
+  return hipMemset(d->overflow, 0, 4) == hipSuccess || osmos_fail(err, "the drafter: a GPU call failed (its overflow flag)");
 }
 
 void ink2_mtp_down(Ink2Forward *f)
@@ -225,19 +225,19 @@ static bool positions(Ink2Forward *f, int32_t p0, uint32_t n)
   return hipMemcpy(f->md.pos, pos, n * 4, hipMemcpyHostToDevice) == hipSuccess;
 }
 
-bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char err[INK2_FWD_ERR])
+bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
   if (!f || !s || s->f != f || !f->mtp)
-    return fail(err, "inkling2: no forward with a drafter, or a sequence of another forward");
+    return osmos_fail(err, "no forward with a drafter, or a sequence of another forward");
   if (s->failed)
-    return fail(err, "inkling2: a sequence after a failed step: load it, or make another");
+    return osmos_fail(err, "a sequence after a failed step: load it, or make another");
   if (from >= to)
     return true;
   if (from < s->tap_pos0 || to > s->pos || (uint32_t)(to - s->tap_pos0) > f->max_tokens)
-    return fail(err, "inkling2: positions not of the sequence's last step, or past its position");
+    return osmos_fail(err, "positions not of the sequence's last step, or past its position");
   if (!s->tap_step || s->tap_step != f->steps) /* 0.9.2: the taps every step overwrites - another sequence's step since,
                                                  or a load (none since): its rings built from another's rows */
-    return fail(err, "inkling2: a seed after another step, or a load: the taps are not this sequence's (step it first)");
+    return osmos_fail(err, "a seed after another step, or a load: the taps are not this sequence's (step it first)");
   const Ink2Mtp *m = f->mtp;
   Ink2MtpDev *d = &f->md;
   const uint32_t C = (uint32_t)m->n_embd, KV = kvw(m), K = (uint32_t)m->n_taps, n = (uint32_t)(to - from);
@@ -271,9 +271,9 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
                             NULL) == hipSuccess &&
        hipMemcpy(&overflow, d->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
   if (!ok)
-    return fail(err, "inkling2: a GPU call failed (the drafter's context)");
+    return osmos_fail(err, "a GPU call failed (the drafter's context)");
   if (overflow)
-    return (void)hipMemset(d->overflow, 0, 4), fail(err, "inkling2: the drafter's context past f16's range");
+    return (void)hipMemset(d->overflow, 0, 4), osmos_fail(err, "the drafter's context past f16's range");
   s->mend = to;
   return true;
 }
@@ -314,16 +314,16 @@ static bool layer(Ink2Forward *f, const Ink2Seq *s, int l, uint32_t B, int32_t p
 }
 
 int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
-                   float *conf, char err[INK2_FWD_ERR])
+                   float *conf, char err[OSMOS_ERR])
 {
   if (!f || !s || s->f != f || !f->mtp || (max && (!drafts || !conf)))
-    return fail(err, "inkling2: no forward with a drafter, a sequence of another forward, or no room"), -1;
+    return osmos_fail(err, "no forward with a drafter, a sequence of another forward, or no room"), -1;
   if (s->failed)
-    return fail(err, "inkling2: a sequence after a failed step: load it, or make another"), -1;
+    return osmos_fail(err, "a sequence after a failed step: load it, or make another"), -1;
   if (y < 0 || y >= f->w->geo.n_vocab)
-    return fail(err, "inkling2: a token not of the vocabulary"), -1;
+    return osmos_fail(err, "a token not of the vocabulary"), -1;
   if (s->mend != s->pos || s->mfrom >= s->mend)
-    return fail(err, "inkling2: the drafter's context not seeded to the sequence's position"), -1;
+    return osmos_fail(err, "the drafter's context not seeded to the sequence's position"), -1;
   const Ink2Mtp *m = f->mtp;
   Ink2MtpDev *d = &f->md;
   const uint32_t C = (uint32_t)m->n_embd, B = (uint32_t)m->block, R = (uint32_t)m->rank, K = (uint32_t)m->n_taps,
@@ -369,9 +369,9 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
        hipMemcpy(p, d->probs, steps * 4, hipMemcpyDeviceToHost) == hipSuccess &&
        hipMemcpy(&overflow, d->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
   if (!ok)
-    return fail(err, "inkling2: a GPU call failed (a draft)"), -1;
+    return osmos_fail(err, "a GPU call failed (a draft)"), -1;
   if (overflow)
-    return (void)hipMemset(d->overflow, 0, 4), fail(err, "inkling2: a draft's activations past f16's range"), -1;
+    return (void)hipMemset(d->overflow, 0, 4), osmos_fail(err, "a draft's activations past f16's range"), -1;
   int k = 0;
   float cum = 1.0f;
   for (; k < (int)steps; k++)

@@ -6,6 +6,7 @@
 #include "osmos/ink2/weights.h"
 #include "osmos/model/expert_units.h"
 #include "osmos/model/qtype.h"
+#include "osmos/err.h"
 
 /* a role's types: a mask of the table's ids (qtype.h), or any type its path reads */
 #define TY(name) (1u << QTYPE_##name)
@@ -158,12 +159,6 @@ static const struct
 #define N_ROLES (sizeof roles / sizeof *roles)
 #define N_SCALES (sizeof scales / sizeof *scales)
 
-static bool fail(char *err, const char *name, const char *why)
-{
-  snprintf(err, INK2_ERR, "%s: %s", name, why);
-  return false;
-}
-
 static uint64_t dim(const Ink2Geometry *g, Dim d)
 {
   switch (d)
@@ -212,25 +207,25 @@ static const GgufTensor *claim(const Gguf *model, bool *taken, const Ink2Geometr
 {
   const GgufTensor *t = gguf_tensor(model, name);
   if (!t)
-    return fail(err, name, "missing"), NULL;
+    return osmos_fail(err, "%s: %s", name, "missing"), NULL;
   const Dim *dims = r->as[g->keys].dims;
   int n = 0;
   while (n < GGUF_MAX_DIMS && dims[n] != D_NONE)
     n++;
   if (t->n_dims != (uint32_t)n)
-    return fail(err, name, "of another number of dims"), NULL;
+    return osmos_fail(err, "%s: %s", name, "of another number of dims"), NULL;
   uint64_t values = 1;
   for (int i = 0; i < n; i++)
   {
     if (t->dims[i] != dim(g, dims[i]))
-      return fail(err, name, "of another shape"), NULL;
+      return osmos_fail(err, "%s: %s", name, "of another shape"), NULL;
     values *= t->dims[i];
   }
   const uint32_t paths = qtype_paths(t->type);
   if (r->path == RAW ? !(t->type < 32 && (r->types >> t->type & 1)) : (paths & r->path) != r->path)
-    return fail(err, name, "a type its reader does not take"), NULL;
+    return osmos_fail(err, "%s: %s", name, "a type its reader does not take"), NULL;
   if (t->bytes != gguf_bytes(t->type, values))
-    return fail(err, name, "its bytes not its type's for its shape"), NULL;
+    return osmos_fail(err, "%s: %s", name, "its bytes not its type's for its shape"), NULL;
   taken[t - model->tensors] = true;
   return t;
 }
@@ -243,7 +238,7 @@ static bool take(const Gguf *model, bool *taken, const Ink2Geometry *g, const Ro
   char name[NAME_MAX_LEN];
   snprintf(name, sizeof name, "%s%s", prefix, n ? n : "?");
   if (!n)
-    return fail(err, name, "a role this file's keys have no tensor for");
+    return osmos_fail(err, "%s: %s", name, "a role this file's keys have no tensor for");
   return (*(const GgufTensor **)((char *)base + r->field) = claim(model, taken, g, r, name, err)) != NULL;
 }
 
@@ -268,7 +263,7 @@ static bool expert_scales(const Gguf *model, bool *taken, const Ink2Geometry *g,
     if (e->type != QTYPE_NVFP4)
     {
       if (gguf_tensor(model, name))
-        return fail(err, name, "a scale beside an expert type whose blocks are its values");
+        return osmos_fail(err, "%s: %s", name, "a scale beside an expert type whose blocks are its values");
       continue;
     }
     if (!(*slot = claim(model, taken, g, &scale_role, name, err)))
@@ -279,21 +274,21 @@ static bool expert_scales(const Gguf *model, bool *taken, const Ink2Geometry *g,
 
 void ink2_weights_destroy(Ink2Weights *w) { free(w); }
 
-Ink2Weights *ink2_weights_create(const Gguf *model, char err[INK2_ERR])
+Ink2Weights *ink2_weights_create(const Gguf *model, char err[OSMOS_ERR])
 {
   if (!model)
-    return fail(err, "ink2_weights_create", "no model"), NULL;
+    return osmos_fail(err, "%s: %s", "ink2_weights_create", "no model"), NULL;
   Ink2Weights *w = calloc(1, sizeof *w);
   bool *taken = calloc(model->n_tensors ? model->n_tensors : 1, sizeof *taken);
   if (!w || !taken)
-    return free(w), free(taken), fail(err, "ink2_weights_create", "out of memory"), NULL;
+    return free(w), free(taken), osmos_fail(err, "%s: %s", "ink2_weights_create", "out of memory"), NULL;
   w->model = model;
   Ink2Geometry *g = &w->geo;
   const GgufTensor *embed = gguf_tensor(model, "token_embd.weight");
   bool ok = ink2_geometry(model, g, err) &&
             (embed && embed->n_dims == 2 ? (g->n_vocab_rows = (int)embed->dims[1]) > 0
-                                         : fail(err, "token_embd.weight", "missing")) &&
-            (g->n_vocab <= g->n_vocab_rows || fail(err, "inkling2.vocab_size", "more tokens than the embedding's rows"));
+                                         : osmos_fail(err, "%s: %s", "token_embd.weight", "missing")) &&
+            (g->n_vocab <= g->n_vocab_rows || osmos_fail(err, "%s: %s", "inkling2.vocab_size", "more tokens than the embedding's rows"));
   for (size_t i = 0; ok && i < N_TOPS; i++)
     if (applies(g, tops[i].when, 0))
       ok = take(model, taken, g, &tops[i], "", w, err);
@@ -310,7 +305,7 @@ Ink2Weights *ink2_weights_create(const Gguf *model, char err[INK2_ERR])
   }
   for (size_t i = 0; ok && i < model->n_tensors; i++)
     if (!taken[i] && strncmp(model->tensors[i].name, DRAFTER, strlen(DRAFTER)) != 0)
-      ok = fail(err, model->tensors[i].name, "a tensor no role of this layer's kind takes");
+      ok = osmos_fail(err, "%s: %s", model->tensors[i].name, "a tensor no role of this layer's kind takes");
   free(taken);
   if (!ok)
     return free(w), NULL;

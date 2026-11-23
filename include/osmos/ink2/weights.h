@@ -1,13 +1,13 @@
 #ifndef OSMOS_INK2_WEIGHTS_H
 #define OSMOS_INK2_WEIGHTS_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/mem/pool.h"
 #include "osmos/model/gguf.h"
 
-#define INK2_ERR 256
 #define INK2_MAX_LAYERS 64
 #define INK2_CONV_TAPS_MAX 8 /* a short convolution's taps (Inkling-2's: 4) */
 #define INK2_RES_QUERIES 3   /* a full layer's attention residual: one query each for q, k and v */
@@ -104,8 +104,8 @@ static inline int ink2_slot_layer(const Ink2Geometry *g, int slot)
 
 static inline bool ink2_slot_sliding(const Ink2Geometry *g, int slot) { return g->sliding[ink2_slot_layer(g, slot)]; }
 
-bool ink2_geometry(const Gguf *model, Ink2Geometry *g, char err[INK2_ERR]);
-Ink2Weights *ink2_weights_create(const Gguf *model, char err[INK2_ERR]);
+bool ink2_geometry(const Gguf *model, Ink2Geometry *g, char err[OSMOS_ERR]);
+Ink2Weights *ink2_weights_create(const Gguf *model, char err[OSMOS_ERR]);
 void ink2_weights_destroy(Ink2Weights *w);
 size_t ink2_weights_experts(const Ink2Weights *w, const int *model_fds, PoolUnit *units, size_t cap);
 

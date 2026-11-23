@@ -82,7 +82,7 @@ static Ink2Forward* forward(const Ink2Weights* w, uint32_t n, bool whole, bool v
   for (int l = 0; l < w->geo.n_layers; l++)
     experts += w->layer[l].exp_gate->bytes + w->layer[l].exp_up->bytes + w->layer[l].exp_down->bytes;
   const Ink2Options o = {n + 64, n, whole ? 2 * experts : experts / 2, nullptr, nullptr, 0, n, v8};
-  char err[INK2_FWD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Ink2Forward* f = ink2_forward_create(w, &o, err);
   if (!f) std::fprintf(stderr, "  ink2_forward_create: %s\n", err);
   CHECK(f && ink2_forward_whole(f) == whole);
@@ -104,7 +104,7 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   Taps t;
   t.n = n, t.slot.resize((size_t) g->n_slots);
   ink2_forward_tap(f, tap, &t);
-  char err[INK2_FWD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Ink2Seq* s = ink2_seq_create(f, err);
   CHECK(s);
   CHECK(ink2_step(f, &s, &n, 1, ids.data(), err) || (std::fprintf(stderr, "  %s\n", err), false));
@@ -210,7 +210,7 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
 
 int main() {
   std::printf("[test_ink2_loop_gpu] start\n");
-  char path[512], gerr[GGUF_ERR] = "", err[INK2_ERR] = "";
+  char path[512], gerr[GGUF_ERR] = "", err[OSMOS_ERR] = "";
   if (std::getenv("OSMOS_TEST_INK2_MINI"))
     std::snprintf(path, sizeof path, "%s", std::getenv("OSMOS_TEST_INK2_MINI"));
   else

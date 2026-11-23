@@ -159,7 +159,6 @@ struct Ink2Forward
   uint32_t n; /* the last step's rows */
 };
 
-bool ink2_fail(char *err, const char *why);
 /* hip_forward.c's: device memory counted in the forward's bytes; a tensor's bytes from g's file, its F32 values on the
    host (F32 / F16 / BF16), uploaded; the drafter's y [n][rows] = W x (mv_run, MV_MAX_TOKENS a launch) */
 bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes);

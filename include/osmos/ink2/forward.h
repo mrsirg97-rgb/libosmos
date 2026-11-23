@@ -1,6 +1,7 @@
 #ifndef OSMOS_INK2_FORWARD_H
 #define OSMOS_INK2_FORWARD_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -8,7 +9,6 @@
 #include "osmos/ink2/weights.h"
 #include "osmos/model/state_io.h"
 
-#define INK2_FWD_ERR 256
 /* a sequence's tokens a rollback can drop: a drafted round's (OSMOS_MAX_BLOCK) - its windows and conv histories keep
    that many rows past what the next token reads */
 #define INK2_MAX_BACK 8
@@ -33,7 +33,7 @@ typedef struct Ink2Options
                             its key's - for a model with the room (osmos-serve's --kv-q8) */
 } Ink2Options;
 
-Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[INK2_FWD_ERR]);
+Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[OSMOS_ERR]);
 void ink2_forward_destroy(Ink2Forward *f);
 uint64_t ink2_forward_bytes(const Ink2Forward *f);
 const uint64_t *ink2_forward_picks(const Ink2Forward *f);
@@ -42,7 +42,7 @@ const uint64_t *ink2_forward_picks(const Ink2Forward *f);
 bool ink2_forward_whole(const Ink2Forward *f);
 uint64_t ink2_identity(const Ink2Forward *f);
 
-Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[INK2_FWD_ERR]);
+Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[OSMOS_ERR]);
 void ink2_seq_destroy(Ink2Seq *s);
 int32_t ink2_seq_position(const Ink2Seq *s);
 uint32_t ink2_seq_reach(const Ink2Seq *s);
@@ -50,14 +50,14 @@ bool ink2_seq_rollback(Ink2Seq *s, uint32_t n);
 bool ink2_seq_prompt(Ink2Seq *s, uint32_t end);
 void ink2_seq_fail(Ink2Seq *s);
 uint64_t ink2_seq_state_bytes(const Ink2Seq *s);
-bool ink2_seq_save_to(const Ink2Seq *s, StateSink sink, void *ctx, char err[INK2_FWD_ERR]);
-bool ink2_seq_load_from(Ink2Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[INK2_FWD_ERR]);
+bool ink2_seq_save_to(const Ink2Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
+bool ink2_seq_load_from(Ink2Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
 uint64_t ink2_seq_mark_bytes(const Ink2Seq *s);
-bool ink2_seq_mark_save(const Ink2Seq *s, void *out, uint64_t bytes, char err[INK2_FWD_ERR]);
-bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[INK2_FWD_ERR]);
+bool ink2_seq_mark_save(const Ink2Seq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
+bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 
 bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-               char err[INK2_FWD_ERR]);
+               char err[OSMOS_ERR]);
 const float *ink2_logits(const Ink2Forward *f);
 
 /* the per-slot checks' (oracle/qwen_dump.cpp's l_out-<slot>, upstream llama.cpp's tensors): a tap, when set, gets
@@ -67,11 +67,11 @@ typedef void (*ink2_tap_fn)(void *arg, int slot, const char *what, const float *
 void ink2_forward_tap(Ink2Forward *f, ink2_tap_fn fn, void *arg);
 const float *ink2_row_logits(const Ink2Forward *f, uint32_t row);
 bool ink2_kept(const Ink2Forward *f, uint32_t row);
-bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[INK2_FWD_ERR]);
+bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 
-bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char err[INK2_FWD_ERR]);
+bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);
 int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float conf_min, float cum_min, int32_t *drafts,
-                   float *conf, char err[INK2_FWD_ERR]);
+                   float *conf, char err[OSMOS_ERR]);
 
 #endif
 

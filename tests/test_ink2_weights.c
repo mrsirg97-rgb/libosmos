@@ -34,7 +34,7 @@ static GgufKv *kv(const char *key)
 
 static bool accepted(void)
 {
-  char err[INK2_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Ink2Weights *w = ink2_weights_create(model, err);
   if (!w)
     printf("    refused: %s\n", err);
@@ -44,7 +44,7 @@ static bool accepted(void)
 
 static void refused(const char *what, const char *needle)
 {
-  char err[INK2_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Ink2Weights *w = ink2_weights_create(model, err);
   if (w || !strstr(err, needle))
   {
@@ -198,7 +198,7 @@ static void test_tensors(const Ink2Weights *w)
 int main(void)
 {
   printf("[test_ink2_weights] start\n");
-  char err[INK2_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", path[512], gerr[GGUF_ERR] = "";
   assert(!ink2_weights_create(NULL, err) && err[0]);
   ink2_weights_destroy(NULL);
   if (getenv("OSMOS_TEST_INK2"))

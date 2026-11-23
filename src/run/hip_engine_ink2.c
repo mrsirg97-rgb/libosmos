@@ -43,7 +43,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   Model *m = calloc(1, sizeof *m);
   if (!m)
     return osmos_fail(err, "out of memory"), NULL;
-  char werr[INK2_ERR > GGUF_ERR ? INK2_ERR : GGUF_ERR] = "";
+  char werr[OSMOS_ERR > GGUF_ERR ? OSMOS_ERR : GGUF_ERR] = "";
   if (!(m->g = gguf_create(files->model, werr)) || !(m->w = ink2_weights_create(m->g, werr)))
   {
     if (err)
@@ -58,7 +58,6 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   return m;
 }
 
-_Static_assert(OSMOS_ERR >= INK2_FWD_ERR, "one error buffer for the engine and the family's calls");
 _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
 
 /* a step's most tokens when the server names none: a prompt's chunk. a prompt step reads every expert not in memory
@@ -164,7 +163,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   /* the drafter: its GGUF (tools/convert/ink2_mtp_gguf.py's) - a directory holding one, or the file */
   if (o->drafter)
   {
-    char path[4096], ierr[INK2_ERR] = "";
+    char path[4096], ierr[OSMOS_ERR] = "";
     snprintf(path, sizeof path, "%s/ink2-mtp.gguf", o->drafter);
     FILE *probe = fopen(path, "rb");
     if (probe)

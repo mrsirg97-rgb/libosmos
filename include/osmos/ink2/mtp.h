@@ -1,6 +1,7 @@
 #ifndef OSMOS_INK2_MTP_H
 #define OSMOS_INK2_MTP_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -37,7 +38,7 @@ typedef struct Ink2Mtp
   const GgufTensor *fuse, *mask, *norm, *m_dflare, *m_hidden_w, *m_hidden_b, *m_w1, *m_rnn_w, *m_rnn_b;
 } Ink2Mtp;
 
-Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[INK2_ERR]);
+Ink2Mtp *ink2_mtp_create(const Gguf *g, const Ink2Weights *target, char err[OSMOS_ERR]);
 void ink2_mtp_destroy(Ink2Mtp *m);
 
 #endif

@@ -52,6 +52,14 @@ static bool one(const SmallPack& p) {
     CHECK(!osmos_open(&lsa, err));
   }
   named_once(arch, "a refused option", err);
+  if (p.drafter) {  // a drafter that is not one (the model's own file): the family named once, its drafter's cause after
+    OsmosOptions d = small_pack_options(m, 1024);
+    d.drafter = path.c_str();
+    err[0] = 0;
+    CHECK(!osmos_create(m, &d, err));
+    named_once(arch, "not a drafter", err);
+    CHECK(count(err, arch) == 1);  // (no inner name of the family's own: "inkling2_mtp")
+  }
   const OsmosOptions o = small_pack_options(m, 1024);
   Osmos* e = osmos_create(m, &o, err);
   CHECK(e);
