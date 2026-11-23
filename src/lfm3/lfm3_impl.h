@@ -2,7 +2,7 @@
 #define OSMOS_LFM3_IMPL_H
 
 /* the lfm3 forward's state (osmos/lfm3/forward.h), shared by hip_lfm3_make.c (the weights, buffers, sequences) and
-   hip_lfm3.c (the step) */
+   hip_lfm3_step.c (the step) */
 
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/gpu/bufs.h"

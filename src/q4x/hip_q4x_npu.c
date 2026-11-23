@@ -60,7 +60,7 @@ bool q4x_npu_make(Q4xForward *f, const char *dir, float share, char err[OSMOS_ER
   char nerr[OSMOS_ERR] = "";
   Q4xBuf *b = &f->b;
   bool ok = (f->npu = npu_open(f->ledger, dir, (uint32_t)D, (uint32_t)ff, NPU_SELECT_MAX, nerr)) &&
-            /* where its rows go: the step's gate, up and down outputs (their sizes hip_forward.c's buffers()') */
+            /* where its rows go: the step's gate, up and down outputs (their sizes hip_q4x_make.c's buffers()') */
             npu_device(f->npu, b->ga, n * k * ff * sizeof(float), nerr) &&
             npu_device(f->npu, b->up, n * k * ff * sizeof(float), nerr) &&
             npu_device(f->npu, b->y, n * k * D * sizeof(float), nerr) &&

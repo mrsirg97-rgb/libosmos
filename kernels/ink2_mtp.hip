@@ -1,4 +1,4 @@
-// Inkling-2's drafter (DSpark, the RNN Markov head; src/ink2/hip_mtp.c, tools/convert/ink2_mtp_oracle.py): its taps'
+// Inkling-2's drafter (DSpark, the RNN Markov head; src/ink2/hip_ink2_draft.c, tools/convert/ink2_mtp_oracle.py): its taps'
 // mixtures, its context caches (f16), its attention over a context and a block, its Markov steps. F32 math.
 #include <hip/hip_runtime.h>
 

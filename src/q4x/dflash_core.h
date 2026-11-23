@@ -3,8 +3,8 @@
 
 /* DFlash2's drafter for any target (hip_dflash_core.c: z-lab's DFlash2DraftModel on the q4x_df_* kernels): its
    buffers, its context's seed and its block's draft - the math one, the target's own calls (its matrices, its
-   embedding and head, its stream, its checks) through a DfHost. q4x's (src/q4x/hip_dflash.c) and LFM3's
-   (src/lfm3/hip_lfm3_dflash.c) each a host: their bits as before the core (0.11.2) */
+   embedding and head, its stream, its checks) through a DfHost. q4x's (src/q4x/hip_q4x_draft_dflash.c) and LFM3's
+   (src/lfm3/hip_lfm3_draft.c) each a host: their bits as before the core (0.11.2) */
 
 #include <stdbool.h>
 #include <stdint.h>

@@ -122,7 +122,7 @@ typedef struct Ink2Prep
 } Ink2Prep;
 bool ink2_attn_prep(const Ink2Prep *p, void *stream);
 
-/* the drafter's (kernels/ink2_mtp.hip; src/ink2/hip_mtp.c) */
+/* the drafter's (kernels/ink2_mtp.hip; src/ink2/hip_ink2_draft.c) */
 bool ink2_mtp_mix(const float *taps, uint32_t n_taps, const float *alpha, uint32_t n, uint32_t dim, float *out,
                   void *stream);
 bool ink2_mtp_kv_put(uint16_t *ring, uint32_t ring_rows, const float *x, uint32_t n, uint32_t row, int32_t pos0,

@@ -142,7 +142,7 @@ ink2_greedy
   rows row0 .. row0 + rows - 1's greatest token (the lowest among equals). false for a row not kept, or rows not
   one run's (their slots not consecutive).
 
-ink2_seq_seed, ink2_seq_draft (a forward built with a drafter: DSpark with the RNN Markov head, src/ink2/hip_mtp.c)
+ink2_seq_seed, ink2_seq_draft (a forward built with a drafter: DSpark with the RNN Markov head, src/ink2/hip_ink2_draft.c)
   seed: the drafter's context at positions from .. to - 1 from the sequence's last step's taps (its rows of that
   step) - each drafter layer's mixture of them normed, its ctx keys and values into the sequence's rings. the
   context is the positions seeded since the last gap (a seed past where it reaches starts it over; a load or a

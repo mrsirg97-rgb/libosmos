@@ -414,7 +414,7 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   if (!mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) || !q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) ||
       (streamed ? !host_tiles(f, (int)(L - f->w->layer), e, &bd, D, ff) : !q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL)))
     return false;
-  /* 0.7.0: the NPU's share of a prompt step's whole entries, taken from the tables (hip_npu.c): each kind's packed
+  /* 0.7.0: the NPU's share of a prompt step's whole entries, taken from the tables (hip_q4x_npu.c): each kind's packed
      before the GPU's matmuls of it are queued, run beside them, its rows where theirs go */
   const bool npu = q4x_npu_take(f, L, n, &bd, D, ff) > 0;
   return mm_x16_rows(b->mixed, D, b->gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&

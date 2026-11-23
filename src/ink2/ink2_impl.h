@@ -1,5 +1,5 @@
 /* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h): src/ink2/hip_ink2_make.c the weights, the membrane and
-   the buffers; hip_ink2_moe.c a layer's MoE; hip_ink2_ctrl.c its controls; hip_ink2_step.c the step; hip_seq.c a
+   the buffers; hip_ink2_moe.c a layer's MoE; hip_ink2_ctrl.c its controls; hip_ink2_step.c the step; hip_ink2_seq.c a
    sequence's tails, its saves and marks */
 #pragma once
 #include "osmos/gpu/bufs.h"
@@ -46,7 +46,7 @@ typedef struct Ink2Tail
   uint32_t keep, cap, held;
 } Ink2Tail;
 
-/* the drafter's resident tensors and its step's buffers (hip_mtp.c) */
+/* the drafter's resident tensors and its step's buffers (hip_ink2_draft.c) */
 typedef struct Ink2MtpDev
 {
   void *wq[INK2_MTP_MAX_LAYERS], *wk[INK2_MTP_MAX_LAYERS], *wv[INK2_MTP_MAX_LAYERS], *wkc[INK2_MTP_MAX_LAYERS],
@@ -192,7 +192,7 @@ bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n);
 /* a tail's next n rows, held (a kernel writes them, in the tail's own format) - NULL past its room (an F32 tail's:
    ink2_tail_put's then) */
 void *ink2_tail_claim(Ink2Tail *t, uint32_t n);
-/* hip_mtp.c: the drafter's weights and buffers (its fold made), freed; a sequence's rings; a step's taps kept */
+/* hip_ink2_draft.c: the drafter's weights and buffers (its fold made), freed; a sequence's rings; a step's taps kept */
 bool ink2_mtp_up(Ink2Forward *f, char *err);
 bool ink2_mtp_seq_make(Ink2Seq *s);
 void ink2_mtp_seq_free(Ink2Seq *s);

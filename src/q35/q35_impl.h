@@ -1,4 +1,4 @@
-/* the q35 forward's and sequence's insides (src/q35/hip_q35.c: the forward and its step; hip_q35_seq.c: a sequence -
+/* the q35 forward's and sequence's insides (src/q35/hip_q35_step.c: the forward and its step; hip_q35_seq.c: a sequence -
    its rings, rollback, prompt, state and marks) */
 #pragma once
 

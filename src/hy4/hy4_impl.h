@@ -1,4 +1,4 @@
-/* the hy4 forward's and sequence's insides (hip_hy4_make.c: the forward made; hip_hy4.c: its step; hip_hy4_layer.c: a
+/* the hy4 forward's and sequence's insides (hip_hy4_make.c: the forward made; hip_hy4_step.c: its step; hip_hy4_layer.c: a
    layer's blocks; hip_hy4_seq.c: a sequence) */
 #pragma once
 #include "osmos/mem/ledger_hip.h"
@@ -115,7 +115,7 @@ struct Hy4Forward
   uint32_t rows;
   hy4_tap_fn tap;
   void *tap_arg;
-  struct Hy4Dfly *dfly;                /* DFly2, when loaded (hip_hy4_dfly.c) */
+  struct Hy4Dfly *dfly;                /* DFly2, when loaded (hip_hy4_draft.c) */
   int dfly_slot[HY4_MAX_LAYERS];       /* a target layer's draft layer reading it, -1 none */
   GpuBufs bufs; /* every GPU and pinned buffer of the forward, recorded as made (hy4_alloc, the step's want[]) -
                    freed from the record at its destroy, the last made first */
@@ -169,9 +169,9 @@ bool hy4_joint(Hy4Forward *f, const Hy4Joint *j, uint32_t cols, const float *x, 
 bool hy4_mat_raw(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                  float *y, bool read);
 /* a BF16 tensor's values as F32 on the host (read from its file; NULL on failure), an F32 matrix [rows][cols] as Q8_0
-   on the GPU (ggml's rounding) - hip_hy4_dfly.c's */
+   on the GPU (ggml's rounding) - hip_hy4_draft.c's */
 bool hy4_q8_up(GpuBufs *b, const float *x, uint64_t rows, uint32_t cols, void **dev);
-/* DFly2's weights and buffers freed (hip_hy4_dfly.c; none loaded: nothing) */
+/* DFly2's weights and buffers freed (hip_hy4_draft.c; none loaded: nothing) */
 void hy4_dfly_free(Hy4Forward *f);
 uint64_t hy4_dfly_bytes(const Hy4Forward *f); /* what DFly2 holds (its record): 0 none */
 bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]); /* Hy4Options' dfly: create's */

@@ -1,5 +1,5 @@
 /* the Qwen forward's shapes (osmos/q4x/forward.h): its weights on the device, a step's buffers, a sequence's state.
-   hip_forward.c builds them, hip_layers.c runs a layer's blocks on them, hip_step.c a step */
+   hip_q4x_make.c builds them, hip_q4x_layers.c runs a layer's blocks on them, hip_q4x_step.c a step */
 #pragma once
 
 #include <hip/hip_runtime_api.h>
@@ -61,7 +61,7 @@ typedef struct Q4xMtpBuf
 typedef DfBuf Q4xDfBuf; /* the drafter's buffers: the DFlash2 core's (dflash_core.h) */
 
 #define Q4X_SIDE_STEP MM_TILE /* a step this small or smaller: the second stream (decode, a draft's verify) */
-#define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_forward.c's table) */
+#define Q4X_ROW_BUFS 96 /* b's buffers at most (hip_q4x_make.c's table) */
 #define Q4X_ROW_THREADS 64 /* stream_ngram's readers: DeepSeek's Engram measure (832,000 random rows/s; 128 no more) */
 
 #define Q4X_EXPERT_READERS 12 /* the experts' membrane's readers: DeepSeek's (FWD_FETCH_THREADS: DESIGN.md, the fetcher) */
@@ -124,7 +124,7 @@ struct Q4xForward
   uint32_t ple_n;
   hipEvent_t ple_copied;
   uint32_t side_spin; /* q4x_forward_side_spin: a test's delay before the shared expert, on s2 (0: none) */
-  /* a step past MM_MAX_TOKENS (hip_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
+  /* a step past MM_MAX_TOKENS (hip_q4x_step.c): b's buffers a token a row (each one's field and row bytes), moved to a
      sub-batch's rows; and its runs' sequences at a sub-batch's start (their rings' cur and positions moved on) */
   struct
   {
@@ -133,7 +133,7 @@ struct Q4xForward
   } rows[Q4X_ROW_BUFS];
   uint32_t n_rows;
   Q4xSeq *sub_seq; /* Q4X_MAX_RUNS of them */
-  /* 0.7.0: the NPU beside the GPU (Q4xOptions' npu, hip_npu.c): a prompt step's first whole 128-token entries of an
+  /* 0.7.0: the NPU beside the GPU (Q4xOptions' npu, hip_q4x_npu.c): a prompt step's first whole 128-token entries of an
      eligible layer's - their gate, up and down the NPU's, the GPU's mm_group skipping them (their counts zeroed) */
   Npu *npu;
   float npu_share;                 /* the share of a layer's picks the NPU takes (a format's cost scaling it) */
@@ -191,10 +191,10 @@ typedef struct Q4xSeqBytes
 #define Q4X_IX_RING(ratio) ((uint32_t)(ratio) - 1u + Q4X_MAX_BACK)
 
 Q4xSeqBytes q4x_seq_bytes(const Q4xGeometry *g);
-bool q4x_seq_reset(Q4xSeq *s); /* hip_state.c: empty, position 0 (its recurrent states and histories zeroed) */
+bool q4x_seq_reset(Q4xSeq *s); /* hip_q4x_seq.c: empty, position 0 (its recurrent states and histories zeroed) */
 
 /* y = W x for n tokens (rows xs, ys apart): mm (f16 activations, WMMA) for a matrix it tiles, else the matvec - by the
-   matrix alone, so a token's bits are its own whatever its batch (hip_layers.c). `ready`: b.x16 is this x's already
+   matrix alone, so a token's bits are its own whatever its batch (hip_q4x_layers.c). `ready`: b.x16 is this x's already
    (the call before made it); q4x_mat2: two matrices on one x, one launch when mm takes both (mm_run2: each the bits it
    takes alone) */
 /* the pinned host buffers (b.pin_tok, b.pin_rows) are read by copies queued, not done: before the host writes them
@@ -216,7 +216,7 @@ bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, ui
 bool q4x_overflow_read(Q4xForward *f);
 bool q4x_overflow_ok(Q4xForward *f, char *err);
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);
-/* the NPU's (hip_npu.c): a layer's share of n tokens' picks taken from its tables and packed (0: none); its gate and
+/* the NPU's (hip_q4x_npu.c): a layer's share of n tokens' picks taken from its tables and packed (0: none); its gate and
    up, then its down, once the GPU's of each are queued */
 uint32_t q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff);
 bool q4x_npu_gate_up(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);
@@ -226,7 +226,7 @@ void q4x_npu_destroy(Q4xForward *f);
 bool q4x_npu_make(Q4xForward *f, const char *dir, float share, char err[OSMOS_ERR]); /* Q4xOptions' npu */
 void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint64_t n);
 
-/* hip_layers.c: a layer's blocks on n tokens of b.h (the residual), its output into b.h */
+/* hip_q4x_layers.c: a layer's blocks on n tokens of b.h (the residual), its output into b.h */
 /* combine: the block before's output (b.out, b.inj) into b.h first, in its norm's launch (q4x_hc_combine_norm) */
 bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, const GgufTensor *up,
              const GgufTensor *inject, uint32_t n, bool combine);

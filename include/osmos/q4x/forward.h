@@ -42,7 +42,7 @@ typedef struct Q4xOptions
                                 machine's room as it stands (experts_fit_now) - q4x_forward_create's */
   struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
                                  borrowed - the engine's, outliving the forward); NULL counts nothing */
-  const char *npu; /* 0.7.0: the NPU beside the GPU (src/q4x/hip_npu.c), made with the forward: its kernels' directory
+  const char *npu; /* 0.7.0: the NPU beside the GPU (src/q4x/hip_q4x_npu.c), made with the forward: its kernels' directory
                       (npu_open's: iq3xxs/, iq2s/, iq4nl-down/), or NULL - another forward's bits (q4x_identity tells
                       them apart); 0.16.0: q4x_forward_npu, attached after */
   float npu_share; /* the part of an eligible layer's prompt picks it takes, in (0, 1) (whole 128-token entries; an
