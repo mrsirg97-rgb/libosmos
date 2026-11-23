@@ -95,7 +95,8 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 
 ## Speed
 
-osmos 0.15.0 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
+osmos 0.15.0 on one Strix Halo (osmos-evo-inkling: 0.15.2, its new draft floor), the `performance` profile, nothing
+else running. Every number from the same harness:
 `osmos-api` with the pack's own `osmos.json` (its context, its drafter, its budget sized to the machine), a fresh
 process, a warm-up request, then each request alone; decode is the answer's own rate from the server's timings. Drafted
 and plain answers are the same tokens, bit for bit (their hashes compared); drafting moves only the speed.
@@ -106,7 +107,7 @@ and plain answers are the same tokens, bit for bit (their hashes compared); draf
 | `qwen38-ud-iq3_xxs` | 921 | **50.3** / **44.4** | 28.7 / 29.2 |
 | `osmos-evo-1017` | 385 | **28.4** / **24.1** | 18.8 / 19.3 |
 | `hy4-flash` | 412 | **23.3** / **20.4** | 17.4 / 17.4 |
-| `osmos-evo-inkling` | 339 | 13.7 / 13.7 | 12.3 / 13.0 |
+| `osmos-evo-inkling` (0.15.2) | 317 | 14.3 / 14.3 | 12.6 / 13.2 |
 | `osmos1.7b` (no drafter) | **4,781** | | **126.3** / **126.2** |
 
 Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
@@ -122,7 +123,7 @@ temperature 0, drafted / plain):
 | `qwen38-ud-iq3_xxs` | **57.3** | **51.2** | **45.2** | 29.1 |
 | `osmos-evo-1017` | 31.4 | 25.3 | 30.9 | 18.3-18.5 |
 | `hy4-flash` | 21.4 | 21.4 | 20.2 | 17.5 |
-| `osmos-evo-inkling` | 14.0 | 13.0 | 12.5 | 12.1-12.9 |
+| `osmos-evo-inkling` (0.15.2) | 15.6 | 12.7 | 13.5 | 12.0-12.6 |
 | `osmos1.7b` | 126.1 | 126.4 | 122.4 | |
 
 **Agents** (`tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system

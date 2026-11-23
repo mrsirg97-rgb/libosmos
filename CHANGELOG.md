@@ -19,7 +19,7 @@
   job looked like a loop). A call's arguments are compared with their keys sorted, so a reordered call is the same
   call.
 - **Inkling-2-Small drafts faster**: its draft floor 0.9 -> 0.5, 11.8 / 11.5 -> 12.7 / 12.4 tok/s code / prose at
-  low-power, every token the same. Every other drafter's floor was swept again, greedy and sampled; each was already
+  low-power (13.7 -> 14.3 / 14.3 at performance), every token the same. Every other drafter's floor was swept again, greedy and sampled; each was already
   at its best.
 
 ## [0.15.1]: an upgrade takes a release's new pack settings
