@@ -16,6 +16,7 @@
 #include "osmos/mem/experts.h"
 #include "osmos/model/moe_route.h"
 #include "osmos/gpu/mv.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/gpu/quant.h"
@@ -1361,11 +1362,8 @@ bool ink2_kept(const Ink2Forward *f, uint32_t row) { return f && row < f->n && f
 
 bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[INK2_FWD_ERR])
 {
-  for (uint32_t r = 0; r < rows; r++)
-    if (!ink2_kept(f, row0 + r) || f->slot[row0 + r] != f->slot[row0] + (int32_t)r)
-      return ink2_fail(err, "inkling2: a row the last step kept no logits of, or rows not one run's");
-  if (!rows || !ops_argmax(f->logits + (uint64_t)f->slot[row0] * f->vocab, f->vocab, rows, f->vocab, f->gid, f->amax, NULL) ||
-      hipMemcpy(ids, f->gid, rows * 4, hipMemcpyDeviceToHost) != hipSuccess)
-    return ink2_fail(err, "inkling2: a GPU call failed (greedy)");
-  return true;
+  /* the shared pick (osmos/gpu/kept.h): one run of kept rows, a NaN row refused - Inkling's own returned -1 as a token */
+  const char *why = f ? kept_greedy(f->slot, f->n, f->logits, f->vocab, row0, rows, f->gid, f->amax, NULL, ids)
+                      : "no forward";
+  return why ? ink2_fail(err, why) : true;
 }
