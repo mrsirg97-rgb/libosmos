@@ -4,6 +4,7 @@
 
 #include "dialect.h"
 #include "osmos/err.h"
+#include "api.h"
 
 /* DeepSeek's reader (maya's frontend.py for DeepSeek): tools and the response format's schema (the encoding's
    response_format) onto the first system message, an empty one put first if none; the reasoning effort as the
@@ -93,7 +94,7 @@ bool request_ds(const Json *body, Request *r, char err[OSMOS_ERR])
   if (rf.oom)
     b.oom = true;
   free(rf.p);
-  r->messages = b.oom ? NULL : json_parse(b.p, b.n, jerr);
+  r->messages = b.oom ? NULL : json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
   free(b.p);
   if (!r->messages)
     return osmos_fail(err, "out of memory");

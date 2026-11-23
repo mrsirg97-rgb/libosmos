@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "loop.h"
+#include "api.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,7 +37,7 @@ static void identity(const Json *call, JsonBuf *b)
   if (a && a->type == JSON_STRING)
   {
     char jerr[OSMOS_ERR] = "";
-    Json *o = json_parse(a->s, a->len, jerr);
+    Json *o = json_parse_within(a->s, a->len, API_TREE_MAX, NULL, jerr);
     if (o)
       json_dump_with(b, o, kCanon), json_free(o);
     else

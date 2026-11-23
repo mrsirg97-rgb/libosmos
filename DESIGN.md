@@ -2311,6 +2311,29 @@ then copied again), a whole-request deadline (a byte every 9 s holds a connectio
 allowlist (an unknown field refused, not ignored), --allow-origin with CORS, token ids and GEN numbers parsed strictly.
 Each limit derived from data (the largest real context's body, measured requests).
 
+**phase 5, the design** (each limit from data, 2026-11-23):
+- the body: the largest context any pack reads is 1M tokens (API_CTX_MAX) - a conversation's whole text, history and
+  tools in it. a long prompt's body measured 2.98 bytes a token (~/bench/ink2mini/prof: 131,072 tokens, 390,667
+  bytes); JSON's escaping of code 1.027x on average, 1.20 at worst (CodeFeedback, 20,000 samples) - so the largest
+  real body ~1M x 2.98 x 1.2 = 3.6 MB. API_BODY_MAX 8 MB (twice it), from 32 MB (9x).
+- the tree: a body parsed is a tree of 72-byte nodes, a string's bytes each, an array's pointers - ~1x its body for a
+  conversation (a few long strings), ~65x for one of tiny values ([0,0,...]: a 32 MB body ~2 GB). json_parse given a
+  budget (its every allocation counted, past it refused "past its memory budget"): the API's, measured on the shapes
+  a client sends (a prompt, a many-turn agent's history with tool calls) - set past the largest by twice.
+- the deadline: a request whole within API_REQUEST_S of its first byte - the headers, then the body at the slowest
+  link a client on this box's network has (loopback and the LAN: past 100 MB/s; a 1 MB/s floor is a slow tunnel's) -
+  a 10 s start and a second a MB of body. a byte every 9 s (SO_RCVTIMEO's 10 s idle alone) held a connection for
+  hours; now a trickle is cut at its deadline, the connection closed (408).
+- the fields an allowlist: what osmos reads (messages, the sampling fields, max_tokens / max_completion_tokens,
+  stream / stream_options, tools / tool_choice, thinking / reasoning_effort / chat_template_kwargs, response_format,
+  osmos), what it refuses past a default (n, stop, the penalties, logit_bias, logprobs / top_logprobs), and a
+  client's own labels it has nothing to do with (model, user - rig sends both - parallel_tool_calls, store false,
+  metadata). Any other field refused, named (a misspelled max_token was ignored: the request ran unbounded).
+- browsers: 0.15.2 refused any Origin. --allow-origin <origin> (repeatable): those origins' requests taken, a
+  preflight (OPTIONS) answered with CORS's headers; any other Origin refused as before.
+- osmos-serve's GEN: its numbers and token ids parsed whole (strtoul to the field's end, a range each) - a trailing
+  byte, a sign, an overflow refused (ERR), never read as a prefix.
+
 **found in phase 2, for phase 3**: Qwen's destroy frees Q4xBuf's first members as an array of pointers (up to
 pin_rows), and DeepSeek's its whole Scratch: a struct whose layout is a hidden contract - a member of another kind
 put in that range is freed as a pointer (phase 2's overflow flag, first placed in Q4xBuf: a double free, then a

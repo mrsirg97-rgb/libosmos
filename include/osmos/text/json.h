@@ -40,6 +40,9 @@ typedef struct JsonBuf /* text written: grown as needed; oom set (and nothing mo
 } JsonBuf;
 
 Json *json_parse(const char *text, size_t len, char err[OSMOS_ERR]);
+/* json_parse within a tree of budget bytes at most (every node, string and slot it allocates counted; *used, if
+   asked, what it took): past it NULL, "past its memory budget" - an untrusted body's (osmos-api's, 0.16.0) */
+Json *json_parse_within(const char *text, size_t len, size_t budget, size_t *used, char err[OSMOS_ERR]);
 void json_free(Json *j);
 const Json *json_get(const Json *obj, const char *key);
 const char *json_str(const Json *obj, const char *key);

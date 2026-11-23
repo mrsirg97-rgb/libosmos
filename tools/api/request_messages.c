@@ -4,6 +4,7 @@
 
 #include "request.h"
 #include "osmos/err.h"
+#include "api.h"
 
 /* the messages as Qwen's and Inkling's templates take them: `reasoning` as reasoning_content, a tool call's arguments
    given as a JSON string parsed into the object the templates need (as llama.cpp's server does; Inkling's template
@@ -23,11 +24,13 @@ static bool arguments(JsonBuf *b, const Json *a, char *err)
   if (a->type != JSON_STRING || blank(a))
     return json_dump(b, a), true;
   char jerr[OSMOS_ERR] = "";
-  Json *o = json_parse(a->s, a->len, jerr);
+  Json *o = json_parse_within(a->s, a->len, API_TREE_MAX, NULL, jerr);
   const bool ok = o && o->type == JSON_OBJECT;
   if (ok)
     json_dump(b, o);
   json_free(o);
+  if (!o) /* (the parse's own why: malformed, or past its memory budget) */
+    return osmos_fail(err, "tool_calls: a call's arguments: %s", jerr);
   return ok || osmos_fail(err, "tool_calls: a call's arguments are not a JSON object");
 }
 
@@ -100,7 +103,7 @@ bool request_messages(const Json *msgs, Json **out, char err[OSMOS_ERR])
       return free(b.p), false;
   json_puts(&b, "]");
   char jerr[OSMOS_ERR] = "";
-  *out = b.oom ? NULL : json_parse(b.p, b.n, jerr);
+  *out = b.oom ? NULL : json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
   free(b.p);
   return *out || osmos_fail(err, "out of memory");
 }

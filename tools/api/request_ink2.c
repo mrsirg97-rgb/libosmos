@@ -4,6 +4,7 @@
 
 #include "dialect.h"
 #include "osmos/err.h"
+#include "api.h"
 
 /* Inkling's reader: the messages as its template takes them (request_messages: a call's arguments an object, as it
    asks; a developer message a system one, as DeepSeek's and Qwen's readers take it - the template knows no other) -
@@ -31,7 +32,7 @@ bool request_ink2(const Json *body, Request *r, char err[OSMOS_ERR])
     JsonBuf b = {0};
     char jerr[OSMOS_ERR] = "";
     json_dump(&b, eff);
-    r->effort_value = b.oom ? NULL : json_parse(b.p, b.n, jerr);
+    r->effort_value = b.oom ? NULL : json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
     free(b.p);
     if (!r->effort_value)
       return osmos_fail(err, "out of memory");

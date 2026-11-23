@@ -6,6 +6,7 @@
 
 #include "dialect.h"
 #include "osmos/err.h"
+#include "api.h"
 
 /* an OpenAI chat request: what every family reads alike - thinking on or off, the tokens asked, streaming - and what
    this server refuses by name rather than ignore (sampling: it decodes greedily; stop strings; several choices);
@@ -34,7 +35,7 @@ Json *request_tools(const Json *body)
   }
   json_puts(&b, "]");
   char jerr[OSMOS_ERR] = "";
-  Json *t = b.oom ? NULL : json_parse(b.p, b.n, jerr);
+  Json *t = b.oom ? NULL : json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
   free(b.p);
   return t;
 }
@@ -169,7 +170,7 @@ bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool pr
   {
     char jerr[OSMOS_ERR] = "";
     JsonBuf b = {0};
-    filled = loop_fill(body, &b) ? json_parse(b.p, b.n, jerr) : NULL;
+    filled = loop_fill(body, &b) ? json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr) : NULL;
     free(b.p);
     if (!filled)
       return osmos_fail(err, "out of memory (the orphans' results)");

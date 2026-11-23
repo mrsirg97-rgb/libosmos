@@ -13,7 +13,11 @@
 #include "osmos/text/tokenizer.h"
 
 #define API_LINGER_MS 2000 /* a refused request's bytes drained this long at most (http_linger) */
-#define API_BODY_MAX (32u << 20) /* a request's body: a 64K-token context's text is ~0.3 MB; tools and history more */
+#define API_BODY_MAX (8u << 20) /* a request's body: twice the largest real one - 1M tokens (API_CTX_MAX) x 2.98 bytes a
+                                   token x 1.2 for escaping, ~3.6 MB (DESIGN.md, "phase 5, the design"; 0.16.0: 32 MB) */
+#define API_TREE_MAX (4 * API_BODY_MAX) /* a body's tree, or a call's arguments' parsed (one at a time, each freed): 2.3x
+                                           the costliest shape measured - an agent's history with tool calls, 1.72x its
+                                           body (a prompt's 1.00x); a body of tiny values ~65x: refused past it */
 #define API_HEAD_MAX (64u << 10) /* its request line and headers */
 
 /* a GEN's run: the tokens as they come, then its DONE (or ERR); its owner waits on cv */

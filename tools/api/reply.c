@@ -9,6 +9,7 @@
 #include "answer.h"
 #include "osmos/text/chat_qwen.h"
 #include "osmos/err.h"
+#include "api.h"
 
 /* POST /v1/chat/completions: the request rendered (the chat encoding), tokenized, run on the engine; its tokens
    streamed as they land (answer.c) or answered whole; at DONE the completion parsed for its tool calls, then the
@@ -118,7 +119,7 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
   const ChatMode mode = rq->mode;
   if ((*parsed = s->d->parse(rq, s->text.p, s->shape.p, s->text.n, &b, err)))
   {
-    Json *m = json_parse(b.p, b.n, jerr);
+    Json *m = json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
     free(b.p);
     const Json *calls = json_get(m, "tool_calls");
     for (size_t i = 0; calls && i < calls->n; i++)
@@ -146,7 +147,7 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
   {
     JsonBuf l = {0};
     s->d->loose(s->text.p ? s->text.p : "", s->shape.p ? s->shape.p : "", s->text.n, &l);
-    Json *m = l.oom ? NULL : json_parse(l.p, l.n, jerr);
+    Json *m = l.oom ? NULL : json_parse_within(l.p, l.n, API_TREE_MAX, NULL, jerr);
     free(l.p);
     return m;
   }
@@ -170,7 +171,7 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
   json_puts(&b, "{\"role\": \"assistant\", \"content\": "), json_dump_string(&b, p + c0, n - c0);
   json_puts(&b, ", \"reasoning_content\": "), json_dump_string(&b, p + r0, rn - r0);
   json_puts(&b, ", \"tool_calls\": []}");
-  Json *m = b.oom ? NULL : json_parse(b.p, b.n, jerr);
+  Json *m = b.oom ? NULL : json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
   free(b.p);
   return m;
 }
@@ -377,7 +378,7 @@ static size_t defuse(Json *j, const Tokenizer *t)
       Json *o = NULL;
       for (int d = 0; d < 2 && (o ? o : v)->type == JSON_STRING; d++)
       {
-        Json *next = json_parse((o ? o : v)->s, (o ? o : v)->len, jerr);
+        Json *next = json_parse_within((o ? o : v)->s, (o ? o : v)->len, API_TREE_MAX, NULL, jerr);
         if (!next)
           break;
         json_free(o), o = next;
@@ -448,7 +449,7 @@ static unsigned next_mark(Api *a, const Request *rq, const int32_t *ids, size_t 
   {
     b.n--;
     json_puts(&b, ", {\"role\": \"user\", \"content\": \"next\"}]");
-    next = b.oom ? NULL : json_parse(b.p, b.n, jerr);
+    next = b.oom ? NULL : json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
   }
   free(b.p);
   if (!next)
@@ -468,7 +469,7 @@ static unsigned next_mark(Api *a, const Request *rq, const int32_t *ids, size_t 
 void api_chat(Api *a, Http *h)
 {
   char err[OSMOS_ERR] = "", jerr[OSMOS_ERR] = "";
-  Json *body = json_parse(h->body, h->body_n, jerr);
+  Json *body = json_parse_within(h->body, h->body_n, API_TREE_MAX, NULL, jerr);
   if (!body || body->type != JSON_OBJECT)
   {
     osmos_fail(err, "the body is not a JSON object%s%s", body ? "" : ": ", body ? "" : jerr);

@@ -352,6 +352,15 @@ class Api(Served, unittest.TestCase):
             time.sleep(0.05)
         self.assertTrue(any(l.startswith("STOP ") for l in self.log()), "no STOP within 3 s")
 
+    def test_6k_parse_budget(self):  # 0.16.0: a tree's memory bounded (json_parse_within) - the body's and a call's
+        self.ready()                   # arguments' alike; a body past API_BODY_MAX (8 MB, from 32) refused unread
+        tiny = "[" + ",".join(["0"] * (1 << 19)) + "]"  # ~1 MB of tiny values: a tree ~65x its bytes, past 4 x 8 MB
+        r = self.post(None, raw=tiny.encode())
+        self.assertIn(r.status, (400, 413))
+        self.assertIn("memory budget", r.read().decode())
+        r = self.post(None, raw=b"x" * (9 << 20))
+        self.assertEqual(r.status, 413)
+
     def test_6j_early_refusals_read(self):  # 0.7.1: a refusal before the body was read reached the client as a reset
         self.ready()                         # (the socket closed with its bytes unread), and Content-Length was lax
         r = self.post(None, raw=b"x" * (33 << 20))  # past API_BODY_MAX: the 413 read, not ECONNRESET
@@ -952,6 +961,19 @@ class QwenApi(Served, unittest.TestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.tpl = qwen_template()
+
+    def test_parse_budget_arguments(self):  # 0.16.0: a call's arguments re-parsed (its template takes an object) -
+        self.ready()                          # their tree bounded as the body's (API_TREE_MAX), refused past it
+        tiny = "[" + ",".join(["0"] * (1 << 19)) + "]"
+        call = {"messages": [{"role": "user", "content": "x"},
+                             {"role": "assistant", "content": None,
+                              "tool_calls": [{"id": "c", "type": "function",
+                                              "function": {"name": "f", "arguments": tiny}}]},
+                             {"role": "tool", "tool_call_id": "c", "content": "ok"},
+                             {"role": "user", "content": "y"}]}
+        r = self.post(call)
+        self.assertEqual(r.status, 400)
+        self.assertIn("memory budget", r.read().decode())
 
     def prompt(self, messages, tools=None, thinking=True, effort=None, preserve=None):
         kw = {"messages": messages, "add_generation_prompt": True, "enable_thinking": thinking}
