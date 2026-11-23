@@ -2,6 +2,7 @@
    the public shapes. hip_engine.c dispatches through it; hip_engine_<family>.c fills one */
 #pragma once
 
+#include "osmos/mem/ledger.h"
 #include "osmos/run/engine.h"
 
 /* a build's step: max_tokens, or the family's own at 0 - never past the context (every family's one rule; Qwen alone
@@ -17,7 +18,7 @@ typedef struct OsmosFamily
   const char *arch; /* general.architecture */
   void *(*open)(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR]);
   void (*close)(void *model);
-  void *(*create)(const void *model, const OsmosOptions *o, char err[OSMOS_ERR]);
+  void *(*create)(const void *model, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR]);
   void (*destroy)(void *eng);
   uint64_t (*identity)(const void *eng);
   void (*stats)(const void *eng, OsmosStats *s);

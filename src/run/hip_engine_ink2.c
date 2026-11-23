@@ -120,6 +120,7 @@ static void rp_print(void)
 
 typedef struct Eng
 {
+  OsmosLedger *ledger; /* the engine's (borrowed: osmos_create's, destroyed after this) */
   Ink2Forward *f;
   Gguf *mg;        /* the drafter's file, or NULL */
   Ink2Mtp *mtp;    /* the drafter, or NULL */
@@ -140,7 +141,7 @@ static void e_destroy(void *p)
   free(e);
 }
 
-static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
+static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
   if (o->npu)
@@ -148,6 +149,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
+  e->ledger = ledger;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->picks) /* a picks file: the router's picks [layer][expert] as uint64, nothing after (DeepSeek's layout) */
   {

@@ -23,6 +23,7 @@ typedef struct Model
 
 typedef struct Eng
 {
+  OsmosLedger *ledger; /* the engine's (borrowed: osmos_create's, destroyed after this) */
   Forward *f;
   Drafter *d;      /* or NULL */
   uint64_t *picks; /* or NULL: held while the forward is */
@@ -94,12 +95,13 @@ static uint64_t *read_picks(const char *path, const Geometry *geo, char err[OSMO
   return p;
 }
 
-static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR])
+static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
   Eng *e = calloc(1, sizeof *e);
   if (!e || !(e->seqs = malloc(FORWARD_MAX_TOKENS * sizeof *e->seqs)))
     return free(e), osmos_fail(err, "out of memory"), NULL;
+  e->ledger = ledger;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->picks && !(e->picks = read_picks(o->picks, &m->w->geo, err)))
     return e_destroy(e), NULL;

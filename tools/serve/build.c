@@ -69,12 +69,9 @@ bool serve_build(Server *sv, Conv *conv, int lanes, const OsmosModel *m, OsmosOp
   uint64_t budget = 0, room = 0;
   char ferr[OSMOS_ERR] = "";
   if (!fit_sized(sized_build, sized_unbuild, &z, FIT_HEADROOM, &budget, ferr))
-    return osmos_fail(err, "%s", ferr), false;
+    return osmos_fail(err, "%s; the smallest build does not fit (a smaller --fill, pack or --max-context)", ferr);
   osmos_room(sv->e, &room);
   out("NOTE the budget sized to this GPU: %.2f GiB (%.2f GiB left free; %.2f GiB of RAM kept free, --fill)\n",
       (double)budget / (1ull << 30), (double)room / (1ull << 30), (double)sv->ram_kept / (1ull << 30));
-  if (room < FIT_HEADROOM) /* fit_sized's floor kept short: --fill past what this machine can keep free */
-    out("NOTE --fill %.2f GiB: more RAM than can be kept free beside the model - the smallest build kept (%.2f GiB: "
-        "the dense weights, every expert streamed)\n", (double)sv->ram_kept / (1ull << 30), (double)budget / (1ull << 30));
   return true;
 }

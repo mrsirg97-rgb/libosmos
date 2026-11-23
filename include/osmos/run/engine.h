@@ -68,6 +68,7 @@ typedef struct OsmosStats
   uint64_t budget, cpu_picks;
   uint64_t streamed, guessed, guess_read;
   uint64_t waits[2], wait_ns[2]; /* reads waited for: [not guessed, guessed] */
+  uint64_t held;                 /* the bytes the engine's ledger holds (osmos/mem/ledger.h): its tree's memory */
 } OsmosStats;
 
 OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR]);

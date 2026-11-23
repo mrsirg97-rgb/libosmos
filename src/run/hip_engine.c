@@ -8,6 +8,8 @@
 #include "osmos/model/gguf.h"
 #include "osmos/text/answer.h"
 #include "osmos/run/fit.h"
+#include "osmos/mem/ledger.h"
+#include "osmos/err_hip.h"
 
 /* the dispatch: a model's family by its file's general.architecture, then every call that family's */
 
@@ -28,8 +30,9 @@ struct Osmos
   void *impl;
   uint32_t vocab; /* a logits row's floats (osmos_greedy_except) */
   float *row;     /* [vocab], a row copied out */
-  float *drow;    /* [vocab] device: a row's copy, its excepted tokens -inf (osmos_sample_except), at first use */
+  float *drow;    /* [vocab] device: a row's copy, its excepted tokens -inf (osmos_sample_except) */
   int32_t *dpick; /* device: a drawn token */
+  OsmosLedger *ledger; /* the engine's memory, one count (osmos/mem/ledger.h): its own, every family's build borrowing it */
   uint64_t ram_kept; /* the system's RAM a build leaves free: OsmosOptions' fill, else FIT_RAM_FREE */
 };
 
@@ -116,8 +119,15 @@ Osmos *osmos_create(const OsmosModel *m, const OsmosOptions *o, char err[OSMOS_E
   if (!(e->row = malloc((size_t)e->vocab * sizeof *e->row)))
     return free(e), osmos_fail(err, "out of memory"), NULL;
   e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
-  if (!named(m->fam, err, (e->impl = m->fam->create(m->impl, o, err)) != NULL))
-    return free(e->row), free(e), NULL;
+  /* the ledger first (the family's build borrows it), then the engine's own buffers - made whole, here: sampling's row
+     and pick were made at their first use */
+  if (!(e->ledger = ledger_create(e->ram_kept, err)) ||
+      !ledger_check(e->ledger, ledger_malloc(e->ledger, (void **)&e->drow, (size_t)e->vocab * sizeof *e->drow), err,
+                    "the engine's sampling row") ||
+      !ledger_check(e->ledger, ledger_malloc(e->ledger, (void **)&e->dpick, sizeof *e->dpick), err,
+                    "the engine's sampling pick") ||
+      !named(m->fam, err, (e->impl = m->fam->create(m->impl, o, e->ledger, err)) != NULL))
+    return osmos_destroy(e), NULL;
   return e;
 }
 
@@ -125,11 +135,10 @@ void osmos_destroy(Osmos *e)
 {
   if (!e)
     return;
-  e->fam->destroy(e->impl);
-  if (e->drow)
-    (void)hipFree(e->drow);
-  if (e->dpick)
-    (void)hipFree(e->dpick);
+  if (e->impl)
+    e->fam->destroy(e->impl); /* (the family's build, its borrowed ledger still here) */
+  ledger_free(e->ledger, e->drow), ledger_free(e->ledger, e->dpick);
+  ledger_destroy(e->ledger); /* last: everything it counted returned */
   free(e->row), free(e);
 }
 
@@ -154,6 +163,8 @@ void osmos_stats(const Osmos *e, OsmosStats *s)
   memset(s, 0, sizeof *s);
   if (e)
     e->fam->stats(e->impl, s);
+  if (e)
+    s->held = ledger_taken(e->ledger);
 }
 
 bool osmos_read(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
@@ -215,8 +226,6 @@ static bool draw(Osmos *e, const float *dev, const OsmosSampling *s, uint64_t po
 {
   if (!(s->temperature < 1e30f) || !(s->top_p > 0 && s->top_p <= 1))
     return osmos_fail(err, "sampling: temperature finite and above 0, top_p in (0, 1]");
-  if (!e->dpick && hipMalloc((void **)&e->dpick, sizeof *e->dpick) != hipSuccess)
-    return e->dpick = NULL, osmos_fail(err, "a GPU call failed (sampling's pick)");
   if (!ops_sample(dev, e->vocab, s->temperature, s->top_p, s->top_k, ops_draw_uniform(s->seed, position), e->dpick,
                   NULL) ||
       hipMemcpy(id, e->dpick, sizeof *id, hipMemcpyDeviceToHost) != hipSuccess)
@@ -251,8 +260,6 @@ bool osmos_sample_except(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_
   if (!dev)
     return osmos_fail(err, "the row's logits not kept");
   const size_t bytes = (size_t)e->vocab * sizeof *e->drow;
-  if (!e->drow && hipMalloc((void **)&e->drow, bytes) != hipSuccess)
-    return e->drow = NULL, osmos_fail(err, "a GPU call failed (a row's copy)");
   const float ninf = -__builtin_inff();
   if (hipDeviceSynchronize() != hipSuccess || hipMemcpy(e->drow, dev, bytes, hipMemcpyDeviceToDevice) != hipSuccess)
     return osmos_fail(err, "a GPU call failed (a row's copy)");
@@ -268,6 +275,8 @@ uint32_t osmos_block(const Osmos *e) { return e ? e->fam->block(e->impl) : 0; }
 OsmosSeq *oseq_create(Osmos *e, char err[OSMOS_ERR])
 {
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
+  if (e)
+    ledger_read(e->ledger); /* (a build's start: what others took since counted) */
   if (!e)
     return osmos_fail(err, "no engine"), NULL;
   OsmosSeq *s = calloc(1, sizeof *s);

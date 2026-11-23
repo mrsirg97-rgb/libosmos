@@ -6,6 +6,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "osmos/err_hip.h"
 #include "osmos/run/fit.h"
 
 /* the room's reading, measured (DESIGN.md, "0.15.2: the build ledger"): memory taken is counted at once - HIP's,
@@ -116,6 +117,13 @@ uint64_t ledger_taken(const OsmosLedger *l) { return l ? l->taken : 0; }
 
 const char *ledger_why(const OsmosLedger *l) { return l ? l->why : ""; }
 
+bool ledger_check(const OsmosLedger *l, hipError_t e, char err[OSMOS_ERR], const char *what)
+{
+  if (e == hipErrorOutOfMemory && l && l->why[0])
+    return osmos_fail(err, "%s: refused by the ledger: %s", what, l->why);
+  return osmos_hip(e, err, what);
+}
+
 static uint32_t slot(const void *p, uint32_t cap)
 {
   const uint64_t h = (uint64_t)(uintptr_t)p * 0x9e3779b97f4a7c15ull; /* (Fibonacci hashing: 2^64 / the golden ratio) */
@@ -144,6 +152,16 @@ static bool grow(OsmosLedger *l)
   return true;
 }
 
+/* bytes as a reader reads them: GiB, or MiB under one */
+static const char *size_of(char out[24], uint64_t b)
+{
+  if (b >= (1ull << 30))
+    snprintf(out, 24, "%.2f GiB", (double)b / (1ull << 30));
+  else
+    snprintf(out, 24, "%.1f MiB", (double)b / (1ull << 20));
+  return out;
+}
+
 /* the allocation's bytes past the room: refused (why kept), else counted - a refusal only on a settled reading */
 static bool take(OsmosLedger *l, size_t bytes)
 {
@@ -153,14 +171,13 @@ static bool take(OsmosLedger *l, size_t bytes)
     settle(l);
   if ((uint64_t)bytes > ledger_left(l))
   {
-    snprintf(l->why, sizeof l->why,
-             "%.2f GiB asked with %.2f GiB left past the %.0f GiB a build's kernels need (the GPU's memory, or the "
-             "system's RAM past the %.1f GiB kept)",
-             (double)bytes / (1ull << 30), (double)ledger_left(l) / (1ull << 30), (double)FIT_HEADROOM / (1ull << 30),
-             (double)l->kept / (1ull << 30));
+    char asked[24], left[24];
+    snprintf(l->why, sizeof l->why, "%s asked, %s left (of the GPU's memory or the RAM past %.1f GiB kept)",
+             size_of(asked, bytes), size_of(left, ledger_left(l)), (double)l->kept / (1ull << 30));
     return false;
   }
   l->taken += bytes;
+  l->why[0] = 0; /* (a refusal said once: never another failure's) */
   return true;
 }
 

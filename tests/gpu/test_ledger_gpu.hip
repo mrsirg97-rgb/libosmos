@@ -43,7 +43,11 @@ int main() {
   CHECK(ledger_host_malloc(l, &h, 64 * kMiB, 0) == hipSuccess && ledger_left(l) == 64 * kMiB);  // pinned host alike
   // past the room: refused before it is taken, why kept
   CHECK(ledger_malloc(l, &b, 65 * kMiB) == hipErrorOutOfMemory && ledger_left(l) == 64 * kMiB);
-  CHECK(std::strstr(ledger_why(l), "GiB asked"));
+  CHECK(std::strstr(ledger_why(l), "MiB asked"));
+  char cerr[OSMOS_ERR] = "";  // its refusal said as the ledger's, until an allocation after it holds
+  CHECK(!ledger_check(l, hipErrorOutOfMemory, cerr, "a buffer") && std::strstr(cerr, "a buffer: refused by the ledger: "));
+  void* ok_after = nullptr;
+  CHECK(ledger_malloc(l, &ok_after, kMiB) == hipSuccess && !ledger_why(l)[0] && ledger_free(l, ok_after) == hipSuccess);
   // a free given back
   CHECK(ledger_free(l, a) == hipSuccess && ledger_left(l) == 192 * kMiB);
   CHECK(ledger_host_free(l, h) == hipSuccess && ledger_left(l) == 256 * kMiB && ledger_taken(l) == 0);

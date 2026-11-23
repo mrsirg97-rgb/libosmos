@@ -36,8 +36,11 @@ uint64_t ledger_left(const OsmosLedger *l);
 uint64_t ledger_left_settled(OsmosLedger *l);
 /* the bytes it holds now */
 uint64_t ledger_taken(const OsmosLedger *l);
-/* its last refusal ("" none): the bytes asked, the room left, the RAM kept */
+/* its last refusal, until an allocation after it holds ("" none): the bytes asked, the room left, the RAM kept */
 const char *ledger_why(const OsmosLedger *l);
+/* an allocation's result in the error shape (osmos/err_hip.h's osmos_hip): the ledger's refusal said as its own -
+   "<what>: refused by the ledger: <why>" - a HIP failure as HIP's */
+bool ledger_check(const OsmosLedger *l, hipError_t e, char err[OSMOS_ERR], const char *what);
 
 /* hipMalloc / hipHostMalloc counted (a NULL ledger: as HIP's own); refused: hipErrorOutOfMemory, nothing taken, why
    kept. _free / _host_free: hipFree / hipHostFree, what it counted given back */
