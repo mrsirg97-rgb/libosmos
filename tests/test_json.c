@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "osmos/text/json.h"
 
@@ -106,6 +107,57 @@ int main(void)
     Json *j = json_parse(b.p, b.n, err);
     assert(j && j->type == JSON_STRING);
     json_free(j), free(b.p);
+  }
+  /* an object's duplicate keys (Python's dict): a key in its first place, its last value - on random objects of keys
+     from a small set (repeated often), against a reference written out by hand */
+  for (int t = 0; t < 2000; t++)
+  {
+    char text[4096], *w = text;
+    int order[8], last[8], seen = 0, at[8];
+    for (int k = 0; k < 8; k++) at[k] = -1;
+    const int n = 1 + (int)(seed % 40);
+    *w++ = '{';
+    for (int i = 0; i < n; i++)
+    {
+      seed = seed * 1103515245u + 12345u;
+      const int k = (int)((seed >> 16) % 8);
+      w += sprintf(w, "%s\"k%d\":%d", i ? "," : "", k, i);
+      if (at[k] < 0) at[k] = seen, order[seen++] = k;
+      last[k] = i;
+    }
+    *w++ = '}', *w = 0;
+    Json *j = json_parse(text, (size_t)(w - text), err);
+    assert(j && j->type == JSON_OBJECT && j->n == (size_t)seen);
+    for (int i = 0; i < seen; i++)
+    {
+      char want[8];
+      snprintf(want, sizeof want, "k%d", order[i]);
+      assert(!strcmp(j->key[i], want) && j->item[i]->type == JSON_INT && atoi(j->item[i]->s) == last[order[i]]);
+    }
+    json_free(j);
+  }
+  /* the work an object's keys cost grows as n log n, not n^2 (0.15.2: each key compared with every earlier one - one
+     1 MB body of 80,000 keys held a core 67 s, a 32 MB one hours): 8x the keys, under 24x the time (n log n ~9.5x,
+     n^2 64x) */
+  {
+    double took[2];
+    const int ns[2] = {25000, 200000};
+    for (int r = 0; r < 2; r++)
+    {
+      char *b = malloc((size_t)ns[r] * 16 + 16), *w = b;
+      *w++ = '{';
+      for (int i = 0; i < ns[r]; i++) w += sprintf(w, "%s\"k%07d\":0", i ? "," : "", i);
+      *w++ = '}', *w = 0;
+      struct timespec a, z;
+      clock_gettime(CLOCK_MONOTONIC, &a);
+      Json *j = json_parse(b, (size_t)(w - b), err);
+      clock_gettime(CLOCK_MONOTONIC, &z);
+      assert(j && j->n == (size_t)ns[r]);
+      took[r] = (double)(z.tv_sec - a.tv_sec) + (double)(z.tv_nsec - a.tv_nsec) / 1e9;
+      json_free(j), free(b);
+    }
+    printf("  an object's keys: %d in %.3f s, %d in %.3f s (%.1fx)\n", ns[0], took[0], ns[1], took[1], took[1] / took[0]);
+    assert(took[1] < 24 * took[0] + 0.05);
   }
   printf("  invalid UTF-8 written as Python's replace reads it (%zu cases, 20000 random byte strings read back)\n",
          sizeof bytes / sizeof *bytes);
