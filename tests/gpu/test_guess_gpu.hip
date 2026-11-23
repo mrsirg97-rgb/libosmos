@@ -44,12 +44,13 @@ static uint64_t fnv(const void* p, size_t n, uint64_t h) {
 static Run decode(const Weights* w, bool no_guess) {
   char err[OSMOS_ERR] = "";
   ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens};
+  o.lane = true;
   o.no_guess = no_guess;
   osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward_create_with: %s\n", err);
   osmos_clear(err);
-  CHECK(f && forward_lane(f, 0, NULL, err));
+  CHECK(f);
   const uint32_t V = (uint32_t) w->geo.n_vocab;
   std::vector<int32_t> p(kPrompt);
   uint32_t r = 1017;

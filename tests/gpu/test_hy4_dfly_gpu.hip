@@ -73,14 +73,13 @@ int main() {
     fid.assign(v.begin(), v.end());
   }
   CHECK(kPrompt > 0 && fid.size() >= kPrompt);
-  const Hy4Options o = {kPrompt, kPrompt + kGen + 64, HY4_DFLY_DRAFTS + 1, getenv("OSMOS_TEST_HY4_KV8") == nullptr};
+  const bool q8 = getenv("OSMOS_TEST_DFLY_Q8") != nullptr;  // (the engine's: Q8_0; the reference's check strict in BF16)
+  Hy4Options o = {kPrompt, kPrompt + kGen + 64, HY4_DFLY_DRAFTS + 1, getenv("OSMOS_TEST_HY4_KV8") == nullptr};
+  o.dfly = dfly.c_str(), o.dfly_q8 = q8; /* (DFly2 made with the forward) */
   osmos_clear(err);
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::printf("  refused: %s\n", err);
-  CHECK(f);
-  const bool q8 = getenv("OSMOS_TEST_DFLY_Q8") != nullptr;  // (the engine's: Q8_0; the reference's check strict in BF16)
-  if (!hy4_dfly_load(f, dfly.c_str(), q8, err)) std::printf("  refused: %s\n", err);
-  CHECK(f->dfly);
+  CHECK(f && f->dfly);
   std::printf("[test_hy4_dfly_gpu] DFly2 loaded beside the forward (%s); a prompt of %u tokens\n", dfly.c_str(), kPrompt);
   std::vector<int32_t> ids(kPrompt);
   for (uint32_t t = 0; t < kPrompt; t++) ids[t] = (int32_t) fid[t];

@@ -153,15 +153,15 @@ int main() {
           fx.round_tokens == (uint32_t) ((w->geo.n_experts - 1) / w->geo.n_used) &&
           fx.seed_window == (uint32_t) w->geo.window && fx.native_ctx > 0);
     ForwardOptions fo = {(int) w->geo.n_layers, kCtx, kBudget, nullptr, 0, true};
+    fo.lane = true, fo.drafter = ddir.c_str(); /* (the forward whole: its lane and its drafter, the engine's) */
     Forward* f = nullptr;
     Drafter* d = nullptr;
-    TestFit fit = {[&](uint64_t b) {  // (the forward, its lane and drafter: everything this part holds)
+    TestFit fit = {[&](uint64_t b) {
                      fo.budget = b;
-                     return (f = forward_create_with(w, &fo, ferr)) && forward_lane(f, 0, NULL, ferr) &&
-                            (d = drafter_create(f, ddir.c_str(), ferr));
+                     return (f = forward_create_with(w, &fo, ferr)) && (d = forward_drafter(f));
                    },
                    [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
-                   [&] { drafter_destroy(d), d = nullptr, forward_destroy(f), f = nullptr; }};
+                   [&] { d = nullptr, forward_destroy(f), f = nullptr; }};
     uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
     CHECK(test_fit(fit, kBudget, &budget));
     osmos_clear(ferr);
@@ -184,8 +184,7 @@ int main() {
         },
         [&](uint32_t n) { return seq_rollback(s, n); });
     seq_destroy(s);
-    drafter_destroy(d);
-    forward_destroy(f);
+    forward_destroy(f); /* (its drafter with it) */
     weights_destroy(w);
     gguf_destroy(g);
   }

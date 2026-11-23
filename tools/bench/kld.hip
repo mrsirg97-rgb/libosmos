@@ -111,6 +111,10 @@ int main(int argc, char** argv) {
   const uint32_t big = std::getenv("BIG") ? (uint32_t) std::atoi(std::getenv("BIG")) : 0;
   CHECK(!big || (big >= step && big <= FORWARD_MAX_TOKENS));
   o.n_layers = (int) w->geo.n_layers, o.max_ctx = n, o.budget = budget, o.max_tokens = big ? big : step;
+  /* the forward whole: its lane (as the engine's and ppl.hip's: a step under n_experts / n_used rows the engine's),
+     the NPU beside the GPU (0.7.0: NPU=<its kernels' dir>, NPU_SHARE of a layer's pairs) */
+  o.lane = true, o.npu = std::getenv("NPU");
+  o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;
   if (const char* fl = std::getenv("FILL"))  // GiB of RAM a build keeps free (osmos-serve --fill): this tool's own
     o.fill_set = true, o.fill = (uint64_t) (std::atof(fl) * 1073741824.0);  // buffers beside it counted in
   std::vector<uint64_t> picks;
@@ -130,7 +134,7 @@ int main(int argc, char** argv) {
       z->o.budget = b;
       char e[OSMOS_ERR] = "";
       z->f = forward_create_with(z->w, &z->o, e);
-      if (!z->f || !forward_lane(z->f, 0, NULL, e) || !forward_room(z->f, room)) {
+      if (!z->f || !forward_room(z->f, room)) {
         if (z->f) forward_destroy(z->f), z->f = nullptr;
         return std::snprintf(err, OSMOS_ERR, "%s", e[0] ? e : "the room could not be read"), false;
       }
@@ -151,11 +155,7 @@ int main(int argc, char** argv) {
   } else {
     f = forward_create_with(w, &o, ferr);
     if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
-    CHECK(forward_lane(f, 0, NULL, ferr));  // as the engine and ppl.hip: a step under n_experts / n_used rows the engine's
   }
-  if (const char* nd = std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu), NPU_SHARE of a layer's pairs
-    if (!forward_npu(f, nd, std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr))
-      std::fprintf(stderr, "forward_npu: %s\n", ferr), std::_Exit(1);
   Seq* s = seq_create(f, ferr);
   CHECK(s);
   std::vector<Seq*> ss(big ? big : step, s);

@@ -28,6 +28,7 @@
 #include "osmos/npu/npu.h"
 #include "osmos/run/forward.h"
 #include "osmos/gpu/overflow.h"
+#include "osmos/model/dspark.h"
 
 #define FWD_MAX_FILES WEIGHTS_MAX_FILES
 #define FWD_SCORE_BYTES (512ull << 20) /* the indexer's scores at most: a step scored in chunks of tokens past it (a
@@ -169,7 +170,7 @@ struct Forward
   uint8_t *r_up;
   uint32_t *m_by, *m_row, *m_base, *m_slot0; /* a layer's routing (moe_route): sorted rows' pairs, pairs' rows, runs */
   int32_t *m_gidx, *m_hidx;                  /* its slots' tokens and rows (FWD_MAX_SLOTS), then carved */
-  /* forward_lane's: on, its CPU threads (0: every expert on the GPU, in the order the CPU would sum it), and a small
+  /* the lane's (ForwardOptions' lane): on, its CPU threads (0: every expert on the GPU, in the order the CPU would sum it), and a small
      step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in ascending expert id */
   /* 0.7.0: the NPU beside the GPU (npu.h; forward_npu): a prompt step's hottest experts' gate and up, a fixed
      share of an eligible layer's pairs in whole NPU_TOKENS parts (hip_ffn.c's npu_pick) - by routing alone, so the
@@ -225,6 +226,7 @@ struct Forward
   void *argmax_part; /* forward_greedy's slices' bests (ops_argmax_scratch of a step's rows) */
   float *taps;
   int n_tap, tap_of[WEIGHTS_MAX_LAYERS];
+  struct Drafter *drafter; /* ForwardOptions' drafter: the forward's own, destroyed first in forward_destroy */
   bool tapped[WEIGHTS_MAX_LAYERS];
   uint32_t tap_n, tap_rows;
   int32_t tap_pos[FWD_MAX_BATCH];
@@ -319,7 +321,17 @@ bool fwd_wait(Forward *f, hipEvent_t ev); /* the GPU past `ev`: spun on in a dec
 bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd_wait on `passed`) */
 /* the taps at target layers `at` taken from the next step on (a drafter's): false if none, or they cannot be held,
    or taps are on already at other layers */
-bool fwd_taps_on(Forward *f, const bool *at);
+/* the taps planned (the target layers at[]: f->tapped, tap_of, n_tap), before the step's buffers are made (taps' with
+   them) - ForwardOptions' drafter's */
+void fwd_taps_plan(Forward *f, const bool *at);
+/* hip_lane.c, hip_fwd_npu.c, hip_drafter.c: what forward_create_with makes last (ForwardOptions' lane, npu, drafter) */
+bool fwd_lane_make(Forward *f, int cpu_threads, const int *cpu_cores, char *err);
+bool fwd_npu_make(Forward *f, const char *dir, float share, char *err);
+/* the drafter's plan, read before the forward's GPU memory (its index, its target layers checked: at[]), and the
+   drafter made from it at the forward's end (ix its from then on); destroyed with the forward */
+bool fwd_drafter_plan(const Forward *f, const char *dir, DsparkIndex **ix, bool *at, char *err);
+struct Drafter *fwd_drafter_make(Forward *f, DsparkIndex *ix, char *err);
+void fwd_drafter_destroy(struct Drafter *d);
 
 bool fwd_attention(Forward *f, int l, char *err);
 /* a weight's product over n tokens (token t's x at x + t * xs, its y at y + t * ys; n up to FWD_MAX_STEP): mm for
@@ -345,9 +357,9 @@ bool fwd_moe(Forward *f, int l, char *err);
 bool fwd_guess_queue(Forward *f, int l);
 bool fwd_prompt_ahead(const Forward *f, int l); /* a prompt's step: its read ahead the guess's union */
 void fwd_guess_want(Forward *f, int l);
-/* hip_lane.c: a small step's routed experts in the matvec's order (forward_lane), into b->moe (the shared one added) */
+/* hip_lane.c: a small step's routed experts in the matvec's order (the lane's), into b->moe (the shared one added) */
 bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, char *err);
-/* hip_cpu_lane.c: the CPU half's pool, maps and buffers (forward_lane), their end; whether a small step's unit goes to
+/* hip_cpu_lane.c: the CPU half's pool, maps and buffers (the lane's CPU half), their end; whether a small step's unit goes to
    the CPU (not in GPU memory: neither resident nor read into the pool); a unit's parts in the mapped files */
 bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err);
 void fwd_cpu_destroy(Forward *f);

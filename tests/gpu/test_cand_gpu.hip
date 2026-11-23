@@ -86,10 +86,11 @@ int main() {
   CHECK(w);
   char err[OSMOS_ERR] = "";
   ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, 100ull << 30, nullptr, kMaxTokens};
+  o.lane = true;
   Forward* f = nullptr;
   TestFit fit = {[&](uint64_t b) {
                    o.budget = b;
-                   return (f = forward_create_with(w, &o, err)) && forward_lane(f, 0, NULL, err);
+                   return (f = forward_create_with(w, &o, err)) != nullptr;
                  },
                  [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
                  [&] { forward_destroy(f), f = nullptr; }};

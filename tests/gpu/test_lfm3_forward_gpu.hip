@@ -451,10 +451,12 @@ int main() {
           osmos_clear(err);
           CHECK(!lfm3_forward_create(w, &ob, err));
         }
-        // OSMOS_LFM3_STAGES (a table without a build): a well-formed one taken, any malformed refused (0.11.2: a bad
-        // string used whatever parsed before it)
-        const Lfm3Options oe = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, nullptr, 0, 0, 0};
-        setenv("OSMOS_LFM3_STAGES", "0:1,1500:2,1900:4", 1);
+        // lfm3_stages_parse (osmos-serve's --rope-stages: a table without a build): a well-formed one taken and
+        // built, any malformed refused (0.11.2: a bad string used whatever parsed before it)
+        Lfm3Stage parsed[LFM3_MAX_STAGES];
+        uint32_t np = 0;
+        CHECK(lfm3_stages_parse("0:1,1500:2,1900:4", parsed, &np) && np == 3);
+        const Lfm3Options oe = {T, T, last, LFM3_HEAD_FILE, nullptr, 1024, parsed, np, 0, 0};
         osmos_clear(err);
         Lfm3Forward* fe = lfm3_forward_create(w, &oe, err);
         CHECK(fe);
@@ -464,14 +466,10 @@ int main() {
         CHECK(e3 && lfm3_step(fe, e3, ids.data(), T, 1, err) && lfm3_seq_stage(e3) == 2);
         lfm3_seq_destroy(e3), lfm3_forward_destroy(fe);
         for (const char* bad : {"0:1,160000:4x", "0:1;160000:4", "0:1 160000:4", "0:1,4294967396:4", ":1", "0:",
-                                "0:1,", "0:1,1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1"}) {
-          setenv("OSMOS_LFM3_STAGES", bad, 1);
-          osmos_clear(err);
-          CHECK(!lfm3_forward_create(w, &oe, err));
-        }
-        unsetenv("OSMOS_LFM3_STAGES");
+                                "0:1,", "0:1,1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1"})
+          CHECK(!lfm3_stages_parse(bad, parsed, &np));
         std::printf("  a table's stages (1,500, 1,900): stages 0, 1, 2 at 1,400, 1,700, 2,048; a crossing's reach its "
-                    "stage's; bad tables and OSMOS_LFM3_STAGES strings refused\n");
+                    "stage's; bad tables and --rope-stages strings refused\n");
       }
       lfm3_seq_destroy(one), lfm3_seq_destroy(two), lfm3_forward_destroy(fy);
     } else {

@@ -9,7 +9,7 @@
 #include "osmos/run/forward.h"
 
 /* DeepSeek-V4.1-Flash behind the engine: each call the forward's and the drafter's own, as osmos-serve made them
-   before 0.4.0 - its decode in the lane's order (forward_lane 0, every expert on the GPU) */
+   before 0.4.0 - its decode in the lane's order (ForwardOptions' lane, cpu_threads 0: every expert on the GPU) */
 
 _Static_assert(OSMOS_ERR == OSMOS_ERR && OSMOS_ERR >= OSMOS_ERR && OSMOS_ERR >= OSMOS_ERR,
                "one error buffer for the engine and the family's calls");
@@ -74,7 +74,6 @@ static void e_destroy(void *p)
   Eng *e = p;
   if (!e)
     return;
-  drafter_destroy(e->d);
   forward_destroy(e->f);
   free(e->picks);
   free(e->seqs);
@@ -106,15 +105,29 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   if (o->picks && !(e->picks = read_picks(o->picks, &m->w->geo, err)))
     return e_destroy(e), NULL;
   e->rows = (uint32_t)((m->w->geo.n_experts - 1) / m->w->geo.n_used); /* m_open's round_tokens */
-  if (o->kv_q8)
-    return e_destroy(e), osmos_fail(err, "kv_q8 is Inkling's alone"), NULL;
-  const ForwardOptions fo = {m->w->geo.n_layers, o->max_ctx,  o->budget,     e->picks,
-                             osmos_step_tokens(o, FORWARD_MAX_TOKENS), o->no_guess, o->fill_set, o->fill, 0, e->rows,
-                             ledger};
-  if (!(e->f = forward_create_with(m->w, &fo, err)) || !forward_lane(e->f, 0, NULL, err) ||
-      (o->npu && !forward_npu(e->f, o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_DS, err)) ||
-      (o->drafter && !(e->d = drafter_create(e->f, o->drafter, err))))
+  if (o->kv_q8 || o->profile || o->rope_stages)
+    return e_destroy(e), osmos_fail(err, "kv_q8 and profile are Inkling's, rope_stages osmos1.7b's"), NULL;
+  /* whole: the lane (every engine's, all its experts on the GPU), the NPU, the drafter - the forward's own */
+  const ForwardOptions fo = {m->w->geo.n_layers,
+                             o->max_ctx,
+                             o->budget,
+                             e->picks,
+                             osmos_step_tokens(o, FORWARD_MAX_TOKENS),
+                             o->no_guess,
+                             o->fill_set,
+                             o->fill,
+                             0,
+                             e->rows,
+                             ledger,
+                             true,
+                             0,
+                             NULL,
+                             o->npu,
+                             o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_DS,
+                             o->drafter};
+  if (!(e->f = forward_create_with(m->w, &fo, err)))
     return e_destroy(e), NULL;
+  e->d = forward_drafter(e->f); /* (borrowed: the forward's) */
   return e;
 }
 

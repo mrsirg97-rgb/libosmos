@@ -174,6 +174,7 @@ float *hy4_host_f32(const Gguf *g, const GgufTensor *t);
 bool hy4_q8_up(GpuBufs *b, const float *x, uint64_t rows, uint32_t cols, void **dev);
 /* DFly2's weights and buffers freed (hip_hy4_dfly.c; none loaded: nothing) */
 void hy4_dfly_free(Hy4Forward *f);
+bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]); /* Hy4Options' dfly: create's */
 
 /* the latent MoE (hip_hy4_moe.c): the router, the experts (the matvecs, or read: the matrix cores), the shared
    expert, the combine norm - into f->y */

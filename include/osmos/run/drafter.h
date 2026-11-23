@@ -15,8 +15,6 @@
 
 typedef struct Drafter Drafter;
 
-Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR]);
-void drafter_destroy(Drafter *d);
 bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);
 
 int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, int32_t drafts[DRAFTER_BLOCK],
@@ -35,13 +33,11 @@ Drafter
   (dir/dspark.bin, ~4.7 GB as the packs ship it: experts IQ2_XS) in GPU memory of their own, outside the Forward's
   budget; its products the matvec's (F32 sums). drafts change no bit of the trunk's: they are only proposals, which a batched forward verifies.
 
-drafter_create
-  the drafter read from dir (dspark.json, dspark.bin) for f; f takes its taps from its next step on - at the target
-  layers the model's GGUF names, else those dspark.json does. NULL with why in err for a drafter it cannot read, target
-  layers neither names (or both, unequal), taps its main_proj does not take, or GPU memory refused.
-
-drafter_destroy
-  its memory (its rings' are the Seqs'). NULL is nothing to do; before its Forward.
+made with its forward (ForwardOptions' drafter: dir's dspark.json, dspark.bin), the forward's own - forward_drafter
+  borrows it, forward_destroy destroys it (0.16.0: drafter_create attached one to a built forward, its taps turned on
+  then). the forward taps from its first step - at the target layers the model's GGUF names, else those dspark.json
+  does, checked before the forward's GPU memory is taken: the forward refused, why said, for a drafter it cannot read,
+  target layers neither names (or both, unequal), taps its main_proj does not take, or GPU memory refused.
 
 drafter_seed
   s's ring rows for its positions from .. to - 1 of f's last step (each one's taps, keys for every block): after a

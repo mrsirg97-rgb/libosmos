@@ -1,13 +1,12 @@
 // one ownership tree, every byte counted (SCOPE.md; DESIGN.md "phase 3's finish line"): an engine's every allocation
 // through its ledger - what the library's own code holds from HIP and HSA (alloc_count.h: the linker's --wrap) the
 // ledger's count, byte for byte, after osmos_create, with sequences, after a step and a drafted round, after a
-// sequence's destroy; and after osmos_destroy and osmos_close nothing held at all. each pack its family's commit puts
-// in kLedgered (0.16.0 phase 3, stage 4: one family a commit); 77 if none here.
+// sequence's destroy; and after osmos_destroy and osmos_close nothing held at all. every family's pack (a name: that
+// pack alone); 77 if none here.
 #include <hip/hip_runtime.h>
 
 #include <cstdio>
 #include <cstring>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -44,9 +43,9 @@ static const Pack kPacks[] = {
      "/Models/osmos/hy4-flash/model-00148-of-00148.safetensors", true},
     {"osmos-evo", "/Models/osmos/osmos-evo/DeepSeek-V4.1-Flash-1017-osmos-evo-A2-00001-of-00005.gguf", nullptr, nullptr,
      false},
+    {"coder27", "/Models/coder27/Huihui-Qwen3.8-27B-Coder390-EfficientThink-abliterated-IQ3_S3.gguf", nullptr, nullptr,
+     false},  // (the 27B: no pack ships it, the engine still builds it)
 };
-// the families whose builds go through the ledger (stage 4 adds one a commit; at its end every family, and this goes)
-static const std::set<std::string> kLedgered = {"lfm3", "inkling2", "qwen4exp", "hy_v4_flash", "deepseek41"};
 
 static std::string home(const char* p) {
   const char* h = std::getenv("HOME");
@@ -74,11 +73,6 @@ static bool one(const Pack& p) {
   OsmosFiles files = {model.c_str(), nullptr, nullptr, p.lsa && !access(lsa.c_str(), R_OK) ? lsa.c_str() : nullptr};
   OsmosModel* m = osmos_open(&files, err);
   CHECK(m);
-  if (!kLedgered.count(osmos_facts(m).family)) {
-    std::printf("  %s: %s not through the ledger yet (stage 4), skipped\n", p.name, osmos_facts(m).family);
-    osmos_close(m);
-    return false;
-  }
   const uint64_t opened = alloc_count::held();  // (the model's own: not the engine's tree)
   OsmosOptions o = small_pack_options(m, 4096);
   if (p.drafter && !access(drafter.c_str(), R_OK)) o.drafter = drafter.c_str();

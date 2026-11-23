@@ -1,4 +1,4 @@
-/* 0.7.0: the NPU beside the GPU in a prompt step's routed experts (forward.h's forward_npu; npu.h). a layer whose
+/* 0.7.0: the NPU beside the GPU in a prompt step's routed experts (forward.h's npu: ForwardOptions'; npu.h). a layer whose
    gate and up share a format the NPU has a kernel for, or whose down has one, gives the NPU a fixed share of its pairs
    in whole NPU_TOKENS parts of its hottest experts - chosen from the routing alone (fwd_npu_pick), so a prompt's bits
    are the same each run. for each matrix it takes the GPU packs the parts' rows (npu_pack_a: of xf for gate and up,
@@ -19,7 +19,7 @@ static void npu_free(Forward *f)
     hipEventDestroy(f->npu_packed), f->npu_packed = NULL;
   if (f->npu_gpu_done)
     hipEventDestroy(f->npu_gpu_done), hipEventDestroy(f->npu_resumed), f->npu_gpu_done = f->npu_resumed = NULL;
-  if (f->npu_tok) /* (made in forward_npu, given back here: the NPU opened again in the forward's life) */
+  if (f->npu_tok) /* (made in fwd_npu_make, given back here: its own failure's or the forward's end) */
     ledger_host_free(f->ledger, f->npu_tok);
   if (f->npu_row)
     ledger_host_free(f->ledger, f->npu_row);
@@ -30,21 +30,21 @@ static void npu_free(Forward *f)
 
 void fwd_npu_destroy(Forward *f) { npu_free(f); }
 
-bool forward_npu(Forward *f, const char *dir, float share, char err[OSMOS_ERR])
+bool fwd_npu_make(Forward *f, const char *dir, float share, char *err)
 {
   const Geometry *g = f->g;
   if (!dir || !(share > 0.0f && share < 1.0f))
-    return osmos_fail(err, "forward_npu: a directory and a share in (0, 1)");
+    return osmos_fail(err, "the NPU: a directory and a share in (0, 1)");
   /* the kernels' shapes: 2304 = 3 passes x 32 cores x NPU_GATE_UP_ROWS, 5120 = 10 x 32 x NPU_DOWN_ROWS */
   if (g->n_embd % (NPU_CORES * NPU_DOWN_ROWS) || g->expert_ff % (NPU_CORES * NPU_GATE_UP_ROWS) || g->n_embd != 5120 ||
       g->expert_ff != 2304 || g->n_experts > OPS_MAX_EXPERTS)
-    return osmos_fail(err, "forward_npu: the kernels are DeepSeek's (5120 -> 2304 -> 5120)");
+    return osmos_fail(err, "the NPU: the kernels are DeepSeek's (5120 -> 2304 -> 5120)");
   npu_free(f);
   const uint64_t pairs = (uint64_t)f->max_tokens * (uint64_t)g->n_used;
   const uint32_t max = (uint32_t)(share * (double)pairs / NPU_TOKENS) + 1;
   char nerr[OSMOS_ERR] = "";
   void *hb = host_slots_base(f->hs), *sb = host_slots_base(f->hs_stream);
-  if (!(f->npu = npu_open(dir, g->n_embd, g->expert_ff, max, nerr)) ||
+  if (!(f->npu = npu_open(f->ledger, dir, g->n_embd, g->expert_ff, max, nerr)) ||
       /* the cache's pages and the stream's: every expert a step holds (npu_run refuses one outside them) */
       !npu_region(f->npu, hb, host_slots_bytes(f->hs), nerr) ||
       !npu_region(f->npu, sb, host_slots_bytes(f->hs_stream), nerr) ||
@@ -65,7 +65,7 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[OSMOS_ERR])
       hipEventCreate(&f->npu_gpu_done) != hipSuccess || hipEventCreate(&f->npu_resumed) != hipSuccess)
   {
     npu_free(f);
-    return osmos_fail(err, "forward_npu: out of memory");
+    return osmos_fail(err, "the NPU: out of memory");
   }
   f->npu_share = share, f->npu_max = max;
   return true;

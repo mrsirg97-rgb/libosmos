@@ -67,12 +67,13 @@ int main() {
   CHECK(w);
   char err[OSMOS_ERR] = "";
   ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens};
+  o.lane = true;
   o.no_guess = true;
   osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward_create_with: %s\n", err);
   osmos_clear(err);
-  CHECK(f && forward_lane(f, 0, NULL, err));
+  CHECK(f);
   std::vector<int32_t> p(kPrompt);
   uint32_t seed = 1017;
   for (auto& x : p) seed = seed * 1664525u + 1013904223u, x = (int32_t) ((seed >> 8) % ((uint32_t) w->geo.n_vocab - 1000)) + 100;

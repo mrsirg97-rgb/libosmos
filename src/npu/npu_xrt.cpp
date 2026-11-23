@@ -20,6 +20,7 @@
 extern "C" {
 #include "osmos/gpu/npu_pack.h"
 #include "osmos/npu/npu.h"
+#include "osmos/mem/ledger_hip.h"
 }
 
 namespace {
@@ -54,6 +55,7 @@ struct Kern {  // a format and kind's kernel: its own hardware context
 };
 
 struct Npu {
+  OsmosLedger* ledger = nullptr;  // borrowed: A's GPU memory counted in it
   xrt::device dev;
   std::vector<Kern> kern;
   uint32_t max_parts = 0;
@@ -67,7 +69,7 @@ struct Npu {
 
 static bool dma(Npu* n, Dma& m, uint64_t bytes, char* err) {
   uint64_t off = 0;
-  if (hipMalloc(&m.d, bytes) != hipSuccess) return say(err, "hipMalloc", nullptr), false;
+  if (ledger_malloc(n->ledger, &m.d, bytes) != hipSuccess) return say(err, "GPU memory (the ledger's, or HIP's)", nullptr), false;
   if (hsa_amd_portable_export_dmabuf(m.d, bytes, &m.fd, &off) != HSA_STATUS_SUCCESS || off)
     return say(err, "a dma-buf export", nullptr), false;
   m.bo = xrt::bo(n->dev, (xrt::bo::export_handle) m.fd);
@@ -87,10 +89,12 @@ static const struct {
     // Qwen's (its own shapes: a pack's npu/ names one model's set): IQ3_XXS 18, IQ2_S 22 gate + up, IQ4_NL 20 down
     {"iq3xxs", NPU_GATE_UP, 18},      {"iq2s", NPU_GATE_UP, 22},      {"iq4nl-down", NPU_DOWN, 20}};
 
-extern "C" Npu* npu_open(const char* dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[OSMOS_ERR]) {
+extern "C" Npu* npu_open(OsmosLedger* l, const char* dir, uint32_t D, uint32_t FF, uint32_t max_parts,
+                         char err[OSMOS_ERR]) {
   Npu* n = nullptr;
   try {
     n = new Npu();
+    n->ledger = l;
     n->dev = xrt::device(0);
     for (const auto& fm : kFormats) {
       const std::string d = std::string(dir) + "/" + fm.sub;
@@ -133,7 +137,7 @@ extern "C" void npu_close(Npu* n) {
   n->runs.clear(), n->regions.clear(), n->kern.clear();
   n->a.bo = xrt::bo();
   if (n->a.fd >= 0) (void) hsa_amd_portable_close_dmabuf(n->a.fd);
-  if (n->a.d) (void) hipFree(n->a.d);
+  if (n->a.d) (void) ledger_free(n->ledger, n->a.d);
   for (Dma& o : n->devs) {  // the GPU's buffers: imported, not the NPU's to free
     o.bo = xrt::bo();
     if (o.fd >= 0) (void) hsa_amd_portable_close_dmabuf(o.fd);

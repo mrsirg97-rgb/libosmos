@@ -62,12 +62,10 @@ int main(int argc, char** argv) {
   const uint32_t run = np + nd + OSMOS_MAX_BLOCK,
                  ctx = getenv("Q4X_BENCH_CTX") ? (uint32_t) atoi(getenv("Q4X_BENCH_CTX")) : run;
   if (ctx < run) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_CTX below the run's %u\n", run), 2;
-  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr, nullptr, 0, df};
+  // 0.7.0: the NPU beside the GPU, made with the forward: NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
+  const float npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN;
+  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr, nullptr, 0, df, 0, nullptr, std::getenv("NPU"), npu_share};
   Q4xForward* fw = q4x_forward_create_with(w, mtp, &qo, ferr);
-  // 0.7.0: the NPU beside the GPU (q4x_forward_npu): NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
-  if (fw && std::getenv("NPU") &&
-      !q4x_forward_npu(fw, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN, ferr))
-    q4x_forward_destroy(fw), fw = nullptr;
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
   // the prompt's end told, as osmos-serve tells it (oseq_prompt): its last row's logits alone. Q4X_BENCH_ALL_ROWS: not told

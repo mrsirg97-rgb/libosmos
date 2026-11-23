@@ -83,8 +83,8 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->picks || o->no_guess || o->npu || o->kv_q8)
-    return osmos_fail(err, "hy_v4_flash: no picks, no_guess, NPU or kv_q8"), NULL;
+  if (o->picks || o->no_guess || o->npu || o->kv_q8 || o->profile || o->rope_stages)
+    return osmos_fail(err, "hy_v4_flash: no picks, no_guess, NPU, kv_q8, profile or rope_stages"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
@@ -93,10 +93,8 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Hy4Options' 0,
      every expert resident) */
   const Hy4Options ho = {steps, o->max_ctx, HY4_LOGIT_ROWS, false, true,
-                         o->budget ? o->budget : 1, ledger};
+                         o->budget ? o->budget : 1, ledger, o->drafter, true}; /* (DFly2 Q8_0: half its reads) */
   if (!(e->f = hy4_forward_create(m->w, m->fds, &ho, err)))
-    return e_destroy(e), NULL;
-  if (o->drafter && !hy4_dfly_load(e->f, o->drafter, true, err)) /* (Q8_0: half the draft's reads) */
     return e_destroy(e), NULL;
   e->drafts = o->drafter ? HY4_DFLY_DRAFTS : 0;
   return e;

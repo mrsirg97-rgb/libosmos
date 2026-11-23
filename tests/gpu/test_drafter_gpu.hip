@@ -68,16 +68,21 @@ int main() {
   lg.resize(V);
   Forward* f = nullptr;
   Drafter* d = nullptr;
-  TestFit fit = {[&](uint64_t b) {  // (the forward and its drafter: everything the test holds)
-                   return (f = forward_create(w, w->geo.n_layers, 4096, b, ferr)) && (d = drafter_create(f, ddir.c_str(), ferr));
+  ForwardOptions o = {(int) w->geo.n_layers, 4096, 0, nullptr, FORWARD_MAX_TOKENS};
+  o.drafter = ddir.c_str(); /* (the forward and its drafter, its own: everything the test holds) */
+  TestFit fit = {[&](uint64_t b) {
+                   o.budget = b;
+                   return (f = forward_create_with(w, &o, ferr)) && (d = forward_drafter(f));
                  },
                  [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
-                 [&] { drafter_destroy(d), d = nullptr, forward_destroy(f), f = nullptr; }};
+                 [&] { d = nullptr, forward_destroy(f), f = nullptr; }};
   uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
   if (!test_fit(fit, kBudget, &budget)) std::printf("  %s\n", ferr);
   CHECK(f && d);
   osmos_clear(ferr);
-  CHECK(!drafter_create(f, "/nonexistent", ferr));
+  ForwardOptions none = o; /* (a drafter not there: refused before the forward takes its GPU memory) */
+  none.drafter = "/nonexistent";
+  CHECK(!forward_create_with(w, &none, ferr));
   const auto prompt = [&](Seq* s) {
     std::vector<Seq*> ss(kPrompt, s);
     osmos_clear(ferr);
@@ -196,12 +201,10 @@ int main() {
                 "the same prompt in two steps\n", kLong, kWin, na);
     seq_destroy(a1), seq_destroy(b1);
   }
-  osmos_clear(ferr);
-  CHECK(forward_lane(f, 0, NULL, ferr));
+  forward_lane_mode(f, true);
   both("the lane", false);
 
-  drafter_destroy(d);
-  forward_destroy(f);
+  forward_destroy(f); /* (its drafter with it) */
   weights_destroy(w);
   gguf_destroy(g);
   gguf_destroy(eg);

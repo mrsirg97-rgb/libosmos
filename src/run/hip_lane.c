@@ -7,7 +7,7 @@
 #include "osmos/gpu/q8.h"
 #include "osmos/err.h"
 
-/* forward_lane's small steps: the step's (token, routed expert) pairs in rows by expert (then token), each expert -
+/* the lane's small steps (ForwardOptions' lane): the step's (token, routed expert) pairs in rows by expert (then token), each expert -
    an entry, or a few of them past MV_MAX_TOKENS tokens - once for its rows through the matvec's group (gate and up
    on the rows' FFN inputs, the lane's activation with each row's weight - over int8 inputs one launch - then down),
    each token's rows then summed in ascending expert id (ref.py's index_add order), the shared expert after. a row's
@@ -27,13 +27,12 @@ typedef struct LaneTabs
   int32_t cpu_row[LANE_PAIRS];               /* the rows the CPU computes (the lane's CPU half) */
 } LaneTabs;
 
-bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[OSMOS_ERR])
+bool fwd_lane_make(Forward *f, int cpu_threads, const int *cpu_cores, char *err)
 {
-  if (!f || cpu_threads < 0 || cpu_threads > CPU_LANE_THREADS_MAX)
-    return osmos_fail(err, "no forward, or a count of CPU threads it does not take");
+  if (cpu_threads < 0 || cpu_threads > CPU_LANE_THREADS_MAX)
+    return osmos_fail(err, "the lane: a count of CPU threads it does not take");
   const uint64_t D = f->g->n_embd;
-  if (!f->lane_up &&
-      (!fwd_mapped(&f->bufs, &f->lane_up, sizeof(LaneTabs)) ||
+  if ((!fwd_mapped(&f->bufs, &f->lane_up, sizeof(LaneTabs)) ||
        hipHostGetDevicePointer(&f->lane_dev, f->lane_up, 0) != hipSuccess ||
        !fwd_alloc(&f->bufs, &f->lane_x, LANE_ROWS * D * sizeof(float)) ||
        !fwd_alloc(&f->bufs, &f->lane_w, LANE_ROWS * sizeof(float)) || !fwd_alloc(&f->bufs, &f->lane_q, LANE_ROWS * D) ||
@@ -41,10 +40,16 @@ bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[OS
        !fwd_alloc(&f->bufs, &f->lane_xq, LANE_PAIRS * D) ||
        !fwd_alloc(&f->bufs, &f->lane_xqd, LANE_PAIRS * (D / LANE_Q8_VALUES) * sizeof(float))))
     return osmos_fail(err, "memory refused (the lane's tables)");
-  if (cpu_threads && !f->cpu && !fwd_cpu_create(f, cpu_threads, cpu_cores, err))
+  if (cpu_threads && !fwd_cpu_create(f, cpu_threads, cpu_cores, err))
     return false;
-  f->lane = true, f->lane_threads = cpu_threads;
+  f->lane_threads = cpu_threads; /* (the order: ForwardOptions' lane, then forward_lane_mode) */
   return true;
+}
+
+void forward_lane_mode(Forward *f, bool on)
+{
+  if (f)
+    f->lane = on;
 }
 
 void forward_reading(Forward *f, bool on)

@@ -120,10 +120,9 @@ constexpr uint32_t kChunks = 32, kChunkTok = 16, kChunkK = OPS_MAX_SELECT > 2048
 static __device__ uint32_t g_ckey[kChunkTok * kChunks * kChunkK], g_citem[kChunkTok * kChunks * kChunkK];
 static __device__ uint32_t g_ccount[kChunkTok * kChunks];
 // (host) the chunked selection: a small step (decode's, a draft's verify) over items enough that a block a token idles the
-// GPU - kChunks chunks each well above k. OSMOS_SELECT_ONE=1 keeps the one-block selection (A/B)
+// GPU - kChunks chunks each well above k (0.7.4: the picks the one-block selection's, bit for bit)
 inline bool chunked(uint32_t n_tok, uint32_t items, uint32_t k) {
-  static const int one = [] { const char* e = getenv("OSMOS_SELECT_ONE"); return e && *e == '1'; }();
-  return !one && n_tok <= kChunkTok && k <= kChunkK && items >= 4u * kChunks * k;
+  return n_tok <= kChunkTok && k <= kChunkK && items >= 4u * kChunks * k;
 }
 
 // candidate i's slot in a token's chunk scratch, from its chunks' offsets (off[m]: the candidates before chunk m)

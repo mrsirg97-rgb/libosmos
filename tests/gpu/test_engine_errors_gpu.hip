@@ -52,6 +52,26 @@ static bool one(const SmallPack& p) {
     CHECK(!osmos_open(&lsa, err));
   }
   named_once(arch, "a refused option", err);
+  // 0.16.0's options (the env knobs INK2_PROFILE, OSMOS_LFM3_STAGES were): profile Inkling's, rope_stages osmos1.7b's -
+  // each refused by a family that does not take it, a malformed table refused by the one that does
+  {
+    const bool ink = !std::strcmp(arch, "inkling2"), lfm = !std::strcmp(arch, "lfm3");
+    OsmosOptions q = small_pack_options(m, 1024);
+    q.profile = !ink, q.rope_stages = lfm ? "0:1,1500:4x" : "0:1";
+    err[0] = 0;
+    CHECK(!osmos_create(m, &q, err));
+    named_once(arch, ink ? "rope_stages refused" : lfm ? "profile refused" : "profile and rope_stages refused", err);
+    if (lfm) {  // a well-formed table taken; a malformed one refused, saying so
+      q.profile = false;
+      err[0] = 0;
+      CHECK(!osmos_create(m, &q, err) && std::strstr(err, "rope_stages"));
+      q.rope_stages = "0:1,1500:2";
+      Osmos* ok = osmos_create(m, &q, err);
+      if (!ok) std::fprintf(stderr, "  %s\n", err);
+      CHECK(ok);
+      osmos_destroy(ok);
+    }
+  }
   if (p.drafter) {  // a drafter that is not one (the model's own file): the family named once, its drafter's cause after
     OsmosOptions d = small_pack_options(m, 1024);
     d.drafter = path.c_str();

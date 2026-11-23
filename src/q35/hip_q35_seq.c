@@ -52,16 +52,16 @@ Q35Seq *q35_seq_create(Q35Forward *f, char err[OSMOS_ERR])
   Q35Seq *s = calloc(1, sizeof *s);
   if (!s)
     return osmos_fail(err, "out of memory"), NULL;
-  s->f = f;
+  s->f = f, s->bufs.ledger = f->ledger;
   const Q35SeqBytes sb = q35_seq_bytes(g);
   const uint64_t blocks = f->max_ctx / LSA_WINDOW + 1;
   bool ok = true;
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = g->recurrent[l] ? q35_alloc(&s->ssm[l], Q35_SLOTS * sb.ssm) && q35_alloc(&s->conv[l], Q35_SLOTS * sb.conv)
-                         : q35_alloc(&s->kc[l], f->max_ctx * sb.kv_row) && q35_alloc(&s->vc[l], f->max_ctx * sb.kv_row) &&
-                               (!f->lsa || (q35_alloc(&s->ik[l], (uint64_t)f->max_ctx * LSA_DIM * F) &&
-                                            q35_alloc(&s->cent[l], blocks * LSA_BUCKETS * LSA_DIM * F) &&
-                                            q35_alloc(&s->mem[l], blocks * LSA_BUCKETS * LSA_CAP * 4)));
+    ok = g->recurrent[l] ? q35_alloc(&s->bufs, &s->ssm[l], Q35_SLOTS * sb.ssm) && q35_alloc(&s->bufs, &s->conv[l], Q35_SLOTS * sb.conv)
+                         : q35_alloc(&s->bufs, &s->kc[l], f->max_ctx * sb.kv_row) && q35_alloc(&s->bufs, &s->vc[l], f->max_ctx * sb.kv_row) &&
+                               (!f->lsa || (q35_alloc(&s->bufs, &s->ik[l], (uint64_t)f->max_ctx * LSA_DIM * F) &&
+                                            q35_alloc(&s->bufs, &s->cent[l], blocks * LSA_BUCKETS * LSA_DIM * F) &&
+                                            q35_alloc(&s->bufs, &s->mem[l], blocks * LSA_BUCKETS * LSA_CAP * 4)));
   if (!ok || !reset(s))
     return q35_seq_destroy(s), osmos_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
@@ -71,9 +71,7 @@ void q35_seq_destroy(Q35Seq *s)
 {
   if (!s)
     return;
-  for (int l = 0; l < Q35_MAX_LAYERS; l++)
-    hipFree(s->conv[l]), hipFree(s->ssm[l]), hipFree(s->kc[l]), hipFree(s->vc[l]), hipFree(s->ik[l]),
-        hipFree(s->cent[l]), hipFree(s->mem[l]);
+  gpu_bufs_free(&s->bufs); /* every GPU buffer it made: from its record */
   free(s);
 }
 

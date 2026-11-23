@@ -77,8 +77,8 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8)
-    return osmos_fail(err, "every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
+  if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8 || o->profile)
+    return osmos_fail(err, "every weight resident - no budget, picks, no_guess, NPU, kv_q8 or profile"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
@@ -96,7 +96,13 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
       return e_destroy(e), NULL;
   }
   const uint32_t steps = osmos_step_tokens(o, LFM3_STEP_TOKENS);
-  const Lfm3Options ho = {steps, o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa, 0, NULL, 0, 0, 0, e->df, ledger};
+  Lfm3Stage stages[LFM3_MAX_STAGES]; /* (the forward copies its table at its making) */
+  uint32_t n_stages = 0;
+  if (o->rope_stages && !lfm3_stages_parse(o->rope_stages, stages, &n_stages))
+    return osmos_fail(err, "rope_stages: not from:factor,... (at most %d, each a 32-bit integer)", LFM3_MAX_STAGES),
+           e_destroy(e), NULL;
+  const Lfm3Options ho = {steps,  o->max_ctx, LFM3_LOGIT_ROWS, LFM3_HEAD_Q8_0, m->lsa, 0, o->rope_stages ? stages : NULL,
+                          n_stages, 0, 0, e->df, ledger};
   if (!(e->f = lfm3_forward_create(m->w, &ho, err)))
     return e_destroy(e), NULL;
   return e;

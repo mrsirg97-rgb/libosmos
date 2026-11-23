@@ -432,6 +432,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   ok = ok && experts(f, o->budget ? o->budget : experts_fit_now(f->ledger, f->fixed_bytes), err); /* (0: this machine's room) */
   if (!ok)
     return hy4_forward_destroy(f), (err && !*err ? osmos_fail(err, "the forward not made") : false), NULL;
+  if (o->dfly && !hy4_dfly_load(f, o->dfly, o->dfly_q8, err)) /* (whole: its drafter made with it) */
+    return hy4_forward_destroy(f), NULL;
   return f;
 }
 

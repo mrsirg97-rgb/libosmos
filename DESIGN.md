@@ -2253,6 +2253,44 @@ fill) and destroys it last in osmos_destroy; the family table's create given it.
 family, its sequences through their forward. (5) the pointer-walked destroys freed by name; --fill fails closed; the
 full GPU suite.
 
+**phase 3, as it went**: SCOPE.md's lifecycle on every byte - the finish line met, and checked byte for byte.
+- the ledger a component (osmos/mem/ledger.h; ledger_hip.h its HIP calls - host code includes the first): made first
+  in osmos_create, destroyed last, the family table's create given it, each family's forward borrowing it; 0.15.2's
+  thread-local bracket, nesting and generations gone (the ledger lives as long as its engine). --fill fails closed:
+  the engine's first allocation refused, osmos-serve not started, the levers named in one message.
+- every shared memory module takes it (upload, the q8 head, step buffers, host slots, experts, experts_fit_now - which
+  now honours --fill: it read FIT_RAM_FREE whatever --fill said); HSA's slots a component (hip_slots_create /
+  _destroy), not a process's static found at a first use; the NPU binding's A buffer through it.
+- every family through it, one commit a family; each component's buffers recorded as made and freed from the record
+  (osmos/gpu/bufs.h's GpuBufs grown into a record of device, pinned and mapped buffers, adopt for a read tensor) - the
+  pointer-walked structs gone (Q4xBuf: 0.15.2's double free; DeepSeek's Scratch; DFlash2's DfBuf) and every hand-kept
+  free list with them (Inkling's, Hy4's, DFly2's, DeepSeek's drafter's four, the 27B's).
+- the test that closes it: test_engine_ledger_gpu - the library's every HIP and HSA allocation (tests/gpu/
+  alloc_count.h: the linker's --wrap) the ledger's count byte for byte, built, with sequences, after a prompt and a
+  drafted round and a sequence's destroy, and nothing held after osmos_destroy / osmos_close: every family (osmos1.7b
+  3032.83 MiB, Mini 21327.33, Small 18812.72 at its smallest, Qwen 44441.73, Hy4 17906.46, DeepSeek 74256.38 at 64
+  GiB, the 27B). It found a leak no other test saw: Mini's destroy freed from hand-kept lists, and 23b2726 (the
+  decode's batched norms) added five buffers to the table and none to the lists - 11.3 MiB of GPU memory an engine
+  (every osmos-serve rebuild, every fit_sized sizing build). Fixed by structure (the record), not by five names.
+- constructed whole: oseq_reset (a conversation's restart allocates nothing - 0.15.2's ledger met a restart refused
+  the memory it had just given back); the engine's sampling buffers at create; DeepSeek's drafter rings with the
+  sequence; the attach-after calls folded into constructor options (the operator's: "do it properly") - DeepSeek's
+  lane, NPU and drafter (ForwardOptions: the forward owns its drafter, forward_drafter borrows it; its target layers
+  checked on the host before any GPU memory; the taps made with the step's buffers), Qwen's NPU (Q4xOptions), Hy4's
+  DFly2 (Hy4Options). The lane's memory always made, its order a mode (forward_lane_mode, as forward_reading moves a
+  prompt's): two tests compare the orders on one forward.
+- one broken-state rule: a step refused by its checks changes nothing (Inkling counted its logits' rows after its
+  layers ran: now before).
+- the engine reads no environment: INK2_PROFILE and OSMOS_LFM3_STAGES options (OsmosOptions' profile, rope_stages;
+  osmos-serve's --profile, --rope-stages; osmos.json's profile, rope_stages - each refused by a family that does not
+  take it, a malformed table refused); INK2_MEM (the ledger counts it), INK2_FA_RT, MLA_G2, HY4_IX_TILE / MM1 / F32,
+  HY4_MLA_F32, OSMOS_SELECT_ONE, HY4_DFLY_HEAD8, Q35_HEAD (A/B switches of decisions made) deleted; Inkling's
+  profile's statics the forward's and the adapter's own.
+
+**found in phase 3, for phase 4**: each family's fixed part (experts_plan's) is still a hipMemGetInfo delta around its
+dense build (Inkling's, Hy4's, Qwen's) - the ledger's taken before and after is exact; the families' option refusals
+are five hand-kept lists (an option table the engine checks once: the adapters' shared wiring).
+
 **phase 4 - one module a concept** (the copies that drifted first): the greedy pick and kept rows (four shapes; two
 meanings of a family's logits, host or device); a family's room (osmos_room once, with fit_room and --fill); weight
 upload (Inkling's private whole-tensor path beside src/mem's); the engine adapters' copied batch / step-size / fail /

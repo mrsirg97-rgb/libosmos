@@ -88,8 +88,8 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->picks || o->no_guess || o->kv_q8)
-    return osmos_fail(err, "qwen4exp: no picks, no_guess or kv_q8"), NULL;
+  if (o->picks || o->no_guess || o->kv_q8 || o->profile || o->rope_stages)
+    return osmos_fail(err, "qwen4exp: no picks, no_guess, kv_q8, profile or rope_stages"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
@@ -103,10 +103,10 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
     return e_destroy(e), NULL;
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Q4xOptions' 0, every
      expert resident) */
-  const Q4xOptions qo = {o->max_ctx, osmos_step_tokens(o, Q4X_STEP_TOKENS), o->stream_ngram, NULL, 0, e->df,
-                         o->budget ? o->budget : 1, ledger};
-  if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)) ||
-      (o->npu && !q4x_forward_npu(e->f, o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_QWEN, err)))
+  const Q4xOptions qo = {o->max_ctx,  osmos_step_tokens(o, Q4X_STEP_TOKENS),
+                         o->stream_ngram, NULL, 0, e->df, o->budget ? o->budget : 1, ledger,
+                         o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_QWEN};
+  if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)))
     return e_destroy(e), NULL;
   return e;
 }

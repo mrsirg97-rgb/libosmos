@@ -151,13 +151,13 @@ int main() {
   const std::string ddir = std::string(home ? home : "") + "/Models/ds1017/dspark-iq2xs";
   const bool with_drafter = access((ddir + "/dspark.bin").c_str(), R_OK) == 0;
   Drafter* d = nullptr;
-  TestFit fit = {[&](uint64_t b) {  // (the forward, its lane and the drafter: everything the test holds)
+  o.lane = true, o.drafter = with_drafter ? ddir.c_str() : nullptr; /* (the forward whole: its lane, its drafter) */
+  TestFit fit = {[&](uint64_t b) {
                    o.budget = b;
-                   return (g_f = forward_create_with(w, &o, g_err)) && forward_lane(g_f, 0, NULL, g_err) &&
-                          (!with_drafter || (d = drafter_create(g_f, ddir.c_str(), g_err)));
+                   return (g_f = forward_create_with(w, &o, g_err)) && (!with_drafter || (d = forward_drafter(g_f)));
                  },
                  [&] { return forward_budget(g_f); }, [&](uint64_t* r) { return forward_room(g_f, r); },
-                 [&] { drafter_destroy(d), d = nullptr, forward_destroy(g_f), g_f = nullptr; }};
+                 [&] { d = nullptr, forward_destroy(g_f), g_f = nullptr; }};
   uint64_t budget = 0;
   CHECK(test_fit(fit, kBudget, &budget));
   const std::vector<int32_t> pa = ids(kPromptA, 1017), pb = ids(kPromptB, 4242);
@@ -228,8 +228,8 @@ int main() {
     seq_destroy(b);
   }
   if (!d) std::printf("  drafted: skipped (no DSpark weights at %s)\n", ddir.c_str());
-  drafter_destroy(d);
-  // a drafter whose dspark.json names target layers other than the model's: refused, saying so (its bin linked)
+  // a drafter whose dspark.json names target layers other than the model's: the forward refused before its GPU memory
+  // is taken, saying so (its bin linked)
   if (d && which == TestModel::kUd) {
     char tmp[] = "/tmp/test_seqstate_XXXXXX";
     CHECK(mkdtemp(tmp));
@@ -241,7 +241,9 @@ int main() {
     for (int c; (c = std::fgetc(in)) != EOF;) std::fputc(c, out);
     std::fclose(in), std::fclose(out);
     osmos_clear(g_err);
-    CHECK(!drafter_create(g_f, t.c_str(), g_err) && std::strstr(g_err, "differ"));
+    ForwardOptions other = o;
+    other.drafter = t.c_str();
+    CHECK(!forward_create_with(w, &other, g_err) && std::strstr(g_err, "differ"));
     std::printf("  a drafter naming other target layers than the model's: refused (%s)\n", g_err);
     CHECK(std::system(("rm -rf " + t).c_str()) == 0);
   }

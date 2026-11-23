@@ -234,22 +234,25 @@ int main(int argc, char** argv) {
   } b{w, o, cpu_threads, cpu_pin, nullptr};
   auto unbuild = [](void* ctx) {
     Built* z = (Built*) ctx;
-    drafter_destroy(g_draft), forward_destroy(z->f);
+    forward_destroy(z->f); /* (its drafter with it) */
     g_draft = nullptr, z->f = nullptr;
   };
   auto build = [](void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[OSMOS_ERR]) -> bool {
     Built* z = (Built*) ctx;
     char ferr[OSMOS_ERR] = "";
     z->o.budget = budget;
-    bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, z->cpu_pin, ferr);
-    if (ok && std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu): NPU=<its kernel's dir>, NPU_SHARE
-      ok = forward_npu(z->f, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr);
-    if (ok && std::getenv("DRAFT")) ok = (g_draft = drafter_create(z->f, std::getenv("DRAFT"), ferr)) != nullptr;
+    /* the forward whole: its lane, the NPU (0.7.0: NPU=<its kernels' dir>, NPU_SHARE), the drafter (DRAFT=<dir>) */
+    z->o.lane = true, z->o.cpu_threads = z->cpu_threads, z->o.cpu_cores = z->cpu_pin;
+    z->o.npu = std::getenv("NPU");
+    z->o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;
+    z->o.drafter = std::getenv("DRAFT");
+    bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) != nullptr;
+    g_draft = ok ? forward_drafter(z->f) : nullptr;
     Seq* s = ok ? seq_create(z->f, ferr) : nullptr;  // an answer's sequence counted, then let go
     ok = ok && s && forward_room(z->f, room);
     seq_destroy(s);
     if (!ok) {
-      drafter_destroy(g_draft), forward_destroy(z->f), g_draft = nullptr, z->f = nullptr;
+      forward_destroy(z->f), g_draft = nullptr, z->f = nullptr;
       return std::snprintf(err, OSMOS_ERR, "%s", ferr), false;
     }
     *built = forward_budget(z->f);
@@ -320,7 +323,6 @@ int main(int argc, char** argv) {
     std::printf("picks: %llu to %s\n", (unsigned long long) total, po);
   }
   if (routes) forward_probe(f, nullptr, nullptr), std::fclose(routes);
-  drafter_destroy(g_draft);
-  forward_destroy(f);
+  forward_destroy(f); /* (its drafter with it) */
   return 0;
 }

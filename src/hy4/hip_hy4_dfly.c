@@ -337,10 +337,10 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
          osmos_fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
     free(x);
   }
-  if (ok && q8 && !getenv("HY4_DFLY_HEAD8") && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
+  if (ok && q8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
   { /* the engine's (q8) drafts' head Q4_0 (a round reads it a draft: 5 x 0.39 GB at Q8_0). Q3_K at 1K, 128 tokens, A/B in one
        session (2026-11-19): code 24.1-24.6 -> 25.6-26.2 tok/s (the same 87 accepted, 106 drafts against 112), prose
-       27.5-28.1 -> 28.3-29.0 (the same 96); +209 MB. HY4_DFLY_HEAD8=1: head8's / the target's */
+       27.5-28.1 -> 28.3-29.0 (the same 96); +209 MB */
     float *x = out->type == QTYPE_BF16 ? hy4_host_f32(f->w->model, out) : NULL;
     ok = (x && q4_up(&d->bufs, x, out->dims[1], (uint32_t)out->dims[0], &d->head4)) || osmos_fail(err, "DFly2: the head's Q4_0 copy");
     free(x);

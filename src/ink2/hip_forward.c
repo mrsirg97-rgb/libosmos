@@ -23,7 +23,7 @@
 #include "osmos/mem/arena.h"
 #include "osmos/err.h"
 
-/* INK2_PROFILE=1: a step's sections timed, each after a synchronize (the bits the same), totals at destroy */
+/* Ink2Options' profile: a step's sections timed, each after a synchronize (the bits the same), totals at destroy */
 enum
 {
   PF_IN,     /* the layer's inputs: attention residuals, norms, q / k / v / rel / gate / sink, convs, clips */
@@ -39,31 +39,22 @@ enum
 };
 static const char *const kPfName[PF_N] = {"inputs",         "attn sliding",  "attn full",     "mid",           "moe",
                                           "  of it waits", "  of it router", "  of it kernels", "head"};
-/* the totals of decode steps (MV_MAX_TOKENS tokens at most) and of prompt steps (more); this step's */
-static double g_pf[2][PF_N], g_step[PF_N], g_pf_at;
-static uint64_t g_pf_tokens[2], g_pf_steps[2];
-static bool pf_on(void)
-{
-  static int on = -1;
-  if (on < 0)
-    on = getenv("INK2_PROFILE") && atoi(getenv("INK2_PROFILE"));
-  return on;
-}
+_Static_assert(PF_N == INK2_PF_N, "the profile's sections: Ink2Forward's pf");
 static double pf_now(void)
 {
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return t.tv_sec + t.tv_nsec * 1e-9;
 }
-static void pf(int b)
+static void pf(Ink2Forward *f, int b)
 {
-  if (!pf_on())
+  if (!f->pf.on)
     return;
   hipDeviceSynchronize();
   const double t = pf_now();
   if (b >= 0)
-    g_step[b] += t - g_pf_at;
-  g_pf_at = t;
+    f->pf.step[b] += t - f->pf.at;
+  f->pf.at = t;
 }
 
 #define T_F32 0u
@@ -403,24 +394,6 @@ static bool mm_takes(const Ink2Forward *f, uint32_t type, uint32_t rows, uint32_
   return (mm_known(type) || (type == QTYPE_BF16 && f->bf16_mm)) && mm_fits(type, rows, cols);
 }
 
-/* INK2_MEM: what the build takes, a stage at a time (the GPU's free memory before and after) */
-static bool mem_on(void)
-{
-  static int on = -1;
-  if (on < 0)
-    on = getenv("INK2_MEM") && atoi(getenv("INK2_MEM")) ? 1 : 0;
-  return on;
-}
-static void mem_note(const char *what, size_t *last)
-{
-  size_t fr = 0, tot = 0;
-  if (!mem_on() || hipMemGetInfo(&fr, &tot) != hipSuccess)
-    return;
-  fprintf(stderr, "ink2 mem: %-22s %8.3f GiB (GPU free %.2f GiB)\n", what, *last > fr ? (*last - fr) / 1073741824.0 : 0.0,
-          fr / 1073741824.0);
-  *last = fr;
-}
-
 static bool buffers(Ink2Forward *f)
 {
   const Ink2Geometry *g = &f->w->geo;
@@ -456,15 +429,9 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->gid, T * 4}, {&f->amax, ops_argmax_scratch((uint32_t)T)},
       {(void **)&f->res_sc, INK2_RES_SCRATCH * 4}, {&f->bx16, INK2_BX16 * MM_BATCH_TOKENS * CH * 2},
   };
-  uint64_t sum = 0;
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
-  {
     if (!ink2_dalloc(f, b[i].p, b[i].bytes))
       return false;
-    sum += b[i].bytes;
-    if (mem_on() && b[i].bytes >= (256ull << 20))
-      fprintf(stderr, "ink2 mem:   step buffer %2zu %8.3f GiB\n", i, b[i].bytes / 1073741824.0);
-  }
   if (g->loop.passes) /* the loop's */
   {
     const uint64_t core = (uint64_t)(g->loop.end - g->loop.start), rank = (uint64_t)g->loop.gate_rank;
@@ -481,14 +448,9 @@ static bool buffers(Ink2Forward *f)
         {&f->cgain3, 3 * MM_BATCH_TOKENS * C * 4}, {&f->cforget3, 3 * MM_BATCH_TOKENS * C * 4},
     };
     for (size_t i = 0; i < sizeof lb / sizeof *lb; i++)
-    {
       if (!ink2_dalloc(f, (void **)lb[i].p, lb[i].bytes))
         return false;
-      sum += lb[i].bytes;
-    }
   }
-  if (mem_on())
-    fprintf(stderr, "ink2 mem:   step buffers, all %zu: %.3f GiB\n", sizeof b / sizeof *b, sum / 1073741824.0);
   f->fa_part = (float *)f->ed; /* (the down rows' buffer: ed_bytes) */
   f->ovf = (OverflowFlag){f->overflow, 4, false};
   if (!overflow_reset(&f->ovf, NULL))
@@ -517,6 +479,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
   f->ledger = o->ledger;
+  f->pf.on = o->profile;
   f->bf16_mm = w->layer[0].q && ink2_type(w->layer[0].q) == QTYPE_BF16; /* (mm_takes': BF16 the model's dense weights) */
   f->w = w, f->v8 = o->values_q8, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
@@ -532,18 +495,14 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   size_t free0 = 0, free1 = 0, total = 0;
   if (hipMemGetInfo(&free0, &total) != hipSuccess)
     return osmos_fail(err, "the GPU's free memory not read"), ink2_forward_destroy(f), NULL;
-  size_t at = free0;
   if (!upload(f))
     return osmos_fail(err, "a dense tensor not read or uploaded (GPU memory, or its file)"),
            ink2_forward_destroy(f), NULL;
-  mem_note("dense weights", &at);
   if (!buffers(f))
     return osmos_fail(err, "GPU memory refused (the step's buffers)"), ink2_forward_destroy(f), NULL;
-  mem_note("step buffers + pinned", &at);
   f->mtp = o->mtp;
   if (f->mtp && !ink2_mtp_up(f, err))
     return ink2_forward_destroy(f), NULL;
-  mem_note("drafter", &at);
   if (!(f->picks = calloc((size_t)w->geo.n_layers * w->geo.n_experts, sizeof *f->picks)))
     return osmos_fail(err, "out of memory"), ink2_forward_destroy(f), NULL;
   if (hipMemGetInfo(&free1, &total) != hipSuccess)
@@ -551,11 +510,6 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : f->dense_bytes;
   if (!experts(f, o->room, o->budget, o->picks, err) || !whole_tables(f, err))
     return ink2_forward_destroy(f), NULL;
-  mem_note("experts' slots", &at);
-  if (mem_on())
-    fprintf(stderr, "ink2 mem:   experts' room %.3f GiB, the stream's %.3f GiB (pinned, all %.3f GiB)\n",
-            host_slots_bytes(f->slots) / 1073741824.0, host_slots_bytes(f->stream) / 1073741824.0,
-            f->pinned_bytes / 1073741824.0);
   return f;
 }
 
@@ -563,20 +517,20 @@ void ink2_forward_destroy(Ink2Forward *f)
 {
   if (!f)
     return;
-  for (int k = 0; pf_on() && k < 2; k++)
+  for (int k = 0; f->pf.on && k < 2; k++)
   {
     double all = 0;
     for (int b = 0; b < PF_N; b++)
-      all += b == PF_WAIT || b == PF_ROUTE || b == PF_XK ? 0 : g_pf[k][b];
-    if (!g_pf_steps[k])
+      all += b == PF_WAIT || b == PF_ROUTE || b == PF_XK ? 0 : f->pf.total[k][b];
+    if (!f->pf.steps[k])
       continue;
     fprintf(stderr, "ink2 profile (%s steps): %llu steps, %llu tokens, %.3f s\n", k ? "prompt" : "decode",
-            (unsigned long long)g_pf_steps[k], (unsigned long long)g_pf_tokens[k], all);
+            (unsigned long long)f->pf.steps[k], (unsigned long long)f->pf.tokens[k], all);
     for (int b = 0; b < PF_N; b++)
-      fprintf(stderr, "  %-13s %8.2f ms a step  %5.1f%%\n", kPfName[b], 1e3 * g_pf[k][b] / (double)g_pf_steps[k],
-              100 * g_pf[k][b] / all);
+      fprintf(stderr, "  %-13s %8.2f ms a step  %5.1f%%\n", kPfName[b], 1e3 * f->pf.total[k][b] / (double)f->pf.steps[k],
+              100 * f->pf.total[k][b] / all);
   }
-  if (pf_on() && (g_pf_steps[0] || g_pf_steps[1]))
+  if (f->pf.on && (f->pf.steps[0] || f->pf.steps[1]))
   {
     MembraneStats ms;
     membrane_stats(f->mem, &ms);
@@ -755,7 +709,7 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   const Ink2Dev *d = &f->L[l];
   const uint32_t C = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, K = (uint32_t)g->n_used,
                  F = (uint32_t)g->ff_exp, P = n * K;
-  const double r0 = pf_on() ? pf_now() : 0;
+  const double r0 = f->pf.on ? pf_now() : 0;
   /* a prompt's read ahead (its picks a layer's experts at least): the next layer's router on this layer's MoE input,
      the union of its picks read into the stream while this layer's experts and the next attention run (27.0 against
      31.5 s of prompt steps, 900 tokens). not a decode's: measured, the guess named 26% of its misses and read ~80
@@ -774,8 +728,8 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
       hipMemcpyAsync(f->hpick, f->pick, 2 * P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       hipStreamSynchronize(NULL) != hipSuccess)
     return osmos_fail(err, "a GPU call failed (the router)");
-  if (pf_on())
-    g_step[PF_ROUTE] += pf_now() - r0;
+  if (f->pf.on)
+    f->pf.step[PF_ROUTE] += pf_now() - r0;
   /* the GPU is past the last layer's experts (the copy waited for it): the visit ends their holds */
   if (!membrane_visit(f->mem, (uint32_t)l, P >= E, err))
     return false;
@@ -813,11 +767,11 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   for (uint32_t j = 0; j < rt.runs; j++)
   {
     const uint32_t e = rt.expert[j], unit = (uint32_t)l * E + e;
-    const double wt = pf_on() ? pf_now() : 0;
+    const double wt = f->pf.on ? pf_now() : 0;
     if (!membrane_wait(f->mem, unit, f->m_ex[j], err))
       return false;
-    if (pf_on())
-      g_step[PF_WAIT] += pf_now() - wt;
+    if (f->pf.on)
+      f->pf.step[PF_WAIT] += pf_now() - wt;
     for (uint32_t q = rt.start[j]; q < rt.start[j] + rt.count[j]; q++)
     {
       const uint32_t m = rt.by[q];
@@ -842,7 +796,7 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   const uint32_t *dxg = (const uint32_t *)(dcnt + ecap), *dyg = dxg + ecap, *dxd = dyg + ecap, *dyd = dxd + ecap;
   const int32_t *dgidx = (const int32_t *)(dyd + ecap), *dhidx = dgidx + scap, *drow = dhidx + scap;
   const float *da = (const float *)(drow + P), *dsg = da + P, *dsu = dsg + P;
-  const double x0 = pf_on() ? pf_now() : 0;
+  const double x0 = f->pf.on ? pf_now() : 0;
   memcpy(f->m_host, h, bytes);
   const bool ok =
       hipMemcpyAsync(dv, f->m_host, bytes, hipMemcpyHostToDevice, NULL) == hipSuccess &&
@@ -855,8 +809,8 @@ static bool moe(Ink2Forward *f, int l, uint32_t n, char *err)
   f->m_a = da, f->m_row = drow;
   if (!ok)
     return osmos_fail(err, "a GPU call failed (the experts)");
-  if (pf_on())
-    hipDeviceSynchronize(), g_step[PF_XK] += pf_now() - x0;
+  if (f->pf.on)
+    hipDeviceSynchronize(), f->pf.step[PF_XK] += pf_now() - x0;
   return true;
 }
 
@@ -1022,7 +976,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     if (!(x))                                                                                                          \
       return osmos_fail(err, "a GPU call failed: " #x);                                                       \
   } while (0)
-  pf(-1);
+  pf(f, -1);
   GPU(hipMemcpy(f->ids_d, tok, n * 4, hipMemcpyHostToDevice) == hipSuccess);
   GPU(ops_embed(W->embed->type, f->embed, C, f->ids_d, n, 1, f->h, NULL));
   GPU(ops_rms(f->h, C, C, f->embed_norm, g->rms_eps, n, f->h, C, NULL));
@@ -1030,7 +984,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     for (int sl = 0; sl < g->n_slots; sl++)
       GPU(ink2_tail_room(&s->conv[sl][c], n));
   uint32_t nb = 0;
-  pf(PF_HEAD);
+  pf(f, PF_HEAD);
   if (f->mtp) /* the drafter's taps: this run's rows of the step's */
     s->tap_row0 = row0, s->tap_pos0 = (int32_t)pos, s->tap_step = f->steps;
   /* the slots in their order: the prelude, the core `passes` times (each from the prelude's output and blocks; a pass
@@ -1165,7 +1119,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     const void *keys = full ? tk->d : ink2_tail_last(tk, n_keys), *vals = full ? tv->d : ink2_tail_last(tv, n_keys);
     /* key 0's position: a full layer's 0, a window's its first's (a tile's start); a decode's units split */
     const uint32_t pos0 = full ? 0 : pos + n - n_keys;
-    pf(PF_IN);
+    pf(f, PF_IN);
     /* a full layer's cache: keys Q8 records, values Q5 (ink2_fa85) or Q8 (ink2_fa8: Ink2Options' values_q8); a
        window's f16 */
     const bool attended =
@@ -1176,7 +1130,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
              : ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
                          f->fa_part, NULL);
     GPU(attended);
-    pf(full ? PF_FULL : PF_ATTN);
+    pf(f, full ? PF_FULL : PF_ATTN);
     GPU(mat2(f, L->out, d->out, f->o, NULL, NULL, NULL, f->att, n, att16));
     Ink2Tail *co = &s->conv[slot][INK2_CONV_OUT], *cf = &s->conv[slot][INK2_CONV_FFN];
     /* r: the output's conv, plus h within a block (a block's first layer's h a block state of its own) */
@@ -1205,10 +1159,10 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     }
     else
       GPU(rms_for(f, L->router, f->tmp, d->ffn_norm, n, f->xn, &f->router16)); /* (the router's x16: moe's first) */
-    pf(PF_MID);
+    pf(f, PF_MID);
     if (!moe(f, l, n, err))
       return false;
-    pf(PF_MOE);
+    pf(f, PF_MOE);
     /* the layer's output, r + the MoE's conv: the next layer's h - the experts' sums in the conv's launch, or
        (its tail past its room) summed first, the tail's rows */
     {
@@ -1225,7 +1179,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     if (f->tap)
       f->tap(f->tap_arg, slot, "l_out", f->h, n, C);
   }
-  pf(PF_MID);
+  pf(f, PF_MID);
   /* the head: the rows from the prompt's end - 1 on */
   GPU(ink2_attn_res(f->out_res_q, 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
                     NULL));
@@ -1252,12 +1206,12 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   if (first < n)
     GPU(ink2_softcap(f->logits + (uint64_t)slot0 * V, (uint64_t)(n - first) * V, g->logit_softcap, NULL));
 #undef GPU
-  pf(PF_HEAD);
+  pf(f, PF_HEAD);
   const int kind = n > MV_MAX_TOKENS;
-  for (int b = 0; pf_on() && b < PF_N; b++)
-    g_pf[kind][b] += g_step[b], g_step[b] = 0;
-  if (pf_on())
-    g_pf_tokens[kind] += n, g_pf_steps[kind]++;
+  for (int b = 0; f->pf.on && b < PF_N; b++)
+    f->pf.total[kind][b] += f->pf.step[b], f->pf.step[b] = 0;
+  if (f->pf.on)
+    f->pf.tokens[kind] += n, f->pf.steps[kind]++;
   s->pos += (int32_t)n;
   s->reach = s->reach + n < INK2_MAX_BACK ? s->reach + n : INK2_MAX_BACK;
   return true;

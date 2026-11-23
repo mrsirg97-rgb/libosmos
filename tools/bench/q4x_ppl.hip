@@ -40,12 +40,10 @@ int main(int argc, char** argv) {
   const uint32_t ctx = getenv("Q4X_PPL_CTX") ? (uint32_t) atoi(getenv("Q4X_PPL_CTX")) : n;
   if (ctx < n) return std::fprintf(stderr, "q4x_ppl: Q4X_PPL_CTX below the text's %u tokens\n", n), 2;
   /* Q4X_PPL_STREAM: the n-gram table read from its file (stream_ngram: the same bits; UD-Q4_K_XL's 28.8 GB left out) */
-  const Q4xOptions qo = {ctx, step, getenv("Q4X_PPL_STREAM") != nullptr, nullptr, 0, nullptr};
+  // 0.7.0: the NPU beside the GPU, made with the forward: NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
+  const float npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN;
+  const Q4xOptions qo = {ctx, step, getenv("Q4X_PPL_STREAM") != nullptr, nullptr, 0, nullptr, 0, nullptr, std::getenv("NPU"), npu_share};
   Q4xForward* fw = q4x_forward_create_with(w, nullptr, &qo, ferr);
-  // 0.7.0: the NPU beside the GPU (q4x_forward_npu): NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
-  if (fw && std::getenv("NPU") &&
-      !q4x_forward_npu(fw, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN, ferr))
-    q4x_forward_destroy(fw), fw = nullptr;
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_ppl: %s\n", ferr), 1;
   const uint32_t V = (uint32_t) w->geo.n_vocab;

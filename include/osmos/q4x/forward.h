@@ -40,6 +40,11 @@ typedef struct Q4xOptions
                                 every expert resident where there is room) */
   struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
                                  borrowed - the engine's, outliving the forward); NULL counts nothing */
+  const char *npu; /* 0.7.0: the NPU beside the GPU (src/q4x/hip_npu.c), made with the forward: its kernels' directory
+                      (npu_open's: iq3xxs/, iq2s/, iq4nl-down/), or NULL - another forward's bits (q4x_identity tells
+                      them apart); 0.16.0: q4x_forward_npu, attached after */
+  float npu_share; /* the part of an eligible layer's prompt picks it takes, in (0, 1) (whole 128-token entries; an
+                      IQ2_S layer's scaled by its cost) */
 } Q4xOptions;
 
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
@@ -51,10 +56,6 @@ void q4x_forward_probe(Q4xForward *f, q4x_probe_fn fn, void *arg);
 uint64_t q4x_forward_bytes(const Q4xForward *f);
 bool q4x_forward_whole(const Q4xForward *f);
 void q4x_forward_side_spin(Q4xForward *f, uint32_t us);
-/* 0.7.0: the NPU beside the GPU (src/q4x/hip_npu.c): dir its kernels (npu_open's: iq3xxs/, iq2s/, iq4nl-down/), share
-   the part of an eligible layer's prompt picks it takes (whole 128-token entries; an IQ2_S layer's scaled by its
-   cost). another forward's bits: q4x_identity tells them apart */
-bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[OSMOS_ERR]);
 /* npu_run's calls, launches and the host's time in them; the parts wanted, and those the tables' whole entries gave */
 void q4x_forward_npu_stats(const Q4xForward *f, uint64_t *calls, uint64_t *parts, double *wait_us, uint64_t *wanted,
                            uint64_t *taken);

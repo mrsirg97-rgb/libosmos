@@ -367,7 +367,7 @@ void q4x_forward_destroy(Q4xForward *f)
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[OSMOS_ERR])
 {
-  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL, 0, NULL};
+  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL, 0, NULL, NULL, 0};
   return q4x_forward_create_with(w, mtp, &o, err);
 }
 
@@ -449,7 +449,7 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   if (hipMemGetInfo(&free1, &total1) == hipSuccess)
     f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
   if (!experts(f, o->budget ? o->budget : experts_fit_now(f->ledger, f->fixed_bytes), err) || /* (0: this machine's room) */
-      !room_left(f, "the forward", err))
+      !room_left(f, "the forward", err) || (o->npu && !q4x_npu_make(f, o->npu, o->npu_share, err))) /* (whole) */
     return q4x_forward_destroy(f), NULL;
   return f;
 }

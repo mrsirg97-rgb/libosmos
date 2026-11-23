@@ -66,6 +66,8 @@ Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_
 typedef struct Q35Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;
+  struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
+                                 borrowed - the engine's, outliving the forward); NULL counts nothing */
 } Q35Options;
 Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, char err[OSMOS_ERR]);
 void q35_forward_destroy(Q35Forward *f);

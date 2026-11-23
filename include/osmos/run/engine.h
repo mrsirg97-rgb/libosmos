@@ -54,6 +54,10 @@ typedef struct OsmosOptions
   const char *npu;      /* 0.7.0: the NPU's kernels' directory (forward_npu), or NULL: the GPU alone */
   float npu_share;      /* its share of a prompt step's layer's pairs: 0 the model's default (OSMOS_NPU_SHARE_*) */
   bool kv_q8;           /* Inkling's full layers' cached values Q8, not Q5 (osmos-serve's --kv-q8; the others refuse it) */
+  bool profile;         /* a measurement's build: a step's sections timed, said at its destroy (osmos-serve's --profile;
+                           Inkling's - the others refuse it; 0.16.0: INK2_PROFILE) */
+  const char *rope_stages; /* osmos1.7b's YaRN stages, "from:factor,..." (osmos-serve's --rope-stages: a table tried
+                              without a build; the others refuse it; NULL the model's; 0.16.0: OSMOS_LFM3_STAGES) */
 } OsmosOptions;
 
 /* the NPU's default shares: each model's best measured, 8K prompts at performance (DESIGN.md, "0.7.0") - DeepSeek's

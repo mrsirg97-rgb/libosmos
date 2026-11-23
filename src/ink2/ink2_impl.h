@@ -92,9 +92,17 @@ struct Ink2Seq
   uint64_t tap_step; /* the forward's step that wrote its taps (Ink2Forward.steps; 0: none) - a seed reads its own */
 };
 
+#define INK2_PF_N 9 /* the profile's sections (hip_forward.c's PF_*) */
+
 struct Ink2Forward
 {
   OsmosLedger *ledger; /* borrowed (Ink2Options'): every allocation of the forward and its sequences */
+  struct
+  {
+    bool on;                                /* Ink2Options' profile */
+    double total[2][INK2_PF_N], step[INK2_PF_N], at; /* the sections' totals [decode, prompt], this step's, the last mark */
+    uint64_t tokens[2], steps[2];
+  } pf;                /* the profile (hip_forward.c's sections): the forward's own - 0.16.0: a process's statics */
   GpuBufs bufs;        /* every GPU and pinned buffer of the forward and its drafter, recorded as made (ink2_dalloc,
                           osmos/gpu/bufs.h) - freed from the record, the last made first */
   uint64_t steps; /* ink2_step's calls: the drafter's taps the last one's, every sequence's in it (Ink2Seq.tap_step) */

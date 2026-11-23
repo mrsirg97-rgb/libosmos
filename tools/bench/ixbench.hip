@@ -166,7 +166,7 @@ int main() {
     const double tkp = time_ms([&] {
       CHECK(ops_topk(sa, R, pos, 1, K, nullptr, BLOCK, wr, T, sel, OPS_MAX_SELECT, n_sel, nullptr));
     });
-    std::vector<int32_t> sh((size_t) T * OPS_MAX_SELECT);  // (0.7.4) the picks' FNV-1a: OSMOS_SELECT_ONE=1's the same
+    std::vector<int32_t> sh((size_t) T * OPS_MAX_SELECT);  // (0.7.4) the picks' FNV-1a: the one-block selection's the same
     CHECK(hipMemcpy(sh.data(), sel, sh.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
     uint64_t hs = 1469598103934665603ull, hb = hs;
     for (uint32_t t = 0; t < T; t++)

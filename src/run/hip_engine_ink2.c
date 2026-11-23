@@ -79,15 +79,15 @@ _Static_assert(INK2_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens withi
    24.2 / 25.6), every floor the same tokens */
 #define INK2_DRAFT_CUM_MIN_WHOLE 0.5f
 
-/* INK2_PROFILE's round accounting (a measurement's): the steps' time by their tokens (1 .. 16, then more), the
-   drafter's seeds and drafts and the drafts they gave, printed at e_destroy */
+/* the profile's round accounting (OsmosOptions' profile, a measurement's): the steps' time by their tokens (1 .. 16,
+   then more), the drafter's seeds and drafts and the drafts they gave, printed at e_destroy - the engine's own */
 #define PROF_N 17
-static struct
+typedef struct Rounds
 {
-  int on;
+  bool on;
   double step_s[PROF_N], seed_s, draft_s;
   uint64_t steps[PROF_N], seeds, drafts, drafted;
-} g_rp;
+} Rounds;
 
 static double now_s(void)
 {
@@ -96,31 +96,25 @@ static double now_s(void)
   return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
 }
 
-static int rp_on(void)
+static void rp_print(const Rounds *rp)
 {
-  if (!g_rp.on)
-    g_rp.on = getenv("INK2_PROFILE") && atoi(getenv("INK2_PROFILE")) ? 1 : -1;
-  return g_rp.on > 0;
-}
-
-static void rp_print(void)
-{
-  if (!rp_on())
+  if (!rp->on)
     return;
   fprintf(stderr, "ink2 rounds: steps by tokens (count, ms each):");
   for (int k = 1; k < PROF_N; k++)
-    if (g_rp.steps[k])
-      fprintf(stderr, " %d%s:%llu/%.1f", k, k == PROF_N - 1 ? "+" : "", (unsigned long long)g_rp.steps[k],
-              1e3 * g_rp.step_s[k] / (double)g_rp.steps[k]);
+    if (rp->steps[k])
+      fprintf(stderr, " %d%s:%llu/%.1f", k, k == PROF_N - 1 ? "+" : "", (unsigned long long)rp->steps[k],
+              1e3 * rp->step_s[k] / (double)rp->steps[k]);
   fprintf(stderr, "\nink2 rounds: %llu seeds %.2f ms each, %llu drafts %.2f ms each (%llu tokens drafted)\n",
-          (unsigned long long)g_rp.seeds, g_rp.seeds ? 1e3 * g_rp.seed_s / (double)g_rp.seeds : 0.0,
-          (unsigned long long)g_rp.drafts, g_rp.drafts ? 1e3 * g_rp.draft_s / (double)g_rp.drafts : 0.0,
-          (unsigned long long)g_rp.drafted);
+          (unsigned long long)rp->seeds, rp->seeds ? 1e3 * rp->seed_s / (double)rp->seeds : 0.0,
+          (unsigned long long)rp->drafts, rp->drafts ? 1e3 * rp->draft_s / (double)rp->drafts : 0.0,
+          (unsigned long long)rp->drafted);
 }
 
 typedef struct Eng
 {
   OsmosLedger *ledger; /* the engine's (borrowed: osmos_create's, destroyed after this) */
+  Rounds rp;           /* the profile's rounds (OsmosOptions' profile) */
   Ink2Forward *f;
   Gguf *mg;        /* the drafter's file, or NULL */
   Ink2Mtp *mtp;    /* the drafter, or NULL */
@@ -133,7 +127,7 @@ static void e_destroy(void *p)
   Eng *e = p;
   if (!e)
     return;
-  rp_print();
+  rp_print(&e->rp);
   ink2_forward_destroy(e->f);
   ink2_mtp_destroy(e->mtp);
   gguf_destroy(e->mg);
@@ -144,12 +138,13 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->npu)
-    return osmos_fail(err, "no NPU kernels for this family"), NULL;
+  if (o->npu || o->rope_stages)
+    return osmos_fail(err, "no NPU kernels for this family, nor rope_stages (osmos1.7b's)"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
   e->ledger = ledger;
+  e->rp.on = o->profile;
   e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->picks) /* a picks file: the router's picks [layer][expert] as uint64, nothing after (DeepSeek's layout) */
   {
@@ -178,7 +173,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
       return osmos_fail(err, "%s", ierr), e_destroy(e), NULL;
   }
   const Ink2Options io = {o->max_ctx, osmos_step_tokens(o, INK2_STEP_TOKENS), 0, e->picks, e->mtp, o->budget,
-                          INK2_LOGIT_ROWS, o->kv_q8, ledger};
+                          INK2_LOGIT_ROWS, o->kv_q8, ledger, o->profile};
   if (!(e->f = ink2_forward_create(m->w, &io, err)))
     return e_destroy(e), NULL;
   return e;
@@ -203,13 +198,13 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
     return osmos_fail(err, "a batch of more than INK2_MAX_RUNS sequences");
   for (uint32_t r = 0; r < runs; r++)
     run[r] = oseq_impl(seqs[first[r]]);
-  const double t0 = rp_on() ? now_s() : 0;
+  const double t0 = e->rp.on ? now_s() : 0;
   if (!n || !ink2_step(e->f, run, len, runs, tokens, err))
     return n ? false : osmos_fail(err, "an empty batch");
-  if (rp_on()) /* (ink2_step synchronizes: its time the step's) */
+  if (e->rp.on) /* (ink2_step synchronizes: its time the step's) */
   {
     const int k = n < PROF_N - 1 ? (int)n : PROF_N - 1;
-    g_rp.step_s[k] += now_s() - t0, g_rp.steps[k]++;
+    e->rp.step_s[k] += now_s() - t0, e->rp.steps[k]++;
   }
   e->n = n;
   return true;
@@ -237,10 +232,10 @@ static uint32_t e_block(const void *p)
 
 static bool s_seed(void *p, void *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
-  const double t0 = rp_on() ? now_s() : 0;
+  const double t0 = ((Eng *)p)->rp.on ? now_s() : 0;
   const bool ok = ink2_seq_seed(((Eng *)p)->f, s, from, to, err);
-  if (rp_on())
-    (void)hipDeviceSynchronize(), g_rp.seed_s += now_s() - t0, g_rp.seeds++;
+  if (((Eng *)p)->rp.on)
+    (void)hipDeviceSynchronize(), ((Eng *)p)->rp.seed_s += now_s() - t0, ((Eng *)p)->rp.seeds++;
   return ok;
 }
 
@@ -255,10 +250,10 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
   if (cum_min < floor_)
     cum_min = floor_;
   const uint32_t most = e_block(p);
-  const double t0 = rp_on() ? now_s() : 0;
+  const double t0 = ((Eng *)p)->rp.on ? now_s() : 0;
   const int got = ink2_seq_draft(((Eng *)p)->f, s, y, most, conf_min, cum_min, drafts, conf, err);
-  if (rp_on())
-    g_rp.draft_s += now_s() - t0, g_rp.drafts++, g_rp.drafted += got > 0 ? (uint64_t)got : 0;
+  if (((Eng *)p)->rp.on)
+    ((Eng *)p)->rp.draft_s += now_s() - t0, ((Eng *)p)->rp.drafts++, ((Eng *)p)->rp.drafted += got > 0 ? (uint64_t)got : 0;
   return got;
 }
 

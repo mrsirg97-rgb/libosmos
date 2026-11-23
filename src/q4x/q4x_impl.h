@@ -133,7 +133,7 @@ struct Q4xForward
   } rows[Q4X_ROW_BUFS];
   uint32_t n_rows;
   Q4xSeq *sub_seq; /* Q4X_MAX_RUNS of them */
-  /* 0.7.0: the NPU beside the GPU (q4x_forward_npu, hip_npu.c): a prompt step's first whole 128-token entries of an
+  /* 0.7.0: the NPU beside the GPU (Q4xOptions' npu, hip_npu.c): a prompt step's first whole 128-token entries of an
      eligible layer's - their gate, up and down the NPU's, the GPU's mm_group skipping them (their counts zeroed) */
   Npu *npu;
   float npu_share;                 /* the share of a layer's picks the NPU takes (a format's cost scaling it) */
@@ -223,6 +223,7 @@ bool q4x_npu_gate_up(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);
 bool q4x_npu_pack_down(Q4xForward *f, uint32_t ff);
 bool q4x_npu_down(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);
 void q4x_npu_destroy(Q4xForward *f);
+bool q4x_npu_make(Q4xForward *f, const char *dir, float share, char err[OSMOS_ERR]); /* Q4xOptions' npu */
 void q4x_seen(const Q4xForward *f, const char *step, int layer, float *dev, uint64_t n);
 
 /* hip_layers.c: a layer's blocks on n tokens of b.h (the residual), its output into b.h */

@@ -19,6 +19,7 @@
 #include "osmos/model/qtype.h"
 #include "osmos/model/rope.h"
 #include "osmos/err.h"
+#include "osmos/model/dspark.h"
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
 #define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */
@@ -495,6 +496,7 @@ static bool scratch(Forward *f)
   f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
   f->ovf = (OverflowFlag){b->overflow, 4, false}; /* (zeroed by fwd_alloc) */
   return fwd_put(b->pre0, pre0, B * hc * F) && fwd_alloc(&f->bufs, &f->argmax_part, ops_argmax_scratch((uint32_t)B)) &&
+         (!f->n_tap || fwd_alloc(&f->bufs, &f->taps, (uint64_t)f->step * f->n_tap * f->g->n_embd * F)) &&
          fwd_mapped(&f->bufs, &f->r_ids, P * 4) &&
          hipHostGetDevicePointer((void **)&f->r_ids_dev, f->r_ids, 0) == hipSuccess &&
          fwd_mapped(&f->bufs, &f->r_guess, S * FWD_GUESS_K * 4) &&
@@ -553,7 +555,8 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
                                const uint64_t *picks, char err[OSMOS_ERR])
 {
-  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0, NULL};
+  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0, NULL,
+                            false, 0, NULL, NULL, 0, NULL};
   return forward_create_with(w, &o, err);
 }
 
@@ -595,6 +598,14 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   f->eg_fd = -1;
   for (int i = 0; i < FWD_MAX_FILES; i++)
     f->fds[i] = f->dfds[i] = -1;
+  /* a drafter's plan before any GPU memory: its index read, its target layers the model's (a drafter refused here,
+     not after the build) - the taps then made with the step's buffers */
+  DsparkIndex *dix = NULL;
+  bool at[WEIGHTS_MAX_LAYERS] = {false};
+  if (o->drafter && !fwd_drafter_plan(f, o->drafter, &dix, at, err))
+    return forward_destroy(f), NULL;
+  if (o->drafter)
+    fwd_taps_plan(f, at);
   bool ok = true, direct = true;
   for (int i = 0; ok && i < w->n_files; i++) /* the model's files, then an overlay's (weights.h) */
     ok = (f->fds[i] = open(w->paths[i], O_RDONLY)) >= 0 &&
@@ -623,6 +634,13 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
         osmos_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
     ok = osmos_fail(err, "a GPU allocation refused");
+  /* made whole: the lane, the NPU, the drafter (ForwardOptions'; 0.16.0: attached after, by their own calls) */
+  ok = ok && fwd_lane_make(f, o->cpu_threads, o->cpu_cores, err) && (!o->npu || fwd_npu_make(f, o->npu, o->npu_share, err));
+  if (ok)
+    f->lane = o->lane;
+  if (ok && dix)
+    ok = (f->drafter = fwd_drafter_make(f, dix, err)) != NULL, dix = NULL; /* (the drafter's: freed with it) */
+  dspark_index_destroy(dix);
   if (!ok)
   {
     forward_destroy(f);
@@ -630,6 +648,8 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   }
   return f;
 }
+
+struct Drafter *forward_drafter(const Forward *f) { return f ? f->drafter : NULL; }
 
 uint64_t forward_budget(const Forward *f) { return f ? f->budget : 0; }
 
@@ -647,6 +667,7 @@ void forward_destroy(Forward *f)
   if (!f)
     return;
   (void)hipDeviceSynchronize(); /* a failed step's kernels done: what is freed or unlocked, the GPU is past */
+  fwd_drafter_destroy(f->drafter); /* first: it borrows the forward (its taps, its head) */
   membrane_destroy(f->mem);
   host_slots_destroy(f->hs), host_slots_destroy(f->hs_stream); /* after the membrane: no unit still in them */
   resident_destroy(f->res);

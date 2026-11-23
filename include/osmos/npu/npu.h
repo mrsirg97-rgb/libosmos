@@ -7,6 +7,7 @@
 #define OSMOS_NPU_NPU_H
 
 #include "osmos/err.h"
+#include "osmos/mem/ledger.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -35,9 +36,9 @@ bool npu_built(void);
 /* the kernels from dir, a subdirectory a format and kind - a model's set (DeepSeek's: iq2xxs/, iq1s/, iq2xs/ gate + up,
    iq2xxs-down/, iq1s-down/, iq2xs-down/, iq2s-down/; Qwen's: iq3xxs/, iq2s/, iq4nl-down/): each
    final.xclbin, insts.bin - its own hardware context, all live at once; going from one to another ~2.7 ms), for an
-   expert of D -> FF -> D; A for at most max_parts parts of either kind (hipMalloc'd, its dma-buf the NPU's). none
-   found: NULL */
-Npu *npu_open(const char *dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[OSMOS_ERR]);
+   expert of D -> FF -> D; A for at most max_parts parts of either kind (GPU memory through l - osmos/mem/ledger.h:
+   borrowed, the forward's; NULL counts nothing - its dma-buf the NPU's). none found: NULL */
+Npu *npu_open(struct OsmosLedger *l, const char *dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[OSMOS_ERR]);
 bool npu_has(const Npu *n, NpuKind kind, uint32_t qtype); /* a kernel for a GGUF type id */
 void npu_close(Npu *n);
 

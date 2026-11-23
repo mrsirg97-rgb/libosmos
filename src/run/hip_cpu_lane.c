@@ -9,7 +9,7 @@
 #include "osmos/cpu/lane.h"
 #include "osmos/err.h"
 
-/* the lane's CPU half (forward_lane's cpu_threads): its pool, the model's files mapped read-only for its workers (the
+/* the lane's CPU half (ForwardOptions' cpu_threads): its pool, the model's files mapped read-only for its workers (the
    page cache's pages, read in place: no copy), and the buffers it hands rows through - the GPU maps them */
 
 static bool refused(Forward *f, char *err, const char *why)
@@ -54,8 +54,8 @@ void fwd_cpu_destroy(Forward *f)
   for (int i = 0; i < FWD_MAX_FILES; i++)
     if (f->map[i])
       munmap((void *)f->map[i], f->map_len[i]), f->map[i] = NULL;
-  void *pin[] = {f->cpu_xf, f->cpu_rw, f->cpu_y, f->cpu_seq}; /* (made in fwd_cpu_create, given back here: the
-                                                                 lane dropped and made again in the forward's life) */
+  void *pin[] = {f->cpu_xf, f->cpu_rw, f->cpu_y, f->cpu_seq}; /* (made in fwd_cpu_create, given back here: its
+                                                                 own failure's or the forward's end) */
   for (int i = 0; i < 4; i++)
     if (pin[i])
       ledger_host_free(f->ledger, pin[i]);

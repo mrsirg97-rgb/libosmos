@@ -90,7 +90,7 @@ int main() {
       const uint32_t vis = (uint32_t) (ps + (int32_t) t + 1) / R;
       for (uint32_t j = 0; j < vis; j++, nsc++) diff += std::memcmp(&c0[(size_t) t * nv + j], &c1[(size_t) t * nv + j], 4) != 0;
     }
-    uint64_t hash = 1469598103934665603ull;  // (0.7.4) the picks' FNV-1a: OSMOS_SELECT_ONE=1's run the same
+    uint64_t hash = 1469598103934665603ull;  // (0.7.4) the picks' FNV-1a: the one-block selection's the same
     for (int32_t v : s1) hash = (hash ^ (uint32_t) v) * 1099511628211ull;
     std::printf("  at %6uK (%6u blocks): plain %8.2f ms, default %8.2f ms (%.1fx) a step of %u - %.3f ms a token a"
                 " layer; the picks %s (%016llx), %llu scores %llu bits differ\n", P / 1024, P / R, naive, blocked,

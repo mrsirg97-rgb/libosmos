@@ -35,6 +35,9 @@ typedef struct Hy4Options
                           expert resident where there is room) */
   struct OsmosLedger *ledger; /* the forward's, its sequences' and its drafter's every allocation counted in it
                                  (osmos/mem/ledger.h: borrowed - the engine's, outliving the forward); NULL nothing */
+  const char *dfly; /* DFly2, the drafter (below), made with the forward: its safetensors' path, or NULL - 0.16.0:
+                       hy4_dfly_load, attached after */
+  bool dfly_q8;     /* its matrices and the drafts' head Q8_0 (ggml's rounding of the BF16): half the reads */
 } Hy4Options;
 
 /* the weights to the GPU (every tensor but the Engram table, read from `fds`' files as the step needs its rows: the
@@ -96,16 +99,15 @@ uint64_t hy4_identity(const Hy4Forward *f);
    sampled token, at the sequence's position) and HY4_DFLY_DRAFTS mask tokens, each layer attending to its target
    sparse layer's keys for the last accepted token (that layer's indexer picks, kept by every step) and the block's
    own rows (written into that layer's cache past the position: a verify's step writes its own over them) - then the
-   hidden correction's chain, each draft through the target's head. hy4_dfly_load: before any sequence drafts;
-   false, err said, for a file not the drafter or not this model's shapes. q8: its matrices and the drafts' head
-   (the target's, copied) Q8_0 (ggml's rounding of the BF16) - half the reads; a draft's precision moves how many
-   are accepted, never the tokens. hy4_seq_draft: up to `most` drafts after
+   hidden correction's chain, each draft through the target's head. made with the forward (Hy4Options' dfly): the
+   forward refused, err said, for a file not the drafter or not this model's shapes. dfly_q8: its matrices and the
+   drafts' head (the target's, copied) Q8_0 (ggml's rounding of the BF16) - half the reads; a draft's precision moves
+   how many are accepted, never the tokens. hy4_seq_draft: up to `most` drafts after
    y (HY4_DFLY_DRAFTS at most), each kept while its probability under the draft's own logits is at least conf_min and
    their product at least cum_min - the count; 0 when the last step kept no snapshot of the position before (a load,
    a prompt not run to its end) or the block would pass max_ctx; -1 with why on a GPU failure */
 #define HY4_DFLY_DRAFTS 5
 #define HY4_DFLY_LAYERS 5
-bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]);
 int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf_min, float cum_min, int32_t *drafts,
                   float *conf, char err[OSMOS_ERR]);
 

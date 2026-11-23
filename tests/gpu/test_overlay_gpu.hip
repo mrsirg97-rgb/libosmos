@@ -51,12 +51,13 @@ static Run decode(const std::string& first, const std::string& overlay) {
   Weights* w = weights_create_with(&wo, werr);
   if (!w) std::fprintf(stderr, "  weights: %s\n", werr);
   CHECK(w);
-  const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens, true};
+  ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens, true};
+  o.lane = true;
   osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward: %s\n", err);
   osmos_clear(err);
-  CHECK(f && forward_lane(f, 0, NULL, err));
+  CHECK(f);
   const uint32_t V = (uint32_t) w->geo.n_vocab;
   std::vector<int32_t> p(kPrompt);
   uint32_t r = 4242;

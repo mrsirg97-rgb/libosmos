@@ -122,6 +122,10 @@ typedef struct Lfm3Options
 /* a prompt token's read sparse from here: under LSA_READ_MAX positions a read is every key (the dense attention's) */
 #define LFM3_LSA_SPARSE_FROM LSA_READ_MAX
 /* the model's open files' paths are its Gguf's (the identity hashes them) */
+/* a stages table from "from:factor,from:factor,..." (osmos-serve's --rope-stages: a model's table tried without a
+   build) - each a decimal of 32 bits, LFM3_MAX_STAGES at most, nothing else; false (t, n unchanged in meaning) for any
+   other string. lfm3_forward_create checks the table's order and factors */
+bool lfm3_stages_parse(const char *c, Lfm3Stage t[LFM3_MAX_STAGES], uint32_t *n);
 Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, char err[OSMOS_ERR]);
 void lfm3_forward_destroy(Lfm3Forward *f);
 

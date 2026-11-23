@@ -1209,10 +1209,9 @@ extern "C" bool hy4_mla_attn(const float* qa, const void* cache, uint32_t slots,
   const uint32_t splits = (window ? window : HY4_MLA_MAX_KEYS) / kSplitKeys + 1 < kMaxSplits
                               ? (window ? window : HY4_MLA_MAX_KEYS) / kSplitKeys + 1
                               : kMaxSplits;
-  static const bool exact = getenv("HY4_MLA_F32") != nullptr;  // (a read's attention the F32 path's: A/B)
-  if (read && !exact && heads % 16 == 0 && latent % 64 == 0 && (latent + rope_dim) % 16 == 0 &&
+  if (read && heads % 16 == 0 && latent % 64 == 0 && (latent + rope_dim) % 16 == 0 &&
       latent + rope_dim <= kMlaRow && rope_dim <= 64) {
-    if (heads % 64 == 0 && !getenv("MLA_G2"))
+    if (heads % 64 == 0)
       mla_mm_kernel<4><<<dim3(heads / 64, n_tok), 512, 0, s>>>(qa, (const uint8_t*) cache, slots, q8, sinks, heads,
                                                                latent, rope_dim, window, sel, n_sel, sel_cap, pool, scale,
                                                                pos, o_lat);
@@ -1317,14 +1316,13 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
   // decode's or a verify's F32. the selection over many blocks for a step's few tokens, a block a token for many (the
   // same picks either way: integer counts)
   const bool spread = n_tok <= kIxSpreadTokens;
-  static const bool exact = getenv("HY4_IX_F32") != nullptr;  // (a read's scores the F32 loop's: A/B)
-  if (read && !exact && dim == kIxDim && heads == 16 && !getenv("HY4_IX_MM1"))
+  if (read && dim == kIxDim && heads == 16)
     ix_score_mm2_kernel<<<dim3((max_groups + kM2Groups - 1) / kM2Groups, (n_tok + kM2Tok - 1) / kM2Tok), 128, 0,
                           st(stream)>>>(q, w, groups, pool, top, pos, n_tok, max_groups, scores);
-  else if (read && !exact && dim == kIxDim && heads <= 16)
+  else if (read && dim == kIxDim && heads <= 16)
     ix_score_mm_kernel<<<dim3((max_groups + kMmGroups - 1) / kMmGroups, (n_tok + kMmTok - 1) / kMmTok), 128, 0,
                          st(stream)>>>(q, w, groups, heads, pool, top, pos, n_tok, max_groups, scores);
-  else if (!read && heads == 16 && dim == kIxDim && !getenv("HY4_IX_TILE"))
+  else if (!read && heads == 16 && dim == kIxDim)
     ix_score_persist_kernel<<<kIxPBlocks, kThreads, 0, st(stream)>>>(q, w, groups, pool, top, pos, n_tok, max_groups,
                                                                      scores);
   else

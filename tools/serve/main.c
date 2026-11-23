@@ -3,7 +3,8 @@
 
      osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
                      [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
-                     [--stream-ngram] [--kv-q8] [--overlay <gguf>] [--lsa <maps>] [--answer-after <text>] [--serve]
+                     [--stream-ngram] [--kv-q8] [--overlay <gguf>] [--lsa <maps>] [--answer-after <text>]
+                     [--profile] [--rope-stages <from:factor,...>] [--serve]
 
    in:  GEN <max_new> [rid=<r>] [spec=<0|1>] [temp=<t>] [top_p=<p>] [top_k=<k>] [seed=<s>] <id,id,...>   STOP [<rid>]   QUIT
    out: READY <max_ctx> stop[ multi=N] / T [<rid>] <token> / PP [<rid>] <done> <total> <ms> <tok/s> <reused> /
@@ -20,11 +21,16 @@
    (Q4xOptions' stream_ngram: the same bits, its 26.8 GiB of UD-IQ3_XXS left free); DeepSeek's Engram always is.
    --kv-q8: Inkling's full layers' cached values Q8, as its keys, not Q5 (OsmosOptions' kv_q8: 17 KiB a token of
    Mini's cache, not 14 - another output; a pack with the room's choice); the other families refuse it.
+   --profile: a measurement's build - a step's sections timed (each after a synchronize: the bits the same), their
+   totals on stderr at the engine's destroy (OsmosOptions' profile: Inkling's; the others refuse it).
+   --rope-stages: osmos1.7b's YaRN stages, "from:factor,..." (OsmosOptions' rope_stages: a table tried without a build;
+   malformed, or another family's, refused).
    --budget: GiB of experts and dense weights in GPU memory, or auto (the default): sized to this GPU (build.c).
    --fill: GiB of the system's RAM kept free - 8 by default (FIT_RAM_FREE: room for an editor, a browser, language
    servers and the agent harness beside the model), 0 or more: auto's sizing fills past it, and saved conversations'
-   RAM stops at it. more than can be kept free: the smallest build (the dense weights alone, every expert streamed),
-   with a NOTE. the output's bits the same at every value: only what stays in memory moves.
+   RAM stops at it. more than the machine can keep free beside the smallest build: refused, not started (0.16.0: the
+   ledger's - it started on the smallest build). the output's bits the same at every value: only what stays in memory
+   moves.
    --answer-after: the reasoning's end token's text (</think>), or #<id>: no --eos token is taken while the turn's
    answer past it is whitespace alone - the row's best other token is (osmos/text/answer.h; osmos-api passes its
    dialect's text; tools/serve/answer_test.py an id).
@@ -136,7 +142,7 @@ int main(int argc, char **argv)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
                "[--max-context N] [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] "
                "[--no-guess] [--stream-ngram] [--kv-q8] [--npu <dir> [--npu-share F]] "
-               "[--overlay <gguf>] [--lsa <maps>] [--serve]");
+               "[--overlay <gguf>] [--lsa <maps>] [--profile] [--rope-stages <from:factor,...>] [--serve]");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
   sv.max_tokens = (uint32_t)atol(opt(argc, argv, "--max-tokens", "2048"));
@@ -179,7 +185,8 @@ int main(int argc, char **argv)
   const OsmosOptions o = {sv.max_ctx,     sv.max_tokens,     (uint64_t)(budget * (double)(1ull << 30)),
                           opt(argc, argv, "--picks", NULL), has(argc, argv, "--no-guess"),
                           opt(argc, argv, "--dspark", NULL), true, sv.ram_kept, has(argc, argv, "--stream-ngram"),
-                          opt(argc, argv, "--npu", NULL), npu_share, has(argc, argv, "--kv-q8")};
+                          opt(argc, argv, "--npu", NULL), npu_share, has(argc, argv, "--kv-q8"),
+                          has(argc, argv, "--profile"), opt(argc, argv, "--rope-stages", NULL)};
   Conv *conv = calloc((size_t)lanes, sizeof *conv);
   if (!conv)
     return die("out of memory");

@@ -39,6 +39,15 @@ typedef struct ForwardOptions
   uint32_t logit_rows;   /* a step's last rows whose logits are kept (forward_logit_rows); 0: its every row */
   struct OsmosLedger *ledger; /* the forward's, its sequences' and its drafter's every allocation counted in it
                                  (osmos/mem/ledger.h: borrowed - the engine's, outliving the forward); NULL nothing */
+  /* the forward made whole with these (0.16.0: forward_lane, forward_npu and drafter_create, each attached after) */
+  bool lane;             /* a decode's order the lane's from the first step (below: "lane"; forward_lane_mode moves it):
+                            every engine's */
+  int cpu_threads;       /* the lane's CPU half: its threads (0: every expert on the GPU; at most CPU_LANE_THREADS_MAX) */
+  const int *cpu_cores;  /* the cores they are pinned to, cpu_threads of them, or NULL */
+  const char *npu;       /* the NPU's kernels' directory (below: "npu"), or NULL: the GPU alone */
+  float npu_share;       /* its share of an eligible layer's pairs, in (0, 1) */
+  const char *drafter;   /* a DSpark drafter's directory (osmos/run/drafter.h): made with the forward, its own - its
+                            taps the forward's from its first step (forward_drafter) - or NULL: none */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[OSMOS_ERR]);
@@ -59,9 +68,9 @@ uint64_t forward_identity(const Forward *f);
 uint64_t seq_state_bytes(const Seq *s);
 bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
 bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
-bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[OSMOS_ERR]);
 void forward_reading(Forward *f, bool on);
-bool forward_npu(Forward *f, const char *dir, float share, char err[OSMOS_ERR]);
+void forward_lane_mode(Forward *f, bool on); /* a decode's order: the lane's, or the matmul's (nothing made: a mode) */
+struct Drafter *forward_drafter(const Forward *f); /* ForwardOptions' drafter, the forward's (NULL: none) */
 void forward_npu_stats(const Forward *f, uint64_t *calls, uint64_t *parts, double *wait_us, double *gpu_idle_ms,
                        uint64_t *gpu_outlasted);
 
@@ -184,12 +193,12 @@ seq_state_bytes / seq_save_to / seq_load_from
   conversation and part another. the format: little-endian, a header (magic, version,
   identity, the fields above), the rows, a trailing 64-bit FNV-1a of everything before it.
 
-forward_npu
+npu (ForwardOptions' npu, npu_share)
   0.7.0: the NPU (npu.h; built with NPU=1) beside the GPU in a prompt step's routed experts - dir its kernel's
   xclbin and instruction stream; share the part of an eligible layer's pairs (gate and up one format it has a kernel for, or a down it has one for: IQ2_XXS, IQ1_S) it takes, in whole
   parts of 128 tokens of the layer's most-picked experts, chosen from the routing alone. its sums are not the GPU's
-  (bfp16 inputs, f32 sums): on, another forward_identity; the same prompt the same bits. false with why: not built, no
-  NPU, another model's shape. a layer's down goes to the NPU too where it has the down's format's kernel.
+  (bfp16 inputs, f32 sums): on, another forward_identity; the same prompt the same bits. the forward refused, why
+  said: not built, no NPU, another model's shape, a share not in (0, 1). a layer's down goes to the NPU too where it has the down's format's kernel.
   forward_npu_stats: its calls (a layer's gate + up or down each), launches and the host's time waiting on them so
   far; the GPU's time idle waiting for the NPU (all but the last call's), and the calls the GPU's own rows outlasted
   the NPU's (zeros when off).
@@ -199,16 +208,17 @@ forward_reading
   lane's int8 ones), so a prompt read in pieces from any point is the bits of one read whole; off: a step under
   n_experts / n_used tokens the lane's again (decode, a draft's verify). osmos_read sets it around its batch.
 
-forward_lane
-  a decode's mode: a step that picks fewer experts than a layer has (a decode's, a verify's) takes its routed experts
+lane (ForwardOptions' lane, cpu_threads, cpu_cores; forward_lane_mode)
+  its tables made with every forward, its CPU half with cpu_threads; the order a mode, the lane's from the first step
+  with lane, moved by forward_lane_mode (as forward_reading moves a prompt's). a decode's mode: a step that picks fewer experts than a layer has (a decode's, a verify's) takes its routed experts
   in the matvec's order (F32 sums, an expert's rows each lane's chunks in turn, then a fixed tree; kernels/lane.h's
   activation) - the order the CPU repeats, so an expert gives the same bits on either, and which one runs it, or
   whether it is resident, changes none. a prompt's steps keep the matmul's (WMMA): in this mode a token's bits
   depend on whether its step was small (determinism's rule 2 relaxed there; rule 1 kept). cpu_threads 0: every
   expert on the GPU. cpu_threads > 0 (at most CPU_LANE_THREADS_MAX; a CPU with AVX-512 VNNI): a small step's experts
   not in GPU memory (neither resident nor in the pool) are computed by that many CPU threads from the model's files
-  (osmos/cpu/lane.h: the GPU's bits), while the GPU runs the others; it waits for their rows before the sum. false
-  with why for a count it does not take.
+  (osmos/cpu/lane.h: the GPU's bits), while the GPU runs the others; it waits for their rows before the sum. the
+  forward refused, why said, for a count it does not take.
 
 forward_step
   forward_batch of one: the token at the sequence's next position through the layers; the stream out in

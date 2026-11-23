@@ -33,6 +33,8 @@ typedef struct Ink2Options
                             its key's - for a model with the room (osmos-serve's --kv-q8) */
   struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
                                  borrowed - the engine's, outliving the forward); NULL counts nothing */
+  bool profile;          /* a step's sections timed, each after a synchronize (its bits the same), their totals said
+                            at its destroy (stderr) - a measurement's build (0.16.0: INK2_PROFILE) */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[OSMOS_ERR]);

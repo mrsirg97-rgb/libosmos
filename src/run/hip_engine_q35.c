@@ -69,8 +69,9 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8)
-    return osmos_fail(err, "qwen35: every weight resident - no budget, picks, no_guess, NPU or kv_q8"), NULL;
+  if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8 || o->profile || o->rope_stages)
+    return osmos_fail(err, "qwen35: every weight resident - no budget, picks, no_guess, NPU, kv_q8, profile or "
+                      "rope_stages"), NULL;
   if (o->drafter)
     return osmos_fail(err, "qwen35: no drafter yet (its MTP head and DFlash: 0.9.0's next step)"), NULL;
   Eng *e = calloc(1, sizeof *e);
@@ -78,7 +79,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
     return osmos_fail(err, "out of memory"), NULL;
   e->ledger = ledger;
   const uint32_t steps = osmos_step_tokens(o, Q35_STEP_TOKENS);
-  const Q35Options qo = {steps, o->max_ctx, Q35_LOGIT_ROWS};
+  const Q35Options qo = {steps, o->max_ctx, Q35_LOGIT_ROWS, ledger};
   if (!(e->f = q35_forward_create_with(m->w, &qo, err)))
     return e_destroy(e), NULL;
   return e;

@@ -169,15 +169,32 @@ static bool targets(const Forward *f, const DsparkIndex *ix, bool *at, char *err
   return true;
 }
 
-Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR])
+bool fwd_drafter_plan(const Forward *f, const char *dir, DsparkIndex **ix, bool *at, char *err)
 {
-  Drafter *d = f ? calloc(1, sizeof *d) : NULL;
+  char xerr[OSMOS_ERR] = "";
+  if (!(*ix = dspark_index(dir, xerr)))
+    return osmos_fail(err, "%s", xerr);
+  const DsparkTensor *mk = dspark_tensor(*ix, "mtp.2.markov_head.embed.weight");
+  const DsparkTensor *mp = dspark_tensor(*ix, "mtp.0.main_proj.weight");
+  bool ok = targets(f, *ix, at, err);
+  uint64_t n_tap = 0;
+  for (int l = 0; ok && l < f->n_layers; l++)
+    n_tap += at[l];
+  ok = ok && ((mk && mp && n_tap && mp->dims[1] == n_tap * f->g->n_embd) ||
+              osmos_fail(err, "a drafter whose taps are not the model's target layers'"));
+  if (!ok)
+    dspark_index_destroy(*ix), *ix = NULL;
+  return ok;
+}
+
+Drafter *fwd_drafter_make(Forward *f, DsparkIndex *ix, char *err)
+{
+  Drafter *d = calloc(1, sizeof *d);
   if (!d)
-    return osmos_fail(err, "no forward, or out of memory"), NULL;
-  d->f = f, d->fd = -1, d->bufs.ledger = f->ledger;
-  char xerr[OSMOS_ERR] = "", perr[OSMOS_ERR] = "";
-  bool ok = (d->ix = dspark_index(dir, xerr)) != NULL || osmos_fail(err, "%s", xerr);
-  ok = ok && ((d->fd = open(d->ix->bin, O_RDONLY)) >= 0 || osmos_fail(err, "dspark.bin could not be opened"));
+    return dspark_index_destroy(ix), osmos_fail(err, "out of memory (the drafter)"), NULL;
+  d->f = f, d->fd = -1, d->bufs.ledger = f->ledger, d->ix = ix; /* (its plan's: the taps f's already) */
+  char perr[OSMOS_ERR] = "";
+  bool ok = (d->fd = open(d->ix->bin, O_RDONLY)) >= 0 || osmos_fail(err, "dspark.bin could not be opened");
   PoolUnit *u = ok ? calloc(d->ix->n, sizeof *u) : NULL;
   ok = ok && (u || osmos_fail(err, "out of memory"));
   for (uint32_t i = 0; ok && i < d->ix->n; i++)
@@ -188,10 +205,7 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR])
   free(u);
   const DsparkTensor *mk = ok ? dspark_tensor(d->ix, "mtp.2.markov_head.embed.weight") : NULL;
   const DsparkTensor *mp = ok ? dspark_tensor(d->ix, "mtp.0.main_proj.weight") : NULL;
-  bool at[WEIGHTS_MAX_LAYERS] = {false};
-  ok = ok && targets(f, d->ix, at, err);
-  ok = ok && ((mk && mp && fwd_taps_on(f, at) && mp->dims[1] == (uint64_t)f->n_tap * f->g->n_embd) ||
-              osmos_fail(err, "a drafter whose taps are not the model's target layers'"));
+  ok = ok && ((mk && mp && f->taps) || osmos_fail(err, "the drafter's taps not planned (fwd_drafter_plan)"));
   if (ok)
   {
     d->rank = (uint32_t)mk->dims[1];
@@ -209,13 +223,13 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR])
   ok = ok && (scratch(d) || osmos_fail(err, "GPU memory refused"));
   if (!ok)
   {
-    drafter_destroy(d);
+    fwd_drafter_destroy(d);
     return NULL;
   }
   return d;
 }
 
-void drafter_destroy(Drafter *d)
+void fwd_drafter_destroy(Drafter *d)
 {
   if (!d)
     return;

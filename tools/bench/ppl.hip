@@ -64,12 +64,12 @@ int main(int argc, char** argv) {
     std::fclose(pf);
     o.picks = picks.data();
   }
+  /* the forward whole: its lane (as the engine's), the NPU beside the GPU (0.7.0: NPU=<its kernels' dir>, NPU_SHARE
+     of a layer's pairs) */
+  o.lane = true, o.npu = std::getenv("NPU");
+  o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;
   Forward* f = forward_create_with(w, &o, ferr);
   if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
-  CHECK(forward_lane(f, 0, NULL, ferr));
-  if (const char* nd = std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu), NPU_SHARE of a layer's pairs
-    if (!forward_npu(f, nd, std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr))
-      std::fprintf(stderr, "forward_npu: %s\n", ferr), std::_Exit(1);
   Seq* s = seq_create(f, ferr);
   CHECK(s);
   const size_t V = (size_t) w->geo.n_vocab;

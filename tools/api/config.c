@@ -98,6 +98,12 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "kv_q8"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->kv_q8 = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
+  if (!strcmp(k, "profile"))
+    return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->profile = v->type == JSON_TRUE, true
+                                                         : fail(err, "true or false", k);
+  if (!strcmp(k, "rope_stages")) /* (its form osmos-serve's to refuse: lfm3_stages_parse) */
+    return v->type == JSON_STRING && v->s[0] ? str(v, c->rope_stages, sizeof c->rope_stages, k, err)
+                                             : fail(err, "a string, from:factor,...", k);
   if (!strcmp(k, "max_context") || !strcmp(k, "parallel") || !strcmp(k, "max_tokens"))
   {
     if (v->type != JSON_INT || !num(v, &x, k, err) || x > 1e7)
@@ -173,6 +179,10 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
     argv[n++] = "--stream-ngram";
   if (c->kv_q8)
     argv[n++] = "--kv-q8";
+  if (c->profile)
+    argv[n++] = "--profile";
+  if (c->rope_stages[0])
+    argv[n++] = "--rope-stages", argv[n++] = c->rope_stages;
   if (c->npu[0])
     argv[n++] = "--npu", argv[n++] = c->npu;
   if (c->npu[0] && c->npu_share > 0)

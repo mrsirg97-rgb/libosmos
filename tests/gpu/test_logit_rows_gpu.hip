@@ -41,11 +41,12 @@ static Rows run(Weights* w, uint32_t logit_rows, const std::vector<int32_t>& ids
   const size_t V = w->geo.n_vocab;
   char err[OSMOS_ERR] = "";
   ForwardOptions o = {(int) w->geo.n_layers, kCtx, kBudget, nullptr, kMaxTokens, true, false, 0, 0, logit_rows};
+  o.lane = true;
   osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "forward: %s\n", err);
   osmos_clear(err);
-  CHECK(f && forward_lane(f, 0, NULL, err) && forward_logit_rows(f) == 0);
+  CHECK(f && forward_logit_rows(f) == 0);
   osmos_clear(err);
   Seq* s = seq_create(f, err);
   CHECK(s);

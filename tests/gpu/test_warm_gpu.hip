@@ -46,11 +46,12 @@ static uint64_t storage_read() {
 
 static Forward* create(Weights* w, char* err) {
   ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens};
+  o.lane = true;
   osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward_create_with: %s\n", err);
   osmos_clear(err);
-  CHECK(f && forward_lane(f, 0, NULL, err));
+  CHECK(f);
   return f;
 }
 

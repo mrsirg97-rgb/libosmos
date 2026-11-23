@@ -341,14 +341,11 @@ bool seq_prompt(Seq *s, uint32_t end)
   return true;
 }
 
-bool fwd_taps_on(Forward *f, const bool *at)
+void fwd_taps_plan(Forward *f, const bool *at)
 {
-  if (f->taps)
-    return memcmp(f->tapped, at, (size_t)f->n_layers * sizeof *at) == 0;
   f->n_tap = 0;
   for (int l = 0; l < f->n_layers; l++)
     f->tapped[l] = at[l], f->tap_of[l] = at[l] ? f->n_tap++ : -1;
-  return f->n_tap && fwd_alloc(&f->bufs, &f->taps, (uint64_t)f->step * f->n_tap * f->g->n_embd * sizeof(float));
 }
 
 uint32_t seq_reach(const Seq *s)

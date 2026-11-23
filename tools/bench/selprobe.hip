@@ -75,9 +75,9 @@ int main(int argc, char** argv) {
     std::fclose(pf);
     o.picks = picks.data();
   }
+  o.lane = true; /* (as the engine's) */
   Forward* f = forward_create_with(w, &o, ferr);
   if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
-  CHECK(forward_lane(f, 0, NULL, ferr));
   Seq* s = seq_create(f, ferr);
   CHECK(s && seq_prompt(s, P));
   std::vector<Seq*> ss(step, s);

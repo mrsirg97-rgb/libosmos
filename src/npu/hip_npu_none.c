@@ -6,9 +6,9 @@
 
 bool npu_built(void) { return false; }
 
-Npu *npu_open(const char *dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[OSMOS_ERR])
+Npu *npu_open(struct OsmosLedger *l, const char *dir, uint32_t D, uint32_t FF, uint32_t max_parts, char err[OSMOS_ERR])
 {
-  (void)dir, (void)D, (void)FF, (void)max_parts;
+  (void)l, (void)dir, (void)D, (void)FF, (void)max_parts;
   osmos_fail(err, "npu: osmos was built without it (make NPU=1)");
   return NULL;
 }

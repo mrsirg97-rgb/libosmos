@@ -227,9 +227,9 @@ void lfm3_forward_destroy(Lfm3Forward *f)
 const Lfm3Stage lfm3_stages_default[] = {{0, 1}};
 const uint32_t lfm3_stages_default_n = sizeof lfm3_stages_default / sizeof lfm3_stages_default[0];
 
-/* OSMOS_LFM3_STAGES: "from:factor,from:factor,..." - each a decimal of 32 bits, LFM3_MAX_STAGES at most, nothing
+/* (osmos/lfm3/forward.h) "from:factor,from:factor,..." - each a decimal of 32 bits, LFM3_MAX_STAGES at most, nothing
    else (0.11.2: a malformed string used whatever parsed before it) */
-static bool parse_stages(const char *c, Lfm3Stage *t, uint32_t *n)
+bool lfm3_stages_parse(const char *c, Lfm3Stage t[LFM3_MAX_STAGES], uint32_t *n)
 {
   uint32_t m = 0;
   for (;;)
@@ -283,16 +283,8 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   f->yarn_from = o->yarn_from ? o->yarn_from : g->native_ctx;
   f->sparse_from = o->lsa_sparse_from ? o->lsa_sparse_from : LFM3_LSA_SPARSE_FROM;
   const Lfm3Stage *table = o->stages ? o->stages : lfm3_stages_default;
-  uint32_t nt = o->stages ? o->n_stages : lfm3_stages_default_n;
-  Lfm3Stage env_table[LFM3_MAX_STAGES];
-  const char *env = o->stages ? NULL : getenv("OSMOS_LFM3_STAGES"); /* "from:factor,..." (0:1 native throughout): a
-                                                                       model's table tried without a build */
-  bool env_ok = true;
-  if (env && *env)
-    env_ok = parse_stages(env, env_table, &nt), table = env_table;
-  bool ok = (env_ok || osmos_fail(err, "OSMOS_LFM3_STAGES: not from:factor,... (at most LFM3_MAX_STAGES, each a 32-bit "
-                                      "integer)")) &&
-            (o->yarn_static_ctx || stages_ok(table, nt) ||
+  const uint32_t nt = o->stages ? o->n_stages : lfm3_stages_default_n;
+  bool ok = (o->yarn_static_ctx || stages_ok(table, nt) ||
             osmos_fail(err, "the YaRN stages: none, past LFM3_MAX_STAGES, not from 0, out of order, or a factor not 1-64"));
   f->yarn_static_ctx = o->yarn_static_ctx;
   if (ok && o->yarn_static_ctx) /* one stage: every position YaRN at yarn_static_ctx over yarn_from */

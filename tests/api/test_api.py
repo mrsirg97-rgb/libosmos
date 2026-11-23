@@ -877,6 +877,29 @@ class KvQ8(Served, unittest.TestCase):
         self.assertIn("kv_q8", r.stderr)
 
 
+class Profile(Served, unittest.TestCase):
+    """osmos.json's profile and rope_stages: osmos-serve's --profile and --rope-stages (0.16.0: the INK2_PROFILE and
+    OSMOS_LFM3_STAGES env knobs as options); profile a bool alone, rope_stages a string alone"""
+    settings = {"profile": True, "rope_stages": "0:1,160000:4"}
+
+    def test_0_passed_on(self):
+        self.ready()
+        args = self.log()[0].split()
+        self.assertIn("--profile", args)
+        self.assertEqual(args[args.index("--rope-stages") + 1], "0:1,160000:4")
+
+    def test_1_refused(self):
+        for bad in ({"profile": 1}, {"rope_stages": 4}, {"rope_stages": ""}):
+            d = tempfile.mkdtemp()
+            cfg = os.path.join(d, "osmos.json")
+            with open(cfg, "w") as f:
+                json.dump({"pack": "test", "model": MODEL, "max_context": 4096, **bad}, f)
+            r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                               capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn(next(iter(bad)), r.stderr)
+
+
 class Npu(Served, unittest.TestCase):
     """osmos.json's npu (the NPU's kernels' directory) and npu_share: osmos-serve's --npu and --npu-share (0.7.0:
     forward_npu); a share in (0, 1) alone, the directory a string, the share nothing without it"""

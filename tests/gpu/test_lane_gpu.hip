@@ -38,10 +38,11 @@ static uint64_t run(Weights* w, const std::vector<int32_t>& ids, uint64_t budget
                     uint64_t* on_cpu) {
   char ferr[OSMOS_ERR] = "";
   osmos_clear(ferr);
-  Forward* f = forward_create(w, kLayers, kCtx, budget, ferr);
+  ForwardOptions o = {kLayers, kCtx, budget, nullptr, FORWARD_MAX_TOKENS};
+  o.lane = true, o.cpu_threads = cpu; /* (the lane's CPU half made with the forward) */
+  Forward* f = forward_create_with(w, &o, ferr);
   if (!f) std::fprintf(stderr, "  %s\n", ferr);
-  osmos_clear(ferr);
-  CHECK(f && forward_lane(f, cpu, NULL, ferr));
+  CHECK(f);
   osmos_clear(ferr);
   Seq* s = seq_create(f, ferr);
   CHECK(s);

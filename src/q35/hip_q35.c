@@ -28,8 +28,8 @@
 
 
 
-bool q35_alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
-#define alloc q35_alloc
+bool q35_alloc(GpuBufs *b, void *p, uint64_t bytes) { return gpu_bufs_one(b, b->ledger, p, bytes); }
+bool q35_pinned(GpuBufs *b, void *p, uint64_t bytes) { return gpu_bufs_host(b, b->ledger, p, bytes); }
 
 
 /* y = s W x over n tokens: the matmul where it tiles, else the matvec; the scale after (an NVFP4 matrix's own) */
