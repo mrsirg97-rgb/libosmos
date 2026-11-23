@@ -2150,10 +2150,13 @@ Each change: design -> schema (the header) -> tests that fail first -> implement
 audits (memory ownership; duplicated per-family code; errors, constants, contracts; structure and the untrusted
 boundary), each finding a candidate until a test reproduces it.
 
-**every phase's gate**: make tests, test_api, test_install; make gpu-tests (the guard's default floor; a test that
-needs another floor says why); every pack (Mini, osmos1.7b, Qwen, Hy4-flash, Small, DeepSeek) through osmos-serve
---budget auto - slot, parallel and turn tests, Mini's sample test, DeepSeek's fill test - and one speed run each, its
-answers' hashes 0.15.2's; CI's host and sanitizer jobs (podman). A phase's commits land only behind its gate.
+**the checks** (the operator's call: the whole gate once, at the end): each phase - make tests, test_api,
+test_install, the GPU tests of the code it touched, and each pack's speed run, its answers' hashes 0.15.2's
+(~/bench/gate153/quick.sh, ~40 minutes); the release's end - make gpu-tests (the guard's default floor; a test
+that needs another says why), every pack (Mini, osmos1.7b, Qwen, Hy4-flash, Small, DeepSeek) through osmos-serve
+--budget auto - slot, parallel and turn tests, Mini's sample test, DeepSeek's fill test - and CI's host and sanitizer
+jobs (podman) (~/bench/gate153/gate.sh). Two phases take more when they land: phase 3's ledger the GPU suite (it
+counts every allocation), phase 4's budget the --budget auto serve runs (it changes the sizing).
 
 **phase 1 - the bugs** (each a failing test first; small, independent):
 - Inkling's greedy pick (src/ink2/hip_forward.c ink2_greedy) never refuses a NaN row: it returns true with token -1;
