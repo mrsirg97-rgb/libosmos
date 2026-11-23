@@ -230,7 +230,7 @@
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-evo", "max_tokens": 262144, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-evo", "deepseek-1017-evo-a"]},
-      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
+      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096, "temperature": 1.0, "top_p": 1.0}
     },
     "ud-iq1_s": {
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_S (speed), 1M context (shorter: --ctx 512k)", "quality": {"wiki_kld": 0.2592, "agent_kld": 0.0664},
@@ -239,7 +239,7 @@
       "picks": "picks-ud-iq1_s", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_s", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-ud-s", "max_tokens": 262144, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-s"]},
-      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
+      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096, "temperature": 1.0, "top_p": 1.0}
     },
     "ud-iq1_m": {
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ1_M (quality), 1M context (shorter: --ctx 512k)", "quality": {"wiki_kld": 0.1895, "agent_kld": 0.0479},
@@ -248,7 +248,7 @@
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq1_m", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-ud-m", "max_tokens": 262144, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-m"]},
-      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
+      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096, "temperature": 1.0, "top_p": 1.0}
     },
     "ud-iq2_xxs": {
       "title": "DeepSeek-V4.1-Flash-1017 UD-IQ2_XXS (slow, the closest to the model), 1M context (shorter: --ctx 512k)", "quality": {"wiki_kld": 0.1255, "agent_kld": 0.0361},
@@ -257,7 +257,7 @@
       "picks": "picks-ud-iq1_m", "drafter": ["drafter-bin", "drafter-json"], "overlay": "abl-ud-iq2_xxs", "npu": "npu-ds",
       "rig": {"id": "deepseek-1017-ud-l", "max_tokens": 262144, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "max",
               "aliases": ["ds-l"]},
-      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096}
+      "settings": {"no_guess": true, "max_context": 1048576, "max_tokens": 4096, "temperature": 1.0, "top_p": 1.0}
     },
     "qwen38-ud-iq3_xxs": {
       "title": "Qwen3.8-Flash-Next UD-IQ3_XXS (drafted by its MTP head), 512K context (1M: --ctx 1m, YaRN: slightly weaker on short text)",
@@ -286,14 +286,14 @@
       "overlay": null,
       "npu": null,
       "rig": {"id": "inkling-2-small-evo", "max_tokens": 131072, "reserve": 131072, "efforts": ["low", "high", "max"], "effort": "high", "aliases": ["inkling"]},
-      "settings": {"max_context": 262144, "max_tokens": 4096}
+      "settings": {"max_context": 262144, "max_tokens": 4096, "temperature": 1.0}
     },
     "osmos1.7b": {
       "title": "osmos1.7b (LFM3-1.7B, Q4_0; was vibes1.7b) with latent sparse attention, 512K context",
       "shards": ["osmos1.7b-q4_0"], "gpu_gib": 7,
       "table": null, "picks": null, "drafter": [], "overlay": null, "lsa": "osmos1.7b-lsa",
       "rig": {"id": "osmos1.7b", "max_tokens": 131072, "reserve": 131072, "efforts": ["none", "high"], "effort": "high", "aliases": ["vibes1.7b", "vibes"]},
-      "settings": {"max_context": 524288, "max_tokens": 4096, "preserve_thinking": true}
+      "settings": {"max_context": 524288, "max_tokens": 4096, "preserve_thinking": true, "temperature": 0.1, "top_k": 50}
     },
     "hy4-flash": {
       "title": "Tencent Hy4-flash (AngelSlim's Q3_K) with its DFly2 drafter, 1M context",

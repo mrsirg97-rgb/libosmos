@@ -74,13 +74,25 @@ class Manifest(unittest.TestCase):
                                            "inkling-2-mini"})  # 0.6.10: one Qwen context, 512K - no 1M pack
         v = m["packs"]["osmos1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 512K (its needles: DESIGN.md, "rope")
         self.assertEqual((v["lsa"], v["settings"]), ("osmos1.7b-lsa", {"max_context": 524288, "max_tokens": 4096,
-                                                                        "preserve_thinking": True}))  # 0.11.3
+                                                                        "preserve_thinking": True, "temperature": 0.1,
+                                                                        "top_k": 50}))  # 0.11.3; 0.15.2: its card's sampling
         self.assertEqual((v["rig"]["efforts"], v["rig"]["effort"]), (["none", "high"], "high"))  # thinking off, on
         self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/osmos1.7b"})
         self.assertEqual((manifest.pack_id(m, "vibes1.7b"), v["rig"]["aliases"]), ("osmos1.7b", ["vibes1.7b", "vibes"]))  # 0.11.1: renamed
         self.assertEqual(m["packs"]["inkling-2-mini"]["settings"],  # 0.14.0: sampled at its release's temperature
                          {"max_context": 1048576, "max_tokens": 4096, "kv_q8": True, "temperature": 1.0})
-        self.assertNotIn("temperature", m["packs"]["hy4-flash"]["settings"])  # (the others greedy, as ever)
+        # 0.15.2: each pack's sampling what measured best here (DESIGN.md, "0.15.2"): its release's (cards,
+        # generation_config.json) where greedy looped on the stuck session's replay - Mini and Small (entered it),
+        # DeepSeek (kept it); greedy where it did not and drafts faster - Qwen, Hy4-flash; osmos1.7b its card's (free:
+        # no drafter). Inkling-2-Small's states none: Mini's 1.0, its family's
+        release = {"osmos-evo-1017": (1.0, 1.0, None), "ud-iq1_s": (1.0, 1.0, None), "ud-iq1_m": (1.0, 1.0, None),
+                   "ud-iq2_xxs": (1.0, 1.0, None), "qwen38-ud-iq3_xxs": (None, None, None),
+                   "qwen38-ud-q4_k_xl": (None, None, None), "osmos-evo-inkling": (1.0, None, None),
+                   "osmos1.7b": (0.1, None, 50), "hy4-flash": (None, None, None), "inkling-2-mini": (1.0, None, None)}
+        for pid, (t, p, k) in release.items():
+            st = m["packs"][pid]["settings"]
+            self.assertEqual((st.get("temperature"), st.get("top_p"), st.get("top_k")), (t, p, k), pid)
+        self.assertEqual(set(release), set(m["packs"]))  # (a new pack: its release's sampling named here)
         h = m["packs"]["hy4-flash"]  # 0.11.0: AngelSlim's Q3_K (the Engram table its shard 2), Tencent's own DFly2
         self.assertEqual((h["drafter"], h["drafter_kind"], h["table"]), (["hy4-dfly2"], "dfly", None))
         self.assertEqual({m["files"][f]["repo"] for f in h["shards"]}, {"AngelSlim/Hy4-flash-GGUF"})
@@ -109,12 +121,14 @@ class Manifest(unittest.TestCase):
         self.assertEqual(m["packs"]["ud-iq1_s"]["table"]["slot"], [5, 5])
         for ds in ("ud-iq1_s", "ud-iq1_m", "osmos-evo-1017"):  # 0.6.10: 4,096-token steps in buffers of their own; 1M
             # (0.7.3: --ctx for less - a prompt cached, a long session reads a turn at a time)
-            self.assertEqual(m["packs"][ds]["settings"], {"no_guess": True, "max_context": 1048576, "max_tokens": 4096})
+            self.assertEqual(m["packs"][ds]["settings"], {"no_guess": True, "max_context": 1048576, "max_tokens": 4096,
+                                                       "temperature": 1.0, "top_p": 1.0})  # (0.15.2: its release's)
         x = m["packs"]["ud-iq2_xxs"]  # six files: its own Q5_K Engram (the sixth) not fetched, the MXFP8 table 6 of 6
         self.assertEqual(x["table"]["slot"], [6, 6])
         self.assertEqual([m["files"][f]["bytes"] for f in x["shards"]],
                          [5780923, 49955895008, 49950675200, 48971469632, 16419622240])
-        self.assertEqual(x["settings"], {"no_guess": True, "max_context": 1048576, "max_tokens": 4096})  # 0.5.7: off is fastest (DESIGN.md)
+        self.assertEqual(x["settings"], {"no_guess": True, "max_context": 1048576, "max_tokens": 4096,  # 0.5.7: off is
+                                         "temperature": 1.0, "top_p": 1.0})  # fastest (DESIGN.md); 0.15.2 its release's
         self.assertEqual((x["overlay"], x["drafter"]), ("abl-ud-iq2_xxs", ["drafter-bin", "drafter-json"]))
         q = m["packs"]["qwen38-ud-iq3_xxs"]
         self.assertEqual(q["drafter_kind"], "mtp")                            # its MTP head: one GGUF
