@@ -1,6 +1,7 @@
 #ifndef OSMOS_TEXT_CHAT_QWEN_H
 #define OSMOS_TEXT_CHAT_QWEN_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -12,12 +13,12 @@
 #define QCHAT_CALL_OPEN "<tool_call>"
 
 bool qchat_render(const Json *messages, const Json *tools, ChatMode mode, const char *effort, bool preserve,
-                  JsonBuf *out, char err[CHAT_ERR]);
+                  JsonBuf *out, char err[OSMOS_ERR]);
 bool qchat_render_with(const Json *messages, const Json *branch, const Json *tools, ChatMode mode, const char *effort,
-                       bool preserve, JsonBuf *out, char err[CHAT_ERR]);
-bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR]);
+                       bool preserve, JsonBuf *out, char err[OSMOS_ERR]);
+bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[OSMOS_ERR]);
 bool qchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
-                        JsonBuf *out, char err[CHAT_ERR]);
+                        JsonBuf *out, char err[OSMOS_ERR]);
 size_t qchat_space_lead(const char *p, size_t n);
 size_t qchat_space_trail(const char *p, size_t n);
 extern const char *const qchat_refused[]; /* special tokens' text a completion can't hold (NULL-terminated) */

@@ -1,6 +1,7 @@
 #ifndef OSMOS_TEXT_CHAT_LFM3_H
 #define OSMOS_TEXT_CHAT_LFM3_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -11,10 +12,10 @@
 #define LCHAT_EOS "<|im_end|>"
 
 bool lchat_render(const Json *messages, const Json *tools, ChatMode mode, bool preserve, JsonBuf *out,
-                  char err[CHAT_ERR]);
-bool lchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR]);
+                  char err[OSMOS_ERR]);
+bool lchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[OSMOS_ERR]);
 bool lchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
-                        JsonBuf *out, char err[CHAT_ERR]);
+                        JsonBuf *out, char err[OSMOS_ERR]);
 extern const char *const lchat_refused[]; /* special tokens' text a completion can't hold (NULL-terminated) */
 
 #endif

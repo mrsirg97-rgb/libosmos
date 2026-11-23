@@ -3,27 +3,21 @@
 #include <string.h>
 
 #include "osmos/text/chat_hy4.h"
+#include "osmos/err.h"
 
 /* Hy4-flash's chat template rendered (osmos/text/chat_hy4.h): its macros and loop in its order */
 
 #define MAX_CLUSTER 256 /* a run of tool messages one turn holds (more refused, not cut) */
 
-static bool fail(char *err, const char *why)
-{
-  if (err)
-    snprintf(err, CHAT_ERR, "%s", why);
-  return false;
-}
-
-bool hchat_tokens(const char *tag, HchatTokens *t, char err[CHAT_ERR])
+bool hchat_tokens(const char *tag, HchatTokens *t, char err[OSMOS_ERR])
 {
   const size_t n = tag ? strlen(tag) : 0;
   if (!n || n > HCHAT_TAG_MAX)
-    return fail(err, "no special tokens' suffix, or one past HCHAT_TAG_MAX");
+    return osmos_fail(err, "no special tokens' suffix, or one past HCHAT_TAG_MAX");
   for (size_t i = 0; i < n; i++)
     if (!((tag[i] >= 'a' && tag[i] <= 'z') || (tag[i] >= 'A' && tag[i] <= 'Z') || (tag[i] >= '0' && tag[i] <= '9') ||
           tag[i] == '_' || tag[i] == '-'))
-      return fail(err, "a special tokens' suffix not of letters, digits, '_' and '-'");
+      return osmos_fail(err, "a special tokens' suffix not of letters, digits, '_' and '-'");
   snprintf(t->start, sizeof t->start, "<｜hy_start:%s｜>", tag);
   snprintf(t->middle, sizeof t->middle, "<｜hy_middle:%s｜>", tag);
   snprintf(t->end, sizeof t->end, "<｜hy_end:%s｜>", tag);
@@ -55,14 +49,14 @@ static const char *between(const char *s, const char *open, char close, size_t *
   return a + strlen(open);
 }
 
-bool hchat_from_template(const char *tmpl, HchatTokens *t, char err[CHAT_ERR])
+bool hchat_from_template(const char *tmpl, HchatTokens *t, char err[OSMOS_ERR])
 {
   size_t n = 0, m = 0;
   const char *tag = between(tmpl, "set HYTK = ':", '\'', &n);
   const char *list = between(tmpl, "reasoning_effort not in [", ']', &m);
   char buf[HCHAT_TAG_MAX + 1];
   if (!tag || !n || n > HCHAT_TAG_MAX || !list)
-    return fail(err, "not Hy4-flash's template (its HYTK suffix, or its reasoning efforts' check)");
+    return osmos_fail(err, "not Hy4-flash's template (its HYTK suffix, or its reasoning efforts' check)");
   memcpy(buf, tag, n), buf[n] = 0;
   if (!hchat_tokens(buf, t, err))
     return false;
@@ -75,11 +69,11 @@ bool hchat_from_template(const char *tmpl, HchatTokens *t, char err[CHAT_ERR])
     if (!b)
       break;
     if ((size_t)(b - a - 1) >= sizeof t->efforts[k])
-      return fail(err, "a reasoning effort's name past the most kept");
+      return osmos_fail(err, "a reasoning effort's name past the most kept");
     memcpy(t->efforts[k], a + 1, (size_t)(b - a - 1)), k++;
     p = b + 1;
   }
-  return k > 0 || fail(err, "the template names no reasoning effort");
+  return k > 0 || osmos_fail(err, "the template names no reasoning effort");
 }
 
 static bool effort_known(const HchatTokens *t, const char *e)
@@ -146,7 +140,7 @@ static bool content(JsonBuf *b, const Json *c, char *err)
   if (c->type == JSON_STRING)
     return json_put(b, c->s, c->len), true;
   if (c->type != JSON_ARRAY)
-    return fail(err, "a message's content not a string, parts or null");
+    return osmos_fail(err, "a message's content not a string, parts or null");
   for (size_t i = 0; i < c->n; i++)
   {
     const Json *it = c->item[i];
@@ -159,10 +153,10 @@ static bool content(JsonBuf *b, const Json *c, char *err)
     if (json_get(it, "image") || json_get(it, "image_url") || json_get(it, "video") || json_get(it, "video_url") ||
         (type && (!strcmp(type, "image") || !strcmp(type, "image_url") || !strcmp(type, "video") ||
                   !strcmp(type, "video_url"))))
-      return fail(err, "an image or a video part (osmos reads text alone)");
+      return osmos_fail(err, "an image or a video part (osmos reads text alone)");
     const Json *text = json_get(it, "text");
     if (!type || strcmp(type, "text") || !text || text->type != JSON_STRING)
-      return fail(err, "a content part not text");
+      return osmos_fail(err, "a content part not text");
     json_put(b, text->s, text->len);
   }
   return true;
@@ -172,7 +166,7 @@ static bool content(JsonBuf *b, const Json *c, char *err)
 static bool tool_json(JsonBuf *b, const Json *t, char *err)
 {
   if (!t || t->type != JSON_OBJECT)
-    return fail(err, "a tool not an object");
+    return osmos_fail(err, "a tool not an object");
   json_puts(b, "{");
   bool first = true;
   for (size_t i = 0; i < t->n; i++)
@@ -241,7 +235,7 @@ static bool tool_response(JsonBuf *b, const Json *m, const HchatTokens *t, char 
       const Json *it = c->item[i];
       const char *type = json_str(it, "type");
       if (type && !strcmp(type, "tool_search_output"))
-        return fail(err, "a tool_search_output part (not read by this build)");
+        return osmos_fail(err, "a tool_search_output part (not read by this build)");
       const Json *out = it->type == JSON_OBJECT ? json_get(it, "output") : NULL;
       if (out ? !content(b, out, err) : !content(b, &(Json){.type = JSON_ARRAY, .item = (Json **)&c->item[i], .n = 1}, err))
         return false;
@@ -294,7 +288,7 @@ static bool assistant(JsonBuf *b, const Json *m, bool think_kept, const HchatTok
   if (truthy(calls))
   {
     if (calls->type != JSON_ARRAY || calls->n > MAX_CLUSTER)
-      return fail(err, "an assistant's tool_calls not an array, or past the calls read");
+      return osmos_fail(err, "an assistant's tool_calls not an array, or past the calls read");
     bool complete = true;
     for (size_t i = 0; i < calls->n; i++)
     {
@@ -313,14 +307,14 @@ static bool assistant(JsonBuf *b, const Json *m, bool think_kept, const HchatTok
     {
       const Json *f = fn_of(calls->item[i]), *name = json_get(f, "name"), *args = json_get(f, "arguments");
       if (!name_ok(name))
-        return fail(err, "a tool call without a name, or its name holding '<'");
+        return osmos_fail(err, "a tool call without a name, or its name holding '<'");
       if (!args || args->type != JSON_OBJECT)
-        return fail(err, "a tool call's arguments not an object");
+        return osmos_fail(err, "a tool call's arguments not an object");
       json_puts(b, t->call), json_put(b, name->s, name->len);
       for (size_t k = 0; k < args->n; k++)
       {
         if (memchr(args->key[k], '<', args->klen[k]))
-          return fail(err, "a tool call's argument key holding '<'");
+          return osmos_fail(err, "a tool call's argument key holding '<'");
         json_puts(b, t->key), json_put(b, args->key[k], args->klen[k]), json_puts(b, t->key_end), json_puts(b, t->value);
         if (args->item[k]->type == JSON_STRING)
           json_put(b, args->item[k]->s, args->item[k]->len);
@@ -337,20 +331,20 @@ static bool assistant(JsonBuf *b, const Json *m, bool think_kept, const HchatTok
 }
 
 bool hchat_render(const Json *messages, const Json *tools, const char *effort, int preserve, const HchatTokens *t,
-                  JsonBuf *out, char err[CHAT_ERR])
+                  JsonBuf *out, char err[OSMOS_ERR])
 {
   if (!messages || messages->type != JSON_ARRAY || !t || !out)
-    return fail(err, "no messages (an array), tokens or output");
+    return osmos_fail(err, "no messages (an array), tokens or output");
   if (tools && tools->type == JSON_NULL)
     tools = NULL;
   if (tools && tools->type != JSON_ARRAY)
-    return fail(err, "tools not an array");
+    return osmos_fail(err, "tools not an array");
   const char *e = effort ? effort : "high";
   if (!effort_known(t, e))
   {
-    char why[CHAT_ERR];
+    char why[OSMOS_ERR];
     snprintf(why, sizeof why, "reasoning_effort error : %.64s, not one the template names", e);
-    return fail(err, why);
+    return osmos_fail(err, "%s", why);
   }
   const bool has_tools = truthy(tools), keep = preserve < 0 ? has_tools : preserve > 0;
   const bool thinks = strcmp(e, "no_think") != 0;
@@ -379,13 +373,13 @@ bool hchat_render(const Json *messages, const Json *tools, const char *effort, i
     const Json *m = messages->item[i];
     const char *role = role_of(m);
     if (!json_str(m, "role"))
-      return fail(err, "a message without a role");
+      return osmos_fail(err, "a message without a role");
     if (!strcmp(role, "tool"))
     {
       size_t n = 0;
       for (; i < messages->n && !strcmp(role_of(messages->item[i]), "tool"); i++)
         if (n == MAX_CLUSTER)
-          return fail(err, "a run of tool messages past the most read");
+          return osmos_fail(err, "a run of tool messages past the most read");
         else
           run[n++] = messages->item[i];
       if (!cluster(out, run, n, ids, n_ids, t, err))
@@ -439,5 +433,5 @@ bool hchat_render(const Json *messages, const Json *tools, const char *effort, i
     if (!thinks)
       json_puts(out, t->think_end);
   }
-  return !out->oom || fail(err, "out of memory");
+  return !out->oom || osmos_fail(err, "out of memory");
 }

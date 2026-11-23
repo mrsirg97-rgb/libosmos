@@ -118,7 +118,7 @@ static void arguments(JsonBuf *b, const Json *args)
 {
   Json *own = NULL;
   const Json *a = args;
-  char err[JSON_ERR];
+  char err[OSMOS_ERR] = "";
   for (int i = 0; i < 2 && a && a->type == JSON_STRING; i++)
   {
     Json *next = json_parse(a->s, a->len, err);

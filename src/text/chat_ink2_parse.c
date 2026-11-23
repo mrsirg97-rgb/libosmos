@@ -3,18 +3,13 @@
 #include <string.h>
 
 #include "osmos/text/chat_ink2.h"
+#include "osmos/err.h"
 
 /* a completion's blocks read back (osmos/text/chat_ink2.h): the markers read in shape, the bytes taken from text */
 
 const char *const ichat_refused[] = {"<|message_user|>", "<|message_system|>", "<|message_tool|>", "<|content_xml|>",
                                      "<|content_tool_error|>", "<|content_image|>", ICHAT_MODEL, ICHAT_THINKING,
                                      ICHAT_TEXT, ICHAT_CALL, NULL};
-
-static bool fail(char *err, const char *why)
-{
-  snprintf(err, CHAT_ERR, "%s", why);
-  return false;
-}
 
 static bool starts(const char *p, size_t n, const char *lit)
 {
@@ -65,11 +60,11 @@ static bool special_in(const char *p, size_t n)
   return false;
 }
 
-bool ichat_parse_shaped(const char *text, const char *shape, size_t len, JsonBuf *out, char err[CHAT_ERR])
+bool ichat_parse_shaped(const char *text, const char *shape, size_t len, JsonBuf *out, char err[OSMOS_ERR])
 {
   const size_t ne = strlen(ICHAT_EOS), nm = strlen(ICHAT_MODEL);
   if (len < ne || memcmp(shape + len - ne, ICHAT_EOS, ne))
-    return fail(err, "no end of turn");
+    return osmos_fail(err, "no end of turn");
   const size_t end = len - ne;
   JsonBuf reasoning = {0}, content = {0}, calls = {0};
   size_t at = 0, n_calls = 0;
@@ -78,14 +73,14 @@ bool ichat_parse_shaped(const char *text, const char *shape, size_t len, JsonBuf
   {
     if (!starts(shape + at, end - at, ICHAT_MODEL))
     {
-      ok = fail(err, "a block without its header");
+      ok = osmos_fail(err, "a block without its header");
       break;
     }
     at += nm;
     const char *k = memmem(shape + at, end - at, "<|content_", 10);
     if (!k)
     {
-      ok = fail(err, "a block without its kind");
+      ok = osmos_fail(err, "a block without its kind");
       break;
     }
     const size_t name0 = at, name_n = (size_t)(k - (shape + at));
@@ -97,34 +92,34 @@ bool ichat_parse_shaped(const char *text, const char *shape, size_t len, JsonBuf
         kind = i;
     if (kind < 0)
     {
-      ok = fail(err, "a block of a kind the model does not write");
+      ok = osmos_fail(err, "a block of a kind the model does not write");
       break;
     }
     at += strlen(kinds[kind]);
     const char *e = memmem(shape + at, end - at, ICHAT_END, strlen(ICHAT_END));
     if (!e)
     {
-      ok = fail(err, "a block without its end");
+      ok = osmos_fail(err, "a block without its end");
       break;
     }
     const size_t body0 = at, body_n = (size_t)(e - (shape + at));
     at = body0 + body_n + strlen(ICHAT_END);
     if (special_in(shape + body0, body_n) || special_in(shape + name0, name_n))
-      ok = fail(err, "a special token in the text");
+      ok = osmos_fail(err, "a special token in the text");
     else if ((kind == 2) != (name_n > 0))
-      ok = fail(err, "a call's header names it; no other block's does");
+      ok = osmos_fail(err, "a call's header names it; no other block's does");
     else if (kind == 0)
       json_put(&reasoning, text + body0, body_n);
     else if (kind == 1)
       json_put(&content, text + body0, body_n);
     else
     {
-      char jerr[JSON_ERR];
+      char jerr[OSMOS_ERR] = "";
       Json *v = json_parse(text + body0, body_n, jerr);
       const Json *nm_v = v ? json_get(v, "name") : NULL, *args = v ? json_get(v, "args") : NULL;
       if (!v || v->type != JSON_OBJECT || v->n != 2 || !nm_v || nm_v->type != JSON_STRING || !args ||
           args->type != JSON_OBJECT || nm_v->len != name_n || memcmp(nm_v->s, text + name0, name_n))
-        ok = fail(err, v ? "a call's JSON not {name, args} of its header's name" : "a call's JSON does not parse");
+        ok = osmos_fail(err, "%s", v ? "a call's JSON not {name, args} of its header's name" : "a call's JSON does not parse");
       else
       {
         json_puts(&calls, n_calls++ ? ", " : "");
@@ -145,13 +140,13 @@ bool ichat_parse_shaped(const char *text, const char *shape, size_t len, JsonBuf
     json_puts(out, ", \"reasoning_content\": ");
     json_dump_string(out, reasoning.p ? reasoning.p : "", reasoning.n);
     json_puts(out, ", \"tool_calls\": ["), json_put(out, calls.p ? calls.p : "", calls.n), json_puts(out, "]}");
-    ok = !(out->oom || reasoning.oom || content.oom || calls.oom) || fail(err, "out of memory");
+    ok = !(out->oom || reasoning.oom || content.oom || calls.oom) || osmos_fail(err, "out of memory");
   }
   free(reasoning.p), free(content.p), free(calls.p);
   return ok;
 }
 
-bool ichat_parse(const char *text, size_t len, JsonBuf *out, char err[CHAT_ERR])
+bool ichat_parse(const char *text, size_t len, JsonBuf *out, char err[OSMOS_ERR])
 {
   return ichat_parse_shaped(text, text, len, out, err);
 }

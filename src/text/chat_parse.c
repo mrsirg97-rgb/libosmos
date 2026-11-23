@@ -171,13 +171,13 @@ static bool calls(const char *t, size_t len, size_t *i, int *last, JsonBuf *out,
 /* (NULL-terminated) encoding.py's check of the reasoning and the content */
 const char *const chat_refused[] = {CHAT_BOS, CHAT_EOS, CHAT_THINK, CHAT_THINK_END, CHAT_DSML, NULL};
 
-bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[CHAT_ERR])
+bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[OSMOS_ERR])
 {
   return chat_parse_shaped(text, text, len, mode, out, err);
 }
 
 bool chat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, JsonBuf *out,
-                       char err[CHAT_ERR])
+                       char err[OSMOS_ERR])
 {
   err[0] = 0;
   const ptrdiff_t off = text - shape; /* the parse reads the shape; what it gives is the text's */

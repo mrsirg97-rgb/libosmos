@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include "osmos/err.h"
 
 static bool blank_text(const char *s, int n)
 {
@@ -13,15 +14,15 @@ static bool blank_text(const char *s, int n)
   return true;
 }
 
-bool answer_rule_create(AnswerRule *r, const Tokenizer *t, int32_t after, char err[ANSWER_ERR])
+bool answer_rule_create(AnswerRule *r, const Tokenizer *t, int32_t after, char err[OSMOS_ERR])
 {
   *r = (AnswerRule){0};
   const int32_t v = t ? tokenizer_vocab(t) : 0;
   if (v <= 0 || after < 0 || after >= v)
-    return snprintf(err, ANSWER_ERR, "no tokenizer, or the reasoning's end %d not one of its %d tokens", after, v),
+    return osmos_fail(err, "no tokenizer, or the reasoning's end %d not one of its %d tokens", after, v),
            false;
   if (!(r->blank = calloc((size_t)v, sizeof *r->blank)))
-    return snprintf(err, ANSWER_ERR, "out of memory"), false;
+    return osmos_fail(err, "out of memory"), false;
   char piece[TOKENIZER_PIECE_MAX];
   for (int32_t id = 0; id < v; id++)
     r->blank[id] = blank_text(piece, tokenizer_piece(t, id, true, piece));

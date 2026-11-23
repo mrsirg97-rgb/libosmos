@@ -5,6 +5,7 @@
 
 #include "chat_args.h"
 #include "chat_qwen_impl.h"
+#include "osmos/err.h"
 
 /* a completion read back as the message the template would render it from (osmos/text/chat_qwen.h): the reasoning
    before </think>, the content before the first <tool_call>, each call's parameters typed by its tool's schema */
@@ -61,7 +62,7 @@ static bool call(Span *rest, const Json *tools, JsonBuf *calls, ptrdiff_t off, c
 {
   Span fn, names[MAX_PARAMS];
   if (!take(rest, QCHAT_CALL_OPEN) || !take(rest, "<function=") || !upto(rest, ">", &fn) || !name_ok(fn))
-    return qchat_fail(err, "a tool call's <tool_call><function=name> malformed");
+    return osmos_fail(err, "a tool call's <tool_call><function=name> malformed");
   fn = real(fn, off);
   JsonBuf args = {0};
   size_t n = 0;
@@ -76,7 +77,7 @@ static bool call(Span *rest, const Json *tools, JsonBuf *calls, ptrdiff_t off, c
     for (size_t i = 0; ok && i < n; i++)
       ok = !(names[i].n == name.n && !memcmp(names[i].p, name.p, name.n));
     if (!ok)
-      return free(args.p), qchat_fail(err, "a tool call's parameter malformed, repeated or past the most read");
+      return free(args.p), osmos_fail(err, "a tool call's parameter malformed, repeated or past the most read");
     if (raw.n && raw.p[0] == '\n')
       raw.p++, raw.n--;
     if (raw.n && raw.p[raw.n - 1] == '\n')
@@ -87,33 +88,33 @@ static bool call(Span *rest, const Json *tools, JsonBuf *calls, ptrdiff_t off, c
   }
   json_puts(&args, "}");
   if (!take(rest, "</function>") || !take(rest, "</tool_call>"))
-    return free(args.p), qchat_fail(err, "a tool call not closed by </function></tool_call>");
+    return free(args.p), osmos_fail(err, "a tool call not closed by </function></tool_call>");
   json_puts(calls, "{\"type\": \"function\", \"function\": {\"name\": "), json_dump_string(calls, fn.p, fn.n);
   json_puts(calls, ", \"arguments\": "), json_dump_string(calls, args.p ? args.p : "", args.n), json_puts(calls, "}}");
   const bool oom = args.oom;
   free(args.p);
-  return !oom || qchat_fail(err, "out of memory");
+  return !oom || osmos_fail(err, "out of memory");
 }
 
-bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR])
+bool qchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[OSMOS_ERR])
 {
   return qchat_parse_shaped(text, text, len, mode, tools, out, err);
 }
 
 bool qchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
-                        JsonBuf *out, char err[CHAT_ERR])
+                        JsonBuf *out, char err[OSMOS_ERR])
 {
   const ptrdiff_t off = text - shape; /* the parse reads the shape; what it gives is the text's */
   text = shape;
   const size_t en = strlen(QCHAT_EOS);
   if (!text || len < en || memcmp(text + len - en, QCHAT_EOS, en))
-    return qchat_fail(err, "no end of turn (" QCHAT_EOS ")");
+    return osmos_fail(err, "%s", "no end of turn (" QCHAT_EOS ")");
   Span body = {text, len - en}, reasoning = {"", 0};
   for (size_t i = 0; qchat_refused[i]; i++)
     if (memmem(body.p, body.n, qchat_refused[i], strlen(qchat_refused[i])))
-      return qchat_fail(err, "a special token in the completion's text");
+      return osmos_fail(err, "a special token in the completion's text");
   if (mode == CHAT_THINKING && !upto(&body, QCHAT_THINK_END, &reasoning))
-    return qchat_fail(err, "no " QCHAT_THINK_END " in a thinking completion");
+    return osmos_fail(err, "%s", "no " QCHAT_THINK_END " in a thinking completion");
   const char *at = memmem(body.p, body.n, QCHAT_CALL_OPEN, strlen(QCHAT_CALL_OPEN));
   Span content = {body.p, at ? (size_t)(at - body.p) : body.n};
   Span rest = {content.p + content.n, body.n - content.n};
@@ -132,5 +133,5 @@ bool qchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMod
   json_puts(out, ", \"tool_calls\": "), json_put(out, calls.p, calls.n), json_puts(out, "}");
   const bool oom = calls.oom || out->oom;
   free(calls.p);
-  return !oom || qchat_fail(err, "out of memory");
+  return !oom || osmos_fail(err, "out of memory");
 }

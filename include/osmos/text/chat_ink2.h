@@ -1,6 +1,7 @@
 #ifndef OSMOS_TEXT_CHAT_INK2_H
 #define OSMOS_TEXT_CHAT_INK2_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -14,9 +15,9 @@
 #define ICHAT_TEXT "<|content_text|>"
 #define ICHAT_CALL "<|content_invoke_tool_json|>"
 
-bool ichat_render(const Json *messages, const Json *tools, const Json *effort, JsonBuf *out, char err[CHAT_ERR]);
-bool ichat_parse(const char *text, size_t len, JsonBuf *out, char err[CHAT_ERR]);
-bool ichat_parse_shaped(const char *text, const char *shape, size_t len, JsonBuf *out, char err[CHAT_ERR]);
+bool ichat_render(const Json *messages, const Json *tools, const Json *effort, JsonBuf *out, char err[OSMOS_ERR]);
+bool ichat_parse(const char *text, size_t len, JsonBuf *out, char err[OSMOS_ERR]);
+bool ichat_parse_shaped(const char *text, const char *shape, size_t len, JsonBuf *out, char err[OSMOS_ERR]);
 void ichat_loose(const char *text, const char *shape, size_t len, JsonBuf *out);
 
 /* a block's header (a stream's boundary): what the model's next block is */

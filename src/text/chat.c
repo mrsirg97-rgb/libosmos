@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "chat_impl.h"
+#include "osmos/err.h"
 
 /* encoding.py's encode_messages for text: the messages read (chat_read.c), tool results put in their calls' order
    (sort_tool_results_by_call_order), earlier reasoning dropped (_drop_thinking_messages), each rendered
@@ -10,11 +11,11 @@
 
 bool chat_fail(char *err, const char *what, const char *why)
 {
-  snprintf(err, CHAT_ERR, "chat: %s: %s", what, why);
+  osmos_fail(err, "chat: %s: %s", what, why);
   return false;
 }
 
-int chat_effort(const Json *effort, char err[CHAT_ERR])
+int chat_effort(const Json *effort, char err[OSMOS_ERR])
 {
   if (!effort || effort->type == JSON_NULL)
     return 75; /* encoding.py's DEFAULT_REASONING_EFFORT, "high" */
@@ -210,7 +211,7 @@ static bool render(JsonBuf *b, const Msg *ms, size_t n, size_t i, ChatMode mode,
   return true;
 }
 
-bool chat_render(const Json *messages, ChatMode mode, int effort, JsonBuf *out, char err[CHAT_ERR])
+bool chat_render(const Json *messages, ChatMode mode, int effort, JsonBuf *out, char err[OSMOS_ERR])
 {
   err[0] = 0;
   if (!messages || messages->type != JSON_ARRAY || !messages->n)

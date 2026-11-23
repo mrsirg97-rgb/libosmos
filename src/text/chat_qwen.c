@@ -4,6 +4,7 @@
 
 #include "chat_qwen_impl.h"
 #include "pretok.h"
+#include "osmos/err.h"
 
 /* the template's render (osmos/text/chat_qwen.h), its branches in its order; its refusals its own words */
 
@@ -24,12 +25,6 @@ static const char kToolsTail[] =
     "Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural "
     "language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question "
     "like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>";
-
-bool qchat_fail(char *err, const char *why)
-{
-  snprintf(err, CHAT_ERR, "%s", why);
-  return false;
-}
 
 static bool py_space(uint32_t c)
 {
@@ -80,24 +75,24 @@ static bool content(const Json *c, bool system, JsonBuf *t, char *err)
   if (c->type == JSON_STRING)
     return json_put(t, c->s, c->len), true;
   if (c->type != JSON_ARRAY)
-    return qchat_fail(err, "Unexpected content type.");
+    return osmos_fail(err, "Unexpected content type.");
   for (size_t i = 0; i < c->n; i++)
   {
     const Json *it = c->item[i];
     if (it->type != JSON_OBJECT)
-      return qchat_fail(err, "Unexpected item type in content.");
+      return osmos_fail(err, "Unexpected item type in content.");
     const char *type = json_str(it, "type");
     if (json_get(it, "image") || json_get(it, "image_url") || is(type, "image"))
-      return qchat_fail(err, system ? "System message cannot contain images."
+      return osmos_fail(err, "%s", system ? "System message cannot contain images."
                                     : "an image: osmos reads text only (no vision placeholder rendered)");
     if (json_get(it, "video") || is(type, "video"))
-      return qchat_fail(err, system ? "System message cannot contain videos."
+      return osmos_fail(err, "%s", system ? "System message cannot contain videos."
                                     : "a video: osmos reads text only (no vision placeholder rendered)");
     const Json *text = json_get(it, "text");
     if (!text)
-      return qchat_fail(err, "Unexpected item type in content.");
+      return osmos_fail(err, "Unexpected item type in content.");
     if (text->type != JSON_STRING)
-      return qchat_fail(err, "a text part's text: a string is needed");
+      return osmos_fail(err, "a text part's text: a string is needed");
     json_put(t, text->s, text->len);
   }
   return true;
@@ -125,7 +120,7 @@ static bool effort_line(ChatMode mode, const char *effort, const char **line, ch
     e = "xhigh";
   if (!is(e, "xhigh") && !is(e, "medium") && !is(e, "low"))
   {
-    snprintf(err, CHAT_ERR, "Unexpected reasoning effort %s. Supported types are xhigh (default), medium, and low.", e);
+    osmos_fail(err, "Unexpected reasoning effort %s. Supported types are xhigh (default), medium, and low.", e);
     return false;
   }
   *line = is(e, "xhigh") ? kXhigh : is(e, "low") ? kLow : "";
@@ -188,9 +183,9 @@ static bool calls(JsonBuf *b, const Json *list, Span text, char *err)
       tc = json_get(tc, "function");
     const Json *name = json_get(tc, "name");
     if (!name || name->type != JSON_STRING)
-      return qchat_fail(err, "Tool call is missing a function name.");
+      return osmos_fail(err, "Tool call is missing a function name.");
     if (!qchat_name_ok(name->s, name->len))
-      return qchat_fail(err, "a tool call's function name holds a newline or '<' (the format's own markup)");
+      return osmos_fail(err, "a tool call's function name holds a newline or '<' (the format's own markup)");
     json_puts(b, k ? "\n<tool_call>\n<function=" : text.n ? "\n\n<tool_call>\n<function=" : "<tool_call>\n<function=");
     json_put(b, name->s, name->len), json_puts(b, ">\n");
     const Json *args = json_get(tc, "arguments");
@@ -198,7 +193,7 @@ static bool calls(JsonBuf *b, const Json *list, Span text, char *err)
       for (size_t i = 0; i < args->n; i++)
       {
         if (!qchat_name_ok(args->key[i], args->klen[i]))
-          return qchat_fail(err, "a tool call's argument name holds a newline or '<' (the format's own markup)");
+          return osmos_fail(err, "a tool call's argument name holds a newline or '<' (the format's own markup)");
         json_puts(b, "<parameter="), json_put(b, args->key[i], args->klen[i]), json_puts(b, ">\n");
         const Json *v = args->item[i];
         if (v->type == JSON_STRING)
@@ -209,13 +204,13 @@ static bool calls(JsonBuf *b, const Json *list, Span text, char *err)
       }
     else if (args && args->type == JSON_STRING && qchat_trim((Span){args->s, args->len}).n)
     {
-      snprintf(err, CHAT_ERR, "Tool call arguments for function \"%s\" were passed as a JSON string. Parse them "
+      osmos_fail(err, "Tool call arguments for function \"%s\" were passed as a JSON string. Parse them "
                               "into an object before calling apply_chat_template.", name->s);
       return false;
     }
     else if (args && args->type != JSON_STRING && args->type != JSON_NULL)
     {
-      snprintf(err, CHAT_ERR, "Tool call arguments for function \"%s\" must be an object/mapping or a JSON string.",
+      osmos_fail(err, "Tool call arguments for function \"%s\" must be an object/mapping or a JSON string.",
                name->s);
       return false;
     }
@@ -232,7 +227,7 @@ static bool message(JsonBuf *b, const Json *ms, size_t i, size_t last, bool pres
   if (!trimmed(m, false, buf, &c, err))
     return false;
   if (system_role(m))
-    return qchat_fail(err, "System message must be at the beginning.");
+    return osmos_fail(err, "System message must be at the beginning.");
   if (is(role, "user"))
     return json_puts(b, IM_START "user\n"), put(b, c), json_puts(b, QCHAT_EOS "\n"), true;
   if (is(role, "assistant"))
@@ -257,7 +252,7 @@ static bool message(JsonBuf *b, const Json *ms, size_t i, size_t last, bool pres
       json_puts(b, QCHAT_EOS "\n");
     return true;
   }
-  return qchat_fail(err, "Unexpected message role.");
+  return osmos_fail(err, "Unexpected message role.");
 }
 
 static bool render(const Json *ms, const Json *branch, const Json *tools, ChatMode mode, const char *effort,
@@ -288,28 +283,28 @@ static bool render(const Json *ms, const Json *branch, const Json *tools, ChatMo
 }
 
 bool qchat_render(const Json *messages, const Json *tools, ChatMode mode, const char *effort, bool preserve,
-                  JsonBuf *out, char err[CHAT_ERR])
+                  JsonBuf *out, char err[OSMOS_ERR])
 {
   return qchat_render_with(messages, messages, tools, mode, effort, preserve, out, err);
 }
 
 bool qchat_render_with(const Json *messages, const Json *branch, const Json *tools, ChatMode mode, const char *effort,
-                       bool preserve, JsonBuf *out, char err[CHAT_ERR])
+                       bool preserve, JsonBuf *out, char err[OSMOS_ERR])
 {
   if (!branch || branch->type != JSON_ARRAY || !messages || messages->type != JSON_ARRAY || branch->n != messages->n)
-    return qchat_fail(err, "a branch's messages not the messages' count");
+    return osmos_fail(err, "a branch's messages not the messages' count");
   if (!messages || messages->type != JSON_ARRAY || !messages->n)
-    return qchat_fail(err, "No messages provided.");
+    return osmos_fail(err, "No messages provided.");
   for (size_t i = 0; i < messages->n; i++)
     if (messages->item[i]->type != JSON_OBJECT)
-      return qchat_fail(err, "messages: each an object");
+      return osmos_fail(err, "messages: each an object");
   if (tools && tools->type != JSON_ARRAY && tools->type != JSON_NULL)
-    return qchat_fail(err, "tools: a list of function tools");
+    return osmos_fail(err, "tools: a list of function tools");
   JsonBuf buf = {0};
   const bool ok = render(messages, branch, tools && tools->type == JSON_ARRAY && tools->n ? tools : NULL, mode, effort,
                          preserve, out, &buf, err);
   free(buf.p);
   if (ok && (out->oom || buf.oom))
-    return qchat_fail(err, "out of memory");
+    return osmos_fail(err, "out of memory");
   return ok;
 }

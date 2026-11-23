@@ -1,12 +1,12 @@
 #ifndef OSMOS_TEXT_ANSWER_H
 #define OSMOS_TEXT_ANSWER_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/text/tokenizer.h"
 
-#define ANSWER_ERR 160
 
 typedef struct AnswerRule
 {
@@ -15,7 +15,7 @@ typedef struct AnswerRule
   int32_t after; /* the reasoning's end (</think>): an answer begins at the first token past it not blank */
 } AnswerRule;
 
-bool answer_rule_create(AnswerRule *r, const Tokenizer *t, int32_t after, char err[ANSWER_ERR]);
+bool answer_rule_create(AnswerRule *r, const Tokenizer *t, int32_t after, char err[OSMOS_ERR]);
 void answer_rule_destroy(AnswerRule *r);
 bool answer_unbegun(const AnswerRule *r, const int32_t *a, uint32_t na, const int32_t *b, uint32_t nb);
 int32_t answer_best(const float *row, uint32_t vocab, const int32_t *except, uint32_t n_except);

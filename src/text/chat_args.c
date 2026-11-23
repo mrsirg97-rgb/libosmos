@@ -72,7 +72,7 @@ static const char *kind_of(const Json *v)
 /* a parameter's value into args: its JSON where that is no string and of a type allowed, else its text */
 void chat_arg_value(JsonBuf *args, const char *raw, size_t n, const Json *schema)
 {
-  char jerr[JSON_ERR];
+  char jerr[OSMOS_ERR] = "";
   Json *v = json_parse(raw, n, jerr);
   const char *kind = v ? kind_of(v) : "string";
   const bool typed = v && strcmp(kind, "string") &&

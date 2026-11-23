@@ -1,18 +1,18 @@
 #ifndef OSMOS_TEXT_TOKENIZER_H
 #define OSMOS_TEXT_TOKENIZER_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "osmos/model/gguf.h"
 
-#define TOKENIZER_ERR 256
 #define TOKENIZER_PIECE_MAX 512 /* the most bytes a token's piece takes (DeepSeek's longest token text: 256) */
 
 typedef struct Tokenizer Tokenizer;
 
-Tokenizer *tokenizer_create(const Gguf *g, char err[TOKENIZER_ERR]);
+Tokenizer *tokenizer_create(const Gguf *g, char err[OSMOS_ERR]);
 void tokenizer_destroy(Tokenizer *t);
 int64_t tokenizer_encode(const Tokenizer *t, const char *text, size_t len, bool parse_special, int32_t *ids,
                          size_t cap);

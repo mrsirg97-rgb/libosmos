@@ -1,6 +1,7 @@
 #ifndef OSMOS_TEXT_CHAT_HY4_H
 #define OSMOS_TEXT_CHAT_HY4_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -18,14 +19,14 @@ typedef struct HchatTokens
   char efforts[HCHAT_EFFORTS][16]; /* the reasoning efforts the template takes ("" past the last) */
 } HchatTokens;
 
-bool hchat_tokens(const char *tag, HchatTokens *t, char err[CHAT_ERR]);
-bool hchat_from_template(const char *tmpl, HchatTokens *t, char err[CHAT_ERR]);
+bool hchat_tokens(const char *tag, HchatTokens *t, char err[OSMOS_ERR]);
+bool hchat_from_template(const char *tmpl, HchatTokens *t, char err[OSMOS_ERR]);
 bool hchat_render(const Json *messages, const Json *tools, const char *effort, int preserve, const HchatTokens *t,
-                  JsonBuf *out, char err[CHAT_ERR]);
+                  JsonBuf *out, char err[OSMOS_ERR]);
 bool hchat_parse(const char *text, size_t len, bool thinking, const Json *tools, const HchatTokens *t, JsonBuf *out,
-                 char err[CHAT_ERR]);
+                 char err[OSMOS_ERR]);
 bool hchat_parse_shaped(const char *text, const char *shape, size_t len, bool thinking, const Json *tools,
-                        const HchatTokens *t, JsonBuf *out, char err[CHAT_ERR]);
+                        const HchatTokens *t, JsonBuf *out, char err[OSMOS_ERR]);
 /* every special token's text of the suffix a completion's text or a request's string can't hold (NULL-terminated:
    the caller's array of HCHAT_REFUSED + 1) */
 #define HCHAT_REFUSED 16

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "osmos/text/json.h"
+#include "osmos/err.h"
 
 /* the reader: RFC 8259 by recursive descent, Python's json.loads' meaning for what it reads (json.h) */
 
@@ -14,12 +15,7 @@ typedef struct Cur
   int depth;
 } Cur;
 
-static Json *fail(Cur *c, const char *why)
-{
-  if (!c->err[0])
-    snprintf(c->err, JSON_ERR, "json: %s at byte %td", why, c->p - c->start);
-  return NULL;
-}
+static Json *fail(Cur *c, const char *why) { return osmos_fail(c->err, "json: %s at byte %td", why, c->p - c->start), NULL; }
 
 static void ws(Cur *c)
 {
@@ -364,7 +360,7 @@ static Json *value(Cur *c)
   return j;
 }
 
-Json *json_parse(const char *text, size_t len, char err[JSON_ERR])
+Json *json_parse(const char *text, size_t len, char err[OSMOS_ERR])
 {
   err[0] = 0;
   Cur c = {text, text, text + len, err, 0};

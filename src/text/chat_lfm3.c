@@ -5,18 +5,13 @@
 
 #include "chat_qwen_impl.h"
 #include "osmos/text/chat_lfm3.h"
+#include "osmos/err.h"
 
 /* LFM3's template's render (osmos/text/chat_lfm3.h), its branches in its order */
 
 #define IM_START "<|im_start|>"
 
 const char *const lchat_refused[] = {IM_START, LCHAT_EOS, LCHAT_BOS, NULL};
-
-static bool fail(char *err, const char *why)
-{
-  snprintf(err, CHAT_ERR, "%s", why);
-  return false;
-}
 
 static bool is(const char *s, const char *lit) { return s && !strcmp(s, lit); }
 static const char *role_of(const Json *m) { return json_str(m, "role"); }
@@ -35,14 +30,14 @@ static bool part(JsonBuf *b, const Json *it, char *err)
   if (it->type == JSON_STRING)
     return json_put(b, it->s, it->len), true;
   if (it->type == JSON_OBJECT && media(it))
-    return fail(err, "an image or a video: osmos reads text only (no vision placeholder rendered)");
+    return osmos_fail(err, "an image or a video: osmos reads text only (no vision placeholder rendered)");
   if (it->type == JSON_OBJECT && is(json_str(it, "type"), "text"))
   {
     const Json *t = json_get(it, "text");
     if (t && t->type == JSON_STRING)
       json_put(b, t->s, t->len);
     else if (t && t->type != JSON_NULL)
-      return fail(err, "a text part's text: a string is needed");
+      return osmos_fail(err, "a text part's text: a string is needed");
     return true;
   }
   return json_dump(b, it), true;
@@ -100,7 +95,7 @@ static bool system_turn(JsonBuf *b, const Json *ms, const Json *tools, size_t *f
     const Json *fn = json_get(t, "function") ? json_get(t, "function") : t;
     if (fn->type != JSON_OBJECT)
     {
-      ok = fail(err, "tools: each a function tool (an object)");
+      ok = osmos_fail(err, "tools: each a function tool (an object)");
       break;
     }
     const Json *d1 = json_get(fn, "defer_loading"), *d2 = json_get(t, "defer_loading");
@@ -129,13 +124,13 @@ static bool calls(JsonBuf *b, const Json *list, char *err)
       tc = json_get(tc, "function");
     const Json *name = json_get(tc, "name");
     if (!name || name->type != JSON_STRING || !qchat_name_ok(name->s, name->len))
-      return fail(err, "a tool call's function name: a string, without a newline or '<' (the format's own markup)");
+      return osmos_fail(err, "a tool call's function name: a string, without a newline or '<' (the format's own markup)");
     const Json *args = json_get(tc, "arguments");
     if (args && args->type == JSON_STRING)
     {
       const Span t = qchat_trim((Span){args->s, args->len});
       if (!(t.n == 0 || (t.n == 2 && !memcmp(t.p, "{}", 2)) || (t.n == 4 && !memcmp(t.p, "null", 4))))
-        return fail(err, "Tool call arguments must be a mapping, got a JSON-encoded string: parse arguments with "
+        return osmos_fail(err, "Tool call arguments must be a mapping, got a JSON-encoded string: parse arguments with "
                          "json.loads() before applying the chat template");
     }
     json_puts(b, k ? "\n\n<tool_call>\n<function=" : "<tool_call>\n<function="), json_put(b, name->s, name->len);
@@ -144,7 +139,7 @@ static bool calls(JsonBuf *b, const Json *list, char *err)
       for (size_t i = 0; i < args->n; i++)
       {
         if (!qchat_name_ok(args->key[i], args->klen[i]))
-          return fail(err, "a tool call's argument name holds a newline or '<' (the format's own markup)");
+          return osmos_fail(err, "a tool call's argument name holds a newline or '<' (the format's own markup)");
         json_puts(b, "<parameter="), json_put(b, args->key[i], args->klen[i]), json_puts(b, ">\n");
         const Json *v = args->item[i];
         if (v->type == JSON_STRING)
@@ -223,7 +218,7 @@ static bool tool_items(JsonBuf *b, const Json *c, size_t *count, char *err)
   {
     const Json *it = c->type == JSON_ARRAY ? c->item[i] : c;
     if (it->type == JSON_OBJECT && (is(json_str(it, "type"), "tool_reference") || json_get(it, "result")))
-      return fail(err, "a tool reference or a tool search's result: not served (the template's tool-search forms)");
+      return osmos_fail(err, "a tool reference or a tool search's result: not served (the template's tool-search forms)");
     json_puts(b, (*count)++ ? "\n" : "");
     if (!part(b, it, err))
       return false;
@@ -257,12 +252,12 @@ static bool render(const Json *ms, const Json *tools, ChatMode mode, bool preser
     const char *role = role_of(m);
     if (!role)
     {
-      ok = fail(err, "a message without a role");
+      ok = osmos_fail(err, "a message without a role");
       break;
     }
     if (json_get(m, "additional_tools"))
     {
-      ok = fail(err, "additional_tools: not served (the template's tool-search forms)");
+      ok = osmos_fail(err, "additional_tools: not served (the template's tool-search forms)");
       break;
     }
     const bool tool = is(role, "tool");
@@ -314,35 +309,35 @@ static bool render(const Json *ms, const Json *tools, ChatMode mode, bool preser
 }
 
 bool lchat_render(const Json *messages, const Json *tools, ChatMode mode, bool preserve, JsonBuf *out,
-                  char err[CHAT_ERR])
+                  char err[OSMOS_ERR])
 {
   if (!messages || messages->type != JSON_ARRAY || !messages->n)
-    return fail(err, "No messages provided.");
+    return osmos_fail(err, "No messages provided.");
   for (size_t i = 0; i < messages->n; i++)
     if (messages->item[i]->type != JSON_OBJECT)
-      return fail(err, "messages: each an object");
+      return osmos_fail(err, "messages: each an object");
   if (tools && tools->type != JSON_ARRAY && tools->type != JSON_NULL)
-    return fail(err, "tools: a list of function tools");
+    return osmos_fail(err, "tools: a list of function tools");
   const bool ok =
       render(messages, tools && tools->type == JSON_ARRAY && tools->n ? tools : NULL, mode, preserve, out, err);
   if (ok && out->oom)
-    return fail(err, "out of memory");
+    return osmos_fail(err, "out of memory");
   return ok;
 }
 
 bool lchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
-                        JsonBuf *out, char err[CHAT_ERR])
+                        JsonBuf *out, char err[OSMOS_ERR])
 {
   if (!text || !shape)
-    return fail(err, "no completion");
+    return osmos_fail(err, "no completion");
   const size_t en = strlen(LCHAT_EOS), body = len >= en ? len - en : len;
   for (int i = 0; lchat_refused[i]; i++)
     if (memmem(shape, body, lchat_refused[i], strlen(lchat_refused[i])))
-      return fail(err, "a special token in the completion's text");
+      return osmos_fail(err, "a special token in the completion's text");
   return qchat_parse_shaped(text, shape, len, mode, tools, out, err);
 }
 
-bool lchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR])
+bool lchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[OSMOS_ERR])
 {
   return lchat_parse_shaped(text, text, len, mode, tools, out, err);
 }

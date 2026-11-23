@@ -1,12 +1,12 @@
 #ifndef OSMOS_TEXT_CHAT_H
 #define OSMOS_TEXT_CHAT_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 
 #include "osmos/text/json.h"
 
-#define CHAT_ERR 256
 
 typedef enum ChatMode
 {
@@ -14,11 +14,11 @@ typedef enum ChatMode
   CHAT_THINKING, /* "thinking": the answer after its reasoning, in <think> .. </think> */
 } ChatMode;
 
-int chat_effort(const Json *effort, char err[CHAT_ERR]);
-bool chat_render(const Json *messages, ChatMode mode, int effort, JsonBuf *out, char err[CHAT_ERR]);
-bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[CHAT_ERR]);
+int chat_effort(const Json *effort, char err[OSMOS_ERR]);
+bool chat_render(const Json *messages, ChatMode mode, int effort, JsonBuf *out, char err[OSMOS_ERR]);
+bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[OSMOS_ERR]);
 bool chat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, JsonBuf *out,
-                       char err[CHAT_ERR]);
+                       char err[OSMOS_ERR]);
 extern const char *const chat_refused[]; /* special tokens' text a completion's reasoning or content can't hold */
 
 #endif
