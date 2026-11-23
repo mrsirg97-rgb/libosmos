@@ -46,9 +46,10 @@ bool experts_plan(const PoolUnit *units, uint32_t layers, uint32_t experts, cons
   for (int pass = 0; pass < EXPERTS_PASSES; pass++)
   {
     room = given;
-    if (budget) /* the build's whole budget: the experts' pool what the rest leaves (fixed, the stream, the slack) */
+    if (budget) /* the build's whole budget: the experts' pool what the rest leaves (fixed, the stream, the slack) - the
+                   budget a ceiling: the two slots' round-up to a whole grain each counted too (0.16.0) */
     {
-      const uint64_t rest = fixed + stream_room + 4 * largest;
+      const uint64_t rest = fixed + stream_room + 4 * largest + 2 * grain;
       room = budget > rest ? budget - rest : 0;
     }
     room = room > all ? all : room < floor ? floor : room;

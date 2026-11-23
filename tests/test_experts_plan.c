@@ -54,7 +54,7 @@ static ExpertsPlan ref_plan(const PoolUnit *u, uint32_t L, uint32_t E, const uin
     room = room0;
     if (budget)
     {
-      const uint64_t rest = fixed + stream_room + 4 * largest;
+      const uint64_t rest = fixed + stream_room + 4 * largest + 2 * GRAIN;
       room = budget > rest ? budget - rest : 0;
     }
     if (room > all)
@@ -134,8 +134,11 @@ int main(void)
         const ExpertsPlan want = ref_plan(u, L, E, order, rooms[r], budgets[b], fixed);
         assert(got.room == want.room && got.stream_room == want.stream_room && got.n_warm == want.n_warm &&
                got.largest == want.largest && got.all == want.all);
-        assert(!budgets[b] || budgets[b] < fixed + got.room || got.room + got.stream_room + fixed <= budgets[b] ||
-               got.room == (uint64_t)E * got.largest);  /* in the budget, or at the floor */
+        /* the budget a ceiling (0.16.0): the build as made - the fixed part, both slot sets with their 2 units' slack
+           and their round-up to a grain - within it, or at the floor */
+        assert(!budgets[b] || budgets[b] < fixed + got.room ||
+               fixed + got.room + got.stream_room + 4 * got.largest + 2 * GRAIN <= budgets[b] ||
+               got.room == (uint64_t)E * got.largest);
         memset(warm, 0, n);
         for (size_t i = 0; i < got.n_warm; i++)
           warm[order[i]] = true;

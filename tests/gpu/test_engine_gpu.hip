@@ -201,6 +201,9 @@ int main() {
   CHECK(osmos_room(e, &room) && room > 0);
   OsmosStats st;
   osmos_stats(e, &st);
+  if (!(st.budget > 0 && st.budget <= kBudget))  // (the whole build's budget a ceiling: built never past it)
+    std::fprintf(stderr, "  built %llu bytes against a budget of %llu (%+lld)\n", (unsigned long long) st.budget,
+                 (unsigned long long) kBudget, (long long) st.budget - (long long) kBudget);
   CHECK(st.budget > 0 && st.budget <= kBudget);
   OsmosSeq* s = oseq_create(e, err);
   CHECK(s && oseq_position(s) == 0 && oseq_reach(s) == 0);

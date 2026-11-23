@@ -59,7 +59,8 @@ static bool pack(const char* name, const std::string& model, const std::string& 
   const OsmosFiles files = {model.c_str(), nullptr, nullptr};
   OsmosModel* m = osmos_open(&files, g_err);
   CHECK(m);
-  const OsmosOptions o = {kCtx, kStep, kBudget, picks.empty() || access(picks.c_str(), R_OK) ? nullptr : picks.c_str(), true,
+  // (no_guess false: Inkling reads none - refused since 0.16.0, its silent taking before)
+  const OsmosOptions o = {kCtx, kStep, kBudget, picks.empty() || access(picks.c_str(), R_OK) ? nullptr : picks.c_str(), false,
                           mtp.c_str(), false, 0, false, nullptr, 0.0f};
   Osmos* e = test_osmos(m, o, g_err);  // (the test's budget, or this machine's fill where it is smaller)
   if (!e) std::fprintf(stderr, "  %s\n", g_err);

@@ -1,5 +1,5 @@
 // a family's failure through the engine names the family once, its cause after it (osmos/err.h: the dispatch's
-// osmos_context): an option the family refuses, a step past its logits' rows, a pick of a row not kept - each err
+// osmos_context): an option the family refuses, a step past its logits' rows - each err
 // "<arch>: <cause>", the arch once; the engine's own refusals (a token outside the vocabulary) no family's. each small
 // pack here; 77 if none.
 #include <hip/hip_runtime.h>
@@ -113,7 +113,9 @@ static bool one(const SmallPack& p) {
   int32_t id = 0;
   err[0] = 0;
   CHECK(!osmos_greedy(e, 0, 1, &id, err));  // (a prompt's end told: row 0's logits not kept)
-  named_once(arch, "a pick of a row not kept", err);
+  // the engine's own refusal since 0.16.0 (its kept view, osmos/gpu/kept.h, every family's): no family named
+  std::printf("    a pick of a row not kept (the engine's): %s\n", err);
+  CHECK(std::strstr(err, "kept no logits") && !std::strstr(err, arch));
   const int32_t out[1] = {-1};
   err[0] = 0;
   CHECK(!osmos_batch(e, ss.data(), out, 1, err) && !std::strstr(err, arch));  // the engine's own: no family's
