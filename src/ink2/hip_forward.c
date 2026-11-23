@@ -1307,7 +1307,7 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
     return osmos_fail(err, "a step's runs 1 .. INK2_MAX_RUNS");
   if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
     return false;
-  uint64_t total = 0;
+  uint64_t total = 0, kept = 0;
   for (uint32_t i = 0; i < runs; i++)
   {
     if (!seqs[i] || seqs[i]->f != f || seqs[i]->failed || !lens[i])
@@ -1318,9 +1318,16 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
     if ((uint64_t)seqs[i]->pos + lens[i] > f->max_ctx)
       return osmos_fail(err, "a sequence past max_ctx");
     total += lens[i];
+    /* the rows its logits are kept of: from its prompt's end - 1 on (run()'s) - counted before any work, so a step
+       past the logits' rows is refused with its sequences as they were (it was found after the layers ran: failed) */
+    const uint32_t pos = (uint32_t)seqs[i]->pos, end = seqs[i]->prompt_end; /* (a position: never negative) */
+    const uint32_t first = end && end - 1 > pos ? (end - 1 - pos < lens[i] ? end - 1 - pos : lens[i]) : 0;
+    kept += lens[i] - first;
   }
   if (total > f->max_tokens)
     return osmos_fail(err, "a step's tokens past max_tokens");
+  if (kept > f->logit_rows)
+    return osmos_fail(err, "a step's kept rows past the logits' (Ink2Options' logit_rows)");
   f->n = 0;
   memset(f->kept, 0, f->max_tokens);
   f->n_slots = 0;

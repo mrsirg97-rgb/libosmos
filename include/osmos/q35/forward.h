@@ -77,6 +77,7 @@ void q35_forward_destroy(Q35Forward *f);
 bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS_ERR]);
 Q35Seq *q35_seq_create(Q35Forward *f, char err[OSMOS_ERR]);
 void q35_seq_destroy(Q35Seq *s);
+bool q35_seq_reset(Q35Seq *s, char err[OSMOS_ERR]); /* oseq_reset's contract (osmos/run/engine.h) */
 int32_t q35_seq_position(const Q35Seq *s);
 
 /* n tokens (n <= max_tokens) after the sequence's own: its state advanced, the logits of the last `rows` of them on

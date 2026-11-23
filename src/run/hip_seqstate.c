@@ -185,6 +185,14 @@ static void reset(Seq *s)
   memset(s->last, 0, sizeof s->last);
 }
 
+bool seq_reset(Seq *s, char err[OSMOS_ERR]) /* (host counters alone: its caches' rows past pos never read) */
+{
+  if (!s)
+    return osmos_fail(err, "no sequence");
+  reset(s);
+  return true;
+}
+
 static bool refuse(Seq *s, char *err, const char *why)
 {
   reset(s);

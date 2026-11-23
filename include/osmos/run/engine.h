@@ -101,6 +101,7 @@ bool osmos_sample_except(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_
 
 OsmosSeq *oseq_create(Osmos *e, char err[OSMOS_ERR]);
 void oseq_destroy(OsmosSeq *s);
+bool oseq_reset(OsmosSeq *s, char err[OSMOS_ERR]);
 bool oseq_prompt(OsmosSeq *s, uint32_t end);
 bool oseq_rollback(OsmosSeq *s, uint32_t n);
 uint32_t oseq_reach(const OsmosSeq *s);
@@ -184,6 +185,13 @@ osmos_sample, osmos_sample_except, osmos_sampled
   except (theirs -inf in a copy of the row). osmos_sampled: s names a temperature above 0 (NULL, or 0: greedy -
   osmos_greedy's / osmos_greedy_except's pick exactly). false with why: a row not kept, a NaN or +inf in it, a GPU
   call failed, s's numbers out of range (temperature not finite, top_p not in (0, 1]).
+
+oseq_reset
+  the sequence a new one: position 0, every state a new sequence's (its next step the bits of a new one's), its memory
+  kept - a conversation's restart allocates nothing. false with why: the sequence then broken until a reset holds or a
+  load. a sequence's broken state, every family's: a step refused by its checks (before any work) leaves its sequences
+  as they were; a step that fails partway leaves them broken - their steps, drafts and saves refused - until
+  oseq_reset or oseq_load holds.
 
 oseq_create .. oseq_load
   a sequence: its position (tokens it holds), oseq_prompt (its prompt ends at end: the family may skip work no later

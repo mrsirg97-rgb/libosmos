@@ -48,6 +48,7 @@ void forward_probe(Forward *f, forward_probe_fn fn, void *arg);
 
 Seq *seq_create(Forward *f, char err[OSMOS_ERR]);
 void seq_destroy(Seq *s);
+bool seq_reset(Seq *s, char err[OSMOS_ERR]); /* oseq_reset's contract (osmos/run/engine.h) */
 bool seq_prompt(Seq *s, uint32_t end);
 bool seq_rollback(Seq *s, uint32_t n);
 uint32_t seq_reach(const Seq *s);

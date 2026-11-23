@@ -9,6 +9,7 @@
 #include "osmos/gpu/state_parts.h"
 #include "osmos/model/fnv.h"
 #include "osmos/err.h"
+#include "osmos/err_hip.h"
 
 #define STATE_MAGIC 0x32474e494b4e49ull /* "INKLNG2" */
 #define MARK_MAGIC 0x4b52414d324b4e49ull
@@ -252,6 +253,29 @@ static uint64_t bytes_at(const Ink2Seq *s, int32_t pos, bool mark)
 }
 
 /* after a load or mark at pos: every tail holds what it was given */
+bool ink2_seq_reset(Ink2Seq *s, char err[OSMOS_ERR])
+{
+  if (!s)
+    return osmos_fail(err, "no sequence");
+  const Ink2Geometry *g = &s->f->w->geo;
+  bool ok = true; /* the conv tails' zeros (a new one's: tail_make's), every tail's rows its start's */
+  for (int l = 0; l < g->n_slots; l++)
+    for (int c = 0; ok && c < INK2_CONVS; c++)
+    {
+      Ink2Tail *t = &s->conv[l][c];
+      ok = osmos_hip(hipMemset(t->d, 0, (uint64_t)t->cap * t->row * t->esize), err, "the sequence's reset");
+    }
+  for (int l = 0; l < g->n_slots; l++)
+  {
+    for (int c = 0; c < INK2_CONVS; c++)
+      s->conv[l][c].held = conv_need(s->f);
+    s->kw[l].held = s->vw[l].held = 0;
+  }
+  s->pos = 0, s->reach = 0, s->prompt_end = 0, s->failed = !ok;
+  s->mfrom = s->mend = 0, s->tap_step = 0;
+  return ok;
+}
+
 static void settle(Ink2Seq *s, int32_t pos, bool mark)
 {
   const Ink2Geometry *g = &s->f->w->geo;

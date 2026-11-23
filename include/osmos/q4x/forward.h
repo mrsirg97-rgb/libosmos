@@ -58,6 +58,7 @@ void q4x_forward_npu_stats(const Q4xForward *f, uint64_t *calls, uint64_t *parts
                            uint64_t *taken);
 
 Q4xSeq *q4x_seq_create(Q4xForward *f, char err[OSMOS_ERR]);
+bool q4x_seq_reset_to(Q4xSeq *s, char err[OSMOS_ERR]); /* oseq_reset's (osmos/run/engine.h) */
 void q4x_seq_destroy(Q4xSeq *s);
 int32_t q4x_seq_position(const Q4xSeq *s);
 uint32_t q4x_seq_reach(const Q4xSeq *s);

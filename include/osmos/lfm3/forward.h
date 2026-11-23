@@ -125,6 +125,7 @@ void lfm3_forward_destroy(Lfm3Forward *f);
 
 Lfm3Seq *lfm3_seq_create(Lfm3Forward *f, char err[OSMOS_ERR]);
 void lfm3_seq_destroy(Lfm3Seq *s);
+bool lfm3_seq_reset(Lfm3Seq *s, char err[OSMOS_ERR]); /* oseq_reset's contract (osmos/run/engine.h) */
 int32_t lfm3_seq_position(const Lfm3Seq *s);
 
 /* runs sequences' tokens in one step (seqs[i] the next lens[i] tokens, consecutive; each once): every matrix read

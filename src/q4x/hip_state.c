@@ -125,6 +125,11 @@ bool q4x_seq_save_to(const Q4xSeq *s, StateSink sink, void *ctx, char err[OSMOS_
   return !why || osmos_fail(err, "%s", why);
 }
 
+bool q4x_seq_reset_to(Q4xSeq *s, char err[OSMOS_ERR])
+{
+  return !s ? osmos_fail(err, "no sequence") : q4x_seq_reset(s) || osmos_fail(err, "the sequence's reset: a GPU call failed");
+}
+
 static bool refuse(Q4xSeq *s, char *err, const char *why)
 {
   q4x_seq_reset(s);

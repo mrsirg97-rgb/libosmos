@@ -27,6 +27,7 @@ typedef struct OsmosFamily
   uint32_t (*block)(const void *eng);
   void *(*seq_create)(void *eng, char err[OSMOS_ERR]);
   void (*seq_destroy)(void *seq);
+  bool (*seq_reset)(void *seq, char err[OSMOS_ERR]);
   bool (*prompt)(void *seq, uint32_t end);
   bool (*rollback)(void *seq, uint32_t n);
   uint32_t (*reach)(const void *seq);

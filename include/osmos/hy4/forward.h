@@ -46,6 +46,7 @@ bool hy4_forward_whole(const Hy4Forward *f);
 
 Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[OSMOS_ERR]);
 void hy4_seq_destroy(Hy4Seq *s);
+bool hy4_seq_reset(Hy4Seq *s, char err[OSMOS_ERR]); /* oseq_reset's contract (osmos/run/engine.h) */
 int32_t hy4_seq_position(const Hy4Seq *s);
 
 /* runs sequences' tokens in one step (seqs[i] the next lens[i] tokens, consecutive; each once): every matrix read once

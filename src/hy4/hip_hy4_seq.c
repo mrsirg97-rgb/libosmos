@@ -132,9 +132,18 @@ bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[OSMOS_
   return !why || osmos_fail(err, "%s", why);
 }
 
+bool hy4_seq_reset(Hy4Seq *s, char err[OSMOS_ERR])
+{
+  if (!s)
+    return osmos_fail(err, "no sequence");
+  s->pos = 0, s->back = 0, s->prompt_end = 0, s->broken = false; /* empty: its rows never read again */
+  s->dkeep = 0;                                                   /* (DFly2's snapshot: none until a step runs) */
+  return true;
+}
+
 static bool refuse(Hy4Seq *s, char *err, const char *why)
 {
-  s->pos = 0, s->back = 0, s->prompt_end = 0, s->broken = false; /* empty: its rows never read again */
+  hy4_seq_reset(s, NULL);
   return osmos_fail(err, "%s", why);
 }
 

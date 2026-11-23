@@ -194,6 +194,11 @@ bool q35_seq_save_to(const Q35Seq *s, StateSink sink, void *ctx, char err[OSMOS_
   return !why || osmos_fail(err, "%s", why);
 }
 
+bool q35_seq_reset(Q35Seq *s, char err[OSMOS_ERR])
+{
+  return !s ? osmos_fail(err, "no sequence") : reset(s) || osmos_fail(err, "the sequence's reset: a GPU call failed");
+}
+
 static bool refuse(Q35Seq *s, char *err, const char *why)
 {
   reset(s);

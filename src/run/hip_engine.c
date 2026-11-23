@@ -279,6 +279,12 @@ OsmosSeq *oseq_create(Osmos *e, char err[OSMOS_ERR])
   return s;
 }
 
+bool oseq_reset(OsmosSeq *s, char err[OSMOS_ERR])
+{
+  osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
+  return s ? named(s->e->fam, err, s->e->fam->seq_reset(s->impl, err)) : osmos_fail(err, "no sequence");
+}
+
 void oseq_destroy(OsmosSeq *s)
 {
   if (!s)

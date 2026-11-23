@@ -139,9 +139,10 @@ void conv_destroy(Conv *c)
 
 bool conv_restart(Conv *c, const Server *sv)
 {
-  oseq_destroy(c->s);
+  (void)sv;
   c->held.n = 0, c->prompt.n = 0, c->user.n = 0; /* (the points' memory kept for the next) */
-  return (c->s = oseq_create(sv->e, c->err)) != NULL;
+  return oseq_reset(c->s, c->err); /* a new sequence in its own memory: a restart allocates nothing (0.15.3; destroyed
+                                      and made again, it could be refused the memory it had just given back) */
 }
 
 /* the sequence's mark kept as pt at its held tokens (serve.h's Point). none (no memory for it, or the mark refused):

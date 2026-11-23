@@ -172,16 +172,24 @@ bool lfm3_seq_save_to(const Lfm3Seq *s, StateSink sink, void *ctx, char err[OSMO
   return !why || osmos_fail(err, "%s", why);
 }
 
-static bool refuse(Lfm3Seq *s, char *err, const char *why)
+bool lfm3_seq_reset(Lfm3Seq *s, char err[OSMOS_ERR])
 {
+  if (!s)
+    return osmos_fail(err, "no sequence");
   s->pos = 0, s->back = 0, s->prompt_end = 0, s->cur = 0, s->closed = 0, s->broken = false; /* empty */
   s->stage = 0, s->turned = 0, s->step_n = 0, s->df_lo = s->df_pos = 0; /* no step to seed from, no context */
   const Lfm3Geometry *g = &s->f->w->geo;
   bool ok = true; /* a new sequence's: zeros (the conv's from 0) - a reset that fails leaves it broken, not "empty" */
   for (int l = 0; ok && l < g->n_layers; l++)
     if (g->kind[l] == LFM3_CONV)
-      ok = osmos_hip(hipMemset(s->conv[l], 0, LFM3_CONV_SLOTS * conv_bytes(g)), NULL, LFM3_SEQ_RESET);
+      ok = osmos_hip(hipMemset(s->conv[l], 0, LFM3_CONV_SLOTS * conv_bytes(g)), err, LFM3_SEQ_RESET);
   s->broken = !ok;
+  return ok;
+}
+
+static bool refuse(Lfm3Seq *s, char *err, const char *why)
+{
+  lfm3_seq_reset(s, NULL);
   return osmos_fail(err, "%s", why);
 }
 

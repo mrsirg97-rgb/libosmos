@@ -44,6 +44,7 @@ uint64_t ink2_identity(const Ink2Forward *f);
 
 Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[OSMOS_ERR]);
 void ink2_seq_destroy(Ink2Seq *s);
+bool ink2_seq_reset(Ink2Seq *s, char err[OSMOS_ERR]); /* oseq_reset's contract (osmos/run/engine.h) */
 int32_t ink2_seq_position(const Ink2Seq *s);
 uint32_t ink2_seq_reach(const Ink2Seq *s);
 bool ink2_seq_rollback(Ink2Seq *s, uint32_t n);

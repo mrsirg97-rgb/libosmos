@@ -147,6 +147,7 @@ static uint32_t e_block(const void *p) { return ((const Eng *)p)->drafts; }
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return hy4_seq_create(((Eng *)p)->f, err); }
 static void s_destroy(void *s) { hy4_seq_destroy(s); }
+static bool s_reset(void *s, char err[OSMOS_ERR]) { return hy4_seq_reset(s, err); }
 static bool s_prompt(void *s, uint32_t end) { return hy4_seq_prompt(s, end); }
 static bool s_rollback(void *s, uint32_t n) { return hy4_seq_rollback(s, n); }
 static uint32_t s_reach(const void *s) { return hy4_seq_reach(s); }
@@ -186,7 +187,7 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 
 const OsmosFamily osmos_hy4 = {
     "hy_v4_flash", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
-    e_batch,       e_logits,   e_greedy,      e_block,   s_create,    s_destroy,  s_prompt, s_rollback,
+    e_batch,       e_logits,   e_greedy,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
     s_reach,       s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     e_read, /* a prompt's read the matrix cores' math, a decode's the matvecs': two maths (hy4_step_read) */
     NULL, NULL, NULL, /* no marks: the whole state */

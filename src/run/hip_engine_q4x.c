@@ -163,6 +163,7 @@ static uint32_t e_block(const void *p)
 
 static void *s_create(void *p, char err[OSMOS_ERR]) { return q4x_seq_create(((Eng *)p)->f, err); }
 static void s_destroy(void *s) { q4x_seq_destroy(s); }
+static bool s_reset(void *s, char err[OSMOS_ERR]) { return q4x_seq_reset_to(s, err); }
 static bool s_prompt(void *s, uint32_t end) { return q4x_seq_prompt(s, end); }
 static bool s_rollback(void *s, uint32_t n) { return q4x_seq_rollback(s, n); }
 static uint32_t s_reach(const void *s) { return q4x_seq_reach(s); }
@@ -230,7 +231,7 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 
 const OsmosFamily osmos_q4x = {
     "qwen4exp", m_open,     m_close,       e_create, e_destroy, e_identity, e_stats,
-    e_batch,    e_logits,   e_greedy,      e_block,  s_create,  s_destroy,  s_prompt,   s_rollback,
+    e_batch,    e_logits,   e_greedy,      e_block,  s_create,  s_destroy, s_reset,  s_prompt,   s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft,    s_draft_all,
     NULL, /* a prompt's read its batch: its small and large steps one math (0.7.1's replay: the same bits on every path) */
     s_mark_bytes, s_mark_save, s_mark_load, /* a mark the states a later token changes (q4x_seq_mark_save) */
