@@ -41,6 +41,8 @@ int main() {
     std::printf("[test_hy4_indexer_gpu] skipped: no GPU or no %s (oracle/hy4_indexer.py)\n", path);
     return 77;
   }
+  void* spread = nullptr;  // (the spread selection's scratch: the caller's, as a forward makes its own)
+  CHECK(hipMalloc(&spread, hy4_ix_spread_bytes()) == hipSuccess);
   const std::vector<float>& shape = A("shape");
   const uint32_t H = (uint32_t) shape[0], nope = (uint32_t) shape[1], vd = (uint32_t) shape[2];
   const uint32_t lat = (uint32_t) shape[3], rd = (uint32_t) shape[4], IH = (uint32_t) shape[5];
@@ -69,7 +71,7 @@ int main() {
   CHECK(hy4_ix_query(ixq, ixw, IH, ID, rd, freqs, dpos, T, 0));
   for (uint32_t a = 0; a < T; a += 6)  // (a decode's or a verify's steps: the F32 scores - the reference's picks exactly)
     CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a,
-                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, false, 0));
+                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, false, spread, 0));
   CHECK(hipDeviceSynchronize() == hipSuccess);
   std::vector<int32_t> s((size_t) T * top), n(T);
   CHECK(hipMemcpy(s.data(), sel, s.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -103,7 +105,7 @@ int main() {
   {
     std::vector<int32_t> nz2(T, 0);
     int32_t *sel2 = dev(zeros), *n2 = dev(nz2);
-    CHECK(hy4_ix_select(ixq, ixw, groups, IH, ID, pool, top, dpos, T, G, scores, sel2, n2, true, 0));
+    CHECK(hy4_ix_select(ixq, ixw, groups, IH, ID, pool, top, dpos, T, G, scores, sel2, n2, true, spread, 0));
     std::vector<int32_t> s2((size_t) T * top), n2h(T);
     CHECK(hipMemcpy(s2.data(), sel2, s2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(hipMemcpy(n2h.data(), n2, n2h.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -125,7 +127,7 @@ int main() {
       const std::vector<float> all = down(scores, (size_t) T * G);
       const uint32_t a = T - 4;
       CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a, 4, G,
-                          scores, sel2, n2, true, 0));
+                          scores, sel2, n2, true, spread, 0));
       const std::vector<float> tail = down(scores, (size_t) 4 * G);
       for (uint32_t t = 0; t < 4; t++) {
         const uint32_t own = (a + t) / pool;  // its complete groups (position t): the scores it reads
@@ -141,7 +143,7 @@ int main() {
   CHECK(hy4_ix_pool(keys, pv, pg, ape, pn, ID, pool, rd, kEps, freqs, 0, G, groups, 0));
   for (uint32_t a = 0; a < T; a += 6)
     CHECK(hy4_ix_select(ixq + (size_t) a * IH * ID, ixw + (size_t) a * IH, groups, IH, ID, pool, top, dpos + a,
-                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, false, 0));
+                        T - a < 6 ? T - a : 6, G, scores, sel + (size_t) a * top, n_sel + a, false, spread, 0));
   const std::vector<float> g2 = down(groups, (size_t) G * ID);
   std::vector<int32_t> s2((size_t) T * top);
   CHECK(hipMemcpy(s2.data(), sel, s2.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);

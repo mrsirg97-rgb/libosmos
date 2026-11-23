@@ -25,6 +25,7 @@
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
 #include "osmos/err.h"
+#include "osmos/err_hip.h"
 
 #define READ_PIECE (64ull << 20)
 
@@ -264,7 +265,7 @@ void hy4_forward_destroy(Hy4Forward *f)
   hipFree((void *)f->exp_tab), free((void *)f->h_tab), free(f->h_ex);
   hipFree(f->head8);
   hipFree(f->kb_tab), hipFree(f->vb_tab), hipFree(f->kb_xo), hipFree(f->kb_yo), hipFree(f->vb_xo), hipFree(f->vb_yo);
-  hipFree(f->hcnt);
+  hipFree(f->hcnt), hipFree(f->ix_spread);
   gpu_free_table(f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
   for (uint32_t i = 0; i < f->n_joints; i++)
     hipFree(f->joints[i]);
@@ -406,6 +407,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   ok = ok && (((f->in_joint = calloc(w->model->n_tensors, sizeof *f->in_joint)) && joints_make(f, &joint_most) &&
                hy4_alloc(&f->jo_attn, (uint64_t)joint_most * F) && hy4_alloc(&f->jo_ffn, (uint64_t)joint_most * F)) ||
               osmos_fail(err, "the joint matrices not made (GPU memory)"));
+  ok = ok && osmos_hip(hipMalloc(&f->ix_spread, hy4_ix_spread_bytes()), err, HY4_IX_SPREAD); /* (whole: SCOPE.md) */
   for (size_t i = 0; ok && i < sizeof read_want / sizeof *read_want; i++)
     ok = hy4_alloc(read_want[i].p, read_want[i].bytes) || osmos_fail(err, "GPU memory refused (the read's buffers)");
   ok = ok && (f->ovf = (OverflowFlag){f->overflow, 8, false}, overflow_reset(&f->ovf, err)) && (f->fault = f->overflow + 1) &&

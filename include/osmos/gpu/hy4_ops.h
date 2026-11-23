@@ -59,7 +59,8 @@ bool hy4_ix_query(float *q, float *w, uint32_t heads, uint32_t dim, uint32_t rop
                   const int32_t *pos, uint32_t n_tok, void *stream);
 bool hy4_ix_select(const float *q, const float *w, const float *groups, uint32_t heads, uint32_t dim, uint32_t pool,
                    uint32_t top, const int32_t *pos, uint32_t n_tok, uint32_t max_groups, float *scores, int32_t *sel,
-                   int32_t *n_sel, bool read, void *stream);
+                   int32_t *n_sel, bool read, void *spread_scratch, void *stream);
+size_t hy4_ix_spread_bytes(void);
 
 /* DFly2's draft block (0.11.0) */
 #define HY4_DFLY_MAX_ROWS 8 /* a draft block's rows at most (the anchor and its masks) */
@@ -171,7 +172,9 @@ hy4_ix_select
   (the reference's top-k picks masked groups then, the causal mask dropping them: the same keys). else the top - 1
   with the greatest score_g = sum over the heads of w_h relu(q_h . groups[g]) (each a fixed order), ties to the
   lower group - an exact selection (the score's k-th greatest by its bits), any C - then its own: sel[t * top ..]
-  ascending, n_sel[t] how many. scores: scratch for n_tok x max_groups (C at most max_groups).
+  ascending, n_sel[t] how many. scores: scratch for n_tok x max_groups (C at most max_groups). spread_scratch: the
+  caller's, hy4_ix_spread_bytes() of it (the selection spread over a token's groups: its state and blocks' counts) -
+  the forward's own, made when it is built (not the op's: 0.15.3's statics, made at first use, never freed, shared).
   read (a prompt's step) past 16 tokens: the scores on the matrix cores (f16 inputs, F32 sums: a near-tie at the
   511th group may swap; env HY4_IX_F32 set: the F32 loop's)
 

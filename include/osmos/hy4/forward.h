@@ -15,6 +15,7 @@
 #include "osmos/model/state_io.h"
 
 #define HY4_MAX_BACK 8                 /* the tokens a sequence can drop (a drafted round's) */
+#define HY4_IX_SPREAD "the indexer's spread scratch" /* its allocation's name (osmos_hip: the fault seam's too) */
 #define HY4_MAX_RUNS 64                /* a step's sequences at most */
 #define HY4_EXPERT_READERS 12          /* the experts' membrane's readers: DeepSeek's and Inkling's (FWD_FETCH_THREADS) */
 

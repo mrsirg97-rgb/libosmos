@@ -1301,9 +1301,14 @@ extern "C" bool hy4_ix_query(float* q, float* w, uint32_t heads, uint32_t dim, u
   return ok();
 }
 
+// the spread selection's scratch: kIxSpreadTokens tokens' state, then their blocks' counts (whole IxWide's first)
+static constexpr size_t kSpreadState = (kIxSpreadTokens * sizeof(IxWide) + 255) / 256 * 256;
+extern "C" size_t hy4_ix_spread_bytes(void) { return kSpreadState + (size_t) kIxSpreadTokens * kWideBlocks * 2 * 4; }
+
 extern "C" bool hy4_ix_select(const float* q, const float* w, const float* groups, uint32_t heads, uint32_t dim,
                               uint32_t pool, uint32_t top, const int32_t* pos, uint32_t n_tok, uint32_t max_groups,
-                              float* scores, int32_t* sel, int32_t* n_sel, bool read, void* stream) {
+                              float* scores, int32_t* sel, int32_t* n_sel, bool read, void* spread_scratch,
+                              void* stream) {
   if (!q || !w || !groups || !pos || !scores || !sel || !n_sel || !heads || heads > 16 || !dim || dim > kIxDim ||
       !pool || top < 2 || !n_tok || !max_groups)
     return false;
@@ -1328,11 +1333,9 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
                                                                                          scores);
   ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(pos, pool, top, max_groups, scores, sel, n_sel, spread);
   if (!spread) return ok();
-  static IxWide* wst = nullptr;  // (the spread selection's scratch: kIxSpreadTokens tokens' - made once)
-  static uint32_t* wcnt = nullptr;
-  if (!wst && (hipMalloc(&wst, kIxSpreadTokens * sizeof(IxWide)) != hipSuccess ||
-               hipMalloc(&wcnt, (size_t) kIxSpreadTokens * kWideBlocks * 2 * 4) != hipSuccess))
-    return false;
+  if (!spread_scratch) return false;  // (the caller's: hy4_ix_spread_bytes, made with its forward)
+  IxWide* wst = (IxWide*) spread_scratch;
+  uint32_t* wcnt = (uint32_t*) ((char*) spread_scratch + kSpreadState);
   const hipStream_t s = st(stream);
   const dim3 grid(kWideBlocks, n_tok);
   ix_wide_init_kernel<<<n_tok, 64, 0, s>>>(pos, pool, top, wst);

@@ -98,6 +98,7 @@ struct Hy4Forward
 
   float *qr, *qres, *q, *kva, *gt, *qa, *olat, *ao, *out;
   float *ixk, *ixkn, *ixq, *ixw, *scores; /* the indexer (ixkn: the step's keys normed, before their rows) */
+  void *ix_spread;                        /* its spread selection's scratch (hy4_ix_spread_bytes): the forward's own */
   int32_t *sel, *n_sel;
   float *emb, *ekv;                    /* Engram's projection's input and output */
   float *ga, *up, *act;                /* the MLPs */

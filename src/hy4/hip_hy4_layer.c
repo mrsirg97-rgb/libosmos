@@ -138,7 +138,7 @@ static bool select_runs(Hy4Forward *f, const float *ixw, const float *groups, ui
   {
     const uint32_t m = len - a < HY4_SCORE_ROWS ? len - a : HY4_SCORE_ROWS, o = off + a;
     ok = hy4_ix_select(f->ixq + (uint64_t)o * IH * ID, ixw + (uint64_t)o * IH, groups, IH, ID, pool, top, f->pos + o, m, mg,
-                       f->scores, f->sel + (uint64_t)o * top, f->n_sel + o, read, f->st);
+                       f->scores, f->sel + (uint64_t)o * top, f->n_sel + o, read, f->ix_spread, f->st);
   }
   return ok;
 }
