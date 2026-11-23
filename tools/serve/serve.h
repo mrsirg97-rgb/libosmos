@@ -9,6 +9,7 @@
 #include "osmos/run/engine.h"
 #include "osmos/serve/slots.h"
 #include "osmos/text/answer.h"
+#include "osmos/serve/gen.h" /* (a GEN line: Gen, gen_parse) */
 
 #define SERVE_MAX_EOS 16
 
@@ -57,21 +58,10 @@ typedef struct Conv
   char err[OSMOS_ERR];
 } Conv;
 
-typedef struct Gen
-{
-  long long max_new, rid;
-  bool has_rid;
-  int spec;     /* spec=0 / 1, or -1 (not given): as the server was started - drafting with a drafter (maya's) */
-  int32_t *ids; /* malloc'd */
-  uint32_t n;
-  uint32_t mark; /* mark=: a point besides the prompt's (Conv.user), 0 none */
-  OsmosSampling samp; /* temp=, top_p=, top_k= (0.15.2), seed= (0.14.0): temperature 0 (not given) greedy */
-} Gen;
 
 double now_ms(void);
 void out(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 bool ids_push(Ids *a, int32_t x);
-bool parse_gen(char *line, Gen *g, char *why, size_t wn);
 bool server_eos(const Server *sv, int32_t t);
 bool server_greedy(Server *sv, const OsmosSampling *samp, uint32_t row0, uint32_t rows, int32_t *picks,
                    char err[OSMOS_ERR]);

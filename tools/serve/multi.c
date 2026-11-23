@@ -137,7 +137,7 @@ static void gen(Multi *m, char *line)
 {
   Gen g;
   char why[256];
-  if (!parse_gen(line, &g, why, sizeof why))
+  if (!gen_parse(line, &g, why, sizeof why))
   {
     out("ERR %s\n", why);
     return;
@@ -178,7 +178,13 @@ static void on_line(void *scope)
   else if (!strcmp(line, "STOP"))
     stop(m, true, 0);
   else if (!strncmp(line, "STOP ", 5))
-    stop(m, false, atoll(line + 5));
+  {
+    long long rid = 0;
+    if (gen_rid(line + 5, &rid)) /* (whole: 0.16.0, "STOP 7x" stopped 7) */
+      stop(m, false, rid);
+    else
+      out("ERR STOP's rid not a whole number (%.24s)\n", line + 5);
+  }
   else if (!strncmp(line, "GEN ", 4))
     gen(m, line);
   else if (*line)

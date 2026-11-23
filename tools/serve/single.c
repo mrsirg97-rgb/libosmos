@@ -286,7 +286,7 @@ int serve_single(Server *sv, Conv *c)
     char why[256];
     if (!strcmp(line, "QUIT"))
       ctl.quit = true;
-    else if (!strncmp(line, "GEN ", 4) && !parse_gen(line, &g, why, sizeof why))
+    else if (!strncmp(line, "GEN ", 4) && !gen_parse(line, &g, why, sizeof why))
       out("ERR %s\n", why);
     else if (!strncmp(line, "GEN ", 4))
     {

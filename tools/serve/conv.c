@@ -75,55 +75,6 @@ bool server_answer(Server *sv, const OsmosSampling *samp, const Ids *held, const
   return osmos_sample_except(sv->e, row, samp, at, sv->eos, (uint32_t)sv->n_eos, pick, err);
 }
 
-bool parse_gen(char *line, Gen *g, char *why, size_t wn)
-{
-  memset(g, 0, sizeof *g);
-  g->spec = -1;
-  g->samp.top_p = 1;
-  char *save = NULL, *tok = strtok_r(line + 4, " ", &save);
-  if (!tok)
-    return snprintf(why, wn, "expected: GEN <max_new> [keys] <id,id,...>"), false;
-  g->max_new = atoll(tok);
-  for (tok = strtok_r(NULL, " ", &save); tok; tok = strtok_r(NULL, " ", &save))
-  {
-    char *eq = strchr(tok, '=');
-    if (!eq)
-      break; /* the ids */
-    *eq = 0;
-    if (!strcmp(tok, "spec"))
-      g->spec = atoi(eq + 1);
-    else if (!strcmp(tok, "rid"))
-      g->rid = atoll(eq + 1), g->has_rid = true;
-    else if (!strcmp(tok, "mark"))
-      g->mark = (uint32_t)strtoul(eq + 1, NULL, 10);
-    else if (!strcmp(tok, "temp"))
-      g->samp.temperature = strtof(eq + 1, NULL);
-    else if (!strcmp(tok, "top_p"))
-      g->samp.top_p = strtof(eq + 1, NULL);
-    else if (!strcmp(tok, "seed"))
-      g->samp.seed = strtoull(eq + 1, NULL, 10);
-    else if (!strcmp(tok, "top_k")) /* 0.15.2: 0 every token */
-      g->samp.top_k = (uint32_t)strtoul(eq + 1, NULL, 10);
-    else
-      return snprintf(why, wn, "the key '%s' is not this engine's (rid, spec, mark, temp, top_p, top_k, seed)", tok),
-             false;
-  }
-  if (!(g->samp.temperature >= 0 && g->samp.temperature < 1e30f) || !(g->samp.top_p > 0 && g->samp.top_p <= 1))
-    return snprintf(why, wn, "temp= finite and at least 0, top_p= in (0, 1]"), false;
-  if (!tok)
-    return snprintf(why, wn, "a GEN with no ids"), false;
-  uint32_t cap = 1;
-  for (const char *c = tok; *c; c++)
-    cap += *c == ',';
-  if (!(g->ids = malloc((size_t)cap * sizeof *g->ids)))
-    return snprintf(why, wn, "out of memory"), false;
-  for (char *s2 = NULL, *x = strtok_r(tok, ",", &s2); x; x = strtok_r(NULL, ",", &s2))
-    g->ids[g->n++] = (int32_t)atol(x);
-  if (!g->n)
-    return free(g->ids), snprintf(why, wn, "a GEN with no ids"), false;
-  return true;
-}
-
 bool conv_create(Conv *c, const Server *sv)
 {
   memset(c, 0, sizeof *c);
