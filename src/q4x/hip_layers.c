@@ -77,7 +77,8 @@ bool q4x_overflow_ok(Q4xForward *f, char *err)
   if (!*f->b.pin_overflow)
     return true;
   *f->b.pin_overflow = 0;
-  hipMemset(f->b.overflow, 0, 4);
+  char rerr[OSMOS_ERR] = ""; /* (a reset that fails: owed - the next step's start says so) */
+  overflow_reset(&f->ovf, rerr);
   return osmos_fail(err, "an activation past f16's range (mm's): the step refused, its results not to be read");
 }
 
@@ -345,7 +346,7 @@ static bool host_tiles(Q4xForward *f, int l, uint32_t e, const Q4xExpertBounds *
     return false;
   MoeRoute rt = {f->h_by, f->h_row, f->h_run, f->h_run + E, f->h_run + 2 * E, f->h_run + 3 * E, f->h_gidx, f->h_hidx,
                  f->h_est, 0, 0};
-  char merr[MEMBRANE_ERR] = "";
+  char merr[OSMOS_ERR] = "";
   if (!moe_route(f->h_ids, e, k, E, MM_TILE, &rt) || !membrane_visit(f->mem, (uint32_t)l, e >= E, merr))
     return false;
   for (uint32_t m = 0; e < E && m < e; m++)

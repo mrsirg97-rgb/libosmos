@@ -21,11 +21,11 @@ struct TestFit {
   std::function<void()> unbuild;
 };
 
-static bool test_fit_build(void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[FIT_ERR]) {
+static bool test_fit_build(void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[OSMOS_ERR]) {
   TestFit* t = (TestFit*) ctx;
   if (!t->build(budget) || !t->room(room)) {
     t->unbuild();
-    return std::snprintf(err, FIT_ERR, "the test's build refused at %.2f GiB", budget / 1073741824.0), false;
+    return std::snprintf(err, OSMOS_ERR, "the test's build refused at %.2f GiB", budget / 1073741824.0), false;
   }
   *built = t->took();
   return true;
@@ -39,7 +39,7 @@ static void test_fit_unbuild(void* ctx) { ((TestFit*) ctx)->unbuild(); }
 // budget. false (nothing built) when no build leaves the headroom: the test refuses, not the machine's memory
 static bool test_fit(TestFit& t, uint64_t want, uint64_t* budget) {
   uint64_t room = 0, b0 = 0;
-  char err[FIT_ERR] = "";
+  char err[OSMOS_ERR] = "";
   if (!test_fit_build(&t, 0, &b0, &room, err))
     return std::fprintf(stderr, "  sized to this machine: %s\n", err), false;
   t.unbuild();

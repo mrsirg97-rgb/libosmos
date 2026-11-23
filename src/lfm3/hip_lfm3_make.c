@@ -132,7 +132,7 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
     return osmos_fail(err, "LSA: the maps file not read (a safetensors file)");
   }
   char *head = malloc(hn + 1);
-  char jerr[JSON_ERR] = "";
+  char jerr[OSMOS_ERR] = "";
   Json *j = head && fread(head, 1, hn, fp) == hn ? json_parse(head, hn, jerr) : NULL;
   const uint64_t m = (uint64_t)f->lsa_in * LSA_DIM;
   float *buf = malloc(m * F);
@@ -320,7 +320,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&
-       hipMemset(f->overflow, 0, 4) == hipSuccess && hipDeviceSynchronize() == hipSuccess;
+       (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) && hipDeviceSynchronize() == hipSuccess;
   if (!ok)
     return lfm3_forward_destroy(f), (err && !*err ? osmos_fail(err, "the forward not made") : false), NULL;
   return f;

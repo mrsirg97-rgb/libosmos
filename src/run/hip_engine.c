@@ -61,7 +61,7 @@ OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR])
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
   if (!files || !files->model)
     return osmos_fail(err, "no model file named"), NULL;
-  char gerr[GGUF_ERR] = "";
+  char gerr[OSMOS_ERR] = "";
   Gguf *h = gguf_header(files->model, gerr);
   if (!h)
     return osmos_fail(err, "%s", gerr), NULL;

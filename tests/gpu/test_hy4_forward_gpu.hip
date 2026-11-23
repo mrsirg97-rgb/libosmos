@@ -183,7 +183,7 @@ static Stats measure(Hy4Forward* f, const std::vector<int32_t>& ids, uint32_t la
 
 int main() {
   const char* home = getenv("HOME") ? getenv("HOME") : "";
-  char model_path[512], ref_path[512], err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
+  char model_path[512], ref_path[512], err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_HY4") ? getenv("OSMOS_TEST_HY4") : "");
   if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf", home);
   std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_HY4_REF") ? getenv("OSMOS_TEST_HY4_REF") : "");

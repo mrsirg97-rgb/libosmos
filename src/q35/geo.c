@@ -13,7 +13,7 @@
 #define ARCH "qwen35"
 #define DIM_MAX (1 << 24)
 #define CTX_MAX (1 << 30)
-_Static_assert(OSMOS_ERR == GGUF_META_ERR && Q35_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && Q35_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 /* the kernels' fixed shapes are q4x's (q4x_ops.h): a head 256, a DeltaNet state 128, a conv's taps 8 at most */
 bool q35_geometry(const Gguf *model, Q35Geometry *g, char err[OSMOS_ERR])

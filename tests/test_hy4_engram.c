@@ -53,7 +53,7 @@ static void test_shape(const EngramShape *s)
 
 static void test_rows(const EngramShape *s, const Ref *r)
 {
-  char err[ENGRAM_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Engram *e = engram_create_shape(s, err);
   if (!e)
     printf("  refused: %s\n", err);
@@ -86,7 +86,7 @@ static void test_refused(Gguf *g, const Hy4Weights *w)
   int32_t *items = map->v.items, was = items[5];
   items[5] = 200000; /* covered: its product with a multiplier past int64 */
   EngramShape s;
-  char err[OSMOS_ERR] = "", eerr[ENGRAM_ERR] = "";
+  char err[OSMOS_ERR] = "", eerr[OSMOS_ERR] = "";
   osmos_clear(err);
   Engram *e = hy4_engram_shape(w, &s, err) ? engram_create_shape(&s, eerr) : NULL;
   assert(!e && (err[0] || eerr[0]));
@@ -105,7 +105,7 @@ int main(void)
 {
   printf("[test_hy4_engram] start\n");
   const char *home = getenv("HOME") ? getenv("HOME") : "";
-  char path[512], gerr[GGUF_ERR] = "", err[OSMOS_ERR] = "";
+  char path[512], gerr[OSMOS_ERR] = "", err[OSMOS_ERR] = "";
   if (getenv("OSMOS_TEST_HY4"))
     snprintf(path, sizeof path, "%s", getenv("OSMOS_TEST_HY4"));
   else

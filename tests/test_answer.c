@@ -53,7 +53,7 @@ static void hand(void)
 
 static Tokenizer *of(const char *shard, Gguf **g)
 {
-  char path[512], err[GGUF_ERR], terr[TOKENIZER_ERR] = "";
+  char path[512], err[OSMOS_ERR], terr[OSMOS_ERR] = "";
   snprintf(path, sizeof path, "%s/Models/%s", getenv("HOME") ? getenv("HOME") : "", shard);
   *g = gguf_header(path, err);
   return *g ? tokenizer_create(*g, terr) : NULL;
@@ -72,7 +72,7 @@ static void real(const char *name, const char *shard)
   const int32_t end = tokenizer_find(t, "</think>");
   assert(end >= 0);
   AnswerRule r;
-  char err[ANSWER_ERR] = "";
+  char err[OSMOS_ERR] = "";
   assert(!answer_rule_create(&r, t, -1, err) && err[0]);
   assert(!answer_rule_create(&r, t, tokenizer_vocab(t), err));
   assert(answer_rule_create(&r, t, end, err));

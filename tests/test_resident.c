@@ -63,7 +63,7 @@ static void fake_free(void *dev, void *ctx)
 static void test_refusals(int fd)
 {
   Mem m = {0};
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   const Slots s = {fake_alloc, fake_free, &m};
   const PoolUnit bad[] = {{.n_parts = 0}, {.n_parts = 4}, {.part = {{fd, 0, 0}}, .n_parts = 1},
                           {.part = {{fd, FILE_BYTES - 1, 2}}, .n_parts = 1}, {.part = {{9999, 0, 1}}, .n_parts = 1}};

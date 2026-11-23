@@ -210,7 +210,7 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
 
 int main() {
   std::printf("[test_ink2_loop_gpu] start\n");
-  char path[512], gerr[GGUF_ERR] = "", err[OSMOS_ERR] = "";
+  char path[512], gerr[OSMOS_ERR] = "", err[OSMOS_ERR] = "";
   if (std::getenv("OSMOS_TEST_INK2_MINI"))
     std::snprintf(path, sizeof path, "%s", std::getenv("OSMOS_TEST_INK2_MINI"));
   else

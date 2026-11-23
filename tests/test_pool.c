@@ -237,7 +237,7 @@ static void check(const Pool *p, const PoolUnit *u, size_t n, uint64_t budget)
 
 static void test_refusals(int fd)
 {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   const PoolUnit none = {.n_parts = 0};
   const PoolUnit four = {.n_parts = 4};
   const PoolUnit zero = {.part = {{fd, 0, 0}}, .n_parts = 1};
@@ -859,7 +859,7 @@ static void al_free(void *dev, void *ctx) { (void)ctx, free(dev); }
 
 static void test_read_align(int fd)
 {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   const int odd = file("odd.bin", (1 << 20) + 100); /* a size not a multiple of the alignment */
   const PoolUnit u[2] = {{.part = {{fd, 4096 * 3 + 2048, 10000}, {fd, 7, 4096}, {fd, 8192, 4096}}, .n_parts = 3},
                          {.part = {{odd, (1 << 20) + 50, 40}}, .n_parts = 1}}; /* 1: its aligned range past the end */
@@ -929,7 +929,7 @@ static void test_arena_room(int fd)
   uint8_t *m = aligned_alloc(ARENA_GRAIN, bytes);
   Arena *ar = arena_create(m, bytes);
   assert(m && ar);
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   memset(&reads, 0, sizeof reads);
   Pool *p = pool_create(u, U, budget, (Slots){ar_alloc, ar_free, ar}, (Fetcher){fake_fetch, &reads, fake_need},
                         ARENA_GRAIN, NULL, NULL, err);

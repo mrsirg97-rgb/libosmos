@@ -11,6 +11,7 @@
 #include "osmos/hy4/forward.h"
 #include "osmos/mem/rowread.h"
 #include "osmos/model/engram.h"
+#include "osmos/gpu/overflow.h"
 
 #define F sizeof(float)
 #define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
@@ -67,6 +68,7 @@ struct Hy4Forward
      slots, f16's overflow; the experts' read tables (mm_group's: entries, slots) */
   void *x16, *xe16;
   int32_t *overflow;
+  OverflowFlag ovf; /* the flags' reset (osmos/gpu/overflow.h): owed when one failed */
   void *st;                   /* the step's stream (every launch) */
   Hy4Joint j_attn[HY4_MAX_LAYERS], j_ffn[HY4_MAX_LAYERS];
   float *jo_attn, *jo_ffn;    /* their outputs (a token's) */

@@ -27,7 +27,7 @@ int main(void)
   FILE *f = fopen("tests/fixtures/json.txt", "r");
   assert(f);
   static char line[8192], in[4096], want[4096];
-  char err[JSON_ERR];
+  char err[OSMOS_ERR] = "";
   int good = 0, bad = 0;
   while (fgets(line, sizeof line, f))
   {

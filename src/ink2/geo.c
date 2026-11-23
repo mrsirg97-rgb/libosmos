@@ -8,7 +8,7 @@
 #define CTX_MAX (1 << 30)
 #define PASSES_MAX 64
 #define GATING_SIGMOID 2 /* llama.cpp's LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID */
-_Static_assert(OSMOS_ERR == GGUF_META_ERR && INK2_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && INK2_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 /* a value a slot - one integer, or an array of one a slot (upstream's): each slot's its layer's, every layer's the
    same (one count implemented) */

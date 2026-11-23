@@ -1,6 +1,7 @@
 #ifndef DRAFTER_H
 #define DRAFTER_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -14,12 +15,12 @@
 
 typedef struct Drafter Drafter;
 
-Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR]);
+Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR]);
 void drafter_destroy(Drafter *d);
-bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[FORWARD_ERR]);
+bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);
 
 int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, int32_t drafts[DRAFTER_BLOCK],
-                  float conf[DRAFTER_BLOCK], char err[FORWARD_ERR]);
+                  float conf[DRAFTER_BLOCK], char err[OSMOS_ERR]);
 
 #endif
 

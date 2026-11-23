@@ -14,6 +14,7 @@
 
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/run/drafter.h"
@@ -36,7 +37,7 @@ constexpr uint64_t kBudget = 100ull << 30;
 
 static Forward* g_f;
 static uint32_t g_vocab;
-static char g_err[OSMOS_ERR];
+static char g_err[OSMOS_ERR] = "";
 
 static std::vector<int32_t> ids(uint32_t n, uint32_t seed) {
   std::vector<int32_t> v(n);
@@ -48,7 +49,9 @@ static std::vector<int32_t> ids(uint32_t n, uint32_t seed) {
 // one greedy step of token t at s's position: its logits row
 static std::vector<float> step(Seq* s, int32_t t, int32_t* next) {
   std::vector<float> lg(g_vocab);
+  osmos_clear(g_err);
   CHECK(forward_step(g_f, s, t, g_err));
+  osmos_clear(g_err);
   CHECK(forward_greedy(g_f, 0, 1, next, g_err) && hipDeviceSynchronize() == hipSuccess);
   CHECK(hipMemcpy(lg.data(), forward_logits(g_f), g_vocab * 4, hipMemcpyDeviceToHost) == hipSuccess);
   return lg;
@@ -63,7 +66,7 @@ int main() {
     return 77;
   }
   const std::string dir = std::string(path).substr(0, std::string(path).rfind('/') + 1);
-  char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, gerr);
   CHECK(g);
   Gguf* eg = which == TestModel::kGsq ? gguf_create((dir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), gerr)
@@ -92,12 +95,15 @@ int main() {
   const uint32_t firsts[] = {16, 6, 1};
   int bad = 0;
   for (uint32_t first : firsts) {
+    osmos_clear(g_err);
     Seq* a = seq_create(g_f, g_err);
     CHECK(a);
     CHECK(seq_prompt(a, kPromptA));
     std::vector<Seq*> ss(kPromptA, a);
+    osmos_clear(g_err);
     CHECK(forward_batch(g_f, ss.data(), pa.data(), kPromptA, g_err));
     int32_t t;
+    osmos_clear(g_err);
     CHECK(forward_greedy(g_f, kPromptA - 1, 1, &t, g_err) && hipDeviceSynchronize() == hipSuccess);
     std::vector<int32_t> toks;
     std::vector<std::vector<float>> rows;

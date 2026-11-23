@@ -43,7 +43,7 @@ static uint64_t fnv(const void* p, size_t n, uint64_t h) {
 
 // the model at `first` (with `overlay`, or none): a prompt, then kNew greedy steps, every logits row and token hashed
 static Run decode(const std::string& first, const std::string& overlay) {
-  char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", err[OSMOS_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(first.c_str(), gerr);
   Gguf* ov = overlay.empty() ? nullptr : gguf_create(overlay.c_str(), gerr);
   CHECK(g && (overlay.empty() || ov));

@@ -28,7 +28,7 @@ static GgufKv *kv(const char *key) { return (GgufKv *)gguf_kv(model, key); }
 
 static bool accepted(void)
 {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   osmos_clear(err);
   Weights *w = weights_create(model, engram, err);
   weights_destroy(w);
@@ -51,7 +51,7 @@ static void refused(const char *what, const char *needle)
 
 static void test_null(void)
 {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   osmos_clear(err);
   assert(weights_create(NULL, NULL, err) == NULL && err[0]);
   weights_destroy(NULL);
@@ -60,7 +60,7 @@ static void test_null(void)
 
 static void test_real(void)
 {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   struct timespec a, b;
   clock_gettime(CLOCK_MONOTONIC, &a);
   osmos_clear(err);
@@ -219,7 +219,7 @@ static void test_kv(void)
   refused("an Engram file of another model", "engram.source");
   k->v.s[0] ^= 1;
 
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   osmos_clear(err);
   assert(weights_create(model, NULL, err) == NULL && strstr(err, "engram"));
   printf("    %-44s -> %s\n", "no Engram file", err);
@@ -260,7 +260,7 @@ static void test_fuzz(void)
     case 2: t->type = t->type == T_BF16 ? T_Q8_0 : T_BF16; break;
     default: t->n_dims = t->n_dims == 1 ? 2 : t->n_dims - 1; break;
     }
-    char err[OSMOS_ERR];
+    char err[OSMOS_ERR] = "";
     osmos_clear(err);
     Weights *w = weights_create(model, engram, err);
     if (w)

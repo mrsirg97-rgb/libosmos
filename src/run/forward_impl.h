@@ -24,6 +24,7 @@
 #include "osmos/model/engram.h"
 #include "osmos/npu/npu.h"
 #include "osmos/run/forward.h"
+#include "osmos/gpu/overflow.h"
 
 #define FWD_MAX_FILES WEIGHTS_MAX_FILES
 #define FWD_SCORE_BYTES (512ull << 20) /* the indexer's scores at most: a step scored in chunks of tokens past it (a
@@ -149,6 +150,7 @@ struct Forward
   bool no_guess;                              /* ForwardOptions': nothing guessed, no router copy made */
   float *freqs_win, *freqs_comp;
   Scratch b;
+  OverflowFlag ovf; /* b.overflow's reset (osmos/gpu/overflow.h): owed when one failed */
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
   /* the experts' routing, a layer's every sub-batch at once: pinned, the picks [token][slot] and the tables
      (hip_ffn.c's carve, one copy to Scratch's up); on the host, the pairs' by-expert order and places */
@@ -295,7 +297,6 @@ static inline uint64_t fwd_bytes(const Forward *f, const GgufTensor *t)
   return fwd_type(f, t) == QUANT_Q5_KR ? t->bytes / QUANT_Q5_K_BYTES * QUANT_Q5_KR_BYTES_A_BLOCK : t->bytes;
 }
 
-bool fwd_fail(char *err, const char *why);
 void fwd_probe(const Forward *f, const char *step, int layer, int index, void *dev, uint64_t n, bool ints);
 bool fwd_put(void *dev, const void *host, uint64_t bytes);
 bool fwd_put_async(void *dev, const void *pinned, uint64_t bytes);

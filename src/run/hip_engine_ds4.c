@@ -11,7 +11,7 @@
 /* DeepSeek-V4.1-Flash behind the engine: each call the forward's and the drafter's own, as osmos-serve made them
    before 0.4.0 - its decode in the lane's order (forward_lane 0, every expert on the GPU) */
 
-_Static_assert(OSMOS_ERR == FORWARD_ERR && OSMOS_ERR >= WEIGHTS_ERR && OSMOS_ERR >= GGUF_ERR,
+_Static_assert(OSMOS_ERR == OSMOS_ERR && OSMOS_ERR >= OSMOS_ERR && OSMOS_ERR >= OSMOS_ERR,
                "one error buffer for the engine and the family's calls");
 _Static_assert(DRAFTER_BLOCK <= OSMOS_MAX_BLOCK, "DSpark's block within the engine's");
 
@@ -51,7 +51,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   Model *m = calloc(1, sizeof *m);
   if (!m)
     return osmos_fail(err, "out of memory"), NULL;
-  char gerr[GGUF_ERR] = "";
+  char gerr[OSMOS_ERR] = "";
   if (!(m->g = gguf_create(files->model, gerr)) || (files->table && !(m->table = gguf_create(files->table, gerr))) ||
       (files->overlay && !(m->overlay = gguf_create(files->overlay, gerr))))
     return osmos_fail(err, "%s", gerr), m_close(m), NULL;

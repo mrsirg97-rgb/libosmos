@@ -62,7 +62,7 @@ static Geometry by_hand(void)
   return g;
 }
 
-static bool read(Geometry *g, char err[WEIGHTS_ERR])
+static bool read(Geometry *g, char err[OSMOS_ERR])
 {
   err[0] = '\0';
   return weights_geometry(model, NULL, g, err);
@@ -83,7 +83,7 @@ static void same(const Geometry *a, const Geometry *b, const char *what)
 static void refused(const char *what, const char *needle)
 {
   Geometry g;
-  char err[WEIGHTS_ERR];
+  char err[OSMOS_ERR] = "";
   const bool ok = read(&g, err);
   check(!ok && strstr(err, needle), what);
   if (!ok)
@@ -116,7 +116,7 @@ static void rename_key(const char *from, const char *to)
 int main(void)
 {
   printf("[test_geo] start\n");
-  char path[512], err[GGUF_ERR];
+  char path[512], err[OSMOS_ERR];
   snprintf(path, sizeof path, "%s/Models/ds1017/UD-IQ1_M/DeepSeek-V4.1-Flash-1017-UD-IQ1_M-00001-of-00005.gguf",
            getenv("HOME") ? getenv("HOME") : "");
   if (!(model = gguf_create(path, err)))
@@ -126,7 +126,7 @@ int main(void)
   }
   const Geometry want = by_hand();
   Geometry got;
-  char why[WEIGHTS_ERR];
+  char why[OSMOS_ERR];
   const bool ok = read(&got, why);
   check(ok, why);
   if (ok)
@@ -180,7 +180,7 @@ int main(void)
   const char *const optional[] = {A "engram.compressed_vocab_size", A "dspark.target_layers"};
   for (size_t i = 0; i < sizeof optional / sizeof optional[0]; i++)
   {
-    char gone[160], why2[WEIGHTS_ERR];
+    char gone[160], why2[OSMOS_ERR];
     snprintf(gone, sizeof gone, "x.%s", optional[i]);
     rename_key(optional[i], gone);
     Geometry o;

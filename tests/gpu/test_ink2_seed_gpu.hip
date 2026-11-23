@@ -32,7 +32,7 @@ extern "C" {
 constexpr uint32_t kCtx = 4096, kStep = 512, kPrompt = 300, kGen = 48;
 constexpr uint64_t kBudget = 60ull << 30;
 
-static char g_err[OSMOS_ERR];
+static char g_err[OSMOS_ERR] = "";
 
 static std::vector<int32_t> ids(uint32_t n, uint32_t seed, uint32_t vocab) {
   std::vector<int32_t> v(n);

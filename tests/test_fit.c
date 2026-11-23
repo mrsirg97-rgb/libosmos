@@ -30,12 +30,12 @@ static uint64_t pool(const Engine *e, uint64_t budget)
   return 2 * (streamed / e->layers);
 }
 
-static bool build(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, char err[FIT_ERR])
+static bool build(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, char err[OSMOS_ERR])
 {
   Engine *e = ctx;
   assert(!e->live); /* the last one unbuilt first */
   if (++e->builds == e->fail_at)
-    return snprintf(err, FIT_ERR, "a build refused"), false;
+    return snprintf(err, OSMOS_ERR, "a build refused"), false;
   *built = budget ? budget : e->dense;
   const uint64_t resident = *built > e->dense ? *built - e->dense : 0;
   uint64_t used = e->other + *built + resident * e->overhead_pct / 100;
@@ -45,7 +45,7 @@ static bool build(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, c
   const int64_t truth = (int64_t)e->memory - (int64_t)(used + p);
   e->least = truth < e->least ? truth : e->least;
   if (used + p > e->memory) /* the engine refuses what does not fit (fwd_room_left) */
-    return snprintf(err, FIT_ERR, "past the memory"), false;
+    return snprintf(err, OSMOS_ERR, "past the memory"), false;
   *room = e->memory - used - p;
   if (e->wobble)
     *room = e->builds % 2 ? *room + e->wobble : (*room > e->wobble ? *room - e->wobble : 0);
@@ -90,7 +90,7 @@ int main(void)
     Engine e = {shapes[k][0] * GIB, shapes[k][1] * GIB, shapes[k][2] * GIB, shapes[k][3] * GIB, shapes[k][4],
                 shapes[k][5], 0, 0, 0, 0, 0, INT64_MAX};
     uint64_t budget = 0, built, room;
-    char err[FIT_ERR] = "";
+    char err[OSMOS_ERR] = "";
     assert(fit_sized(build, unbuild, &e, GIB, &budget, err));
     assert(e.live && e.builds <= FIT_BUILDS + 1); /* (+1: the last that fit, again, after a refused step) */
     room = e.memory - e.other - budget - (budget - e.dense) * e.overhead_pct / 100 - pool(&e, budget);
@@ -101,12 +101,12 @@ int main(void)
   }
   Engine e = {113 * GIB, 3 * GIB, 12 * GIB, 140 * GIB, 40, 0, 0, 0, 0, 1, 0, INT64_MAX}; /* the dense build refused */
   uint64_t budget = 0;
-  char err[FIT_ERR] = "";
+  char err[OSMOS_ERR] = "";
   assert(!fit_sized(build, unbuild, &e, GIB, &budget, err) && !strcmp(err, "a build refused") && !e.live);
   Engine f = {113 * GIB, 3 * GIB, 12 * GIB, 140 * GIB, 40, 0, 0, 0, 0, 2, 0, INT64_MAX}; /* a growth step refused: smaller, not fatal */
   budget = 0;
   assert(fit_sized(build, unbuild, &f, GIB, &budget, err) && f.live);
-  char refused[FIT_ERR];
+  char refused[OSMOS_ERR];
   snprintf(refused, sizeof refused, "%s", err);
   const uint64_t smaller = budget;
   /* memory in chunks wider than the window: no budget lands in it - the one kept still leaves the headroom, within a

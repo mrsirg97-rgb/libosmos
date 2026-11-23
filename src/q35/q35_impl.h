@@ -10,6 +10,7 @@
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/lsa.h"
 #include "osmos/q35/forward.h"
+#include "osmos/gpu/overflow.h"
 
 #define F sizeof(float)
 
@@ -31,6 +32,7 @@ struct Q35Forward
   uint32_t rows;            /* the last step's rows */
   int32_t *ids, *argmax;    /* q35_greedy's ids (device, logit_rows) and its scratch */
   int32_t *tok, *pin_tok, *overflow;
+  OverflowFlag ovf; /* the flag's reset (osmos/gpu/overflow.h): owed when one failed */
   void *x16;
   const float *x16_x; /* the activations x16 holds as f16 (the last matrix's, on the matmul), or NULL */
   q35_tap_fn tap;

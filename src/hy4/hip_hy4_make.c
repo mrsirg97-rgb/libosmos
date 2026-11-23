@@ -225,7 +225,7 @@ static bool engram_reader(Hy4Forward *f, const int *fds, char *err)
   const Hy4Weights *w = f->w;
   const Hy4Geometry *g = &w->geo;
   EngramShape shape;
-  char eerr[ENGRAM_ERR] = "";
+  char eerr[OSMOS_ERR] = "";
   if (!hy4_engram_shape(w, &shape, err))
     return false;
   if (!(f->eg = engram_create_shape(&shape, eerr)))
@@ -408,7 +408,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
               osmos_fail(err, "the joint matrices not made (GPU memory)"));
   for (size_t i = 0; ok && i < sizeof read_want / sizeof *read_want; i++)
     ok = hy4_alloc(read_want[i].p, read_want[i].bytes) || osmos_fail(err, "GPU memory refused (the read's buffers)");
-  ok = ok && hipMemset(f->overflow, 0, 8) == hipSuccess && (f->fault = f->overflow + 1) &&
+  ok = ok && (f->ovf = (OverflowFlag){f->overflow, 8, false}, overflow_reset(&f->ovf, err)) && (f->fault = f->overflow + 1) &&
        hipHostMalloc((void **)&f->pin_flags, 8, 0) == hipSuccess && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
        (f->h_rxd = malloc(ecap * 4)) && (f->h_ryd = malloc(ecap * 4)) && (f->h_rcnt = malloc(ecap * 4)) &&
        (f->h_rw = malloc(3 * ecap * sizeof(void *))) && (f->rkey = malloc(ecap * 8)) &&

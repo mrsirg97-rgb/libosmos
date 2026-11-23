@@ -8,7 +8,7 @@
 #define DIM_MAX (1 << 24)
 #define CTX_MAX (1 << 30)
 #define NGRAM_MIN 2
-_Static_assert(OSMOS_ERR == GGUF_META_ERR && Q4X_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && Q4X_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 /* layer l a Gated DeltaNet unless every attn_interval-th; the sparse attention's keys pooled in blocks of one ratio, a
    DeltaNet's none, the indexer's budget whole blocks of it */

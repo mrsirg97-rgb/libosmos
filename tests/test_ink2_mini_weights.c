@@ -60,7 +60,7 @@ static void refused(const char *what, const char *needle)
 
 static Gguf *open_model(const char *env, const char *fallback)
 {
-  char path[512], gerr[GGUF_ERR] = "";
+  char path[512], gerr[OSMOS_ERR] = "";
   if (getenv(env))
     snprintf(path, sizeof path, "%s", getenv(env));
   else

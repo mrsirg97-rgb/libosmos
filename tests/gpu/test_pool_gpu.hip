@@ -56,7 +56,7 @@ static void on_event(const PoolEvent* ev, void*) {
   pins += ev->kind == POOL_EV_PIN;
 }
 static int drain(Pool* p) {
-  char rerr[OSMOS_ERR];
+  char rerr[OSMOS_ERR] = "";
   const int before = pins;
   Pool* const pools[READS_POOLS] = {p, nullptr};
   CHECK(reads_pump(g_reads, pools, true, rerr));
@@ -88,7 +88,7 @@ int main() {
     std::printf("[test_pool_gpu] skipped: no model (test_model.h) or no GPU\n");
     return 77;
   }
-  char gerr[GGUF_ERR] = "";
+  char gerr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, gerr);
   CHECK(g);
   std::vector<int> fds(g->n_files);

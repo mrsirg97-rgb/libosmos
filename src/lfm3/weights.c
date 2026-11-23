@@ -16,7 +16,7 @@
 #define DIM_MAX (1 << 24)
 #define CTX_MAX (1 << 30)
 #define UNROTATED 1e30f /* rope_freqs' factor on a pair the full layers leave unrotated (the zero tail) */
-_Static_assert(OSMOS_ERR == GGUF_META_ERR && LFM3_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && LFM3_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 bool lfm3_geometry(const Gguf *model, Lfm3Geometry *g, char err[OSMOS_ERR])
 {

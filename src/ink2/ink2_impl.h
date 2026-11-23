@@ -10,6 +10,7 @@
 #include "osmos/ink2/mtp.h"
 #include "osmos/mem/host_slots.h"
 #include "osmos/mem/membrane.h"
+#include "osmos/gpu/overflow.h"
 
 /* a conv tail's rows past its 2 keep: a step of at most these appended in place (a decode's, a drafted round's); a
    larger step's inputs read from the step's buffer, the tail keeping their last keep rows (ink2_tail_put) */
@@ -58,6 +59,7 @@ typedef struct Ink2MtpDev
   int32_t *pos, *prev, *ids;
   void *x16;         /* the block's activations as mm reads them: a tile of its widest input */
   int32_t *overflow; /* an x16 value past f16's range (the draft's refusal, not the step's) */
+  OverflowFlag ovf;  /* its reset (osmos/gpu/overflow.h) */
 } Ink2MtpDev;
 
 enum
@@ -142,6 +144,7 @@ struct Ink2Forward
   const float *m_a;     /* the layer's experts' weights a pick and the picks' rows (in m_dev): their sum's */
   const int32_t *m_row;
   void *x16, *xe16; /* mm's f16 activations: a dense matrix's input (MM_MAX_TOKENS rows), the experts' slots */
+  OverflowFlag ovf;  /* the step flag's reset (osmos/gpu/overflow.h): owed when one failed */
   int32_t *overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
   uint32_t head_rows; /* the head's rows a launch (f->head's) */
   float *fa_part; /* a split decode's attention units (ink2_fa_scratch) */

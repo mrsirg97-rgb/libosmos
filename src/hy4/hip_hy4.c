@@ -69,6 +69,8 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > HY4_MAX_RUNS)
     return osmos_fail(err, "no forward, sequences or tokens, or past HY4_MAX_RUNS runs");
+  if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
+    return false;
   f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
                   half-rewritten slot table (0.11.2) */
   Hy4Run run[HY4_MAX_RUNS];
@@ -126,7 +128,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   {
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
-    hipMemset(f->overflow, 0, 8);
+    { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */
     return osmos_fail(err, "%s", over    ? "an activation past f16's range (the step refused)"
                                  : fault ? "the router picked an expert out of range or twice (the step refused)"
                                          : "a GPU call or an Engram read failed in the step");

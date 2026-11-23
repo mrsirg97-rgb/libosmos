@@ -10,6 +10,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/model/moe_route.h"
+#include "osmos/err.h"
 
 /* every Engram row the step reads - each sub-batch's tokens' rows for each of its Engram layers (the layers ascending:
    fwd_engram's nth) - begun at the step's start on Engram's readers, into the stage one after another, so they read
@@ -31,11 +32,11 @@ bool fwd_engram_issue(Forward *f, char *err)
       if (!g->engram[l])
         continue;
       if (f->dec >= 0 && l > f->dec)
-        return fwd_fail(err, "an Engram layer past the decoder's first: its tokens compacted");
+        return osmos_fail(err, "an Engram layer past the decoder's first: its tokens compacted");
       const GgufTensor *t = f->w->layer[l].eg_embd;
       const uint64_t b = gguf_bytes(t->type, hd);
       if (rb && b != rb)
-        return fwd_fail(err, "Engram layers of different row sizes");
+        return osmos_fail(err, "Engram layers of different row sizes");
       rb = b, f->eg_at[k][nth] = at;
       const Sub *s = &f->sub[k];
       for (uint32_t i = 0; i < s->n; i++)
@@ -49,7 +50,7 @@ bool fwd_engram_issue(Forward *f, char *err)
   if (!at)
     return true;
   if (!rowread_start(f->eg_read, f->eg_fd, f->eg_off, (uint32_t)at, (uint32_t)rb, f->stage))
-    return fwd_fail(err, "Engram's readers refused the step's rows");
+    return osmos_fail(err, "Engram's readers refused the step's rows");
   f->eg_pending = true;
   return true;
 }
@@ -69,7 +70,7 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
   {
     f->eg_pending = false;
     if (!rowread_wait(f->eg_read))
-      return fwd_fail(err, "an Engram row could not be read");
+      return osmos_fail(err, "an Engram row could not be read");
   }
   const uint8_t *stage = f->stage + f->eg_at[f->cur][nth] * rb;
   const uint64_t vals = (uint64_t)n * cols * hd;
@@ -78,7 +79,7 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
                   fwd_mat(f, L->eg_wkv, fwd_dev(f, L->eg_wkv), (hc + 1) * D, cols * hd, b->erow_f, cols * hd, n,
                           b->ekv, (hc + 1) * D) &&
                   ops_engram_gate(b->h, b->ekv, f->eg_gate[l], hc, D, g->rms_eps, n, NULL);
-  return ok || fwd_fail(err, "a GPU call failed (Engram)");
+  return ok || osmos_fail(err, "a GPU call failed (Engram)");
 }
 
 /* a bump allocator over the pinned staging region and its device copy: a table's host and device addresses */
@@ -233,7 +234,7 @@ bool fwd_moe(Forward *f, int l, char *err)
        fwd_guess_queue(f, l) && hipEventRecord(f->routed, NULL) == hipSuccess && shared(f, l) &&
        fwd_wait(f, f->routed);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the router, the shared expert)");
+    return osmos_fail(err, "a GPU call failed (the router, the shared expert)");
   /* the stream is past the last layer's experts (the router came after them): the visit ends their holds */
   if (!membrane_visit(f->mem, (uint32_t)l, P >= E, err))
     return false;
@@ -250,7 +251,7 @@ bool fwd_moe(Forward *f, int l, char *err)
   uint32_t at[OPS_MAX_EXPERTS + 1], rexp[OPS_MAX_EXPERTS], rcnt[OPS_MAX_EXPERTS];
   MoeRoute rt = {f->m_by, f->m_row, rexp, f->m_base, rcnt, f->m_slot0, f->m_gidx, f->m_hidx, at, 0, 0};
   if (E > OPS_MAX_EXPERTS || !moe_route(ids, P, K, E, MM_TILE, &rt))
-    return fwd_fail(err, "the router picked an expert the model does not have");
+    return osmos_fail(err, "the router picked an expert the model does not have");
   for (uint32_t m = 0; m < P; m++)
     f->picks[(uint32_t)l * E + (uint32_t)ids[m]]++;
   const uint32_t nd = rt.runs, slots = rt.slots, *base = rt.start, *slot0 = rt.slot0, *row_of = rt.row;
@@ -346,7 +347,7 @@ bool fwd_moe(Forward *f, int l, char *err)
        (!dn_on || fwd_npu_run(f, NPU_DOWN, l, parts, err)) &&
        ops_gather_sum_add(b->moe, b->ye, dorder, K, n, D, b->sye, NULL);
   if (!ok)
-    return err[0] ? false : fwd_fail(err, "a GPU call failed (the experts)");
+    return err[0] ? false : osmos_fail(err, "a GPU call failed (the experts)");
   fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
   return true;
 }

@@ -250,7 +250,7 @@ int main() {
     std::printf("[test_forward_gpu] skipped: no oracle dump (oracle/layer_dump.py) or no GPU\n");
     return 77;
   }
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[OSMOS_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
   Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
   CHECK(g && eg);

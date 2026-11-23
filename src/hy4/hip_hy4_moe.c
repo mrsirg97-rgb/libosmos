@@ -40,7 +40,7 @@ static bool in_memory(Hy4Forward *f, int l, const MoeRoute *rt, uint32_t picks)
         f->h_ex[j][k] = f->h_tab[((uint64_t)ml * 3 + (uint64_t)k) * E + rt->expert[j]];
     return true;
   }
-  char merr[MEMBRANE_ERR] = "";
+  char merr[OSMOS_ERR] = "";
   Membrane *m = f->ex.mem;
   if (!membrane_visit(m, ml, picks >= E, merr))
     return false;

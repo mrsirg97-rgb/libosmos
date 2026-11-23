@@ -55,7 +55,7 @@ static Gguf *open_file(const char *env, const char *fallback)
   char home[512];
   snprintf(home, sizeof home, "%s/%s", getenv("HOME") ? getenv("HOME") : "", fallback);
   const char *path = getenv(env) ? getenv(env) : home;
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf *g = gguf_create(path, err);
   if (!g)
     printf("  %s: not on this machine, skipped (%s)\n", path, err);

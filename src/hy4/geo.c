@@ -8,7 +8,7 @@
 #define DIM_MAX (1 << 24)
 #define CTX_MAX (1 << 30)
 #define SIGMOID_GATING 2 /* llama.cpp's expert_gating_func: 1 softmax, 2 sigmoid */
-_Static_assert(OSMOS_ERR == GGUF_META_ERR && HY4_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && HY4_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 /* a float a layer, at least n of them (the list covers block_count: the trunk and the nextn layers) */
 static bool floats(GgufMeta *m, const char *key, int n, float *out)

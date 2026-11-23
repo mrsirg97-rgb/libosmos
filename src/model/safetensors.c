@@ -73,7 +73,7 @@ Gguf *st_create(const char *path, char err[OSMOS_ERR])
   char *head = malloc(hn);
   const bool got = head && fread(head, 1, hn, f) == hn;
   fclose(f);
-  char jerr[JSON_ERR] = "";
+  char jerr[OSMOS_ERR] = "";
   Json *j = got ? json_parse(head, hn, jerr) : NULL;
   free(head);
   if (!j || j->type != JSON_OBJECT)

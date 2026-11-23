@@ -2,6 +2,7 @@
 
 #include "forward_impl.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/err.h"
 
 /* the decoder skip. DeepSeek-V4.1's layers past the last KV source (dec: the decoder's first layer) take their
    compressed KV from dec alone and keep nothing of a token but its window; so a prompt token's decoder state past dec
@@ -83,7 +84,7 @@ bool fwd_compact(Forward *f, char *err)
                   (!f->sub[f->cur].cand_on ||
                    (ops_gather_rows(b->score, (const float *)b->cand, b->keep, nk, f->cand_words, NULL) &&
                     fwd_copy(b->cand, b->score, (uint64_t)nk * f->cand_words * 4)));
-  return ok || fwd_fail(err, "a GPU call failed (the decoder's compaction)");
+  return ok || osmos_fail(err, "a GPU call failed (the decoder's compaction)");
 }
 
 static const float *fv(const Forward *f, const GgufTensor *t) { return (const float *)fwd_dev(f, t); }
@@ -121,7 +122,7 @@ bool fwd_head(Forward *f, char *err)
       k = e;
     }
     if (!ok)
-      return fwd_fail(err, "a GPU call failed (the head)");
+      return osmos_fail(err, "a GPU call failed (the head)");
     fwd_probe(f, "logits", -1, f->pin->pos[0], b->vocab, (uint64_t)(f->n_all - base) * V, false);
     f->vocab_rows = f->n_all - base;
   }
@@ -135,5 +136,5 @@ bool fwd_head(Forward *f, char *err)
        ops_gather_rows(b->mid, b->h, b->back, f->n_all, hc * D, NULL) &&
        fwd_copy(b->h, b->mid, (uint64_t)f->n_all * hc * D * sizeof(float));
   f->n = f->n_all;
-  return ok || fwd_fail(err, "a GPU call failed (the stream's rows)");
+  return ok || osmos_fail(err, "a GPU call failed (the stream's rows)");
 }

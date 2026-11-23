@@ -198,7 +198,7 @@ static void test_tensors(const Ink2Weights *w)
 int main(void)
 {
   printf("[test_ink2_weights] start\n");
-  char err[OSMOS_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", path[512], gerr[OSMOS_ERR] = "";
   assert(!ink2_weights_create(NULL, err) && err[0]);
   ink2_weights_destroy(NULL);
   if (getenv("OSMOS_TEST_INK2"))

@@ -8,13 +8,13 @@
 #include "drafter_impl.h"
 #include "osmos/model/qtype.h"
 #include "osmos/mem/hip_slots.h"
+#include "osmos/err.h"
 
 /* the drafter: its weights in GPU memory of their own, its rings from the trunk's taps, a round's head (hip_drafter.c)
    behind its blocks (hip_drafter_round.c) */
 
 #define DRAFTER_READERS 4 /* the load's readers: the fetcher's (DESIGN.md) */
 
-static bool fail(char *err, const char *why) { return fwd_fail(err, why); }
 
 /* a tensor's device bytes, by name (b >= 0: "mtp.b." + name); NULL if it has none */
 static const void *dev_of(Drafter *d, int b, const char *name, uint32_t *type, uint64_t *values);
@@ -160,39 +160,39 @@ static bool targets(const Forward *f, const DsparkIndex *ix, bool *at, char *err
   for (uint32_t i = 0; i < ix->n_targets; i++)
   {
     if (ix->targets[i] >= (uint32_t)f->n_layers)
-      return fail(err, "dspark.json: a target layer past the model's");
+      return osmos_fail(err, "dspark.json: a target layer past the model's");
     theirs[ix->targets[i]] = true;
   }
   if (any && ix->n_targets && memcmp(at, theirs, (size_t)f->n_layers * sizeof *at) != 0)
-    return fail(err, "the model's DSpark target layers and dspark.json's differ");
+    return osmos_fail(err, "the model's DSpark target layers and dspark.json's differ");
   if (!any && !ix->n_targets)
-    return fail(err, "no DSpark target layers: neither the model's GGUF nor dspark.json names them");
+    return osmos_fail(err, "no DSpark target layers: neither the model's GGUF nor dspark.json names them");
   if (!any)
     memcpy(at, theirs, (size_t)f->n_layers * sizeof *at);
   return true;
 }
 
-Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
+Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR])
 {
   Drafter *d = f ? calloc(1, sizeof *d) : NULL;
   if (!d)
-    return fail(err, "no forward, or out of memory"), NULL;
+    return osmos_fail(err, "no forward, or out of memory"), NULL;
   d->f = f, d->fd = -1;
-  char xerr[DSPARK_ERR] = "", perr[POOL_ERR] = "";
-  bool ok = (d->ix = dspark_index(dir, xerr)) != NULL || fail(err, xerr);
-  ok = ok && ((d->fd = open(d->ix->bin, O_RDONLY)) >= 0 || fail(err, "dspark.bin could not be opened"));
+  char xerr[OSMOS_ERR] = "", perr[OSMOS_ERR] = "";
+  bool ok = (d->ix = dspark_index(dir, xerr)) != NULL || osmos_fail(err, "%s", xerr);
+  ok = ok && ((d->fd = open(d->ix->bin, O_RDONLY)) >= 0 || osmos_fail(err, "dspark.bin could not be opened"));
   PoolUnit *u = ok ? calloc(d->ix->n, sizeof *u) : NULL;
-  ok = ok && (u || fail(err, "out of memory"));
+  ok = ok && (u || osmos_fail(err, "out of memory"));
   for (uint32_t i = 0; ok && i < d->ix->n; i++)
     u[i] = (PoolUnit){.part = {{d->fd, d->ix->t[i].offset, d->ix->t[i].bytes}}, .n_parts = 1};
-  ok = ok && ((d->res = resident_create(u, d->ix->n, hip_slots(), DRAFTER_READERS, perr)) || fail(err, perr));
+  ok = ok && ((d->res = resident_create(u, d->ix->n, hip_slots(), DRAFTER_READERS, perr)) || osmos_fail(err, "%s", perr));
   free(u);
   const DsparkTensor *mk = ok ? dspark_tensor(d->ix, "mtp.2.markov_head.embed.weight") : NULL;
   const DsparkTensor *mp = ok ? dspark_tensor(d->ix, "mtp.0.main_proj.weight") : NULL;
   bool at[WEIGHTS_MAX_LAYERS] = {false};
   ok = ok && targets(f, d->ix, at, err);
   ok = ok && ((mk && mp && fwd_taps_on(f, at) && mp->dims[1] == (uint64_t)f->n_tap * f->g->n_embd) ||
-              fail(err, "a drafter whose taps are not the model's target layers'"));
+              osmos_fail(err, "a drafter whose taps are not the model's target layers'"));
   if (ok)
   {
     d->rank = (uint32_t)mk->dims[1];
@@ -201,12 +201,12 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[FORWARD_ERR])
     d->main_norm = widen(d, 0, "main_norm.weight", f->g->n_embd), d->norm = widen(d, 2, "norm.weight", f->g->n_embd);
     d->conf_w = widen(d, 2, "confidence_head.proj.weight", (uint64_t)f->g->n_embd + d->rank);
     ok = (d->main_proj && d->mk_embed && d->mk_head && d->main_norm && d->norm && d->conf_w) ||
-         fail(err, "a drafter without its heads");
+         osmos_fail(err, "a drafter without its heads");
   }
   for (int b = 0; ok && b < DRAFTER_BLOCKS; b++)
-    ok = block(d, b) || fail(err, "a drafter block's weights missing, its experts of mixed types or of a type the matvec "
+    ok = block(d, b) || osmos_fail(err, "a drafter block's weights missing, its experts of mixed types or of a type the matvec "
                               "does not take, or GPU memory refused");
-  ok = ok && (scratch(d) || fail(err, "GPU memory refused"));
+  ok = ok && (scratch(d) || osmos_fail(err, "GPU memory refused"));
   if (!ok)
   {
     drafter_destroy(d);
@@ -270,15 +270,15 @@ static bool seed_run(Drafter *d, Seq *s, uint32_t i0, uint32_t n)
   return ok && fwd_settle(d->f);
 }
 
-bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[FORWARD_ERR])
+bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[OSMOS_ERR])
 {
   Forward *f = d ? d->f : NULL;
   if (!f || !s || s->f != f)
-    return fail(err, "no drafter, or a sequence of another forward");
+    return osmos_fail(err, "no drafter, or a sequence of another forward");
   const Geometry *g = f->g;
   const uint32_t W = (uint32_t)g->window, hd = g->head_dim;
   if (!s->dring && !fwd_alloc(&s->dring, (uint64_t)DRAFTER_BLOCKS * W * kv_row_bytes(KV_FP8, hd)))
-    return fail(err, "GPU memory refused (the drafter's rings)");
+    return osmos_fail(err, "GPU memory refused (the drafter's rings)");
   if (to - from > (int32_t)W) /* only the window's last positions stay in the ring */
     from = to - (int32_t)W;
   int32_t want = from;
@@ -293,13 +293,13 @@ bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[FORWARD
     while (e < f->tap_n && f->tap_bs[e] == s && f->tap_pos[e] == f->tap_pos[e - 1] + 1 && f->tap_pos[e] < to)
       e++;
     if (f->tap_pos[i] != want)
-      return fail(err, "a position the last step did not tap");
+      return osmos_fail(err, "a position the last step did not tap");
     if (!seed_run(d, s, i, e - i))
-      return fail(err, "a GPU call failed (the drafter's seed)");
+      return osmos_fail(err, "a GPU call failed (the drafter's seed)");
     want = f->tap_pos[e - 1] + 1, i = e;
   }
   if (want != to)
-    return fail(err, "a position the last step did not tap");
+    return osmos_fail(err, "a position the last step did not tap");
   s->dseeded = true; /* its rings this sequence's context from here */
   return true;
 }
@@ -318,11 +318,11 @@ static bool confidence(Drafter *d, uint32_t t, float *out)
 }
 
 int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, int32_t drafts[DRAFTER_BLOCK],
-                  float conf[DRAFTER_BLOCK], char err[FORWARD_ERR])
+                  float conf[DRAFTER_BLOCK], char err[OSMOS_ERR])
 {
   Forward *f = d ? d->f : NULL;
   if (!f || !s || s->f != f || !s->dring || !s->dseeded || y < 0 || y >= f->g->n_vocab)
-    return fail(err, "no drafter, an unseeded sequence or a token outside the vocabulary"), -1;
+    return osmos_fail(err, "no drafter, an unseeded sequence or a token outside the vocabulary"), -1;
   const Geometry *g = f->g;
   const uint32_t D = g->n_embd, V = (uint32_t)g->n_vocab, T = DRAFTER_BLOCK;
   const int32_t p0 = s->pos;
@@ -330,7 +330,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     d->pin->ids[t] = t ? DRAFTER_NOISE : y, d->pin->pos_q[t] = p0 + (int32_t)t, d->pin->pos_a[t] = p0 - 1;
   if (!fwd_put_async(d->ids, d->pin->ids, T * 4) || !fwd_put_async(d->pos_q, d->pin->pos_q, T * 4) ||
       !fwd_put_async(d->pos_a, d->pin->pos_a, T * 4) || !drafter_blocks(d, s, p0, err))
-    return err[0] ? -1 : (fail(err, "a GPU call failed (the drafter's blocks)"), -1);
+    return err[0] ? -1 : (osmos_fail(err, "a GPU call failed (the drafter's blocks)"), -1);
   int n = 0;
   float cum = 1.0f;
   bool head = false;
@@ -341,7 +341,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     const uint8_t *e_row = (const uint8_t *)d->mk_embed + (uint64_t)prev * d->rank * sizeof(uint16_t);
     if (!quant_dequant(DRAFTER_BF16, e_row, d->rank, d->cat + D, NULL) ||
         !confidence(d, (uint32_t)n, &conf[n]))
-      return fail(err, "a GPU call failed (the drafter's confidence)"), -1;
+      return osmos_fail(err, "a GPU call failed (the drafter's confidence)"), -1;
     cum *= conf[n];
     if (conf[n] < conf_min || cum < cum_min)
       break;
@@ -350,14 +350,14 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
       head = ops_rms(d->xc, D, D, d->norm, g->rms_eps, T, d->xn, D, NULL) &&
              mv_strided(fwd_type(f, f->w->output), fwd_dev(f, f->w->output), V, D, d->xn, D, T, d->vocab, V, NULL);
       if (!head)
-        return fail(err, "a GPU call failed (the drafter's head)"), -1;
+        return osmos_fail(err, "a GPU call failed (the drafter's head)"), -1;
     }
     float *row = d->vocab + (uint64_t)n * V;
     if (!mv_strided(DRAFTER_BF16, d->mk_head, V, d->rank, d->cat + D, d->rank, 1, d->mk, V, NULL) ||
         !ops_add(row, d->mk, V, NULL) || !ops_argmax(row, V, 1, V, d->best, d->best_part, NULL) ||
         hipMemcpyAsync(&d->pin->best, d->best, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
         !fwd_settle(d->f))
-      return fail(err, "a GPU call failed (the drafter's markov step)"), -1;
+      return osmos_fail(err, "a GPU call failed (the drafter's markov step)"), -1;
     if (d->pin->best < 0) /* a NaN in the row: no draft from it, nor past it */
       break;
     drafts[n] = d->pin->best; /* greedy: the most, ties to the lowest token (ops_argmax's) */

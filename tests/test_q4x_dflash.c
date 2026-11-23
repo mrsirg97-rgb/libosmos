@@ -71,7 +71,7 @@ static void key(const char *name, uint64_t v, const char *needle)
 int main(void)
 {
   printf("[test_q4x_dflash] start\n");
-  char err[OSMOS_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", path[512], gerr[OSMOS_ERR] = "";
   const char *home = getenv("HOME") ? getenv("HOME") : "";
   osmos_clear(err);
   assert(!q4x_dflash_create(NULL, NULL, err) && err[0]);

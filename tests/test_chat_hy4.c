@@ -46,7 +46,7 @@ static const Json *or_null(const Json *v) { return v && v->type != JSON_NULL ? v
 /* a fixtures file's cases against its template's dialect: renders, parses, refusals */
 static void cases(const char *name, const char *suffix, bool low)
 {
-  char path[256], err[JSON_ERR], cerr[CHAT_ERR];
+  char path[256], err[OSMOS_ERR], cerr[OSMOS_ERR];
   HchatTokens t;
   snprintf(path, sizeof path, "tests/fixtures/chat_%s.template", name);
   FILE *tf = fopen(path, "r");
@@ -119,7 +119,7 @@ int main(void)
 {
   printf("[test_chat_hy4] start\n");
   HchatTokens t;
-  char err[JSON_ERR], cerr[CHAT_ERR];
+  char err[OSMOS_ERR] = "", cerr[OSMOS_ERR] = "";
   assert(!hchat_tokens("a|b", &t, cerr) && !hchat_tokens("", &t, cerr));
   assert(!hchat_from_template("no template here", &t, cerr));
   cases("hy4", ":6124c78e", true);           /* AngelSlim's GGUF's template */

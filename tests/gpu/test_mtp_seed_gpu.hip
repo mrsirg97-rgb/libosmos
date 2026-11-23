@@ -57,7 +57,7 @@ int main() {
     std::printf("[test_mtp_seed_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its MTP head, the dump's ids or a GPU\n");
     return 77;
   }
-  char gerr[GGUF_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(first.c_str(), gerr);
   Gguf* mg = gguf_create(head.c_str(), gerr);
   CHECK(g && mg);

@@ -217,7 +217,7 @@ int main() {
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
   const std::string model = home + "/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
   int ndev = 0;
-  char gerr[GGUF_ERR] = "";
+  char gerr[OSMOS_ERR] = "";
   Gguf* g = access(model.c_str(), R_OK) == 0 ? gguf_create(model.c_str(), gerr) : nullptr;
   if (!g || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
     std::printf("[test_q4x_overflow_gpu] skipped: no model or GPU\n");

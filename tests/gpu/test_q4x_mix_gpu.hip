@@ -109,7 +109,7 @@ int main() {
   std::printf("[test_q4x_mix_gpu] start\n");
   int ndev = 0;
   Ref probe;
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(home_path(kQwenFirst).c_str(), err);
   if (!g || !ref_read("hc_init", &probe) || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
     std::printf("[test_q4x_mix_gpu] skipped: no Qwen3.8 UD-IQ3_XXS, its dump or a GPU\n");

@@ -86,7 +86,7 @@ int main() {
     std::printf("[test_q4x_taps_gpu] skipped: no Qwen3.8 UD-IQ3_XXS or no GPU\n");
     return 77;
   }
-  char gerr[GGUF_ERR] = "", werr[OSMOS_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(first.c_str(), gerr);
   CHECK(g);
   Q4xWeights* w = q4x_weights_create(g, nullptr, werr);

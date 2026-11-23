@@ -1,6 +1,7 @@
 #ifndef FORWARD_H
 #define FORWARD_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 
 #define SEQ_STATE_VERSION 3 /* seq_save's format or meaning: raised when it changes (forward_identity has it). 2 (0.7.1):
@@ -12,7 +13,6 @@
 #include "osmos/model/state_io.h"
 #include "osmos/model/weights.h"
 
-#define FORWARD_ERR 256
 /* a batch's sub-batches of MM_MAX_TOKENS: maya's 8,192-token chunk. each layer runs them all before the next, so the
    experts it streams are read once for all of them (DESIGN.md, "the memory, revised") */
 #define FORWARD_SUBS 4
@@ -39,14 +39,14 @@ typedef struct ForwardOptions
   uint32_t logit_rows;   /* a step's last rows whose logits are kept (forward_logit_rows); 0: its every row */
 } ForwardOptions;
 
-Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR]);
+Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[OSMOS_ERR]);
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
-                               const uint64_t *picks, char err[FORWARD_ERR]);
-Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err[FORWARD_ERR]);
+                               const uint64_t *picks, char err[OSMOS_ERR]);
+Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err[OSMOS_ERR]);
 void forward_destroy(Forward *f);
 void forward_probe(Forward *f, forward_probe_fn fn, void *arg);
 
-Seq *seq_create(Forward *f, char err[FORWARD_ERR]);
+Seq *seq_create(Forward *f, char err[OSMOS_ERR]);
 void seq_destroy(Seq *s);
 bool seq_prompt(Seq *s, uint32_t end);
 bool seq_rollback(Seq *s, uint32_t n);
@@ -54,20 +54,20 @@ uint32_t seq_reach(const Seq *s);
 int32_t seq_position(const Seq *s);
 uint64_t forward_identity(const Forward *f);
 uint64_t seq_state_bytes(const Seq *s);
-bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR]);
-bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[FORWARD_ERR]);
-bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FORWARD_ERR]);
+bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
+bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
+bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[OSMOS_ERR]);
 void forward_reading(Forward *f, bool on);
-bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]);
+bool forward_npu(Forward *f, const char *dir, float share, char err[OSMOS_ERR]);
 void forward_npu_stats(const Forward *f, uint64_t *calls, uint64_t *parts, double *wait_us, double *gpu_idle_ms,
                        uint64_t *gpu_outlasted);
 
-bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR]);
-bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR]);
+bool forward_step(Forward *f, Seq *s, int32_t token, char err[OSMOS_ERR]);
+bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
 const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
 uint32_t forward_logit_rows(const Forward *f);
-bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR]);
+bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 const uint64_t *forward_picks(const Forward *f);
 uint64_t forward_budget(const Forward *f);
 bool forward_room(const Forward *f, uint64_t *bytes);

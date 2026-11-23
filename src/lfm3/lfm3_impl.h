@@ -11,6 +11,7 @@
 #include "osmos/lfm3/forward.h"
 #include "osmos/q4x/dflash.h"
 #include "../q4x/dflash_core.h"
+#include "osmos/gpu/overflow.h"
 
 #define F 4ull               /* a float's bytes */
 #define LFM3_CONV_SLOTS (LFM3_MAX_BACK + 1) /* a convolution's states a sequence keeps: the current, and a rollback's */
@@ -56,6 +57,7 @@ struct Lfm3Forward
   int32_t *counts;
   float *h_ik, *h_cent;
   int32_t *h_mem;
+  OverflowFlag ovf;   /* its reset (osmos/gpu/overflow.h): owed when one failed */
   int32_t *overflow;  /* an activation past f16's range in a read (mm_x16's): the step refused */
   void *st;
   /* a step's buffers: max_tokens rows each */

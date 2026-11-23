@@ -33,7 +33,7 @@ static const char *file(const char *name, const char *header, size_t data)
 
 static void refused(const char *what, const char *header, size_t data, const char *says)
 {
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf *g = st_create(file("bad.safetensors", header, data), err);
   if (g || !strstr(err, says))
     fprintf(stderr, "  %s: %s\n", what, g ? "accepted" : err);
@@ -45,7 +45,7 @@ int main(void)
 {
   printf("[test_safetensors] start\n");
   assert(mkdtemp(dir));
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   /* two tensors and the metadata: a [3, 4] BF16 (24 bytes) after a [2] F32 (8 bytes) */
   const char *good = "{\"__metadata__\":{\"format\":\"pt\"},\"b\":{\"dtype\":\"BF16\",\"shape\":[3,4],\"data_offsets\":[8,32]},"
                      "\"a\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}";

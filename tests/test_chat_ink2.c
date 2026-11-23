@@ -46,7 +46,7 @@ int main(void)
   printf("[test_chat_ink2] start\n");
   FILE *f = fopen("tests/fixtures/chat_ink2.jsonl", "r");
   assert(f);
-  char err[JSON_ERR], cerr[CHAT_ERR];
+  char err[OSMOS_ERR] = "", cerr[OSMOS_ERR] = "";
   int renders = 0, refused = 0, parses = 0, parse_refused = 0, i = 0;
   size_t n;
   for (char *line; (line = slurp_line(f, &n)); i++)

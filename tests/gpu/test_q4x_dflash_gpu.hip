@@ -163,7 +163,7 @@ int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("[test_q4x_dflash_gpu] start\n");
   int ndev = 0;
-  char gerr[GGUF_ERR] = "", werr[OSMOS_ERR] = "", err[OSMOS_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", err[OSMOS_ERR] = "";
   const std::string ref = home_path(kRef);
   FILE* fi = std::fopen((ref + "/ids.txt").c_str(), "r");
   FILE* fp = std::fopen((ref + "/prompt.txt").c_str(), "r");

@@ -144,7 +144,7 @@ int main() {
   // the family's own calls, as osmos-serve made them before 0.4.0 (forward_lane 0: its decode's order)
   Run direct;
   {
-    char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[OSMOS_ERR] = "";
+    char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
     Gguf* g = gguf_create(path, gerr);
     const WeightsOptions wo = {g, nullptr, nullptr};
     Weights* w = g ? weights_create_with(&wo, werr) : nullptr;

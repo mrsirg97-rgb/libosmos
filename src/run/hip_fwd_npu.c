@@ -10,6 +10,7 @@
 
 #include "forward_impl.h"
 #include "osmos/model/qtype.h"
+#include "osmos/err.h"
 
 static void npu_free(Forward *f)
 {
@@ -25,19 +26,19 @@ static void npu_free(Forward *f)
 
 void fwd_npu_destroy(Forward *f) { npu_free(f); }
 
-bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR])
+bool forward_npu(Forward *f, const char *dir, float share, char err[OSMOS_ERR])
 {
   const Geometry *g = f->g;
   if (!dir || !(share > 0.0f && share < 1.0f))
-    return fwd_fail(err, "forward_npu: a directory and a share in (0, 1)");
+    return osmos_fail(err, "forward_npu: a directory and a share in (0, 1)");
   /* the kernels' shapes: 2304 = 3 passes x 32 cores x NPU_GATE_UP_ROWS, 5120 = 10 x 32 x NPU_DOWN_ROWS */
   if (g->n_embd % (NPU_CORES * NPU_DOWN_ROWS) || g->expert_ff % (NPU_CORES * NPU_GATE_UP_ROWS) || g->n_embd != 5120 ||
       g->expert_ff != 2304 || g->n_experts > OPS_MAX_EXPERTS)
-    return fwd_fail(err, "forward_npu: the kernels are DeepSeek's (5120 -> 2304 -> 5120)");
+    return osmos_fail(err, "forward_npu: the kernels are DeepSeek's (5120 -> 2304 -> 5120)");
   npu_free(f);
   const uint64_t pairs = (uint64_t)f->max_tokens * (uint64_t)g->n_used;
   const uint32_t max = (uint32_t)(share * (double)pairs / NPU_TOKENS) + 1;
-  char nerr[NPU_ERR] = "";
+  char nerr[OSMOS_ERR] = "";
   void *hb = host_slots_base(f->hs), *sb = host_slots_base(f->hs_stream);
   if (!(f->npu = npu_open(dir, g->n_embd, g->expert_ff, max, nerr)) ||
       /* the cache's pages and the stream's: every expert a step holds (npu_run refuses one outside them) */
@@ -49,7 +50,7 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]
       !npu_device(f->npu, f->b.ye, pairs * g->n_embd * sizeof(float), nerr))
   {
     npu_free(f);
-    return fwd_fail(err, nerr);
+    return osmos_fail(err, "%s", nerr);
   }
   const unsigned mapped = hipHostMallocMapped | hipHostMallocCoherent;
   if (hipHostMalloc((void **)&f->npu_tok, (size_t)max * NPU_TOKENS * 4, mapped) != hipSuccess ||
@@ -60,7 +61,7 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[FORWARD_ERR]
       hipEventCreate(&f->npu_gpu_done) != hipSuccess || hipEventCreate(&f->npu_resumed) != hipSuccess)
   {
     npu_free(f);
-    return fwd_fail(err, "forward_npu: out of memory");
+    return osmos_fail(err, "forward_npu: out of memory");
   }
   f->npu_share = share, f->npu_max = max;
   return true;
@@ -131,7 +132,7 @@ bool fwd_npu_run(Forward *f, NpuKind kind, int l, uint32_t parts, char *err)
   const LayerWeights *L = &f->w->layer[l];
   const uint32_t qt = kind == NPU_GATE_UP ? L->exp_gate->type : L->exp_down->type;
   const QTypeInfo *qi = qtype_info(qt);
-  char nerr[NPU_ERR] = "";
+  char nerr[OSMOS_ERR] = "";
   if (f->npu_timed) /* the last call's pair, long past: the GPU's idle between them */
   {
     float ms = 0;
@@ -140,7 +141,7 @@ bool fwd_npu_run(Forward *f, NpuKind kind, int l, uint32_t parts, char *err)
     f->npu_timed = false;
   }
   if (!qi || hipEventRecord(f->npu_gpu_done, NULL) != hipSuccess || hipEventSynchronize(f->npu_packed) != hipSuccess)
-    return fwd_fail(err, "the NPU's packing failed");
+    return osmos_fail(err, "the NPU's packing failed");
   const uint64_t w_bytes = (uint64_t)g->expert_ff * g->n_embd / qi->values * qi->bytes; /* either matrix: D x FF */
   for (uint32_t p = 0; p < parts; p++) /* a part's rows where the GPU reads them: from its first row's */
     if (kind == NPU_GATE_UP)
@@ -150,10 +151,10 @@ bool fwd_npu_run(Forward *f, NpuKind kind, int l, uint32_t parts, char *err)
       f->npu_c0[p] = f->npu_c1[p] = f->b.ye + (uint64_t)f->npu_row[p] * g->n_embd;
   const bool ahead = hipEventQuery(f->npu_gpu_done) == hipErrorNotReady; /* the GPU still busy as the NPU begins */
   if (!npu_run(f->npu, kind, qt, parts, f->npu_wg, f->npu_wu, w_bytes, f->npu_c0, f->npu_c1, nerr))
-    return fwd_fail(err, nerr);
+    return osmos_fail(err, "%s", nerr);
   f->npu_gpu_ahead_ms += ahead && hipEventQuery(f->npu_gpu_done) == hipErrorNotReady; /* still busy as it ends: a count */
   if (hipEventRecord(f->npu_resumed, NULL) != hipSuccess)
-    return fwd_fail(err, "the NPU's resume event");
+    return osmos_fail(err, "the NPU's resume event");
   f->npu_timed = true;
   return true;
 }

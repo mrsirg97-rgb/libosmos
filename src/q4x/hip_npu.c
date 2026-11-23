@@ -50,7 +50,7 @@ bool q4x_forward_npu(Q4xForward *f, const char *dir, float share, char err[OSMOS
     return osmos_fail(err, "q4x_forward_npu: the kernels are Qwen3.8-Flash-Next's (2560 -> 640 -> 2560)");
   q4x_npu_destroy(f);
   const uint64_t n = f->max_tokens, k = (uint64_t)g->n_used, D = (uint64_t)g->n_embd, ff = (uint64_t)g->ff_exp;
-  char nerr[NPU_ERR] = "";
+  char nerr[OSMOS_ERR] = "";
   Q4xBuf *b = &f->b;
   bool ok = (f->npu = npu_open(dir, (uint32_t)D, (uint32_t)ff, NPU_SELECT_MAX, nerr)) &&
             /* where its rows go: the step's gate, up and down outputs (their sizes hip_forward.c's buffers()') */
@@ -125,7 +125,7 @@ uint32_t q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExp
 /* the parts' launches of one kind, once their packing is done (the GPU going on with what was queued after it) */
 static bool run(Q4xForward *f, const Q4xLayer *L, NpuKind kind, uint32_t D, uint32_t ff)
 {
-  char nerr[NPU_ERR] = "";
+  char nerr[OSMOS_ERR] = "";
   if (hipEventSynchronize(f->npu_packed) != hipSuccess)
     return fprintf(stderr, "q4x: the NPU's packing failed\n"), false;
   const uint32_t parts = *f->npu_nsel;

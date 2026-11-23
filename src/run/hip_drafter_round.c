@@ -1,6 +1,7 @@
 #include <math.h>
 
 #include "drafter_impl.h"
+#include "osmos/err.h"
 
 /* a round's three blocks on its DRAFTER_BLOCK rows (DeepSeek's DSparkBlock: the trunk's layer in small) */
 
@@ -75,5 +76,5 @@ bool drafter_blocks(Drafter *d, Seq *s, int32_t p0, char *err)
     pre = d->f_pre; /* the next block's attention pre: this one's FFN mix (the trunk's lag) */
   }
   ok = ok && ops_hc_pre(d->h, d->f_pre, hc, D, T, d->xc, NULL);
-  return ok || fwd_fail(err, "a GPU call failed (the drafter's blocks)");
+  return ok || osmos_fail(err, "a GPU call failed (the drafter's blocks)");
 }

@@ -43,7 +43,7 @@ static void *m_open(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_E
   Model *m = calloc(1, sizeof *m);
   if (!m)
     return osmos_fail(err, "out of memory"), NULL;
-  char werr[OSMOS_ERR > GGUF_ERR ? OSMOS_ERR : GGUF_ERR] = "";
+  char werr[OSMOS_ERR > OSMOS_ERR ? OSMOS_ERR : OSMOS_ERR] = "";
   if (!(m->g = gguf_create(files->model, werr)) || !(m->w = ink2_weights_create(m->g, werr)))
   {
     if (err)

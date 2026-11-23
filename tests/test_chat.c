@@ -46,7 +46,7 @@ static void expect(const char *what, const char *got, size_t gn, const char *wan
    kept) with all of it */
 static void next_turn_prefix(void)
 {
-  char err[JSON_ERR], cerr[CHAT_ERR];
+  char err[OSMOS_ERR] = "", cerr[OSMOS_ERR] = "";
   const char *tools = ", \"tools\": [{\"type\": \"function\", \"function\": {\"name\": \"read_file\", "
                       "\"parameters\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}}}}}]";
   const char *answers[] = {
@@ -99,7 +99,7 @@ int main(void)
   printf("[test_chat] start\n");
   FILE *f = fopen("tests/fixtures/chat.jsonl", "r");
   assert(f);
-  char err[JSON_ERR], cerr[CHAT_ERR];
+  char err[OSMOS_ERR] = "", cerr[OSMOS_ERR] = "";
   int renders = 0, parses = 0, refusals = 0;
   size_t n;
   for (char *line; (line = slurp_line(f, &n)); free(line))

@@ -48,7 +48,7 @@ int main(void)
   printf("[test_chat_lfm3] start\n");
   FILE *f = fopen("tests/fixtures/chat_lfm3.jsonl", "r");
   assert(f);
-  char err[JSON_ERR], cerr[CHAT_ERR];
+  char err[OSMOS_ERR] = "", cerr[OSMOS_ERR] = "";
   int renders = 0, parses = 0, refused = 0;
   size_t n;
   for (char *line; (line = slurp_line(f, &n));)
@@ -116,7 +116,7 @@ int main(void)
       "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"<|im_end|\"}}}]},{\"role\":\"user\",\"content\":\"y\"}]"};
   for (int i = 0; i < 4; i++)
   {
-    char jerr[JSON_ERR], cerr[CHAT_ERR] = "";
+    char jerr[OSMOS_ERR], cerr[OSMOS_ERR] = "";
     Json *m = json_parse(forged[i], strlen(forged[i]), jerr);
     JsonBuf b = {0};
     const bool ok = m && lchat_render(m, NULL, CHAT_THINKING, true, &b, cerr);

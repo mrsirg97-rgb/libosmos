@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "osmos/err.h"
 #include "state_stream.h"
 
 extern "C" {
@@ -41,7 +42,7 @@ constexpr uint64_t kBudget = 100ull << 30;  // (its experts mostly held: test_fi
 
 static Forward* g_f;
 static uint32_t g_vocab;
-static char g_err[OSMOS_ERR];
+static char g_err[OSMOS_ERR] = "";
 
 static uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
   const uint8_t* b = (const uint8_t*) p;
@@ -63,11 +64,13 @@ static int32_t prompt(Seq* s, const std::vector<int32_t>& p, uint64_t* h) {
   std::vector<Seq*> ss(P, s);
   for (uint32_t at = 0; at < P;) {
     const uint32_t c = P - at < kMaxTokens ? P - at : kMaxTokens;
+    osmos_clear(g_err);
     CHECK(forward_batch(g_f, ss.data(), p.data() + at, c, g_err));
     at += c;
   }
   const uint32_t row = (P - 1) % kMaxTokens;
   int32_t t;
+  osmos_clear(g_err);
   CHECK(forward_greedy(g_f, row, 1, &t, g_err) && hipDeviceSynchronize() == hipSuccess);
   std::vector<float> lg(g_vocab);
   CHECK(hipMemcpy(lg.data(), forward_logits(g_f) + (uint64_t) row * g_vocab, g_vocab * 4, hipMemcpyDeviceToHost) ==
@@ -80,7 +83,9 @@ static int32_t prompt(Seq* s, const std::vector<int32_t>& p, uint64_t* h) {
 static void answer(Seq* s, int32_t t, int n, uint64_t* h) {
   std::vector<float> lg(g_vocab);
   for (int i = 0; i < n; i++) {
+    osmos_clear(g_err);
     CHECK(forward_step(g_f, s, t, g_err));
+    osmos_clear(g_err);
     CHECK(forward_greedy(g_f, 0, 1, &t, g_err) && hipDeviceSynchronize() == hipSuccess);
     CHECK(hipMemcpy(lg.data(), forward_logits(g_f), g_vocab * 4, hipMemcpyDeviceToHost) == hipSuccess);
     *h = fnv(lg.data(), lg.size() * 4, *h);
@@ -95,19 +100,23 @@ static void drafted(Drafter* d, Seq* s, int32_t t, int n, uint64_t* h) {
   float cf[DRAFTER_BLOCK];
   std::vector<float> lg((size_t) (DRAFTER_BLOCK + 1) * g_vocab);
   for (int made = 0; made < n;) {
+    osmos_clear(g_err);
     const int k = drafter_draft(d, s, t, 0.0f, 0.0f, dr, cf, g_err);
     CHECK(k >= 0);
     std::vector<int32_t> toks{t};
     toks.insert(toks.end(), dr, dr + k);
     std::vector<Seq*> ss(toks.size(), s);
+    osmos_clear(g_err);
     CHECK(forward_batch(g_f, ss.data(), toks.data(), (uint32_t) toks.size(), g_err));
     int32_t picks[DRAFTER_BLOCK + 1];
+    osmos_clear(g_err);
     CHECK(forward_greedy(g_f, 0, (uint32_t) k + 1, picks, g_err) && hipDeviceSynchronize() == hipSuccess);
     CHECK(hipMemcpy(lg.data(), forward_logits(g_f), (size_t) (k + 1) * g_vocab * 4, hipMemcpyDeviceToHost) ==
           hipSuccess);
     *h = fnv(lg.data(), (size_t) (k + 1) * g_vocab * 4, *h);
     int m = 0;
     while (m < k && picks[m] == dr[m]) m++;
+    osmos_clear(g_err);
     CHECK(seq_rollback(s, (uint32_t) (k - m)) && drafter_seed(d, s, pos, pos + m + 1, g_err));
     *h = fnv(picks, (size_t) (m + 1) * 4, *h);
     t = picks[m], pos += m + 1, made += m + 1;
@@ -124,7 +133,7 @@ int main() {
     return 77;
   }
   const std::string dir = std::string(path).substr(0, std::string(path).rfind('/') + 1);
-  char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, gerr);
   CHECK(g);
   Gguf* eg = which == TestModel::kGsq ? gguf_create((dir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), gerr)
@@ -156,6 +165,7 @@ int main() {
   for (int draft = 0; draft < (d ? 2 : 1); draft++) {
     // the reference: A from its prompt to its answer, never set aside
     uint64_t ref = 1469598103934665603ull;
+    osmos_clear(g_err);
     Seq* a = seq_create(g_f, g_err);
     CHECK(a);
     int32_t t = prompt(a, pa, &ref);
@@ -165,19 +175,23 @@ int main() {
 
     // A's prompt, its state saved; B run in its own sequence; A's state loaded into B's; A answers from there
     uint64_t got = 1469598103934665603ull;
+    osmos_clear(g_err);
     a = seq_create(g_f, g_err);
     CHECK(a);
     t = prompt(a, pa, &got);
     if (draft) CHECK(drafter_seed(d, a, 0, (int32_t) kPromptA, g_err));
     std::vector<uint8_t> st(seq_state_bytes(a));
+    osmos_clear(g_err);
     CHECK(!st.empty() && !save_buf(seq_save_to, a, st.data(), st.size() - 1, g_err) && save_buf(seq_save_to, a, st.data(), st.size(), g_err));
     seq_destroy(a);
+    osmos_clear(g_err);
     Seq* b = seq_create(g_f, g_err);
     CHECK(b);
     uint64_t hb = 0;
     const int32_t tb = prompt(b, pb, &hb);
     if (draft) CHECK(drafter_seed(d, b, 0, (int32_t) kPromptB, g_err));
     answer(b, tb, kNewB, &hb);
+    osmos_clear(g_err);
     CHECK(load_buf(seq_load_from, b, st.data(), st.size(), g_err) && seq_position(b) == (int32_t) kPromptA);
     draft ? drafted(d, b, t, kNew, &got) : answer(b, t, kNew, &got);
     std::printf("  %s: A's state %zu bytes (%u tokens) set aside, B's %u + %d run, A taken back into B's sequence: "
@@ -188,9 +202,12 @@ int main() {
     if (!draft) {  // refusals, each leaving the sequence at position 0
       std::vector<uint8_t> bad = st;
       bad[bad.size() / 2] ^= 0x10;
+      osmos_clear(g_err);
       CHECK(!load_buf(seq_load_from, b, bad.data(), bad.size(), g_err) && seq_position(b) == 0);
       std::printf("  a byte damaged: refused (%s), the sequence reset\n", g_err);
+      osmos_clear(g_err);
       CHECK(load_buf(seq_load_from, b, st.data(), st.size(), g_err) && seq_position(b) == (int32_t) kPromptA);
+      osmos_clear(g_err);
       CHECK(!load_buf(seq_load_from, b, st.data(), st.size() - 4, g_err) && seq_position(b) == 0);
       std::printf("  a size that disagrees: refused (%s), the sequence reset\n", g_err);
       // another identity: the header's (bytes 8 .. 16, after the magic and the version), the checksum made again
@@ -202,7 +219,9 @@ int main() {
       const uint64_t sum = fnv(bad.data(), bad.size() - 8);
       std::memcpy(bad.data() + bad.size() - 8, &sum, 8);
       CHECK(id != forward_identity(g_f));
+      osmos_clear(g_err);
       CHECK(load_buf(seq_load_from, b, st.data(), st.size(), g_err));
+      osmos_clear(g_err);
       CHECK(!load_buf(seq_load_from, b, bad.data(), bad.size(), g_err) && seq_position(b) == 0);
       std::printf("  another identity: refused (%s), the sequence reset\n", g_err);
     }
@@ -221,6 +240,7 @@ int main() {
     CHECK(in && out && std::fputs("{\"target_layers\": [36, 38, 39], ", out) >= 0 && std::fgetc(in) == '{');
     for (int c; (c = std::fgetc(in)) != EOF;) std::fputc(c, out);
     std::fclose(in), std::fclose(out);
+    osmos_clear(g_err);
     CHECK(!drafter_create(g_f, t.c_str(), g_err) && std::strstr(g_err, "differ"));
     std::printf("  a drafter naming other target layers than the model's: refused (%s)\n", g_err);
     CHECK(std::system(("rm -rf " + t).c_str()) == 0);

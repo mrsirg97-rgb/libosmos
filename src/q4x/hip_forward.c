@@ -289,8 +289,9 @@ static bool buffers(Q4xForward *f, char *err)
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
     if (want[i].per_token)
       f->rows[f->n_rows].p = want[i].p, f->rows[f->n_rows++].row = want[i].bytes / n;
-  if (hipMemset(b->overflow, 0, 4) != hipSuccess)
-    return osmos_fail(err, "a GPU call failed (the f16 overflow flag)");
+  f->ovf = (OverflowFlag){b->overflow, 4, false};
+  if (!overflow_reset(&f->ovf, err))
+    return false;
   int32_t *iota = malloc(n * g->ple_heads * 4);
   for (uint64_t i = 0; iota && i < n * g->ple_heads; i++)
     iota[i] = (int32_t)i;

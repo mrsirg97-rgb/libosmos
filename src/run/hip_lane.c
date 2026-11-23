@@ -5,6 +5,7 @@
 #include "lane.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q8.h"
+#include "osmos/err.h"
 
 /* forward_lane's small steps: the step's (token, routed expert) pairs in rows by expert (then token), each expert -
    an entry, or a few of them past MV_MAX_TOKENS tokens - once for its rows through the matvec's group (gate and up
@@ -26,10 +27,10 @@ typedef struct LaneTabs
   int32_t cpu_row[LANE_PAIRS];               /* the rows the CPU computes (the lane's CPU half) */
 } LaneTabs;
 
-bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FORWARD_ERR])
+bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[OSMOS_ERR])
 {
   if (!f || cpu_threads < 0 || cpu_threads > CPU_LANE_THREADS_MAX)
-    return fwd_fail(err, "no forward, or a count of CPU threads it does not take");
+    return osmos_fail(err, "no forward, or a count of CPU threads it does not take");
   const uint64_t D = f->g->n_embd;
   if (!f->lane_up &&
       (hipHostMalloc((void **)&f->lane_up, sizeof(LaneTabs), hipHostMallocMapped | hipHostMallocCoherent) !=
@@ -40,7 +41,7 @@ bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[FO
        !fwd_alloc(&f->lane_qd, LANE_ROWS * (D / LANE_Q8_VALUES) * sizeof(float)) ||
        !fwd_alloc(&f->lane_xq, LANE_PAIRS * D) ||
        !fwd_alloc(&f->lane_xqd, LANE_PAIRS * (D / LANE_Q8_VALUES) * sizeof(float))))
-    return fwd_fail(err, "memory refused (the lane's tables)");
+    return osmos_fail(err, "memory refused (the lane's tables)");
   if (cpu_threads && !f->cpu && !fwd_cpu_create(f, cpu_threads, cpu_cores, err))
     return false;
   f->lane = true, f->lane_threads = cpu_threads;
@@ -119,7 +120,7 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
   Scratch *b = &f->b;
   const uint32_t D = g->n_embd, E = g->n_experts, K = g->n_used, n = f->n;
   if (picks > LANE_PAIRS)
-    return fwd_fail(err, "a small step of more pairs than the lane's tables");
+    return osmos_fail(err, "a small step of more pairs than the lane's tables");
   LaneTabs *t = (LaneTabs *)f->lane_up;
   int32_t rows[LANE_PAIRS][2];
   for (uint32_t m = 0; m < picks; m++)
@@ -149,7 +150,7 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
     {
       const void *part[POOL_PARTS];
       if (!fwd_cpu_parts(f, u, part))
-        return fwd_fail(err, "an expert's file not one the CPU lane mapped");
+        return osmos_fail(err, "an expert's file not one the CPU lane mapped");
       f->cpu_e[nc] = (CpuLaneExpert){part[0], part[1], part[2], r, 1}, f->cpu_unit[nc++] = u;
       t->cpu_row[n_cpu++] = (int32_t)r;
       continue;
@@ -218,5 +219,5 @@ bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, cha
   ok = ok && (!nc || (ops_wait(f->cpu_seq_dev, f->cpu_value, NULL) &&
                       ops_copy_rows(b->ye, f->cpu_y_dev, d->cpu_row, n_cpu, D, NULL)));
   ok = ok && ops_gather_sum_add(b->moe, b->ye, d->order, K, n, D, b->sye, NULL);
-  return ok || fwd_fail(err, "a GPU call failed (the lane's experts)");
+  return ok || osmos_fail(err, "a GPU call failed (the lane's experts)");
 }

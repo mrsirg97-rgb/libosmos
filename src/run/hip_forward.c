@@ -17,6 +17,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/model/qtype.h"
 #include "osmos/model/rope.h"
+#include "osmos/err.h"
 
 #define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
 #define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */
@@ -24,12 +25,6 @@
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
 _Static_assert(sizeof(LayerWeights) % sizeof(const GgufTensor *) == 0, "LayerWeights is its tensors and only them");
 _Static_assert(sizeof(Scratch) % sizeof(void *) == 0, "Scratch is its device buffers and only them");
-
-bool fwd_fail(char *err, const char *why)
-{
-  snprintf(err, FORWARD_ERR, "forward: %s", why);
-  return false;
-}
 
 bool fwd_put(void *dev, const void *host, uint64_t bytes)
 {
@@ -135,10 +130,10 @@ static size_t choose(Forward *f, int32_t *rix, const PoolUnit *ex, PoolUnit *res
   if (!budget)
     budget = f->budget = a.total; /* 0: the dense weights alone (forward_budget says what they took) */
   if (a.total > budget)
-    return fwd_fail(err, "the layers' weights are more than the budget"), 0;
+    return osmos_fail(err, "the layers' weights are more than the budget"), 0;
   uint32_t *order = malloc((size_t)f->n_layers * E * sizeof *order); /* [layer][rank]: the expert */
   if (!order)
-    return fwd_fail(err, "out of memory"), 0;
+    return osmos_fail(err, "out of memory"), 0;
   for (int l = 0; l < f->n_layers; l++)
   {
     uint32_t *o = order + (size_t)l * E;
@@ -230,7 +225,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   if (!ok)
   {
     free(all), free(res), free(t_res), free(rix);
-    return fwd_fail(err, "out of memory, or the experts' units");
+    return osmos_fail(err, "out of memory, or the experts' units");
   }
   size_t n_t = 0;
   t_res[n_t++] = w->embed, t_res[n_t++] = w->output, t_res[n_t++] = w->output_norm;
@@ -255,9 +250,9 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   const size_t n_res = choose(f, rix, all, res, n_t, budget, picks, err);
   const size_t n_warm = n_res > n_t ? n_res - n_t : 0;
   uint32_t *warm = n_warm ? malloc(n_warm * sizeof *warm) : NULL;
-  char perr[POOL_ERR] = "";
+  char perr[OSMOS_ERR] = "";
   if (!n_res || (n_warm && !warm))
-    ok = n_res ? fwd_fail(err, "out of memory") : false;
+    ok = n_res ? osmos_fail(err, "out of memory") : false;
   /* the stream's room (experts_stream_room: two layers' experts not warm at load, never under a whole layer's - the
      membrane's room is shared by every layer, so decode misses evict another layer's stale units and a prompt step
      holds every cold pick of a layer in the stream at once) */
@@ -283,9 +278,9 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   if (!ok)
     ;
   else if (!(f->res = resident_create(res, n_t, hip_slots(), FWD_FETCH_THREADS, perr)))
-    ok = fwd_fail(err, perr);
+    ok = osmos_fail(err, "%s", perr);
   else if (!direct_units(f, all) || !f->pool_room)
-    ok = fwd_fail(err, "out of memory (the pools' units), or a budget with no experts");
+    ok = osmos_fail(err, "out of memory (the pools' units), or a budget with no experts");
   else /* the budget's experts its warm start: read at the first step (membrane_warm), not here - fit.h's builds */
   {
     Experts ex;
@@ -300,7 +295,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
     ok = resident_dev(f->res, i, dev);
     f->tdev[weights_tensor_index(w, t_res[i])] = dev[0];
   }
-  ok = ok && (repack_all(f, t_res, n_t) || fwd_fail(err, "the Q5_K matrices' repack failed"));
+  ok = ok && (repack_all(f, t_res, n_t) || osmos_fail(err, "the Q5_K matrices' repack failed"));
   free(res), free(t_res);
   f->units = all; /* the CPU lane's parts and a promotion's copy */
   return ok;
@@ -313,7 +308,7 @@ static bool oa_tables(Forward *f, char *err)
   const Geometry *g = f->g;
   const uint32_t G = (uint32_t)g->o_groups, oin = (uint32_t)(g->n_heads * g->head_dim / G);
   if (G > FWD_MAX_GROUPS)
-    return fwd_fail(err, "more wo_a groups than this build runs");
+    return osmos_fail(err, "more wo_a groups than this build runs");
   const void **tab = calloc((size_t)f->n_layers * G, sizeof *tab);
   uint32_t xo[FWD_MAX_GROUPS], yo[FWD_MAX_GROUPS];
   for (uint32_t k = 0; k < G; k++)
@@ -326,7 +321,7 @@ static bool oa_tables(Forward *f, char *err)
       tab[(size_t)l * G + k] = fwd_dev(f, f->w->layer[l].out_a) + k * (fwd_bytes(f, f->w->layer[l].out_a) / G);
   ok = ok && fwd_put(f->oa_tab, tab, (uint64_t)f->n_layers * G * sizeof *tab);
   free(tab);
-  return ok || fwd_fail(err, "a GPU allocation refused (the wo_a tables)");
+  return ok || osmos_fail(err, "a GPU allocation refused (the wo_a tables)");
 }
 
 bool fwd_alloc(void *p, uint64_t bytes)
@@ -378,7 +373,7 @@ static bool gates(Forward *f, const Weights *w, char *err)
   const uint64_t n = (uint64_t)w->geo.hc * (uint64_t)w->geo.n_embd;
   float *g = malloc(n * sizeof *g);
   uint16_t *q = malloc(n * sizeof *q), *k = malloc(n * sizeof *k);
-  bool ok = g && q && k;
+  bool ok = (g && q && k) || osmos_fail(err, "out of memory (the Engram's gates)");
   for (int l = 0; ok && l < w->geo.n_layers; l++)
   {
     if (!w->geo.engram[l])
@@ -394,10 +389,13 @@ static bool gates(Forward *f, const Weights *w, char *err)
         memcpy(&x, &a, 4), memcpy(&y, &b, 4);
         g[i] = x * y;
       }
-    ok = ok && fwd_alloc(&f->eg_gate[l], n * sizeof *g) && fwd_put(f->eg_gate[l], g, n * sizeof *g);
+    /* each cause its own (one message for all three read "could not be read" for a refused allocation) */
+    ok = (ok || osmos_fail(err, "the Engram's gates of layer %d could not be read", l)) &&
+         (fwd_alloc(&f->eg_gate[l], n * sizeof *g) || osmos_fail(err, "GPU memory refused (the Engram's gates)")) &&
+         (fwd_put(f->eg_gate[l], g, n * sizeof *g) || osmos_fail(err, "a GPU copy failed (the Engram's gates)"));
   }
   free(g), free(q), free(k);
-  return ok || fwd_fail(err, "the Engram's gates could not be read");
+  return ok;
 }
 
 /* an F32 router (llama.cpp's GGUFs) rounded to BF16 (nearest, ties to even) for the guess alone: the guess picks the
@@ -424,7 +422,7 @@ static bool guess_routers(Forward *f, const Weights *w, char *err)
     ok = ok && fwd_alloc(&f->guess_router[l], n * sizeof *h) && fwd_put(f->guess_router[l], h, n * sizeof *h);
     free(x), free(h);
   }
-  return ok || fwd_fail(err, "a router's copy for the guess could not be made");
+  return ok || osmos_fail(err, "a router's copy for the guess could not be made");
 }
 
 static bool scratch(Forward *f)
@@ -489,6 +487,7 @@ static bool scratch(Forward *f)
   for (int l = 0; l < g->n_layers; l++)
     n_eg += g->engram[l];
   f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
+  f->ovf = (OverflowFlag){b->overflow, 4, false}; /* (zeroed by fwd_alloc) */
   return fwd_put(b->pre0, pre0, B * hc * F) && fwd_alloc(&f->argmax_part, ops_argmax_scratch((uint32_t)B)) &&
          hipHostMalloc((void **)&f->r_ids, P * 4, hipHostMallocMapped | hipHostMallocCoherent) == hipSuccess &&
          hipHostGetDevicePointer((void **)&f->r_ids_dev, f->r_ids, 0) == hipSuccess &&
@@ -542,31 +541,31 @@ static bool freqs(Forward *f)
          fwd_alloc(&f->freqs_comp, bytes) && fwd_put(f->freqs_win, a, bytes) && fwd_put(f->freqs_comp, c, bytes);
 }
 
-Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[FORWARD_ERR])
+Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[OSMOS_ERR])
 {
   return forward_create_ranked(w, n_layers, max_ctx, budget, NULL, err);
 }
 
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
-                               const uint64_t *picks, char err[FORWARD_ERR])
+                               const uint64_t *picks, char err[OSMOS_ERR])
 {
   const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0};
   return forward_create_with(w, &o, err);
 }
 
-Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err[FORWARD_ERR])
+Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err[OSMOS_ERR])
 {
   const int n_layers = o ? o->n_layers : 0;
   const uint32_t max_ctx = o ? o->max_ctx : 0, max_tokens = o && o->max_tokens ? o->max_tokens : FORWARD_MAX_TOKENS;
   const uint64_t *picks = o ? o->picks : NULL;
   const uint64_t budget = o ? o->budget : 0;
   if (!w || n_layers < 1 || n_layers > w->geo.n_layers || !max_ctx || max_tokens > FORWARD_MAX_TOKENS)
-    return fwd_fail(err, "no weights, or layers, a context or a step it cannot run"), NULL;
+    return osmos_fail(err, "no weights, or layers, a context or a step it cannot run"), NULL;
   if (w->n_files > FWD_MAX_FILES)
-    return fwd_fail(err, "more files than this build maps"), NULL;
+    return osmos_fail(err, "more files than this build maps"), NULL;
   Forward *f = calloc(1, sizeof *f);
   if (!f)
-    return fwd_fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->no_guess = o->no_guess, f->budget = budget;
   f->ahead_limit = o->ahead_limit, f->logit_rows = o->logit_rows;
   f->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
@@ -595,30 +594,30 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   for (int i = 0; ok && i < w->n_files; i++) /* the model's files, then an overlay's (weights.h) */
     ok = (f->fds[i] = open(w->paths[i], O_RDONLY)) >= 0 &&
          (direct = (f->dfds[i] = open(w->paths[i], O_RDONLY | O_DIRECT)) >= 0);
-  char eerr[ENGRAM_ERR] = "";
+  char eerr[OSMOS_ERR] = "";
   if (!ok && !direct) /* refused loudly: the pool's reads are direct (no silent buffered path) */
-    fwd_fail(err, "a model file could not be opened O_DIRECT (its filesystem: tmpfs and some FUSE ones refuse it)");
+    osmos_fail(err, "a model file could not be opened O_DIRECT (its filesystem: tmpfs and some FUSE ones refuse it)");
   else if (!ok)
-    fwd_fail(err, "a model file could not be opened");
+    osmos_fail(err, "a model file could not be opened");
   else if ((f->eg_fd = engram_fd(f, w)) < 0)
-    ok = fwd_fail(err, "the Engram's file could not be opened");
+    ok = osmos_fail(err, "the Engram's file could not be opened");
   else if (!(f->hash = engram_create(w, f->fds, eerr)))
-    ok = fwd_fail(err, eerr);
+    ok = osmos_fail(err, "%s", eerr);
   else if (!gates(f, w, err) || !guess_routers(f, w, err))
     ok = false;
   else if (!(f->rows = calloc((size_t)FWD_MAX_BATCH * WEIGHTS_MAX_LAYERS * f->g->engram_cols, sizeof *f->rows)) ||
            !(f->eg_off = calloc((size_t)FWD_MAX_SUBS * FWD_MAX_BATCH * engram_layers(w, n_layers) *
                                     f->g->engram_cols + 1,
                                 sizeof *f->eg_off)))
-    ok = fwd_fail(err, "out of memory");
+    ok = osmos_fail(err, "out of memory");
   else if (!(f->eg_read = rowread_create(FWD_ROW_THREADS)))
-    ok = fwd_fail(err, "Engram's readers could not start");
+    ok = osmos_fail(err, "Engram's readers could not start");
   const size_t nu = (size_t)n_layers * w->geo.n_experts;
   ok = ok && units(f, budget, picks, err) && oa_tables(f, err) &&
        ((f->picks = calloc(nu, sizeof *f->picks)) ||
-        fwd_fail(err, "out of memory"));
+        osmos_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
-    ok = fwd_fail(err, "a GPU allocation refused");
+    ok = osmos_fail(err, "a GPU allocation refused");
   if (!ok)
   {
     forward_destroy(f);
@@ -732,18 +731,18 @@ void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2])
 const float *forward_logits(const Forward *f) { return f->b.vocab; }
 uint32_t forward_logit_rows(const Forward *f) { return f ? f->vocab_rows : 0; }
 
-bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[FORWARD_ERR])
+bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
   if (!f || !ids || !rows || row0 + rows < row0 || row0 + rows > f->vocab_rows)
-    return fwd_fail(err, "rows the last step's head did not compute");
+    return osmos_fail(err, "rows the last step's head did not compute");
   const uint32_t V = (uint32_t)f->g->n_vocab;
   /* b->ids free between steps (the next one's tokens written at its start) */
   if (!ops_argmax(f->b.vocab + (uint64_t)row0 * V, V, rows, V, f->b.ids, f->argmax_part, NULL) ||
       hipMemcpyAsync(f->pin->greedy, f->b.ids, rows * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       !fwd_settle(f))
-    return fwd_fail(err, "a GPU call failed (the greedy picks)");
+    return osmos_fail(err, "a GPU call failed (the greedy picks)");
   for (uint32_t r = 0; r < rows; r++)
     if ((ids[r] = f->pin->greedy[r]) < 0)
-      return fwd_fail(err, "a NaN in a row's logits");
+      return osmos_fail(err, "a NaN in a row's logits");
   return true;
 }

@@ -62,7 +62,7 @@ int main() {
   std::vector<uint8_t> w;
   float wscale = 1.0f, gs = 0.05f;
   const char* mp = std::getenv("Q35_MODEL");
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = mp ? gguf_create(mp, err) : nullptr;
   const GgufTensor* t = g ? gguf_tensor(g, "blk.3.ffn_gate.weight") : nullptr;
   if (t && t->type == QTYPE_NVFP4) {

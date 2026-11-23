@@ -63,7 +63,6 @@ static Rows run(Weights* w, uint32_t logit_rows, const std::vector<int32_t>& ids
   CHECK(forward_greedy(f, r.long_rows - 1, 1, &r.long_pick, err));
   int32_t t;
   if (refuse_past)  // a slot past the kept ones, and a run of rows reaching one
-    osmos_clear(err);
     CHECK(!forward_greedy(f, kKeep, 1, &t, err) && !forward_greedy(f, 0, kKeep + 1, std::vector<int32_t>(kLong).data(), err));
   osmos_clear(err);
   CHECK(forward_batch(f, ss.data(), ids.data() + kLong, kShort, err));

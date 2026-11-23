@@ -7,6 +7,7 @@
 #include "forward_impl.h"
 #include "lane.h"
 #include "osmos/cpu/lane.h"
+#include "osmos/err.h"
 
 /* the lane's CPU half (forward_lane's cpu_threads): its pool, the model's files mapped read-only for its workers (the
    page cache's pages, read in place: no copy), and the buffers it hands rows through - the GPU maps them */
@@ -14,7 +15,7 @@
 static bool refused(Forward *f, char *err, const char *why)
 {
   fwd_cpu_destroy(f);
-  return fwd_fail(err, why);
+  return osmos_fail(err, "%s", why);
 }
 
 bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err)
@@ -94,14 +95,14 @@ bool fwd_cpu_submit(Forward *f, int l, uint32_t picks, uint32_t nc, const int32_
   const LayerWeights *L = &f->w->layer[l];
   const uint32_t D = f->g->n_embd;
   if (!cpu_lane_wait(f->cpu)) /* (the last job: long posted, the stream past its wait) */
-    return fwd_fail(err, "the CPU lane's experts failed");
+    return osmos_fail(err, "the CPU lane's experts failed");
   for (uint32_t r = 0; r < picks; r++)
     memcpy(f->cpu_x + (uint64_t)r * D, f->cpu_xf + (uint64_t)tok[r] * D, D * sizeof(float)),
         f->cpu_w[r] = f->cpu_rw[pair[r]];
   const CpuLaneJob job = {L->exp_gate->type, L->exp_down->type, D, f->g->expert_ff, f->g->clamp_exp[l], f->cpu_x,
                           f->cpu_w, picks, f->cpu_e, nc, f->cpu_y, f->cpu_seq, ++f->cpu_value};
   if (!cpu_lane_submit(f->cpu, &job))
-    return fwd_fail(err, "the CPU lane refused a layer's experts");
+    return osmos_fail(err, "the CPU lane refused a layer's experts");
   for (uint32_t k = 0; k < nc; k++)
     f->cpu_picks += f->cpu_e[k].cnt;
   return true;

@@ -278,7 +278,7 @@ static void test_kv(void)
    self-contained head (its own embedding), a tensor missing - each refused */
 static void test_mtp(const Q4xWeights *w, const char *path)
 {
-  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   Gguf *mtp = gguf_header(path, gerr);
   if (!mtp)
   {
@@ -338,7 +338,7 @@ static void test_mtp(const Q4xWeights *w, const char *path)
    tensor of */
 static void test_overlay(const char *path)
 {
-  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   Gguf *ov = gguf_create(path, gerr);
   if (!ov)
   {
@@ -390,7 +390,7 @@ static void test_overlay(const char *path)
 int main(void)
 {
   printf("[test_q4x_weights] start\n");
-  char err[OSMOS_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", path[512], gerr[OSMOS_ERR] = "";
   osmos_clear(err);
   assert(!q4x_weights_create(NULL, NULL, err) && err[0]);
   q4x_weights_destroy(NULL);

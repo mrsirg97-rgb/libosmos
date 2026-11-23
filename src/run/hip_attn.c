@@ -4,6 +4,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include "forward_impl.h"
+#include "osmos/err.h"
 
 #define FP4_LATENT_BLOCK KV_FP4_E4M3_BLOCK /* ref.py: the compressed rows' fp4_round(lat, 16, True) */
 #define FP4_INDEX_BLOCK KV_FP4_POW2_BLOCK  /* and the indexer's keys and queries', fp4_round(x, 32, False) */
@@ -86,7 +87,7 @@ static bool compress_rows(Forward *f, int l, char *err)
   ok = ok && ops_rope(b->lat, 1, hd, RD, hd, f->freqs_comp, b->rpos, false, n, NULL) &&
        ops_fp4_round(b->lat, (uint64_t)n * hd, FP4_LATENT_BLOCK, true, b->lat_p, hd, NULL) && runs(f, keep_run, &a);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the compressor)");
+    return osmos_fail(err, "a GPU call failed (the compressor)");
   /* a probe's row: the kept one read back, then packed again (a forced probe may have stood the oracle's in) */
   const uint64_t lb = kv_row_bytes(KV_FP4_E4M3, hd);
   for (uint32_t i = 0; ok && f->probe && i < n; i++)
@@ -98,7 +99,7 @@ static bool compress_rows(Forward *f, int l, char *err)
       fwd_probe(f, "ckv", l, m, b->row_f, hd, false);
       ok = ok && ops_kv_pack(KV_FP4_E4M3, b->row_f, 1, hd, row, NULL);
     }
-  return ok || fwd_fail(err, "a GPU call failed (the compressor's probe)");
+  return ok || osmos_fail(err, "a GPU call failed (the compressor's probe)");
 }
 
 /* an index source's rows for each token: its query against its sequence's source's keys, weighted a head, the top k
@@ -126,7 +127,7 @@ static bool select_rows(Forward *f, int l, int src, char *err)
     sb->cand_on = need;
   const bool masked = g->cand_source >= 0 && l > g->cand_source && sb->cand_on;
   if ((need || masked) && !f->cand_words)
-    return fwd_fail(err, "the candidate blocks without their bits (max_ctx under them)");
+    return osmos_fail(err, "the candidate blocks without their bits (max_ctx under them)");
   /* in chunks of score_rows tokens (a token's scores, bits and picks its own: the chunks change no bit) */
   const uint32_t W = f->cand_words;
   for (uint32_t c0 = 0; ok && c0 < n; c0 += f->score_rows)
@@ -168,7 +169,7 @@ static bool select_rows(Forward *f, int l, int src, char *err)
   }
   if (ok && l == g->cand_source && need)
     fwd_probe(f, "cand", l, f->at, b->cand, (uint64_t)n * f->cand_words, true);
-  return ok || fwd_fail(err, "a GPU call failed (the indexer)");
+  return ok || osmos_fail(err, "a GPU call failed (the indexer)");
 }
 
 /* a run's keys into its sequence's window, as they are (a probe's: after it may have stood the oracle's in) */
@@ -224,7 +225,7 @@ bool fwd_attention(Forward *f, int l, char *err)
   else
     ok = ok && runs(f, ring_run, &l);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (q, the window's keys)");
+    return osmos_fail(err, "a GPU call failed (q, the window's keys)");
   const int src = g->kv_from[l];
   if (ratio && g->kv_source[l] && !compress_rows(f, l, err))
     return false;
@@ -269,7 +270,7 @@ bool fwd_attention(Forward *f, int l, char *err)
                          NULL);
   }
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the attention)");
+    return osmos_fail(err, "a GPU call failed (the attention)");
   fwd_probe(f, "o", l, f->at, b->o, n * H * HD, false);
   /* wo_a: the tokens' attention to f16 once - its rope back and FP8 on the way, o read once (mm_x16_attn) - then
      every group in one launch, group k over its 4,096 of each (the groups' token counts the step's: forward_batch
@@ -279,7 +280,7 @@ bool fwd_attention(Forward *f, int l, char *err)
                 H * HD, b->oa, f->oa_yoff, OG * OL, NULL);
   ok = ok && fwd_mat(f, L->out_b, fwd_dev(f, L->out_b), D, OG * OL, b->oa, OG * OL, n, b->y, D);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the attention's output)");
+    return osmos_fail(err, "a GPU call failed (the attention's output)");
   fwd_probe(f, "attn_out", l, f->at, b->y, n * D, false);
   return true;
 }

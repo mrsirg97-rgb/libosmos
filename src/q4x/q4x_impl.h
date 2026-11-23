@@ -13,6 +13,7 @@
 #include "osmos/q4x/dflash.h"
 #include "osmos/q4x/forward.h"
 #include "dflash_core.h"
+#include "osmos/gpu/overflow.h"
 
 /* a step's buffers, for max_tokens tokens */
 typedef struct Q4xBuf
@@ -67,6 +68,8 @@ typedef DfBuf Q4xDfBuf; /* the drafter's buffers: the DFlash2 core's (dflash_cor
 
 struct Q4xForward
 {
+  OverflowFlag ovf; /* b.overflow's reset (osmos/gpu/overflow.h): owed when one failed - here, not in Q4xBuf (its
+                       destroy frees Q4xBuf's first members as an array of pointers) */
   uint64_t steps; /* q4x_step's calls: b.taps the last one's (a batch past Q4X_MAX_RUNS is several: Q4xSeq.step_id) */
   const Q4xWeights *w;
   const Q4xMtp *mtp; /* or NULL */

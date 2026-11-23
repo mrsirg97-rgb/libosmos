@@ -129,7 +129,7 @@ static void shaped(const Tokenizer *t, const char *open, const char *client, con
 
 static Tokenizer *of(const char *shard)
 {
-  char path[512], err[GGUF_ERR], terr[TOKENIZER_ERR] = "";
+  char path[512], err[OSMOS_ERR], terr[OSMOS_ERR] = "";
   snprintf(path, sizeof path, "%s/Models/%s", getenv("HOME") ? getenv("HOME") : "", shard);
   Gguf *g = gguf_header(path, err);
   if (!g)

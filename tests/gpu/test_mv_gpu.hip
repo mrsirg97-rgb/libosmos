@@ -269,7 +269,7 @@ int main() {
   CHECK(!mv_run(8, nullptr, 8, 256, nullptr, 0, nullptr, nullptr) && !mv_run(8, nullptr, 8, 256, nullptr, 9, nullptr,
                                                                                 nullptr));
   std::printf("  refusals: unknown type, cols not whole blocks, 0 or 9 tokens\n");
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
   for (size_t i = 0; i < n_shapes; i++) shape(g, shapes[i]);

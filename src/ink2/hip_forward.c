@@ -326,7 +326,7 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
      fixed bytes, the stream, the slack), then the slots and membrane over them (experts_create) */
   ExpertsPlan plan;
   Experts ex;
-  char merr[MEMBRANE_ERR] = "";
+  char merr[OSMOS_ERR] = "";
   if (ok && !experts_plan(units, L, E, warm, room, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
   if (ok && !experts_create(units, L, E, warm, &plan, ARENA_GRAIN, INK2_EXPERT_READERS, copy_host, NULL, 0, true, &ex,
@@ -490,7 +490,8 @@ static bool buffers(Ink2Forward *f)
   if (mem_on())
     fprintf(stderr, "ink2 mem:   step buffers, all %zu: %.3f GiB\n", sizeof b / sizeof *b, sum / 1073741824.0);
   f->fa_part = (float *)f->ed; /* (the down rows' buffer: ed_bytes) */
-  if (hipMemset(f->overflow, 0, 4) != hipSuccess)
+  f->ovf = (OverflowFlag){f->overflow, 4, false};
+  if (!overflow_reset(&f->ovf, NULL))
     return false;
   /* the router's picks and weights and the experts' tables through pinned host memory: copies queued on the stream,
      one synchronize a layer for the picks, none for the tables (the next layer's picks' wait is past them) */
@@ -1304,6 +1305,8 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
 {
   if (!f || !runs || runs > INK2_MAX_RUNS)
     return osmos_fail(err, "a step's runs 1 .. INK2_MAX_RUNS");
+  if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
+    return false;
   uint64_t total = 0;
   for (uint32_t i = 0; i < runs; i++)
   {
@@ -1334,7 +1337,7 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
   if (ok && overflow)
     ok = osmos_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   if (!ok) /* what the failed step may have set: not the next step's to answer for */
-    (void)hipMemset(f->overflow, 0, 4);
+    { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */
   if (!ok)
   {
     for (uint32_t i = 0; i < runs; i++)

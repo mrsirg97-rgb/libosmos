@@ -212,6 +212,8 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > Q35_MAX_RUNS)
     return osmos_fail(err, "no forward, sequences or tokens, or past Q35_MAX_RUNS runs");
+  if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
+    return false;
   f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
                   half-rewritten slot table (0.11.2) */
   Run run[Q35_MAX_RUNS];
@@ -278,8 +280,8 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
   {
     for (uint32_t r = 0; r < runs; r++) /* their rings part written: never read on */
       run[r].s->broken = true;
-    if (over) /* the flag this step's: the next step's from zero (0.11.2 - it stayed set, every step after refused) */
-      hipMemset(f->overflow, 0, 4);
+    if (over) /* the flag this step's: the next step's from zero */
+      { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */
     return osmos_fail(err, "%s", over ? "an activation past f16's range (the step refused)" : "a GPU call failed in the step");
   }
   for (uint32_t r = 0; r < runs; r++)

@@ -89,7 +89,7 @@ int main() {
     return 77;
   }
   const std::string dir = std::string(path).substr(0, std::string(path).rfind('/') + 1);
-  char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, gerr);
   CHECK(g);
   Gguf* eg = which == TestModel::kGsq ? gguf_create((dir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), gerr)

@@ -214,6 +214,8 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
   Q4xRun r[Q4X_MAX_RUNS];
   if (!f || !seqs || !lens || !tokens || !runs || runs > Q4X_MAX_RUNS)
     return osmos_fail(err, "no forward, sequences or tokens, or runs not 1 .. Q4X_MAX_RUNS");
+  if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
+    return false;
   for (uint32_t i = 0; i < runs; i++)
     if (seqs[i] && seqs[i]->broken)
       return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");

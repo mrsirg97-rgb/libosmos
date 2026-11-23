@@ -200,7 +200,7 @@ int main() {
     std::printf("[test_q8_fuse_gpu] skipped: no ds1017 or UD-IQ1_M, or no GPU\n");
     return 77;
   }
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
   // ds1017's IQ1_M, IQ2_XXS, IQ2_XS; UD-IQ1_M's IQ1_S, IQ2_XXS, IQ2_S (test_model.h's gates)

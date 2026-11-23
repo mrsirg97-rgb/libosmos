@@ -135,7 +135,7 @@ int main() {
     CHECK(std::fread(maya.v.data(), 4, maya.v.size(), f) == maya.v.size());
     std::fclose(f);
   }
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[OSMOS_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   char path[512];
   const TestModel which = test_model(path, sizeof path);  // the oracle's dump must be of this model (its pack)
   CHECK(which != TestModel::kNone);

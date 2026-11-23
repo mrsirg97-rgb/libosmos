@@ -153,7 +153,7 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
   ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   f->head_type = w->output->type;
-  ok = ok && head_q8(f, err) && hipMemset(f->overflow, 0, 4) == hipSuccess &&
+  ok = ok && head_q8(f, err) && (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess && (f->slot = malloc(n * 4));
   if (!ok)

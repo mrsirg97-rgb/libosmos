@@ -175,7 +175,7 @@ int main() {
   std::printf("[test_q4x_forward_gpu] start\n");
   int ndev = 0;
   Ref probe0;
-  char err[GGUF_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(home_path(kQwenFirst).c_str(), err);
   const std::vector<int32_t> ids = dump_ids();
   if (!g || !ref_read("result_norm", &probe0) || ids.size() != kTok || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {

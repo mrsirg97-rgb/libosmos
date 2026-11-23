@@ -217,7 +217,7 @@ static void test_tensors(void)
 int main(void)
 {
   printf("[test_hy4_weights] start\n");
-  char err[OSMOS_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", path[512], gerr[OSMOS_ERR] = "";
   osmos_clear(err);
   assert(!hy4_weights_create(NULL, err) && err[0]);
   hy4_weights_destroy(NULL);

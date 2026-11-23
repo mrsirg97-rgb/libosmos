@@ -158,7 +158,8 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     if (!ink2_dalloc(f, b[i].p, b[i].bytes))
       return osmos_fail(err, "the drafter: GPU memory refused (the drafter's buffers)");
-  return hipMemset(d->overflow, 0, 4) == hipSuccess || osmos_fail(err, "the drafter: a GPU call failed (its overflow flag)");
+  d->ovf = (OverflowFlag){d->overflow, 4, false};
+  return overflow_reset(&d->ovf, err);
 }
 
 void ink2_mtp_down(Ink2Forward *f)
@@ -231,6 +232,8 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
     return osmos_fail(err, "no forward with a drafter, or a sequence of another forward");
   if (s->failed)
     return osmos_fail(err, "a sequence after a failed step: load it, or make another");
+  if (!overflow_settle(&f->md.ovf, err)) /* (a reset the drafter owes: refused with its cause while it fails) */
+    return false;
   if (from >= to)
     return true;
   if (from < s->tap_pos0 || to > s->pos || (uint32_t)(to - s->tap_pos0) > f->max_tokens)
@@ -273,7 +276,7 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
   if (!ok)
     return osmos_fail(err, "a GPU call failed (the drafter's context)");
   if (overflow)
-    return (void)hipMemset(d->overflow, 0, 4), osmos_fail(err, "the drafter's context past f16's range");
+    return overflow_reset(&d->ovf, NULL), osmos_fail(err, "the drafter's context past f16's range");
   s->mend = to;
   return true;
 }
@@ -320,6 +323,8 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
     return osmos_fail(err, "no forward with a drafter, a sequence of another forward, or no room"), -1;
   if (s->failed)
     return osmos_fail(err, "a sequence after a failed step: load it, or make another"), -1;
+  if (!overflow_settle(&f->md.ovf, err))
+    return -1;
   if (y < 0 || y >= f->w->geo.n_vocab)
     return osmos_fail(err, "a token not of the vocabulary"), -1;
   if (s->mend != s->pos || s->mfrom >= s->mend)
@@ -371,7 +376,7 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
   if (!ok)
     return osmos_fail(err, "a GPU call failed (a draft)"), -1;
   if (overflow)
-    return (void)hipMemset(d->overflow, 0, 4), osmos_fail(err, "a draft's activations past f16's range"), -1;
+    return overflow_reset(&d->ovf, NULL), osmos_fail(err, "a draft's activations past f16's range"), -1;
   int k = 0;
   float cum = 1.0f;
   for (; k < (int)steps; k++)

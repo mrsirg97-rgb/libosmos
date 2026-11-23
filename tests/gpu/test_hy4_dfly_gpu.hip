@@ -43,7 +43,7 @@ static void dump(const std::string& dir, const char* name, const void* dev, size
 }
 
 int main() {
-  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   const char* home = getenv("HOME") ? getenv("HOME") : "";
   const std::string model = getenv("OSMOS_TEST_HY4") ? getenv("OSMOS_TEST_HY4")
                                                      : std::string(home) + "/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf";

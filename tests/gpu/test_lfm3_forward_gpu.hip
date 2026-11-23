@@ -66,7 +66,7 @@ static uint32_t argmax(const float* x, uint32_t V) {
 
 int main() {
   const char* home = getenv("HOME") ? getenv("HOME") : "";
-  char model_path[512], ref_path[512], err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
+  char model_path[512], ref_path[512], err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_LFM3") ? getenv("OSMOS_TEST_LFM3") : "");
   if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/osmos1.7b/osmos1.7b-Q4_0.gguf", home);
   std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_LFM3_REF") ? getenv("OSMOS_TEST_LFM3_REF") : "");

@@ -148,7 +148,7 @@ static std::vector<uint32_t> keys_of(const std::vector<int32_t>& s, const std::v
 int main() {
   std::printf("[test_q4x_qsa_gpu] start\n");
   int ndev = 0;
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Ref raw;
   Gguf* gg = gguf_create(home_path(kQwenFirst).c_str(), err);
   if (!gg || !ref_read("indexer_k_raw-3", &raw, kDump) || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {

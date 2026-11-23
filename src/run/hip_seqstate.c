@@ -9,6 +9,7 @@
 #include "forward_impl.h"
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/model/fnv.h"
+#include "osmos/err.h"
 
 /* a sequence's state as one byte string (forward.h, seq_save): a header, then by position each layer's window rows
    (with seq_rollback's depth before them), its compressed rows and indexer keys, its compressor's open positions, the
@@ -154,12 +155,12 @@ static bool move_part(const Part *p, uint8_t *bounce, bool out, StateSink sink, 
   return true;
 }
 
-bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
+bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !sink)
-    return fwd_fail(err, "no sequence, or no sink");
+    return osmos_fail(err, "no sequence, or no sink");
   if (hipDeviceSynchronize() != hipSuccess) /* the stream's writes of its rows done */
-    return fwd_fail(err, "a GPU call failed (before the save)");
+    return osmos_fail(err, "a GPU call failed (before the save)");
   Header h = {STATE_MAGIC, SEQ_STATE_VERSION, forward_identity(s->f), s->pos, s->prompt_end, s->dec_from, s->n_last,
               {0}, s->dring && s->dseeded, (uint32_t)(s->hi - s->pos)};
   memcpy(h.last, s->last, sizeof h.last);
@@ -172,7 +173,7 @@ bool seq_save_to(const Seq *s, StateSink sink, void *ctx, char err[FORWARD_ERR])
     ok = move_part(&p[i], bounce, true, sink, NULL, ctx, &sum);
   ok = ok && sink(ctx, &sum, sizeof sum);
   free(bounce);
-  return ok || fwd_fail(err, bounce ? "a GPU copy or the sink failed (the save)" : "out of memory (the save)");
+  return ok || osmos_fail(err, "%s", bounce ? "a GPU copy or the sink failed (the save)" : "out of memory (the save)");
 }
 
 /* a sequence at position 0, as seq_create made it (its rows are rewritten before they are read: a position's
@@ -187,13 +188,13 @@ static void reset(Seq *s)
 static bool refuse(Seq *s, char *err, const char *why)
 {
   reset(s);
-  return fwd_fail(err, why);
+  return osmos_fail(err, "%s", why);
 }
 
-bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[FORWARD_ERR])
+bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !src)
-    return fwd_fail(err, "no sequence, or no source");
+    return osmos_fail(err, "no sequence, or no source");
   const Forward *f = s->f;
   Header h;
   uint64_t sum = 0;

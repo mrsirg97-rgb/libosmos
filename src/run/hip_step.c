@@ -8,12 +8,13 @@
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/err.h"
 
-Seq *seq_create(Forward *f, char err[FORWARD_ERR])
+Seq *seq_create(Forward *f, char err[OSMOS_ERR])
 {
   Seq *s = f ? calloc(1, sizeof *s) : NULL;
   if (!s)
-    return fwd_fail(err, "no forward, or out of memory"), NULL;
+    return osmos_fail(err, "no forward, or out of memory"), NULL;
   s->f = f;
   const Geometry *g = f->g;
   const uint64_t F = sizeof(float), hd = (uint64_t)g->head_dim;
@@ -35,7 +36,7 @@ Seq *seq_create(Forward *f, char err[FORWARD_ERR])
   if (!ok)
   {
     seq_destroy(s);
-    return fwd_fail(err, "a GPU allocation refused"), NULL;
+    return osmos_fail(err, "a GPU allocation refused"), NULL;
   }
   return s;
 }
@@ -79,7 +80,7 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
       const uint32_t at = r0 + j0 - cut, m = n - j0;
       if (!ops_hc_mean(b->h + (uint64_t)j0 * hc * D, hc, D, m,
                        f->taps + ((uint64_t)at * f->n_tap + f->tap_of[l]) * D, (uint32_t)f->n_tap * D, NULL))
-        return fwd_fail(err, "a GPU call failed (the drafter's tap)");
+        return osmos_fail(err, "a GPU call failed (the drafter's tap)");
       f->tap_n = at + m;
       memcpy(f->tap_pos + at, f->pin->pos + j0, m * sizeof *f->tap_pos);
       memcpy(f->tap_bs + at, f->bs + j0, m * sizeof *f->tap_bs);
@@ -97,7 +98,7 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
                                g->sinkhorn_iters, n, b->a_pre, b->a_post, b->a_comb, b->h, pre, fv(f, L->attn_norm),
                                b->x, f->probe ? NULL : b->x16, f->probe ? NULL : b->overflow, NULL, NULL, NULL);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the attention's mixes)");
+    return osmos_fail(err, "a GPU call failed (the attention's mixes)");
   fwd_probe(f, "a_pre", l, p, b->a_pre, n * hc, false);
   fwd_probe(f, "a_post", l, p, b->a_post, n * hc, false);
   fwd_probe(f, "a_comb", l, p, b->a_comb, n * hc * hc, false);
@@ -116,7 +117,7 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
                           b->xf, f->xf_x16 ? b->x16 : NULL, f->xf_x16 ? b->overflow : NULL,
                           f->xf_q8 ? f->lane_xq : NULL, f->xf_q8 ? f->lane_xqd : NULL, NULL);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the FFN's mixes)");
+    return osmos_fail(err, "a GPU call failed (the FFN's mixes)");
   fwd_probe(f, "h_mid", l, p, b->mid, n * hc * D, false);
   fwd_probe(f, "f_pre", l, p, b->f_pre, n * hc, false);
   fwd_probe(f, "f_post", l, p, b->f_post, n * hc, false);
@@ -138,7 +139,7 @@ static bool layer_out(Forward *f, int l, char *err)
                                                 fv(f, f->w->layer[l + 1].hc_attn_fn), b->hcp, NULL)
                               : ops_hc_post(b->moe, b->mid, b->f_post, b->f_comb, hc, D, n, b->h, NULL);
   if (!ok)
-    return fwd_fail(err, "a GPU call failed (the FFN's hc_post)");
+    return osmos_fail(err, "a GPU call failed (the FFN's hc_post)");
   fwd_probe(f, "h_out", l, f->at, b->h, n * hc * D, false);
   return true;
 }
@@ -189,14 +190,14 @@ static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
   for (uint32_t i = 0; i < n; i++)
   {
     if (!seqs[i] || seqs[i]->f != f)
-      return fwd_fail(err, "a token of no sequence, or another forward's");
+      return osmos_fail(err, "a token of no sequence, or another forward's");
     if (tokens[i] < 0 || tokens[i] >= g->n_vocab)
-      return fwd_fail(err, "a token outside the vocabulary");
+      return osmos_fail(err, "a token outside the vocabulary");
     seqs[i]->staged = 0;
   }
   for (uint32_t i = 0; i < n; i++)
     if ((uint32_t)(seqs[i]->pos + seqs[i]->staged++) >= f->max_ctx)
-      return fwd_fail(err, "a sequence past max_ctx");
+      return osmos_fail(err, "a sequence past max_ctx");
   for (uint32_t i = 0; i < n; i++)
     seqs[i]->staged = 0;
   *placed = true; /* from here a sequence's history moves (a refusal before: every sequence as it was - 0.11.2) */
@@ -214,7 +215,7 @@ static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     s->n_last = s->n_last < cap ? s->n_last + 1 : cap;
     if (!engram_rows(f->hash, s->last, s->n_last < ng ? s->n_last : ng,
                      b->rows + (uint64_t)j * WEIGHTS_MAX_LAYERS * g->engram_cols))
-      return fwd_fail(err, "a token the Engram hash refused");
+      return osmos_fail(err, "a token the Engram hash refused");
   }
   return true;
 }
@@ -230,7 +231,7 @@ static bool begin(Forward *f, char *err)
       !fwd_put_async(f->b.oa_cnt, f->pin->oa_cnt, (uint64_t)g->o_groups * 4) ||
       !fwd_put_async(f->b.pos, f->pin->pos, f->n * 4) ||
       !ops_embed(f->w->embed->type, fwd_dev(f, f->w->embed), g->n_embd, f->b.ids, f->n, g->hc, f->b.h, NULL))
-    return fwd_fail(err, "a GPU call failed (the embedding)");
+    return osmos_fail(err, "a GPU call failed (the embedding)");
   return true;
 }
 
@@ -243,20 +244,22 @@ static bool fail_held(Forward *f)
   (void)hipDeviceSynchronize();
   if (f->cpu)
     (void)cpu_lane_wait(f->cpu);
-  (void)hipMemset(f->b.overflow, 0, 4); /* what the failed step may have set: not the next step's to answer for */
+  { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* what the failed step may have set: not the next step's to answer for (failing: owed) */
   membrane_end(f->mem);
   return false;
 }
 
-static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[FORWARD_ERR]);
+static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[OSMOS_ERR]);
 
 /* a step; one that fails once its tokens are placed leaves each sequence's n-gram history (last[]) past its position:
    the sequence broken - refused until it is reset or loaded - not stepped again on a phantom history (0.7.1) */
-bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[FORWARD_ERR])
+bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {
   for (uint32_t i = 0; i < n; i++)
     if (seqs[i] && seqs[i]->broken)
-      return fwd_fail(err, "a sequence a failed step left (its history past its position): reset or load it");
+      return osmos_fail(err, "a sequence a failed step left (its history past its position): reset or load it");
+  if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
+    return false;
   bool placed = false;
   const bool ok = batch(f, seqs, tokens, n, &placed, err);
   for (uint32_t i = 0; !ok && placed && i < n; i++)
@@ -264,11 +267,11 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
   return ok;
 }
 
-static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[FORWARD_ERR])
+static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t n, bool *placed, char err[OSMOS_ERR])
 {
   const Geometry *g = f->g;
   if (!n || n > f->max_tokens)
-    return fwd_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
+    return osmos_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
   if (!membrane_warm(f->mem, err)) /* the budget's experts, at the first step (nothing to do after it) */
     return false;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
@@ -324,13 +327,13 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
   /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
   if (hipMemcpyAsync(&f->pin->overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
       !fwd_settle(f))
-    return fwd_fail(err, "a GPU call failed (the step)"), fail_held(f);
+    return osmos_fail(err, "a GPU call failed (the step)"), fail_held(f);
   if (f->cpu && !cpu_lane_wait(f->cpu))
-    return fwd_fail(err, "the CPU lane's experts failed"), fail_held(f);
+    return osmos_fail(err, "the CPU lane's experts failed"), fail_held(f);
   membrane_end(f->mem);
   if (f->pin->overflow) /* the flag cleared here and after a failed step (fail_held), not every step: a launch a step */
-    return (void)hipMemset(f->b.overflow, 0, 4),
-           fwd_fail(err, "an activation past f16's range: the step's results are not to be trusted");
+    return overflow_reset(&f->ovf, NULL),
+           osmos_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   for (uint32_t i = 0; i < n; i++)
     seqs[i]->pos++, seqs[i]->hi = seqs[i]->pos > seqs[i]->hi ? seqs[i]->pos : seqs[i]->hi;
   return true;
@@ -374,7 +377,7 @@ bool seq_rollback(Seq *s, uint32_t n)
   return true;
 }
 
-bool forward_step(Forward *f, Seq *s, int32_t token, char err[FORWARD_ERR])
+bool forward_step(Forward *f, Seq *s, int32_t token, char err[OSMOS_ERR])
 {
   return forward_batch(f, &s, &token, 1, err);
 }

@@ -27,7 +27,7 @@ extern "C" {
   } while (0)
 #define OK(c) CHECK((c) || (std::fprintf(stderr, "%s\n", err), false))
 
-static char err[OSMOS_ERR];
+static char err[OSMOS_ERR] = "";
 static uint32_t V;
 
 static std::vector<float> row(Q35Forward* f, uint32_t r) {
