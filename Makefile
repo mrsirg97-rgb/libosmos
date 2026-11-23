@@ -97,10 +97,14 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
+# a test that counts the library's every allocation (tests/gpu/alloc_count.h): HIP's and HSA's allocators wrapped
+ALLOC_COUNT_WRAP := -Wl,--wrap=hipMalloc,--wrap=hipFree,--wrap=hipHostMalloc,--wrap=hipHostFree,--wrap=hipHostRegister,--wrap=hipHostUnregister,--wrap=hsa_amd_memory_pool_allocate,--wrap=hsa_amd_memory_pool_free
+$(BIN_DIR)/gpu/test_engine_ledger_gpu: GPU_TEST_LINK := $(ALLOC_COUNT_WRAP)
+
 $(BIN_DIR)/gpu/%: $(TEST_DIR)/gpu/%.hip $(LIB) $(HIP_LIB)
 	@mkdir -p $(dir $@)
 	@mkdir -p $(OBJ_DIR)/tests/gpu
-	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 $(NPU_LIBS) $(HIP_RUNPATH) -o $@
+	$(HIPCC) -O2 $(DEPFLAGS) -MF $(OBJ_DIR)/tests/gpu/$*.d -Iinclude -I$(KERNEL_DIR) --offload-arch=$(HIP_ARCH) $< -L$(LIB_DIR) -losmos_hip -losmos -lhsa-runtime64 $(NPU_LIBS) $(HIP_RUNPATH) $(GPU_TEST_LINK) -o $@
 
 # the bench tools (tools/bench/*.hip): built with the GPU's tests, so a change to what they call fails the build, not a
 # bench run weeks later (0.7.1: nothing built them)

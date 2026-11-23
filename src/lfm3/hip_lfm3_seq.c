@@ -29,19 +29,19 @@ Lfm3Seq *lfm3_seq_create(Lfm3Forward *f, char err[OSMOS_ERR])
   for (int l = 0; ok && l < g->n_layers; l++)
   {
     const uint64_t rows = g->kind[l] == LFM3_SLIDING ? f->ring : f->max_ctx;
-    ok = g->kind[l] == LFM3_CONV ? lfm3_alloc(&s->conv[l], conv) && hipMemset(s->conv[l], 0, conv) == hipSuccess
-                                 : lfm3_alloc(&s->kc[l], rows * row) && lfm3_alloc(&s->vc[l], rows * row);
+    ok = g->kind[l] == LFM3_CONV ? lfm3_alloc(f, &s->conv[l], conv) && hipMemset(s->conv[l], 0, conv) == hipSuccess
+                                 : lfm3_alloc(f, &s->kc[l], rows * row) && lfm3_alloc(f, &s->vc[l], rows * row);
     if (ok && f->lsa && g->kind[l] == LFM3_FULL)
     {
       const uint64_t blocks = f->max_ctx / LSA_WINDOW + 1;
-      ok = lfm3_alloc(&s->ik[l], (uint64_t)f->max_ctx * LSA_DIM * F) &&
-           lfm3_alloc(&s->cent[l], blocks * LSA_BUCKETS * LSA_DIM * F) &&
-           lfm3_alloc(&s->mem[l], blocks * LSA_BUCKETS * LSA_CAP * 4);
+      ok = lfm3_alloc(f, &s->ik[l], (uint64_t)f->max_ctx * LSA_DIM * F) &&
+           lfm3_alloc(f, &s->cent[l], blocks * LSA_BUCKETS * LSA_DIM * F) &&
+           lfm3_alloc(f, &s->mem[l], blocks * LSA_BUCKETS * LSA_CAP * 4);
     }
   }
   const uint64_t ring = f->df ? (uint64_t)f->df_ring * f->df->geo.n_kv_heads * f->df->geo.head_dim * F : 0;
   for (int l = 0; ok && f->df && l < f->df->geo.n_layers; l++) /* the drafter's rings (its context's keys, values) */
-    ok = lfm3_alloc(&s->dk[l], ring) && lfm3_alloc(&s->dv[l], ring);
+    ok = lfm3_alloc(f, &s->dk[l], ring) && lfm3_alloc(f, &s->dv[l], ring);
   if (!ok)
     return lfm3_seq_destroy(s), osmos_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
@@ -51,11 +51,12 @@ void lfm3_seq_destroy(Lfm3Seq *s)
 {
   if (!s)
     return;
+  Lfm3Forward *f = s->f; /* (its memory its forward's ledger's) */
   for (int l = 0; l < LFM3_MAX_LAYERS; l++)
-    hipFree(s->conv[l]), hipFree(s->kc[l]), hipFree(s->vc[l]), hipFree(s->ik[l]), hipFree(s->cent[l]),
-        hipFree(s->mem[l]);
+    lfm3_free(f, s->conv[l]), lfm3_free(f, s->kc[l]), lfm3_free(f, s->vc[l]), lfm3_free(f, s->ik[l]),
+        lfm3_free(f, s->cent[l]), lfm3_free(f, s->mem[l]);
   for (int l = 0; l < Q4X_DFLASH_MAX_LAYERS; l++)
-    hipFree(s->dk[l]), hipFree(s->dv[l]);
+    lfm3_free(f, s->dk[l]), lfm3_free(f, s->dv[l]);
   free(s);
 }
 

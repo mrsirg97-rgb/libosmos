@@ -9,10 +9,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/gpu/bufs.h"
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/q4x/dflash.h"
 
-/* the drafter's buffers: a seed's max_tokens context rows, a block's, the selector's, pinned copies out. device
-   pointers first, then the pinned (df_buffers_free's order) */
+/* the drafter's buffers: a seed's max_tokens context rows, a block's, the selector's, pinned copies out - each made
+   through one ledger and freed by name (0.15.3: freed as an array of the struct's first pointers) */
 typedef struct DfBuf
 {
   float *th;            /* [max_tokens][n_embd]: the context's taps through fc, then its hidden norm */
@@ -24,6 +26,7 @@ typedef struct DfBuf
   int32_t *tok, *iota; /* device: the block's tokens (y, then masks); 0 .. max_ctx + block (a run's positions) */
   int32_t *pin_tok, *pin_path, *pin_idx; /* pinned: the block's anchor in; its path, the top-k's ids, values, p out */
   float *pin_val, *pin_p;
+  GpuBufs bufs;        /* the device buffers' record (osmos/gpu/bufs.h: its ledger the pinned ones' too) */
 } DfBuf;
 
 /* a target's calls the drafter's math goes through - each on its own stream, its own matrices' path */
@@ -51,7 +54,7 @@ typedef struct DfRings
   uint32_t ring;
 } DfRings;
 
-bool df_buffers(DfBuf *d, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx);
+bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx);
 void df_buffers_free(DfBuf *d);
 bool df_seed(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, const float *taps, int32_t from,
              uint32_t n);

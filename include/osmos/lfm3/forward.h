@@ -116,6 +116,8 @@ typedef struct Lfm3Options
   uint32_t lsa_sparse_from; /* with LSA, a prompt's tokens from this position read sparse (0: LFM3_LSA_SPARSE_FROM) */
   const struct Q4xDflash *dflash; /* a DFlash2 drafter (q4x_dflash_create_for against these weights; lfm3_dflash_*):
                                      its taps every step's, its rings each sequence's; NULL none */
+  struct OsmosLedger *ledger;     /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
+                                     borrowed - the engine's, outliving the forward); NULL counts nothing */
 } Lfm3Options;
 /* a prompt token's read sparse from here: under LSA_READ_MAX positions a read is every key (the dense attention's) */
 #define LFM3_LSA_SPARSE_FROM LSA_READ_MAX

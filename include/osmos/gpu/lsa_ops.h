@@ -18,7 +18,7 @@ extern "C" {
 
 typedef struct LsaScratch LsaScratch;
 /* the scratch for reads over at most max_buckets closed buckets */
-LsaScratch *lsa_scratch_create(uint32_t max_buckets);
+LsaScratch *lsa_scratch_create(struct OsmosLedger *l, uint32_t max_buckets); /* its buffers l's (NULL counts nothing) */
 void lsa_scratch_destroy(LsaScratch *s);
 
 /* the read at position p over the first `blocks` closed blocks' buckets (device cent [blocks*64 x 64] F32, members

@@ -4,6 +4,7 @@
 /* the lfm3 forward's state (osmos/lfm3/forward.h), shared by hip_lfm3_make.c (the weights, buffers, sequences) and
    hip_lfm3.c (the step) */
 
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/gpu/bufs.h"
 #include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -20,6 +21,7 @@ typedef DfBuf Lfm3DfBuf; /* the drafter's buffers: the DFlash2 core's (src/q4x/d
 
 struct Lfm3Forward
 {
+  OsmosLedger *ledger; /* borrowed (Lfm3Options'): every allocation of the forward and its sequences */
   const Lfm3Weights *w;
   void **dev; /* each tensor's device copy, by the model's index */
   uint32_t max_tokens, max_ctx, logit_rows;
@@ -122,7 +124,9 @@ static inline LsaDims lfm3_free_dims(const Lfm3Geometry *g)
   return (LsaDims){p, half, half + p, (uint32_t)g->head_dim};
 }
 
-bool lfm3_alloc(void *p, uint64_t bytes);
+/* a device buffer of the forward's (its ledger's), and one given back */
+bool lfm3_alloc(Lfm3Forward *f, void *p, uint64_t bytes);
+void lfm3_free(Lfm3Forward *f, void *p);
 static inline const void *lfm3_dev(const Lfm3Forward *f, const GgufTensor *t)
 {
   return f->dev[t - f->w->model->tensors];

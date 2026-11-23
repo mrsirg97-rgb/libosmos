@@ -88,7 +88,7 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS
   /* the maps' rotation: YaRN at yarn x native (their training's), whatever this forward's context */
   if (!q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), Q4X_THETA_GGML, &f->rope))
     return osmos_fail(err, "the maps' YaRN rotation refused");
-  ok = (f->lsa_s = lsa_scratch_create(f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && alloc(&f->iq, LSA_DIM * F) &&
+  ok = (f->lsa_s = lsa_scratch_create(NULL /* ledger: stage 4 */, f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && alloc(&f->iq, LSA_DIM * F) &&
        alloc(&f->list, LSA_READ_MAX * 4) && alloc(&f->list_n, 4) && (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) &&
        (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) && (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
   if (!ok)
