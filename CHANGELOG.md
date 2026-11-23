@@ -1,7 +1,13 @@
 # Changelog
 
-## [0.15.2]: each pack's default sampling measured, top_k, a sharper loop signal
+## [0.15.2]: two osmos-api denial-of-service fixes, each pack's default sampling measured, top_k, a sharper loop signal
 
+- **Two denial-of-service fixes in osmos-api.** A request whose JSON had many keys in one object took time growing
+  with the square of their count - a 1 MB body held a core for over a minute, the 32 MB limit for hours, and 16 at
+  once every core; it is now linear (the same 1 MB in 0.14 s). And any web page open in a browser could send such
+  requests, or prompts, to the local server - a page's `text/plain` POST to localhost needs no permission. Requests
+  carrying an `Origin` header (a browser's) are now refused, and, bound to localhost (the default), so is a `Host`
+  other than `localhost`, `127.0.0.1` or `[::1]` (DNS rebinding). API clients, curl and agents are unaffected.
 - **Each pack's default is what measured best on this box.** Every pack was replayed on a real agent session that
   got stuck repeating one tool call (Inkling-2-Mini's, at two points: where the loop began, and four repeats in),
   greedy and at its release's own sampling (seeds 1-4). Greedy entered the loop on the Inkling models and kept an
@@ -10,12 +16,6 @@
   1.0** (inkling-2-mini at 1.0 as before), **osmos1.7b at its card's 0.1 / top_k 50**, and Qwen3.8 and Hy4-flash stay
   greedy. A request's own `temperature` / `top_p` / `top_k` / `seed` override a pack's; an upgrade
   (`osmos_install.py --upgrade`) brings the new defaults unless you set your own.
-- **Two denial-of-service fixes in osmos-api.** A request whose JSON had many keys in one object took time growing
-  with the square of their count - a 1 MB body held a core for over a minute, the 32 MB limit for hours, and 16 at
-  once every core; it is now linear (the same 1 MB in 0.14 s). And any web page open in a browser could send such
-  requests, or prompts, to the local server - a page's `text/plain` POST to localhost needs no permission. Requests
-  carrying an `Origin` header (a browser's) are now refused, and, bound to localhost (the default), so is a `Host`
-  other than `localhost`, `127.0.0.1` or `[::1]` (DNS rebinding). API clients, curl and agents are unaffected.
 - **`top_k`.** Requests (and a pack's `osmos.json`) take `top_k`: the k most likely tokens kept, ties with the k-th
   kept too, then `top_p` within them - Hugging Face's order. 0 or -1 keeps every token. A seed still reproduces an
   answer exactly, drafted or not.
@@ -25,8 +25,8 @@
   job looked like a loop). A call's arguments are compared with their keys sorted, so a reordered call is the same
   call.
 - **Inkling-2-Small drafts faster**: its draft floor 0.9 -> 0.5, 11.8 / 11.5 -> 12.7 / 12.4 tok/s code / prose at
-  low-power (13.7 -> 14.3 / 14.3 at performance), every token the same. Every other drafter's floor was swept again, greedy and sampled; each was already
-  at its best.
+  low-power (13.7 -> 14.3 / 14.3 at performance), every token the same. Every other drafter's floor was swept again,
+  greedy and sampled; each was already at its best.
 
 ## [0.15.1]: an upgrade takes a release's new pack settings
 
