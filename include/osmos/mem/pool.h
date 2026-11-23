@@ -1,11 +1,11 @@
 #ifndef POOL_H
 #define POOL_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define POOL_ERR 256
 #define POOL_PARTS 3
 #define POOL_ALIGN 256 /* where a part starts in its unit's memory: any GPU load aligned, as the allocator's own */
 
@@ -73,7 +73,7 @@ typedef void (*pool_event_fn)(const PoolEvent *ev, void *arg);
 typedef struct Pool Pool;
 
 Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots slots, Fetcher fetcher,
-                  uint64_t read_align, pool_event_fn on_event, void *event_arg, char err[POOL_ERR]);
+                  uint64_t read_align, pool_event_fn on_event, void *event_arg, char err[OSMOS_ERR]);
 void pool_destroy(Pool *p);
 
 PoolPin pool_pin(Pool *p, uint32_t unit, const void *dev[POOL_PARTS]);

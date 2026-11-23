@@ -91,7 +91,7 @@ static bool experts(Hy4Forward *f, uint64_t budget, char *err)
   for (size_t u = 0; ok && u < n; u++) /* expert 0 of every layer, then 1, ... */
     order[u] = (uint32_t)((u % ML) * E + u / ML);
   ExpertsPlan plan;
-  char merr[MEMBRANE_ERR] = "";
+  char merr[OSMOS_ERR] = "";
   ok = ok && (experts_plan(units, ML, E, order, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan) ||
               osmos_fail(err, "the experts' plan refused"));
   ok = ok && (experts_create(units, ML, E, order, &plan, ARENA_GRAIN, HY4_EXPERT_READERS, copy_host, NULL, 0, true,
@@ -122,7 +122,7 @@ static bool experts(Hy4Forward *f, uint64_t budget, char *err)
 
 static bool upload(Hy4Forward *f, char *err)
 {
-  return gpu_upload_table(f->w->model, READ_PIECE, not_resident, f, &f->dev, err, err ? OSMOS_ERR : 0);
+  return gpu_upload_table(f->w->model, READ_PIECE, not_resident, f, &f->dev, err);
 }
 
 /* a joint of members (NULL ones skipped; rows each, cols alike): grouped by type in the members' order, each type's

@@ -5,6 +5,7 @@
 #include <hip/hip_runtime_api.h>
 #include <unistd.h>
 
+#include "osmos/err.h"
 #include "osmos/gpu/upload.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/gpu/quant.h"
@@ -27,14 +28,13 @@ const char *gpu_read_tensor(const Gguf *g, const GgufTensor *t, void *pin, uint6
   return why;
 }
 
-bool gpu_upload_table(const Gguf *g, uint64_t piece, gpu_upload_skip skip, void *arg, void ***dev, char *err,
-                      size_t err_n)
+bool gpu_upload_table(const Gguf *g, uint64_t piece, gpu_upload_skip skip, void *arg, void ***dev, char *err)
 {
   void *pin = NULL;
   if (!(*dev = calloc(g->n_tensors ? g->n_tensors : 1, sizeof **dev)) || hipHostMalloc(&pin, piece, 0) != hipSuccess)
   {
     if (err)
-      snprintf(err, err_n, "%s", "out of memory (the weights' table, or a pinned piece)");
+      osmos_fail(err, "out of memory (the weights' table, or a pinned piece)");
     return false;
   }
   bool ok = true;
@@ -45,7 +45,7 @@ bool gpu_upload_table(const Gguf *g, uint64_t piece, gpu_upload_skip skip, void 
       continue;
     const char *why = gpu_read_tensor(g, t, pin, piece, &(*dev)[i]);
     if ((ok = !why) == false && err)
-      snprintf(err, err_n, "%s: not read into GPU memory (%s)", t->name, why);
+      osmos_fail(err, "%s: not read into GPU memory (%s)", t->name, why);
   }
   hipHostFree(pin);
   return ok;

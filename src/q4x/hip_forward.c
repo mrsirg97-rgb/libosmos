@@ -125,7 +125,7 @@ static bool experts(Q4xForward *f, uint64_t budget, char *err)
     warm[u] = (uint32_t)((u % L) * E + u / L);
   ExpertsPlan plan;
   Experts ex;
-  char merr[MEMBRANE_ERR] = "";
+  char merr[OSMOS_ERR] = "";
   if (ok && !experts_plan(units, L, E, warm, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
   if (ok && !experts_create(units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, host_copy, NULL, 0, true, &ex,
@@ -185,7 +185,7 @@ static bool not_uploaded(const GgufTensor *t, void *arg)
 static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
 {
   UploadSkip u = {f, shadow, skip};
-  return gpu_upload_table(g, READ_PIECE, not_uploaded, &u, dev, err, err ? OSMOS_ERR : 0);
+  return gpu_upload_table(g, READ_PIECE, not_uploaded, &u, dev, err);
 }
 
 static void free_table(const Gguf *g, void **dev) { gpu_free_table(g, dev, NULL); }

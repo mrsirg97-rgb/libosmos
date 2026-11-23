@@ -36,7 +36,7 @@ constexpr uint64_t kBudget = 100ull << 30;
 
 static Forward* g_f;
 static uint32_t g_vocab;
-static char g_err[FORWARD_ERR];
+static char g_err[OSMOS_ERR];
 
 static std::vector<int32_t> ids(uint32_t n, uint32_t seed) {
   std::vector<int32_t> v(n);

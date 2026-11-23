@@ -14,6 +14,7 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/run/forward.h"
@@ -40,9 +41,11 @@ static void blow_up(const char* step, int layer, int, void* dev, uint64_t n, boo
 
 // the prompt through a new sequence: true and its last token's pick, or false with why
 static bool run(Forward* f, const std::vector<int32_t>& p, int32_t* t, char* err) {
+  osmos_clear(err);
   Seq* s = seq_create(f, err);
   CHECK(s && seq_prompt(s, (uint32_t) p.size()));
   std::vector<Seq*> ss(p.size(), s);
+  osmos_clear(err);
   const bool ok = forward_batch(f, ss.data(), p.data(), (uint32_t) p.size(), err) &&
                   forward_greedy(f, (uint32_t) p.size() - 1, 1, t, err);
   seq_destroy(s);
@@ -62,11 +65,13 @@ int main() {
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens};
   o.no_guess = true;
+  osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward_create_with: %s\n", err);
+  osmos_clear(err);
   CHECK(f && forward_lane(f, 0, NULL, err));
   std::vector<int32_t> p(kPrompt);
   uint32_t seed = 1017;
@@ -90,6 +95,7 @@ int main() {
   forward_probe(f, blow_up, nullptr);
   CHECK(!run(f, p, &t, err));
   forward_probe(f, nullptr, nullptr);
+  osmos_clear(err);
   Seq* s = seq_create(f, err);
   CHECK(s);
   for (uint32_t i = 0; i < 4; i++) CHECK(forward_step(f, s, p[i], err));

@@ -15,6 +15,7 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/run/forward.h"
@@ -35,17 +36,22 @@ constexpr int kCpuThreads = 6;
 
 static uint64_t run(Weights* w, const std::vector<int32_t>& ids, uint64_t budget, int cpu, uint64_t* streamed,
                     uint64_t* on_cpu) {
-  char ferr[FORWARD_ERR] = "";
+  char ferr[OSMOS_ERR] = "";
+  osmos_clear(ferr);
   Forward* f = forward_create(w, kLayers, kCtx, budget, ferr);
   if (!f) std::fprintf(stderr, "  %s\n", ferr);
+  osmos_clear(ferr);
   CHECK(f && forward_lane(f, cpu, NULL, ferr));
+  osmos_clear(ferr);
   Seq* s = seq_create(f, ferr);
   CHECK(s);
   std::vector<Seq*> ss(kPrompt, s);
+  osmos_clear(ferr);
   CHECK(forward_batch(f, ss.data(), ids.data(), kPrompt, ferr));
   std::vector<float> st((size_t) w->geo.hc * w->geo.n_embd);
   uint64_t h = 1469598103934665603ull;
   for (int p = kPrompt; p < kIds; p++) {
+    osmos_clear(ferr);
     const bool ok = forward_step(f, s, ids[p], ferr);
     if (!ok) std::fprintf(stderr, "  step %d: %s\n", p, ferr);
     CHECK(ok);

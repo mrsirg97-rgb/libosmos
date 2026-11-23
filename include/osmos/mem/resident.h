@@ -1,6 +1,7 @@
 #ifndef RESIDENT_H
 #define RESIDENT_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -11,7 +12,7 @@
 
 typedef struct Resident Resident;
 
-Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, int threads, char err[POOL_ERR]);
+Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, int threads, char err[OSMOS_ERR]);
 void resident_destroy(Resident *r);
 
 bool resident_dev(const Resident *r, size_t unit, const void *dev[POOL_PARTS]);

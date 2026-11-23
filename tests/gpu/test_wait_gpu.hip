@@ -9,6 +9,7 @@
 #include <sys/resource.h>
 #include <vector>
 
+#include "osmos/err.h"
 #include "test_model.h"
 
 extern "C" {
@@ -38,13 +39,15 @@ int main() {
   if (which == TestModel::kNone || hipGetDeviceCount(&ndev) != hipSuccess || !ndev)
     return std::printf("[test_wait_gpu] skipped: no model (test_model.h) or no GPU\n"), 77;
   CHECK(gpu_sleep_on_waits());  // before the first kernel, as osmos-serve and dbench
-  char ferr[FORWARD_ERR] = "";
+  char ferr[OSMOS_ERR] = "";
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
+  osmos_clear(ferr);
   Forward* f = forward_create(w, w->geo.n_layers, kCtx, kBudget, ferr);
   if (!f) std::printf("forward_create: %s\n", ferr);
   CHECK(f);
+  osmos_clear(ferr);
   Seq* s = seq_create(f, ferr);
   CHECK(s && seq_prompt(s, kPrompt));
   std::vector<int32_t> ids(kPrompt);
@@ -53,6 +56,7 @@ int main() {
   // the prompt: one step of kPrompt tokens (its routing pairs past a layer's experts) - slept on
   double c0 = thread_cpu();
   auto t0 = std::chrono::steady_clock::now();
+  osmos_clear(ferr);
   CHECK(forward_batch(f, ss.data(), ids.data(), kPrompt, ferr));
   const double pw = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), pc = thread_cpu() - c0;
   // decode: a token a step - spun on
@@ -60,6 +64,7 @@ int main() {
   c0 = thread_cpu();
   t0 = std::chrono::steady_clock::now();
   for (uint32_t i = 0; i < kDecode; i++) {
+    osmos_clear(ferr);
     CHECK(forward_step(f, s, tok, ferr));
     tok = 1000 + (int32_t) i;
   }

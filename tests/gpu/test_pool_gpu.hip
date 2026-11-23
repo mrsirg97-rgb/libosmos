@@ -56,7 +56,7 @@ static void on_event(const PoolEvent* ev, void*) {
   pins += ev->kind == POOL_EV_PIN;
 }
 static int drain(Pool* p) {
-  char rerr[READS_ERR];
+  char rerr[OSMOS_ERR];
   const int before = pins;
   Pool* const pools[READS_POOLS] = {p, nullptr};
   CHECK(reads_pump(g_reads, pools, true, rerr));
@@ -111,7 +111,7 @@ int main() {
   for (int e = 0; e < E; e++)
     for (int k = 0; k < 3; k++) want[(size_t) e * 3 + k] = file_sum(units[e].part[k]);
   const uint64_t budget = unit_bytes * (uint64_t) E / 4;
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
   Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), reads_fetcher(g_reads, 0), 0, on_event, nullptr, err);
   if (!p) std::fprintf(stderr, "pool_create: %s\n", err);

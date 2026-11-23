@@ -4,6 +4,7 @@
 #include <time.h>
 
 #include "osmos/mem/pool.h"
+#include "osmos/err.h"
 
 typedef struct Slot
 {
@@ -224,7 +225,7 @@ static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
 {
   if (s->u.n_parts < 1 || s->u.n_parts > POOL_PARTS)
   {
-    snprintf(err, POOL_ERR, "unit %zu: %d parts (1 to %d)", i, s->u.n_parts, POOL_PARTS);
+    osmos_fail(err, "unit %zu: %d parts (1 to %d)", i, s->u.n_parts, POOL_PARTS);
     return false;
   }
   for (int k = 0; k < s->u.n_parts; k++)
@@ -234,7 +235,7 @@ static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
     if (fstat(r->fd, &st) != 0 || r->bytes == 0 || r->offset >= (uint64_t)st.st_size ||
         r->bytes > (uint64_t)st.st_size - r->offset)
     {
-      snprintf(err, POOL_ERR, "unit %zu part %d: 0 bytes, past its file, or a file that cannot be read", i, k);
+      osmos_fail(err, "unit %zu part %d: 0 bytes, past its file, or a file that cannot be read", i, k);
       return false;
     }
     uint64_t head, mem;
@@ -250,16 +251,16 @@ static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
 }
 
 Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots slots, Fetcher fetcher,
-                  uint64_t read_align, pool_event_fn on_event, void *event_arg, char err[POOL_ERR])
+                  uint64_t read_align, pool_event_fn on_event, void *event_arg, char err[OSMOS_ERR])
 {
   err[0] = 0;
   if (read_align & (read_align - 1))
-    return snprintf(err, POOL_ERR, "a read alignment of %llu: not a power of two", (unsigned long long)read_align), NULL;
+    return osmos_fail(err, "a read alignment of %llu: not a power of two", (unsigned long long)read_align), NULL;
   Pool *p = calloc(1, sizeof *p);
   if (!p || !(p->s = calloc(n_units ? n_units : 1, sizeof *p->s)))
   {
     free(p);
-    snprintf(err, POOL_ERR, "out of memory");
+    osmos_fail(err, "out of memory");
     return NULL;
   }
   p->budget = budget, p->slots = slots, p->fetcher = fetcher, p->on_event = on_event, p->event_arg = event_arg;
@@ -269,7 +270,7 @@ Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots 
     s->u = units[i];
     const bool fits = check_unit(s, i, read_align, err) && s->size <= budget;
     if (!fits && !err[0])
-      snprintf(err, POOL_ERR, "unit %zu: %llu bytes, more than the budget", i, (unsigned long long)s->size);
+      osmos_fail(err, "unit %zu: %llu bytes, more than the budget", i, (unsigned long long)s->size);
     if (!fits)
     {
       pool_destroy(p);

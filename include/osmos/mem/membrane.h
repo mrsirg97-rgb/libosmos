@@ -1,13 +1,13 @@
 #ifndef MEMBRANE_H
 #define MEMBRANE_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "osmos/mem/pool.h"
 
-#define MEMBRANE_ERR 256
 
 typedef struct Membrane Membrane;
 
@@ -35,17 +35,17 @@ typedef struct MembraneStats
   uint64_t guess_read;           /* reads a guess began */
 } MembraneStats;
 
-Membrane *membrane_create(const MembraneOptions *o, char err[MEMBRANE_ERR]);
+Membrane *membrane_create(const MembraneOptions *o, char err[OSMOS_ERR]);
 void membrane_destroy(Membrane *m);
 
-bool membrane_warm(Membrane *m, char err[MEMBRANE_ERR]);
-bool membrane_visit(Membrane *m, uint32_t layer, bool passing, char err[MEMBRANE_ERR]);
+bool membrane_warm(Membrane *m, char err[OSMOS_ERR]);
+bool membrane_visit(Membrane *m, uint32_t layer, bool passing, char err[OSMOS_ERR]);
 void membrane_score(Membrane *m, uint32_t unit);
 void membrane_guess(Membrane *m, uint32_t unit);
 void membrane_ahead(Membrane *m, uint32_t unit);
-bool membrane_hold(Membrane *m, uint32_t unit, char err[MEMBRANE_ERR]);
+bool membrane_hold(Membrane *m, uint32_t unit, char err[OSMOS_ERR]);
 bool membrane_ready(const Membrane *m, uint32_t unit, const void *dev[POOL_PARTS]);
-bool membrane_wait(Membrane *m, uint32_t unit, const void *dev[POOL_PARTS], char err[MEMBRANE_ERR]);
+bool membrane_wait(Membrane *m, uint32_t unit, const void *dev[POOL_PARTS], char err[OSMOS_ERR]);
 void membrane_end(Membrane *m);
 
 bool membrane_whole(const Membrane *m);

@@ -1,13 +1,14 @@
 #ifndef HOST_SLOTS_H
 #define HOST_SLOTS_H
 
+#include "osmos/err.h"
 #include <stdint.h>
 
 #include "osmos/mem/pool.h"
 
 typedef struct HostSlots HostSlots;
 
-HostSlots *host_slots_create(uint64_t bytes, char err[POOL_ERR]);
+HostSlots *host_slots_create(uint64_t bytes, char err[OSMOS_ERR]);
 void host_slots_destroy(HostSlots *h);
 Slots host_slots(HostSlots *h);
 uint64_t host_slots_bytes(const HostSlots *h);

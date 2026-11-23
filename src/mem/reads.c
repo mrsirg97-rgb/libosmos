@@ -7,6 +7,7 @@
 #include "libevt/runtime/context.h"
 #include "libevt/scheduler/engine.h"
 #include "osmos/mem/fetchq.h"
+#include "osmos/err.h"
 
 #define READS_PRIO 1 /* the engine carries one kind of event: a read's end */
 
@@ -102,15 +103,15 @@ static void need(uint32_t unit, uint64_t need, void *ctx)
   fetchq_need(r->q, unit, need);
 }
 
-Reads *reads_create(uint32_t n_units, int threads, char err[READS_ERR])
+Reads *reads_create(uint32_t n_units, int threads, char err[OSMOS_ERR])
 {
   if (!n_units)
-    return snprintf(err, READS_ERR, "reads: no units"), NULL;
+    return osmos_fail(err, "reads: no units"), NULL;
   Reads *r = calloc(1, sizeof *r);
   if (!r || !(r->rd = calloc(n_units, sizeof *r->rd)))
   {
     free(r);
-    return snprintf(err, READS_ERR, "reads: no memory for %u reads", n_units), NULL;
+    return osmos_fail(err, "reads: no memory for %u reads", n_units), NULL;
   }
   r->n_units = n_units;
   atomic_init(&r->broken, false);
@@ -122,7 +123,7 @@ Reads *reads_create(uint32_t n_units, int threads, char err[READS_ERR])
   r->q = r->evt ? fetchq_create(threads, n_units, post_end, r) : NULL;
   if (!r->q)
   {
-    snprintf(err, READS_ERR, "reads: the readers (%d) or the engine could not start", threads);
+    osmos_fail(err, "reads: the readers (%d) or the engine could not start", threads);
     reads_destroy(r);
     return NULL;
   }
@@ -144,10 +145,10 @@ Fetcher reads_fetcher(Reads *r, int pool)
   return pool >= 0 && pool < READS_POOLS ? (Fetcher){fetch, &r->fors[pool], need} : (Fetcher){0};
 }
 
-bool reads_pump(Reads *r, Pool *const pools[READS_POOLS], bool wait, char err[READS_ERR])
+bool reads_pump(Reads *r, Pool *const pools[READS_POOLS], bool wait, char err[OSMOS_ERR])
 {
   if (!r || !pools || !(pools[0] || pools[1]))
-    return snprintf(err, READS_ERR, "reads: no reads or no pool to pump into"), false;
+    return osmos_fail(err, "reads: no reads or no pool to pump into"), false;
   for (int k = 0; k < READS_POOLS; k++)
     r->pools[k] = pools[k];
   if (wait && !atomic_load(&r->broken))
@@ -155,7 +156,7 @@ bool reads_pump(Reads *r, Pool *const pools[READS_POOLS], bool wait, char err[RE
   while (!atomic_load(&r->broken) && engine_pump(r->evt, 0))
     ;
   if (atomic_load(&r->broken))
-    return snprintf(err, READS_ERR, "reads: a read's end could not be posted (no memory)"), false;
+    return osmos_fail(err, "reads: a read's end could not be posted (no memory)"), false;
   return true;
 }
 

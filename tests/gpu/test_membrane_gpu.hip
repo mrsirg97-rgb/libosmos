@@ -13,6 +13,7 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/run/forward.h"
@@ -47,13 +48,16 @@ static std::vector<int32_t> tokens(uint32_t n, uint32_t seed, uint32_t V) {
 static void prompt(Forward* f, Seq* s, const std::vector<int32_t>& p, char* err) {
   CHECK(seq_prompt(s, (uint32_t) p.size()));
   std::vector<Seq*> ss(p.size(), s);
+  osmos_clear(err);
   CHECK(forward_batch(f, ss.data(), p.data(), (uint32_t) p.size(), err));
 }
 
 // one step of s at token t: its logits copied out, the token it picks
 static int32_t step(Forward* f, Seq* s, int32_t t, std::vector<float>& lg, char* err) {
+  osmos_clear(err);
   CHECK(forward_step(f, s, t, err));
   int32_t next;
+  osmos_clear(err);
   CHECK(forward_greedy(f, 0, 1, &next, err) && hipDeviceSynchronize() == hipSuccess);
   CHECK(hipMemcpy(lg.data(), forward_logits(f), lg.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
   return next;
@@ -72,18 +76,22 @@ int main() {
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens};
   o.no_guess = true; /* every read a pin's: the waits count every miss */
+  osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward_create_with: %s\n", err);
+  osmos_clear(err);
   CHECK(f && forward_lane(f, 0, NULL, err));
   const uint32_t V = (uint32_t) w->geo.n_vocab;
   const std::vector<int32_t> p = tokens(kPrompt, 1017, V);
+  osmos_clear(err);
   Seq *a = seq_create(f, err), *b = seq_create(f, err), *c = seq_create(f, err);
   CHECK(a && b && c);
   prompt(f, a, p, err), prompt(f, b, p, err);
   int32_t t;
+  osmos_clear(err);
   CHECK(forward_greedy(f, kPrompt - 1, 1, &t, err));
   std::vector<float> la(V), lb(V);
 

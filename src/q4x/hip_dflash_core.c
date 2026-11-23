@@ -12,6 +12,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "dflash_core.h"
+#include "osmos/err.h"
 
 #define F sizeof(float)
 
@@ -131,8 +132,7 @@ static bool block_layer(const DfHost *h, const Q4xDflash *df, DfBuf *d, const Df
 }
 
 int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, int32_t y, int32_t pos0,
-             int32_t ctx_from, uint32_t n, float conf_min, float cum_min, int32_t *drafts, float *conf, char *err,
-             uint32_t err_n)
+             int32_t ctx_from, uint32_t n, float conf_min, float cum_min, int32_t *drafts, float *conf, char *err)
 {
   const Q4xDflashGeometry *g = &df->geo;
   const uint32_t B = (uint32_t)g->block, D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab, R = (uint32_t)g->sel_rank;
@@ -159,7 +159,7 @@ int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, i
        hipMemcpyAsync(d->pin_p, d->top_p, (B - 1) * F, hipMemcpyDeviceToHost, s) == hipSuccess &&
        (!h->before_sync || h->before_sync(h->ctx)) && hipStreamSynchronize(s) == hipSuccess;
   if (!ok)
-    return snprintf(err, err_n, "%s", "a GPU call failed (a draft)"), -1;
+    return osmos_fail(err, "a GPU call failed (a draft)"), -1;
   if (h->after_sync && !h->after_sync(h->ctx, err))
     return -1;
   /* a draft's confidence: the head's probability of it at its place - the greatest's (q4x_top) scaled by its logit
@@ -174,7 +174,7 @@ int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, i
     while (c < K && ids[c] != d->pin_path[kept])
       c++;
     if (c == K)
-      return snprintf(err, err_n, "%s", "the selector's pick not one of its candidates"), -1;
+      return osmos_fail(err, "the selector's pick not one of its candidates"), -1;
     const float p = d->pin_p[kept] * expf(val[c] - val[0]);
     cum *= p;
     if (p < conf_min || cum < cum_min)

@@ -5,6 +5,7 @@
 
 #include "osmos/mem/membrane.h"
 #include "osmos/mem/reads.h"
+#include "osmos/err.h"
 
 struct Membrane
 {
@@ -37,13 +38,6 @@ struct Membrane
   MembraneStats stats;
 };
 
-static bool fail(char *err, const char *why)
-{
-  if (err)
-    snprintf(err, MEMBRANE_ERR, "%s", why);
-  return false;
-}
-
 static const char kBroken[] = "the membrane refused: a promotion's copy failed - membrane_end, the GPU past it, first";
 
 static uint64_t now_ns(void)
@@ -68,35 +62,35 @@ static Pool *pool_for(const Membrane *m, uint32_t unit, bool passing)
 
 static bool pump(Membrane *m, bool wait, char *err)
 {
-  char rerr[READS_ERR] = "";
-  return reads_pump(m->reads, (Pool *[READS_POOLS]){m->pool, m->stream}, wait, rerr) || fail(err, rerr);
+  char rerr[OSMOS_ERR] = "";
+  return reads_pump(m->reads, (Pool *[READS_POOLS]){m->pool, m->stream}, wait, rerr) || osmos_fail(err, "%s", rerr);
 }
 
 static void held(Membrane *m, Pool *in, uint32_t unit) { m->held_in[m->n_held] = in, m->held[m->n_held++] = unit; }
 
-Membrane *membrane_create(const MembraneOptions *o, char err[MEMBRANE_ERR])
+Membrane *membrane_create(const MembraneOptions *o, char err[OSMOS_ERR])
 {
   if (!o || !o->units || !o->n_layers || !o->per_layer || !o->copy || (o->n_warm && !o->warm))
-    return fail(err, "the membrane: no options, units, layers or copy"), NULL;
+    return osmos_fail(err, "the membrane: no options, units, layers or copy"), NULL;
   const uint64_t n = (uint64_t)o->n_layers * o->per_layer;
   if (n > UINT32_MAX)
-    return fail(err, "the membrane: more units than it numbers"), NULL;
+    return osmos_fail(err, "the membrane: more units than it numbers"), NULL;
   for (size_t i = 0; i < o->n_warm; i++)
     if (o->warm[i] >= n)
-      return fail(err, "the membrane: a warm unit past its units"), NULL;
+      return osmos_fail(err, "the membrane: a warm unit past its units"), NULL;
   Membrane *m = calloc(1, sizeof *m);
   if (!m)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   m->n_units = (uint32_t)n, m->n_layers = o->n_layers, m->copy = o->copy, m->copy_ctx = o->copy_ctx, m->layer = -1;
   m->n_warm = o->n_warm;
-  char perr[POOL_ERR] = "";
+  char perr[OSMOS_ERR] = "";
   const bool ok = (m->units = malloc(n * sizeof *m->units)) && (m->held = malloc(2 * n * sizeof *m->held)) &&
                   (m->held_in = malloc(2 * n * sizeof *m->held_in)) && (m->is_held = calloc(n, sizeof *m->is_held)) &&
                   (m->pend = malloc(n * sizeof *m->pend)) &&
                   (m->pend_in = malloc(n * sizeof *m->pend_in)) && (m->failed = malloc(n * sizeof *m->failed)) && (m->guessed = calloc(n, sizeof *m->guessed)) &&
                   (!o->n_warm || (m->warm = malloc(o->n_warm * sizeof *m->warm)));
   if (!ok)
-    return membrane_destroy(m), fail(err, "out of memory"), NULL;
+    return membrane_destroy(m), osmos_fail(err, "out of memory"), NULL;
   memcpy(m->units, o->units, n * sizeof *m->units);
   m->room = o->room;
   for (uint64_t u = 0; u < n; u++)
@@ -108,7 +102,7 @@ Membrane *membrane_create(const MembraneOptions *o, char err[MEMBRANE_ERR])
                               NULL, perr)) ||
       !(m->stream = pool_create(m->units, m->n_units, o->stream_room, o->stream_slots, reads_fetcher(m->reads, 1),
                                 o->read_align, NULL, NULL, perr)))
-    return membrane_destroy(m), fail(err, perr[0] ? perr : "the membrane's pools refused"), NULL;
+    return membrane_destroy(m), osmos_fail(err, "%s", perr[0] ? perr : "the membrane's pools refused"), NULL;
   m->ahead_limit = o->ahead_limit, m->ahead_now = o->ahead_limit;
   reads_ahead_limit(m->reads, o->ahead_limit);
   return m;
@@ -124,24 +118,24 @@ void membrane_destroy(Membrane *m)
   free(m);
 }
 
-bool membrane_warm(Membrane *m, char err[MEMBRANE_ERR])
+bool membrane_warm(Membrane *m, char err[OSMOS_ERR])
 {
   if (m->n_failed)
-    return fail(err, kBroken);
+    return osmos_fail(err, "%s", kBroken);
   const size_t n = m->n_warm;
   m->n_warm = 0; /* once, read or refused */
   size_t pinned = 0;
   bool ok = true;
   for (; ok && pinned < n; pinned++)
     if (pool_pin(m->pool, m->warm[pinned], (const void *[POOL_PARTS]){0}) == POOL_FULL)
-      ok = fail(err, "an expert the budget holds the pool could not");
+      ok = osmos_fail(err, "an expert the budget holds the pool could not");
   if (!ok)
     pinned--; /* the one refused holds nothing */
   while (ok && n && pool_reading(m->pool))
     ok = pump(m, true, err);
   for (size_t k = 0; ok && k < n; k++)
     if (pool_state(m->pool, m->warm[k]) != POOL_PINNED)
-      ok = fail(err, "an expert's read from its file failed");
+      ok = osmos_fail(err, "an expert's read from its file failed");
   for (size_t k = pinned; k-- > 0;) /* every hold the warm start took ended, refused or not (0.7.1: a refusal kept
                                        them, the room held for good) */
     pool_release(m->pool, m->warm[k], 0);
@@ -173,12 +167,12 @@ void membrane_end(Membrane *m)
   m->n_failed = keep;
 }
 
-bool membrane_visit(Membrane *m, uint32_t layer, bool passing, char err[MEMBRANE_ERR])
+bool membrane_visit(Membrane *m, uint32_t layer, bool passing, char err[OSMOS_ERR])
 {
   if (m->n_failed)
-    return fail(err, kBroken);
+    return osmos_fail(err, "%s", kBroken);
   if (layer >= m->n_layers)
-    return fail(err, "the membrane: a layer past its layers");
+    return osmos_fail(err, "the membrane: a layer past its layers");
   if (!pump(m, false, err))
     return false;
   if (m->layer == (int64_t)layer)
@@ -230,15 +224,15 @@ static bool promote(Membrane *m, uint32_t unit, bool *done, char *err)
   held(m, m->pool, unit), m->is_held[unit] = true;
   for (int k = 0; k < m->units[unit].n_parts; k++)
     if (!m->copy((void *)dst[k], src[k], m->units[unit].part[k].bytes, m->copy_ctx))
-      return m->failed[m->n_failed++] = unit, fail(err, "an expert's copy into the membrane failed");
+      return m->failed[m->n_failed++] = unit, osmos_fail(err, "an expert's copy into the membrane failed");
   *done = true;
   return true;
 }
 
-bool membrane_hold(Membrane *m, uint32_t unit, char err[MEMBRANE_ERR])
+bool membrane_hold(Membrane *m, uint32_t unit, char err[OSMOS_ERR])
 {
   if (m->n_failed)
-    return fail(err, kBroken);
+    return osmos_fail(err, "%s", kBroken);
   if (m->is_held[unit])
     return true;
   bool promoted = false;
@@ -252,7 +246,7 @@ bool membrane_hold(Membrane *m, uint32_t unit, char err[MEMBRANE_ERR])
     if (!pump(m, true, err))
       return false;
   if (pin == POOL_FULL)
-    return fail(err, "an expert the pool cannot hold (its room, or GPU memory refused)");
+    return osmos_fail(err, "an expert the pool cannot hold (its room, or GPU memory refused)");
   held(m, in, unit), m->is_held[unit] = true;
   return true;
 }
@@ -263,10 +257,10 @@ bool membrane_ready(const Membrane *m, uint32_t unit, const void *dev[POOL_PARTS
   return !m->n_failed && in && pool_dev(in, unit, dev);
 }
 
-bool membrane_wait(Membrane *m, uint32_t unit, const void *dev[POOL_PARTS], char err[MEMBRANE_ERR])
+bool membrane_wait(Membrane *m, uint32_t unit, const void *dev[POOL_PARTS], char err[OSMOS_ERR])
 {
   if (m->n_failed)
-    return fail(err, kBroken);
+    return osmos_fail(err, "%s", kBroken);
   Pool *p = pool_in(m, unit);
   if (p && pool_state(p, unit) == POOL_READING)
   {
@@ -277,7 +271,7 @@ bool membrane_wait(Membrane *m, uint32_t unit, const void *dev[POOL_PARTS], char
         return false;
     m->stats.waits[k]++, m->stats.wait_ns[k] += now_ns() - t0;
   }
-  return (p && pool_dev(p, unit, dev)) || fail(err, "an expert's read from its file failed");
+  return (p && pool_dev(p, unit, dev)) || osmos_fail(err, "an expert's read from its file failed");
 }
 
 bool membrane_whole(const Membrane *m)

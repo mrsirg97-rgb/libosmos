@@ -23,6 +23,7 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/gpu/mm.h"
@@ -55,7 +56,7 @@ struct Run {
 using Schedule = std::vector<std::vector<int>>;
 
 static void play(Run* r, const Schedule& sch) {
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   std::vector<Seq*> seqs(kSeqs);
   for (auto& s : seqs) CHECK((s = seq_create(r->f, err)));
   std::vector<int> next(kSeqs, 0);
@@ -83,7 +84,7 @@ static void play(Run* r, const Schedule& sch) {
 // bit for bit. `skip`: each told its prompt's end (seq_prompt) - only its last token's logits
 constexpr int kSubStep = 512, kMaxSeqs = 2;
 static void sub_batches(Forward* f, size_t V, const std::vector<int32_t>& real, int ns, int len, bool skip) {
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   std::mt19937 rng(41);
   std::vector<int32_t> ids[kMaxSeqs];
   for (int k = 0; k < ns; k++)
@@ -94,11 +95,13 @@ static void sub_batches(Forward* f, size_t V, const std::vector<int32_t>& real, 
   for (int i = n - last; i < n; i++)
     if (first[i % ns] < 0) first[i % ns] = i / ns;
   for (int k = 0; k < ns; k++) {
+    osmos_clear(err);
     Seq* s = seq_create(f, err);
     CHECK(s && (!skip || seq_prompt(s, (uint32_t) len)));
     for (int p = 0; p < len; p += kSubStep) {
       const int m = std::min(kSubStep, len - p);
       std::vector<Seq*> ss(m, s);
+      osmos_clear(err);
       CHECK(forward_batch(f, ss.data(), &ids[k][p], (uint32_t) m, err));
       for (int i = 0; i < m; i++)
         if (p + i >= first[k] && (!skip || p + i == len - 1)) {
@@ -115,6 +118,7 @@ static void sub_batches(Forward* f, size_t V, const std::vector<int32_t>& real, 
   std::vector<int32_t> toks(n);
   for (int i = 0; i < n; i++) bs[i] = s[i % ns], toks[i] = ids[i % ns][i / ns];
   const auto a = std::chrono::steady_clock::now();
+  osmos_clear(err);
   CHECK(forward_batch(f, bs.data(), toks.data(), (uint32_t) n, err));
   CHECK(hipDeviceSynchronize() == hipSuccess);
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
@@ -138,16 +142,19 @@ static void sub_batches(Forward* f, size_t V, const std::vector<int32_t>& real, 
 // (seq_rollback) - each row the token's own gets, and every later step, the bits of the sequence stepped one token at
 // a time (the rejected tokens' window, compressor and Engram state rewritten before anything reads it)
 static void rollback(Forward* f, size_t V, const std::vector<int32_t>& ids) {
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const int n = (int) ids.size(), junk = 2;
+  osmos_clear(err);
   Seq* a = seq_create(f, err);
   CHECK(a);
   std::vector<float> ref((size_t) n * V), got((size_t) n * V);
   for (int p = 0; p < n; p++) {
+    osmos_clear(err);
     CHECK(forward_step(f, a, ids[p], err));
     CHECK(hipMemcpy(&ref[(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
   }
   seq_destroy(a);
+  osmos_clear(err);
   Seq* b = seq_create(f, err);
   CHECK(b);
   CHECK(!seq_rollback(b, 1));  // nothing stepped: nothing to undo
@@ -155,6 +162,7 @@ static void rollback(Forward* f, size_t V, const std::vector<int32_t>& ids) {
   for (int p = 0; p < n; p++) {
     const int32_t t[3] = {ids[p], ids[(p + 7) % n], ids[(p + 13) % n]};
     Seq* const ss[3] = {b, b, b};
+    osmos_clear(err);
     CHECK(forward_batch(f, ss, t, 1 + junk, err));
     CHECK(hipMemcpy(&got[(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
     CHECK(seq_rollback(b, junk));
@@ -234,11 +242,12 @@ int main() {
   std::vector<int32_t> all(32);
   for (auto& v : all) CHECK(std::fscanf(idf, "%d,", &v) == 1);
   std::fclose(idf);
-  char ferr[FORWARD_ERR] = "";
+  char ferr[OSMOS_ERR] = "";
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
   Forward* f0 = nullptr;
+  osmos_clear(ferr);
   TestFit fit = {[&](uint64_t b) { return (f0 = forward_create(w, w->geo.n_layers, kCtx, b, ferr)) != nullptr; },
                  [&] { return forward_budget(f0); }, [&](uint64_t* r) { return forward_room(f0, r); },
                  [&] { forward_destroy(f0), f0 = nullptr; }};
@@ -247,15 +256,20 @@ int main() {
   Run r{f0, (size_t) w->geo.n_vocab, {}, {}};
   for (int k = 0; k < kSeqs; k++)  // 4 windows of the real ids: different sequences, real text
     r.ids.push_back(std::vector<int32_t>(all.begin() + 5 * k, all.begin() + 5 * k + kLen));
+  osmos_clear(ferr);
   Seq* s0 = seq_create(r.f, ferr);
   std::vector<int32_t> many(FORWARD_MAX_TOKENS + 1, 0);
   std::vector<Seq*> many_s(FORWARD_MAX_TOKENS + 1, s0);
+  osmos_clear(ferr);
   CHECK(!forward_batch(r.f, many_s.data(), many.data(), FORWARD_MAX_TOKENS + 1, ferr));
+  osmos_clear(ferr);
   CHECK(!forward_batch(r.f, many_s.data(), many.data(), 0, ferr));
   int32_t bad = (int32_t) r.V;
+  osmos_clear(ferr);
   CHECK(!forward_batch(r.f, many_s.data(), &bad, 1, ferr));
   // a refusal before the work leaves the sequence as it was: its next step runs (0.11.2 - a refused token marked
   // it broken, every step after refused)
+  osmos_clear(ferr);
   CHECK(forward_batch(r.f, many_s.data(), all.data(), 1, ferr));
   seq_destroy(s0);
   std::printf("  refusals: %d tokens, 0 tokens, a token past the vocabulary - the sequence's next step as ever\n",

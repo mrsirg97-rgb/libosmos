@@ -1,21 +1,21 @@
 #ifndef READS_H
 #define READS_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/mem/pool.h"
 
-#define READS_ERR 256
 #define READS_POOLS 2 /* the pools one Reads reads for: the forward's membrane and its stream (DESIGN.md, "0.5.8") */
 
 typedef struct Reads Reads;
 
-Reads *reads_create(uint32_t n_units, int threads, char err[READS_ERR]);
+Reads *reads_create(uint32_t n_units, int threads, char err[OSMOS_ERR]);
 void reads_destroy(Reads *r);
 
 Fetcher reads_fetcher(Reads *r, int pool);
-bool reads_pump(Reads *r, Pool *const pools[READS_POOLS], bool wait, char err[READS_ERR]);
+bool reads_pump(Reads *r, Pool *const pools[READS_POOLS], bool wait, char err[OSMOS_ERR]);
 int reads_out(const Reads *r);
 uint64_t reads_split(const Reads *r);
 void reads_ahead_limit(Reads *r, uint64_t bytes);

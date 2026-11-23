@@ -90,5 +90,5 @@ int q4x_dflash_draft(Q4xForward *f, Q4xSeq *s, int32_t y, uint32_t max, float co
   const int32_t lo = pos0 - (int32_t)g->window, ctx_from = lo > s->df_lo ? lo : s->df_lo; /* (the ring past it) */
   const DfHost h = host(f);
   const DfRings r = rings(f, s);
-  return df_draft(&h, f->df, &f->d, &r, y, pos0, ctx_from, n, conf_min, cum_min, drafts, conf, err, OSMOS_ERR);
+  return df_draft(&h, f->df, &f->d, &r, y, pos0, ctx_from, n, conf_min, cum_min, drafts, conf, err);
 }

@@ -1,6 +1,7 @@
 /* osmos/mem/experts.h - an MoE's experts behind the membrane, sized to a budget: every family's (DeepSeek's,
    Inkling's, Qwen's, Hy4-flash's) one plan and one build */
 #pragma once
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -52,7 +53,7 @@ experts_destroy
 */
 bool experts_create(const PoolUnit *units, uint32_t layers, uint32_t experts, const uint32_t *order,
                     const ExpertsPlan *p, uint64_t grain, int readers, membrane_copy_fn copy, void *copy_ctx,
-                    uint64_t ahead_limit, bool warm_now, Experts *out, char err[MEMBRANE_ERR]);
+                    uint64_t ahead_limit, bool warm_now, Experts *out, char err[OSMOS_ERR]);
 void experts_destroy(Experts *e);
 
 /*

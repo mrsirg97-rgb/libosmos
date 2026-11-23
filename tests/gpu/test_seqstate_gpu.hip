@@ -41,7 +41,7 @@ constexpr uint64_t kBudget = 100ull << 30;  // (its experts mostly held: test_fi
 
 static Forward* g_f;
 static uint32_t g_vocab;
-static char g_err[FORWARD_ERR];
+static char g_err[OSMOS_ERR];
 
 static uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
   const uint8_t* b = (const uint8_t*) p;

@@ -29,7 +29,7 @@ static bool past_layers(const GgufTensor *t, void *arg) /* the MTP head's layers
 
 static bool upload(Q35Forward *f, char *err)
 {
-  return gpu_upload_table(f->w->model, READ_PIECE, past_layers, f, &f->dev, err, err ? OSMOS_ERR : 0);
+  return gpu_upload_table(f->w->model, READ_PIECE, past_layers, f, &f->dev, err);
 }
 
 void q35_forward_destroy(Q35Forward *f)

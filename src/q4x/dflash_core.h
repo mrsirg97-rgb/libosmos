@@ -56,8 +56,7 @@ void df_buffers_free(DfBuf *d);
 bool df_seed(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, const float *taps, int32_t from,
              uint32_t n);
 int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, int32_t y, int32_t pos0,
-             int32_t ctx_from, uint32_t n, float conf_min, float cum_min, int32_t *drafts, float *conf, char *err,
-             uint32_t err_n);
+             int32_t ctx_from, uint32_t n, float conf_min, float cum_min, int32_t *drafts, float *conf, char *err);
 
 #endif
 

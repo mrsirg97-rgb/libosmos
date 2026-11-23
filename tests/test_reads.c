@@ -55,7 +55,7 @@ static PoolUnit *units_of(int fd, uint32_t n)
 /* the consumer's wait for a unit: pumped until it is no longer reading */
 static void wait_for(Reads *r, Pool *p, uint32_t unit)
 {
-  char err[READS_ERR];
+  char err[OSMOS_ERR];
   while (pool_state(p, unit) == POOL_READING)
     assert(reads_pump(r, (Pool *[READS_POOLS]){p}, true, err));
 }
@@ -71,7 +71,7 @@ static void check_bytes(Pool *p, uint32_t unit)
 
 static void test_refusals(int fd)
 {
-  char err[READS_ERR];
+  char err[OSMOS_ERR];
   assert(!reads_create(0, 4, err) && err[0]);
   assert(!reads_create(8, 0, err) && !reads_create(8, 65, err));
   reads_destroy(NULL);
@@ -84,7 +84,7 @@ static void test_refusals(int fd)
 /* many reads on many readers, pins among the reads ahead: every one pinned once with its bytes */
 static void test_many(int fd, uint32_t n, int threads)
 {
-  char err[READS_ERR], perr[POOL_ERR];
+  char err[OSMOS_ERR], perr[OSMOS_ERR];
   PoolUnit *u = units_of(fd, n);
   Reads *r = reads_create(n, threads, err);
   assert(r);
@@ -123,7 +123,7 @@ static void test_many(int fd, uint32_t n, int threads)
 static void test_split(int fd)
 {
   enum { U = 16 };
-  char err[READS_ERR], perr[POOL_ERR];
+  char err[OSMOS_ERR], perr[OSMOS_ERR];
   PoolUnit *u = units_of(fd, U);
   Reads *r = reads_create(U, 4, err);
   assert(r);
@@ -151,7 +151,7 @@ static void test_split(int fd)
 static void test_pins(int fd)
 {
   enum { U = 12 };
-  char err[READS_ERR], perr[POOL_ERR];
+  char err[OSMOS_ERR], perr[OSMOS_ERR];
   PoolUnit *u = units_of(fd, U);
   Reads *r = reads_create(U, 1, err);
   assert(r);
@@ -180,7 +180,7 @@ static void test_pins(int fd)
 /* a read that fails (its file gone from under it) ends FAILED, cold again - not lost, nothing waits forever */
 static void test_failure(void)
 {
-  char err[READS_ERR], perr[POOL_ERR];
+  char err[OSMOS_ERR], perr[OSMOS_ERR];
   const int fd = file("gone.bin", 2);
   PoolUnit *u = units_of(fd, 2);
   Reads *r = reads_create(2, 2, err);
@@ -204,7 +204,7 @@ static void test_failure(void)
 static void test_destroy_busy(int fd)
 {
   enum { U = 400 };
-  char err[READS_ERR], perr[POOL_ERR];
+  char err[OSMOS_ERR], perr[OSMOS_ERR];
   PoolUnit *u = units_of(fd, U);
   Reads *r = reads_create(U, 2, err);
   assert(r);
@@ -226,7 +226,7 @@ static void test_destroy_busy(int fd)
 static void test_two_pools(int fd)
 {
   enum { U = 8 };
-  char err[READS_ERR], perr[POOL_ERR];
+  char err[OSMOS_ERR], perr[OSMOS_ERR];
   PoolUnit *u = units_of(fd, U);
   const void *dev[POOL_PARTS];
   Reads *r = reads_create(U, 2, err);

@@ -25,7 +25,7 @@ bool lfm3_alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? 
 /* every tensor of g into GPU memory, its device pointer at its index in *table */
 static bool upload_file(const Gguf *g, void ***table, char *err)
 {
-  return gpu_upload_table(g, READ_PIECE, NULL, NULL, table, err, err ? OSMOS_ERR : 0);
+  return gpu_upload_table(g, READ_PIECE, NULL, NULL, table, err);
 }
 
 static bool upload(Lfm3Forward *f, char *err) { return upload_file(f->w->model, &f->dev, err); }

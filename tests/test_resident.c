@@ -63,7 +63,7 @@ static void fake_free(void *dev, void *ctx)
 static void test_refusals(int fd)
 {
   Mem m = {0};
-  char err[POOL_ERR];
+  char err[OSMOS_ERR];
   const Slots s = {fake_alloc, fake_free, &m};
   const PoolUnit bad[] = {{.n_parts = 0}, {.n_parts = 4}, {.part = {{fd, 0, 0}}, .n_parts = 1},
                           {.part = {{fd, FILE_BYTES - 1, 2}}, .n_parts = 1}, {.part = {{9999, 0, 1}}, .n_parts = 1}};
@@ -129,7 +129,7 @@ static void test_layout(int fd)
   }
   u[7] = (PoolUnit){.part = {{fd, 3, RESIDENT_ARENA / 512}}, .n_parts = 1}; /* small enough for the file */
   Mem m = {0};
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Resident *r = resident_create(u, N, (Slots){fake_alloc, fake_free, &m}, 4, err);
   if (!r)
     fprintf(stderr, "  %s\n", err);
@@ -174,7 +174,7 @@ static void test_room(int fd)
   const PoolUnit u[2] = {{.part = {{fd, 17, file_b}, {-1, 0, room_b}}, .n_parts = 2},
                          {.part = {{-1, 0, 64}}, .n_parts = 1}};
   Mem m = {0};
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Resident *r = resident_create(u, 2, (Slots){alloc_ab, fake_free, &m}, 4, err);
   assert(r);
   const void *dev[POOL_PARTS];

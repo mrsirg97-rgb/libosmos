@@ -14,6 +14,7 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/run/drafter.h"
@@ -59,7 +60,7 @@ int main() {
   std::vector<int32_t> ids(kPrompt);
   for (auto& v : ids) CHECK(std::fscanf(idf, "%d,", &v) == 1);
   std::fclose(idf);
-  char ferr[FORWARD_ERR] = "";
+  char ferr[OSMOS_ERR] = "";
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
@@ -75,9 +76,11 @@ int main() {
   uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
   if (!test_fit(fit, kBudget, &budget)) std::printf("  %s\n", ferr);
   CHECK(f && d);
+  osmos_clear(ferr);
   CHECK(!drafter_create(f, "/nonexistent", ferr));
   const auto prompt = [&](Seq* s) {
     std::vector<Seq*> ss(kPrompt, s);
+    osmos_clear(ferr);
     const bool ok = forward_batch(f, ss.data(), ids.data(), kPrompt, ferr);
     if (!ok) std::fprintf(stderr, "  %s\n", ferr);
     CHECK(ok);
@@ -86,11 +89,13 @@ int main() {
   // drafted and verified against stepping one at a time: once in the default mode, once in the lane's (its small
   // steps' experts in the matvec's order: the plain steps and the verifies alike, so still the same tokens)
   const auto both = [&](const char* mode, bool first) {
+    osmos_clear(ferr);
     Seq* s = seq_create(f, ferr);
     int y = prompt(s);
     std::vector<int> plain;
     for (int i = 0; i < kTokens; i++) {
       plain.push_back(y);
+      osmos_clear(ferr);
       const bool stepped = forward_step(f, s, y, ferr);
       if (!stepped) std::fprintf(stderr, "  step %d: %s\n", i, ferr);
       CHECK(stepped);
@@ -98,24 +103,30 @@ int main() {
     }
     seq_destroy(s);
 
+    osmos_clear(ferr);
     s = seq_create(f, ferr);
     int32_t dr[DRAFTER_BLOCK];
     float cf[DRAFTER_BLOCK];
     y = prompt(s);
     if (first) {
+      osmos_clear(ferr);
       CHECK(drafter_draft(d, s, y, kConfMin, kCumMin, dr, cf, ferr) < 0);  // not seeded: refused
+      osmos_clear(ferr);
       CHECK(!drafter_seed(d, s, kPrompt, kPrompt + 1, ferr));               // a position the last step did not tap
     }
+    osmos_clear(ferr);
     CHECK(drafter_seed(d, s, kPrompt - 128, kPrompt, ferr));
     std::vector<int> spec;
     int32_t pos = kPrompt;
     int drafted = 0, accepted = 0, rounds = 0;
     while ((int) spec.size() < kTokens) {
+      osmos_clear(ferr);
       const int k = drafter_draft(d, s, y, kConfMin, kCumMin, dr, cf, ferr);
       CHECK(k >= 0 && k <= DRAFTER_BLOCK);
       std::vector<int32_t> toks{y};
       toks.insert(toks.end(), dr, dr + k);
       std::vector<Seq*> ss(toks.size(), s);
+      osmos_clear(ferr);
       CHECK(forward_batch(f, ss.data(), toks.data(), (uint32_t) toks.size(), ferr));
       int m = 0, next = -1;
       for (;; m++) {
@@ -125,6 +136,7 @@ int main() {
           break;
         }
       }
+      osmos_clear(ferr);
       CHECK(seq_rollback(s, (uint32_t) (k - m)) && drafter_seed(d, s, pos, pos + m + 1, ferr));
       spec.push_back(y);
       spec.insert(spec.end(), dr, dr + m);
@@ -151,24 +163,31 @@ int main() {
     std::fclose(lf);
     const auto read = [&](Seq* s, int from, int n) {
       std::vector<Seq*> ss(n, s);
+      osmos_clear(ferr);
       const bool ok = forward_batch(f, ss.data(), lid.data() + from, (uint32_t) n, ferr);
       if (!ok) std::fprintf(stderr, "  %s\n", ferr);
       CHECK(ok);
     };
     int32_t dra[DRAFTER_BLOCK], drb[DRAFTER_BLOCK];
     float cfa[DRAFTER_BLOCK], cfb[DRAFTER_BLOCK];
+    osmos_clear(ferr);
     Seq* a1 = seq_create(f, ferr);
     read(a1, 0, kLong);
     const int ya = argmax_row(f, (int) forward_logit_rows(f) - 1);  // the step's last row: its last sub-batch's
+    osmos_clear(ferr);
     const bool seeded = drafter_seed(d, a1, kLong - kWin, kLong, ferr);
     if (!seeded) std::fprintf(stderr, "  one step of %d: %s\n", kLong, ferr);
     CHECK(seeded);
+    osmos_clear(ferr);
     const int na = drafter_draft(d, a1, ya, kConfMin, kCumMin, dra, cfa, ferr);
+    osmos_clear(ferr);
     Seq* b1 = seq_create(f, ferr);
     read(b1, 0, kLong - 130);
     read(b1, kLong - 130, 130);
     const int yb = argmax_row(f, (int) forward_logit_rows(f) - 1);
+    osmos_clear(ferr);
     CHECK(drafter_seed(d, b1, kLong - kWin, kLong, ferr));
+    osmos_clear(ferr);
     const int nb = drafter_draft(d, b1, yb, kConfMin, kCumMin, drb, cfb, ferr);
     if (!(ya == yb && na == nb)) std::fprintf(stderr, "  one step: y %d, %d drafts (%d ..); two steps: y %d, %d drafts (%d ..)\n", ya, na, na > 0 ? dra[0] : -1, yb, nb, nb > 0 ? drb[0] : -1);
     CHECK(ya == yb && na >= 0 && na == nb && std::memcmp(dra, drb, na * sizeof *dra) == 0 &&
@@ -177,6 +196,7 @@ int main() {
                 "the same prompt in two steps\n", kLong, kWin, na);
     seq_destroy(a1), seq_destroy(b1);
   }
+  osmos_clear(ferr);
   CHECK(forward_lane(f, 0, NULL, ferr));
   both("the lane", false);
 

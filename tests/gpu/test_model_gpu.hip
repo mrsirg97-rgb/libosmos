@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "osmos/err.h"
 #include "test_model.h"
 #include "test_fit.h"
 
@@ -134,7 +135,7 @@ int main() {
     CHECK(std::fread(maya.v.data(), 4, maya.v.size(), f) == maya.v.size());
     std::fclose(f);
   }
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[OSMOS_ERR] = "";
   char path[512];
   const TestModel which = test_model(path, sizeof path);  // the oracle's dump must be of this model (its pack)
   CHECK(which != TestModel::kNone);
@@ -147,6 +148,7 @@ int main() {
   CHECK(w);
   const auto t0 = std::chrono::steady_clock::now();
   Forward* f = nullptr;
+  osmos_clear(ferr);
   TestFit fit = {[&](uint64_t b) { return (f = forward_create(w, w->geo.n_layers, 4096, b, ferr)) != nullptr; },
                  [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
                  [&] { forward_destroy(f), f = nullptr; }};
@@ -162,6 +164,7 @@ int main() {
   std::vector<double> ms;
   for (int run = 0; run < 3; run++) {  // free and probed, unprobed and timed, forced (each layer from the oracle's)
     forward_probe(f, run == 1 ? nullptr : probe, run == 2 ? &forced : &d);
+    osmos_clear(ferr);
     Seq* s = seq_create(f, ferr);
     CHECK(s);
     for (int p = 0; p < T; p++) {
@@ -176,6 +179,7 @@ int main() {
       const float* row = &got[run][(size_t) p * V];
       for (uint32_t i = 1; i < (uint32_t) V; i++)
         if (row[i] > row[first]) first = (int32_t) i;
+      osmos_clear(ferr);
       CHECK(forward_greedy(f, 0, 1, &pick, ferr) && pick == first && !forward_greedy(f, 0, 2, &pick, ferr));
     }
     seq_destroy(s);
@@ -245,13 +249,16 @@ int main() {
   CHECK(picks == 3ull * T * L * w->geo.n_used);
   for (size_t i = 0; i < nu; i++) least[i] = most - forward_picks(f)[i];
   forward_destroy(f);
+  osmos_clear(ferr);
   f = forward_create_ranked(w, L, 4096, budget, least.data(), ferr);
   if (!f) std::printf("  forward_create_ranked: %s\n", ferr);
   CHECK(f);
   std::vector<float> ranked((size_t) T * V);
+  osmos_clear(ferr);
   Seq* rs = seq_create(f, ferr);
   CHECK(rs);
   for (int p = 0; p < T; p++) {
+    osmos_clear(ferr);
     CHECK(forward_step(f, rs, (int32_t) ids.v[p], ferr));
     CHECK(hipMemcpy(&ranked[(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
   }
@@ -259,12 +266,15 @@ int main() {
   CHECK(ranked == got[1]);
   // forward_lane (0 CPU threads: its experts all on the GPU, in the matvec's order): two runs the same bits, its
   // logits within the oracle's reach (KL within kLaneKlSlack of maya's, argmax the oracle's or a tie)
+  osmos_clear(ferr);
   CHECK(forward_lane(f, 0, NULL, ferr));
   std::vector<std::vector<float>> lane(2, std::vector<float>((size_t) T * V));
   for (int run = 0; run < 2; run++) {
+    osmos_clear(ferr);
     Seq* ls = seq_create(f, ferr);
     CHECK(ls);
     for (int p = 0; p < T; p++) {
+      osmos_clear(ferr);
       CHECK(forward_step(f, ls, (int32_t) ids.v[p], ferr));
       CHECK(hipMemcpy(&lane[run][(size_t) p * V], forward_logits(f), V * 4, hipMemcpyDeviceToHost) == hipSuccess);
     }
