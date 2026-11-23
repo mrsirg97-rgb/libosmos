@@ -7,6 +7,7 @@
 
 #include "osmos/run/gpu.h"
 #include "serve.h"
+#include "osmos/err.h"
 
 double now_ms(void)
 {
@@ -248,7 +249,7 @@ void conv_set_aside(Conv *c, const Server *sv)
       !c->held.n || !slots_keeps(sv->slots, c->held.n))
     return; /* not kept: nothing saved, no room made (0.7.1: kept ones moved for it, then it was refused) */
   const uint64_t bytes = oseq_state_bytes(c->s);
-  char serr[SLOTS_ERR] = "";
+  char serr[OSMOS_ERR] = "";
   bool kept = false, ok;
   void *st = slots_room(sv->slots, bytes, serr) ? malloc(bytes) : NULL;
   c->err[0] = '\0';
@@ -318,7 +319,7 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   if (id < 0)
     return true;
   c->via = "slot";
-  char serr[SLOTS_ERR] = "";
+  char serr[OSMOS_ERR] = "";
   c->err[0] = '\0';
   if (!slots_take_stream(sv->slots, id, conv_load, c, serr)) /* (a failed load leaves the sequence empty) */
   {
@@ -327,7 +328,7 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   }
   for (uint32_t i = 0; i < len; i++)
     if (!ids_push(&c->held, p[i]))
-      return snprintf(c->err, sizeof c->err, "out of memory (a kept conversation's tokens)"), false;
+      return osmos_fail(c->err, "out of memory (a kept conversation's tokens)"), false;
   /* kept as its prompt's point left it (conv_set_aside): that point again, taken back. 0.9.2: none was, and the turn
      taken back at exactly that point (the same turn again, or a tool result whose mark it is) read on without one -
      its stops not past held.n - so its next turn found nothing to go back to and read the whole conversation again
@@ -346,7 +347,7 @@ static bool read_piece(Conv *c, const Server *sv, const int32_t *p, uint32_t k, 
     return true;
   OsmosSeq **seqs = calloc(k, sizeof *seqs);
   if (!seqs)
-    return snprintf(c->err, sizeof c->err, "out of memory"), false;
+    return osmos_fail(c->err, "out of memory"), false;
   for (uint32_t i = 0; i < k; i++)
     seqs[i] = c->s;
   const uint32_t at = c->held.n;
@@ -354,7 +355,7 @@ static bool read_piece(Conv *c, const Server *sv, const int32_t *p, uint32_t k, 
   free(seqs);
   for (uint32_t i = 0; ok && i < k; i++)
     if (!ids_push(&c->held, p[at + i]))
-      return snprintf(c->err, sizeof c->err, "out of memory"), false;
+      return osmos_fail(c->err, "out of memory"), false;
   const uint32_t lo = n > sv->window && n - sv->window > at ? n - sv->window : at;
   return ok && (!seed || lo >= at + k || oseq_seed(c->s, (int32_t)lo, (int32_t)(at + k), c->err));
 }
@@ -390,7 +391,7 @@ bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t
         return false;
       take(c, i ? &c->prompt : &c->user, i ? "prompt's" : "last user turn's");
       if (!i && !oseq_prompt(c->s, n)) /* past the mark: the prompt's own end */
-        return snprintf(c->err, sizeof c->err, "the prompt's end not past its mark"), false;
+        return osmos_fail(c->err, "the prompt's end not past its mark"), false;
       at_end = n;
     }
   if (c->held.n < end)

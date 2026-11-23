@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "multi.h"
+#include "osmos/err.h"
 
 #define MAX_LANES OSMOS_MAX_LANES
 
@@ -59,7 +60,7 @@ static void settle(Multi *m, const Entry *e, const int32_t *toks, const int32_t 
             (!keep || oseq_seed(ln->c.s, e->pos, e->pos + keep, ln->c.err));
   for (int i = 0; ok && i < keep; i++)
     if (!(ok = ids_push(&ln->c.held, toks[e->off + i])))
-      snprintf(ln->c.err, sizeof ln->c.err, "out of memory");
+      osmos_fail(ln->c.err, "out of memory");
   if (!ok)
   {
     lane_fail(m, ln);
@@ -107,7 +108,7 @@ static int lanes_of(Multi *m, Lane **go, int *after, int32_t (*dr)[OSMOS_MAX_BLO
   }
   float cf[MAX_LANES][OSMOS_MAX_BLOCK];
   int cnt[MAX_LANES];
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   if (nd && !oseq_draft_all(ds, ys, (uint32_t)nd, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, dr, cf, cnt, err))
   {
     int kept = 0;
@@ -151,7 +152,7 @@ void round_all(Multi *m)
   }
   if (!total)
     return;
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   /* every row's greedy pick in one launch (lanes greedy and sampled mixed): a sampled lane's rows drawn again below */
   if (!osmos_batch(sv->e, seqs, toks, (uint32_t)total, err) || !osmos_greedy(sv->e, 0, (uint32_t)total, picks, err))
   {
@@ -173,7 +174,7 @@ void round_all(Multi *m)
     if (ln->g.spec)
       settle(m, &in[j], toks, picks);
     else if (!ids_push(&ln->c.held, toks[in[j].off]))
-      snprintf(ln->c.err, sizeof ln->c.err, "out of memory"), lane_fail(m, ln);
+      osmos_fail(ln->c.err, "out of memory"), lane_fail(m, ln);
     else
       ln->t = picks[in[j].off];
   }

@@ -2246,6 +2246,12 @@ then copied again), a whole-request deadline (a byte every 9 s holds a connectio
 allowlist (an unknown field refused, not ignored), --allow-origin with CORS, token ids and GEN numbers parsed strictly.
 Each limit derived from data (the largest real context's body, measured requests).
 
+**found in phase 2, for phase 3**: Qwen's destroy frees Q4xBuf's first members as an array of pointers (up to
+pin_rows), and DeepSeek's its whole Scratch: a struct whose layout is a hidden contract - a member of another kind
+put in that range is freed as a pointer (phase 2's overflow flag, first placed in Q4xBuf: a double free, then a
+"GPU call failed (the embedding)" in the next forward). Each buffer freed by name, or a table of the buffers it holds
+(Inkling's shape), so nothing about the struct's order is a rule.
+
 **phase 6 - structure**: files past ~300 lines split by responsibility (Inkling's forward 1,385 lines: make / moe /
 ctrl / step, as Hy4's and osmos1.7b's already are); one name a role across families (<fam>_fail, hip_<fam>_make /
 step / seq / draft, DeepSeek under src/ds4); comments to their load-bearing statements - an invariant the code cannot

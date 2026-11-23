@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
   CHECK(ids.size() >= n && n > 1);
   const char* mp = std::getenv("MODEL");
   CHECK(mp);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(mp, err);
   if (!g) std::fprintf(stderr, "gguf_create: %s\n", err), std::_Exit(1);
   const char* op = std::getenv("OVERLAY");

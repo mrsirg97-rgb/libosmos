@@ -44,6 +44,7 @@
 #include "osmos/run/gpu.h"
 #include "osmos/text/tokenizer.h"
 #include "osmos/version.h"
+#include "osmos/err.h"
 
 static const char *opt(int argc, char **argv, const char *name, const char *dflt)
 {
@@ -85,7 +86,7 @@ static int die(const char *what)
   return 2;
 }
 
-static bool open_slots(Server *sv, const char *model, char *err, size_t en)
+static bool open_slots(Server *sv, const char *model, char err[OSMOS_ERR])
 {
   char dflt[4096];
   const char *slash = strrchr(model, '/');
@@ -97,9 +98,9 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
   const SlotsOptions so = {dir, (uint32_t)env_num("OSMOS_SLOT_CAP", 4), ram, env_num("OSMOS_SLOT_GB", 16),
                            (uint32_t)env_num("OSMOS_SLOT_MIN", 1024), env_num("OSMOS_SLOT_DAYS", 7),
                            osmos_identity(sv->e)};
-  char serr[SLOTS_ERR] = "";
+  char serr[OSMOS_ERR] = "";
   if (!(sv->slots = slots_create(&so, serr)))
-    return snprintf(err, en, "%s", serr), false;
+    return osmos_fail(err, "%s", serr);
   out("NOTE slots: %u conversations kept from an earlier run (%s); RAM for them %.2f GiB (%.2f available, %.0f kept "
       "free)\n", slots_in_dir(sv->slots), dir, ram / (double)(1ull << 30), avail / (double)(1ull << 30),
       sv->ram_kept / (double)(1ull << 30));
@@ -109,7 +110,7 @@ static bool open_slots(Server *sv, const char *model, char *err, size_t en)
 /* --answer-after's rule, from the model's own tokenizer (the token of its text, its blank tokens) */
 static bool answer_of(Server *sv, const char *model, const char *after, char err[OSMOS_ERR])
 {
-  char gerr[GGUF_ERR] = "", terr[TOKENIZER_ERR] = "", aerr[ANSWER_ERR] = "";
+  char gerr[OSMOS_ERR] = "", terr[OSMOS_ERR] = "", aerr[OSMOS_ERR] = "";
   Gguf *g = gguf_header(model, gerr);
   Tokenizer *t = g ? tokenizer_create(g, terr) : NULL;
   char *rest = NULL;
@@ -117,7 +118,7 @@ static bool answer_of(Server *sv, const char *model, const char *after, char err
   const int32_t id = after[0] == '#' ? (rest > after + 1 && !*rest ? (int32_t)n : -1) : t ? tokenizer_find(t, after) : -1;
   const bool ok = t && answer_rule_create(&sv->answer, t, id, aerr);
   if (!ok)
-    snprintf(err, OSMOS_ERR, "--answer-after: %s", !g ? gerr : !t ? terr : aerr);
+    osmos_fail(err, "--answer-after: %s", !g ? gerr : !t ? terr : aerr);
   else
     out("NOTE answer-after %d\n", sv->answer.after);
   tokenizer_destroy(t), gguf_destroy(g);
@@ -186,12 +187,12 @@ int main(int argc, char **argv)
     return die(err);
   if (osmos_reads_apart(sv.e)) /* (a client's - a test's - what a next turn reuses: its prompt's point, not its answer) */
     out("NOTE reads apart: a turn's earlier answer is read again from its prompt's point, never continued on\n");
-  if (env_num("OSMOS_SLOT_KEEP", 1) != 0 && !open_slots(&sv, model, err, sizeof err))
+  if (env_num("OSMOS_SLOT_KEEP", 1) != 0 && !open_slots(&sv, model, err))
     return die(err);
   const int rc = par ? serve_multi(&sv, conv, lanes) : serve_single(&sv, conv);
   if (sv.slots) /* the end: every conversation set aside, RAM's written to the folder */
   {
-    char serr[SLOTS_ERR] = "";
+    char serr[OSMOS_ERR] = "";
     for (int i = 0; i < lanes; i++)
       conv_set_aside(&conv[i], &sv);
     if (!slots_flush(sv.slots, serr))

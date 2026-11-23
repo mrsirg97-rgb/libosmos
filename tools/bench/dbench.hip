@@ -68,7 +68,7 @@ static FILE* g_ids;             // IDS=file: each undrafted answer's token ids, 
 
 static int32_t pick(Forward* f, std::vector<float>& lg, uint32_t V, uint32_t row) {
   if (g_greedy) {
-    char e[FORWARD_ERR] = "";
+    char e[OSMOS_ERR] = "";
     int32_t id = -1;
     if (!forward_greedy(f, row, 1, &id, e)) std::fprintf(stderr, "greedy: %s\n", e), std::_Exit(1);
     return id;
@@ -88,7 +88,7 @@ static double epoch() {  // seconds since the epoch: tools/power.py's samples ar
 }
 
 static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& ids, int n, uint64_t* h, bool windows = true) {
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Seq* s = seq_create(f, err);
   CHECK(s);
   const uint32_t P = (uint32_t) ids.size(), V = w->geo.n_vocab;
@@ -113,7 +113,7 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
   const auto t0 = std::chrono::steady_clock::now();
   const double te0 = epoch();
   if (g_draft) {
-    char err2[FORWARD_ERR] = "";
+    char err2[OSMOS_ERR] = "";
     CHECK(drafter_seed(g_draft, s, (int32_t) P > kRing ? (int32_t) P - kRing : 0, (int32_t) P, err2));
     int32_t pos = (int32_t) P, dr[DRAFTER_BLOCK];
     float cf[DRAFTER_BLOCK];
@@ -175,7 +175,7 @@ int main(int argc, char** argv) {
   const char* md = std::getenv("MODEL_DIR");
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "",
                     mdir = md ? std::string(md) + "/" : home + "/models/ds1017/";
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   // MODEL: a model's first shard (unsloth's UD: its Engram its own, ENGRAM unset); else ds1017's in MODEL_DIR
   const char* mp = std::getenv("MODEL");
   const char* ep = std::getenv("ENGRAM");
@@ -237,9 +237,9 @@ int main(int argc, char** argv) {
     drafter_destroy(g_draft), forward_destroy(z->f);
     g_draft = nullptr, z->f = nullptr;
   };
-  auto build = [](void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[FIT_ERR]) -> bool {
+  auto build = [](void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[OSMOS_ERR]) -> bool {
     Built* z = (Built*) ctx;
-    char ferr[FORWARD_ERR] = "";
+    char ferr[OSMOS_ERR] = "";
     z->o.budget = budget;
     bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, z->cpu_pin, ferr);
     if (ok && std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu): NPU=<its kernel's dir>, NPU_SHARE
@@ -250,13 +250,13 @@ int main(int argc, char** argv) {
     seq_destroy(s);
     if (!ok) {
       drafter_destroy(g_draft), forward_destroy(z->f), g_draft = nullptr, z->f = nullptr;
-      return std::snprintf(err, FIT_ERR, "%s", ferr), false;
+      return std::snprintf(err, OSMOS_ERR, "%s", ferr), false;
     }
     *built = forward_budget(z->f);
     return true;
   };
   uint64_t sized_to = 0;
-  char zerr[FIT_ERR] = "";
+  char zerr[OSMOS_ERR] = "";
   if (sized ? !fit_sized(build, unbuild, &b, FIT_HEADROOM, &sized_to, zerr)
             : !build(&b, budget, &sized_to, &sized_to, zerr))
     std::fprintf(stderr, "build: %s\n", zerr), std::_Exit(1);

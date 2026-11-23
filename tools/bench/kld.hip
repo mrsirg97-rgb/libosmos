@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
 
   const char* mp = std::getenv("MODEL");
   CHECK(mp);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(mp, err);
   if (!g) std::fprintf(stderr, "gguf_create: %s\n", err), std::_Exit(1);
   const char* op = std::getenv("OVERLAY");
@@ -128,11 +128,11 @@ int main(int argc, char** argv) {
     const FitBuild build = [](void* c, uint64_t b, uint64_t* built, uint64_t* room, char* err) -> bool {
       Ctx* z = (Ctx*) c;
       z->o.budget = b;
-      char e[FORWARD_ERR] = "";
+      char e[OSMOS_ERR] = "";
       z->f = forward_create_with(z->w, &z->o, e);
       if (!z->f || !forward_lane(z->f, 0, NULL, e) || !forward_room(z->f, room)) {
         if (z->f) forward_destroy(z->f), z->f = nullptr;
-        return std::snprintf(err, FIT_ERR, "%s", e[0] ? e : "the room could not be read"), false;
+        return std::snprintf(err, OSMOS_ERR, "%s", e[0] ? e : "the room could not be read"), false;
       }
       *built = forward_budget(z->f);
       std::fprintf(stderr, "sizing: a build at %.2f GiB took %.2f, left %.2f GiB\n", b / 1073741824.0,
@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
       if (z->f) forward_destroy(z->f), z->f = nullptr;
     };
     uint64_t sized = 0;
-    char ferr2[FIT_ERR] = "";
+    char ferr2[OSMOS_ERR] = "";
     if (!fit_sized(build, unbuild, &z, FIT_HEADROOM, &sized, ferr2)) std::fprintf(stderr, "fit_sized: %s\n", ferr2), std::_Exit(1);
     f = z.f;
     std::fprintf(stderr, "the budget sized to this GPU: %.2f GiB\n", sized / 1073741824.0);

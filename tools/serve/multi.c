@@ -11,6 +11,7 @@
 #include "libevt/runtime/context.h"
 #include "multi.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/err.h"
 
 typedef struct LineEv
 {
@@ -71,6 +72,7 @@ static int pick_lane(const Multi *m, const Gen *g)
 static void admit(Multi *m, int i, Gen *g)
 {
   Lane *ln = &m->lane[i];
+  osmos_clear(ln->c.err); /* (osmos/err.h: an earlier request's cause never this one's) */
   ln->g = *g, ln->st = READING, ln->produced = ln->accepted = ln->drafted = 0, ln->t0 = now_ms(), ln->t1 = ln->t0, ln->used = ++m->clock;
   ln->limit = g->max_new > 0 ? g->max_new : (long long)m->sv->max_ctx - g->n;
   if (!conv_continue(&ln->c, m->sv, g->ids, g->n))
@@ -81,7 +83,7 @@ static void admit(Multi *m, int i, Gen *g)
   ln->reused = ln->c.held.n;
   if (!oseq_prompt(ln->c.s, conv_prompt_end(&ln->c, g->n, g->mark)))
   {
-    snprintf(ln->c.err, sizeof ln->c.err, "the prompt's end not past the conversation's");
+    osmos_fail(ln->c.err, "the prompt's end not past the conversation's");
     lane_fail(m, ln);
   }
 }

@@ -95,7 +95,7 @@ int main(int argc, char **argv)
   if (!qt || !(qt->paths & QTYPE_MV) || qt->values != 256)
     return fprintf(stderr, "requant_dspark: %s is not an expert type the drafter's matvec takes\n", tn), 2;
   const int threads = argc > 4 ? atoi(argv[4]) : 16;
-  char err[DSPARK_ERR] = "";
+  char err[OSMOS_ERR] = "";
   DsparkIndex *ix = dspark_index(argv[1], err);
   if (!ix)
     return fprintf(stderr, "requant_dspark: %s\n", err), 2;

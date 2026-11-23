@@ -7,6 +7,7 @@
 
 #include "serve.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/err.h"
 
 #define QUEUED 64 /* lines that came while a request ran, kept for after it */
 
@@ -206,6 +207,7 @@ static void fail(Server *sv, Conv *c)
 /* one request: the prompt's rest a step at a time (PP), the answer (T), DONE */
 static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
 {
+  osmos_clear(c->err); /* (osmos/err.h: an earlier request's cause never this one's) */
   const double t0 = now_ms();
   const uint32_t n = g->n;
   if (n >= sv->max_ctx)
@@ -228,7 +230,7 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
   const uint32_t reused = c->held.n;
   if (!oseq_prompt(c->s, conv_prompt_end(c, n, g->mark)))
   {
-    snprintf(c->err, sizeof c->err, "the prompt's end not past the conversation's");
+    osmos_fail(c->err, "the prompt's end not past the conversation's");
     fail(sv, c);
     return;
   }

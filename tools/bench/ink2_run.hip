@@ -173,7 +173,7 @@ static void matt(const GgufTensor* t, const float* x, uint32_t n, float* y) {  /
 
 int main(int argc, char** argv) {
   if (argc < 3) return std::fprintf(stderr, "ink2_run <first shard> <ids> [out.f32]\n"), 2;
-  char err[GGUF_ERR > OSMOS_ERR ? GGUF_ERR : OSMOS_ERR];
+  char err[OSMOS_ERR > OSMOS_ERR ? OSMOS_ERR : OSMOS_ERR];
   Gguf* model = gguf_create(argv[1], err);
   CHECK(model || (std::fprintf(stderr, "%s\n", err), false));
   g_model = model;

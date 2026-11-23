@@ -40,7 +40,7 @@ static double logsumexp(const float* x, uint32_t V) {
 }
 
 int main(int argc, char** argv) {
-  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "", terr[TOKENIZER_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "", terr[OSMOS_ERR] = "";
   if (argc < 4) return std::fprintf(stderr, "usage: lfm3_lsa_check <GGUF> <maps> <text> [P=16384] [D=64] [F]\n"), 2;
   const uint32_t P = argc > 4 ? (uint32_t) atoi(argv[4]) : 16384, D = argc > 5 ? (uint32_t) atoi(argv[5]) : 64;
   const uint32_t F = argc > 6 ? (uint32_t) strtoul(argv[6], nullptr, 10) : 0;

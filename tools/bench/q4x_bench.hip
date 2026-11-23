@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
   for (int32_t x; f && ids.size() < np && std::fscanf(f, "%d,", &x) == 1;) ids.push_back(x);
   if (f) std::fclose(f);
   if (ids.size() != np || !np || !nd) return std::fprintf(stderr, "q4x_bench: %zu ids, %u asked\n", ids.size(), np), 2;
-  char gerr[GGUF_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(argv[1], gerr);
   /* OVERLAY: a GGUF whose tensors stand in for the model's of their names (an abliteration: q4x_weights_create) */
   Gguf* ov = getenv("OVERLAY") ? gguf_create(getenv("OVERLAY"), gerr) : nullptr;
