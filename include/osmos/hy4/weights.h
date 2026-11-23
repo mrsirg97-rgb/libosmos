@@ -1,13 +1,13 @@
 #ifndef OSMOS_HY4_WEIGHTS_H
 #define OSMOS_HY4_WEIGHTS_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/model/engram.h"
 #include "osmos/model/gguf.h"
 
-#define HY4_ERR 256
 #define HY4_MAX_LAYERS 64
 #define HY4_MAX_HC 4      /* the residual's streams (Hy4-flash's iHC: 4) */
 #define HY4_MAX_ENGRAM 8  /* the Engram layers (Hy4-flash's: 4) */
@@ -79,12 +79,12 @@ typedef struct Hy4Weights
   Hy4Layer layer[HY4_MAX_LAYERS];
 } Hy4Weights;
 
-bool hy4_geometry(const Gguf *model, Hy4Geometry *g, char err[HY4_ERR]);
-Hy4Weights *hy4_weights_create(const Gguf *model, char err[HY4_ERR]);
+bool hy4_geometry(const Gguf *model, Hy4Geometry *g, char err[OSMOS_ERR]);
+Hy4Weights *hy4_weights_create(const Gguf *model, char err[OSMOS_ERR]);
 void hy4_weights_destroy(Hy4Weights *w);
 
 /* the Engram hash's shape (osmos/model/engram.h) from the file's metadata */
-bool hy4_engram_shape(const Hy4Weights *w, EngramShape *s, char err[HY4_ERR]);
+bool hy4_engram_shape(const Hy4Weights *w, EngramShape *s, char err[OSMOS_ERR]);
 
 #endif
 

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "osmos/err.h"
 #include "osmos/hy4/weights.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/qtype.h"
@@ -41,7 +42,8 @@ static GgufKv *kv(const char *key)
 
 static bool accepted(void)
 {
-  char err[HY4_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Hy4Weights *w = hy4_weights_create(model, err);
   if (!w)
     printf("    refused: %s\n", err);
@@ -51,7 +53,8 @@ static bool accepted(void)
 
 static void refused(const char *what, const char *needle)
 {
-  char err[HY4_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Hy4Weights *w = hy4_weights_create(model, err);
   if (w || !strstr(err, needle))
   {
@@ -214,7 +217,8 @@ static void test_tensors(void)
 int main(void)
 {
   printf("[test_hy4_weights] start\n");
-  char err[HY4_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  osmos_clear(err);
   assert(!hy4_weights_create(NULL, err) && err[0]);
   hy4_weights_destroy(NULL);
   if (getenv("OSMOS_TEST_HY4"))
@@ -227,6 +231,7 @@ int main(void)
     printf("[test_hy4_weights] ok\n");
     return 0;
   }
+  osmos_clear(err);
   Hy4Weights *w = hy4_weights_create(model, err);
   if (!w)
     printf("  refused: %s\n", err);

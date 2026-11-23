@@ -21,6 +21,7 @@
 #include "osmos/model/qtype.h"
 #include "osmos/model/safetensors.h"
 #include "hy4_impl.h"
+#include "osmos/err.h"
 
 /* the release's config.json: dfly_target_kv_layers (= dfly_target_index_layer), dfly_mask_token_id */
 static const int TARGETS[HY4_DFLY_LAYERS] = {25, 29, 33, 37, 41};
@@ -58,7 +59,6 @@ struct Hy4Dfly
   float *pin_prob;
 };
 
-static bool fail(char *err, const char *why) { return hy4_fail(err, why); }
 
 /* a tensor of the file by its name under the prefix, of these dims (ggml's order), BF16 */
 static const GgufTensor *need(const Gguf *g, const char *name, uint64_t d0, uint64_t d1, char *err)
@@ -68,9 +68,9 @@ static const GgufTensor *need(const Gguf *g, const char *name, uint64_t d0, uint
   const GgufTensor *t = gguf_tensor(g, full);
   if (!t || t->type != QTYPE_BF16 || t->dims[0] != d0 || (d1 ? t->n_dims != 2 || t->dims[1] != d1 : t->n_dims != 1))
   {
-    char why[HY4_ERR];
+    char why[OSMOS_ERR];
     snprintf(why, sizeof why, "DFly2: %s missing, not BF16 or of another shape", full);
-    return fail(err, why), NULL;
+    return osmos_fail(err, "%s", why), NULL;
   }
   return t;
 }
@@ -251,38 +251,38 @@ void hy4_dfly_free(Hy4Forward *f)
     f->dfly_slot[l] = -1;
 }
 
-bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
+bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR])
 {
   if (!f || !path)
-    return fail(err, "no forward or drafter path");
+    return osmos_fail(err, "no forward or drafter path");
   if (f->dfly)
-    return fail(err, "DFly2: already loaded");
+    return osmos_fail(err, "DFly2: already loaded");
   const Hy4Geometry *g = &f->w->geo;
   const uint32_t D = (uint32_t)g->n_embd, ql = (uint32_t)g->q_lora, lat = (uint32_t)g->kv_lora;
   const uint32_t nope = (uint32_t)g->nope_dim, rd = (uint32_t)g->rope_dim, vd = (uint32_t)g->v_dim;
   for (int i = 0; i < HY4_DFLY_LAYERS; i++)
     if (TARGETS[i] >= g->n_layers || g->sliding[TARGETS[i]])
-      return fail(err, "DFly2: a target layer not one of this model's sparse layers");
+      return osmos_fail(err, "DFly2: a target layer not one of this model's sparse layers");
   if (MASK_TOKEN >= g->n_vocab)
-    return fail(err, "DFly2: its mask token past this model's vocabulary");
+    return osmos_fail(err, "DFly2: its mask token past this model's vocabulary");
   if (f->max_tokens < ROWS) /* a draft's block in the step's buffers (its MLA table max_tokens x heads - 0.11.2) */
-    return fail(err, "DFly2: a forward's step smaller than a draft block");
+    return osmos_fail(err, "DFly2: a forward's step smaller than a draft block");
   const uint32_t H = (uint32_t)g->n_heads[TARGETS[0]];
   struct Hy4Dfly *d = calloc(1, sizeof *d);
   if (!d)
-    return fail(err, "out of memory");
+    return osmos_fail(err, "out of memory");
   f->dfly = d;
   d->q8 = q8, d->wtype = q8 ? QTYPE_Q8_0 : QTYPE_BF16, d->ehtype = q8 ? QTYPE_Q8_0 : QTYPE_F32;
   if (!(d->st = st_create(path, err)))
     return hy4_dfly_free(f), false;
   void *pin = NULL;
   if (!(d->dev = calloc(d->st->n_tensors, sizeof *d->dev)) || hipHostMalloc(&pin, READ_PIECE, 0) != hipSuccess)
-    return hy4_dfly_free(f), fail(err, "out of memory (DFly2's table or a pinned piece)");
+    return hy4_dfly_free(f), osmos_fail(err, "out of memory (DFly2's table or a pinned piece)");
   bool ok = true;
   { /* the FFN's width from the file (9,216 in the release) */
     const GgufTensor *gp = gguf_tensor(d->st, PREFIX "0.mlp.gate_proj.weight");
     d->ff = gp && gp->n_dims == 2 ? (uint32_t)gp->dims[1] : 0;
-    ok = d->ff || fail(err, "DFly2: no layer 0 FFN gate (not the drafter's file)");
+    ok = d->ff || osmos_fail(err, "DFly2: no layer 0 FFN gate (not the drafter's file)");
   }
   for (int i = 0; ok && i < HY4_DFLY_LAYERS; i++)
   {
@@ -307,7 +307,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
                  small(d->st, qan, &L->q_a_norm) && small(d->st, kvn, &L->kv_a_norm) &&
                  small(d->st, ppn, &L->post_proj_norm) && small(d->st, fn, &L->ffn_norm) && small(d->st, sk, &L->sinks) &&
                  split_kvb(d->st, kv_b, H, nope, vd, lat, &L->k_b, &L->v_b)) ||
-                fail(err, "DFly2: a layer's tensors not read into GPU memory"));
+                osmos_fail(err, "DFly2: a layer's tensors not read into GPU memory"));
   }
   const GgufTensor *eh = ok ? need(d->st, "mtp_fusion.eh_proj.weight", 2 * D, D, err) : NULL;
   const GgufTensor *eg = ok ? need(d->st, "mtp_fusion.gate", D, 0, err) : NULL;
@@ -329,21 +329,21 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
       for (uint64_t c = 0; c < 2ull * D; c++)
         w[r * 2 * D + c] *= gv[r];
     ok = (w && gv && (q8 ? hy4_q8_up(w, D, 2 * D, (void **)&d->eh) : up_f32(w, (uint64_t)D * 2 * D, &d->eh))) ||
-         fail(err, "DFly2: the fusion not made");
+         osmos_fail(err, "DFly2: the fusion not made");
     free(w), free(gv);
   }
   ok = ok && ((small(d->st, en, &d->enorm) && small(d->st, hn, &d->hnorm) && small(d->st, fnm, &d->final_norm) &&
                small(d->st, chn, &d->hidden_norm) && small(d->st, cen, &d->embed_norm) &&
                matrix(d, cg, pin, &d->corr_gate) && matrix(d, cu, pin, &d->corr_up) &&
                matrix(d, cd, pin, &d->corr_down)) ||
-              fail(err, "DFly2: its shared tensors not read into GPU memory"));
+              osmos_fail(err, "DFly2: its shared tensors not read into GPU memory"));
   hipHostFree(pin);
   const GgufTensor *out = f->w->output;
   if (ok && q8 && !f->head8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
   { /* the drafts' head: the target's own as Q8_0 (a draft's precision moves its acceptance, never the output) */
     float *x = out->type == QTYPE_BF16 ? hy4_host_f32(f->w->model, out) : NULL;
     ok = (x && hy4_q8_up(x, out->dims[1], (uint32_t)out->dims[0], &d->head8)) ||
-         fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
+         osmos_fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
     free(x);
   }
   if (ok && q8 && !getenv("HY4_DFLY_HEAD8") && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
@@ -351,7 +351,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
        session (2026-11-19): code 24.1-24.6 -> 25.6-26.2 tok/s (the same 87 accepted, 106 drafts against 112), prose
        27.5-28.1 -> 28.3-29.0 (the same 96); +209 MB. HY4_DFLY_HEAD8=1: head8's / the target's */
     float *x = out->type == QTYPE_BF16 ? hy4_host_f32(f->w->model, out) : NULL;
-    ok = (x && q4_up(x, out->dims[1], (uint32_t)out->dims[0], &d->head4)) || fail(err, "DFly2: the head's Q4_0 copy");
+    ok = (x && q4_up(x, out->dims[1], (uint32_t)out->dims[0], &d->head4)) || osmos_fail(err, "DFly2: the head's Q4_0 copy");
     free(x);
   }
   /* the buffers: ROWS rows each */
@@ -374,7 +374,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR])
   if (!ok)
   {
     if (!err[0])
-      fail(err, "GPU memory refused (DFly2's buffers)");
+      osmos_fail(err, "GPU memory refused (DFly2's buffers)");
     return hy4_dfly_free(f), false;
   }
   for (int i = 0; i < HY4_DFLY_LAYERS; i++)
@@ -390,7 +390,7 @@ static bool mat(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uint
 }
 
 int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf_min, float cum_min, int32_t *drafts,
-                  float *conf, char err[HY4_ERR])
+                  float *conf, char err[OSMOS_ERR])
 {
   struct Hy4Dfly *d = f ? f->dfly : NULL;
   if (!d || !s || s->f != f || s->broken || !drafts || !conf)
@@ -467,7 +467,7 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
        hipMemcpyAsync(d->pin_prob, d->prob, most * F, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
        hipStreamSynchronize(f->st) == hipSuccess;
   if (!ok)
-    return fail(err, "DFly2: a GPU call failed (a draft)"), -1;
+    return osmos_fail(err, "DFly2: a GPU call failed (a draft)"), -1;
   int k = 0;
   float cum = 1.0f;
   for (; k < (int)most; k++)

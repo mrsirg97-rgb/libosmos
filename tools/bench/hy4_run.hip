@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
   if (argc < 2) return std::fprintf(stderr, "usage: hy4_run <GGUF> [prompt=2048] [step=2048] [decode=32]\n"), 2;
   const uint32_t P = argc > 2 ? (uint32_t) atoi(argv[2]) : 2048, S = argc > 3 ? (uint32_t) atoi(argv[3]) : 2048;
   const uint32_t D = argc > 4 ? (uint32_t) atoi(argv[4]) : 32;
-  char err[HY4_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[GGUF_ERR] = "";
   Gguf* g = gguf_create(argv[1], gerr);
   CHECK(g);
   Hy4Weights* w = hy4_weights_create(g, err);

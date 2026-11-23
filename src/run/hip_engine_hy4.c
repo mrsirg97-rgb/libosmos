@@ -15,7 +15,6 @@
    or shared; the logits of the kept rows alone. the drafter, when named, DFly2 (the release's
    model-00148-of-00148.safetensors): HY4_DFLY_DRAFTS a round, verified in a decode's step */
 _Static_assert(HY4_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
-_Static_assert(OSMOS_ERR >= HY4_ERR && OSMOS_ERR >= GGUF_ERR, "one error buffer for the engine and the family's calls");
 
 /* a step's most tokens when the server names none (a prompt's chunk), and a round's most kept rows */
 #define HY4_STEP_TOKENS 2048

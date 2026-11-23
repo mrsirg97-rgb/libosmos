@@ -7,6 +7,7 @@
    token's bits however its sequence is split into steps: a prompt's (hy4_step_read) the matrix cores', a decode's
    (hy4_step_runs) the matvecs' */
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -35,14 +36,14 @@ typedef struct Hy4Options
 
 /* the weights to the GPU (every tensor but the Engram table, read from `fds`' files as the step needs its rows: the
    model's open descriptors, by file), a step's buffers; NULL and err for a model refused, memory the GPU refuses */
-Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Options *o, char err[HY4_ERR]);
+Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Options *o, char err[OSMOS_ERR]);
 void hy4_forward_destroy(Hy4Forward *f);
 /* the build's bytes (its fixed part - weights, buffers - and its experts' pinned host slots), and whether every expert
    is resident (decode's tables then the GPU's) */
 uint64_t hy4_forward_bytes(const Hy4Forward *f);
 bool hy4_forward_whole(const Hy4Forward *f);
 
-Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR]);
+Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[OSMOS_ERR]);
 void hy4_seq_destroy(Hy4Seq *s);
 int32_t hy4_seq_position(const Hy4Seq *s);
 
@@ -53,21 +54,21 @@ int32_t hy4_seq_position(const Hy4Seq *s);
    unchanged, for a refusal before the work; false after it began (a GPU call or a read failed): the step's sequences
    refused from then on (hy4_seq_fail's), until a load */
 bool hy4_step_runs(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                   char err[HY4_ERR]);
+                   char err[OSMOS_ERR]);
 /* the same step in a prompt's math (the engine's read): the matrices and the experts on the matrix cores (mm), its
    bits a prompt's however it is split - not a decode's (two maths, as DeepSeek's and q35's: DESIGN.md). false past
    it as hy4_step_runs, and for an activation past f16's range (the step refused) */
 bool hy4_step_read(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                   char err[HY4_ERR]);
+                   char err[OSMOS_ERR]);
 /* one sequence, its last `rows` rows' logits on the host (hy4_logits: rows x n_vocab) - the checks' form: a step past
    HY4_MV_TOKENS tokens a prompt's math, the rest a decode's */
 #define HY4_MV_TOKENS 4
-bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[HY4_ERR]);
+bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR]);
 const float *hy4_logits(const Hy4Forward *f);
 /* row's logits (device, n_vocab floats) of the last hy4_step_runs, NULL for a row not kept */
 const float *hy4_row_logits(const Hy4Forward *f, uint32_t row);
 /* the greatest token of each of rows row0 .. row0 + rows - 1 (the lowest among equals); false for a row not kept */
-bool hy4_greedy(Hy4Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[HY4_ERR]);
+bool hy4_greedy(Hy4Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 /* a tap, when set: every layer's streams after it (n x hc x n_embd, the GPU's) - the checks against the reference */
 typedef void (*hy4_tap_fn)(void *arg, int layer, const float *dev_h, uint32_t n, uint32_t hc, uint32_t dim);
 void hy4_forward_tap(Hy4Forward *f, hy4_tap_fn fn, void *arg);
@@ -100,12 +101,12 @@ uint64_t hy4_identity(const Hy4Forward *f);
    a prompt not run to its end) or the block would pass max_ctx; -1 with why on a GPU failure */
 #define HY4_DFLY_DRAFTS 5
 #define HY4_DFLY_LAYERS 5
-bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[HY4_ERR]);
+bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]);
 int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf_min, float cum_min, int32_t *drafts,
-                  float *conf, char err[HY4_ERR]);
+                  float *conf, char err[OSMOS_ERR]);
 
 uint64_t hy4_seq_state_bytes(const Hy4Seq *s);
-bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[HY4_ERR]);
-bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[HY4_ERR]);
+bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
+bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
 
 #endif

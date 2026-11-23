@@ -5,6 +5,7 @@
 
 #include "osmos/hy4/weights.h"
 #include "osmos/model/qtype.h"
+#include "osmos/err.h"
 
 /* a role's types: a mask of the table's ids (qtype.h), or any type its path reads */
 #define TY(name) (1u << QTYPE_##name)
@@ -113,12 +114,6 @@ typedef struct Ctx
   int layer;
 } Ctx;
 
-static bool fail(char *err, const char *name, const char *why)
-{
-  snprintf(err, HY4_ERR, "%s: %s", name, why);
-  return false;
-}
-
 static uint64_t dim(const Ctx *c, Dim d)
 {
   const Hy4Geometry *g = c->g;
@@ -179,24 +174,24 @@ static const GgufTensor *claim(const Ctx *c, const Role *r, const char *name, ch
 {
   const GgufTensor *t = gguf_tensor(c->model, name);
   if (!t)
-    return fail(err, name, "missing"), NULL;
+    return osmos_fail(err, "%s: %s", name, "missing"), NULL;
   int n = 0;
   while (n < GGUF_MAX_DIMS && r->dims[n] != D_NONE)
     n++;
   if (t->n_dims != (uint32_t)n)
-    return fail(err, name, "of another number of dims"), NULL;
+    return osmos_fail(err, "%s: %s", name, "of another number of dims"), NULL;
   uint64_t values = 1;
   for (int i = 0; i < n; i++)
   {
     if (t->dims[i] != dim(c, r->dims[i]))
-      return fail(err, name, "of another shape"), NULL;
+      return osmos_fail(err, "%s: %s", name, "of another shape"), NULL;
     values *= t->dims[i];
   }
   const uint32_t paths = qtype_paths(t->type);
   if (r->path == RAW ? !(t->type < 32 && (r->types >> t->type & 1)) : (paths & r->path) != r->path)
-    return fail(err, name, "a type its reader does not take"), NULL;
+    return osmos_fail(err, "%s: %s", name, "a type its reader does not take"), NULL;
   if (t->bytes != gguf_bytes(t->type, values))
-    return fail(err, name, "its bytes not its type's for its shape"), NULL;
+    return osmos_fail(err, "%s: %s", name, "its bytes not its type's for its shape"), NULL;
   c->taken[t - c->model->tensors] = true;
   return t;
 }
@@ -206,10 +201,10 @@ static bool engram_list(const Gguf *model, const char *key, size_t n, int64_t *o
 {
   const GgufKv *k = gguf_kv(model, key);
   if (!k || k->type != GGUF_ARRAY || k->n != n)
-    return fail(err, key, "missing, or not a column an Engram layer");
+    return osmos_fail(err, "%s: %s", key, "missing, or not a column an Engram layer");
   for (size_t i = 0; i < n; i++)
     if (!gguf_int(k, i, &out[i]) || out[i] < 0)
-      return fail(err, key, "a value not a non-negative integer");
+      return osmos_fail(err, "%s: %s", key, "a value not a non-negative integer");
   return true;
 }
 
@@ -223,7 +218,7 @@ static bool engram_spans(const Gguf *model, const Hy4Geometry *g, uint64_t *rows
   const size_t n = (size_t)g->n_engram * (size_t)cols;
   int64_t off[MAX_COLS], size[MAX_COLS];
   if (n > MAX_COLS)
-    return fail(err, "hy_v4_flash.ple.heads_per_ngram", "more columns than this build keeps");
+    return osmos_fail(err, "%s: %s", "hy_v4_flash.ple.heads_per_ngram", "more columns than this build keeps");
   if (!engram_list(model, "hy_v4_flash.ple.head_offsets", n, off, err) ||
       !engram_list(model, "hy_v4_flash.ple.head_vocab_sizes", n, size, err))
     return false;
@@ -248,14 +243,14 @@ static bool drafter_tensor(const char *name, const Hy4Geometry *g)
 
 void hy4_weights_destroy(Hy4Weights *w) { free(w); }
 
-Hy4Weights *hy4_weights_create(const Gguf *model, char err[HY4_ERR])
+Hy4Weights *hy4_weights_create(const Gguf *model, char err[OSMOS_ERR])
 {
   if (!model)
-    return fail(err, "hy4_weights_create", "no model"), NULL;
+    return osmos_fail(err, "%s: %s", "hy4_weights_create", "no model"), NULL;
   Hy4Weights *w = calloc(1, sizeof *w);
   bool *taken = calloc(model->n_tensors ? model->n_tensors : 1, sizeof *taken);
   if (!w || !taken)
-    return free(w), free(taken), fail(err, "hy4_weights_create", "out of memory"), NULL;
+    return free(w), free(taken), osmos_fail(err, "%s: %s", "hy4_weights_create", "out of memory"), NULL;
   w->model = model;
   const Hy4Geometry *g = &w->geo;
   Ctx c = {model, g, taken, 0, -1};
@@ -275,7 +270,7 @@ Hy4Weights *hy4_weights_create(const Gguf *model, char err[HY4_ERR])
   }
   for (size_t i = 0; ok && i < model->n_tensors; i++)
     if (!taken[i] && !drafter_tensor(model->tensors[i].name, g))
-      ok = fail(err, model->tensors[i].name, "a tensor no role of this layer's kind takes");
+      ok = osmos_fail(err, "%s: %s", model->tensors[i].name, "a tensor no role of this layer's kind takes");
   free(taken);
   if (!ok)
     return free(w), NULL;
@@ -302,20 +297,20 @@ static uint64_t covered_length(const GgufKv *map)
   return run;
 }
 
-bool hy4_engram_shape(const Hy4Weights *w, EngramShape *s, char err[HY4_ERR])
+bool hy4_engram_shape(const Hy4Weights *w, EngramShape *s, char err[OSMOS_ERR])
 {
   if (!w || !s)
-    return fail(err, "hy4_engram_shape", "no weights");
+    return osmos_fail(err, "%s: %s", "hy4_engram_shape", "no weights");
   const Hy4Geometry *g = &w->geo;
   const GgufKv *map = gguf_kv(w->model, "hy_v4_flash.engram.token_map");
   if (!map || map->type != GGUF_ARRAY || map->n != (uint64_t)g->n_vocab)
-    return fail(err, "hy_v4_flash.engram.token_map", "missing, or not an entry a token");
+    return osmos_fail(err, "%s: %s", "hy_v4_flash.engram.token_map", "missing, or not an entry a token");
   const uint64_t covered = covered_length(map);
   int64_t compressed = 0, v;
   for (uint64_t i = 0; i < covered; i++)
   {
     if (!gguf_int(map, i, &v) || v < 0)
-      return fail(err, "hy_v4_flash.engram.token_map", "an entry not a non-negative integer");
+      return osmos_fail(err, "%s: %s", "hy_v4_flash.engram.token_map", "an entry not a non-negative integer");
     compressed = v + 1 > compressed ? v + 1 : compressed;
   }
   *s = (EngramShape){w->model, "hy_v4_flash", g->n_engram, g->engram_ngram, g->engram_heads, map->n, covered,

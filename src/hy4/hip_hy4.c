@@ -12,6 +12,7 @@
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
+#include "osmos/err.h"
 
 /* the tokens' embedding rows (decoded, unrounded: the file's values) copied into each of the hc streams */
 static bool embed(Hy4Forward *f, uint32_t n)
@@ -67,7 +68,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
                  bool read, uint32_t keep_from, char *err)
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > HY4_MAX_RUNS)
-    return hy4_fail(err, "no forward, sequences or tokens, or past HY4_MAX_RUNS runs");
+    return osmos_fail(err, "no forward, sequences or tokens, or past HY4_MAX_RUNS runs");
   f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
                   half-rewritten slot table (0.11.2) */
   Hy4Run run[HY4_MAX_RUNS];
@@ -76,24 +77,24 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   {
     Hy4Seq *s = seqs[r];
     if (!s || s->f != f || !lens[r])
-      return hy4_fail(err, "a run of no sequence, of another forward, or of no tokens");
+      return osmos_fail(err, "a run of no sequence, of another forward, or of no tokens");
     if (s->broken)
-      return hy4_fail(err, "a sequence after a failed step: load it, or make another");
+      return osmos_fail(err, "a sequence after a failed step: load it, or make another");
     for (uint32_t k = 0; k < r; k++)
       if (seqs[k] == s)
-        return hy4_fail(err, "a sequence twice in one step");
+        return osmos_fail(err, "a sequence twice in one step");
     if ((uint64_t)n + lens[r] > f->max_tokens || (uint64_t)s->pos + lens[r] > f->max_ctx)
-      return hy4_fail(err, "the tokens past the forward's step, or a sequence past its context");
+      return osmos_fail(err, "the tokens past the forward's step, or a sequence past its context");
     run[r] = (Hy4Run){s, n, lens[r]};
     for (uint32_t t = 0; t < lens[r]; t++)
       kept += n + t >= keep_from && (!s->prompt_end || s->pos + t + 1 >= s->prompt_end);
     n += lens[r];
   }
   if (kept > f->logit_rows)
-    return hy4_fail(err, "a step's kept rows past the logits' (Hy4Options' logit_rows)");
+    return osmos_fail(err, "a step's kept rows past the logits' (Hy4Options' logit_rows)");
   for (uint32_t i = 0; i < n; i++)
     if (tokens[i] < 0 || tokens[i] >= f->w->geo.n_vocab)
-      return hy4_fail(err, "a token outside the vocabulary");
+      return osmos_fail(err, "a token outside the vocabulary");
   for (uint32_t r = 0; r < runs; r++)
     for (uint32_t t = 0; t < run[r].len; t++)
     {
@@ -126,9 +127,9 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
     hipMemset(f->overflow, 0, 8);
-    return hy4_fail(err, over    ? "an activation past f16's range (the step refused)"
-                         : fault ? "the router picked an expert out of range or twice (the step refused)"
-                                 : "a GPU call or an Engram read failed in the step");
+    return osmos_fail(err, "%s", over    ? "an activation past f16's range (the step refused)"
+                                 : fault ? "the router picked an expert out of range or twice (the step refused)"
+                                         : "a GPU call or an Engram read failed in the step");
   }
   for (uint32_t r = 0; r < runs; r++)
   {
@@ -142,26 +143,26 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
 }
 
 bool hy4_step_runs(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                   char err[HY4_ERR])
+                   char err[OSMOS_ERR])
 {
   return step(f, seqs, lens, runs, tokens, false, 0, err);
 }
 
 bool hy4_step_read(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                   char err[HY4_ERR])
+                   char err[OSMOS_ERR])
 {
   return step(f, seqs, lens, runs, tokens, true, 0, err);
 }
 
-bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[HY4_ERR])
+bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR])
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
-    return hy4_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
+    return osmos_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
   if (!step(f, &s, &n, 1, tokens, n > HY4_MV_TOKENS, n - rows, err))
     return false;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||
-         hy4_fail(err, "a GPU call failed (the logits' copy)");
+         osmos_fail(err, "a GPU call failed (the logits' copy)");
 }
 
 const float *hy4_logits(const Hy4Forward *f) { return f ? f->pin_logits : NULL; }
@@ -171,10 +172,10 @@ const float *hy4_row_logits(const Hy4Forward *f, uint32_t row)
   return f ? kept_row(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row) : NULL;
 }
 
-bool hy4_greedy(Hy4Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[HY4_ERR])
+bool hy4_greedy(Hy4Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
   const char *why = f ? kept_greedy(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row0, rows, f->ids,
                                     f->argmax, f->st, ids)
                       : "no forward or ids, or rows past the last step's";
-  return !why || hy4_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
 }

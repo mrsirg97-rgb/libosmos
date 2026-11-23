@@ -9,14 +9,15 @@
 #include "osmos/gpu/state_parts.h"
 #include "osmos/gpu/hy4_ops.h"
 #include "hy4_impl.h"
+#include "osmos/err.h"
 
-Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR])
+Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[OSMOS_ERR])
 {
   if (!f)
-    return hy4_fail(err, "no forward"), NULL;
+    return osmos_fail(err, "no forward"), NULL;
   Hy4Seq *s = calloc(1, sizeof *s);
   if (!s)
-    return hy4_fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   s->f = f;
   const Hy4Geometry *g = &f->w->geo;
   const uint64_t row = hy4_mla_row_bytes((uint32_t)g->kv_lora, (uint32_t)g->rope_dim, f->kv8), ctx = f->max_ctx;
@@ -30,7 +31,7 @@ Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR])
        hy4_alloc(&s->dn, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * 4) &&
        hy4_alloc(&s->dhid, (uint64_t)HY4_DFLY_KEEP * g->n_embd * F);
   if (!ok)
-    return hy4_seq_destroy(s), hy4_fail(err, "GPU memory refused (a sequence's state)"), NULL;
+    return hy4_seq_destroy(s), osmos_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
 }
 
@@ -115,12 +116,12 @@ uint64_t hy4_seq_state_bytes(const Hy4Seq *s)
   return state_parts_bytes(sizeof(Header), p, parts(s, s->pos, p));
 }
 
-bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[HY4_ERR])
+bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !sink)
-    return hy4_fail(err, "no sequence or sink");
+    return osmos_fail(err, "no sequence or sink");
   if (s->broken)
-    return hy4_fail(err, "a sequence after a failed step (its state part written): load it, or make another");
+    return osmos_fail(err, "a sequence after a failed step (its state part written): load it, or make another");
   Header h;
   memset(&h, 0, sizeof h);
   h.magic = STATE_MAGIC, h.version = STATE_VERSION, h.identity = hy4_identity(s->f), h.pos = s->pos;
@@ -128,19 +129,19 @@ bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[HY4_ER
     h.last[j] = s->pos > j ? s->tokens[s->pos - 1 - j] : -1;
   StatePart p[MAX_PARTS];
   const char *why = state_parts_save(&h, sizeof h, p, parts(s, s->pos, p), sink, ctx);
-  return !why || hy4_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
 }
 
 static bool refuse(Hy4Seq *s, char *err, const char *why)
 {
   s->pos = 0, s->back = 0, s->prompt_end = 0, s->broken = false; /* empty: its rows never read again */
-  return hy4_fail(err, why);
+  return osmos_fail(err, "%s", why);
 }
 
-bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[HY4_ERR])
+bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !src)
-    return hy4_fail(err, "no sequence or source");
+    return osmos_fail(err, "no sequence or source");
   s->dkeep = 0; /* (DFly2's snapshot: none until a step runs) */
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))

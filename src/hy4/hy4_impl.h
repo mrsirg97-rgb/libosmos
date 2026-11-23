@@ -140,7 +140,6 @@ typedef struct Hy4Run
   uint32_t off, len;
 } Hy4Run;
 
-bool hy4_fail(char *err, const char *why);
 bool hy4_alloc(void *p, uint64_t bytes);
 /* y = W x for n tokens (W the tensor on the GPU, any type the matvec reads): a token's sums its own */
 bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
