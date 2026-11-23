@@ -1,5 +1,6 @@
 /* a component's buffers recorded as they are made (osmos/gpu/bufs.h) */
 #include <stdlib.h>
+#include <string.h>
 
 #include <hip/hip_runtime_api.h>
 
@@ -24,9 +25,13 @@ static bool one(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes, bool host, 
   b->ledger = l;
   if (!room(b))
     return false;
-  const size_t n = bytes ? (size_t)bytes : 1;
+  const size_t n = (size_t)bytes + GPU_BUFS_PAD; /* (zeroed whole: a buffer's first read never another's bytes) */
   if ((host ? ledger_host_malloc(l, (void **)p, n, flags) : ledger_malloc(l, (void **)p, n)) != hipSuccess)
     return *(void **)p = NULL, false;
+  if (host)
+    memset(*(void **)p, 0, n);
+  else if (hipMemset(*(void **)p, 0, n) != hipSuccess)
+    return ledger_free(l, *(void **)p), *(void **)p = NULL, false;
   b->slot[b->n++] = (GpuBuf){(void **)p, host};
   return true;
 }

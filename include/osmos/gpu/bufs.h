@@ -12,6 +12,10 @@
 
 #include "osmos/mem/ledger.h"
 
+/* every buffer zeroed and GPU_BUFS_PAD bytes past its end - one policy every family's (0.16.0: DeepSeek's zeroed, Inkling's
+   padded 16 since its first engine, the others neither) */
+#define GPU_BUFS_PAD 16
+
 typedef struct GpuWant
 {
   void *p;        /* the pointer's address (a float **, an int32_t **, ...) */

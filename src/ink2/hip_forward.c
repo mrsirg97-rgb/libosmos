@@ -64,7 +64,7 @@ static void pf(Ink2Forward *f, int b)
 
 bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes)
 {
-  if (!gpu_bufs_one(&f->bufs, f->ledger, p, bytes + 16))
+  if (!gpu_bufs_one(&f->bufs, f->ledger, p, bytes)) /* (its pad osmos/gpu/bufs.h's, every family's) */
     return false;
   f->dense_bytes += bytes;
   return true;

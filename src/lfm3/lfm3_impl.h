@@ -87,6 +87,7 @@ struct Lfm3Forward
 
 struct Lfm3Seq
 {
+  GpuBufs bufs; /* its GPU buffers, recorded as made (its forward's ledger's) */
   Lfm3Forward *f;
   int32_t pos;
   uint32_t stage, turned; /* its YaRN stage; the position its last crossing turned the keys at (a rollback's floor) */
@@ -124,8 +125,9 @@ static inline LsaDims lfm3_free_dims(const Lfm3Geometry *g)
   return (LsaDims){p, half, half + p, (uint32_t)g->head_dim};
 }
 
-/* a device buffer of the forward's (its ledger's), and one given back */
-bool lfm3_alloc(Lfm3Forward *f, void *p, uint64_t bytes);
+/* a GPU buffer recorded in b (the forward's, or a sequence's: its ledger the forward's), freed from the record at its
+   owner's destroy; lfm3_free gives back one the record does not hold (a tensor's, made by the upload) */
+bool lfm3_alloc(GpuBufs *b, void *p, uint64_t bytes);
 void lfm3_free(Lfm3Forward *f, void *p);
 static inline const void *lfm3_dev(const Lfm3Forward *f, const GgufTensor *t)
 {

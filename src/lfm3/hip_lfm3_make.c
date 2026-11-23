@@ -20,10 +20,7 @@
 
 #define READ_PIECE (64ull << 20)
 
-bool lfm3_alloc(Lfm3Forward *f, void *p, uint64_t bytes)
-{
-  return ledger_malloc(f->ledger, (void **)p, bytes ? bytes : 1) == hipSuccess;
-}
+bool lfm3_alloc(GpuBufs *b, void *p, uint64_t bytes) { return gpu_bufs_one(b, b->ledger, p, bytes); }
 
 void lfm3_free(Lfm3Forward *f, void *p)
 {
@@ -43,7 +40,7 @@ static bool upload(Lfm3Forward *f, char *err) { return upload_file(f, f->w->mode
 static bool lfm3_df_buffers(Lfm3Forward *f, char *err)
 {
   const uint64_t T = (uint64_t)f->df->geo.n_taps * (uint64_t)f->df->geo.n_embd;
-  return (lfm3_alloc(f, &f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx)) ||
+  return (lfm3_alloc(&f->bufs, &f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx)) ||
          osmos_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 
@@ -81,10 +78,9 @@ static const void *join(Lfm3Forward *f, const GgufTensor *const *t, int k, bool 
       return NULL;
     bytes += t[i]->bytes;
   }
-  uint8_t *buf = NULL;
-  if (!lfm3_alloc(f, &buf, bytes))
+  if (!lfm3_alloc(&f->bufs, &f->joints[f->n_joints], bytes)) /* (its table's slot recorded: freed from it) */
     return *ok = false, NULL;
-  f->joints[f->n_joints++] = buf;
+  uint8_t *buf = f->joints[f->n_joints++];
   uint64_t at = 0;
   for (int i = 0; i < k && *ok; i++)
   {
@@ -167,7 +163,7 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
       }
       float **dst = w ? &f->wk[l] : &f->wq[l];
       ok = fseeko(fp, (off_t)(8 + hn + strtoull(off->item[0]->s, NULL, 10)), SEEK_SET) == 0 &&
-           fread(buf, F, m, fp) == m && lfm3_alloc(f, dst, m * F) &&
+           fread(buf, F, m, fp) == m && lfm3_alloc(&f->bufs, dst, m * F) &&
            hipMemcpy(*dst, buf, m * F, hipMemcpyHostToDevice) == hipSuccess;
       if (!ok)
         osmos_fail(err, "LSA: a map not read (its bytes, or GPU memory)");
@@ -176,8 +172,8 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
   fclose(fp), free(head), free(buf), json_free(j);
   if (!ok)
     return err && !*err ? osmos_fail(err, "LSA: the maps not read") : false;
-  ok = (f->lsa_s = lsa_scratch_create(f->ledger, f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && lfm3_alloc(f, &f->iq, LSA_DIM * F) &&
-       lfm3_alloc(f, &f->list, LSA_READ_MAX * 4) && lfm3_alloc(f, &f->list_n, 4) &&
+  ok = (f->lsa_s = lsa_scratch_create(f->ledger, f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && lfm3_alloc(&f->bufs, &f->iq, LSA_DIM * F) &&
+       lfm3_alloc(&f->bufs, &f->list, LSA_READ_MAX * 4) && lfm3_alloc(&f->bufs, &f->list_n, 4) &&
        (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) && (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) &&
        (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
   /* the scores' scratch: a sub-batch's tokens x every closed bucket, at most a step's prompt rows' F32 (its q, k, v,
@@ -186,10 +182,10 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
   f->max_buckets = f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1;
   f->sub_n = rows / f->max_buckets < f->max_tokens ? (uint32_t)(rows / f->max_buckets) : f->max_tokens;
   f->sub_n = f->sub_n ? f->sub_n : 1;
-  ok = ok && lfm3_alloc(f, &f->iqb, (uint64_t)f->max_tokens * LSA_DIM * F) &&
-       lfm3_alloc(f, &f->lists, (uint64_t)f->max_tokens * LSA_READ_MAX * 4) &&
-       lfm3_alloc(f, &f->counts, (uint64_t)f->max_tokens * 4) &&
-       lfm3_alloc(f, &f->lsa_sc, lsa_batch_scratch(f->sub_n, f->max_buckets) * F);
+  ok = ok && lfm3_alloc(&f->bufs, &f->iqb, (uint64_t)f->max_tokens * LSA_DIM * F) &&
+       lfm3_alloc(&f->bufs, &f->lists, (uint64_t)f->max_tokens * LSA_READ_MAX * 4) &&
+       lfm3_alloc(&f->bufs, &f->counts, (uint64_t)f->max_tokens * 4) &&
+       lfm3_alloc(&f->bufs, &f->lsa_sc, lsa_batch_scratch(f->sub_n, f->max_buckets) * F);
   return (f->lsa = ok) || osmos_fail(err, "LSA: out of memory (the read's scratch)");
 }
 
@@ -197,28 +193,18 @@ void lfm3_forward_destroy(Lfm3Forward *f)
 {
   if (!f)
     return;
-  for (int l = 0; l < LFM3_MAX_LAYERS; l++)
-    lfm3_free(f, f->wq[l]), lfm3_free(f, f->wk[l]);
   lsa_scratch_destroy(f->lsa_s);
-  lfm3_free(f, f->iq), lfm3_free(f, f->list), lfm3_free(f, f->list_n);
-  lfm3_free(f, f->iqb), lfm3_free(f, f->lists), lfm3_free(f, f->counts), lfm3_free(f, f->lsa_sc);
   free(f->h_ik), free(f->h_cent), free(f->h_mem);
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   gpu_free_table(f->ledger, f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
-  for (uint32_t i = 0; i < f->n_joints; i++)
-    lfm3_free(f, f->joints[i]);
   free(f->in_joint);
-  gpu_bufs_free(&f->bufs); /* the step's buffers: the table's */
-  if (f->pin_tok)
-    ledger_host_free(f->ledger, f->pin_tok);
-  if (f->pin_logits)
-    ledger_host_free(f->ledger, f->pin_logits);
-  lfm3_free(f, f->head_q8);
+  lfm3_free(f, f->head_q8); /* (gpu_q8_rows': not the record's) */
+  gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer lfm3_alloc made - the step's, LSA's, the joints', the taps':
+                              from the record, before the joints' table it NULLs */
   free(f->slot);
   if (f->df)
     gpu_free_table(f->ledger, f->df->model, f->df_dev, NULL);
-  lfm3_free(f, f->taps);
   df_buffers_free(&f->d);
   free(f);
 }
@@ -273,7 +259,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
   const Lfm3Geometry *g = &w->geo;
-  f->w = w, f->max_tokens = o->max_tokens, f->max_ctx = o->max_ctx, f->ledger = o->ledger;
+  f->w = w, f->max_tokens = o->max_tokens, f->max_ctx = o->max_ctx, f->ledger = o->ledger, f->bufs.ledger = o->ledger;
   f->logit_rows = o->logit_rows ? o->logit_rows : o->max_tokens;
   f->ring = (uint32_t)g->window + o->max_tokens + LFM3_MAX_BACK;
   const uint64_t n = o->max_tokens, lr = f->logit_rows, D = (uint64_t)g->n_embd, ff = (uint64_t)g->n_ff;
@@ -322,8 +308,8 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   };
   ok = ok && (gpu_bufs_alloc(&f->bufs, f->ledger, want, sizeof want / sizeof *want) ||
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
-  ok = ok && ledger_host_malloc(f->ledger, (void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
-       ledger_host_malloc(f->ledger, (void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess &&
+  ok = ok && gpu_bufs_host(&f->bufs, f->ledger, &f->pin_tok, n * 4) &&
+       gpu_bufs_host(&f->bufs, f->ledger, &f->pin_logits, lr * g->n_vocab * F) &&
        (f->slot = malloc(n * 4)) &&
        (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) && hipDeviceSynchronize() == hipSuccess;
   if (!ok)
