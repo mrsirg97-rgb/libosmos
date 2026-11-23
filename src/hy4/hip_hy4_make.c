@@ -95,7 +95,7 @@ static bool experts(Hy4Forward *f, uint64_t budget, char *err)
   char merr[OSMOS_ERR] = "";
   ok = ok && (experts_plan(units, ML, E, order, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan) ||
               osmos_fail(err, "the experts' plan refused"));
-  ok = ok && (experts_create(units, ML, E, order, &plan, ARENA_GRAIN, HY4_EXPERT_READERS, copy_host, NULL, 0, true,
+  ok = ok && (experts_create(NULL /* ledger: stage 4 */, units, ML, E, order, &plan, ARENA_GRAIN, HY4_EXPERT_READERS, copy_host, NULL, 0, true,
                              &f->ex, merr) ||
               osmos_fail(err, "%s", merr[0] ? merr : "the experts' membrane refused"));
   if (ok)
@@ -123,7 +123,7 @@ static bool experts(Hy4Forward *f, uint64_t budget, char *err)
 
 static bool upload(Hy4Forward *f, char *err)
 {
-  return gpu_upload_table(f->w->model, READ_PIECE, not_resident, f, &f->dev, err);
+  return gpu_upload_table(NULL /* ledger: stage 4 */, f->w->model, READ_PIECE, not_resident, f, &f->dev, err);
 }
 
 /* a joint of members (NULL ones skipped; rows each, cols alike): grouped by type in the members' order, each type's
@@ -266,7 +266,7 @@ void hy4_forward_destroy(Hy4Forward *f)
   hipFree(f->head8);
   hipFree(f->kb_tab), hipFree(f->vb_tab), hipFree(f->kb_xo), hipFree(f->kb_yo), hipFree(f->vb_xo), hipFree(f->vb_yo);
   hipFree(f->hcnt), hipFree(f->ix_spread);
-  gpu_free_table(f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
+  gpu_free_table(NULL /* ledger: stage 4 */, f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
   for (uint32_t i = 0; i < f->n_joints; i++)
     hipFree(f->joints[i]);
   free(f->joints), free(f->in_joint);
@@ -426,7 +426,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
          freqs(g->rope_base, (uint32_t)g->rope_dim, &f->freqs_sparse)) ||
         osmos_fail(err, "the ropes' tables not made")) &&
        engram_reader(f, fds, err);
-  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
+  ok = ok && (gpu_bufs_alloc(&f->bufs, NULL /* ledger: stage 4 */, want, sizeof want / sizeof *want) ||
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_pos, n * 4, 0) == hipSuccess &&
@@ -438,7 +438,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   size_t free1 = 0, total1 = 0;
   if (ok && hipMemGetInfo(&free1, &total1) == hipSuccess) /* the fixed part: what the build took before its experts */
     f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
-  ok = ok && experts(f, o->budget ? o->budget : experts_fit_now(f->fixed_bytes), err); /* (0: this machine's room) */
+  ok = ok && experts(f, o->budget ? o->budget : experts_fit_now(NULL /* ledger: stage 4 */, f->fixed_bytes), err); /* (0: this machine's room) */
   if (!ok)
     return hy4_forward_destroy(f), (err && !*err ? osmos_fail(err, "the forward not made") : false), NULL;
   return f;

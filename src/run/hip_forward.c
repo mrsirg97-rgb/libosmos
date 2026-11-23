@@ -7,6 +7,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/run/fit.h"
 #include "forward_impl.h"
 #include "osmos/mem/experts.h"
@@ -277,14 +278,15 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   free(rix);
   if (!ok)
     ;
-  else if (!(f->res = resident_create(res, n_t, hip_slots(), FWD_FETCH_THREADS, perr)))
+  else if (!(f->gpu_slots = hip_slots_create(NULL /* ledger: stage 4 */, perr)) ||
+           !(f->res = resident_create(res, n_t, hip_slots(f->gpu_slots), FWD_FETCH_THREADS, perr)))
     ok = osmos_fail(err, "%s", perr);
   else if (!direct_units(f, all) || !f->pool_room)
     ok = osmos_fail(err, "out of memory (the pools' units), or a budget with no experts");
   else /* the budget's experts its warm start: read at the first step (membrane_warm), not here - fit.h's builds */
   {
     Experts ex;
-    ok = experts_create(all, (uint32_t)f->n_layers, E, warm, &plan, ARENA_GRAIN, FWD_FETCH_THREADS, copy_on_stream,
+    ok = experts_create(NULL /* ledger: stage 4 */, all, (uint32_t)f->n_layers, E, warm, &plan, ARENA_GRAIN, FWD_FETCH_THREADS, copy_on_stream,
                         NULL, f->ahead_limit, false, &ex, err);
     f->mem = ex.mem, f->hs = ex.slots, f->hs_stream = ex.stream;
   }
@@ -645,6 +647,7 @@ void forward_destroy(Forward *f)
   membrane_destroy(f->mem);
   host_slots_destroy(f->hs), host_slots_destroy(f->hs_stream); /* after the membrane: no unit still in them */
   resident_destroy(f->res);
+  hip_slots_destroy(f->gpu_slots); /* after the resident set: its memory released through it */
   rowread_destroy(f->eg_read);
   free(f->eg_off);
   free(f->tdev);

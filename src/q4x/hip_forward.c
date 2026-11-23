@@ -128,7 +128,7 @@ static bool experts(Q4xForward *f, uint64_t budget, char *err)
   char merr[OSMOS_ERR] = "";
   if (ok && !experts_plan(units, L, E, warm, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
-  if (ok && !experts_create(units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, host_copy, NULL, 0, true, &ex,
+  if (ok && !experts_create(NULL /* ledger: stage 4 */, units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, host_copy, NULL, 0, true, &ex,
                             merr))
     ok = osmos_fail(err, "%s", merr[0] ? merr : "the experts' membrane refused");
   if (ok)
@@ -185,10 +185,10 @@ static bool not_uploaded(const GgufTensor *t, void *arg)
 static bool upload(const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err)
 {
   UploadSkip u = {f, shadow, skip};
-  return gpu_upload_table(g, READ_PIECE, not_uploaded, &u, dev, err);
+  return gpu_upload_table(NULL /* ledger: stage 4 */, g, READ_PIECE, not_uploaded, &u, dev, err);
 }
 
-static void free_table(const Gguf *g, void **dev) { gpu_free_table(g, dev, NULL); }
+static void free_table(const Gguf *g, void **dev) { gpu_free_table(NULL /* ledger: stage 4 */, g, dev, NULL); }
 
 /* the MTP head's buffers */
 static bool mtp_buffers(Q4xForward *f, char *err)
@@ -446,7 +446,7 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   size_t free1 = 0, total1 = 0; /* the fixed part: what the build took before its experts (experts_plan's) */
   if (hipMemGetInfo(&free1, &total1) == hipSuccess)
     f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
-  if (!experts(f, o->budget ? o->budget : experts_fit_now(f->fixed_bytes), err) || /* (0: this machine's room) */
+  if (!experts(f, o->budget ? o->budget : experts_fit_now(NULL /* ledger: stage 4 */, f->fixed_bytes), err) || /* (0: this machine's room) */
       !room_left("the forward", err))
     return q4x_forward_destroy(f), NULL;
   return f;

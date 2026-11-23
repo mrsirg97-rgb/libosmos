@@ -216,7 +216,7 @@ static bool matrix(struct Hy4Dfly *d, const GgufTensor *t, void *pin, const void
       if (!ok)
         return false;
     }
-    else if (gpu_read_tensor(d->st, t, pin, READ_PIECE, slot))
+    else if (gpu_read_tensor(NULL /* ledger: stage 4 */, d->st, t, pin, READ_PIECE, slot))
       return false;
   }
   *dev = *slot;

@@ -8,7 +8,7 @@
 #include "osmos/model/gguf.h"
 #include "osmos/text/answer.h"
 #include "osmos/run/fit.h"
-#include "osmos/mem/ledger.h"
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/err_hip.h"
 
 /* the dispatch: a model's family by its file's general.architecture, then every call that family's */

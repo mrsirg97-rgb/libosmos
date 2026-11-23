@@ -29,14 +29,14 @@ static bool past_layers(const GgufTensor *t, void *arg) /* the MTP head's layers
 
 static bool upload(Q35Forward *f, char *err)
 {
-  return gpu_upload_table(f->w->model, READ_PIECE, past_layers, f, &f->dev, err);
+  return gpu_upload_table(NULL /* ledger: stage 4 */, f->w->model, READ_PIECE, past_layers, f, &f->dev, err);
 }
 
 void q35_forward_destroy(Q35Forward *f)
 {
   if (!f)
     return;
-  gpu_free_table(f->w->model, f->dev, NULL);
+  gpu_free_table(NULL /* ledger: stage 4 */, f->w->model, f->dev, NULL);
   gpu_bufs_free(&f->bufs); /* the step's buffers: the table's */
   hipHostFree(f->pin_logits), hipHostFree(f->pin_tok);
   free(f->slot);
@@ -108,7 +108,7 @@ static bool head_q8(Q35Forward *f, char *err)
   const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd;
   void **slot = &f->dev[t - f->w->model->tensors];
   void *q = NULL;
-  if (!gpu_q8_rows(QTYPE_BF16, *slot, (uint64_t)D * 2, V, D, &q))
+  if (!gpu_q8_rows(NULL /* ledger: stage 4 */, QTYPE_BF16, *slot, (uint64_t)D * 2, V, D, &q))
     return osmos_fail(err, "the LM head's Q8_0 not made (GPU memory, or a launch)");
   hipFree(*slot);
   *slot = q, f->head_type = QTYPE_Q8_0;
@@ -150,7 +150,7 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
       {&f->tok, n * 4},         {&f->overflow, 4},    {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2},
   };
   bool ok = q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, max_ctx, Q4X_THETA_GGML, &f->rope) && upload(f, err);
-  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
+  ok = ok && (gpu_bufs_alloc(&f->bufs, NULL /* ledger: stage 4 */, want, sizeof want / sizeof *want) ||
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   f->head_type = w->output->type;
   ok = ok && head_q8(f, err) && (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) &&

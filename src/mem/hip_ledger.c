@@ -1,5 +1,5 @@
 /* the ledger (osmos/mem/ledger.h) */
-#include "osmos/mem/ledger.h"
+#include "osmos/mem/ledger_hip.h"
 
 #include <stdio.h>
 #include <stdlib.h>

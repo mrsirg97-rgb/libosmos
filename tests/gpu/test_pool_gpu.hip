@@ -80,6 +80,10 @@ static unsigned long long gpu_sum(const void* dev, size_t n, unsigned long long*
   return got;
 }
 
+// every slot here counted in one ledger (0.15.3: HSA's and the host slots' memory counted; all of it back at the end)
+static OsmosLedger* g_ledger;
+static HipSlots* g_slots;
+
 int main() {
   std::printf("[test_pool_gpu] start\n");
   char path[512];
@@ -88,6 +92,9 @@ int main() {
     std::printf("[test_pool_gpu] skipped: no model (test_model.h) or no GPU\n");
     return 77;
   }
+  g_ledger = ledger_create_room(UINT64_MAX / 2, 0);
+  char serr[OSMOS_ERR] = "";
+  CHECK(g_ledger && (g_slots = hip_slots_create(g_ledger, serr)));
   char gerr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, gerr);
   CHECK(g);
@@ -113,7 +120,7 @@ int main() {
   const uint64_t budget = unit_bytes * (uint64_t) E / 4;
   char err[OSMOS_ERR] = "";
   CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
-  Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(), reads_fetcher(g_reads, 0), 0, on_event, nullptr, err);
+  Pool* p = pool_create(units.data(), units.size(), budget, hip_slots(g_slots), reads_fetcher(g_reads, 0), 0, on_event, nullptr, err);
   if (!p) std::fprintf(stderr, "pool_create: %s\n", err);
   CHECK(p);
   unsigned long long* d_sum = nullptr;
@@ -152,7 +159,7 @@ int main() {
   // DESIGN.md "the fetcher"), each read's end an event pumped into the pool on this thread - then a GPU sum each
   for (int k = 0; k < 3; k++) posix_fadvise(fds[t[k]->file], (off_t) t[k]->offset, (off_t) t[k]->bytes, POSIX_FADV_DONTNEED);
   CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
-  p = pool_create(units.data(), units.size(), unit_bytes * (uint64_t) E + (64u << 20), hip_slots(),
+  p = pool_create(units.data(), units.size(), unit_bytes * (uint64_t) E + (64u << 20), hip_slots(g_slots),
                   reads_fetcher(g_reads, 0), 0, on_event, nullptr, err);
   CHECK(p);
   const double t0 = now_ms();
@@ -185,7 +192,7 @@ int main() {
     for (int e = 0; e < E; e++)
       for (int k = 0; k < 3; k++) du[e].part[k].fd = dfds[t[k]->file];
     const uint64_t room = unit_bytes * (uint64_t) E + (64u << 20);
-    HostSlots* hs = host_slots_create(room + (64u << 20), err);
+    HostSlots* hs = host_slots_create(g_ledger, room + (64u << 20), err);
     if (!hs) std::fprintf(stderr, "host_slots_create: %s\n", err);
     CHECK(hs);
     CHECK((g_reads = reads_create((uint32_t) E, 4, err)));
@@ -219,9 +226,9 @@ int main() {
   // file's pages dropped from the page cache (the copy is the one kept)
   for (int k = 0; k < 3; k++) posix_fadvise(fds[t[k]->file], (off_t) t[k]->offset, (off_t) t[k]->bytes, POSIX_FADV_DONTNEED);
   double r0 = now_ms();
-  Resident* rs = resident_create(units.data(), units.size(), hip_slots(), 4, err);
+  Resident* rs = resident_create(units.data(), units.size(), hip_slots(g_slots), 4, err);
   if (!rs) std::fprintf(stderr, "resident_create: %s\n", err);
-  CHECK(rs);
+  CHECK(rs && ledger_taken(g_ledger) >= resident_bytes(rs)); // (HSA's memory counted as it is taken)
   const double res_ms = now_ms() - r0;
   for (int e = 0; e < E; e++) {
     const void* dev[POOL_PARTS];
@@ -233,6 +240,9 @@ int main() {
               "GPU sum the file's\n", E, (double) unit_bytes * E / 1e9, (double) resident_bytes(rs) / 1e9, res_ms,
               (double) unit_bytes * E / (res_ms * 1e-3) / 1e9);
   resident_destroy(rs);
+  CHECK(ledger_taken(g_ledger) == 0); // every slot - HSA's, the host slots' - given back
+  hip_slots_destroy(g_slots), ledger_destroy(g_ledger);
+  std::printf("  the ledger: every slot counted as taken, all of it given back\n");
   CHECK(hipFree(d_sum) == hipSuccess);
   for (int fd : fds) close(fd);
   gguf_destroy(g);

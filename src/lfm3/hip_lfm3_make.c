@@ -25,7 +25,7 @@ bool lfm3_alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? 
 /* every tensor of g into GPU memory, its device pointer at its index in *table */
 static bool upload_file(const Gguf *g, void ***table, char *err)
 {
-  return gpu_upload_table(g, READ_PIECE, NULL, NULL, table, err);
+  return gpu_upload_table(NULL /* ledger: stage 4 */, g, READ_PIECE, NULL, NULL, table, err);
 }
 
 static bool upload(Lfm3Forward *f, char *err) { return upload_file(f->w->model, &f->dev, err); }
@@ -108,7 +108,7 @@ static bool head_q8(Lfm3Forward *f, char *err)
 {
   const GgufTensor *t = f->w->embd;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd;
-  if (!gpu_q8_rows(t->type, lfm3_dev(f, t), t->bytes / V, V, D, &f->head_q8))
+  if (!gpu_q8_rows(NULL /* ledger: stage 4 */, t->type, lfm3_dev(f, t), t->bytes / V, V, D, &f->head_q8))
     return osmos_fail(err, "the head's Q8_0 not made (GPU memory, or a launch)");
   f->head = f->head_q8, f->head_type = QTYPE_Q8_0;
   return true;
@@ -196,7 +196,7 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   free(f->h_ik), free(f->h_cent), free(f->h_mem);
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
-  gpu_free_table(f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
+  gpu_free_table(NULL /* ledger: stage 4 */, f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
   for (uint32_t i = 0; i < f->n_joints; i++)
     hipFree(f->joints[i]);
   free(f->in_joint);
@@ -205,7 +205,7 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   hipFree(f->head_q8);
   free(f->slot);
   if (f->df)
-    gpu_free_table(f->df->model, f->df_dev, NULL);
+    gpu_free_table(NULL /* ledger: stage 4 */, f->df->model, f->df_dev, NULL);
   hipFree(f->taps);
   df_buffers_free(&f->d);
   free(f);
@@ -316,7 +316,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
       {&f->x16, (uint64_t)MM_MAX_TOKENS * (ff > 3 * D ? ff : 3 * D) * 2}, {&f->overflow, 4},
       {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
-  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
+  ok = ok && (gpu_bufs_alloc(&f->bufs, NULL /* ledger: stage 4 */, want, sizeof want / sizeof *want) ||
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&

@@ -6,12 +6,11 @@
    leave under FIT_HEADROOM of the room refused before it is taken; every free given back. the room: this machine's
    (fit_room - the GPU's free memory, or the system's RAM past ram_kept, the less), read at the ledger's making and
    again at a build's start (what others took since counted), and once it stands still before a refusal is final.
-   a NULL ledger counts nothing (a library caller sizing its own build). one thread's at a time: the engine's */
+   a NULL ledger counts nothing (a library caller sizing its own build). one thread's at a time: the engine's.
+   HIP's allocations through it: osmos/mem/ledger_hip.h (this header host code's too) */
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-#include <hip/hip_runtime_api.h>
 
 #include "osmos/err.h"
 
@@ -38,17 +37,6 @@ uint64_t ledger_left_settled(OsmosLedger *l);
 uint64_t ledger_taken(const OsmosLedger *l);
 /* its last refusal, until an allocation after it holds ("" none): the bytes asked, the room left, the RAM kept */
 const char *ledger_why(const OsmosLedger *l);
-/* an allocation's result in the error shape (osmos/err_hip.h's osmos_hip): the ledger's refusal said as its own -
-   "<what>: refused by the ledger: <why>" - a HIP failure as HIP's */
-bool ledger_check(const OsmosLedger *l, hipError_t e, char err[OSMOS_ERR], const char *what);
-
-/* hipMalloc / hipHostMalloc counted (a NULL ledger: as HIP's own); refused: hipErrorOutOfMemory, nothing taken, why
-   kept. _free / _host_free: hipFree / hipHostFree, what it counted given back */
-hipError_t ledger_malloc(OsmosLedger *l, void **p, size_t bytes);
-hipError_t ledger_host_malloc(OsmosLedger *l, void **p, size_t bytes, unsigned int flags);
-hipError_t ledger_free(OsmosLedger *l, void *p);
-hipError_t ledger_host_free(OsmosLedger *l, void *p);
-
 /* an allocator not HIP's (mapped host slots, HSA's pools) counted alike: reserve the bytes before (false: refused, why
    kept), then keep them with the pointer it gave - or unreserve, the allocation failed - and release the pointer when
    it is freed */

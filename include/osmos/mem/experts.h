@@ -7,6 +7,7 @@
 #include <stddef.h>
 
 #include "osmos/mem/membrane.h"
+#include "osmos/mem/ledger.h"
 #include "osmos/mem/pool.h"
 
 typedef struct ExpertsPlan
@@ -46,21 +47,24 @@ typedef struct Experts
 /*
 experts_create
   the plan built: its pool's and stream's host slots (room + 2 largest, stream_room + 2 largest) and a membrane over
-  them, order's first n_warm read in (membrane_warm) - readers, copy, copy_ctx and ahead_limit membrane_create's. false
-  with err, nothing held, on any refusal.
+  them, order's first n_warm read in (membrane_warm) - readers, copy, copy_ctx and ahead_limit membrane_create's; the
+  slots counted in l (osmos/mem/ledger.h: borrowed - the caller's build's; NULL counts nothing). false with err,
+  nothing held, on any refusal.
 experts_destroy
   the membrane (its readers stopped), then its memory; a zeroed one nothing.
 */
-bool experts_create(const PoolUnit *units, uint32_t layers, uint32_t experts, const uint32_t *order,
+bool experts_create(OsmosLedger *l, const PoolUnit *units, uint32_t layers, uint32_t experts, const uint32_t *order,
                     const ExpertsPlan *p, uint64_t grain, int readers, membrane_copy_fn copy, void *copy_ctx,
                     uint64_t ahead_limit, bool warm_now, Experts *out, char err[OSMOS_ERR]);
 void experts_destroy(Experts *e);
 
 /*
 experts_fit_now
-  a build's budget sized to this machine as it stands: its fixed part (what it has built, bytes) and the room it
-  leaves (fit_room: the GPU's free memory, or the RAM past FIT_RAM_FREE) less FIT_HEADROOM - experts_plan's budget for
-  as many experts as fit, every one on a machine with the room; 1 (the smallest build) when there is none. a forward's
-  own sizing in one build (a test's, a bench's); osmos-serve sizes the whole engine over builds (fit_sized)
+  a build's budget sized to this machine as it stands: its fixed part (what it has built, bytes) and what l leaves
+  (ledger_left_settled: the room - the GPU's free memory, or the RAM past what l keeps, --fill - less FIT_HEADROOM, read
+  once it stands still) - experts_plan's budget for as many experts as fit, every one on a machine with the room; 1
+  (the smallest build) when there is none. a NULL l: the machine read as a ledger keeping FIT_RAM_FREE would (0.15.3:
+  it read FIT_RAM_FREE whatever --fill said). a forward's own sizing in one build (a test's, a bench's); osmos-serve
+  sizes the whole engine over builds (fit_sized)
 */
-uint64_t experts_fit_now(uint64_t fixed);
+uint64_t experts_fit_now(OsmosLedger *l, uint64_t fixed);

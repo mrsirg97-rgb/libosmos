@@ -329,7 +329,7 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
   char merr[OSMOS_ERR] = "";
   if (ok && !experts_plan(units, L, E, warm, room, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
-  if (ok && !experts_create(units, L, E, warm, &plan, ARENA_GRAIN, INK2_EXPERT_READERS, copy_host, NULL, 0, true, &ex,
+  if (ok && !experts_create(NULL /* ledger: stage 4 */, units, L, E, warm, &plan, ARENA_GRAIN, INK2_EXPERT_READERS, copy_host, NULL, 0, true, &ex,
                             merr))
     ok = osmos_fail(err, "%s", merr[0] ? merr : "the experts' membrane refused");
   if (ok)

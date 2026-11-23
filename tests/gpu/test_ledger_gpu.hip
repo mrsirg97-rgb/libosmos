@@ -11,7 +11,7 @@
 #include <cstring>
 
 extern "C" {
-#include "osmos/mem/ledger.h"
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/run/fit.h"
 }
 

@@ -45,6 +45,7 @@ struct Drafter
   DsparkIndex *ix;
   int fd;
   Resident *res;
+  HipSlots *slots; /* res's memory (hip_slots.h): made before it, destroyed after */
   DBlock b[DRAFTER_BLOCKS];
   const void *main_proj, *mk_embed, *mk_head;
   uint32_t main_type, rank;

@@ -4,11 +4,12 @@
 #include "osmos/err.h"
 #include <stdint.h>
 
+#include "osmos/mem/ledger.h"
 #include "osmos/mem/pool.h"
 
 typedef struct HostSlots HostSlots;
 
-HostSlots *host_slots_create(uint64_t bytes, char err[OSMOS_ERR]);
+HostSlots *host_slots_create(OsmosLedger *l, uint64_t bytes, char err[OSMOS_ERR]);
 void host_slots_destroy(HostSlots *h);
 Slots host_slots(HostSlots *h);
 uint64_t host_slots_bytes(const HostSlots *h);
@@ -25,7 +26,8 @@ HostSlots
   place"). registered memory is outside ttm's pages_limit: the forward counts it against its budget instead.
 
 host_slots_create
-  `bytes` rounded up to whole pages, mapped, populated and registered; NULL with the reason in `err` when the mapping,
+  `bytes` rounded up to whole pages, reserved in l (osmos/mem/ledger.h: borrowed, given back at destroy; NULL counts
+  nothing) before they are mapped, then mapped, populated and registered; NULL with the reason in `err` when the mapping,
   the registration or the arena is refused, or when the GPU's address of the memory is not the host's (the readers
   and the kernels share one pointer: refused rather than guessed).
 

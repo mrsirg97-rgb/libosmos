@@ -13,6 +13,7 @@
 #include "osmos/mem/host_slots.h"
 #include "osmos/mem/membrane.h"
 #include "osmos/mem/pool.h"
+#include "osmos/mem/hip_slots.h"
 #include "osmos/mem/resident.h"
 #include "osmos/mem/rowread.h"
 #include "osmos/cpu/lane.h"
@@ -132,6 +133,7 @@ struct Forward
   HostSlots *hs_stream;    /* the stream's */
   Membrane *mem; /* every expert's cache and a prompt's stream (membrane.h; DESIGN.md, "0.5.8", "0.6.2") */
   Resident *res;            /* the layers' tensors and a share of the experts, in GPU memory (resident.h) */
+  HipSlots *gpu_slots;      /* res's memory (hip_slots.h): made before it, destroyed after */
   uint32_t n_expert_units;  /* the pool's units: layer * n_experts + expert */
   uint64_t *picks;          /* each unit's picks by the router so far (forward_picks) */
   PoolUnit *units;          /* each expert unit's file ranges (the CPU lane's parts) */

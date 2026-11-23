@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "osmos/mem/ledger.h"
+
 #define GPU_BUFS_MAX 128 /* a forward's table's buffers at most */
 
 typedef struct GpuWant
@@ -20,11 +22,13 @@ typedef struct GpuBufs
 {
   void **slot[GPU_BUFS_MAX];
   uint32_t n;
+  OsmosLedger *ledger; /* what they were taken from (borrowed: the forward's build's) */
 } GpuBufs;
 
-/* each wanted buffer allocated on the device and recorded; false at the first the GPU refused (those before it
+/* each wanted buffer allocated on the device through l (osmos/mem/ledger.h; NULL counts nothing - every call on one
+   GpuBufs the same ledger) and recorded; false at the first the GPU refused (those before it
    recorded: gpu_bufs_free frees them) or past GPU_BUFS_MAX */
-bool gpu_bufs_alloc(GpuBufs *b, const GpuWant *want, size_t n);
+bool gpu_bufs_alloc(GpuBufs *b, OsmosLedger *l, const GpuWant *want, size_t n);
 /* every recorded buffer freed, its pointer NULL; the record empty */
 void gpu_bufs_free(GpuBufs *b);
 

@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "drafter_impl.h"
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/model/qtype.h"
 #include "osmos/mem/hip_slots.h"
 #include "osmos/err.h"
@@ -185,7 +186,9 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR])
   ok = ok && (u || osmos_fail(err, "out of memory"));
   for (uint32_t i = 0; ok && i < d->ix->n; i++)
     u[i] = (PoolUnit){.part = {{d->fd, d->ix->t[i].offset, d->ix->t[i].bytes}}, .n_parts = 1};
-  ok = ok && ((d->res = resident_create(u, d->ix->n, hip_slots(), DRAFTER_READERS, perr)) || osmos_fail(err, "%s", perr));
+  ok = ok && (((d->slots = hip_slots_create(NULL /* ledger: stage 4 */, perr)) &&
+               (d->res = resident_create(u, d->ix->n, hip_slots(d->slots), DRAFTER_READERS, perr))) ||
+              osmos_fail(err, "%s", perr));
   free(u);
   const DsparkTensor *mk = ok ? dspark_tensor(d->ix, "mtp.2.markov_head.embed.weight") : NULL;
   const DsparkTensor *mp = ok ? dspark_tensor(d->ix, "mtp.0.main_proj.weight") : NULL;
@@ -241,6 +244,7 @@ void drafter_destroy(Drafter *d)
   hipFree(d->best_part);
   hipHostFree(d->pin);
   resident_destroy(d->res);
+  hip_slots_destroy(d->slots); /* after the resident set: its memory released through it */
   if (d->fd >= 0)
     close(d->fd);
   dspark_index_destroy(d->ix);
