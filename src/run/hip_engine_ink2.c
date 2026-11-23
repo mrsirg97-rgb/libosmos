@@ -137,8 +137,6 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->npu || o->rope_stages)
-    return osmos_fail(err, "no NPU kernels for this family, nor rope_stages (osmos1.7b's)"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
@@ -268,7 +266,9 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 }
 
 const OsmosFamily osmos_ink2 = {
-    "inkling2", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
+    "inkling2",
+    OSMOS_TAKES_BUDGET | OSMOS_TAKES_PICKS | OSMOS_TAKES_DRAFTER | OSMOS_TAKES_KV_Q8 | OSMOS_TAKES_PROFILE, /* its options (engine_impl.h) */
+    m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
     e_step,     e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     false, /* a prompt's read its batch: one math for every step */

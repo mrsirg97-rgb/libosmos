@@ -14,9 +14,26 @@ static inline uint32_t osmos_step_tokens(const OsmosOptions *o, uint32_t family_
   return t < o->max_ctx ? t : o->max_ctx;
 }
 
+/* the options a family takes (OsmosFamily's takes): one set past the family's refused by osmos_create, the option
+   named - never ignored (0.16.0: five hand-kept lists; stream_ngram taken silently by every family but Qwen's,
+   no_guess by Inkling's). max_ctx, max_tokens and fill every family's */
+enum
+{
+  OSMOS_TAKES_BUDGET = 1u << 0,
+  OSMOS_TAKES_PICKS = 1u << 1,
+  OSMOS_TAKES_NO_GUESS = 1u << 2,
+  OSMOS_TAKES_DRAFTER = 1u << 3,
+  OSMOS_TAKES_STREAM_NGRAM = 1u << 4,
+  OSMOS_TAKES_NPU = 1u << 5,
+  OSMOS_TAKES_KV_Q8 = 1u << 6,
+  OSMOS_TAKES_PROFILE = 1u << 7,
+  OSMOS_TAKES_ROPE_STAGES = 1u << 8,
+};
+
 typedef struct OsmosFamily
 {
   const char *arch; /* general.architecture */
+  uint32_t takes;   /* the options it takes (OSMOS_TAKES_*) */
   void *(*open)(const OsmosFiles *files, OsmosFacts *facts, char err[OSMOS_ERR]);
   void (*close)(void *model);
   void *(*create)(const void *model, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR]);

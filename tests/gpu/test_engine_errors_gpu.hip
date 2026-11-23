@@ -72,6 +72,22 @@ static bool one(const SmallPack& p) {
       osmos_destroy(ok);
     }
   }
+  // an option the family has no use for refused, never ignored (0.16.0: one table, the engine's - stream_ngram was
+  // taken silently by every family but Qwen's, no_guess by Inkling's), the option named
+  {
+    OsmosOptions q = small_pack_options(m, 1024);
+    q.stream_ngram = true;
+    err[0] = 0;
+    CHECK(!osmos_create(m, &q, err) && std::strstr(err, "stream_ngram"));
+    named_once(arch, "stream_ngram refused", err);
+    if (!std::strcmp(arch, "inkling2")) {
+      q = small_pack_options(m, 1024);
+      q.no_guess = true;
+      err[0] = 0;
+      CHECK(!osmos_create(m, &q, err) && std::strstr(err, "no_guess"));
+      named_once(arch, "no_guess refused", err);
+    }
+  }
   if (p.drafter) {  // a drafter that is not one (the model's own file): the family named once, its drafter's cause after
     OsmosOptions d = small_pack_options(m, 1024);
     d.drafter = path.c_str();

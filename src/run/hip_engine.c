@@ -106,11 +106,39 @@ OsmosFacts osmos_facts(const OsmosModel *m)
   return m ? m->facts : none;
 }
 
+/* the first option set that the family does not take, or NULL (engine_impl.h's OSMOS_TAKES_*) */
+static const char *untaken(const OsmosFamily *f, const OsmosOptions *o)
+{
+  const struct
+  {
+    bool set;
+    uint32_t bit;
+    const char *name;
+  } opt[] = {
+      {o->budget != 0, OSMOS_TAKES_BUDGET, "budget (its every weight resident)"},
+      {o->picks != NULL, OSMOS_TAKES_PICKS, "picks"},
+      {o->no_guess, OSMOS_TAKES_NO_GUESS, "no_guess"},
+      {o->drafter != NULL, OSMOS_TAKES_DRAFTER, "drafter"},
+      {o->stream_ngram, OSMOS_TAKES_STREAM_NGRAM, "stream_ngram (Qwen's n-gram table)"},
+      {o->npu != NULL, OSMOS_TAKES_NPU, "npu (no NPU kernels for it)"},
+      {o->kv_q8, OSMOS_TAKES_KV_Q8, "kv_q8 (Inkling's)"},
+      {o->profile, OSMOS_TAKES_PROFILE, "profile (Inkling's)"},
+      {o->rope_stages != NULL, OSMOS_TAKES_ROPE_STAGES, "rope_stages (osmos1.7b's)"},
+  };
+  for (size_t i = 0; i < sizeof opt / sizeof *opt; i++)
+    if (opt[i].set && !(f->takes & opt[i].bit))
+      return opt[i].name;
+  return NULL;
+}
+
 Osmos *osmos_create(const OsmosModel *m, const OsmosOptions *o, char err[OSMOS_ERR])
 {
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
   if (!m || !o)
     return osmos_fail(err, "no model or options"), NULL;
+  const char *opt = untaken(m->fam, o);
+  if (opt) /* (refused before anything is made, the family named) */
+    return named(m->fam, err, osmos_fail(err, "an option it does not take: %s", opt)), NULL;
   Osmos *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;

@@ -83,8 +83,6 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->picks || o->no_guess || o->npu || o->kv_q8 || o->profile || o->rope_stages)
-    return osmos_fail(err, "hy_v4_flash: no picks, no_guess, NPU, kv_q8, profile or rope_stages"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
@@ -157,7 +155,9 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 }
 
 const OsmosFamily osmos_hy4 = {
-    "hy_v4_flash", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
+    "hy_v4_flash",
+    OSMOS_TAKES_BUDGET | OSMOS_TAKES_DRAFTER, /* its options (engine_impl.h) */
+    m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
     e_step,       e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
     s_reach,       s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     true, /* a prompt's read the matrix cores' math, a decode's the matvecs': two maths (hy4_step_read)  */

@@ -102,8 +102,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   if (o->picks && !(e->picks = read_picks(o->picks, &m->w->geo, err)))
     return e_destroy(e), NULL;
   e->rows = (uint32_t)((m->w->geo.n_experts - 1) / m->w->geo.n_used); /* m_open's round_tokens */
-  if (o->kv_q8 || o->profile || o->rope_stages)
-    return e_destroy(e), osmos_fail(err, "kv_q8 and profile are Inkling's, rope_stages osmos1.7b's"), NULL;
   /* whole: the lane (every engine's, all its experts on the GPU), the NPU, the drafter - the forward's own */
   const ForwardOptions fo = {m->w->geo.n_layers,
                              o->max_ctx,
@@ -195,7 +193,9 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 }
 
 const OsmosFamily osmos_ds4 = {
-    "deepseek41", m_open,   m_close,   e_create, e_destroy,  e_identity,    e_stats,
+    "deepseek41",
+    OSMOS_TAKES_BUDGET | OSMOS_TAKES_PICKS | OSMOS_TAKES_NO_GUESS | OSMOS_TAKES_DRAFTER | OSMOS_TAKES_NPU, /* its options (engine_impl.h) */
+    m_open,   m_close,   e_create, e_destroy,  e_identity,    e_stats,
     e_step,       e_kept,  e_block,  s_create,   s_destroy, s_reset,     s_prompt, s_rollback,
     s_reach,      s_position, s_state_bytes, s_save_to, s_load_from, s_seed,        s_draft,  NULL, /* its drafts one sequence at a time */
     true, /* a prompt's read: the large steps' math at any size (forward_reading) */

@@ -69,11 +69,6 @@ static void e_destroy(void *p)
 static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger, char err[OSMOS_ERR])
 {
   const Model *m = pm;
-  if (o->budget || o->picks || o->no_guess || o->npu || o->kv_q8 || o->profile || o->rope_stages)
-    return osmos_fail(err, "qwen35: every weight resident - no budget, picks, no_guess, NPU, kv_q8, profile or "
-                      "rope_stages"), NULL;
-  if (o->drafter)
-    return osmos_fail(err, "qwen35: no drafter yet (its MTP head and DFlash: 0.9.0's next step)"), NULL;
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
@@ -149,7 +144,9 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 }
 
 const OsmosFamily osmos_q35 = {
-    "qwen35",   m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
+    "qwen35",
+    0, /* its options (engine_impl.h) */
+      m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
     e_step,    e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     true, /* a prompt's read the matmul's math, a decode's mv_fp4's: two maths (q35_step_read)  */
