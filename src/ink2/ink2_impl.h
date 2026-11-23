@@ -177,8 +177,6 @@ struct Ink2Forward
 /* hip_forward.c's: device memory counted in the forward's bytes; a tensor's bytes from g's file, its F32 values on the
    host (F32 / F16 / BF16), uploaded; the drafter's y [n][rows] = W x (mv_run, MV_MAX_TOKENS a launch) */
 bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes);
-bool ink2_read_tensor(const Gguf *g, const GgufTensor *t, void *out);
-float *ink2_host_f32(const Gguf *g, const GgufTensor *t, uint64_t *n);
 bool ink2_up_host(Ink2Forward *f, const float *v, uint64_t n, float **out);
 bool ink2_up_f32_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, float **out);
 bool ink2_up_raw_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, void **out);

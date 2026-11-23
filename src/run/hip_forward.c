@@ -7,6 +7,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/model/tensor.h"
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/run/fit.h"
 #include "forward_impl.h"
@@ -359,18 +360,6 @@ static int engram_fd(const Forward *f, const Weights *w)
   return -1;
 }
 
-/* a tensor's bytes from the model's files into host memory */
-static bool read_all(const Forward *f, const GgufTensor *t, void *out)
-{
-  for (uint64_t got = 0; got < t->bytes;)
-  {
-    const ssize_t n = pread(f->fds[t->file], (char *)out + got, t->bytes - got, (off_t)(t->offset + got));
-    if (n <= 0)
-      return false;
-    got += (uint64_t)n;
-  }
-  return true;
-}
 
 /* each Engram layer's gate as ops_engram_gate reads it: F32 [hc][dim], q k. a llama.cpp GGUF's folded (engram_gate:
    read as it is); ds1017's q and k (BF16) multiplied here - a product of two BF16 values exact in F32 (8-bit
@@ -387,8 +376,8 @@ static bool gates(Forward *f, const Weights *w, char *err)
       continue;
     const LayerWeights *L = &w->layer[l];
     if (w->geo.engram_own)
-      ok = read_all(f, L->eg_gate, g);
-    else if ((ok = read_all(f, L->eg_q, q) && read_all(f, L->eg_k, k)))
+      ok = tensor_read_fd(f->fds[(L->eg_gate)->file], L->eg_gate, g);
+    else if ((ok = tensor_read_fd(f->fds[(L->eg_q)->file], L->eg_q, q) && tensor_read_fd(f->fds[(L->eg_k)->file], L->eg_k, k)))
       for (uint64_t i = 0; i < n; i++)
       {
         const uint32_t a = (uint32_t)q[i] << 16, b = (uint32_t)k[i] << 16;
@@ -419,7 +408,7 @@ static bool guess_routers(Forward *f, const Weights *w, char *err)
     const uint64_t n = t->bytes / sizeof(float);
     float *x = malloc(t->bytes);
     uint16_t *h = malloc(n * sizeof *h);
-    ok = x && h && read_all(f, t, x);
+    ok = x && h && tensor_read_fd(f->fds[(t)->file], t, x);
     for (uint64_t i = 0; ok && i < n; i++)
     {
       uint32_t u;

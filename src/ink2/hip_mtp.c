@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "ink2_impl.h"
+#include "osmos/model/tensor.h"
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
@@ -81,7 +82,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
     return osmos_fail(err, "the drafter: a drafter tensor not read or uploaded");
   /* the mixtures: softmax over the taps, a stage a row */
   uint64_t n = 0;
-  float *fw = ink2_host_f32(g, m->fuse, &n), *rnn = NULL, *hw = NULL, *hb = NULL;
+  float *fw = tensor_f32(g, m->fuse, &n), *rnn = NULL, *hw = NULL, *hb = NULL;
   ok = fw && n == (uint64_t)(m->n_layers + 1) * m->n_taps;
   for (int st = 0; ok && st <= m->n_layers; st++)
   {
@@ -95,7 +96,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
   }
   ok = ok && ink2_up_host(f, fw, n, &d->alpha);
   /* rnn_proj's columns apart: [state | prev] a step's own, [hidden | features] the step's invariant */
-  ok = ok && (rnn = ink2_host_f32(g, m->m_rnn_w, &n)) != NULL;
+  ok = ok && (rnn = tensor_f32(g, m->m_rnn_w, &n)) != NULL;
   if (ok)
   {
     const uint32_t cols = 2 * R + 2 * C, rows = 3 * R;
@@ -111,7 +112,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
   /* the fold: the target's head through hidden_out - its rank columns as tokens (the head's own quantized values,
      the base logits' head), transposed to [rows][rank] Q8_0 for the matvec (a step reads it whole: 55 MB, BF16's
      103); and the bias's */
-  ok = ok && (hw = ink2_host_f32(g, m->m_hidden_w, &n)) != NULL && (hb = ink2_host_f32(g, m->m_hidden_b, &n)) != NULL;
+  ok = ok && (hw = tensor_f32(g, m->m_hidden_w, &n)) != NULL && (hb = tensor_f32(g, m->m_hidden_b, &n)) != NULL;
   float *cols = NULL, *dcols = NULL, *dt = NULL, *db = NULL;
   if (ok)
   {

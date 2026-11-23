@@ -170,7 +170,6 @@ bool hy4_mat_raw(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uin
                  float *y, bool read);
 /* a BF16 tensor's values as F32 on the host (read from its file; NULL on failure), an F32 matrix [rows][cols] as Q8_0
    on the GPU (ggml's rounding) - hip_hy4_dfly.c's */
-float *hy4_host_f32(const Gguf *g, const GgufTensor *t);
 bool hy4_q8_up(GpuBufs *b, const float *x, uint64_t rows, uint32_t cols, void **dev);
 /* DFly2's weights and buffers freed (hip_hy4_dfly.c; none loaded: nothing) */
 void hy4_dfly_free(Hy4Forward *f);

@@ -13,6 +13,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/model/tensor.h"
 #include "osmos/gpu/hy4_ops.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -76,31 +77,6 @@ static const GgufTensor *need(const Gguf *g, const char *name, uint64_t d0, uint
   return t;
 }
 
-/* a tensor's BF16 values as F32 on the host (read from its file) */
-float *hy4_host_f32(const Gguf *g, const GgufTensor *t)
-{
-  const uint64_t n = t->bytes / 2;
-  uint16_t *b = malloc(t->bytes);
-  float *x = malloc(n * sizeof *x);
-  const int fd = open(g->paths[t->file], O_RDONLY);
-  bool ok = b && x && fd >= 0;
-  for (uint64_t at = 0; ok && at < t->bytes;)
-  {
-    const ssize_t r = pread(fd, (uint8_t *)b + at, t->bytes - at, (off_t)(t->offset + at));
-    ok = r > 0, at += ok ? (uint64_t)r : 0;
-  }
-  if (fd >= 0)
-    close(fd);
-  for (uint64_t i = 0; ok && i < n; i++)
-  {
-    const uint32_t u = (uint32_t)b[i] << 16;
-    memcpy(&x[i], &u, 4);
-  }
-  free(b);
-  if (!ok)
-    free(x), x = NULL;
-  return x;
-}
 
 static bool up_f32(GpuBufs *b, const float *x, uint64_t n, float **dev)
 {
@@ -110,7 +86,7 @@ static bool up_f32(GpuBufs *b, const float *x, uint64_t n, float **dev)
 /* a small BF16 tensor to the GPU as F32 */
 static bool small(GpuBufs *b, const Gguf *g, const GgufTensor *t, float **dev)
 {
-  float *x = t ? hy4_host_f32(g, t) : NULL;
+  float *x = t ? tensor_f32(g, t, &(uint64_t){0}) : NULL;
   const bool ok = up_f32(b, x, t ? t->bytes / 2 : 0, dev);
   free(x);
   return ok;
@@ -137,7 +113,7 @@ static void q8_row(const float *x, uint32_t n, uint8_t *out)
 static bool split_kvb(GpuBufs *b, const Gguf *g, const GgufTensor *t, uint32_t H, uint32_t nope, uint32_t vd, uint32_t lat,
                       void **k_b, void **v_b)
 {
-  float *kv = hy4_host_f32(g, t);
+  float *kv = tensor_f32(g, t, &(uint64_t){0});
   const uint64_t kb_row = nope / 32 * 34, vb_row = lat / 32 * 34;
   const uint64_t kb = (uint64_t)H * lat * kb_row, vb = (uint64_t)H * vd * vb_row;
   uint8_t *hk = malloc(kb), *hv = malloc(vb);
@@ -211,7 +187,7 @@ static bool matrix(struct Hy4Dfly *d, const GgufTensor *t, void *pin, const void
   {
     if (d->q8)
     {
-      float *x = hy4_host_f32(d->st, t);
+      float *x = tensor_f32(d->st, t, &(uint64_t){0});
       const bool ok = hy4_q8_up(&d->bufs, x, t->dims[1], (uint32_t)t->dims[0], slot);
       free(x);
       if (!ok)
@@ -315,7 +291,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
   ok = ok && eh && eg && en && hn && fnm && chn && cen && cg && cu && cd;
   if (ok)
   { /* the fusion's matrix with its gate folded in: row r times gate[r] */
-    float *w = hy4_host_f32(d->st, eh), *gv = hy4_host_f32(d->st, eg);
+    float *w = tensor_f32(d->st, eh, &(uint64_t){0}), *gv = tensor_f32(d->st, eg, &(uint64_t){0});
     for (uint64_t r = 0; w && gv && r < D; r++)
       for (uint64_t c = 0; c < 2ull * D; c++)
         w[r * 2 * D + c] *= gv[r];
@@ -332,7 +308,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
   const GgufTensor *out = f->w->output;
   if (ok && q8 && !f->head8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
   { /* the drafts' head: the target's own as Q8_0 (a draft's precision moves its acceptance, never the output) */
-    float *x = out->type == QTYPE_BF16 ? hy4_host_f32(f->w->model, out) : NULL;
+    float *x = out->type == QTYPE_BF16 ? tensor_f32(f->w->model, out, &(uint64_t){0}) : NULL;
     ok = (x && hy4_q8_up(&d->bufs, x, out->dims[1], (uint32_t)out->dims[0], &d->head8)) ||
          osmos_fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
     free(x);
@@ -341,7 +317,7 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
   { /* the engine's (q8) drafts' head Q4_0 (a round reads it a draft: 5 x 0.39 GB at Q8_0). Q3_K at 1K, 128 tokens, A/B in one
        session (2026-11-19): code 24.1-24.6 -> 25.6-26.2 tok/s (the same 87 accepted, 106 drafts against 112), prose
        27.5-28.1 -> 28.3-29.0 (the same 96); +209 MB */
-    float *x = out->type == QTYPE_BF16 ? hy4_host_f32(f->w->model, out) : NULL;
+    float *x = out->type == QTYPE_BF16 ? tensor_f32(f->w->model, out, &(uint64_t){0}) : NULL;
     ok = (x && q4_up(&d->bufs, x, out->dims[1], (uint32_t)out->dims[0], &d->head4)) || osmos_fail(err, "DFly2: the head's Q4_0 copy");
     free(x);
   }

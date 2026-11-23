@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "osmos/model/tensor.h"
 #include "osmos/model/engram.h"
 #include "osmos/err.h"
 
@@ -31,17 +32,8 @@ static void *slurp(const GgufTensor *t, const int *fds)
   void *p = malloc(t->bytes ? t->bytes : 1);
   if (!p)
     return NULL;
-  uint64_t got = 0;
-  while (got < t->bytes)
-  {
-    const ssize_t n = pread(fds[t->file], (char *)p + got, t->bytes - got, (off_t)(t->offset + got));
-    if (n <= 0)
-    {
-      free(p);
-      return NULL;
-    }
-    got += (uint64_t)n;
-  }
+  if (!tensor_read_fd(fds[t->file], t, p))
+    return free(p), NULL;
   return p;
 }
 

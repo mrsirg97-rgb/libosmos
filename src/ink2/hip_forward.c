@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "ink2_impl.h"
+#include "osmos/model/tensor.h"
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/mem/experts.h"
@@ -69,68 +70,6 @@ bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes)
   return true;
 }
 
-/* a tensor's bytes from its file */
-bool ink2_read_tensor(const Gguf *g, const GgufTensor *t, void *out)
-{
-  const int fd = open(g->paths[t->file], O_RDONLY);
-  if (fd < 0)
-    return false;
-  uint64_t at = 0;
-  while (at < t->bytes)
-  {
-    const ssize_t n = pread(fd, (uint8_t *)out + at, t->bytes - at, (off_t)(t->offset + at));
-    if (n <= 0)
-      break;
-    at += (uint64_t)n;
-  }
-  close(fd);
-  return at == t->bytes;
-}
-
-static float half_f(uint16_t h)
-{
-  const uint32_t s = (uint32_t)(h >> 15) << 31, e = h >> 10 & 31, m = h & 1023;
-  uint32_t u;
-  if (!e)
-  {
-    float v = ldexpf((float)m, -24);
-    return s ? -v : v;
-  }
-  u = e == 31 ? s | 0x7f800000u | m << 13 : s | (e + 112) << 23 | m << 13;
-  float v;
-  memcpy(&v, &u, 4);
-  return v;
-}
-
-/* a small tensor's values as F32 on the host (F32, F16 or BF16 in the file); NULL where it is another type */
-float *ink2_host_f32(const Gguf *g, const GgufTensor *t, uint64_t *n)
-{
-  const uint32_t es = t->type == T_F32 ? 4 : t->type == T_F16 || t->type == T_BF16 ? 2 : 0;
-  if (!es)
-    return NULL;
-  *n = t->bytes / es;
-  uint8_t *b = malloc(t->bytes);
-  float *v = malloc(*n * 4 + 4);
-  if (!b || !v || !ink2_read_tensor(g, t, b))
-    return free(b), free(v), NULL;
-  for (uint64_t i = 0; i < *n; i++)
-  {
-    if (es == 4)
-      memcpy(&v[i], b + 4 * i, 4);
-    else
-    {
-      const uint16_t h = (uint16_t)(b[2 * i] | b[2 * i + 1] << 8);
-      uint32_t u = (uint32_t)h << 16;
-      if (t->type == T_BF16)
-        memcpy(&v[i], &u, 4);
-      else
-        v[i] = half_f(h);
-    }
-  }
-  free(b);
-  return v;
-}
-
 bool ink2_up_host(Ink2Forward *f, const float *v, uint64_t n, float **out)
 {
   return ink2_dalloc(f, (void **)out, n * 4) && hipMemcpy(*out, v, n * 4, hipMemcpyHostToDevice) == hipSuccess;
@@ -143,7 +82,7 @@ bool ink2_up_f32_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, float **
   if (!t)
     return true;
   uint64_t n = 0;
-  float *v = ink2_host_f32(g, t, &n);
+  float *v = tensor_f32(g, t, &n);
   const bool ok = v && ink2_up_host(f, v, n, out);
   free(v);
   return ok;
@@ -162,7 +101,7 @@ bool ink2_up_raw_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, void **o
     return false;
   void *b = malloc(t->bytes), *stage = NULL;
   const uint64_t rows = t->n_dims == 2 ? t->dims[1] : 1, packed = q5 ? t->bytes / 176 * 180 : t->bytes;
-  bool ok = b && ink2_read_tensor(g, t, b) && ink2_dalloc(f, out, packed);
+  bool ok = b && tensor_read(g, t, b) && ink2_dalloc(f, out, packed);
   if (ok && q5)
     ok = ledger_malloc(f->ledger, &stage, t->bytes) == hipSuccess && hipMemcpy(stage, b, t->bytes, hipMemcpyHostToDevice) == hipSuccess &&
          quant_repack_q5k(stage, (uint32_t)rows, (uint32_t)t->dims[0], *out, NULL) && hipDeviceSynchronize() == hipSuccess;
@@ -181,7 +120,7 @@ static bool up_raw(Ink2Forward *f, const GgufTensor *t, void **out) { return ink
 static bool up_conv_static(Ink2Forward *f, const GgufTensor *t, float **out)
 {
   uint64_t n = 0;
-  float *v = ink2_host_f32(f->w->model, t, &n);
+  float *v = tensor_f32(f->w->model, t, &n);
   if (!v)
     return false;
   const uint32_t taps = (uint32_t)f->w->geo.conv;
@@ -211,7 +150,7 @@ static bool up_loop(Ink2Forward *f)
     return true;
   const uint64_t C = (uint64_t)g->n_embd, core = (uint64_t)(g->loop.end - g->loop.start);
   uint64_t nq = 0, nk = 0;
-  float *q = ink2_host_f32(w->model, w->loop_query, &nq), *kv = ink2_host_f32(w->model, w->loop_kv_query, &nk),
+  float *q = tensor_f32(w->model, w->loop_query, &nq), *kv = tensor_f32(w->model, w->loop_kv_query, &nk),
         *four = malloc(INK2_CTRLS * C * 4);
   bool ok = q && kv && four && nq == 2 * core * C && nk == 2 * core * C;
   for (int l = g->loop.start; ok && l < g->loop.end; l++)
@@ -260,7 +199,7 @@ static bool upload(Ink2Forward *f)
     for (int k = 0; ok && k < 3; k++)
     {
       uint64_t n = E;
-      d->scale[k] = sc[k] ? ink2_host_f32(w->model, sc[k], &n) : malloc(E * sizeof(float));
+      d->scale[k] = sc[k] ? tensor_f32(w->model, sc[k], &n) : malloc(E * sizeof(float));
       ok = d->scale[k] && n == E;
       for (uint32_t e = 0; ok && !sc[k] && e < E; e++)
         d->scale[k][e] = 1.0f;

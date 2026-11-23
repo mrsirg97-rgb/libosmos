@@ -11,6 +11,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include "osmos/model/tensor.h"
 #include "osmos/gpu/hy4_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
@@ -383,7 +384,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   if (ok && o->head_q8 && f->w->output->type == QTYPE_BF16)
   { /* the head's Q8_0 copy (Hy4Options' head_q8): its BF16 freed */
     const GgufTensor *out = f->w->output;
-    float *x = hy4_host_f32(f->w->model, out);
+    float *x = tensor_f32(f->w->model, out, &(uint64_t){0});
     ok = (x && hy4_q8_up(&f->bufs, x, out->dims[1], (uint32_t)out->dims[0], &f->head8)) ||
          osmos_fail(err, "the head's Q8_0 copy not made");
     free(x);
