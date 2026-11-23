@@ -39,7 +39,7 @@ typedef struct Q4xBuf
   void *top_part;                                                     /* q4x_greedy's slices' bests (ops_argmax) */
   int32_t *pin_rows, *pin_tok, *pin_overflow;                         /* their pinned host copies */
   float *logits;
-  bool *kept; /* host, [max_tokens]: a row's logits its last step's (q4x_kept) */
+  int32_t *slot; /* host, [max_tokens]: a row's logits slot (its own row), or -1 - its last step's (osmos/gpu/kept.h) */
 } Q4xBuf; /* (its buffers the forward's record's: never freed as an array of its first pointers - 0.15.2's double free) */
 
 /* the MTP head's buffers (with a head): a step's hidden rows, a draft's inputs and logits */

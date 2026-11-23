@@ -508,6 +508,7 @@ static bool scratch(Forward *f)
          (f->m_hidx = malloc(FWD_MAX_SLOTS(P, g->n_experts) * 4)) &&
          fwd_pinned(&f->bufs, &f->stage, NS * B * (uint64_t)(f->n_eg = n_eg ? n_eg : 1) * cols * row) &&
          fwd_pinned(&f->bufs, &f->pin, sizeof *f->pin) && subs(f) &&
+         (f->slot = malloc(f->max_tokens * sizeof *f->slot)) && memset(f->slot, 0xff, f->max_tokens * sizeof *f->slot) &&
          hipEventCreateWithFlags(&f->routed, hipEventDisableTiming) == hipSuccess &&
          hipEventCreateWithFlags(&f->passed, hipEventDisableTiming) == hipSuccess;
 }
@@ -707,6 +708,7 @@ void forward_destroy(Forward *f)
   if (f->eg_fd >= 0)
     close(f->eg_fd);
   engram_destroy(f->hash);
+  free(f->slot);
   free(f->rows);
   free(f);
 }
@@ -736,18 +738,20 @@ void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2])
 const float *forward_logits(const Forward *f) { return f->b.vocab; }
 uint32_t forward_logit_rows(const Forward *f) { return f ? f->vocab_rows : 0; }
 
+static bool settle(void *f) { return fwd_settle(f); } /* (the forward's wait: a decode's spins - hip_wait.c) */
+
+void forward_kept_view(const Forward *f, KeptView *k)
+{
+  *k = (KeptView){0};
+  if (f) /* (the picks' scratch: b.ids, free between steps - the next one's tokens written at its start) */
+    *k = (KeptView){f->slot,   f->step_n,       f->b.vocab,        (uint32_t)f->g->n_vocab, f->b.ids, f->argmax_part,
+                    NULL,      f->pin->greedy,  settle,            (void *)f};
+}
+
 bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
-  if (!f || !ids || !rows || row0 + rows < row0 || row0 + rows > f->vocab_rows)
-    return osmos_fail(err, "rows the last step's head did not compute");
-  const uint32_t V = (uint32_t)f->g->n_vocab;
-  /* b->ids free between steps (the next one's tokens written at its start) */
-  if (!ops_argmax(f->b.vocab + (uint64_t)row0 * V, V, rows, V, f->b.ids, f->argmax_part, NULL) ||
-      hipMemcpyAsync(f->pin->greedy, f->b.ids, rows * sizeof(int32_t), hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-      !fwd_settle(f))
-    return osmos_fail(err, "a GPU call failed (the greedy picks)");
-  for (uint32_t r = 0; r < rows; r++)
-    if ((ids[r] = f->pin->greedy[r]) < 0)
-      return osmos_fail(err, "a NaN in a row's logits");
-  return true;
+  KeptView k;
+  forward_kept_view(f, &k);
+  const char *why = kept_greedy(&k, row0, rows, ids);
+  return !why || osmos_fail(err, "%s", why);
 }

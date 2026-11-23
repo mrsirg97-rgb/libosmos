@@ -229,7 +229,7 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
   const uint64_t hd = (uint64_t)g->hc * g->n_embd;
   for (uint32_t i = 0; i < runs; i++) /* from here a failure leaves the rings part written: advance clears it */
     r[i].s->broken = true;
-  memset(b->kept + row0, 0, n * sizeof *b->kept); /* the step's rows: kept once it is whole */
+  memset(b->slot + row0, 0xff, n * sizeof *b->slot); /* the step's rows: none kept until it is whole (-1) */
   if (!embed(f, r, runs, tokens, n))
     return osmos_fail(err, "a GPU call failed (the embedding)");
   bool pending = false;
@@ -257,7 +257,7 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
     return false;
   for (uint32_t i = 0; i < runs; i++)
     for (uint32_t t = 0; t < r[i].n; t++)
-      b->kept[row0 + r[i].t0 + t] = t >= unwanted(&r[i]);
+      b->slot[row0 + r[i].t0 + t] = t >= unwanted(&r[i]) ? (int32_t)(row0 + r[i].t0 + t) : -1;
   advance(f, r, runs, tokens, row0);
   return true;
 }
@@ -268,7 +268,20 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
 }
 
 const float *q4x_logits(const Q4xForward *f) { return f ? f->b.logits : NULL; }
-bool q4x_kept(const Q4xForward *f, uint32_t row) { return f && row < f->max_tokens && f->b.kept[row]; }
+void q4x_kept_view(const Q4xForward *f, KeptView *k)
+{
+  *k = (KeptView){0};
+  if (f) /* (the picks' scratch: the MoE's table, free between steps) */
+    *k = (KeptView){f->b.slot, f->max_tokens, f->b.logits, (uint32_t)f->w->geo.n_vocab, f->b.cnt, f->b.top_part, NULL,
+                    NULL, NULL, NULL};
+}
+
+bool q4x_kept(const Q4xForward *f, uint32_t row)
+{
+  KeptView k;
+  q4x_kept_view(f, &k);
+  return kept_row(&k, row) != NULL;
+}
 
 bool q4x_seq_prompt(Q4xSeq *s, uint32_t end)
 {
@@ -281,18 +294,8 @@ const float *q4x_taps(const Q4xForward *f) { return f && f->n_taps ? f->b.taps :
 
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
-  if (!f || !ids || !rows || row0 + rows > f->max_tokens)
-    return osmos_fail(err, "no forward or ids, or rows past a step's");
-  for (uint32_t r = 0; r < rows; r++)
-    if (!f->b.kept[row0 + r])
-      return osmos_fail(err, "a row the last step kept no logits of");
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab;
-  int32_t *d = f->b.cnt; /* the MoE's table, free between steps */
-  if (!ops_argmax(f->b.logits + (uint64_t)row0 * V, V, rows, V, d, f->b.top_part, NULL) ||
-      hipMemcpy(ids, d, rows * 4, hipMemcpyDeviceToHost) != hipSuccess)
-    return osmos_fail(err, "a GPU call failed (the greedy pick)");
-  for (uint32_t r = 0; r < rows; r++)
-    if (ids[r] < 0)
-      return osmos_fail(err, "a NaN in a row's logits");
-  return true;
+  KeptView k;
+  q4x_kept_view(f, &k);
+  const char *why = kept_greedy(&k, row0, rows, ids);
+  return !why || osmos_fail(err, "%s", why);
 }

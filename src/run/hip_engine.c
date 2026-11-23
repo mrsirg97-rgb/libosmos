@@ -196,12 +196,30 @@ bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_
   return named(e->fam, err, e->fam->batch(e->impl, seqs, tokens, n, err));
 }
 
-const float *osmos_logits(const Osmos *e, uint32_t row) { return e ? e->fam->logits(e->impl, row) : NULL; }
+/* the last step's kept rows, the family's view (osmos/gpu/kept.h) */
+static KeptView kept_of(const Osmos *e)
+{
+  KeptView k = {0};
+  e->fam->kept(e->impl, &k);
+  return k;
+}
+
+static const float *row_of(const Osmos *e, uint32_t row)
+{
+  const KeptView k = kept_of(e);
+  return kept_row(&k, row);
+}
+
+const float *osmos_logits(const Osmos *e, uint32_t row) { return e ? row_of(e, row) : NULL; }
 
 bool osmos_greedy(Osmos *e, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
-  return e && ids ? named(e->fam, err, e->fam->greedy(e->impl, row0, rows, ids, err)) : osmos_fail(err, "no engine");
+  if (!e || !ids)
+    return osmos_fail(err, "no engine");
+  const KeptView k = kept_of(e);
+  const char *why = kept_greedy(&k, row0, rows, ids);
+  return !why || osmos_fail(err, "%s", why);
 }
 
 bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t n, int32_t *id, char err[OSMOS_ERR])
@@ -209,7 +227,7 @@ bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
   if (!e || !id)
     return osmos_fail(err, "no engine");
-  const float *dev = e->fam->logits(e->impl, row);
+  const float *dev = row_of(e, row);
   if (!dev)
     return osmos_fail(err, "the row's logits not kept");
   if (hipDeviceSynchronize() != hipSuccess ||
@@ -240,7 +258,7 @@ bool osmos_sample(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_t posit
     return osmos_greedy(e, row, 1, id, err);
   if (!e || !id)
     return osmos_fail(err, "no engine");
-  const float *dev = e->fam->logits(e->impl, row);
+  const float *dev = row_of(e, row);
   if (!dev)
     return osmos_fail(err, "the row's logits not kept");
   if (hipDeviceSynchronize() != hipSuccess)
@@ -256,7 +274,7 @@ bool osmos_sample_except(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_
     return osmos_greedy_except(e, row, except, n, id, err);
   if (!e || !id)
     return osmos_fail(err, "no engine");
-  const float *dev = e->fam->logits(e->impl, row);
+  const float *dev = row_of(e, row);
   if (!dev)
     return osmos_fail(err, "the row's logits not kept");
   const size_t bytes = (size_t)e->vocab * sizeof *e->drow;

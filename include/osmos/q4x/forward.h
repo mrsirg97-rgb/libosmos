@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/gpu/kept.h"
 #include "osmos/model/state_io.h"
 #include "osmos/q4x/weights.h"
 
@@ -83,6 +84,8 @@ bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint
 const float *q4x_logits(const Q4xForward *f);
 bool q4x_kept(const Q4xForward *f, uint32_t row);
 const float *q4x_taps(const Q4xForward *f);
+/* the last step's kept rows (osmos/gpu/kept.h): the engine reads and picks a row through it */
+void q4x_kept_view(const Q4xForward *f, KeptView *k);
 bool q4x_greedy(Q4xForward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 
 bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);

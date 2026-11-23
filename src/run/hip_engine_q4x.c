@@ -143,18 +143,11 @@ static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint3
   return true;
 }
 
-static const float *e_logits(const void *p, uint32_t row)
+static void e_kept(const void *p, KeptView *k)
 {
   const Eng *e = p;
-  return row < e->n && q4x_kept(e->f, row) ? q4x_logits(e->f) + (uint64_t)row * e->vocab : NULL;
-}
-
-static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
-{
-  Eng *e = p;
-  if (!rows || (uint64_t)row0 + rows > e->n)
-    return osmos_fail(err, "a row the last step kept no logits of");
-  return q4x_greedy(e->f, row0, rows, ids, err);
+  q4x_kept_view(e->f, k);
+  k->rows = e->n < k->rows ? e->n : k->rows; /* (the batch's rows: a row past it another step's) */
 }
 
 static uint32_t e_block(const void *p)
@@ -233,7 +226,7 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 
 const OsmosFamily osmos_q4x = {
     "qwen4exp", m_open,     m_close,       e_create, e_destroy, e_identity, e_stats,
-    e_batch,    e_logits,   e_greedy,      e_block,  s_create,  s_destroy, s_reset,  s_prompt,   s_rollback,
+    e_batch,    e_kept,      e_block,  s_create,  s_destroy, s_reset,  s_prompt,   s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft,    s_draft_all,
     NULL, /* a prompt's read its batch: its small and large steps one math (0.7.1's replay: the same bits on every path) */
     s_mark_bytes, s_mark_save, s_mark_load, /* a mark the states a later token changes (q4x_seq_mark_save) */

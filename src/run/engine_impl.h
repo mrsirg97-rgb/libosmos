@@ -3,6 +3,7 @@
 #pragma once
 
 #include "osmos/mem/ledger.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/run/engine.h"
 
 /* a build's step: max_tokens, or the family's own at 0 - never past the context (every family's one rule; Qwen alone
@@ -23,8 +24,8 @@ typedef struct OsmosFamily
   uint64_t (*identity)(const void *eng);
   void (*stats)(const void *eng, OsmosStats *s);
   bool (*batch)(void *eng, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
-  const float *(*logits)(const void *eng, uint32_t row);
-  bool (*greedy)(void *eng, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
+  void (*kept)(const void *eng, KeptView *k); /* the last step's kept rows (osmos/gpu/kept.h): the engine reads and
+                                                 picks every family's rows through it - 0.16.0: six copies */
   uint32_t (*block)(const void *eng);
   void *(*seq_create)(void *eng, char err[OSMOS_ERR]);
   void (*seq_destroy)(void *seq);

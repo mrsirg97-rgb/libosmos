@@ -270,6 +270,7 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     return false;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
+  memset(f->slot, 0xff, n * sizeof *f->slot); /* (no row kept until a head computes it) */
   if (!place(f, seqs, tokens, n, placed, err) || !fwd_engram_issue(f, err)) /* (placed: past its checks) */
     return false;
   f->hcp_next = false;

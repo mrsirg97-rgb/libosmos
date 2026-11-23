@@ -320,15 +320,24 @@ bool q35_step(Q35Forward *f, Q35Seq *s, const int32_t *tokens, uint32_t n, uint3
 
 const float *q35_logits(const Q35Forward *f) { return f ? f->pin_logits : NULL; }
 
+void q35_kept(const Q35Forward *f, KeptView *k)
+{
+  *k = (KeptView){0};
+  if (f)
+    *k = (KeptView){f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, f->ids, f->argmax, NULL, NULL, NULL, NULL};
+}
+
 const float *q35_row_logits(const Q35Forward *f, uint32_t row)
 {
-  return f ? kept_row(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row) : NULL;
+  KeptView k;
+  q35_kept(f, &k);
+  return kept_row(&k, row);
 }
 
 bool q35_greedy(Q35Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
-  const char *why = f ? kept_greedy(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row0, rows, f->ids,
-                                    f->argmax, NULL, ids)
-                      : "no forward or ids, or rows past the last step's";
+  KeptView k;
+  q35_kept(f, &k);
+  const char *why = kept_greedy(&k, row0, rows, ids);
   return !why || osmos_fail(err, "%s", why);
 }

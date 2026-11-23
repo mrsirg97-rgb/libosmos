@@ -320,15 +320,24 @@ bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, ui
 
 const float *lfm3_logits(const Lfm3Forward *f) { return f ? f->pin_logits : NULL; }
 
+void lfm3_kept(const Lfm3Forward *f, KeptView *k)
+{
+  *k = (KeptView){0};
+  if (f)
+    *k = (KeptView){f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, f->ids, f->argmax, f->st, NULL, NULL, NULL};
+}
+
 const float *lfm3_row_logits(const Lfm3Forward *f, uint32_t row)
 {
-  return f ? kept_row(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row) : NULL;
+  KeptView k;
+  lfm3_kept(f, &k);
+  return kept_row(&k, row);
 }
 
 bool lfm3_greedy(Lfm3Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
-  const char *why = f ? kept_greedy(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row0, rows, f->ids,
-                                    f->argmax, f->st, ids)
-                      : "no forward or ids, or rows past the last step's";
+  KeptView k;
+  lfm3_kept(f, &k);
+  const char *why = kept_greedy(&k, row0, rows, ids);
   return !why || osmos_fail(err, "%s", why);
 }

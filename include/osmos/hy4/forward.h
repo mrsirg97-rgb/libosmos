@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "osmos/hy4/weights.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/model/state_io.h"
 
 #define HY4_MAX_BACK 8                 /* the tokens a sequence can drop (a drafted round's) */
@@ -73,6 +74,8 @@ bool hy4_step_read(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uin
 bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR]);
 const float *hy4_logits(const Hy4Forward *f);
 /* row's logits (device, n_vocab floats) of the last hy4_step_runs, NULL for a row not kept */
+/* the last step's kept rows (osmos/gpu/kept.h): the engine reads and picks a row through it */
+void hy4_kept(const Hy4Forward *f, KeptView *k);
 const float *hy4_row_logits(const Hy4Forward *f, uint32_t row);
 /* the greatest token of each of rows row0 .. row0 + rows - 1 (the lowest among equals); false for a row not kept */
 bool hy4_greedy(Hy4Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);

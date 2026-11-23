@@ -308,7 +308,7 @@ static bool buffers(Q4xForward *f, char *err)
     return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
   return (pinned(f, &b->pin_rows, n * g->ple_heads * 4) && pinned(f, &b->pin_tok, n * 4) &&
           pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) &&
-          (b->kept = calloc(n, sizeof *b->kept))) ||
+          (b->slot = malloc(n * sizeof *b->slot)) && memset(b->slot, 0xff, n * sizeof *b->slot)) ||
          osmos_fail(err, "pinned memory refused (a step's tokens)");
 }
 
@@ -334,7 +334,7 @@ void q4x_forward_destroy(Q4xForward *f)
   if (f->df)
     free_table(f, f->df->model, f->df_dev);
   df_buffers_free(&f->d);
-  free(f->b.kept);
+  free(f->b.slot);
   if (f->s2)
     (void)hipStreamDestroy(f->s2);
   if (f->e_in)

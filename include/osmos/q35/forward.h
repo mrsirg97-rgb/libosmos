@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "osmos/model/gguf.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/model/state_io.h"
 
 #define Q35_MAX_LAYERS 128
@@ -106,6 +107,8 @@ bool q35_step_runs(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uin
 bool q35_step_read(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                    char err[OSMOS_ERR]);
 /* row's logits (device, n_vocab floats) of the last q35_step_runs, NULL for a row not kept */
+/* the last step's kept rows (osmos/gpu/kept.h): the engine reads and picks a row through it */
+void q35_kept(const Q35Forward *f, KeptView *k);
 const float *q35_row_logits(const Q35Forward *f, uint32_t row);
 /* the greatest token of each of rows row0 .. row0 + rows - 1 (the lowest among equals); false for a row not kept */
 bool q35_greedy(Q35Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);

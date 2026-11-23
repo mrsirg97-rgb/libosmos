@@ -7,6 +7,7 @@
 
 #include "osmos/ink2/mtp.h"
 #include "osmos/ink2/weights.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/model/state_io.h"
 
 /* a sequence's tokens a rollback can drop: a drafted round's (OSMOS_MAX_BLOCK) - its windows and conv histories keep
@@ -70,6 +71,8 @@ const float *ink2_logits(const Ink2Forward *f);
    layer's its own outputs alone), n x n_embd, the GPU's - a step's run of rows at a time */
 typedef void (*ink2_tap_fn)(void *arg, int slot, const char *what, const float *dev, uint32_t n, uint32_t dim);
 void ink2_forward_tap(Ink2Forward *f, ink2_tap_fn fn, void *arg);
+/* the last step's kept rows (osmos/gpu/kept.h): the engine reads and picks a row through it */
+void ink2_kept_view(const Ink2Forward *f, KeptView *k);
 const float *ink2_row_logits(const Ink2Forward *f, uint32_t row);
 bool ink2_kept(const Ink2Forward *f, uint32_t row);
 bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);

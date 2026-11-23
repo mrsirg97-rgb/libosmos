@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "osmos/model/gguf.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/model/state_io.h"
 
 #define LFM3_MAX_LAYERS 64
@@ -153,6 +154,8 @@ bool lfm3_step_read(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, 
 bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR]);
 const float *lfm3_logits(const Lfm3Forward *f);
 /* row's logits (device, n_vocab floats) of the last step, NULL for a row not kept */
+/* the last step's kept rows (osmos/gpu/kept.h): the engine reads and picks a row through it */
+void lfm3_kept(const Lfm3Forward *f, KeptView *k);
 const float *lfm3_row_logits(const Lfm3Forward *f, uint32_t row);
 /* the greatest token of each of rows row0 .. row0 + rows - 1 (the lowest among equals); false for a row not kept */
 bool lfm3_greedy(Lfm3Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);

@@ -254,6 +254,8 @@ struct Forward
   int32_t row[FWD_MAX_BATCH];    /* a kept token's row in the step (compacted row i: row[i]) */
   bool want[FWD_MAX_BATCH];      /* a token whose logits the caller may read */
   uint32_t vocab_rows;           /* the last step's logits rows (its head's; 0 when it ran none) */
+  int32_t *slot; /* host, [max_tokens]: a batch row's slot in b.vocab, or -1 - the rows its head computed (osmos/gpu/
+                    kept.h; 0.16.0: the engine took a step's last vocab_rows as kept, those the head skipped too) */
   forward_probe_fn probe;
   void *probe_arg;
 };

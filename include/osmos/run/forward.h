@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include "osmos/gpu/mm.h"
+#include "osmos/gpu/kept.h"
 #include "osmos/model/state_io.h"
 #include "osmos/model/weights.h"
 
@@ -79,6 +80,9 @@ bool forward_batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t
 const float *forward_stream(const Forward *f);
 const float *forward_logits(const Forward *f);
 uint32_t forward_logit_rows(const Forward *f);
+/* the last step's kept rows - those its head computed (osmos/gpu/kept.h): the engine reads and picks a row through it;
+   forward_greedy picks the batch's rows through it */
+void forward_kept_view(const Forward *f, KeptView *k);
 bool forward_greedy(Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 const uint64_t *forward_picks(const Forward *f);
 uint64_t forward_budget(const Forward *f);
@@ -272,9 +276,11 @@ forward_logit_rows
   the slots of forward_logits the last step filled: its last sub-batch's rows, logit_rows at most where that is
   set; 0 for none (no forward, no step, no head).
 
-forward_greedy
-  the greedy picks of the last step's logits rows row0 .. row0 + rows on the GPU (ops_argmax: the greatest, the lowest
-  token among equals - what a scan of forward_logits' row in order picks), only the ids copied back. false with why
-  for rows the last step's head did not compute (it ran none: n_layers not the model's, or no token left) or a row
-  with a NaN.
+forward_kept_view, forward_greedy
+  the last step's kept rows - the batch's rows its head computed (a prompt marked: its last alone; logit_rows set: the
+  last sub-batch's last ones at most), each at its slot of forward_logits - and the greedy picks of the batch's rows
+  row0 .. row0 + rows through them (osmos/gpu/kept.h: ops_argmax, the greatest, the lowest token among equals - what a
+  scan of the row in order picks - the ids through pinned memory, the forward's own wait). false with why for a row
+  its head did not compute (it ran none: n_layers not the model's, or no token left) or a row with a NaN. 0.16.0: the
+  rows were the logits' slots, and a step's last vocab_rows taken as kept - those the head skipped too.
 */

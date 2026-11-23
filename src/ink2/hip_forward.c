@@ -461,13 +461,13 @@ static bool buffers(Ink2Forward *f)
       !gpu_bufs_host(&f->bufs, f->ledger, &f->hgpick, T * K * 4) ||
       !gpu_bufs_host(&f->bufs, f->ledger, &f->m_host, table_bytes(T * K, E)))
     return false;
-  f->kept = calloc(T, 1), f->slot = malloc(T * sizeof *f->slot);
+  f->slot = malloc(T * sizeof *f->slot);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
   f->m_key = malloc(table_entries(T * K, E) * sizeof *f->m_key);
   f->m_ent = malloc(table_entries(T * K, E) * sizeof *f->m_ent), f->m_run = malloc(4 * E * sizeof *f->m_run);
   f->m_ex = malloc(E * sizeof *f->m_ex);
   f->m_build = malloc(table_bytes(T * K, E)); /* the tables built in cached memory, then one copy into the pinned */
-  return f->hpick && f->kept && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build &&
+  return f->hpick && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build &&
          f->m_ent && f->m_run && f->m_ex;
 }
 
@@ -551,7 +551,7 @@ void ink2_forward_destroy(Ink2Forward *f)
     for (int k = 0; k < 3; k++)
       free(f->L[l].scale[k]);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer, the forward's and its drafter's: from the record */
-  free(f->picks), free(f->picks_all), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
+  free(f->picks), free(f->picks_all), free(f->slot), free(f->m_at), free(f->m_by);
   free(f->m_key), free(f->m_build), free(f->m_ent), free(f->m_run), free(f->m_ex);
   free(f);
 }
@@ -1194,7 +1194,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     return osmos_fail(err, "a step's kept rows past the logits' (Ink2Options' logit_rows)");
   const uint32_t slot0 = f->n_slots; /* this run's kept rows the next slots, in order */
   for (uint32_t t = 0; t < n; t++)
-    f->kept[row0 + t] = t >= first, f->slot[row0 + t] = t >= first ? (int32_t)(slot0 + t - first) : -1;
+    f->slot[row0 + t] = t >= first ? (int32_t)(slot0 + t - first) : -1;
   f->n_slots += n - first;
   for (uint32_t at = first; at < n; at += f->head_rows)
   {
@@ -1252,7 +1252,8 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
   if (kept > f->logit_rows)
     return osmos_fail(err, "a step's kept rows past the logits' (Ink2Options' logit_rows)");
   f->n = 0;
-  memset(f->kept, 0, f->max_tokens);
+  for (uint32_t r = 0; r < f->max_tokens; r++) /* (no row kept until the step keeps it) */
+    f->slot[r] = -1;
   f->n_slots = 0;
   f->steps++;
   bool ok = true;
@@ -1280,17 +1281,26 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
 
 const float *ink2_logits(const Ink2Forward *f) { return f ? f->logits : NULL; }
 
-const float *ink2_row_logits(const Ink2Forward *f, uint32_t row)
+void ink2_kept_view(const Ink2Forward *f, KeptView *k)
 {
-  return ink2_kept(f, row) ? f->logits + (uint64_t)f->slot[row] * f->vocab : NULL;
+  *k = (KeptView){0};
+  if (f)
+    *k = (KeptView){f->slot, f->n, f->logits, f->vocab, f->gid, f->amax, NULL, NULL, NULL, NULL};
 }
 
-bool ink2_kept(const Ink2Forward *f, uint32_t row) { return f && row < f->n && f->kept[row]; }
+const float *ink2_row_logits(const Ink2Forward *f, uint32_t row)
+{
+  KeptView k;
+  ink2_kept_view(f, &k);
+  return kept_row(&k, row);
+}
+
+bool ink2_kept(const Ink2Forward *f, uint32_t row) { return ink2_row_logits(f, row) != NULL; }
 
 bool ink2_greedy(Ink2Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
-  /* the shared pick (osmos/gpu/kept.h): one run of kept rows, a NaN row refused - Inkling's own returned -1 as a token */
-  const char *why = f ? kept_greedy(f->slot, f->n, f->logits, f->vocab, row0, rows, f->gid, f->amax, NULL, ids)
-                      : "no forward";
+  KeptView k;
+  ink2_kept_view(f, &k);
+  const char *why = kept_greedy(&k, row0, rows, ids);
   return why ? osmos_fail(err, "%s", why) : true;
 }

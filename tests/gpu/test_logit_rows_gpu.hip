@@ -1,6 +1,7 @@
 // a forward that keeps a step's last rows' logits alone (ForwardOptions' logit_rows) against one that keeps every
 // row: a step longer than them - its last rows the same bits at slots 0 .., forward_logit_rows theirs, a greedy pick
-// of the last slot the same token, of a slot past them refused; a step within them - every row as before. needs a
+// of the batch's last row the same token, of a row before the kept ones refused (forward_greedy takes the batch's rows,
+// as every family's pick: osmos/gpu/kept.h, 0.16.0); a step within them - every row as before. needs a
 // gfx1151 and a model (test_model.h); skipped (77) without.
 #include <hip/hip_runtime.h>
 
@@ -61,10 +62,11 @@ static Rows run(Weights* w, uint32_t logit_rows, const std::vector<int32_t>& ids
         hipMemcpy(r.long_last.data(), forward_logits(f) + (size_t) (r.long_rows - kKeep) * V, kKeep * V * 4,
                   hipMemcpyDeviceToHost) == hipSuccess);
   osmos_clear(err);
-  CHECK(forward_greedy(f, r.long_rows - 1, 1, &r.long_pick, err));
+  CHECK(forward_greedy(f, kLong - 1, 1, &r.long_pick, err));
   int32_t t;
-  if (refuse_past)  // a slot past the kept ones, and a run of rows reaching one
-    CHECK(!forward_greedy(f, kKeep, 1, &t, err) && !forward_greedy(f, 0, kKeep + 1, std::vector<int32_t>(kLong).data(), err));
+  if (refuse_past)  // a row before the kept ones, and a run of rows reaching one
+    CHECK(!forward_greedy(f, kLong - kKeep - 1, 1, &t, err) &&
+          !forward_greedy(f, kLong - kKeep - 1, kKeep + 1, std::vector<int32_t>(kLong).data(), err));
   osmos_clear(err);
   CHECK(forward_batch(f, ss.data(), ids.data() + kLong, kShort, err));
   r.short_rows = forward_logit_rows(f);

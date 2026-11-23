@@ -167,26 +167,7 @@ static bool e_read(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32
 }
 
 /* the batch's row r among the rows the forward keeps (the last kept of n), or -1 */
-static int64_t kept_row(const Eng *e, uint32_t r)
-{
-  return r < e->n && r >= e->n - e->kept ? (int64_t)r - (int64_t)(e->n - e->kept) : -1;
-}
-
-static const float *e_logits(const void *p, uint32_t row)
-{
-  const Eng *e = p;
-  const int64_t k = kept_row(e, row);
-  return k < 0 ? NULL : forward_logits(e->f) + (uint64_t)k * e->vocab;
-}
-
-static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
-{
-  Eng *e = p;
-  const int64_t k = kept_row(e, row0);
-  if (!rows || k < 0 || kept_row(e, row0 + rows - 1) < 0)
-    return osmos_fail(err, "a row the last step kept no logits of");
-  return forward_greedy(e->f, (uint32_t)k, rows, ids, err);
-}
+static void e_kept(const void *p, KeptView *k) { forward_kept_view(((const Eng *)p)->f, k); }
 
 static uint32_t e_block(const void *p) { return ((const Eng *)p)->d ? DRAFTER_BLOCK : 0; }
 
@@ -222,7 +203,7 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 
 const OsmosFamily osmos_ds4 = {
     "deepseek41", m_open,   m_close,   e_create, e_destroy,  e_identity,    e_stats,
-    e_batch,      e_logits, e_greedy,  e_block,  s_create,   s_destroy, s_reset,     s_prompt, s_rollback,
+    e_batch,      e_kept,  e_block,  s_create,   s_destroy, s_reset,     s_prompt, s_rollback,
     s_reach,      s_position, s_state_bytes, s_save_to, s_load_from, s_seed,        s_draft,  NULL, /* its drafts one sequence at a time */
     e_read, /* a prompt's read: the large steps' math at any size (forward_reading) */
     NULL,   NULL, NULL, /* a mark its whole state */

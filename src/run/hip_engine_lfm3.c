@@ -144,12 +144,7 @@ static bool e_read(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32
   return batch(p, seqs, tokens, n, true, err);
 }
 
-static const float *e_logits(const void *p, uint32_t row) { return lfm3_row_logits(((const Eng *)p)->f, row); }
-
-static bool e_greedy(void *p, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
-{
-  return lfm3_greedy(((Eng *)p)->f, row0, rows, ids, err);
-}
+static void e_kept(const void *p, KeptView *k) { lfm3_kept(((const Eng *)p)->f, k); }
 
 static uint32_t e_block(const void *p)
 {
@@ -191,7 +186,7 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 
 const OsmosFamily osmos_lfm3 = {
     "lfm3", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
-    e_batch,       e_logits,   e_greedy,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
+    e_batch,       e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
     s_reach,       s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     e_read, /* a prompt's read the matrix cores' math, a decode's the matvecs': two maths (lfm3_step_read) */
     NULL, NULL, NULL, /* no marks: the whole state */
