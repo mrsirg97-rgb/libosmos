@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -56,8 +57,28 @@ static int die(const char *why)
 }
 
 static Api api;
+static bool loopback; /* bound to a loopback address: a Host not its names refused (DNS rebinding) */
+static int port_bound;
 static pthread_mutex_t conns_mu = PTHREAD_MUTEX_INITIALIZER;
 static int conns;
+
+/* a Host one of this loopback server's names - localhost, 127.0.0.1, [::1] (case aside) - with its port or none */
+static bool host_ours(const char *host)
+{
+  static const char *const names[] = {"localhost", "127.0.0.1", "[::1]"};
+  for (size_t i = 0; i < sizeof names / sizeof *names; i++)
+  {
+    const size_t n = strlen(names[i]);
+    if (strncasecmp(host, names[i], n))
+      continue;
+    if (!host[n])
+      return true;
+    char *e;
+    if (host[n] == ':' && host[n + 1] >= '0' && host[n + 1] <= '9' && strtol(host + n + 1, &e, 10) == port_bound && !*e)
+      return true;
+  }
+  return false;
+}
 
 static void answer(Http *h)
 {
@@ -69,6 +90,15 @@ static void answer(Http *h)
     http_linger(h->fd, true); /* its bytes unread: drained, so the client reads the status, not a reset */
     return;
   }
+  /* a web page's request refused before anything is read into the engine (0.15.2): any page can POST text/plain to
+     localhost with no preflight - a browser says its Origin, and DNS rebinding a Host not this server's */
+  if (h->origin)
+    return (void)http_error(h->fd, 403, "a browser's request (an Origin header): osmos-api serves local clients, not "
+                                        "web pages");
+  if (!h->host[0])
+    return (void)http_error(h->fd, 400, "no Host header (HTTP/1.1 requires one)");
+  if (loopback && !host_ours(h->host))
+    return (void)http_error(h->fd, 403, "a Host not this server's (localhost, 127.0.0.1 or [::1], its port): refused");
   char *q = strchr(h->path, '?');
   if (q)
     *q = 0;
@@ -220,6 +250,7 @@ int main(int argc, char **argv)
   snprintf(dport, sizeof dport, "%d", API_PORT);
   const int port = atoi(opt(argc, argv, "--port", dport));
   const int lfd = listen_on(opt(argc, argv, "--host", "127.0.0.1"), port);
+  loopback = !strncmp(opt(argc, argv, "--host", "127.0.0.1"), "127.", 4), port_bound = port;
   if (lfd < 0)
   {
     char why[256];

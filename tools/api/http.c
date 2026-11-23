@@ -30,6 +30,7 @@ static const char *reason(int status)
   {
   case 200: return "OK";
   case 400: return "Bad Request";
+  case 403: return "Forbidden";
   case 404: return "Not Found";
   case 405: return "Method Not Allowed";
   case 411: return "Length Required";
@@ -80,6 +81,19 @@ int http_read(Http *h, char err[API_ERR])
       if (v > API_BODY_MAX)
         return free(head), snprintf(err, API_ERR, "a body past %u bytes", API_BODY_MAX), 413;
       length = (size_t)v, has_length = true;
+    }
+    else if (!strncasecmp(l, "Origin:", 7))
+      h->origin = true;
+    else if (!strncasecmp(l, "Host:", 5))
+    { /* its value, spaces around it dropped; one longer than the buffer refused (no Host of ours is) */
+      const char *v = l + 5, *e = strstr(l, "\r\n");
+      while (v < e && (*v == ' ' || *v == '\t'))
+        v++;
+      while (e > v && (e[-1] == ' ' || e[-1] == '\t'))
+        e--;
+      if ((size_t)(e - v) >= sizeof h->host || h->host[0])
+        return free(head), snprintf(err, API_ERR, "a Host header too long, or two"), 400;
+      memcpy(h->host, v, (size_t)(e - v)), h->host[e - v] = 0;
     }
     else if (!strncasecmp(l, "Transfer-Encoding:", 18))
       return free(head), snprintf(err, API_ERR, "a chunked body (send its Content-Length)"), 411;

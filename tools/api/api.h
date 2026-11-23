@@ -71,6 +71,8 @@ typedef struct Http
   char path[256];
   char *body;
   size_t body_n;
+  bool origin;    /* an Origin header came: a browser's request */
+  char host[256]; /* the Host header's value ("" none) */
 } Http;
 
 int http_read(Http *h, char err[API_ERR]);

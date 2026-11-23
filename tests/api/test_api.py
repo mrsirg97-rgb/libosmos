@@ -327,7 +327,7 @@ class Api(Served, unittest.TestCase):
         self.reply("a " * 50, finish="hold", pace=0.02)
         s = socket.create_connection(("127.0.0.1", self.port))
         body = json.dumps({"messages": [{"role": "user", "content": "x"}], "stream": True}).encode()
-        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         s.recv(4096)
         s.close()
         for _ in range(100):
@@ -344,7 +344,7 @@ class Api(Served, unittest.TestCase):
         self.reply("a " * 400, pace=0.02)
         s = socket.create_connection(("127.0.0.1", self.port))
         body = json.dumps({"messages": [{"role": "user", "content": "x"}], "reasoning_effort": "none"}).encode()
-        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         time.sleep(0.3)
         s.close()
         t0 = time.time()
@@ -358,7 +358,7 @@ class Api(Served, unittest.TestCase):
         self.assertEqual(r.status, 413)
         for head in (b"Content-Length: -1", b"Content-Length: 12xyz", b"Content-Length: 2\r\nContent-Length: 3"):
             s = socket.create_connection(("127.0.0.1", self.port))
-            s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n" + head + b"\r\n\r\n{}")
+            s.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n" + head + b"\r\n\r\n{}")
             got = s.recv(4096)
             s.close()
             self.assertTrue(got.startswith(b"HTTP/1.1 400"), (head, got[:60]))
@@ -670,7 +670,7 @@ class Api(Served, unittest.TestCase):
         self.reply("ok</think>fine" + EOS)
         body = json.dumps({"messages": [{"role": "user", "content": "x" * 2000}]}).encode()
         with socket.create_connection(("127.0.0.1", self.port), timeout=10) as c:
-            c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+            c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
                       b"Expect: 100-continue\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n")
             self.assertTrue(c.recv(64).startswith(b"HTTP/1.1 100 Continue\r\n\r\n"))
             c.sendall(body)
@@ -726,6 +726,60 @@ def qwen_template():
     sys.path.insert(0, os.path.join(ROOT, "tools"))
     import gen_chat_fixtures_qwen
     return gen_chat_fixtures_qwen.template(QWEN, GGUF_PY)
+
+
+@unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class Browser(Served, unittest.TestCase):
+    """a web page's request refused (0.15.2): any page can POST text/plain to localhost with no preflight - an
+    Origin header is a browser's, refused; bound to loopback, a Host other than its names is DNS rebinding's, refused -
+    the engine never asked. SDKs, curl and agents send no Origin and a localhost Host"""
+
+    def send(self, headers, method="POST", path="/v1/chat/completions"):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
+        c.request(method, path, body=body if method == "POST" else None, headers=headers)
+        r = c.getresponse()
+        return r.status, r.read()
+
+    def gens(self):
+        return len([l for l in self.log() if l.startswith("GEN ")]) if os.path.exists(os.path.join(self.dir, "log")) else 0
+
+    def test_1_a_page_s_origin_refused(self):
+        self.ready()
+        before = self.gens()
+        for origin in ("https://evil.example", "null", "http://localhost:3000"):
+            st, b = self.send({"Content-Type": "text/plain", "Origin": origin})
+            self.assertEqual(st, 403, origin)
+            self.assertIn(b"browser", b)
+            st, _ = self.send({"Origin": origin}, "GET", "/health")
+            self.assertEqual(st, 403, origin)
+        self.assertEqual(self.gens(), before)  # the engine never asked
+
+    def test_2_a_rebinding_host_refused(self):
+        self.ready()
+        before = self.gens()
+        for host in ("evil.example", f"evil.example:{self.port}", "127.0.0.1.evil.example", "localhost.evil.example"):
+            st, b = self.send({"Host": host, "Content-Type": "application/json"})
+            self.assertEqual(st, 403, host)
+            self.assertIn(b"Host", b)
+        self.assertEqual(self.gens(), before)
+
+    def test_3_local_clients_served(self):
+        self.ready()
+        for host in ("localhost", f"localhost:{self.port}", f"127.0.0.1:{self.port}", "127.0.0.1", f"[::1]:{self.port}",
+                     f"LOCALHOST:{self.port}"):
+            self.reply("</think>Fine." + EOS)
+            st, _ = self.send({"Host": host, "Content-Type": "application/json"})
+            self.assertEqual(st, 200, host)
+        self.reply("</think>Fine." + EOS)
+        st, _ = self.send({"Content-Type": "application/json"})  # http.client's own Host: 127.0.0.1:<port>
+        self.assertEqual(st, 200)
+
+    def test_4_no_host_refused(self):
+        self.ready()
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:  # HTTP/1.1 requires Host (RFC 9112)
+            s.sendall(b"GET /health HTTP/1.1\r\n\r\n")
+            self.assertIn(b" 400 ", s.recv(4096).split(b"\r\n")[0] + b" ")
 
 
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")

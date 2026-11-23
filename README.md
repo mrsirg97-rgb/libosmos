@@ -34,7 +34,9 @@ python3 tools/install/osmos_install.py osmos-evo-inkling --serve   # Inkling-2-S
 
 The installer builds the engine, downloads the pack's files at pinned commits, checks every SHA-256, writes the
 pack's `osmos.json` and starts **osmos-api**, an OpenAI-compatible server on the first free port from 8091, or
-`--port` (`/v1/chat/completions` streamed or whole, with tools and reasoning; `/v1/models`; `/health`). Options:
+`--port` (`/v1/chat/completions` streamed or whole, with tools and reasoning; `/v1/models`; `/health`). It serves
+local clients - SDKs, curl, agents - and refuses web pages: a request with an `Origin` header, or a `Host` that is not
+`localhost` / `127.0.0.1`, is refused (0.15.2). Options:
 
 - `--abliterated` adds huihui-ai's abliteration as an overlay (the DeepSeek and Qwen packs; the stock files stay as
   they are).
