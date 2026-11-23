@@ -65,10 +65,11 @@ python3 tools/install/osmos_install.py --prune [--yes]      # the versions no ro
 Each version reads its own frozen `osmos.<version>.json`, so a newer installer's settings never break an older row.
 A running row takes the new version at its next start.
 
-**Sampling** (0.14.0): requests take `temperature`, `top_p` and `seed`; a pack's `osmos.json` may set
-`temperature` / `top_p` defaults (inkling-2-mini: temperature 1.0, as released; the others greedy). Each token is
-drawn from (seed, position) alone, so a seed reproduces an answer, drafted or not; without one a seed is drawn and
-returned in `x-osmos-seed`.
+**Sampling**: requests take `temperature`, `top_k`, `top_p` and `seed`, and each pack's `osmos.json` sets the default
+that measured best here (0.15.2: replayed on an agent session that looped, greedy and sampled). DeepSeek's packs sample
+at temperature 1.0 / top_p 1.0, inkling-2-mini and osmos-evo-inkling at 1.0, osmos1.7b at 0.1 / top_k 50; Qwen3.8 and
+hy4-flash decode greedily (they did not loop greedy, and draft faster). Each token is drawn from (seed, position)
+alone, so a seed reproduces an answer, drafted or not; without one a seed is drawn and returned in `x-osmos-seed`.
 
 **Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
 header - turns since the last tool call, the most repeated recent call, how many times in a row the last call was

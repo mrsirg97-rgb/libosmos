@@ -2141,6 +2141,40 @@ prompt is the full layers' attention's: the dense matrices' 2x is a shallow prom
 25.7, 42.4 / 26.6, 35.1 / 25.7 tok/s; a coding task 49.6 / 25.2; after a 131K prompt 24.2 / 17.0. prompts (plain)
 2,969 / 37,375 / 131,087 tokens at 1,001 / 1,045 / 775 tok/s (drafted's within 3%).
 
+### 0.15.2: each pack's floor and sampling, measured (2026-11-22, low-power)
+
+**the floors** (~/bench/sweep150: the cumulative-confidence floor swept per family, code / prose, 500 tokens, every
+answer's hash the same across the sweep). greedy: Qwen3.8 0.1 best (53.7 / 43.7; code noisy +-15%), Hy4-flash 0.45
+(18.8-19.2 / 18.0-18.3), DeepSeek 0.1 (26.2 / 24.6), Inkling-2-Small 0.5 (12.7 / 12.4 against 0.9's 11.8 / 11.4: the
+0.8.x floor from when its verify cost more - moved). at each release's sampling: Qwen (1.0 / 0.95 / 20) 0.5 best (36.9
+/ 31.5 against 0.1's 32.2 / 26.1) - committed, then reverted when Qwen stayed greedy (a floor a temperature is the
+open alternative); Hy4-flash (0.9) 0.45 / 0.8 within noise (17.4-17.9), kept; DeepSeek (1.0) flat, 0.1 kept; Small
+(1.0) flat 11.3-11.8, 0.5 kept.
+
+**the loop check** (~/bench/loop152: Inkling-2-Mini's stuck session's requests - the agent read go.mod again and
+again - at message 356, where its loop began, and 360, four repeats in; each pack's own template; greedy, then its
+release's sampling at seeds 1-4; a cell the calls repeating the loop's):
+
+| pack | 356 greedy | 356 sampled | 360 greedy | 360 sampled |
+| --- | --- | --- | --- | --- |
+| inkling-2-mini (0.14.0's) | loops | 0 of 8 calls | loops | 1 of 5 calls |
+| osmos-evo-inkling | 1 of 2 | 0 in 4 seeds | 2 of 2 | 3 of 4 seeds |
+| osmos-evo (DeepSeek) | 0 | 0 in 4 | 2 of 2 | 0 in 4 |
+| qwen38-ud-iq3_xxs | 0 | 0 in 4 | 1 of 1 | 3 of 4 seeds |
+| hy4-flash | 0 | 0 in 4 | 0 | 0 in 4 |
+| osmos1.7b | 0 | 0 in 4 | 0 | 0 in 4 |
+
+the Inkling family enters it greedy; DeepSeek does not enter it but only sampling leaves it; Qwen copies a loop
+already in its history at any setting, as Mini does; Hy4-flash and osmos1.7b never repeat it. the defaults
+(packs.json): sampled where greedy looped - Mini, Small, DeepSeek; greedy where it did not and drafts faster - Qwen
+(~30%), Hy4-flash (~7%); osmos1.7b its card's (free: no drafter). one session: evidence, not proof - a loop past a
+default is the loop signal's (unchanged_repeats; a client that acts on stuck).
+
+**top_k**: ops_sample's threshold for top-k found as top-p's is - by bisection over a float's bits, counting v >= t
+(>= k: ties to the k-th kept), then top-p's bisection from that threshold over the top-k mass; every sum in one order,
+so a draw is still a row's bits and drafted == plain (test_sample_gpu against the definition, 4,770 draws;
+sample_test with top_p 0.95 / top_k 20, and top_k 1 the greedy answer).
+
 ### 0.15.1: an upgrade's frozen config takes the release's new settings (2026-11-22)
 
 found upgrading the rig to 0.15.0: inkling-2-mini's osmos.0.15.0.json had no temperature. versions.freeze copied the
