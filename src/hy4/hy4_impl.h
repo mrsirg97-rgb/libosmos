@@ -188,3 +188,11 @@ static inline const void *hy4_dev(const Hy4Forward *f, const GgufTensor *t)
   return f->dev[t - f->w->model->tensors];
 }
 static inline const float *hy4_fv(const Hy4Forward *f, const GgufTensor *t) { return (const float *)hy4_dev(f, t); }
+
+/* hip_hy4_resident.c's, for hip_hy4_make.c (one file before 0.16.0) */
+bool hy4_as_f32(Hy4Forward *f, const GgufTensor *t, float **out);
+bool hy4_engram_reader(Hy4Forward *f, const int *fds, char *err);
+bool hy4_experts(Hy4Forward *f, uint64_t budget, char *err);
+bool hy4_freqs(Hy4Forward *f, float base, uint32_t dim, float **out);
+bool hy4_joints_make(Hy4Forward *f, uint32_t *most);
+bool hy4_upload(Hy4Forward *f, char *err);

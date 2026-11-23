@@ -234,3 +234,8 @@ bool ink2_conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint32_
 bool ink2_proj_batch(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, bool full, bool apart, const float *aq, const float *ak, const float *av, const float *q_norm, const float *k_norm, const float *v_norm, uint32_t n, float *dyn_k, float *dyn_v, bool *ok);
 bool ink2_control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, const float *x, const float *m, uint32_t n, float *out);
 bool ink2_controls3(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, const float *const *x, const float *m, uint32_t n, float *out, bool *ok);
+
+/* hip_ink2_resident.c's, for hip_ink2_make.c */
+bool ink2_experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64_t *picks, char *err);
+bool ink2_upload(Ink2Forward *f);
+bool ink2_whole_tables(Ink2Forward *f, char *err);
