@@ -13,6 +13,7 @@
 
 #include "alloc_count.h"
 #include "small_packs.h"
+#include "test_fit.h"
 
 #define CHECK(x)                                                                 \
   do {                                                                           \
@@ -41,9 +42,11 @@ static const Pack kPacks[] = {
      "/Models/qwen38/DFlash2/dflash2-Q8_0.gguf", true},
     {"hy4-flash", "/Models/osmos/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf", nullptr,
      "/Models/osmos/hy4-flash/model-00148-of-00148.safetensors", true},
+    {"osmos-evo", "/Models/osmos/osmos-evo/DeepSeek-V4.1-Flash-1017-osmos-evo-A2-00001-of-00005.gguf", nullptr, nullptr,
+     false},
 };
 // the families whose builds go through the ledger (stage 4 adds one a commit; at its end every family, and this goes)
-static const std::set<std::string> kLedgered = {"lfm3", "inkling2", "qwen4exp", "hy_v4_flash"};
+static const std::set<std::string> kLedgered = {"lfm3", "inkling2", "qwen4exp", "hy_v4_flash", "deepseek41"};
 
 static std::string home(const char* p) {
   const char* h = std::getenv("HOME");
@@ -80,7 +83,17 @@ static bool one(const Pack& p) {
   OsmosOptions o = small_pack_options(m, 4096);
   if (p.drafter && !access(drafter.c_str(), R_OK)) o.drafter = drafter.c_str();
   if (p.smallest) o.budget = 1;
-  Osmos* e = osmos_create(m, &o, err);
+  Osmos* e = nullptr;
+  if (!std::strcmp(osmos_facts(m).family, "deepseek41")) {
+    // DeepSeek's budget its resident experts' alone (phase 4's one meaning): sized as its engine test sizes it
+    // (test_fit.h: 64 GiB its own, lowered where the machine leaves no room)
+    TestFit fit = {[&](uint64_t b) { o.budget = b; return (e = osmos_create(m, &o, err)) != nullptr; },
+                   [&] { OsmosStats st; osmos_stats(e, &st); return st.budget; },
+                   [&](uint64_t* r) { return osmos_room(e, r); }, [&] { osmos_destroy(e), e = nullptr; }};
+    uint64_t budget = 0;
+    CHECK(test_fit(fit, 64ull << 30, &budget));
+  } else
+    e = osmos_create(m, &o, err);
   if (!e) std::fprintf(stderr, "  %s\n", err);
   CHECK(e);
   same(p.name, "built", e, opened);

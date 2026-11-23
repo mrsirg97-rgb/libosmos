@@ -1,6 +1,8 @@
 #ifndef FORWARD_IMPL_H
 #define FORWARD_IMPL_H
 
+#include "osmos/gpu/bufs.h"
+#include "osmos/mem/ledger_hip.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -117,6 +119,9 @@ typedef struct Pinned
 
 struct Forward
 {
+  OsmosLedger *ledger; /* borrowed (ForwardOptions'): every allocation of the forward, its sequences and drafter */
+  GpuBufs bufs;        /* every GPU and pinned buffer of the forward, recorded as made (fwd_alloc, fwd_pinned) -
+                          freed from the record at its destroy, the views put back first */
   const Weights *w;
   const Geometry *g;
   int n_layers;
@@ -254,6 +259,7 @@ struct Forward
 struct Seq
 {
   Forward *f;
+  GpuBufs bufs; /* its GPU buffers, recorded as made (its forward's ledger's) */
   int32_t pos;
   int32_t prompt_end; /* seq_prompt's end (0: none) */
   int32_t staged;     /* its tokens placed so far in the step being placed */
@@ -268,7 +274,8 @@ struct Seq
   uint8_t *ring[WEIGHTS_MAX_LAYERS];                             /* KV_FP8 rows (kvfmt.h) */
   uint8_t *ckv[WEIGHTS_MAX_LAYERS], *ik[WEIGHTS_MAX_LAYERS];     /* KV_FP4_E4M3, KV_FP4_POW2 rows */
   float *pend_kvc[WEIGHTS_MAX_LAYERS], *pend_sc[WEIGHTS_MAX_LAYERS];
-  uint8_t *dring; /* a drafter's rings, [block][window] KV_FP8 rows (drafter_seed's; NULL until then) */
+  uint8_t *dring; /* a drafter's rings, [block][window] KV_FP8 rows - made with the sequence (0.16.0: at a first draft or a
+                     state's load: made at first use, SCOPE.md) */
   bool dseeded;   /* dring holds this sequence's context (drafter_seed's, or a state's): a reset or a load without
                      rings leaves the buffer, not its rows (0.11.2 - a draft read the last conversation's) */
 };
@@ -303,7 +310,11 @@ void fwd_probe(const Forward *f, const char *step, int layer, int index, void *d
 bool fwd_put(void *dev, const void *host, uint64_t bytes);
 bool fwd_put_async(void *dev, const void *pinned, uint64_t bytes);
 bool fwd_copy(void *dst, const void *src, uint64_t bytes); /* device to device, on the stream */
-bool fwd_alloc(void *dev, uint64_t bytes); /* *(void **)dev = zeroed device memory */
+/* *(void **)dev = zeroed device memory, recorded in b (its owner's: the forward's, a sequence's, the drafter's - b's
+   ledger the forward's), freed from it at the owner's destroy; fwd_pinned / fwd_mapped pinned host memory alike */
+bool fwd_alloc(GpuBufs *b, void *dev, uint64_t bytes);
+bool fwd_pinned(GpuBufs *b, void *host, uint64_t bytes);
+bool fwd_mapped(GpuBufs *b, void *host, uint64_t bytes);
 bool fwd_wait(Forward *f, hipEvent_t ev); /* the GPU past `ev`: spun on in a decode-sized step, slept on in a prompt's */
 bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd_wait on `passed`) */
 /* the taps at target layers `at` taken from the next step on (a drafter's): false if none, or they cannot be held,

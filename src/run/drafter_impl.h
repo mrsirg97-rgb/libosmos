@@ -41,6 +41,7 @@ typedef struct DPin
 struct Drafter
 {
   Forward *f;
+  GpuBufs bufs; /* every GPU and pinned buffer of the drafter, recorded as made (its forward's ledger's) */
   uint32_t ex_type; /* the routed experts' type, every one's (dspark.json's: MXFP4 as packed, or requantized) */
   DsparkIndex *ix;
   int fd;

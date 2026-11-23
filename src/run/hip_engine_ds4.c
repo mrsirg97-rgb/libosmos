@@ -109,7 +109,8 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   if (o->kv_q8)
     return e_destroy(e), osmos_fail(err, "kv_q8 is Inkling's alone"), NULL;
   const ForwardOptions fo = {m->w->geo.n_layers, o->max_ctx,  o->budget,     e->picks,
-                             osmos_step_tokens(o, FORWARD_MAX_TOKENS), o->no_guess, o->fill_set, o->fill, 0, e->rows};
+                             osmos_step_tokens(o, FORWARD_MAX_TOKENS), o->no_guess, o->fill_set, o->fill, 0, e->rows,
+                             ledger};
   if (!(e->f = forward_create_with(m->w, &fo, err)) || !forward_lane(e->f, 0, NULL, err) ||
       (o->npu && !forward_npu(e->f, o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_DS, err)) ||
       (o->drafter && !(e->d = drafter_create(e->f, o->drafter, err))))

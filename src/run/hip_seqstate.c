@@ -218,9 +218,7 @@ bool seq_load_from(Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[
       h.n_last < 0 || h.n_last > STATE_LAST || h.has_dring > 1 || h.ahead > SEQ_MAX_BACK)
     return refuse(s, err, "a state's position past this forward's context, or its fields out of range");
   /* the parts as the state laid them out: the sequence at its position (and a drafter's rings to fill) */
-  if (h.has_dring && !s->dring &&
-      !fwd_alloc(&s->dring, (uint64_t)DRAFTER_BLOCKS * f->g->window * kv_row_bytes(KV_FP8, (uint32_t)f->g->head_dim)))
-    return refuse(s, err, "GPU memory refused (the drafter's rings)");
+  /* (the drafter's rings the sequence's from its making: a state's rings read into them) */
   s->pos = h.pos;
   s->dseeded = h.has_dring; /* the rings the state's, or none (not read until drafter_seed) */
   Part p[MAX_PARTS];

@@ -37,6 +37,8 @@ typedef struct ForwardOptions
   uint64_t fill;         /* the system's RAM a build leaves free, bytes: forward_room's (0: every byte past the headroom) */
   uint64_t ahead_limit;  /* the membrane's: the most bytes of reads ahead read at once (0: no bound) */
   uint32_t logit_rows;   /* a step's last rows whose logits are kept (forward_logit_rows); 0: its every row */
+  struct OsmosLedger *ledger; /* the forward's, its sequences' and its drafter's every allocation counted in it
+                                 (osmos/mem/ledger.h: borrowed - the engine's, outliving the forward); NULL nothing */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[OSMOS_ERR]);

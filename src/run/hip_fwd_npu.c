@@ -19,7 +19,11 @@ static void npu_free(Forward *f)
     hipEventDestroy(f->npu_packed), f->npu_packed = NULL;
   if (f->npu_gpu_done)
     hipEventDestroy(f->npu_gpu_done), hipEventDestroy(f->npu_resumed), f->npu_gpu_done = f->npu_resumed = NULL;
-  hipHostFree(f->npu_tok), hipHostFree(f->npu_row), f->npu_tok = NULL, f->npu_row = NULL;
+  if (f->npu_tok) /* (made in forward_npu, given back here: the NPU opened again in the forward's life) */
+    ledger_host_free(f->ledger, f->npu_tok);
+  if (f->npu_row)
+    ledger_host_free(f->ledger, f->npu_row);
+  f->npu_tok = NULL, f->npu_row = NULL;
   free(f->npu_wg), free(f->npu_wu), f->npu_wg = f->npu_wu = NULL;
   free(f->npu_c0), free(f->npu_c1), f->npu_c0 = f->npu_c1 = NULL;
 }
@@ -53,8 +57,8 @@ bool forward_npu(Forward *f, const char *dir, float share, char err[OSMOS_ERR])
     return osmos_fail(err, "%s", nerr);
   }
   const unsigned mapped = hipHostMallocMapped | hipHostMallocCoherent;
-  if (hipHostMalloc((void **)&f->npu_tok, (size_t)max * NPU_TOKENS * 4, mapped) != hipSuccess ||
-      hipHostMalloc((void **)&f->npu_row, (size_t)max * 4, mapped) != hipSuccess ||
+  if (ledger_host_malloc(f->ledger, (void **)&f->npu_tok, (size_t)max * NPU_TOKENS * 4, mapped) != hipSuccess ||
+      ledger_host_malloc(f->ledger, (void **)&f->npu_row, (size_t)max * 4, mapped) != hipSuccess ||
       !(f->npu_wg = malloc(max * sizeof *f->npu_wg)) || !(f->npu_wu = malloc(max * sizeof *f->npu_wu)) ||
       !(f->npu_c0 = malloc(max * sizeof *f->npu_c0)) || !(f->npu_c1 = malloc(max * sizeof *f->npu_c1)) ||
       hipEventCreateWithFlags(&f->npu_packed, hipEventDisableTiming) != hipSuccess ||

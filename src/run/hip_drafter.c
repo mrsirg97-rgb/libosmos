@@ -45,18 +45,14 @@ static const void *dev_of(Drafter *d, int b, const char *name, uint32_t *type, u
 }
 
 /* a BF16 vector widened to F32 (an F32 one copied), into memory of its own */
-static float *widen(Drafter *d, int b, const char *name, uint64_t n)
+static bool widen(Drafter *d, int b, const char *name, uint64_t n, float **out)
 {
   uint32_t type = 0;
   uint64_t values = 0;
   const void *src = dev_of(d, b, name, &type, &values);
-  float *out = NULL;
-  if (!src || values != n || !fwd_alloc(&out, n * sizeof(float))) /* its n values, no fewer (0.7.1: read past it) */
-    return NULL;
-  const bool ok = type == 0 ? fwd_copy(out, src, n * sizeof(float)) : quant_dequant(type, src, n, out, NULL);
-  if (!ok)
-    return hipFree(out), NULL;
-  return out;
+  if (!src || values != n || !fwd_alloc(&d->bufs, out, n * sizeof(float))) /* its n values, no fewer (0.7.1) */
+    return false;
+  return type == 0 ? fwd_copy(*out, src, n * sizeof(float)) : quant_dequant(type, src, n, *out, NULL);
 }
 
 static bool block(Drafter *d, int b)
@@ -71,12 +67,12 @@ static bool block(Drafter *d, int b)
   k->hca_fn = dev(d, b, "hc_attn_fn", NULL), k->hca_base = dev(d, b, "hc_attn_base", NULL);
   k->hca_scale = dev(d, b, "hc_attn_scale", NULL), k->hcf_fn = dev(d, b, "hc_ffn_fn", NULL);
   k->hcf_base = dev(d, b, "hc_ffn_base", NULL), k->hcf_scale = dev(d, b, "hc_ffn_scale", NULL);
-  k->q_norm = widen(d, b, "attn.q_norm.weight", ql), k->kv_norm = widen(d, b, "attn.kv_norm.weight", hd);
-  k->attn_norm = widen(d, b, "attn_norm.weight", D), k->ffn_norm = widen(d, b, "ffn_norm.weight", D);
+  bool wide = widen(d, b, "attn.q_norm.weight", ql, &k->q_norm) && widen(d, b, "attn.kv_norm.weight", hd, &k->kv_norm) &&
+              widen(d, b, "attn_norm.weight", D, &k->attn_norm) && widen(d, b, "ffn_norm.weight", D, &k->ffn_norm);
   const void *wo_a = dev(d, b, "attn.wo_a.weight", NULL);
   bool ok = k->wq_a && k->wq_b && k->wkv && k->wo_b && k->sh1 && k->sh3 && k->sh2 && k->gate && k->sink &&
             k->gate_bias && k->hca_fn && k->hca_base && k->hca_scale && k->hcf_fn && k->hcf_base && k->hcf_scale &&
-            k->q_norm && k->kv_norm && k->attn_norm && k->ffn_norm && wo_a;
+            wide && wo_a; /* (a widen that failed partway: its buffer made, its values not - refused) */
   /* the experts' tables, and wo_a's groups a row (group g's rows g * o_lora on, its 4,096 columns Q8_0) */
   const void *host[DRAFTER_EXPERTS];
   static const char *role[3] = {"w1", "w3", "w2"};
@@ -92,7 +88,7 @@ static bool block(Drafter *d, int b)
         d->ex_type = type;
       ok = ok && type == d->ex_type && (qtype_paths(type) & QTYPE_MV);
     }
-    ok = ok && fwd_alloc(&k->ex[r], sizeof host) && fwd_put(k->ex[r], host, sizeof host);
+    ok = ok && fwd_alloc(&d->bufs, &k->ex[r], sizeof host) && fwd_put(k->ex[r], host, sizeof host);
   }
   const uint32_t G = (uint32_t)d->f->g->o_groups, OL = (uint32_t)d->f->g->o_lora;
   const uint32_t oin = (uint32_t)d->f->g->n_heads * hd / G;
@@ -100,7 +96,7 @@ static bool block(Drafter *d, int b)
   for (uint32_t t = 0; t < DRAFTER_BLOCK; t++)
     for (uint32_t g = 0; g < G; g++)
       oa[t * G + g] = (const uint8_t *)wo_a + (uint64_t)g * OL * gguf_bytes(DRAFTER_Q8_0, oin);
-  return ok && fwd_alloc(&k->oa_tab, DRAFTER_BLOCK * G * sizeof *oa) &&
+  return ok && fwd_alloc(&d->bufs, &k->oa_tab, DRAFTER_BLOCK * G * sizeof *oa) &&
          fwd_put(k->oa_tab, oa, DRAFTER_BLOCK * G * sizeof *oa);
 }
 
@@ -133,7 +129,7 @@ static bool scratch(Drafter *d)
       {&d->tab, 3 * P * sizeof(void *)},
   };
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
-    if (!fwd_alloc(want[i].p, want[i].bytes))
+    if (!fwd_alloc(&d->bufs, want[i].p, want[i].bytes))
       return false;
   /* constant: the block's own rows every row's selected keys (no causal mask in a block), each pair its own row
      in the routed sum, the first block's pre one-hot on stream 0 */
@@ -149,7 +145,7 @@ static bool scratch(Drafter *d)
     pair[m] = (int32_t)m;
   return fwd_put(d->sel, sel, sizeof sel) && fwd_put(d->n_sel, n_sel, sizeof n_sel) &&
          fwd_put(d->pair, pair, sizeof pair) && fwd_put(d->pre0, pre0, T * hc * F) &&
-         hipHostMalloc((void **)&d->pin, sizeof *d->pin, 0) == hipSuccess;
+         fwd_pinned(&d->bufs, &d->pin, sizeof *d->pin);
 }
 
 /* the trunk's layers the drafter taps: the model's GGUF's where it names them, else dspark.json's; both named, equal */
@@ -178,7 +174,7 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR])
   Drafter *d = f ? calloc(1, sizeof *d) : NULL;
   if (!d)
     return osmos_fail(err, "no forward, or out of memory"), NULL;
-  d->f = f, d->fd = -1;
+  d->f = f, d->fd = -1, d->bufs.ledger = f->ledger;
   char xerr[OSMOS_ERR] = "", perr[OSMOS_ERR] = "";
   bool ok = (d->ix = dspark_index(dir, xerr)) != NULL || osmos_fail(err, "%s", xerr);
   ok = ok && ((d->fd = open(d->ix->bin, O_RDONLY)) >= 0 || osmos_fail(err, "dspark.bin could not be opened"));
@@ -186,7 +182,7 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR])
   ok = ok && (u || osmos_fail(err, "out of memory"));
   for (uint32_t i = 0; ok && i < d->ix->n; i++)
     u[i] = (PoolUnit){.part = {{d->fd, d->ix->t[i].offset, d->ix->t[i].bytes}}, .n_parts = 1};
-  ok = ok && (((d->slots = hip_slots_create(NULL /* ledger: stage 4 */, perr)) &&
+  ok = ok && (((d->slots = hip_slots_create(f->ledger, perr)) &&
                (d->res = resident_create(u, d->ix->n, hip_slots(d->slots), DRAFTER_READERS, perr))) ||
               osmos_fail(err, "%s", perr));
   free(u);
@@ -201,9 +197,10 @@ Drafter *drafter_create(Forward *f, const char *dir, char err[OSMOS_ERR])
     d->rank = (uint32_t)mk->dims[1];
     d->main_proj = dev(d, 0, "main_proj.weight", &d->main_type);
     d->mk_embed = dev(d, 2, "markov_head.embed.weight", NULL), d->mk_head = dev(d, 2, "markov_head.head.weight", NULL);
-    d->main_norm = widen(d, 0, "main_norm.weight", f->g->n_embd), d->norm = widen(d, 2, "norm.weight", f->g->n_embd);
-    d->conf_w = widen(d, 2, "confidence_head.proj.weight", (uint64_t)f->g->n_embd + d->rank);
-    ok = (d->main_proj && d->mk_embed && d->mk_head && d->main_norm && d->norm && d->conf_w) ||
+    const bool wide = widen(d, 0, "main_norm.weight", f->g->n_embd, &d->main_norm) &&
+                      widen(d, 2, "norm.weight", f->g->n_embd, &d->norm) &&
+                      widen(d, 2, "confidence_head.proj.weight", (uint64_t)f->g->n_embd + d->rank, &d->conf_w);
+    ok = (d->main_proj && d->mk_embed && d->mk_head && wide) ||
          osmos_fail(err, "a drafter without its heads");
   }
   for (int b = 0; ok && b < DRAFTER_BLOCKS; b++)
@@ -222,27 +219,8 @@ void drafter_destroy(Drafter *d)
 {
   if (!d)
     return;
-  for (int b = 0; b < DRAFTER_BLOCKS; b++)
-  {
-    DBlock *k = &d->b[b];
-    hipFree(k->q_norm), hipFree(k->kv_norm), hipFree(k->attn_norm), hipFree(k->ffn_norm), hipFree(k->oa_tab);
-    for (int r = 0; r < 3; r++)
-      hipFree(k->ex[r]);
-  }
-  hipFree(d->main_norm), hipFree(d->norm), hipFree(d->conf_w);
-  float **bufs[] = {&d->h, &d->mid, &d->x, &d->qa, &d->q, &d->kv, &d->o, &d->oa, &d->y, &d->xf, &d->logits, &d->rw,
-                    &d->ga, &d->up, &d->hh, &d->ye, &d->moe, &d->sga, &d->sup, &d->shh, &d->sye, &d->hcp, &d->a_pre,
-                    &d->a_post, &d->a_comb, &d->f_pre, &d->f_post, &d->f_comb, &d->pre0, &d->att, &d->xc, &d->xn,
-                    &d->vocab, &d->mk, &d->cat, &d->cval, &d->main_x, &d->kvs};
-  for (size_t i = 0; i < sizeof bufs / sizeof *bufs; i++)
-    hipFree(*bufs[i]);
-  hipFree(d->kvs_p);
-  int32_t **ibufs[] = {&d->ridx, &d->sel, &d->n_sel, &d->pos_q, &d->pos_a, &d->ids, &d->pair, &d->tap_pos, &d->best};
-  for (size_t i = 0; i < sizeof ibufs / sizeof *ibufs; i++)
-    hipFree(*ibufs[i]);
-  hipFree(d->tab);
-  hipFree(d->best_part);
-  hipHostFree(d->pin);
+  gpu_bufs_free(&d->bufs); /* every GPU and pinned buffer the drafter made: from its record (0.16.0: four hand-kept
+                              lists) */
   resident_destroy(d->res);
   hip_slots_destroy(d->slots); /* after the resident set: its memory released through it */
   if (d->fd >= 0)
@@ -281,8 +259,7 @@ bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[OSMOS_E
     return osmos_fail(err, "no drafter, or a sequence of another forward");
   const Geometry *g = f->g;
   const uint32_t W = (uint32_t)g->window, hd = g->head_dim;
-  if (!s->dring && !fwd_alloc(&s->dring, (uint64_t)DRAFTER_BLOCKS * W * kv_row_bytes(KV_FP8, hd)))
-    return osmos_fail(err, "GPU memory refused (the drafter's rings)");
+  (void)hd; /* (the rings the sequence's from its making) */
   if (to - from > (int32_t)W) /* only the window's last positions stay in the ring */
     from = to - (int32_t)W;
   int32_t want = from;

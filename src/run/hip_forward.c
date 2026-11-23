@@ -176,7 +176,7 @@ static bool repacks(const Weights *w, const GgufTensor *t, uint32_t *rows, uint3
 static bool repack_all(Forward *f, const GgufTensor *const *t_res, size_t n_t)
 {
   void *stage = NULL;
-  bool ok = hipMalloc(&stage, FWD_REPACK_STAGE) == hipSuccess;
+  bool ok = ledger_malloc(f->ledger, &stage, FWD_REPACK_STAGE) == hipSuccess;
   for (size_t i = 0; ok && i < n_t; i++)
   {
     uint32_t rows, cols;
@@ -196,7 +196,8 @@ static bool repack_all(Forward *f, const GgufTensor *const *t_res, size_t n_t)
     }
     f->ttype[weights_tensor_index(f->w, t_res[i])] = QUANT_Q5_KR;
   }
-  hipFree(stage);
+  if (stage)
+    ledger_free(f->ledger, stage);
   return ok;
 }
 
@@ -278,7 +279,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   free(rix);
   if (!ok)
     ;
-  else if (!(f->gpu_slots = hip_slots_create(NULL /* ledger: stage 4 */, perr)) ||
+  else if (!(f->gpu_slots = hip_slots_create(f->ledger, perr)) ||
            !(f->res = resident_create(res, n_t, hip_slots(f->gpu_slots), FWD_FETCH_THREADS, perr)))
     ok = osmos_fail(err, "%s", perr);
   else if (!direct_units(f, all) || !f->pool_room)
@@ -286,7 +287,7 @@ static bool units(Forward *f, uint64_t budget, const uint64_t *picks, char *err)
   else /* the budget's experts its warm start: read at the first step (membrane_warm), not here - fit.h's builds */
   {
     Experts ex;
-    ok = experts_create(NULL /* ledger: stage 4 */, all, (uint32_t)f->n_layers, E, warm, &plan, ARENA_GRAIN, FWD_FETCH_THREADS, copy_on_stream,
+    ok = experts_create(f->ledger, all, (uint32_t)f->n_layers, E, warm, &plan, ARENA_GRAIN, FWD_FETCH_THREADS, copy_on_stream,
                         NULL, f->ahead_limit, false, &ex, err);
     f->mem = ex.mem, f->hs = ex.slots, f->hs_stream = ex.stream;
   }
@@ -315,8 +316,8 @@ static bool oa_tables(Forward *f, char *err)
   uint32_t xo[FWD_MAX_GROUPS], yo[FWD_MAX_GROUPS];
   for (uint32_t k = 0; k < G; k++)
     xo[k] = k * oin * MM_TILE, yo[k] = k * (uint32_t)g->o_lora; /* group k's first column, in the tiled x16 */
-  bool ok = tab && fwd_alloc(&f->oa_tab, (uint64_t)f->n_layers * G * sizeof *tab) &&
-            fwd_alloc(&f->oa_xoff, G * 4) && fwd_alloc(&f->oa_yoff, G * 4) && fwd_put(f->oa_xoff, xo, G * 4) &&
+  bool ok = tab && fwd_alloc(&f->bufs, &f->oa_tab, (uint64_t)f->n_layers * G * sizeof *tab) &&
+            fwd_alloc(&f->bufs, &f->oa_xoff, G * 4) && fwd_alloc(&f->bufs, &f->oa_yoff, G * 4) && fwd_put(f->oa_xoff, xo, G * 4) &&
             fwd_put(f->oa_yoff, yo, G * 4);
   for (int l = 0; ok && l < f->n_layers; l++)
     for (uint32_t k = 0; k < G; k++)
@@ -326,11 +327,14 @@ static bool oa_tables(Forward *f, char *err)
   return ok || osmos_fail(err, "a GPU allocation refused (the wo_a tables)");
 }
 
-bool fwd_alloc(void *p, uint64_t bytes)
+bool fwd_alloc(GpuBufs *b, void *p, uint64_t bytes)
 {
   void **out = p;
-  return hipMalloc(out, bytes ? bytes : 4) == hipSuccess && hipMemset(*out, 0, bytes ? bytes : 4) == hipSuccess;
+  return gpu_bufs_one(b, b->ledger, p, bytes ? bytes : 4) && hipMemset(*out, 0, bytes ? bytes : 4) == hipSuccess;
 }
+
+bool fwd_pinned(GpuBufs *b, void *p, uint64_t bytes) { return gpu_bufs_host(b, b->ledger, p, bytes); }
+bool fwd_mapped(GpuBufs *b, void *p, uint64_t bytes) { return gpu_bufs_mapped(b, b->ledger, p, bytes); }
 
 static bool subs(Forward *f);
 
@@ -393,7 +397,7 @@ static bool gates(Forward *f, const Weights *w, char *err)
       }
     /* each cause its own (one message for all three read "could not be read" for a refused allocation) */
     ok = (ok || osmos_fail(err, "the Engram's gates of layer %d could not be read", l)) &&
-         (fwd_alloc(&f->eg_gate[l], n * sizeof *g) || osmos_fail(err, "GPU memory refused (the Engram's gates)")) &&
+         (fwd_alloc(&f->bufs, &f->eg_gate[l], n * sizeof *g) || osmos_fail(err, "GPU memory refused (the Engram's gates)")) &&
          (fwd_put(f->eg_gate[l], g, n * sizeof *g) || osmos_fail(err, "a GPU copy failed (the Engram's gates)"));
   }
   free(g), free(q), free(k);
@@ -421,7 +425,7 @@ static bool guess_routers(Forward *f, const Weights *w, char *err)
       memcpy(&u, &x[i], 4);
       h[i] = (uint16_t)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
     }
-    ok = ok && fwd_alloc(&f->guess_router[l], n * sizeof *h) && fwd_put(f->guess_router[l], h, n * sizeof *h);
+    ok = ok && fwd_alloc(&f->bufs, &f->guess_router[l], n * sizeof *h) && fwd_put(f->guess_router[l], h, n * sizeof *h);
     free(x), free(h);
   }
   return ok || osmos_fail(err, "a router's copy for the guess could not be made");
@@ -480,7 +484,7 @@ static bool scratch(Forward *f)
   };
   _Static_assert(sizeof want / sizeof *want == sizeof(Scratch) / sizeof(void *), "every buffer of Scratch, once");
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
-    if (!fwd_alloc(want[i].field, want[i].bytes))
+    if (!fwd_alloc(&f->bufs, want[i].field, want[i].bytes))
       return false;
   float pre0[FWD_MAX_BATCH * OPS_MAX_HC] = {0}; /* the first block's pre, a token: stream 0 */
   for (uint64_t i = 0; i < B; i++)
@@ -490,20 +494,18 @@ static bool scratch(Forward *f)
     n_eg += g->engram[l];
   f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
   f->ovf = (OverflowFlag){b->overflow, 4, false}; /* (zeroed by fwd_alloc) */
-  return fwd_put(b->pre0, pre0, B * hc * F) && fwd_alloc(&f->argmax_part, ops_argmax_scratch((uint32_t)B)) &&
-         hipHostMalloc((void **)&f->r_ids, P * 4, hipHostMallocMapped | hipHostMallocCoherent) == hipSuccess &&
+  return fwd_put(b->pre0, pre0, B * hc * F) && fwd_alloc(&f->bufs, &f->argmax_part, ops_argmax_scratch((uint32_t)B)) &&
+         fwd_mapped(&f->bufs, &f->r_ids, P * 4) &&
          hipHostGetDevicePointer((void **)&f->r_ids_dev, f->r_ids, 0) == hipSuccess &&
-         hipHostMalloc((void **)&f->r_guess, S * FWD_GUESS_K * 4, hipHostMallocMapped | hipHostMallocCoherent) ==
-             hipSuccess &&
+         fwd_mapped(&f->bufs, &f->r_guess, S * FWD_GUESS_K * 4) &&
          hipHostGetDevicePointer((void **)&f->r_guess_dev, f->r_guess, 0) == hipSuccess &&
-         hipHostMalloc((void **)&f->r_up, FWD_UP_BYTES(P), 0) == hipSuccess &&
+         fwd_pinned(&f->bufs, &f->r_up, FWD_UP_BYTES(P)) &&
          (f->m_by = malloc(P * 4)) && (f->m_row = malloc(P * 4)) && (f->m_base = malloc(P * 4)) &&
          (f->m_slot0 = malloc(P * 4)) &&
          (f->m_gidx = malloc(FWD_MAX_SLOTS(P, g->n_experts) * 4)) &&
          (f->m_hidx = malloc(FWD_MAX_SLOTS(P, g->n_experts) * 4)) &&
-         hipHostMalloc((void **)&f->stage, NS * B * (uint64_t)(f->n_eg = n_eg ? n_eg : 1) * cols * row, 0) ==
-             hipSuccess &&
-         hipHostMalloc((void **)&f->pin, sizeof *f->pin, 0) == hipSuccess && subs(f) &&
+         fwd_pinned(&f->bufs, &f->stage, NS * B * (uint64_t)(f->n_eg = n_eg ? n_eg : 1) * cols * row) &&
+         fwd_pinned(&f->bufs, &f->pin, sizeof *f->pin) && subs(f) &&
          hipEventCreateWithFlags(&f->routed, hipEventDisableTiming) == hipSuccess &&
          hipEventCreateWithFlags(&f->passed, hipEventDisableTiming) == hipSuccess;
 }
@@ -521,11 +523,11 @@ static bool subs(Forward *f)
   for (uint32_t k = 1; ok && k < f->n_subs; k++)
   {
     Sub *s = &f->sub[k];
-    ok = fwd_alloc(&s->h, B * hc * g->n_embd * F) && fwd_alloc(&s->f_pre, B * hc * F) && fwd_alloc(&s->pos, B * 4) &&
-         fwd_alloc(&s->sel, B * OPS_MAX_SELECT * 4) && fwd_alloc(&s->n_sel, B * 4) &&
-         fwd_alloc(&s->cand, B * f->cand_words * 4) &&
-         fwd_alloc(&s->oa_cnt, FWD_MAX_GROUPS * 4) && fwd_alloc(&s->keep, B * 4) && fwd_alloc(&s->back, B * 4) &&
-         hipHostMalloc((void **)&s->pin, sizeof *s->pin, 0) == hipSuccess &&
+    ok = fwd_alloc(&f->bufs, &s->h, B * hc * g->n_embd * F) && fwd_alloc(&f->bufs, &s->f_pre, B * hc * F) && fwd_alloc(&f->bufs, &s->pos, B * 4) &&
+         fwd_alloc(&f->bufs, &s->sel, B * OPS_MAX_SELECT * 4) && fwd_alloc(&f->bufs, &s->n_sel, B * 4) &&
+         fwd_alloc(&f->bufs, &s->cand, B * f->cand_words * 4) &&
+         fwd_alloc(&f->bufs, &s->oa_cnt, FWD_MAX_GROUPS * 4) && fwd_alloc(&f->bufs, &s->keep, B * 4) && fwd_alloc(&f->bufs, &s->back, B * 4) &&
+         fwd_pinned(&f->bufs, &s->pin, sizeof *s->pin) &&
          (s->rows = calloc(B * WEIGHTS_MAX_LAYERS * g->engram_cols, sizeof *s->rows)) != NULL;
   }
   return ok;
@@ -539,8 +541,8 @@ static bool freqs(Forward *f)
   const Rope comp = {g->rope_dim, g->compress_rope_base, g->rope_original, g->rope_factor, g->yarn_beta_fast,
                      g->yarn_beta_slow};
   const uint64_t bytes = (uint64_t)g->rope_dim / 2 * sizeof(float);
-  return rope_freqs(&win, a) && rope_freqs(&comp, c) && fwd_alloc(&f->freqs_win, bytes) &&
-         fwd_alloc(&f->freqs_comp, bytes) && fwd_put(f->freqs_win, a, bytes) && fwd_put(f->freqs_comp, c, bytes);
+  return rope_freqs(&win, a) && rope_freqs(&comp, c) && fwd_alloc(&f->bufs, &f->freqs_win, bytes) &&
+         fwd_alloc(&f->bufs, &f->freqs_comp, bytes) && fwd_put(f->freqs_win, a, bytes) && fwd_put(f->freqs_comp, c, bytes);
 }
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[OSMOS_ERR])
@@ -551,7 +553,7 @@ Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64
 Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget,
                                const uint64_t *picks, char err[OSMOS_ERR])
 {
-  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0};
+  const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0, NULL};
   return forward_create_with(w, &o, err);
 }
 
@@ -568,6 +570,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
   Forward *f = calloc(1, sizeof *f);
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
+  f->ledger = o->ledger, f->bufs.ledger = o->ledger;
   f->w = w, f->g = &w->geo, f->n_layers = n_layers, f->max_ctx = max_ctx, f->no_guess = o->no_guess, f->budget = budget;
   f->ahead_limit = o->ahead_limit, f->logit_rows = o->logit_rows;
   f->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
@@ -652,24 +655,13 @@ void forward_destroy(Forward *f)
   free(f->eg_off);
   free(f->tdev);
   free(f->ttype);
-  hipFree(f->oa_tab);
-  hipFree(f->oa_xoff);
-  hipFree(f->oa_yoff);
-  if (f->xf0) /* the views back at the whole buffers: Scratch frees them */
+  if (f->xf0) /* the views back at the whole buffers: the record frees what was made */
     f->b.xf = f->xf0, f->b.moe = f->moe0, f->b.mid = f->mid0, f->b.f_post = f->f_post0, f->b.f_comb = f->f_comb0;
-  hipHostFree(f->r_ids);
-  hipHostFree(f->r_guess);
-  hipHostFree(f->r_up);
   free(f->m_by), free(f->m_row), free(f->m_base), free(f->m_slot0), free(f->m_gidx), free(f->m_hidx);
   free(f->picks), free(f->units);
   fwd_cpu_destroy(f);
   fwd_npu_destroy(f);
-  hipHostFree(f->lane_up);
-  hipFree(f->lane_x), hipFree(f->lane_w), hipFree(f->lane_q), hipFree(f->lane_qd),
-      hipFree(f->lane_xq), hipFree(f->lane_xqd);
-  hipFree(f->taps);
-  hipFree(f->argmax_part);
-  if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: Scratch frees them */
+  if (f->sub[0].h) /* the first sub-batch's buffers back where they came from: the record frees them */
   {
     const Sub *s = &f->sub[0];
     f->b.h = s->h, f->b.f_pre = s->f_pre, f->b.pos = s->pos, f->b.sel = s->sel, f->b.n_sel = s->n_sel;
@@ -677,18 +669,9 @@ void forward_destroy(Forward *f)
     f->b.oa_cnt = s->oa_cnt, f->b.keep = s->keep, f->b.back = s->back, f->pin = s->pin, f->rows = s->rows;
   }
   for (int k = 1; k < FWD_MAX_SUBS; k++)
-  {
-    Sub *s = &f->sub[k];
-    hipFree(s->h), hipFree(s->f_pre), hipFree(s->pos), hipFree(s->sel), hipFree(s->n_sel), hipFree(s->oa_cnt);
-    hipFree(s->keep), hipFree(s->back), hipHostFree(s->pin), free(s->rows), hipFree(s->cand);
-  }
-  void **dev = (void **)&f->b;
-  for (size_t i = 0; i < sizeof f->b / sizeof(void *); i++)
-    hipFree(dev[i]);
-  hipFree(f->freqs_win);
-  hipFree(f->freqs_comp);
-  hipHostFree(f->stage);
-  hipHostFree(f->pin);
+    free(f->sub[k].rows);
+  gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer the forward made - Scratch's, the subs', the lane's, the taps',
+                              the tables': from the record (0.16.0: Scratch was freed as an array of its pointers) */
   if (f->routed)
     hipEventDestroy(f->routed);
   if (f->passed)
@@ -702,8 +685,6 @@ void forward_destroy(Forward *f)
   }
   if (f->eg_fd >= 0)
     close(f->eg_fd);
-  for (int l = 0; l < WEIGHTS_MAX_LAYERS; l++)
-    hipFree(f->eg_gate[l]), hipFree(f->guess_router[l]);
   engram_destroy(f->hash);
   free(f->rows);
   free(f);

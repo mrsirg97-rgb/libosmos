@@ -9,28 +9,30 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/err.h"
+#include "drafter_impl.h"
 
 Seq *seq_create(Forward *f, char err[OSMOS_ERR])
 {
   Seq *s = f ? calloc(1, sizeof *s) : NULL;
   if (!s)
     return osmos_fail(err, "no forward, or out of memory"), NULL;
-  s->f = f;
+  s->f = f, s->bufs.ledger = f->ledger;
   const Geometry *g = f->g;
   const uint64_t F = sizeof(float), hd = (uint64_t)g->head_dim;
-  bool ok = true;
+  /* the drafter's rings made with it, whole (a drafter's seed fills them, a state's load reads them): ~0.2 MiB */
+  bool ok = fwd_alloc(&s->bufs, &s->dring, (uint64_t)DRAFTER_BLOCKS * g->window * kv_row_bytes(KV_FP8, (uint32_t)hd));
   for (int l = 0; ok && l < f->n_layers; l++)
   {
     /* the window's keys, the compressed rows and the indexer's keys as the model rounds them (kvfmt.h) */
-    ok = fwd_alloc(&s->ring[l], f->slots * kv_row_bytes(KV_FP8, (uint32_t)hd));
+    ok = fwd_alloc(&s->bufs, &s->ring[l], f->slots * kv_row_bytes(KV_FP8, (uint32_t)hd));
     if (ok && g->kv_source[l])
     {
       const uint64_t rows = f->max_ctx / (uint64_t)g->compress[l] + 1;
       const uint64_t pend = FWD_PEND_ROWS(f->step, g->compress[l]);
-      ok = fwd_alloc(&s->ckv[l], rows * kv_row_bytes(KV_FP4_E4M3, (uint32_t)hd)) &&
-           (!g->ix_source[l] || fwd_alloc(&s->ik[l], rows * kv_row_bytes(KV_FP4_POW2, (uint32_t)g->ix_head_dim))) &&
+      ok = fwd_alloc(&s->bufs, &s->ckv[l], rows * kv_row_bytes(KV_FP4_E4M3, (uint32_t)hd)) &&
+           (!g->ix_source[l] || fwd_alloc(&s->bufs, &s->ik[l], rows * kv_row_bytes(KV_FP4_POW2, (uint32_t)g->ix_head_dim))) &&
            (g->compress[l] < 2 ||
-            (fwd_alloc(&s->pend_kvc[l], pend * hd * F) && fwd_alloc(&s->pend_sc[l], pend * hd * F)));
+            (fwd_alloc(&s->bufs, &s->pend_kvc[l], pend * hd * F) && fwd_alloc(&s->bufs, &s->pend_sc[l], pend * hd * F)));
     }
   }
   if (!ok)
@@ -45,15 +47,7 @@ void seq_destroy(Seq *s)
 {
   if (!s)
     return;
-  for (int l = 0; l < WEIGHTS_MAX_LAYERS; l++)
-  {
-    hipFree(s->ring[l]);
-    hipFree(s->ckv[l]);
-    hipFree(s->ik[l]);
-    hipFree(s->pend_kvc[l]);
-    hipFree(s->pend_sc[l]);
-  }
-  hipFree(s->dring);
+  gpu_bufs_free(&s->bufs); /* every GPU buffer it made: from its record */
   free(s);
 }
 
@@ -354,7 +348,7 @@ bool fwd_taps_on(Forward *f, const bool *at)
   f->n_tap = 0;
   for (int l = 0; l < f->n_layers; l++)
     f->tapped[l] = at[l], f->tap_of[l] = at[l] ? f->n_tap++ : -1;
-  return f->n_tap && fwd_alloc(&f->taps, (uint64_t)f->step * f->n_tap * f->g->n_embd * sizeof(float));
+  return f->n_tap && fwd_alloc(&f->bufs, &f->taps, (uint64_t)f->step * f->n_tap * f->g->n_embd * sizeof(float));
 }
 
 uint32_t seq_reach(const Seq *s)

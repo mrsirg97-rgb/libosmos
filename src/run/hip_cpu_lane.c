@@ -34,11 +34,11 @@ bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err)
     f->map[i] = m, f->map_len[i] = (uint64_t)st.st_size;
   }
   const unsigned mapped = hipHostMallocMapped | hipHostMallocCoherent; /* the GPU reads what the CPU wrote, uncached */
-  if (hipHostMalloc((void **)&f->cpu_xf, LANE_PAIRS * D * sizeof(float), 0) != hipSuccess ||
-      hipHostMalloc((void **)&f->cpu_rw, LANE_PAIRS * sizeof(float), 0) != hipSuccess ||
+  if (ledger_host_malloc(f->ledger, (void **)&f->cpu_xf, LANE_PAIRS * D * sizeof(float), 0) != hipSuccess ||
+      ledger_host_malloc(f->ledger, (void **)&f->cpu_rw, LANE_PAIRS * sizeof(float), 0) != hipSuccess ||
       !(f->cpu_x = malloc(LANE_PAIRS * D * sizeof(float))) || !(f->cpu_w = malloc(LANE_PAIRS * sizeof(float))) ||
-      hipHostMalloc((void **)&f->cpu_y, LANE_ROWS * D * sizeof(float), mapped) != hipSuccess ||
-      hipHostMalloc((void **)&f->cpu_seq, sizeof(uint32_t), mapped) != hipSuccess ||
+      ledger_host_malloc(f->ledger, (void **)&f->cpu_y, LANE_ROWS * D * sizeof(float), mapped) != hipSuccess ||
+      ledger_host_malloc(f->ledger, (void **)&f->cpu_seq, sizeof(uint32_t), mapped) != hipSuccess ||
       hipHostGetDevicePointer((void **)&f->cpu_y_dev, f->cpu_y, 0) != hipSuccess ||
       hipHostGetDevicePointer((void **)&f->cpu_seq_dev, f->cpu_seq, 0) != hipSuccess ||
       !(f->on_cpu = calloc(f->n_expert_units, sizeof *f->on_cpu)))
@@ -54,7 +54,11 @@ void fwd_cpu_destroy(Forward *f)
   for (int i = 0; i < FWD_MAX_FILES; i++)
     if (f->map[i])
       munmap((void *)f->map[i], f->map_len[i]), f->map[i] = NULL;
-  hipHostFree(f->cpu_xf), hipHostFree(f->cpu_rw), hipHostFree(f->cpu_y), hipHostFree(f->cpu_seq);
+  void *pin[] = {f->cpu_xf, f->cpu_rw, f->cpu_y, f->cpu_seq}; /* (made in fwd_cpu_create, given back here: the
+                                                                 lane dropped and made again in the forward's life) */
+  for (int i = 0; i < 4; i++)
+    if (pin[i])
+      ledger_host_free(f->ledger, pin[i]);
   free(f->cpu_x), free(f->cpu_w), free(f->on_cpu);
   f->cpu_xf = f->cpu_rw = f->cpu_x = f->cpu_w = f->cpu_y = NULL, f->cpu_seq = NULL, f->on_cpu = NULL;
 }

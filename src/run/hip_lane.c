@@ -33,14 +33,13 @@ bool forward_lane(Forward *f, int cpu_threads, const int *cpu_cores, char err[OS
     return osmos_fail(err, "no forward, or a count of CPU threads it does not take");
   const uint64_t D = f->g->n_embd;
   if (!f->lane_up &&
-      (hipHostMalloc((void **)&f->lane_up, sizeof(LaneTabs), hipHostMallocMapped | hipHostMallocCoherent) !=
-           hipSuccess ||
+      (!fwd_mapped(&f->bufs, &f->lane_up, sizeof(LaneTabs)) ||
        hipHostGetDevicePointer(&f->lane_dev, f->lane_up, 0) != hipSuccess ||
-       !fwd_alloc(&f->lane_x, LANE_ROWS * D * sizeof(float)) ||
-       !fwd_alloc(&f->lane_w, LANE_ROWS * sizeof(float)) || !fwd_alloc(&f->lane_q, LANE_ROWS * D) ||
-       !fwd_alloc(&f->lane_qd, LANE_ROWS * (D / LANE_Q8_VALUES) * sizeof(float)) ||
-       !fwd_alloc(&f->lane_xq, LANE_PAIRS * D) ||
-       !fwd_alloc(&f->lane_xqd, LANE_PAIRS * (D / LANE_Q8_VALUES) * sizeof(float))))
+       !fwd_alloc(&f->bufs, &f->lane_x, LANE_ROWS * D * sizeof(float)) ||
+       !fwd_alloc(&f->bufs, &f->lane_w, LANE_ROWS * sizeof(float)) || !fwd_alloc(&f->bufs, &f->lane_q, LANE_ROWS * D) ||
+       !fwd_alloc(&f->bufs, &f->lane_qd, LANE_ROWS * (D / LANE_Q8_VALUES) * sizeof(float)) ||
+       !fwd_alloc(&f->bufs, &f->lane_xq, LANE_PAIRS * D) ||
+       !fwd_alloc(&f->bufs, &f->lane_xqd, LANE_PAIRS * (D / LANE_Q8_VALUES) * sizeof(float))))
     return osmos_fail(err, "memory refused (the lane's tables)");
   if (cpu_threads && !f->cpu && !fwd_cpu_create(f, cpu_threads, cpu_cores, err))
     return false;
