@@ -18,6 +18,7 @@
 #define LFM3_HEAD_DIM 128 /* the attention kernels' head (q35's widened to it: DESIGN.md) */
 #define LFM3_MAX_BACK 8   /* the tokens a sequence can drop (a drafted round's) */
 #define LFM3_MAX_RUNS 64  /* a step's sequences at most */
+#define LFM3_SEQ_RESET "a sequence's reset" /* its GPU calls' name (osmos_hip: the fault seam's too) */
 
 typedef enum Lfm3Kind
 {

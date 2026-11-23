@@ -10,6 +10,7 @@
 #include "osmos/model/fnv.h"
 #include "lfm3_impl.h"
 #include "osmos/err.h"
+#include "osmos/err_hip.h"
 
 static uint64_t conv_bytes(const Lfm3Geometry *g) { return (uint64_t)(g->conv_taps - 1) * (uint64_t)g->n_embd * F; }
 static uint64_t kv_row(const Lfm3Geometry *g) { return q4x_kv_row_bytes((uint32_t)(g->n_kv_heads * g->head_dim)); }
@@ -176,9 +177,11 @@ static bool refuse(Lfm3Seq *s, char *err, const char *why)
   s->pos = 0, s->back = 0, s->prompt_end = 0, s->cur = 0, s->closed = 0, s->broken = false; /* empty */
   s->stage = 0, s->turned = 0, s->step_n = 0, s->df_lo = s->df_pos = 0; /* no step to seed from, no context */
   const Lfm3Geometry *g = &s->f->w->geo;
-  for (int l = 0; l < g->n_layers; l++)
+  bool ok = true; /* a new sequence's: zeros (the conv's from 0) - a reset that fails leaves it broken, not "empty" */
+  for (int l = 0; ok && l < g->n_layers; l++)
     if (g->kind[l] == LFM3_CONV)
-      hipMemset(s->conv[l], 0, LFM3_CONV_SLOTS * conv_bytes(g)); /* a new sequence's: zeros (the conv's from 0) */
+      ok = osmos_hip(hipMemset(s->conv[l], 0, LFM3_CONV_SLOTS * conv_bytes(g)), NULL, LFM3_SEQ_RESET);
+  s->broken = !ok;
   return osmos_fail(err, "%s", why);
 }
 
