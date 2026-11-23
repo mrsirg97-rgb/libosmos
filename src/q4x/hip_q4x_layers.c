@@ -1,3 +1,5 @@
+/* Qwen's layer blocks (q4x_impl.h), each as its test holds it to llama.cpp's (tests/gpu/test_q4x_*_gpu): the
+   matrices, the mixer into b.mixed and b.inj, the DeltaNet and the attention (its index's keys and picks) */
 #include "osmos/mem/membrane.h"
 #include "osmos/model/moe_route.h"
 #include "osmos/gpu/mm.h"
@@ -5,11 +7,8 @@
 #include "q4x_impl.h"
 #include "osmos/err.h"
 
-/* a layer's blocks, each as its test holds it to llama.cpp's (tests/gpu/test_q4x_*_gpu): the mixer into b.mixed and
-   b.inj, a block's output into b.out, the n-gram layer's into b.h itself */
 
 #define TY(t) ((t)->type)
-
 static bool mm_takes(const GgufTensor *t, uint32_t rows, uint32_t cols, uint32_t xs, uint32_t ys)
 {
   return mm_known(TY(t)) && mm_fits(TY(t), rows, cols) && xs >= cols && ys >= rows;
@@ -59,7 +58,7 @@ bool q4x_mat2(Q4xForward *f, const GgufTensor *t0, uint32_t rows0, float *y0, ui
 
 /* an op's output also as mm's f16 (b.x16), for the matmul after it - a step within one x16's tokens; else NULL (the
    matmul converts) */
-static const Q4xX16 *side(Q4xForward *f, uint32_t n, uint32_t cols, Q4xX16 *s)
+const Q4xX16 *q4x_side(Q4xForward *f, uint32_t n, uint32_t cols, Q4xX16 *s)
 {
   if (n > MM_MAX_TOKENS)
     return NULL;
@@ -84,7 +83,7 @@ bool q4x_overflow_ok(Q4xForward *f, char *err)
 
 #define mat(f, t, rows, cols, x, xs, n, y, ys) q4x_mat(f, t, rows, cols, x, xs, n, y, ys, false)
 
-static const float *fv(const Q4xForward *f, const GgufTensor *t) { return (const float *)q4x_dev(f, t); }
+const float *q4x_fv(const Q4xForward *f, const GgufTensor *t) { return (const float *)q4x_dev(f, t); }
 
 bool q4x_inj_wait(Q4xForward *f)
 {
@@ -116,7 +115,7 @@ static bool up_mean(Q4xForward *f, const GgufTensor *up, uint32_t n, uint32_t hc
   Q4xBuf *b = &f->b;
   const uint32_t hd = hc * D;
   Q4xX16 sd;
-  const Q4xX16 *ms = side(f, n, D, &sd);
+  const Q4xX16 *ms = q4x_side(f, n, D, &sd);
   if (x16 && mm_takes(up, hd, r, r, hd) &&
       mm_run_gated_mean(TY(up), q4x_dev(f, up), hc, D, r, x16, n, b->xn, b->mixed, ms ? ms->x16 : NULL,
                         ms ? ms->row0 : 0, b->overflow, f->st))
@@ -161,12 +160,12 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
      inject is F32 - a 4K prompt's norms and injects 479 -> 361 ms, low-power. a small step keeps the two, the inject
      beside on s2: a block a token there would be the one block (decode 27.4 -> 25.6 tok/s) */
   if (n > Q4X_SIDE_STEP && inject && TY(inject) == QTYPE_F32 && inject->dims[0] == hd && inject->dims[1] == hc &&
-      q4x_hc_norm_inject(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, fv(f, norm), g->rms_eps, b->xn,
-                         side(f, n, hd, &sd), fv(f, inject), b->inj, combine, NULL))
+      q4x_hc_norm_inject(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, q4x_fv(f, norm), g->rms_eps, b->xn,
+                         q4x_side(f, n, hd, &sd), q4x_fv(f, inject), b->inj, combine, NULL))
     return down_up(f, down, up, n, hc, D, r, ready);
-  return (combine ? q4x_hc_combine_norm(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, fv(f, norm), g->rms_eps,
-                                        b->xn, side(f, n, hd, &sd), NULL)
-                  : q4x_hc_norm(b->h, fv(f, norm), n, hc, D, g->rms_eps, b->xn, side(f, n, hd, &sd), NULL)) &&
+  return (combine ? q4x_hc_combine_norm(b->h, b->out, b->inj, n, hc, D, 1.0f / (float)hc, q4x_fv(f, norm), g->rms_eps,
+                                        b->xn, q4x_side(f, n, hd, &sd), NULL)
+                  : q4x_hc_norm(b->h, q4x_fv(f, norm), n, hc, D, g->rms_eps, b->xn, q4x_side(f, n, hd, &sd), NULL)) &&
          (!inject || inject_of(f, inject, n, hc, hd)) && down_up(f, down, up, n, hc, D, r, ready);
 }
 
@@ -195,7 +194,7 @@ bool q4x_deltanet(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t
   const bool side_gates = beside(gt, gr, gc, 2, n);
   bool ok = !side_gates || to_side(f);
   ok = ok && mat(f, L->alpha, vh, D, b->mixed, D, n, b->al, vh) && mat(f, L->beta, vh, D, b->mixed, D, n, b->be, vh) &&
-       q4x_ssm_gates(b->al, b->be, fv(f, L->dt), fv(f, L->a), n, vh, b->g, b->b, f->st);
+       q4x_ssm_gates(b->al, b->be, q4x_fv(f, L->dt), q4x_fv(f, L->a), n, vh, b->g, b->b, f->st);
   f->st = NULL;
   ok = ok && (!side_gates || hipEventRecord(f->e_gates, f->s2) == hipSuccess) &&
        q4x_mat2(f, L->qkv, ch, b->qkv, ch, L->gate, in, b->z, in, D, b->mixed, D, n, ready);
@@ -203,15 +202,15 @@ bool q4x_deltanet(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t
   {
     const Q4xSeq *s = r[i].s;
     const uint64_t t0 = r[i].t0;
-    ok = q4x_conv(b->qkv + t0 * ch, r[i].n, ch, (uint32_t)g->ssm_conv, 1, fv(f, L->conv), s->conv[l], Q4X_SLOTS,
+    ok = q4x_conv(b->qkv + t0 * ch, r[i].n, ch, (uint32_t)g->ssm_conv, 1, q4x_fv(f, L->conv), s->conv[l], Q4X_SLOTS,
                   s->cur, b->cv + t0 * ch, NULL) &&
          (i || !side_gates || hipStreamWaitEvent(NULL, f->e_gates, 0) == hipSuccess) && /* the gates done */
          q4x_delta(b->cv + t0 * ch, b->g + t0 * vh, b->b + t0 * vh, r[i].n, (uint32_t)g->ssm_groups, vh,
                    (uint32_t)g->ssm_state, g->rms_eps, b->qkn, s->ssm[l], Q4X_SLOTS, s->cur, b->ro + t0 * in, NULL);
   }
   return ok &&
-         q4x_gated_norm(b->ro, fv(f, L->ssm_norm), b->z, n, vh, (uint32_t)g->ssm_state, g->rms_eps, b->fo,
-                        side(f, n, in, &sd), NULL) &&
+         q4x_gated_norm(b->ro, q4x_fv(f, L->ssm_norm), b->z, n, vh, (uint32_t)g->ssm_state, g->rms_eps, b->fo,
+                        q4x_side(f, n, in, &sd), NULL) &&
          q4x_mat(f, L->ssm_out, D, in, b->fo, in, n, b->out, D, ready);
 }
 
@@ -225,7 +224,7 @@ static bool runs_ix_keys(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, ui
   bool ok = mat(f, L->ix_k, Q4X_IX_DIM, D, b->mixed, D, n, b->ikr, Q4X_IX_DIM);
   for (uint32_t i = 0; ok && i < runs; i++)
     ok = q4x_ix_pool(b->ikr + (uint64_t)c[i].t0 * Q4X_IX_DIM, c[i].n, c[i].pos, ratio, c[i].ixr, Q4X_IX_RING(ratio),
-                     &f->rope, fv(f, L->ix_k_norm), g->rms_eps, c[i].ixk, f->st);
+                     &f->rope, q4x_fv(f, L->ix_k_norm), g->rms_eps, c[i].ixk, f->st);
   return ok;
 }
 
@@ -241,7 +240,7 @@ static bool runs_ix_pick(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, ui
   for (uint32_t i = 0; ok && i < runs; i++)
   {
     const uint64_t t0 = c[i].t0;
-    ok = q4x_ix_q(b->iqr + t0 * ixq, c[i].n, heads, &f->rope, fv(f, L->ix_q_norm), g->rms_eps, c[i].pos,
+    ok = q4x_ix_q(b->iqr + t0 * ixq, c[i].n, heads, &f->rope, q4x_fv(f, L->ix_q_norm), g->rms_eps, c[i].pos,
                   b->iq + t0 * ixq, f->st) &&
          q4x_ix_pick(b->iq + t0 * ixq, c[i].ixk, c[i].n, heads, c[i].pos, ratio, blocks, b->ixs,
                      q4x_ix_scratch(f->max_ctx, ratio), b->sel + t0 * blocks, b->npick + t0, f->st);
@@ -262,8 +261,8 @@ static bool runs_kv(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_
   for (uint32_t i = 0; ok && i < runs; i++)
   {
     const uint64_t t0 = c[i].t0;
-    ok = q4x_qk(b->qf + t0 * 2 * q, b->kr + t0 * kv, c[i].n, heads, kvh, hd, &f->rope, fv(f, L->q_norm),
-                fv(f, L->k_norm), g->rms_eps, c[i].pos, b->q + t0 * q, b->gt + t0 * q,
+    ok = q4x_qk(b->qf + t0 * 2 * q, b->kr + t0 * kv, c[i].n, heads, kvh, hd, &f->rope, q4x_fv(f, L->q_norm),
+                q4x_fv(f, L->k_norm), g->rms_eps, c[i].pos, b->q + t0 * q, b->gt + t0 * q,
                 b->kq + t0 * kv, NULL) &&
          q4x_kv_put(b->kq + t0 * kv, b->vr + t0 * kv, c[i].n, kv, c[i].kc + (uint64_t)c[i].pos * row,
                     c[i].vc + (uint64_t)c[i].pos * row, NULL);
@@ -278,7 +277,7 @@ bool q4x_attention(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t
   const uint32_t D = (uint32_t)g->n_embd, heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads;
   const uint32_t hd = (uint32_t)g->head_dim, q = heads * hd, kv = kvh * hd;
   Q4xX16 sd, rs;
-  const Q4xX16 *all = side(f, n, q, &sd);
+  const Q4xX16 *all = q4x_side(f, n, q, &sd);
   const bool ready = n <= MM_MAX_TOKENS; /* b.x16 the mixer's mixed (q4x_mix), then the attention's output */
   const uint32_t ratio = (uint32_t)g->ix_ratio, blocks = (uint32_t)g->ix_top_k / ratio;
   /* the indexer (its keys and picks from b.mixed, read by the attention alone): a small step's on s2 beside q, k, v and
@@ -315,205 +314,4 @@ bool q4x_attention_kv(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint3
   return q4x_mat2(f, L->k, kv, b->kr, kv, L->v, kv, b->vr, kv, D, b->mixed, D, n,
                   n <= MM_MAX_TOKENS) && /* b.x16 the mixer's mixed (q4x_mix) */
          runs_kv(f, L, c, runs, 0) && runs_ix_keys(f, L, c, runs, n);
-}
-
-/* an expert tensor over the tables' runs, a launch each (mm_group: a part's slab decoded once for its 16 << r tokens) */
-static bool experts(const GgufTensor *t, const void **ptr, const Q4xBuf *b, const Q4xExpertBounds *bd, uint32_t rows,
-                    uint32_t cols, const uint32_t *xo, float *y, const uint32_t *yo)
-{
-  bool ok = true;
-  for (int r = 0; ok && r < Q4X_TILE_RUNS; r++)
-    if (bd->count[r])
-    {
-      const uint32_t at = bd->first[r];
-      ok = mm_group(TY(t), ptr + at, b->cnt + at, bd->count[r], MM_TILE << r, rows, cols, b->xe16, xo + at, cols, y,
-                    yo + at, rows, NULL);
-    }
-  return ok;
-}
-
-/* a streamed layer's tables on the host, q4x_expert_tiles' layout (its bounds' runs: an entry a part of at most 128
-   of an expert's rows, in the run of its tiles, experts ascending in each; counts 0 past the live ones, slots -1): the
-   picks by expert (moe_route), each run's expert from the membrane (visited - the GPU past the last layer's experts:
-   the picks' copy waited for it - scored at a decode, held, waited for). false for a pick out of range, a refusal */
-static int run_of(uint32_t c) { return c <= MM_TILE ? 0 : c <= 2 * MM_TILE ? 1 : c <= 4 * MM_TILE ? 2 : 3; }
-
-static bool host_tiles(Q4xForward *f, int l, uint32_t e, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff)
-{
-  Q4xBuf *b = &f->b;
-  const uint32_t E = (uint32_t)f->w->geo.n_experts, k = (uint32_t)f->w->geo.n_used, part = MM_TILE << (Q4X_TILE_RUNS - 1);
-  if (hipMemcpy(f->h_ids, b->ids, (size_t)e * 4, hipMemcpyDeviceToHost) != hipSuccess)
-    return false;
-  MoeRoute rt = {f->h_by, f->h_row, f->h_run, f->h_run + E, f->h_run + 2 * E, f->h_run + 3 * E, f->h_gidx, f->h_hidx,
-                 f->h_est, 0, 0};
-  char merr[OSMOS_ERR] = "";
-  if (!moe_route(f->h_ids, e, k, E, MM_TILE, &rt) || !membrane_visit(f->mem, (uint32_t)l, e >= E, merr))
-    return false;
-  for (uint32_t m = 0; e < E && m < e; m++)
-    membrane_score(f->mem, (uint32_t)l * E + (uint32_t)f->h_ids[m]);
-  for (uint32_t j = 0; j < rt.runs; j++) /* every distinct pick held first: the cold ones' reads under way together */
-    if (!membrane_hold(f->mem, (uint32_t)l * E + rt.expert[j], merr))
-      return false;
-  uint32_t at[Q4X_TILE_RUNS];
-  for (int r = 0; r < Q4X_TILE_RUNS; r++)
-    at[r] = bd->first[r];
-  for (uint32_t i = 0; i < bd->entries; i++)
-    f->h_cnt[i] = 0;
-  for (uint32_t j = 0; j < rt.runs; j++)
-  {
-    if (!membrane_wait(f->mem, (uint32_t)l * E + rt.expert[j], f->h_ex[j], merr))
-      return false;
-    for (uint32_t off = 0; off < rt.count[j]; off += part)
-    {
-      const uint32_t c = rt.count[j] - off < part ? rt.count[j] - off : part, en = at[run_of(c)]++;
-      const uint32_t slot = rt.slot0[j] + off, place = rt.start[j] + off;
-      f->h_cnt[en] = (int32_t)c, f->h_xg[en] = slot * D, f->h_xd[en] = slot * ff, f->h_yg[en] = place * ff,
-      f->h_yd[en] = place * D;
-      for (int t = 0; t < Q4X_GROUP_TENSORS; t++)
-        f->h_ptr[(uint64_t)t * bd->entries + en] = f->h_ex[j][t];
-    }
-  }
-  for (uint32_t s = rt.slots; s < bd->slots; s++)
-    f->h_gidx[s] = f->h_hidx[s] = -1;
-  const uint64_t ne = bd->entries;
-  return hipMemcpy(b->cnt, f->h_cnt, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(b->xg, f->h_xg, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(b->yg, f->h_yg, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(b->xd, f->h_xd, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(b->yd, f->h_yd, ne * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(b->ptr, f->h_ptr, Q4X_GROUP_TENSORS * ne * sizeof *f->h_ptr, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(b->gidx, f->h_gidx, (uint64_t)bd->slots * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(b->hidx, f->h_hidx, (uint64_t)bd->slots * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMemcpy(b->where, f->h_row, (uint64_t)e * 4, hipMemcpyHostToDevice) == hipSuccess;
-}
-
-bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
-{
-  const Q4xGeometry *g = &f->w->geo;
-  Q4xBuf *b = &f->b;
-  const uint32_t D = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, k = (uint32_t)g->n_used, ff = (uint32_t)g->ff_exp;
-  const uint32_t e = n * k;
-  Q4xExpertBounds bd;
-  q4x_expert_bounds(e, E, &bd);
-  const GgufTensor *t[Q4X_GROUP_TENSORS] = {L->exp_gate, L->exp_up, L->exp_down};
-  Q4xExpertTiles et = {.cnt = b->cnt, .gidx = b->gidx, .hidx = b->hidx, .xg = b->xg, .yg = b->yg, .xd = b->xd,
-                       .yd = b->yd, .where = b->where, .off = b->eoff};
-  /* a layer of the model's with its experts on the membrane: their addresses the table's (the MTP head's layer, or a
-     forward without one: its tensors' own) */
-  const bool model_layer = L >= f->w->layer && L < f->w->layer + g->n_layers;
-  const bool tab = f->exp_tab && model_layer, streamed = f->mem && !f->exp_tab && model_layer;
-  for (int i = 0; i < Q4X_GROUP_TENSORS; i++)
-  {
-    et.ptr[i] = b->ptr + (uint64_t)i * bd.entries;
-    if (tab)
-      et.tab[i] = (const void *const *)f->exp_tab + ((uint64_t)(L - f->w->layer) * Q4X_GROUP_TENSORS + (uint64_t)i) * E;
-    else if (!streamed)
-      et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E;
-  }
-  /* each expert read once for up to 128 of the step's tokens that picked it (q4x_expert_tiles, mm_group) */
-  if (!mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) || !q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) ||
-      (streamed ? !host_tiles(f, (int)(L - f->w->layer), e, &bd, D, ff) : !q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL)))
-    return false;
-  /* 0.7.0: the NPU's share of a prompt step's whole entries, taken from the tables (hip_q4x_npu.c): each kind's packed
-     before the GPU's matmuls of it are queued, run beside them, its rows where theirs go */
-  const bool npu = q4x_npu_take(f, L, n, &bd, D, ff) > 0;
-  return mm_x16_rows(b->mixed, D, b->gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
-         experts(t[0], et.ptr[0], b, &bd, ff, D, b->xg, b->ga, b->yg) &&
-         experts(t[1], et.ptr[1], b, &bd, ff, D, b->xg, b->up, b->yg) && (!npu || q4x_npu_gate_up(f, L, D, ff)) &&
-         q4x_swiglu_rows(b->ga, b->up, ff, b->hidx, bd.slots, b->xe16, b->overflow, NULL) &&
-         (!npu || q4x_npu_pack_down(f, ff)) && experts(t[2], et.ptr[2], b, &bd, D, ff, b->xd, b->y, b->yd) &&
-         (!npu || q4x_npu_down(f, L, D, ff)) &&
-         (n > Q4X_SIDE_STEP || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
-         q4x_moe_sum(b->y, b->where, b->w, n, k, D, b->sh, b->sl, b->out, NULL);
-}
-
-/* the shared expert and its gate's logit (b.sh, b.sl) - after the FFN's mixer, b.x16 its mixed (q4x_mix): a token's
-   own, so with the layer's part (a step past MM_MAX_TOKENS: a sub-batch at a time, b.x16 the mixer's still) */
-bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n)
-{
-  const Q4xGeometry *g = &f->w->geo;
-  Q4xBuf *b = &f->b;
-  const uint32_t D = (uint32_t)g->n_embd, sff = (uint32_t)g->ff_shexp;
-  Q4xX16 sd;
-  /* a small step's (decode, a draft's verify): the shared expert on the second stream, beside the routed experts -
-     both latency-bound at a few tokens, together nearer the memory's bandwidth (plain decode 23.9 -> 25.8 tok/s,
-     drafted 40.1 -> 43.6, low-power). it reads the mixer's outputs alone (b.mixed, b.x16) and writes b.sh, b.sl and
-     its own f16 into b.x16, which the routed experts do not touch (theirs b.xe16); q4x_moe_sum waits for it. the same
-     kernels on the same inputs: the same bits */
-  const bool side_stream = n <= Q4X_SIDE_STEP;
-  if (side_stream && (hipEventRecord(f->e_in, NULL) != hipSuccess || hipStreamWaitEvent(f->s2, f->e_in, 0) != hipSuccess))
-    return false;
-  if (side_stream)
-    f->st = f->s2;
-  if (side_stream && f->side_spin && !q4x_spin(f->side_spin, f->s2)) /* a test's: the shared expert last */
-    return false;
-  const bool ok = q4x_mat2(f, L->sh_gate, sff, b->shg, sff, L->sh_up, sff, b->shu, sff, D, b->mixed, D, n,
-                           n <= MM_MAX_TOKENS) &&
-                  q4x_swiglu(b->shg, b->shu, (uint64_t)n * sff, b->shg, side(f, n, sff, &sd), f->st) &&
-                  q4x_mat(f, L->sh_down, D, sff, b->shg, sff, n, b->sh, D, n <= MM_MAX_TOKENS) &&
-                  mat(f, L->sh_gate_inp, 1, D, b->mixed, D, n, b->sl, 1);
-  f->st = NULL;
-  return ok && (!side_stream || hipEventRecord(f->e_out, f->s2) == hipSuccess);
-}
-
-/* the step's tokens' rows already in b.ple_rows */
-/* stream_ngram: the step's n tokens' rows (b.pin_rows', ple_heads a token) begun on the readers into the stage - once
-   the last step's copy of it is done (ple_copied); a step that failed before its n-gram layer: its rows waited for first */
-bool q4x_ple_issue(Q4xForward *f, uint32_t n)
-{
-  const GgufTensor *tab = f->w->ple_table;
-  const uint64_t rb = tab->bytes / tab->dims[1];
-  const uint32_t rows = n * (uint32_t)f->w->geo.ple_heads;
-  if (f->ple_pending)
-    (void)rowread_wait(f->ple_read), f->ple_pending = false;
-  if (hipEventSynchronize(f->ple_copied) != hipSuccess)
-    return false;
-  for (uint32_t i = 0; i < rows; i++)
-    f->ple_off[i] = tab->offset + (uint64_t)f->b.pin_rows[i] * rb;
-  if (!rowread_start(f->ple_read, f->ple_fd, f->ple_off, rows, (uint32_t)rb, f->ple_stage))
-    return false;
-  f->ple_pending = true, f->ple_n = rows;
-  return true;
-}
-
-/* the n-gram table's rows of the n tokens: the held table's own, or (stream_ngram) the stage's - read for the step,
-   copied in whole at its first part (sub-batch 0: b's views at their start), each part's in its view of ple_sbuf */
-static bool ple_table_rows(Q4xForward *f, uint32_t n)
-{
-  const GgufTensor *tab = f->w->ple_table;
-  Q4xBuf *b = &f->b;
-  const uint64_t rb = tab->bytes / tab->dims[1];
-  const uint32_t heads = (uint32_t)f->w->geo.ple_heads;
-  if (!f->stream_ngram)
-    return q4x_rows(TY(tab), q4x_dev(f, tab), rb, (uint32_t)tab->dims[0], b->ple_rows, n * heads, b->emb, NULL);
-  if (f->ple_pending)
-  {
-    f->ple_pending = false;
-    if (!rowread_wait(f->ple_read) ||
-        hipMemcpyAsync(b->ple_sbuf, f->ple_stage, (uint64_t)f->ple_n * rb, hipMemcpyHostToDevice, NULL) != hipSuccess ||
-        hipEventRecord(f->ple_copied, NULL) != hipSuccess)
-      return false;
-  }
-  return q4x_rows(TY(tab), b->ple_sbuf, rb, (uint32_t)tab->dims[0], b->ple_iota, n * heads, b->emb, NULL);
-}
-
-bool q4x_ple(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n)
-{
-  const Q4xGeometry *g = &f->w->geo;
-  const Q4xLayer *L = &f->w->layer[l];
-  Q4xBuf *b = &f->b;
-  const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, hd = hc * D;
-  bool ok = ple_table_rows(f, n) &&
-         q4x_mat2(f, L->ple_key, hd, b->key, hd, L->ple_value, D, b->val, D, D, b->emb, D, n, false) &&
-         q4x_hc_norm(b->key, fv(f, L->ple_norm_key), n, hc, D, g->rms_eps, b->kn, NULL, NULL) &&
-         q4x_hc_norm(b->h, fv(f, L->ple_norm_query), n, hc, D, g->rms_eps, b->qn, NULL, NULL) &&
-         q4x_ple_gate(b->kn, b->qn, b->val, n, hc, D, b->pg, b->gated, NULL) &&
-         q4x_hc_norm(b->gated, fv(f, L->ple_norm_conv), n, hc, D, g->rms_eps, b->nrm, NULL, NULL);
-  for (uint32_t i = 0; ok && i < runs; i++) /* a sequence's conv history over its own tokens */
-  {
-    const uint64_t t0 = r[i].t0 * (uint64_t)hd;
-    ok = q4x_conv(b->nrm + t0, r[i].n, hd, (uint32_t)g->ple_conv, (uint32_t)g->ple_ngram, fv(f, L->ple_conv),
-                  r[i].s->ple_hist, Q4X_SLOTS, r[i].s->cur, b->conv + t0, NULL);
-  }
-  return ok && q4x_add2(b->h, b->gated, b->conv, (uint64_t)n * hd, NULL);
 }

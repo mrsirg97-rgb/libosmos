@@ -88,3 +88,34 @@ bool osmos_gpu_room(uint64_t *bytes);
 
 extern const OsmosFamily osmos_ds4, osmos_q4x, osmos_ink2, osmos_q35, osmos_lfm3, osmos_hy4;
 
+
+/* the engine's handles (hip_engine.c the engine's calls, hip_engine_seq.c a sequence's; one file before 0.16.0) */
+struct OsmosModel
+{
+  const OsmosFamily *fam;
+  void *impl;
+  OsmosFacts facts;
+};
+
+struct Osmos
+{
+  uint32_t last_n; /* the last batch's tokens (0: none, or it failed): the kept view's rows at most */
+  const OsmosFamily *fam;
+  void *impl;
+  uint32_t vocab; /* a logits row's floats (osmos_greedy_except) */
+  float *row;     /* [vocab], a row copied out */
+  float *drow;    /* [vocab] device: a row's copy, its excepted tokens -inf (osmos_sample_except) */
+  int32_t *dpick; /* device: a drawn token */
+  OsmosLedger *ledger; /* the engine's memory, one count (osmos/mem/ledger.h): its own, every family's build borrowing it */
+  uint64_t ram_kept; /* the system's RAM a build leaves free: OsmosOptions' fill, else FIT_RAM_FREE */
+};
+
+struct OsmosSeq
+{
+  Osmos *e;
+  void *impl;
+};
+
+/* hip_engine.c's, for hip_engine_seq.c */
+bool engine_named(const OsmosFamily *fam, char err[OSMOS_ERR], bool ok);
+int engine_named_count(const OsmosFamily *fam, char err[OSMOS_ERR], int got);

@@ -251,3 +251,19 @@ bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n); /* b.sh, b.sl
 bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n);
 bool q4x_ple(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n);
 bool q4x_ple_issue(Q4xForward *f, uint32_t n); /* stream_ngram: the step's n tokens' rows begun (b.pin_rows') */
+
+/* hip_q4x_resident.c's, for hip_q4x_make.c (one file before 0.16.0) */
+bool q4x_buffers(Q4xForward *f, char *err);
+bool q4x_experts(Q4xForward *f, uint64_t budget, char *err);
+void q4x_free_table(Q4xForward *f, const Gguf *g, void **dev);
+bool q4x_mtp_buffers(Q4xForward *f, char *err);
+bool q4x_ple_stream(Q4xForward *f, char *err);
+bool q4x_df_buffers(Q4xForward *f, char *err);
+bool q4x_room_left(Q4xForward *f, const char *after, char *err);
+bool q4x_room_left_past(Q4xForward *f, uint64_t more, const char *after, char *err);
+bool q4x_seq_alloc(Q4xSeq *s, void *p, uint64_t bytes);
+bool q4x_upload(OsmosLedger *l, const Q4xForward *f, const Gguf *g, const Gguf *shadow, const GgufTensor *skip, void ***dev, char *err);
+
+/* hip_q4x_layers.c's, for hip_q4x_moe.c (one file before 0.16.0) */
+const float *q4x_fv(const Q4xForward *f, const GgufTensor *t);
+const Q4xX16 *q4x_side(Q4xForward *f, uint32_t n, uint32_t cols, Q4xX16 *s);
