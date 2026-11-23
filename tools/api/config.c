@@ -35,6 +35,44 @@ static bool num(const Json *v, double *out, const char *key, char *err)
   return true;
 }
 
+/* osmos.json's slots object: keep (a bool), dir (a path), cap / min (whole counts), gb / ram_gb / days (numbers) -
+   each its type, past 0; another key refused */
+static bool slots(Config *c, const Json *v, char *err)
+{
+  if (v->type != JSON_OBJECT)
+    return fail(err, "an object (keep, dir, cap, gb, ram_gb, min, days)", "slots");
+  for (size_t i = 0; i < v->n; i++)
+  {
+    const char *k = v->key[i];
+    const Json *x = v->item[i];
+    double d = 0;
+    if (!strcmp(k, "keep"))
+    {
+      if (x->type != JSON_TRUE && x->type != JSON_FALSE)
+        return fail(err, "true or false", "slots.keep");
+      c->slots_off = x->type == JSON_FALSE;
+      continue;
+    }
+    if (!strcmp(k, "dir"))
+    {
+      if (!str(x, c->slot_dir, sizeof c->slot_dir, "slots.dir", err))
+        return false;
+      continue;
+    }
+    double *at = !strcmp(k, "cap") ? &c->slot_cap : !strcmp(k, "gb") ? &c->slot_gb : !strcmp(k, "ram_gb") ? &c->slot_ram_gb
+               : !strcmp(k, "min") ? &c->slot_min : !strcmp(k, "days") ? &c->slot_days : NULL;
+    char name[48];
+    snprintf(name, sizeof name, "slots.%.32s", k);
+    if (!at)
+      return fail(err, "a key slots does not take (keep, dir, cap, gb, ram_gb, min, days)", name);
+    const bool count = !strcmp(k, "cap") || !strcmp(k, "min");
+    if ((count && x->type != JSON_INT) || !num(x, &d, name, err) || d > 1e7)
+      return fail(err, count ? "a whole count above 0" : "a number above 0", name);
+    *at = d;
+  }
+  return true;
+}
+
 static bool field(Config *c, const char *k, const Json *v, char *err)
 {
   double x;
@@ -97,6 +135,11 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
                                                                          : fail(err, "an integer, 0 (every token) or more", k);
   if (!strcmp(k, "kv_q8"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->kv_q8 = v->type == JSON_TRUE, true
+                                                         : fail(err, "true or false", k);
+  if (!strcmp(k, "slots"))
+    return slots(c, v, err);
+  if (!strcmp(k, "stats"))
+    return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->stats = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
   if (!strcmp(k, "profile"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->profile = v->type == JSON_TRUE, true
@@ -181,6 +224,24 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
     argv[n++] = "--kv-q8";
   if (c->profile)
     argv[n++] = "--profile";
+  if (c->stats)
+    argv[n++] = "--stats";
+  if (c->slots_off)
+    argv[n++] = "--no-slots";
+  if (c->slot_dir[0])
+    argv[n++] = "--slot-dir", argv[n++] = c->slot_dir;
+  const struct
+  {
+    const char *flag;
+    double v;
+  } slot_nums[] = {{"--slot-cap", c->slot_cap}, {"--slot-gb", c->slot_gb}, {"--slot-ram-gb", c->slot_ram_gb},
+                   {"--slot-min", c->slot_min}, {"--slot-days", c->slot_days}};
+  for (size_t i = 0; i < sizeof slot_nums / sizeof *slot_nums; i++)
+    if (slot_nums[i].v > 0)
+    {
+      snprintf(c->num[7 + i], sizeof c->num[7 + i], "%g", slot_nums[i].v);
+      argv[n++] = (char *)slot_nums[i].flag, argv[n++] = c->num[7 + i];
+    }
   if (c->rope_stages[0])
     argv[n++] = "--rope-stages", argv[n++] = c->rope_stages;
   if (c->npu[0])

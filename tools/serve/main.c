@@ -34,12 +34,13 @@
    --answer-after: the reasoning's end token's text (</think>), or #<id>: no --eos token is taken while the turn's
    answer past it is whitespace alone - the row's best other token is (osmos/text/answer.h; osmos-api passes its
    dialect's text; tools/serve/answer_test.py an id).
-   conversations are kept (maya #356; OSMOS_SLOT_KEEP=0: not): OSMOS_SLOT_CAP (4) in RAM, past it OSMOS_SLOT_DIR
-   (<the model's folder>/slots) under OSMOS_SLOT_GB (16), OSMOS_SLOT_MIN (1024) tokens at least, RAM's room the
-   available above --fill's (OSMOS_SLOT_RAM_GB lowers it; past it a state streams to the folder in pieces),
-   OSMOS_SLOT_DAYS (7). OSMOS_STATS=1: the forward's read counters on stderr at exit (the reads it waited on, their
-   time; the guess's). greedy: maya's sampling, penalty and thinking keys are refused, named */
+   conversations are kept (maya #356; --no-slots: not): --slot-cap (4) in RAM, past it --slot-dir (<the model's
+   folder>/slots) under --slot-gb (16), --slot-min (1024) tokens at least, RAM's room the available above --fill's
+   (--slot-ram-gb lowers it; past it a state streams to the folder in pieces), --slot-days (7) - 0.16.0: the env's
+   OSMOS_SLOT_*, options now (osmos.json's slots object). --stats: the forward's read counters on stderr at exit (the
+   reads it waited on, their time; the guess's). greedy: maya's sampling, penalty and thinking keys are refused, named */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,11 +69,28 @@ static bool has(int argc, char **argv, const char *name)
   return false;
 }
 
-static double env_num(const char *name, double dflt)
+/* a flag's number whole (a decimal and nothing after it, finite) in [lo, hi], or dflt when not given: false for
+   one given otherwise (0.16.0: the slots' were env knobs, read with atof) */
+static bool flag_num(int argc, char **argv, const char *name, double dflt, double lo, double hi, double *v)
 {
-  const char *v = getenv(name);
-  return v && *v ? atof(v) : dflt;
+  const char *s = opt(argc, argv, name, NULL);
+  if (!s)
+    return *v = dflt, true;
+  char *end = NULL;
+  errno = 0;
+  const double x = strtod(s, &end);
+  if (end == s || *end || errno || !(x >= lo && x <= hi))
+    return false;
+  *v = x;
+  return true;
 }
+
+/* the slots' options (--slot-*: 0.16.0's, the env's before): their defaults the slots' own measures */
+typedef struct SlotFlags
+{
+  const char *dir; /* NULL: the model's folder's slots/ */
+  double cap, gb, ram_gb, min, days;
+} SlotFlags;
 
 /* --fill's GiB as bytes: a number and nothing after it, 0 or more and finite (more than any machine's: the most) */
 static bool fill_of(const char *s, uint64_t *bytes)
@@ -92,18 +110,16 @@ static int die(const char *what)
   return 2;
 }
 
-static bool open_slots(Server *sv, const char *model, char err[OSMOS_ERR])
+static bool open_slots(Server *sv, const char *model, const SlotFlags *sf, char err[OSMOS_ERR])
 {
   char dflt[4096];
   const char *slash = strrchr(model, '/');
   snprintf(dflt, sizeof dflt, "%.*s/slots", slash ? (int)(slash - model) : 1, slash ? model : ".");
-  const char *dir = getenv("OSMOS_SLOT_DIR") ? getenv("OSMOS_SLOT_DIR") : dflt;
+  const char *dir = sf->dir ? sf->dir : dflt;
   const uint64_t avail = fit_ram_available(), room = avail > sv->ram_kept ? avail - sv->ram_kept : 0;
-  const double cap_gb = env_num("OSMOS_SLOT_RAM_GB", -1); /* lower only: the room above --fill's is the most */
+  const double cap_gb = sf->ram_gb; /* lower only: the room above --fill's is the most */
   const uint64_t ram = cap_gb >= 0 && (uint64_t)(cap_gb * (double)(1ull << 30)) < room ? (uint64_t)(cap_gb * (double)(1ull << 30)) : room;
-  const SlotsOptions so = {dir, (uint32_t)env_num("OSMOS_SLOT_CAP", 4), ram, env_num("OSMOS_SLOT_GB", 16),
-                           (uint32_t)env_num("OSMOS_SLOT_MIN", 1024), env_num("OSMOS_SLOT_DAYS", 7),
-                           osmos_identity(sv->e)};
+  const SlotsOptions so = {dir, (uint32_t)sf->cap, ram, sf->gb, (uint32_t)sf->min, sf->days, osmos_identity(sv->e)};
   char serr[OSMOS_ERR] = "";
   if (!(sv->slots = slots_create(&so, serr)))
     return osmos_fail(err, "%s", serr);
@@ -143,6 +159,12 @@ int main(int argc, char **argv)
                "[--max-context N] [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] "
                "[--no-guess] [--stream-ngram] [--kv-q8] [--npu <dir> [--npu-share F]] "
                "[--overlay <gguf>] [--lsa <maps>] [--profile] [--rope-stages <from:factor,...>] [--serve]");
+  SlotFlags sf = {opt(argc, argv, "--slot-dir", NULL), 0, 0, 0, 0, 0}; /* (read first: a bad one refused before a build) */
+  if (!flag_num(argc, argv, "--slot-cap", 4, 1, 1e6, &sf.cap) || !flag_num(argc, argv, "--slot-gb", 16, 0.001, 1e6, &sf.gb) ||
+      !flag_num(argc, argv, "--slot-ram-gb", -1, 0, 1e6, &sf.ram_gb) ||
+      !flag_num(argc, argv, "--slot-min", 1024, 1, 1e9, &sf.min) || !flag_num(argc, argv, "--slot-days", 7, 0, 1e5, &sf.days) ||
+      sf.cap != (double)(uint32_t)sf.cap || sf.min != (double)(uint32_t)sf.min)
+    return die("--slot-cap / --slot-min whole counts, --slot-gb / --slot-ram-gb / --slot-days numbers, each in its range");
   Server sv = {0};
   sv.max_ctx = (uint32_t)atol(opt(argc, argv, "--max-context", "1048576"));
   sv.max_tokens = (uint32_t)atol(opt(argc, argv, "--max-tokens", "2048"));
@@ -194,7 +216,7 @@ int main(int argc, char **argv)
     return die(err);
   if (osmos_reads_apart(sv.e)) /* (a client's - a test's - what a next turn reuses: its prompt's point, not its answer) */
     out("NOTE reads apart: a turn's earlier answer is read again from its prompt's point, never continued on\n");
-  if (env_num("OSMOS_SLOT_KEEP", 1) != 0 && !open_slots(&sv, model, err))
+  if (!has(argc, argv, "--no-slots") && !open_slots(&sv, model, &sf, err))
     return die(err);
   const int rc = par ? serve_multi(&sv, conv, lanes) : serve_single(&sv, conv);
   if (sv.slots) /* the end: every conversation set aside, RAM's written to the folder */
@@ -206,7 +228,7 @@ int main(int argc, char **argv)
       out("NOTE slots: %s\n", serr);
     slots_destroy(sv.slots);
   }
-  if (getenv("OSMOS_STATS") && sv.e) /* the engine's counters at the end (a bench's: where its time waits) */
+  if (has(argc, argv, "--stats") && sv.e) /* the engine's counters at the end (a bench's: where its time waits) */
   {
     OsmosStats st;
     osmos_stats(sv.e, &st);

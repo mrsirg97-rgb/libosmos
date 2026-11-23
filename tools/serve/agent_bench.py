@@ -163,11 +163,11 @@ def main():
           flush=True)
     ok = True
     if a.only in ("both", "osmos"):
+        slots = tempfile.mkdtemp(prefix="osmos-bench-slots-", dir=a.slot_parent)  # on the SSD (/tmp: RAM here)
         args = ["--model", a.model] + (["--dspark", a.dspark] if a.dspark else []) + ["--budget", a.budget, "--max-tokens", a.max_tokens,
                 "--max-context", str(a.ctx), "--parallel", str(a.lanes or a.agents)] + (["--picks", a.picks] if a.picks else []) + \
-            a.osmos_flag
-        slots = tempfile.mkdtemp(prefix="osmos-bench-slots-", dir=a.slot_parent)  # on the SSD (/tmp: RAM here)
-        env = dict(os.environ, OSMOS_SLOT_KEEP="1" if a.slots == "on" else "0", OSMOS_SLOT_DIR=slots)
+            a.osmos_flag + ["--slot-dir", slots] + ([] if a.slots == "on" else ["--no-slots"])
+        env = dict(os.environ)
         try:
             ok &= report(run(f"osmos-serve (budget {a.budget} GiB, {a.max_tokens}-token steps, "
                              f"{a.lanes or a.agents} lanes, slots {a.slots})", a.exe, args, env, plan, text,

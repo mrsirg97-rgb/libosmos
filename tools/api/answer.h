@@ -16,6 +16,7 @@ typedef struct Answer
 {
   int fd;
   const struct Http *http; /* its connection (the fd's): a response's headers its (an allowed origin's CORS) */
+  uint32_t keepalive_ms;   /* a stream's keep-alive comment past this quiet (Api's) */
   bool stream;
   const char *model;
   const Dialect *d; /* the markers it is cut at */

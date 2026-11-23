@@ -43,18 +43,7 @@ static const char *boot_tag(void)
   return boot;
 }
 
-/* KEEPALIVE_MS, or OSMOS_API_KEEPALIVE_MS (a test's shorter one) */
-static uint32_t keepalive_ms(void)
-{
-  static uint32_t ms;
-  if (!ms)
-  {
-    const char *e = getenv("OSMOS_API_KEEPALIVE_MS");
-    const long v = e ? strtol(e, NULL, 10) : 0;
-    ms = v > 0 ? (uint32_t)v : KEEPALIVE_MS;
-  }
-  return ms;
-}
+
 
 /* the client closed its end (a stream's reader gone: its run STOPped) */
 static bool closed(int fd)
@@ -71,7 +60,7 @@ static bool more(Api *a, Run *r, size_t *seen, Answer *s)
   pthread_mutex_lock(&r->mu);
   while (*seen == r->n && !r->done)
   {
-    if (s->stream && !s->gone && ++s->idle * WAIT_MS > keepalive_ms())
+    if (s->stream && !s->gone && ++s->idle * WAIT_MS > s->keepalive_ms)
     {
       ping = true; /* written below, the lock let go: a slow client never holds the engine's appends */
       break;
@@ -507,7 +496,7 @@ void api_chat(Api *a, Http *h)
     request_free(&rq);
     return;
   }
-  Answer s = {.fd = h->fd, .http = h, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
+  Answer s = {.fd = h->fd, .http = h, .keepalive_ms = a->keepalive_ms ? a->keepalive_ms : KEEPALIVE_MS, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
               .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT, .loop = &rq.loop,
               .sampled = rq.sampled, .seed = rq.seed,
               .boundary = a->d->header != NULL};

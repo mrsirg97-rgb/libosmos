@@ -1665,13 +1665,13 @@ caller's, no server. this ports both, as one binary that speaks maya's line prot
 - a request that does not continue the conversation in its Seq sets that one aside first, then takes back the kept
   conversation whose tokens are the longest prefix of the prompt (longer than what the Seq holds already); only the
   rest of the prompt is read.
-- RAM first (`OSMOS_SLOT_CAP`, 4), past it the least recently used to a folder (`OSMOS_SLOT_DIR`, beside the
-  model), the folder capped (`OSMOS_SLOT_GB`, 16: the least recently used removed, never the one just written),
-  conversations under `OSMOS_SLOT_MIN` tokens (1024) not kept, a folder's older than `OSMOS_SLOT_DAYS` (7)
-  removed. a slot is a `.bin` and a `.meta` (the identity, the tokens, the size), each written under a temporary name
+- RAM first (`--slot-cap`, 4), past it the least recently used to a folder (`--slot-dir`, beside the
+  model), the folder capped (`--slot-gb`, 16: the least recently used removed, never the one just written),
+  conversations under `--slot-min` tokens (1024) not kept, a folder's older than `--slot-days` (7)
+  removed (0.16.0: these were the env's `OSMOS_SLOT_*`; flags now, osmos.json's `slots` object through osmos-api). a slot is a `.bin` and a `.meta` (the identity, the tokens, the size), each written under a temporary name
   and renamed; at start the folder is indexed and a slot whose `.meta` is missing, foreign or disagrees is removed.
-  QUIT sets every conversation aside and writes RAM's to the folder. on by default since 0.5.6 (`OSMOS_SLOT_KEEP=0`
-  turns it off), RAM held by bytes too (0.5.6's "doing less").
+  QUIT sets every conversation aside and writes RAM's to the folder. on by default since 0.5.6 (`--no-slots`,
+  `"slots": {"keep": false}`, turns it off), RAM held by bytes too (0.5.6's "doing less").
 
 **3. several conversations at once (#587's)**
 - `--parallel N`: N Seqs. the loop on libevt's engine (`~/Projects/libevt`): stdin's lines and the turns are

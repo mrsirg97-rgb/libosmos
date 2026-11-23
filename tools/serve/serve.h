@@ -22,7 +22,7 @@ typedef struct Ids
 typedef struct Server
 {
   Osmos *e;       /* the model's engine: its drafter when osmos_block is not 0 */
-  Slots *slots;    /* or NULL (OSMOS_SLOT_KEEP off) */
+  Slots *slots;    /* or NULL (--no-slots) */
   uint32_t max_tokens, max_ctx;
   uint32_t round_tokens; /* a decode step's most tokens: (experts - 1) / experts a token; more, a prompt's step */
   uint32_t window;       /* a drafter seed's window: the positions it reads back from a prompt's end */

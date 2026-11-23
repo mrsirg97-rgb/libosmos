@@ -426,7 +426,7 @@ The Speed tables: each pack through `osmos-api` on its own `osmos.json`, a fresh
 
 ```sh
 powerprofilesctl set performance
-OSMOS_SLOT_KEEP=0 bin/osmos-api --config ~/Models/osmos/<pack>/osmos.json --port 8241 &
+bin/osmos-api --config ~/Models/osmos/<pack>/osmos.json --port 8241 &   # its osmos.json with "slots": {"keep": false}
 curl -s localhost:8241/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 16}' > /dev/null   # the warm-up
 curl -s localhost:8241/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages": [{"role": "user",

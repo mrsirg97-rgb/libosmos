@@ -4,7 +4,7 @@
 
 #include "api.h"
 
-#define CONFIG_ARGS_MAX 40 /* config_argv's every flag and its NULL (36 with all: room past it) */
+#define CONFIG_ARGS_MAX 56 /* config_argv's every flag and its NULL (49 with all: room past it) */
 
 /* a pack's osmos.json (the installer's: tools/install/layout.py) - what the engine is started with */
 typedef struct Config
@@ -30,7 +30,12 @@ typedef struct Config
   double npu_share;   /* its share of a layer's pairs (--npu-share): 0 osmos-serve's own */
   unsigned max_context, parallel;
   unsigned max_tokens; /* a prompt step's tokens (osmos-serve's --max-tokens); 0: osmos-serve's own */
-  char num[7][32]; /* config_argv's numbers as text */
+  /* osmos-serve's slots (0.16.0: the env knobs OSMOS_SLOT_*, options): kept unless keep false; each 0 / "" its own */
+  bool slots_off;
+  char slot_dir[PATH_MAX];
+  double slot_cap, slot_gb, slot_ram_gb, slot_min, slot_days;
+  bool stats; /* osmos-serve's --stats (the engine's counters at its end: a bench's) */
+  char num[13][32]; /* config_argv's numbers as text */
   char eng[PATH_MAX];
 } Config;
 

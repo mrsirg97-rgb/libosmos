@@ -57,7 +57,7 @@ def main():
     D = calib[9000:12000]
     loop = D + other[5000:5200]  # the loop's next round: D, its answer and a tool's result (a continuation)
     turn_d = D[:-1] + [swap] + other[5200:5264]
-    e = Engine(a.exe, args, dict(os.environ, OSMOS_SLOT_KEEP="0"))
+    e = Engine(a.exe, args + ["--no-slots"], dict(os.environ))
     try:
         e.gen(A, 16)
         rt = e.gen(turn, 16)

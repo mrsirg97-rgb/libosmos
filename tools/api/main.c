@@ -1,7 +1,7 @@
 /* osmos-api: the engine as an OpenAI-compatible server (DESIGN.md, "osmos-api").
 
      osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>] [--ctx N|Nk|Nm]
-               [--allow-origin <origin>]...
+               [--allow-origin <origin>]... [--keepalive-ms N]
      osmos-api --tokenize --model <first shard>     (stdin's text as the prompt's ids, one line: for tests)
 
    POST /v1/chat/completions, GET /v1/models, GET /health (503 while the engine loads). osmos-serve - beside this
@@ -258,6 +258,14 @@ int main(int argc, char **argv)
     return die(err);
   char dport[16];
   snprintf(dport, sizeof dport, "%d", API_PORT);
+  if (opt(argc, argv, "--keepalive-ms", NULL)) /* (a test's shorter one: 0.16.0 OSMOS_API_KEEPALIVE_MS) */
+  {
+    char *e;
+    const long v = strtol(opt(argc, argv, "--keepalive-ms", NULL), &e, 10);
+    if (*e || v < 100 || v > 600000)
+      return die("--keepalive-ms: a whole number of milliseconds, 100 to 600000");
+    api.keepalive_ms = (uint32_t)v;
+  }
   for (int i = 1; i + 1 < argc; i++) /* --allow-origin, each its own */
     if (!strcmp(argv[i], "--allow-origin"))
     {

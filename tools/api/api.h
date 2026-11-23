@@ -115,6 +115,7 @@ typedef struct Api
   double temperature, top_p; /* the pack's sampling: a request's unset, these (0.14.0; temperature 0 greedy) */
   unsigned top_k;            /* likewise (0.15.2; 0 every token) */
   const char *allow[API_ORIGINS_MAX]; /* --allow-origin's: browsers' origins taken (CORS), any other refused */
+  uint32_t keepalive_ms; /* a stream's keep-alive comment past this quiet (--keepalive-ms; 0.16.0 an env knob) */
   int n_allow;
 } Api;
 

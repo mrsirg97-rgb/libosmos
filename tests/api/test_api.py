@@ -895,7 +895,7 @@ class AllowedOrigin(Served, unittest.TestCase):
 class KeepAlive(Served, unittest.TestCase):
     """0.11.2: a stream silent past the keep-alive (a long prompt's read) gets SSE comments - a client's idle timeout
     not taken for a dead server (its retry read the prompt again from the start, and timed out again)"""
-    env = {"OSMOS_API_KEEPALIVE_MS": "1000"}
+    args = ["--keepalive-ms", "1000"]  # (0.16.0: the env OSMOS_API_KEEPALIVE_MS, an option now)
 
     def test_a_silent_read_kept_alive(self):
         self.ready()
@@ -1007,6 +1007,42 @@ class Profile(Served, unittest.TestCase):
                                capture_output=True, text=True, timeout=30)
             self.assertNotEqual(r.returncode, 0, bad)
             self.assertIn(next(iter(bad)), r.stderr)
+
+
+class SlotsAndStats(Served, unittest.TestCase):
+    """osmos.json's slots and stats: osmos-serve's --no-slots / --slot-* and --stats (0.16.0: the env knobs
+    OSMOS_SLOT_KEEP, _DIR, _CAP, _GB, _RAM_GB, _MIN, _DAYS and OSMOS_STATS, options now); each its type and range"""
+    settings = {"slots": {"keep": True, "dir": "/tmp/osmos-slots-test", "cap": 6, "gb": 12.5, "ram_gb": 4,
+                          "min": 2048, "days": 3}, "stats": True}
+
+    def test_0_passed_on(self):
+        self.ready()
+        args = self.log()[0].split()
+        for flag, value in (("--slot-dir", "/tmp/osmos-slots-test"), ("--slot-cap", "6"), ("--slot-gb", "12.5"),
+                            ("--slot-ram-gb", "4"), ("--slot-min", "2048"), ("--slot-days", "3")):
+            self.assertEqual(args[args.index(flag) + 1], value, flag)
+        self.assertIn("--stats", args)
+        self.assertNotIn("--no-slots", args)
+
+    def test_1_refused(self):
+        for bad in ({"slots": {"keep": 1}}, {"slots": {"cap": -1}}, {"slots": {"gb": "x"}}, {"slots": {"what": 1}},
+                    {"slots": []}, {"stats": 1}):
+            d = tempfile.mkdtemp()
+            cfg = os.path.join(d, "osmos.json")
+            with open(cfg, "w") as f:
+                json.dump({"pack": "test", "model": MODEL, "max_context": 4096, **bad}, f)
+            r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                               capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn(next(iter(bad)), r.stderr)
+
+
+class NoSlots(Served, unittest.TestCase):
+    settings = {"slots": {"keep": False}}
+
+    def test_0_passed_on(self):
+        self.ready()
+        self.assertIn("--no-slots", self.log()[0].split())
 
 
 class Npu(Served, unittest.TestCase):
