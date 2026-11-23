@@ -1,7 +1,9 @@
-/* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h): src/ink2/hip_forward.c the weights, the membrane and
-   the step; src/ink2/hip_seq.c a sequence's tails, its saves and marks */
+/* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h): src/ink2/hip_ink2_make.c the weights, the membrane and
+   the buffers; hip_ink2_moe.c a layer's MoE; hip_ink2_ctrl.c its controls; hip_ink2_step.c the step; hip_seq.c a
+   sequence's tails, its saves and marks */
 #pragma once
 #include "osmos/gpu/bufs.h"
+#include "osmos/gpu/mm.h" /* (MM_TILE: the experts' table sizes below) */
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/model/moe_route.h"
 
@@ -92,7 +94,7 @@ struct Ink2Seq
   uint64_t tap_step; /* the forward's step that wrote its taps (Ink2Forward.steps; 0: none) - a seed reads its own */
 };
 
-#define INK2_PF_N 9 /* the profile's sections (hip_forward.c's PF_*) */
+#define INK2_PF_N 9 /* the profile's sections (PF_*, below) */
 
 struct Ink2Forward
 {
@@ -102,7 +104,7 @@ struct Ink2Forward
     bool on;                                /* Ink2Options' profile */
     double total[2][INK2_PF_N], step[INK2_PF_N], at; /* the sections' totals [decode, prompt], this step's, the last mark */
     uint64_t tokens[2], steps[2];
-  } pf;                /* the profile (hip_forward.c's sections): the forward's own - 0.16.0: a process's statics */
+  } pf;                /* the profile (PF_*'s sections): the forward's own - 0.16.0: a process's statics */
   GpuBufs bufs;        /* every GPU and pinned buffer of the forward and its drafter, recorded as made (ink2_dalloc,
                           osmos/gpu/bufs.h) - freed from the record, the last made first */
   uint64_t steps; /* ink2_step's calls: the drafter's taps the last one's, every sequence's in it (Ink2Seq.tap_step) */
@@ -174,7 +176,7 @@ struct Ink2Forward
   uint32_t n; /* the last step's rows */
 };
 
-/* hip_forward.c's: device memory counted in the forward's bytes; a tensor's bytes from g's file, its F32 values on the
+/* hip_ink2_make.c's: device memory counted in the forward's bytes; a tensor's bytes from g's file, its F32 values on the
    host (F32 / F16 / BF16), uploaded; the drafter's y [n][rows] = W x (mv_run, MV_MAX_TOKENS a launch) */
 bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes);
 bool ink2_up_host(Ink2Forward *f, const float *v, uint64_t n, float **out);
@@ -196,3 +198,39 @@ bool ink2_mtp_seq_make(Ink2Seq *s);
 void ink2_mtp_seq_free(Ink2Seq *s);
 bool ink2_mtp_tap(Ink2Forward *f, int slot, const float *x, uint32_t n, uint32_t row0);
 void *ink2_tail_row(const Ink2Tail *t, uint32_t r);
+
+/* the forward's parts (hip_ink2_make.c / _moe.c / _ctrl.c / _step.c, one file before 0.16.0): what one calls of
+   another. */
+/* Ink2Options' profile: a step's sections timed, each after a synchronize (the bits the same), totals at destroy */
+/* Ink2Options' profile: a step's sections timed, each after a synchronize (the bits the same), totals at destroy */
+enum
+{
+  PF_IN,     /* the layer's inputs: attention residuals, norms, q / k / v / rel / gate / sink, convs, clips */
+  PF_ATTN,   /* a sliding layer's attention (its window's keys) */
+  PF_FULL,   /* a full layer's attention (every key so far) */
+  PF_MID,    /* the output's matrix and conv, the residual, the MoE's input; the MoE's conv and residual */
+  PF_MOE,    /* the router, the experts (their waits apart: PF_WAIT) */
+  PF_WAIT,   /* the experts' holds and waits (the membrane's reads), inside PF_MOE */
+  PF_ROUTE,  /* the router's matrix and picks, their copy to the host, inside PF_MOE */
+  PF_XK,     /* the experts' tables sent and their kernels, inside PF_MOE */
+  PF_HEAD,   /* the embedding, the head */
+  PF_N
+};
+_Static_assert(PF_N == INK2_PF_N, "the profile's sections: Ink2Forward's pf");
+static inline uint64_t ink2_table_entries(uint64_t P, uint64_t E) { return P + E; }
+static inline uint64_t ink2_table_slots(uint64_t P, uint64_t E) { return P + E * (MM_TILE - 1); }
+static inline uint64_t ink2_table_bytes(uint64_t P, uint64_t E)
+{
+  return ink2_table_entries(P, E) * (3 * sizeof(void *) + 5 * 4) + ink2_table_slots(P, E) * 2 * 4 + P * 4 * 4;
+}
+double ink2_pf_now(void);
+void ink2_pf(Ink2Forward *f, int b);
+bool ink2_mm_takes(const Ink2Forward *f, uint32_t type, uint32_t rows, uint32_t cols);
+bool ink2_mat(Ink2Forward *f, const GgufTensor *t, const void *w, const float *x, uint32_t n, float *y);
+bool ink2_mat2(Ink2Forward *f, const GgufTensor *t0, const void *w0, float *y0, const GgufTensor *t1, const void *w1, float *y1, const float *x, uint32_t n, bool ready);
+bool ink2_rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const float *w, uint32_t n, float *y, bool *ready);
+bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err);
+bool ink2_conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint32_t taps, const float *w, uint32_t heads, const float *dyn, float res, float scale, const float *add, float *y);
+bool ink2_proj_batch(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, bool full, bool apart, const float *aq, const float *ak, const float *av, const float *q_norm, const float *k_norm, const float *v_norm, uint32_t n, float *dyn_k, float *dyn_v, bool *ok);
+bool ink2_control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, const float *x, const float *m, uint32_t n, float *out);
+bool ink2_controls3(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, const float *const *x, const float *m, uint32_t n, float *out, bool *ok);

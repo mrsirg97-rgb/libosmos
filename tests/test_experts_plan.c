@@ -36,7 +36,7 @@ static uint64_t ref_stream(const PoolUnit *u, uint32_t L, uint32_t E, const bool
   return 2 * most > whole ? 2 * most : whole;
 }
 
-/* Inkling's experts() sizing (ink2/hip_forward.c, 0.12.3), with the plan's one change (every unit warm: 3 units) */
+/* Inkling's experts() sizing (ink2/hip_ink2_make.c, 0.12.3), with the plan's one change (every unit warm: 3 units) */
 static ExpertsPlan ref_plan(const PoolUnit *u, uint32_t L, uint32_t E, const uint32_t *warm, uint64_t room0,
                             uint64_t budget, uint64_t fixed)
 {
