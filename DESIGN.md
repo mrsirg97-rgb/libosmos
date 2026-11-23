@@ -2229,7 +2229,14 @@ upload (Inkling's private whole-tensor path beside src/mem's); the engine adapte
 passthroughs; drafter wiring (a directory or a file, by family; the dflash2 check twice); a state header's checks; the
 allocation helpers (one zeroes, one pads, four do neither). Last, the meaning of a budget: DeepSeek's the resident
 weights alone, the others' the whole build, budget 0 three meanings - one meaning, DeepSeek's sizing through the
-shared plan (the flagship's sizing: its own gate, --budget auto on every DeepSeek pack).
+shared plan (the flagship's sizing: its own gate, --budget auto on every DeepSeek pack). With it, fit_sized near the
+edge (found by phase 1's check, in 0.15.2's release binary alike): the room moves in ~1 GiB steps, not smoothly
+(DeepSeek: 98.88 GiB left 1.86, 99.11 left 0.86) - the headroom's window inside one step - so a sizing whose first
+long step lands on the flat just past a step creeps across it (99.63 / 99.47 / 99.25 / 99.02 all ~0.8-0.96), runs out
+of builds and keeps the last that fit, 14 GiB short (84.98 GiB; another start of the same binary kept 98.88). The fix:
+the step read from the builds (two budgets, one room), and a build on a flat past the headroom stepped below the
+step, not across it; test_fit a case of builds run out on a flat. (A drift model, an algorithm tuned to it - pure
+halving, regula falsi - did worse on the box: tried, measured and reverted in phase 1.)
 
 **phase 5 - the untrusted boundary** (osmos-api, osmos-serve): a parse-memory budget (a 32 MB body is ~2 GB of tree,
 then copied again), a whole-request deadline (a byte every 9 s holds a connection for hours), the request's fields an
