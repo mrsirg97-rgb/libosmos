@@ -27,14 +27,19 @@ struct Pack {
   const char* model;    // under $HOME
   const char* lsa;      // under $HOME, or NULL
   const char* drafter;  // under $HOME, or NULL
+  bool smallest;        // the smallest build (every expert streamed): a pack past this machine's memory whole
 };
 
 static const Pack kPacks[] = {
     {"osmos1.7b", "/Models/osmos/osmos1.7b/osmos1.7b-Q4_0.gguf", "/Models/osmos/osmos1.7b/osmos1.7b-lsa-maps.safetensors",
      "/Models/osmos1.7b/osmos1.7b-dflash2-Q4_0.gguf"},
+    {"inkling-2-mini", "/Models/osmos/inkling-2-mini/Inkling-2-Mini-00001-of-00002.gguf", nullptr,
+     "/Models/osmos/inkling-2-mini/ink2-mini-mtp-q8.gguf"},
+    {"osmos-evo-inkling", "/Models/osmos/osmos-evo-inkling/Inkling-2-Small-UD-IQ1_S-00001-of-00005.gguf", nullptr,
+     nullptr, true},
 };
 // the families whose builds go through the ledger (stage 4 adds one a commit; at its end every family, and this goes)
-static const std::set<std::string> kLedgered = {"lfm3"};
+static const std::set<std::string> kLedgered = {"lfm3", "inkling2"};
 
 static std::string home(const char* p) {
   const char* h = std::getenv("HOME");
@@ -70,6 +75,7 @@ static bool one(const Pack& p) {
   const uint64_t opened = alloc_count::held();  // (the model's own: not the engine's tree)
   OsmosOptions o = small_pack_options(m, 4096);
   if (p.drafter && !access(drafter.c_str(), R_OK)) o.drafter = drafter.c_str();
+  if (p.smallest) o.budget = 1;
   Osmos* e = osmos_create(m, &o, err);
   if (!e) std::fprintf(stderr, "  %s\n", err);
   CHECK(e);
@@ -101,8 +107,10 @@ static bool one(const Pack& p) {
   same(p.name, "a sequence destroyed", e, opened);
   oseq_destroy(s[0]);
   osmos_destroy(e);
+  if (alloc_count::held() != opened) alloc_count::say(opened);
   CHECK(alloc_count::held() == opened);  // the engine's whole tree given back
   osmos_close(m);
+  if (alloc_count::held() != before) alloc_count::say(before);
   CHECK(alloc_count::held() == before);
   std::printf("  %s: destroyed, every byte given back\n", p.name);
   return true;

@@ -178,7 +178,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
       return osmos_fail(err, "%s", ierr), e_destroy(e), NULL;
   }
   const Ink2Options io = {o->max_ctx, osmos_step_tokens(o, INK2_STEP_TOKENS), 0, e->picks, e->mtp, o->budget,
-                          INK2_LOGIT_ROWS, o->kv_q8};
+                          INK2_LOGIT_ROWS, o->kv_q8, ledger};
   if (!(e->f = ink2_forward_create(m->w, &io, err)))
     return e_destroy(e), NULL;
   return e;

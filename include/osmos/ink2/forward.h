@@ -31,6 +31,8 @@ typedef struct Ink2Options
                             a decode's or a drafted round's every row, each lane's); 0: max_tokens (every row) */
   bool values_q8;        /* a full layer's cached values Q8 records (ink2_fa8), not Q5 (ink2_fa85): a value's bytes
                             its key's - for a model with the room (osmos-serve's --kv-q8) */
+  struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
+                                 borrowed - the engine's, outliving the forward); NULL counts nothing */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[OSMOS_ERR]);

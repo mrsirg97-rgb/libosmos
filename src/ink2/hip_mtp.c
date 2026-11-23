@@ -120,21 +120,20 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
     for (uint32_t r = 0; ok && r < R; r++)
       for (uint32_t c = 0; c < C; c++)
         cols[(size_t)r * C + c] = hw[(size_t)c * R + r];
-    ok = ok && hipMalloc((void **)&dcols, (size_t)R * C * 4) == hipSuccess &&
+    ok = ok && ledger_malloc(f->ledger, (void **)&dcols, (size_t)R * C * 4) == hipSuccess &&
          hipMemcpy(dcols, cols, (size_t)R * C * 4, hipMemcpyHostToDevice) == hipSuccess &&
-         hipMalloc((void **)&dt, (size_t)R * VR * 4) == hipSuccess && hipMalloc((void **)&db, (size_t)C * 4) == hipSuccess &&
+         ledger_malloc(f->ledger, (void **)&dt, (size_t)R * VR * 4) == hipSuccess &&
+         ledger_malloc(f->ledger, (void **)&db, (size_t)C * 4) == hipSuccess &&
          hipMemcpy(db, hb, (size_t)C * 4, hipMemcpyHostToDevice) == hipSuccess &&
          ink2_mv(f->w->output, f->output, dcols, R, dt) && ink2_dalloc(f, &d->fold, Q8_0_BYTES((uint64_t)VR * R)) &&
          ink2_transpose_q8_0(dt, R, VR, d->fold, NULL) && ink2_dalloc(f, (void **)&d->fold_b, (uint64_t)VR * 4) &&
          ink2_mv(f->w->output, f->output, db, 1, d->fold_b) && hipDeviceSynchronize() == hipSuccess;
   }
   free(fw), free(rnn), free(hw), free(hb), free(cols);
-  if (dcols)
-    hipFree(dcols);
-  if (dt)
-    hipFree(dt);
-  if (db)
-    hipFree(db);
+  void *tmp[] = {dcols, dt, db}; /* (the fold's staging) */
+  for (size_t i = 0; i < sizeof tmp / sizeof *tmp; i++)
+    if (tmp[i])
+      ledger_free(f->ledger, tmp[i]);
   if (!ok)
     return osmos_fail(err, "the drafter: the drafter's mixtures, Markov projections or fold not made");
   struct
@@ -162,27 +161,6 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
   return overflow_reset(&d->ovf, err);
 }
 
-void ink2_mtp_down(Ink2Forward *f)
-{
-  Ink2MtpDev *d = &f->md;
-  void *p[] = {d->alpha, d->mask, d->norm, d->m_dflare, d->w_sp, d->w_hf, d->rnn_b, d->fold_b, d->w1, d->fold,
-               d->taps, d->mix, d->kctx, d->vctx, d->x, d->res, d->nrm, d->q, d->kb, d->vb, d->att, d->ob, d->g, d->u,
-               d->hf, d->inv, d->vec, d->p, d->state, d->latent, d->corr, d->base, d->lg, d->probs, d->scr, d->f_rnn,
-               d->pos, d->prev, d->ids, d->x16, d->overflow};
-  for (size_t i = 0; i < sizeof p / sizeof *p; i++)
-    if (p[i])
-      hipFree(p[i]);
-  for (int l = 0; l < INK2_MTP_MAX_LAYERS; l++)
-  {
-    void *q[] = {d->wq[l], d->wk[l], d->wv[l], d->wkc[l], d->wvc[l], d->wo[l], d->wgate[l], d->wup[l], d->wdown[l],
-                 d->in_norm[l], d->post_norm[l], d->dflare[l], d->q_norm[l], d->k_norm[l], d->k_norm_ctx[l]};
-    for (size_t i = 0; i < sizeof q / sizeof *q; i++)
-      if (q[i])
-        hipFree(q[i]);
-  }
-  memset(d, 0, sizeof *d);
-}
-
 bool ink2_mtp_seq_make(Ink2Seq *s)
 {
   const Ink2Forward *f = s->f;
@@ -191,24 +169,26 @@ bool ink2_mtp_seq_make(Ink2Seq *s)
   {
     s->mrows[l] = ring_rows(f, l);
     const uint64_t bytes = (uint64_t)s->mrows[l] * KV * 2;
-    if (hipMalloc((void **)&s->mk[l], bytes) != hipSuccess || hipMalloc((void **)&s->mv[l], bytes) != hipSuccess)
+    if (ledger_malloc(f->ledger, (void **)&s->mk[l], bytes) != hipSuccess ||
+        ledger_malloc(f->ledger, (void **)&s->mv[l], bytes) != hipSuccess)
       return false;
   }
   s->mfrom = s->mend = 0;
-  return hipMalloc((void **)&s->mlast, (uint64_t)f->mtp->n_taps * f->mtp->n_embd * 4) == hipSuccess;
+  return ledger_malloc(f->ledger, (void **)&s->mlast, (uint64_t)f->mtp->n_taps * f->mtp->n_embd * 4) == hipSuccess;
 }
 
 void ink2_mtp_seq_free(Ink2Seq *s)
 {
-  for (int l = 0; l < INK2_MTP_MAX_LAYERS; l++)
+  OsmosLedger *l = s->f->ledger;
+  for (int i = 0; i < INK2_MTP_MAX_LAYERS; i++)
   {
-    if (s->mk[l])
-      hipFree(s->mk[l]);
-    if (s->mv[l])
-      hipFree(s->mv[l]);
+    if (s->mk[i])
+      ledger_free(l, s->mk[i]);
+    if (s->mv[i])
+      ledger_free(l, s->mv[i]);
   }
   if (s->mlast)
-    hipFree(s->mlast);
+    ledger_free(l, s->mlast);
 }
 
 bool ink2_mtp_tap(Ink2Forward *f, int slot, const float *x, uint32_t n, uint32_t row0)

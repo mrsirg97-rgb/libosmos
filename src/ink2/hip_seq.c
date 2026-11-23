@@ -64,10 +64,11 @@ bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n)
   return true;
 }
 
-static bool tail_make(Ink2Tail *t, uint32_t row, uint32_t esize, uint32_t keep, uint32_t cap, uint32_t zeros)
+static bool tail_make(OsmosLedger *l, Ink2Tail *t, uint32_t row, uint32_t esize, uint32_t keep, uint32_t cap,
+                      uint32_t zeros)
 {
   *t = (Ink2Tail){NULL, row, esize, keep, cap, zeros};
-  return hipMalloc(&t->d, (uint64_t)cap * row * esize) == hipSuccess &&
+  return ledger_malloc(l, &t->d, (uint64_t)cap * row * esize) == hipSuccess &&
          hipMemset(t->d, 0, (uint64_t)cap * row * esize) == hipSuccess;
 }
 
@@ -101,12 +102,12 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[OSMOS_ERR])
   for (int l = 0; ok && l < g->n_slots; l++)
   {
     for (int c = 0; ok && c < INK2_CONVS; c++)
-      ok = tail_make(&s->conv[l][c], conv_row(f, c), 4, ck, 2 * ck + INK2_TAIL_STEP, conv_need(f));
+      ok = tail_make(f->ledger, &s->conv[l][c], conv_row(f, c), 4, ck, 2 * ck + INK2_TAIL_STEP, conv_need(f));
     if (ok && ink2_slot_sliding(g, l))
-      ok = tail_make(&s->kw[l], kd, 2, wk, 2 * wk + T, 0) && tail_make(&s->vw[l], kd, 2, wk, 2 * wk + T, 0);
+      ok = tail_make(f->ledger, &s->kw[l], kd, 2, wk, 2 * wk + T, 0) && tail_make(f->ledger, &s->vw[l], kd, 2, wk, 2 * wk + T, 0);
     else if (ok)
-      ok = tail_make(&s->kw[l], kv, INK2_KV8_RECORD, f->max_ctx, f->max_ctx, 0) &&
-           tail_make(&s->vw[l], kv, f->v8 ? INK2_KV8_RECORD : INK2_KV5_RECORD, f->max_ctx, f->max_ctx, 0);
+      ok = tail_make(f->ledger, &s->kw[l], kv, INK2_KV8_RECORD, f->max_ctx, f->max_ctx, 0) &&
+           tail_make(f->ledger, &s->vw[l], kv, f->v8 ? INK2_KV8_RECORD : INK2_KV5_RECORD, f->max_ctx, f->max_ctx, 0);
   }
   if (ok && f->mtp)
     ok = ink2_mtp_seq_make(s);
@@ -134,15 +135,16 @@ void ink2_seq_destroy(Ink2Seq *s)
   if (!s)
     return;
   hipDeviceSynchronize();
+  OsmosLedger *led = s->f->ledger; /* (its memory its forward's ledger's) */
   for (int l = 0; l < INK2_MAX_LAYERS; l++)
   {
     for (int c = 0; c < INK2_CONVS; c++)
       if (s->conv[l][c].d)
-        hipFree(s->conv[l][c].d);
+        ledger_free(led, s->conv[l][c].d);
     if (s->kw[l].d)
-      hipFree(s->kw[l].d);
+      ledger_free(led, s->kw[l].d);
     if (s->vw[l].d)
-      hipFree(s->vw[l].d);
+      ledger_free(led, s->vw[l].d);
   }
   ink2_mtp_seq_free(s);
   free(s);

@@ -1,8 +1,10 @@
 #ifndef OSMOS_GPU_BUFS_H
 #define OSMOS_GPU_BUFS_H
 
-/* a forward's step buffers allocated from one table and freed from what it recorded (src/mem/hip_bufs.c) - one list
-   a buffer, not an allocation's and a teardown's kept in step by hand (0.11.2) */
+/* a component's buffers recorded as they are made and freed from the record (src/mem/hip_bufs.c) - one list a buffer,
+   never an allocation's and a teardown's kept in step by hand (0.11.2's rule; 0.15.3: Mini's hand-kept list had
+   lost five of its buffers - 11.3 MiB an engine, test_engine_ledger_gpu). device memory or pinned host memory, each
+   through one ledger, freed in reverse */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -10,26 +12,32 @@
 
 #include "osmos/mem/ledger.h"
 
-#define GPU_BUFS_MAX 128 /* a forward's table's buffers at most */
-
 typedef struct GpuWant
 {
   void *p;        /* the pointer's address (a float **, an int32_t **, ...) */
   uint64_t bytes; /* 0: one byte (a buffer every step reads the address of) */
 } GpuWant;
 
+typedef struct GpuBuf
+{
+  void **p;  /* the pointer's address: NULLed when freed */
+  bool host; /* pinned host memory (ledger_host_malloc's), else the device's */
+} GpuBuf;
+
 typedef struct GpuBufs
 {
-  void **slot[GPU_BUFS_MAX];
-  uint32_t n;
-  OsmosLedger *ledger; /* what they were taken from (borrowed: the forward's build's) */
+  GpuBuf *slot; /* the record, grown as it fills */
+  uint32_t n, cap;
+  OsmosLedger *ledger; /* what they were taken from (borrowed: the build's; every call on one GpuBufs the same) */
 } GpuBufs;
 
-/* each wanted buffer allocated on the device through l (osmos/mem/ledger.h; NULL counts nothing - every call on one
-   GpuBufs the same ledger) and recorded; false at the first the GPU refused (those before it
-   recorded: gpu_bufs_free frees them) or past GPU_BUFS_MAX */
+/* each wanted buffer allocated on the device through l (osmos/mem/ledger.h; NULL counts nothing) and recorded; false
+   at the first refused (those before it recorded: gpu_bufs_free frees them) */
 bool gpu_bufs_alloc(GpuBufs *b, OsmosLedger *l, const GpuWant *want, size_t n);
-/* every recorded buffer freed, its pointer NULL; the record empty */
+/* one device buffer, or one of pinned host memory, recorded alike */
+bool gpu_bufs_one(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes);
+bool gpu_bufs_host(GpuBufs *b, OsmosLedger *l, void *p, uint64_t bytes);
+/* every recorded buffer freed, the last made first, its pointer NULL; the record gone */
 void gpu_bufs_free(GpuBufs *b);
 
 #endif

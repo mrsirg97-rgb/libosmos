@@ -1,6 +1,8 @@
 /* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h): src/ink2/hip_forward.c the weights, the membrane and
    the step; src/ink2/hip_seq.c a sequence's tails, its saves and marks */
 #pragma once
+#include "osmos/gpu/bufs.h"
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/model/moe_route.h"
 
 #include <stdbool.h>
@@ -92,6 +94,9 @@ struct Ink2Seq
 
 struct Ink2Forward
 {
+  OsmosLedger *ledger; /* borrowed (Ink2Options'): every allocation of the forward and its sequences */
+  GpuBufs bufs;        /* every GPU and pinned buffer of the forward and its drafter, recorded as made (ink2_dalloc,
+                          osmos/gpu/bufs.h) - freed from the record, the last made first */
   uint64_t steps; /* ink2_step's calls: the drafter's taps the last one's, every sequence's in it (Ink2Seq.tap_step) */
   const Ink2Weights *w;
   const Ink2Mtp *mtp; /* the drafter, or NULL */
@@ -182,7 +187,6 @@ bool ink2_tail_put(Ink2Tail *t, const float *x, uint32_t n);
 void *ink2_tail_claim(Ink2Tail *t, uint32_t n);
 /* hip_mtp.c: the drafter's weights and buffers (its fold made), freed; a sequence's rings; a step's taps kept */
 bool ink2_mtp_up(Ink2Forward *f, char *err);
-void ink2_mtp_down(Ink2Forward *f);
 bool ink2_mtp_seq_make(Ink2Seq *s);
 void ink2_mtp_seq_free(Ink2Seq *s);
 bool ink2_mtp_tap(Ink2Forward *f, int slot, const float *x, uint32_t n, uint32_t row0);

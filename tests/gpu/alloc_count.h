@@ -6,7 +6,11 @@
 #include <hip/hip_runtime.h>
 #include <hsa/hsa_ext_amd.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <functional>
+#include <vector>
 #include <mutex>
 #include <unordered_map>
 
@@ -32,6 +36,19 @@ inline uint64_t held() {
   uint64_t n = 0;
   for (auto& kv : live()) n += kv.second;
   return n;
+}
+// what is held, said (a leak's allocations: their sizes, the largest first)
+inline void say(uint64_t from) {
+  std::lock_guard<std::mutex> g(mu);
+  std::vector<uint64_t> b;
+  for (auto& kv : live()) b.push_back(kv.second);
+  std::sort(b.begin(), b.end(), std::greater<uint64_t>());
+  uint64_t n = 0;
+  for (uint64_t x : b) n += x;
+  std::fprintf(stderr, "  held: %zu allocations, %llu bytes past %llu:", b.size(), (unsigned long long) (n - from),
+               (unsigned long long) from);
+  for (size_t i = 0; i < b.size() && i < 12; i++) std::fprintf(stderr, " %llu", (unsigned long long) b[i]);
+  std::fprintf(stderr, "\n");
 }
 }  // namespace alloc_count
 

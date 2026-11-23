@@ -72,8 +72,8 @@ static void pf(int b)
 
 bool ink2_dalloc(Ink2Forward *f, void **p, uint64_t bytes)
 {
-  if (hipMalloc(p, bytes + 16) != hipSuccess)
-    return *p = NULL, false;
+  if (!gpu_bufs_one(&f->bufs, f->ledger, p, bytes + 16))
+    return false;
   f->dense_bytes += bytes;
   return true;
 }
@@ -173,12 +173,12 @@ bool ink2_up_raw_of(Ink2Forward *f, const Gguf *g, const GgufTensor *t, void **o
   const uint64_t rows = t->n_dims == 2 ? t->dims[1] : 1, packed = q5 ? t->bytes / 176 * 180 : t->bytes;
   bool ok = b && ink2_read_tensor(g, t, b) && ink2_dalloc(f, out, packed);
   if (ok && q5)
-    ok = hipMalloc(&stage, t->bytes) == hipSuccess && hipMemcpy(stage, b, t->bytes, hipMemcpyHostToDevice) == hipSuccess &&
+    ok = ledger_malloc(f->ledger, &stage, t->bytes) == hipSuccess && hipMemcpy(stage, b, t->bytes, hipMemcpyHostToDevice) == hipSuccess &&
          quant_repack_q5k(stage, (uint32_t)rows, (uint32_t)t->dims[0], *out, NULL) && hipDeviceSynchronize() == hipSuccess;
   else if (ok)
     ok = hipMemcpy(*out, b, t->bytes, hipMemcpyHostToDevice) == hipSuccess;
   if (stage)
-    hipFree(stage);
+    ledger_free(f->ledger, stage);
   free(b);
   return ok;
 }
@@ -329,7 +329,7 @@ static bool experts(Ink2Forward *f, uint64_t room, uint64_t budget, const uint64
   char merr[OSMOS_ERR] = "";
   if (ok && !experts_plan(units, L, E, warm, room, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
-  if (ok && !experts_create(NULL /* ledger: stage 4 */, units, L, E, warm, &plan, ARENA_GRAIN, INK2_EXPERT_READERS, copy_host, NULL, 0, true, &ex,
+  if (ok && !experts_create(f->ledger, units, L, E, warm, &plan, ARENA_GRAIN, INK2_EXPERT_READERS, copy_host, NULL, 0, true, &ex,
                             merr))
     ok = osmos_fail(err, "%s", merr[0] ? merr : "the experts' membrane refused");
   if (ok)
@@ -495,9 +495,9 @@ static bool buffers(Ink2Forward *f)
     return false;
   /* the router's picks and weights and the experts' tables through pinned host memory: copies queued on the stream,
      one synchronize a layer for the picks, none for the tables (the next layer's picks' wait is past them) */
-  if (hipHostMalloc((void **)&f->hpick, 2 * T * K * 4, 0) != hipSuccess ||
-      hipHostMalloc((void **)&f->hgpick, T * K * 4, 0) != hipSuccess ||
-      hipHostMalloc((void **)&f->m_host, table_bytes(T * K, E), 0) != hipSuccess)
+  if (!gpu_bufs_host(&f->bufs, f->ledger, &f->hpick, 2 * T * K * 4) ||
+      !gpu_bufs_host(&f->bufs, f->ledger, &f->hgpick, T * K * 4) ||
+      !gpu_bufs_host(&f->bufs, f->ledger, &f->m_host, table_bytes(T * K, E)))
     return false;
   f->kept = calloc(T, 1), f->slot = malloc(T * sizeof *f->slot);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);
@@ -516,6 +516,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   Ink2Forward *f = calloc(1, sizeof *f);
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
+  f->ledger = o->ledger;
   f->bf16_mm = w->layer[0].q && ink2_type(w->layer[0].q) == QTYPE_BF16; /* (mm_takes': BF16 the model's dense weights) */
   f->w = w, f->v8 = o->values_q8, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
@@ -586,48 +587,16 @@ void ink2_forward_destroy(Ink2Forward *f)
             ms.wait_ns[1] * 1e-9);
   }
   hipDeviceSynchronize();
-  if (f->mtp)
-    ink2_mtp_down(f);
   membrane_destroy(f->mem);
   host_slots_destroy(f->slots), host_slots_destroy(f->stream);
   for (int i = 0; f->fds && i < f->w->model->n_files; i++)
     if (f->fds[i] >= 0)
       close(f->fds[i]);
   free(f->fds);
-  void *dev[] = {f->embed, f->output, f->embed_norm, f->out_res_q, f->out_norm, f->ids_d, f->h, f->blocks, f->a3,
-                 f->xn, f->kn, f->vn, f->q, f->k, f->v, f->kc, f->vc, f->rel, f->gate, f->sink, f->att, f->dyn,
-                 f->o, f->r, f->moe, f->logit, f->tmp, f->pick, f->eg, f->eu, f->ed, f->head,
-                 f->logits, f->gid, f->amax, f->m_dev, f->gpick, f->gw, f->x16, f->xe16, f->overflow,
-                 f->res_sc, f->pre_h, f->bank, f->bank_out, f->msg, f->ctl, f->ccat, f->cgate, f->cgain,
-                 f->cforget, (void *)f->exp_tab, f->scale_tab, f->picks_d, (void *)f->t_ptr, f->t_cnt, f->t_gidx,
-                 f->t_hidx, f->t_where, f->t_off, f->t_xg, f->t_yg, f->t_xd, f->t_yd, f->t_sg, f->t_su, f->t_a};
-  for (size_t i = 0; i < sizeof dev / sizeof *dev; i++)
-    if (dev[i])
-      hipFree(dev[i]);
   for (int l = 0; l < INK2_MAX_LAYERS; l++)
-  {
-    Ink2Dev *d = &f->L[l];
-    void *p[] = {d->attn_res_q, d->ffn_res_q, d->attn_norm, d->q_norm, d->k_norm, d->v_norm, d->ffn_norm, d->q,
-                 d->k, d->v, d->rel, d->out, d->gate, d->sink, d->router, d->k_conv_proj, d->v_conv_proj,
-                 d->q_clip, d->rel_clip, d->rel_proj, d->router_bias, d->k_conv, d->v_conv, d->out_conv,
-                 d->ffn_out_conv, d->msg_q};
-    for (size_t i = 0; i < sizeof p / sizeof *p; i++)
-      if (p[i])
-        hipFree(p[i]);
-    for (int c = 0; c < INK2_CTRLS; c++)
-    {
-      void *q[] = {d->ctrl_down[c], d->ctrl_gain[c], d->ctrl_forget[c]};
-      for (int i = 0; i < 3; i++)
-        if (q[i])
-          hipFree(q[i]);
-    }
     for (int k = 0; k < 3; k++)
-      free(d->scale[k]);
-  }
-  void *pinned[] = {f->hpick, f->hgpick, f->m_host};
-  for (size_t i = 0; i < sizeof pinned / sizeof *pinned; i++)
-    if (pinned[i])
-      hipHostFree(pinned[i]);
+      free(f->L[l].scale[k]);
+  gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer, the forward's and its drafter's: from the record */
   free(f->picks), free(f->picks_all), free(f->kept), free(f->slot), free(f->m_at), free(f->m_by);
   free(f->m_key), free(f->m_build), free(f->m_ent), free(f->m_run), free(f->m_ex);
   free(f);
