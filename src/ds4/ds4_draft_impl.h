@@ -1,10 +1,10 @@
-#ifndef DRAFTER_IMPL_H
-#define DRAFTER_IMPL_H
+#ifndef DS4_DRAFT_IMPL_H
+#define DS4_DRAFT_IMPL_H
 
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/model/dspark.h"
-#include "osmos/run/drafter.h"
+#include "osmos/ds4/drafter.h"
 
 #define DRAFTER_BLOCKS 3          /* mtp.0 .. mtp.2 */
 #define DRAFTER_EXPERTS 128       /* a block's routed experts */
@@ -62,7 +62,7 @@ struct Drafter
   DPin *pin;
 };
 
-/* hip_drafter_round.c: a round's blocks on the d->ids rows at p0, into d->xc (the collapse) */
+/* hip_ds4_draft_round.c: a round's blocks on the d->ids rows at p0, into d->xc (the collapse) */
 bool drafter_blocks(Drafter *d, Seq *s, int32_t p0, char *err);
 
 #endif

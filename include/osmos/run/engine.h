@@ -138,7 +138,7 @@ bool oseq_draft_all(OsmosSeq *const *s, const int32_t *y, uint32_t n, float conf
 engine
   the one shape the server, the bench and the tools run a model through, whatever its family (DESIGN.md, "0.4.0: one
   engine interface"): a family is chosen by the file's general.architecture, and each call is that family's - its
-  bits, its errors. a family's own headers (osmos/run/forward.h, drafter.h) stay for its tests; this header names no
+  bits, its errors. a family's own headers (osmos/ds4/forward.h, drafter.h) stay for its tests; this header names no
   family's types.
 
 osmos_open

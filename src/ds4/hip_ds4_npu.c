@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "osmos/model/qtype.h"
 #include "osmos/err.h"
 
@@ -48,7 +48,7 @@ bool fwd_npu_make(Forward *f, const char *dir, float share, char *err)
       /* the cache's pages and the stream's: every expert a step holds (npu_run refuses one outside them) */
       !npu_region(f->npu, hb, host_slots_bytes(f->hs), nerr) ||
       !npu_region(f->npu, sb, host_slots_bytes(f->hs_stream), nerr) ||
-      /* where its rows go: the step's gate, up and down outputs (their sizes hip_forward.c's buffers()') */
+      /* where its rows go: the step's gate, up and down outputs (their sizes hip_ds4_make.c's buffers()') */
       !npu_device(f->npu, f->b.ga, pairs * g->expert_ff * sizeof(float), nerr) ||
       !npu_device(f->npu, f->b.upr, pairs * g->expert_ff * sizeof(float), nerr) ||
       !npu_device(f->npu, f->b.ye, pairs * g->n_embd * sizeof(float), nerr))

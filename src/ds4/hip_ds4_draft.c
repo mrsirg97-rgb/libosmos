@@ -5,14 +5,14 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "drafter_impl.h"
+#include "ds4_draft_impl.h"
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/model/qtype.h"
 #include "osmos/mem/hip_slots.h"
 #include "osmos/err.h"
 
-/* the drafter: its weights in GPU memory of their own, its rings from the trunk's taps, a round's head (hip_drafter.c)
-   behind its blocks (hip_drafter_round.c) */
+/* the drafter: its weights in GPU memory of their own, its rings from the trunk's taps, a round's head (hip_ds4_draft.c)
+   behind its blocks (hip_ds4_draft_round.c) */
 
 #define DRAFTER_READERS 4 /* the load's readers: the fetcher's (DESIGN.md) */
 

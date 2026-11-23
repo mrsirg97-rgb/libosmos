@@ -1,5 +1,5 @@
 // the lane's bits are not its residency's: forward_lane over 20 layers at two budgets - the tight one streaming far
-// more of each step's experts, read while the ready ones run (hip_lane.c: those in GPU memory first, the reading
+// more of each step's experts, read while the ready ones run (hip_ds4_lane.c: those in GPU memory first, the reading
 // ones after) - an 8-token prompt, then 24 tokens a step at a time; every step's stream out the same bits at both.
 // a token's rows summed in any order but ascending expert id fails it. and the lane's CPU half at the tight budget
 // (forward_lane's cpu_threads: the experts not in GPU memory computed on the CPU) - the same bits again, the CPU's
@@ -18,7 +18,7 @@ extern "C" {
 #include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 

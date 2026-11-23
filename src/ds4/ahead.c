@@ -1,4 +1,4 @@
-#include "osmos/run/ahead.h"
+#include "osmos/ds4/ahead.h"
 
 uint32_t ahead_union(const int32_t *guess, uint32_t tokens, uint32_t per_token, uint32_t k, uint32_t n_experts,
                      bool *named)

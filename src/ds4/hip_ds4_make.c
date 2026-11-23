@@ -10,7 +10,7 @@
 #include "osmos/model/tensor.h"
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/run/fit.h"
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "osmos/mem/experts.h"
 #include "osmos/mem/arena.h"
 #include "osmos/mem/hip_slots.h"
@@ -22,7 +22,7 @@
 #include "osmos/err.h"
 #include "osmos/model/dspark.h"
 
-#define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_forward.c) */
+#define FWD_REPACK_STAGE (64u << 20) /* the Q5_K repack's chunk of a matrix, copied out (hip_ds4_make.c) */
 #define FWD_FETCH_THREADS 12 /* DESIGN.md, the fetcher: 4 at the SSD's ceiling; 12 a decode's miss sooner (UD, step 5) */
 #define FWD_ROW_THREADS 64  /* DESIGN.md, Engram's reads: 64 threads 832,000 random rows/s, 128 no more */
 #define TENSORS_A_LAYER (sizeof(LayerWeights) / sizeof(const GgufTensor *))
@@ -389,7 +389,7 @@ static bool scratch(Forward *f)
       {&b->ikr_p, B * kv_row_bytes(KV_FP4_POW2, (uint32_t)ih)}, {&b->row_f, hd * F},
       {&b->ckv_f, (uint64_t)f->ckv_f_rows * hd * F}, {&b->ring_f, (uint64_t)f->slots * hd * F},
       {&b->score, (f->score_rows * (uint64_t)f->score_stride > B * Fs ? f->score_rows * (uint64_t)f->score_stride
-                                                                        : B * Fs) * F}, /* the indexer's; hip_skip.c's */
+                                                                        : B * Fs) * F}, /* the indexer's; hip_ds4_skip.c's */
       {&b->att, OPS_ATTN_SCRATCH(B, g->n_heads, (uint64_t)g->window + g->ix_topk) * F},
       {&b->erow, B * cols * row}, {&b->erow_f, B * egv * F},        {&b->ekv, B * (hc + 1) * D * F},
       {&b->ids, B * 4},           {&b->pos, B * 4},                 {&b->rpos, B * 4},
@@ -436,7 +436,7 @@ static bool scratch(Forward *f)
          hipEventCreateWithFlags(&f->passed, hipEventDisableTiming) == hipSuccess;
 }
 
-/* the sub-batches' own state (forward_impl.h's Sub): the first the Forward's own buffers, the others their own */
+/* the sub-batches' own state (ds4_impl.h's Sub): the first the Forward's own buffers, the others their own */
 static bool subs(Forward *f)
 {
   const Geometry *g = f->g;
@@ -663,7 +663,7 @@ void forward_waits(const Forward *f, uint64_t n[2], uint64_t ns[2])
 const float *forward_logits(const Forward *f) { return f->b.vocab; }
 uint32_t forward_logit_rows(const Forward *f) { return f ? f->vocab_rows : 0; }
 
-static bool settle(void *f) { return fwd_settle(f); } /* (the forward's wait: a decode's spins - hip_wait.c) */
+static bool settle(void *f) { return fwd_settle(f); } /* (the forward's wait: a decode's spins - hip_ds4_wait.c) */
 
 void forward_kept_view(const Forward *f, KeptView *k)
 {

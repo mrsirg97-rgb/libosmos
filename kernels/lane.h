@@ -1,4 +1,4 @@
-/* the lane's arithmetic, the same on the GPU and the CPU (hip_lane.c's experts, kernels/ops.hip's lane swiglu): IEEE
+/* the lane's arithmetic, the same on the GPU and the CPU (hip_ds4_lane.c's experts, kernels/ops.hip's lane swiglu): IEEE
    operations only - fmaf, rintf, ldexpf, + - * / - in one order, so the same bits wherever they run (the C side built
    with -ffp-contract=off, as the HIP side is). an exp of its own: the libraries' expf need not agree */
 #ifndef LANE_H

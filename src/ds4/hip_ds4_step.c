@@ -3,13 +3,13 @@
 
 #include <hip/hip_runtime_api.h>
 
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "lane.h"
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/err.h"
-#include "drafter_impl.h"
+#include "ds4_draft_impl.h"
 
 Seq *seq_create(Forward *f, char err[OSMOS_ERR])
 {
@@ -214,7 +214,7 @@ static bool place(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
   return true;
 }
 
-/* a sub-batch's start: its plan (hip_skip.c), its tokens and positions to the GPU, its streams embedded */
+/* a sub-batch's start: its plan (hip_ds4_skip.c), its tokens and positions to the GPU, its streams embedded */
 static bool begin(Forward *f, char *err)
 {
   const Geometry *g = f->g;

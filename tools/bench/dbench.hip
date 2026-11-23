@@ -31,8 +31,8 @@ extern "C" {
 #include "osmos/run/fit.h"
 #include "osmos/run/gpu.h"
 #include "osmos/cpu/lane.h"
-#include "osmos/run/forward.h"
-#include "osmos/run/drafter.h"
+#include "osmos/ds4/forward.h"
+#include "osmos/ds4/drafter.h"
 #include "osmos/run/engine.h"  // the drafting floors (osmos-serve's)
 }
 

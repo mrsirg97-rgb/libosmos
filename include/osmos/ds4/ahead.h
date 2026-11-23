@@ -1,5 +1,5 @@
-#ifndef OSMOS_RUN_AHEAD_H
-#define OSMOS_RUN_AHEAD_H
+#ifndef OSMOS_DS4_AHEAD_H
+#define OSMOS_DS4_AHEAD_H
 
 #include <stdbool.h>
 #include <stdint.h>

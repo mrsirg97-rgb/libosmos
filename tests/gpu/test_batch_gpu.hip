@@ -27,7 +27,7 @@ extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/gpu/mm.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 #include "test_fit.h"
@@ -311,7 +311,7 @@ int main() {
               "(%.1f tok/s, %.2fx); a prompt 16 a step %.0f ms (%.1f tok/s, %.2fx)\n", schedules, n, alone_ms,
               n * 1e3 / alone_ms, inter_ms, n * 1e3 / inter_ms, alone_ms / inter_ms, prompt_ms, n * 1e3 / prompt_ms,
               alone_ms / prompt_ms);
-  // the decoder's reach (hip_skip.c): the skip's first sub-batch (its sequence's first 2,048) all before it, so that
+  // the decoder's reach (hip_ds4_skip.c): the skip's first sub-batch (its sequence's first 2,048) all before it, so that
   // sub-batch has none past dec
   int src = -1;
   for (int l = 0; l < w->geo.n_layers; l++)

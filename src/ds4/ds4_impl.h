@@ -1,5 +1,5 @@
-#ifndef FORWARD_IMPL_H
-#define FORWARD_IMPL_H
+#ifndef DS4_IMPL_H
+#define DS4_IMPL_H
 
 #include "osmos/gpu/bufs.h"
 #include "osmos/mem/ledger_hip.h"
@@ -26,7 +26,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/model/engram.h"
 #include "osmos/npu/npu.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 #include "osmos/gpu/overflow.h"
 #include "osmos/model/dspark.h"
 
@@ -47,7 +47,7 @@
 /* the resident set's following of the text (hip_adapt.c): an expert's heat halved every this many steps; a streamed
    one takes a resident one's place when this much hotter; at most this many a layer a step (each a copy in GPU
    memory) */
-#define FWD_GUESS_K 6 /* a token's next-layer experts guessed (hip_guess.c): the router's top this many */
+#define FWD_GUESS_K 6 /* a token's next-layer experts guessed (hip_ds4_guess.c): the router's top this many */
 /* a layer's routing tables at most for `pairs` pairs: 3 matrix pointers, 4 offsets, a count an entry (an expert, or
    a part of MM_MAX_TOKENS of one: at most pairs entries); an order and a pair a pair; 2 x 16 slots an expert - with
    each table's alignment (16) */
@@ -56,7 +56,7 @@
 #define FWD_MAX_SLOTS(pairs, experts) ((pairs) + (uint64_t)(experts) * (MM_TILE - 1))
 
 /* a sub-batch's own: all its tokens carry from one layer to the next - swapped into the Forward and its Scratch to
-   run one of its layers (hip_step.c's enter and leave) */
+   run one of its layers (hip_ds4_step.c's enter and leave) */
 typedef struct Sub
 {
   float *h, *f_pre;
@@ -90,7 +90,7 @@ typedef struct Scratch
   float *lat, *kvc, *scg, *ikr, *qix, *wix, *score;
   uint8_t *kv_p, *lat_p, *ikr_p; /* the step's rows packed as a sequence keeps them (kvfmt.h): keys, latents, ix keys */
   float *row_f;                  /* a kept row read back for a probe, and packed again after it */
-  float *ckv_f;                  /* a prompt step's compressed rows unpacked once for its attention (hip_attn.c), up
+  float *ckv_f;                  /* a prompt step's compressed rows unpacked once for its attention (hip_ds4_attn.c), up
                                     to ckv_f_rows of them */
   float *ring_f;                 /* and the window's ring (the forward's slots) */
   float *att;                   /* the attention's scores, then their denominators (ops_sparse_attn) */
@@ -101,8 +101,8 @@ typedef struct Scratch
   uint32_t *clist; /* a scored chunk's tokens' candidate blocks, listed (ops_cand_list: score_rows x cand_blocks) */
   uint32_t *clist_n;
   float *bmax;    /* the candidate source's blocks' highest scores (ops_cand_blocks_max: score_rows x blocks) */
-  int32_t *keep, *back; /* the decoder's tokens (hip_skip.c): kept, compacted; then each back at its row */
-  float *gw;            /* the next layer's guessed experts' weights (hip_guess.c: the router's, unread) */
+  int32_t *keep, *back; /* the decoder's tokens (hip_ds4_skip.c): kept, compacted; then each back at its row */
+  float *gw;            /* the next layer's guessed experts' weights (hip_ds4_guess.c: the router's, unread) */
 } Scratch;
 
 /* host memory the GPU copies to and from on the stream (pinned: the copies are asynchronous). each is written only
@@ -114,7 +114,7 @@ typedef struct Pinned
   int32_t overflow;               /* an activation past f16: the step refused */
   int32_t oa_cnt[FWD_MAX_GROUPS]; /* each wo_a group's tokens: the step's */
   int32_t rpos[WEIGHTS_MAX_LAYERS][FWD_MAX_BATCH];
-  int32_t keep[FWD_MAX_BATCH], back[FWD_MAX_BATCH]; /* hip_skip.c's: the kept tokens' rows, and back */
+  int32_t keep[FWD_MAX_BATCH], back[FWD_MAX_BATCH]; /* hip_ds4_skip.c's: the kept tokens' rows, and back */
   int32_t greedy[FWD_MAX_BATCH];                    /* forward_greedy's picks */
 } Pinned;
 
@@ -154,14 +154,14 @@ struct Forward
   bool eg_pending;                                   /* the step's rows begun, not yet waited for */
   Engram *hash;
   float *eg_gate[WEIGHTS_MAX_LAYERS]; /* each Engram layer's gate, F32 q k on the device (ops_engram_gate) */
-  uint16_t *guess_router[WEIGHTS_MAX_LAYERS]; /* an F32 router's BF16 copy for the guess alone (hip_guess.c), or NULL */
+  uint16_t *guess_router[WEIGHTS_MAX_LAYERS]; /* an F32 router's BF16 copy for the guess alone (hip_ds4_guess.c), or NULL */
   bool no_guess;                              /* ForwardOptions': nothing guessed, no router copy made */
   float *freqs_win, *freqs_comp;
   Scratch b;
   OverflowFlag ovf; /* b.overflow's reset (osmos/gpu/overflow.h): owed when one failed */
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
   /* the experts' routing, a layer's every sub-batch at once: pinned, the picks [token][slot] and the tables
-     (hip_ffn.c's carve, one copy to Scratch's up); on the host, the pairs' by-expert order and places */
+     (hip_ds4_ffn.c's carve, one copy to Scratch's up); on the host, the pairs' by-expert order and places */
   int32_t *r_ids;         /* mapped and coherent: the router writes the picks here (r_ids_dev) - no copy kernel */
   int32_t *r_guess;       /* mapped and coherent: the next layer's guessed experts, [token][FWD_GUESS_K] */
   int32_t *r_ids_dev, *r_guess_dev; /* their device addresses */
@@ -173,7 +173,7 @@ struct Forward
   /* the lane's (ForwardOptions' lane): on, its CPU threads (0: every expert on the GPU, in the order the CPU would sum it), and a small
      step's tables - pinned, [gate, up, down][pair] pointers then each token's pairs in ascending expert id */
   /* 0.7.0: the NPU beside the GPU (npu.h; forward_npu): a prompt step's hottest experts' gate and up, a fixed
-     share of an eligible layer's pairs in whole NPU_TOKENS parts (hip_ffn.c's npu_pick) - by routing alone, so the
+     share of an eligible layer's pairs in whole NPU_TOKENS parts (hip_ds4_ffn.c's npu_pick) - by routing alone, so the
      same prompt the same bits; on, another forward_identity */
   Npu *npu;
   float npu_share;   /* the share of a layer's pairs the NPU takes */
@@ -201,7 +201,7 @@ struct Forward
   int8_t *lane_xq;        /* the step's tokens' FFN inputs to int8, a row a token - once, however many experts it
                              picked; gate and up read a row's by its token (xin) - and their scales */
   float *lane_xqd;
-  /* the lane's CPU half (hip_cpu_lane.c; lane_threads > 0): the experts of a small step that are not in GPU memory
+  /* the lane's CPU half (hip_ds4_cpu_lane.c; lane_threads > 0): the experts of a small step that are not in GPU memory
      computed by a pool of threads from the model's files mapped read-only, their rows handed back in host memory the
      GPU maps, cpu_seq posted with cpu_value when they are there (the stream waits on it) */
   CpuLane *cpu;
@@ -235,7 +235,7 @@ struct Forward
   Pinned *pin;
   hipEvent_t routed;                /* the router's picks are on the host */
   hipEvent_t passed;                /* fwd_wait's: the stream past the work queued so far */
-  uint32_t step_n;                  /* the step's tokens (forward_batch's n): a wait's spin or sleep (hip_wait.c) */
+  uint32_t step_n;                  /* the step's tokens (forward_batch's n): a wait's spin or sleep (hip_ds4_wait.c) */
   Sub sub[FWD_MAX_SUBS];            /* the step's sub-batches; the Forward's own fields the one running */
   uint32_t n_subs, max_tokens;      /* the most sub-batches a step takes (ForwardOptions' max_tokens), and its tokens */
   uint32_t step;                    /* a sub-batch's most tokens: FWD_MAX_BATCH, or max_tokens (to 16s) below it - every
@@ -326,7 +326,7 @@ bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd
 /* the taps planned (the target layers at[]: f->tapped, tap_of, n_tap), before the step's buffers are made (taps' with
    them) - ForwardOptions' drafter's */
 void fwd_taps_plan(Forward *f, const bool *at);
-/* hip_lane.c, hip_fwd_npu.c, hip_drafter.c: what forward_create_with makes last (ForwardOptions' lane, npu, drafter) */
+/* hip_ds4_lane.c, hip_ds4_npu.c, hip_ds4_draft.c: what forward_create_with makes last (ForwardOptions' lane, npu, drafter) */
 bool fwd_lane_make(Forward *f, int cpu_threads, const int *cpu_cores, char *err);
 bool fwd_npu_make(Forward *f, const char *dir, float share, char *err);
 /* the drafter's plan, read before the forward's GPU memory (its index, its target layers checked: at[]), and the
@@ -349,24 +349,24 @@ bool fwd_mat_ready(Forward *f, const GgufTensor *t, const void *w, uint32_t rows
 bool fwd_engram(Forward *f, int l, int nth, char *err);
 /* every Engram row a step reads, begun at its start (the forward's thread goes on); fwd_engram waits for them */
 bool fwd_engram_issue(Forward *f, char *err);
-/* hip_skip.c: the decoder skip (seq_prompt) - the step's plan, its compaction past layer dec, the head, the stream */
+/* hip_ds4_skip.c: the decoder skip (seq_prompt) - the step's plan, its compaction past layer dec, the head, the stream */
 void fwd_decoder(Forward *f);
 void fwd_plan(Forward *f);
 bool fwd_compact(Forward *f, char *err);
 bool fwd_head(Forward *f, char *err);
 bool fwd_moe(Forward *f, int l, char *err);
-/* hip_guess.c: a small step's next-layer experts guessed from this layer's FFN input - the guess queued before the
+/* hip_ds4_guess.c: a small step's next-layer experts guessed from this layer's FFN input - the guess queued before the
    routing event (its copy beside the picks'), its streamed experts wanted after it, the picks scored against it */
 bool fwd_guess_queue(Forward *f, int l);
 bool fwd_prompt_ahead(const Forward *f, int l); /* a prompt's step: its read ahead the guess's union */
 void fwd_guess_want(Forward *f, int l);
-/* hip_lane.c: a small step's routed experts in the matvec's order (the lane's), into b->moe (the shared one added) */
+/* hip_ds4_lane.c: a small step's routed experts in the matvec's order (the lane's), into b->moe (the shared one added) */
 bool fwd_lane_experts(Forward *f, int l, const int32_t *ids, uint32_t picks, char *err);
-/* hip_cpu_lane.c: the CPU half's pool, maps and buffers (the lane's CPU half), their end; whether a small step's unit goes to
+/* hip_ds4_cpu_lane.c: the CPU half's pool, maps and buffers (the lane's CPU half), their end; whether a small step's unit goes to
    the CPU (not in GPU memory: neither resident nor read into the pool); a unit's parts in the mapped files */
 bool fwd_cpu_create(Forward *f, int threads, const int *cores, char *err);
 void fwd_cpu_destroy(Forward *f);
-/* the NPU's (hip_fwd_npu.c) */
+/* the NPU's (hip_ds4_npu.c) */
 void fwd_npu_destroy(Forward *f);
 uint32_t fwd_npu_layer(const Forward *f, int l, uint32_t pairs);
 uint32_t fwd_npu_pick(const Forward *f, uint32_t pairs, const int32_t *cnt, uint32_t nd, uint32_t *nq);

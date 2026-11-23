@@ -5,8 +5,8 @@
 #include "engine_impl.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/drafter.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/drafter.h"
+#include "osmos/ds4/forward.h"
 
 /* DeepSeek-V4.1-Flash behind the engine: each call the forward's and the drafter's own, as osmos-serve made them
    before 0.4.0 - its decode in the lane's order (ForwardOptions' lane, cpu_threads 0: every expert on the GPU) */

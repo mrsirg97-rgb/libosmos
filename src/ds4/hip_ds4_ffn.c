@@ -4,8 +4,8 @@
 
 #include <hip/hip_runtime_api.h>
 
-#include "osmos/run/ahead.h"
-#include "forward_impl.h"
+#include "osmos/ds4/ahead.h"
+#include "ds4_impl.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/quant.h"
@@ -284,7 +284,7 @@ bool fwd_moe(Forward *f, int l, char *err)
       return false;
   }
   prefetch(f, l, P);
-  if (fwd_small(f, P)) /* the lane's small step: every expert in the matvec's order (hip_lane.c) */
+  if (fwd_small(f, P)) /* the lane's small step: every expert in the matvec's order (hip_ds4_lane.c) */
   {
     if (!fwd_lane_experts(f, l, ids, P, err))
       return false;

@@ -2,7 +2,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-#include "osmos/run/ahead.h"
+#include "osmos/ds4/ahead.h"
 
 /* ahead_union: each token's first k guesses, their union; ids out of range skipped; the count */
 

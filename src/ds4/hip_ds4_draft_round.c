@@ -1,6 +1,6 @@
 #include <math.h>
 
-#include "drafter_impl.h"
+#include "ds4_draft_impl.h"
 #include "osmos/err.h"
 
 /* a round's three blocks on its DRAFTER_BLOCK rows (DeepSeek's DSparkBlock: the trunk's layer in small) */

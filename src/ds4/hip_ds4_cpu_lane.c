@@ -4,7 +4,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "lane.h"
 #include "osmos/cpu/lane.h"
 #include "osmos/err.h"

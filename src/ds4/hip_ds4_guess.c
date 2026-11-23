@@ -1,9 +1,9 @@
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/model/qtype.h"
 
 /* the next layer's experts guessed a layer ahead, for a small step (a decode's, a verify's: picks fewer than a
-   layer's experts - a prompt's step already reads the whole next layer ahead, hip_ffn.c's prefetch). the guess: the
+   layer's experts - a prompt's step already reads the whole next layer ahead, hip_ds4_ffn.c's prefetch). the guess: the
    next layer's router on this layer's FFN input (the stream it will route moves a layer's residual on), the top
    FWD_GUESS_K a token, written into the host's mapped r_guess. queued before the routing event, so the host's one
    wait covers both; the guessed experts the next layer would stream are then wanted (their reads begun) under this

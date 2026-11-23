@@ -3,7 +3,7 @@
 
 #include <hip/hip_runtime_api.h>
 
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "osmos/err.h"
 
 #define FP4_LATENT_BLOCK KV_FP4_E4M3_BLOCK /* ref.py: the compressed rows' fp4_round(lat, 16, True) */
@@ -263,7 +263,7 @@ bool fwd_attention(Forward *f, int l, char *err)
       ok = ok && ops_kv_unpack(KV_FP8, ring, f->slots, HD, b->ring_f, NULL);
       ring = b->ring_f, rfmt = KV_F32;
     }
-    const int32_t floor = f->dec >= 0 && l > f->dec ? f->bs[i]->dec_from : 0; /* the decoder's: hip_skip.c */
+    const int32_t floor = f->dec >= 0 && l > f->dec ? f->bs[i]->dec_from : 0; /* the decoder's: hip_ds4_skip.c */
     ok = ok && ops_sparse_attn(b->q + (uint64_t)i * H * HD, ring, rfmt, f->slots, b->pos + i, g->window, floor, ckv,
                          fmt, ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL, ckv ? b->n_sel + i : NULL, OPS_MAX_SELECT,
                          (uint32_t)g->ix_topk, F(f, L->sinks), scale, H, HD, run, b->att, b->o + (uint64_t)i * H * HD,

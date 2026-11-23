@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "lane.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q8.h"

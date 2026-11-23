@@ -1,4 +1,4 @@
-// the forward's waits for the GPU (src/run/hip_wait.c): a decode-sized step's spin (its waits short and many, a wake
+// the forward's waits for the GPU (src/ds4/hip_ds4_wait.c): a decode-sized step's spin (its waits short and many, a wake
 // ~0.2 ms), a prompt's step's sleep - the forward's thread's CPU time against the wall of each, on the real model.
 // gpu_sleep_on_waits first, as the binaries do. needs the model (test_model.h); skipped (77) without it.
 #include <hip/hip_runtime.h>
@@ -13,7 +13,7 @@
 #include "test_model.h"
 
 extern "C" {
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 #include "osmos/run/gpu.h"
 }
 

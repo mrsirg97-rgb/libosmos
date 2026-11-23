@@ -31,7 +31,7 @@
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 
 #define CHECK(x)                                                                 \

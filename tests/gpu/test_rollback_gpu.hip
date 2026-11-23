@@ -17,8 +17,8 @@ extern "C" {
 #include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/drafter.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/drafter.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 #include "test_fit.h"

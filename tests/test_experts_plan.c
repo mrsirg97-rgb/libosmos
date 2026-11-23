@@ -19,7 +19,7 @@ static uint64_t draw(uint64_t m)
   return (g_rng >> 17) % m;
 }
 
-/* DeepSeek's stream_budget (run/hip_forward.c, 0.12.3), a warm flag a unit for its rix */
+/* DeepSeek's stream_budget (ds4/hip_ds4_make.c, 0.12.3), a warm flag a unit for its rix */
 static uint64_t ref_stream(const PoolUnit *u, uint32_t L, uint32_t E, const bool *warm)
 {
   uint64_t most = 0, whole = 0;

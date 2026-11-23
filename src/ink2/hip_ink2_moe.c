@@ -78,7 +78,7 @@ bool ink2_rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const flo
 }
 
 /* one role's experts (their entries in ascending count): a launch a run of the same column tiles (mm_col_tiles), so
-   a one-tile expert is not run in a hot one's many-tile kernel (hip_ffn.c's group). each expert's rows its own: the
+   a one-tile expert is not run in a hot one's many-tile kernel (hip_ds4_ffn.c's group). each expert's rows its own: the
    launches' order changes no bit */
 static bool group(uint32_t type, const void *const *dtab, const int32_t *cnt, const int32_t *dcnt, uint32_t ne,
                   uint32_t rows, uint32_t cols, const void *x16, const uint32_t *dxo, float *y, const uint32_t *dyo,

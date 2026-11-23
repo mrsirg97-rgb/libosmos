@@ -415,8 +415,8 @@ python3 tools/install/test_install.py
 
 ## Use as a library
 
-The engine interface over both models is `include/osmos/run/engine.h`; DeepSeek's forward is `osmos/run/forward.h`,
-and its drafter is `osmos/run/drafter.h`. Each header's contract is in a comment at its end, and every call returns
+The engine interface over both models is `include/osmos/run/engine.h`; DeepSeek's forward is `osmos/ds4/forward.h`,
+and its drafter is `osmos/ds4/drafter.h`. Each header's contract is in a comment at its end, and every call returns
 `false` or `NULL` with the reason in `err` rather than guess. `tools/bench/dbench.hip` is a complete example loop.
 
 ## Reproduce the numbers

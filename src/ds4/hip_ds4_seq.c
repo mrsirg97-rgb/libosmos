@@ -5,8 +5,8 @@
 
 #include <hip/hip_runtime_api.h>
 
-#include "drafter_impl.h"
-#include "forward_impl.h"
+#include "ds4_draft_impl.h"
+#include "ds4_impl.h"
 #include "osmos/gpu/state_parts.h"
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/model/fnv.h"
@@ -25,7 +25,7 @@ typedef struct Header
   uint64_t identity;
   int32_t pos, prompt_end, dec_from, n_last;
   int32_t last[STATE_LAST];
-  uint32_t has_dring, ahead; /* ahead: hi - pos (forward_impl.h) - a rollback's room after the load as before */
+  uint32_t has_dring, ahead; /* ahead: hi - pos (ds4_impl.h) - a rollback's room after the load as before */
 } Header;
 
 uint64_t forward_identity(const Forward *f)

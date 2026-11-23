@@ -2,7 +2,7 @@
 
 #include <hip/hip_runtime_api.h>
 
-#include "forward_impl.h"
+#include "ds4_impl.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/err.h"
 

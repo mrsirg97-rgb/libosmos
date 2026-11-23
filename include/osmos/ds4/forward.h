@@ -47,7 +47,7 @@ typedef struct ForwardOptions
   const int *cpu_cores;  /* the cores they are pinned to, cpu_threads of them, or NULL */
   const char *npu;       /* the NPU's kernels' directory (below: "npu"), or NULL: the GPU alone */
   float npu_share;       /* its share of an eligible layer's pairs, in (0, 1) */
-  const char *drafter;   /* a DSpark drafter's directory (osmos/run/drafter.h): made with the forward, its own - its
+  const char *drafter;   /* a DSpark drafter's directory (osmos/ds4/drafter.h): made with the forward, its own - its
                             taps the forward's from its first step (forward_drafter) - or NULL: none */
 } ForwardOptions;
 
