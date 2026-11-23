@@ -95,8 +95,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   e->ledger = ledger;
   if (o->drafter && !(e->mg = gguf_create(o->drafter, err)))
     return e_destroy(e), NULL;
-  const GgufKv *arch = e->mg ? gguf_kv(e->mg, "general.architecture") : NULL;
-  const bool dflash = arch && arch->type == GGUF_STRING && !strcmp(arch->v.s, "dflash2");
+  const bool dflash = e->mg && gguf_arch(e->mg) && !strcmp(gguf_arch(e->mg), "dflash2"); /* (else its MTP head) */
   if (e->mg && (dflash ? !(e->df = q4x_dflash_create(e->mg, m->w, err)) : !(e->mtp = q4x_mtp_create(e->mg, m->w, err))))
     return e_destroy(e), NULL;
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Q4xOptions' 0, every

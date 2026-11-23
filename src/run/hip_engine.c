@@ -69,10 +69,8 @@ OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR])
   Gguf *h = gguf_header(files->model, gerr);
   if (!h)
     return osmos_fail(err, "%s", gerr), NULL;
-  const GgufKv *a = gguf_kv(h, "general.architecture");
   char arch[64] = "";
-  if (a && a->type == GGUF_STRING)
-    snprintf(arch, sizeof arch, "%s", a->v.s);
+  snprintf(arch, sizeof arch, "%s", gguf_arch(h) ? gguf_arch(h) : "");
   gguf_destroy(h);
   const OsmosFamily *fam = NULL;
   for (size_t i = 0; i < sizeof families / sizeof *families; i++)

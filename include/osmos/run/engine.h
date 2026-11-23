@@ -48,7 +48,9 @@ typedef struct OsmosOptions
   uint64_t budget;      /* the GPU memory streamed experts may hold: bytes, given (the server sizes it) */
   const char *picks;    /* a ranking file for the resident set, or NULL */
   bool no_guess;        /* no experts guessed a layer ahead */
-  const char *drafter;  /* the drafter's directory, or NULL: no drafting */
+  const char *drafter;  /* the drafter's path, or NULL: no drafting - a file (Qwen's and osmos1.7b's GGUF: DFlash2,
+                           or Qwen's MTP head; Hy4's DFly2 safetensors) or a directory (DeepSeek's DSpark: dspark.json,
+                           dspark.bin; Inkling's: one holding ink2-mtp.gguf, or the file) - the family refuses another */
   bool fill_set;        /* fill given; else the RAM a sizing keeps free is FIT_RAM_FREE (osmos/run/fit.h) */
   uint64_t fill;        /* the system's RAM a sizing leaves free, bytes (osmos-serve's --fill; 0: all of it the cache's) */
   bool stream_ngram;    /* Qwen's n-gram table read from its file a step at a time, not held in GPU memory (DeepSeek's

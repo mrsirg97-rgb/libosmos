@@ -336,3 +336,9 @@ const GgufKv *gguf_kv(const Gguf *g, const char *key)
       return &g->kv[i];
   return NULL;
 }
+
+const char *gguf_arch(const Gguf *g)
+{
+  const GgufKv *a = gguf_kv(g, "general.architecture");
+  return a && a->type == GGUF_STRING ? a->v.s : NULL;
+}

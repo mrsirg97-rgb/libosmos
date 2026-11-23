@@ -87,9 +87,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   {
     if (!(e->dg = gguf_create(o->drafter, err)))
       return e_destroy(e), NULL;
-    const GgufKv *arch = gguf_kv(e->dg, "general.architecture");
-    if (!arch || arch->type != GGUF_STRING || strcmp(arch->v.s, "dflash2"))
-      return osmos_fail(err, "a drafter not a DFlash2 (general.architecture dflash2)"), e_destroy(e), NULL;
     const Lfm3Geometry *geo = &m->w->geo;
     const Q4xDflashTarget t = {geo->n_embd, geo->n_vocab, geo->n_layers};
     if (!(e->df = q4x_dflash_create_for(e->dg, &t, err)))

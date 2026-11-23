@@ -91,8 +91,8 @@ static bool engram(GgufMeta *m, const Gguf *file, Geometry *g)
   const GgufKv *theirs = gguf_kv(file, ARCH ".engram.source");
   if (!src || !theirs || theirs->type != GGUF_STRING || strcmp(src->v.s, theirs->v.s) != 0)
     return meta_fail(m, ARCH ".engram.source", "the Engram file is not this model's");
-  const GgufKv *arch = gguf_kv(file, "general.architecture");
-  if (!arch || arch->type != GGUF_STRING || strcmp(arch->v.s, ARCH "-engram") != 0)
+  const char *arch = gguf_arch(file);
+  if (!arch || strcmp(arch, ARCH "-engram") != 0)
     return meta_fail(m, "general.architecture", "the Engram file is not " ARCH "-engram");
   return true;
 }

@@ -69,6 +69,9 @@ void gguf_destroy(Gguf *g);
 
 const GgufTensor *gguf_tensor(const Gguf *g, const char *name);
 const GgufKv *gguf_kv(const Gguf *g, const char *key);
+/* general.architecture's text ("deepseek41", "dflash2", ...), or NULL: none, or not a string - every reader of a
+   file's kind its one (0.16.0: six read the key and checked its type each) */
+const char *gguf_arch(const Gguf *g);
 uint64_t gguf_bytes(uint32_t type, uint64_t values);
 bool gguf_int(const GgufKv *kv, size_t i, int64_t *out);
 
