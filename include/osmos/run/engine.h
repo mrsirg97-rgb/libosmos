@@ -9,6 +9,8 @@
 
 #define OSMOS_MAX_BLOCK 8 /* a drafter's most drafts a round, any family's */
 #define OSMOS_MAX_LANES 64 /* a round's most sequences at once (osmos-serve's round.c) */
+#define OSMOS_MAX_RUNS 64  /* a step's most sequences, every family's (osmos_batch refuses more, whole: a step's logits
+                              one step's) */
 /* a draft kept while each confidence is at least this and their product too (oseq_draft's floors): swept for energy at
    low-power (DESIGN.md, "0.3.x: drafting for joules") - 0.1 the least J a token, 0.5 (maya's) 6% more, 0.0 as much
    (the early stop gone). the bits are the model's whatever they are */

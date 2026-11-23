@@ -119,7 +119,6 @@ typedef struct Eng
   Gguf *mg;        /* the drafter's file, or NULL */
   Ink2Mtp *mtp;    /* the drafter, or NULL */
   uint64_t *picks; /* the picks file's counts, or NULL */
-  uint32_t vocab, n;
 } Eng;
 
 static void e_destroy(void *p)
@@ -145,7 +144,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
     return osmos_fail(err, "out of memory"), NULL;
   e->ledger = ledger;
   e->rp.on = o->profile;
-  e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->picks) /* a picks file: the router's picks [layer][expert] as uint64, nothing after (DeepSeek's layout) */
   {
     const size_t n = (size_t)m->w->geo.n_layers * m->w->geo.n_experts;
@@ -185,37 +183,27 @@ static void e_stats(const void *p, OsmosStats *s) { s->budget = ink2_forward_byt
 
 /* the batch's sequences one step (each one's consecutive tokens a run, INK2_MAX_RUNS of them at most); a sequence
    met again after another's refused */
-static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+static bool e_step(void *p, void *const *run, const uint32_t *len, uint32_t runs, const int32_t *tokens, bool read,
+                   char err[OSMOS_ERR])
 {
   _Static_assert(INK2_MAX_RUNS == OSMOS_FAMILY_RUNS, "a step's runs the engine's");
+  (void)read; /* (one math for every step) */
   Eng *e = p;
-  e->n = 0;
-  if (!osmos_runs_consecutive(seqs, n, err))
-    return false;
-  Ink2Seq *run[INK2_MAX_RUNS];
-  uint32_t first[INK2_MAX_RUNS], len[INK2_MAX_RUNS], runs;
-  if (osmos_runs(seqs, n, 0, first, len, &runs) < n) /* the runs counted before any step: a batch of more refused whole */
-    return osmos_fail(err, "a batch of more than INK2_MAX_RUNS sequences");
+  uint32_t n = 0;
   for (uint32_t r = 0; r < runs; r++)
-    run[r] = oseq_impl(seqs[first[r]]);
+    n += len[r];
   const double t0 = e->rp.on ? now_s() : 0;
-  if (!n || !ink2_step(e->f, run, len, runs, tokens, err))
-    return n ? false : osmos_fail(err, "an empty batch");
+  if (!ink2_step(e->f, (Ink2Seq *const *)run, len, runs, tokens, err))
+    return false;
   if (e->rp.on) /* (ink2_step synchronizes: its time the step's) */
   {
     const int k = n < PROF_N - 1 ? (int)n : PROF_N - 1;
     e->rp.step_s[k] += now_s() - t0, e->rp.steps[k]++;
   }
-  e->n = n;
   return true;
 }
 
-static void e_kept(const void *p, KeptView *k)
-{
-  const Eng *e = p;
-  ink2_kept_view(e->f, k);
-  k->rows = e->n < k->rows ? e->n : k->rows; /* (the batch's rows: a row past it another step's) */
-}
+static void e_kept(const void *p, KeptView *k) { ink2_kept_view(((const Eng *)p)->f, k); }
 
 static uint32_t e_block(const void *p)
 {
@@ -281,8 +269,8 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 
 const OsmosFamily osmos_ink2 = {
     "inkling2", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
-    e_batch,    e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
+    e_step,     e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
-    NULL, /* a prompt's read its batch: one math for every step */
+    false, /* a prompt's read its batch: one math for every step */
     s_mark_bytes, s_mark_save, s_mark_load, /* a mark the conv tails and windows (ink2_seq_mark_save) */
 };

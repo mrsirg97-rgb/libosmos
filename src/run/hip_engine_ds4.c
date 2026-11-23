@@ -28,8 +28,6 @@ typedef struct Eng
   Drafter *d;      /* or NULL */
   uint64_t *picks; /* or NULL: held while the forward is */
   Seq **seqs;      /* a batch's sequences, FORWARD_MAX_TOKENS of them */
-  uint32_t vocab;   /* a logits row */
-  uint32_t n, kept; /* the last batch's rows, and its last rows the forward keeps logits of */
   uint32_t rows;    /* the forward's logit_rows: a decode step's most tokens (the facts' round_tokens) */
 } Eng;
 
@@ -101,7 +99,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   if (!e || !(e->seqs = malloc(FORWARD_MAX_TOKENS * sizeof *e->seqs)))
     return free(e), osmos_fail(err, "out of memory"), NULL;
   e->ledger = ledger;
-  e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->picks && !(e->picks = read_picks(o->picks, &m->w->geo, err)))
     return e_destroy(e), NULL;
   e->rows = (uint32_t)((m->w->geo.n_experts - 1) / m->w->geo.n_used); /* m_open's round_tokens */
@@ -141,30 +138,26 @@ static void e_stats(const void *p, OsmosStats *s)
   forward_waits(f, s->waits, s->wait_ns);
 }
 
-static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+static bool e_step(void *p, void *const *run, const uint32_t *len, uint32_t runs, const int32_t *tokens, bool read,
+                   char err[OSMOS_ERR])
 {
   Eng *e = p;
-  if (n > FORWARD_MAX_TOKENS)
-    return osmos_fail(err, "a batch of more than the forward's max_tokens");
-  for (uint32_t i = 0; i < n; i++)
-    e->seqs[i] = oseq_impl(seqs[i]);
-  e->n = e->kept = 0;
-  if (!forward_batch(e->f, e->seqs, tokens, n, err))
-    return false;
-  e->n = n, e->kept = forward_logit_rows(e->f); /* the last sub-batch's last rows (ForwardOptions' logit_rows) */
-  return true;
+  uint32_t n = 0; /* (the forward takes a token's sequence each: the runs laid out) */
+  for (uint32_t r = 0; r < runs; r++)
+    for (uint32_t t = 0; t < len[r]; t++, n++)
+    {
+      if (n == FORWARD_MAX_TOKENS)
+        return osmos_fail(err, "a batch of more than the forward's max_tokens");
+      e->seqs[n] = run[r];
+    }
+  forward_reading(e->f, read); /* a prompt's read: the large steps' math at any size */
+  const bool ok = forward_batch(e->f, e->seqs, tokens, n, err);
+  forward_reading(e->f, false);
+  return ok;
 }
 
 /* a prompt's read: osmos_batch with the forward reading (forward_reading) - its bits a prompt's, not a decode's, at
    any step size, so a turn continued after a reused prefix reads its rest as a fresh read reads it (0.7.1) */
-static bool e_read(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
-{
-  Eng *e = p;
-  forward_reading(e->f, true);
-  const bool ok = e_batch(p, seqs, tokens, n, err);
-  forward_reading(e->f, false);
-  return ok;
-}
 
 /* the batch's row r among the rows the forward keeps (the last kept of n), or -1 */
 static void e_kept(const void *p, KeptView *k) { forward_kept_view(((const Eng *)p)->f, k); }
@@ -203,8 +196,8 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 
 const OsmosFamily osmos_ds4 = {
     "deepseek41", m_open,   m_close,   e_create, e_destroy,  e_identity,    e_stats,
-    e_batch,      e_kept,  e_block,  s_create,   s_destroy, s_reset,     s_prompt, s_rollback,
+    e_step,       e_kept,  e_block,  s_create,   s_destroy, s_reset,     s_prompt, s_rollback,
     s_reach,      s_position, s_state_bytes, s_save_to, s_load_from, s_seed,        s_draft,  NULL, /* its drafts one sequence at a time */
-    e_read, /* a prompt's read: the large steps' math at any size (forward_reading) */
+    true, /* a prompt's read: the large steps' math at any size (forward_reading) */
     NULL,   NULL, NULL, /* a mark its whole state */
 };

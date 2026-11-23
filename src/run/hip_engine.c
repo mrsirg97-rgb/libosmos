@@ -26,6 +26,7 @@ struct OsmosModel
 
 struct Osmos
 {
+  uint32_t last_n; /* the last batch's tokens (0: none, or it failed): the kept view's rows at most */
   const OsmosFamily *fam;
   void *impl;
   uint32_t vocab; /* a logits row's floats (osmos_greedy_except) */
@@ -167,33 +168,45 @@ void osmos_stats(const Osmos *e, OsmosStats *s)
     s->held = ledger_taken(e->ledger);
 }
 
-bool osmos_read(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
-{
-  osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
-  if (!e || !e->fam->read)
-    return osmos_batch(e, seqs, tokens, n, err);
-  if (!seqs || !tokens || !n)
-    return osmos_fail(err, "a batch of no tokens");
-  for (uint32_t i = 0; i < n; i++)
-    if (!seqs[i] || seqs[i]->e != e)
-      return osmos_fail(err, "a batch's sequence not this engine's");
-  return named(e->fam, err, e->fam->read(e->impl, seqs, tokens, n, err));
-}
-
-bool osmos_reads_apart(const Osmos *e) { return e && e->fam->read; }
-
-bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+/* a batch's step, every family's one path (0.16.0: each family built its runs - Qwen split past 64 sequences, the
+   others refused - and osmos_read checked no token): the checks, the runs, the family's step; the rows the kept
+   view reads its batch's */
+static bool step(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, bool read, char err[OSMOS_ERR])
 {
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */
   if (!e || !seqs || !tokens || !n)
     return osmos_fail(err, "a batch of no tokens");
+  e->last_n = 0; /* (no row kept until a step holds) */
   for (uint32_t i = 0; i < n; i++)
     if (!seqs[i] || seqs[i]->e != e)
       return osmos_fail(err, "a batch's sequence not this engine's");
   for (uint32_t i = 0; i < n; i++) /* every family's, before any reads one (Inkling, the 27B and Qwen embedded any) */
     if (tokens[i] < 0 || (uint32_t)tokens[i] >= e->vocab)
       return osmos_fail(err, "a token outside the vocabulary");
-  return named(e->fam, err, e->fam->batch(e->impl, seqs, tokens, n, err));
+  uint32_t first[OSMOS_MAX_RUNS], len[OSMOS_MAX_RUNS], runs = 0;
+  if (!osmos_runs_consecutive(seqs, n, err))
+    return false;
+  if (osmos_runs(seqs, n, 0, first, len, &runs) < n) /* counted before any step: refused whole */
+    return osmos_fail(err, "a batch of more than %d sequences (a step's most: OSMOS_MAX_RUNS)", OSMOS_MAX_RUNS);
+  void *run[OSMOS_MAX_RUNS];
+  for (uint32_t r = 0; r < runs; r++)
+    run[r] = seqs[first[r]]->impl;
+  if (!named(e->fam, err, e->fam->step(e->impl, run, len, runs, tokens, read && e->fam->reads_apart, err)))
+    return false;
+  e->last_n = n;
+  return true;
+}
+
+bool osmos_read(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+{
+  return step(e, seqs, tokens, n, true, err);
+}
+
+bool osmos_reads_apart(const Osmos *e) { return e && e->fam->reads_apart; }
+
+bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+{
+  return step(e, seqs, tokens, n, false, err);
 }
 
 /* the last step's kept rows, the family's view (osmos/gpu/kept.h) */
@@ -201,6 +214,7 @@ static KeptView kept_of(const Osmos *e)
 {
   KeptView k = {0};
   e->fam->kept(e->impl, &k);
+  k.rows = e->last_n < k.rows ? e->last_n : k.rows; /* (the last batch's rows: a row past it another step's) */
   return k;
 }
 

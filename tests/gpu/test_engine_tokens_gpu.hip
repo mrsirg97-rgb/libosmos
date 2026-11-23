@@ -1,6 +1,8 @@
-// the engine refuses a token outside the vocabulary before any family reads it (osmos/run/engine.h: osmos_batch) -
-// past the last id, at it, and negative: refused, saying so, the sequence where it was; a token inside, read (0.16.0:
-// Inkling, the 27B and Qwen embedded any id - a read past the table on the GPU). each small pack here; 77 if none.
+// the engine refuses a token outside the vocabulary before any family reads it (osmos/run/engine.h: osmos_batch and
+// osmos_read alike) - past the last id, at it, and negative: refused, saying so, the sequence where it was; a token
+// inside, read (0.16.0: Inkling, the 27B and Qwen embedded any id - a read past the table on the GPU; osmos_read
+// checked none). a batch's runs one meaning, the engine's: more than OSMOS_MAX_RUNS sequences refused whole, saying
+// so (0.16.0: Qwen split it into steps, the others refused - each its own). each small pack here; 77 if none.
 #include <hip/hip_runtime.h>
 
 #include <cstdio>
@@ -36,7 +38,20 @@ static bool one(const SmallPack& p) {
     const int32_t t[4] = {100, 101, bad, 103};  // (one bad id among good ones: the whole step refused)
     err[0] = 0;
     CHECK(!osmos_batch(e, ss, t, 4, err) && std::strstr(err, "vocabulary"));
+    err[0] = 0;
+    CHECK(!osmos_read(e, ss, t, 4, err) && std::strstr(err, "vocabulary"));  // a prompt's read alike
     CHECK(oseq_position(s) == 0);  // nothing read
+  }
+  {  // a batch of one sequence past the step's most: refused whole, nothing read
+    std::vector<OsmosSeq*> many(OSMOS_MAX_RUNS + 1);
+    for (auto& q : many) CHECK((q = oseq_create(e, err)));
+    std::vector<int32_t> mt(many.size(), 100);
+    err[0] = 0;
+    CHECK(!osmos_batch(e, many.data(), mt.data(), (uint32_t) many.size(), err) && std::strstr(err, "sequences"));
+    for (auto* q : many) {
+      CHECK(oseq_position(q) == 0);
+      oseq_destroy(q);
+    }
   }
   const int32_t good[4] = {100, 101, V - 1, 0};
   CHECK(osmos_batch(e, ss, good, 4, err) && oseq_position(s) == 4);

@@ -36,7 +36,6 @@ typedef struct Eng
   Gguf *mg;      /* the drafter's file, or NULL */
   Q4xMtp *mtp;   /* the MTP head, or NULL */
   Q4xDflash *df; /* DFlash2, or NULL */
-  uint32_t vocab, n; /* a logits row; the last batch's rows (every one kept) */
 } Eng;
 
 static void m_close(void *p)
@@ -94,7 +93,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   if (!e)
     return osmos_fail(err, "out of memory"), NULL;
   e->ledger = ledger;
-  e->vocab = (uint32_t)m->w->geo.n_vocab;
   if (o->drafter && !(e->mg = gguf_create(o->drafter, err)))
     return e_destroy(e), NULL;
   const GgufKv *arch = e->mg ? gguf_kv(e->mg, "general.architecture") : NULL;
@@ -117,38 +115,15 @@ static void e_stats(const void *p, OsmosStats *s) { s->budget = q4x_forward_byte
 
 /* the batch's sequences one step (each one's consecutive tokens a run, at their rows), Q4X_MAX_RUNS at a time; a
    sequence met again after another's refused */
-static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
+static bool e_step(void *p, void *const *run, const uint32_t *len, uint32_t runs, const int32_t *tokens, bool read,
+                   char err[OSMOS_ERR])
 {
   _Static_assert(Q4X_MAX_RUNS == OSMOS_FAMILY_RUNS, "a step's runs the engine's");
-  Eng *e = p;
-  e->n = 0;
-  if (!osmos_runs_consecutive(seqs, n, err))
-    return false;
-  Q4xSeq *run[Q4X_MAX_RUNS];
-  uint32_t first[Q4X_MAX_RUNS], len[Q4X_MAX_RUNS], runs;
-  for (uint32_t at = 0; at < n;) /* past Q4X_MAX_RUNS sequences: several steps */
-  {
-    const uint32_t k = osmos_runs(seqs, n, at, first, len, &runs);
-    for (uint32_t r = 0; r < runs; r++)
-      run[r] = oseq_impl(seqs[first[r]]);
-    if (!q4x_step(e->f, run, len, runs, tokens + at, at, err))
-    {
-      for (uint32_t i = 0; i < at; i++) /* the steps before it advanced theirs: their tokens never fed again */
-        q4x_seq_fail(oseq_impl(seqs[i]));
-      return false;
-    }
-    at += k;
-  }
-  e->n = n;
-  return true;
+  (void)read; /* (one math: a prompt's read its step) */
+  return q4x_step(((Eng *)p)->f, (Q4xSeq *const *)run, len, runs, tokens, 0, err);
 }
 
-static void e_kept(const void *p, KeptView *k)
-{
-  const Eng *e = p;
-  q4x_kept_view(e->f, k);
-  k->rows = e->n < k->rows ? e->n : k->rows; /* (the batch's rows: a row past it another step's) */
-}
+static void e_kept(const void *p, KeptView *k) { q4x_kept_view(((const Eng *)p)->f, k); }
 
 static uint32_t e_block(const void *p)
 {
@@ -226,8 +201,8 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 
 const OsmosFamily osmos_q4x = {
     "qwen4exp", m_open,     m_close,       e_create, e_destroy, e_identity, e_stats,
-    e_batch,    e_kept,      e_block,  s_create,  s_destroy, s_reset,  s_prompt,   s_rollback,
+    e_step,     e_kept,      e_block,  s_create,  s_destroy, s_reset,  s_prompt,   s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft,    s_draft_all,
-    NULL, /* a prompt's read its batch: its small and large steps one math (0.7.1's replay: the same bits on every path) */
+    false, /* a prompt's read its batch: its small and large steps one math (0.7.1's replay: the same bits on every path) */
     s_mark_bytes, s_mark_save, s_mark_load, /* a mark the states a later token changes (q4x_seq_mark_save) */
 };

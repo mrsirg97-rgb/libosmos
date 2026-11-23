@@ -23,7 +23,10 @@ typedef struct OsmosFamily
   void (*destroy)(void *eng);
   uint64_t (*identity)(const void *eng);
   void (*stats)(const void *eng, OsmosStats *s);
-  bool (*batch)(void *eng, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
+  /* a step: runs[r] (a family sequence) the next len[r] tokens, consecutive - the engine's checks made, its runs
+     built (OSMOS_MAX_RUNS at most: hip_engine.c); read a prompt's (the large steps' math), where reads_apart */
+  bool (*step)(void *eng, void *const *runs, const uint32_t *len, uint32_t n_runs, const int32_t *tokens, bool read,
+               char err[OSMOS_ERR]);
   void (*kept)(const void *eng, KeptView *k); /* the last step's kept rows (osmos/gpu/kept.h): the engine reads and
                                                  picks every family's rows through it - 0.16.0: six copies */
   uint32_t (*block)(const void *eng);
@@ -44,8 +47,8 @@ typedef struct OsmosFamily
   bool (*draft_all)(void *eng, OsmosSeq *const *seqs, const int32_t *y, uint32_t n, float conf_min, float cum_min,
                     int32_t (*drafts)[OSMOS_MAX_BLOCK], float (*conf)[OSMOS_MAX_BLOCK], int *counts,
                     char err[OSMOS_ERR]);
-  /* a prompt's read (osmos_read), or NULL: the family's batch, its prompt and decode steps one math (Qwen's) */
-  bool (*read)(void *eng, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
+  bool reads_apart; /* a prompt's read another math than a decode's (step's read): osmos_reads_apart; false one math
+                       (Qwen's, Inkling's: read ignored) */
   /* a mark (oseq_mark_save), or NULL: the whole state */
   uint64_t (*mark_bytes)(const void *seq);
   bool (*mark_save)(const void *seq, void *out, uint64_t bytes, char err[OSMOS_ERR]);
@@ -60,7 +63,7 @@ void *oseq_impl(const OsmosSeq *s);
    next OSMOS_FAMILY_RUNS runs at most (each a sequence's consecutive tokens: first[r] its first, len[r] its count),
    their count in *runs, the tokens they take returned (n - at when every run fit). a family's step its own: refused
    past its runs, or split over several steps (q4x's). osmos_gpu_room: hipMemGetInfo's free bytes */
-#define OSMOS_FAMILY_RUNS 64 /* every family's step's sequences at most (LFM3_MAX_RUNS, Q4X_MAX_RUNS, ...) */
+#define OSMOS_FAMILY_RUNS OSMOS_MAX_RUNS /* every family's step's sequences at most (LFM3_MAX_RUNS, Q4X_MAX_RUNS, ...) */
 bool osmos_runs_consecutive(OsmosSeq *const *seqs, uint32_t n, char err[OSMOS_ERR]);
 uint32_t osmos_runs(OsmosSeq *const *seqs, uint32_t n, uint32_t at, uint32_t first[OSMOS_FAMILY_RUNS],
                     uint32_t len[OSMOS_FAMILY_RUNS], uint32_t *runs);

@@ -91,35 +91,11 @@ static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
 
 /* the batch's sequences one step (each one's consecutive tokens a run), Q35_MAX_RUNS at a time, in a decode's math
    or (read) a prompt's; a sequence met again after another's refused */
-static bool batch(Eng *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, bool read, char err[OSMOS_ERR])
+static bool e_step(void *p, void *const *run, const uint32_t *len, uint32_t runs, const int32_t *tokens, bool read,
+                   char err[OSMOS_ERR])
 {
   _Static_assert(Q35_MAX_RUNS == OSMOS_FAMILY_RUNS, "a step's runs the engine's");
-  if (!osmos_runs_consecutive(seqs, n, err))
-    return false;
-  Q35Seq *run[Q35_MAX_RUNS];
-  uint32_t first[Q35_MAX_RUNS], len[Q35_MAX_RUNS], runs;
-  for (uint32_t at = 0; at < n;)
-  {
-    const uint32_t k = osmos_runs(seqs, n, at, first, len, &runs);
-    if (at + k < n)
-      return osmos_fail(err, "qwen35: a batch past Q35_MAX_RUNS sequences"); /* its logits one step's: never split */
-    for (uint32_t r = 0; r < runs; r++)
-      run[r] = oseq_impl(seqs[first[r]]);
-    if (!(read ? q35_step_read : q35_step_runs)(e->f, run, len, runs, tokens + at, err))
-      return false;
-    at += k;
-  }
-  return true;
-}
-
-static bool e_batch(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
-{
-  return batch(p, seqs, tokens, n, false, err);
-}
-
-static bool e_read(void *p, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
-{
-  return batch(p, seqs, tokens, n, true, err);
+  return (read ? q35_step_read : q35_step_runs)(((Eng *)p)->f, (Q35Seq *const *)run, len, runs, tokens, err);
 }
 
 static void e_kept(const void *p, KeptView *k) { q35_kept(((const Eng *)p)->f, k); }
@@ -174,8 +150,8 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 
 const OsmosFamily osmos_q35 = {
     "qwen35",   m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
-    e_batch,    e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
+    e_step,    e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
-    e_read, /* a prompt's read the matmul's math, a decode's mv_fp4's: two maths (q35_step_read) */
+    true, /* a prompt's read the matmul's math, a decode's mv_fp4's: two maths (q35_step_read)  */
     s_mark_bytes, s_mark_save, s_mark_load,
 };
