@@ -70,6 +70,7 @@ class Served:
     model = MODEL
     settings = {}  # a class's own pack settings beside these
     env = {}  # a class's own environment for osmos-api
+    args = []  # a class's own flags for osmos-api
 
     @classmethod
     def setUpClass(cls):
@@ -79,7 +80,7 @@ class Served:
             json.dump(dict({"pack": "test", "model": cls.model, "max_context": 4096, "no_guess": True}, **cls.settings), f)
         cls.port = free_port()
         env = dict(os.environ, FAKE_DIR=cls.dir, **cls.env)
-        cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE], env=env,
+        cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE] + cls.args, env=env,
                                     stderr=subprocess.DEVNULL)
         for _ in range(200):
             try:
@@ -836,6 +837,61 @@ class Browser(Served, unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class AllowedOrigin(Served, unittest.TestCase):
+    """--allow-origin (0.16.0): a named origin's requests taken - its preflight answered, every response it reads,
+    a stream's and an error's too, carrying CORS's Access-Control-Allow-Origin (its own, never *) and Vary: Origin;
+    any other origin refused as before (0.15.2)"""
+    ALLOWED = "http://localhost:5173"
+    args = ["--allow-origin", ALLOWED, "--allow-origin", "https://app.example"]
+
+    def send(self, headers, method="POST", path="/v1/chat/completions", body=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        b = body if body is not None else {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2,
+                                           "reasoning_effort": "none"}
+        c.request(method, path, body=json.dumps(b) if method == "POST" else None, headers=headers)
+        r = c.getresponse()
+        return r.status, dict((k.lower(), v) for k, v in r.getheaders()), r.read()
+
+    def test_1_preflight(self):
+        self.ready()
+        st, h, _ = self.send({"Origin": self.ALLOWED, "Access-Control-Request-Method": "POST",
+                              "Access-Control-Request-Headers": "content-type, authorization"}, "OPTIONS")
+        self.assertEqual(st, 204)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+        self.assertIn("POST", h.get("access-control-allow-methods", ""))
+        self.assertIn("content-type", h.get("access-control-allow-headers", "").lower())
+        self.assertIn("Origin", h.get("vary", ""))
+        st, _, _ = self.send({"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"}, "OPTIONS")
+        self.assertEqual(st, 403)
+
+    def test_2_responses_carry_it(self):
+        self.ready()
+        self.reply("ok" + EOS)
+        st, h, _ = self.send({"Origin": self.ALLOWED, "Content-Type": "application/json"})
+        self.assertEqual(st, 200)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+        st, h, _ = self.send({"Origin": self.ALLOWED}, body={"messages": []})  # an error's too
+        self.assertEqual(st, 400)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+        self.reply("ok" + EOS)
+        st, h, _ = self.send({"Origin": self.ALLOWED}, body={"messages": [{"role": "user", "content": "hi"}],
+                                                             "max_tokens": 2, "stream": True, "reasoning_effort": "none"})
+        self.assertEqual(st, 200)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+        st, h, _ = self.send({"Origin": self.ALLOWED}, "GET", "/health")
+        self.assertEqual(st, 200)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+
+    def test_3_others_refused(self):
+        self.ready()
+        for origin in ("https://evil.example", "null", "http://localhost:5174", self.ALLOWED + "/"):
+            st, h, b = self.send({"Origin": origin})
+            self.assertEqual(st, 403, origin)
+            self.assertNotIn("access-control-allow-origin", h)
+        st, h, _ = self.send({})  # no Origin: a local client's, as ever, no CORS header
+        self.assertNotIn("access-control-allow-origin", h)
+
+
 class KeepAlive(Served, unittest.TestCase):
     """0.11.2: a stream silent past the keep-alive (a long prompt's read) gets SSE comments - a client's idle timeout
     not taken for a dead server (its retry read the prompt again from the start, and timed out again)"""

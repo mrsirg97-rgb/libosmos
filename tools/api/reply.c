@@ -179,7 +179,7 @@ static Json *message(const Answer *s, const Request *rq, long long rid, bool *pa
 /* a run that gives no answer: a streamed one's error event (no [DONE]), or a 500. a completion its parse refused
    goes with it as its text (the EOS dropped): greedy, the same messages again are the same completion, so a client
    can only get past one by showing the model what it wrote (#34) - sent back, a client's text is defused as any */
-static void fail_at(int fd, int status, bool stream, const char *why, const JsonBuf *completion, const char *eos)
+static void fail_at(const Http *h, int status, bool stream, const char *why, const JsonBuf *completion, const char *eos)
 {
   JsonBuf e = {0};
   json_puts(&e, "{\"error\": {\"message\": "), json_dump_string(&e, why, strlen(why));
@@ -195,19 +195,19 @@ static void fail_at(int fd, int status, bool stream, const char *why, const Json
   if (e.oom)
   {
     if (!stream) /* an open stream takes no status line: its end without [DONE] the error */
-      http_error(fd, 500, why);
+      http_error(h, 500, why);
   }
   else if (stream)
-    http_stream_event(fd, e.p, e.n);
+    http_stream_event(h->fd, e.p, e.n);
   else /* the model's answer attached (it did not parse): the same request the same answer - an OpenAI client told
           not to retry it (x-should-retry: theirs - 0.11.2, a whole answer generated three times for one error) */
-    http_send_h(fd, status, "application/json", e.p, e.n, completion ? "x-should-retry: false\r\n" : NULL);
+    http_send_h(h, status, "application/json", e.p, e.n, completion ? "x-should-retry: false\r\n" : NULL);
   free(e.p);
 }
 
-static void fail(int fd, bool stream, const char *why, const JsonBuf *completion, const char *eos)
+static void fail(const Http *h, bool stream, const char *why, const JsonBuf *completion, const char *eos)
 {
-  fail_at(fd, 500, stream, why, completion, eos);
+  fail_at(h, 500, stream, why, completion, eos);
 }
 
 /* the x-osmos-loop header line (loop.h's value, "\r\n" ended) */
@@ -300,9 +300,9 @@ static void whole(Answer *s, const Run *r, const Json *m, size_t prompt_n)
   char head[512];
   loop_head(head, sizeof head, s);
   if (b.oom)
-    http_error(s->fd, 500, "out of memory");
+    http_error(s->http, 500, "out of memory");
   else
-    http_send_h(s->fd, 200, "application/json", b.p, b.n, head);
+    http_send_h(s->http, 200, "application/json", b.p, b.n, head);
   free(b.p);
 }
 
@@ -473,7 +473,7 @@ void api_chat(Api *a, Http *h)
   if (!body || body->type != JSON_OBJECT)
   {
     osmos_fail(err, "the body is not a JSON object%s%s", body ? "" : ": ", body ? "" : jerr);
-    json_free(body), http_error(h->fd, 400, err);
+    json_free(body), http_error(h, 400, err);
     return;
   }
   Request rq;
@@ -481,7 +481,7 @@ void api_chat(Api *a, Http *h)
   json_free(body);
   if (!ok)
   {
-    http_error(h->fd, 400, err);
+    http_error(h, 400, err);
     return;
   }
   size_t n = 0;
@@ -500,21 +500,21 @@ void api_chat(Api *a, Http *h)
   if (!r) /* 503 for loading alone (a request's own fault - its template's - a 400 then too: 0.9.2's, retried) */
   {
     if (over)
-      http_error_code(h->fd, 400, err, "messages", "context_length_exceeded");
+      http_error_code(h, 400, err, "messages", "context_length_exceeded");
     else
-      http_error_head(h->fd, loading ? 503 : 400, err, NULL, NULL,
+      http_error_head(h, loading ? 503 : 400, err, NULL, NULL,
                       loading ? "Retry-After: 10\r\n" : NULL); /* (a load takes minutes: a client's retries spaced) */
     request_free(&rq);
     return;
   }
-  Answer s = {.fd = h->fd, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
+  Answer s = {.fd = h->fd, .http = h, .stream = rq.stream, .model = a->model, .d = a->d, .created = (long long)time(NULL),
               .phase = rq.mode == CHAT_THINKING ? PHASE_REASONING : PHASE_CONTENT, .loop = &rq.loop,
               .sampled = rq.sampled, .seed = rq.seed,
               .boundary = a->d->header != NULL};
   snprintf(s.id, sizeof s.id, "chatcmpl-osmos-%s%lld", boot_tag(), r->rid);
   char head[512];
   loop_head(head, sizeof head, &s);
-  if (rq.stream && !http_stream_open_h(h->fd, head))
+  if (rq.stream && !http_stream_open_h(h, head))
     s.gone = true;
   answer_chunk(&s, "{\"role\": \"assistant\", \"content\": \"\"}", NULL, "");
   size_t seen = 0;
@@ -527,11 +527,11 @@ void api_chat(Api *a, Http *h)
       ;
   }
   else if (!strcmp(r->finish, "error"))
-    fail(h->fd, rq.stream, r->err, NULL, NULL);
+    fail(h, rq.stream, r->err, NULL, NULL);
   else if (!strcmp(r->finish, "cancel")) /* cancelled with its client still here: the engine's QUIT (this server
                                             stopping) - a cut answer, never a "stop" (0.9.2): a stream's error event,
                                             no [DONE]; a whole answer's 503, its retry for the next server */
-    fail_at(h->fd, 503, rq.stream, "the server stopped before the answer's end (osmos-api shutting down)", NULL, NULL);
+    fail_at(h, 503, rq.stream, "the server stopped before the answer's end (osmos-api shutting down)", NULL, NULL);
   else
   {
     answer_advance(&s);
@@ -543,10 +543,10 @@ void api_chat(Api *a, Http *h)
          text as the answer (#25). cut by max_tokens ("length"), its text goes as it is */
       const bool called = memmem(s.shape.p, s.shape.n, a->d->calls_open, strlen(a->d->calls_open)) != NULL;
       snprintf(err, sizeof err, "the model's %s did not parse (%s)", called ? "tool call" : "answer", perr);
-      fail(h->fd, rq.stream, err, &s.text, a->d->eos);
+      fail(h, rq.stream, err, &s.text, a->d->eos);
     }
     else if (!m)
-      fail(h->fd, rq.stream, "out of memory", NULL, NULL); /* a stream's open: its error event, not a status line */
+      fail(h, rq.stream, "out of memory", NULL, NULL); /* a stream's open: its error event, not a status line */
     else if (rq.stream)
     {
       if (!parsed)

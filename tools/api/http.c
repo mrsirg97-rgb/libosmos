@@ -112,7 +112,15 @@ int http_read(Http *h, char err[OSMOS_ERR])
       length = (size_t)v, has_length = true;
     }
     else if (!strncasecmp(l, "Origin:", 7))
-      h->origin = true;
+    { /* its value, spaces around it dropped; one longer than the buffer kept as unmatchable (refused: a browser's) */
+      const char *v = l + 7, *e = strstr(l, "\r\n");
+      while (v < e && (*v == ' ' || *v == '\t'))
+        v++;
+      while (e > v && (e[-1] == ' ' || e[-1] == '\t'))
+        e--;
+      const size_t n = (size_t)(e - v) < sizeof h->origin ? (size_t)(e - v) : 0;
+      memcpy(h->origin, n ? v : "?", n ? n : 1), h->origin[n ? n : 1] = 0;
+    }
     else if (!strncasecmp(l, "Host:", 5))
     { /* its value, spaces around it dropped; one longer than the buffer refused (no Host of ours is) */
       const char *v = l + 5, *e = strstr(l, "\r\n");
@@ -156,32 +164,44 @@ int http_read(Http *h, char err[OSMOS_ERR])
   return 0;
 }
 
-bool http_send(int fd, int status, const char *type, const char *body, size_t n)
+bool http_send(const Http *h, int status, const char *type, const char *body, size_t n)
 {
-  return http_send_h(fd, status, type, body, n, NULL);
+  return http_send_h(h, status, type, body, n, NULL);
 }
 
 /* with head: more header lines ("Name: value\r\n" each) before the blank line */
-bool http_send_h(int fd, int status, const char *type, const char *body, size_t n, const char *head)
+/* (every response's: an allowed origin's CORS lines its own, h->cors) */
+bool http_send_h(const Http *h, int status, const char *type, const char *body, size_t n, const char *head)
 {
-  char h[1024];
-  const int k = snprintf(h, sizeof h,
-                         "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n%s\r\n",
-                         status, reason(status), type, n, head ? head : "");
-  return k > 0 && (size_t)k < sizeof h && send_all(fd, h, (size_t)k) && send_all(fd, body, n);
+  char t[1536];
+  const int k = snprintf(t, sizeof t,
+                         "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\n%s%s\r\n",
+                         status, reason(status), type, n, h->cors, head ? head : "");
+  return k > 0 && (size_t)k < sizeof t && send_all(h->fd, t, (size_t)k) && send_all(h->fd, body, n);
 }
 
-bool http_stream_open(int fd)
+bool http_preflight(const Http *h)
 {
-  return http_stream_open_h(fd, NULL);
+  char t[768];
+  const int k = snprintf(t, sizeof t,
+                         "HTTP/1.1 204 No Content\r\n%sAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                         "Access-Control-Allow-Headers: Content-Type, Authorization\r\nAccess-Control-Max-Age: 600\r\n"
+                         "Content-Length: 0\r\nConnection: close\r\n\r\n",
+                         h->cors);
+  return k > 0 && (size_t)k < sizeof t && send_all(h->fd, t, (size_t)k);
 }
 
-bool http_stream_open_h(int fd, const char *head)
+bool http_stream_open(const Http *h)
 {
-  char h[1024];
-  const int k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
-                                      "Connection: close\r\n%s\r\n", head ? head : "");
-  return k > 0 && (size_t)k < sizeof h && send_all(fd, h, (size_t)k);
+  return http_stream_open_h(h, NULL);
+}
+
+bool http_stream_open_h(const Http *h, const char *head)
+{
+  char t[1536];
+  const int k = snprintf(t, sizeof t, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
+                                      "Connection: close\r\n%s%s\r\n", h->cors, head ? head : "");
+  return k > 0 && (size_t)k < sizeof t && send_all(h->fd, t, (size_t)k);
 }
 
 bool http_stream_event(int fd, const char *data, size_t n)
@@ -191,16 +211,17 @@ bool http_stream_event(int fd, const char *data, size_t n)
 
 bool http_stream_comment(int fd) { return send_all(fd, ": keep-alive\n\n", 14); }
 
-bool http_error(int fd, int status, const char *message) { return http_error_code(fd, status, message, NULL, NULL); }
+bool http_error(const Http *h, int status, const char *message) { return http_error_code(h, status, message, NULL, NULL); }
 
 /* with OpenAI's param and code (or NULL): a client's own handling keyed on them - context_length_exceeded the one
    harnesses compact a conversation on (0.9.2) */
-bool http_error_code(int fd, int status, const char *message, const char *param, const char *code)
+bool http_error_code(const Http *h, int status, const char *message, const char *param, const char *code)
 {
-  return http_error_head(fd, status, message, param, code, NULL);
+  return http_error_head(h, status, message, param, code, NULL);
 }
 
-bool http_error_head(int fd, int status, const char *message, const char *param, const char *code, const char *head)
+bool http_error_head(const Http *h, int status, const char *message, const char *param, const char *code,
+                     const char *head)
 {
   JsonBuf b = {0};
   json_puts(&b, "{\"error\": {\"message\": ");
@@ -211,7 +232,7 @@ bool http_error_head(int fd, int status, const char *message, const char *param,
   if (code)
     json_puts(&b, ", \"code\": "), json_dump_string(&b, code, strlen(code));
   json_puts(&b, "}}");
-  const bool ok = !b.oom && http_send_h(fd, status, "application/json", b.p, b.n, head);
+  const bool ok = !b.oom && http_send_h(h, status, "application/json", b.p, b.n, head);
   free(b.p);
   return ok;
 }

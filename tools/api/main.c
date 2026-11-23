@@ -1,11 +1,14 @@
 /* osmos-api: the engine as an OpenAI-compatible server (DESIGN.md, "osmos-api").
 
      osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>] [--ctx N|Nk|Nm]
+               [--allow-origin <origin>]...
      osmos-api --tokenize --model <first shard>     (stdin's text as the prompt's ids, one line: for tests)
 
    POST /v1/chat/completions, GET /v1/models, GET /health (503 while the engine loads). osmos-serve - beside this
    binary unless --engine names another - runs as the child with the pack's settings (osmos.json, the installer's);
-   its exit ends this server (the launcher restarts it) */
+   its exit ends this server (the launcher restarts it). --allow-origin (repeatable, 0.16.0): a web page's origin
+   whose requests are taken - its preflight answered, every response carrying CORS's headers for it; any other
+   browser's request (an Origin header) refused, as since 0.15.2 */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
@@ -86,19 +89,28 @@ static void answer(Http *h)
   const int status = http_read(h, err);
   if (status)
   {
-    http_error(h->fd, status, err);
+    http_error(h, status, err);
     http_linger(h->fd, true); /* its bytes unread: drained, so the client reads the status, not a reset */
     return;
   }
   /* a web page's request refused before anything is read into the engine (0.15.2): any page can POST text/plain to
      localhost with no preflight - a browser says its Origin, and DNS rebinding a Host not this server's */
-  if (h->origin)
-    return (void)http_error(h->fd, 403, "a browser's request (an Origin header): osmos-api serves local clients, not "
-                                        "web pages");
+  if (h->origin[0]) /* a browser's: its origin named by --allow-origin taken (CORS), any other refused */
+  {
+    bool allowed = false;
+    for (int i = 0; !allowed && i < api.n_allow; i++)
+      allowed = !strcmp(h->origin, api.allow[i]);
+    if (!allowed)
+      return (void)http_error(h, 403, "a browser's request (an Origin header): osmos-api serves local clients and the "
+                                      "origins --allow-origin names, not this page");
+    snprintf(h->cors, sizeof h->cors, "Access-Control-Allow-Origin: %s\r\nVary: Origin\r\n", h->origin);
+    if (!strcmp(h->method, "OPTIONS")) /* the preflight: what a page may send */
+      return (void)http_preflight(h);
+  }
   if (!h->host[0])
-    return (void)http_error(h->fd, 400, "no Host header (HTTP/1.1 requires one)");
+    return (void)http_error(h, 400, "no Host header (HTTP/1.1 requires one)");
   if (loopback && !host_ours(h->host))
-    return (void)http_error(h->fd, 403, "a Host not this server's (localhost, 127.0.0.1 or [::1], its port): refused");
+    return (void)http_error(h, 403, "a Host not this server's (localhost, 127.0.0.1 or [::1], its port): refused");
   char *q = strchr(h->path, '?');
   if (q)
     *q = 0;
@@ -107,7 +119,7 @@ static void answer(Http *h)
   {
     const bool ready = engine_ready(&api.engine);
     const char *b = ready ? "{\"status\": \"ok\"}" : "{\"status\": \"loading\"}";
-    http_send(h->fd, ready ? 200 : 503, "application/json", b, strlen(b));
+    http_send(h, ready ? 200 : 503, "application/json", b, strlen(b));
   }
   else if (!strcmp(h->path, "/v1/models") && get)
   {
@@ -121,15 +133,15 @@ static void answer(Http *h)
       snprintf(t, sizeof t, ", \"context_length\": %u", api.engine.max_ctx), json_puts(&b, t);
     json_puts(&b, ready ? ", \"osmos\": {\"ready\": true}}]}" : ", \"osmos\": {\"ready\": false}}]}");
     if (!b.oom)
-      http_send(h->fd, 200, "application/json", b.p, b.n);
+      http_send(h, 200, "application/json", b.p, b.n);
     free(b.p);
   }
   else if (!strcmp(h->path, "/v1/chat/completions") && post)
     api_chat(&api, h);
   else if (!strcmp(h->path, "/v1/chat/completions") || !strcmp(h->path, "/v1/models"))
-    http_error(h->fd, 405, "method not allowed");
+    http_error(h, 405, "method not allowed");
   else
-    http_error(h->fd, 404, "not found (POST /v1/chat/completions, GET /v1/models, GET /health)");
+    http_error(h, 404, "not found (POST /v1/chat/completions, GET /v1/models, GET /health)");
 }
 
 static volatile sig_atomic_t stopping; /* SIGTERM / SIGINT: the engine QUIT, then this server's end */
@@ -246,6 +258,13 @@ int main(int argc, char **argv)
     return die(err);
   char dport[16];
   snprintf(dport, sizeof dport, "%d", API_PORT);
+  for (int i = 1; i + 1 < argc; i++) /* --allow-origin, each its own */
+    if (!strcmp(argv[i], "--allow-origin"))
+    {
+      if (api.n_allow == API_ORIGINS_MAX || !argv[i + 1][0] || strpbrk(argv[i + 1], "\r\n *"))
+        return die("--allow-origin: an origin a page says (scheme://host[:port]), 16 at most, never *");
+      api.allow[api.n_allow++] = argv[++i];
+    }
   const int port = atoi(opt(argc, argv, "--port", dport));
   const int lfd = listen_on(opt(argc, argv, "--host", "127.0.0.1"), port);
   loopback = !strncmp(opt(argc, argv, "--host", "127.0.0.1"), "127.", 4), port_bound = port;
@@ -287,9 +306,9 @@ int main(int argc, char **argv)
       pthread_mutex_unlock(&conns_mu);
       pthread_t t;
       if (!room)
-        http_error(fd, 503, "too many connections"), http_linger(fd, false), close(fd);
+        http_error(&(Http){.fd = fd}, 503, "too many connections"), http_linger(fd, false), close(fd);
       else if (pthread_create(&t, NULL, connection, (void *)(intptr_t)fd))
-        http_error(fd, 503, "no thread for it"), close(fd), pthread_mutex_lock(&conns_mu), conns--,
+        http_error(&(Http){.fd = fd}, 503, "no thread for it"), close(fd), pthread_mutex_lock(&conns_mu), conns--,
             pthread_mutex_unlock(&conns_mu);
       else
         pthread_detach(t);

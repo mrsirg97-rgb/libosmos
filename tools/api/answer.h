@@ -15,6 +15,7 @@ typedef enum Phase
 typedef struct Answer
 {
   int fd;
+  const struct Http *http; /* its connection (the fd's): a response's headers its (an allowed origin's CORS) */
   bool stream;
   const char *model;
   const Dialect *d; /* the markers it is cut at */
