@@ -7,6 +7,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/model/gguf.h"
 #include "osmos/text/answer.h"
+#include "osmos/run/fit.h"
 
 /* the dispatch: a model's family by its file's general.architecture, then every call that family's */
 
@@ -29,6 +30,7 @@ struct Osmos
   float *row;     /* [vocab], a row copied out */
   float *drow;    /* [vocab] device: a row's copy, its excepted tokens -inf (osmos_sample_except), at first use */
   int32_t *dpick; /* device: a drawn token */
+  uint64_t ram_kept; /* the system's RAM a build leaves free: OsmosOptions' fill, else FIT_RAM_FREE */
 };
 
 struct OsmosSeq
@@ -102,6 +104,7 @@ Osmos *osmos_create(const OsmosModel *m, const OsmosOptions *o, char err[OSMOS_E
   e->fam = m->fam, e->vocab = (uint32_t)m->facts.vocab;
   if (!(e->row = malloc((size_t)e->vocab * sizeof *e->row)))
     return free(e), fail(err, "out of memory"), NULL;
+  e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
   if (!(e->impl = m->fam->create(m->impl, o, err)))
     return free(e->row), free(e), NULL;
   return e;
@@ -121,7 +124,17 @@ void osmos_destroy(Osmos *e)
 
 uint64_t osmos_identity(const Osmos *e) { return e ? e->fam->identity(e->impl) : 0; }
 
-bool osmos_room(const Osmos *e, uint64_t *bytes) { return e && bytes && e->fam->room(e->impl, bytes); }
+/* the room a build left, every family's one rule: the GPU's free memory, or the system's RAM past what it keeps free,
+   the less (fit_room) - the experts' pinned host slots in RAM, not the GPU's count (osmos1.7b and the 27B reported the
+   GPU's free alone) */
+bool osmos_room(const Osmos *e, uint64_t *bytes)
+{
+  uint64_t free_b = 0;
+  if (!e || !bytes || !osmos_gpu_room(&free_b))
+    return false;
+  *bytes = fit_room(free_b, fit_ram_available(), e->ram_kept);
+  return true;
+}
 
 void osmos_stats(const Osmos *e, OsmosStats *s)
 {

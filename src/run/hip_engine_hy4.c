@@ -33,7 +33,6 @@ typedef struct Eng
 {
   Hy4Forward *f;
   uint32_t drafts; /* a round's drafts (DFly2's), 0 without a drafter */
-  uint64_t ram_kept; /* the system's RAM kept free (--fill, else FIT_RAM_FREE): the room's other bound */
 } Eng;
 
 static bool fail(char err[OSMOS_ERR], const char *what)
@@ -95,7 +94,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
   Eng *e = calloc(1, sizeof *e);
   if (!e)
     return fail(err, "out of memory"), NULL;
-  e->ram_kept = o->fill_set ? o->fill : FIT_RAM_FREE;
   const uint32_t steps = osmos_step_tokens(o, HY4_STEP_TOKENS);
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Hy4Options' 0,
      every expert resident) */
@@ -110,17 +108,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 }
 
 static uint64_t e_identity(const void *p) { return hy4_identity(((const Eng *)p)->f); }
-
-/* the room a build left: the GPU's free memory, or the RAM past ram_kept - the experts' pinned host slots in RAM, not
-   in the GPU's free count (Inkling's, DeepSeek's) */
-static bool e_room(const void *p, uint64_t *bytes)
-{
-  uint64_t free_b = 0;
-  if (!osmos_gpu_room(&free_b))
-    return false;
-  *bytes = fit_room(free_b, fit_ram_available(), ((const Eng *)p)->ram_kept);
-  return true;
-}
 
 static void e_stats(const void *p, OsmosStats *s) { s->budget = hy4_forward_bytes(((const Eng *)p)->f); }
 
@@ -205,7 +192,7 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 }
 
 const OsmosFamily osmos_hy4 = {
-    "hy_v4_flash", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_room,  e_stats,
+    "hy_v4_flash", m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
     e_batch,       e_logits,   e_greedy,      e_block,   s_create,    s_destroy,  s_prompt, s_rollback,
     s_reach,       s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     e_read, /* a prompt's read the matrix cores' math, a decode's the matvecs': two maths (hy4_step_read) */

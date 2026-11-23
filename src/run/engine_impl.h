@@ -20,7 +20,6 @@ typedef struct OsmosFamily
   void *(*create)(const void *model, const OsmosOptions *o, char err[OSMOS_ERR]);
   void (*destroy)(void *eng);
   uint64_t (*identity)(const void *eng);
-  bool (*room)(const void *eng, uint64_t *bytes);
   void (*stats)(const void *eng, OsmosStats *s);
   bool (*batch)(void *eng, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
   const float *(*logits)(const void *eng, uint32_t row);

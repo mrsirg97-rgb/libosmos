@@ -122,7 +122,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 }
 
 static uint64_t e_identity(const void *p) { return forward_identity(((const Eng *)p)->f); }
-static bool e_room(const void *p, uint64_t *bytes) { return forward_room(((const Eng *)p)->f, bytes); }
 
 static void e_stats(const void *p, OsmosStats *s)
 {
@@ -211,7 +210,7 @@ static int s_draft(void *p, void *s, int32_t y, float conf_min, float cum_min, i
 }
 
 const OsmosFamily osmos_ds4 = {
-    "deepseek41", m_open,   m_close,   e_create, e_destroy,  e_identity,    e_room,  e_stats,
+    "deepseek41", m_open,   m_close,   e_create, e_destroy,  e_identity,    e_stats,
     e_batch,      e_logits, e_greedy,  e_block,  s_create,   s_destroy,     s_prompt, s_rollback,
     s_reach,      s_position, s_state_bytes, s_save_to, s_load_from, s_seed,        s_draft,  NULL, /* its drafts one sequence at a time */
     e_read, /* a prompt's read: the large steps' math at any size (forward_reading) */

@@ -91,12 +91,6 @@ static void *e_create(const void *pm, const OsmosOptions *o, char err[OSMOS_ERR]
 
 static uint64_t e_identity(const void *p) { return q35_identity(((const Eng *)p)->f); }
 
-static bool e_room(const void *p, uint64_t *bytes)
-{
-  (void)p;
-  return osmos_gpu_room(bytes);
-}
-
 static void e_stats(const void *p, OsmosStats *s) { (void)p, (void)s; }
 
 /* the batch's sequences one step (each one's consecutive tokens a run), Q35_MAX_RUNS at a time, in a decode's math
@@ -187,7 +181,7 @@ static bool s_mark_load(void *s, const void *in, uint64_t bytes, char err[OSMOS_
 }
 
 const OsmosFamily osmos_q35 = {
-    "qwen35",   m_open,     m_close,       e_create,  e_destroy,   e_identity, e_room,  e_stats,
+    "qwen35",   m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
     e_batch,    e_logits,   e_greedy,      e_block,   s_create,    s_destroy,  s_prompt, s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     e_read, /* a prompt's read the matmul's math, a decode's mv_fp4's: two maths (q35_step_read) */
