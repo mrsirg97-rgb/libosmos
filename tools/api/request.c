@@ -96,10 +96,42 @@ static unsigned long long drawn_seed(void)
   return s & ((1ull << 53) - 1);
 }
 
+/* the request's fields an allowlist (0.16.0: one osmos did not know ignored - a misspelled max_token ran the request
+   unbounded): what it reads, what it refuses past a default (n, stop, the penalties, logit_bias, logprobs), and a
+   client's own labels it has nothing to do with (model, user - rig sends both - parallel_tool_calls, metadata, store
+   when false) */
+static const char *const kFields[] = {
+    "messages",       "temperature",     "top_p",      "top_k",        "seed",           "stop",
+    "n",              "presence_penalty", "frequency_penalty", "top_logprobs", "repetition_penalty", "logit_bias",
+    "logprobs",       "tools",           "tool_choice", "thinking",    "reasoning_effort", "chat_template_kwargs",
+    "osmos",          "max_tokens",      "max_completion_tokens", "stream", "stream_options", "response_format",
+    "model",          "user",            "parallel_tool_calls", "metadata", "store",
+};
+
+static bool fields_known(const Json *body, char *err)
+{
+  for (size_t i = 0; i < body->n; i++)
+  {
+    bool known = false;
+    for (size_t k = 0; !known && k < sizeof kFields / sizeof *kFields; k++)
+      known = !strcmp(body->key[i], kFields[k]);
+    if (!known)
+      return osmos_fail(err, "%.64s: a field osmos does not take (refused, not ignored)", body->key[i]);
+  }
+  const Json *store = json_get(body, "store");
+  if (store && store->type != JSON_NULL && store->type != JSON_FALSE)
+    return osmos_fail(err, "store: osmos keeps no completions (false or absent)");
+  return true;
+}
+
 bool request_read(const Json *body, const Dialect *d, bool fill_orphans, bool preserve_default, double temperature,
                   double top_p, unsigned top_k, Request *r, char err[OSMOS_ERR])
 {
   memset(r, 0, sizeof *r);
+  if (!body || body->type != JSON_OBJECT)
+    return osmos_fail(err, "the body: a JSON object");
+  if (!fields_known(body, err))
+    return false;
   r->preserve = true, r->preserve_default = preserve_default;
   const Json *msgs = json_get(body, "messages");
   if (!msgs || msgs->type != JSON_ARRAY || !msgs->n)

@@ -352,6 +352,20 @@ class Api(Served, unittest.TestCase):
             time.sleep(0.05)
         self.assertTrue(any(l.startswith("STOP ") for l in self.log()), "no STOP within 3 s")
 
+    def test_6m_fields_allowlist(self):  # 0.16.0: a field osmos does not know refused, named - never ignored (a
+        self.ready()                       # misspelled max_token ran the request unbounded); a client's own labels taken
+        base = {"messages": [{"role": "user", "content": "x"}], "max_tokens": 2, "reasoning_effort": "none"}
+        for bad in ({"max_token": 2}, {"foo": 1}, {"functions": []}):
+            r = self.post(dict(base, **bad))
+            self.assertEqual(r.status, 400, bad)
+            self.assertIn(next(iter(bad)), r.read().decode())
+        r = self.post(dict(base, store=True))
+        self.assertEqual(r.status, 400)
+        self.assertIn("store", r.read().decode())
+        ok = dict(base, model="osmos-test", user="rig", metadata={"k": "v"}, parallel_tool_calls=True, store=False)
+        r = self.post(ok)
+        self.assertEqual(r.status, 200, r.read())
+
     def test_6l_request_deadline(self):  # 0.16.0: a request whole within its deadline from its first byte - 10 s for
         self.ready()                       # its headers, a second a MB of body past them - a trickle cut (408), not
         for head_first in (True, False):   # held while each byte beats the 10 s idle (a byte every 9 s: hours)
