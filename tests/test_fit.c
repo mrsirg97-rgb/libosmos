@@ -53,6 +53,17 @@ static bool build(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, c
   return true;
 }
 
+/* the room a budget leaves, its true one (no wobble; 0 past the memory) - the chunks' */
+static uint64_t build_room(const Engine *e, uint64_t budget)
+{
+  const uint64_t resident = budget > e->dense ? budget - e->dense : 0;
+  uint64_t used = e->other + budget + resident * e->overhead_pct / 100;
+  if (e->chunk)
+    used = (used + e->chunk - 1) / e->chunk * e->chunk;
+  const uint64_t p = pool(e, budget);
+  return e->memory > used + p ? e->memory - used - p : 0;
+}
+
 static void unbuild(void *ctx)
 {
   ((Engine *)ctx)->live = 0;
@@ -140,7 +151,37 @@ int main(void)
     }
   printf("  the room's measure wobbling 0.05-0.25 GiB: no build past the memory, none further under the headroom than "
          "the wobble\n");
-  printf("  the dense build refused: its why (%s); a growth step refused: built smaller (%.2f GiB)\n[test_fit] ok\n",
-         refused, (double)smaller / GIB);
+  printf("  the dense build refused: its why (%s); a growth step refused: built smaller (%.2f GiB)\n", refused,
+         (double)smaller / GIB);
+  /* a flat near the edge (found by 0.16.0's phase 1 check, 0.15.2's release binary alike): memory taken in 0.93 GiB
+     chunks, the box's - a first step landing on the flat just past a chunk read nearly one room for every budget
+     over it, a little short of the headroom, so each next step crept down a fraction of the shortfall and the builds
+     ran out, the last that fit kept: 14 GiB short (84.98 GiB against 98.88). every start across a chunk: the kept
+     budget within two chunks and the slack of the best (the largest leaving the headroom, scanned) - a flat stepped
+     below gives up its own width and the sliver at its top (the streamed pool shrinking along it), never a creep */
+  {
+    int worst_at = -1;
+    double worst = 0;
+    for (int at = 0; at < 64; at++)
+    {
+      const uint64_t chunk = 93 * GIB / 100;
+      Engine q = {115 * GIB + (uint64_t)at * chunk / 64, 3 * GIB, 12 * GIB, 110 * GIB, 43, 6, chunk, 0, 0, 0, 0,
+                  INT64_MAX};
+      uint64_t best = 0, b = 0;
+      for (b = q.dense; b <= q.dense + q.experts; b += GIB / 64) /* the best, scanned */
+        if (build_room(&q, b) >= GIB)
+          best = b;
+      budget = 0;
+      assert(fit_sized(build, unbuild, &q, GIB, &budget, err) && q.live);
+      assert(build_room(&q, budget) >= GIB); /* never kept short of the headroom */
+      const double short_by = ((double)best - (double)budget) / GIB;
+      if (short_by > worst)
+        worst = short_by, worst_at = at;
+    }
+    printf("  a flat near the edge: every start across a 0.93 GiB chunk within %.2f GiB of the best (worst at %d/64)\n",
+           worst, worst_at);
+    assert(worst <= 2 * 0.93 + (double)FIT_SLACK / GIB); /* two chunks and the slack at most (0.16.0: 10.01 short) */
+  }
+  printf("[test_fit] ok\n");
   return 0;
 }

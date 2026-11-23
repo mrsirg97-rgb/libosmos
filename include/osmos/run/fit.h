@@ -13,6 +13,8 @@
                                      the model beside an editor, a browser, language servers and the agent harness */
 
 #define FIT_SLACK (1ull << 28) /* room past the headroom a sizing stops at: 256 MiB, a few experts' units */
+#define FIT_CHUNK (1ull << 30) /* the room's steps: memory taken ~0.93 GiB at once on this box (DESIGN.md, 0.16.0's
+                                  flat) - a build on a flat short of the headroom stepped below it by one */
 #define FIT_FIRST_COST 1.125 /* fit_sized's first step's cost a byte of budget: past the units' padding seen (6-12%) */
 #define FIT_BUILDS 6           /* builds at most past the dense one's first (and one more to keep the largest that
                                   left the headroom): a sizing took 3-6 on this box */
