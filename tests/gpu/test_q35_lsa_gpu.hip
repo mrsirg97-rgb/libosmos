@@ -26,7 +26,7 @@ extern "C" {
 // the tail's log-probabilities (tail x V, host), the prompt in steps of `chunk`
 static std::vector<float> run(Q35Weights* w, const std::vector<int32_t>& ids, uint32_t tail, const char* maps,
                               uint32_t chunk) {
-  char err[Q35_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const uint32_t T = (uint32_t) ids.size(), V = (uint32_t) w->geo.n_vocab;
   Q35Forward* f = q35_forward_create(w, chunk, T + 8, err);
   CHECK(f || (std::fprintf(stderr, "%s\n", err), false));
@@ -66,7 +66,7 @@ int main() {
   CHECK(std::fread(ids.data(), 4, ids.size(), fi) == ids.size());
   std::fclose(fi);
   const uint32_t tail = std::getenv("Q35_TAIL") ? (uint32_t) std::atoi(std::getenv("Q35_TAIL")) : 256;
-  char err[Q35_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(mp, err);
   CHECK(g);
   Q35Weights* w = q35_weights_create(g, err);

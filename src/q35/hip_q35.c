@@ -24,15 +24,9 @@
 #include "osmos/model/qtype.h"
 #include "osmos/q35/forward.h"
 #include "q35_impl.h"
+#include "osmos/err.h"
 
 
-bool q35_fail(char *err, const char *why)
-{
-  if (err)
-    snprintf(err, Q35_ERR, "%s", why);
-  return false;
-}
-#define fail q35_fail
 
 bool q35_alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
 #define alloc q35_alloc
@@ -217,7 +211,7 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
                  bool read, uint32_t keep_from, char *err)
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > Q35_MAX_RUNS)
-    return fail(err, "no forward, sequences or tokens, or past Q35_MAX_RUNS runs");
+    return osmos_fail(err, "no forward, sequences or tokens, or past Q35_MAX_RUNS runs");
   f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
                   half-rewritten slot table (0.11.2) */
   Run run[Q35_MAX_RUNS];
@@ -226,21 +220,21 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
   {
     Q35Seq *s = seqs[r];
     if (!s || s->f != f || !lens[r])
-      return fail(err, "a run of no sequence, of another forward, or of no tokens");
+      return osmos_fail(err, "a run of no sequence, of another forward, or of no tokens");
     if (s->broken)
-      return fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+      return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
     for (uint32_t k = 0; k < r; k++)
       if (seqs[k] == s)
-        return fail(err, "a sequence twice in one step");
+        return osmos_fail(err, "a sequence twice in one step");
     if ((uint64_t)n + lens[r] > f->max_tokens || (uint64_t)s->pos + lens[r] > f->max_ctx)
-      return fail(err, "the tokens past the forward's step, or a sequence past its context");
+      return osmos_fail(err, "the tokens past the forward's step, or a sequence past its context");
     run[r] = (Run){s, n, lens[r]};
     for (uint32_t t = 0; t < lens[r]; t++)
       kept += n + t >= keep_from && (!s->prompt_end || s->pos + t + 1 >= s->prompt_end);
     n += lens[r];
   }
   if (kept > f->logit_rows)
-    return fail(err, "a step's kept rows past the logits' (Q35Options' logit_rows)");
+    return osmos_fail(err, "a step's kept rows past the logits' (Q35Options' logit_rows)");
   const Q35Geometry *g = &f->w->geo;
   const uint32_t D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab;
   memcpy(f->pin_tok, tokens, (size_t)n * 4);
@@ -286,7 +280,7 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
       run[r].s->broken = true;
     if (over) /* the flag this step's: the next step's from zero (0.11.2 - it stayed set, every step after refused) */
       hipMemset(f->overflow, 0, 4);
-    return fail(err, over ? "an activation past f16's range (the step refused)" : "a GPU call failed in the step");
+    return osmos_fail(err, "%s", over ? "an activation past f16's range (the step refused)" : "a GPU call failed in the step");
   }
   for (uint32_t r = 0; r < runs; r++)
   {
@@ -298,28 +292,28 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
 }
 
 bool q35_step_runs(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                   char err[Q35_ERR])
+                   char err[OSMOS_ERR])
 {
   return step(f, seqs, lens, runs, tokens, false, 0, err);
 }
 
 bool q35_step_read(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                   char err[Q35_ERR])
+                   char err[OSMOS_ERR])
 {
   return step(f, seqs, lens, runs, tokens, true, 0, err);
 }
 
 /* one sequence, its last `rows` rows' logits on the host (q35_logits): a step past Q35_MV_TOKENS tokens a prompt's
    math, the rest a decode's (the checks against HF: both) */
-bool q35_step(Q35Forward *f, Q35Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[Q35_ERR])
+bool q35_step(Q35Forward *f, Q35Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR])
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
-    return fail(err, "a step of no tokens, or more rows than tokens or the logits'");
+    return osmos_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
   if (!step(f, &s, &n, 1, tokens, n > Q35_MV_TOKENS, n - rows, err))
     return false;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||
-         fail(err, "a GPU call failed (the logits' copy)");
+         osmos_fail(err, "a GPU call failed (the logits' copy)");
 }
 
 const float *q35_logits(const Q35Forward *f) { return f ? f->pin_logits : NULL; }
@@ -329,10 +323,10 @@ const float *q35_row_logits(const Q35Forward *f, uint32_t row)
   return f ? kept_row(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row) : NULL;
 }
 
-bool q35_greedy(Q35Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q35_ERR])
+bool q35_greedy(Q35Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR])
 {
   const char *why = f ? kept_greedy(f->slot, f->rows, f->logits, (uint32_t)f->w->geo.n_vocab, row0, rows, f->ids,
                                     f->argmax, NULL, ids)
                       : "no forward or ids, or rows past the last step's";
-  return !why || fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
 }

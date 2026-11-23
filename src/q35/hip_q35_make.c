@@ -15,9 +15,9 @@
 #include "osmos/gpu/upload.h"
 #include "osmos/model/qtype.h"
 #include "q35_impl.h"
+#include "osmos/err.h"
 
 #define READ_PIECE (64ull << 20)
-#define fail q35_fail
 #define alloc q35_alloc
 
 void q35_forward_tap(Q35Forward *f, q35_tap_fn fn, void *arg) { f->tap = fn, f->tap_arg = arg; }
@@ -29,7 +29,7 @@ static bool past_layers(const GgufTensor *t, void *arg) /* the MTP head's layers
 
 static bool upload(Q35Forward *f, char *err)
 {
-  return gpu_upload_table(f->w->model, READ_PIECE, past_layers, f, &f->dev, err, err ? Q35_ERR : 0);
+  return gpu_upload_table(f->w->model, READ_PIECE, past_layers, f, &f->dev, err, err ? OSMOS_ERR : 0);
 }
 
 void q35_forward_destroy(Q35Forward *f)
@@ -48,23 +48,23 @@ void q35_forward_destroy(Q35Forward *f)
   free(f);
 }
 
-bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_ERR])
+bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS_ERR])
 {
   const Q35Geometry *g = &f->w->geo;
   if (f->lsa)
-    return fail(err, "the read already on");
+    return osmos_fail(err, "the read already on");
   if (!maps) /* YaRN alone: the dense model under the maps' rotation (the read's comparison) */
     return q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), Q4X_THETA_GGML, &f->rope) ||
-           fail(err, "the YaRN rotation refused");
+           osmos_fail(err, "the YaRN rotation refused");
   if ((uint32_t)g->n_kv_heads * (uint32_t)(g->head_dim - g->rope_dim) != LSA_IN)
-    return fail(err, "the model's free key dims are not the maps' input");
+    return osmos_fail(err, "the model's free key dims are not the maps' input");
   FILE *fp = fopen(maps, "rb");
   uint32_t hdr[4] = {0};
   if (!fp || fread(hdr, 4, 4, fp) != 4 || memcmp(hdr, "LSAM", 4) || hdr[2] != LSA_IN || hdr[3] != LSA_DIM)
   {
     if (fp)
       fclose(fp);
-    return fail(err, "the maps file not read (tools/convert/lsa_maps.py's, LSA_IN x LSA_DIM)");
+    return osmos_fail(err, "the maps file not read (tools/convert/lsa_maps.py's, LSA_IN x LSA_DIM)");
   }
   const size_t m = (size_t)LSA_IN * LSA_DIM;
   float *buf = malloc(2 * m * F);
@@ -82,17 +82,17 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_E
   fclose(fp);
   free(buf);
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = g->recurrent[l] || f->wq[l] || (fail(err, "an attention layer without its maps"), false);
+    ok = g->recurrent[l] || f->wq[l] || (osmos_fail(err, "an attention layer without its maps"), false);
   if (!ok)
-    return err && !*err ? fail(err, "the maps not loaded") : false;
+    return err && !*err ? osmos_fail(err, "the maps not loaded") : false;
   /* the maps' rotation: YaRN at yarn x native (their training's), whatever this forward's context */
   if (!q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), Q4X_THETA_GGML, &f->rope))
-    return fail(err, "the maps' YaRN rotation refused");
+    return osmos_fail(err, "the maps' YaRN rotation refused");
   ok = (f->lsa_s = lsa_scratch_create(f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && alloc(&f->iq, LSA_DIM * F) &&
        alloc(&f->list, LSA_READ_MAX * 4) && alloc(&f->list_n, 4) && (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) &&
        (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) && (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
   if (!ok)
-    return fail(err, "out of memory (the read's scratch)");
+    return osmos_fail(err, "out of memory (the read's scratch)");
   f->lsa = seen > 0;
   return true;
 }
@@ -109,25 +109,25 @@ static bool head_q8(Q35Forward *f, char *err)
   void **slot = &f->dev[t - f->w->model->tensors];
   void *q = NULL;
   if (!gpu_q8_rows(QTYPE_BF16, *slot, (uint64_t)D * 2, V, D, &q))
-    return fail(err, "the LM head's Q8_0 not made (GPU memory, or a launch)");
+    return osmos_fail(err, "the LM head's Q8_0 not made (GPU memory, or a launch)");
   hipFree(*slot);
   *slot = q, f->head_type = QTYPE_Q8_0;
   return true;
 }
 
-Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_t max_ctx, char err[Q35_ERR])
+Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_t max_ctx, char err[OSMOS_ERR])
 {
   const Q35Options o = {max_tokens, max_ctx, 0};
   return q35_forward_create_with(w, &o, err);
 }
 
-Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, char err[Q35_ERR])
+Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, char err[OSMOS_ERR])
 {
   if (!w || !o || !o->max_tokens || o->max_tokens > o->max_ctx || o->max_ctx > OPS_Q4X_MAX_KEYS)
-    return fail(err, "no weights, no tokens, or a context past the attention's keys"), NULL;
+    return osmos_fail(err, "no weights, no tokens, or a context past the attention's keys"), NULL;
   Q35Forward *f = calloc(1, sizeof *f);
   if (!f)
-    return fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   const uint32_t max_tokens = o->max_tokens, max_ctx = o->max_ctx;
   f->w = w, f->max_tokens = max_tokens, f->max_ctx = max_ctx;
   f->logit_rows = o->logit_rows && o->logit_rows < max_tokens ? o->logit_rows : max_tokens;
@@ -151,12 +151,12 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
   };
   bool ok = q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, max_ctx, Q4X_THETA_GGML, &f->rope) && upload(f, err);
   ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
-              fail(err, "GPU memory refused (a step's buffers)"));
+              osmos_fail(err, "GPU memory refused (a step's buffers)"));
   f->head_type = w->output->type;
   ok = ok && head_q8(f, err) && hipMemset(f->overflow, 0, 4) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess &&
        hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess && (f->slot = malloc(n * 4));
   if (!ok)
-    return q35_forward_destroy(f), (err && !*err ? fail(err, "the forward not made") : false), NULL;
+    return q35_forward_destroy(f), (err && !*err ? osmos_fail(err, "the forward not made") : false), NULL;
   return f;
 }

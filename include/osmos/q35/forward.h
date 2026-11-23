@@ -6,13 +6,13 @@
    SwiGLU. the q4x family's kernels (q4x_ops.h) on one GPU, the weights whole in its memory; a sequence's state its
    attention layers' cache (Q8_0) and its DeltaNets' conv history and recurrent state */
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "osmos/model/gguf.h"
 #include "osmos/model/state_io.h"
 
-#define Q35_ERR 256
 #define Q35_MAX_LAYERS 128
 
 typedef struct Q35Geometry
@@ -26,7 +26,7 @@ typedef struct Q35Geometry
   uint32_t native_ctx;
 } Q35Geometry;
 
-bool q35_geometry(const Gguf *model, Q35Geometry *g, char err[Q35_ERR]);
+bool q35_geometry(const Gguf *model, Q35Geometry *g, char err[OSMOS_ERR]);
 
 /* a layer's tensors (the ones its kind has; the rest NULL) and each matrix's own scale (NVFP4's: its .scale beside it,
    1 for any other type) */
@@ -52,7 +52,7 @@ typedef struct Q35Weights
 } Q35Weights;
 
 /* every tensor the forward reads, found and its shape checked against the geometry; NULL and err otherwise */
-Q35Weights *q35_weights_create(const Gguf *model, char err[Q35_ERR]);
+Q35Weights *q35_weights_create(const Gguf *model, char err[OSMOS_ERR]);
 void q35_weights_destroy(Q35Weights *w);
 
 /* the forward: the weights in the GPU's memory, a step's buffers for max_tokens tokens, contexts to max_ctx (past the
@@ -60,22 +60,22 @@ void q35_weights_destroy(Q35Weights *w);
 typedef struct Q35Forward Q35Forward;
 typedef struct Q35Seq Q35Seq;
 
-Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_t max_ctx, char err[Q35_ERR]);
+Q35Forward *q35_forward_create(const Q35Weights *w, uint32_t max_tokens, uint32_t max_ctx, char err[OSMOS_ERR]);
 /* the same, logit_rows the logits' rows a step keeps at most (0: max_tokens, every row) - a server's prompt step keeps
    its last row alone (q35_seq_prompt), so its table is a round's rows, not max_tokens x 248K floats */
 typedef struct Q35Options
 {
   uint32_t max_tokens, max_ctx, logit_rows;
 } Q35Options;
-Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, char err[Q35_ERR]);
+Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, char err[OSMOS_ERR]);
 void q35_forward_destroy(Q35Forward *f);
 /* latent sparse attention (osmos/lsa.h): the maps file (tools/convert/lsa_maps.py's: W_Q and W_K an attention layer),
    before any sequence; from then every attention layer's keys indexed and each closed block bucketed (a prompt's
    steps and a decode's), a decode step's (n <= Q35_ATTN_DECODE_MAX) attention its read's alone, a prompt's dense (as
    lsa.py's quality: the read's cost measured on what follows a prompt). the rotation YaRN's at yarn x native, the
    maps' own (-vibes': 40). maps NULL: the rotation alone, the read off (the dense model it is measured against) */
-bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[Q35_ERR]);
-Q35Seq *q35_seq_create(Q35Forward *f, char err[Q35_ERR]);
+bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS_ERR]);
+Q35Seq *q35_seq_create(Q35Forward *f, char err[OSMOS_ERR]);
 void q35_seq_destroy(Q35Seq *s);
 int32_t q35_seq_position(const Q35Seq *s);
 
@@ -83,7 +83,7 @@ int32_t q35_seq_position(const Q35Seq *s);
    the host (q35_logits: rows x n_vocab); a tap, when set, gets every layer's residual after it (n x n_embd, the GPU's) */
 typedef void (*q35_tap_fn)(void *arg, int layer, const float *dev_h, uint32_t n, uint32_t dim);
 void q35_forward_tap(Q35Forward *f, q35_tap_fn fn, void *arg);
-bool q35_step(Q35Forward *f, Q35Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[Q35_ERR]);
+bool q35_step(Q35Forward *f, Q35Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR]);
 const float *q35_logits(const Q35Forward *f);
 
 /* the engine's (DESIGN.md, "0.9.0: q35 behind the engine"): q4x's contracts (osmos/q4x/forward.h) on q35's state */
@@ -97,15 +97,15 @@ const float *q35_logits(const Q35Forward *f);
    before the work; false after it began (a GPU call failed, an activation past f16's range): the step's sequences
    refused from then on (q35_seq_fail's), until a load */
 bool q35_step_runs(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                   char err[Q35_ERR]);
+                   char err[OSMOS_ERR]);
 /* the same step in a prompt's math (the engine's read: the matmul at any size, attention dense), its bits a prompt's
    however it is split - not a decode's (two maths, as DeepSeek's: DESIGN.md) */
 bool q35_step_read(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                   char err[Q35_ERR]);
+                   char err[OSMOS_ERR]);
 /* row's logits (device, n_vocab floats) of the last q35_step_runs, NULL for a row not kept */
 const float *q35_row_logits(const Q35Forward *f, uint32_t row);
 /* the greatest token of each of rows row0 .. row0 + rows - 1 (the lowest among equals); false for a row not kept */
-bool q35_greedy(Q35Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[Q35_ERR]);
+bool q35_greedy(Q35Forward *f, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 /* the prompt ends at end (its last token end - 1): rows before it not kept (the head not run for them) */
 bool q35_seq_prompt(Q35Seq *s, uint32_t end);
 /* the tokens a sequence can drop (Q35_MAX_BACK at most; 0 after a load, a mark's load, or a new one; with LSA no
@@ -121,13 +121,13 @@ uint64_t q35_identity(const Q35Forward *f);
    histories, the attention rows below the position, LSA's index and buckets, then a sum) - load refuses another
    identity or format, a size not its position's, a damaged string: the sequence then empty */
 uint64_t q35_seq_state_bytes(const Q35Seq *s);
-bool q35_seq_save_to(const Q35Seq *s, StateSink sink, void *ctx, char err[Q35_ERR]);
-bool q35_seq_load_from(Q35Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[Q35_ERR]);
+bool q35_seq_save_to(const Q35Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
+bool q35_seq_load_from(Q35Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR]);
 /* a mark (a point the sequence goes back to: what a later token changes - the DeltaNets' states and conv histories,
    the position - not the attention rows below it, which only grow): its bytes, save, load (refused past the
    position or another's size; with LSA, below the last closed block) */
 uint64_t q35_seq_mark_bytes(const Q35Seq *s);
-bool q35_seq_mark_save(const Q35Seq *s, void *out, uint64_t bytes, char err[Q35_ERR]);
-bool q35_seq_mark_load(Q35Seq *s, const void *in, uint64_t bytes, char err[Q35_ERR]);
+bool q35_seq_mark_save(const Q35Seq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
+bool q35_seq_mark_load(Q35Seq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 
 #endif

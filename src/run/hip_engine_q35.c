@@ -11,7 +11,6 @@
    read the matmul's (two maths, as DeepSeek's: the engine's read), each a token's bits however its step is split or
    shared; the logits of the kept rows alone. no drafter yet: block 0 */
 _Static_assert(Q35_MAX_BACK >= OSMOS_MAX_BLOCK, "a drafted round's tokens within a rollback's reach");
-_Static_assert(OSMOS_ERR >= Q35_ERR && OSMOS_ERR >= GGUF_ERR, "one error buffer for the engine and the family's calls");
 
 /* a step's most tokens when the server names none (a prompt's chunk), and a round's most kept rows: each lane's
    token and its drafts (OSMOS_MAX_LANES x 9 rows of 248,320 floats: 0.57 GB) */

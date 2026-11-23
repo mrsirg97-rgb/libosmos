@@ -69,7 +69,6 @@ typedef struct Q35SeqBytes
 } Q35SeqBytes;
 Q35SeqBytes q35_seq_bytes(const Q35Geometry *g);
 
-bool q35_fail(char *err, const char *why);
 bool q35_alloc(void *p, uint64_t bytes);
 
 /* a tensor's bytes on the GPU (by its index in the model's table) */
