@@ -352,6 +352,36 @@ class Api(Served, unittest.TestCase):
             time.sleep(0.05)
         self.assertTrue(any(l.startswith("STOP ") for l in self.log()), "no STOP within 3 s")
 
+    def test_6l_request_deadline(self):  # 0.16.0: a request whole within its deadline from its first byte - 10 s for
+        self.ready()                       # its headers, a second a MB of body past them - a trickle cut (408), not
+        for head_first in (True, False):   # held while each byte beats the 10 s idle (a byte every 9 s: hours)
+            s = socket.create_connection(("127.0.0.1", self.port))
+            body = json.dumps({"messages": [{"role": "user", "content": "x"}]}).encode()
+            head = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\n\r\n" % len(body)
+            trickle = head if head_first else body
+            if not head_first:
+                s.sendall(head)
+            t0, got = time.time(), b""
+            s.settimeout(1.0)
+            for b in trickle:
+                try:
+                    s.send(bytes([b]))
+                except OSError:
+                    break
+                try:
+                    got = s.recv(4096)
+                    if got:
+                        break
+                except socket.timeout:
+                    pass
+                time.sleep(1.0)
+                if time.time() - t0 > 30:
+                    break
+            s.close()
+            took = time.time() - t0
+            self.assertIn(b"408", got, "the %s trickled: no 408 (%.1f s)" % ("headers" if head_first else "body", took))
+            self.assertLess(took, 16)
+
     def test_6k_parse_budget(self):  # 0.16.0: a tree's memory bounded (json_parse_within) - the body's and a call's
         self.ready()                   # arguments' alike; a body past API_BODY_MAX (8 MB, from 32) refused unread
         tiny = "[" + ",".join(["0"] * (1 << 19)) + "]"  # ~1 MB of tiny values: a tree ~65x its bytes, past 4 x 8 MB

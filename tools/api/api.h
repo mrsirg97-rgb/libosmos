@@ -19,6 +19,11 @@
                                            the costliest shape measured - an agent's history with tool calls, 1.72x its
                                            body (a prompt's 1.00x); a body of tiny values ~65x: refused past it */
 #define API_HEAD_MAX (64u << 10) /* its request line and headers */
+/* a request whole within a deadline from its first byte (0.16.0: a byte every 9 s, under the 10 s idle, held a
+   connection for hours): API_REQUEST_S for its headers, API_BODY_S_MB a MB of its body past them - a slow tunnel's
+   1 MB/s (this box's loopback and LAN past 100 MB/s); past it 408, the connection closed */
+#define API_REQUEST_S 10
+#define API_BODY_S_MB 1
 
 /* a GEN's run: the tokens as they come, then its DONE (or ERR); its owner waits on cv */
 typedef struct Run

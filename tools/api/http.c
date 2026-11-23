@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -35,6 +36,7 @@ static const char *reason(int status)
   case 404: return "Not Found";
   case 405: return "Method Not Allowed";
   case 411: return "Length Required";
+  case 408: return "Request Timeout";
   case 413: return "Payload Too Large";
   case 431: return "Request Header Fields Too Large";
   case 500: return "Internal Server Error";
@@ -44,7 +46,28 @@ static const char *reason(int status)
   }
 }
 
-/* the request read: 0, or the status to answer with (err why) */
+static double now_s(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+
+/* recv within the request's deadline: what it read, 0 the connection closed, -1 an error, -2 the deadline passed */
+static ssize_t recv_by(int fd, void *p, size_t n, double deadline)
+{
+  const double left = deadline - now_s();
+  if (left <= 0)
+    return -2;
+  struct pollfd q = {fd, POLLIN, 0};
+  const int r = poll(&q, 1, (int)(left * 1000) + 1);
+  if (r == 0)
+    return -2;
+  return r < 0 ? -1 : recv(fd, p, n, 0);
+}
+
+/* the request read: 0, or the status to answer with (err why) - whole within its deadline (API_REQUEST_S, then
+   API_BODY_S_MB a MB of body) from its first byte */
 int http_read(Http *h, char err[OSMOS_ERR])
 {
   char *head = malloc(API_HEAD_MAX + 1);
@@ -52,13 +75,18 @@ int http_read(Http *h, char err[OSMOS_ERR])
   char *end = NULL;
   if (!head)
     return osmos_fail(err, "out of memory"), 500;
+  double deadline = 0; /* (from the first byte: an idle keep-alive connection's wait the idle timeout's) */
   while (!end)
   {
     if (n == API_HEAD_MAX)
       return free(head), osmos_fail(err, "headers past %u bytes", API_HEAD_MAX), 431;
-    const ssize_t k = recv(h->fd, head + n, API_HEAD_MAX - n, 0);
+    const ssize_t k = n ? recv_by(h->fd, head + n, API_HEAD_MAX - n, deadline) : recv(h->fd, head, API_HEAD_MAX, 0);
+    if (k == -2)
+      return free(head), osmos_fail(err, "the request's headers not whole within %d s", API_REQUEST_S), 408;
     if (k <= 0)
       return free(head), osmos_fail(err, "the connection closed in the headers"), 400;
+    if (!n)
+      deadline = now_s() + API_REQUEST_S;
     n += (size_t)k, head[n] = 0;
     end = strstr(head, "\r\n\r\n");
   }
@@ -113,9 +141,13 @@ int http_read(Http *h, char err[OSMOS_ERR])
   if (cont && h->body_n < length) /* the client waits for this before its body (curl's, past 1 KB: 0.11.2 - a second
                                      lost a request, its wait for one never sent) */
     send_all(h->fd, "HTTP/1.1 100 Continue\r\n\r\n", 25);
+  deadline += (double)API_BODY_S_MB * ((double)length / (1u << 20)); /* (its body's time past the headers') */
   while (h->body_n < length)
   {
-    const ssize_t k = recv(h->fd, h->body + h->body_n, length - h->body_n, 0);
+    const ssize_t k = recv_by(h->fd, h->body + h->body_n, length - h->body_n, deadline);
+    if (k == -2)
+      return osmos_fail(err, "the request's body not whole within its deadline (%d s and %d s a MB)", API_REQUEST_S,
+                        API_BODY_S_MB), 408;
     if (k <= 0)
       return osmos_fail(err, "the connection closed in the body"), 400;
     h->body_n += (size_t)k;
