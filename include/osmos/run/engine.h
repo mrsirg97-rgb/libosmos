@@ -4,9 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/err.h"
 #include "osmos/model/state_io.h"
 
-#define OSMOS_ERR 256
 #define OSMOS_MAX_BLOCK 8 /* a drafter's most drafts a round, any family's */
 #define OSMOS_MAX_LANES 64 /* a round's most sequences at once (osmos-serve's round.c) */
 /* a draft kept while each confidence is at least this and their product too (oseq_draft's floors): swept for energy at
