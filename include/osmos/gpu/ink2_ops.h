@@ -1,6 +1,7 @@
 #ifndef OSMOS_GPU_INK2_OPS_H
 #define OSMOS_GPU_INK2_OPS_H
 
+#include "osmos/gpu/q4x_ops.h" /* (Q4xExpertTiles: ink2_moe_prep's tables) */
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -17,6 +18,13 @@ bool ink2_softcap(float *x, uint64_t n, float cap, void *stream);
 /* a whole membrane's MoE tables' scales (q4x_expert_tiles the rest): n picks (ids, their weights w, their places
    where), scale [gate, up, down][n_exp] - sg[place], su[place] the pick's expert's gate and up scales, a[pick] its
    weight times the down's; picks[expert] counted (a layer's n_exp counters) */
+/* a decode's or a verify's MoE preparation in one launch: ops_router_scored (sigmoid) of the n_tok tokens' logits into
+   idx / w, q4x_expert_tiles of their n_tok x k picks into t, ink2_moe_scales of them - the same functions those run,
+   so the same bits. false past q4x_expert_tiles' inline placing (n_tok x k > 256: the three launches then) */
+bool ink2_moe_prep(const float *logits, const float *bias, uint32_t n_exp, uint32_t k, float route_scale, uint32_t n_tok,
+                   int32_t *idx, float *w, uint32_t dim, uint32_t ff, const Q4xExpertTiles *t, const float *scale,
+                   float *sg, float *su, float *a, uint32_t *picks, void *stream);
+#define INK2_MOE_PREP_PICKS 256 /* ink2_moe_prep's most picks (n_tok x k): q4x_expert_tiles' inline placing */
 bool ink2_moe_scales(const int32_t *ids, const float *w, const int32_t *where, const float *scale, uint32_t n_exp,
                      uint32_t n, float *sg, float *su, float *a, uint32_t *picks, void *stream);
 /* a loop's control of a core layer's input x by its message m: out = x - tanh(forget) x + tanh(gain) m, n values

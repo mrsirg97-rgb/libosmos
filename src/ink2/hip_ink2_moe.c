@@ -122,13 +122,18 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
   float *const y[3] = {f->eg, f->eu, f->ed};
   const uint32_t *xo[3] = {f->t_xg, f->t_xg, f->t_xd}, *yo[3] = {f->t_yg, f->t_yg, f->t_yd};
   float *pw = (float *)(f->pick + P);
-  bool ok = ink2_mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) &&
-            ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw,
-                              f->st) &&
-            q4x_expert_tiles(f->pick, P, K, E, C, F, &et, f->st) &&
-            ink2_moe_scales(f->pick, pw, f->t_where, f->scale_tab + (uint64_t)l * 3 * E, E, P, f->t_sg, f->t_su,
-                            f->t_a, f->picks_d + (uint64_t)l * E, f->st) &&
-            mm_x16_rows(f->xn, C, f->t_gidx, bd.slots, C, f->xe16, f->overflow, f->st);
+  const float *scales = f->scale_tab + (uint64_t)l * 3 * E;
+  uint32_t *picks = f->picks_d + (uint64_t)l * E;
+  bool ok = ink2_mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16);
+  if (ok && P <= INK2_MOE_PREP_PICKS) /* a decode's or a verify's: the three in one launch, the same bits */
+    ok = ink2_moe_prep(f->logit, d->router_bias, E, K, g->route_scale, n, f->pick, pw, C, F, &et, scales, f->t_sg,
+                       f->t_su, f->t_a, picks, f->st);
+  else
+    ok = ok &&
+         ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw, f->st) &&
+         q4x_expert_tiles(f->pick, P, K, E, C, F, &et, f->st) &&
+         ink2_moe_scales(f->pick, pw, f->t_where, scales, E, P, f->t_sg, f->t_su, f->t_a, picks, f->st);
+  ok = ok && mm_x16_rows(f->xn, C, f->t_gidx, bd.slots, C, f->xe16, f->overflow, f->st);
   for (int k = 0; ok && k < 3; k++)
   {
     if (k == 2)

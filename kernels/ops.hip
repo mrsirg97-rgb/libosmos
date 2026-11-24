@@ -8,6 +8,7 @@
 #include "round.h"
 #include "lane.h"
 #include "mm.h"
+#include "router.h"
 
 extern "C" {
 #include "osmos/gpu/kvfmt.h"
@@ -23,7 +24,6 @@ using launches::st;
 using launches::ok;
 
 constexpr int kWave = 32;
-constexpr float kRouteEps = 1e-20f;
 constexpr float kEngramDotFloor = 1e-6f; // the gate's |dot| floor before the square root
 
 constexpr int kWide = 1024;  // the hc pre-norm's block: a token's whole stream (4 x 5,120) in one block's reach
@@ -483,37 +483,12 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, u
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) hk[d] = hk[d] + gate * value[d];
 }
 
-// a block a token: its scores (sqrt(softplus)), the block's threads; then the k greatest of score + bias by its first
-// wave alone (block.h's wave_pick: the larger, ties to the lower expert - the serial scan's picks), their weights
-constexpr uint32_t kRouterLane = OPS_MAX_EXPERTS / 32;  // a lane's experts at most
+// a block a token: router.h's (its scores, the k greatest by its first wave, their weights)
 template <int Score>
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                               int32_t* idx, float* w) {
   __shared__ float sc[OPS_MAX_EXPERTS], keys[OPS_MAX_EXPERTS];
-  const uint32_t t = blockIdx.x;
-  for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads) {
-    const float l = logits[(uint64_t) t * n_exp + e];
-    sc[e] = Score == OPS_SCORE_SIGMOID ? sigmoid(l) : sqrtf(softplus(l));
-    keys[e] = pick_key(sc[e] + bias[e]);
-  }
-  __syncthreads();
-  if (threadIdx.x >= (uint32_t) kWave) return;
-  const uint32_t lane = threadIdx.x;
-  float key[kRouterLane];
-  for (uint32_t r = 0; r < kRouterLane; r++) key[r] = lane + 32 * r < n_exp ? keys[lane + 32 * r] : 0.0f;
-  uint32_t taken = 0;
-  int32_t pick[OPS_MAX_TOPK];
-  for (uint32_t s = 0; s < k; s++) {
-    float best;
-    pick[s] = wave_pick<kRouterLane>(key, n_exp, &taken, &best);
-  }
-  if (lane) return;
-  float wt[OPS_MAX_TOPK], sum = 0;
-  for (uint32_t s = 0; s < k; s++) sum += (wt[s] = (uint32_t) pick[s] < n_exp ? sc[pick[s]] : 0.0f);
-  for (uint32_t s = 0; s < k; s++) {
-    idx[t * k + s] = pick[s];
-    w[t * k + s] = wt[s] / (sum + kRouteEps) * scale;
-  }
+  router::token<Score>(logits, bias, n_exp, k, scale, blockIdx.x, kThreads, sc, keys, idx, w, nullptr);
 }
 
 // x16 (when not NULL): h as mm_x16 would put it, the rows past n_tok zero to a whole tile (threads past h's)

@@ -5,6 +5,8 @@
 #include "block.h"
 #include "launch.h"
 #include "mm.h"
+#include "moe_tiles.h"
+#include "router.h"
 
 extern "C" {
 #include "osmos/gpu/ink2_ops.h"
@@ -19,13 +21,40 @@ using launches::ok;
 
 // the experts' tables' scales on the GPU (a whole membrane's MoE): pick m of expert e at place q = where[m] - the place's
 // gate and up scales, the pick's weight times the down's scale (moe's host products: the same bits), its picks counted
-__global__ void moe_scales_kernel(const int32_t* ids, const float* w, const int32_t* where, const float* scale,
-                                  uint32_t n_exp, uint32_t n, float* sg, float* su, float* a, uint32_t* picks) {
-  const uint32_t m = blockIdx.x * kThreads + threadIdx.x;
-  if (m >= n) return;
+// pick m's scales: its expert's gate and up scales at its place, its weight times the down's, the layer's count
+__device__ inline void moe_scale_pick(uint32_t m, const int32_t* ids, const float* w, const int32_t* where,
+                                      const float* scale, uint32_t n_exp, float* sg, float* su, float* a,
+                                      uint32_t* picks) {
   const int32_t e = ids[m], q = where[m];
   sg[q] = scale[e], su[q] = scale[n_exp + e], a[m] = w[m] * scale[2 * n_exp + e];
   atomicAdd(picks + e, 1u);
+}
+
+__global__ void moe_scales_kernel(const int32_t* ids, const float* w, const int32_t* where, const float* scale,
+                                  uint32_t n_exp, uint32_t n, float* sg, float* su, float* a, uint32_t* picks) {
+  const uint32_t m = blockIdx.x * kThreads + threadIdx.x;
+  if (m < n) moe_scale_pick(m, ids, w, where, scale, n_exp, sg, su, a, picks);
+}
+
+// a decode's or a verify's MoE preparation in one block, not three launches: each token's picks (router.h's), the
+// picks as mm_group's tables (moe_tiles.h's), their scales (moe_scale_pick) - the same functions the three kernels
+// run, so the same bits. its picks the block's LDS between them (at most kPlaceInline: the tiles' inline placing)
+__global__ __launch_bounds__(moe_tiles::kGroupThreads) void moe_prep_kernel(
+    const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float route_scale, uint32_t n_tok,
+    int32_t* idx, float* w, uint32_t dim, uint32_t ff, Q4xExpertTiles t, Q4xExpertBounds bd, const float* scale,
+    float* sg, float* su, float* a, uint32_t* picks) {
+  __shared__ float sc[OPS_MAX_EXPERTS], keys[OPS_MAX_EXPERTS];
+  __shared__ int32_t ids[moe_tiles::kPlaceInline];
+  for (uint32_t tok = 0; tok < n_tok; tok++) {
+    router::token<OPS_SCORE_SIGMOID>(logits, bias, n_exp, k, route_scale, tok, moe_tiles::kGroupThreads, sc, keys,
+                                     idx, w, ids);
+    __syncthreads();  // (the next token's scores over this one's LDS)
+  }
+  const uint32_t P = n_tok * k;
+  moe_tiles::tiles_block(ids, P, k, n_exp, dim, ff, t, bd);
+  __syncthreads();  // its places (t.where) and the router's weights, the block's writes
+  for (uint32_t m = threadIdx.x; m < P; m += moe_tiles::kGroupThreads)
+    moe_scale_pick(m, ids, w, t.where, scale, n_exp, sg, su, a, picks);
 }
 
 // a loop's control: x - tanh(forget) x + tanh(gain) m, upstream's order (inkling2.cpp's control: sub, then add)
@@ -930,6 +959,24 @@ extern "C" bool ink2_attn(const Ink2Attn* a, const float* q, const float* rel, c
     return false;
   attn_kernel<<<n_tok * a->heads, a->head_dim, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj,
                                                                 out);
+  return ok();
+}
+
+extern "C" bool ink2_moe_prep(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float route_scale,
+                              uint32_t n_tok, int32_t* idx, float* w, uint32_t dim, uint32_t ff,
+                              const Q4xExpertTiles* t, const float* scale, float* sg, float* su, float* a,
+                              uint32_t* picks, void* stream) {
+  const uint32_t P = n_tok * k;
+  if (!logits || !bias || !n_exp || n_exp > OPS_MAX_EXPERTS || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok ||
+      P > moe_tiles::kPlaceInline || !idx || !w || !dim || !ff || !t || !t->cnt || !t->gidx || !t->hidx || !t->xg ||
+      !t->yg || !t->xd || !t->yd || !t->where || !t->off || !scale || !sg || !su || !a || !picks)
+    return false;
+  for (int j = 0; j < Q4X_GROUP_TENSORS; j++)
+    if ((!t->tab[j] && (!t->base[j] || !t->bytes[j])) || !t->ptr[j]) return false;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds(P, n_exp, &bd);
+  moe_prep_kernel<<<1, moe_tiles::kGroupThreads, 0, st(stream)>>>(logits, bias, n_exp, k, route_scale, n_tok, idx, w,
+                                                                  dim, ff, *t, bd, scale, sg, su, a, picks);
   return ok();
 }
 
