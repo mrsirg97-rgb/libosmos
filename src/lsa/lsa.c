@@ -42,22 +42,61 @@ static double dot(const double *a, const double *b)
   return s;
 }
 
+/* a's dot with b0 .. b3 at once: each its own sum in dot's order (a d at a time, no contraction: the library's flags),
+   so each dot()'s bits - four chains in flight, not one (Ward's dots were its time) */
+static void dot4(const double *a, const double *b0, const double *b1, const double *b2, const double *b3, double *out)
+{
+  double s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+  for (int d = 0; d < LSA_DIM; d++)
+    s0 += a[d] * b0[d], s1 += a[d] * b1[d], s2 += a[d] * b2[d], s3 += a[d] * b3[d];
+  out[0] = s0, out[1] = s1, out[2] = s2, out[3] = s3;
+}
+
+/* row i of g against the pools listed (js, n of them): dot4 four at a time, dot() the rest */
+static void dots_row(double sums[POOLS][LSA_DIM], double g[POOLS][POOLS], int i, const int *js, int n)
+{
+  int k = 0;
+  for (; k + 4 <= n; k += 4)
+  {
+    double o[4];
+    dot4(sums[i], sums[js[k]], sums[js[k + 1]], sums[js[k + 2]], sums[js[k + 3]], o);
+    for (int q = 0; q < 4; q++)
+      g[i][js[k + q]] = g[js[k + q]][i] = o[q];
+  }
+  for (; k < n; k++)
+    g[i][js[k]] = g[js[k]][i] = dot(sums[i], sums[js[k]]);
+}
+
 /* Ward over a block's pools (lsa.py's ward): each round every pool's cheapest partner within the cap (cost |a| + |b|
    - |a + b|, a tie the lower index); the mutual pairs merged cheapest first (a tie the lower pool), as many as the
-   bucket count still needs; a pool's label its root's rank among the pools left, in pool order */
+   bucket count still needs; a pool's label its root's rank among the pools left, in pool order. g holds every alive
+   pair's dot(sums[i], sums[j]) - made once, then a merged pool's row again after its round: the same dot() on the same
+   sums (a product's operands commute exactly, its sum the same order), so each cost and tie the same as each round's
+   every dot again (0.18.0: 0.83 ms -> ... a block) */
 static bool ward(double sums[POOLS][LSA_DIM], int *label)
 {
+  static __thread double g[POOLS][POOLS], cc[POOLS][POOLS]; /* (cc: each pair's cost, an's as g's) */
   int sz[POOLS], parent[POOLS], best[POOLS];
-  bool alive[POOLS];
+  bool alive[POOLS], moved[POOLS];
   double cost[POOLS], an[POOLS];
   for (int i = 0; i < POOLS; i++)
     sz[i] = LSA_POOL, parent[i] = i, alive[i] = true;
+  int js[POOLS];
+  for (int i = 0; i < POOLS; i++)
+  {
+    for (int j = i; j < POOLS; j++)
+      js[j - i] = j;
+    dots_row(sums, g, i, js, POOLS - i);
+  }
+  for (int i = 0; i < POOLS; i++)
+    an[i] = sqrt(fmax(g[i][i], 0));
+  for (int i = 0; i < POOLS; i++)
+    for (int j = 0; j < POOLS; j++)
+      cc[i][j] = an[i] + an[j] - sqrt(fmax(an[i] * an[i] + an[j] * an[j] + 2 * g[i][j], 0));
   int left = POOLS;
   for (int round = 0; round < 256 && left > LSA_BUCKETS; round++)
   {
     const int need = left - LSA_BUCKETS;
-    for (int i = 0; i < POOLS; i++)
-      an[i] = alive[i] ? sqrt(fmax(dot(sums[i], sums[i]), 0)) : 0;
     for (int i = 0; i < POOLS; i++)
     {
       best[i] = -1, cost[i] = INFINITY;
@@ -65,7 +104,7 @@ static bool ward(double sums[POOLS][LSA_DIM], int *label)
       {
         if (j == i || !alive[j] || sz[i] + sz[j] > LSA_CAP)
           continue;
-        const double c = an[i] + an[j] - sqrt(fmax(an[i] * an[i] + an[j] * an[j] + 2 * dot(sums[i], sums[j]), 0));
+        const double c = cc[i][j];
         if (c < cost[i])
           cost[i] = c, best[i] = j;
       }
@@ -82,13 +121,31 @@ static bool ward(double sums[POOLS][LSA_DIM], int *label)
         const int t = pairs[b];
         pairs[b] = pairs[b - 1], pairs[b - 1] = t;
       }
+    for (int i = 0; i < POOLS; i++)
+      moved[i] = false;
     for (int k = 0; k < np && k < need; k++)
     {
       const int i = pairs[k], j = best[i];
       for (int d = 0; d < LSA_DIM; d++)
         sums[i][d] += sums[j][d];
-      sz[i] += sz[j], alive[j] = false, parent[j] = i, left--;
+      sz[i] += sz[j], alive[j] = false, parent[j] = i, left--, moved[i] = true;
     }
+    for (int i = 0; i < POOLS; i++) /* a merged pool's dots with every pool alive, its sums as they now are */
+      if (moved[i])
+      {
+        int n = 0;
+        for (int j = 0; j < POOLS; j++)
+          if (alive[j])
+            js[n++] = j;
+        dots_row(sums, g, i, js, n);
+      }
+    for (int i = 0; i < POOLS; i++) /* its norm, then its costs (cost(i, j) and cost(j, i) each its own expression) */
+      if (moved[i])
+        an[i] = sqrt(fmax(g[i][i], 0));
+    for (int i = 0; i < POOLS; i++)
+      for (int j = 0; j < POOLS; j++)
+        if ((moved[i] || moved[j]) && alive[i] && alive[j])
+          cc[i][j] = an[i] + an[j] - sqrt(fmax(an[i] * an[i] + an[j] * an[j] + 2 * g[i][j], 0));
   }
   if (left != LSA_BUCKETS)
     return false;
