@@ -200,6 +200,9 @@ destroys them.
    and Hy4's MLA are where it is least certain, measured before they move.
 3. **The drafters on the core too** - recommended, last.
 
+**Decided (the operator, 2026-11-24): yes to all three** - Inkling's units for every family, f16 operands with F32
+sums everywhere (the F32 paths included, by KL), the drafters on the core last. B1 next.
+
 ## Proofs and checks
 
 - **Per kernel change:** a byte comparison against the old kernel on seeded inputs (`fa_bits`-style, every format,
