@@ -148,8 +148,10 @@ static std::vector<uint8_t> core(Kind kind, uint32_t window, const Inputs& in, u
                                  std::vector<uint8_t>* x16_out, std::string* why) {
   char err[OSMOS_ERR] = "";
   const AttnCoreDesc d = desc(kind, window, in.T, in.K);
-  AttnCore* c = attn_core_create(&d, nullptr, err);
-  if (!c) return *why = err, std::vector<uint8_t>();
+  const uint64_t sb = attn_core_scratch(&d);
+  void* scratch = dev<uint8_t>(sb);
+  AttnCore* c = attn_core_create(&d, scratch, sb, err);
+  if (!c) return (void) hipFree(scratch), *why = err, std::vector<uint8_t>();
   float* out = dev<float>((size_t) n * H * D);
   void* xb = x16 ? (void*) dev<uint16_t>((size_t) 16 * H * D + 4096) : nullptr;
   int32_t* of = dev<int32_t>(1);
@@ -165,7 +167,7 @@ static std::vector<uint8_t> core(Kind kind, uint32_t window, const Inputs& in, u
   else *why = "attn_core_run refused the step";
   if (ok && x16_out) *x16_out = down(xb, (size_t) 16 * H * D * 2);
   attn_core_destroy(c);
-  (void) hipFree(out), (void) hipFree(xb), (void) hipFree(of);
+  (void) hipFree(out), (void) hipFree(xb), (void) hipFree(of), (void) hipFree(scratch);
   return o;
 }
 
@@ -242,16 +244,19 @@ static void refusals() {
       {"d_rel", [](AttnCoreDesc* d) { d->d_rel = 8; }},
       {"window", [](AttnCoreDesc* d) { d->window = 1000; }},               // not a whole tile
       {"max_tokens", [](AttnCoreDesc* d) { d->max_tokens = 0; }},
+      {"max_keys", [](AttnCoreDesc* d) { d->max_keys = 1u << 30; }},     // past the scratch it was given
   };
   const AttnCoreDesc good = desc(KIND_KV85, 0, 64, 4096);
   char err[OSMOS_ERR] = "";
-  AttnCore* c = attn_core_create(&good, nullptr, err);
+  const uint64_t sb = attn_core_scratch(&good);
+  void* scratch = dev<uint8_t>(sb);
+  AttnCore* c = attn_core_create(&good, scratch, sb, err);
   check(c != nullptr, std::string("refusals: Inkling's own desc made (") + err + ")");
   for (const Bad& b : bad) {
     AttnCoreDesc d = good;
     b.bend(&d);
     err[0] = 0;
-    AttnCore* x = attn_core_create(&d, nullptr, err);
+    AttnCore* x = attn_core_create(&d, scratch, sb, err);
     check(!x && std::strstr(err, b.field), std::string("refusals: ") + b.field + " refused by name (\"" + err + "\")");
     attn_core_destroy(x);
   }
@@ -267,6 +272,7 @@ static void refusals() {
     free_inputs(in);
   }
   attn_core_destroy(c);
+  (void) hipFree(scratch);
 }
 
 int main() {

@@ -11,7 +11,6 @@
 #include <stdint.h>
 
 #include "osmos/err.h"
-#include "osmos/mem/ledger.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +18,14 @@ extern "C" {
 
 #define ATTN_UNIT 256 /* a unit's keys (Inkling's INK2_FA_UNIT) */
 #define ATTN_TILE 16  /* a tile's keys (WMMA's) */
+#define ATTN_HEAD 128 /* a head's dims the core takes (B2: Inkling's; C: 256, MLA's) */
+#define ATTN_GROUP_MAX 8 /* query heads a KV head at most (a prompt block's waves) */
+#define ATTN_REL 16      /* ATTN_TERM_REL's states a head (its sum unrolled) */
+#define ATTN_EXTENT_MAX 1024
+/* Inkling's records (ink2_to_kv8, ink2_to_kv5): a head's row of ATTN_HEAD values */
+#define ATTN_KV8_BLOCK 32 /* values a scale */
+#define ATTN_KV8_RECORD (ATTN_HEAD + ATTN_HEAD / ATTN_KV8_BLOCK * 2) /* int8s, then f16 scales */
+#define ATTN_KV5_RECORD (ATTN_HEAD / 2 + ATTN_HEAD / 8 + ATTN_HEAD / ATTN_KV8_BLOCK * 2) /* nibbles, fifth bits, scales */
 
 /* a cache row's format, keys and values each their own */
 typedef enum AttnRows
@@ -63,9 +70,12 @@ typedef struct AttnCoreDesc
 
 typedef struct AttnCore AttnCore;
 
-/* the core for d, its scratch from l (NULL counts nothing) whole; NULL with err naming what it does not take - a
-   dim, a group, a format, a term, a bound - or the memory refused */
-AttnCore *attn_core_create(const AttnCoreDesc *d, OsmosLedger *l, char err[OSMOS_ERR]);
+/* the device scratch a core for d borrows (a split decode's units' partials): its bytes */
+uint64_t attn_core_scratch(const AttnCoreDesc *d);
+/* the core for d over scratch (the device's, attn_core_scratch(d) bytes at least; borrowed - its owner frees it, and
+   may use it between steps: a step's alone); NULL with err naming what it does not take - a dim, a group, a format,
+   a term, a bound, the scratch short */
+AttnCore *attn_core_create(const AttnCoreDesc *d, void *scratch, uint64_t scratch_bytes, char err[OSMOS_ERR]);
 void attn_core_destroy(AttnCore *c);
 
 /* a step's keys: the cache's rows from key0's position (row r the key at position key0 + r), n_keys of them; or,
