@@ -69,6 +69,11 @@ bool launch(const void* w, uint32_t rows, uint32_t cols, const float* x, uint32_
   constexpr Tune k = tune(T, NT);
   if constexpr (T == quant::kF32)
     if (rows < (uint64_t) cus() * mv::kWavesPerBlock * k.r) return mv::launch<T, NT, k.r, k.u, 1>(w, rows, cols, x, xs, y, ys, s);
+  // osmos1.7b v-r15's BF16 2,048-column rows, one token: 8 chunks in flight a lane - the row's whole share at once
+  // (16.3 -> 15.0 ms a token's matrices, DESIGN.md "0.17.1"); by its columns alone (Mini's BF16 none of them). the
+  // same bits (a lane's chunks summed in the same order)
+  if constexpr (T == quant::kBF16 && NT == 1)
+    if (cols == 2048) return mv::launch<T, NT, 1, 8>(w, rows, cols, x, xs, y, ys, s);
   // a large Q8_0 matrix, one token: 4 chunks in flight a lane (under kQ8Wide: 1). the same bits (a lane's chunks
   // summed in the same order)
   if constexpr (T == quant::kQ8_0 && NT == 1)

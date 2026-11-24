@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.17.1]: osmos1.7b v-r15 - a better model, in Q8_0: prompts as fast as before, decode ~96 tok/s, 256K
+
+A one-pack release: osmos1.7b moves to its v-r15 training (recipe v-r15: one engineer's agent sessions replayed in
+the model's own words and chosen by signal, fitted to 32K; trained against a Q4_0 KV cache). Every other pack's
+answers are unchanged (hashed against 0.17.0's).
+
+- **The model is better** (its card): the real-commit bench's mean score 0.202 -> 0.248, lower perplexity on all six
+  held-out code sets and at 16K-48K, never a broken build or a false "done".
+- **The pack is its Q8_0 file** (1.85 GB), with new LSA maps fitted to it, at a 256K context (the maps validated to
+  262,144). Against its BF16 file here, Q8_0 decodes 71% faster and reads prompts 25-30% faster for a KL of 0.00038
+  (wiki and code, 8,192 tokens each; top-1 99.0-99.2%, perplexity the same to three decimals). The BF16 file runs
+  too.
+- **Speed** (performance profile; v-r10 Q4_0 in parentheses): a ~3K prompt 5,419 tok/s (5,321), decode 96.2 / 95.6
+  code / prose (126.6 / 124.0); 128K prompts 3,489-3,653 (3,591), 256K 3,332-3,443; decode after them 87-100 and
+  84-90. The agents bench (4 agents x 8 turns): first token p50 0.81 s (0.88), turns 8.5 s (8.2) - prompts faster,
+  decode slower, for the better model.
+- **Long contexts:** a code placed at 10 / 50 / 90% of 32K, 128K and 256K prompts: 9 of 9 found. LSA against
+  dense: the same next-token loss at 32K-256K. GPU memory at ready 5.6 GiB, the same after 256K prompts.
+- **For contributors** (osmos1.7b's code; Mini's shapes and bits untouched):
+  - its matrices take the matrix cores for BF16 (they had all gone to the matvec);
+  - BF16's 2,048- and 7,680-column rows on mm's tile at 128 x 4 x 8, and 8 chunks in flight on the matvec's
+    2,048-column rows (by those columns alone: DESIGN.md "0.17.1");
+  - a Q8_0 tied embedding (its own table the head);
+  - a decode step below LSA's sparse start reads dense, as a prompt's rows there do (decode +5%);
+  - LSA's closed blocks bucketed a layer at a time (one wait, not one a block; the same buckets).
+- **Removed** `.rocprofv3/`, a profiler's output committed by accident in 0.17.0.
+
 ## [0.17.0]: every pack measured against its ceiling; inkling-2-mini's prompts 6.4% faster; the same answers
 
 Every pack's answers are unchanged, token for token (hashed against 0.16.0's, greedy and sampled). This release

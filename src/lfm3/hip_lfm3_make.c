@@ -108,11 +108,14 @@ static bool joints(Lfm3Forward *f, char *err)
 }
 
 /* the tied head's Q8_0 copy (q35's head_q8: ggml's quantizer through q4x_kv_put, a chunk of rows at a time) - the
-   embedding's table kept the file's: the head alone reads the copy */
+   embedding's table kept the file's: the head alone reads the copy. a Q8_0 file's (v-r15's Q8_0): its own table the
+   head, no copy */
 static bool head_q8(Lfm3Forward *f, char *err)
 {
   const GgufTensor *t = f->w->embd;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab, D = (uint32_t)f->w->geo.n_embd;
+  if (t->type == QTYPE_Q8_0)
+    return f->head = lfm3_dev(f, t), f->head_type = QTYPE_Q8_0, true;
   if (!gpu_q8_rows(f->ledger, t->type, lfm3_dev(f, t), t->bytes / V, V, D, &f->head_q8))
     return osmos_fail(err, "the head's Q8_0 not made (GPU memory, or a launch)");
   f->head = f->head_q8, f->head_type = QTYPE_Q8_0;
@@ -174,8 +177,10 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
     return err && !*err ? osmos_fail(err, "LSA: the maps not read") : false;
   ok = (f->lsa_s = lsa_scratch_create(f->ledger, f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && lfm3_alloc(&f->bufs, &f->iq, LSA_DIM * F) &&
        lfm3_alloc(&f->bufs, &f->list, LSA_READ_MAX * 4) && lfm3_alloc(&f->bufs, &f->list_n, 4) &&
-       (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) && (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) &&
-       (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
+       (f->close_max = f->max_tokens / LSA_WINDOW + 2) &&
+       (f->h_ik = malloc((uint64_t)f->close_max * LSA_WINDOW * LSA_DIM * F)) &&
+       (f->h_cent = malloc((uint64_t)f->close_max * LSA_BUCKETS * LSA_DIM * F)) &&
+       (f->h_mem = malloc((uint64_t)f->close_max * LSA_BUCKETS * LSA_CAP * 4));
   /* the scores' scratch: a sub-batch's tokens x every closed bucket, at most a step's prompt rows' F32 (its q, k, v,
      gate and attention: max_tokens x (2 q + 2 kv + heads)) - one more of a step's own size */
   const uint64_t rows = (uint64_t)f->max_tokens * (2 * g->n_heads * g->head_dim + 2 * g->n_kv_heads * g->head_dim);
@@ -259,6 +264,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
   const Lfm3Geometry *g = &w->geo;
+  f->bf16_mm = w->layer[0].ffn_gate && w->layer[0].ffn_gate->type == QTYPE_BF16; /* (lfm3_mm_takes') */
   f->w = w, f->max_tokens = o->max_tokens, f->max_ctx = o->max_ctx, f->ledger = o->ledger, f->bufs.ledger = o->ledger;
   f->logit_rows = o->logit_rows ? o->logit_rows : o->max_tokens;
   f->ring = (uint32_t)g->window + o->max_tokens + LFM3_MAX_BACK;

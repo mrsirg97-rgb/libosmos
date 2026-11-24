@@ -45,6 +45,7 @@ struct Lfm3Forward
   /* latent sparse attention (Lfm3Options' lsa): a full layer's maps (device, lsa_in x LSA_DIM), the read's scratch,
      a query's index and read (device), a block's index vectors, centroids and buckets on the host (Ward's) */
   bool lsa;
+  bool bf16_mm; /* the model's matrices BF16 (v-r15, as released): a read's on mm (lfm3_mm_takes), mm's by name */
   uint64_t lsa_id; /* the maps file's (fnv_file): a state's index vectors and buckets theirs (lfm3_identity) */
   uint32_t lsa_in;
   float *wq[LFM3_MAX_LAYERS], *wk[LFM3_MAX_LAYERS];
@@ -57,7 +58,8 @@ struct Lfm3Forward
   float *iqb, *lsa_sc;
   uint32_t *lists;
   int32_t *counts;
-  float *h_ik, *h_cent;
+  float *h_ik, *h_cent; /* close_max blocks of each (close_blocks: a layer's closed blocks a copy, one wait) */
+  uint32_t close_max;
   int32_t *h_mem;
   OverflowFlag ovf;   /* its reset (osmos/gpu/overflow.h): owed when one failed */
   int32_t *overflow;  /* an activation past f16's range in a read (mm_x16's): the step refused */

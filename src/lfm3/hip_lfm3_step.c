@@ -16,16 +16,24 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/kept.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/model/qtype.h"
 #include "osmos/gpu/q35_ops.h"
 #include "lfm3_impl.h"
 #include "osmos/err.h"
+
+/* a read's matrix on mm: its table's types (mm_known), and BF16 where the model's matrices are (f->bf16_mm: mm takes
+   BF16 by name - its f16 the value's where f16 holds it, a read's sums not the matvec's bits; osmos1.7b reads apart) */
+static bool mm_takes(const Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols)
+{
+  return (mm_known(t->type) || (t->type == QTYPE_BF16 && f->bf16_mm)) && mm_fits(t->type, rows, cols);
+}
 
 /* y = W x: a decode's the matvec (mv_strided: a token's sums its own), a read's the matrix cores where mm takes the
    type and shape (mm_tokens, f16 x: a token's sums its own), else the matvec */
 static bool mat(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
                 bool read)
 {
-  if (read && mm_known(t->type) && mm_fits(t->type, rows, cols))
+  if (read && mm_takes(f, t, rows, cols))
     return mm_tokens(t->type, lfm3_dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow,
                      false, f->st);
   return mv_strided(t->type, lfm3_dev(f, t), rows, cols, x, cols, n, y, rows, f->st);
@@ -36,7 +44,7 @@ static bool mat(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t col
 static bool x16_once(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                      bool read)
 {
-  return read && mm_known(t->type) && mm_fits(t->type, rows, cols) && n <= f->max_tokens &&
+  return read && mm_takes(f, t, rows, cols) && n <= f->max_tokens &&
          mm_x16_whole(x, cols, n, cols, f->x16, f->overflow, f->st);
 }
 
@@ -44,7 +52,7 @@ static bool x16_once(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_
 static bool mat16(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                   float *y, bool read, bool have16)
 {
-  if (have16 && read && mm_known(t->type) && mm_fits(t->type, rows, cols))
+  if (have16 && read && mm_takes(f, t, rows, cols))
     return mm_tokens_x16(t->type, lfm3_dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, f->x16, n, f->st);
   return mat(f, t, rows, cols, x, n, y, read);
 }
@@ -89,15 +97,26 @@ static bool kv_put(Lfm3Forward *f, const Lfm3Run *r, const float *vf, int l, boo
    (src/lsa's lsa_block), its buckets back - every full layer's at once (the count the sequence's) */
 static bool close_blocks(Lfm3Forward *f, Lfm3Seq *s, int l, uint32_t want, uint32_t from)
 {
-  for (uint32_t b = from; b < want; b++)
-    if (hipMemcpyAsync(f->h_ik, s->ik[l] + (uint64_t)b * LSA_WINDOW * LSA_DIM, LSA_WINDOW * LSA_DIM * F,
+  /* blocks from .. want: up to close_max a batch - their keys' index to the host in one copy and one wait, each
+     bucketed (lsa_block, in block order: the same buckets), then their centroids and members back in one copy each.
+     a block a wait was 30 (a 3K prompt) to 48 (a 4,096-token step) drains of the GPU's queue a step */
+  for (uint32_t b0 = from; b0 < want; b0 += f->close_max)
+  {
+    const uint32_t k = want - b0 < f->close_max ? want - b0 : f->close_max;
+    if (hipMemcpyAsync(f->h_ik, s->ik[l] + (uint64_t)b0 * LSA_WINDOW * LSA_DIM, (uint64_t)k * LSA_WINDOW * LSA_DIM * F,
                        hipMemcpyDeviceToHost, f->st) != hipSuccess ||
-        hipStreamSynchronize((hipStream_t)f->st) != hipSuccess || !lsa_block(f->h_ik, b, f->h_cent, f->h_mem) ||
-        hipMemcpy(s->cent[l] + (uint64_t)b * LSA_BUCKETS * LSA_DIM, f->h_cent, LSA_BUCKETS * LSA_DIM * F,
+        hipStreamSynchronize((hipStream_t)f->st) != hipSuccess)
+      return false;
+    for (uint32_t i = 0; i < k; i++)
+      if (!lsa_block(f->h_ik + (uint64_t)i * LSA_WINDOW * LSA_DIM, b0 + i, f->h_cent + (uint64_t)i * LSA_BUCKETS * LSA_DIM,
+                     f->h_mem + (uint64_t)i * LSA_BUCKETS * LSA_CAP))
+        return false;
+    if (hipMemcpy(s->cent[l] + (uint64_t)b0 * LSA_BUCKETS * LSA_DIM, f->h_cent, (uint64_t)k * LSA_BUCKETS * LSA_DIM * F,
                   hipMemcpyHostToDevice) != hipSuccess ||
-        hipMemcpy(s->mem[l] + (uint64_t)b * LSA_BUCKETS * LSA_CAP, f->h_mem, LSA_BUCKETS * LSA_CAP * 4,
+        hipMemcpy(s->mem[l] + (uint64_t)b0 * LSA_BUCKETS * LSA_CAP, f->h_mem, (uint64_t)k * LSA_BUCKETS * LSA_CAP * 4,
                   hipMemcpyHostToDevice) != hipSuccess)
       return false;
+  }
   return true;
 }
 
@@ -132,6 +151,9 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
            q4x_attn_lists(f->qr + at * q, s->kc[l], s->vc[l], m, H, KV, hd, f->lists, f->counts, LSA_READ_MAX,
                           gt + at * H, &shape, f->att + at * q, f->st);
   }
+  if (P + n <= f->sparse_from) /* a decode below sparse_from: the dense attention's, as a prompt's rows there (its
+                                  blocks still closed: the reads past it) - LSA's read every step cost 6% of decode */
+    return close_blocks(f, s, l, (P + n) / LSA_WINDOW, s->closed);
   uint32_t closed = s->closed;
   for (uint32_t t = 0; t < n; t++)
   {
