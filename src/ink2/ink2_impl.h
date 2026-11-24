@@ -172,7 +172,8 @@ struct Ink2Forward
   int32_t *slot;       /* a step's row's logits slot, or -1 (none kept) */
   uint32_t logit_rows, n_slots; /* the logits' slots, and the step's taken */
   uint32_t n; /* the last step's rows */
-  void *st;   /* the step's stream (a blocking one: the null stream's work, a sequence's tails, ordered against it) */
+  void *st;   /* the step's stream: NULL, the default stream - a stream of its own, its drafter's and tails' launches
+                 on the default one, measured 6.5% slower (DESIGN.md "0.16.1: a stream of Mini's own") */
 };
 
 /* hip_ink2_make.c's: device memory counted in the forward's bytes; a tensor's bytes from g's file, its F32 values on the

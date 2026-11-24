@@ -7212,3 +7212,13 @@ small kernels' latency - at most ~15-20% if every one were a bare launch.
   blocks a step); fusing kernels spread over many blocks puts their work in fewer and lengthens the chain (the conv
   here, the attention residual's dots and mix before). The ~10 us small kernels that are many-block (the convs, the
   norms, the swiglu, attn_prep) are not fusion's; their latency is their own.
+
+### 0.16.1: a stream of Mini's own - measured slower, undone (2026-11-24, low-power)
+
+Mini's step moved to a blocking stream of its own (f010b0c: graphs' groundwork, a captured stream), its drafter's,
+its tails' and its uploads' launches left on the default stream - ordered, so the same bits. Against v0.16.0 (Mini
+drafted, alternated, three rounds): code 45.1-45.2 -> 42.2-42.7 tok/s, prose 41.3-41.5 -> 38.7-39.0 (-6.5%); every
+A/B after it measured against a base that already held it (01b1dc0's 42.0-42.3), and the stamps' census above on it
+too (its step 41.8 ms the stream's). A blocking stream beside the legacy default one: each switch between them an
+implicit wait, a drafted round several. With graphs dropped it had no use: undone (Ink2Forward's st left NULL, the
+default stream; the launches' stream argument kept). Lesson: an A/B's base is the last release, not the last commit.
