@@ -7279,3 +7279,12 @@ ink2_fa at 2,968 tokens, 24 heads (a wall-clock ink2_fabench: the GPU's timestam
   no change), the plain and diagonal P V as two branches (248 -> 232: the compiler sizes for the kernel's worst
   point). Next: the diagonal tiles as their own pass (the attention core's skeleton, docs/attention-core.md B) -
   the main kernel without the cut's code, the rows' (m, l, o) handed on in F32, the same order.
+- **tried, not kept: the diagonal tiles as their own pass** (fa_kernel's kFaMain / kFaEdge: the keys below a block's
+  first query's tile without the causal cut's code, the rows' state - m, l, the fold's gm, gl, o - handed on in F32,
+  the rest from it; branch fa-split). Every output byte the one pass's (40 cases); the main pass's spill 248 -> 104-
+  116 bytes a lane. Mini's ~3K prompt in the engine 1,056-1,060 tok/s against rel-170's 1,064-1,067 (v0.16.0
+  1,010-1,013; the same hashes) - no faster: with RT 4's (fewer spills, no faster) the spills are not the limit.
+- **what limits it, then**: under the unit contract (16-key tiles, a wave's rows' B fragments from LDS) each of a
+  block's 24 waves reads K's and V^T's fragments for every tile - ~17 KB a wave a tile, LDS traffic of the order of
+  the WMMAs' time - and the tile's softmax and latency besides (91% waiting). Reusing a fragment over more rows a wave
+  needs registers there aren't. Phase A ends here: 64-key stages kept, Mini's prompt +5.6% (docs/attention-core.md).
