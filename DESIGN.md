@@ -7245,3 +7245,18 @@ looped model's layers their passes (Mini: 48 blocks of 24 layers, each twice).
 expert resident.) **Prefill is every pack's gap** - 32-53% of practical, alike: shared causes, the shared core's.
 Decode: Hy4 past the goal, Mini and DeepSeek near it, Qwen's 75% a gap; Small's mostly its SSD; osmos1.7b's bytes
 (~4 ms a token) under its fixed per-step costs - its target the launches' floor, to be measured.
+
+### 0.17.0: Mini's prompt attention - what limits it (2026-11-24, low-power)
+
+ink2_fa at 2,968 tokens, 24 heads (a wall-clock ink2_fabench: the GPU's timestamps read 0 on this box): a full layer
+25-35 ms (54 GFLOP: ~1.8 TFLOP/s), a sliding one 11.1-11.5 (31 GFLOP: ~2.8) - ~6-10% of the matrix cores' ~29.
+- **the counters**: 91% of its wave cycles waiting (SQ_WAIT_ANY / SQ_WAVE_CYCLES); ~1,160 VALU instructions a
+  16-key tile a wave against its 16 WMMAs; the prompt kernel (fa_kernel<3, 8, ...>) 240 VGPRs, 196 bytes a lane
+  spilled to scratch, 768 threads - one block a WGP, latency-bound.
+- **the relative bias** (16 gathered rel_proj loads and FMAs a score, extent 1,024: nearly every score): off
+  (extent 1) a full layer -20%, a sliding one -25%.
+- **tried, not kept: the bias's table slice in LDS** (staged with K / V, the same values and FMA order - every output
+  byte the same, 40 cases): slower, sliding 11.1-11.5 -> 12.4-12.6 ms - its registers spilled 196 -> 284 bytes a lane
+  (rel_proj's 64 KB is in cache: the gathers were not the cost, their VALU and registers are).
+- so the limit is registers: any state added spills. Next: the kernel's register pressure (the bias loop's unroll,
+  the causal cut's copies, Q / O's 128 VGPRs), measured by spills and occupancy before speed.
