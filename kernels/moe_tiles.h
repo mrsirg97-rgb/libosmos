@@ -40,14 +40,32 @@ __device__ inline void tiles_block(const int32_t* ids, uint32_t n, uint32_t k, u
   for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads)
     for (int a = 0; a < A; a++) sc[a][e] = own(e, a);
   __syncthreads();
-  for (uint32_t d = 1; d < n_exp; d <<= 1) {  // inclusive scans (Hillis-Steele), then each less its own
-    int v[A][kMaxExperts / kGroupThreads];
-    for (uint32_t e = threadIdx.x, j = 0; e < n_exp; e += kGroupThreads, j++)
-      for (int a = 0; a < A; a++) v[a][j] = e >= d ? sc[a][e - d] : 0;
-    __syncthreads();
-    for (uint32_t e = threadIdx.x, j = 0; e < n_exp; e += kGroupThreads, j++)
-      for (int a = 0; a < A; a++) sc[a][e] += v[a][j];
-    __syncthreads();
+  {  // inclusive scans, then each less its own: a wave's 32 by shuffles, then the earlier waves' and chunks' totals -
+     // integers, so the sums Hillis-Steele's whatever their order (two barriers a chunk of kGroupThreads, not 14)
+    constexpr int W = kGroupThreads / 32;
+    __shared__ int wsum[A][W];
+    const uint32_t lane = threadIdx.x % 32, w = threadIdx.x / 32;
+    int carry[A] = {};
+    for (uint32_t base = 0; base < n_exp; base += kGroupThreads) {
+      const uint32_t e = base + threadIdx.x;
+      int v[A];
+      for (int a = 0; a < A; a++) v[a] = e < n_exp ? sc[a][e] : 0;
+      for (uint32_t o = 1; o < 32; o <<= 1)
+        for (int a = 0; a < A; a++) {
+          const int u = __shfl_up(v[a], o, 32);
+          if (lane >= o) v[a] += u;
+        }
+      if (lane == 31)
+        for (int a = 0; a < A; a++) wsum[a][w] = v[a];
+      __syncthreads();
+      for (int a = 0; a < A; a++) {
+        int pre = carry[a], all = 0;
+        for (uint32_t x = 0; x < (uint32_t) W; x++) pre += x < w ? wsum[a][x] : 0, all += wsum[a][x];
+        if (e < n_exp) sc[a][e] = v[a] + pre;
+        carry[a] += all;
+      }
+      __syncthreads();  // (wsum the next chunk's)
+    }
   }
   if (threadIdx.x < A) live[threadIdx.x] = sc[threadIdx.x][n_exp - 1];
   __syncthreads();  // the totals read before the last expert's thread makes its own exclusive below
