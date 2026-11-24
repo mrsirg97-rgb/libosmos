@@ -2,7 +2,9 @@
 
 ## [0.16.0]: the engine consolidated - one contract a concept, every byte owned, a hardened server; the same answers
 
-The same tokens as 0.15.2 on all six packs (every pack's answers hashed against 0.15.2's, greedy and sampled). What
+The same tokens as 0.15.2 on all six packs (every pack's answers hashed against 0.15.2's, greedy and sampled), and no
+speed lost: every pack re-measured at the performance profile - decode level, the agents bench level or faster, and
+inkling-2-mini reading a 3K prompt at ~1,150 tok/s (the README's tables are 0.16.0's). What
 changed is how the engine is built: one shared implementation of each concept where each model family had its own
 copy - the kind of copy two of 0.15's memory bugs lived in.
 
