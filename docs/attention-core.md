@@ -131,6 +131,75 @@ One descriptor and one kernel skeleton:
 | DeepSeek, Hy4, osmos1.7b, 27B (reads apart) | **change once**: their own orders today | KL, drafted == plain, their tests |
 | drafters | follow their family | their tests |
 
+## The spec (0.18.0, for the operator's review)
+
+0.17.0 measured Phase A and shipped its one win; 0.18.0 builds the core (AGENTS.md's order: this spec, then the
+schema, then failing tests, then the implementation, Inkling first).
+
+### The inventory, as the headers state it
+
+| family | kernels | keys | cache rows | head | the sums' order | precision | contract |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Inkling (Mini, Small) | `ink2_fa`, `_fa16`, `_fa8`, `_fa85`, the split decode | positions: causal, window | F32, f16, Q8 records, Q8 + Q5 records | 128, GQA <= 8 | 256-key units from 0, folded in order; 16-key tiles | WMMA f16, F32 sums | prompt == decode |
+| Qwen | `q4x_attn` (prompt and decode) | positions, or QSA's picked blocks + tail | Q8_0 (ggml blocks) | 256, GQA <= 16 | 128-key chunks merged in order | WMMA f16 | prompt == decode |
+| q35, osmos1.7b | `q35_attn_decode`, `q35_attn_read`, `q4x_attn_lists` | positions; LSA's list (any order) | Q8_0 | 128 / 256 | runs of >= 16 keys, <= 512 parts; a list in order | F32 decode, f16 lists | reads apart |
+| Hy4 | `hy4_mla_attn` (and its read path, `mla_mm`) | window; or `pool`-position groups (sel) | F32 or Q8 latent rows, a ring | MLA: K 576, V 512, MQA | splits of 64 merged with the sink | F32 decode, f16 read | reads apart |
+| DeepSeek | `ops_sparse_attn` | window (ring) + selected compressed rows | FP8 ring, FP4 rows, F32 | 256, key = value | keys in order | F32 | reads apart |
+| drafters | `ink2_mtp_attn`, `q4x_df_attn`, Hy4's DFly | ring context + the block's own (not causal) | f16 / F32 | 128 / its own | spans merged in order | F32 | their family's |
+
+Five row formats, four sums' orders, two precisions - in 3,346 lines (ink2.hip's attention, q4x_attn.hip,
+q35_attn.hip, sparse_attn.hip, attn.hip), with Hy4's MLA in hy4.hip and the drafters' beside them.
+
+### The core's contract (proposed)
+
+1. **One sums' order for every family: Inkling's units.** A query's keys in 256-key units at absolute positions,
+   each unit's online softmax from nothing, the units folded in order from the sink (none: zero), 16-key tiles
+   ascending in a unit, one WMMA chain over the head dim. A list or a selection (LSA, QSA, Hy4's groups, DeepSeek's
+   compressed rows) is the same: its keys in the list's order, cut into units of 256 of the list. Then prompt ==
+   decode for every family, and drafted == plain with it, from one place.
+2. **One precision: f16 operands on the matrix cores, F32 sums and softmax.** The F32 decode paths (q35's, Hy4's,
+   DeepSeek's) and the F32 drafters move to it: their bits change once, held by KL against today's.
+3. **A row decoder per cache format, to f16 in LDS** - F32, f16, Q8 records, Q8 + Q5 records, Q8_0, FP8, FP4,
+   Hy4's Q8 latent: each a decode of a row's chunk, the core's loads around it.
+4. **The hooks a family supplies, and only these:** a logit term (Inkling's relative bias; none elsewhere), a sink
+   (a logit, or none), an epilogue (the gate: a value's or a head's; MLA's latent output stays hy4_mla_out's).
+   Rope, clips and norms stay before it (attn_prep's and each family's).
+5. **Head shapes:** Dk and Dv separately (128 / 128, 256 / 256, MLA 576 / 512), GQA to 16, MQA.
+6. **Fail closed:** a shape, format or source the core does not take is refused by name at build (the family's
+   forward_create), never at a step.
+
+### Ownership (SCOPE.md)
+
+`attn_core_create(const AttnCoreDesc *, ledger, err)` / `attn_core_destroy` - the descriptor checked and the scratch
+(the split decode's partials, the units' fold) sized and allocated whole at create, from the forward's ledger; a
+step's call takes the core and its tensors, never allocates. The forward owns its cores (one per layer kind), and
+destroys them.
+
+### Tests, written before the core (they fail until it exists)
+
+- byte comparisons against each kernel it replaces, on seeded inputs: every row format, window, list, length (37 -
+  4,096 tokens), a step at depth, decodes and verifies - Inkling's must be byte-identical (fa_bits' 40 cases, made a
+  test); the others' KL against today's on real weights (a family's own tolerance, from today's run-to-run: no number
+  picked by hand)
+- properties: a token's bits whatever its batch, its step's split, its decode; drafted == plain
+- refusals: a head dim, a GQA, a format, a list longer than its stride - each named
+- a mutation of each comparison (it must fail when the core is wrong)
+
+### Phases
+
+- **B1: schema + tests** (`include/osmos/gpu/attn_core.h`, the tests above, failing).
+- **B2: the skeleton + Inkling**, byte-identical, `ink2_fa*` callers moved, the old kernels deleted.
+- **C: a family a commit** - Qwen, q35 / osmos1.7b (with LSA's lists), Hy4, DeepSeek, then the drafters: each its KL,
+  its prompt == decode test, its hashes re-based, its old kernel deleted. Sized once B2 exists.
+
+### Decisions for the operator
+
+1. **One order (Inkling's units) for every family** - recommended: it is what makes prompt == decode a property of
+   the core rather than of five kernels; the cost is one KL-checked bit change for each family but Inkling.
+2. **One precision (f16 operands, F32 sums), the F32 paths included** - recommended, by KL; DeepSeek's FP4 rows
+   and Hy4's MLA are where it is least certain, measured before they move.
+3. **The drafters on the core too** - recommended, last.
+
 ## Proofs and checks
 
 - **Per kernel change:** a byte comparison against the old kernel on seeded inputs (`fa_bits`-style, every format,
