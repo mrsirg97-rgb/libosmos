@@ -2346,8 +2346,11 @@ step / seq / draft, DeepSeek under src/ds4); comments to their load-bearing stat
 say, a unit, a protocol, a security reason - with release history and measurements (~250 version-citing lines, ~90
 measurements) moved here. Last, as it moves the code every earlier phase edits.
 
-**phase 7 - graphs**: Qwen's graph capture lifted into a shared contract, a step's launches captured and replayed, so
-Inkling-2-Mini adopts it in 0.15.4 (launch overhead alone: ~1,467 launches a 3-row verify step; the same bits).
+**phase 7 - graphs: dropped** (2026-11-23). It assumed Qwen had graph capture to lift; it never did - HIP graphs were
+measured twice and not kept (a scratch chain of 1,500 tiny kernels: 2.02 us a kernel launched, 1.87 replayed; Qwen's
+decode step captured whole, 1,737 nodes: 23.42 / 23.54 tok/s against 23.63 / 23.56 launched). the ~2 us between two
+dependent kernels is the GPU's, not the launch's: for Mini's ~1,467 launches a 3-row verify step a graph predicts
+~0.2 ms of a ~13 ms step. Mini's launch cost is a fusion's job (fewer kernels), not a graph's.
 
 **decisions for the operator**: (1) a budget's one meaning changes DeepSeek's sizing - its own gate; (2) the
 environment knobs: options, or deleted where nothing uses them; (3) the comment rule, applied by hand file by file;
