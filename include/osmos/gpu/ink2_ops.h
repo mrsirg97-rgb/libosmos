@@ -60,6 +60,13 @@ bool ink2_moe_conv(const float *x, const float *a, const int32_t *row, uint32_t 
 bool ink2_conv_dyn_keep(const float *x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t heads, const float *w,
                         const float *dyn, const float *hist, float res, float scale, float *y, float *keep,
                         void *stream);
+/* ink2_conv_keep (the static conv of x into partial, plus add; x's rows into keep) then ink2_attn_res on partial, in
+   two launches not three - the same bits. false past INK2_RES_SPLIT_TOKENS tokens, with no scratch or no keep (the
+   tail's room): the two calls then */
+bool ink2_attn_res_conv(const float *x, uint32_t taps, const float *w, const float *hist, float res, float conv_scale,
+                        const float *add, float *keep, const float *query, uint32_t queries, const float *blocks,
+                        uint32_t n_blocks, uint32_t b_stride, float *partial, uint32_t n_tok, uint32_t dim, float eps,
+                        float scale, float *out, float *scratch, void *stream);
 bool ink2_attn_res(const float *query, uint32_t queries, const float *blocks, uint32_t n_blocks, uint32_t b_stride,
                    const float *partial, uint32_t n_tok, uint32_t dim, float eps, float scale, float *out, float *scratch,
                    void *stream);

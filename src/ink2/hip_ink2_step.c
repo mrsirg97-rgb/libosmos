@@ -206,9 +206,21 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
                            (uint64_t)C * 4, n, hipMemcpyDeviceToDevice, f->st) == hipSuccess);
       nb++;
     }
-    GPU(ink2_conv_put(co, f->o, n, C, taps, d->out_conv, 0, NULL, conv_res, conv_scale, boundary ? NULL : f->h, f->r, f->st));
-    GPU(ink2_attn_res(d->ffn_res_q, 1, f->blocks, nb, maxb, f->r, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
-                      f->st));
+    /* the output's conv made by the FFN residual's own dots (a decode's, a verify's: two launches, the same bits),
+       else the conv then the residual */
+    const float *co_hist = ink2_tail_last(co, taps - 1);
+    float *co_keep = n <= INK2_RES_SPLIT_TOKENS && f->res_sc ? (float *)ink2_tail_claim(co, n) : NULL;
+    if (co_keep)
+      GPU(ink2_attn_res_conv(f->o, taps, d->out_conv, co_hist, conv_res, conv_scale, boundary ? NULL : f->h, co_keep,
+                             d->ffn_res_q, 1, f->blocks, nb, maxb, f->r, n, C, g->rms_eps, res_scale, f->tmp,
+                             f->res_sc, f->st));
+    else
+    {
+      GPU(ink2_conv_put(co, f->o, n, C, taps, d->out_conv, 0, NULL, conv_res, conv_scale, boundary ? NULL : f->h,
+                        f->r, f->st));
+      GPU(ink2_attn_res(d->ffn_res_q, 1, f->blocks, nb, maxb, f->r, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
+                        f->st));
+    }
     /* a looped layer's FFN control, its last step (x - tanh(forget) x + tanh(gain) m) in the router's norm's launch
        where the router is mm's (ops_rms_x16_ctrl: ink2_loop_ctrl then rms_for's bits) */
     const bool ctl16 = looped && n <= MM_MAX_TOKENS &&
