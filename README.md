@@ -14,7 +14,7 @@ An inference engine for five mixture-of-experts models, and one small long-conte
 - **Inkling-2-Mini** (Thinking Machines; 26B, its middle layers looped three times a token), the release's own
   NVFP4 / MXFP8 / BF16 weights - 19.6 GB, all of it in GPU memory - drafted by its own head, to a 1M context:
   prompts at ~1,000 tokens a second.
-- **osmos1.7b** (LFM3-1.7B, 1.36 GB in Q4_0), its full-attention layers reading a 512K context through latent sparse
+- **osmos1.7b** (LFM3-1.7B, 1.85 GB in Q8_0), its full-attention layers reading a 256K context through latent sparse
   attention: prompts at thousands of tokens a second, each token's attention ~4,600 keys however long the context.
 
 **The same input gives the same output, bit for bit**, however it runs: alone or batched with other conversations,
@@ -77,7 +77,7 @@ alone, so a seed reproduces an answer, drafted or not; without one a seed is dra
 header - turns since the last tool call, the most repeated recent call, how many times in a row the last call was
 made again after the same result, orphaned calls and results (a client's history compaction can drop one side), and
 `stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
-true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling-2-Small 256K, Inkling-2-Mini 1M, Hy4-flash 1M, osmos1.7b 512K), or
+true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling-2-Small 256K, Inkling-2-Mini 1M, Hy4-flash 1M, osmos1.7b 256K), or
 `--ctx` (installer or osmos-api: `512k`, `1m`, ...).
 
 ## The packs
@@ -91,7 +91,7 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 | `qwen38-ud-iq3_xxs` | 84 GB + 3 GB MTP head | 512K | Qwen, fully in GPU memory |
 | `qwen38-ud-q4_k_xl` | 111 GB (82 GB in GPU memory, its 29 GB n-gram table read from the SSD) + 3 GB MTP head | 512K | the larger quant: slower than UD-IQ3_XXS, no better perplexity on our text |
 | `osmos-evo-inkling` | 158 GB (unsloth's UD-IQ1_S files + a 55.5 GB delta in two parts, made where you install it) + 1.3 GB drafter | 256K | Inkling-2-Small: UD-IQ1_S with its experts' down projections IQ2_S / IQ3_XXS and its attention and head Q5_K |
-| `osmos1.7b` | 1.36 GB + 0.8 MB of LSA maps | 512K | a small, fast agent model: LFM3-1.7B, its long contexts read sparse (`vibes1.7b`: its old name) |
+| `osmos1.7b` | 1.85 GB + 0.8 MB of LSA maps | 256K | a small, fast agent model: LFM3-1.7B, its long contexts read sparse (`vibes1.7b`: its old name) |
 | `hy4-flash` | 92 GB (~79 GiB in GPU memory) + 63 GB Engram table + 1.7 GB DFly2 drafter | 1M | Tencent's Hy4-flash: 220B, ~11B active a token, its own drafter - AngelSlim's Q3_K |
 | `inkling-2-mini` | 19.6 GB (all in GPU memory) + 0.4 GB drafter | 1M | Inkling-2-Mini as released: fast prompts, long contexts, the most room to spare |
 
@@ -110,7 +110,7 @@ and plain answers are the same tokens, bit for bit (their hashes compared); draf
 | `osmos-evo-1017` | 384 | **29.0** / **24.2** | 18.8 / 19.3 |
 | `hy4-flash` | 408 | **22.9** / **20.2** | 17.4 / 17.4 |
 | `osmos-evo-inkling` | 371 | 14.5 / 14.3 | 12.6 / 13.2 |
-| `osmos1.7b` (no drafter) | **5,321** | | **126.6** / **124.0** |
+| `osmos1.7b` (v-r15, 0.17.1; no drafter) | **5,419** | | **96.2** / **95.6** |
 
 Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
 `inkling-2-mini` samples at its release's temperature 1.0 by default: the same code question at its default draws
@@ -126,18 +126,18 @@ Code is a duration parser with tests, prose a B-tree explanation, 256 tokens eac
 | `osmos-evo-1017` | 31.4 | 25.3 | 30.9 | 18.3-18.5 |
 | `hy4-flash` | 21.4 | 21.4 | 20.2 | 17.5 |
 | `osmos-evo-inkling` (0.15.2) | 15.6 | 12.7 | 13.5 | 12.0-12.6 |
-| `osmos1.7b` | 126.1 | 126.4 | 122.4 | |
+| `osmos1.7b` (v-r10, Q4_0) | 126.1 | 126.4 | 122.4 | |
 
-**Agents** (osmos 0.16.0; `tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system
+**Agents** (osmos 0.16.0, osmos1.7b 0.17.1's v-r15; `tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system
 prompt and task, then tool results of 150-2,000 tokens (one in ten a 5K-20K file read) and 0.5-5 s of tool time
 between turns: 98,757 new prompt tokens against up to 8,003 answer tokens, each model's own tokens, at a 131K
 context, every turn drafted where the pack has a drafter.
 
 | | `osmos1.7b` | `qwen38-ud-iq3_xxs` | `inkling-2-mini` | `osmos-evo-1017` | `hy4-flash` | `osmos-evo-inkling` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Wall time, all 32 turns | **88.4 s** | 185.2 s | 208.3 s | 434.3 s | 514.6 s | 856.4 s |
-| First token, p50 / p95 | **0.88 / 6.6 s** | 2.22 / 25.9 s | 1.94 / 20.5 s | 6.03 / 53.2 s | 4.89 / 51.0 s | 8.94 / 80.3 s |
-| Turn done, p50 / p95 | **8.2 / 12.4 s** | 13.6 / 45.3 s | 17.3 / 45.7 s | 41.7 / 84.9 s | 48.7 / 109.6 s | 87.5 / 213.2 s |
+| Wall time, all 32 turns | **90.8 s** | 185.2 s | 208.3 s | 434.3 s | 514.6 s | 856.4 s |
+| First token, p50 / p95 | **0.81 / 5.8 s** | 2.22 / 25.9 s | 1.94 / 20.5 s | 6.03 / 53.2 s | 4.89 / 51.0 s | 8.94 / 80.3 s |
+| Turn done, p50 / p95 | **8.5 / 13.9 s** | 13.6 / 45.3 s | 17.3 / 45.7 s | 41.7 / 84.9 s | 48.7 / 109.6 s | 87.5 / 213.2 s |
 
 Every turn answered, and every later turn continued its conversation in place. osmos sizes itself to leave 8 GiB of
 RAM free beside the model (`"fill_gib"` in `osmos.json`, osmos-serve `--fill`: the output the same at any value).
@@ -249,25 +249,24 @@ tok/s); 128K and 512K needles at 10 / 50 / 90% likewise.
 ### osmos1.7b
 
 [osmos1.7b](https://huggingface.co/mrsirg97-rgb/osmos1.7b) (vibes1.7b until 0.11.1): LFM3-1.7B (Liquid's hybrid: 13
-short-convolution, 5 sliding and 6 full-attention layers) fine-tuned on 32K-token examples and trained on the Q4_0 grid
-it ships in, its full layers reading through its latent sparse attention maps - a token's read its 1,024 best buckets
-of the closed 512-key blocks, then the window and the sinks: ~4,600 keys, however long the context. Its long contexts
-(osmos 0.11.1, the `performance` profile, one conversation):
+short-convolution, 5 sliding and 6 full-attention layers) fine-tuned on one engineer's agent sessions, replayed in the
+model's own words (recipe v-r15, its card) and trained against a Q4_0 KV cache. The pack is its Q8_0 file - against
+the BF16 one here, KL 0.00038 for 71% faster decode - its full layers reading through latent sparse attention maps
+fitted to it: a token's read its 1,024 best buckets of the closed 512-key blocks, then the window and the sinks: ~4,600
+keys, however long the context. Its long contexts (osmos 0.17.1, the `performance` profile, one conversation):
 
 | | |
 | --- | ---: |
-| Decode at 32K / 128K / 512K | 100 / 97 / 85 tok/s |
-| Prompt, 2K / 32K / 128K / 512K tokens | **6,479** / 3,948 / 3,591 / 3,128 tok/s |
-| A code placed at 10 / 50 / 90% of a 524K prompt (source code), asked at its end | 3 of 3 |
-| The same at 10 / 30 / 50 / 70 / 90% of a 1.04M prompt (`--ctx 1m`) | 4 of 5 |
-| KL against Liquid's reference (64 / 2,048 / 24,576 tokens) | 3.1e-5 / 2.0e-5 / 3.2e-5 (top-1 63, 64, 64 of 64) |
+| Prompt, ~3K / 32K / 128K / 256K tokens | **5,419** / 3,718-3,955 / 3,489-3,653 / 3,332-3,443 tok/s |
+| Decode after a 32K / 128K / 256K prompt | 87-99 / 87-100 / 84-90 tok/s |
+| A code placed at 10 / 50 / 90% of a 32K, 128K and 256K prompt (source code), asked at its end | 9 of 9 |
+| Its LSA read against dense attention (64 decode steps at 128K / 256K) | the same next-token loss (1.380 / 1.292 against 1.393 / 1.276), top-1 55 / 49 of 64 |
+| KL of the Q8_0 pack against the BF16 file's run (8,192 tokens of wiki / code) | 0.00038 / 0.00039 (top-1 99.0 / 99.2%) |
 
-Its rope is native at every length: on the last 2,048 tokens' loss YaRN x4 read best past ~192K, but it lost the 524K
-prompt's code 52K from its end, which native found (DESIGN.md, "osmos1.7b: rope"), so there are no stages and no
-cached key is ever turned. The pack is 512K; `--ctx 1m` reaches 1M, where the model found 4 of 5 codes (the miss
-answered with a path from the source beside it, as YaRN did). Prompts read sparse past 4,612 tokens (the first
-position a read can leave a key out), as the model was trained; every token's bits are the same however its prompt
-is split into steps.
+Its rope is native at every length (DESIGN.md, "osmos1.7b: rope"): no stages, and no cached key is ever turned. The
+pack is 256K, its maps' fit; `--ctx` reaches further, unmeasured on this release. Prompts read sparse past 4,612
+tokens (the first position a read can leave a key out), as the model was trained; every token's bits are the same
+however its prompt is split into steps. The BF16 file runs too (its prompts on the matrix cores: DESIGN.md "0.17.1").
 
 ### hy4-flash
 

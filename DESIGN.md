@@ -7288,3 +7288,72 @@ ink2_fa at 2,968 tokens, 24 heads (a wall-clock ink2_fabench: the GPU's timestam
   block's 24 waves reads K's and V^T's fragments for every tile - ~17 KB a wave a tile, LDS traffic of the order of
   the WMMAs' time - and the tile's softmax and latency besides (91% waiting). Reusing a fragment over more rows a wave
   needs registers there aren't. Phase A ends here: 64-key stages kept, Mini's prompt +5.6% (docs/attention-core.md).
+
+### 0.17.1: osmos1.7b v-r15 on BF16 - its shapes swept (2026-11-24, low-power, wall clock)
+
+v-r15 ships BF16 only (trained against a Q4_0 KV cache; the engine's Q8_0 cache matches f16 on it, the card says). Loaded
+as 0.17.0 found it, a ~3K prompt read at 1,205 tok/s and decode at 48.9 - against v-r10's Q4_0 3,800 and 125.
+
+- **The prompt was on the matvec.** mm takes BF16 by name (mm.hip: not in mm_known's table; ink2 opts in for Mini's
+  dense), and lfm3 never had: every BF16 matrix of a read went to mv_strided. lfm3_mm_takes opts in where the
+  model's matrices are BF16: 1,205 -> 2,734 tok/s. KL against the matvec run (scratch lfm3_kld: 8,192 tokens a text,
+  steps of 2,048, every row): wiki 0.000021, code 0.000039, top-1 99.7-99.8%, perplexity the same to four decimals.
+- **The gemm was the wrong kernel for its rows.** A 2,048-token step's BF16 matrices (osmos1.7b's: 2,048 columns
+  but the FFN's down, 7,680):
+
+  | path | a step's matrices |
+  | --- | ---: |
+  | gemm 128 x 8 x 8, its plan 2,4,2,4 (BF16's, Mini's) | 393 ms |
+  | the same, plan 4,2,1,8 (the same bits) | 365 |
+  | gemm 128 x 1 x 8 (no K split) | 331 |
+  | tile 128 x 8 x 8, CT 8 (the same bits as the gemm) | 304 |
+  | **tile 128 x 4 x 8, CT 8** | **269** |
+  | Q4_0's tile, the same shapes | 190 |
+
+  The 2,048-column matrices ran 12 TFLOP/s on the gemm against Q4_0's 32 on the tile; long-K ones (k / v, the
+  down) were near 30 either way. Not the K split (W 1 barely helped): the gemm reads a block's x again for every 64
+  rows. 128 x 4 x 8 on the tile for BF16's 2,048 and 7,680 columns alone (bf16_four: Mini's BF16 has neither) -
+  a ~3K prompt 2,734 -> 3,316. KL against the matvec run: wiki 0.000021, code 0.000041. What is left against Q4_0
+  is the tile reading a block's rows again every 128 tokens: BF16's are 3.5x Q4_0's bytes.
+- **Decode: the matvec's short rows.** A token's BF16 matrices (decode's joint launches: q / k / v / gate 3,088 rows,
+  gate + up 15,360) by rows a wave (R) and chunks in flight (U) - neither changes a bit:
+
+  | | R 1 U 4 (BF16's) | R 1 U 8 | R 2 U 4 | R 4 U 1 |
+  | --- | ---: | ---: | ---: | ---: |
+  | q / k / v / gate, 3,088 x 2,048 | 127 GB/s | 148 | 91 | 70 |
+  | out, 2,048 x 2,048 | 98 | 129 | 87 | 67 |
+  | gate + up, 15,360 x 2,048 | 194 | 206 | 158 | 101 |
+  | down, 2,048 x 7,680 | 226 | 224 | 223 | 223 |
+  | a token's matrices | 16.30 ms | 15.01 | 19.60 | 28.02 |
+
+  U 8 at 2,048 columns alone: decode 49.3 -> 53.0 tok/s, its answers the same hashes. Mini's 2,304-column rows gain
+  with U 8 too (199 -> 223 GB/s; its 3,072 lose a little): not taken in a one-pack patch - 0.18.0's. A short row
+  stays ~130 GB/s whatever R and U: a wave one row, 8 chunks a lane - several short rows a wave (a kernel change)
+  is what would close it.
+
+Mini through all of it: its three hashes the same, mm / mv / ink2 GPU tests pass.
+
+**Then Q8_0, the pack.** v-r15's Q8_0 file (the same release, 1.85 GB; its tied embedding Q8_0, which lfm3 now takes:
+its own table the head) against the BF16 file, low-power, the pack's osmos.json each:
+
+| | Q8_0 | BF16 |
+| --- | ---: | ---: |
+| a ~3K prompt (osmos-api) | 4,022-4,430 | 3,327-3,337 |
+| decode, code / prose (osmos-api) | 90.4-90.9 / 91.1-91.3 | 53.0 / 52.9-53.0 |
+| lfm3_run: prompt 2K / 16K, decode | 5,919 / 5,609, 100.8 | 4,666 / 4,578, 56.6 |
+| KL against BF16's matvec run (wiki / code) | 0.00038 / 0.00039 | 0.00002 / 0.00004 |
+| top-1, perplexity (wiki / code) | 99.0 / 99.2%, 14.081 / 5.142 | 99.8%, 14.081 / 5.143 |
+| the stuck session's replay (10 runs) | no loop | no loop |
+
+Q8_0's block (a scale, 32 bytes) is mm's most tuned dense type, and half BF16's bytes for the tile's re-reads; the
+Q4_0 it replaces rode IQ4_NL's shapes unmeasured.
+
+**LSA's cost at a short context.** The server against lfm3_run's 100.8 (no LSA there): the pack with its maps
+decoded 91 tok/s, without them 96.7 - every decode step took LSA's read (its index, its buckets' read, the list
+attention) however few its tokens. A decode step below sparse_from now reads dense, as a prompt's rows there do: 96.2
+(the same answers). At a 3K prompt LSA still costs ~11% of the wall (4,000 against 4,493 tok/s) though only 8 ms of
+GPU work (409.6 against 401.4 ms, the keys' index): the GPU waits while the CPU buckets each closed block (Ward, 5
+blocks x 6 layers a 3K prompt). Batching a layer's blocks into one copy and one wait (the same buckets: lfm3_lsa_check's
+KL, top-1 and NLL to every digit) did not move the 3K prompt - the bucketing itself is the time. Deferring it to the
+first read that needs one changes what a saved state's `closed` means (its buckets saved, the rollback rule, the
+loader's check); bucketing on the GPU, or on a thread beside it, is 0.18.0's.
