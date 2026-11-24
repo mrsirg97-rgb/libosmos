@@ -100,6 +100,24 @@ bool ink2_control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, c
   /* the two norms' f16 side by side in x16 where down is mm's: its input's, not converted again (ops_rms's bits) */
   const bool r16 = n <= MM_MAX_TOKENS && ink2_mm_takes(f, ink2_type(L->ctrl_down[c]), (uint32_t)L->ctrl_down[c]->dims[1],
                                                   (uint32_t)L->ctrl_down[c]->dims[0]);
+  /* the down's gate and its f16 in one launch (mm_run_x16: mm_run then mm_x16's bytes), the gain and forget on that
+     f16 (bx16 5's: the controls' gates', free by the FFN's) - its norms the f16 alone (no reader of their F32: x16's
+     the down's input, x and m loop_ctrl's); else the norms' F32 (ccat), the down, then the pair converting its gate */
+  const uint32_t G = (uint32_t)f->w->geo.loop.gate_rank;
+  const GgufTensor *gf[2] = {L->ctrl_gain[c], L->ctrl_forget[c]};
+  void *g16 = bx16_at(f, 5);
+  if (r16 && batchable(f, gf, 2, G))
+  {
+    const OpsRmsPart norms16[2] = {{x, NULL, NULL, f->x16, C, 2 * C, 2 * C, 0}, {m, NULL, NULL, f->x16, C, 2 * C, 2 * C, C}};
+    if (!ops_rms_x16_many(norms16, 2, C, eps, n, f->overflow, f->st))
+      return false;
+    if (mm_run_x16(ink2_type(L->ctrl_down[c]), d->ctrl_down[c], G, 2 * C, f->x16, n, f->cgate, G, g16, f->overflow,
+                   f->st))
+      return mm_tokens(ink2_type(gf[0]), d->ctrl_gain[c], C, f->cgain, C, d->ctrl_forget[c], C, f->cforget, C, G,
+                       f->cgate, G, n, g16, f->overflow, true, f->st) &&
+             (!out || ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, f->st));
+    /* mm_run_x16 refused the shape: the path below, its norms again with their F32 (the same values, deterministic) */
+  }
   const OpsRmsPart norms[2] = {{x, NULL, f->ccat, f->x16, C, 2 * C, 2 * C, 0},
                                {m, NULL, f->ccat + C, f->x16, C, 2 * C, 2 * C, C}};
   const bool normed = r16 ? ops_rms_x16_many(norms, 2, C, eps, n, f->overflow, f->st)
@@ -107,16 +125,6 @@ bool ink2_control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, c
                                 ops_rms(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, f->st);
   if (!normed)
     return false;
-  /* the down's gate and its f16 in one launch (mm_run_x16: mm_run then mm_x16's bytes), the gain and forget on that
-     f16 (bx16 5's: the controls' gates', free by the FFN's); else the down, then the pair converting its gate */
-  const uint32_t G = (uint32_t)f->w->geo.loop.gate_rank;
-  const GgufTensor *gf[2] = {L->ctrl_gain[c], L->ctrl_forget[c]};
-  void *g16 = bx16_at(f, 5);
-  if (r16 && batchable(f, gf, 2, G) &&
-      mm_run_x16(ink2_type(L->ctrl_down[c]), d->ctrl_down[c], G, 2 * C, f->x16, n, f->cgate, G, g16, f->overflow, f->st))
-    return mm_tokens(ink2_type(gf[0]), d->ctrl_gain[c], C, f->cgain, C, d->ctrl_forget[c], C, f->cforget, C, G,
-                     f->cgate, G, n, g16, f->overflow, true, f->st) &&
-           (!out || ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, f->st));
   return ink2_mat2(f, L->ctrl_down[c], d->ctrl_down[c], f->cgate, NULL, NULL, NULL, f->ccat, n, r16) &&
          ink2_mat2(f, L->ctrl_gain[c], d->ctrl_gain[c], f->cgain, L->ctrl_forget[c], d->ctrl_forget[c], f->cforget,
               f->cgate, n, false) &&

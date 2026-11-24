@@ -60,7 +60,7 @@ __device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const fl
     return;
   }
   const float* xr = x + (uint64_t) row * xs;
-  float* yr = y + (uint64_t) row * ys;
+  float* yr = y ? y + (uint64_t) row * ys : nullptr;  // (NULL: the f16 alone - a reader of x16 only)
   // a thread's values kRmsRun at a time, their loads in flight together (a block a row: its latency), each sum's
   // adds and each value's ops in rms_kernel's order - y may be x, so a run's loads before its stores
   float ss = 0;
@@ -87,7 +87,7 @@ __device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const fl
       const uint32_t i = i0 + u * kThreads;
       if (i >= n) break;
       const float o = w ? (v[u] * r) * g[u] : v[u] * r;
-      yr[i] = o;
+      if (yr) yr[i] = o;
       if (x16) mm::x16_put(x16, row, c0 + i, xts, o, overflow);
     }
   }
@@ -834,7 +834,7 @@ extern "C" bool ops_rms_x16_many(const OpsRmsPart* parts, uint32_t count, uint32
   RmsParts p = {};
   for (uint32_t i = 0; i < count; i++) {  // (ops_rms_x16_at's refusals, each part)
     const OpsRmsPart& q = parts[i];
-    if (!q.x || !q.y || !q.x16 || q.c0 % mm::kTile || q.c0 + n > q.xts) return false;
+    if (!q.x || !q.x16 || q.c0 % mm::kTile || q.c0 + n > q.xts) return false;  // (y NULL: the f16 alone)
     p.x[i] = q.x, p.w[i] = q.w, p.y[i] = q.y, p.x16[i] = (_Float16*) q.x16;
     p.xs[i] = q.x_stride, p.ys[i] = q.y_stride, p.xts[i] = q.xts, p.c0[i] = q.c0;
   }
