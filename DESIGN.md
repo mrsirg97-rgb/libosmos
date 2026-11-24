@@ -7272,3 +7272,10 @@ ink2_fa at 2,968 tokens, 24 heads (a wall-clock ink2_fabench: the GPU's timestam
   rest of the step's matmuls 70-86% of theirs. The kernel's shape (16 queries and a head a wave, K / V decoded a block,
   the softmax and bias a 16-key tile) is the cap: the shared attention core (0.17.0's) is a design for this GPU from
   the start, to the unit contract (256-key units, the decode's order: prompt == decode, deterministic).
+- **the register audit by ablation** (throwaway compiles, the compiler's spill report): without the causal cut (a
+  diagonal tile's per-row masked P V WMMAs) 248 -> 120 bytes a lane; without the bias 248 -> 168; without the unit
+  fold 0 - but that removal left O never read in the prompt's kernel (its only reader the fold), so the P V itself was
+  deleted: not a measurement. Tried, not kept: the fold out of the tile loop (units an outer loop, the same order:
+  no change), the plain and diagonal P V as two branches (248 -> 232: the compiler sizes for the kernel's worst
+  point). Next: the diagonal tiles as their own pass (the attention core's skeleton, docs/attention-core.md B) -
+  the main kernel without the cut's code, the rows' (m, l, o) handed on in F32, the same order.
