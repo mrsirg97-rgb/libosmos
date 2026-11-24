@@ -1,11 +1,12 @@
 # Changelog
 
-## [0.16.1]: inkling-2-mini's decode, a little less work; the same answers
+## [0.16.1]: inkling-2-mini's decode, a little less work, and what its decode is made of; the same answers
 
 - **inkling-2-mini decodes with fewer launches.** At decode and verify sizes, each layer's MoE preparation (the
   router's top 8 of 128 experts, the experts' tables, their scales) is one GPU launch instead of three, and the
-  experts' tables are counted with a wave's shuffles instead of fourteen block-wide barriers: about 0.75 ms less a
-  decode step (37.1 -> 21.2 us a layer, 48 layers). Every pack's answers are unchanged, token for token.
+  experts' tables are counted with a wave's shuffles instead of fourteen block-wide barriers: 37.1 -> 21.2 us a
+  layer. End to end it is small - drafted decode +0.3-0.4% at low-power (45.1 -> 45.2 tok/s code, 41.3 -> 41.4
+  prose, three rounds each against 0.16.0). Every pack's answers are unchanged, token for token.
 - **Measured and written down, not built** (DESIGN.md): HIP graphs (the GPU's own ~2 us between dependent kernels is
   not a launch's), an opt-in int4 prompt path (`--fast`: int4 activations changed the top token on 18-25% of rows
   against 0.46% of noise - not built), and a census of Mini's decode: ~68% of a step is reading its release weights
