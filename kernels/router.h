@@ -43,4 +43,42 @@ __device__ inline void token(const float* logits, const float* bias, uint32_t n_
     }
   }
 }
+
+// the same picks by one wave alone, its token's: a lane's experts' scores and keys in its registers (lane + 32 r -
+// the layout wave_pick reads), a pick's score fetched from its expert's lane - every value token()'s expression, so
+// the same bits; a block's waves each a token at once (no barrier: the wave's registers and shuffles alone)
+template <int Score, int R>
+__device__ inline void token_wave(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
+                                  uint32_t t, int32_t* idx, float* w, int32_t* idx_lds) {
+  const uint32_t lane = threadIdx.x % 32;
+  float sc[R], key[R];
+#pragma unroll
+  for (int r = 0; r < R; r++) {
+    const uint32_t e = lane + 32u * (uint32_t) r;
+    const float l = e < n_exp ? logits[(uint64_t) t * n_exp + e] : 0.0f;
+    sc[r] = Score == OPS_SCORE_SIGMOID ? sigmoid(l) : sqrtf(softplus(l));
+    key[r] = e < n_exp ? pick_key(sc[r] + bias[e]) : 0.0f;
+  }
+  uint32_t taken = 0;
+  int32_t pick[OPS_MAX_TOPK];
+  float wt[OPS_MAX_TOPK];
+  for (uint32_t s = 0; s < k; s++) {
+    float best;
+    pick[s] = wave_pick<R>(key, n_exp, &taken, &best);
+    const uint32_t p = (uint32_t) pick[s] < n_exp ? (uint32_t) pick[s] : 0u;
+    float mine = 0.0f;
+#pragma unroll
+    for (int r = 0; r < R; r++)
+      if ((uint32_t) r == p / 32) mine = sc[r];
+    const float v = __shfl(mine, (int) (p % 32), 32);
+    wt[s] = (uint32_t) pick[s] < n_exp ? v : 0.0f;
+  }
+  if (lane) return;
+  float sum = 0;
+  for (uint32_t s = 0; s < k; s++) sum += wt[s];
+  for (uint32_t s = 0; s < k; s++) {
+    if (idx) idx[t * k + s] = pick[s], w[t * k + s] = wt[s] / (sum + kRouteEps) * scale;
+    if (idx_lds) idx_lds[t * k + s] = pick[s];
+  }
+}
 }  // namespace router

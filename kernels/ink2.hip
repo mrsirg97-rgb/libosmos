@@ -36,6 +36,7 @@ __global__ void moe_scales_kernel(const int32_t* ids, const float* w, const int3
   if (m < n) moe_scale_pick(m, ids, w, where, scale, n_exp, sg, su, a, picks);
 }
 
+constexpr int kPrepLane = 8;  // the prep's router: a lane's experts at most (256: Mini's 128, the test's 256)
 // a decode's or a verify's MoE preparation in one block, not three launches: each token's picks (router.h's), the
 // picks as mm_group's tables (moe_tiles.h's), their scales (moe_scale_pick) - the same functions the three kernels
 // run, so the same bits. its picks the block's LDS between them (at most kPlaceInline: the tiles' inline placing)
@@ -43,13 +44,11 @@ __global__ __launch_bounds__(moe_tiles::kGroupThreads) void moe_prep_kernel(
     const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float route_scale, uint32_t n_tok,
     int32_t* idx, float* w, uint32_t dim, uint32_t ff, Q4xExpertTiles t, Q4xExpertBounds bd, const float* scale,
     float* sg, float* su, float* a, uint32_t* picks) {
-  __shared__ float sc[OPS_MAX_EXPERTS], keys[OPS_MAX_EXPERTS];
   __shared__ int32_t ids[moe_tiles::kPlaceInline];
-  for (uint32_t tok = 0; tok < n_tok; tok++) {
-    router::token<OPS_SCORE_SIGMOID>(logits, bias, n_exp, k, route_scale, tok, moe_tiles::kGroupThreads, sc, keys,
-                                     idx, w, ids);
-    __syncthreads();  // (the next token's scores over this one's LDS)
-  }
+  constexpr uint32_t kWaves = moe_tiles::kGroupThreads / 32;
+  for (uint32_t tok = threadIdx.x / 32; tok < n_tok; tok += kWaves)  // a wave a token, the block's waves at once
+    router::token_wave<OPS_SCORE_SIGMOID, kPrepLane>(logits, bias, n_exp, k, route_scale, tok, idx, w, ids);
+  __syncthreads();  // every token's picks (ids) and weights before the tiles
   const uint32_t P = n_tok * k;
   moe_tiles::tiles_block(ids, P, k, n_exp, dim, ff, t, bd);
   __syncthreads();  // its places (t.where) and the router's weights, the block's writes
@@ -967,7 +966,7 @@ extern "C" bool ink2_moe_prep(const float* logits, const float* bias, uint32_t n
                               const Q4xExpertTiles* t, const float* scale, float* sg, float* su, float* a,
                               uint32_t* picks, void* stream) {
   const uint32_t P = n_tok * k;
-  if (!logits || !bias || !n_exp || n_exp > OPS_MAX_EXPERTS || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok ||
+  if (!logits || !bias || !n_exp || n_exp > 32u * kPrepLane || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok ||
       P > moe_tiles::kPlaceInline || !idx || !w || !dim || !ff || !t || !t->cnt || !t->gidx || !t->hidx || !t->xg ||
       !t->yg || !t->xd || !t->yd || !t->where || !t->off || !scale || !sg || !su || !a || !picks)
     return false;
