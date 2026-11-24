@@ -705,6 +705,17 @@ extern "C" bool mm_tokens_scaled(uint32_t type, const void* w0, uint32_t rows0, 
   return ok;
 }
 
+extern "C" bool mm_x16_whole(const float* x, uint32_t xs, uint32_t n, uint32_t cols, void* x16, int32_t* overflow,
+                             void* stream) {
+  if (!x || !x16 || !n || n > MM_X16_ROWS_MAX) return false;
+  bool ok = true;
+  for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS) {
+    const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
+    ok = mm_x16(x + (uint64_t) k0 * xs, xs, m, cols, (_Float16*) x16 + mm::x16_at(k0, 0, cols), overflow, stream);
+  }
+  return ok;
+}
+
 extern "C" bool mm_tokens_x16(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
                               uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const void* x16, uint32_t n,
                               void* stream) {
