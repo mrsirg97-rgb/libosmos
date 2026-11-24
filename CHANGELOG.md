@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.16.0]: the engine consolidated - one contract a concept, every byte owned, a hardened server; the same answers
+
+The same tokens as 0.15.2 on all six packs (every pack's answers hashed against 0.15.2's, greedy and sampled). What
+changed is how the engine is built: one shared implementation of each concept where each model family had its own
+copy - the kind of copy two of 0.15's memory bugs lived in.
+
+- **Every GPU byte is owned, counted and given back.** An engine's memory is one count (its ledger), made first and
+  freed last; every buffer a model's build or a conversation makes is recorded and freed from that record, and a
+  destroyed engine is checked to return every byte (a test counts each allocation on all seven model families).
+  Found on the way: **inkling-2-mini leaked 11.3 MiB each time an engine was made**, fixed. A conversation restarted
+  by osmos-serve no longer allocates (osmos-evo-inkling's server could exit on a restart when the slot store had
+  taken the room), and a `--fill` that leaves the build nothing is refused rather than half-built.
+- **`--budget` means one thing for every pack: the whole build's GPU memory.** DeepSeek's packs counted only their
+  experts' pool, so `--budget 64` built more than 64 GiB; it is now a ceiling for all of them. `--budget auto`'s
+  sizing could also creep along a flat stretch near the edge and settle 10-14 GiB below what fits; it now steps past
+  it (at most ~1.6 GiB short in the sizing test's worst case).
+- **Errors are loud and say what failed, once.** One error shape everywhere: a failure names its model family once,
+  then its cause, and a message is never an earlier call's left over. The engine refuses, rather than ignores or
+  half-applies: an option the model's family does not take (named), a token outside the vocabulary (in a step, a
+  prompt or a draft), a pick from a row with NaN logits, a saved conversation of another format or holding a token
+  outside the vocabulary.
+- **osmos-api is harder to knock over.** A request body is capped at 8 MB (was 32), and parsing one can no longer
+  build a ~2 GB tree from a body of tiny values. A request must arrive within its deadline (10 s, plus 1 s a MB):
+  a client trickling a byte every few seconds is answered `408` instead of holding a connection for hours. A
+  request field osmos does not take is refused by name instead of silently ignored (`store: true`, say). And
+  `--allow-origin <origin>` (repeatable) lets a named web page call the server, with CORS and its preflight; every
+  other browser origin is still refused.
+- **osmos-serve reads its GEN lines strictly**: each number must be whole and in range - `GEN 12x`, a token id of
+  `-5`, `1,,2` or `STOP 7x` are refused with `ERR` saying which value, where before each was read as a prefix.
+- **Settings are flags and `osmos.json` keys, not environment variables.** Neither the engine nor the tools read the
+  environment any more:
+  - osmos-serve's kept conversations: `--no-slots`, `--slot-dir`, `--slot-cap`, `--slot-gb`, `--slot-ram-gb`,
+    `--slot-min`, `--slot-days` (were `OSMOS_SLOT_KEEP` / `_DIR` / `_CAP` / `_GB` / `_RAM_GB` / `_MIN` / `_DAYS`);
+    through osmos-api, a `"slots": {"keep": false, "dir": ..., ...}` object in `osmos.json`.
+  - `--stats` / `"stats": true` (was `OSMOS_STATS`), osmos-api's `--keepalive-ms` (was `OSMOS_API_KEEPALIVE_MS`).
+  - `--profile` / `"profile": true` (was `INK2_PROFILE`), `--rope-stages` / `"rope_stages"` (was
+    `OSMOS_LFM3_STAGES`); the A/B knobs (`INK2_MEM`, `HY4_DFLY_HEAD8`, `Q35_HEAD` and others) are gone.
+  
+  **If you set any of these in a script, move it to the flag**: the variables are now ignored, so slots, for one,
+  would stay on. Each flag is checked whole and in range; a bad one is refused before the model loads.
+- **For contributors**: DeepSeek's forward lives in `src/ds4` and `include/osmos/ds4`, leaving `src/run` to the
+  engine; every family names its files by role (`hip_<family>_make` / `_step` / `_seq` / `_draft`), and the largest
+  files are split by responsibility. Comments keep what a reader needs at the line (invariants, units, layouts, bit
+  rules, contracts); their release history and measurements are in DESIGN.md.
+
 ## [0.15.2]: two osmos-api denial-of-service fixes, each pack's default sampling measured, top_k, a sharper loop signal
 
 - **Two denial-of-service fixes in osmos-api.** A request whose JSON had many keys in one object took time growing
