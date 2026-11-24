@@ -7146,3 +7146,29 @@ The comment pass (phase 6, AGENTS.md's sparse comments): the history and measure
 - tools/bench/mmsweep.hip (g_passes): ink2 takes 20 passes - a low-power clock swings ±15% a pass.
 - tools/bench/q4x_ppl.hip (Q4X_PPL_STREAM): the streamed n-gram table leaves UD-Q4_K_XL's 28.8 GB out of GPU memory. qxbench came in 0.7.3 (its picks' hash 0.7.4); selprobe was made for issue #47's trace.
 - tools/requant/requant_ink2_mtp.c: osmos-evo-inkling's drafter at q5_K q5_K is 1.18 GiB against q8_0 q8_0's 1.76, its drafts the same.
+
+### 0.16.1: --fast (iu4, W4A4) simulated on osmos1.7b - not viable (2026-11-24, branch fastsim-spike, local)
+
+**The question.** An opt-in `--fast` prompt path: the prompt matmuls on gfx1151's iu4 matrix cores (100.9-101.2 TOPS
+against f16's 48.6-50.1, 0.6.0's microbenchmark), the weights' 4-bit codes as stored, the activations rounded to int4.
+Only the linear k-quants hold 4-bit integer codes (Q4_0, Q4_K, Q3_K, Q2_K): osmos1.7b (Q4_0) whole, Hy4's experts
+(Q4_K / Q3_K), part of DeepSeek's (Q2_K); Mini (NVFP4 / FP8 / BF16), Qwen and Small (IQ grids and tables) would need
+their weights re-quantized. So osmos1.7b first: its weights exactly iu4's.
+
+**The simulation** (kernels/sim_a4.hip, lfm3's mat(); tools/bench/lfm3_a4): each Q4_0 matmul's F32 input rounded as an
+iu4 kernel would, then the exact matmul; 8,192 tokens of calib16k in 2,048-token prompt steps, every row against the
+exact path in double. The exact path's own noise (every matmul through the matvec's sums instead): KL 0.0001, top-1
+another 0.46%.
+
+| rounded | KL mean | KL p99 | top-1 another | dNLL |
+| --- | ---: | ---: | ---: | ---: |
+| all Q4_0, int4 a 32 | 0.367 | 3.77 | 24.5% | +0.262 |
+| all, int4 a 16 | 0.276 | 2.79 | 22.0% | +0.251 |
+| all, a 16, the clip of least squared error | 0.328 | 2.79 | 24.4% | +0.322 |
+| all, Hadamard (32) then int4 a 32 - exact rotated weights' bound | 0.196 | 2.22 | 17.7% | +0.141 |
+| one kind alone (int4 a 16): shortconv out / in, ffn_gate, ffn_up, attention, ffn_down | 0.023-0.077 | 0.30-1.08 | 6.2-11.1% | |
+
+**Not viable.** int4 activations move the top token on ~a quarter of rows; any one kind of matmul alone 6-11% (13-24x
+the noise); the rotation (which would itself need re-quantized weights) still 18%. A large MoE tolerates more (0.6.0:
+DeepSeek's experts' gate / up at int4, top-1 5.4% against its noise's 2.8%) - still twice the noise, on one tensor kind.
+`--fast` on iu4 is not built. iu8 (W4A8) runs at f16's rate here (0.6.0: mmq 0.87x / 0.68x at 64 / 128 tokens).
