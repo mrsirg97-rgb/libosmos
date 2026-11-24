@@ -16,16 +16,24 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/kept.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/model/qtype.h"
 #include "osmos/gpu/q35_ops.h"
 #include "lfm3_impl.h"
 #include "osmos/err.h"
+
+/* a read's matrix on mm: its table's types (mm_known), and BF16 where the model's matrices are (f->bf16_mm: mm takes
+   BF16 by name - its f16 the value's where f16 holds it, a read's sums not the matvec's bits; osmos1.7b reads apart) */
+static bool mm_takes(const Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols)
+{
+  return (mm_known(t->type) || (t->type == QTYPE_BF16 && f->bf16_mm)) && mm_fits(t->type, rows, cols);
+}
 
 /* y = W x: a decode's the matvec (mv_strided: a token's sums its own), a read's the matrix cores where mm takes the
    type and shape (mm_tokens, f16 x: a token's sums its own), else the matvec */
 static bool mat(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
                 bool read)
 {
-  if (read && mm_known(t->type) && mm_fits(t->type, rows, cols))
+  if (read && mm_takes(f, t, rows, cols))
     return mm_tokens(t->type, lfm3_dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow,
                      false, f->st);
   return mv_strided(t->type, lfm3_dev(f, t), rows, cols, x, cols, n, y, rows, f->st);
@@ -36,7 +44,7 @@ static bool mat(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t col
 static bool x16_once(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                      bool read)
 {
-  return read && mm_known(t->type) && mm_fits(t->type, rows, cols) && n <= f->max_tokens &&
+  return read && mm_takes(f, t, rows, cols) && n <= f->max_tokens &&
          mm_x16_whole(x, cols, n, cols, f->x16, f->overflow, f->st);
 }
 
@@ -44,7 +52,7 @@ static bool x16_once(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_
 static bool mat16(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                   float *y, bool read, bool have16)
 {
-  if (have16 && read && mm_known(t->type) && mm_fits(t->type, rows, cols))
+  if (have16 && read && mm_takes(f, t, rows, cols))
     return mm_tokens_x16(t->type, lfm3_dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, f->x16, n, f->st);
   return mat(f, t, rows, cols, x, n, y, read);
 }

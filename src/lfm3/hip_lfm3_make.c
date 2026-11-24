@@ -259,6 +259,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
   const Lfm3Geometry *g = &w->geo;
+  f->bf16_mm = w->layer[0].ffn_gate && w->layer[0].ffn_gate->type == QTYPE_BF16; /* (lfm3_mm_takes') */
   f->w = w, f->max_tokens = o->max_tokens, f->max_ctx = o->max_ctx, f->ledger = o->ledger, f->bufs.ledger = o->ledger;
   f->logit_rows = o->logit_rows ? o->logit_rows : o->max_tokens;
   f->ring = (uint32_t)g->window + o->max_tokens + LFM3_MAX_BACK;

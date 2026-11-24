@@ -71,6 +71,12 @@ template <> struct Tuned<quant::kBF16> { using S = mm::Shape<MM_BF16_SHAPE>; sta
 // keep 128 x 8 x 8. by its columns alone, so a matrix's every count
 struct Bf16Nine { using S = mm::Shape<128, 9, 8>; };
 constexpr bool bf16_nine(uint32_t cols) { return cols >= kShortCols && cols % (128 * 9) == 0; }
+// osmos1.7b v-r15's BF16 (2,048 columns: q, k, v, the gate, out, the convolution's in / out, the FFN's gate / up;
+// 7,680: its down): 128 x 4 x 8 on the tile, never the gemm - the gemm reads a block's x again for every 64 rows, the
+// tile its rows again for every 128 tokens: 2,048-token step's matrices 393 -> 269 ms (DESIGN.md, "0.17.1"). by its
+// columns alone (Mini's BF16 has none of them: its shapes, its bits as they were)
+struct Bf16Four { using S = mm::Shape<128, 4, 8>; };
+constexpr bool bf16_four(uint32_t cols) { return cols == 2048 || cols == 7680; }
 // UD-Q4_K_XL's expert types, on the register-A path (mm.h's kRegA): Q4_K 32 x 16 x 2 (its 2,560-column rows' 80
 // slabs for 16 waves to share: the decode's latency hidden; a 32-value slab's lane holds 2 chunks, so U 2 at most),
 // Q5_1 32 x 8 x 2 (its 640-column down: 20 slabs too few for 16). the 64-value slabs through LDS were not taken: they
@@ -345,6 +351,8 @@ bool launch_gemm(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipS
 template <quant::Type T, int CT>
 bool launch_ct(const Mats& m, uint32_t cols, const void* x16, uint32_t n, hipStream_t s) {
   if constexpr (T == quant::kBF16)
+    if (bf16_four(cols)) return launch_shape<T, CT, Bf16Four::S>(m, cols, x16, n, s);
+  if constexpr (T == quant::kBF16)
     if (bf16_nine(cols)) {  // (the gemm and the tile the same shape: its sums' order at every count)
       using S9 = Bf16Nine::S;
       if (gemm_takes<T, S9>(m, cols, n)) return launch_gemm<T, S9>(m, cols, x16, n, s);
@@ -419,6 +427,8 @@ bool batch_shape(const mm::Parts& p, uint32_t count, uint32_t rows, uint32_t col
 
 template <quant::Type T, int CT>
 bool batch_ct(const mm::Parts& p, uint32_t count, uint32_t rows, uint32_t cols, uint32_t n, hipStream_t s) {
+  if constexpr (T == quant::kBF16)
+    if (bf16_four(cols)) return batch_shape<T, CT, Bf16Four::S>(p, count, rows, cols, n, s);
   if constexpr (T == quant::kBF16)
     if (bf16_nine(cols)) return batch_shape<T, CT, Bf16Nine::S>(p, count, rows, cols, n, s);
   if (odd<T>(cols)) return batch_shape<T, CT, typename Odd<T>::S>(p, count, rows, cols, n, s);
@@ -500,6 +510,8 @@ bool gemm_runs(uint32_t rows, uint32_t cols, uint32_t n) {
   const Mats m = {{nullptr, nullptr}, {rows, 0}, {nullptr, nullptr}, {rows, 0}};
   if (!fits<T>(rows, cols) || n > MM_MAX_TOKENS) return false;
   if constexpr (T == quant::kBF16)
+    if (bf16_four(cols)) return false;  // (the tile's alone)
+  if constexpr (T == quant::kBF16)
     if (bf16_nine(cols)) return gemm_takes<T, Bf16Nine::S>(m, cols, n);
   if constexpr (kGemm<T>) return gemm_on<T>(m, cols, n);
   return false;
@@ -559,6 +571,8 @@ template <quant::Type T, int CT>
 bool x16_ct(const void* w, uint32_t rows, uint32_t cols, const void* x16, uint32_t n, float* y, uint32_t ys,
             mm::Silu ep, hipStream_t s) {
   if constexpr (T == quant::kBF16)
+    if (bf16_four(cols)) return silu_shape<T, CT, Bf16Four::S>(w, rows, cols, x16, n, y, ys, ep, s);
+  if constexpr (T == quant::kBF16)
     if (bf16_nine(cols)) {
       const Mats m = {{w, nullptr}, {rows, 0}, {y, nullptr}, {ys, 0}};
       if (gemm_takes<T, Bf16Nine::S>(m, cols, n)) return false;
@@ -573,6 +587,8 @@ bool x16_launch(const void* w, uint32_t rows, uint32_t cols, const void* x16, ui
   int slab = odd<T>(cols) ? Odd<T>::S::kSlab : cols < kShortCols ? Short<T>::S::kSlab : Tuned<T>::S::kSlab;
   if constexpr (T == quant::kBF16)
     if (bf16_nine(cols)) slab = Bf16Nine::S::kSlab;
+  if constexpr (T == quant::kBF16)
+    if (bf16_four(cols)) slab = Bf16Four::S::kSlab;
   if (rows % mm::kTile || (n > 1 && ys < rows) || cols % quant::Block<T>::values || cols % slab) return false;
   switch (col_tiles<T>(n)) {
     case 1: return x16_ct<T, 1>(w, rows, cols, x16, n, y, ys, ep, s);
