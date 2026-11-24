@@ -46,7 +46,7 @@ bool ops_rms_x16_at(const float *x, uint32_t n, uint32_t x_stride, const float *
 typedef struct OpsRmsPart
 {
   const float *x, *w;
-  float *y;
+  float *y;      /* or NULL (ops_rms_x16_many): the f16 alone, for a reader of x16 only */
   void *x16;
   uint32_t x_stride, y_stride, xts, c0;
 } OpsRmsPart;

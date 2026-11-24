@@ -61,7 +61,7 @@ static bool buffers(Ink2Forward *f)
                  taps = (uint64_t)g->conv, E = (uint64_t)g->n_experts, K = (uint64_t)g->n_used,
                  F = (uint64_t)g->ff_exp, VR = f->w->output->dims[1],
                  CH0 = H * D > C ? H * D : C, CH = g->loop.passes && 2 * C > CH0 ? 2 * C : CH0,
-                 X16 = ((T < MM_MAX_TOKENS ? T : MM_MAX_TOKENS) + MM_TILE - 1) / MM_TILE * MM_TILE;
+                 X16 = (T + MM_TILE - 1) / MM_TILE * MM_TILE; /* a step's rows: its producers' f16 whole (mm_tokens_x16) */
   const uint32_t head = ink2_type(f->w->output);
   f->head_rows = ink2_mm_takes(f, head, (uint32_t)VR, (uint32_t)C) ? MM_TILE * mm_col_tiles(head, MM_MAX_TOKENS) : MV_MAX_TOKENS;
   /* the experts' down rows and a decode's split attention share one buffer: the attention's partials are dead before
@@ -110,6 +110,7 @@ static bool buffers(Ink2Forward *f)
       if (!ink2_dalloc(f, (void **)lb[i].p, lb[i].bytes))
         return false;
   }
+  f->x16_rows = (uint32_t)((T + MM_TILE - 1) / MM_TILE * MM_TILE);
   f->fa_part = (float *)f->ed; /* (the down rows' buffer: ed_bytes) */
   f->ovf = (OverflowFlag){f->overflow, 4, false};
   if (!overflow_reset(&f->ovf, NULL))

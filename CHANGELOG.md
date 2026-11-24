@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.17.0]: every pack measured against its ceiling; inkling-2-mini's prompts 6.4% faster; the same answers
+
+Every pack's answers are unchanged, token for token (hashed against 0.16.0's, greedy and sampled). This release
+measures where each pack's time goes against what this box can do, and takes the first shared fixes from that map.
+
+- **inkling-2-mini reads prompts 6.4% faster** (a ~3K prompt 1,009-1,014 -> 1,076-1,077 tok/s at low-power, three rounds
+  against 0.16.0), and decodes slightly faster (drafted +0.3%):
+  - its prompt attention stages 64 keys per synchronization instead of 16 (a sliding-window layer -18%);
+  - each layer's MoE preparation at decode is one GPU launch instead of three;
+  - a prompt step's activations are converted to f16 once, by the kernel that produces them, instead of again for
+    every matrix that reads them;
+  - a looped layer's controls no longer write a copy nothing reads, and its attention preparation no longer
+    launches 190,000 one-row blocks.
+  - at the performance profile its ~3K prompt reads at 1,252 tok/s (0.16.0: 1,153), and in the agents bench (4
+    agents x 8 turns, cached prompts) its first token comes 14% sooner (mean 5.70 -> 4.90 s) and its turns finish 7%
+    sooner (20.39 -> 18.99 s).
+- **osmos1.7b's prompts convert each activation to f16 once** for all the matrices that read it (q, k, v and the
+  gate; the FFN's gate and up): 306 fewer passes a ~3K step. End to end it is within noise (3,770-3,796 ->
+  3,772-3,813 tok/s at low-power, three rounds against 0.16.0).
+- **Measured and written down** (DESIGN.md, docs/attention-core.md):
+  - every pack's decode and prefill ceilings against what it measures; prefill is every pack's gap (32-53% of
+    practical);
+  - a prefill census of all six packs (where a ~3K prompt's time goes);
+  - why the prompt attention can't get much faster under its prompt == decode contract (LDS traffic, not
+    registers);
+  - the design of a shared attention core;
+  - what was tried and not kept: HIP graphs, an opt-in int4 prompt path (`--fast`: the top token changed on 18-25%
+    of rows - not built), several fusions and attention restructures (the same bits, no faster).
+- **For contributors:** `mm_tokens_x16` / `mm_x16_whole` (a matrix over a step's whole f16 activations), the router
+  and the experts' tables as shared device code (`kernels/router.h`, `kernels/moe_tiles.h`).
+
 ## [0.16.0]: the engine consolidated - one contract a concept, every byte owned, a hardened server; the same answers
 
 The same tokens as 0.15.2 on all six packs (every pack's answers hashed against 0.15.2's, greedy and sampled), and no

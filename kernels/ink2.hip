@@ -5,6 +5,8 @@
 #include "block.h"
 #include "launch.h"
 #include "mm.h"
+#include "moe_tiles.h"
+#include "router.h"
 
 extern "C" {
 #include "osmos/gpu/ink2_ops.h"
@@ -19,13 +21,39 @@ using launches::ok;
 
 // the experts' tables' scales on the GPU (a whole membrane's MoE): pick m of expert e at place q = where[m] - the place's
 // gate and up scales, the pick's weight times the down's scale (moe's host products: the same bits), its picks counted
-__global__ void moe_scales_kernel(const int32_t* ids, const float* w, const int32_t* where, const float* scale,
-                                  uint32_t n_exp, uint32_t n, float* sg, float* su, float* a, uint32_t* picks) {
-  const uint32_t m = blockIdx.x * kThreads + threadIdx.x;
-  if (m >= n) return;
+// pick m's scales: its expert's gate and up scales at its place, its weight times the down's, the layer's count
+__device__ inline void moe_scale_pick(uint32_t m, const int32_t* ids, const float* w, const int32_t* where,
+                                      const float* scale, uint32_t n_exp, float* sg, float* su, float* a,
+                                      uint32_t* picks) {
   const int32_t e = ids[m], q = where[m];
   sg[q] = scale[e], su[q] = scale[n_exp + e], a[m] = w[m] * scale[2 * n_exp + e];
   atomicAdd(picks + e, 1u);
+}
+
+__global__ void moe_scales_kernel(const int32_t* ids, const float* w, const int32_t* where, const float* scale,
+                                  uint32_t n_exp, uint32_t n, float* sg, float* su, float* a, uint32_t* picks) {
+  const uint32_t m = blockIdx.x * kThreads + threadIdx.x;
+  if (m < n) moe_scale_pick(m, ids, w, where, scale, n_exp, sg, su, a, picks);
+}
+
+constexpr int kPrepLane = 8;  // the prep's router: a lane's experts at most (256: Mini's 128, the test's 256)
+// a decode's or a verify's MoE preparation in one block, not three launches: each token's picks (router.h's), the
+// picks as mm_group's tables (moe_tiles.h's), their scales (moe_scale_pick) - the same functions the three kernels
+// run, so the same bits. its picks the block's LDS between them (at most kPlaceInline: the tiles' inline placing)
+__global__ __launch_bounds__(moe_tiles::kGroupThreads) void moe_prep_kernel(
+    const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float route_scale, uint32_t n_tok,
+    int32_t* idx, float* w, uint32_t dim, uint32_t ff, Q4xExpertTiles t, Q4xExpertBounds bd, const float* scale,
+    float* sg, float* su, float* a, uint32_t* picks) {
+  __shared__ int32_t ids[moe_tiles::kPlaceInline];
+  constexpr uint32_t kWaves = moe_tiles::kGroupThreads / 32;
+  for (uint32_t tok = threadIdx.x / 32; tok < n_tok; tok += kWaves)  // a wave a token, the block's waves at once
+    router::token_wave<OPS_SCORE_SIGMOID, kPrepLane>(logits, bias, n_exp, k, route_scale, tok, idx, w, ids);
+  __syncthreads();  // every token's picks (ids) and weights before the tiles
+  const uint32_t P = n_tok * k;
+  moe_tiles::tiles_block(ids, P, k, n_exp, dim, ff, t, bd);
+  __syncthreads();  // its places (t.where) and the router's weights, the block's writes
+  for (uint32_t m = threadIdx.x; m < P; m += moe_tiles::kGroupThreads)
+    moe_scale_pick(m, ids, w, t.where, scale, n_exp, sg, su, a, picks);
 }
 
 // a loop's control: x - tanh(forget) x + tanh(gain) m, upstream's order (inkling2.cpp's control: sub, then add)
@@ -470,11 +498,14 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   // W waves: the prompt's G RT (a row tile's heads); a split decode's as many as its (token, head) rows fill - a wave
   // without rows still holds its registers, so a decode's token runs one wave, not G (more blocks resident)
   static_assert(SPLIT || W == G * RT, "the prompt's waves its row tiles' heads");
-  constexpr int kNth = W * 32, kItems = (kFaTile * kFaHead + kNth - 1) / kNth;
+  // ST 16-key tiles a stage (a prompt's 4: one pair of barriers and one prefetch for 64 keys; a split decode's 1) - each
+  // tile's scores, softmax, P V and fold as before, in the same order: the stage changes no bit
+  constexpr int ST = SPLIT ? 1 : 4, kStage = kFaTile * ST, kVKey = kStage + 8;
+  constexpr int kNth = W * 32, kItems = (kStage * kFaHead + kNth - 1) / kNth;
   // a one-wave decode over a full layer's Q8 records: its keys straight from each lane's own record into the scores'
   // B fragments (a lane its key's, as LDS would hand them) - no K tile in LDS, so more blocks resident
   constexpr bool kKD = sizeof(KV) == 1 && SPLIT && W == 1;
-  __shared__ __attribute__((aligned(32))) _Float16 ks[kKD ? 8 : kFaTile * kFaRow], vt[kFaHead * kFaKey];
+  __shared__ __attribute__((aligned(32))) _Float16 ks[kKD ? 8 : kStage * kFaRow], vt[kFaHead * kVKey];
   __shared__ __attribute__((aligned(32))) _Float16 ps[W][kFaTile * kFaKey];
   // a block RT row tiles of 16 tokens; a wave (row tile, query head) - every K / V tile shared by the block's waves
   const uint32_t wave = threadIdx.x / 32, lane = threadIdx.x % 32, half = lane >> 4, col = lane % kFaTile;
@@ -529,7 +560,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   constexpr bool kQ8 = sizeof(KV) == 1, kHalf = sizeof(KV) <= 2;  // (kHalf: 8 f16s a load - a Q8 record's too)
   constexpr bool kV5 = std::is_same<KV, Kv85>::value;             // (the values Q5 records: ink2_fa85)
   constexpr uint32_t kVRec = kV5 ? INK2_KV5_RECORD : INK2_KV8_RECORD;
-  constexpr int kVec = 8, kVecs = kFaTile * kFaHead / kVec, kVItems = (kVecs + kNth - 1) / kNth;
+  constexpr int kVec = 8, kVecs = kStage * kFaHead / kVec, kVItems = (kVecs + kNth - 1) / kNth;
   float kr[kHalf ? 1 : kItems], vr[kHalf ? 1 : kItems];
   fa_h8 kh[kHalf && !kQ8 ? kVItems : 1], vh[kHalf && !kQ8 ? kVItems : 1];
   Kv8Raw k8[kQ8 ? kVItems : 1], v8[kQ8 && !kV5 ? kVItems : 1];  // (a Q8 / Q5 tile as loaded: its values at the store)
@@ -547,7 +578,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   auto fetch = [&](uint32_t kb) {
     if constexpr (kQ8)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kStage, d = i / kStage * kVec;  // (a wave's threads its keys: V^T's stores apart)
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
         const uint64_t at = (uint64_t) (kb + r) * a.kv_heads + kvh;
         if constexpr (!kKD) k8[it] = in ? kv8_raw((const uint8_t*) k + at * INK2_KV8_RECORD, d) : Kv8Raw{};
@@ -558,7 +589,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       }
     else if constexpr (kHalf)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kStage, d = i / kStage * kVec;  // (a wave's threads its keys: V^T's stores apart)
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
         const uint64_t at = ((uint64_t) (kb + r) * a.kv_heads + kvh) * kFaHead + d;
         kh[it] = in ? *(const fa_h8*) (k + at) : fa_h8{}, vh[it] = in ? *(const fa_h8*) (v + at) : fa_h8{};
@@ -566,7 +597,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     else
       for (int it = 0; it < kItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead, key = kb + r;
-        const bool in = i < kFaTile * kFaHead && key < n_keys;
+        const bool in = i < kStage * kFaHead && key < n_keys;
         const uint64_t at = ((uint64_t) key * a.kv_heads + kvh) * kFaHead + d;
         kr[it] = in ? (float) k[at] : 0.0f, vr[it] = in ? (float) v[at] : 0.0f;
       }
@@ -575,11 +606,11 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     fetch(klo);
     if constexpr (kKD) fetch_k(klo);
   }
-  for (uint32_t kb = klo; kb <= khi; kb += kFaTile) {
-    __syncthreads();  // the last tile's K, V read by every wave
+  for (uint32_t kb0 = klo; kb0 <= khi; kb0 += kStage) {
+    __syncthreads();  // the last stage's K, V read by every wave
     if constexpr (kHalf)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kStage, d = i / kStage * kVec;  // (a wave's threads its keys: V^T's stores apart)
         if (i >= (uint32_t) kVecs) continue;
         fa_h8 kv, vv;  // a Q8 / Q5 tile's values now (a missing key's raw zeros: 0 x 0, f16's +0)
         if constexpr (kQ8) {
@@ -591,17 +622,20 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         } else
           kv = kh[it], vv = vh[it];
         if constexpr (!kKD) *(fa_h8*) (ks + r * kFaRow + d) = kv;
-        for (int e = 0; e < kVec; e++) vt[(d + e) * kFaKey + r] = vv[e];
+        for (int e = 0; e < kVec; e++) vt[(d + e) * kVKey + r] = vv[e];
       }
 
     else
       for (int it = 0; it < kItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead;
-        if (i < kFaTile * kFaHead) ks[r * kFaRow + d] = (_Float16) kr[it], vt[d * kFaKey + r] = (_Float16) vr[it];
+        if (i < kStage * kFaHead) ks[r * kFaRow + d] = (_Float16) kr[it], vt[d * kVKey + r] = (_Float16) vr[it];
       }
     __syncthreads();
-    if (kb + kFaTile <= khi) fetch(kb + kFaTile);  // the next tile's, in flight under this one's WMMAs
+    if (kb0 + kStage <= khi) fetch(kb0 + kStage);  // the next stage's, in flight under this one's WMMAs
     if (!active) continue;                         // (its loads done: no row of its own)
+    for (int sub = 0; sub < ST; sub++) {
+    const uint32_t kb = kb0 + (uint32_t) sub * kFaTile;  // this tile's first key
+    if (kb > khi) break;
     fa_f8 sacc = {};
     for (int g = 0; g < kFaHead / kFaTile; g++) {
       fa_h16 kb16;
@@ -610,7 +644,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         const fa_h8 lo = kv8_vals({kq[2 * g], ksc[2 * g / kPer]}), hi = kv8_vals({kq[2 * g + 1], ksc[(2 * g + 1) / kPer]});
         for (int e = 0; e < kVec; e++) kb16[e] = lo[e], kb16[kVec + e] = hi[e];
       } else
-        kb16 = *(const fa_h16*) (ks + col * kFaRow + g * kFaTile);
+        kb16 = *(const fa_h16*) (ks + (sub * kFaTile + col) * kFaRow + g * kFaTile);
       sacc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(qa[g], kb16, sacc);
     }
     if constexpr (kKD)
@@ -650,7 +684,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
 #pragma unroll
     for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
       for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
-      const fa_h16 bv = *(const fa_h16*) (vt + (nt * kFaTile + col) * kFaKey);
+      const fa_h16 bv = *(const fa_h16*) (vt + (nt * kFaTile + col) * kVKey + sub * kFaTile);
       const fa_f8 prev = o[nt];
       o[nt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bv, prev);
       for (int c = cmin; c <= cmax; c++) {
@@ -677,6 +711,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
           m[j] = -INFINITY, l[j] = 0.0f;
         }
       }
+    }  // (the stage's tiles)
   }
   for (int j = 0; j < 8 && active; j++) {
     const uint32_t t = rtok(2 * j + half);
@@ -867,10 +902,11 @@ extern "C" bool ink2_to_f16(const float* x, uint64_t n, uint16_t* y, void* strea
 // a block a row of a token's (q's heads, rel's, then k's and v's KV heads): q and rel clipped; a key row its conv,
 // clip and store, a value row its conv, norm (rms_kernel's: its threads, its block_sum) and store - in LDS between
 constexpr uint32_t kPrepBlocks = INK2_MAX_HEAD / INK2_KV8_BLOCK;  // a record's scale blocks: a thread each
-__global__ void attn_prep_kernel(Ink2Prep p) {
-  __shared__ float lds[kThreads], row[INK2_MAX_HEAD];
+// one row of the prep (a token's q or rel head, its k or v head's conv): row b of the step's n_tok x per; every thread
+// of the block calls it, the row's path the same for all (its barriers)
+__device__ inline void prep_row(const Ink2Prep& p, uint32_t b, float* lds, float* row) {
   const uint32_t H = p.heads, KV = p.kv_heads, D = INK2_MAX_HEAD, per = 2 * H + 2 * KV;
-  const uint32_t t = blockIdx.x / per, r = blockIdx.x % per;
+  const uint32_t t = b / per, r = b % per;
   if (r < H) return clip_row(p.q + ((uint64_t) t * H + r) * D, t, r, D, p.q_w, p.q_clip, p.tau, lds);
   if (r < 2 * H) {
     const uint32_t j = r - H;
@@ -904,13 +940,29 @@ __global__ void attn_prep_kernel(Ink2Prep p) {
     kv5_block(row, threadIdx.x, (uint8_t*) s.store + at * INK2_KV5_RECORD);
 }
 
+// a block `each` rows in turn, each prep_row's - the same work and order a row, so the same bits. a prompt's rows
+// kPrepRows a block (190K blocks of one row at ~3K tokens were the dispatcher's, not the memory's); a decode's or a
+// verify's one a block, as before (its few rows in parallel: kPrepRows a block there made a decode step slower)
+constexpr uint32_t kPrepRows = 8, kPrepRowsFrom = 16384;
+__global__ void attn_prep_kernel(Ink2Prep p, uint32_t each) {
+  __shared__ float lds[kThreads], row[INK2_MAX_HEAD];
+  const uint32_t rows = p.n_tok * (2 * p.heads + 2 * p.kv_heads);
+  for (uint32_t i = 0; i < each; i++) {
+    const uint32_t b = blockIdx.x * each + i;
+    if (b >= rows) break;
+    prep_row(p, b, lds, row);
+    __syncthreads();  // (the next row's lds and row)
+  }
+}
+
 extern "C" bool ink2_attn_prep(const Ink2Prep* p, void* stream) {
   if (!p || !p->n_tok || !p->q || !p->rel || !p->heads || !p->kv_heads || p->head_dim != INK2_MAX_HEAD ||
       !p->d_rel || p->taps < 2 || p->taps > INK2_MAX_TAPS || (p->tau.alpha > 0 && !(p->tau.floor > 0)))
     return false;
   for (const Ink2PrepKv* s : {&p->k, &p->v})
     if (!s->x || !s->w || !s->y || !s->store) return false;
-  attn_prep_kernel<<<p->n_tok * (2 * p->heads + 2 * p->kv_heads), kThreads, 0, st(stream)>>>(*p);
+  const uint32_t rows = p->n_tok * (2 * p->heads + 2 * p->kv_heads), each = rows >= kPrepRowsFrom ? kPrepRows : 1;
+  attn_prep_kernel<<<(rows + each - 1) / each, kThreads, 0, st(stream)>>>(*p, each);
   return ok();
 }
 
@@ -930,6 +982,24 @@ extern "C" bool ink2_attn(const Ink2Attn* a, const float* q, const float* rel, c
     return false;
   attn_kernel<<<n_tok * a->heads, a->head_dim, 0, st(stream)>>>(*a, q, rel, sink, gate, n_tok, k, v, n_keys, rel_proj,
                                                                 out);
+  return ok();
+}
+
+extern "C" bool ink2_moe_prep(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float route_scale,
+                              uint32_t n_tok, int32_t* idx, float* w, uint32_t dim, uint32_t ff,
+                              const Q4xExpertTiles* t, const float* scale, float* sg, float* su, float* a,
+                              uint32_t* picks, void* stream) {
+  const uint32_t P = n_tok * k;
+  if (!logits || !bias || !n_exp || n_exp > 32u * kPrepLane || !k || k > OPS_MAX_TOPK || k > n_exp || !n_tok ||
+      P > moe_tiles::kPlaceInline || !idx || !w || !dim || !ff || !t || !t->cnt || !t->gidx || !t->hidx || !t->xg ||
+      !t->yg || !t->xd || !t->yd || !t->where || !t->off || !scale || !sg || !su || !a || !picks)
+    return false;
+  for (int j = 0; j < Q4X_GROUP_TENSORS; j++)
+    if ((!t->tab[j] && (!t->base[j] || !t->bytes[j])) || !t->ptr[j]) return false;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds(P, n_exp, &bd);
+  moe_prep_kernel<<<1, moe_tiles::kGroupThreads, 0, st(stream)>>>(logits, bias, n_exp, k, route_scale, n_tok, idx, w,
+                                                                  dim, ff, *t, bd, scale, sg, su, a, picks);
   return ok();
 }
 

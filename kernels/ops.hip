@@ -8,6 +8,7 @@
 #include "round.h"
 #include "lane.h"
 #include "mm.h"
+#include "router.h"
 
 extern "C" {
 #include "osmos/gpu/kvfmt.h"
@@ -23,7 +24,6 @@ using launches::st;
 using launches::ok;
 
 constexpr int kWave = 32;
-constexpr float kRouteEps = 1e-20f;
 constexpr float kEngramDotFloor = 1e-6f; // the gate's |dot| floor before the square root
 
 constexpr int kWide = 1024;  // the hc pre-norm's block: a token's whole stream (4 x 5,120) in one block's reach
@@ -60,7 +60,7 @@ __device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const fl
     return;
   }
   const float* xr = x + (uint64_t) row * xs;
-  float* yr = y + (uint64_t) row * ys;
+  float* yr = y ? y + (uint64_t) row * ys : nullptr;  // (NULL: the f16 alone - a reader of x16 only)
   // a thread's values kRmsRun at a time, their loads in flight together (a block a row: its latency), each sum's
   // adds and each value's ops in rms_kernel's order - y may be x, so a run's loads before its stores
   float ss = 0;
@@ -87,7 +87,7 @@ __device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const fl
       const uint32_t i = i0 + u * kThreads;
       if (i >= n) break;
       const float o = w ? (v[u] * r) * g[u] : v[u] * r;
-      yr[i] = o;
+      if (yr) yr[i] = o;
       if (x16) mm::x16_put(x16, row, c0 + i, xts, o, overflow);
     }
   }
@@ -483,37 +483,12 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, u
   for (uint32_t d = threadIdx.x; d < dim; d += kThreads) hk[d] = hk[d] + gate * value[d];
 }
 
-// a block a token: its scores (sqrt(softplus)), the block's threads; then the k greatest of score + bias by its first
-// wave alone (block.h's wave_pick: the larger, ties to the lower expert - the serial scan's picks), their weights
-constexpr uint32_t kRouterLane = OPS_MAX_EXPERTS / 32;  // a lane's experts at most
+// a block a token: router.h's (its scores, the k greatest by its first wave, their weights)
 template <int Score>
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
                               int32_t* idx, float* w) {
   __shared__ float sc[OPS_MAX_EXPERTS], keys[OPS_MAX_EXPERTS];
-  const uint32_t t = blockIdx.x;
-  for (uint32_t e = threadIdx.x; e < n_exp; e += kThreads) {
-    const float l = logits[(uint64_t) t * n_exp + e];
-    sc[e] = Score == OPS_SCORE_SIGMOID ? sigmoid(l) : sqrtf(softplus(l));
-    keys[e] = pick_key(sc[e] + bias[e]);
-  }
-  __syncthreads();
-  if (threadIdx.x >= (uint32_t) kWave) return;
-  const uint32_t lane = threadIdx.x;
-  float key[kRouterLane];
-  for (uint32_t r = 0; r < kRouterLane; r++) key[r] = lane + 32 * r < n_exp ? keys[lane + 32 * r] : 0.0f;
-  uint32_t taken = 0;
-  int32_t pick[OPS_MAX_TOPK];
-  for (uint32_t s = 0; s < k; s++) {
-    float best;
-    pick[s] = wave_pick<kRouterLane>(key, n_exp, &taken, &best);
-  }
-  if (lane) return;
-  float wt[OPS_MAX_TOPK], sum = 0;
-  for (uint32_t s = 0; s < k; s++) sum += (wt[s] = (uint32_t) pick[s] < n_exp ? sc[pick[s]] : 0.0f);
-  for (uint32_t s = 0; s < k; s++) {
-    idx[t * k + s] = pick[s];
-    w[t * k + s] = wt[s] / (sum + kRouteEps) * scale;
-  }
+  router::token<Score>(logits, bias, n_exp, k, scale, blockIdx.x, kThreads, sc, keys, idx, w, nullptr);
 }
 
 // x16 (when not NULL): h as mm_x16 would put it, the rows past n_tok zero to a whole tile (threads past h's)
@@ -822,7 +797,7 @@ static uint32_t tiles(uint32_t n) { return (n + mm::kTile - 1) / mm::kTile * mm:
 
 extern "C" bool ops_rms_x16(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, uint32_t rows,
                             float* y, uint32_t ys, void* x16, int32_t* overflow, void* stream) {
-  if (!n || n % mm::kTile || !rows || rows > MM_MAX_TOKENS || !x16 || !overflow) return false;
+  if (!n || n % mm::kTile || !rows || rows > MM_X16_ROWS_MAX || !x16 || !overflow) return false;  // (x16: rows' room the caller's)
   rms_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, (_Float16*) x16, overflow, n, 0);
   return ok();
 }
@@ -859,7 +834,7 @@ extern "C" bool ops_rms_x16_many(const OpsRmsPart* parts, uint32_t count, uint32
   RmsParts p = {};
   for (uint32_t i = 0; i < count; i++) {  // (ops_rms_x16_at's refusals, each part)
     const OpsRmsPart& q = parts[i];
-    if (!q.x || !q.y || !q.x16 || q.c0 % mm::kTile || q.c0 + n > q.xts) return false;
+    if (!q.x || !q.x16 || q.c0 % mm::kTile || q.c0 + n > q.xts) return false;  // (y NULL: the f16 alone)
     p.x[i] = q.x, p.w[i] = q.w, p.y[i] = q.y, p.x16[i] = (_Float16*) q.x16;
     p.xs[i] = q.x_stride, p.ys[i] = q.y_stride, p.xts[i] = q.xts, p.c0[i] = q.c0;
   }

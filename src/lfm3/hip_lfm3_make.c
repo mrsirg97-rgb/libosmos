@@ -303,7 +303,7 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
       {&f->xf, lr * D * F},      {&f->logits, lr * g->n_vocab * F}, {&f->hk, lr * D * F},
       {&f->ids, lr * 4},         {&f->argmax, ops_argmax_scratch((uint32_t)lr)},
       {&f->fa_scratch, q4x_attn_scratch_dim((uint32_t)g->n_heads, (uint32_t)g->n_kv_heads, (uint32_t)g->head_dim, f->max_ctx) * F},
-      {&f->x16, (uint64_t)MM_MAX_TOKENS * (ff > 3 * D ? ff : 3 * D) * 2}, {&f->overflow, 4},
+      {&f->x16, (uint64_t)(n + MM_TILE - 1) / MM_TILE * MM_TILE * (ff > 3 * D ? ff : 3 * D) * 2}, {&f->overflow, 4},
       {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
   ok = ok && (gpu_bufs_alloc(&f->bufs, f->ledger, want, sizeof want / sizeof *want) ||

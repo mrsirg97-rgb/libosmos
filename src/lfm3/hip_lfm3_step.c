@@ -31,6 +31,32 @@ static bool mat(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t col
   return mv_strided(t->type, lfm3_dev(f, t), rows, cols, x, cols, n, y, rows, f->st);
 }
 
+/* x's f16 once for the matrices on it (mm_x16_whole): true when x16 holds all n rows (a read on the matrix cores) -
+   then mat16's matrices read it, not each converting x again; false (not a read, or refused): each converts its own */
+static bool x16_once(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
+                     bool read)
+{
+  return read && mm_known(t->type) && mm_fits(t->type, rows, cols) && n <= f->max_tokens &&
+         mm_x16_whole(x, cols, n, cols, f->x16, f->overflow, f->st);
+}
+
+/* mat on x, its f16 already whole in x16 (have16: x16_once's) where the matrix is mm's - the same bits */
+static bool mat16(Lfm3Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
+                  float *y, bool read, bool have16)
+{
+  if (have16 && read && mm_known(t->type) && mm_fits(t->type, rows, cols))
+    return mm_tokens_x16(t->type, lfm3_dev(f, t), rows, y, rows, NULL, 0, NULL, 0, cols, f->x16, n, f->st);
+  return mat(f, t, rows, cols, x, n, y, read);
+}
+
+/* the FFN's gate and up on xn, its f16 once */
+static bool ffn_in(Lfm3Forward *f, const Lfm3Layer *L, uint32_t ff, uint32_t D, uint32_t n, float *ga, float *up,
+                   bool read)
+{
+  const bool xn16 = x16_once(f, L->ffn_gate, ff, D, f->xn, n, read);
+  return mat16(f, L->ffn_gate, ff, D, f->xn, n, ga, read, xn16) && mat16(f, L->ffn_up, ff, D, f->xn, n, up, read, xn16);
+}
+
 static bool conv(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n, bool read)
 {
   const Lfm3Geometry *g = &f->w->geo;
@@ -135,9 +161,10 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
   const bool joint = n == 1 && !read && f->j_attn[l];
   float *qf = joint ? f->jo : f->qf, *kf = joint ? f->jo + q : f->kf, *vf = joint ? f->jo + q + kv : f->vf;
   float *gt = joint ? f->jo + q + 2 * kv : f->g;
+  const bool xn16 = !joint && x16_once(f, L->q, q, D, f->xn, n, read); /* (q, k, v and the gate on one f16) */
   bool ok = joint ? mv_strided(L->q->type, f->j_attn[l], q + 2 * kv + H, D, f->xn, D, 1, f->jo, q + 2 * kv + H, f->st)
-                  : mat(f, L->q, q, D, f->xn, n, qf, read) && mat(f, L->k, kv, D, f->xn, n, kf, read) &&
-                        mat(f, L->v, kv, D, f->xn, n, vf, read) && mat(f, L->gate, H, D, f->xn, n, gt, read);
+                  : mat16(f, L->q, q, D, f->xn, n, qf, read, xn16) && mat16(f, L->k, kv, D, f->xn, n, kf, read, xn16) &&
+                        mat16(f, L->v, kv, D, f->xn, n, vf, read, xn16) && mat16(f, L->gate, H, D, f->xn, n, gt, read, xn16);
   for (uint32_t r = 0; ok && r < runs; r++)
   {
     const Lfm3Run *R = &run[r];
@@ -183,7 +210,7 @@ static bool layer(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint
          ops_rms_add_rms(f->h, f->y, lfm3_fv(f, L->post_attn_norm), lfm3_fv(f, L->ffn_norm), g->rms_eps, D, n, f->xn,
                          f->st) &&
          (joint ? mv_strided(L->ffn_gate->type, f->j_ffn[l], 2 * ff, D, f->xn, D, 1, f->jo, 2 * ff, f->st)
-                : mat(f, L->ffn_gate, ff, D, f->xn, n, ga, read) && mat(f, L->ffn_up, ff, D, f->xn, n, up, read)) &&
+                : ffn_in(f, L, ff, D, n, ga, up, read)) &&
          ops_swiglu(ga, up, ff, INFINITY, NULL, n, f->act, f->st) && mat(f, L->ffn_down, D, ff, f->act, n, f->y, read) &&
          ops_rms_add_rms(f->h, f->y, lfm3_fv(f, L->post_ffn_norm), next, g->rms_eps, D, n, f->xn, f->st);
 }

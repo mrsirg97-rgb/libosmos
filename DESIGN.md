@@ -7146,3 +7146,145 @@ The comment pass (phase 6, AGENTS.md's sparse comments): the history and measure
 - tools/bench/mmsweep.hip (g_passes): ink2 takes 20 passes - a low-power clock swings ±15% a pass.
 - tools/bench/q4x_ppl.hip (Q4X_PPL_STREAM): the streamed n-gram table leaves UD-Q4_K_XL's 28.8 GB out of GPU memory. qxbench came in 0.7.3 (its picks' hash 0.7.4); selprobe was made for issue #47's trace.
 - tools/requant/requant_ink2_mtp.c: osmos-evo-inkling's drafter at q5_K q5_K is 1.18 GiB against q8_0 q8_0's 1.76, its drafts the same.
+
+### 0.16.1: --fast (iu4, W4A4) simulated on osmos1.7b - not viable (2026-11-24, branch fastsim-spike, local)
+
+**The question.** An opt-in `--fast` prompt path: the prompt matmuls on gfx1151's iu4 matrix cores (100.9-101.2 TOPS
+against f16's 48.6-50.1, 0.6.0's microbenchmark), the weights' 4-bit codes as stored, the activations rounded to int4.
+Only the linear k-quants hold 4-bit integer codes (Q4_0, Q4_K, Q3_K, Q2_K): osmos1.7b (Q4_0) whole, Hy4's experts
+(Q4_K / Q3_K), part of DeepSeek's (Q2_K); Mini (NVFP4 / FP8 / BF16), Qwen and Small (IQ grids and tables) would need
+their weights re-quantized. So osmos1.7b first: its weights exactly iu4's.
+
+**The simulation** (kernels/sim_a4.hip, lfm3's mat(); tools/bench/lfm3_a4): each Q4_0 matmul's F32 input rounded as an
+iu4 kernel would, then the exact matmul; 8,192 tokens of calib16k in 2,048-token prompt steps, every row against the
+exact path in double. The exact path's own noise (every matmul through the matvec's sums instead): KL 0.0001, top-1
+another 0.46%.
+
+| rounded | KL mean | KL p99 | top-1 another | dNLL |
+| --- | ---: | ---: | ---: | ---: |
+| all Q4_0, int4 a 32 | 0.367 | 3.77 | 24.5% | +0.262 |
+| all, int4 a 16 | 0.276 | 2.79 | 22.0% | +0.251 |
+| all, a 16, the clip of least squared error | 0.328 | 2.79 | 24.4% | +0.322 |
+| all, Hadamard (32) then int4 a 32 - exact rotated weights' bound | 0.196 | 2.22 | 17.7% | +0.141 |
+| one kind alone (int4 a 16): shortconv out / in, ffn_gate, ffn_up, attention, ffn_down | 0.023-0.077 | 0.30-1.08 | 6.2-11.1% | |
+
+**Not viable.** int4 activations move the top token on ~a quarter of rows; any one kind of matmul alone 6-11% (13-24x
+the noise); the rotation (which would itself need re-quantized weights) still 18%. A large MoE tolerates more (0.6.0:
+DeepSeek's experts' gate / up at int4, top-1 5.4% against its noise's 2.8%) - still twice the noise, on one tensor kind.
+`--fast` on iu4 is not built. iu8 (W4A8) runs at f16's rate here (0.6.0: mmq 0.87x / 0.68x at 64 / 128 tokens).
+
+### 0.16.1: Mini's decode step, counted (2026-11-24, low-power; branch stamps-spike, local)
+
+**How.** rocprofv3's timestamps (and HIP events) read 0 on this box since 2026-11-23's boot - the command processor's
+stamps, not the shader's clock, which ticks. So a spike stamped the stream itself: a one-thread kernel writing
+wall_clock64 (100 MHz) and a tag after each statement of Mini's step and each part of its MoE (kernels/stamp.hip),
+a stamp's own cost (2.6 us, a back-to-back pair) subtracted. A plain decode, 160 steps after a 400-token prompt.
+
+**The step: 41.8 ms; 1,374 launches** (a verify step the same launches; rocprofv3's kernel names, counts intact):
+
+| | ms a step | share | |
+| --- | ---: | ---: | --- |
+| the dense projections: q, gate, k, v, rel (37.7 MiB a layer, 195 us: 203 GB/s); the output (13.5 MiB, 72 us: 196 GB/s) | 12.9 | 31% | the roofline |
+| the experts (mm_group, gate / up / down, 8 of 128: 81 us a launch) | 11.7 | 28% | mmsweep mini's 151-177 GB/s |
+| the head | 3.8 | 9% | |
+| the attention, the controls | 4.5 | 11% | |
+| ~600 small kernels at 10-16 us each (a bare launch 2.6) | 8.8 | 21% | their own latency |
+
+The small ones: the MoE's preparation (the router's scores, the experts' tiles, their scales, the rows to f16: 4
+launches a layer, ~2.3 ms; the router's matvec ~0.6 more), the attention residuals (~1.9; one launch tried slower, in
+DESIGN "the attention residual's dots and mix in one launch"), the convs (~1.0), the norms (~0.7), attn_prep and the
+swiglu (~1.1). The weights' reads (68%) are at the roofline: on the release weights, decode's reducible work is the
+small kernels' latency - at most ~15-20% if every one were a bare launch.
+
+### 0.16.1: Mini's small kernels fused - what pays (2026-11-24, low-power, stamps)
+
+- **kept: the MoE's preparation in one launch** (ink2_moe_prep: the router's picks, the experts' tiles, their scales;
+  router.h's token_wave a wave a token, moe_tiles.h's tiles_block). Per layer 12.2 + 13.3 + 11.6 = 37.1 us -> 23.5;
+  a decode step 41.75 -> 40.89 ms (-2%); end to end Mini drafted +0.3-0.5% (within speed.sh's spread). The first
+  version looped the step's tokens through one block (the three ran a block a token side by side): a verify's ~4
+  tokens serial, -0.5% end to end - the wave a token fixed it. Every output the three launches' bits
+  (test_ink2_moe_prep_gpu, 90 cases); the full suite and every pack's hashes the same.
+- **tried, not kept: the output's conv in the FFN residual's dots** (attn_res_dots_kernel<true>: the partial state's
+  blocks each made their token's r). conv_put 10.0 + attn_res 16.7 = 26.7 us a layer -> 32.2: the conv's 2,304
+  channels a token spread over nine blocks before, one or two after - those the step's critical path. The same bits
+  (test_ink2_res_conv_gpu, 224 cases), reverted (fuse-conv's 6f2ed07, then its revert).
+- **the rule**: a fusion pays where its kernels were each a block or a few already (the MoE's preparation: single
+  blocks a step); fusing kernels spread over many blocks puts their work in fewer and lengthens the chain (the conv
+  here, the attention residual's dots and mix before). The ~10 us small kernels that are many-block (the convs, the
+  norms, the swiglu, attn_prep) are not fusion's; their latency is their own.
+
+### 0.16.1: a stream of Mini's own - measured slower, undone (2026-11-24, low-power)
+
+Mini's step moved to a blocking stream of its own (f010b0c: graphs' groundwork, a captured stream), its drafter's,
+its tails' and its uploads' launches left on the default stream - ordered, so the same bits. Against v0.16.0 (Mini
+drafted, alternated, three rounds): code 45.1-45.2 -> 42.2-42.7 tok/s, prose 41.3-41.5 -> 38.7-39.0 (-6.5%); every
+A/B after it measured against a base that already held it (01b1dc0's 42.0-42.3), and the stamps' census above on it
+too (its step 41.8 ms the stream's). A blocking stream beside the legacy default one: each switch between them an
+implicit wait, a drafted round several. With graphs dropped it had no use: undone (Ink2Forward's st left NULL, the
+default stream; the launches' stream argument kept). Lesson: an A/B's base is the last release, not the last commit.
+
+### 0.17.0: every pack's ceilings, measured against (2026-11-24, performance)
+
+**The goal** (the operator's): 90% of each pack's practical ceiling, decode and prefill. Practical: each piece at its
+kernel's best measured standalone rate - dense reads ~200 GB/s, routed experts ~170, the head ~190 (mmsweep), prompt
+matmuls ~29 TFLOP/s (the dense mm, 0.5.4); hardware: a token's bytes at the ~240 GB/s streaming read. A token's
+bytes and FLOPs from the GGUFs (~/bench/roof170/roofline.py): dense whole, a routed expert tensor its used / count
+share, the embedding and per-layer tables (per_layer_token_embd, Engram) a row, the head whole, the drafter apart; a
+looped model's layers their passes (Mini: 48 blocks of 24 layers, each twice).
+
+| pack | decode B / token | hw | practical | 90% | plain now | of practical | prefill FLOP / token | practical | 90% | now | of practical |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| inkling-2-mini | 5.60 GB | 42.8 | 33.4 | 30.0 | 28.8 | 86% | 9.8 G | 2,970 | 2,670 | 1,153 | 39% |
+| osmos1.7b | 0.83 GB | 290 | 242 | 218 | 126.3 | 52% | 2.9 G | 9,890 | 8,900 | 5,199 | 53% |
+| qwen38-ud-iq3_xxs | 4.98 GB | 48.2 | 38.6 | 34.7 | 28.9 | 75% | 13.3 G | 2,170 | 1,960 | 955 | 44% |
+| hy4-flash | 10.3 GB | 23.2 | 18.5 | 16.6 | 17.4 | 94% | 22.8 G | 1,270 | 1,150 | 409 | 32% |
+| osmos-evo-inkling (streams) | 7.45 GB | 32.2 | 24.8 | 22.4 | 12.9 | 52% | 35.9 G | 810 | 730 | 359 | 44% |
+| osmos-evo (streams) | 8.05 GB | 29.8 | 23.6 | 21.3 | 19.1 | 81% | 31.6 G | 920 | 830 | 391 | 43% |
+
+(plain decode the README's 0.15.0; prefill a ~3K prompt, 0.16.0's pass; a streaming pack's decode ceiling as if every
+expert resident.) **Prefill is every pack's gap** - 32-53% of practical, alike: shared causes, the shared core's.
+Decode: Hy4 past the goal, Mini and DeepSeek near it, Qwen's 75% a gap; Small's mostly its SSD; osmos1.7b's bytes
+(~4 ms a token) under its fixed per-step costs - its target the launches' floor, to be measured.
+
+### 0.17.0: Mini's prompt attention - what limits it (2026-11-24, low-power)
+
+ink2_fa at 2,968 tokens, 24 heads (a wall-clock ink2_fabench: the GPU's timestamps read 0 on this box): a full layer
+25-35 ms (54 GFLOP: ~1.8 TFLOP/s), a sliding one 11.1-11.5 (31 GFLOP: ~2.8) - ~6-10% of the matrix cores' ~29.
+- **the counters**: 91% of its wave cycles waiting (SQ_WAIT_ANY / SQ_WAVE_CYCLES); ~1,160 VALU instructions a
+  16-key tile a wave against its 16 WMMAs; the prompt kernel (fa_kernel<3, 8, ...>) 240 VGPRs, 196 bytes a lane
+  spilled to scratch, 768 threads - one block a WGP, latency-bound.
+- **the relative bias** (16 gathered rel_proj loads and FMAs a score, extent 1,024: nearly every score): off
+  (extent 1) a full layer -20%, a sliding one -25%.
+- **tried, not kept: the bias's table slice in LDS** (staged with K / V, the same values and FMA order - every output
+  byte the same, 40 cases): slower, sliding 11.1-11.5 -> 12.4-12.6 ms - its registers spilled 196 -> 284 bytes a lane
+  (rel_proj's 64 KB is in cache: the gathers were not the cost, their VALU and registers are).
+- so the limit is registers: any state added spills. Next: the kernel's register pressure (the bias loop's unroll,
+  the causal cut's copies, Q / O's 128 VGPRs), measured by spills and occupancy before speed.
+- **kept: 64 keys a stage** (a9234b8; the prompt kernel's K / V^T for four 16-key tiles behind one pair of barriers,
+  each tile's work as before and in the same order): a sliding layer 11.1-11.8 -> 8.5-9.4 ms, Mini's ~3K prompt
+  1,010 -> 1,060-1,065 tok/s end to end against v0.16.0 (low-power, three rounds, the same hashes). Spill up 196 ->
+  ~240 bytes a lane (the prefetch four times as deep); moving the prefetch's issue later changed nothing (the stage's
+  tile loop not unrolled: the registers held throughout).
+- **measured, not built: half of Q in registers** (a resource experiment, its arithmetic wrong on purpose): spill
+  ~240 -> 100-112 bytes, a sliding layer 9.0 -> 7.0-7.5 ms - an upper bound: the real one reloads Q's other half each
+  tile from L2 (~49 KB a block's Q), with no registers to prefetch it into. Estimated ~-10% of attention.
+- **the performance census** (2,968 tokens, 2.16 s a step): attention 346 ms at ~17% of the matrix cores' rate, the
+  rest of the step's matmuls 70-86% of theirs. The kernel's shape (16 queries and a head a wave, K / V decoded a block,
+  the softmax and bias a 16-key tile) is the cap: the shared attention core (0.17.0's) is a design for this GPU from
+  the start, to the unit contract (256-key units, the decode's order: prompt == decode, deterministic).
+- **the register audit by ablation** (throwaway compiles, the compiler's spill report): without the causal cut (a
+  diagonal tile's per-row masked P V WMMAs) 248 -> 120 bytes a lane; without the bias 248 -> 168; without the unit
+  fold 0 - but that removal left O never read in the prompt's kernel (its only reader the fold), so the P V itself was
+  deleted: not a measurement. Tried, not kept: the fold out of the tile loop (units an outer loop, the same order:
+  no change), the plain and diagonal P V as two branches (248 -> 232: the compiler sizes for the kernel's worst
+  point). Next: the diagonal tiles as their own pass (the attention core's skeleton, docs/attention-core.md B) -
+  the main kernel without the cut's code, the rows' (m, l, o) handed on in F32, the same order.
+- **tried, not kept: the diagonal tiles as their own pass** (fa_kernel's kFaMain / kFaEdge: the keys below a block's
+  first query's tile without the causal cut's code, the rows' state - m, l, the fold's gm, gl, o - handed on in F32,
+  the rest from it; branch fa-split). Every output byte the one pass's (40 cases); the main pass's spill 248 -> 104-
+  116 bytes a lane. Mini's ~3K prompt in the engine 1,056-1,060 tok/s against rel-170's 1,064-1,067 (v0.16.0
+  1,010-1,013; the same hashes) - no faster: with RT 4's (fewer spills, no faster) the spills are not the limit.
+- **what limits it, then**: under the unit contract (16-key tiles, a wave's rows' B fragments from LDS) each of a
+  block's 24 waves reads K's and V^T's fragments for every tile - ~17 KB a wave a tile, LDS traffic of the order of
+  the WMMAs' time - and the tile's softmax and latency besides (91% waiting). Reusing a fragment over more rows a wave
+  needs registers there aren't. Phase A ends here: 64-key stages kept, Mini's prompt +5.6% (docs/attention-core.md).
