@@ -1,0 +1,104 @@
+#ifndef OSMOS_GPU_ATTN_CORE_H
+#define OSMOS_GPU_ATTN_CORE_H
+
+/* the attention core (docs/attention-core.md): one attention for every family. a query's keys in units of
+   ATTN_UNIT at absolute positions (a list's: ATTN_UNIT of its entries), each unit's online softmax from nothing,
+   folded in order from the sink; ATTN_TILE keys a tile, ascending; f16 operands on the matrix cores, F32 sums - so a
+   token's bits are its own whatever its step, its batch or its decode. a family supplies its rows' format, its logit
+   term, its sink and its gate; rope, clips and norms come before it */
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "osmos/err.h"
+#include "osmos/mem/ledger.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define ATTN_UNIT 256 /* a unit's keys (Inkling's INK2_FA_UNIT) */
+#define ATTN_TILE 16  /* a tile's keys (WMMA's) */
+
+/* a cache row's format, keys and values each their own */
+typedef enum AttnRows
+{
+  ATTN_ROWS_F32,
+  ATTN_ROWS_F16,  /* IEEE half bits (ink2_to_f16's) */
+  ATTN_ROWS_KV8,  /* Inkling's Q8 records (ink2_to_kv8's): a head's int8s, then a f16 scale a 32 */
+  ATTN_ROWS_KV5,  /* Inkling's Q5 records (ink2_to_kv5's), values alone */
+  ATTN_ROWS_Q8_0, /* ggml's Q8_0 blocks (q4x_kv_put's) */
+} AttnRows;
+
+/* a logit's term past q . k scaling */
+typedef enum AttnTerm
+{
+  ATTN_TERM_NONE,
+  ATTN_TERM_REL, /* Inkling's relative bias: rel[t][h] . rel_proj[:, d] at distance d < extent, else 0 */
+} AttnTerm;
+
+/* what one gate value scales: none, a head's values, a value */
+typedef enum AttnGate
+{
+  ATTN_GATE_NONE,
+  ATTN_GATE_HEAD,
+  ATTN_GATE_VALUE,
+} AttnGate;
+
+/* a layer kind's attention, checked whole at attn_core_create */
+typedef struct AttnCoreDesc
+{
+  uint32_t heads, kv_heads; /* GQA: heads / kv_heads query heads a key head, consecutive */
+  uint32_t dk, dv;          /* a key's and a value's dims */
+  AttnRows k_rows, v_rows;
+  uint32_t window;          /* the keys a token sees, itself the last (0: every one before it) */
+  float scaling;            /* q . k's */
+  AttnTerm term;
+  uint32_t d_rel, extent;   /* ATTN_TERM_REL's */
+  bool sink;                /* a sink logit a (token, head), no value */
+  AttnGate gate;            /* sigmoid(gate) times the output */
+  uint32_t max_tokens;      /* a step's queries at most */
+  uint32_t max_keys;        /* a query's keys at most (positions: the context; lists: their stride) */
+} AttnCoreDesc;
+
+typedef struct AttnCore AttnCore;
+
+/* the core for d, its scratch from l (NULL counts nothing) whole; NULL with err naming what it does not take - a
+   dim, a group, a format, a term, a bound - or the memory refused */
+AttnCore *attn_core_create(const AttnCoreDesc *d, OsmosLedger *l, char err[OSMOS_ERR]);
+void attn_core_destroy(AttnCore *c);
+
+/* a step's keys: the cache's rows from key0's position (row r the key at position key0 + r), n_keys of them; or,
+   lists given, each query's own counts[t] positions (lists[t stride ..], any order) of the same rows */
+typedef struct AttnKeys
+{
+  const void *k, *v;
+  uint32_t key0, n_keys;  /* key0 a multiple of ATTN_TILE */
+  const uint32_t *lists;  /* NULL: positions */
+  const int32_t *counts;
+  uint32_t stride;
+} AttnKeys;
+
+/* a step: n_tok queries at positions pos0 .. pos0 + n_tok - 1 (with positions: each a key, pos0 + t - key0 < n_keys) */
+typedef struct AttnStep
+{
+  const float *q; /* [n_tok][heads][dk] */
+  uint32_t n_tok, pos0;
+  AttnKeys keys;
+  const float *rel, *rel_proj; /* ATTN_TERM_REL's: [n_tok][heads][d_rel], [d_rel][extent] */
+  const float *sink;           /* [n_tok][heads] (the desc's sink) */
+  const float *gate;           /* [n_tok][heads][dv] or [n_tok][heads] (the desc's gate) */
+  float *out;                  /* [n_tok][heads][dv] */
+  void *x16;                   /* out also as mm_x16 lays it (NULL: not) */
+  int32_t *overflow;           /* x16's flag (mm_x16's) */
+} AttnStep;
+
+/* the step on stream; false (nothing written) when it is past the core's desc: more tokens or keys, a list with
+   positions' term, a key0 off a tile */
+bool attn_core_run(const AttnCore *c, const AttnStep *s, void *stream);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
