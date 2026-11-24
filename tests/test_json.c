@@ -171,7 +171,7 @@ int main(void)
     char *conv = malloc(n + 64), *tiny = malloc(2 * n + 8);
     size_t k = (size_t)snprintf(conv, 64, "{\"messages\":[{\"role\":\"user\",\"content\":\"");
     memset(conv + k, 'x', n), k += n;
-    k += (size_t)snprintf(conv + k, 64, "\"}]}");
+    k += (size_t)snprintf(conv + k, n + 64 - k, "\"}]}");
     char jerr[OSMOS_ERR] = "";
     size_t used = 0;
     Json *c = json_parse_within(conv, k, 2 * n, &used, jerr);
