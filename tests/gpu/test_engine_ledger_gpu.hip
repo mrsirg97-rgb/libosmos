@@ -31,8 +31,8 @@ struct Pack {
 };
 
 static const Pack kPacks[] = {
-    // 0.17.1: v-r15 (BF16) and its maps; the v-r10 DFlash2 drafter kept for its buffers' count (the pack ships none)
-    {"osmos1.7b", "/Models/osmos/osmos1.7b/osmos1.7b-BF16.gguf",
+    // 0.17.1: v-r15 (Q8_0) and its maps; the v-r10 DFlash2 drafter kept for its buffers' count (the pack ships none)
+    {"osmos1.7b", "/Models/osmos/osmos1.7b/osmos1.7b-Q8_0.gguf",
      "/Models/osmos/osmos1.7b/osmos1.7b-v-r15-lsa-maps.safetensors", "/Models/osmos1.7b/osmos1.7b-dflash2-Q4_0.gguf"},
     {"inkling-2-mini", "/Models/osmos/inkling-2-mini/Inkling-2-Mini-00001-of-00002.gguf", nullptr,
      "/Models/osmos/inkling-2-mini/ink2-mini-mtp-q8.gguf"},

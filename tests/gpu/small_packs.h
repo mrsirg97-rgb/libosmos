@@ -16,7 +16,7 @@ struct SmallPack {
 };
 
 static const SmallPack kSmallPacks[] = {
-    {"osmos1.7b", "/Models/osmos/osmos1.7b/osmos1.7b-BF16.gguf", nullptr},  // 0.17.1: v-r15, BF16
+    {"osmos1.7b", "/Models/osmos/osmos1.7b/osmos1.7b-Q8_0.gguf", nullptr},  // 0.17.1: v-r15, Q8_0
     {"inkling-2-mini", "/Models/osmos/inkling-2-mini/Inkling-2-Mini-00001-of-00002.gguf",
      "/Models/osmos/inkling-2-mini/ink2-mini-mtp-q8.gguf"},
 };
