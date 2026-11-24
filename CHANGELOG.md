@@ -1,17 +1,31 @@
 # Changelog
 
-## [0.17.0] (in progress): every pack toward 90% of its practical ceiling - decode and prefill
+## [0.17.0]: every pack measured against its ceiling; faster prompts on inkling-2-mini and osmos1.7b; the same answers
 
-- **inkling-2-mini decodes with fewer launches.** At decode and verify sizes, each layer's MoE preparation (the
-  router's top 8 of 128 experts, the experts' tables, their scales) is one GPU launch instead of three, and the
-  experts' tables are counted with a wave's shuffles instead of fourteen block-wide barriers: 37.1 -> 21.2 us a
-  layer. End to end it is small - drafted decode +0.3-0.4% at low-power (45.1 -> 45.2 tok/s code, 41.3 -> 41.4
-  prose, three rounds each against 0.16.0). Every pack's answers are unchanged, token for token.
-- **Measured and written down, not built** (DESIGN.md): HIP graphs (the GPU's own ~2 us between dependent kernels is
-  not a launch's), an opt-in int4 prompt path (`--fast`: int4 activations changed the top token on 18-25% of rows
-  against 0.46% of noise - not built), and a census of Mini's decode: ~68% of a step is reading its release weights
-  at the memory's speed; the small kernels that remain are spread over many blocks, where fusing them made the
-  step slower (a second fusion tried and reverted).
+Every pack's answers are unchanged, token for token (hashed against 0.16.0's, greedy and sampled). This release
+measures where each pack's time goes against what this box can do, and takes the first shared fixes from that map.
+
+- **inkling-2-mini reads prompts 6.6% faster** (a ~3K prompt 1,004-1,011 -> 1,073 tok/s at low-power, three rounds
+  against 0.16.0), and decodes slightly faster (drafted +0.3%):
+  - its prompt attention stages 64 keys per synchronization instead of 16 (a sliding-window layer -18%);
+  - each layer's MoE preparation at decode is one GPU launch instead of three;
+  - a prompt step's activations are converted to f16 once, by the kernel that produces them, instead of again for
+    every matrix that reads them;
+  - a looped layer's controls no longer write a copy nothing reads, and its attention preparation no longer
+    launches 190,000 one-row blocks.
+- **osmos1.7b reads prompts ~1% faster**: each activation is converted to f16 once for all the matrices that read
+  it (q, k, v and the gate; the FFN's gate and up).
+- **Measured and written down** (DESIGN.md, docs/attention-core.md):
+  - every pack's decode and prefill ceilings against what it measures; prefill is every pack's gap (32-53% of
+    practical);
+  - a prefill census of all six packs (where a ~3K prompt's time goes);
+  - why the prompt attention can't get much faster under its prompt == decode contract (LDS traffic, not
+    registers);
+  - the design of a shared attention core;
+  - what was tried and not kept: HIP graphs, an opt-in int4 prompt path (`--fast`: the top token changed on 18-25%
+    of rows - not built), several fusions and attention restructures (the same bits, no faster).
+- **For contributors:** `mm_tokens_x16` / `mm_x16_whole` (a matrix over a step's whole f16 activations), the router
+  and the experts' tables as shared device code (`kernels/router.h`, `kernels/moe_tiles.h`).
 
 ## [0.16.0]: the engine consolidated - one contract a concept, every byte owned, a hardened server; the same answers
 
