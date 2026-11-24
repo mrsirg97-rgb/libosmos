@@ -7260,3 +7260,15 @@ ink2_fa at 2,968 tokens, 24 heads (a wall-clock ink2_fabench: the GPU's timestam
   (rel_proj's 64 KB is in cache: the gathers were not the cost, their VALU and registers are).
 - so the limit is registers: any state added spills. Next: the kernel's register pressure (the bias loop's unroll,
   the causal cut's copies, Q / O's 128 VGPRs), measured by spills and occupancy before speed.
+- **kept: 64 keys a stage** (a9234b8; the prompt kernel's K / V^T for four 16-key tiles behind one pair of barriers,
+  each tile's work as before and in the same order): a sliding layer 11.1-11.8 -> 8.5-9.4 ms, Mini's ~3K prompt
+  1,010 -> 1,060-1,065 tok/s end to end against v0.16.0 (low-power, three rounds, the same hashes). Spill up 196 ->
+  ~240 bytes a lane (the prefetch four times as deep); moving the prefetch's issue later changed nothing (the stage's
+  tile loop not unrolled: the registers held throughout).
+- **measured, not built: half of Q in registers** (a resource experiment, its arithmetic wrong on purpose): spill
+  ~240 -> 100-112 bytes, a sliding layer 9.0 -> 7.0-7.5 ms - an upper bound: the real one reloads Q's other half each
+  tile from L2 (~49 KB a block's Q), with no registers to prefetch it into. Estimated ~-10% of attention.
+- **the performance census** (2,968 tokens, 2.16 s a step): attention 346 ms at ~17% of the matrix cores' rate, the
+  rest of the step's matmuls 70-86% of theirs. The kernel's shape (16 queries and a head a wave, K / V decoded a block,
+  the softmax and bias a 16-key tile) is the cap: the shared attention core (0.17.0's) is a design for this GPU from
+  the start, to the unit contract (256-key units, the decode's order: prompt == decode, deterministic).
