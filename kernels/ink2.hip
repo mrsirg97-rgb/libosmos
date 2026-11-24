@@ -902,10 +902,11 @@ extern "C" bool ink2_to_f16(const float* x, uint64_t n, uint16_t* y, void* strea
 // a block a row of a token's (q's heads, rel's, then k's and v's KV heads): q and rel clipped; a key row its conv,
 // clip and store, a value row its conv, norm (rms_kernel's: its threads, its block_sum) and store - in LDS between
 constexpr uint32_t kPrepBlocks = INK2_MAX_HEAD / INK2_KV8_BLOCK;  // a record's scale blocks: a thread each
-__global__ void attn_prep_kernel(Ink2Prep p) {
-  __shared__ float lds[kThreads], row[INK2_MAX_HEAD];
+// one row of the prep (a token's q or rel head, its k or v head's conv): row b of the step's n_tok x per; every thread
+// of the block calls it, the row's path the same for all (its barriers)
+__device__ inline void prep_row(const Ink2Prep& p, uint32_t b, float* lds, float* row) {
   const uint32_t H = p.heads, KV = p.kv_heads, D = INK2_MAX_HEAD, per = 2 * H + 2 * KV;
-  const uint32_t t = blockIdx.x / per, r = blockIdx.x % per;
+  const uint32_t t = b / per, r = b % per;
   if (r < H) return clip_row(p.q + ((uint64_t) t * H + r) * D, t, r, D, p.q_w, p.q_clip, p.tau, lds);
   if (r < 2 * H) {
     const uint32_t j = r - H;
@@ -939,13 +940,29 @@ __global__ void attn_prep_kernel(Ink2Prep p) {
     kv5_block(row, threadIdx.x, (uint8_t*) s.store + at * INK2_KV5_RECORD);
 }
 
+// a block `each` rows in turn, each prep_row's - the same work and order a row, so the same bits. a prompt's rows
+// kPrepRows a block (190K blocks of one row at ~3K tokens were the dispatcher's, not the memory's); a decode's or a
+// verify's one a block, as before (its few rows in parallel: kPrepRows a block there made a decode step slower)
+constexpr uint32_t kPrepRows = 8, kPrepRowsFrom = 16384;
+__global__ void attn_prep_kernel(Ink2Prep p, uint32_t each) {
+  __shared__ float lds[kThreads], row[INK2_MAX_HEAD];
+  const uint32_t rows = p.n_tok * (2 * p.heads + 2 * p.kv_heads);
+  for (uint32_t i = 0; i < each; i++) {
+    const uint32_t b = blockIdx.x * each + i;
+    if (b >= rows) break;
+    prep_row(p, b, lds, row);
+    __syncthreads();  // (the next row's lds and row)
+  }
+}
+
 extern "C" bool ink2_attn_prep(const Ink2Prep* p, void* stream) {
   if (!p || !p->n_tok || !p->q || !p->rel || !p->heads || !p->kv_heads || p->head_dim != INK2_MAX_HEAD ||
       !p->d_rel || p->taps < 2 || p->taps > INK2_MAX_TAPS || (p->tau.alpha > 0 && !(p->tau.floor > 0)))
     return false;
   for (const Ink2PrepKv* s : {&p->k, &p->v})
     if (!s->x || !s->w || !s->y || !s->store) return false;
-  attn_prep_kernel<<<p->n_tok * (2 * p->heads + 2 * p->kv_heads), kThreads, 0, st(stream)>>>(*p);
+  const uint32_t rows = p->n_tok * (2 * p->heads + 2 * p->kv_heads), each = rows >= kPrepRowsFrom ? kPrepRows : 1;
+  attn_prep_kernel<<<(rows + each - 1) / each, kThreads, 0, st(stream)>>>(*p, each);
   return ok();
 }
 
