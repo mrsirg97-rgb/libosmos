@@ -134,7 +134,8 @@ Lfm3Weights *lfm3_weights_create(const Gguf *model, char err[OSMOS_ERR])
   const uint64_t H = (uint64_t)g->n_heads, q = H * hd, kv = (uint64_t)g->n_kv_heads * hd;
   const GgufTensor *e = ok ? gguf_tensor(model, "token_embd.weight") : NULL;
   ok = ok && (e || osmos_fail(err, "%s: %s", "token_embd.weight", "not in the model")) && e->n_dims == 2 && e->dims[0] == D &&
-       (g->n_vocab = (int)e->dims[1]) > 0 && (e->type == QTYPE_BF16 || osmos_fail(err, "%s: %s", e->name, "the tied head not BF16"));
+       (g->n_vocab = (int)e->dims[1]) > 0 && (e->type == QTYPE_BF16 || e->type == QTYPE_Q8_0 ||
+        osmos_fail(err, "%s: %s", e->name, "the tied head neither BF16 nor Q8_0"));
   if (ok)
     w->embd = e, f.found++;
   ok = ok && find(&f, "output_norm.weight", D, 0, false, &w->out_norm) &&
