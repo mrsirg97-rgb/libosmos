@@ -7195,3 +7195,20 @@ launches a layer, ~2.3 ms; the router's matvec ~0.6 more), the attention residua
 DESIGN "the attention residual's dots and mix in one launch"), the convs (~1.0), the norms (~0.7), attn_prep and the
 swiglu (~1.1). The weights' reads (68%) are at the roofline: on the release weights, decode's reducible work is the
 small kernels' latency - at most ~15-20% if every one were a bare launch.
+
+### 0.16.1: Mini's small kernels fused - what pays (2026-11-24, low-power, stamps)
+
+- **kept: the MoE's preparation in one launch** (ink2_moe_prep: the router's picks, the experts' tiles, their scales;
+  router.h's token_wave a wave a token, moe_tiles.h's tiles_block). Per layer 12.2 + 13.3 + 11.6 = 37.1 us -> 23.5;
+  a decode step 41.75 -> 40.89 ms (-2%); end to end Mini drafted +0.3-0.5% (within speed.sh's spread). The first
+  version looped the step's tokens through one block (the three ran a block a token side by side): a verify's ~4
+  tokens serial, -0.5% end to end - the wave a token fixed it. Every output the three launches' bits
+  (test_ink2_moe_prep_gpu, 90 cases); the full suite and every pack's hashes the same.
+- **tried, not kept: the output's conv in the FFN residual's dots** (attn_res_dots_kernel<true>: the partial state's
+  blocks each made their token's r). conv_put 10.0 + attn_res 16.7 = 26.7 us a layer -> 32.2: the conv's 2,304
+  channels a token spread over nine blocks before, one or two after - those the step's critical path. The same bits
+  (test_ink2_res_conv_gpu, 224 cases), reverted (fuse-conv's 6f2ed07, then its revert).
+- **the rule**: a fusion pays where its kernels were each a block or a few already (the MoE's preparation: single
+  blocks a step); fusing kernels spread over many blocks puts their work in fewer and lengthens the chain (the conv
+  here, the attention residual's dots and mix before). The ~10 us small kernels that are many-block (the convs, the
+  norms, the swiglu, attn_prep) are not fusion's; their latency is their own.
