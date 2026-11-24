@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.16.1]: inkling-2-mini's decode, a little less work, and what its decode is made of; the same answers
+## [0.17.0] (in progress): every pack toward 90% of its practical ceiling - decode and prefill
 
 - **inkling-2-mini decodes with fewer launches.** At decode and verify sizes, each layer's MoE preparation (the
   router's top 8 of 128 experts, the experts' tables, their scales) is one GPU launch instead of three, and the
