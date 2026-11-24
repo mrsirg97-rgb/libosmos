@@ -269,45 +269,18 @@ __global__ void attn_res_kernel(const float* query, uint32_t queries, const floa
 // sum and each query's dot with it - attn_res_kernel's own sums - into scratch [n_tok][1 + queries][ns], then the
 // softmax and the weighted sum a block a kThreads of dim, each value's arithmetic attn_res_kernel's: the same bits
 constexpr uint32_t kResRun = 8;  // a 6144-wide state's 24 values a thread in 3 runs
-// the partial state made in the dots' own blocks (attn_res_conv): r = conv_at(x) (+ add) - conv_kernel's values, so
-// its bits - each partial block its token's row in registers, the first (y 0) writing r and the conv's tail
-struct ResConv {
-  const float *x, *w, *hist, *add;
-  uint32_t taps;
-  float res, scale;
-  float *keep;
-};
-constexpr uint32_t kResConvRun = (6144 + kThreads - 1) / kThreads;  // a row's values a thread at most (dim <= 6144)
-
-template <bool Conv>
 __global__ void attn_res_dots_kernel(const float* query, uint32_t queries, const float* blocks, uint32_t nb,
-                                     uint32_t bs, float* partial, uint32_t dim, float* scratch, ResConv cv) {
+                                     uint32_t bs, const float* partial, uint32_t dim, float* scratch) {
   __shared__ float lds[kThreads];
   const uint32_t s = blockIdx.x, y = blockIdx.y, t = blockIdx.z, ns = nb + 1;
+  const float* v = s < nb ? blocks + ((uint64_t) t * bs + s) * dim : partial + (uint64_t) t * dim;
   float d = 0;  // (unrolled: a thread's loads in flight together, its adds in order)
-  if (Conv && s == nb) {  // the partial state: made here, then the same sums over its values
-    float r[kResConvRun];
-    for (uint32_t c = threadIdx.x, j = 0; c < dim; c += kThreads, j++) {
-      const float out = conv_at(cv.x, t, c, dim, cv.taps, cv.w, cv.hist, cv.res, cv.scale);
-      r[j] = cv.add ? cv.add[(uint64_t) t * dim + c] + out : out;
-      if (!y) {
-        partial[(uint64_t) t * dim + c] = r[j];
-        if (cv.keep) cv.keep[(uint64_t) t * dim + c] = cv.x[(uint64_t) t * dim + c];
-      }
-    }
-    if (!y)
-      for (uint32_t c = threadIdx.x, j = 0; c < dim; c += kThreads, j++) d += r[j] * r[j];
-    else
-      for (uint32_t c = threadIdx.x, j = 0; c < dim; c += kThreads, j++) d += query[(uint64_t) (y - 1) * dim + c] * r[j];
-  } else {
-    const float* v = s < nb ? blocks + ((uint64_t) t * bs + s) * dim : partial + (uint64_t) t * dim;
-    if (!y)
+  if (!y)
 #pragma unroll kResRun
-      for (uint32_t c = threadIdx.x; c < dim; c += kThreads) d += v[c] * v[c];
-    else
+    for (uint32_t c = threadIdx.x; c < dim; c += kThreads) d += v[c] * v[c];
+  else
 #pragma unroll kResRun
-      for (uint32_t c = threadIdx.x; c < dim; c += kThreads) d += query[(uint64_t) (y - 1) * dim + c] * v[c];
-  }
+    for (uint32_t c = threadIdx.x; c < dim; c += kThreads) d += query[(uint64_t) (y - 1) * dim + c] * v[c];
   d = block_sum<kThreads>(d, lds);
   if (!threadIdx.x) scratch[((uint64_t) t * (1 + queries) + y) * ns + s] = d;
 }
@@ -1128,34 +1101,14 @@ extern "C" bool ink2_attn_res(const float* query, uint32_t queries, const float*
       n_blocks + 1 > INK2_MAX_RES || n_blocks > b_stride || !n_tok || !dim)
     return false;
   if (scratch && n_tok <= INK2_RES_SPLIT_TOKENS) {
-    attn_res_dots_kernel<false><<<dim3(n_blocks + 1, 1 + queries, n_tok), kThreads, 0, st(stream)>>>(
-        query, queries, blocks, n_blocks, b_stride, (float*) partial, dim, scratch, ResConv{});
+    attn_res_dots_kernel<<<dim3(n_blocks + 1, 1 + queries, n_tok), kThreads, 0, st(stream)>>>(
+        query, queries, blocks, n_blocks, b_stride, partial, dim, scratch);
     attn_res_mix_kernel<<<dim3((dim + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(
         queries, blocks, n_blocks, b_stride, partial, dim, eps, scale, n_tok, scratch, out);
     return ok();
   }
   attn_res_kernel<<<n_tok, kThreads, 0, st(stream)>>>(query, queries, blocks, n_blocks, b_stride, partial, dim, eps,
                                                       scale, n_tok, out);
-  return ok();
-}
-
-// ink2_conv_keep then ink2_attn_res's split path in two launches, not three: the partial state r made by the dots'
-// own blocks (attn_res_dots_kernel<true>), the same bits; false where ink2_attn_res would not split (the caller's
-// three launches then) or the conv's tail has no room (keep NULL: its tail put after, as ink2_conv_put's)
-extern "C" bool ink2_attn_res_conv(const float* x, uint32_t taps, const float* w, const float* hist, float res,
-                                   float conv_scale, const float* add, float* keep, const float* query,
-                                   uint32_t queries, const float* blocks, uint32_t n_blocks, uint32_t b_stride,
-                                   float* partial, uint32_t n_tok, uint32_t dim, float eps, float scale, float* out,
-                                   float* scratch, void* stream) {
-  if (!x || !w || !taps || !keep || !query || !partial || !out || !scratch || (n_blocks && !blocks) || !queries ||
-      queries > INK2_MAX_QUERIES || n_blocks + 1 > INK2_MAX_RES || n_blocks > b_stride || !n_tok ||
-      n_tok > INK2_RES_SPLIT_TOKENS || !dim || dim > kResConvRun * kThreads)
-    return false;
-  const ResConv cv = {x, w, hist, add, taps, res, conv_scale, keep};
-  attn_res_dots_kernel<true><<<dim3(n_blocks + 1, 1 + queries, n_tok), kThreads, 0, st(stream)>>>(
-      query, queries, blocks, n_blocks, b_stride, partial, dim, scratch, cv);
-  attn_res_mix_kernel<<<dim3((dim + kThreads - 1) / kThreads, n_tok), kThreads, 0, st(stream)>>>(
-      queries, blocks, n_blocks, b_stride, partial, dim, eps, scale, n_tok, scratch, out);
   return ok();
 }
 
