@@ -72,8 +72,8 @@ class Manifest(unittest.TestCase):
         self.assertEqual(set(m["packs"]), {"osmos-evo-1017", "ud-iq1_s", "ud-iq1_m", "ud-iq2_xxs", "qwen38-ud-iq3_xxs",
                                            "qwen38-ud-q4_k_xl", "osmos-evo-inkling", "osmos1.7b", "hy4-flash",
                                            "inkling-2-mini"})  # 0.6.10: one Qwen context, 512K - no 1M pack
-        v = m["packs"]["osmos1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 0.17.1: v-r15 (BF16), 256K - its maps' fit
-        self.assertEqual((v["shards"], v["lsa"]), (["osmos1.7b-bf16"], "osmos1.7b-lsa"))
+        v = m["packs"]["osmos1.7b"]  # 0.10.0: LFM3's, its LSA maps beside it; 0.17.1: v-r15 (Q8_0), 256K - its maps' fit
+        self.assertEqual((v["shards"], v["lsa"]), (["osmos1.7b-q8_0"], "osmos1.7b-lsa"))
         self.assertEqual((v["lsa"], v["settings"]), ("osmos1.7b-lsa", {"max_context": 262144, "max_tokens": 4096,
                                                                         "preserve_thinking": True, "temperature": 0.1,
                                                                         "top_k": 50}))  # 0.11.3; 0.15.2: its card's sampling
