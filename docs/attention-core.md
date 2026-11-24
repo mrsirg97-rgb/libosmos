@@ -1,8 +1,13 @@
 # The attention core (0.17.0, design for review)
 
 One attention for every family, built for gfx1151, so that a prompt's attention runs near the matrix cores' rate
-and one shape replaces today's copies. Status: **design**. Nothing here is built. Each phase below lands only after
-its proofs pass.
+and one shape replaces today's copies. Each phase below lands only after its proofs pass.
+
+**Status after 0.17.0:** Phase A's measurements are done. One change shipped: 64 keys per stage (sliding layers
+-18%, the same bits). The rest of A (the decode pre-pass, the register audit, the bias as its own pass) was measured
+in pieces and found limited by LDS fragment traffic and tile latency under the unit contract, not by spills (DESIGN.md
+"Mini's prompt attention - what limits it"). B and C are not built; they move to a later release, where B is mainly a
+consolidation (one shape replacing ~8) rather than a speed win.
 
 ## Why
 
@@ -141,7 +146,7 @@ One descriptor and one kernel skeleton:
 1. **One-time bit changes are acceptable** when KL matches today's, nothing regresses (speed, quality, drafted ==
    plain, the serve tests), and the gain outweighs what's there now.
 2. **0.17.0 = Phase A + building B.** C's size is measured once B exists; C goes in 0.17.0 or in the release after,
-   decided then.
+   decided then. (Revised at 0.17.0's release: A measured and its one winning change shipped; B and C deferred.)
 3. Unit size: decided per family when it moves (C).
 
 ## Open questions to measure
