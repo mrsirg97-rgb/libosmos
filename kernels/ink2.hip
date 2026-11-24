@@ -498,11 +498,14 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   // W waves: the prompt's G RT (a row tile's heads); a split decode's as many as its (token, head) rows fill - a wave
   // without rows still holds its registers, so a decode's token runs one wave, not G (more blocks resident)
   static_assert(SPLIT || W == G * RT, "the prompt's waves its row tiles' heads");
-  constexpr int kNth = W * 32, kItems = (kFaTile * kFaHead + kNth - 1) / kNth;
+  // ST 16-key tiles a stage (a prompt's 4: one pair of barriers and one prefetch for 64 keys; a split decode's 1) - each
+  // tile's scores, softmax, P V and fold as before, in the same order: the stage changes no bit
+  constexpr int ST = SPLIT ? 1 : 4, kStage = kFaTile * ST, kVKey = kStage + 8;
+  constexpr int kNth = W * 32, kItems = (kStage * kFaHead + kNth - 1) / kNth;
   // a one-wave decode over a full layer's Q8 records: its keys straight from each lane's own record into the scores'
   // B fragments (a lane its key's, as LDS would hand them) - no K tile in LDS, so more blocks resident
   constexpr bool kKD = sizeof(KV) == 1 && SPLIT && W == 1;
-  __shared__ __attribute__((aligned(32))) _Float16 ks[kKD ? 8 : kFaTile * kFaRow], vt[kFaHead * kFaKey];
+  __shared__ __attribute__((aligned(32))) _Float16 ks[kKD ? 8 : kStage * kFaRow], vt[kFaHead * kVKey];
   __shared__ __attribute__((aligned(32))) _Float16 ps[W][kFaTile * kFaKey];
   // a block RT row tiles of 16 tokens; a wave (row tile, query head) - every K / V tile shared by the block's waves
   const uint32_t wave = threadIdx.x / 32, lane = threadIdx.x % 32, half = lane >> 4, col = lane % kFaTile;
@@ -557,7 +560,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   constexpr bool kQ8 = sizeof(KV) == 1, kHalf = sizeof(KV) <= 2;  // (kHalf: 8 f16s a load - a Q8 record's too)
   constexpr bool kV5 = std::is_same<KV, Kv85>::value;             // (the values Q5 records: ink2_fa85)
   constexpr uint32_t kVRec = kV5 ? INK2_KV5_RECORD : INK2_KV8_RECORD;
-  constexpr int kVec = 8, kVecs = kFaTile * kFaHead / kVec, kVItems = (kVecs + kNth - 1) / kNth;
+  constexpr int kVec = 8, kVecs = kStage * kFaHead / kVec, kVItems = (kVecs + kNth - 1) / kNth;
   float kr[kHalf ? 1 : kItems], vr[kHalf ? 1 : kItems];
   fa_h8 kh[kHalf && !kQ8 ? kVItems : 1], vh[kHalf && !kQ8 ? kVItems : 1];
   Kv8Raw k8[kQ8 ? kVItems : 1], v8[kQ8 && !kV5 ? kVItems : 1];  // (a Q8 / Q5 tile as loaded: its values at the store)
@@ -575,7 +578,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
   auto fetch = [&](uint32_t kb) {
     if constexpr (kQ8)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kStage, d = i / kStage * kVec;  // (a wave's threads its keys: V^T's stores apart)
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
         const uint64_t at = (uint64_t) (kb + r) * a.kv_heads + kvh;
         if constexpr (!kKD) k8[it] = in ? kv8_raw((const uint8_t*) k + at * INK2_KV8_RECORD, d) : Kv8Raw{};
@@ -586,7 +589,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       }
     else if constexpr (kHalf)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kStage, d = i / kStage * kVec;  // (a wave's threads its keys: V^T's stores apart)
         const bool in = i < (uint32_t) kVecs && kb + r < n_keys;
         const uint64_t at = ((uint64_t) (kb + r) * a.kv_heads + kvh) * kFaHead + d;
         kh[it] = in ? *(const fa_h8*) (k + at) : fa_h8{}, vh[it] = in ? *(const fa_h8*) (v + at) : fa_h8{};
@@ -594,7 +597,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     else
       for (int it = 0; it < kItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead, key = kb + r;
-        const bool in = i < kFaTile * kFaHead && key < n_keys;
+        const bool in = i < kStage * kFaHead && key < n_keys;
         const uint64_t at = ((uint64_t) key * a.kv_heads + kvh) * kFaHead + d;
         kr[it] = in ? (float) k[at] : 0.0f, vr[it] = in ? (float) v[at] : 0.0f;
       }
@@ -603,11 +606,11 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
     fetch(klo);
     if constexpr (kKD) fetch_k(klo);
   }
-  for (uint32_t kb = klo; kb <= khi; kb += kFaTile) {
-    __syncthreads();  // the last tile's K, V read by every wave
+  for (uint32_t kb0 = klo; kb0 <= khi; kb0 += kStage) {
+    __syncthreads();  // the last stage's K, V read by every wave
     if constexpr (kHalf)
       for (int it = 0; it < kVItems; it++) {
-        const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
+        const uint32_t i = threadIdx.x + it * kNth, r = i % kStage, d = i / kStage * kVec;  // (a wave's threads its keys: V^T's stores apart)
         if (i >= (uint32_t) kVecs) continue;
         fa_h8 kv, vv;  // a Q8 / Q5 tile's values now (a missing key's raw zeros: 0 x 0, f16's +0)
         if constexpr (kQ8) {
@@ -619,17 +622,20 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         } else
           kv = kh[it], vv = vh[it];
         if constexpr (!kKD) *(fa_h8*) (ks + r * kFaRow + d) = kv;
-        for (int e = 0; e < kVec; e++) vt[(d + e) * kFaKey + r] = vv[e];
+        for (int e = 0; e < kVec; e++) vt[(d + e) * kVKey + r] = vv[e];
       }
 
     else
       for (int it = 0; it < kItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i / kFaHead, d = i % kFaHead;
-        if (i < kFaTile * kFaHead) ks[r * kFaRow + d] = (_Float16) kr[it], vt[d * kFaKey + r] = (_Float16) vr[it];
+        if (i < kStage * kFaHead) ks[r * kFaRow + d] = (_Float16) kr[it], vt[d * kVKey + r] = (_Float16) vr[it];
       }
     __syncthreads();
-    if (kb + kFaTile <= khi) fetch(kb + kFaTile);  // the next tile's, in flight under this one's WMMAs
+    if (kb0 + kStage <= khi) fetch(kb0 + kStage);  // the next stage's, in flight under this one's WMMAs
     if (!active) continue;                         // (its loads done: no row of its own)
+    for (int sub = 0; sub < ST; sub++) {
+    const uint32_t kb = kb0 + (uint32_t) sub * kFaTile;  // this tile's first key
+    if (kb > khi) break;
     fa_f8 sacc = {};
     for (int g = 0; g < kFaHead / kFaTile; g++) {
       fa_h16 kb16;
@@ -638,7 +644,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
         const fa_h8 lo = kv8_vals({kq[2 * g], ksc[2 * g / kPer]}), hi = kv8_vals({kq[2 * g + 1], ksc[(2 * g + 1) / kPer]});
         for (int e = 0; e < kVec; e++) kb16[e] = lo[e], kb16[kVec + e] = hi[e];
       } else
-        kb16 = *(const fa_h16*) (ks + col * kFaRow + g * kFaTile);
+        kb16 = *(const fa_h16*) (ks + (sub * kFaTile + col) * kFaRow + g * kFaTile);
       sacc = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(qa[g], kb16, sacc);
     }
     if constexpr (kKD)
@@ -678,7 +684,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
 #pragma unroll
     for (int nt = 0; nt < kFaHead / kFaTile; nt++) {
       for (int j = 0; j < 8; j++) o[nt][j] *= alpha[j];
-      const fa_h16 bv = *(const fa_h16*) (vt + (nt * kFaTile + col) * kFaKey);
+      const fa_h16 bv = *(const fa_h16*) (vt + (nt * kFaTile + col) * kVKey + sub * kFaTile);
       const fa_f8 prev = o[nt];
       o[nt] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(pa, bv, prev);
       for (int c = cmin; c <= cmax; c++) {
@@ -705,6 +711,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
           m[j] = -INFINITY, l[j] = 0.0f;
         }
       }
+    }  // (the stage's tiles)
   }
   for (int j = 0; j < 8 && active; j++) {
     const uint32_t t = rtok(2 * j + half);
